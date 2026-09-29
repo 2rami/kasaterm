@@ -1703,7 +1703,7 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketOpenWeb(url, target) => {
-                // `kasaterm-cli web <url>` → 요청 pane 옆에 웹 pane split.
+                // `surface.open_preview`(kind web) → 요청 pane 의 탭으로 웹 pane.
                 // 파일 미리보기와 달리 여기서 처리하는 이유: 자식 창 생성에
                 // ActiveEventLoop 가 필요하다.
                 self.open_web_pane(event_loop, url, target.as_deref());
@@ -1748,7 +1748,7 @@ impl ApplicationHandler<UserEvent> for App {
                 surface,
                 reply,
             } => {
-                // `kasaterm-cli web-eval/-text/-shot/-url` — 답은 reply 채널로
+                // `web.drive`(eval·text·shot·url) — 답은 reply 채널로
                 // 소켓 스레드에 돌아간다(eval/shot 은 wry·WebKit 콜백에서 늦게).
                 self.web_drive(op, arg, surface.as_deref(), reply.clone());
                 return;

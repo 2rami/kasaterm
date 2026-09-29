@@ -22,8 +22,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_Security",
-    # kasaterm-cli login 이 비밀번호를 화면에 안 찍히게 읽는다.
-    "Win32_System_Console",
     # kasaterm-cli share new 가 폴더 이름에 이 기기 날짜를 붙인다.
     "Win32_System_SystemInformation",
 ] }

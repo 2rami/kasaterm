@@ -5,8 +5,8 @@
 //!   kasa-device agents           이 기기 슬롯을 관문에 올리고 합친 목록을 보인다
 //!   kasa-device logout
 //!
-//! 도는 앱이 옛 판이라 `kasaterm-cli login` 을 못 받는 기기(설치본을 당장 못 바꾸는 미니)와
-//! 화면 없는 기기용이다. 앱과 같은 파일·같은 함수(`device_auth`·`agent_accounts`)를 쓰므로
+//! 설정 화면을 못 여는 기기(화면 없는 기기·ssh 로만 닿는 기기)용이다 — 앱 CLI 의 login 은
+//! 2026-09-29 정리로 빠졌다. 앱과 같은 파일·같은 함수(`device_auth`·`agent_accounts`)를 쓰므로
 //! 여기서 한 로그인을 새 판 앱이 그대로 이어 쓴다.
 
 use kasa_mcp::{agent_accounts, device_auth, relay_auth};

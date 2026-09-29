@@ -930,7 +930,7 @@ impl App {
             }
         }
         match hosts.len() {
-            0 => Err("열린 웹 pane 이 없다 — 먼저 `kasaterm-cli web <url>`".to_string()),
+            0 => Err("열린 웹 pane 이 없다 — 먼저 웹 pane 을 열어라".to_string()),
             1 => Ok(hosts[0].0),
             _ => Err(format!(
                 "웹 pane 이 여럿이다 — %surface 로 골라라: {}",

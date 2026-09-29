@@ -2,8 +2,8 @@
 //! `~/.config/kasaterm/device.json`(0600)에 둔다. 비밀번호는 남기지 않는다.
 //!
 //! 토큰이 있으면 업링크가 hello 에 실어 관문에 「이 계정의 이 기계」로 붙는다(`uplink.rs`).
-//! 관문 쪽은 `gateway.rs`·`relay_auth.rs`. 로그인은 설정 화면이나 `kasaterm-cli login` 이
-//! 소켓(`relay.account`)으로 부른다 — 화면 없는 기기(미니·윈도우)도 같은 길이다.
+//! 관문 쪽은 `gateway.rs`·`relay_auth.rs`. 로그인은 설정 화면이 소켓(`relay.account`)으로
+//! 부르고, 화면 없이 붙일 때는 `kasa-device login` 이 같은 함수를 쓴다.
 //!
 //! 윈도우는 파일 권한을 따로 좁히지 않는다 — 사용자 프로필 폴더의 ACL 을 물려받는다.
 

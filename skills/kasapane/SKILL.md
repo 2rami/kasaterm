@@ -924,7 +924,6 @@ kasaterm-cli tell-status kt1.1789582774860.13972-…                    # 영수
 | 진짜로 끄기 | `kasaterm-cli closed <%pane>` | 인자 없이 `closed` 면 되살리기 목록만 본다 |
 | 헤더 제목 | `kasaterm-cli rename <id> <제목>` | 자기 pane 은 `"$KASATERM_PANE_ID"` |
 | 헤더 accent | `kasaterm-cli color <id> <#rrggbb>` | |
-| 위치 교환(내용 유지) | `kasaterm-cli swap <a> <b>` | |
 | 텍스트 전송 | `kasaterm-cli send --surface <id> <text>` | 엔터가 필요하면 본문에 실제 줄바꿈 |
 | 명명 키 전송 | `kasaterm-cli key --surface <id> <enter\|tab\|escape\|…>` | |
 

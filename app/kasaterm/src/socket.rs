@@ -1347,7 +1347,7 @@ impl Backend for PtyBackend {
     }
 
     /// Geometry of the visible window's panes as window-relative percentages,
-    /// for `kasaterm-cli layout`'s ASCII diagram. The live tree lives in the
+    /// for the `kasaterm-cli where`/`windows` ASCII diagrams. The live tree lives in the
     /// GUI thread's `pty_layout`, but `publish_pty_layout` mirrors it into
     /// `ws.layout` (tmux-shape, cell coords) on every split/close/focus — so we
     /// read that here. `ws.layout` is `None` for a single pane (≤1 leaf), so we

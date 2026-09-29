@@ -100,8 +100,8 @@ fn run() -> Result<Option<Response>> {
     }
     let cmd = args.remove(0);
     if API_TARGET.get().is_some() {
-        if !matches!(cmd.as_str(),"board"|"board-watch"|"rooms"|"activity"|"tell"|"tell-status"|"nacho-report") {
-            return Err(anyhow!("--api supports board, board-watch, rooms, activity, tell, tell-status and nacho-report"));
+        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell-status"|"nacho-report") {
+            return Err(anyhow!("--api supports board, board-watch, activity, tell, tell-status and nacho-report"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
@@ -188,12 +188,6 @@ fn run() -> Result<Option<Response>> {
     if cmd == "app-update" {
         return run_app_update(&args);
     }
-    // `rooms` 는 board 를 방(창)별로 접어 사람이 읽는 표로 낸다 — 위임 상대를 고르는 자리.
-    if cmd == "rooms" {
-        let socket_path = resolve_socket_path()?;
-        print_rooms(&socket_path)?;
-        return Ok(None);
-    }
     // 클립보드 — 값이 대화·인자·기록에 찍히지 않게 하는 문 셋(2026-09-10 지시 「env 키
     // 같은 것도 클립보드에 있어 하면 안전하게」). usemap CLI 의 `--clipboard` 와 같은 생각.
     if cmd == "copy" && args.first().is_some_and(|a| a == "--secret") {
@@ -214,23 +208,6 @@ fn run() -> Result<Option<Response>> {
             return Err(anyhow!("{}", resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("복사 실패")));
         }
         println!("비밀값 복사됨 · {}자 — 목록·폰엔 가려 보인다", text.chars().count());
-        return Ok(None);
-    }
-    if cmd == "clips" {
-        let socket_path = resolve_socket_path()?;
-        let req = Request { id: json!("clips"), method: "clipboard.list".into(), params: json!({}) };
-        let resp = roundtrip(&socket_path, &req)?;
-        let items = resp.result.as_ref().and_then(|v| v.get("items")).and_then(Value::as_array).cloned().unwrap_or_default();
-        if items.is_empty() {
-            println!("아직 복사한 것이 없다");
-        }
-        for (i, it) in items.iter().enumerate() {
-            let id = it.get("id").and_then(Value::as_u64).unwrap_or(0);
-            let secret = it.get("secret").and_then(Value::as_bool).unwrap_or(false);
-            let preview = it.get("preview").and_then(Value::as_str).unwrap_or("");
-            let chars = it.get("chars").and_then(Value::as_u64).unwrap_or(0);
-            println!("{:>2}. #{id:<4} {}{preview}  ({chars}자)", i + 1, if secret { "[비밀] " } else { "" });
-        }
         return Ok(None);
     }
     if cmd == "paste" && !args.is_empty() {
@@ -372,51 +349,6 @@ fn run() -> Result<Option<Response>> {
             std::process::exit(if ok { 0 } else { 1 });
         }
     }
-    // `human <명령…>` — **사람이 쳐야 하는 명령**(sudo·로그인·비밀번호)을 옆 pane 에
-    // 넣어 둔다. 캐릭터가 「터미널 열고 이걸 치라」고 말로 시키면 사람이 옮겨 치다
-    // 틀리고, 캐릭터가 터미널 앱을 따로 띄우면 화면 밖으로 나간다(2026-09-14 지적).
-    // 이 명령 하나가 그 규칙이다: 아래로 쪼개고, 명령을 밀어넣고, 포커스를 넘긴다 —
-    // 사람은 비밀번호만 치면 된다. 응답은 그 pane id(peek 으로 완료를 볼 수 있게).
-    if cmd == "human" {
-        let text = args.join(" ");
-        if text.trim().is_empty() {
-            anyhow::bail!("human 뒤에 사람이 칠 명령을 줘라");
-        }
-        let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
-        let socket_path = resolve_socket_path()?;
-        let split = Request {
-            id: json!(format!("cli-{}", std::process::id())),
-            method: "surface.split".into(),
-            params: json!({ "direction": "down", "focus": true, "from": from }),
-        };
-        let r = roundtrip(&socket_path, &split)?;
-        if !r.ok {
-            anyhow::bail!(
-                "pane 을 못 쪼갰다: {}",
-                r.error.map(|e| e.message).unwrap_or_else(|| "사유 없음".into())
-            );
-        }
-        let surface = r
-            .result
-            .as_ref()
-            .and_then(|v| v.pointer("/surface/id"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("쪼갠 pane 의 id 를 못 받았다"))?;
-        // 셸이 뜨는 데 한 박자 — 바로 밀어넣으면 첫 글자가 프롬프트 전에 씹힌다.
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        let send = Request {
-            id: json!(format!("cli-{}-send", std::process::id())),
-            method: "surface.send_text".into(),
-            params: json!({ "surface_id": surface, "text": format!("{text}\n") }),
-        };
-        let r = roundtrip(&socket_path, &send)?;
-        println!(
-            "{}",
-            json!({ "ok": r.ok, "surface": surface, "note": "사람이 칠 차례 — 완료는 peek 으로 본다" })
-        );
-        std::process::exit(if r.ok { 0 } else { 1 });
-    }
     // 학생 한 명을 서브에이전트처럼 부르고 기다리는 두 명령. 서브에이전트는 보드·화면에 안 보여
     // 사람이 진행을 못 지켜본다 — 그런데 학생 소환은 쪼개기·부팅·보드 확인·tell 네 단계라 Claude 가
     // 한 번에 끝나는 Agent 도구로 흘렀다(2026-09-28). `summon` 이 그 넷을, `wait` 가 완료 기다리기를 맡는다.
@@ -517,28 +449,6 @@ fn run() -> Result<Option<Response>> {
         }
         return Ok(None);
     }
-    if cmd == "home" {
-        let socket_path = resolve_socket_path()?;
-        let resp = roundtrip(
-            &socket_path,
-            &Request {
-                id: "home".into(),
-                method: "machine.home".into(),
-                params: Value::Null,
-            },
-        )?;
-        let r = resp.result.unwrap_or(Value::Null);
-        if !resp.ok || r.get("configured").and_then(|v| v.as_bool()) != Some(true) {
-            std::process::exit(1);
-        }
-        let label = r.get("label").and_then(|v| v.as_str()).unwrap_or("");
-        if r.get("online").and_then(|v| v.as_bool()) != Some(true) {
-            eprintln!("본진 {label} 이 지금 안 닿는다");
-            std::process::exit(3);
-        }
-        println!("{label}");
-        return Ok(None);
-    }
     // `closed [%pane]` — 되살리기 목록. pane 을 주면 그 항목을 **진짜 끈다**.
     //
     // 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 10개를 넘겨
@@ -561,13 +471,13 @@ fn run() -> Result<Option<Response>> {
         println!("{}", serde_json::to_string(&resp)?);
         return Ok(None);
     }
-    // `sessions`/`resume` — 터미널 안 세션 피커. claude 자체 /resume 은 teamName 이
+    // `sessions` — 터미널 안 세션 목록. claude 자체 /resume 은 teamName 이
     // 기록된 세션(=팀 트리플로 뜨는 kasaterm pane 세션 전부)을 무조건 숨기므로,
     // jsonl 직스캔으로 팀 세션까지 전부 보여주고 캐릭터색·캐릭터명으로 구분한다.
     // 디스크만 읽어 GUI 가 죽어 있어도 동작. `resume` 은 번호를 받아 그 자리에서
     // `claude --resume` 을 실행한다(pane 이면 shim 이 트리플·페르소나 재부착).
-    if cmd == "sessions" || cmd == "resume" {
-        run_sessions_picker(cmd == "resume", &args)?;
+    if cmd == "sessions" {
+        run_sessions_picker(&args)?;
         return Ok(None);
     }
     // `statusline` — claude statusLine 커맨드(stdin JSON → 한 줄 출력). collab-hooks
@@ -625,13 +535,6 @@ fn run() -> Result<Option<Response>> {
                 error.message = "이 앱은 서버 복원 등록을 지원하지 않아요. 앱을 업데이트한 뒤 다시 등록해주세요. 서버는 실행하지 않았어요.".into();
             }
         }
-    }
-    // `layout` is meant to be *read*, not piped — render the pane rects as an
-    // ASCII diagram so claude (and a human) grasp the screen split at a glance.
-    // On error we fall through to the raw JSON so the failure is still visible.
-    if cmd == "layout" && response.ok {
-        println!("{}", render_layout(&response));
-        return Ok(None);
     }
     // `windows` lists every window (not just the visible one) so an agent can
     // answer "what's in window 1" — each gets a header + its own box diagram.
@@ -703,79 +606,6 @@ fn tell_state_line(receipt: &Value) -> String {
         _ => state,
     };
     if reason.is_empty() { said.to_string() } else { format!("{said} · {reason}") }
-}
-
-/// Machine and room identity must precede reusable pane numbers.
-fn print_rooms(socket_path: &str) -> Result<()> {
-    let req = Request {
-        id: "rooms".into(),
-        method: "collab.snapshot".into(),
-        params: json!({"scope":"all"}),
-    };
-    let resp = roundtrip(socket_path, &req)?;
-    if !resp.ok { return Err(anyhow!(resp.error.map(|error|error.message).unwrap_or_else(||"room snapshot failed".into()))); }
-    let snapshot = resp.result.context("room snapshot missing")?;
-    let me = std::env::var("KASATERM_PANE_ID").unwrap_or_default();
-    let machine = if API_TARGET.get().is_none() { rooms_caller_machine() } else { None };
-    print!("{}",render_rooms(&snapshot,&me,machine.as_deref())?);
-    Ok(())
-}
-
-fn rooms_caller_machine() -> Option<String> {
-    use std::io::Read;
-    if kasa_socket::isolated_collab_root().is_some() || std::env::var_os("KASATERM_TEST_BOARD_FIXTURE").is_some() { return None; }
-    if let Ok(id) = std::env::var("KASATERM_MACHINE_ID") { if !id.is_empty() { return Some(id); } }
-    let path = std::env::var_os("KASATERM_MACHINE_ID_FILE").map(std::path::PathBuf::from)
-        .or_else(||Some(kasa_socket::home_dir()?.join(".config/kasaterm/machine-id")))?;
-    let mut id = String::new();
-    std::fs::File::open(path).ok()?.take(129).read_to_string(&mut id).ok()?;
-    let id = id.trim();
-    ((8..=128).contains(&id.len()) && id.bytes().all(|b|b.is_ascii_alphanumeric() || b"-_.".contains(&b))).then(||id.to_owned())
-}
-
-fn render_rooms(snapshot: &Value, me: &str, caller_machine: Option<&str>) -> Result<String> {
-    use kasa_socket::board::{field,short};
-    if snapshot["schema_version"] != 1 { return Err(anyhow!("unsupported room snapshot")); }
-    let sources = snapshot["sources"].as_array().context("room sources missing")?;
-    let panes = snapshot["panes"].as_array().context("room panes missing")?;
-    let locals: Vec<_> = sources.iter().filter(|source|source["is_local"] == true)
-        .filter_map(|source|field(source,"machine_id")).collect();
-    let local_machine = (locals.len() == 1).then(||locals[0]);
-    let mine: Vec<_> = panes.iter().filter(|pane| !me.is_empty()
-        && local_machine.is_some() && caller_machine == local_machine
-        && sources.iter().any(|source|field(source,"machine_id") == local_machine && source["state"] == "online")
-        && field(&pane["address"],"machine_id") == local_machine
-        && field(&pane["address"],"surface_id") == Some(me) && pane["freshness"] == "fresh").collect();
-    let my_room = (mine.len() == 1).then(||field(mine[0],"room_id")).flatten();
-    let mut groups: std::collections::BTreeMap<(String,Option<String>),Vec<&Value>> = std::collections::BTreeMap::new();
-    for pane in panes {
-        groups.entry((field(&pane["address"],"machine_id").unwrap_or("unknown").to_owned(),field(pane,"room_id").map(str::to_owned))).or_default().push(pane);
-    }
-    let mut out = String::new();
-    for source in sources.iter().filter(|source|source["state"] != "online") {
-        out.push_str(&format!("{} [{}]: {}\n",short(field(source,"label").unwrap_or("기기 미확인"),120),short(field(source,"machine_id").unwrap_or("unknown"),128),field(source,"state").unwrap_or("unknown")));
-    }
-    if groups.is_empty() { out.push_str("(pane 없음)\n"); }
-    for ((machine,room),rows) in groups {
-        let first = rows[0];
-        let local = local_machine == Some(machine.as_str());
-        let room_label = field(first,"room_label").unwrap_or("방 미확인");
-        let mine = local && my_room.is_some() && my_room == room.as_deref();
-        out.push_str(&format!("{} [{}] · {}{}\n",short(field(first,"machine_label").unwrap_or(&machine),120),short(&machine,128),short(room_label,120),if mine {"  ← 내 방"} else {""}));
-        for pane in rows {
-            let id = field(&pane["address"],"surface_id").unwrap_or("?");
-            let mut tags = Vec::new();
-            if mine && id == me { tags.push("나".to_owned()); }
-            if !local { tags.push("원격 또는 출처 미확인".into()); }
-            if let Some(harness) = field(pane,"harness").filter(|h|*h != "claude") { tags.push(short(harness,40)); }
-            if pane["detached"] == true { tags.push("화면밖".into()); }
-            if pane["freshness"] != "fresh" { tags.push("최근 상태 미확인".into()); }
-            let tags = if tags.is_empty() {String::new()} else {format!("  [{}]",tags.join("·"))};
-            out.push_str(&format!("  {:<5} {:<8} {:<8}{tags}  {}\n",short(id,64),short(field(pane,"character").unwrap_or("(캐릭터 없음)"),80),short(field(pane,"status").unwrap_or("unknown"),32),short(field(pane,"title").unwrap_or(""),200)));
-        }
-    }
-    out.push_str("연락 주소는 board --all에서 선택한 pane의 address 전체를 사용하세요.\n");
-    Ok(out)
 }
 
 /// Poll `collab.board` AND this pane's inbox every `interval_secs`, printing
@@ -1538,33 +1368,6 @@ fn render_where(resp: &Response, query: &str, me: Option<&str>) -> String {
     }
 }
 
-fn render_layout(resp: &Response) -> String {
-    let panes = resp
-        .result
-        .as_ref()
-        .and_then(|v| v.get("panes"))
-        .and_then(|v| v.as_array());
-    let rects: Vec<(String, u16, u16, u16, u16)> = match panes {
-        Some(arr) => arr
-            .iter()
-            .filter_map(|p| {
-                Some((
-                    p.get("surface_id")?.as_str()?.to_string(),
-                    p.get("x")?.as_u64()? as u16,
-                    p.get("y")?.as_u64()? as u16,
-                    p.get("w")?.as_u64()? as u16,
-                    p.get("h")?.as_u64()? as u16,
-                ))
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    if rects.is_empty() {
-        return "(빈 레이아웃 — 보이는 pane 없음)".to_string();
-    }
-    draw_boxes(&rects)
-}
-
 /// Box-drawing from pane rects given as 0..100 percentages of the window.
 /// Each cell accumulates U/D/L/R connection bits so shared borders between
 /// adjacent panes resolve to the right junction glyph (┬ ├ ┼ …) automatically.
@@ -1739,7 +1542,6 @@ fn print_help(all: bool) {
             "where [찾을 말] [--json]                  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
             "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서",
             "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
-            "rooms                                     기기·방별 상태 요약",
             "peek [%N] [줄수]                          pane 화면 글자",
             "capture [%N] [경로] | --window [경로]      pane 또는 창 전체 스크린샷",
             "transcript [%N] [N]                       claude 최근 대화 N 턴",
@@ -1747,66 +1549,46 @@ fn print_help(all: bool) {
         ]),
         ("학생·협업", &[
             "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
-            "tell-status ID                            전달 영수증 조회",
             "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
-            "wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
             "done <succeeded|failed> [요약]            내 일 완료 보고",
-            "nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed …] [--tests …] [--next …]",
-            "                                          나쵸가 띄운 학생의 보고(토큰·비밀은 거부)",
-            "dismiss %N… [--force]                     일 끝난 학생 창 닫기(미커밋 변경이 있으면 안 닫는다)",
-            "sessions [N] · resume [N]                 최근 claude 세션 목록 · 번호로 그 자리에서 이어가기",
-            "pet-say [--from 곳] [--state busy|wait|error] <문안>   바탕화면 펫에게 한 줄",
+            "sessions [N]                              최근 claude·codex 세션 목록",
         ]),
         ("창·칸 조작", &[
             "split <left|right|up|down> [%N] [--focus] [--count N]   칸 나누기 — 방 전체가 같은 크기 격자로 다시 짜인다",
+            "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
             "tab [%N] [--focus]                        그 칸에 새 탭",
             "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기)",
-            "move %N <대상> [방향] · swap %A %B · resize %N <0..1>",
+            "move %N <대상> [방향] · resize %N <0..1>  칸 옮기기 · 비율",
             "focus %N · close %N · closed [%N]         포커스 · 닫기 · 되살리기 목록(%N 을 주면 진짜 끈다)",
-            "rename %N <제목>                          창 이름(고정 — claude 가 붙이는 제목이 못 덮는다)",
-            "rename-window <이름> · rename [세션id] <이름>   방 이름 · claude 세션 제목",
-            "color %N <#rrggbb>",
-            "send [--surface %N] <글> · key [--surface %N] <enter|tab|escape|up|…>",
-            "human <명령…>                             사람이 쳐야 하는 명령(sudo·로그인)을 아래 칸에 넣고 포커스를 넘긴다",
-        ]),
-        ("웹·브라우저", &[
-            "web <url> [%N]                            연 칸의 탭으로 웹 pane",
-            "web-text · web-url · web-eval '<js>' · web-shot <경로>   [%N] 웹 pane 읽기·실행·스크린샷",
-            "open <url>                                사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
+            "rename-window <이름>                      방 이름",
         ]),
         ("클립보드·결과물", &[
             "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
             "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
-            "clips                                     최근 복사 목록(비밀은 가림)",
             "share path | new <주제> | status          KASA-share 결과물 폴더(new 는 경로를 찍는다)",
         ]),
-        ("기기·계정·네트워크", &[
-            "machines [--names] · home                 명부 기계 목록 · 본진 기계",
-            "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
-            "migrate [%N] <기계|local> [--cwd /레포] [--force]   claude 를 그 기계로 이사(대화·미커밋 변경까지)",
-            "unfold <라벨>                             그 기계의 학생 칸을 전부 거울로 펼치기",
+        ("기기·네트워크", &[
+            "machines [--names]                        명부 기계 목록",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
-            "login [아이디] · logout · devices [status | revoke ID] · agents(다른 기기의 Claude·Codex 계정)",
-            "server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   로컬 서버 실행·복원 등록(비밀값 금지)",
         ]),
         ("앱", &[
             "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·나쵸 승인)",
             "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
         ]),
-    ];
-    let hidden: &[(&str, &[&str])] = &[
-        ("훅·내부 (사람이 칠 일 없음)", &[
+        ("훅 (claude 훅이 부른다)", &[
             "bind-transcript <path> · notify [--surface %N] <제목> [본문] · attention [--surface %N] [사유]",
-            "agent-status <start|end|clear> <subagent|background> [key] [라벨]",
-            "ping · capabilities · identify · list <workspaces|surfaces>",
+            "agent-status <start|end|clear> <subagent|background> [key] [라벨] · identify(내 칸 번호)",
         ]),
-        ("옛 이름 (where 로 합쳤다 — 아직 동작한다)", &[
-            "layout                                    보는 방 배치도",
-            "windows                                   모든 방 배치도",
-        ]),
-        ("잘 안 쓰는 것", &[
-            "promote %N                                pane 을 상주 데몬으로 승격",
-            "remote <http://호스트:포트> [--cwd] [--attach id] [%N]   원격 PTY 호스트의 셸을 pane 으로",
+    ];
+    // 목록에서는 뺐지만 학생 규약·나쵸·셰임이 실제로 부르는 것 — 지우면 그쪽이 멈춘다.
+    let hidden: &[(&str, &[&str])] = &[
+        ("목록에서 뺀 것 (규약·나쵸·셰임이 부르니 남겨 둔다)", &[
+            "tell-status ID · wait <이름|%N>… · nacho-report --status … --summary …   학생 규약",
+            "send [--surface %N] <글> · key [--surface %N] <키> · rename %N <제목> · color %N <#rrggbb> · ping · list surfaces   나쵸",
+            "dismiss %N… [--force] · server --surface %N '<명령>' | --clear   나쵸",
+            "windows                                   나쵸(「현재 보이는」 줄을 읽는다)",
+            "remote <http://호스트:포트> …             `to` 셰임",
+            "pet-say [--from 곳] [--state busy|wait|error] <문안>   요청장부 도구(tools/request_journal)",
         ]),
     ];
     eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 학생 이름.\n");
@@ -1820,7 +1602,7 @@ fn print_help(all: bool) {
     eprintln!("앞에 붙이는 것: --api BASE [--api-token-file FILE] — 다른 기기 HTTP 로 보낸다");
     eprintln!("소켓: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > 기본(/tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)");
     if !all {
-        eprintln!("훅·옛 이름까지: kasaterm-cli help all");
+        eprintln!("목록에서 뺀 것까지: kasaterm-cli help all");
     }
 }
 
@@ -1896,74 +1678,11 @@ fn server_params(args: &[String]) -> Result<Value> {
     Ok(params)
 }
 
-fn read_line_prompt(prompt: &str) -> Result<String> {
-    eprint!("{prompt}");
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(line.trim().to_string())
-}
-
-/// 화면에 안 찍히게 한 줄을 읽는다. 터미널이 아니면(파이프) 그냥 읽는다.
-fn read_secret(prompt: &str) -> Result<String> {
-    eprint!("{prompt}");
-    let _ = std::io::stderr().flush();
-    #[cfg(unix)]
-    let saved = unsafe {
-        let mut t: libc::termios = std::mem::zeroed();
-        if libc::isatty(libc::STDIN_FILENO) == 1 && libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
-            let old = t;
-            t.c_lflag &= !libc::ECHO;
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
-            Some(old)
-        } else {
-            None
-        }
-    };
-    #[cfg(windows)]
-    let saved = unsafe {
-        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
-        let h = GetStdHandle(STD_INPUT_HANDLE);
-        let mut mode = 0;
-        if GetConsoleMode(h, &mut mode) != 0 {
-            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT);
-            Some((h, mode))
-        } else {
-            None
-        }
-    };
-    let mut line = String::new();
-    let read = std::io::stdin().read_line(&mut line);
-    #[cfg(unix)]
-    if let Some(old) = saved {
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &old) };
-        eprintln!();
-    }
-    #[cfg(windows)]
-    if let Some((h, mode)) = saved {
-        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(h, mode) };
-        eprintln!();
-    }
-    read?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
-
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     // Caller-supplied id so async clients can correlate; we just stamp
     // a process-id-based string for the CLI path where nobody cares.
     let id = json!(format!("cli-{}", std::process::id()));
     let (method, params): (&str, Value) = match cmd {
-        // 관문 계정 — 화면 없는 기기(미니·윈도우)도 이것으로 로그인한다. 비밀번호는 앱이 관문에
-        // 한 번 건네고 버린다(기기에는 기기 토큰만 남는다).
-        "login" => {
-            let account = match args.first() {
-                Some(a) => a.clone(),
-                None => read_line_prompt("아이디: ")?,
-            };
-            let password = read_secret("비밀번호: ")?;
-            ("relay.account", json!({ "op": "login", "account": account, "password": password }))
-        }
-        "logout" => ("relay.account", json!({ "op": "logout" })),
         // 카사넷 포트 공유 — 다른 기기 개발 서버를 이 기기 localhost 로 끌어온다(docs/kasanet.md P3).
         "net" => match args.first().map(String::as_str) {
             Some("forward") => {
@@ -1998,19 +1717,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             }
             Some(other) => return Err(anyhow!("net forward|list|stop — 모르는 것: {other}")),
         },
-        "devices" => match args.first().map(String::as_str) {
-            None => ("relay.account", json!({ "op": "devices" })),
-            Some("status") => ("relay.account", json!({ "op": "status" })),
-            Some("revoke") => {
-                let id = args.get(1).ok_or_else(|| anyhow!("devices revoke <device_id>"))?;
-                ("relay.account", json!({ "op": "revoke", "device_id": id }))
-            }
-            Some(other) => return Err(anyhow!("devices [status | revoke <device_id>] — 모르는 것: {other}")),
-        },
-        // 이 기기 슬롯을 관문에 올리고 같은 계정 기기들의 코딩 에이전트 계정 목록을 받는다.
-        "agents" => ("relay.account", json!({ "op": "agents" })),
         "ping" => ("system.ping", json!({})),
-        "capabilities" => ("system.capabilities", json!({})),
         "identify" => ("system.identify", json!({})),
         "list" => {
             let what = args
@@ -2182,79 +1889,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("window.new", json!({}))
         }
         "server" => ("surface.server", server_params(args)?),
-        // 도는 pane 을 로컬 상주 데몬으로 **무중단 승격** — 셸·claude 는 그대로,
-        // 소유권만 앱 밖으로. 이후 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다.
-        "promote" => {
-            let pane = args
-                .iter()
-                .find(|a| a.starts_with('%'))
-                .cloned()
-                .or_else(|| {
-                    std::env::var("KASATERM_PANE_ID")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .ok_or_else(|| anyhow!("promote 는 대상 pane 이 필요해요 (예: promote %3)"))?;
-            ("surface.promote", json!({ "pane": pane }))
-        }
-        // pane 의 claude 를 **다른 기계로 이사** — 대화를 통째 그 호스트로 옮기고
-        // 같은 자리에서 같은 대화로 다시 깨운다. 안 올린 git 변경이 있으면 막아 선다.
-        "migrate" => {
-            let mut positional: Vec<String> = Vec::new();
-            let mut i = 0usize;
-            while i < args.len() {
-                let a = &args[i];
-                if a == "--cwd" || a == "--run" {
-                    i += 2;
-                    continue;
-                }
-                if a.starts_with('%') || a.starts_with("--") {
-                    i += 1;
-                    continue;
-                }
-                positional.push(a.clone());
-                i += 1;
-            }
-            let base = positional.first().cloned().ok_or_else(|| {
-                anyhow!("migrate 는 목적지가 필요해요 (예: migrate 맥미니 · migrate %3 맥미니 · 데려오기: migrate %3 local)")
-            })?;
-            let flagval = |name: &str| {
-                args.iter()
-                    .position(|a| a == name)
-                    .and_then(|i| args.get(i + 1))
-                    .cloned()
-            };
-            let pane = args
-                .iter()
-                .find(|a| a.starts_with('%'))
-                .cloned()
-                .or_else(|| {
-                    std::env::var("KASATERM_PANE_ID")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .ok_or_else(|| {
-                    anyhow!("migrate 는 대상 pane 이 필요해요 (예: migrate %3 http://...)")
-                })?;
-            (
-                "surface.migrate",
-                json!({
-                    "pane": pane,
-                    "base": base,
-                    "cwd": flagval("--cwd"),
-                    "run": flagval("--run"),
-                    "force": args.iter().any(|a| a == "--force"),
-                }),
-            )
-        }
-        // 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로 펼친다.
-        "unfold" => {
-            let label = args
-                .first()
-                .cloned()
-                .ok_or_else(|| anyhow!("unfold 는 기계 라벨이 필요해요 (예: unfold 맥미니)"))?;
-            ("machine.unfold", json!({ "label": label }))
-        }
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
         // 같은 세션에 다시 붙는다.
@@ -2351,70 +1985,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 });
             ("surface.new_tab", json!({ "outer": outer, "focus": focus }))
         }
-        // URL 을 요청 pane 옆 웹(브라우저) pane 으로. 개발 서버를 그 서버를
-        // 띄운 pane 곁에 두는 용도 — 어느 방 어느 pane 이 띄운 건지 화면
-        // 배치가 말해 준다.
-        // 화면 안 웹 pane(`web`)과 다르다 — 이건 「사람 눈앞의 브라우저」다. 본진
-        // 학생이 부르면 거울로 보고 있는 맥북 크롬에 뜬다(호스트가 되돌린다).
-        "open" => {
-            let url = args
-                .iter()
-                .find(|a| !a.starts_with('%'))
-                .ok_or_else(|| anyhow!("open needs a URL (e.g. open https://example.com)"))?;
-            let target = args
-                .iter()
-                .find(|a| a.starts_with('%'))
-                .cloned()
-                .or_else(|| {
-                    std::env::var("KASATERM_PANE_ID")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                });
-            ("surface.open_url", json!({ "url": url, "target": target }))
-        }
-        "web" => {
-            let url = args
-                .iter()
-                .find(|a| !a.starts_with('%'))
-                .ok_or_else(|| anyhow!("web needs a URL (e.g. web localhost:5173)"))?;
-            let target = args
-                .iter()
-                .find(|a| a.starts_with('%'))
-                .cloned()
-                .or_else(|| {
-                    std::env::var("KASATERM_PANE_ID")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                });
-            (
-                "surface.open_preview",
-                json!({ "kind": "web", "path": url, "target": target }),
-            )
-        }
-        // 웹 pane 조종 — 열어 둔 내장 브라우저를 확인 도구로 쓴다. %surface 를
-        // 안 주면 열린 웹 pane 이 하나일 때만 그걸 잡는다(여럿이면 후보 나열
-        // 오류). eval 결과는 JSON 직렬화 문자열이다.
-        "web-eval" | "web-text" | "web-shot" | "web-url" => {
-            let op = &cmd[4..]; // "web-eval" → "eval"
-            let surface = args.iter().find(|a| a.starts_with('%')).cloned();
-            let arg = args.iter().find(|a| !a.starts_with('%')).cloned();
-            match (op, &arg) {
-                ("eval", None) => {
-                    anyhow::bail!("web-eval needs JS (e.g. web-eval 'document.title')")
-                }
-                // Windows 절대경로는 `/` 로 시작하지 않는다(`C:\…`) — 첫 글자
-                // 비교로 판정하면 그 플랫폼에서 web-shot 이 통째로 막힌다.
-                ("shot", Some(p)) if !std::path::Path::new(p).is_absolute() => {
-                    anyhow::bail!("web-shot needs an absolute path (got {p})")
-                }
-                ("shot", None) => anyhow::bail!("web-shot needs an absolute .png path"),
-                _ => {}
-            }
-            (
-                "web.drive",
-                json!({ "op": op, "arg": arg.unwrap_or_default(), "surface": surface }),
-            )
-        }
         // pane 을 다른 pane 옆으로 — 대상이 다른 창이면 **창을 건너뛴다**(PTY 유지).
         "move" => {
             let moving = args
@@ -2428,15 +1998,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 "surface.move",
                 json!({ "surface_id": moving, "target": target, "direction": dir }),
             )
-        }
-        "swap" => {
-            let a = args
-                .first()
-                .ok_or_else(|| anyhow!("swap needs <surface_a> <surface_b>"))?;
-            let b = args
-                .get(1)
-                .ok_or_else(|| anyhow!("swap needs a second surface_id"))?;
-            ("surface.swap", json!({ "a": a, "b": b }))
         }
         "resize" => {
             let surface = args
@@ -2569,20 +2130,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             if args.get(1).is_none_or(|a|a != "--address") { return Err(anyhow!("tell-status requires the original --address JSON")); }
             let address: Value = serde_json::from_str(args.get(2).ok_or_else(||anyhow!("missing receipt address"))?)?;
             ("collab.tell_status",json!({"message_id":id,"address":address}))
-        }
-        "resume" => {
-            // resume <session_id> [cwd] — 사라진(재시작·종료) 학생 세션을 새 pane 에 claude
-            // --resume 으로 이어 띄운다(사용자: tell 오발송 대신 이어가기). cwd 생략 시 활성 방 cwd.
-            let sid = args
-                .first()
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .ok_or_else(|| anyhow!("resume needs <session_id> [cwd]"))?;
-            let cwd = args.get(1).filter(|s| !s.is_empty()).cloned();
-            (
-                "session.resume",
-                json!({ "id": sid, "cwd": cwd, "newroom": false }),
-            )
         }
         "recent-sessions" => {
             // recent-sessions [cwd] — 이어갈 후보 세션 목록(최신순, id/label/mtime/cwd). tell
@@ -2774,7 +2321,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "outcome": outcome, "summary": summary }),
             )
         }
-        "layout" => ("window.layout", json!({})),
         "where" => ("window.where", json!({})),
         "windows" => ("window.list", json!({})),
         "bind-transcript" => {
@@ -3456,14 +3002,13 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
 
 // ---------------------------------------------------------------- sessions --
 
-/// 터미널 세션 피커 본체. `interactive=false`(sessions)면 목록만, `true`(resume)면
-/// 번호 입력을 받아 그 세션을 이어간다. 목록은 jsonl·SQLite 직스캔이라 claude
+/// 터미널 세션 목록. 목록은 jsonl·SQLite 직스캔이라 claude
 /// /resume 의 teamName 필터를 안 탄다.
 ///
 /// 기본은 **세 하네스 전체**(claude·codex·agy)를 가로지른다 — 하네스가 셋이 된
 /// 뒤로 "어디서 뭘 하다 말았나"를 한 자리에서 봐야 하기 때문이다. `--here` 는
 /// 예전처럼 지금 cwd 의 claude 세션만 본다(그 프로젝트 것만 훑을 때).
-fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
+fn run_sessions_picker(args: &[String]) -> Result<()> {
     let limit = args
         .iter()
         .find_map(|s| s.parse::<usize>().ok())
@@ -3544,52 +3089,7 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
             );
         }
     }
-    if !interactive {
-        return Ok(());
-    }
-    print!("\n번호 입력 (Enter=취소): ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).context("stdin")?;
-    let Ok(n) = line.trim().parse::<usize>() else {
-        println!("취소");
-        return Ok(());
-    };
-    let Some(sel) = n.checked_sub(1).and_then(|i| list.get(i)) else {
-        return Err(anyhow!("{n}번 세션이 없어요 (1..{})", list.len()));
-    };
-    if sel.harness == "claude" && live.contains(&sel.id) {
-        return Err(anyhow!(
-            "이미 실행 중인 세션이에요 ({}) — 그 pane 을 쓰거나 `claude agents` 로 attach 하세요. \
-             중복 --resume 은 프로세스가 갈라져요.",
-            &sel.id[..8]
-        ));
-    }
-    let run = kasa_socket::sessions::resume_command(&sel.harness, &sel.id, &sel.cwd);
-    // 사용자 셸(-i)로 실행 — zshrc 의 claude() 래퍼(권한 플래그 등)와 pane PATH 의
-    // kasaterm shim(트리플·페르소나)을 사람이 직접 친 것과 똑같이 태운다.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let err = std::process::Command::new(shell)
-            .arg("-ic")
-            .arg(&run)
-            .exec();
-        Err(anyhow!("{} 실행 실패: {err}", sel.harness))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = std::process::Command::new("cmd")
-            .args(["/C", &run])
-            .status()
-            .context("하네스 실행")?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("exit {status}"))
-        }
-    }
+    Ok(())
 }
 
 /// `{sid: 학생명}` 평면 JSON(session_characters.json). 없거나 깨지면 빈 맵.
@@ -4144,31 +3644,6 @@ mod tests {
         assert_eq!(super::mark_tell_sender("⟦아로나⟧ 이미".into(), Some("아로나")), "⟦아로나⟧ 이미");
         assert_eq!(super::mark_tell_sender("본문".into(), None), "본문");
         assert_eq!(super::mark_tell_sender("본문".into(), Some(" ")), "본문");
-    }
-
-    #[test]
-    fn rooms_use_machine_and_room_identity_without_peer_addresses() {
-        let pane = |machine: &str,room: &str,character: &str| serde_json::json!({
-            "address":{"machine_id":machine,"surface_id":"%1","surface_key":format!("key-{machine}")},
-            "machine_label":machine,"room_id":room,"room_label":format!("방 {room}"),"character":character,
-            "status":"idle","freshness":"fresh","title":"task","peer_name":"never-use-this-address"});
-        let snapshot = serde_json::json!({"schema_version":1,
-            "sources":[{"machine_id":"local-machine","is_local":true,"state":"online"},
-                {"machine_id":"remote-machine","is_local":false,"state":"online"}],
-            "panes":[pane("local-machine","one","Local"),pane("remote-machine","one","Remote")]});
-        let rendered = super::render_rooms(&snapshot,"%1",Some("local-machine")).unwrap();
-        assert_eq!(rendered.matches("← 내 방").count(),1);
-        assert_eq!(rendered.matches("[나]").count(),1);
-        assert!(rendered.contains("local-machine") && rendered.contains("remote-machine"));
-        assert!(rendered.contains("%1") && rendered.contains("address 전체"));
-        assert!(!rendered.contains("never-use-this-address") && !rendered.contains("to="));
-        assert!(!super::render_rooms(&snapshot,"%1",None).unwrap().contains("내 방"));
-        assert!(!super::render_rooms(&snapshot,"%1",Some("other-machine")).unwrap().contains("내 방"));
-        let mut unknown = snapshot.clone(); unknown["sources"][0]["is_local"] = serde_json::Value::Null;
-        assert!(!super::render_rooms(&unknown,"%1",Some("local-machine")).unwrap().contains("내 방"));
-        let mut missing = snapshot.clone(); missing["panes"][0]["room_id"] = serde_json::Value::Null;
-        assert!(!super::render_rooms(&missing,"%1",Some("local-machine")).unwrap().contains("내 방"));
-        assert!(super::render_rooms(&serde_json::json!({}),"%1",None).is_err());
     }
 
     #[test]
