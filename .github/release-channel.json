@@ -4,6 +4,6 @@
     "macos"
   ],
   "schema": "kasaterm-release-channel/1",
-  "source_commit": "dafe226e516add8d6fd6f54f42d6605880085ba6",
-  "tag": "v0.2.13"
+  "source_commit": "dec38e16d27b2f0955ba0c6c4d04f83fdd3715d8",
+  "tag": "v0.2.14"
 }
