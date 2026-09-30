@@ -23,12 +23,14 @@ CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. app
 
 controller는 Mac 한 대다. 소스와 상태, LFS 캐시는 Desktop·Documents·Downloads 밖에 둔다. 상시 정책 파일은 저장소 밖의 소유자 전용 0600 파일이고 저장소·기계 id·preview 피드·Mac·현재 minor의 패치 증가·서명 팀·공증 프로필·LFS 경로에 결속된다.
 
+LFS 경로는 미니 LFS 서버의 저장소(`~/.local/share/kasaterm-lfs`)를 그대로 쓴다([fast-patch-release.md](fast-patch-release.md) 「미니 LFS 서버」). 사람이 올린 그림이 곧 controller 의 로컬 캐시라 격리 워크트리가 네트워크 없이 선다. 2026-09-29 GitHub LFS 예산 초과로 controller 가 멈춘 뒤 합쳤다(정책 revision 4).
+
 직렬 controller는 상태 폴더의 0700 `target/`에 컴파일 캐시를 재사용한다. 계획별 소스·검사 결과·서명 산출물은 계속 분리하며, 새 커밋의 검증을 캐시가 대신하지 않는다.
 
 ```sh
 python3 -m tools.release.auto --state-dir /절대/상태폴더 enable \
   --controller 기계_ID --minor 0.2 \
-  --lfs-storage /절대/LFS저장소 --unlock-signing
+  --lfs-storage ~/.local/share/kasaterm-lfs --unlock-signing
 python3 -m tools.release.auto --state-dir /절대/상태폴더 install \
   --source /절대/controller소스 --python /절대/python3 --apply
 ```

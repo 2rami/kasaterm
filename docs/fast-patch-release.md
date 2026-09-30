@@ -294,48 +294,65 @@ gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f pl
   계획은 msi 가 없어 release 단계에서 멈춘다(성공으로 안 친다). 나중에 `both` 로 마무리하면 이어서 끝난다.
 - 워크플로 수동 실행은 게시다(appcast 가 나간다) — 나쵸 확인을 받은 흐름에서만.
 
-### git LFS 는 굽는 job 만
+### git LFS — 미니 LFS 서버가 정본이다
 
-그림 에셋(png·ttf 등, 릴리스 커밋 기준 3,364개·126 MB)은 git LFS 라 체크아웃이 받는 만큼 저장소 소유 계정의 LFS 대역폭
-예산을 쓴다. 2026-09-27 v0.2.1 태그 실행은 두 job 모두 체크아웃의 `git lfs fetch` 에서 「This repository exceeded its LFS
-budget」로 멈췄다(실행 1회에 126 MB × 2).
+그림 에셋(png·ttf 등, main 기준 2,359개·124 MB)은 git LFS 다. GitHub LFS 예산이 막혀(batch 응답 「This repository exceeded
+its LFS budget」) 2026-09-27 CI 굽기가, 09-29 15:58~09-30 09:40 controller 격리 워크트리가 섰다. 2026-09-30 부터 저장소
+`.lfsconfig` 가 미니 LFS 서버를 가리켜 사람·CI·controller 가 모두 거기서 받고 거기로 올린다. GitHub LFS 는 안 쓴다.
 
-| job | 그림이 필요한가 | 받는 것 |
-|---|---|---|
-| build-msi | 필요 — 학생 그림을 실행 파일에 넣고(`sprites.rs`), arona-ui 빌드 결과·폰트를 설치본에 담는다 | **미니 LFS 창구에서**(아래) `mobile/`·`web/arona-ui/character-src/`(vite 빌드가 안 읽는다)를 뺀 78 MB. 받아야 할 것이 포인터로 남으면 멈춘다(빈칸 그림 판 방지) |
-| build-dmg (local) | 불필요 — Cargo.toml·릴리스 노트만 읽고 dmg 는 릴리스에서 받는다 | 없음(`lfs: false` → checkout 이 `GIT_LFS_SKIP_SMUDGE=1`) |
-| build-dmg (ci·빌드 검증) | 필요 | 전부 |
-| appcast | 불필요 — dmg·msi 는 릴리스에서 받는다 | 없음(뒤의 `git pull --rebase` 도 `GIT_LFS_SKIP_SMUDGE`) |
+| 누가 | 어떻게 |
+|---|---|
+| 사람 — pull·checkout | `.lfsconfig` 를 따라 미니에서. 토큰 없음(남이 clone 해도 그림이 보인다) |
+| 사람 — push | pre-push 가 새 그림만 미니로 올린다. git 자격 도우미의 올리기 토큰이 있어야 한다(아래 `login`). 이미 있는 그림만 든 push 는 토큰 없이 통과 |
+| CI build-msi | `.github/actions/lfs-pull` 로 `mobile/`·`web/arona-ui/character-src/`(vite 빌드가 안 읽는다)를 뺀 약 80 MB. 받아야 할 것이 포인터로 남으면 멈춘다(빈칸 그림 판 방지) |
+| CI build-dmg — ci·빌드 검증 | 같은 액션으로 전부 |
+| CI build-dmg local·appcast·resolve | 안 받는다(`lfs: false` → checkout 이 `GIT_LFS_SKIP_SMUDGE=1`). 로컬 dmg 검증은 Cargo.toml·릴리스 노트만 읽는다 |
+| controller | `lfs.storage` 가 서버 저장소 그 폴더라 격리 워크트리가 네트워크 없이 선다 |
 
-build-dmg 의 ci·빌드 검증 길은 여전히 GitHub LFS 에서 받는다 — 예산이 막히면 그 길만 선다.
-
-### 미니 LFS 창구
-
-예산이 막혀도 Windows 판이 서게, build-msi 는 GitHub LFS 대신 **미니의 읽기 전용 LFS 창구**에서 그림을 받는다(2026-09-28,
-v0.2.1 Windows 판이 예산으로 막힌 뒤 소유자 결정). 사람들의 push/pull 은 GitHub LFS 그대로다 — 저장소 `.lfsconfig` 를 두지
-않고, 그 단계의 환경(`GIT_CONFIG_COUNT`)으로만 `lfs.url`·인증 머리를 준다.
+### 미니 LFS 서버
 
 | 자리 | 무엇 |
 |---|---|
-| 서버 | `tools/release/mini_lfs.py`(표준 라이브러리만). batch API 의 download 만 — upload·잠금·PUT 은 403, 토큰 없으면 경로와 무관하게 401. `127.0.0.1:8794` |
-| 객체 | 미니 `~/.local/share/kasaterm-lfs/objects` — 미니 저장소의 LFS 객체를 복제해 둔다(launchd 의 파이썬은 `~/Desktop` 을 못 읽는다) |
-| 토큰 | 미니 `~/.config/kasaterm-lfs/token`(600)과 GitHub 비밀 `MINI_LFS_TOKEN` 에만. 주소는 저장소 변수 `MINI_LFS_URL` |
+| 서버 | `tools/release/mini_lfs.py`(표준 라이브러리만) `127.0.0.1:8794`. batch download·객체 GET/HEAD 는 누구나, batch upload(서버에 없는 그림이 있을 때)·PUT 은 토큰. 잠금 API 는 없다(404, `.lfsconfig` 의 `locksverify = false`). 지우기·고치기 없음 |
+| 올리기 검사 | 받은 바이트의 sha256 이 oid 와 같을 때만 저장(임시 파일 → fsync → rename). 한 개 90 MB(Cloudflare 무료 요청 본문 100 MB 한도 아래)·batch 1,000개·디스크 여유 5 GB 아래로는 안 받는다(507) |
+| 저장소 | 미니 `~/.local/share/kasaterm-lfs/objects`(git-lfs 모양 `ab/cd/<oid>`) — controller 정책의 `lfs_storage` 와 같은 폴더. 09-30 에 옛 창구 객체·controller 캐시(`kasaterm-preview-lfs`)·이 맥북 `.git/lfs` 를 해시 확인하며 합쳤다(4,409개) |
+| 토큰 | 미니 `~/.config/kasaterm-lfs/token`(600, 한 줄에 「이름 토큰」)에만. 기기마다 하나이고 서버가 요청마다 다시 읽어 추가·폐기가 재시작 없이 먹는다. 파일 권한·형식이 틀리면 아무도 못 올린다. `ci` 는 GitHub 비밀 `MINI_LFS_TOKEN` 과 같은 값 — 지금 CI 는 받기만 해서 쓰지 않는다 |
+| 기기 자격 | 각 기기의 git 자격 도우미(`https://kasaterm.debimarlene.com`, 사용자 이름 `lfs`)에만. 토큰은 커밋·로그·화면에 안 나온다 |
 | 바깥 길 | kasaterm 명명 터널의 `kasaterm.debimarlene.com` 에 경로 규칙 `^/lfs/` 하나(관문 규칙보다 앞) — 새 DNS 없이 |
 | 상주 | launchd `com.geono.kasaterm-lfs`. 지금은 LaunchAgent(로그인해야 뜬다). `sudo bash scripts/mini-lfs.sh daemon` 으로 LaunchDaemon 이 된다 — 다만 kasaterm 터널도 LaunchAgent 라, 로그인 없는 재부팅에서 바깥 길까지 살리려면 터널도 같이 옮겨야 한다 |
 
 ```sh
-bash scripts/mini-lfs.sh status      # 상주·무토큰 401·토큰 200(토큰은 안 찍는다)
-bash scripts/mini-lfs.sh sync        # 새 그림이 든 판을 CI 가 굽기 전에 — 미니 저장소에 받아 둔 객체 중 창구에 없는 것만 복제
-bash scripts/mini-lfs.sh install     # 서버 파일을 고쳤을 때(토큰·주소는 유지)
+# 미니에서
+bash scripts/mini-lfs.sh status               # 상주·무토큰 받기 200·무토큰 올리기 401·토큰 올리기 200(토큰은 안 찍는다)
+bash scripts/mini-lfs.sh install              # 서버 파일을 고쳤을 때(토큰·주소는 유지)
+bash scripts/mini-lfs.sh token list           # 이름만
+bash scripts/mini-lfs.sh token revoke <이름>  # 잃어버린 기기 — 다음 요청부터 거절
+bash scripts/mini-lfs.sh sync <LFS 객체 폴더> # 다른 곳에만 있는 그림을 들일 때 — 빠진 것만, 해시 확인
+# 올리는 기기에서, 새 기기마다 한 번
+bash scripts/mini-lfs.sh login <기기 이름>    # ssh nachoneko 로 토큰을 받아 git 자격 도우미에 넣고 올리기를 확인한다
 ```
 
-- 창구에 없는 그림은 batch 가 객체별 404 로 답해 `git lfs pull` 이 그 이름을 대고 멈춘다 — 미니 저장소가 그 커밋의 LFS 를
-  받아 둔 뒤 `sync` 한다.
-- 미니가 꺼졌거나(터널 502·530) 토큰이 틀렸으면(401) build-msi 는 받기 전의 확인 요청에서 그 HTTP 코드를 대고 멈춘다. 조용히
-  건너뛰지 않는다.
-- 토큰을 바꾸려면 미니의 토큰 파일을 지우고 `install` → `gh secret set MINI_LFS_TOKEN -R 2rami/kasaterm < ~/.config/kasaterm-lfs/token`.
+- `login` 은 자격 도우미가 토큰을 되돌려 주는지까지 본다. SSH 세션처럼 키체인이 잠긴 곳은 그 호스트만 파일 도우미로 둔다:
+  `git config --global credential.https://kasaterm.debimarlene.com.helper ''` 뒤 `… .helper store` 를 한 줄 더.
+- 서버에 없는 그림을 받으려 하면 batch 가 객체별 404 로 답해 `git lfs pull` 이 그 이름을 대고 멈춘다 — 그 그림을 가진 기기에서
+  `git lfs push --object-id origin <oid>` 로 올린다.
+- 객체 응답은 `Cache-Control: immutable` 이다(이름이 곧 내용의 해시).
 - 터널 설정을 고치면 cloudflared 를 재시작해야 읽는다(관문 웹터미널·기기 ssh 입구가 한 번 끊긴다). 같은 터널로 연결을 하나 더
-  띄워 두고 상주 쪽을 재시작하면 새 연결은 끊기지 않는다(2026-09-28 이렇게 넣었다).
+  띄워 두고 상주 쪽을 재시작하면 새 연결은 끊기지 않는다(2026-09-28 이렇게 넣었다). 서버만 고치면(`install`) 터널은 그대로다.
+
+### 미니가 꺼졌을 때
+
+| 무엇 | 어떻게 되나 | 할 것 |
+|---|---|---|
+| 사람 — 받기 | 로컬에 없는 그림이 든 pull·checkout 이 batch 오류(502·530)로 멈춘다. 이미 받은 그림은 영향 없다 | 코드만 필요하면 `GIT_LFS_SKIP_SMUDGE=1 git pull`, 미니가 돌아오면 `git lfs pull` |
+| 사람 — 올리기 | 새 그림이 든 push 가 pre-push 에서 멈추고 커밋도 안 나간다 — 남이 못 받는 커밋이 생기지 않는다 | 기다렸다 다시 push. `--no-verify` 로 밀지 않는다 |
+| CI | build-msi·CI mac 굽기가 받기 전 확인 요청에서 HTTP 코드를 대고 멈춘다. 로컬 dmg 검증·appcast 는 그림이 필요 없어 그대로 | 미니가 돌아오면 [태그 마무리](#ci-가-멈춘-태그를-마무리하기--태그는-그대로-둔다) |
+| controller | 미니가 controller 라 같이 멈춘다. 미니는 켜져 있고 터널만 끊겼으면 로컬 저장소로 계속 돈다(태그 push·gh 는 GitHub 길) | 없음 |
+
+- 터널이 잠깐 끊기면 진행 중 요청이 한꺼번에 취소되고 batch 가 520 으로 통째 실패할 수 있다(09-30 실측, cloudflared 의
+  「Incoming request ended abruptly」). 다시 부르면 받은 것은 건너뛴다 — CI 액션은 세 번까지 스스로 다시 받는다.
+- 오래 죽으면 GitHub LFS 로 되돌릴 수는 있지만 예산이 풀려야 하고, 09-30 이후 올린 그림은 GitHub 에 없다. 되돌리려면 `.lfsconfig` 를
+  지우는 커밋과 함께 그림을 가진 기기에서 `git -c lfs.url=https://github.com/2rami/kasaterm.git/info/lfs lfs push --all origin`.
 
 ## 처음 한 번만 필요한 것
 
@@ -349,7 +366,7 @@ bash scripts/mini-lfs.sh install     # 서버 파일을 고쳤을 때(토큰·�
 
 ```sh
 python3 -m unittest tools.release.tests.test_fastpatch      # 82건 — 아래
-python3 -m unittest tools.release.tests.test_mini_lfs       # 미니 LFS 창구 15건 — 진짜 HTTP·진짜 git-lfs 왕복
+python3 -m unittest tools.release.tests.test_mini_lfs       # 미니 LFS 서버 26건 — 진짜 HTTP·진짜 git-lfs 받기·올리기·거부
 cargo test -p kasa-socket app_update                         # 기기 업데이트 창구·러너 32건(app-update.md 「검사」)
 bash scripts/nacho-update-interop.sh                         # 실제 나쵸 update 승인 서버(격리)와 러너·기기 왕복
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건

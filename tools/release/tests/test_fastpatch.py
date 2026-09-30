@@ -1782,15 +1782,16 @@ class LocalSigningRepoTests(unittest.TestCase):
         # Windows 굽기는 학생 그림을 실행 파일에 넣으니 LFS 가 필요하다 — 쓰는 것만 받고, 남은 포인터가 있으면 멈춘다.
         # 로컬 dmg 검증·appcast 는 그림이 필요 없다.
         self.assertIn("lfs: false", msi)
-        self.assertIn('git lfs pull --exclude="$EXCLUDE"', msi)
-        self.assertIn("EXCLUDE='mobile/**,web/arona-ui/character-src/**'", msi)
-        self.assertIn("grep -vE '^(mobile/|web/arona-ui/character-src/)'", msi)
+        self.assertIn("uses: ./.github/actions/lfs-pull", msi)
+        self.assertIn("skip: mobile/ web/arona-ui/character-src/", msi)
         self.assertLess(msi.index("Fetch LFS assets for the Windows build"), msi.index("Build and verify Windows packages"))
-        # 받는 곳은 GitHub LFS 가 아니라 미니 창구다(자세한 계약은 test_mini_lfs) — mac·appcast 는 미니를 안 부른다.
-        self.assertIn("MINI_LFS_TOKEN: ${{ secrets.MINI_LFS_TOKEN }}", msi)
-        self.assertNotIn("MINI_LFS", dmg + app)
-        self.assertIn("lfs: ${{ env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == '' }}", dmg)
+        # 받는 곳은 GitHub LFS 가 아니라 .lfsconfig 의 미니 LFS 서버다(자세한 계약은 test_mini_lfs). 로컬 dmg 검증은 안 받는다.
+        fetch = dmg[dmg.index("- name: Fetch LFS assets for the CI mac build"):dmg.index("- name: Rust toolchain")]
+        self.assertIn("if: env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == ''", fetch)
+        self.assertIn("uses: ./.github/actions/lfs-pull", fetch)
+        self.assertNotIn("lfs-pull", app)
         self.assertNotIn("lfs: true", msi + dmg + app)
+        self.assertNotIn("lfs: ${{", msi + dmg + app)
         self.assertIn("GIT_LFS_SKIP_SMUDGE: '1'", app)
         # 태그 마무리: 입력한 태그를 체크아웃하고 그 릴리스에 붙이며, 태그를 만들거나 옮기는 명령은 없다.
         self.assertIn("RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}", wf)

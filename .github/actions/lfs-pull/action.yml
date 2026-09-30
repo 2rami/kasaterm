@@ -1,0 +1,35 @@
+name: LFS pull from the mini
+description: 그림을 저장소 .lfsconfig 가 가리키는 미니 LFS 서버에서 받는다(GitHub LFS 는 안 쓴다). 받기는 토큰이 없다.
+inputs:
+  skip:
+    description: 받지 않을 폴더(끝에 / , 공백으로 구분). 비우면 전부 받는다
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Fetch LFS assets from the mini
+      shell: bash
+      env:
+        SKIP: ${{ inputs.skip }}
+        GIT_TERMINAL_PROMPT: '0'
+        GCM_INTERACTIVE: never
+      run: |
+        URL="$(git config -f .lfsconfig --get lfs.url || true)"
+        [[ -n "$URL" ]] || { echo "::error::.lfsconfig 에 lfs.url 이 없다 — 미니 LFS 로 옮기기(2026-09-30) 전 커밋이다"; exit 1; }
+        # 미니가 꺼졌으면(터널 530·502) 받기 전에 그 코드를 대고 멈춘다 — git lfs 의 재시도로 흐려지지 않게.
+        CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -X POST -H 'Content-Type: application/vnd.git-lfs+json' \
+          -d '{"operation":"download","transfers":["basic"],"objects":[]}' "$URL/objects/batch" || true)"
+        [[ "$CODE" == 200 ]] || { echo "::error::미니 LFS 서버가 받기에 HTTP $CODE 로 답했다 — 미니·kasaterm 터널을 본다(scripts/mini-lfs.sh status)"; exit 1; }
+        EXCLUDE=""; SKIP_RE=""
+        for d in $SKIP; do EXCLUDE="${EXCLUDE:+$EXCLUDE,}${d}**"; SKIP_RE="${SKIP_RE:+$SKIP_RE|}^${d}"; done
+        git lfs install --local
+        # 받기는 토큰이 없다 — 러너의 자격 도우미(GCM)가 창을 띄우려 들지 않게 끈다.
+        # 터널이 잠깐 끊기면 batch 가 520 으로 통째 실패한다 — 받은 것은 건너뛰니 다시 부르면 이어 받는다.
+        for try in 1 2 3; do
+          git -c credential.helper= lfs pull ${EXCLUDE:+--exclude="$EXCLUDE"} && break
+          [[ $try == 3 ]] || { echo "::warning::git lfs pull 실패 — ${try}번째, 다시 받는다"; sleep 10; }
+        done
+        # 받아야 할 그림이 하나라도 포인터로 남았으면 멈춘다 — 학생 그림 일부가 빈칸인 판을 내지 않는다.
+        LEFT="$(git lfs ls-files | awk '$2 == "-"' | cut -d' ' -f3- | { if [[ -n "$SKIP_RE" ]]; then grep -vE "$SKIP_RE"; else cat; fi; } || true)"
+        [[ -z "$LEFT" ]] || { echo "::error::LFS 그림이 포인터로 남았다 ($(echo "$LEFT" | wc -l | tr -d ' ')개)"; echo "$LEFT" | head -20; exit 1; }

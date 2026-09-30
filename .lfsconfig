@@ -1,0 +1,5 @@
+# git LFS 정본은 미니다(tools/release/mini_lfs.py, docs/fast-patch-release.md 「미니 LFS 서버」) — GitHub LFS 는 안 쓴다.
+# 받기는 토큰 없이 누구나, 올리기는 git 자격 도우미의 토큰(scripts/mini-lfs.sh login). 잠금 API 는 없다.
+[lfs]
+	url = https://kasaterm.debimarlene.com/lfs
+	locksverify = false
