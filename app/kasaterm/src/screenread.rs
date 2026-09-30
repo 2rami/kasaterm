@@ -4093,7 +4093,7 @@ pub(crate) fn paint_student_overlays(
 
 /// statusline 프사 자리표시자(U+FFFC 연속 셀) 위치 — `(행, 시작열, 칸수)`.
 ///
-/// statusline.py 가 학생 이름 대신 이 문자를 내보낸다. **아래→위 스캔**인 것이
+/// 상태줄(`kasaterm-cli statusline`)이 학생 이름 대신 이 문자를 내보낸다. **아래→위 스캔**인 것이
 /// 중요하다: statusline 은 늘 화면 바닥 쪽인데, 대화 출력에 U+FFFC 원문이 섞이면
 /// (statusline 디버그 출력 등) 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다
 /// (실사고). 모든 호출부가 같은 자리를 찍도록 한 곳에 둔다.

@@ -6982,7 +6982,7 @@ fn apply_lite_env() {
     std::env::remove_var("KASATERM_TMUX_SHIM_DIR");
 }
 
-/// `lite` 면 최소 shim 만 — rc 셋 + `kasaterm-cli`. claude 래퍼·훅·caps.json·미리보기
+/// `lite` 면 최소 shim 만 — rc 셋 + `kasaterm-cli`. claude 래퍼·훅·미리보기
 /// 셰임은 전부 뺀다. CLI 는 이 shim dir 로만 pane PATH 에 오르므로 shim 을 통째로
 /// 끄는 `shim_inject=off` 와는 다르다(그러면 lite 안에서 split/send 가 안 된다).
 fn install_pane_shims(lite: bool) {
@@ -6993,18 +6993,6 @@ fn install_pane_shims(lite: bool) {
     if !lite && !socket::read_shim_inject() {
         eprintln!("[shim] shim_inject=off — 순정 모드, pane shim 미설치");
         return;
-    }
-    // 렌더러 capability 공표 — statusline.py 가 이걸 보고서만 SGR8(conceal) 세션 id
-    // 마커를 내보낸다. 게이트가 없으면 .app 설치 직후(재시작 전) 구버전 렌더러가
-    // 마커를 그대로 그려 화면에 `⟦a1b2c3d4⟧` 가 노출된다(conceal 미지원).
-    if !lite {
-        let caps = kasa_socket::home_dir()
-            .unwrap_or_default()
-            .join(".config/kasaterm/caps.json");
-        if let Some(d) = caps.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let _ = std::fs::write(&caps, "{\"sgr_conceal\":true}\n");
     }
     let shim_dir = std::env::temp_dir().join(format!(
         "kasaterm{}-shim-{}",
@@ -7731,14 +7719,6 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         };
         serde_json::json!({ "type": "command", "command": run, "timeout": timeout })
     };
-    // statusline: unix 는 검증된 py(uv/python3 존재), Windows 는 python3 부재라
-    // kasaterm-cli 서브커맨드(같은 출력, 골든 diff 검증)를 쓴다 — shim dir 에
-    // 스테이징된 exe 가 pane PATH 로 잡힌다.
-    let statusline_cmd = if cfg!(windows) {
-        "kasaterm-cli statusline".to_string()
-    } else {
-        format!("\"{hd}/statusline.py\"")
-    };
     // Mirrors what install-hooks.sh used to register globally — same matcher
     // and timeouts, so in-pane behavior is unchanged.
     let mut settings = serde_json::json!({
@@ -7831,7 +7811,15 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         // statusLine 도 세션 스코프 --settings 로 주입 — 배정 학생 프사(U+FFFC)·model·git·
         // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는
         // 사용자 ~/.claude/settings.json statusLine 그대로(--settings 는 pane PATH 한정).
-        "statusLine": { "type": "command", "command": statusline_cmd, "padding": 0 },
+        // claude 는 대화가 움직일 때만 상태줄을 다시 그려, 쉬는 pane 은 다른 곳에서 바꾼
+        // 브랜치를 계속 옛 이름으로 보였다. 매초 다시 그린다 — 그래서 한 번에 수 ms 인
+        // kasaterm-cli(shim dir 에 스테이징돼 pane PATH 로 잡힌다)로 짓는다.
+        "statusLine": {
+            "type": "command",
+            "command": "kasaterm-cli statusline",
+            "padding": 0,
+            "refreshInterval": 1,
+        },
         // 다른 방 pane 이 보낸 메시지를 승인 대기로 잡지 않는다. 기본값은 권한 프롬프트를
         // 건너뛰는 세션의 인바운드를 붙잡는데, pane claude 는 전부 그 모드라 기본값이면
         // 학생을 굴리는 흐름이 매 메시지 사용자 클릭에서 끊긴다(08-09: accept 로 도달 확인).

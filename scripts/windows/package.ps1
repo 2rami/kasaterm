@@ -272,7 +272,7 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
 )
 $requiredFiles = @(
     "kasaterm.exe", "kasaterm-cli.exe", "WinSparkle.dll", "index.html",
-    "characters.json", "kasacollab.py", "statusline.py",
+    "characters.json", "kasacollab.py",
     "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt"
 )
 Assert-MsiManifest -Manifest $verifyWxs -Names $requiredFiles

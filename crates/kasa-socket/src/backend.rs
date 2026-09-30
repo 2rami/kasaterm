@@ -322,7 +322,7 @@ pub struct PaneActivity {
     #[serde(default)]
     pub cwd: String,
     /// statusLine 이 보고한 "현재 보는 경로" — claude 는 셸 위에서 돌아 lsof(cwd)로는
-    /// 내부 cd 가 안 보여, statusline.py 가 매 렌더 `report-cwd` 로 직접 보고한다.
+    /// 내부 cd 가 안 보여, 상태줄(`kasaterm-cli statusline`)이 `report-cwd` 로 직접 보고한다.
     /// cwd(=claude 프로세스 실행 경로, 고정)와 함께 푸터 "실행/현재 보는" 두 경로(사용자).
     #[serde(default)]
     pub view_cwd: String,
@@ -855,7 +855,7 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("set_color unsupported by this backend")
     }
     /// statusLine 이 매 렌더 보고하는 "현재 보는 경로" + 컨텍스트 창/사용 토큰.
-    /// claude 가 셸 위에서 cd 해도 lsof(최상위 셸 cwd)로는 안 보여, statusline.py 가
+    /// claude 가 셸 위에서 cd 해도 lsof(최상위 셸 cwd)로는 안 보여, 상태줄이
     /// 직접 push 한다. board 의 `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로").
     ///
     /// `ctx_window`/`ctx_tokens` 는 훅 stdin 의 하네스 정본이다(0 = 미보고). transcript

@@ -35,7 +35,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **`KASATERM_MACHINES='[]'`** — 사용자 명부(`machines.json`)를 안 읽게 한다. 안 걸면 리그가 명부의 기기마다 ssh 터널을 열고,
   저쪽에서 이쪽으로 오는 되돌아오는 길(`-R`)을 **사용자 앱과 같은 원격 포트**로 열어 다툰다(2026-09-29 실측: 한 기기는 거부됐지만
   다른 기기는 리그 쪽이 열렸다). 기기 칸(직통·빌드 다름)은 그래서 리그로 못 보고, 실기기에서 확인한다.
-- **`KASATERM_COLLAB_ROOT`** 로 `session_characters.json`(세션↔학생 바인딩)·bind 마커·`agent-roster/` 를 가른다. 안 걸면 본판 폴더를 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않지만, 같은 cwd 의 같은 pane 번호(`%2`)가 본판 세션에 결합해 글리프가 남의 것을 보는 일이 생긴다. `caps.json` 만은 격리 창구가 없다 — 같은 터미널이면 같은 값이라 무해하다.
+- **`KASATERM_COLLAB_ROOT`** 로 `session_characters.json`(세션↔학생 바인딩)·bind 마커·`agent-roster/` 를 가른다. 안 걸면 본판 폴더를 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않지만, 같은 cwd 의 같은 pane 번호(`%2`)가 본판 세션에 결합해 글리프가 남의 것을 보는 일이 생긴다.
 - ⚠️ **`KASATERM_SOCKET_PATH` 를 띄울 때도 주고, `kasaterm-cli` 를 부를 때도 줘라.** CLI 는 `$KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock` 순으로 붙고 **포트는 안 본다** — 리그를 다른 포트로 띄웠어도 CLI 에 이 변수를 안 주면 그 명령이 **사용자 앱으로 간다**(2026-09-03 실측: `split right` 이 사용자 창에 pane 을 만들었고, `send` 가 도는 학생의 입력창에 글자를 밀어넣었다). 앱 부팅 줄과 CLI 호출 양쪽에 같은 경로를 걸어라:
   `export KASATERM_SOCKET_PATH=/tmp/<네이름>/rig.sock` 를 먼저 하고 그 셸에서 둘 다 부르는 것이 가장 안전하다.
 - **화면을 판정할 때 `kasaterm-cli capture <pane>` 을 믿지 마라 — 원본 글자판이다.** 그건 `capture_pane_offscreen` 이라 `t.cells` 를 그대로 찍어, 렌더러가 화면을 만들며 하는 일(스크롤백 당김·입력창 붙잡기 같은 재구성)이 **안 보인다**. 렌더 변경을 눈으로 확인하려면 `kasaterm-cli capture --window <path>`(창 프레임) 이나 `KASATERM_AUTOCAPTURE_MS`/`_PATH` 를 써라. 2026-09-03 에 이걸 몰라 "코드가 안 돈다"고 한동안 오판했다(계측을 심어 보니 값은 맞게 돌고 있었다).

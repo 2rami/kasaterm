@@ -439,9 +439,7 @@ fn run() -> Result<Option<Response>> {
         run_sessions_picker(&args)?;
         return Ok(None);
     }
-    // `statusline` — claude statusLine 커맨드(stdin JSON → 한 줄 출력). collab-hooks
-    // statusline.py 의 Rust 이식 — Windows 는 python3 가 없어 py 를 못 돌리므로 이
-    // 서브커맨드가 pane statusline 을 담당한다(mac 은 검증된 py 경로 유지).
+    // `statusline` — pane claude 의 statusLine 커맨드(stdin JSON → 한 줄 출력).
     if cmd == "statusline" {
         run_statusline();
         return Ok(None);
@@ -1708,7 +1706,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "report-cwd" => {
-            // statusline.py 가 매 렌더 호출:
+            // 상태줄(`statusline`)이 값이 바뀔 때마다 호출:
             //   report-cwd <surface_id> <cwd> [session_id] [ctx_window] [ctx_tokens] [model] [effort]
             // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출하고, 컨텍스트 창·사용
             // 토큰을 함께 실어 board 의 ctx% 분모를 확정한다(추정 대신 하네스 정본).
@@ -3209,9 +3207,8 @@ fn pad_display(s: &str, width: usize) -> String {
 }
 
 // ── statusline ──────────────────────────────────────────────────────────────
-// collab-hooks/statusline.py 의 충실 이식. 출력 바이트 동형이 목표 — 세그먼트
-// 순서·색·서식·마커를 py 와 같게 유지한다(골든 diff 로 검증). py 를 고치면
-// 여기도 같이 고칠 것.
+// pane claude 의 상태줄. 렌더러(screenread)가 이 줄의 표식을 읽어 오버레이를 얹으므로
+// 세그먼트 순서·표식을 바꾸면 그쪽 판독도 같이 봐야 한다.
 
 const SL_RESET: &str = "\x1b[0m";
 const SL_BOLD: &str = "\x1b[1m";
@@ -3247,9 +3244,13 @@ const SL_C_SEP: &str = "565f89";
 const SL_C_FALLBACK: &str = "a0a6b0";
 
 // kasaterm pane 표식 — 옛 프사 자리표시자(5칸)를 프사 제거와 함께 1칸으로 줄인 것.
-// **지우지 마라**: agents 뷰 판정·stale statusline 복구·standing 앵커가 이 문자의
-// 존재를 근거로 삼는다(statusline.py 의 SPRITE 주석에 자세히 적어 뒀다).
+// **지우지 마라**: 이 문자가 화면에 있느냐가 세 판정의 근거다 — agents 목록 뷰인지
+// (`has_profile_slot`), 상태줄이 stale 이라 재실행해야 하는지(socket.rs), 입력박스 위
+// 전신 학생을 어느 행에 세울지(standing). 렌더러가 이 칸을 걷어 화면엔 안 남는다.
 const SL_SPRITE: &str = "\u{fffc}";
+// kasaterm 안에서 Nerd Font 글리프 대신 찍는 한 칸 표식 — 렌더러가 찾아 지우고 공식 로고를 얹는다.
+const SL_MODEL_MARKER_CLAUDE: &str = "\u{e0c0}";
+const SL_MODEL_MARKER_GPT: &str = "\u{e0c1}";
 
 struct SlIcons {
     model: &'static str,
@@ -3332,209 +3333,141 @@ fn sl_context(d: &Value) -> (u64, f64, u64) {
     (win, pct, tot)
 }
 
+/// `git rev-parse --abbrev-ref HEAD` 와 같은 답을 HEAD 파일에서 바로 읽는다. 상태줄은 매초 다시
+/// 그려져서 pane 마다 git 을 띄우면 그것만으로 한 번에 10ms 씩 든다. 워크트리·서브모듈의 `.git`
+/// 파일(`gitdir: …`)도 따라간다.
 fn sl_git_branch(cwd: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let mut dir = Path::new(cwd);
+    let git_dir = loop {
+        let dot = dir.join(".git");
+        if dot.is_dir() {
+            break dot;
+        }
+        if let Ok(link) = std::fs::read_to_string(&dot) {
+            break dir.join(link.strip_prefix("gitdir:")?.trim());
+        }
+        dir = dir.parent()?;
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    Some(match head.trim().strip_prefix("ref:") {
+        Some(name) => {
+            let name = name.trim();
+            name.strip_prefix("refs/heads/").unwrap_or(name).to_string()
+        }
+        None => "HEAD".to_string(),
+    })
+}
+
+/// 상태줄 한 줄을 짓는 데 필요한 바깥 사실. 환경·파일 읽기를 여기로 모아 줄 짓기는 입력만으로
+/// 정해지게 한다.
+struct SlSurroundings<'a> {
+    in_pane: bool,
+    character: Option<&'a str>,
+    config: &'a Value,
+    settings: &'a Value,
+    branch: Option<&'a str>,
+}
+
+fn sl_window_label(win: u64) -> String {
+    if win >= 1_000_000 {
+        "1M".to_string()
+    } else if win > 0 {
+        format!("{}k", win / 1000)
     } else {
-        None
+        String::new()
     }
 }
 
-fn run_statusline() {
-    use std::io::Read;
-    let mut buf = String::new();
-    let d: Value = match std::io::stdin().read_to_string(&mut buf) {
-        Ok(_) => match serde_json::from_str(&buf) {
-            Ok(v) => v,
-            Err(_) => {
-                println!("{} err{SL_RESET}", ansi_fg("f7768e"));
-                return;
-            }
-        },
-        Err(_) => {
-            println!("{} err{SL_RESET}", ansi_fg("f7768e"));
-            return;
-        }
+/// 보드에 뜨는 모델 표시명 — 상태줄에 찍는 것과 같은 글자(창 크기 꼬리 포함).
+fn sl_model_label(d: &Value, win: u64) -> String {
+    let name = d.pointer("/model/display_name").and_then(Value::as_str).unwrap_or("");
+    let name = name.split(" (").next().unwrap_or(name);
+    if name.is_empty() {
+        return String::new();
+    }
+    format!("{name} {}", sl_window_label(win)).trim().to_string()
+}
+
+fn sl_line(d: &Value, cwd: &str, at: &SlSurroundings) -> String {
+    let ic = sl_icons(at.config.get("icon_set").and_then(Value::as_str).unwrap_or("nerd-font"));
+    let sep_char = at.config.get("separator").and_then(Value::as_str).unwrap_or("┃");
+    let field_on = |field: &str| {
+        at.settings
+            .get(format!("agent_statusline_{field}"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
     };
-
-    let cfg =
-        sl_read_json(&sl_home().join(".claude/statusline-config.json")).unwrap_or(Value::Null);
-    let ic = sl_icons(
-        cfg.get("icon_set")
-            .and_then(|v| v.as_str())
-            .unwrap_or("nerd-font"),
-    );
-    let sep_char = cfg.get("separator").and_then(|v| v.as_str()).unwrap_or("┃");
-    let settings_path = sl_env("KASATERM_SETTINGS_FILE").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| sl_home().join(".config/kasaterm/settings.json"));
-    let settings = sl_read_json(&settings_path).unwrap_or(Value::Null);
-    let field_on = |field: &str| settings.get(format!("agent_statusline_{field}"))
-        .and_then(Value::as_bool).unwrap_or(true);
-
-    let cwd = d
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        })
-        .unwrap_or_default();
-    let session_id = d.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-
-    // claude 내부 cd 와 컨텍스트 창을 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행
-    // (비동기, statusline 출력을 지연시키지 않는다). pane 밖에선 무동작. 창을 함께
-    // 보내는 이유는 transcript 의 model 에 `[1m]` 이 안 실려 GUI 가 1M 세션을 200k 로
-    // 오판하기 때문 — 하네스가 준 이 값만이 정본이다.
-    if let Some(pane) = sl_env("KASATERM_PANE_ID") {
-        if !cwd.is_empty() {
-            if let Ok(me) = std::env::current_exe() {
-                let (ctx_win, _, ctx_tot) = sl_context(&d);
-                let (win_s, tot_s) = (ctx_win.to_string(), ctx_tot.to_string());
-                // 재시작 뒤 같은 모델·effort 로 되살리려고 함께 싣는다. `id` 는 **가공
-                // 없이** — `[1m]` 을 떼면 되먹였을 때 1M 세션이 200k 로 강등된다.
-                let model = d
-                    .pointer("/model/id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let effort = d
-                    .pointer("/effort/level")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let _ = std::process::Command::new(me)
-                    .args([
-                        "report-cwd",
-                        &pane,
-                        &cwd,
-                        session_id,
-                        &win_s,
-                        &tot_s,
-                        model,
-                        effort,
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn();
-            }
-        }
-    }
-
-    // 세션 id 마커 — 렌더러가 conceal 지원을 공표(caps.json)한 경우에만 SGR8 로 싣는다.
-    let mut sid_marker = String::new();
-    if !session_id.is_empty() && sl_env("KASATERM_PANE_ID").is_some() {
-        if let Some(caps) = sl_read_json(&sl_home().join(".config/kasaterm/caps.json")) {
-            if caps
-                .get("sgr_conceal")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                let sid8: String = session_id.chars().take(8).collect();
-                sid_marker = format!("\x1b[8m⟦{sid8}⟧\x1b[28m");
-            }
-        }
-    }
-
     let sep = format!(" {SL_DIM}{}{sep_char}{SL_RESET} ", ansi_fg(SL_C_SEP));
     let mut parts: Vec<String> = Vec::new();
 
-    let mut name = sl_env("KASATERM_CHARACTER");
-    // 포크/attach 뷰(세션 id ≠ env anchor)만 세션→캐릭터 영속 바인딩을 정본으로.
-    let forked_view = !session_id.is_empty()
-        && std::env::var("KASATERM_SESSION_ID").ok().as_deref() != Some(session_id);
-    if forked_view {
-        let config = kasa_socket::isolated_collab_root().unwrap_or_else(|| sl_home().join(".config/kasaterm"));
-        if let Some(map) = sl_read_json(&kasa_socket::session_storage::read_path(&config, "session_characters.json"))
-        {
-            if let Some(bound) = map.get(session_id).and_then(|v| v.as_str()) {
-                if !bound.is_empty() {
-                    name = Some(bound.to_string());
-                }
-            }
-        }
-    }
-    if let Some(ref name) = name {
-        let hex = SL_STUDENT_HEX
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| *v)
-            .unwrap_or(SL_C_FALLBACK);
-        // pane 안에서는 학생을 안 쓴다 — pane 헤더가 이미 보여준다. 밖에서는 헤더가
-        // 없으니 여기서만 알 수 있다. (statusline.py 와 출력 바이트가 같아야 한다.)
-        if sl_env("KASATERM_PANE_ID").is_some() {
-            parts.push(SL_SPRITE.to_string());
+    // pane 안에서는 학생을 안 쓴다 — pane 헤더가 이미 보여준다. 표식 한 칸만 왼쪽 끝에 붙이고
+    // 구분자는 안 단다(넣으면 `￼ ┃ ` 로 네 칸이 빈다). 밖에서는 헤더가 없으니 여기서만 알 수 있다.
+    let mut prefix = "";
+    if let Some(name) = at.character {
+        if at.in_pane {
+            prefix = SL_SPRITE;
         } else {
+            let hex = SL_STUDENT_HEX
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| *v)
+                .unwrap_or(SL_C_FALLBACK);
             let c = ansi_fg(hex);
             parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}"));
         }
     }
 
-    // ⑂ bg 배지 — anchor 불일치이되 사용자 주도 resume(shim 마커)은 제외.
-    let user_resume = !session_id.is_empty()
-        && (std::env::var("KASATERM_RESUMED_SID").ok().as_deref() == Some(session_id)
-            || sl_env("KASATERM_RESUME_PICKER").is_some());
-    if forked_view && !user_resume && sl_env("KASATERM_PANE_ID").is_some() {
-        parts.push(format!("{SL_DIM}{}⑂ bg{SL_RESET}", ansi_fg(SL_C_FALLBACK)));
-    }
-
+    let (win, pct, _) = sl_context(d);
     if let Some(model) = d
-        .get("model")
-        .and_then(|m| m.get("display_name"))
-        .and_then(|v| v.as_str())
+        .pointer("/model/display_name")
+        .and_then(Value::as_str)
         .filter(|s| !s.is_empty() && field_on("model"))
     {
-        // "(1M context)" 등 괄호 꼬리는 ctx% 의 "·1M" 과 중복 — 잘라 truncate 방지.
         let model = model.split(" (").next().unwrap_or(model);
-        parts.push(format!(
-            "{}{SL_BOLD}{} {model}{SL_RESET}",
-            ansi_fg(SL_C_MODEL),
+        // 창 크기는 모델의 성질이라 모델 옆에 붙인다 — 같은 Opus 라도 분모가 다섯 배 갈린다.
+        let win_s = sl_window_label(win);
+        let tail = if win_s.is_empty() {
+            String::new()
+        } else {
+            format!("{SL_DIM} {win_s}{SL_RESET}")
+        };
+        // kasaterm 안에서는 PUA 표식 한 칸을 찍고 렌더러가 그 자리에 공식 로고를 얹는다.
+        let id = d.pointer("/model/id").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let icon = if !at.in_pane {
             ic.model
-        ));
+        } else if id.starts_with("gpt-")
+            || id.starts_with("codex-")
+            || (id.starts_with('o') && id[1..].starts_with(|c: char| c.is_ascii_digit()))
+        {
+            SL_MODEL_MARKER_GPT
+        } else if id.starts_with("claude-") {
+            SL_MODEL_MARKER_CLAUDE
+        } else {
+            ic.model
+        };
+        parts.push(format!("{}{SL_BOLD}{icon} {model}{SL_RESET}{tail}", ansi_fg(SL_C_MODEL)));
     }
 
-    if let Some(branch) = sl_git_branch(&cwd).filter(|s| !s.is_empty()) {
-        parts.push(format!(
-            "{}{} {branch}{SL_RESET}",
-            ansi_fg(SL_C_GIT),
-            ic.git
-        ));
+    if let Some(branch) = at.branch.filter(|s| !s.is_empty()) {
+        parts.push(format!("{}{} {branch}{SL_RESET}", ansi_fg(SL_C_GIT), ic.git));
     }
 
-    let dir_name = std::path::Path::new(&cwd)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if field_on("cwd") { parts.push(format!(
-        "{}{} {dir_name}{SL_RESET}",
-        ansi_fg(SL_C_DIR),
-        ic.folder
-    )); }
+    if field_on("cwd") {
+        let dir_name = Path::new(cwd)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        parts.push(format!("{}{} {dir_name}{SL_RESET}", ansi_fg(SL_C_DIR), ic.folder));
+    }
 
-    let (win, pct, _) = sl_context(&d);
-    let win_s = if win >= 1_000_000 {
-        format!("·{}M", win / 1_000_000)
-    } else if win > 0 {
-        format!("·{}k", win / 1_000)
-    } else {
-        String::new()
-    };
-    let c_ctx = if pct >= 90.0 {
-        ansi_fg("f7768e")
-    } else {
-        ansi_fg(SL_C_CTX)
-    };
-    if field_on("usage") { parts.push(format!("{c_ctx}{pct:.0}%{SL_DIM}{win_s}{SL_RESET}")); }
+    if field_on("usage") {
+        let c_ctx = ansi_fg(if pct >= 90.0 { "f7768e" } else { SL_C_CTX });
+        parts.push(format!("{c_ctx}{pct:.0}%{SL_RESET}"));
+    }
 
     if let Some(lvl) = d
-        .get("effort")
-        .and_then(|e| e.get("level"))
-        .and_then(|v| v.as_str())
+        .pointer("/effort/level")
+        .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
         let hex = SL_EFFORT_HEX
@@ -3545,7 +3478,118 @@ fn run_statusline() {
         parts.push(format!("{}{} {lvl}{SL_RESET}", ansi_fg(hex), ic.effort));
     }
 
-    println!("{}{sid_marker}", parts.join(&sep));
+    format!("{prefix}{}", parts.join(&sep))
+}
+
+/// 상태줄은 매초 다시 그려지지만 앱에 알릴 값은 거의 안 바뀐다. 보고 하나가 GUI 이벤트 둘을
+/// 일으키므로 같은 값이면 30초에 한 번만 보낸다 — 앱이 다시 켜져 기억을 잃어도 그 안에 되찬다.
+/// 열쇠에 부모(claude) 프로세스를 넣어 새로 뜬 claude 의 첫 보고는 막지 않는다.
+fn sl_report_due(pane: &str, payload: &str) -> bool {
+    #[cfg(unix)]
+    let owner = std::os::unix::process::parent_id().to_string();
+    #[cfg(not(unix))]
+    let owner = String::from("0");
+    let dir = std::env::temp_dir().join("kasaterm-statusline");
+    let path = dir.join(format!("{}-{owner}", pane.trim_start_matches('%')));
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(30));
+    if fresh && std::fs::read_to_string(&path).is_ok_and(|prev| prev == payload) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&path, payload);
+    true
+}
+
+fn run_statusline() {
+    use std::io::Read;
+    let mut buf = String::new();
+    let Some(d) = std::io::stdin()
+        .read_to_string(&mut buf)
+        .ok()
+        .and_then(|_| serde_json::from_str::<Value>(&buf).ok())
+    else {
+        println!("{} err{SL_RESET}", ansi_fg("f7768e"));
+        return;
+    };
+
+    let cwd = d
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .unwrap_or_default();
+    let session_id = d.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let pane = sl_env("KASATERM_PANE_ID");
+
+    // claude 내부 cd 와 컨텍스트 창을 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행(비동기).
+    // 창을 함께 보내는 이유는 transcript 의 model 에 `[1m]` 이 안 실려 GUI 가 1M 세션을 200k 로
+    // 오판하기 때문이다. model 은 `id` **원본** — `[1m]` 을 떼면 복원 때 200k 로 강등된다.
+    if let (Some(pane), false) = (pane.as_deref(), cwd.is_empty()) {
+        let (win, _, tot) = sl_context(&d);
+        let report = [
+            "report-cwd".to_string(),
+            pane.to_string(),
+            cwd.clone(),
+            session_id.to_string(),
+            win.to_string(),
+            tot.to_string(),
+            d.pointer("/model/id").and_then(Value::as_str).unwrap_or("").to_string(),
+            d.pointer("/effort/level").and_then(Value::as_str).unwrap_or("").to_string(),
+            sl_model_label(&d, win),
+        ];
+        if sl_report_due(pane, &report.join("\n")) {
+            if let Ok(me) = std::env::current_exe() {
+                let _ = std::process::Command::new(me)
+                    .args(&report)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+
+    let mut character = sl_env("KASATERM_CHARACTER");
+    // 포크/attach 뷰(세션 id ≠ env anchor)는 env 캐릭터가 출생 pane 의 동결값이라, 그때만
+    // 세션→캐릭터 영속 바인딩을 정본으로 읽는다.
+    if !session_id.is_empty()
+        && std::env::var("KASATERM_SESSION_ID").ok().as_deref() != Some(session_id)
+    {
+        let config = kasa_socket::isolated_collab_root()
+            .unwrap_or_else(|| sl_home().join(".config/kasaterm"));
+        let path = kasa_socket::session_storage::read_path(&config, "session_characters.json");
+        if let Some(bound) = sl_read_json(&path)
+            .and_then(|map| map.get(session_id).and_then(Value::as_str).map(str::to_string))
+            .filter(|s| !s.is_empty())
+        {
+            character = Some(bound);
+        }
+    }
+
+    let config = sl_read_json(&sl_home().join(".claude/statusline-config.json")).unwrap_or(Value::Null);
+    let settings_path = sl_env("KASATERM_SETTINGS_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| sl_home().join(".config/kasaterm/settings.json"));
+    let settings = sl_read_json(&settings_path).unwrap_or(Value::Null);
+    let branch = sl_git_branch(&cwd);
+    println!(
+        "{}",
+        sl_line(
+            &d,
+            &cwd,
+            &SlSurroundings {
+                in_pane: pane.is_some(),
+                character: character.as_deref(),
+                config: &config,
+                settings: &settings,
+                branch: branch.as_deref(),
+            },
+        )
+    );
 }
 
 #[cfg(test)]
@@ -3828,5 +3872,71 @@ mod tests {
         assert_eq!(super::board_matches(&rows, "미도리@맥미니").len(), 1);
         assert_eq!(super::board_matches(&rows, "%5").len(), 1);
         assert!(super::board_matches(&rows, "유즈").is_empty());
+    }
+
+    fn statusline(d: &serde_json::Value, in_pane: bool, character: Option<&str>, settings: &serde_json::Value) -> String {
+        super::sl_line(
+            d,
+            "/tmp/hidden-directory",
+            &super::SlSurroundings {
+                in_pane,
+                character,
+                config: &serde_json::Value::Null,
+                settings,
+                branch: None,
+            },
+        )
+    }
+
+    #[test]
+    fn hidden_statusline_fields_keep_the_pane_marker() {
+        let d = serde_json::json!({"model": {"id": "claude-fixture", "display_name": "FixtureModel"}, "context_window": {"used_percentage": 23}});
+        let off = serde_json::json!({"agent_statusline_model": false, "agent_statusline_usage": false, "agent_statusline_cwd": false});
+        assert_eq!(statusline(&d, true, Some("프라나"), &off), super::SL_SPRITE);
+    }
+
+    #[test]
+    fn missing_or_non_boolean_statusline_preferences_show_the_field() {
+        let d = serde_json::json!({"model": {"id": "claude-fixture", "display_name": "FixtureModel"}, "context_window": {"used_percentage": 23}});
+        for settings in [serde_json::Value::Null, serde_json::json!("invalid"), serde_json::json!({"agent_statusline_usage": "false"})] {
+            let line = statusline(&d, false, None, &settings);
+            assert!(line.contains("FixtureModel") && line.contains("hidden-directory") && line.contains("23%"), "{line}");
+        }
+    }
+
+    #[test]
+    fn statusline_model_marker_only_inside_a_pane() {
+        for (id, marker) in [("claude-opus-5-5[1m]", super::SL_MODEL_MARKER_CLAUDE), ("gpt-5.5", super::SL_MODEL_MARKER_GPT), ("o3", super::SL_MODEL_MARKER_GPT)] {
+            let d = serde_json::json!({"model": {"id": id, "display_name": "M"}});
+            assert!(statusline(&d, true, None, &serde_json::Value::Null).contains(marker), "{id}");
+            assert!(!statusline(&d, false, None, &serde_json::Value::Null).contains(marker), "{id}");
+        }
+    }
+
+    #[test]
+    fn statusline_branch_reads_head_without_git() {
+        let root = std::env::temp_dir().join(format!("kt-sl-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("deep/er")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/feat/rain\n").unwrap();
+        assert_eq!(super::sl_git_branch(repo.join("deep/er").to_str().unwrap()).as_deref(), Some("feat/rain"));
+
+        let admin = repo.join(".git/worktrees/side");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("HEAD"), "3f2a9c0000000000000000000000000000000000\n").unwrap();
+        let side = root.join("side");
+        std::fs::create_dir_all(&side).unwrap();
+        std::fs::write(side.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_eq!(super::sl_git_branch(side.to_str().unwrap()).as_deref(), Some("HEAD"));
+
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let above_is_repo = plain.ancestors().skip(1).any(|dir| dir.join(".git").exists());
+        if !above_is_repo {
+            assert_eq!(super::sl_git_branch(plain.to_str().unwrap()), None);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

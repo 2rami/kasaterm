@@ -274,7 +274,7 @@ pub struct PtyBackend {
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
     /// surface_id → statusLine 이 보고한 "현재 보는 경로"(report_cwd). claude 내부 cd 는
-    /// lsof(cwd_cache)로 안 보여, statusline.py 가 매 렌더 직접 push 한다.
+    /// lsof(cwd_cache)로 안 보여, 상태줄(`kasaterm-cli statusline`)이 직접 push 한다.
     reported_cwd: Arc<Mutex<HashMap<String, String>>>,
     /// surface_id → statusLine 이 보고한 (컨텍스트 창, 사용 토큰). 하네스가 훅 stdin 으로
     /// 준 값이라 ctx% 분모의 정본이다 — transcript 의 model 엔 `[1m]` 이 안 실려(API 응답

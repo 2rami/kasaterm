@@ -1187,7 +1187,7 @@ int _trimmedCols(List<_Cell> row) {
   return _rowCols(row.sublist(0, end));
 }
 
-/// 상태줄 조각의 종류 — 아이콘 글리프로 안다(statusline.py 가 찍는 Nerd 글리프).
+/// 상태줄 조각의 종류 — 아이콘 글리프로 안다(kasaterm-cli statusline 이 찍는 Nerd 글리프).
 const _glyphBranch = 0xE0A0;
 const _glyphFolder = 0xF07B;
 
