@@ -568,6 +568,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let credential = crate::device_auth::DeviceCred {
             relay: format!("http://{address}"), account: "fixture".into(), device_id: "fixture-device".into(), token: "fixture-token".into(),
+            display_name: None,
         };
         let body = br#"{"id":"stable-id","text":"fixture","task":"a1","rev":"3"}"#;
         for _ in 0..2 {
@@ -599,6 +600,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let credential = crate::device_auth::DeviceCred {
             relay: format!("http://{address}"), account: "fixture".into(), device_id: "fixture-device".into(), token: "fixture-token".into(),
+            display_name: None,
         };
         let (status, _) = desktop_exchange(&credential, "GET", "/api/app/events?wait=0", None, &|| Ok(())).await.unwrap();
         assert_eq!(status, 307);

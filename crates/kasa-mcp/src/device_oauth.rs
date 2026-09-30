@@ -245,6 +245,7 @@ pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
             account: account.into(),
             device_id: device_id.into(),
             token: token.into(),
+            display_name: super::display_label(value["display_name"].as_str()),
         })
     };
     let saved = {
@@ -339,6 +340,7 @@ mod tests {
             account: "one".into(),
             device_id: "dev_123".into(),
             token: "private".into(),
+            display_name: None,
         };
         let attempt = Attempt {
             gateway: credential.relay.clone(),

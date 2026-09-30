@@ -28,6 +28,7 @@ fn ready(link: Option<Link>) -> Ready {
         identity: Identity {
             provider: Provider::Github,
             subject: "123".into(),
+            display: String::new(),
         },
         device: Device {
             provider: Provider::Github,
@@ -87,6 +88,7 @@ async fn mocked_browser_flow_only_returns_device_token_to_bound_poll() {
     *gate.oauth.mock_identity.lock().unwrap() = Some(Identity {
         provider: Provider::Github,
         subject: "123".into(),
+        display: String::new(),
     });
     let request = axum::http::Request::builder().body(axum::body::Body::from(json!({
         "provider":"github","kind":"desktop","machine_id":"machine-one","label":"Test laptop"

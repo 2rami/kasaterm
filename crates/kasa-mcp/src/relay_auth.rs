@@ -173,6 +173,11 @@ impl Accounts {
         self.with(|f| f.accounts.contains_key(name))
     }
 
+    /// 관리 화면용 — 이름·만든 시각·막힘뿐, 비밀번호 해시는 내지 않는다.
+    pub(crate) fn summary(&self) -> Vec<(String, u64, bool)> {
+        self.with(|f| f.accounts.iter().map(|(name, a)| (name.clone(), a.created, a.disabled)).collect())
+    }
+
     /// 비밀번호가 맞는가. 없는 계정·막힌 계정도 같은 계산을 거친다 — 걸린 시간으로 계정 유무를
     /// 가늠하지 못하게.
     pub fn check(&self, name: &str, pw: &str) -> bool {

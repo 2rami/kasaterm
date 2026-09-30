@@ -146,12 +146,46 @@ pub(crate) struct Exchange {
     pub provider: Provider,
     verifier: String,
     nonce: String,
+    /// Relay-administrator browser sign-in: it never creates accounts or device credentials.
+    pub admin: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Identity {
     pub provider: Provider,
     pub subject: String,
+    /// Verified Google email or GitHub login, shown to people only; never an identity key.
+    pub display: String,
+}
+
+/// Sign-up record of an account created by OAuth. Holds no conversation or screen content.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct Profile {
+    pub provider: Option<Provider>,
+    /// Zero when the account predates this record.
+    #[serde(default)]
+    pub created: u64,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub last_login: u64,
+}
+
+pub(crate) struct AccountInfo {
+    pub providers: Vec<Provider>,
+    pub profile: Option<Profile>,
+    pub oauth_created: bool,
+    pub active: bool,
+}
+
+fn display_label(value: Option<&str>) -> String {
+    value
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect()
 }
 
 enum Outcome {
@@ -218,6 +252,8 @@ struct Book {
     identities: HashMap<String, String>,
     #[serde(default)]
     accounts: HashMap<String, bool>,
+    #[serde(default)]
+    profiles: HashMap<String, Profile>,
 }
 
 impl OAuth {
@@ -272,6 +308,7 @@ impl OAuth {
             provider: device.provider,
             verifier: secret(),
             nonce: secret(),
+            admin: false,
         };
         pending.insert(
             request_id.clone(),
@@ -349,15 +386,19 @@ impl OAuth {
         }
         request.outcome = Outcome::Confirmed;
         request.csrf_hash = None;
-        let provider = request.device.provider;
+        self.authorization_url(&request.state, &request.exchange)
+    }
+
+    fn authorization_url(&self, state: &str, exchange: &Exchange) -> Result<String, &'static str> {
+        let provider = exchange.provider;
         let config = self.config.clients.get(&provider).ok_or("setup_required")?;
         let mut url = reqwest::Url::parse(provider.authorize_url()).map_err(|_| "unavailable")?;
         url.query_pairs_mut().extend_pairs([
             ("client_id", config.id.as_str()),
             ("redirect_uri", &self.config.callback(provider)),
             ("response_type", "code"),
-            ("state", &request.state),
-            ("code_challenge", &challenge(&request.exchange.verifier)),
+            ("state", state),
+            ("code_challenge", &challenge(&exchange.verifier)),
             ("code_challenge_method", "S256"),
             (
                 "scope",
@@ -370,10 +411,84 @@ impl OAuth {
         ]);
         if provider == Provider::Google {
             url.query_pairs_mut()
-                .append_pair("nonce", &request.exchange.nonce)
+                .append_pair("nonce", &exchange.nonce)
                 .append_pair("prompt", "select_account");
         }
         Ok(url.to_string())
+    }
+
+    /// Browser sign-in to the relay admin page. The browser that starts it is also the one that
+    /// receives the result, so the state cookie binds the callback and no app code is involved.
+    /// Returns the provider URL and the state cookie.
+    pub fn start_admin(&self, provider: Provider) -> Result<(String, String), &'static str> {
+        if !self.config.enabled(provider) || !self.storage_ready() {
+            return Err("setup_required");
+        }
+        let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
+        pending.retain(|_, request| request.created.elapsed() < TTL);
+        if pending.len() >= MAX_PENDING {
+            return Err("too_many_requests");
+        }
+        let state = secret();
+        let cookie = secret();
+        let exchange = Exchange {
+            provider,
+            verifier: secret(),
+            nonce: secret(),
+            admin: true,
+        };
+        let url = self.authorization_url(&state, &exchange)?;
+        let header = format!(
+            "{}={cookie}; Path=/relay/oauth/; Secure; HttpOnly; SameSite=Lax; Max-Age=600",
+            cookie_name(&state)
+        );
+        pending.insert(
+            secret(),
+            Pending {
+                created: Instant::now(),
+                device: Device {
+                    provider,
+                    kind: "admin".into(),
+                    machine_id: String::new(),
+                },
+                label: String::new(),
+                link: None,
+                // Nobody holds this capability, so an admin request can never be polled for a device token.
+                poll_hash: digest(&secret()),
+                browser_hash: Some(digest(&cookie)),
+                csrf_hash: None,
+                user_code: String::new(),
+                confirmation_failures: 0,
+                state,
+                exchange,
+                outcome: Outcome::Confirmed,
+            },
+        );
+        Ok((url, header))
+    }
+
+    /// Ends an admin sign-in started by `start_admin`; device requests are left untouched.
+    pub fn finish_admin(
+        &self,
+        id: &str,
+        result: Result<Identity, &'static str>,
+    ) -> Result<Identity, &'static str> {
+        let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
+        let request = pending
+            .get(id)
+            .filter(|request| {
+                request.exchange.admin
+                    && request.created.elapsed() < TTL
+                    && matches!(request.outcome, Outcome::Exchanging)
+            })
+            .ok_or("invalid_state")?;
+        let provider = request.device.provider;
+        pending.remove(id);
+        let identity = result?;
+        if identity.provider != provider {
+            return Err("provider_mismatch");
+        }
+        Ok(identity)
     }
 
     pub fn callback(
@@ -401,7 +516,9 @@ impl OAuth {
     pub fn finish(&self, id: &str, result: Result<Identity, &'static str>) {
         if let Ok(mut pending) = self.pending.lock() {
             if let Some(request) = pending.get_mut(id).filter(|request| {
-                request.created.elapsed() < TTL && matches!(request.outcome, Outcome::Exchanging)
+                !request.exchange.admin
+                    && request.created.elapsed() < TTL
+                    && matches!(request.outcome, Outcome::Exchanging)
             }) {
                 request.outcome = match result {
                     Ok(identity) if identity.provider == request.device.provider => {
@@ -468,13 +585,30 @@ impl OAuth {
             return Err("invalid_identity");
         }
         let key = format!("{}:{}", identity.provider.name(), identity.subject);
+        let now = crate::relay_auth::now_secs();
         let mut guard = self.identities.lock().map_err(|_| "unavailable")?;
         let book = guard.as_ref().ok_or("storage_unavailable")?;
         if let Some(account) = book.identities.get(&key) {
             if link.is_some_and(|link| link != account) {
                 return Err("already_linked");
             }
-            return Ok(account.clone());
+            let account = account.clone();
+            if link.is_none() && book.accounts.contains_key(&account) {
+                let mut next = book.clone();
+                let profile = next.profiles.entry(account.clone()).or_insert_with(|| Profile {
+                    provider: Some(identity.provider),
+                    ..Profile::default()
+                });
+                if !identity.display.is_empty()
+                    && (profile.display.is_empty() || profile.provider == Some(identity.provider))
+                {
+                    profile.display = identity.display.clone();
+                }
+                profile.last_login = now;
+                // The sign-in already succeeded; a failed bookkeeping write must not undo it.
+                let _ = self.commit(&mut guard, next);
+            }
+            return Ok(account);
         }
         if link.is_none() && !self.config.allow_signup {
             return Err("account_not_linked");
@@ -489,11 +623,25 @@ impl OAuth {
                 );
                 if !book.accounts.contains_key(&account) && !account_exists(&account) {
                     next.accounts.insert(account.clone(), true);
+                    next.profiles.insert(
+                        account.clone(),
+                        Profile {
+                            provider: Some(identity.provider),
+                            created: now,
+                            display: identity.display.clone(),
+                            last_login: now,
+                        },
+                    );
                     break account;
                 }
             },
         };
         next.identities.insert(key, account.clone());
+        self.commit(&mut guard, next)?;
+        Ok(account)
+    }
+
+    fn commit(&self, guard: &mut Option<Book>, next: Book) -> Result<(), &'static str> {
         let path = self.path.as_ref().ok_or("storage_unavailable")?;
         crate::relay_auth::write_private(
             path,
@@ -501,7 +649,64 @@ impl OAuth {
         )
         .map_err(|_| "storage_unavailable")?;
         *guard = Some(next);
-        Ok(account)
+        Ok(())
+    }
+
+    /// The account an identity already belongs to. Never creates or links anything.
+    pub fn lookup(&self, identity: &Identity) -> Option<String> {
+        let key = format!("{}:{}", identity.provider.name(), identity.subject);
+        self.identities.lock().ok()?.as_ref()?.identities.get(&key).cloned()
+    }
+
+    /// Name to show for an OAuth-created account; password accounts keep their chosen name.
+    pub fn display_name(&self, account: &str) -> Option<String> {
+        let book = self.identities.lock().ok()?;
+        book.as_ref()?
+            .profiles
+            .get(account)
+            .map(|profile| profile.display.clone())
+            .filter(|display| !display.is_empty())
+    }
+
+    pub(crate) fn overview(&self) -> HashMap<String, AccountInfo> {
+        let Ok(book) = self.identities.lock() else {
+            return HashMap::new();
+        };
+        let Some(book) = book.as_ref() else {
+            return HashMap::new();
+        };
+        let mut out: HashMap<String, AccountInfo> = HashMap::new();
+        for (account, active) in &book.accounts {
+            out.insert(
+                account.clone(),
+                AccountInfo {
+                    providers: Vec::new(),
+                    profile: book.profiles.get(account).cloned(),
+                    oauth_created: true,
+                    active: *active,
+                },
+            );
+        }
+        for (key, account) in &book.identities {
+            let provider = match key.split_once(':').map(|(provider, _)| provider) {
+                Some("google") => Provider::Google,
+                Some("github") => Provider::Github,
+                _ => continue,
+            };
+            let info = out.entry(account.clone()).or_insert_with(|| AccountInfo {
+                providers: Vec::new(),
+                profile: None,
+                oauth_created: false,
+                active: true,
+            });
+            if !info.providers.contains(&provider) {
+                info.providers.push(provider);
+            }
+        }
+        for info in out.values_mut() {
+            info.providers.sort_by_key(|provider| provider.name());
+        }
+        out
     }
 
     pub async fn exchange(
@@ -629,6 +834,7 @@ fn github_identity(user: &Value) -> Result<Identity, &'static str> {
     Ok(Identity {
         provider: Provider::Github,
         subject: id.to_string(),
+        display: display_label(user["login"].as_str()),
     })
 }
 
@@ -707,6 +913,7 @@ fn google_claims(
     Ok(Identity {
         provider: Provider::Google,
         subject: subject.into(),
+        display: display_label(claims["email"].as_str()),
     })
 }
 

@@ -585,7 +585,7 @@ mod tests {
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let cred = DeviceCred { relay: format!("http://{}", listener.local_addr().unwrap()),
-            account:"fixture".into(), device_id:"fixture".into(), token:"fixture-not-a-real-token".into() };
+            account:"fixture".into(), device_id:"fixture".into(), token:"fixture-not-a-real-token".into(), display_name: None };
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
         let allow = || if active.load(Ordering::Acquire) { Ok(()) } else { Err("changed".into()) };
         assert_eq!(exchange(&cred, &[], &allow).await, Err(ExchangeError::Changed));

@@ -298,7 +298,7 @@ mod tests {
         let relay = format!("http://{}", listener.local_addr().unwrap());
         let router = Router::new().route("/relay/account-sync", get(read).patch(patch)).with_state(state.clone());
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
-        (DeviceCred { relay, account: "alice".into(), device_id: "test-device".into(), token: "fixture-only".into() }, state, task)
+        (DeviceCred { relay, account: "alice".into(), device_id: "test-device".into(), token: "fixture-only".into(), display_name: None }, state, task)
     }
 
     #[tokio::test]

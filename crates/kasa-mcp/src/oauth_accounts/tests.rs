@@ -157,6 +157,7 @@ fn state_cookie_pkce_provider_and_replay_are_bound() {
         Ok(Identity {
             provider: Provider::Google,
             subject: "123".into(),
+            display: String::new(),
         }),
     );
     assert!(oauth.poll(&input, false).unwrap().is_some());
@@ -205,6 +206,7 @@ fn expiration_cancel_and_failed_exchange_are_terminal() {
         Ok(Identity {
             provider: Provider::Google,
             subject: "123".into(),
+            display: String::new(),
         }),
     );
     assert!(oauth.poll(&input, false).is_err());
@@ -258,10 +260,12 @@ fn identities_are_namespaced_never_email_merged_and_conflicts_fail() {
     let google = Identity {
         provider: Provider::Google,
         subject: "123".into(),
+        display: String::new(),
     };
     let github = Identity {
         provider: Provider::Github,
         subject: "123".into(),
+        display: String::new(),
     };
     assert_eq!(
         oauth
@@ -309,6 +313,7 @@ fn signup_is_opt_in_and_corrupt_storage_is_not_replaced() {
     let identity = Identity {
         provider: Provider::Google,
         subject: "123".into(),
+        display: String::new(),
     };
     assert_eq!(
         oauth.resolve(&identity, None, |_| false).err(),

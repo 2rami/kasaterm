@@ -316,7 +316,8 @@ pub(super) fn paint(
         );
         *y += 18.0;
     }
-    if let Some(account) = v.status["account"].as_str() {
+    // OAuth 로 만든 계정 이름(oauth_<hex>)은 사람이 못 알아본다 — 관문이 준 이메일·아이디를 쓴다.
+    if let Some(account) = v.status["display_name"].as_str().or(v.status["account"].as_str()) {
         let label = fit(g, account, w, 10.5, false);
         draw_text(g, x, *y, &label, 10.5, theme::text_dim(), false);
         *y += 18.0;

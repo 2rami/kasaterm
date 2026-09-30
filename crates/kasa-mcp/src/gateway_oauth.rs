@@ -269,6 +269,9 @@ async fn callback(
     } else {
         Err("invalid_code")
     };
+    if exchange.admin {
+        return super::admin::signed_in(&gate, gate.oauth.finish_admin(&request, result));
+    }
     let success = result.is_ok();
     gate.oauth.finish(&request, result);
     let message = if success {
@@ -366,7 +369,8 @@ fn complete(gate: &Gate, ready: Ready) -> axum::response::Response {
         return json_err(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
     }
     // The requester may lose the response or fail to save it; existing credentials remain explicitly revocable.
-    axum::Json(json!({"ok":true,"status":"complete","account":account,"device_id":device_id,"token":token})).into_response()
+    let display_name = gate.oauth.display_name(&account);
+    axum::Json(json!({"ok":true,"status":"complete","account":account,"display_name":display_name,"device_id":device_id,"token":token})).into_response()
 }
 
 #[cfg(test)]

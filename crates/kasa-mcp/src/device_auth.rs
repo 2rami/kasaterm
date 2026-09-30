@@ -121,6 +121,15 @@ pub struct DeviceCred {
     pub account: String,
     pub device_id: String,
     pub token: String,
+    /// OAuth 로 만든 계정의 표시 이름 — 화면에만 쓴다. 계정을 가르는 값은 `account` 다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// 관문이 준 표시 이름을 화면에 올려도 되는 모양으로 — 제어 문자를 빼고 100자까지.
+pub(crate) fn display_label(value: Option<&str>) -> Option<String> {
+    let label: String = value?.trim().chars().filter(|c| !c.is_control()).take(100).collect();
+    (!label.is_empty()).then_some(label)
 }
 
 fn path() -> Option<PathBuf> {
@@ -198,6 +207,7 @@ async fn login(account: &str, password: &str) -> anyhow::Result<DeviceCred> {
         account: v["account"].as_str().unwrap_or(account).to_string(),
         device_id: v["device_id"].as_str().unwrap_or_default().to_string(),
         token: v["token"].as_str().ok_or_else(|| anyhow::anyhow!("관문이 토큰을 안 줬어요"))?.to_string(),
+        display_name: display_label(v["display_name"].as_str()),
     };
     {
         let _guard = CREDENTIALS.lock().map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
@@ -274,6 +284,8 @@ fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::upl
     let auth_error = up.auth_error.as_deref().or(rejected.then_some("authentication_expired"));
     let authenticated = matching && up.connected && auth_error.is_none()
         && cred.is_some_and(|c| up.account.as_deref() == Some(c.account.as_str()));
+    let display_name = if authenticated { up.display_name.clone() } else { None }
+        .or_else(|| cred.and_then(|c| c.display_name.clone()));
     let state = if gateway.is_none() {
         "gateway_off"
     } else if cred.is_none() {
@@ -294,6 +306,7 @@ fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::upl
         "authenticated": authenticated,
         "state": state,
         "account": cred.as_ref().map(|c| c.account.clone()),
+        "display_name": display_name,
         "device_id": cred.as_ref().map(|c| c.device_id.clone()),
         "connected": up.connected,
         "connected_as": up.account,
@@ -349,7 +362,7 @@ mod tests {
     #[test]
     fn account_stamp_rejects_gateway_account_token_and_login_epoch_changes() {
         let cred = DeviceCred { relay:"https://relay.example".into(), account:"one".into(),
-            device_id:"fixture-device".into(), token:"fixture-token".into() };
+            device_id:"fixture-device".into(), token:"fixture-token".into(), display_name: None };
         let stamp = Stamp { epoch: 3, identity: identity(&cred) };
         assert!(stamp.accepts(&cred, Some("https://relay.example/"), 3));
         assert!(!stamp.accepts(&cred, None, 3));
@@ -378,7 +391,7 @@ mod tests {
     #[test]
     fn saved_credentials_are_not_a_confirmed_connection() {
         let cred = DeviceCred { relay: "https://relay.example".into(), account: "sample".into(),
-            device_id: "device-one".into(), token: "never-render-this-token".into() };
+            device_id: "device-one".into(), token: "never-render-this-token".into(), display_name: None };
         let mut up = crate::uplink::Status::default();
         let state = status_from(Some(&cred), Some("https://relay.example/"), &up, false);
         assert_eq!(state["state"], "connecting");
@@ -388,6 +401,14 @@ mod tests {
         assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up, false)["authenticated"], false);
         up.account = Some(cred.account.clone());
         assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up, false)["state"], "connected");
+        up.display_name = Some("person@example.com".into());
+        assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up, false)["display_name"], "person@example.com");
+        let saved = DeviceCred { display_name: Some("saved-name".into()), ..cred.clone() };
+        assert_eq!(status_from(Some(&saved), Some("https://other.example"), &up, false)["display_name"], "saved-name",
+            "a stale connection's name must not replace the saved one");
+        up.display_name = None;
+        assert_eq!(display_label(Some(" a\u{7}b ")).as_deref(), Some("ab"));
+        assert_eq!(display_label(Some("  ")), None);
         let rejected_http = status_from(Some(&cred), Some(&cred.relay), &up, true);
         assert_eq!(rejected_http["state"], "reauth_required");
         assert_eq!(rejected_http["logged_in"], false);
@@ -411,6 +432,7 @@ mod tests {
             account: "geno".into(),
             device_id: "dev_1".into(),
             token: "kdt_x".into(),
+            display_name: None,
         };
         crate::relay_auth::write_private(&p, &serde_json::to_string(&c).unwrap()).unwrap();
         let back: DeviceCred = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();

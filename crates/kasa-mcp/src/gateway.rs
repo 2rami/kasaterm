@@ -29,6 +29,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+#[path = "gateway_admin.rs"]
+mod admin;
 #[path = "gateway_oauth.rs"]
 mod oauth;
 #[path = "gateway_workspace.rs"]
@@ -65,6 +67,11 @@ struct Uplink {
     nacho_app: AtomicBool,
     /// 기기가 폐기되면 이 연결을 끊는다.
     kick: tokio::sync::Notify,
+    /// 지난번 계량 뒤로 오간 프레임 바이트·요청 수(`admin::Gate::meter` 가 접어 간다). 내용은 안 센다.
+    rx_bytes: AtomicU64,
+    tx_bytes: AtomicU64,
+    requests: AtomicU64,
+    metered: Mutex<Instant>,
 }
 
 /// 로그인한 기기 하나. 토큰은 sha256 만 남긴다.
@@ -213,6 +220,8 @@ pub struct Gate {
     agents: Arc<Mutex<HashMap<String, crate::agent_accounts::Book>>>,
     accounts: Arc<crate::relay_auth::Accounts>,
     oauth: Arc<crate::oauth_accounts::OAuth>,
+    admins: Arc<admin::Admins>,
+    usage: Arc<admin::Meter>,
     limiter: Arc<crate::relay_auth::Limiter>,
     account_sync: Arc<crate::account_sync::server::Store>,
     /// 계정별 개인비서(키·작업·대화). 상태 폴더가 없으면 `None` — 메모리에만 키를 두지 않는다.
@@ -301,6 +310,10 @@ impl Gate {
             oauth: Arc::new(crate::oauth_accounts::OAuth::new(
                 state_path.as_ref().map(|p| p.with_file_name("relay-oauth-identities.json")),
                 crate::oauth_accounts::Config::from_env(),
+            )),
+            admins: Arc::new(admin::Admins::from_env()),
+            usage: Arc::new(admin::Meter::open(
+                state_path.as_ref().map(|p| p.with_file_name("relay-usage.json")),
             )),
             limiter: Arc::new(crate::relay_auth::Limiter::default()),
             account_sync: Arc::new(crate::account_sync::server::Store::new(
@@ -443,6 +456,7 @@ fn key_hash(key: &str) -> String {
 pub fn router(gate: Gate) -> Router {
     Router::new()
         .merge(oauth::routes())
+        .merge(admin::routes())
         .merge(workspace::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
@@ -582,8 +596,8 @@ async fn whoami(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axu
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     axum::Json(serde_json::json!({
-        "ok": true, "account": d.account, "device_id": id, "kind": d.kind,
-        "label": d.label, "machine_id": d.machine_id,
+        "ok": true, "account": d.account, "display_name": gate.oauth.display_name(&d.account),
+        "device_id": id, "kind": d.kind, "label": d.label, "machine_id": d.machine_id,
     }))
     .into_response()
 }
@@ -611,7 +625,9 @@ async fn devices_list(State(gate): State<Gate>, headers: axum::http::HeaderMap) 
             })
         })
         .collect();
-    axum::Json(serde_json::json!({ "ok": true, "account": d.account, "devices": list })).into_response()
+    let display_name = gate.oauth.display_name(&d.account);
+    axum::Json(serde_json::json!({ "ok": true, "account": d.account, "display_name": display_name, "devices": list }))
+        .into_response()
 }
 
 fn account_sync_response(
@@ -932,6 +948,10 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         owner_slug: owner_slug.filter(|slug| gate.claim(slug, &hash)),
         nacho_app: AtomicBool::new(nacho_app && account.is_some()),
         kick: tokio::sync::Notify::new(),
+        rx_bytes: AtomicU64::new(0),
+        tx_bytes: AtomicU64::new(0),
+        requests: AtomicU64::new(0),
+        metered: Mutex::new(Instant::now()),
     });
     if let Err(why) = gate.admit(&hash, up.clone()) {
         let _ = tx
@@ -969,11 +989,13 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             serde_json::json!({
                 "t": "ok", "accepted": acc, "rejected": rej,
                 "proto": 2, "account": account, "device_id": device_id,
+                "display_name": account.as_deref().and_then(|a| gate.oauth.display_name(a)),
             })
             .to_string()
             .into(),
         ))
         .await;
+    let (meter_gate, meter_up) = (gate.clone(), up.clone());
     let writer = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         tick.tick().await;
@@ -982,10 +1004,18 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
                 m = wrx.recv() => match m {
                     // Close 를 보내고 나면 쓸 것이 없다 — 끝나야 폐기 통보가 버려지지 않고 나간다.
                     Some(m @ Message::Close(_)) => { let _ = tx.send(m).await; break }
-                    Some(m) => if tx.send(m).await.is_err() { break },
+                    Some(m) => {
+                        if let Message::Binary(b) = &m {
+                            meter_up.tx_bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
+                        }
+                        if tx.send(m).await.is_err() { break }
+                    }
                     None => break,
                 },
-                _ = tick.tick() => if tx.send(Message::Ping(Vec::new().into())).await.is_err() { break },
+                _ = tick.tick() => {
+                    meter_gate.meter(&meter_up);
+                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() { break }
+                }
             }
         }
     });
@@ -1006,6 +1036,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         match m {
             Ok(Message::Binary(b)) => {
                 up.touch();
+                up.rx_bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
                 let Some((kind, id, payload)) = decode(&b) else { continue };
                 let s = up.streams.lock().unwrap().get(&id).cloned();
                 if let Some(s) = s {
@@ -1074,6 +1105,10 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
     }
     gate.live.lock().unwrap().remove(&conn);
     up.streams.lock().unwrap().clear();
+    if up.account.is_some() {
+        gate.meter(&up);
+        gate.usage.save();
+    }
     eprintln!(
         "[gateway] {machine} 떨어짐(#{conn}){}",
         up.account.as_deref().map(|a| format!(" — 계정 {a}")).unwrap_or_default()
@@ -1310,6 +1345,7 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
     if up.tx.send(Message::Binary(encode(OPEN, id, open.as_bytes()).into())).await.is_err() {
         return offline_page(true);
     }
+    up.requests.fetch_add(1, Ordering::Relaxed);
     if is_ws {
         use axum::extract::FromRequestParts as _;
         let (mut parts, _body) = req.into_parts();
@@ -1483,6 +1519,10 @@ mod tests {
             owner_slug: None,
             nacho_app: AtomicBool::new(false),
             kick: tokio::sync::Notify::new(),
+            rx_bytes: AtomicU64::new(0),
+            tx_bytes: AtomicU64::new(0),
+            requests: AtomicU64::new(0),
+            metered: Mutex::new(Instant::now()),
         })
     }
 

@@ -30,6 +30,22 @@ New OAuth-only accounts are **not** created by default. `KASA_OAUTH_ALLOW_SIGNUP
 - A desktop login attempt is bound to the local credential epoch and gateway. Logout, cancellation, a newer attempt or a changed account prevents an old response from saving over the new state. Credentials and poll capabilities are absent from render snapshots.
 - OAuth token issuance never automatically revokes existing device credentials. Losing the poll response, failing to save the new credential, or rejecting a late OAuth result therefore cannot destroy a newer password login. Unused or older credentials remain visible through the existing device list and can be explicitly revoked. This does not change the legacy password-login replacement behavior.
 
+## Relay administration page
+
+`GET /relay/admin` lists who signed up and roughly how they use the relay. It is disabled (404) unless the private relay environment sets `KASA_RELAY_ADMINS` to a comma-separated list of relay account names. Request bodies, cookies and headers cannot designate an administrator.
+
+- Sign-in reuses the provider flow: `POST /relay/admin/login/{provider}` (same-origin form) starts a request with a 256-bit state, a state cookie and PKCE S256, and the shared callback finishes it. The browser that starts the request also receives the result, so no app verification code is involved. The identity must already be linked to a listed account; this flow never creates an account or a device credential, and unknown identities receive the same refusal as non-administrators.
+- A successful sign-in sets `__Secure-kasa_admin` (HttpOnly, Secure, SameSite=Lax, `Path=/relay/admin`, two hours). The relay keeps only its SHA-256 in memory, so a restart signs administrators out. Every request re-checks the listing and account state; disabling the account ends access immediately. `POST /relay/admin/logout` requires the same origin.
+- Each row shows the account name, display name, sign-up route (`google`, `github` or `password`) and time, linked login methods, active desktop/phone device counts, current desktop connections, last access, and approximate usage. `GET /relay/admin/accounts` returns the same rows as JSON. Responses are `no-store`, framing is denied and forms may only post to the relay and the fixed providers.
+- Usage counts uplink connection time, uplink frame bytes in both directions and relayed request count per account in `relay-usage.json` (private permissions, written every five minutes and on disconnect). Phone traffic through an account device is counted on that device. Request and response contents, including conversations and screens, are never stored or shown.
+- To designate the operator: add `KASA_RELAY_ADMINS` to the relay service environment, reload the service, then link Google or GitHub to that account from the app before signing in.
+
+## Display names
+
+OAuth sign-up records the provider, sign-up time and a display name in the identity file: the verified Google email or the GitHub login. It is display-only and never an identity key or merge criterion. Signing in again with the sign-up provider refreshes it; a later linked provider does not rename the account. Password accounts keep their chosen name.
+
+`/relay/whoami`, `/relay/devices`, the uplink welcome and the OAuth `complete` response carry `display_name`. The desktop account screen shows it instead of the `oauth_<hex>` account name.
+
 ## Client API
 
 - `GET /relay/oauth/providers` returns public provider availability and whether new sign-up is allowed.

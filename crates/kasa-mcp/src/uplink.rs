@@ -210,6 +210,8 @@ pub struct Status {
     pub accepted: usize,
     /// 기기 토큰으로 붙었으면 관문이 확인해 준 계정.
     pub account: Option<String>,
+    /// OAuth 로 만든 계정이면 관문이 알려 준 표시 이름(검증된 이메일·깃허브 아이디).
+    pub display_name: Option<String>,
     /// 관문이 기기 토큰을 거절했다(폐기·다른 기계) — 다시 로그인해야 한다.
     pub auth_error: Option<String>,
 }
@@ -385,12 +387,14 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
             }
             let n = v.get("accepted").and_then(|a| a.as_array()).map_or(0, |a| a.len());
             let account = v["account"].as_str().map(str::to_string);
+            let display_name = crate::device_auth::display_label(v["display_name"].as_str());
             set_status(|s| {
                 s.connected = true;
                 s.since = Some(Instant::now());
                 s.last_error = None;
                 s.accepted = n;
                 s.account = account.clone();
+                s.display_name = display_name.clone();
                 if account.is_some() {
                     s.auth_error = None;
                 }
@@ -516,6 +520,7 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
         s.connected = false;
         s.accepted = 0;
         s.account = None;
+        s.display_name = None;
     });
     streams.lock().unwrap().clear();
     writer.abort();
