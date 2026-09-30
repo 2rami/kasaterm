@@ -14,6 +14,8 @@ ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH. 키·토큰은 출력하지 않는다
   asc.py internal-group <app id> <그룹> <이메일>  내부 테스터 그룹(모든 빌드 자동) + 팀원 초대
   asc.py beta-info <app id> <build id> <연락 이메일> <이름> <성> <전화>  베타 심사에 필요한 글
   asc.py submit-review <build id>     베타 앱 심사 제출(공개 링크 테스터에게 풀리려면 필요)
+  asc.py dist-cert <csr> <cer 경로>   Apple Distribution 인증서 발급 → DER 로 저장, id 출력
+  asc.py store-profile <bundle id> <이름> <cert id> <저장 경로>  App Store 프로파일 발급 → 저장, UUID 출력
 """
 import json, os, sys, time, urllib.request, urllib.error
 from pathlib import Path
@@ -148,8 +150,26 @@ def cmd_submit_review(build):
     print(r["data"]["attributes"].get("betaReviewState"))
 
 
+def cmd_dist_cert(csr, out):
+    # 키는 CSR 을 만든 쪽에만 있다 — 여기서는 인증서만 받는다.
+    import base64
+    r = call("POST", "/certificates", {"data": {"type": "certificates", "attributes": {"certificateType": "DISTRIBUTION", "csrContent": Path(csr).read_text()}}})
+    Path(out).write_bytes(base64.b64decode(r["data"]["attributes"]["certificateContent"]))
+    print(r["data"]["id"])
+
+
+def cmd_store_profile(ident, name, cert, out):
+    import base64
+    r = call("GET", "/bundleIds", params={"filter[identifier]": ident})
+    b = next(x for x in r["data"] if x["attributes"]["identifier"] == ident)
+    r = call("POST", "/profiles", {"data": {"type": "profiles", "attributes": {"name": name, "profileType": "IOS_APP_STORE"}, "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": b["id"]}}, "certificates": {"data": [{"type": "certificates", "id": cert}]}}}})
+    a = r["data"]["attributes"]
+    Path(out).write_bytes(base64.b64decode(a["profileContent"]))
+    print(a["uuid"])
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if not a:
         sys.exit(__doc__)
-    {"team": cmd_team, "bundle-id": cmd_bundle_id, "app": cmd_app, "builds": cmd_builds, "wait-build": cmd_wait_build, "public-link": cmd_public_link, "add-build": cmd_add_build, "internal-group": cmd_internal_group, "beta-info": cmd_beta_info, "submit-review": cmd_submit_review}[a[0]](*a[1:])
+    {"team": cmd_team, "bundle-id": cmd_bundle_id, "app": cmd_app, "builds": cmd_builds, "wait-build": cmd_wait_build, "public-link": cmd_public_link, "add-build": cmd_add_build, "internal-group": cmd_internal_group, "beta-info": cmd_beta_info, "submit-review": cmd_submit_review, "dist-cert": cmd_dist_cert, "store-profile": cmd_store_profile}[a[0]](*a[1:])
