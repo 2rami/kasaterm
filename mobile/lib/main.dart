@@ -335,7 +335,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     _connection.addListener(_changed);
     _connection.beforeDisconnect = PushBridge.instance.unbind;
     unawaited(PushBridge.instance.unbind());
-    _connection.restore(bakedRoot: _baked);
+    _connection.restore(bakedRoot: _baked, preferBaked: _preferBaked);
     AppLinkObserver.instance.attach(_openLink);
     if (_openPane.isNotEmpty) {
       _openLink(
@@ -411,6 +411,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
 
   // An explicit logout record takes precedence over development launch defaults.
   static const _baked = String.fromEnvironment('KASA_ROOT');
+  static const _preferBaked = bool.fromEnvironment('KASA_ROOT_REPLACE');
 
   void _loadTokens(Server server) {
     // 서버가 정해지는 자리가 여기 하나라 푸시 등록도 같이 건다.

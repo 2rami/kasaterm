@@ -30,7 +30,8 @@ device=${1:-$(xcrun devicectl list devices 2>/dev/null | awk '/connected/ && /iP
 # 주소는 자격이라 argv 에 싣지 않는다 — 파일(0600)로 넘기고 끝나면 지운다.
 defines=$(mktemp)
 trap 'rm -f "$defines"' EXIT
-python3 -c 'import json, sys; print(json.dumps({"KASA_ROOT": sys.argv[1]}))' "$root" > "$defines"
+# KASA_ROOT_REPLACE=1 이면 폰에 저장된 옛 주소 연결을 이 주소로 갈아 끼운다(계정 로그인은 그대로).
+python3 -c 'import json, sys; print(json.dumps({"KASA_ROOT": sys.argv[1], "KASA_ROOT_REPLACE": "true" if sys.argv[2] == "1" else "false"}))' "$root" "${KASA_ROOT_REPLACE:-0}" > "$defines"
 
 # 빌드 번호는 시각 — 폰에 어느 판이 깔렸는지 `xcrun devicectl device info apps` 로 가른다.
 build=$(date +%y%m%d%H%M)

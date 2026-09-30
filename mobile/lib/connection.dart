@@ -58,7 +58,10 @@ class ConnectionController extends ChangeNotifier {
     return _generation;
   }
 
-  Future<void> restore({String bakedRoot = ''}) async {
+  /// `preferBaked` 는 실기 설치(`tool/phone.sh`)가 구운 주소로 옛 주소 연결을 갈아 끼울 때만 켠다 — 저장된
+  /// 옛 주소는 앱을 다시 깔아도 키체인에 남아서, 그 기기가 관문에서 사라지면 구운 새 주소가 영영 안 쓰였다.
+  /// 계정 로그인은 건드리지 않는다.
+  Future<void> restore({String bakedRoot = '', bool preferBaked = false}) async {
     final generation = _reset();
     phase = ConnectionPhase.restoring;
     _notify();
@@ -70,7 +73,10 @@ class ConnectionController extends ChangeNotifier {
         await _check(generation);
         return;
       }
-      final root = saved == null ? Server.parse(bakedRoot) : saved.legacyRoot;
+      final baked = Server.parse(bakedRoot);
+      final replace = preferBaked && baked != null && saved?.legacyRoot != baked;
+      final root = saved == null || replace ? baked : saved.legacyRoot;
+      if (replace) await _save(SavedConnection(legacyRoot: baked), generation);
       if (root != null && Server.parse(root.toString()) != null) {
         server = Server(root);
         phase = ConnectionPhase.ready;
