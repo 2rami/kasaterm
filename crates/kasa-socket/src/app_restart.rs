@@ -751,6 +751,12 @@ pub fn helper_env(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String, String)>
     env
 }
 
+/// 재시작 도우미는 sh 스크립트라 유닉스 전용이다. 없는 플랫폼에서는 띄우지 않고 오류로 돌린다 — 호출부를 cfg 로 가르지 않아도 Windows 빌드가 선다.
+#[cfg(not(unix))]
+pub fn spawn_helper(_spec: &HelperSpec) -> Result<u32> {
+    anyhow::bail!("app restart helper is not supported on this platform")
+}
+
 /// 도우미를 띄운다 — 새 프로세스 그룹, stdin 없음, 출력은 작업 옆 로그.
 #[cfg(unix)]
 pub fn spawn_helper(spec: &HelperSpec) -> Result<u32> {

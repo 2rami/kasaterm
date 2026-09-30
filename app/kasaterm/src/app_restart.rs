@@ -34,11 +34,17 @@ fn baking() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 fn pet_alive() -> Option<bool> {
     let path = kasa_socket::home_dir()?.join(".config/kasaterm/pet.pid");
     let pid: i32 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     // SAFETY: 신호 0 은 보내지 않고 존재만 묻는다.
     Some(unsafe { libc::kill(pid, 0) } == 0)
+}
+
+#[cfg(not(unix))]
+fn pet_alive() -> Option<bool> {
+    None
 }
 
 impl App {
