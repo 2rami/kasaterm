@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../hub_model.dart';
 import '../server.dart';
 import '../student_art.dart';
+import '../weather/sheet.dart';
 import 'controls.dart';
 
 /// 허브에서 pane·방을 다루는 판들 — 닫기·옆에 추가·자리 바꾸기·방 만들기/이름/닫기.
@@ -72,6 +73,7 @@ Future<void> showPaneSheet(
             subtitle: const Text('데스크톱의 × 와 같다 — 되살리기로 되돌릴 수 있다'),
             onTap: () => Navigator.pop(ctx, _PaneAct.close),
           ),
+          const CardWeatherRow(),
           const SizedBox(height: 8),
         ],
       ),
@@ -148,6 +150,7 @@ Future<void> showRoomSheet(
               subtitle: const Text('이 방의 pane 을 전부 닫는다'),
               onTap: () => Navigator.pop(ctx, _RoomAct.close),
             ),
+          const CardWeatherRow(),
           const SizedBox(height: 8),
         ],
       ),

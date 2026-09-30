@@ -11,6 +11,7 @@ import '../nacho_reply.dart';
 import '../nacho_student.dart';
 import '../server.dart';
 import '../server_image.dart';
+import '../weather/scene.dart';
 import '../wide_layout.dart';
 import 'hub.dart';
 import 'nacho_reply_view.dart';
@@ -177,7 +178,8 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
             children: [
               if (_desk.problem != null) _Banner(text: _desk.problem!),
               Expanded(
-                child: wide
+                child: WeatherScene(
+                  child: wide
                     ? Row(
                         children: [
                           Expanded(
@@ -193,6 +195,7 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
                         ],
                       )
                     : TabBarView(children: [chat, board]),
+                ),
               ),
             ],
           ),

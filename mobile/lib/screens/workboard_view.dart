@@ -9,6 +9,8 @@ import '../organize.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../weather/card.dart';
+import '../weather/model.dart';
 import '../work_mode.dart';
 import '../workboard.dart';
 import '../look.dart';
@@ -235,13 +237,21 @@ class _WorkBoardViewState extends State<WorkBoardView>
     }
     // 정리 모드면 누를 때 정리가 먼저, 조율 모드면 길게 누를 때 — 모드는 나쵸 값만 본다.
     final organizing = _modes.state?.mode == WorkMode.organize;
-    return _WorkRow(
-      item: i,
-      server: widget.server,
-      attention: attention,
-      onTap: organizing ? () => _openOrganize(i) : open,
-      onLongPress: () => _openOrganize(i),
-      action: action,
+    return WeatherCard(
+      id: 'task:${i.key}',
+      mood: switch (i.lane) {
+        _ when i.yours != null => Mood.yourTurn,
+        WorkLane.done => Mood.resting,
+        _ => Mood.busy,
+      },
+      child: _WorkRow(
+        item: i,
+        server: widget.server,
+        attention: attention,
+        onTap: organizing ? () => _openOrganize(i) : open,
+        onLongPress: () => _openOrganize(i),
+        action: action,
+      ),
     );
   }
 

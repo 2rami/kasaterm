@@ -4,6 +4,7 @@ import '../nacho.dart';
 import '../organize.dart';
 import '../server.dart';
 import '../status_style.dart';
+import '../weather/sheet.dart';
 import '../workboard.dart';
 
 /// 작업판에서 고른 일 하나의 정리 — 현재 작업·변경·다음 일·막힘·검증. PC 작업 탭 정리 칸과 같은 말.
@@ -94,6 +95,7 @@ class OrganizeSheet extends StatelessWidget {
                 ],
               ),
             ],
+            const CardWeatherRow(),
           ],
         );
       },

@@ -9,6 +9,7 @@ import UserNotifications
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var channel: FlutterMethodChannel?
+  private var a11yChannel: FlutterMethodChannel?
   private var pendingTap: [String: Any]?
   private var lastToken: String?
   private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
@@ -27,6 +28,21 @@ import UserNotifications
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let messenger = engineBridge.applicationRegistrar.messenger()
+    // 「투명도 줄이기」는 플러터가 안 알려 준다 — 날씨가 이 값을 보고 꺼진다(docs/weather.md 접근성).
+    let a11y = FlutterMethodChannel(name: "kasaterm/a11y", binaryMessenger: messenger)
+    a11yChannel = a11y
+    a11y.setMethodCallHandler { call, result in
+      if call.method == "reduceTransparency" {
+        result(UIAccessibility.isReduceTransparencyEnabled)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    NotificationCenter.default.addObserver(
+      forName: UIAccessibility.reduceTransparencyStatusDidChangeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.a11yChannel?.invokeMethod("reduceTransparency", arguments: UIAccessibility.isReduceTransparencyEnabled)
+    }
     let ch = FlutterMethodChannel(name: "kasaterm/push", binaryMessenger: messenger)
     channel = ch
     ch.setMethodCallHandler { [weak self] call, result in

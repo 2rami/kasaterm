@@ -5,6 +5,8 @@ import '../server.dart';
 import 'browser_device.dart';
 import 'dev_server.dart';
 import '../theme_prefs.dart';
+import '../weather/sheet.dart';
+import '../weather/store.dart';
 import '../look.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
@@ -215,6 +217,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
+          Card(
+            child: ListenableBuilder(
+              listenable: weather.settings,
+              builder: (context, _) {
+                final w = weather.settings.value;
+                return ListTile(
+                  leading: const Icon(Icons.umbrella_outlined),
+                  title: const Text('날씨'),
+                  subtitle: Text(w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 — 카드·단추에 비를 내린다'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => showWeatherSheet(context),
+                );
+              },
             ),
           ),
           const SizedBox(height: Look.groupGap),

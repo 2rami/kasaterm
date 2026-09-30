@@ -258,18 +258,49 @@ class RelayAccountApi {
   Future<AccountSyncSnapshot> readSync() async =>
       AccountSyncSnapshot.fromJson(await _request('account-sync'));
 
-  Future<AccountSyncSnapshot> setMobileTheme(int revision, String mode) async {
+  Future<AccountSyncSnapshot> setMobileTheme(int revision, String mode) {
     if (!const ['light', 'dark', 'system'].contains(mode)) {
       throw const AccountException('지원하지 않는 테마예요.');
     }
+    return patchSync(
+      revision,
+      {'mobile_theme_mode': mode},
+      failure: '계정 테마를 저장하지 못했어요. 연결을 확인해 주세요.',
+    );
+  }
+
+  /// 옵트인 키(`weather` 등)는 이름을 대야 보인다 — 관문이 [keys] 를 모르면(옛 관문) 그 키만 빠진다.
+  Future<AccountSyncSnapshot> readSyncWith(List<String> keys) async {
+    try {
+      final response = await _client
+          .get(origin.resolve('/relay/account-sync'), headers: {_syncKeys: keys.join(',')})
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        throw AccountException(accountError(response.statusCode), status: response.statusCode);
+      }
+      return AccountSyncSnapshot.fromJson(jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>);
+    } on AccountException {
+      rethrow;
+    } catch (_) {
+      throw const AccountException('계정 설정을 받지 못했어요. 연결을 확인해 주세요.');
+    }
+  }
+
+  /// 계정 설정 몇 칸을 바꾼다. 다른 기기가 먼저 바꿨으면 [AccountSyncConflict] 에 지금 값을 싣는다.
+  Future<AccountSyncSnapshot> patchSync(
+    int revision,
+    Map<String, Object?> settings, {
+    List<String> keys = const [],
+    String failure = '계정에 저장하지 못했어요. 연결을 확인해 주세요.',
+  }) async {
     try {
       final response = await _client
           .patch(
             origin.resolve('/relay/account-sync'),
-            headers: {'content-type': 'application/json'},
+            headers: {'content-type': 'application/json', if (keys.isNotEmpty) _syncKeys: keys.join(',')},
             body: jsonEncode({
               'expected_revision': revision,
-              'settings': {'mobile_theme_mode': mode},
+              'settings': settings,
               'machines': {},
             }),
           )
@@ -293,9 +324,12 @@ class RelayAccountApi {
     } on AccountSyncConflict {
       rethrow;
     } catch (_) {
-      throw const AccountException('계정 테마를 저장하지 못했어요. 연결을 확인해 주세요.');
+      throw AccountException(failure);
     }
   }
+
+  /// 데스크톱 `account_sync::schema::KEYS_HEADER` 와 같은 이름.
+  static const _syncKeys = 'x-kasa-sync-keys';
 
   void close() => _client.close();
 }

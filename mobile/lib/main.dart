@@ -15,6 +15,7 @@ import 'screens/nacho_home.dart';
 import 'screens/terminal.dart';
 import 'server.dart';
 import 'theme_prefs.dart';
+import 'weather/store.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -330,6 +331,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     phoneThemeSync.bind(null);
+    weather.bind(null);
     _connection.addListener(_changed);
     _connection.beforeDisconnect = PushBridge.instance.unbind;
     unawaited(PushBridge.instance.unbind());
@@ -351,6 +353,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     _connection.removeListener(_changed);
     _connection.dispose();
     phoneThemeSync.unbind();
+    weather.unbind();
     WidgetsBinding.instance.removeObserver(this);
     PushBridge.instance.unbind();
     super.dispose();
@@ -361,6 +364,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       unawaited(PushBridge.instance.retryCleanup());
       unawaited(phoneThemeSync.refresh());
+      unawaited(weather.refresh());
       KasanetRouter.resumed();
       if (_connection.server == null) unawaited(_connection.retry());
     }
@@ -430,6 +434,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     if (phoneThemeSync.account != _connection.account) {
       if (_connection.account != null) unawaited(PushBridge.instance.unbind());
       phoneThemeSync.bind(_connection.account);
+      weather.bind(_connection.account);
       final account = _connection.account;
       phoneThemeSync.onUnauthorized = () {
         if (_connection.account == account) {

@@ -8,6 +8,9 @@ import '../look.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../weather/card.dart';
+import '../weather/model.dart';
+import '../weather/scene.dart';
 import '../wide_layout.dart';
 import 'clipboard_sheet.dart';
 import 'notes_sheet.dart';
@@ -182,7 +185,9 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
           fit: StackFit.expand,
           children: [
             ColoredBox(color: theme.scaffoldBackgroundColor),
-            RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
+            WeatherScene(
+              child: RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
+            ),
             // 지난번 목록을 먼저 그렸다 — 새 목록이 닿을 때까지 위에 얇게 「확인 중」.
             if (_model.showingCached)
               const Positioned(
@@ -269,7 +274,13 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             );
           }
         }
-        rooms.add(_RoomBox(children: inside));
+        rooms.add(
+          WeatherCard(
+            id: 'room:${s.machine ?? ''}|${room.title}',
+            mood: moodOf(room.panes.map((p) => weatherMood(StatusStyle.of(p, theme.colorScheme).mood))),
+            child: _RoomBox(children: inside),
+          ),
+        );
       }
       if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
     }

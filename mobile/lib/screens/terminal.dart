@@ -16,6 +16,7 @@ import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 import '../theme_prefs.dart';
+import '../weather/scene.dart';
 import 'conversation_view.dart';
 import 'controls.dart';
 
@@ -459,13 +460,15 @@ class _TerminalScreenState extends State<TerminalScreen>
               children: [
                 if (chat)
                   Expanded(
-                    child: ConversationView(
-                      server: widget.server,
-                      pane: pane,
-                      session: s,
-                      accent: accent,
-                      onTerminal: _showTerminal,
-                      bottomTick: _bottomTick,
+                    child: WeatherScene(
+                      child: ConversationView(
+                        server: widget.server,
+                        pane: pane,
+                        session: s,
+                        accent: accent,
+                        onTerminal: _showTerminal,
+                        bottomTick: _bottomTick,
+                      ),
                     ),
                   )
                 else
