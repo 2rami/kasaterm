@@ -755,6 +755,9 @@ impl App {
         if surface.or(fallback_surface.as_deref()).is_some_and(|id| self.restoration_blocks_surface(id)) {
             return;
         }
+        if let Some(id) = surface.or(fallback_surface.as_deref()) {
+            self.touch_surface_size(id);
+        }
         // Route to whichever backend owns the *active tab*. In-pane tabs
         // (`spawn_new_tab`) are always GUI-local PtySessions in `self.pty`,
         // even when the GUI is daemon-attached: the daemon owns only the
@@ -1092,6 +1095,11 @@ impl App {
             },
             None => (row, col),
         };
+        // 버튼 누름만 손길이다 — 끌기(32)·호버(35)·휠(64~)은 보기다.
+        if press && button & (32 | 64) == 0 {
+            let surface = self.ws.lock().unwrap().active_tab_pid(pane_id);
+            self.touch_surface_size(&surface);
+        }
         let final_byte = if press { 'M' } else { 'm' };
         let payload = format!("\x1b[<{button};{};{}{final_byte}", col + 1, row + 1);
         if let Some(tmux) = self.tmux.as_ref() {

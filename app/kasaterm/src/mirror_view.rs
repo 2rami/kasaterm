@@ -1,4 +1,6 @@
-//! Viewer-only cell projection. Never resize or mutate the canonical terminal.
+//! Viewer-side cell projection for a mirror that does not hold the source grid.
+//! Projection never resizes or mutates the canonical terminal: only a person
+//! touching the mirror moves the source grid to this pane (`mirror_follow`).
 use crate::GridCell;
 use unicode_width::UnicodeWidthChar;
 

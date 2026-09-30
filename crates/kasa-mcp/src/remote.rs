@@ -82,8 +82,8 @@ impl Drop for DetachOnDrop {
     fn drop(&mut self) {
         self.viewport.detached.store(true, Ordering::Release);
         self.viewport.retry.notify_one();
-        // 확대한 채로 pane 을 닫으면 호스트가 키워진 격자로 남는다 — 떼기 전에 놓는다.
-        if self.viewport.expanded.lock().unwrap().take().is_some() {
+        // 원본 격자를 쥔 채로 pane 을 닫으면 호스트가 그 격자로 남는다 — 떼기 전에 놓는다.
+        if self.viewport.held.lock().unwrap().take().is_some() {
             let _ = self.outgoing.send(Out::Control(
                 serde_json::json!({"t": "viewport", "op": "release"}).to_string(),
             ));
@@ -104,16 +104,21 @@ struct ViewportState {
     connection_error: Mutex<Option<String>>,
     retry: tokio::sync::Notify,
     surface_key: Mutex<Option<String>>,
-    /// 확대 동안 원본 격자를 키우는 길. `on_resize` 는 거울에서 닫혀 있고
-    /// (뷰어가 원본 크기를 흔들면 다른 뷰어와 호스트가 서로 덮는다) 그 문을
-    /// 사람이 확대한 순간에만 여는 것이 `expand_source` 다.
+    /// 원본 격자를 바꾸는 길. `on_resize` 는 거울에서 닫혀 있고(창 크기만 바뀌었는데
+    /// 원본이 따라 흔들리면 다른 뷰어와 호스트가 서로 덮는다) 사람이 이 거울을 만졌을
+    /// 때(`touch_source`)나 옛 호스트에서 확대했을 때(`expand_source`)만 연다.
     outgoing: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Out>>>,
-    /// 확대로 호스트에 요청한 격자. Some 이면 「지금 소유권을 쥐고 있어야 하는
+    /// 호스트에 요청해 쥐고 있는 격자. Some 이면 「지금 소유권을 쥐고 있어야 하는
     /// 상태」다. 되돌릴 격자는 **서버가** 안다(`viewport_sizes.effective()` — 쥔
     /// 뷰어가 없으면 호스트 자기 크기로 돌아간다). 크기를 기억하는 이유는 재접속이다:
-    /// 남(호스트·다른 뷰어)이 격자를 바꾸면 서버가 연결을 닫아 재접속시키고, 그때
-    /// 소유권은 옛 연결과 함께 죽는다 — 새 연결의 첫 악수 뒤에 이 크기로 다시 잡는다.
-    expanded: Mutex<Option<(u16, u16)>>,
+    /// 연결이 끊기면 소유권은 옛 연결과 함께 죽으므로 새 연결의 첫 악수 뒤에 이 크기로
+    /// 다시 잡는다. 남(원본의 사람·더 늦게 만진 뷰어)이 가져가면 서버의 `lost` 로 비운다 —
+    /// 안 비우면 재접속이 빼앗긴 격자를 도로 빼앗는다.
+    held: Mutex<Option<(u16, u16)>>,
+    /// 호스트가 「마지막으로 만진 쪽이 이긴다」를 안다(`viewport_latest`). 모르는 옛
+    /// 호스트면 거울은 만져도 원본을 안 바꾸고 예전처럼 확대 때만 키운다 — 옛 호스트엔
+    /// 원본 쪽 사람이 격자를 되찾는 길이 없다.
+    latest: AtomicBool,
 }
 
 impl ViewportState {
@@ -265,14 +270,61 @@ pub fn is_view_pane(local_id: &str) -> bool {
         .is_some_and(|l| l.view)
 }
 
-/// Record local display bounds without negotiating ownership of the source PTY.
-/// Both parsers keep the host's grid. The GUI fits that grid inside these bounds,
-/// so attaching, resizing or reconnecting a mirror never resizes the source.
+/// Record local display bounds. Attaching, resizing or reconnecting a mirror
+/// alone never takes the source grid; the GUI fits the host's grid inside these
+/// bounds. Only a mirror that a person touched (`touch_source`) holds the grid,
+/// and while it holds it the grid follows these bounds.
 pub fn set_viewport(local_id: &str, cols: u16, rows: u16) -> bool {
     let map = links().lock().unwrap();
     let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
-    *link.viewport.target.lock().unwrap() = Some((cols.clamp(2, 1000), rows.clamp(1, 1000)));
+    let target = (cols.clamp(2, 1000), rows.clamp(1, 1000));
+    *link.viewport.target.lock().unwrap() = Some(target);
+    if link.viewport.latest.load(Ordering::Acquire) {
+        let mut held = link.viewport.held.lock().unwrap();
+        if held.is_some_and(|size| size != target) && send_viewport(link, serde_json::json!({
+            "t": "viewport", "op": "resize", "cols": target.0, "rows": target.1,
+        })) {
+            *held = Some(target);
+        }
+    }
     true
+}
+
+/// 호스트가 「마지막으로 만진 쪽이 이긴다」를 아는 거울인가 — 아니면 호출부는
+/// 예전 규칙(확대 때만 키움)을 쓴다.
+pub fn follows_latest(local_id: &str) -> bool {
+    links().lock().unwrap().get(local_id)
+        .is_some_and(|link| link.view && link.viewport.latest.load(Ordering::Acquire))
+}
+
+/// 사람이 이 거울을 만졌다(초점·입력) — 원본 격자를 이 칸 크기로 잡는다(tmux
+/// `window-size latest`). 원본 기기의 사람이 자기 칸을 만지거나 다른 뷰어가 더 늦게
+/// 만지면 서버가 `lost` 로 알려 비우고, 다음 손길에 다시 잡는다. 이미 이 크기로 쥐고
+/// 있으면 아무것도 안 보낸다 — 입력마다 불리는 자리다.
+pub fn touch_source(local_id: &str) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    if !link.viewport.latest.load(Ordering::Acquire) {
+        return false;
+    }
+    let Some(target) = *link.viewport.target.lock().unwrap() else { return false };
+    let mut held = link.viewport.held.lock().unwrap();
+    if *held == Some(target) {
+        return false;
+    }
+    let op = if held.is_some() { "resize" } else { "acquire" };
+    if !send_viewport(link, serde_json::json!({"t": "viewport", "op": op, "cols": target.0, "rows": target.1})) {
+        return false;
+    }
+    *held = Some(target);
+    true
+}
+
+/// 이 거울이 지금 원본 격자를 쥐고 있다고 아는 크기(검사·표시용).
+pub fn held_source_size(local_id: &str) -> Option<(u16, u16)> {
+    let map = links().lock().unwrap();
+    let held = *map.get(local_id)?.viewport.held.lock().unwrap();
+    held
 }
 
 /// 거울이 **확대되어 있는 동안만** 원본 격자를 키운다.
@@ -296,12 +348,12 @@ pub fn expand_source(local_id: &str, cols: u16, rows: u16, current: (u16, u16)) 
         return false;
     }
     // 처음 키울 때만 소유권을 잡고(acquire), 쥔 뒤에는 크기만 바꾼다(resize).
-    let mut expanded = link.viewport.expanded.lock().unwrap();
-    let op = if expanded.is_some() { "resize" } else { "acquire" };
+    let mut held = link.viewport.held.lock().unwrap();
+    let op = if held.is_some() { "resize" } else { "acquire" };
     if !send_viewport(link, serde_json::json!({"t": "viewport", "op": op, "cols": cols, "rows": rows})) {
         return false;
     }
-    *expanded = Some((cols, rows));
+    *held = Some((cols, rows));
     true
 }
 
@@ -310,7 +362,7 @@ pub fn expand_source(local_id: &str, cols: u16, rows: u16, current: (u16, u16)) 
 pub fn restore_source(local_id: &str) -> bool {
     let map = links().lock().unwrap();
     let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
-    if link.viewport.expanded.lock().unwrap().take().is_none() {
+    if link.viewport.held.lock().unwrap().take().is_none() {
         return false;
     }
     // 크기를 지정하지 않는다 — 놓으면 호스트가 자기 격자로 돌아간다.
@@ -331,7 +383,7 @@ pub struct RemoteInfo {
     pub label: String,
     pub remote_cwd: Option<String>,
     pub origin_cwd: Option<String>,
-    /// 거울 연결(원본 격자 불변). 세션 저장이 이걸 실어야 재시작 뒤에도
+    /// 거울 연결(만지기 전엔 원본 격자 불변). 세션 저장이 이걸 실어야 재시작 뒤에도
     /// 거울로 되붙는다 — 안 실으면 복원된 pane 이 원본 크기를 뺏는다.
     pub view: bool,
     /// `to` 로 이 앱이 세운 자리(RemoteIdentity::owned).
@@ -448,7 +500,8 @@ pub fn connect(
     connect_inner(spec, local_pane_id, cols, rows, view, false, None)
 }
 
-/// Mirrors follow the server's grid and fit it locally, without acquiring size control.
+/// Mirrors follow the server's grid and fit it locally; they take size control only
+/// when a person touches them (`touch_source`).
 pub fn connect_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
     connect_inner(spec, local_pane_id, 0, 0, true, false, None)
 }
@@ -754,6 +807,11 @@ async fn manager(
                                         }
                                         let fresh_connection = !sized_this_conn;
                                         sized_this_conn = true;
+                                        if fresh_connection {
+                                            let latest = v.pointer("/capabilities/viewport_latest")
+                                                .and_then(|x| x.as_u64()) == Some(1);
+                                            viewport.latest.store(latest, Ordering::Release);
+                                        }
                                         if !had_attach {
                                             had_attach = true;
                                             let id = remote_id.clone().unwrap_or_default();
@@ -763,7 +821,7 @@ async fn manager(
                                         // 함께 죽었다 — 새 연결의 첫 악수 뒤에 같은 크기로 다시 잡는다.
                                         // 같은 연결 안의 size(내 요청의 결과)에는 걸리지 않는다.
                                         if fresh_connection {
-                                            if let Some((cols, rows)) = *viewport.expanded.lock().unwrap() {
+                                            if let Some((cols, rows)) = *viewport.held.lock().unwrap() {
                                                 if let Some(out) = viewport.outgoing.lock().unwrap().as_ref() {
                                                     let _ = out.send(Out::Control(serde_json::json!({
                                                         "t": "viewport", "op": "acquire", "cols": cols, "rows": rows,
@@ -771,6 +829,12 @@ async fn manager(
                                                 }
                                             }
                                         }
+                                    }
+                                    // 원본의 사람이나 더 늦게 만진 뷰어가 격자를 가져갔다. 쥔 줄 알고
+                                    // 있으면 재접속이 도로 빼앗고, 다음 손길이 acquire 대신 resize 를
+                                    // 보내 거절당한다.
+                                    Some("viewport") if v.get("lost").and_then(|x| x.as_bool()) == Some(true) => {
+                                        viewport.held.lock().unwrap().take();
                                     }
                                     // 호스트가 「이 페이지를 네 쪽에서 열어라」 —
                                     // 본진 학생이 연 브라우저를 보는 사람의 기계로

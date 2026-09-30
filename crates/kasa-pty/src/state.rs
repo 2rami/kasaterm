@@ -418,6 +418,16 @@ impl ViewportSizes {
     fn close(&mut self, token: u64) {
         self.viewers.retain(|v| v.token != token);
     }
+
+    /// The source GUI is the latest toucher: every viewer lease yields, including
+    /// older non-owners, so a later release cannot hand the grid back to one.
+    fn reclaim(&mut self) -> bool {
+        let held = self.owner().is_some();
+        for viewer in &mut self.viewers {
+            viewer.size = None;
+        }
+        held
+    }
 }
 
 pub struct PtySession {
@@ -1745,6 +1755,24 @@ impl PtySession {
 
     pub fn has_viewer_size_control(&self) -> bool {
         self.viewport_sizes.lock().unwrap().owner().is_some()
+    }
+
+    /// The viewer lease whose size the PTY currently has. A connection compares
+    /// this with its own token to tell its viewer that a newer toucher won.
+    pub fn viewer_size_owner(&self) -> Option<u64> {
+        self.viewport_sizes.lock().unwrap().owner()
+    }
+
+    /// A person touched this pane on the source machine: return to its own
+    /// layout size (tmux `window-size latest`). False when no viewer held it.
+    pub fn reclaim_viewer_sizes(&self) -> Result<bool> {
+        let mut sizes = self.viewport_sizes.lock().unwrap();
+        if !sizes.reclaim() {
+            return Ok(false);
+        }
+        let (cols, rows) = sizes.effective();
+        self.resize_effective(cols, rows)?;
+        Ok(true)
     }
 
     pub fn open_viewer_size(&self) -> u64 {
@@ -6823,6 +6851,26 @@ mod external_session_tests {
         assert_eq!(sess.size(), (120, 40));
         sess.close_viewer_size(second).unwrap();
         assert_eq!(sess.size(), (21, 6));
+    }
+
+    #[test]
+    fn source_touch_reclaims_every_viewer_lease_until_a_viewer_touches_again() {
+        let (sess, _etx, _wrx, _resized) = ext_session(21, 6);
+        let first = sess.open_viewer_size();
+        let second = sess.open_viewer_size();
+        assert!(!sess.reclaim_viewer_sizes().unwrap(), "nothing held, nothing to reclaim");
+        assert!(sess.acquire_viewer_size(first, 100, 30).unwrap());
+        assert!(sess.acquire_viewer_size(second, 120, 40).unwrap());
+        assert_eq!(sess.viewer_size_owner(), Some(second));
+        sess.resize(30, 8).unwrap();
+        assert!(sess.reclaim_viewer_sizes().unwrap());
+        assert_eq!(sess.size(), (30, 8), "the source returns to its latest layout");
+        assert_eq!(sess.viewer_size_owner(), None);
+        assert!(!sess.resize_viewer_size(second, 90, 20).unwrap(), "a stale lease cannot resize");
+        sess.close_viewer_size(second).unwrap();
+        assert_eq!(sess.size(), (30, 8), "an older waiting viewer does not inherit the grid");
+        assert!(sess.acquire_viewer_size(first, 100, 30).unwrap(), "a new touch wins again");
+        assert_eq!(sess.size(), (100, 30));
     }
 
     #[test]

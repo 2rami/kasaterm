@@ -6992,9 +6992,11 @@ async fn term_ws_run(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
                 "surface_key": handshake_key,
+                // `viewport_latest`: the last toucher wins, a person on this machine
+                // reclaims by touching the pane, and a viewer that lost is told so.
                 "capabilities": if native_scene {
-                    serde_json::json!({ "mirror_viewport": 1, "native_scene": 1 })
-                } else { serde_json::json!({ "mirror_viewport": 1 }) },
+                    serde_json::json!({ "mirror_viewport": 1, "viewport_latest": 1, "native_scene": 1 })
+                } else { serde_json::json!({ "mirror_viewport": 1, "viewport_latest": 1 }) },
             })
             .to_string()
             .into(),
@@ -7063,6 +7065,19 @@ async fn term_ws_run(
     let replaced = Arc::new(tokio::sync::Notify::new());
     let replaced_input = replaced.clone();
     let mut last_size = (c, r);
+    // 이 연결이 원본 격자를 쥐었다고 뷰어에게 답한 상태. 입력 쪽이 허가 순간 세우고,
+    // 출력 쪽이 남(원본의 사람·더 늦게 만진 뷰어)에게 넘어간 것을 보고 `lost` 로 알린다 —
+    // 표본 추출이 아니라 깃발이라 짧게 쥐었다 잃어도 놓치지 않는다.
+    let viewport_held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let viewport_held_in = viewport_held.clone();
+    let viewport_lost = move |sess: &kasa_pty::PtySession| {
+        viewport_held.load(std::sync::atomic::Ordering::Acquire)
+            && sess.viewer_size_owner() != Some(viewport_token)
+            && viewport_held.swap(false, std::sync::atomic::Ordering::AcqRel)
+    };
+    let lost_notice = || Message::Text(
+        serde_json::json!({"t": "viewport", "granted": false, "lost": true}).to_string().into(),
+    );
     // 화면이 위로 밀려 스크롤백으로 들어간 줄을 거울에게도 흘린다(`scrolled`). 이게
     // 없으면 폰은 살아 있는 화면만 받아 위로 넘길 지난 줄이 없다.
     let mut last_hist = sess.view_state().1;
@@ -7091,6 +7106,9 @@ async fn term_ws_run(
                     // parser rather than mixing a new snapshot with queued old
                     // byte deltas. Grid subscribers already receive that frame.
                     // 이 연결의 viewport 요청이 바꾼 격자면 재접속하지 않는다(SelfSized 주석).
+                    if viewport_lost(&sess_sz) && ws_tx.send(lost_notice()).await.is_err() {
+                        break;
+                    }
                     let foreign = match *self_sized_out.lock().unwrap() {
                         SelfSized::Idle => true,
                         SelfSized::Pending => false,
@@ -7145,6 +7163,9 @@ async fn term_ws_run(
                             _ => false,
                         }
                     };
+                    if viewport_lost(&sess_sz) && ws_tx.send(lost_notice()).await.is_err() {
+                        break;
+                    }
                     if now != last_size {
                         if !want_grid && !self_caused {
                             // A byte delta can beat the quiet-resize timer.
@@ -7364,6 +7385,10 @@ async fn term_ws_run(
                             }
                             _ => false,
                         };
+                        // A refused resize means someone touched the pane after us.
+                        let lost = v["op"] == "resize" && !granted
+                            && viewport_held_in.load(std::sync::atomic::Ordering::Acquire);
+                        viewport_held_in.store(granted, std::sync::atomic::Ordering::Release);
                         if clear_reflow {
                             let _ = btx_shell.send(Frame::Reflow).await;
                         }
@@ -7390,7 +7415,10 @@ async fn term_ws_run(
                         } else {
                             *self_sized_in.lock().unwrap() = SelfSized::Idle;
                         }
-                        let reply = serde_json::json!({"t": "viewport", "granted": granted});
+                        let mut reply = serde_json::json!({"t": "viewport", "granted": granted});
+                        if lost {
+                            reply["lost"] = serde_json::json!(true);
+                        }
                         let _ = btx_shell.send(Frame::Control(reply.to_string())).await;
                         continue;
                     }
@@ -9220,6 +9248,61 @@ mod tests {
             ws.close(None).await.unwrap();
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn source_touch_tells_the_holding_raw_mirror_it_lost_before_reattaching() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let id = format!("viewport-latest-{}", uuid::Uuid::new_v4());
+        let (_events_tx, events_rx) = crossbeam_channel::unbounded();
+        let sess = Arc::new(kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: id.clone(), cols: 32, rows: 23, ..Default::default() },
+            kasa_pty::ExternalIo {
+                events: events_rx,
+                writer: Box::new(std::io::sink()),
+                on_resize: Arc::new(|_, _| {}),
+            },
+        ).unwrap());
+        kasa_pty::register_session(&id, &sess);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/term/ws?pane={id}&own=0"))
+            .await.unwrap();
+        let mut texts = Vec::<Value>::new();
+        let mut next_text = async |ws: &mut tokio_tungstenite::WebSocketStream<_>| -> Option<Value> {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    match ws.next().await {
+                        Some(Ok(Message::Text(text))) => return Some(serde_json::from_str(&text).unwrap()),
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                        Some(Ok(_)) => {}
+                    }
+                }
+            }).await.expect("websocket response timeout")
+        };
+        let size = next_text(&mut ws).await.unwrap();
+        assert_eq!(size["capabilities"]["viewport_latest"], 1);
+        ws.send(Message::Text(json!({"t":"viewport", "op":"acquire", "cols":180, "rows":50})
+            .to_string().into())).await.unwrap();
+        loop {
+            let v = next_text(&mut ws).await.unwrap();
+            if v["t"] == "viewport" { assert_eq!(v["granted"], true); break; }
+        }
+        assert_eq!(sess.size(), (180, 50));
+        assert!(sess.reclaim_viewer_sizes().unwrap());
+        assert_eq!(sess.size(), (32, 23));
+        while let Some(v) = next_text(&mut ws).await {
+            texts.push(v);
+        }
+        let lost = texts.iter().position(|v| v["t"] == "viewport" && v["lost"] == true);
+        assert!(lost.is_some(), "the viewer must learn it lost the grid: {texts:?}");
+        server.abort();
     }
 
     #[tokio::test]

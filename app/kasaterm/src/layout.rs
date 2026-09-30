@@ -687,7 +687,8 @@ impl App {
         // from leaf_cells — no dependency on ws.panes being populated. A
         // freshly split pane has no PaneState until its first output, so the
         // old ws.panes walk left it at 80×24 spawn size (화면 겹침/하단 잘림).
-        // Mirrors record local bounds only; their parser and source keep the host grid.
+        // Mirrors record local bounds; the source grid follows them only while a
+        // person's touch holds it (`mirror_follow`).
         for (id, (pc, pr)) in &leaf_cells {
             if kasa_mcp::remote::is_view_pane(id) {
                 kasa_mcp::remote::set_viewport(id, *pc, *pr);
@@ -735,14 +736,20 @@ impl App {
         // shifted (rounding) and the renderer caches the previous tree.
         self.publish_pty_layout();
     }
-    /// 확대된 거울만 원본 격자를 함께 키운다(풀면 되돌린다).
+    /// 옛 호스트: 확대된 거울만 원본 격자를 함께 키운다(풀면 되돌린다).
     ///
-    /// 거울은 원본 크기를 절대 안 건드리는 것이 기본이다 — 창을 줄일 때마다
+    /// 옛 호스트에서 거울은 원본 크기를 안 건드리는 것이 기본이다 — 창을 줄일 때마다
     /// 호스트가 따라 줄면 거기 앉은 사람 화면이 망가진다. 다만 확대는 뜻이
     /// 다르다: claude 가 접어 둔 줄(`+N lines`)은 호스트가 그 rows 로 그리지
     /// 않아 **스크롤백에도 없으므로**, 재투영으로는 영영 못 본다. 원본이 커져야
     /// 비로소 그려진다. 그래서 확대한 동안만 키우고, 풀면 원래 격자로 돌린다.
+    ///
+    /// 「마지막으로 만진 쪽이 이긴다」를 아는 호스트면 이 규칙을 안 쓴다 — 확대는 그 칸을
+    /// 만진 것이라(`toggle_pane_zoom`) 원본이 이미 이 칸 크기를 따르고, 풀어도 놓지 않는다.
     fn fit_zoomed_mirror(&self, zoom_key: &str, pid: &str, cols: u16, rows: u16) {
+        if kasa_mcp::remote::follows_latest(pid) {
+            return;
+        }
         if self.zoomed_pane.as_deref() != Some(zoom_key) {
             kasa_mcp::remote::restore_source(pid);
             return;
@@ -1755,6 +1762,10 @@ impl App {
         }
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
+        if self.zoomed_pane.is_some() {
+            let surface = self.ws.lock().unwrap().active_tab_pid(pane);
+            self.touch_surface_size(&surface);
+        }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();

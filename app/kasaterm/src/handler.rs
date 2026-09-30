@@ -3133,6 +3133,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.aux_window_event(id, event, event_loop);
             return;
         }
+        if main_window {
+            self.note_human_touch(&event);
+        }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -7561,6 +7564,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         self.flush_aux_opens(event_loop);
+        self.apply_human_touch();
         let web_visual_deadline = self.publish_web_visual_scenes();
         self.warm_visible_drag_identities();
         // 신원 조회가 값을 채웠으면 그 자리에서 다시 그린다. 조회는 백그라운드
