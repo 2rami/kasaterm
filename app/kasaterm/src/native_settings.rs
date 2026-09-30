@@ -7129,8 +7129,9 @@ fn seg_row(
     label: &str,
     cells: &[(&str, bool, SettingsAction)],
 ) {
+    // 1px slack: `fit` truncates a label measured to exactly its own width (「비 양」 → 「비 …」).
     let label_w = (g.measure_chrome_text(&crate::native_strings::text(label), 12.0, false)
-        + crate::native_controls::CONTROL_PADDING_X).min(w * 0.4);
+        + crate::native_controls::CONTROL_PADDING_X + 1.0).min(w * 0.4);
     flat_row(g, x, *y, w, label, "", label_w);
     let control_x = x + label_w + 12.0;
     segmented(g, s, hits, control_x, *y + (ROW_H - CTL_H) / 2.0, (x + w - control_x).max(0.0), cells);
