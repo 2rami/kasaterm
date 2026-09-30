@@ -2826,11 +2826,12 @@ impl App {
                 g.rect(0.0, 0.0, tab_strip_w, sb_win_h, theme::panel_bg());
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
             }
-            if pulse_h > 0.0 {
-                crate::sidebar_pulse::draw_view_switch(g, &mut self.pulse, sb_cursor, tab_strip_w, self.sidebar_list_body);
+            let switch_tip = if pulse_h > 0.0 {
+                crate::sidebar_pulse::draw_view_switch(g, &mut self.pulse, sb_cursor, tab_strip_w, self.sidebar_list_body)
             } else {
                 self.pulse.switch = None;
-            }
+                None
+            };
             self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
             self.info.navigation.route = self.board_scene.route_highlight().or_else(crate::sidebar_pulse::fixture_route);
             crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
@@ -3586,7 +3587,7 @@ impl App {
             // 배치도 칸의 hover 팝업(별도창 띠·탭 명단). 사이드바 안에서 정하고 칼럼들
             // 뒤에 그린다 — 안에서 그리면 파일트리가 위에 얹혀 가린다.
             let mut sb_tips: (Option<(f32, f32, String)>, Option<(f32, f32, Vec<TabPeek>)>) =
-                (None, None);
+                (switch_tip, None);
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
             if tab_strip_w > 0.0 {
@@ -4276,7 +4277,7 @@ impl App {
                 // 팝업은 여기서 안 그린다 — 파일트리·git 칼럼이 뒤에 그려져 그 위를
                 // 덮는다(2026-09-09 지적 「마우스오버 명단이 파일트리창에 가려져」).
                 // 칼럼들 뒤에 한 번 그린다(`paint_shell_menu` 앞).
-                sb_tips = (undock_tip, deck_tip);
+                sb_tips = (undock_tip.or(sb_tips.0.take()), deck_tip);
                 for (k, ((wi, _, r), info)) in sb_rows.iter().zip(sb_row_info.iter()).enumerate() {
                     let (who, label, col, is_cur) =
                         (&info.who, &info.label, &info.color, info.is_cur);

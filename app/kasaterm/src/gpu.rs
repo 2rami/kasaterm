@@ -4407,6 +4407,8 @@ impl GpuRenderer {
             "settings-2" => include_str!("../assets/icons/settings-2.svg"),
             "columns-2" => include_str!("../assets/icons/columns-2.svg"),
             "rows-2" => include_str!("../assets/icons/rows-2.svg"),
+            "list" => include_str!("../assets/icons/list.svg"),
+            "layout-grid" => include_str!("../assets/icons/layout-grid.svg"),
             "copy" => include_str!("../assets/icons/copy.svg"),
             "terminal" => include_str!("../assets/icons/terminal.svg"),
             // 픽셀 세트에는 없다 — `queue_icon` 이 벡터로 폴백하므로 픽셀 테마에서도
@@ -4554,7 +4556,9 @@ impl GpuRenderer {
             "git-commit-horizontal" => include_str!("../assets/icons/pixel/git-commit-horizontal.svg"),
             "image" => include_str!("../assets/icons/pixel/image.svg"),
             "info" => include_str!("../assets/icons/pixel/info.svg"),
+            "layout-grid" => include_str!("../assets/icons/pixel/layout-grid.svg"),
             "lightbulb" => include_str!("../assets/icons/pixel/lightbulb.svg"),
+            "list" => include_str!("../assets/icons/pixel/list.svg"),
             "maximize" => include_str!("../assets/icons/pixel/maximize.svg"),
             "message-square-warning" => include_str!("../assets/icons/pixel/message-square-warning.svg"),
             "minus" => include_str!("../assets/icons/pixel/minus.svg"),

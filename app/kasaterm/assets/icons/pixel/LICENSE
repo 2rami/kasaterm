@@ -6,7 +6,8 @@ reproduced below. Some are renamed to kasaterm's Lucide-derived names.
 
 The panel-*, columns-2, rows-2, file-plus, file-code and folder-tree glyphs
 have no pixelarticons counterpart and were drawn for kasaterm on the same
-24-unit grid; they carry kasaterm's own license.
+24-unit grid; they carry kasaterm's own license. The list and layout-grid
+glyphs were likewise drawn for kasaterm and carry the same license.
 
 ---
 

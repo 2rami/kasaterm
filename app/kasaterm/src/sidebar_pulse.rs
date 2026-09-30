@@ -1,4 +1,4 @@
-//! 사이드바 현황 — 맨 위 「목록 | 배치도」 전환과 학생 한 줄(이름 · 지금 일 / 사정 한 줄).
+//! 사이드바 현황 — 맨 위 「목록 | 배치도」 아이콘 전환과 학생 한 줄(이름 · 지금 일 / 사정 한 줄).
 //!
 //! 옛 현황 줄(「사람 차례 N · 작업 N · 끝 N」)은 걷었다 — 차례 수를 따로 세우지 않고 줄이 말한다
 //! (2026-09-29 합의, `docs/boards.md` 「다음 구조」). 보드 스냅샷은 여전히 백그라운드로 읽는다:
@@ -179,22 +179,39 @@ pub(crate) fn menu_label(hidden: bool) -> &'static str {
     if hidden { "목록·배치도 줄 보이기" } else { "목록·배치도 줄 숨기기" }
 }
 
-/// 사이드바 맨 위, 기기 머리줄 위의 「목록 | 배치도」. 고른 것은 전체 기본(`sidebar_body`)이고,
-/// 방마다 우클릭으로 고른 것이 그보다 이긴다.
-pub(crate) fn draw_view_switch(g: &mut gpu::GpuRenderer, pulse: &mut Pulse, cursor: (f32, f32), width: f32, list: bool) {
-    pulse.switch = None;
+/// 전환 아이콘 둘의 자리 `(목록, 배치도)`. 왼쪽 끝이 방 카드와 같은 선이라 그림이 기기 머리줄
+/// 아이콘 밑에 선다. 둘이 안 들어가는 폭이면 `None`.
+fn switch_rects(width: f32) -> Option<(Rect, Rect)> {
     const GAP: f32 = 6.0;
-    let pad = if width < 180.0 { 8.0 } else { 14.0 };
-    let w = ((width - 2.0 * pad - GAP) / 2.0).floor();
-    if w <= 0.0 {
-        return;
+    let side = crate::native_controls::CONTROL_HEIGHT;
+    if SIDEBAR_TAB_INSET + 2.0 * side + GAP > width {
+        return None;
     }
-    let y = TITLE_HEIGHT + 2.0;
-    let row_h = PULSE_H - 4.0;
+    let y = TITLE_HEIGHT + (PULSE_H - side) / 2.0;
+    Some(((SIDEBAR_TAB_INSET, y, side, side), (SIDEBAR_TAB_INSET + side + GAP, y, side, side)))
+}
+
+/// 사이드바 맨 위, 기기 머리줄 위의 「목록 | 배치도」 아이콘. 고른 것은 전체 기본(`sidebar_body`)이고,
+/// 방마다 우클릭으로 고른 것이 그보다 이긴다. 글자가 없으니 마우스가 올라간 쪽의 이름을 툴팁으로
+/// 돌려준다 — 칼럼들을 다 그린 뒤에 얹어야 파일트리에 안 가린다.
+pub(crate) fn draw_view_switch(
+    g: &mut gpu::GpuRenderer,
+    pulse: &mut Pulse,
+    cursor: (f32, f32),
+    width: f32,
+    list: bool,
+) -> Option<(f32, f32, String)> {
+    pulse.switch = None;
+    let (list_rect, map_rect) = switch_rects(width)?;
     let style = |active| crate::native_controls::Style { active, ..Default::default() };
-    let left = crate::native_controls::text_button(g, (pad, y, w, row_h), cursor, "목록", style(list));
-    let right = crate::native_controls::text_button(g, (pad + w + GAP, y, w, row_h), cursor, "배치도", style(!list));
+    let left = crate::native_controls::icon_button(g, list_rect, cursor, "list", style(list));
+    let right = crate::native_controls::icon_button(g, map_rect, cursor, "layout-grid", style(!list));
     pulse.switch = Some((left, right));
+    let inside = |r: Rect| cursor.0 >= r.0 && cursor.0 < r.0 + r.2 && cursor.1 >= r.1 && cursor.1 < r.1 + r.3;
+    [(left, "목록"), (right, "배치도")]
+        .into_iter()
+        .find(|(r, _)| inside(*r))
+        .map(|(_, name)| (cursor.0, cursor.1, name.to_string()))
 }
 
 /// 방 안 순서 — 내 차례 → 하는 중 → 쉬는 중.
@@ -665,6 +682,17 @@ mod tests {
         let mut turns = [RowTurn::Resting, RowTurn::Yours, RowTurn::Working, RowTurn::Yours];
         turns.sort();
         assert_eq!(turns, [RowTurn::Yours, RowTurn::Yours, RowTurn::Working, RowTurn::Resting]);
+    }
+
+    /// 전환은 아이콘 둘 — 공통 아이콘 단추 크기로 전환 줄 안에 서고, 왼쪽 끝이 방 카드 선이다.
+    #[test]
+    fn switch_icons_sit_in_the_switch_row_on_the_card_line() {
+        let (list, map) = switch_rects(240.0).unwrap();
+        assert_eq!((list.0, list.2, list.3), (SIDEBAR_TAB_INSET, 26.0, 26.0));
+        assert_eq!(map.0, list.0 + list.2 + 6.0, "사이 6");
+        assert!(list.1 >= TITLE_HEIGHT && list.1 + list.3 <= TITLE_HEIGHT + PULSE_H, "전환 줄 안");
+        assert!(crate::gpu::GpuRenderer::icon_svg("list").is_some() && crate::gpu::GpuRenderer::icon_svg("layout-grid").is_some());
+        assert!(switch_rects(60.0).is_none(), "둘이 안 들어가면 안 그린다 — 반쪽 단추를 누르게 두지 않는다");
     }
 
     #[test]
