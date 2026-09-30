@@ -1355,7 +1355,8 @@ fn share_local_date() -> String {
     }
     #[cfg(windows)]
     {
-        let t = unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime() };
+        let mut t: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
         format!("{:04}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay)
     }
 }
