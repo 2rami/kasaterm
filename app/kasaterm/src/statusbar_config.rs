@@ -7,9 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub(crate) const WIDGETS: [&str; 10] = [
+pub(crate) const WIDGETS: [&str; 11] = [
     "claude",
     "codex",
+    "launchers",
     "ports",
     "schedules",
     "pet",
@@ -30,6 +31,9 @@ pub(crate) struct Prefs {
     pub(crate) colors: HashMap<String, String>,
     pub(crate) usage_fields: HashMap<String, Vec<String>>,
     pub(crate) separators: bool,
+    /// 실행 단추 목록(`launchers`). 표시 설정이 아니라 내용이라 하단바 「기본값으로」가
+    /// 건드리지 않는다.
+    pub(crate) launchers: Vec<crate::launchers::Launcher>,
 }
 
 impl Default for Prefs {
@@ -51,6 +55,7 @@ impl Default for Prefs {
                 })
                 .collect(),
             separators: true,
+            launchers: crate::launchers::defaults(),
         }
     }
 }
@@ -101,6 +106,7 @@ impl Prefs {
             .get("statusbar_separators")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        out.launchers = crate::launchers::from_settings(settings);
         out
     }
 
@@ -217,6 +223,13 @@ fn normalized_order<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
                     continue;
                 }
             }
+            // 실행 단추는 도구 무리의 맨 앞(계정 바로 옆) — 끝에 붙이면 기기 칩 사이에 낀다.
+            if id == "launchers" {
+                if let Some(at) = out.iter().position(|x| group(x) == 1) {
+                    out.insert(at, id.to_string());
+                    continue;
+                }
+            }
             out.push(id.to_string());
         }
     }
@@ -235,7 +248,7 @@ fn valid_usage_field(field: &str) -> bool {
 pub(crate) fn group(id: &str) -> u8 {
     match id {
         "claude" | "codex" => 0,
-        "ports" | "schedules" | "pet" | "clipboard" => 1,
+        "launchers" | "ports" | "schedules" | "pet" | "clipboard" => 1,
         "link" => 2,
         _ => 2,
     }
@@ -306,6 +319,15 @@ mod tests {
         assert!(!p.colors.contains_key("codex"));
         assert_eq!(p.usage_fields["claude"], ["weekly"]);
         assert_eq!(p.usage_fields["codex"], DEFAULT_USAGE_FIELDS);
+    }
+
+    #[test]
+    fn saved_order_from_before_launchers_puts_them_first_among_tools() {
+        let p = Prefs::from_settings(&serde_json::json!({
+            "statusbar_order": ["claude", "codex", "clipboard", "ports", "pet", "schedules",
+                "resources", "tunnel", "link", "version"],
+        }));
+        assert_eq!(&p.order[2..4], ["launchers", "clipboard"]);
     }
 
     #[test]

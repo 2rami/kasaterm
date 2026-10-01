@@ -1389,7 +1389,9 @@ impl App {
                 self.chrome_dirty = true;
             }
             SettingsAction::ResetStatusbar => {
+                let launchers = std::mem::take(&mut self.set_statusbar.launchers);
                 self.set_statusbar = crate::statusbar_config::Prefs::default();
+                self.set_statusbar.launchers = launchers;
                 self.settings_save();
                 self.chrome_dirty = true;
             }

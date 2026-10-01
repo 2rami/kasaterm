@@ -3275,6 +3275,7 @@ fn statusbar_widget_label(id: &str) -> &'static str {
     match id {
         "claude" => "Claude 사용량",
         "codex" => "Codex 사용량",
+        "launchers" => "실행 단추",
         "ports" => "열린 포트",
         "pet" => "펫 상태",
         "clipboard" => "클립보드",
@@ -3310,6 +3311,7 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
         return parts.join(" ");
     }
     match id {
+        "launchers" => "슬랙",
         "ports" => ":3000 · :5173",
         "pet" => "펫 2명",
         "clipboard" => "클립보드",
