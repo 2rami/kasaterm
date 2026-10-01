@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../net_tcp.dart';
 import '../server.dart';
 import '../look.dart';
+import '../twins_loading.dart';
 import 'controls.dart';
 
 /// 데스크톱 개발 서버를 앱 안 Safari 화면(안드로이드는 크롬 커스텀 탭)으로 연다 — 데스크톱 `127.0.0.1:port` 를
@@ -123,8 +124,10 @@ class _DevServerScreenState extends State<DevServerScreen> {
     final scheme = theme.colorScheme;
     final local = _bridge?.localPort;
     final direct = widget.server.pathOf(widget.machine)?.$1 ?? false;
-    return Scaffold(
-      appBar: AppBar(title: Text('localhost:${widget.port}')),
+    return TwinBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: Text('localhost:${widget.port}')),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(Look.groupGap),
@@ -157,7 +160,7 @@ class _DevServerScreenState extends State<DevServerScreen> {
               ],
               const SizedBox(height: 24),
               if (_launching)
-                const CircularProgressIndicator()
+                const TwinsMark(hopping: true, face: Look.pullFace)
               else if (local != null)
                 FilledButton.icon(
                   onPressed: _launch,
@@ -180,6 +183,7 @@ class _DevServerScreenState extends State<DevServerScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }

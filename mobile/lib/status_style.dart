@@ -169,7 +169,9 @@ class Appear extends StatelessWidget {
   final int delayIndex;
 
   @override
-  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+  Widget build(BuildContext context) => Look.still(context)
+      ? child
+      : TweenAnimationBuilder<double>(
     tween: Tween(begin: 0, end: 1),
     duration: Duration(milliseconds: 320 + 40 * delayIndex.clamp(0, 8)),
     curve: Curves.easeOutCubic,
@@ -199,6 +201,7 @@ class WorkingBar extends StatelessWidget {
             height: 3,
             child: LinearProgressIndicator(
               minHeight: 3,
+              borderRadius: BorderRadius.circular(3),
               color: style.color,
               backgroundColor: style.color.withValues(alpha: 0.16),
             ),
@@ -259,10 +262,9 @@ class MirrorTag extends StatelessWidget {
       final theme = Theme.of(context);
       final color = looks.color(machine);
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-        decoration: BoxDecoration(
-          borderRadius: Look.corners,
-          border: Border.all(color: color),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        decoration: ShapeDecoration(
+          shape: StadiumBorder(side: BorderSide(color: color)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,

@@ -13,6 +13,7 @@ import '../theme_prefs.dart';
 import '../weather/sheet.dart';
 import '../weather/store.dart';
 import '../look.dart';
+import '../twins_loading.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
 import 'oauth_sheet.dart';
@@ -161,308 +162,298 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('설정')),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        children: [
-          Card(
-            child: Column(
+  Widget build(BuildContext context) => TwinBackdrop(
+    child: Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('설정')),
+      body: FutureBuilder<OAuthProviders>(
+        future: _providers,
+        builder: (context, snap) => _list(snap.data?.enabled ?? const <OAuthProvider>[]),
+      ),
+    ),
+  );
+
+  Widget _list(List<OAuthProvider> providers) {
+    final account = server.account;
+    // 묶음 차례로 하늘·호박을 번갈아 — 계정 묶음이 빠지면 그 뒤가 한 칸씩 당겨진다.
+    final linking = account != null && providers.isNotEmpty;
+    const phone = 0;
+    final desktop = linking ? 2 : 1;
+    return ListView(
+          padding: const EdgeInsets.fromLTRB(Look.pagePad, 8, Look.pagePad, Look.groupGap * 2),
+          children: [
+            _AccountCard(server: server),
+            SettingsGroup(
+              title: '이 폰',
               children: [
-                ListTile(
-                  leading: const Icon(Icons.link),
-                  title: Text(server.account?.label ?? '연결된 주소'),
-                  subtitle: Text(server.describe()),
+                SettingsRow(
+                  tone: phone,
+                  icon: Icons.brightness_6_outlined,
+                  title: '밝기',
+                  subtitle: switch (phoneThemeMode.value) {
+                    ThemeMode.system => '데스크톱 테마 그대로',
+                    ThemeMode.light => '밝게 · 같은 테마 색을 밝게',
+                    ThemeMode.dark => '어둡게 · 같은 테마 색을 어둡게',
+                  },
+                  trailing: IconChoice<ThemeMode>(
+                    options: const [
+                      (ThemeMode.system, Icons.desktop_windows_outlined, '데스크톱 따라감'),
+                      (ThemeMode.light, Icons.light_mode_outlined, '밝게'),
+                      (ThemeMode.dark, Icons.dark_mode_outlined, '어둡게'),
+                    ],
+                    selected: phoneThemeMode.value,
+                    onSelect: _setMode,
+                  ),
                 ),
-                const Divider(height: 1),
-                if (server.routeChanges case final changes?)
-                  ListenableBuilder(
-                    listenable: changes,
-                    builder: (context, _) => ListTile(
-                      leading: const Icon(Icons.bolt_outlined),
-                      title: const Text('데스크톱 길'),
-                      subtitle: Text(switch (server.pathOf(null)) {
-                        (true, final int ms) => '카사넷 직통 · ${ms}ms',
-                        (true, null) => '카사넷 직통',
-                        (false, _) => '관문 경유 — 직통을 찾는 중',
-                        null => '관문 경유',
-                      }),
+                ListenableBuilder(
+                  listenable: weather.settings,
+                  builder: (context, _) {
+                    final w = weather.settings.value;
+                    return SettingsRow(
+                      tone: phone,
+                      icon: Icons.umbrella_outlined,
+                      title: '날씨',
+                      subtitle: w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 · 카드와 단추에 비를 내려요',
+                      chevron: true,
+                      onTap: () => showWeatherSheet(context),
+                    );
+                  },
+                ),
+              ],
+            ),
+            if (linking)
+              SettingsGroup(
+                title: '계정',
+                children: [
+                  for (final p in providers)
+                    SettingsRow(
+                      key: Key('link-${p.id}'),
+                      tone: 1,
+                      icon: Icons.login_rounded,
+                      title: '${p.label} 연결',
+                      subtitle: '다음부터 ${p.label} 로그인으로 이 계정에 들어와요',
+                      chevron: true,
+                      onTap: _linking ? null : () => unawaited(_link(p)),
                     ),
-                  ),
-                const Divider(height: 1),
-                if (server.account != null)
-                  const ListTile(leading: Icon(Icons.notifications_off_outlined),
-                    title: Text('계정 알림은 준비 중'),
-                    subtitle: Text('로그아웃 뒤 다른 계정의 알림이 오지 않도록, 계정 연결에서는 푸시 알림을 아직 등록하지 않습니다.')),
-                ListTile(
-                  leading: Icon(
-                    Icons.delete_outline,
-                    color: theme.colorScheme.error,
-                  ),
-                  title: Text(server.account == null ? '주소 바꾸기 · 지우기' : '로그아웃'),
-                  subtitle: const Text('연결을 종료하고 로그인 화면으로 돌아갑니다'),
+                ],
+              ),
+            SettingsGroup(title: '데스크톱', children: _desktopRows(desktop)),
+            SettingsGroup(
+              title: '앱',
+              children: [
+                FutureBuilder<AppRelease?>(
+                  future: _release,
+                  builder: (context, snap) {
+                    final r = snap.data;
+                    final fresh = r != null && r.newer;
+                    return SettingsRow(
+                      tone: desktop + 1,
+                      icon: fresh ? Icons.system_update_outlined : Icons.info_outline_rounded,
+                      title: '앱 판',
+                      subtitle: fresh
+                          ? '새 판 ${r.version} (${r.build}) · 눌러서 설치'
+                          : (kasaBuild.isEmpty ? '개발 설치' : '빌드 $kasaBuild'),
+                      trailing: fresh ? const _Pill('새 판') : null,
+                      chevron: fresh,
+                      onTap: fresh ? () => unawaited(r.open()) : null,
+                    );
+                  },
+                ),
+              ],
+            ),
+            SettingsGroup(
+              children: [
+                SettingsRow(
+                  danger: true,
+                  icon: Icons.logout_rounded,
+                  title: account == null ? '주소 바꾸기 · 지우기' : '로그아웃',
+                  subtitle: '이 폰의 연결을 끝내고 로그인 화면으로 돌아가요',
                   onTap: () => _forget(context),
                 ),
               ],
             ),
-          ),
-          FutureBuilder<OAuthProviders>(
-            future: _providers,
-            builder: (context, snap) {
-              final providers = snap.data?.enabled ?? const <OAuthProvider>[];
-              if (server.account == null || providers.isEmpty) return const SizedBox.shrink();
-              return Padding(
-                padding: const EdgeInsets.only(top: Look.groupGap),
-                child: Card(
-                  child: Column(
-                    children: [
-                      for (final (i, p) in providers.indexed) ...[
-                        if (i > 0) const Divider(height: 1),
-                        ListTile(
-                          key: Key('link-${p.id}'),
-                          leading: const Icon(Icons.login),
-                          title: Text('${p.label} 연결'),
-                          subtitle: Text('다음부터 ${p.label} 로그인으로 이 계정에 들어와요'),
-                          trailing: const Icon(Icons.chevron_right),
-                          enabled: !_linking,
-                          onTap: () => unawaited(_link(p)),
-                        ),
-                      ],
-                    ],
-                  ),
+          ],
+        );
+  }
+
+  /// 데스크톱 설정을 폰에서 바꾸는 줄 — 강조색·모서리는 데스크톱 「외형」 값이고 누르면 데스크톱이 바뀐다.
+  /// 테마(밝기)는 여기 없다 — 폰에서 밝은 테마를 고르면 맥북까지 밝아졌다(2026-09-10 지적).
+  List<Widget> _desktopRows(int tone) {
+    final a = _appearance;
+    final busy = _pending != null;
+    return [
+      if (_loading)
+        SettingsRow(tone: tone, icon: Icons.palette_outlined, title: '외형', subtitle: '데스크톱 설정을 받는 중이에요')
+      else if (a == null)
+        SettingsRow(
+          tone: tone,
+          icon: Icons.cloud_off_outlined,
+          title: '외형',
+          subtitle: '데스크톱 설정을 못 받았어요 · 옛 데스크톱이거나 연결이 끊겼어요',
+          trailing: TextButton(onPressed: _reload, child: const Text('다시')),
+        )
+      else ...[
+        SettingsRow(
+          tone: tone,
+          icon: Icons.palette_outlined,
+          title: '강조색',
+          subtitle: '누르면 데스크톱 강조색이 바뀌어요',
+          below: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final c in _entries(a, 'accents'))
+                _AccentDot(
+                  name: c['name'] as String? ?? '',
+                  color: parseHexColor(c['hex'] as String?) ?? Theme.of(context).colorScheme.primary,
+                  selected: c['name'] == a['accent'],
+                  onTap: busy || c['name'] is! String ? null : () => _apply('accent', c['name'] as String),
                 ),
-              );
-            },
+            ],
           ),
-          const SizedBox(height: Look.groupGap),
-          Card(
-            child: FutureBuilder<AppRelease?>(
-              future: _release,
-              builder: (context, snap) {
-                final r = snap.data;
-                final fresh = r != null && r.newer;
-                return ListTile(
-                  leading: Icon(fresh ? Icons.system_update_outlined : Icons.info_outline),
-                  title: Text(kasaBuild.isEmpty ? '앱 판 · 개발 설치' : '앱 판 · 빌드 $kasaBuild'),
-                  subtitle: fresh ? Text('새 판 ${r.version} (${r.build}) — 눌러서 설치') : null,
-                  trailing: fresh ? const Icon(Icons.chevron_right) : null,
-                  onTap: fresh ? () => unawaited(r.open()) : null,
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: Look.groupGap),
-          _SectionTitle('학생'),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.public_outlined),
-              title: const Text('브라우저 기기'),
-              subtitle: const Text('학생이 보여 주려 여는 페이지가 갈 곳 — 이 폰이면 쪽지로'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => showBrowserDeviceSheet(context, server: server),
-            ),
-          ),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.web_outlined),
-              title: const Text('데스크톱 개발 서버 열기'),
-              subtitle: const Text('데스크톱 localhost 페이지를 이 앱 안에서 — 직통이면 카사넷으로'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => openDevServer(context, server: server),
-            ),
-          ),
-          const SizedBox(height: Look.groupGap),
-          _SectionTitle('이 폰'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('밝기', style: theme.textTheme.titleSmall),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: SegmentedButton<ThemeMode>(
-                      showSelectedIcon: false,
-                      segments: const [
-                        ButtonSegment(
-                          value: ThemeMode.system,
-                          label: Text('데스크톱 따라감'),
-                        ),
-                        ButtonSegment(
-                          value: ThemeMode.light,
-                          label: Text('밝게'),
-                        ),
-                        ButtonSegment(
-                          value: ThemeMode.dark,
-                          label: Text('어둡게'),
-                        ),
-                      ],
-                      selected: {phoneThemeMode.value},
-                      onSelectionChanged: (s) => _setMode(s.first),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    phoneThemeMode.value == ThemeMode.system
-                        ? '연결된 데스크톱의 테마 색을 그대로 입는다. 못 받으면 폰 시스템 설정.'
-                        : '데스크톱 테마 색을 이 밝기로 바꿔 입는다. 못 받으면 폰 기본 색.',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Card(
-            child: ListenableBuilder(
-              listenable: weather.settings,
-              builder: (context, _) {
-                final w = weather.settings.value;
-                return ListTile(
-                  leading: const Icon(Icons.umbrella_outlined),
-                  title: const Text('날씨'),
-                  subtitle: Text(w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 — 카드·단추에 비를 내린다'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => showWeatherSheet(context),
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: Look.groupGap),
-          _SectionTitle('데스크톱 외형'),
-          if (_loading)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(child: CircularProgressIndicator()),
-            )
-          else if (_appearance == null)
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.cloud_off),
-                title: const Text('데스크톱 설정을 못 받았다'),
-                subtitle: const Text('옛 데스크톱이거나 연결이 끊겼다. 당겨서 다시.'),
-                onTap: _reload,
-              ),
-            )
-          else
-            _AppearanceCard(
-              appearance: _appearance!,
-              pending: _pending,
-              onPick: _apply,
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupTitleGap),
-      child: Text(
-        text,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
         ),
+        SettingsRow(
+          tone: tone,
+          icon: Icons.rounded_corner_rounded,
+          title: '모서리',
+          subtitle: [
+            for (final sh in _entries(a, 'shapes'))
+              if (sh['key'] == a['shape']) sh['label'] as String? ?? '',
+            '데스크톱 모양',
+          ].where((t) => t.isNotEmpty).join(' · '),
+          trailing: IconChoice<String>(
+            options: [
+              for (final sh in _entries(a, 'shapes'))
+                if (sh['key'] case final String key)
+                  (key, _shapeIcon(key), sh['label'] as String? ?? key),
+            ],
+            selected: a['shape'] as String?,
+            onSelect: busy ? null : (key) => _apply('shape', key),
+          ),
+        ),
+      ],
+      SettingsRow(
+        tone: tone,
+        icon: Icons.public_outlined,
+        title: '브라우저 기기',
+        subtitle: '학생이 보여 주려 여는 페이지가 갈 곳',
+        chevron: true,
+        onTap: () => showBrowserDeviceSheet(context, server: server),
       ),
-    );
+      SettingsRow(
+        tone: tone,
+        icon: Icons.web_outlined,
+        title: '개발 서버 열기',
+        subtitle: '데스크톱 localhost 페이지를 이 앱 안에서',
+        chevron: true,
+        onTap: () => openDevServer(context, server: server),
+      ),
+    ];
   }
-}
 
-/// 데스크톱 설정 화면의 외형 칸 — 강조색·모서리. 목록도 고른 것도 데스크톱이 준
-/// 것이고, 누르면 데스크톱이 바뀐다. 테마(밝기)는 여기 없다 — 폰에서 밝은 테마를
-/// 고르면 맥북까지 밝아졌다(2026-09-10 지적). 폰의 밝기는 위 「이 폰」 칸이 폰만 바꾼다.
-class _AppearanceCard extends StatelessWidget {
-  const _AppearanceCard({
-    required this.appearance,
-    required this.pending,
-    required this.onPick,
-  });
+  /// 데스크톱 모양 프리셋(`rounded`·`sharp`·`pixel`)의 그림. 모르는 새 프리셋은 일반 모양 그림으로.
+  static IconData _shapeIcon(String key) => switch (key) {
+    'rounded' => Icons.rounded_corner_rounded,
+    'sharp' => Icons.crop_square_rounded,
+    'pixel' => Icons.grid_4x4_rounded,
+    _ => Icons.category_outlined,
+  };
 
-  final Map<String, Object?> appearance;
-  final String? pending;
-  final Future<void> Function(String action, String id) onPick;
-
-  List<Map<String, Object?>> _list(String key) {
-    final v = appearance[key];
+  static List<Map<String, Object?>> _entries(Map<String, Object?> a, String key) {
+    final v = a[key];
     if (v is! List) return const [];
     return [
       for (final e in v)
         if (e is Map) e.cast<String, Object?>(),
     ];
   }
+}
+
+/// 맨 위 계정 판 — 쌍둥이 그림 · 계정 이름 · 데스크톱까지 가는 길 · 주소.
+class _AccountCard extends StatelessWidget {
+  const _AccountCard({required this.server});
+
+  final Server server;
+
+  String _path() => switch (server.pathOf(null)) {
+    (true, final int ms) => '카사넷 직통 · ${ms}ms',
+    (true, null) => '카사넷 직통',
+    (false, _) => '관문 경유 · 직통을 찾는 중',
+    null => '관문 경유',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tone = TwinTone.of(context);
+    final dim = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    Widget body() => Row(
+      children: [
+        Container(
+          width: Look.accountArt,
+          height: Look.accountArt,
+          decoration: BoxDecoration(
+            borderRadius: Look.corners,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [tone.skyWash, tone.amberWash],
+            ),
+          ),
+          child: Image.asset(
+            'assets/original/twins.png',
+            cacheWidth: (Look.accountArt * MediaQuery.devicePixelRatioOf(context)).round(),
+          ),
+        ),
+        const SizedBox(width: Look.cardPad),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                server.account?.label ?? '연결된 주소',
+                style: theme.textTheme.titleLarge,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: Look.rowGap),
+              Text(_path(), style: theme.textTheme.bodySmall),
+              Text(server.describe(), style: dim, overflow: TextOverflow.ellipsis),
+            ],
+          ),
+        ),
+      ],
+    );
+    final changes = server.routeChanges;
+    return Container(
+      padding: const EdgeInsets.all(Look.cardPad),
+      decoration: tone.cardBox(),
+      child: changes == null ? body() : ListenableBuilder(listenable: changes, builder: (context, _) => body()),
+    );
+  }
+}
+
+/// 「새 판」 같은 짧은 알림 알약 — 강조 물 위 강조 글자.
+class _Pill extends StatelessWidget {
+  const _Pill(this.text);
+
+  final String text;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final accent = appearance['accent'] as String?;
-    final shape = appearance['shape'] as String?;
-    final busy = pending != null;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('강조색', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                for (final a in _list('accents'))
-                  _AccentDot(
-                    name: a['name'] as String? ?? '',
-                    color: parseHexColor(a['hex'] as String?) ?? scheme.primary,
-                    selected: a['name'] == accent,
-                    onTap: busy || a['name'] is! String
-                        ? null
-                        : () => onPick('accent', a['name'] as String),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Text('모서리', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final s in _list('shapes'))
-                  ChoiceChip(
-                    label: Text(s['label'] as String? ?? s['key'] as String? ?? ''),
-                    selected: s['key'] == shape,
-                    onSelected: busy || s['key'] is! String
-                        ? null
-                        : (_) => onPick('shape', s['key'] as String),
-                  ),
-              ],
-            ),
-            if (busy) ...[
-              const SizedBox(height: 12),
-              const LinearProgressIndicator(minHeight: 2),
-            ],
-          ],
-        ),
-      ),
+    return Container(
+      height: Look.chipH,
+      padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX),
+      alignment: Alignment.center,
+      decoration: ShapeDecoration(shape: const StadiumBorder(), color: scheme.primary.withValues(alpha: 0.16)),
+      child: Text(text, style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary)),
     );
   }
 }
 
-/// 테마 카드 — 그 테마의 바탕·글자·ansi 색으로 그려야 고르기 전에 색이 보인다.
+/// 강조색 동그라미 — 고른 것은 바깥 고리. 누름 영역은 44.
 class _AccentDot extends StatelessWidget {
   const _AccentDot({
     required this.name,
@@ -481,29 +472,23 @@ class _AccentDot extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return Tooltip(
       message: name,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
+      child: InkResponse(
         onTap: onTap,
-        child: Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: selected ? scheme.onSurface : scheme.outlineVariant,
-              width: selected ? 2.5 : 1,
+        radius: Look.tap / 2,
+        child: SizedBox.square(
+          dimension: Look.tap,
+          child: Center(
+            child: Container(
+              width: Look.swatch,
+              height: Look.swatch,
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: selected ? scheme.onSurface : Colors.transparent, width: 2),
+              ),
+              child: DecoratedBox(decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
             ),
           ),
-          child: selected
-              ? Icon(
-                  Icons.check,
-                  size: 18,
-                  color: color.computeLuminance() > 0.5
-                      ? Colors.black87
-                      : Colors.white,
-                )
-              : null,
         ),
       ),
     );

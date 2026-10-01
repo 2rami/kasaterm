@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../server.dart';
+import '../twins_loading.dart';
 import '../relay_account.dart';
 import '../look.dart';
 import 'controls.dart';
@@ -150,7 +151,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Scaffold(
+    return TwinBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
       body: SafeArea(
         child: Align(
           alignment: Alignment.topCenter,
@@ -161,10 +164,14 @@ class _ConnectScreenState extends State<ConnectScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text('KASA Mobile', style: theme.textTheme.titleLarge),
+                  const SizedBox(height: Look.groupGap),
+                  const ExcludeSemantics(child: Center(child: TwinsStage(t: 0, size: Look.twinsSmall))),
+                  const SizedBox(height: Look.fieldGap),
+                  Text('KASA Mobile', textAlign: TextAlign.center, style: theme.textTheme.titleLarge),
                   const SizedBox(height: 8),
                   Text(
                     '데스크톱과 같은 계정으로 로그인하세요.',
+                    textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -297,6 +304,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
             ),
           ),
         ),
+      ),
       ),
     );
   }

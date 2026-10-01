@@ -758,14 +758,11 @@ class _Key extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    // 채움 없이 테만 — 켜진 ctrl 은 강조 테·글자(4장 형태 규칙).
+    // 쌍둥이 결 — 테 없이 톤 채움, 켜진 ctrl 은 강조 물·글자.
     final ink = selected ? scheme.primary : scheme.onSurface;
     return Material(
-      color: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: Look.corners,
-        side: BorderSide(color: selected ? scheme.primary : scheme.outline),
-      ),
+      color: selected ? scheme.primary.withValues(alpha: 0.18) : scheme.surfaceContainerHigh,
+      shape: RoundedRectangleBorder(borderRadius: Look.corners),
       child: InkWell(
         onTap: onTap,
         borderRadius: Look.corners,

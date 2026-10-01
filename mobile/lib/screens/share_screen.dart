@@ -3,8 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../look.dart';
 import '../server.dart';
+import '../twins_loading.dart';
 import '../chat_markdown.dart' show chatMarkdownStyle;
+import 'controls.dart';
 import 'notes_sheet.dart' show timeAgo;
 
 /// KASA-share — 학생들이 만든 시안·스크린샷·문서가 `<날짜>-<주제>/` 폴더로 쌓이는 곳.
@@ -64,17 +67,18 @@ class _ShareScreenState extends State<ShareScreen> {
   Widget build(BuildContext context) {
     final l = _listing;
     final folder = l == null || widget.folder == null ? null : _folderOf(l);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          widget.folder == null
-              ? (l?.name ?? 'KASA-share')
-              : folder?.topic ?? widget.folder!,
+    return TwinBackdrop(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          title: Text(
+            widget.folder == null
+                ? (l?.name ?? 'KASA-share')
+                : folder?.topic ?? widget.folder!,
+          ),
         ),
-      ),
-      body: RefreshIndicator(
-        onRefresh: _load,
-        child: _body(context, l, folder),
+        body: _body(context, l, folder),
       ),
     );
   }
@@ -85,51 +89,70 @@ class _ShareScreenState extends State<ShareScreen> {
         text: _problem ?? '불러오는 중',
         busy: _problem == null,
         onRetry: _problem == null ? null : _load,
+        onRefresh: _load,
       );
     }
-    final problem = _problem == null ? null : _Banner(text: _problem!);
+    final problem = _problem == null ? null : ErrorBand(text: '새로 못 읽었어요 · $_problem', onRetry: _load);
     if (widget.folder != null) {
       if (folder == null) {
         return _Message(
           text: '이 폴더가 이제 없어요 — 다른 기기에서 지웠을 수 있어요',
           banner: problem,
+          onRefresh: _load,
         );
       }
       return _FolderView(
         server: widget.server,
         folder: folder,
         banner: problem,
+        onRefresh: _load,
       );
     }
     if (l.isEmpty) {
       return _Message(
         text: '아직 올라온 결과물이 없어요.\n학생이 만든 시안·스크린샷·문서가 날짜별 폴더로 여기 쌓여요.',
         banner: problem,
+        onRefresh: _load,
       );
     }
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.only(bottom: 24),
-      children: [
-        ?problem,
-        for (final f in l.folders)
-          _FolderRow(
-            server: widget.server,
-            folder: f,
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ShareScreen(
-                  server: widget.server,
-                  folder: f.name,
-                  initial: l,
+    return CustomScrollView(
+      physics: twinsScroll,
+      slivers: [
+        twinsRefreshSliver(_load),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap),
+          sliver: SliverList.list(
+            children: [
+              ?problem,
+              if (l.folders.isNotEmpty)
+                SettingsGroup(
+                  inset: _rowInset(Look.thumbLg),
+                  children: [
+                    for (final f in l.folders)
+                      _FolderRow(
+                        server: widget.server,
+                        folder: f,
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => ShareScreen(
+                              server: widget.server,
+                              folder: f.name,
+                              initial: l,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
-              ),
-            ),
+              if (l.files.isNotEmpty)
+                SettingsGroup(
+                  title: l.folders.isNotEmpty ? '폴더 밖' : null,
+                  inset: _rowInset(Look.thumb),
+                  children: [for (final f in l.files) ShareFileRow(server: widget.server, file: f)],
+                ),
+            ],
           ),
-        if (l.files.isNotEmpty) ...[
-          if (l.folders.isNotEmpty) const _SectionTitle(text: '폴더 밖'),
-          for (final f in l.files) ShareFileRow(server: widget.server, file: f),
-        ],
+        ),
       ],
     );
   }
@@ -156,15 +179,13 @@ class _FolderRow extends StatelessWidget {
       '파일 ${folder.files.length}개',
       timeAgo(folder.modified),
     ].join(' · ');
-    return Column(
-      children: [
-        ListTile(
+    return ListTile(
           onTap: onTap,
           leading: _Thumb(
             server: server,
             file: cover,
             fallback: Icons.folder_outlined,
-            size: 48,
+            size: Look.thumbLg,
           ),
           title: Text(
             folder.topic,
@@ -179,19 +200,20 @@ class _FolderRow extends StatelessWidget {
             Icons.chevron_right_rounded,
             color: scheme.onSurfaceVariant,
           ),
-        ),
-        const Divider(height: 1),
-      ],
-    );
+        );
   }
 }
 
+/// 판 안 줄 사이 선은 썸네일 뒤 글자선부터 — 목록 타일 안 여백 16 · 썸네일 · 사이 16.
+double _rowInset(double thumb) => Look.pagePad * 2 + thumb;
+
 /// 한 폴더 — 그림은 폭에 맞춘 격자로 먼저(고르는 일이 많다), 나머지는 줄로.
 class _FolderView extends StatelessWidget {
-  const _FolderView({required this.server, required this.folder, this.banner});
+  const _FolderView({required this.server, required this.folder, required this.onRefresh, this.banner});
 
   final Server server;
   final ShareFolder folder;
+  final Future<void> Function() onRefresh;
   final Widget? banner;
 
   @override
@@ -205,17 +227,22 @@ class _FolderView extends StatelessWidget {
         if (!images.contains(f)) f,
     ];
     return CustomScrollView(
-      physics: const AlwaysScrollableScrollPhysics(),
+      physics: twinsScroll,
       slivers: [
-        if (banner != null) SliverToBoxAdapter(child: banner),
+        twinsRefreshSliver(onRefresh),
+        if (banner != null)
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+            sliver: SliverToBoxAdapter(child: banner),
+          ),
         if (folder.files.isEmpty)
           const SliverFillRemaining(
             hasScrollBody: false,
-            child: Center(child: Text('빈 폴더예요')),
+            child: Center(child: TwinsNotice(text: '빈 폴더예요')),
           ),
         if (images.isNotEmpty)
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+            padding: const EdgeInsets.fromLTRB(Look.pagePad, Look.cardGap, Look.pagePad, 0),
             sliver: SliverGrid(
               gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
                 maxCrossAxisExtent: 200,
@@ -229,11 +256,17 @@ class _FolderView extends StatelessWidget {
               ),
             ),
           ),
-        SliverList.list(
-          children: [
-            for (final f in rest) ShareFileRow(server: server, file: f),
-            const SizedBox(height: 24),
-          ],
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap),
+          sliver: SliverList.list(
+            children: [
+              if (rest.isNotEmpty)
+                SettingsGroup(
+                  inset: _rowInset(Look.thumb),
+                  children: [for (final f in rest) ShareFileRow(server: server, file: f)],
+                ),
+            ],
+          ),
         ),
       ],
     );
@@ -252,15 +285,15 @@ class _ImageTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     return InkWell(
       onTap: () => openShareFile(context, server, file),
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: Look.corners,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
             child: Container(
               decoration: BoxDecoration(
-                border: Border.all(color: scheme.outlineVariant),
-                borderRadius: BorderRadius.circular(6),
+                color: scheme.surfaceContainerHigh,
+                borderRadius: Look.corners,
               ),
               clipBehavior: Clip.antiAlias,
               child: _NetImage(
@@ -302,15 +335,13 @@ class ShareFileRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final outside = !_inApp(file.kind);
-    return Column(
-      children: [
-        ListTile(
+    return ListTile(
           onTap: () => openShareFile(context, server, file),
           leading: _Thumb(
             server: server,
             file: file.kind == ShareKind.image && !file.tooLarge ? file : null,
             fallback: _kindIcon(file.kind),
-            size: 40,
+            size: Look.thumb,
           ),
           title: Text(file.name, maxLines: 2, overflow: TextOverflow.ellipsis),
           subtitle: Text(
@@ -328,10 +359,7 @@ class ShareFileRow extends StatelessWidget {
                   color: scheme.onSurfaceVariant,
                 )
               : null,
-        ),
-        const Divider(height: 1),
-      ],
-    );
+        );
   }
 }
 
@@ -470,8 +498,11 @@ class _ShareTextScreenState extends State<ShareTextScreen> {
   Widget build(BuildContext context) {
     final t = _text;
     final file = widget.file;
-    return Scaffold(
+    return TwinBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
         title: Text(file.name, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           if (t != null)
@@ -530,6 +561,7 @@ class _ShareTextScreenState extends State<ShareTextScreen> {
                 ),
               ),
       ),
+      ),
     );
   }
 }
@@ -556,8 +588,8 @@ class _Thumb extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        border: Border.all(color: scheme.outlineVariant),
-        borderRadius: BorderRadius.circular(6),
+        color: scheme.surfaceContainerHigh,
+        borderRadius: Look.smallCorners,
       ),
       clipBehavior: Clip.antiAlias,
       alignment: Alignment.center,
@@ -620,12 +652,14 @@ class _NetImage extends StatelessWidget {
   }
 }
 
+/// 목록 대신 한 마디 — 받는 중이면 깡총 쌍둥이, 아니면 서 있는 쌍둥이와 문장·다시 읽기.
 class _Message extends StatelessWidget {
   const _Message({
     required this.text,
     this.busy = false,
     this.onRetry,
     this.banner,
+    this.onRefresh,
   });
 
   final String text;
@@ -633,85 +667,34 @@ class _Message extends StatelessWidget {
   final VoidCallback? onRetry;
   final Widget? banner;
 
+  /// 당겨서 새로 고침 — 없으면(글 보기 화면은 바깥 당김이 맡는다) 그냥 목록.
+  final Future<void> Function()? onRefresh;
+
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      children: [
-        ?banner,
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 48, 24, 24),
-          child: Column(
-            children: [
-              if (busy) ...[
-                const SizedBox.square(
-                  dimension: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                const SizedBox(height: 14),
-              ],
-              Text(
-                text,
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+  Widget build(BuildContext context) => CustomScrollView(
+    physics: twinsScroll,
+    slivers: [
+      if (onRefresh != null) twinsRefreshSliver(onRefresh!),
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap),
+        sliver: SliverList.list(
+          children: [
+            ?banner,
+            const SizedBox(height: Look.groupGap),
+            if (busy)
+              TwinsLoading(label: text, size: Look.twinsSmall)
+            else
+              TwinsNotice(
+                text: text,
+                action: onRetry == null
+                    ? null
+                    : OutlinedButton(onPressed: onRetry, child: const Text('다시 읽기')),
               ),
-              if (onRetry != null) ...[
-                const SizedBox(height: 12),
-                OutlinedButton(onPressed: onRetry, child: const Text('다시 읽기')),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// 이미 받은 목록은 두고 새로고침만 실패했을 때 — 목록 위 한 줄.
-class _Banner extends StatelessWidget {
-  const _Banner({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      decoration: BoxDecoration(
-        border: Border(left: BorderSide(color: scheme.error, width: 3)),
-      ),
-      child: Text(
-        '새로 못 읽었어요 — $text',
-        style: Theme.of(
-          context,
-        ).textTheme.bodySmall?.copyWith(color: scheme.error),
-      ),
-    );
-  }
-}
-
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 6),
-      child: Text(
-        text,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
+          ],
         ),
       ),
-    );
-  }
+    ],
+  );
 }
 
 bool _inApp(ShareKind k) => switch (k) {

@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+
+import '../look.dart';
+import '../twins_loading.dart';
 import 'package:flutter/services.dart';
 
 import '../server.dart';
@@ -146,7 +149,7 @@ class _ClipboardSheetState extends State<_ClipboardSheet> {
             ),
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator())
+                ? const Center(child: TwinsMark(hopping: true, face: Look.pullFace))
                 : _items.isEmpty
                 ? Center(
                     child: Text(

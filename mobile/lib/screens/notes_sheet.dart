@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'dev_server.dart';
 
 import '../hub_model.dart';
+import '../look.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
@@ -290,10 +291,10 @@ class _NoteRow extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: color),
+            padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX, vertical: 2),
+            decoration: ShapeDecoration(
+              shape: const StadiumBorder(),
+              color: color.withValues(alpha: 0.16),
             ),
             child: Text(
               label,
@@ -347,7 +348,7 @@ class _NoteRow extends StatelessWidget {
                   ),
                 ),
                 child: ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: Look.smallCorners,
                   child: ServerImage(
                     server: server,
                     uri: server.noteImage(note.id, machine: note.machine),

@@ -13,6 +13,7 @@ import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 import '../look.dart';
+import '../twins_loading.dart';
 import 'controls.dart';
 
 /// 학생 화면의 두 얼굴 — 격자 그대로(터미널)와 말풍선(대화). 웹이 「웹 터미널」과
@@ -370,7 +371,7 @@ class _ConversationViewState extends State<ConversationView>
     final theme = Theme.of(context);
     if (!_loaded) {
       return _error == null
-          ? const Center(child: CircularProgressIndicator.adaptive())
+          ? const TwinsLoading(label: '대화를 받는 중', size: Look.twinsSmall)
           : _Empty(
               icon: Icons.cloud_off_outlined,
               title: '대화를 못 받았어요',
@@ -749,7 +750,7 @@ class _ToolRunCard extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: Look.corners,
-          border: Border.all(color: scheme.outline),
+          color: scheme.surfaceContainerHigh.withValues(alpha: 0.6),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1012,10 +1013,10 @@ class _CommandChip extends StatelessWidget {
       child: Align(
         alignment: Alignment.centerRight,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            borderRadius: Look.corners,
-            border: Border.all(color: scheme.primary),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: ShapeDecoration(
+            shape: const StadiumBorder(),
+            color: scheme.primary.withValues(alpha: 0.16),
           ),
           child: Text(
             text,
@@ -1046,7 +1047,7 @@ class _AnsweredCard extends StatelessWidget {
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
           borderRadius: Look.corners,
-          border: Border.all(color: scheme.outline),
+          color: scheme.surfaceContainerHigh.withValues(alpha: 0.6),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1162,9 +1163,17 @@ class _Empty extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 40, color: dim),
+            // 빈·실패 화면은 서 있는 쌍둥이(design.md 「쌍둥이 결」). 뜻 아이콘은 제목 앞에 작게.
+            const ExcludeSemantics(child: TwinsStage(t: 0, size: Look.twinsSmall)),
             const SizedBox(height: 12),
-            Text(title, style: theme.textTheme.titleSmall),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: Look.iconSize, color: dim),
+                const SizedBox(width: 6),
+                Flexible(child: Text(title, style: theme.textTheme.titleSmall)),
+              ],
+            ),
             const SizedBox(height: 6),
             Text(
               body,
@@ -1210,8 +1219,8 @@ class _MenuCard extends StatelessWidget {
       ),
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       decoration: BoxDecoration(
-        color: Theme.of(context).scaffoldBackgroundColor,
-        borderRadius: Look.corners,
+        color: TwinTone.of(context).card,
+        borderRadius: Look.cardCorners,
         border: Border.all(color: accent),
       ),
       child: SingleChildScrollView(

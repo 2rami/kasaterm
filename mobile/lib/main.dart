@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 
 import 'connection.dart';
 import 'app_link.dart';
@@ -10,6 +11,7 @@ import 'hub_prefs.dart';
 import 'kasanet.dart';
 import 'look.dart';
 import 'push.dart';
+import 'screens/controls.dart';
 import 'screens/connect.dart';
 import 'screens/dev_server.dart';
 import 'screens/conversation_view.dart';
@@ -115,16 +117,19 @@ ThemeData buildThemeFrom({
   );
   final line = BorderSide(color: outline);
   final corners = RoundedRectangleBorder(borderRadius: Look.corners);
+  const pill = StadiumBorder();
   final press = WidgetStatePropertyAll(onSurface.withValues(alpha: Look.pressTint));
-  // 채움 없이 테만 — 주 동작은 강조 테+글자, 일반은 기본 테 + 글자색(4장 형태 규칙).
-  ButtonStyle outlined(Color ink, Color edge) => ButtonStyle(
-    backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+  final tone = Color.alphaBlend(surfaceHigh, background);
+  final twin = TwinTone.on(brightness: brightness, surfaceHigh: surfaceHigh, background: background, outline: outline);
+  // 쌍둥이 결 — 테 없이 채운다. 주 동작은 강조 채움, 일반은 옅은 톤 채움(design.md 「쌍둥이 결」).
+  ButtonStyle filled(Color fill, Color ink) => ButtonStyle(
+    backgroundColor: WidgetStateProperty.resolveWith(
+      (s) => s.contains(WidgetState.disabled) ? tone.withValues(alpha: 0.6) : fill,
+    ),
     foregroundColor: WidgetStateProperty.resolveWith(
       (s) => s.contains(WidgetState.disabled) ? onSurfaceVariant : ink,
     ),
-    side: WidgetStateProperty.resolveWith(
-      (s) => BorderSide(color: s.contains(WidgetState.disabled) ? outline : edge),
-    ),
+    side: const WidgetStatePropertyAll(BorderSide.none),
     overlayColor: press,
     shape: WidgetStatePropertyAll(corners),
     minimumSize: const WidgetStatePropertyAll(Size(Look.tap, Look.buttonH)),
@@ -137,9 +142,13 @@ ThemeData buildThemeFrom({
     useMaterial3: true,
     colorScheme: scheme,
     textTheme: text,
+    extensions: [twin],
     scaffoldBackgroundColor: background,
     canvasColor: background,
+    // 앱바 아래 선은 없다 — 바탕 머리 빛이 앱바 뒤까지 이어진다. 투명한 앱바는 상태줄 글자색을 바탕으로 못 잰다 —
+    // 밝은 테마에서 시계·배터리가 흰 글자로 사라졌다.
     appBarTheme: AppBarTheme(
+      systemOverlayStyle: brightness == Brightness.dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
       backgroundColor: background,
       foregroundColor: onSurface,
       elevation: 0,
@@ -147,7 +156,6 @@ ThemeData buildThemeFrom({
       centerTitle: false,
       toolbarHeight: Look.appBarH,
       titleTextStyle: text.titleLarge,
-      shape: Border(bottom: line),
     ),
     tabBarTheme: TabBarThemeData(
       labelColor: primary,
@@ -156,15 +164,21 @@ ThemeData buildThemeFrom({
       unselectedLabelStyle: text.labelLarge?.copyWith(fontWeight: FontWeight.w400),
       dividerColor: outline,
       indicatorSize: TabBarIndicatorSize.label,
-      indicator: UnderlineTabIndicator(borderSide: BorderSide(color: primary, width: 2)),
+      indicator: UnderlineTabIndicator(
+        borderSide: BorderSide(color: primary, width: 3),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+      ),
       splashFactory: NoSplash.splashFactory,
       overlayColor: press,
     ),
     dividerTheme: DividerThemeData(color: outline, space: 1, thickness: 1),
     cardTheme: CardThemeData(
       elevation: 0,
-      color: Colors.transparent,
-      shape: Border(bottom: line),
+      color: twin.card,
+      shape: RoundedRectangleBorder(
+        borderRadius: Look.cardCorners,
+        side: twin.cardEdge.a == 0 ? BorderSide.none : BorderSide(color: twin.cardEdge),
+      ),
       margin: EdgeInsets.zero,
     ),
     listTileTheme: ListTileThemeData(
@@ -174,23 +188,25 @@ ThemeData buildThemeFrom({
       iconColor: onSurfaceVariant,
       titleTextStyle: text.bodyLarge,
       subtitleTextStyle: text.bodySmall?.copyWith(color: onSurfaceVariant),
+      shape: corners,
     ),
     inputDecorationTheme: InputDecorationTheme(
-      filled: false,
+      filled: true,
+      fillColor: tone,
       hintStyle: TextStyle(color: onSurfaceVariant),
       floatingLabelBehavior: FloatingLabelBehavior.never,
-      border: OutlineInputBorder(borderRadius: Look.corners, borderSide: line),
-      enabledBorder: OutlineInputBorder(borderRadius: Look.corners, borderSide: line),
+      border: OutlineInputBorder(borderRadius: Look.corners, borderSide: BorderSide.none),
+      enabledBorder: OutlineInputBorder(borderRadius: Look.corners, borderSide: BorderSide.none),
       focusedBorder: OutlineInputBorder(
         borderRadius: Look.corners,
-        borderSide: BorderSide(color: primary),
+        borderSide: BorderSide(color: primary, width: 1.5),
       ),
       constraints: const BoxConstraints(minHeight: Look.tap),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     ),
-    filledButtonTheme: FilledButtonThemeData(style: outlined(primary, primary)),
-    outlinedButtonTheme: OutlinedButtonThemeData(style: outlined(onSurface, outline)),
-    elevatedButtonTheme: ElevatedButtonThemeData(style: outlined(onSurface, outline)),
+    filledButtonTheme: FilledButtonThemeData(style: filled(primary, onPrimary)),
+    outlinedButtonTheme: OutlinedButtonThemeData(style: filled(tone, onSurface)),
+    elevatedButtonTheme: ElevatedButtonThemeData(style: filled(tone, onSurface)),
     textButtonTheme: TextButtonThemeData(
       style: ButtonStyle(
         foregroundColor: WidgetStatePropertyAll(primary),
@@ -208,53 +224,58 @@ ThemeData buildThemeFrom({
         shape: corners,
       ),
     ),
+    // 알약 분할 — 고른 칸만 강조 물을 깐다. 테는 바깥 한 줄.
     segmentedButtonTheme: SegmentedButtonThemeData(
       style: ButtonStyle(
-        backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+        backgroundColor: WidgetStateProperty.resolveWith(
+          (s) => s.contains(WidgetState.selected) ? primary.withValues(alpha: 0.16) : Colors.transparent,
+        ),
         foregroundColor: WidgetStateProperty.resolveWith(
           (s) => s.contains(WidgetState.selected) ? primary : onSurfaceVariant,
         ),
-        side: WidgetStateProperty.resolveWith(
-          (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline),
-        ),
+        side: WidgetStatePropertyAll(line),
         overlayColor: press,
-        shape: WidgetStatePropertyAll(corners),
+        shape: const WidgetStatePropertyAll(pill),
         minimumSize: const WidgetStatePropertyAll(Size(Look.tap, Look.buttonH)),
         textStyle: WidgetStatePropertyAll(text.labelLarge),
       ),
     ),
     chipTheme: ChipThemeData(
-      // M3 는 고른 칩을 color 로 채운다 — selectedColor 만으로는 안 막힌다.
-      color: const WidgetStatePropertyAll(Colors.transparent),
-      backgroundColor: Colors.transparent,
-      selectedColor: Colors.transparent,
-      disabledColor: Colors.transparent,
+      // M3 는 고른 칩을 color 로 채운다 — 고른 것만 강조 물, 나머지는 톤.
+      color: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? primary.withValues(alpha: 0.16) : tone,
+      ),
+      backgroundColor: tone,
+      selectedColor: primary.withValues(alpha: 0.16),
+      disabledColor: tone,
       checkmarkColor: primary,
       side: WidgetStateBorderSide.resolveWith(
-        (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline),
+        (s) => s.contains(WidgetState.selected) ? BorderSide(color: primary) : BorderSide.none,
       ),
       labelStyle: text.labelMedium?.copyWith(color: onSurface),
       secondaryLabelStyle: text.labelMedium?.copyWith(color: primary),
-      shape: corners,
+      shape: pill,
       padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX),
     ),
     checkboxTheme: CheckboxThemeData(
-      fillColor: const WidgetStatePropertyAll(Colors.transparent),
-      checkColor: WidgetStatePropertyAll(primary),
+      fillColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? primary : Colors.transparent,
+      ),
+      checkColor: WidgetStatePropertyAll(onPrimary),
       side: WidgetStateBorderSide.resolveWith(
-        (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline),
+        (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline, width: 1.5),
       ),
     ),
     switchTheme: SwitchThemeData(
-      trackColor: const WidgetStatePropertyAll(Colors.transparent),
-      trackOutlineColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.selected) ? primary : outline,
+      trackColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? primary : tone,
       ),
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
       thumbColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.selected) ? primary : onSurfaceVariant,
+        (s) => s.contains(WidgetState.selected) ? onPrimary : onSurfaceVariant,
       ),
     ),
-    // 대화상자·시트는 A 이전의 둥근 판이다 — 안의 주 동작 채움은 ModalLook 이 맡는다.
+    // 대화상자·시트는 둥근 판이다 — 안의 주 동작 채움은 ModalLook 이 맡는다.
     dialogTheme: DialogThemeData(
       backgroundColor: Color.alphaBlend(surfaceHigh, background),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Look.dialogRadius)),
@@ -277,6 +298,7 @@ ThemeData buildThemeFrom({
       behavior: SnackBarBehavior.floating,
       shape: RoundedRectangleBorder(borderRadius: Look.corners),
     ),
+    badgeTheme: const BadgeThemeData(largeSize: 18, padding: EdgeInsets.symmetric(horizontal: 5)),
   );
 }
 
@@ -525,12 +547,20 @@ class AccountWaitingScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final checking = connection.phase == ConnectionPhase.checking;
-    return Scaffold(
-      appBar: AppBar(title: const Text('기기 연결')),
+    final devices = [
+      for (final d in connection.devices)
+        if (d['kind'] != 'phone') d,
+    ];
+    return TwinBackdrop(
+      child: Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('기기 연결')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
+            Center(child: TwinsMark(hopping: checking, face: Look.pullFace)),
+            const SizedBox(height: Look.fieldGap),
             Text(
               '${connection.account!.label} 계정',
               style: Theme.of(context).textTheme.titleLarge,
@@ -553,16 +583,18 @@ class AccountWaitingScreen extends StatelessWidget {
                 '이 계정에는 아직 데스크톱이 없어요. 쓰던 데스크톱 계정이 있다면 로그아웃한 뒤 아이디로 로그인하고, 설정에서 Google·GitHub 을 연결해 주세요.',
               ),
             ],
-            for (final device in connection.devices.where(
-              (d) => d['kind'] != 'phone',
-            ))
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.computer_outlined),
-                title: Text('${device['label'] ?? device['device_id']}'),
-                subtitle: Text(
-                  device['online'] == true ? '온라인 · 연결 준비 확인 중' : '오프라인',
-                ),
+            if (devices.isNotEmpty)
+              SettingsGroup(
+                title: '이 계정의 데스크톱',
+                children: [
+                  for (final (i, device) in devices.indexed)
+                    SettingsRow(
+                      tone: i,
+                      icon: Icons.computer_outlined,
+                      title: '${device['label'] ?? device['device_id']}',
+                      subtitle: device['online'] == true ? '온라인 · 연결 준비 확인 중' : '오프라인',
+                    ),
+                ],
               ),
             const SizedBox(height: 20),
             FilledButton(
@@ -577,6 +609,7 @@ class AccountWaitingScreen extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }

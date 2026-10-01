@@ -11,11 +11,13 @@ import '../machine_look.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../twins_loading.dart';
 import '../weather/card.dart';
 import '../weather/model.dart';
 import '../weather/scene.dart';
 import '../wide_layout.dart';
 import 'clipboard_sheet.dart';
+import 'controls.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
@@ -176,96 +178,94 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// 새로 고치는 중 — 앱바 쌍둥이가 뛴다.
+  bool _refreshing = false;
+
+  Future<void> _refresh() async {
+    setState(() => _refreshing = true);
+    try {
+      await _model.refresh();
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: _shown,
     builder: (context, _) {
       final theme = Theme.of(context);
-      return Scaffold(
-        appBar: AppBar(
-          title: Row(
-            children: [
-              Image.asset(
-                'assets/icons/kasa.png',
-                width: 22,
-                height: 22,
-                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+      return TwinBackdrop(
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            // 제목 글자 없이 쌍둥이 표 — 목록이 학생이라는 것은 화면이 말한다(2026-10-01).
+            title: TwinsMark(hopping: _refreshing || _model.showingCached),
+            actions: [
+              // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
+              // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
+              IconButton(
+                tooltip: 'KASA-share',
+                onPressed: _openShare,
+                icon: const Icon(Icons.folder_outlined),
               ),
-              const SizedBox(width: 8),
-              const Text('학생'),
+              IconButton(
+                tooltip: '클립보드',
+                onPressed: () =>
+                    showClipboardSheet(context, server: widget.server),
+                icon: const Icon(Icons.content_paste_outlined),
+              ),
+              // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
+              // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
+              IconButton(
+                tooltip: '학생 쪽지',
+                onPressed: () => NotesSheet.show(
+                  context,
+                  model: _model,
+                  server: widget.server,
+                  onOpen: _open,
+                ),
+                icon: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 280),
+                  transitionBuilder: (child, anim) => ScaleTransition(
+                    scale: CurvedAnimation(
+                      parent: anim,
+                      curve: Curves.easeOutBack,
+                    ),
+                    child: child,
+                  ),
+                  child: _model.unread > 0
+                      ? Badge.count(
+                          key: ValueKey(_model.unread),
+                          count: _model.unread,
+                          backgroundColor: StatusStyle.attention,
+                          textColor: Colors.white,
+                          child: const Icon(Icons.notifications_rounded),
+                        )
+                      : const Icon(
+                          Icons.notifications_outlined,
+                          key: ValueKey(0),
+                        ),
+                ),
+              ),
+              _ViewMenu(model: _model),
+              IconButton(
+                onPressed: _openSettings,
+                icon: const Icon(Icons.settings_outlined),
+                tooltip: '설정',
+              ),
             ],
           ),
-          actions: [
-            // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
-            // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
-            IconButton(
-              tooltip: 'KASA-share',
-              onPressed: _openShare,
-              icon: const Icon(Icons.folder_outlined),
-            ),
-            IconButton(
-              tooltip: '클립보드',
-              onPressed: () =>
-                  showClipboardSheet(context, server: widget.server),
-              icon: const Icon(Icons.content_paste_outlined),
-            ),
-            // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
-            // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
-            IconButton(
-              tooltip: '학생 쪽지',
-              onPressed: () => NotesSheet.show(
-                context,
-                model: _model,
-                server: widget.server,
-                onOpen: _open,
-              ),
-              icon: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 280),
-                transitionBuilder: (child, anim) => ScaleTransition(
-                  scale: CurvedAnimation(
-                    parent: anim,
-                    curve: Curves.easeOutBack,
-                  ),
-                  child: child,
-                ),
-                child: _model.unread > 0
-                    ? Badge.count(
-                        key: ValueKey(_model.unread),
-                        count: _model.unread,
-                        backgroundColor: StatusStyle.attention,
-                        textColor: Colors.white,
-                        child: const Icon(Icons.notifications_rounded),
-                      )
-                    : const Icon(
-                        Icons.notifications_outlined,
-                        key: ValueKey(0),
-                      ),
-              ),
-            ),
-            _ViewMenu(model: _model),
-            IconButton(
-              onPressed: _openSettings,
-              icon: const Icon(Icons.settings_outlined),
-              tooltip: '설정',
-            ),
-          ],
-        ),
-        body: Stack(
-          fit: StackFit.expand,
-          children: [
-            ColoredBox(color: theme.scaffoldBackgroundColor),
-            WeatherScene(
-              child: RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
-            ),
-            // 지난번 목록을 먼저 그렸다 — 새 목록이 닿을 때까지 위에 얇게 「확인 중」.
-            if (_model.showingCached)
-              const Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: LinearProgressIndicator(minHeight: 2),
-              ),
-          ],
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              WeatherScene(child: _body(theme)),
+              // 지난번 목록을 먼저 그렸다 — 새 목록이 닿을 때까지 위에 얇게 「확인 중」.
+              if (_model.showingCached)
+                const Positioned(top: 0, left: 0, right: 0, child: TwinBar()),
+            ],
+          ),
         ),
       );
     },
@@ -276,12 +276,15 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     final shape = _model.view.shape;
     final children = <Widget>[];
     if (_model.error != null) {
-      children.add(
-        _Notice(text: _model.error!, color: theme.colorScheme.error),
-      );
+      children.add(ErrorBand(text: _model.error!, onRetry: _refresh));
     }
     if (sections.isEmpty && _model.error == null) {
-      children.add(const _Notice(text: '학생 목록을 받는 중…'));
+      children.add(
+        const Padding(
+          padding: EdgeInsets.only(top: Look.groupGap * 2),
+          child: TwinsLoading(label: '학생 목록을 받는 중', size: Look.twinsSmall),
+        ),
+      );
     }
     for (final s in sections) {
       final title = s.machine ?? _model.rootName ?? '이 기계';
@@ -303,7 +306,16 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       );
       if (folded) continue;
       if (s.online && s.rooms.isEmpty) {
-        children.add(const _Notice(text: '학생이 없다'));
+        children.add(
+          TwinsNotice(
+            text: '아직 학생이 없어요',
+            action: FilledButton.icon(
+              onPressed: () => _newRoom(s),
+              icon: const Icon(Icons.add, size: Look.iconSize),
+              label: const Text('새 방'),
+            ),
+          ),
+        );
       }
       // 아이패드·가로 화면에선 방 상자가 여러 열로 선다 — 한 방이 화면 폭을 다 먹으면
       // 한 칸짜리 방의 지도가 화면 반을 차지한다.
@@ -346,19 +358,39 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
           }
         }
         rooms.add(
-          WeatherCard(
-            id: 'room:${s.machine ?? ''}|${room.title}',
-            mood: moodOf(room.panes.map((p) => weatherMood(StatusStyle.of(p, theme.colorScheme).mood))),
-            child: _RoomBox(children: inside),
+          _RoomBox(
+            child: WeatherCard(
+              id: 'room:${s.machine ?? ''}|${room.title}',
+              mood: moodOf(
+                room.panes.map(
+                  (p) => weatherMood(StatusStyle.of(p, theme.colorScheme).mood),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: inside,
+              ),
+            ),
           ),
         );
       }
       if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
     }
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap),
-      children: children,
+    // 당기면 쌍둥이가 내려온다 — 머티리얼 빙글이 대신(design.md 「쌍둥이 결」).
+    return CustomScrollView(
+      physics: twinsScroll,
+      slivers: [
+        twinsRefreshSliver(_refresh),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(
+            Look.pagePad,
+            0,
+            Look.pagePad,
+            Look.groupGap,
+          ),
+          sliver: SliverList.list(children: children),
+        ),
+      ],
     );
   }
 }
@@ -433,8 +465,8 @@ class _ViewMenu extends StatelessWidget {
   );
 }
 
-/// 기기 머리글 — 기기색 아이콘 · 이름(16/600) · 「기준 기기 · N명」 두 줄과 그 아래 기기색 2px 선. 데스크톱
-/// 사이드바 기기 머리(기기색 아이콘 + 굵은 이름 + 사정 한 줄)와 같은 모양이고, 선이 기기 경계다 — 흐린 묶음
+/// 기기 머리글 — 기기색 물 동그라미 안 아이콘 · 이름(16/600) · 「기준 기기 · N명」 두 줄과 그 아래 기기색 2px 알약 선.
+/// 데스크톱 사이드바 기기 머리(기기색 아이콘 + 굵은 이름 + 사정 한 줄)와 같은 모양이고, 선이 기기 경계다 — 흐린 묶음
 /// 제목 한 줄로는 어디서 다른 기기 학생이 시작하는지 안 보였다(2026-10-01 지적). 기준 기기 칸도 같은 머리를 단다.
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
@@ -474,81 +506,125 @@ class _SectionHeader extends StatelessWidget {
     final dim = scheme.onSurfaceVariant;
     final sub = theme.textTheme.bodySmall;
     final line = online ? color : scheme.outline;
+    final wash = Color.alphaBlend(
+      line.withValues(alpha: 0.16),
+      theme.scaffoldBackgroundColor,
+    );
     return Padding(
-      padding: EdgeInsets.only(top: Look.groupGap, bottom: folded ? 0 : Look.groupTitleGap),
+      padding: EdgeInsets.only(
+        top: Look.groupGap,
+        bottom: folded ? 0 : Look.cardGap,
+      ),
       child: InkWell(
         onTap: onTap,
         borderRadius: Look.corners,
-        child: Container(
-          constraints: const BoxConstraints(minHeight: Look.row2),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: line, width: Look.stripe)),
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: Look.iconSize, color: line),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(title, style: theme.textTheme.titleMedium, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: Look.rowGap),
-                    Text.rich(
-                      TextSpan(
-                        children: [
-                          if (!online)
-                            TextSpan(text: '연결 안 됨', style: TextStyle(color: scheme.error))
-                          else
-                            TextSpan(text: '${root ? '기준 기기' : '연결됨'} · 학생 $count'),
-                        ],
-                      ),
-                      style: sub?.copyWith(color: dim),
-                      overflow: TextOverflow.ellipsis,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: Look.row2,
+              child: Row(
+                children: [
+                  Container(
+                    width: Look.machineBadge,
+                    height: Look.machineBadge,
+                    decoration: BoxDecoration(
+                      color: wash,
+                      shape: BoxShape.circle,
                     ),
-                  ],
-                ),
+                    child: Icon(
+                      icon,
+                      size: Look.iconSize,
+                      color: machineInk(line, wash),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          title,
+                          style: theme.textTheme.titleMedium,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: Look.rowGap),
+                        Text.rich(
+                          TextSpan(
+                            children: [
+                              if (!online)
+                                TextSpan(
+                                  text: '연결 안 됨',
+                                  style: TextStyle(color: scheme.error),
+                                )
+                              else
+                                TextSpan(
+                                  text: '${root ? '기준 기기' : '연결됨'} · 학생 $count',
+                                ),
+                            ],
+                          ),
+                          style: sub?.copyWith(color: dim),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (onAdd != null)
+                    IconButton(
+                      tooltip: '새 방',
+                      onPressed: onAdd,
+                      icon: Icon(Icons.add, color: dim),
+                    ),
+                  AnimatedRotation(
+                    turns: folded ? -0.25 : 0,
+                    duration: const Duration(milliseconds: 160),
+                    child: Icon(
+                      Icons.expand_more,
+                      size: Look.iconSize,
+                      color: dim,
+                    ),
+                  ),
+                ],
               ),
-              if (onAdd != null)
-                IconButton(
-                  tooltip: '새 방',
-                  onPressed: onAdd,
-                  icon: Icon(Icons.add, color: dim),
-                ),
-              AnimatedRotation(
-                turns: folded ? -0.25 : 0,
-                duration: const Duration(milliseconds: 160),
-                child: Icon(Icons.expand_more, size: Look.iconSize, color: dim),
+            ),
+            Container(
+              height: Look.twinBarH,
+              decoration: BoxDecoration(
+                color: line,
+                borderRadius: BorderRadius.circular(Look.twinBarH),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-/// 방 하나 — 판 없이 제목 줄과 학생 줄, 아래 선 하나로 다음 방과 가른다(카드 금지).
+/// 방 하나 = 둥근 판 하나(쌍둥이 결). 날씨 유리가 판 모서리 밖으로 안 나가게 같은 모서리로 자른다.
 class _RoomBox extends StatelessWidget {
-  const _RoomBox({required this.children});
+  const _RoomBox({required this.child});
 
-  final List<Widget> children;
+  final Widget child;
 
   @override
   Widget build(BuildContext context) => Container(
-    margin: const EdgeInsets.only(bottom: 8),
-    decoration: BoxDecoration(
-      border: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outline)),
-    ),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
+    margin: const EdgeInsets.only(bottom: Look.cardGap),
+    decoration: TwinTone.of(context).cardBox(),
+    child: ClipRRect(borderRadius: Look.cardCorners, child: child),
   );
 }
 
-/// 방 제목 줄 40 — 기기색 아이콘 · 방 이름 15/600 · 경로 13 흐림. 서버는 「이름 · 경로」 한 줄로 준다.
+/// 방 제목 줄 44 — 기기색 아이콘 · 방 이름 15/600 · 경로 13 흐림. 서버는 「이름 · 경로」 한 줄로 준다.
 /// 아이콘은 머리글이 화면 위로 지나간 뒤에도 어느 기기 방인지 말한다.
 class _RoomHeader extends StatelessWidget {
-  const _RoomHeader({required this.title, required this.icon, required this.color, this.onMenu});
+  const _RoomHeader({
+    required this.title,
+    required this.icon,
+    required this.color,
+    this.onMenu,
+  });
 
   final String title;
   final IconData icon;
@@ -563,21 +639,32 @@ class _RoomHeader extends StatelessWidget {
     final cut = title.indexOf(' · ');
     final name = cut < 0 ? title : title.substring(0, cut);
     final path = cut < 0 ? '' : title.substring(cut + 3);
-    return SizedBox(
+    return Container(
       height: Look.roomHeadH,
+      padding: const EdgeInsets.only(left: Look.cardPad, right: 4),
       child: Row(
         children: [
-          Icon(icon, size: Look.iconSize, color: color),
+          Icon(
+            icon,
+            size: Look.iconSize,
+            color: machineInk(color, TwinTone.of(context).card),
+          ),
           const SizedBox(width: 8),
           Flexible(
-            child: Text(name, style: theme.textTheme.titleSmall, overflow: TextOverflow.ellipsis),
+            child: Text(
+              name,
+              style: theme.textTheme.titleSmall,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
           if (path.isNotEmpty) ...[
             const SizedBox(width: 8),
             Expanded(
               child: Text(
                 path,
-                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -587,30 +674,12 @@ class _RoomHeader extends StatelessWidget {
             IconButton(
               tooltip: '방 메뉴',
               onPressed: onMenu,
-              icon: Icon(Icons.more_horiz, color: theme.colorScheme.onSurfaceVariant),
+              icon: Icon(
+                Icons.more_horiz,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
         ],
-      ),
-    );
-  }
-}
-
-class _Notice extends StatelessWidget {
-  const _Notice({required this.text, this.color});
-
-  final String text;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
-      child: Text(
-        text,
-        style: theme.textTheme.bodyMedium?.copyWith(
-          color: color ?? theme.colorScheme.onSurfaceVariant,
-        ),
       ),
     );
   }
@@ -644,7 +713,7 @@ class _MiniMap extends StatelessWidget {
     final hidden = room.unplaced;
     final undocked = room.undocked;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(Look.cardGap, 0, Look.cardGap, Look.cardGap),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -871,7 +940,7 @@ class _MiniCellState extends State<_MiniCell> {
           curve: Curves.easeOut,
           decoration: BoxDecoration(
             color: accent.withValues(alpha: 0.12),
-            borderRadius: Look.corners,
+            borderRadius: Look.smallCorners,
             border: waiting ? Border.all(color: edge, width: 1.5) : null,
           ),
           clipBehavior: Clip.antiAlias,
@@ -1123,68 +1192,100 @@ class _PaneTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     final slug = pane.slug;
     final st = StatusStyle.of(pane, scheme);
-    // 왼쪽 2px 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례 주황, 하는 중 강조, 쉬는 중 없음.
-    final stripe = st.needsYou ? StatusStyle.attention : (st.live ? scheme.primary : null);
+    // 왼쪽 알약 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례 주황, 하는 중 강조, 쉬는 중 없음.
+    final stripe = st.needsYou
+        ? StatusStyle.attention
+        : (st.live ? scheme.primary : null);
     // 글은 세션 이름과 도는 시간뿐 — 데스크톱 사이드바 목록 줄과 같다(2026-10-01). 학생 이름은
     // 얼굴이, 상태는 띠와 막대가 말한다. 막대는 지도 칸 바닥의 그것과 같은 위젯이다.
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
-      child: Container(
-        constraints: const BoxConstraints(minHeight: Look.row2),
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: scheme.outline),
-            left: BorderSide(color: stripe ?? Colors.transparent, width: Look.stripe),
-          ),
-        ),
-        padding: const EdgeInsets.fromLTRB(10, 8, Look.pagePad, 8),
-        child: Row(
+      child: CustomPaint(
+        // 줄 사이 선은 글자 시작점부터 — 판 안의 안쪽 선(design.md 「행」).
+        painter: _InsetLine(scheme.outline, Look.cardPad + Look.face + 12),
+        child: Stack(
           children: [
-            Hero(
-              tag: 'face-${pane.machine}-${pane.id}',
-              child: StudentFace(
-                server: server,
-                slug: slug,
-                url: slug == null ? null : server.avatar(slug, machine: pane.machine),
-                shell: pane.isShell,
-                size: Look.face,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          pane.rowTitle,
-                          style: theme.textTheme.titleSmall,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if ((pane.mirrorOf ?? '').isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        MirrorTag(pane.mirrorOf!),
-                      ],
-                    ],
+            if (stripe != null)
+              Positioned(
+                left: Look.stripeX,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: Container(
+                    width: Look.stripe,
+                    height: Look.stripeH,
+                    decoration: BoxDecoration(
+                      color: stripe,
+                      borderRadius: BorderRadius.circular(Look.stripe),
+                    ),
                   ),
-                  const SizedBox(height: Look.rowGap),
-                  // 둘째 줄 자리는 늘 잡아 둔다 — 일이 시작·끝날 때마다 이름이 위아래로 튀지 않게.
-                  SizedBox(
-                    height: Look.subLine,
-                    child: Row(
+                ),
+              ),
+            Container(
+              constraints: const BoxConstraints(minHeight: Look.row2),
+              padding: const EdgeInsets.fromLTRB(
+                Look.cardPad,
+                8,
+                Look.cardPad,
+                8,
+              ),
+              child: Row(
+                children: [
+                  Hero(
+                    tag: 'face-${pane.machine}-${pane.id}',
+                    child: StudentFace(
+                      server: server,
+                      slug: slug,
+                      url: slug == null
+                          ? null
+                          : server.avatar(slug, machine: pane.machine),
+                      shell: pane.isShell,
+                      size: Look.face,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Expanded(child: Center(child: WorkingBar(style: st))),
-                        if (time != null) ...[
-                          const SizedBox(width: 6),
-                          Text(time, style: elapsedStyle(pane.busySecs!, theme)),
-                        ],
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                pane.rowTitle,
+                                style: theme.textTheme.titleSmall,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if ((pane.mirrorOf ?? '').isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              MirrorTag(pane.mirrorOf!),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: Look.rowGap),
+                        // 둘째 줄 자리는 늘 잡아 둔다 — 일이 시작·끝날 때마다 이름이 위아래로 튀지 않게.
+                        SizedBox(
+                          height: Look.subLine,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Center(child: WorkingBar(style: st)),
+                              ),
+                              if (time != null) ...[
+                                const SizedBox(width: 6),
+                                Text(
+                                  time,
+                                  style: elapsedStyle(pane.busySecs!, theme),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -1196,6 +1297,26 @@ class _PaneTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 위쪽 1px 선을 [inset] 부터 오른쪽 끝까지.
+class _InsetLine extends CustomPainter {
+  const _InsetLine(this.color, this.inset);
+
+  final Color color;
+  final double inset;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      Rect.fromLTWH(inset, 0, size.width - inset, 1),
+      Paint()..color = color,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_InsetLine old) =>
+      old.color != color || old.inset != inset;
 }
 
 /// PC 상태줄과 같은 조각들 — 하네스 로고 · 모델 · 브랜치 · 컨텍스트% · effort.

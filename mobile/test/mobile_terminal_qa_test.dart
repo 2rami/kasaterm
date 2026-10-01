@@ -243,9 +243,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      // 위에 쌍둥이 그림(96)이 선다 — 그래도 자판(844 화면에서 약 508 위)보다 로그인 단추까지 위다.
       expect(
         tester.getRect(find.byKey(const Key('account-input'))).top,
-        closeTo(123, 0.5),
+        closeTo(263.5, 0.5),
       );
       await expectLater(
         find.byType(MaterialApp),

@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../look.dart';
+import '../twins_loading.dart';
+
 import '../server.dart';
 
 /// 하단바 「브라우저 기기」의 폰 판 — 학생이 사람에게 보여 주려 여는 페이지가 어디로
@@ -152,7 +155,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
             if (_loading)
               const Padding(
                 padding: EdgeInsets.all(24),
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(child: TwinsMark(hopping: true, face: Look.pullFace)),
               )
             else ...[
               _row(

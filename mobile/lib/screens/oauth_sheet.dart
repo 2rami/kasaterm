@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../look.dart';
+import '../twins_loading.dart';
 import '../relay_account.dart';
 import 'controls.dart';
 
@@ -218,7 +219,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
               const SizedBox(height: Look.groupGap),
               FilledButton(onPressed: () => Navigator.of(context).pop(), child: const Text('닫기')),
             ] else if (flow == null) ...[
-              const Center(child: Padding(padding: EdgeInsets.all(Look.groupGap), child: CircularProgressIndicator())),
+              const Center(child: Padding(padding: EdgeInsets.all(Look.groupGap), child: TwinsMark(hopping: true, face: Look.pullFace))),
             ] else if (flow.userCode == null) ...[
               Row(
                 children: [

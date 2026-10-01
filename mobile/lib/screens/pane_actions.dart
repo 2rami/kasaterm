@@ -22,7 +22,6 @@ Future<void> showPaneSheet(
   required void Function(Pane) onOpen,
   required Future<void> Function() onChanged,
 }) async {
-  final scheme = Theme.of(context).colorScheme;
   final act = await showModalBottomSheet<_PaneAct>(
     context: context,
     showDragHandle: true,
@@ -49,28 +48,29 @@ Future<void> showPaneSheet(
                   ),
           ),
           const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.open_in_new),
-            title: const Text('화면 보기'),
+          SettingsRow(
+            icon: Icons.open_in_new,
+            title: '화면 보기',
             onTap: () => Navigator.pop(ctx, _PaneAct.open),
           ),
-          ListTile(
-            leading: const Icon(Icons.add_box_outlined),
-            title: const Text('옆에 pane 추가'),
-            subtitle: const Text('셸 하나를 이 pane 옆에 쪼갠다'),
+          SettingsRow(
+            icon: Icons.add_box_outlined,
+            title: '옆에 pane 추가',
+            subtitle: '셸 하나를 이 pane 옆에 쪼갠다',
             onTap: () => Navigator.pop(ctx, _PaneAct.split),
           ),
           if (room.panes.length > 1)
-            ListTile(
-              leading: const Icon(Icons.swap_horiz),
-              title: const Text('자리 바꾸기'),
-              subtitle: const Text('같은 방의 다른 pane 과 자리를 맞바꾼다'),
+            SettingsRow(
+              icon: Icons.swap_horiz,
+              title: '자리 바꾸기',
+              subtitle: '같은 방의 다른 pane 과 자리를 맞바꾼다',
               onTap: () => Navigator.pop(ctx, _PaneAct.swap),
             ),
-          ListTile(
-            leading: Icon(Icons.close, color: scheme.error),
-            title: Text('닫기', style: TextStyle(color: scheme.error)),
-            subtitle: const Text('데스크톱의 × 와 같다 — 되살리기로 되돌릴 수 있다'),
+          SettingsRow(
+            danger: true,
+            icon: Icons.close,
+            title: '닫기',
+            subtitle: '데스크톱의 × 와 같다 — 되살리기로 되돌릴 수 있다',
             onTap: () => Navigator.pop(ctx, _PaneAct.close),
           ),
           const CardWeatherRow(),
@@ -115,7 +115,6 @@ Future<void> showRoomSheet(
   required String? machine,
   required Future<void> Function() onChanged,
 }) async {
-  final scheme = Theme.of(context).colorScheme;
   final first = room.panes.isEmpty ? null : room.panes.first;
   final act = await showModalBottomSheet<_RoomAct>(
     context: context,
@@ -131,23 +130,24 @@ Future<void> showRoomSheet(
           ),
           const Divider(height: 1),
           if (first != null)
-            ListTile(
-              leading: const Icon(Icons.add_box_outlined),
-              title: const Text('pane 추가'),
-              subtitle: const Text('이 방에 셸 하나를 쪼갠다'),
+            SettingsRow(
+              icon: Icons.add_box_outlined,
+              title: 'pane 추가',
+              subtitle: '이 방에 셸 하나를 쪼갠다',
               onTap: () => Navigator.pop(ctx, _RoomAct.add),
             ),
           if (first != null)
-            ListTile(
-              leading: const Icon(Icons.drive_file_rename_outline),
-              title: const Text('방 이름 바꾸기'),
+            SettingsRow(
+              icon: Icons.drive_file_rename_outline,
+              title: '방 이름 바꾸기',
               onTap: () => Navigator.pop(ctx, _RoomAct.rename),
             ),
           if (first != null)
-            ListTile(
-              leading: Icon(Icons.close, color: scheme.error),
-              title: Text('방 닫기', style: TextStyle(color: scheme.error)),
-              subtitle: const Text('이 방의 pane 을 전부 닫는다'),
+            SettingsRow(
+              danger: true,
+              icon: Icons.close,
+              title: '방 닫기',
+              subtitle: '이 방의 pane 을 전부 닫는다',
               onTap: () => Navigator.pop(ctx, _RoomAct.close),
             ),
           const CardWeatherRow(),
