@@ -25,6 +25,8 @@ if [ -f "$kc" ]; then
     KASA_PROFILE_com_debimarlene_kasaterm="kasaterm mini dev app"
     KASA_PROFILE_com_debimarlene_kasaterm_NotificationService="kasaterm mini dev notif")
 fi
+# 서명은 나중에 한 번에(adhoc.sh 가 관문 기계에서 구울 때) — 그 기계엔 개발 인증서가 없어도 된다.
+[ "${KASA_ARCHIVE_UNSIGNED:-0}" = 1 ] && sign=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO)
 # 수동 배포 키체인(testflight.sh --manual)이 검색 목록에 있으면 자동 서명 내보내기도 그 키를 집다 잠금
 # 암호창에서 멈춘다(10-01 실측) — 미리 연다.
 dkc=$HOME/Library/Keychains/ios-dist.keychain-db

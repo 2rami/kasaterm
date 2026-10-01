@@ -109,8 +109,21 @@ def profile_for(bid, cert_id, device_ids):
     return saved
 
 
-def entitlements(bundle, out):
-    out.write_bytes(run("codesign", "-d", "--entitlements", "-", "--xml", str(bundle)))
+# 서명 없이 아카이브한 판(관문 기계에서 구울 때)은 권한을 프로파일에서 고른다. keychain-access-groups 는 빼야 한다 —
+# 넣으면 키체인 기본 그룹이 바뀌어 폰에 저장된 로그인을 못 읽는다.
+PROFILE_KEYS = ("application-identifier", "com.apple.developer.team-identifier", "get-task-allow",
+                "aps-environment", "com.apple.developer.usernotifications.communication")
+
+
+def entitlements(bundle, profile, out):
+    try:
+        out.write_bytes(run("codesign", "-d", "--entitlements", "-", "--xml", str(bundle)))
+        if plistlib.loads(out.read_bytes()):
+            return
+    except (RuntimeError, plistlib.InvalidFileException, ValueError):
+        pass
+    ent = plistlib.loads(run("security", "cms", "-D", "-i", str(profile)))["Entitlements"]
+    out.write_bytes(plistlib.dumps({k: ent[k] for k in PROFILE_KEYS if k in ent}))
 
 
 def cmd_resign(release):
@@ -128,9 +141,10 @@ def cmd_resign(release):
             for fw in sorted(b.glob("Frameworks/*.framework")) + sorted(b.glob("Frameworks/*.dylib")):
                 run(*sign, str(fw))
             bid = plistlib.loads((b / "Info.plist").read_bytes())["CFBundleIdentifier"]
-            shutil.copyfile(profile_for(bid, c["id"], device_ids), b / "embedded.mobileprovision")
+            profile = profile_for(bid, c["id"], device_ids)
             ent = work / f"{bid}.entitlements"
-            entitlements(b, ent)
+            entitlements(b, profile, ent)
+            shutil.copyfile(profile, b / "embedded.mobileprovision")
             run(*sign, "--entitlements", str(ent), "--generate-entitlement-der", str(b))
         run("codesign", "--verify", "--deep", "--strict", str(app))
         out = work / IPA

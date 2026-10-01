@@ -20,7 +20,7 @@ mobile/tool/adhoc.sh          # 아카이브 → Ad Hoc ipa → 미니에서 재
 mobile/tool/adhoc.sh --show   # 링크를 사람이 보는 기기로도 띄운다
 ```
 
-판마다 token 이 새로 나오고 지금 판과 바로 앞 판만 남는다. 기기 손 등록은 `mobile/tool/asc.py device <UDID> <이름>`.
+관문 기계(서명 준비가 있는 기계)에서 돌리면 ssh 없이 그 자리에서 올리고, 개발 인증서 없이 서명 없는 아카이브를 그 기계의 배포 인증서로 한 번에 서명한다(권한은 프로파일에서 고르되 `keychain-access-groups` 는 뺀다 — 넣으면 폰에 저장된 로그인을 못 읽는다). 판마다 token 이 새로 나오고 지금 판과 바로 앞 판만 남는다. 기기 손 등록은 `mobile/tool/asc.py device <UDID> <이름>`.
 
 ## 어디서 무엇이 도나
 

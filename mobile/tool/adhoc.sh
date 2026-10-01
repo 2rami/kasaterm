@@ -29,11 +29,19 @@ for a in "$@"; do
   esac
 done
 out=build/ios/adhoc
-host=${KASA_INSTALL_HOST:-nachoneko}
+# 관문 기계 자신에서 돌면(서명 준비가 여기 있으면) ssh 없이 바로 쓰고, 아카이브도 서명 없이 해 둔 뒤 여기서 서명한다.
+if [ -z "${KASA_INSTALL_HOST:-}" ] && [ -f "$HOME/.config/kasaterm/asc/adhoc/cert.json" ]; then host=local; else host=${KASA_INSTALL_HOST:-nachoneko}; fi
 origin=${KASA_INSTALL_ORIGIN:-https://kasaterm.debimarlene.com}
 remote=.config/kasaterm/relay-install
 
-if [ "$mode" != publish ]; then
+if [ "$mode" != publish ] && [ "$host" = local ]; then
+  KASA_ARCHIVE_UNSIGNED=1
+  . tool/ios-archive.sh
+  rm -rf "$out" && mkdir -p "$out/x/Payload"
+  ditto "$arch/Products/Applications/Runner.app" "$out/x/Payload/Runner.app"
+  (cd "$out/x" && zip -qry ../kasaterm.ipa Payload)
+  rm -rf "$out/x"
+elif [ "$mode" != publish ]; then
   . tool/ios-archive.sh
   opts=$(mktemp -t export.XXXX.plist)
   trap 'rm -f "$opts"' EXIT
@@ -53,6 +61,8 @@ PLIST
     | tail -3
   ipa=$(ls "$out"/*.ipa)
   mv "$ipa" "$out/kasaterm.ipa"
+fi
+if [ "$mode" != publish ]; then
   info=$arch/Products/Applications/Runner.app/Info.plist
   python3 - "$info" "$out/meta.json" <<'PY'
 import json, plistlib, sys, time
@@ -69,12 +79,16 @@ fi
 token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
 up=".up-$token"
 tooldir=.local/share/kasa-relay/adhoc
-ssh -o ConnectTimeout=10 "$host" "mkdir -p $remote/$up $tooldir && chmod 700 $remote"
-scp -q "$out/kasaterm.ipa" "$out/meta.json" "$host:$remote/$up/"
-scp -q tool/asc.py tool/adhoc_sign.py "$host:$tooldir/"
+# 원격 기본 셸(zsh)은 빈 글롭에서 멈추므로 bash 로 돈다. 경로는 관문 기계의 홈 기준.
+on_host() { if [ "$host" = local ]; then (cd "$HOME" && bash -s -- "$@"); else ssh -o ConnectTimeout=10 "$host" bash -s -- "$@"; fi; }
+put() { local dest=$1; shift; if [ "$host" = local ]; then cp "$@" "$HOME/$dest/"; else scp -q "$@" "$host:$dest/"; fi; }
+on_host "$remote/$up" "$tooldir" "$remote" <<'SH'
+mkdir -p "$1" "$2" && chmod 700 "$3"
+SH
+put "$remote/$up" "$out/kasaterm.ipa" "$out/meta.json"
+put "$tooldir" tool/asc.py tool/adhoc_sign.py
 # 판 바꾸기는 디렉터리 이름 바꾸기 → latest 갈아 끼우기 순이라, 관문은 반쯤 올라간 판을 보지 않는다.
-# 원격 기본 셸(zsh)은 빈 글롭에서 멈추므로 bash 로 돈다.
-ssh "$host" bash -s -- "$remote" "$up" "$token" "$tooldir" <<'SH'
+on_host "$remote" "$up" "$token" "$tooldir" <<'SH'
 set -euo pipefail
 shopt -s nullglob dotglob
 signer=$HOME/$4/adhoc_sign.py
