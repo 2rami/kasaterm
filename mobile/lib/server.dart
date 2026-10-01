@@ -596,6 +596,32 @@ class Server {
   List<String>? wsProtocolsFor(Uri u) =>
       isDirect(u.replace(scheme: u.scheme == 'wss' ? 'https' : 'http')) ? null : wsProtocols;
 
+  /// 소켓 악수가 HTTP 로 거절됐을 때 사람에게 보일 까닭. 소켓 라이브러리는 상태도 본문도 넘겨주지 않아 같은 주소를
+  /// 한 번 GET 한다 — 관문의 거절은 업그레이드 전에 나므로 같은 답이 온다. 닿지 못했거나 거절이 아니면 null.
+  Future<String?> socketRefusal(Uri ws) async {
+    final http.Response res;
+    try {
+      res = await _client
+          .get(ws.replace(scheme: ws.scheme == 'wss' ? 'https' : 'http'))
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      return null;
+    }
+    Object? error;
+    try {
+      final j = jsonDecode(utf8.decode(res.bodyBytes));
+      if (j is Map) error = j['error'];
+    } catch (_) {}
+    return switch ((res.statusCode, error)) {
+      (_, 'account_device_unavailable') =>
+        '이 기계는 지금 로그인한 계정으로 닿지 않아요. 그 기계가 꺼져 있거나 같은 계정으로 로그인돼 있지 않아요.',
+      (401, _) => '로그인이 만료되어 화면을 열 수 없어요. 다시 로그인해 주세요.',
+      (404, _) => '그 기계의 카사텀이 관문에 붙어 있지 않아요.',
+      (final s, _) when s == 502 || s == 503 || s == 504 => '관문이 그 기계로 길을 열지 못했어요 (HTTP $s).',
+      _ => null,
+    };
+  }
+
   /// 오류 문구·설정 화면용. slug 는 자격이라 가린다.
   String describe() {
     final p = root.path;

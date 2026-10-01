@@ -74,13 +74,17 @@ class TermSession extends ChangeNotifier {
     _direct = server.isDirect(uri.replace(scheme: 'http'));
     final ch = connectTermSocket(uri, protocols: server.wsProtocolsFor(uri));
     _channel = ch;
+    var opened = false;
     _sub = ch.stream.listen(
       (data) { if (generation == _generation) _onData(data); },
-      onError: (Object _) { if (generation == _generation) _lost(); },
-      onDone: () { if (generation == _generation) _lost(); },
+      onError: (Object _) { if (generation == _generation) _lost(refused: opened ? null : uri); },
+      onDone: () { if (generation == _generation) _lost(refused: opened ? null : uri); },
       cancelOnError: true,
     );
-    ch.ready.catchError((Object _) { if (generation == _generation) _lost(); });
+    ch.ready.then<void>(
+      (_) { opened = true; },
+      onError: (Object _) { if (generation == _generation) _lost(refused: uri); },
+    );
   }
 
   Uri _wsUri() => server.wsUri(
@@ -114,6 +118,7 @@ class TermSession extends ChangeNotifier {
         grid.apply({'cols': msg['cols'], 'rows': msg['rows']});
         mirror = msg['mirror'] == true;
         state = TermState.connected;
+        note = null;
         _backoffSec = 1;
         _sendJson({'t': 'history', 'rows': historyAsk});
       case 'history':
@@ -141,7 +146,9 @@ class TermSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _lost() {
+  /// [refused] 는 악수조차 못 마친 소켓의 주소다. 망 유실과 달리 관문이 거절한 것이면(계정에 없는 기계 등) 몇 번을
+  /// 다시 붙어도 같으니, 「다시 연결 중」만 띄우지 않고 그 까닭을 [note] 로 보인다.
+  void _lost({Uri? refused}) {
     if (_disposed || _paused || state == TermState.gone) return;
     if (_channel == null) return;
     _closeChannel();
@@ -149,6 +156,14 @@ class TermSession extends ChangeNotifier {
     notifyListeners();
     _retry = Timer(Duration(seconds: _backoffSec), connect);
     _backoffSec = math.min(_backoffSec * 2, 10);
+    if (refused != null) _explain(refused);
+  }
+
+  Future<void> _explain(Uri refused) async {
+    final why = await server.socketRefusal(refused);
+    if (_disposed || state != TermState.reconnecting || why == note) return;
+    note = why;
+    notifyListeners();
   }
 
   bool get canSend => !server.isClosed && state == TermState.connected && _channel != null;
