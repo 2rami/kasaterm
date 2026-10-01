@@ -63,6 +63,13 @@ abstract final class Look {
   static const sheetRadius = 28.0;
   static const modalButtonRadius = 8.0;
 
+  /// 켤 때 계정 확인 화면의 쌍둥이(`twins_loading.dart`) — 그림 한 장의 정사각 크기, 동생이 뛰는 높이
+  /// (언니는 절반), 발밑 그림자 두께, 한 박. 두 사람이 반 박씩 엇갈려 번갈아 뛴다.
+  static const twins = 136.0;
+  static const twinsHop = 12.0;
+  static const twinsShadow = 6.0;
+  static const twinsBeat = Duration(milliseconds: 1100);
+
   static BorderRadius get corners => BorderRadius.circular(radius);
 
   /// 아이패드 판정은 device_shape 와 같다 — 짧은 변 600 이상이거나 긴 변 1000 이상.

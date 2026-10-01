@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/grid.dart';
+import 'package:kasaterm_mobile/desktop_palette.dart';
 import 'package:kasaterm_mobile/grid_canvas.dart';
 import 'package:kasaterm_mobile/server.dart';
 
@@ -13,7 +14,7 @@ DesignTokens tokens(bool dark) => DesignTokens(
   surface: 0xff333333,
   surfaceHover: 0xff444444,
   border: 0xff555555,
-  text: 0xffcccccc,
+  text: dark ? 0xffcccccc : 0xff222222,
   textDim: 0xff888888,
   onAccent: 0xffffffff,
   danger: 0xffff0000,
@@ -23,7 +24,7 @@ DesignTokens tokens(bool dark) => DesignTokens(
 void main() {
   for (final dark in [true, false]) {
     testWidgets(
-      'explicit ${dark ? 'dark' : 'light'} ignores source brightness',
+      'explicit ${dark ? 'dark' : 'light'} flips the desktop palette',
       (tester) async {
         final source = tokens(!dark);
         late TerminalPalette palette;
@@ -46,14 +47,17 @@ void main() {
             ),
           ),
         );
+        // 데스크톱 팔레트를 그 밝기로 뒤집은 색 — 폰 기본색이 아니다.
+        final flipped = source.inBrightness(dark: dark);
         expect(palette.dark, dark);
-        expect(palette.bg, local.bg);
-        expect(palette.fg, local.fg);
+        expect(palette.bg, Color(flipped.bg));
+        expect(palette.fg, Color(flipped.fg));
+        expect(palette.bg, isNot(local.bg));
         expect(palette.ansi, local.ansi);
         final n = dark ? 0xfa : 0x11;
         final f = dark ? 0x22 : 0xcc;
-        expect(palette.resolve(RgbColor(n, n, n), foreground: false), local.bg);
-        expect(palette.resolve(RgbColor(f, f, f), foreground: true), local.fg);
+        expect(palette.resolve(RgbColor(n, n, n), foreground: false), palette.bg);
+        expect(palette.resolve(RgbColor(f, f, f), foreground: true), palette.fg);
         // Source-colored syntax, diff backgrounds and student accents survive.
         expect(
           palette.resolve(const RgbColor(192, 112, 208), foreground: true),

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'connection.dart';
 import 'app_link.dart';
+import 'desktop_palette.dart';
 import 'hub_model.dart';
 import 'hub_prefs.dart';
 import 'kasanet.dart';
@@ -16,6 +17,7 @@ import 'screens/hub.dart';
 import 'screens/terminal.dart';
 import 'server.dart';
 import 'theme_prefs.dart';
+import 'twins_loading.dart';
 import 'weather/store.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
@@ -278,6 +280,23 @@ ThemeData buildThemeFrom({
   );
 }
 
+/// 「데스크톱 따라감」이면 데스크톱 밝기 그대로, 밝게·어둡게를 골랐으면 같은 팔레트를 그 밝기로
+/// 뒤집어 입는다 — 어느 쪽이든 데스크톱과 같은 테마다. 색을 못 받았을 때만 폰 기본 얼굴.
+({ThemeMode mode, ThemeData light, ThemeData dark}) appThemes(
+  ThemeMode mode,
+  DesignTokens? tokens,
+) => (
+  mode: mode == ThemeMode.system && tokens != null
+      ? (tokens.looksDark ? ThemeMode.dark : ThemeMode.light)
+      : mode,
+  light: tokens == null
+      ? buildTheme(Brightness.light)
+      : themeFromTokens(tokens.inBrightness(dark: false)),
+  dark: tokens == null
+      ? buildTheme(Brightness.dark)
+      : themeFromTokens(tokens.inBrightness(dark: true)),
+);
+
 class KasatermApp extends StatelessWidget {
   const KasatermApp({super.key});
 
@@ -286,21 +305,15 @@ class KasatermApp extends StatelessWidget {
     valueListenable: phoneThemeMode,
     builder: (context, mode, _) => ValueListenableBuilder<DesignTokens?>(
       valueListenable: designTokens,
-      // 「데스크톱 따라감」이면 받은 색이 밝기와 상관없이 그 얼굴이다. 폰에서 밝게·
-      // 어둡게를 골랐으면 데스크톱 색을 접고 폰 기본 얼굴을 그 밝기로.
       builder: (context, tokens, _) {
-        final desktop = mode == ThemeMode.system ? tokens : null;
+        final themes = appThemes(mode, tokens);
         return MaterialApp(
           navigatorKey: navigatorKey,
           debugShowCheckedModeBanner: false,
           title: 'KASA Mobile',
-          themeMode: mode,
-          theme: desktop == null
-              ? buildTheme(Brightness.light)
-              : themeFromTokens(desktop),
-          darkTheme: desktop == null
-              ? buildTheme(Brightness.dark)
-              : themeFromTokens(desktop),
+          themeMode: themes.mode,
+          theme: themes.light,
+          darkTheme: themes.dark,
           home: const RootScreen(),
         );
       },
@@ -320,6 +333,10 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   final _connection = ConnectionController();
   Server? _boundServer;
   AppLink? _pendingLink;
+
+  /// 기다림 화면을 한 번 봤나 — 그 뒤의 「다시 확인」은 그 화면의 단추가 진행을 보이고,
+  /// 쌍둥이는 켜고 처음 확인할 때만 나온다.
+  bool _waited = false;
 
   /// 검증용: 빌드 때 `KASA_OPEN_PANE`(과 `KASA_OPEN_MACHINE`)을 주면 켜자마자 그 학생
   /// 화면을 연다 — 시뮬레이터는 탭을 못 보내니 링크와 같은 길로 화면을 꺼내 본다.
@@ -458,16 +475,26 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       });
       if (server != null) _loadTokens(server);
     }
-    if (_connection.phase == ConnectionPhase.signedOut) _pendingLink = null;
+    if (_connection.phase == ConnectionPhase.signedOut) {
+      _pendingLink = null;
+      _waited = false;
+    }
+    if (_connection.phase == ConnectionPhase.waiting) _waited = true;
     setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_connection.phase == ConnectionPhase.restoring) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
     final server = _connection.server;
+    final phase = _connection.phase;
+    // 로그인 중(계정이 아직 없음)에는 연결 화면을 남긴다 — 갈아 끼우면 친 아이디가 지워진다.
+    if (phase == ConnectionPhase.restoring ||
+        (phase == ConnectionPhase.checking &&
+            _connection.account != null &&
+            server == null &&
+            !_waited)) {
+      return const Scaffold(body: SafeArea(child: TwinsLoading()));
+    }
     if (server == null && _connection.account == null) {
       return ConnectScreen(
         onConnected: _connection.connectLegacy,

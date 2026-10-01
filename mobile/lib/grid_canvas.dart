@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import 'claude_style.dart';
 import 'contrast.dart';
+import 'desktop_palette.dart';
 import 'fill_viewer.dart';
 import 'grid.dart';
 import 'links.dart';
@@ -55,20 +56,22 @@ class TerminalPalette {
     required ThemeMode mode,
     DesignTokens? source,
   }) {
-    if (mode == ThemeMode.system && source != null) {
-      return TerminalPalette.fromTokens(source);
+    if (source != null) {
+      if (mode == ThemeMode.system) return TerminalPalette.fromTokens(source);
+      // 앱 테마와 같은 뒤집힌 팔레트 — 터미널 바탕만 폰 기본색이면 상단 바와 칸 사이에 이음매가 보인다.
+      final t = source.inBrightness(dark: mode == ThemeMode.dark);
+      return TerminalPalette(
+        dark: t.dark,
+        fg: Color(t.fg),
+        bg: Color(t.bg),
+        cursor: Color(t.accent),
+        ansi: t.ansi,
+        minContrast: source.minContrast,
+        sourceFg: Color(source.fg),
+        sourceBg: Color(source.bg),
+      );
     }
-    final local = of(context);
-    return TerminalPalette(
-      dark: local.dark,
-      fg: local.fg,
-      bg: local.bg,
-      cursor: local.cursor,
-      ansi: local.ansi,
-      minContrast: source?.minContrast ?? local.minContrast,
-      sourceFg: source == null ? null : Color(source.fg),
-      sourceBg: source == null ? null : Color(source.bg),
-    );
+    return of(context);
   }
 
   /// 서버 색을 아직 못 받았을 때의 앱 기본색.

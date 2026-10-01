@@ -309,7 +309,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Text(
                     phoneThemeMode.value == ThemeMode.system
                         ? '연결된 데스크톱의 테마 색을 그대로 입는다. 못 받으면 폰 시스템 설정.'
-                        : '데스크톱 색은 접고 폰 기본 얼굴을 이 밝기로 입는다.',
+                        : '데스크톱 테마 색을 이 밝기로 바꿔 입는다. 못 받으면 폰 기본 색.',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),

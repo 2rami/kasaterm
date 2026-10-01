@@ -6,8 +6,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'relay_account.dart';
 
 /// 폰 자체 밝기. 「데스크톱 따라감」이 기본 — 붙은 기계의 색을 그대로 입는다.
-/// 밝게·어둡게를 고르면 데스크톱 색을 접고 폰의 기본 얼굴을 그 밝기로 입는다
-/// (데스크톱 팔레트는 한 벌뿐이라 밝기를 뒤집을 수가 없다).
+/// 밝게·어둡게를 고르면 같은 데스크톱 팔레트를 그 밝기로 뒤집어 입는다(`desktop_palette.dart`).
+/// 데스크톱이 보내는 팔레트는 한 벌뿐이라 반대 밝기는 폰이 지어낸다.
 final phoneThemeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
 final phoneThemeSync = PhoneThemeSync();
 
