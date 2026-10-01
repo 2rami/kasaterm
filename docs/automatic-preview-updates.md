@@ -9,6 +9,47 @@
 3. 전용 controller가 대기열을 직렬 처리한다. 깨끗한 별도 checkout에서 검사 → 패치 버전 증가 → Developer ID 서명 → 공증 → 태그·prerelease → CI 검증·EdDSA → preview 피드 순서다.
 4. 완료는 명령 종료 코드가 아니라 `feed` 단계까지 검증된 상태다. CI 대기 중인 작업을 성공으로 보고하지 않는다. 실패·대기는 상태와 원인을 남긴다.
 
+### 무엇을 굽나 — 등록된 커밋 그대로
+
+controller는 마지막 발행 뒤 main에 들어온 등록 커밋 가운데 가장 새 것을 **그 커밋 그대로** 굽는다. main 끝이 아니다.
+1번의 「정확한 커밋」·「미완성 변경 제외」가 등록의 뜻이라, 등록 안 된 커밋은 판에 싣지 않는 것이 정책에 맞는다.
+
+- main 끝이 등록 안 된 커밋(폰·문서·관문만 바꾼 것 등)이어도 기다리지 않는다. 그 아래 가장 새 등록 커밋이 나간다.
+- 그 판이 품은 더 오래된 등록은 「이미 나간 판에 포함」으로 끝낸다. 마지막 발행을 품지 않은 곁가지 커밋은 내지 않는다(앞 판에 실린 변경이 빠진 판이 되므로).
+- 검사가 실패해 아직 굽지 못한 계획은 더 새 등록이 오면 양보한다. 다 구운 계획은 더 새 등록이 와도 먼저 낸다.
+
+### 굽는 사이 main 이 움직이면
+
+굽기가 20분 남짓이고 그 사이 여러 학생이 main 에 push 한다. 그래서 태그 직전 판정은 「main 이 계획 커밋 그대로인가」가 아니라
+다음 셋이다(`policy.untagged_stale`).
+
+- origin/main 이 계획 커밋을 품는다(조상이거나 같다).
+- 계획 판 이상의 `v*` 태그가 원격에 없다.
+- preview 피드가 계획 때 그대로다.
+
+셋 중 하나라도 어긋나면 그 계획은 태그 없이 버리고 다음 tick 이 새 계획을 잡는다. 통과하면 태그는 계획 커밋에 판 번호·채널 기록만
+바꾼 버전 커밋에 선다. main 이 계획 커밋 그대로면 그 버전 커밋을 main 에 올리고, 앞서 갔으면 **main 끝 + 버전 커밋 합침 커밋**
+(트리는 main 끝 그대로에 `Cargo.toml` 판 번호 줄과 `.github/release-channel.json` 만 바꾼 것)을 태그와 `--atomic` 으로 함께 올린다.
+판에 실리는 것은 태그 커밋이고, 그 사이 들어온 남의 변경은 main 에만 남는다. push 하는 사이 main 이 또 움직이면 원격이 태그 없이
+그대로이므로 새 끝에 다시 합쳐 5번까지 올린다. 판 번호는 계속 오르고, 나가는 커밋은 모두 main 에 있다.
+
+이 완화는 preview 만이다. stable(나쵸 단발 승인)은 예전대로 main 이 계획 커밋일 때만 태그를 올린다.
+
+### controller 소스 갱신
+
+`tools/release` 를 고쳐 main 에 올렸으면 controller 가 도는 소스 checkout 을 그 커밋으로 옮긴다. LaunchAgent 의 `WorkingDirectory` 가
+그 폴더다(미니는 `~/.local/share/kasaterm-preview-controller`).
+
+```sh
+git -C /절대/controller소스 fetch -q origin main
+git -C /절대/controller소스 merge-base --is-ancestor <40자리 SHA> origin/main   # main 에 있는 커밋만
+git -C /절대/controller소스 checkout -q --detach <40자리 SHA>
+python3 -m tools.release.auto --state-dir /절대/상태폴더 status                  # 새 코드로 정책·대기열을 읽는지
+```
+
+도는 tick 은 시작할 때 모듈을 다 읽어 둔 채 끝까지 옛 코드로 가고, 다음 tick(1분 간격)부터 새 코드다. 그래서 굽는 중에 옮겨도 된다.
+LaunchAgent 는 다시 등록하지 않는다. 그 checkout 은 사람이 손대지 않는 깨끗한 detached 상태로 둔다.
+
 CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
 검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과
 공개 피드의 버전·주소·서명·크기를 최대 60회(확인 사이 10초) 대조한다. 실패·시간 초과는 CI 실패이며,
@@ -76,5 +117,5 @@ preview 업데이터를 시작한 프로세스에서는 Sparkle이 설치를 전
 - `.github/release-channel.json`은 버전 커밋의 채널·태그·부모 SHA·플랫폼을 고정한다. CI는 그 태그의 파일을 검증하고 분기한다.
 - preview는 Mac DMG 하나, GitHub prerelease, `latest=false`, `appcast-preview.xml`만 사용한다. 안정판 피드·Windows 피드·일반 latest는 바꾸지 않는다.
 - 기존 나쵸 단발 승인 방식은 그대로다. 자동 publisher는 별도 정책 허가이며 두 허가를 같은 작업에서 섞지 않는다.
-- 버전·태그·파일 해시·서명·공증 검사를 낮추지 않는다. main이 움직이면 재계획하거나 검증한 피드 커밋을 비교 후 다시 제출한다. 강제 push는 하지 않는다.
+- 버전·태그·파일 해시·서명·공증 검사를 낮추지 않는다. main이 움직이면 preview는 위 합침 커밋으로, stable은 재계획으로, 피드는 검증한 피드 커밋을 비교 후 다시 제출한다. 강제 push는 하지 않는다.
 - 모바일 바이너리는 이 Mac 경로의 대상이 아니다. 폰 앱은 설치 링크 판(`mobile/tool/adhoc.sh`, [절차](ios-adhoc-install.md))으로 따로 올린다. TestFlight는 2026-10-01부터 쓰지 않는다.

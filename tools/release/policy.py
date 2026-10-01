@@ -173,6 +173,22 @@ def disable(state_dir):
     return value
 
 
+def untagged_stale(plan, facts, backend):
+    """Why an untagged plan may no longer be published, or None.
+
+    main moving on past the planned commit does not stale a plan: the tag stage merges the version commit into the new
+    tip, so only commits already on main are released and versions still increase. Students push during the ~20 minute
+    build, so requiring main to stay put meant no release ever went out."""
+    if not backend.contains(plan["commit"], facts.get("main")):
+        return "origin/main no longer contains the planned commit; wait for a new plan"
+    want = version_tuple(plan.get("version"))
+    if not want or any(have >= want for have in backend.release_versions()):
+        return "a release tag at or above this plan's version exists; wait for a new plan"
+    if backend.feed_base(plan) != plan["feed_base"]:
+        return "preview feed changed since planning"
+    return None
+
+
 class Authorizer:
     def __init__(self, state_dir, expected_hash, requested_commit, planned_commit, controller_identity=identity):
         self.state_dir, self.expected_hash = Path(state_dir), expected_hash
@@ -224,10 +240,9 @@ class Authorizer:
             if facts["tag_parent"] != plan["commit"]:
                 raise Refused("existing tag belongs to a different source commit")
         else:
-            if facts.get("main") != plan["commit"]:
-                raise Refused("origin/main advanced before tagging; wait for a new plan")
-            if backend.feed_base(plan) != plan["feed_base"]:
-                raise Refused("preview feed changed since planning")
+            stale = untagged_stale(plan, facts, backend)
+            if stale:
+                raise Refused(stale)
         if backend.runner.mode == "live":
             # Once the external transaction starts, local revocation cannot recall CI work already dispatched.
             state.setdefault("publication", {"commit_point": "external_tag_submission_authorized", "tag": plan["tag"],

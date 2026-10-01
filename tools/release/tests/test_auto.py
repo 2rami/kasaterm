@@ -7,10 +7,10 @@ import unittest
 from unittest import mock
 
 from tools.release import auto, fastpatch, policy
-from tools.release.common import Pending, Refused, sha256_bytes
+from tools.release.common import Pending, Refused, sha256_bytes, version_tuple
 from tools.release.proc import Result, Runner
 
-A, B = "a" * 40, "b" * 40
+A, B, C = "a" * 40, "b" * 40, "c" * 40
 CONTROLLER = "mini-controller"
 
 
@@ -46,7 +46,16 @@ class FakeBackend:
     def resume_facts(self, plan):
         return {"main": self.engine.head, "tag_parent": self.engine.tags.get(plan["tag"])}
 
+    def contains(self, older, newer):
+        return self.engine.contains(older, newer)
+
+    def release_versions(self):
+        return {version_tuple(tag) for tag in self.engine.tags}
+
     def tag(self, plan, _state):
+        if self.engine.tag_error:
+            self.engine.tag_error, error = None, self.engine.tag_error
+            raise Refused(error)
         self.engine.calls.append("tag")
         self.engine.tags[plan["tag"]] = plan["commit"]
         if self.engine.disable_after_tag:
@@ -72,12 +81,13 @@ class FakeEngine:
         self.root = Path(root)
         self.plans = self.root / "plans"
         self.head, self.ready = A, [A]
+        self.history = [A, B, C]
         self.feed = "sha256:feed"
         self.remote_url = policy.REMOTE_URL
         self.tags, self.calls = {}, []
         self.waiting = False
         self.disable_after_tag = False
-        self.metadata = False
+        self.tag_error = None
         self.orphan = None
         self.local_ready = True
         self.created = 0
@@ -90,8 +100,13 @@ class FakeEngine:
     def queue(self, _policy):
         return self.head, self.ready
 
-    def can_advance(self, _older, _newer):
-        return self.metadata
+    def contains(self, older, newer):
+        return older in self.history and newer in self.history and self.history.index(older) <= self.history.index(newer)
+
+    def lineage(self, base, head):
+        if head not in self.history or base and not self.contains(base, head):
+            return []
+        return self.history[self.history.index(base) + 1 if base else 0:self.history.index(head) + 1][::-1]
 
     def orphaned_publication(self, _requested, _planned):
         return self.orphan
@@ -99,6 +114,8 @@ class FakeEngine:
     def make_plan(self, config, commit):
         self.created += 1
         plan = plan_for(config, commit)
+        plan["version"] = f"0.2.{1 + self.created}"
+        plan["tag"] = "v" + plan["version"]
         plan["feed_base"] = self.feed
         rehash(plan)
         fastpatch.save_plan(plan, self.plans)
@@ -258,9 +275,15 @@ class PolicyFixture(unittest.TestCase):
         first["commit"] = B
         with self.assertRaises(Refused): authorizer(plan, {"authorization": first}, FakeBackend(self.engine), "feed")
 
-    def test_remote_main_movement_before_tag_is_refused(self):
+    def test_main_moving_past_the_plan_is_published_but_a_dropped_plan_or_newer_tag_is_refused(self):
         self.engine.head = B
-        with self.assertRaisesRegex(Refused, "advanced"):
+        self.assertEqual(self.auth()(plan_for(self.config), {}, FakeBackend(self.engine), "tag")["commit"], A)
+        self.engine.history = [B]
+        with self.assertRaisesRegex(Refused, "no longer contains"):
+            self.auth()(plan_for(self.config), {}, FakeBackend(self.engine), "tag")
+        self.engine.history = [A, B]
+        self.engine.tags["v0.2.3"] = B
+        with self.assertRaisesRegex(Refused, "at or above"):
             self.auth()(plan_for(self.config), {}, FakeBackend(self.engine), "tag")
 
     def test_queue_reference_mismatch_is_refused(self):
@@ -326,12 +349,43 @@ class PolicyFixture(unittest.TestCase):
         self.assertEqual(self.engine.created, 2)
         self.assertEqual(self.engine.calls.count("tag"), 1)
 
-    def test_covered_metadata_queue_does_not_republish_same_source(self):
+    def test_ready_commits_inside_a_publication_are_covered_not_republished(self):
         self.engine.head, self.engine.ready = B, [A, B]
         self.assertEqual(auto.tick(self.root, self.engine)["state"], "done")
-        self.engine.metadata = True
         self.assertEqual(auto.tick(self.root, self.engine)["state"], "idle")
+        self.assertEqual(auto.load_ledger(self.root)["requests"][A]["reason"], "already covered by a completed publication")
         self.assertEqual(self.engine.created, 1)
+
+    def test_main_moving_during_the_build_still_publishes_the_built_plan(self):
+        build = self.engine.run_local
+        def students_push_while_baking(plan, config):
+            self.engine.head = C
+            return build(plan, config)
+        self.engine.run_local = students_push_while_baking
+        result = auto.tick(self.root, self.engine)
+        self.assertEqual((result["state"], result["request"]), ("done", A))
+        self.assertEqual(self.engine.calls, ["tag", "release", "feed"])
+        self.assertEqual(self.engine.created, 1)
+
+    def test_unbuilt_plan_yields_to_a_newer_ready_commit(self):
+        self.engine.local_ready = False
+        self.assertEqual(auto.tick(self.root, self.engine)["state"], "blocked")
+        self.engine.head, self.engine.ready, self.engine.local_ready = B, [A, B], True
+        second = auto.tick(self.root, self.engine)
+        self.assertEqual((second["state"], self.engine.load_plan(second["plan_id"])[0]["commit"]), ("done", B))
+        self.assertEqual(auto.tick(self.root, self.engine)["state"], "idle")
+        self.assertEqual(self.engine.calls, ["tag", "release", "feed"])
+
+    def test_built_plan_ships_before_a_newer_ready_commit(self):
+        self.engine.tag_error = "push 실패 — 원격은 그대로다"
+        with self.assertRaisesRegex(Refused, "push"):
+            auto.tick(self.root, self.engine)
+        self.engine.head, self.engine.ready = B, [A, B]
+        first = auto.tick(self.root, self.engine)
+        self.assertEqual((first["state"], first["request"]), ("done", A))
+        second = auto.tick(self.root, self.engine)
+        self.assertEqual((second["state"], second["request"]), ("done", B))
+        self.assertEqual((self.engine.created, self.engine.calls.count("tag")), (2, 2))
 
     def test_invalid_queue_and_plan_id_are_rejected(self):
         policy.atomic_json(self.root / "queue.json", {"schema": "kasaterm-preview-queue/1", "requests": {}, "active": A})
@@ -447,18 +501,17 @@ class PolicyFixture(unittest.TestCase):
         self.assertEqual(auto.tick(self.root, self.engine)["state"], "blocked")
         self.assertEqual(self.engine.calls, [])
 
-    def test_native_main_advance_waits_for_new_ready_without_replanning(self):
-        self.engine.head = B
-        self.assertEqual(auto.tick(self.root, self.engine)["state"], "waiting_ready")
-        self.assertEqual(self.engine.created, 0)
-
-    def test_metadata_only_advance_records_original_and_planned_sha(self):
-        self.engine.head, self.engine.metadata = B, True
+    def test_unregistered_main_tip_publishes_the_newest_registered_commit_exactly(self):
+        self.engine.head, self.engine.ready = C, [A, B]
         result = auto.tick(self.root, self.engine)
         plan, state = self.engine.load_plan(result["plan_id"])
-        self.assertEqual(plan["commit"], B)
-        self.assertEqual(state["authorization"]["requested_commit"], A)
-        self.assertEqual(state["authorization"]["commit"], B)
+        self.assertEqual((result["state"], result["request"], plan["commit"]), ("done", B, B))
+        self.assertEqual((state["authorization"]["requested_commit"], state["authorization"]["commit"]), (B, B))
+
+    def test_ready_commit_off_main_waits_without_planning(self):
+        self.engine.head, self.engine.ready, self.engine.history = B, [C], [A, B]
+        self.assertEqual(auto.tick(self.root, self.engine)["state"], "waiting_ready")
+        self.assertEqual(self.engine.created, 0)
 
     def test_orphaned_preview_tag_does_not_create_another_release(self):
         self.engine.orphan = "v0.2.2"
@@ -494,7 +547,7 @@ class PolicyFixture(unittest.TestCase):
                 auto.service_spec(source, self.root, sys.executable)
 
 
-class MetadataGitFixture(unittest.TestCase):
+class GitFixture(unittest.TestCase):
     def test_fresh_clone_materializes_lfs_from_explicit_cache_without_network(self):
         binary = shutil.which("git-lfs")
         if not binary:
@@ -526,30 +579,30 @@ class MetadataGitFixture(unittest.TestCase):
             auto.git(checkout, "worktree", "add", "--detach", str(worktree), "HEAD", env={"GIT_LFS_SKIP_SMUDGE": "0"})
             self.assertEqual((worktree / "asset.bin").read_bytes(), contents)
 
-    def test_only_version_metadata_and_docs_can_advance(self):
+    def test_lineage_follows_only_commits_after_the_last_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             auto.git(repo, "init", "--initial-branch=main")
             auto.git(repo, "config", "user.name", "Fixture")
             auto.git(repo, "config", "user.email", "fixture@example.invalid")
-            cargo = repo / "Cargo.toml"
-            cargo.write_text('[workspace.package]\nversion = "0.2.1"\n[workspace.dependencies]\ncrate = "1"\n')
-            auto.git(repo, "add", ".")
-            auto.git(repo, "commit", "-m", "fixture")
-            first = auto.git(repo, "rev-parse", "HEAD")
-            cargo.write_text(cargo.read_text().replace('version = "0.2.1"', 'version = "0.2.2"'))
-            (repo / "docs").mkdir()
-            (repo / "docs/note.md").write_text("Fixture documentation\n")
-            auto.git(repo, "add", ".")
-            auto.git(repo, "commit", "-m", "metadata")
-            second = auto.git(repo, "rev-parse", "HEAD")
-            self.assertTrue(auto.metadata_only(repo, first, second))
-            cargo.write_text(cargo.read_text().replace('crate = "1"', 'crate = "2"'))
-            auto.git(repo, "add", ".")
-            auto.git(repo, "commit", "-m", "dependency")
-            third = auto.git(repo, "rev-parse", "HEAD")
-            self.assertFalse(auto.metadata_only(repo, first, third))
-            self.assertFalse(auto.metadata_only(repo, third, first))
+            def commit(message):
+                auto.git(repo, "commit", "--allow-empty", "-m", message)
+                return auto.git(repo, "rev-parse", "HEAD")
+            root = commit("root")
+            published = commit("published")
+            after = commit("after")
+            auto.git(repo, "checkout", "-b", "side", root)
+            side = commit("side branch that never saw the publication")
+            auto.git(repo, "checkout", "main")
+            auto.git(repo, "merge", "--no-ff", "-m", "merge side", "side")
+            merged = auto.git(repo, "rev-parse", "HEAD")
+            tip = commit("tip")
+            self.assertEqual(auto.lineage(repo, published, tip), [tip, merged, after])
+            self.assertEqual(auto.lineage(repo, None, after), [after, published, root])
+            self.assertEqual(auto.lineage(repo, side, after), [])
+            self.assertTrue(auto.contains(repo, published, tip))
+            self.assertFalse(auto.contains(repo, side, published))
+            self.assertFalse(auto.contains(repo, "f" * 40, tip))
 
 
 if __name__ == "__main__":

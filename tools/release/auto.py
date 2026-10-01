@@ -102,42 +102,22 @@ def enqueue(repo, commit):
     return {"commit": commit, "state": "queued"}
 
 
-def metadata_only(repo, older, newer):
-    try:
-        git(repo, "merge-base", "--is-ancestor", older, newer)
-        files = git(repo, "diff", "--no-renames", "--name-only", older, newer).splitlines()
-        for name in files:
-            if name.startswith("docs/") or name in ("README.md", "CHANGELOG.md"):
-                continue
-            if name == ".github/release-channel.json":
-                manifest = json.loads(git(repo, "show", newer + ":" + name))
-                if not isinstance(manifest, dict) or not re.fullmatch(r"v\d+\.\d+\.\d+", manifest.get("tag", "")):
-                    return False
-                validate_channel_manifest(manifest, manifest.get("tag"), manifest.get("source_commit"))
-                continue
-            if name not in ("Cargo.toml", "mobile/pubspec.yaml"):
-                return False
-            before, after = (git(repo, "show", revision + ":" + name) for revision in (older, newer))
-            def without_version(text):
-                section, count, output = "", 0, []
-                for line in text.splitlines():
-                    if line.startswith("["):
-                        section = line
-                    match = (name == "Cargo.toml" and section == "[workspace.package]"
-                             and re.fullmatch(r'version = "\d+\.\d+\.\d+"', line)) or (
-                                 name == "mobile/pubspec.yaml" and re.fullmatch(r"version: \d+\.\d+\.\d+(?:\+\d+)?", line))
-                    if match:
-                        count += 1
-                        line = "VERSION"
-                    output.append(line)
-                return output, count
-            old_body, old_count = without_version(before)
-            new_body, new_count = without_version(after)
-            if old_count != 1 or new_count != 1 or old_body != new_body:
-                return False
-        return bool(files)
-    except (Refused, ValueError, TypeError, AttributeError):
-        return False
+def contains(repo, older, newer):
+    """Whether newer includes older. A commit this checkout never received (a ready ref dropped from main) is not included."""
+    for sha in (older, newer):
+        if not sha or subprocess.run(["git", "-C", str(repo), "cat-file", "-e", sha + "^{commit}"],
+                                     capture_output=True, timeout=60).returncode:
+            return False
+    result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer], capture_output=True, timeout=120)
+    if result.returncode not in (0, 1):
+        raise Refused("cannot compare commit ancestry")
+    return result.returncode == 0
+
+
+def lineage(repo, base, head):
+    """Commits after the last publication up to head, newest first. A side branch that never saw base is left out so a
+    release never drops what the previous one shipped."""
+    return git(repo, "rev-list", "--topo-order", *(["--ancestry-path", base + ".." + head] if base else [head])).splitlines()
 
 
 class Engine:
@@ -199,9 +179,12 @@ class Engine:
                 return ref.removeprefix("refs/tags/")
         return None
 
-    def can_advance(self, older, newer):
+    def lineage(self, base, head):
         self.prepare()
-        return metadata_only(self.repo, older, newer)
+        return lineage(self.repo, base, head)
+
+    def contains(self, older, newer):
+        return contains(self.repo, older, newer)
 
     def make_plan(self, config, commit):
         self.prepare()
@@ -390,45 +373,51 @@ def tick(state_dir, engine=None):
             policy.atomic_json(ledger_path, ledger)
         head, ready = engine.queue(config)
         ledger["remote_main"] = head
+        published = [entry for entry in ledger["requests"].values() if entry.get("state") == "done" and entry.get("completed_at_ms")]
+        last = max(published, key=lambda entry: entry["completed_at_ms"])["planned_commit"] if published else None
+        # Only exact registered commits ship: an unregistered tip (phone, docs, relay) must not hold back the desktop
+        # release, and must not ride along in it either.
+        after = engine.lineage(last, head)
+        candidates = [sha for sha in ready if ledger["requests"].get(sha, {}).get("state") != "done"]
+        for sha in list(candidates):
+            if sha not in after and sha != ledger.get("active") and last and engine.contains(sha, last):
+                ledger["requests"].setdefault(sha, {}).update(state="done", reason="already covered by a completed publication")
+                candidates.remove(sha)
+        eligible = [sha for sha in after if sha in candidates]
         request = ledger.get("active")
         if request:
             entry = ledger["requests"][request]
             plan, prior = engine.load_plan(entry["plan_id"])
             facts = engine.facts(plan, config)
-            feed_changed = not facts.get("tag_parent") and engine.backend(plan, "dry", config).feed_base(plan) != plan["feed_base"]
-            if not facts.get("tag_parent") and (head != plan["commit"] or feed_changed):
-                entry.update(state="waiting_main", reason="origin/main or preview feed advanced before any tag", observed_main=head)
-                ledger["active"] = None
-                request = None
-                save()
+            if not facts.get("tag_parent"):
+                stale = policy.untagged_stale(plan, facts, engine.backend(plan, "dry", config))
+                # A built plan still ships even if newer work arrived; an unbuilt one (failed checks) yields to it.
+                if not stale and eligible and eligible[0] != request and not fastpatch.live_ready(plan, prior):
+                    stale = "a newer ready commit supersedes this unbuilt plan"
+                if stale:
+                    entry.update(state="waiting_main", reason=stale, observed_main=head)
+                    ledger["active"] = None
+                    request = None
+                    save()
         if request is None:
-            candidates = [sha for sha in ready if ledger["requests"].get(sha, {}).get("state") != "done"]
-            completed = [entry.get("planned_commit") for entry in ledger["requests"].values() if entry.get("state") == "done"]
-            for sha in list(candidates):
-                if any(sha == done or done and engine.can_advance(sha, done) for done in completed):
-                    ledger["requests"].setdefault(sha, {}).update(state="done", reason="already covered by a completed publication")
-                    candidates.remove(sha)
-            if head in candidates:
-                request = head
-            else:
-                eligible = [sha for sha in candidates if engine.can_advance(sha, head)]
-                request = eligible[-1] if eligible else None
+            request = eligible[0] if eligible else None
             for sha in candidates:
                 if sha != request:
-                    ledger["requests"].setdefault(sha, {}).update(state="waiting_main", observed_main=head)
+                    reason = "a newer ready commit goes first" if sha in eligible else "not on origin/main after the last publication"
+                    ledger["requests"].setdefault(sha, {}).update(state="waiting_main", reason=reason, observed_main=head)
             if request is None:
                 save()
                 return {"state": "waiting_ready" if candidates else "idle", "remote_main": head}
             old = ledger["requests"].get(request, {})
             if old.get("policy_hash") and old["policy_hash"] != config["policy_hash"]:
                 raise Refused("queued request belongs to an older policy revision")
-            orphan = engine.orphaned_publication(request, head)
+            orphan = engine.orphaned_publication(request, request)
             if orphan:
                 ledger["requests"].setdefault(request, {}).update(state="blocked", reason="existing preview tag requires its original plan", tag=orphan)
                 save()
                 raise Refused("existing preview tag requires its original plan; refusing a new release")
-            plan = engine.make_plan(config, head)
-            entry = {"state": "prepared", "plan_id": plan["plan_id"], "planned_commit": head,
+            plan = engine.make_plan(config, request)
+            entry = {"state": "prepared", "plan_id": plan["plan_id"], "planned_commit": request,
                      "policy_hash": config["policy_hash"], "policy_id": config["policy_id"], "policy_scope": policy.scope_hash(config)}
             ledger["requests"][request] = entry
             ledger["active"] = request
@@ -449,6 +438,7 @@ def tick(state_dir, engine=None):
             entry["publication"] = state.get("publication")
             if complete(state):
                 entry.update(state="done", completed_at_ms=int(time.time() * 1000))
+                entry.pop("reason", None)
                 ledger["active"] = None
             else:
                 entry.update(state="waiting", reason="publication has unfinished stages")

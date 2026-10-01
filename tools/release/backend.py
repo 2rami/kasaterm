@@ -3,7 +3,8 @@
 `tag-release.sh` 를 그대로 부르지 않는 까닭: 그 스크립트는 로컬 태그만 보고, 지금 체크아웃의 `main` 가지를 push 한다.
 공유 워킹트리에서는 그 `main` 이 계획 커밋이라는 보장이 없다. 그래서 같은 일(같은 치환·같은 커밋 메시지·같은 태그)을
 계획 커밋의 격리 워크트리에서 하고, `HEAD:main` 과 태그를 `--atomic` 으로 한 번에 올린다 — 둘 중 하나만 올라가는
-반쪽 상태를 만들지 않는다. CI 는 태그 push 로 도는 release.yml 그대로다.
+반쪽 상태를 만들지 않는다. preview 는 그 사이 main 이 앞서 갔으면 main 에 버전 커밋 대신 main 끝과 버전 커밋을 합친
+커밋을 올린다(태그는 그대로 버전 커밋). CI 는 태그 push 로 도는 release.yml 그대로다.
 
 release.yml 이 `MAC_ARTIFACT: local` 이면 mac dmg 는 이 기기가 만든다(tools/release/macsign.py): 굽기 단계가 버전 커밋으로
 Developer ID·hardened runtime 서명해 굽고, 태그 단계가 승인 뒤 공증·staple·재검증을 마친 다음에만 push 하며, 릴리스
@@ -27,6 +28,7 @@ TESTS = (["cargo", "test", "-p", "kasaterm", "--release"],
          ["cargo", "test", "-p", "kasa-mcp", "--release"],
          ["cargo", "test", "-p", "kasa-socket", "--release"])
 PUBLISH_STAGES = ("tag", "release", "feed")
+MAIN_RACE_ATTEMPTS = 5
 # Ed25519 SubjectPublicKeyInfo 머리 — Sparkle 공개키(32바이트)를 openssl 이 읽는 PEM 으로 싼다.
 _ED25519_SPKI = bytes.fromhex("302a300506032b6570032100")
 
@@ -141,6 +143,24 @@ class RealBackend:
         if fingerprint is None:
             raise Refused("피드를 읽지 못해 기준 해시를 못 쟀다")
         return fingerprint
+
+    def contains(self, older, newer):
+        """newer 가 older 를 품는가(같으면 참). 방금 원격에서 읽은 커밋이 아직 없으면 main 을 받아 온다."""
+        if not older or not newer:
+            return False
+        if not self.git("cat-file", "-e", f"{newer}^{{commit}}").ok:
+            self.git("fetch", "-q", self.remote, "refs/heads/main", timeout=120)
+        r = self.git("merge-base", "--is-ancestor", older, newer)
+        if r.timed_out or r.code not in (0, 1):
+            raise Refused(f"커밋 조상 관계를 확인하지 못했다 — {r.tail(2) or '시간 초과'}")
+        return r.code == 0
+
+    def release_versions(self):
+        r = self.git("ls-remote", "--tags", self.remote, "refs/tags/v*", timeout=60)
+        if not r.ok:
+            raise Refused(f"원격 판 태그를 읽지 못했다 — {r.tail(2) or '시간 초과'}")
+        names = (line.split("\t")[-1].removeprefix("refs/tags/").removesuffix("^{}") for line in r.out.splitlines())
+        return {v for v in map(version_tuple, names) if v}
 
     def resume_facts(self, plan):
         """나쵸 `resume` 에 싣는 원격 사실 — 지금 main, 태그가 섰으면 그 커밋의 부모(= 계획 커밋이어야 한다)."""
@@ -523,7 +543,9 @@ class RealBackend:
         return [["git", "worktree", "add", "--detach", str(self.workdir / "wt"), plan["commit"]],
                 ["(Cargo.toml", "버전", "→", plan["version"], "채널", "→", plan["channel"], CHANNEL_MANIFEST + ")"],
                 ["git", "commit", "-qm", f"chore(release): {plan['tag']}"],
-                ["git", "push", "--atomic", self.remote, f"HEAD:refs/heads/{plan['branch']}", f"HEAD:refs/tags/{plan['tag']}"]]
+                ["git", "push", "--atomic", self.remote, f"HEAD:refs/heads/{plan['branch']}", f"HEAD:refs/tags/{plan['tag']}"]] + (
+                    [["(main 이 계획 커밋보다 앞서 갔으면 HEAD:refs/heads/main 대신 main 끝과 버전 커밋을 합친 커밋)"]]
+                    if plan["channel"] == "preview" else [])
 
     def preview(self, stage, plan):
         """live 가 아닐 때 게시 단계가 보이는 것 — 명령과 원격 사실. 로컬 저장소에도 흔적을 안 남긴다."""
@@ -560,7 +582,7 @@ class RealBackend:
                 done["notarized"] = self.notarize(plan, local, built)
             return done
         head = self.remote_ref(main)
-        if head != plan["commit"]:
+        if head != plan["commit"] and not self.may_merge(plan, head):
             raise Refused(f"원격 {plan['branch']} 가 계획 커밋이 아니다({(head or '?')[:8]}) — 계획에 없는 변경이 섞이므로 새 계획이 필요하다")
         wt = self.worktree(plan)
         bump = self.ensure_bump(wt, plan)
@@ -569,17 +591,64 @@ class RealBackend:
             if bump != built.get("commit"):
                 raise Refused(f"구운 판의 커밋({(built.get('commit') or '?')[:8]})과 지금 버전 커밋({bump[:8]})이 다르다 — run 으로 다시 굽는다")
             extra["notarized"] = self.notarize(plan, local, built)
-        push = self.git("push", "--atomic", self.remote, f"HEAD:{main}", f"HEAD:refs/tags/{tag}",
-                        kind="publish", timeout=180, cwd=wt)
-        if push.ok:
-            return {"tag": tag, "commit": bump, "pushed": True, **extra}
-        # 응답이 실패·시간 초과여도 원격에 반영됐을 수 있다 — 원격을 다시 읽어 맞춘다.
-        now_tag, now_main = self.remote_ref("refs/tags/" + tag), self.remote_ref(main)
-        if now_tag == bump and now_main == bump:
-            return {"tag": tag, "commit": bump, "pushed": True, "note": "push 응답은 실패였지만 원격에 반영돼 있었다", **extra}
-        if not now_tag and now_main == plan["commit"]:
-            raise Refused(f"push 실패 — 원격은 그대로다(다시 돌리면 이어서) · {'시간 초과' if push.timed_out else push.tail(2)}")
-        raise Refused(f"push 뒤 원격이 반쪽이다(태그 {(now_tag or '없음')[:8]}, {plan['branch']} {(now_main or '?')[:8]}) — 손대지 않고 멈춘다")
+        for _ in range(MAIN_RACE_ATTEMPTS):
+            target = bump if head == plan["commit"] else self.merge_into_main(wt, plan, bump, head)
+            push = self.git("push", "--atomic", self.remote, f"{target}:{main}", f"{bump}:refs/tags/{tag}",
+                            kind="publish", timeout=180, cwd=wt)
+            done = {"tag": tag, "commit": bump, "pushed": True, **({"main": target} if target != bump else {}), **extra}
+            if push.ok:
+                return done
+            # 응답이 실패·시간 초과여도 원격에 반영됐을 수 있다 — 원격을 다시 읽어 맞춘다.
+            now_tag, now_main = self.remote_ref("refs/tags/" + tag), self.remote_ref(main)
+            if now_tag == bump and (now_main == target or self.contains(target, now_main)):
+                return {**done, "note": "push 응답은 실패였지만 원격에 반영돼 있었다"}
+            if now_tag or not now_main:
+                raise Refused(f"push 뒤 원격이 반쪽이다(태그 {(now_tag or '없음')[:8]}, {plan['branch']} {(now_main or '?')[:8]}) — 손대지 않고 멈춘다")
+            if now_main == head:
+                raise Refused(f"push 실패 — 원격은 그대로다(다시 돌리면 이어서) · {'시간 초과' if push.timed_out else push.tail(2)}")
+            if not self.may_merge(plan, now_main):
+                raise Refused(f"push 하는 사이 원격 {plan['branch']} 가 이 계획으로 올릴 수 없게 움직였다({now_main[:8]}) — 새 계획이 필요하다")
+            # 원자 push 라 태그도 안 섰다 — 그 사이 다른 작업자가 올린 새 끝에 다시 합친다.
+            head = now_main
+        raise Refused(f"push 하는 사이 {plan['branch']} 가 {MAIN_RACE_ATTEMPTS}번 연달아 움직였다 — 원격은 태그 없이 그대로다(다시 돌리면 이어서)")
+
+    def may_merge(self, plan, head):
+        """preview 는 계획 뒤 main 이 앞서 가도 낸다 — 계획 커밋이 main 에 남아 있으면 버전 커밋을 main 끝에 합친다.
+        굽기가 20분 남짓이라 그 사이 누군가 push 하면 영영 못 나가던 것을 푼다. 이 완화는 preview 정책 허가 범위에서만
+        정했으므로 stable(나쵸 단발 승인)은 예전대로 main 이 계획 커밋일 때만 올린다."""
+        return plan["channel"] == "preview" and self.contains(plan["commit"], head)
+
+    def merge_into_main(self, wt, plan, bump, head):
+        """main 끝과 버전 커밋을 합친 커밋. 트리는 main 끝 그대로에 판 번호 줄과 채널 기록만 버전 커밋 것으로 바꾼다 —
+        버전 커밋은 계획 커밋에서 그 둘만 바꾼 것이고 main 끝은 계획 커밋을 품으니 이것이 곧 두 갈래를 합친 결과다.
+        일반 merge 에 맡기지 않는 까닭: 지난 합침이 바꾼 같은 판 번호 줄에서 매번 충돌한다."""
+        if not self.git("cat-file", "-e", f"{head}^{{commit}}", cwd=wt).ok:
+            self.git("fetch", "-q", self.remote, "refs/heads/" + plan["branch"], timeout=120, cwd=wt)
+        cargo = self.git("show", f"{head}:Cargo.toml", cwd=wt)
+        if not cargo.ok or not re.search(r'^version = "[^"]*"', cargo.out, re.M):
+            raise Refused(f"main 끝({head[:8]})의 Cargo.toml 워크스페이스 버전 줄을 못 찾았다")
+        scratch = self.workdir / "main-merge"
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / "Cargo.toml").write_text(re.sub(r'^version = "[^"]*"', f'version = "{plan["version"]}"', cargo.out, count=1, flags=re.M))
+        index = scratch / "index"
+        index.unlink(missing_ok=True)
+        blob = self.git("hash-object", "-w", str(scratch / "Cargo.toml"), kind="local", cwd=wt)
+        manifest = self.git("rev-parse", f"{bump}:{CHANNEL_MANIFEST}", cwd=wt)
+        if not blob.ok or not manifest.ok:
+            raise Refused("main 합침에 넣을 판 번호·채널 기록을 만들지 못했다")
+        env = {"GIT_INDEX_FILE": str(index)}
+        for args in (("read-tree", head),
+                     ("update-index", "--add", "--cacheinfo", f"100644,{blob.out.strip()},Cargo.toml"),
+                     ("update-index", "--add", "--cacheinfo", f"100644,{manifest.out.strip()},{CHANNEL_MANIFEST}")):
+            r = self.git(*args, kind="local", cwd=wt, extra=env)
+            if not r.ok:
+                raise Refused(f"main 합침 트리를 만들지 못했다 — {r.tail(2)}")
+        tree = self.git("write-tree", kind="local", cwd=wt, extra=env)
+        merged = self.git("commit-tree", tree.out.strip(), "-p", head, "-p", bump, "-m", f"chore(release): {plan['tag']} main 합침",
+                          kind="local", cwd=wt) if tree.ok else tree
+        if not merged.ok:
+            raise Refused(f"main 합침 커밋을 만들지 못했다 — {merged.tail(2)}")
+        return merged.out.strip()
 
     def reconcile_tag(self, plan, tagged):
         # FETCH_HEAD 로만 받는다 — 로컬 태그 ref 를 만들지 않는다.

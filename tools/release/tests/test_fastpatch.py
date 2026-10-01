@@ -1847,7 +1847,10 @@ class PreviewReleaseTests(LocalFixture):
         self.head = self.commit("preview feed support")
         sh(self.work, "git", "push", "-q", "origin", "main")
         self.preview_feed = self.tmp / "appcast-preview.xml"
-        self.preview_feed.write_bytes((REPO / "docs/appcast-preview.xml").read_bytes())
+        # 빈 채널에서 시작한다 — 저장소의 실제 피드는 판이 나갈수록 항목이 생겨 기준 태그가 이 fixture 에 없게 된다.
+        self.preview_feed.write_text('<?xml version="1.0" encoding="utf-8"?>\n<rss xmlns:sparkle="http://www.andymatuschak.org/'
+                                     'xml-namespaces/sparkle" version="2.0"><channel><title>kasaterm Preview (macOS)</title>'
+                                     '</channel></rss>\n')
 
     def preview_plan(self, **kwargs):
         return self.plan(channel="preview", feed=str(self.preview_feed), feed_win=None,
@@ -1953,6 +1956,69 @@ class PreviewReleaseTests(LocalFixture):
         self.assertEqual(self.uploads, [])
         with self.assertRaisesRegex(Refused, "재사용"):
             fp.run(plan["plan_id"], backend, self.state, approval_id="ap_x", authority=object())
+
+    def publish_any(self, plan):
+        return self.publish(plan, lambda current, state, backend, stage: {"plan_id": current["plan_id"], "stage": stage})
+
+    def other_student(self, path, text, message):
+        sh(self.work, "git", "pull", "-q", "--ff-only", "origin", "main")
+        (self.work / path).write_text(text)
+        moved = self.commit(message)
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        return moved
+
+    def show(self, revision, path):
+        sh(self.work, "git", "fetch", "-q", "origin", "--tags")
+        return sh(self.work, "git", "show", f"{revision}:{path}")
+
+    def test_preview_tag_merges_the_version_commit_into_a_main_that_moved_on(self):
+        for round in (1, 2):
+            plan = self.preview_plan()
+            self.go(plan, "local")
+            moved = self.other_student("app/kasaterm/src/main.rs", f"fn main() {{ student_{round}(); }}\n", "굽는 사이 다른 학생의 변경")
+            tagged = self.publish_any(plan)["stages"]["tag"]["detail"]
+            bump, merged = self.remote(f"refs/tags/{plan['tag']}"), self.remote("refs/heads/main")
+            self.assertEqual((tagged["commit"], tagged["main"]), (bump, merged))
+            self.assertEqual(sh(self.work, "git", "rev-parse", f"{bump}^"), plan["commit"])
+            self.assertEqual(sh(self.work, "git", "log", "-1", "--format=%P", merged).split(), [moved, bump])
+            self.assertEqual(sh(self.work, "git", "diff", "--name-only", moved, merged).split(), [common.CHANNEL_MANIFEST, "Cargo.toml"])
+            self.assertIn(f'version = "{plan["version"]}"', self.show(merged, "Cargo.toml"))
+            self.assertEqual(self.show(merged, common.CHANNEL_MANIFEST), self.show(bump, common.CHANNEL_MANIFEST))
+            self.assertIn(f"student_{round}", self.show(merged, "app/kasaterm/src/main.rs"))
+            self.assertNotIn(f"student_{round}", self.show(bump, "app/kasaterm/src/main.rs"))
+            sh(self.work, "git", "pull", "-q", "--ff-only", "origin", "main")
+            (self.work / "app/kasaterm/src/next.rs").write_text(f"// {round}\n")
+            self.commit("다음 판의 변경")
+            sh(self.work, "git", "push", "-q", "origin", "main")
+        self.assertEqual(self.remote_tags(), ["v0.2.0", "v0.2.1", "v0.2.2"])
+
+    def test_preview_tag_merges_again_when_main_moves_during_the_push(self):
+        plan = self.preview_plan()
+        self.go(plan, "local")
+        raced = []
+
+        def race(real):
+            if not raced:
+                raced.append(self.other_student("docs/race.md", "r\n", "push 하는 사이 올라온 변경"))
+            raced.append(None)
+            return real()
+
+        self.push_answer = race
+        tagged = self.publish_any(plan)["stages"]["tag"]["detail"]
+        self.assertEqual(len(raced), 3)
+        self.assertEqual(sh(self.work, "git", "log", "-1", "--format=%P", tagged["main"]).split(), [raced[0], tagged["commit"]])
+        self.assertEqual(self.remote("refs/heads/main"), tagged["main"])
+
+    def test_preview_tag_refuses_a_main_that_no_longer_contains_the_plan(self):
+        plan = self.preview_plan()
+        self.go(plan, "local")
+        sh(self.work, "git", "reset", "-q", "--hard", "v0.2.0")
+        (self.work / "app/kasaterm/src/main.rs").write_text("fn main() { rewritten(); }\n")
+        self.commit("고쳐 쓴 main")
+        sh(self.work, "git", "push", "-q", "--force", "origin", "main")
+        with self.assertRaisesRegex(Refused, "새 계획"):
+            self.publish_any(plan)
+        self.assertEqual(self.remote_tags(), ["v0.2.0"])
 
     def test_preview_ci_context_is_pinned_and_refuses_stale_or_cross_platform_manifest(self):
         plan = self.preview_plan()
