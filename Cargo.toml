@@ -22,7 +22,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.2.19"
+version = "0.2.20"
 license = "MIT"
 
 [workspace.dependencies]
