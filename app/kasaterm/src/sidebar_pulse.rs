@@ -1,8 +1,9 @@
-//! 사이드바 현황 — 맨 위 「목록 | 배치도」 아이콘 전환과 학생 한 줄(이름 · 지금 일 / 사정 한 줄).
+//! 사이드바 현황 — 맨 위 「목록 | 배치도」 아이콘 전환과 목록 한 줄(세션 이름 / 진행 띠 · 경과 시간).
 //!
 //! 옛 현황 줄(「사람 차례 N · 작업 N · 끝 N」)은 걷었다 — 차례 수를 따로 세우지 않고 줄이 말한다
-//! (2026-09-29 합의, `docs/boards.md` 「다음 구조」). 보드 스냅샷은 여전히 백그라운드로 읽는다:
-//! 줄의 마지막 보고와 펫 현황판(`overlay.json`) 요약이 거기서 나온다. 치수는 `docs/design.md`
+//! (2026-09-29 합의, `docs/boards.md` 「다음 구조」). 줄에서 학생 이름·마지막 보고도 뺐다 — 얼굴이
+//! 누구인지 말하고, 글은 세션 이름과 배치도 칸과 같은 띠·시간만 남는다(2026-10-01). 보드 스냅샷은
+//! 펫 현황판(`overlay.json`)이 떠 있을 때만 백그라운드로 읽는다. 치수는 `docs/design.md`
 //! 「사이드바 현황 목록」.
 
 use super::*;
@@ -10,11 +11,13 @@ use kasa_socket::backend::Backend;
 
 /// 맨 위 전환 줄(옛 현황 줄 자리) — 높이 30, 안쪽 26.
 pub(crate) const PULSE_H: f32 = 30.0;
-/// 두 줄 목록 행. 얼굴 20 · 첫 줄 12 · 둘째 줄 10.5(줄높이 14).
+/// 두 줄 목록 행. 얼굴 20 · 첫 줄 세션 이름 12 · 둘째 줄 진행 띠와 경과 시간 10.5(줄높이 14).
 pub(crate) const LIST_ROW_H: f32 = 40.0;
 /// 방 이름 아래 첫 줄까지의 틈. 행 사이는 0.
 pub(crate) const LIST_TOP_GAP: f32 = 4.0;
 const FACE: f32 = 20.0;
+/// 둘째 줄 높이 — 띠를 이 줄의 세로 가운데에 앉힌다.
+const LINE_H: f32 = 14.0;
 /// 요약이라 몇 초 늦어도 뜻이 안 바뀌고, 사이드바가 열려 있는 내내 돈다.
 const POLL: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -58,56 +61,7 @@ pub(crate) struct PulseDigest {
     pub(crate) waiting: Vec<WaitingStudent>,
 }
 
-/// 보드가 본 학생 한 줄의 사정 — 사이드바 둘째 줄의 재료. 차례·하는 중 판정은 줄 점과 같은
-/// 실시간 상태(`pane_needs_you`·`pane_is_busy`)가 하고, 여기서는 글만 빌린다.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct StudentLine {
-    /// 마지막 보고 첫 줄.
-    pub(crate) report: String,
-    /// 기다림의 종류(`permission`·`question`·`idle`).
-    pub(crate) attention_kind: Option<String>,
-    /// 마지막 끝 보고가 실패다.
-    pub(crate) failed: bool,
-}
-
-/// 보드 스냅샷의 학생 줄 — 이 기기 것은 pane id 로, 다른 기기 것은 `(기기 이름, 원본 pane id)` 로.
-/// 거울 줄은 원본 기기 줄과 같은 학생이라 싣지 않는다.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SidebarLines {
-    pub(crate) local: HashMap<String, StudentLine>,
-    pub(crate) remote: HashMap<(String, String), StudentLine>,
-}
-
-/// `collab_snapshot` 원문에서 줄 사정을 뽑는다. 모르는 칸은 비운다.
-pub(crate) fn parse_lines(value: &serde_json::Value) -> SidebarLines {
-    let root = value.get("result").unwrap_or(value);
-    let local_ids: Vec<&str> = root["sources"].as_array().into_iter().flatten()
-        .filter(|source| source["is_local"].as_bool() == Some(true))
-        .filter_map(|source| source["machine_id"].as_str())
-        .collect();
-    let mut lines = SidebarLines::default();
-    for pane in root["panes"].as_array().into_iter().flatten() {
-        if pane["status_reason"].as_str() == Some(crate::socket::REMOTE_MIRROR_REASON) {
-            continue;
-        }
-        let Some(surface) = pane["address"]["surface_id"].as_str().filter(|s| !s.is_empty()) else { continue };
-        let line = StudentLine {
-            report: pane["progress"].as_str().unwrap_or("").lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string(),
-            attention_kind: pane["attention_kind"].as_str().filter(|s| !s.is_empty()).map(str::to_string),
-            failed: pane["done_outcome"].as_str() == Some("failed"),
-        };
-        let machine = pane["address"]["machine_id"].as_str().unwrap_or("");
-        if local_ids.contains(&machine) {
-            lines.local.insert(surface.to_string(), line);
-        } else {
-            let label = pane["machine_label"].as_str().unwrap_or("").to_string();
-            lines.remote.insert((label, surface.to_string()), line);
-        }
-    }
-    lines
-}
-
-type Mailbox = Arc<Mutex<Option<Result<SidebarLines, String>>>>;
+type Mailbox = Arc<Mutex<Option<Result<(), String>>>>;
 
 #[derive(Default)]
 pub(crate) struct Pulse {
@@ -222,46 +176,31 @@ pub(crate) enum RowTurn {
     Resting,
 }
 
-impl RowTurn {
-    fn color(self) -> [u8; 4] {
-        match self {
-            Self::Yours => theme::attention(),
-            Self::Working => theme::accent(),
-            Self::Resting => theme::text_mute(),
-        }
-    }
-}
-
 /// 목록 한 줄의 글. 로컬 줄은 `App::row_student`, 다른 기기 줄은 `sidebar_navigation` 이 채운다.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RowStudent {
-    /// 얼굴 열쇠(학생 이름). 셸·웹 pane 은 비어 있다.
+    /// 얼굴 열쇠(학생 이름). 셸·웹 pane 은 비어 있다. 글로는 안 적는다 — 얼굴이 말한다.
     pub(crate) who: String,
-    pub(crate) name: String,
-    /// 지금 일 = 세션(창) 이름.
-    pub(crate) work: String,
+    /// 세션(창) 이름. 학생 없는 pane 은 그 pane 이름(zsh·웹…).
+    pub(crate) title: String,
     pub(crate) turn: RowTurn,
-    /// 사정의 첫 낱말(질문·승인·보고·하는 중·쉬는 중).
-    pub(crate) word: &'static str,
-    pub(crate) report: String,
 }
 
-/// 사정의 차례와 첫 낱말. 사람 손이 필요한 기다림과 안 본 보고가 「내 차례」다.
-pub(crate) fn row_state(waiting: bool, attention_kind: Option<&str>, unread: bool, failed: bool, busy: bool) -> (RowTurn, &'static str) {
-    if waiting {
-        let word = match attention_kind {
-            Some("permission") => "승인",
-            Some("question") => "질문",
-            _ => "확인 부탁",
-        };
-        (RowTurn::Yours, word)
-    } else if unread {
-        (RowTurn::Yours, if failed { "실패" } else { "보고" })
+/// 줄의 차례. 사람 손이 필요한 기다림과 안 본 보고가 「내 차례」다.
+pub(crate) fn row_turn(waiting: bool, unread: bool, busy: bool) -> RowTurn {
+    if waiting || unread {
+        RowTurn::Yours
     } else if busy {
-        (RowTurn::Working, "하는 중")
+        RowTurn::Working
     } else {
-        (RowTurn::Resting, "쉬는 중")
+        RowTurn::Resting
     }
+}
+
+/// 세션 이름 — 도는 표시를 뗀 창 이름, 비면 그 칸의 종류.
+pub(crate) fn row_title(label: &str, kind: &str) -> String {
+    let title = plain_title(label);
+    if title.is_empty() { kind.to_string() } else { title.to_string() }
 }
 
 /// 창 이름 앞의 도는 표시(`◐ `·`✳ `)를 뗀다 — OSC 제목에는 붙어 오고 고정 제목에는 없다.
@@ -276,7 +215,12 @@ pub(crate) struct RowPaint<'a> {
     pub(crate) icon: &'static str,
     pub(crate) cur: bool,
     pub(crate) hover: bool,
+    /// 도는 중 — 학생이 걷고 띠가 쓸린다.
     pub(crate) busy: bool,
+    /// 아래 셋은 배치도 칸 바닥 띠와 같은 값이다(`render::progress_bar`·`elapsed_mark`).
+    pub(crate) compact_pct: Option<u8>,
+    pub(crate) bg_active: bool,
+    pub(crate) busy_secs: Option<u64>,
     /// 저쪽에서 닫힌 줄 — 전부 흐리게.
     pub(crate) muted: bool,
 }
@@ -306,43 +250,54 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     }
     let tx = fx + FACE + 8.0;
     let right = rx + rw - 8.0;
-    let ink = |color| if p.muted { theme::text_mute() } else { color };
-    let name = crate::info::fit_text(g, &s.name, (right - tx).max(0.0), 12.0, false);
-    g.draw_text(tx, ry + 5.0, &name, gpu::DrawOpts { font_size: 12.0, color: ink(theme::text()), bold: false, italic: false });
-    let nx = tx + g.measure_chrome_text(&name, 12.0, false) + 6.0;
-    if !s.work.is_empty() && nx < right {
-        let work = crate::info::fit_text(g, &s.work, right - nx, 10.5, false);
-        g.draw_text(nx, ry + 6.5, &work, gpu::DrawOpts { font_size: 10.5, color: ink(theme::text_dim()), bold: false, italic: false });
+    let title = crate::info::fit_text(g, &s.title, (right - tx).max(0.0), 12.0, false);
+    let ink = if p.muted { theme::text_mute() } else { theme::text() };
+    g.draw_text(tx, ry + 5.0, &title, gpu::DrawOpts { font_size: 12.0, color: ink, bold: false, italic: false });
+    // 둘째 줄은 배치도 칸 바닥과 같은 띠 — 시간은 띠 오른쪽 끝을 내주고 띠가 그만큼 짧아진다.
+    let line_y = ry + 22.0;
+    let mut bar_w = right - tx;
+    if let Some((txt, color, bold)) = crate::render::elapsed_mark(p.busy_secs, p.busy || p.bg_active) {
+        let lw = g.measure_chrome_text(&txt, 10.5, bold);
+        g.draw_text(right - lw, line_y, &txt, gpu::DrawOpts { font_size: 10.5, color, bold, italic: false });
+        bar_w -= lw + 6.0;
     }
-    let line = match (s.word.is_empty(), s.report.is_empty()) {
-        (false, false) => format!("{} · {}", s.word, s.report),
-        (false, true) => s.word.to_string(),
-        (true, _) => s.report.clone(),
-    };
-    let line = crate::info::fit_text(g, &line, (rx + rw - 8.0 - tx).max(0.0), 10.5, false);
-    g.draw_text(tx, ry + 22.0, &line, gpu::DrawOpts { font_size: 10.5, color: ink(s.turn.color()), bold: false, italic: false });
+    if bar_w > 0.0 {
+        let bar_y = line_y + (LINE_H - crate::render::MINI_BAR_H) / 2.0;
+        crate::render::progress_bar(g, tx, bar_y, bar_w, p.compact_pct, p.busy, p.bg_active);
+    }
 }
 
 pub(crate) fn fixture_on() -> bool {
     cfg!(debug_assertions) && crate::verification_run() && std::env::var_os("KASATERM_SIDEBAR_FIXTURE").is_some()
 }
 
-/// 격리 검증 앱의 가짜 학생 — 진짜 claude 없이 줄 모양·순서·강조를 잰다. pane id 의 숫자로 고른다.
-fn fixture_row(pane: &str) -> Option<RowStudent> {
+/// 격리 검증 앱의 가짜 학생 — 진짜 claude 없이 줄 모양·순서·강조와 배치도 띠를 잰다. pane id 의
+/// 숫자로 고른다. 넷째 값은 도는 중인 줄의 경과 초(배치도 칸과 목록 줄이 같은 시간을 말하나).
+const FIXTURE_ROWS: [(&str, &str, RowTurn, Option<u64>); 6] = [
+    ("케이", "계정 설정·하단바·우측패널", RowTurn::Working, Some(12 * 60)),
+    ("유우카", "미러링 방식 변경", RowTurn::Yours, None),
+    ("아로나", "MC 되돌리기 dev 반영", RowTurn::Resting, None),
+    ("코유키", "카사넷 iroh P2P 직통", RowTurn::Yours, None),
+    ("모모이", "작업현황 판 웹 목업", RowTurn::Working, Some(47 * 60)),
+    ("호시노", "슬랙 요청 채널 접수대 — 스레드 원글까지 붙이는 긴 제목", RowTurn::Resting, None),
+];
+
+fn fixture_entry(pane: &str) -> Option<(&'static str, &'static str, RowTurn, Option<u64>)> {
     if !fixture_on() {
         return None;
     }
-    const ROWS: [(&str, &str, RowTurn, &str, &str); 6] = [
-        ("케이", "계정 설정·하단바·우측패널", RowTurn::Working, "하는 중", "하단바 메뉴 묶는 중"),
-        ("유우카", "미러링 방식 변경", RowTurn::Yours, "질문", "칸 색까지 넘길까요, 상태로만?"),
-        ("아로나", "MC 되돌리기 dev 반영", RowTurn::Resting, "쉬는 중", "dev 반영 확인 끝"),
-        ("코유키", "카사넷 iroh P2P 직통", RowTurn::Yours, "보고", "빠른 업데이트 등록"),
-        ("모모이", "작업현황 판 웹 목업", RowTurn::Working, "하는 중", "목업 v2"),
-        ("호시노", "슬랙 요청 채널 접수대 — 스레드 원글까지 붙이는 긴 제목", RowTurn::Resting, "쉬는 중", "스레드 원글 반영"),
-    ];
     let n: usize = pane.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().ok()?;
-    let (name, work, turn, word, report) = ROWS[n % ROWS.len()];
-    Some(RowStudent { who: name.into(), name: name.into(), work: work.into(), turn, word, report: report.into() })
+    Some(FIXTURE_ROWS[n % FIXTURE_ROWS.len()])
+}
+
+fn fixture_row(pane: &str) -> Option<RowStudent> {
+    let (name, title, turn, _) = fixture_entry(pane)?;
+    Some(RowStudent { who: name.into(), title: title.into(), turn })
+}
+
+/// 가짜 학생이 도는 중이면 그 경과 초 — 렌더가 배치도 칸과 목록 줄에 같이 싣는다.
+pub(crate) fn fixture_busy_secs(pane: &str) -> Option<u64> {
+    fixture_entry(pane)?.3
 }
 
 impl App {
@@ -355,24 +310,14 @@ impl App {
         }
     }
 
-    /// 매 틱 — 받은 줄 사정을 반영하고, 때가 되면 다음 읽기를 백그라운드에 건다. 보드 스냅샷은
+    /// 매 틱 — 펫 현황판이 떠 있으면 때마다 보드 요약 읽기를 백그라운드에 건다. 보드 스냅샷은
     /// 원격 기기까지 합친 것이라 GUI 스레드에서 기다리지 않는다.
     pub(crate) fn sidebar_pulse_tick(&mut self) {
         let arrived = self.pulse.mailbox.lock().unwrap().take();
         if let Some(result) = arrived {
             self.pulse.inflight = false;
             match result {
-                Ok(lines) => {
-                    self.pulse.failed = false;
-                    // 갱신이 실패해도 지우지 않는다 — 한 번 끊겼다고 보고가 비면 「할 말 없음」으로 읽힌다.
-                    if self.info.navigation.lines != lines {
-                        self.info.navigation.lines = lines;
-                        self.chrome_dirty = true;
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                }
+                Ok(()) => self.pulse.failed = false,
                 Err(error) => {
                     if !self.pulse.failed {
                         eprintln!("[pulse] 보드 요약 실패: {error}");
@@ -384,9 +329,8 @@ impl App {
         if self.lite || self.pulse.inflight || self.pulse.last_poll.is_some_and(|at| at.elapsed() < POLL) {
             return;
         }
-        // 펫이 떠 있으면 사이드바를 접어도 읽는다 — 현황판은 카사텀이 가려진 동안 보는 자리다.
-        let pet = crate::chrome::pet_pid().is_some();
-        if (self.tabs_on_top || !self.sidebar_visible) && !pet {
+        // 사이드바를 접어도 읽는다 — 현황판은 카사텀이 가려진 동안 보는 자리다.
+        if crate::chrome::pet_pid().is_none() {
             return;
         }
         let Some(backend) = self.socket_backend.clone() else {
@@ -400,11 +344,11 @@ impl App {
             let result = backend
                 .collab_snapshot(&serde_json::json!({"scope": "all"}))
                 .map_err(|e| e.to_string())
-                .and_then(|value| Ok((parse_lines(&value), crate::board_digest::pulse_digest(value)?)));
-            if let (true, Ok((_, digest)), Some(dir)) = (pet, result.as_ref(), crate::chrome::pet_model_dir()) {
+                .and_then(crate::board_digest::pulse_digest);
+            if let (Ok(digest), Some(dir)) = (result.as_ref(), crate::chrome::pet_model_dir()) {
                 write_pet_overlay(&dir, digest);
             }
-            *mailbox.lock().unwrap() = Some(result.map(|(lines, _)| lines));
+            *mailbox.lock().unwrap() = Some(result.map(|_| ()));
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
@@ -447,7 +391,7 @@ impl App {
         if let Some(row) = fixture_row(id) {
             return row;
         }
-        let (who, tab, kind) = {
+        let (who, kind) = {
             let ws = self.ws.lock().unwrap();
             let kind = match ws.panes.get(id).map(|p| &p.content) {
                 Some(PaneContent::Web(_)) => "웹",
@@ -456,33 +400,17 @@ impl App {
                 Some(PaneContent::Settings) => "설정",
                 _ => "터미널",
             };
-            (self.display_pane_char(&ws, id).unwrap_or_default(), ws.active_tab_pid(id), kind)
+            (self.display_pane_char(&ws, id).unwrap_or_default(), kind)
         };
         let label = self.pane_row_label(id);
-        let line = self.info.navigation.lines.local.get(&tab).or_else(|| self.info.navigation.lines.local.get(id));
-        let waiting = self.pane_needs_you(id);
-        let unread = !waiting && self.unread_panes.contains(id);
-        let busy = self.pane_is_busy(id);
-        let (turn, word) = row_state(
-            waiting,
-            line.and_then(|l| l.attention_kind.as_deref()),
-            unread,
-            line.is_some_and(|l| l.failed),
-            busy,
-        );
-        if who.is_empty() {
-            // 학생 없는 pane — 이름 자리에 그 pane 이 무엇인지(zsh·웹…), 둘째 줄에 종류.
-            return RowStudent { name: label, turn, word: if busy { "도는 중" } else { "" }, report: kind.into(), ..Default::default() };
-        }
-        let work = plain_title(&label);
-        RowStudent {
-            who: who.clone(),
-            name: who,
-            work: if work.eq_ignore_ascii_case("claude") { String::new() } else { work.to_string() },
-            turn,
-            word,
-            report: line.map(|l| l.report.clone()).unwrap_or_default(),
-        }
+        let turn = row_turn(self.pane_needs_you(id), self.unread_panes.contains(id), self.pane_is_busy(id));
+        // 학생 없는 pane 은 그 pane 이름(zsh·웹…)을 그대로 — 경로 앞 `~/` 를 도는 표시로 떼면 안 된다.
+        let title = if who.is_empty() {
+            if label.trim().is_empty() { kind.to_string() } else { label }
+        } else {
+            row_title(&label, kind)
+        };
+        RowStudent { who, title, turn }
     }
 
     /// 목록 보기에 설 이 방 pane — 거울 줄을 빼고(원본 기기 줄과 같은 학생) 내 차례 → 하는 중 →
@@ -607,36 +535,25 @@ mod tests {
         assert_eq!(rows[2]["pane"].as_str(), Some(""), "갈 곳이 없으면 비운다 — 남의 기기 pane id 로 이 기기를 찾지 않는다");
     }
 
-    /// 스냅샷 원문에서 줄 사정: 이 기기 줄은 pane id 로, 다른 기기 줄은 (기기, 원본 id) 로. 거울 줄은 뺀다.
+    /// 방 안 순서 — 사람 손이 필요한 기다림과 안 본 보고가 내 차례다.
     #[test]
-    fn lines_split_local_and_remote_and_skip_mirrors() {
-        let value = serde_json::json!({"result": {
-            "sources": [{"machine_id": "me", "is_local": true}, {"machine_id": "mini", "is_local": false}],
-            "panes": [
-                {"address": {"machine_id": "me", "surface_id": "%3"}, "machine_label": "맥북",
-                 "progress": "\n  배포 끝났어요\n둘째 줄", "attention_kind": "question"},
-                {"address": {"machine_id": "me", "surface_id": "%9"}, "status_reason": crate::socket::REMOTE_MIRROR_REASON},
-                {"address": {"machine_id": "mini", "surface_id": "%1"}, "machine_label": "맥미니", "done_outcome": "failed"},
-            ]}});
-        let lines = parse_lines(&value);
-        assert_eq!(lines.local.len(), 1, "거울 줄은 원본 기기 줄과 같은 학생");
-        assert_eq!(lines.local["%3"].report, "배포 끝났어요", "첫 줄만, 앞뒤 공백 없이");
-        assert_eq!(lines.local["%3"].attention_kind.as_deref(), Some("question"));
-        assert!(lines.remote[&("맥미니".to_string(), "%1".to_string())].failed);
-    }
-
-    /// 방 안 순서와 첫 낱말 — 사람 손이 필요한 기다림과 안 본 보고가 내 차례다.
-    #[test]
-    fn row_state_orders_yours_then_working_then_resting() {
-        assert_eq!(row_state(true, Some("permission"), false, false, false), (RowTurn::Yours, "승인"));
-        assert_eq!(row_state(true, Some("question"), true, false, true), (RowTurn::Yours, "질문"), "기다림이 먼저");
-        assert_eq!(row_state(false, None, true, true, false), (RowTurn::Yours, "실패"));
-        assert_eq!(row_state(false, None, true, false, true), (RowTurn::Yours, "보고"));
-        assert_eq!(row_state(false, None, false, false, true), (RowTurn::Working, "하는 중"));
-        assert_eq!(row_state(false, None, false, true, false), (RowTurn::Resting, "쉬는 중"), "읽은 실패 보고는 쉬는 중");
+    fn row_turn_orders_yours_then_working_then_resting() {
+        assert_eq!(row_turn(true, false, false), RowTurn::Yours);
+        assert_eq!(row_turn(true, true, true), RowTurn::Yours, "기다림이 도는 중보다 먼저");
+        assert_eq!(row_turn(false, true, true), RowTurn::Yours, "안 본 보고");
+        assert_eq!(row_turn(false, false, true), RowTurn::Working);
+        assert_eq!(row_turn(false, false, false), RowTurn::Resting);
         let mut turns = [RowTurn::Resting, RowTurn::Yours, RowTurn::Working, RowTurn::Yours];
         turns.sort();
         assert_eq!(turns, [RowTurn::Yours, RowTurn::Yours, RowTurn::Working, RowTurn::Resting]);
+    }
+
+    /// 줄 글은 세션 이름뿐 — 학생 이름은 얼굴이 말한다. 이름이 비면 종류로 남겨 빈 줄을 만들지 않는다.
+    #[test]
+    fn row_title_is_the_session_name_without_the_student() {
+        assert_eq!(row_title("◑ 목록뷰 진행 막대·이름 정리", "터미널"), "목록뷰 진행 막대·이름 정리");
+        assert_eq!(row_title("claude", "터미널"), "claude");
+        assert_eq!(row_title("⠂ ", "터미널"), "터미널");
     }
 
     /// 전환은 아이콘 둘 — 공통 아이콘 단추 크기로 전환 줄 안에 서고, 왼쪽 끝이 방 카드 선이다.

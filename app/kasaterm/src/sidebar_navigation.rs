@@ -19,8 +19,6 @@ pub(crate) struct NavigationState {
     collapsed_rooms: std::collections::HashSet<String>,
     /// 방마다 고른 본문 보기와 전체 기본 — 본기기 카드의 「목록으로 보기」와 같다.
     pub(crate) list_rooms: RoomViews,
-    /// 보드가 본 학생 줄 사정(마지막 보고 등). 현황 틱이 채운다.
-    pub(crate) lines: crate::sidebar_pulse::SidebarLines,
     /// 펼친 「창 밖 셸」 줄 — 기기 라벨, 이 기기는 빈 문자열.
     web_open: std::collections::HashSet<String>,
     /// 방 카드 우클릭 메뉴. 본기기 방 메뉴와 같은 항목(본문 보기·이름·닫기).
@@ -363,7 +361,7 @@ fn draw_cell(
     let dragging = drag.is_some_and(|d| d == row.remote_id.as_str());
     let drop_here = drag.is_some_and(|d| d != row.remote_id.as_str()) && hover;
     g.hover_pointer |= hover && !row.closed;
-    let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
+    let busy = deck_busy(deck);
     let waiting = machine.online && deck.iter().any(|r| r.needs_you());
     let signal = waiting.then(|| (theme::attention(), 0.9));
     round_rect(g, mx, my, mw, mh, 2.0, if drop_here {
@@ -429,34 +427,20 @@ fn draw_cell(
     }
 }
 
-/// 목록 본문의 한 줄 — 본기기 목록 줄(render.rs)과 같은 문법: 얼굴(도는 중이면 걷기)·
-/// 이름·줄 끝 상태 점(기다림이면 깜빡). 누르면 그 자리로 보기 창을 연다.
-/// 다른 기기 학생 한 줄의 글 — 이 기기 줄(`App::row_student`)과 같은 규칙.
-fn remote_student(machine: &state::MachinesColMachine, deck: &[&state::MachinesColRow], lines: &crate::sidebar_pulse::SidebarLines) -> crate::sidebar_pulse::RowStudent {
+/// 다른 기기 학생 한 줄의 글 — 이 기기 줄(`App::row_student`)과 같은 규칙: 얼굴 열쇠와 세션 이름.
+fn remote_student(machine: &state::MachinesColMachine, deck: &[&state::MachinesColRow]) -> crate::sidebar_pulse::RowStudent {
     let head = deck.iter().find(|r| !r.name.is_empty()).copied().unwrap_or(deck[0]);
-    let line = lines.remote.get(&(machine.label.clone(), head.remote_id.clone()));
-    let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
     let waiting = machine.online && deck.iter().any(|r| r.needs_you());
-    let (turn, word) = crate::sidebar_pulse::row_state(
-        waiting,
-        head.attention_kind.as_deref().or_else(|| line.and_then(|l| l.attention_kind.as_deref())),
-        false,
-        line.is_some_and(|l| l.failed),
-        busy,
-    );
-    let title = crate::sidebar_pulse::plain_title(&head.title).to_string();
-    if head.name.is_empty() {
-        let name = if title.is_empty() { head.remote_id.clone() } else { title };
-        return crate::sidebar_pulse::RowStudent { name, turn, word: if head.closed { "닫힘" } else { "" }, report: "터미널".into(), ..Default::default() };
-    }
     crate::sidebar_pulse::RowStudent {
         who: head.name.clone(),
-        name: head.name.clone(),
-        work: title,
-        turn,
-        word: if head.closed { "닫힘" } else { word },
-        report: line.map(|l| l.report.clone()).unwrap_or_default(),
+        title: crate::sidebar_pulse::row_title(&head.title, "터미널"),
+        turn: crate::sidebar_pulse::row_turn(waiting, false, deck_busy(deck)),
     }
+}
+
+/// 칸(바깥 pane 과 그 탭들) 중 하나라도 도는가 — 배치도 칸과 목록 줄이 같은 답을 쓴다.
+fn deck_busy(deck: &[&state::MachinesColRow]) -> bool {
+    deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -481,7 +465,11 @@ fn draw_list_row(
         icon: "terminal",
         cur,
         hover,
-        busy: student.turn == crate::sidebar_pulse::RowTurn::Working,
+        // 다른 기기 배치도 칸(`draw_cell`)과 같은 값 — 도는 중이면 쓸림 띠, compact %·시간은 저쪽이 안 넘긴다.
+        busy: deck_busy(deck),
+        compact_pct: None,
+        bg_active: false,
+        busy_secs: None,
         muted: head.closed,
     });
     if !head.closed {
@@ -537,7 +525,6 @@ struct RowsCtx<'a> {
     numbers: &'a [(String, Option<u64>, String, usize)],
     collapsed: &'a std::collections::HashSet<String>,
     listed: &'a RoomViews,
-    lines: &'a crate::sidebar_pulse::SidebarLines,
     /// 지금 끌고 있는 칸의 원격 pane id.
     drag: Option<&'a str>,
     viewing: Option<&'a (String, Vec<String>)>,
@@ -655,7 +642,7 @@ fn draw_rows(
         if !collapsed && listed {
             // 목록 보기 — 배치도 자리에 학생 줄(본기기 목록 줄과 같은 기하·같은 순서).
             let mut rows: Vec<(crate::sidebar_pulse::RowStudent, &Vec<&state::MachinesColRow>)> =
-                stacks.iter().map(|deck| (remote_student(machine, deck, ctx.lines), deck)).collect();
+                stacks.iter().map(|deck| (remote_student(machine, deck), deck)).collect();
             rows.sort_by_key(|(student, _)| student.turn);
             for (k, (student, deck)) in rows.iter().enumerate() {
                 let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::sidebar_pulse::LIST_ROW_H,
@@ -704,12 +691,11 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, shared_scroll, room_numbers, device_views, web_open, lines, .. } = nav;
+        local_content_h, shared_scroll, room_numbers, device_views, web_open, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
         listed: list_rooms,
-        lines,
         drag: cell_drag.as_ref().filter(|d| d.active).map(|d| d.pane.as_str()),
         viewing: viewing.as_ref(),
         viewing_cur: viewing_cur.as_deref(),

@@ -59,7 +59,7 @@ struct TabPeek {
 }
 
 struct SidebarRowInfo {
-    /// 목록 줄(두 줄)의 글 — 이름 · 지금 일 / 사정 한 줄.
+    /// 목록 줄(두 줄)의 글 — 세션 이름과 차례. 둘째 줄 띠·시간은 아래 칸들에서 온다.
     student: crate::sidebar_pulse::RowStudent,
     /// 배정 학생명(얼굴용). claude 가 안 붙은 pane 은 빈 문자열.
     who: String,
@@ -197,6 +197,35 @@ fn elapsed_style(secs: u64) -> ([u8; 4], bool) {
         s if s < 600 => (theme::text_mute(), false),
         s if s < 1800 => (theme::text_dim(), false),
         _ => (theme::accent(), true),
+    }
+}
+
+/// 진행 띠 끝에 붙는 경과 시간 `(글, 색, 굵게)` — 도는 중이거나 백그라운드가 돌 때만.
+/// 배치도 칸과 사이드바 목록 줄이 같은 값을 같은 단계로 보이게 한 곳에서 판다.
+pub(crate) fn elapsed_mark(busy_secs: Option<u64>, running: bool) -> Option<(String, [u8; 4], bool)> {
+    let secs = busy_secs.filter(|_| running)?;
+    let (color, bold) = elapsed_style(secs);
+    Some((elapsed_label(secs)?, color, bold))
+}
+
+/// 진행 띠 한 줄 — 배치도 칸·별도창 칸·사이드바 목록 줄이 같은 모양을 쓴다. 헤더와
+/// 같은 한 벌(`working_bar`·`pulse_bar`)이라 같은 pane 이 자리마다 다른 리듬으로 흔들리지 않는다.
+///
+/// compact 를 busy 보다 **먼저** 본다 — compact 중에도 스피너가 돌아 busy 가 함께 참이라,
+/// 뒤로 미루면 늘 쓸림바가 이겨 「얼마나 남았나」가 사라진다. `bg_active` 는
+/// `refresh_pane_activity` 가 busy 일 때 false 로 넣으니(input.rs) busy 와 겹칠 일이 없다.
+/// 대기 중은 부르지 않는다 — 멈춘 것인데 띠가 차오르면 「일하는 줄」 알고 지나친다.
+pub(crate) fn progress_bar(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, compact_pct: Option<u8>, busy: bool, bg_active: bool) {
+    if let Some(pct) = compact_pct {
+        g.rect(x, y, w, MINI_BAR_H, theme::with_alpha(theme::accent(), 0x3a));
+        let done = w * (pct as f32 / 100.0).clamp(0.0, 1.0);
+        if done > 0.5 {
+            g.rect(x, y, done, MINI_BAR_H, theme::accent());
+        }
+    } else if busy {
+        g.working_bar(x, y, w, MINI_BAR_H, theme::accent());
+    } else if bg_active {
+        g.pulse_bar(x, y, w, MINI_BAR_H, theme::accent());
     }
 }
 
@@ -2246,10 +2275,12 @@ impl App {
                 // 걷게 할 조건은 헤더 진행 바와 **같은 한 벌**을 쓴다. 기다리는 중은
                 // 빠진다 — 그건 도는 게 아니라 멈춘 것이고, 걸으면서 동시에 나를
                 // 부르면 두 신호가 서로를 부정한다.
-                let busy = self.pane_is_busy(id);
+                let fixture_secs = crate::sidebar_pulse::fixture_busy_secs(id);
+                let busy = self.pane_is_busy(id) || fixture_secs.is_some();
                 let busy_secs = act
                     .and_then(|a| a.busy_since)
-                    .map(|t| t.elapsed().as_secs());
+                    .map(|t| t.elapsed().as_secs())
+                    .or(fixture_secs);
                 let student = self.row_student(id);
                 SidebarRowInfo {
                     student,
@@ -4102,21 +4133,10 @@ impl App {
                     // 읽히고, 칸 폭을 다 쓰는 띠는 **곁눈으로도** 잡힌다. 얼굴이 10px
                     // 까지 작아지는 칸에서 걷는 다리는 사실상 안 보인다.
                     //
-                    // 순서는 그대로다. compact 를 busy 보다 **먼저** 본다 — compact
-                    // 중에도 스피너가 돌아 busy 가 함께 참이라, 뒤로 미루면 늘 쓸림바가
-                    // 이겨 「얼마나 남았나」가 사라진다. 헤더가 같은 순서로 갈라 놨다.
-                    // `bg_active` 는 `refresh_pane_activity` 가 busy 일 때 false 로 넣으니
-                    // (input.rs) busy 와 겹칠 일이 애초에 없다.
-                    //
-                    // 대기 중(`waiting`)은 일부러 뺐다 — 그건 도는 게 아니라 멈춘 것이고,
-                    // 바가 차오르면 「일하는 줄」 알고 지나치게 된다(2026-08-11 에 갈라
-                    // 놓은 규칙이다). 칸이 통째로 숨쉬는 것이 이미 그 말을 하고 있다.
-                    //
-                    // 모양은 헤더와 **같은 한 벌**을 쓴다(`working_bar`·`pulse_bar`) —
-                    // 배치도만 다른 리듬으로 흔들리면 같은 pane 이 자리마다 다른 말을 한다.
+                    // 순서·대기 중 제외·모양은 `progress_bar` 가 한 곳에서 정한다 — 목록
+                    // 줄도 같은 띠를 쓴다(2026-10-01 「프로세스바 미니맵처럼」).
                     if minimap_has_bar(mw, mh) {
-                        let bar_h = MINI_BAR_H;
-                        let (bx, by, mut bw) = (mx + 2.0, my + mh - bar_h - MINI_BAR_PAD, mw - 4.0);
+                        let (bx, by, mut bw) = (mx + 2.0, my + mh - MINI_BAR_H - MINI_BAR_PAD, mw - 4.0);
                         // 경과 시간 — 바 오른쪽 끝을 내주고 바가 그만큼 짧아진다
                         // (사용자 2026-08-24: 도는 것끼리 오래된 순서가 안 보인다).
                         // 걷기·쓸림바는 「도는 중」만 말하지 「얼마나째」는 못 말하고,
@@ -4128,13 +4148,8 @@ impl App {
                         // 오른쪽 밖에서 시작해야 한다. 칸은 5px 까지 작아지므로 좁은
                         // 칸에서는 조용히 생략된다 — 거기서는 걷기와 바가 이미 「돈다」를
                         // 말하고 있고, 시간까지 우겨넣으면 얼굴 위에 숫자가 겹친다.
-                        if let Some(txt) = info
-                            .busy_secs
-                            .filter(|_| info.busy || info.bg_active)
-                            .and_then(elapsed_label)
-                        {
+                        if let Some((txt, col, bold)) = elapsed_mark(info.busy_secs, info.busy || info.bg_active) {
                             let fs = 9.0;
-                            let (col, bold) = elapsed_style(info.busy_secs.unwrap_or(0));
                             let lw = g.measure_chrome_text(&txt, fs, bold);
                             let lx = bx + bw - lw;
                             if bw - lw - 3.0 >= 10.0 && lx >= fx + face + 2.0 {
@@ -4154,17 +4169,7 @@ impl App {
                                 bw -= lw + 3.0;
                             }
                         }
-                        if let Some(pct) = info.compact_pct {
-                            g.rect(bx, by, bw, bar_h, theme::with_alpha(theme::accent(), 0x3a));
-                            let done = bw * (pct as f32 / 100.0).clamp(0.0, 1.0);
-                            if done > 0.5 {
-                                g.rect(bx, by, done, bar_h, theme::accent());
-                            }
-                        } else if info.busy {
-                            g.working_bar(bx, by, bw, bar_h, theme::accent());
-                        } else if info.bg_active {
-                            g.pulse_bar(bx, by, bw, bar_h, theme::accent());
-                        }
+                        progress_bar(g, bx, by, bw, info.compact_pct, info.busy, info.bg_active);
                     }
                     // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
                     // 나와 있는지. 전엔 뒷장이 우상단으로 계단지는 카드 덱이었는데,
@@ -4299,19 +4304,8 @@ impl App {
                         }
                     }
                     if minimap_has_bar(mw, mh) {
-                        let bar_h = MINI_BAR_H;
-                        let (bx, by, bw) = (mx + 2.0, my + mh - bar_h - MINI_BAR_PAD, mw - 4.0);
-                        if let Some(pct) = info.compact_pct {
-                            g.rect(bx, by, bw, bar_h, theme::with_alpha(theme::accent(), 0x3a));
-                            let done = bw * (pct as f32 / 100.0).clamp(0.0, 1.0);
-                            if done > 0.5 {
-                                g.rect(bx, by, done, bar_h, theme::accent());
-                            }
-                        } else if info.busy {
-                            g.working_bar(bx, by, bw, bar_h, theme::accent());
-                        } else if info.bg_active {
-                            g.pulse_bar(bx, by, bw, bar_h, theme::accent());
-                        }
+                        let by = my + mh - MINI_BAR_H - MINI_BAR_PAD;
+                        progress_bar(g, mx + 2.0, by, mw - 4.0, info.compact_pct, info.busy, info.bg_active);
                     }
                     if mw >= 22.0 {
                         g.queue_icon("external-link", mx + mw - 10.0, my + 2.0, 8.0, theme::text_mute());
@@ -4336,7 +4330,10 @@ impl App {
                             icon: info.icon,
                             cur: is_cur,
                             hover,
-                            busy: info.busy || info.student.turn == crate::sidebar_pulse::RowTurn::Working && crate::sidebar_pulse::fixture_on(),
+                            busy: info.busy,
+                            compact_pct: info.compact_pct,
+                            bg_active: info.bg_active,
+                            busy_secs: info.busy_secs,
                             muted: false,
                         });
                         continue;
