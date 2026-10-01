@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'app_release.dart';
 import 'kasanet.dart';
 import 'kasanet_native.dart';
+import 'machine_look.dart';
 import 'relay_account.dart';
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
@@ -67,11 +68,11 @@ class Pane {
   final String? machine;
 
   /// 무엇을 기다리나 — permission(승인) · question(질문·선택) · idle(답 없이 방치).
-  /// 없으면 화면 글자로만 잡은 「답 기다림」.
+  /// 사람을 부르는 것은 앞의 둘뿐이다([needsYou]).
   final String? kind;
   final String? waitingFor;
 
-  /// 쉬기 시작한 지 몇 초 — 「방금 끝냄」과 「쉬는 중」을 가른다.
+  /// 쉬기 시작한 지 몇 초.
   final int? idleSecs;
 
   /// 닫았지만 살아 있는 pane(데스크톱의 되살리기 목록) — 방에 없다.
@@ -110,12 +111,15 @@ class Pane {
 
   /// 작업 중일 때 정확한 한 마디. 백그라운드가 있으면 그 설명이 먼저다 — 최신 도구
   /// 라벨은 턴이 끝난 뒤에도 남아, 감시만 도는 pane 에 옛 「Edit …」가 붙는다.
-  String get busyLabel {
+  String get busyLabel => busyDetail ?? '하는 중';
+
+  /// 「하는 중」 뒤에 붙는 사정. 모르면 null.
+  String? get busyDetail {
     // compact 는 도구 라벨보다 먼저 — 그동안 학생은 답을 못 하니 「무엇을 하던 중」
     // 보다 「지금 압축 중」이 사람이 알아야 할 말이다.
     if (isCompacting) {
       final pct = compactPct;
-      return pct == null ? '컴팩트 중' : '컴팩트 중 · $pct%';
+      return pct == null ? '컴팩트' : '컴팩트 $pct%';
     }
     if (background.isNotEmpty) {
       final n = background.length;
@@ -127,7 +131,7 @@ class Pane {
       return '서브에이전트 ${subagents.length} · ${subagents.first}';
     }
     final d = doing ?? '';
-    return d.isEmpty ? '작업 중' : d;
+    return d.isEmpty ? null : d;
   }
 
   /// PC 상태줄의 조각들 — 모델 · 브랜치 · 컨텍스트% · effort. 빈 것은 뺀다.
@@ -150,31 +154,25 @@ class Pane {
     if ((effortLabel ?? effort ?? '').isNotEmpty) (effortLabel ?? effort)!,
   ];
 
-  /// 사람 손이 필요한가 — 답·승인·질문 어느 쪽이든.
-  bool get isWaiting => status == 'waiting' || status == 'blocked';
-  bool get isIdle => status == 'idle';
+  /// 사람 손이 필요한가 — 승인·질문뿐이다. 데스크톱 `MachinesColRow::needs_you` 와 같은 규칙이라
+  /// 방치(`idle`)·종류 모를 기다림은 쉬는 것과 같다. 폰만 그걸 주황 「오래 기다림」으로 띄워
+  /// 데스크톱 「쉬는 중」과 어긋났다(2026-10-01 지적).
+  bool get needsYou =>
+      !closed &&
+      const {'waiting', 'attention', 'blocked'}.contains(status) &&
+      (kind == 'permission' || kind == 'question');
+
+  /// 도는 중 — 데스크톱 사이드바 다른 기기 줄과 같은 낱말 둘. `unknown`·빈 상태(셸)는 쉬는 것이다.
+  bool get isBusy => status == 'working' || isCompacting;
   bool get isCompacting => status == 'compacting';
 
-  /// 끝낸 지 얼마 안 됐다 — 마지막 답을 읽을 차례.
-  bool get justDone => isIdle && idleSecs != null && idleSecs! < 600;
-
-  /// 목록 칩에 쓰는 한 마디.
-  String get kindLabel {
-    if (isWaiting) {
-      return switch (kind) {
-        'permission' => '승인 기다림',
-        'question' => '질문 기다림',
-        'idle' => '오래 기다림',
-        _ => '답 기다림',
-      };
-    }
-    if (isBusy) return busyLabel;
-    if (justDone) return '방금 끝냄';
-    return '쉼';
+  /// 상태 낱말 — 판정은 [needsYou]·[isBusy] 로 데스크톱과 같고, 같은 학생이 두 화면에서 같은 말을 한다.
+  String get statusWord {
+    if (closed) return '닫힘';
+    if (needsYou) return kind == 'permission' ? '승인' : '질문';
+    if (isBusy) return '하는 중';
+    return '쉬는 중';
   }
-
-  /// 상태가 비면(학생이 안 도는 셸) 바쁜 것이 아니다 — 웹 허브와 같은 규칙.
-  bool get isBusy => status.isNotEmpty && !isIdle && !isWaiting;
   bool get isWebShell => id.startsWith('web-');
 
   /// Character assignment is optional, so the live harness also identifies an agent.
@@ -759,6 +757,35 @@ class Server {
     if (res.statusCode != 200) {
       throw ServerException('설정이 안 바뀌었다 (${res.statusCode})');
     }
+  }
+
+  /// 기기 색·아이콘 — 기준 기기가 지금 칠하는 색과 계정 설정의 아이콘. 장식이라 못 받은 쪽은 비운다.
+  Future<MachineLooks> machineLooks() async {
+    Object? appearance;
+    Object? icons;
+    await Future.wait([
+      () async {
+        try {
+          final v = await _getJson('settings/values', timeout: const Duration(seconds: 10));
+          if (v is Map) appearance = v['appearance'];
+        } on ServerException {
+          // 옛 판·끊김 — 이름 규칙으로 간다.
+        }
+      }(),
+      () async {
+        final a = account;
+        if (a == null) return;
+        try {
+          final res = await _client
+              .get(a.origin.resolve('/relay/account-sync'))
+              .timeout(const Duration(seconds: 10));
+          if (res.statusCode != 200) return;
+          final j = jsonDecode(utf8.decode(res.bodyBytes));
+          if (j is Map && j['settings'] is Map) icons = (j['settings'] as Map)['device_icons'];
+        } catch (_) {}
+      }(),
+    ]);
+    return MachineLooks.parse(appearance: appearance, deviceIcons: icons);
   }
 
   Future<Me> me() async {

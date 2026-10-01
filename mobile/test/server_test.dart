@@ -106,6 +106,7 @@ void main() {
                   'name': '아리스',
                   'title': '앱',
                   'status': 'waiting',
+                  'kind': 'permission',
                   'slug': 'arisu',
                   'window': 1,
                   'cwd': '/x',
@@ -148,7 +149,7 @@ void main() {
         }),
       );
       final panes = await s.panes();
-      expect(panes.single.isWaiting, isTrue);
+      expect(panes.single.needsYou, isTrue);
       expect(panes.single.machine, isNull);
       expect(await s.sessions(), ['', '아이폰']);
       final machines = await s.machines();
@@ -270,21 +271,37 @@ void kindTests() {
   Pane pane(Map<String, Object?> extra) =>
       Pane.fromJson({'id': '%1', 'name': '아리스', ...extra});
 
-  test('기다리는 종류가 칩 글귀가 된다', () {
-    expect(
-      pane({'status': 'waiting', 'kind': 'permission'}).kindLabel,
-      '승인 기다림',
-    );
-    expect(pane({'status': 'waiting', 'kind': 'question'}).kindLabel, '질문 기다림');
-    expect(pane({'status': 'waiting', 'kind': 'idle'}).kindLabel, '오래 기다림');
-    expect(pane({'status': 'waiting'}).kindLabel, '답 기다림');
-    expect(pane({'status': 'blocked'}).kindLabel, '답 기다림');
+  // 판정 정본은 데스크톱 `MachinesColRow::needs_you`·`AgentState::needs_you`.
+  test('사람을 부르는 것은 승인·질문뿐 — 방치·종류 모를 기다림은 쉬는 중', () {
+    expect(pane({'status': 'waiting', 'kind': 'permission'}).statusWord, '승인');
+    expect(pane({'status': 'waiting', 'kind': 'question'}).statusWord, '질문');
+    expect(pane({'status': 'blocked', 'kind': 'question'}).needsYou, isTrue);
+    for (final p in [
+      pane({'status': 'waiting', 'kind': 'idle'}),
+      pane({'status': 'waiting'}),
+      pane({'status': 'blocked'}),
+      pane({'status': 'unknown', 'kind': 'permission'}),
+      pane({'status': 'waiting', 'kind': 'permission', 'closed': true}),
+    ]) {
+      expect(p.needsYou, isFalse, reason: '${p.status}/${p.kind}');
+    }
+    expect(pane({'status': 'waiting', 'kind': 'idle'}).statusWord, '쉬는 중');
+    expect(pane({'status': 'waiting', 'kind': 'permission', 'closed': true}).statusWord, '닫힘');
   });
 
-  test('작업 중이면 무엇을 하는지 — 백그라운드 설명 > 서브에이전트 > 도구 라벨', () {
-    expect(pane({'status': 'working'}).kindLabel, '작업 중');
+  test('도는 것은 working·compacting 만 — unknown·빈 상태는 쉬는 중', () {
+    expect(pane({'status': 'working'}).statusWord, '하는 중');
+    expect(pane({'status': 'compacting'}).statusWord, '하는 중');
+    expect(pane({'status': 'unknown'}).isBusy, isFalse);
+    expect(pane({'status': ''}).statusWord, '쉬는 중');
+    expect(pane({'status': 'idle', 'idle_secs': 30}).statusWord, '쉬는 중');
+  });
+
+  test('하는 중의 사정 — 컴팩트 > 백그라운드 설명 > 서브에이전트 > 도구 라벨', () {
+    expect(pane({'status': 'working'}).busyDetail, isNull);
+    expect(pane({'status': 'working'}).busyLabel, '하는 중');
     expect(
-      pane({'status': 'working', 'doing': 'Bash cargo check'}).kindLabel,
+      pane({'status': 'working', 'doing': 'Bash cargo check'}).busyDetail,
       'Bash cargo check',
     );
     expect(
@@ -292,33 +309,23 @@ void kindTests() {
         'status': 'working',
         'doing': 'Edit a.dart',
         'background': ['애플 메일 감시'],
-      }).kindLabel,
+      }).busyDetail,
       '백그라운드 · 애플 메일 감시',
     );
     expect(
       pane({
         'status': 'working',
         'background': ['a', 'b'],
-      }).kindLabel,
+      }).busyDetail,
       '백그라운드 2개 · a',
     );
     expect(
       pane({
         'status': 'working',
         'subagents': ['정찰'],
-      }).kindLabel,
+      }).busyDetail,
       '서브에이전트 1 · 정찰',
     );
-  });
-
-  test('쉰 지 10분 안이면 「방금 끝냄」, 넘으면 「쉼」', () {
-    expect(pane({'status': 'idle', 'idle_secs': 30}).kindLabel, '방금 끝냄');
-    expect(pane({'status': 'idle', 'idle_secs': 3600}).kindLabel, '쉼');
-    expect(pane({'status': 'idle'}).kindLabel, '쉼');
-    expect(pane({'status': 'working'}).kindLabel, '작업 중');
-  });
-
-  test('blocked 도 사람 손이 필요한 것으로 센다', () {
-    expect(pane({'status': 'blocked'}).isWaiting, isTrue);
+    expect(pane({'status': 'compacting', 'compact_pct': 40}).busyDetail, '컴팩트 40%');
   });
 }

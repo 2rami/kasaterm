@@ -411,7 +411,7 @@ void disabledReasonTests() {
     await tester.pump(HubModel.pollEvery);
     await tester.pump();
     expect(find.text('세이아'), findsOneWidget);
-    expect(find.textContaining('컴팩트 중 · 40%'), findsOneWidget);
+    expect(find.textContaining('하는 중 · 컴팩트 40%'), findsOneWidget);
     expect(server.listed, ['~mini-stable']);
   });
 }

@@ -2,15 +2,17 @@ import 'package:flutter/material.dart';
 
 import 'claude_style.dart';
 import 'look.dart';
+import 'machine_look.dart';
 import 'server.dart';
 
-/// 학생 상태의 갈래 — 색·아이콘·말이 여기 하나로 묶인다.
-enum PaneMood { waiting, working, done, resting, closed }
+/// 학생 상태의 갈래 — 색·아이콘·말이 여기 하나로 묶인다. 데스크톱의 셋(내 차례 · 하는 중 · 쉬는 중)에
+/// 닫힘 하나.
+enum PaneMood { waiting, working, resting, closed }
 
 /// 상태 하나 = 색 하나·아이콘 하나·말 한 마디. 허브 칩·미니맵 점·터미널 상태줄이
 /// 전부 이걸 쓴다 — 자리마다 따로 칠하면 「기다림」이 어디선 주황이고 어디선
-/// 파랑이 된다(2026-09-07 지시 「뱃지색은 통일해야지 상태는」). 색은 데스크톱
-/// DESIGN.md 의 status-attention·status-success 와 같은 값이라 두 화면이 한 말을 한다.
+/// 파랑이 된다(2026-09-07 지시 「뱃지색은 통일해야지 상태는」). 판정·색은 데스크톱과 같다 —
+/// 내 차례(승인·질문만) attention · 하는 중 accent · 쉬는 중 흐림.
 class StatusStyle {
   const StatusStyle({
     required this.mood,
@@ -41,44 +43,32 @@ class StatusStyle {
     if (p.closed) {
       return StatusStyle(
         mood: PaneMood.closed,
-        label: '닫힘',
+        label: p.statusWord,
         icon: Icons.inventory_2_rounded,
         color: scheme.outline,
       );
     }
-    if (p.isWaiting) {
-      final (label, icon) = switch (p.kind) {
-        'permission' => ('승인 기다림', Icons.pan_tool_alt_rounded),
-        'question' => ('질문 기다림', Icons.help_rounded),
-        'idle' => ('오래 기다림', Icons.hourglass_bottom_rounded),
-        _ => ('답 기다림', Icons.chat_bubble_rounded),
-      };
+    if (p.needsYou) {
       return StatusStyle(
         mood: PaneMood.waiting,
-        label: label,
-        icon: icon,
+        label: p.statusWord,
+        icon: p.kind == 'permission' ? Icons.pan_tool_alt_rounded : Icons.help_rounded,
         color: attention,
       );
     }
     if (p.isBusy) {
+      // 데스크톱 둘째 줄처럼 「낱말 · 사정」 — 낱말이 앞이라 칩이 잘려도 상태는 같은 말로 남는다.
+      final detail = p.busyDetail;
       return StatusStyle(
         mood: PaneMood.working,
-        label: p.busyLabel,
+        label: detail == null ? p.statusWord : '${p.statusWord} · $detail',
         icon: p.isCompacting ? Icons.compress_rounded : Icons.bolt_rounded,
         color: scheme.primary,
       );
     }
-    if (p.justDone) {
-      return StatusStyle(
-        mood: PaneMood.done,
-        label: '방금 끝냄',
-        icon: Icons.check_circle_rounded,
-        color: success,
-      );
-    }
     return StatusStyle(
       mood: PaneMood.resting,
-      label: '쉼',
+      label: p.statusWord,
       icon: Icons.bedtime_rounded,
       color: scheme.onSurfaceVariant,
     );
@@ -505,63 +495,41 @@ class PaneStatusLine extends StatelessWidget {
   }
 }
 
-/// 기계마다 다른 색 — 이름으로 정해져서 켤 때마다 같다. 폰에선 「어느 기계 학생인지」가
-/// 머리글 한 줄뿐이라 색으로도 갈라 둔다(2026-09-08 지시 「기기별로도 잘 구분되게」).
-Color machineColor(String label, ColorScheme scheme) {
-  const hues = <double>[212, 168, 282, 24, 340, 96];
-  var h = 0;
-  for (final r in label.runes) {
-    h = (h * 31 + r) & 0x7fffffff;
-  }
-  final dark = scheme.brightness == Brightness.dark;
-  return HSLColor.fromAHSL(
-    1,
-    hues[h % hues.length],
-    0.55,
-    dark ? 0.68 : 0.42,
-  ).toColor();
-}
-
-/// 이름이 말해 주는 만큼만 — 맥북은 노트북, 미니는 데스크톱, 나머지는 그냥 컴퓨터.
-IconData machineIcon(String label) {
-  final l = label.toLowerCase();
-  if (l.contains('북') || l.contains('book')) return Icons.laptop_mac;
-  if (l.contains('미니') || l.contains('mini')) return Icons.desktop_mac;
-  return Icons.computer_outlined;
-}
-
-/// 「이 자리는 저 기계 pane 의 거울」 — 기계색 작은 칩. 이름 옆에 붙는다.
+/// 「이 자리는 저 기계 pane 의 거울」 — 기기색 작은 칩. 이름 옆에 붙는다.
 class MirrorTag extends StatelessWidget {
   const MirrorTag(this.machine, {super.key});
 
   final String machine;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = machineColor(machine, theme.colorScheme);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withValues(alpha: 0.6)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(machineIcon(machine), size: 11, color: color),
-          const SizedBox(width: 3),
-          Text(
-            machine,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: machineLooks,
+    builder: (context, looks, _) {
+      final theme = Theme.of(context);
+      final color = looks.color(machine);
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+        decoration: BoxDecoration(
+          borderRadius: Look.corners,
+          border: Border.all(color: color),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(looks.icon(machine), size: 11, color: color),
+            const SizedBox(width: 3),
+            Text(
+              machine,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: machineInk(color, theme.colorScheme.surface),
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-      ),
-    );
-  }
+          ],
+        ),
+      );
+    },
+  );
 }

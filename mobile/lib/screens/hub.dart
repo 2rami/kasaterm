@@ -7,6 +7,7 @@ import '../app_release.dart';
 import '../hub_model.dart';
 import '../hub_prefs.dart';
 import '../look.dart';
+import '../machine_look.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
@@ -20,6 +21,8 @@ import 'pane_actions.dart';
 import 'settings.dart';
 import 'share_screen.dart';
 import 'terminal.dart';
+
+export '../machine_look.dart' show parseHexColor;
 
 /// 첫 화면 — 기계·방별 학생 목록. 기다리는 학생이 맨 위에 선다.
 class HubScreen extends StatefulWidget {
@@ -45,6 +48,9 @@ class HubScreen extends StatefulWidget {
 
 class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   late final HubModel _model = HubModel(widget.server, prefs: widget.prefs);
+
+  /// 목록과 기기 색표 — 색표는 관문 기준 기기 설정에서 따로 온다.
+  late final Listenable _shown = Listenable.merge([_model, machineLooks]);
 
   @override
   void initState() {
@@ -172,7 +178,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _model,
+    listenable: _shown,
     builder: (context, _) {
       final theme = Theme.of(context);
       return Scaffold(
@@ -279,18 +285,18 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     }
     for (final s in sections) {
       final title = s.machine ?? _model.rootName ?? '이 기계';
-      final tint = machineColor(title, theme.colorScheme);
+      final tint = machineColor(title, local: s.machine == null);
+      final icon = machineIcon(title);
       final folded = _model.view.isFolded(s.machine);
       children.add(
         _SectionHeader(
           title: title,
+          icon: icon,
           color: tint,
+          root: s.machine == null,
           online: s.online,
           folded: folded,
-          // 접힌 기계는 안이 안 보이니 주소 기계라도 몇 명인지는 남긴다.
-          trailing: !s.online || (s.machine == null && !folded)
-              ? null
-              : '${s.paneCount}명',
+          count: s.studentCount,
           onTap: () => _model.toggleFold(s),
           onAdd: s.online ? () => _newRoom(s) : null,
         ),
@@ -306,6 +312,8 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
         final inside = <Widget>[
           _RoomHeader(
             title: room.title,
+            icon: icon,
+            color: tint,
             onMenu: s.online ? () => _roomSheet(s, room) : null,
           ),
         ];
@@ -425,26 +433,33 @@ class _ViewMenu extends StatelessWidget {
   );
 }
 
-/// 기계 머리글 — 묶음 제목(13/600 흐림) 한 줄. 기계색은 아이콘에만 둔다. 안 닿는 기계는
-/// 「연결 안 됨」을 위험색 글자로 달아, 밖에서 열었을 때 어느 기계가 빠졌는지 한눈에 갈린다.
+/// 기기 머리글 — 기기색 아이콘 · 이름(16/600) · 「기준 기기 · N명」 두 줄과 그 아래 기기색 2px 선. 데스크톱
+/// 사이드바 기기 머리(기기색 아이콘 + 굵은 이름 + 사정 한 줄)와 같은 모양이고, 선이 기기 경계다 — 흐린 묶음
+/// 제목 한 줄로는 어디서 다른 기기 학생이 시작하는지 안 보였다(2026-10-01 지적). 기준 기기 칸도 같은 머리를 단다.
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.title,
+    required this.icon,
     required this.color,
+    this.root = false,
     this.online = true,
     this.folded = false,
-    this.trailing,
+    this.count = 0,
     this.onTap,
     this.onAdd,
   });
 
   final String title;
+  final IconData icon;
 
-  /// 그 기계의 색 — 머리글 아이콘.
+  /// 그 기기의 색 — 데스크톱 설정 「기기 색」 그대로.
   final Color color;
+
+  /// 관문이 고른 기준 기기(주소가 가리키는 기기).
+  final bool root;
   final bool online;
   final bool folded;
-  final String? trailing;
+  final int count;
 
   /// 머리글 자체를 누르면 접고 편다. 「새 방」 단추는 자기 탭을 먼저 먹는다.
   final VoidCallback? onTap;
@@ -457,28 +472,44 @@ class _SectionHeader extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final dim = scheme.onSurfaceVariant;
-    final label = theme.textTheme.labelMedium;
+    final sub = theme.textTheme.bodySmall;
+    final line = online ? color : scheme.outline;
     return Padding(
-      padding: EdgeInsets.only(top: Look.groupGap - 8, bottom: folded ? 0 : Look.groupTitleGap - 8),
+      padding: EdgeInsets.only(top: Look.groupGap, bottom: folded ? 0 : Look.groupTitleGap),
       child: InkWell(
         onTap: onTap,
         borderRadius: Look.corners,
-        child: SizedBox(
-          height: Look.tap,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: Look.row2),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: line, width: Look.stripe)),
+          ),
           child: Row(
             children: [
-              Icon(machineIcon(title), size: 16, color: online ? color : scheme.outline),
-              const SizedBox(width: 8),
+              Icon(icon, size: Look.iconSize, color: line),
+              const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  title,
-                  style: label?.copyWith(color: dim),
-                  overflow: TextOverflow.ellipsis,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(title, style: theme.textTheme.titleMedium, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: Look.rowGap),
+                    Text.rich(
+                      TextSpan(
+                        children: [
+                          if (!online)
+                            TextSpan(text: '연결 안 됨', style: TextStyle(color: scheme.error))
+                          else
+                            TextSpan(text: '${root ? '기준 기기' : '연결됨'} · 학생 $count'),
+                        ],
+                      ),
+                      style: sub?.copyWith(color: dim),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ),
               ),
-              if (!online)
-                Text('연결 안 됨', style: label?.copyWith(color: scheme.error)),
-              if (trailing != null) Text(trailing!, style: label?.copyWith(color: dim)),
               if (onAdd != null)
                 IconButton(
                   tooltip: '새 방',
@@ -514,11 +545,14 @@ class _RoomBox extends StatelessWidget {
   );
 }
 
-/// 방 제목 줄 40 — 방 이름 15/600 과 경로 13 흐림. 서버는 「이름 · 경로」 한 줄로 준다.
+/// 방 제목 줄 40 — 기기색 아이콘 · 방 이름 15/600 · 경로 13 흐림. 서버는 「이름 · 경로」 한 줄로 준다.
+/// 아이콘은 머리글이 화면 위로 지나간 뒤에도 어느 기기 방인지 말한다.
 class _RoomHeader extends StatelessWidget {
-  const _RoomHeader({required this.title, this.onMenu});
+  const _RoomHeader({required this.title, required this.icon, required this.color, this.onMenu});
 
   final String title;
+  final IconData icon;
+  final Color color;
 
   /// 방 메뉴(pane 추가·이름·닫기). 안 닿는 기계엔 안 단다.
   final VoidCallback? onMenu;
@@ -533,6 +567,8 @@ class _RoomHeader extends StatelessWidget {
       height: Look.roomHeadH,
       child: Row(
         children: [
+          Icon(icon, size: Look.iconSize, color: color),
+          const SizedBox(width: 8),
           Flexible(
             child: Text(name, style: theme.textTheme.titleSmall, overflow: TextOverflow.ellipsis),
           ),
@@ -578,14 +614,6 @@ class _Notice extends StatelessWidget {
       ),
     );
   }
-}
-
-Color? parseHexColor(String? hex) {
-  if (hex == null) return null;
-  final h = hex.replaceFirst('#', '');
-  if (h.length != 6) return null;
-  final v = int.tryParse(h, radix: 16);
-  return v == null ? null : Color(0xff000000 | v);
 }
 
 /// 데스크톱 창을 축소한 지도 — 방 안에서 누가 어디에 어떤 크기로 앉아 있는지.

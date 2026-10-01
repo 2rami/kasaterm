@@ -55,7 +55,7 @@ void main() {
     );
     expect(remote.online, isTrue);
     expect(remote.route, '~mini-stable');
-    expect(remote.paneCount, 1);
+    expect(remote.studentCount, 1);
     expect(remote.rooms.single.panes.single.id, '%1');
     expect(remote.rooms.single.panes.single.machine, '~mini-stable');
     expect(server.paneRoutes, ['~mini-stable']);
@@ -72,7 +72,7 @@ void main() {
       (section) => section.machine == '미니',
     );
     expect(remote.online, isTrue);
-    expect(remote.paneCount, 1);
+    expect(remote.studentCount, 1);
     expect(remote.rooms.single.panes.single.id, '%1');
   });
 }

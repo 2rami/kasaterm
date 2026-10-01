@@ -233,9 +233,9 @@ void main() {
           expect(find.byType(PaneViewSwitch), findsOneWidget);
           expect(
             find.text(switch (scene) {
-              CodexScene.progress => 'exec_command flutter test',
-              CodexScene.complete => '방금 끝냄',
-              CodexScene.approval => '승인 기다림',
+              CodexScene.progress => '하는 중 · exec_command flutter test',
+              CodexScene.complete => '쉬는 중',
+              CodexScene.approval => '승인',
             }),
             findsOneWidget,
           );

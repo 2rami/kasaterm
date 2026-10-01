@@ -7,11 +7,12 @@ import 'package:kasaterm_mobile/server.dart';
 
 const _mini = '~mini-stable';
 
-Pane pane(String id, {String status = 'idle', String? machine}) => Pane(
+Pane pane(String id, {String status = 'idle', String? kind, String? machine}) => Pane(
   id: id,
   name: '학생$id',
   title: '',
   status: status,
+  kind: kind,
   window: 0,
   cwd: '/',
   machine: machine,
@@ -115,13 +116,13 @@ void main() {
     final model = HubModel(server);
     final done = model.refresh();
     await pumpEventQueue();
-    expect(section(model, null)?.paneCount, 1);
+    expect(section(model, null)?.studentCount, 1);
     expect(section(model, '미니')?.online, isTrue);
     // 명부가 실어 온 행이 없으면 원격 절은 비어 있다가, 그 기계가 답하면 찬다.
-    expect(section(model, '미니')?.paneCount, 0);
+    expect(section(model, '미니')?.studentCount, 0);
     server.gates['panes:$_mini']!.complete();
     await done;
-    expect(section(model, '미니')?.paneCount, 1);
+    expect(section(model, '미니')?.studentCount, 1);
     model.dispose();
   });
 
@@ -131,7 +132,7 @@ void main() {
     final model = HubModel(server);
     final done = model.refresh();
     await pumpEventQueue();
-    expect(section(model, null)?.paneCount, 1);
+    expect(section(model, null)?.studentCount, 1);
     server.gates['notes:']!.complete();
     await done;
     model.dispose();
@@ -164,8 +165,8 @@ void main() {
     server.rows[''] = [pane('%0'), pane('%2')];
     server.gates['panes:'] = Completer();
     final model = HubModel(server);
-    expect(section(model, null)?.paneCount, 1);
-    expect(section(model, '미니')?.paneCount, 1);
+    expect(section(model, null)?.studentCount, 1);
+    expect(section(model, '미니')?.studentCount, 1);
     expect(model.showingCached, isTrue);
     final done = model.refresh();
     await pumpEventQueue();
@@ -173,7 +174,7 @@ void main() {
     server.gates['panes:']!.complete();
     await done;
     expect(model.showingCached, isFalse);
-    expect(section(model, null)?.paneCount, 2);
+    expect(section(model, null)?.studentCount, 2);
     model.dispose();
   });
 
@@ -187,7 +188,7 @@ void main() {
     await model.refresh();
     expect(model.error, isNotNull);
     expect(model.showingCached, isFalse);
-    expect(section(model, null)?.paneCount, 1);
+    expect(section(model, null)?.studentCount, 1);
     model.dispose();
   });
 
@@ -214,7 +215,7 @@ void main() {
     model.refresh().then((_) => finished = true);
     await tester.pump();
     // 원격은 그 사이 이미 섰다.
-    expect(section(model, '미니')?.paneCount, 1);
+    expect(section(model, '미니')?.studentCount, 1);
     await tester.pump(HubModel.listTimeout + const Duration(seconds: 1));
     expect(finished, isTrue);
     expect(model.error, contains('늦다'));
@@ -228,7 +229,7 @@ void main() {
     await tester.pump();
     expect(server.waiters.keys, containsAll(['', _mini]));
     server.calls.clear();
-    server.rows[_mini] = [pane('%1', status: 'waiting', machine: _mini)];
+    server.rows[_mini] = [pane('%1', status: 'waiting', kind: 'permission', machine: _mini)];
     server.bump(_mini);
     await tester.pump();
     await tester.pump();
@@ -334,7 +335,7 @@ void main() {
     final first = HubModel(server);
     await tester.runAsync(first.refresh);
     first.dispose();
-    server.rows[''] = [pane('%0', status: 'waiting')];
+    server.rows[''] = [pane('%0', status: 'waiting', kind: 'question')];
     final model = HubModel(server)..start();
     await tester.pump();
     await tester.pump();
@@ -344,10 +345,21 @@ void main() {
     server.bump('');
     await tester.pump();
     await tester.pump();
-    server.rows[''] = [pane('%0', status: 'waiting')];
+    server.rows[''] = [pane('%0', status: 'waiting', kind: 'question')];
     server.bump('');
     await tester.pump();
     await tester.pump();
+    expect(buzz, ['HapticFeedbackType.mediumImpact']);
+    // 방치(idle)는 데스크톱처럼 사람을 부르지 않는다 — 세지도 울리지도 않는다.
+    server.rows[''] = [pane('%0')];
+    server.bump('');
+    await tester.pump();
+    await tester.pump();
+    server.rows[''] = [pane('%0', status: 'waiting', kind: 'idle')];
+    server.bump('');
+    await tester.pump();
+    await tester.pump();
+    expect(model.waiting, 0);
     expect(buzz, ['HapticFeedbackType.mediumImpact']);
     model.dispose();
   });

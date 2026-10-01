@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'hub_prefs.dart';
+import 'machine_look.dart';
 import 'server.dart';
 
 class HubRoom {
@@ -66,7 +67,9 @@ class HubSection {
   final bool online;
   final List<HubRoom> rooms;
 
-  int get paneCount => rooms.fold(0, (n, r) => n + r.panes.length);
+  /// 학생 수 — 학생이 안 도는 셸은 세지 않는다.
+  int get studentCount =>
+      rooms.fold(0, (n, r) => n + r.panes.where((p) => !p.isShell).length);
 }
 
 /// 앱이 살아 있는 동안 기억하는 마지막 목록 — 허브를 다시 열면 이것부터 그린다.
@@ -148,7 +151,7 @@ class HubModel extends ChangeNotifier {
   /// 주소 기계의 줄이 아직 지난번 기억이다 — 화면이 얇은 진행 막대로 「확인 중」을 말한다.
   bool get showingCached => _seeded.contains(_rootKey) && error == null;
 
-  /// 지금 기다리는 학생 수 — 상단 배지. 「마지막으로 본 뒤 새로 기다리게 된 수」를
+  /// 지금 사람을 부르는 학생 수(승인·질문) — 상단 배지. 「마지막으로 본 뒤 새로 기다리게 된 수」를
   /// 누적했더니 학생 화면에 머무는 동안 상태가 오락가락한 것까지 쌓여 52 같은 수가
   /// 떴다. 서버가 말하는 지금 수가 늘 맞고, 목록이 길 때 위에서 한눈에 보인다.
   int waiting = 0;
@@ -172,7 +175,7 @@ class HubModel extends ChangeNotifier {
   final Set<String> _seeded = {};
   final Set<String> _seenNotes = {};
   final Set<String> _notesPrimed = {};
-  Map<String, String> _lastStatus = const {};
+  Map<String, bool> _lastNeeds = const {};
 
   bool _running = false;
   bool _disposed = false;
@@ -238,6 +241,12 @@ class HubModel extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// 기기 색·아이콘은 데스크톱 설정에서 바뀔 때만 바뀐다 — 폴링 박자엔 안 싣고 열 때·당길 때만 읽는다.
+  Future<void> _loadLooks() async {
+    final looks = await server.machineLooks();
+    if (!_disposed) machineLooks.value = looks;
+  }
+
   Future<void> _loadRootName() async {
     try {
       final me = await server.me();
@@ -267,6 +276,7 @@ class HubModel extends ChangeNotifier {
 
   /// 전부 한 번 — 당겨서 새로 고침·첫 화면. 명부에 새로 뜬 기계까지 받은 뒤 돌아온다.
   Future<void> refresh() async {
+    unawaited(_loadLooks());
     final mark = _seq;
     await Future.wait([
       _refreshSource(_rootKey),
@@ -552,24 +562,22 @@ class HubModel extends ChangeNotifier {
   /// 처음 본 학생은 세지 않는다 — 앱을 켠 순간 이미 기다리던 것은 목록 맨 위에
   /// 보이는 것으로 충분하고, 진동은 「방금 바뀐 것」에만 의미가 있다.
   void _noteWaiting(List<HubSection> next) {
-    final status = <String, String>{};
+    final needs = <String, bool>{};
     var fresh = 0;
     var now = 0;
     for (final s in next) {
       final seeded = _seeded.contains(s.route ?? _rootKey);
       for (final r in s.rooms) {
         for (final p in r.panes) {
-          if (p.isWaiting) now++;
+          if (p.needsYou) now++;
           if (seeded) continue;
           final key = '${s.machine ?? ''}|${p.id}';
-          status[key] = p.status;
-          final before = _lastStatus[key];
-          final wasWaiting = before == 'waiting' || before == 'blocked';
-          if (p.isWaiting && before != null && !wasWaiting) fresh++;
+          needs[key] = p.needsYou;
+          if (p.needsYou && _lastNeeds[key] == false) fresh++;
         }
       }
     }
-    _lastStatus = status;
+    _lastNeeds = needs;
     waiting = now;
     if (fresh > 0 && !_disposed) HapticFeedback.mediumImpact();
   }
@@ -634,7 +642,8 @@ class HubModel extends ChangeNotifier {
     return null;
   }
 
-  static int _rank(Pane p) => p.isWaiting ? 0 : (p.isBusy ? 1 : 2);
+  /// 데스크톱 방 안 순서와 같다 — 내 차례 → 하는 중 → 쉬는 중.
+  static int _rank(Pane p) => p.needsYou ? 0 : (p.isBusy ? 1 : 2);
 
   @visibleForTesting
   static List<HubRoom> rooms(
