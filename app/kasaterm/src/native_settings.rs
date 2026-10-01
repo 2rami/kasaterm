@@ -4743,7 +4743,7 @@ fn paint_pet(
 /// 날씨 — docs/weather.md 표의 모든 항목. 켜고 끄는 줄이 맨 위, 나머지는 켜기 전에도
 /// 미리 골라 둘 수 있게 늘 선다.
 fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
-    use crate::weather::model::{self as wm, Change, Effect, Mood, RainAmount, WeatherTarget, WipeMode};
+    use crate::weather::model::{self as wm, Change, Effect, Mood, RainAmount, WeatherTarget};
     let ws = &s.weather;
     let act = SettingsAction::Weather;
     let amounts = |current: RainAmount, make: &dyn Fn(RainAmount) -> Change| -> Vec<(&'static str, bool, SettingsAction)> {
@@ -4795,15 +4795,8 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
         let on = e.get(&ws.effects);
         toggle_row(g, s, hits, x, y, w, e.label(), on, act(Change::Effect(e, !on)));
     }
-
-    *y += 8.0;
-    section_title(g, x, *y, "닦기", "");
-    *y += 54.0;
-    let wipes: Vec<(&str, bool, SettingsAction)> =
-        WipeMode::ALL.iter().map(|&m| (m.label(), ws.wipe == m, act(Change::Wipe(m)))).collect();
-    seg_row(g, s, hits, x, y, w, "창 닦기", &wipes);
     let at = wm::REWET_STEPS.iter().position(|&v| v >= ws.rewet_secs).unwrap_or(wm::REWET_STEPS.len() - 1);
-    stepper_row(g, s, hits, x, y, w, "다시 젖는 시간", &wm::rewet_label(ws.rewet_secs),
+    stepper_row(g, s, hits, x, y, w, "젖는 시간", &wm::rewet_label(ws.rewet_secs),
         act(Change::Rewet(wm::REWET_STEPS[at.saturating_sub(1)])),
         act(Change::Rewet(wm::REWET_STEPS[(at + 1).min(wm::REWET_STEPS.len() - 1)])));
 

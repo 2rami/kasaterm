@@ -83,14 +83,6 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   void register(WeatherPlace p) => _places.add(p);
   void unregister(WeatherPlace p) => _places.remove(p);
 
-  /// 이 손가락이 단추 위에서 시작했는지 — 카드가 「단추만 누르면 그 자리만 닦기」를 가른다.
-  bool isOnButton(Offset global) {
-    final scene = _sceneBox;
-    if (scene == null) return false;
-    final local = scene.globalToLocal(global);
-    return _spots.values.any((s) => s.rect.inflate(4).contains(local));
-  }
-
   RenderBox? get _sceneBox {
     final r = _paintKey.currentContext?.findRenderObject();
     return r is RenderBox && r.attached && r.hasSize ? r : null;

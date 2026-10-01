@@ -3448,8 +3448,7 @@ impl App {
     }
     /// `KASATERM_AUTOWEATHER="<ms>:<step>;…"` — 날씨 검증 대본. 단계는
     /// `set:<json>`(날씨 설정에 합친다) · `menu:<pane>`(사이드바 창 줄 우클릭, 메뉴를 연 채 둔다) ·
-    /// `pick:<pane>:<follow|picked|clear|drizzle|rain|downpour>`(그 메뉴를 진짜로 눌러 고른다) ·
-    /// `type:<pane>`(그 창에 키 하나를 친 것으로 알린다 — 합성 키 이벤트는 못 만든다).
+    /// `pick:<pane>:<follow|picked|clear|drizzle|rain|downpour>`(그 메뉴를 진짜로 눌러 고른다).
     /// 메뉴는 사람이 누르는 것과 같은 좌표 판정을 지난다.
     pub(crate) fn run_pending_autoweather(&mut self) {
         use std::sync::{Mutex, OnceLock};
@@ -3507,8 +3506,6 @@ impl App {
                     None => eprintln!("[autoweather] {pane} 줄을 사이드바에서 못 찾음"),
                 }
                 self.chrome_dirty = true;
-            } else if let Some(pane) = step.strip_prefix("type:") {
-                self.weather_note_typed(pane);
             } else if let Some(rest) = step.strip_prefix("pick:") {
                 let Some((pane, pick)) = rest.split_once(':') else { continue };
                 use crate::weather::model::{PaneWeather as W, RainAmount as A};

@@ -15,7 +15,6 @@ void main() {
     expect(s.amount, RainAmount.drizzle);
     expect(s.target, WeatherTarget.focusedOnly);
     expect(s.effects, Effect.values.toSet());
-    expect(s.wipe, WipeMode.onInput);
     expect(s.rewetSecs, 180);
     expect(s.byStatus, isFalse);
     expect((s.busy, s.yourTurn, s.resting), (RainAmount.drizzle, RainAmount.downpour, RainAmount.none));
@@ -43,14 +42,12 @@ void main() {
     expect(s.target, WeatherTarget.backgroundOnly);
     expect(s.has(Effect.drops), isFalse);
     expect(s.has(Effect.buttons), isFalse);
-    expect(s.wipe, WipeMode.never);
     expect(s.rewetSecs, WeatherSettings.rewetMin);
     expect(s.moodAmount(Mood.busy), RainAmount.rain);
     expect(WeatherSettings.fromJson(s.toJson()), s);
     // 계정 동기화 검사기(`schema.rs weather`)가 받는 이름만 쓴다.
     expect(s.toJson().keys.toSet(), {
-      'enabled', 'amount', 'wind_dir', 'wind_strength', 'target', 'effects', 'wipe',
-      'rewet_secs', 'by_status', 'busy', 'your_turn', 'resting', 'ignore_os',
+      'enabled', 'amount', 'wind_dir', 'wind_strength', 'target', 'effects', 'rewet_secs', 'by_status', 'busy', 'your_turn', 'resting', 'ignore_os',
     });
   });
 
@@ -104,17 +101,13 @@ void main() {
     }
   });
 
-  test('비가 그친 카드는 몇 초 안에 마르고, 닦은 길의 물은 걷힌다', () {
-    final sim = GlassSim(1)..size = const Size(360, 150);
-    for (var i = 0; i < 300; i++) {
+  test('큰비에도 고인 물은 넘쳐 빠져 카드 아래를 다 덮지 않고, 비가 그치면 몇 초 안에 마른다', () {
+    final sim = GlassSim(1)..size = const Size(360, 64);
+    for (var i = 0; i < 300 * 30; i++) {
       sim.step(1 / 30, RainAmount.downpour);
     }
     expect(sim.beads, isNotEmpty);
-    sim.wipePath(const Offset(0, 75), const Offset(360, 75), radius: 200);
-    expect(sim.beads, isEmpty);
-    for (var i = 0; i < 300; i++) {
-      sim.step(1 / 30, RainAmount.downpour);
-    }
+    expect(sim.level, lessThan(GlassSim.maxLevel * 0.75));
     for (var i = 0; i < 6 * 30; i++) {
       sim.step(1 / 30, RainAmount.none);
     }

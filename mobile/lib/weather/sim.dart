@@ -30,13 +30,8 @@ class GlassSim {
   final pool = Float64List(poolCells);
   final _poolV = Float64List(poolCells);
   double level = 0;
-  double _drainPerSec = 0;
 
   double _beadAcc = 0, _dropAcc = 0, _time = 0;
-
-  /// 닦는 중이면 0→1. 왼쪽부터 오른쪽으로 쓸고 지나간다.
-  double? sweep;
-  bool _sweepLeft = true;
 
   double get _area => size.width * size.height / 10000;
   int get _beadCap => (size.width * size.height / 200).round();
@@ -78,7 +73,7 @@ class GlassSim {
     _poolV[i] -= r * 5;
   }
 
-  /// [rate] 는 「다시 젖는 시간」이 짧을수록 커진다. [wind] −1~1 은 흐르는 방울을 옆으로 민다.
+  /// [rate] 는 「젖는 시간」이 짧을수록 커진다. [wind] −1~1 은 흐르는 방울을 옆으로 민다.
   void step(double dt, RainAmount amount, {double rate = 1, double wind = 0, bool impacts = false}) {
     if (size.isEmpty) return;
     _time += dt;
@@ -104,15 +99,14 @@ class GlassSim {
     }
     beads.removeWhere((b) => b.r < 0.35 || b.p.dy + b.r > surfaceAt(b.p.dx));
     if (dry) runs.removeWhere((d) => (d.r -= evap * dt) < 1.3);
-    level = math.max(0, level - (dry ? 3.0 : 0.02 + _drainPerSec) * dt);
-    if (level == 0) _drainPerSec = 0;
+    // 고인 물은 차오를수록 테두리로 빨리 넘쳐 빠진다 — 그냥 두면 큰비에 금방 차서 카드 아래를 덮은 채 남는다.
+    level = math.max(0, level - (dry ? 3.0 : 0.02 + level * 0.2) * dt);
 
     for (final run in runs) {
       _move(run, dt);
     }
     runs.removeWhere((r) => r.dead);
     _waves(dt);
-    _sweepStep(dt);
     for (final w in ripples) {
       w.age += dt;
     }
@@ -121,7 +115,7 @@ class GlassSim {
 
   /// 물이 다 걷혀 더 그릴 것이 없는지.
   bool get settled =>
-      beads.isEmpty && runs.isEmpty && level < 0.05 && ripples.isEmpty && sweep == null;
+      beads.isEmpty && runs.isEmpty && level < 0.05 && ripples.isEmpty;
 
   final ripples = <Ripple>[];
   double _wind = 0;
@@ -187,47 +181,6 @@ class GlassSim {
     for (var i = 0; i < poolCells; i++) {
       pool[i] = (pool[i] + _poolV[i] * dt).clamp(-4.0, 4.0);
     }
-  }
-
-  /// 손가락이 지나간 길의 물을 훔친다.
-  void wipePath(Offset a, Offset b, {double radius = 22}) {
-    double dist(Offset p) {
-      final ab = b - a;
-      final len2 = ab.distanceSquared;
-      final t = len2 == 0 ? 0.0 : (((p - a).dx * ab.dx + (p - a).dy * ab.dy) / len2).clamp(0.0, 1.0);
-      return (p - (a + ab * t)).distance;
-    }
-
-    beads.removeWhere((o) => dist(o.p) < radius + o.r);
-    for (final d in runs) {
-      if (dist(d.p) < radius + d.r) d.dead = true;
-    }
-    runs.removeWhere((d) => d.dead);
-  }
-
-  /// 손을 떼면 카드 전체를 한 번 쓸어 닦고 고인 물을 뺀다.
-  void startSweep({required bool fromLeft}) {
-    sweep = 0;
-    _sweepLeft = fromLeft;
-    _drainPerSec = level / 0.6;
-  }
-
-  void _sweepStep(double dt) {
-    final s = sweep;
-    if (s == null) return;
-    final next = s + dt / 0.35;
-    final x = (_sweepLeft ? next : 1 - next) * (size.width + 30) - 15;
-    bool gone(Offset p) => _sweepLeft ? p.dx < x : p.dx > x;
-    beads.removeWhere((o) => gone(o.p));
-    runs.removeWhere((d) => gone(d.p));
-    sweep = next >= 1 ? null : next;
-  }
-
-  /// 닦는 막대의 지금 x(없으면 null).
-  double? get sweepX {
-    final s = sweep;
-    if (s == null) return null;
-    return (_sweepLeft ? s : 1 - s) * (size.width + 30) - 15;
   }
 }
 

@@ -3523,11 +3523,6 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
-        if self.weather.settings.enabled {
-            if let Some(pane) = self.target_pane() {
-                self.weather_note_typed(&pane);
-            }
-        }
         // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
         // pane 의 셸로 새 나간다(이름을 고치다 셸에 명령이 찍힌다).
         if self.room_rename_key(event) {

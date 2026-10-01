@@ -63,27 +63,6 @@ impl WeatherTarget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum WipeMode {
-    #[default]
-    OnInput,
-    OnFocus,
-    Never,
-}
-
-impl WipeMode {
-    pub(crate) const ALL: [WipeMode; 3] = [WipeMode::OnInput, WipeMode::OnFocus, WipeMode::Never];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            WipeMode::OnInput => "입력하면",
-            WipeMode::OnFocus => "초점 오면",
-            WipeMode::Never => "안 닦음",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WeatherEffects {
@@ -127,8 +106,7 @@ pub(crate) struct WeatherSettings {
     pub wind_strength: f32,
     pub target: WeatherTarget,
     pub effects: WeatherEffects,
-    pub wipe: WipeMode,
-    /// 닦인 창이 다시 다 젖기까지. 30 ~ 600초.
+    /// 비를 맞기 시작한 창이 다 젖기까지(물방울이 늘고 김이 낀다). 30 ~ 600초.
     pub rewet_secs: u32,
     pub by_status: bool,
     pub busy: RainAmount,
@@ -147,7 +125,6 @@ impl Default for WeatherSettings {
             wind_strength: 0.0,
             target: WeatherTarget::FocusedOnly,
             effects: WeatherEffects::default(),
-            wipe: WipeMode::OnInput,
             rewet_secs: 180,
             by_status: false,
             busy: RainAmount::Drizzle,
@@ -247,7 +224,7 @@ impl Mood {
     }
 }
 
-/// 다시 젖는 시간의 칸들(초).
+/// 젖는 시간의 칸들(초).
 pub(crate) const REWET_STEPS: [u32; 7] = [30, 60, 120, 180, 300, 450, 600];
 
 pub(crate) fn rewet_label(secs: u32) -> String {
@@ -269,7 +246,6 @@ pub(crate) enum Change {
     WindStrength(u8),
     Target(WeatherTarget),
     Effect(Effect, bool),
-    Wipe(WipeMode),
     Rewet(u32),
     ByStatus(bool),
     Status(Mood, RainAmount),
@@ -284,7 +260,6 @@ pub(crate) fn apply(mut s: WeatherSettings, c: Change) -> WeatherSettings {
         Change::WindStrength(q) => s.wind_strength = q as f32 / 4.0,
         Change::Target(t) => s.target = t,
         Change::Effect(e, on) => e.set(&mut s.effects, on),
-        Change::Wipe(w) => s.wipe = w,
         Change::Rewet(secs) => s.rewet_secs = secs,
         Change::ByStatus(on) => s.by_status = on,
         Change::Status(Mood::Busy, a) => s.busy = a,
@@ -421,7 +396,6 @@ mod tests {
         assert!(!s.enabled);
         assert_eq!(s.amount, RainAmount::Drizzle);
         assert_eq!(s.target, WeatherTarget::FocusedOnly);
-        assert_eq!(s.wipe, WipeMode::OnInput);
         assert_eq!(s.rewet_secs, 180);
         assert!(s.effects.streaks && s.effects.drops && s.effects.mist && s.effects.ripples && s.effects.buttons);
         assert!(!s.by_status && !s.ignore_os);

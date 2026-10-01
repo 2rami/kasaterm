@@ -49,6 +49,7 @@ fn weather(v: &Value) -> bool {
         "wind_dir" => number(value, -1.0, 1.0),
         "wind_strength" => number(value, 0.0, 1.0),
         "target" => one_of(value, &["all_windows", "focused_only", "unfocused_only", "picked_only", "background_only"]),
+        // Older apps still send it; nothing reads it since wiping went away.
         "wipe" => one_of(value, &["on_input", "on_focus", "never"]),
         "rewet_secs" => number(value, 30.0, 600.0),
         "effects" => value.as_object().is_some_and(|e| e.len() <= 8 && e.iter().all(|(k, b)| {

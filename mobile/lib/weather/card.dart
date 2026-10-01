@@ -24,8 +24,8 @@ Mood weatherMood(PaneMood m) => switch (m) {
 /// 제 유리를 가진 카드(허브 방·작업 줄). 날씨가 꺼져 있으면 [child] 그대로다 — 틱·그림·셰이더 없음.
 ///
 /// 켜져 있으면 이 카드에 오는 비 양(설정·초점·카드별 덮어쓰기·학생 상태)만큼 유리에 물이 맺혀
-/// 흐르고 아래 테두리에 고인다. 만지면 이 카드가 초점이 되고, 「닦기」 설정대로 닦인다 — 단추만
-/// 누르면 누른 자리만, 빈 곳을 만지거나 스크롤하면 한 번 쓸어 닦는다. 길게 누르면 「이 카드 날씨」.
+/// 흐르고 아래 테두리에 고인다. 김은 비를 맞기 시작한 뒤 「젖는 시간」에 걸쳐 낀다. 만지면 이 카드가
+/// 초점이 된다. 길게 누르면 「이 카드 날씨」.
 class WeatherCard extends StatefulWidget {
   const WeatherCard({super.key, required this.id, this.mood, required this.child});
 
@@ -53,12 +53,11 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
   WeatherSceneState? _scene;
   ui.FragmentShader? _glass, _rain;
   ui.Image? _drops, _snap;
-  bool _snapBusy = false, _onButton = false;
+  bool _snapBusy = false;
   Duration _last = Duration.zero;
   double _acc = 0, _sinceSnap = 99, _dpr = 2;
   DateTime _paintedAt = DateTime(0);
-  DateTime _wipedAt = DateTime.now();
-  Offset? _down, _prev;
+  DateTime _rainFrom = DateTime.now();
   ({bool active, bool moving}) _v = (active: false, moving: false);
   RainAmount _amount = RainAmount.none;
   bool _dark = true;
@@ -120,6 +119,7 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
         : RainAmount.none;
     final changed = v.active != _v.active || amount != _amount || v.moving != _v.moving;
     _v = v;
+    if (_amount == RainAmount.none && amount != RainAmount.none) _rainFrom = DateTime.now();
     _amount = amount;
     if (v.active && _glass == null) {
       _loadShared().then((_) async {
@@ -238,48 +238,9 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
 
   void _onDown(PointerDownEvent e) {
     if (!_v.active) return;
-    final wasFocused = weather.focused.value == widget.id;
     weather.focus(widget.id);
-    final s = weather.settings.value;
-    if (s.has(Effect.ripples)) _sim.ripple(e.localPosition);
-    switch (s.wipe) {
-      case WipeMode.onInput:
-        _down = _prev = e.localPosition;
-        _onButton = _scene?.isOnButton(e.position) ?? false;
-        _sim.wipePath(e.localPosition, e.localPosition);
-        if (!_onButton) _wipedAt = DateTime.now();
-      case WipeMode.onFocus:
-        if (!wasFocused) _sweep(e.localPosition.dx < _sim.size.width / 2);
-      case WipeMode.never:
-        break;
-    }
+    if (weather.settings.value.has(Effect.ripples)) _sim.ripple(e.localPosition);
     _sync();
-  }
-
-  void _onMove(PointerMoveEvent e) {
-    final prev = _prev, down = _down;
-    if (prev == null || down == null) return;
-    _sim.wipePath(prev, e.localPosition);
-    _prev = e.localPosition;
-    // 단추에서 시작했어도 끌고 나가면 스크롤이다 — 그 카드는 쓴 카드로 친다.
-    if (_onButton && (e.localPosition - down).distance > 18) {
-      _onButton = false;
-      _wipedAt = DateTime.now();
-    }
-  }
-
-  void _onUp(PointerEvent e) {
-    final down = _down;
-    if (down == null) return;
-    if (!_onButton) _sweep(e.localPosition.dx >= down.dx);
-    _down = _prev = null;
-    _onButton = false;
-  }
-
-  void _sweep(bool fromLeft) {
-    _sim.startSweep(fromLeft: fromLeft);
-    _wipedAt = DateTime.now();
-    if (!_ticker.isActive && _wet) _ticker.start();
   }
 
   @override
@@ -294,9 +255,6 @@ class _WeatherCardState extends State<WeatherCard> with SingleTickerProviderStat
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onDown,
-      onPointerMove: _onMove,
-      onPointerUp: _onUp,
-      onPointerCancel: _onUp,
       child: GestureDetector(
         onLongPress: () => showCardWeatherSheet(context, widget.id),
         child: Stack(
@@ -351,7 +309,7 @@ class _GlassPainter extends CustomPainter {
     if (drops == null || snap == null || shader == null) return;
     final sim = s._sim;
     final set = weather.settings.value;
-    final since = DateTime.now().difference(s._wipedAt).inMilliseconds / 1000;
+    final since = DateTime.now().difference(s._rainFrom).inMilliseconds / 1000;
     final fog = set.has(Effect.mist) && s._amount != RainAmount.none
         ? math.min(1.0, since / set.rewetSecs) * 0.12
         : 0.0;
@@ -382,21 +340,6 @@ class _GlassPainter extends CustomPainter {
       ..setImageSampler(0, snap)
       ..setImageSampler(1, drops);
     canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
-
-    // 쓸어 닦는 막대 — 물기를 밀고 지나가는 자리를 옅게 보인다.
-    final x = sim.sweepX;
-    if (x != null) {
-      final bar = Rect.fromLTWH(x - 10, 0, 20, size.height);
-      canvas.drawRect(
-        bar,
-        Paint()
-          ..shader = LinearGradient(
-            colors: dark
-                ? const [Color(0x00ffffff), Color(0x33dff0ff), Color(0x00ffffff)]
-                : const [Color(0x00000000), Color(0x1a2a4a6a), Color(0x00000000)],
-          ).createShader(bar),
-      );
-    }
   }
 
   @override

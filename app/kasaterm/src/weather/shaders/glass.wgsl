@@ -1,4 +1,4 @@
-// Each pane composes its own drops, droplets, mist, bottom pool and wiper blade over the
+// Each pane composes its own drops, droplets, mist and bottom pool over the
 // scene. Drop model from raindrop-fx (SardineFish, MIT): exclusion-combined normal maps,
 // refraction = base + size * scale, Lambert with a shadow offset. A drop shows only its
 // own pane (refraction measured in pane size, clamped inside it); the focused input row
@@ -77,12 +77,5 @@ fn fs_glass(in: VOut) -> @location(0) vec4f {
         }
     }
 
-    // Squeegee blade while a wipe runs.
-    if (a.w >= 0.0) {
-        let dy = px.y - a.w;
-        let blade = 1.0 - smoothstep(1.0 * pt, 2.0 * pt, abs(dy));
-        let lip = (1.0 - smoothstep(0.0, 1.2 * pt, abs(dy + 2.6 * pt))) * 0.22;
-        col = mix(col, vec3f(0.07, 0.08, 0.09), blade * 0.85) + vec3f(lip);
-    }
     return vec4f(col, 1.0);
 }

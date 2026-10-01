@@ -2,7 +2,7 @@
 // Follows raindrop-fx by SardineFish (MIT, (c) 2021): drops are splatted into a map as
 // (normal.xy, refraction size, coverage); tiny droplets accumulate in a persistent map;
 // a mist layer fogs in over time; sliding drops erase droplets and mist behind them.
-// Here every instance carries its pane rect and is clipped to it, and wiper sweeps and
+// Here every instance carries its pane rect and is clipped to it, and drying panes and
 // per-pane mist growth are drawn as rect instances. Drop shape is analytic.
 
 struct GM {
@@ -104,7 +104,7 @@ fn fs_erase(in: DV) -> @location(0) vec4f {
     return vec4f(0.0, 0.0, 0.0, smoothstep(0.3, 1.0, coverage(in.q * 0.97)));
 }
 
-// Wiper sweep: clears everything under the rect.
+// A pane out of the rain: clears everything under the rect.
 @fragment
 fn fs_erase_rect(in: DV) -> @location(0) vec4f {
     return vec4f(0.0, 0.0, 0.0, 1.0);

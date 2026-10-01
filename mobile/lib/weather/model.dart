@@ -31,18 +31,6 @@ enum WeatherTarget {
       values.firstWhere((t) => t.id == v, orElse: () => WeatherTarget.focusedOnly);
 }
 
-enum WipeMode {
-  onInput('on_input', '입력하면'),
-  onFocus('on_focus', '초점 오면'),
-  never('never', '안 닦음');
-
-  const WipeMode(this.id, this.label);
-  final String id;
-  final String label;
-
-  static WipeMode parse(Object? v) => values.firstWhere((w) => w.id == v, orElse: () => WipeMode.onInput);
-}
-
 enum Effect {
   streaks('빗줄기'),
   drops('창 물방울'),
@@ -72,7 +60,6 @@ class WeatherSettings {
     this.windStrength = 0,
     this.target = WeatherTarget.focusedOnly,
     this.effects = const {...Effect.values},
-    this.wipe = WipeMode.onInput,
     this.rewetSecs = 180,
     this.byStatus = false,
     this.busy = RainAmount.drizzle,
@@ -91,9 +78,8 @@ class WeatherSettings {
   final double windStrength;
   final WeatherTarget target;
   final Set<Effect> effects;
-  final WipeMode wipe;
 
-  /// 닦인 카드가 다시 다 젖기까지. 30 ~ 600초.
+  /// 비를 맞기 시작한 카드가 다 젖기까지(알갱이가 맺히고 김이 낀다). 30 ~ 600초.
   final int rewetSecs;
   final bool byStatus;
   final RainAmount busy, yourTurn, resting;
@@ -121,7 +107,6 @@ class WeatherSettings {
     double? windStrength,
     WeatherTarget? target,
     Set<Effect>? effects,
-    WipeMode? wipe,
     int? rewetSecs,
     bool? byStatus,
     RainAmount? busy,
@@ -135,7 +120,6 @@ class WeatherSettings {
     windStrength: windStrength ?? this.windStrength,
     target: target ?? this.target,
     effects: effects ?? this.effects,
-    wipe: wipe ?? this.wipe,
     rewetSecs: rewetSecs ?? this.rewetSecs,
     byStatus: byStatus ?? this.byStatus,
     busy: busy ?? this.busy,
@@ -160,7 +144,6 @@ class WeatherSettings {
     'wind_strength': windStrength,
     'target': target.id,
     'effects': {for (final e in Effect.values) e.name: effects.contains(e)},
-    'wipe': wipe.id,
     'rewet_secs': rewetSecs,
     'by_status': byStatus,
     'busy': busy.name,
@@ -183,7 +166,6 @@ class WeatherSettings {
       windStrength: ranged(raw['wind_strength'], 0, 1, 0),
       target: WeatherTarget.parse(raw['target']),
       effects: fx is Map ? {for (final e in Effect.values) if (fx[e.name] != false) e} : d.effects,
-      wipe: WipeMode.parse(raw['wipe']),
       rewetSecs: ranged(raw['rewet_secs'], rewetMin.toDouble(), rewetMax.toDouble(), 180).round(),
       byStatus: raw['by_status'] == true,
       busy: RainAmount.parse(raw['busy'], d.busy),

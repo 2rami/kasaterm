@@ -78,7 +78,7 @@ pub(crate) struct Frame {
     pub ripples: Vec<[f32; 4]>,
     pub ripple_steps: u32,
     pub ripple_dim: [u32; 2],
-    /// 창 물 지도 인스턴스: 물방울 | 알갱이 | 와이퍼 | 김서림 (논리 px).
+    /// 창 물 지도 인스턴스: 물방울 | 알갱이 | 마르는 창 | 김서림 (논리 px).
     pub inst: Vec<Inst>,
     pub counts: [u32; 4],
     /// 물 지도 캔버스(논리 px).
@@ -305,7 +305,7 @@ impl WeatherGpu {
         let m_btn = shader(device, include_str!("shaders/buttons.wgsl"), "weather buttons", false);
         use wgpu::BlendFactor as F;
         let over = Some(blend(F::One, F::OneMinusSrcAlpha));
-        let wipe = Some(blend(F::Zero, F::OneMinusSrcAlpha));
+        let erase = Some(blend(F::Zero, F::OneMinusSrcAlpha));
         let p = |m, vs, fs, fmt, bl, inst| pipeline(device, m, vs, fs, fmt, bl, inst);
         let pipes = Pipes {
             rain: p(&m_rain, "vs_full", "fs_rain", MAP_FMT, None, false),
@@ -316,8 +316,8 @@ impl WeatherGpu {
             ripple_update: p(&m_ripple, "vs_full", "fs_update", MAP_FMT, None, false),
             drop_map: p(&m_gmap, "vs_drop", "fs_drop", MAP_FMT, over, true),
             droplet: p(&m_gmap, "vs_drop", "fs_droplet", MAP_FMT, over, true),
-            erase: p(&m_gmap, "vs_drop", "fs_erase", MAP_FMT, wipe, true),
-            erase_rect: p(&m_gmap, "vs_rect", "fs_erase_rect", MAP_FMT, wipe, true),
+            erase: p(&m_gmap, "vs_drop", "fs_erase", MAP_FMT, erase, true),
+            erase_rect: p(&m_gmap, "vs_rect", "fs_erase_rect", MAP_FMT, erase, true),
             mist_rect: p(&m_gmap, "vs_rect", "fs_mist_rect", MAP_FMT, Some(blend(F::OneMinusDst, F::One)), true),
             down: p(&m_blur, "vs_full", "fs_down", SCENE_FMT, None, false),
             blur_h: p(&m_blur, "vs_full", "fs_blur_h", SCENE_FMT, None, false),
@@ -538,7 +538,7 @@ impl WeatherGpu {
         }
 
         if f.glass {
-            let [n_drops, n_droplets, n_wipes, n_mist] = f.counts;
+            let [n_drops, n_droplets, n_dry, n_mist] = f.counts;
             let inst = &self.buf.inst;
             {
                 let mut rp = pass(enc, &s.drops.view, true);
@@ -548,13 +548,13 @@ impl WeatherGpu {
                 let mut rp = pass(enc, &s.droplets.view, false);
                 draw(&mut rp, inst, &p.droplet, &s.droplet_u, n_drops, n_droplets);
                 draw(&mut rp, inst, &p.erase, &s.erase_u, 0, n_drops);
-                draw(&mut rp, inst, &p.erase_rect, &s.erase_rect_u, n_drops + n_droplets, n_wipes);
+                draw(&mut rp, inst, &p.erase_rect, &s.erase_rect_u, n_drops + n_droplets, n_dry);
             }
             {
                 let mut rp = pass(enc, &s.mist.view, false);
-                draw(&mut rp, inst, &p.mist_rect, &s.mist_rect_u, n_drops + n_droplets + n_wipes, n_mist);
+                draw(&mut rp, inst, &p.mist_rect, &s.mist_rect_u, n_drops + n_droplets + n_dry, n_mist);
                 draw(&mut rp, inst, &p.erase, &s.erase_u, 0, n_drops);
-                draw(&mut rp, inst, &p.erase_rect, &s.erase_rect_u, n_drops + n_droplets, n_wipes);
+                draw(&mut rp, inst, &p.erase_rect, &s.erase_rect_u, n_drops + n_droplets, n_dry);
             }
             full(enc, &s.quarter.view, &p.down, &s.down[cur]);
             full(enc, &s.eighth[0].view, &p.down, &s.down[2]);

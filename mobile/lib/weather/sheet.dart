@@ -159,21 +159,7 @@ class _WeatherSheet extends StatelessWidget {
                 value: s.has(e),
                 onChanged: (v) => set(s.withEffect(e, v)),
               ),
-            _Title('닦기'),
-            _Pad(
-              SegmentedButton<WipeMode>(
-                showSelectedIcon: false,
-                segments: [for (final w in WipeMode.values) ButtonSegment(value: w, label: Text(w.label))],
-                selected: {s.wipe},
-                onSelectionChanged: (v) => set(s.copyWith(wipe: v.first)),
-              ),
-            ),
-            _Note(switch (s.wipe) {
-              WipeMode.onInput => '카드 빈 곳을 만지거나 그 카드에서 스크롤하면 쓸어 닦는다. 단추만 누르면 누른 자리만.',
-              WipeMode.onFocus => '다른 카드를 만지다 이 카드로 오면 한 번 쓸어 닦는다.',
-              WipeMode.never => '닦지 않는다 — 마를 때까지 둔다.',
-            }, dim),
-            _Title('다시 젖는 시간'),
+            _Title('젖는 시간'),
             _Slider(
               label: '',
               value: _rewet.indexOf(_nearest(s.rewetSecs)).toDouble(),

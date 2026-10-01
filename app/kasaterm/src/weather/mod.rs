@@ -29,7 +29,6 @@ pub(crate) struct WeatherState {
     os: OsMotion,
     os_at: Option<Instant>,
     last: Option<Instant>,
-    typed: Option<String>,
     places: Vec<Place>,
     spots: Vec<ButtonSpot>,
     ripple_acc: f32,
@@ -167,12 +166,6 @@ impl App {
         }
     }
 
-    pub(crate) fn weather_note_typed(&mut self, pane: &str) {
-        if self.weather.settings.enabled {
-            self.weather.typed = Some(pane.to_owned());
-        }
-    }
-
     /// 비가 오거나 물이 아직 흐르면 다음 장을 불러야 한다.
     pub(crate) fn weather_animating(&mut self) -> bool {
         let v = self.weather.verdict();
@@ -299,8 +292,7 @@ impl App {
         } else {
             Vec::new()
         };
-        let typed = st.typed.take().map(|id| key_of(&id));
-        let ev = sim::Events { typed, mouse: Some([self.cursor_px.0, self.cursor_px.1]), mouse_down: st.mouse_down };
+        let ev = sim::Events { mouse: Some([self.cursor_px.0, self.cursor_px.1]), mouse_down: st.mouse_down };
         let places = st.places.clone();
         st.world.step(dt, &s, v.moving, &places, &spots, &ev, win);
 
@@ -330,9 +322,9 @@ impl App {
             speed = speed.max(ps.cur[2]);
             any_streak |= streak > 0.01;
             any_panel |= ripples;
-            any_glass |= p.kind == PlaceKind::Pane && (mist > 0.0 || ps.pool > 1.0 || ps.wiper.is_some());
+            any_glass |= p.kind == PlaceKind::Pane && (mist > 0.0 || ps.pool > 1.0);
             pu.rect[i] = px(p.rect);
-            pu.a[i] = [kind, mist, ps.pool_h() * scale, ps.wiper_y().map_or(-1.0, |y| y * scale)];
+            pu.a[i] = [kind, mist, ps.pool_h() * scale, 0.0];
             pu.b[i] = [ps.wave * scale, damping, streak, ps.cur[1]];
             pu.c[i] = p.guard.map_or([0.0; 4], px);
         }
@@ -365,21 +357,17 @@ impl App {
             inst.push(gpu::Inst { pos: *at, size: [*size; 2], extra: [0.0; 4], clip: rect_of(*k) });
         }
         let n_droplets = inst.len() as u32 - n_drops;
-        for p in st.world.places.values().filter(|p| p.kind == PlaceKind::Pane) {
-            if let Some(y) = p.wiper_y() {
-                inst.push(gpu::Inst { pos: [p.rect[0], p.rect[1]], size: [p.rect[2], y - p.rect[1]], extra: [0.0; 4], clip: p.rect });
-            } else if p.dry {
-                // Out of the rain: condensation and mist go with the water.
-                inst.push(gpu::Inst { pos: [p.rect[0], p.rect[1]], size: [p.rect[2], p.rect[3]], extra: [0.0; 4], clip: p.rect });
-            }
+        // Out of the rain: condensation and mist go with the water.
+        for p in st.world.places.values().filter(|p| p.kind == PlaceKind::Pane && p.dry) {
+            inst.push(gpu::Inst { pos: [p.rect[0], p.rect[1]], size: [p.rect[2], p.rect[3]], extra: [0.0; 4], clip: p.rect });
         }
-        let n_wipes = inst.len() as u32 - n_drops - n_droplets;
+        let n_dry = inst.len() as u32 - n_drops - n_droplets;
         if s.effects.mist {
             for p in st.world.places.values().filter(|p| p.kind == PlaceKind::Pane) {
                 inst.push(gpu::Inst { pos: [p.rect[0], p.rect[1]], size: [p.rect[2], p.rect[3]], extra: [dt / MIST_TIME, 0.0, 0.0, 0.0], clip: p.rect });
             }
         }
-        let n_mist = inst.len() as u32 - n_drops - n_droplets - n_wipes;
+        let n_mist = inst.len() as u32 - n_drops - n_droplets - n_dry;
         any_glass |= n_drops > 0 || n_droplets > 0;
 
         let mut bu = gpu::ButtonsU::zeroed();
@@ -426,7 +414,7 @@ impl App {
             ripple_steps,
             ripple_dim,
             inst,
-            counts: [n_drops, n_droplets, n_wipes, n_mist],
+            counts: [n_drops, n_droplets, n_dry, n_mist],
             canvas: win,
             rain: any_streak && v.moving,
             ripple: ripple_on,

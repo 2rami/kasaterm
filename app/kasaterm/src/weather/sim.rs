@@ -1,10 +1,10 @@
-//! 날씨의 CPU 쪽: 창마다의 젖음(물방울·김서림·아래 고임·와이퍼)과 단추 물방울의 몸.
+//! 날씨의 CPU 쪽: 창마다의 젖음(물방울·김서림·아래 고임)과 단추 물방울의 몸.
 //! 단위는 논리 px, y 는 아래로. 창 사각형은 매 프레임 앱 상태에서 새로 받고, 상태는
 //! 창 key 로 이어 든다 — 창이 옮겨 가도 제 물을 들고 간다.
 //!
 //! 물방울 움직임은 raindrop-fx(SardineFish, MIT)의 RaindropSimulator/RainDrop 을 옮긴 것이다.
 
-use super::model::{RainAmount, WeatherSettings, WipeMode};
+use super::model::{RainAmount, WeatherSettings};
 
 use std::collections::HashMap;
 
@@ -53,7 +53,7 @@ pub(crate) const LEVEL: [[f32; 6]; 4] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlaceKind {
-    /// 터미널 창: 유리. 물방울·김서림·고임·와이퍼.
+    /// 터미널 창: 유리. 물방울·김서림·고임.
     Pane,
     /// 사이드바·옆 판·오른쪽 열: 물웅덩이. 파문.
     Panel,
@@ -90,9 +90,8 @@ pub(crate) struct PlaceState {
     pub guard: Option<[f32; 4]>,
     pub focused: bool,
     pub cur: [f32; 6],
-    pub idle: f32,
-    pub wiper: Option<f32>,
-    since_wipe: f32,
+    /// 비를 맞기 시작한 뒤로 지난 초. 「젖는 시간」에 걸쳐 물방울이 늘고 김이 낀다.
+    pub wet_for: f32,
     pub pool: f32,
     pub wave: f32,
     rain_acc: f32,
@@ -100,19 +99,16 @@ pub(crate) struct PlaceState {
     unseen: f32,
 }
 
-const WIPE_SECS: f32 = 0.5;
 const POOL_MAX: f32 = 16.0;
 pub(crate) const VIS: f32 = 0.36;
 const AREA_PER_MASS: f32 = VIS * VIS * std::f32::consts::PI / 4.0;
 
 impl PlaceState {
-    // The focused pane is rained on like the rest (「초점 창만」 is the default target);
-    // using it is what dries it, through the wiper.
     fn stale(&self, rewet: f32) -> f32 {
-        0.4 + 0.6 * (self.idle / rewet).clamp(0.0, 1.0)
+        0.4 + 0.6 * (self.wet_for / rewet).clamp(0.0, 1.0)
     }
     pub(crate) fn mist_target(&self, rewet: f32) -> f32 {
-        let m = ((self.idle / rewet - 0.1) / 0.9).clamp(0.0, 1.0) * 0.6;
+        let m = ((self.wet_for / rewet - 0.1) / 0.9).clamp(0.0, 1.0) * 0.6;
         if self.focused {
             m * 0.4
         } else {
@@ -121,9 +117,6 @@ impl PlaceState {
     }
     pub(crate) fn pool_h(&self) -> f32 {
         (self.pool * AREA_PER_MASS * 2.5 / self.rect[2].max(1.0)).min(POOL_MAX)
-    }
-    pub(crate) fn wiper_y(&self) -> Option<f32> {
-        self.wiper.map(|p| self.rect[1] + p * (self.rect[3] - self.pool_h()))
     }
     fn bottom(&self) -> f32 {
         self.rect[1] + self.rect[3] - self.pool_h()
@@ -206,8 +199,6 @@ pub(crate) struct Btn {
 /// 이번 프레임의 사건.
 #[derive(Default)]
 pub(crate) struct Events {
-    /// 입력이 들어간 창 key.
-    pub typed: Option<u64>,
     pub mouse: Option<V2>,
     pub mouse_down: bool,
 }
@@ -222,7 +213,6 @@ pub(crate) struct World {
     /// 이번 프레임에 맺힌 작은 알갱이: x, y, 크기, 창 key.
     pub droplets: Vec<(V2, f32, u64)>,
     pub time: f32,
-    focus: Option<u64>,
     rng: Rng,
     next_id: u32,
     grid: Vec<Vec<usize>>,
@@ -241,7 +231,6 @@ impl Default for World {
             ripples: Vec::new(),
             droplets: Vec::new(),
             time: 0.0,
-            focus: None,
             rng: Rng(0x9E37_79B9_7F4A_7C15),
             next_id: 1,
             grid: Vec::new(),
@@ -253,15 +242,6 @@ impl Default for World {
 }
 
 impl World {
-    /// 창 하나를 한 번 닦는다(초점 이동·입력·손으로).
-    pub(crate) fn wipe(&mut self, key: u64) {
-        if let Some(p) = self.places.get_mut(&key) {
-            if p.kind == PlaceKind::Pane && p.wiper.is_none() {
-                p.wiper = Some(0.0);
-            }
-        }
-    }
-
     pub(crate) fn clear(&mut self) {
         *self = World::default();
     }
@@ -287,7 +267,6 @@ impl World {
         for p in self.places.values_mut() {
             p.unseen += dt;
         }
-        let new_focus = places.iter().find(|p| p.focused).map(|p| p.key);
         for p in places {
             let st = self.places.entry(p.key).or_insert_with(|| PlaceState {
                 kind: p.kind,
@@ -296,9 +275,7 @@ impl World {
                 guard: None,
                 focused: false,
                 cur: LEVEL[0],
-                idle: 0.0,
-                wiper: None,
-                since_wipe: 99.0,
+                wet_for: 0.0,
                 pool: 0.0,
                 wave: 0.0,
                 rain_acc: 0.0,
@@ -317,41 +294,11 @@ impl World {
             }
         }
         self.places.retain(|_, p| p.unseen < 5.0);
-        if new_focus != self.focus {
-            if let Some(k) = new_focus {
-                if let Some(p) = self.places.get_mut(&k) {
-                    p.idle = 0.0;
-                    if s.wipe == WipeMode::OnFocus {
-                        self.wipe(k);
-                    }
-                }
-            }
-            self.focus = new_focus;
-        }
-        if let Some(k) = ev.typed {
-            if let Some(p) = self.places.get_mut(&k) {
-                p.idle = 0.0;
-                if s.wipe == WipeMode::OnInput && p.wiper.is_none() && p.since_wipe > 1.1 {
-                    p.wiper = Some(0.0);
-                }
-            }
-        }
-
         for p in self.places.values_mut() {
-            p.idle += dt;
-            p.since_wipe += dt;
+            p.wet_for = if p.dry { 0.0 } else { p.wet_for + dt };
             p.wave *= (-dt * 1.5).exp();
             let drain = if p.dry { 1.5 } else { 0.03 };
             p.pool = (p.pool * (-drain * dt).exp()).min(POOL_MAX * p.rect[2] / (AREA_PER_MASS * 2.5));
-            // The blade holds one frame at the bottom so everything it carried reaches the pool.
-            if p.wiper == Some(1.0) {
-                p.wiper = None;
-                p.since_wipe = 0.0;
-                p.wave = (p.wave + 2.5).min(3.0);
-            }
-            if let Some(w) = p.wiper.as_mut() {
-                *w = if moving { (*w + dt / WIPE_SECS).min(1.0) } else { 1.0 };
-            }
             let stale = p.stale(rewet);
             match p.kind {
                 PlaceKind::Pane if s.effects.drops => {
@@ -461,29 +408,12 @@ impl World {
         }
         if !moving {
             self.drops.retain(|d| !d.dead);
-            for p in self.places.values_mut() {
-                if p.wiper.is_some() {
-                    let key_rect = p.rect;
-                    self.drops.retain(|d| !inside(d.pos, key_rect));
-                }
-            }
             return;
         }
         let steps = (dt / 0.03).ceil().max(1.0) as usize;
         for _ in 0..steps {
             let h = dt / steps as f32;
             self.integrate(h, wind);
-            let wipes: Vec<(u64, f32)> =
-                self.places.iter().filter_map(|(k, p)| p.wiper_y().map(|y| (*k, y))).collect();
-            for (k, y) in wipes {
-                for d in self.drops.iter_mut().filter(|d| d.place == k && !d.dead) {
-                    let ry = d.radii()[1];
-                    if d.pos[1] - ry < y {
-                        d.pos[1] = y + ry;
-                        d.vel = [0.0; 2];
-                    }
-                }
-            }
             self.collide(canvas);
             self.drops.retain(|d| !d.dead);
         }
@@ -754,7 +684,7 @@ impl World {
     /// 이 자리에서 비가 멈췄는지(모든 물이 걷혔는지) — 멈췄으면 다시 그릴 필요가 없다.
     pub(crate) fn settled(&self) -> bool {
         self.drops.is_empty()
-            && self.places.values().all(|p| p.cur[0] < 0.01 && p.wiper.is_none() && p.pool_h() < 0.3)
+            && self.places.values().all(|p| p.cur[0] < 0.01 && p.pool_h() < 0.3)
             && self.buttons.iter().all(|b| b.press.abs() < 0.01 && b.ring_t < 0.0)
     }
 }
@@ -800,22 +730,23 @@ mod tests {
     }
 
     #[test]
-    fn typing_wipes_and_idle_panes_get_wetter() {
+    fn a_pane_fogs_in_over_the_wetting_time_and_starts_over_after_drying() {
         let mut w = World::default();
-        let s = settings();
-        let places = [pane(1, 0.0, true, None), pane(2, 400.0, false, None)];
-        for _ in 0..300 {
-            w.step(1.0 / 60.0, &s, true, &places, &[], &Events::default(), [800.0, 600.0]);
-        }
-        let typed = Events { typed: Some(1), ..Default::default() };
-        w.step(1.0 / 60.0, &s, true, &places, &[], &typed, [800.0, 600.0]);
-        assert!(w.places[&1].wiper.is_some());
-        assert!(w.places[&2].wiper.is_none());
-        for _ in 0..60 {
-            w.step(1.0 / 60.0, &s, true, &places, &[], &Events::default(), [800.0, 600.0]);
-        }
-        let count = |k: u64| w.drops.iter().filter(|d| d.place == k).count();
-        assert!(count(2) > count(1), "the unused pane should hold more water");
+        let s = WeatherSettings { rewet_secs: 30, ..settings() };
+        let rewet = s.rewet_secs as f32;
+        let wet = [pane(1, 0.0, false, None)];
+        let dry = [Place { amount: RainAmount::None, ..pane(1, 0.0, false, None) }];
+        let run = |w: &mut World, places: &[Place], secs: usize| {
+            for _ in 0..secs * 60 {
+                w.step(1.0 / 60.0, &s, true, places, &[], &Events::default(), [400.0, 600.0]);
+            }
+        };
+        run(&mut w, &wet, 2);
+        let early = w.places[&1].mist_target(rewet);
+        run(&mut w, &wet, 30);
+        assert!(w.places[&1].mist_target(rewet) > early);
+        run(&mut w, &dry, 1);
+        assert_eq!(w.places[&1].mist_target(rewet), 0.0);
     }
 
     #[test]

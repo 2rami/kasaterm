@@ -4,7 +4,7 @@
 struct R {
     n: vec4f,               // count, streak density and alpha outside every place
     rect: array<vec4f, 24>, // x, y, w, h (px)
-    a: array<vec4f, 24>,    // kind (0 pane, 1 panel, 2 bar), mist target, pool height px, wiper y px (<0 none)
+    a: array<vec4f, 24>,    // kind (0 pane, 1 panel, 2 bar), mist target, pool height px, unused
     b: array<vec4f, 24>,    // pool wave px, ripple damping, streak density, streak alpha
     c: array<vec4f, 24>,    // guard rect px: the focused input row, never wet (w = 0: none)
 };
