@@ -59,13 +59,6 @@ impl App {
     pub(crate) fn feedback_btn_rect(&self, _win_h_logical: f32) -> Rect {
         (0.0, 0.0, 0.0, 0.0)
     }
-    pub(crate) fn board_btn_rect(&self, win_h_logical: f32) -> Rect {
-        self.sidebar_tray_rects(win_h_logical)
-            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.board)
-    }
-    pub(crate) fn arona_btn_rect(&self, _win_h_logical: f32) -> Rect {
-        (0.0, 0.0, 0.0, 0.0)
-    }
 
     /// Re-emit the claude wrapper into the live shim dir so an already-open pane
     /// picks up a knob change on its next `claude` run (the shim path is stable

@@ -936,13 +936,13 @@ impl App {
     /// origin_x / window_cells / hit-test calc routes through here so a
     /// single `sidebar_visible` flip reflows the whole grid.
     pub(crate) fn effective_sidebar_w(&self) -> f32 {
-        self.tab_strip_w() + self.left_panel_col_w() + self.file_tree_col_w()
+        self.tab_strip_w() + self.file_tree_col_w()
     }
 
-    /// 네 기둥이 **원하는** 폭 `(탭 스트립, 왼쪽 판, 파일트리, 우측 칼럼)`(사용자가 드래그로
+    /// 세 기둥이 **원하는** 폭 `(탭 스트립, 파일트리, 우측 칼럼)`(사용자가 드래그로
     /// 정한 값). 접혀 있으면 0. `chrome_widths` 만 이걸 쓴다 — 바깥에서 이 값을 그리기에 쓰면
     /// 창이 좁을 때 예산을 건너뛰고 겹쳐 그리게 된다.
-    fn chrome_wants(&self) -> (f32, f32, f32, f32) {
+    fn chrome_wants(&self) -> (f32, f32, f32) {
         if self.internal_room_active_any() {
             return (
                 if self.sidebar_visible && !self.tabs_on_top {
@@ -950,7 +950,6 @@ impl App {
                 } else {
                     0.0
                 },
-                0.0,
                 0.0,
                 0.0,
             );
@@ -961,7 +960,6 @@ impl App {
             } else {
                 0.0
             },
-            self.left_panel_want_w(),
             if self.file_tree.visible {
                 self.file_tree.w_logical
             } else {
@@ -975,12 +973,11 @@ impl App {
         )
     }
 
-    /// 이번 프레임에 네 기둥이 **실제로** 차지할 폭 `(탭 스트립, 왼쪽 판, 파일트리, 우측 칼럼)`.
+    /// 이번 프레임에 세 기둥이 **실제로** 차지할 폭 `(탭 스트립, 파일트리, 우측 칼럼)`.
     ///
     /// 원하는 폭의 합이 창에 들어가면 그대로 준다. 넘치면 터미널 몫(`GRID_KEEP_COLS`)을
-    /// 먼저 떼어 두고, 남는 것을 **우선순위 역순**(우측 칼럼 → 파일트리 → 왼쪽 판 → 탭 스트립)으로
-    /// 하한까지 깎는다. 그래도 넘치는 창이면 같은 순서로 접는다. 왼쪽 판이 파일트리보다 늦게
-    /// 깎이는 것은 사람이 방금 보려고 연 것이라서다.
+    /// 먼저 떼어 두고, 남는 것을 **우선순위 역순**(우측 칼럼 → 파일트리 → 탭 스트립)으로
+    /// 하한까지 깎는다. 그래도 넘치는 창이면 같은 순서로 접는다.
     ///
     /// 깎는 것은 **여기서 돌려주는 값뿐이고 `*_w_logical` 은 안 건드린다** — 그래서 창을
     /// 도로 넓히면 사용자가 정한 폭이 그대로 돌아온다. 예산을 필드에 써 버리면 창을 한 번
@@ -988,24 +985,23 @@ impl App {
     ///
     /// 순서가 우측 칼럼부터인 이유: 셋 중 가장 넓고(420) 참조용이라, 같은 픽셀을 내놓을 때
     /// 잃는 것이 가장 적다. 탭 스트립이 마지막인 건 그게 방을 오가는 유일한 손잡이여서다.
-    pub(crate) fn chrome_widths(&self) -> (f32, f32, f32, f32) {
-        let (mut tab, mut panel, mut tree, mut git) = self.chrome_wants();
+    pub(crate) fn chrome_widths(&self) -> (f32, f32, f32) {
+        let (mut tab, mut tree, mut git) = self.chrome_wants();
         let Some(win) = self.window.as_ref() else {
-            return (tab, panel, tree, git);
+            return (tab, tree, git);
         };
         let win_w = win.inner_size().width as f32 / self.effective_scale();
         if win_w <= 1.0 {
-            return (tab, panel, tree, git);
+            return (tab, tree, git);
         }
         let keep = GRID_KEEP_COLS * self.cell.w + 2.0 * WINDOW_PADDING;
-        let mut over = tab + panel + tree + git - (win_w - keep);
+        let mut over = tab + tree + git - (win_w - keep);
         if over <= 0.0 {
-            return (tab, panel, tree, git);
+            return (tab, tree, git);
         }
         for (w, floor) in [
             (&mut git, GIT_COL_W_AUTO_MIN),
             (&mut tree, FILE_TREE_W_AUTO_MIN),
-            (&mut panel, crate::left_panel::LEFT_PANEL_W_AUTO_MIN),
             (&mut tab, SIDEBAR_W_AUTO_MIN),
         ] {
             if over <= 0.0 {
@@ -1020,7 +1016,7 @@ impl App {
         }
         // 하한까지 밀고도 안 들어가는 창 — 여기서는 뭔가를 지워야 터미널이 성립한다.
         // 하한 폭의 기둥을 억지로 남기면 셋 다 읽을 수 없는 채로 그리드만 죽는다.
-        for w in [&mut git, &mut tree, &mut panel, &mut tab] {
+        for w in [&mut git, &mut tree, &mut tab] {
             if over <= 0.0 {
                 break;
             }
@@ -1030,7 +1026,7 @@ impl App {
             over -= *w;
             *w = 0.0;
         }
-        (tab, panel, tree, git)
+        (tab, tree, git)
     }
 
     /// Width of the session-tab strip alone (0 when collapsed). With top tabs
@@ -1160,16 +1156,12 @@ impl App {
     }
     /// File-tree column width (0 when hidden). Independent of the tab strip.
     pub(crate) fn file_tree_col_w(&self) -> f32 {
-        self.chrome_widths().2
-    }
-    /// 왼쪽 판 폭(닫혔으면 0) — 사이드바 바로 오른쪽에 붙는다(`left_panel.rs`).
-    pub(crate) fn left_panel_col_w(&self) -> f32 {
         self.chrome_widths().1
     }
     /// Left edge (logical x) of the file-tree column — right after the tab
-    /// strip and the left panel. The column sits between them and the cell grid.
+    /// strip. The column sits between it and the cell grid.
     pub(crate) fn file_tree_col_x(&self) -> f32 {
-        self.tab_strip_w() + self.left_panel_col_w()
+        self.tab_strip_w()
     }
     /// Right-hand chrome width (the git column), mirroring `effective_sidebar_w`
     /// on the left. Folded into `window_cells` so the cell grid reflows and no
@@ -1185,7 +1177,7 @@ impl App {
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
-        self.chrome_widths().3
+        self.chrome_widths().2
     }
     /// Left edge (logical x) of the git column — flush against the window's
     /// right edge. 0 before the window exists (no paint yet).
@@ -2086,7 +2078,6 @@ impl App {
             file_tree_w: Some(self.file_tree.w_logical),
             git_col_visible: Some(self.git.col_visible),
             git_col_w: Some(self.git.col_w_logical),
-            left_panel_w: Some(self.left_panel.w_logical),
         });
     }
 
@@ -2506,15 +2497,11 @@ impl App {
         }
     }
 
-    /// 사이드바 하단에 붙박인 트레이 — 기기 추가(`+`)와 앱 전역 버튼(보드·아로나·피드백·설정).
-    /// 세로 사이드바가 없으면 `None`.
+    /// 사이드바 하단에 붙박인 트레이 — 기기 추가(`+`). 세로 사이드바가 없으면 `None`.
     ///
-    /// 셋 다 원래는 세션 목록 *뒤에* 줄줄이 붙어 있었다. 그러면 세션이 늘 때마다
-    /// 아래로 밀려서, 늘 같은 버튼을 누르는데 자리가 매번 달라진다. 트레이는 목록
-    /// 길이와 무관하게 바닥에 고정이라 근육기억이 선다.
-    ///
-    /// 보드·아로나는 메뉴막대와 단축키에만 있어 찾을 길이 없었다(2026-09-28 지시 「왼쪽에서
-    /// 열리게」). 둘 다 설정처럼 본문 자리를 바꾸는 화면이라 같은 줄, 설정 쪽에 선다.
+    /// 원래는 세션 목록 *뒤에* 붙어 있었다. 그러면 세션이 늘 때마다 아래로 밀려서,
+    /// 늘 같은 버튼을 누르는데 자리가 매번 달라진다. 트레이는 목록 길이와 무관하게
+    /// 바닥에 고정이라 근육기억이 선다.
     pub(crate) fn sidebar_tray_rects(&self, win_h: f32) -> Option<SidebarTray> {
         if self.tabs_on_top || !self.sidebar_visible {
             return None;
@@ -2953,25 +2940,6 @@ impl App {
             self.toggle_git_col();
         }
     }
-    /// 아로나(나쵸 대화)는 계정 작업현황 판의 「나쵸 대화」 탭이다 — 왼쪽 판을 열고 그 탭으로.
-    pub(crate) fn open_arona_panel(&mut self, _event_loop: &ActiveEventLoop) {
-        if self.lite {
-            return;
-        }
-        if self.board_panel_open() || self.open_board_panel() {
-            self.board_scene.set_tab(crate::native_board::BoardTab::Chat);
-            self.prime_hit_areas();
-            self.handoff_ime_to_active_surface();
-            self.repaint_all();
-        }
-    }
-
-    pub(crate) fn close_arona_panel(&mut self) {
-        if self.board_panel_open() && self.board_scene.tab() == crate::native_board::BoardTab::Chat {
-            self.close_left_panel();
-        }
-    }
-
     pub(crate) fn toggle_settings_web(
         &mut self,
         _event_loop: &ActiveEventLoop,
@@ -3011,71 +2979,6 @@ impl App {
             main.request_redraw();
         }
         eprintln!("[inline-web] closed kind={kind:?}");
-        // 웹뷰가 판 밖의 길(자식 창 닫기·보드 열기)로 닫혀도 판 자리를 거둔다.
-        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Arona) {
-            self.close_left_panel();
-        }
-    }
-
-    pub(crate) fn sync_inline_web(&mut self) {
-        let Some(main) = self.window.clone() else {
-            return;
-        };
-        let Ok(origin) = main.inner_position() else {
-            return;
-        };
-        let origin = origin.to_logical::<f64>(main.scale_factor());
-        let zoom = (self.ui_zoom as f64).max(0.1);
-        // 웹뷰는 판 본문 자리에 앉는다. 자식 창은 잘라 그릴 수 없어, 밀려 나오는 동안 왼쪽으로
-        // 밀면 사이드바를 덮는다 — 대신 폭을 키워 나오게 한다.
-        let slide = self.left_panel_slide_px();
-        let body = self.left_panel_body_rect().map(|(x, y, w, h)| {
-            (x as f64 * zoom, y as f64 * zoom, (w - slide).max(1.0) as f64 * zoom, h as f64 * zoom)
-        });
-        let Some(host) = self.inline_web.as_mut() else {
-            return;
-        };
-        let Some(body) = body else {
-            // 설정 방이 앞에 오면 판 자리가 없다. 닫지 않고 숨겨 두면 돌아올 때 대화가 남는다.
-            if host.visible {
-                if let Some(child) = host.window.as_ref() {
-                    crate::webpane::detach_child(&main, child);
-                    child.set_visible(false);
-                }
-                let _ = host.webview.set_visible(false);
-                host.visible = false;
-                host.last_frame = None;
-            }
-            return;
-        };
-        let frame = inline_web_frame(origin.x, origin.y, body);
-        if host.last_frame != Some(frame) {
-            let (x, y, width, height) = body;
-            if let Some(child) = host.window.as_ref() {
-                let _ = child.request_inner_size(winit::dpi::LogicalSize::new(width, height));
-                child.set_outer_position(winit::dpi::LogicalPosition::new(origin.x + x, origin.y + y));
-            }
-            let _ = host.webview.set_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(
-                    if host.window.is_some() { 0.0 } else { x },
-                    if host.window.is_some() { 0.0 } else { y },
-                )
-                .into(),
-                size: wry::dpi::LogicalSize::new(width, height).into(),
-            });
-            host.last_frame = Some(frame);
-        }
-        if !host.visible {
-            let _ = host.webview.set_visible(true);
-            if let Some(child) = host.window.as_ref() {
-                child.set_visible(true);
-                crate::webpane::attach_child(&main, child);
-                child.focus_window();
-            } else {
-                main.focus_window();
-            }
-            host.visible = true;
-        }
     }
 
     pub(crate) fn inline_web_window_event(
@@ -3128,22 +3031,6 @@ impl App {
 
     pub(crate) fn close_settings_inline(&mut self) {
         self.close_settings_room();
-    }
-
-    pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.board_panel_open() && self.board_scene.tab() == crate::native_board::BoardTab::Chat {
-            self.close_left_panel();
-            return;
-        }
-        // 나쵸는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정은 셸 없는 표식 pane 이라 그 방에서
-        // 열면 대상이 내부 id 로 굳는다 — 먼저 사용자 방으로 돌아가고, 돌아갈 방이 없으면 안 연다.
-        if self.internal_room_kind_at(self.active_window).is_some()
-            && !self.return_from_active_internal_room()
-        {
-            self.set_toast("나쵸 대화를 열 사용자 방이 없어요".to_string());
-            return;
-        }
-        self.open_arona_panel(event_loop);
     }
 
     /// 사용자: 새 방(윈도우) + 첫 pane 캐릭터 지정. 방별 collab 격리로 room slug 를
@@ -4032,30 +3919,6 @@ impl App {
         });
         let focus_key = focus.as_ref().map(|f| f.to_string()).unwrap_or_default();
         let focus_changed = *LAST_FOCUS.lock().unwrap() != focus_key;
-
-        // 계정 작업판이 살아 있으면(로그인·키·90초 안의 관측) 그것이 펫의 정본이다 — 화면
-        // 추정으로 만든 아랫줄은 쓰지 않는다. 판이 끊기면 아랫줄로 돌아가고 펫은 schema 의
-        // 신선도 검사로 지난 계정 작업을 내린다. 같은 글이라도 30초마다 다시 적어 관측
-        // 시각이 살아 있게 한다(펫은 같은 글이면 말풍선을 다시 띄우지 않는다).
-        let scoped = self.board_scene.assistant_pet_status();
-        if scoped["account_current"] == true && scoped["key_present"] == true {
-            let state = scoped["state"].as_str().unwrap_or("idle").to_string();
-            let text = scoped["text"].as_str().unwrap_or("").to_string();
-            let same = last.as_ref().is_some_and(|(_, st, tx)| *st == state && *tx == text);
-            let refreshed = last
-                .as_ref()
-                .is_none_or(|(t, _, _)| now.duration_since(*t) >= std::time::Duration::from_secs(30));
-            if same && !focus_changed && !refreshed {
-                return;
-            }
-            *last = Some((now, state, text));
-            *LAST_FOCUS.lock().unwrap() = focus_key;
-            let Some(dir) = pet_model_dir() else { return };
-            let mut record = scoped;
-            record["focus"] = focus.unwrap_or(serde_json::Value::Null);
-            let _ = std::fs::write(dir.join("board.json"), record.to_string());
-            return;
-        }
 
         // 급한 것부터. 막힌 사람이 있는데 「무엇을 하는 중」이라고 말하면 그 한 줄이
         // 정작 손이 필요한 곳을 덮는다.
@@ -5137,16 +5000,6 @@ fn set_dock_badge(_count: usize) {}
 pub(crate) fn ensure_notification_authorization() {}
 
 
-fn inline_web_frame(origin_x: f64, origin_y: f64, body: (f64, f64, f64, f64)) -> (i32, i32, u32, u32) {
-    let (x, y, w, h) = body;
-    (
-        (origin_x + x).round() as i32,
-        (origin_y + y).round() as i32,
-        w.round().max(1.0) as u32,
-        h.round().max(1.0) as u32,
-    )
-}
-
 pub(crate) fn side_column_should_toggle(
     replacing_inline: bool,
     column_visible: bool,
@@ -5155,24 +5008,20 @@ pub(crate) fn side_column_should_toggle(
     !replacing_inline && column_visible && destination_already_selected
 }
 
-// Keeping only device creation and the work hub makes the footer independent of settings and chat navigation.
+// 트레이에는 기기 추가 하나만 남았다 — 보드 단추와 그 판은 나쵸 독립 앱으로 갔다.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SidebarTray {
     pub(crate) line_y: f32,
     pub(crate) plus: (f32, f32, f32, f32),
-    pub(crate) board: (f32, f32, f32, f32),
 }
 
 pub(crate) fn sidebar_tray_layout(line_y: f32, strip: f32) -> SidebarTray {
     let strip = strip.max(0.0);
     let inset = (SIDEBAR_TAB_INSET + 4.0).min(strip * 0.1);
     let available = (strip - inset * 2.0).max(0.0);
-    let gap = 8.0_f32.min(available);
-    let button = ((available - gap) / 2.0).clamp(0.0, 28.0);
-    let plus_w = (available - gap - button).max(0.0);
-    let y = line_y + (SIDEBAR_TRAY_H - button) / 2.0;
-    SidebarTray { line_y, plus: (inset, y, plus_w, button),
-        board: (inset + plus_w + gap, y, button, button) }
+    let h = 28.0_f32.min(available);
+    let y = line_y + (SIDEBAR_TRAY_H - h) / 2.0;
+    SidebarTray { line_y, plus: (inset, y, available, h) }
 }
 
 #[cfg(test)]
@@ -5180,15 +5029,12 @@ mod sidebar_tray_tests {
     use super::*;
 
     #[test]
-    fn only_device_and_work_hub_buttons_fit_even_a_narrow_sidebar() {
+    fn device_button_fills_the_tray_even_in_a_narrow_sidebar() {
         for width in [0.0, 32.0, 64.0, SIDEBAR_W_AUTO_MIN, 160.0, SIDEBAR_W, 380.0] {
             let tray = sidebar_tray_layout(500.0, width);
-            for rect in [tray.plus, tray.board] {
-                assert!(rect.0 >= 0.0 && rect.2 >= 0.0);
-                assert!(rect.0 + rect.2 <= width + 0.01);
-            }
-            assert!(tray.plus.0 + tray.plus.2 <= tray.board.0);
-            assert!(tray.plus.2 >= tray.board.2);
+            let (x, _, w, h) = tray.plus;
+            assert!(x >= 0.0 && w >= 0.0 && h <= 28.0);
+            assert!(x + w <= width + 0.01);
         }
     }
 }
@@ -5343,19 +5189,6 @@ mod room_rename_tests {
         assert!(notify_dedup_passes("test:dedup-beta"));
     }
 
-
-    #[test]
-    fn 인라인_웹은_판_본문_자리에_앉는다() {
-        assert_eq!(
-            inline_web_frame(100.0, 200.0, (200.0, 68.0, 599.0, 700.0)),
-            (300, 268, 599, 700)
-        );
-        assert_eq!(
-            inline_web_frame(-300.0, 40.0, (200.0, 68.0, 0.2, 0.0)),
-            (-100, 108, 1, 1),
-            "밀려 나오기 첫 프레임에도 0 폭 창을 만들지 않는다"
-        );
-    }
 
     #[test]
     fn 인라인에서_고른_목적지는_이미_열려_있어도_닫지_않는다() {

@@ -39,6 +39,6 @@
 ## 확인 방법
 
 - `cargo test -p kasa-mcp nacho_relay` — 허용목록·405·403(원격·폰)·503, 헤더를 새로 짓는지, `changed_by` 빼기.
-- `cargo test -p kasaterm work_mode native_board::side` — 명부 기기만 대상, 경유 값도 쓰기 꺼짐, 권위와 안 섞임.
+- 데스크톱의 읽는 쪽(작업 탭·보드 판)은 걷었다(2026-10-01, 나쵸 대화·작업은 독립 앱). 창구는 관문·폰 쪽 길로 남는다.
 - 나쵸 고정 자료 대조: `NACHO_DESK_FIXTURES=<나쵸>/docs/development/api/fixtures cargo test -p kasaterm nacho_read_scope_fixture_matches -- --ignored`
 - 실제 나쵸에 읽기만: `cargo test -p kasa-mcp live_read_relay -- --ignored` (키가 있는 기기에서, GET 둘뿐).

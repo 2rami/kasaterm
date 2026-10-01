@@ -8706,12 +8706,10 @@ mod tests {
     /// 스크롤바는 스크롤되는 영역의 오른쪽에 붙어야 한다. 글자가 앉는 칼럼
     /// (`content_x`/`content_w`)을 그대로 주면 그 좌우 여백만큼 안으로 들어와,
     /// 막대가 패널 가장자리에서 떨어진 허공에 뜬다(2026-09-05 지적 · 실측 58px).
-    /// 설정과 보드가 같은 자리에서 같은 실수를 했으므로 둘 다 지킨다.
     #[test]
     fn the_scrollbar_hugs_the_panel_edge_not_the_text_column() {
         for (label, source, marker) in [
             ("설정", include_str!("native_settings.rs"), "paint_scroll_affordance(\n        g,\n        scroll_x,"),
-            ("작업 열", include_str!("native_board.rs"), "paint_scroll_affordance(g, x, top, width + 12.0,"),
         ] {
             assert!(
                 source.contains(marker),

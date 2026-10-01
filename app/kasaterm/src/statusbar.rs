@@ -1331,8 +1331,7 @@ fn paint_ports_popover(
 /// 해져 눈이 세로로 못 훑는다. 자릿수가 칸을 넘으면 그건 포트가 아니므로 걱정이 없다.
 /// 예약(반복·타이머) 팝오버 — 보드 방 「등록됨」을 옮긴 것(2026-09-08 지시 「켜져
 /// 있는 거는 포트 하단바로」). 줄마다 켜짐 점·지시문·종류/대상/다음 시각, 오른쪽에
-/// 멈춤/켜기와 ×. 새로 거는 건 여전히 보드 방이다 — 입력칸까지 하단바에 두면 팝오버가
-/// 화면 절반이 된다.
+/// 멈춤/켜기와 ×.
 fn paint_schedules_popover(
     g: &mut gpu::GpuRenderer,
     sb: &mut state::StatusbarState,
@@ -1380,7 +1379,7 @@ fn paint_schedules_popover(
         g.draw_text(
             x + PADX,
             ry + 10.0,
-            "예약된 작업이 없어요 — 새 예약은 보드 방에서 건다",
+            "예약된 작업이 없어요",
             gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
         );
     }

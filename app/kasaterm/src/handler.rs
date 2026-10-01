@@ -859,10 +859,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::SocketAronaClose => {
-                self.close_arona_panel();
-                return;
-            }
             // 아래 셋은 **그 pane 이 있는 방**의 트리를 만진다 — 활성 방만 보면 다른 기기의
             // 거울이 보낸 명령(원본은 다른 방을 보는 중)이 조용히 버려진다(2026-09-17).
             // swap 은 leaf id 교환이라 자리가 바뀐 두 PTY 의 크기가 다를 수 있다 — 활성 방이면
@@ -1301,10 +1297,10 @@ impl ApplicationHandler<UserEvent> for App {
                         self.pending_restores.push((sess, cmd, at));
                     }
                     if let Some(reply) = reply {
-                        let _ = reply.send(crate::native_board::confirmed_resume_pane(Some(new_id)));
+                        let _ = reply.send(Ok(new_id));
                     }
                 } else if let Some(reply) = reply {
-                    let _ = reply.send(crate::native_board::confirmed_resume_pane(None));
+                    let _ = reply.send(Err("이어받을 pane을 만들지 못했어요".to_string()));
                 }
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -2050,12 +2046,8 @@ impl ApplicationHandler<UserEvent> for App {
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
-            let board_item = MenuItem::new("작업현황 켜기/끄기  ⇧⌘B", true, None);
-            let arona_item = MenuItem::new("나쵸 대화 켜기/끄기  ⇧⌘A", true, None);
             let _ = view_m.append(&git_item);
             let _ = view_m.append(&session_item);
-            let _ = view_m.append(&board_item);
-            let _ = view_m.append(&arona_item);
             // 편집 메뉴 — macOS 는 이 메뉴(Cmd+V/Cmd+C 단축키)가 있어야 아로나
             // webview 입력창 붙여넣기가 먹는다. 다만 PredefinedMenuItem::paste/copy 는
             // 그 단축키 keyDown 을 NSMenu 가 가로채 winit 까지 안 내려보내 터미널
@@ -2083,8 +2075,6 @@ impl ApplicationHandler<UserEvent> for App {
             menu.init_for_nsapp();
             self.git_menu_item = Some(git_item);
             self.session_menu_item = Some(session_item);
-            self.board_menu_item = Some(board_item);
-            self.arona_menu_item = Some(arona_item);
             self.copy_menu_item = Some(copy_item);
             self.paste_menu_item = Some(paste_item);
             self.update_menu_item = Some(update_item);
@@ -3061,8 +3051,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autoexpand();
         self.arm_autoalert();
         self.arm_autotoggle();
-        self.arm_autoarona();
-        self.arm_autoboard();
         // 온보딩 제거 — 강제 ModePicker 자동오픈 없이 터미널이 기본이다.
         self.arm_autotabs();
         self.arm_autodrag();
@@ -3090,7 +3078,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reproject_main_cursor();
             }
             if let WindowEvent::MouseInput { button, .. } = &event {
-                let workspace = (self.settings_room_active() || self.board_panel_open()).then(|| {
+                let workspace = self.settings_room_active().then(|| {
                     let size = self.window.as_ref().unwrap().inner_size();
                     let scale = self.effective_scale();
                     let left = self.effective_sidebar_w();
@@ -3341,8 +3329,6 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings_room_active() {
                     self.native_settings_wheel(delta);
-                } else if self.board_panel_open() && self.left_panel_contains(self.cursor_px.0, self.cursor_px.1) {
-                    self.native_board_wheel(delta);
                 } else {
                     self.handle_wheel(delta);
                 }
@@ -3390,31 +3376,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
                     let cursor = self.native_settings_cursor(self.cursor_px.0, self.cursor_px.1);
-                    self.text_cursor_shown = cursor == CursorIcon::Text;
-                    window.set_cursor(cursor);
-                    self.chrome_dirty = true;
-                    window.request_redraw();
-                    return;
-                }
-                if self.left_panel_drag() {
-                    window.set_cursor(CursorIcon::ColResize);
-                    window.request_redraw();
-                    return;
-                }
-                if self.left_panel_grip_hover(self.cursor_px.0, self.cursor_px.1) {
-                    window.set_cursor(CursorIcon::ColResize);
-                    return;
-                }
-                if self.left_panel_contains(self.cursor_px.0, self.cursor_px.1)
-                    && !self.native_board_contains(self.cursor_px.0, self.cursor_px.1)
-                {
-                    window.set_cursor(CursorIcon::Default);
-                    self.chrome_dirty = true;
-                    window.request_redraw();
-                    return;
-                }
-                if self.native_board_contains(self.cursor_px.0, self.cursor_px.1) {
-                    let cursor = self.native_board_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
                     window.set_cursor(cursor);
                     self.chrome_dirty = true;
@@ -4655,24 +4616,6 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                // 왼쪽 판 — ×·폭 손잡이·보드 본문. 판 밖을 누르면 초점만 터미널로 돌려주고
-                // 아래로 흘린다(판이 열린 채로 옆 pane 에 바로 칠 수 있어야 한다).
-                if matches!(state, ElementState::Released) && self.left_panel_release() {
-                    window.set_cursor(CursorIcon::Default);
-                    window.request_redraw();
-                    return;
-                }
-                if matches!(state, ElementState::Pressed)
-                    && self.left_panel_press(self.cursor_px.0, self.cursor_px.1)
-                {
-                    self.last_input_at = Instant::now();
-                    window.request_redraw();
-                    return;
-                }
-                if self.left_panel_contains(self.cursor_px.0, self.cursor_px.1) {
-                    window.request_redraw();
-                    return;
-                }
                 // Settings: the sidebar entry toggles the screen. While it's
                 // open, clicks in the view area (right of the sidebar) route to
                 // the form; a click on the session sidebar closes settings and
@@ -4715,20 +4658,6 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // 사이드바 맨 위 「목록 | 배치도」 — 방 본문의 전체 기본을 바꾼다.
                     if self.sidebar_switch_click((cx, cy)) {
-                        self.session_touched = session_touched_before_event;
-                        window.request_redraw();
-                        return;
-                    }
-                    // 보드·아로나 — 메뉴막대 밖의 입구(트레이 버튼). 단축키와 같은 토글이라
-                    // 열린 화면에서 누르면 작업 방으로 돌아온다.
-                    if hit(self.board_btn_rect) {
-                        self.toggle_board_panel();
-                        self.session_touched = session_touched_before_event;
-                        window.request_redraw();
-                        return;
-                    }
-                    if hit(self.arona_btn_rect) {
-                        self.toggle_arona_panel(event_loop);
                         self.session_touched = session_touched_before_event;
                         window.request_redraw();
                         return;
@@ -7168,10 +7097,6 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_ime(ime);
                     return;
                 }
-                if self.board_panel_focused() {
-                    self.native_board_ime(ime);
-                    return;
-                }
                 if self.chat_view_ime(&ime) {
                     window.request_redraw();
                     return;
@@ -7412,13 +7337,9 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW)
                     )
                 {
-                    // 판에 초점이 있으면 ⌘W 는 판을 닫는다 — 보드가 방이던 때 ⌘W 가 보드를 닫던 감각.
                     match self.internal_room_kind_at(self.active_window) {
                         Some(crate::internal_room::InternalRoomKind::Settings) => {
                             self.close_settings_room();
-                        }
-                        None if self.left_panel.focused && self.left_panel_kind().is_some() => {
-                            self.close_left_panel();
                         }
                         None => self.close_active_tab(),
                     }
@@ -7439,44 +7360,11 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                // 설정·보드 방은 아래에서 키를 통째로 삼킨다(무조건 return).
-                // 아로나 토글이 그 뒤에 있으면 그 화면들에서 영영 안 먹으므로,
-                // `Cmd+,`(설정) 와 같은 자리에서 먼저 잡는다.
-                if matches!(event.state, ElementState::Pressed)
-                    && !event.repeat
-                    && self.host_mod()
-                    && self.modifiers.shift_key()
-                    && matches!(
-                        event.physical_key,
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA)
-                    )
-                {
-                    self.toggle_arona_panel(event_loop);
-                    window.request_redraw();
-                    return;
-                }
-                // 보드도 같은 자리에서 잡는다 — 보드 안에서 눌러 작업 방으로 돌아올 수 있어야 한다.
-                // Info 단추 줄을 걷은 뒤(2026-09-08) 보드로 가는 길이 메뉴막대 하나뿐이었다. 메뉴
-                // 가속키로 걸지 않는 것은 macOS 에서 메뉴와 이 처리기가 같은 키를 두 번 받아 열자마자
-                // 닫히기 때문이다.
-                if matches!(event.state, ElementState::Pressed)
-                    && !event.repeat
-                    && self.host_mod()
-                    && self.modifiers.shift_key()
-                    && matches!(
-                        event.physical_key,
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyB)
-                    )
-                {
-                    self.toggle_board_panel();
-                    window.request_redraw();
-                    return;
-                }
-                // 내부 방(설정)과 초점 잡은 보드 판에서도 방 단축키는 산다. 아래 두 갈래는 키를 전부
+                // 내부 방(설정)에서도 방 단축키는 산다. 아래 갈래는 키를 전부
                 // 그 화면에 넘기므로, 사이드바 카드가 약속한 `⌘N` 이 설정 안에선
                 // 죽어 있었다(2026-09-07 지시 「커맨드 키 있으면 작동하게 하던가
                 // 아니면 빼버리던가」). 글자 입력 중이어도 ⌘숫자는 글자가 아니다.
-                if (self.settings_room_active() || self.board_panel_focused())
+                if self.settings_room_active()
                     && matches!(event.state, ElementState::Pressed)
                     && !event.repeat
                     && self.host_mod()
@@ -7491,20 +7379,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.settings_room_active() {
                     self.native_settings_key(&event);
-                    window.request_redraw();
-                    return;
-                }
-                // 초점이 판에 있으면 키는 보드 몫이다. 터미널을 누르면 초점이 돌아간다.
-                if self.board_panel_focused() {
-                    if matches!(event.state, ElementState::Pressed)
-                        && !event.repeat
-                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                        && self.board_scene.input().is_none()
-                    {
-                        self.close_left_panel();
-                    } else {
-                        self.native_board_key(&event);
-                    }
                     window.request_redraw();
                     return;
                 }
@@ -7627,7 +7501,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.native_settings_tick();
         self.safe_tell_tick();
         self.trust_prompt_tick();
-        self.native_board_tick();
         self.sidebar_pulse_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
@@ -7668,7 +7541,6 @@ impl ApplicationHandler<UserEvent> for App {
         // 턴에 배치까지 끝난다.
         self.drain_pending_web_hosts(event_loop);
         self.sync_web_hosts();
-        self.sync_inline_web();
         self.tick_update_notice();
         // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
         // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
@@ -7752,10 +7624,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_git_col();
             } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_session_panel(event_loop);
-            } else if self.board_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                self.toggle_board_panel();
-            } else if self.arona_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                self.toggle_arona_panel(event_loop);
             } else if self.paste_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 // Cmd+V: key 창 first responder(아로나 webview)에 paste: 위임 →
                 // 안 먹으면(터미널 창) 직접 클립보드 붙여넣기.
@@ -7975,8 +7843,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_sticky_seek();
         self.run_pending_autoturnclick();
         self.run_pending_autotoggle();
-        self.run_pending_autoarona(event_loop);
-        self.run_pending_autoboard();
         self.run_pending_autochat();
         self.run_pending_autotabs();
         self.run_pending_autoopen();
@@ -8007,7 +7873,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_sidebar_navigation_probe(event_loop);
         self.run_pending_web_shell_probe(event_loop);
         self.run_pending_pulse_probe(event_loop);
-        self.run_pending_panel_probe(event_loop);
         self.run_pending_autonotify();
         // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은
         // 자리가 「잘려 안 보이는 행」위인지가 의미를 갖는다.

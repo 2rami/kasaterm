@@ -61,8 +61,6 @@ struct TabPeek {
 struct SidebarRowInfo {
     /// 목록 줄(두 줄)의 글 — 이름 · 지금 일 / 사정 한 줄.
     student: crate::sidebar_pulse::RowStudent,
-    /// 받는 곳 강조 — `Some(확신이 문턱 아래인가)`.
-    route: Option<bool>,
     /// 배정 학생명(얼굴용). claude 가 안 붙은 pane 은 빈 문자열.
     who: String,
     /// 줄에 적는 것 — 그 pane 이 지금 무엇인가(claude · zsh · 편집기…).
@@ -2158,7 +2156,6 @@ impl App {
         // 배치도 칸에 쓸 활성 pane — 칸마다 락을 잡지 않게 여기서 한 번만 뜬다
         // (페인트 루프는 gpu 를 빌린 상태라 `&self` 메서드도 못 부른다).
         let sb_active_pane = self.ws.lock().unwrap().active_pane.clone();
-        let route_highlight = self.board_scene.route_highlight().or_else(crate::sidebar_pulse::fixture_route);
         // 배치도 칸과 꼬리 줄이 **같은 것**을 말한다 — 한쪽만 고치면 같은 pane 이
         // 자리마다 다른 얼굴을 갖는다. 그래서 계산은 한 벌이다.
         let pane_info = |id: &String| -> SidebarRowInfo {
@@ -2254,11 +2251,8 @@ impl App {
                     .and_then(|a| a.busy_since)
                     .map(|t| t.elapsed().as_secs());
                 let student = self.row_student(id);
-                let route = crate::sidebar_navigation::route_mark(
-                    route_highlight.as_ref(), true, "", id, &student.who);
                 SidebarRowInfo {
                     student,
-                    route,
                     who,
                     label,
                     color: self.pane_state_color(id),
@@ -2406,8 +2400,6 @@ impl App {
         let settings_btn = self.settings_btn_rect(win_h_logical);
         self.settings_btn_rect = settings_btn;
         self.feedback_btn_rect = self.feedback_btn_rect(win_h_logical);
-        self.board_btn_rect = self.board_btn_rect(win_h_logical);
-        self.arona_btn_rect = self.arona_btn_rect(win_h_logical);
         // 트레이 기하는 `&self` 메서드라 아래 `self.gpu.as_mut()` 빌림 안에서는
         // 못 부른다 — 다른 chrome rect 들과 같이 여기서 미리 읽는다.
         let sidebar_tray = self.sidebar_tray_rects(win_h_logical);
@@ -2539,9 +2531,6 @@ impl App {
             (ws.active_pane.clone(), chars, agents)
         };
         let settings_room_active = self.settings_room_active();
-        let board_panel_open = self.board_panel_open();
-        let left_panel_frame = self.left_panel_rect();
-        let panel_slide = self.left_panel_slide_px();
         let pulse_h = self.sidebar_pulse_h();
         let sb_head_top = self.sidebar_head_top();
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
@@ -2562,12 +2551,6 @@ impl App {
             })
             .flatten();
         let mut settings_paint = None;
-        // 보드는 판 본문에 그린다(상태줄 자리는 `left_panel_rect` 가 남긴다). 밀려 나오는 동안은
-        // 왼쪽으로 민 자리에 그리고 판 사각으로 자른다.
-        let board_body = board_panel_open.then(|| self.left_panel_body_rect()).flatten();
-        let board_snapshot = board_body
-            .and_then(|(x, y, w, h)| self.native_board_snapshot((x - panel_slide, y, w, h)));
-        let mut board_paint = None;
         // 원격 방 이름 편집칸 — GPU 를 빌리기 전에 읽어 둔다.
         self.info.navigation.rename = self.remote_rename_overlay();
         let claude_observations: std::collections::HashMap<_, _> = self.set_claude_accounts.iter()
@@ -2895,7 +2878,6 @@ impl App {
                 None
             };
             self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
-            self.info.navigation.route = self.board_scene.route_highlight().or_else(crate::sidebar_pulse::fixture_route);
             crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
                 sb_head_top, (0.0, sb_view.0, tab_strip_w, sb_full_h));
             // 사이드바 토글. 자리는 `sidebar_toggle_rect` 가 정한다 — 접혔으면
@@ -4354,7 +4336,6 @@ impl App {
                             icon: info.icon,
                             cur: is_cur,
                             hover,
-                            route: info.route,
                             busy: info.busy || info.student.turn == crate::sidebar_pulse::RowTurn::Working && crate::sidebar_pulse::fixture_on(),
                             muted: false,
                         });
@@ -4671,7 +4652,7 @@ impl App {
                         g.rect(fr.0, by - 1.5, fr.2, 3.0, theme::accent());
                     }
                 }
-                // ── 하단 트레이 ── 기기 추가 · 보드 · 아로나 · 피드백 · 설정. 목록과 얇은 선으로
+                // ── 하단 트레이 ── 기기 추가. 목록과 얇은 선으로
                 // 갈라 "목록의 마지막 항목"이 아니라 별도 층으로 읽히게 한다.
                 // "+" 피커가 열려 있으면 스킵 — 팝업이 이 자리를 덮는데 아이콘
                 // 글리프는 rect 위 레이어라 비쳐 올라온다(가려지는 chrome 은 안
@@ -4686,33 +4667,6 @@ impl App {
                             1.0,
                             theme::border(),
                         );
-                        for (r, icon, on) in [
-                            (tray.board, "rows-2", board_panel_open),
-                        ] {
-                            let (bx, by, bw, bh) = r;
-                            let hover = sb_cursor.0 >= bx
-                                && sb_cursor.0 <= bx + bw
-                                && sb_cursor.1 >= by
-                                && sb_cursor.1 <= by + bh;
-                            g.hover_pointer |= hover;
-                            if hover {
-                                hover_rect(g, bx, by, bw, bh, theme::radius_sm());
-                            }
-                            g.queue_icon(
-                                icon,
-                                bx + (bw - theme::ICON_SIZE) / 2.0,
-                                by + (bh - theme::ICON_SIZE) / 2.0,
-                                theme::ICON_SIZE,
-                                // 켜진 설정은 판 대신 **색**으로 말한다(플랫 문법).
-                                if on {
-                                    theme::accent()
-                                } else if hover {
-                                    theme::text()
-                                } else {
-                                    theme::text_mute()
-                                },
-                            );
-                        }
                     }
                 }
                 // pane 행 우클릭 메뉴 — 이 칼럼에서 **마지막**에 그린다(다른 것 위에
@@ -8198,14 +8152,6 @@ impl App {
             if let Some(snapshot) = settings_snapshot.as_ref() {
                 settings_paint = Some(crate::native_settings::paint(g, snapshot));
             }
-            if let Some(rect) = left_panel_frame {
-                crate::left_panel::draw_frame(g, &mut self.left_panel, rect, panel_slide, self.cursor_px);
-            }
-            if let (Some(snapshot), Some((bx, by, bw, bh))) = (board_snapshot.as_ref(), board_body) {
-                g.push_clip(bx, by, bw, bh);
-                board_paint = Some(crate::native_board::paint(g, snapshot));
-                g.pop_clip();
-            }
             Self::paint_gpu_overlays(g, &overlay);
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
@@ -9976,20 +9922,6 @@ impl App {
             {
                 Self::draw_hover_tip(g, "기기 추가", sb_plus.0, sb_plus.1,
                     win_px.0 / scale, sb_win_h);
-            }
-            if !self.tabs_on_top && self.info.machine_menu.is_none() && tab_strip_w > 0.0 {
-                let over = |r: (f32, f32, f32, f32)| r.2 > 0.0
-                    && sb_cursor.0 >= r.0 && sb_cursor.0 <= r.0 + r.2
-                    && sb_cursor.1 >= r.1 && sb_cursor.1 <= r.1 + r.3;
-                let tip = [
-                    (self.board_btn_rect, "보드  ⇧⌘B"),
-                    (self.arona_btn_rect, "나쵸 대화  ⇧⌘A"),
-                ]
-                .into_iter()
-                .find(|(r, _)| over(*r));
-                if let Some((r, label)) = tip {
-                    Self::draw_hover_tip(g, label, r.0, r.1, win_px.0 / scale, sb_win_h);
-                }
             }
             if self.info.machine_menu.is_some() {
                 info::draw_machine_menu(g, sb_cursor, &mut self.info, 0.0, tab_strip_w.max(240.0), TITLE_HEIGHT, sb_win_h - status_h);
@@ -12728,9 +12660,6 @@ impl App {
         if let Some(output) = settings_paint {
             self.finish_native_settings_paint(output);
         }
-        if let Some(output) = board_paint {
-            self.finish_native_board_paint(output);
-        }
         if let Some(p) = self.account_switch_confirm.as_mut() {
             if !account_confirm_hits.is_empty() {
                 p.rects = account_confirm_hits;
@@ -13399,7 +13328,6 @@ impl App {
             || git_op_animating
             || banner_animating
             || walk_animating
-            || self.left_panel_sliding()
             // 혜성은 그리드에 얹히므로 `bar_animating` 처럼 bar-only 경로로 두면 안 된다
             // — 전체 프레임을 다시 그려야 위상이 반영된다.
             || comet_animating;

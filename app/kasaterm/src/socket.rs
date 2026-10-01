@@ -1446,11 +1446,6 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn close_arona(&self) -> Result<()> {
-        let _ = self.proxy.send_event(UserEvent::SocketAronaClose);
-        Ok(())
-    }
-
     fn swap_surfaces(&self, a: &str, b: &str) -> Result<()> {
         // 검증은 여기(backend 스레드, ws 조회 가능)서 — GUI 위임은 fire-and-
         // forget 이라 저쪽 실패를 CLI 에 돌려줄 수 없다.
@@ -4091,7 +4086,7 @@ mod remote_board_tests {
                     "harness": harness, "name": "current student", "status": "waiting",
                     "kind": kind, "waiting_for": "Claude is waiting for your input"
                 }));
-                assert_eq!(crate::native_board::agent_needs_attention(&row),
+                assert_eq!(crate::info::agent_needs_attention(&row),
                     matches!(kind, Some("permission" | "question")));
             }
         }
@@ -4100,11 +4095,11 @@ mod remote_board_tests {
             "name": "current student"
         }));
         assert_eq!(row.attention_kind.as_deref(), Some("question"));
-        assert!(crate::native_board::agent_needs_attention(&row));
+        assert!(crate::info::agent_needs_attention(&row));
         apply_remote_board_facts(&mut row, &serde_json::json!({"state_fresh": false}));
         assert_eq!(row.character.as_deref(), Some("current student"));
         assert_eq!(row.status, "unknown");
-        assert!(!crate::native_board::agent_needs_attention(&row));
+        assert!(!crate::info::agent_needs_attention(&row));
     }
 }
 
@@ -6757,7 +6752,6 @@ pub(crate) struct WindowUi {
     pub(crate) file_tree_w: Option<f32>,
     pub(crate) git_col_visible: Option<bool>,
     pub(crate) git_col_w: Option<f32>,
-    pub(crate) left_panel_w: Option<f32>,
 }
 
 /// 칸 너비로 말이 되는 범위. 사람이 파일을 손으로 고쳤거나 옛 판이 이상한 값을 남겼을 때
@@ -6782,7 +6776,6 @@ fn read_window_ui_at(path: &std::path::Path) -> WindowUi {
         file_tree_w: width("file_tree_w"),
         git_col_visible: flag("git_col_visible"),
         git_col_w: width("git_col_w"),
-        left_panel_w: width("left_panel_w"),
     }
 }
 
@@ -6807,7 +6800,6 @@ fn write_window_ui_at(path: &std::path::Path, ui: &WindowUi) {
     put("file_tree_w", ui.file_tree_w.map(|v| serde_json::json!(v)));
     put("git_col_visible", ui.git_col_visible.map(serde_json::Value::from));
     put("git_col_w", ui.git_col_w.map(|v| serde_json::json!(v)));
-    put("left_panel_w", ui.left_panel_w.map(|v| serde_json::json!(v)));
     doc["ui"] = serde_json::Value::Object(block);
     write_window_doc_at(path, &doc);
 }
@@ -6830,7 +6822,7 @@ mod window_ui_tests {
     fn frame_and_ui_survive_each_other() {
         let p = scratch();
         write_window_frame_at(&p, 1100.0, 860.0, Some((10.0, 20.0)));
-        let ui = WindowUi { sidebar_visible: Some(true), sidebar_w: Some(240.0), file_tree_visible: Some(true), file_tree_w: Some(300.0), git_col_visible: Some(false), git_col_w: Some(420.0), left_panel_w: Some(640.0) };
+        let ui = WindowUi { sidebar_visible: Some(true), sidebar_w: Some(240.0), file_tree_visible: Some(true), file_tree_w: Some(300.0), git_col_visible: Some(false), git_col_w: Some(420.0) };
         write_window_ui_at(&p, &ui);
         assert_eq!(read_window_ui_at(&p), ui);
         write_window_frame_at(&p, 900.0, 700.0, None);

@@ -3,117 +3,9 @@ pub(crate) use kasa_socket::transfer::*;
 
 use anyhow::{anyhow, Result};
 use kasa_socket::backend::Backend;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-fn machine_row(snapshot: &MachineSnapshot, local: bool) -> TransferMachine {
-    TransferMachine {
-        id: snapshot.machine_id.clone(), label: snapshot.label.clone(), local, online: true,
-        room_transfer_supported: snapshot.room_transfer_supported, rooms: snapshot.rooms.clone(),
-        unavailable_reason: (!snapshot.room_transfer_supported).then(|| "이 기계에 새 판이 필요해요".into()),
-    }
-}
-
-fn deduplicate(rows: Vec<SessionRow>) -> Vec<SessionRow> {
-    let mut out: Vec<SessionRow> = Vec::new();
-    let mut keys = HashMap::new();
-    for row in rows {
-        let key = row.identity.canonical_key();
-        if let Some(&index) = keys.get(&key) {
-            let current: &mut SessionRow = &mut out[index];
-            for pane in row.local_panes {
-                if !current.local_panes.contains(&pane) { current.local_panes.push(pane); }
-            }
-        } else {
-            keys.insert(key, out.len());
-            out.push(row);
-        }
-    }
-    out
-}
-
-fn import_remote_sessions(snapshot: MachineSnapshot) -> Vec<SessionRow> {
-    snapshot.sessions.into_iter().filter(|row| row.identity.machine_id == snapshot.machine_id)
-        .map(|mut row| {
-            // 원격 응답의 local_panes는 상대 기계의 번호라 이쪽 포커스 주소가 아니다.
-            row.local_panes.clear();
-            row
-        }).collect()
-}
-
-fn attach_local_mirror(rows: &mut Vec<SessionRow>, machine: &str, origin: &str, local: String, cwd: String) {
-    if let Some(row) = rows.iter_mut().find(|row| row.identity.machine_id == machine && row.identity.pane_id == origin) {
-        if !row.local_panes.contains(&local) { row.local_panes.push(local); }
-    } else {
-        rows.push(SessionRow {
-            identity: SessionIdentity { machine_id: machine.into(), pane_id: origin.into(), ..Default::default() },
-            local_panes: vec![local], cwd, status: "unknown".into(),
-            unavailable_reason: Some("원본 세션의 현재 상태를 확인하지 못했어요".into()), ..Default::default()
-        });
-    }
-}
-
-pub(crate) fn collect(backend: &Arc<dyn Backend>) -> TransferSnapshot {
-    let mut result = TransferSnapshot::default();
-    match backend.transfer_snapshot() {
-        Ok(local) => {
-            result.machines.push(machine_row(&local, true));
-            result.sessions.extend(local.sessions.into_iter().filter(|row| row.identity.machine_id == local.machine_id));
-        }
-        Err(error) => result.errors.push(format!("이 기계: {error:#}")),
-    }
-    let cached = kasa_mcp::machines::snapshot();
-    let machines = kasa_mcp::machines::machines();
-    let replies = std::thread::scope(|scope| {
-        let jobs: Vec<_> = machines.iter().map(|machine| {
-            scope.spawn(move || (machine, kasa_mcp::remote::transfer_snapshot(&machine.base)))
-        }).collect();
-        jobs.into_iter().filter_map(|job| job.join().ok()).collect::<Vec<_>>()
-    });
-    let mut bases = HashMap::new();
-    for (machine, reply) in replies {
-        match reply {
-            Ok(snapshot) => {
-                bases.insert(machine.base.clone(), snapshot.machine_id.clone());
-                result.machines.push(machine_row(&snapshot, false));
-                result.sessions.extend(import_remote_sessions(snapshot));
-            }
-            Err(error) => {
-                let old = cached.iter().find(|row| row.get("label").and_then(|v| v.as_str()) == Some(&machine.label));
-                let id = old.and_then(|row| row.get("route")).and_then(|v| v.as_str())
-                    .and_then(|route| route.strip_prefix('~')).map(str::to_string)
-                    .or_else(|| machine.machine_id.clone()).unwrap_or_else(|| machine.base.clone());
-                bases.insert(machine.base.clone(), id.clone());
-                let reason = format!("현재 상태를 안전하게 확인할 수 없어요: {error:#}");
-                result.machines.push(TransferMachine {
-                    id: id.clone(), label: machine.label.clone(), local: false,
-                    online: old.and_then(|row| row.get("online")).and_then(|v| v.as_bool()).unwrap_or(false),
-                    room_transfer_supported: false, rooms: Vec::new(), unavailable_reason: Some(reason.clone()),
-                });
-                if let Some(panes) = old.and_then(|row| row.get("panes")).and_then(|v| v.as_array()) {
-                    for pane in panes {
-                        let text = |name| pane.get(name).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let pane_id = text("id");
-                        if pane_id.is_empty() { continue; }
-                        result.sessions.push(SessionRow {
-                            identity: SessionIdentity { machine_id: id.clone(), pane_id, ..Default::default() },
-                            name: text("character"), title: text("title"), cwd: text("cwd"),
-                            status: "unknown".into(), unavailable_reason: Some(reason.clone()), ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-    }
-    for pane in kasa_pty::live_sessions() {
-        let Some(info) = kasa_mcp::remote::remote_info(&pane) else { continue };
-        let Some(machine_id) = bases.get(&info.base) else { continue };
-        attach_local_mirror(&mut result.sessions, machine_id, &info.remote_id, pane, info.remote_cwd.unwrap_or_default());
-    }
-    result.sessions = deduplicate(result.sessions);
-    result
-}
 
 fn resolve(backend: &Arc<dyn Backend>, machine_id: &str) -> Result<Option<kasa_mcp::machines::Machine>> {
     let local = backend.transfer_snapshot()?;
@@ -218,48 +110,6 @@ pub(crate) fn execute_with_progress(
     out
 }
 
-pub(crate) fn close_shells_with_progress(
-    backend: &Arc<dyn Backend>, sessions: Vec<SessionIdentity>, confirmed: bool, mut progress: impl FnMut(TransferResult),
-) -> Vec<TransferResult> {
-    let mut seen = HashSet::new();
-    sessions.into_iter().filter(|source| seen.insert(source.canonical_key())).map(|source| {
-        let result = (|| -> Result<()> {
-            if !confirmed { anyhow::bail!("셸 닫기 확인이 필요해요"); }
-            let machine = resolve(backend, &source.machine_id)?;
-            let row = current_row(&snapshot_at(backend, machine.as_ref())?, &source)?;
-            if !row.shell_closeable || row.harness.is_some() || row.status == "unknown" {
-                anyhow::bail!("빈 셸임을 확인하지 못했거나 프로그램이 실행 중이에요");
-            }
-            match machine {
-                Some(machine) => kasa_mcp::remote::transfer_close(&machine.base, &source),
-                None => backend.transfer_close(&source),
-            }
-        })();
-        let result = match result {
-            Ok(()) => report(&source, TransferStatus::Succeeded, "확인한 빈 셸을 닫았어요", None),
-            Err(error) => report(&source, TransferStatus::Failed, format!("{error:#}"), None),
-        };
-        progress(result.clone());
-        result
-    }).collect()
-}
-
-pub(crate) fn focus_session(backend: &Arc<dyn Backend>, identity: &SessionIdentity) -> Result<String> {
-    let snapshot = collect(backend);
-    let row = snapshot.sessions.iter().find(|row| row.identity == *identity)
-        .ok_or_else(|| anyhow!("세션이 바뀌었어요. 목록을 다시 확인해 주세요"))?;
-    if let Some(pane) = row.local_panes.first() {
-        backend.focus_surface(pane)?;
-        return Ok("세션을 열었어요".into());
-    }
-    let Some(machine) = resolve(backend, &identity.machine_id)? else {
-        backend.focus_surface(&identity.pane_id)?;
-        return Ok("세션을 열었어요".into());
-    };
-    backend.remote_pane(&machine.base, Some(&row.cwd), Some(&identity.pane_id), None, false, None)?;
-    Ok("원격 세션을 열었어요".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,17 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_origin_merges_mirrors_but_not_equal_names_or_paths() {
-        let mut first = row("mini", "%8", "live");
-        first.local_panes = vec!["%20".into()];
-        let mut mirror = first.clone();
-        mirror.local_panes = vec!["%21".into()];
-        let rows = deduplicate(vec![first, mirror, row("mini", "%9", "other"), row("macbook", "%8", "another")]);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].local_panes, vec!["%20", "%21"]);
-    }
-
-    #[test]
     fn revalidation_rejects_reused_pane_and_changed_session() {
         let old = row("mini", "%8", "old");
         let mut snapshot = MachineSnapshot { sessions: vec![row("mini", "%8", "new")], ..Default::default() };
@@ -292,21 +131,6 @@ mod tests {
         assert!(current_row(&snapshot, &old.identity).is_err());
         snapshot.sessions[0] = old.clone();
         assert!(current_row(&snapshot, &old.identity).is_ok());
-    }
-
-    #[test]
-    fn remote_pane_number_is_not_a_local_address() {
-        let mut local = row("macbook", "%4", "local");
-        local.local_panes = vec!["%4".into()];
-        let mut remote = row("mini", "%4", "remote");
-        remote.local_panes = vec!["%4".into()];
-        let mut rows = vec![local];
-        rows.extend(import_remote_sessions(MachineSnapshot { machine_id: "mini".into(), sessions: vec![remote], ..Default::default() }));
-        assert_eq!(rows[0].local_panes, vec!["%4"]);
-        assert!(rows[1].local_panes.is_empty());
-        attach_local_mirror(&mut rows, "mini", "%4", "%18".into(), "/project".into());
-        assert_eq!(rows[0].local_panes, vec!["%4"]);
-        assert_eq!(rows[1].local_panes, vec!["%18"]);
     }
 
     #[test]

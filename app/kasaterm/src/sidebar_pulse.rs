@@ -15,8 +15,7 @@ pub(crate) const LIST_ROW_H: f32 = 40.0;
 /// 방 이름 아래 첫 줄까지의 틈. 행 사이는 0.
 pub(crate) const LIST_TOP_GAP: f32 = 4.0;
 const FACE: f32 = 20.0;
-/// 보드 방이 열려 있을 때의 갱신 간격(`refresh_due` 2.2초)보다 느슨하게 — 요약이라
-/// 몇 초 늦어도 뜻이 안 바뀌고, 사이드바가 열려 있는 내내 돈다.
+/// 요약이라 몇 초 늦어도 뜻이 안 바뀌고, 사이드바가 열려 있는 내내 돈다.
 const POLL: std::time::Duration = std::time::Duration::from_secs(3);
 
 type Rect = (f32, f32, f32, f32);
@@ -277,8 +276,6 @@ pub(crate) struct RowPaint<'a> {
     pub(crate) icon: &'static str,
     pub(crate) cur: bool,
     pub(crate) hover: bool,
-    /// 받는 곳이면 `Some(확신이 문턱 아래인가)`.
-    pub(crate) route: Option<bool>,
     pub(crate) busy: bool,
     /// 저쪽에서 닫힌 줄 — 전부 흐리게.
     pub(crate) muted: bool,
@@ -287,16 +284,12 @@ pub(crate) struct RowPaint<'a> {
 pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     let (rx, ry, rw, rh) = rect;
     let s = p.student;
-    if p.route.is_some() {
-        round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::with_alpha(theme::accent(), 36));
-    } else if p.cur {
+    if p.cur {
         round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_active());
     } else if p.hover {
         round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover());
     }
-    let band = if p.route.is_some() {
-        Some(theme::accent())
-    } else if s.turn == RowTurn::Yours && !p.muted {
+    let band = if s.turn == RowTurn::Yours && !p.muted {
         Some(theme::attention())
     } else {
         None
@@ -312,13 +305,7 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
         g.queue_icon(p.icon, fx + 4.0, fy + 4.0, 12.0, theme::text_dim());
     }
     let tx = fx + FACE + 8.0;
-    let mut right = rx + rw - 8.0;
-    if let Some(tentative) = p.route {
-        let tag = if tentative { "여기로?" } else { "여기로" };
-        let tw = g.measure_chrome_text(tag, 10.5, false);
-        right -= tw + 6.0;
-        g.draw_text(rx + rw - 8.0 - tw, ry + 6.5, tag, gpu::DrawOpts { font_size: 10.5, color: theme::accent(), bold: false, italic: false });
-    }
+    let right = rx + rw - 8.0;
     let ink = |color| if p.muted { theme::text_mute() } else { color };
     let name = crate::info::fit_text(g, &s.name, (right - tx).max(0.0), 12.0, false);
     g.draw_text(tx, ry + 5.0, &name, gpu::DrawOpts { font_size: 12.0, color: ink(theme::text()), bold: false, italic: false });
@@ -334,23 +321,6 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     };
     let line = crate::info::fit_text(g, &line, (rx + rw - 8.0 - tx).max(0.0), 10.5, false);
     g.draw_text(tx, ry + 22.0, &line, gpu::DrawOpts { font_size: 10.5, color: ink(s.turn.color()), bold: false, italic: false });
-}
-
-/// 격리 검증 앱의 받는 곳 — 나쵸 판 입력칸이 아직 판정에 안 이어진 동안 강조 모양을 잰다.
-/// `KASATERM_SIDEBAR_FIXTURE_ROUTE=이름`(끝에 `?` 면 확신 문턱 아래).
-pub(crate) fn fixture_route() -> Option<crate::native_board::route::RouteHighlight> {
-    if !cfg!(debug_assertions) || !crate::verification_run() {
-        return None;
-    }
-    let want = std::env::var("KASATERM_SIDEBAR_FIXTURE_ROUTE").ok()?;
-    let (name, tentative) = match want.strip_suffix('?') {
-        Some(name) => (name.to_string(), true),
-        None => (want, false),
-    };
-    Some(crate::native_board::route::RouteHighlight {
-        student: crate::native_board::route::StudentRef { name, local: true, ..Default::default() },
-        tentative,
-    })
 }
 
 pub(crate) fn fixture_on() -> bool {
@@ -427,17 +397,10 @@ impl App {
         let mailbox = self.pulse.mailbox.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            #[cfg(debug_assertions)]
-            let fixture = crate::native_board::pulse_fixture_digest();
-            #[cfg(not(debug_assertions))]
-            let fixture: Option<Result<PulseDigest, String>> = None;
-            let result = match fixture {
-                Some(digest) => digest.map(|digest| (SidebarLines::default(), digest)),
-                None => backend
-                    .collab_snapshot(&serde_json::json!({"scope": "all"}))
-                    .map_err(|e| e.to_string())
-                    .and_then(|value| Ok((parse_lines(&value), crate::native_board::pulse_digest(value)?))),
-            };
+            let result = backend
+                .collab_snapshot(&serde_json::json!({"scope": "all"}))
+                .map_err(|e| e.to_string())
+                .and_then(|value| Ok((parse_lines(&value), crate::board_digest::pulse_digest(value)?)));
             if let (true, Ok((_, digest)), Some(dir)) = (pet, result.as_ref(), crate::chrome::pet_model_dir()) {
                 write_pet_overlay(&dir, digest);
             }
@@ -540,7 +503,7 @@ impl App {
     /// 격리 앱에서 입구를 **진짜 클릭**(winit MouseInput 을 window_event 로)으로 눌러 본다 —
     /// 상태를 손으로 세우면 handler 의 클릭 순서에 가려지는 버그를 못 잡는다.
     /// 켜기: `KASATERM_PULSE_PROBE=1` + 검증 실행(`KASATERM_WINDOW_SIZE`). 결과는 `[pulse-probe]` 줄.
-    /// 배치도 → 목록 전환(설정 저장까지) → 트레이 보드 두 번 → 방 메뉴로 전환 줄 숨기기·보이기.
+    /// 배치도 → 목록 전환(설정 저장까지) → 방 메뉴로 전환 줄 숨기기·보이기.
     pub(crate) fn run_pending_pulse_probe(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::OnceLock;
@@ -575,23 +538,15 @@ impl App {
                 self.pulse.switch.map(|(list, _)| list)
             }
             2 => {
-                eprintln!("[pulse-probe] list_chosen={} board_closed={}", self.sidebar_list_body, !self.board_panel_open());
-                Some(self.board_btn_rect).filter(|r| r.2 > 0.0)
-            }
-            3 => {
-                eprintln!("[pulse-probe] tray_opens_board={}", self.board_panel_open());
-                Some(self.board_btn_rect).filter(|r| r.2 > 0.0)
-            }
-            4 => {
-                eprintln!("[pulse-probe] tray_returns={}", !self.board_panel_open());
+                eprintln!("[pulse-probe] list_chosen={}", self.sidebar_list_body);
                 button = MouseButton::Right;
                 room()
             }
-            5 => {
+            3 => {
                 eprintln!("[pulse-probe] room_menu_offers_toggle={}", toggle_item().is_some());
                 toggle_item()
             }
-            6 => {
+            4 => {
                 eprintln!(
                     "[pulse-probe] hidden={} head_top={} saved={:?}",
                     self.pulse.hidden,
@@ -601,8 +556,8 @@ impl App {
                 button = MouseButton::Right;
                 room()
             }
-            7 => toggle_item(),
-            8 => {
+            5 => toggle_item(),
+            6 => {
                 eprintln!("[pulse-probe] shown_again={} head_top={}", !self.pulse.hidden, self.sidebar_head_top());
                 STEP.store(10, Ordering::Relaxed);
                 return;

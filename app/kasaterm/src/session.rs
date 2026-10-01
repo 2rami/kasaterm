@@ -7440,7 +7440,6 @@ impl App {
         self.pty_layout = None;
         self.windows.clear();
         self.settings_scene.leave();
-        self.close_left_panel();
         // ── 저장된 배정 먼저 잡아 두기 ────────────────────────────────────
         // 복원은 leaf 를 하나씩 되살리는데, 저장된 학생을 **그 차례가 와야** 잡는다.
         // 그래서 앞 차례의 leaf 가 새로 배정받다가 뒤 leaf 의 학생을 집어가면, 뒤

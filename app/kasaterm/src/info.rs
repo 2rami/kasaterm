@@ -350,9 +350,9 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
                 snap.tasks.insert(
                     r.surface_id.clone(),
                     TaskLine {
-                        label: crate::native_board::status_label(&r),
-                        attention: crate::native_board::agent_needs_attention(&r),
-                        working: crate::native_board::agent_is_working(&r),
+                        label: status_label(&r),
+                        attention: agent_needs_attention(&r),
+                        working: agent_is_working(&r),
                     },
                 );
             }
@@ -1444,6 +1444,70 @@ fn dedup_ports(mut ports: Vec<(u16, u32)>) -> Vec<(u16, u32)> {
     ports.sort_unstable();
     ports.dedup();
     ports
+}
+
+pub(crate) fn status_label(row: &kasa_socket::backend::PaneActivity) -> String {
+    if row.reach == "stale" || row.status == "unknown" {
+        "미확인".to_string()
+    } else if agent_needs_attention(row) {
+        "확인 필요".to_string()
+    } else if row.status == "blocked" {
+        "막힘".to_string()
+    } else if row.status == "waiting" && row.attention_kind.as_deref()
+        .and_then(crate::agent_state::WaitKind::parse).is_none() {
+        "미확인".to_string()
+    } else if let Some(outcome) = &row.done_outcome {
+        if outcome == "succeeded" { "완료 보고".to_string() } else { "실패 보고".to_string() }
+    } else if row.status == "thinking" {
+        "생각 중".to_string()
+    } else if row.status == "compacting" {
+        "대화 정리 중".to_string()
+    } else if agent_is_working(row) {
+        if row.intent.is_empty() { "작업 중".to_string() } else { row.intent.clone() }
+    } else {
+        "대기 중".to_string()
+    }
+}
+
+pub(crate) fn agent_needs_attention(row: &kasa_socket::backend::PaneActivity) -> bool {
+    row.reach != "stale"
+        && matches!(row.status.as_str(), "waiting" | "attention" | "blocked")
+        && row.attention_kind.as_deref().and_then(crate::agent_state::WaitKind::parse)
+            .is_some_and(crate::agent_state::WaitKind::needs_you)
+}
+
+pub(crate) fn agent_is_working(row: &kasa_socket::backend::PaneActivity) -> bool {
+    matches!(
+        row.status.as_str(),
+        "working" | "building" | "compacting" | "thinking"
+    )
+}
+
+#[cfg(test)]
+mod pane_activity_tests {
+    use super::{agent_is_working, agent_needs_attention, status_label};
+    use kasa_socket::backend::PaneActivity;
+
+    #[test]
+    fn board_attention_requires_a_live_typed_request() {
+        let mut row = PaneActivity {
+            status: "waiting".into(), waiting_for: Some("Claude is waiting for your input".into()),
+            ..Default::default()
+        };
+        for kind in [None, Some("idle"), Some("unknown")] {
+            row.attention_kind = kind.map(str::to_string);
+            assert!(!agent_needs_attention(&row));
+            assert!(!agent_is_working(&row));
+        }
+        for kind in ["permission", "question"] {
+            row.attention_kind = Some(kind.into());
+            assert!(agent_needs_attention(&row));
+            row.reach = "stale".into();
+            assert!(!agent_needs_attention(&row));
+            assert_eq!(status_label(&row), "미확인");
+            row.reach.clear();
+        }
+    }
 }
 
 #[cfg(test)]

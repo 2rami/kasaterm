@@ -1,7 +1,7 @@
 //! PTY 없는 네이티브 내부 방의 공통 수명 규칙.
 //!
 //! 설정은 사용자 작업 방과 같은 `windows` 목록에 앉지만 셸, cwd, 복원
-//! 기록을 갖지 않는다. 보드도 방이었다가 왼쪽 판으로 옮겨 갔다(`left_panel.rs`).
+//! 기록을 갖지 않는다.
 //! 이 모듈은 내부 방의 marker와 변형 차단을 한 관문으로
 //! 묶어, 새 기능이 내부 화면을 터미널 pane으로 오인하지 않게 한다.
 
@@ -247,10 +247,6 @@ mod tests {
             let area = crate::native_settings::content_area((1000.0, height), 200.0, 30.0);
             assert_eq!(area.1 + area.3, height - 30.0);
         }
-        assert!(
-            include_str!("left_panel.rs").contains("- TITLE_HEIGHT - self.status_h()"),
-            "왼쪽 판(보드·아로나)도 상태줄 자리를 남겨야 한다"
-        );
     }
 
     #[test]

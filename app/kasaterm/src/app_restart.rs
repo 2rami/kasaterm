@@ -5,6 +5,7 @@
 //! 자기 사실로 판정한다(`kasa_socket::app_restart::{authorize_run, authorize_target}`).
 
 use super::*;
+use std::io::{Read, Write};
 use kasa_socket::app_restart::{ApprovalView, Authority, BinaryId, BusyPane, Facts, HelperSpec, JobRequest, PendingInstall, CAPABILITY, SCHEMA};
 
 fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
@@ -165,7 +166,7 @@ impl NachoAuthority {
 /// 나쵸 앱 창구의 승인 응답 — 200 이면 `approval`, 아니면 나쵸가 적은 `error` 낱말(already_used·scope_changed…).
 fn nacho_approval(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<ApprovalView, String> {
     let bytes = body.map(|b| b.to_string().into_bytes());
-    let (status, raw) = crate::nacho_tasks::app_request(method, path, bytes.as_deref())?;
+    let (status, raw) = app_request(method, path, bytes.as_deref())?;
     let value: serde_json::Value = serde_json::from_slice(&raw).unwrap_or_default();
     if status == 200 {
         return serde_json::from_value(value["approval"].clone()).map_err(|_| "나쵸 승인 응답을 읽지 못했다".to_string());
@@ -212,6 +213,51 @@ pub(crate) fn accept_restart(facts: &Facts, req: &JobRequest, proxy: &winit::eve
         proxy.send_event(UserEvent::RestartExit(req.job.job_id.clone())).map_err(|_| "app event loop is gone".to_string())?;
     }
     Ok(serde_json::json!({"ok": true, "job_id": req.job.job_id, "created": created}))
+}
+
+/// 나쵸 앱 창구 요청 한 번 — (상태 코드, 본문). 판정(409·410·503 의 뜻)은 부르는 쪽 몫이다.
+/// 키는 이 함수 안에서만 읽고 돌려주지 않는다.
+pub(crate) fn app_request(method: &str, path: &str, body: Option<&[u8]>) -> Result<(u16, Vec<u8>), String> {
+    let raw = app_exchange(method, path, body)?;
+    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("나쵸 응답이 잘렸어요")?;
+    let status = String::from_utf8_lossy(&raw[..head_end]).split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+    Ok((status, raw[head_end + 4..].to_vec()))
+}
+
+fn app_exchange(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    let (url, key) = kasa_mcp::nacho_app_target().map_err(|code| match code {
+        "nacho_key_missing" => "이 기기에는 나쵸 앱 키가 없어 나쵸에 묻지 않았어요".to_string(),
+        _ => "나쵸 자리 정보가 없어 나쵸에 묻지 않았어요".to_string(),
+    })?;
+    let mut headers = format!("X-Nacho-Token: {key}\r\nX-Kasa-Owner: 1\r\nX-Kasa-User: desktop\r\n");
+    if let Some(body) = body {
+        headers.push_str(&format!("Content-Type: application/json\r\nX-Journal-Request: 1\r\nContent-Length: {}\r\n", body.len()));
+    }
+    exchange(&url, method, path, &headers, body, "나쵸")
+}
+
+fn exchange(url: &str, method: &str, path: &str, headers: &str, body: Option<&[u8]>, who: &str) -> Result<Vec<u8>, String> {
+    let authority = url.strip_prefix("http://").ok_or(format!("{who} 주소가 평문 HTTP 가 아니라 묻지 않았어요"))?;
+    let authority = authority.split('/').next().unwrap_or("");
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(authority)
+        .ok()
+        .and_then(|mut a| a.next())
+        .ok_or(format!("{who} 주소를 해석하지 못했어요"))?;
+    let timeout = std::time::Duration::from_millis(1500);
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|_| format!("{who}에 연결하지 못했어요"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    // HTTP/1.0 으로 물어 청크 전송을 피한다 — 본문 끝은 연결이 닫히는 자리다.
+    let request = format!(
+        "{method} {path} HTTP/1.0\r\nHost: {authority}\r\n{headers}Accept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).map_err(|_| format!("{who}에 요청을 보내지 못했어요"))?;
+    if let Some(body) = body {
+        stream.write_all(body).map_err(|_| format!("{who}에 본문을 보내지 못했어요"))?;
+    }
+    let mut raw = Vec::new();
+    stream.take(2 * 1024 * 1024).read_to_end(&mut raw).map_err(|_| format!("{who} 응답이 끊겼어요"))?;
+    Ok(raw)
 }
 
 #[cfg(test)]

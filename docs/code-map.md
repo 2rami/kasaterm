@@ -26,15 +26,12 @@
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
-- `sidebar_pulse.rs` — 사이드바 맨 위 현황 줄(모든 기기 보드의 사람 차례·작업·끝, 누르면 보드). 수는 `native_board::pulse_counts`(보드 목록과 같은 판정, 원격 거울 줄 제외)를 백그라운드로 3초마다 읽는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
-- `left_panel.rs` — 사이드바 옆에서 밀려 나오는 판(보드·아로나 모드). 폭 배분의 넷째 기둥, 초점(키가 판으로 가나)·폭 끌기·×·밀려 나오기. 보드는 방이 아니라 여기 뜬다
-- `native_board.rs` — 운영 보드(wgpu). 첫 탭 「작업현황」(사람용, 에이전트용은 「관측」 탭 — docs/boards.md)은 자식 모듈 `native_board/work.rs`(B안: 답할 것 → 진행·검증·완료, 기기·학생, 상세의 출처·증거·연결). 오른쪽 열 「작업」 탭은 `native_board/side.rs`(정리: 지금 창의 현재 작업·변경·다음 일·막힘·검증 / 조율: 같은 할 일 목록을 좁게 / 권한 표)
-- `work_mode.rs` — 작업 모드(정리·조율)와 권한 표의 나쵸 클라이언트. 정본은 나쵸(`GET/POST /api/app/work-mode`·`GET /api/app/capabilities`, 나쵸 `desk-api.md`), 카사텀 설정의 `work_mode_cache` 는 마지막으로 확인한 값뿐. 쓰기는 탭을 누를 때만, 모드는 둘뿐. 나쵸 키 없는 기기는 사람이 고른 명부 기기(`nacho_read_via`)의 `/nacho/read/*` 로 읽기만 한다 — `docs/nacho-read-relay.md`
+- `board_digest.rs` — 모든 기기 보드 스냅샷(`collab.snapshot`)의 요약: 사람 차례·하는 중·끝 수와 사람을 기다리는 학생. 사이드바 학생 줄·펫 현황판이 쓴다. 보드 판은 걷었다(나쵸 대화·작업은 나쵸 독립 앱)
+- `sidebar_pulse.rs` — 사이드바 맨 위 「목록 | 배치도」 전환과 학생 줄 사정(모든 기기 보드의 사람 차례·작업·끝). 수는 `board_digest.rs`(원격 거울 줄 제외)를 백그라운드로 3초마다 읽고 펫 현황판에도 적는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
 - `update_notice.rs` — 새 판 알림: 업데이터(맥 preview Sparkle 확인·WinSparkle)가 찾은 판을 오른쪽 위 결정 알림으로 세우고, [업데이트]면 끊길 일을 한 번 묻고 설치를 맡긴다, [닫기]면 그 판을 기기 설정에 적는다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
-- `nacho_tasks.rs` — 나쵸 작업 장부의 타입 클라이언트(`/api/app/tasks`). 같은 id 는 큰 `rev` 하나, 끊기면 마지막 목록 유지, `done` 과 검증 통과를 가른다
 - `mirror_follow.rs` — 원본 격자는 마지막으로 만진 쪽을 따른다(tmux `window-size latest`). 사람 손(키·IME·왼클릭·SGR 누름·확대)이 닿은 칸을 판정해, 거울이면 `remote::touch_source` 로 원본을 그 칸 크기로 잡고 원본이면 `reclaim_viewer_sizes` 로 되찾는다. 만지기 전 거울은 `mirror_view` 가 뷰어 쪽에서 다시 접는다. 호스트가 `viewport_latest` 를 모르면(옛 판) 확대 때만 키우는 옛 규칙(`layout.rs fit_zoomed_mirror`)
 - `trust_prompt.rs` — claude 폴더 신뢰 화면 자동 통과. 화면 펌프(`pump_pty_screens`)가 후보 pane 을 적고 GUI 틱이 판정한다: claude pane·입력 조용·한글 조합 아님일 때만, 초점이 No 면 아래 화살표 한 번, Yes 면 Enter 한 번(같은 화면에 반복 없음). 신뢰 선탑재는 `kasa_socket::claude_trust`(claude shim 이 `kasaterm-cli claude-trust "$PWD"` 로 부름)
 - `own_room.rs` — 이 기기 방 지키기: 현지에 세울 칸(셸·학생·연결 칸)의 기준이 다른 기기 방의 보기 창이면 이 기기 방으로 옮기고(`own_spawn_host` — 섞이면 그 방이 통째로 「이 기기」 절로 넘어가 저쪽 학생이 이쪽 학생처럼 보인다), 자기 칸이 0 이 되면(닫기·이사·미러만 복원) 이 기기 셸 방을 하나 세운다(`keep_own_room`, 1초 틱)

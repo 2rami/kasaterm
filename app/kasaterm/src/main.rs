@@ -32,8 +32,7 @@ mod limit_reset;
 mod layout;
 mod lineedit;
 mod markdown;
-mod native_board;
-mod nacho_tasks;
+mod board_digest;
 mod transfer_endpoints;
 mod tell_delivery;
 mod trust_prompt;
@@ -86,7 +85,6 @@ mod lsp;
 mod machinescol;
 mod sidebar_navigation;
 mod sidebar_pulse;
-mod left_panel;
 mod mirror_theme;
 mod mirror_view;
 mod mirror_follow;
@@ -1612,7 +1610,6 @@ pub(crate) struct InlineWebHost {
     pub(crate) webview: wry::WebView,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) kind: InlineWebKind,
-    pub(crate) last_frame: Option<(i32, i32, u32, u32)>,
     pub(crate) visible: bool,
     pub(crate) restore_sidebar: bool,
 }
@@ -3979,9 +3976,6 @@ enum UserEvent {
     /// `(show, focus_pane)`: a reveal may also focus a specific pane so the
     /// classroom can jump the user to a character's seat.
     SocketRevealTerminal(bool, Option<String>),
-    /// Close the arona classroom window (`POST /arona-close` — the
-    /// ModePicker's "터미널로" choice). No-op when it isn't open.
-    SocketAronaClose,
     /// `surface.swap` delegated from the socket thread — exchange two leaves'
     /// tree positions (PTYs stay put, ids trade slots). `(a, b)`, both
     /// pre-validated to exist by the backend.
@@ -4314,9 +4308,6 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 설정 방의 폼 입력. 필드를 함께 실어야 조합 중 다른 칸을 눌렀을 때
     /// 마지막 음절이 새 칸이 아니라 떠나는 칸에 확정된다.
     Settings(SettingsInput),
-    /// PTY 없는 보드 방의 입력. 필드를 함께 실어 조합 중 탭 이동도 떠나는 칸에
-    /// 확정되게 한다.
-    Board(native_board::BoardInput),
     /// 대화로 보는 학생 pane 의 입력칸(바깥 pane id). 터미널 surface 가 아니라서 조합
     /// 글자가 터미널 커서에 겹쳐 그려지지 않는다.
     Chat(String),
@@ -4982,10 +4973,6 @@ struct App {
     /// flips the sidebar once at this instant so a screenshot can capture the
     /// collapsed-grid state without a human clicking the title-bar button.
     autotoggle_sidebar_at: Option<Instant>,
-    /// Headless arona-panel toggle deadline (KASATERM_AUTOARONA_MS).
-    autoarona_at: Option<Instant>,
-    /// Headless native board-room toggle deadline (KASATERM_AUTOBOARD_MS).
-    autoboard_at: Option<Instant>,
     /// Extra sidebar flips queued after the first (KASATERM_AUTOTOGGLE_SIDEBAR_N),
     /// 1.5s apart, to stress hide↔show reflow without a human.
     autotoggle_left: u32,
@@ -5692,8 +5679,6 @@ struct App {
     git_ignore_started: bool,
     /// PTY 없는 싱글턴 설정 방의 카테고리와 돌아갈 사용자 pane.
     settings_scene: settings_room::SettingsScene,
-    /// PTY 없는 싱글턴 운영 보드와 마지막 사용자 pane 기준.
-    board_scene: native_board::Scene,
     /// In-memory mirror of settings.json, edited live and written on each
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
@@ -5814,13 +5799,8 @@ struct App {
     settings_btn_rect: (f32, f32, f32, f32),
     /// 사이드바 트레이의 피드백 버튼 rect — 설정과 같은 짝.
     feedback_btn_rect: (f32, f32, f32, f32),
-    /// 사이드바 트레이의 보드·아로나 버튼 rect — 메뉴막대 밖의 입구.
-    board_btn_rect: (f32, f32, f32, f32),
-    arona_btn_rect: (f32, f32, f32, f32),
     /// 사이드바 맨 위 현황 줄(`sidebar_pulse.rs`).
     pulse: sidebar_pulse::Pulse,
-    /// 사이드바 옆에서 밀려 나오는 보드·아로나 판(`left_panel.rs`).
-    left_panel: left_panel::LeftPanel,
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -5908,13 +5888,9 @@ struct App {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     menu: Option<muda::Menu>,
     git_menu_item: Option<muda::MenuItem>,
-    arona_menu_item: Option<muda::MenuItem>,
     /// "세션 패널" menu item id, matched against MenuEvents to toggle the
     /// session panel.
     session_menu_item: Option<muda::MenuItem>,
-    /// "board 패널" menu item id, matched against MenuEvents to toggle the
-    /// collab board panel.
-    board_menu_item: Option<muda::MenuItem>,
     /// 편집 메뉴 복사/붙여넣기 — 네이티브 PredefinedMenuItem 은 Cmd+C/Cmd+V
     /// keyDown 을 가로채 터미널까지 안 내려보낸다(먹통). 커스텀 항목으로 만들어
     /// MenuEvent id 로 매칭, webview 우선 위임 후 폴백으로 직접 클립보드 처리.
@@ -6057,8 +6033,6 @@ impl App {
             autowindow_left: 0,
             autowindow_at: None,
             autotoggle_sidebar_at: None,
-            autoarona_at: None,
-            autoboard_at: None,
             autotoggle_left: 0,
             autotabs_n: 0,
             autotabs_at: None,
@@ -6303,7 +6277,6 @@ impl App {
             // 헤드리스 초기 열림은 KASATERM_AUTOSETTINGS(testkit)가 event_loop
             // 위에서 담당한다.
             settings_scene: settings_room::SettingsScene::default(),
-            board_scene: native_board::Scene::default(),
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_open_mode: socket::read_file_open_mode(),
             set_file_open_app: socket::read_file_open_app(),
@@ -6369,10 +6342,7 @@ impl App {
             feedback_delivery: feedback_delivery::State::default(),
             settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
             feedback_btn_rect: (0.0, 0.0, 0.0, 0.0),
-            board_btn_rect: (0.0, 0.0, 0.0, 0.0),
-            arona_btn_rect: (0.0, 0.0, 0.0, 0.0),
             pulse: sidebar_pulse::Pulse::from_settings(),
-            left_panel: left_panel::LeftPanel::new(ui.left_panel_w),
             last_blink_on: false,
             chrome_dirty: true,
             theme_fx: None,
@@ -6406,9 +6376,7 @@ impl App {
             version_anim_start: Instant::now(),
             menu: None,
             git_menu_item: None,
-            arona_menu_item: None,
             session_menu_item: None,
-            board_menu_item: None,
             copy_menu_item: None,
             paste_menu_item: None,
             update_menu_item: None,

@@ -233,7 +233,6 @@ impl App {
         let body_h = (win[1] - title - self.status_h()).max(0.0);
         let columns = [
             ("panel:sidebar", 0.0, self.tab_strip_w()),
-            ("panel:left", self.tab_strip_w(), self.left_panel_col_w()),
             ("panel:files", self.file_tree_col_x(), self.file_tree_col_w()),
             ("panel:right", self.git_col_x(), self.git_col_w()),
         ];

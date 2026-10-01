@@ -21,8 +21,6 @@ pub(crate) struct NavigationState {
     pub(crate) list_rooms: RoomViews,
     /// 보드가 본 학생 줄 사정(마지막 보고 등). 현황 틱이 채운다.
     pub(crate) lines: crate::sidebar_pulse::SidebarLines,
-    /// 나쵸 판 입력칸이 가리키는 받는 곳. 렌더가 프레임마다 채운다.
-    pub(crate) route: Option<crate::native_board::route::RouteHighlight>,
     /// 펼친 「창 밖 셸」 줄 — 기기 라벨, 이 기기는 빈 문자열.
     web_open: std::collections::HashSet<String>,
     /// 방 카드 우클릭 메뉴. 본기기 방 메뉴와 같은 항목(본문 보기·이름·닫기).
@@ -64,17 +62,6 @@ impl FromIterator<String> for RoomViews {
     fn from_iter<I: IntoIterator<Item = String>>(keys: I) -> Self {
         Self { chosen: keys.into_iter().map(|key| (key, true)).collect(), default_list: false }
     }
-}
-
-/// 받는 곳 강조가 이 줄인가 — 주소가 맞으면 그것, 옛 판 기계라 주소가 어긋나면 이름으로.
-/// `Some(확신이 문턱 아래인가)`.
-pub(crate) fn route_mark(route: Option<&crate::native_board::route::RouteHighlight>, local: bool, machine_label: &str, surface_id: &str, name: &str) -> Option<bool> {
-    let route = route?;
-    let s = &route.student;
-    let by_address = !s.surface_id.is_empty() && s.surface_id == surface_id
-        && (if local { s.local } else { !s.local && s.machine_label == machine_label });
-    let by_name = !name.is_empty() && s.name == name && s.local == local;
-    (by_address || by_name).then_some(route.tentative)
 }
 
 /// 문턱을 넘어야 끌기가 되어 방을 여는 클릭과 pane 이동을 구분한다.
@@ -480,7 +467,6 @@ fn draw_list_row(
     room: &str,
     deck: &[&state::MachinesColRow],
     student: &crate::sidebar_pulse::RowStudent,
-    route: Option<&crate::native_board::route::RouteHighlight>,
     cur: bool,
     row: Rect,
     cursor: (f32, f32),
@@ -495,7 +481,6 @@ fn draw_list_row(
         icon: "terminal",
         cur,
         hover,
-        route: route_mark(route, false, &machine.label, &head.remote_id, &student.who),
         busy: student.turn == crate::sidebar_pulse::RowTurn::Working,
         muted: head.closed,
     });
@@ -553,7 +538,6 @@ struct RowsCtx<'a> {
     collapsed: &'a std::collections::HashSet<String>,
     listed: &'a RoomViews,
     lines: &'a crate::sidebar_pulse::SidebarLines,
-    route: Option<&'a crate::native_board::route::RouteHighlight>,
     /// 지금 끌고 있는 칸의 원격 pane id.
     drag: Option<&'a str>,
     viewing: Option<&'a (String, Vec<String>)>,
@@ -677,7 +661,7 @@ fn draw_rows(
                 let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::sidebar_pulse::LIST_ROW_H,
                     tab_w - 16.0, crate::sidebar_pulse::LIST_ROW_H);
                 let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
-                draw_list_row(g, hits, machine, room, deck, student, ctx.route, cur, row, cursor, view);
+                draw_list_row(g, hits, machine, room, deck, student, cur, row, cursor, view);
             }
         } else if !collapsed {
             let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
@@ -720,13 +704,12 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, shared_scroll, room_numbers, device_views, web_open, lines, route, .. } = nav;
+        local_content_h, shared_scroll, room_numbers, device_views, web_open, lines, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
         listed: list_rooms,
         lines,
-        route: route.as_ref(),
         drag: cell_drag.as_ref().filter(|d| d.active).map(|d| d.pane.as_str()),
         viewing: viewing.as_ref(),
         viewing_cur: viewing_cur.as_deref(),

@@ -1265,13 +1265,6 @@ pub trait Backend: Send + Sync {
     fn reveal_terminal(&self, _show: bool, _focus_pane: Option<&str>) -> Result<()> {
         anyhow::bail!("reveal_terminal not supported")
     }
-    /// Close the arona classroom window (no-op when it isn't open) and bring
-    /// the main terminal back. The ModePicker's "터미널로" choice calls this —
-    /// the web page can't close its own host window. Default unsupported.
-    fn close_arona(&self) -> Result<()> {
-        anyhow::bail!("close_arona not supported")
-    }
-
     /// 지금 화면에 쓰이는 디자인 토큰(색 팔레트·실루엣). 설정 화면의 웹뷰 판이
     /// 이걸 CSS 변수로 심어 네이티브와 같은 색으로 그린다.
     ///
