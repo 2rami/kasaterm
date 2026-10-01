@@ -22,3 +22,12 @@ class AppRelease {
 
   Future<bool> open() => launchUrl(install, mode: LaunchMode.externalApplication);
 }
+
+/// 관문이 판이 바뀌는 순간 답하는 길의 한 번 답. [waits] 가 없으면 옛 관문이라 붙들지 않고 곧바로 답했다.
+class ReleaseWatch {
+  const ReleaseWatch(this.release, {required this.waits});
+
+  /// 올라온 판이 없으면 null.
+  final AppRelease? release;
+  final bool waits;
+}

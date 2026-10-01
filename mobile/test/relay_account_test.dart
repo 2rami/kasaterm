@@ -157,6 +157,28 @@ void main() {
     expect(await Server(Uri.parse('https://gateway.invalid/u/x/')).latestRelease(), isNull);
   });
 
+  test('새 판 지켜보기는 가진 빌드를 들고 관문에 붙들어 달라고 하고, 붙들어 주는 관문인지 읽는다', () async {
+    final seen = <Uri>[];
+    final s = Server.account(
+      session(),
+      client: MockClient((req) async {
+        seen.add(req.url);
+        return http.Response('{"ok":true,"release":null,"waits":true}', 200);
+      }),
+    );
+    final w = await s.watchRelease(have: '2610011039', hold: const Duration(seconds: 40));
+    expect(seen.single.toString(), 'https://gateway.invalid/relay/install/latest?have=2610011039&wait=40');
+    expect((w?.release, w?.waits), (null, true));
+    s.close();
+
+    final old = Server.account(
+      session(),
+      client: MockClient((_) async => http.Response('{"ok":true,"release":null}', 200)),
+    );
+    expect((await old.watchRelease(have: ''))?.waits, isFalse);
+    old.close();
+  });
+
   test(
     'Bearer is origin-bound, redirects disabled, WS token is never a URL',
     () async {

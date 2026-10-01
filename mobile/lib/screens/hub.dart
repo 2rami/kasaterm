@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../app_release.dart';
 import '../hub_model.dart';
 import '../hub_prefs.dart';
 import '../look.dart';
@@ -35,6 +36,9 @@ class HubScreen extends StatefulWidget {
   /// 보기 설정 저장소. 없으면(테스트) 고른 것이 이 화면에서만 산다.
   final HubPrefs? prefs;
 
+  /// 새 판을 묻지 못했거나(끊김·관리자 아님) 붙들어 주지 않는 옛 관문이면 이만큼 쉬고 다시 묻는다.
+  static const releaseRetry = Duration(seconds: 30);
+
   @override
   State<HubScreen> createState() => _HubScreenState();
 }
@@ -47,25 +51,43 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _model.start();
-    _watchReleases();
+    unawaited(_watchReleases());
   }
 
   /// 이 실행에서 이미 알린 빌드 — 앱으로 돌아올 때마다 같은 판을 또 알리지 않는다.
   String? _offered;
 
-  /// 켤 때·돌아올 때만 물으면 켜 둔 채 쓰는 동안 올라온 판을 모른다 — 앞에 있는 동안 30초마다 묻는다(판 정보 한 줄이라 가볍다).
-  static const _releaseEvery = Duration(seconds: 30);
-  Timer? _releaseTimer;
+  // 앞에 있는 동안 관문의 「판이 바뀌면 곧바로 답하는」 길에 늘 하나 매달려 있다 — 쓰는 중에 올라온 판도 그 순간 알린다.
+  /// 지금 도는 지켜보기의 번호 — 뒤로 가면 올려 앞 것을 멈춘다.
+  int _releaseRun = 0;
+  Timer? _releaseNap;
 
-  void _watchReleases() {
-    _releaseTimer?.cancel();
-    _releaseTimer = Timer.periodic(_releaseEvery, (_) => unawaited(_offerRelease()));
-    unawaited(_offerRelease());
+  Future<void> _watchReleases() async {
+    final run = ++_releaseRun;
+    String? seen;
+    while (mounted && run == _releaseRun) {
+      final w = await widget.server.watchRelease(have: seen);
+      if (!mounted || run != _releaseRun) return;
+      if (w != null) {
+        seen = w.release?.build ?? '';
+        final r = w.release;
+        if (r != null) _offerRelease(r);
+      }
+      if (w == null || !w.waits) {
+        final nap = Completer<void>();
+        _releaseNap = Timer(HubScreen.releaseRetry, nap.complete);
+        await nap.future;
+      }
+    }
   }
 
-  Future<void> _offerRelease() async {
-    final r = await widget.server.latestRelease();
-    if (r == null || !r.newer || r.build == _offered || !mounted) return;
+  void _stopWatchingReleases() {
+    _releaseRun++;
+    _releaseNap?.cancel();
+  }
+
+  void _offerRelease(AppRelease r) {
+    if (!r.newer || r.build == _offered) return;
     _offered = r.build;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text('새 판 ${r.version} (${r.build})이 있어요'),
@@ -77,7 +99,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _releaseTimer?.cancel();
+    _stopWatchingReleases();
     _model.dispose();
     super.dispose();
   }
@@ -87,12 +109,12 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         _model.start();
-        _watchReleases();
+        unawaited(_watchReleases());
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
         _model.stop();
-        _releaseTimer?.cancel();
+        _stopWatchingReleases();
       case AppLifecycleState.inactive:
         break;
     }

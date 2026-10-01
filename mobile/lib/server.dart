@@ -869,23 +869,32 @@ class Server {
   }
 
   /// 관문에 올라온 Ad Hoc 판. 관문은 관리자 계정에게만 준다 — 옛 주소 연결·다른 계정·옛 관문·끊김이면 null.
-  Future<AppRelease?> latestRelease() async {
+  Future<AppRelease?> latestRelease() async => (await watchRelease())?.release;
+
+  /// [have] 를 주면 관문이 그 빌드와 다른 판이 올라올 때까지 최대 [hold] 붙들었다 올라오는 즉시 답한다.
+  /// 묻지 못했으면(옛 주소 연결·다른 계정·끊김) null.
+  Future<ReleaseWatch?> watchRelease({String? have, Duration hold = const Duration(seconds: 40)}) async {
     final a = account;
     if (a == null) return null;
+    final path = have == null ? '/relay/install/latest' : '/relay/install/latest?have=${Uri.encodeQueryComponent(have)}&wait=${hold.inSeconds}';
     try {
       final res = await _client
-          .get(a.origin.resolve('/relay/install/latest'))
-          .timeout(const Duration(seconds: 10));
+          .get(a.origin.resolve(path))
+          .timeout(const Duration(seconds: 10) + (have == null ? Duration.zero : hold));
       if (res.statusCode != 200) return null;
-      final r = (jsonDecode(res.body) as Map)['release'];
-      if (r is! Map) return null;
-      final (version, build) = (r['version'], r['build']);
-      final install = Uri.tryParse('${r['install']}');
-      if (version is! String || build is! String || install?.scheme != 'itms-services') return null;
-      return AppRelease(version, build, install!);
+      final body = jsonDecode(res.body) as Map;
+      return ReleaseWatch(_release(body['release']), waits: body['waits'] == true);
     } catch (_) {
       return null;
     }
+  }
+
+  static AppRelease? _release(Object? r) {
+    if (r is! Map) return null;
+    final (version, build) = (r['version'], r['build']);
+    final install = Uri.tryParse('${r['install']}');
+    if (version is! String || build is! String || install?.scheme != 'itms-services') return null;
+    return AppRelease(version, build, install!);
   }
 
   /// 애플에서 받은 푸시 토큰을 맡긴다 — 서버가 학생 대기·끝냄·쪽지 때 이 폰으로 쏜다.

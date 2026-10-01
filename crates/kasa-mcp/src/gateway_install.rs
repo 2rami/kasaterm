@@ -5,7 +5,8 @@
 //! - itms-services 는 인증 헤더도 쿠키도 못 싣는다. 그래서 판마다 새로 뽑는 token 이 곧 자격이다. 받아 가도
 //!   서명에 등록된 기기에만 깔리고, 든 것은 공개 레포의 앱뿐이다.
 //! - `latest` 는 관리자 계정의 기기 토큰으로만 준다 — 폰 앱이 「새 판」을 알리는 데 쓴다. 등록되지 않은
-//!   기기의 사용자에게 못 까는 판을 알리지 않는다.
+//!   기기의 사용자에게 못 까는 판을 알리지 않는다. `?have=<빌드>&wait=<초>` 면 그 빌드와 다른 판이 올라올
+//!   때까지 붙들고 있다가 올라오는 즉시 답한다 — 폰이 쓰는 중에도 새 판을 곧바로 알린다.
 //! - 등록 안 된 기기는 같은 페이지에서 스스로 등록한다(`gateway_install/enroll.rs`). 서명기가 없는 관문은 그
 //!   단계를 감춘다.
 
@@ -230,12 +231,35 @@ async fn ipa(State(gate): State<Gate>, AxPath(token): AxPath<String>) -> axum::r
         .into_response()
 }
 
-async fn latest(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+#[derive(Deserialize)]
+struct LatestQuery {
+    have: Option<String>,
+    #[serde(default)]
+    wait: u64,
+}
+
+/// 붙들고 있는 상한. 공용 주소 앞의 터널이 100초에 끊으므로 그보다 넉넉히 짧게.
+const LATEST_WAIT_MAX: u64 = 50;
+
+async fn latest(
+    State(gate): State<Gate>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<LatestQuery>,
+) -> axum::response::Response {
     let Some((_, device)) = gate.device_of(&headers) else {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     if !gate.is_admin(&device.account) {
         return json_err(StatusCode::FORBIDDEN, "forbidden");
+    }
+    if let Some(have) = q.have.as_deref() {
+        // 올리는 쪽은 ssh 로 파일만 쓰고 관문에 알리지 않는다 — 1초마다 `latest` 를 다시 읽는다(작은 파일 하나).
+        let until = tokio::time::Instant::now() + Duration::from_secs(q.wait.min(LATEST_WAIT_MAX));
+        while gate.current_release().map(|(_, m)| m.build).unwrap_or_default() == have
+            && tokio::time::Instant::now() < until
+        {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
     let release = gate.current_release().zip(gate.public_origin(&headers)).map(|((token, meta), origin)| {
         let (page, install) = links(&origin, &token);
@@ -244,7 +268,8 @@ async fn latest(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axu
             "uploaded": meta.uploaded, "page": page, "install": install,
         })
     });
-    axum::Json(serde_json::json!({ "ok": true, "release": release })).into_response()
+    // `waits` 가 없는 옛 관문은 have·wait 를 모른 채 곧바로 답한다 — 폰은 그때 천천히 다시 묻는다.
+    axum::Json(serde_json::json!({ "ok": true, "release": release, "waits": true })).into_response()
 }
 
 /// 관리 화면(`/relay/admin`)의 「설치 링크 · 기기」 칸. 기기 수는 서명기가 등록·재서명 때마다 적는 `devices.json` 을 읽는다

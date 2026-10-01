@@ -120,6 +120,40 @@ async fn latest_is_for_admin_devices_only() {
     assert!(now["release"]["install"].as_str().unwrap().starts_with("itms-services://?action=download-manifest&url=https%3A%2F%2F"));
 }
 
+#[tokio::test]
+async fn latest_answers_the_moment_a_different_build_lands() {
+    let dir = std::env::temp_dir().join(format!("kasa-install-{}", uuid::Uuid::new_v4()));
+    let addr = serve(gate_in(&dir, "boss")).await;
+    let boss = login(addr, "boss").await;
+    put_release(&dir, TOKEN, "2610011200");
+    let ask = |query: &'static str| {
+        let req = reqwest::Client::new().get(format!("http://{addr}/relay/install/latest{query}")).bearer_auth(&boss);
+        async move { req.send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+
+    // Already different from what the phone has: no waiting.
+    let started = std::time::Instant::now();
+    let now = ask("?have=2610010900&wait=30").await;
+    assert_eq!((now["release"]["build"].as_str(), now["waits"].as_bool()), (Some("2610011200"), Some(true)));
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    // Same build: held until the upload swaps `latest`, then answered right away.
+    let held = tokio::spawn(ask("?have=2610011200&wait=30"));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!held.is_finished());
+    let started = std::time::Instant::now();
+    put_release(&dir, "Hq3vX9kLm2Pw8RtY4nBc7HdF", "2610011300");
+    let moved = held.await.unwrap();
+    assert_eq!(moved["release"]["build"], "2610011300");
+    assert!(started.elapsed() < Duration::from_secs(3));
+
+    // Nothing new: the hold ends at `wait` with the same build.
+    let started = std::time::Instant::now();
+    let same = ask("?have=2610011300&wait=2").await;
+    assert_eq!(same["release"]["build"], "2610011300");
+    assert!(started.elapsed() >= Duration::from_secs(2));
+}
+
 #[test]
 fn reads_device_attributes_out_of_the_signed_envelope() {
     let mut body = vec![0x30, 0x80, 0x06, 0x09, 0xff, 0x00];
