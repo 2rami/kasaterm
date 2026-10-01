@@ -1,7 +1,7 @@
 """다기기 빠른 패치 릴리스 — 범위를 계획 하나에 고정하고, 나쵸 승인 한 번으로 단계를 끝까지 추적한다.
 
 정본 흐름은 그대로다: 버전 커밋·태그 push → `.github/workflows/release.yml`(msi·dmg 빌드, 릴리스 첨부, appcast
-서명·커밋). 기기 쪽은 이미 있는 업데이터가 받는다 — macOS Sparkle, Windows WinSparkle, iOS 는 TestFlight.
+서명·커밋). 기기 쪽은 이미 있는 업데이터가 받는다 — macOS Sparkle, Windows WinSparkle, iOS 는 설치 링크(adhoc.sh).
 
 - plan    커밋·다음 패치 버전·포함 변경·플랫폼/채널·기기 범위·기준 피드 해시·서명 관문을 한 파일에 고정한다.
           `--json` 의 `approval_scope` 를 나쵸가 그대로 승인 요청으로 만든다.
@@ -77,7 +77,7 @@ def remote_versions(repo, remote="origin"):
 
 
 def classify(paths):
-    """바뀐 파일 → 어느 배포가 필요한가. 네이티브는 앱 업데이트, 폰은 TestFlight 판, 문서·인프라는 기기에 안 간다."""
+    """바뀐 파일 → 어느 배포가 필요한가. 네이티브는 앱 업데이트, 폰은 설치 링크 판, 문서·인프라는 기기에 안 간다."""
     kinds = {"native": [], "mobile": [], "feed": [], "docs": [], "infra": []}
     for p in paths:
         if re.match(r"docs/appcast[^/]*\.xml$", p):
@@ -127,10 +127,10 @@ def capabilities(repo):
             "apply": "MSI 설치본만 — 토스트 [설치]·판 번호 줄을 눌렀을 때 MSI 실행",
         },
         "ios": {
-            "path": "testflight" if text("mobile/tool/testflight.sh") else None,
-            "channels": ["testflight-internal", "testflight-external(베타 심사)", "app-store(심사)"],
+            "path": "adhoc" if text("mobile/tool/adhoc.sh") else None,
+            "channels": ["adhoc-install-link"],
             "hotpatch": False,
-            "apply": "TestFlight 앱에서 사람이 업데이트 — 바이너리 핫패치·심사 우회 없음. 이 도구의 단계 밖",
+            "apply": "mobile/tool/adhoc.sh 로 설치 링크 새 판, 사람이 링크에서 설치 — 바이너리 핫패치 없음. 이 도구의 단계 밖",
         },
     }
 
@@ -300,7 +300,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=None,
     platforms = (["macos", "windows"] if kinds["native"] else []) + (["ios"] if kinds["mobile"] else [])
     desktop = (["macos"] if kinds["native"] else []) if channel == "preview" else [p for p in platforms if p != "ios"]
     if not desktop:
-        blocks.append("데스크톱에 게시할 변경이 없다 — iOS 는 TestFlight 경로로 따로 간다")
+        blocks.append("데스크톱에 게시할 변경이 없다 — iOS 는 설치 링크(mobile/tool/adhoc.sh)로 따로 간다")
 
     installed = identity_of(runner, installed_app, tools) if Path(installed_app).exists() else None
     signing = {"release": caps["macos"]["ci_identity"], "installed": installed, "installed_app": str(installed_app),
@@ -336,7 +336,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=None,
         "schema": SCHEMA, "commit": commit, "branch": branch, "remote": remote,
         "version": version_text(want), "tag": f"v{version_text(want)}", "channel": channel,
         "platforms": desktop,
-        # TestFlight 는 같은 빌드 번호를 두 번 받지 않는다 — testflight.sh 와 같은 yymmddHHMM 이라 단조롭다.
+        # 앱은 빌드 번호로 새 판을 가린다 — adhoc.sh 와 같은 yymmddHHMM 이라 단조롭다.
         "ios_build": (ios_build or time.strftime("%y%m%d%H%M")) if "ios" in platforms and channel == "stable" else None,
         "devices": sorted(d["label"] for d in in_scope),
         "device_ids": sorted(d["machine_id"] for d in in_scope),
@@ -624,7 +624,7 @@ def describe(plan, state=None):
              f"  기준 {plan['base']['tag'] or '없음'} · 피드 mac {plan['feed']['version'] or '미확인'} / win {plan['feed']['windows_version'] or '미확인'}"
              f" · 기준 해시 {(plan['feed_base'] or '없음')[:19]} · 커밋 {len(plan['changes']['commits'])}개",
              "  게시: " + (", ".join(plan["platforms"]) or "데스크톱 변경 없음")
-             + (f" · iOS 는 TestFlight 판({plan['ios_build']})이 따로 필요" if plan["ios_build"] else "")]
+             + (f" · iOS 는 설치 링크 판({plan['ios_build']}, mobile/tool/adhoc.sh)이 따로 필요" if plan["ios_build"] else "")]
     for e in plan["errors"]:
         lines.append(f"  막힘: {e}")
     for b in plan["live_blocks"]:

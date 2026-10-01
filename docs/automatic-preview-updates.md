@@ -77,4 +77,4 @@ preview 업데이터를 시작한 프로세스에서는 Sparkle이 설치를 전
 - preview는 Mac DMG 하나, GitHub prerelease, `latest=false`, `appcast-preview.xml`만 사용한다. 안정판 피드·Windows 피드·일반 latest는 바꾸지 않는다.
 - 기존 나쵸 단발 승인 방식은 그대로다. 자동 publisher는 별도 정책 허가이며 두 허가를 같은 작업에서 섞지 않는다.
 - 버전·태그·파일 해시·서명·공증 검사를 낮추지 않는다. main이 움직이면 재계획하거나 검증한 피드 커밋을 비교 후 다시 제출한다. 강제 push는 하지 않는다.
-- 모바일 바이너리는 이 Mac 경로의 대상이 아니다. 모바일 업데이트는 TestFlight/App Store의 정상 배포 경로를 사용한다.
+- 모바일 바이너리는 이 Mac 경로의 대상이 아니다. 폰 앱은 설치 링크 판(`mobile/tool/adhoc.sh`, [절차](ios-adhoc-install.md))으로 따로 올린다. TestFlight는 2026-10-01부터 쓰지 않는다.

@@ -400,7 +400,7 @@ class PlanTests(Fixture):
         plan = self.plan(tools={**self.tools, "git-lfs": {"path": None, "why": "git-lfs 을 찾지 못했다"}})
         self.assertIn("git-lfs 가 없다", " ".join(plan["errors"]))
 
-    def test_mobile_changes_ask_for_a_testflight_build_outside_the_desktop_stages(self):
+    def test_mobile_changes_ask_for_an_install_link_build_outside_the_desktop_stages(self):
         (self.work / "mobile/lib").mkdir(parents=True)
         (self.work / "mobile/lib/a.dart").write_text("//\n")
         self.commit("feat: 폰")

@@ -62,6 +62,7 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - `idle`과 침묵은 완료가 아니다. done 보고와 결과 확인 후 맡겼던 창을 정리한다.
 - 본인 작업이 끝나면 `kasaterm-cli done succeeded '완료·미확인·남은 것'`으로 한 번 보고한다. 실패는 `failed`, 막힘·승인 필요는 `blocked`·`needs_approval`. 부른 창에는 done이 전하니 완료를 tell로 따로 알리지 않는다.
 - 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../../docs/automatic-preview-updates.md)).
+- 폰 앱(`mobile/`) 수정은 main 푸시 후 `mobile/tool/adhoc.sh`로 설치 링크 새 판을 올린다. TestFlight는 쓰지 않는다([절차](../../../docs/ios-adhoc-install.md)).
 - 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. sleep을 반복하지 않고, 계속 지켜볼 일은 변경분·진행·실패·끊김만 받는다.
 
 ## 오케스트레이터가 띄운 일

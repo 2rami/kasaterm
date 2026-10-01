@@ -28,7 +28,9 @@ UI는 Pretendard 400/600(OFL)을 사용하고 터미널은 TermMono/TermHangul/T
 없는 그림은 중립 아이콘으로 표시한다. 새 애니메이션을 제공하는 것은 아니다.
 
 iOS 빌드 전에 `tool/kasanet.sh` 가 카사넷 정적 라이브러리(`ios/KasaNet/KasaNet.xcframework`, 커밋하지 않음)를 굽는다 —
-`sim.sh`·`phone.sh`·`testflight.sh` 는 먼저 부른다. 손으로 `flutter build ios` 할 때도 먼저 부른다.
+`sim.sh`·`phone.sh`·`adhoc.sh` 는 먼저 부른다. 손으로 `flutter build ios` 할 때도 먼저 부른다.
+
+폰·아이패드 배포는 설치 링크 `tool/adhoc.sh`([절차](../docs/ios-adhoc-install.md))다. `testflight.sh` 는 2026-10-01부터 쓰지 않는다.
 
 시뮬레이터 검증은 `flutter build ios --simulator --debug`를 사용한다. `--no-codesign`은
 Keychain 접근이 거부될 수 있어 로그인 저장소 검증용으로 쓰지 않는다.

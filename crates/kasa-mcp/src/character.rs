@@ -22,7 +22,7 @@ pub(crate) fn read_setting_str(key: &str) -> Option<String> {
     read_setting_value(key)?.as_str().map(String::from)
 }
 
-/// 폰 앱을 내려받는 주소(TestFlight 공개 링크 같은 것). 하단바 「기기」 QR 이 여는
+/// 폰 앱을 내려받는 주소(설치 링크 `…/relay/install/<token>/` 같은 것). 하단바 「기기」 QR 이 여는
 /// 안내 페이지가 「설치」 단추에 단다. 없으면 페이지가 케이블 설치 안내로 대신한다 —
 /// 무료 Apple ID 로는 공중 설치 경로가 없어서다. env 가 설정을 이긴다(헤드리스 검증).
 pub fn app_install_url() -> Option<String> {

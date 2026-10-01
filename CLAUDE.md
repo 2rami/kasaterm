@@ -40,6 +40,10 @@ claude 가 전부 죽는다(2026-08-15 에 pane 9개가 날아갔다). 거둘 �
 앱을 직접 종료·재실행하지 않는다. 선택된 Mac은 preview 새 판을 알림으로 띄우고, 사람이 [업데이트]를 눌렀을 때만 받아서 설치·재실행한다.
 절차·최초 설정·중단 범위는 [`docs/automatic-preview-updates.md`](docs/automatic-preview-updates.md).
 
+폰 앱(`mobile/`)이 바뀌면 main 푸시 뒤 `mobile/tool/adhoc.sh`로 설치 링크 새 판을 올린다(자체 배포).
+TestFlight는 쓰지 않는다 — 2026-10-01 개인 팀 TestFlight 설치가 애플 쪽에서 막혀 바꿨다. 남의 미커밋 변경이 굽히지
+않게 origin/main 깨끗한 worktree에서 굽고, 판 번호·링크를 보고한다. 절차는 [`docs/ios-adhoc-install.md`](docs/ios-adhoc-install.md).
+
 `bash scripts/build-app.sh`의 `dist/kasaterm.app`은 로컬 검증·최초 설치용이다. 로컬 빌드만으로 다른 기기에 배포됐다고 보고하지 않는다.
 
 ⚠️ 다른 pane 이 Rust 를 고치는 중이면 스크립트가 거부한다. 기다렸다 다시 불러라.
