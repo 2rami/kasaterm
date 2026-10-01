@@ -31,6 +31,8 @@ use tokio::sync::mpsc;
 
 #[path = "gateway_admin.rs"]
 mod admin;
+#[path = "gateway_install.rs"]
+mod install;
 #[path = "gateway_oauth.rs"]
 mod oauth;
 #[path = "gateway_workspace.rs"]
@@ -226,6 +228,9 @@ pub struct Gate {
     account_sync: Arc<crate::account_sync::server::Store>,
     /// 계정별 개인비서(키·작업·대화). 상태 폴더가 없으면 `None` — 메모리에만 키를 두지 않는다.
     workspace: Option<Arc<workspace::Service>>,
+    /// Ad Hoc 설치 판(`gateway_install.rs`). 상태 폴더가 없으면 창구도 없다.
+    install_dir: Option<PathBuf>,
+    enroll: Arc<install::Enroll>,
     auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
     state_write: Arc<Mutex<()>>,
@@ -320,6 +325,8 @@ impl Gate {
                 state_path.as_ref().map(|p| p.with_file_name("account-sync")),
             )),
             workspace: workspace::Service::open(state_path.as_deref()),
+            install_dir: state_path.as_ref().map(|p| p.with_file_name("relay-install")),
+            enroll: Arc::new(install::Enroll::from_env()),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
             state_write: Arc::new(Mutex::new(())),
@@ -458,6 +465,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(oauth::routes())
         .merge(admin::routes())
         .merge(workspace::routes())
+        .merge(install::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))

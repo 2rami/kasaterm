@@ -105,6 +105,48 @@ void main() {
     );
   }
 
+  test('관문의 Ad Hoc 판은 기기 토큰으로만 묻고 설치 주소는 itms-services 만 받는다', () async {
+    final seen = <Uri>[];
+    final s = Server.account(
+      session(),
+      client: MockClient((req) async {
+        seen.add(req.url);
+        expect(req.headers['authorization'], 'Bearer test-device-token');
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'release': {
+              'version': '1.0.0',
+              'build': '2610011039',
+              'install': 'itms-services://?action=download-manifest&url=https%3A%2F%2Fgateway.invalid%2Fm',
+            },
+          }),
+          200,
+        );
+      }),
+    );
+    final r = await s.latestRelease();
+    expect(seen.single.toString(), 'https://gateway.invalid/relay/install/latest');
+    expect(r?.build, '2610011039');
+    // 시험 판은 KASA_BUILD 가 없다 — 개발 설치처럼 새 판을 알리지 않는다.
+    expect(r?.newer, isFalse);
+    s.close();
+
+    final odd = Server.account(
+      session(),
+      client: MockClient((_) async => http.Response(
+        '{"ok":true,"release":{"version":"1","build":"2","install":"https://other.invalid/x"}}',
+        200,
+      )),
+    );
+    expect(await odd.latestRelease(), isNull);
+    odd.close();
+    final denied = Server.account(session(), client: MockClient((_) async => http.Response('{}', 403)));
+    expect(await denied.latestRelease(), isNull);
+    denied.close();
+    expect(await Server(Uri.parse('https://gateway.invalid/u/x/')).latestRelease(), isNull);
+  });
+
   test(
     'Bearer is origin-bound, redirects disabled, WS token is never a URL',
     () async {

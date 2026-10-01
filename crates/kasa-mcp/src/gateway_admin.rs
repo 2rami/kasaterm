@@ -115,6 +115,11 @@ impl Admins {
 }
 
 impl Gate {
+    /// 지금 관리자로 지정된 계정인가 — 기기 토큰으로 들어온 요청용(`gateway_install.rs`).
+    pub(super) fn is_admin(&self, account: &str) -> bool {
+        self.admins.accounts.contains(account)
+    }
+
     /// 관리 화면을 봐도 되는 계정 — 표가 살아 있고, 지금도 지정돼 있고, 막히지 않았다.
     fn admin_of(&self, headers: &axum::http::HeaderMap) -> Option<String> {
         let token = Admins::token(headers)?;
@@ -323,7 +328,7 @@ fn esc(value: &str) -> String {
 }
 
 /// 관문은 미니(한국 시각)에서 돌지만 시간대 표 없이 UTC+9 로 적는다.
-fn kst(ts: u64) -> String {
+pub(super) fn kst(ts: u64) -> String {
     if ts == 0 {
         return "—".into();
     }
@@ -457,7 +462,7 @@ async fn home(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum:
         return json_err(StatusCode::NOT_FOUND, "not_found");
     }
     match gate.admin_of(&headers) {
-        Some(admin) => html_page(StatusCode::OK, &dashboard(&admin, &rows(&gate))),
+        Some(admin) => html_page(StatusCode::OK, &(dashboard(&admin, &rows(&gate)) + &install::admin_section(&gate))),
         None => html_page(StatusCode::OK, &login_page(&gate)),
     }
 }

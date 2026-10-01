@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../app_release.dart';
 import '../main.dart' show designTokens;
 import '../server.dart';
 import 'browser_device.dart';
@@ -32,6 +35,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, Object?>? _appearance;
   bool _loading = true;
   String? _pending;
+  late final Future<AppRelease?> _release = server.latestRelease();
 
   @override
   void initState() {
@@ -152,6 +156,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onTap: () => _forget(context),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: Look.groupGap),
+          Card(
+            child: FutureBuilder<AppRelease?>(
+              future: _release,
+              builder: (context, snap) {
+                final r = snap.data;
+                final fresh = r != null && r.newer;
+                return ListTile(
+                  leading: Icon(fresh ? Icons.system_update_outlined : Icons.info_outline),
+                  title: Text(kasaBuild.isEmpty ? '앱 판 · 개발 설치' : '앱 판 · 빌드 $kasaBuild'),
+                  subtitle: fresh ? Text('새 판 ${r.version} (${r.build}) — 눌러서 설치') : null,
+                  trailing: fresh ? const Icon(Icons.chevron_right) : null,
+                  onTap: fresh ? () => unawaited(r.open()) : null,
+                );
+              },
             ),
           ),
           const SizedBox(height: Look.groupGap),

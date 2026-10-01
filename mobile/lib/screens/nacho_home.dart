@@ -52,6 +52,21 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_desk.start());
+    unawaited(_offerRelease());
+  }
+
+  /// 이 실행에서 이미 알린 빌드 — 앱으로 돌아올 때마다 같은 판을 또 알리지 않는다.
+  String? _offered;
+
+  Future<void> _offerRelease() async {
+    final r = await widget.server.latestRelease();
+    if (r == null || !r.newer || r.build == _offered || !mounted) return;
+    _offered = r.build;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('새 판 ${r.version} (${r.build})이 있어요'),
+      duration: const Duration(seconds: 10),
+      action: SnackBarAction(label: '설치', onPressed: () => unawaited(r.open())),
+    ));
   }
 
   @override
@@ -67,6 +82,7 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(_desk.start());
+        unawaited(_offerRelease());
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:

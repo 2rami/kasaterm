@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show Listenable;
 import 'package:http/http.dart' as http;
 
+import 'app_release.dart';
 import 'kasanet.dart';
 import 'kasanet_native.dart';
 import 'relay_account.dart';
@@ -864,6 +865,26 @@ class Server {
       // Server errors can include local paths/tunnel credentials: show a safe
       // actionable message rather than reflecting arbitrary response text.
       throw const ServerException('사진을 붙이지 못했어요. 연결과 학생 입력창을 확인해 주세요.');
+    }
+  }
+
+  /// 관문에 올라온 Ad Hoc 판. 관문은 관리자 계정에게만 준다 — 옛 주소 연결·다른 계정·옛 관문·끊김이면 null.
+  Future<AppRelease?> latestRelease() async {
+    final a = account;
+    if (a == null) return null;
+    try {
+      final res = await _client
+          .get(a.origin.resolve('/relay/install/latest'))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final r = (jsonDecode(res.body) as Map)['release'];
+      if (r is! Map) return null;
+      final (version, build) = (r['version'], r['build']);
+      final install = Uri.tryParse('${r['install']}');
+      if (version is! String || build is! String || install?.scheme != 'itms-services') return null;
+      return AppRelease(version, build, install!);
+    } catch (_) {
+      return null;
     }
   }
 

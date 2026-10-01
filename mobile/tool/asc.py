@@ -16,6 +16,8 @@ ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH. 키·토큰은 출력하지 않는다
   asc.py submit-review <build id>     베타 앱 심사 제출(공개 링크 테스터에게 풀리려면 필요)
   asc.py dist-cert <csr> <cer 경로>   Apple Distribution 인증서 발급 → DER 로 저장, id 출력
   asc.py store-profile <bundle id> <이름> <cert id> <저장 경로>  App Store 프로파일 발급 → 저장, UUID 출력
+  asc.py devices                      등록된 기기(Ad Hoc 설치가 되는 기기)
+  asc.py device <udid> <이름>         기기 등록(이미 있으면 그대로) — Ad Hoc 판은 등록 뒤 새로 서명해야 깔린다
 """
 import json, os, sys, time, urllib.request, urllib.error
 from pathlib import Path
@@ -168,8 +170,23 @@ def cmd_store_profile(ident, name, cert, out):
     print(a["uuid"])
 
 
+def cmd_devices():
+    r = call("GET", "/devices", params={"limit": 200})
+    for d in r.get("data", []):
+        a = d["attributes"]
+        print(d["id"], a["udid"], a["deviceClass"], a["status"], a["name"])
+
+
+def cmd_device(udid, name):
+    r = call("GET", "/devices", params={"filter[udid]": udid})
+    if r.get("data"):
+        print(r["data"][0]["id"]); return
+    r = call("POST", "/devices", {"data": {"type": "devices", "attributes": {"name": name, "udid": udid, "platform": "IOS"}}})
+    print(r["data"]["id"])
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if not a:
         sys.exit(__doc__)
-    {"team": cmd_team, "bundle-id": cmd_bundle_id, "app": cmd_app, "builds": cmd_builds, "wait-build": cmd_wait_build, "public-link": cmd_public_link, "add-build": cmd_add_build, "internal-group": cmd_internal_group, "beta-info": cmd_beta_info, "submit-review": cmd_submit_review, "dist-cert": cmd_dist_cert, "store-profile": cmd_store_profile}[a[0]](*a[1:])
+    {"team": cmd_team, "bundle-id": cmd_bundle_id, "app": cmd_app, "builds": cmd_builds, "wait-build": cmd_wait_build, "public-link": cmd_public_link, "add-build": cmd_add_build, "internal-group": cmd_internal_group, "beta-info": cmd_beta_info, "submit-review": cmd_submit_review, "dist-cert": cmd_dist_cert, "store-profile": cmd_store_profile, "devices": cmd_devices, "device": cmd_device}[a[0]](*a[1:])
