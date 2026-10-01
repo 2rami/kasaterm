@@ -475,6 +475,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
         onConnected: _connection.connectLegacy,
         onLogin: _connection.login,
         message: _connection.message,
+        relay: (origin) => _connection.relay(origin, null),
+        installId: _connection.installId,
+        onSession: _connection.adopt,
       );
     }
     if (server == null) return AccountWaitingScreen(connection: _connection);
@@ -500,7 +503,7 @@ class AccountWaitingScreen extends StatelessWidget {
           padding: const EdgeInsets.all(24),
           children: [
             Text(
-              '${connection.account!.account} 계정',
+              '${connection.account!.label} 계정',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 12),
@@ -513,6 +516,14 @@ class AccountWaitingScreen extends StatelessWidget {
             const Text(
               '데스크톱 카사텀을 켜고 같은 계정으로 로그인해 주세요. 이미 켜져 있다면 최신 버전인지 확인해 주세요.',
             ),
+            // Google·GitHub 로 처음 들어오면 관문이 새 계정을 만든다 — 쓰던 데스크톱 계정과 다르다는 것을 여기서 알린다.
+            if (connection.account!.account.startsWith('oauth_') &&
+                !connection.devices.any((d) => d['kind'] != 'phone')) ...[
+              const SizedBox(height: 12),
+              const Text(
+                '이 계정에는 아직 데스크톱이 없어요. 쓰던 데스크톱 계정이 있다면 로그아웃한 뒤 아이디로 로그인하고, 설정에서 Google·GitHub 을 연결해 주세요.',
+              ),
+            ],
             for (final device in connection.devices.where(
               (d) => d['kind'] != 'phone',
             ))

@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../server.dart';
 import '../relay_account.dart';
 import '../look.dart';
 import 'controls.dart';
+import 'oauth_sheet.dart';
 
 class ConnectScreen extends StatefulWidget {
   const ConnectScreen({
@@ -11,12 +14,20 @@ class ConnectScreen extends StatefulWidget {
     required this.onConnected,
     required this.onLogin,
     this.message,
+    this.relay,
+    this.installId,
+    this.onSession,
   });
 
   final Future<void> Function(Server server) onConnected;
   final Future<void> Function(Uri origin, String account, String password)
   onLogin;
   final String? message;
+
+  /// Google·GitHub 로그인 — 셋이 다 있어야 단추가 선다(`ConnectionController.relay`·`installId`·`adopt`).
+  final RelayAccountApi Function(Uri origin)? relay;
+  final Future<String> Function()? installId;
+  final Future<void> Function(AccountSession session)? onSession;
 
   @override
   State<ConnectScreen> createState() => _ConnectScreenState();
@@ -29,6 +40,54 @@ class _ConnectScreenState extends State<ConnectScreen> {
   final _gateway = TextEditingController(text: defaultGateway);
   String? _error;
   bool _busy = false;
+  OAuthProviders _providers = const OAuthProviders([]);
+  Uri? _providersFor;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadProviders());
+  }
+
+  /// 서버 주소를 바꾸면 그 서버가 켜 둔 것으로 다시 묻는다.
+  Future<void> _loadProviders() async {
+    final origin = parseGateway(_gateway.text);
+    final relay = widget.relay;
+    if (relay == null || widget.onSession == null || widget.installId == null || origin == null) return;
+    if (origin == _providersFor) return;
+    _providersFor = origin;
+    final api = relay(origin);
+    try {
+      final providers = await api.oauthProviders();
+      if (mounted && _providersFor == origin) setState(() => _providers = providers);
+    } finally {
+      api.close();
+    }
+  }
+
+  Future<void> _oauth(OAuthProvider provider) async {
+    final origin = parseGateway(_gateway.text);
+    if (_busy || origin == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final api = widget.relay!(origin);
+    try {
+      final id = await widget.installId!();
+      if (!mounted) return;
+      final result = await showOAuthSheet(context, api: api, provider: provider, machineId: id);
+      final session = result?.session;
+      if (session != null) await widget.onSession!(session);
+    } on AccountException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } catch (_) {
+      if (mounted) setState(() => _error = '이 폰의 고유 id 를 저장하지 못했어요. 다시 시도해 주세요.');
+    } finally {
+      api.close();
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 
   @override
   void dispose() {
@@ -167,6 +226,28 @@ class _ConnectScreenState extends State<ConnectScreen> {
                           )
                         : const Text('로그인'),
                   ),
+                  for (final provider in _providers.enabled) ...[
+                    const SizedBox(height: 8),
+                    OutlinedButton(
+                      key: Key('oauth-${provider.id}'),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(Look.tap, Look.buttonH),
+                      ),
+                      onPressed: _busy ? null : () => _oauth(provider),
+                      child: Text('${provider.label} 로그인'),
+                    ),
+                  ],
+                  if (_providers.enabled.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _providers.signup
+                          ? '처음 쓰는 Google·GitHub 은 새 계정이 돼요. 데스크톱과 같은 계정을 쓰려면 아이디로 로그인한 뒤 설정에서 연결해 주세요.'
+                          : '데스크톱 설정 → 계정에서 연결해 둔 Google·GitHub 으로 들어가요.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   ExpansionTile(
                     title: const Text('고급 설정'),
@@ -180,6 +261,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         style: const TextStyle(fontSize: 16),
                         autocorrect: false,
                         keyboardType: TextInputType.url,
+                        onSubmitted: (_) => unawaited(_loadProviders()),
                         decoration: const InputDecoration(),
                         ),
                       ),

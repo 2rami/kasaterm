@@ -28,6 +28,7 @@ class AccountSession {
     required this.account,
     required this.deviceId,
     required this.token,
+    this.displayName,
   }) {
     if (parseGateway(origin.toString()) == null ||
         account.isEmpty ||
@@ -41,6 +42,10 @@ class AccountSession {
   final String account;
   final String deviceId;
   final String token;
+
+  /// Google·GitHub 로 가입한 계정은 이름이 `oauth_<hex>` 라 사람에게는 이 값(메일·로그인 이름)을 보인다.
+  final String? displayName;
+  String get label => displayName?.isNotEmpty == true ? displayName! : account;
   Uri get root => origin.resolve('/relay/account/');
   List<String> get protocols => ['kasa-relay-account', 'kasa-auth.$token'];
 
@@ -50,6 +55,7 @@ class AccountSession {
     'account': account,
     'device_id': deviceId,
     'token': token,
+    'display_name': ?displayName,
   };
 
   factory AccountSession.fromJson(Map<String, dynamic> json) => AccountSession(
@@ -57,13 +63,17 @@ class AccountSession {
     account: json['account'] as String,
     deviceId: json['device_id'] as String,
     token: json['token'] as String,
+    displayName: json['display_name'] as String?,
   );
 }
 
 class AccountException implements Exception {
-  const AccountException(this.message, {this.status});
+  const AccountException(this.message, {this.status, this.code});
   final String message;
   final int? status;
+
+  /// 관문이 실어 보낸 `error` 값(`account_not_linked` 등). 없으면 null.
+  final String? code;
   @override
   String toString() => message;
 }
@@ -75,6 +85,74 @@ String accountError(int status) => switch (status) {
   503 => '계정은 로그인되어 있어요. 연결할 데스크톱을 기다리고 있어요.',
   _ => '서버가 요청을 처리하지 못했어요 ($status).',
 };
+
+/// Google·GitHub 로그인의 관문 오류 — 데스크톱 `native_device_account.rs` 의 `safe_error` 와 같은 뜻으로 말한다.
+String oauthError(String? code, int status) => switch (code) {
+  'setup_required' || 'oauth_unavailable' => '이 서버는 Google·GitHub 로그인을 아직 켜지 않았어요.',
+  'account_not_linked' => '이 로그인이 연결된 KASA 계정이 없어요. 기존 계정으로 로그인한 뒤 설정에서 연결해 주세요.',
+  'already_linked' => '이미 다른 KASA 계정에 연결된 로그인이에요. 계정은 자동으로 합치지 않아요.',
+  'expired' || 'account_changed' || 'link_expired' => '로그인 요청이 만료되었거나 계정이 바뀌었어요. 다시 시작해 주세요.',
+  'account_disabled' => '막힌 계정이에요. 관리자에게 물어봐 주세요.',
+  'rate_limited' => accountError(429),
+  'device_mismatch' => '이 폰의 로그인과 요청이 맞지 않아요. 로그아웃 뒤 다시 로그인해 주세요.',
+  _ => status == 401 ? '저장된 로그인이 만료되었어요. 다시 로그인해 주세요.' : '로그인을 마치지 못했어요. 연결 상태를 확인하고 다시 시도해 주세요.',
+};
+
+enum OAuthProvider {
+  google('google', 'Google'),
+  github('github', 'GitHub');
+
+  const OAuthProvider(this.id, this.label);
+  final String id;
+  final String label;
+}
+
+/// 관문의 Google·GitHub 로그인 요청 하나. `poll_token` 은 이 요청의 결과를 받는 자격이라 메모리에만 둔다.
+class OAuthFlow {
+  const OAuthFlow({
+    required this.provider,
+    required this.machineId,
+    required this.requestId,
+    required this.pollToken,
+    required this.userCode,
+    required this.authorization,
+    required this.expires,
+  });
+
+  final OAuthProvider provider;
+  final String machineId;
+  final String requestId;
+  final String pollToken;
+
+  /// 브라우저 확인 화면에 사람이 넣는 코드. 이 앱에만 보인다 — 링크만 가로챈 사람은 못 넘긴다.
+  final String userCode;
+  final Uri authorization;
+  final DateTime expires;
+
+  Map<String, String> get _poll => {
+    'request_id': requestId,
+    'poll_token': pollToken,
+    'provider': provider.id,
+    'kind': 'phone',
+    'machine_id': machineId,
+  };
+}
+
+/// 기다리는 중이면 둘 다 null, 로그인이면 [session], 연결이면 [linked].
+class OAuthResult {
+  const OAuthResult({this.session, this.linked = false});
+  final AccountSession? session;
+  final bool linked;
+  bool get pending => session == null && !linked;
+}
+
+class OAuthProviders {
+  const OAuthProviders(this.enabled, {this.signup = false});
+  final List<OAuthProvider> enabled;
+
+  /// 처음 보는 Google·GitHub 신원으로 새 계정을 만드는 서버인가.
+  final bool signup;
+}
 
 class AccountSyncSnapshot {
   const AccountSyncSnapshot(this.revision, this.settings);
@@ -178,7 +256,8 @@ class RelayAccountApi {
 
   Future<Map<String, dynamic>> _request(
     String path, {
-    Map<String, String>? body,
+    Map<String, Object?>? body,
+    String Function(String? code, int status)? error,
   }) async {
     try {
       final uri = origin.resolve('/relay/$path');
@@ -192,9 +271,15 @@ class RelayAccountApi {
                     ))
               .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) {
+        String? code;
+        try {
+          final e = (jsonDecode(utf8.decode(response.bodyBytes)) as Map)['error'];
+          if (e is String && RegExp(r'^[a-z_]{1,40}$').hasMatch(e)) code = e;
+        } catch (_) {}
         throw AccountException(
-          accountError(response.statusCode),
+          (error ?? (_, status) => accountError(status))(code, response.statusCode),
           status: response.statusCode,
+          code: code,
         );
       }
       final json = jsonDecode(utf8.decode(response.bodyBytes));
@@ -228,6 +313,87 @@ class RelayAccountApi {
       );
     } catch (_) {
       throw const AccountException('로그인 응답을 확인하지 못했어요.');
+    }
+  }
+
+  /// 관문이 켜 둔 Google·GitHub 로그인. 옛 관문·끊김이면 빈 목록.
+  Future<OAuthProviders> oauthProviders() async {
+    try {
+      final json = await _request('oauth/providers');
+      final enabled = {
+        for (final p in json['providers'] as List? ?? const [])
+          if (p is Map && p['enabled'] == true) p['id'],
+      };
+      return OAuthProviders(
+        [for (final p in OAuthProvider.values) if (enabled.contains(p.id)) p],
+        signup: json['signup_enabled'] == true,
+      );
+    } on AccountException {
+      return const OAuthProviders([]);
+    }
+  }
+
+  /// [link] 면 지금 로그인한 계정에 이 로그인 방법을 더한다(기기 토큰이 실려야 한다), 아니면 그 신원으로 로그인.
+  Future<OAuthFlow> oauthStart(OAuthProvider provider, String machineId, {bool link = false}) async {
+    final json = await _request(
+      'oauth/start',
+      body: {
+        'provider': provider.id,
+        'kind': 'phone',
+        'label': '카사모바일',
+        'machine_id': machineId,
+        'link': link,
+      },
+      error: oauthError,
+    );
+    final url = Uri.tryParse('${json['authorization_url']}');
+    final (id, poll, code, ttl) = (json['request_id'], json['poll_token'], json['user_code'], json['expires_in']);
+    // 확인 화면은 관문 자신의 주소여야 한다 — 다른 곳으로 보내는 응답은 따르지 않는다.
+    if (url == null || !sameOrigin(url, origin) || id is! String || poll is! String || code is! String || ttl is! int) {
+      throw const AccountException('로그인 요청 응답을 확인하지 못했어요.');
+    }
+    return OAuthFlow(
+      provider: provider,
+      machineId: machineId,
+      requestId: id,
+      pollToken: poll,
+      userCode: code,
+      authorization: url,
+      expires: DateTime.now().add(Duration(seconds: ttl)),
+    );
+  }
+
+  Future<OAuthResult> oauthPoll(OAuthFlow flow) async {
+    final json = await _request('oauth/poll', body: flow._poll, error: oauthError);
+    switch (json['status']) {
+      case 'linked':
+        return const OAuthResult(linked: true);
+      case 'complete':
+        try {
+          return OAuthResult(
+            session: AccountSession(
+              origin: origin,
+              account: json['account'] as String,
+              deviceId: json['device_id'] as String,
+              token: json['token'] as String,
+              displayName: json['display_name'] as String?,
+            ),
+          );
+        } on AccountException {
+          rethrow;
+        } catch (_) {
+          throw const AccountException('로그인 응답을 확인하지 못했어요.');
+        }
+      default:
+        return const OAuthResult();
+    }
+  }
+
+  Future<void> oauthCancel(OAuthFlow flow) async {
+    try {
+      await _request('oauth/cancel', body: flow._poll);
+    } on AccountException {
+      // 이미 끝났거나 만료된 요청 — 관문에서도 10분이면 사라진다.
     }
   }
 

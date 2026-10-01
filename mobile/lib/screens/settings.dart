@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../app_release.dart';
+import '../connection_store.dart';
 import '../main.dart' show designTokens;
+import '../relay_account.dart';
 import '../server.dart';
 import 'browser_device.dart';
 import 'dev_server.dart';
@@ -13,16 +15,21 @@ import '../weather/store.dart';
 import '../look.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
+import 'oauth_sheet.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.server,
     required this.onChangeAddress,
+    this.installId,
   });
 
   final Server server;
   final Future<void> Function() onChangeAddress;
+
+  /// 검사용 — 이 설치의 고정 id 를 키체인 대신 준다.
+  final Future<String> Function()? installId;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -36,6 +43,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loading = true;
   String? _pending;
   late final Future<AppRelease?> _release = server.latestRelease();
+  late final Future<OAuthProviders> _providers = _loadProviders();
+
+  Future<OAuthProviders> _loadProviders() async {
+    final api = _relay();
+    if (api == null) return const OAuthProviders([]);
+    try {
+      return await api.oauthProviders();
+    } finally {
+      api.close();
+    }
+  }
+  bool _linking = false;
+
+  RelayAccountApi? _relay() {
+    final session = server.account;
+    return session == null ? null : RelayAccountApi(session.origin, session: session);
+  }
+
+  /// 지금 계정에 Google·GitHub 로그인을 더한다 — 다음부터 그 단추로 이 계정에 들어온다.
+  Future<void> _link(OAuthProvider provider) async {
+    final api = _relay();
+    if (api == null || _linking) return;
+    setState(() => _linking = true);
+    try {
+      final id = await (widget.installId ?? const ConnectionStore().installId)();
+      if (!mounted) return;
+      final r = await showOAuthSheet(context, api: api, provider: provider, machineId: id, link: true);
+      if (r?.linked == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('이 계정에 ${provider.label} 로그인을 연결했어요.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('연결을 시작하지 못했어요. 다시 시도해 주세요.')),
+        );
+      }
+    } finally {
+      api.close();
+      if (mounted) setState(() => _linking = false);
+    }
+  }
 
   @override
   void initState() {
@@ -123,7 +173,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 ListTile(
                   leading: const Icon(Icons.link),
-                  title: Text(server.account?.account ?? '연결된 주소'),
+                  title: Text(server.account?.label ?? '연결된 주소'),
                   subtitle: Text(server.describe()),
                 ),
                 const Divider(height: 1),
@@ -157,6 +207,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
+          ),
+          FutureBuilder<OAuthProviders>(
+            future: _providers,
+            builder: (context, snap) {
+              final providers = snap.data?.enabled ?? const <OAuthProvider>[];
+              if (server.account == null || providers.isEmpty) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.only(top: Look.groupGap),
+                child: Card(
+                  child: Column(
+                    children: [
+                      for (final (i, p) in providers.indexed) ...[
+                        if (i > 0) const Divider(height: 1),
+                        ListTile(
+                          key: Key('link-${p.id}'),
+                          leading: const Icon(Icons.login),
+                          title: Text('${p.label} 연결'),
+                          subtitle: Text('다음부터 ${p.label} 로그인으로 이 계정에 들어와요'),
+                          trailing: const Icon(Icons.chevron_right),
+                          enabled: !_linking,
+                          onTap: () => unawaited(_link(p)),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
           const SizedBox(height: Look.groupGap),
           Card(

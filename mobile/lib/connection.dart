@@ -92,12 +92,28 @@ class ConnectionController extends ChangeNotifier {
   }
 
   Future<void> login(Uri origin, String name, String password) async {
+    final api = _relay(origin, null);
+    try {
+      await _signIn(() => api.login(name, password));
+    } finally {
+      api.close();
+    }
+  }
+
+  /// Google·GitHub 로그인이 받아 온 세션으로 들어간다(`screens/oauth_sheet.dart`).
+  Future<void> adopt(AccountSession session) => _signIn(() async => session);
+
+  /// 이 설치의 고정 id(`ConnectionStore.installId`).
+  Future<String> installId() => _store.installId();
+
+  RelayAccountApi relay(Uri origin, AccountSession? session) => _relay(origin, session);
+
+  Future<void> _signIn(Future<AccountSession> Function() obtain) async {
     final generation = _reset();
     phase = ConnectionPhase.checking;
     _notify();
-    final api = _relay(origin, null);
     try {
-      final session = await api.login(name, password);
+      final session = await obtain();
       if (!_current(generation)) return;
       await _save(SavedConnection(account: session), generation);
       if (!_current(generation)) return;
@@ -115,8 +131,6 @@ class ConnectionController extends ChangeNotifier {
       message = '로그인을 안전하게 저장하지 못했어요. 다시 시도해 주세요.';
       _notify();
       throw AccountException(message!);
-    } finally {
-      api.close();
     }
   }
 

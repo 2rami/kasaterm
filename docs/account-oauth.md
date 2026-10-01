@@ -54,7 +54,9 @@ OAuth sign-up records the provider, sign-up time and a display name in the ident
 - `POST /relay/oauth/poll` and `/relay/oauth/cancel` accept `request_id`, `poll_token`, `provider`, `kind`, and `machine_id`. Poll returns `pending`, `linked`, or `complete`; only `complete` carries the KASA device credential.
 - Desktop `relay.account` operations are `oauth_providers`, `oauth_start`, `oauth_poll`, and `oauth_cancel`. The start operation keeps the poll capability in process memory and exposes only `authorization_url`, `flow_id` and `user_code`. Poll/cancel require that same `flow_id`.
 
-The server API supports a stable phone installation ID, but this change only wires desktop UI. Mobile provider buttons and physical-device validation remain separate work. A cold relay restart cancels pending browser attempts; durable identity links survive.
+- The phone app (`mobile/lib/screens/oauth_sheet.dart`) uses the same flow with `kind: "phone"`. Its `machine_id` is a random 32-hex installation ID kept in the Keychain (`ConnectionStore.installId`); it survives logout so a later link request matches that phone's login. The login screen shows a button for each enabled provider and warns when sign-up is open that a first-time identity becomes a new account. Settings offers **Google 연결**/**GitHub 연결** for the logged-in account. The sheet copies the user code to the clipboard, opens the confirmation page in Safari (not an in-app view), polls every two seconds and immediately on return to the app, and cancels the request when dismissed. The start response is rejected unless the confirmation URL has the relay's own origin.
+
+A cold relay restart cancels pending browser attempts; durable identity links survive.
 
 ## Verification
 
