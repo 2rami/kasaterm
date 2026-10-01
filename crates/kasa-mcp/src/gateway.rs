@@ -1295,8 +1295,10 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
     let candidates = candidates_of(&uplinks);
     let requested_machine = machine_route(&rest).map(|(machine, _)| machine);
     let route = pick_route(&candidates, requested_machine);
+    // 이름 route 의 Fallback 은 계정 허브의 로컬 프록시로 간다 — 허브는 자기 명부 기계만 찾으니 남의 계정
+    // 기계에는 안 닿는다. 남의 계정 기계는 `~id` 라 위에서 이미 Missing 이다.
     if access.is_some() && (route == RoutePick::Missing
-        || requested_machine.is_some() && matches!(route, RoutePick::Fallback(_))) {
+        || needs_nacho && requested_machine.is_some() && matches!(route, RoutePick::Fallback(_))) {
         return json_err(StatusCode::SERVICE_UNAVAILABLE,
             if needs_nacho { "nacho_hub_unavailable" } else { "account_device_unavailable" });
     }
@@ -2014,6 +2016,46 @@ mod tests {
         let closed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.expect("revoked socket remained open");
         assert!(matches!(closed, Some(Ok(TM::Close(_))) | None));
         assert_eq!(get_json(addr, "/relay/account/term/me", token).await.0, 401);
+    }
+
+    /// 계정에 안 붙은 기계(허브 명부의 ssh 기계)는 `/machines` 에 이름 route 로 실려 폰 목록에 뜬다.
+    /// 그 화면 소켓을 503 으로 막으면 폰은 「다시 연결 중…」만 돈다 — 허브의 로컬 프록시로 넘긴다.
+    #[tokio::test]
+    async fn account_phone_reaches_hub_roster_machine_by_name() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let dir = std::env::temp_dir().join(format!("kasa-account-roster-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let (_, desktop) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","machine_id":"account-mac-a"
+        })).await;
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","kind":"phone"
+        })).await;
+        let token = phone["token"].as_str().unwrap();
+        let mut hello = desktop_hello("account-mac-a", desktop["token"].as_str().unwrap());
+        hello["slugs"] = serde_json::json!([SLUG]);
+        hello["owner_slug"] = SLUG.into();
+        let fake = fake_uplink_at(addr, hello, |id, open, out| {
+            if open["ws"] == true {
+                let _ = out.send(encode(HEAD, id, br#"{"status":101}"#));
+                let _ = out.send(encode(WS_TEXT, id, b"ready"));
+            }
+        }).await;
+        let mut request = format!("ws://{addr}/relay/account/m/%EB%A7%A5%EB%AF%B8%EB%8B%88/term/ws?pane=%253&grid=1")
+            .into_client_request().unwrap();
+        request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL,
+            format!("kasa-relay-account, kasa-auth.{token}").parse().unwrap());
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await.expect("roster machine socket refused");
+        assert_eq!(ws.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
+        {
+            let opens = fake.opens.lock().unwrap();
+            let (_, open) = opens.last().unwrap();
+            assert_eq!(open["slug"], SLUG);
+            assert_eq!(open["path"], "/m/%EB%A7%A5%EB%AF%B8%EB%8B%88/term/ws?pane=%253&grid=1");
+        }
+        let count = fake.opens.lock().unwrap().len();
+        assert_eq!(get_json(addr, "/relay/account/m/~another-account-machine/term/me", token).await.0, 503);
+        assert_eq!(fake.opens.lock().unwrap().len(), count);
     }
 
     #[tokio::test]

@@ -46,7 +46,8 @@ SSH 별칭은 실행 없이 단순 `Host`·`HostName`·`User`·`Port`를 해석�
 - 확인: `GET /relay/whoami`, `GET /relay/devices`.
 - 앱 API 루트: `/relay/account/`. HTTP는 Bearer, WebSocket은 `kasa-relay-account`와 `kasa-auth.<device-token>` subprotocol을 사용한다. 토큰을 URL·쿼리·화면·로그에 넣지 않는다.
 - 새 데스크톱 업링크는 공개가 켜진 자기 owner 주소를 `owner_slug`로 알린다. 관문은 같은 계정의 기기만 골라 내부 owner 경로로 연결하고 해당 주소나 인증 헤더를 폰/다른 기기로 노출하지 않는다.
-- 다른 계정 기계 이름을 요청해도 로컬 프록시로 대신 보내지 않는다. 연결 가능한 자기 기기가 없으면 `503 account_device_unavailable`다. 계정 로그인 성공과 기기 온라인 상태는 별개다.
+- 계정에 없는 기계 id(`m/~<id>/`)는 로컬 프록시로 대신 보내지 않고 `503 account_device_unavailable`이다. 연결 가능한 자기 기기가 없을 때도 같다. 계정 로그인 성공과 기기 온라인 상태는 별개다.
+- 이름 route(`m/<이름>/`)가 계정 기기와 맞지 않으면 계정 허브의 로컬 프록시로 넘긴다. 허브 명부(ssh·announce)의 기계는 계정에 로그인하지 않아도 `/machines`에 이름 route로 실리기 때문이다. 허브는 자기 명부만 찾으므로 다른 계정 기계에는 닿지 않는다(없으면 404). 나쵸 앱 경로는 여전히 503이다.
 - 로그아웃: `POST /relay/logout`. 기기 토큰을 폐기하면 해당 계정 WebSocket도 닫힌다. 모바일은 서버가 끊겨 있어도 로컬 자격·연결·캐시를 먼저 정리한다.
 - 기존 `/u/<slug>/` 직접 연결은 별도 보조 입구로 유지한다.
 
