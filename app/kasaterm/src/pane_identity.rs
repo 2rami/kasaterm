@@ -101,6 +101,11 @@ pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
 /// 두고 **테두리**가 기기색을 더 진하게 문다(2026-09-14 승인: 「은은한 채움+테두리」).
 const MINIMAP_TINT: f32 = 0.22;
 const MINIMAP_BORDER_TINT: f32 = 0.55;
+/// 기기 칸 채움이 이 기기 칸에서 떨어져야 하는 거리(RGB). 바탕과 색조가 비슷한 기기색은
+/// 22% 로 섞으면 이 기기 칸과 같아 보여(2026-10-01 실측: 이 기기 #374046, 맥미니 #38454b)
+/// 이 거리가 날 때까지 더 섞는다.
+const MINIMAP_MIN_GAP: f32 = 32.0;
+const MINIMAP_TINT_MAX: f32 = 0.6;
 
 /// 스포이드 슬롯 번호에서 기기 칸을 가르는 기준. 팔레트 칸(0..27)과 한 통을
 /// 쓰므로 그보다 훨씬 위에 둔다.
@@ -120,8 +125,11 @@ pub(crate) struct DeviceColorRow {
 }
 
 struct DeviceColors {
-    /// 사용자가 고른 색 — 정규화한 이름 → 색.
+    /// 사용자가 고른 색 — 기기 열쇠(`identity_key`) → 색.
     overrides: HashMap<String, [u8; 4]>,
+    /// 정규화한 이름 → `id:<기기 id>`. 같은 기계를 기기마다 다른 이름으로 부르므로(맥미니는
+    /// 맥북을 「맥북」, 맥북은 자기를 컴퓨터 이름으로) 색은 이름이 아니라 id 에 붙는다.
+    aliases: HashMap<String, String>,
     /// 명부(이 기기 + 등록 기계)에 배정한 기본색 — 정규화한 이름 → 색.
     assigned: HashMap<String, [u8; 4]>,
     /// 화면에 낼 순서: (표시 이름, 이 기기인가).
@@ -133,7 +141,40 @@ static DEVICE_COLORS: std::sync::RwLock<Option<DeviceColors>> = std::sync::RwLoc
 static LOCAL_MACHINE_ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 fn normalize_device(label: &str) -> String {
-    label.trim().to_lowercase()
+    // 맥 컴퓨터 이름은 「MacBook Pro」 사이가 NBSP 라, 공백 종류만 다른 두 항목이 생겼다.
+    label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// 색을 찾고 적는 열쇠 — id 를 아는 기기는 `id:<id>`, 모르면 정규화한 이름.
+fn identity_key(aliases: &HashMap<String, String>, label: &str) -> String {
+    let name = normalize_device(label);
+    aliases.get(&name).cloned().unwrap_or(name)
+}
+
+/// 이름 → id 표. 다른 기기에서 배운 것 위에 명부, 그 위에 이 기기를 얹는다 — 가까운 쪽이 이긴다.
+fn device_aliases(settings: &serde_json::Value) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut put = |label: &str, id: &str| {
+        if !label.trim().is_empty() && !id.trim().is_empty() {
+            out.insert(normalize_device(label), format!("id:{}", id.trim()));
+        }
+    };
+    for (label, id) in settings.get("device_color_ids").and_then(|v| v.as_object()).into_iter().flatten() {
+        if let Some(id) = id.as_str() { put(label, id); }
+    }
+    for machine in kasa_mcp::machines::machines() {
+        if let Some(id) = machine.machine_id.as_deref() { put(&machine.label, id); }
+    }
+    if let Some(id) = local_machine_id() {
+        for label in crate::info::cached_local_machine_name().into_iter().chain([kasa_mcp::machines::self_label().as_str()]) {
+            put(label, &id);
+        }
+    }
+    out
+}
+
+fn stamp_of(at: &serde_json::Map<String, serde_json::Value>, label: &str) -> u64 {
+    at.get(label).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
 fn device_hash(key: &str) -> usize {
@@ -191,24 +232,28 @@ fn local_machine_id() -> Option<String> {
         .clone()
 }
 
-fn read_overrides(settings: &serde_json::Value) -> HashMap<String, [u8; 4]> {
-    settings
-        .get("device_colors")
-        .and_then(|v| v.as_object())
-        .map(|map| {
-            map.iter()
-                .filter_map(|(label, value)| {
-                    let rgb = value.as_str().and_then(parse_color_input)?;
-                    Some((normalize_device(label), [rgb[0], rgb[1], rgb[2], 255]))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// 같은 기기를 가리키는 항목이 여럿이면 가장 늦게 고친 것이 이긴다.
+fn read_overrides(settings: &serde_json::Value, aliases: &HashMap<String, String>) -> HashMap<String, [u8; 4]> {
+    let at = settings.get("device_colors_at").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let mut newest: HashMap<String, (u64, [u8; 4])> = HashMap::new();
+    let mut entries: Vec<(&String, &serde_json::Value)> =
+        settings.get("device_colors").and_then(|v| v.as_object()).into_iter().flatten().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (label, value) in entries {
+        let Some(rgb) = value.as_str().and_then(parse_color_input) else { continue };
+        let ms = stamp_of(&at, label);
+        let slot = newest.entry(identity_key(aliases, label)).or_insert((ms, [rgb[0], rgb[1], rgb[2], 255]));
+        if ms > slot.0 {
+            *slot = (ms, [rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+    newest.into_iter().map(|(key, (_, color))| (key, color)).collect()
 }
 
 fn build_device_colors() -> DeviceColors {
     let settings = socket::read_settings();
-    let overrides = read_overrides(&settings);
+    let aliases = device_aliases(&settings);
+    let overrides = read_overrides(&settings, &aliases);
     let mut roster: Vec<(String, Option<String>)> = Vec::new();
     let mut shown: Vec<(String, bool)> = Vec::new();
     if let Some(local) = crate::info::cached_local_machine_name() {
@@ -226,6 +271,7 @@ fn build_device_colors() -> DeviceColors {
     }
     DeviceColors {
         overrides,
+        aliases,
         assigned: assign_defaults(&roster),
         roster: shown,
         loaded_at: std::time::Instant::now(),
@@ -267,7 +313,7 @@ pub(crate) fn machine_tint(label: &str) -> [u8; 4] {
     let key = normalize_device(label);
     with_device_colors(|c| {
         c.overrides
-            .get(&key)
+            .get(&identity_key(&c.aliases, label))
             .or_else(|| c.assigned.get(&key))
             .copied()
     })
@@ -288,7 +334,7 @@ pub(crate) fn device_color_rows() -> Vec<DeviceColorRow> {
                     .get(&key)
                     .copied()
                     .unwrap_or_else(|| hashed_device_color(&key));
-                let custom = c.overrides.get(&key).copied();
+                let custom = c.overrides.get(&identity_key(&c.aliases, label)).copied();
                 let hex = |c: [u8; 4]| theme::hex_str([c[0], c[1], c[2]]);
                 DeviceColorRow {
                     label: label.clone(),
@@ -364,46 +410,114 @@ fn write_overrides(
 }
 
 fn stamp(at: &mut serde_json::Map<String, serde_json::Value>, label: &str, ms: u64) {
-    let key = normalize_device(label);
-    at.retain(|k, _| normalize_device(k) != key);
     at.insert(label.trim().to_string(), serde_json::json!(ms));
 }
 
-/// 다른 기기와 맞추기 위한 표 — 색과 바꾼 시각. `/term/device-colors` 로 나간다.
+fn current_aliases() -> HashMap<String, String> {
+    with_device_colors(|c| c.aliases.clone()).unwrap_or_default()
+}
+
+/// 같은 기기를 가리키는 항목을 이름이 달라도 색 표·시각 표에서 다 걷는다.
+fn forget_device(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    at: &mut serde_json::Map<String, serde_json::Value>,
+    aliases: &HashMap<String, String>,
+    key: &str,
+) {
+    map.retain(|k, _| identity_key(aliases, k) != key);
+    at.retain(|k, _| identity_key(aliases, k) != key);
+}
+
+/// 다른 기기와 맞추기 위한 표 — 색과 바꾼 시각, 그리고 이름마다 아는 기기 id. id 가 있어야
+/// 저쪽이 자기가 부르는 이름(명부 이름)과 이쪽 이름을 같은 기계로 묶는다. `/term/device-colors`.
 pub(crate) fn device_color_sync_table() -> serde_json::Value {
     let settings = socket::read_settings();
+    let aliases = device_aliases(&settings);
+    let mut ids = serde_json::Map::new();
+    for table in ["device_colors", "device_colors_at"] {
+        for label in settings.get(table).and_then(|v| v.as_object()).into_iter().flatten().map(|(k, _)| k) {
+            if let Some(id) = aliases.get(&normalize_device(label)).and_then(|k| k.strip_prefix("id:")) {
+                ids.insert(label.clone(), serde_json::json!(id));
+            }
+        }
+    }
     serde_json::json!({
         "colors": settings.get("device_colors").cloned().unwrap_or(serde_json::json!({})),
         "at": settings.get("device_colors_at").cloned().unwrap_or(serde_json::json!({})),
+        "ids": ids,
     })
+}
+
+/// 저쪽 표에서 들일 것 — 새로 배운 이름 → id, 그리고 (기기 열쇠, 저쪽 이름, 시각, 색).
+struct MergePlan {
+    learned: Option<serde_json::Map<String, serde_json::Value>>,
+    newer: Vec<(String, String, u64, Option<String>)>,
+    aliases: HashMap<String, String>,
+}
+
+/// 같은 기기는 이름이 달라도 id 로 묶어 견준다. 저쪽이 id 를 붙여 보낸 항목은 그 id 가 열쇠다 —
+/// 어느 기계를 뜻했는지는 적은 쪽이 안다. 배운 이름은 이쪽이 모르는 것만 남긴다(가까운 쪽이 정본).
+fn plan_merge(settings: &serde_json::Value, mut aliases: HashMap<String, String>, remote: &serde_json::Value) -> MergePlan {
+    let empty = serde_json::Map::new();
+    let remote_at = remote.get("at").and_then(|v| v.as_object()).unwrap_or(&empty);
+    let remote_colors = remote.get("colors").and_then(|v| v.as_object());
+    let remote_ids = remote.get("ids").and_then(|v| v.as_object());
+    let mut learned = settings.get("device_color_ids").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let mut learned_new = false;
+    for (label, id) in remote_ids.into_iter().flatten() {
+        let Some(id) = id.as_str().map(str::trim).filter(|id| !id.is_empty()) else { continue };
+        let name = normalize_device(label);
+        if name.is_empty() || aliases.contains_key(&name) { continue; }
+        aliases.insert(name, format!("id:{id}"));
+        learned.insert(label.trim().to_string(), serde_json::json!(id));
+        learned_new = true;
+    }
+    let key_of = |label: &str| {
+        remote_ids
+            .and_then(|ids| ids.get(label))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("id:{id}"))
+            .unwrap_or_else(|| identity_key(&aliases, label))
+    };
+    let local_at = settings.get("device_colors_at").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let local_stamp = |key: &str| {
+        local_at.iter().filter(|(k, _)| identity_key(&aliases, k) == key).filter_map(|(_, v)| v.as_u64()).max().unwrap_or(0)
+    };
+    let mut newer: Vec<(String, String, u64, Option<String>)> = Vec::new();
+    for (label, ms) in remote_at {
+        let Some(ms) = ms.as_u64() else { continue };
+        let key = key_of(label);
+        if ms <= local_stamp(&key) || newer.iter().any(|(k, _, m, _)| *k == key && *m >= ms) { continue; }
+        newer.retain(|(k, ..)| *k != key);
+        let color = remote_colors
+            .and_then(|c| c.get(label))
+            .and_then(|v| v.as_str().and_then(parse_color_input))
+            .map(theme::hex_str);
+        newer.push((key, label.clone(), ms, color));
+    }
+    MergePlan { learned: learned_new.then_some(learned), newer, aliases }
 }
 
 /// 다른 기기의 표를 받아 **더 새로운 항목만** 들인다(색을 고친 것도, 지운 것도). 시각은
 /// 저쪽 것을 그대로 적어 양쪽이 같은 값으로 수렴한다. 바뀐 것이 있으면 true.
 pub(crate) fn merge_device_colors(remote: &serde_json::Value) -> bool {
-    let Some(remote_at) = remote.get("at").and_then(|v| v.as_object()) else { return false };
-    let remote_colors = remote.get("colors").and_then(|v| v.as_object());
+    if remote.get("at").and_then(|v| v.as_object()).is_none() { return false; }
     let settings = socket::read_settings();
-    let local_at = settings.get("device_colors_at").and_then(|v| v.as_object()).cloned().unwrap_or_default();
-    let stamp_of = |map: &serde_json::Map<String, serde_json::Value>, key: &str| {
-        map.iter().find(|(k, _)| normalize_device(k) == key).and_then(|(_, v)| v.as_u64()).unwrap_or(0)
-    };
-    let mut newer: Vec<(String, u64, Option<String>)> = Vec::new();
-    for (label, ms) in remote_at {
-        let Some(ms) = ms.as_u64() else { continue };
-        let key = normalize_device(label);
-        if ms <= stamp_of(&local_at, &key) { continue; }
-        let color = remote_colors
-            .and_then(|c| c.iter().find(|(k, _)| normalize_device(k) == key))
-            .and_then(|(_, v)| v.as_str().and_then(parse_color_input))
-            .map(theme::hex_str);
-        newer.push((label.clone(), ms, color));
+    let plan = plan_merge(&settings, device_aliases(&settings), remote);
+    let learned = plan.learned.is_some();
+    if let Some(map) = plan.learned {
+        socket::write_setting("device_color_ids", serde_json::Value::Object(map));
     }
-    if newer.is_empty() { return false; }
+    if plan.newer.is_empty() {
+        if learned { reload_device_colors(); }
+        return learned;
+    }
+    let aliases = plan.aliases;
     write_overrides(|map, at| {
-        for (label, ms, color) in newer {
-            let key = normalize_device(&label);
-            map.retain(|k, _| normalize_device(k) != key);
+        for (key, label, ms, color) in plan.newer {
+            forget_device(map, at, &aliases, &key);
             if let Some(hex) = color {
                 map.insert(label.trim().to_string(), serde_json::Value::String(hex));
             }
@@ -414,11 +528,12 @@ pub(crate) fn merge_device_colors(remote: &serde_json::Value) -> bool {
 }
 
 /// 기기 하나의 색을 설정에 굳힌다. 이름 키는 표시 이름 그대로 두어 파일을 열었을
-/// 때 어느 기계인지 읽히게 하고, 찾을 때만 대소문자·공백을 접는다.
+/// 때 어느 기계인지 읽히게 하고, 찾을 때는 id(모르면 접은 이름)로 묶는다.
 pub(crate) fn set_device_color(label: &str, rgb: [u8; 3]) {
-    let key = normalize_device(label);
+    let aliases = current_aliases();
+    let key = identity_key(&aliases, label);
     write_overrides(|map, at| {
-        map.retain(|k, _| normalize_device(k) != key);
+        forget_device(map, at, &aliases, &key);
         map.insert(
             label.trim().to_string(),
             serde_json::Value::String(theme::hex_str(rgb)),
@@ -433,8 +548,8 @@ pub(crate) fn preview_device_color(label: &str, rgb: [u8; 3]) {
     ensure_device_colors();
     if let Ok(mut slot) = DEVICE_COLORS.write() {
         if let Some(c) = slot.as_mut() {
-            c.overrides
-                .insert(normalize_device(label), [rgb[0], rgb[1], rgb[2], 255]);
+            let key = identity_key(&c.aliases, label);
+            c.overrides.insert(key, [rgb[0], rgb[1], rgb[2], 255]);
             // 미리보기 중에 자동 재적재가 돌면 파일값으로 되돌아가 색이 튄다.
             c.loaded_at = std::time::Instant::now();
         }
@@ -442,9 +557,10 @@ pub(crate) fn preview_device_color(label: &str, rgb: [u8; 3]) {
 }
 
 pub(crate) fn reset_device_color(label: &str) {
-    let key = normalize_device(label);
+    let aliases = current_aliases();
+    let key = identity_key(&aliases, label);
     write_overrides(|map, at| {
-        map.retain(|k, _| normalize_device(k) != key);
+        forget_device(map, at, &aliases, &key);
         stamp(at, label, now_ms());
     });
 }
@@ -470,7 +586,29 @@ pub(crate) fn panel_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] 
 }
 
 pub(crate) fn minimap_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
-    machine.map_or(base, |label| theme::lerp(base, machine_tint(label), MINIMAP_TINT))
+    machine.map_or(base, |label| minimap_fill(base, machine_tint(label)))
+}
+
+/// 이 기기 칸이 보이는 색 — 반투명 테두리색(`border` 0x66)이 판 바탕에 얹힌 것.
+fn minimap_local_cell(base: [u8; 4]) -> [u8; 4] {
+    theme::lerp(base, theme::border(), 0x66 as f32 / 255.0)
+}
+
+fn rgb_gap(a: [u8; 4], b: [u8; 4]) -> f32 {
+    (0..3).map(|i| (a[i] as f32 - b[i] as f32).powi(2)).sum::<f32>().sqrt()
+}
+
+/// 기기색을 22% 부터 섞되, 이 기기 칸과 `MINIMAP_MIN_GAP` 만큼 떨어질 때까지 더 섞는다.
+fn minimap_fill(base: [u8; 4], tint: [u8; 4]) -> [u8; 4] {
+    let local = minimap_local_cell(base);
+    let mut t = MINIMAP_TINT;
+    loop {
+        let fill = theme::lerp(base, tint, t);
+        if t >= MINIMAP_TINT_MAX || rgb_gap(fill, local) >= MINIMAP_MIN_GAP {
+            return fill;
+        }
+        t = (t + 0.02).min(MINIMAP_TINT_MAX);
+    }
 }
 
 /// 배치도 칸 테두리 — 채움보다 진하게 기기색을 문다. 기기가 없으면 `fallback`.
@@ -694,12 +832,96 @@ mod tests {
         let settings = serde_json::json!({
             "device_colors": { " MacBook ": "#112233", "맥미니": "rgb(1, 2, 3)", "bad": "zzz" }
         });
-        let o = read_overrides(&settings);
+        let o = read_overrides(&settings, &std::collections::HashMap::new());
         assert_eq!(o.get("macbook"), Some(&[0x11, 0x22, 0x33, 255]));
         assert_eq!(o.get("맥미니"), Some(&[1, 2, 3, 255]));
         assert_eq!(o.get("bad"), None);
         assert_eq!(hashed_device_color(" MACBOOK "), hashed_device_color(" MACBOOK "));
         assert_eq!(machine_tint(" MACBOOK "), machine_tint("macbook"));
+    }
+
+    /// 같은 기계를 기기마다 다른 이름으로 불러도(명부 이름·컴퓨터 이름·NBSP) id 로 한 색이다.
+    #[test]
+    fn one_machine_keeps_one_color_across_names() {
+        assert_eq!(super::normalize_device("건호의 MacBook\u{a0}Pro"), super::normalize_device(" 건호의 MacBook  Pro "));
+        let aliases: std::collections::HashMap<String, String> = [
+            ("나쵸네코".to_string(), "id:mini".to_string()),
+            ("nachoneko".to_string(), "id:mini".to_string()),
+        ].into_iter().collect();
+        let settings = serde_json::json!({
+            "device_colors": {
+                "나쵸네코": "#548a84",
+                "nachoneko": "#e99dbe",
+                "건호의 MacBook\u{a0}Pro": "#f0dbae",
+                "건호의 MacBook Pro": "#4c86e4"
+            },
+            "device_colors_at": {
+                "nachoneko": 1790513120019u64,
+                "건호의 MacBook\u{a0}Pro": 1790513122318u64,
+                "건호의 MacBook Pro": 1790550916056u64
+            }
+        });
+        let o = read_overrides(&settings, &aliases);
+        assert_eq!(o.get("id:mini"), Some(&[0xe9, 0x9d, 0xbe, 255]), "시각 없는 옛 색보다 늦게 고친 색");
+        assert_eq!(o.get("건호의 macbook pro"), Some(&[0x4c, 0x86, 0xe4, 255]), "공백 종류만 다른 두 항목은 하나");
+        assert_eq!(o.len(), 2);
+    }
+
+    /// 2026-10-01 두 기기의 실제 색 표: 맥북은 맥미니를 「나쵸네코」(시각 없는 청록), 맥미니는 자기를
+    /// 「nachoneko」(분홍)로 들고 있었다. id 를 주고받으면 둘 다 같은 색에 닿는다.
+    #[test]
+    fn two_devices_converge_on_one_color_per_machine() {
+        let mac_aliases: std::collections::HashMap<String, String> = [
+            ("건호의 macbook pro".to_string(), "id:book".to_string()),
+            ("나쵸네코".to_string(), "id:mini".to_string()),
+        ].into_iter().collect();
+        let mac = serde_json::json!({
+            "device_colors": { "나쵸네코": "#548a84", "nachoneko": "#e99dbe",
+                               "건호의 MacBook\u{a0}Pro": "#f0dbae", "건호의 MacBook Pro": "#4c86e4" },
+            "device_colors_at": { "nachoneko": 1790513120019u64, "건호의 MacBook\u{a0}Pro": 1790513122318u64,
+                                  "건호의 MacBook Pro": 1790550916056u64 }
+        });
+        let mini = serde_json::json!({
+            "device_colors": { "nachoneko": "#e99dbe", "건호의 MacBook\u{a0}Pro": "#f0dbae", "건호의 MacBook Pro": "#4c86e4" },
+            "device_colors_at": { "nachoneko": 1790513120019u64, "건호의 MacBook\u{a0}Pro": 1790513122318u64,
+                                  "건호의 MacBook Pro": 1790550916056u64 }
+        });
+        let mini_aliases: std::collections::HashMap<String, String> = [
+            ("nachoneko".to_string(), "id:mini".to_string()),
+            ("맥북".to_string(), "id:book".to_string()),
+        ].into_iter().collect();
+        let table = |settings: &serde_json::Value, ids: serde_json::Value| serde_json::json!({
+            "colors": settings["device_colors"], "at": settings["device_colors_at"], "ids": ids,
+        });
+
+        // 맥북이 맥미니 표를 받는다 — 맥미니가 자기 이름에 id 를 붙여 보낸다.
+        let plan = super::plan_merge(&mac, mac_aliases.clone(), &table(&mini, serde_json::json!({ "nachoneko": "mini" })));
+        assert!(plan.learned.as_ref().is_some_and(|m| m.contains_key("nachoneko")), "{:?}", plan.learned);
+        assert!(plan.newer.is_empty(), "같은 시각 항목은 이미 있다: {:?}", plan.newer);
+        let o = read_overrides(&mac, &plan.aliases);
+        assert_eq!(o.get("id:mini"), Some(&[0xe9, 0x9d, 0xbe, 255]), "시각 없는 청록보다 늦게 고친 분홍");
+        assert_eq!(o.get("id:book"), Some(&[0x4c, 0x86, 0xe4, 255]));
+
+        // 맥미니가 맥북 표를 받는다 — 맥북 이름이 「맥북」과 같은 기계임을 배운다.
+        let plan = super::plan_merge(&mini, mini_aliases.clone(), &table(&mac, serde_json::json!({
+            "건호의 MacBook\u{a0}Pro": "book", "건호의 MacBook Pro": "book", "나쵸네코": "mini",
+        })));
+        assert_eq!(plan.aliases.get("건호의 macbook pro").map(String::as_str), Some("id:book"), "{:?}", plan.learned);
+        let o = read_overrides(&mini, &plan.aliases);
+        assert_eq!(o.get("id:book"), Some(&[0x4c, 0x86, 0xe4, 255]), "맥미니에서 「맥북」 칸도 맥북이 고른 파랑");
+        assert_eq!(o.get("id:mini"), Some(&[0xe9, 0x9d, 0xbe, 255]));
+        assert!(plan.newer.is_empty(), "같은 시각은 다시 들이지 않는다: {:?}", plan.newer);
+    }
+
+    /// 기기색이 바탕과 색조가 비슷해도 기기 칸은 이 기기 칸과 갈려 보여야 한다.
+    #[test]
+    fn device_cell_stands_apart_from_local_cell_even_with_a_muted_tint() {
+        for base in [[0x30, 0x31, 0x3b, 255], [25, 27, 34, 255], [240, 240, 246, 255]] {
+            for tint in [[0x54, 0x8a, 0x84, 255], [0xf0, 0xdb, 0xae, 255], DEVICE_COLOR_PRESETS[2].1] {
+                let fill = super::minimap_fill(base, tint);
+                assert!(distance(fill, super::minimap_local_cell(base)) >= 24.0, "{tint:?} on {base:?} → {fill:?}");
+            }
+        }
     }
 
     #[test]
