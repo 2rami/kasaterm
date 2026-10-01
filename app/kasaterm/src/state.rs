@@ -731,6 +731,8 @@ pub(crate) enum PaneMenuItem {
     Focus,
     /// 크게 보기 토글.
     Zoom,
+    /// 대화로 보기 ↔ 터미널로 보기(학생 pane 만, chat_view.rs).
+    ChatView,
     /// pane 닫기 — 되살리기(⌘⇧T)로 되돌릴 수 있다.
     Close,
     /// `to` 로 세운 원격 자리를 닫되 **저쪽 pane 은 남긴다**(긴 작업을 걸어 두고
@@ -841,6 +843,9 @@ pub(crate) struct InfoState {
     /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
     pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
     pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
+    /// 메뉴를 연 pane 이 학생이면 `Some(지금 대화로 보는가)`, 셸이면 None — 그리는 쪽이
+    /// App 을 못 보므로 여는 자리에서 적어 둔다.
+    pub(crate) pane_menu_chat: Option<bool>,
     /// Device heading hit rect: click collapses, right-click opens its menu.
     pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) machine_collapsed: std::collections::HashSet<String>,
@@ -898,6 +903,7 @@ impl Default for InfoState {
             ctx_menu_rects: Vec::new(),
             pane_menu: None,
             pane_menu_rects: Vec::new(),
+            pane_menu_chat: None,
             machine_rects: Vec::new(),
             machine_collapsed: std::collections::HashSet::new(),
             machine_pane_rects: Vec::new(),

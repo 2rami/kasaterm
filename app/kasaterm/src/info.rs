@@ -3682,6 +3682,10 @@ fn draw_pane_menu(
                 }
             }
             items.push((M::Focus, MenuRow::new("pane 으로 가기").sep()));
+            if let Some(on) = info.pane_menu_chat {
+                let (label, icon) = if on { ("터미널로 보기", "terminal") } else { ("대화로 보기", "message-circle") };
+                items.push((M::ChatView, MenuRow::new(label).icon(icon)));
+            }
             items.push((M::Zoom, MenuRow::new("크게 보기")));
             items.push((M::Close, MenuRow::new("닫기")));
             if kasa_mcp::remote::remote_info(pane)

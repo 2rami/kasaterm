@@ -13,6 +13,24 @@ pub(crate) mod terminal_scene;
 #[path = "account_popover.rs"]
 mod account_popover;
 
+/// ⋮ 메뉴 칸에 올리면 뜨는 이름.
+fn handle_menu_tip(action: ActionKind, chat_on: bool) -> &'static str {
+    match action {
+        ActionKind::ChatView if chat_on => "터미널로 보기",
+        ActionKind::ChatView => "대화로 보기",
+        ActionKind::NewTab => "새 탭",
+        ActionKind::SplitH => "좌우로 나누기",
+        ActionKind::SplitV => "위아래로 나누기",
+        ActionKind::ToggleHeader => "상단바",
+        ActionKind::ToggleStatusbar => "하단바",
+        ActionKind::ToggleZoom => "크게 보기",
+        ActionKind::RefreshRenderer => "화면 새로고침",
+        ActionKind::Undock => "별도 창으로",
+        ActionKind::Close => "닫기",
+        _ => "",
+    }
+}
+
 fn terminal_preedit_for_active<'a>(
     preedit: &'a str,
     owner_surface: Option<&str>,
@@ -285,7 +303,8 @@ impl App {
                         .unwrap_or(Some((raw_row as usize, raw_col as usize)));
                     let (cur_row, cur_col) = position.map(|(row, col)| (row as u16, col as u16))
                         .unwrap_or((0, 0));
-                    let cur_vis = source_vis && position.is_some();
+                    // 대화로 보는 pane 은 격자를 안 그린다 — 커서 블록만 허공에 뜨면 안 된다.
+                    let cur_vis = source_vis && position.is_some() && !self.chat_view_showing(&id);
                     let cols = shift.and_then(|view| view.projection.as_ref())
                         .and_then(|projection| projection.rows.first())
                         .map(|row| row.len().min(u16::MAX as usize) as u16)
@@ -385,7 +404,13 @@ impl App {
             font_size: self.font_size,
             font_scale: pane_font_scale,
             selection: self.selection,
-            suggestion: self.current_suggestion.clone().unwrap_or_default(),
+            suggestion: if active_surface.as_deref().is_some_and(|id| self.chat_view_showing(id))
+                || self.target_pane().is_some_and(|id| self.chat_view_showing(&id))
+            {
+                String::new()
+            } else {
+                self.current_suggestion.clone().unwrap_or_default()
+            },
         }
     }
 
@@ -990,6 +1015,7 @@ impl App {
         // every pane so in-pane WebViews and other overlays can be snapped
         // to their pane after the borrow scope ends.
         let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+        let mut chat_slots: Vec<crate::chat_view::Slot> = Vec::new();
         // pane 마다 화면을 어떻게 옮겨 그렸는지. 락 안에서는 `self` 가 불변이라
         // 여기 모아 두었다가 블록이 끝난 뒤 한 번에 옮긴다(body_rects 와 같은 이유).
         let mut view_shifts: Vec<(String, crate::PaneViewShift)> = Vec::new();
@@ -1209,6 +1235,29 @@ impl App {
                     + header_shift_logical
                     + PANE_INNER_Y;
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                // 대화로 보는 학생 pane — 격자와 그 위의 장식(학생 그림·배너)은 빼고
+                // 본문 자리에 말풍선을 그린다. 학생이 나가 셸만 남았으면 터미널 그대로다.
+                let chat_slot = (self.chat_view_on(&id) && self.pane_can_chat(&ws, &id)).then(|| {
+                    let tab = ws.active_tab_pid(&id);
+                    let state = self.pane_activity.get(&id).map(|a| &a.state);
+                    crate::chat_view::Slot {
+                        pane: id.clone(),
+                        rect: (0.0, 0.0, 0.0, 0.0),
+                        name: ws
+                            .pane_character
+                            .get(&tab)
+                            .cloned()
+                            .or_else(|| self.pty.get(tab.as_str()).and_then(|p| p.active_agent()).map(|k| k.as_str().to_string()))
+                            .unwrap_or_else(|| "학생".to_string()),
+                        working: state.is_some_and(|s| s.is_busy()),
+                        needs_you: state.is_some_and(|s| s.needs_you()),
+                        focused: active_id.as_deref() == Some(id.as_str()),
+                        mirror: kasa_mcp::remote::remote_info(&tab).is_some()
+                            || kasa_mcp::remote::remote_info(&id).is_some(),
+                        preedit: self.chat_view_preedit(&id),
+                        caret_on: self.cursor_blink_on(Instant::now()),
+                    }
+                });
                 let composition = self.compose_terminal_pane(
                     &ws, pane, pane.term(), &id, ws.active_tab_pid(&id), cols_now, rows_now,
                     body_left, body_top, pane_font_scale, true, &turn_headers,
@@ -1232,22 +1281,25 @@ impl App {
                 let runs_claude = composition.runs_claude;
                 let true_char = composition.true_char;
                 let tab_pid = composition.tab_pid;
-                banner_slots.extend(composition.banner_slots);
-                spinner_slots.extend(composition.spinner_slots);
-                waiting_slots.extend(composition.waiting_slots);
-                standing_slots.extend(composition.standing_slots);
-                profile_slots.extend(composition.profile_slots);
-                inline_slots.extend(composition.inline_slots);
-                schale_logo_slots.extend(composition.schale_logo_slots);
-                title_outline_slots.extend(composition.title_outline_slots);
-                status_model_icons.extend(composition.status_model_icons);
-                sticky_pill_slots.extend(composition.sticky_pill_slots);
-                turn_header_slots.extend(composition.turn_header_slots);
-                view_shifts.extend(composition.view_shifts);
+                // 학생 판정(제목줄 이름)은 보기와 상관없이 산다.
                 agents_view_panes.extend(composition.agents_view_panes);
                 mirror_claude_panes.extend(composition.mirror_claude_panes);
-                if tip_hit.is_none() {
-                    tip_hit = composition.tip_hit;
+                if chat_slot.is_none() {
+                    banner_slots.extend(composition.banner_slots);
+                    spinner_slots.extend(composition.spinner_slots);
+                    waiting_slots.extend(composition.waiting_slots);
+                    standing_slots.extend(composition.standing_slots);
+                    profile_slots.extend(composition.profile_slots);
+                    inline_slots.extend(composition.inline_slots);
+                    schale_logo_slots.extend(composition.schale_logo_slots);
+                    title_outline_slots.extend(composition.title_outline_slots);
+                    status_model_icons.extend(composition.status_model_icons);
+                    sticky_pill_slots.extend(composition.sticky_pill_slots);
+                    turn_header_slots.extend(composition.turn_header_slots);
+                    view_shifts.extend(composition.view_shifts);
+                    if tip_hit.is_none() {
+                        tip_hit = composition.tip_hit;
+                    }
                 }
                 let hover_links = hovered_link
                     .as_ref()
@@ -1255,7 +1307,7 @@ impl App {
                     .map(|(_, spans, _)| spans.clone())
                     .unwrap_or_default();
                 slots.push(PaneSlot {
-                    rows: composed,
+                    rows: if chat_slot.is_some() { Vec::new() } else { composed },
                     origin_px,
                     // Unfocused panes dim their text only (no box veil). Single
                     // un-split pane is never dimmed.
@@ -1339,6 +1391,10 @@ impl App {
                     - self.statusbar_px(&id))
                 .max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
+                if let Some(mut slot) = chat_slot {
+                    slot.rect = (bx, by, bw, bh);
+                    chat_slots.push(slot);
+                }
                 if let Some(image) = img {
                     image_slots.push((
                         id.clone(),
@@ -2294,6 +2350,11 @@ impl App {
         // Which tab the cursor is over (for hover affordance + showing × only
         // where the user is pointing, Warp-style).
         let sb_cursor = self.cursor_px;
+        // ⋮ 메뉴의 대화 보기 칸 — 아래 그리기 패스는 gpu 를 빌린 채라 메서드를 못 부른다.
+        let handle_chat = self.handle_menu.clone().map(|pid| {
+            let ws = self.ws.lock().unwrap();
+            (pid.clone(), self.pane_can_chat(&ws, &pid), self.chat_view_on(&pid))
+        });
         let sb_hover = sb_tabs
             .iter()
             .find(|(_, r)| {
@@ -2802,6 +2863,8 @@ impl App {
                 self.md_content_h.insert(id.clone(), content_h);
             }
             self.md_find_rects = find_btn_hits;
+            // 대화 보기 — 마크다운과 같은 자리(빈 셀 패스 뒤, pane 머리 앞)에 크롬으로 그린다.
+            Self::paint_chat_views(g, &mut self.chat_view, &chat_slots, sb_cursor);
             // 호버 툴팁 — pane 을 다 그린 뒤에 얹는다. pane 안에서 그리면 툴팁이
             // 경계를 넘는 순간 다음 pane 이 위를 덮어 반쪽만 남는다.
             if let Some((tip, hx, hy)) = self
@@ -7552,12 +7615,19 @@ impl App {
                                 }),
                             )
                         };
+                        // 대화 보기 전환은 학생 pane 에만 — 셸에는 펼칠 대화가 없다.
+                        let (can_chat, chat_on) = handle_chat
+                            .as_ref()
+                            .filter(|(pid, ..)| pid == fid)
+                            .map_or((false, false), |(_, can, on)| (*can, *on));
+                        let chat_icon = if chat_on { "terminal" } else { "message-circle" };
                         let hdr_icon = if hdr_vis {
                             "panel-top"
                         } else {
                             "panel-top-dashed"
                         };
                         let items = [
+                            (chat_icon, ActionKind::ChatView),
                             ("plus", ActionKind::NewTab),
                             // columns-2(세로선=좌우 2칸) → Horizontal(right),
                             // rows-2(가로선=상하 2칸) → Vertical(bottom). 아이콘이
@@ -7577,6 +7647,7 @@ impl App {
                         let items: Vec<(&str, ActionKind)> = items
                             .into_iter()
                             .filter(|(_, a)| term_tab || *a != ActionKind::Undock)
+                            .filter(|(_, a)| (can_chat && !lite) || *a != ActionKind::ChatView)
                             .filter(|(_, a)| {
                                 !lite
                                     || !matches!(
@@ -7625,6 +7696,7 @@ impl App {
                         );
                         let mut bx2 = mx + pad;
                         let by2 = my + pad;
+                        let mut tip_at: Option<(&str, f32, f32)> = None;
                         for (icon, act) in items {
                             let on = hmx >= bx2 && hmx <= bx2 + bw && hmy >= by2 && hmy <= by2 + bh;
                             if on {
@@ -7646,8 +7718,18 @@ impl App {
                                 bisz,
                                 if on { theme::text() } else { theme::text_dim() },
                             );
+                            // 아이콘만으로는 뜻이 갈리는 칸이 있다 — 올리면 이름을 띄운다.
+                            if on {
+                                let tip = handle_menu_tip(act, chat_on);
+                                if !tip.is_empty() {
+                                    tip_at = Some((tip, bx2, by2 + bh + 6.0));
+                                }
+                            }
                             menu_hits.push((act, (bx2, by2, bw, bh)));
                             bx2 += bw + gap;
+                        }
+                        if let Some((tip, tx, ty)) = tip_at.take() {
+                            Self::draw_hover_tip(g, tip, tx, ty, win_px.0 / scale, win_px.1 / scale);
                         }
                     }
                 }
@@ -13243,6 +13325,8 @@ impl App {
         // emitting 10k+ sugarloaf calls. PTY updates flag the per-
         // pane dirty bit; chrome events flag `self.chrome_dirty`;
         // cursor blink phase toggles count separately.
+        // 대화 보기는 기록이 새로 오면 그려야 한다 — 격자가 그대로여도 게이트를 연다.
+        self.pump_chat_views();
         let blink_changed = blink_on != self.last_blink_on;
         // 보이는 pane 으로 한정한다 — 안 보이는 방의 pane 이 dirty 여도 그릴 그림이
         // 없는데, 전에는 그 하나가 프레임을 통째로 불렀다. 방마다 claude 를 띄우면

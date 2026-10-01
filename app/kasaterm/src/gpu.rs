@@ -1906,6 +1906,16 @@ impl GpuRenderer {
         self.rect(x, y - size * 0.1, w.max(1.0), size * 1.22, col);
     }
 
+    /// 대화 보기의 코드 글자 — 마크다운 렌더와 같은 고정폭 얼굴(한글만 고딕). 줄 바꿈은
+    /// 부르는 쪽이 이미 했다.
+    pub(crate) fn draw_code_text(&mut self, x: f32, y: f32, text: &str, size: f32, color: [u8; 4]) {
+        self.md_draw_word(text, x, y, size, color, false, false, 0, true);
+    }
+
+    pub(crate) fn measure_code_text(&mut self, text: &str, size: f32) -> f32 {
+        self.measure_run(text, size, false, false, true, true)
+    }
+
     fn md_runs(
         &mut self,
         spans: &[crate::MdSpan],

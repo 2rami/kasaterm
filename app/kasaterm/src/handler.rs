@@ -4232,6 +4232,10 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(k, r)| k.starts_with('%') && inside(r))
                         .map(|(k, _)| k.clone());
                     if let Some(pane) = pane {
+                        self.info.pane_menu_chat = {
+                            let ws = self.ws.lock().unwrap();
+                            self.pane_can_chat(&ws, &pane).then(|| self.chat_view_on(&pane))
+                        };
                         self.info.pane_menu = Some((cx, cy, pane, state::PaneMenuPage::Root));
                         self.chrome_dirty = true;
                         window.request_redraw();
@@ -5431,6 +5435,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.info.pane_menu = None;
                                     self.toggle_pane_zoom(&pane);
                                 }
+                                Some(M::ChatView) => {
+                                    self.info.pane_menu = None;
+                                    self.toggle_chat_view(&pane);
+                                }
                                 Some(M::Close) => {
                                     self.info.pane_menu = None;
                                     self.close_pane(&pane);
@@ -5924,6 +5932,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.undock_active_tab_of(&menu_pid, event_loop)
                                 }
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
+                                ActionKind::ChatView => self.toggle_chat_view(&menu_pid),
                                 // md 토글·웹 컨트롤은 헤더 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
                                 // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
@@ -6041,6 +6050,7 @@ impl ApplicationHandler<UserEvent> for App {
                             ActionKind::RefreshRenderer => {
                                 self.refresh_renderer();
                             }
+                            ActionKind::ChatView => self.toggle_chat_view(&pid),
                             // 탭 띠의 ⋮ — 헤더 우클릭과 같은 메뉴를 연다(두 번 누르면 닫힘).
                             ActionKind::HandleMenu => {
                                 self.handle_menu = if self.handle_menu.as_deref() == Some(pid.as_str()) {
@@ -6488,6 +6498,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 match state {
                     ElementState::Pressed => {
+                        // 대화로 보는 pane 의 본문 — 밑에 깔린 격자의 링크·선택·마우스
+                        // 보고로 새지 않게 먼저 받는다.
+                        if self.chat_view_press(self.cursor_px.0, self.cursor_px.1) {
+                            window.request_redraw();
+                            return;
+                        }
                         // URL under the press → arm it and bail out before any
                         // text-selection / mouse-forwarding starts. A release
                         // that stays put (a click, not a drag) opens it. We
@@ -7156,6 +7172,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_board_ime(ime);
                     return;
                 }
+                if self.chat_view_ime(&ime) {
+                    window.request_redraw();
+                    return;
+                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard
@@ -7741,7 +7761,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let to_webview = crate::macos_open::send_paste_action();
                 #[cfg(not(target_os = "macos"))]
                 let to_webview = false;
-                if !to_webview {
+                if !to_webview && !self.chat_view_paste() {
                     self.input_buf.clear();
                     self.current_suggestion = None;
                     self.paste_clipboard();
@@ -7954,6 +7974,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
         self.run_pending_autoboard();
+        self.run_pending_autochat();
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();

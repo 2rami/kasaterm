@@ -4193,7 +4193,7 @@ pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
 /// raw="" 라 프론트 재파싱·리렌더가 0.
 const TRANSCRIPT_TAIL: u64 = 512 * 1024;
 
-fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<TranscriptChunk> {
+pub(crate) fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<TranscriptChunk> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
@@ -4219,8 +4219,9 @@ fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<Tran
     let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let next_offset = start + end as u64;
     let mut slice = &buf[..end];
-    // tail(reset)일 땐 중간부터 시작해 깨진 앞 첫 줄도 버린다.
-    if reset {
+    // tail(reset)이 파일 중간에서 시작했으면 깨진 앞 첫 줄을 버린다. 처음(0)부터 읽었으면
+    // 그 줄은 온전하다 — 버리면 짧은 기록의 첫 말이 대화에서 빠진다.
+    if reset && start > 0 {
         if let Some(i) = slice.iter().position(|&b| b == b'\n') {
             slice = &slice[i + 1..];
         }

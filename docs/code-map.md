@@ -22,6 +22,7 @@
 - `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
 - `transcript.rs` — claude-code transcript(jsonl) → board 스냅샷 추출
+- `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라

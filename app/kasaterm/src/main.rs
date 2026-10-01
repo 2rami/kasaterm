@@ -16,6 +16,7 @@ mod agent_state;
 mod agent_transitions;
 mod bridge;
 mod cells;
+mod chat_view;
 mod chrome;
 mod claude_auth;
 mod clipboard;
@@ -1503,6 +1504,8 @@ enum ActionKind {
     /// 탭 띠 헤더 오른쪽의 ⋮ 단추 — 단추 넷을 접고 ⋮ 메뉴(`handle_menu`)를 연다.
     /// 헤더 우클릭과 같은 메뉴다.
     HandleMenu,
+    /// ⋮ 메뉴의 「대화로 보기 / 터미널로 보기」 — 학생 pane 만(chat_view.rs).
+    ChatView,
     /// 웹 pane 헤더의 브라우저 컨트롤 — 터미널 클러스터(분할·상태바) 대신
     /// 이 넷이 그려진다. 실행은 webpane::web_nav.
     WebBack,
@@ -4312,6 +4315,9 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 보드 방의 입력. 필드를 함께 실어 조합 중 탭 이동도 떠나는 칸에
     /// 확정되게 한다.
     Board(native_board::BoardInput),
+    /// 대화로 보는 학생 pane 의 입력칸(바깥 pane id). 터미널 surface 가 아니라서 조합
+    /// 글자가 터미널 커서에 겹쳐 그려지지 않는다.
+    Chat(String),
 }
 
 impl ImeFocus {
@@ -5990,6 +5996,8 @@ struct App {
     /// 쓰고 헤더의 같은 pill 자리에 그린다 — 서로 배타(한쪽 begin 이 다른쪽
     /// cancel).
     web_find: Option<WebAddrEdit>,
+    /// pane 마다 기억하는 대화 보기 — chat_view.rs.
+    chat_view: crate::chat_view::ChatViews,
     /// 세션 복원이 앉힌 웹 pane 의 자식 창 대기열 `(host_id, url)` — 복원
     /// 경로엔 ActiveEventLoop 가 없어 창을 못 만든다. about_to_wait 가 다음
     /// 턴에 걷어 spawn_web_host 로 실물을 만든다.
@@ -6436,6 +6444,7 @@ impl App {
             web_host_seq: 0,
             web_addr: None,
             web_find: None,
+            chat_view: Default::default(),
             pending_web_hosts: Vec::new(),
             themegen: Default::default(),
             mirror_sync: Default::default(),
