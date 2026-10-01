@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -16,6 +17,7 @@ import 'clipboard_sheet.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
+import 'share_screen.dart';
 import 'terminal.dart';
 
 /// 첫 화면 — 기계·방별 학생 목록. 기다리는 학생이 맨 위에 선다.
@@ -45,6 +47,21 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _model.start();
+    unawaited(_offerRelease());
+  }
+
+  /// 이 실행에서 이미 알린 빌드 — 앱으로 돌아올 때마다 같은 판을 또 알리지 않는다.
+  String? _offered;
+
+  Future<void> _offerRelease() async {
+    final r = await widget.server.latestRelease();
+    if (r == null || !r.newer || r.build == _offered || !mounted) return;
+    _offered = r.build;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('새 판 ${r.version} (${r.build})이 있어요'),
+      duration: const Duration(seconds: 10),
+      action: SnackBarAction(label: '설치', onPressed: () => unawaited(r.open())),
+    ));
   }
 
   @override
@@ -59,6 +76,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         _model.start();
+        unawaited(_offerRelease());
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
@@ -101,6 +119,12 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     onChanged: _model.refresh,
   );
 
+  void _openShare() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => ShareScreen(server: widget.server)),
+    );
+  }
+
   void _openSettings() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -134,6 +158,11 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
           actions: [
             // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
             // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
+            IconButton(
+              tooltip: 'KASA-share',
+              onPressed: _openShare,
+              icon: const Icon(Icons.folder_outlined),
+            ),
             IconButton(
               tooltip: '클립보드',
               onPressed: () =>

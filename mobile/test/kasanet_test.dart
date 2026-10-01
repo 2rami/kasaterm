@@ -111,7 +111,6 @@ void main() {
       reason: '기본 기계의 id 로 불러도 같은 입구',
     );
     expect(server.uri('machines').host, 'gw.example');
-    expect(server.uri('nacho/app/tasks').host, 'gw.example');
     expect(server.uri('kasanet/phone').host, 'gw.example');
     expect(server.pathOf(null), (true, 7));
 

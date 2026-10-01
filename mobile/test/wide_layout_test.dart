@@ -14,13 +14,6 @@ void main() {
     expect(columnsFor(1376 - 24), 3);
   });
 
-  test('나란히 보기 — 아이패드 11 세로는 탭, 가로·13 세로는 나란히', () {
-    expect(sideBySide(834), isFalse);
-    expect(sideBySide(1032), isTrue);
-    expect(sideBySide(1210), isTrue);
-    expect(sideBySide(402), isFalse);
-  });
-
   test('벽돌 쌓기 — 차례대로 가장 낮은 열에, 같으면 왼쪽', () {
     expect(masonryPlace([300, 100, 100, 100], 2), [
       (0, 0.0),

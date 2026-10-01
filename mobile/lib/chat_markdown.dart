@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
-/// 말풍선 속 마크다운의 글꼴 — 학생 대화와 나쵸 대화가 같이 쓴다.
+/// 말풍선 속 마크다운의 글꼴 — 학생 대화와 KASA-share 문서가 같이 쓴다.
 ///
 /// [codeBg] 는 말풍선 바탕과 달라야 코드가 보여서 부르는 쪽이 고른다.
 MarkdownStyleSheet chatMarkdownStyle(

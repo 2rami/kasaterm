@@ -5,13 +5,14 @@ import 'package:flutter/material.dart';
 import 'connection.dart';
 import 'app_link.dart';
 import 'hub_model.dart';
+import 'hub_prefs.dart';
 import 'kasanet.dart';
 import 'look.dart';
 import 'push.dart';
 import 'screens/connect.dart';
 import 'screens/dev_server.dart';
 import 'screens/conversation_view.dart';
-import 'screens/nacho_home.dart';
+import 'screens/hub.dart';
 import 'screens/terminal.dart';
 import 'server.dart';
 import 'theme_prefs.dart';
@@ -307,8 +308,7 @@ class KasatermApp extends StatelessWidget {
   );
 }
 
-/// 저장된 주소가 있으면 나쵸 창구(대화·작업), 없으면 연결 화면. 학생 허브는 나쵸 창구의
-/// 오른쪽 위에서 들어간다. 주소를 바꾸거나 지우면 다시 여기로.
+/// 저장된 주소가 있으면 학생 허브, 없으면 연결 화면. 주소를 바꾸거나 지우면 다시 여기로.
 class RootScreen extends StatefulWidget {
   const RootScreen({super.key});
 
@@ -416,8 +416,6 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void _loadTokens(Server server) {
     // 서버가 정해지는 자리가 여기 하나라 푸시 등록도 같이 건다.
     PushBridge.instance.bind(server, _openLink);
-    // 첫 화면은 나쵸 창구다 — 그동안 학생 목록을 받아 두면 허브가 빈 채로 안 열린다.
-    unawaited(HubModel.warm(server));
     server.designTokens().then((t) {
       if (t == null ||
           !mounted ||
@@ -481,10 +479,14 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       );
     }
     if (server == null) return AccountWaitingScreen(connection: _connection);
-    return NachoHome(
+    final account = server.account;
+    return HubScreen(
       key: ObjectKey(server),
       server: server,
       onChangeAddress: _connection.logout,
+      prefs: HubPrefs(
+        scope: account == null ? '' : '${account.origin}|${account.account}',
+      ),
     );
   }
 }

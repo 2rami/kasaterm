@@ -107,16 +107,6 @@ class HubModel extends ChangeNotifier {
 
   static void clearCache() => _cache.clear();
 
-  /// 첫 화면에서 미리 한 바퀴 받아 둔다 — 학생 목록을 여는 순간 이미 그려져 있게.
-  static Future<void> warm(Server server) async {
-    final model = HubModel(server);
-    try {
-      await model.refresh();
-    } finally {
-      model.dispose();
-    }
-  }
-
   List<HubSection> sections = const [];
 
   /// 어느 기기를 따라갈지·어떤 모양으로 볼지. 배지는 보기와 무관하게 전부 센다 —

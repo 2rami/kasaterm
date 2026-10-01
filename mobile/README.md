@@ -42,8 +42,8 @@ Keychain 접근이 거부될 수 있어 로그인 저장소 검증용으로 쓰�
 
 - 주소 기계 목록·방 이름·배치·명부·쪽지를 **한 번에** 묻고, 온 것부터 그린다. 명부를 기억하면
   원격 기계도 같은 차례에 묻는다. 요청마다 10초 상한이 있어 느린 기계는 그 절만 직전 것으로 남는다.
-- 앱이 살아 있는 동안 마지막 목록을 기억한다. 첫 화면(나쵸 창구)이 뜰 때 미리 한 바퀴 받아 두어,
-  허브를 열면 곧바로 그려지고 새 목록이 닿을 때까지 위에 얇은 진행 막대가 선다.
+- 앱이 살아 있는 동안 마지막 목록을 기억한다. 허브를 다시 열면 곧바로 그려지고 새 목록이 닿을
+  때까지 위에 얇은 진행 막대가 선다.
 - 기계마다 `term/changes?since=N&wait=15` 에 매달려 있다가 번호가 오르면 그 기계만 다시 읽는다.
   답의 `status:true` 는 그 서버가 **학생 상태 전이**(작업 중·기다림·쉼)에도 번호를 올린다는 뜻이고,
   그때 폴링은 도구 이름·컨텍스트 % 용으로 15초에 한 번만 한다. `status` 가 없는 옛 판은 5초 폴링,
@@ -71,20 +71,17 @@ lib/
   connection.dart     로그인·복원·기기 연결 대기·로그아웃 상태
   connection_store.dart 계정/기존 주소 → 단일 Keychain 항목
   relay_account.dart  origin 고정 계정 API · 인증 전송 · 테마 revision CAS
-  nacho.dart           나쵸 창구 — 대화 원장 이어 받기(순번) · 같은 id 재전송 · 작업 장부 읽기
-  nacho_reply.dart     나쵸 답 가르기 — 실행·진단 줄과 사용량 꼬리를 접힌 상세로(원문 보존) · 학생 링크 읽기
-  nacho_student.dart   장부의 맡은 학생(surface·host·machine_id) → 실제 pane. 기계를 못 정하면 짐작 안 함
   hub_model.dart       기계→방→학생 트리 · 기계마다 따로 받아 온 것부터 · `term/changes` 롱폴 · 대기 전이 배지+햅틱
   grid.dart            순수 Dart 격자 모델 — dirty 행 교체 · 글자 폭 표 · 256 팔레트
   term_session.dart    WS 수명(백오프·gone·pause/resume) · 키 바이트 · 답장 · 그림 폴링
   grid_canvas.dart     CustomPainter 렌더러(행 캐시) + InteractiveViewer 폭 맞춤·핀치
-  wide_layout.dart     아이패드·가로 화면 — 방 상자 여러 열(벽돌 쌓기)·대화와 작업 나란히. 값은 docs/design.md 「태블릿」
+  wide_layout.dart     아이패드·가로 화면 — 방 상자 여러 열(벽돌 쌓기). 값은 docs/design.md 「태블릿」
   hardware_keys.dart   하드웨어 키보드 → pane 바이트(Esc·⌘.·Ctrl·방향·Shift+Tab). 글자는 입력칸이 받는다
   kasanet.dart         데스크톱 직통(카사넷) 길 고르기 — 직통이면 앱 안 입구, 아니면 관문. 등록은 관문으로만(docs/kasanet.md P5)
   kasanet_native*.dart 앱에 링크된 kasa-net-ffi(ios/KasaNet) 바인딩. 웹·시험은 없음(늘 관문)
   net_tcp*.dart        데스크톱 개발 서버를 폰 localhost 로 끌어오는 다리(/net/tcp 웹소켓)
   conversation.dart    학생 대화 모델 — transcript-raw(claude)·rollout(codex) 줄 → 말풍선·도구 묶음 · 화면의 선택 메뉴 읽기
-  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings · dev_server(앱 안 Safari·크롬 커스텀 탭)
+  screens/             connect · hub(첫 화면) · share_screen · terminal(「터미널|대화」 전환) · conversation_view · settings · dev_server(앱 안 Safari·크롬 커스텀 탭)
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
 ```

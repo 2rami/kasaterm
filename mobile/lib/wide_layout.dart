@@ -13,23 +13,12 @@ const roomColumnMinWidth = 340.0;
 /// 방 상자 열 사이. 상자의 아래 여백(10)과 같게 둬 가로·세로 틈이 같아 보이게.
 const roomColumnGap = 10.0;
 
-/// 이 폭부터 나쵸 첫 화면의 「대화」와 「작업」을 탭 대신 나란히 편다.
-const sideBySideMinWidth = 900.0;
-
-/// 나란히 펼 때 오른쪽 「작업」 열의 폭 — 폰에서 다듬은 작업판을 그 폭 그대로 쓴다.
-const workColumnWidth = 400.0;
-
-/// 대화처럼 읽는 열의 상한(PC 설정 화면 `CONTENT_MAX_W` 와 같은 값).
-const readColumnMaxWidth = 800.0;
-
 /// [width] 에 [minWidth] 이상인 열이 몇 개 들어가는지. 폰 세로는 1열이다.
 int columnsFor(
   double width, {
   double minWidth = roomColumnMinWidth,
   double gap = roomColumnGap,
 }) => math.max(1, ((width + gap) / (minWidth + gap)).floor());
-
-bool sideBySide(double width) => width >= sideBySideMinWidth;
 
 /// 높이가 제각각인 상자를 차례대로 가장 낮은 열에 쌓는다(같으면 왼쪽). 돌려주는 것은
 /// 상자마다 (열, 위쪽 y). 차례를 지키므로 위에서 아래로 읽으면 원래 순서에 가깝다.
