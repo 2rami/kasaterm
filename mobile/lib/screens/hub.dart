@@ -47,11 +47,21 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _model.start();
-    unawaited(_offerRelease());
+    _watchReleases();
   }
 
   /// 이 실행에서 이미 알린 빌드 — 앱으로 돌아올 때마다 같은 판을 또 알리지 않는다.
   String? _offered;
+
+  /// 켤 때·돌아올 때만 물으면 켜 둔 채 쓰는 동안 올라온 판을 모른다 — 앞에 있는 동안 30초마다 묻는다(판 정보 한 줄이라 가볍다).
+  static const _releaseEvery = Duration(seconds: 30);
+  Timer? _releaseTimer;
+
+  void _watchReleases() {
+    _releaseTimer?.cancel();
+    _releaseTimer = Timer.periodic(_releaseEvery, (_) => unawaited(_offerRelease()));
+    unawaited(_offerRelease());
+  }
 
   Future<void> _offerRelease() async {
     final r = await widget.server.latestRelease();
@@ -67,6 +77,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _releaseTimer?.cancel();
     _model.dispose();
     super.dispose();
   }
@@ -76,11 +87,12 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         _model.start();
-        unawaited(_offerRelease());
+        _watchReleases();
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
         _model.stop();
+        _releaseTimer?.cancel();
       case AppLifecycleState.inactive:
         break;
     }
