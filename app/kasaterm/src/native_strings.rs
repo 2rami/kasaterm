@@ -227,7 +227,7 @@ fn english(value: &str) -> Option<&'static str> {
         "말풍선 표시 시간" => "Bubble duration",
         "펫 조작" => "Pet controls",
         "클릭으로 쓰다듬기 · 끌어서 자리 옮기기" => "Click to pet · Drag to move",
-        "두 번 클릭해 캐릭터 바꾸기 · 휠로 크기 조절" => "Double-click to switch character · Scroll to resize",
+        "휠로 크기 조절 · 말풍선을 누르면 그 창으로" => "Scroll to resize · Click the bubble to open that pane",
         "우클릭으로 행동 선택과 기능 켜고 끄기" => "Right-click for actions and quick toggles",
         "펫 설정을 저장하지 못했습니다. 다시 눌러 주세요" => "Could not save pet settings. Please try again",
         "클립보드" => "Clipboard",

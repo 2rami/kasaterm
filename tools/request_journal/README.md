@@ -7,8 +7,10 @@ The database is operational app data, not a MEMORY vault note.
 ## Chat and restart checks
 
 The main web surface asks Nacho about this project's requests and restart checks;
-raw journal records remain in a collapsed evidence section. The native pet uses
-the same server-owned `pet` conversation. Neither surface executes model output.
+raw journal records remain in a collapsed evidence section. The surface never
+executes model output. The native pet does not chat here (removed 2026-10-01);
+it only pulls Nacho's postbox through `/api/pet/poll` and short lines through
+`/api/pet-chatter`.
 
 The baseline is the observed operating-system app process start time, never the
 journal service's start time. A separate background RuntimeObserver records that
@@ -60,7 +62,7 @@ messages of at most about 32 KiB JSON each. After a job completes, clients read
 history forward from `after=user_message_id-1` until `next_after` is null. Older
 conversation pages use `before`/`next_before`. Job metadata never carries the full
 checklist; the checklist/evidence endpoints page it separately so a large UTF-8
-conversation cannot exceed the native pet's response budget.
+conversation stays within a bounded response.
 
 Successful synthesis shows its main feature checks rather than appending each
 unmapped commit as another user task. Additional records remain in

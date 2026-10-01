@@ -24,14 +24,8 @@ mod chatter;
 mod menu;
 mod catalog;
 mod journal;
-mod chat;
-mod ask;
 mod postbox;
 mod overlay;
-#[cfg(target_os = "macos")]
-mod chat_panel;
-#[cfg(target_os = "macos")]
-mod ask_bar;
 #[cfg(target_os = "macos")]
 mod native_cursor;
 
@@ -52,9 +46,7 @@ fn preview_mode() -> bool {
 enum Nacho {
     #[default]
     Idle,
-    /// 질문을 받고 판을 보는 중.
-    Looking,
-    /// 답하는 중 — 나쵸가 고른 동작을 한 번 보여 주고 Idle 로 돌아간다.
+    /// 말하는 중 — 고른 동작을 한 번 보여 주고 Idle 로 돌아간다.
     Speaking,
 }
 
@@ -65,7 +57,6 @@ struct Gfx {
     p_normal: wgpu::RenderPipeline, p_add: wgpu::RenderPipeline, p_mul: wgpu::RenderPipeline, p_mask: wgpu::RenderPipeline,
     p_plain: wgpu::RenderPipeline,
     bubble_vb: wgpu::Buffer, bubble_ub: wgpu::Buffer,
-    typed_vb: wgpu::Buffer, typed_ub: wgpu::Buffer,
 }
 
 struct App {
@@ -80,8 +71,6 @@ struct App {
     resting: bool,
     playback: catalog::Playback,
     name: String,
-    /// 두 번 누름 판정용. 왼쪽 한 번은 끌기라, 바로 끌어 버리면 두 번째를 못 본다.
-    last_click: Option<std::time::Instant>,
     /// 커서가 캐릭터의 **칠해진 픽셀** 위인가. 창은 네모라 그냥 두면 투명한 여백을
     /// 눌러도 펫이 잡히고, 그 아래 있던 창은 영영 못 누른다.
     on_body: bool,
@@ -97,11 +86,10 @@ struct App {
     /// 글자를 그린 텍스처. 말풍선은 이것이 있을 때만 뜬다.
     bubble_text: Option<(wgpu::TextureView, f32, f32)>,
     bubble_geometry: Option<bubble::Geometry>,
-    typed_geometry: Option<bubble::Geometry>,
     text_viewport: Option<(u32,u32,u64)>,
     /// 글자 크기(pt). 설정 화면이 `pet/text_pt` 에 적어 두면 그것을 따른다.
     text_pt: f32,
-    /// 지금 말풍선이 가리키는 pane — 되받아 말하거나 말풍선을 누르면 이리로 간다.
+    /// 지금 말풍선이 가리키는 pane — 말풍선을 누르면 이리로 간다.
     subject: String,
     /// 사람이 지금 보고 있는 pane 의 요약 — 펫을 한 번 누르면 말한다.
     focus: Option<board::Focus>,
@@ -114,23 +102,12 @@ struct App {
     /// 지금 도는 자동 모션이 한 번 보여 주고 끝나는 반응인가. 끝나면 Idle 로 돌아간다.
     reaction_once: bool,
     nacho: Nacho,
-    /// 지금 가는 질문이 사람이 친 것이 아니라 펫이 스스로 꺼낸 것(인사·승인 알림)인가.
-    /// 이런 건 실패해도 「닿지 못했어요」를 안 띄운다 — 묻지도 않은 사람에게 오류를 보이는 셈이다.
-    ask_auto: bool,
-    /// 켜질 때 나쵸가 한 번 말을 걸었나.
-    greeted: bool,
-    /// 사람이 입력 바를 끌어 옮긴 만큼(제자리 기준). state.json 에 함께 남긴다.
-    ask_offset: (f64, f64),
-    /// 나쵸가 이 답에 골라 준 동작 그룹. 목록에 있는 것만 받는다.
+    /// 나쵸 말에 맞춰 보여 줄 동작 그룹. 목록에 있는 것만 받는다.
     nacho_group: Option<String>,
-    /// 나쵸가 켠 표정의 번호 — 답을 내리거나 다음 답이 오면 끈다.
-    nacho_expression: Option<usize>,
-    /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
-    typing: Option<String>,
-    /// 판이 급한 국면에서 이미 한 번 물었다. `urgent` 는 말풍선을 접지 않으려고 두는
-    /// 표시라 말을 할 때마다 꺼지는데, 그것으로 「물었는가」를 판정하면 판이 갱신될
-    /// 때마다 같은 것을 다시 묻게 된다.
-    urgent_asked: bool,
+    /// 판이 급한 국면에서 이미 한 번 튀었다. `urgent` 는 말풍선을 접지 않으려고 두는
+    /// 표시라 말을 할 때마다 꺼지는데, 그것으로 「튀었는가」를 판정하면 판이 갱신될
+    /// 때마다 다시 튄다.
+    urgent_seen: bool,
     /// 묻지 않아도 먼저 거는 말을 대 주는 곳.
     chatter: chatter::Client,
     /// 말풍선에 글자를 한 자씩 찍는 중 — (지금까지 찍은 글자 수, 마지막으로 찍은 때).
@@ -138,20 +115,11 @@ struct App {
     typed: Option<(usize, std::time::Instant)>,
     journal: journal::Client,
     journal_shown: bool,
-    chat: chat::Chat,
-    /// 머리 위 유리 바가 서버에 묻고 있는 것. 한 번에 하나다.
-    ask: ask::Client,
-    /// 나쵸가 넘긴 소식을 **끌어오는** 곳(인계·학생 완료·막힘). 물음과 반대 방향이다.
+    /// 나쵸가 넘긴 소식을 **끌어오는** 곳(인계·학생 완료·막힘).
     postbox: postbox::Client,
-    /// 바에 걸어 둔 「맡은 일」 한 줄 — 바뀔 때만 다시 그린다.
-    task_line: String,
-    /// 나쵸의 답이 말풍선에 떠 있다. 판이 바뀌어도 안 덮고, 사람이 누르거나 다시 묻거나
-    /// 한참 지날 때까지 안 접는다 — 읽으라고 띄운 요약이 12초 뒤 사라지면 안 띄운 것과 같다.
+    /// 나쵸 소식이 말풍선에 떠 있다. 판이 바뀌어도 안 덮고, 사람이 누르거나 한참 지날
+    /// 때까지 안 접는다 — 읽으라고 띄운 소식이 12초 뒤 사라지면 안 띄운 것과 같다.
     answer_shown: bool,
-    #[cfg(target_os = "macos")]
-    chat_panel: Option<chat_panel::Panel>,
-    #[cfg(target_os = "macos")]
-    ask_bar: Option<ask_bar::Bar>,
     #[cfg(target_os = "macos")]
     popup: Option<menu::Popup>,
     /// 떠 있는 현황판(`overlay.rs`). 카사텀이 `overlay.json` 을 적어 둔 때만 선다.
@@ -167,11 +135,6 @@ struct App {
     menu_probe_motion: f32,
     menu_probe_mesh: u64,
     menu_probe_motion_checked: bool,
-    chat_restore_scale: Option<f32>,
-    chat_prefill: Option<String>,
-    typed_tex: Option<(wgpu::TextureView, f32, f32)>,
-    /// 조합 중인 한글. 확정 전이라 `typing` 에 아직 안 붙은 글자다.
-    preedit: String,
     /// 모델의 맨 윗점(모델 좌표). 말풍선이 이 점을 따라다녀 몸이 흔들리면 함께 흔들린다.
     head: (f32, f32),
     /// 그림이 실제로 차지하는 범위. 모델이 선언한 캔버스보다 큰 경우가 흔해(마오는 모자가
@@ -319,19 +282,12 @@ impl ApplicationHandler for App {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bubble_ub = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 160,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        // Queue writes happen before the shared submit, so the two text draws
-        // must not overwrite each other's persistent geometry and uniforms.
-        let typed_vb = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("typed-text-vertices"), size: 6 * 16,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let typed_ub = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("typed-text-uniforms"), size: 160,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         self.gfx = Some(Gfx {
             p_normal: mk("fs", fmt, over), p_add: mk("fs", fmt, add), p_mul: mk("fs", fmt, mul),
             p_mask: mk("fs_mask", wgpu::TextureFormat::Rgba8Unorm, add), p_plain: mk("fs_plain", fmt, over),
-            bubble_vb, bubble_ub, typed_vb, typed_ub,
+            bubble_vb, bubble_ub,
             dev, q, surf, fmt, bgl, samp, texs, mask_view, dummy_view });
         self.win = Some(win);
-        if std::env::args().any(|arg| arg == "--chat") { self.toggle_chat(); }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
@@ -341,7 +297,7 @@ impl ApplicationHandler for App {
             // 물리 크기를 그대로 쥐고 있어 캐릭터가 반쪽이 되거나 흐릿해진다 — 논리 크기를
             // 다시 걸어 주면 뒤따르는 Resized 가 맞는 물리 크기를 들고 온다.
             WindowEvent::ScaleFactorChanged { .. } => {
-                self.bubble_geometry=None;self.typed_geometry=None;self.text_viewport=None;
+                self.bubble_geometry=None;self.text_viewport=None;
                 if let Some(w) = &self.win {
                     let _ = w.request_inner_size(winit::dpi::LogicalSize::new(
                         self.w * self.scale as f64,
@@ -350,7 +306,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(sz) => {
-                self.bubble_geometry=None;self.typed_geometry=None;self.text_viewport=None;
+                self.bubble_geometry=None;self.text_viewport=None;
                 if let Some(g) = &self.gfx {
                     let caps_alpha = self.alpha;
                     g.surf.configure(&g.dev, &wgpu::SurfaceConfiguration {
@@ -366,18 +322,6 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 // 비활성 창의 첫 클릭은 마지막 그리기 이후 들어올 수 있어 말풍선 위치를 다시 잰다.
                 self.poll_cursor();
-                if self.cursor_on_typed() {self.last_click=None;if let Some(win)=&self.win {win.focus_window();}return;}
-                let double = self
-                    .last_click
-                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
-                self.last_click = Some(std::time::Instant::now());
-                // 두 번 누르면 머리 위 유리 바가 열린다. 한 번 누름은 창 끌기라 여기
-                // 걸 수가 없고, 여기 있던 「다음 캐릭터」는 메뉴에 그대로 있다 —
-                // 캐릭터는 하루에 한 번 바꾸지만 묻는 것은 하루에도 여러 번이다.
-                if double {
-                    self.toggle_ask();
-                    return;
-                }
                 // 말풍선을 누르면 그 이야기의 pane 으로 간다 — 「누가 무엇을 하고 있다」를
                 // 읽고 그 자리를 화면에서 찾아 헤매는 것이 이 펫이 없애려던 일이다.
                 if self.cursor_on_bubble() {
@@ -424,52 +368,6 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
                 self.show_menu();
             }
-            // 친 글자. 포커스를 받은 동안에만 온다(말 걸기를 열 때만 키 창이 된다).
-            WindowEvent::KeyboardInput { event, .. } if self.typing.is_some() => {
-                use winit::keyboard::{Key, NamedKey};
-                if event.state != ElementState::Pressed {
-                    return;
-                }
-                match &event.logical_key {
-                    Key::Named(NamedKey::Escape) => self.toggle_typing(),
-                    Key::Named(NamedKey::Enter) => self.send_typed(),
-                    Key::Named(NamedKey::Backspace) => {
-                        if let Some(t) = self.typing.as_mut() {
-                            t.pop();
-                        }
-                        self.rebuild_typed();
-                    }
-                    Key::Named(NamedKey::Space) => {
-                        if let Some(t) = self.typing.as_mut() {
-                            t.push(' ');
-                        }
-                        self.rebuild_typed();
-                    }
-                    _ => {
-                        if let Some(txt) = event.text.as_ref() {
-                            if let Some(t) = self.typing.as_mut() {
-                                t.push_str(txt);
-                            }
-                            self.rebuild_typed();
-                        }
-                    }
-                }
-            }
-            // 한글 조합 — 조합 중인 글자를 그대로 보여 주고, 확정되면 붙인다.
-            WindowEvent::Ime(ime) if self.typing.is_some() => {
-                use winit::event::Ime;
-                match ime {
-                    Ime::Commit(txt) => {
-                        if let Some(t) = self.typing.as_mut() {
-                            t.push_str(&txt);
-                        }
-                        self.preedit.clear();
-                    }
-                    Ime::Preedit(txt, _) => self.preedit = txt,
-                    _ => {}
-                }
-                self.rebuild_typed();
-            }
             WindowEvent::RedrawRequested => self.draw(),
             _ => {}
         }
@@ -480,42 +378,17 @@ impl ApplicationHandler for App {
         #[cfg(target_os="macos")]
         if let (Some(started),Some(popup))=(self.menu_probe_started,self.popup.as_ref()) {
             let elapsed=started.elapsed().as_secs_f32();
+            #[cfg(debug_assertions)]
+            if elapsed>1.0&&self.menu_probe_phase==0 {
+                if let Ok(path)=std::env::var("KASAPET_MENU_SHOT") {if !std::path::Path::new(&path).exists(){eprintln!("MENU_PROBE_SHOT:{}",popup.probe_shot(&path));}}
+            }
             if elapsed>1.5&&!self.menu_probe_motion_checked {eprintln!("MENU_PROBE_MOTION_CHANGED:{} MESH_CHANGED:{}",self.motion.as_ref().is_some_and(|m|(m.time()-self.menu_probe_motion).abs()>0.05),self.probe_mesh_signature()!=self.menu_probe_mesh);self.menu_probe_motion_checked=true;}
-            if elapsed>2.0&&self.menu_probe_phase==0 {popup.probe_click_row(3);self.menu_probe_phase=1;}
+            if elapsed>2.0&&self.menu_probe_phase==0 {popup.probe_click_row(0);self.menu_probe_phase=1;}
             else if elapsed>3.0&&self.menu_probe_phase==1 {popup.probe_click_row(0);self.menu_probe_phase=2;}
             else if elapsed>4.0&&self.menu_probe_phase==2 {popup.probe_key(125);popup.probe_key(36);self.menu_probe_phase=3;}
             else if elapsed>6.0&&self.menu_probe_phase==3 {eprintln!("MENU_PROBE_RENDER_FRAMES:{} VISIBLE:{}",self.menu_probe_frames,popup.visible());popup.probe_key(53);self.menu_probe_phase=4;}
             else if self.menu_probe_phase==4&&!popup.visible(){eprintln!("MENU_PROBE_ESCAPE_CLOSED:true");self.menu_probe_phase=5;el.exit();}
             if elapsed>10.0 {eprintln!("MENU_PROBE_TIMEOUT");el.exit();}
-        }
-        // 진짜 펫에서 바가 열리고 머리 위에 앉는지 — 사람 손 없이 확인하는 창구.
-        // `KASAPET_AUTOASK` 에 물음을 담으면 그것을 실제로 보내고 답까지 기다린다
-        // (`1` 이면 여는 데까지만). 물을 pane 은 `KASAPET_AUTOASK_PANE` 으로 덮는다.
-        #[cfg(target_os="macos")]
-        if let Ok(question) = std::env::var("KASAPET_AUTOASK") {
-            let question = question.trim().to_string();
-            if self.frames==30 {
-                if !self.ask_open() { self.toggle_ask(); }
-                let pet = self.win.as_ref().and_then(|w| w.outer_position().ok()).map(|p| p.y as f64);
-                match self.ask_bar.as_ref() {
-                    Some(bar) => eprintln!("ASK_APP_OPEN:{} FRAME:{:?} PET_TOP:{:?}", bar.visible(), bar.probe_frame(), pet),
-                    None => eprintln!("ASK_APP_OPEN:false"),
-                }
-                if question != "1" && !question.is_empty() {
-                    let pane = std::env::var("KASAPET_AUTOASK_PANE").ok().filter(|p| !p.is_empty())
-                        .unwrap_or_else(|| self.ask_pane());
-                    eprintln!("ASK_APP_PANE:{pane}");
-                    if let Some(path) = self.journal_path() {
-                        let sent = self.ask.ask(path.clone(), question.clone(), pane, self.act_catalog(), self.postbox.task_id());
-                        eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), sent);
-                        if sent { self.begin_looking(true); }
-                    }
-                }
-            }
-            // 답이 말풍선에 찍힌 뒤 한 장 뜨고 나간다 — 답을 받자마자 나가면 그림에 답이 없다.
-            // 시퀀스는 shot_at 부터 shot_seq 장을 찍는다 — 그 끝까지는 나가면 안 된다.
-            let shot_end = self.shot_at + self.shot_seq;
-            if self.frames>60 && !self.ask.busy() && (self.shot_path.is_none() || self.frames > shot_end) { el.exit(); }
         }
         if let Some(w) = &self.win { w.request_redraw(); }
     }
@@ -534,13 +407,12 @@ impl App {
             .unwrap_or(false);
         if let Some(d) = &self.pet_dir { self.apply_preferences(kasa_pet_config::read(d)); }
         menu::content(&self.preferences, self.resting || self.mood == board::Mood::Sleep,
-            self.typing.is_some(), self.chat_open(), self.catalog.touch().is_some(), can_next, self.pet_dir.is_some(),
+            self.catalog.touch().is_some(), can_next, self.pet_dir.is_some(),
             &self.catalog, &self.playback, &self.expressions.indices())
     }
 
     fn show_menu(&mut self) {
         self.poll_cursor();
-        self.last_click = None;
         #[cfg(target_os = "macos")]
         {
             if self.popup.is_none() {let content=self.menu_content();self.popup=menu::Popup::new(content);}
@@ -563,15 +435,7 @@ impl App {
     fn apply_menu_action(&mut self, el: &ActiveEventLoop, action: Option<menu::Action>) {
         if self.menu_probe_started.is_some()&&matches!(action,Some(menu::Action::Motion(_))){eprintln!("MENU_PROBE_CLICK_APPLIED:true");}
         match action {
-            Some(menu::Action::Talk) => self.toggle_typing(),
-            Some(menu::Action::Ask) => self.toggle_ask(),
-            Some(menu::Action::AskNow(question)) => self.ask_now(question),
-            Some(menu::Action::Chat) => self.toggle_chat(),
-            Some(menu::Action::ChatAsk(question)) => {
-                if !self.chat_open() { self.toggle_chat(); }
-                self.chat_prefill = Some(question.to_string());
-            }
-            Some(menu::Action::Journal(action)) => self.request_journal(action),
+            Some(menu::Action::OpenJournal) => self.open_journal(),
             Some(menu::Action::Touch) => self.touch(),
             Some(menu::Action::Rest) => {
                 self.resting = !(self.resting || self.mood == board::Mood::Sleep);
@@ -583,7 +447,7 @@ impl App {
             Some(menu::Action::Next) => self.next_character(),
             Some(menu::Action::Motion(i)) => self.select_motion(i),
             Some(menu::Action::Expression(i)) => self.select_expression(i),
-            Some(menu::Action::ResetExpressions) => { self.expressions.clear(); self.nacho_expression = None; }
+            Some(menu::Action::ResetExpressions) => self.expressions.clear(),
             Some(menu::Action::RepeatMotion) => {
                 let repeat = !self.playback.repeat;
                 if let Some(i) = self.playback.selected {
@@ -613,11 +477,6 @@ impl App {
 
     fn apply_preferences(&mut self, prefs: kasa_pet_config::PetPreferences) {
         let previous = std::mem::replace(&mut self.preferences, prefs);
-        if previous.ask_always && !self.preferences.ask_always && self.ask_open() {
-            self.ask.cancel();
-            #[cfg(target_os = "macos")]
-            if let Some(bar) = &self.ask_bar { bar.hide(); }
-        }
         if self.preferences.always_on_top != previous.always_on_top {
             if let Some(w) = &self.win {
                 w.set_window_level(if self.preferences.always_on_top {
@@ -626,12 +485,7 @@ impl App {
             }
         }
         if let Some(percent) = self.preferences.scale_percent {
-            let mut scale = percent as f32 / 100.0;
-            #[cfg(target_os = "macos")]
-            if let Some(panel) = self.chat_panel.as_ref().filter(|p| p.visible()) {
-                self.chat_restore_scale = Some(scale);
-                scale = scale.min((panel.max_pet_height() / self.h) as f32).max(0.4);
-            }
+            let scale = percent as f32 / 100.0;
             if (scale - self.scale).abs() > 0.001 {
                 self.scale = scale;
                 if let Some(w) = &self.win {
@@ -644,7 +498,6 @@ impl App {
         if self.preferences.text_pt as f32 != self.text_pt {
             self.text_pt = self.preferences.text_pt as f32;
             self.rebuild_bubble_text();
-            self.rebuild_typed();
         } else if self.preferences.bubble_width != previous.bubble_width {
             self.rebuild_bubble_text();
         }
@@ -768,76 +621,10 @@ impl App {
         hit
     }
 
-    /// 말 걸기를 열고 닫는다. 열 때만 창이 키를 받는다 — 평소에 포커스를 쥐면
-    /// 남의 타이핑에 끼어든다(그게 `with_active(false)` 의 전부다).
-    fn toggle_typing(&mut self) {
-        if self.typing.is_some() {
-            self.typing = None;
-            self.preedit.clear();
-            self.typed_tex = None;
-            if let Some(w) = &self.win {
-                w.set_ime_allowed(false);
-            }
-            resign_key();
-            if self.playback.selected.is_none() { self.resume_automatic(); }
-            return;
-        }
-        self.close_chat();
-        self.typing = Some(String::new());
-        self.resting = false;
-        if self.playback.selected.is_none() && (self.preferences.animations || self.typing.is_some()) { self.resume_automatic(); }
-        if let Some(w) = &self.win {
-            w.set_ime_allowed(true);
-            w.focus_window();
-        }
-        self.rebuild_typed();
-    }
-
-    /// 친 글을 그 캐릭터의 pane 으로 보낸다. 보내는 길은 사람이 쓰는 것과 **같은
-    /// 명령**이다 — 따로 두면 한쪽만 고쳐지는 날이 온다.
-    fn send_typed(&mut self) {
-        let text = self.typing.clone().unwrap_or_default();
-        let text = text.trim().to_string();
-        if let Some(action) = journal::intent(&text) {
-            self.toggle_typing();
-            self.request_journal(action);
-            return;
-        }
-        if text.is_empty() || self.subject.is_empty() {
-            self.toggle_typing();
-            return;
-        }
-        if let Some(cli) = cli_path() {
-            let _ = std::process::Command::new(cli)
-                .arg("send")
-                .arg("--surface")
-                .arg(&self.subject)
-                .arg(format!("{text}\n"))
-                .status();
-        }
-        self.toggle_typing();
-    }
-
-    fn rebuild_typed(&mut self) {
-        self.typed_geometry=None;
-        if self.typing.is_none(){self.typed_tex=None;return;}
-        let Some(viewport)=self.bubble_viewport() else{self.typed_tex=None;return;};
-        let Some(g) = &self.gfx else { return };
-        let body = format!(
-            "› {}{}",
-            self.typing.clone().unwrap_or_default(),
-            self.preedit
-        );
-        self.typed_tex = bubble::render_preview(&g.dev, &g.q, &body, viewport, self.text_pt, self.preferences.bubble_width as f32);
-    }
-
-    fn request_journal(&mut self, action: journal::Action) {
-        let path = self.pet_dir.as_ref().and_then(|dir| dir.parent())
-            .map(|dir| dir.join("request-journal/service.json"))
-            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config/kasaterm/request-journal/service.json")));
-        let Some(path) = path else { return };
-        if self.journal.request(action, path) {
-            self.say = "요청 장부를 읽고 있어요…".into();
+    fn open_journal(&mut self) {
+        let Some(path) = self.journal_path() else { return };
+        if self.journal.open(path) {
+            self.say = "요청 장부를 여는 중이에요…".into();
             self.journal_shown = true;
             self.said_at = std::time::Instant::now();
             self.urgent = false;
@@ -845,178 +632,19 @@ impl App {
         }
     }
 
-    fn chat_open(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        { self.chat_panel.as_ref().is_some_and(|panel| panel.visible()) }
-        #[cfg(not(target_os = "macos"))]
-        { false }
-    }
-
     fn journal_path(&self) -> Option<std::path::PathBuf> {
         self.pet_dir.as_ref().and_then(|dir| dir.parent()).map(|dir| dir.join("request-journal/service.json"))
             .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config/kasaterm/request-journal/service.json")))
     }
 
-    fn toggle_chat(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            if self.chat_open() { self.close_chat(); return; }
-            if self.typing.is_some() { self.toggle_typing(); }
-            if self.chat_panel.is_none() {
-                self.chat_panel = self.win.as_ref().and_then(|win| chat_panel::Panel::new(win));
-            }
-            let Some(panel) = &self.chat_panel else { self.action_error("대화창을 열지 못했어요."); return };
-            self.chat_restore_scale = Some(self.scale);
-            set_hand_cursor(false);
-            panel.show();
-            if let Some(path) = self.journal_path() {
-                let snapshot = path.with_file_name("pet-chat-history.json");
-                self.chat.load(path, snapshot);
-            }
-            self.fit_chat();
-            self.render_chat();
-        }
-    }
-
-    fn close_chat(&mut self) {
-        self.chat.close();
-        self.chat_prefill = None;
-        #[cfg(target_os = "macos")]
-        if let Some(panel) = &self.chat_panel { panel.hide(); }
-        if let Some(scale) = self.chat_restore_scale.take() {
-            self.scale = scale;
-            if let Some(win) = &self.win { let _ = win.request_inner_size(winit::dpi::LogicalSize::new(self.w * scale as f64, self.h * scale as f64)); }
-            self.save_state();
-        }
-    }
-
-    fn fit_chat(&mut self) {
-        #[cfg(target_os = "macos")]
-        if let Some(panel) = self.chat_panel.as_mut().filter(|p| p.visible()) {
-            let scale = self.chat_restore_scale.unwrap_or(self.scale).min((panel.max_pet_height() / self.h) as f32).max(0.4);
-            if (scale - self.scale).abs() > 0.001 {
-                self.scale = scale;
-                if let Some(win) = &self.win { let _ = win.request_inner_size(winit::dpi::LogicalSize::new(self.w * scale as f64, self.h * scale as f64)); }
-            }
-            panel.sync();
-        }
-    }
-
-    fn render_chat(&self) {
-        #[cfg(target_os = "macos")]
-        if let Some(panel) = &self.chat_panel { panel.render(&self.chat.transcript(), self.chat.busy(), self.chat.failed, &self.chat.progress, self.chat.has_older(), self.chat.showing_older); }
-    }
-
-    fn poll_chat(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            let events = self.chat_panel.as_ref().map(|panel| panel.events()).unwrap_or_default();
-            for event in events {
-                match event {
-                    chat_panel::Event::Close => self.close_chat(),
-                    chat_panel::Event::Send(text) => {
-                        if !self.chat.busy() {
-                            if let Some(path) = self.journal_path() {
-                                self.chat.send(path, text);
-                                if let Some(panel) = &self.chat_panel { panel.clear_input(); }
-                            }
-                            self.render_chat();
-                        }
-                    }
-                    chat_panel::Event::Retry => { if let Some(path) = self.journal_path() { self.chat.retry(path); } self.render_chat(); }
-                    chat_panel::Event::Older => { if let Some(path) = self.journal_path() { self.chat.older(path); } self.render_chat(); }
-                }
-            }
-            if self.chat.poll() { self.render_chat(); }
-            if self.chat_open() && !self.chat.busy() {
-                if let Some(question) = self.chat_prefill.take() {
-                    if let Some(path) = self.journal_path() { self.chat.send(path, question); self.render_chat(); }
-                }
-            }
-            self.fit_chat();
-        }
-    }
-
-    fn ask_open(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        { self.ask_bar.as_ref().is_some_and(|bar| bar.visible()) }
-        #[cfg(not(target_os = "macos"))]
-        { false }
-    }
-
-    /// 머리 위 유리 바를 연다. 대화창과 달리 창을 차지하지 않으므로 펫 크기를 줄이지
-    /// 않는다 — 하던 일을 멈추지 않은 채 한 마디 던지는 자리다. `focus` 가 거짓이면 키를
-    /// 안 뺏는다(상시 표시로 펫이 뜰 때).
-    fn open_ask(&mut self, focus: bool) {
-        #[cfg(target_os = "macos")]
-        {
-            if self.typing.is_some() { self.toggle_typing(); }
-            if self.chat_open() { self.close_chat(); }
-            if self.ask_bar.is_none() {
-                self.ask_bar = self.win.as_ref().and_then(|win| ask_bar::Bar::new(win));
-                if let Some(bar) = &self.ask_bar { bar.set_offset(self.ask_offset); }
-            }
-            let Some(bar) = &self.ask_bar else { self.action_error("유리 바를 열지 못했어요."); return };
-            if focus { set_hand_cursor(false); bar.show(); } else { bar.show_quiet(); }
-            bar.sync(HEADROOM * self.scale as f64);
-        }
-        #[cfg(not(target_os = "macos"))]
-        { let _ = focus; }
-    }
-
-    /// 메뉴·두 번 누름. 늘 떠 있는 바라면 여닫는 대신 커서를 준다 — 상시 표시를 켠 사람이
-    /// 「바로 묻기」를 눌렀는데 바가 사라지면 그건 반대로 간 것이다.
-    fn toggle_ask(&mut self) {
-        if self.ask_open() {
-            #[cfg(target_os = "macos")]
-            if self.preferences.ask_always {
-                if let Some(bar) = &self.ask_bar { set_hand_cursor(false); bar.focus(); }
-                return;
-            }
-            self.close_ask();
-            return;
-        }
-        self.open_ask(true);
-    }
-
-    /// Esc·×·포커스 잃음. 늘 떠 있는 바는 키만 내려놓고 자리에 남는다.
-    fn close_ask(&mut self) {
-        self.ask.cancel();
-        #[cfg(target_os = "macos")]
-        if let Some(bar) = &self.ask_bar {
-            if self.preferences.ask_always { bar.clear_input(); resign_key(); } else { bar.hide(); }
-        }
-    }
-
     /// 지금 이야기의 주인공 pane. 사람이 보고 있는 창이 먼저고, 그것이 없으면 말풍선이
-    /// 가리키던 pane 이다 — 서버는 이 이름으로 「이 창」을 찾는다.
-    fn ask_pane(&self) -> String {
+    /// 가리키던 pane 이다 — 먼저 거는 말은 이 창을 보고 짓는다.
+    fn focus_pane(&self) -> String {
         self.focus.as_ref().map(|focus| focus.pane.clone()).filter(|pane| !pane.is_empty())
             .unwrap_or_else(|| self.subject.clone())
     }
 
-    /// 펫이 스스로 나쵸에게 한 마디 부탁한다(켜질 때 인사, 승인 기다리는 학생 알림).
-    /// 이미 묻는 중이면 건너뛴다 — 사람이 친 질문이 먼저다.
-    fn ask_auto(&mut self, text: &str) {
-        if self.ask.busy() || self.ask_pane().is_empty() { return; }
-        self.ask_at(text, false);
-        self.ask_auto = true;
-    }
-
-    /// 나쵸에게 묻는다. 답은 말풍선으로 온다(`poll_ask`).
-    fn ask_now(&mut self, text: &str) {
-        self.ask_at(text, true);
-    }
-
-    fn ask_at(&mut self, text: &str, announce: bool) {
-        let pane = self.ask_pane();
-        let Some(path) = self.journal_path() else { return };
-        if self.ask.ask(path, text.to_string(), pane, self.act_catalog(), self.postbox.task_id()) {
-            self.begin_looking(announce);
-        }
-    }
-
-    /// 나쵸의 말을 말풍선에 띄운다. `sticky` 면 사람이 누르거나 다시 묻기 전까지 안 접는다.
+    /// 나쵸의 말을 말풍선에 띄운다. `sticky` 면 사람이 누르기 전까지 안 접는다.
     fn speak(&mut self, text: String, sticky: bool) {
         self.journal_shown = false;
         self.answer_shown = sticky;
@@ -1027,98 +655,25 @@ impl App {
         self.rebuild_bubble_text();
     }
 
-    /// 나쵸의 답을 내린다. 판 글이 다시 흐르도록 판을 새로 읽게 한다.
+    /// 나쵸 소식을 내린다. 판 글이 다시 흐르도록 판을 새로 읽게 한다.
     fn dismiss_answer(&mut self) {
         self.answer_shown = false;
         self.say.clear();
         self.board_seen = None;
         self.rebuild_bubble_text();
-        self.clear_nacho_expression();
         self.set_nacho(Nacho::Idle, false);
     }
 
-    /// 읽으라고 띄운 답이라도 이만큼 지나면 내린다 — 오래된 판 요약은 지금 이야기가 아니다.
+    /// 읽으라고 띄운 소식이라도 이만큼 지나면 내린다 — 오래된 판 이야기는 지금 이야기가 아니다.
     const ANSWER_LINGER: std::time::Duration = std::time::Duration::from_secs(180);
 
-    /// 먼저 거는 말이 떠 있는 답을 비켜 주는 시간. 답은 안 접히는 것이 규칙이라(3분),
-    /// 그것을 그대로 기다리면 켤 때 인사 한 줄에 3분을 내주게 되고 먼저 거는 말은 없는
-    /// 기능이 된다. 사람이 한 줄을 읽기에는 넉넉하고 잡담이 끊기기에는 짧은 자리다.
+    /// 먼저 거는 말이 떠 있는 소식을 비켜 주는 시간. 소식은 안 접히는 것이 규칙이라(3분),
+    /// 그것을 그대로 기다리면 먼저 거는 말은 없는 기능이 된다. 사람이 한 줄을 읽기에는
+    /// 넉넉하고 잡담이 끊기기에는 짧은 자리다.
     const ANSWER_RESPECT: std::time::Duration = std::time::Duration::from_secs(45);
 
-    fn poll_ask(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            // 상시 표시 — 창이 생기면 키를 뺏지 않고 띄운다.
-            if self.preferences.ask_always && !self.ask_open() && self.win.is_some() && self.frames >= 2 {
-                self.open_ask(false);
-            }
-            if !self.greeted && self.frames >= 30 && self.pet_dir.is_some() && std::env::var_os("KASAPET_AUTOASK").is_none() && !self.ask_pane().is_empty() {
-                self.greeted = true;
-                // 판 이야기를 여기서 시키지 않는다 — 그 말을 꺼내면 나쵸가 기계마다 한
-                // 단락씩 늘어놓는 전체 판 모드로 답하고, 그 긴 글이 첫 화면을 덮는다.
-                // 판은 먼저 거는 말(`poll_chatter`)이 10초에 한 줄씩 알아서 흘린다.
-                self.ask_auto("방금 켜졌어. 판 이야기는 빼고 한 줄로 짧게 인사만 해줘");
-            }
-            let events = self.ask_bar.as_ref().map(|bar| bar.events()).unwrap_or_default();
-            for event in events {
-                match event {
-                    ask_bar::Event::Close => self.close_ask(),
-                    ask_bar::Event::Send(text) => {
-                        let pane = self.ask_pane();
-                        if let Some(path) = self.journal_path() {
-                            if self.ask.ask(path, text, pane, self.act_catalog(), self.postbox.task_id()) {
-                                if let Some(bar) = &self.ask_bar { bar.clear_input(); }
-                                self.begin_looking(true);
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(result) = self.ask.poll() {
-                if std::env::var_os("KASAPET_AUTOASK").is_some() {
-                    eprintln!("ASK_APP_ANSWER:{}", match &result {
-                        Ok(answer) => answer.line().replace('\n', " | "),
-                        Err(()) => "닿지 못했어요".to_string(),
-                    });
-                    if self.shot_path.is_some() { self.shot_at = self.frames + 30; }
-                }
-                match result {
-                    Ok(answer) => {
-                        self.speak(answer.line(), true);
-                        if std::env::var_os("KASAPET_AUTOASK").is_some() {
-                            eprintln!("ASK_APP_ACT:{}|{}", answer.motion.as_deref().unwrap_or("-"), answer.expression.as_deref().unwrap_or("-"));
-                        }
-                        self.perform(answer.motion, answer.expression);
-                    }
-                    Err(()) if self.ask_auto => {
-                        self.say.clear();
-                        self.rebuild_bubble_text();
-                        self.set_nacho(Nacho::Idle, false);
-                    }
-                    Err(()) => {
-                        self.speak("나쵸에게 닿지 못했어요.".into(), false);
-                        self.perform(Some("Error".into()), None);
-                    }
-                }
-            }
-            if self.answer_shown && self.said_at.elapsed() > Self::ANSWER_LINGER { self.dismiss_answer(); }
-            // 다른 창으로 넘어가면 접는다. 늘 떠 있는 입력줄은 바탕화면에 얹어 둔 판이
-            // 되고, 사람은 그 판을 곧 안 보게 된다 — 상시 표시는 그걸 알고 켜는 것이다.
-            if !self.preferences.ask_always && self.ask_bar.as_ref().is_some_and(|bar| bar.lost_focus()) { self.close_ask(); }
-            let moved = self.ask_bar.as_ref().filter(|bar| bar.visible()).map(|bar| {
-                bar.sync(HEADROOM * self.scale as f64);
-                bar.offset()
-            });
-            // 사람이 끌어 옮긴 자리는 그때 적어 둔다 — 종료를 기다리면 SIGTERM 으로 죽을 때 못 남긴다.
-            if let Some(offset) = moved.filter(|o| *o != self.ask_offset) {
-                self.ask_offset = offset;
-                self.save_state();
-            }
-        }
-    }
-
     /// 나쵸가 넘긴 소식을 끌어와 말풍선에 올린다 — 인계(「여기서 이어받을게」)와 학생
-    /// 완료·막힘. 묻는 길과 **반대 방향**이라 따로 돈다.
+    /// 완료·막힘.
     ///
     /// ★**창을 앞으로 끌어내거나 키를 뺏지 않는다.** 말풍선에 올리기만 한다 — 사람이 다른
     /// 일을 하는 중에 바탕화면 펫이 앞으로 튀어나오면 그건 알림이 아니라 방해다.
@@ -1131,54 +686,44 @@ impl App {
             self.postbox.remember_at(dir.join("postbox-spoken.json"));
         }
         self.postbox.pump(&path);
-
-        // 바에 걸린 「맡은 일」 — 바뀔 때만 손댄다.
-        let line = self.postbox.task().map(postbox::Task::line).unwrap_or_default();
-        if line != self.task_line {
-            self.task_line = line;
-            #[cfg(target_os = "macos")]
-            if let Some(bar) = &self.ask_bar {
-                bar.set_task(&self.task_line);
-            }
-        }
+        if self.answer_shown && self.said_at.elapsed() > Self::ANSWER_LINGER { self.dismiss_answer(); }
 
         if !self.postbox.waiting() {
             return;
         }
-        // 사람이 읽고 있는 답·찍는 중인 말·기다리는 물음 위에 얹지 않는다. 소식은 우편함에
-        // 그대로 남아 있으므로(ACK 전에는 안 꺼낸다) 잠시 뒤에 나온다.
+        // 사람이 읽고 있는 소식·찍는 중인 말 위에 얹지 않는다. 소식은 우편함에 그대로 남아
+        // 있으므로(ACK 전에는 안 꺼낸다) 잠시 뒤에 나온다.
         let reading = self.answer_shown && self.said_at.elapsed() < Self::ANSWER_RESPECT;
-        if self.ask.busy() || reading || self.typed.is_some() {
+        if reading || self.typed.is_some() {
             return;
         }
         let Some(got) = self.postbox.take() else { return };
         self.speak(got.text, true);
-        self.perform(Some(if got.kind == "watch" { "Talk" } else { "Think" }.into()), None);
+        self.perform(Some(if got.kind == "watch" { "Talk" } else { "Think" }.into()));
     }
 
-    /// 묻지 않아도 먼저 거는 말. 사람이 지금 읽을 것이 떠 있거나 무언가 묻는 중이면
-    /// 끼어들지 않는다 — 혼잣말이 사람이 기다리던 답을 덮으면 그건 방해다.
+    /// 먼저 거는 말. 사람이 지금 읽을 것이 떠 있으면 끼어들지 않는다 — 혼잣말이 사람이
+    /// 읽던 소식을 덮으면 그건 방해다.
     fn poll_chatter(&mut self) {
         if !self.preferences.chatter || !self.preferences.bubbles { return; }
         let gap = std::time::Duration::from_secs(self.preferences.chatter_seconds as u64);
         // 사람 손이 필요하다는 말 위에 잡담을 얹지 않는다 — 그 한 줄이 여기 있는 이유가 그것이다.
         let reading = self.answer_shown && self.said_at.elapsed() < Self::ANSWER_RESPECT;
-        let quiet = self.urgent || reading || self.journal_shown || self.ask.busy()
-            || self.typing.is_some() || self.chat.network_active()
+        let quiet = self.urgent || reading || self.journal_shown
             // 아직 찍는 중인 말이 있다 — 문장이 끝나기 전에 갈아 치우면 사람은 그 줄을
             // 읽지도 못하고 잃는다.
             || self.typed.is_some();
         // 자는 펫이 떠들면 자는 것이 아니다.
         if self.resting || self.mood == board::Mood::Sleep { return; }
         let Some(path) = self.journal_path() else { return };
-        let pane = self.ask_pane();
+        let pane = self.focus_pane();
         if let Some(line) = self.chatter.poll(&path, &pane, gap, quiet) {
             if self.overlay_data.is_some() {
                 // 요약은 현황판의 몫이다 — 말풍선은 사람과 나누는 대화 자리로 남긴다.
                 self.nacho_line = line;
             } else {
                 self.speak(line, false);
-                self.perform(Some("Talk".into()), None);
+                self.perform(Some("Talk".into()));
             }
         }
     }
@@ -1201,20 +746,13 @@ impl App {
     /// 매번 왼쪽 위로 돌아가면 옮긴 일이 헛일이 된다.
     fn save_state(&self) {
         let Some(d) = &self.pet_dir else { return };
-        let j = format!(
-            "{{\"x\":{:.0},\"y\":{:.0},\"scale\":{:.3},\"ask_dx\":{:.0},\"ask_dy\":{:.0}}}",
-            self.x, self.y, self.chat_restore_scale.unwrap_or(self.scale), self.ask_offset.0, self.ask_offset.1
-        );
+        let j = format!("{{\"x\":{:.0},\"y\":{:.0},\"scale\":{:.3}}}", self.x, self.y, self.scale);
         let _ = std::fs::write(d.join("state.json"), j);
     }
 
     /// 다음 캐릭터로. 프로세스를 바꿔치기(`execv`)하는 이유는 **pid 를 지키기 위해서**다 —
     /// 하단바 칩은 pid 파일로 켜짐을 판정하므로, 새로 spawn 하면 그 칩이 꺼진 것으로 읽힌다.
     fn next_character(&mut self) {
-        if self.chat.network_active() {
-            self.action_error("나쵸 답변이나 취소가 끝나면 캐릭터를 바꿀 수 있어요.");
-            return;
-        }
         let Some(d) = self.pet_dir.clone() else { return };
         let mut names: Vec<String> = std::fs::read_dir(&d)
             .map(|rd| {
@@ -1234,9 +772,7 @@ impl App {
         let Some(model) = model3_in(&d.join(next)) else { return };
         let _ = std::fs::write(d.join("current"), next);
         self.save_state();
-        let reopen_chat = self.chat_open();
-        self.chat.close();
-        exec_self(&model, reopen_chat);
+        exec_self(&model);
     }
 
     /// kasaterm 이 적어 둔 판을 읽는다. 파일이 안 바뀌었으면 아무 일도 안 한다 —
@@ -1265,8 +801,8 @@ impl App {
         self.stirred = std::time::Instant::now();
         let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
         // 판의 글(「미도리 · crm」)은 말풍선에 안 띄운다 — 거기는 나쵸가 말하는 자리다
-        // (2026-09-17 지시). 사람 손이 필요해지는 순간만 나쵸에게 한 줄 부탁하고, 그런 말이
-        // 새로 뜰 땐 캐릭터가 한 번 튄다 — 자리를 비운 사이의 승인 요청을 놓치지 않게.
+        // (2026-09-17 지시). 사람 손이 필요해지는 순간엔 캐릭터가 한 번 튄다 — 자리를 비운
+        // 사이의 승인 요청을 놓치지 않게. 누가 기다리는지는 현황판이 보여 준다.
         if account_scoped && self.say != workspace_text {
             if workspace_text.is_empty() {
                 self.say.clear();
@@ -1276,15 +812,11 @@ impl App {
                 self.speak(workspace_text, false);
             }
         }
-        if board::legacy_auto_question(account_scoped, urgent, self.urgent_asked) {
-            self.urgent_asked = true;
+        if board::legacy_urgent_alert(account_scoped, urgent, self.urgent_seen) {
+            self.urgent_seen = true;
             if !self.resting && self.preferences.animations { self.start_bounce(); }
-            // 현황판이 떠 있으면 누가 무엇을 기다리는지가 이미 거기 있다 — 나쵸에게 문장을 부탁할 까닭이 없다.
-            if self.overlay_data.is_none() {
-                self.ask_auto("사람 손이 필요한 학생 하나만, 누가 무엇을 기다리는지 한 줄로 알려줘");
-            }
         }
-        if !urgent { self.urgent_asked = false; }
+        if !urgent { self.urgent_seen = false; }
         self.urgent = urgent;
         if mood != self.mood {
             self.apply_mood(mood);
@@ -1343,10 +875,8 @@ impl App {
 
     fn automatic_group(&self) -> String {
         if self.resting || self.mood == board::Mood::Sleep { "Sleep".into() }
-        else if self.typing.is_some() { "Talk".into() }
         else {
             match self.nacho {
-                Nacho::Looking => "Think".into(),
                 Nacho::Speaking => self.nacho_group.clone().unwrap_or_else(|| "Talk".into()),
                 Nacho::Idle => "Idle".into(),
             }
@@ -1362,63 +892,20 @@ impl App {
     }
 
     fn restart_automatic(&mut self) {
-        if self.playback.selected.is_none() && (self.preferences.animations || self.typing.is_some()) { self.resume_automatic(); }
+        if self.playback.selected.is_none() && self.preferences.animations { self.resume_automatic(); }
     }
 
-    /// 이 캐릭터가 할 수 있는 동작·표정 — 나쵸에게 보내 답에 맞춰 고르게 한다. 그룹은 한 번씩,
-    /// 이름 옆에 한국어 뜻을 붙인다(후후의 파일 이름은 병음이라 그것만으로는 못 고른다).
-    fn act_catalog(&self) -> serde_json::Value {
-        let word = |label: String| label.split(" · ").next().unwrap_or("").to_string();
-        let mut seen = std::collections::BTreeSet::new();
-        let motions: Vec<serde_json::Value> = self.catalog.motions.iter()
-            .filter(|m| m.available && seen.insert(m.group.clone()))
-            .map(|m| serde_json::json!({"group": m.group, "label": word(m.label())}))
-            .collect();
-        let expressions: Vec<serde_json::Value> = self.catalog.expressions.iter()
-            .filter(|e| e.available && !e.unlinked)
-            .map(|e| serde_json::json!({"name": e.name, "label": word(e.label())}))
-            .collect();
-        serde_json::json!({"motions": motions, "expressions": expressions})
-    }
-
-    /// 나쵸가 답과 함께 고른 동작·표정을 입힌다. 목록 밖 이름은 무시한다.
-    fn perform(&mut self, motion: Option<String>, expression: Option<String>) {
-        self.clear_nacho_expression();
+    /// 나쵸 말에 맞춰 동작을 입힌다. 목록 밖 이름은 무시한다.
+    fn perform(&mut self, motion: Option<String>) {
         self.nacho_group = motion.filter(|group| self.catalog.group(group).is_some());
-        if let Some(name) = expression {
-            if let Some(i) = self.catalog.expressions.iter().position(|e| e.name == name && e.available && !e.unlinked) {
-                if !self.expressions.indices().contains(&i) && self.expressions.toggle(&self.catalog, i).is_ok() {
-                    self.nacho_expression = Some(i);
-                }
-            }
-        }
         self.set_nacho(Nacho::Speaking, true);
-    }
-
-    fn clear_nacho_expression(&mut self) {
-        if let Some(i) = self.nacho_expression.take() {
-            if self.expressions.indices().contains(&i) { let _ = self.expressions.toggle(&self.catalog, i); }
-        }
-    }
-
-    /// 질문을 보냈다 — 판을 보는 동작으로.
-    /// `announce` 는 묻고 있다는 것을 말풍선으로 알릴지. 사람이 친 질문에는 알리지만
-    /// 펫이 스스로 묻는 것은 조용히 한다 — 읽던 말이 「보는 중」으로 덮이면 사람은
-    /// 자기가 읽던 문장이 어디로 갔는지 알 수 없다.
-    fn begin_looking(&mut self, announce: bool) {
-        self.ask_auto = false;
-        if announce {
-            self.speak("나쵸가 보는 중…".into(), false);
-        }
-        self.clear_nacho_expression();
-        self.set_nacho(Nacho::Looking, false);
     }
 
     fn resume_automatic(&mut self) {
         let group = self.automatic_group();
         // 답하는 동작은 한 번 보여 주고 Idle 로 돌아간다 — 돌려 두면 펫이 하루 종일
         // 부산스럽다(2026-09-17 「베개가 계속 생겨」). 잠·대화·판 보는 중은 그대로 돈다.
-        let once = self.playback.selected.is_none() && self.nacho == Nacho::Speaking && !self.resting && self.typing.is_none();
+        let once = self.playback.selected.is_none() && self.nacho == Nacho::Speaking && !self.resting;
         if let Some(i) = self.playback.target(&self.catalog, &group) {
             if !self.play_motion(i, !once) { self.motion = None; }
             self.reaction_once = once;
@@ -1459,7 +946,7 @@ impl App {
         if self.mood == board::Mood::Sleep { self.apply_mood(board::Mood::Idle); }
         self.stirred = std::time::Instant::now();
         // 접힌 나쵸 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
-        // 잠깐 뒤 사라지는 것이 손해가 아니게 된다. 이 창 이야기는 바에 물으면 된다.
+        // 잠깐 뒤 사라지는 것이 손해가 아니게 된다.
         self.said_at = std::time::Instant::now();
         let Some(i) = self.catalog.touch() else { return };
         if self.play_motion(i, false) {
@@ -1487,10 +974,6 @@ impl App {
         self.saying() && self.bubble_geometry.zip(self.local).is_some_and(|(rect,p)|rect.contains(p))
     }
 
-    fn cursor_on_typed(&self)->bool {
-        self.typing.is_some()&&self.typed_geometry.zip(self.local).is_some_and(|(rect,p)|rect.contains(p))
-    }
-
     /// 말풍선이 가리키는 pane 을 앞으로 꺼낸다. pane 고르기와 창 올리기는 따로다 —
     /// 앱이 뒤에 있으면 고르기만 해서는 화면에 안 뜬다.
     fn jump_to_subject(&mut self) {
@@ -1499,7 +982,7 @@ impl App {
             return;
         }
         if self.journal_shown {
-            self.request_journal(journal::Action::Open);
+            self.open_journal();
             return;
         }
         self.touch();
@@ -1611,7 +1094,7 @@ impl App {
 
     fn refresh_text_viewport(&mut self) {
         let key=self.win.as_ref().map(|win|{let size=win.inner_size();(size.width,size.height,win.scale_factor().to_bits())});
-        if self.text_viewport!=key {self.text_viewport=key;self.rebuild_bubble_text();self.rebuild_typed();}
+        if self.text_viewport!=key {self.text_viewport=key;self.rebuild_bubble_text();}
     }
 
     fn draw(&mut self) {
@@ -1622,8 +1105,6 @@ impl App {
         self.poll_board();
         self.poll_overlay();
         self.poll_journal();
-        self.poll_chat();
-        self.poll_ask();
         self.poll_postbox();
         self.poll_chatter();
         self.tick_typewriter();
@@ -1635,7 +1116,7 @@ impl App {
             if self.nacho == Nacho::Speaking { self.nacho = Nacho::Idle; }
             self.resume_automatic();
         }
-        let moving = self.playback.selected.is_some() || self.typing.is_some() || (self.preferences.animations
+        let moving = self.playback.selected.is_some() || (self.preferences.animations
             && (!self.resting || self.catalog.group("Sleep").is_some()));
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
         self.last = std::time::Instant::now();
@@ -1774,9 +1255,8 @@ impl App {
         let fit = fit_xform(self.bbox, cw, ch, win_w, win_h, room);
         let viewport=self.bubble_viewport();
         self.bubble_geometry=if preview_mode(){None}else{self.bubble_text.as_ref().and_then(|(_,w,h)|bubble::geometry(viewport?,(*w,*h),fit.apply(self.head)))};
-        self.typed_geometry=self.typed_tex.as_ref().and_then(|(_,w,h)|bubble::geometry(viewport?,(*w,*h),(0.0,-1.0)));
         let base = fit.matrix();
-        let frame = match g.surf.get_current_texture() { Ok(f) => f, Err(_) => {self.bubble_geometry=None;self.typed_geometry=None;return;} };
+        let frame = match g.surf.get_current_texture() { Ok(f) => f, Err(_) => {self.bubble_geometry=None;return;} };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = g.dev.create_command_encoder(&Default::default());
         let bind = |ub: &wgpu::Buffer, tex: &wgpu::TextureView, mask: &wgpu::TextureView| g.dev.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1865,29 +1345,6 @@ impl App {
                 rp.set_vertex_buffer(0, g.bubble_vb.slice(..));
                 rp.draw(0..6, 0..1);
             }
-            // 말 걸기 줄 — 캐릭터 발치에. 머리 위는 펫이 말하는 자리라 겹치면
-            // 누가 한 말인지 안 갈린다.
-            if let (Some((tv, _, _)),Some(geometry)) = (&self.typed_tex,self.typed_geometry) {
-                let (x0,y0,x1,y1)=geometry.ndc();
-                let quad = [
-                    V { p: [x0, y0], uv: [0.0, 0.0] },
-                    V { p: [x1, y0], uv: [1.0, 0.0] },
-                    V { p: [x0, y1], uv: [0.0, 1.0] },
-                    V { p: [x1, y0], uv: [1.0, 0.0] },
-                    V { p: [x1, y1], uv: [1.0, 1.0] },
-                    V { p: [x0, y1], uv: [0.0, 1.0] },
-                ];
-                g.q.write_buffer(&g.typed_vb, 0, bytemuck::cast_slice(&quad));
-                let mut m = [0.0f32; 16];
-                m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
-                let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: 1.0, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
-                g.q.write_buffer(&g.typed_ub, 0, bytemuck::bytes_of(&u));
-                let bg = bind(&g.typed_ub, tv, &g.dummy_view);
-                rp.set_pipeline(&g.p_plain);
-                rp.set_bind_group(0, &bg, &[]);
-                rp.set_vertex_buffer(0, g.typed_vb.slice(..));
-                rp.draw(0..6, 0..1);
-            }
         }
         g.q.submit([enc.finish()]);
         self.frames += 1;
@@ -1896,14 +1353,14 @@ impl App {
         // 커서 자리가 캐릭터의 칠해진 픽셀인지 본다. 몇 프레임에 한 번이면 충분하다 —
         // 손이 움직이는 속도보다 훨씬 잦다.
         if self.frames % 4 == 0 {
-            let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble() || self.cursor_on_typed();
+            let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble();
             #[cfg(target_os = "macos")]
             let over = over && self.win.as_ref().is_some_and(|w| native_cursor::is_frontmost_at_cursor(w));
             #[cfg(target_os = "macos")]
-            let chat_hover = self.chat_panel.as_ref().is_some_and(|panel| panel.contains_cursor()) || self.popup.as_ref().is_some_and(|popup|popup.contains_cursor());
+            let menu_hover = self.popup.as_ref().is_some_and(|popup|popup.contains_cursor());
             #[cfg(not(target_os = "macos"))]
-            let chat_hover = false;
-            let over = over && !chat_hover;
+            let menu_hover = false;
+            let over = over && !menu_hover;
             if over != self.on_body {
                 self.on_body = over;
                 if let Some(w) = &self.win {
@@ -1913,7 +1370,7 @@ impl App {
                 }
                 // 벗어나는 순간에만 화살표로 되돌린다. 계속 되돌리면 남의 창 위에서
                 // 그쪽이 띄운 커서(글자 위의 I 빔 같은 것)를 우리가 계속 지운다.
-                if !over && !chat_hover {
+                if !over && !menu_hover {
                     set_hand_cursor(false);
                 }
             }
@@ -2048,19 +1505,6 @@ fn cli_path() -> Option<std::path::PathBuf> {
         .or_else(|| Some(std::path::PathBuf::from("kasaterm-cli")))
 }
 
-/// 키 창 자리를 내려놓는다 — 말 걸기를 닫으면 곧바로 하던 창으로 돌아가야 한다.
-#[cfg(target_os = "macos")]
-fn resign_key() {
-    use objc2_app_kit::NSApplication;
-    if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
-        // `hide` 를 쓰면 펫 창까지 사라진다 — 자리만 내려놓는다.
-        NSApplication::sharedApplication(mtm).deactivate();
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn resign_key() {}
-
 /// kasaterm 창을 앞으로. 펫은 독에 안 서므로(accessory) 자기가 활성이 될 일이 없고,
 /// 남의 앱을 올리는 것이라 번들 id 로 찾아 부른다. 개발 실행(번들 아님)에서는 못 찾는데,
 /// 그때는 pane 고르기까지만 되고 창은 사람이 올린다.
@@ -2119,7 +1563,7 @@ fn model3_in(dir: &std::path::Path) -> Option<String> {
 
 /// 같은 자리에서 다른 모델로 다시 시작한다. pid 가 그대로라 하단바 칩이 계속 켜짐으로 보인다.
 #[cfg(unix)]
-fn exec_self(model: &str, chat: bool) {
+fn exec_self(model: &str) {
     use std::ffi::CString;
     let Ok(exe) = std::env::current_exe() else { return };
     let (Ok(a0), Ok(a1)) = (
@@ -2128,13 +1572,12 @@ fn exec_self(model: &str, chat: bool) {
     ) else {
         return;
     };
-    let flag = CString::new("--chat").unwrap();
-    let argv = [a0.as_ptr(), a1.as_ptr(), if chat { flag.as_ptr() } else { std::ptr::null() }, std::ptr::null()];
+    let argv = [a0.as_ptr(), a1.as_ptr(), std::ptr::null()];
     unsafe { libc::execv(a0.as_ptr(), argv.as_ptr()) };
 }
 
 #[cfg(not(unix))]
-fn exec_self(model: &str, _chat: bool) {
+fn exec_self(model: &str) {
     if let Ok(exe) = std::env::current_exe() {
         if std::process::Command::new(exe).arg(model).spawn().is_ok() {
             std::process::exit(0);
@@ -2155,35 +1598,14 @@ fn idle_motion(model3: &str) -> Option<String> {
 }
 
 
-fn positional_arguments(args: impl Iterator<Item = String>) -> (Option<String>, Option<String>) {
-    // Character switching carries the chat flag through exec; it is not a motion file.
-    let mut positional = args.skip(1).filter(|arg| arg != "--chat");
-    (positional.next(), positional.next())
-}
-
-#[cfg(test)]
-mod argument_tests {
-    #[test]
-    fn chat_flag_never_replaces_the_default_or_explicit_motion() {
-        let parse = |args: &[&str]| super::positional_arguments(args.iter().map(|s| s.to_string()));
-        assert_eq!(parse(&["kasapet", "model.json", "--chat"]), (Some("model.json".into()), None));
-        assert_eq!(parse(&["kasapet", "model.json", "idle.motion3.json", "--chat"]), (Some("model.json".into()), Some("idle.motion3.json".into())));
-        assert_eq!(parse(&["kasapet", "--chat", "model.json", "idle.motion3.json"]), (Some("model.json".into()), Some("idle.motion3.json".into())));
-        assert_eq!(parse(&["kasapet", "model.json"]), (Some("model.json".into()), None));
-    }
-}
-
 fn main() {
-    #[cfg(all(target_os = "macos", debug_assertions))]
-    if std::env::args().any(|arg| arg == "--chat-panel-probe") { chat_panel::probe(); return; }
-    #[cfg(all(target_os = "macos", debug_assertions))]
-    if std::env::args().any(|arg| arg == "--ask-bar-probe") { ask_bar::probe(); return; }
     #[cfg(all(target_os = "macos", debug_assertions))]
     if let Some(i) = std::env::args().position(|arg| arg == "--overlay-probe") {
         overlay::probe(std::env::args().nth(i + 1).as_deref());
         return;
     }
-    let (model_arg, motion_arg) = positional_arguments(std::env::args());
+    let mut args = std::env::args().skip(1);
+    let (model_arg, motion_arg) = (args.next(), args.next());
     let path = model_arg.unwrap();
     let model = mocari::assets::load_model_runtime(&path).expect("모델");
     let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
@@ -2210,14 +1632,11 @@ fn main() {
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let pet_dir = dir.parent().filter(|p| p.join("current").exists()).map(|p| p.to_path_buf());
     let (mut x, mut y, mut scale) = (60.0_f64, 80.0_f64, 1.0_f32);
-    let mut ask_offset = (0.0_f64, 0.0_f64);
     if let Some(t) = pet_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("state.json")).ok()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
             x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(x);
             y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(y);
             scale = v.get("scale").and_then(|n| n.as_f64()).unwrap_or(scale as f64) as f32;
-            let num = |k: &str| v.get(k).and_then(|n| n.as_f64()).filter(|n| n.is_finite()).unwrap_or(0.0);
-            ask_offset = (num("ask_dx"), num("ask_dy"));
         }
     }
     let preferences = pet_dir.as_ref().map(|d| kasa_pet_config::read(d)).unwrap_or_default();
@@ -2236,27 +1655,19 @@ fn main() {
     }
     let mut app = App { win: None, gfx: None,
         x, y, w: 420.0, h: 600.0 + HEADROOM, scale,
-        alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, on_body: false, local: None,
+        alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, on_body: false, local: None,
         preferences, resting: false, playback: catalog::Playback::default(),
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
         bubble_text: None, text_pt, subject: String::new(), focus: None,
-        bubble_geometry:None,typed_geometry:None,text_viewport:None,
+        bubble_geometry:None,text_viewport:None,
         journal: journal::Client::default(),
         journal_shown: false,
-        chat: chat::Chat::default(), chat_restore_scale: None,
-        chat_prefill: None,
-        ask: ask::Client::default(),
         postbox: postbox::Client::default(),
-        task_line: String::new(),
         answer_shown: false,
-        urgent_asked: false,
+        urgent_seen: false,
         chatter: chatter::Client::default(),
         typed: None,
-        #[cfg(target_os = "macos")]
-        chat_panel: None,
-        #[cfg(target_os = "macos")]
-        ask_bar: None,
         #[cfg(target_os = "macos")]
         popup: None,
         #[cfg(target_os = "macos")]
@@ -2266,7 +1677,7 @@ fn main() {
         nacho_line: String::new(),
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
         menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
-        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, ask_auto: false, greeted: false, ask_offset, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
+        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, nacho_group: None, head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),

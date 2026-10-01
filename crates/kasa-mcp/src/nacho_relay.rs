@@ -44,7 +44,7 @@ fn key_path() -> Option<PathBuf> {
         .or_else(|| home().map(|h| h.join(".config/nacho-app.key")))
 }
 
-/// 넘길 곳과 키. 넘길 곳은 펫 대리인(`tools/request_journal/ask.py`)과 같은 서술자, 키는 앱 전용 파일.
+/// 넘길 곳과 키. 넘길 곳은 펫 대리인(`tools/request_journal/pet_relay.py`)과 같은 서술자, 키는 앱 전용 파일.
 pub(crate) fn target_from(env_url: Option<String>, desc: Option<&Path>, key: Option<&Path>) -> Result<Target, &'static str> {
     let url = env_url
         .map(|u| u.trim().to_string())

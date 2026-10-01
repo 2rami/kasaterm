@@ -1,7 +1,7 @@
 """펫이 먼저 거는 말 — 묻지 않아도 몇 초에 한 줄씩 툭 던진다.
 
-`ask.py` 는 사람이 물어야 답하고 도구까지 실행하는 길이다. 이쪽은 아무도 묻지 않았고
-아무것도 실행하지 않는다 — 지금 보고 있는 창 하나를 보고 짧은 한 줄을 지어 줄 뿐이다.
+아무도 묻지 않았고 아무것도 실행하지 않는다 — 지금 보고 있는 창 하나를 보고 짧은 한 줄을
+지어 줄 뿐이다.
 
 한 번 부를 때 여러 줄을 받아 두는 이유는 값이다. 10초마다 모델을 부르면 하루 8640번이고,
 그 한 번이 판과 화면을 통째로 싣는다. 다섯 줄을 미리 받아 하나씩 풀면 같은 체감에
@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 
-from .ask import PEEK_LINES, _clip, _json_result, llm_client, persona, plain, run_cli
+from .pet_relay import PEEK_LINES, _clip, _json_result, llm_client, persona, plain, run_cli
 
 # 말풍선 한 줄이 한눈에 읽히는 길이. 넘으면 사람은 그것을 읽을거리로 보고 미룬다.
 LINE_CHARS = 40

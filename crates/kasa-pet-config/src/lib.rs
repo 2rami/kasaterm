@@ -13,8 +13,6 @@ pub struct PetPreferences {
     pub activity_reactions: bool,
     pub always_on_top: bool,
     pub lock_position: bool,
-    /// 머리 위 입력 바를 늘 띄워 둔다 — 메뉴를 거치지 않고 바로 묻는다.
-    pub ask_always: bool,
     pub scale_percent: Option<u32>,
     pub text_pt: u32,
     /// 긴 말(나쵸 요약)이 앉는 말풍선의 최대 너비(논리 px).
@@ -36,7 +34,6 @@ impl Default for PetPreferences {
             activity_reactions: true,
             always_on_top: true,
             lock_position: false,
-            ask_always: true,
             scale_percent: None,
             text_pt: 13,
             bubble_width: 400,
@@ -56,7 +53,6 @@ pub enum PreferenceChange {
     ActivityReactions(bool),
     AlwaysOnTop(bool),
     LockPosition(bool),
-    AskAlways(bool),
     ScalePercent(Option<u32>),
     TextPt(u32),
     BubbleWidth(u32),
@@ -75,7 +71,6 @@ impl PreferenceChange {
             Self::ActivityReactions(v) => ("activity_reactions", json!(v)),
             Self::AlwaysOnTop(v) => ("always_on_top", json!(v)),
             Self::LockPosition(v) => ("lock_position", json!(v)),
-            Self::AskAlways(v) => ("ask_always", json!(v)),
             Self::ScalePercent(v) => ("scale_percent", json!(v.map(|n| n.clamp(40, 300)))),
             Self::TextPt(v) => ("text_pt", json!(v.clamp(8, 40))),
             Self::BubbleWidth(v) => ("bubble_width", json!(v.clamp(240, 800))),
@@ -119,7 +114,6 @@ pub fn read(dir: &Path) -> PetPreferences {
         activity_reactions: flag("activity_reactions", d.activity_reactions),
         always_on_top: flag("always_on_top", d.always_on_top),
         lock_position: flag("lock_position", d.lock_position),
-        ask_always: flag("ask_always", d.ask_always),
         scale_percent: v
             .get("scale_percent")
             .filter(|n| n.as_i64().is_some())

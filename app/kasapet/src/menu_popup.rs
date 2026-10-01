@@ -146,6 +146,18 @@ impl Popup {
         );
         if let Some(event)=NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(NSEventType::LeftMouseDown,point,NSEventModifierFlags::empty(),0.0,self.panel.windowNumber(),None,1,1,1.0) {self.panel.sendEvent(&event);}
     }
+    /// 화면 기록 권한 없이 메뉴를 떠 보는 길 — 현황판 검증(`KASAPET_OVERLAY_SHOT`)과 같은 방식이다.
+    #[cfg(debug_assertions)]
+    pub fn probe_shot(&self, path: &str) -> bool {
+        let frame = self.panel.contentView().and_then(|view| unsafe { view.superview() });
+        let png = frame.and_then(|view| {
+            let bounds = view.bounds();
+            let rep = view.bitmapImageRepForCachingDisplayInRect(bounds)?;
+            view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+            unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
+        });
+        png.is_some_and(|data| std::fs::write(path, data.to_vec()).is_ok())
+    }
     pub fn probe_key(&self, code: u16) {
         if let Some(event)=NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(NSEventType::KeyDown,NSPoint::new(0.0,0.0),NSEventModifierFlags::empty(),0.0,self.panel.windowNumber(),None,&NSString::new(),&NSString::new(),false,code){self.panel.sendEvent(&event);}
     }

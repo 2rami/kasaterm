@@ -624,7 +624,7 @@ pub(crate) fn same_keyboard_target(a: &Target, b: &Target) -> bool {
             matches!((a, b), (P::FollowCursor(_), P::FollowCursor(_)) | (P::Animations(_), P::Animations(_))
                 | (P::Bubbles(_), P::Bubbles(_)) | (P::ActivityReactions(_), P::ActivityReactions(_))
                 | (P::AlwaysOnTop(_), P::AlwaysOnTop(_)) | (P::LockPosition(_), P::LockPosition(_))
-                | (P::AskAlways(_), P::AskAlways(_)) | (P::Chatter(_), P::Chatter(_))) || a == b
+                | (P::Chatter(_), P::Chatter(_))) || a == b
         }
         _ => a == b,
     }
@@ -4731,7 +4731,7 @@ fn paint_pet(
     pet_section(g, x, y, "펫 조작");
     for text in [
         "클릭으로 쓰다듬기 · 끌어서 자리 옮기기",
-        "두 번 클릭해 캐릭터 바꾸기 · 휠로 크기 조절",
+        "휠로 크기 조절 · 말풍선을 누르면 그 창으로",
         "우클릭으로 행동 선택과 기능 켜고 끄기",
     ] {
         let text = fit(g, text, w, 11.0, false);

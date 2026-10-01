@@ -51,7 +51,7 @@ class ServerTests(unittest.TestCase):
         """펫이 인계 소식을 끌어가는 길(2026-09-22). 이 서버는 판단하지 않고 중계만 한다."""
         from unittest.mock import patch
 
-        with patch("tools.request_journal.ask.relay_poll", return_value=(200, {"ok": True, "messages": []})) as relay:
+        with patch("tools.request_journal.pet_relay.relay_poll", return_value=(200, {"ok": True, "messages": []})) as relay:
             status, _, raw = self.post_json("/api/pet/poll", {"machine": "맥북", "ack": ["a"], "wait": 5})
         self.assertEqual((status, json.loads(raw)), (200, {"ok": True, "messages": []}))
         relay.assert_called_once_with({"machine": "맥북", "ack": ["a"], "wait": 5})
@@ -65,18 +65,10 @@ class ServerTests(unittest.TestCase):
                                     {"Content-Type": "application/json"})
         self.assertEqual(status, 415)
 
-    def test_the_handed_over_work_is_an_allowed_field_on_the_ask_door(self):
-        """펫이 이어받은 일 이름표를 실어 보낸다 — 모르는 칸으로 걸러 버리면 그 왕복이 끊긴다."""
-        from unittest.mock import patch
-
-        class Chat:
-            provider_factory = staticmethod(lambda _cancel: None)
-
-        self.server.chat = Chat()
-        with patch("tools.request_journal.ask.answer", return_value=(200, {"answer": "네"})) as answered:
-            status, _, _raw = self.post_json("/api/ask", {"text": "어디까지?", "pane": "%1", "task": "w1"})
-        self.assertEqual(status, 200)
-        self.assertEqual(answered.call_args[0][1]["task"], "w1")
+    def test_the_pet_no_longer_asks_through_the_journal(self):
+        """펫은 나쵸에게 묻지 않는다(2026-10-01) — 대화는 나쵸 앱이 맡는다. 물음 길은 닫혀 있다."""
+        status, _, _raw = self.post_json("/api/ask", {"text": "어디까지?", "pane": "%1"})
+        self.assertEqual(status, 404)
 
     def test_final_report_does_not_confirm_application(self):
         status, _, body = self.call("/api/requests")

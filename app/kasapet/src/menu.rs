@@ -2,12 +2,6 @@ use kasa_pet_config::{PetPreferences, PreferenceChange};
 
 #[derive(Clone, Copy)]
 pub enum Action {
-    Ask,
-    /// 정해진 질문을 바 없이 바로 묻는다 — 답은 말풍선으로 온다.
-    AskNow(&'static str),
-    Chat,
-    ChatAsk(&'static str),
-    Talk,
     Touch,
     Rest,
     Next,
@@ -18,7 +12,7 @@ pub enum Action {
     ResetExpressions,
     RepeatMotion,
     Automatic,
-    Journal(crate::journal::Action),
+    OpenJournal,
 }
 #[derive(Clone)]
 pub enum Item {
@@ -81,8 +75,6 @@ fn heading(label: &str) -> Row {
 pub fn content(
     prefs: &PetPreferences,
     resting: bool,
-    typing: bool,
-    chatting: bool,
     can_touch: bool,
     can_next: bool,
     can_save: bool,
@@ -91,27 +83,9 @@ pub fn content(
     expressions: &[usize],
 ) -> Content {
     let home = vec![
-        action("바로 묻기", true, Action::Ask),
-        action("모든 기기 요약", true, Action::AskNow("지금 모든 기기의 학생들 상황을 요약해줘")),
-        action(
-            if chatting {
-                "나쵸 대화 닫기"
-            } else {
-                "나쵸와 대화"
-            },
-            true,
-            Action::Chat,
-        ),
-        action(
-            "재시작 확인할 일",
-            true,
-            Action::ChatAsk("나 재시작하면 뭐 확인해야 돼?"),
-        ),
-        heading("펫"),
         page("모션", 1),
         page("표정 · 소품", 2),
         page("빠른 설정", 3),
-        heading("더 보기"),
         page("다른 행동 · 작업 기록", 4),
         action("펫 끄기", true, Action::Quit),
     ];
@@ -221,43 +195,15 @@ pub fn content(
             prefs.lock_position,
             PreferenceChange::LockPosition(!prefs.lock_position),
         ),
-        (
-            "입력창 상시 표시",
-            prefs.ask_always,
-            PreferenceChange::AskAlways(!prefs.ask_always),
-        ),
     ]
     .into_iter()
     .map(|(s, on, p)| check(s, can_save, on, Action::Preference(p))));
     let more = vec![
-        action(
-            if typing {
-                "학생 말 걸기 닫기"
-            } else {
-                "학생에게 말 걸기"
-            },
-            true,
-            Action::Talk,
-        ),
         action("쓰다듬기", can_touch, Action::Touch),
         action(if resting { "깨우기" } else { "쉬기" }, true, Action::Rest),
         action("다음 캐릭터", can_next, Action::Next),
         heading("작업 기록"),
-        action(
-            "시킨 일 요약",
-            true,
-            Action::ChatAsk("내가 시킨 일들을 요약해줘."),
-        ),
-        action(
-            "반영 기다리는 일",
-            true,
-            Action::ChatAsk("반영을 기다리는 일은 뭐야?"),
-        ),
-        action(
-            "요청 기록 열기",
-            true,
-            Action::Journal(crate::journal::Action::Open),
-        ),
+        action("요청 기록 열기", true, Action::OpenJournal),
     ];
     Content {
         pages: vec![
@@ -293,8 +239,6 @@ mod tests {
         let data = content(
             &PetPreferences::default(),
             false,
-            false,
-            false,
             true,
             true,
             true,
@@ -302,22 +246,9 @@ mod tests {
             &crate::catalog::Playback::default(),
             &[],
         );
-        assert!(matches!(
-            data.pages[0].1[0].item,
-            Item::Action(Action::Ask, false)
-        ));
-        assert!(matches!(
-            data.pages[0].1[1].item,
-            Item::Action(Action::AskNow(_), false)
-        ));
-        assert!(matches!(
-            data.pages[0].1[2].item,
-            Item::Action(Action::Chat, false)
-        ));
-        assert!(matches!(
-            data.pages[0].1[3].item,
-            Item::Action(Action::ChatAsk(_), false)
-        ));
+        // 펫에 묻거나 말 거는 자리는 없다 — 대화는 나쵸 앱이 맡는다.
+        assert!(data.pages.iter().flat_map(|(_, rows)| rows).all(|row| !row.label.contains("묻기") && !row.label.contains("대화")));
+        assert!(data.pages[0].1[..4].iter().all(|row| matches!(row.item, Item::Page(_))));
         assert!(!data.pages[2].1[0].enabled);
         assert!(data.pages[2].1[0].label.contains("모델 연결 없음"));
         assert!(data.pages[3]
@@ -327,6 +258,6 @@ mod tests {
         assert!(data.pages[4]
             .1
             .iter()
-            .any(|row| matches!(row.item, Item::Action(Action::Talk, false))));
+            .any(|row| matches!(row.item, Item::Action(Action::OpenJournal, false))));
     }
 }

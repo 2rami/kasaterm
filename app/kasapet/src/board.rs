@@ -93,8 +93,8 @@ fn read_value(v: &serde_json::Value, now: u64) -> (Mood, String, String, Option<
     )
 }
 
-pub fn legacy_auto_question(account_scoped: bool, urgent: bool, already_asked: bool) -> bool {
-    !account_scoped && urgent && !already_asked
+pub fn legacy_urgent_alert(account_scoped: bool, urgent: bool, already_seen: bool) -> bool {
+    !account_scoped && urgent && !already_seen
 }
 
 /// 급하지 않은 말이 떠 있는 시간. 계속 띄워 두면 바탕화면에 글자 판을 얹어 둔 꼴이 되고,
@@ -156,8 +156,8 @@ mod tests {
             "account_current":true,"key_present":true,"state":"busy","text":"기록된 작업 · 진행 중","pane":""});
         assert_eq!(read_value(&record, 1050).0, Mood::Busy);
         assert!(read_value(&record, 1050).4);
-        assert!(!legacy_auto_question(true, true, false));
-        assert!(legacy_auto_question(false, true, false));
+        assert!(!legacy_urgent_alert(true, true, false));
+        assert!(legacy_urgent_alert(false, true, false));
         assert_eq!(read_value(&record, 1091).0, Mood::Idle);
         assert_eq!(read_value(&record, 900).0, Mood::Idle);
         for key in ["account_current", "key_present"] {

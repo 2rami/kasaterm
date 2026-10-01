@@ -2,8 +2,8 @@
 //!
 //! 전에는 나쵸가 펫에 소식을 **밀어 넣었다**(`kasaterm-cli pet-say` → 모델 폴더의 파일).
 //! 그 길은 나쵸가 도는 기계에서만 된다 — 다른 바탕화면의 펫에는 못 닿고, 넣은 쪽은 그 줄이
-//! 사람 눈에 닿았는지 알 방법이 없다. 그래서 방향을 뒤집었다: 펫이 나쵸를 부르는 길
-//! (`ask.rs` 의 `/api/ask`)은 이미 모든 기계에서 도니, 그 위에 **끌어가기**를 얹는다.
+//! 사람 눈에 닿았는지 알 방법이 없다. 그래서 방향을 뒤집었다: 모든 기계의 펫이 나쵸(또는
+//! 그 기계의 장부 대리인)를 직접 불러 **끌어간다**.
 //!
 //! 지키는 선
 //! - **말한 것만 받았다고 한다.** 서버는 ACK 를 받고서야 그 줄을 지운다 — 받아 들고 오다
@@ -42,31 +42,9 @@ pub struct Line {
     pub kind: String,
 }
 
-/// 이 바탕화면이 **지금 이어받고 있는 일**. 바에 한 줄로 걸린다.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Task {
-    pub id: String,
-    pub title: String,
-    pub step: String,
-    pub paused: bool,
-}
-
-impl Task {
-    /// 바에 거는 한 줄. 단계가 있으면 어디까지 왔는지까지.
-    pub fn line(&self) -> String {
-        let head = if self.paused { "멈춤" } else { "맡은 일" };
-        if self.step.is_empty() {
-            format!("{head} · {}", self.title)
-        } else {
-            format!("{head} · {} — {}", self.title, self.step)
-        }
-    }
-}
-
 struct Fetched {
     machine: String,
     lines: Vec<Line>,
-    task: Option<Task>,
 }
 
 /// 한 번에 붙잡고 기다리는 시간. 새 소식이 들어오면 서버가 바로 깨워 주므로, 이 값은
@@ -97,7 +75,6 @@ pub struct Client {
     /// 이미 말한 id. ACK 가 유실돼 같은 줄이 다시 와도 두 번 말하지 않게 한다.
     spoken: VecDeque<String>,
     queue: VecDeque<Line>,
-    task: Option<Task>,
     /// 말한 id 를 남겨 두는 자리. 없으면(펫 폴더를 모르는 검증 실행) 메모리만 쓴다.
     memo: Option<std::path::PathBuf>,
     next_at: Option<Instant>,
@@ -183,7 +160,6 @@ impl Client {
         if !got.machine.is_empty() {
             self.machine = got.machine;
         }
-        self.task = got.task;
         for line in got.lines {
             // 이미 말한 것은 **다시 말하지 않고 다시 ACK 만** 한다(ACK 가 유실된 재전달).
             if self.spoken.contains(&line.id) {
@@ -191,7 +167,7 @@ impl Client {
                 continue;
             }
             // ★아직 안 꺼낸 줄도 겹치지 않는다. 서버는 ACK 전까지 같은 줄을 계속 주는데,
-            // 사람이 글자를 치는 동안에는 아무도 안 꺼낸다 — 그 사이 폴링이 도는 만큼 같은
+            // 사람이 다른 소식을 읽는 동안에는 아무도 안 꺼낸다 — 그 사이 폴링이 도는 만큼 같은
             // id 가 쌓이고 나중에 그만큼 되풀이해 말하게 된다(2026-09-22 검수). 여기서는
             // **ACK 도 안 한다**: 아직 안 말했는데 ACK 하면 서버가 지워 그 줄이 사라진다.
             if self.queue.iter().any(|row| row.id == line.id) {
@@ -220,19 +196,10 @@ impl Client {
     pub fn waiting(&self) -> bool {
         !self.queue.is_empty()
     }
-
-    /// 지금 이어받고 있는 일. 바에 걸고, 묻는 말에 함께 실어 보낸다.
-    pub fn task(&self) -> Option<&Task> {
-        self.task.as_ref()
-    }
-
-    pub fn task_id(&self) -> String {
-        self.task.as_ref().map(|t| t.id.clone()).unwrap_or_default()
-    }
 }
 
 fn fetch(service: &Path, machine: &str, acks: &[String]) -> Result<Fetched, ()> {
-    let port = crate::journal::ask_service(service)?;
+    let port = crate::journal::nacho_service(service)?;
     let body = json!({ "machine": machine, "ack": acks, "wait": WAIT_SEC });
     let value = crate::journal::request_within(
         port,
@@ -263,25 +230,9 @@ fn parse(value: &Value) -> Fetched {
         })
         .take(8)
         .collect();
-    let task = value["task"].as_object().and_then(|row| {
-        let id = row.get("id")?.as_str()?.trim();
-        if id.is_empty() {
-            return None;
-        }
-        let pick = |key: &str, cap: usize| -> String {
-            row.get(key).and_then(Value::as_str).unwrap_or("").trim().chars().take(cap).collect()
-        };
-        Some(Task {
-            id: id.chars().take(40).collect(),
-            title: pick("title", 80),
-            step: pick("step", 60),
-            paused: row.get("paused").and_then(Value::as_bool).unwrap_or(false),
-        })
-    });
     Fetched {
         machine: value["machine"].as_str().unwrap_or("").chars().take(40).collect(),
         lines,
-        task,
     }
 }
 
@@ -344,22 +295,6 @@ mod tests {
         assert_eq!(client.machine, "건호의 MacBook Pro");
     }
 
-    #[test]
-    fn the_task_card_rides_along_and_clears_when_the_work_closes() {
-        let mut client = Client::default();
-        fed(&mut client, &json!({"task": {"id": "w1", "title": "빌드 고치기", "step": "검사 돌리기"}}));
-        assert_eq!(client.task_id(), "w1");
-        assert_eq!(client.task().unwrap().line(), "맡은 일 · 빌드 고치기 — 검사 돌리기");
-        fed(&mut client, &json!({"task": null}));
-        assert!(client.task().is_none() && client.task_id().is_empty());
-    }
-
-    #[test]
-    fn a_paused_task_says_so() {
-        let task = Task { id: "w1".into(), title: "빌드 고치기".into(), step: String::new(), paused: true };
-        assert_eq!(task.line(), "멈춤 · 빌드 고치기");
-    }
-
     /// 빈 줄·이름 없는 줄은 버린다 — 말풍선에 빈 칸이 뜨면 사람은 못 읽은 줄 알고 기다린다.
     #[test]
     fn empty_rows_are_dropped() {
@@ -379,7 +314,7 @@ mod tests {
         tx.send(Err(())).unwrap();
         client.pending = Some(rx);
         client.collect();
-        assert!(!client.waiting() && client.task().is_none());
+        assert!(!client.waiting());
         assert_eq!(client.fails, 1);
         let first = client.next_at.expect("다시 걸 때를 잡아 둔다");
         for _ in 0..5 {
@@ -409,15 +344,15 @@ mod tests {
     }
 
     /// ★**안 꺼낸 채로 다시 받아도 줄이 겹치지 않는다.** 서버는 ACK 전까지 같은 줄을 계속
-    /// 주는데, 사람이 글자를 치는 동안에는 `take` 를 안 한다(끼어들지 않으려고). 그 사이
+    /// 주는데, 사람이 다른 소식을 읽는 동안에는 `take` 를 안 한다(끼어들지 않으려고). 그 사이
     /// 폴링이 여러 번 돌면 **같은 id 가 큐에 여러 개 쌓이고**, 나중에 그만큼 되풀이해 말하게
     /// 된다(2026-09-22 검수 지적).
     #[test]
-    fn the_same_line_never_piles_up_while_the_person_is_typing() {
+    fn the_same_line_never_piles_up_while_the_person_is_reading() {
         let mut client = Client::default();
         let same = json!({"messages": [{"id": "a", "text": "인계 한 줄"}]});
         for _ in 0..5 {
-            fed(&mut client, &same);        // 사람이 치는 동안 아무도 안 꺼낸다
+            fed(&mut client, &same);        // 사람이 읽는 동안 아무도 안 꺼낸다
         }
         assert_eq!(client.queue.len(), 1, "같은 줄은 한 자리만 차지한다");
         assert_eq!(client.take().unwrap().text, "인계 한 줄");

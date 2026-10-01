@@ -228,6 +228,9 @@ kasaterm-cli done <succeeded|failed|blocked|needs_restart|needs_approval> "…" 
   - 펫 쪽 코드는 이번에 안 바꿨다. 지금 소스의 펫(`app/kasapet` postbox.rs·main.rs, 201a98de 이후)은 우편함의
     모든 줄을 말풍선으로 띄우고 ACK 를 돌려주지만, **그 판이 설치돼 있어야** 한다. 설치된 펫의 판은 따로
     확인해야 한다(맥북 펫은 이 폴링 판의 배포가 보류된 적이 있다).
+- 2026-10-01부터 펫은 나쵸에게 묻지 않는다 — 대화창·물음 입력줄을 걷었다. 펫이 나쵸에 거는 길은
+  우편함(`/api/pet/poll`)과 먼저 거는 말(`/api/pet-chatter`, 장부 대리인)뿐이다. 그래서 펫의 `alive` 는
+  우편함 들름으로만 남는다.
 - 확인 버튼이 필요한 도구(머지·pane 입력·화면 조작)는 앱 턴에서 돌지 않는다 — 원장에 「기존 창구 확인
   필요」가 남는다. 작업 단위 승인(`approval_needed`)도 앱에서 풀지 않는다.
 
