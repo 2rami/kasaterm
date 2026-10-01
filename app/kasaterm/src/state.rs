@@ -101,13 +101,6 @@ pub(crate) struct StatusbarState {
     pub(crate) clip_menu: Option<(u64, f32, f32)>,
     /// 펫 칩 — 바탕화면 캐릭터를 켜고 끈다.
     pub(crate) pet_rect: Option<(f32, f32, f32, f32)>,
-    /// 실행 단추 — (`launchers` 의 번호, 눌림 사각). 단추마다 한 칸.
-    pub(crate) launcher_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    /// 단추마다 그 프로그램이 도는 칸이 있나(점). `launchers_tick` 이 1초에 한 번 채운다.
-    pub(crate) launcher_live: Vec<bool>,
-    pub(crate) launcher_checked: Option<std::time::Instant>,
-    /// 명령 → 마지막으로 띄운 탭과 그 시각. 프로그램이 끝나 셸만 남은 탭을 다시 쓴다.
-    pub(crate) launched: HashMap<String, (String, std::time::Instant)>,
     /// 도구 칩이 직전 프레임에 실제로 쓴 폭. 오른쪽 칩은 왼쪽 칩들 몫을 남기고
     /// 나머지를 쓰는데, 그 몫을 칸 전체로 잡으면 숫자 하나짜리 칩 때문에 가운데가
     /// 빈 채로 판 번호·기기 이름이 잘린다.

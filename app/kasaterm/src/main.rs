@@ -109,7 +109,6 @@ mod sesscol;
 mod state;
 mod statusbar;
 mod statusbar_config;
-mod launchers;
 mod syntax;
 mod turnjump;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.

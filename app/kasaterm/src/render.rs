@@ -8732,9 +8732,8 @@ impl App {
                     }
                 }
                 let seg_x0 = x;
-                let widget_count = ["launchers", "ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel", "link"]
+                let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel", "link"]
                     .iter().filter(|id| status_prefs.visible(id))
-                    .filter(|id| **id != "launchers" || !status_prefs.launchers.is_empty())
                     .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
                 let compact_tools = (win_w * 0.68 - 24.0) / (widget_count as f32) < 28.0;
                 let account_right = if status_prefs.visible("claude") || status_prefs.visible("codex") {
@@ -9249,7 +9248,7 @@ impl App {
                     }
                 }
                 if account_drawn
-                    && ["launchers", "ports", "pet", "clipboard", "resources", "tunnel", "version"]
+                    && ["ports", "pet", "clipboard", "resources", "tunnel", "version"]
                         .iter()
                         .any(|id| status_prefs.visible(id))
                 {
@@ -9302,7 +9301,6 @@ impl App {
                 self.statusbar.schedule_rect = None;
                 self.statusbar.pet_rect = None;
                 self.statusbar.clip_rect = None;
-                self.statusbar.launcher_rects.clear();
                 // 다른 기기와 어떻게·얼마나 가깝게 붙어 있나. 직통(그 기계에 바로)과
                 // 중계(공용 관문 경유)는 체감이 딴판이라, 숫자와 함께 한눈에 보여야 한다.
                 macro_rules! draw_link_widget {
@@ -9711,7 +9709,7 @@ impl App {
                     // 본다 — 값이 아직 없는 칩은 이제 자리를 안 먹으므로 설정만 보면 빈
                     // 자리 옆에 선만 남는다.
                     let has_device = rx < device_right;
-                    let has_work = ["launchers", "ports", "pet", "clipboard"]
+                    let has_work = ["ports", "pet", "clipboard"]
                         .iter()
                         .any(|id| status_prefs.visible(id));
                     if status_prefs.separators && has_device && has_work {
@@ -9876,55 +9874,6 @@ impl App {
                     }
                         }};
                     }
-                    // 실행 단추 — `launchers` 마다 아이콘+이름 한 칸. 누르면 그 명령의 칸이
-                    // 뜨거나 그리로 간다(launchers.rs). 점은 그 프로그램이 도는 칸이 있나.
-                    macro_rules! draw_launchers_widget {
-                        () => {{
-                    self.statusbar.launcher_rects.clear();
-                    if status_prefs.visible("launchers") {
-                        let icon = tool_icon;
-                        let gap = if compact_tools { 0.0 } else { 4.0_f32 };
-                        let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
-                        let n = status_prefs.launchers.len().max(1) as f32;
-                        let each = ((slot_w - chip * n) / n - icon - gap - dot).max(0.0);
-                        for (index, launcher) in status_prefs.launchers.iter().enumerate().rev() {
-                            let label = if compact_tools {
-                                String::new()
-                            } else {
-                                crate::info::fit_text(g, &launcher.label, each, fs, false)
-                            };
-                            let lw = g.measure_chrome_text(&label, fs, false);
-                            let seg = icon + gap + lw + dot;
-                            rx -= seg + chip;
-                            let col = chip_ink(&status_prefs, "launchers", false);
-                            g.queue_icon(launcher.icon, rx, sy + (status_h - icon) / 2.0, icon, col);
-                            g.draw_text(
-                                rx + icon + gap,
-                                ty,
-                                &label,
-                                gpu::DrawOpts {
-                                    font_size: fs,
-                                    color: col,
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            if !compact_tools {
-                                let live = self.statusbar.launcher_live.get(index).copied().unwrap_or(false);
-                                status_dot(g, rx + icon + gap + lw, sy, status_h,
-                                    if live { ChipState::Ok } else { ChipState::Off });
-                            }
-                            let lr = (rx - chip / 2.0, sy, seg + chip, status_h);
-                            {
-                                let (hx, hy) = self.cursor_px;
-                                g.hover_pointer |=
-                                    hx >= lr.0 && hx <= lr.0 + lr.2 && hy >= lr.1 && hy <= lr.1 + lr.3;
-                            }
-                            self.statusbar.launcher_rects.push((index, lr));
-                        }
-                    }
-                        }};
-                    }
                     // 포트 — 열려 있는 워크스페이스 포트 **개수**다. 예전엔 이 앱의
                     // `:8765` 만 적었는데, 그건 이미 알고 있는 값이라 자리를 쓰면서
                     // 아무것도 안 알렸다. 개수는 "지금 뭔가 떠 있나" 에 답하고, 눌러
@@ -9976,7 +9925,7 @@ impl App {
                         .iter()
                         .rev()
                         .filter(|id| {
-                            matches!(id.as_str(), "launchers" | "ports" | "schedules" | "pet" | "clipboard")
+                            matches!(id.as_str(), "ports" | "schedules" | "pet" | "clipboard")
                         })
                         .filter(|id| status_prefs.visible(id))
                     {
@@ -9993,20 +9942,12 @@ impl App {
                             "schedules" => draw_schedules_widget!(),
                             "pet" => draw_pet_widget!(),
                             "clipboard" => draw_clipboard_widget!(),
-                            "launchers" => draw_launchers_widget!(),
                             _ => {}
                         }
                         self.statusbar.port_rect = self.statusbar.port_rect.and_then(|r| if id == "ports" { g.clip_hit(r) } else { Some(r) });
                         self.statusbar.schedule_rect = self.statusbar.schedule_rect.and_then(|r| if id == "schedules" { g.clip_hit(r) } else { Some(r) });
                         self.statusbar.pet_rect = self.statusbar.pet_rect.and_then(|r| if id == "pet" { g.clip_hit(r) } else { Some(r) });
                         self.statusbar.clip_rect = self.statusbar.clip_rect.and_then(|r| if id == "clipboard" { g.clip_hit(r) } else { Some(r) });
-                        if id == "launchers" {
-                            let rects = std::mem::take(&mut self.statusbar.launcher_rects);
-                            self.statusbar.launcher_rects = rects
-                                .into_iter()
-                                .filter_map(|(index, r)| g.clip_hit(r).map(|r| (index, r)))
-                                .collect();
-                        }
                         g.pop_clip();
                         rx = statusbar_next_right(slot_right, rx, slot_w);
                         self.statusbar.tool_used.insert(id.clone(), slot_right - rx);
@@ -13745,7 +13686,7 @@ fn link_state(worst_tone: u8) -> ChipState {
 fn statusbar_tool_weight(id: &str) -> f32 {
     match id {
         "tunnel" => 2.0,
-        "resources" | "link" | "version" | "launchers" | "ports" | "schedules" | "pet" | "clipboard" => 1.0,
+        "resources" | "link" | "version" | "ports" | "schedules" | "pet" | "clipboard" => 1.0,
         _ => 0.0,
     }
 }

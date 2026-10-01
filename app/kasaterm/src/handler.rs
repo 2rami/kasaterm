@@ -6185,17 +6185,6 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    if let Some(index) = self
-                        .statusbar
-                        .launcher_rects
-                        .iter()
-                        .find(|(_, r)| sb_hit(r))
-                        .map(|(index, _)| *index)
-                    {
-                        self.open_launcher(index);
-                        window.request_redraw();
-                        return;
-                    }
                     if let Some(pid) = self
                         .statusbar
                         .toggle_rects
@@ -7629,7 +7618,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_mirror_theme();
         self.poll_mirror_sync();
         self.keep_own_room();
-        self.launchers_tick();
         self.publish_layout_feed();
         self.poll_layout_watch();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
@@ -8049,7 +8037,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
         self.run_clipboard_probe(event_loop);
-        self.run_launcher_probe(event_loop);
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoclicks(event_loop);

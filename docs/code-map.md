@@ -26,7 +26,6 @@
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
-- `launchers.rs` — 하단바 실행 단추(settings.json `launchers`, 키가 없으면 설치된 kasaslk 하나). 누르면 이 기기 방의 새 탭에서 명령을 돌리고, 그 프로그램이 도는 칸(`running_job`)이 있으면 그리로 간다. 칩 그리기는 render.rs 상태줄의 `draw_launchers_widget`
 - `sidebar_pulse.rs` — 사이드바 맨 위 현황 줄(모든 기기 보드의 사람 차례·작업·끝, 누르면 보드). 수는 `native_board::pulse_counts`(보드 목록과 같은 판정, 원격 거울 줄 제외)를 백그라운드로 3초마다 읽는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
 - `left_panel.rs` — 사이드바 옆에서 밀려 나오는 판(보드·아로나 모드). 폭 배분의 넷째 기둥, 초점(키가 판으로 가나)·폭 끌기·×·밀려 나오기. 보드는 방이 아니라 여기 뜬다
 - `native_board.rs` — 운영 보드(wgpu). 첫 탭 「작업현황」(사람용, 에이전트용은 「관측」 탭 — docs/boards.md)은 자식 모듈 `native_board/work.rs`(B안: 답할 것 → 진행·검증·완료, 기기·학생, 상세의 출처·증거·연결). 오른쪽 열 「작업」 탭은 `native_board/side.rs`(정리: 지금 창의 현재 작업·변경·다음 일·막힘·검증 / 조율: 같은 할 일 목록을 좁게 / 권한 표)
