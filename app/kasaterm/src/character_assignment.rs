@@ -54,6 +54,26 @@ impl App {
         assert_eq!(self.pty.len(), 4);
         eprintln!("[character-order] PASS: Arona first, distinct tabs/worktree/room, existing identities preserved, isolated registry={}", kasa_socket::collab_root().display());
     }
+
+    /// 계정 동기화가 다른 기기의 학생 명단을 settings.json 에 써 넣은 뒤, 다음 배정이 그 명단과 순서를 따른다.
+    pub(crate) fn run_student_picks_probe(&mut self) {
+        if !crate::verification_run() || std::env::var_os("KASATERM_AUTO_STUDENT_PICKS").is_none()
+            || self.restore_progress.is_some() || self.pty.is_empty() { return; }
+        static RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if RAN.swap(true, std::sync::atomic::Ordering::Relaxed) { return; }
+        let original = self.target_surface().expect("initial verification pane");
+        let roster = kasa_mcp::character::roster_in_use().expect("bundled roster");
+        assert!(kasa_mcp::character::assignable_names(&roster).len() > 2, "no picks yet: everyone");
+        socket::write_setting("character_picks", serde_json::json!({"__base": ["세이아", "아즈사"]}));
+        self.reload_student_choices();
+        assert_eq!(kasa_mcp::character::assignable_names(&roster), ["세이아", "아즈사"]);
+        let first = self.prepare_agent_identity(&original, "", "", std::process::id()).unwrap();
+        assert_eq!(first["character"], "세이아");
+        let tab = self.spawn_new_tab(&original, false).expect("second tab");
+        let second = self.prepare_agent_identity(&tab, "", "", std::process::id()).unwrap();
+        assert_eq!(second["character"], "아즈사", "the synced order is the assignment order");
+        eprintln!("[student-picks] PASS: synced picks replace the pool in order without a restart");
+    }
 }
 
 #[cfg(test)]

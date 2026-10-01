@@ -15,6 +15,7 @@ impl App {
             return Err("settings edit in progress".into());
         }
         let refresh = request.changes_runtime();
+        let students = ["character_theme", "character_picks"].iter().any(|key| request.changes_setting(key));
         kasa_mcp::account_sync::apply_pending(request)?;
         if !refresh { return Ok(()); }
         let settings = socket::read_settings();
@@ -35,6 +36,8 @@ impl App {
         self.font_size = socket::read_font_size();
         theme::apply_from_settings_read_only();
         if persona != self.set_claude_persona { self.regen_pane_shims(); }
+        // Before the settings cache reloads: it reads the roster and theme cards through these.
+        if students { self.reload_student_choices(); }
         self.settings_scene.refresh_cache();
         self.refresh_native_settings_dynamic_cache();
         self.reload_native_settings_media_cache();

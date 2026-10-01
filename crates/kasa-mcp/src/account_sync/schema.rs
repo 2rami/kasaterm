@@ -9,7 +9,7 @@ const MAX_MACHINES: usize = 128;
 /// Keys a client must ask for by name (header `KEYS_HEADER`, comma separated). Every
 /// validator here rejects a whole snapshot that holds a key it does not know, so a key
 /// added later is hidden from clients that did not name it, and those keep syncing.
-pub const OPT_IN_KEYS: &[&str] = &["weather"];
+pub const OPT_IN_KEYS: &[&str] = &["weather", "character_picks"];
 pub const KEYS_HEADER: &str = "x-kasa-sync-keys";
 
 pub fn opt_in_header() -> String {
@@ -56,6 +56,17 @@ fn weather(v: &Value) -> bool {
             matches!(k.as_str(), "streaks" | "drops" | "mist" | "ripples" | "buttons") && b.is_boolean()
         })),
         _ => false,
+    })
+}
+
+/// `{"<theme folder|__base>": ["name", …]}` — who new panes may get, in assignment order.
+/// Names only: a theme or name the receiving device lacks is skipped there, not deleted.
+fn character_picks(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    o.len() <= 32 && o.iter().all(|(theme, names)| {
+        name(&Value::String(theme.clone()), 80) && !theme.is_empty() && theme != "." && theme != ".."
+            && names.as_array().is_some_and(|a| a.len() <= 256
+                && a.iter().all(|n| text(n, 40) && n.as_str().is_some_and(|s| !s.trim().is_empty())))
     })
 }
 
@@ -138,6 +149,7 @@ pub fn valid_setting(key: &str, v: &Value) -> bool {
         "custom_themes" => v.as_array().is_some_and(|a| a.len() <= 24 && a.iter().all(palette)),
         "custom_theme" => palette(v),
         "weather" => weather(v),
+        "character_picks" => character_picks(v),
         _ => false,
     }
 }
@@ -225,7 +237,7 @@ pub fn known_setting(key: &str) -> bool {
         | "character_appearance" | "claude_persona" | "sidebar_persona" | "terminal_persona"
         | "file_tree_default" | "pane_footer_default" | "usage_compact" | "sidebar_pulse"
         | "statusbar_hidden" | "statusbar_order" | "statusbar_separators" | "statusbar_colors"
-        | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather")
+        | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather" | "character_picks")
 }
 
 pub fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
@@ -265,6 +277,24 @@ mod tests {
         assert!(!old.settings.contains_key("weather") && old.settings.contains_key("theme"));
         let new = visible(snapshot, &accepted_keys(Some(&opt_in_header())));
         assert!(new.settings.contains_key("weather"));
+    }
+
+    #[test]
+    fn student_picks_sync_only_as_names_and_only_to_clients_that_ask() {
+        let picks = json!({"__base":["미도리","아즈사"], "project-sekai":["에무"], "지운테마":[]});
+        assert!(valid_setting("character_picks", &picks));
+        assert!(valid_setting("character_picks", &json!({})), "no picks means everyone");
+        for bad in [json!({"../x":["미도리"]}), json!({"a/b":["미도리"]}), json!({"~":["미도리"]}), json!({"..":[]}),
+            json!({"__base":"미도리"}), json!({"__base":[1]}), json!({"__base":[" "]}), json!({"__base":["a\nb"]}),
+            json!({"__base":["가".repeat(41)]}), json!(["미도리"])] {
+            assert!(!valid_setting("character_picks", &bad), "{bad}");
+        }
+        let local = json!({"character_picks": picks.clone(), "character_theme":"project-sekai"});
+        assert_eq!(safe_local_settings(&local).len(), 2);
+        let mut snapshot = Snapshot::default();
+        snapshot.settings.insert("character_picks".into(), picks);
+        assert!(!visible(snapshot.clone(), &accepted_keys(None)).settings.contains_key("character_picks"));
+        assert!(visible(snapshot, &accepted_keys(Some(&opt_in_header()))).settings.contains_key("character_picks"));
     }
 
     #[test]

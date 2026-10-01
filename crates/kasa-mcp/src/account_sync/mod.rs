@@ -26,6 +26,10 @@ impl PendingApply {
     pub fn changes_runtime(&self) -> bool {
         self.original.settings != self.expected.settings || self.original.machines != self.expected.machines
     }
+
+    pub fn changes_setting(&self, key: &str) -> bool {
+        self.original.settings.get(key) != self.expected.settings.get(key)
+    }
 }
 
 type ApplyHook = Arc<dyn Fn(PendingApply) -> Result<(), String> + Send + Sync>;
@@ -150,11 +154,13 @@ async fn get_remote(client: &reqwest::Client, credential: &DeviceCred) -> Result
 }
 
 /// Set when the relay refused a patch that carried an opt-in key: it predates that key.
-/// Those keys then stay local for a while instead of failing every sync pass.
-static LEGACY_RELAY_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// Those keys then stay local for a while instead of failing every sync pass. Kept per
+/// relay, so signing in to a newer relay does not inherit an older one's verdict.
+static LEGACY_RELAY_UNTIL: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
 
-fn relay_lacks_opt_in() -> bool {
-    LEGACY_RELAY_UNTIL.lock().ok().and_then(|g| *g).is_some_and(|until| std::time::Instant::now() < until)
+fn relay_lacks_opt_in(relay: &str) -> bool {
+    LEGACY_RELAY_UNTIL.lock().ok().and_then(|g| g.clone())
+        .is_some_and(|(legacy, until)| legacy == relay && std::time::Instant::now() < until)
 }
 
 fn without_opt_in(changes: &mut local::Delta) -> bool {
@@ -184,7 +190,7 @@ async fn synchronize(
     let mut changes = if let Some(binding) = previous { local::delta(&binding.observed, &original) }
         else if seed { local::delta(&Snapshot::default(), &original) }
         else { local::Delta::default() };
-    if relay_lacks_opt_in() {
+    if relay_lacks_opt_in(&credential.relay) {
         without_opt_in(&mut changes);
     }
     if !changes.settings.is_empty() || !changes.machines.is_empty() {
@@ -199,7 +205,7 @@ async fn synchronize(
             let status = response.status().as_u16();
             if status == 400 && without_opt_in(&mut changes) {
                 if let Ok(mut until) = LEGACY_RELAY_UNTIL.lock() {
-                    *until = Some(std::time::Instant::now() + Duration::from_secs(600));
+                    *until = Some((credential.relay.clone(), std::time::Instant::now() + Duration::from_secs(600)));
                 }
                 if changes.settings.is_empty() && changes.machines.is_empty() { committed = true; break; }
                 continue;
@@ -350,6 +356,37 @@ mod tests {
         assert_eq!(remote.settings.get("theme"), Some(&json!("ink")));
         assert!(!remote.settings.contains_key("weather"));
         assert_eq!(local::read_json(&paths.settings, json!({})).unwrap()["weather"]["amount"], "rain");
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn student_picks_follow_the_account_both_ways() {
+        let (credential, _, server) = fixture().await;
+        let root = std::env::temp_dir().join(format!("account-sync-picks-{}", uuid::Uuid::new_v4()));
+        let a = paths(&root, "one");
+        let b = paths(&root, "two");
+        let picks = json!({"__base":["아즈사","미도리"], "project-sekai":["에무"]});
+        local::write_private(&a.settings, &json!({"character_theme":"project-sekai","character_picks":picks})).unwrap();
+        local::write_private(&b.settings, &json!({"character_picks":{"__base":["아로나"]}})).unwrap();
+        let client = reqwest::Client::new();
+        let allow = || Ok(());
+        let changed = Mutex::new(Vec::new());
+        let apply = |request: PendingApply| {
+            changed.lock().unwrap().push(request.changes_setting("character_picks"));
+            apply_files(&request)
+        };
+        let sync = |paths| synchronize(&client, &credential, Stamp::fixture(), paths, &allow, &apply);
+        sync(a.clone()).await.unwrap();
+        sync(b.clone()).await.unwrap();
+        let received = local::read_json(&b.settings, json!({})).unwrap();
+        assert_eq!(received["character_picks"], picks, "order is the assignment order and must survive");
+        assert_eq!(received["character_theme"], "project-sekai");
+        assert_eq!(*changed.lock().unwrap(), [false, true]);
+        local::edit_json(&b.settings, json!({}), |value| { value["character_picks"] = json!({"__base":["미도리"]}); Ok(()) }).unwrap();
+        sync(b.clone()).await.unwrap();
+        sync(a.clone()).await.unwrap();
+        assert_eq!(local::read_json(&a.settings, json!({})).unwrap()["character_picks"], json!({"__base":["미도리"]}));
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }

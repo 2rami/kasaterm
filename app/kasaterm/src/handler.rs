@@ -7894,6 +7894,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_mirror_focus_probe(event_loop);
         self.run_character_assignment_probe();
         self.run_agent_identity_probe();
+        self.run_student_picks_probe();
         // 지글 원복 — NudgePaneResize 가 1행 줄인 pane 을 원 크기로 되돌린다.
         if !self.pending_unjiggle.is_empty() {
             let now = std::time::Instant::now();

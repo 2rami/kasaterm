@@ -13,11 +13,47 @@ fn choose<'a>(requested: Option<&'a str>, resumed: Option<&'a str>, seated: Opti
     [requested, resumed, seated, next].into_iter().flatten().find(|name| !name.is_empty())
 }
 
+/// `pid` 가 `ancestor` 아래에서 뜬 프로세스인가.
+fn descends_from(table: &[(u32, u32, String)], pid: u32, ancestor: u32) -> bool {
+    let mut cur = pid;
+    for _ in 0..64 {
+        let Some(&(_, parent, _)) = table.iter().find(|(p, _, _)| *p == cur) else { return false };
+        if parent == ancestor { return true; }
+        if parent <= 1 || parent == cur { return false; }
+        cur = parent;
+    }
+    false
+}
+
+fn identity_json(roster: Option<&serde_json::Value>, name: &str, launch_token: &str) -> anyhow::Result<serde_json::Value> {
+    let persona = if socket::read_claude_persona() {
+        kasa_mcp::character::persona_for_any(name)
+            .ok_or_else(|| anyhow::anyhow!("assigned character has no instructions"))?
+    } else { kasa_mcp::character::protocol_only() };
+    let model = roster.and_then(|r| kasa_mcp::character::model_for(r, name)).unwrap_or_default();
+    let backend = roster.and_then(|r| kasa_mcp::character::backend_for(r, name)).unwrap_or_default();
+    Ok(serde_json::json!({"character": name, "persona": persona, "slug": crate::theme::agent_slug(name),
+        "model": model, "backend": backend, "launch_token": launch_token}))
+}
+
 impl App {
+    /// 이 pane 에 앉은 하네스 **아래에서** 뜬 실행(그 학생의 Bash 도구가 친 `claude --version` 같은 것)은
+    /// 자리를 새로 받지 않고 앉은 학생을 빌린다. 받게 두면 그 짧은 실행이 끝날 때 자리째 걷혀, 계속 도는
+    /// 원래 학생의 이름표가 비고 그 학생이 다음 pane 에 또 배정된다(2026-10-01 %14 아즈사).
+    fn nested_launch_identity(&self, pane: &str, pid: u32) -> anyhow::Result<Option<serde_json::Value>> {
+        let Some(&harness) = self.pane_agent_launches.get(pane) else { return Ok(None) };
+        if harness == pid { return Ok(None); }
+        let name = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned().unwrap_or_default();
+        if name.is_empty() || !descends_from(&kasa_pty::fresh_process_table(), pid, harness) { return Ok(None); }
+        let token = self.file_tree.instruction_launches.get(pane).cloned().unwrap_or_default();
+        identity_json(kasa_mcp::character::roster_in_use().as_ref(), &name, &token).map(Some)
+    }
+
     pub(crate) fn prepare_agent_identity(&mut self, pane: &str, sid: &str, requested: &str, pid: u32) -> anyhow::Result<serde_json::Value> {
         anyhow::ensure!(!kasa_mcp::remote::is_remote_pane(pane), "cannot launch an identity on a mirror");
         anyhow::ensure!(self.ws.lock().unwrap().outer_for_pty(pane).is_some(), "pane is no longer open");
         anyhow::ensure!(pid > 0, "missing harness process identity");
+        if let Some(identity) = self.nested_launch_identity(pane, pid)? { return Ok(identity); }
         let pending = self.ws.lock().unwrap().pane_next_character.get(pane).cloned();
         let requested = (!requested.is_empty()).then_some(requested).or(pending.as_deref());
         if let Some(name) = requested {
@@ -35,12 +71,8 @@ impl App {
         let next = (automatic && seated.is_none()).then(|| self.next_auto_character(&members, pane)).flatten();
         let name = choose(requested, mapped.as_deref(), seated.as_deref(), next.as_deref())
             .ok_or_else(|| anyhow::anyhow!("no student available for this launch"))?.to_string();
-        let persona = if socket::read_claude_persona() {
-            kasa_mcp::character::persona_for_any(&name)
-                .ok_or_else(|| anyhow::anyhow!("assigned character has no instructions"))?
-        } else { kasa_mcp::character::protocol_only() };
-        let model = roster.as_ref().and_then(|r| kasa_mcp::character::model_for(r, &name)).unwrap_or_default();
-        let backend = roster.as_ref().and_then(|r| kasa_mcp::character::backend_for(r, &name)).unwrap_or_default();
+        let launch_token = kasa_mcp::character::new_session_id();
+        let identity = identity_json(roster.as_ref(), &name, &launch_token)?;
         if !sid.is_empty() { kasa_mcp::character::bind_session_character(sid, &name)?; }
         // GUI event serialization makes allocation and publication one operation
         // across all rooms. The old *pane label* is deliberately NOT a fallback —
@@ -56,12 +88,10 @@ impl App {
             ws.pane_launch_character.insert(pane.into(), name.clone());
         }
         self.pane_agent_launches.insert(pane.into(), pid);
-        let launch_token = kasa_mcp::character::new_session_id();
-        self.file_tree.instruction_launches.insert(pane.into(), launch_token.clone());
+        self.file_tree.instruction_launches.insert(pane.into(), launch_token);
         self.relabel_pane(pane, &name);
-        if automatic { self.last_auto_character = Some(name.clone()); }
-        Ok(serde_json::json!({"character": name, "persona": persona, "slug": crate::theme::agent_slug(&name),
-            "model": model, "backend": backend, "launch_token": launch_token}))
+        if automatic { self.last_auto_character = Some(name); }
+        Ok(identity)
     }
 
     pub(crate) fn release_finished_agent_identities(&mut self) {
@@ -144,7 +174,17 @@ impl App {
         let moved = self.prepare_agent_identity(&pane, "", "", std::process::id()).unwrap();
         assert_ne!(moved["character"], prev.as_str(), "a student seated elsewhere is not reused");
         self.ws.lock().unwrap().pane_character.remove("%elsewhere");
-        eprintln!("[agent-identity] PASS: resumed name/persona agree; late mapping cannot relabel; explicit selection updates both; same-seat restart keeps the student");
+        // 앉은 하네스 아래에서 뜬 짧은 실행은 자리를 빌릴 뿐, 끝나도 자리를 걷지 않는다(%14).
+        let seated = moved["character"].as_str().unwrap().to_string();
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let nested = self.prepare_agent_identity(&pane, &kasa_mcp::character::new_session_id(), "", child.id()).unwrap();
+        assert_eq!(nested["character"], seated.as_str(), "a nested run borrows the seated student");
+        assert_eq!(self.pane_agent_launches[&pane], std::process::id(), "a nested run does not take the seat");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        self.release_finished_agent_identities();
+        assert_eq!(self.ws.lock().unwrap().pane_character[&pane], seated, "the seated harness keeps its name");
+        eprintln!("[agent-identity] PASS: resumed name/persona agree; late mapping cannot relabel; explicit selection updates both; same-seat restart keeps the student; nested run keeps the seat");
     }
 }
 
@@ -156,6 +196,15 @@ mod tests {
         assert_eq!(choose(None, Some("코하루"), None, Some("모모이")), Some("코하루"));
         assert_eq!(choose(Some("아로나"), Some("코하루"), None, Some("모모이")), Some("아로나"));
         assert_eq!(choose(None, None, None, Some("모모이")), Some("모모이"));
+    }
+
+    #[test]
+    fn only_processes_under_the_seated_harness_count_as_nested() {
+        let table = [(10, 1, "claude".to_string()), (11, 10, "zsh".into()), (12, 11, "sh".into()), (20, 1, "zsh".into())];
+        assert!(descends_from(&table, 12, 10));
+        assert!(!descends_from(&table, 20, 10), "a sibling launch is a new harness");
+        assert!(!descends_from(&table, 10, 10), "the harness itself is not nested");
+        assert!(!descends_from(&table, 99, 10), "an unknown pid is not nested");
     }
 
     #[test]

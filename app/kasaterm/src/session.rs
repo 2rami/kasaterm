@@ -3487,6 +3487,15 @@ impl App {
         Ok(kasa_mcp::character::picks_of_theme(theme).is_empty() != on)
     }
 
+    /// 다른 기기에서 학생 테마·명단이 넘어와 settings.json 이 밖에서 바뀌었을 때. 설정 화면이
+    /// 쓰는 길과 달리 `write_character_picks` 를 안 거쳤으니 배정·활성 테마 캐시도 여기서 걷는다.
+    pub(crate) fn reload_student_choices(&mut self) {
+        kasa_mcp::character::invalidate_active_theme();
+        kasa_mcp::character::invalidate_character_picks();
+        socket::invalidate_theme_rows();
+        self.invalidate_character_view();
+    }
+
     /// 명단이 바뀐 뒤 화면 쪽 캐시를 걷는다. 배정 캐시는 `write_character_picks` 가
     /// 이미 비웠다 — 여기는 그림·색·테마 카드 몫이라 **짝으로** 불러야 한다.
     fn invalidate_character_view(&mut self) {
