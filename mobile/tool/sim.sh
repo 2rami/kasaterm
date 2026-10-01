@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 sim=${KASA_SIM:-EEB8BE7C-B2C3-4EB9-9570-86FA79B8FF9B}
-app=com.debimarlene.kasatermMobile
+app=com.debimarlene.kasaterm
 cmd=${1:-}; shift || true
 
 case "$cmd" in

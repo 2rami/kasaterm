@@ -69,7 +69,7 @@ xcrun devicectl device install app --device "$device" "$app" >/dev/null
 # ⚠️돌고 있던 앱은 새 판을 깔아도 안 죽는다 — 그냥 launch 하면 옛 프로세스가 앞으로 나올 뿐이라
 # 「고쳤는데 그대로」가 된다(2026-09-05 실측). 반드시 끄고 켠다.
 # 잠긴 폰은 켜 주지 못한다(FBSOpenApplicationErrorDomain 7) — 설치는 이미 끝났으니 오류가 아니다.
-if xcrun devicectl device process launch --terminate-existing --device "$device" com.debimarlene.kasatermMobile >/dev/null 2>&1; then
+if xcrun devicectl device process launch --terminate-existing --device "$device" com.debimarlene.kasaterm >/dev/null 2>&1; then
   echo "폰에 올렸다(빌드 $build) — 앱을 껐다 켰다"
 else
   echo "폰에 올렸다(빌드 $build) — 잠겨 있어 못 켰다, 잠금을 풀고 아이콘을 눌러 달라"

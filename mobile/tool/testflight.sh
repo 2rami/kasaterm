@@ -34,8 +34,8 @@ if [ -f "$kc" ]; then
   sign=(DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Development"
     OTHER_CODE_SIGN_FLAGS="--keychain $kc"
     'PROVISIONING_PROFILE_SPECIFIER=$(KASA_PROFILE_$(PRODUCT_BUNDLE_IDENTIFIER:identifier))'
-    KASA_PROFILE_com_debimarlene_kasatermMobile="kasaterm mini dev app"
-    KASA_PROFILE_com_debimarlene_kasatermMobile_NotificationService="kasaterm mini dev notif")
+    KASA_PROFILE_com_debimarlene_kasaterm="kasaterm mini dev app"
+    KASA_PROFILE_com_debimarlene_kasaterm_NotificationService="kasaterm mini dev notif")
 fi
 
 build=$(date +%y%m%d%H%M)
@@ -63,8 +63,8 @@ if [ "$manual" = 1 ]; then
   signing='<key>signingStyle</key><string>manual</string>
   <key>signingCertificate</key><string>Apple Distribution</string>
   <key>provisioningProfiles</key><dict>
-    <key>com.debimarlene.kasatermMobile</key><string>kasaterm appstore app</string>
-    <key>com.debimarlene.kasatermMobile.NotificationService</key><string>kasaterm appstore notif</string>
+    <key>com.debimarlene.kasaterm</key><string>kasaterm appstore app</string>
+    <key>com.debimarlene.kasaterm.NotificationService</key><string>kasaterm appstore notif</string>
   </dict>'
 fi
 

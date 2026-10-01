@@ -141,7 +141,7 @@ tool/phone.sh
 - 첫 설치 뒤 폰의 설정 → 일반 → VPN 및 기기 관리에서 개발자 앱을 한 번 「신뢰」해야 켜진다.
 - 무료 Apple ID(Personal Team)는 7일마다 `tool/phone.sh` 를 다시 돌린다.
 - 개발자 모드가 꺼져 있으면 xcodebuild 가 "Developer Mode disabled" 로 선다.
-- 번들 id 는 `com.debimarlene.kasatermMobile`. 로컬 서버(`http://127.0.0.1:8765/` · LAN)에
+- 번들 id 는 `com.debimarlene.kasaterm`. 로컬 서버(`http://127.0.0.1:8765/` · LAN)에
   붙이려면 `Info.plist` 의 `NSAppTransportSecurity` 에 `NSAllowsLocalNetworking` 이 켜져 있어야 한다.
 
 ## 웹에서 앱으로

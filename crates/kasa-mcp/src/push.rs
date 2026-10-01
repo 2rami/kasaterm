@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// 앱의 번들 id — `apns-topic`. 폰 프로젝트(mobile/ios)와 같아야 한다.
-pub const TOPIC: &str = "com.debimarlene.kasatermMobile";
+pub const TOPIC: &str = "com.debimarlene.kasaterm";
 const TICK: Duration = Duration::from_secs(4);
 /// 같은 pane 에 연달아 쏘지 않는 최소 간격 — 대기↔바쁨을 튀는 스피너 오판이 있다.
 const MIN_GAP: Duration = Duration::from_secs(15);
