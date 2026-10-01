@@ -60,6 +60,7 @@ fn badge_icon(tone: theme::NoticeTone, title: &str) -> &'static str {
         Success => "check",
         Error => "x",
         Warning | Attention => "triangle-alert",
+        Info if title.starts_with("새 판") => "arrow-up",
         Info => "info",
     }
 }
@@ -128,8 +129,10 @@ pub(crate) struct Notice<'a> {
     pub elapsed_ms: f32,
     /// 결정을 받는 알림(승인·업데이트)이면 두 칩의 이름.
     pub actions: Option<(&'a str, &'a str)>,
-    /// 둘째 칩이 되돌릴 수 없는 거절인가(승인 「거부」). 「나중에」는 아니다.
+    /// 둘째 칩이 되돌릴 수 없는 거절인가(승인 「거부」). 「닫기」는 아니다.
     pub decline_is_danger: bool,
+    /// 글로 판정한 뜻 대신 쓸 뜻. 결정 알림은 기본이 주의라, 새 판처럼 할 일 있음을 말할 때 건다.
+    pub tone: Option<theme::NoticeTone>,
 }
 
 /// 오른쪽 위 알림. 돌려주는 사각형은 **다 내려앉은 자리**다 — 들어오는 0.18초 동안
@@ -145,7 +148,7 @@ pub(crate) fn paint_notice(
     // 결정 칩은 공통 버튼이라 흐리게 못 그린다 — 판만 흐려지며 들어오면 칩이 먼저 떠
     // 보인다. 결정을 받는 알림은 미끄러지기만 한다.
     let alpha = if has_action { notice.alpha } else { notice.alpha * enter };
-    let tone = theme::notice_tone(notice.message, has_action);
+    let tone = notice.tone.unwrap_or_else(|| theme::notice_tone(notice.message, has_action));
     let (title, detail) = split_notice(theme::clean_notice_text(notice.message));
     let limit = theme::notice_line_limit(tone);
     let keep_tail = theme::notice_keeps_tail(tone);
@@ -279,6 +282,7 @@ mod tests {
         assert_eq!(badge_icon(Success, "나쵸네코에서 복사됨"), "copy");
         assert_eq!(badge_icon(Success, "저장했어요"), "check");
         assert_eq!(badge_icon(Attention, "미도리"), "triangle-alert");
+        assert_eq!(badge_icon(Info, "새 판 v0.2.18 있어요"), "arrow-up");
     }
 
     #[test]

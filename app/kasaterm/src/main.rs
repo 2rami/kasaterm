@@ -64,6 +64,7 @@ mod stream;
 mod testkit;
 mod theme;
 mod toast;
+mod update_notice;
 mod themegen;
 mod transcript;
 mod webpane;
@@ -5915,9 +5916,11 @@ struct App {
     update_menu_item: Option<muda::MenuItem>,
     /// "kasaterm 종료"(⌘Q) 메뉴 — MenuEvent id 로 매칭해 종료 확인 NSAlert 를 띄운다.
     quit_menu_item: Option<muda::MenuItem>,
-    /// Sparkle SPUStandardUpdaterController — 보관해야 백그라운드 자동 체크가 유지된다(드롭=정지).
+    /// Sparkle SPUStandardUpdaterController — 보관해야 판 확인이 유지된다(드롭=정지).
     #[cfg(target_os = "macos")]
     sparkle_updater: Option<macos_sparkle::Updater>,
+    /// 새 판 알림 — 업데이터가 찾고 사람이 아직 답하지 않은 판(`update_notice.rs`).
+    update_notice: Option<update_notice::Notice>,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -6402,6 +6405,7 @@ impl App {
             quit_menu_item: None,
             #[cfg(target_os = "macos")]
             sparkle_updater: None,
+            update_notice: None,
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
@@ -6489,8 +6493,6 @@ fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
 
 /// 위 판정의 캐시판 — 상태줄은 프레임마다 도는 자리라 stat 두 번도 매번은 아깝다.
 pub(crate) fn install_pending() -> bool {
-    #[cfg(target_os = "macos")]
-    if macos_sparkle::install_on_quit_ready() { return true; }
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
     static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();

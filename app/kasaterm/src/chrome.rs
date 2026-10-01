@@ -1492,10 +1492,14 @@ impl App {
     pub(crate) fn set_toast(&mut self, msg: String) {
         // lite 는 토스트가 없다 — 그리는 쪽(render)도 같이 막혀 있어 직접 세운 것도 안 뜬다.
         // 승인 알림이 서 있으면 그 자리를 안 뺏는다 — 글만 바뀌고 칩은 남아, 「복사됨」
-        // 옆의 [승인] 이 엉뚱한 pane 에 답을 보내게 된다.
-        if self.lite || self.collab.toast_action.is_some() {
+        // 옆의 [승인] 이 엉뚱한 pane 에 답을 보내게 된다. 새 판 알림은 물러섰다가 자리가
+        // 비면 다시 선다(`update_notice.rs`).
+        if self.lite
+            || self.collab.toast_action.as_deref().is_some_and(|a| a != crate::update_notice::ACTION)
+        {
             return;
         }
+        self.collab.toast_action = None;
         self.collab.toast = Some((msg, std::time::Instant::now()));
         self.collab.toast_rect = None;
         if let Some(w) = self.window.as_ref() {

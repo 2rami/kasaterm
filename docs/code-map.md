@@ -30,6 +30,7 @@
 - `native_board.rs` — 운영 보드(wgpu). 첫 탭 「작업현황」(사람용, 에이전트용은 「관측」 탭 — docs/boards.md)은 자식 모듈 `native_board/work.rs`(B안: 답할 것 → 진행·검증·완료, 기기·학생, 상세의 출처·증거·연결). 오른쪽 열 「작업」 탭은 `native_board/side.rs`(정리: 지금 창의 현재 작업·변경·다음 일·막힘·검증 / 조율: 같은 할 일 목록을 좁게 / 권한 표)
 - `work_mode.rs` — 작업 모드(정리·조율)와 권한 표의 나쵸 클라이언트. 정본은 나쵸(`GET/POST /api/app/work-mode`·`GET /api/app/capabilities`, 나쵸 `desk-api.md`), 카사텀 설정의 `work_mode_cache` 는 마지막으로 확인한 값뿐. 쓰기는 탭을 누를 때만, 모드는 둘뿐. 나쵸 키 없는 기기는 사람이 고른 명부 기기(`nacho_read_via`)의 `/nacho/read/*` 로 읽기만 한다 — `docs/nacho-read-relay.md`
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
+- `update_notice.rs` — 새 판 알림: 업데이터(맥 preview Sparkle 확인·WinSparkle)가 찾은 판을 오른쪽 위 결정 알림으로 세우고, [업데이트]면 끊길 일을 한 번 묻고 설치를 맡긴다, [닫기]면 그 판을 기기 설정에 적는다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
 - `nacho_tasks.rs` — 나쵸 작업 장부의 타입 클라이언트(`/api/app/tasks`). 같은 id 는 큰 `rev` 하나, 끊기면 마지막 목록 유지, `done` 과 검증 통과를 가른다

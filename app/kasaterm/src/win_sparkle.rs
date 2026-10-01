@@ -11,26 +11,21 @@
 //! WinSparkle 은 자체 체크가 업데이트를 찾으면 Win32 구식 다이얼로그를 무조건
 //! 띄우고, 이를 끄거나 꾸밀 API 가 없다. 그래서 **체크는 우리가, 설치만
 //! WinSparkle 에게**: 자동 체크를 0 으로 끄고 appcast 를 직접 받아(curl, UI 없음)
-//! 버전을 비교한 뒤, 새 버전이면 kasaterm 토스트([설치][나중에] 칩, 승인 토스트
-//! 배관 재사용)로 알린다. [설치] 클릭 시에만
+//! 버전을 비교한 뒤, 새 버전이면 kasaterm 새 판 알림(`update_notice.rs`, [업데이트][닫기]
+//! 칩)으로 알린다. [업데이트] 클릭 시에만
 //! `win_sparkle_check_update_with_ui_and_install` 로 위임 — "업데이트 있음"
 //! 창을 건너뛰고 다운로드 진행바 → EdDSA 검증 → MSI 실행까지 WinSparkle 의
 //! 검증·설치 머신을 그대로 쓴다.
 
 use std::sync::Mutex;
 
-/// 업데이트 토스트의 `collab.toast_action` 센티널 — 승인 토스트 배관(sticky·
-/// 칩·클릭 라우팅)을 재사용하되 pane id("%N" 형식)와 절대 충돌하지 않는 값.
-/// handler.rs(칩 클릭·본문 클릭)와 render.rs(칩 라벨)가 이 값으로 분기한다.
-pub(crate) const UPDATE_TOAST_ACTION: &str = "__kasaterm_update__";
-
-/// 체커 스레드가 찾은 새 버전. GUI(about_to_wait)가 take 해 토스트를 무장한다.
+/// 체커 스레드가 찾은 새 버전. GUI(about_to_wait)가 take 해 새 판 알림을 세운다.
 /// take 후엔 이번 실행에선 다시 안 뜬다(다음 실행 때 재체크).
 static FOUND: Mutex<Option<String>> = Mutex::new(None);
 
 pub(crate) fn take_found() -> Option<String> {
-    // 테스트 훅: KASATERM_FAKE_UPDATE=<버전> 을 첫 호출에서 1회 소비 — Windows
-    // 실기 없이(mac 포함) 업데이트 토스트 UI 를 검증한다(testkit env 하네스 결).
+    // 테스트 훅: KASATERM_FAKE_UPDATE=<버전> 을 첫 호출에서 1회 소비 — 업데이터 없이
+    // (mac dev 빌드 포함) 새 판 알림 UI 를 검증한다(testkit env 하네스 결).
     {
         use std::sync::atomic::{AtomicBool, Ordering};
         static FAKE_TAKEN: AtomicBool = AtomicBool::new(false);
@@ -73,8 +68,8 @@ pub(crate) fn version_newer(a: &str, b: &str) -> bool {
     }
 }
 
-/// 토스트 [설치] 칩 → WinSparkle 다운로드·설치로 위임. mac 에선 no-op
-/// (센티널 토스트 자체가 Windows 에서만 무장되지만 심볼은 공용으로 둔다).
+/// 새 판 알림 [업데이트] → WinSparkle 다운로드·설치로 위임. mac 에선 no-op
+/// (부르는 쪽이 `available()` 로 먼저 거르지만 심볼은 공용으로 둔다).
 #[cfg(not(windows))]
 pub(crate) fn install() {}
 
@@ -172,7 +167,7 @@ mod ffi {
             INSTALL_FN.store(install_fn as usize, Ordering::SeqCst);
         }
         // 시작 몇 초 뒤 appcast 를 직접 받아 버전 비교(UI 없음). 새 버전이면
-        // FOUND 에 기록 → GUI(about_to_wait)가 kasaterm 토스트로 알린다.
+        // FOUND 에 기록 → GUI(about_to_wait)가 새 판 알림으로 알린다.
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(6));
             let Some(xml) = fetch_appcast() else { return };
@@ -204,7 +199,7 @@ mod ffi {
         INSTALL_FN.load(Ordering::SeqCst) != 0
     }
 
-    /// 토스트 [설치] 칩 → WinSparkle 에 다운로드·설치 위임. "업데이트 있음"
+    /// 새 판 알림 [업데이트] → WinSparkle 에 다운로드·설치 위임. "업데이트 있음"
     /// 창은 건너뛰고 진행바부터 시작한다(재체크·EdDSA 검증·MSI 실행 포함).
     pub(crate) fn install() {
         let p = INSTALL_FN.load(Ordering::SeqCst);

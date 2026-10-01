@@ -37,7 +37,7 @@ claude 가 전부 죽는다(2026-08-15 에 pane 9개가 날아갔다). 거둘 �
 남의 미완성 변경·미검증 커밋은 포함하지 않고, 갈라진 main을 강제 push하지 않는다. 문서만 바뀐 경우는 등록하지 않는다.
 등록은 배포 완료가 아니다. controller가 검사·서명·공증·preview 피드 검증을 끝냈는지 따로 보고하며,
 실패·대기는 이유와 함께 남긴다. 일반 사용자 stable 게시는 별도 승인을 유지한다.
-앱을 직접 종료·재실행하지 않는다. 선택된 Mac은 preview를 받아 두고 사용자의 정상 종료 때 설치한다.
+앱을 직접 종료·재실행하지 않는다. 선택된 Mac은 preview 새 판을 알림으로 띄우고, 사람이 [업데이트]를 눌렀을 때만 받아서 설치·재실행한다.
 절차·최초 설정·중단 범위는 [`docs/automatic-preview-updates.md`](docs/automatic-preview-updates.md).
 
 `bash scripts/build-app.sh`의 `dist/kasaterm.app`은 로컬 검증·최초 설치용이다. 로컬 빌드만으로 다른 기기에 배포됐다고 보고하지 않는다.

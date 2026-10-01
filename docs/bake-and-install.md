@@ -5,7 +5,7 @@
 ## 기본 완료 경로 — 빠른 업데이트 등록
 
 작은 앱 수정도 검사·커밋·main 푸시 뒤 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 실행한다.
-기기별 원격 빌드를 매번 요청받는 방식 대신, 선택된 Mac이 preview 피드를 받아 다음 정상 종료에 설치한다.
+기기별 원격 빌드를 매번 요청받는 방식 대신, 선택된 Mac이 preview 피드에서 새 판을 찾아 알리고 사람이 [업데이트]를 누르면 설치한다.
 등록·controller 처리·피드 검증·기기 적용은 서로 다른 상태다. stable 배포 승인은 별도로 유지한다.
 상시 정책과 처음 한 번의 준비는 [자동 preview 업데이트](automatic-preview-updates.md)를 따른다.
 

@@ -138,6 +138,7 @@ pub(crate) const RELEASES: &str = "https://github.com/2rami/kasaterm/releases/la
 
 /// 판 번호 줄을 눌렀을 때 쓰는 길. 업데이터가 있으면 그 창이 확인·받기·설치를 사람에게 묻는다
 /// (EdDSA 서명 확인도 업데이터 몫이고, 설치·재실행은 거기서 사람이 고른다 — 여기서 끄지 않는다).
+/// 맥 preview 는 확인만 하고 답을 새 판 알림으로 낸다(`update_notice.rs`).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UpdateEntry {
     Sparkle,

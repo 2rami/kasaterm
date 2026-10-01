@@ -1642,9 +1642,8 @@ impl App {
         let collab_toast_msg = if self.lite { None } else { self.collab.toast.as_ref().map(|(m, _)| m.clone()) };
         let collab_toast_action_on = self.collab.toast_action.is_some();
         let collab_toast_elapsed_ms = self.collab_toast_elapsed_ms();
-        // 업데이트 토스트(win_sparkle 센티널)면 칩 라벨이 승인/거부 대신 설치/나중에.
-        let update_toast_on =
-            self.collab.toast_action.as_deref() == Some(crate::win_sparkle::UPDATE_TOAST_ACTION);
+        // 새 판 알림이면 칩 라벨이 승인/거부 대신 업데이트/닫기, 뜻도 그쪽이 정한다.
+        let update_chips = self.update_notice_chips();
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -8415,9 +8414,16 @@ impl App {
             self.collab.toast_deny_rect = None;
             if collab_toast_alpha > 0.0 {
                 if let Some(msg) = collab_toast_msg.as_ref() {
-                    let actions = collab_toast_action_on.then(|| {
-                        if update_toast_on { ("설치", "나중에") } else { ("승인", "거부") }
-                    });
+                    // 센티널만 남고 글이 다른 알림으로 덮인 한 프레임은 칩 없이 그린다.
+                    let actions = match update_chips {
+                        Some((chips, _)) => Some(chips),
+                        None if collab_toast_action_on
+                            && self.collab.toast_action.as_deref() != Some(crate::update_notice::ACTION) =>
+                        {
+                            Some(("승인", "거부"))
+                        }
+                        None => None,
+                    };
                     let hits = toast::paint_notice(
                         g,
                         win_px.0 / scale,
@@ -8427,7 +8433,8 @@ impl App {
                             alpha: collab_toast_alpha,
                             elapsed_ms: collab_toast_elapsed_ms,
                             actions,
-                            decline_is_danger: !update_toast_on,
+                            decline_is_danger: update_chips.is_none(),
+                            tone: update_chips.and_then(|(_, tone)| tone),
                         },
                     );
                     self.collab.toast_rect = Some(hits.card);
