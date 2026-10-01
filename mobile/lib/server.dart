@@ -37,6 +37,7 @@ class Pane {
     this.kind,
     this.waitingFor,
     this.idleSecs,
+    this.busySecs,
     this.closed = false,
     this.undocked = false,
     this.session,
@@ -74,6 +75,9 @@ class Pane {
 
   /// 쉬기 시작한 지 몇 초.
   final int? idleSecs;
+
+  /// 도는 중에 들어온 지 몇 초 — 목록 줄 띠 끝의 시간. 데스크톱 배치도 칸과 같은 판정이다.
+  final int? busySecs;
 
   /// 닫았지만 살아 있는 pane(데스크톱의 되살리기 목록) — 방에 없다.
   final bool closed;
@@ -134,26 +138,6 @@ class Pane {
     return d.isEmpty ? null : d;
   }
 
-  /// PC 상태줄의 조각들 — 모델 · 브랜치 · 컨텍스트% · effort. 빈 것은 뺀다.
-  List<String> get statusParts => [
-    if ((modelLabel ?? '').isNotEmpty)
-      modelLabel!
-    else if ((model ?? '').isNotEmpty)
-      model!,
-    if ((branch ?? '').isNotEmpty) branch!,
-    if (contextPct != null) '$contextPct%',
-    if ((effortLabel ?? effort ?? '').isNotEmpty) (effortLabel ?? effort)!,
-  ];
-
-  /// 목록 한 줄용 — 모델과 effort 만.
-  List<String> get briefStatusParts => [
-    if ((modelLabel ?? '').isNotEmpty)
-      modelLabel!
-    else if ((model ?? '').isNotEmpty)
-      model!,
-    if ((effortLabel ?? effort ?? '').isNotEmpty) (effortLabel ?? effort)!,
-  ];
-
   /// 사람 손이 필요한가 — 승인·질문뿐이다. 데스크톱 `MachinesColRow::needs_you` 와 같은 규칙이라
   /// 방치(`idle`)·종류 모를 기다림은 쉬는 것과 같다. 폰만 그걸 주황 「오래 기다림」으로 띄워
   /// 데스크톱 「쉬는 중」과 어긋났다(2026-10-01 지적).
@@ -183,6 +167,16 @@ class Pane {
     null || '' => '셸',
     final value => value,
   };
+  /// 목록 한 줄의 글 — 세션 이름. 학생 이름은 얼굴이 말한다(2026-10-01 「캐릭터 이름 빼고 …
+  /// 세션 이름이랑 시간만」, 데스크톱 사이드바 목록 줄과 같다). 이름을 안 붙인 학생은 하네스
+  /// 이름, 셸은 폴더.
+  String get rowTitle {
+    final s = session ?? '';
+    if (s.isNotEmpty) return s;
+    if (isShell) return subtitle.isNotEmpty ? subtitle : '셸';
+    return harness == 'codex' ? 'Codex' : 'Claude';
+  }
+
   String get subtitle {
     // 목록엔 /rename 으로 붙인 이름(session)만 — 에이전트가 제 대화를 요약한 제목은
     // 안 보인다(2026-09-08 지시). 이름 없는 셸만 어느 폴더인지 한 마디.
@@ -206,6 +200,7 @@ class Pane {
     kind: j['kind'] as String?,
     waitingFor: j['waiting_for'] as String?,
     idleSecs: (j['idle_secs'] as num?)?.toInt(),
+    busySecs: (j['busy_secs'] as num?)?.toInt(),
     closed: j['closed'] == true,
     undocked: j['undocked'] == true,
     session: j['session'] as String?,

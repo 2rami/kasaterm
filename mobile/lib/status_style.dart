@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'claude_style.dart';
 import 'look.dart';
 import 'machine_look.dart';
 import 'server.dart';
@@ -161,66 +160,6 @@ class _PulseDotState extends State<PulseDot>
   }
 }
 
-/// 상태 칩 — 아이콘(또는 숨 쉬는 점) + 한 마디. 사람 손이 필요하면 꽉 채운 주황,
-/// 나머지는 그 색을 옅게 깐다. 상태가 바뀌면 옛 칩이 스르르 새 칩으로 바뀐다.
-class StatusChip extends StatelessWidget {
-  const StatusChip({super.key, required this.pane, this.compact = false});
-
-  final Pane pane;
-
-  /// 미니맵처럼 좁은 자리 — 말 없이 아이콘·점만.
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final st = StatusStyle.of(pane, scheme);
-    final lead = st.live
-        ? PulseDot(color: st.color, size: 7)
-        : Icon(st.icon, size: 13, color: st.color);
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 260),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeIn,
-      transitionBuilder: (child, anim) => FadeTransition(
-        opacity: anim,
-        child: ScaleTransition(
-          scale: Tween(begin: 0.92, end: 1.0).animate(anim),
-          child: child,
-        ),
-      ),
-      // 채움 없이 상태색 테와 글자 — 「내 차례」도 굵기로만 세운다(4장 형태 규칙).
-      child: Container(
-        key: ValueKey('${st.mood}-${st.label}'),
-        height: Look.chipH,
-        padding: EdgeInsets.symmetric(horizontal: compact ? 5 : Look.chipPadX),
-        decoration: BoxDecoration(
-          borderRadius: Look.corners,
-          border: Border.all(color: st.color.withValues(alpha: st.needsYou ? 1 : 0.55)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            lead,
-            if (!compact) ...[
-              const SizedBox(width: 5),
-              // 「백그라운드 · 설명」처럼 긴 말은 칩 폭(줄의 40%)에서 잘린다 — 이름을 밀어내지 않는다.
-              Flexible(
-                child: Text(
-                  st.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(color: st.color),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class Appear extends StatelessWidget {
   const Appear({super.key, required this.child, this.delayIndex = 0});
 
@@ -240,138 +179,6 @@ class Appear extends StatelessWidget {
     ),
     child: child,
   );
-}
-
-/// 얼굴 둘레의 상태 테 — 작업 중이면 호 하나가 돌고(진행 중이라는 뜻), 사람을
-/// 기다리면 주황 테가 서 있다. 폰에선 도트가 너무 작아 얼굴에 상태를 얹는다
-/// (2026-09-07 지시 「그냥 프사만 뜨게 하자, 작업 중 애니메이션」).
-class StatusRing extends StatefulWidget {
-  const StatusRing({
-    super.key,
-    required this.style,
-    required this.child,
-    this.size = 40,
-    this.stroke = 2.5,
-  });
-
-  final StatusStyle style;
-  final Widget child;
-  final double size;
-  final double stroke;
-
-  @override
-  State<StatusRing> createState() => _StatusRingState();
-}
-
-class _StatusRingState extends State<StatusRing>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctl = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1400),
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    _sync();
-  }
-
-  @override
-  void didUpdateWidget(StatusRing old) {
-    super.didUpdateWidget(old);
-    if (old.style.mood != widget.style.mood) _sync();
-  }
-
-  void _sync() {
-    if (widget.style.live) {
-      if (!_ctl.isAnimating) _ctl.repeat();
-    } else {
-      _ctl.stop();
-    }
-  }
-
-  @override
-  void dispose() {
-    _ctl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final st = widget.style;
-    final pad = widget.stroke + 2;
-    final box = widget.size + pad * 2;
-    return SizedBox(
-      width: box,
-      height: box,
-      child: AnimatedBuilder(
-        animation: _ctl,
-        builder: (context, child) => CustomPaint(
-          painter: _RingPainter(
-            color: st.color,
-            stroke: widget.stroke,
-            // 도는 호는 작업 중에만, 꽉 찬 테는 기다림에만. 나머지는 테 없음.
-            sweep: st.live ? 0.28 : (st.needsYou ? 1.0 : 0.0),
-            turn: _ctl.value,
-          ),
-          child: child,
-        ),
-        child: Padding(padding: EdgeInsets.all(pad), child: widget.child),
-      ),
-    );
-  }
-}
-
-class _RingPainter extends CustomPainter {
-  const _RingPainter({
-    required this.color,
-    required this.stroke,
-    required this.sweep,
-    required this.turn,
-  });
-
-  final Color color;
-  final double stroke;
-
-  /// 테가 차지하는 비율(0~1). 1 이면 온 테, 0 이면 안 그린다.
-  final double sweep;
-
-  /// 호의 시작 각(0~1 바퀴).
-  final double turn;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (sweep <= 0) return;
-    final rect = Rect.fromLTWH(
-      stroke / 2,
-      stroke / 2,
-      size.width - stroke,
-      size.height - stroke,
-    );
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke
-      ..strokeCap = StrokeCap.round;
-    if (sweep >= 1) {
-      canvas.drawOval(rect, paint);
-      return;
-    }
-    // 뒤에 옅은 온 테를 깔아 호가 어디를 도는지 보이게.
-    canvas.drawOval(
-      rect,
-      Paint()
-        ..color = color.withValues(alpha: 0.18)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = stroke,
-    );
-    const tau = 6.283185307179586;
-    canvas.drawArc(rect, turn * tau - tau / 4, sweep * tau, false, paint);
-  }
-
-  @override
-  bool shouldRepaint(_RingPainter o) =>
-      o.turn != turn || o.sweep != sweep || o.color != color;
 }
 
 /// 타일 바닥의 진행 막대 — 작업 중이면 빛이 흐르고, 아니면 자리를 안 차지한다
@@ -400,6 +207,24 @@ class WorkingBar extends StatelessWidget {
   );
 }
 
+/// 도는 시간 — 데스크톱 배치도 칸·사이드바 목록 줄(`render::elapsed_mark`)과 같은 말·같은 단계.
+/// 1분 미만은 없다(잠깐 도는 일에 숫자가 붙으면 정작 오래 도는 것이 묻힌다). 두 시간까지 분으로
+/// 버틴다 — 한 시간에서 단위를 갈면 「99분」 다음이 「1시간」이 되어 숫자가 거꾸로 간다.
+String? elapsedLabel(int? secs) {
+  if (secs == null || secs < 60) return null;
+  if (secs < 7200) return '${secs ~/ 60}분';
+  return '${secs ~/ 3600}시간';
+}
+
+/// 오래 돌수록 눈에 띄게 — 10분 전 흐림, 30분 전 보조, 그 뒤 강조 굵게(데스크톱과 같은 문턱).
+TextStyle elapsedStyle(int secs, ThemeData theme) {
+  final scheme = theme.colorScheme;
+  final base = theme.textTheme.bodySmall ?? const TextStyle(fontSize: Look.sub);
+  if (secs < 600) return base.copyWith(color: scheme.onSurfaceVariant.withValues(alpha: 0.7));
+  if (secs < 1800) return base.copyWith(color: scheme.onSurfaceVariant);
+  return base.copyWith(color: scheme.primary, fontWeight: FontWeight.w600);
+}
+
 /// 우리가 붙인 세션 이름 — 데스크톱 pane 머리의 이름 옆 자리와 같다. 허브 타일과
 /// 터미널 화면 머리가 같은 모양으로 단다.
 class SessionTag extends StatelessWidget {
@@ -417,80 +242,6 @@ class SessionTag extends StatelessWidget {
         fontWeight: FontWeight.w600,
       ),
       overflow: TextOverflow.ellipsis,
-    );
-  }
-}
-
-/// 데스크톱 pane 머리의 셋째 줄 — 하네스 아이콘 · 모델 · 브랜치 · 컨텍스트% · effort.
-/// 컨텍스트가 80% 를 넘으면 그 숫자만 주황으로 도드라진다.
-class PaneStatusLine extends StatelessWidget {
-  const PaneStatusLine({super.key, required this.pane, this.brief = false});
-
-  final Pane pane;
-
-  /// 목록용 — 모델과 effort 만(2026-09-08 지시). 브랜치·컨텍스트% 는 방 머리와
-  /// 터미널 화면이 말한다.
-  final bool brief;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final mute = theme.textTheme.labelSmall?.copyWith(
-      color: scheme.onSurfaceVariant,
-      fontFamily: 'TermMono',
-    );
-    final parts = brief ? pane.briefStatusParts : pane.statusParts;
-    final pct = pane.contextPct;
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Row(
-        children: [
-          // 하네스 로고 — 제 색으로(harnessLogoColor). 회색으로 작게 두니 안 보였다
-          // (2026-09-08 지시 「상태줄에 로고 뜨는 거도」).
-          if (pane.harness == 'claude' || pane.harness == 'codex') ...[
-            // 256px 원본을 13px 로 그냥 줄이면 가는 획이 뭉개져 깨진 점으로 보였다
-            // (2026-09-08 지적) — 작게 미리 풀고 밉맵으로 줄인다.
-            Image.asset(
-              'assets/icons/${pane.harness}.png',
-              width: 14,
-              height: 14,
-              cacheWidth: 56,
-              filterQuality: FilterQuality.medium,
-              color: harnessLogoColor(pane.harness ?? '', scheme.onSurface),
-              errorBuilder: (_, _, _) => const SizedBox.shrink(),
-            ),
-            const SizedBox(width: 5),
-          ],
-          Flexible(
-            child: Text.rich(
-              TextSpan(
-                children: [
-                  for (final (i, p) in parts.indexed) ...[
-                    // 앞 공백은 안 끊어지는 것 — 두 줄로 접힐 때 「· xhigh」처럼
-                    // 구분점이 줄머리에 오지 않고 앞 줄 꼬리에 남는다.
-                    if (i > 0) const TextSpan(text: '\u00A0· '),
-                    TextSpan(
-                      text: p,
-                      style: pct != null && p == '$pct%' && pct >= 80
-                          ? TextStyle(
-                              color: StatusStyle.attention,
-                              fontWeight: FontWeight.w600,
-                            )
-                          : null,
-                    ),
-                  ],
-                ],
-              ),
-              style: mute,
-              // 폰 폭엔 넷이 한 줄에 안 들어갈 때가 있다 — 컨텍스트%·effort 가 「…」로
-              // 사라지느니 한 줄 더 쓴다.
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

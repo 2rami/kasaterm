@@ -18,7 +18,9 @@ http.Response _answer(http.Request req) {
         'id': '%1',
         'name': '아리스',
         'title': '폰 미니맵',
+        'session': '폰 목록 줄',
         'status': 'working',
+        'busy_secs': 14 * 60,
         'window': 0,
         'cwd': '/w',
         'color': '#7c9cff',
@@ -135,15 +137,15 @@ void main() {
     // 떠오르기(Appear)가 끝난 뒤를 찍는다 — 중간 프레임을 골든으로 굳히면 안 된다.
     await tester.pump(const Duration(milliseconds: 1200));
     expect(find.text('게임개발부'), findsOneWidget);
-    // 지도 칸은 앞 탭(호시노)을 보이고, 아리스는 목록에만 — 칸은 넘겨야 나온다.
-    expect(find.text('호시노'), findsNWidgets(2));
-    expect(find.text('아리스'), findsAtLeastNWidgets(1));
-    // 숨은 탭 학생은 지도 밑 「탭 안」 줄에 서고, 목록에는 그대로 있다.
+    // 지도 칸은 앞 탭(호시노)을 보인다. 목록 줄은 학생 이름 없이 세션 이름과 도는 시간만
+    // (데스크톱 사이드바 목록 줄과 같다) — 아리스는 칸을 넘겨야 이름이 나온다.
+    expect(find.text('호시노'), findsOneWidget);
+    expect(find.text('아리스'), findsNothing);
+    expect(find.text('폰 목록 줄'), findsOneWidget);
+    expect(find.text('14분'), findsOneWidget);
+    // 숨은 탭 학생은 지도 밑 「탭 안」 줄에, 별도창 학생은 「별도창」 줄에 선다. 목록에도 줄은 있다.
     expect(find.text('탭 안'), findsOneWidget);
-    expect(find.text('세이아'), findsOneWidget);
-    // 별도창 학생은 지도 밑 「별도창」 줄에 서고, 목록에는 그대로 있다.
     expect(find.text('별도창'), findsOneWidget);
-    expect(find.text('유즈'), findsOneWidget);
     await expectLater(
       find.byType(HubScreen),
       matchesGoldenFile('goldens/hub_minimap.png'),

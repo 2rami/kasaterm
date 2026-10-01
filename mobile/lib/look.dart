@@ -11,12 +11,7 @@ abstract final class Look {
   static const buttonPadX = 16.0;
   static const iconSize = 20.0;
 
-  static const chipH = 24.0;
   static const chipPadX = 8.0;
-
-  /// 상태 칩이 줄 폭에서 가져갈 수 있는 몫 — 이름 3 : 상태 2.
-  static const nameFlex = 3;
-  static const statusFlex = 2;
 
   static const title = 18.0;
   static const group = 16.0;
@@ -32,6 +27,7 @@ abstract final class Look {
   static const row1 = 48.0;
   static const row2 = 60.0;
   static const rowGap = 2.0;
+  static const subLine = 18.0;
 
   static const stripe = 2.0;
   static const face = 32.0;

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/machine_look.dart';
+import 'package:kasaterm_mobile/status_style.dart';
 
 void main() {
   test('기기색은 기준 기기가 칠하는 색 그대로 — 밝게·어둡게와 상관없다', () {
@@ -50,17 +51,19 @@ void main() {
     expect(p('', 'zsh').subtitle, 'kasaterm');
   });
 
-  test('목록 상태줄은 모델과 effort 만', () {
-    final p = Pane.fromJson({
-      'id': '%1',
-      'name': '아리스',
-      'model_label': 'Fable 5.1 1M',
-      'branch': 'main',
-      'context_pct': 40,
-      'effort_label': 'xhigh',
-    });
-    expect(p.statusParts, ['Fable 5.1 1M', 'main', '40%', 'xhigh']);
-    expect(p.briefStatusParts, ['Fable 5.1 1M', 'xhigh']);
+  test('목록 줄 글은 세션 이름과 도는 시간뿐 — 학생 이름은 안 쓴다', () {
+    Pane p(Map<String, Object?> extra) => Pane.fromJson({'id': '%1', 'cwd': '/w/kasaterm', ...extra});
+    expect(p({'name': '아리스', 'session': '폰 목록 줄', 'busy_secs': 840}).rowTitle, '폰 목록 줄');
+    expect(p({'name': '아리스', 'session': '폰 목록 줄', 'busy_secs': 840}).busySecs, 840);
+    expect(p({'name': '아리스', 'harness': 'codex'}).rowTitle, 'Codex');
+    expect(p({'name': '아리스'}).rowTitle, 'Claude');
+    expect(p({}).rowTitle, 'kasaterm', reason: '셸은 폴더');
+    // 데스크톱 배치도 칸과 같은 말 — 1분 미만 없음, 두 시간까지 분, 그 뒤 시간(내림).
+    expect(elapsedLabel(59), isNull);
+    expect(elapsedLabel(60), '1분');
+    expect(elapsedLabel(7199), '119분');
+    expect(elapsedLabel(7200), '2시간');
+    expect(elapsedLabel(null), isNull);
   });
 
   test('거울 pane 은 어느 기계의 거울인지 안다', () {

@@ -3394,6 +3394,7 @@ impl Backend for PtyBackend {
                 match self.hub.resolved(sid) {
                     Some(r) => {
                         row.status = r.state.board_word().into();
+                        row.busy_secs = r.state.is_busy().then(|| r.since.elapsed().as_secs());
                         if let crate::agent_state::AgentState::Waiting { kind, reason } = &r.state {
                             row.waiting_for = (!reason.is_empty()).then(|| reason.clone());
                             row.attention_kind = Some(kind.as_str().to_string());

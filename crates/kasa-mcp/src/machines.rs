@@ -1665,7 +1665,7 @@ fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> 
     row["state_fresh"] = Value::Bool(fresh);
     if !fresh {
         row["status"] = Value::String("unknown".into());
-        for field in ["kind", "attention_kind", "waiting_for", "idle_secs", "compact_pct"] {
+        for field in ["kind", "attention_kind", "waiting_for", "idle_secs", "busy_secs", "compact_pct"] {
             row[field] = Value::Null;
         }
     }

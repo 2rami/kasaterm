@@ -275,6 +275,10 @@ pub struct PaneActivity {
     /// idle 로 들어온 뒤 흐른 초 — 「방금 끝냈다」와 「한참 쉼」을 가른다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_secs: Option<u64>,
+    /// 도는 중(working·compacting)에 들어온 뒤 흐른 초 — 폰 목록 줄의 시간. 데스크톱 배치도 칸의
+    /// 경과 시간과 같은 허브 판정에서 잰다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_secs: Option<u64>,
     /// P3 — cumulative `message.usage` over the transcript tail window. The orchestrator
     /// reads these to spot an over-budget / runaway pane and steer the fleet.
     #[serde(default)]

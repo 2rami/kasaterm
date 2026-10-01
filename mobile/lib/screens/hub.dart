@@ -1125,16 +1125,9 @@ class _PaneTile extends StatelessWidget {
     final st = StatusStyle.of(pane, scheme);
     // 왼쪽 2px 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례 주황, 하는 중 강조, 쉬는 중 없음.
     final stripe = st.needsYou ? StatusStyle.attention : (st.live ? scheme.primary : null);
-    final second = pane.briefStatusParts.isNotEmpty
-        ? PaneStatusLine(pane: pane, brief: true)
-        : (pane.subtitle.isNotEmpty
-              ? Text(
-                  pane.subtitle,
-                  style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                )
-              : null);
+    // 글은 세션 이름과 도는 시간뿐 — 데스크톱 사이드바 목록 줄과 같다(2026-10-01). 학생 이름은
+    // 얼굴이, 상태는 띠와 막대가 말한다. 막대는 지도 칸 바닥의 그것과 같은 위젯이다.
+    final time = st.live ? elapsedLabel(pane.busySecs) : null;
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
@@ -1146,26 +1139,21 @@ class _PaneTile extends StatelessWidget {
             left: BorderSide(color: stripe ?? Colors.transparent, width: Look.stripe),
           ),
         ),
-        padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
+        padding: const EdgeInsets.fromLTRB(10, 8, Look.pagePad, 8),
         child: Row(
           children: [
             Hero(
               tag: 'face-${pane.machine}-${pane.id}',
-              child: StatusRing(
-                style: st,
+              child: StudentFace(
+                server: server,
+                slug: slug,
+                url: slug == null ? null : server.avatar(slug, machine: pane.machine),
+                shell: pane.isShell,
                 size: Look.face,
-                child: StudentFace(
-                  server: server,
-                  slug: slug,
-                  url: slug == null ? null : server.avatar(slug, machine: pane.machine),
-                  shell: pane.isShell,
-                  size: Look.face,
-                ),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
-              flex: Look.nameFlex,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
@@ -1174,29 +1162,34 @@ class _PaneTile extends StatelessWidget {
                     children: [
                       Flexible(
                         child: Text(
-                          pane.displayName,
+                          pane.rowTitle,
                           style: theme.textTheme.titleSmall,
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      if ((pane.session ?? '').isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        Flexible(child: SessionTag(pane.session!)),
-                      ],
                       if ((pane.mirrorOf ?? '').isNotEmpty) ...[
                         const SizedBox(width: 6),
                         MirrorTag(pane.mirrorOf!),
                       ],
                     ],
                   ),
-                  if (second != null) ...[const SizedBox(height: Look.rowGap), second],
+                  const SizedBox(height: Look.rowGap),
+                  // 둘째 줄 자리는 늘 잡아 둔다 — 일이 시작·끝날 때마다 이름이 위아래로 튀지 않게.
+                  SizedBox(
+                    height: Look.subLine,
+                    child: Row(
+                      children: [
+                        Expanded(child: Center(child: WorkingBar(style: st))),
+                        if (time != null) ...[
+                          const SizedBox(width: 6),
+                          Text(time, style: elapsedStyle(pane.busySecs!, theme)),
+                        ],
+                      ],
+                    ),
+                  ),
                 ],
               ),
-            ),
-            const SizedBox(width: 8),
-            Flexible(
-              flex: Look.statusFlex,
-              child: Align(alignment: Alignment.centerRight, child: StatusChip(pane: pane)),
             ),
           ],
         ),

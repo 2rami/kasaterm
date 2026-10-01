@@ -4877,6 +4877,8 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "attention_kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
+                // 도는 지 몇 초 — 폰 목록 줄이 데스크톱 사이드바 줄처럼 띠 끝에 시간을 단다.
+                "busy_secs": b.and_then(|p| p.busy_secs),
                 // 무엇을 하는 중인가 — 폰이 「작업 중」 대신 정확한 말을 쓴다(2026-09-08 지시
                 // 「모니터링이나 백그라운드 셸 돌아가면 … 작업 중 말고 정확히」). doing 은
                 // 최신 도구 라벨, background 는 아직 안 끝난 백그라운드 셸·감시의 설명,
