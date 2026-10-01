@@ -262,3 +262,30 @@ async fn enrollment_is_hidden_and_closed_without_a_signer_and_limited_per_ip() {
     assert_eq!(codes.iter().filter(|c| **c == 200).count(), 10);
     assert_eq!(codes.last(), Some(&429));
 }
+
+#[test]
+fn admin_section_shows_counts_room_left_and_masked_registrations() {
+    let dir = std::env::temp_dir().join(format!("kasa-install-{}", uuid::Uuid::new_v4()));
+    let mut gate = gate_in(&dir, "boss");
+    gate.enroll = Arc::new(Enroll::new(Some(dir.join("signer.sh")), 7));
+    put_release(&dir, TOKEN, "2610011200");
+    std::fs::write(
+        dir.join("relay-install/devices.json"),
+        json!({"updated":1,"limit":100,"classes":{"IPHONE":{"enabled":3,"disabled":2},"IPAD":{"enabled":1,"disabled":0}}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("relay-install/registrations.jsonl"),
+        format!(
+            "{}\n",
+            json!({"at":now_secs(),"udid":"00008140-001059A41431801C","product":"iPhone17,1","version":"26.0","name":"<b>폰</b>","ip":"1.2.3.4","result":"registered"})
+        ),
+    )
+    .unwrap();
+    let html = admin_section(&gate);
+    assert!(html.contains("<td>iPhone</td><td class=n>3</td><td class=n>2</td><td class=n>95</td>"));
+    assert!(html.contains("<td>iPad</td><td class=n>1</td><td class=n>0</td><td class=n>99</td>"));
+    assert!(html.contains("오늘 새로 1 / 하루 7대"));
+    assert!(html.contains("…31801C") && !html.contains("00008140-001059A4"));
+    assert!(html.contains("&lt;b&gt;폰") && !html.contains("1.2.3.4"));
+}
