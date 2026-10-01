@@ -319,6 +319,39 @@ class Machine {
   final int? rttMs;
 }
 
+/// 기준 기기의 명부([hub])에 관문이 아는 계정 기기([live], `/relay/account-machines`)를 겹친다. 명부가 그 기기를
+/// 모르거나 「연결 안 됨」으로 내보내도 관문에 붙어 있으면 `~id` 로 닿는다 — 학생은 그 경로로 따로 읽는다.
+/// 기준 기기 자신은 빠진다(첫 칸으로 이미 보인다).
+List<Machine> withAccountMachines(List<Machine> hub, Object? live) {
+  final list = live is Map ? live['machines'] : null;
+  if (list is! List) return hub;
+  final out = [...hub];
+  for (final m in list) {
+    if (m is! Map) continue;
+    final (id, name, aliases) = (m['id'], m['machine'], m['aliases']);
+    if (id is! String || id.isEmpty || id == (live as Map)['hub']) continue;
+    final route = '~$id';
+    final names = {
+      if (name is String) name,
+      if (aliases is List) ...aliases.whereType<String>(),
+    };
+    final i = out.indexWhere((x) => x.route == route || names.contains(x.label) || names.contains(x.route));
+    if (i >= 0 && out[i].online) continue;
+    final entry = Machine(
+      label: i >= 0 ? out[i].label : (name is String && name.isNotEmpty ? name : id),
+      route: route,
+      online: true,
+      panes: const [],
+    );
+    if (i >= 0) {
+      out[i] = entry;
+    } else {
+      out.add(entry);
+    }
+  }
+  return out;
+}
+
 /// `/term/changes` 한 번의 답.
 class Changes {
   const Changes({required this.epoch, required this.status});
@@ -798,7 +831,7 @@ class Server {
   Future<List<Machine>> machines() async {
     final j = await _getJson('machines');
     final list = j is Map ? j['machines'] : null;
-    return [
+    final hub = [
       if (list is List)
         for (final m in list)
           if (m is Map)
@@ -814,6 +847,21 @@ class Server {
               ),
             ),
     ];
+    return account == null ? hub : withAccountMachines(hub, await _accountMachines());
+  }
+
+  /// 관문에 지금 계정으로 붙어 있는 기기. 옛 관문·끊김이면 null — 기준 기기의 명부만 쓴다.
+  Future<Object?> _accountMachines() async {
+    final a = account;
+    if (a == null) return null;
+    try {
+      final res = await _client
+          .get(a.origin.resolve('/relay/account-machines'))
+          .timeout(const Duration(seconds: 10));
+      return res.statusCode == 200 ? jsonDecode(utf8.decode(res.bodyBytes)) : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 답장 한 줄. 서버가 Ctrl-U·bracketed paste·짧은 지연 뒤 Enter 를 맡으므로

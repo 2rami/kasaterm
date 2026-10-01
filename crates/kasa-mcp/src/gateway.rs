@@ -471,6 +471,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/relay/whoami", get(whoami))
         .route("/relay/devices", get(devices_list))
         .route("/relay/account-sync", get(account_sync_get).patch(account_sync_patch))
+        .route("/relay/account-machines", get(account_machines))
         .route("/relay/account/", any(account_proxy_root))
         .route("/relay/account/{*rest}", any(account_proxy))
         .route("/relay/logout", axum::routing::post(logout))
@@ -1185,6 +1186,28 @@ fn account_access(gate: &Gate, headers: &axum::http::HeaderMap) -> Option<Accoun
         device_id: device.0, token_hash: device.1.token_hash })
 }
 
+fn account_uplinks(gate: &Gate, account: &str) -> Vec<Arc<Uplink>> {
+    gate.live.lock().unwrap().values().filter(|(_, up)| up.account.as_deref() == Some(account)
+        && up.owner_slug.is_some()).map(|(_, up)| up.clone()).collect()
+}
+
+/// 계정으로 지금 붙어 있는 기기들과 그중 폰의 기준 기기(`hub`, 기계 경로 없는 요청이 가는 곳).
+/// 기준 기기의 명부는 다른 계정 기기를 모르거나 옛 판이라 「연결 안 됨」으로 내보낼 수 있고, 기준 기기는
+/// 가장 최근에 붙은 기기라 재접속마다 바뀐다 — 폰은 이 목록으로 기기마다 `~id` 로 관문을 거쳐 직접 닿는다.
+async fn account_machines(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some(access) = account_access(&gate, &headers).filter(AccountAccess::valid) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let mut uplinks = account_uplinks(&gate, &access.account);
+    uplinks.sort_by_key(|up| up.conn);
+    let candidates = candidates_of(&uplinks);
+    let hub = match pick_route(&candidates, None) {
+        RoutePick::Fallback(index) => Some(uplinks[index].machine_id.clone()),
+        _ => None,
+    };
+    axum::Json(serde_json::json!({ "ok": true, "machines": live_machines(&candidates), "hub": hub })).into_response()
+}
+
 async fn account_proxy_root(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
     account_forward(gate, String::new(), req).await
 }
@@ -1279,8 +1302,7 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
     let needs_nacho = access.is_some() && nacho_app_path(&rest);
     let mut uplinks = if let Some(access) = &access {
         if !access.valid() { return json_err(StatusCode::UNAUTHORIZED, "unauthorized"); }
-        gate.live.lock().unwrap().values().filter(|(_, up)| up.account.as_deref() == Some(&access.account)
-            && up.owner_slug.is_some()).map(|(_, up)| up.clone()).collect::<Vec<_>>()
+        account_uplinks(&gate, &access.account)
     } else { gate
         .by_slug
         .lock()
@@ -2057,6 +2079,47 @@ mod tests {
             assert_eq!(open["slug"], SLUG);
             assert_eq!(open["path"], path);
         }
+    }
+
+    #[tokio::test]
+    async fn account_machines_lists_live_account_devices_and_the_phone_hub() {
+        let dir = std::env::temp_dir().join(format!("kasa-account-machines-{}", uuid::Uuid::new_v4()));
+        let gate = account_gate(&dir);
+        let addr = spawn_relay(gate).await;
+        let mut tokens = Vec::new();
+        for machine in ["work-mac", "home-mac"] {
+            let (_, device) = post(addr, "/relay/login", None, serde_json::json!({
+                "account":"geno","password":"correct horse","machine_id":machine
+            })).await;
+            tokens.push(device["token"].as_str().unwrap().to_string());
+        }
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","kind":"phone"
+        })).await;
+        let phone = phone["token"].as_str().unwrap();
+        assert_eq!(get_json(addr, "/relay/account-machines", "invalid").await.0, 401);
+        assert_eq!(get_json(addr, "/relay/account-machines", phone).await.1["machines"], serde_json::json!([]));
+
+        let mut work = desktop_hello("work-mac", &tokens[0]);
+        work["slugs"] = serde_json::json!([SLUG]);
+        work["owner_slug"] = SLUG.into();
+        work["machine_aliases"] = serde_json::json!(["회사 맥북"]);
+        let _work = fake_uplink_at(addr, work, |id, _, out| reply(&out, id, serde_json::json!({"status":200}), b"{}")).await;
+        let mut home = desktop_hello("home-mac", &tokens[1]);
+        home["key"] = "home-machine-key-1234".into();
+        home["machine"] = "집 맥북".into();
+        home["slugs"] = serde_json::json!(["zyxwvutsrqponmlkjihgfedcb"]);
+        home["owner_slug"] = "zyxwvutsrqponmlkjihgfedcb".into();
+        let _home = fake_uplink_at(addr, home, |id, _, out| reply(&out, id, serde_json::json!({"status":200}), b"{}")).await;
+
+        let (status, list) = get_json(addr, "/relay/account-machines", phone).await;
+        assert_eq!(status, 200);
+        // 가장 최근에 붙은 기기가 기준이다 — 폰은 그 기기를 뺀 나머지에 `~id` 로 닿는다.
+        assert_eq!(list["hub"], "home-mac");
+        let machines = list["machines"].as_array().unwrap();
+        assert_eq!(machines.len(), 2);
+        assert_eq!(machines[1]["id"], "work-mac");
+        assert_eq!(machines[1]["aliases"], serde_json::json!(["맥북", "회사 맥북"]));
     }
 
     #[tokio::test]

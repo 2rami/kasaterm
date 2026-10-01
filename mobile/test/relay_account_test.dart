@@ -115,6 +115,46 @@ void main() {
     );
   }
 
+  test('기준 기기가 「연결 안 됨」으로 내보낸 계정 기기도 관문에 붙어 있으면 ~id 로 닿는다', () async {
+    final s = Server.account(
+      session(),
+      client: MockClient((req) async {
+        final body = switch (req.url.path) {
+          '/relay/account/machines' => {
+            'ok': true,
+            'machines': [
+              {'label': '나쵸네코', 'route': '~mini', 'online': true, 'panes': []},
+              {'label': '건호의 MacBook Pro', 'route': '건호의 MacBook Pro', 'online': false, 'panes': []},
+              {'label': '거노 데스크탑', 'route': '거노 데스크탑', 'online': false, 'panes': []},
+            ],
+          },
+          '/relay/account-machines' => {
+            'ok': true,
+            'hub': 'home',
+            'machines': [
+              {'id': 'home', 'machine': '모묘모의 MacBook Pro', 'aliases': []},
+              {'id': 'work', 'machine': '맥북', 'aliases': ['맥북', '건호의 MacBook Pro']},
+              {'id': 'spare', 'machine': '새 맥', 'aliases': []},
+            ],
+          },
+          _ => null,
+        };
+        return http.Response.bytes(utf8.encode(jsonEncode(body)), body == null ? 404 : 200);
+      }),
+    );
+    final list = await s.machines();
+    expect([for (final m in list) (m.label, m.route, m.online)], [
+      ('나쵸네코', '~mini', true),
+      ('건호의 MacBook Pro', '~work', true),
+      ('거노 데스크탑', '거노 데스크탑', false),
+      ('새 맥', '~spare', true),
+    ]);
+    s.close();
+
+    // 옛 관문(창구 없음)이면 기준 기기의 명부 그대로.
+    expect(withAccountMachines(list.take(1).toList(), null).single.route, '~mini');
+  });
+
   test('관문의 Ad Hoc 판은 기기 토큰으로만 묻고 설치 주소는 itms-services 만 받는다', () async {
     final seen = <Uri>[];
     final s = Server.account(
