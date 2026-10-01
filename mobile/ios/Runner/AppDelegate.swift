@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Flutter
 import UIKit
 import UserNotifications
@@ -13,6 +14,7 @@ import UserNotifications
   private var pendingTap: [String: Any]?
   private var lastToken: String?
   private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
+  private var webAuth: ASWebAuthenticationSession?
 
   override func application(
     _ application: UIApplication,
@@ -42,6 +44,39 @@ import UserNotifications
       forName: UIAccessibility.reduceTransparencyStatusDidChangeNotification, object: nil, queue: .main
     ) { [weak self] _ in
       self?.a11yChannel?.invokeMethod("reduceTransparency", arguments: UIAccessibility.isReduceTransparencyEnabled)
+    }
+    // 계정 로그인 시스템 창. 관문이 kasaterm:// 로 돌려보낸 주소(일회용 code)를 다트에 준다 — 확인 코드 입력이 없다.
+    let auth = FlutterMethodChannel(name: "kasaterm/web_auth", binaryMessenger: messenger)
+    auth.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "authenticate", let self,
+            let args = call.arguments as? [String: String],
+            let url = args["url"].flatMap(URL.init(string:)),
+            let scheme = args["scheme"]
+      else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      self.webAuth?.cancel()
+      let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { [weak self] back, error in
+        DispatchQueue.main.async {
+          self?.webAuth = nil
+          if let back {
+            result(back.absoluteString)
+          } else if (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin {
+            result(nil)
+          } else {
+            result(FlutterError(code: "web_auth", message: error?.localizedDescription, details: nil))
+          }
+        }
+      }
+      session.presentationContextProvider = self
+      // Safari 의 Google·GitHub 로그인을 그대로 쓴다 — 매번 다시 로그인하지 않게.
+      session.prefersEphemeralWebBrowserSession = false
+      self.webAuth = session
+      if !session.start() {
+        self.webAuth = nil
+        result(FlutterError(code: "web_auth", message: "start failed", details: nil))
+      }
     }
     let ch = FlutterMethodChannel(name: "kasaterm/push", binaryMessenger: messenger)
     channel = ch
@@ -146,5 +181,12 @@ import UserNotifications
       pendingTap = tap
     }
     completionHandler()
+  }
+}
+
+extension AppDelegate: ASWebAuthenticationPresentationContextProviding {
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+    return windows.first(where: \.isKeyWindow) ?? windows.first ?? ASPresentationAnchor()
   }
 }

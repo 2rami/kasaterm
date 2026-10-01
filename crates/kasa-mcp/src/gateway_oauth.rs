@@ -1,5 +1,5 @@
 use super::*;
-use crate::oauth_accounts::{Device, Link, Poll, Provider, Ready};
+use crate::oauth_accounts::{Device, Link, Native, Poll, Provider, Ready, Token};
 use axum::extract::Query;
 use serde::Deserialize;
 use serde_json::json;
@@ -11,6 +11,7 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/oauth/authorize/{id}", get(authorize).post(confirm))
         .route("/relay/oauth/{provider}/callback", get(callback))
         .route("/relay/oauth/poll", axum::routing::post(poll))
+        .route("/relay/oauth/token", axum::routing::post(token))
         .route("/relay/oauth/cancel", axum::routing::post(cancel))
         .layer(axum::middleware::map_response(secure_response))
 }
@@ -71,6 +72,42 @@ struct Start {
     machine_id: String,
     #[serde(default)]
     link: bool,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    redirect_uri: Option<String>,
+    state: Option<String>,
+}
+
+/// RFC 8252 + PKCE: an app that names its own redirect URI and S256 challenge skips the typed code.
+fn native(input: &Start) -> Result<Option<Native>, &'static str> {
+    let (Some(challenge), Some(redirect_uri)) = (&input.code_challenge, &input.redirect_uri) else {
+        return if input.code_challenge.is_none()
+            && input.redirect_uri.is_none()
+            && input.code_challenge_method.is_none()
+            && input.state.is_none()
+        {
+            Ok(None)
+        } else {
+            Err("invalid_request")
+        };
+    };
+    if input.code_challenge_method.as_deref() != Some("S256")
+        || !crate::oauth_accounts::valid_challenge(challenge)
+        || input
+            .state
+            .as_deref()
+            .is_some_and(|state| !crate::oauth_accounts::valid_client_state(state))
+    {
+        return Err("invalid_request");
+    }
+    if !crate::oauth_accounts::valid_redirect_uri(redirect_uri) {
+        return Err("invalid_redirect_uri");
+    }
+    Ok(Some(Native {
+        challenge: challenge.clone(),
+        redirect_uri: redirect_uri.clone(),
+        state: input.state.clone(),
+    }))
 }
 
 async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
@@ -85,6 +122,10 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
     if !matches!(input.kind.as_str(), "desktop" | "phone") || !valid_machine_id(&input.machine_id) {
         return json_err(StatusCode::BAD_REQUEST, "bad_device");
     }
+    let native = match native(&input) {
+        Ok(native) => native,
+        Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
+    };
     let link = if input.link {
         let Some((device_id, device)) = gate.device_of(&headers) else {
             return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -121,7 +162,7 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         .filter(|c| !c.is_control())
         .take(60)
         .collect();
-    match gate.oauth.start(device, label, link) {
+    match gate.oauth.start(device, label, link, native) {
         Ok(value) => axum::Json(value).into_response(),
         Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
     }
@@ -131,6 +172,17 @@ async fn authorize(
     State(gate): State<Gate>,
     AxPath(id): AxPath<String>,
 ) -> axum::response::Response {
+    match gate.oauth.redirect(&id) {
+        Ok(Some((cookie, url))) => {
+            return (
+                StatusCode::SEE_OTHER,
+                [(header::SET_COOKIE, cookie), (header::LOCATION, url)],
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
+    }
     match gate.oauth.browser(&id) {
         Ok(confirmation) => (
             [(header::SET_COOKIE, confirmation.cookie.clone())],
@@ -273,7 +325,9 @@ async fn callback(
         return super::admin::signed_in(&gate, gate.oauth.finish_admin(&request, result));
     }
     let success = result.is_ok();
-    gate.oauth.finish(&request, result);
+    if let Some(url) = gate.oauth.finish(&request, result) {
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response();
+    }
     let message = if success {
         "KASA sign-in verified. Return to KASA to finish. You can close this tab."
     } else {
@@ -298,6 +352,20 @@ async fn poll(State(gate): State<Gate>, req: axum::extract::Request) -> axum::re
     match gate.oauth.poll(&input, false) {
         Ok(None) => axum::Json(json!({"ok":true,"status":"pending"})).into_response(),
         Ok(Some(ready)) => complete(&gate, ready),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn token(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    if gate.limiter.allow("oauth", &client_ip(&req)).is_err() {
+        return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    let input: Token = match body(req).await {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+    match gate.oauth.token(&input) {
+        Ok(ready) => complete(&gate, ready),
         Err(error) => json_err(StatusCode::BAD_REQUEST, error),
     }
 }

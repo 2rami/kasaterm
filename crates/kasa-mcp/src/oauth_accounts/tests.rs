@@ -27,6 +27,7 @@ fn start(oauth: &OAuth) -> (Value, Poll) {
             },
             "Laptop".into(),
             None,
+            None,
         )
         .unwrap();
     let input = Poll {
@@ -419,4 +420,190 @@ fn google_rs256_signature_accepts_local_fixture_and_rejects_tampering() {
     assert!(google_identity(token, &fixture["jwks"], "other-app", "fixture-nonce", 150).is_err());
     assert!(google_identity(token, &fixture["jwks"], "fixture", "other-nonce", 150).is_err());
     assert!(google_identity(token, &fixture["jwks"], "fixture", "fixture-nonce", 200).is_err());
+}
+
+const VERIFIER: &str = "fixture-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
+const LOOPBACK: &str = "http://127.0.0.1:53682/oauth/callback";
+
+fn native_start(oauth: &OAuth) -> String {
+    let value = oauth
+        .start(
+            Device {
+                provider: Provider::Google,
+                kind: "desktop".into(),
+                machine_id: "machine-one".into(),
+            },
+            "Laptop".into(),
+            None,
+            Some(Native {
+                challenge: pkce_challenge(VERIFIER),
+                redirect_uri: LOOPBACK.into(),
+                state: Some("app-state".into()),
+            }),
+        )
+        .unwrap();
+    assert!(value.get("user_code").is_none() && value.get("poll_token").is_none());
+    value["request_id"].as_str().unwrap().into()
+}
+
+/// Walks a redirect flow through the browser and provider; returns the code sent to the app.
+fn native_code(oauth: &OAuth, id: &str) -> String {
+    let (cookie, url) = oauth.redirect(id).unwrap().unwrap();
+    let url = reqwest::Url::parse(&url).unwrap();
+    assert_eq!(url.host_str(), Some("accounts.google.com"));
+    let state = url.query_pairs().find(|(key, _)| key == "state").unwrap().1;
+    let (request, _) = oauth.callback(Provider::Google, &state, &cookie).unwrap();
+    let back = oauth
+        .finish(
+            &request,
+            Ok(Identity {
+                provider: Provider::Google,
+                subject: "123".into(),
+                display: String::new(),
+            }),
+        )
+        .unwrap();
+    assert!(back.starts_with(&format!("{LOOPBACK}?")));
+    let back = reqwest::Url::parse(&back).unwrap();
+    let pairs: HashMap<_, _> = back.query_pairs().into_owned().collect();
+    assert_eq!(pairs["state"], "app-state");
+    pairs["code"].clone()
+}
+
+fn redeem(
+    oauth: &OAuth,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<Ready, &'static str> {
+    oauth.token(&Token {
+        code: code.into(),
+        code_verifier: verifier.into(),
+        redirect_uri: redirect_uri.into(),
+    })
+}
+
+#[test]
+fn redirect_flow_needs_no_typed_code_but_only_the_verifier_redeems() {
+    let (oauth, dir) = fixture();
+    let id = native_start(&oauth);
+    assert!(
+        oauth.browser(&id).is_err(),
+        "redirect flow showed a code page"
+    );
+    assert!(oauth.confirm(&id, "", "", "").is_err());
+    let code = native_code(&oauth, &id);
+    assert!(
+        oauth.redirect(&id).is_err(),
+        "browser re-entered after callback"
+    );
+    let other = "other-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
+    assert_eq!(
+        redeem(&oauth, &code, other, LOOPBACK).err(),
+        Some("invalid_grant")
+    );
+    assert_eq!(
+        redeem(&oauth, &code, VERIFIER, LOOPBACK).err(),
+        Some("invalid_grant"),
+        "intercepted code stayed usable after a failed attempt"
+    );
+
+    let id = native_start(&oauth);
+    let code = native_code(&oauth, &id);
+    assert!(redeem(&oauth, &code, VERIFIER, "http://127.0.0.1:1/other").is_err());
+
+    let id = native_start(&oauth);
+    let code = native_code(&oauth, &id);
+    let ready = redeem(&oauth, &code, VERIFIER, LOOPBACK).unwrap();
+    assert_eq!(ready.identity.subject, "123");
+    assert_eq!(ready.device.machine_id, "machine-one");
+    assert_eq!(
+        redeem(&oauth, &code, VERIFIER, LOOPBACK).err(),
+        Some("invalid_grant")
+    );
+    assert!(redeem(&oauth, "", VERIFIER, LOOPBACK).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn redirect_flow_cannot_be_polled_and_codes_expire() {
+    let (oauth, dir) = fixture();
+    let id = native_start(&oauth);
+    let code = native_code(&oauth, &id);
+    let poll = Poll {
+        request_id: id.clone(),
+        poll_token: String::new(),
+        provider: Provider::Google,
+        kind: "desktop".into(),
+        machine_id: "machine-one".into(),
+    };
+    assert!(
+        oauth.poll(&poll, false).is_err(),
+        "poll released a redirect result"
+    );
+    oauth
+        .pending
+        .lock()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .code
+        .as_mut()
+        .unwrap()
+        .1 = Instant::now() - CODE_TTL;
+    assert_eq!(
+        redeem(&oauth, &code, VERIFIER, LOOPBACK).err(),
+        Some("invalid_grant")
+    );
+
+    let id = native_start(&oauth);
+    oauth.pending.lock().unwrap().get_mut(&id).unwrap().created = Instant::now() - TTL;
+    assert_eq!(oauth.redirect(&id).err(), Some("expired"));
+
+    let id = native_start(&oauth);
+    let (cookie, url) = oauth.redirect(&id).unwrap().unwrap();
+    let url = reqwest::Url::parse(&url).unwrap();
+    let state = url.query_pairs().find(|(key, _)| key == "state").unwrap().1;
+    let (request, _) = oauth.callback(Provider::Google, &state, &cookie).unwrap();
+    let back = oauth.finish(&request, Err("cancelled")).unwrap();
+    assert_eq!(
+        back,
+        format!("{LOOPBACK}?error=access_denied&state=app-state")
+    );
+    assert!(!oauth.pending.lock().unwrap().contains_key(&id));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn only_loopback_ip_and_first_party_app_redirects_are_accepted() {
+    for ok in [
+        "http://127.0.0.1:53682/oauth/callback",
+        "http://[::1]:8080/cb",
+        "kasaterm://oauth",
+        "kasaterm:/oauth",
+        "nachochat://oauth/callback",
+    ] {
+        assert!(valid_redirect_uri(ok), "{ok}");
+    }
+    for bad in [
+        "http://localhost:53682/cb",
+        "https://127.0.0.1:53682/cb",
+        "http://127.0.0.1/cb",
+        "http://127.0.0.2:5000/cb",
+        "http://10.0.0.5:5000/cb",
+        "https://attacker.example/cb",
+        "http://127.0.0.1:5000/cb?next=https://attacker.example",
+        "http://127.0.0.1:5000/cb#frag",
+        "http://user@127.0.0.1:5000/cb",
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "evilapp://oauth",
+        "",
+    ] {
+        assert!(!valid_redirect_uri(bad), "{bad}");
+    }
+    assert!(valid_challenge(&pkce_challenge(VERIFIER)));
+    assert!(!valid_challenge("short"));
+    assert!(!valid_verifier("too-short"));
+    assert!(!valid_client_state("bad state"));
 }

@@ -12,6 +12,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   # Native account sockets enforce redirect boundaries; web keeps the legacy path.
   http: ^1.2.2
+  # 계정 로그인 PKCE(S256) — 관문이 이 앱만 가진 verifier 로 결과를 내준다.
+  crypto: ^3.0.6
   web_socket_channel: ^3.0.1
   # 주소에 든 slug 가 곧 자격이라 평문 저장소가 아니라 Keychain 에 둔다.
   flutter_secure_storage: ^9.2.2

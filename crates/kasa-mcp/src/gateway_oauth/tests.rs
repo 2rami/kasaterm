@@ -491,3 +491,157 @@ async fn server_save_failure_does_not_revoke_existing_login() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn redirect_login_skips_code_page_and_redeems_only_with_verifier() {
+    let (gate, dir) = fixture();
+    *gate.oauth.mock_identity.lock().unwrap() = Some(Identity {
+        provider: Provider::Github,
+        subject: "123".into(),
+        display: String::new(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router(gate)).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let base = format!("http://{address}/relay/oauth");
+    let providers: Value = client
+        .get(format!("{base}/providers"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(providers["redirect_login"], true);
+    let verifier = "fixture-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
+    let redirect_uri = "kasaterm://oauth";
+    let start = |redirect: &str, method: &str| {
+        client.post(format!("{base}/start")).json(&json!({
+            "provider":"github","kind":"phone","machine_id":"machine-one","label":"Phone",
+            "code_challenge":crate::oauth_accounts::pkce_challenge(verifier),
+            "code_challenge_method":method,"redirect_uri":redirect,"state":"app-state"
+        }))
+    };
+    let refused = start("https://attacker.example/cb", "S256")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 400);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap()["error"],
+        "invalid_redirect_uri"
+    );
+    assert_eq!(
+        start(redirect_uri, "plain")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        400
+    );
+
+    // Browser → provider → app redirect, then redeem; returns the code and the token response.
+    let login = || async {
+        let started: Value = start(redirect_uri, "S256")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(started.get("user_code").is_none() && started.get("poll_token").is_none());
+        let id = started["request_id"].as_str().unwrap();
+        assert_eq!(
+            started["authorization_url"],
+            format!("https://relay.example/relay/oauth/authorize/{id}")
+        );
+        let browser = client
+            .get(format!("{base}/authorize/{id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            browser.status().as_u16(),
+            303,
+            "redirect login showed a code page"
+        );
+        let provider =
+            reqwest::Url::parse(browser.headers()["location"].to_str().unwrap()).unwrap();
+        assert_eq!(provider.host_str(), Some("github.com"));
+        let state = provider
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let cookie = browser.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let back = client
+            .get(format!("{base}/github/callback"))
+            .query(&[("state", state.as_str()), ("code", "provider-code")])
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(back.status().as_u16(), 303);
+        let back = reqwest::Url::parse(back.headers()["location"].to_str().unwrap()).unwrap();
+        assert_eq!(back.scheme(), "kasaterm");
+        let pairs: HashMap<_, _> = back.query_pairs().into_owned().collect();
+        assert_eq!(pairs["state"], "app-state");
+        pairs["code"].clone()
+    };
+    let redeem = |code: String, verifier: &'static str| {
+        client.post(format!("{base}/token")).json(&json!({
+            "code":code,"code_verifier":verifier,"redirect_uri":redirect_uri
+        }))
+    };
+    let code = login().await;
+    let intercepted = redeem(
+        code.clone(),
+        "attacker-verifier-0123456789-abcdefghijklmnopqrst",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(intercepted.status().as_u16(), 400);
+    assert_eq!(
+        redeem(code, verifier)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        400
+    );
+
+    let code = login().await;
+    let done: Value = redeem(code.clone(), verifier)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(done["status"], "complete");
+    assert!(done["token"].as_str().unwrap().starts_with("kdt_"));
+    let replay: Value = redeem(code, verifier)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay["error"], "invalid_grant");
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
