@@ -42,6 +42,9 @@ pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Resu
     let id = params["message_id"].as_str().context("tell requires message_id")?;
     tell::valid_id(id)?;
     let body = tell::normalize(params["body"].as_str().context("tell requires body")?)?;
+    if let Some(flag) = tell::leaked_cli_flag(&body) {
+        bail!("본문이 CLI 옵션 {flag} 로 시작해요 — 보낸 기기의 kasaterm-cli 가 그 옵션을 모르는 옛 판이면 옵션이 본문이 되고 진짜 본문은 빠져요. 그 기기 앱을 업데이트하세요");
+    }
     let mut normalized = params.clone(); normalized["address"] = serde_json::to_value(&address)?;
     normalized["body"] = json!(body);
     if address.machine_id != crate::board_service::local_id()? {
@@ -59,7 +62,7 @@ pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Resu
     ensure!(Address::parse(&identity)? == address,"target changed while accepting message");
     let receiver_pid = identity["agent_pid"].as_u64().context("current agent process evidence unavailable")? as u32;
     let record = ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?
-        .accept_with_policy(id,address,body,params["ttl_seconds"].as_u64().unwrap_or(900),params["policy"] == "reject",receiver_pid,
+        .accept_with_policy(id,address,body,params["ttl_seconds"].as_u64().unwrap_or(tell::QUEUE_TTL_SECONDS),params["policy"] == "reject",receiver_pid,
             params["title"].as_str().unwrap_or("").to_owned())?;
     if wake().is_err() {
         return Ok(transition(id,State::Failed,"GUI delivery event was not accepted")?.receipt());

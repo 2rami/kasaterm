@@ -674,6 +674,9 @@ fn surface_turn(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         return param_err(id, "surface.turn `permission_mode` must be a short identifier");
     }
     match backend.turn(surface_id, phase, mode) {
+        Ok(()) if phase == "start" => {
+            Response::success(id, json!({"ok": true, "session_title": backend.take_session_title(surface_id)}))
+        }
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

@@ -2991,8 +2991,13 @@ impl Backend for PtyBackend {
     }
 
     fn collab_tell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::tell_service::submit(self,params,||self.proxy.send_event(UserEvent::SafeTellWake)
-            .map_err(|_|anyhow::anyhow!("GUI delivery event loop stopped")))
+        // 알릴 창은 이 기기의 창이다 — 받는 기기로 넘기기 전에 뗀다.
+        let mut params = params.clone();
+        let notify = params.as_object_mut().and_then(|fields|fields.remove("notify"));
+        let receipt = kasa_mcp::tell_service::submit(self,&params,||self.proxy.send_event(UserEvent::SafeTellWake)
+            .map_err(|_|anyhow::anyhow!("GUI delivery event loop stopped")))?;
+        if let Some(notify) = notify { crate::tell_delivery::watch_sent(&receipt,&notify,&params); }
+        Ok(receipt)
     }
 
     fn collab_tell_status(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
@@ -3951,6 +3956,10 @@ impl Backend for PtyBackend {
         // 턴 경계가 곧 보드의 status 다 — 관측 주기를 기다리지 않고 바로 긁게 한다.
         kasa_mcp::board_service::poke();
         Ok(())
+    }
+
+    fn take_session_title(&self, surface_id: &str) -> Option<String> {
+        crate::tell_delivery::take_session_title(surface_id)
     }
 }
 

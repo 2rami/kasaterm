@@ -1,5 +1,5 @@
 use super::*;
-use kasa_socket::tell::{Address, Record, State};
+use kasa_socket::tell::{Address, Hold, Record, State};
 use kasa_socket::Backend;
 use std::time::Duration;
 use std::collections::{BTreeMap,HashSet};
@@ -18,6 +18,10 @@ const PROOF_FRESHNESS: Duration = Duration::from_millis(250);
 /// 보통은 그보다 훨씬 먼저 `release_input` 이 푼다.
 const HOLD_FOR: Duration = Duration::from_secs(4);
 const WORKERS: usize = 4;
+/// 키를 친 뒤 이만큼은 화면이 아직 못 따라왔을 수 있어 초안 표시를 믿는다. 에코는 수 ms, 이미지 붙여넣기의
+/// 첨부 표시는 1초 안팎이라 넉넉히 잡았다. 그 뒤는 화면이 정본이다 — Esc·Ctrl+C 로 비운 입력칸이 Enter 를
+/// 칠 때까지 초안으로 남아 tell 을 15분 붙들다 버리던 자리다(2026-10-01, 하루 61건 중 21건).
+const DRAFT_TRUST: Duration = Duration::from_secs(5);
 
 #[derive(Clone,Debug)]
 struct Proof {
@@ -170,6 +174,162 @@ fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop
         }
     });
 }
+/// 줄 선 채 이만큼 지나면 보낸 창에 한 번 알린다. 전달은 보통 1초 안에 끝나고(10-01 하루치 중앙값 0.8초),
+/// 그보다 길면 받는 쪽 사람이 풀어야 하는 것이다. 짧은 초안 정리로 울리지 않을 만큼만 둔다.
+const NOTICE_AFTER: Duration = Duration::from_secs(120);
+const WATCH_POLL: Duration = Duration::from_secs(20);
+
+/// 보낸 쪽지 하나 — 보낸 창에 알릴 때까지 지켜본다.
+struct Watch {
+    id: String,
+    address: serde_json::Value,
+    notify: String,
+    label: String,
+    first_line: String,
+    sent_at: Instant,
+    warned: bool,
+    next_poll: Instant,
+}
+
+fn watches() -> &'static std::sync::Mutex<Vec<Watch>> {
+    static VALUE: std::sync::OnceLock<std::sync::Mutex<Vec<Watch>>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(Default::default)
+}
+
+/// 이 기기 창이 보낸 쪽지를 맡는다. 보낸 쪽은 `tell --status` 를 따로 보지 않으면 막힌 줄도 버려진 줄도
+/// 몰랐다(2026-10-01: 15분 만료 두 건을 받는 쪽이 먼저 알아챘다).
+pub(crate) fn watch_sent(receipt: &serde_json::Value, notify: &serde_json::Value, params: &serde_json::Value) {
+    if !matches!(receipt["state"].as_str(), Some("accepted" | "dispatching")) { return; }
+    let (Some(id), Some(surface)) = (receipt["message_id"].as_str(), notify["surface"].as_str()) else { return };
+    let label = notify["label"].as_str().or_else(||receipt["address"]["surface_id"].as_str()).unwrap_or("받는 창");
+    let body = params["body"].as_str().unwrap_or_default();
+    let line = body.lines().map(str::trim).find(|line|!line.is_empty()).unwrap_or_default();
+    let line = line.strip_prefix('⟦').and_then(|rest|rest.split_once('⟧')).map_or(line,|(_,rest)|rest.trim_start());
+    let mut first_line: String = line.chars().take(40).collect();
+    if line.chars().count() > 40 { first_line.push('…'); }
+    let now = Instant::now();
+    watches().lock().unwrap().push(Watch {
+        id: id.into(), address: receipt["address"].clone(), notify: surface.into(), label: label.into(),
+        first_line, sent_at: now, warned: false, next_poll: now + WATCH_POLL,
+    });
+}
+
+/// 지켜보는 쪽지마다 영수증을 다시 묻고, 알릴 것이 생기면 보낸 창에 tell 한다. 다른 기기 영수증은 HTTP 라
+/// 늦을 수 있어 전달 틱과 다른 스레드에서 돈다.
+fn poll_watches(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    let now = Instant::now();
+    let due: Vec<(String,serde_json::Value)> = watches().lock().unwrap().iter()
+        .filter(|watch|watch.next_poll <= now).map(|watch|(watch.id.clone(),watch.address.clone())).collect();
+    if due.is_empty() || ACTIVE.swap(true,Ordering::AcqRel) { return; }
+    std::thread::spawn(move || {
+        for (id,address) in due {
+            let receipt = kasa_mcp::tell_service::status(&serde_json::json!({"message_id":id,"address":address}));
+            let notice = {
+                let mut list = watches().lock().unwrap();
+                let Some(index) = list.iter().position(|watch|watch.id == id) else { continue };
+                let watch = &mut list[index];
+                watch.next_poll = Instant::now() + WATCH_POLL;
+                let step = match &receipt {
+                    Ok(receipt) => watch_step(watch,receipt),
+                    // 영수증을 못 물으면(다른 기기가 꺼짐 등) 다음 차례에 다시 본다 — 하루가 지나면 영수증째 없다.
+                    Err(_) if watch.sent_at.elapsed() > Duration::from_millis(kasa_socket::tell::RECEIPT_LIFETIME_MS) => WatchStep::Drop(None),
+                    Err(_) => WatchStep::Keep(None),
+                };
+                match step {
+                    WatchStep::Keep(notice) => notice.map(|text|(watch.notify.clone(),text)),
+                    WatchStep::Drop(notice) => {
+                        let notify = watch.notify.clone();
+                        list.remove(index);
+                        notice.map(|text|(notify,text))
+                    }
+                }
+            };
+            if let Some((surface,text)) = notice {
+                let params = serde_json::json!({"message_id":kasa_socket::tell::new_message_id(),"surface_id":surface,"body":text});
+                let wake = ||proxy.send_event(UserEvent::SafeTellWake).map_err(|_|anyhow::anyhow!("GUI delivery event loop stopped"));
+                if let Err(error) = kasa_mcp::tell_service::submit(&*backend,&params,wake) {
+                    eprintln!("[tell] 보낸 창 {surface} 에 쪽지 알림 실패: {error:#}");
+                }
+            }
+        }
+        ACTIVE.store(false,Ordering::Release);
+    });
+}
+
+enum WatchStep { Keep(Option<String>), Drop(Option<String>) }
+
+fn watch_step(watch: &mut Watch, receipt: &serde_json::Value) -> WatchStep {
+    let reason = receipt["reason"].as_str().unwrap_or_default();
+    let head = format!("{} 에게 보낸 쪽지({})", watch.label, watch.id);
+    let first = &watch.first_line;
+    match receipt["state"].as_str() {
+        Some("submitted") => WatchStep::Drop(None),
+        Some("failed") => {
+            let why = if reason == "queued message expired" { "기다리다 만료됐어요".to_string() } else { reason.to_string() };
+            WatchStep::Drop(Some(format!("[쪽지 못 감] {head}가 못 들어가고 버려졌어요 — {why}. 첫 줄: «{first}». 필요하면 새로 보내세요.")))
+        }
+        Some("uncertain") => WatchStep::Drop(Some(format!(
+            "[쪽지 확인 못 함] {head}가 들어갔는지 확인 못 했어요 — {reason}. 새로 보내지 말고 `kasaterm-cli tell --status {}` 로 같은 ID 만 확인하세요. 첫 줄: «{first}»",
+            watch.id))),
+        Some("accepted") if !watch.warned && watch.sent_at.elapsed() >= NOTICE_AFTER => {
+            watch.warned = true;
+            let until = receipt["expires_at_ms"].as_u64().and_then(kasa_socket::tell::clock_hm).unwrap_or_else(||"만료 시각".into());
+            let (cause,remedy) = Hold::from_reason(reason).map_or(("받는 창이 아직 못 받았어요(옛 판이라 까닭을 안 알려 줘요)","받는 창이 비면 들어가요"),
+                |hold|(hold.cause(),hold.remedy()));
+            WatchStep::Keep(Some(format!(
+                "[쪽지 대기] {head}가 {}분째 못 들어갔어요 — {cause}. {remedy}. {until}까지 못 들어가면 버려져요. 급하면 다른 길로 알리세요. 첫 줄: «{first}»",
+                watch.sent_at.elapsed().as_secs() / 60)))
+        }
+        _ => WatchStep::Keep(None),
+    }
+}
+
+/// tell 로 들어간 「지금 일」 — 받는 pane 의 다음 턴 시작 훅이 가져가 claude 세션 이름으로 쓴다. 입력칸에
+/// `/rename` 을 쳐 넣으면 사람이 쓰던 글과 섞일 수 있어, 프롬프트 제출 훅의 공식 `sessionTitle` 로 간다.
+/// claude 가 바쁘면 그 글은 줄을 섰다 제출되므로 한 시간까지 기다린다.
+fn session_titles() -> &'static std::sync::Mutex<HashMap<String,(String,Instant)>> {
+    static VALUE: std::sync::OnceLock<std::sync::Mutex<HashMap<String,(String,Instant)>>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(Default::default)
+}
+
+pub(crate) fn take_session_title(surface: &str) -> Option<String> {
+    let (title,at) = session_titles().lock().unwrap().remove(surface)?;
+    (at.elapsed() < Duration::from_secs(kasa_socket::tell::QUEUE_TTL_SECONDS)).then_some(title)
+}
+
+/// 받는 pane 입력박스 아래에 뜨는 한 줄 — 긴 것, 좁은 칸용 짧은 것.
+pub(crate) fn waiting_label(count: usize, hold: Hold) -> [String; 2] {
+    let short = match hold {
+        Hold::Draft => "입력칸 비우기",
+        Hold::Composition => "조합 끝내기",
+        Hold::Approval => "승인·질문 답하기",
+        Hold::Typing | Hold::Identity => "곧 들어감",
+        Hold::Closed | Hold::PasteMode => "지금은 못 넣음",
+    };
+    [format!("쪽지 {count} 대기 · {}", hold.remedy()), format!("쪽지 대기 · {short}")]
+}
+
+/// 한 번 이상 미뤄진 쪽지를 받는 pane 별로 센다. 바뀐 때만 GUI 로 보낸다 — 틱은 0.5초마다 돈다.
+fn publish_waiting(proxy: &winit::event_loop::EventLoopProxy<UserEvent>, pending: &[Record]) {
+    static LAST: std::sync::Mutex<Option<HashMap<String,(usize,Hold)>>> = std::sync::Mutex::new(None);
+    let waiting = waiting_by_surface(pending);
+    let mut last = LAST.lock().unwrap();
+    if last.as_ref() != Some(&waiting) && proxy.send_event(UserEvent::TellWaiting(waiting.clone())).is_ok() {
+        *last = Some(waiting);
+    }
+}
+
+fn waiting_by_surface(pending: &[Record]) -> HashMap<String,(usize,Hold)> {
+    let mut waiting = HashMap::<String,(usize,Hold)>::new();
+    for record in pending {
+        let Some(hold) = Hold::from_reason(&record.reason) else { continue };
+        let entry = waiting.entry(record.address.surface_id.clone()).or_insert((0,hold));
+        entry.0 += 1;
+    }
+    waiting
+}
+
 impl std::fmt::Debug for Commit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TellCommit").field("message_id",&self.record.message_id).finish()
@@ -260,18 +420,21 @@ impl App {
             && delivery.record.expires_at_ms > kasa_socket::tell::now_ms()
     }
 
-    fn tell_ready(&self, record: &Record, pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind, empty: bool) -> bool {
+    fn tell_ready(&self, record: &Record, pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind, empty: bool) -> std::result::Result<(),Hold> {
+        if pty.input_closed() { return Err(Hold::Closed); }
         // 붙여넣은 뒤(`empty` 가 거짓)에 시작된 한글 조합은 입력이 붙들려 있어 본문에 안 섞인다 — 그것 때문에
         // Enter 를 보류하면 본문이 입력창에 남아 사람 글과 함께 제출된다.
-        if pty.input_closed() || (empty && self.tell_composing(&record.address.surface_id)) { return false; }
+        if empty && self.tell_composing(&record.address.surface_id) { return Err(Hold::Composition); }
         let (cells,screen) = live_cells(pty);
-        if !screen.bracketed_paste { return false; }
+        if !screen.bracketed_paste { return Err(Hold::PasteMode); }
         // 사람 차례(승인·질문)면 글을 안 넣는다 — 판정이 정본이고, 아래 화면 검사는 지금
         // 커서 아래에 승인 위젯이 그려져 있나 보는 기계적 보호막이다(배경 탭 포함).
-        if self.collab.hub.state(&record.address.surface_id).needs_you() { return false; }
-        if crate::input::rows_show_approval_prompt(&cells).is_some() { return false; }
-        !empty || (!pty.input_draft_present() && pty.input_quiet_for(Duration::from_millis(300))
-            && prompt_empty_at(&cells,screen.cursor_row as usize,screen.cursor_col as usize,harness))
+        if self.collab.hub.state(&record.address.surface_id).needs_you()
+            || crate::input::rows_show_approval_prompt(&cells).is_some() { return Err(Hold::Approval); }
+        if !empty { return Ok(()); }
+        if pty.input_draft_recent(DRAFT_TRUST) || !pty.input_quiet_for(Duration::from_millis(300)) { return Err(Hold::Typing); }
+        if !prompt_empty_at(&cells,screen.cursor_row as usize,screen.cursor_col as usize,harness) { return Err(Hold::Draft); }
+        Ok(())
     }
 
     pub(crate) fn safe_tell_tick(&mut self) {
@@ -283,10 +446,12 @@ impl App {
             *last = Some(Instant::now());
         }
         let Some(backend) = self.socket_backend.clone() else { return };
+        poll_watches(backend.clone(),self.proxy.clone());
         if BATCH_ACTIVE.swap(true,Ordering::AcqRel) { return; }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             if let Ok(pending) = kasa_mcp::tell_service::pending() {
+                publish_waiting(&proxy,&pending);
                 let selected = scheduler().lock().unwrap().select(pending,WORKERS);
                 for record in selected { begin_proof(backend.clone(),proxy.clone(),record); }
             }
@@ -301,10 +466,11 @@ impl App {
             return;
         }
         let proof = delivery.proof.as_ref().unwrap();
-        if !self.tell_proof_current(delivery)
-            || !self.tell_ready(&delivery.record,&delivery.pty,proof.harness,true) {
+        let hold = if self.tell_proof_current(delivery) { self.tell_ready(&delivery.record,&delivery.pty,proof.harness,true).err() }
+            else { Some(Hold::Identity) };
+        if let Some(hold) = hold {
             let state = if delivery.record.reject_if_busy { State::Failed } else { State::Accepted };
-            finish(&delivery.record,state,"no bytes written; waiting for fresh identity and an empty input without approval, attachments or composition");
+            finish(&delivery.record,state,hold.reason());
             return;
         }
         let payload = format!("\x1b[200~{}\x1b[201~",delivery.record.body);
@@ -331,8 +497,8 @@ impl App {
         let blocked = self.tell_target_change(commit)
             .or_else(||(commit.pty.input_revision() != commit.revision).then_some("input changed after paste"))
             .or_else(||(!self.tell_proof_current(commit)).then_some("identity proof stale or tell expired"))
-            .or_else(||commit.proof.as_ref().ok().filter(|proof|!self.tell_ready(&commit.record,&commit.pty,proof.harness,false))
-                .map(|_|"approval, question, composition or closed input"));
+            .or_else(||commit.proof.as_ref().ok().and_then(|proof|self.tell_ready(&commit.record,&commit.pty,proof.harness,false).err())
+                .map(Hold::reason));
         let unchanged = blocked.is_none();
         // 입력창 안을 본다. 화면 맨 아래 30줄만 보면, 대화가 아직 없는 새 세션은 입력창이 화면
         // **위쪽**에 있어 큰 창에서 그 범위 밖이었다 — 글은 들어갔는데 에코를 못 찾아 Enter 를
@@ -360,14 +526,21 @@ impl App {
                 return;
             }
         }
+        // 제목은 Enter **앞에** 맡긴다 — Enter 가 닿자마자 claude 의 제출 훅이 가져가러 온다.
+        let surface = commit.record.address.surface_id.clone();
+        if !commit.record.title.is_empty() {
+            session_titles().lock().unwrap().insert(surface.clone(),(commit.record.title.clone(),Instant::now()));
+        }
         let result = commit.pty.send_bytes_guarded(b"\r",Some(commit.revision));
+        if result.is_err() { session_titles().lock().unwrap().remove(&surface); }
         let _ = commit.pty.release_input();
         let (state,reason) = if result.is_ok() { (State::Submitted,"paste and Enter writes succeeded; model read is unconfirmed") }
             else { (State::Uncertain,"Enter write unconfirmed; automatic retry prohibited") };
         finish(&commit.record,state,reason);
         // 새 일이 닿은 순간 그 창의 「지금 일」이 바뀐다 — 사이드바·창 머리·관측이 모두 창 이름을 읽는다.
+        // claude 자기 세션 이름(`/resume`·agents 목록)은 그 글이 프롬프트로 제출될 때 훅이 맞춘다.
         if state == State::Submitted && !commit.record.title.is_empty() {
-            let _ = self.proxy.send_event(UserEvent::SocketRename(commit.record.address.surface_id.clone(),commit.record.title.clone()));
+            let _ = self.proxy.send_event(UserEvent::SocketRename(surface,commit.record.title.clone()));
         }
     }
 }
@@ -610,5 +783,38 @@ mod tests {
         assert!(fresh.input_draft_present());
         assert!(fresh.agent_session_started());
         assert!(!fresh.input_draft_present());
+    }
+
+    #[test]
+    fn held_tells_are_counted_per_receiver_with_the_reason_people_can_act_on() {
+        let mut first = record("%15"); first.reason = Hold::Draft.reason().into();
+        let mut second = record("%15"); second.reason = Hold::Draft.reason().into();
+        let mut fresh = record("%3"); fresh.reason = "stored; waiting for safe empty input".into();
+        let mut approval = record("%4"); approval.reason = Hold::Approval.reason().into();
+        let waiting = waiting_by_surface(&[first,second,fresh,approval]);
+        assert_eq!(waiting.get("%15"), Some(&(2,Hold::Draft)));
+        assert!(!waiting.contains_key("%3"), "한 번도 안 미뤄진 쪽지는 표시하지 않는다");
+        assert_eq!(waiting_label(2,Hold::Draft), ["쪽지 2 대기 · 입력칸을 비우면 들어가요","쪽지 대기 · 입력칸 비우기"]);
+        assert_eq!(waiting_label(1,Hold::Approval)[0], "쪽지 1 대기 · 승인·질문에 답하면 들어가요");
+    }
+
+    #[test]
+    fn the_sender_hears_once_when_held_and_once_when_dropped() {
+        let mut watch = Watch {
+            id: "kt1.1.0123456789abcdef".into(), address: serde_json::json!({}), notify: "%25".into(),
+            label: "아즈사@맥북".into(), first_line: "새 일 — 보드 걷기".into(),
+            sent_at: Instant::now() - NOTICE_AFTER, warned: false, next_poll: Instant::now(),
+        };
+        let held = serde_json::json!({"state":"accepted","reason":Hold::Draft.reason(),"expires_at_ms":0});
+        let WatchStep::Keep(Some(notice)) = watch_step(&mut watch,&held) else { panic!("2분 넘게 막히면 알린다") };
+        assert!(notice.starts_with("[쪽지 대기] 아즈사@맥북") && notice.contains("쓰던 글") && notice.contains("보드 걷기"), "{notice}");
+        assert!(matches!(watch_step(&mut watch,&held), WatchStep::Keep(None)), "대기 알림은 한 번만");
+        let expired = serde_json::json!({"state":"failed","reason":"queued message expired"});
+        let WatchStep::Drop(Some(gone)) = watch_step(&mut watch,&expired) else { panic!("버려지면 알린다") };
+        assert!(gone.starts_with("[쪽지 못 감]") && gone.contains("만료"), "{gone}");
+        let delivered = serde_json::json!({"state":"submitted","reason":""});
+        assert!(matches!(watch_step(&mut watch,&delivered), WatchStep::Drop(None)), "들어가면 조용히 놓는다");
+        watch.sent_at = Instant::now(); watch.warned = false;
+        assert!(matches!(watch_step(&mut watch,&held), WatchStep::Keep(None)), "막 보낸 것은 아직 안 알린다");
     }
 }

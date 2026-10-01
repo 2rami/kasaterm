@@ -455,9 +455,7 @@ fn run() -> Result<Option<Response>> {
     let mut args = args;
     // 사람은 주소 JSON 을 안 친다(2026-09-16 지시 「몇 개 안 쳐도 바로 되게」) —
     // `tell 이름 본문` 은 보드에서 주소를 찾고, `tell --status ID` 는 보낼 때 적어 둔 주소를 쓴다.
-    if cmd == "tell" {
-        resolve_tell_target(&mut args)?;
-    }
+    let tell_label = if cmd == "tell" { resolve_tell_target(&mut args)? } else { None };
     if cmd == "tell:status" && args.len() == 1 && !args[0].starts_with("--") {
         let address = load_receipt(&args[0]).ok_or_else(|| anyhow!(
             "이 ID 의 주소를 모르겠어요 — 이 기계에서 보낸 것이 아니면 --address 를 함께 주세요"
@@ -476,7 +474,16 @@ fn run() -> Result<Option<Response>> {
         }
         args = board_args;
     }
-    let request = build_request(&cmd, &args)?;
+    let mut request = build_request(&cmd, &args)?;
+    // 줄 선 쪽지가 막히거나 버려지면 보낸 창에 알려 달라고 이 기기 앱에 맡긴다. 다른 기기로 곧장 보내는
+    // `--api` 는 그 기기가 이 창을 모르니 빼고, 창 밖(사람이 친 셸)도 알릴 데가 없어 뺀다.
+    if cmd == "tell" && API_TARGET.get().is_none() {
+        if let Some(pane) = std::env::var("KASATERM_PANE_ID").ok().filter(|p| !p.is_empty()) {
+            let label = tell_label.clone().or_else(|| request.params["surface_id"].as_str().map(str::to_owned))
+                .or_else(|| request.params.pointer("/address/surface_id").and_then(Value::as_str).map(str::to_owned));
+            request.params["notify"] = json!({ "surface": pane, "label": label });
+        }
+    }
     let socket_path = resolve_socket_path()?;
     let mut response = roundtrip(&socket_path, &request)?;
     // 오케스트레이터가 띄운 세션이면 세션 id(기록 파일 이름)에 표식을 남긴다 — 앱 재시작 복원이
@@ -519,6 +526,14 @@ fn run() -> Result<Option<Response>> {
         let me = std::env::var("KASATERM_PANE_ID").ok();
         println!("{}", render_where(&response, &query.join(" "), me.as_deref()));
         return Ok(None);
+    }
+    // 턴 시작 훅이 부른다 — 이 pane 에 tell 로 「지금 일」이 들어왔으면 claude 의 공식 창구(UserPromptSubmit
+    // 훅 출력의 `sessionTitle`)로 세션 이름을 맞춘다. 그 밖엔 아무것도 안 낸다: 훅 stdout 은 claude 가 읽는다.
+    if cmd == "turn" {
+        if let Some(title) = response.result.as_ref().and_then(|r| r.get("session_title")).and_then(Value::as_str) {
+            println!("{}", json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": title}}));
+        }
+        return if response.ok { Ok(None) } else { Ok(Some(response)) };
     }
     // `activity` 는 사람(과 학생)이 읽는 자리다 — board 처럼 기계가 파싱하는 게
     // 아니라 「쟤 왜 저러나」를 눈으로 훑는 용도라, JSON 대신 시간순 목록으로 낸다.
@@ -567,6 +582,11 @@ fn await_tell_settled(socket_path: &str, id: &str, address: &Value) -> Option<Va
 fn tell_state_line(receipt: &Value) -> String {
     let state = receipt.get("state").and_then(|s| s.as_str()).unwrap_or("?");
     let reason = receipt.get("reason").and_then(|s| s.as_str()).unwrap_or_default();
+    if let (true, Some(hold)) = (state == "accepted", kasa_socket::tell::Hold::from_reason(reason)) {
+        let until = receipt.get("expires_at_ms").and_then(Value::as_u64).and_then(kasa_socket::tell::clock_hm)
+            .unwrap_or_else(|| "만료 시각".into());
+        return format!("대기 — {}. {} ({until}까지 못 들어가면 버려지고, 2분 넘게 막히면 이 창에 알려 준다)", hold.cause(), hold.remedy());
+    }
     let said = match state {
         "submitted" => "들어갔다(모델이 읽었는지는 별개)",
         "accepted" => "아직 큐 — 상대 입력창이 비면 들어간다",
@@ -577,6 +597,7 @@ fn tell_state_line(receipt: &Value) -> String {
     };
     if reason.is_empty() { said.to_string() } else { format!("{said} · {reason}") }
 }
+
 
 /// Poll `collab.board` AND this pane's inbox every `interval_secs`, printing
 /// one Monitor event line per change: a pane whose status/intent changed (or
@@ -839,6 +860,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             let address = row.get("address").cloned().unwrap_or(Value::Null);
             let mut params = json!({ "message_id": message_id, "address": address, "body": body });
             if let Some(title) = &title { params["title"] = json!(title); }
+            if let Some(pane) = &from { params["notify"] = json!({ "surface": pane, "label": surface }); }
             let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(), params })?;
             if told.ok {
                 break (row, message_id, address, told);
@@ -1013,10 +1035,14 @@ fn row_address<'a>(row: &'a Value, key: &str) -> &'a str {
 /// 사람이 부르는 이름(`미도리`·`미도리@맥미니`·`%12`)에 맞는 줄 — 세션이 붙은 pane 만.
 fn board_matches<'a>(rows: &'a [Value], target: &str) -> Vec<&'a Value> {
     let (name, machine) = target.rsplit_once('@').map(|(n, m)| (n, Some(m))).unwrap_or((target, None));
+    // macOS 컴퓨터 이름은 띄어쓰기가 줄바꿈 없는 공백(U+00A0)이라, 목록을 보고 그대로 친 `이름@건호의 MacBook Pro`
+    // 가 「보드에 없어요」로 떨어졌다(2026-10-01). 공백 종류는 가리지 않는다.
+    let spaced = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let machine = machine.map(spaced);
     rows.iter().filter(|p| {
-        let label = row_text(p, "machine_label");
+        let label = spaced(&row_text(p, "machine_label"));
         (name == row_text(p, "character") || name == row_text(p, "title") || name == row_address(p, "surface_id"))
-            && machine.is_none_or(|m| m == label || label.starts_with(m))
+            && machine.as_deref().is_none_or(|m| m == label || label.starts_with(m))
             && p.get("address").and_then(|a| a.get("session_id")).is_some()
     }).collect()
 }
@@ -2030,8 +2056,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     _ if arg.starts_with('%') && params.get("address").is_none() && params.get("surface_id").is_none() => {
                         params["surface_id"] = json!(arg); index += 1;
                     }
+                    // 모르는 옵션을 본문으로 넘기면 받는 쪽에는 옵션 줄이 가고 진짜 본문은 빠진다(2026-10-01
+                    // `--title` 을 모르던 판이 그랬다). `--` 로 시작하는 본문은 `--` 뒤에 쓴다.
+                    _ if arg.starts_with("--") => return Err(anyhow!(
+                        "tell: 모르는 옵션 {arg} (옵션: --title --stdin --id --address). --로 시작하는 본문이면 `--` 뒤에 쓰세요")),
                     _ => break,
                 }
+            }
+            if let Some(flag) = args.get(index..).unwrap_or_default().iter().find(|a|matches!(a.as_str(),"--title"|"--stdin"|"--id"|"--address")) {
+                return Err(anyhow!("tell: {flag} 가 본문 뒤에 있어요 — 옵션은 대상 바로 뒤, 본문 앞에 두세요"));
             }
             if params.get("address").is_none() && params.get("surface_id").is_none() {
                 return Err(anyhow!("tell requires %surface or --address JSON"));
@@ -2421,19 +2454,20 @@ fn mark_tell_sender(body: String, character: Option<&str>) -> String {
 
 /// `tell` 의 대상이 이름이면 보드에서 주소로 바꾼다 — `이름`·`이름@기계`·`%N@기계`·방 제목.
 /// `%N`·`--address` 는 그대로 둔다. 하나만 맞아야 보낸다 — 둘 이상이면 후보를 보여 주고 멈춘다.
-fn resolve_tell_target(args: &mut Vec<String>) -> Result<()> {
+/// 이름으로 찾았으면 `이름@기계` 를 돌려준다 — 쪽지가 막혔다는 알림에서 누구에게 보낸 것인지 말한다.
+fn resolve_tell_target(args: &mut Vec<String>) -> Result<Option<String>> {
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
             "--id" | "--title" => i += 2,
             "--stdin" | "--force" => i += 1,
-            "--address" | "--" => return Ok(()),
-            a if a.starts_with('%') && !a.contains('@') => return Ok(()),
+            "--address" | "--" => return Ok(None),
+            a if a.starts_with('%') && !a.contains('@') => return Ok(None),
             a if a.starts_with("--") => return Err(anyhow!("모르는 옵션: {a}")),
             _ => break,
         }
     }
-    let Some(target) = args.get(i).cloned() else { return Ok(()) };
+    let Some(target) = args.get(i).cloned() else { return Ok(None) };
     let panes = snapshot_rows(&resolve_socket_path()?, false)?;
     match board_matches(&panes, &target).as_slice() {
         [] => Err(anyhow!("「{target}」 이(가) 보드에 없어요 — `kasaterm-cli rooms` 로 이름을 확인하세요")),
@@ -2441,7 +2475,8 @@ fn resolve_tell_target(args: &mut Vec<String>) -> Result<()> {
             let address = one.get("address").cloned().unwrap_or(Value::Null);
             eprintln!("→ {}", describe_row(one));
             args.splice(i..i + 1, ["--address".to_string(), address.to_string()]);
-            Ok(())
+            let who = row_text(one, "character");
+            Ok(Some(if who.is_empty() { target } else { format!("{who}@{}", row_text(one, "machine_label")) }))
         }
         many => Err(anyhow!("「{target}」 이(가) 여럿이에요 — 이름@기계 로 골라 주세요:\n{}",
             many.iter().map(|p| format!("  {}", describe_row(p))).collect::<Vec<_>>().join("\n"))),
@@ -3870,6 +3905,32 @@ mod tests {
     }
 
     #[test]
+    fn tell_refuses_unknown_options_instead_of_sending_them_as_the_body() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let address = r#"{"machine_id":"m","surface_key":"k","surface_id":"%1","session_id":"s","instance_id":"i"}"#;
+        // 2026-10-01: `--title` 을 모르던 판이 `--title 제목 --stdin` 을 본문으로 보냈다 — 지금은 모르는 옵션이면 멈춘다.
+        let err = super::build_request("tell", &v(&["--address", address, "--titel", "보드 걷기", "--stdin"])).unwrap_err();
+        assert!(err.to_string().contains("모르는 옵션 --titel"), "{err}");
+        let err = super::build_request("tell", &v(&["%1", "본문", "--title", "늦은 제목"])).unwrap_err();
+        assert!(err.to_string().contains("본문 뒤"), "{err}");
+        let ok = super::build_request("tell", &v(&["%1", "--title", "보드 걷기", "본문", "한 줄"])).unwrap();
+        assert_eq!(ok.params["title"], "보드 걷기");
+        assert!(ok.params["body"].as_str().unwrap().ends_with("본문 한 줄"));
+        let dashed = super::build_request("tell", &v(&["%1", "--", "--로 시작하는 본문"])).unwrap();
+        assert!(dashed.params["body"].as_str().unwrap().ends_with("--로 시작하는 본문"));
+        assert!(super::build_request("tell", &v(&["%1", "옵션 --title 이야기"])).is_ok(), "한 덩어리 본문 속 낱말은 옵션이 아니다");
+    }
+
+    #[test]
+    fn a_held_tell_says_why_and_until_when() {
+        let receipt = serde_json::json!({"state":"accepted","reason":kasa_socket::tell::Hold::Draft.reason(),"expires_at_ms":0});
+        let line = super::tell_state_line(&receipt);
+        assert!(line.contains("쓰던 글") && line.contains("비우면") && line.contains("버려지고"), "{line}");
+        let old = serde_json::json!({"state":"accepted","reason":"no bytes written; waiting"});
+        assert!(super::tell_state_line(&old).starts_with("아직 큐"));
+    }
+
+    #[test]
     fn board_matches_by_name_machine_or_surface_with_a_session() {
         let rows = vec![
             serde_json::json!({"character":"미도리","machine_label":"맥미니","address":{"surface_id":"%3","session_id":"s1"}}),
@@ -3878,6 +3939,8 @@ mod tests {
         ];
         assert_eq!(super::board_matches(&rows, "미도리").len(), 2);
         assert_eq!(super::board_matches(&rows, "미도리@맥미니").len(), 1);
+        let nbsp = vec![serde_json::json!({"character":"유우카","machine_label":"건호의 MacBook\u{a0}Pro","address":{"surface_id":"%3","session_id":"s"}})];
+        assert_eq!(super::board_matches(&nbsp, "유우카@건호의 MacBook Pro").len(), 1, "줄바꿈 없는 공백도 띄어쓰기로 본다");
         assert_eq!(super::board_matches(&rows, "%5").len(), 1);
         assert!(super::board_matches(&rows, "유즈").is_empty());
     }

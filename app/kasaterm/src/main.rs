@@ -3621,6 +3621,7 @@ enum UserEvent {
     SafeTellWake,
     SafeTellReady(tell_delivery::Commit),
     SafeTellCommit(tell_delivery::Commit),
+    TellWaiting(HashMap<String, (usize, kasa_socket::tell::Hold)>),
     /// Split delegated from the socket thread. The `Sender` carries the new
     /// pane's real id back so `split_surface` can return it instead of the old
     /// `"pane-new"` placeholder — without it the teammate launcher targets a
@@ -5467,6 +5468,9 @@ struct App {
     /// 훅이 남기는 `/tmp/kasaterm-collab/ultracode/<sid>.on` 마커를 대신 읽는다.
     /// `refresh_pane_activity` 박자(300ms)로 갱신 — 매 프레임 stat 하지 않는다.
     pane_ultracode: std::collections::HashSet<String>,
+    /// 줄 서 있는 tell — 받는 pane → (몇 통, 막힌 까닭). 입력박스 아래 테두리에 「쪽지 대기」로 뜬다.
+    /// 받는 사람은 제 입력칸이 쪽지를 막는 줄 몰라 15분 뒤 조용히 버려지던 자리다(2026-10-01).
+    tell_waiting: HashMap<String, (usize, kasa_socket::tell::Hold)>,
     /// 괄호 없는 턴-시작 스피너(`✢ Transmuting…`)의 살아있음 프로브 — pane →
     /// (행, 마지막 글리프, 확정, 그 행 최초 목격 시각). 글리프가 틱 사이에
     /// 바뀌면 확정 = 진짜 스피너(인용문은 멈춰 있다). 방금 Enter 가 들어간
@@ -6197,6 +6201,7 @@ impl App {
             last_claude_status: None,
             pane_activity: HashMap::new(),
             pane_ultracode: std::collections::HashSet::new(),
+            tell_waiting: HashMap::new(),
             theme_light_last: None,
             retheme_queue: HashMap::new(),
             window_focused: true,

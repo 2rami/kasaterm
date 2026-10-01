@@ -510,6 +510,9 @@ pub struct PtySession {
     input_closed: std::sync::atomic::AtomicBool,
     input_revision: std::sync::atomic::AtomicU64,
     input_draft: std::sync::atomic::AtomicBool,
+    /// 초안 표시가 마지막으로 서거나 다시 선 시각. 표시는 Enter 로만 꺼지므로 Esc·Ctrl+C 로 비운 입력칸도
+    /// 영영 초안으로 남았다 — 이 시각이 오래됐으면 표시 대신 화면이 판정한다(`input_draft_recent`).
+    draft_marked_at: Mutex<Option<Instant>>,
     /// tell 이 붙여 넣고 Enter 를 칠 동안 사람 입력을 붙들어 두는 자리(기한, 모인 바이트). 그 틈에 친 글이
     /// 붙여 넣은 본문 뒤에 붙어 함께 제출되던 자리다(2026-09-29). 기한이 지나면 다음 쓰기가 먼저 흘려보낸다.
     input_hold: Mutex<Option<(Instant, Vec<u8>)>>,
@@ -804,6 +807,7 @@ impl PtySession {
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),
             input_draft: std::sync::atomic::AtomicBool::new(true),
+            draft_marked_at: Mutex::new(None),
             input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
             output_beats,
@@ -902,6 +906,7 @@ impl PtySession {
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),
             input_draft: std::sync::atomic::AtomicBool::new(true),
+            draft_marked_at: Mutex::new(None),
             input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
             output_beats,
@@ -1011,6 +1016,7 @@ impl PtySession {
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),
             input_draft: std::sync::atomic::AtomicBool::new(true),
+            draft_marked_at: Mutex::new(None),
             input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
             output_beats,
@@ -1271,6 +1277,13 @@ impl PtySession {
         self.input_draft.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// 초안 표시가 `within` 안에 섰는가. 그보다 오래된 표시는 화면이 확인할 몫이다 — 친 글은 그 사이
+    /// 입력칸에 그려졌거나(그러면 화면이 막는다) 지워졌다.
+    pub fn input_draft_recent(&self, within: std::time::Duration) -> bool {
+        self.input_draft_present()
+            && self.draft_marked_at.lock().unwrap().is_some_and(|at| at.elapsed() < within)
+    }
+
     /// 새 에이전트 세션이 섰다(claude SessionStart). 그 입력창은 빈 채로 뜨므로, 셸에 넣은 부팅
     /// 줄이 남긴 초안 표시를 거둔다 — 부팅 줄은 `send` 로 LF 로 끝나 위의 「제출」 판정(CR)에
     /// 안 걸리고, 사람이 Enter 를 칠 때까지 tell 이 「초안 있음」으로 영영 미뤄졌다(2026-09-28
@@ -1290,6 +1303,7 @@ impl PtySession {
     pub fn reserve_input_draft(&self) {
         let _writer = self.writer.lock().unwrap();
         self.input_draft.store(true,std::sync::atomic::Ordering::Release);
+        *self.draft_marked_at.lock().unwrap() = Some(Instant::now());
         self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
     }
 
@@ -1345,11 +1359,14 @@ impl PtySession {
             let mut w = self.writer.lock().unwrap();
             anyhow::ensure!(!self.input_closed(), "pane is closed — reopen it before sending input");
             anyhow::ensure!(expected.is_none_or(|revision|revision == self.input_revision()), "input changed during tell delivery");
-            if expected.is_none() && !passive {
+            // 클릭은 입력칸에 글을 못 넣는다 — 세면 학생 창을 눌러 보기만 해도 사람이 Enter 를 칠 때까지
+            // tell 이 줄만 섰다(2026-10-01 실측: 하루 61건 중 21건 만료).
+            if expected.is_none() && !passive && !mouse_report(bytes) {
                 // A separately submitted Enter proves a user draft is gone;
                 // editing, wrapped lines and attachment sequences do not.
                 let submitted = bytes == b"\r" || (bytes.ends_with(b"\r") && !bytes.contains(&0x1b));
                 self.input_draft.store(!submitted,std::sync::atomic::Ordering::Release);
+                if !submitted { *self.draft_marked_at.lock().unwrap() = Some(Instant::now()); }
             }
             let revision = if passive { self.input_revision() }
                 else { self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel) + 1 };
@@ -4045,6 +4062,15 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
 
 /// 입력창 글을 바꿀 수 없는 리포트 — 포커스(CSI I/O), SGR 마우스 휠, 버튼 없는 이동(호버).
 /// 클릭·끌기는 TUI 의 선택지를 누를 수 있어 입력으로 친다.
+/// 마우스 리포트(SGR `CSI < … M|m`, 옛 X10 `CSI M` + 3바이트) 한 덩어리인가.
+fn mouse_report(bytes: &[u8]) -> bool {
+    if let Some(rest) = bytes.strip_prefix(b"\x1b[<") {
+        return matches!(rest.last(), Some(b'M' | b'm'))
+            && rest[..rest.len() - 1].iter().all(|b| b.is_ascii_digit() || *b == b';');
+    }
+    bytes.len() == 6 && bytes.starts_with(b"\x1b[M")
+}
+
 fn passive_report(bytes: &[u8]) -> bool {
     if bytes == b"\x1b[I" || bytes == b"\x1b[O" {
         return true;
@@ -4095,6 +4121,37 @@ mod passive_report_tests {
         assert!(!pty.input_draft_present(), "휠·호버는 초안이 아니다");
         pty.send_bytes(b"\x1b[<0;10;5M").unwrap();
         assert_ne!(pty.input_revision(), pasted, "클릭은 여전히 입력으로 센다");
+        pty.send_bytes(b"\x1b[<0;10;5m").unwrap();
+        assert!(!pty.input_draft_present(), "클릭은 입력칸에 글을 못 넣는다 — 초안이 아니다");
+    }
+
+    #[test]
+    fn a_keystroke_marks_a_recent_draft_that_the_screen_takes_over_later() {
+        let (_events, erx) = crossbeam_channel::unbounded();
+        let pty = super::PtySession::start_external(
+            super::PtyOptions { pane_id: "draft-recent".into(), ..Default::default() },
+            super::ExternalIo { events: erx, writer: Box::new(std::io::sink()), on_resize: std::sync::Arc::new(|_, _| {}) },
+        ).unwrap();
+        let window = std::time::Duration::from_millis(80);
+        assert!(!pty.input_draft_recent(window), "막 연 칸은 표시가 서도 시각이 없다 — 화면이 판정한다");
+        pty.send_bytes(b"\x1b").unwrap();
+        assert!(pty.input_draft_recent(window), "Esc 직후는 화면이 아직 못 따라왔을 수 있다");
+        std::thread::sleep(window * 2);
+        assert!(pty.input_draft_present() && !pty.input_draft_recent(window), "Enter 없이도 시간이 지나면 화면이 정본");
+        pty.send_bytes(b"\r").unwrap();
+        assert!(!pty.input_draft_recent(window));
+        pty.reserve_input_draft();
+        assert!(pty.input_draft_recent(window), "이미지 붙여넣기 예약도 같은 창 안에서 막는다");
+    }
+
+    #[test]
+    fn mouse_reports_are_recognized_whole() {
+        for mouse in [&b"\x1b[<0;10;5M"[..], b"\x1b[<2;1;1m", b"\x1b[<32;3;4M", b"\x1b[M #!"] {
+            assert!(super::mouse_report(mouse), "{mouse:?}");
+        }
+        for other in [&b"\x1b[<0;10"[..], b"\x1b[A", b"a", b"\x1b[<0;1;1Mabc", b"\x1b"] {
+            assert!(!super::mouse_report(other), "{other:?}");
+        }
     }
 }
 
