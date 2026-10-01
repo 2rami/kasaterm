@@ -1,7 +1,7 @@
 name: kasaterm_mobile
 description: "kasaterm 학생 원격 조종 앱 — 폰에서 학생 목록·화면·답장."
 publish_to: 'none'
-version: 0.1.0+1
+version: 1.0.0+1
 
 environment:
   sdk: ^3.11.5
