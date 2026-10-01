@@ -9,6 +9,16 @@
 3. 전용 controller가 대기열을 직렬 처리한다. 깨끗한 별도 checkout에서 검사 → 패치 버전 증가 → Developer ID 서명 → 공증 → 태그·prerelease → CI 검증·EdDSA → preview 피드 순서다.
 4. 완료는 명령 종료 코드가 아니라 `feed` 단계까지 검증된 상태다. CI 대기 중인 작업을 성공으로 보고하지 않는다. 실패·대기는 상태와 원인을 남긴다.
 
+CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
+검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과
+공개 피드의 버전·주소·서명·크기를 최대 60회(확인 사이 10초) 대조한다. 실패·시간 초과는 CI 실패이며,
+이미 올라간 피드 커밋·태그·산출물을 되돌리거나 새 릴리스를 만들지 않는다. 사이트 설정도 자동 변경하지 않는다.
+원인을 해결한 뒤 해당 appcast job만 명시적으로 재실행하면 같은 검증 피드를 확인하고 Pages 게시를 재시도한다.
+근거: [Pages의 GITHUB_TOKEN 제한](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#troubleshooting-publishing-from-a-branch),
+[Pages 빌드 요청과 권한](https://docs.github.com/en/rest/pages/pages#request-a-github-pages-build).
+
+일반적인 `build-app.sh` 실행이나 자유문구 `done`만으로 공개 발행을 승인하지 않는다. 새 커밋을 검증하고 위 대기열에 등록하는 것까지가 빠른 업데이트 작업의 완료 기준이다.
+
 ### 무엇을 굽나 — 등록된 커밋 그대로
 
 controller는 마지막 발행 뒤 main에 들어온 등록 커밋 가운데 가장 새 것을 **그 커밋 그대로** 굽는다. main 끝이 아니다.
@@ -41,6 +51,7 @@ controller는 마지막 발행 뒤 main에 들어온 등록 커밋 가운데 가
 그 폴더다(미니는 `~/.local/share/kasaterm-preview-controller`).
 
 ```sh
+export PATH="$HOME/.local/bin:$PATH" GIT_LFS_SKIP_SMUDGE=1   # git-lfs 위치(미니). 소스는 파이썬 도구만 쓰니 그림은 안 받는다
 git -C /절대/controller소스 fetch -q origin main
 git -C /절대/controller소스 merge-base --is-ancestor <40자리 SHA> origin/main   # main 에 있는 커밋만
 git -C /절대/controller소스 checkout -q --detach <40자리 SHA>
@@ -50,15 +61,9 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 status           
 도는 tick 은 시작할 때 모듈을 다 읽어 둔 채 끝까지 옛 코드로 가고, 다음 tick(1분 간격)부터 새 코드다. 그래서 굽는 중에 옮겨도 된다.
 LaunchAgent 는 다시 등록하지 않는다. 그 checkout 은 사람이 손대지 않는 깨끗한 detached 상태로 둔다.
 
-CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
-검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과
-공개 피드의 버전·주소·서명·크기를 최대 60회(확인 사이 10초) 대조한다. 실패·시간 초과는 CI 실패이며,
-이미 올라간 피드 커밋·태그·산출물을 되돌리거나 새 릴리스를 만들지 않는다. 사이트 설정도 자동 변경하지 않는다.
-원인을 해결한 뒤 해당 appcast job만 명시적으로 재실행하면 같은 검증 피드를 확인하고 Pages 게시를 재시도한다.
-근거: [Pages의 GITHUB_TOKEN 제한](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#troubleshooting-publishing-from-a-branch),
-[Pages 빌드 요청과 권한](https://docs.github.com/en/rest/pages/pages#request-a-github-pages-build).
-
-일반적인 `build-app.sh` 실행이나 자유문구 `done`만으로 공개 발행을 승인하지 않는다. 새 커밋을 검증하고 위 대기열에 등록하는 것까지가 빠른 업데이트 작업의 완료 기준이다.
+ssh 로 들어간 셸은 PATH 에 git-lfs 가 없어 첫 줄을 빼면 checkout 이 LFS 필터에서 반쯤 멈춘다 — HEAD 는 옛 커밋인데 파일만
+바뀐 채가 되고 다음 tick 이 그 섞인 파일로 돈다(2026-10-01). 직전이 깨끗했다면 그 변경은 실패한 checkout 산물뿐이니 같은 SHA 로
+`checkout -q -f --detach` 해 마무리한다.
 
 ## 처음 한 번: controller
 
