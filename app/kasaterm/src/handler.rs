@@ -278,6 +278,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SafeTellWake => { self.safe_tell_tick(); }
             UserEvent::SafeTellReady(delivery) => { self.safe_tell_ready(delivery); }
             UserEvent::SafeTellCommit(commit) => { self.safe_tell_commit(commit); }
+            UserEvent::TellWaiting(waiting) => {
+                if self.tell_waiting != *waiting {
+                    self.tell_waiting = waiting.clone();
+                    if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+                }
+            }
             UserEvent::SocketBytes(sid, bytes) => {
                 {
                     let target = match sid.as_deref() {

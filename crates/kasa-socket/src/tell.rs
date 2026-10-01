@@ -9,6 +9,90 @@ pub const MAX_TITLE_CHARS: usize = 60;
 const MAX_RECORDS: usize = 1024;
 const MAX_STORAGE: usize = 4 * 1024 * 1024;
 pub const RECEIPT_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+/// 줄 선 쪽지를 버리기까지(초). 상한(1시간)으로 둔다. 2026-10-01 이 맥북 영수증 하루치 61건 중 21건이 옛 기본
+/// 15분에 만료됐는데, 막은 것은 사람이 Enter 를 칠 때까지 안 꺼지던 초안 표시였고(그 뒤로는 화면이 판정한다)
+/// 늦게 들어간 것도 그 표시가 풀린 순간이었다. 남는 기다림은 사람의 진짜 초안·승인 화면뿐이라 사람이 자리를
+/// 비운 만큼 길어지고, 만료된 21건 중 9건은 시간이 지나도 뜻이 안 바래는 완료 보고였다. 대신 기다리는 동안
+/// 받는 창 입력칸 아래에 대기 표시가 뜨고, 보낸 창에는 2분 뒤 막힌 까닭과 버릴 시각이, 버리면 그 사실이 간다.
+pub const QUEUE_TTL_SECONDS: u64 = 3600;
+
+/// 전달을 미룬 까닭. 영수증 `reason` 의 `waiting:<낱말> — …` 로 실려 보낸 쪽 CLI·받는 쪽 화면이 무엇이
+/// 막았는지 가른다 — 하나로 뭉친 문장으로는 「입력칸이 비었는데 왜」를 못 풀었다(2026-10-01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold { Draft, Typing, Composition, Approval, Closed, PasteMode, Identity }
+
+impl Hold {
+    const ALL: [Hold; 7] = [Hold::Draft, Hold::Typing, Hold::Composition, Hold::Approval, Hold::Closed, Hold::PasteMode, Hold::Identity];
+    pub fn word(self) -> &'static str {
+        match self {
+            Hold::Draft => "draft", Hold::Typing => "typing", Hold::Composition => "composition", Hold::Approval => "approval",
+            Hold::Closed => "closed", Hold::PasteMode => "paste_mode", Hold::Identity => "identity",
+        }
+    }
+    pub fn reason(self) -> &'static str {
+        match self {
+            Hold::Draft => "waiting:draft — receiver input box has text; delivered once it is empty",
+            Hold::Typing => "waiting:typing — receiver typed within the last seconds",
+            Hold::Composition => "waiting:composition — receiver is composing with an IME",
+            Hold::Approval => "waiting:approval — approval or question on the receiver screen",
+            Hold::Closed => "waiting:closed — receiver input is closed",
+            Hold::PasteMode => "waiting:paste_mode — receiver screen does not accept a paste now",
+            Hold::Identity => "waiting:identity — identity proof went stale; retrying",
+        }
+    }
+    /// 영수증 사유 → 까닭. 옛 판이 쓴 뭉친 문장은 `None`.
+    pub fn from_reason(reason: &str) -> Option<Self> {
+        let word = reason.strip_prefix("waiting:")?.split(' ').next()?;
+        Self::ALL.into_iter().find(|hold| hold.word() == word)
+    }
+    /// 사람에게 하는 말 — 무엇이 막았나.
+    pub fn cause(self) -> &'static str {
+        match self {
+            Hold::Draft => "받는 창 입력칸에 쓰던 글이 있어요",
+            Hold::Typing => "받는 창에서 방금 키를 쳤어요",
+            Hold::Composition => "받는 창에서 글자를 조합하는 중이에요",
+            Hold::Approval => "받는 창이 승인·질문 화면이에요",
+            Hold::Closed => "받는 창 입력이 닫혀 있어요",
+            Hold::PasteMode => "받는 창 화면이 지금 붙여넣기를 안 받아요",
+            Hold::Identity => "받는 창 확인이 늦어 다시 보는 중이에요",
+        }
+    }
+    /// 사람에게 하는 말 — 언제 들어가나.
+    pub fn remedy(self) -> &'static str {
+        match self {
+            Hold::Draft => "입력칸을 비우면 들어가요",
+            Hold::Composition => "글자 조합이 끝나면 들어가요",
+            Hold::Approval => "승인·질문에 답하면 들어가요",
+            Hold::Typing | Hold::Identity => "곧 들어가요",
+            Hold::Closed | Hold::PasteMode => "지금은 못 넣어요",
+        }
+    }
+}
+
+/// epoch ms → 이 기기 시각 `HH:MM`. 쪽지를 버릴 시각을 사람 말로 할 때 쓴다.
+pub fn clock_hm(ms: u64) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let time = (ms / 1000).min(libc::time_t::MAX as u64) as libc::time_t;
+        let mut local: libc::tm = unsafe { std::mem::zeroed() };
+        if !unsafe { libc::localtime_r(&time, &mut local) }.is_null() {
+            return Some(format!("{:02}:{:02}", local.tm_hour, local.tm_min));
+        }
+    }
+    let _ = ms;
+    None
+}
+
+/// 옛 CLI 가 모르는 옵션을 본문 머리로 흘려보낸 흔적(`--title 제목 --stdin` 이 본문이 되고 진짜 본문은
+/// 사라진 2026-10-01 실측). 받는 쪽에서 거절해야 보낸 쪽이 틀린 글이 갔다는 것을 그 자리에서 안다.
+pub fn leaked_cli_flag(body: &str) -> Option<&'static str> {
+    let mut text = body.trim_start();
+    if let Some(rest) = text.strip_prefix('⟦').and_then(|rest| rest.split_once('⟧')) {
+        text = rest.1.trim_start();
+    }
+    ["--title", "--stdin", "--id", "--address", "--force"].into_iter()
+        .find(|flag| text.strip_prefix(flag).is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)))
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Address {
@@ -274,6 +358,19 @@ mod tests {
         assert_eq!(record.title, "세션 이름 바꾸기");
         let plain = ledger.accept(&new_message_id(),address(),"plain".into(),900).unwrap();
         assert!(plain.title.is_empty() && !serde_json::to_string(&plain).unwrap().contains("\"title\""), "제목 없는 옛 꼴 그대로");
+    }
+    #[test] fn hold_reasons_round_trip_and_old_sentences_stay_unknown() {
+        for hold in Hold::ALL { assert_eq!(Hold::from_reason(hold.reason()), Some(hold)); }
+        assert_eq!(Hold::from_reason("no bytes written; waiting for fresh identity and an empty input"), None);
+        assert_eq!(Hold::from_reason("waiting:nonsense — x"), None);
+    }
+    #[test] fn a_flag_an_old_cli_leaked_into_the_body_is_caught() {
+        assert_eq!(leaked_cli_flag("⟦세이아⟧ --title 카사텀 보드 버튼·창 걷기 --stdin"), Some("--title"));
+        assert_eq!(leaked_cli_flag("--stdin"), Some("--stdin"));
+        assert_eq!(leaked_cli_flag("  --id kt1.1.0123456789abcdef hello"), Some("--id"));
+        for fine in ["옵션 --title 은 본문 앞에", "--titles are fine", "⟦유우카⟧ 새 일", "-- 표시"] {
+            assert_eq!(leaked_cli_flag(fine), None, "{fine}");
+        }
     }
     #[test] fn duplicate_id_does_not_reinject_or_retarget() {
         let mut ledger = ledger();

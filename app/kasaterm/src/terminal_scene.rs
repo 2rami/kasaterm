@@ -2275,6 +2275,13 @@ impl App {
             style_prompt_box(&mut composed, accent);
             // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
         }
+        if let Some((count, hold)) = self.tell_waiting.get(&tab_pid).filter(|_| !(agents_view || resume_picker || ask_picker)) {
+            overlay_tell_waiting_label(
+                &mut composed,
+                &crate::tell_delivery::waiting_label(*count, *hold),
+                prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
+            );
+        }
         // codex 자리의 세션 이름 배지. claude 는 CLI 가 /rename 뒤 스스로 위보더
         // 우측에 그리고(그 전에는 위의 claude 배지가 채운다) codex 는 안 그려서,
         // 화면만 보고는 무슨 일을 하는 자리인지 알 수가 없었다(2026-09-05 지적).

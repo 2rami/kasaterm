@@ -283,6 +283,33 @@ pub(crate) fn overlay_claude_session_label(
     paint_label(rows, top, start + 1, end - 1, &shown, accent);
 }
 
+/// 줄 서 있는 쪽지 알림 — 입력박스 **아래** 테두리에 ` 쪽지 2 대기 · 입력칸을 비우면 들어가요 ` 를 심는다.
+/// 위테두리는 세션 이름·ultracode 자리라 비운다. 입력칸 바로 밑이라 타이핑하던 사람 눈에 걸린다 — 제 초안이
+/// 쪽지를 막는 줄 몰라 15분 뒤 조용히 버려지던 자리다(2026-10-01). `texts` 는 긴 것부터, 들어가는 첫 것을
+/// 쓴다 — 좁은 칸에서 끝을 잘라 「비우면 …」 만 남으면 할 일이 안 읽힌다. 앞 대시 열 칸·뒤 대시 한 칸은 남겨
+/// `prompt_box` 가 그 줄을 계속 테두리로 본다.
+pub(crate) fn overlay_tell_waiting_label(rows: &mut [Vec<GridCell>], texts: &[String], accent: [u8; 4]) {
+    use unicode_width::UnicodeWidthStr;
+    let Some(PromptBox::Bordered { bottom, .. }) = prompt_box(rows) else {
+        return;
+    };
+    const AT: usize = 10;
+    let Some(last_dash) = rows[bottom].iter().rposition(|c| c.ch == '─') else {
+        return;
+    };
+    let room = last_dash.saturating_sub(AT + 2);
+    let Some(text) = texts.iter().find(|text| text.width() <= room) else {
+        return;
+    };
+    let end = AT + text.width() + 2;
+    if rows[bottom][..end].iter().any(|c| c.ch != '─') {
+        return;
+    }
+    rows[bottom][AT].ch = ' ';
+    rows[bottom][end - 1].ch = ' ';
+    paint_label(rows, bottom, AT + 1, end - 1, text, accent);
+}
+
 /// 이름을 배지 폭에 맞춘다 — 넘치면 `…` 으로 끊는다. 한글은 두 칸이라 글자 수로
 /// 세면 배지가 자리를 넘어 입력창까지 민다. `(보일 글자, 차지하는 칸 수)`.
 fn fit_label(name: &str, budget: usize) -> (String, usize) {
@@ -7598,6 +7625,32 @@ mod prompt_box_tests {
         overlay_claude_session_label(&mut rows, "카사크롬 탭 그룹", [200, 120, 255, 255]);
         let top = top_of(&rows);
         assert!(top.ends_with(" 카사크롬 탭 그룹 ─"), "{top:?}");
+    }
+
+    /// 줄 선 쪽지는 입력박스 아래 테두리에 뜬다. 좁으면 짧은 문구로, 그마저 안 들어가면 안 그린다.
+    #[test]
+    fn waiting_tell_label_sits_on_the_bottom_border_and_keeps_the_box() {
+        let bordered = |s: &str, w: usize| {
+            let mut r = row_from(s);
+            r.resize(w, GridCell::blank());
+            r
+        };
+        let texts = ["쪽지 1 대기 · 입력칸을 비우면 들어가요".to_string(), "쪽지 대기 · 입력칸 비우기".to_string()];
+        let bottom_of = |w: usize| {
+            let dashes = "─".repeat(w - 1);
+            let mut rows = vec![row_from("• 끝"), bordered(&dashes, w), bordered("❯ 쓰던 글", w), bordered(&dashes, w)];
+            overlay_tell_waiting_label(&mut rows, &texts, [200, 120, 255, 255]);
+            assert!(matches!(prompt_box(&rows), Some(PromptBox::Bordered { top: 1, bottom: 3, .. })), "{w}열: 테두리로 남아야 한다");
+            let top: String = rows[1].iter().map(|c| c.ch).filter(|c| *c != ' ').collect();
+            assert_eq!(top, dashes, "위테두리(세션 이름 자리)는 안 건드린다");
+            rows[3].iter().map(|c| c.ch).filter(|c| *c != '\0').collect::<String>()
+        };
+        let wide = bottom_of(80);
+        assert!(wide.starts_with(&format!("{} 쪽지 1 대기 · 입력칸을 비우면 들어가요 ─", "─".repeat(10))), "{wide:?}");
+        let narrow = bottom_of(46);
+        assert!(narrow.contains(" 쪽지 대기 · 입력칸 비우기 ─"), "좁은 칸은 짧은 문구: {narrow:?}");
+        let tiny = bottom_of(30);
+        assert_eq!(tiny, format!("{} ", "─".repeat(29)), "안 들어가면 아예 안 그린다");
     }
 
     #[test]

@@ -1093,6 +1093,11 @@ pub trait Backend: Send + Sync {
     fn turn(&self, _surface_id: &str, _phase: &str, _permission_mode: &str) -> Result<()> {
         anyhow::bail!("turn unsupported by this backend")
     }
+    /// tell 이 「지금 일」과 함께 들어간 pane 의 그 제목을 한 번 내준다. 턴 시작 훅이 claude 의 공식
+    /// 창구(UserPromptSubmit 의 `sessionTitle`)로 세션 이름을 맞추는 데 쓴다. Default none.
+    fn take_session_title(&self, _surface_id: &str) -> Option<String> {
+        None
+    }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just
     /// report one.

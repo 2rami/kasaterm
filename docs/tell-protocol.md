@@ -2,18 +2,25 @@
 
 `collab.tell` / `POST /collab/tell` accepts
 `{message_id:"kt1.<unix-ms>.<unique-hex-nonce>", address:{machine_id,surface_key,surface_id,session_id,instance_id}, body,
-policy:"queue"|"reject", ttl_seconds:900, title?}`. Optional `title` (one line, at most 60 characters) is the
+policy:"queue"|"reject", ttl_seconds:3600, title?, notify?}`. Optional `title` (one line, at most 60 characters) is the
 receiver's current work: once the message is `submitted`, the receiving machine renames that pane to it (pinned,
-so the sidebar, pane header and board `title` all follow). It is not part of the message identity. CLI:
+so the sidebar, pane header and board `title` all follow) and hands it to that pane's next turn-start hook, which
+returns it as the UserPromptSubmit `sessionTitle` — Claude's own session name (`/resume`, agents list, the rename
+slot on the input box) follows without typing `/rename` into the input. It is not part of the message identity. CLI:
 `tell … --title "지금 일"`; `summon` sends `--name` or the brief's `목적:` line as the title. Local CLI `%N` is resolved once to
 the current local address. Automated callers should supply the complete address
 from the collaboration board. The receiver validates every identity component;
 missing session or instance evidence never authorizes injection. Remote requests
 use a known machine route, the existing HTTP authentication/origin guard, and the
 same complete address. No Claude registry, peer socket, or attach is involved.
-CLI accepts `tell [--id ID] --address '<JSON>' --stdin` and retains local `%N`. It also
+CLI accepts `tell [--id ID] --address '<JSON>' --stdin` and retains local `%N`. Options go between the target and
+the body; an unknown `--option` there, or a known one after the body, is an error — an older CLI that did not know
+`--title` sent `--title … --stdin` as the body and dropped the real one (2026-10-01). A body that begins with `--`
+goes after `--`. Receivers reject a body that starts with `--title`, `--stdin`, `--id`, `--address` or `--force`
+(after an optional `⟦sender⟧` marker), so a CLI too old to know an option fails loudly instead of delivering it. It also
 accepts a name (`tell 이름 …`, `tell 이름@기계 …`, `tell %N@기계 …`): the CLI resolves it
-against `board --all` and refuses ambiguous matches by listing the candidates. It records
+against `board --all` (machine labels compare with any whitespace equal — macOS names use U+00A0) and refuses
+ambiguous matches by listing the candidates. It records
 each sent ID's address locally so `tell-status ID` works without `--address`.
 It prints the ID before dispatch so a disconnected caller can inspect/retry that
 same ID. An old server produces an unsupported-method error; there is no fallback.
@@ -55,6 +62,34 @@ Working/thinking/building alone does not defer a message. Approval/question
 screens defer it until the selection UI is gone. An existing draft or IME
 composition is preserved; an independent message cannot be submitted through
 that occupied input without changing the user's text, so it remains queued.
+The screen decides whether the input is empty. A keystroke that is not a separate
+Enter marks a draft that is trusted for 5 seconds only (the echo or an image
+attachment lands well inside that); after that the screen is authoritative. Mouse
+reports never mark a draft. Before this, the mark cleared only on Enter, so one Esc,
+Ctrl+C, arrow or click held every later message until the 15-minute expiry while
+the input box was visibly empty — 21 of 61 messages on one machine in a day.
+
+Each deferral writes a specific reason, `waiting:<word> — …`, with `<word>` one of
+`draft` (input box has text), `typing` (keystroke in the last 5 s), `composition`,
+`approval`, `closed`, `paste_mode` or `identity`. The CLI prints it in Korean with
+the expiry time. The receiving pane shows `쪽지 N 대기 · <how to release>` on the
+bottom border of its input box while any of its messages has been deferred.
+
+Queue TTL defaults to 3600 s, the maximum. On 2026-10-01 a day of receipts had
+21 of 61 messages expire at the old 900 s; the cause was the Enter-only draft mark
+above, and the late deliveries were released at the moment someone pressed Enter.
+What remains is a person's real draft or an approval screen, which lasts as long
+as that person is away, and 9 of the 21 were completion reports whose meaning does
+not age. Waiting is no longer silent, so the longer queue does not hide anything.
+
+`notify:{surface,label}` is accepted only on the local socket (the CLI adds the
+sender's `$KASATERM_PANE_ID`; never with `--api`). The sending app removes it before
+routing and watches the receipt every 20 s: after 2 minutes still queued it tells
+the sender pane once, `[쪽지 대기] …` with the reason and the time the message will
+be dropped; on `failed` it sends `[쪽지 못 감] …`, on `uncertain`
+`[쪽지 확인 못 함] …` (same ID only), and on `submitted` it stops silently. Notices
+are ordinary local tells without `notify`, so they never chain. Old receivers
+without reason words still get the notices, with a generic cause.
 A guarded
 input revision detects intervening writes between paste and Enter. Input is never
 cleared; `--force` cannot bypass the checks. A delayed Enter also rechecks the
