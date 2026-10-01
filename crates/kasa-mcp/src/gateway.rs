@@ -1294,9 +1294,13 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
     uplinks.sort_by_key(|up| up.conn);
     let candidates = candidates_of(&uplinks);
     let requested_machine = machine_route(&rest).map(|(machine, _)| machine);
-    let route = pick_route(&candidates, requested_machine);
-    // 이름 route 의 Fallback 은 계정 허브의 로컬 프록시로 간다 — 허브는 자기 명부 기계만 찾으니 남의 계정
-    // 기계에는 안 닿는다. 남의 계정 기계는 `~id` 라 위에서 이미 Missing 이다.
+    let mut route = pick_route(&candidates, requested_machine);
+    // 계정에 로그인하지 않은 기계도 허브 명부(ssh·announce)에 있으면 `/machines` 에 `~id`·이름 route 로 실려
+    // 폰 목록에 뜬다. 그 요청은 계정 허브의 로컬 프록시로 넘긴다 — 허브는 자기 명부에서만 찾으니(없으면 404)
+    // 남의 계정 기계에는 닿지 않는다.
+    if access.is_some() && !needs_nacho && requested_machine.is_some() && route == RoutePick::Missing {
+        route = pick_route(&candidates, None);
+    }
     if access.is_some() && (route == RoutePick::Missing
         || needs_nacho && requested_machine.is_some() && matches!(route, RoutePick::Fallback(_))) {
         return json_err(StatusCode::SERVICE_UNAVAILABLE,
@@ -1997,9 +2001,9 @@ mod tests {
         assert_eq!(reqwest::get(format!("http://{addr}/relay/account/term/me?token=not-a-credential"))
             .await.unwrap().status().as_u16(), 401);
         assert_eq!(get_json(addr, "/relay/account/term/me", token).await.1["account_view"], true);
-        let count = fake.opens.lock().unwrap().len();
-        assert_eq!(get_json(addr, "/relay/account/m/~another-account-machine/term/me", token).await.0, 503);
-        assert_eq!(fake.opens.lock().unwrap().len(), count);
+        // 계정 업링크에 없는 기계는 허브가 자기 명부로 판정한다 — 접두를 벗기지 않고 그대로 넘긴다.
+        assert_eq!(get_json(addr, "/relay/account/m/~another-account-machine/term/me", token).await.0, 200);
+        assert_eq!(fake.opens.lock().unwrap().last().unwrap().1["path"], "/m/~another-account-machine/term/me");
         {
             let opens = fake.opens.lock().unwrap();
             assert_eq!(opens[0].1["slug"], SLUG);
@@ -2018,10 +2022,10 @@ mod tests {
         assert_eq!(get_json(addr, "/relay/account/term/me", token).await.0, 401);
     }
 
-    /// 계정에 안 붙은 기계(허브 명부의 ssh 기계)는 `/machines` 에 이름 route 로 실려 폰 목록에 뜬다.
+    /// 계정에 안 붙은 기계(허브 명부의 ssh 기계)도 `/machines` 에 `~id`·이름 route 로 실려 폰 목록에 뜬다.
     /// 그 화면 소켓을 503 으로 막으면 폰은 「다시 연결 중…」만 돈다 — 허브의 로컬 프록시로 넘긴다.
     #[tokio::test]
-    async fn account_phone_reaches_hub_roster_machine_by_name() {
+    async fn account_phone_reaches_hub_roster_machine() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let dir = std::env::temp_dir().join(format!("kasa-account-roster-{}", uuid::Uuid::new_v4()));
         let addr = spawn_relay(account_gate(&dir)).await;
@@ -2041,21 +2045,18 @@ mod tests {
                 let _ = out.send(encode(WS_TEXT, id, b"ready"));
             }
         }).await;
-        let mut request = format!("ws://{addr}/relay/account/m/%EB%A7%A5%EB%AF%B8%EB%8B%88/term/ws?pane=%253&grid=1")
-            .into_client_request().unwrap();
-        request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL,
-            format!("kasa-relay-account, kasa-auth.{token}").parse().unwrap());
-        let (mut ws, _) = tokio_tungstenite::connect_async(request).await.expect("roster machine socket refused");
-        assert_eq!(ws.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
-        {
+        for route in ["~4af3d95d64374ea3bdf951942caf19b2", "%EB%A7%A5%EB%AF%B8%EB%8B%88"] {
+            let path = format!("/m/{route}/term/ws?pane=%253&grid=1");
+            let mut request = format!("ws://{addr}/relay/account{path}").into_client_request().unwrap();
+            request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL,
+                format!("kasa-relay-account, kasa-auth.{token}").parse().unwrap());
+            let (mut ws, _) = tokio_tungstenite::connect_async(request).await.expect("roster machine socket refused");
+            assert_eq!(ws.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
             let opens = fake.opens.lock().unwrap();
             let (_, open) = opens.last().unwrap();
             assert_eq!(open["slug"], SLUG);
-            assert_eq!(open["path"], "/m/%EB%A7%A5%EB%AF%B8%EB%8B%88/term/ws?pane=%253&grid=1");
+            assert_eq!(open["path"], path);
         }
-        let count = fake.opens.lock().unwrap().len();
-        assert_eq!(get_json(addr, "/relay/account/m/~another-account-machine/term/me", token).await.0, 503);
-        assert_eq!(fake.opens.lock().unwrap().len(), count);
     }
 
     #[tokio::test]
