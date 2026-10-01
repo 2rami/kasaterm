@@ -100,6 +100,7 @@ mod restore_progress;
 mod mirror_close;
 mod close_grace;
 mod mirror_sync;
+mod own_room;
 mod mirror_layout;
 mod mirror_diff;
 mod mcpcol;

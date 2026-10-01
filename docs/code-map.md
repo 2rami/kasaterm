@@ -37,6 +37,7 @@
 - `nacho_tasks.rs` — 나쵸 작업 장부의 타입 클라이언트(`/api/app/tasks`). 같은 id 는 큰 `rev` 하나, 끊기면 마지막 목록 유지, `done` 과 검증 통과를 가른다
 - `mirror_follow.rs` — 원본 격자는 마지막으로 만진 쪽을 따른다(tmux `window-size latest`). 사람 손(키·IME·왼클릭·SGR 누름·확대)이 닿은 칸을 판정해, 거울이면 `remote::touch_source` 로 원본을 그 칸 크기로 잡고 원본이면 `reclaim_viewer_sizes` 로 되찾는다. 만지기 전 거울은 `mirror_view` 가 뷰어 쪽에서 다시 접는다. 호스트가 `viewport_latest` 를 모르면(옛 판) 확대 때만 키우는 옛 규칙(`layout.rs fit_zoomed_mirror`)
 - `trust_prompt.rs` — claude 폴더 신뢰 화면 자동 통과. 화면 펌프(`pump_pty_screens`)가 후보 pane 을 적고 GUI 틱이 판정한다: claude pane·입력 조용·한글 조합 아님일 때만, 초점이 No 면 아래 화살표 한 번, Yes 면 Enter 한 번(같은 화면에 반복 없음). 신뢰 선탑재는 `kasa_socket::claude_trust`(claude shim 이 `kasaterm-cli claude-trust "$PWD"` 로 부름)
+- `own_room.rs` — 이 기기 방 지키기: 현지에 세울 칸(셸·학생·연결 칸)의 기준이 다른 기기 방의 보기 창이면 이 기기 방으로 옮기고(`own_spawn_host` — 섞이면 그 방이 통째로 「이 기기」 절로 넘어가 저쪽 학생이 이쪽 학생처럼 보인다), 자기 칸이 0 이 되면(닫기·이사·미러만 복원) 이 기기 셸 방을 하나 세운다(`keep_own_room`, 1초 틱)
 - `agent_transitions.rs` — 상태 전이 → 알림 이벤트(TurnDone/Waiting/Error/…) 순수 함수. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].

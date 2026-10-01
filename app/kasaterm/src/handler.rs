@@ -7617,6 +7617,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_machines_col();
         self.refresh_mirror_theme();
         self.poll_mirror_sync();
+        self.keep_own_room();
         self.publish_layout_feed();
         self.poll_layout_watch();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더

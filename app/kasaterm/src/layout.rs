@@ -916,7 +916,7 @@ impl App {
             let out = self.spawn_new_tab(&outer, false);
             self.pending_spawn_cwd = None;
             return match out {
-                Ok(surface) => SpawnShellReply { window: self.window_of_pane(&outer), surface, error: None },
+                Ok(surface) => SpawnShellReply { window: self.window_of_pane(&surface), surface, error: None },
                 Err(e) => {
                     eprintln!("[spawn_shell] tab failed: {e:#}");
                     failed(format!("{e:#}"))
@@ -956,7 +956,7 @@ impl App {
             };
         }
         let surface = self.spawn_shell_pane(at.cwd.as_deref());
-        SpawnShellReply { surface, window: Some(self.active_window), error: None }
+        SpawnShellReply { window: self.window_of_pane(&surface), surface, error: None }
     }
     /// pane 여러 개를 **한 번에** 배치한다 — 방 전체가 크기가 같은 벤토 격자로 다시 짜이고
     /// 학생들은 부른 pane 옆에 붙는다(`rebento_window`). 다른 기기 방의 보기 창만 옛 모양
@@ -996,6 +996,7 @@ impl App {
         };
         // 탭을 지목받았으면 그 탭이 든 pane — 탭은 BSP leaf 가 아니라 트리에서 못 찾는다.
         let host = self.ws.lock().unwrap().outer_for_pty(&host).unwrap_or(host);
+        let host = if self.spawns_own_pane() { self.own_spawn_host(&host) } else { host };
         self.ensure_user_mutation_target(
             &host,
             crate::settings_room::SettingsMutation::Split,
@@ -1132,6 +1133,7 @@ impl App {
     /// `host` 옆에 정한 축·쪽으로 셸 하나. 포커스는 옮기지 않는다 — 쪼갠 사람은 저쪽에 있다.
     fn split_beside(&mut self, host: &str, dir: kasa_pty::SplitDir, before: bool) -> Result<String> {
         let host = self.ws.lock().unwrap().outer_for_pty(host).unwrap_or_else(|| host.to_string());
+        let host = if self.spawns_own_pane() { self.own_spawn_host(&host) } else { host };
         let Some(owner) = self.window_of_pane(&host) else {
             anyhow::bail!("배치할 pane {host} 이 어느 window 트리에도 없다");
         };
@@ -1474,6 +1476,7 @@ impl App {
             .unwrap()
             .outer_for_pty(&active)
             .unwrap_or(active);
+        let active = if self.spawns_own_pane() { self.own_spawn_host(&active) } else { active };
         // **그 pane 을 가진 트리**에 꽂는다 — 활성 window 트리가 아니라.
         // 예전엔 `pty_layout` 만 봐서, 사용자가 다른 방을 보고 있으면 pane 이 자기
         // 자리를 쪼개려다 통째로 실패했다("pane %5 이 활성 window(1) 트리에 없다").
@@ -1631,6 +1634,8 @@ impl App {
             outer,
             crate::settings_room::SettingsMutation::Tab,
         )?;
+        let own_host = self.spawns_own_pane().then(|| self.own_spawn_host(outer));
+        let outer = own_host.as_deref().unwrap_or(outer);
         // Outer pane must already exist in the layout (it's the user's focused
         // pane). Use its size for the initial pty so the shell starts at the
         // right cols/rows — `resize_backend` after re-applies it anyway, but a

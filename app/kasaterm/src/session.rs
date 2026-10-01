@@ -892,6 +892,8 @@ impl App {
             &anchor,
             crate::settings_room::SettingsMutation::RemotePane,
         )?;
+        // 연결 칸은 거울이 아니라 이쪽이 쥔 칸이다 — 보기 창에 섞이면 그 방이 이 기기 방이 된다.
+        let anchor = self.own_spawn_host(&anchor);
         let owner = self.window_of_pane(&anchor);
         if owner.is_none() {
             anyhow::bail!("기준 pane {anchor} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
@@ -951,6 +953,9 @@ impl App {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+        } else {
+            self.publish_pty_layout();
+            self.chrome_dirty = true;
         }
         Ok(new_id)
     }
