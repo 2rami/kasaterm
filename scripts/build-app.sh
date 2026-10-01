@@ -437,8 +437,7 @@ PLIST
 # 애플 발급 인증서가 키체인에 있으면 그것부터 쓴다 — 자체 서명 번들은 알림센터 등록이
 # 「Notifications are not allowed」로 거절된다(2026-08-21 조사: 남은 변수는 TeamIdentifier
 # 하나). 개발자 계정을 결제하면 Xcode 가 「Apple Development」를 넣어 두고, 배포용
-# 「Developer ID Application」이 있으면 그게 먼저다. 어느 쪽이든 번들에 표식을 남겨
-# 앱이 부팅 때 알림센터를 켠다(chrome.rs `os_notify_enabled`). KASATERM_SIGN_ID 로
+# 「Developer ID Application」이 있으면 그게 먼저다. KASATERM_SIGN_ID 로
 # 명시하면 그대로 이긴다. 인증서를 바꾸면 화면 녹화 같은 권한을 한 번 다시 묻는다.
 SIGN_ID="${KASATERM_SIGN_ID:-}"
 APPLE_SIGN=""
@@ -562,12 +561,6 @@ sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-serve-web"
 # 펫은 Resources 안의 Mach-O 라 app 서명이 봉인만 하고 서명은 안 한다(링커 ad-hoc 그대로) — 공증은 그것도 거절한다.
 [[ "$HARDENED" == "1" ]] && sign_part "$APP/Contents/Resources/kasapet"
-# 애플 인증서 표식 — 서명 봉인 안에 들어가야 하므로 app 서명 직전에 쓴다.
-if [[ -n "$APPLE_SIGN" ]]; then
-  printf '%s\n' "$APPLE_SIGN" > "$APP/Contents/Resources/apple-signed"
-else
-  rm -f "$APP/Contents/Resources/apple-signed"
-fi
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 [[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")

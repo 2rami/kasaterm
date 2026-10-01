@@ -4131,18 +4131,6 @@ fn notify_dedup_passes(key: &str) -> bool {
     true
 }
 
-/// Raise a macOS desktop notification. Inside the signed `.app` bundle we use
-/// `UNUserNotificationCenter` so the alert carries kasaterm's own app icon (and
-/// gets the native sound/click affordances). The bare `cargo run` binary has no
-/// bundle identifier and can't obtain notification authorization, so there we
-/// fall back to `osascript` — which shows the Script Editor icon (dev-only).
-///
-/// `dedup` 을 주면 그 열쇠로 8초 게이트를 탄다(같은 일에 두 경로가 쏘는 경우).
-///
-/// 플랫폼 분기는 **안쪽**에 둔다 — 게이트를 바깥에 한 벌로 두려면 함수가 하나여야
-/// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
-/// `route` 는 배너를 눌렀을 때 갈 자리 — `(pane id, 그때의 claude 세션 id)`. 세션까지
-/// 싣는 이유는 surface id 가 재사용되기 때문이다(`macos_notify` 참조).
 /// 배너를 만들 `ActiveEventLoop` 가 없는 자리에서 줄을 서는 곳.
 ///
 /// `notify_desktop` 은 자유 함수라 `App` 에 직접 못 닿는다. 그렇다고 호출부마다
@@ -4156,37 +4144,41 @@ pub(crate) fn banner_inbox() -> &'static std::sync::Mutex<Vec<crate::notify_bann
     Q.get_or_init(Default::default)
 }
 
-/// OS 알림(macOS 알림 센터)을 함께 쏠지 — **기본은 끔**이다.
-///
-/// 자체 서명 번들이라 `UNUserNotificationCenter` 등록이 거절되고
-/// (`Notifications are not allowed for this application`), 그래서 osascript 로
-/// 떨어지면 배너에 **스크립트 편집기 아이콘**이 붙는다. 우리 코드가 원인이
-/// 아니라는 것까지 배제 실측으로 확인했다(`98b6502`: 53KB 최소 ObjC 앱도 같은
-/// 오류). 사용자 2026-08-21 「그럼 기본 알림은 꺼줘」 — 자체 배너가 같은 자리에서
-/// 뜨므로 OS 알림은 중복이고, 게다가 남의 아이콘을 달고 뜬다.
-///
-/// **지우지 않고 끈 이유**: 지금 못 고치는 것이지 영영 아닌 게 아니다. 애플
-/// 개발자 인증서가 생기면 아이콘·알림센터 누적·클릭 라우팅이 전부 제대로 서고,
-/// 그때는 되살리는 것이 맞다. `KASATERM_OS_NOTIFY=1` 로 그 자리에서 켠다.
-///
-/// **끄면서 잃는 것**: 알림센터에 안 쌓이고 방해금지 연동이 없다. 그 자리는
-/// 이미 다른 것들이 메운다 — `unread_panes`(못 본 완료)·Dock 배지·사이드바
-/// 숨쉬기, 그리고 자체 배너. 넷 다 `handle_notify` 한 자리에서 함께 선다.
-fn os_notify_enabled() -> bool {
-    if std::env::var("KASATERM_OS_NOTIFY").is_ok_and(|v| v == "1" || v == "true") {
-        return true;
-    }
-    // 굽기가 애플 발급 인증서로 서명했으면 번들에 표식을 남긴다(build-app.sh). 알림센터
-    // 등록이 통과하는 조건이 그것뿐이라(2026-08-21 조사), 표식이 곧 「켜도 된다」다.
-    static MARK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MARK.get_or_init(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent()?.parent().map(|c| c.join("Resources/apple-signed")))
-            .is_some_and(|p| p.is_file())
-    })
+/// 알림 한 건이 나갈 길.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotifyPath {
+    /// 알림센터(`UNUserNotificationCenter`) — 앱 아이콘·학생 얼굴·눌러서 그 pane 으로.
+    Native,
+    /// `osascript` — 스크립트 편집기 명의지만 알림센터에 남는다.
+    Osascript,
+    /// 앱이 직접 그리는 배너 창(`notify_banner`).
+    Banner,
 }
 
+/// 번들로 도는 macOS 는 **OS 알림만** 낸다 — 사용자 2026-10-01 「앱 자체 알림 배너
+/// 제거하지 않았나? 계속 뜨네」「os 알림으로 대체하지 않았나」. 전에는 알림센터 허락이
+/// 없으면 자체 배너를 띄우고 osascript 도 함께 쏴 같은 알림이 두 번 떴다. 이 맥북은
+/// 애플 서명 표식이 있는데도 macOS 가 등록을 거절해 허락이 늘 없으므로 사실상 매번
+/// 그랬다. 허락이 있으면 알림센터, 없으면(거절·아직 답 없음) osascript 다.
+///
+/// 배너가 남는 것은 OS 알림을 낼 수 없는 실행뿐이다 — 번들 없는 맨 바이너리(검증
+/// 리그·`cargo run`)는 알림센터 등록 자체가 안 되고, Windows 는 이 경로가 없다.
+fn notify_path(macos_bundle: bool, authorized: bool) -> NotifyPath {
+    match (macos_bundle, authorized) {
+        (false, _) => NotifyPath::Banner,
+        (true, true) => NotifyPath::Native,
+        (true, false) => NotifyPath::Osascript,
+    }
+}
+
+/// 데스크톱 알림을 낸다 — 완료·승인 대기·오류·계정 한도가 전부 이 한 자리를 지난다.
+///
+/// `dedup` 을 주면 그 열쇠로 8초 게이트를 탄다(같은 일에 두 경로가 쏘는 경우).
+///
+/// 플랫폼 분기는 **안쪽**에 둔다 — 게이트를 바깥에 한 벌로 두려면 함수가 하나여야
+/// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
+/// `route` 는 눌렀을 때 갈 자리 — `(pane id, 그때의 claude 세션 id)`. 세션까지
+/// 싣는 이유는 surface id 가 재사용되기 때문이다(`macos_notify` 참조).
 pub(crate) fn notify_desktop(
     title: &str,
     body: &str,
@@ -4198,47 +4190,26 @@ pub(crate) fn notify_desktop(
     if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) {
         return;
     }
-    // 알림센터가 켜져 있고 허락까지 받았으면 그쪽이 정본이다 — 같은 알림이 자체
-    // 배너와 시스템 배너로 두 번 뜨지 않게 자체 배너는 쉰다. 아직 안 물었거나(첫
-    // 알림) 거절됐으면 자체 배너가 든다. 여기가 모든 알림이 지나는 한 자리라, 이
-    // 판정 하나로 완료·승인 대기·계정 한도가 전부 같은 모양으로 뜬다.
     #[cfg(target_os = "macos")]
-    let auth = NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed);
+    let path = notify_path(
+        is_bundled(),
+        NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 1,
+    );
     #[cfg(not(target_os = "macos"))]
-    let auth = 2u8;
-    let native = os_notify_enabled() && auth == 1;
-    if !native {
-        banner_inbox().lock().unwrap().push((
+    let path = notify_path(false, false);
+    match path {
+        NotifyPath::Banner => banner_inbox().lock().unwrap().push((
             title.to_string(),
             body.to_string(),
             character.map(str::to_string),
             route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
-        ));
-    }
-    // 애플 서명이 없는 굽기(자체 인증서 `kasaterm-dev`, 2026-09-14 부터 기본)는
-    // 알림센터 등록이 거절되어 자체 배너만 남았다 — 앱을 보고 있으면 배너가 뜨지만
-    // 다른 앱에 가 있으면 아무것도 안 온다(사용자 「사용 중이어도 알림센터로 오게」).
-    // osascript 는 스크립트 편집기 명의라 서명과 무관하게 알림센터에 남는다 —
-    // 아이콘은 그쪽 것이지만 「안 오는 것」보다 낫다. 자체 배너는 그대로 둔다:
-    // 눌러서 그 pane 으로 가는 길은 배너에만 있다.
-    #[cfg(target_os = "macos")]
-    if !native && is_bundled() && !os_notify_enabled() {
-        notify_osascript(title, body);
-    }
-    if !native {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if is_bundled() {
-            notify_native(title, body, character, route);
-        } else {
-            notify_osascript(title, body);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (title, body, character, route);
+        )),
+        #[cfg(target_os = "macos")]
+        NotifyPath::Native => notify_native(title, body, character, route),
+        #[cfg(target_os = "macos")]
+        NotifyPath::Osascript => notify_osascript(title, body),
+        #[cfg(not(target_os = "macos"))]
+        NotifyPath::Native | NotifyPath::Osascript => {}
     }
 }
 
@@ -4264,7 +4235,7 @@ fn student_profile_file(character: &str, seq: u64) -> Option<std::path::PathBuf>
 ///
 /// 전에는 `requestAuthorization` 의 콜백이 **빈 블록**이라 거부돼도 아무도 몰랐다:
 /// 요청은 그대로 native 로 나가고 시스템이 조용히 버려, 화면에는 "알림이 안 온다"
-/// 만 남았다. 답을 여기 남겨 두면 다음 알림부터 학생 얼굴 배너를 쓴다.
+/// 만 남았다. 답을 여기 남겨 두면 허락이 없는 동안은 osascript 로 나간다.
 #[cfg(target_os = "macos")]
 static NOTIFY_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -4295,7 +4266,7 @@ pub(crate) fn ensure_notification_authorization() {
                     let why = unsafe { err.as_ref() }
                         .map(|e| e.localizedDescription().to_string())
                         .unwrap_or_else(|| "사유 없음".to_string());
-                    eprintln!("[notify] 데스크톱 알림 권한 없음 — 자체 배너 사용: {why}");
+                    eprintln!("[notify] 데스크톱 알림 권한 없음 — osascript 사용: {why}");
                 }
             },
         );
@@ -4303,8 +4274,8 @@ pub(crate) fn ensure_notification_authorization() {
         let opts = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
         center.requestAuthorizationWithOptions_completionHandler(opts, &handler);
         // 요청 콜백이 **안 오는 경우가 있다.** 그러면 `NOTIFY_AUTH` 가 0(아직 모름)에
-        // 머물러 모든 알림이 자체 배너로 샌다 — 애플 인증서로 서명해 알림센터를 쓰게
-        // 해 두고도 배너만 뜨던 것이 이것이다(2026-09-15 지적). 현재 권한은 요청과
+        // 머물러 알림센터를 허락받고도 osascript 로 샌다 — 애플 인증서로 서명해 두고도
+        // 알림센터를 못 쓰던 것이 이것이다(2026-09-15 지적). 현재 권한은 요청과
         // 별개로 직접 읽을 수 있으니, 같이 물어 답이 오는 대로 채운다. 둘 중 먼저
         // 오는 쪽이 이기고, 값은 같은 뜻이라 순서가 어느 쪽이든 결과가 같다.
         refresh_notification_authorization();
@@ -4328,16 +4299,15 @@ pub(crate) fn refresh_notification_authorization() {
     let handler = block2::RcBlock::new(
         |settings: std::ptr::NonNull<objc2_user_notifications::UNNotificationSettings>| {
             let status = unsafe { settings.as_ref() }.authorizationStatus();
-            // `KASATERM_NOTIFY_DEBUG=1` — 왜 OS 알림 대신 자체 배너가 뜨는지 앱이
+            // `KASATERM_NOTIFY_DEBUG=1` — 왜 알림센터 대신 osascript 로 나가는지 앱이
             // 직접 말한다. GUI 로 띄운 앱은 stderr 가 어디에도 안 남아(2026-09-15
             // 실측: 로그 파일이 0줄) 이 자리를 밖에서 들여다볼 창구가 없었다.
             if std::env::var_os("KASATERM_NOTIFY_DEBUG").is_some() {
                 let p = std::env::temp_dir().join("kasaterm-notify.log");
                 let line = format!(
-                    "auth_status={} bundled={} os_notify_enabled={}\n",
+                    "auth_status={} bundled={}\n",
                     status.0,
-                    is_bundled(),
-                    os_notify_enabled()
+                    is_bundled()
                 );
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
@@ -4381,44 +4351,6 @@ fn notify_native(
         Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
         None => format!("kasaterm-notify-{seq}"),
     };
-    // 거부·미등록이 확정났으면 native 는 요청을 받아 놓고 버린다 — 그 자리에서
-    // osascript 로 돌린다. 자체 서명 'kasaterm-dev' 번들은 등록 요청이
-    // "Notifications are not allowed for this application" 으로 거절되므로
-    // (2026-08-17 실측) 배포 실물에서는 사실상 늘 이 길이고, 그래서 배너에
-    // 스크립트 편집기 아이콘이 붙는다. 구식 센터(NSUserNotification)로 앱
-    // 아이콘을 실어 보려 했지만 **같은 검문에 조용히 버려졌다**(배달 예외도
-    // 오류도 없이 알림 DB 에 기록이 안 남는 것을 격리 인스턴스 + 알림 DB 로
-    // 실측) — 조용한 유실은 아이콘보다 나쁘므로 걷어냈다. 앱 아이콘을 실으려면
-    // 애플 발급 인증서로 서명하거나 자체 배너 창을 그려야 한다.
-    //
-    // ★2026-08-21 재조사(같은 지적이 세 번째라 판정을 다시 쟀다). **원인이
-    // 우리 쪽에 없다는 것까지 확인했다** — 다음 다섯을 하나씩 배제했으므로
-    // 네 번째 조사는 이 목록을 지나 곧장 「서명」으로 가면 된다:
-    //   ①실행 방식 — 번들 실행파일 직접 exec 도, `open` 으로 LaunchServices 를
-    //     제대로 거친 것도 같은 오류(직접 exec 는 프로세스가 앱으로 등록되지
-    //     않아 흔히 의심되는 자리인데, 여기선 범인이 아니다)
-    //   ②번들 id 오염 — 같은 `com.kasa.kasaterm` 이 여섯 경로에 등록돼 있어
-    //     유력해 보였지만, 번들 id 만 바꾼 사본도 똑같이 거절당했다
-    //   ③서명 무결성 — `codesign --verify --deep --strict` 가 중첩
-    //     Sparkle.framework·XPC·kasaterm-cli 까지 전부 통과한다(valid on disk,
-    //     satisfies its Designated Requirement). 깨진 중첩 서명이 이 오류의
-    //     흔한 원인이라 재 봤다
-    //   ④요청 시점 — `resumed`(=applicationDidFinishLaunching)라 이미 정석이다
-    //   ⑤TCC 잔재 — 한 번도 등록된 적이 없다(`ncprefs` 91개 중 kasaterm 없음).
-    //     새 번들 id 는 기록 자체가 없는데도 같은 오류다
-    // 결정타: **53KB 짜리 순수 ObjC 최소 앱**(NSApplication + delegate +
-    // requestAuthorization 뿐, 같은 자체 서명, 새 id, `open` 실행)도 글자 그대로
-    // 같은 오류를 받는다. 남은 변수는 TeamIdentifier(애플 발급 인증서) 하나뿐이다.
-    // ⇒ 코드로 넘을 수 있는 벽이 아니다. 길은 둘: 애플 개발자 인증서로 서명하거나
-    // (알림센터 누적·클릭 라우팅·아이콘을 통째로 되찾는다), 자체 배너 창을 그린다
-    // (아이콘은 자유지만 알림센터에 안 쌓이고 방해금지 같은 OS 통합을 잃는다).
-    if NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 2 {
-        banner_inbox().lock().unwrap().push((
-            title.to_string(), body.to_string(), character.map(str::to_string),
-            route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
-        ));
-        return;
-    }
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
@@ -4444,24 +4376,25 @@ fn notify_native(
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, delivered_content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
-    // 배달이 실패하면(권한 회수·첨부 거부 등) 학생 얼굴 배너로 돌린다.
+    // 배달이 실패하면(권한 회수·첨부 거부 등) osascript 로 돌린다.
     // 실패를 삼키면 "알림이 안 온다" 만 남고 이유는 어디에도 안 남는다.
-    let fallback = (
-        title.to_string(), body.to_string(), character.map(str::to_string),
-        route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
-    );
+    let (fb_title, fb_body) = (title.to_string(), body.to_string());
     let done = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
         if let Some(e) = unsafe { err.as_ref() } {
             eprintln!(
-                "[notify] native 배달 실패 — 학생 프사 배너 사용: {}",
+                "[notify] native 배달 실패 — osascript 사용: {}",
                 e.localizedDescription()
             );
-            banner_inbox().lock().unwrap().push(fallback.clone());
+            notify_osascript(&fb_title, &fb_body);
         }
     });
     center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
 }
 
+/// 스크립트 편집기 명의로 배달된다 — 알림센터 등록이 거절된 번들에서도 알림센터에
+/// 남는 유일한 OS 알림 길이다. 아이콘·학생 얼굴·눌러서 그 pane 으로 가기는 없다.
+/// 그걸 되찾으려면 알림센터 허락이 서야 하고(사연은 `macos_notify` 아래 주석),
+/// 구식 `NSUserNotification` 은 같은 검문에 조용히 버려져 길이 아니다.
 #[cfg(target_os = "macos")]
 fn notify_osascript(title: &str, body: &str) {
     let script = format!(
@@ -5267,5 +5200,22 @@ mod pet_board_tests {
         assert_eq!(v["text"], text);
         assert_eq!(v["state"], "busy");
         assert_eq!(v["pane"], "%5");
+    }
+}
+
+#[cfg(test)]
+mod notify_path_tests {
+    use super::{notify_path, NotifyPath};
+
+    #[test]
+    fn bundled_macos_never_draws_own_banner() {
+        assert_eq!(notify_path(true, true), NotifyPath::Native);
+        assert_eq!(notify_path(true, false), NotifyPath::Osascript);
+    }
+
+    #[test]
+    fn banner_only_where_os_notify_is_unavailable() {
+        assert_eq!(notify_path(false, false), NotifyPath::Banner);
+        assert_eq!(notify_path(false, true), NotifyPath::Banner);
     }
 }
