@@ -7625,6 +7625,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.themegen_poll();
         self.native_settings_tick();
         self.safe_tell_tick();
+        self.trust_prompt_tick();
         self.native_board_tick();
         self.sidebar_pulse_tick();
         self.pump_native_onboarding();

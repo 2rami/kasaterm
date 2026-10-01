@@ -36,6 +36,7 @@ mod native_board;
 mod nacho_tasks;
 mod transfer_endpoints;
 mod tell_delivery;
+mod trust_prompt;
 mod native_onboarding;
 mod native_settings;
 mod device_icons;
@@ -8176,6 +8177,9 @@ fi\n\
 [ -n \"$SID\" ] && export CLAUDE_CODE_TASK_LIST_ID=\"$SID\"\n\
 {mblk}\
 {permissions}\
+# 폴더 신뢰 화면(「Is this a project you trust?」) 선해결 — 무인으로 띄운 학생이 거기서\n\
+# 멈춘다. codex shim 의 config.toml 신뢰와 같은 자리다. 서브커맨드·-p 엔 그 화면이 없다.\n\
+[ -n \"$PERSONA_OK\" ] && kasaterm-cli claude-trust \"$PWD\" >/dev/null 2>&1\n\
 if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\

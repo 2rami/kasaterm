@@ -413,10 +413,15 @@ impl App {
                         crate::socket::screen_marker_sid8(&s)
                     })?
                 });
+                // claude 폴더 신뢰 화면 후보 — 판정과 입력은 한글 조합 상태를 아는 GUI 스레드 몫(trust_prompt.rs).
+                let trust_hint = update.dirty.iter().any(|(_, row)| crate::trust_prompt::row_mentions_trust(row));
                 let pane_for_marker = update.pane_id.clone();
                 let mut ws = ws_screens.lock().unwrap();
                 Self::apply_screen_update(&mut ws, update);
                 drop(ws);
+                if trust_hint {
+                    crate::trust_prompt::note(&pane_for_marker);
+                }
                 if let Some(w) = win_screens.as_ref() {
                     w.request_redraw();
                 }

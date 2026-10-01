@@ -13,6 +13,8 @@ serde_json = "1"
 base64 = "0.22"
 ring = "0.17"
 sha2 = "0.10"
+# claude 신뢰 키(`claude_trust`)를 claude 와 같이 NFC 로 맞춘다. 이미 워크스페이스에 있는 판이다.
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

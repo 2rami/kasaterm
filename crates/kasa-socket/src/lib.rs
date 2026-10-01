@@ -23,6 +23,7 @@
 
 pub mod backend;
 pub mod board;
+pub mod claude_trust;
 pub mod methods;
 pub mod peers;
 pub mod protocol;

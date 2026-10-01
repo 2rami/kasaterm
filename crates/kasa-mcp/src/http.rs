@@ -5083,38 +5083,8 @@ async fn term_repo_post(
     // 「이 폴더를 신뢰하나」 화면에서 멈추고, 이사 온 학생은 자동 resume 이
     // 그 화면에 먹혀 밤새 서 있는다(2026-08-27 이사 실측 메모). 레포를 준비하는
     // 이 자리가 곧 「여기서 claude 를 돌리겠다」는 뜻이므로 여기서 심는다.
-    preseed_claude_trust(path);
+    kasa_socket::claude_trust::preseed(std::path::Path::new(&path));
     Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path, "dirty": dirty_lines }))
-}
-
-/// `~/.claude.json` 의 projects[path] 에 신뢰 표시를 심는다. 실패해도 조용히
-/// 넘어간다 — 없으면 사람이 한 번 눌러 주면 되는 것이지 이사가 못 갈 일은 아니다.
-///
-/// ⚠️ claude 가 같은 파일을 쓰는 중일 수 있다 — 통짜 읽고 temp+rename 으로
-/// 원자 교체한다. 드물게 서로의 갱신을 덮을 수 있지만 이 파일은 claude 가
-/// 수시로 다시 채우는 캐시라 잃어도 다음 실행이 복구한다.
-fn preseed_claude_trust(path: &str) {
-    let Some(home) = kasa_socket::home_dir() else { return };
-    let cfg = home.join(".claude.json");
-    let Ok(raw) = std::fs::read_to_string(&cfg) else { return };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
-    let Some(projects) = v
-        .as_object_mut()
-        .and_then(|o| o.entry("projects").or_insert(serde_json::json!({})).as_object_mut())
-    else {
-        return;
-    };
-    let entry = projects.entry(path.to_string()).or_insert(serde_json::json!({}));
-    if entry.get("hasTrustDialogAccepted").and_then(|b| b.as_bool()) == Some(true) {
-        return;
-    }
-    if let Some(o) = entry.as_object_mut() {
-        o.insert("hasTrustDialogAccepted".into(), serde_json::json!(true));
-    }
-    let tmp = cfg.with_extension("json.kasaterm-tmp");
-    if std::fs::write(&tmp, v.to_string()).and_then(|_| std::fs::rename(&tmp, &cfg)).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
 }
 
 const TERM_SPAWN_LEASE_MIN: u64 = 30;

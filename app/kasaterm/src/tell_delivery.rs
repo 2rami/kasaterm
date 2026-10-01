@@ -229,7 +229,7 @@ fn prompt_empty_at(cells: &[Vec<GridCell>], cursor_row: usize, cursor_col: usize
 }
 
 impl App {
-    fn tell_composing(&self, surface: &str) -> bool {
+    pub(crate) fn tell_composing(&self, surface: &str) -> bool {
         let owner = self.os_ime_surface.as_deref().or_else(||self.ime_focus.as_ref().and_then(crate::ImeFocus::terminal_surface));
         (self.in_preedit || !self.preedit.is_empty() || self.os_ime_surface.is_some())
             && owner.is_none_or(|owner|owner == surface || self.ws.lock().unwrap().active_tab_pid(owner) == surface)

@@ -444,6 +444,14 @@ fn run() -> Result<Option<Response>> {
         run_statusline();
         return Ok(None);
     }
+    // `claude-trust <폴더>` — pane claude shim 이 실행 직전에 부른다(폴더 신뢰 화면 선해결).
+    // 소켓을 안 거쳐 앱이 없어도 돈다. 실패는 조용히 — 화면은 앱이 한 번 넘겨 준다.
+    if cmd == "claude-trust" {
+        if let Some(dir) = args.first() {
+            kasa_socket::claude_trust::preseed(std::path::Path::new(dir));
+        }
+        return Ok(None);
+    }
     let mut args = args;
     // 사람은 주소 JSON 을 안 친다(2026-09-16 지시 「몇 개 안 쳐도 바로 되게」) —
     // `tell 이름 본문` 은 보드에서 주소를 찾고, `tell --status ID` 는 보낼 때 적어 둔 주소를 쓴다.
