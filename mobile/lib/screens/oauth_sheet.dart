@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -8,8 +9,20 @@ import '../look.dart';
 import '../relay_account.dart';
 import 'controls.dart';
 
-/// Google·GitHub 로그인(또는 [link] 면 지금 계정에 연결). 관문 확인 화면을 Safari 로 열고, 이 앱에만 보이는 확인
-/// 코드를 거기 넣게 한 뒤, 끝날 때까지 관문에 묻는다. 데스크톱(`native_device_account.rs`)과 같은 흐름이다.
+/// 시스템 로그인 창으로 [url] 을 열고, [scheme] 주소로 돌아온 순간 그 주소를 준다. 사람이 닫으면 null.
+typedef WebAuthenticate = Future<Uri?> Function(Uri url, String scheme);
+
+const _webAuth = MethodChannel('kasaterm/web_auth');
+
+/// iOS ASWebAuthenticationSession(`AppDelegate.swift`). Safari 의 Google 로그인을 그대로 쓰고 결과는 이 앱에만 온다.
+Future<Uri?> systemWebAuthenticate(Uri url, String scheme) async {
+  final back = await _webAuth.invokeMethod<String>('authenticate', {'url': '$url', 'scheme': scheme});
+  return back == null ? null : Uri.tryParse(back);
+}
+
+/// Google·GitHub 로그인(또는 [link] 면 지금 계정에 연결). 관문이 앱 리다이렉트를 알고 이 기기가 시스템 로그인 창을
+/// 띄울 수 있으면([authenticate]) 확인 코드 없이 그 창에서 끝낸다. 아니면 옛 길 — 관문 확인 화면을 Safari 로 열고,
+/// 이 앱에만 보이는 확인 코드를 거기 넣게 한 뒤, 끝날 때까지 관문에 묻는다. 데스크톱(`device_oauth.rs`)과 같은 흐름이다.
 ///
 /// 로그인이면 받은 세션을, 연결이면 [OAuthResult.linked] 를 돌려준다. 취소·실패면 null(실패 글은 시트가 보인다).
 Future<OAuthResult?> showOAuthSheet(
@@ -19,6 +32,7 @@ Future<OAuthResult?> showOAuthSheet(
   required String machineId,
   bool link = false,
   Future<bool> Function(Uri url)? open,
+  WebAuthenticate? authenticate,
   Duration every = const Duration(seconds: 2),
 }) => showModalBottomSheet<OAuthResult>(
   context: context,
@@ -32,6 +46,8 @@ Future<OAuthResult?> showOAuthSheet(
       machineId: machineId,
       link: link,
       open: open ?? (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+      authenticate:
+          authenticate ?? (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS ? systemWebAuthenticate : null),
       every: every,
     ),
   ),
@@ -44,6 +60,7 @@ class _OAuthSheet extends StatefulWidget {
     required this.machineId,
     required this.link,
     required this.open,
+    required this.authenticate,
     required this.every,
   });
 
@@ -52,6 +69,7 @@ class _OAuthSheet extends StatefulWidget {
   final String machineId;
   final bool link;
   final Future<bool> Function(Uri url) open;
+  final WebAuthenticate? authenticate;
   final Duration every;
 
   @override
@@ -89,12 +107,21 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
 
   Future<void> _start() async {
     try {
-      final flow = await widget.api.oauthStart(widget.provider, widget.machineId, link: widget.link);
+      final flow = await widget.api.oauthStart(
+        widget.provider,
+        widget.machineId,
+        link: widget.link,
+        redirect: widget.authenticate != null,
+      );
       if (!mounted) {
         unawaited(widget.api.oauthCancel(flow));
         return;
       }
       setState(() => _flow = flow);
+      if (flow.redirect != null) {
+        await _authenticate(flow);
+        return;
+      }
       _timer = Timer.periodic(widget.every, (_) => unawaited(_poll()));
       await _openBrowser();
     } on AccountException catch (e) {
@@ -102,11 +129,37 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
     }
   }
 
+  /// 확인 코드 없는 길 — 시스템 창이 돌아온 주소의 code 를 이 앱의 verifier 로 바꾼다. 창을 닫았으면 시트도 닫는다.
+  Future<void> _authenticate(OAuthFlow flow) async {
+    Uri? back;
+    try {
+      back = await widget.authenticate!(flow.authorization, oauthRedirectScheme);
+    } on PlatformException {
+      if (mounted) _stop('로그인 창을 열지 못했어요. 다시 시도해 주세요.');
+      return;
+    }
+    if (!mounted || _done) return;
+    if (back == null) {
+      _done = true;
+      Navigator.of(context).pop();
+      return;
+    }
+    try {
+      final r = await widget.api.oauthRedeem(flow, back);
+      if (!mounted) return;
+      _done = true;
+      Navigator.of(context).pop(r);
+    } on AccountException catch (e) {
+      _stop(e.message);
+    }
+  }
+
   /// 코드를 클립보드에 두고 연다 — Safari 확인 칸에 붙여 넣기만 하면 된다.
   Future<void> _openBrowser() async {
     final flow = _flow;
-    if (flow == null) return;
-    await Clipboard.setData(ClipboardData(text: flow.userCode));
+    final code = flow?.userCode;
+    if (flow == null || code == null) return;
+    await Clipboard.setData(ClipboardData(text: code));
     var opened = false;
     try {
       opened = await widget.open(flow.authorization);
@@ -120,7 +173,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
 
   Future<void> _poll() async {
     final flow = _flow;
-    if (flow == null || _polling || _done || !mounted) return;
+    if (flow == null || flow.pollToken == null || _polling || _done || !mounted) return;
     if (DateTime.now().isAfter(flow.expires)) {
       _stop(oauthError('expired', 400));
       return;
@@ -166,6 +219,14 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
               FilledButton(onPressed: () => Navigator.of(context).pop(), child: const Text('닫기')),
             ] else if (flow == null) ...[
               const Center(child: Padding(padding: EdgeInsets.all(Look.groupGap), child: CircularProgressIndicator())),
+            ] else if (flow.userCode == null) ...[
+              Row(
+                children: [
+                  const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                  const SizedBox(width: Look.fieldGap),
+                  Expanded(child: Text('$name 로그인 창에서 마쳐 주세요', style: theme.textTheme.bodyMedium)),
+                ],
+              ),
             ] else ...[
               Text(
                 'Safari 의 확인 화면에 이 코드를 넣고 $name 로그인을 마친 뒤 이 앱으로 돌아오세요. 코드는 복사해 두었어요.',
@@ -173,7 +234,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
               ),
               const SizedBox(height: Look.groupGap),
               SelectableText(
-                flow.userCode,
+                flow.userCode!,
                 key: const Key('oauth-code'),
                 textAlign: TextAlign.center,
                 style: theme.textTheme.headlineMedium?.copyWith(

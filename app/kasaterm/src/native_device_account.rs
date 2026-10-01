@@ -164,6 +164,8 @@ fn safe_error(error: &str) -> String {
         "먼저 기존 KASA 계정으로 로그인한 뒤 Google 또는 GitHub를 연결해 주세요".into()
     } else if error.contains("already_linked") {
         "이미 다른 KASA 계정에 연결된 로그인이에요. 계정은 자동으로 합치지 않아요".into()
+    } else if error.contains("cancelled") {
+        "브라우저에서 로그인을 취소했어요".into()
     } else if error.contains("expired") || error.contains("account_changed") {
         "로그인 요청이 만료되었거나 계정이 바뀌었어요. 다시 시작해 주세요".into()
     } else if error.contains("아이디나 비밀번호") {
@@ -560,10 +562,10 @@ fn run_oauth(
     let flow_id = started["flow_id"]
         .as_str()
         .ok_or_else(|| safe_error("oauth_unavailable"))?;
-    let code = started["user_code"]
-        .as_str()
-        .ok_or_else(|| safe_error("oauth_unavailable"))?;
-    let _ = code_tx.send(code.to_string());
+    // 관문이 앱 리다이렉트(PKCE)를 받으면 확인 코드가 없다 — 브라우저가 로그인 결과를 이 기기로 바로 돌려준다.
+    if let Some(code) = started["user_code"].as_str() {
+        let _ = code_tx.send(code.to_string());
+    }
     if !cancelled.load(Ordering::Acquire) {
         let url = started["authorization_url"]
             .as_str()

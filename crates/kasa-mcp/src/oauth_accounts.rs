@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 use sha2::Digest as _;
 
 pub(crate) const TTL: Duration = Duration::from_secs(600);
+/// Lifetime of the one-time code handed to an app's redirect URI; the app redeems it immediately.
+pub(crate) const CODE_TTL: Duration = Duration::from_secs(120);
+/// Private-use URI schemes of first-party apps that may receive a login result (RFC 8252 §7.1).
+const APP_SCHEMES: [&str; 2] = ["kasaterm", "nachochat"];
 const MAX_PENDING: usize = 256;
 const MAX_RESPONSE: usize = 128 * 1024;
 
@@ -93,7 +97,7 @@ impl Config {
             let enabled = storage_ready && self.enabled(provider);
             json!({"id":provider.name(),"enabled":enabled,"reason":if enabled { "" } else { "setup_required" }})
         });
-        json!({"ok":true,"signup_enabled":self.allow_signup,"providers":providers})
+        json!({"ok":true,"signup_enabled":self.allow_signup,"redirect_login":true,"providers":providers})
     }
 }
 
@@ -110,7 +114,53 @@ pub fn valid_origin(value: &str) -> bool {
     })
 }
 
-fn secret() -> String {
+/// RFC 8252 redirect targets: an any-port loopback IP literal (never `localhost`, which can be
+/// re-resolved) or an allowed app scheme. Anything else could deliver the code off the device.
+pub fn valid_redirect_uri(value: &str) -> bool {
+    value.len() <= 512
+        && reqwest::Url::parse(value).is_ok_and(|url| {
+            let target = match url.scheme() {
+                "http" => {
+                    url.port().is_some() && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+                }
+                scheme => APP_SCHEMES.contains(&scheme),
+            };
+            target
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+}
+
+fn unreserved(value: &str, len: std::ops::RangeInclusive<usize>) -> bool {
+    len.contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+}
+
+/// S256 challenge: base64url SHA-256 without padding.
+pub fn valid_challenge(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+}
+
+pub fn valid_verifier(value: &str) -> bool {
+    unreserved(value, 43..=128)
+}
+
+pub fn valid_client_state(value: &str) -> bool {
+    unreserved(value, 1..=128)
+}
+
+pub fn pkce_challenge(verifier: &str) -> String {
+    challenge(verifier)
+}
+
+pub(crate) fn secret() -> String {
     use ring::rand::SecureRandom as _;
     let mut bytes = [0; 32];
     ring::rand::SystemRandom::new()
@@ -132,6 +182,15 @@ pub(crate) struct Device {
     pub provider: Provider,
     pub kind: String,
     pub machine_id: String,
+}
+
+/// An app that receives the result at its own redirect URI and proves possession of the PKCE
+/// verifier, instead of a person typing a code into the browser.
+#[derive(Clone)]
+pub(crate) struct Native {
+    pub challenge: String,
+    pub redirect_uri: String,
+    pub state: Option<String>,
 }
 
 #[derive(Clone)]
@@ -209,6 +268,17 @@ struct Pending {
     state: String,
     exchange: Exchange,
     outcome: Outcome,
+    native: Option<Native>,
+    /// Hash and issue time of the code sent to `native.redirect_uri`.
+    code: Option<(String, Instant)>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Token {
+    pub code: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
 }
 
 #[derive(Deserialize)]
@@ -290,6 +360,7 @@ impl OAuth {
         device: Device,
         label: String,
         link: Option<Link>,
+        native: Option<Native>,
     ) -> Result<Value, &'static str> {
         if !self.config.enabled(device.provider) || !self.storage_ready() {
             return Err("setup_required");
@@ -303,34 +374,103 @@ impl OAuth {
         let poll_token = secret();
         let state = secret();
         let code = digest(&secret()).to_uppercase();
-        let user_code = format!("{}-{}", &code[..4], &code[4..8]);
+        // A redirect flow is redeemed only with its PKCE verifier, so it has no typed code or poll capability.
+        let user_code = if native.is_some() {
+            String::new()
+        } else {
+            format!("{}-{}", &code[..4], &code[4..8])
+        };
         let exchange = Exchange {
             provider: device.provider,
             verifier: secret(),
             nonce: secret(),
             admin: false,
         };
+        let authorization_url =
+            format!("{}/relay/oauth/authorize/{request_id}", self.config.origin);
+        let mut response = json!({"ok":true,"request_id":request_id,"expires_in":TTL.as_secs(),"authorization_url":authorization_url});
+        if native.is_none() {
+            response["poll_token"] = json!(poll_token);
+            response["user_code"] = json!(user_code);
+        }
         pending.insert(
-            request_id.clone(),
+            request_id,
             Pending {
                 created: Instant::now(),
                 device,
                 label,
                 link,
-                poll_hash: digest(&poll_token),
+                poll_hash: digest(&if native.is_some() {
+                    secret()
+                } else {
+                    poll_token
+                }),
                 browser_hash: None,
                 csrf_hash: None,
-                user_code: user_code.clone(),
+                user_code,
                 confirmation_failures: 0,
                 state,
                 exchange,
                 outcome: Outcome::Waiting,
+                native,
+                code: None,
             },
         );
-        Ok(
-            json!({"ok":true,"request_id":request_id,"poll_token":poll_token,"user_code":user_code,"expires_in":TTL.as_secs(),
-            "authorization_url":format!("{}/relay/oauth/authorize/{request_id}", self.config.origin)}),
-        )
+        Ok(response)
+    }
+
+    /// Browser entry of a redirect flow: binds this browser to the request and goes straight to the
+    /// provider. Returns `None` for code-confirmation flows. Re-opening rebinds to the newest browser.
+    pub fn redirect(&self, request_id: &str) -> Result<Option<(String, String)>, &'static str> {
+        let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
+        let request = pending
+            .get_mut(request_id)
+            .filter(|r| r.created.elapsed() < TTL)
+            .ok_or("expired")?;
+        if request.native.is_none() {
+            return Ok(None);
+        }
+        if !matches!(request.outcome, Outcome::Waiting | Outcome::Confirmed) {
+            return Err("already_used");
+        }
+        let url = self.authorization_url(&request.state, &request.exchange)?;
+        let cookie = secret();
+        request.browser_hash = Some(digest(&cookie));
+        request.outcome = Outcome::Confirmed;
+        Ok(Some((state_cookie(&request.state, &cookie), url)))
+    }
+
+    /// Redeems a redirect flow's one-time code. A presented code is spent even when the verifier or
+    /// redirect URI is wrong, so an intercepted code cannot be retried.
+    pub fn token(&self, input: &Token) -> Result<Ready, &'static str> {
+        let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
+        let hash = digest(&input.code);
+        let id = pending
+            .iter()
+            .find(|(_, request)| request.code.as_ref().is_some_and(|(code, _)| *code == hash))
+            .map(|(id, _)| id.clone())
+            .ok_or("invalid_grant")?;
+        let request = pending.remove(&id).ok_or("invalid_grant")?;
+        let (Some(native), Some((_, issued))) = (&request.native, request.code) else {
+            return Err("invalid_grant");
+        };
+        if request.created.elapsed() >= TTL
+            || issued.elapsed() >= CODE_TTL
+            || native.redirect_uri != input.redirect_uri
+            || !valid_verifier(&input.code_verifier)
+            || challenge(&input.code_verifier) != native.challenge
+        {
+            return Err("invalid_grant");
+        }
+        let Outcome::Ready(identity) = request.outcome else {
+            return Err("invalid_grant");
+        };
+        Ok(Ready {
+            identity,
+            device: request.device,
+            label: request.label,
+            link: request.link,
+        })
     }
 
     pub fn browser(&self, request_id: &str) -> Result<BrowserConfirmation, &'static str> {
@@ -339,6 +479,9 @@ impl OAuth {
             .get_mut(request_id)
             .filter(|r| r.created.elapsed() < TTL)
             .ok_or("expired")?;
+        if request.native.is_some() {
+            return Err("invalid_request");
+        }
         if !matches!(request.outcome, Outcome::Waiting) {
             return Err("already_used");
         }
@@ -347,10 +490,7 @@ impl OAuth {
         request.browser_hash = Some(digest(&cookie));
         request.csrf_hash = Some(digest(&csrf));
         Ok(BrowserConfirmation {
-            cookie: format!(
-                "{}={cookie}; Path=/relay/oauth/; Secure; HttpOnly; SameSite=Lax; Max-Age=600",
-                cookie_name(&request.state)
-            ),
+            cookie: state_cookie(&request.state, &cookie),
             csrf,
             label: request.label.clone(),
             machine_id: request.device.machine_id.clone(),
@@ -371,7 +511,8 @@ impl OAuth {
             .get_mut(request_id)
             .filter(|r| r.created.elapsed() < TTL)
             .ok_or("expired")?;
-        if !matches!(request.outcome, Outcome::Waiting)
+        if request.native.is_some()
+            || !matches!(request.outcome, Outcome::Waiting)
             || !browser_matches(request, cookies)
             || request.csrf_hash.as_deref() != Some(digest(csrf).as_str())
         {
@@ -438,10 +579,7 @@ impl OAuth {
             admin: true,
         };
         let url = self.authorization_url(&state, &exchange)?;
-        let header = format!(
-            "{}={cookie}; Path=/relay/oauth/; Secure; HttpOnly; SameSite=Lax; Max-Age=600",
-            cookie_name(&state)
-        );
+        let header = state_cookie(&state, &cookie);
         pending.insert(
             secret(),
             Pending {
@@ -462,6 +600,8 @@ impl OAuth {
                 state,
                 exchange,
                 outcome: Outcome::Confirmed,
+                native: None,
+                code: None,
             },
         );
         Ok((url, header))
@@ -513,22 +653,47 @@ impl OAuth {
         Ok((id.clone(), request.exchange.clone()))
     }
 
-    pub fn finish(&self, id: &str, result: Result<Identity, &'static str>) {
-        if let Ok(mut pending) = self.pending.lock() {
-            if let Some(request) = pending.get_mut(id).filter(|request| {
-                !request.exchange.admin
-                    && request.created.elapsed() < TTL
-                    && matches!(request.outcome, Outcome::Exchanging)
-            }) {
-                request.outcome = match result {
-                    Ok(identity) if identity.provider == request.device.provider => {
-                        Outcome::Ready(identity)
-                    }
-                    Ok(_) => Outcome::Failed("provider_mismatch"),
-                    Err(error) => Outcome::Failed(error),
-                };
+    /// Records the provider result. For a redirect flow, returns where to send the browser: the
+    /// app's redirect URI with a fresh one-time code, or with an OAuth error.
+    pub fn finish(&self, id: &str, result: Result<Identity, &'static str>) -> Option<String> {
+        let mut pending = self.pending.lock().ok()?;
+        let request = pending.get_mut(id).filter(|request| {
+            !request.exchange.admin
+                && request.created.elapsed() < TTL
+                && matches!(request.outcome, Outcome::Exchanging)
+        })?;
+        let outcome = match result {
+            Ok(identity) if identity.provider == request.device.provider => {
+                Outcome::Ready(identity)
             }
+            Ok(_) => Outcome::Failed("provider_mismatch"),
+            Err(error) => Outcome::Failed(error),
+        };
+        let Some(native) = request.native.clone() else {
+            request.outcome = outcome;
+            return None;
+        };
+        let mut url = reqwest::Url::parse(&native.redirect_uri).ok()?;
+        if let Outcome::Failed(error) = outcome {
+            pending.remove(id);
+            url.query_pairs_mut().append_pair(
+                "error",
+                if error == "cancelled" {
+                    "access_denied"
+                } else {
+                    "server_error"
+                },
+            );
+        } else {
+            let code = secret();
+            request.code = Some((digest(&code), Instant::now()));
+            request.outcome = outcome;
+            url.query_pairs_mut().append_pair("code", &code);
         }
+        if let Some(state) = &native.state {
+            url.query_pairs_mut().append_pair("state", state);
+        }
+        Some(url.to_string())
     }
 
     pub fn poll(&self, input: &Poll, cancel: bool) -> Result<Option<Ready>, &'static str> {
@@ -595,10 +760,13 @@ impl OAuth {
             let account = account.clone();
             if link.is_none() && book.accounts.contains_key(&account) {
                 let mut next = book.clone();
-                let profile = next.profiles.entry(account.clone()).or_insert_with(|| Profile {
-                    provider: Some(identity.provider),
-                    ..Profile::default()
-                });
+                let profile = next
+                    .profiles
+                    .entry(account.clone())
+                    .or_insert_with(|| Profile {
+                        provider: Some(identity.provider),
+                        ..Profile::default()
+                    });
                 if !identity.display.is_empty()
                     && (profile.display.is_empty() || profile.provider == Some(identity.provider))
                 {
@@ -655,7 +823,13 @@ impl OAuth {
     /// The account an identity already belongs to. Never creates or links anything.
     pub fn lookup(&self, identity: &Identity) -> Option<String> {
         let key = format!("{}:{}", identity.provider.name(), identity.subject);
-        self.identities.lock().ok()?.as_ref()?.identities.get(&key).cloned()
+        self.identities
+            .lock()
+            .ok()?
+            .as_ref()?
+            .identities
+            .get(&key)
+            .cloned()
     }
 
     /// Name to show for an OAuth-created account; password accounts keep their chosen name.
@@ -797,6 +971,13 @@ impl OAuth {
 
 fn cookie_name(state: &str) -> String {
     format!("__Secure-kasa_oauth_{}", &digest(state)[..16])
+}
+
+fn state_cookie(state: &str, cookie: &str) -> String {
+    format!(
+        "{}={cookie}; Path=/relay/oauth/; Secure; HttpOnly; SameSite=Lax; Max-Age=600",
+        cookie_name(state)
+    )
 }
 
 fn browser_matches(request: &Pending, cookies: &str) -> bool {

@@ -1,5 +1,8 @@
 use super::*;
 use crate::oauth_accounts::Provider;
+use std::io::{Read as _, Write as _};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 static ATTEMPT: Mutex<Option<Attempt>> = Mutex::new(None);
 
@@ -10,6 +13,137 @@ struct Attempt {
     previous: Option<DeviceCred>,
     request: Value,
     link: bool,
+    loopback: Option<Arc<Loopback>>,
+}
+
+/// RFC 8252 loopback receiver. The gateway sends the browser here with a one-time code that only
+/// this process can redeem, because only it holds the PKCE verifier.
+struct Loopback {
+    verifier: String,
+    redirect_uri: String,
+    state: String,
+    result: Mutex<Option<Result<String, &'static str>>>,
+    stop: AtomicBool,
+}
+
+impl Loopback {
+    fn bind() -> anyhow::Result<(Arc<Self>, std::net::TcpListener)> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        Ok((
+            Arc::new(Self {
+                verifier: crate::oauth_accounts::secret(),
+                redirect_uri: format!("http://127.0.0.1:{port}/oauth/callback"),
+                state: crate::oauth_accounts::secret(),
+                result: Mutex::new(None),
+                stop: AtomicBool::new(false),
+            }),
+            listener,
+        ))
+    }
+
+    fn serve(self: Arc<Self>, listener: std::net::TcpListener) {
+        let _ = listener.set_nonblocking(true);
+        let deadline = std::time::Instant::now() + crate::oauth_accounts::TTL;
+        while !self.stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if self.answer(stream) {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// True once the attempt's own callback arrived; other visits get a 404 and keep it waiting.
+    fn answer(&self, mut stream: std::net::TcpStream) -> bool {
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while request.len() < 8192 && !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => request.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let line = String::from_utf8_lossy(&request);
+        let mut words = line.split_whitespace();
+        let received = (words.next() == Some("GET"))
+            .then(|| words.next())
+            .flatten()
+            .and_then(|target| self.callback(target));
+        let (status, body) = match &received {
+            Some(Ok(_)) => (
+                "200 OK",
+                "KASA 로그인을 받았어요. 이 탭을 닫고 KASA 로 돌아가세요.",
+            ),
+            Some(Err(_)) => (
+                "200 OK",
+                "KASA 로그인을 마치지 못했어요. KASA 에서 다시 시도해 주세요.",
+            ),
+            None => ("404 Not Found", "Not found"),
+        };
+        let body =
+            format!("<!doctype html><meta charset=\"utf-8\"><title>KASA</title><p>{body}</p>");
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let Some(received) = received else {
+            return false;
+        };
+        if let Ok(mut result) = self.result.lock() {
+            *result = Some(received);
+        }
+        true
+    }
+
+    fn callback(&self, target: &str) -> Option<Result<String, &'static str>> {
+        if !target.starts_with('/') {
+            return None;
+        }
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
+        if url.path() != "/oauth/callback" {
+            return None;
+        }
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        // A visit without this attempt's state is someone else's page and must not end the attempt.
+        if pairs.get("state") != Some(&self.state) {
+            return None;
+        }
+        if let Some(code) = pairs.get("code").filter(|code| opaque(code)) {
+            return Some(Ok(code.clone()));
+        }
+        Some(Err(match pairs.get("error").map(String::as_str) {
+            Some("access_denied") => "cancelled",
+            _ => "oauth_unavailable",
+        }))
+    }
+}
+
+/// Gateways that predate redirect login keep the typed-code flow.
+async fn redirect_login(gateway: &str) -> bool {
+    let Ok(client) = client() else {
+        return false;
+    };
+    let Ok(response) = client
+        .get(format!("{gateway}/relay/oauth/providers"))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    response
+        .json::<Value>()
+        .await
+        .is_ok_and(|value| value["redirect_login"] == true)
 }
 
 fn gateway() -> anyhow::Result<String> {
@@ -71,9 +205,22 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
         }
         (EPOCH.fetch_add(1, Ordering::AcqRel) + 1, previous)
     };
-    let mut request = client()?.post(format!("{gateway}/relay/oauth/start")).json(&json!({
+    let mut body = json!({
         "provider":provider,"kind":"desktop","machine_id":machine,"label":crate::mobile::machine_name(),"link":link,
-    }));
+    });
+    let loopback = if redirect_login(&gateway).await {
+        let (loopback, listener) = Loopback::bind()?;
+        body["code_challenge"] = json!(crate::oauth_accounts::pkce_challenge(&loopback.verifier));
+        body["code_challenge_method"] = json!("S256");
+        body["redirect_uri"] = json!(loopback.redirect_uri);
+        body["state"] = json!(loopback.state);
+        Some((loopback, listener))
+    } else {
+        None
+    };
+    let mut request = client()?
+        .post(format!("{gateway}/relay/oauth/start"))
+        .json(&body);
     if link {
         request = request.bearer_auth(&previous.as_ref().unwrap().token);
     }
@@ -94,24 +241,41 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
         .as_str()
         .filter(|id| opaque(id))
         .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
-    let poll_token = value["poll_token"]
-        .as_str()
-        .filter(|id| opaque(id))
-        .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
-    let user_code = value["user_code"]
-        .as_str()
-        .filter(|code| verification_code(code))
-        .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
     anyhow::ensure!(
         authorization_url == format!("{gateway}/relay/oauth/authorize/{request_id}"),
         "invalid_oauth_response"
     );
+    let (request, user_code, listener, loopback) = match loopback {
+        Some((loopback, listener)) => (
+            json!({"request_id":request_id}),
+            None,
+            Some(listener),
+            Some(loopback),
+        ),
+        None => {
+            let poll_token = value["poll_token"]
+                .as_str()
+                .filter(|id| opaque(id))
+                .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
+            let user_code = value["user_code"]
+                .as_str()
+                .filter(|code| verification_code(code))
+                .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
+            (
+                json!({"provider":provider,"kind":"desktop","machine_id":machine,"request_id":request_id,"poll_token":poll_token}),
+                Some(user_code),
+                None,
+                None,
+            )
+        }
+    };
     let attempt = Attempt {
         gateway,
         epoch,
         previous,
         link,
-        request: json!({"provider":provider,"kind":"desktop","machine_id":machine,"request_id":request_id,"poll_token":poll_token}),
+        request,
+        loopback: loopback.clone(),
     };
     {
         let _guard = CREDENTIALS
@@ -126,11 +290,18 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
             ),
             "account_changed"
         );
-        *ATTEMPT
+        let mut active = ATTEMPT
             .lock()
-            .map_err(|_| anyhow::anyhow!("oauth_unavailable"))? = Some(attempt);
+            .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?;
+        if let Some(old) = active.as_ref().and_then(|old| old.loopback.as_ref()) {
+            old.stop.store(true, Ordering::Release);
+        }
+        *active = Some(attempt);
     }
-    // The UI only needs the one-use browser launch URL, never the poll capability.
+    if let (Some(loopback), Some(listener)) = (loopback, listener) {
+        std::thread::spawn(move || loopback.serve(listener));
+    }
+    // The UI only needs the one-use browser launch URL, never the poll capability or verifier.
     Ok(
         json!({"ok":true,"authorization_url":authorization_url,"flow_id":request_id,"user_code":user_code}),
     )
@@ -158,7 +329,7 @@ fn safe_code(value: &Value) -> &'static str {
         Some("account_not_linked") => "account_not_linked",
         Some("already_linked") => "already_linked",
         Some("cancelled") => "cancelled",
-        Some("expired" | "link_expired") => "expired",
+        Some("expired" | "link_expired" | "invalid_grant") => "expired",
         Some("rate_limited") => "rate_limited",
         _ => "oauth_unavailable",
     }
@@ -201,9 +372,30 @@ pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
             "account_changed"
         );
     }
-    let response = client()?
-        .post(format!("{}/relay/oauth/poll", attempt.gateway))
-        .json(&attempt.request)
+    let request = match &attempt.loopback {
+        Some(loopback) => {
+            let received = loopback
+                .result
+                .lock()
+                .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?
+                .take();
+            let code = match received {
+                None => return Ok(json!({"ok":true,"status":"pending"})),
+                Some(Ok(code)) => code,
+                Some(Err(error)) => {
+                    forget(&attempt);
+                    anyhow::bail!("{error}");
+                }
+            };
+            client()?
+                .post(format!("{}/relay/oauth/token", attempt.gateway))
+                .json(&json!({"code":code,"code_verifier":loopback.verifier,"redirect_uri":loopback.redirect_uri}))
+        }
+        None => client()?
+            .post(format!("{}/relay/oauth/poll", attempt.gateway))
+            .json(&attempt.request),
+    };
+    let response = request
         .send()
         .await
         .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?;
@@ -212,6 +404,10 @@ pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
         .json()
         .await
         .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?;
+    if attempt.loopback.is_some() && !status.is_success() {
+        // The code is spent either way; a retry needs a new browser login.
+        forget(&attempt);
+    }
     anyhow::ensure!(status.is_success(), "{}", safe_code(&value));
     if value["status"] == "pending" {
         return Ok(json!({"ok":true,"status":"pending"}));
@@ -295,6 +491,17 @@ pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
     Ok(json!({"ok":true,"status":if attempt.link { "linked" } else { "complete" }}))
 }
 
+fn forget(attempt: &Attempt) {
+    if let Ok(mut active) = ATTEMPT.lock() {
+        if active
+            .as_ref()
+            .is_some_and(|active| active.request["request_id"] == attempt.request["request_id"])
+        {
+            *active = None;
+        }
+    }
+}
+
 pub(super) async fn cancel(params: &Value) -> anyhow::Result<Value> {
     let attempt = {
         let _guard = CREDENTIALS
@@ -321,11 +528,16 @@ pub(super) async fn cancel(params: &Value) -> anyhow::Result<Value> {
         attempt
     };
     if let Some(attempt) = attempt {
-        let _ = client()?
-            .post(format!("{}/relay/oauth/cancel", attempt.gateway))
-            .json(&attempt.request)
-            .send()
-            .await;
+        if let Some(loopback) = &attempt.loopback {
+            // A redirect flow has no server-side cancel capability; it expires unredeemed.
+            loopback.stop.store(true, Ordering::Release);
+        } else {
+            let _ = client()?
+                .post(format!("{}/relay/oauth/cancel", attempt.gateway))
+                .json(&attempt.request)
+                .send()
+                .await;
+        }
     }
     Ok(json!({"ok":true}))
 }
@@ -348,6 +560,7 @@ mod tests {
             previous: Some(credential.clone()),
             request: Value::Null,
             link: false,
+            loopback: None,
         };
         assert!(attempt_current(
             &attempt,
@@ -378,6 +591,60 @@ mod tests {
             Some(&credential.relay),
             4
         ));
+    }
+    #[test]
+    fn loopback_takes_only_its_own_callback() {
+        let (loopback, listener) = Loopback::bind().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(
+            loopback.redirect_uri,
+            format!("http://127.0.0.1:{port}/oauth/callback")
+        );
+        assert!(crate::oauth_accounts::valid_redirect_uri(
+            &loopback.redirect_uri
+        ));
+        let server = std::thread::spawn({
+            let loopback = loopback.clone();
+            move || loopback.serve(listener)
+        });
+        let get = |target: String| {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(stream, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+        let code = crate::oauth_accounts::secret();
+        assert!(
+            get(format!("/oauth/callback?code={code}&state=forged")).starts_with("HTTP/1.1 404")
+        );
+        assert!(get("/favicon.ico".into()).starts_with("HTTP/1.1 404"));
+        assert!(loopback.result.lock().unwrap().is_none());
+        let page = get(format!(
+            "/oauth/callback?code={code}&state={}",
+            loopback.state
+        ));
+        assert!(page.starts_with("HTTP/1.1 200") && page.contains("no-referrer"));
+        server.join().unwrap();
+        assert_eq!(loopback.result.lock().unwrap().clone(), Some(Ok(code)));
+        assert_eq!(
+            loopback.callback(&format!(
+                "/oauth/callback?error=access_denied&state={}",
+                loopback.state
+            )),
+            Some(Err("cancelled"))
+        );
+        assert_eq!(
+            loopback.callback(&format!(
+                "/oauth/callback?code=<script>&state={}",
+                loopback.state
+            )),
+            Some(Err("oauth_unavailable"))
+        );
+        assert_eq!(
+            loopback.callback("http://attacker.example/oauth/callback"),
+            None
+        );
     }
     #[test]
     fn provider_errors_and_capabilities_are_not_reflected() {

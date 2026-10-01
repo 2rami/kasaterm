@@ -1,4 +1,7 @@
 import 'dart:convert';
+import 'dart:math';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:http/http.dart' as http;
 
@@ -102,7 +105,8 @@ String oauthError(String? code, int status) => switch (code) {
   'setup_required' || 'oauth_unavailable' => '이 서버는 Google·GitHub 로그인을 아직 켜지 않았어요.',
   'account_not_linked' => '이 로그인이 연결된 KASA 계정이 없어요. 기존 계정으로 로그인한 뒤 설정에서 연결해 주세요.',
   'already_linked' => '이미 다른 KASA 계정에 연결된 로그인이에요. 계정은 자동으로 합치지 않아요.',
-  'expired' || 'account_changed' || 'link_expired' => '로그인 요청이 만료되었거나 계정이 바뀌었어요. 다시 시작해 주세요.',
+  'expired' || 'account_changed' || 'link_expired' || 'invalid_grant' => '로그인 요청이 만료되었거나 계정이 바뀌었어요. 다시 시작해 주세요.',
+  'cancelled' => '로그인을 취소했어요.',
   'account_disabled' => '막힌 계정이에요. 관리자에게 물어봐 주세요.',
   'rate_limited' => accountError(429),
   'device_mismatch' => '이 폰의 로그인과 요청이 맞지 않아요. 로그아웃 뒤 다시 로그인해 주세요.',
@@ -118,14 +122,37 @@ enum OAuthProvider {
   final String label;
 }
 
-/// 관문의 Google·GitHub 로그인 요청 하나. `poll_token` 은 이 요청의 결과를 받는 자격이라 메모리에만 둔다.
+/// 관문이 로그인 결과(일회용 code)를 돌려보내는 이 앱의 주소. iOS 는 ASWebAuthenticationSession 이 이 스킴을 가로챈다.
+const oauthRedirectScheme = 'kasaterm';
+const oauthRedirectUri = '$oauthRedirectScheme://oauth';
+
+/// 앱 리다이렉트 로그인(RFC 8252)의 비밀. [verifier] 가 없으면 돌아온 code 로 세션을 못 받으니
+/// 남이 보낸 링크로 로그인해도 결과는 링크를 만든 쪽이 아니라 이 기기 브라우저로만 돌아온다.
+class OAuthRedirect {
+  OAuthRedirect._(this.verifier, this.state);
+
+  factory OAuthRedirect.create() => OAuthRedirect._(_random(), _random());
+
+  final String verifier;
+  final String state;
+
+  String get challenge => _base64Url(sha256.convert(ascii.encode(verifier)).bytes);
+
+  static final _rng = Random.secure();
+  static String _random() => _base64Url(List.generate(32, (_) => _rng.nextInt(256)));
+  static String _base64Url(List<int> bytes) => base64Url.encode(bytes).replaceAll('=', '');
+}
+
+/// 관문의 Google·GitHub 로그인 요청 하나. `poll_token`·[redirect] 는 이 요청의 결과를 받는 자격이라 메모리에만 둔다.
+/// 앱 리다이렉트 요청이면 [redirect] 만, 옛 확인 코드 요청이면 [pollToken]·[userCode] 만 있다.
 class OAuthFlow {
   const OAuthFlow({
     required this.provider,
     required this.machineId,
     required this.requestId,
-    required this.pollToken,
-    required this.userCode,
+    this.pollToken,
+    this.userCode,
+    this.redirect,
     required this.authorization,
     required this.expires,
   });
@@ -133,14 +160,15 @@ class OAuthFlow {
   final OAuthProvider provider;
   final String machineId;
   final String requestId;
-  final String pollToken;
+  final String? pollToken;
 
   /// 브라우저 확인 화면에 사람이 넣는 코드. 이 앱에만 보인다 — 링크만 가로챈 사람은 못 넘긴다.
-  final String userCode;
+  final String? userCode;
+  final OAuthRedirect? redirect;
   final Uri authorization;
   final DateTime expires;
 
-  Map<String, String> get _poll => {
+  Map<String, String?> get _poll => {
     'request_id': requestId,
     'poll_token': pollToken,
     'provider': provider.id,
@@ -158,11 +186,14 @@ class OAuthResult {
 }
 
 class OAuthProviders {
-  const OAuthProviders(this.enabled, {this.signup = false});
+  const OAuthProviders(this.enabled, {this.signup = false, this.redirect = false});
   final List<OAuthProvider> enabled;
 
   /// 처음 보는 Google·GitHub 신원으로 새 계정을 만드는 서버인가.
   final bool signup;
+
+  /// 확인 코드 없이 앱 리다이렉트(PKCE)로 결과를 주는 관문인가. 옛 관문은 코드 흐름만 안다.
+  final bool redirect;
 }
 
 class AccountSyncSnapshot {
@@ -338,6 +369,7 @@ class RelayAccountApi {
       return OAuthProviders(
         [for (final p in OAuthProvider.values) if (enabled.contains(p.id)) p],
         signup: json['signup_enabled'] == true,
+        redirect: json['redirect_login'] == true,
       );
     } on AccountException {
       return const OAuthProviders([]);
@@ -345,7 +377,9 @@ class RelayAccountApi {
   }
 
   /// [link] 면 지금 로그인한 계정에 이 로그인 방법을 더한다(기기 토큰이 실려야 한다), 아니면 그 신원으로 로그인.
-  Future<OAuthFlow> oauthStart(OAuthProvider provider, String machineId, {bool link = false}) async {
+  /// [redirect] 면(이 기기가 시스템 로그인 창을 띄울 수 있으면) 관문이 아는 한 확인 코드 없는 앱 리다이렉트로 시작한다.
+  Future<OAuthFlow> oauthStart(OAuthProvider provider, String machineId, {bool link = false, bool redirect = false}) async {
+    final r = redirect && (await oauthProviders()).redirect ? OAuthRedirect.create() : null;
     final json = await _request(
       'oauth/start',
       body: {
@@ -354,28 +388,63 @@ class RelayAccountApi {
         'label': '카사모바일',
         'machine_id': machineId,
         'link': link,
+        if (r != null) ...{
+          'code_challenge': r.challenge,
+          'code_challenge_method': 'S256',
+          'redirect_uri': oauthRedirectUri,
+          'state': r.state,
+        },
       },
       error: oauthError,
     );
     final url = Uri.tryParse('${json['authorization_url']}');
     final (id, poll, code, ttl) = (json['request_id'], json['poll_token'], json['user_code'], json['expires_in']);
     // 확인 화면은 관문 자신의 주소여야 한다 — 다른 곳으로 보내는 응답은 따르지 않는다.
-    if (url == null || !sameOrigin(url, origin) || id is! String || poll is! String || code is! String || ttl is! int) {
+    if (url == null ||
+        !sameOrigin(url, origin) ||
+        id is! String ||
+        ttl is! int ||
+        (r == null && (poll is! String || code is! String))) {
       throw const AccountException('로그인 요청 응답을 확인하지 못했어요.');
     }
     return OAuthFlow(
       provider: provider,
       machineId: machineId,
       requestId: id,
-      pollToken: poll,
-      userCode: code,
+      pollToken: r == null ? poll as String : null,
+      userCode: r == null ? code as String : null,
+      redirect: r,
       authorization: url,
       expires: DateTime.now().add(Duration(seconds: ttl)),
     );
   }
 
-  Future<OAuthResult> oauthPoll(OAuthFlow flow) async {
-    final json = await _request('oauth/poll', body: flow._poll, error: oauthError);
+  /// 시스템 로그인 창이 [back] 으로 돌아오면 그 일회용 code 를 verifier 와 함께 세션으로 바꾼다.
+  Future<OAuthResult> oauthRedeem(OAuthFlow flow, Uri back) async {
+    final r = flow.redirect;
+    final q = back.queryParameters;
+    if (r == null || back.scheme != oauthRedirectScheme || q['state'] != r.state) {
+      throw const AccountException('로그인 응답을 확인하지 못했어요.');
+    }
+    if (q['error'] case final e?) {
+      throw AccountException(oauthError(e == 'access_denied' ? 'cancelled' : 'oauth_unavailable', 400));
+    }
+    final code = q['code'];
+    if (code == null || code.isEmpty) throw const AccountException('로그인 응답을 확인하지 못했어요.');
+    final json = await _request(
+      'oauth/token',
+      body: {'code': code, 'code_verifier': r.verifier, 'redirect_uri': oauthRedirectUri},
+      error: oauthError,
+    );
+    final result = _oauthResult(json);
+    if (result.pending) throw const AccountException('로그인 응답을 확인하지 못했어요.');
+    return result;
+  }
+
+  Future<OAuthResult> oauthPoll(OAuthFlow flow) async =>
+      _oauthResult(await _request('oauth/poll', body: flow._poll, error: oauthError));
+
+  OAuthResult _oauthResult(Map<String, dynamic> json) {
     switch (json['status']) {
       case 'linked':
         return const OAuthResult(linked: true);
@@ -401,6 +470,8 @@ class RelayAccountApi {
   }
 
   Future<void> oauthCancel(OAuthFlow flow) async {
+    // 리다이렉트 요청은 거둘 자격이 없다 — 아무도 code 를 안 바꾸면 관문에서 10분 뒤 사라진다.
+    if (flow.pollToken == null) return;
     try {
       await _request('oauth/cancel', body: flow._poll);
     } on AccountException {
