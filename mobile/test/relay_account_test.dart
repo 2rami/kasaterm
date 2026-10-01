@@ -21,6 +21,16 @@ AccountSession session({String account = 'fixture'}) => AccountSession(
 class _NativeHttp extends HttpOverrides {}
 
 void main() {
+  test('계정 화면 소켓 악수 주소는 기본 포트 관문에서도 같은 출처다', () {
+    final ws = Uri.parse('wss://gateway.invalid/relay/account/m/~mini/term/ws?pane=%253&grid=1');
+    // dart:io WebSocket.connect 가 openUrl 에 넘기는 모양 그대로.
+    final handshake = Uri(scheme: 'https', userInfo: ws.userInfo, host: ws.host, port: ws.port,
+        path: ws.path, query: ws.query, fragment: ws.fragment);
+    expect(sameOrigin(ws.replace(scheme: 'https'), handshake), isTrue);
+    expect(sameOrigin(Uri.parse('https://gateway.invalid/'), Uri.parse('https://gateway.invalid:8443/')), isFalse);
+    expect(sameOrigin(Uri.parse('https://gateway.invalid/'), Uri.parse('http://gateway.invalid/')), isFalse);
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test(

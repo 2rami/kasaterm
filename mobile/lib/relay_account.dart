@@ -20,7 +20,18 @@ Uri? parseGateway(String value) {
 }
 
 bool sameOrigin(Uri a, Uri b) =>
-    a.scheme == b.scheme && a.host == b.host && a.port == b.port;
+    a.scheme == b.scheme && a.host == b.host && _port(a) == _port(b);
+
+/// dart:io 의 소켓 악수는 `wss://` 주소를 `https://` 로 바꿀 때 포트를 `wss` 기준으로 읽는다. Uri 는 wss 의 기본
+/// 포트를 몰라 0 이 넘어오고, 그대로 비교하면 기본 포트 관문(443)으로 가는 계정 화면 소켓이 전부 「주소가 바뀌었다」로
+/// 끊긴다. 0 은 그 스킴의 기본 포트로 읽는다.
+int _port(Uri u) => u.port != 0
+    ? u.port
+    : switch (u.scheme) {
+        'https' => 443,
+        'http' => 80,
+        _ => 0,
+      };
 
 class AccountSession {
   AccountSession({
