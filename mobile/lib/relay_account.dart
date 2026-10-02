@@ -108,6 +108,8 @@ String oauthError(String? code, int status) => switch (code) {
   'expired' || 'account_changed' || 'link_expired' || 'invalid_grant' => '로그인 요청이 만료되었거나 계정이 바뀌었어요. 다시 시작해 주세요.',
   'cancelled' => '로그인을 취소했어요.',
   'account_disabled' => '막힌 계정이에요. 관리자에게 물어봐 주세요.',
+  'bad_credentials' => '아이디나 비밀번호를 확인해 주세요.',
+  'signup_disabled' => '이 서버는 새 계정을 받지 않아요. 기존 계정에 연결해 주세요.',
   'rate_limited' => accountError(429),
   'device_mismatch' => '이 폰의 로그인과 요청이 맞지 않아요. 로그아웃 뒤 다시 로그인해 주세요.',
   _ => status == 401 ? '저장된 로그인이 만료되었어요. 다시 로그인해 주세요.' : '로그인을 마치지 못했어요. 연결 상태를 확인하고 다시 시도해 주세요.',
@@ -177,16 +179,31 @@ class OAuthFlow {
   };
 }
 
-/// 기다리는 중이면 둘 다 null, 로그인이면 [session], 연결이면 [linked].
+/// 어느 계정에도 연결 안 된 Google·GitHub 로그인. 새 계정을 만들지 기존 계정에 연결할지 사람이 고른다.
+/// [ticket] 은 그 고르기를 관문에 알리는 자격이라 메모리에만 둔다.
+class OAuthChoice {
+  const OAuthChoice({required this.ticket, required this.provider, required this.display, required this.signup});
+  final String ticket;
+  final OAuthProvider provider;
+
+  /// 로그인한 메일·아이디. 사람에게 「누가 들어왔나」를 보이는 데만 쓴다.
+  final String display;
+
+  /// 새 계정을 받는 서버인가. 아니면 기존 계정 연결만 된다.
+  final bool signup;
+}
+
+/// 기다리는 중이면 모두 null, 로그인이면 [session], 연결이면 [linked], 계정을 골라야 하면 [choice].
 class OAuthResult {
-  const OAuthResult({this.session, this.linked = false});
+  const OAuthResult({this.session, this.linked = false, this.choice});
   final AccountSession? session;
   final bool linked;
-  bool get pending => session == null && !linked;
+  final OAuthChoice? choice;
+  bool get pending => session == null && !linked && choice == null;
 }
 
 class OAuthProviders {
-  const OAuthProviders(this.enabled, {this.signup = false, this.redirect = false});
+  const OAuthProviders(this.enabled, {this.signup = false, this.redirect = false, this.choose = false});
   final List<OAuthProvider> enabled;
 
   /// 처음 보는 Google·GitHub 신원으로 새 계정을 만드는 서버인가.
@@ -194,6 +211,9 @@ class OAuthProviders {
 
   /// 확인 코드 없이 앱 리다이렉트(PKCE)로 결과를 주는 관문인가. 옛 관문은 코드 흐름만 안다.
   final bool redirect;
+
+  /// 처음 보는 신원을 바로 새 계정으로 만들지 않고 고르게 해 주는 관문인가.
+  final bool choose;
 }
 
 class AccountSyncSnapshot {
@@ -370,6 +390,7 @@ class RelayAccountApi {
         [for (final p in OAuthProvider.values) if (enabled.contains(p.id)) p],
         signup: json['signup_enabled'] == true,
         redirect: json['redirect_login'] == true,
+        choose: json['choose_account'] == true,
       );
     } on AccountException {
       return const OAuthProviders([]);
@@ -379,7 +400,8 @@ class RelayAccountApi {
   /// [link] 면 지금 로그인한 계정에 이 로그인 방법을 더한다(기기 토큰이 실려야 한다), 아니면 그 신원으로 로그인.
   /// [redirect] 면(이 기기가 시스템 로그인 창을 띄울 수 있으면) 관문이 아는 한 확인 코드 없는 앱 리다이렉트로 시작한다.
   Future<OAuthFlow> oauthStart(OAuthProvider provider, String machineId, {bool link = false, bool redirect = false}) async {
-    final r = redirect && (await oauthProviders()).redirect ? OAuthRedirect.create() : null;
+    final can = redirect || !link ? await oauthProviders() : const OAuthProviders([]);
+    final r = redirect && can.redirect ? OAuthRedirect.create() : null;
     final json = await _request(
       'oauth/start',
       body: {
@@ -388,6 +410,7 @@ class RelayAccountApi {
         'label': '카사모바일',
         'machine_id': machineId,
         'link': link,
+        if (!link && can.choose) 'choose': true,
         if (r != null) ...{
           'code_challenge': r.challenge,
           'code_challenge_method': 'S256',
@@ -444,10 +467,44 @@ class RelayAccountApi {
   Future<OAuthResult> oauthPoll(OAuthFlow flow) async =>
       _oauthResult(await _request('oauth/poll', body: flow._poll, error: oauthError));
 
+  /// 고른 대로 — 새 계정을 만든다.
+  Future<AccountSession> oauthSignup(OAuthChoice choice) =>
+      _session(_request('oauth/signup', body: {'ticket': choice.ticket}, error: oauthError));
+
+  /// 고른 대로 — 기존 계정의 비밀번호를 이번 한 번 확인하고 이 로그인을 그 계정에 연결한다.
+  /// 비밀번호가 틀리면 [AccountException.code] 가 `bad_credentials` 이고 같은 [choice] 로 다시 할 수 있다.
+  Future<AccountSession> oauthClaim(OAuthChoice choice, String account, String password) => _session(
+    _request(
+      'oauth/claim',
+      body: {'ticket': choice.ticket, 'account': account.trim(), 'password': password},
+      error: oauthError,
+    ),
+  );
+
+  Future<AccountSession> _session(Future<Map<String, dynamic>> response) async {
+    final session = _oauthResult(await response).session;
+    if (session == null) throw const AccountException('로그인 응답을 확인하지 못했어요.');
+    return session;
+  }
+
   OAuthResult _oauthResult(Map<String, dynamic> json) {
     switch (json['status']) {
       case 'linked':
         return const OAuthResult(linked: true);
+      case 'choose':
+        final (ticket, provider, display) = (json['ticket'], json['provider'], json['display']);
+        final which = OAuthProvider.values.where((p) => p.id == provider).firstOrNull;
+        if (ticket is! String || ticket.isEmpty || which == null) {
+          throw const AccountException('로그인 응답을 확인하지 못했어요.');
+        }
+        return OAuthResult(
+          choice: OAuthChoice(
+            ticket: ticket,
+            provider: which,
+            display: display is String ? display : '',
+            signup: json['signup_enabled'] == true,
+          ),
+        );
       case 'complete':
         try {
           return OAuthResult(

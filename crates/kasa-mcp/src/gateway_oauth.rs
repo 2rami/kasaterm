@@ -13,6 +13,8 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/oauth/poll", axum::routing::post(poll))
         .route("/relay/oauth/token", axum::routing::post(token))
         .route("/relay/oauth/cancel", axum::routing::post(cancel))
+        .route("/relay/oauth/signup", axum::routing::post(signup))
+        .route("/relay/oauth/claim", axum::routing::post(claim))
         .layer(axum::middleware::map_response(secure_response))
 }
 
@@ -76,6 +78,9 @@ struct Start {
     code_challenge_method: Option<String>,
     redirect_uri: Option<String>,
     state: Option<String>,
+    /// Ask before an unlinked identity becomes a new account (`choose_account` clients).
+    #[serde(default)]
+    choose: bool,
 }
 
 /// RFC 8252 + PKCE: an app that names its own redirect URI and S256 challenge skips the typed code.
@@ -126,6 +131,9 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         Ok(native) => native,
         Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
     };
+    if input.link && input.choose {
+        return json_err(StatusCode::BAD_REQUEST, "invalid_request");
+    }
     let link = if input.link {
         let Some((device_id, device)) = gate.device_of(&headers) else {
             return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -162,7 +170,7 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         .filter(|c| !c.is_control())
         .take(60)
         .collect();
-    match gate.oauth.start(device, label, link, native) {
+    match gate.oauth.start(device, label, link, native, input.choose) {
         Ok(value) => axum::Json(value).into_response(),
         Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
     }
@@ -404,6 +412,18 @@ fn complete(gate: &Gate, ready: Ready) -> axum::response::Response {
             Err(error) => json_err(StatusCode::CONFLICT, error),
         };
     }
+    if ready.choose && gate.oauth.lookup(&ready.identity).is_none() {
+        let (provider, display) = (ready.identity.provider, ready.identity.display.clone());
+        return match gate.oauth.hold(ready) {
+            Ok(ticket) => axum::Json(json!({
+                "ok":true,"status":"choose","ticket":ticket,"provider":provider.name(),
+                "display":display,"signup_enabled":gate.oauth.config.signup_enabled(),
+                "expires_in":crate::oauth_accounts::TTL.as_secs(),
+            }))
+            .into_response(),
+            Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
+        };
+    }
     let account = match gate
         .oauth
         .resolve(&ready.identity, None, |name| gate.accounts.exists(name))
@@ -411,6 +431,11 @@ fn complete(gate: &Gate, ready: Ready) -> axum::response::Response {
         Ok(account) => account,
         Err(error) => return json_err(StatusCode::FORBIDDEN, error),
     };
+    sign_in(gate, account, ready)
+}
+
+/// Issues a device credential for an account the provider identity now belongs to.
+fn sign_in(gate: &Gate, account: String, ready: Ready) -> axum::response::Response {
     if !gate.account_active(&account) {
         return json_err(StatusCode::UNAUTHORIZED, "account_disabled");
     }
@@ -439,6 +464,94 @@ fn complete(gate: &Gate, ready: Ready) -> axum::response::Response {
     // The requester may lose the response or fail to save it; existing credentials remain explicitly revocable.
     let display_name = gate.oauth.display_name(&account);
     axum::Json(json!({"ok":true,"status":"complete","account":account,"display_name":display_name,"device_id":device_id,"token":token})).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Signup {
+    ticket: String,
+}
+
+/// The person chose a new account for a held, unlinked sign-in.
+async fn signup(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    if gate.limiter.allow("oauth", &client_ip(&req)).is_err() {
+        return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    let input: Signup = match body(req).await {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+    let ready = match gate.oauth.held(&input.ticket) {
+        Ok(ready) => ready,
+        Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
+    };
+    if !gate.oauth.config.signup_enabled() {
+        return json_err(StatusCode::FORBIDDEN, "signup_disabled");
+    }
+    if !gate.oauth.spend(&input.ticket) {
+        return json_err(StatusCode::BAD_REQUEST, "expired");
+    }
+    match gate
+        .oauth
+        .resolve(&ready.identity, None, |name| gate.accounts.exists(name))
+    {
+        Ok(account) => sign_in(&gate, account, ready),
+        Err(error) => json_err(StatusCode::FORBIDDEN, error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Claim {
+    ticket: String,
+    account: String,
+    password: String,
+}
+
+/// The person named an existing password account for a held sign-in. The password is asked once;
+/// afterwards the provider alone signs in to that account. It shares the password login's lockout.
+async fn claim(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let ip = client_ip(&req);
+    let input: Claim = match body(req).await {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+    let account = input.account.trim().to_lowercase();
+    if gate.limiter.allow(&account, &ip).is_err() {
+        return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    let ready = match gate.oauth.held(&input.ticket) {
+        Ok(ready) => ready,
+        Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
+    };
+    let ok = crate::relay_auth::valid_account_name(&account)
+        && !input.password.is_empty()
+        && input.password.len() <= 1024
+        && {
+            let accounts = gate.accounts.clone();
+            let (name, password) = (account.clone(), input.password);
+            tokio::task::spawn_blocking(move || accounts.check(&name, &password))
+                .await
+                .unwrap_or(false)
+        };
+    gate.limiter.record(&account, ok);
+    if !ok {
+        gate.oauth.miss(&input.ticket);
+        return json_err(StatusCode::UNAUTHORIZED, "bad_credentials");
+    }
+    if !gate.account_active(&account) {
+        return json_err(StatusCode::UNAUTHORIZED, "account_disabled");
+    }
+    if !gate.oauth.spend(&input.ticket) {
+        return json_err(StatusCode::BAD_REQUEST, "expired");
+    }
+    match gate
+        .oauth
+        .resolve(&ready.identity, Some(&account), |name| gate.accounts.exists(name))
+    {
+        Ok(account) => sign_in(&gate, account, ready),
+        Err(error) => json_err(StatusCode::CONFLICT, error),
+    }
 }
 
 #[cfg(test)]

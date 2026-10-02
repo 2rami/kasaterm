@@ -28,6 +28,7 @@ fn start(oauth: &OAuth) -> (Value, Poll) {
             "Laptop".into(),
             None,
             None,
+            false,
         )
         .unwrap();
     let input = Poll {
@@ -440,6 +441,7 @@ fn native_start(oauth: &OAuth) -> String {
                 redirect_uri: LOOPBACK.into(),
                 state: Some("app-state".into()),
             }),
+            false,
         )
         .unwrap();
     assert!(value.get("user_code").is_none() && value.get("poll_token").is_none());
@@ -606,4 +608,9 @@ fn only_loopback_ip_and_first_party_app_redirects_are_accepted() {
     assert!(!valid_challenge("short"));
     assert!(!valid_verifier("too-short"));
     assert!(!valid_client_state("bad state"));
+}
+
+pub(crate) fn without_signup(mut config: Config) -> Config {
+    config.allow_signup = false;
+    config
 }

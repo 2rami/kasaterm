@@ -37,6 +37,7 @@ fn ready(link: Option<Link>) -> Ready {
         },
         label: "Fixture".into(),
         link,
+        choose: false,
     }
 }
 
@@ -643,5 +644,148 @@ async fn redirect_login_skips_code_page_and_redeems_only_with_verifier() {
         .unwrap();
     assert_eq!(replay["error"], "invalid_grant");
     server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// First sign-in with an unlinked provider identity asks before creating an account; naming an
+/// existing account costs its password once, after which the provider alone signs in.
+#[tokio::test]
+async fn unlinked_sign_in_asks_then_claims_existing_account_once() {
+    let (gate, dir) = fixture();
+    *gate.oauth.mock_identity.lock().unwrap() = Some(Identity {
+        provider: Provider::Google,
+        subject: "google-sub-1".into(),
+        display: "person@example.com".into(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = gate.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let base = format!("http://{address}/relay/oauth");
+    let providers: Value = client.get(format!("{base}/providers")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(providers["choose_account"], true);
+    let verifier = "fixture-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
+    let redirect_uri = "kasaterm://oauth";
+    let login = || async {
+        let started: Value = client
+            .post(format!("{base}/start"))
+            .json(&json!({
+                "provider":"google","kind":"phone","machine_id":"machine-one","label":"Phone",
+                "code_challenge":crate::oauth_accounts::pkce_challenge(verifier),
+                "code_challenge_method":"S256","redirect_uri":redirect_uri,"choose":true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = started["request_id"].as_str().unwrap();
+        let browser = client.get(format!("{base}/authorize/{id}")).send().await.unwrap();
+        let provider = reqwest::Url::parse(browser.headers()["location"].to_str().unwrap()).unwrap();
+        let state = provider.query_pairs().find(|(key, _)| key == "state").unwrap().1.into_owned();
+        let cookie = browser.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+        let back = client
+            .get(format!("{base}/google/callback"))
+            .query(&[("state", state.as_str()), ("code", "provider-code")])
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        let back = reqwest::Url::parse(back.headers()["location"].to_str().unwrap()).unwrap();
+        let code = back.query_pairs().find(|(key, _)| key == "code").unwrap().1.into_owned();
+        client
+            .post(format!("{base}/token"))
+            .json(&json!({"code":code,"code_verifier":verifier,"redirect_uri":redirect_uri}))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    let post = |path: &str, body: Value| {
+        let request = client.post(format!("{base}/{path}")).json(&body);
+        async move {
+            let response = request.send().await.unwrap();
+            (response.status().as_u16(), response.json::<Value>().await.unwrap())
+        }
+    };
+
+    let held = login().await;
+    assert_eq!(held["status"], "choose");
+    assert_eq!(held["display"], "person@example.com");
+    assert_eq!(held["signup_enabled"], true);
+    assert!(held.get("token").is_none(), "an unlinked sign-in got a device credential");
+    let ticket = held["ticket"].as_str().unwrap().to_string();
+    let wrong = post("claim", json!({"ticket":ticket,"account":"one","password":"wrong"})).await;
+    assert_eq!((wrong.0, wrong.1["error"].as_str()), (401, Some("bad_credentials")));
+    let forged = post("claim", json!({"ticket":"forged-ticket","account":"one","password":"fixture"})).await;
+    assert_eq!(forged.0, 400);
+    let claimed = post("claim", json!({"ticket":ticket,"account":"One ","password":"fixture"})).await;
+    assert_eq!(claimed.0, 200);
+    assert_eq!(claimed.1["status"], "complete");
+    assert_eq!(claimed.1["account"], "one");
+    assert!(gate.device_by_token(claimed.1["token"].as_str().unwrap()).is_some());
+    let replay = post("claim", json!({"ticket":ticket,"account":"one","password":"fixture"})).await;
+    assert_eq!(replay.0, 400, "a held sign-in was used twice");
+
+    let again = login().await;
+    assert_eq!(again["status"], "complete", "the claimed identity still asked");
+    assert_eq!(again["account"], "one");
+
+    // A different identity can start a new account, but only through its own ticket.
+    *gate.oauth.mock_identity.lock().unwrap() = Some(Identity {
+        provider: Provider::Google,
+        subject: "google-sub-2".into(),
+        display: "new@example.com".into(),
+    });
+    let fresh = login().await;
+    assert_eq!(fresh["status"], "choose");
+    let ticket = fresh["ticket"].as_str().unwrap().to_string();
+    for _ in 0..5 {
+        post("claim", json!({"ticket":ticket,"account":"two","password":"guess"})).await;
+    }
+    let burned = post("signup", json!({"ticket":ticket})).await;
+    assert_eq!(burned.0, 400, "a ticket survived repeated wrong passwords");
+    let fresh = login().await;
+    let created = post("signup", json!({"ticket":fresh["ticket"]})).await;
+    assert_eq!(created.0, 200);
+    assert!(created.1["account"].as_str().unwrap().starts_with("oauth_"));
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn held_sign_in_respects_disabled_signup_and_existing_links() {
+    let (gate, dir) = fixture();
+    let mut ready = ready(None);
+    ready.choose = true;
+    let held = response_json(complete(&gate, ready.clone())).await;
+    assert_eq!(held["status"], "choose");
+    let mut oauth = crate::oauth_accounts::OAuth::new(
+        Some(dir.join("relay-oauth-identities.json")),
+        gate.oauth.config.clone(),
+    );
+    oauth.config = crate::oauth_accounts::tests::without_signup(oauth.config);
+    let ticket = oauth.hold(ready.clone()).unwrap();
+    let mut closed = gate.clone();
+    closed.oauth = Arc::new(oauth);
+    let request = axum::http::Request::builder()
+        .body(axum::body::Body::from(json!({"ticket":ticket}).to_string()))
+        .unwrap();
+    assert_eq!(signup(State(closed.clone()), request).await.status(), StatusCode::FORBIDDEN);
+    // Once linked elsewhere, a held ticket cannot move the identity to another account.
+    closed.oauth.resolve(&ready.identity, Some("two"), |_| true).unwrap();
+    let request = axum::http::Request::builder()
+        .body(axum::body::Body::from(
+            json!({"ticket":ticket,"account":"one","password":"fixture"}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(claim(State(closed), request).await.status(), StatusCode::CONFLICT);
     let _ = std::fs::remove_dir_all(dir);
 }

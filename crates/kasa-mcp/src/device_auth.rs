@@ -330,6 +330,8 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
                 "oauth_start" => oauth::start(&params).await,
                 "oauth_poll" => oauth::poll(&params).await,
                 "oauth_cancel" => oauth::cancel(&params).await,
+                "oauth_signup" => oauth::choose(&params, false).await,
+                "oauth_claim" => oauth::choose(&params, true).await,
                 "login" => {
                     let account = params["account"].as_str().unwrap_or("").trim().to_lowercase();
                     let password = params["password"].as_str().unwrap_or("");

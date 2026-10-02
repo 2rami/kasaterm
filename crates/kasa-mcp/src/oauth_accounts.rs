@@ -14,6 +14,8 @@ pub(crate) const CODE_TTL: Duration = Duration::from_secs(120);
 /// Private-use URI schemes of first-party apps that may receive a login result (RFC 8252 §7.1).
 const APP_SCHEMES: [&str; 2] = ["kasaterm", "nachochat"];
 const MAX_PENDING: usize = 256;
+/// Wrong passwords a held sign-in survives before it must start over.
+const MAX_CLAIM_FAILURES: u8 = 5;
 const MAX_RESPONSE: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -92,12 +94,15 @@ impl Config {
     pub fn callback(&self, provider: Provider) -> String {
         format!("{}/relay/oauth/{}/callback", self.origin, provider.name())
     }
+    pub fn signup_enabled(&self) -> bool {
+        self.allow_signup
+    }
     pub fn providers(&self, storage_ready: bool) -> Value {
         let providers = [Provider::Google, Provider::Github].map(|provider| {
             let enabled = storage_ready && self.enabled(provider);
             json!({"id":provider.name(),"enabled":enabled,"reason":if enabled { "" } else { "setup_required" }})
         });
-        json!({"ok":true,"signup_enabled":self.allow_signup,"redirect_login":true,"providers":providers})
+        json!({"ok":true,"signup_enabled":self.allow_signup,"redirect_login":true,"choose_account":true,"providers":providers})
     }
 }
 
@@ -271,6 +276,8 @@ struct Pending {
     native: Option<Native>,
     /// Hash and issue time of the code sent to `native.redirect_uri`.
     code: Option<(String, Instant)>,
+    /// The client can let the person choose between a new and an existing account.
+    choose: bool,
 }
 
 #[derive(Deserialize)]
@@ -291,11 +298,21 @@ pub(crate) struct Poll {
     pub machine_id: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct Ready {
     pub identity: Identity,
     pub device: Device,
     pub label: String,
     pub link: Option<Link>,
+    pub choose: bool,
+}
+
+/// A verified identity that is not linked to any account yet, waiting for the person to create
+/// an account or name an existing one. Only the device that redeemed the sign-in holds the ticket.
+struct Held {
+    created: Instant,
+    ready: Ready,
+    failures: u8,
 }
 
 pub(crate) struct BrowserConfirmation {
@@ -310,6 +327,7 @@ pub(crate) struct BrowserConfirmation {
 pub(crate) struct OAuth {
     pub config: Config,
     pending: Mutex<HashMap<String, Pending>>,
+    held: Mutex<HashMap<String, Held>>,
     identities: Mutex<Option<Book>>,
     path: Option<PathBuf>,
     #[cfg(test)]
@@ -338,6 +356,7 @@ impl OAuth {
         Self {
             config,
             pending: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashMap::new()),
             identities: Mutex::new(book),
             path,
             #[cfg(test)]
@@ -361,6 +380,7 @@ impl OAuth {
         label: String,
         link: Option<Link>,
         native: Option<Native>,
+        choose: bool,
     ) -> Result<Value, &'static str> {
         if !self.config.enabled(device.provider) || !self.storage_ready() {
             return Err("setup_required");
@@ -414,6 +434,7 @@ impl OAuth {
                 outcome: Outcome::Waiting,
                 native,
                 code: None,
+                choose,
             },
         );
         Ok(response)
@@ -470,6 +491,7 @@ impl OAuth {
             device: request.device,
             label: request.label,
             link: request.link,
+            choose: request.choose,
         })
     }
 
@@ -602,6 +624,7 @@ impl OAuth {
                 outcome: Outcome::Confirmed,
                 native: None,
                 code: None,
+                choose: false,
             },
         );
         Ok((url, header))
@@ -734,7 +757,57 @@ impl OAuth {
             device: request.device,
             label: request.label,
             link: request.link,
+            choose: request.choose,
         }))
+    }
+
+    /// Keeps an unlinked sign-in until the person chooses an account. Returns the ticket.
+    pub fn hold(&self, ready: Ready) -> Result<String, &'static str> {
+        let mut held = self.held.lock().map_err(|_| "unavailable")?;
+        held.retain(|_, entry| entry.created.elapsed() < TTL);
+        if held.len() >= MAX_PENDING {
+            return Err("too_many_requests");
+        }
+        let ticket = secret();
+        held.insert(
+            digest(&ticket),
+            Held {
+                created: Instant::now(),
+                ready,
+                failures: 0,
+            },
+        );
+        Ok(ticket)
+    }
+
+    /// The held sign-in, left in place so a wrong password can be retried.
+    pub fn held(&self, ticket: &str) -> Result<Ready, &'static str> {
+        let held = self.held.lock().map_err(|_| "unavailable")?;
+        held.get(&digest(ticket))
+            .filter(|entry| entry.created.elapsed() < TTL)
+            .map(|entry| entry.ready.clone())
+            .ok_or("expired")
+    }
+
+    /// Ends a held sign-in. False when another request already used or ended it.
+    pub fn spend(&self, ticket: &str) -> bool {
+        self.held
+            .lock()
+            .is_ok_and(|mut held| held.remove(&digest(ticket)).is_some())
+    }
+
+    /// Counts a wrong password; the ticket dies after a few so it cannot be used to guess.
+    pub fn miss(&self, ticket: &str) {
+        let Ok(mut held) = self.held.lock() else {
+            return;
+        };
+        let key = digest(ticket);
+        if let Some(entry) = held.get_mut(&key) {
+            entry.failures = entry.failures.saturating_add(1);
+            if entry.failures >= MAX_CLAIM_FAILURES {
+                held.remove(&key);
+            }
+        }
     }
 
     pub fn resolve(

@@ -44,6 +44,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
   OAuthProviders _providers = const OAuthProviders([]);
   Uri? _providersFor;
 
+  /// Google·GitHub 이 켜진 서버에서는 아이디·비밀번호 칸을 「다른 방법」 아래 접어 둔다.
+  bool _passwordOpen = false;
+
   @override
   void initState() {
     super.initState();
@@ -148,9 +151,18 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
   }
 
+  /// 처음 보는 Google·GitHub 을 어떻게 받는지. 옛 서버는 묻지 않고 새 계정을 만든다.
+  String get _oauthHint => switch ((_providers.choose, _providers.signup)) {
+    (true, true) => '처음 쓰는 Google·GitHub 이면 새 계정을 만들지, 이미 있는 KASA 계정에 연결할지 물어봐요.',
+    (true, false) => '처음 쓰는 Google·GitHub 은 이미 있는 KASA 계정에 한 번 연결하면 그다음부터 바로 들어가요.',
+    (false, true) => '처음 쓰는 Google·GitHub 은 새 계정이 돼요. 데스크톱과 같은 계정을 쓰려면 아이디로 로그인한 뒤 설정에서 연결해 주세요.',
+    (false, false) => '데스크톱 설정 → 계정에서 연결해 둔 Google·GitHub 으로 들어가요.',
+  };
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final oauth = _providers.enabled.isNotEmpty;
     return TwinBackdrop(
       child: Scaffold(
       backgroundColor: Colors.transparent,
@@ -177,37 +189,77 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
-                  LabeledField(
-                    label: '아이디',
-                    child: TextField(
-                    key: const Key('account-input'),
-                    controller: _account,
-                    enabled: !_busy,
-                    style: const TextStyle(fontSize: 16),
-                    autofillHints: const [AutofillHints.username],
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    textInputAction: TextInputAction.next,
-                    decoration: const InputDecoration(),
+                  if (oauth) ...[
+                    for (final provider in _providers.enabled) ...[
+                      FilledButton(
+                        key: Key('oauth-${provider.id}'),
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(Look.tap, Look.buttonH),
+                        ),
+                        onPressed: _busy ? null : () => _oauth(provider),
+                        child: Text('${provider.label}로 로그인'),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    Text(
+                      _oauthHint,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  LabeledField(
-                    label: '비밀번호',
-                    child: TextField(
-                    key: const Key('password-input'),
-                    controller: _password,
-                    enabled: !_busy,
-                    style: const TextStyle(fontSize: 16),
-                    obscureText: true,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    autofillHints: const [AutofillHints.password],
-                    textInputAction: TextInputAction.go,
-                    onSubmitted: (_) => _login(),
-                    decoration: const InputDecoration(),
+                    const SizedBox(height: Look.groupGap),
+                    Text(
+                      '다른 방법',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: Look.groupTitleGap),
+                  ],
+                  if (oauth && !_passwordOpen)
+                    OutlinedButton(
+                      key: const Key('account-open'),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(Look.tap, Look.buttonH),
+                      ),
+                      onPressed: _busy ? null : () => setState(() => _passwordOpen = true),
+                      child: const Text('아이디로 로그인'),
+                    )
+                  else ...[
+                    LabeledField(
+                      label: '아이디',
+                      child: TextField(
+                        key: const Key('account-input'),
+                        controller: _account,
+                        enabled: !_busy,
+                        autofocus: oauth,
+                        style: const TextStyle(fontSize: 16),
+                        autofillHints: const [AutofillHints.username],
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        textInputAction: TextInputAction.next,
+                        decoration: const InputDecoration(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    LabeledField(
+                      label: '비밀번호',
+                      child: TextField(
+                        key: const Key('password-input'),
+                        controller: _password,
+                        enabled: !_busy,
+                        style: const TextStyle(fontSize: 16),
+                        obscureText: true,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        autofillHints: const [AutofillHints.password],
+                        textInputAction: TextInputAction.go,
+                        onSubmitted: (_) => _login(),
+                        decoration: const InputDecoration(),
+                      ),
+                    ),
+                  ],
                   if (_error ?? widget.message case final message?) ...[
                     const SizedBox(height: 12),
                     Semantics(
@@ -218,41 +270,21 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       ),
                     ),
                   ],
-                  const SizedBox(height: 12),
-                  FilledButton(
-                    key: const Key('account-login'),
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(Look.tap, Look.buttonH),
-                    ),
-                    onPressed: _busy ? null : _login,
-                    child: _busy
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('로그인'),
-                  ),
-                  for (final provider in _providers.enabled) ...[
-                    const SizedBox(height: 8),
-                    OutlinedButton(
-                      key: Key('oauth-${provider.id}'),
-                      style: OutlinedButton.styleFrom(
+                  if (!oauth || _passwordOpen) ...[
+                    const SizedBox(height: 12),
+                    (oauth ? OutlinedButton.new : FilledButton.new)(
+                      key: const Key('account-login'),
+                      style: (oauth ? OutlinedButton.styleFrom : FilledButton.styleFrom)(
                         minimumSize: const Size(Look.tap, Look.buttonH),
                       ),
-                      onPressed: _busy ? null : () => _oauth(provider),
-                      child: Text('${provider.label} 로그인'),
-                    ),
-                  ],
-                  if (_providers.enabled.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _providers.signup
-                          ? '처음 쓰는 Google·GitHub 은 새 계정이 돼요. 데스크톱과 같은 계정을 쓰려면 아이디로 로그인한 뒤 설정에서 연결해 주세요.'
-                          : '데스크톱 설정 → 계정에서 연결해 둔 Google·GitHub 으로 들어가요.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
+                      onPressed: _busy ? null : _login,
+                      child: _busy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('로그인'),
                     ),
                   ],
                   const SizedBox(height: 8),

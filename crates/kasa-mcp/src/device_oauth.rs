@@ -14,6 +14,8 @@ struct Attempt {
     request: Value,
     link: bool,
     loopback: Option<Arc<Loopback>>,
+    /// Gateway capability for an unlinked sign-in waiting for the person's account choice.
+    ticket: Option<String>,
 }
 
 /// RFC 8252 loopback receiver. The gateway sends the browser here with a one-time code that only
@@ -128,22 +130,20 @@ impl Loopback {
     }
 }
 
-/// Gateways that predate redirect login keep the typed-code flow.
-async fn redirect_login(gateway: &str) -> bool {
+/// What the gateway supports. Older gateways keep the typed-code flow and create an account for
+/// an unlinked identity without asking.
+async fn capabilities(gateway: &str) -> Value {
     let Ok(client) = client() else {
-        return false;
+        return Value::Null;
     };
     let Ok(response) = client
         .get(format!("{gateway}/relay/oauth/providers"))
         .send()
         .await
     else {
-        return false;
+        return Value::Null;
     };
-    response
-        .json::<Value>()
-        .await
-        .is_ok_and(|value| value["redirect_login"] == true)
+    response.json::<Value>().await.unwrap_or(Value::Null)
 }
 
 fn gateway() -> anyhow::Result<String> {
@@ -208,7 +208,11 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
     let mut body = json!({
         "provider":provider,"kind":"desktop","machine_id":machine,"label":crate::mobile::machine_name(),"link":link,
     });
-    let loopback = if redirect_login(&gateway).await {
+    let capabilities = capabilities(&gateway).await;
+    if !link && capabilities["choose_account"] == true {
+        body["choose"] = json!(true);
+    }
+    let loopback = if capabilities["redirect_login"] == true {
         let (loopback, listener) = Loopback::bind()?;
         body["code_challenge"] = json!(crate::oauth_accounts::pkce_challenge(&loopback.verifier));
         body["code_challenge_method"] = json!("S256");
@@ -276,6 +280,7 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
         link,
         request,
         loopback: loopback.clone(),
+        ticket: None,
     };
     {
         let _guard = CREDENTIALS
@@ -329,6 +334,9 @@ fn safe_code(value: &Value) -> &'static str {
         Some("account_not_linked") => "account_not_linked",
         Some("already_linked") => "already_linked",
         Some("cancelled") => "cancelled",
+        Some("bad_credentials") => "bad_credentials",
+        Some("signup_disabled") => "signup_disabled",
+        Some("account_disabled") => "account_disabled",
         Some("expired" | "link_expired" | "invalid_grant") => "expired",
         Some("rate_limited") => "rate_limited",
         _ => "oauth_unavailable",
@@ -346,7 +354,8 @@ fn attempt_current(
         && gateway.is_some_and(|gateway| gateway.trim_end_matches('/') == attempt.gateway)
 }
 
-pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
+/// The attempt named by `flow_id`, if this device's credential and gateway have not changed since.
+fn active(params: &Value) -> anyhow::Result<Attempt> {
     let attempt = ATTEMPT
         .lock()
         .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?
@@ -358,19 +367,25 @@ pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
             .is_some_and(|id| attempt.request["request_id"] == id),
         "account_changed"
     );
-    {
-        let _guard = CREDENTIALS
-            .lock()
-            .map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
-        anyhow::ensure!(
-            attempt_current(
-                &attempt,
-                current().as_ref(),
-                crate::mobile::gateway().as_deref(),
-                EPOCH.load(Ordering::Acquire)
-            ),
-            "account_changed"
-        );
+    let _guard = CREDENTIALS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
+    anyhow::ensure!(
+        attempt_current(
+            &attempt,
+            current().as_ref(),
+            crate::mobile::gateway().as_deref(),
+            EPOCH.load(Ordering::Acquire)
+        ),
+        "account_changed"
+    );
+    Ok(attempt)
+}
+
+pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
+    let attempt = active(params)?;
+    if attempt.ticket.is_some() {
+        return Ok(json!({"ok":true,"status":"choose"}));
     }
     let request = match &attempt.loopback {
         Some(loopback) => {
@@ -411,6 +426,77 @@ pub(super) async fn poll(params: &Value) -> anyhow::Result<Value> {
     anyhow::ensure!(status.is_success(), "{}", safe_code(&value));
     if value["status"] == "pending" {
         return Ok(json!({"ok":true,"status":"pending"}));
+    }
+    settle(attempt, value).await
+}
+
+/// The person's answer to an unlinked sign-in: a new account, or an existing one by its password.
+/// A wrong password keeps the choice open; anything else ends the attempt.
+pub(super) async fn choose(params: &Value, claim: bool) -> anyhow::Result<Value> {
+    let attempt = active(params)?;
+    let ticket = attempt
+        .ticket
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("expired"))?;
+    let (path, body) = if claim {
+        let account = params["account"].as_str().unwrap_or("").trim();
+        let password = params["password"].as_str().unwrap_or("");
+        anyhow::ensure!(
+            !account.is_empty() && !password.is_empty(),
+            "bad_credentials"
+        );
+        (
+            "claim",
+            json!({"ticket":ticket,"account":account,"password":password}),
+        )
+    } else {
+        ("signup", json!({"ticket":ticket}))
+    };
+    let response = client()?
+        .post(format!("{}/relay/oauth/{path}", attempt.gateway))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?;
+    let status = response.status();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?;
+    if !status.is_success() {
+        let code = safe_code(&value);
+        if !matches!(code, "bad_credentials" | "rate_limited") {
+            forget(&attempt);
+        }
+        anyhow::bail!("{code}");
+    }
+    anyhow::ensure!(value["status"] == "complete", "invalid_oauth_response");
+    settle(attempt, value).await
+}
+
+async fn settle(attempt: Attempt, value: Value) -> anyhow::Result<Value> {
+    if !attempt.link && value["status"] == "choose" {
+        let ticket = value["ticket"]
+            .as_str()
+            .filter(|ticket| opaque(ticket))
+            .ok_or_else(|| anyhow::anyhow!("invalid_oauth_response"))?;
+        let mut active = ATTEMPT
+            .lock()
+            .map_err(|_| anyhow::anyhow!("oauth_unavailable"))?;
+        let held = active
+            .as_mut()
+            .filter(|active| active.request["request_id"] == attempt.request["request_id"])
+            .ok_or_else(|| anyhow::anyhow!("account_changed"))?;
+        held.ticket = Some(ticket.into());
+        let provider = match value["provider"].as_str() {
+            Some("google") => "google",
+            Some("github") => "github",
+            _ => "",
+        };
+        // The ticket stays in this process; the UI only learns who signed in and what it may do.
+        return Ok(json!({"ok":true,"status":"choose","provider":provider,
+            "display":super::display_label(value["display"].as_str()),
+            "signup_enabled":value["signup_enabled"] == true}));
     }
     let credential = if attempt.link {
         anyhow::ensure!(
@@ -561,6 +647,7 @@ mod tests {
             request: Value::Null,
             link: false,
             loopback: None,
+            ticket: None,
         };
         assert!(attempt_current(
             &attempt,

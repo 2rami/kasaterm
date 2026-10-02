@@ -16,6 +16,22 @@ pub(crate) enum Action {
     OAuth(Provider),
     Linked,
     CancelOAuth,
+    /// The provider signed in an identity no account has yet; the person picks one.
+    Choose,
+    OpenClaim,
+    Signup,
+    CancelChoice,
+}
+
+/// An unlinked provider sign-in waiting for the person's answer. The gateway ticket stays in
+/// `device_auth`; this holds only what the page shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Choice {
+    flow_id: String,
+    provider: Provider,
+    display: String,
+    signup: bool,
+    claim: bool,
 }
 
 #[derive(Default)]
@@ -33,6 +49,8 @@ pub(crate) struct State {
     oauth_cancel: Option<Arc<AtomicBool>>,
     oauth_code_rx: Option<Receiver<String>>,
     oauth_code: Option<String>,
+    choice_rx: Option<Receiver<Choice>>,
+    choice: Option<Choice>,
 }
 
 #[derive(Clone)]
@@ -47,6 +65,7 @@ pub(crate) struct View {
     providers: serde_json::Value,
     oauth_waiting: bool,
     oauth_code: Option<String>,
+    choice: Option<Choice>,
 }
 
 pub(crate) fn mask(value: &str) -> String {
@@ -85,7 +104,24 @@ impl State {
             providers: self.providers.clone(),
             oauth_waiting: self.oauth_cancel.is_some(),
             oauth_code: self.oauth_code.clone(),
+            choice: self.choice.clone(),
         }
+    }
+
+    /// Verification-run screens of the sign-in page with providers enabled and, optionally, an
+    /// unlinked sign-in waiting for the account choice. Holds no gateway capability.
+    pub(crate) fn fixture(&mut self, choice: bool, claim: bool) {
+        self.providers = serde_json::json!({"state":"ready","providers":[
+            {"id":"google","enabled":true},{"id":"github","enabled":true}]});
+        self.provider_check = None;
+        self.provider_checked = Some(std::time::Instant::now());
+        self.choice = choice.then(|| Choice {
+            flow_id: String::new(),
+            provider: Provider::Google,
+            display: "person@example.com".into(),
+            signup: true,
+            claim,
+        });
     }
 
     pub(crate) fn hide(&mut self) {
@@ -96,6 +132,9 @@ impl State {
             if !cancel.swap(true, Ordering::AcqRel) {
                 kasa_mcp::device_auth::cancel_oauth();
             }
+        }
+        if self.choice.take().is_some() {
+            kasa_mcp::device_auth::cancel_oauth();
         }
     }
 
@@ -133,9 +172,18 @@ impl State {
         self.oauth_cancel = None;
         self.oauth_code = None;
         self.oauth_code_rx = None;
+        if let Some(choice) = self.choice_rx.take().and_then(|rx| rx.try_recv().ok()) {
+            self.choice = Some(choice);
+        }
         match result {
+            Ok(Action::Choose) => {}
+            // A wrong password or a short lockout keeps the choice so the person can try again.
+            Err(error) if self.choice.is_some() && (error == BAD_CREDENTIALS || error == RATE_LIMITED) => {
+                self.message = Some((error, true));
+            }
             Ok(Action::Login) => {
                 self.form = false;
+                self.choice = None;
                 // 관문에 붙은 즉시 다른 기기의 에이전트 계정 목록을 받는다.
                 kasa_mcp::agent_accounts::poke();
                 self.message = Some((
@@ -147,15 +195,22 @@ impl State {
                 self.message = Some(("이 KASA 계정에 로그인 방법을 연결했어요".into(), false))
             }
             Ok(Action::CancelOAuth) => self.message = Some(("로그인을 취소했어요".into(), false)),
+            Ok(Action::CancelChoice) => self.choice = None,
             Ok(_) => {
                 self.confirm_logout = false;
                 self.message = Some(("이 기기에서 로그아웃했어요".into(), false));
             }
-            Err(error) => self.message = Some((error, true)),
+            Err(error) => {
+                self.choice = None;
+                self.message = Some((error, true));
+            }
         }
         true
     }
 }
+
+const BAD_CREDENTIALS: &str = "아이디나 비밀번호를 확인해 주세요";
+const RATE_LIMITED: &str = "로그인 시도가 많아요. 잠시 후 다시 시도해 주세요";
 
 fn safe_error(error: &str) -> String {
     if error.contains("setup_required") {
@@ -168,10 +223,14 @@ fn safe_error(error: &str) -> String {
         "브라우저에서 로그인을 취소했어요".into()
     } else if error.contains("expired") || error.contains("account_changed") {
         "로그인 요청이 만료되었거나 계정이 바뀌었어요. 다시 시작해 주세요".into()
-    } else if error.contains("아이디나 비밀번호") {
-        "아이디나 비밀번호를 확인해 주세요".into()
-    } else if error.contains("너무 여러 번") {
-        "로그인 시도가 많아요. 잠시 후 다시 시도해 주세요".into()
+    } else if error.contains("아이디나 비밀번호") || error.contains("bad_credentials") {
+        BAD_CREDENTIALS.into()
+    } else if error.contains("signup_disabled") {
+        "이 서버는 새 계정을 받지 않아요. 기존 계정에 연결해 주세요".into()
+    } else if error.contains("account_disabled") {
+        "사용이 막힌 계정이에요".into()
+    } else if error.contains("너무 여러 번") || error.contains("rate_limited") {
+        RATE_LIMITED.into()
     } else if error.contains("관문이 꺼져") {
         "기기 연결 서버가 꺼져 있어요".into()
     } else {
@@ -206,6 +265,11 @@ impl App {
             return;
         }
         self.device_account.message = None;
+        // The password form doubles as the existing-account step of a provider sign-in.
+        let action = match action {
+            Action::Login if self.device_account.choice.is_some() => Action::Choose,
+            action => action,
+        };
         match action {
             Action::OpenLogin => {
                 self.device_account.refresh();
@@ -233,14 +297,61 @@ impl App {
                 let (code_tx, code_rx) = mpsc::channel();
                 self.device_account.oauth_code_rx = Some(code_rx);
                 self.device_account.oauth_code = None;
+                let (choice_tx, choice_rx) = mpsc::channel();
+                self.device_account.choice_rx = Some(choice_rx);
+                self.device_account.choice = None;
                 let (tx, rx) = mpsc::channel();
                 self.device_account.pending = Some(rx);
                 std::thread::spawn(move || {
-                    let result = run_oauth(provider, link, &cancel, code_tx);
+                    let result = run_oauth(provider, link, &cancel, code_tx, choice_tx);
                     let _ = tx.send(result);
                 });
             }
             Action::Linked | Action::CancelOAuth => {}
+            Action::OpenClaim => {
+                if let Some(choice) = self.device_account.choice.as_mut() {
+                    choice.claim = true;
+                    self.native_settings_focus(SettingsInput::DeviceAccountName);
+                }
+            }
+            Action::Choose | Action::Signup | Action::CancelChoice => {
+                let Some(choice) = self.device_account.choice.clone() else {
+                    return;
+                };
+                if action == Action::Choose
+                    && (self.device_account.account.trim().is_empty()
+                        || self.device_account.password.is_empty())
+                {
+                    self.device_account.message =
+                        Some(("아이디와 비밀번호를 입력해 주세요".into(), true));
+                    self.chrome_dirty = true;
+                    return;
+                }
+                self.native_settings_blur();
+                let params = match action {
+                    Action::Choose => serde_json::json!({"op":"oauth_claim","flow_id":choice.flow_id,
+                        "account":self.device_account.account.trim(),
+                        "password":std::mem::take(&mut self.device_account.password)}),
+                    Action::Signup => {
+                        serde_json::json!({"op":"oauth_signup","flow_id":choice.flow_id})
+                    }
+                    _ => serde_json::json!({"op":"oauth_cancel","flow_id":choice.flow_id}),
+                };
+                let (tx, rx) = mpsc::channel();
+                self.device_account.pending = Some(rx);
+                std::thread::spawn(move || {
+                    let result = kasa_mcp::device_auth::handle(&params)
+                        .map(|_| {
+                            if action == Action::CancelChoice {
+                                Action::CancelChoice
+                            } else {
+                                Action::Login
+                            }
+                        })
+                        .map_err(|error| safe_error(&error.to_string()));
+                    let _ = tx.send(result);
+                });
+            }
             Action::Login | Action::Logout => {
                 if action == Action::Login
                     && (self.device_account.account.trim().is_empty()
@@ -351,56 +462,8 @@ pub(super) fn paint(
             );
             *y += ROW_H;
         }
-    } else if v.form {
-        text_field(
-            g,
-            s,
-            hits,
-            caret,
-            x,
-            *y,
-            w,
-            "아이디",
-            &v.account,
-            SettingsInput::DeviceAccountName,
-            s.settings_caret,
-            false,
-        );
-        *y += ROW_H;
-        text_field(
-            g,
-            s,
-            hits,
-            caret,
-            x,
-            *y,
-            w,
-            "비밀번호",
-            &v.password_mask,
-            SettingsInput::DeviceAccountPassword,
-            s.settings_caret,
-            false,
-        );
-        *y += ROW_H;
-        account_buttons(
-            g,
-            s,
-            hits,
-            x,
-            y,
-            w,
-            "로그인",
-            Action::Login,
-            "취소",
-            Action::Cancel,
-        );
-        info_slab(
-            g,
-            x,
-            y,
-            w,
-            "비밀번호는 저장하지 않습니다. 로그인 정보는 이 기기에 유지됩니다.",
-        );
+    } else if let Some(choice) = &v.choice {
+        paint_choice(g, s, hits, caret, x, y, w, v, choice);
     } else if v.confirm_logout {
         info_slab(
             g,
@@ -421,9 +484,10 @@ pub(super) fn paint(
             "취소",
             Action::Cancel,
         );
-    } else {
-        let saved = v.status["credential_saved"].as_bool() == Some(true);
-        if saved {
+    } else if v.status["credential_saved"].as_bool() == Some(true) {
+        if v.form {
+            password_form(g, s, hits, caret, x, y, w, v, "로그인", Action::Cancel);
+        } else {
             account_buttons(
                 g,
                 s,
@@ -436,78 +500,37 @@ pub(super) fn paint(
                 "로그아웃",
                 Action::AskLogout,
             );
-        } else {
-            let bw = (g.measure_chrome_text("로그인", 12.0, true) + 32.0).min(w);
-            button(
-                g,
-                s,
-                hits,
-                (x, *y, bw, CTL_H),
-                "로그인",
-                Target::Setting(SettingsAction::DeviceAccount(Action::OpenLogin)),
-                true,
-            );
-            *y += ROW_H;
         }
-    }
-    if !v.busy && !v.confirm_logout {
-        let linked = v.status["logged_in"] == true;
-        let width = ((w - 8.0) / 2.0).max(0.0);
-        for (index, provider) in [Provider::Google, Provider::Github].into_iter().enumerate() {
-            let name = if provider == Provider::Google {
-                "Google"
-            } else {
-                "GitHub"
-            };
-            let label = format!("{name} {}", if linked { "연결" } else { "로그인" });
-            let rect = (x + index as f32 * (width + 8.0), *y, width, CTL_H);
-            if provider_enabled(&v.providers, provider) {
-                button(
-                    g,
-                    s,
-                    hits,
-                    rect,
-                    &label,
-                    Target::Setting(SettingsAction::DeviceAccount(Action::OAuth(provider))),
-                    false,
-                );
-            } else {
-                crate::native_controls::text_button(
-                    g,
-                    rect,
-                    s.cursor,
-                    &label,
-                    crate::native_controls::Style {
-                        enabled: false,
-                        ..Default::default()
-                    },
-                );
-            }
-        }
-        *y += ROW_H;
-        if ![Provider::Google, Provider::Github]
-            .into_iter()
-            .any(|provider| provider_enabled(&v.providers, provider))
-        {
-            let hint = match v.providers["state"].as_str() {
-                Some("setup_required") => {
-                    "Google·GitHub 로그인 준비 중 · 서버에 OAuth 앱을 등록해야 사용할 수 있어요."
-                }
-                Some("isolated") => "검증 실행에서는 실제 계정 로그인을 사용하지 않아요.",
-                Some("unavailable") => {
-                    "로그인 방법을 확인하지 못했어요. 연결 서버의 상태와 업데이트를 확인해 주세요."
-                }
-                _ => "Google·GitHub 로그인 사용 가능 여부 확인 중…",
-            };
-            info_slab(g, x, y, w, hint);
-        } else if linked {
+        provider_buttons(g, s, hits, x, y, w, v, true);
+    } else {
+        // Signing in with Google·GitHub is the main path; an ID and password is the fallback.
+        let ready = provider_buttons(g, s, hits, x, y, w, v, false);
+        if ready {
             info_slab(
                 g,
                 x,
                 y,
                 w,
-                "현재 KASA 계정에 로그인 방법을 연결합니다. 다른 계정과 자동으로 합치지 않습니다.",
+                "처음 쓰는 Google·GitHub 이면 새 계정을 만들지, 이미 있는 KASA 계정에 연결할지 물어봐요.",
             );
+        }
+        draw_text(g, x, *y + 4.0, "다른 방법", 11.0, theme::text_dim(), false);
+        *y += 24.0;
+        if v.form {
+            password_form(g, s, hits, caret, x, y, w, v, "로그인", Action::Cancel);
+        } else {
+            let label = "아이디로 로그인";
+            let bw = (g.measure_chrome_text(label, 12.0, false) + 32.0).min(w);
+            button(
+                g,
+                s,
+                hits,
+                (x, *y, bw, CTL_H),
+                label,
+                Target::Setting(SettingsAction::DeviceAccount(Action::OpenLogin)),
+                false,
+            );
+            *y += ROW_H;
         }
     }
     if let Some((message, error)) = &v.message {
@@ -541,6 +564,221 @@ pub(super) fn paint(
     *y += 24.0;
 }
 
+fn provider_name(provider: Provider) -> &'static str {
+    if provider == Provider::Google {
+        "Google"
+    } else {
+        "GitHub"
+    }
+}
+
+/// Google·GitHub buttons side by side. Signed out they are the primary way in; signed in they link
+/// another login method to this account. Returns whether any provider can be used.
+#[allow(clippy::too_many_arguments)]
+fn provider_buttons(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    v: &View,
+    linked: bool,
+) -> bool {
+    let width = ((w - 8.0) / 2.0).max(0.0);
+    for (index, provider) in [Provider::Google, Provider::Github].into_iter().enumerate() {
+        let label = format!(
+            "{} {}",
+            provider_name(provider),
+            if linked { "연결" } else { "로그인" }
+        );
+        let rect = (x + index as f32 * (width + 8.0), *y, width, CTL_H);
+        if provider_enabled(&v.providers, provider) {
+            button(
+                g,
+                s,
+                hits,
+                rect,
+                &label,
+                Target::Setting(SettingsAction::DeviceAccount(Action::OAuth(provider))),
+                !linked,
+            );
+        } else {
+            crate::native_controls::text_button(
+                g,
+                rect,
+                s.cursor,
+                &label,
+                crate::native_controls::Style {
+                    enabled: false,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    *y += ROW_H;
+    let ready = [Provider::Google, Provider::Github]
+        .into_iter()
+        .any(|provider| provider_enabled(&v.providers, provider));
+    if !ready {
+        let hint = match v.providers["state"].as_str() {
+            Some("setup_required") => {
+                "Google·GitHub 로그인 준비 중 · 서버에 OAuth 앱을 등록해야 사용할 수 있어요."
+            }
+            Some("isolated") => "검증 실행에서는 실제 계정 로그인을 사용하지 않아요.",
+            Some("unavailable") => {
+                "로그인 방법을 확인하지 못했어요. 연결 서버의 상태와 업데이트를 확인해 주세요."
+            }
+            _ => "Google·GitHub 로그인 사용 가능 여부 확인 중…",
+        };
+        info_slab(g, x, y, w, hint);
+    } else if linked {
+        info_slab(
+            g,
+            x,
+            y,
+            w,
+            "현재 KASA 계정에 로그인 방법을 연결합니다. 다른 계정과 자동으로 합치지 않습니다.",
+        );
+    }
+    ready
+}
+
+#[allow(clippy::too_many_arguments)]
+fn password_form(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    v: &View,
+    submit: &str,
+    cancel: Action,
+) {
+    text_field(
+        g,
+        s,
+        hits,
+        caret,
+        x,
+        *y,
+        w,
+        "아이디",
+        &v.account,
+        SettingsInput::DeviceAccountName,
+        s.settings_caret,
+        false,
+    );
+    *y += ROW_H;
+    text_field(
+        g,
+        s,
+        hits,
+        caret,
+        x,
+        *y,
+        w,
+        "비밀번호",
+        &v.password_mask,
+        SettingsInput::DeviceAccountPassword,
+        s.settings_caret,
+        false,
+    );
+    *y += ROW_H;
+    account_buttons(g, s, hits, x, y, w, submit, Action::Login, "취소", cancel);
+}
+
+/// An unlinked Google·GitHub sign-in: start a new account, or connect an existing one by its
+/// password once so the provider alone signs in afterwards.
+#[allow(clippy::too_many_arguments)]
+fn paint_choice(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    v: &View,
+    choice: &Choice,
+) {
+    let who = if choice.display.is_empty() {
+        provider_name(choice.provider).to_string()
+    } else {
+        format!("{} · {}", provider_name(choice.provider), choice.display)
+    };
+    let who = fit(g, &who, w, 12.0, true);
+    draw_text(g, x, *y, &who, 12.0, theme::text(), true);
+    *y += 18.0;
+    for line in wrap_words(g, "아직 KASA 계정에 연결되지 않은 로그인이에요.", w, 12.0) {
+        draw_text(g, x, *y, &line, 12.0, theme::text(), false);
+        *y += 18.0;
+    }
+    *y += 8.0;
+    if choice.claim {
+        password_form(
+            g,
+            s,
+            hits,
+            caret,
+            x,
+            y,
+            w,
+            v,
+            "연결하고 로그인",
+            Action::CancelChoice,
+        );
+        info_slab(
+            g,
+            x,
+            y,
+            w,
+            &format!(
+                "기존 KASA 계정의 비밀번호를 이번 한 번만 확인해요. 다음부터는 {} 로그인만으로 들어와요.",
+                provider_name(choice.provider)
+            ),
+        );
+        return;
+    }
+    let mut buttons: Vec<(&str, Action, bool)> = vec![("기존 계정에 연결", Action::OpenClaim, true)];
+    if choice.signup {
+        buttons.push(("새 계정 만들기", Action::Signup, false));
+    }
+    buttons.push(("취소", Action::CancelChoice, false));
+    let mut bx = x;
+    for (label, action, primary) in buttons {
+        let bw = g.measure_chrome_text(label, 12.0, primary) + 32.0;
+        if bx > x && bx + bw > x + w {
+            bx = x;
+            *y += ROW_H;
+        }
+        button(
+            g,
+            s,
+            hits,
+            (bx, *y, bw.min(w), CTL_H),
+            label,
+            Target::Setting(SettingsAction::DeviceAccount(action)),
+            primary,
+        );
+        bx += bw + 8.0;
+    }
+    *y += ROW_H;
+    info_slab(
+        g,
+        x,
+        y,
+        w,
+        if choice.signup {
+            "이미 쓰던 KASA 계정이 있으면 연결하세요. 새 계정을 만들면 기존 계정의 기기·설정과 따로 움직여요."
+        } else {
+            "이 서버는 새 계정을 받지 않아요. 기존 KASA 계정에 연결해 주세요."
+        },
+    );
+}
+
 fn provider_enabled(providers: &serde_json::Value, provider: Provider) -> bool {
     providers["providers"].as_array().is_some_and(|providers| {
         providers
@@ -554,6 +792,7 @@ fn run_oauth(
     link: bool,
     cancelled: &AtomicBool,
     code_tx: mpsc::Sender<String>,
+    choice_tx: mpsc::Sender<Choice>,
 ) -> Result<Action, String> {
     let call = |params| {
         kasa_mcp::device_auth::handle(&params).map_err(|error| safe_error(&error.to_string()))
@@ -578,6 +817,16 @@ fn run_oauth(
         match response {
             Ok(value) if value["status"] == "complete" => return Ok(Action::Login),
             Ok(value) if value["status"] == "linked" => return Ok(Action::Linked),
+            Ok(value) if value["status"] == "choose" => {
+                let _ = choice_tx.send(Choice {
+                    flow_id: flow_id.to_string(),
+                    provider,
+                    display: value["display"].as_str().unwrap_or_default().to_string(),
+                    signup: value["signup_enabled"] == true,
+                    claim: false,
+                });
+                return Ok(Action::Choose);
+            }
             Err(error) => {
                 let _ = call(serde_json::json!({"op":"oauth_cancel","flow_id":flow_id}));
                 return Err(error);
@@ -711,5 +960,51 @@ mod tests {
         result_tx.send(Ok(Action::CancelOAuth)).unwrap();
         assert!(state.poll());
         assert!(state.view().oauth_code.is_none());
+    }
+
+    #[test]
+    fn unlinked_sign_in_waits_for_choice_and_survives_only_a_wrong_password() {
+        let (result_tx, result_rx) = mpsc::channel();
+        let (choice_tx, choice_rx) = mpsc::channel();
+        let mut state = State {
+            pending: Some(result_rx),
+            choice_rx: Some(choice_rx),
+            oauth_cancel: Some(Arc::new(AtomicBool::new(false))),
+            ..Default::default()
+        };
+        let choice = Choice {
+            flow_id: "flow".into(),
+            provider: Provider::Google,
+            display: "person@example.com".into(),
+            signup: true,
+            claim: false,
+        };
+        choice_tx.send(choice.clone()).unwrap();
+        result_tx.send(Ok(Action::Choose)).unwrap();
+        assert!(state.poll());
+        assert_eq!(state.view().choice, Some(choice));
+        assert!(!state.view().busy && !state.view().oauth_waiting);
+
+        let (tx, rx) = mpsc::channel();
+        state.pending = Some(rx);
+        tx.send(Err(safe_error("bad_credentials"))).unwrap();
+        assert!(state.poll());
+        assert!(state.choice.is_some(), "a wrong password dropped the choice");
+        assert!(state.message.as_ref().unwrap().1);
+
+        let (tx, rx) = mpsc::channel();
+        state.pending = Some(rx);
+        tx.send(Err(safe_error("expired"))).unwrap();
+        assert!(state.poll());
+        assert!(state.choice.is_none());
+    }
+
+    #[test]
+    fn leaving_the_page_drops_a_waiting_choice() {
+        let mut state = State::default();
+        state.fixture(true, true);
+        assert!(state.view().choice.is_some());
+        state.hide();
+        assert!(state.view().choice.is_none());
     }
 }

@@ -16,6 +16,17 @@ OAuth is disabled until the relay administrator registers provider applications 
 4. Deploy the tested relay under the normal deployment procedure. Merely rebuilding the desktop app does not enable server login. Check `GET /relay/oauth/providers` for enabled providers without exposing secret values.
 5. Initially sign in with the existing KASA account/password, then choose **Google 연결** or **GitHub 연결** in device-account settings. Current apps use the redirect login below and go straight to the provider; older apps still get a browser page that names the requesting device and asks for the verification code displayed only in that KASA app. Future devices can use that provider's login button.
 
+### First sign-in with an identity no account has yet
+
+Clients that see `"choose_account": true` in `GET /relay/oauth/providers` send `choose: true` with a non-link `oauth/start`. When the provider identity is not linked to any account, the gateway then neither creates an account nor refuses: the completed poll or token redemption returns `{"status":"choose","ticket":…,"provider":…,"display":…,"signup_enabled":…}` instead of a device credential. The ticket goes only to the device that proved the sign-in (PKCE verifier or poll capability), lives ten minutes and holds the verified identity server-side.
+
+- `POST /relay/oauth/signup {ticket}` creates an OAuth account (only when sign-up is enabled; otherwise `403 signup_disabled`) and returns the usual `complete` body.
+- `POST /relay/oauth/claim {ticket, account, password}` links the identity to an existing password account after checking its password once, then returns `complete` for that account. It shares the password login's per-account lockout and per-IP limit. A wrong password returns `401 bad_credentials` and keeps the ticket; five wrong passwords end it. An identity already linked elsewhere returns `409 already_linked`.
+- Each ticket is spent by its first successful answer. Afterwards the provider alone signs in to that account on any device. Email addresses never select the account — the person names it and proves it.
+- Clients that omit `choose` keep the earlier behavior (`KASA_OAUTH_ALLOW_SIGNUP` decides between a new account and `account_not_linked`), so older apps are unaffected.
+
+Desktop `relay.account` adds `oauth_signup {flow_id}` and `oauth_claim {flow_id, account, password}`; `oauth_poll` reports `choose` with only `provider`, `display` and `signup_enabled` — the ticket stays in process memory. Both apps lead the signed-out page with the Google·GitHub buttons and keep the ID/password form under 「다른 방법」.
+
 New OAuth-only accounts are **not** created by default. `KASA_OAUTH_ALLOW_SIGNUP=1` explicitly enables public sign-up for successfully verified provider identities. Enabling this is an administrator policy choice, not a build default. Otherwise an unlinked identity receives `account_not_linked`. Do not enable public registration merely to test the buttons.
 
 ## Identity and security contract

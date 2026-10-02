@@ -17,7 +17,13 @@ const installId = '0123456789abcdef0123456789abcdef';
 
 /// 관문 흉내 — 확인 화면을 연 뒤 [pendingPolls] 번은 기다리라 하고 그다음 [finish] 를 준다.
 class FakeGateway {
-  FakeGateway({this.pendingPolls = 1, Map<String, Object?>? finish, this.finishStatus = 200, this.redirect = false})
+  FakeGateway({
+    this.pendingPolls = 1,
+    Map<String, Object?>? finish,
+    this.finishStatus = 200,
+    this.redirect = false,
+    this.choose = false,
+  })
     : finish = finish ??
           {'ok': true, 'status': 'complete', 'account': 'oauth_ab12', 'display_name': 'me@example.test', 'device_id': 'dev-1', 'token': 'kdt_phone'};
 
@@ -25,6 +31,9 @@ class FakeGateway {
 
   /// 확인 코드 없는 앱 리다이렉트를 아는 관문인가.
   final bool redirect;
+
+  /// 처음 보는 신원을 바로 새 계정으로 만들지 않고 고르게 하는 관문인가.
+  final bool choose;
   final Map<String, Object?> finish;
   final int finishStatus;
   final requests = <http.Request>[];
@@ -35,7 +44,7 @@ class FakeGateway {
     switch (req.url.path) {
       case '/relay/oauth/providers':
         return http.Response(
-          '{"ok":true,"signup_enabled":true,${redirect ? '"redirect_login":true,' : ''}"providers":[{"id":"google","enabled":true},{"id":"github","enabled":false}]}',
+          '{"ok":true,"signup_enabled":true,${redirect ? '"redirect_login":true,' : ''}${choose ? '"choose_account":true,' : ''}"providers":[{"id":"google","enabled":true},{"id":"github","enabled":false}]}',
           200,
         );
       case '/relay/oauth/start':
@@ -61,9 +70,21 @@ class FakeGateway {
         return http.Response(jsonEncode(finish), finishStatus);
       case '/relay/oauth/cancel':
         return http.Response('{"ok":true,"status":"cancelled"}', 200);
+      case '/relay/oauth/claim':
+        expect(body['ticket'], 'held-ticket');
+        if (body['account'] != 'fixture' || body['password'] != 'right') {
+          return http.Response('{"ok":false,"error":"bad_credentials"}', 401);
+        }
+        return http.Response(jsonEncode(_complete('fixture')), 200);
+      case '/relay/oauth/signup':
+        expect(body, {'ticket': 'held-ticket'});
+        return http.Response(jsonEncode(_complete('oauth_new')), 200);
     }
     return http.Response('{}', 404);
   });
+
+  static Map<String, Object?> _complete(String account) =>
+      {'ok': true, 'status': 'complete', 'account': account, 'device_id': 'dev-2', 'token': 'kdt_chosen'};
 
   Map start() => jsonDecode(requests.firstWhere((r) => r.url.path == '/relay/oauth/start').body) as Map;
 }
@@ -355,5 +376,151 @@ void main() {
     final back = AccountSession.fromJson(s.toJson().cast<String, dynamic>());
     expect(back.label, 'me@example.test');
     expect(AccountSession(origin: origin, account: 'fixture', deviceId: 'd', token: 'kdt_x').label, 'fixture');
+  });
+
+  group('처음 보는 Google 로그인은 계정을 고르게 한다', () {
+    FakeGateway held() => FakeGateway(
+      redirect: true,
+      choose: true,
+      finish: {
+        'ok': true,
+        'status': 'choose',
+        'ticket': 'held-ticket',
+        'provider': 'google',
+        'display': 'me@example.test',
+        'signup_enabled': true,
+      },
+    );
+
+    testWidgets('기존 계정 연결 — 틀린 비밀번호는 다시, 맞으면 그 계정 세션', (tester) async {
+      final gateway = held();
+      OAuthResult? result;
+      var finished = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                result = await showOAuthSheet(
+                  context,
+                  api: RelayAccountApi(origin, client: gateway.client()),
+                  provider: OAuthProvider.google,
+                  machineId: installId,
+                  authenticate: (_, _) async =>
+                      Uri.parse('kasaterm://oauth?code=one-time&state=${gateway.start()['state']}'),
+                );
+                finished = true;
+              },
+              child: const Text('go'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('go'));
+      await until(tester, () => find.byKey(const Key('oauth-choice-who')).evaluate().isNotEmpty);
+      await tester.pumpAndSettle();
+      expect(gateway.start()['choose'], isTrue);
+      expect(find.text('Google · me@example.test'), findsOneWidget);
+      expect(find.byKey(const Key('oauth-choice-signup')), findsOneWidget);
+      expect(finished, isFalse, reason: '고르기 전에 시트가 닫혔다');
+
+      await tester.tap(find.byKey(const Key('oauth-choice-claim')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('claim-account')), 'fixture');
+      await tester.enterText(find.byKey(const Key('claim-password')), 'wrong');
+      await tester.tap(find.byKey(const Key('claim-submit')));
+      await until(tester, () => find.text('아이디나 비밀번호를 확인해 주세요.').evaluate().isNotEmpty);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('claim-submit')), findsOneWidget, reason: '틀린 비밀번호로 고르기를 잃었다');
+      expect(tester.widget<TextField>(find.byKey(const Key('claim-password'))).controller!.text, isEmpty);
+
+      await tester.enterText(find.byKey(const Key('claim-password')), 'right');
+      await tester.tap(find.byKey(const Key('claim-submit')));
+      await until(tester, () => finished);
+      await tester.pumpAndSettle();
+      expect(result?.session?.account, 'fixture');
+      expect(result?.session?.token, 'kdt_chosen');
+    });
+
+    testWidgets('새 계정 만들기는 그 표로만 계정을 만든다', (tester) async {
+      final gateway = held();
+      OAuthResult? result;
+      var finished = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                result = await showOAuthSheet(
+                  context,
+                  api: RelayAccountApi(origin, client: gateway.client()),
+                  provider: OAuthProvider.google,
+                  machineId: installId,
+                  authenticate: (_, _) async =>
+                      Uri.parse('kasaterm://oauth?code=one-time&state=${gateway.start()['state']}'),
+                );
+                finished = true;
+              },
+              child: const Text('go'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('go'));
+      await until(tester, () => find.byKey(const Key('oauth-choice-signup')).evaluate().isNotEmpty);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('oauth-choice-signup')));
+      await until(tester, () => finished);
+      await tester.pumpAndSettle();
+      expect(result?.session?.account, 'oauth_new');
+      expect(gateway.requests.map((r) => r.url.path), isNot(contains('/relay/oauth/claim')));
+    });
+
+    test('옛 관문에는 choose 를 보내지 않는다', () async {
+      final gateway = FakeGateway(redirect: true);
+      final api = RelayAccountApi(origin, client: gateway.client());
+      await api.oauthStart(OAuthProvider.google, installId, redirect: true);
+      expect(gateway.start().containsKey('choose'), isFalse);
+      final linking = FakeGateway(redirect: true, choose: true);
+      final linked = RelayAccountApi(
+        origin,
+        client: linking.client(),
+        session: AccountSession(origin: origin, account: 'fixture', deviceId: 'd', token: 'kdt_x'),
+      );
+      await linked.oauthStart(OAuthProvider.google, installId, link: true, redirect: true);
+      expect(linking.start().containsKey('choose'), isFalse, reason: '연결 요청에 choose 를 실었다');
+    });
+  });
+
+  testWidgets('Google·GitHub 이 켜진 서버면 그 단추가 먼저고 아이디는 「다른 방법」 아래 접혀 있다', (tester) async {
+    final gateway = FakeGateway(redirect: true, choose: true);
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ConnectScreen(
+          onConnected: (_) async {},
+          onLogin: (_, _, _) async {},
+          relay: (o) => RelayAccountApi(o, client: gateway.client()),
+          installId: () async => installId,
+          onSession: (_) async {},
+        ),
+      ),
+    );
+    await until(tester, () => find.byKey(const Key('oauth-google')).evaluate().isNotEmpty);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('account-input')), findsNothing);
+    expect(find.textContaining('연결할지 물어봐요'), findsOneWidget);
+    final google = tester.getRect(find.byKey(const Key('oauth-google')));
+    final other = tester.getRect(find.byKey(const Key('account-open')));
+    expect(google.top, lessThan(other.top));
+    expect(google.top, lessThanOrEqualTo(300));
+    expect(google.height, greaterThanOrEqualTo(44));
+    await tester.tap(find.byKey(const Key('account-open')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('account-input')), findsOneWidget);
+    expect(find.byKey(const Key('account-login')), findsOneWidget);
   });
 }

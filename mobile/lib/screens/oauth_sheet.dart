@@ -26,6 +26,7 @@ Future<Uri?> systemWebAuthenticate(Uri url, String scheme) async {
 /// 이 앱에만 보이는 확인 코드를 거기 넣게 한 뒤, 끝날 때까지 관문에 묻는다. 데스크톱(`device_oauth.rs`)과 같은 흐름이다.
 ///
 /// 로그인이면 받은 세션을, 연결이면 [OAuthResult.linked] 를 돌려준다. 취소·실패면 null(실패 글은 시트가 보인다).
+/// 어느 계정에도 연결 안 된 로그인이면 시트 안에서 새 계정을 만들지, 기존 계정에 연결할지(비밀번호 한 번) 고르게 한다.
 Future<OAuthResult?> showOAuthSheet(
   BuildContext context, {
   required RelayAccountApi api,
@@ -83,6 +84,12 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
   Timer? _timer;
   bool _polling = false;
   bool _done = false;
+  OAuthChoice? _choice;
+  bool _claim = false;
+  bool _busy = false;
+  String? _claimError;
+  final _account = TextEditingController();
+  final _password = TextEditingController();
 
   @override
   void initState() {
@@ -97,6 +104,8 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
     _timer?.cancel();
     final flow = _flow;
     if (flow != null && !_done) unawaited(widget.api.oauthCancel(flow));
+    _account.dispose();
+    _password.dispose();
     super.dispose();
   }
 
@@ -148,8 +157,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
     try {
       final r = await widget.api.oauthRedeem(flow, back);
       if (!mounted) return;
-      _done = true;
-      Navigator.of(context).pop(r);
+      _finish(r);
     } on AccountException catch (e) {
       _stop(e.message);
     }
@@ -183,14 +191,151 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
     try {
       final r = await widget.api.oauthPoll(flow);
       if (!mounted || r.pending) return;
-      _done = true;
-      _timer?.cancel();
-      Navigator.of(context).pop(r);
+      _finish(r);
     } on AccountException catch (e) {
       _stop(e.message);
     } finally {
       _polling = false;
     }
+  }
+
+  void _finish(OAuthResult r) {
+    _done = true;
+    _timer?.cancel();
+    if (r.choice case final choice?) {
+      setState(() => _choice = choice);
+      return;
+    }
+    Navigator.of(context).pop(r);
+  }
+
+  Future<void> _answer({required bool claim}) async {
+    final choice = _choice;
+    if (choice == null || _busy) return;
+    if (claim && (_account.text.trim().isEmpty || _password.text.isEmpty)) {
+      setState(() => _claimError = '아이디와 비밀번호를 입력해 주세요.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _claimError = null;
+    });
+    try {
+      final session = claim
+          ? await widget.api.oauthClaim(choice, _account.text, _password.text)
+          : await widget.api.oauthSignup(choice);
+      if (mounted) Navigator.of(context).pop(OAuthResult(session: session));
+    } on AccountException catch (e) {
+      if (!mounted) return;
+      // 틀린 비밀번호·잠깐 잠김은 같은 고르기로 다시 해 볼 수 있다. 나머지는 처음부터 다시.
+      if (e.code == 'bad_credentials' || e.code == 'rate_limited') {
+        _password.clear();
+        setState(() => _claimError = e.message);
+      } else {
+        _stop(e.message);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  List<Widget> _chooseAccount(ThemeData theme, OAuthChoice choice) {
+    final name = choice.provider.label;
+    final dim = theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    return [
+      Text(
+        choice.display.isEmpty ? name : '$name · ${choice.display}',
+        key: const Key('oauth-choice-who'),
+        style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 2),
+      Text('아직 KASA 계정에 연결되지 않은 로그인이에요.', style: theme.textTheme.bodyMedium),
+      const SizedBox(height: Look.groupGap),
+      if (!_claim) ...[
+        FilledButton(
+          key: const Key('oauth-choice-claim'),
+          onPressed: _busy ? null : () => setState(() => _claim = true),
+          child: const Text('기존 계정에 연결'),
+        ),
+        if (choice.signup) ...[
+          const SizedBox(height: 8),
+          OutlinedButton(
+            key: const Key('oauth-choice-signup'),
+            style: OutlinedButton.styleFrom(minimumSize: const Size(Look.tap, Look.buttonH)),
+            onPressed: _busy ? null : () => unawaited(_answer(claim: false)),
+            child: const Text('새 계정 만들기'),
+          ),
+        ],
+        const SizedBox(height: 8),
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(minimumSize: const Size(Look.tap, Look.buttonH)),
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: const Text('취소'),
+        ),
+        const SizedBox(height: Look.fieldGap),
+        Text(
+          choice.signup
+              ? '이미 쓰던 KASA 계정이 있으면 연결하세요. 새 계정을 만들면 기존 계정의 기기·설정과 따로 움직여요.'
+              : '이 서버는 새 계정을 받지 않아요. 기존 KASA 계정에 연결해 주세요.',
+          style: dim,
+        ),
+      ] else ...[
+        LabeledField(
+          label: '아이디',
+          child: TextField(
+            key: const Key('claim-account'),
+            controller: _account,
+            enabled: !_busy,
+            style: const TextStyle(fontSize: 16),
+            autofillHints: const [AutofillHints.username],
+            autocorrect: false,
+            enableSuggestions: false,
+            textInputAction: TextInputAction.next,
+          ),
+        ),
+        const SizedBox(height: 12),
+        LabeledField(
+          label: '비밀번호',
+          child: TextField(
+            key: const Key('claim-password'),
+            controller: _password,
+            enabled: !_busy,
+            style: const TextStyle(fontSize: 16),
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            autofillHints: const [AutofillHints.password],
+            textInputAction: TextInputAction.go,
+            onSubmitted: (_) => unawaited(_answer(claim: true)),
+          ),
+        ),
+        if (_claimError case final error?) ...[
+          const SizedBox(height: 12),
+          Semantics(liveRegion: true, child: Text(error, style: TextStyle(color: theme.colorScheme.error))),
+        ],
+        const SizedBox(height: Look.groupGap),
+        FilledButton(
+          key: const Key('claim-submit'),
+          onPressed: _busy ? null : () => unawaited(_answer(claim: true)),
+          child: _busy
+              ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('연결하고 로그인'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(minimumSize: const Size(Look.tap, Look.buttonH)),
+          onPressed: _busy
+              ? null
+              : () => setState(() {
+                  _claim = false;
+                  _claimError = null;
+                }),
+          child: const Text('뒤로'),
+        ),
+        const SizedBox(height: Look.fieldGap),
+        Text('기존 KASA 계정의 비밀번호를 이번 한 번만 확인해요. 다음부터는 $name 로그인만으로 들어와요.', style: dim),
+      ],
+    ];
   }
 
   void _stop(String message) {
@@ -206,8 +351,13 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
     final flow = _flow;
     final name = widget.provider.label;
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.pagePad),
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          Look.pagePad,
+          0,
+          Look.pagePad,
+          Look.pagePad + MediaQuery.viewInsetsOf(context).bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -218,6 +368,8 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
               Semantics(liveRegion: true, child: Text(error, style: TextStyle(color: scheme.error))),
               const SizedBox(height: Look.groupGap),
               FilledButton(onPressed: () => Navigator.of(context).pop(), child: const Text('닫기')),
+            ] else if (_choice case final choice?) ...[
+              ..._chooseAccount(theme, choice),
             ] else if (flow == null) ...[
               const Center(child: Padding(padding: EdgeInsets.all(Look.groupGap), child: TwinsMark(hopping: true, face: Look.pullFace))),
             ] else if (flow.userCode == null) ...[
