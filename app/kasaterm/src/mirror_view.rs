@@ -353,6 +353,12 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
     output
 }
 
+fn content_end(source: &[Vec<GridCell>]) -> usize {
+    source.iter().rposition(|row| row.iter().any(|cell|
+        !matches!(cell.ch, ' ' | '\0') || cell.hidden || cell.inverse || cell.underline
+            || cell.bg != kasa_bridge::screen::Color::Default)).map_or(0, |row| row + 1)
+}
+
 /// Render at independent viewer dimensions. `None` follows the live cursor;
 /// `Some(0)` explicitly selects the body tail. Input and its footer remain pinned; input taller than the viewport
 /// is clipped around its cursor. Callers should use at least two columns for CJK.
@@ -369,10 +375,7 @@ pub(crate) fn project(
     // source rows below a shell prompt would put only blank padding in a short
     // viewer. Preserve visible background/conceal metadata and the cursor row;
     // only discard the unused tail, then pad to the viewer's own height below.
-    let content_end = source.iter().rposition(|row| row.iter().any(|cell|
-        !matches!(cell.ch, ' ' | '\0') || cell.hidden || cell.inverse || cell.underline
-            || cell.bg != kasa_bridge::screen::Color::Default)).map_or(0, |row| row + 1);
-    let source_end = content_end.max(source_cursor.0.saturating_add(1)).min(source.len());
+    let source_end = content_end(source).max(source_cursor.0.saturating_add(1)).min(source.len());
     let input_top = input_top.filter(|&top| top < source_end);
     let recognised_prompt = crate::screenread::prompt_box(source);
     let agent_body = recognised_prompt.is_some() && input_top.is_some();
@@ -450,8 +453,11 @@ pub(crate) fn project_session_history_target(
     let live = snapshot.live;
     if history_offset == 0 && !crate::screenread::pinned_input_top(&live)
         .is_some_and(|top| top <= cursor.0) {
-        let mut view = project(&source, cursor, cols, rows, None, scroll);
-        view.top_abs = view.top_source_row.map(|r| snapshot.history_size as i64 + r as i64);
+        let view = project(&source, cursor, cols, rows, None, scroll);
+        let (mut view, pulled) = (!snapshot.screen.alt_screen)
+            .then(|| fill_from_history(&snapshot.above, &source, cursor, cols, rows, scroll, &view))
+            .flatten().unwrap_or((view, 0));
+        view.top_abs = view.top_source_row.map(|r| snapshot.history_size as i64 - pulled as i64 + r as i64);
         return Some(view);
     }
     // Include enough local history for this viewer before reflow. Canonical
@@ -465,6 +471,32 @@ pub(crate) fn project_session_history_target(
     let mut view = project_history_target(&history, &live, cursor, offset, cols, rows, scroll, target_row);
     view.top_abs = view.top_source_row.map(|row| first_abs + row as i64);
     Some(view)
+}
+
+/// A source that shrank pushed its top lines into scrollback. Its live screen
+/// alone leaves a taller or wider viewer with blank rows below and half a line
+/// on top, so pull just enough history above it — what a terminal does when it
+/// grows taller. A source with blank rows of its own (after `clear`) keeps them:
+/// that is its screen, not a lack of room. Returns the rows pulled from history;
+/// they are not clickable, like any history projection.
+fn fill_from_history(
+    above: &[Vec<GridCell>], source: &[Vec<GridCell>], cursor: SourcePos,
+    cols: usize, rows: usize, scroll: Option<usize>, live: &Projection,
+) -> Option<(Projection, usize)> {
+    let full = content_end(source).max(cursor.0.saturating_add(1)) >= source.len();
+    let split_top = above.first().and_then(|row| row.last()).is_some_and(|cell| cell.wrapped)
+        && source.first().is_some_and(|row| row.len() != cols);
+    if above.is_empty() || !full || (live.body_lines.len() >= rows && !split_top) { return None; }
+    let combined: Vec<_> = above.iter().rev().chain(source).cloned().collect();
+    let shifted = (cursor.0 + above.len(), cursor.1);
+    let mut cut = project(&combined, shifted, cols, rows, None, None).top_source_row?;
+    while cut > 0 && combined[cut - 1].last().is_some_and(|cell| cell.wrapped) { cut -= 1; }
+    let pulled = above.len().checked_sub(cut).filter(|&n| n > 0)?;
+    let mut view = project(&combined[cut..], (cursor.0 + pulled, cursor.1), cols, rows, None, scroll);
+    let remap = |pos: &mut Option<SourcePos>| *pos = pos.and_then(|(row, col)| row.checked_sub(pulled).map(|row| (row, col)));
+    for row in &mut view.source_map { for pos in row { remap(pos); } }
+    for line in &mut view.body_lines { for pos in &mut line.source_map { remap(pos); } }
+    Some((view, pulled))
 }
 
 pub(crate) fn project_history(
@@ -692,6 +724,61 @@ mod tests {
             (source.cursor_row as usize, source.cursor_col as usize), 180, 30, None).unwrap();
         assert_eq!(text(&returned.rows), text(&live.rows), "returning to live must restore the same viewport");
         events.send(kasa_pty::ExtEvent::Eof).unwrap();
+    }
+
+    /// A shrinking source pushes its top lines into scrollback. Reflowing only its
+    /// live screen left the unchanged viewer blank below with half a line on top.
+    #[test]
+    fn shrunk_source_fills_viewer_from_history_but_clear_keeps_its_blank_rows() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let parser = |cols, rows| {
+            let (events, incoming) = crossbeam_channel::unbounded();
+            let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+                cols, rows, pane_id: format!("mirror-shrunk-{}", uuid::Uuid::new_v4()), ..Default::default()
+            }, kasa_pty::ExternalIo {
+                events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+            }).unwrap();
+            (events, session)
+        };
+        let feed = |events: &crossbeam_channel::Sender<kasa_pty::ExtEvent>, session: &kasa_pty::PtySession, bytes: Vec<u8>| {
+            events.send(kasa_pty::ExtEvent::Bytes(bytes)).unwrap();
+            session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        };
+        let (source_events, source) = parser(125, 28);
+        let mut bytes = String::new();
+        for i in 1..=60 { bytes.push_str(&format!("line {i:02} {}END\r\n", "abcdefghij".repeat(10))); }
+        bytes.push_str("$ ");
+        feed(&source_events, &source, bytes.into_bytes());
+        // The source window shrinks; its parser reflows on the next frame.
+        source_events.send(kasa_pty::ExtEvent::SetSize(70, 16)).unwrap();
+        feed(&source_events, &source, b"\x1b[0m".to_vec());
+        assert!(source.full_snapshot().dirty.iter().any(|(_, row)| text(&[row.clone()])[0].starts_with("cdefghij")),
+            "the source's top row is the tail of a line wrapped into history");
+        // The mirror reconnects: size handshake, then RIS + the source snapshot.
+        let (events, mirror) = parser(125, 28);
+        let (snapshot, size) = source.sized_snapshot_bytes();
+        assert_eq!(size, (70, 16));
+        events.send(kasa_pty::ExtEvent::SetSize(70, 16)).unwrap();
+        feed(&events, &mirror, [b"\x1bc".as_slice(), &snapshot].concat());
+
+        let wanted: Vec<String> = (34..=60).map(|i| format!("line {i:02} {}END", "abcdefghij".repeat(10)))
+            .chain(["$".to_string()]).collect();
+        let shrunk = project_session_history(&mirror, &[], (0, 0), 125, 28, None).unwrap();
+        assert_eq!(text(&shrunk.rows), wanted, "viewer keeps its own rows after the source shrank");
+        let (r, c) = shrunk.cursor.unwrap();
+        assert_eq!((r, c), (27, 2));
+        let live = mirror.viewer_snapshot(125, 28).screen;
+        assert_eq!(shrunk.source_map[r][c], Some((live.cursor_row as usize, live.cursor_col as usize)),
+            "live cells still map to the source grid");
+        assert_eq!(shrunk.source_map[0][0], None, "pulled history is not a live source cell");
+        assert_eq!(shrunk.max_scroll, 0, "the first wheel still reaches parser history");
+
+        feed(&events, &mirror, b"\x1b[H\x1b[2J$ ".to_vec());
+        let cleared = project_session_history(&mirror, &[], (0, 0), 125, 28, None).unwrap();
+        assert_eq!(text(&cleared.rows)[0], "$", "a cleared source keeps its prompt on top");
+        assert!(text(&cleared.rows)[1..].iter().all(String::is_empty));
+        for events in [source_events, events] { events.send(kasa_pty::ExtEvent::Eof).unwrap(); }
     }
 
     #[test]
