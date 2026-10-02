@@ -210,7 +210,9 @@ impl TerminalComposition {
                 }
             }
         }
-        for (index, (_, path, x, y, w, h, c0, c1, hug)) in self.inline_slots.iter().enumerate() {
+        for (index, slot) in self.inline_slots.iter().enumerate() {
+            let (x, y, w, h) = slot.rect;
+            let path = &slot.path;
             let asset = cache.image(path, || {
                 let bytes = std::fs::read(path).ok()?;
                 let decoded = image::load_from_memory(&bytes).ok()?;
@@ -223,19 +225,19 @@ impl TerminalComposition {
             let Some((bytes, iw, ih)) = asset else {
                 continue;
             };
-            let width = if *hug {
-                (h * iw as f32 / ih.max(1) as f32).min(iw as f32).min(*w)
+            let width = if slot.fit == InlineFit::Hug {
+                (h * iw as f32 / ih.max(1) as f32).min(iw as f32).min(w)
             } else {
-                *w
+                w
             };
             if let Some(id) = cache.register(pane, index as u64 + 1, bytes) {
                 add(
-                    (*x, *y, width, *h),
-                    (*x, *c0, width, *c1 - *c0),
+                    (x, y, width, h),
+                    slot.clip,
                     -10,
                     VisualAsset::Inline { id },
                     None,
-                    "scale-down",
+                    if slot.fit == InlineFit::Contain { "contain" } else { "scale-down" },
                     "center",
                 );
             }
@@ -598,6 +600,30 @@ pub(crate) type TurnSlot = (
     crate::turnjump::TurnHeader,
 );
 
+/// 인라인 그림 한 장의 이번 프레임 자리. 좌표는 LOGICAL px(queue_image 관례).
+#[derive(Clone, Debug)]
+pub(crate) struct InlineSlot {
+    /// 텍스처 키.
+    pub(crate) key: String,
+    pub(crate) path: String,
+    /// 그림 상자.
+    pub(crate) rect: (f32, f32, f32, f32),
+    /// 보이는 영역 — 이 밖은 잘린다.
+    pub(crate) clip: (f32, f32, f32, f32),
+    pub(crate) fit: InlineFit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum InlineFit {
+    /// 상자 안 가운데, 원본 크기까지만(OSC 1337 — PTY 가 칸 수를 재어 준다).
+    Native,
+    /// 원본 크기까지만, 상자를 그림 비율로 좁혀 왼쪽에 붙인다(글 흐름 그림 —
+    /// 박스가 그림보다 넓으면 그림만 한가운데로 떨어져 나온다).
+    Hug,
+    /// 비율을 지켜 상자에 꽉 맞춘다, 작으면 키운다(kitty 놓기 규칙).
+    Contain,
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
     pub(crate) animated_cells: bool,
@@ -607,7 +633,7 @@ pub(crate) struct TerminalComposition {
     pub(crate) waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))>,
     pub(crate) standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
     pub(crate) profile_slots: Vec<(&'static str, (f32, f32, f32, f32))>,
-    pub(crate) inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32, bool)>,
+    pub(crate) inline_slots: Vec<InlineSlot>,
     pub(crate) schale_logo_slots: Vec<(f32, f32, f32, f32)>,
     pub(crate) title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])>,
     pub(crate) status_model_icons: Vec<StatusModelIconSlot>,
@@ -951,9 +977,24 @@ impl App {
                 bracketed_paste: source.bracketed_paste, scroll_offset: source.scroll_offset,
                 prompt_end: source.prompt_end.and_then(|(r,c)| map_position(r as usize,c as usize)),
                 inline_images: source.inline_images.iter().filter_map(|image| {
-                    let (r,c) = map_position(usize::try_from(image.row).ok()?, image.col as usize)?;
-                    let mut image = image.clone(); image.row = i32::from(r); image.col = c;
-                    image.cols = image.cols.min((cols_now.max(2) as u16).saturating_sub(c));
+                    let width = cols_now.max(2) as u16;
+                    let mut image = image.clone();
+                    match image.clip {
+                        // kitty 조각은 보이는 칸을 옮기고 상자를 같은 만큼 민다.
+                        Some(clip) => {
+                            let (r, c) = map_position(usize::try_from(clip.row).ok()?, clip.col as usize)?;
+                            image.row += i32::from(r) - clip.row;
+                            image.col = u16::try_from(i32::from(image.col) + i32::from(c) - i32::from(clip.col)).ok()?;
+                            image.clip = Some(kasa_bridge::screen::CellClip {
+                                row: i32::from(r), col: c, cols: clip.cols.min(width.saturating_sub(c)), rows: clip.rows,
+                            });
+                        }
+                        None => {
+                            let (r, c) = map_position(usize::try_from(image.row).ok()?, image.col as usize)?;
+                            image.row = i32::from(r); image.col = c;
+                            image.cols = image.cols.min(width.saturating_sub(c));
+                        }
+                    }
                     Some(image)
                 }).collect(),
                 ..Default::default()
@@ -973,7 +1014,7 @@ impl App {
         let mut standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))> =
             Default::default();
         let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Default::default();
-        let mut inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32, bool)> =
+        let mut inline_slots: Vec<InlineSlot> =
             Default::default();
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Default::default();
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Default::default();
@@ -1083,26 +1124,43 @@ impl App {
             // 같은 옮김을 거쳐야 글 흐름과 안 어긋난다 — 커서·조합 오버레이와 같은
             // 이유다. classic claude 는 OSC 1337 을 안 써서 지금은 셸 pane 만 이
             // 길로 오지만(그쪽은 옮김이 없다), 보정을 빼 두면 나중에 조용히 어긋난다.
+            // kitty 조각은 보이는 칸(clip)의 첫 줄을 옮기고 상자를 같은 만큼 민다 —
+            // 상자 윗줄은 이미 화면 밖(음수)일 수 있다.
             let shift = view_shifts.last().map(|(_, s)| s).filter(|s| s.projection.is_none());
             for v in &t.inline_images {
-                let vrow = match shift {
-                    Some(s) => match s.display_pos(v.row as usize, v.col as usize) {
-                        Some((r, _)) => r,
+                let (anchor_row, anchor_col) = v.clip.map_or((v.row, v.col), |c| (c.row, c.col));
+                let dy = match shift {
+                    Some(s) => match usize::try_from(anchor_row)
+                        .ok()
+                        .and_then(|r| s.display_pos(r, anchor_col as usize))
+                    {
+                        Some((r, _)) => r as i32 - anchor_row,
                         None => continue,
                     },
-                    None => v.row as usize,
+                    None => 0,
                 };
-                inline_slots.push((
-                    format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
-                    v.path.clone(),
+                let rect = (
                     body_left + v.col as f32 * icw,
-                    body_top + vrow as f32 * ich,
+                    body_top + (v.row + dy) as f32 * ich,
                     v.cols as f32 * icw,
                     v.rows as f32 * ich,
-                    clip_y0,
-                    clip_y1,
-                    false,
-                ));
+                );
+                let (clip, fit) = match v.clip {
+                    Some(c) => {
+                        let y0 = (body_top + (c.row + dy) as f32 * ich).max(clip_y0);
+                        let y1 = (body_top + (c.row + dy + c.rows as i32) as f32 * ich).min(clip_y1);
+                        let x0 = body_left + c.col as f32 * icw;
+                        ((x0, y0, c.cols as f32 * icw, (y1 - y0).max(0.0)), InlineFit::Contain)
+                    }
+                    None => ((rect.0, clip_y0, rect.2, clip_y1 - clip_y0), InlineFit::Native),
+                };
+                inline_slots.push(InlineSlot {
+                    key: format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
+                    path: v.path.clone(),
+                    rect,
+                    clip,
+                    fit,
+                });
             }
         }
         // 글 흐름 안 그림 — `[[img:<경로>:<행수>]]` 표식이 잡은 자리에 얹는다.
@@ -1123,17 +1181,13 @@ impl App {
                     // 정렬) 글 흐름에서 떨어져 보인다. 스크린샷 대부분이
                     // 16:9(1.78) 라 이 안에 들어 왼쪽에서 시작한다.
                     let w = (h * 3.0).min(cols_now as f32 * icw);
-                    inline_slots.push((
-                        format!("mdimg:{tab_pid}:{}", b.path),
-                        b.path.clone(),
-                        body_left,
-                        body_top + b.row as f32 * ich,
-                        w,
-                        h,
-                        clip_y0,
-                        clip_y1,
-                        true,
-                    ));
+                    inline_slots.push(InlineSlot {
+                        key: format!("mdimg:{tab_pid}:{}", b.path),
+                        path: b.path.clone(),
+                        rect: (body_left, body_top + b.row as f32 * ich, w, h),
+                        clip: (body_left, clip_y0, w, clip_y1 - clip_y0),
+                        fit: InlineFit::Hug,
+                    });
                 }
             }
         }

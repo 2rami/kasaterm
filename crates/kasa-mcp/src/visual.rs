@@ -117,6 +117,12 @@ pub fn source_key(source: &ScreenUpdate, offset: usize) -> Option<String> {
         hash.update(image.rows.to_le_bytes());
         hash.update((image.path.len() as u64).to_le_bytes());
         hash.update(image.path.as_bytes());
+        if let Some(clip) = image.clip {
+            hash.update(clip.row.to_le_bytes());
+            hash.update(clip.col.to_le_bytes());
+            hash.update(clip.cols.to_le_bytes());
+            hash.update(clip.rows.to_le_bytes());
+        }
     }
     Some(format!("{:x}", hash.finalize()))
 }

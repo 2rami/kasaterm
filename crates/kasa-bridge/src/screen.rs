@@ -78,6 +78,21 @@ pub struct InlineImageView {
     /// 차지하는 셀 폭·높이(송신측 width=<cells> + 픽셀 비율).
     pub cols: u16,
     pub rows: u16,
+    /// kitty 그림이면 상자 안에서 실제로 보이는 칸. 그림은 상자에 비율을 지켜
+    /// 맞추고(작으면 키운다) 이 칸 밖은 잘라 낸다 — 글자 칸 자리표시는 글처럼
+    /// 일부 줄만 화면에 남거나 다른 글에 덮이므로 상자 전체를 그리면 남의 글을
+    /// 가린다. `None` 은 OSC 1337(원본 크기까지만, pane 이 자른다).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<CellClip>,
+}
+
+/// 뷰포트 칸 사각형.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CellClip {
+    pub row: i32,
+    pub col: u16,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// Screen diff sent from the flusher thread to consumers.

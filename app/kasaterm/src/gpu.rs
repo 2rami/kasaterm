@@ -4810,6 +4810,34 @@ impl GpuRenderer {
         ));
     }
 
+    /// 상자에 비율을 지켜 꽉 맞춘다 — 작은 그림은 키우고 가운데 놓는다. kitty 그림
+    /// 프로토콜의 놓기 규칙이다(`c`×`r` 칸 상자). `queue_image` 는 원본 크기를 넘겨
+    /// 키우지 않아 레티나 칸 상자를 못 채운다. LOGICAL px.
+    pub fn queue_image_contain(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32) {
+        let Some(entry) = self.images.get(id) else { return };
+        let s = self.scale;
+        let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let (iw, ih) = (entry.w.max(1) as f32, entry.h.max(1) as f32);
+        let fit = (bw / iw).min(bh / ih);
+        let (dw, dh) = (iw * fit, ih * fit);
+        self.image_quads.push((
+            id.to_string(),
+            CellInstance {
+                cell_px: [bx + (bw - dw) * 0.5, by + (bh - dh) * 0.5, dw, dh],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            },
+            self.chrome.len() as u32,
+            self.cur_clip_phys(),
+        ));
+    }
+
     /// `queue_image` 의 cover-fit 바닥 배경 버전 — 박스를 꽉 채우고(fill) 넘치는
     /// 축은 UV 를 중앙 크롭한다. 이미지 패스(셀보다 먼저 그려짐)라 default-bg 셀
     /// 자리로 비친다 — agents/resume 피커의 교실 배경용. LOGICAL px.

@@ -3167,6 +3167,7 @@ impl App {
                 h: ch,
                 baseline: 0.0,
             };
+            kasa_pty::set_cell_pixels((cw * eff).round() as u32, (ch * eff).round() as u32);
         }
         if self.window.is_some() {
             let (cols, rows) = self.window_cells();

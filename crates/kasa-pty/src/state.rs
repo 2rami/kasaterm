@@ -534,16 +534,23 @@ pub struct PtySession {
     last_input: Mutex<Option<Instant>>,
 }
 
+/// 격자 크기에 화면 픽셀 크기를 곁들인다. 그림을 원본 크기로 놓는 앱(`kitten
+/// icat`)은 `TIOCGWINSZ` 의 픽셀 값으로 칸 크기를 잰다 — 0 이면 그리기를 포기한다.
+fn pty_size(cols: u16, rows: u16) -> PtySize {
+    let (cw, ch) = crate::kitty::cell_pixels().unwrap_or((0, 0));
+    PtySize {
+        rows,
+        cols,
+        pixel_width: (cols as u32 * cw).min(u16::MAX as u32) as u16,
+        pixel_height: (rows as u32 * ch).min(u16::MAX as u32) as u16,
+    }
+}
+
 impl PtySession {
     pub fn start(opts: PtyOptions) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize {
-                rows: opts.rows,
-                cols: opts.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .openpty(pty_size(opts.cols, opts.rows))
             .context("openpty")?;
         // Default to the user's login shell. CommandBuilder picks up
         // $SHELL fallback on its own when we don't override; pass `-il`
@@ -617,6 +624,14 @@ impl PtySession {
         // 그림을 장수 단위로 관리하는 TUI(kasaslk)가 이 값을 읽고 그 안에서만
         // 쓴다. 안 주면 옛 한도 16 으로 보고 줄여 그린다.
         cmd.env("KASATERM_INLINE_IMAGE_SLOTS", INLINE_IMAGE_SLOTS.to_string());
+        // Claude Code 는 kitty 그림을 XTVERSION 이름이 kitty·ghostty 일 때만 쓴다
+        // (2.1.287: 이름 허용 목록 + `a=q` 응답). 이름을 꾸미면 다른 판정까지 남의
+        // 터미널 것으로 갈려(예전 ghostty 위장을 걷은 까닭, 위 TERM 주석) 이 값 —
+        // Claude Code 가 모르는 터미널을 위해 둔 공식 스위치 — 로 지원을 알린다.
+        // kitty 프로토콜을 아는 다른 앱은 `a=q` 질의에 정직하게 답해 알린다.
+        // ConPTY 는 APC 를 넘기지 않아 Windows 에선 그림이 못 와 켜지 않는다.
+        #[cfg(unix)]
+        cmd.env("CLAUDE_CODE_FORCE_TERMINAL_IMAGES", "1");
         // claude 의 렌더러(classic·fullscreen)는 여기서 정하지 않는다 — 사람이 claude 의
         // `/tui` 로 고른다. 08-30~09-28 사이 이 자리에서 강제를 다섯 번 뒤집었다. 마지막
         // 이유는 classic 이 `/config` 같은 대화창을 닫으며 화면 한 장만 다시 찍어 위 대화가
@@ -726,6 +741,7 @@ impl PtySession {
             last_title: Arc::clone(&title_handle),
             respond: true,
         };
+        let responder = listener.clone();
         let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
         // Seed restored scrollback into alacritty before the shell's first
         // output, so scroll-up shows the pre-restart screen content. Fed as if
@@ -773,6 +789,7 @@ impl PtySession {
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
+            responder,
             Arc::clone(&scheme_reports),
             Arc::clone(&output_beats),
             None,
@@ -841,6 +858,7 @@ impl PtySession {
             last_title: Arc::clone(&title_handle),
             respond: false,
         };
+        let responder = listener.clone();
         let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
         let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> =
@@ -874,6 +892,7 @@ impl PtySession {
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
+            responder,
             Arc::clone(&scheme_reports),
             Arc::clone(&output_beats),
             Some(parsed_generation),
@@ -954,6 +973,7 @@ impl PtySession {
             // 입양자가 이제 유일한 호스트다 — 자동 응답도 이쪽 몫.
             respond: true,
         };
+        let responder = listener.clone();
         let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
         if !opts.initial_scrollback.is_empty() {
             let mut proc: Processor<StdSyncHandler> = Processor::new();
@@ -986,6 +1006,7 @@ impl PtySession {
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
             Arc::clone(&inline_imgs),
+            responder,
             Arc::clone(&scheme_reports),
             Arc::clone(&output_beats),
             None,
@@ -1858,23 +1879,19 @@ impl PtySession {
         match &self.io {
             SessionIo::Local { master, .. } => {
                 let pty = master.lock().unwrap();
-                pty.resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
+                pty.resize(pty_size(cols, rows))
                 .context("pty resize")?;
             }
             SessionIo::External { on_resize } => (on_resize)(cols, rows),
             #[cfg(unix)]
             SessionIo::Adopted { fd, .. } => {
                 use std::os::fd::AsRawFd;
+                let px = pty_size(cols, rows);
                 let ws = libc::winsize {
                     ws_row: rows,
                     ws_col: cols,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
+                    ws_xpixel: px.pixel_width,
+                    ws_ypixel: px.pixel_height,
                 };
                 // TIOCSWINSZ — SIGWINCH 가 자식에게 간다. 실패는 격자만 로컬 적용.
                 unsafe {
@@ -2061,7 +2078,15 @@ impl PtyEventForwarder {
 impl EventListener for PtyEventForwarder {
     fn send_event(&self, event: AlacEvent) {
         match event {
-            AlacEvent::PtyWrite(s) => self.write_to_pty(s.as_bytes()),
+            AlacEvent::PtyWrite(s) => {
+                // alacritty 의 DA1 답은 칸 하나짜리 VT102(`ESC[?6c`)인데, `kitten icat`
+                // (0.47)은 이 모양만 못 읽어 그림 지원 감지가 끝나지 않고 시간 초과로
+                // 그리기를 포기한다(`?62c`·`?6;c`·`?62;22c` 는 다 넘어갔다). ghostty 와
+                // 같은 VT220+색(`?62;22c`)으로 답한다 — 질의를 DA1 로 마무리하는
+                // 앱(Claude Code 포함)은 내용 없이 도착만 본다.
+                let s = if s == "\x1b[?6c" { "\x1b[?62;22c".to_string() } else { s };
+                self.write_to_pty(s.as_bytes())
+            }
             AlacEvent::ColorRequest(index, formatter) => {
                 // Reply with values that match ghostty's defaults so
                 // that Claude Code / other TUIs which probe the host
@@ -2125,11 +2150,12 @@ impl EventListener for PtyEventForwarder {
             }
             AlacEvent::TextAreaSizeRequest(formatter) => {
                 let (cols, rows) = *self.size.lock().unwrap();
+                let (cw, ch) = crate::kitty::cell_pixels().unwrap_or((7, 16));
                 let reply = formatter(WindowSize {
                     num_lines: rows,
                     num_cols: cols,
-                    cell_width: 7,
-                    cell_height: 16,
+                    cell_width: cw.min(u16::MAX as u32) as u16,
+                    cell_height: ch.min(u16::MAX as u32) as u16,
                 });
                 self.write_to_pty(reply.as_bytes());
             }
@@ -2427,6 +2453,7 @@ fn spawn_reader_thread(
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
     screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
     inline_imgs: Arc<Mutex<InlineImgs>>,
+    responder: PtyEventForwarder,
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
     output_beats: Arc<Mutex<VecDeque<Instant>>>,
     parsed_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -2462,13 +2489,6 @@ fn spawn_reader_thread(
         let mut img_buf: Vec<u8> = Vec::new();
         let mut img_capturing = false;
         let mut inline_scan = InlineScan::default();
-        // Kitty graphics protocol (APC `\x1b_G…\x1b\\`) capture state. One
-        // image can arrive as multiple APC chunks linked by `m=1` / `m=0` —
-        // `kitty_chunk_buf` is the current chunk's raw bytes, while
-        // `kitty_payload_buf` accumulates the decoded body across chunks.
-        let mut kitty_chunk_buf: Vec<u8> = Vec::new();
-        let mut kitty_payload_buf: Vec<u8> = Vec::new();
-        let mut kitty_capturing = false;
         // OSC 777 desktop-notification capture state (payload can span reads).
         let mut notify_buf: Vec<u8> = Vec::new();
         let mut notify_capturing = false;
@@ -2652,11 +2672,11 @@ fn spawn_reader_thread(
             };
             let processed_bytes: &[u8] =
                 nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
-            // Sniff for iTerm OSC 1337 inline images / kitty graphics. Both
-            // scans walk the byte slice, so we cheaply prefix-check first —
-            // most reads have no `\x1b]1337` / `\x1b_G` and we skip the
-            // walk entirely. Critical for TUI throughput (claude code emits
-            // thousands of small reads per second with neither prefix).
+            // Sniff for iTerm OSC 1337 inline images. The scan walks the
+            // byte slice, so we cheaply prefix-check first — most reads have
+            // no `\x1b]1337` and we skip the walk entirely. Critical for TUI
+            // throughput (claude code emits thousands of small reads per
+            // second without it).
             // 셀-흐름 모드에선 이 시퀀스를 term 락 안의 advance_scanning_inline
             // 이 잡는다(커서 위치가 필요해서다). 여기 레거시 스캔은 탭 모드 전용.
             if !inline_cell_flow()
@@ -2665,18 +2685,8 @@ fn spawn_reader_thread(
             {
                 scan_inline_image(processed_bytes, &mut img_buf, &mut img_capturing);
             }
-            if kitty_capturing
-                || memchr::memmem::find(processed_bytes, b"\x1b_G").is_some()
-            {
-                scan_kitty_graphics(
-                    processed_bytes,
-                    &mut kitty_chunk_buf,
-                    &mut kitty_payload_buf,
-                    &mut kitty_capturing,
-                );
-            }
             // OSC 777 desktop notification: alacritty drops it unhandled like
-            // OSC 1337/kitty, so sniff the raw batch and stash until a snapshot
+            // OSC 1337, so sniff the raw batch and stash until a snapshot
             // frame can carry it to the host pump.
             if notify_capturing
                 || memchr::memmem::find(processed_bytes, b"\x1b]777").is_some()
@@ -2735,9 +2745,12 @@ fn spawn_reader_thread(
                         taps.retain(|sub| sub.try_send(buf[..n].to_vec()).is_ok());
                     }
                 }
-                if inline_cell_flow()
-                    && (inline_scan.capturing
-                        || memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some())
+                if inline_scan.busy()
+                    || (inline_cell_flow()
+                        && memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some())
+                    || memchr::memmem::find(processed_bytes, b"\x1b_G").is_some()
+                    || processed_bytes.ends_with(b"\x1b")
+                    || processed_bytes.ends_with(b"\x1b_")
                 {
                     advance_scanning_inline(
                         &mut processor,
@@ -2745,6 +2758,7 @@ fn spawn_reader_thread(
                         processed_bytes,
                         &mut inline_scan,
                         &inline_imgs,
+                        &responder,
                     );
                 } else {
                     processor.advance(&mut *t, processed_bytes);
@@ -3312,7 +3326,7 @@ fn extract_command(
 
 /// Standard base64 decode (no external crate). Ignores non-alphabet bytes
 /// (whitespace, `=` padding) so it tolerates wrapped iTerm payloads.
-fn b64_decode(s: &[u8]) -> Vec<u8> {
+pub(crate) fn b64_decode(s: &[u8]) -> Vec<u8> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -3451,6 +3465,9 @@ fn image_pixels(bytes: &[u8]) -> u64 {
 #[derive(Default)]
 struct InlineImgs {
     imgs: Vec<InlineImg>,
+    /// kitty 그림 프로토콜로 받은 그림·놓기. `next_id` 순번을 함께 써서 장수·픽셀
+    /// 한도와 「오래된 것부터」가 OSC 1337 기록과 한 줄로 선다.
+    kitty: crate::kitty::KittyStore,
     next_id: u64,
     /// 리플로우·clear·alt 전환 감지용 직전 프레임 상태.
     last_cols: u16,
@@ -3460,31 +3477,68 @@ struct InlineImgs {
 }
 
 impl InlineImgs {
-    /// 장수·픽셀 한도를 넘는 동안 가장 오래된 것부터 파일째 놓는다.
+    /// 장수·픽셀 한도를 넘는 동안 가장 오래된 것부터 파일째 놓는다. OSC 1337
+    /// 기록과 kitty 그림을 한 셈으로 친다 — 순번(`next_id`)이 같은 줄이다.
     fn evict_over_budget(&mut self) {
-        let mut pixels: u64 = self.imgs.iter().map(|i| i.pixels).sum();
-        while self.imgs.len() > 1
-            && (self.imgs.len() > INLINE_IMAGE_SLOTS || pixels > INLINE_IMAGE_PIXEL_BUDGET)
-        {
-            let old = self.imgs.remove(0);
-            pixels -= old.pixels;
-            let _ = std::fs::remove_file(&old.path);
+        loop {
+            let count = self.imgs.len() + self.kitty.images.len();
+            let pixels: u64 = self.imgs.iter().map(|i| i.pixels).sum::<u64>()
+                + self.kitty.images.iter().map(|i| i.pixels).sum::<u64>();
+            if count <= 1 || (count <= INLINE_IMAGE_SLOTS && pixels <= INLINE_IMAGE_PIXEL_BUDGET) {
+                return;
+            }
+            let iterm = self.imgs.first().map(|i| i.id);
+            let kitty = self.kitty.images.iter().map(|i| i.uid).min();
+            match (iterm, kitty) {
+                (Some(a), Some(b)) if b < a => self.kitty.evict(b),
+                (Some(_), _) => {
+                    let old = self.imgs.remove(0);
+                    let _ = std::fs::remove_file(&old.path);
+                }
+                (None, Some(b)) => self.kitty.evict(b),
+                (None, None) => return,
+            }
         }
     }
 }
 
-/// 리더 스레드의 OSC 1337 캡처 상태(셀-흐름 경로). 페이로드가 read 여러 번에
-/// 걸칠 수 있어 buf/capturing 이 프레임을 넘어 살고, anchor 는 마커를 만난
-/// 순간의 커서(= 이미지 좌상단)다.
+/// pane 이 닫히면 받은 그림 파일도 함께 지운다 — 안 지우면 임시 폴더에 쌓인다.
+impl Drop for InlineImgs {
+    fn drop(&mut self) {
+        for im in self.imgs.drain(..) {
+            let _ = std::fs::remove_file(&im.path);
+        }
+        self.kitty.clear();
+    }
+}
+
+/// 리더 스레드의 그림 시퀀스 캡처 상태(OSC 1337 셀-흐름 경로·kitty APC).
+/// 페이로드가 read 여러 번에 걸칠 수 있어 buf/capturing 이 프레임을 넘어 살고,
+/// anchor 는 머리를 만난 순간의 커서(= 그림 좌상단)다.
 #[derive(Default)]
 struct InlineScan {
     buf: Vec<u8>,
-    capturing: bool,
+    capturing: Option<Capture>,
     anchor: Option<(i64, u16)>,
+    /// read 경계에 걸린 kitty 머리(`ESC`·`ESC _`). 다음 배치 앞에 붙여 다시 본다 —
+    /// 조각 전송은 4KB 마다 머리가 서서 64KB read 경계에 자주 걸린다.
+    carry: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Capture {
+    Iterm,
+    Kitty,
+}
+
+impl InlineScan {
+    fn busy(&self) -> bool {
+        self.capturing.is_some() || !self.carry.is_empty()
+    }
 }
 
 /// PNG IHDR 의 (width, height). PNG 가 아니면 None — 그때 줄수는 기본값으로.
-fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
         return None;
     }
@@ -3533,55 +3587,95 @@ fn grid_line_sig(term: &Term<PtyEventForwarder>, line: i32) -> String {
     s.trim().to_string()
 }
 
-/// OSC 1337 이 섞인 배치를 파서에 먹이면서 이미지를 **그 자리에서** 뜬다.
+/// 그림 시퀀스(OSC 1337·kitty APC)가 섞인 배치를 파서에 먹이면서 그림을
+/// **그 자리에서** 뜬다.
 ///
 /// 마커 직전까지 파서를 먼저 돌려야 커서가 이미지 자리에 가 있다 — 배치를
 /// 통째로 advance 한 뒤 커서를 읽으면 이미지 뒤에 온 출력(recall 의 절대좌표
 /// 리페인트)이 커서를 이미 딴 데로 옮긴 뒤다. 시퀀스 본문은 파서에 안 먹인다:
 /// alacritty 는 어차피 버리고, vte OSC 버퍼에 MB 급 base64 를 밀 이유가 없다.
-/// 마커가 read 경계에 걸치면 이번 배치는 놓친다 — 기존 scan_inline_image 와
-/// 같은 트레이드(게이트 프리픽스 검사도 같은 한계를 이미 안고 있었다).
+/// kitty 질의 응답도 이 순서 덕에 뒤따르는 DA1 응답보다 먼저 나간다 — 질의를
+/// 보낸 쪽은 DA1 이 먼저 오면 「지원 안 함」으로 읽는다.
+/// OSC 1337 마커가 read 경계에 걸치면 이번 배치는 놓친다 — 기존 scan_inline_image
+/// 와 같은 트레이드. kitty 머리는 `carry` 로 잇는다.
 fn advance_scanning_inline(
     processor: &mut Processor<StdSyncHandler>,
     term: &mut Term<PtyEventForwarder>,
     bytes: &[u8],
     st: &mut InlineScan,
     imgs: &Mutex<InlineImgs>,
+    responder: &PtyEventForwarder,
 ) {
-    const MARKER: &[u8] = b"\x1b]1337;File=";
-    let mut data = bytes;
+    const ITERM: &[u8] = b"\x1b]1337;File=";
+    const KITTY: &[u8] = b"\x1b_G";
+    let joined;
+    let mut data: &[u8] = if st.carry.is_empty() {
+        bytes
+    } else {
+        let mut v = std::mem::take(&mut st.carry);
+        v.extend_from_slice(bytes);
+        joined = v;
+        &joined
+    };
     loop {
-        if st.capturing {
-            let bel = data.iter().position(|&b| b == 0x07);
+        if let Some(kind) = st.capturing {
+            // kitty 는 ST 로만 닫힌다. OSC 1337 은 BEL 도 받는다.
             let stx = find_subslice(data, b"\x1b\\");
-            let end = match (bel, stx) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
+            let end = match kind {
+                Capture::Kitty => stx.map(|e| (e, 2)),
+                Capture::Iterm => match (data.iter().position(|&b| b == 0x07), stx) {
+                    (Some(a), Some(b)) if a < b => Some((a, 1)),
+                    (Some(a), None) => Some((a, 1)),
+                    (_, Some(b)) => Some((b, 2)),
+                    (None, None) => None,
+                },
+            };
+            // ST 가 read 경계에서 `ESC` | `\\` 로 갈렸다.
+            let end = if st.buf.last() == Some(&0x1b) && data.first() == Some(&b'\\') {
+                st.buf.pop();
+                Some((0, 1))
+            } else {
+                end
             };
             match end {
-                Some(e) => {
+                Some((e, term_len)) => {
                     st.buf.extend_from_slice(&data[..e]);
-                    record_inline_image(term, st, imgs);
+                    match kind {
+                        Capture::Iterm => record_inline_image(term, st, imgs),
+                        Capture::Kitty => record_kitty(processor, term, st, imgs, responder),
+                    }
                     st.buf.clear();
-                    st.capturing = false;
-                    let term_len = if data.get(e) == Some(&0x07) { 1 } else { 2 };
+                    st.capturing = None;
                     data = &data[(e + term_len).min(data.len())..];
                 }
                 None => {
-                    // 말라 죽은 스트림 무한 성장 방지 — scan_inline_image 와 동일.
-                    if st.buf.len() < 8 * 1024 * 1024 {
+                    // 말라 죽은 스트림 무한 성장 방지. kitty 는 조각 하나가 그림
+                    // 한 장일 수도 있어(조각 없이 보내는 클라이언트) 그림 상한만큼 둔다.
+                    let cap = match kind {
+                        Capture::Iterm => 8 * 1024 * 1024,
+                        Capture::Kitty => 96 * 1024 * 1024,
+                    };
+                    if st.buf.len() < cap {
                         st.buf.extend_from_slice(data);
                     } else {
                         st.buf.clear();
-                        st.capturing = false;
+                        st.capturing = None;
                         st.anchor = None;
                     }
                     return;
                 }
             }
         } else {
-            match find_subslice(data, MARKER) {
-                Some(m) => {
+            let iterm = if inline_cell_flow() { find_subslice(data, ITERM) } else { None };
+            let kitty = find_subslice(data, KITTY);
+            let next = match (iterm, kitty) {
+                (Some(a), Some(b)) if b < a => Some((b, Capture::Kitty, KITTY.len())),
+                (Some(a), _) => Some((a, Capture::Iterm, ITERM.len())),
+                (None, Some(b)) => Some((b, Capture::Kitty, KITTY.len())),
+                (None, None) => None,
+            };
+            match next {
+                Some((m, kind, len)) => {
                     processor.advance(term, &data[..m]);
                     // 동기 출력(DECSET 2026) 안이면 방금 먹인 바이트가 파서
                     // 버퍼에만 쌓여 커서가 옛 자리(입력줄)에 있다 — recall 은
@@ -3596,15 +3690,58 @@ fn advance_scanning_inline(
                         let cur = term.grid().cursor.point;
                         Some((hist + cur.line.0.max(0) as i64, cur.column.0 as u16))
                     };
-                    st.capturing = true;
-                    data = &data[m + MARKER.len()..];
+                    st.capturing = Some(kind);
+                    data = &data[m + len..];
                 }
                 None => {
-                    processor.advance(term, data);
+                    let keep = if data.ends_with(b"\x1b_") {
+                        2
+                    } else if data.ends_with(b"\x1b") {
+                        1
+                    } else {
+                        0
+                    };
+                    processor.advance(term, &data[..data.len() - keep]);
+                    st.carry = data[data.len() - keep..].to_vec();
                     return;
                 }
             }
         }
+    }
+}
+
+/// 완성된 kitty APC 본문 하나를 처리한다 — 응답은 PTY 로, 커서 자리 놓기의
+/// 커서 이동은 파서로(동기 출력 중이면 그 버퍼 뒤에 줄을 서 순서가 지켜진다).
+fn record_kitty(
+    processor: &mut Processor<StdSyncHandler>,
+    term: &mut Term<PtyEventForwarder>,
+    st: &mut InlineScan,
+    imgs: &Mutex<InlineImgs>,
+    responder: &PtyEventForwarder,
+) {
+    let at = st
+        .anchor
+        .take()
+        .map(|(abs_line, col)| crate::kitty::At { abs_line, col });
+    let env = crate::kitty::Env {
+        local_media: responder.respond,
+        grid_cols: term.grid().columns() as u16,
+        hist: term.grid().history_size() as i64,
+    };
+    let out = {
+        let mut lock = imgs.lock().unwrap();
+        let InlineImgs { kitty, next_id, .. } = &mut *lock;
+        let out = kitty.handle(&st.buf, at, &env, next_id);
+        lock.evict_over_budget();
+        out
+    };
+    if let Some(reply) = out.reply {
+        responder.write_to_pty(&reply);
+    }
+    if let Some((down, col)) = out.cursor {
+        let mut seq = b"\x1bD".repeat(down as usize);
+        seq.extend_from_slice(format!("\x1b[{}G", col as u32 + 1).as_bytes());
+        processor.advance(term, &seq);
     }
 }
 
@@ -3703,6 +3840,7 @@ fn attach_inline_views_at_offset(
     display_offset: usize,
 ) {
     let mut lock = imgs.lock().unwrap();
+    update.inline_images.clear();
     let grid = term.grid();
     let cols = grid.columns() as u16;
     let rows = grid.screen_lines() as u16;
@@ -3725,10 +3863,18 @@ fn attach_inline_views_at_offset(
             let _ = std::fs::remove_file(&im.path);
         }
     }
+    if clear_all {
+        lock.kitty.drop_anchored();
+    }
     lock.last_cols = cols;
     lock.last_rows = rows;
     lock.last_hist = hist;
     lock.last_alt = alt;
+    let top_abs = hist - display_offset as i64;
+    if !lock.kitty.is_empty() {
+        crate::kitty::anchored_views(&lock.kitty, top_abs, rows, &mut update.inline_images);
+        crate::kitty::placeholder_views(term, &lock.kitty, display_offset, &mut update.inline_images);
+    }
     if lock.imgs.is_empty() {
         return;
     }
@@ -3750,8 +3896,7 @@ fn attach_inline_views_at_offset(
         }
         alive
     });
-    let top_abs = hist - display_offset as i64;
-    update.inline_images = lock
+    let iterm: Vec<_> = lock
         .imgs
         .iter()
         .filter_map(|im| {
@@ -3766,10 +3911,12 @@ fn attach_inline_views_at_offset(
                     col: im.col,
                     cols: im.cols,
                     rows: im.rows,
+                    clip: None,
                 }
             })
         })
         .collect();
+    update.inline_images.extend(iterm);
 }
 
 /// Injected into PowerShell (`pwsh` / `powershell`) via `-Command` so it reports
@@ -3929,115 +4076,6 @@ fn scan_osc_notify(
     }
 }
 
-/// A completed kitty graphics payload (`f=100` PNG bytes already decoded). Same
-/// path as the iTerm OSC 1337 emitter — write a temp file and ask the kasaspace
-/// MCP to open it in an image pane.
-fn emit_kitty_image(payload: &[u8]) {
-    if payload.len() < 16 {
-        return;
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = std::env::temp_dir().join(format!("kasaterm-kitty-{nanos}.png"));
-    if std::fs::write(&tmp, payload).is_err() {
-        return;
-    }
-    let port = std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".into());
-    let url = format!("http://127.0.0.1:{port}/open-image");
-    let _ = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--get",
-            "--data-urlencode",
-            &format!("path={}", tmp.display()),
-            &url,
-        ])
-        .status();
-}
-
-/// Capture a kitty graphics protocol sequence (APC `\x1b_G<params>;<body>\x1b\\`)
-/// that may span multiple PTY reads AND multiple chunks (linked by `m=1` /
-/// `m=0`). MVP: only `f=100` (PNG) direct-base64 payloads are accepted —
-/// `f=32`/`f=24` raw RGB(A) are skipped because the image pane expects a
-/// decodable container. alacritty's VT parser drops APCs, so we sniff in
-/// parallel from the raw byte stream.
-fn scan_kitty_graphics(
-    bytes: &[u8],
-    chunk_buf: &mut Vec<u8>,
-    payload_buf: &mut Vec<u8>,
-    capturing: &mut bool,
-) {
-    const APC_G: &[u8] = b"\x1b_G";
-    const ST: &[u8] = b"\x1b\\";
-    let mut data = bytes;
-    loop {
-        if *capturing {
-            match find_subslice(data, ST) {
-                Some(e) => {
-                    chunk_buf.extend_from_slice(&data[..e]);
-                    // Parse params (before ';') and body (after).
-                    let sep = chunk_buf.iter().position(|&b| b == b';');
-                    if let Some(sep_pos) = sep {
-                        let (params, body) = chunk_buf.split_at(sep_pos);
-                        let body = &body[1..]; // skip ';'
-                        let params_s = std::str::from_utf8(params).unwrap_or("");
-                        let mut more = false;
-                        let mut format_png = true; // default if missing
-                        for kv in params_s.split(',') {
-                            let kv = kv.trim();
-                            if let Some((k, v)) = kv.split_once('=') {
-                                match k {
-                                    "m" => more = v == "1",
-                                    // First chunk carries `f=`; subsequent
-                                    // chunks usually omit it.
-                                    "f" if !v.is_empty() => format_png = v == "100",
-                                    _ => {}
-                                }
-                            }
-                        }
-                        // Reject non-PNG formats once detected; clear state.
-                        if !format_png {
-                            payload_buf.clear();
-                            chunk_buf.clear();
-                            *capturing = false;
-                            data = &data[(e + ST.len()).min(data.len())..];
-                            continue;
-                        }
-                        let decoded = b64_decode(body);
-                        payload_buf.extend_from_slice(&decoded);
-                        if !more {
-                            emit_kitty_image(payload_buf);
-                            payload_buf.clear();
-                        }
-                    }
-                    chunk_buf.clear();
-                    *capturing = false;
-                    data = &data[(e + ST.len()).min(data.len())..];
-                }
-                None => {
-                    chunk_buf.extend_from_slice(data);
-                    if chunk_buf.len() > 8 * 1024 * 1024 {
-                        chunk_buf.clear();
-                        payload_buf.clear();
-                        *capturing = false;
-                    }
-                    return;
-                }
-            }
-        } else {
-            match find_subslice(data, APC_G) {
-                Some(start) => {
-                    *capturing = true;
-                    data = &data[start + APC_G.len()..];
-                }
-                None => return,
-            }
-        }
-    }
-}
-
 /// Build the "Last login: <time> on <tty>" banner Terminal.app shows.
 /// Returns None on first ever spawn (no stored timestamp) or when we
 /// couldn't resolve a tty name — both cases would render as an
@@ -4081,7 +4119,9 @@ fn build_last_login_line(tty: Option<&str>) -> Option<String> {
 }
 
 fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
-    let ch = if cell.c == '\0' { ' ' } else { cell.c };
+    // kitty 자리표시는 그림이 덮는 빈칸이다. 글자로 넘기면 GUI·거울·폰이 없는
+    // 글리프(두부)를 그린다 — 그림이 없는 쪽(원격 거울·웹)도 자리만 비워 둔다.
+    let ch = if cell.c == '\0' || cell.c == crate::kitty::PLACEHOLDER { ' ' } else { cell.c };
     Cell {
         ch,
         fg: convert_color(cell.fg),
@@ -6339,6 +6379,240 @@ mod inline_image_tests {
             assert!(Instant::now() < deadline, "자식 env 에 {want} 가 없다: {}", sess.visible_text(10));
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+#[cfg(test)]
+mod kitty_graphics_tests {
+    use super::*;
+    use crate::kitty::diacritic;
+    use crate::kitty::tests::{b64, png};
+    use kasa_bridge::screen::{CellClip, InlineImageView};
+
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+    impl Write for Shared {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 리더 스레드가 하는 일(스캔하며 파서 먹이기 → 스냅샷에 그림 싣기)을 PTY 없이.
+    struct Rig {
+        term: Term<PtyEventForwarder>,
+        proc: Processor<StdSyncHandler>,
+        scan: InlineScan,
+        imgs: Mutex<InlineImgs>,
+        out: Arc<Mutex<Vec<u8>>>,
+        responder: PtyEventForwarder,
+    }
+
+    fn rig(cols: u16, rows: u16, respond: bool) -> Rig {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let listener = PtyEventForwarder {
+            respond,
+            writer: Arc::new(Mutex::new(Box::new(Shared(out.clone())))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        };
+        Rig {
+            responder: listener.clone(),
+            term: make_term(cols, rows, listener),
+            proc: Processor::new(),
+            scan: InlineScan::default(),
+            imgs: Mutex::new(InlineImgs::default()),
+            out,
+        }
+    }
+
+    impl Rig {
+        fn feed(&mut self, bytes: &[u8]) {
+            advance_scanning_inline(&mut self.proc, &mut self.term, bytes, &mut self.scan, &self.imgs, &self.responder);
+        }
+        fn views_at(&self, offset: usize) -> Vec<InlineImageView> {
+            let mut u = ScreenUpdate::default();
+            attach_inline_views_at_offset(&mut u, &self.term, &self.imgs, offset);
+            u.inline_images
+        }
+        fn views(&self) -> Vec<InlineImageView> {
+            self.views_at(0)
+        }
+        fn out(&self) -> String {
+            String::from_utf8_lossy(&self.out.lock().unwrap()).into_owned()
+        }
+    }
+
+    const PROBE: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+
+    /// `fg` 는 SGR 글자색 인자, `(line, col)` 은 상자 왼쪽 위(1부터) — 줄마다 CUP 로
+    /// 그 열에 다시 선다(Claude Code 의 Ink 가 그리는 모양).
+    fn placeholders(fg: &str, cols: u32, rows: u32, (line, col): (u32, u32)) -> String {
+        (0..rows)
+            .map(|r| {
+                let mut s = format!("\x1b[{};{col}H\x1b[{fg}m", line + r);
+                for c in 0..cols {
+                    s.push(crate::kitty::PLACEHOLDER);
+                    s.push(diacritic(r));
+                    s.push(diacritic(c));
+                }
+                s + "\x1b[39m"
+            })
+            .collect()
+    }
+
+    fn transmit_virtual(r: &mut Rig, id: u32, cols: u32, rows: u32) {
+        r.feed(format!("\x1b_Ga=T,U=1,q=2,f=100,i={id},c={cols},r={rows};{}\x1b\\", b64(&png(8, 8))).as_bytes());
+    }
+
+    /// 질의를 보낸 쪽은 뒤따른 DA1 이 먼저 오면 「지원 안 함」으로 읽는다.
+    #[test]
+    fn query_reply_precedes_da1() {
+        let mut r = rig(40, 6, true);
+        let mut bytes = PROBE.to_vec();
+        bytes.extend_from_slice(b"\x1b[c");
+        r.feed(&bytes);
+        assert_eq!(r.out(), "\x1b_Gi=31;OK\x1b\\\x1b[?62;22c");
+    }
+
+    #[test]
+    fn sequence_split_across_reads_is_still_whole() {
+        let mut r = rig(40, 6, true);
+        // 머리가 `ESC` | `_G…` 로, 끝(ST)이 `ESC` | `\\` 로 갈린다.
+        r.feed(b"hi\x1b");
+        r.feed(b"_Gi=31,s=1,v=1,a=q,t=d,f=24;AA");
+        r.feed(b"AA\x1b");
+        r.feed(b"\\ok");
+        assert_eq!(r.out(), "\x1b_Gi=31;OK\x1b\\");
+        assert_eq!(grid_line_sig(&r.term, 0), "hiok", "APC 가 화면에 글자로 새면 안 된다");
+    }
+
+    #[test]
+    fn remote_mirror_parser_never_answers() {
+        let mut r = rig(40, 6, false);
+        r.feed(PROBE);
+        assert_eq!(r.out(), "");
+    }
+
+    /// Claude Code mod `Image` 의 모양 — 4칸×2줄 얼굴 뒤에 이름.
+    #[test]
+    fn placeholders_become_one_clipped_view() {
+        let mut r = rig(40, 6, true);
+        transmit_virtual(&mut r, 7, 4, 2);
+        r.feed(format!("ab{}", placeholders("38;5;7", 4, 2, (1, 3))).as_bytes());
+        let v = r.views();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!((v[0].row, v[0].col, v[0].cols, v[0].rows), (0, 2, 4, 2));
+        assert_eq!(v[0].clip, Some(CellClip { row: 0, col: 2, cols: 4, rows: 2 }));
+        // 자리표시 칸은 빈칸으로 넘어간다 — 그림이 없는 거울·폰도 자리만 남는다.
+        let snap = snapshot(&mut r.term, 40, 6, "t", &Arc::new(Mutex::new(None)), true);
+        let row0 = &snap.dirty.iter().find(|(i, _)| *i == 0).unwrap().1;
+        let text: String = row0.iter().take(8).map(|c| c.ch).collect();
+        assert_eq!(text, "ab      ");
+    }
+
+    #[test]
+    fn scrolling_clips_like_text_and_scrollback_shows_it_again() {
+        let mut r = rig(40, 4, true);
+        transmit_virtual(&mut r, 7, 4, 2);
+        r.feed(placeholders("38;5;7", 4, 2, (1, 1)).as_bytes());
+        r.feed(b"\x1b[4;1H");
+        // 맨 아래에서 한 줄 밀어 올리면 그림 첫 줄은 히스토리로, 둘째 줄만 화면
+        // 맨 위에 남는다.
+        r.feed(b"\r\nx");
+        let v = r.views();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!((v[0].row, v[0].clip), (-1, Some(CellClip { row: 0, col: 0, cols: 4, rows: 1 })));
+        let back = r.views_at(1);
+        assert_eq!(back[0].clip, Some(CellClip { row: 0, col: 0, cols: 4, rows: 2 }));
+    }
+
+    #[test]
+    fn alt_screen_keeps_its_own_placeholders() {
+        let mut r = rig(40, 6, true);
+        transmit_virtual(&mut r, 7, 4, 2);
+        r.feed(b"\x1b[?1049h");
+        r.feed(placeholders("38;5;7", 4, 1, (3, 5)).as_bytes());
+        let v = r.views();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].clip, Some(CellClip { row: 2, col: 4, cols: 4, rows: 1 }));
+        r.feed(b"\x1b[?1049l");
+        assert!(r.views().is_empty(), "대체 화면의 글자와 함께 그림도 사라진다");
+        assert_eq!(r.imgs.lock().unwrap().kitty.images.len(), 1, "그림 데이터는 남는다");
+    }
+
+    #[test]
+    fn truecolor_id_with_high_byte_and_inferred_cells() {
+        let mut r = rig(40, 6, true);
+        let id = 2u32 << 24 | 0x01_02_03;
+        transmit_virtual(&mut r, id, 3, 1);
+        // 첫 칸만 행·열·윗바이트를 싣고 나머지는 결합 문자 없이 — 왼쪽에서 잇는다.
+        let mut line = String::from("\x1b[38;2;1;2;3m");
+        line.push(crate::kitty::PLACEHOLDER);
+        line.push(diacritic(0));
+        line.push(diacritic(0));
+        line.push(diacritic(2));
+        line.push(crate::kitty::PLACEHOLDER);
+        line.push(crate::kitty::PLACEHOLDER);
+        r.feed(line.as_bytes());
+        let v = r.views();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].clip, Some(CellClip { row: 0, col: 0, cols: 3, rows: 1 }));
+    }
+
+    #[test]
+    fn unknown_image_ids_draw_nothing() {
+        let mut r = rig(40, 6, true);
+        transmit_virtual(&mut r, 7, 4, 1);
+        r.feed(placeholders("38;5;8", 4, 1, (1, 1)).as_bytes());
+        assert!(r.views().is_empty());
+    }
+
+    #[test]
+    fn cursor_put_moves_the_cursor_and_rides_the_scroll() {
+        let mut r = rig(40, 5, true);
+        r.feed(format!("x\x1b_Ga=T,f=100,i=1,c=3,r=2;{}\x1b\\y", b64(&png(4, 4))).as_bytes());
+        assert_eq!(grid_line_sig(&r.term, 1), "y");
+        let cur = r.term.grid().cursor.point;
+        assert_eq!((cur.line.0, cur.column.0), (1, 5), "아래로 1줄, 오른쪽으로 3칸 뒤 y 한 글자");
+        let v = r.views();
+        assert_eq!((v[0].row, v[0].col, v[0].cols, v[0].rows), (0, 1, 3, 2));
+        r.feed(b"\r\n\r\n\r\n\r\n");
+        assert_eq!(r.views()[0].row, -1, "글과 함께 위로 밀린다");
+        // 지우기(a=d, 화면 전부)로 놓기가 사라진다.
+        r.feed(b"\x1b_Ga=d\x1b\\");
+        assert!(r.views().is_empty());
+    }
+
+    #[test]
+    fn budget_counts_iterm_and_kitty_together() {
+        let mut imgs = InlineImgs::default();
+        for id in 0..(INLINE_IMAGE_SLOTS as u64 - 1) {
+            imgs.imgs.push(InlineImg {
+                id,
+                key: (format!("f{id}"), id),
+                path: std::path::PathBuf::from(format!("/nonexistent-kasaterm-inline-{id}.png")),
+                pixels: 1,
+                abs_line: 0,
+                col: 0,
+                cols: 1,
+                rows: 1,
+                row_sig: None,
+            });
+        }
+        imgs.next_id = INLINE_IMAGE_SLOTS as u64;
+        let env = crate::kitty::Env { local_media: true, grid_cols: 80, hist: 0 };
+        for i in 1..=2 {
+            let body = format!("a=t,f=100,i={i},q=2;{}", b64(&png(2, 2)));
+            let InlineImgs { kitty, next_id, .. } = &mut imgs;
+            kitty.handle(body.as_bytes(), None, &env, next_id);
+            imgs.evict_over_budget();
+        }
+        assert_eq!(imgs.imgs.len() + imgs.kitty.images.len(), INLINE_IMAGE_SLOTS);
+        assert_eq!(imgs.imgs[0].id, 1, "가장 오래된 OSC 1337 기록이 먼저 나간다");
+        assert_eq!(imgs.kitty.images.len(), 2);
     }
 }
 

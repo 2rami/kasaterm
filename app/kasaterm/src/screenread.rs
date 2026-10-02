@@ -2525,7 +2525,7 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
     out
 }
 
-/// 인라인 이미지(OSC 1337)를 올리고 그린다 — 파일에서 한 번 디코드해 텍스처로
+/// 인라인 이미지(OSC 1337·kitty)를 올리고 그린다 — 파일에서 한 번 디코드해 텍스처로
 /// 올리고, 이번 프레임 배치에 없는 키는 텍스처를 놓는다. PTY 쪽이 뷰포트에
 /// 겹치는 그림만 보내므로, 스크롤로 벗어난 그림의 GPU 메모리가 여기서 함께
 /// 회수된다(안 놓으면 샌다). 디코드에 실패한 키는 false 로 남겨 매 프레임
@@ -2534,22 +2534,23 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
 /// 키 집합은 이번 프레임에 **렌더된 pane** 기준이다 — 워크스페이스를 전환하면
 /// 그쪽 그림 텍스처가 놓였다가 돌아올 때 다시 디코드된다(전환은 드물고
 /// 디코드는 ms 급이라 캐시를 창 넘어 유지할 이유가 없다).
-/// `hug` 가 참이면 박스를 그림 비율만큼 좁혀 **왼쪽에 붙인다**. `queue_image` 의
+/// `InlineFit::Hug` 면 박스를 그림 비율만큼 좁혀 **왼쪽에 붙인다**. `queue_image` 의
 /// contain-fit 은 박스 안 중앙 정렬이라, 준 박스가 그림보다 넓으면 글 흐름에서
 /// 그림만 한가운데로 떨어져 나온다. OSC 1337 경로는 PTY 가 셀 수를 재어 주므로
 /// 박스가 이미 맞아 이 손질이 필요 없다.
 pub(crate) fn paint_inline_images(
     g: &mut gpu::GpuRenderer,
-    slots: &[(String, String, f32, f32, f32, f32, f32, f32, bool)],
+    slots: &[crate::render::terminal_scene::InlineSlot],
 ) {
-    // 값은 디코드한 픽셀 크기 — `hug` 가 박스를 좁히는 데 쓴다. `None` 은 디코드
+    use crate::render::terminal_scene::InlineFit;
+    // 값은 디코드한 픽셀 크기 — `Hug` 가 박스를 좁히는 데 쓴다. `None` 은 디코드
     // 실패라, 매 프레임 같은 파일을 다시 열지 않게 남겨 둔다.
     static UPLOADED: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, Option<(u32, u32)>>>,
     > = std::sync::OnceLock::new();
     let mut up = UPLOADED.get_or_init(Default::default).lock().unwrap();
     let live: std::collections::HashSet<&str> =
-        slots.iter().map(|s| s.0.as_str()).collect();
+        slots.iter().map(|s| s.key.as_str()).collect();
     up.retain(|k, _| {
         let keep = live.contains(k.as_str());
         if !keep {
@@ -2557,7 +2558,9 @@ pub(crate) fn paint_inline_images(
         }
         keep
     });
-    for (key, path, x, y, w, h, c0, c1, hug) in slots {
+    for slot in slots {
+        let (key, path) = (&slot.key, &slot.path);
+        let (x, y, w, h) = slot.rect;
         if !up.contains_key(key) {
             let dims = std::fs::read(path)
                 .ok()
@@ -2568,18 +2571,21 @@ pub(crate) fn paint_inline_images(
                     g.upload_image(key, &rgba, iw, ih);
                     (iw, ih)
                 });
-            up.insert(key.clone(), dims);
+            up.insert(key.to_string(), dims);
         }
         let Some(Some((iw, ih))) = up.get(key).copied() else { continue };
-        let bw = if *hug && ih > 0 {
-            // no-upscale 캡이 있어 그림이 박스보다 작으면 원본 크기로 그려진다 —
-            // 좁힐 폭도 그 실제 크기를 넘지 않아야 왼쪽에 붙는다.
-            (h * iw as f32 / ih as f32).min(iw as f32).min(*w)
-        } else {
-            *w
-        };
-        g.push_clip(*x, *c0, bw, *c1 - *c0);
-        g.queue_image(key, *x, *y, bw, *h, 1.0, 0.0, 0.0);
+        let (cx, cy, cw, ch) = slot.clip;
+        g.push_clip(cx, cy, cw, ch);
+        match slot.fit {
+            InlineFit::Contain => g.queue_image_contain(key, x, y, w, h),
+            InlineFit::Native => g.queue_image(key, x, y, w, h, 1.0, 0.0, 0.0),
+            InlineFit::Hug => {
+                // no-upscale 캡이 있어 그림이 박스보다 작으면 원본 크기로 그려진다 —
+                // 좁힐 폭도 그 실제 크기를 넘지 않아야 왼쪽에 붙는다.
+                let bw = if ih > 0 { (h * iw as f32 / ih as f32).min(iw as f32).min(w) } else { w };
+                g.queue_image(key, x, y, bw, h, 1.0, 0.0, 0.0);
+            }
+        }
         g.pop_clip();
     }
 }

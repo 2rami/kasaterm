@@ -2962,6 +2962,10 @@ impl ApplicationHandler<UserEvent> for App {
             "[startup] gpu renderer; cell_geom w={:.2} h={:.2} (scale={scale})",
             self.cell.w, self.cell.h,
         );
+        kasa_pty::set_cell_pixels(
+            (self.cell.w * scale).round() as u32,
+            (self.cell.h * scale).round() as u32,
+        );
         self.gpu = Some(renderer);
         self.window = Some(window);
         // 배율을 한 번도 안 고른 사람에게만, 이 모니터에 맞는 값을 넘겨준다.

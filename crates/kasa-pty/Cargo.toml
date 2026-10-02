@@ -31,6 +31,8 @@ memchr = "2"
 # 인라인 그림 머리말에서 픽셀 수만 읽는다(픽셀 합계 한도). 앱과 같은 판·같은
 # 형식 집합이라 GUI 가 디코드할 수 있는 그림만 셈에 든다.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# kitty 그림 프로토콜의 `o=z`(zlib) 본문 풀기. png 가 이미 끌어오는 판이다.
+miniz_oxide = "0.8"
 
 # Windows has no `ps`: enumerate the process table (pid/ppid/exe name) via a
 # Toolhelp snapshot, and read a single process's argv out of its PEB over

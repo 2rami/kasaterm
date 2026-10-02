@@ -989,11 +989,8 @@ impl App {
             }
             out
         };
-        // 인라인 이미지 이번 프레임 배치 — (텍스처 키, 파일, x, y, w, h, clip_y0,
-        // clip_y1, hug). 좌표는 LOGICAL px(queue_image 관례). hug=박스를 그림 비율로
-        // 좁혀 왼쪽에 붙인다(글 흐름 그림용, OSC 1337 은 박스가 이미 맞아 false).
-        let mut inline_slots: Vec<(String, String, f32, f32, f32, f32, f32, f32, bool)> =
-            Vec::new();
+        // 인라인 이미지 이번 프레임 배치(`InlineSlot`).
+        let mut inline_slots: Vec<crate::render::terminal_scene::InlineSlot> = Vec::new();
         // 커서가 멎은 `[Image #N]` — (pane, 번호, 그 글자의 화면 박스). 박스는
         // 툴팁을 글자 바로 옆에 붙이는 데 쓴다.
         let mut tip_hit: Option<(String, u32, (f32, f32, f32, f32))> = None;
