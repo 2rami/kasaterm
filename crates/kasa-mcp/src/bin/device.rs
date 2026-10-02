@@ -4,6 +4,11 @@
 //!   kasa-device status           로그인 상태(토큰 값은 안 보인다)
 //!   kasa-device agents           이 기기 슬롯을 관문에 올리고 합친 목록을 보인다
 //!   kasa-device logout
+//!   kasa-device work <동작> ['<JSON>']   계정에 연결한 Gmail·GitHub 일(관문이 대신 부른다, 쓰기는 사람 승인 대기)
+//!     동작: connections · mail_list {query,max} · mail_read {id} · mail_send {to,cc,subject,body,reply_to}
+//!           · pr_create {repo,base,head,title,body,draft} · reject {id} · connections_audit
+//!
+//! 승인은 여기서 못 한다 — 앱 설정 화면에서만 난다(docs/account-connections.md).
 //!
 //! 설정 화면을 못 여는 기기(화면 없는 기기·ssh 로만 닿는 기기)용이다 — 앱 CLI 의 login 은
 //! 2026-09-29 정리로 빠졌다. 앱과 같은 파일·같은 함수(`device_auth`·`agent_accounts`)를 쓰므로
@@ -26,12 +31,26 @@ fn main() -> anyhow::Result<()> {
         }
         "logout" => device_auth::handle(&json!({ "op": "logout" }))?,
         "status" => device_auth::status(),
+        "work" => {
+            let op = args.get(1).map(String::as_str).unwrap_or("connections");
+            anyhow::ensure!(
+                matches!(op, "connections" | "connections_audit" | "mail_list" | "mail_read" | "mail_send" | "pr_create" | "reject"),
+                "kasa-device work connections|mail_list|mail_read|mail_send|pr_create|reject|connections_audit ['<JSON>']"
+            );
+            let mut params: serde_json::Value = match args.get(2) {
+                Some(raw) => serde_json::from_str(raw)?,
+                None => json!({}),
+            };
+            anyhow::ensure!(params.is_object(), "JSON 은 객체여야 해요");
+            params["op"] = json!(op);
+            device_auth::handle(&params)?
+        }
         "agents" => {
             let v = device_auth::handle(&json!({ "op": "agents" }))?;
             print_agents(&v);
             return Ok(());
         }
-        _ => anyhow::bail!("kasa-device login [<계정>] | status | agents | logout"),
+        _ => anyhow::bail!("kasa-device login [<계정>] | status | agents | logout | work <동작> ['<JSON>']"),
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

@@ -37,6 +37,8 @@ mod install;
 mod oauth;
 #[path = "gateway_workspace.rs"]
 mod workspace;
+#[path = "gateway_connections.rs"]
+mod connections;
 
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -228,6 +230,8 @@ pub struct Gate {
     account_sync: Arc<crate::account_sync::server::Store>,
     /// 계정별 개인비서(키·작업·대화). 상태 폴더가 없으면 `None` — 메모리에만 키를 두지 않는다.
     workspace: Option<Arc<workspace::Service>>,
+    /// 계정에 붙인 메일·PR 일 권한(`connections.rs`). 상태 폴더가 없으면 `None`.
+    connections: Option<Arc<crate::connections::Service>>,
     /// Ad Hoc 설치 판(`gateway_install.rs`). 상태 폴더가 없으면 창구도 없다.
     install_dir: Option<PathBuf>,
     enroll: Arc<install::Enroll>,
@@ -305,6 +309,7 @@ impl Gate {
             .as_deref()
             .map(|p| load_state(p, now_secs()))
             .unwrap_or_default();
+        let oauth_config = crate::oauth_accounts::Config::from_env();
         Self {
             by_slug: Arc::new(Mutex::new(HashMap::new())),
             keys: Arc::new(Mutex::new(keys)),
@@ -314,7 +319,7 @@ impl Gate {
             accounts: Arc::new(crate::relay_auth::Accounts::new(accounts_path)),
             oauth: Arc::new(crate::oauth_accounts::OAuth::new(
                 state_path.as_ref().map(|p| p.with_file_name("relay-oauth-identities.json")),
-                crate::oauth_accounts::Config::from_env(),
+                oauth_config.clone(),
             )),
             admins: Arc::new(admin::Admins::from_env()),
             usage: Arc::new(admin::Meter::open(
@@ -325,6 +330,7 @@ impl Gate {
                 state_path.as_ref().map(|p| p.with_file_name("account-sync")),
             )),
             workspace: workspace::Service::open(state_path.as_deref()),
+            connections: crate::connections::Service::open(state_path.as_deref(), oauth_config),
             install_dir: state_path.as_ref().map(|p| p.with_file_name("relay-install")),
             enroll: Arc::new(install::Enroll::from_env()),
             auth_changes: tokio::sync::watch::channel(0).0,
@@ -465,6 +471,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(oauth::routes())
         .merge(admin::routes())
         .merge(workspace::routes())
+        .merge(connections::routes())
         .merge(install::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))

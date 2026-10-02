@@ -6,6 +6,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "native_work_permissions.rs"]
+pub(crate) mod work;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     OpenLogin,
@@ -21,6 +24,7 @@ pub(crate) enum Action {
     OpenClaim,
     Signup,
     CancelChoice,
+    Work(work::Act),
 }
 
 /// An unlinked provider sign-in waiting for the person's answer. The gateway ticket stays in
@@ -51,6 +55,7 @@ pub(crate) struct State {
     oauth_code: Option<String>,
     choice_rx: Option<Receiver<Choice>>,
     choice: Option<Choice>,
+    pub(crate) work: work::State,
 }
 
 #[derive(Clone)]
@@ -66,6 +71,7 @@ pub(crate) struct View {
     oauth_waiting: bool,
     oauth_code: Option<String>,
     choice: Option<Choice>,
+    work: work::View,
 }
 
 pub(crate) fn mask(value: &str) -> String {
@@ -105,6 +111,7 @@ impl State {
             oauth_waiting: self.oauth_cancel.is_some(),
             oauth_code: self.oauth_code.clone(),
             choice: self.choice.clone(),
+            work: self.work.view(self.status["logged_in"] == true),
         }
     }
 
@@ -136,6 +143,7 @@ impl State {
         if self.choice.take().is_some() {
             kasa_mcp::device_auth::cancel_oauth();
         }
+        self.work.hide();
     }
 
     fn poll(&mut self) -> bool {
@@ -240,6 +248,7 @@ fn safe_error(error: &str) -> String {
 
 impl App {
     pub(crate) fn device_account_poll(&mut self) {
+        self.work_permissions_poll();
         if self.device_account.poll() {
             self.device_account.refresh();
             self.chrome_dirty = true;
@@ -253,6 +262,10 @@ impl App {
     }
 
     pub(crate) fn device_account_action(&mut self, action: Action) {
+        if let Action::Work(act) = action {
+            self.work_permissions_action(act);
+            return;
+        }
         if action == Action::CancelOAuth {
             if let Some(cancel) = &self.device_account.oauth_cancel {
                 if !cancel.swap(true, Ordering::AcqRel) {
@@ -307,7 +320,7 @@ impl App {
                     let _ = tx.send(result);
                 });
             }
-            Action::Linked | Action::CancelOAuth => {}
+            Action::Linked | Action::CancelOAuth | Action::Work(_) => {}
             Action::OpenClaim => {
                 if let Some(choice) = self.device_account.choice.as_mut() {
                     choice.claim = true;

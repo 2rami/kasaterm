@@ -9,6 +9,9 @@ pub(crate) fn fixture() -> (OAuth, PathBuf) {
             Some("fixture-secret".into())
         }
         "KASA_OAUTH_ALLOW_SIGNUP" => Some("1".into()),
+        "KASA_GITHUB_APP_CLIENT_ID" => Some("app-id".into()),
+        "KASA_GITHUB_APP_CLIENT_SECRET" => Some("app-secret".into()),
+        "KASA_GITHUB_APP_SLUG" => Some("kasa-work".into()),
         _ => None,
     });
     (
@@ -29,6 +32,7 @@ fn start(oauth: &OAuth) -> (Value, Poll) {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
     let input = Poll {
@@ -156,11 +160,11 @@ fn state_cookie_pkce_provider_and_replay_are_bound() {
     );
     oauth.finish(
         &id,
-        Ok(Identity {
+        Ok((Identity {
             provider: Provider::Google,
             subject: "123".into(),
             display: String::new(),
-        }),
+        }, None)),
     );
     assert!(oauth.poll(&input, false).unwrap().is_some());
     assert!(oauth.poll(&input, false).is_err());
@@ -205,11 +209,14 @@ fn expiration_cancel_and_failed_exchange_are_terminal() {
     assert!(oauth.poll(&input, true).unwrap().is_none());
     oauth.finish(
         &input.request_id,
-        Ok(Identity {
-            provider: Provider::Google,
-            subject: "123".into(),
-            display: String::new(),
-        }),
+        Ok((
+            Identity {
+                provider: Provider::Google,
+                subject: "123".into(),
+                display: String::new(),
+            },
+            None,
+        )),
     );
     assert!(oauth.poll(&input, false).is_err());
     let (started, input) = start(&oauth);
@@ -442,6 +449,7 @@ fn native_start(oauth: &OAuth) -> String {
                 state: Some("app-state".into()),
             }),
             false,
+            None,
         )
         .unwrap();
     assert!(value.get("user_code").is_none() && value.get("poll_token").is_none());
@@ -458,11 +466,11 @@ fn native_code(oauth: &OAuth, id: &str) -> String {
     let back = oauth
         .finish(
             &request,
-            Ok(Identity {
+            Ok((Identity {
                 provider: Provider::Google,
                 subject: "123".into(),
                 display: String::new(),
-            }),
+            }, None)),
         )
         .unwrap();
     assert!(back.starts_with(&format!("{LOOPBACK}?")));

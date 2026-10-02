@@ -4207,6 +4207,11 @@ impl App {
                 eprintln!("[autosettings] 다른 기기 계정 로그인 {key}");
                 self.settings_apply(SettingsAction::AdoptSharedAccount(provider, key));
             }
+            "device-work" | "device-work-open" if crate::verification_run() => {
+                let open = std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("device-work-open");
+                self.device_account.work.fixture(open);
+                self.chrome_dirty = true;
+            }
             "device-oauth" | "device-choice" | "device-claim" if crate::verification_run() => {
                 let action = std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default();
                 self.device_account

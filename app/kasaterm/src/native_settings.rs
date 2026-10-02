@@ -4401,6 +4401,7 @@ fn paint_accounts(
     // KASA 계정이 맨 위 — 코딩 에이전트 계정과 따로 「연결 기기」에 있어서, 계정을 찾는 사람이
     // 두 페이지를 오갔다(2026-09-29 「계정 설정이 여기저기 흩어졌다」).
     device_account::paint(g, s, hits, caret, x, y, w);
+    device_account::work::paint(g, s, hits, x, y, w);
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
     *y += 14.0;
     let switch_home = s.home_accounts.as_ref().filter(|_| s.account_scope_home);

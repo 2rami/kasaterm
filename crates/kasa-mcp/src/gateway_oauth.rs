@@ -81,6 +81,9 @@ struct Start {
     /// Ask before an unlinked identity becomes a new account (`choose_account` clients).
     #[serde(default)]
     choose: bool,
+    /// Work permissions to connect to the signed-in account instead of a sign-in.
+    #[serde(default)]
+    connect: Vec<crate::connections::Feature>,
 }
 
 /// RFC 8252 + PKCE: an app that names its own redirect URI and S256 challenge skips the typed code.
@@ -134,6 +137,24 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
     if input.link && input.choose {
         return json_err(StatusCode::BAD_REQUEST, "invalid_request");
     }
+    // Provider tokens reach only an app that proves the redirect with its PKCE verifier, and only
+    // for the account whose device asked.
+    let connect = if input.connect.is_empty() {
+        None
+    } else if !input.link
+        || native.is_none()
+        || input.connect.len() > 3
+        || input
+            .connect
+            .iter()
+            .any(|feature| feature.provider() != input.provider)
+    {
+        return json_err(StatusCode::BAD_REQUEST, "invalid_request");
+    } else {
+        let mut features = input.connect.clone();
+        features.dedup();
+        Some(features)
+    };
     let link = if input.link {
         let Some((device_id, device)) = gate.device_of(&headers) else {
             return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -170,7 +191,7 @@ async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         .filter(|c| !c.is_control())
         .take(60)
         .collect();
-    match gate.oauth.start(device, label, link, native, input.choose) {
+    match gate.oauth.start(device, label, link, native, input.choose, connect) {
         Ok(value) => axum::Json(value).into_response(),
         Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
     }
@@ -330,6 +351,7 @@ async fn callback(
         Err("invalid_code")
     };
     if exchange.admin {
+        let result = result.map(|(identity, _)| identity);
         return super::admin::signed_in(&gate, gate.oauth.finish_admin(&request, result));
     }
     let success = result.is_ok();
@@ -359,6 +381,7 @@ async fn poll(State(gate): State<Gate>, req: axum::extract::Request) -> axum::re
     };
     match gate.oauth.poll(&input, false) {
         Ok(None) => axum::Json(json!({"ok":true,"status":"pending"})).into_response(),
+        Ok(Some(ready)) if ready.connect.is_some() => connect(&gate, ready).await,
         Ok(Some(ready)) => complete(&gate, ready),
         Err(error) => json_err(StatusCode::BAD_REQUEST, error),
     }
@@ -373,6 +396,7 @@ async fn token(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         Err(error) => return error,
     };
     match gate.oauth.token(&input) {
+        Ok(ready) if ready.connect.is_some() => connect(&gate, ready).await,
         Ok(ready) => complete(&gate, ready),
         Err(error) => json_err(StatusCode::BAD_REQUEST, error),
     }
@@ -386,6 +410,44 @@ async fn cancel(State(gate): State<Gate>, req: axum::extract::Request) -> axum::
     match gate.oauth.poll(&input, true) {
         Ok(_) => axum::Json(json!({"ok":true,"status":"cancelled"})).into_response(),
         Err(error) => json_err(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+/// Saves a connect flow's provider tokens to the account of the device that started it. The
+/// provider identity is not linked for sign-in — work permissions and sign-in are separate.
+async fn connect(gate: &Gate, ready: Ready) -> axum::response::Response {
+    let (Some(link), Some(features), Some(grant)) = (&ready.link, &ready.connect, ready.grant)
+    else {
+        return json_err(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    let label = {
+        let devices = gate.devices.lock().unwrap();
+        match devices.get(&link.device_id).filter(|device| {
+            device.revoked_at.is_none()
+                && device.account == link.account
+                && device.token_hash == link.token_hash
+        }) {
+            Some(device) if gate.account_active(&link.account) => device.label.clone(),
+            _ => return json_err(StatusCode::UNAUTHORIZED, "link_expired"),
+        }
+    };
+    let Some(connections) = &gate.connections else {
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
+    };
+    let caller = crate::connections::Caller {
+        account: &link.account,
+        device: &link.device_id,
+        label: &label,
+    };
+    match connections.store(&caller, grant, features).await {
+        Ok(summary) => {
+            axum::Json(json!({"ok":true,"status":"connected","account":link.account,"connection":summary}))
+                .into_response()
+        }
+        Err(error) => json_err(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+            error.code(),
+        ),
     }
 }
 

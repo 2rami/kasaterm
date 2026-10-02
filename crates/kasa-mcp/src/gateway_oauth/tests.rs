@@ -38,6 +38,8 @@ fn ready(link: Option<Link>) -> Ready {
         label: "Fixture".into(),
         link,
         choose: false,
+        connect: None,
+        grant: None,
     }
 }
 

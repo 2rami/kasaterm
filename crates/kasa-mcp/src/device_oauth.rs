@@ -16,6 +16,8 @@ struct Attempt {
     loopback: Option<Arc<Loopback>>,
     /// Gateway capability for an unlinked sign-in waiting for the person's account choice.
     ticket: Option<String>,
+    /// Connects work permissions to the signed-in account instead of signing in.
+    connect: bool,
 }
 
 /// RFC 8252 loopback receiver. The gateway sends the browser here with a one-time code that only
@@ -186,7 +188,15 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
     anyhow::ensure!(sync_environment_allowed(), "oauth_disabled_in_isolated_run");
     let provider: Provider = serde_json::from_value(params["provider"].clone())
         .map_err(|_| anyhow::anyhow!("bad_provider"))?;
-    let link = params["link"].as_bool().unwrap_or(false);
+    let connect: Vec<String> = params["connect"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|feature| feature.as_str())
+        .filter(|feature| matches!(*feature, "mail.read" | "mail.send" | "github.pr"))
+        .map(str::to_string)
+        .collect();
+    let link = params["link"].as_bool().unwrap_or(false) || !connect.is_empty();
     let gateway = gateway()?;
     let machine =
         crate::mobile::machine_identity().ok_or_else(|| anyhow::anyhow!("machine_id_required"))?;
@@ -211,6 +221,15 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
     let capabilities = capabilities(&gateway).await;
     if !link && capabilities["choose_account"] == true {
         body["choose"] = json!(true);
+    }
+    if !connect.is_empty() {
+        // Provider tokens are only handed over through the PKCE redirect, never the typed code.
+        anyhow::ensure!(capabilities["redirect_login"] == true, "update_required");
+        anyhow::ensure!(
+            capabilities["connect"][provider.name()] == true,
+            "setup_required"
+        );
+        body["connect"] = json!(connect);
     }
     let loopback = if capabilities["redirect_login"] == true {
         let (loopback, listener) = Loopback::bind()?;
@@ -281,6 +300,7 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
         request,
         loopback: loopback.clone(),
         ticket: None,
+        connect: !connect.is_empty(),
     };
     {
         let _guard = CREDENTIALS
@@ -475,6 +495,18 @@ pub(super) async fn choose(params: &Value, claim: bool) -> anyhow::Result<Value>
 }
 
 async fn settle(attempt: Attempt, value: Value) -> anyhow::Result<Value> {
+    if attempt.connect {
+        anyhow::ensure!(
+            value["status"] == "connected"
+                && attempt
+                    .previous
+                    .as_ref()
+                    .is_some_and(|c| value["account"] == c.account),
+            "invalid_oauth_response"
+        );
+        forget(&attempt);
+        return Ok(json!({"ok":true,"status":"connected","connection":value["connection"]}));
+    }
     if !attempt.link && value["status"] == "choose" {
         let ticket = value["ticket"]
             .as_str()
@@ -648,6 +680,7 @@ mod tests {
             link: false,
             loopback: None,
             ticket: None,
+            connect: false,
         };
         assert!(attempt_current(
             &attempt,

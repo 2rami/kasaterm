@@ -1,4 +1,7 @@
-use super::{Error, Result};
+//! Per-account sealed files on the gateway: AES-256-GCM under a master key that lives in the same
+//! private directory, with the domain and account name bound as associated data. Each store keeps
+//! its own directory and key, so one leaked key does not open another store.
+
 use base64::Engine as _;
 use ring::{
     aead,
@@ -10,8 +13,17 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_ENVELOPE: u64 = 8 * 1024 * 1024;
-pub(super) struct Vault {
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Error {
+    Invalid,
+    Storage,
+}
+pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) struct Vault {
     directory: PathBuf,
+    domain: &'static str,
     key: aead::LessSafeKey,
     _lock: File,
 }
@@ -95,7 +107,7 @@ fn create_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 impl Vault {
-    pub(super) fn open(directory: PathBuf) -> Result<Self> {
+    pub(crate) fn open(directory: PathBuf, domain: &'static str) -> Result<Self> {
         // Unix permissions are a prerequisite until a tested Windows ACL implementation exists.
         if !cfg!(unix) || !directory.is_absolute() || directory.file_name().is_none() {
             return Err(Error::Storage);
@@ -154,6 +166,7 @@ impl Vault {
         }
         Ok(Self {
             directory,
+            domain,
             key: aead::LessSafeKey::new(unbound),
             _lock: lock,
         })
@@ -167,7 +180,7 @@ impl Vault {
         Ok(self.directory.join(format!("{account}.sealed")))
     }
 
-    pub(super) fn read<T: DeserializeOwned>(&self, account: &str) -> Result<Option<T>> {
+    pub(crate) fn read<T: DeserializeOwned>(&self, account: &str) -> Result<Option<T>> {
         let Some(bytes) = read_private(&self.path(account)?, MAX_ENVELOPE)? else {
             return Ok(None);
         };
@@ -184,7 +197,7 @@ impl Vault {
             .try_into()
             .map_err(|_| Error::Storage)?;
         let mut ciphertext = decode(&envelope.ciphertext)?;
-        let aad = format!("kasa.workspace-assistant.v1:{account}");
+        let aad = format!("{}:{account}", self.domain);
         let clear = self
             .key
             .open_in_place(
@@ -198,7 +211,7 @@ impl Vault {
         value.map(Some)
     }
 
-    pub(super) fn write<T: Serialize>(&self, account: &str, value: &T) -> Result<()> {
+    pub(crate) fn write<T: Serialize>(&self, account: &str, value: &T) -> Result<()> {
         let path = self.path(account)?;
         if std::fs::symlink_metadata(&path)
             .is_ok_and(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
@@ -206,7 +219,7 @@ impl Vault {
             return Err(Error::Storage);
         }
         let nonce = random::<12>()?;
-        let aad = format!("kasa.workspace-assistant.v1:{account}");
+        let aad = format!("{}:{account}", self.domain);
         let mut clear = serde_json::to_vec(value).map_err(|_| Error::Storage)?;
         if clear.len() > 5 * 1024 * 1024 {
             return Err(Error::Storage);

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest as _;
 
+use crate::connections::{Feature, Grant};
+
 pub(crate) const TTL: Duration = Duration::from_secs(600);
 /// Lifetime of the one-time code handed to an app's redirect URI; the app redeems it immediately.
 pub(crate) const CODE_TTL: Duration = Duration::from_secs(120);
@@ -57,6 +59,9 @@ pub(crate) struct Config {
     pub origin: String,
     clients: HashMap<Provider, ClientConfig>,
     allow_signup: bool,
+    /// GitHub App that grants pull-request work permissions; sign-in keeps the OAuth App.
+    github_app: Option<ClientConfig>,
+    github_app_slug: Option<String>,
 }
 
 impl Config {
@@ -68,24 +73,54 @@ impl Config {
         let Some(origin) = get("KASA_OAUTH_PUBLIC_ORIGIN").filter(|s| valid_origin(s)) else {
             return Self::default();
         };
+        let client = |id: &str, secret: &str| {
+            let (id, secret) = (get(id)?, get(secret)?);
+            [id.as_str(), secret.as_str()]
+                .iter()
+                .all(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_whitespace))
+                .then_some(ClientConfig { id, secret })
+        };
         let mut clients = HashMap::new();
         for (provider, prefix) in [(Provider::Google, "GOOGLE"), (Provider::Github, "GITHUB")] {
-            if let (Some(id), Some(secret)) = (
-                get(&format!("KASA_OAUTH_{prefix}_CLIENT_ID")),
-                get(&format!("KASA_OAUTH_{prefix}_CLIENT_SECRET")),
+            if let Some(config) = client(
+                &format!("KASA_OAUTH_{prefix}_CLIENT_ID"),
+                &format!("KASA_OAUTH_{prefix}_CLIENT_SECRET"),
             ) {
-                if [id.as_str(), secret.as_str()].iter().all(|s| {
-                    !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_whitespace)
-                }) {
-                    clients.insert(provider, ClientConfig { id, secret });
-                }
+                clients.insert(provider, config);
             }
         }
         Self {
             origin: origin.trim_end_matches('/').into(),
             clients,
             allow_signup: get("KASA_OAUTH_ALLOW_SIGNUP").as_deref() == Some("1"),
+            github_app: client("KASA_GITHUB_APP_CLIENT_ID", "KASA_GITHUB_APP_CLIENT_SECRET"),
+            github_app_slug: get("KASA_GITHUB_APP_SLUG").filter(|slug| {
+                (1..=100).contains(&slug.len())
+                    && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            }),
         }
+    }
+
+    /// Whether work permissions for this provider can be connected: Gmail rides on the sign-in
+    /// Google client, GitHub needs the separate GitHub App.
+    pub fn connect_enabled(&self, provider: Provider) -> bool {
+        match provider {
+            Provider::Google => self.enabled(Provider::Google),
+            Provider::Github => self.github_app.is_some(),
+        }
+    }
+
+    pub(crate) fn credentials(&self, provider: Provider, connect: bool) -> Option<(&str, &str)> {
+        let client = if connect && provider == Provider::Github {
+            self.github_app.as_ref()
+        } else {
+            self.clients.get(&provider)
+        }?;
+        Some((client.id.as_str(), client.secret.as_str()))
+    }
+
+    pub(crate) fn github_app_slug(&self) -> Option<&str> {
+        self.github_app_slug.as_deref()
     }
 
     pub fn enabled(&self, provider: Provider) -> bool {
@@ -102,7 +137,8 @@ impl Config {
             let enabled = storage_ready && self.enabled(provider);
             json!({"id":provider.name(),"enabled":enabled,"reason":if enabled { "" } else { "setup_required" }})
         });
-        json!({"ok":true,"signup_enabled":self.allow_signup,"redirect_login":true,"choose_account":true,"providers":providers})
+        json!({"ok":true,"signup_enabled":self.allow_signup,"redirect_login":true,"choose_account":true,"providers":providers,
+            "connect":{"google":storage_ready && self.connect_enabled(Provider::Google),"github":storage_ready && self.connect_enabled(Provider::Github)}})
     }
 }
 
@@ -212,6 +248,8 @@ pub(crate) struct Exchange {
     nonce: String,
     /// Relay-administrator browser sign-in: it never creates accounts or device credentials.
     pub admin: bool,
+    /// Work permissions asked for; the provider's tokens are kept instead of only the identity.
+    pub connect: Option<Vec<Feature>>,
 }
 
 #[derive(Clone, Debug)]
@@ -278,6 +316,8 @@ struct Pending {
     code: Option<(String, Instant)>,
     /// The client can let the person choose between a new and an existing account.
     choose: bool,
+    /// Provider tokens of a connect flow, held until the requesting device redeems the result.
+    grant: Option<Grant>,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +345,8 @@ pub(crate) struct Ready {
     pub label: String,
     pub link: Option<Link>,
     pub choose: bool,
+    pub connect: Option<Vec<Feature>>,
+    pub grant: Option<Grant>,
 }
 
 /// A verified identity that is not linked to any account yet, waiting for the person to create
@@ -332,6 +374,8 @@ pub(crate) struct OAuth {
     path: Option<PathBuf>,
     #[cfg(test)]
     pub mock_identity: Mutex<Option<Identity>>,
+    #[cfg(test)]
+    pub mock_grant: Mutex<Option<Grant>>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -361,6 +405,8 @@ impl OAuth {
             path,
             #[cfg(test)]
             mock_identity: Mutex::new(None),
+            #[cfg(test)]
+            mock_grant: Mutex::new(None),
         }
     }
 
@@ -381,8 +427,13 @@ impl OAuth {
         link: Option<Link>,
         native: Option<Native>,
         choose: bool,
+        connect: Option<Vec<Feature>>,
     ) -> Result<Value, &'static str> {
-        if !self.config.enabled(device.provider) || !self.storage_ready() {
+        let enabled = match &connect {
+            Some(_) => self.config.connect_enabled(device.provider),
+            None => self.config.enabled(device.provider),
+        };
+        if !enabled || !self.storage_ready() {
             return Err("setup_required");
         }
         let mut pending = self.pending.lock().map_err(|_| "unavailable")?;
@@ -405,6 +456,7 @@ impl OAuth {
             verifier: secret(),
             nonce: secret(),
             admin: false,
+            connect,
         };
         let authorization_url =
             format!("{}/relay/oauth/authorize/{request_id}", self.config.origin);
@@ -435,6 +487,7 @@ impl OAuth {
                 native,
                 code: None,
                 choose,
+                grant: None,
             },
         );
         Ok(response)
@@ -492,6 +545,8 @@ impl OAuth {
             label: request.label,
             link: request.link,
             choose: request.choose,
+            connect: request.exchange.connect,
+            grant: request.grant,
         })
     }
 
@@ -554,28 +609,46 @@ impl OAuth {
 
     fn authorization_url(&self, state: &str, exchange: &Exchange) -> Result<String, &'static str> {
         let provider = exchange.provider;
-        let config = self.config.clients.get(&provider).ok_or("setup_required")?;
+        let (client_id, _) = self
+            .config
+            .credentials(provider, exchange.connect.is_some())
+            .ok_or("setup_required")?;
         let mut url = reqwest::Url::parse(provider.authorize_url()).map_err(|_| "unavailable")?;
         url.query_pairs_mut().extend_pairs([
-            ("client_id", config.id.as_str()),
+            ("client_id", client_id),
             ("redirect_uri", &self.config.callback(provider)),
             ("response_type", "code"),
             ("state", state),
             ("code_challenge", &challenge(&exchange.verifier)),
             ("code_challenge_method", "S256"),
-            (
-                "scope",
-                if provider == Provider::Google {
-                    "openid email"
-                } else {
-                    "read:user"
-                },
-            ),
         ]);
+        match (provider, &exchange.connect) {
+            (Provider::Google, Some(features)) => {
+                let scopes: Vec<&str> = ["openid", "email"]
+                    .into_iter()
+                    .chain(features.iter().filter_map(|feature| feature.scope()))
+                    .collect();
+                // Offline access with fresh consent is what returns a refresh token; earlier
+                // grants (sign-in) stay included so the new token covers them too.
+                url.query_pairs_mut()
+                    .append_pair("scope", &scopes.join(" "))
+                    .append_pair("access_type", "offline")
+                    .append_pair("include_granted_scopes", "true")
+                    .append_pair("prompt", "consent select_account");
+            }
+            (Provider::Google, None) => {
+                url.query_pairs_mut()
+                    .append_pair("scope", "openid email")
+                    .append_pair("prompt", "select_account");
+            }
+            // A GitHub App's permissions come from the app itself, not from a scope.
+            (Provider::Github, Some(_)) => {}
+            (Provider::Github, None) => {
+                url.query_pairs_mut().append_pair("scope", "read:user");
+            }
+        }
         if provider == Provider::Google {
-            url.query_pairs_mut()
-                .append_pair("nonce", &exchange.nonce)
-                .append_pair("prompt", "select_account");
+            url.query_pairs_mut().append_pair("nonce", &exchange.nonce);
         }
         Ok(url.to_string())
     }
@@ -599,6 +672,7 @@ impl OAuth {
             verifier: secret(),
             nonce: secret(),
             admin: true,
+            connect: None,
         };
         let url = self.authorization_url(&state, &exchange)?;
         let header = state_cookie(&state, &cookie);
@@ -625,6 +699,7 @@ impl OAuth {
                 native: None,
                 code: None,
                 choose: false,
+                grant: None,
             },
         );
         Ok((url, header))
@@ -678,7 +753,11 @@ impl OAuth {
 
     /// Records the provider result. For a redirect flow, returns where to send the browser: the
     /// app's redirect URI with a fresh one-time code, or with an OAuth error.
-    pub fn finish(&self, id: &str, result: Result<Identity, &'static str>) -> Option<String> {
+    pub fn finish(
+        &self,
+        id: &str,
+        result: Result<(Identity, Option<Grant>), &'static str>,
+    ) -> Option<String> {
         let mut pending = self.pending.lock().ok()?;
         let request = pending.get_mut(id).filter(|request| {
             !request.exchange.admin
@@ -686,7 +765,9 @@ impl OAuth {
                 && matches!(request.outcome, Outcome::Exchanging)
         })?;
         let outcome = match result {
-            Ok(identity) if identity.provider == request.device.provider => {
+            Ok((_, None)) if request.exchange.connect.is_some() => Outcome::Failed("invalid_token"),
+            Ok((identity, grant)) if identity.provider == request.device.provider => {
+                request.grant = grant;
                 Outcome::Ready(identity)
             }
             Ok(_) => Outcome::Failed("provider_mismatch"),
@@ -758,6 +839,8 @@ impl OAuth {
             label: request.label,
             link: request.link,
             choose: request.choose,
+            connect: request.exchange.connect,
+            grant: request.grant,
         }))
     }
 
@@ -956,19 +1039,23 @@ impl OAuth {
         out
     }
 
+    /// Redeems the provider's code. A connect flow also returns the provider tokens it got.
     pub async fn exchange(
         &self,
         exchange: &Exchange,
         code: &str,
-    ) -> Result<Identity, &'static str> {
+    ) -> Result<(Identity, Option<Grant>), &'static str> {
         #[cfg(test)]
         if let Some(identity) = self.mock_identity.lock().unwrap().clone() {
-            return Ok(identity);
+            let grant = exchange
+                .connect
+                .as_ref()
+                .and_then(|_| self.mock_grant.lock().unwrap().clone());
+            return Ok((identity, grant));
         }
-        let config = self
+        let (client_id, client_secret) = self
             .config
-            .clients
-            .get(&exchange.provider)
+            .credentials(exchange.provider, exchange.connect.is_some())
             .ok_or("setup_required")?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -981,8 +1068,8 @@ impl OAuth {
                 .post(exchange.provider.token_url())
                 .header("Accept", "application/json")
                 .form(&[
-                    ("client_id", config.id.as_str()),
-                    ("client_secret", config.secret.as_str()),
+                    ("client_id", client_id),
+                    ("client_secret", client_secret),
                     ("code", code),
                     ("redirect_uri", &self.config.callback(exchange.provider)),
                     ("code_verifier", &exchange.verifier),
@@ -999,7 +1086,7 @@ impl OAuth {
         {
             return Err("invalid_token");
         }
-        match exchange.provider {
+        let identity = match exchange.provider {
             Provider::Google => {
                 let jwt = token["id_token"]
                     .as_str()
@@ -1016,29 +1103,34 @@ impl OAuth {
                 google_identity(
                     jwt,
                     &jwks,
-                    &config.id,
+                    client_id,
                     &exchange.nonce,
                     crate::relay_auth::now_secs(),
-                )
+                )?
             }
             Provider::Github => {
-                let token = token["access_token"]
+                let access = token["access_token"]
                     .as_str()
                     .filter(|token| !token.is_empty() && token.len() < 4096)
                     .ok_or("invalid_token")?;
                 let user = bounded_json(
                     client
                         .get("https://api.github.com/user")
-                        .bearer_auth(token)
+                        .bearer_auth(access)
                         .header("Accept", "application/vnd.github+json")
                         .send()
                         .await
                         .map_err(|_| "provider_unavailable")?,
                 )
                 .await?;
-                github_identity(&user)
+                github_identity(&user)?
             }
-        }
+        };
+        let grant = match &exchange.connect {
+            Some(_) => Some(grant(&identity, &token, crate::relay_auth::now_secs())?),
+            None => None,
+        };
+        Ok((identity, grant))
     }
 }
 
@@ -1078,6 +1170,40 @@ async fn bounded_json(mut response: reqwest::Response) -> Result<Value, &'static
         data.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&data).map_err(|_| "provider_rejected")
+}
+
+/// Tokens of a connect flow's token response, for the identity that response proved.
+fn grant(identity: &Identity, token: &Value, now: u64) -> Result<Grant, &'static str> {
+    let access = token["access_token"]
+        .as_str()
+        .filter(|token| !token.is_empty() && token.len() < 4096)
+        .ok_or("invalid_token")?;
+    let refresh = token["refresh_token"]
+        .as_str()
+        .filter(|token| !token.is_empty() && token.len() < 4096);
+    let expires_in = token["expires_in"].as_u64();
+    // A token that expires without a way to renew it would stop working within the hour.
+    if expires_in.is_some() && refresh.is_none() {
+        return Err("invalid_token");
+    }
+    Ok(Grant {
+        provider: identity.provider,
+        subject: identity.subject.clone(),
+        display: identity.display.clone(),
+        access_token: access.into(),
+        access_expires: expires_in.map_or(0, |secs| now + secs),
+        refresh_token: refresh.map(str::to_string),
+        refresh_expires: token["refresh_token_expires_in"]
+            .as_u64()
+            .map_or(0, |secs| now + secs),
+        scopes: token["scope"]
+            .as_str()
+            .unwrap_or("")
+            .split([' ', ','])
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_string)
+            .collect(),
+    })
 }
 
 fn github_identity(user: &Value) -> Result<Identity, &'static str> {

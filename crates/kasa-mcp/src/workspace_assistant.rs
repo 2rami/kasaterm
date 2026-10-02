@@ -4,7 +4,6 @@ mod desktop;
 mod jev;
 pub use desktop::DesktopSession;
 mod text;
-mod vault;
 
 pub use jev::request_keywords;
 pub use jev::JevAdapter;
@@ -28,6 +27,14 @@ pub enum Error {
     RateLimited,
     Unavailable,
     EvidenceRequired,
+}
+impl From<crate::sealed::Error> for Error {
+    fn from(error: crate::sealed::Error) -> Self {
+        match error {
+            crate::sealed::Error::Invalid => Self::Invalid,
+            crate::sealed::Error::Storage => Self::Storage,
+        }
+    }
 }
 impl Error {
     pub fn code(&self) -> &'static str {
@@ -345,7 +352,7 @@ pub struct RouteAdvice {
 const ROUTE_PER_MINUTE: u32 = 90;
 
 pub struct Store {
-    vault: vault::Vault,
+    vault: crate::sealed::Vault,
     accounts: Mutex<BTreeMap<String, Account>>,
     /// Routing asks while the owner types, so it gets its own per-minute budget in memory
     /// instead of spending the persisted hourly decision rate.
@@ -354,7 +361,7 @@ pub struct Store {
 impl Store {
     pub fn open(directory: PathBuf) -> Result<Self> {
         Ok(Self {
-            vault: vault::Vault::open(directory)?,
+            vault: crate::sealed::Vault::open(directory, "kasa.workspace-assistant.v1")?,
             accounts: Mutex::new(BTreeMap::new()),
             route_rate: Mutex::new(BTreeMap::new()),
         })
@@ -390,7 +397,7 @@ impl Store {
         account.revision = account.revision.checked_add(1).ok_or(Error::Storage)?;
         if let Err(error) = self.vault.write(&ctx.account, account) {
             accounts.remove(&ctx.account);
-            return Err(error);
+            return Err(error.into());
         }
         accounts.insert(ctx.account.clone(), account.clone());
         Ok(())

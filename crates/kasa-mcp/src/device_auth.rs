@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 
 #[path = "device_oauth.rs"]
 mod oauth;
+#[path = "device_connections.rs"]
+pub mod connections;
 
 static CREDENTIALS: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -332,6 +334,8 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
                 "oauth_cancel" => oauth::cancel(&params).await,
                 "oauth_signup" => oauth::choose(&params, false).await,
                 "oauth_claim" => oauth::choose(&params, true).await,
+                "connections" | "connections_audit" | "disconnect" | "mail_list" | "mail_read"
+                | "mail_send" | "pr_create" | "reject" => connections::handle(&op, &params).await,
                 "login" => {
                     let account = params["account"].as_str().unwrap_or("").trim().to_lowercase();
                     let password = params["password"].as_str().unwrap_or("");

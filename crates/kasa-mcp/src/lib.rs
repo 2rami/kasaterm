@@ -22,6 +22,8 @@ pub mod feedback;
 pub mod feedback_client;
 pub mod relay_auth;
 pub mod oauth_accounts;
+mod sealed;
+pub mod connections;
 pub mod workspace_assistant;
 pub use workspace_assistant::DesktopSession as WorkspaceDesktopSession;
 pub mod device_auth;
