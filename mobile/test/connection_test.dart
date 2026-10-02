@@ -116,6 +116,43 @@ void main() {
     },
   );
 
+  test('계정 확인을 기다리는 동안 기기 목록·데스크톱 확인이 이미 떠 있다', () async {
+    final whoami = Completer<http.Response>();
+    final asked = <String>[];
+    final store = MemoryStore()..value = SavedConnection(account: session());
+    final connection = ConnectionController(
+      store: store,
+      relayFactory: (origin, credentials) => RelayAccountApi(
+        origin,
+        session: credentials,
+        client: MockClient((request) async {
+          asked.add(request.url.path);
+          if (request.url.path == '/relay/whoami') return whoami.future;
+          return http.Response('{"ok":true,"devices":[{"id":"mac"}]}', 200);
+        }),
+      ),
+      serverFactory: (session) => Server.account(
+        session,
+        client: MockClient((request) async {
+          asked.add('desktop:${request.url.path}');
+          return http.Response('{"name":"desktop","owner":true}', 200);
+        }),
+      ),
+    );
+    final restoring = connection.restore();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(asked, containsAll(['/relay/whoami', '/relay/devices', 'desktop:/relay/account/mobile/me']));
+    expect(connection.phase, ConnectionPhase.checking);
+    whoami.complete(http.Response(
+      '{"ok":true,"account":"fixture","device_id":"phone-fixture","kind":"phone"}',
+      200,
+    ));
+    await restoring;
+    expect(connection.phase, ConnectionPhase.ready);
+    expect(connection.devices.single['id'], 'mac');
+    connection.dispose();
+  });
+
   test('logout wins over a late successful login response', () async {
     final pending = Completer<http.Response>();
     final store = MemoryStore();

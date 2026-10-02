@@ -147,12 +147,18 @@ class ConnectionController extends ChangeNotifier {
     final api = _relay(session.origin, session);
     Server? candidate;
     try {
-      await api.verify(session);
-      if (!_current(generation)) return;
-      devices = await api.devices();
-      if (!_current(generation)) return;
+      // 관문 왕복 셋(계정 확인·기기 목록·데스크톱 확인)을 함께 띄운다. 차례로 기다리면 관문이 홍콩·도쿄를
+      // 돌아 셋에 0.6초, 폰 망에서는 1초 가까이 든다(2026-10-02 실측). 판정은 예전 순서 그대로 — 계정이
+      // 틀렸다는 답이 데스크톱 답보다 먼저다. 뒤의 것의 실패가 기다리지 않게 된 뒤 새지 않게 `ignore`.
+      final verified = api.verify(session);
+      final listed = api.devices()..ignore();
       candidate = _serverFactory(session);
-      await candidate.me().timeout(const Duration(seconds: 15));
+      final reached = candidate.me().timeout(const Duration(seconds: 15))..ignore();
+      await verified;
+      if (!_current(generation)) return;
+      devices = await listed;
+      if (!_current(generation)) return;
+      await reached;
       if (!_current(generation)) return;
       server?.close();
       server = candidate;
