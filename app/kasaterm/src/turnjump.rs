@@ -369,6 +369,9 @@ impl crate::App {
                 if self.follow_live_tail_at(&pane_id) {
                     return true;
                 }
+                if self.prompt_nav_bottom(&pane_id) {
+                    return true;
+                }
                 let cell = self.px_to_pane_cell(x, y).map(|(_, c, r)| (c, r)).unwrap_or((1, 1));
                 if dbg {
                     eprintln!("[turn] seek-bottom pane={pane_id} cell={cell:?}");
@@ -380,6 +383,11 @@ impl crate::App {
             // 읽는다. 그 줄이 없으면(이미 라이브 바닥) 할 일이 없다.
             TurnHit::SeekPrev | TurnHit::SeekNext => {
                 let down = matches!(hit, TurnHit::SeekNext);
+                // claude 안의 mod 가 있으면 그것이 정확한 자리로 보낸다(prompt_nav.rs).
+                let op = if down { crate::prompt_nav::NavOp::Next } else { crate::prompt_nav::NavOp::Prev };
+                if self.prompt_nav_request(&pane_id, op) {
+                    return true;
+                }
                 let Some(target) = crate::render::sticky_text_for(&pane_id) else {
                     if dbg {
                         eprintln!("[turn] seek {hit:?} pane={pane_id} — 붙은 줄이 없어 무시");

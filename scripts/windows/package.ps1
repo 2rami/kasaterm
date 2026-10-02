@@ -205,6 +205,12 @@ New-Item -ItemType Directory -Path $collabStage -Force | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $repoRoot "app\kasaterm\collab-hooks") -File |
     Where-Object { $_.Extension -ne ".md" } |
     Copy-Item -Destination $collabStage -Force
+# 풀스크린 claude 의 프롬프트 이동·스크롤바 mod 는 폴더째 싣는다(시험 제외). shim 이 실행 때 쓸 수 있는 자리로 복사해 쓴다.
+$promptNavStage = Join-Path $collabStage "claude-mods\prompt-nav"
+New-Item -ItemType Directory -Path $promptNavStage -Force | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $repoRoot "app\kasaterm\collab-hooks\claude-mods\prompt-nav") -Force |
+    Where-Object { $_.Name -notin @("tests", ".gitignore") } |
+    Copy-Item -Destination $promptNavStage -Recurse -Force
 
 $wixBuildRoot = Reset-Directory -Path (Join-Path $workRoot "wix") -AllowedRoot $targetRoot
 $aronaWxs = Join-Path $wixBuildRoot "aronaui.wxs"

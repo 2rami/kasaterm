@@ -109,6 +109,7 @@ mod statusbar;
 mod statusbar_config;
 mod syntax;
 mod turnjump;
+mod prompt_nav;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
 mod version;
 // 물리 메모리 압박 판정 — 하단바 사용량 위젯의 「재시작 권장」 근거.
@@ -7320,6 +7321,60 @@ exec /usr/bin/open "$@"
 /// Locate the canonical collab-hooks directory the generated hook settings
 /// point at. The scripts resolve their siblings via `dirname $0`, so pointing
 /// at any one complete copy works.
+/// 풀스크린 claude 의 프롬프트 이동·스크롤바 mod(`collab-hooks/claude-mods/prompt-nav`)를 shim
+/// 자리로 옮긴다. 번들 안을 그대로 가리키면 claude 가 그 폴더에 타입 파일을 써 서명된 앱이
+/// 바뀌므로 쓸 수 있는 자리에 복사본을 둔다. 시험·타입 폴더는 싣지 않는다.
+fn install_prompt_nav_mod(hooks_dir: &std::path::Path, shim_dir: &std::path::Path) -> bool {
+    fn copy(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if matches!(name.to_str(), Some("tests" | "types" | ".gitignore")) {
+                continue;
+            }
+            let src = entry.path();
+            let dst = to.join(&name);
+            if src.is_dir() {
+                copy(&src, &dst)?;
+            } else {
+                // 같은 내용이면 건드리지 않는다 — claude 는 이 폴더를 지켜보다 파일이 바뀌면 mod 를
+                // 다시 싣는데, 다시 실린 mod 는 대화 기록 차례를 잃는다(shim 은 설정을 바꿀 때마다 다시 굽는다).
+                let body = std::fs::read(&src)?;
+                if std::fs::read(&dst).ok().as_deref() != Some(body.as_slice()) {
+                    std::fs::write(&dst, body)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let from = hooks_dir.join("claude-mods/prompt-nav");
+    let to = shim_dir.join("claude-mods/prompt-nav");
+    crate::prompt_nav::set_dir(shim_dir.join("prompt-nav"));
+    match copy(&from, &to) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[shim] prompt-nav mod copy failed: {e}");
+            false
+        }
+    }
+}
+
+/// claude shim 에 얹는 줄. 상태 파일은 그 칸 몫이라 뜰 때 지운다 — 남아 있으면 mod 없이 뜬
+/// claude 에도 낡은 막대가 그려진다.
+fn prompt_nav_block(installed: bool) -> String {
+    if !installed {
+        return String::new();
+    }
+    "PNAV=\"$SELF_DIR/claude-mods/prompt-nav\"\n\
+if [ -n \"$PERSONA_OK\" ] && [ -f \"$PNAV/.claude-plugin/plugin.json\" ]; then\n\
+  export KASATERM_PROMPT_NAV_DIR=\"$SELF_DIR/prompt-nav\"\n\
+  [ -n \"$KASATERM_PANE_ID\" ] && rm -f \"$KASATERM_PROMPT_NAV_DIR/$KASATERM_PANE_ID.json\" \"$KASATERM_PROMPT_NAV_DIR/$KASATERM_PANE_ID.req.json\"\n\
+  set -- --plugin-dir \"$PNAV\" \"$@\"\n\
+fi\n"
+        .to_string()
+}
+
 fn locate_collab_hooks_dir() -> Option<std::path::PathBuf> {
     resolve_collab_hooks_dir(
         std::env::current_exe().ok().as_deref(),
@@ -8140,6 +8195,7 @@ if [ -n \"$KASATERM_PANE_ID\" ] && [ -f \"$OVP\" ]; then\n\
 fi\n\
 {tblk}\
 {pblk}\
+{nblk}\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
 # 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(사용자: 유즈\n\
@@ -8157,6 +8213,7 @@ if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block,
+        nblk = prompt_nav_block(install_prompt_nav_mod(&hooks_dir, shim_dir)),
         permissions = format!("if [ -n \"$PERSONA_OK\" ]; then\n{}fi\n", agent_preferences::permission_shell("claude", agent_preferences::permission("claude")) + ":\n"));
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
@@ -10212,6 +10269,34 @@ mod tests {
             body.contains("KASATERM_AGENT="),
             "board 가 읽는 AGENT env 가 사라졌다"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_wrapper_loads_the_prompt_nav_mod() {
+        // 풀스크린 claude 의 프롬프트 이동·스크롤바는 칸 안의 mod 가 눈이다. 번들 안을 가리키면
+        // claude 가 거기에 타입 파일을 써 서명이 깨지므로 shim 자리의 복사본을 싣는다.
+        let dir = std::env::temp_dir().join(format!("kt-shim-pnav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hooks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("collab-hooks");
+        assert!(install_prompt_nav_mod(&hooks, &dir));
+        let copy = dir.join("claude-mods/prompt-nav");
+        assert!(copy.join(".claude-plugin/plugin.json").is_file(), "mod 복사본이 없다");
+        assert!(copy.join("hooks/register.tsx").is_file());
+        assert!(copy.join("bin/transcript-items.py").is_file(), "기록 차례 도우미가 빠졌다");
+        assert!(!copy.join("tests").exists(), "시험은 싣지 않는다");
+        let block = prompt_nav_block(true);
+        assert!(block.contains("set -- --plugin-dir \"$PNAV\""), "--plugin-dir 줄이 빠졌다");
+        assert!(block.contains("KASATERM_PROMPT_NAV_DIR="), "mod 가 상태를 쓸 자리를 모른다");
+        assert!(prompt_nav_block(false).is_empty());
+        // 실제 wrapper 에 실렸다면 진짜 claude 를 부르기 전이어야 한다(훅 폴더가 낡은 번들이면 안 실린다).
+        install_claude_hook_shim(&dir);
+        if let Ok(body) = std::fs::read_to_string(dir.join("claude")) {
+            if let Some(at) = body.find("--plugin-dir") {
+                assert!(at < body.find("exec \"$REAL\"").unwrap(), "--plugin-dir 가 exec 뒤에 있다");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

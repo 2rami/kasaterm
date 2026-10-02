@@ -3070,6 +3070,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autoopen();
         self.arm_autoconfirm();
         self.arm_autoturnclick();
+        self.arm_autonav();
         self.schedule_autoquit();
     }
 
@@ -3382,6 +3383,11 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if self.native_settings_drag_move(self.cursor_px.0, self.cursor_px.1) {
+                    return;
+                }
+                if self.prompt_nav_drag_move() || self.prompt_nav_hover(self.cursor_px.0, self.cursor_px.1) {
+                    window.set_cursor(CursorIcon::Default);
+                    window.request_redraw();
                     return;
                 }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
@@ -4337,6 +4343,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
                 if matches!(state, ElementState::Released) {
+                    if self.prompt_nav_release() {
+                        window.request_redraw();
+                        return;
+                    }
                     if self.native_settings_end_drag() {
                         window.request_redraw();
                         return;
@@ -4672,6 +4682,11 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // 풀스크린 claude 칸 오른쪽 여백의 스크롤바·프롬프트 눈금(prompt_nav.rs).
+                    if self.prompt_nav_press(cx, cy) {
+                        window.request_redraw();
+                        return;
+                    }
                     // 대화 턴 헤더 클릭 — 바는 그 질문 자리로, ↑↓ 는 앞뒤 질문으로.
                     // SGR 전달보다 먼저 잡아 클릭이 pane 안 TUI 로 새지 않게 한다.
                     if self.turn_header_click(cx, cy) {
@@ -4692,6 +4707,13 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|(id, _, text)| (id.clone(), text.clone()))
                     }) {
                         if self.jump_mirror_prompt(&pane_id, &target, None) {
+                            window.request_redraw();
+                            return;
+                        }
+                        // claude 안의 mod 가 있으면 지금 턴의 질문 자리로 곧장 — 휠로 되짚지 않는다.
+                        if self.prompt_nav_current(&pane_id).is_some_and(|i| {
+                            self.prompt_nav_request(&pane_id, crate::prompt_nav::NavOp::Prompt(i))
+                        }) {
                             window.request_redraw();
                             return;
                         }
@@ -7851,6 +7873,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autowheel();
         self.run_pending_autocloseburst();
         self.run_pending_sticky_seek();
+        self.pump_prompt_nav();
+        self.run_pending_autonav();
         self.run_pending_autoturnclick();
         self.run_pending_autotoggle();
         self.run_pending_autochat();

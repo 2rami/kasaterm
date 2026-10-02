@@ -229,6 +229,19 @@
 - 격리 검증: `KASATERM_CHAT_FIXTURE=<jsonl>`(디버그 판만, 묶인 기록 대신 그 파일) ·
   `KASATERM_AUTOCHAT="11000:toggle;14000:draft=글;14500:send;16000:pick=0;20000:open;21000:scroll=9999;22000:hovermenu"`.
 
+### 풀스크린 claude 스크롤바·프롬프트 눈금 (`prompt_nav.rs`)
+
+claude 가 대체 화면에서 스크롤을 쥔 칸에만 선다. 위치는 칸 안 mod(`collab-hooks/claude-mods/prompt-nav`)가 잰
+행 단위다 — 막대·눈금·누름이 같은 행 비례(`행 / 전체 행 × 대화 높이`)를 쓴다.
+
+- 자리: 격자 오른쪽 여백(`PANE_INNER_X` 6) 가운데, 대화 맨 위부터 입력 상자 위 빈 줄 앞까지. 글자 칸을 덮지 않는다.
+- 손잡이: 쉴 때 폭 3.5 · `with_alpha(text, 0x66)`(파일 트리 막대와 같다), 올리거나 끄는 중 폭 5 · `0x99` 에 홈
+  `with_alpha(text, 0x14)`. 최소 높이 24, 모서리는 `pill_rect`. 전체가 한 화면에 들면 그리지 않는다.
+- 프롬프트 눈금: 폭 6 · 높이 2, `with_alpha(accent, 0x80)`, 지금 보는 턴의 눈금만 `accent`. 누름은 위아래 4.
+- 누름 자리: 격자 끝 4 안쪽부터 여백까지(폭 `PANE_INNER_X + 3`) — 칸 경계의 나누기 손잡이는 남긴다.
+- 동작: 눈금 = 그 프롬프트로, 손잡이 끌기 = 끄는 자리의 줄로, 홈 = 누른 자리가 가운데 오게. 칸 안에서는
+  Option·Ctrl+↑↓ 가 앞뒤 프롬프트(mod 단추), `/prompt-nav 3` 이 셋째 프롬프트다.
+
 ### Info 탭 (`info.rs draw_info_col`)
 
 - 학생 줄 머리 바로 아래 「지금 하는 일」(44): 얼굴 28 · 「요청」「답」 흐린 이름표(10) + 한 줄씩(11). 보드가 든 값을 쓴다.

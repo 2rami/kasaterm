@@ -1,0 +1,6 @@
+{
+  "name": "prompt-nav",
+  "version": "0.1.0",
+  "description": "풀스크린 Claude Code 에서 내 프롬프트 사이를 오가고, 위치를 kasaterm 스크롤바에 알린다",
+  "author": { "name": "kasaterm" }
+}
