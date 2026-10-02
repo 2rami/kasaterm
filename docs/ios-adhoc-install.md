@@ -30,7 +30,7 @@ mobile/tool/adhoc.sh --show   # 링크를 사람이 보는 기기로도 띄운�
 |---|---|
 | `mobile/tool/adhoc.sh` (이 맥) | 아카이브·내보내기, ipa·`meta.json` 을 미니 `~/.config/kasaterm/relay-install/.up-<token>/` 로, 서명기 파일도 함께 부친다 |
 | `mobile/tool/adhoc_sign.py` (미니) | ASC 기기 등록, 기기 전부를 든 Ad Hoc 프로파일 재발급, ipa 재서명, 기기 수 `devices.json`, 등록 프로파일 서명 |
-| `crates/kasa-mcp/src/gateway_install.rs` (관문) | 설치 페이지·manifest·ipa·`/relay/install/latest`, 관리 화면 칸 |
+| `crates/kasa-mcp/src/gateway_install.rs` (관문) | 설치 페이지·manifest·ipa·`/relay/install/latest`, 관리 화면 칸. 2026-10-02 부터 관문은 서울, 설치 창구는 미니의 설치 전용 관문(서울이 역터널로 넘김) — `latest`·관리 화면만 서울이라 `adhoc.sh` 가 판을 서울에도 놓는다(`docs/seoul-gateway.md`) |
 | `crates/kasa-mcp/src/gateway_install/enroll.rs` (관문) | UDID 받는 Profile Service, 일회용 challenge, 작업 실행·기록 |
 
 서명 키는 미니의 전용 키체인 `~/Library/Keychains/ios-adhoc.keychain-db` 에만 있다(암호 파일

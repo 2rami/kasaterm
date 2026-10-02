@@ -6,6 +6,8 @@
 	http_port 8081
 	https_port 9443
 	servers :9443 {
+		# HTTP/3(UDP 9443)는 밖으로 안 열린다 — nginx 가 TCP 443 만 넘긴다.
+		protocols h1 h2
 		listener_wrappers {
 			proxy_protocol {
 				timeout 5s
@@ -23,18 +25,21 @@
 		}
 	}
 	# 앱 재서명(설치 링크 등록)은 macOS 키체인이라 미니 관문에 남는다. latest 만 기기 토큰을 보므로 여기서.
+	# 미니는 ssh 역터널(미니 launchd com.geono.kasa-seoul-tunnel)로 붙는다 — Cloudflare 터널(kasaterm-mini)
+	# 경유는 서울(ICN)에서 미니 커넥터까지 0.5MB/s 라 설치 파일·LFS 가 느렸다. 역터널은 100MB/s 대.
 	@mini_install {
 		path /relay/install/*
 		not path /relay/install/latest
 	}
 	handle @mini_install {
-		reverse_proxy https://kasaterm-mini.debimarlene.com {
-			header_up Host {upstream_hostport}
+		reverse_proxy 127.0.0.1:18790 {
+			header_up CF-Connecting-IP {remote_host}
+			flush_interval -1
 		}
 	}
 	handle /lfs/* {
-		reverse_proxy https://kasaterm-mini.debimarlene.com {
-			header_up Host {upstream_hostport}
+		reverse_proxy 127.0.0.1:18794 {
+			flush_interval -1
 		}
 	}
 	handle {

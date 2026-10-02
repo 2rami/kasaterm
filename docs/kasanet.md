@@ -325,6 +325,8 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   systemd `kasanet-relay`(사용자 `kasanet-relay`, `CAP_NET_BIND_SERVICE` 만), 설정 `/etc/kasanet-relay/relay.toml`, 인증서는
   Let's Encrypt 를 중계가 직접(TLS-ALPN-01) 받아 `/var/lib/kasanet-relay/certs` 에 두고 스스로 갱신한다. QUIC 주소 찾기를 켠다 —
   예전 터널 너머 중계는 이것이 없어 직통이 안 섰다. 서버 IPv6 가 꺼져 있어 `0.0.0.0` 으로만 묶는다(`[::]` 면 안 뜬다).
+  같은 날 관문도 이 서버로 옮겨 443 은 nginx 가 SNI 로 가른다 — 중계 https 는 `127.0.0.1:8443`, TLS 는 풀지 않고 넘기므로 중계의
+  ACME 도 그대로다(`docs/seoul-gateway.md`). 그 뒤로 잰 강제 중계 왕복 15ms 로 같다.
 - 운영은 `tools/kasanet-relay/relay.sh`(이 맥에서): `install`(바이너리·설정·systemd), `allow <id> <이름>`·`deny <id>`(허용 목록을
   고치고 다시 켠다 — 붙은 기기는 몇 초 끊겼다 다시 붙는다), `ids`(이 맥·명부 기기·이 맥에 등록한 폰의 id), `status`.
 

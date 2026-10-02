@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# 관문(kasa-relay)을 서울 서버(네이버 클라우드, 국내 중계와 같은 기계)에서 돌린다 — 이 맥에서 ssh 로. docs/kasanet.md 「서울 관문」.
+# 관문(kasa-relay)을 서울 서버(네이버 클라우드, 국내 중계와 같은 기계)에서 돌린다 — 이 맥에서 ssh 로. docs/seoul-gateway.md.
 #
+#   gateway.sh build      kasa-relay 를 리눅스(x86_64)용으로 굽는다 — 도커 rust 이미지 안 교차 컴파일, 결과는 ./out/kasa-relay.
+#                         서버(1GB)에서 직접 굽지 않는다(kasa-mcp 전체라 메모리가 모자란다).
 #   gateway.sh install <kasa-relay 리눅스 바이너리> <caddy 리눅스 바이너리>
 #                         nginx(443 SNI)·Caddy(TLS)·관문 systemd 를 올린다. 관문은 아직 안 켠다.
 #   gateway.sh env        미니 launchd plist 의 관문 환경을 /etc/kasa-relay/env 로 옮긴다(값은 화면·로그에 안 나온다).
 #   gateway.sh state      미니 관문 상태(계정·기기·봉인 저장소·설치 판)를 서울로 복사한다. 관문이 꺼진 채로 부른다.
 #   gateway.sh sync-install   미니 relay-install/ 만 서울로 — 폰 새 판을 올린 뒤(latest·관리 화면이 서울에서 그것을 본다).
+#   gateway.sh upgrade <kasa-relay 리눅스 바이너리>   관문만 갈아 끼우고 다시 켠다(업링크가 몇 초 끊겼다 다시 붙는다).
 #   gateway.sh status
 #
 # 서울 서버는 ssh 별칭 `kasanet-relay`, 미니는 `nacho-neko`(KASANET_RELAY_SSH·KASA_MINI_SSH 로 바꾼다).
@@ -28,6 +31,25 @@ fix_owner() {
 }
 
 case "${1:-}" in
+  build)
+    repo="$(cd "$HERE/../.." && pwd)"
+    mkdir -p "$HERE/out"
+    # 맥 폴더를 target 으로 쓰면 rlib 를 못 찾는 깨짐이 났다 — target·레지스트리는 도커 볼륨에 둔다.
+    docker run --rm -v "$repo:/src:ro" -v kasa-gateway-target:/target -v kasa-gateway-cargo:/usr/local/cargo/registry \
+      -v "$HERE/out:/out" -w /src -e CARGO_TARGET_DIR=/target \
+      -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+      -e CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc -e AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar \
+      rust:1.95-bookworm bash -c 'apt-get update -qq >/dev/null && apt-get install -y -qq gcc-x86-64-linux-gnu libc6-dev-amd64-cross >/dev/null &&
+        rustup target add x86_64-unknown-linux-gnu >/dev/null 2>&1 &&
+        cargo build --release -p kasa-mcp --bin kasa-relay --target x86_64-unknown-linux-gnu &&
+        cp /target/x86_64-unknown-linux-gnu/release/kasa-relay /out/'
+    ls -la "$HERE/out/kasa-relay"
+    ;;
+  upgrade)
+    relay_bin="${2:?kasa-relay 리눅스 바이너리 경로}"
+    scp -q "$relay_bin" "$SEOUL:/tmp/kasa-relay.new"
+    seoul 'sudo install -m 0755 /tmp/kasa-relay.new /usr/local/bin/kasa-relay && rm /tmp/kasa-relay.new && sudo systemctl restart kasa-relay && sleep 2 && systemctl is-active kasa-relay'
+    ;;
   install)
     relay_bin="${2:?kasa-relay 리눅스 바이너리 경로}"
     caddy_bin="${3:?caddy 리눅스 바이너리 경로}"
@@ -88,13 +110,13 @@ EOF' | seoul 'sudo tee /etc/kasa-relay/env >/dev/null && sudo chown root:kasa-re
   sync-install)
     mini "cd $MINI_CFG && tar -cf - relay-install" | seoul "sudo rm -rf $STATE/relay-install.new && sudo mkdir $STATE/relay-install.new && sudo tar -C $STATE/relay-install.new -xf - --no-same-owner && sudo rm -rf $STATE/relay-install && sudo mv $STATE/relay-install.new/relay-install $STATE/relay-install && sudo rmdir $STATE/relay-install.new"
     fix_owner
-    seoul "sudo cat $STATE/relay-install/latest; echo"
+    seoul "sudo python3 -c 'import json; t=open(\"$STATE/relay-install/latest\").read().strip(); m=json.load(open(\"$STATE/relay-install/\"+t+\"/meta.json\")); print(\"서울에 놓은 판:\", m[\"version\"], m[\"build\"])'"
     ;;
   status)
     seoul 'systemctl is-active nginx kasa-edge kasa-relay kasanet-relay; free -m | sed -n 2,3p; sudo journalctl -u kasa-relay -u kasa-edge -n 15 --no-pager -o cat'
     ;;
   *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

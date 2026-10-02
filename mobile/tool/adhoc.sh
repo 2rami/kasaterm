@@ -108,6 +108,14 @@ for d in */; do
 done
 SH
 
+# 관문은 서울(네이버)에 있고 설치 창구만 미니에 남았다 — 폰 앱의 새 판 알림(latest)·관리 화면은 서울이 기기 토큰과
+# 함께 보므로 판을 서울에도 놓는다(docs/seoul-gateway.md).
+seoul_sync="$(cd "$(dirname "$0")/../.." && pwd)/tools/kasa-gateway-seoul/gateway.sh"
+if [ "$host" != local ] && [ -x "$seoul_sync" ]; then
+  KASA_MINI_SSH="$host" "$seoul_sync" sync-install >/dev/null \
+    || echo "주의: 서울 관문에 판을 못 놓았다 — tools/kasa-gateway-seoul/gateway.sh sync-install" >&2
+fi
+
 url=$origin/relay/install/$token/
 code=$(curl -s -o /dev/null -w '%{http_code}' "${url}manifest.plist")
 [ "$code" = 200 ] || echo "주의: 관문이 manifest 를 $code 로 답했다 — 관문이 설치 창구를 아는 판인지 봐 달라" >&2
