@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 
+import 'background_grace.dart';
 import 'connection.dart';
 import 'app_link.dart';
 import 'desktop_palette.dart';
@@ -369,6 +370,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    BackgroundGrace.instance.attach();
     phoneThemeSync.bind(null);
     weather.bind(null);
     _connection.addListener(_changed);

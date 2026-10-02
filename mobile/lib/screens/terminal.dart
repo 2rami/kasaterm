@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../background_grace.dart';
 import '../device_shape.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -45,8 +46,7 @@ class TerminalScreen extends StatefulWidget {
   State<TerminalScreen> createState() => _TerminalScreenState();
 }
 
-class _TerminalScreenState extends State<TerminalScreen>
-    with WidgetsBindingObserver {
+class _TerminalScreenState extends State<TerminalScreen> {
   late final TermSession _session =
       widget.session ?? TermSession(widget.server, widget.pane);
   final _input = TextEditingController();
@@ -84,7 +84,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    BackgroundGrace.instance.addListener(_graceChanged);
     _inputFocus.onKeyEvent = _onHardwareKey;
     _session.connect();
     _startPaneRefresh();
@@ -134,26 +134,21 @@ class _TerminalScreenState extends State<TerminalScreen>
   @override
   void dispose() {
     _stopPaneRefresh();
-    WidgetsBinding.instance.removeObserver(this);
+    BackgroundGrace.instance.removeListener(_graceChanged);
     _session.dispose();
     _input.dispose();
     _inputFocus.dispose();
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    switch (state) {
-      case AppLifecycleState.resumed:
-        _session.resume();
-        _startPaneRefresh();
-      case AppLifecycleState.paused:
-      case AppLifecycleState.detached:
-      case AppLifecycleState.hidden:
-        _session.pause();
-        _stopPaneRefresh();
-      case AppLifecycleState.inactive:
-        break;
+  /// 다른 앱에 다녀오는 동안은 소켓을 그대로 둔다 — 돌아오면 화면이 이미 지금이다.
+  void _graceChanged() {
+    if (BackgroundGrace.instance.live) {
+      _session.resume();
+      _startPaneRefresh();
+    } else {
+      _session.pause();
+      _stopPaneRefresh();
     }
   }
 

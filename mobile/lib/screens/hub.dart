@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../app_release.dart';
+import '../background_grace.dart';
 import '../hub_model.dart';
 import '../hub_prefs.dart';
 import '../look.dart';
@@ -48,7 +49,7 @@ class HubScreen extends StatefulWidget {
   State<HubScreen> createState() => _HubScreenState();
 }
 
-class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
+class _HubScreenState extends State<HubScreen> {
   late final HubModel _model = HubModel(widget.server, prefs: widget.prefs);
 
   /// 목록과 기기 색표 — 색표는 관문 기준 기기 설정에서 따로 온다.
@@ -57,7 +58,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    BackgroundGrace.instance.addListener(_graceChanged);
     _model.start();
     unawaited(_watchReleases());
   }
@@ -106,25 +107,20 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+    BackgroundGrace.instance.removeListener(_graceChanged);
     _stopWatchingReleases();
     _model.dispose();
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    switch (state) {
-      case AppLifecycleState.resumed:
-        _model.start();
-        unawaited(_watchReleases());
-      case AppLifecycleState.paused:
-      case AppLifecycleState.detached:
-      case AppLifecycleState.hidden:
-        _model.stop();
-        _stopWatchingReleases();
-      case AppLifecycleState.inactive:
-        break;
+  /// 다른 앱에 다녀오는 동안은 목록 받기·롱폴을 그대로 둔다 — 그 시간이 다 됐을 때만 닫는다.
+  void _graceChanged() {
+    if (BackgroundGrace.instance.live) {
+      _model.start();
+      unawaited(_watchReleases());
+    } else {
+      _model.stop();
+      _stopWatchingReleases();
     }
   }
 

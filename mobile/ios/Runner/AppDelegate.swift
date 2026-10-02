@@ -15,6 +15,8 @@ import UserNotifications
   private var lastToken: String?
   private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
   private var webAuth: ASWebAuthenticationSession?
+  private var backgroundChannel: FlutterMethodChannel?
+  private var graceTask: UIBackgroundTaskIdentifier = .invalid
 
   override func application(
     _ application: UIApplication,
@@ -25,6 +27,12 @@ import UserNotifications
       pendingTap = Self.payload(remote)
     }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  private func endGrace() {
+    guard graceTask != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(graceTask)
+    graceTask = .invalid
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -44,6 +52,27 @@ import UserNotifications
       forName: UIAccessibility.reduceTransparencyStatusDidChangeNotification, object: nil, queue: .main
     ) { [weak self] _ in
       self?.a11yChannel?.invokeMethod("reduceTransparency", arguments: UIAccessibility.isReduceTransparencyEnabled)
+    }
+    // 다른 앱에 다녀오는 동안 연결을 살려 둘 시간을 받는다(다트 `background_grace.dart`). 시간이 다 되면 다트가 닫는다.
+    let background = FlutterMethodChannel(name: "kasaterm/background", binaryMessenger: messenger)
+    backgroundChannel = background
+    background.setMethodCallHandler { [weak self] call, result in
+      guard let self else { return result(nil) }
+      switch call.method {
+      case "begin":
+        if self.graceTask == .invalid {
+          self.graceTask = UIApplication.shared.beginBackgroundTask(withName: "kasaterm.grace") { [weak self] in
+            self?.backgroundChannel?.invokeMethod("expired", arguments: nil)
+            self?.endGrace()
+          }
+        }
+        result(self.graceTask != .invalid)
+      case "end":
+        self.endGrace()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
     // 계정 로그인 시스템 창. 관문이 kasaterm:// 로 돌려보낸 주소(일회용 code)를 다트에 준다 — 확인 코드 입력이 없다.
     let auth = FlutterMethodChannel(name: "kasaterm/web_auth", binaryMessenger: messenger)

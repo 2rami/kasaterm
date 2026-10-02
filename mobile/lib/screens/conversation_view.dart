@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../background_grace.dart';
 import '../chat_markdown.dart';
 import '../conversation.dart';
 import '../links.dart';
@@ -179,8 +180,7 @@ class ConversationView extends StatefulWidget {
   State<ConversationView> createState() => _ConversationViewState();
 }
 
-class _ConversationViewState extends State<ConversationView>
-    with WidgetsBindingObserver {
+class _ConversationViewState extends State<ConversationView> {
   static const _pollEvery = Duration(milliseconds: 1500);
 
   final _conv = Conversation();
@@ -199,7 +199,7 @@ class _ConversationViewState extends State<ConversationView>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    BackgroundGrace.instance.addListener(_graceChanged);
     _scroll.addListener(_onScroll);
     _start();
   }
@@ -216,23 +216,17 @@ class _ConversationViewState extends State<ConversationView>
   @override
   void dispose() {
     _timer?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
+    BackgroundGrace.instance.removeListener(_graceChanged);
     _scroll.dispose();
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    switch (state) {
-      case AppLifecycleState.resumed:
-        _start();
-      case AppLifecycleState.paused:
-      case AppLifecycleState.detached:
-      case AppLifecycleState.hidden:
-        _timer?.cancel();
-        _timer = null;
-      case AppLifecycleState.inactive:
-        break;
+  void _graceChanged() {
+    if (BackgroundGrace.instance.live) {
+      _start();
+    } else {
+      _timer?.cancel();
+      _timer = null;
     }
   }
 
