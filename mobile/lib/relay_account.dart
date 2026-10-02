@@ -237,6 +237,16 @@ class WorkList {
 }
 
 /// 관문 일 권한 오류 — 데스크톱 `native_work_permissions.rs` 의 `readable` 과 같은 뜻.
+String approvalError(String? code, int status) => switch (code) {
+  'approver_required' => '승인 자격을 다시 받지 못했어요. 잠시 뒤 다시 눌러 주세요.',
+  'digest_mismatch' => '보는 동안 요청이 바뀌었어요. 다시 열어 확인해 주세요.',
+  'already_closed' => '이미 다른 곳에서 처리됐어요.',
+  'expired' => '시간이 지나 원래 창으로 돌아갔어요.',
+  'truncated_cannot_allow' => '원문이 너무 길어 다 못 실었어요. 허락은 원래 창에서 해 주세요.',
+  'not_found' => '이미 처리됐거나 사라진 요청이에요.',
+  _ => status == 404 ? '관문이 원격 승인을 아직 몰라요. 관문 업데이트가 필요해요.' : accountError(status),
+};
+
 String workError(String? code, int status) => switch (code) {
   'approver_required' => '승인 자격을 다시 받지 못했어요. 잠시 뒤 다시 눌러 주세요.',
   'content_changed' => '보는 동안 내용이 바뀌었어요. 다시 열어 확인해 주세요.',
@@ -633,6 +643,42 @@ class RelayAccountApi {
   }
 
   static final _registered = <String>{};
+
+  /// 계정의 원격 승인 요청 목록. [since] 가 지금 판과 같으면 바뀔 때까지 [wait] 초 붙든다(긴 폴링).
+  Future<Map<String, dynamic>> approvals({int? since, int wait = 0}) => _request(
+    'approvals?wait=$wait${since == null ? '' : '&since=$since'}',
+    error: approvalError,
+  );
+
+  /// 이 화면이 보인 요청([digest]) 그대로 결정한다. [approver] 는 이 앱 실행 동안만 메모리에 있는 승인 열쇠다.
+  Future<Map<String, dynamic>> decideApproval(String id, String digest, bool allow, String approver) async {
+    Future<Map<String, dynamic>> once() => _request(
+      'approvals/${Uri.encodeComponent(id)}/decide',
+      body: {'decision': allow ? 'allow' : 'deny', 'digest': digest},
+      headers: {'x-kasa-approver': approver},
+      error: approvalError,
+    );
+    Future<void> register() => _request('approvals/approver', body: {'key': approver}, error: approvalError);
+    if (!_approvalRegistered.contains(approver)) {
+      await register();
+      _approvalRegistered.add(approver);
+    }
+    try {
+      return await once();
+    } on AccountException catch (e) {
+      if (e.code != 'approver_required') rethrow;
+      await register();
+      return once();
+    }
+  }
+
+  static final _approvalRegistered = <String>{};
+
+  /// 원격 승인 알림을 이 폰으로 — 관문이 계정 기기 기록에 묶어 둔다(폐기하면 안 간다).
+  Future<void> registerApprovalPush(String token, String env) =>
+      _request('approvals/push', body: {'token': token, 'env': env}, error: approvalError);
+
+  Future<void> unregisterApprovalPush() => _request('approvals/push', delete: true, error: approvalError);
 
   Future<void> oauthCancel(OAuthFlow flow) async {
     // 리다이렉트 요청은 거둘 자격이 없다 — 아무도 code 를 안 바꾸면 관문에서 10분 뒤 사라진다.

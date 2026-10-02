@@ -6,12 +6,14 @@ import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'background_grace.dart';
 import 'connection.dart';
 import 'app_link.dart';
+import 'approvals.dart';
 import 'desktop_palette.dart';
 import 'hub_model.dart';
 import 'hub_prefs.dart';
 import 'kasanet.dart';
 import 'look.dart';
 import 'push.dart';
+import 'screens/approval_screen.dart';
 import 'screens/controls.dart';
 import 'screens/connect.dart';
 import 'screens/dev_server.dart';
@@ -378,6 +380,12 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     unawaited(PushBridge.instance.unbind());
     _connection.restore(bakedRoot: _baked, preferBaked: _preferBaked);
     AppLinkObserver.instance.attach(_openLink);
+    ApprovalCenter.instance.onNew = _announceApproval;
+    if (_openApproval.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => unawaited(_openLink(AppLink(approval: _openApproval))),
+      );
+    }
     if (_openPane.isNotEmpty) {
       _openLink(
         AppLink(
@@ -390,6 +398,8 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    ApprovalCenter.instance.onNew = null;
+    _approvalBanner?.remove();
     AppLinkObserver.instance.detach();
     _connection.removeListener(_changed);
     _connection.dispose();
@@ -402,7 +412,11 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      ApprovalCenter.instance.setForeground(false);
+    }
     if (state == AppLifecycleState.resumed) {
+      ApprovalCenter.instance.setForeground(true);
       unawaited(PushBridge.instance.retryCleanup());
       unawaited(phoneThemeSync.refresh());
       unawaited(weather.refresh());
@@ -412,6 +426,14 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openLink(AppLink link) async {
+    if (link.approval case final id?) {
+      if (_connection.account == null) {
+        if (_connection.phase == ConnectionPhase.restoring) _pendingLink = link;
+        return;
+      }
+      _showApproval(id);
+      return;
+    }
     final server = _connection.server;
     // Links navigate the current session; they cannot install credentials.
     if (server == null || server.isClosed) {
@@ -450,6 +472,59 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     );
   }
 
+  OverlayEntry? _approvalBanner;
+  String? _approvalShown;
+
+  /// 검증용: 빌드 때 `KASA_OPEN_APPROVAL` 을 주면 켜자마자 그 승인 화면을 연다(시뮬레이터는 알림을 못 누른다).
+  static const _openApproval = String.fromEnvironment('KASA_OPEN_APPROVAL');
+
+  void _showApproval(String id) {
+    _approvalBanner?.remove();
+    _approvalBanner = null;
+    final nav = navigatorKey.currentState;
+    if (nav == null || _approvalShown == id) return;
+    _approvalShown = id;
+    unawaited(
+      nav
+          .push(
+            MaterialPageRoute<void>(
+              fullscreenDialog: true,
+              builder: (_) => ApprovalScreen(center: ApprovalCenter.instance, id: id),
+            ),
+          )
+          .whenComplete(() => _approvalShown = null),
+    );
+  }
+
+  /// 앱이 앞에 있는 동안 새 요청 — 위쪽 띠 하나. 보고 있는 승인 화면이 있으면 띄우지 않는다.
+  void _announceApproval(Approval a) {
+    if (_approvalShown != null || !mounted) return;
+    final overlay = navigatorKey.currentState?.overlay;
+    if (overlay == null) return;
+    _approvalBanner?.remove();
+    late final OverlayEntry entry;
+    void dismiss() {
+      if (_approvalBanner == entry) _approvalBanner = null;
+      if (entry.mounted) entry.remove();
+    }
+
+    entry = OverlayEntry(
+      builder: (_) => Positioned(
+        top: 0,
+        left: 0,
+        right: 0,
+        child: ApprovalBanner(
+          center: ApprovalCenter.instance,
+          id: a.id,
+          onOpen: () => _showApproval(a.id),
+          onDismiss: dismiss,
+        ),
+      ),
+    );
+    _approvalBanner = entry;
+    overlay.insert(entry);
+  }
+
   // An explicit logout record takes precedence over development launch defaults.
   static const _baked = String.fromEnvironment('KASA_ROOT');
   static const _preferBaked = bool.fromEnvironment('KASA_ROOT_REPLACE');
@@ -471,8 +546,17 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void _changed() {
     if (!mounted) return;
     final server = _connection.server;
+    ApprovalCenter.instance.bind(_connection.account);
     if (phoneThemeSync.account != _connection.account) {
-      if (_connection.account != null) unawaited(PushBridge.instance.unbind());
+      if (_connection.account case final account?) {
+        unawaited(
+          PushBridge.instance.unbind().then((_) {
+            if (mounted && _connection.account == account) {
+              return PushBridge.instance.bindAccount(account, _openLink);
+            }
+          }),
+        );
+      }
       phoneThemeSync.bind(_connection.account);
       weather.bind(_connection.account);
       final account = _connection.account;

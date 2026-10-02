@@ -182,7 +182,7 @@ import UserNotifications
 
   private static func payload(_ info: [AnyHashable: Any]) -> [String: Any] {
     var out: [String: Any] = [:]
-    for key in ["machine", "pane", "kind"] {
+    for key in ["machine", "pane", "kind", "approval"] {
       if let v = info[key] as? String { out[key] = v }
     }
     return out
@@ -194,6 +194,12 @@ import UserNotifications
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
+    // 원격 승인은 앱이 제 띠를 세운다 — 앞에 떠 있을 때 시스템 배너까지 내면 같은 요청이 두 번 보인다.
+    let kind = notification.request.content.userInfo["kind"] as? String
+    if kind == "approval" {
+      completionHandler(pushEnabled ? [.list] : [])
+      return
+    }
     completionHandler(pushEnabled ? [.banner, .list, .sound] : [])
   }
 

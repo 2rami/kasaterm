@@ -353,6 +353,17 @@ pub async fn send(alert: &Alert) -> usize {
     sent
 }
 
+/// 토큰 하나에 한 통 — 관문이 계정 폰에 원격 승인을 알릴 때(`gateway_approvals.rs`). 이 기기의
+/// `push_tokens.json` 은 안 본다. 같은 `collapse` 의 앞 알림을 갈아 끼운다(소리·배너는 payload 가 정한다).
+/// 실패는 (상태 코드, 애플이 준 본문) — 410·BadDeviceToken 이면 부른 쪽이 토큰을 걷는다.
+pub async fn send_to(env: &str, token: &str, payload: &Value, collapse: &str) -> Result<(), (u16, String)> {
+    let Some(key) = load_key() else { return Err((0, "no_key".into())) };
+    let bearer = jwt(&key).map_err(|e| (0, e))?;
+    post_once(env, token, &bearer, payload, Some(collapse))
+        .await
+        .map_err(|(status, text)| (status.as_u16(), text))
+}
+
 /// 쪽지가 들어왔을 때 — `notes::add` 뒤에서 부른다.
 pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
     let alert = note_alert(character, kind, summary, pane, url);

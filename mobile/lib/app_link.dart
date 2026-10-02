@@ -3,7 +3,7 @@ import 'package:flutter/widgets.dart';
 /// 웹 화면이 앱으로 건너뛸 때 주는 링크 `kasaterm://open?root=…&machine=…&pane=…`.
 /// 폰의 사파리(슬랙 알림 링크·주소 직접 열기)로 들어와도 앱에서 그 학생을 연다.
 class AppLink {
-  const AppLink({this.root, this.machine, this.pane, this.scroll, this.url});
+  const AppLink({this.root, this.machine, this.pane, this.scroll, this.url, this.approval});
 
   static const scheme = 'kasaterm';
 
@@ -17,6 +17,9 @@ class AppLink {
 
   /// 학생이 보여 주려 연 페이지(알림 `url`) — pane 대신 이걸 사파리로 연다.
   final String? url;
+
+  /// 원격 승인 알림(`kind: approval`)의 요청 id — 그 승인 화면을 연다.
+  final String? approval;
 
   /// 엔진이 스킴을 벗기고 `/?pane=…` 꼴로 줄 수도 있어 쿼리만으로도 알아본다.
   static AppLink? parse(Uri? u) {

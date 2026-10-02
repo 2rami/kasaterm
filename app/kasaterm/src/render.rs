@@ -1751,7 +1751,7 @@ impl App {
         let collab_toast_action_on = self.collab.toast_action.is_some();
         let collab_toast_elapsed_ms = self.collab_toast_elapsed_ms();
         // 새 판 알림이면 칩 라벨이 승인/거부 대신 업데이트/닫기, 뜻도 그쪽이 정한다.
-        let update_chips = self.update_notice_chips();
+        let update_chips = self.update_notice_chips().or_else(|| self.remote_notice_chips());
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {

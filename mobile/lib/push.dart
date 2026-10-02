@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import 'app_link.dart';
+import 'relay_account.dart';
 import 'server.dart';
 
 /// 푸시 다리 — 네이티브(AppDelegate)가 애플에서 받은 기기 토큰을 카사텀 서버에
@@ -39,9 +40,10 @@ class PushBridge {
 
   /// 연결된 서버가 정해질 때마다 부른다 — 토큰이 이미 있으면 바로 맡긴다.
   Future<void> bind(Server server, Future<void> Function(AppLink) onTap) async {
-    if (server.account != null) {
-      // Desktop APNs subscriptions do not yet have an account-device lease.
+    if (server.account case final account?) {
+      // 데스크톱 알림 구독은 계정 기기 임대가 아직 없다. 원격 승인 알림만 관문이 직접 보낸다.
       await unbind();
+      await bindAccount(account, onTap);
       return;
     }
     _server = server;
@@ -76,11 +78,59 @@ class PushBridge {
     await _register();
   }
 
+  /// 계정 폰 — 토큰을 관문에 맡겨 원격 승인 알림을 받는다(docs/remote-approval.md). 연결할 데스크톱을
+  /// 기다리는 동안에도 건다 — 승인은 관문이 직접 알린다.
+  Future<void> bindAccount(AccountSession account, Future<void> Function(AppLink) onTap) async {
+    if (identical(_account, account) && _onTap == onTap) return;
+    _account = account;
+    _onTap = onTap;
+    try {
+      await _ch.invokeMethod<void>('request');
+      final saved = await _ch.invokeMapMethod<String, Object?>('token');
+      if (saved != null) {
+        _token = saved['token'] as String?;
+        _env = (saved['env'] as String?) ?? 'prod';
+      }
+      final pending = await _ch.invokeMapMethod<String, Object?>('pending');
+      if (pending != null && pending.isNotEmpty) _tap(pending);
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+    await _registerAccount();
+  }
+
+  Future<void> _registerAccount() async {
+    final account = _account;
+    final token = _token;
+    if (account == null || token == null) return;
+    final key = '${account.origin}|${account.deviceId}|$token|$_env';
+    if (_accountRegistered == key) return;
+    final api = accountApi(account);
+    try {
+      await api.registerApprovalPush(token, _env);
+      if (_account == account) _accountRegistered = key;
+    } on AccountException {
+      // 다음 토큰·다음 연결 때 다시.
+    } finally {
+      api.close();
+    }
+  }
+
+  @visibleForTesting
+  RelayAccountApi Function(AccountSession) accountApi = (s) => RelayAccountApi(s.origin, session: s);
+
+  AccountSession? _account;
+  String? _accountRegistered;
+
   Future<bool> unbind() {
     final oldServer = _server;
     final oldToken = _token;
     _server = null;
     _onTap = null;
+    _account = null;
+    _accountRegistered = null;
     _requested = false;
     unawaited(_suspendNative());
     _registration = _registration.then((_) async {
@@ -168,7 +218,11 @@ class PushBridge {
         final m = (call.arguments as Map?)?.cast<String, Object?>();
         _token = m?['token'] as String?;
         _env = (m?['env'] as String?) ?? 'prod';
-        await _register();
+        if (_account != null) {
+          await _registerAccount();
+        } else {
+          await _register();
+        }
       case 'onTap':
         final m = (call.arguments as Map?)?.cast<String, Object?>();
         if (m != null) _tap(m);
@@ -179,6 +233,11 @@ class PushBridge {
   }
 
   void _tap(Map<String, Object?> m) {
+    final approval = m['approval'] as String?;
+    if (m['kind'] == 'approval' && approval != null && approval.isNotEmpty) {
+      _onTap?.call(AppLink(approval: approval));
+      return;
+    }
     final url = m['url'] as String?;
     if (url != null && url.isNotEmpty) {
       _onTap?.call(AppLink(url: url));

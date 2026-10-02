@@ -4790,6 +4790,8 @@ impl ApplicationHandler<UserEvent> for App {
                         if ok || no {
                             if target == crate::update_notice::ACTION {
                                 self.answer_update_notice(ok);
+                            } else if target == crate::remote_approval::ACTION {
+                                self.answer_remote_notice(ok);
                             } else {
                                 self.respond_approval(&target, ok);
                                 // pane_prompt_wait/attention 은 여기서 걷지 않는다 —
@@ -4814,8 +4816,11 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 새 판 알림 본문은 닫기다 — 센티널을 active_pane 에
                                 // 넣으면 존재하지 않는 pane 을 가리킨다.
                                 self.answer_update_notice(false);
+                            } else if self.remote_notice_showing() {
+                                // 원격 승인 알림 본문은 [보기] 다 — 원문을 시트로 연다.
+                                self.answer_remote_notice(true);
                             } else if let Some(target) = self.collab.toast_action.take() {
-                                if target != crate::update_notice::ACTION {
+                                if target != crate::update_notice::ACTION && target != crate::remote_approval::ACTION {
                                     self.focus_pane(&target);
                                 }
                             }
@@ -7574,6 +7579,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.drain_pending_web_hosts(event_loop);
         self.sync_web_hosts();
         self.tick_update_notice();
+        self.tick_remote_approval();
         // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
         // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
         // 돈다(사용자: 이미지 pane gif 도 재생). 정지 이미지(frames==1)엔 영향 없음.

@@ -25,6 +25,8 @@ pub mod relay_auth;
 pub mod oauth_accounts;
 mod sealed;
 pub mod connections;
+pub mod approval_text;
+pub mod approval_bridge;
 pub mod workspace_assistant;
 pub use workspace_assistant::DesktopSession as WorkspaceDesktopSession;
 pub mod device_auth;

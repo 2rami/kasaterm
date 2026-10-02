@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 mod oauth;
 #[path = "device_connections.rs"]
 pub mod connections;
+#[path = "device_approvals.rs"]
+pub mod approvals;
 
 static CREDENTIALS: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);

@@ -39,6 +39,8 @@ mod oauth;
 mod workspace;
 #[path = "gateway_connections.rs"]
 mod connections;
+#[path = "gateway_approvals.rs"]
+mod approvals;
 
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -235,6 +237,8 @@ pub struct Gate {
     /// Ad Hoc 설치 판(`gateway_install.rs`). 상태 폴더가 없으면 창구도 없다.
     install_dir: Option<PathBuf>,
     enroll: Arc<install::Enroll>,
+    /// 원격 승인 요청(메모리)·승인 열쇠·폰 푸시 토큰(`gateway_approvals.rs`).
+    approvals: Arc<approvals::Store>,
     auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
     state_write: Arc<Mutex<()>>,
@@ -333,6 +337,7 @@ impl Gate {
             connections: crate::connections::Service::open(state_path.as_deref(), oauth_config),
             install_dir: state_path.as_ref().map(|p| p.with_file_name("relay-install")),
             enroll: Arc::new(install::Enroll::from_env()),
+            approvals: Arc::new(approvals::Store::open(state_path.as_deref())),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
             state_write: Arc::new(Mutex::new(())),
@@ -473,6 +478,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(workspace::routes())
         .merge(connections::routes())
         .merge(install::routes())
+        .merge(approvals::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))

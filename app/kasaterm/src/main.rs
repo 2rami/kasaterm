@@ -66,6 +66,7 @@ mod testkit;
 mod theme;
 mod toast;
 mod update_notice;
+mod remote_approval;
 mod themegen;
 mod transcript;
 mod webpane;
@@ -5910,6 +5911,8 @@ struct App {
     sparkle_updater: Option<macos_sparkle::Updater>,
     /// 새 판 알림 — 업데이터가 찾고 사람이 아직 답하지 않은 판(`update_notice.rs`).
     update_notice: Option<update_notice::Notice>,
+    /// 다른 기기 학생의 원격 승인 요청 — 알림·시트·결정(`remote_approval.rs`).
+    remote_approval: remote_approval::State,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -6390,6 +6393,7 @@ impl App {
             #[cfg(target_os = "macos")]
             sparkle_updater: None,
             update_notice: None,
+            remote_approval: Default::default(),
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
