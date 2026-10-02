@@ -1,0 +1,3 @@
+gw-kr.debimarlene.com {
+	import gateway
+}

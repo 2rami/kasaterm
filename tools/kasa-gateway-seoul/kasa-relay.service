@@ -1,0 +1,24 @@
+[Unit]
+Description=kasaterm gateway (kasa-relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kasa-relay
+Group=kasa-relay
+# 비밀(OAuth·GitHub 앱 등)은 여기에만 — gateway.sh env 가 미니 plist 에서 옮긴다.
+EnvironmentFile=/etc/kasa-relay/env
+Environment=HOME=/var/lib/kasa-relay
+ExecStart=/usr/local/bin/kasa-relay --bind 127.0.0.1 --port 8790 --state /var/lib/kasa-relay/relay-state.json
+WorkingDirectory=/var/lib/kasa-relay
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kasa-relay
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

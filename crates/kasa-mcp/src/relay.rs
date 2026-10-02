@@ -24,6 +24,11 @@ pub async fn serve(bind: &str, port: u16, state: Option<std::path::PathBuf>) -> 
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let addr = listener.local_addr()?;
     println!("[kasa-relay] listening on {addr}");
+    // 업링크로 가는 HTTP 는 웹소켓 프레임 여럿(머리·몸·끝)으로 쪼개 간다 — Nagle 이 켜져 있으면 프레임마다 상대의
+    // 지연 ACK(40ms)를 기다려 요청 하나가 80ms 늘었다(2026-10-02 서울 관문 실측).
+    let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     // peer 주소가 있어야 로그인 시도 제한이 「직접 붙은 연결」과 「cloudflared 뒤」를 가른다.
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())

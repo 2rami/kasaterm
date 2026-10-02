@@ -1,0 +1,51 @@
+# 서울 관문 앞단 — nginx(443, SNI) 가 PROXY 프로토콜과 함께 넘긴 TLS 를 여기서 푼다. /etc/kasa-edge/Caddyfile.
+{
+	admin off
+	email {$KASA_EDGE_CONTACT}
+	# 80 은 iroh-relay(사로잡힌 포털 확인)가 쓴다 — HTTP 챌린지 없이 TLS-ALPN 만(443 → nginx → 9443).
+	http_port 8081
+	https_port 9443
+	servers :9443 {
+		listener_wrappers {
+			proxy_protocol {
+				timeout 5s
+				allow 127.0.0.1/32
+			}
+			tls
+		}
+	}
+}
+
+(gateway) {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	# 앱 재서명(설치 링크 등록)은 macOS 키체인이라 미니 관문에 남는다. latest 만 기기 토큰을 보므로 여기서.
+	@mini_install {
+		path /relay/install/*
+		not path /relay/install/latest
+	}
+	handle @mini_install {
+		reverse_proxy https://kasaterm-mini.debimarlene.com {
+			header_up Host {upstream_hostport}
+		}
+	}
+	handle /lfs/* {
+		reverse_proxy https://kasaterm-mini.debimarlene.com {
+			header_up Host {upstream_hostport}
+		}
+	}
+	handle {
+		# 관문은 루프백 상대면 CF-Connecting-IP 를 접속자로 본다 — 접속자가 보낸 값을 덮어쓴다.
+		reverse_proxy 127.0.0.1:8790 {
+			header_up CF-Connecting-IP {remote_host}
+			flush_interval -1
+		}
+	}
+}
+
+# 사이트는 sites/ 에 하나씩 — 관문 주소(kasaterm)는 DNS 를 이 서버로 돌릴 때 넣는다. 먼저 넣으면 인증서 발급이
+# 계속 실패해 Let's Encrypt 실패 한도(호스트당 시간 5회)에 걸린다.
+import sites/*.caddy

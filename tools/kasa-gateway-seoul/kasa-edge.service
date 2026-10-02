@@ -1,0 +1,22 @@
+[Unit]
+Description=kasaterm gateway TLS edge (caddy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kasa-edge
+Group=kasa-edge
+EnvironmentFile=/etc/kasa-edge/env
+Environment=XDG_DATA_HOME=/var/lib/kasa-edge XDG_CONFIG_HOME=/var/lib/kasa-edge
+ExecStart=/usr/local/bin/caddy run --config /etc/kasa-edge/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kasa-edge
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

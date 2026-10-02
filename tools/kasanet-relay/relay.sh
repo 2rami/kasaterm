@@ -4,6 +4,7 @@
 #   relay.sh install           바이너리(공식 릴리스, sha256 확인)·설정·systemd 를 올리고 켠다. 다시 불러도 된다.
 #   relay.sh allow <id> <이름>   허용 목록에 한 줄 넣고 다시 켠다(연결이 몇 초 끊겼다 다시 붙는다).
 #   relay.sh deny <id>          허용 목록에서 뺀다.
+#   relay.sh apply              설정 틀(relay.toml.in)을 고친 뒤 지금 허용 목록 그대로 다시 짜서 켠다.
 #   relay.sh ids                이 맥의 카사넷 id 와 이 맥에 등록한 폰 id — allow 에 넘길 값.
 #   relay.sh status             서비스 상태·허용 목록·최근 로그.
 #
@@ -92,6 +93,9 @@ case "${1:-}" in
     list="$(allowlist | awk -v id="$id" '$1 != id')"
     push_config "$(printf '%s\n%s # %s' "$list" "$id" "$name" | sed '/^$/d')"
     ;;
+  apply)
+    push_config "$(allowlist)"
+    ;;
   deny)
     id="${2:-}"
     valid_id "$id"
@@ -128,7 +132,7 @@ EOF
     remote 'systemctl is-active kasanet-relay; echo "--- 허용 목록"; sudo cat /etc/kasanet-relay/allowlist; echo "--- 로그"; sudo journalctl -u kasanet-relay -n 20 --no-pager'
     ;;
   *)
-    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

@@ -7,7 +7,8 @@ enable_quic_addr_discovery = true
 enable_metrics = false
 
 [tls]
-https_bind_addr = "0.0.0.0:443"
+# 443 은 nginx 가 SNI 로 갈라 넘긴다(관문과 나눠 쓴다, tools/kasa-gateway-seoul/nginx-sni.conf).
+https_bind_addr = "127.0.0.1:8443"
 quic_bind_addr = "0.0.0.0:7842"
 cert_mode = "LetsEncrypt"
 hostname = "@HOST@"

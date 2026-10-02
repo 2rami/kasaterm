@@ -60,7 +60,8 @@ const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 type GatewaySocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect_gateway(url: &str, timeout: Duration) -> anyhow::Result<GatewaySocket> {
-    let (ws, _) = tokio::time::timeout(timeout, tokio_tungstenite::connect_async(url))
+    // Nagle 끔 — 관문을 거치는 HTTP 는 프레임 여럿으로 쪼개 가서, 켜 두면 프레임마다 지연 ACK 를 기다린다(relay.rs).
+    let (ws, _) = tokio::time::timeout(timeout, tokio_tungstenite::connect_async_tls_with_config(url, None, true, None))
         .await.map_err(|_| anyhow::anyhow!("관문 연결 시간이 초과됐어요"))?
         .map_err(|error| anyhow::anyhow!("관문에 못 붙었어요: {error}"))?;
     Ok(ws)
