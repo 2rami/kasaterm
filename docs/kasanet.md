@@ -332,14 +332,20 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 
 ### 허용 목록 — 아무나 못 쓰게
 
-iroh-relay 문서의 `access.allowlist`. 중계 접속 때 기기 비밀키로 서명하므로 id 를 흉내 낼 수 없다. 모르는 키는
-`The relay denied our authentication (not authorized)` 로 끊긴다(실서버 확인). 중계 로그에는 거절된 id 가 안 남는다.
+iroh-relay 문서의 접근 제어. 중계 접속 때 기기 비밀키로 서명하므로 id 를 흉내 낼 수 없다. 모르는 키는
+`The relay denied our authentication (not authorized)` 로 끊긴다(실서버 확인). 처음엔 `access.allowlist` 였으나 중계 로그에 거절된
+id 가 안 남고 고칠 때마다 중계를 다시 켜야 해서, 같은 날 `access.http` → 서버 안 `access.py`(127.0.0.1:9101, systemd
+`kasanet-relay-access`)로 바꿨다 — 접속마다 `/etc/kasanet-relay/allowlist` 를 읽고 허용·거절을 journal 에 남긴다(어느 쪽이든
+실패하면 거절, 앱은 n0 로 돌아간다).
 
-- 지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`. 개인 맥북·윈도우는 카사넷 판이 아니라 아직 없다.
+- 지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`, 폰 `3e6bdd4f…`(10-02 14:40 넣음, 14:40:37 허용 접속). 개인 맥북·윈도우는 아직 없다.
 - 넣는 법: `relay.sh ids` 로 id 를 보고 `relay.sh allow <id> <이름>`. 다른 기기 id 는 이 맥의 루프백 base(`/machines`)로 받은
   `/version` 에서 — 앱이 허용 목록을 배우는 길과 같다.
 - **폰**: 데스크톱이 관문 계정 채널로 확인한 폰 등록(`POST /kasanet/phone`)마다 그 id 를 `kasanet-phone-app.json` 의
-  `phones` 에 남긴다. 새 판 데스크톱에 폰이 한 번 등록되면 `ids` 에 나온다.
+  `phones` 에 남긴다(새 판 데스크톱). 옛 판 데스크톱이면 앱 로그의 `[kasanet] 폰 3e6bdd4f52 허용`(앞 10자리)과 중계 거절 기록을
+  맞춘다 — `relay.sh denied` 로 보고 `relay.sh allow 3e6bdd4f52 폰` 처럼 앞자리로 넣으면 거절 기록에서 전체 id 를 찾는다.
+- 폰이 국내 중계로 **데이터를 싣는** 것은 상대 데스크톱도 새 판(홈 중계가 국내 중계)일 때다 — 폰은 데스크톱이 알린 중계 주소로
+  가므로, 옛 판 데스크톱(홈 aps1)과는 직통이 아니면 관문이다.
 - 목록에 없는 기기(`kasa_net::relay::fall_back_when_denied`): 거절을 보면 국내 중계를 지도에서 빼 n0 를 홈으로 쓰고 30분 뒤 다시
   넣어 본다 — 목록 밖 기기는 이 중계를 넣기 전과 똑같이 동작하고, 목록에 막 든 기기는 앱을 다시 켜지 않아도 옮겨 온다.
   거절된 채로 같은 중계를 계속 두드리면 구멍 뚫기 신호까지 잃는다.

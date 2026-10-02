@@ -1,0 +1,17 @@
+[Unit]
+Description=kasanet domestic relay access check
+Before=kasanet-relay.service
+
+[Service]
+User=kasanet-relay
+Group=kasanet-relay
+ExecStart=/usr/bin/python3 /usr/local/lib/kasanet-relay/access.py
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

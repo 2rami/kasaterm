@@ -16,7 +16,6 @@ contact = "@CONTACT@"
 prod_tls = true
 cert_dir = "/var/lib/kasanet-relay/certs"
 
-[access]
-allowlist = [
-@ALLOWLIST@
-]
+# 허용 목록(/etc/kasanet-relay/allowlist)은 access.py 가 접속마다 읽는다 — 목록을 고쳐도 중계를 다시 안 켠다.
+[access.http]
+url = "http://127.0.0.1:9101/"
