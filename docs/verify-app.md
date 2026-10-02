@@ -88,3 +88,34 @@ export KASATERM_SOCKET_PATH=/tmp/<네이름>-lite/lite.sock     # CLI 도 같은
   `$TMPDIR/kasaterm-selfinstall.log` 가 안 생겼는지로 확인한다. 로그는 `$TMPDIR/kasaterm-lite-app.log`.
 - shim 은 최소(rc 셋 + `kasaterm-cli`)라 pane 에서 `which claude` 가 **진짜** claude 여야 하고 `which kasaterm-cli` 는
   `$TMPDIR/kasaterm-lite-shim-<pid>/` 여야 한다.
+
+## 업데이트 리그(Sparkle 실제 흐름)
+
+새 판 창·진행 막대·다시 켜기를 바꿨으면 실제 Sparkle 로 돌려 본다. `scripts/update-rig.py` 가 설치본을 뼈대로 격리 번들
+두 판(0.0.1·0.0.2, 번들 id `com.kasa.kasaterm.updaterig`, 시험 EdDSA 키)과 그 키로 서명한 로컬 피드를 만든다. 앱은
+`KASATERM_UPDATE_RIG_FEED`(루프백만)가 있으면 설치 위치 검사 없이 Sparkle 을 켜고 그 피드를 본다.
+
+```bash
+python3 scripts/update-rig.py --root /tmp/<네이름>-up --binary target/debug/kasaterm   # port·피드 주소를 찍는다
+(cd /tmp/<네이름>-up/serve && python3 -m http.server <port> --bind 127.0.0.1 > ../http.log 2>&1 &)
+cd /tmp/<네이름>-up && source rig.env && export KASATERM_UPDATE_RIG_SHOTS=$PWD/shots KASATERM_UPDATE_RIG_PRESS_MS=3000 \
+  KASATERM_AUTOSEND="sleep 600" KASATERM_AUTOQUIT_MS=60000 && mkdir -p shots
+app/kasaterm-rig.app/Contents/MacOS/kasaterm > run.out 2>&1 &
+APP=$!
+```
+
+- **캡처** — Sparkle 창은 AppKit 이라 `capture --window`(wgpu 프레임)에 안 잡히고, 이 세션엔 화면 녹화 권한도 없다.
+  `KASATERM_UPDATE_RIG_SHOTS` 면 앱이 제 창(시트 포함)을 창 서버에서 떠 달라질 때마다 `NNN-w<창번호>.png` 로 남긴다.
+- **누르기** — `KASATERM_UPDATE_RIG_PRESS_MS` 면 그만큼 그대로인 창의 기본 단추(Return)를 누른다. 업데이트 설치 →
+  설치 후 다시 시작 → 끊김 시트의 [나중에] 순이다. `KASATERM_AUTOSEND="sleep 600"` 으로 일하는 창을 만들면 시트가 선다.
+- **판정** — `[update-rig] … 기본 단추 누름` 로그, `app/kasaterm-rig.app` 의 `CFBundleVersion` 이 0.0.2 로 바뀌었는지,
+  다시 켜졌다면 부모가 launchd(ppid 1)인 새 프로세스. [나중에] 길은 다시 켜지 않고 `AUTOQUIT` 종료 때 설치된다.
+- ⚠️ **다시 켜는 길은 사람 화면에 OS 창을 띄울 수 있다.** 다시 켜진 리그는 LaunchServices 가 띄워 TCC 책임자가 리그
+  자신이다. 셸이 `~/Desktop` 같은 보호 폴더에서 뜨면 「kasaterm-rig 의 데스크톱 접근」 창이 뜨고, 리그는 굽을 때마다
+  ad-hoc 서명이 바뀌어 매번 다시 묻는다(2026-10-02 세 번 띄웠다). 리그 설정에 `default_cwd` 를 박아 두었지만, 같은 경로에
+  다시 구운 번들은 LaunchServices 가 옛 Info.plist 를 기억해 `LSEnvironment` 가 어긋날 수 있다. 다시 켜기까지 볼 일이
+  아니면 [나중에] 길로 끝내라.
+- 다시 켜진 리그의 `TMPDIR` 은 LaunchServices 가 사용자 값으로 덮는다 — 그 로그는 본판 `$TMPDIR/kasaterm-app.log` 에
+  이어 붙는다(이어쓰기라 본판 기록은 안 깨진다). 리그 `AUTOQUIT` 으로 오래 남지 않게 한다.
+- 리그는 배경(Accessory) 앱이라 스스로 앞에 오지 않는다. 그래서 「앱이 앞에 있을 때 표준 창」 조건은 리그에서 건너뛴다 —
+  표준 창이 뜨는 순간 리그가 앞으로 나와 키 창을 가져가니, 사람이 타자 중이면 끝난 뒤 돌려라.

@@ -1,5 +1,6 @@
-//! 새 판 알림 — 업데이터가 찾은 판을 오른쪽 위 알림 한 장으로 알리고, 사람이 [업데이트] 를 눌렀을
-//! 때만 받기·설치를 맡긴다. 종료할 때 몰래 설치하던 길은 걷었다(2026-10-01, `macos_sparkle.rs`).
+//! 새 판 알림 — Windows 업데이터가 찾은 판을 오른쪽 위 알림 한 장으로 알리고, 사람이 [업데이트] 를
+//! 눌렀을 때만 받기·설치를 맡긴다. macOS 는 Sparkle 표준 창이 안내·받기·설치를 하고(`macos_sparkle.rs`),
+//! 여기서는 다시 켜기 직전에 끊길 일만 묻는다.
 //!
 //! 결정 알림 배관(`collab.toast_action`)을 [`ACTION`] 센티널로 빌린다. 다른 알림보다 낮다 — 복사·
 //! 완료·승인이 자리를 덮으면 칩을 거두고 물러섰다가, 자리가 비면 다시 선다. 덮인 글 옆에 [업데이트]
@@ -79,32 +80,48 @@ impl App {
         #[cfg(target_os = "macos")]
         if let Some(updater) = self.sparkle_updater.as_ref() {
             crate::macos_sparkle::tick(updater);
-            if crate::macos_sparkle::take_latest() {
-                self.set_toast(format!("최신 판이에요 · {}", crate::version::label()));
+            if crate::macos_sparkle::take_relaunch_request() {
+                self.confirm_update_relaunch();
             }
-            if let Some(why) = crate::macos_sparkle::take_failure() {
-                self.set_toast(format!("업데이트 실패 · {why}"));
-            }
-            if let Some((version, manual)) = crate::macos_sparkle::take_found() {
-                self.offer_update(version, manual);
+            if crate::macos_sparkle::take_postponed() {
+                self.set_toast("새 판은 다음에 끌 때 설치돼요 · 지금 하려면 업데이트 확인".to_string());
             }
         }
         if let Some(version) = crate::win_sparkle::take_found() {
-            self.offer_update(version, false);
+            self.offer_update(version);
         }
         self.show_update_notice();
     }
 
-    fn offer_update(&mut self, version: String, manual: bool) {
-        if !manual {
-            let settings = crate::socket::read_settings();
-            if !should_offer(&version, settings[DISMISSED_KEY].as_str()) {
-                return;
-            }
-            // 같은 판은 한 번만 — 시간마다 도는 확인이 서 있는 알림을 다시 세우지 않는다.
-            if self.update_notice.as_ref().is_some_and(|n| n.version == version) {
-                return;
-            }
+    /// Sparkle 이 받은 판을 설치하고 다시 켜려 한다. 다시 켜면 PTY 가 앱과 함께 끝나 도는 턴·명령이
+    /// 끊기고, 저장 안 한 문서는 묻지 않고 닫힌다(Sparkle 의 종료는 ⌘Q 의 확인을 지나지 않는다). 끊길
+    /// 것이 있으면 OS 시트로 한 번 더 묻는다. 기다렸다 저절로 다시 켜지 않는 것은, 사람이 모르는 때에
+    /// 화면이 사라지기 때문이다.
+    #[cfg(target_os = "macos")]
+    fn confirm_update_relaunch(&mut self) {
+        let dirty = self.dirty_docs(&crate::PendingClose::Window).len();
+        let Some(what) = interrupts(&self.update_interrupted_panes(), dirty) else {
+            crate::macos_sparkle::answer_relaunch(true);
+            return;
+        };
+        let info = format!("{what}\n「나중에」를 누르면 다음에 끌 때 설치돼요.");
+        let shown = self.window.as_ref().is_some_and(|window| {
+            crate::macos_open::confirm_sheet(window, "지금 다시 켜면 끊겨요", &info,
+                ("그래도 다시 켜기", "나중에"), true, crate::macos_sparkle::answer_relaunch)
+        });
+        if !shown {
+            crate::macos_sparkle::answer_relaunch(false);
+        }
+    }
+
+    fn offer_update(&mut self, version: String) {
+        let settings = crate::socket::read_settings();
+        if !should_offer(&version, settings[DISMISSED_KEY].as_str()) {
+            return;
+        }
+        // 같은 판은 한 번만 — 시간마다 도는 확인이 서 있는 알림을 다시 세우지 않는다.
+        if self.update_notice.as_ref().is_some_and(|n| n.version == version) {
+            return;
         }
         self.update_notice = Some(Notice { version, stage: Stage::Offer, shown_at: None });
     }
@@ -161,9 +178,7 @@ impl App {
             }
             return;
         }
-        // 다시 켜면 PTY 가 앱과 함께 끝나 도는 턴·명령이 끊기고, 저장 안 한 문서는 묻지 않고 닫힌다
-        // (Sparkle 의 종료는 ⌘Q 의 확인을 지나지 않는다). 기다렸다 저절로 켜면 사람이 모르는 때에
-        // 화면이 사라지므로, 지금 끊길 것을 보여 주고 한 번 더 묻는다.
+        // 끊길 것을 보여 주고 한 번 더 묻는다 — 까닭은 macOS 의 `confirm_update_relaunch` 와 같다.
         if notice.stage == Stage::Offer {
             let dirty = self.dirty_docs(&crate::PendingClose::Window).len();
             if let Some(what) = interrupts(&self.update_interrupted_panes(), dirty) {
@@ -171,7 +186,7 @@ impl App {
                 return;
             }
         }
-        self.start_update_install(&notice.version);
+        self.start_update_install();
     }
 
     /// 다시 켜면 끊길 창. 학생은 상태(일함·사람 기다림)로, 학생이 아닌 창은 도는 명령으로 본다.
@@ -192,12 +207,7 @@ impl App {
         busy
     }
 
-    fn start_update_install(&mut self, #[allow(unused_variables)] version: &str) {
-        #[cfg(target_os = "macos")]
-        if self.sparkle_updater.as_ref().is_some_and(crate::macos_sparkle::install_now) {
-            self.set_toast(format!("새 판 v{version} 받는 중 · 다 받으면 저절로 다시 켜져요"));
-            return;
-        }
+    fn start_update_install(&mut self) {
         if crate::win_sparkle::available() {
             crate::win_sparkle::install();
             return;
