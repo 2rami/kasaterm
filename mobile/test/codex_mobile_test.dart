@@ -8,6 +8,7 @@ import 'package:kasaterm_mobile/claude_style.dart';
 import 'package:kasaterm_mobile/conversation.dart';
 import 'package:kasaterm_mobile/grid.dart';
 import 'package:kasaterm_mobile/grid_canvas.dart';
+import 'package:kasaterm_mobile/look.dart';
 import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
@@ -324,8 +325,9 @@ void main() {
         await tester.tap(tool);
         await tester.pump();
           expect(find.textContaining('12 tests passed'), findsOneWidget);
+          // 흐르는 글의 한글은 고딕으로 — TermHangul 은 한글 진행 폭이 반 칸이라 포개진다.
           expect(tester.widget<Text>(find.textContaining('12 tests passed')).style?.fontFamilyFallback,
-            contains('TermHangul'));
+            Look.flowMonoFallback);
         expect(tester.takeException(), isNull);
         if (width == 390) {
           await expectLater(

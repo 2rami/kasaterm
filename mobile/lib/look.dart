@@ -71,7 +71,15 @@ abstract final class Look {
   static const mapMaxPad = 200.0;
 
   static const fieldGap = 12.0;
+
+  /// 대화 보기 입력줄 위, 붙여 두고 아직 안 보낸 사진.
+  static const attachThumb = 48.0;
   static const inputMaxLines = 6;
+
+  /// 격자 밖 흐르는 글(인라인 코드·코드 칸·도구 결과·글자 선택)의 고정폭 대체 글꼴. TermHangul 은
+  /// 한글 진행 폭이 반 칸이라 칸마다 놓는 격자에서만 맞고, 흐르는 글에선 한글이 서로 포개진다 —
+  /// 한글은 UI 고딕으로 보낸다(데스크톱 인라인 코드와 같은 규칙).
+  static const flowMonoFallback = ['Pretendard', 'TermSymbol'];
 
   /// 경고 띠 바탕 — `danger` 12%. 원색 채움 금지.
   static const dangerTint = 0.12;

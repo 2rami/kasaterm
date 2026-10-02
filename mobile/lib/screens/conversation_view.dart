@@ -101,6 +101,7 @@ class ChatComposer extends StatelessWidget {
     required this.onSend,
     this.leading,
     this.onStop,
+    this.photos = const [],
   });
 
   final TextEditingController controller;
@@ -109,47 +110,106 @@ class ChatComposer extends StatelessWidget {
   final VoidCallback onSend;
   final Widget? leading;
 
+  /// 입력상자에 붙여 두고 아직 안 보낸 사진 — 대화 보기는 상자의 `[Image #1]` 이 안 보인다.
+  final List<Uint8List> photos;
+
   /// 작업 중일 때만 — esc 로 멈춘다.
   final VoidCallback? onStop;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(4, 8, Look.pagePad, 8),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ?leading,
-        Expanded(
-          child: TextField(
-            controller: controller,
-            focusNode: focusNode,
-            enabled: enabled,
-            minLines: 1,
-            maxLines: Look.inputMaxLines,
-            textInputAction: TextInputAction.newline,
-            // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
-            style: const TextStyle(fontSize: 16),
-            decoration: const InputDecoration(hintText: '메시지 보내기'),
-          ),
+        if (photos.isNotEmpty) _PendingPhotos(photos),
+        _row(),
+      ],
+    ),
+  );
+
+  Widget _row() => Row(
+    crossAxisAlignment: CrossAxisAlignment.end,
+    children: [
+      ?leading,
+      Expanded(
+        child: TextField(
+          controller: controller,
+          focusNode: focusNode,
+          enabled: enabled,
+          minLines: 1,
+          maxLines: Look.inputMaxLines,
+          textInputAction: TextInputAction.newline,
+          // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
+          style: const TextStyle(fontSize: 16),
+          decoration: const InputDecoration(hintText: '메시지 보내기'),
         ),
-        if (onStop != null) ...[
-          const SizedBox(width: 4),
-          IconButton(
-            onPressed: onStop,
-            icon: const Icon(Icons.stop_circle_outlined),
-            tooltip: '멈추기 (esc)',
-          ),
-        ],
-        const SizedBox(width: 8),
-        ListenableBuilder(
-          listenable: controller,
-          builder: (context, _) => SendButton(
-            ready: controller.text.trim().isNotEmpty,
-            onPressed: enabled ? onSend : null,
-            round: true,
-          ),
+      ),
+      if (onStop != null) ...[
+        const SizedBox(width: 4),
+        IconButton(
+          onPressed: onStop,
+          icon: const Icon(Icons.stop_circle_outlined),
+          tooltip: '멈추기 (esc)',
         ),
       ],
+      const SizedBox(width: 8),
+      ListenableBuilder(
+        listenable: controller,
+        builder: (context, _) => SendButton(
+          ready: controller.text.trim().isNotEmpty || photos.isNotEmpty,
+          onPressed: enabled ? onSend : null,
+          round: true,
+        ),
+      ),
+    ],
+  );
+}
+
+class _PendingPhotos extends StatelessWidget {
+  const _PendingPhotos(this.photos);
+  final List<Uint8List> photos;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(Look.tap, 0, 0, Look.groupTitleGap),
+    child: Semantics(
+      label: '보낼 사진 ${photos.length}장',
+      child: Row(
+        children: [
+          // 여러 장이면 옆으로 민다 — 안내 글은 늘 보인다.
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final (i, p) in photos.indexed) ...[
+                    if (i > 0) const SizedBox(width: Look.groupTitleGap),
+                    ClipRRect(
+                      borderRadius: Look.smallCorners,
+                      child: Image.memory(
+                        p,
+                        width: Look.attachThumb,
+                        height: Look.attachThumb,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: Look.groupTitleGap),
+          Text(
+            '보내면 함께 가요',
+            style: TextStyle(
+              fontSize: Look.sub,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }
@@ -854,7 +914,7 @@ class _ToolRow extends StatelessWidget {
                   toolLabel(tool.name),
                   style: const TextStyle(
                     fontFamily: 'TermMono',
-                    fontFamilyFallback: ['TermHangul', 'TermSymbol'],
+                    fontFamilyFallback: Look.flowMonoFallback,
                     fontSize: Look.chip,
                     fontWeight: FontWeight.w600,
                   ),
@@ -879,7 +939,7 @@ class _ToolRow extends StatelessWidget {
                   _clip(stripAnsi(result).trim()),
                   style: TextStyle(
                     fontFamily: 'TermMono',
-                    fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
+                    fontFamilyFallback: Look.flowMonoFallback,
                     fontSize: Look.chip,
                     height: 1.35,
                     color: tool.error ? scheme.error : scheme.onSurface,
@@ -970,7 +1030,7 @@ class _Fold extends StatelessWidget {
                       style: mono
                           ? TextStyle(
                               fontFamily: 'TermMono',
-                              fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
+                              fontFamilyFallback: Look.flowMonoFallback,
                               fontSize: Look.chip,
                               height: 1.35,
                               color: dim,
@@ -1016,7 +1076,7 @@ class _CommandChip extends StatelessWidget {
             text,
             style: TextStyle(
               fontFamily: 'TermMono',
-              fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
+              fontFamilyFallback: Look.flowMonoFallback,
               fontSize: Look.sub,
               color: scheme.onSurface,
             ),

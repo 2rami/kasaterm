@@ -13,6 +13,7 @@ class PhotoAttachmentButton extends StatefulWidget {
     required this.enabled,
     this.onBusy,
     this.onAttached,
+    this.confirm = true,
     this.disabledReason,
     this.pickImage = pickAttachmentImage,
   });
@@ -25,7 +26,12 @@ class PhotoAttachmentButton extends StatefulWidget {
   /// 모르게 된다(2026-09-17 지적 「사진첨부 버튼 왜 안 눌리냐」).
   final String? disabledReason;
   final ValueChanged<bool>? onBusy;
-  final VoidCallback? onAttached;
+
+  /// 붙인 사진 — 서버가 받은 그 바이트.
+  final ValueChanged<Uint8List>? onAttached;
+
+  /// 붙였다는 알림 띠. 붙인 사진을 화면이 따로 보여 주면 끈다.
+  final bool confirm;
   final Future<Uint8List?> Function() pickImage;
 
   @override
@@ -60,8 +66,10 @@ class _PhotoAttachmentButtonState extends State<PhotoAttachmentButton> {
       setState(() => _uploading = true);
       await server.pasteImage(pane.id, bytes, machine: pane.machine);
       if (!mounted) return;
-      widget.onAttached?.call();
-      _message('사진을 입력창에 첨부했어요. 보내기를 누르면 함께 전달돼요.');
+      widget.onAttached?.call(bytes);
+      if (widget.confirm) {
+        _message('사진을 입력창에 첨부했어요. 보내기를 누르면 함께 전달돼요.');
+      }
     } on ServerException catch (error) {
       if (mounted) _message(error.message);
     } catch (_) {

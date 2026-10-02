@@ -15,7 +15,7 @@ MarkdownStyleSheet chatMarkdownStyle(
   final size = base.fontSize ?? 15;
   final mono = TextStyle(
     fontFamily: 'TermMono',
-    fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
+    fontFamilyFallback: Look.flowMonoFallback,
     fontSize: size - 2,
     color: base.color,
     backgroundColor: codeBg,

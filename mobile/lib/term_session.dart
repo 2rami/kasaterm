@@ -196,6 +196,21 @@ class TermSession extends ChangeNotifier {
     await server.send(pane.id, text, machine: pane.machine);
   }
 
+  /// 글자 바로 뒤에 붙여 보내면 Ink 가 Enter 를 먹는다 — 서버 `send` 가 기다리는 것과 같은 틈.
+  static const enterGap = Duration(milliseconds: 150);
+
+  /// 사진을 붙여 둔 입력상자에 글을 더해 보낸다. [reply] 의 서버 `send` 는 상자를 Ctrl+U 로
+  /// 비우고 붙이므로 먼저 들어간 `[Image #1]` 까지 지워 사진이 안 간다(2026-10-02 대화 보기 제보).
+  Future<void> replyAfterAttachment(String text) async {
+    if (state != TermState.connected) {
+      throw const ServerException('연결이 끊겨 보내지 못했어요. 다시 연결되면 보내 주세요.');
+    }
+    // 앞 공백 — 붙인 자리표 바로 뒤에 붙으면 `[Image #1]글` 로 한 덩이가 된다.
+    sendText('\x1b[200~ ${text.replaceAll('\x1b', '')}\x1b[201~');
+    await Future<void>.delayed(enterGap);
+    sendText('\r');
+  }
+
   /// 앱이 뒤로 가면 우리가 먼저 닫는다 — iOS 가 소켓을 죽인 채 두면 복귀 때
   /// 「끊김」인지 판단이 늦다.
   void pause() {

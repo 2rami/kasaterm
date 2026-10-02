@@ -554,7 +554,7 @@ class _ShareTextScreenState extends State<ShareTextScreen> {
                   t,
                   style: const TextStyle(
                     fontFamily: 'TermMono',
-                    fontFamilyFallback: ['TermHangul'],
+                    fontFamilyFallback: Look.flowMonoFallback,
                     fontSize: 13,
                     height: 1.45,
                   ),

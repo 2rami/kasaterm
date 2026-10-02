@@ -54,7 +54,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
   bool _ctrl = false;
   bool _sending = false;
   bool _attaching = false;
-  bool _pendingAttachment = false;
+
+  /// 입력상자에 붙여 두고 아직 안 보낸 사진. 대화 보기는 상자를 안 보여 주니 입력줄 위에 띄운다.
+  final List<Uint8List> _pendingPhotos = [];
+  bool get _pendingAttachment => _pendingPhotos.isNotEmpty;
 
   /// 지금의 pane — 열 때 받은 것으로 시작해 목록을 다시 받아 갈아 끼운다. 셸에서
   /// claude 를 띄우면 이름·얼굴·상태가 따라오고, 사진 버튼도 그때 켜진다(2026-09-17
@@ -165,13 +168,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
         _session.sendText('\r');
       } else if (_ctrl && text.length == 1) {
         _session.ctrl(text);
+      } else if (_pendingAttachment) {
+        await _session.replyAfterAttachment(text);
       } else {
         await _session.reply(text);
       }
       if (!mounted || widget.server.isClosed) return;
       _input.clear();
       _ctrl = false;
-      _pendingAttachment = false;
+      _pendingPhotos.clear();
     } on ServerException catch (e) {
       if (mounted) _toast(e.message);
     } finally {
@@ -244,15 +249,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _sendLive(_liveInput.flush(_input.value));
     setState(_dropLive);
     final gap = DateTime.now().difference(_lastLiveSend);
-    if (gap < _enterGap) await Future<void>.delayed(_enterGap - gap);
+    if (gap < TermSession.enterGap) {
+      await Future<void>.delayed(TermSession.enterGap - gap);
+    }
     if (!mounted || widget.server.isClosed) return;
     _session.sendText(enter);
-    if (enter == '\r') _pendingAttachment = false;
+    if (enter == '\r') _pendingPhotos.clear();
     _toBottom();
     _inputFocus.requestFocus();
   }
-
-  static const _enterGap = Duration(milliseconds: 150);
 
   void _toggleLive() {
     setState(() {
@@ -483,7 +488,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
                     enabled:
                         s.state != TermState.gone && !_sending && !_attaching,
                     onSend: _send,
-                    leading: _photoButton(s, pane),
+                    leading: _photoButton(s, pane, chat: true),
+                    photos: _pendingPhotos,
                     onStop: pane.isBusy && s.canSend
                         ? () => s.sendText('\x1b')
                         : null,
@@ -500,7 +506,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                             ctrl: _ctrl,
                             onCtrl: () => setState(() => _ctrl = !_ctrl),
                             onKey: _toBottom,
-                            onSubmit: () => _pendingAttachment = false,
+                            onSubmit: () => setState(_pendingPhotos.clear),
                           ),
                         ),
                       ),
@@ -533,9 +539,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
     },
   );
 
-  Widget _photoButton(TermSession s, Pane pane) => PhotoAttachmentButton(
+  Widget _photoButton(TermSession s, Pane pane, {bool chat = false}) => PhotoAttachmentButton(
     server: widget.server,
     pane: pane,
+    // 대화 보기는 입력줄 위 미리보기가 같은 말을 한다 — 알림 띠가 입력줄을 덮지 않게.
+    confirm: !chat,
     pickImage: widget.pickImage ?? pickAttachmentImage,
     enabled:
         s.state == TermState.connected &&
@@ -548,8 +556,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
         ? '보내는 중이에요. 잠시 뒤 다시 눌러 주세요.'
         : '연결이 끊겨 사진을 붙일 수 없어요. 다시 연결되면 켜져요.',
     onBusy: (busy) => setState(() => _attaching = busy),
-    onAttached: () => setState(() {
-      _pendingAttachment = true;
+    onAttached: (photo) => setState(() {
+      _pendingPhotos.add(photo);
       _bottomTick++;
     }),
   );
@@ -602,7 +610,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                 child: SelectableText(
                   text.isEmpty ? '(빈 화면)' : text,
                   style: const TextStyle(fontFamily: 'TermMono',
-                    fontFamilyFallback: ['TermHangul', 'TermSymbol'], fontSize: 14),
+                    fontFamilyFallback: Look.flowMonoFallback, fontSize: 14),
                 ),
               ),
             ),
