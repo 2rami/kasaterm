@@ -3799,44 +3799,111 @@ impl App {
     /// `KASATERM_AUTOCLICKS="x,y;x,y"` — 논리 좌표를 차례로 진짜 클릭한다(첫 클릭은
     /// `KASATERM_AUTOCLICKS_MS`, 기본 6000 뒤, 그다음은 `_GAP_MS` 기본 1200 간격). 팝오버마다 하네스를
     /// 새로 만들지 않고 화면 어디든 열어 둔 채 `kasaterm-cli capture --window` 로 찍으려는 것.
+    /// `text:<글>` 항목은 pane 격자에서 그 글자를 찾아 누른다 — 창 배율이 실행마다 달라 px 를
+    /// 미리 못 정하는 TUI 단추용이고, 사람 손처럼 그 칸으로 옮겨(호버) 누르고 90ms 뒤에 뗀다.
     pub(crate) fn run_pending_autoclicks(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::OnceLock;
+        use std::sync::{Mutex, OnceLock};
         use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
-        static PLAN: OnceLock<Option<(Instant, u64, Vec<(f32, f32)>)>> = OnceLock::new();
+        static PLAN: OnceLock<Option<(Instant, u64, Vec<String>)>> = OnceLock::new();
         static NEXT: AtomicUsize = AtomicUsize::new(0);
+        static RELEASE: Mutex<Option<Instant>> = Mutex::new(None);
         let Some((due, gap, points)) = PLAN.get_or_init(|| {
             let spec = std::env::var("KASATERM_AUTOCLICKS").ok()?;
-            let points = spec
-                .split(';')
-                .filter_map(|p| {
-                    let (x, y) = p.split_once(',')?;
-                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
-                })
-                .collect();
+            let points = spec.split(';').map(str::to_string).collect();
             let ms = std::env::var("KASATERM_AUTOCLICKS_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
             let gap = std::env::var("KASATERM_AUTOCLICKS_GAP_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
             Some((Instant::now() + std::time::Duration::from_millis(ms), gap, points))
         }) else {
             return;
         };
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let press = |app: &mut Self, state| {
+            app.window_event(event_loop, wid, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left });
+        };
+        let pending_release = *RELEASE.lock().unwrap();
+        if let Some(at) = pending_release {
+            if Instant::now() >= at {
+                *RELEASE.lock().unwrap() = None;
+                press(self, ElementState::Released);
+            }
+            return;
+        }
         let i = NEXT.load(Ordering::Relaxed);
-        let Some(&(x, y)) = points.get(i) else { return };
+        let Some(point) = points.get(i) else { return };
         if Instant::now() < *due + std::time::Duration::from_millis(gap * i as u64) {
             return;
         }
         NEXT.store(i + 1, Ordering::Relaxed);
-        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        if let Some(text) = point.strip_prefix("text:") {
+            let Some((x, y)) = self.autoclick_text_px(text) else {
+                eprintln!("[autoclicks] {i}: {text:?} 못 찾음");
+                return;
+            };
+            let scale = self.effective_scale() as f64;
+            self.window_event(event_loop, wid, WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(x as f64 * scale, y as f64 * scale),
+            });
+            self.cursor_px = (x, y);
+            press(self, ElementState::Pressed);
+            *RELEASE.lock().unwrap() = Some(Instant::now() + std::time::Duration::from_millis(90));
+            eprintln!("[autoclicks] {i}: {text:?} ({x:.0},{y:.0})");
+            return;
+        }
+        let Some((x, y)) = point.split_once(',').and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?))) else {
+            return;
+        };
         self.cursor_px = (x, y);
         for state in [ElementState::Pressed, ElementState::Released] {
-            self.window_event(
-                event_loop,
-                wid,
-                WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left },
-            );
+            press(self, state);
         }
         self.chrome_dirty = true;
         eprintln!("[autoclicks] {i}: ({x:.0},{y:.0}) scale={:.2}", self.effective_scale());
+    }
+    /// pane 격자(활성 pane 먼저)에서 `text` 가 처음 나오는 칸의 px. 넓은 글자 뒤 칸은 글자가 아니라 건너뛴다.
+    fn autoclick_text_px(&self, text: &str) -> Option<(f32, f32)> {
+        let want: Vec<char> = text.chars().collect();
+        let (pane, col, row) = {
+            let ws = self.ws.lock().ok()?;
+            let mut ids: Vec<&String> = ws.panes.keys().collect();
+            ids.sort_by_key(|id| Some(id.as_str()) != ws.active_pane.as_deref());
+            ids.into_iter().find_map(|id| {
+                let t = ws.panes.get(id)?.term()?;
+                t.cells.iter().enumerate().find_map(|(r, cells)| {
+                    let mut line: Vec<(usize, char)> = Vec::new();
+                    let mut skip = 0;
+                    for (c, cell) in cells.iter().enumerate() {
+                        if skip > 0 {
+                            skip -= 1;
+                            continue;
+                        }
+                        skip = unicode_width::UnicodeWidthChar::width(cell.ch).unwrap_or(1).saturating_sub(1);
+                        line.push((c, cell.ch));
+                    }
+                    let at = line.windows(want.len()).position(|w| w.iter().map(|(_, ch)| *ch).eq(want.iter().copied()))?;
+                    Some((id.clone(), line[at].0 as u16, r as u16))
+                })
+            })?
+        };
+        let size = self.window.as_ref()?.inner_size();
+        let scale = self.effective_scale();
+        let (w, h) = (size.width as f32 / scale, size.height as f32 / scale);
+        // 칸 좌표는 pane 밖(제목줄 등)에서도 가장자리 칸으로 붙어 나오므로 그 칸으로 읽히는 px 들의 가운데를 쓴다.
+        let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+        let mut y = TITLE_HEIGHT;
+        while y < h {
+            let mut x = 0.0;
+            while x < w {
+                if self.px_to_pane_cell(x, y).is_some_and(|(p, c, r)| p == pane && c == col && r == row) {
+                    lo = (lo.0.min(x), lo.1.min(y));
+                    hi = (hi.0.max(x), hi.1.max(y));
+                }
+                x += 2.0;
+            }
+            y += 2.0;
+        }
+        (lo.0 <= hi.0).then(|| ((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0))
     }
 
     /// `KASATERM_AUTOPILLCLICK_MS` 뒤에 타이틀바 사용량 pill 을 **진짜로 클릭**한다.

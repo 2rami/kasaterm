@@ -41,6 +41,9 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - ⚠️ **`KASATERM_SOCKET_PATH` 를 띄울 때도 주고, `kasaterm-cli` 를 부를 때도 줘라.** CLI 는 `$KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock` 순으로 붙고 **포트는 안 본다** — 리그를 다른 포트로 띄웠어도 CLI 에 이 변수를 안 주면 그 명령이 **사용자 앱으로 간다**(2026-09-03 실측: `split right` 이 사용자 창에 pane 을 만들었고, `send` 가 도는 학생의 입력창에 글자를 밀어넣었다). 앱 부팅 줄과 CLI 호출 양쪽에 같은 경로를 걸어라:
   `export KASATERM_SOCKET_PATH=/tmp/<네이름>/rig.sock` 를 먼저 하고 그 셸에서 둘 다 부르는 것이 가장 안전하다.
 - **화면을 판정할 때 `kasaterm-cli capture <pane>` 을 믿지 마라 — 원본 글자판이다.** 그건 `capture_pane_offscreen` 이라 `t.cells` 를 그대로 찍어, 렌더러가 화면을 만들며 하는 일(스크롤백 당김·입력창 붙잡기 같은 재구성)이 **안 보인다**. 렌더 변경을 눈으로 확인하려면 `kasaterm-cli capture --window <path>`(창 프레임) 이나 `KASATERM_AUTOCAPTURE_MS`/`_PATH` 를 써라. 2026-09-03 에 이걸 몰라 "코드가 안 돈다"고 한동안 오판했다(계측을 심어 보니 값은 맞게 돌고 있었다).
+- **리그 창이 다른 창에 가려져 있으면 `peek`·`capture` 가 몇 초 전 화면을 준다.** 격자는 프레임이 돌 때 PTY 에서 옮겨지는데, 가려진 창은
+  다음 입력이 올 때까지 프레임을 거의 안 돈다(2026-10-02: Claude Code 는 클릭에 18ms 만에 다시 그렸는데 1.5초 뒤 `peek` 은 옛 화면이었다).
+  앱이 무엇을 받고 무엇을 그렸는지는 pane 명령 앞에 입출력을 적는 pty 중계를 끼워 보고, 화면 판정은 다음 입력 뒤에 한다.
 - **`TMPDIR` 도 리그 폴더로.** 앱은 stderr 가 tty 가 아니면 `$TMPDIR/kasaterm-app.log` 로 돌린다 — 안 가르면 리그 로그가
   사용자 앱 로그에 섞이고, `> app.log` 로 받은 파일은 비어 있다(2026-09-25). 소켓 경로는 104바이트 한도라 스크래치 폴더
   깊숙이 두면 `path must be shorter than SUN_LEN` 으로 소켓 서버가 안 선다 — `/tmp/<네이름>/` 처럼 짧게.
@@ -62,7 +65,9 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
 `/tmp/tmux-501` 을 지워야 할 만큼 상태가 꼬였다면, 지우기 전에 다른 pane 이 쓰는 중인지 `kasaterm-cli board` 로 먼저 확인해라.
 
 1. **빌드/실행** — `cargo run -p kasaterm > /tmp/kasaterm-run.log 2>&1 &` (백그라운드)
-2. **누르기** — `KASATERM_AUTOCLICKS="x,y;x,y"`(논리 좌표) · `_MS`(첫 클릭, 기본 6000) · `_GAP_MS`(사이, 기본 1200). 팝오버·묶음 알약을
+2. **누르기** — `KASATERM_AUTOCLICKS="x,y;x,y"`(논리 좌표) · `_MS`(첫 클릭, 기본 6000) · `_GAP_MS`(사이, 기본 1200). `text:<글>` 항목은
+   pane 격자에서 그 글자를 찾아 사람 손처럼 옮겨(호버) 누르고 90ms 뒤에 뗀다 — 창 배율이 실행마다 달라 px 를 미리 못 정하는 TUI 단추용
+   (`KASATERM_AUTOCLICKS="text:학생 현황 ];text:메모 ]"`). 팝오버·묶음 알약을
    연 채로 `kasaterm-cli capture --window` 로 찍는다. 좌표는 창의 논리 크기(물리 폭 ÷ 로그의 `scale=`) 기준이다 — 캡처 PNG 는 줄여 저장되니 비율로 옮긴다. 표시용 픽스처(`KASATERM_AUTOINFO=execution…`)는
    검증 실행(`KASATERM_WINDOW_SIZE="w,h"`)에서만 선다.
 3. **스크린샷** — `KASATERM_AUTOCAPTURE_MS=8000` 로 N초 후 자동 캡처. 기본 경로 `$TMPDIR/kasaterm.png` (`KASATERM_AUTOCAPTURE_PATH` 로 변경). **판정은 `Read` 로 직접 본다** — 먼저 `sips -s format jpeg -s formatOptions 60 -Z 1200 <png> --out <jpg>` 로 줄여서 연다. 이미지는 대화에 박혀 매 요청마다 다시 전송되고 빼는 수단이 없다(2026-09-05: 한 세션에 47장 8.5MB 가 쌓여 32MB 벽에 걸렸다) — 볼 것을 정한 뒤 한 장씩. macOS `screencapture` 는 권한 막혀 안 됨 — 무조건 자체 캡처.

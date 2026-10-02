@@ -6487,7 +6487,18 @@ impl ApplicationHandler<UserEvent> for App {
                             let switched = self.ws.lock().unwrap().active_pane.as_deref()
                                 != Some(pane_id.as_str());
                             self.focus_pane(&pane_id);
-                            if switched {
+                            if self.pane_takes_mouse(&pane_id) {
+                                // Hand the press to the TUI. Its own
+                                // selection / copy-on-select kicks in
+                                // (Claude Code spawns `pbcopy`).
+                                // 초점을 옮기는 클릭도 넘긴다 — 삼키면 옆 칸의 Claude Code 단추가
+                                // 두 번 눌러야 듣는다(2026-10-02 「안 바뀌어」). tmux 기본·WezTerm 기본과
+                                // 같은 관례이고, 터미널 쪽 선택은 Shift+클릭으로 남는다.
+                                self.selection = None;
+                                self.drag_anchor = None;
+                                self.send_mouse_sgr(&pane_id, 0, col, row, true);
+                                self.mouse_forward_pane = Some(pane_id.clone());
+                            } else if switched {
                                 // Daemon owns the active pointer: its cwd poll
                                 self.selection = None;
                                 self.drag_anchor = None;
@@ -6498,14 +6509,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 if self.pane_is_image(&pane_id) {
                                     self.begin_image_pan(&pane_id);
                                 }
-                            } else if self.pane_takes_mouse(&pane_id) {
-                                // Hand the press to the TUI. Its own
-                                // selection / copy-on-select kicks in
-                                // (Claude Code spawns `pbcopy`).
-                                self.selection = None;
-                                self.drag_anchor = None;
-                                self.send_mouse_sgr(&pane_id, 0, col, row, true);
-                                self.mouse_forward_pane = Some(pane_id.clone());
                             } else if self.pane_is_image(&pane_id) {
                                 // Image pane: a drag pans the zoomed image
                                 // instead of selecting text.

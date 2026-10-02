@@ -1519,7 +1519,7 @@ fn print_help() {
         ("학생·협업", &[
             "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
             "tell --status ID                          전달 영수증 조회",
-            "tell --raw [%N] <글> · tell --key [%N] <enter|tab|escape|up|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
+            "tell --raw [%N] <글> · tell --key [%N] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
             "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
             "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약] [--changed 파일]… [--tests 글] [--next 글]",
             "                                          내 일 보고. 오케스트레이터가 띄운 창이면 그쪽 보고함에도 넣는다",

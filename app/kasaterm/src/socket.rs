@@ -4140,17 +4140,62 @@ pub(crate) fn split_trailing_submit(bytes: &[u8]) -> (&[u8], &[u8]) {
 /// the key isn't a recognized symbolic name) can borrow the original
 /// `str`'s bytes without lifetime gymnastics.
 pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
-    match key {
-        "enter" => b"\r".to_vec(),
+    // 조합키(`ctrl+x`·`alt+b`·`shift+tab`)를 글자로 흘리면 「ctrl+x」 여섯 글자가 입력칸에 들어간다
+    // (2026-10-02 Claude Code 의 ctrl+x tab 이 그렇게 막혔다).
+    let lower = key.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("ctrl+") {
+        let control = match rest.as_bytes() {
+            [c @ b'a'..=b'z'] => Some(c - b'a' + 1),
+            [c @ (b'@' | b'[' | b'\\' | b']' | b'^' | b'_')] => Some(c & 0x1f),
+            b"space" | b" " => Some(0),
+            b"?" => Some(0x7f),
+            _ => None,
+        };
+        if let Some(byte) = control {
+            return vec![byte];
+        }
+    }
+    if let Some(rest) = lower.strip_prefix("alt+").or_else(|| lower.strip_prefix("meta+")) {
+        let mut bytes = vec![0x1b];
+        bytes.extend(key_to_bytes(&key[key.len() - rest.len()..]));
+        return bytes;
+    }
+    match lower.as_str() {
+        "enter" | "return" => b"\r".to_vec(),
         "tab" => b"\t".to_vec(),
-        "escape" => b"\x1b".to_vec(),
+        "shift+tab" => b"\x1b[Z".to_vec(),
+        "escape" | "esc" => b"\x1b".to_vec(),
         "backspace" => b"\x7f".to_vec(),
         "delete" => b"\x1b[3~".to_vec(),
+        "space" => b" ".to_vec(),
         "up" => b"\x1b[A".to_vec(),
         "down" => b"\x1b[B".to_vec(),
         "right" => b"\x1b[C".to_vec(),
         "left" => b"\x1b[D".to_vec(),
-        other => other.as_bytes().to_vec(),
+        "home" => b"\x1b[H".to_vec(),
+        "end" => b"\x1b[F".to_vec(),
+        "pageup" => b"\x1b[5~".to_vec(),
+        "pagedown" => b"\x1b[6~".to_vec(),
+        _ => key.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod key_to_bytes_tests {
+    use super::key_to_bytes;
+
+    #[test]
+    fn chords_become_control_bytes_not_their_spelling() {
+        assert_eq!(key_to_bytes("ctrl+x"), b"\x18");
+        assert_eq!(key_to_bytes("Ctrl+C"), b"\x03");
+        assert_eq!(key_to_bytes("ctrl+["), b"\x1b");
+        assert_eq!(key_to_bytes("ctrl+space"), b"\x00");
+        assert_eq!(key_to_bytes("alt+b"), b"\x1bb");
+        assert_eq!(key_to_bytes("alt+enter"), b"\x1b\r");
+        assert_eq!(key_to_bytes("shift+tab"), b"\x1b[Z");
+        assert_eq!(key_to_bytes("tab"), b"\t");
+        assert_eq!(key_to_bytes("2"), b"2");
+        assert_eq!(key_to_bytes("Y"), b"Y");
     }
 }
 
