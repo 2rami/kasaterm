@@ -151,6 +151,11 @@ pub async fn start(mcp_port: u16) {
         return;
     }
     tokio::spawn(sweep_phones());
+    if let Some(n) = NODE.get() {
+        tokio::spawn(kasa_net::portmap::keep_swept(n.endpoint.clone(), |s| {
+            eprintln!("[kasanet] 공유기 UPnP 매핑 정리 — 이 기기 것 {}칸 중 {}칸 지움", s.mine, s.removed);
+        }));
+    }
     if let Some(ms) = std::env::var(STOP_AFTER_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())

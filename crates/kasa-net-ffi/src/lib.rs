@@ -109,6 +109,7 @@ fn start(path: &Path) -> i32 {
         Ok(ep) => ep,
         Err(e) => return fail(format!("kasanet: 엔드포인트: {e}")),
     };
+    rt.spawn(kasa_net::portmap::keep_swept(endpoint.clone(), |_| {}));
     *slot = Some(Node {
         rt,
         endpoint,
