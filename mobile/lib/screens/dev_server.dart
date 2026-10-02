@@ -111,9 +111,10 @@ class _DevServerScreenState extends State<DevServerScreen> {
 
   String get _pathLine {
     final p = widget.server.pathOf(widget.machine);
+    final way = widget.server.relayedOf(widget.machine) ? '데스크톱 국내 중계' : '데스크톱 직통';
     return switch (p) {
-      (true, final int ms) => '데스크톱 직통 · ${ms}ms',
-      (true, null) => '데스크톱 직통',
+      (true, final int ms) => '$way · ${ms}ms',
+      (true, null) => way,
       _ => '관문 경유',
     };
   }

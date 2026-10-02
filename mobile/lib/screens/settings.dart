@@ -394,11 +394,13 @@ class _AccountCard extends StatelessWidget {
   final Server server;
 
   String _path() => switch (server.pathOf(null)) {
-    (true, final int ms) => '카사넷 직통 · ${ms}ms',
-    (true, null) => '카사넷 직통',
+    (true, final int ms) => '${_way()} · ${ms}ms',
+    (true, null) => _way(),
     (false, _) => '관문 경유 · 직통을 찾는 중',
     null => '관문 경유',
   };
+
+  String _way() => server.relayedOf(null) ? '카사넷 국내 중계' : '카사넷 직통';
 
   @override
   Widget build(BuildContext context) {

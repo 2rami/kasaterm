@@ -1,0 +1,25 @@
+[Unit]
+Description=kasanet domestic relay (iroh-relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kasanet-relay
+Group=kasanet-relay
+ExecStart=/usr/local/bin/iroh-relay --config-path /etc/kasanet-relay/relay.toml
+WorkingDirectory=/var/lib/kasanet-relay
+Restart=always
+RestartSec=2
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kasanet-relay
+ReadOnlyPaths=/etc/kasanet-relay
+LimitNOFILE=65536
+Environment=RUST_LOG=iroh_relay=info
+
+[Install]
+WantedBy=multi-user.target

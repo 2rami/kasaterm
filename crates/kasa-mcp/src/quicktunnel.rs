@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn in_app_only_for_this_machine_once_a_new_phone_app_registered() {
         assert!(in_app_url("http://localhost:3000/").is_none(), "새 판 폰 앱이 없으면 터널 그대로");
-        crate::kasanet::note_phone_app();
+        crate::kasanet::note_phone_app(None);
         assert_eq!(in_app_url("http://localhost:3000/a?b=1#c").as_deref(), Some("http://localhost:3000/a?b=1#c"));
         assert_eq!(in_app_url("http://0.0.0.0:5173/x").as_deref(), Some("http://localhost:5173/x"));
         assert!(in_app_url("http://[::1]:3000/").is_some());

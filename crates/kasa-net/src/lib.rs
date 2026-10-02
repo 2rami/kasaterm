@@ -6,6 +6,7 @@ pub mod identity;
 pub mod link;
 pub mod peer;
 pub mod portmap;
+pub mod relay;
 pub mod route;
 
 pub use iroh;

@@ -103,7 +103,8 @@ class _Ffi implements KasanetNative {
     }
     if (j is! Map) return null;
     return KasanetPath(
-      direct: j['path'] == 'direct',
+      direct: j['path'] == 'direct' || j['path'] == 'kasa_relay',
+      relayed: j['path'] == 'kasa_relay',
       rttMs: (j['rtt_ms'] as num?)?.toInt(),
       error: j['error'] as String?,
     );

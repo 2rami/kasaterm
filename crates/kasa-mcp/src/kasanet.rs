@@ -2,7 +2,8 @@
 //!
 //! 기기 주소(`Machine.base`)는 바꾸지 않는다. 대신 base 마다 로컬 입구(`kasa_net::Route`)를 두고,
 //! 요청을 보내는 자리가 `route_base(base)` 로 그 입구를 받는다. 입구는 연결마다 직통이면 카사넷,
-//! 아니면 원래 base(ssh 터널 등)로 잇는다. 공용 중계로는 데이터를 싣지 않는다(P0: ssh 길보다 느리다).
+//! 아니면 원래 base(ssh 터널 등)로 잇는다. 중계는 국내 자체 중계(`kasa_net::relay`)로만 싣고, n0 공용 중계로는
+//! 싣지 않는다(P0: ssh 길보다 느리다).
 //!
 //! 허용 목록: 루프백 base(앱이 든 ssh 터널·손으로 든 터널·손님의 되돌아오는 -R)로 물은 `/version` 이
 //! 알려 준 EndpointId 만 넣는다. 그 길은 ssh 인증을 거쳤다. 카사넷으로 들어온 연결은 받는 쪽에서
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use kasa_net::iroh::endpoint::presets;
 use kasa_net::iroh::protocol::Router;
-use kasa_net::iroh::{Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey};
+use kasa_net::iroh::{Endpoint, EndpointId, SecretKey};
 use kasa_net::{fwd, identity, peer, AllowList, FwdServer, Link, LinkState, RelayTrust, Route};
 use serde_json::Value;
 
@@ -31,9 +32,6 @@ const STOP_AFTER_ENV: &str = "KASATERM_KASANET_STOP_MS";
 /// 검증 리그용 — UDP 를 이 주소(예: `127.0.0.1:0`)에만 연다. 서명 안 된 디버그 앱이 0.0.0.0 을 열면 macOS 방화벽이
 /// 사람 화면에 묻기 창을 띄우고, 답하기 전까지 들어오는 UDP 를 막아 직통이 안 선다(2026-09-29 리그에서 중계만 잡힘).
 const BIND_ENV: &str = "KASATERM_KASANET_BIND";
-/// 데이터를 실어도 되는 중계 주소(쉼표로). 기본은 비어 있어 중계로는 싣지 않는다 — n0 공용 중계는 ssh 길보다
-/// 느렸다(P0). 자체 중계가 서면 그 주소를 넣거나 `trust_relays` 로 넘긴다.
-const TRUSTED_RELAYS_ENV: &str = "KASATERM_KASANET_TRUSTED_RELAYS";
 
 struct Node {
     endpoint: Endpoint,
@@ -98,9 +96,10 @@ pub async fn start(mcp_port: u16) {
     };
     let allow = AllowList::default();
     // 주소 찾기(pkarr 공개)는 쓰지 않는다 — 상대 주소는 /version 으로 직접 받고, 기기 IP 를 공용 DNS 에
-    // 올리지 않는다. 중계는 구멍 뚫기 신호에만 쓴다.
-    let mut builder =
-        kasa_net::builder(presets::Minimal, key, &allow).relay_mode(RelayMode::Default);
+    // 올리지 않는다. 데이터는 국내 자체 중계로만 싣고 n0 중계는 구멍 뚫기 신호에만 쓴다.
+    let own_relays = kasa_net::relay::own_relays();
+    let mut builder = kasa_net::builder(presets::Minimal, key, &allow)
+        .relay_mode(kasa_net::relay::relay_mode(&own_relays));
     if let Some(at) = std::env::var(BIND_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<SocketAddr>().ok())
@@ -130,17 +129,13 @@ pub async fn start(mcp_port: u16) {
         endpoint.id().fmt_short(),
         crate::machines::KASACHROME_PORT
     );
+    let relay_watch = endpoint.clone();
     let node = Node {
         endpoint,
         router,
         allow,
         fwd: fwd_server,
-        trust: RelayTrust::new(
-            std::env::var(TRUSTED_RELAYS_ENV)
-                .unwrap_or_default()
-                .split(',')
-                .filter_map(|u| RelayUrl::from_str(u.trim()).ok()),
-        ),
+        trust: RelayTrust::new(own_relays.clone()),
         mcp_port,
         handle: tokio::runtime::Handle::current(),
         links: Mutex::new(HashMap::new()),
@@ -156,6 +151,11 @@ pub async fn start(mcp_port: u16) {
             eprintln!("[kasanet] 공유기 UPnP 매핑 정리 — 이 기기 것 {}칸 중 {}칸 지움", s.mine, s.removed);
         }));
     }
+    tokio::spawn(kasa_net::relay::fall_back_when_denied(
+        relay_watch,
+        own_relays,
+        |line| eprintln!("[kasanet] {line}"),
+    ));
     if let Some(ms) = std::env::var(STOP_AFTER_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -167,13 +167,6 @@ pub async fn start(mcp_port: u16) {
                 let _ = n.router.shutdown().await;
             }
         });
-    }
-}
-
-/// 데이터를 실어도 되는 중계를 바꾼다(자체 중계 설정이 부른다). 이미 붙은 링크에도 다음 판정부터 든다.
-pub fn trust_relays(urls: impl IntoIterator<Item = RelayUrl>) {
-    if let Some(n) = NODE.get() {
-        n.trust.set(urls);
     }
 }
 
@@ -315,7 +308,7 @@ pub fn allow_phone(id: &str) -> Result<Duration, &'static str> {
         .is_none();
     if fresh {
         eprintln!("[kasanet] 폰 {} 허용", id.fmt_short());
-        note_phone_app();
+        note_phone_app(Some(id));
     }
     Ok(PHONE_TTL)
 }
@@ -340,15 +333,26 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-pub(crate) fn note_phone_app() {
+/// `phones` 에 폰 id 를 남긴다 — 국내 중계 허용 목록에 넣을 폰을 관문이 주인 폰으로 확인해 준 id 에서 고르게
+/// (`tools/kasanet-relay/relay.sh allow`). 공개키라 비밀이 아니다.
+pub(crate) fn note_phone_app(id: Option<EndpointId>) {
     let now = unix_now();
     if let Ok(mut at) = PHONE_APP_AT.lock() {
         *at = Some(now);
     }
     if let Some(path) = phone_app_path() {
+        let mut phones = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v.get("phones").cloned())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(id), Some(map)) = (id, phones.as_object_mut()) {
+            map.insert(id.to_string(), now.into());
+        }
         let _ = std::fs::write(
             path,
-            serde_json::json!({ "registered_at": now }).to_string(),
+            serde_json::json!({ "registered_at": now, "phones": phones }).to_string(),
         );
     }
 }

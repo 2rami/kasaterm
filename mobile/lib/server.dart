@@ -520,6 +520,9 @@ class Server {
   /// (직통인가, 왕복 ms). 아직 모르는 기계·옛 주소면 null.
   (bool, int?)? pathOf(String? machine) => _kasanet?.pathOf(machine);
 
+  /// 입구 길이 직통이 아니라 국내 자체 중계인가.
+  bool relayedOf(String? machine) => _kasanet?.relayedOf(machine) ?? false;
+
   /// 관문이 확인해 주는 값(`machines` 의 살아 있는 기계 목록)과 카사넷 자체를 배우는 길은 늘 관문으로.
   static bool _gatewayOnly(String path) =>
       path == 'machines' || path == 'version' || path.startsWith('kasanet/');

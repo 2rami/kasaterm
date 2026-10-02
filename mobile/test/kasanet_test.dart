@@ -9,6 +9,7 @@ import 'package:kasaterm_mobile/server.dart';
 
 class FakeNative implements KasanetNative {
   bool direct = true;
+  bool relayed = false;
   String? error;
   final opened = <String>[];
   int changes = 0;
@@ -24,7 +25,7 @@ class FakeNative implements KasanetNative {
 
   @override
   KasanetPath? state(int port) => port == 40001
-      ? KasanetPath(direct: direct, rttMs: direct ? 7 : null, error: error)
+      ? KasanetPath(direct: direct, relayed: relayed, rttMs: direct ? 7 : null, error: error)
       : null;
 
   @override
@@ -149,6 +150,28 @@ void main() {
     expect(woke, 1);
     expect(server.uri('term/panes').host, 'gw.example');
     expect(server.pathOf(null), (false, null));
+  });
+
+  test('국내 중계로 가도 입구로 싣고, 직통↔중계가 바뀌면 알린다', () async {
+    final wire = Wire();
+    final native = FakeNative()..relayed = true;
+    final server = Server.account(
+      session,
+      client: wire.client,
+      kasanet: native,
+    );
+    addTearDown(server.close);
+    server.uri('term/panes');
+    await settle();
+    expect(server.uri('term/panes').host, '127.0.0.1');
+    expect(server.relayedOf(null), isTrue);
+    var woke = 0;
+    server.routeChanges!.addListener(() => woke++);
+    native.relayed = false;
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    expect(woke, 1, reason: '중계 → 직통도 길 바뀜');
+    expect(server.relayedOf(null), isFalse);
+    expect(server.uri('term/panes').host, '127.0.0.1');
   });
 
   test('입구로 간 GET 이 끊기면 관문으로 한 번 더, POST 는 다시 안 보낸다', () async {

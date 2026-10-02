@@ -3,10 +3,11 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-/// 입구 하나의 지금 길.
+/// 입구 하나의 지금 길. [direct] 는 입구로 실어도 되는가 — 직통이거나 국내 자체 중계([relayed]).
 class KasanetPath {
-  const KasanetPath({required this.direct, this.rttMs, this.error});
+  const KasanetPath({required this.direct, this.relayed = false, this.rttMs, this.error});
   final bool direct;
+  final bool relayed;
   final int? rttMs;
   final String? error;
 }
@@ -34,6 +35,7 @@ class _Desk {
   _Desk(this.port);
   final int port;
   bool direct = false;
+  bool relayed = false;
   int? rttMs;
   Timer? renew;
   DateTime? reRegisteredAt;
@@ -114,6 +116,13 @@ class KasanetRouter extends ChangeNotifier {
     final key = _key(machine);
     final desk = key == null ? null : _desks[key];
     return desk == null ? null : (desk.direct, desk.rttMs);
+  }
+
+  /// 입구로 가되 직통이 아니라 국내 자체 중계를 거치는가 — 「직통/중계」 표시.
+  bool relayedOf(String? machine) {
+    final key = _key(machine);
+    final desk = key == null ? null : _desks[key];
+    return desk != null && desk.direct && desk.relayed;
   }
 
   /// `/version` → 등록 → 입구. 처음 배울 때도, 수명 3분의 1마다 다시 등록할 때도 같은 길이다 — 데스크톱 앱이 다른
@@ -217,9 +226,11 @@ class KasanetRouter extends ChangeNotifier {
     for (final desk in _desks.values.toSet()) {
       final s = _native.state(desk.port);
       final direct = s?.direct ?? false;
+      final relayed = s?.relayed ?? false;
       desk.rttMs = s?.rttMs;
-      if (direct != desk.direct) {
+      if (direct != desk.direct || relayed != desk.relayed) {
         desk.direct = direct;
+        desk.relayed = relayed;
         changed = true;
       }
       // 데스크톱이 다시 떠 이 폰을 잊었으면(403) 수명을 기다리지 않고 다시 등록한다.

@@ -1,8 +1,9 @@
 //! 카사넷을 폰 앱에 싣는 C ABI. 설계는 `docs/kasanet.md` 「P5」.
 //!
 //! 폰은 거는 쪽뿐이다 — 허용 목록이 비어 있어 들어오는 연결은 모두 끊는다. 데스크톱마다 `127.0.0.1` 입구
-//! 하나를 열고(`kasa_net::Route::direct_only`), 입구는 직통일 때만 싣는다. 관문(HTTPS)으로 갈지 입구로 갈지는
-//! 앱이 연결마다 `kasanet_state` 를 보고 고른다. 직통을 잃으면 입구가 실던 연결을 끊어 앱이 관문으로 다시 붙는다.
+//! 하나를 열고(`kasa_net::Route::direct_only`), 입구는 직통이나 국내 자체 중계일 때만 싣는다. 관문(HTTPS)으로 갈지
+//! 입구로 갈지는 앱이 연결마다 `kasanet_state` 를 보고 고른다. 그 길을 잃으면 입구가 실던 연결을 끊어 앱이 관문으로
+//! 다시 붙는다.
 //!
 //! 문자열은 모두 UTF-8 C 문자열. 이 라이브러리가 돌려준 문자열은 `kasanet_free_string` 으로 돌려준다.
 //! 모든 함수는 어느 스레드에서 불러도 되고, 오래 막지 않는다(`kasanet_start`·`kasanet_stop` 만 바인드·닫기를 기다린다).
@@ -15,8 +16,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use kasa_net::iroh::endpoint::presets;
-use kasa_net::iroh::{Endpoint, EndpointId, RelayMode};
-use kasa_net::{identity, peer, AllowList, Link, LinkState, Route};
+use kasa_net::iroh::{Endpoint, EndpointId};
+use kasa_net::{identity, peer, relay, AllowList, Link, LinkState, RelayTrust, Route};
 
 struct Entrance {
     route: Route,
@@ -26,6 +27,7 @@ struct Entrance {
 struct Node {
     rt: tokio::runtime::Runtime,
     endpoint: Endpoint,
+    trust: RelayTrust,
     links: HashMap<EndpointId, Link>,
     /// 입구 로컬 포트 → 입구. 같은 데스크톱(같은 id)을 다시 열면 같은 입구를 준다.
     entrances: HashMap<u16, Entrance>,
@@ -89,10 +91,11 @@ fn start(path: &Path) -> i32 {
         Ok(rt) => rt,
         Err(e) => return fail(format!("kasanet: 런타임: {e}")),
     };
-    // 데스크톱과 같은 틀 — 주소 찾기(pkarr) 없이 n0 중계는 구멍 뚫기 신호에만. 받는 프로토콜이 없고 허용 목록이
-    // 비어 있어 들어오는 연결은 핸드셰이크 직후 끊긴다.
+    // 데스크톱과 같은 틀 — 주소 찾기(pkarr) 없이, 데이터는 국내 자체 중계로만 싣고 n0 중계는 구멍 뚫기 신호에만.
+    // 받는 프로토콜이 없고 허용 목록이 비어 있어 들어오는 연결은 핸드셰이크 직후 끊긴다.
+    let own_relays = relay::own_relays();
     let mut builder = kasa_net::builder(presets::Minimal, key, &AllowList::default())
-        .relay_mode(RelayMode::Default);
+        .relay_mode(relay::relay_mode(&own_relays));
     // 검증 리그(시뮬레이터)용 — 데스크톱의 같은 이름 스위치와 같다. 맥에서 0.0.0.0 UDP 를 열면 방화벽이 사람 화면에
     // 묻기 창을 띄운다.
     if let Some(at) = std::env::var(BIND_ENV)
@@ -110,9 +113,16 @@ fn start(path: &Path) -> i32 {
         Err(e) => return fail(format!("kasanet: 엔드포인트: {e}")),
     };
     rt.spawn(kasa_net::portmap::keep_swept(endpoint.clone(), |_| {}));
+    // 폰 로그는 사람이 못 본다 — 거절되면 조용히 n0 로 돌아간다.
+    rt.spawn(relay::fall_back_when_denied(
+        endpoint.clone(),
+        own_relays.clone(),
+        |_| {},
+    ));
     *slot = Some(Node {
         rt,
         endpoint,
+        trust: RelayTrust::new(own_relays),
         links: HashMap::new(),
         entrances: HashMap::new(),
     });
@@ -164,7 +174,7 @@ fn open(text: &str) -> i32 {
             link.clone()
         }
         None => {
-            let link = Link::start(n.endpoint.clone(), addr, Default::default());
+            let link = Link::start(n.endpoint.clone(), addr, n.trust.clone());
             n.links.insert(link.id(), link.clone());
             link
         }
@@ -184,8 +194,8 @@ fn open(text: &str) -> i32 {
     i32::from(local)
 }
 
-/// 입구의 지금 길. `{"path":"direct"|"relay"|"down","rtt_ms":N|null,"carried":N,"error":"…"|null}`.
-/// 입구가 없으면 NULL. `direct` 일 때만 입구로 보낸다.
+/// 입구의 지금 길. `{"path":"direct"|"kasa_relay"|"relay"|"down","rtt_ms":N|null,"carried":N,"error":"…"|null}`.
+/// 입구가 없으면 NULL. `direct`(직통)·`kasa_relay`(국내 자체 중계)일 때만 입구로 보낸다. `relay` 는 n0 공용 중계뿐이다.
 #[no_mangle]
 pub extern "C" fn kasanet_state(local_port: u16) -> *mut c_char {
     guarded(std::ptr::null_mut(), || {
@@ -194,9 +204,8 @@ pub extern "C" fn kasanet_state(local_port: u16) -> *mut c_char {
             return std::ptr::null_mut();
         };
         let (path, rtt) = match e.link.state() {
-            LinkState::Direct { rtt } | LinkState::TrustedRelay { rtt } => {
-                ("direct", Some(rtt.as_millis() as u64))
-            }
+            LinkState::Direct { rtt } => ("direct", Some(rtt.as_millis() as u64)),
+            LinkState::TrustedRelay { rtt } => ("kasa_relay", Some(rtt.as_millis() as u64)),
             LinkState::Relay => ("relay", None),
             LinkState::Down => ("down", None),
         };
@@ -250,6 +259,7 @@ pub extern "C" fn kasanet_stop() {
             endpoint,
             links,
             entrances,
+            ..
         } = n;
         {
             let _rt = rt.enter();

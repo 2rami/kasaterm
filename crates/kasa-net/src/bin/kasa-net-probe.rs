@@ -3,10 +3,14 @@
 //!   kasa-net-probe serve [--key PATH] [--allow ID] [--for SECS] [--relay URL [--n0]]
 //!   kasa-net-probe dial <ADDR> [--mode direct|relay] [--trials N] [--pings N] [--bytes N] [--key PATH] [--relay URL [--n0]]
 //!   kasa-net-probe id --key PATH
+//!   kasa-net-probe serve-fwd --port P --allow ID [--key PATH] [--for SECS] [--relay URL [--n0]]
+//!   kasa-net-probe forward <ADDR> --port P [--mode direct|relay] [--key PATH] [--relay URL [--n0]]
 //!
 //! serve 가 찍는 `KASANET_ADDR ...` 줄의 값을 dial 에 그대로 넘긴다.
 //! relay 모드는 거는 쪽의 IP 전송을 걷어 내 중계 말고는 길이 없게 만든다.
 //! `--relay` 는 n0 공용 중계 대신 그 중계 하나만 쓴다(자체 중계 측정). `--n0` 을 더하면 n0 중계도 함께 둔다.
+//! `serve-fwd`·`forward` 는 앱과 같은 길(`FwdServer` ← `Link`·`Route`)로 serve 쪽 `127.0.0.1:P` 를 거는 쪽
+//! `127.0.0.1:L` 로 끌어온다 — 앱 HTTP·거울을 그 길 위에서 재려고. `--relay` 로 준 중계는 믿는 중계로 친다.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -15,11 +19,12 @@ use anyhow::{bail, Context, Result};
 use iroh::defaults::prod::default_relay_map;
 use iroh::endpoint::Builder;
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
+use iroh::protocol::Router;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
     TransportAddr,
 };
-use kasa_net::{identity, AllowList};
+use kasa_net::{fwd, identity, AllowList, FwdServer, Link, RelayTrust, Route};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
@@ -52,6 +57,35 @@ async fn main() -> Result<()> {
                 opt("--allow"),
                 Duration::from_secs(secs),
                 relay_map(opt("--relay"), has("--n0"))?,
+            )
+            .await
+        }
+        "serve-fwd" => {
+            let port = opt("--port").context("--port P")?.parse()?;
+            let allow = EndpointId::from_str(&opt("--allow").context("--allow ID")?)?;
+            let secs = opt("--for").map(|s| s.parse()).transpose()?.unwrap_or(900);
+            serve_fwd(
+                key(opt("--key"))?,
+                allow,
+                port,
+                Duration::from_secs(secs),
+                relay_map(opt("--relay"), has("--n0"))?,
+            )
+            .await
+        }
+        "forward" => {
+            let addr = parse_addr(args.get(1).context("forward <ADDR>")?)?;
+            let port = opt("--port").context("--port P")?.parse()?;
+            let relay_only = opt("--mode").as_deref() == Some("relay");
+            let trust =
+                RelayTrust::new(opt("--relay").map(|u| RelayUrl::from_str(&u)).transpose()?);
+            forward(
+                addr,
+                port,
+                relay_only,
+                key(opt("--key"))?,
+                relay_map(opt("--relay"), has("--n0"))?,
+                trust,
             )
             .await
         }
@@ -94,12 +128,10 @@ fn key(path: Option<String>) -> Result<SecretKey> {
     })
 }
 
-/// 자체 중계는 Cloudflare 터널(HTTP 웹소켓) 너머라 UDP 로 가는 QUIC 주소 찾기가 없다 — 그 탐침을 끈다.
-/// 주소 찾기가 없으면 공인 주소를 몰라 구멍 뚫기가 안 선다. `n0` 은 그 몫을 n0 중계에 맡긴다.
+/// 주어진 중계는 QUIC 주소 찾기(UDP 7842)도 켠 것으로 본다 — 국내 중계가 그렇게 선다(`tools/kasanet-relay`).
 fn relay_map(url: Option<String>, n0: bool) -> Result<Option<RelayMap>> {
     let Some(url) = url else { return Ok(None) };
-    let mut cfg = RelayConfig::from(RelayUrl::from_str(&url)?);
-    cfg.quic = None;
+    let cfg = RelayConfig::from(RelayUrl::from_str(&url)?);
     let map = if n0 {
         default_relay_map()
     } else {
@@ -157,6 +189,58 @@ async fn serve(
     }
     ep.close().await;
     Ok(())
+}
+
+async fn serve_fwd(
+    secret: SecretKey,
+    allow: EndpointId,
+    port: u16,
+    life: Duration,
+    relay: Option<RelayMap>,
+) -> Result<()> {
+    let b = kasa_net::builder(presets::N0, secret, &AllowList::new([allow]));
+    let ep = with_relay(b, relay).bind().await?;
+    if timeout(Duration::from_secs(10), ep.online()).await.is_err() {
+        eprintln!("중계에 못 붙음(10초)");
+    }
+    println!("KASANET_ADDR {}", format_addr(&ep.addr()));
+    let router = Router::builder(ep)
+        .accept(fwd::ALPN, FwdServer::new([port]))
+        .spawn();
+    tokio::time::sleep(life).await;
+    router.shutdown().await?;
+    Ok(())
+}
+
+async fn forward(
+    peer: EndpointAddr,
+    port: u16,
+    relay_only: bool,
+    secret: SecretKey,
+    relay: Option<RelayMap>,
+    trust: RelayTrust,
+) -> Result<()> {
+    let mut b = with_relay(Endpoint::builder(presets::N0).secret_key(secret), relay);
+    let peer = if relay_only {
+        b = b.clear_ip_transports();
+        only_relay(&peer)
+    } else {
+        peer
+    };
+    let ep = b.bind().await?;
+    let link = Link::start(ep, peer, trust);
+    let route = Route::direct_only()?;
+    route.set_link(link.clone(), port);
+    println!("FORWARD 127.0.0.1:{}", route.local_addr().port());
+    loop {
+        eprintln!(
+            "길 {:?} 실은 연결 {:?} {}",
+            link.state(),
+            route.carried(),
+            link.last_error().unwrap_or_default()
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 async fn handle(conn: Connection) {
