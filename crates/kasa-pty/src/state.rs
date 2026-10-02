@@ -5159,17 +5159,6 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
     g.as_ref()?.1.get(&pid).cloned()
 }
 
-/// pane 프로세스 env 의 한 변수 값 — 세션 캐릭터 anchor(`KASATERM_SESSION_ID`) 복원용.
-/// 포크·`--resume`·`agents`·`--bg` 는 claude 가 transcript id 를 새로 발급해 stem ≠ 원본
-/// anchor 라, stem 매핑도 부모 상속(parentSessionId)도 실패한다(사용자: 백그라운드 재접속에서
-/// 학생이 유우카로 둔갑). env 의 KASATERM_SESSION_ID 는 스폰 때 캐릭터에 바인딩된 원본이라
-/// (env 상속으로 포크/재접속 너머 보존) 유일하게 진짜 학생을 가리킨다. 값은 uuid(공백 없음)라
-/// 공백 split 파싱이 안전하다. `ps eww` = env 를 command 열 뒤에 붙여 출력(macOS/BSD).
-#[cfg(unix)]
-pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
-    process_env_vars(pid, &[key]).remove(key)
-}
-
 /// 여러 키를 **ps 한 번**으로 읽는다 — board 는 pane 마다 여러 env 를 보는데 키당
 /// 프로세스를 띄우면 폴링(1s)마다 pane 수 × 키 수만큼 ps 가 뜬다.
 #[cfg(unix)]
@@ -5192,11 +5181,6 @@ pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<St
         }
     }
     found
-}
-
-#[cfg(not(unix))]
-pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
-    None
 }
 
 #[cfg(not(unix))]

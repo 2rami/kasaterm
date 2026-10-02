@@ -11,14 +11,16 @@
 //! in-process multiplexer (`Workspace` of `PtySession`s).
 
 pub mod layout;
+mod procinfo;
 mod state;
 
 pub use crossbeam_channel::Receiver as ScreenReceiver;
 pub use layout::{bento, bento_shape, fleet, fleet_capacity, Bento, Divider, PtyLayout, SplitDir};
+pub use procinfo::{process_cmdline, process_env_var, process_env_vars};
 pub use state::{
-    agent_for_shell, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session, process_cmdline,
-    process_env_var, release_session, ExtEvent, ExternalIo,
-    process_env_vars, process_table, process_table_shared, fresh_process_table,
+    agent_for_shell, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session,
+    release_session, ExtEvent, ExternalIo,
+    process_table, process_table_shared, fresh_process_table,
     register_session, set_host_colors, AgentKind, AgentSpec, CommandBlock, PromptAnchor, PtyOptions,
     AGENT_TABLE,
     PtySession, ViewerSnapshot,

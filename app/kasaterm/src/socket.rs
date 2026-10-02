@@ -3725,16 +3725,7 @@ impl Backend for PtyBackend {
             let cwd = row.cwd.clone();
             row.branch = branch_cache
                 .entry(cwd.clone())
-                .or_insert_with(|| {
-                    crate::proc::command("git")
-                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                        .current_dir(&cwd)
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        .filter(|b| !b.is_empty() && b != "HEAD")
-                })
+                .or_insert_with(|| head_branch(std::path::Path::new(&cwd)))
                 .clone();
         }
         // 이사 전 transcript는 대화 보관용이다. 지금 실행 상태는 원격 호스트가
@@ -4189,6 +4180,27 @@ pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
     let mut buf = Vec::new();
     let _ = f.take(max_bytes).read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// 폴더가 든 저장소의 지금 브랜치 — `git rev-parse --abbrev-ref HEAD` 와 같은 답을 `HEAD` 파일에서
+/// 읽는다. board 는 폴마다 폴더 수만큼 git 을 띄워 `/term/panes` 한 번에 47ms(폴더 넷)를 썼다(2026-10-02
+/// `sample`). 워크트리·서브모듈의 `.git` 파일(`gitdir: …`)도 따라간다. 떨어진 HEAD 는 None.
+fn head_branch(dir: &std::path::Path) -> Option<String> {
+    for at in dir.ancestors() {
+        let dot = at.join(".git");
+        let Ok(meta) = std::fs::metadata(&dot) else { continue };
+        let git_dir = if meta.is_dir() {
+            dot
+        } else {
+            let link = std::fs::read_to_string(&dot).ok()?;
+            at.join(link.trim().strip_prefix("gitdir:")?.trim())
+        };
+        let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+        let name = head.trim().strip_prefix("ref:")?.trim();
+        let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+    None
 }
 
 /// 채팅뷰 증분 읽기 — `offset` 이후 append 된 **완전한 줄**만 돌려준다. offset==0
@@ -8417,6 +8429,42 @@ mod pid_cwd_tests {
             ),
         ];
         assert_eq!(super::claude_under(&table, 100), None);
+    }
+}
+
+#[cfg(test)]
+mod head_branch_tests {
+    use super::head_branch;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// 예전 `git rev-parse --abbrev-ref HEAD` 와 같은 답 — 하위 폴더·워크트리·떨어진 HEAD·저장소 밖.
+    #[test]
+    fn reads_the_same_branch_git_reports() {
+        let tmp = std::env::temp_dir().join(format!("kasa-head-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(repo.join("a/b")).unwrap();
+        git(&repo, &["init", "-q", "-b", "작업/한글"]);
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]);
+        assert_eq!(head_branch(&repo.join("a/b")).as_deref(), Some("작업/한글"));
+        assert_eq!(git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]), "작업/한글");
+
+        let wt = tmp.join("wt");
+        git(&repo, &["worktree", "add", "-q", "-b", "곁가지", wt.to_str().unwrap()]);
+        assert_eq!(head_branch(&wt), Some("곁가지".into()));
+
+        git(&repo, &["checkout", "-q", "--detach"]);
+        assert_eq!(head_branch(&repo), None);
+
+        let outside = tmp.join("plain");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(head_branch(&outside), None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 
