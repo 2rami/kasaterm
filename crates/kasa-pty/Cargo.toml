@@ -28,6 +28,9 @@ unicode-normalization = "0.1"
 # Fast SIMD substring search — used in the reader hot path to short-circuit
 # the OSC 1337 / kitty graphics scans when neither prefix is present.
 memchr = "2"
+# 인라인 그림 머리말에서 픽셀 수만 읽는다(픽셀 합계 한도). 앱과 같은 판·같은
+# 형식 집합이라 GUI 가 디코드할 수 있는 그림만 셈에 든다.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 # Windows has no `ps`: enumerate the process table (pid/ppid/exe name) via a
 # Toolhelp snapshot, and read a single process's argv out of its PEB over

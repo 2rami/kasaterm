@@ -614,6 +614,9 @@ impl PtySession {
             env!("CARGO_PKG_VERSION"),
         );
         cmd.env("COLORTERM", "truecolor");
+        // 그림을 장수 단위로 관리하는 TUI(kasaslk)가 이 값을 읽고 그 안에서만
+        // 쓴다. 안 주면 옛 한도 16 으로 보고 줄여 그린다.
+        cmd.env("KASATERM_INLINE_IMAGE_SLOTS", INLINE_IMAGE_SLOTS.to_string());
         // claude 의 렌더러(classic·fullscreen)는 여기서 정하지 않는다 — 사람이 claude 의
         // `/tui` 로 고른다. 08-30~09-28 사이 이 자리에서 강제를 다섯 번 뒤집었다. 마지막
         // 이유는 classic 이 `/config` 같은 대화창을 닫으며 화면 한 장만 다시 찍어 위 대화가
@@ -3393,6 +3396,9 @@ struct InlineImg {
     /// 아니라 **이동**이다.
     key: (String, u64),
     path: std::path::PathBuf,
+    /// 원본 픽셀 수(가로×세로) — `INLINE_IMAGE_PIXEL_BUDGET` 셈용. 머리말을 못
+    /// 읽는 형식은 0 이다(GUI 도 같은 디코더라 텍스처가 안 생긴다).
+    pixels: u64,
     abs_line: i64,
     col: u16,
     cols: u16,
@@ -3406,6 +3412,42 @@ struct InlineImg {
     row_sig: Option<String>,
 }
 
+/// 한 pane 이 붙들어 두는 인라인 그림 장수. 넘으면 오래된 것부터 놓는다.
+///
+/// 한 장의 값은 PTY 쪽 임시 PNG 파일 하나와, 뷰포트에 보이는 동안의 GUI 텍스처
+/// 하나다. 텍스처는 **원본 픽셀 그대로** RGBA8 로 올라가(`upload_image`) 장당
+/// 가로×세로×4 바이트이고, 화면을 벗어나면 놓인다. 그래서 장수는 작은 그림을
+/// 많이 그리는 화면을 위해 넉넉히 두고, 메모리는 아래 픽셀 합계가 묶는다.
+/// 16 이던 시절 kasaslk 는 화면 전체에 12장만 그려 스레드 칸 프사·이모지가
+/// 반블록으로 밀렸다(2026-10-02). 그 화면은 그림이 작아(셀 14×30px 기준
+/// 프사 56×60, 본문 그림 많아야 0.7Mpx) 64장이 다 차도 픽셀 합계 근처에도
+/// 안 간다. 값은 `KASATERM_INLINE_IMAGE_SLOTS` 로 자식에게도 알린다.
+pub const INLINE_IMAGE_SLOTS: usize = 64;
+
+/// 한 pane 이 붙들어 두는 인라인 그림의 원본 픽셀 합. 넘으면 장수와 같은 순서
+/// (오래된 것부터)로 놓되, 방금 온 한 장은 크기와 관계없이 남긴다.
+///
+/// 장수만으로는 메모리가 안 묶인다 — 작은 칸(`width=8`)에 1200만 화소 사진을
+/// 실으면 세 줄짜리 그림이 텍스처 48MB 다. 리그 실측(2026-10-02, 4032×3024
+/// PNG 다섯 장을 한 화면에): GPU 몫 footprint 가 +239MB(장당 가로×세로×4)
+/// 오르고, 스크롤로 화면에서 걷히면 그만큼 돌아온다(네 번 오가도 바닥이 안
+/// 자랐다). 6400만 화소(텍스처 256MB)면 휴대폰 사진 다섯 장·레티나 스크린샷
+/// 열한 장이 한 pane 에 함께 산다. 기본 폭(칸의 60%) 사진은 한 장이 스무 줄을
+/// 넘어 한 화면에 두세 장뿐이라 평소엔 이 선에 닿지 않는다.
+const INLINE_IMAGE_PIXEL_BUDGET: u64 = 64_000_000;
+
+/// 그림 머리말만 읽은 원본 픽셀 수. GUI 가 쓰는 것과 같은 디코더 집합이다.
+fn image_pixels(bytes: &[u8]) -> u64 {
+    if let Some((w, h)) = png_size(bytes) {
+        return w as u64 * h as u64;
+    }
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .map_or(0, |(w, h)| w as u64 * h as u64)
+}
+
 #[derive(Default)]
 struct InlineImgs {
     imgs: Vec<InlineImg>,
@@ -3415,6 +3457,20 @@ struct InlineImgs {
     last_rows: u16,
     last_hist: i64,
     last_alt: bool,
+}
+
+impl InlineImgs {
+    /// 장수·픽셀 한도를 넘는 동안 가장 오래된 것부터 파일째 놓는다.
+    fn evict_over_budget(&mut self) {
+        let mut pixels: u64 = self.imgs.iter().map(|i| i.pixels).sum();
+        while self.imgs.len() > 1
+            && (self.imgs.len() > INLINE_IMAGE_SLOTS || pixels > INLINE_IMAGE_PIXEL_BUDGET)
+        {
+            let old = self.imgs.remove(0);
+            pixels -= old.pixels;
+            let _ = std::fs::remove_file(&old.path);
+        }
+    }
 }
 
 /// 리더 스레드의 OSC 1337 캡처 상태(셀-흐름 경로). 페이로드가 read 여러 번에
@@ -3625,12 +3681,9 @@ fn record_inline_image(
     }
     let id = lock.next_id;
     lock.next_id += 1;
-    lock.imgs.push(InlineImg { id, key, path: tmp, abs_line, col, cols, rows, row_sig: None });
-    // 한 pane 에 무한정 쌓이지 않게 — 오래된 것부터 파일째 놓는다.
-    while lock.imgs.len() > 16 {
-        let old = lock.imgs.remove(0);
-        let _ = std::fs::remove_file(&old.path);
-    }
+    let pixels = image_pixels(&bytes);
+    lock.imgs.push(InlineImg { id, key, path: tmp, pixels, abs_line, col, cols, rows, row_sig: None });
+    lock.evict_over_budget();
 }
 
 /// 스냅샷에 인라인 이미지의 이번 프레임 뷰포트 배치를 싣는다. 앵커가 무너지는
@@ -5159,6 +5212,17 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
     g.as_ref()?.1.get(&pid).cloned()
 }
 
+/// pane 프로세스 env 의 한 변수 값 — 세션 캐릭터 anchor(`KASATERM_SESSION_ID`) 복원용.
+/// 포크·`--resume`·`agents`·`--bg` 는 claude 가 transcript id 를 새로 발급해 stem ≠ 원본
+/// anchor 라, stem 매핑도 부모 상속(parentSessionId)도 실패한다(사용자: 백그라운드 재접속에서
+/// 학생이 유우카로 둔갑). env 의 KASATERM_SESSION_ID 는 스폰 때 캐릭터에 바인딩된 원본이라
+/// (env 상속으로 포크/재접속 너머 보존) 유일하게 진짜 학생을 가리킨다. 값은 uuid(공백 없음)라
+/// 공백 split 파싱이 안전하다. `ps eww` = env 를 command 열 뒤에 붙여 출력(macOS/BSD).
+#[cfg(unix)]
+pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
+    process_env_vars(pid, &[key]).remove(key)
+}
+
 /// 여러 키를 **ps 한 번**으로 읽는다 — board 는 pane 마다 여러 env 를 보는데 키당
 /// 프로세스를 띄우면 폴링(1s)마다 pane 수 × 키 수만큼 ps 가 뜬다.
 #[cfg(unix)]
@@ -5181,6 +5245,11 @@ pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<St
         }
     }
     found
+}
+
+#[cfg(not(unix))]
+pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
+    None
 }
 
 #[cfg(not(unix))]
@@ -6178,6 +6247,99 @@ mod inline_image_tests {
         assert_eq!(back.len(), 1, "스크롤백을 다 올려도 그림이 안 돌아왔다");
         let _ = std::fs::remove_file(&back[0].path);
     }
+
+    /// kasaslk 는 한 화면에 프사·이모지를 수십 장 그린다 — 옛 한도 16 을 넘는
+    /// 그림이 말없이 버려지면 화면에 남은 그림이 빈 자리가 된다.
+    #[test]
+    fn pane_keeps_more_than_sixteen_images() {
+        let sess = sh("test-inline-many");
+        let want = 20;
+        // size 만 달리해 서로 다른 그림(키)으로 만든다.
+        let cmd = format!(
+            "i=1; while [ $i -le {want} ]; do printf '\\033]1337;File=name=bi5wbmc=;size=%d;width=4;inline=1:{PNG_1X1}\\007\\n' $i; i=$((i+1)); done\n"
+        );
+        sess.send_bytes(cmd.as_bytes()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let kept = loop {
+            let _ = sess.full_snapshot();
+            let n = sess.inline_imgs.lock().unwrap().imgs.len();
+            if n >= want || Instant::now() > deadline {
+                break n;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let imgs: Vec<_> = sess.inline_imgs.lock().unwrap().imgs.drain(..).collect();
+        for im in &imgs {
+            let _ = std::fs::remove_file(&im.path);
+        }
+        assert_eq!(kept, want, "{want}장 중 {kept}장만 남았다");
+    }
+
+    fn fixture(id: u64, pixels: u64) -> InlineImg {
+        InlineImg {
+            id,
+            key: (format!("f{id}"), id),
+            path: std::path::PathBuf::from(format!("/nonexistent-kasaterm-inline-{id}.png")),
+            pixels,
+            abs_line: 0,
+            col: 0,
+            cols: 4,
+            rows: 1,
+            row_sig: None,
+        }
+    }
+
+    #[test]
+    fn slot_overflow_drops_the_oldest_first() {
+        let mut imgs = InlineImgs::default();
+        for id in 0..(INLINE_IMAGE_SLOTS as u64 + 3) {
+            imgs.imgs.push(fixture(id, 56 * 60));
+            imgs.evict_over_budget();
+        }
+        assert_eq!(imgs.imgs.len(), INLINE_IMAGE_SLOTS);
+        assert_eq!(imgs.imgs[0].id, 3, "가장 오래된 셋이 먼저 나가야 한다");
+        assert_eq!(imgs.imgs.last().unwrap().id, INLINE_IMAGE_SLOTS as u64 + 2);
+    }
+
+    /// 장수 안이어도 원본 픽셀 합이 넘으면 오래된 것부터 놓는다. 방금 온 한
+    /// 장은 혼자 한도를 넘어도 남는다 — 그걸 버리면 아무것도 안 그려진다.
+    #[test]
+    fn pixel_budget_drops_the_oldest_but_keeps_the_newest() {
+        let photo = 4032 * 3024;
+        let mut imgs = InlineImgs::default();
+        for id in 0..8 {
+            imgs.imgs.push(fixture(id, photo));
+            imgs.evict_over_budget();
+        }
+        let total: u64 = imgs.imgs.iter().map(|i| i.pixels).sum();
+        assert!(total <= INLINE_IMAGE_PIXEL_BUDGET, "합계 {total} 가 한도를 넘었다");
+        assert_eq!(imgs.imgs.len() as u64, INLINE_IMAGE_PIXEL_BUDGET / photo);
+        assert_eq!(imgs.imgs.last().unwrap().id, 7);
+
+        imgs.imgs.push(fixture(100, INLINE_IMAGE_PIXEL_BUDGET * 2));
+        imgs.evict_over_budget();
+        assert_eq!(imgs.imgs.len(), 1);
+        assert_eq!(imgs.imgs[0].id, 100);
+    }
+
+    #[test]
+    fn image_pixels_reads_png_and_other_headers() {
+        let png = b64_decode(PNG_1X1.as_bytes());
+        assert_eq!(image_pixels(&png), 1);
+        assert_eq!(image_pixels(b"not an image at all"), 0);
+    }
+
+    #[test]
+    fn child_env_carries_the_slot_count() {
+        let sess = sh("test-inline-env");
+        sess.send_bytes(b"echo \"SLOTS=$KASATERM_INLINE_IMAGE_SLOTS.\"\n").unwrap();
+        let want = format!("SLOTS={INLINE_IMAGE_SLOTS}.");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sess.visible_text(10).contains(&want) {
+            assert!(Instant::now() < deadline, "자식 env 에 {want} 가 없다: {}", sess.visible_text(10));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -7094,7 +7256,7 @@ mod external_session_tests {
         sess.inline_imgs.lock().unwrap().imgs.push(InlineImg {
             id: 1, key: ("fixture".into(), 0),
             path: std::path::PathBuf::from("/nonexistent-kasaterm-inline-fixture.png"),
-            abs_line: history + 1, col: 2, cols: 4, rows: 1, row_sig: None,
+            pixels: 0, abs_line: history + 1, col: 2, cols: 4, rows: 1, row_sig: None,
         });
         assert_eq!(sess.live_screen().inline_images[0].row, 1);
         sess.scroll(3);
