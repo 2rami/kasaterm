@@ -17,6 +17,7 @@ import '../twins_loading.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
 import 'oauth_sheet.dart';
+import 'work_permissions.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -178,7 +179,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // 묶음 차례로 하늘·호박을 번갈아 — 계정 묶음이 빠지면 그 뒤가 한 칸씩 당겨진다.
     final linking = account != null && providers.isNotEmpty;
     const phone = 0;
-    final desktop = linking ? 2 : 1;
+    final desktop = account != null ? 2 : 1;
     return ListView(
           padding: const EdgeInsets.fromLTRB(Look.pagePad, 8, Look.pagePad, Look.groupGap * 2),
           children: [
@@ -221,10 +222,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
-            if (linking)
+            if (account != null)
               SettingsGroup(
                 title: '계정',
                 children: [
+                  SettingsRow(
+                    key: const Key('work-permissions'),
+                    tone: 1,
+                    icon: Icons.mail_lock_outlined,
+                    title: '일 권한',
+                    subtitle: 'Gmail·GitHub 연결 · 메일·PR 승인',
+                    chevron: true,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => WorkPermissionsScreen(
+                          api: () => RelayAccountApi(account.origin, session: account),
+                          installId: widget.installId ?? const ConnectionStore().installId,
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (linking)
                   for (final p in providers)
                     SettingsRow(
                       key: Key('link-${p.id}'),

@@ -193,14 +193,62 @@ class OAuthChoice {
   final bool signup;
 }
 
-/// 기다리는 중이면 모두 null, 로그인이면 [session], 연결이면 [linked], 계정을 골라야 하면 [choice].
+/// 기다리는 중이면 모두 null, 로그인이면 [session], 연결이면 [linked], 계정을 골라야 하면 [choice],
+/// 일 권한(Gmail·GitHub)을 붙였으면 [connected].
 class OAuthResult {
-  const OAuthResult({this.session, this.linked = false, this.choice});
+  const OAuthResult({this.session, this.linked = false, this.choice, this.connected = false});
   final AccountSession? session;
   final bool linked;
   final OAuthChoice? choice;
-  bool get pending => session == null && !linked && choice == null;
+  final bool connected;
+  bool get pending => session == null && !linked && choice == null && !connected;
 }
+
+/// 계정에 붙인 일 권한과 승인을 기다리는 쓰기(docs/account-connections.md). 토큰은 관문에만 있다.
+class WorkList {
+  const WorkList({
+    this.connections = const [],
+    this.pending = const [],
+    this.mail = false,
+    this.github = false,
+    this.installUrl,
+  });
+
+  factory WorkList.fromJson(Map<String, dynamic> json) {
+    List<Map<String, dynamic>> maps(Object? list) => [
+      for (final item in list is List ? list : const []) if (item is Map<String, dynamic>) item,
+    ];
+    final available = json['available'];
+    final install = Uri.tryParse('${json['github_install_url']}');
+    return WorkList(
+      connections: maps(json['connections']),
+      pending: maps(json['pending']),
+      mail: available is Map && available['google'] == true,
+      github: available is Map && available['github'] == true,
+      installUrl: install != null && install.scheme == 'https' && install.host == 'github.com' ? install : null,
+    );
+  }
+
+  final List<Map<String, dynamic>> connections;
+  final List<Map<String, dynamic>> pending;
+  final bool mail;
+  final bool github;
+  final Uri? installUrl;
+}
+
+/// 관문 일 권한 오류 — 데스크톱 `native_work_permissions.rs` 의 `readable` 과 같은 뜻.
+String workError(String? code, int status) => switch (code) {
+  'approver_required' => '승인 자격을 다시 받지 못했어요. 잠시 뒤 다시 눌러 주세요.',
+  'content_changed' => '보는 동안 내용이 바뀌었어요. 다시 열어 확인해 주세요.',
+  'reconnect_required' => '연결이 풀렸어요. 다시 연결해 주세요.',
+  'feature_missing' => '이 연결에 그 권한이 없어요. 다시 연결하며 권한을 허용해 주세요.',
+  'repo_not_accessible' => '그 레포에 GitHub 앱이 설치되지 않았어요. 앱을 설치한 뒤 다시 승인해 주세요.',
+  'provider_rejected' => '받는 쪽이 거절했어요.',
+  'result_unknown' => '보냈지만 결과를 못 받았어요. 메일함·GitHub 에서 확인해 주세요.',
+  'not_found' => '이미 처리됐거나 사라진 항목이에요.',
+  'setup_required' => '관문에 이 연결이 아직 준비되지 않았어요.',
+  _ => status == 404 ? '관문이 이 기능을 아직 몰라요. 관문 업데이트가 필요해요.' : accountError(status),
+};
 
 class OAuthProviders {
   const OAuthProviders(this.enabled, {this.signup = false, this.redirect = false, this.choose = false});
@@ -320,26 +368,34 @@ class RelayAccountApi {
     String path, {
     Map<String, Object?>? body,
     String Function(String? code, int status)? error,
+    bool delete = false,
+    Map<String, String> headers = const {},
   }) async {
     try {
       final uri = origin.resolve('/relay/$path');
       final response =
-          await (body == null
-                  ? _client.get(uri)
+          await (delete
+                  ? _client.delete(uri, headers: headers)
+                  : body == null
+                  ? _client.get(uri, headers: headers)
                   : _client.post(
                       uri,
-                      headers: {'content-type': 'application/json'},
+                      headers: {'content-type': 'application/json', ...headers},
                       body: jsonEncode(body),
                     ))
-              .timeout(const Duration(seconds: 15));
+              .timeout(const Duration(seconds: 30));
       if (response.statusCode != 200) {
         String? code;
+        String? detail;
         try {
-          final e = (jsonDecode(utf8.decode(response.bodyBytes)) as Map)['error'];
+          final json = jsonDecode(utf8.decode(response.bodyBytes)) as Map;
+          final e = json['error'];
           if (e is String && RegExp(r'^[a-z_]{1,40}$').hasMatch(e)) code = e;
+          if (json['detail'] case final String d) detail = d.length > 300 ? d.substring(0, 300) : d;
         } catch (_) {}
+        final message = (error ?? (_, status) => accountError(status))(code, response.statusCode);
         throw AccountException(
-          (error ?? (_, status) => accountError(status))(code, response.statusCode),
+          detail == null ? message : '$message — $detail',
           status: response.statusCode,
           code: code,
         );
@@ -399,9 +455,22 @@ class RelayAccountApi {
 
   /// [link] 면 지금 로그인한 계정에 이 로그인 방법을 더한다(기기 토큰이 실려야 한다), 아니면 그 신원으로 로그인.
   /// [redirect] 면(이 기기가 시스템 로그인 창을 띄울 수 있으면) 관문이 아는 한 확인 코드 없는 앱 리다이렉트로 시작한다.
-  Future<OAuthFlow> oauthStart(OAuthProvider provider, String machineId, {bool link = false, bool redirect = false}) async {
+  ///
+  /// [connect] 를 주면(`mail.read`·`mail.send`·`github.pr`) 로그인 대신 지금 계정에 일 권한을 붙인다 — 공급자 토큰이
+  /// 이 기기 verifier 로만 넘어가게 앱 리다이렉트가 있어야 한다.
+  Future<OAuthFlow> oauthStart(
+    OAuthProvider provider,
+    String machineId, {
+    bool link = false,
+    bool redirect = false,
+    List<String> connect = const [],
+  }) async {
+    if (connect.isNotEmpty) link = true;
     final can = redirect || !link ? await oauthProviders() : const OAuthProviders([]);
     final r = redirect && can.redirect ? OAuthRedirect.create() : null;
+    if (connect.isNotEmpty && r == null) {
+      throw const AccountException('이 서버나 기기는 연결 창을 열 수 없어요. 관문·앱 업데이트가 필요해요.');
+    }
     final json = await _request(
       'oauth/start',
       body: {
@@ -411,6 +480,7 @@ class RelayAccountApi {
         'machine_id': machineId,
         'link': link,
         if (!link && can.choose) 'choose': true,
+        if (connect.isNotEmpty) 'connect': connect,
         if (r != null) ...{
           'code_challenge': r.challenge,
           'code_challenge_method': 'S256',
@@ -491,6 +561,8 @@ class RelayAccountApi {
     switch (json['status']) {
       case 'linked':
         return const OAuthResult(linked: true);
+      case 'connected':
+        return const OAuthResult(connected: true);
       case 'choose':
         final (ticket, provider, display) = (json['ticket'], json['provider'], json['display']);
         final which = OAuthProvider.values.where((p) => p.id == provider).firstOrNull;
@@ -525,6 +597,42 @@ class RelayAccountApi {
         return const OAuthResult();
     }
   }
+
+  Future<WorkList> work() async =>
+      WorkList.fromJson(await _request('connections', error: workError));
+
+  /// 끊기 — 관문이 공급자 쪽 권한도 돌려준다. 돌려준 게 확인되면 true.
+  Future<bool> disconnect(String id) async =>
+      (await _request('connections/${Uri.encodeComponent(id)}', delete: true, error: workError))['provider_revoked'] ==
+      true;
+
+  Future<void> reject(String id) =>
+      _request('connections/pending/${Uri.encodeComponent(id)}/reject', body: const {}, error: workError);
+
+  /// 이 화면이 보여 준 내용([digest]) 그대로 실행한다. [approver] 는 이 앱 실행 동안만 메모리에 있는 승인 열쇠다.
+  Future<Map<String, dynamic>> approve(String id, String digest, String approver) async {
+    Future<Map<String, dynamic>> once() => _request(
+      'connections/pending/${Uri.encodeComponent(id)}/approve',
+      body: {'digest': digest},
+      headers: {'x-kasa-approver': approver},
+      error: workError,
+    );
+    Future<void> register() => _request('connections/approver', body: {'key': approver}, error: workError);
+    if (!_registered.contains(approver)) {
+      await register();
+      _registered.add(approver);
+    }
+    try {
+      return await once();
+    } on AccountException catch (e) {
+      // 관문이 재시작하면 열쇠를 잊는다 — 한 번 다시 등록하고 다시 묻는다.
+      if (e.code != 'approver_required') rethrow;
+      await register();
+      return once();
+    }
+  }
+
+  static final _registered = <String>{};
 
   Future<void> oauthCancel(OAuthFlow flow) async {
     // 리다이렉트 요청은 거둘 자격이 없다 — 아무도 code 를 안 바꾸면 관문에서 10분 뒤 사라진다.

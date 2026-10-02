@@ -33,6 +33,8 @@ Future<OAuthResult?> showOAuthSheet(
   required OAuthProvider provider,
   required String machineId,
   bool link = false,
+  List<String> connect = const [],
+  String? title,
   Future<bool> Function(Uri url)? open,
   WebAuthenticate? authenticate,
   Duration every = const Duration(seconds: 2),
@@ -47,6 +49,8 @@ Future<OAuthResult?> showOAuthSheet(
       provider: provider,
       machineId: machineId,
       link: link,
+      connect: connect,
+      title: title,
       open: open ?? (url) => launchUrl(url, mode: LaunchMode.externalApplication),
       authenticate:
           authenticate ?? (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS ? systemWebAuthenticate : null),
@@ -61,6 +65,8 @@ class _OAuthSheet extends StatefulWidget {
     required this.provider,
     required this.machineId,
     required this.link,
+    required this.connect,
+    required this.title,
     required this.open,
     required this.authenticate,
     required this.every,
@@ -70,6 +76,8 @@ class _OAuthSheet extends StatefulWidget {
   final OAuthProvider provider;
   final String machineId;
   final bool link;
+  final List<String> connect;
+  final String? title;
   final Future<bool> Function(Uri url) open;
   final WebAuthenticate? authenticate;
   final Duration every;
@@ -122,6 +130,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
         widget.machineId,
         link: widget.link,
         redirect: widget.authenticate != null,
+        connect: widget.connect,
       );
       if (!mounted) {
         unawaited(widget.api.oauthCancel(flow));
@@ -362,7 +371,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(widget.link ? '$name 연결' : '$name 로그인', style: theme.textTheme.titleLarge),
+            Text(widget.title ?? (widget.link ? '$name 연결' : '$name 로그인'), style: theme.textTheme.titleLarge),
             const SizedBox(height: Look.fieldGap),
             if (_error case final error?) ...[
               Semantics(liveRegion: true, child: Text(error, style: TextStyle(color: scheme.error))),
