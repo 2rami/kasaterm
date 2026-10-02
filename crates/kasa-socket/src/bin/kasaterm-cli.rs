@@ -762,6 +762,15 @@ const SUMMON_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '한 줄 
 /// 부팅한 claude 가 보드에 설 때까지 기다리는 상한.
 const SUMMON_BOOT_SECS: u64 = 90;
 
+/// 부팅 명령이 새 codex 대화를 여는가(`codex`·`시로코 codex`·`codex --model x`). 이어 열기·한 번 실행 같은
+/// 서브커맨드는 첫 입력 인자를 받는 자리가 아니라 빼고, 따옴표로 지시를 이미 준 명령에는 덧붙이지 않는다.
+fn boots_fresh_codex(boot: &str) -> bool {
+    let words: Vec<&str> = boot.split_whitespace().collect();
+    let Some(at) = words.iter().position(|w| *w == "codex") else { return false };
+    !words[at + 1..].iter().any(|w| w.starts_with(['\'', '"'])
+        || matches!(*w, "resume" | "fork" | "exec" | "e" | "review" | "login" | "logout" | "mcp" | "apply" | "a" | "cloud" | "help"))
+}
+
 /// 갓 부팅한 학생에게 보낸 tell 의 거절 중 기다리면 풀리는 것 — claude 판정이나 대화 번호가 아직 안 섰다.
 fn tell_target_booting(why: &str) -> bool {
     ["shell or unsupported harness", "bound conversation differs", "tell withheld"]
@@ -822,8 +831,25 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             params: json!({ "surface_id": surface, "title": title }) });
     }
 
+    let mut body = brief.trim().to_string();
+    if !body.contains("kasaterm-cli done") {
+        body.push_str("\n\n");
+        body.push_str(SUMMON_DONE_HINT);
+    }
+    let title = name.clone().or_else(|| brief_title(&brief)).map(|t| kasa_socket::tell::normalize_title(&t)).transpose()?
+        .filter(|t| !t.is_empty());
+    let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
+    let body = kasa_socket::tell::normalize(&body)?;
+
+    // codex 는 첫 입력 전엔 대화 기록이 없어 tell 이 겨눌 주소(대화 번호)가 영영 안 선다 — 브리프를 첫
+    // 입력 인자로 넘긴다(2026-10-02 실측: `--cmd '호시노 codex'` 가 90초 뒤 「안 떴어요」로 끝났다).
+    let first_prompt = boots_fresh_codex(&boot);
     // 갓 만든 pane 은 번호 재사용 때문에 「pane 없음」 가드가 한두 번 헛걸린다(실측) — 잠깐 두고 다시 보낸다.
-    let line = format!("cd {} && {boot}\n", shell_quote(&cwd.to_string_lossy()));
+    let line = if first_prompt {
+        format!("cd {} && {boot} {}\n", shell_quote(&cwd.to_string_lossy()), shell_quote(&body))
+    } else {
+        format!("cd {} && {boot}\n", shell_quote(&cwd.to_string_lossy()))
+    };
     let mut refused = None;
     for attempt in 0..3 {
         if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
@@ -835,16 +861,28 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     if let Some(why) = refused {
         return Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {why}"));
     }
-
-    let mut body = brief.trim().to_string();
-    if !body.contains("kasaterm-cli done") {
-        body.push_str("\n\n");
-        body.push_str(SUMMON_DONE_HINT);
+    let wait = format!("kasaterm-cli board --wait {surface} --since {since}");
+    if first_prompt {
+        let started = std::time::Instant::now();
+        let row = loop {
+            let row = snapshot_rows(socket_path, true).ok().and_then(|rows| rows.into_iter()
+                .find(|p| row_address(p, "surface_id") == surface && !row_address(p, "session_id").is_empty()));
+            if let Some(row) = row { break row; }
+            if started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS) {
+                return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        };
+        if let (Some(title), None) = (&title, &name) {
+            let _ = roundtrip(socket_path, &Request { id: json!("summon"), method: "surface.rename".into(),
+                params: json!({ "surface_id": surface, "title": title }) });
+        }
+        let character = row_text(&row, "character");
+        let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
+        println!("{who} 소환 · 지시는 첫 입력으로 넣음");
+        println!("{}", if from.is_some() { format!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}") } else { format!("기다리려면: {wait}") });
+        return Ok(());
     }
-    let title = name.clone().or_else(|| brief_title(&brief)).map(|t| kasa_socket::tell::normalize_title(&t)).transpose()?
-        .filter(|t| !t.is_empty());
-    let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
-    let body = kasa_socket::tell::normalize(&body)?;
 
     // 브리프는 claude 가 뜬 뒤에만 tell 로 — 셸 명령줄에 섞이면 부팅이 깨진다(skills/kasapane).
     // 보드에 대화 번호가 서는 것과 tell 이 받는 조건(claude 판정·살아 있는 대화와 번호 일치)은 1~2초
@@ -881,7 +919,6 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     let character = row_text(&row, "character");
     let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
     println!("{who} 소환 · 지시 {state} · 영수증 {message_id}");
-    let wait = format!("kasaterm-cli board --wait {surface} --since {since}");
     if from.is_some() {
         println!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}");
     } else {
@@ -3901,6 +3938,16 @@ mod tests {
     fn summon_quotes_the_folder_for_the_shell() {
         assert_eq!(super::shell_quote("/a b/c"), "'/a b/c'");
         assert_eq!(super::shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn summon_hands_codex_the_brief_as_its_first_input_only_for_a_fresh_conversation() {
+        for boot in ["codex", "시로코 codex", "kimi codex", "codex --model gpt-5"] {
+            assert!(super::boots_fresh_codex(boot), "{boot}");
+        }
+        for boot in ["claude", "시로코", "codex resume abc", "codex exec 'x'", "codex '이미 준 지시'", "codexx"] {
+            assert!(!super::boots_fresh_codex(boot), "{boot}");
+        }
     }
 
     #[test]

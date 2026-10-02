@@ -7852,16 +7852,14 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // 남긴다(hot path 가벼움). 아래 라인들은 전부 PERSONA_OK 게이트를 공유하므로
     // attach/agents/subcommand(case 가 PERSONA_OK 를 비움)엔 안 붙어 서브커맨드를 오염 안
     // 시킨다. 불변식(session-id/--settings/task-list)은 노브가 아니라 계속 하드코딩.
-    let persona_on = socket::read_claude_persona();
     let model = socket::read_claude_model();
     let effort = socket::read_claude_effort();
     let extra = socket::read_claude_extra();
     let extra = extra.trim();
-    let persona_line = if persona_on {
-        "[ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n".to_string()
-    } else {
-        String::new()
-    };
+    // 「말투」 토글로 이 줄을 빼지 않는다 — 꺼지면 신원 쪽이 `KASATERM_PERSONA` 를 규약만으로 내려 준다.
+    // 여기서 한 번 더 막으면 말투를 끈 채 부팅한 앱의 claude 만 보드·전달·done 규약 없이 떴다
+    // (2026-10-02 codex pane 과 견주다 확인 — codex 는 같은 값을 AGENTS.md 로 받아 규약이 실렸다).
+    let persona_line = "[ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n".to_string();
     // 학생별 실행 통로(`KASATERM_BACKEND`) — kimi·glm 처럼 claude 를 감싸 게이트웨이로
     // 보내는 런처다. 이 줄이 persona 블록의 **맨 앞**인 것이 설계의 핵심이다: 런처는
     // 환경을 씌운 뒤 다시 PATH 의 claude(= 이 shim)를 부르므로, 플래그를 붙인 다음에
@@ -8384,6 +8382,20 @@ export CODEX_HOME="$CH"
 if [ -n "$ACCT" ]; then
   set -- "$@" -c 'cli_auth_credentials_store="file"'
 fi
+# codex 는 도구 셸의 env 를 shell_environment_policy 로 새로 짓는다. 사용자가 inherit="core" 를 쓰면
+# KASATERM_* 가 통째로 빠져, 학생의 kasaterm-cli 가 앱 소켓을 못 찾고 board·tell·done 이 전부
+# 끊긴다(2026-10-02 실측: connect to "/tmp/cmux.sock"). 이 실행의 값을 `set` 으로 못박는다.
+# 값은 TOML 문자열로 감싼다 — 맨값이면 포트 같은 숫자가 정수로 읽혀 설정 전체가 거부된다.
+# 페르소나는 AGENTS.md 로 이미 갔고, KEY·TOKEN·SECRET 이 든 이름은 codex 기본 제외 규칙을 따른다.
+NL='
+'
+for n in CODEX_HOME $(env | sed -n 's/^\(KASA[A-Z0-9_]*\)=.*/\1/p' | sort -u); do
+  case "$n" in KASATERM_PERSONA|*KEY*|*TOKEN*|*SECRET*) continue ;; esac
+  v=$(printenv "$n") || continue
+  case "$v" in *"$NL"*) continue ;; esac
+  v=$(printf '%s' "$v" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  set -- "$@" -c "shell_environment_policy.set.$n=\"$v\""
+done
 # codex 는 홈마다 app-server 데몬을 띄우고(기능 daemon_auto_start) pane 이 닫혀도 남겨 둔다.
 # 홈이 pane 마다 따로라 codex pane 을 열 때마다 하나씩 쌓였다(2026-09-25 실측: 도는 codex 0,
 # 데몬 3). 그래서 이 codex 를 띄운 셸(pane 의 셸)이 사라지면 그 홈의 데몬을 내린다.
@@ -10432,6 +10444,45 @@ mod tests {
             .output().unwrap();
         assert!(result.status.success());
         assert_eq!(String::from_utf8(result.stdout).unwrap(), "/usr/bin:/bin");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// inherit="core" 인 사용자 설정에서도 학생의 도구 셸이 pane 신원을 보게 하는 블록.
+    #[cfg(unix)]
+    #[test]
+    fn codex_wrapper_pins_pane_env_for_tool_shells() {
+        let dir = std::env::temp_dir().join(format!("kt-shim-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        install_codex_shim(&dir);
+        let body = std::fs::read_to_string(dir.join("codex")).unwrap();
+        let start = body.find("NL='").unwrap();
+        let block = &body[start..];
+        let block = &block[..block.find("\ndone\n").unwrap() + 6];
+        let result = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("set -- resume\n{block}printf '%s\\n' \"$@\"")])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CODEX_HOME", "/tmp/h")
+            .env("KASATERM_PANE_ID", "%3")
+            .env("KASATERM_CHARACTER", "시로코")
+            .env("KASASPACE_MCP_PORT", "50992")
+            .env("KASATERM_SOCKET_PATH", "/tmp/a \"b\"\\c.sock")
+            .env("KASATERM_PERSONA", "말투\n규약")
+            .env("KASATERM_KASANET_KEY", "/tmp/k")
+            .output().unwrap();
+        assert!(result.status.success());
+        let args: Vec<String> = String::from_utf8(result.stdout).unwrap().lines().map(str::to_string).collect();
+        assert_eq!(args[0], "resume", "원래 인자가 앞에 남아야 서브커맨드가 안 깨진다");
+        for want in [
+            "shell_environment_policy.set.CODEX_HOME=\"/tmp/h\"",
+            "shell_environment_policy.set.KASATERM_PANE_ID=\"%3\"",
+            "shell_environment_policy.set.KASATERM_CHARACTER=\"시로코\"",
+            "shell_environment_policy.set.KASASPACE_MCP_PORT=\"50992\"",
+            "shell_environment_policy.set.KASATERM_SOCKET_PATH=\"/tmp/a \\\"b\\\"\\\\c.sock\"",
+        ] {
+            assert!(args.iter().any(|a| a == want), "{want} 이 빠졌다: {args:?}");
+        }
+        assert!(!args.iter().any(|a| a.contains("PERSONA") || a.contains("KASANET_KEY")), "{args:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
