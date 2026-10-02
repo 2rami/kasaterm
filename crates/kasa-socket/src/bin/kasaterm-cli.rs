@@ -3507,6 +3507,8 @@ struct SlSurroundings<'a> {
     config: &'a Value,
     settings: &'a Value,
     branch: Option<&'a str>,
+    /// 칸 안 mod 가 앱에 알린 비용·한도·백그라운드 수(`<pane>-mod.json`). mod 없는 칸은 None.
+    module: Option<&'a Value>,
 }
 
 fn sl_window_label(win: u64) -> String {
@@ -3606,6 +3608,10 @@ fn sl_line(d: &Value, cwd: &str, at: &SlSurroundings) -> String {
         parts.push(format!("{c_ctx}{pct:.0}%{SL_RESET}"));
     }
 
+    if let Some(m) = at.module.filter(|_| field_on("usage")) {
+        parts.extend(sl_module_parts(m));
+    }
+
     if let Some(lvl) = d
         .pointer("/effort/level")
         .and_then(Value::as_str)
@@ -3620,6 +3626,53 @@ fn sl_line(d: &Value, cwd: &str, at: &SlSurroundings) -> String {
     }
 
     format!("{prefix}{}", parts.join(&sep))
+}
+
+#[cfg(test)]
+fn strip_ansi_for_test(s: &str) -> String {
+    let mut out = String::new();
+    let mut esc = false;
+    for c in s.chars() {
+        if esc {
+            if c.is_ascii_alphabetic() {
+                esc = false;
+            }
+        } else if c == '\x1b' {
+            esc = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// mod 칸의 덧붙임 — 한도(5시간·7일)·비용·백그라운드 수. 한도는 절반을 넘은 것만, 90% 넘으면 붉게.
+fn sl_module_parts(m: &Value) -> Vec<String> {
+    let mut parts = Vec::new();
+    for limit in m.get("limits").and_then(Value::as_array).into_iter().flatten() {
+        let Some(pct) = limit.get("percent").and_then(Value::as_f64).filter(|p| *p >= 50.0) else { continue };
+        let name = match limit.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "five_hour" => "5h",
+            "seven_day" => "7d",
+            other => other,
+        };
+        let c = ansi_fg(if pct >= 90.0 { "f7768e" } else { SL_C_CTX });
+        parts.push(format!("{c}{name} {pct:.0}%{SL_RESET}"));
+    }
+    if let Some(usd) = m.get("cost_usd").and_then(Value::as_f64).filter(|usd| *usd >= 0.01) {
+        parts.push(format!("{SL_DIM}${usd:.2}{SL_RESET}"));
+    }
+    if let Some(n) = m.get("background").and_then(Value::as_u64).filter(|n| *n > 0) {
+        parts.push(format!("{}bg {n}{SL_RESET}", ansi_fg(SL_C_GIT)));
+    }
+    parts
+}
+
+/// 앱이 이 칸에 쓴 mod 사실 — 같은 세션 것만(다른 세션이 남긴 낡은 파일을 안 읽게).
+fn sl_module_facts(pane: &str, session_id: &str) -> Option<Value> {
+    let path = std::env::temp_dir().join("kasaterm-statusline").join(format!("{}-mod.json", pane.trim_start_matches('%')));
+    let facts = sl_read_json(&path)?;
+    (facts.get("session").and_then(Value::as_str) == Some(session_id)).then_some(facts)
 }
 
 /// 상태줄은 매초 다시 그려지지만 앱에 알릴 값은 거의 안 바뀐다. 보고 하나가 GUI 이벤트 둘을
@@ -3717,6 +3770,7 @@ fn run_statusline() {
         .unwrap_or_else(|| sl_home().join(".config/kasaterm/settings.json"));
     let settings = sl_read_json(&settings_path).unwrap_or(Value::Null);
     let branch = sl_git_branch(&cwd);
+    let module = pane.as_deref().and_then(|pane| sl_module_facts(pane, session_id));
     println!(
         "{}",
         sl_line(
@@ -3728,6 +3782,7 @@ fn run_statusline() {
                 config: &config,
                 settings: &settings,
                 branch: branch.as_deref(),
+                module: module.as_ref(),
             },
         )
     );
@@ -4063,12 +4118,21 @@ mod tests {
                 config: &serde_json::Value::Null,
                 settings,
                 branch: None,
+                module: None,
             },
         )
     }
 
     #[test]
-    fn hidden_statusline_fields_keep_the_pane_marker() {
+    fn module_parts_show_high_limits_cost_and_background() {
+        let m = serde_json::json!({"limits": [{"kind": "five_hour", "percent": 93.0}, {"kind": "seven_day", "percent": 12.0}], "cost_usd": 1.234, "background": 2});
+        let plain: Vec<String> = super::sl_module_parts(&m).iter().map(|p| super::strip_ansi_for_test(p)).collect();
+        assert_eq!(plain, ["5h 93%", "$1.23", "bg 2"]);
+        assert!(super::sl_module_parts(&serde_json::json!({"limits": [], "cost_usd": 0.0, "background": 0})).is_empty());
+    }
+
+    #[test]
+        fn hidden_statusline_fields_keep_the_pane_marker() {
         let d = serde_json::json!({"model": {"id": "claude-fixture", "display_name": "FixtureModel"}, "context_window": {"used_percentage": 23}});
         let off = serde_json::json!({"agent_statusline_model": false, "agent_statusline_usage": false, "agent_statusline_cwd": false});
         assert_eq!(statusline(&d, true, Some("프라나"), &off), super::SL_SPRITE);

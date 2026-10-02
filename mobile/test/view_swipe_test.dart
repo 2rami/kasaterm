@@ -42,6 +42,7 @@ class SwipeServer extends Server {
     String pane,
     int offset, {
     String? machine,
+    int? waitMs,
   }) async {
     final t = transcript;
     if (t == null) return null;

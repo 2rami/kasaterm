@@ -1488,6 +1488,11 @@ impl App {
                             None => continue,
                         }
                     };
+                    // mod 가 실린 claude 칸은 엔진이 직접 알린다 — 화면을 판독하지 않는다.
+                    if kasa_mcp::claude_mod::live(&key).is_some() {
+                        screen.remove(&key);
+                        continue;
+                    }
                     match t.term() {
                         Some(term) => {
                             let signs = crate::agent_state::ScreenSigns {

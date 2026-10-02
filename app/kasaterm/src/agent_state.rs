@@ -12,6 +12,10 @@
 //! - claude 명부 `agents --json` 의 idle|busy|waiting
 //! - PTY 출력 박동(살아 있나만) · Enter 직후 브리지 · codex·agy 전용 화면 승인 폴백
 //!
+//! claude 칸에 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 실려 있으면 그것이 엔진 이벤트로 알린
+//! 사실(`kasa_mcp::claude_mod`)이 위 전부를 대신한다 — 그 칸에서는 화면·기록 턴·명부·Enter 다리가 쉰다.
+//! 위 재료들은 mod 없는 claude 와 codex·agy 몫으로 남는다.
+//!
 //! 화면은 이제 그림 자리(스프라이트 앵커)와 압축 % 장식에만 쓴다. `resolve` 는 순수 함수라
 //! 표로 시험하고, `StateHub` 가 재료를 모아 GUI 틱과 보드 빌더 양쪽에 같은 답을 준다.
 
@@ -153,6 +157,8 @@ pub(crate) struct Evidence {
     /// 정확하게」). 정본이 아니라, 정본이 없거나 정본과 어긋날 때만 판정을 바꾼다. None 은 그
     /// pane 의 격자를 못 본 것(원격·아직 스캔 전) — 그때는 화면 규칙이 전부 쉰다.
     pub screen: Option<ScreenSigns>,
+    /// 칸 안 mod 가 알린 지금 — 있으면 이 칸의 정본이다(`resolve_module`).
+    pub module: Option<ModuleSigns>,
     /// 훅·기록이 본 뒤 작업(서브에이전트·백그라운드).
     pub bg_active: bool,
     pub intent: String,
@@ -168,6 +174,19 @@ pub(crate) struct ScreenSigns {
     pub approval: Option<String>,
     /// 끊김 문구(`find_connection_trouble`)가 화면 아래 몇 줄 안에 있다.
     pub trouble: Option<&'static str>,
+}
+
+/// 연결 mod 가 엔진 이벤트로 알린 것(`kasa_mcp::claude_mod::ModState` 에서 판정에 쓰는 몫).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModuleSigns {
+    pub turn_open: bool,
+    /// 지난 턴이 오류·거절로 끝났으면 그 까닭.
+    pub turn_error: Option<String>,
+    pub compacting: bool,
+    /// 열린 승인 요청의 도구 — 창이 뜬 뒤 칸에 사람 키가 들어왔으면(`answered`) 답한 것으로 본다.
+    pub permission: Option<String>,
+    pub answered: bool,
+    pub question: bool,
 }
 
 /// 판정 결과.
@@ -327,6 +346,39 @@ fn attention_live(e: &Evidence, kind: WaitKind, age: Option<Duration>) -> bool {
     }
 }
 
+/// mod 칸의 판정 — 엔진이 알린 그대로다. 60초 방치(idle_prompt)만 Notification 훅에서 받는다.
+fn resolve_module(e: &Evidence, m: &ModuleSigns) -> (AgentState, &'static str) {
+    if let Some(tool) = m.permission.as_ref().filter(|_| !m.answered) {
+        let reason = if tool.is_empty() { WaitKind::Permission.default_reason().to_string() } else { format!("{tool} 승인 대기") };
+        return (AgentState::Waiting { kind: WaitKind::Permission, reason }, "mod permission");
+    }
+    if m.question {
+        return (
+            AgentState::Waiting { kind: WaitKind::Question, reason: WaitKind::Question.default_reason().into() },
+            "mod question",
+        );
+    }
+    if m.compacting {
+        return (AgentState::Compacting, "mod compact");
+    }
+    if m.turn_open || m.permission.is_some() {
+        return (AgentState::Working, "mod turn open");
+    }
+    if let Some(why) = &m.turn_error {
+        let label = e.transcript_error.as_ref().map(|err| err.label.clone()).unwrap_or_else(|| {
+            if why == "refusal" { "모델이 거절함".into() } else { "오류로 턴이 끝남".into() }
+        });
+        return (AgentState::Error { label }, "mod turn error");
+    }
+    if let Some((WaitKind::Idle, reason, age)) = &e.attention {
+        if attention_live(e, WaitKind::Idle, *age) {
+            let reason = if reason.trim().is_empty() { WaitKind::Idle.default_reason().to_string() } else { reason.clone() };
+            return (AgentState::Waiting { kind: WaitKind::Idle, reason }, IDLE_PROMPT);
+        }
+    }
+    (AgentState::Idle, "mod idle")
+}
+
 /// 순수 판정. 우선순위는 위에서 아래 — 첫 줄이 맞으면 거기서 끝.
 pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
     if let Some((word, reason, kind)) = &e.remote {
@@ -334,6 +386,9 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
     }
     if e.harness.is_none() {
         return (AgentState::Idle, "shell");
+    }
+    if let Some(m) = &e.module {
+        return resolve_module(e, m);
     }
     // 화면이 살아 돈다(스피너 + 출력 박동) = 사람이 이미 답했다. 훅 attention 표식은 Stop·기록
     // 성장이 와야 풀리는데 그 사이 몇 초를 「대기」로 남기던 것을 화면이 먼저 푼다.
@@ -502,6 +557,7 @@ impl StateHub {
         }
         self.perm_mode.lock().unwrap().retain(|id, _| live.contains(id));
         self.screen.lock().unwrap().retain(|id, _| live.contains(id));
+        kasa_mcp::claude_mod::retain(&live);
         let official = crate::socket::agents_status_cached();
         let official_errors = crate::socket::agents_error_sids_cached();
         let bound: HashMap<String, PathBuf> = match self.bound.try_lock() {
@@ -571,6 +627,24 @@ impl StateHub {
                     .ok()
                     .is_some_and(|h| h.get(id).is_some_and(|a| !a.is_empty()));
                 evidence.screen = self.screen.lock().unwrap().get(id).cloned();
+                if harness == Some(kasa_pty::AgentKind::Claude) {
+                    if let Some(m) = kasa_mcp::claude_mod::live(id) {
+                        let key = session.as_ref().and_then(|p| p.last_key());
+                        let answered = m.permission_since.zip(key).is_some_and(|(asked, key)| key > asked);
+                        if let Some(key) = key.filter(|_| answered) {
+                            kasa_mcp::claude_mod::close_answered(id, key);
+                        }
+                        evidence.bg_active = m.running_tasks().next().is_some();
+                        evidence.module = Some(ModuleSigns {
+                            turn_open: m.turn_open,
+                            turn_error: m.turn_error.clone(),
+                            compacting: m.compacting.is_some_and(|at| at.elapsed() < COMPACT_MAX),
+                            permission: m.permissions.first().map(|(_, tool)| tool.clone()),
+                            answered,
+                            question: m.question.is_some(),
+                        });
+                    }
+                }
             }
             let (state, reason) = resolve(&evidence);
             let since = previous
@@ -653,6 +727,42 @@ mod tests {
         assert_eq!(resolve(&e), (AgentState::Working, "remote"));
         e.remote = Some(("nonsense".into(), None, None));
         assert_eq!(resolve(&e).0, AgentState::Unknown);
+    }
+
+    /// mod 칸은 엔진이 알린 그대로다 — 화면 스피너·기록 턴이 다른 말을 해도 따르지 않는다.
+    #[test]
+    fn a_module_pane_follows_the_engine_not_the_screen() {
+        let mut e = claude();
+        e.transcript_turn = Some(TurnState::Working);
+        e.transcript_age = Some(secs(1));
+        sc(&mut e).spinner = true;
+        e.heartbeat = true;
+        e.module = Some(ModuleSigns::default());
+        assert_eq!(resolve(&e), (AgentState::Idle, "mod idle"));
+        e.module = Some(ModuleSigns { turn_open: true, ..Default::default() });
+        assert_eq!(resolve(&e), (AgentState::Working, "mod turn open"));
+        let asked = ModuleSigns { turn_open: true, permission: Some("Bash".into()), ..Default::default() };
+        e.module = Some(asked.clone());
+        assert!(matches!(resolve(&e).0, AgentState::Waiting { kind: WaitKind::Permission, ref reason } if reason == "Bash 승인 대기"));
+        e.module = Some(ModuleSigns { answered: true, ..asked });
+        assert_eq!(resolve(&e), (AgentState::Working, "mod turn open"));
+        e.module = Some(ModuleSigns { turn_open: true, question: true, ..Default::default() });
+        assert!(matches!(resolve(&e).0, AgentState::Waiting { kind: WaitKind::Question, .. }));
+        e.module = Some(ModuleSigns { compacting: true, ..Default::default() });
+        assert_eq!(resolve(&e).0, AgentState::Compacting);
+        e.module = Some(ModuleSigns { turn_error: Some("error".into()), ..Default::default() });
+        assert!(matches!(resolve(&e).0, AgentState::Error { .. }));
+    }
+
+    /// mod 칸의 60초 방치는 Notification 훅이 알린 그대로 기다림(idle)이다.
+    #[test]
+    fn a_module_pane_still_takes_the_idle_prompt_hook() {
+        let mut e = claude();
+        e.module = Some(ModuleSigns::default());
+        e.attention = Some((WaitKind::Idle, String::new(), Some(secs(1))));
+        assert_eq!(resolve(&e).1, IDLE_PROMPT);
+        e.module = Some(ModuleSigns { turn_open: true, ..Default::default() });
+        assert_eq!(resolve(&e).0, AgentState::Working);
     }
 
     /// 훅이 연 턴은 도는 중이다 — 낡았어도 박동이 있으면(긴 빌드) 계속.

@@ -532,6 +532,9 @@ pub struct PtySession {
     /// 타이핑·화살표·마우스 SGR 의 에코 재그리기가 출력 박동으로 읽히는 것을
     /// 막는 억제 신호 — `output_heartbeat` 가 이 직후 1.5초는 박동을 안 믿는다.
     last_input: Mutex<Option<Instant>>,
+    /// 사람이 무언가를 **누른** 마지막 시각 — `last_input` 에서 포커스·휠·호버 리포트를 뺀 것.
+    /// 엔진이 승인 창의 답을 알리지 않아, 창이 뜬 뒤 칸에 들어온 이 입력이 「답했다」의 증거다.
+    last_key: Mutex<Option<Instant>>,
 }
 
 /// 격자 크기에 화면 픽셀 크기를 곁들인다. 그림을 원본 크기로 놓는 앱(`kitten
@@ -832,6 +835,7 @@ impl PtySession {
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
+            last_key: Mutex::new(None),
         })
     }
 
@@ -933,6 +937,7 @@ impl PtySession {
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
+            last_key: Mutex::new(None),
         })
     }
 
@@ -1045,6 +1050,7 @@ impl PtySession {
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
+            last_key: Mutex::new(None),
         })
     }
 
@@ -1360,6 +1366,9 @@ impl PtySession {
         // 마우스만 올려도 tell 이 붙여 넣은 뒤 Enter 를 보류해 글이 입력창에 남고(2026-09-29 두 건),
         // 초안 표시가 서서 다음 tell 은 사람이 Enter 를 칠 때까지 줄만 섰다.
         let passive = passive_report(bytes);
+        if !passive {
+            *self.last_key.lock().unwrap() = Some(Instant::now());
+        }
         let merged;
         let bytes = if expected.is_none() && !passive {
             let mut hold = self.input_hold.lock().unwrap();
@@ -1418,6 +1427,10 @@ impl PtySession {
     /// 마지막 CR/LF 가 이 PTY 로 들어간 시각 — 없으면 아직 아무 제출도 없었다.
     pub fn last_submit(&self) -> Option<Instant> {
         *self.last_submit.lock().unwrap()
+    }
+
+    pub fn last_key(&self) -> Option<Instant> {
+        *self.last_key.lock().unwrap()
     }
 
 

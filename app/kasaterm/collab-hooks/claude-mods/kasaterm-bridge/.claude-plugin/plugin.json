@@ -1,0 +1,6 @@
+{
+  "name": "kasaterm-bridge",
+  "version": "0.1.0",
+  "description": "claude 칸의 상태·승인 요청·백그라운드·도구 활동·대화를 kasaterm 에 알리고, tell 을 쉬는 순간 프롬프트로 받는다",
+  "author": { "name": "kasaterm" }
+}

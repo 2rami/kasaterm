@@ -19,14 +19,14 @@ pub const QUEUE_TTL_SECONDS: u64 = 3600;
 /// 전달을 미룬 까닭. 영수증 `reason` 의 `waiting:<낱말> — …` 로 실려 보낸 쪽 CLI·받는 쪽 화면이 무엇이
 /// 막았는지 가른다 — 하나로 뭉친 문장으로는 「입력칸이 비었는데 왜」를 못 풀었다(2026-10-01).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Hold { Draft, Typing, Composition, Approval, Closed, PasteMode, Identity }
+pub enum Hold { Draft, Typing, Composition, Approval, Closed, PasteMode, Identity, Busy }
 
 impl Hold {
-    const ALL: [Hold; 7] = [Hold::Draft, Hold::Typing, Hold::Composition, Hold::Approval, Hold::Closed, Hold::PasteMode, Hold::Identity];
+    const ALL: [Hold; 8] = [Hold::Draft, Hold::Typing, Hold::Composition, Hold::Approval, Hold::Closed, Hold::PasteMode, Hold::Identity, Hold::Busy];
     pub fn word(self) -> &'static str {
         match self {
             Hold::Draft => "draft", Hold::Typing => "typing", Hold::Composition => "composition", Hold::Approval => "approval",
-            Hold::Closed => "closed", Hold::PasteMode => "paste_mode", Hold::Identity => "identity",
+            Hold::Closed => "closed", Hold::PasteMode => "paste_mode", Hold::Identity => "identity", Hold::Busy => "busy",
         }
     }
     pub fn reason(self) -> &'static str {
@@ -38,6 +38,7 @@ impl Hold {
             Hold::Closed => "waiting:closed — receiver input is closed",
             Hold::PasteMode => "waiting:paste_mode — receiver screen does not accept a paste now",
             Hold::Identity => "waiting:identity — identity proof went stale; retrying",
+            Hold::Busy => "waiting:busy — receiver is mid-turn; its in-session mod takes it once it rests",
         }
     }
     /// 영수증 사유 → 까닭. 옛 판이 쓴 뭉친 문장은 `None`.
@@ -55,6 +56,7 @@ impl Hold {
             Hold::Closed => "받는 창 입력이 닫혀 있어요",
             Hold::PasteMode => "받는 창 화면이 지금 붙여넣기를 안 받아요",
             Hold::Identity => "받는 창 확인이 늦어 다시 보는 중이에요",
+            Hold::Busy => "받는 창이 일하는 중이에요",
         }
     }
     /// 사람에게 하는 말 — 언제 들어가나.
@@ -64,6 +66,7 @@ impl Hold {
             Hold::Composition => "글자 조합이 끝나면 들어가요",
             Hold::Approval => "승인·질문에 답하면 들어가요",
             Hold::Typing | Hold::Identity => "곧 들어가요",
+            Hold::Busy => "지금 일이 끝나면 들어가요",
             Hold::Closed | Hold::PasteMode => "지금은 못 넣어요",
         }
     }

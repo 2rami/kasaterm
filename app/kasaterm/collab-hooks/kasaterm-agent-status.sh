@@ -19,6 +19,8 @@
 # ⚠️ 무슨 일이 있어도 **exit 0, stdout 은 비운다**. 훅이 실패하거나 뭔가를 출력해
 # claude 의 도구 호출이 막히는 것보다, 진행 표시가 한 번 빠지는 편이 훨씬 낫다.
 [ -z "$KASATERM_PANE_ID" ] && exit 0
+# 연결 mod(claude-mods/kasaterm-bridge)가 실린 claude 는 백그라운드 목록을 엔진에서 바로 알린다.
+[ -n "$KASATERM_MOD_BRIDGE" ] && exit 0
 payload="$(cat 2>/dev/null)"
 
 # payload 실물 덤프. 훅 스펙은 문서가 끝까지 알려 주지 않는 부분이 있어(PostToolUse

@@ -909,15 +909,23 @@ class Server {
 
   /// 대화 보기의 재료 — pane 에 묶인 transcript 의 `offset` 이후 줄. 0 이면 꼬리 창을
   /// `reset` 으로 준다. 아직 묶인 기록이 없으면(셸·막 띄운 claude) null.
+  /// [waitMs] 를 주면 새 줄이 없을 때 서버가 그 칸의 다음 대화 행까지 쥐었다가 답한다(긴 폴링). 그 길을
+  /// 모르는 옛 서버와 mod 없는 칸은 바로 답한다.
   Future<({String raw, int offset, bool reset})?> transcriptRaw(
     String pane,
     int offset, {
     String? machine,
+    int? waitMs,
   }) async {
     final body = await _getJson(
       'transcript-raw',
-      query: {'surface': pane, 'offset': '$offset'},
+      query: {
+        'surface': pane,
+        'offset': '$offset',
+        if (waitMs != null) 'wait_ms': '$waitMs',
+      },
       machine: machine,
+      timeout: waitMs == null ? null : Duration(milliseconds: waitMs + 15000),
     );
     if (body is! Map || body['ok'] != true) return null;
     final next = body['offset'];

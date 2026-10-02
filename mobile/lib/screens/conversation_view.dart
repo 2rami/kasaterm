@@ -247,6 +247,9 @@ class ConversationView extends StatefulWidget {
 class _ConversationViewState extends State<ConversationView> {
   static const _pollEvery = Duration(milliseconds: 1500);
 
+  /// 서버가 다음 대화 행을 기다려 주는 한도. 그동안 타이머 바퀴는 `_polling` 에 걸려 쉰다.
+  static const _waitMs = 15000;
+
   final _conv = Conversation();
   final _scroll = ScrollController();
   final _open = Set<Object>.identity();
@@ -303,12 +306,16 @@ class _ConversationViewState extends State<ConversationView> {
   Future<void> _poll() async {
     if (_polling || !mounted) return;
     _polling = true;
+    var again = false;
     try {
       final pane = widget.pane;
+      final from = _conv.offset;
+      final waited = _loaded && !_missing;
       final chunk = await widget.server.transcriptRaw(
         pane.id,
-        _conv.offset,
+        from,
         machine: pane.machine,
+        waitMs: waited ? _waitMs : null,
       );
       if (!mounted) return;
       if (chunk == null) {
@@ -319,6 +326,8 @@ class _ConversationViewState extends State<ConversationView> {
         });
         return;
       }
+      // 기다려 받은 새 줄이면 곧바로 다음 줄을 기다린다 — 타이머 박자를 안 기다린다.
+      again = waited && !chunk.reset && chunk.offset > from && widget.active;
       if (!_conv.apply(chunk.raw, reset: chunk.reset, next: chunk.offset)) {
         // 세션이 바뀌었다 — 다음 바퀴가 꼬리부터 다시 받는다.
         _conv.clear();
@@ -335,6 +344,7 @@ class _ConversationViewState extends State<ConversationView> {
       if (mounted && !_loaded) setState(() => _error = e.message);
     } finally {
       _polling = false;
+      if (again && mounted) unawaited(_poll());
     }
   }
 

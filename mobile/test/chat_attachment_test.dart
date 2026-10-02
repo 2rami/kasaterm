@@ -41,6 +41,7 @@ class ChatServer extends Server {
     String pane,
     int offset, {
     String? machine,
+    int? waitMs,
   }) async => null;
 
   @override

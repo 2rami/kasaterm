@@ -8489,6 +8489,13 @@ impl App {
             self.collab.hub.clone(),
         ));
         backend.start_session_discovery();
+        // 칸 안 mod 가 사실을 알리면 다음 판정이 메모를 건너뛰고, 쉬게 된 칸에 밀린 tell 을 곧바로 꺼낸다.
+        let (hub, proxy) = (self.collab.hub.clone(), self.proxy.clone());
+        kasa_mcp::claude_mod::set_listener(move |_| {
+            hub.invalidate();
+            let _ = proxy.send_event(UserEvent::SafeTellWake);
+        });
+        crate::tell_delivery::listen_module_acks(self.proxy.clone());
         // GUI 쪽에도 핸들 보관 — ResumeSession 이 attach/재개 pane 의 transcript 를
         // bind hook 없이 즉석 확정(bind_transcript)할 때 쓴다.
         self.socket_backend = Some(backend.clone());

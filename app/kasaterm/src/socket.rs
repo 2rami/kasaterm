@@ -2841,6 +2841,10 @@ impl Backend for PtyBackend {
         surface_id: &str,
         limit: usize,
     ) -> Result<Vec<kasa_socket::backend::ActivityEvent>> {
+        // mod 칸은 엔진이 알린 활동을 그대로 준다 — 기록 꼬리를 읽어 짝짓지 않는다.
+        if let Some(events) = kasa_mcp::claude_mod::activity(surface_id, limit) {
+            return Ok(events.into_iter().filter_map(|e| serde_json::from_value(e).ok()).collect());
+        }
         let path = self
             .bound
             .lock()
@@ -3159,8 +3163,10 @@ impl Backend for PtyBackend {
                 if !reason.is_empty() { row["waiting_for"] = json!(reason); }
             }
             if !mirrored {
-                if !meta.background.is_empty() { row["background"] = json!(meta.background); }
-                if !meta.subagents.is_empty() { row["subagents"] = json!(meta.subagents); }
+                let (background, subagents) = kasa_mcp::claude_mod::task_labels(&id)
+                    .unwrap_or_else(|| (meta.background.clone(), meta.subagents.clone()));
+                if !background.is_empty() { row["background"] = json!(background); }
+                if !subagents.is_empty() { row["subagents"] = json!(subagents); }
             }
             let mut done = self.done_reports.lock().unwrap();
             if done.get(&id).is_some_and(|report|report.idle_seen && status == "working") { done.remove(&id); }
@@ -3310,6 +3316,11 @@ impl Backend for PtyBackend {
                             row.background.push(l);
                         }
                     }
+                }
+                // mod 칸은 엔진 목록이 정본이다 — 꼬리·훅 짐작을 갈아 끼운다.
+                if let Some((background, subagents)) = kasa_mcp::claude_mod::task_labels(sid) {
+                    row.background = background;
+                    row.subagents = subagents;
                 }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
                 // pane_window 는 모든 방의 split 트리 leaf 집합이다(publish_pty_layout).

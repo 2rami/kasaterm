@@ -58,6 +58,12 @@ replaced sessions are never retargeted. Queue policy is independent of readiness
 
 Delivery requires a live Claude/Codex PTY, full current identity,
 an empty supported input prompt, and no approval/question or IME composition.
+A Claude pane whose in-session bridge mod is live (`docs/claude-mod-bridge.md`) is not pasted into: once the
+mod reports the session resting (no turn, permission dialog, question or compaction) the message is handed to the
+mod, which submits it as a prompt of its own (`$.prompt.submit`, the input box and any draft untouched). The receipt
+stays `dispatching` until the mod acknowledges: `submitted` once that prompt started its turn, `failed` if the engine
+refused it. A message the mod did not take within 20 s goes back to `accepted`; one it took but never acknowledged
+within 90 s becomes `uncertain`. While the pane works the hold reason is `waiting:busy`.
 Working/thinking/building alone does not defer a message. Approval/question
 screens defer it until the selection UI is gone. An existing draft or IME
 composition is preserved; an independent message cannot be submitted through

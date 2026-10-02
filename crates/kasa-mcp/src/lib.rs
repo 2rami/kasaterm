@@ -2,6 +2,7 @@
 //! 예전에는 pane 조작을 MCP 도구로도 내보냈지만 `kasaterm-cli` 와 완전히 겹쳐 걷었다.
 
 pub mod character;
+pub mod claude_mod;
 pub mod board_service;
 pub mod changes;
 pub mod browser_route;

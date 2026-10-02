@@ -2898,16 +2898,30 @@ async fn transcript_raw_handler(
 ) -> impl IntoResponse {
     let surface = params.get("surface").map(String::as_str).unwrap_or("");
     let offset = params.get("offset").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    let body = if surface.is_empty() {
-        serde_json::json!({ "ok": false, "error": "surface=%N required" })
-    } else {
-        match backend.transcript_raw(surface, offset) {
+    // `wait_ms` — 새 줄이 없으면 그 칸의 mod 가 대화 행을 알릴 때까지 쥐었다가 다시 읽는다(긴 폴링).
+    // mod 없는 칸은 바로 답한다. 행은 mod 가 알린 직후 파일에 닿으므로 한 박자 늦춰 읽는다.
+    let wait = params
+        .get("wait_ms")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|ms| std::time::Duration::from_millis(ms.min(25_000)));
+    let seen = wait.and_then(|_| crate::claude_mod::row_count(surface));
+    let mut chunk = (!surface.is_empty()).then(|| backend.transcript_raw(surface, offset));
+    if let (Some(wait), Some(seen), Some(Ok(c))) = (wait, seen, chunk.as_ref()) {
+        if c.raw.is_empty() && !c.reset {
+            crate::claude_mod::wait_rows(surface, seen, wait).await;
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            chunk = Some(backend.transcript_raw(surface, offset));
+        }
+    }
+    let body = match chunk {
+        None => serde_json::json!({ "ok": false, "error": "surface=%N required" }),
+        Some(chunk) => match chunk {
             Ok(c) => serde_json::json!({
                 "ok": true, "surface_id": surface,
                 "raw": c.raw, "offset": c.offset, "reset": c.reset,
             }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-        }
+        },
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
@@ -5924,7 +5938,7 @@ pub fn remote_token() -> Option<&'static str> {
 /// 이 판정은 한쪽으로만 틀릴 수 있다: 우리 코드도 브라우저도 이 헤더를 보내지
 /// 않으니 로컬 경로는 그대로고, 로컬에서 굳이 위조해 붙여도 **토큰을 더 요구받을
 /// 뿐**이라 느슨해지는 방향이 없다.
-fn is_remote_peer(req: &axum::extract::Request) -> bool {
+pub(crate) fn is_remote_peer(req: &axum::extract::Request) -> bool {
     if req.extensions().get::<ViaUplink>().is_some() {
         return true;
     }
@@ -7900,6 +7914,7 @@ pub fn spawn_http_server_opts(
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
+                    .merge(crate::claude_mod::routes())
                     .route("/collab/tell", post(move |Json(params): Json<serde_json::Value>| {
                         let backend = tell_backend.clone();
                         collab_tell_post(backend,Json(params))
