@@ -110,7 +110,8 @@ SH
 
 # 관문은 서울(네이버)에 있고 설치 창구만 미니에 남았다 — 폰 앱의 새 판 알림(latest)·관리 화면은 서울이 기기 토큰과
 # 함께 보므로 판을 서울에도 놓는다(docs/seoul-gateway.md).
-seoul_sync="$(cd "$(dirname "$0")/../.." && pwd)/tools/kasa-gateway-seoul/gateway.sh"
+# 맨 위에서 이미 mobile/ 로 들어왔다 — `$0` 이 상대 경로면 여기서 다시 따라가면 어긋난다.
+seoul_sync="$(cd .. && pwd)/tools/kasa-gateway-seoul/gateway.sh"
 if [ "$host" != local ] && [ -x "$seoul_sync" ]; then
   KASA_MINI_SSH="$host" "$seoul_sync" sync-install >/dev/null \
     || echo "주의: 서울 관문에 판을 못 놓았다 — tools/kasa-gateway-seoul/gateway.sh sync-install" >&2
