@@ -76,6 +76,21 @@ abstract final class Look {
   static const attachThumb = 48.0;
   static const inputMaxLines = 6;
 
+  /// 학생 화면 터미널 ↔ 대화 밀기(design.md 「터미널 ↔ 대화 밀기」). 가로가 세로의 이 배수 이상일
+  /// 때만 쪽을 넘긴다(약 34° 안) — 그보다 비스듬하면 세로 읽기 스크롤이 가져간다.
+  static const swipeRatio = 1.5;
+
+  /// iOS 뒤로 가기 가장자리 띠 — CupertinoPageRoute 와 같은 폭(왼쪽 안전 여백이 더 넓으면 그 폭).
+  /// 여기서 시작한 밀기는 쪽 넘김이 받지 않는다.
+  static const backEdge = 20.0;
+
+  /// 단추·점으로 바꿀 때 쪽이 미끄러지는 시간. 동작 줄이기면 바로 바뀐다.
+  static const viewFlip = Duration(milliseconds: 240);
+
+  /// 자판이 떠 전환 줄을 접었을 때 지금 보기를 알리는 점 둘.
+  static const viewDot = 6.0;
+  static const viewDotGap = 6.0;
+
   /// 격자 밖 흐르는 글(인라인 코드·코드 칸·도구 결과·글자 선택)의 고정폭 대체 글꼴. TermHangul 은
   /// 한글 진행 폭이 반 칸이라 칸마다 놓는 격자에서만 맞고, 흐르는 글에선 한글이 서로 포개진다 —
   /// 한글은 UI 고딕으로 보낸다(데스크톱 인라인 코드와 같은 규칙).

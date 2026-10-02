@@ -225,6 +225,7 @@ class ConversationView extends StatefulWidget {
     required this.accent,
     required this.onTerminal,
     this.bottomTick = 0,
+    this.active = true,
   });
 
   final Server server;
@@ -235,6 +236,9 @@ class ConversationView extends StatefulWidget {
 
   /// 보낼 때마다 오른다 — 맨 아래로 내리고 곧바로 한 번 더 받는다.
   final int bottomTick;
+
+  /// 보이는 쪽인가. 터미널 쪽으로 밀어 둔 동안은 살려만 두고 대화를 받지 않는다.
+  final bool active;
 
   @override
   State<ConversationView> createState() => _ConversationViewState();
@@ -261,12 +265,13 @@ class _ConversationViewState extends State<ConversationView> {
     super.initState();
     BackgroundGrace.instance.addListener(_graceChanged);
     _scroll.addListener(_onScroll);
-    _start();
+    if (widget.active) _start();
   }
 
   @override
   void didUpdateWidget(ConversationView old) {
     super.didUpdateWidget(old);
+    if (old.active != widget.active) _graceChanged();
     if (old.bottomTick != widget.bottomTick) {
       _toBottom();
       Timer(const Duration(milliseconds: 400), _poll);
@@ -282,7 +287,7 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   void _graceChanged() {
-    if (BackgroundGrace.instance.live) {
+    if (BackgroundGrace.instance.live && widget.active) {
       _start();
     } else {
       _timer?.cancel();

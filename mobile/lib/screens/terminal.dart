@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 import '../background_grace.dart';
 import '../device_shape.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
@@ -51,6 +54,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
       widget.session ?? TermSession(widget.server, widget.pane);
   final _input = TextEditingController();
   final _inputFocus = FocusNode();
+
+  /// 대화 보기의 입력줄은 따로 — 바로 치기 칸의 글은 이미 화면 입력상자에 가 있어 같은 칸을 쓰면
+  /// 대화에서 보낼 때 두 번 들어간다. 두 칸 다 살려 두니 쪽을 바꿔도 쓰던 글이 남는다.
+  final _chatInput = TextEditingController();
+  final _chatFocus = FocusNode();
   bool _ctrl = false;
   bool _sending = false;
   bool _attaching = false;
@@ -84,9 +92,22 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _toBottom() => setState(() => _bottomTick++);
 
+  /// 터미널(0) ↔ 대화(1) 두 쪽. 손가락은 PageView 가 아니라 [_ViewSwipe] 가 받는다 —
+  /// 기본 밀기엔 각도·시작 자리 판정이 없어 비스듬히 읽어 내리다 쪽이 넘어간다.
+  late final PageController _pages = PageController(initialPage: _shownPage);
+  Drag? _drag;
+
+  /// 쪽 사이에 걸쳐 있는 동안 — 두 쪽 다 깨어 있어야 밀려 들어오는 쪽이 멈춰 보이지 않는다.
+  bool _paging = false;
+  late bool _lastCanChat = _canChat(_pane);
+
+  int get _shownPage =>
+      _canChat(_pane) && paneView.value == PaneView.chat ? 1 : 0;
+
   @override
   void initState() {
     super.initState();
+    paneView.addListener(_followView);
     BackgroundGrace.instance.addListener(_graceChanged);
     _inputFocus.onKeyEvent = _onHardwareKey;
     _session.connect();
@@ -137,10 +158,14 @@ class _TerminalScreenState extends State<TerminalScreen> {
   @override
   void dispose() {
     _stopPaneRefresh();
+    paneView.removeListener(_followView);
     BackgroundGrace.instance.removeListener(_graceChanged);
     _session.dispose();
     _input.dispose();
     _inputFocus.dispose();
+    _chatInput.dispose();
+    _chatFocus.dispose();
+    _pages.dispose();
     super.dispose();
   }
 
@@ -156,8 +181,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   /// 보낼 때 입력창의 글 전체만 읽는다 — 조합 중인 자모가 새어 나갈 길이 없다.
-  Future<void> _send() async {
-    final text = _input.text;
+  Future<void> _send(TextEditingController field, FocusNode focus) async {
+    final text = field.text;
     if (_sending || _attaching || (text.isEmpty && !_pendingAttachment)) return;
     setState(() {
       _sending = true;
@@ -166,7 +191,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     try {
       if (text.isEmpty && _pendingAttachment) {
         _session.sendText('\r');
-      } else if (_ctrl && text.length == 1) {
+      } else if (_ctrl && text.length == 1 && field == _input) {
         _session.ctrl(text);
       } else if (_pendingAttachment) {
         await _session.replyAfterAttachment(text);
@@ -174,7 +199,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         await _session.reply(text);
       }
       if (!mounted || widget.server.isClosed) return;
-      _input.clear();
+      field.clear();
       _ctrl = false;
       _pendingPhotos.clear();
     } on ServerException catch (e) {
@@ -182,7 +207,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     } finally {
       if (mounted) {
         setState(() => _sending = false);
-        _inputFocus.requestFocus();
+        focus.requestFocus();
       }
     }
   }
@@ -194,12 +219,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _bottomTick++;
   }
 
-  /// 하드웨어 키보드(아이패드) — 입력칸이 못 받는 키를 pane 으로. 대화 보기의 입력칸은
-  /// 말풍선을 쓰는 칸이라 넘기지 않는다.
+  /// 하드웨어 키보드(아이패드) — 입력칸이 못 받는 키를 pane 으로. 터미널 입력칸에만 단다 —
+  /// 대화 보기의 입력칸은 말풍선을 쓰는 칸이라 넘기지 않는다.
   KeyEventResult _onHardwareKey(FocusNode _, KeyEvent e) {
     final s = _session;
     if (e is KeyUpEvent || !s.canSend || _attaching) return KeyEventResult.ignored;
-    if (_canChat(_pane) && paneView.value == PaneView.chat) return KeyEventResult.ignored;
     final keys = HardwareKeyboard.instance;
     // Shift+Enter — 소프트 키 ⇧↵ 와 같은 줄바꿈. 칸의 글을 먼저 보내고 잇는다.
     if (_live &&
@@ -318,10 +342,97 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 대화 기록이 있는 창인가 — 셸·웹 셸엔 학생이 없어 격자만 있다.
   static bool _canChat(Pane p) => !p.isShell && !p.isWebShell;
 
-  void _showTerminal() {
-    paneView.value = PaneView.terminal;
-    const PaneViewPrefs().save(PaneView.terminal);
+  void _showTerminal() => _choose(PaneView.terminal);
+
+  /// 단추·점·「터미널로 보기」 — 고른 쪽을 기억하고, 쪽은 [_followView] 가 옮긴다.
+  void _choose(PaneView v) {
+    paneView.value = v;
+    const PaneViewPrefs().save(v);
   }
+
+  /// 쪽을 [paneView] 에 맞춘다. 밀어서 바뀐 것이면 이미 그 쪽이라 그대로 둔다. 입력칸에 초점이
+  /// 있었으면 새 쪽 입력칸으로 옮긴다 — 두 칸 다 살아 있어 자판이 내려갔다 올라오지 않는다.
+  void _followView() {
+    if (!mounted) return;
+    final want = _shownPage;
+    if (_inputFocus.hasFocus || _chatFocus.hasFocus) {
+      (want == 1 ? _chatFocus : _inputFocus).requestFocus();
+    }
+    if (!_pages.hasClients || _drag != null) return;
+    if ((_pages.page ?? want.toDouble()).round() == want) return;
+    if (Look.still(context)) {
+      _pages.jumpToPage(want);
+    } else {
+      _pages.animateToPage(
+        want,
+        duration: Look.viewFlip,
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
+  /// 밀기를 받을 자리인가. 뒤로 가기 띠에서 시작한 손가락은 뒤로 가기 몫이고, 격자 그대로
+  /// 보기는 손가락이 격자를 상하좌우로 끌어 읽으니 그 쪽에선 단추로만 바꾼다.
+  bool _swipeStarts(Offset at) {
+    if (!_canChat(_pane) || !_pages.hasClients) return false;
+    final edge = math.max(MediaQuery.paddingOf(context).left, Look.backEdge);
+    if (at.dx < edge) return false;
+    return _wrap || (_pages.page ?? 0) >= 0.5;
+  }
+
+  void _swipeStart(DragStartDetails d) =>
+      _drag = _pages.position.drag(d, () => _drag = null);
+
+  /// 놓으면 가까운 쪽으로 미끄러진다. 동작 줄이기면 미끄러지지 않고 그 자리에서 바로 —
+  /// 판정은 PageScrollPhysics 와 같다(튕긴 쪽으로 반 쪽 더 간 셈 치고 반올림).
+  void _swipeEnd(DragEndDetails d) {
+    if (!Look.still(context)) {
+      _drag?.end(d);
+      return;
+    }
+    final v = -(d.primaryVelocity ?? 0);
+    final page = (_pages.page ?? 0) + (v == 0 ? 0 : v.sign * 0.5);
+    _pages.jumpToPage(page.round().clamp(0, _canChat(_pane) ? 1 : 0));
+  }
+
+  /// 쪽이 반을 넘으면 그 쪽이 지금 보기다 — 전환 단추·입력줄·앱바 단추가 따라온다.
+  bool _onPageScroll(ScrollNotification n) {
+    if (n.depth != 0 || n.metrics.axis != Axis.horizontal) return false;
+    _afterLayout(() {
+      switch (n) {
+        case ScrollStartNotification():
+          if (!_paging) setState(() => _paging = true);
+        case ScrollUpdateNotification():
+          // 학생이 나가 대화 쪽이 사라지며 되돌아가는 것은 고른 보기를 바꾸지 않는다.
+          if (!_canChat(_pane) || !_pages.hasClients) return;
+          final v = (_pages.page ?? 0).round() >= 1
+              ? PaneView.chat
+              : PaneView.terminal;
+          if (paneView.value != v) paneView.value = v;
+        case ScrollEndNotification():
+          if (_paging) setState(() => _paging = false);
+          if (_canChat(_pane)) const PaneViewPrefs().save(paneView.value);
+        default:
+      }
+    });
+    return false;
+  }
+
+  /// 쪽 알림은 배치 중에도 온다(쪽 수가 줄어 되돌아갈 때). 그때 화면을 다시 세우면 안 되니 프레임 뒤로.
+  void _afterLayout(VoidCallback fn) {
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) fn();
+      });
+    } else {
+      fn();
+    }
+  }
+
+  Widget _page(int index, int shown, Widget child) => _KeepPage(
+    child: TickerMode(enabled: _paging || index == shown, child: child),
+  );
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
@@ -335,6 +446,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
       final slug = pane.slug;
       final canChat = _canChat(pane);
       final chat = canChat && paneView.value == PaneView.chat;
+      if (canChat != _lastCanChat) {
+        _lastCanChat = canChat;
+        WidgetsBinding.instance.addPostFrameCallback((_) => _followView());
+      }
       // 자판이 뜨면 머리·전환 줄을 앱바 한 줄로 접는다 — 글 보이는 높이가 307pt(35%)까지 줄었다.
       final typing = MediaQuery.viewInsetsOf(context).bottom > 0;
       return _StudentFrame(
@@ -432,6 +547,13 @@ class _TerminalScreenState extends State<TerminalScreen> {
             ),
             bottom: canChat && !typing ? const PaneViewSwitch() : null,
             actions: [
+              // 전환 줄을 접은 동안에도 지금 보기가 보이게.
+              if (canChat && typing)
+                _ViewDots(
+                  chat: chat,
+                  onTap: () =>
+                      _choose(chat ? PaneView.terminal : PaneView.chat),
+                ),
               // 글자 선택·접기는 격자 얘기다 — 대화 보기에선 말풍선을 꾹 눌러 복사한다.
               if (!chat) ...[
                 // 글자 선택 — 격자는 손가락으로 못 긁으니 화면 글자를 그대로 선택 상자에
@@ -458,85 +580,136 @@ class _TerminalScreenState extends State<TerminalScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                if (chat)
-                  Expanded(
-                    child: WeatherScene(
-                      child: ConversationView(
-                        server: widget.server,
-                        pane: pane,
-                        session: s,
-                        accent: accent,
-                        onTerminal: _showTerminal,
-                        bottomTick: _bottomTick,
-                      ),
-                    ),
-                  )
-                else
-                  // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
-                  // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                      child: _view(s),
-                    ),
-                  ),
-                if (s.note != null) _NoteBar(text: s.note!),
-                if (chat)
-                  ChatComposer(
-                    controller: _input,
-                    focusNode: _inputFocus,
-                    enabled:
-                        s.state != TermState.gone && !_sending && !_attaching,
-                    onSend: _send,
-                    leading: _photoButton(s, pane, chat: true),
-                    photos: _pendingPhotos,
-                    onStop: pane.isBusy && s.canSend
-                        ? () => s.sendText('\x1b')
-                        : null,
-                  )
-                else ...[
-                  Row(
-                    children: [
-                      _photoButton(s, pane),
-                      Expanded(
-                        child: AbsorbPointer(
-                          absorbing: _attaching,
-                          child: _KeyBar(
-                            session: s,
-                            ctrl: _ctrl,
-                            onCtrl: () => setState(() => _ctrl = !_ctrl),
-                            onKey: _toBottom,
-                            onSubmit: () => setState(_pendingPhotos.clear),
+                Expanded(
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: _onPageScroll,
+                    child: RawGestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      gestures: {
+                        _ViewSwipe:
+                            GestureRecognizerFactoryWithHandlers<_ViewSwipe>(
+                              () => _ViewSwipe(debugOwner: this),
+                              (r) => r
+                                ..starts = _swipeStarts
+                                ..onStart = _swipeStart
+                                ..onUpdate = (d) {
+                                  _drag?.update(d);
+                                }
+                                ..onEnd = _swipeEnd
+                                ..onCancel = () {
+                                  _drag?.cancel();
+                                },
+                            ),
+                      },
+                      child: PageView(
+                        controller: _pages,
+                        physics: const NeverScrollableScrollPhysics(),
+                        children: [
+                          // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
+                          // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
+                          _page(
+                            0,
+                            chat ? 1 : 0,
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                              child: _view(s),
+                            ),
                           ),
-                        ),
+                          if (canChat)
+                            _page(
+                              1,
+                              chat ? 1 : 0,
+                              WeatherScene(
+                                child: ConversationView(
+                                  server: widget.server,
+                                  pane: pane,
+                                  session: s,
+                                  accent: accent,
+                                  onTerminal: _showTerminal,
+                                  bottomTick: _bottomTick,
+                                  active: _paging || chat,
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                  if (_live)
-                    _LiveBar(
-                      controller: _input,
-                      focusNode: _inputFocus,
-                      enabled: s.state != TermState.gone && !_attaching,
-                      onChanged: _onLiveChanged,
-                      onSubmit: _liveSubmit,
-                      onDraft: _toggleLive,
-                    )
-                  else
-                    _ReplyBar(
-                      controller: _input,
-                      focusNode: _inputFocus,
+                ),
+                if (s.note != null) _NoteBar(text: s.note!),
+                // 두 입력줄을 다 살려 두고 지금 쪽 것만 보인다 — 쓰던 글·초점이 쪽을 바꿔도 남는다.
+                Offstage(
+                  offstage: chat,
+                  child: _terminalComposer(s, pane, autofocus: !chat),
+                ),
+                if (canChat)
+                  Offstage(
+                    offstage: !chat,
+                    child: ChatComposer(
+                      controller: _chatInput,
+                      focusNode: _chatFocus,
                       enabled:
                           s.state != TermState.gone && !_sending && !_attaching,
-                      onSend: _send,
-                      onLive: _toggleLive,
+                      onSend: () => _send(_chatInput, _chatFocus),
+                      leading: _photoButton(s, pane, chat: true),
+                      // 숨은 동안은 미리보기를 풀지 않는다 — 보이는 순간 다시 그린다.
+                      photos: chat ? _pendingPhotos : const [],
+                      onStop: pane.isBusy && s.canSend
+                          ? () => s.sendText('\x1b')
+                          : null,
                     ),
-                ],
+                  ),
               ],
             ),
           ),
         ),
       );
     },
+  );
+
+  Widget _terminalComposer(
+    TermSession s,
+    Pane pane, {
+    required bool autofocus,
+  }) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Row(
+        children: [
+          _photoButton(s, pane),
+          Expanded(
+            child: AbsorbPointer(
+              absorbing: _attaching,
+              child: _KeyBar(
+                session: s,
+                ctrl: _ctrl,
+                onCtrl: () => setState(() => _ctrl = !_ctrl),
+                onKey: _toBottom,
+                onSubmit: () => setState(_pendingPhotos.clear),
+              ),
+            ),
+          ),
+        ],
+      ),
+      if (_live)
+        _LiveBar(
+          controller: _input,
+          focusNode: _inputFocus,
+          enabled: s.state != TermState.gone && !_attaching,
+          autofocus: autofocus,
+          onChanged: _onLiveChanged,
+          onSubmit: _liveSubmit,
+          onDraft: _toggleLive,
+        )
+      else
+        _ReplyBar(
+          controller: _input,
+          focusNode: _inputFocus,
+          enabled: s.state != TermState.gone && !_sending && !_attaching,
+          onSend: () => _send(_input, _inputFocus),
+          onLive: _toggleLive,
+        ),
+    ],
   );
 
   Widget _photoButton(TermSession s, Pane pane, {bool chat = false}) => PhotoAttachmentButton(
@@ -662,6 +835,115 @@ class _TerminalScreenState extends State<TerminalScreen> {
       version: s.grid.version,
       palette: palette,
       composing: _live ? _composing : null,
+    );
+  }
+}
+
+/// 터미널 ↔ 대화 밀기의 손가락 판정(design.md 「터미널 ↔ 대화 밀기」).
+///
+/// - 가로가 세로의 [Look.swipeRatio] 배 이상일 때만 받는다. 세로 스크롤은 세로 18 에서 곧바로
+///   받으니 그보다 비스듬한 밀기는 읽기 스크롤로 간다.
+/// - 안쪽 가로 스크롤(코드 칸·표)은 더 깊어 먼저 판정받고 각도 조건도 없어, 밀 거리가 있으면
+///   그쪽이 이긴다. 내용이 칸에 다 들어가 밀 거리가 없으면 쪽 넘김이 받는다.
+/// - [starts] 가 거절한 자리(뒤로 가기 띠 등)에서 시작한 손가락은 아예 보지 않는다.
+class _ViewSwipe extends HorizontalDragGestureRecognizer {
+  // 다른 손이 없으면 손을 뗄 때 경기장이 남은 우리에게 이김을 넘긴다 — 문턱을 못 넘은
+  // 비스듬한 밀기가 그때 튕김으로 쪽을 넘기지 않게, 문턱을 넘은 밀기만 끈다.
+  _ViewSwipe({super.debugOwner}) {
+    onlyAcceptDragOnThreshold = true;
+  }
+
+  bool Function(Offset global) starts = _anywhere;
+  static bool _anywhere(Offset _) => true;
+  Offset _moved = Offset.zero;
+
+  @override
+  bool isPointerAllowed(PointerEvent event) =>
+      starts(event.position) && super.isPointerAllowed(event);
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _moved = Offset.zero;
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void addAllowedPointerPanZoom(PointerPanZoomStartEvent event) {
+    _moved = Offset.zero;
+    super.addAllowedPointerPanZoom(event);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent) _moved += event.delta;
+    if (event is PointerPanZoomUpdateEvent) _moved = event.pan;
+    super.handleEvent(event);
+  }
+
+  @override
+  bool hasSufficientGlobalDistanceToAccept(
+    PointerDeviceKind pointerDeviceKind,
+    double? deviceTouchSlop,
+  ) =>
+      super.hasSufficientGlobalDistanceToAccept(
+        pointerDeviceKind,
+        deviceTouchSlop,
+      ) &&
+      _moved.dx.abs() >= _moved.dy.abs() * Look.swipeRatio;
+}
+
+/// 밀어 둔 쪽도 그대로 — 대화를 다시 받거나 터미널 스크롤이 맨 아래로 돌아가지 않게.
+class _KeepPage extends StatefulWidget {
+  const _KeepPage({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_KeepPage> createState() => _KeepPageState();
+}
+
+class _KeepPageState extends State<_KeepPage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
+/// 자판이 떠 전환 줄을 접었을 때의 지금 보기 — 왼쪽 점이 터미널, 오른쪽 점이 대화.
+/// 누르면 다른 쪽으로 간다.
+class _ViewDots extends StatelessWidget {
+  const _ViewDots({required this.chat, required this.onTap});
+
+  final bool chat;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    Widget dot(bool on) => Container(
+      width: Look.viewDot,
+      height: Look.viewDot,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: on ? scheme.primary : scheme.outline,
+      ),
+    );
+    return IconButton(
+      tooltip: chat ? '대화 보기 · 눌러 터미널로' : '터미널 보기 · 눌러 대화로',
+      onPressed: onTap,
+      icon: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          dot(!chat),
+          const SizedBox(width: Look.viewDotGap),
+          dot(chat),
+        ],
+      ),
     );
   }
 }
@@ -853,6 +1135,7 @@ class _LiveBar extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.enabled,
+    required this.autofocus,
     required this.onChanged,
     required this.onSubmit,
     required this.onDraft,
@@ -861,6 +1144,9 @@ class _LiveBar extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool enabled;
+
+  /// 열 때 대화 쪽이면 끈다 — 숨은 칸이 초점을 잡아 자판이 뜨면 안 된다.
+  final bool autofocus;
   final ValueChanged<String> onChanged;
   final VoidCallback onSubmit;
 
@@ -884,7 +1170,7 @@ class _LiveBar extends StatelessWidget {
               controller: controller,
               focusNode: focusNode,
               enabled: enabled,
-              autofocus: true,
+              autofocus: autofocus,
               autocorrect: false,
               enableSuggestions: false,
               textCapitalization: TextCapitalization.none,

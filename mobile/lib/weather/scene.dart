@@ -73,7 +73,10 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   final _repaint = ValueNotifier<int>(0);
   final _time = ValueNotifier<double>(0);
   final _paintKey = GlobalKey();
-  late final Ticker _ticker = createTicker(_tick);
+  // 처음 쓸 때 만든다. 첫 동기화 전에 버려지는 판(쪽 넘김이 다음 쪽을 미리 한 번 짓는다)이
+  // dispose 에서 새로 만들면 이미 떨어진 TickerMode 를 찾다 터진다.
+  Ticker? _made;
+  Ticker get _ticker => _made ??= createTicker(_tick);
   ui.FragmentShader? _buttons;
   Timer? _scan;
   Duration _last = Duration.zero;
@@ -113,7 +116,7 @@ class WeatherSceneState extends State<WeatherScene> with SingleTickerProviderSta
   void dispose() {
     weather.changes.removeListener(_sync);
     _scan?.cancel();
-    _ticker.dispose();
+    _made?.dispose();
     _repaint.dispose();
     _time.dispose();
     _buttons?.dispose();
