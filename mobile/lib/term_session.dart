@@ -45,6 +45,23 @@ class TermSession extends ChangeNotifier {
   bool _direct = false;
   StreamSubscription<Object?>? _sub;
   Timer? _retry;
+
+  /// 폰 터미널 보기가 원본 격자를 쥘 크기. 열면 바로 가져간다(2026-10-05 지시 「열면 바로」) —
+  /// 데스크톱 칸이 좁으면(24×15) Claude 전체 화면은 스크롤백이 없어 폰에 보일 줄이 그뿐이라
+  /// 위쪽이 통째로 비었다. 원본 기기에서 사람이 그 칸을 만지면 서버가 되찾고 `lost` 를 알린다
+  /// (docs/webterm-handoff.md 「마지막으로 만진 쪽이 이긴다」) — 그 뒤엔 폰에서 입력할 때 다시 쥔다.
+  (int, int)? _viewSize;
+  bool _holdView = false;
+
+  /// 서버가 `viewport_latest` 를 안다 — 모르는 옛 호스트엔 크기를 안 보낸다.
+  bool _canHold = false;
+
+  /// 이 연결이 쥐겠다고 보낸 크기. 연결이 끊기면 서버가 놓아 준다.
+  (int, int)? _held;
+
+  /// 남(원본의 사람·더 늦게 만진 거울)이 가져갔다 — 폰에서 손대기 전엔 다시 안 쥔다.
+  bool _yielded = false;
+  Timer? _viewTimer;
   int _backoffSec = 1;
   bool _paused = false;
   bool _disposed = false;
@@ -121,6 +138,22 @@ class TermSession extends ChangeNotifier {
         note = null;
         _backoffSec = 1;
         _sendJson({'t': 'history', 'rows': historyAsk});
+        // 크기가 바뀔 때마다 오는 size 에는 capabilities 가 없다 — 첫 악수에서만 판정한다.
+        final caps = msg['capabilities'];
+        if (caps is Map) {
+          _canHold = caps['viewport_latest'] != null;
+          _held = null;
+          _yielded = false;
+          _syncView();
+        }
+      case 'viewport':
+        if (msg['lost'] == true) {
+          _held = null;
+          _yielded = true;
+        } else if (msg['granted'] != true && _held != null) {
+          _held = null;
+        }
+        return;
       case 'history':
         history
           ..clear()
@@ -171,7 +204,48 @@ class TermSession extends ChangeNotifier {
   void sendBytes(List<int> bytes) {
     final ch = _channel;
     if (ch == null || !canSend) return;
+    _touched();
     ch.sink.add(Uint8List.fromList(bytes));
+  }
+
+  /// 터미널 보기가 접지 않고 담을 열·줄. 키보드가 오르내리는 동안 프레임마다 바뀌므로 멈춘 뒤에 보낸다.
+  void setViewport(int cols, int rows) {
+    if (_viewSize == (cols, rows)) return;
+    _viewSize = (cols, rows);
+    _viewTimer?.cancel();
+    _viewTimer = Timer(const Duration(milliseconds: 250), _syncView);
+  }
+
+  /// 터미널 보기가 보이는 동안만 쥔다 — 대화 보기·데스크톱 격자 그대로 보기에선 놓는다.
+  set holdViewport(bool on) {
+    if (_holdView == on) return;
+    _holdView = on;
+    _syncView();
+  }
+
+  void _touched() {
+    if (!_yielded) return;
+    _yielded = false;
+    _syncView();
+  }
+
+  void _syncView() {
+    _viewTimer?.cancel();
+    _viewTimer = null;
+    if (!_canHold || _channel == null || state != TermState.connected) return;
+    final want = _holdView && !_yielded ? _viewSize : null;
+    if (want == _held) return;
+    if (want == null) {
+      _sendJson({'t': 'viewport', 'op': 'release'});
+    } else {
+      _sendJson({
+        't': 'viewport',
+        'op': _held == null ? 'acquire' : 'resize',
+        'cols': want.$1,
+        'rows': want.$2,
+      });
+    }
+    _held = want;
   }
 
   void sendText(String text) => sendBytes(utf8.encode(text));
@@ -189,6 +263,7 @@ class TermSession extends ChangeNotifier {
   /// 답장 한 줄. 학생 pane 은 서버가 Enter 타이밍을 맡는 `send` 로, 웹 셸은
   /// 그 창구가 없어 소켓으로 직접.
   Future<void> reply(String text) async {
+    _touched();
     if (pane.isWebShell) {
       sendText('$text\r');
       return;
@@ -205,6 +280,7 @@ class TermSession extends ChangeNotifier {
     if (state != TermState.connected) {
       throw const ServerException('연결이 끊겨 보내지 못했어요. 다시 연결되면 보내 주세요.');
     }
+    _touched();
     // 앞 공백 — 붙인 자리표 바로 뒤에 붙으면 `[Image #1]글` 로 한 덩이가 된다.
     sendText('\x1b[200~ ${text.replaceAll('\x1b', '')}\x1b[201~');
     await Future<void>.delayed(enterGap);
@@ -246,6 +322,9 @@ class TermSession extends ChangeNotifier {
 
   void _closeChannel() {
     _generation++;
+    _held = null;
+    _viewTimer?.cancel();
+    _viewTimer = null;
     _sub?.cancel();
     _sub = null;
     _channel?.sink.close();

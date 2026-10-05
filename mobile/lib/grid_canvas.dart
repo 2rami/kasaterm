@@ -135,17 +135,42 @@ const _fontFallback = ['TermHangul', 'TermSymbol', 'Menlo', 'Apple Symbols'];
 const _lineHeight = 1.2;
 
 class _CellMetrics {
-  _CellMetrics(this.fontSize)
-    : width = _measure(fontSize).width,
-      height = _measure(fontSize).height;
+  factory _CellMetrics(double fontSize) {
+    final cell = _measure('M', fontSize);
+    final width = cell.width;
+    final cjkScale = 2 * width / fontSize;
+    final cjk = _measure('가', fontSize * cjkScale);
+    return _CellMetrics._(
+      fontSize,
+      width,
+      cell.height,
+      cjkScale,
+      cell.computeDistanceToActualBaseline(TextBaseline.alphabetic) -
+          cjk.computeDistanceToActualBaseline(TextBaseline.alphabetic),
+    );
+  }
+
+  _CellMetrics._(
+    this.fontSize,
+    this.width,
+    this.height,
+    this.cjkScale,
+    this.cjkDy,
+  );
 
   final double fontSize;
   final double width;
   final double height;
 
-  static TextPainter _measure(double fontSize) => TextPainter(
+  /// 한글·한자·가나를 그릴 글자 크기 배율 — 그 글꼴의 1em(글자 한 벌의 폭)이 두 칸이 되게.
+  final double cjkScale;
+
+  /// 키운 글자의 바탕선을 칸 글꼴 바탕선에 맞추는 세로 이동.
+  final double cjkDy;
+
+  static TextPainter _measure(String text, double fontSize) => TextPainter(
     text: TextSpan(
-      text: 'M',
+      text: text,
       style: TextStyle(
         fontFamily: _fontFamily,
         fontFamilyFallback: _fontFallback,
@@ -157,6 +182,27 @@ class _CellMetrics {
   )..layout();
 }
 
+/// 두 칸을 한 벌로 채우는 글자 — 한글·한자·가나·전각. 데스크톱은 D2Coding 이 바탕
+/// 글꼴이라 1em 이 곧 두 칸인데, 폰은 칸이 JetBrains(0.6em)라 같은 크기의 한글이 두 칸
+/// 상자의 72% 만 차고 「유 우 카」로 벌어졌다(2026-10-05 실기). 게다가 번들 D2Coding 은
+/// Nerd Font **Mono** 판이라 진행 폭이 반(0.5em)이어서 진행 폭으로 가운데 맞추면 글자가
+/// 오른쪽으로 밀린다. 그래서 1em 을 두 칸에 맞춰 키우고 칸 왼쪽에서 그린다. 이모지·기호는
+/// 제 글꼴의 폭이 맞으니 그대로 둔다.
+bool _fillsTwoCells(int r) =>
+    (r >= 0x1100 && r <= 0x115f) ||
+    (r >= 0x2e80 && r <= 0x303e) ||
+    (r >= 0x3041 && r <= 0x33ff) ||
+    (r >= 0x3400 && r <= 0x4dbf) ||
+    (r >= 0x4e00 && r <= 0x9fff) ||
+    (r >= 0xa000 && r <= 0xa4cf) ||
+    (r >= 0xa960 && r <= 0xa97f) ||
+    (r >= 0xac00 && r <= 0xd7a3) ||
+    (r >= 0xf900 && r <= 0xfaff) ||
+    (r >= 0xfe30 && r <= 0xfe4f) ||
+    (r >= 0xff00 && r <= 0xff60) ||
+    (r >= 0xffe0 && r <= 0xffe6) ||
+    (r >= 0x20000 && r <= 0x3fffd);
+
 class _Piece {
   _Piece({
     required this.x,
@@ -165,6 +211,8 @@ class _Piece {
     required this.underline,
     required this.color,
     this.bg,
+    this.dx,
+    this.dy = 0,
   });
 
   final double x;
@@ -173,6 +221,10 @@ class _Piece {
   final bool underline;
   final Color color;
   final Color? bg;
+
+  /// 상자 안 글자 자리. null 이면 진행 폭으로 가운데에 둔다.
+  final double? dx;
+  final double dy;
 }
 
 class _RowLayout {
@@ -194,8 +246,9 @@ class _RowLayout {
       final tp = p.painter;
       if (tp == null) continue;
       // wide 글자는 두 칸 상자 가운데에 — 폴백 글꼴은 정확히 두 배 폭이 아니다.
-      final dx = tp.width < p.width ? (p.width - tp.width) / 2 : 0.0;
-      tp.paint(canvas, Offset(p.x + dx, y));
+      final dx =
+          p.dx ?? (tp.width < p.width ? (p.width - tp.width) / 2 : 0.0);
+      tp.paint(canvas, Offset(p.x + dx, y + p.dy));
       if (p.underline) {
         final uy = y + m.height - 1.5;
         canvas.drawRect(
@@ -266,6 +319,7 @@ class _RowCache {
             ? FontStyle.italic
             : FontStyle.normal,
       );
+      final cjkStyle = style.copyWith(fontSize: m.fontSize * m.cjkScale);
       final underline = run.flags & flagUnderline != 0;
       final startCol = col;
       final buffer = StringBuffer();
@@ -288,13 +342,19 @@ class _RowCache {
         final w = cellWidth(rune);
         if (w == 2) {
           flush();
+          final cjk = _fillsTwoCells(rune);
           pieces.add(
             _Piece(
               x: col * m.width,
               width: 2 * m.width,
-              painter: _painter(String.fromCharCode(rune), style),
+              painter: _painter(
+                String.fromCharCode(rune),
+                cjk ? cjkStyle : style,
+              ),
               underline: underline,
               color: fg,
+              dx: cjk ? 0 : null,
+              dy: cjk ? m.cjkDy : 0,
             ),
           );
           col += 2;
@@ -426,21 +486,17 @@ class _GridPainter extends CustomPainter {
       Rect.fromLTWH(x, y, cells * metrics.width, metrics.height),
       Paint()..color = palette.fg.withValues(alpha: 0.18),
     );
-    final tp = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          fontFamily: 'TermMono',
-          fontFamilyFallback: _fontFallback,
-          fontSize: metrics.fontSize,
-          color: palette.fg,
-          decoration: TextDecoration.underline,
-          decorationColor: palette.fg,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(canvas, Offset(x, y + (metrics.height - tp.height) / 2));
+    // 격자 글자와 같은 칸 배치로 — 한 줄로 이어 그리면 반 폭 한글이 서로 포갠다.
+    final layout = _RowCache._build(
+      [Run(text, const DefaultColor(), const DefaultColor(), flagUnderline)],
+      palette,
+      metrics,
+      0,
+    );
+    canvas.save();
+    canvas.translate(x, 0);
+    layout.paint(canvas, y, metrics);
+    canvas.restore();
     return cells;
   }
 
@@ -570,8 +626,8 @@ class _GridCanvasState extends State<GridCanvas> {
   }
 }
 
-/// 폰 폭으로 접은 화면. 데스크톱 pane 은 제 크기 그대로 두고(크기 신호를 안 보낸다)
-/// 받은 행을 이 폭의 열 수로 접는다. 세로로만 넘기고, 바닥(입력창)에 붙어 새 줄을 따라간다.
+/// 폰 폭으로 접은 화면. 받은 행을 이 폭의 열 수로 접는다. 세로로만 넘기고, 바닥(입력창)에
+/// 붙어 새 줄을 따라간다. 원본 크기를 가져갈지는 [onViewport] 를 받은 쪽(터미널 화면)이 정한다.
 class WrappedCanvas extends StatefulWidget {
   const WrappedCanvas({
     super.key,
@@ -585,10 +641,14 @@ class WrappedCanvas extends StatefulWidget {
     this.initialScroll,
     this.fontSize = 13,
     this.composing,
+    this.onViewport,
   });
 
   /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다(바로 치기).
   final String? composing;
+
+  /// 이 화면이 접지 않고 담을 열·줄 — 원본이 이 크기면 폰 폭 글꼴로 꼭 맞는다. 바뀔 때만 부른다.
+  final void Function(int cols, int rows)? onViewport;
 
   /// 살아 있는 화면. 지난 줄은 `history` 로 따로 받아 꾸밈(스피너·입력상자 판독)은
   /// 살아 있는 화면에만 건다 — 데스크톱도 화면에 보이는 격자만 판독한다.
@@ -675,6 +735,8 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
 
   late _CellMetrics _base = _CellMetrics(widget.fontSize);
   _CellMetrics? _scaled;
+  _CellMetrics? _wide;
+  (int, int)? _reported;
 
   /// 좁은 pane(42열)은 기본 글꼴이면 폰 폭의 2/3 만 쓰고 글자도 작다 — pane 열 수가 폰
   /// 열 수보다 적으면 글꼴을 키워 그 열 수가 폭을 채우게 한다(상한은 `_maxFont`). 넓은 pane 은
@@ -690,7 +752,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     if (old.fontSize != widget.fontSize) {
       _base = _CellMetrics(widget.fontSize);
       _scaled = null;
+      _wide = null;
     }
+    if (old.onViewport != widget.onViewport) _reported = null;
     if (old.bottomTick != widget.bottomTick && _scroll.hasClients) {
       final tick = widget.bottomTick;
       // Scroll notifications also rebuild AppBar, outside this subtree's build.
@@ -731,17 +795,17 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     return size.clamp(widget.fontSize, _maxFont);
   }
 
+  _CellMetrics _wideMetrics(double maxWidth) {
+    final size = _wideSize(maxWidth);
+    final cached = _wide;
+    if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
+    return _wide = _CellMetrics(size);
+  }
+
   _CellMetrics _metricsFor(double maxWidth) {
     final paneCols = widget.grid.cols;
     final fit = _fitSize(maxWidth);
-    if (fit == null) {
-      final size = _wideSize(maxWidth);
-      final cached = _scaled;
-      if (cached != null && (cached.fontSize - size).abs() < 0.01) {
-        return cached;
-      }
-      return _scaled = _CellMetrics(size);
-    }
+    if (fit == null) return _wideMetrics(maxWidth);
     var size = fit;
     final cached = _scaled;
     if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
@@ -792,8 +856,21 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
               wrapCols: cols,
             );
       final animated = live is StyledGrid && live.animated;
+      // 넓은 pane 을 접는 글꼴로 잰다 — 원본이 이 크기가 되면 [_fitSize] 가 같은 글꼴을 고른다.
+      final wide = _wideMetrics(constraints.maxWidth);
+      final viewport = constraints.hasBoundedHeight
+          ? (
+              math.max(2, (constraints.maxWidth / wide.width).floor()),
+              math.max(1, (constraints.maxHeight / wide.height).floor()),
+            )
+          : null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+        final report = widget.onViewport;
+        if (report != null && viewport != null && viewport != _reported) {
+          _reported = viewport;
+          report(viewport.$1, viewport.$2);
+        }
         _setAnimating(animated && animate);
         final want = _pendingScroll;
         if (want != null && _scroll.hasClients) {
