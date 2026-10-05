@@ -5,18 +5,25 @@ use std::time::Duration;
 use std::collections::{BTreeMap,HashSet};
 use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
 
-/// 붙여넣기가 화면에 닿았는지 보는 앞머리 길이(공백 제외). 짧은 본문은 통째로 확인된다.
+/// 붙여넣기가 화면에 닿았는지 보는 앞머리·끝머리 길이(공백 제외). 짧은 본문은 통째로 확인된다.
 const PROBE_CHARS: usize = 24;
+/// 하네스가 긴 붙여넣기를 접어 보이는 자리표시(공백을 뺀 꼴) — claude 는 800자 넘거나 줄바꿈이 셋 이상이면
+/// `[Pasted text #1 +3 lines]`, 1만 자 넘으면 가운데를 `[...Truncated text #1 +N lines...]` 로, codex 는
+/// `[Pasted Content 1234 chars]`. 좁은 칸에서는 이 표시도 두 줄로 접혀 공백을 빼고 맞춘다.
+const COLLAPSED_PASTE: [&str; 3] = ["[Pastedtext#", "[...Truncatedtext#", "[PastedContent"];
 
 const PROOF_DEADLINE: Duration = Duration::from_secs(2);
-/// 붙여넣은 글이 화면에 그려지기를 기다리는 한도. 막 뜬 claude 는 첫 붙여넣기를 160ms 안에
-/// 못 그려, 한 번만 보고 Enter 를 보류하던 자리다(2026-09-28 실측: 입력 변화 없이 echoed=false).
-const ECHO_DEADLINE: Duration = Duration::from_secs(2);
+/// 붙여넣은 글이 화면에 그려지기를 기다리는 한도. 막 뜬 claude 는 첫 붙여넣기를 늦게 그린다 — 2초만 보고
+/// Enter 를 보류하면 글은 입력창에 들어가 있는데 제출만 안 된 채 끝났다(2026-10-05 리그 실측: 새 세션 첫
+/// 붙여넣기가 0~15초 뒤에 그려졌고, 대화가 있던 칸은 0.1~0.4초). 입력이 그대로인 동안만 기다린다.
+const ECHO_DEADLINE: Duration = Duration::from_secs(15);
 const ECHO_POLL: Duration = Duration::from_millis(160);
-const PROOF_FRESHNESS: Duration = Duration::from_millis(250);
-/// 붙여넣기부터 Enter 까지 사람 입력을 붙들어 두는 한도 — 반영 기다림과 매 회차 신원 증명을 덮는다.
-/// 보통은 그보다 훨씬 먼저 `release_input` 이 푼다.
-const HOLD_FOR: Duration = Duration::from_secs(4);
+/// 증명이 끝난 뒤 GUI 가 Enter 를 판정하기까지 허용하는 시간. 칸이 많아 이벤트 고리가 바쁘면 250ms 를
+/// 넘겨 붙여넣은 글을 둔 채 보류하던 자리다(2026-10-05 「identity proof stale」 두 건). 넘으면 다시 증명한다.
+const PROOF_FRESHNESS: Duration = Duration::from_secs(1);
+/// 붙여넣기부터 Enter 까지 사람 입력을 붙들어 두는 한도 — 반영 기다림과 마지막 신원 증명을 덮는다.
+/// 이것이 먼저 풀리면 그 뒤 친 키가 본문 뒤에 붙는다. 보통은 그보다 훨씬 먼저 `release_input` 이 푼다.
+const HOLD_FOR: Duration = Duration::from_secs(20);
 const WORKERS: usize = 4;
 /// 키를 친 뒤 이만큼은 화면이 아직 못 따라왔을 수 있어 초안 표시를 믿는다. 에코는 수 ms, 이미지 붙여넣기의
 /// 첨부 표시는 1초 안팎이라 넉넉히 잡았다. 그 뒤는 화면이 정본이다 — Esc·Ctrl+C 로 비운 입력칸이 Enter 를
@@ -128,24 +135,55 @@ fn input_box_text(cells: &[Vec<GridCell>]) -> Option<String> {
     Some(cells[rows].iter().map(|row|row.iter().map(|cell|cell.ch).filter(|ch|*ch != '\0').chain(['\n']).collect::<String>()).collect())
 }
 
-#[derive(Debug,PartialEq,Eq)]
-enum CommitStep { Enter, Wait, Withhold }
-
-/// 입력이 그대로인데 글만 아직 안 그려졌으면 조금 더 본다. 누가 끼어들면 `unchanged` 가 먼저
-/// 깨지므로, 기다림이 남의 입력 위에 Enter 를 치는 일은 없다.
-fn commit_step(unchanged: bool, echoed: bool, since_paste: Option<Duration>) -> CommitStep {
-    match (unchanged,echoed) {
-        (true,true) => CommitStep::Enter,
-        (true,false) if since_paste.is_some_and(|waited|waited < ECHO_DEADLINE) => CommitStep::Wait,
-        _ => CommitStep::Withhold,
-    }
+/// 입력창에 보이는 글(`shown`)이 붙여넣은 본문인가. 앞머리·끝머리 중 하나가 보이거나 접힌 자리표시가 있으면
+/// 된다. 앞머리만 보면, 좁은 칸에서 긴 본문이 여러 줄로 접힐 때 claude 입력창이 커서 쪽 끝 몇 줄만 보여 줘
+/// 글은 다 들어갔는데 Enter 를 보류했다(2026-10-05 리그 52칸·395자 재현: 입력창에 마지막 6줄만). 붙여넣기 직후
+/// 커서는 본문 끝에 있으므로 끝머리는 늘 보인다. 어느 쪽이든 24자는 남의 글과 우연히 겹치지 않는다.
+fn paste_echoed(body: &str, shown: &str) -> bool {
+    let compact = |text: &str|text.chars().filter(|c|!c.is_whitespace()).collect::<Vec<char>>();
+    let body = compact(body);
+    if body.is_empty() { return false; }
+    let shown: String = compact(shown).into_iter().collect();
+    let head: String = body.iter().take(PROBE_CHARS).collect();
+    let tail: String = body[body.len().saturating_sub(PROBE_CHARS)..].iter().collect();
+    shown.contains(&head) || shown.contains(&tail) || COLLAPSED_PASTE.iter().any(|mark|shown.contains(mark))
 }
 
-/// 붙여넣은 뒤 잠시 두고 신원을 다시 증명해 GUI 에 Enter 판정을 맡긴다 — 반영을 기다리는 동안 되풀이된다.
-fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, mut commit: Commit) {
+/// Enter 직전 신원 증명의 상태.
+#[derive(Debug,PartialEq,Eq)]
+enum ProofState { Current, Renew, Broken }
+
+#[derive(Debug,PartialEq,Eq)]
+enum CommitStep { Enter, Wait, Prove, Withhold(&'static str) }
+
+/// 붙여넣은 뒤 한 번 볼 때의 판정. 입력이나 대상이 바뀌었으면(`blocked`) 기다리지 않고 보류한다 — 기다림이
+/// 남의 입력 위에 Enter 를 치는 일은 없다. 글이 아직 안 그려졌으면 한도까지 더 보고, 그려졌으면 신원을 새로
+/// 증명받아 그 증명이 살아 있을 때만 Enter 를 친다. 증명 일꾼이 다 찼거나 늦은 것은 다시 받는다.
+fn commit_step(blocked: Option<&'static str>, echoed: bool, proof: ProofState, since_paste: Option<Duration>) -> CommitStep {
+    if let Some(why) = blocked { return CommitStep::Withhold(why); }
+    if proof == ProofState::Broken { return CommitStep::Withhold("receiver identity no longer matches"); }
+    if echoed && proof == ProofState::Current { return CommitStep::Enter; }
+    if !since_paste.is_some_and(|waited|waited < ECHO_DEADLINE) {
+        return CommitStep::Withhold(if echoed { "identity proof not renewed in time" } else { "paste echo not seen" });
+    }
+    if echoed { CommitStep::Prove } else { CommitStep::Wait }
+}
+
+/// 증명 실패 중 다시 받으면 되는 것 — 일꾼이 다 찼거나 기한을 넘긴 것. 나머지는 대상이 바뀐 것이다.
+fn proof_transient(reason: &str) -> bool { reason.contains("occupied") || reason.contains("deadline") }
+
+/// 잠시 두고 GUI 에 Enter 판정을 맡긴다 — 반영을 기다리는 동안 되풀이된다. 신원 증명은 `prove` 일 때만 새로
+/// 받는다(글이 보인 뒤). 기다리는 매 회차마다 증명하면 일꾼 넷을 한 칸이 붙들어 다른 칸 쪽지가 밀린다.
+fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, mut commit: Commit, prove: bool) {
     std::thread::spawn(move || {
         std::thread::sleep(ECHO_POLL);
-        commit.proof = collect_proof(backend,commit.record.clone(),commit.pty.clone());
+        if prove {
+            match collect_proof(backend,commit.record.clone(),commit.pty.clone()) {
+                Ok(proof) => commit.proof = Ok(proof),
+                Err(reason) if proof_transient(&reason) => {}
+                Err(reason) => commit.proof = Err(reason),
+            }
+        }
         if proxy.send_event(UserEvent::SafeTellCommit(commit.clone())).is_err() {
             let _ = commit.pty.release_input();
             finish(&commit.record,State::Uncertain,"GUI stopped after paste; automatic retry prohibited");
@@ -536,37 +574,38 @@ impl App {
             finish(&delivery.record,State::Uncertain,"receiver disappeared after paste"); return;
         };
         let mut commit = delivery.clone(); commit.revision = revision; commit.pasted_at = Some(Instant::now());
-        schedule_commit(backend,self.proxy.clone(),commit);
+        schedule_commit(backend,self.proxy.clone(),commit,true);
     }
 
     pub(crate) fn safe_tell_commit(&mut self, commit: &Commit) {
+        let proof = match &commit.proof {
+            Ok(proof) if proof.completed.elapsed() <= PROOF_FRESHNESS => ProofState::Current,
+            Ok(_) => ProofState::Renew,
+            Err(_) => ProofState::Broken,
+        };
         // 보류 사유를 하나로 뭉치면 영수증만 보고는 무엇이 막았는지 가를 수 없다(2026-09-29 두 건).
-        let blocked = self.tell_target_change(commit)
+        let blocked = commit.proof.as_ref().ok().and_then(|proof| self.tell_target_change(commit)
             .or_else(||(commit.pty.input_revision() != commit.revision).then_some("input changed after paste"))
-            .or_else(||(!self.tell_proof_current(commit)).then_some("identity proof stale or tell expired"))
-            .or_else(||commit.proof.as_ref().ok().and_then(|proof|self.tell_ready(&commit.record,&commit.pty,proof.harness,false).err())
-                .map(Hold::reason));
-        let unchanged = blocked.is_none();
+            .or_else(||(commit.record.expires_at_ms <= kasa_socket::tell::now_ms()).then_some("tell expired"))
+            .or_else(||self.tell_ready(&commit.record,&commit.pty,proof.harness,false).err().map(Hold::reason)));
         // 입력창 안을 본다. 화면 맨 아래 30줄만 보면, 대화가 아직 없는 새 세션은 입력창이 화면
         // **위쪽**에 있어 큰 창에서 그 범위 밖이었다 — 글은 들어갔는데 에코를 못 찾아 Enter 를
         // 영영 보류했다(2026-09-28 실측: 44행 창, 입력창 9행). 입력창을 못 찾는 하네스만 옛 방식.
-        let tail = input_box_text(&live_cells(&commit.pty).0).unwrap_or_else(||commit.pty.visible_text(30));
-        let compact = |text: &str|text.chars().filter(|c|!c.is_whitespace()).collect::<String>();
-        // 붙여넣은 글이 화면에 **통째로** 보여야 한다고 요구하면, 입력창이 접히거나 긴 본문이
-        // tail 밖으로 밀린 자리에서 Enter 가 영영 안 나간다 — 글은 들어갔는데 제출만 안 된
-        // 채로 끝난다(2026-09-21 「tell 엔터 안 되는 버그」). 앞머리만 본다: 내가 쓴 글이
-        // 거기 있다는 증거로는 그것으로 충분하고, 이 길이가 남의 글과 우연히 겹치지 않는다.
-        let probe: String = compact(&commit.record.body).chars().take(PROBE_CHARS).collect();
-        let echoed = !probe.is_empty()
-            && (compact(&tail).contains(&probe) || tail.contains("[Pasted text #"));
-        match commit_step(unchanged,echoed,commit.pasted_at.map(|at|at.elapsed())) {
+        let shown = input_box_text(&live_cells(&commit.pty).0).unwrap_or_else(||commit.pty.visible_text(30));
+        let echoed = paste_echoed(&commit.record.body,&shown);
+        let step = commit_step(blocked,echoed,proof,commit.pasted_at.map(|at|at.elapsed()));
+        match step {
             CommitStep::Enter => {}
-            CommitStep::Wait if self.socket_backend.is_some() => {
-                schedule_commit(self.socket_backend.clone().unwrap(),self.proxy.clone(),commit.clone());
+            CommitStep::Wait | CommitStep::Prove if self.socket_backend.is_some() => {
+                schedule_commit(self.socket_backend.clone().unwrap(),self.proxy.clone(),commit.clone(),step == CommitStep::Prove);
                 return;
             }
             _ => {
-                let why = blocked.unwrap_or("paste echo not seen");
+                let why = match (&step,&commit.proof) {
+                    (_,Err(reason)) => format!("identity proof failed: {reason}"),
+                    (CommitStep::Withhold(why),_) => why.to_string(),
+                    _ => "receiver disappeared after paste".into(),
+                };
                 eprintln!("[tell] {} → {} Enter 보류: {why}", commit.record.message_id, commit.record.address.surface_id);
                 let _ = commit.pty.release_input();
                 finish(&commit.record,State::Uncertain,&format!("Enter withheld: {why}"));
@@ -784,16 +823,44 @@ mod tests {
     /// 부팅 줄 뒤에 사람이 친 글은 진짜 초안이라 SessionStart 가 와도 지키고, PTY 가 막 떠 아무것도
     /// 안 들어간 창(초기값 초안)도 빈 창으로 친다.
     /// 막 뜬 claude 는 붙여넣기를 늦게 그린다 — 입력이 그대로면 한도까지 기다리고, 누가 끼어들었거나
-    /// 한도를 넘으면 보류한다. 기다림이 없으면 둘째 줄이 깨진다.
+    /// 한도를 넘으면 보류한다. 기다림이 없으면 둘째 줄이 깨진다. 글이 보였는데 증명이 늦었거나 일꾼이
+    /// 찼으면(`Renew`) 다시 증명받는다 — 붙여넣은 글을 둔 채 보류하던 「stale」·「proof missing」 자리다.
     #[test]
     fn slow_paste_echo_waits_but_interference_never_does() {
+        use ProofState::{Broken,Current,Renew};
         let ms = Duration::from_millis;
-        assert_eq!(commit_step(true,true,Some(ms(160))),CommitStep::Enter);
-        assert_eq!(commit_step(true,false,Some(ms(160))),CommitStep::Wait);
-        assert_eq!(commit_step(true,false,Some(ECHO_DEADLINE)),CommitStep::Withhold);
-        assert_eq!(commit_step(false,false,Some(ms(160))),CommitStep::Withhold);
-        assert_eq!(commit_step(false,true,Some(ms(160))),CommitStep::Withhold);
-        assert_eq!(commit_step(true,false,None),CommitStep::Withhold);
+        let early = Some(ms(160));
+        assert_eq!(commit_step(None,true,Current,early),CommitStep::Enter);
+        assert_eq!(commit_step(None,false,Current,early),CommitStep::Wait);
+        assert_eq!(commit_step(None,false,Renew,Some(ms(10_000))),CommitStep::Wait, "새 세션은 수 초 늦게 그린다");
+        assert_eq!(commit_step(None,false,Current,Some(ECHO_DEADLINE)),CommitStep::Withhold("paste echo not seen"));
+        assert_eq!(commit_step(Some("input changed after paste"),false,Current,early),CommitStep::Withhold("input changed after paste"));
+        assert_eq!(commit_step(Some("input changed after paste"),true,Current,early),CommitStep::Withhold("input changed after paste"));
+        assert_eq!(commit_step(None,false,Current,None),CommitStep::Withhold("paste echo not seen"));
+        assert_eq!(commit_step(None,true,Renew,early),CommitStep::Prove, "늦은 증명은 다시 받는다");
+        assert_eq!(commit_step(None,true,Renew,Some(ECHO_DEADLINE)),CommitStep::Withhold("identity proof not renewed in time"));
+        assert!(matches!(commit_step(None,true,Broken,early),CommitStep::Withhold(_)), "신원이 바뀌었으면 기다리지 않는다");
+        assert!(proof_transient("identity proof workers are occupied") && proof_transient("identity proof deadline expired"));
+        assert!(!proof_transient("live target session, binding or PTY changed"));
+    }
+
+    /// 2026-10-05 리그(52칸) 재현 화면: 395자 한 줄 본문을 붙이자 claude 입력창이 끝쪽 6줄만 보여 줘
+    /// 앞머리가 없었다. 끝머리로 확인한다. 접힌 자리표시는 좁은 칸에서 두 줄로 갈려도 맞는다.
+    #[test]
+    fn echo_accepts_the_tail_when_a_narrow_box_scrolls_the_head_away() {
+        let filler = "검증 문장을 늘리는 채움 글입니다 — 답은 받음 한 단어. ".repeat(9);
+        let body = format!("⟦아즈사⟧ 폰 터미널 세로 스크롤 맡은 아즈사다. 원인: Claude 전체 화면은 alt 화면+마우스(SGR) 모드라 {filler}");
+        let shown = "❯ 검증 문장을 늘리는 채움 글입니다 — 답은 받음 한\n  단어. 검증 문장을 늘리는 채움 글입니다 — 답은\n\
+                     받음 한 단어. 검증 문장을 늘리는 채움 글입니다 —\n  답은 받음 한 단어. 검증 문장을 늘리는 채움\n\
+                     글입니다 — 답은 받음 한 단어. 검증 문장을 늘리는\n  채움 글입니다 — 답은 받음 한 단어.\n";
+        assert!(paste_echoed(&body,shown));
+        assert!(paste_echoed(&body,&format!("❯ {}\n",&body.chars().take(40).collect::<String>())), "앞머리만 보여도 된다");
+        assert!(!paste_echoed(&body,"❯ 남이 쓰던 초안 한 줄\n"));
+        assert!(!paste_echoed(&body,"❯ Try \"how do I log an error?\"\n"), "빈 입력창의 예시 문구는 에코가 아니다");
+        assert!(paste_echoed("a\nb\nc\nd","❯ [Pasted text #1 +3\n  lines]\n"));
+        assert!(paste_echoed("long","› [Pasted Content 1204 chars]\n"));
+        assert!(paste_echoed("long","❯ head [...Truncated text #2 +80 lines...] tail\n"));
+        assert!(!paste_echoed("","❯ \n"));
     }
 
     /// 새 세션 화면: 입력창이 맨 위에 있고 아래 40줄이 비었다 — 바닥 30줄만 보던 에코 확인이

@@ -99,7 +99,26 @@ without reason words still get the notices, with a generic cause.
 A guarded
 input revision detects intervening writes between paste and Enter. Input is never
 cleared; `--force` cannot bypass the checks. A delayed Enter also rechecks the
-session, receiver process and prompt. Claude identity must match the live command's
+session, receiver process and prompt.
+
+Enter follows a paste only once the paste is seen inside the input box: the first or
+the last 24 non-whitespace characters of the body, or a harness's collapsed-paste
+marker (`[Pasted text #`, `[...Truncated text #`, Codex `[Pasted Content`), compared
+with whitespace removed so wrapping cannot split them. The tail matters in narrow
+panes: Claude shows only the last lines of a long input, around the cursor, so a
+395-character body in a 52-column pane had its head scrolled out of view and a
+head-only check withheld Enter with the whole body sitting in the box (2026-10-05:
+21 of 35 receipts on one machine were withheld, and each leftover body then held the
+next message as `waiting:draft`). While the input revision is unchanged the receiver
+waits up to 15 s for the echo, because a freshly started Claude drew its first paste
+0–15 s late (an idle pane with history draws it in 0.1–0.4 s); a person's keystrokes
+for that pane are held meanwhile and replayed in order afterwards. The identity is
+proven again once the echo is seen. A proof that is late (older than 1 s when the GUI
+judges it) or that found the proof workers busy is renewed instead of withholding the
+pasted body; a changed identity, changed input, approval screen or expiry still
+withholds at once.
+
+Claude identity must match the live command's
 full session UUID. Codex must expose exactly one matching root rollout through
 its current open files; ambiguous or unavailable evidence defers no guess.
 The receiver holds an exclusive storage lock to prevent another process from
