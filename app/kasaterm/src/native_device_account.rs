@@ -18,6 +18,8 @@ pub(crate) enum Action {
     Logout,
     OAuth(Provider),
     Linked,
+    /// A settings link that also brought the provider's work permissions (Gmail·PR).
+    Connected { linked: bool, install: bool },
     CancelOAuth,
     /// The provider signed in an identity no account has yet; the person picks one.
     Choose,
@@ -119,7 +121,8 @@ impl State {
     /// unlinked sign-in waiting for the account choice. Holds no gateway capability.
     pub(crate) fn fixture(&mut self, choice: bool, claim: bool) {
         self.providers = serde_json::json!({"state":"ready","providers":[
-            {"id":"google","enabled":true},{"id":"github","enabled":true}]});
+            {"id":"google","enabled":true},{"id":"github","enabled":true}],
+            "connect":{"google":true,"github":true}});
         self.provider_check = None;
         self.provider_checked = Some(std::time::Instant::now());
         self.choice = choice.then(|| Choice {
@@ -201,6 +204,16 @@ impl State {
             }
             Ok(Action::Linked) => {
                 self.message = Some(("이 KASA 계정에 로그인 방법을 연결했어요".into(), false))
+            }
+            Ok(Action::Connected { linked, install }) => {
+                self.work.refresh_now();
+                let text = match (linked, install) {
+                    (true, true) => "로그인과 일 권한을 연결했어요. 열린 GitHub 화면에서 PR 올릴 레포를 골라 주세요",
+                    (true, false) => "로그인과 일 권한을 연결했어요",
+                    (false, true) => "일 권한을 연결했어요. 이 GitHub 은 다른 KASA 계정의 로그인이라 로그인은 그대로예요. 열린 GitHub 화면에서 레포를 골라 주세요",
+                    (false, false) => "일 권한을 연결했어요. 이 계정은 다른 KASA 계정의 로그인이라 로그인은 그대로예요",
+                };
+                self.message = Some((text.into(), false));
             }
             Ok(Action::CancelOAuth) => self.message = Some(("로그인을 취소했어요".into(), false)),
             Ok(Action::CancelChoice) => self.choice = None,
@@ -320,7 +333,7 @@ impl App {
                     let _ = tx.send(result);
                 });
             }
-            Action::Linked | Action::CancelOAuth | Action::Work(_) => {}
+            Action::Linked | Action::Connected { .. } | Action::CancelOAuth | Action::Work(_) => {}
             Action::OpenClaim => {
                 if let Some(choice) = self.device_account.choice.as_mut() {
                     choice.claim = true;
@@ -646,12 +659,18 @@ fn provider_buttons(
         };
         info_slab(g, x, y, w, hint);
     } else if linked {
+        let work = |provider: &str| v.providers["connect"][provider] == true;
         info_slab(
             g,
             x,
             y,
             w,
-            "현재 KASA 계정에 로그인 방법을 연결합니다. 다른 계정과 자동으로 합치지 않습니다.",
+            match (work("google"), work("github")) {
+                (true, true) => "현재 KASA 계정에 로그인 방법을 연결하고, 같은 허용으로 Gmail 읽기·보내기와 GitHub PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
+                (true, false) => "현재 KASA 계정에 로그인 방법을 연결하고, Google 은 같은 허용으로 Gmail 읽기·보내기 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
+                (false, true) => "현재 KASA 계정에 로그인 방법을 연결하고, GitHub 은 같은 허용으로 PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
+                (false, false) => "현재 KASA 계정에 로그인 방법을 연결합니다. 다른 계정과 자동으로 합치지 않습니다.",
+            },
         );
     }
     ready
@@ -810,7 +829,9 @@ fn run_oauth(
     let call = |params| {
         kasa_mcp::device_auth::handle(&params).map_err(|error| safe_error(&error.to_string()))
     };
-    let started = call(serde_json::json!({"op":"oauth_start","provider":provider,"link":link}))?;
+    // 로그인된 기기에서 연결하면 같은 동의로 그 공급자의 일 권한(Gmail·PR)까지 붙인다.
+    let started =
+        call(serde_json::json!({"op":"oauth_start","provider":provider,"link":link,"work":link}))?;
     let flow_id = started["flow_id"]
         .as_str()
         .ok_or_else(|| safe_error("oauth_unavailable"))?;
@@ -830,6 +851,16 @@ fn run_oauth(
         match response {
             Ok(value) if value["status"] == "complete" => return Ok(Action::Login),
             Ok(value) if value["status"] == "linked" => return Ok(Action::Linked),
+            Ok(value) if value["status"] == "connected" => {
+                let install = value["install_url"].as_str();
+                if let Some(url) = install {
+                    crate::chrome::open_url_in_browser(url);
+                }
+                return Ok(Action::Connected {
+                    linked: value["linked"] == true,
+                    install: install.is_some(),
+                });
+            }
             Ok(value) if value["status"] == "choose" => {
                 let _ = choice_tx.send(Choice {
                     flow_id: flow_id.to_string(),

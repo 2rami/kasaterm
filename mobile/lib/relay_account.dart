@@ -124,6 +124,12 @@ enum OAuthProvider {
   final String label;
 }
 
+/// 연결 한 번에 함께 붙는 그 공급자의 일 권한.
+List<String> workFeatures(OAuthProvider provider) => switch (provider) {
+  OAuthProvider.google => const ['mail.read', 'mail.send'],
+  OAuthProvider.github => const ['github.pr'],
+};
+
 /// 관문이 로그인 결과(일회용 code)를 돌려보내는 이 앱의 주소. iOS 는 ASWebAuthenticationSession 이 이 스킴을 가로챈다.
 const oauthRedirectScheme = 'kasaterm';
 const oauthRedirectUri = '$oauthRedirectScheme://oauth';
@@ -194,13 +200,16 @@ class OAuthChoice {
 }
 
 /// 기다리는 중이면 모두 null, 로그인이면 [session], 연결이면 [linked], 계정을 골라야 하면 [choice],
-/// 일 권한(Gmail·GitHub)을 붙였으면 [connected].
+/// 일 권한(Gmail·GitHub)을 붙였으면 [connected]. 일 권한과 함께 로그인도 이 계정에 붙었으면 [linked] 도 참이다.
 class OAuthResult {
-  const OAuthResult({this.session, this.linked = false, this.choice, this.connected = false});
+  const OAuthResult({this.session, this.linked = false, this.choice, this.connected = false, this.installUrl});
   final AccountSession? session;
   final bool linked;
   final OAuthChoice? choice;
   final bool connected;
+
+  /// GitHub 앱이 아직 어느 레포에도 설치되지 않았을 때 열 설치 화면. 관문의 GitHub 앱 주소만 받는다.
+  final Uri? installUrl;
   bool get pending => session == null && !linked && choice == null && !connected;
 }
 
@@ -261,8 +270,17 @@ String workError(String? code, int status) => switch (code) {
 };
 
 class OAuthProviders {
-  const OAuthProviders(this.enabled, {this.signup = false, this.redirect = false, this.choose = false});
+  const OAuthProviders(
+    this.enabled, {
+    this.signup = false,
+    this.redirect = false,
+    this.choose = false,
+    this.connect = const {},
+  });
   final List<OAuthProvider> enabled;
+
+  /// 연결할 때 일 권한(Gmail·GitHub PR)까지 함께 붙일 수 있는 공급자 id.
+  final Set<String> connect;
 
   /// 처음 보는 Google·GitHub 신원으로 새 계정을 만드는 서버인가.
   final bool signup;
@@ -457,6 +475,11 @@ class RelayAccountApi {
         signup: json['signup_enabled'] == true,
         redirect: json['redirect_login'] == true,
         choose: json['choose_account'] == true,
+        connect: {
+          if (json['connect'] case final Map<String, dynamic> c)
+            for (final p in OAuthProvider.values)
+              if (c[p.id] == true) p.id,
+        },
       );
     } on AccountException {
       return const OAuthProviders([]);
@@ -468,16 +491,23 @@ class RelayAccountApi {
   ///
   /// [connect] 를 주면(`mail.read`·`mail.send`·`github.pr`) 로그인 대신 지금 계정에 일 권한을 붙인다 — 공급자 토큰이
   /// 이 기기 verifier 로만 넘어가게 앱 리다이렉트가 있어야 한다.
+  ///
+  /// [work] 면 연결([link])할 때 관문이 받을 수 있는 한 그 공급자의 일 권한도 같은 허용으로 붙인다.
+  /// 옛 관문·준비 안 된 공급자는 로그인 연결만 한다.
   Future<OAuthFlow> oauthStart(
     OAuthProvider provider,
     String machineId, {
     bool link = false,
     bool redirect = false,
     List<String> connect = const [],
+    bool work = false,
   }) async {
     if (connect.isNotEmpty) link = true;
     final can = redirect || !link ? await oauthProviders() : const OAuthProviders([]);
     final r = redirect && can.redirect ? OAuthRedirect.create() : null;
+    if (link && work && connect.isEmpty && r != null && can.connect.contains(provider.id)) {
+      connect = workFeatures(provider);
+    }
     if (connect.isNotEmpty && r == null) {
       throw const AccountException('이 서버나 기기는 연결 창을 열 수 없어요. 관문·앱 업데이트가 필요해요.');
     }
@@ -572,7 +602,14 @@ class RelayAccountApi {
       case 'linked':
         return const OAuthResult(linked: true);
       case 'connected':
-        return const OAuthResult(connected: true);
+        final install = Uri.tryParse('${json['install_url'] ?? ''}');
+        // 관문 자신의 GitHub 앱 설치 화면만 연다.
+        final github = install != null && install.isScheme('https') && install.host == 'github.com';
+        return OAuthResult(
+          connected: true,
+          linked: json['linked'] == true,
+          installUrl: github && install.path.startsWith('/apps/') ? install : null,
+        );
       case 'choose':
         final (ticket, provider, display) = (json['ticket'], json['provider'], json['display']);
         final which = OAuthProvider.values.where((p) => p.id == provider).firstOrNull;

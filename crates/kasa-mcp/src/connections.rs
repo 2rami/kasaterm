@@ -892,6 +892,21 @@ impl Service {
         }
     }
 
+    /// Whether the GitHub App is installed on any account or repo this user can reach, so the app
+    /// can open the install page right after connecting. `None` when GitHub did not answer.
+    pub async fn github_installed(&self, access_token: &str) -> Option<bool> {
+        let response = self
+            .http
+            .get(format!("{}/user/installations?per_page=1", self.endpoints.github_api))
+            .bearer_auth(access_token)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .ok()
+            .filter(|response| response.status().is_success())?;
+        Some(bounded(response).await.ok()?["total_count"].as_u64()? > 0)
+    }
+
     pub fn github_install_url(&self) -> Option<String> {
         self.config
             .github_app_slug()

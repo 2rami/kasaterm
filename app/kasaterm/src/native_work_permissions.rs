@@ -9,10 +9,7 @@ const MAX_SHOWN_LINES: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Act {
-    ConnectMail,
-    ConnectGithub,
     InstallGithub,
-    CancelConnect,
     AskDisconnect(usize),
     Disconnect,
     KeepConnection,
@@ -34,7 +31,6 @@ pub(crate) struct State {
     fetched: Option<std::time::Instant>,
     fetch: Option<Receiver<Done>>,
     busy: Option<Receiver<Done>>,
-    connect_cancel: Option<Arc<AtomicBool>>,
     /// (id, digest) of the pending write the person opened. Approval acts on exactly this.
     open: Option<(String, String)>,
     disconnect: Option<String>,
@@ -51,7 +47,6 @@ pub(crate) struct View {
     open: Option<String>,
     disconnect: Option<String>,
     busy: bool,
-    connecting: bool,
     message: Option<(String, bool)>,
 }
 
@@ -89,7 +84,6 @@ impl State {
             open: self.open.as_ref().map(|(id, _)| id.clone()),
             disconnect: self.disconnect.clone(),
             busy: self.busy.is_some(),
-            connecting: self.connect_cancel.is_some(),
             message: self.message.clone(),
         }
     }
@@ -158,7 +152,6 @@ impl State {
         }
         if let Some(Ok(Done::Acted(result))) = self.busy.as_ref().map(Receiver::try_recv) {
             self.busy = None;
-            self.connect_cancel = None;
             changed = true;
             match result {
                 Ok(message) => {
@@ -192,12 +185,12 @@ impl State {
     }
 
     pub(crate) fn hide(&mut self) {
-        if let Some(cancel) = self.connect_cancel.take() {
-            if !cancel.swap(true, Ordering::AcqRel) {
-                kasa_mcp::device_auth::cancel_oauth();
-            }
-        }
         self.disconnect = None;
+    }
+
+    /// A new connection was just made from the account page; show it without waiting a minute.
+    pub(crate) fn refresh_now(&mut self) {
+        self.refresh_due(true, true);
     }
 
     fn run(&mut self, work: impl FnOnce() -> Result<String, String> + Send + 'static) {
@@ -289,28 +282,6 @@ fn detail(pending: &serde_json::Value) -> Vec<(String, String)> {
     rows
 }
 
-fn connect(provider: Provider, features: &[&str], cancelled: &AtomicBool) -> Result<String, String> {
-    let call = |params| kasa_mcp::device_auth::handle(&params).map_err(|error| error.to_string());
-    let started = call(serde_json::json!({"op":"oauth_start","provider":provider,"connect":features}))?;
-    let flow = started["flow_id"].as_str().ok_or("oauth_unavailable")?.to_string();
-    if !cancelled.load(Ordering::Acquire) {
-        crate::chrome::open_url_in_browser(started["authorization_url"].as_str().ok_or("oauth_unavailable")?);
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-    while !cancelled.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-        match call(serde_json::json!({"op":"oauth_poll","flow_id":flow})) {
-            Ok(value) if value["status"] == "connected" => {
-                let display = value["connection"]["display"].as_str().unwrap_or("");
-                return Ok(format!("{display} 를 연결했어요"));
-            }
-            Err(error) => return Err(error),
-            _ => std::thread::sleep(std::time::Duration::from_secs(1)),
-        }
-    }
-    let _ = call(serde_json::json!({"op":"oauth_cancel","flow_id":flow}));
-    Err("cancelled".into())
-}
-
 impl App {
     /// Background list refresh, notifications for new pending writes, and finished actions.
     pub(crate) fn work_permissions_poll(&mut self) {
@@ -337,28 +308,11 @@ impl App {
 
     pub(crate) fn work_permissions_action(&mut self, act: Act) {
         let work = &mut self.device_account.work;
-        if work.busy.is_some() && act != Act::CancelConnect {
+        if work.busy.is_some() {
             return;
         }
         work.message = None;
         match act {
-            Act::ConnectMail | Act::ConnectGithub => {
-                let (provider, features): (Provider, &'static [&'static str]) = if act == Act::ConnectMail {
-                    (Provider::Google, &["mail.read", "mail.send"])
-                } else {
-                    (Provider::Github, &["github.pr"])
-                };
-                let cancel = Arc::new(AtomicBool::new(false));
-                work.connect_cancel = Some(cancel.clone());
-                work.run(move || connect(provider, features, &cancel));
-            }
-            Act::CancelConnect => {
-                if let Some(cancel) = &work.connect_cancel {
-                    if !cancel.swap(true, Ordering::AcqRel) {
-                        kasa_mcp::device_auth::cancel_oauth();
-                    }
-                }
-            }
             Act::InstallGithub => {
                 if let Some(url) = work.data["github_install_url"].as_str() {
                     crate::chrome::open_url_in_browser(url);
@@ -489,49 +443,27 @@ pub(crate) fn paint(
         *y += ROW_H;
     }
     let available = |provider: &str| v.data["available"][provider] == true;
-    if v.connecting {
-        draw_text(g, x, *y + 4.0, "브라우저에서 허용을 마쳐 주세요", 12.0, theme::text_dim(), false);
-        *y += 22.0;
-        button(g, s, hits, (x, *y, 120.0_f32.min(w), CTL_H), "연결 취소", act(Act::CancelConnect), false);
-        *y += ROW_H;
-    } else {
-        let width = ((w - 8.0) / 2.0).max(0.0);
-        for (index, (label, a, provider)) in [
-            ("Gmail 연결", Act::ConnectMail, "google"),
-            ("GitHub 연결", Act::ConnectGithub, "github"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let rect = (x + index as f32 * (width + 8.0), *y, width, CTL_H);
-            if available(provider) && !v.busy {
-                button(g, s, hits, rect, label, act(a), false);
-            } else {
-                crate::native_controls::text_button(
-                    g,
-                    rect,
-                    s.cursor,
-                    label,
-                    crate::native_controls::Style { enabled: false, ..Default::default() },
-                );
-            }
-        }
-        *y += ROW_H;
-    }
     if v.data.is_null() {
         info_slab(g, x, y, w, "연결 목록을 받는 중…");
     } else if !available("google") && !available("github") {
         info_slab(g, x, y, w, "관문에 Gmail·GitHub 연결이 아직 준비되지 않았어요.");
     } else {
+        // 따로 붙이는 단추는 없다 — 위 「Google·GitHub 연결」 한 번이 로그인과 일 권한을 함께 붙인다.
         info_slab(
             g,
             x,
             y,
             w,
-            "학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로, 메일 보내기·PR 만들기는 아래에서 승인해야 나가요.",
+            if connections.is_empty() {
+                "위 「Google 연결」·「GitHub 연결」을 누르면 로그인과 함께 Gmail 읽기·보내기, GitHub PR 권한이 붙어요."
+            } else if connections.iter().any(|c| c["state"] == "reconnect_required") {
+                "「다시 연결 필요」는 위 「Google 연결」·「GitHub 연결」을 한 번 더 누르면 돼요."
+            } else {
+                "학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로, 메일 보내기·PR 만들기는 아래에서 승인해야 나가요."
+            },
         );
         if connections.iter().any(|c| c["provider"] == "github") && v.data["github_install_url"].is_string() {
-            button(g, s, hits, (x, *y, 150.0_f32.min(w), CTL_H), "GitHub 앱 설치", act(Act::InstallGithub), false);
+            button(g, s, hits, (x, *y, 150.0_f32.min(w), CTL_H), "PR 올릴 레포 고르기", act(Act::InstallGithub), false);
             *y += ROW_H;
         }
     }

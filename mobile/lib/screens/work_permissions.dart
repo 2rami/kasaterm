@@ -9,7 +9,6 @@ import '../look.dart';
 import '../relay_account.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
-import 'oauth_sheet.dart';
 
 /// 이 앱 실행 동안만 메모리에 있는 승인 열쇠. 키체인에도 디스크에도 두지 않는다 — 같은 계정의 다른 프로그램이
 /// 정해진 길로는 승인을 흉내 내지 못하게(docs/account-connections.md 「쓰기는 사람 확인을 거친다」).
@@ -22,18 +21,9 @@ final String _approver = () {
 
 /// 계정에 붙인 Gmail·GitHub 과, 학생·나쵸가 낸 메일·PR 이 사람 승인을 기다리는 목록.
 class WorkPermissionsScreen extends StatefulWidget {
-  const WorkPermissionsScreen({
-    super.key,
-    required this.api,
-    required this.installId,
-    this.authenticate,
-  });
+  const WorkPermissionsScreen({super.key, required this.api});
 
   final RelayAccountApi Function() api;
-  final Future<String> Function() installId;
-
-  /// 검사용 — 시스템 로그인 창 대신.
-  final WebAuthenticate? authenticate;
 
   @override
   State<WorkPermissionsScreen> createState() => _WorkPermissionsScreenState();
@@ -76,36 +66,6 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
   void _say(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-  }
-
-  Future<void> _connect(
-    OAuthProvider provider,
-    List<String> features,
-    String title,
-  ) async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    final api = widget.api();
-    try {
-      final id = await widget.installId();
-      if (!mounted) return;
-      final r = await showOAuthSheet(
-        context,
-        api: api,
-        provider: provider,
-        machineId: id,
-        connect: features,
-        title: title,
-        authenticate: widget.authenticate,
-      );
-      if (r?.connected == true) _say('$title 했어요.');
-    } on AccountException catch (e) {
-      _say(e.message);
-    } finally {
-      api.close();
-      if (mounted) setState(() => _busy = false);
-      await _reload();
-    }
   }
 
   Future<void> _disconnect(Map<String, dynamic> connection) async {
@@ -230,79 +190,51 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
                         ),
                     ],
                   ),
-                SettingsGroup(
-                  title: '연결',
-                  children: [
-                    for (final c in list.connections)
-                      SettingsRow(
-                        key: Key('connection-${c['id']}'),
-                        icon: c['provider'] == 'github'
-                            ? Icons.code_rounded
-                            : Icons.mail_outline_rounded,
-                        title:
-                            '${c['provider'] == 'github' ? 'GitHub' : 'Gmail'} · ${c['display'] ?? ''}',
-                        subtitle: c['state'] == 'reconnect_required'
-                            ? '다시 연결 필요'
-                            : featureLabel(c['features']),
-                        trailing: TextButton(
-                          onPressed: _busy
-                              ? null
-                              : () => unawaited(_disconnect(c)),
-                          child: const Text('끊기'),
+                if (list.connections.isNotEmpty)
+                  SettingsGroup(
+                    title: '연결',
+                    children: [
+                      for (final c in list.connections)
+                        SettingsRow(
+                          key: Key('connection-${c['id']}'),
+                          icon: c['provider'] == 'github'
+                              ? Icons.code_rounded
+                              : Icons.mail_outline_rounded,
+                          title:
+                              '${c['provider'] == 'github' ? 'GitHub' : 'Gmail'} · ${c['display'] ?? ''}',
+                          subtitle: c['state'] == 'reconnect_required'
+                              ? '다시 연결 필요'
+                              : featureLabel(c['features']),
+                          trailing: TextButton(
+                            onPressed: _busy
+                                ? null
+                                : () => unawaited(_disconnect(c)),
+                            child: const Text('끊기'),
+                          ),
                         ),
-                      ),
-                    SettingsRow(
-                      key: const Key('connect-mail'),
-                      icon: Icons.add_rounded,
-                      title: 'Gmail 연결',
-                      subtitle: list.mail
-                          ? '메일 읽기와 보내기 요청 · 보내기는 늘 승인 뒤'
-                          : '관문에 아직 준비되지 않았어요',
-                      chevron: list.mail,
-                      onTap: list.mail && !_busy
-                          ? () => unawaited(
-                              _connect(OAuthProvider.google, const [
-                                'mail.read',
-                                'mail.send',
-                              ], 'Gmail 연결'),
-                            )
-                          : null,
-                    ),
-                    SettingsRow(
-                      key: const Key('connect-github'),
-                      icon: Icons.add_rounded,
-                      title: 'GitHub 연결',
-                      subtitle: list.github
-                          ? 'PR 만들기 요청 · 만들기는 늘 승인 뒤'
-                          : '관문에 아직 준비되지 않았어요',
-                      chevron: list.github,
-                      onTap: list.github && !_busy
-                          ? () => unawaited(
-                              _connect(OAuthProvider.github, const [
-                                'github.pr',
-                              ], 'GitHub 연결'),
-                            )
-                          : null,
-                    ),
-                    if (list.installUrl case final url?
-                        when list.connections.any(
-                          (c) => c['provider'] == 'github',
-                        ))
-                      SettingsRow(
-                        icon: Icons.open_in_new_rounded,
-                        title: 'GitHub 앱 설치',
-                        subtitle: 'PR 을 올릴 레포를 고르세요',
-                        chevron: true,
-                        onTap: () => unawaited(
-                          launchUrl(url, mode: LaunchMode.externalApplication),
+                      if (list.installUrl case final url?
+                          when list.connections.any(
+                            (c) => c['provider'] == 'github',
+                          ))
+                        SettingsRow(
+                          icon: Icons.open_in_new_rounded,
+                          title: 'PR 올릴 레포 고르기',
+                          subtitle: 'GitHub 앱을 둔 레포를 더하거나 빼요',
+                          chevron: true,
+                          onTap: () => unawaited(
+                            launchUrl(url, mode: LaunchMode.externalApplication),
+                          ),
                         ),
-                      ),
-                  ],
-                ),
+                    ],
+                  ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   child: Text(
-                    '학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로 되고, 메일 보내기·PR 만들기는 여기나 데스크톱 설정에서 승인해야 나가요.',
+                    list.connections.isEmpty
+                        ? '설정 「계정」의 Google 연결·GitHub 연결 한 번이면 로그인과 함께 Gmail 읽기·보내기, GitHub PR 권한이 붙어요.'
+                        : list.connections.any((c) => c['state'] == 'reconnect_required')
+                        ? '「다시 연결 필요」는 설정 「계정」의 Google 연결·GitHub 연결을 한 번 더 누르면 돼요.'
+                        : '학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로 되고, 메일 보내기·PR 만들기는 여기나 데스크톱 설정에서 승인해야 나가요.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),

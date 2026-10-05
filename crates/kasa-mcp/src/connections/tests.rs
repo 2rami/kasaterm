@@ -89,6 +89,13 @@ pub(crate) async fn providers() -> (String, Seen) {
             }),
         )
         .route(
+            "/github/user/installations",
+            get(|State(calls): State<Seen>, headers: axum::http::HeaderMap| async move {
+                note(&calls, "github/installations", headers["authorization"].to_str().unwrap().into());
+                axum::Json(json!({"total_count":0,"installations":[]}))
+            }),
+        )
+        .route(
             "/github/applications/{id}/grant",
             delete(|State(calls): State<Seen>, AxPath(id): AxPath<String>, body: String| async move {
                 note(&calls, "github/revoke", format!("{id} {body}"));

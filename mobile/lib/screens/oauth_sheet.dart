@@ -34,6 +34,7 @@ Future<OAuthResult?> showOAuthSheet(
   required String machineId,
   bool link = false,
   List<String> connect = const [],
+  bool work = false,
   String? title,
   Future<bool> Function(Uri url)? open,
   WebAuthenticate? authenticate,
@@ -50,6 +51,7 @@ Future<OAuthResult?> showOAuthSheet(
       machineId: machineId,
       link: link,
       connect: connect,
+      work: work,
       title: title,
       open: open ?? (url) => launchUrl(url, mode: LaunchMode.externalApplication),
       authenticate:
@@ -66,6 +68,7 @@ class _OAuthSheet extends StatefulWidget {
     required this.machineId,
     required this.link,
     required this.connect,
+    required this.work,
     required this.title,
     required this.open,
     required this.authenticate,
@@ -77,6 +80,9 @@ class _OAuthSheet extends StatefulWidget {
   final String machineId;
   final bool link;
   final List<String> connect;
+
+  /// 연결하면서 그 공급자의 일 권한도 함께 붙인다([RelayAccountApi.oauthStart] 의 work).
+  final bool work;
   final String? title;
   final Future<bool> Function(Uri url) open;
   final WebAuthenticate? authenticate;
@@ -131,6 +137,7 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
         link: widget.link,
         redirect: widget.authenticate != null,
         connect: widget.connect,
+        work: widget.work,
       );
       if (!mounted) {
         unawaited(widget.api.oauthCancel(flow));

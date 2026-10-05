@@ -181,14 +181,17 @@ pub(super) async fn providers() -> anyhow::Result<Value> {
     } else {
         "setup_required"
     };
-    Ok(json!({"state":state,"providers":providers}))
+    // Which providers also bring work permissions when linked from settings.
+    let connect = json!({"google":value["redirect_login"] == true && value["connect"]["google"] == true,
+        "github":value["redirect_login"] == true && value["connect"]["github"] == true});
+    Ok(json!({"state":state,"providers":providers,"connect":connect}))
 }
 
 pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
     anyhow::ensure!(sync_environment_allowed(), "oauth_disabled_in_isolated_run");
     let provider: Provider = serde_json::from_value(params["provider"].clone())
         .map_err(|_| anyhow::anyhow!("bad_provider"))?;
-    let connect: Vec<String> = params["connect"]
+    let mut connect: Vec<String> = params["connect"]
         .as_array()
         .into_iter()
         .flatten()
@@ -221,6 +224,19 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
     let capabilities = capabilities(&gateway).await;
     if !link && capabilities["choose_account"] == true {
         body["choose"] = json!(true);
+    }
+    // Linking Google·GitHub from settings also brings that provider's work permissions in the same
+    // consent, when the gateway can hold them; an older or unprepared gateway links the sign-in only.
+    if link
+        && connect.is_empty()
+        && params["work"] == true
+        && capabilities["redirect_login"] == true
+        && capabilities["connect"][provider.name()] == true
+    {
+        connect = match provider {
+            Provider::Google => vec!["mail.read".into(), "mail.send".into()],
+            Provider::Github => vec!["github.pr".into()],
+        };
     }
     if !connect.is_empty() {
         // Provider tokens are only handed over through the PKCE redirect, never the typed code.
@@ -505,7 +521,17 @@ async fn settle(attempt: Attempt, value: Value) -> anyhow::Result<Value> {
             "invalid_oauth_response"
         );
         forget(&attempt);
-        return Ok(json!({"ok":true,"status":"connected","connection":value["connection"]}));
+        let link_error = match value["link_error"].as_str() {
+            None => Value::Null,
+            Some("already_linked") => json!("already_linked"),
+            Some(_) => json!("link_failed"),
+        };
+        // Only the gateway's own GitHub App page is opened from here.
+        let install_url = value["install_url"]
+            .as_str()
+            .filter(|url| url.starts_with("https://github.com/apps/") && url.len() < 200);
+        return Ok(json!({"ok":true,"status":"connected","connection":value["connection"],
+            "linked":value["linked"] == true,"link_error":link_error,"install_url":install_url}));
     }
     if !attempt.link && value["status"] == "choose" {
         let ticket = value["ticket"]

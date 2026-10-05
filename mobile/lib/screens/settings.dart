@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app_release.dart';
 import '../connection_store.dart';
@@ -71,11 +72,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final id = await (widget.installId ?? const ConnectionStore().installId)();
       if (!mounted) return;
-      final r = await showOAuthSheet(context, api: api, provider: provider, machineId: id, link: true);
-      if (r?.linked == true && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('이 계정에 ${provider.label} 로그인을 연결했어요.')),
-        );
+      // 같은 허용으로 그 공급자의 일 권한(Gmail·PR)까지 붙인다 — 「일 권한」에서 따로 연결하지 않는다.
+      final r = await showOAuthSheet(context, api: api, provider: provider, machineId: id, link: true, work: true);
+      if (r == null || !mounted) return;
+      final text = switch ((r.connected, r.linked)) {
+        (true, true) => '${provider.label} 로그인과 일 권한을 연결했어요.',
+        (true, false) => '일 권한을 연결했어요. 이 ${provider.label} 은 다른 KASA 계정의 로그인이라 로그인은 그대로예요.',
+        (false, true) => '이 계정에 ${provider.label} 로그인을 연결했어요.',
+        _ => null,
+      };
+      if (text != null) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+      }
+      if (r.installUrl case final url?) {
+        unawaited(launchUrl(url, mode: LaunchMode.externalApplication));
       }
     } catch (_) {
       if (mounted) {
@@ -231,13 +241,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     tone: 1,
                     icon: Icons.mail_lock_outlined,
                     title: '일 권한',
-                    subtitle: 'Gmail·GitHub 연결 · 메일·PR 승인',
+                    subtitle: '연결된 Gmail·GitHub · 메일·PR 승인',
                     chevron: true,
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (_) => WorkPermissionsScreen(
                           api: () => RelayAccountApi(account.origin, session: account),
-                          installId: widget.installId ?? const ConnectionStore().installId,
                         ),
                       ),
                     ),
@@ -249,7 +258,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       tone: 1,
                       icon: Icons.login_rounded,
                       title: '${p.label} 연결',
-                      subtitle: '다음부터 ${p.label} 로그인으로 이 계정에 들어와요',
+                      subtitle: p == OAuthProvider.google
+                          ? '로그인과 Gmail 읽기·보내기를 한 번에 붙여요'
+                          : '로그인과 PR 일 권한을 한 번에 붙여요',
                       chevron: true,
                       onTap: _linking ? null : () => unawaited(_link(p)),
                     ),

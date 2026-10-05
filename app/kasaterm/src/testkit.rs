@@ -4277,6 +4277,8 @@ impl App {
             "device-work" | "device-work-open" if crate::verification_run() => {
                 let open = std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("device-work-open");
                 self.device_account.work.fixture(open);
+                // 위 「Google·GitHub 연결」 단추와 안내도 관문이 일 권한을 받는 상태로 보인다.
+                self.device_account.fixture(false, false);
                 self.chrome_dirty = true;
             }
             "device-oauth" | "device-choice" | "device-claim" if crate::verification_run() => {

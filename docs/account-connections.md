@@ -2,7 +2,9 @@
 
 관문 계정 로그인은 구글·깃허브로 **신원만** 확인한다(`openid email`, `read:user` —
 [account-oauth.md](account-oauth.md)). 이 문서는 같은 계정에 메일·PR 같은 **일 권한**을
-따로 붙여, 어느 기기·어느 에이전트든 계정 이름으로 그 일을 하게 하는 설계다.
+붙여, 어느 기기·어느 에이전트든 계정 이름으로 그 일을 하게 하는 설계다. 로그인된 기기의 설정에서
+「Google 연결」·「GitHub 연결」을 누르면 한 번의 허용으로 로그인 연결과 일 권한이 함께 붙는다
+([연결 한 번에 둘 다](#연결-한-번에-둘-다)).
 
 지금 나쵸는 맥미니에서 `gws`·`gh` CLI 로 한 사람 계정만 쓴다. 그 자격증명은 미니 한 대에
 묶여 있고, 누가 무엇을 보냈는지 남는 곳이 없고, 다른 기기·폰은 같은 일을 못 한다.
@@ -59,7 +61,9 @@
 
 ## 범위를 필요할 때 더 받는다
 
-로그인은 지금처럼 신원 범위만 받는다. 일 권한은 **기능을 켤 때** 따로 동의받는다.
+처음 로그인(아직 기기 자격증명이 없는 쪽)은 지금처럼 신원 범위만 받는다. 일 권한 범위는 로그인된 기기가
+설정에서 그 공급자를 **연결할 때** 받는다 — 모든 새 로그인에 메일 범위를 물으면 「확인되지 않은 앱」 경고와
+평생 100명 한도가 로그인 전체에 걸리기 때문이다.
 
 | 기능 | 구글 범위 | 깃허브 |
 |---|---|---|
@@ -71,12 +75,29 @@
   `openid email` 을 같이 받아 어느 메일 계정이 연결됐는지 화면에 보인다.
 - 구글은 사용자가 동의 화면에서 범위 일부만 체크할 수 있다. 토큰 응답의 `scope` 를 보고
   **받은 것만** 켠다(읽기만 받았으면 보내기는 꺼진 채 「보내기 권한 없음」).
-- 메일 연결은 로그인 신원과 같은 구글 계정일 필요가 없다(개인 계정으로 로그인하고 회사 메일을
+- 메일 연결은 처음 로그인한 구글 계정과 같을 필요가 없다(개인 계정으로 로그인하고 회사 메일을
   연결할 수 있다). 연결은 `(공급자, 공급자 쪽 신원)` 으로 구분하고 계정당 여럿 둘 수 있다.
-  연결은 로그인 수단이 되지 않는다 — 로그인 연결과 일 연결은 서로 다른 장부다.
+  로그인 연결(`relay-oauth-identities.json`)과 일 연결(봉인함)은 장부는 다르지만 한 번의 허용으로 함께 적힌다.
 - 흐름은 기존 `/relay/oauth/start` 에 `connect: ["mail.read", …]` 만 더한다. 기기 자격증명(`link:true`)과
   PKCE 앱 리다이렉트가 둘 다 있어야 시작된다 — 공급자 토큰은 그 요청을 낸 기기가 verifier 로 받아 갈 때만
-  그 계정 봉인함에 들어간다(남에게 넘긴 링크로는 남의 계정에 못 붙는다). 연결은 로그인 신원으로 연결되지 않는다.
+  그 계정 봉인함에 들어간다(남에게 넘긴 링크로는 남의 계정에 못 붙는다).
+
+### 연결 한 번에 둘 다
+
+2026-10-05 결정: 설정의 「Google 연결」·「GitHub 연결」과 「일 권한」의 Gmail·GitHub 연결을 따로 누르게 하지 않는다.
+
+- 클라이언트(PC `device_oauth.rs`, 폰 `relay_account.dart`)는 로그인된 기기의 연결에 `work` 를 싣고, 관문
+  `providers` 의 `connect.<공급자>` 가 참이면 그 공급자의 기능 전부(Google `mail.read`·`mail.send`, GitHub
+  `github.pr`)를 `connect` 로 보낸다. 관문이 그 공급자를 못 받거나(옛 관문·GitHub App 미설정) 앱 리다이렉트가 없으면
+  지금처럼 로그인 연결만 한다.
+- 관문은 `connect` 흐름이 끝나면 토큰을 봉인함에 넣는 것과 함께 같은 신원을 그 계정의 로그인으로 잇는다
+  (`resolve(identity, Some(account))`, 기기 잠금을 쥔 채 — `complete` 와 같다). 그 신원이 이미 **다른** 계정의
+  로그인이면 그 로그인은 그대로 두고 일 권한만 이 계정에 넣는다 — 응답 `linked:false`, `link_error:"already_linked"`.
+  계정을 메일·신원으로 합치지 않는다는 원칙은 그대로다.
+- GitHub 은 사용자 토큰으로 `GET /user/installations` 를 물어 앱이 아무 데도 설치되지 않았으면 `installed:false` 와
+  `install_url`(관문의 `KASA_GITHUB_APP_SLUG` 설치 화면)을 함께 준다. 앱은 그 주소가 `https://github.com/apps/` 일 때만
+  바로 열어 레포를 고르게 한다. GitHub 이 답을 안 주면 두 값 다 없다.
+- GitHub 로그인용 OAuth 앱과 일 권한용 GitHub App 은 다른 클라이언트지만 `GET /user` 의 숫자 id 가 같아 같은 신원으로 잇는다.
 
 ## 구글 메일 범위 제약
 
@@ -139,7 +160,7 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
 | 길 | 하는 일 |
 |---|---|
 | `GET /relay/oauth/providers` | `connect: {google, github}` — 이 관문에서 연결할 수 있는 것 |
-| `POST /relay/oauth/start` + `link:true`, `connect:[기능]`, PKCE 리다이렉트 | 연결 시작. 끝은 `token` 이 `{"status":"connected","connection":…}` 를 준다(기기 자격증명은 안 준다) |
+| `POST /relay/oauth/start` + `link:true`, `connect:[기능]`, PKCE 리다이렉트 | 연결 시작. 끝은 `token` 이 `{"status":"connected","connection":…,"linked":…}` 를 준다(기기 자격증명은 안 준다). 로그인을 못 이었으면 `link_error`, GitHub 앱이 설치 전이면 `installed:false`·`install_url` |
 | `GET /relay/connections` | 연결 목록(공급자·표시 이름·기능·`state`)·승인 대기 전체·`available`·`github_install_url`. 토큰 없음 |
 | `DELETE /relay/connections/{id}` | 끊기(공급자 철회 + 봉인 삭제 + 그 연결의 대기 버림). `provider_revoked` 로 철회 확인 여부 |
 | `POST /relay/connections/mail/list` | `{connection?, query?, max?(1~25)}` → 보낸 이·받는 이·제목·날짜·미리보기·안 읽음 |
@@ -157,8 +178,9 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
 
 ## 화면과 CLI
 
-- PC 설정 → 계정 「일 권한」: 연결 줄(Gmail·GitHub, 권한, 「다시 연결 필요」)과 [끊기]→[정말 끊기],
-  [Gmail 연결]·[GitHub 연결]·[GitHub 앱 설치], 「승인을 기다리는 일」 목록 → [보기] 로 펼쳐 내용 전부 →
+- PC 설정 → 계정: 위 [Google 연결]·[GitHub 연결] 한 번이 로그인과 일 권한을 함께 붙인다(GitHub 앱이 설치 전이면
+  설치 화면을 바로 연다). 「일 권한」: 연결 줄(Gmail·GitHub, 권한, 「다시 연결 필요」 — 위 연결을 다시 누르면 된다)과
+  [끊기]→[정말 끊기], [PR 올릴 레포 고르기], 「승인을 기다리는 일」 목록 → [보기] 로 펼쳐 내용 전부 →
   [보내기]/[PR 만들기]·[버리기]. 앱은 로그인돼 있으면 1분마다 목록을 받고 새 대기가 오면 데스크톱 알림을 띄운다
   (앱을 켤 때 이미 있던 대기는 알리지 않는다).
 - 학생: `kasaterm-cli mail [list] [--query …] [--max N]`, `mail read <id>`,
@@ -174,7 +196,7 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
 관문 환경(launchd plist `EnvironmentVariables`, 바꾸면 `bootout`→`bootstrap`):
 
 - `KASA_GITHUB_APP_CLIENT_ID`·`KASA_GITHUB_APP_CLIENT_SECRET` — GitHub App 의 OAuth 자격. 없으면 GitHub 연결 단추가 꺼진다.
-- `KASA_GITHUB_APP_SLUG` — 앱 주소 이름. 「GitHub 앱 설치」가 `https://github.com/apps/<slug>/installations/new` 를 연다.
+- `KASA_GITHUB_APP_SLUG` — 앱 주소 이름. GitHub 연결 직후 설치 화면과 「PR 올릴 레포 고르기」가 `https://github.com/apps/<slug>/installations/new` 를 연다.
 - Gmail 은 로그인용 Google 클라이언트를 그대로 쓴다(새 환경 없음).
 
 Google Cloud(로그인 OAuth 클라이언트가 있는 프로젝트):

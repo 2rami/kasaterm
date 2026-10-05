@@ -83,7 +83,6 @@ Future<void> until(WidgetTester tester, bool Function() done) async {
 Widget host(FakeWork fake) => MaterialApp(
   home: WorkPermissionsScreen(
     api: () => RelayAccountApi(origin, client: fake.client(), session: session),
-    installId: () async => '0123456789abcdef0123456789abcdef',
   ),
 );
 
@@ -159,5 +158,49 @@ void main() {
       throwsA(isA<AccountException>()),
       reason: '리다이렉트 없이 연결을 시작했다',
     );
+  });
+
+  test('설정의 Google·GitHub 연결은 관문이 받는 한 일 권한도 같은 허용으로 붙인다', () async {
+    final starts = <Map>[];
+    var connect = '{"google":true,"github":false}';
+    var tokenReply = '';
+    final api = RelayAccountApi(
+      origin,
+      session: session,
+      client: MockClient((req) async {
+        switch (req.url.path) {
+          case '/relay/oauth/providers':
+            return http.Response('{"ok":true,"redirect_login":true,"providers":[{"id":"google","enabled":true},{"id":"github","enabled":true}],"connect":$connect}', 200);
+          case '/relay/oauth/start':
+            starts.add(jsonDecode(req.body) as Map);
+            return http.Response(jsonEncode({'ok': true, 'request_id': 'r', 'expires_in': 600,
+              'authorization_url': '${req.url.origin}/relay/oauth/authorize/r'}), 200);
+          case '/relay/oauth/token':
+            return http.Response(tokenReply, 200);
+        }
+        return http.Response('{}', 404);
+      }),
+    );
+    final google = await api.oauthStart(OAuthProvider.google, 'machine-phone-0001', link: true, redirect: true, work: true);
+    expect(starts.last['connect'], ['mail.read', 'mail.send']);
+    expect(starts.last['link'], isTrue);
+    // 관문이 GitHub 일 권한을 못 받으면 로그인 연결만 한다.
+    await api.oauthStart(OAuthProvider.github, 'machine-phone-0001', link: true, redirect: true, work: true);
+    expect(starts.last.containsKey('connect'), isFalse);
+    connect = '{"google":true,"github":true}';
+    final github = await api.oauthStart(OAuthProvider.github, 'machine-phone-0001', link: true, redirect: true, work: true);
+    expect(starts.last['connect'], ['github.pr']);
+
+    tokenReply = '{"ok":true,"status":"connected","account":"one","connection":{"id":"con_a"},"linked":true}';
+    final linked = await api.oauthRedeem(google, Uri.parse('kasaterm://oauth?code=c&state=${google.redirect!.state}'));
+    expect((linked.connected, linked.linked, linked.installUrl), (true, true, null));
+    tokenReply = '{"ok":true,"status":"connected","account":"one","connection":{"id":"con_b"},"linked":false,'
+        '"link_error":"already_linked","installed":false,"install_url":"https://github.com/apps/kasaterm/installations/new"}';
+    final install = await api.oauthRedeem(github, Uri.parse('kasaterm://oauth?code=c&state=${github.redirect!.state}'));
+    expect((install.connected, install.linked), (true, false));
+    expect(install.installUrl, Uri.parse('https://github.com/apps/kasaterm/installations/new'));
+    tokenReply = tokenReply.replaceFirst('https://github.com/apps/', 'https://evil.example/apps/');
+    final odd = await api.oauthRedeem(github, Uri.parse('kasaterm://oauth?code=c&state=${github.redirect!.state}'));
+    expect(odd.installUrl, isNull, reason: '관문의 GitHub 앱 주소 밖을 열려 했다');
   });
 }

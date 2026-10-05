@@ -413,36 +413,59 @@ async fn cancel(State(gate): State<Gate>, req: axum::extract::Request) -> axum::
     }
 }
 
-/// Saves a connect flow's provider tokens to the account of the device that started it. The
-/// provider identity is not linked for sign-in — work permissions and sign-in are separate.
+/// Saves a connect flow's provider tokens to the account of the device that started it, and links
+/// the same identity as a sign-in to that account — one consent connects both. An identity that
+/// already signs in to another account stays there; the work tokens still land here.
 async fn connect(gate: &Gate, ready: Ready) -> axum::response::Response {
     let (Some(link), Some(features), Some(grant)) = (&ready.link, &ready.connect, ready.grant)
     else {
         return json_err(StatusCode::BAD_REQUEST, "invalid_request");
     };
-    let label = {
+    let Some(connections) = &gate.connections else {
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
+    };
+    let (label, linked) = {
+        // Held through identity persistence so revocation cannot race the link, as in `complete`.
         let devices = gate.devices.lock().unwrap();
-        match devices.get(&link.device_id).filter(|device| {
+        let label = match devices.get(&link.device_id).filter(|device| {
             device.revoked_at.is_none()
                 && device.account == link.account
                 && device.token_hash == link.token_hash
         }) {
             Some(device) if gate.account_active(&link.account) => device.label.clone(),
             _ => return json_err(StatusCode::UNAUTHORIZED, "link_expired"),
-        }
-    };
-    let Some(connections) = &gate.connections else {
-        return json_err(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
+        };
+        let linked = gate
+            .oauth
+            .resolve(&ready.identity, Some(&link.account), |name| {
+                gate.accounts.exists(name)
+            })
+            .map(|_| ());
+        (label, linked)
     };
     let caller = crate::connections::Caller {
         account: &link.account,
         device: &link.device_id,
         label: &label,
     };
+    let installed = match grant.provider {
+        Provider::Github => connections.github_installed(&grant.access_token).await,
+        Provider::Google => None,
+    };
     match connections.store(&caller, grant, features).await {
         Ok(summary) => {
-            axum::Json(json!({"ok":true,"status":"connected","account":link.account,"connection":summary}))
-                .into_response()
+            let mut value = json!({"ok":true,"status":"connected","account":link.account,"connection":summary,
+                "linked":linked.is_ok()});
+            if let Err(error) = linked {
+                value["link_error"] = json!(error);
+            }
+            if let Some(installed) = installed {
+                value["installed"] = json!(installed);
+                if !installed {
+                    value["install_url"] = json!(connections.github_install_url());
+                }
+            }
+            axum::Json(value).into_response()
         }
         Err(error) => json_err(
             StatusCode::from_u16(error.status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
