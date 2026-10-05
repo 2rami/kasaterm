@@ -9,6 +9,7 @@ import '../main.dart' show designTokens;
 import '../relay_account.dart';
 import '../server.dart';
 import 'browser_device.dart';
+import 'character_picks.dart';
 import 'dev_server.dart';
 import '../theme_prefs.dart';
 import '../weather/sheet.dart';
@@ -361,6 +362,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ],
+      // 학생 명단은 계정 공통 설정이라 계정으로 붙었을 때만 — 옛 주소 연결은 계정 동기화가 없다.
+      if (server.account case final account?)
+        SettingsRow(
+          key: const Key('character-picks'),
+          tone: tone,
+          icon: Icons.groups_2_outlined,
+          title: '학생 고르기',
+          subtitle: '학생 테마와 새 창에 나올 학생 · 모든 기기 같이',
+          chevron: true,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => CharacterPicksScreen(
+                server: server,
+                api: () => RelayAccountApi(account.origin, session: account),
+              ),
+            ),
+          ),
+        ),
       SettingsRow(
         tone: tone,
         icon: Icons.public_outlined,

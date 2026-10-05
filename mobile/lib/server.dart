@@ -1118,6 +1118,21 @@ class Server {
   Uri avatar(String slug, {String? machine}) =>
       uri('term/avatar/${Uri.encodeComponent(slug)}.png', machine: machine);
 
+  /// 데스크톱 설정 캐릭터 탭과 같은 테마 카드 — 폰엔 테마 폴더가 없어 고를 후보는 붙은 데스크톱 것을 본다.
+  Future<Map<String, Object?>> characterChoices() async {
+    final j = await _getJson('settings/characters', timeout: const Duration(seconds: 15));
+    if (j is! Map) throw ServerException('${describe()} 응답을 읽지 못했다 (settings/characters)');
+    return j.cast<String, Object?>();
+  }
+
+  /// 테마 하나의 명단(`__base` = 번들). 없는 테마면 404.
+  Future<Object?> themeRoster(String key) =>
+      _getJson('theme-roster', query: {'id': key}, timeout: const Duration(seconds: 15));
+
+  /// 그 테마 폴더의 얼굴. 번들은 테마를 안 준다 — 데스크톱 설정 카드와 같은 길.
+  Uri characterFace(String slug, String themeId) =>
+      uri('character-face', query: {'slug': slug, if (themeId.isNotEmpty) 'theme': themeId});
+
   /// 학생 쪽지 — 나쵸가 남긴 「시킨 것 → 한 것」 한 줄. 최근 것부터.
   Future<List<Note>> notes({String? machine}) async {
     final j = await _getJson('term/notes', machine: machine);

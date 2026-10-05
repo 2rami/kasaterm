@@ -63,6 +63,11 @@ abstract final class Look {
   static const stripeX = 5.0;
   static const face = 32.0;
 
+  /// 학생 고르기 칸 — 얼굴, 칸 최소 폭(줄마다 이 폭으로 되는 만큼 세운다), 테마 머리의 얼굴이 겹치는 폭.
+  static const pickFace = 48.0;
+  static const pickCell = 80.0;
+  static const faceOverlap = 10.0;
+
   /// 기기 머리글의 기기색 물 동그라미.
   static const machineBadge = 36.0;
 
