@@ -49,6 +49,9 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 - **서울 관문**: systemd `kasa-relay`(사용자 `kasa-relay`, `--bind 127.0.0.1 --port 8790 --state /var/lib/kasa-relay/relay-state.json`),
   환경 `/etc/kasa-relay/env`(미니 plist 에서 옮김, 서명기는 뺌, Jev 는 `/usr/bin/node` + `/opt/kasa-relay/jev/client.mjs`,
   피드백은 `/etc/kasa-relay/feedback.env`). Caddy 는 공식 2.11.6(우분투 2.6.2 는 PROXY 프로토콜 리스너가 없다), systemd `kasa-edge`.
+  원격 승인 폰 알림용 APNs 열쇠는 `/etc/kasa-relay/apns/AuthKey_<id>.p8`(디렉터리 root:kasa-relay 750, 파일 kasa-relay 0600),
+  env 에 `KASATERM_APNS_KEY_ID`·`KASATERM_APNS_TEAM_ID`·`KASATERM_APNS_KEY_PATH`([remote-approval.md](remote-approval.md)).
+  관문이 새로 쓰는 파일은 상태 옆 `relay-push.json`(폰 푸시 토큰)·`relay-approvals-audit.jsonl`(승인 감사).
 - 운영 `tools/kasa-gateway-seoul/gateway.sh`(이 맥): `build`(도커 교차 컴파일) · `upgrade <바이너리>` · `install` · `env` ·
   `state` · `sync-install` · `status`. 중계는 `tools/kasanet-relay/relay.sh`.
 
@@ -63,6 +66,12 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 거절됐고, 앱은 그 토큰을 메모리에 「거절됨」으로 들고 토큰 없이(폰 주소만) 붙는다 — 서울 상태에는 토큰이 멀쩡하지만 **앱을 다시
 켜기 전까지 계정 없이 붙어 있다**(계정 길로 보는 폰 기계 목록·계정 동기화가 빈다). 다음 전환에서는 설치 전용 인스턴스를 DNS 를
 바꾼 뒤에 띄우거나, 그 사이 관문을 아예 내려 둔다.
+
+## 원격 승인 교체 기록 (2026-10-05)
+
+8c185712 관문으로 교체(sha256 6dd6d12d…), APNs 열쇠·env 셋 추가. 교체 전 백업: `/usr/local/bin/kasa-relay.bak-20261005`,
+`/etc/kasa-relay/env.bak-20261005`, `/var/lib/kasa-relay-bak-20261005.tar`. 되돌리기는 그 바이너리·env 를 제자리로 놓고
+`sudo systemctl restart kasa-relay`(열쇠 파일은 지워도 되고 남겨도 옛 관문은 안 읽는다).
 
 ## 되돌리기
 
