@@ -13,6 +13,7 @@ class _Host {
   _Host(this.http);
   final HttpServer http;
   final control = <Map<String, Object?>>[];
+  final keys = <String>[];
   WebSocket? socket;
 
   static Future<_Host> start({required bool latest}) async {
@@ -41,6 +42,7 @@ class _Host {
         }),
       );
       socket.listen((m) {
+        if (m is List<int>) host.keys.add(utf8.decode(m));
         if (m is String) {
           final v = (jsonDecode(m) as Map).cast<String, Object?>();
           if (v['t'] == 'viewport') host.control.add(v);
@@ -140,6 +142,48 @@ void main() {
       await _until(() => s.state == TermState.connected);
       await _quiet();
       expect(host.control, isEmpty);
+      s.dispose();
+      await host.http.close(force: true);
+    }, _NativeHttp()),
+  );
+
+  test(
+    '앱이 굴리는 화면에 휠을 SGR 로 넘기되 원본 크기를 되찾는 손길로 치지 않는다',
+    () => HttpOverrides.runWithHttpOverrides(() async {
+      final host = await _Host.start(latest: true);
+      final s = TermSession(serverFor(host), pane)
+        ..holdViewport = true
+        ..setViewport(42, 30)
+        ..connect();
+      await _until(() => host.control.isNotEmpty);
+      host.send({'t': 'viewport', 'granted': false, 'lost': true});
+      host.send({
+        't': 'grid',
+        'cols': 24,
+        'rows': 15,
+        'dirty': [],
+        'alt': true,
+        'mouse': true,
+        'mouseSgr': true,
+      });
+      await _until(() => s.scrollsApp);
+      s
+        ..wheel(3)
+        ..wheel(-1);
+      await _until(() => host.keys.length >= 2);
+      expect(host.keys, [
+        '\x1b[<64;13;8M' * 3,
+        '\x1b[<65;13;8M',
+      ]);
+      await _quiet();
+      expect(host.control, hasLength(1), reason: '휠은 보기다 — 되찾긴 크기를 도로 쥐지 않는다');
+
+      host.send({'t': 'grid', 'alt': false, 'dirty': []});
+      await _until(() => !s.scrollsApp);
+      s.wheel(2);
+      await _quiet();
+      expect(host.keys, hasLength(2), reason: '스크롤백이 있는 화면은 폰이 굴린다');
+
       s.dispose();
       await host.http.close(force: true);
     }, _NativeHttp()),

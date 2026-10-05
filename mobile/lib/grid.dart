@@ -92,6 +92,12 @@ class Grid implements GridLines {
   bool appCursor = false;
   bool bracketedPaste = false;
 
+  /// 대체 화면(alt)에 마우스 보고(SGR)를 켠 앱 — Claude 전체 화면·vim. 터미널 스크롤백이 없어
+  /// 앱이 휠을 받아 스스로 굴린다.
+  bool alt = false;
+  bool mouse = false;
+  bool mouseSgr = false;
+
   /// 프레임마다 오른다 — 위젯이 「다시 그릴 것이 있나」를 이 숫자로 안다.
   int version = 0;
 
@@ -128,6 +134,9 @@ class Grid implements GridLines {
     cursorVisible = m['cursorVisible'] as bool? ?? cursorVisible;
     appCursor = m['appCursor'] as bool? ?? appCursor;
     bracketedPaste = m['bracketedPaste'] as bool? ?? bracketedPaste;
+    alt = m['alt'] as bool? ?? alt;
+    mouse = m['mouse'] as bool? ?? mouse;
+    mouseSgr = m['mouseSgr'] as bool? ?? mouseSgr;
     version++;
   }
 

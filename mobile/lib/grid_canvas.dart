@@ -573,6 +573,7 @@ class GridCanvas extends StatefulWidget {
     required this.palette,
     this.fontSize = 13,
     this.composing,
+    this.onWheel,
   });
 
   final Grid grid;
@@ -583,12 +584,32 @@ class GridCanvas extends StatefulWidget {
   /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다.
   final String? composing;
 
+  /// 앱이 스스로 굴리는 화면이면 세로 끌기를 휠 줄로 넘긴다(양수 = 위, 지난 내용).
+  final void Function(int lines)? onWheel;
+
   @override
   State<GridCanvas> createState() => _GridCanvasState();
 }
 
+/// 손가락 세로 이동을 휠 줄로 — 보이는 한 줄 높이만큼 끌 때마다 한 줄. 아래로 끌면 지난 내용이
+/// 내려와야 하니 위로 굴린다(양수).
+class _WheelDrag {
+  double _acc = 0;
+
+  void reset() => _acc = 0;
+
+  void add(double dy, double lineH, void Function(int lines) wheel) {
+    _acc += dy;
+    final lines = (_acc / lineH).truncate();
+    if (lines == 0) return;
+    _acc -= lines * lineH;
+    wheel(lines);
+  }
+}
+
 class _GridCanvasState extends State<GridCanvas> {
   final _cache = _RowCache();
+  final _wheel = _WheelDrag();
   late _CellMetrics _metrics = _CellMetrics(widget.fontSize);
 
   @override
@@ -604,9 +625,13 @@ class _GridCanvasState extends State<GridCanvas> {
     final grid = widget.grid;
     final cols = math.max(grid.cols, 1);
     final rows = math.max(grid.rows, 1);
+    final wheel = widget.onWheel;
     return FillViewer(
       content: Size(cols * _metrics.width, rows * _metrics.height),
       background: widget.palette.bg,
+      onVerticalPan: wheel == null
+          ? null
+          : (dy) => _wheel.add(dy, _metrics.height, wheel),
       child: _LinkTaps(
         lines: grid.lines,
         cols: grid.cols,
@@ -642,7 +667,12 @@ class WrappedCanvas extends StatefulWidget {
     this.fontSize = 13,
     this.composing,
     this.onViewport,
+    this.onWheel,
   });
+
+  /// 앱이 스스로 굴리는 화면(Claude 전체 화면 — 스크롤백 0)이면 세로 끌기를 지난 줄 넘김 대신
+  /// 휠 줄로 넘긴다(양수 = 위, 지난 내용).
+  final void Function(int lines)? onWheel;
 
   /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다(바로 치기).
   final String? composing;
@@ -737,6 +767,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
   _CellMetrics? _scaled;
   _CellMetrics? _wide;
   (int, int)? _reported;
+  final _wheel = _WheelDrag();
 
   /// 좁은 pane(42열)은 기본 글꼴이면 폰 폭의 2/3 만 쓰고 글자도 작다 — pane 열 수가 폰
   /// 열 수보다 적으면 글꼴을 키워 그 열 수가 폭을 채우게 한다(상한은 `_maxFont`). 넓은 pane 은
@@ -866,6 +897,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
           : null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+        if (widget.onWheel != null && _scroll.hasClients && _scroll.offset != 0) {
+          _scroll.jumpTo(0);
+        }
         final report = widget.onViewport;
         if (report != null && viewport != null && viewport != _reported) {
           _reported = viewport;
@@ -924,9 +958,10 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
           tail = _reflow.apply(_TailGrid(live, top), cols);
         }
       }
+      final wheel = widget.onWheel;
       // 스크롤 상자는 내용만큼만 줄어들려 한다 — 느슨한 높이(Row 안 등)에서는 두 줄짜리
       // 상자가 세로 가운데에 떠서 바닥 정렬이 깨진다. 주어진 자리를 통째로 차지시킨다.
-      return SizedBox.expand(
+      final body = SizedBox.expand(
         child: ColoredBox(
           color: widget.palette.bg,
           child: Stack(
@@ -937,6 +972,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                 child: SingleChildScrollView(
                   controller: _scroll,
                   reverse: true,
+                  physics: wheel == null
+                      ? null
+                      : const NeverScrollableScrollPhysics(),
                   // 위로 넘기며 읽을 땐 키보드를 내린다 — 키보드가 화면 반을 먹어
                   // 열 줄밖에 안 보인다. 다시 치려면 아래 칸을 누르면 된다.
                   keyboardDismissBehavior:
@@ -969,6 +1007,17 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
             ],
           ),
         ),
+      );
+      if (wheel == null) return body;
+      // 굴릴 지난 줄이 없는 화면 — 끌기를 앱의 휠로. 키보드를 내리는 것은 스크롤 상자와 같다.
+      return GestureDetector(
+        onVerticalDragStart: (_) {
+          _wheel.reset();
+          FocusManager.instance.primaryFocus?.unfocus();
+        },
+        onVerticalDragUpdate: (d) =>
+            _wheel.add(d.delta.dy, metrics.height, wheel),
+        child: body,
       );
     },
   );

@@ -817,6 +817,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         initialScroll: widget.initialScroll,
         composing: _live ? _composing : null,
         onViewport: s.setViewport,
+        onWheel: s.scrollsApp ? s.wheel : null,
         // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
         student: pane.isWebShell
             ? null
@@ -841,6 +842,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       version: s.grid.version,
       palette: palette,
       composing: _live ? _composing : null,
+      onWheel: s.scrollsApp ? s.wheel : null,
     );
   }
 }

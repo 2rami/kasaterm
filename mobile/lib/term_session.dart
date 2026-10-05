@@ -250,6 +250,21 @@ class TermSession extends ChangeNotifier {
 
   void sendText(String text) => sendBytes(utf8.encode(text));
 
+  /// 지난 내용을 앱이 굴리는 화면인가 — 대체 화면에 마우스 보고(SGR)를 켠 앱(Claude 전체 화면)은
+  /// 터미널 스크롤백이 0 이라(2026-10-05 실기 「스크롤이 안 돼」) 손가락 세로 끌기를 휠로 넘긴다.
+  bool get scrollsApp => grid.alt && grid.mouse && grid.mouseSgr;
+
+  /// 데스크톱 휠과 같은 SGR(64 위·65 아래, `input.rs handle_wheel`). [lines] 가 양수면 위(지난 내용).
+  /// 휠은 보기라 원본 크기를 되찾는 손길로 치지 않는다 — [sendBytes] 를 거치지 않는다.
+  void wheel(int lines) {
+    final ch = _channel;
+    if (lines == 0 || ch == null || !canSend || !scrollsApp) return;
+    // 줄이 아니라 그 pane 안인지가 중요하다 — 가운데는 Claude 의 대화 칸이다.
+    final at = '${grid.cols ~/ 2 + 1};${grid.rows ~/ 2 + 1}';
+    final one = '\x1b[<${lines > 0 ? 64 : 65};${at}M';
+    ch.sink.add(Uint8List.fromList(utf8.encode(one * math.min(lines.abs(), 8))));
+  }
+
   /// 방향키는 앱이 DECCKM 을 켰는지에 따라 SS3 여야 한다 — CSI 로 보내면 claude·vim
   /// 의 줄 이동이 조용히 무시된다.
   void arrow(String letter) =>

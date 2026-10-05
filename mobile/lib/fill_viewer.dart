@@ -14,12 +14,18 @@ class FillViewer extends StatefulWidget {
     required this.content,
     required this.background,
     required this.child,
+    this.onVerticalPan,
   });
 
   /// 자식의 본래 크기 — 자식은 이 크기의 상자 안에 그려진다.
   final Size content;
   final Color background;
   final Widget child;
+
+  /// 한 손가락 세로 끌기 중 격자 끝을 넘어선 몫(내용 좌표 px, 아래로 끌면 양수)을 넘겨받는다.
+  /// 주면 세로로는 격자 안에서만 밀고 빈 여백으로 넘어가지 않는다 — 넘어선 몫은 앱이 스스로
+  /// 굴리게 한다(Claude 전체 화면은 스크롤백이 없다, 2026-10-05 실기 「스크롤이 안 돼」).
+  final ValueChanged<double>? onVerticalPan;
 
   static double fitFor(Size content, BoxConstraints box) {
     final w = math.max(content.width, 1.0);
@@ -34,11 +40,28 @@ class FillViewer extends StatefulWidget {
 class _FillViewerState extends State<FillViewer> {
   final _controller = TransformationController();
   double _fit = 1;
+  double _boxH = 0;
 
   @override
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  /// 세로는 여기서 민다(InteractiveViewer 는 가로만) — 격자 위·아래 끝에서 멈추고 남는 몫을 넘긴다.
+  void _panY(ScaleUpdateDetails d) {
+    final pan = widget.onVerticalPan;
+    if (pan == null || d.pointerCount != 1 || d.focalPointDelta.dy == 0) return;
+    final m = _controller.value;
+    final scale = m.getMaxScaleOnAxis();
+    final t = m.getTranslation();
+    final h = math.max(widget.content.height, 1.0) * scale;
+    final want = t.y + d.focalPointDelta.dy;
+    final y = want.clamp(math.min(0.0, _boxH - h), 0.0).toDouble();
+    if (y != t.y) {
+      _controller.value = m.clone()..setTranslationRaw(t.x, y, t.z);
+    }
+    if (want != y) pan((want - y) / scale);
   }
 
   /// 사용자가 손대지 않은 배율(= 직전 fit)일 때만 새 fit 을 적용한다 — 키운
@@ -66,6 +89,7 @@ class _FillViewerState extends State<FillViewer> {
       final fitH = constraints.maxHeight / h;
       final fit = FillViewer.fitFor(widget.content, constraints);
       if ((fit - _fit).abs() > 1e-6) _applyFit(fit);
+      _boxH = constraints.maxHeight;
       return ColoredBox(
         color: widget.background,
         child: ClipRect(
@@ -74,6 +98,10 @@ class _FillViewerState extends State<FillViewer> {
             constrained: false,
             minScale: math.min(math.min(fitW, fitH), fit),
             maxScale: 6,
+            panAxis: widget.onVerticalPan == null
+                ? PanAxis.free
+                : PanAxis.horizontal,
+            onInteractionUpdate: _panY,
             boundaryMargin: EdgeInsets.symmetric(
               horizontal: constraints.maxWidth,
               vertical: constraints.maxHeight,
