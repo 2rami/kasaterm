@@ -27,6 +27,9 @@ class TermSession extends ChangeNotifier {
 
   /// 살아 있는 화면 위의 지난 줄(오래된 순). 붙을 때 한 번 받고(`history`), 그 뒤로
   /// 화면이 위로 밀릴 때마다 서버가 흘려 준다(`scrolled`). 위로 넘겨 읽는 데 쓴다.
+  /// 대체 화면(Claude 전체 화면·vim)인 동안은 비운다 — 그 화면엔 지난 줄이 없고, 원본이 대체
+  /// 화면을 줄일 때 밀려 올라간 윗줄이 `scrolled` 로 와서 전체 화면 위에 옛 머리말이 겹쳐 보였다
+  /// (2026-10-05 「풀스크린으로 바뀌고 나오는 거」). 나오면 원본의 지난 줄을 다시 받는다.
   final List<List<Run>> history = [];
   int historyVersion = 0;
   static const historyMax = 3000;
@@ -155,19 +158,28 @@ class TermSession extends ChangeNotifier {
         }
         return;
       case 'history':
+        if (grid.alt) return;
         history
           ..clear()
           ..addAll(_rows(msg['rows']));
         historyVersion++;
       case 'scrolled':
+        if (grid.alt) return;
         history.addAll(_rows(msg['rows']));
         if (history.length > historyMax) {
           history.removeRange(0, history.length - historyMax);
         }
         historyVersion++;
       case 'grid':
+        final wasAlt = grid.alt;
         grid.apply(msg);
         if (state != TermState.connected) state = TermState.connected;
+        if (grid.alt && !wasAlt && history.isNotEmpty) {
+          history.clear();
+          historyVersion++;
+        } else if (wasAlt && !grid.alt) {
+          _sendJson({'t': 'history', 'rows': historyAsk});
+        }
       case 'gone':
         // 세션이 진짜 끝났다 — 유실과 달리 다시 붙을 곳이 없다.
         state = TermState.gone;

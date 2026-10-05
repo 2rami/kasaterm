@@ -13,6 +13,7 @@ class _Host {
   _Host(this.http);
   final HttpServer http;
   final control = <Map<String, Object?>>[];
+  final asks = <String>[];
   final keys = <String>[];
   WebSocket? socket;
 
@@ -45,6 +46,7 @@ class _Host {
         if (m is List<int>) host.keys.add(utf8.decode(m));
         if (m is String) {
           final v = (jsonDecode(m) as Map).cast<String, Object?>();
+          host.asks.add(v['t'] as String);
           if (v['t'] == 'viewport') host.control.add(v);
         }
       });
@@ -183,6 +185,47 @@ void main() {
       s.wheel(2);
       await _quiet();
       expect(host.keys, hasLength(2), reason: '스크롤백이 있는 화면은 폰이 굴린다');
+
+      s.dispose();
+      await host.http.close(force: true);
+    }, _NativeHttp()),
+  );
+
+  test(
+    '전체 화면(대체 화면) 동안 지난 줄을 비우고, 나오면 원본의 지난 줄을 다시 받는다',
+    () => HttpOverrides.runWithHttpOverrides(() async {
+      final host = await _Host.start(latest: false);
+      final s = TermSession(serverFor(host), pane)..connect();
+      List<List<Object?>> rows(String prefix, int n) => [
+        for (var i = 0; i < n; i++)
+          [
+            ['$prefix $i', null, null, 0],
+          ],
+      ];
+      String last() => s.history.last.map((r) => r.text).join();
+      await _until(() => host.asks.contains('history'));
+      host.send({'t': 'history', 'rows': rows('셸 줄', 5)});
+      host.send({'t': 'grid', 'cols': 24, 'rows': 15, 'dirty': [], 'alt': false});
+      await _until(() => s.history.length == 5);
+
+      host.send({'t': 'grid', 'dirty': [], 'alt': true});
+      await _until(() => s.grid.alt);
+      expect(s.history, isEmpty, reason: '전체 화면 위에 셸 지난 줄이 비치면 안 된다');
+      // 원본이 전체 화면을 줄이면 밀려 올라간 윗줄이 지난 줄로 온다 — 옛 머리말이 겹쳐 보였다.
+      host
+        ..send({'t': 'scrolled', 'rows': rows('Claude Code 머리말', 3)})
+        ..send({'t': 'history', 'rows': rows('Claude Code 머리말', 3)});
+      await _quiet();
+      expect(s.history, isEmpty);
+
+      final before = host.asks.where((t) => t == 'history').length;
+      host.send({'t': 'grid', 'dirty': [], 'alt': false});
+      await _until(
+        () => host.asks.where((t) => t == 'history').length > before,
+      );
+      host.send({'t': 'history', 'rows': rows('셸 줄', 6)});
+      await _until(() => s.history.length == 6);
+      expect(last(), '셸 줄 5');
 
       s.dispose();
       await host.http.close(force: true);
