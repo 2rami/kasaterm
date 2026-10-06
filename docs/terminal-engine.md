@@ -1,6 +1,6 @@
 # 공통 터미널 엔진 — 카사텀·새 카사라이트·`kasa tui`
 
-상태: **설계**(2026-10-06). 코드는 아직 바꾸지 않았다. 이 문서는 세 제품이 같은 코드를 쓰게 하려면
+상태: **설계**(2026-10-06). L 트랙 결과는 §8. 이 문서는 세 제품이 같은 코드를 쓰게 하려면
 무엇을 어디로 떼는지, 새 카사라이트와 TUI 판을 어떤 순서로 세우는지를 정한다.
 
 - **카사텀**: 지금 본판 GUI(`app/kasaterm`). 학생·보드·나쵸·계정·웹뷰까지 다 있는 판.
@@ -419,6 +419,26 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
   - 그러나 `kasa_cells::CASCADIA_CODE_NF`·`SYMBOLS_NERD_FONT_MONO` 는 **둘 다 132바이트**로 들어왔다. LFS 포인터 파일이 그대로 박힌 것이고, 컴파일 오류 없이 실행 중에 글꼴이 깨진다.
   - 그래서 §2.1-3 규칙이 필요하다. `kasa-pty` 쪽은 LFS 파일이 없어 문제가 없다.
 - 렌더·크레이트·라이트 실측은 이 문서 §1의 출처 그대로다. 줄 수는 `wc -l`, 함수 경계는 중괄호 스캔, 바이너리는 `size -m`·`otool -L`, 메모리는 `footprint` 로 쟀다.
+
+## 8. L 트랙 결과 (2026-10-06)
+
+- **L1**: `kasa-gridview` 가 섰다 — 팔레트·상자/블록 도형·커서·`GridRenderer`(표면·아틀라스·셀·클립·그림·캡처·P3)·
+  칸 덧그림(`overlay`)·인라인 그림(`images`)·글꼴 찾기·macOS 레이어. `GpuRenderer` 는 엔진을 `grid` 로 품고
+  `Deref` 로 내보인다(`gpu.rs` 7,327 → 4,380줄). 박힌 Nerd 글꼴은 앱 `assets/fonts` 로 옮겨 엔진 크레이트에 LFS 가
+  없다. 격리 리그 전후 화면 차는 기준판끼리의 잡음(≤92px) 안, release 그리기 p50 7.73 → 7.75ms(회귀 없음).
+  커밋 8d285e2e·12f8bec8·cf9c73ea·1cdbb10b.
+- **L2**: kasalite `app/lite`(ce0cc6a·2bbefa4). §4.2 의 박자를 실측으로 골랐다(kasalite `spikes/frame-pacing`):
+  링크 + Immediate + drawable 3장, 키 메아리는 바로, 출력은 박자에, 입력·출력 뒤 1초는 매 박자 내 ProMotion 을
+  붙잡는다. 대기열 1(drawable 2장)은 `nextDrawable` 에서 GUI 스레드를 p50 7ms 세웠고, Fifo 는 박자를
+  `get_current_texture` 에서 막아 맞춘다.
+- **L3**: `lite-v0.2.0` 태그, `.github/workflows/release-lite.yml`. dist 에 `tag-namespace = "kasa-tui"` 를 걸어
+  kasa tui 태그는 `kasa-tui-v*` 가 됐다. 라이트 릴리스는 「최신」으로 표시하지 않는다(셸 설치기가
+  `releases/latest` 를 쓴다).
+- **§4.3 목표 대비**(전후 표는 kasalite `bench/` 로 쟀다): 크기 셋(8.4·9.0·4.7MB)·스크롤백 증가·키→present
+  (p50 0.3ms)는 닿았다. **켜기 150ms 는 닿을 수 없다** — 이 맥(macOS 26.5)에서 빈 winit 창 하나가 246ms 다.
+  **키→화면 평균 8ms 도** 창 서버 합성 몫이 커서 p50 ~20ms 에 머문다. 메모리는 96MB(시스템 몫 대부분).
+- **엔진이 혼자 설 때 드러난 것**: objc2 디버그 인자 검사(`relax-void-encoding` 이 본판에선 다른 의존이 켜 줬다),
+  kasa-socket 의 `ring`(앱 업데이트 전용인데 늘 실렸다 — 이제 `app-update` 아래).
 
 ## 참고
 
