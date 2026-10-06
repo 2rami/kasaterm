@@ -284,17 +284,6 @@ pub(crate) struct NowLine {
     pub(crate) reply: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum InfoScope { AllRooms, #[default] CurrentRoom, SelectedPane }
-
-fn in_scope(group: &PaneGroup, scope: InfoScope, room: usize, selected: Option<&str>) -> bool {
-    match scope {
-        InfoScope::AllRooms => true,
-        InfoScope::CurrentRoom => group.window == room,
-        InfoScope::SelectedPane => selected.is_some_and(|id| group.pane == id || group.tabs.iter().any(|tab| tab.pane == id)),
-    }
-}
-
 /// 한 번의 수집 결과.
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct InfoSnap {
@@ -799,7 +788,7 @@ pub(crate) type SiteCache = std::sync::Arc<std::sync::Mutex<HashMap<(u16, u32), 
 
 /// 홈 아래 경로의 앞머리를 `~` 로 줄인다. 이 기계의 홈은 어느 pane 이든 같아서
 /// 전부 적어봐야 목록에서 겹치기만 하고, 정작 pane 을 가르는 건 그 뒤쪽이다.
-fn tilde_path(p: &std::path::Path) -> String {
+pub(crate) fn tilde_path(p: &std::path::Path) -> String {
     match kasa_socket::home_dir() {
         Some(home) => tilde_under(p, &home),
         None => p.to_string_lossy().into_owned(),
@@ -823,7 +812,7 @@ fn tilde_under(p: &std::path::Path, home: &std::path::Path) -> String {
 
 /// 포트 번호만 보고는 며칠 전 띄워둔 서버가 뭔지 알 수 없다. 알아낼 수 있는
 /// 것을 싼 순서로 붙인다: 표준 서비스 → 작업 폴더 이름 → 서버가 응답한 제목.
-fn site_label(port: u16, cwd: Option<&std::path::Path>, sites: &SiteCache) -> String {
+pub(crate) fn site_label(port: u16, cwd: Option<&std::path::Path>, sites: &SiteCache) -> String {
     if let Some(known) = well_known(port) {
         return known.to_string();
     }
@@ -892,7 +881,7 @@ pub(crate) fn port_kind(port: u16, name: &str) -> &'static str {
 /// 아직 안 물어본 포트에 한 번씩 HTTP 로 제목을 물어본다. 워커 스레드에서
 /// 부르되 수집을 막지 않도록 따로 띄운다 — 응답 없는 소켓 하나가 목록 전체를
 /// 세워선 안 된다. 표준 서비스 포트는 건드리지 않는다.
-fn probe_sites(ports: &[(u16, u32)], sites: &SiteCache) {
+pub(crate) fn probe_sites(ports: &[(u16, u32)], sites: &SiteCache) {
     let todo: Vec<(u16, u32)> = {
         let Ok(seen) = sites.lock() else { return };
         ports
@@ -1308,7 +1297,7 @@ fn process_snapshot() -> Vec<Raw> {
 /// 놓치지 않으려면 전부 받아 호출자가 걸러야 하고, 실측 비용도 46ms 로
 /// pid 필터를 걸 때와 사실상 같다.
 #[cfg(unix)]
-fn listening_ports() -> Vec<(u16, u32)> {
+pub(crate) fn listening_ports() -> Vec<(u16, u32)> {
     // `-F pn` 은 프로세스 레코드(p<pid>)와 이름 레코드(n<addr>)만 내보내는 lsof
     // 의 기계 판독 모드다. 사람이 읽는 표를 파싱하면 명령 이름에 공백이 든
     // 프로세스에서 열이 밀린다.
@@ -1339,7 +1328,7 @@ fn listening_ports() -> Vec<(u16, u32)> {
 }
 
 #[cfg(windows)]
-fn listening_ports() -> Vec<(u16, u32)> {
+pub(crate) fn listening_ports() -> Vec<(u16, u32)> {
     let Ok(out) = proc::command("netstat").args(["-ano", "-p", "TCP"]).output() else {
         return Vec::new();
     };
@@ -1776,7 +1765,6 @@ impl App {
             self.run_pending_autoinfo();
             return;
         }
-        self.info.active_room = self.active_window;
         self.info.selected_pane = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
         let selected_pid = self.ws.lock().ok().and_then(|ws| ws.active_pane.as_deref().map(|pane| ws.active_tab_pid(pane)));
         self.info.selected_pid = selected_pid.as_ref().map(|pid| {
@@ -1803,7 +1791,12 @@ impl App {
         // 한다 — 안 그러면 칩이 영영 0 으로 앉아 거짓말을 한다. 대신 주기를
         // 늦춘다(수집이 `ps` + `lsof` fork 라 상시 1.5초는 비싸고, 칩의 숫자는
         // 초 단위로 맞을 이유가 없다).
-        let watching = (self.info.tab == state::SideTab::Info && self.git.col_visible)
+        // 맨 위 카드는 감시 스레드가 따로 채운다. 아래 「모든 방」 목록은 펼쳤을 때만 자주 모은다.
+        let info_open = self.info.tab == state::SideTab::Info && self.git.col_visible;
+        let (target, hint) = self.info_focus_target();
+        self.info.focus_alt = self.ws.lock().ok().and_then(|ws| ws.active().and_then(|p| p.term()).map(|t| t.alt_screen)).unwrap_or(false);
+        self.info.focus.aim(target, hint, info_open);
+        let watching = (info_open && self.info.pane_expanded.contains(ROOMS_FOLD))
             || self.statusbar.popover.is_some();
         // 워커가 새 스냅샷을 올렸을 때만 렌더용 사본으로 옮긴다. 프레임마다
         // 잠그고 통째로 clone 하면 프로세스 수만큼의 String 할당이 60fps 로
@@ -1834,6 +1827,11 @@ impl App {
             self.info.frozen_since = None;
         }
         let frozen = hovering && self.info.frozen_since.is_some();
+        if !frozen {
+            if let Some(seen) = self.info.focus.take(&mut self.info.focus_rev) {
+                self.info.focus_view = seen;
+            }
+        }
         if rev != self.info.seen_rev && !frozen {
             if let Ok(g) = self.info.snap.lock() {
                 self.info.view = g.clone();
@@ -2388,12 +2386,8 @@ mod execution_overview_tests {
         }
     }
     #[test]
-    fn scopes_preserve_all_rooms_and_match_inner_tabs() {
+    fn execution_keys_split_devices() {
         let group = PaneGroup { pane: "%1".into(), window: 2, tabs: vec![TabRow { pane: "%7".into(), ..Default::default() }], ..Default::default() };
-        assert!(in_scope(&group, InfoScope::AllRooms, 0, None));
-        assert!(!in_scope(&group, InfoScope::CurrentRoom, 0, None));
-        assert!(in_scope(&group, InfoScope::SelectedPane, 0, Some("%7")));
-        assert!(!in_scope(&group, InfoScope::SelectedPane, 0, Some("%8")));
         assert_ne!(execution_key(&group), execution_key(&PaneGroup { machine: Some("other".into()), ..group.clone() }));
     }
     #[test]
@@ -2456,19 +2450,18 @@ mod execution_overview_tests {
         assert!(task_repeats_state("작업 중", "실행") && !task_repeats_state("확인 필요", "대기"));
     }
     #[test]
-    fn current_window_summary_leads_with_machine_folder_agent_and_model() {
+    fn room_rows_lead_with_machine_folder_agent_and_model() {
         let local = PaneGroup { pane: "%1".into(), cwd: "~/Desktop/kasaterm".into(), harness: "claude".into(), model: "claude-fable-5-1".into(), window: 0, ..Default::default() };
         let remote = PaneGroup { pane: "%2".into(), machine: Some("맥미니".into()), shell: "zsh".into(), window: 0, ..Default::default() };
         let other_room = PaneGroup { pane: "%3".into(), window: 1, ..Default::default() };
         let snap = InfoSnap { panes: vec![local, remote, other_room], ..Default::default() };
         let info = state::InfoState::default();
-        assert_eq!(info.scope, InfoScope::CurrentRoom, "the panel is a summary of the current window");
         let lines = execution_lines(&snap, &info);
-        assert!(!lines.iter().any(|line| matches!(line, ExecutionLine::Group(group, _) if group.pane == "%3")));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Group(group, _) if group.pane == "%3")), "the folded list keeps every room");
         let rows: Vec<(&str, Option<&str>)> = lines.iter().filter_map(|line| match line { ExecutionLine::Kv { name, value, .. } => Some((name.as_str(), value.as_deref())), _ => None }).collect();
         let first = rows.iter().position(|(name, _)| *name == "기기").unwrap();
         assert_eq!(&rows[first..first + 5], &[("기기", Some(local_machine_name())), ("폴더", Some("~/Desktop/kasaterm")), ("에이전트", Some("claude")), ("모델", Some("claude-fable-5-1")), ("상태", Some("대기 · claude"))]);
-        let remote_at = rows.iter().rposition(|(name, _)| *name == "기기").unwrap();
+        let remote_at = rows.iter().enumerate().filter(|(_, (name, _))| *name == "기기").nth(1).unwrap().0;
         assert_eq!(&rows[remote_at..remote_at + 2], &[("기기", Some("맥미니")), ("에이전트", Some("zsh"))], "unknown folder and model stay out of the folded row");
         let mut expanded = state::InfoState::default();
         expanded.pane_expanded.insert(execution_key(&snap.panes[1]));
@@ -2483,8 +2476,14 @@ fn execution_state(status: &str, remote: bool, rows: &[ProcRow], board: Option<&
     if rows.is_empty() { "대기".into() } else { "실행".into() }
 }
 
-enum ExecutionLine<'a> {
+pub(crate) enum ExecutionLine<'a> {
     Section(String),
+    /// 「지금 보는 칸」 카드 머리 — 굵은 칸 종류 · 오른쪽 흐린 기기·칸.
+    Head { title: String, note: String },
+    /// 누르는 「이름 · 값」 줄(카드의 경로·포트).
+    Link { name: String, value: String, tip: String, hit: Option<crate::info_focus::FocusHit> },
+    /// 접는 묶음 머리 — `key` 가 `pane_expanded` 에 있으면 펼친 것.
+    Fold { title: String, key: String },
     Group(&'a PaneGroup, String),
     Text(String, bool),
     /// 「이름 · 값」 표 한 줄. 값이 없으면 흐린 「—」 에 `tip` 이 까닭을 단다.
@@ -2501,8 +2500,8 @@ enum ExecutionLine<'a> {
 impl ExecutionLine<'_> {
     fn height(&self) -> f32 {
         match self {
-            Self::Section(_) => DEV_H,
-            Self::Group(..) | Self::Schedule(_) => GROUP_H,
+            Self::Section(_) | Self::Fold { .. } => DEV_H,
+            Self::Group(..) | Self::Schedule(_) | Self::Head { .. } => GROUP_H,
             Self::Now(_) => NOW_H,
             Self::PillRow { .. } => PILL_ROW_H,
             _ => ROW_H,
@@ -2512,6 +2511,8 @@ impl ExecutionLine<'_> {
 
 /// 「지금 하는 일」 줄 — 28px 얼굴 옆에 요청·답 두 줄.
 const NOW_H: f32 = 44.0;
+/// 카드 아래 「모든 방」 목록의 펼침 열쇠(`pane_expanded`). 접힌 게 기본이다.
+pub(crate) const ROOMS_FOLD: &str = "fold:rooms";
 const PILL_ROW_H: f32 = 24.0;
 
 fn kv<'a>(name: &str, value: impl Into<Option<String>>, tip: &str, warn: bool) -> ExecutionLine<'a> {
@@ -2529,7 +2530,7 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
     if let Some(error) = &snap.collection_error { lines.push(ExecutionLine::Text(format!("수집실패 · {error}"), true)); }
     if snap.board_error { lines.push(ExecutionLine::Text("작업 상태 수집실패 · 실행 정보만 표시".into(), true)); }
     let mut room = None;
-    for group in snap.panes.iter().filter(|group| in_scope(group, info.scope, info.active_room, info.selected_pane.as_deref())) {
+    for group in &snap.panes {
         if room != Some(group.window) {
             room = Some(group.window);
             lines.push(ExecutionLine::Section(if group.window_label.is_empty() { format!("방 {}", group.window + 1) } else { format!("방 {} · {}", group.window + 1, group.window_label) }));
@@ -2675,7 +2676,7 @@ fn kv_name_w(w: f32) -> f32 {
 /// 알약을 폭에 맞춰 줄로 접는다. 첫 줄만 이름을 달고 이어지는 줄은 이름 칸을 비운다.
 /// 알약 하나. 묶음 알약은 `toggle` 열쇠를 들고, 누르면 그 자리에서 펼치거나 접는다.
 #[derive(Clone, Debug, PartialEq)]
-struct Pill {
+pub(crate) struct Pill {
     label: String,
     tip: String,
     toggle: Option<String>,
@@ -2757,8 +2758,15 @@ pub(crate) fn draw_info_col(
     info.group_rects.clear(); info.proc_rects.clear(); info.kill_rects.clear();
     info.machine_rects.clear(); info.machine_pane_rects.clear(); info.sec_rects.clear(); info.dir_btn_rects.clear();
     info.tip_rects.clear();
+    info.focus_rects.clear();
     let value_w = (w - 26.0 - kv_name_w(w - 26.0)).max(0.0);
-    let lines: Vec<_> = execution_lines(&snap, info).into_iter().flat_map(|line| match line {
+    let mut lines = crate::info_focus::card_lines(&info.focus_view, info.focus_alt);
+    let rooms_open = info.pane_expanded.contains(ROOMS_FOLD);
+    lines.push(ExecutionLine::Fold { title: format!("모든 방 · 칸 {}개", snap.panes.iter().filter(|g| !g.closed).count()), key: ROOMS_FOLD.into() });
+    if rooms_open {
+        lines.extend(execution_lines(&snap, info));
+    }
+    let lines: Vec<_> = lines.into_iter().flat_map(|line| match line {
         ExecutionLine::Context(text) => wrap_context_line(g, &text, (w - 26.0).max(0.0)).into_iter().map(ExecutionLine::Context).collect(),
         ExecutionLine::Pills { name, items: None, tip } => vec![ExecutionLine::Kv { name, value: None, tip, warn: false }],
         ExecutionLine::Pills { name, items: Some(items), tip } if items.is_empty() => {
@@ -2781,6 +2789,49 @@ pub(crate) fn draw_info_col(
         if y + row_h > top && y < bottom {
             match line {
                 ExecutionLine::Section(title) => draw_room_head(g, title, x0, right, y + 3.0),
+                ExecutionLine::Head { title, note } => {
+                    let nw = if note.is_empty() { 0.0 } else { g.measure_chrome_text(note, 10.0, false).min((right - x0) * 0.5) };
+                    let title = fit_text(g, title, (right - x0 - nw - 12.0).max(0.0), 12.0, true);
+                    g.draw_text(x0, y + 5.0, &title, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
+                    if nw > 0.0 {
+                        let note = fit_text(g, note, nw, 10.0, false);
+                        let note_x = right - g.measure_chrome_text(&note, 10.0, false);
+                        g.draw_text(note_x, y + 6.0, &note, gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: false, italic: false });
+                    }
+                }
+                ExecutionLine::Fold { title, key } => {
+                    let rect = (x, y, w, row_h);
+                    if hit(cursor, &rect) {
+                        g.rect(x, y, w, row_h, theme::surface());
+                        g.hover_pointer = true;
+                    }
+                    let open = info.pane_expanded.contains(key);
+                    let affordance = if open { "접기" } else { "펼치기" };
+                    let aw = g.measure_chrome_text(affordance, 10.0, false);
+                    draw_room_head(g, title, x0 - 12.0, right - aw - 8.0, y + 3.0);
+                    g.draw_text(right - aw, y + 9.0, affordance, gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: false, italic: false });
+                    if let Some(clipped) = g.clip_hit(rect) { info.group_rects.push((key.clone(), clipped)); }
+                }
+                ExecutionLine::Link { name, value, tip, hit: target } => {
+                    let name_w = kv_name_w(right - x0);
+                    let vx = x0 + name_w;
+                    let rect = (x, y, w, row_h);
+                    let hot = target.is_some() && hit(cursor, &rect);
+                    if hot {
+                        g.rect(x, y, w, row_h, theme::surface());
+                        g.hover_pointer = true;
+                    }
+                    if !name.is_empty() {
+                        let name_text = fit_text(g, name, (name_w - 8.0).max(0.0), 11.0, false);
+                        g.draw_text(x0, y + 5.0, &name_text, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false });
+                    }
+                    let text = fit_text(g, value, (right - vx).max(0.0), 11.0, false);
+                    g.draw_text(vx, y + 5.0, &text, gpu::DrawOpts { font_size: 11.0, color: if target.is_some() { theme::accent() } else { theme::text() }, bold: false, italic: false });
+                    if let Some(clipped) = g.clip_hit(rect) {
+                        if let Some(target) = target { info.focus_rects.push((target.clone(), clipped)); }
+                        if !tip.is_empty() { info.tip_rects.push((tip.clone(), clipped)); }
+                    }
+                }
                 ExecutionLine::Group(group, key) => {
                     let rect = (x, y, w, row_h);
                     if hit(cursor, &rect) { g.rect(x, y, w, row_h, theme::surface()); }

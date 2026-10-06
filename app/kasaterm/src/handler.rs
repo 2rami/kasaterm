@@ -5581,6 +5581,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            if let Some(hit) = self
+                                .info
+                                .focus_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(h, _)| h.clone())
+                            {
+                                self.run_focus_hit(hit);
+                                window.request_redraw();
+                                return;
+                            }
                             // pane 그룹 머리 → 그 그룹만 접기.
                             if let Some(pane) = self
                                 .info
@@ -5589,7 +5600,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, r)| inside(r))
                                 .map(|(p, _)| p.clone())
                             {
-                                if pane.starts_with("runtime:") || pane.starts_with("pills:") {
+                                if pane.starts_with("runtime:") || pane.starts_with("pills:") || pane.starts_with("fold:") {
                                     if !self.info.pane_expanded.remove(&pane) {
                                         self.info.pane_expanded.insert(pane);
                                     }

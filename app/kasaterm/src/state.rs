@@ -766,8 +766,13 @@ pub(crate) enum InfoMenuAction {
 /// `root`/`root_is_repo` 는 파일트리가 앵커한 디렉터리로, 그게 git 레포라서
 /// 골라진 것인지를 패널이 정직하게 밝히는 데 쓴다.
 pub(crate) struct InfoState {
-    pub(crate) scope: crate::info::InfoScope,
-    pub(crate) active_room: usize,
+    /// 맨 위 「지금 보는 칸」 카드 — 감시 스레드와 함께 쥐는 자리, 렌더가 읽는 사본, 그 판 번호, 누르는 줄.
+    pub(crate) focus: std::sync::Arc<crate::info_focus::FocusShared>,
+    pub(crate) focus_view: crate::info_focus::Seen,
+    pub(crate) focus_rev: u64,
+    pub(crate) focus_rects: Vec<(crate::info_focus::FocusHit, (f32, f32, f32, f32))>,
+    /// 그 칸이 전체 화면(alt screen)인가 — 칸 종류를 「전체 화면 · vim」 으로 적는다.
+    pub(crate) focus_alt: bool,
     pub(crate) selected_pane: Option<String>,
     pub(crate) selected_pid: String,
     pub(crate) selected_session_id: String,
@@ -865,8 +870,11 @@ pub(crate) struct InfoState {
 impl Default for InfoState {
     fn default() -> Self {
         Self {
-            scope: crate::info::InfoScope::CurrentRoom,
-            active_room: 0,
+            focus: Default::default(),
+            focus_view: Default::default(),
+            focus_rev: 0,
+            focus_rects: Vec::new(),
+            focus_alt: false,
             selected_pane: None,
             selected_pid: String::new(),
             selected_session_id: String::new(),

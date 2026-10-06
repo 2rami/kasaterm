@@ -16,6 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// 승인 요청 하나를 쥐는 한도. 넘으면 원격 결정을 안 받고 엔진 창만 남는다.
@@ -112,6 +113,7 @@ struct Pane {
     /// 대화 행이 몇 번 쌓였나 — 대화 보기가 기록 파일을 다시 읽을 때를 안다(내용은 파일이 정본).
     rows: u64,
     status: Option<StatusLine>,
+    focus: FocusTrack,
 }
 
 /// 엔진이 자기 상태줄을 다시 그리기를 기다리는 한도. 엔진은 refreshInterval 1초에 300ms 를 더 미뤄,
@@ -202,6 +204,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                             activity: VecDeque::new(),
                             rows: 0,
                             status: None,
+                            focus: FocusTrack::default(),
                         },
                     );
                 }
@@ -231,6 +234,9 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
             }
             touched |= apply_one(pane, &kind, event, &mut statusline);
         }
+    }
+    if !events.is_empty() {
+        bump(surface);
     }
     if !git.is_empty() {
         record_git(git);
@@ -267,16 +273,23 @@ fn apply_one(pane: &mut Pane, kind: &str, event: &Value, statusline: &mut bool) 
     match kind {
         "turn" => match text(event, "phase").as_str() {
             "start" => note(pane, "prompt", "", &text(event, "text"), None),
-            "end" => note(pane, "say", "", &text(event, "answer"), None),
+            "end" => {
+                note(pane, "say", "", &text(event, "answer"), None);
+                pane.focus.tools.clear();
+            }
             _ => {}
         },
         "tool" => {
             let tool = text(event, "tool");
             match text(event, "phase").as_str() {
-                "start" => note(pane, "tool", &tool, &text(event, "label"), None),
+                "start" => {
+                    note(pane, "tool", &tool, &text(event, "label"), None);
+                    pane.focus.start(event, tool);
+                }
                 "end" => {
                     let error = event.get("error").and_then(Value::as_bool).unwrap_or(false);
                     note(pane, "result", &tool, &text(event, "text"), Some(error));
+                    pane.focus.end(&text(event, "id"), &tool, error);
                 }
                 _ => {}
             }
@@ -354,6 +367,10 @@ fn apply_one(pane: &mut Pane, kind: &str, event: &Value, statusline: &mut bool) 
                         .collect()
                 })
                 .unwrap_or_default();
+            pane.focus.task_since.retain(|id, _| s.background.iter().any(|t| t.id == *id));
+            for task in &s.background {
+                pane.focus.task_since.entry(task.id.clone()).or_insert(now);
+            }
             *statusline = true;
         }
         "row" => {
@@ -437,6 +454,214 @@ pub async fn wait_rows(surface: &str, seen: u64, wait: Duration) {
     loop {
         let notified = ROWS_WAKE.notified();
         if row_count(surface).is_none_or(|n| n > seen) || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            return;
+        }
+    }
+}
+
+// ── Info 카드 ────────────────────────────────────────────────────────────
+
+const RECENT_TOOLS: usize = 5;
+
+/// 오른쪽 Info 열 「지금 보는 칸」이 그리는 mod 몫 — 도는 도구·끝난 도구·백그라운드가 언제부터인가.
+#[derive(Default)]
+struct FocusTrack {
+    tools: Vec<OpenTool>,
+    recent: VecDeque<DoneTool>,
+    /// 백그라운드 작업을 처음 본 때. 엔진 목록은 시작 시각을 안 싣는다.
+    task_since: HashMap<String, Instant>,
+}
+
+struct OpenTool {
+    id: String,
+    tool: String,
+    label: String,
+    agent: bool,
+    since: Instant,
+}
+
+struct DoneTool {
+    tool: String,
+    label: String,
+    agent: bool,
+    error: bool,
+    took: Duration,
+    at: Instant,
+}
+
+impl FocusTrack {
+    fn start(&mut self, event: &Value, tool: String) {
+        let id = text(event, "id");
+        self.tools.retain(|t| id.is_empty() || t.id != id);
+        let agent = event.get("agent").and_then(Value::as_str).is_some_and(|a| !a.is_empty());
+        self.tools.push(OpenTool { id, tool, label: text(event, "label"), agent, since: Instant::now() });
+    }
+
+    fn end(&mut self, id: &str, tool: &str, error: bool) {
+        let Some(at) = self.tools.iter().position(|t| t.id == id && t.tool == tool) else { return };
+        let open = self.tools.remove(at);
+        if self.recent.len() >= RECENT_TOOLS {
+            self.recent.pop_back();
+        }
+        let now = Instant::now();
+        self.recent.push_front(DoneTool {
+            tool: open.tool,
+            label: open.label,
+            agent: open.agent,
+            error,
+            took: now.duration_since(open.since),
+            at: now,
+        });
+    }
+}
+
+/// 카드 한 줄의 도구. 나이·걸린 시간은 부른 순간 기준(ms)이라 다른 기기로 건너가도 시계가 안 갈린다.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusTool {
+    pub tool: String,
+    pub label: String,
+    /// 서브에이전트 안에서 돈 것.
+    pub agent: bool,
+    pub age_ms: u64,
+    /// 끝난 도구만 — 걸린 시간과 실패.
+    pub took_ms: Option<u64>,
+    pub error: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusTask {
+    /// `subagent`·`shell`·`monitor`·`workflow`.
+    pub kind: String,
+    pub label: String,
+    pub status: String,
+    pub age_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusAsk {
+    pub tool: String,
+    pub preview: String,
+    pub age_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusContext {
+    pub tokens: Option<u64>,
+    pub window: Option<u64>,
+    pub percent: Option<f64>,
+}
+
+/// 한 칸의 mod 사실 중 Info 카드가 쓰는 것. `state` 는 `working`·`resting`·`permission`·`question`·`compacting`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusFacts {
+    pub state: String,
+    pub tools: Vec<FocusTool>,
+    /// 끝난 도구, 최근 것부터.
+    pub recent: Vec<FocusTool>,
+    pub background: Vec<FocusTask>,
+    pub context: Option<FocusContext>,
+    pub ask: Option<FocusAsk>,
+}
+
+/// Info 카드의 mod 몫 — 그 칸이 mod 칸일 때만.
+pub fn focus_facts(surface: &str) -> Option<FocusFacts> {
+    facts_of(surface, &live(surface)?)
+}
+
+fn facts_of(surface: &str, state: &ModState) -> Option<FocusFacts> {
+    let now = Instant::now();
+    let ms = |d: Duration| d.as_millis() as u64;
+    let ask = permissions()
+        .into_iter()
+        .find(|r| r["surface"] == surface && r["session"] == state.session.as_str())
+        .map(|r| FocusAsk {
+            tool: text(&r, "tool"),
+            preview: text(&r, "preview"),
+            age_ms: now_ms().saturating_sub(r["created_at_ms"].as_u64().unwrap_or_else(now_ms)),
+        });
+    let phase = if !state.permissions.is_empty() || ask.is_some() {
+        "permission"
+    } else if state.question.is_some() {
+        "question"
+    } else if state.compacting.is_some() {
+        "compacting"
+    } else if state.turn_open {
+        "working"
+    } else {
+        "resting"
+    };
+    let panes = PANES.lock().unwrap();
+    let track = &panes.get(surface)?.focus;
+    Some(FocusFacts {
+        state: phase.into(),
+        tools: track
+            .tools
+            .iter()
+            .map(|t| FocusTool { tool: t.tool.clone(), label: t.label.clone(), agent: t.agent, age_ms: ms(now - t.since), took_ms: None, error: false })
+            .collect(),
+        recent: track
+            .recent
+            .iter()
+            .map(|t| FocusTool {
+                tool: t.tool.clone(),
+                label: t.label.clone(),
+                agent: t.agent,
+                age_ms: ms(now - t.at),
+                took_ms: Some(ms(t.took)),
+                error: t.error,
+            })
+            .collect(),
+        background: state
+            .running_tasks()
+            .map(|t| FocusTask {
+                kind: t.kind.clone(),
+                label: t.label.clone(),
+                status: t.status.clone(),
+                age_ms: track.task_since.get(&t.id).map_or(0, |since| ms(now - *since)),
+            })
+            .collect(),
+        context: state.usage.as_ref().map(|u| FocusContext { tokens: u.context_tokens, window: u.context_window, percent: u.context_percent }),
+        ask,
+    })
+}
+
+static SEQS: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(Default::default);
+static SEQ_WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
+static FOCUS_LISTENER: OnceLock<Listener> = OnceLock::new();
+
+/// mod 사실이 바뀐 칸마다 부를 자리 — 도구 하나가 시작·끝나도 부른다(`set_listener` 는 판정이 바뀔 때만). 앱이 한 번 건다.
+pub fn set_focus_listener(listener: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = FOCUS_LISTENER.set(Arc::new(listener));
+}
+
+/// 그 칸의 mod 사실이 바뀌었다 — 기다리는 쪽(GUI·다른 기기의 긴 폴링)을 깨운다.
+fn bump(surface: &str) {
+    *SEQS.lock().unwrap().entry(surface.to_string()).or_default() += 1;
+    SEQ_WAKE.notify_waiters();
+    if let Some(listener) = FOCUS_LISTENER.get() {
+        listener(surface);
+    }
+}
+
+/// 그 칸의 mod 사실 판 번호. 바뀐 적 없으면 0.
+pub fn seq(surface: &str) -> u64 {
+    SEQS.lock().unwrap().get(surface).copied().unwrap_or(0)
+}
+
+/// 그 칸의 판 번호가 `seen` 과 달라지거나 `wait` 가 지날 때까지 기다린다.
+pub async fn wait_seq(surface: &str, seen: u64, wait: Duration) {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let notified = SEQ_WAKE.notified();
+        if seq(surface) != seen || tokio::time::Instant::now() >= deadline {
             return;
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -660,6 +885,7 @@ pub fn decide(id: &str, surface: &str, session: &str, decision: &str, message: &
     };
     audit(&request, decision, by);
     REQUESTS_WAKE.notify_waiters();
+    bump(surface);
     Ok(())
 }
 
@@ -699,6 +925,7 @@ pub fn close_answered(surface: &str, key: Instant) {
         audit(request, "local:answered", "desk");
     }
     REQUESTS_WAKE.notify_waiters();
+    bump(surface);
 }
 
 fn audit(request: &Ask, decision: &str, by: &str) {
@@ -1191,6 +1418,46 @@ mod tests {
         assert_eq!(mine.len(), 1, "a signal from another session is dropped like any other event");
         assert_eq!(mine[0].paths, vec!["/repo/a.rs".to_string()]);
         assert!(!PANES.lock().unwrap()["%t20"].activity.iter().any(|row| row["kind"] == "git"));
+    }
+
+    #[test]
+    fn the_focus_card_follows_tools_and_background_and_every_change_bumps_the_pane() {
+        apply("%f1", "s", &ev(json!({"kind": "hello", "pid": 1})));
+        let before = seq("%f1");
+        apply("%f1", "s", &ev(json!({"kind": "turn", "phase": "start", "turn": "t"})));
+        apply("%f1", "s", &ev(json!({"kind": "tool", "phase": "start", "id": "a", "tool": "Bash", "label": "npm test"})));
+        apply("%f1", "s", &ev(json!({"kind": "tool", "phase": "start", "id": "b", "tool": "Read", "label": "main.rs", "agent": "sub1"})));
+        apply("%f1", "s", &ev(json!({"kind": "tool", "phase": "end", "id": "b", "tool": "Read", "error": true})));
+        apply("%f1", "s", &ev(json!({"kind": "background", "tasks": [{"id": "bg1", "type": "shell", "status": "running", "label": "npm run dev"}]})));
+        assert!(seq("%f1") >= before + 5, "도구 하나가 시작·끝나도 판이 오른다");
+        let state = PANES.lock().unwrap()["%f1"].state.clone();
+        let facts = facts_of("%f1", &state).unwrap();
+        assert_eq!(facts.state, "working");
+        assert_eq!(facts.tools.iter().map(|t| t.tool.as_str()).collect::<Vec<_>>(), ["Bash"]);
+        assert_eq!(facts.recent.len(), 1);
+        assert!(facts.recent[0].agent && facts.recent[0].error && facts.recent[0].took_ms.is_some());
+        assert_eq!(facts.background[0].label, "npm run dev");
+        apply("%f1", "s", &ev(json!({"kind": "background", "tasks": []})));
+        apply("%f1", "s", &ev(json!({"kind": "turn", "phase": "end", "turn": "t"})));
+        let state = PANES.lock().unwrap()["%f1"].state.clone();
+        let facts = facts_of("%f1", &state).unwrap();
+        assert_eq!(facts.state, "resting");
+        assert!(facts.tools.is_empty() && facts.background.is_empty(), "턴이 끝나면 못 받은 끝남도 거둔다");
+        assert!(PANES.lock().unwrap()["%f1"].focus.task_since.is_empty());
+    }
+
+    #[test]
+    fn only_the_last_few_finished_tools_are_kept_newest_first() {
+        apply("%f2", "s", &ev(json!({"kind": "hello", "pid": 1})));
+        for i in 0..8 {
+            let id = format!("t{i}");
+            apply("%f2", "s", &ev(json!({"kind": "tool", "phase": "start", "id": id, "tool": "Edit", "label": format!("f{i}")})));
+            apply("%f2", "s", &ev(json!({"kind": "tool", "phase": "end", "id": id, "tool": "Edit"})));
+        }
+        let state = PANES.lock().unwrap()["%f2"].state.clone();
+        let recent = facts_of("%f2", &state).unwrap().recent;
+        assert_eq!(recent.len(), RECENT_TOOLS);
+        assert_eq!(recent[0].label, "f7");
     }
 
     #[test]

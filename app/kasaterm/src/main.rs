@@ -79,6 +79,7 @@ pub(crate) use chrome::Density;
 mod gitdiff;
 mod git_panel;
 mod info;
+mod info_focus;
 mod context_info;
 mod internal_room;
 mod links;

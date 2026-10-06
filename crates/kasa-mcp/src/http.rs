@@ -7892,6 +7892,12 @@ pub fn spawn_http_server_opts(
                             async move { Json(crate::git_panel::wait(backend, q.0).await) }
                         }),
                     )
+                    .route(
+                        "/term/pane-info",
+                        get(|q: Query<std::collections::HashMap<String, String>>| async move {
+                            Json(crate::pane_info::wait(q.0).await)
+                        }),
+                    )
                     .route("/term/device-colors", get(move || {
                         let backend = colors_backend.clone();
                         async move { Json(backend.device_colors().unwrap_or_else(|_| serde_json::json!({}))) }

@@ -68,6 +68,15 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   신호부터 최대 1초, 신호로 읽는 사이 최소 800ms). mod 칸의 주기 조회는 5초로 늦춘다 — 사람 셸·편집기·codex 가 바꾼 것만
   그 주기로 잡는다. mod 없는 칸은 옛 1.2초 그대로다. 다른 기기 칸은 원본의 `/term/gitcol/wait` 가 같은 신호로 풀린다
   (`docs/remote-git-panel.md`).
+- **Info 카드**(오른쪽 Info 열 맨 위 「지금 보는 칸」, `app/kasaterm/src/info_focus.rs`): 새 이벤트 없이 `tool`·`turn`·
+  `background`·`usage`·`permission` 으로 짓는다. 앱은 칸마다 도는 도구(시작 시각)·끝난 도구 최근 5개(걸린 시간·실패)·
+  백그라운드를 처음 본 때를 쥐고 `claude_mod::focus_facts` 로 내준다(나이는 부른 순간 기준 ms — 거울로 건너가도 시계가
+  안 갈린다). 이벤트 묶음·승인 결정마다 그 칸의 판 번호(`claude_mod::seq`)가 오르고 `set_focus_listener` 가 GUI 감시를
+  깨운다 — 판정이 바뀔 때만 부르는 `set_listener` 와 달리 도구 하나가 시작·끝나도 부른다. 다른 기기 칸은 원본의
+  `GET /term/pane-info?schema=kasa.pane-info.v1&machine_id&pane&surface_key&since&wait_ms`(최대 8초)가 판 번호로 풀리고,
+  프로세스·포트가 바뀌면 1초 안에 답한다. 신원은 Git 열과 같이 기계 id·칸·surface_key 로 확인하고 거울 칸이면 거절한다.
+  답 `{schema, ok, seq, card}` 의 `card` 는 칸 종류·셸·셸 위 프로그램·폴더·모델·추론 강도·위 mod 사실·그 칸 프로세스
+  트리의 listen 포트다. 옛 원본(404)·옛 판(`update_needed`)은 카드에 까닭을 적고 드물게 다시 묻는다.
 
 ## 권한 요청 — 원격 승인 계약
 

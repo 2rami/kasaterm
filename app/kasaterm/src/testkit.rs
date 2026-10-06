@@ -2908,7 +2908,7 @@ impl App {
         let preview = std::env::var("KASATERM_AUTOINFO").unwrap_or_default();
         if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown" | "execution-skills") {
             use crate::context_info::ContextEvidence;
-            use crate::info::{ContextLines, InfoScope, InfoSnap, PaneGroup};
+            use crate::info::{ContextLines, InfoSnap, PaneGroup};
             let evidence = if preview == "execution-unknown" { ContextEvidence::default() } else {
                 ContextEvidence {
                     available: true, partial: true, observed_records: 18,
@@ -2936,14 +2936,13 @@ impl App {
                 }
             };
             self.git.col_w_logical = 280.0;
-            self.info.scope = InfoScope::AllRooms;
-            self.info.active_room = 0;
             self.info.selected_pane = Some("%info-fixture".into());
             self.info.selected_pid = if preview == "execution-stale" { "%new-fixture" } else { "%info-fixture" }.into();
             self.info.selected_session_id = "fixture-session".into();
             self.info.selected_harness = "claude".into();
             // 매 틱 다시 깔리므로 누른 스킬 묶음(`pills:`)만은 남겨 둔다 — 펼침을 눌러 확인할 수 있게.
             self.info.pane_expanded.retain(|key| key.starts_with("pills:"));
+            self.info.pane_expanded.insert(crate::info::ROOMS_FOLD.into());
             if matches!(preview.as_str(), "execution-details" | "execution-scroll" | "execution-skills") {
                 self.info.pane_expanded.insert("runtime:local:%info-fixture".into());
             }
