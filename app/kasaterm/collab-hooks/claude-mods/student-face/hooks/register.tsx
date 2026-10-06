@@ -90,11 +90,12 @@ export const register: Register = on => {
       turn.firsts.add(e.requestId)
       if (turn.firsts.size > FIRSTS_MAX) turn.firsts.delete(turn.firsts.values().next().value as string)
     }
-    if (!turn.firsts.has(e.requestId)) return next(e)
+    // 턴의 첫 답은 큰 얼굴, 도구 뒤 같은 턴에 이어지는 답의 ● 는 한 줄짜리 작은 얼굴로.
+    const big = turn.firsts.has(e.requestId)
     const { Box, Image, Markdown } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" gap={1}>
-        <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={4} rows={2} alt=" " />
+        <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={big ? 4 : 2} rows={big ? 2 : 1} alt=" " />
         <Box flexDirection="column" flexGrow={1} flexShrink={1}>
           <Markdown text={e.props.text} />
         </Box>

@@ -111,17 +111,18 @@ test('when the app cannot be reached the face it already knew stays', async ($, 
   await ui.unmount()
 })
 
-test('one face per turn: a later reply block in the same turn has none, and the first keeps its face on redraw', async ($, on) => {
+test('the turn opens with the big face; a later reply block in the same turn gets the small one; the first keeps the big one on redraw', async ($, on) => {
   host(on, { name: '유우카', face: FACE })
   await $.session.start(START)
   const first = await reply($, 'terminal', REPLY, { id: 'a' })
-  expect(await first.findAll({ type: 'Image' })).toHaveLength(1)
+  expect((await first.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 4, rows: 2 })
   await first.unmount()
   const later = await reply($, 'terminal', { text: '도구 뒤 글', isFirstOfReply: true }, { newTurn: false, id: 'b' })
-  expect(await later.findAll({ type: 'Image' })).toHaveLength(0)
+  expect((await later.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 2, rows: 1 })
+  expect((await later.findAll({ type: 'Markdown' }))[0]?.props.text).toBe('도구 뒤 글')
   await later.unmount()
   const again = await reply($, 'terminal', REPLY, { newTurn: false, id: 'a' })
-  expect(await again.findAll({ type: 'Image' })).toHaveLength(1)
+  expect((await again.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 4, rows: 2 })
   await again.unmount()
 })
 
