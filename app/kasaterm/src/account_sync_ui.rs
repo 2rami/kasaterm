@@ -11,11 +11,12 @@ impl App {
     }
 
     pub(crate) fn apply_account_sync(&mut self, request: kasa_mcp::account_sync::PendingApply) -> Result<(), String> {
-        if self.settings_input.is_some() || self.machine_edit.is_some() {
+        if self.settings_input.is_some() || self.machine_edit.is_some() || self.device_name_edit.is_some() {
             return Err("settings edit in progress".into());
         }
         let refresh = request.changes_runtime();
         let students = ["character_theme", "character_picks"].iter().any(|key| request.changes_setting(key));
+        let names = request.changes_setting("device_names");
         kasa_mcp::account_sync::apply_pending(request)?;
         if !refresh { return Ok(()); }
         let settings = socket::read_settings();
@@ -38,6 +39,7 @@ impl App {
         if persona != self.set_claude_persona { self.regen_pane_shims(); }
         // Before the settings cache reloads: it reads the roster and theme cards through these.
         if students { self.reload_student_choices(); }
+        if names { crate::render::pane_identity::reload_device_colors(); }
         self.settings_scene.refresh_cache();
         self.refresh_native_settings_dynamic_cache();
         self.reload_native_settings_media_cache();

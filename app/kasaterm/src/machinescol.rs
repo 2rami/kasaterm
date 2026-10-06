@@ -779,7 +779,7 @@ impl App {
             if !pane.is_empty() {
                 self.close_pane(pane);
             }
-            self.set_toast(format!("{label} 의 {name} 닫는 중"));
+            self.set_toast(format!("{} 의 {name} 닫는 중", crate::render::pane_identity::device_name(&label)));
             let (base, rid_s, name_s) = (m.base.clone(), rid, name.clone());
             std::thread::spawn(move || {
                 if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &rid_s, None, false) {
@@ -817,7 +817,7 @@ impl App {
             // 저쪽 태생 학생 데려오기 = 거울 열기 + 그 자리에서 역이사. 역이사가 sid 를
             // 저쪽에 물어 오므로(5830da54) 로컬에 기억이 없어도 간다.
             let (label, rid, name, cwd) = (label.clone(), remote_id.clone(), name.clone(), cwd.clone());
-            self.set_toast(format!("{name} 여기로 데려오는 중 — {label}"));
+            self.set_toast(format!("{name} 여기로 데려오는 중 — {}", crate::render::pane_identity::device_name(&label)));
             self.render_frame();
             let outcome = self.mirror_remote_pane(&label, &rid, &name, &cwd).and_then(|id| {
                 #[cfg(unix)]
@@ -847,10 +847,10 @@ impl App {
         } = &btn
         {
             let (label, rid, name, cwd) = (label.clone(), remote_id.clone(), name.clone(), cwd.clone());
-            self.set_toast(format!("{name} 거울 여는 중 — {label}, 이 pane 의 탭으로"));
+            self.set_toast(format!("{name} 거울 여는 중 — {}, 이 pane 의 탭으로", crate::render::pane_identity::device_name(&label)));
             self.render_frame();
             match self.mirror_remote_pane(&label, &rid, &name, &cwd) {
-                Ok(_) => self.set_toast(format!("{name} 거울 — {label} 의 화면을 이 pane 의 탭으로 열었다")),
+                Ok(_) => self.set_toast(format!("{name} 거울 — {} 의 화면을 이 pane 의 탭으로 열었다", crate::render::pane_identity::device_name(&label))),
                 Err(e) => self.set_toast(format!("거울 실패 — {e:#}")),
             }
             self.info.machines_col.last_refresh = None; // 새 거울을 바로 읽게.

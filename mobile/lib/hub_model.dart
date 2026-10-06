@@ -244,7 +244,20 @@ class HubModel extends ChangeNotifier {
   /// 기기 색·아이콘은 데스크톱 설정에서 바뀔 때만 바뀐다 — 폴링 박자엔 안 싣고 열 때·당길 때만 읽는다.
   Future<void> _loadLooks() async {
     final looks = await server.machineLooks();
-    if (!_disposed) machineLooks.value = looks;
+    if (!_disposed) machineLooks.value = looks.copyWith(ids: machineLooks.value.ids);
+  }
+
+  /// `~id` 길로 닿는 기계의 이름 → id. 이름만 든 자리(거울 칩)도 계정 이름을 찾는다.
+  void _learnIds(List<Machine> list) {
+    final ids = {...machineLooks.value.ids};
+    for (final m in list) {
+      if (m.route.length > 1 && m.route.startsWith('~') && m.label.isNotEmpty) {
+        ids[normalizeDevice(m.label)] = m.route.substring(1);
+      }
+    }
+    if (!mapEquals(ids, machineLooks.value.ids)) {
+      machineLooks.value = machineLooks.value.copyWith(ids: ids);
+    }
   }
 
   Future<void> _loadRootName() async {
@@ -382,6 +395,7 @@ class HubModel extends ChangeNotifier {
       if (!m.online) _seeded.remove(m.route);
     }
     _machines = list;
+    _learnIds(list);
     _compose();
     _syncWatchers();
     for (final m in list) {

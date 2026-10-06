@@ -17,6 +17,9 @@ class MachineLooks {
     this.icons = const {},
     this.presets = defaultPresets,
     this.local,
+    this.names = const {},
+    this.rootId,
+    this.ids = const {},
   });
 
   /// 데스크톱 `DEVICE_COLOR_PRESETS` — 옛 판이 `device_presets` 를 안 줄 때만 쓴다.
@@ -38,8 +41,23 @@ class MachineLooks {
   /// 기준 기기 자신의 색 — 기준 기기 칸은 이름이 「이 기계」로 떠도 이 색을 쓴다.
   final Color? local;
 
-  /// `appearance` 는 `settings/values` 의 `appearance`, `deviceIcons` 는 계정 설정의 `device_icons`.
-  factory MachineLooks.parse({Object? appearance, Object? deviceIcons}) {
+  /// 계정이 기기에 붙인 이름(`device_names`) — 기기 id → 이름. 보여 줄 때만 쓴다.
+  final Map<String, String> names;
+
+  /// 기준 기기의 id(`/version` 의 `machine_id`).
+  final String? rootId;
+
+  /// 정규화한 기기 이름 → id. `~id` 길로 닿는 기계를 허브가 알려 준다 — 거울 칩처럼 이름만 든 자리가 쓴다.
+  final Map<String, String> ids;
+
+  /// `appearance` 는 `settings/values` 의 `appearance`, `deviceIcons`·`deviceNames` 는 계정 설정의
+  /// `device_icons`·`device_names`. [deviceNames] 가 null 이면 `appearance.device_names` 를 쓴다.
+  factory MachineLooks.parse({
+    Object? appearance,
+    Object? deviceIcons,
+    Object? deviceNames,
+    String? rootId,
+  }) {
     final a = appearance is Map ? appearance : const {};
     final colors = <String, Color>{};
     Color? local;
@@ -69,8 +87,32 @@ class MachineLooks {
       icons: icons,
       presets: presets.isEmpty ? defaultPresets : presets,
       local: local,
+      // 계정 값을 받았으면 그것이 정본이다. 못 받았으면(계정 없이 붙은 폰·옛 관문) 기준 기기가 든 사본.
+      names: parseDeviceNames(deviceNames ?? a['device_names']),
+      rootId: rootId == null || rootId.isEmpty ? null : rootId,
     );
   }
+
+  MachineLooks copyWith({Map<String, String>? names, Map<String, String>? ids}) => MachineLooks(
+    colors: colors,
+    icons: icons,
+    presets: presets,
+    local: local,
+    names: names ?? this.names,
+    rootId: rootId,
+    ids: ids ?? this.ids,
+  );
+
+  /// 기기 id — [local] 이면 기준 기기, `~id` 길이면 그 id, 아니면 허브가 알려 준 이름 표.
+  String? idOf(String label, {String? route, bool local = false}) {
+    if (local) return rootId;
+    if (route != null && route.startsWith('~') && route.length > 1) return route.substring(1);
+    return ids[normalizeDevice(label)];
+  }
+
+  /// 사람이 부르는 이름 — 계정 이름이 있으면 그것, 없으면 [label]. 색·아이콘·길은 [label] 그대로 쓴다.
+  String name(String label, {String? route, bool local = false}) =>
+      names[idOf(label, route: route, local: local)] ?? label;
 
   /// [local] 이면 기준 기기 — 폰이 그 기기를 부르는 이름(「이 기계」)이 명부 이름과 다를 수 있다.
   Color color(String label, {bool local = false}) {
@@ -108,6 +150,25 @@ class MachineLooks {
   }
 }
 
+/// 계정 설정 `device_names` — 빈 이름·글이 아닌 값은 버린다.
+Map<String, String> parseDeviceNames(Object? raw) => {
+  if (raw is Map)
+    for (final e in raw.entries)
+      if (e.value is String && (e.value as String).trim().isNotEmpty) '${e.key}': (e.value as String).trim(),
+};
+
+/// [names] 에서 [id] 의 이름을 바꾼 새 표. 빈 [name] 은 지워 기기 제 이름으로 돌린다.
+Map<String, String> renameDevice(Map<String, String> names, String id, String name) {
+  final next = {...names};
+  final trimmed = name.trim();
+  if (trimmed.isEmpty) {
+    next.remove(id);
+  } else {
+    next[id] = trimmed;
+  }
+  return next;
+}
+
 /// 데스크톱 `normalize_device` — 맥 컴퓨터 이름의 NBSP 같은 공백 종류 차이를 지운다.
 String normalizeDevice(String label) => label
     .trim()
@@ -131,6 +192,9 @@ Color machineColor(String label, {bool local = false}) =>
     machineLooks.value.color(label, local: local);
 
 IconData machineIcon(String label) => machineLooks.value.icon(label);
+
+String machineName(String label, {String? route, bool local = false}) =>
+    machineLooks.value.name(label, route: route, local: local);
 
 /// 기기색으로 쓴 글자 — 그대로 칠하면 밝은 바탕 위 노랑이 안 읽힌다. 데스크톱 머리의
 /// `MachineIdentity::foreground`(대비 4.5)와 같은 보정이다. 아이콘·띠는 기기색 그대로 둔다.

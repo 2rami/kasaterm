@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../character_picks.dart';
 import '../look.dart';
+import '../machine_look.dart';
 import '../relay_account.dart';
 import '../server.dart';
 import '../twins_loading.dart';
@@ -364,7 +365,7 @@ class _CharacterPicksScreenState extends State<CharacterPicksScreen> {
           padding: const EdgeInsets.fromLTRB(4, Look.groupGap, 4, 0),
           child: Text(
             '계정에 저장해 모든 기기가 같은 명단을 써요. 이미 떠 있는 창의 학생은 그대로예요.'
-            '${store.machine == null ? '' : ' 학생 목록과 얼굴은 ${store.machine} 것이에요.'}',
+            '${store.machine == null ? '' : ' 학생 목록과 얼굴은 ${machineName(store.machine!, local: true)} 것이에요.'}',
             style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ),

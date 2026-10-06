@@ -702,7 +702,7 @@ fn paint_link_popover(
 ) {
     let machines = kasa_mcp::machines::snapshot();
     let rows: Vec<(String, bool, bool, Option<u64>)> = machines.iter().map(|m| (
-        m["label"].as_str().unwrap_or("기기").to_string(),
+        m["label"].as_str().map(crate::render::pane_identity::device_name).unwrap_or_else(|| "기기".to_string()),
         m["online"].as_bool() == Some(true),
         m["online_via"].as_str() == Some("direct"),
         m["rtt_ms"].as_u64(),
@@ -787,8 +787,8 @@ fn paint_tunnel_popover(
     round_rect(g, x + 12.0, y + 60.0, w - 24.0, 38.0, theme::radius_sm(), theme::panel_bg());
     g.queue_icon("monitor-smartphone", x + 23.0, y + 71.0, 16.0, theme::text_dim());
     text(g, x + 48.0, y + 66.0, "현재 기기", 9.0, theme::text_mute(), false);
-    let device = crate::info::cached_local_machine_name().unwrap_or("이 기기");
-    let device = crate::info::fit_text(g, device, w - 72.0, 11.0, true);
+    let device = crate::render::pane_identity::local_device_name().unwrap_or_else(|| "이 기기".to_string());
+    let device = crate::info::fit_text(g, &device, w - 72.0, 11.0, true);
     text(g, x + 48.0, y + 79.0, &device, 11.0, theme::text(), true);
 
     let Some(host) = host else {
@@ -847,7 +847,8 @@ fn paint_tunnel_popover(
         let fy = y + 376.0;
         g.rect(x + 16.0, fy - 4.0, w - 32.0, 1.0, theme::border());
         g.queue_icon("globe", x + 16.0, fy + 6.0, 12.0, theme::text_mute());
-        let device = if sb.chrome_phone { "폰" } else if sb.chrome_machine.is_empty() { "이 기기" } else { &sb.chrome_machine };
+        let named = crate::render::pane_identity::device_name(&sb.chrome_machine);
+        let device = if sb.chrome_phone { "폰" } else if sb.chrome_machine.is_empty() { "이 기기" } else { &named };
         let label = if reachable || sb.chrome_phone { format!("브라우저 · {device}") } else { format!("브라우저 · {device} 연결 확인 필요") };
         let label = crate::info::fit_text(g, &label, w - 64.0, 10.0, false);
         text(g, x + 35.0, fy + 6.0, &label, 10.0,
@@ -907,8 +908,8 @@ fn paint_chrome_popover(
         let display = if phone {
             "폰 · 쪽지로 받기".to_string()
         } else if label.is_empty() {
-            crate::info::cached_local_machine_name().map(|name| format!("{name} · 이 기기")).unwrap_or_else(|| "이 기기".into())
-        } else { label.to_string() };
+            crate::render::pane_identity::local_device_name().map(|name| format!("{name} · 이 기기")).unwrap_or_else(|| "이 기기".into())
+        } else { crate::render::pane_identity::device_name(label) };
         let display = crate::info::fit_text(g, &display, w - 87.0, 11.0, selected);
         g.draw_text(x + 41.0, ry + 12.0, &display, gpu::DrawOpts {
             font_size: 11.0, color: theme::text(), bold: selected, italic: false,

@@ -4510,6 +4510,8 @@ pub(crate) enum SettingsInput {
     CustomThemeLabel,
     /// 기계 명부의 이름·ssh 칸. 어느 줄의 어느 칸인지는 `App.machine_edit` 이 든다.
     MachineField,
+    /// 계정이 기기에 붙이는 화면 이름. 어느 기기인지는 `App.device_name_edit` 이 id 로 든다.
+    DeviceName,
     /// Agent 계정 별명. 제공자와 슬롯 id 는 `App.account_label_edit` 이 든다.
     AccountLabel,
     /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드. 어느 슬롯인지는 진행 중인 로그인
@@ -4660,6 +4662,8 @@ pub(crate) enum SettingsAction {
     RemoveMachine(usize),
     /// 그 줄의 칸을 고치기 시작한다 — `true` 면 ssh 칸.
     FocusMachineField(usize, bool),
+    /// 그 기기(id)의 화면 이름을 고치기 시작한다.
+    FocusDeviceName(String),
     /// 빌드가 다른 기계 한 대에 현재 dist를 보낸다. 값은 명부의 정확한 ssh 대상.
     SyncMachine(String, String),
     /// 하단바에 **안 쓰는 계정의 한도까지** 세우는 스위치.
@@ -5780,6 +5784,8 @@ struct App {
     account_label_edit: Option<(AccountProvider, String, String)>,
     /// 기계 명부에서 지금 고치는 칸 — (줄 번호, ssh 칸인가, 버퍼).
     machine_edit: Option<(usize, bool, String)>,
+    /// 화면 이름을 고치는 기기 — (기기 id, 버퍼).
+    device_name_edit: Option<(String, String)>,
     device_account: native_settings::device_account::State,
     /// 마지막으로 화면에 반영한 신원 조회 세대. `settings::probe_generation`.
     probe_seen: u64,
@@ -6339,6 +6345,7 @@ impl App {
             custom_theme_label_edit: None,
             account_label_edit: None,
             machine_edit: None,
+            device_name_edit: None,
             device_account: native_settings::device_account::State::default(),
             probe_seen: 0,
             login_code_edit: String::new(),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../look.dart';
+import '../machine_look.dart';
 import '../twins_loading.dart';
 
 import '../server.dart';
@@ -129,7 +130,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final t = _target;
-    final rootName = _rootName ?? '이 기계';
+    final rootName = machineName(_rootName ?? '이 기계', local: true);
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -174,7 +175,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
               for (final c in t?.candidates ?? const <String>[])
                 _row(
                   icon: Icons.desktop_windows_outlined,
-                  label: c,
+                  label: machineName(c),
                   selected: t != null && !t.phone && t.machine == c,
                   onTap: () => _pickMachine(c),
                 ),

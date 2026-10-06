@@ -9,7 +9,7 @@ const MAX_MACHINES: usize = 128;
 /// Keys a client must ask for by name (header `KEYS_HEADER`, comma separated). Every
 /// validator here rejects a whole snapshot that holds a key it does not know, so a key
 /// added later is hidden from clients that did not name it, and those keep syncing.
-pub const OPT_IN_KEYS: &[&str] = &["weather", "character_picks"];
+pub const OPT_IN_KEYS: &[&str] = &["weather", "character_picks", "device_names"];
 pub const KEYS_HEADER: &str = "x-kasa-sync-keys";
 
 pub fn opt_in_header() -> String {
@@ -67,6 +67,15 @@ fn character_picks(v: &Value) -> bool {
         name(&Value::String(theme.clone()), 80) && !theme.is_empty() && theme != "." && theme != ".."
             && names.as_array().is_some_and(|a| a.len() <= 256
                 && a.iter().all(|n| text(n, 40) && n.as_str().is_some_and(|s| !s.trim().is_empty())))
+    })
+}
+
+/// `{"<machine id>": "name"}` — what people call each device on every screen of the account.
+/// Display only: routes, roster lookups, aliases, colors and icon keys keep the machine's own label.
+fn device_names(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    o.len() <= 64 && o.iter().all(|(id, name)| {
+        valid_machine_id(id) && text(name, 40) && name.as_str().is_some_and(|s| !s.trim().is_empty())
     })
 }
 
@@ -150,6 +159,7 @@ pub fn valid_setting(key: &str, v: &Value) -> bool {
         "custom_theme" => palette(v),
         "weather" => weather(v),
         "character_picks" => character_picks(v),
+        "device_names" => device_names(v),
         _ => false,
     }
 }
@@ -237,7 +247,8 @@ pub fn known_setting(key: &str) -> bool {
         | "character_appearance" | "claude_persona" | "sidebar_persona" | "terminal_persona"
         | "file_tree_default" | "pane_footer_default" | "usage_compact" | "sidebar_pulse"
         | "statusbar_hidden" | "statusbar_order" | "statusbar_separators" | "statusbar_colors"
-        | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather" | "character_picks")
+        | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather" | "character_picks"
+        | "device_names")
 }
 
 pub fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
@@ -295,6 +306,21 @@ mod tests {
         snapshot.settings.insert("character_picks".into(), picks);
         assert!(!visible(snapshot.clone(), &accepted_keys(None)).settings.contains_key("character_picks"));
         assert!(visible(snapshot, &accepted_keys(Some(&opt_in_header()))).settings.contains_key("character_picks"));
+    }
+
+    #[test]
+    fn device_names_bind_to_machine_ids_and_only_reach_clients_that_ask() {
+        let names = json!({"4af3d95d64374ea3bd":"본진", "mac-book.1":"회사 맥북"});
+        assert!(valid_setting("device_names", &names));
+        assert!(valid_setting("device_names", &json!({})), "no names means every device keeps its own");
+        for bad in [json!({"../x":"본진"}), json!({"a/b":"본진"}), json!({"":"본진"}), json!({"id":""}),
+            json!({"id":"  "}), json!({"id":"a\nb"}), json!({"id":"가".repeat(41)}), json!({"id":1}), json!(["본진"])] {
+            assert!(!valid_setting("device_names", &bad), "{bad}");
+        }
+        let mut snapshot = Snapshot::default();
+        snapshot.settings.insert("device_names".into(), names);
+        assert!(!visible(snapshot.clone(), &accepted_keys(None)).settings.contains_key("device_names"));
+        assert!(visible(snapshot, &accepted_keys(Some("device_names"))).settings.contains_key("device_names"));
     }
 
     #[test]

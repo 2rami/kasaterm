@@ -823,6 +823,7 @@ pub(crate) struct Snapshot {
     pub(crate) account_usage_expanded: std::collections::HashSet<String>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
     pub(crate) machine_edit: Option<(usize, bool, String)>,
+    pub(crate) device_name_edit: Option<(String, String)>,
     pub(crate) login_job: Option<crate::settings::LoginJob>,
     /// 로그인이 코드를 기다릴 때 그 칸에 든 값.
     pub(crate) login_code: String,
@@ -1067,6 +1068,7 @@ impl App {
             dropdown_scroll: scene.dropdown_scroll(),
             account_label_edit: self.account_label_edit.clone(),
             machine_edit: self.machine_edit.clone(),
+            device_name_edit: self.device_name_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
             login_code: self.login_code_edit.clone(),
             home_accounts: home_accounts_view(),
@@ -1336,6 +1338,7 @@ impl App {
             SettingsInput::CustomThemeLabel
             | SettingsInput::AccountLabel
             | SettingsInput::MachineField
+            | SettingsInput::DeviceName
             | SettingsInput::LoginCode => {
                 self.settings_caret = self
                     .native_settings_field_value(field)
@@ -1416,6 +1419,13 @@ impl App {
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
+            SettingsInput::DeviceName => (
+                self.device_name_edit
+                    .as_ref()
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default(),
+                self.settings_caret,
+            ),
             SettingsInput::LoginCode => (self.login_code_edit.clone(), self.settings_caret),
             SettingsInput::ThemeLabel => (
                 self.theme_label_edit
@@ -1490,6 +1500,11 @@ impl App {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
                 }
             }
+            SettingsInput::DeviceName => {
+                if let Some((_, buffer)) = self.device_name_edit.as_mut() {
+                    crate::lineedit::insert(buffer, &mut self.settings_caret, text);
+                }
+            }
             SettingsInput::LoginCode => {
                 crate::lineedit::insert(&mut self.login_code_edit, &mut self.settings_caret, text);
             }
@@ -1559,6 +1574,9 @@ impl App {
         if self.settings_input == Some(SettingsInput::MachineField) {
             self.flush_machine_field();
         }
+        if self.settings_input == Some(SettingsInput::DeviceName) {
+            self.flush_device_name();
+        }
         if self.settings_input == Some(SettingsInput::LoginCode) {
             self.submit_login_code_field();
         }
@@ -1604,6 +1622,11 @@ impl App {
             }
             SettingsInput::MachineField => {
                 if let Some((_, _, value)) = self.machine_edit.as_mut() {
+                    *value = backup.value;
+                }
+            }
+            SettingsInput::DeviceName => {
+                if let Some((_, value)) = self.device_name_edit.as_mut() {
                     *value = backup.value;
                 }
             }
@@ -1659,6 +1682,7 @@ impl App {
             Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
             Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
             Some(SettingsInput::MachineField) => self.machine_edit = None,
+            Some(SettingsInput::DeviceName) => self.device_name_edit = None,
             // 코드는 지우지 않는다 — 붙여넣다 esc 를 눌러도 다시 치게 하지 않는다.
             Some(SettingsInput::LoginCode) => {}
             _ => {}
@@ -2392,6 +2416,10 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
             .machine_edit
             .as_mut()
             .map(|(_, _, buffer)| (buffer, &mut app.settings_caret)),
+        SettingsInput::DeviceName => app
+            .device_name_edit
+            .as_mut()
+            .map(|(_, buffer)| (buffer, &mut app.settings_caret)),
         SettingsInput::ThemeLabel => app
             .theme_label_edit
             .as_mut()
@@ -3764,7 +3792,8 @@ fn paint_device_icons(
     *y += 54.0;
     for row in s.device_icons.iter() {
         g.queue_icon(&row.icon, x, *y + (ROW_H - theme::ICON_SIZE) / 2.0, theme::ICON_SIZE, theme::text());
-        let label = if row.local { format!("{} · 이 기기", row.label) } else { row.label.clone() };
+        let name = crate::render::pane_identity::device_name(&row.label);
+        let label = if row.local { format!("{name} · 이 기기") } else { name };
         let label = fit(g, &label, (w - theme::ICON_SIZE - 12.0).max(0.0), 12.0, false);
         draw_text(g, x + theme::ICON_SIZE + 12.0, *y + 12.0, &label, 12.0, theme::text(), false);
         *y += ROW_H;
@@ -3834,10 +3863,11 @@ fn paint_device_colors(
         let swatch = (x + 8.0, *y + 8.0, 24.0, 24.0);
         round_rect(g, swatch.0, swatch.1, swatch.2, swatch.3, theme::radius_sm(), color);
         stroke_round(g, swatch, theme::radius_sm(), theme::edge_on(color));
+        let shown_name = crate::render::pane_identity::device_name(&row.label);
         let name = if row.local {
-            format!("{} · 이 기기", row.label)
+            format!("{shown_name} · 이 기기")
         } else {
-            row.label.clone()
+            shown_name
         };
         let right_w = 176.0;
         let name_w = (w - 42.0 - right_w).max(60.0);
@@ -4928,6 +4958,7 @@ fn paint_machines(
         false,
     );
     *y += 30.0;
+    paint_device_names(g, s, hits, caret, x, y, w);
     // 카사크롬(브라우저 도구)이 어느 기계의 크롬을 조작할지 — 이 기계가 기본이고,
     // 명부에 ssh 나 chrome_port 가 있는 기계만 고를 수 있다(다리로 갈 길이 있어야 한다).
     // 고른 기계가 안 닿으면 MCP 는 이 기계 크롬으로 물러난다(하단바 「모바일」 칩이 말한다).
@@ -4936,14 +4967,15 @@ fn paint_machines(
     {
         let chosen = kasa_mcp::machines::kasachrome_machine();
         let candidates = kasa_mcp::machines::kasachrome_candidates();
+        let names: Vec<String> = candidates.iter().map(|l| crate::render::pane_identity::device_name(l)).collect();
         let mut cells: Vec<(&str, bool, SettingsAction)> = vec![(
             "이 기계",
             chosen.is_empty(),
             SettingsAction::ChromeMachine(String::new()),
         )];
-        for label in &candidates {
+        for (label, name) in candidates.iter().zip(&names) {
             cells.push((
-                label.as_str(),
+                name.as_str(),
                 chosen == *label,
                 SettingsAction::ChromeMachine(label.clone()),
             ));
@@ -4953,7 +4985,8 @@ fn paint_machines(
         let note = if chosen.is_empty() {
             "학생의 브라우저 도구가 이 맥의 크롬을 씁니다".to_string()
         } else {
-            format!("학생의 브라우저 도구가 {chosen} 의 크롬(로그인 그대로)을 쓰고, 안 닿으면 이 맥 크롬으로 물러납니다")
+            format!("학생의 브라우저 도구가 {} 의 크롬(로그인 그대로)을 쓰고, 안 닿으면 이 맥 크롬으로 물러납니다",
+                crate::render::pane_identity::device_name(&chosen))
         };
         for line in wrap_words(g, &note, w, 10.5) {
             draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
@@ -5010,6 +5043,102 @@ fn paint_machines(
         *y += 20.0;
     }
     *y += 8.0;
+}
+
+/// 기기 이름 — 계정(`device_names`)이 기기 id 에 붙이는 화면 이름. 명부 이름(`to` 로 부르는
+/// 이름)·기기색·아이콘은 그대로라, 바꿔도 길이 끊기지 않는다.
+fn paint_device_names(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    draw_text(g, x, *y + 5.0, "기기 이름", 12.5, theme::text(), true);
+    *y += 28.0;
+    let note = crate::native_strings::text(
+        "여기서 바꾼 이름이 같은 KASA 계정의 PC·폰 화면에 함께 떠요 — `to` 로 부르는 명부 이름과 기기색은 그대로예요",
+    );
+    for line in wrap_words(g, &note, w, 10.5) {
+        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+        *y += 15.0;
+    }
+    *y += 6.0;
+    let text_x = x + theme::ICON_SIZE + 12.0;
+    for row in crate::render::pane_identity::device_name_rows() {
+        let editing = s.device_name_edit.as_ref().filter(|(id, _)| *id == row.id);
+        g.queue_icon(
+            &crate::device_icons::icon(&row.label),
+            x,
+            *y + (ROW_H - theme::ICON_SIZE) / 2.0,
+            theme::ICON_SIZE,
+            theme::text(),
+        );
+        if let Some((_, value)) = editing {
+            text_field(
+                g,
+                s,
+                hits,
+                caret,
+                text_x,
+                *y + (ROW_H - CTL_H) / 2.0,
+                w - (text_x - x),
+                "",
+                value,
+                SettingsInput::DeviceName,
+                s.settings_caret,
+                false,
+            );
+            *y += ROW_H;
+            draw_text(
+                g,
+                text_x,
+                *y,
+                "Enter 저장 · Esc 취소 · 비우면 원래 이름으로 돌아가요",
+                10.5,
+                theme::text_dim(),
+                false,
+            );
+            *y += 18.0;
+        } else {
+            let pencil = (x + w - CTL_H, *y + (ROW_H - CTL_H) / 2.0, CTL_H, CTL_H);
+            let room = (pencil.0 - 8.0 - text_x).max(0.0);
+            let shown = row.name.as_deref().unwrap_or(&row.label);
+            let shown = fit(g, shown, room, 12.0, false);
+            draw_text(g, text_x, *y + 5.0, &shown, 12.0, theme::text(), false);
+            let mut detail = if row.name.is_some() {
+                format!("원래 이름 {}", row.label)
+            } else {
+                "이름을 안 붙였어요".to_string()
+            };
+            if row.local {
+                detail.push_str(" · 이 기기");
+            }
+            let detail = fit(g, &detail, room, 10.5, false);
+            draw_text(g, text_x, *y + 22.0, &detail, 10.5, theme::text_mute(), false);
+            // 줄 아무 데나 누르면 고친다 — 연필을 따로 찾지 않아도 된다.
+            register_clipped(
+                g,
+                hits,
+                Target::Setting(SettingsAction::FocusDeviceName(row.id.clone())),
+                (x, *y, pencil.0 - x - 4.0, ROW_H),
+                HitCursor::Pointer,
+            );
+            mini_icon_button(
+                g,
+                s,
+                hits,
+                pencil,
+                "pencil",
+                Target::Setting(SettingsAction::FocusDeviceName(row.id.clone())),
+            );
+            *y += ROW_H;
+        }
+        g.rect(x, *y - 1.0, w, 1.0, theme::with_alpha(theme::border(), 140));
+    }
+    *y += 22.0;
 }
 
 #[allow(clippy::too_many_arguments)]

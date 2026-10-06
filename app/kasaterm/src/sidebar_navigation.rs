@@ -682,7 +682,8 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let plus = (width - 36.0, head.1, 28.0, head.3);
     let text_x = if compact { 12.0 } else { 38.0 };
     if !compact { g.queue_icon(&crate::device_icons::icon(label), 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
-    text(g, label, text_x, head.1 + 4.0, plus.0 - text_x - 4.0, 12.0, theme::text(), true);
+    let name = crate::render::pane_identity::local_device_name().filter(|n| !n.is_empty()).unwrap_or_else(|| label.to_string());
+    text(g, &name, text_x, head.1 + 4.0, plus.0 - text_x - 4.0, 12.0, theme::text(), true);
     text(g, "이 기기", text_x, head.1 + 22.0, plus.0 - text_x - 4.0, 10.0, theme::text_dim(), false);
     if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
     g.hover_pointer |= hit(cursor, plus);
@@ -716,7 +717,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         let text_x = if compact { 12.0 } else { 36.0 };
         let text_right = plus.0 - 4.0;
         if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 14.0, y + 11.0, 14.0, crate::render::machine_tint(&machine.label)); }
-        text(g, &machine.label, text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
+        text(g, &crate::render::pane_identity::device_name(&machine.label), text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
         text(g, &status(machine), text_x, y + 20.0, text_right - text_x, 9.5, theme::text_dim(), false);
         g.hover_pointer |= clipped(menu, viewport).is_some_and(|r| hit(cursor, r))
             || machine.online && clipped(plus, viewport).is_some_and(|r| hit(cursor, r));
@@ -1015,7 +1016,7 @@ impl App {
             },
             Action::NewRoom(label) => {
                 if let Err(e) = self.new_remote_room(&label) {
-                    self.set_toast(format!("{label} 에 새 방 실패 — {e:#}"));
+                    self.set_toast(format!("{} 에 새 방 실패 — {e:#}", crate::render::pane_identity::device_name(&label)));
                 }
                 self.info.machines_col.last_refresh = None;
             }
@@ -1425,7 +1426,7 @@ impl App {
         ids.sort();
         ids.dedup();
         if window.is_none() && ids.is_empty() { return; }
-        self.set_toast(format!("{label} 의 방 닫는 중…"));
+        self.set_toast(format!("{} 의 방 닫는 중…", crate::render::pane_identity::device_name(label)));
         let base = m.base.clone();
         std::thread::spawn(move || {
             let result = match window {
@@ -1467,7 +1468,7 @@ impl App {
             return;
         };
         let (base, pane) = (m.base.clone(), pane.to_string());
-        self.set_toast(format!("{label} 의 pane 닫는 중…"));
+        self.set_toast(format!("{} 의 pane 닫는 중…", crate::render::pane_identity::device_name(label)));
         std::thread::spawn(move || {
             if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &pane, None, false) {
                 eprintln!("[remote] pane close failed: {e:#}");
@@ -1489,7 +1490,7 @@ impl App {
             ..Default::default()
         };
         let (base, label) = (m.base.clone(), label.to_string());
-        self.set_toast(format!("{label} 에 {} 세우는 중…", if as_tab { "탭을" } else { "옆자리를" }));
+        self.set_toast(format!("{} 에 {} 세우는 중…", crate::render::pane_identity::device_name(&label), if as_tab { "탭을" } else { "옆자리를" }));
         std::thread::spawn(move || {
             if let Err(e) = kasa_mcp::remote::spawn_shell_pane_at(&base, &at, None) {
                 eprintln!("[remote] spawn beside failed: {e:#}");

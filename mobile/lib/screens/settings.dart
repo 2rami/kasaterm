@@ -10,6 +10,7 @@ import '../relay_account.dart';
 import '../server.dart';
 import 'browser_device.dart';
 import 'character_picks.dart';
+import 'device_names.dart';
 import 'dev_server.dart';
 import '../theme_prefs.dart';
 import '../weather/sheet.dart';
@@ -390,6 +391,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => CharacterPicksScreen(
+                server: server,
+                api: () => RelayAccountApi(account.origin, session: account),
+              ),
+            ),
+          ),
+        ),
+      if (server.account case final account?)
+        SettingsRow(
+          key: const Key('device-names'),
+          tone: tone,
+          icon: Icons.drive_file_rename_outline_rounded,
+          title: '기기 이름',
+          subtitle: '여기서 바꾼 이름이 모든 PC·폰 화면에 같이',
+          chevron: true,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => DeviceNamesScreen(
                 server: server,
                 api: () => RelayAccountApi(account.origin, session: account),
               ),

@@ -322,6 +322,18 @@ impl App {
         self.chrome_dirty = true;
     }
 
+    /// 고치던 기기 이름을 계정 설정에 적는다. 빈 칸은 기기 제 이름으로 돌린다.
+    pub(crate) fn flush_device_name(&mut self) {
+        let Some((id, value)) = self.device_name_edit.take() else {
+            return;
+        };
+        if let Err(message) = crate::render::pane_identity::set_device_name(&id, &value) {
+            self.set_toast(message);
+        }
+        self.repaint_all();
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn submit_login_code_field(&mut self) {
         let code = self.login_code_edit.trim().to_string();
         if code.is_empty() {
@@ -1493,6 +1505,20 @@ impl App {
                 self.settings_caret = value.chars().count();
                 self.machine_edit = Some((idx, ssh, value));
                 self.settings_input = Some(SettingsInput::MachineField);
+                self.chrome_dirty = true;
+            }
+            SettingsAction::FocusDeviceName(id) => {
+                if self.device_name_edit.is_some() {
+                    self.flush_device_name();
+                }
+                let value = crate::render::pane_identity::device_name_rows()
+                    .into_iter()
+                    .find(|row| row.id == id)
+                    .map(|row| row.name.unwrap_or(row.label))
+                    .unwrap_or_default();
+                self.settings_caret = value.chars().count();
+                self.device_name_edit = Some((id, value));
+                self.settings_input = Some(SettingsInput::DeviceName);
                 self.chrome_dirty = true;
             }
             SettingsAction::SyncMachine(label, expected_target) => {
@@ -2810,6 +2836,8 @@ impl App {
                         "custom": r.custom,
                     }))
                     .collect::<Vec<_>>(),
+                // 계정이 붙인 기기 이름의 이 기기 사본 — 계정으로 안 붙은 폰도 같은 이름을 본다.
+                "device_names": pane_identity::device_names(),
                 "device_presets": pane_identity::DEVICE_COLOR_PRESETS
                     .iter()
                     .map(|(n, c)| serde_json::json!({ "name": n, "hex": hex(*c) }))

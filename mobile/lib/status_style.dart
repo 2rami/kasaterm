@@ -272,7 +272,7 @@ class MirrorTag extends StatelessWidget {
             Icon(looks.icon(machine), size: 11, color: color),
             const SizedBox(width: 3),
             Text(
-              machine,
+              looks.name(machine),
               style: theme.textTheme.labelSmall?.copyWith(
                 color: machineInk(color, theme.colorScheme.surface),
                 fontWeight: FontWeight.w600,

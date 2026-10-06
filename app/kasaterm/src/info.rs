@@ -2544,7 +2544,9 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
         }
         // 현재 창 요약 — 기기·폴더·에이전트·모델이 상태보다 먼저. 모델은 하네스가 보고한 값만.
         // 모르는 값(「—」)은 접힌 줄에 안 세운다 — 실행 상세를 펼치면 까닭과 함께 보인다.
-        lines.push(kv("기기", group.machine.clone().unwrap_or_else(|| local_machine_name().to_string()), "", false));
+        lines.push(kv("기기", group.machine.as_deref().map(crate::render::pane_identity::device_name)
+            .or_else(crate::render::pane_identity::local_device_name)
+            .unwrap_or_else(|| local_machine_name().to_string()), "", false));
         if expanded || !group.cwd.is_empty() { lines.push(kv("폴더", group.cwd.clone(), "작업 폴더를 아직 못 읽었어요", false)); }
         let agent = if group.harness.is_empty() { group.shell.clone() } else { group.harness.clone() };
         if expanded || !agent.is_empty() { lines.push(kv("에이전트", agent, "실행 대상이 없어요", false)); }
@@ -3225,7 +3227,7 @@ fn draw_group_head(
     // before fitting long student/task names so a narrow Info column keeps it.
     if let Some(machine) = gp.machine.as_deref().filter(|m| !m.is_empty()) {
         let available = (text_right - tx - 8.0).max(0.0);
-        let badge = fit_text(g, &format!("⇄ {machine}"), available * 0.45, 10.0, true);
+        let badge = fit_text(g, &format!("⇄ {}", crate::render::pane_identity::device_name(machine)), available * 0.45, 10.0, true);
         let bw = g.measure_chrome_text(&badge, 10.0, true);
         if bw > 0.0 {
             let bx = text_right - bw - 8.0;
@@ -3733,14 +3735,14 @@ fn draw_pane_menu(
                 .machines
                 .iter()
                 .find(|m| m.mirrored.iter().any(|r| &r.pane == pane))
-                .map(|m| m.label.clone());
-            if let Some(label) = from {
+                .map(|m| crate::render::pane_identity::device_name(&m.label));
+            if let Some(name) = from {
                 // 조사(로/으로)를 안 붙이려고 화살표로 방향을 말한다 — 「나쵸네코 로」가 어색했다.
-                items.push((M::Bring, MenuRow::new(format!("데려오기 ← {label}")).sep().icon("server")));
+                items.push((M::Bring, MenuRow::new(format!("데려오기 ← {name}")).sep().icon("server")));
             } else {
                 let mut first = true;
                 for m in mc.machines.iter().filter(|m| m.online) {
-                    let row = MenuRow::new(format!("보내기 → {}", m.label)).icon("server");
+                    let row = MenuRow::new(format!("보내기 → {}", crate::render::pane_identity::device_name(&m.label))).icon("server");
                     items.push((M::Send(m.label.clone()), if first { row.sep() } else { row }));
                     first = false;
                 }
@@ -3950,7 +3952,7 @@ pub(crate) fn draw_machine_menu(
     };
     use state::MachinesColBtn as B;
     let mut items: Vec<(Option<B>, MenuRow)> = Vec::new();
-    items.push((None, MenuRow::new(m.label.clone()).bold().icon("server").muted()));
+    items.push((None, MenuRow::new(crate::render::pane_identity::device_name(&m.label)).bold().icon("server").muted()));
     if !m.online {
         items.push((None, MenuRow::new(crate::machinescol::ago_label(m.ago_secs)).muted()));
     }

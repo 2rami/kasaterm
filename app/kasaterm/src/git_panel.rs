@@ -188,9 +188,9 @@ pub(crate) fn header(
     mut y: f32,
     width: f32,
 ) -> f32 {
-    let machine: &str = match &view.remote {
-        Some((label, _)) => label,
-        None => info::cached_local_machine_name().unwrap_or("이 기기"),
+    let machine = match &view.remote {
+        Some((label, _)) => crate::render::pane_identity::device_name(label),
+        None => crate::render::pane_identity::local_device_name().unwrap_or_else(|| "이 기기".to_string()),
     };
     let repo = view
         .repo_root

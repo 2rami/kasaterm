@@ -7,7 +7,10 @@ pub(super) struct PaneIdentity {
 }
 
 pub(super) struct MachineIdentity {
+    /// 기기 제 이름 — 색·아이콘·명부를 찾는 열쇠.
     pub label: String,
+    /// 화면에 쓰는 이름(계정의 `device_names`, 없으면 `label`).
+    pub name: String,
     pub detail: String,
     pub remote: bool,
     tint: [u8; 4],
@@ -55,6 +58,7 @@ impl MachineIdentity {
         let tint = machine_tint(&label);
         let icon = crate::device_icons::icon(&label);
         Self {
+            name: device_name(&label),
             label,
             detail,
             remote: is_remote,
@@ -134,6 +138,10 @@ struct DeviceColors {
     assigned: HashMap<String, [u8; 4]>,
     /// 화면에 낼 순서: (표시 이름, 이 기기인가).
     roster: Vec<(String, bool)>,
+    /// 계정이 기기에 붙인 이름(`device_names`) — 기기 id → 이름.
+    names: HashMap<String, String>,
+    /// id 를 아는 기기 — (제 이름, id, 이 기기인가). 이 기기가 맨 앞.
+    known: Vec<(String, String, bool)>,
     loaded_at: std::time::Instant,
 }
 
@@ -256,11 +264,18 @@ fn build_device_colors() -> DeviceColors {
     let overrides = read_overrides(&settings, &aliases);
     let mut roster: Vec<(String, Option<String>)> = Vec::new();
     let mut shown: Vec<(String, bool)> = Vec::new();
+    let mut known: Vec<(String, String, bool)> = Vec::new();
     if let Some(local) = crate::info::cached_local_machine_name() {
         roster.push((local.to_string(), local_machine_id()));
         shown.push((local.to_string(), true));
+        if let Some(id) = local_machine_id() { known.push((local.to_string(), id, true)); }
     }
     for machine in kasa_mcp::machines::machines() {
+        if let Some(id) = machine.machine_id.as_deref().filter(|id| !id.trim().is_empty()) {
+            if !machine.label.trim().is_empty() && !known.iter().any(|(_, k, _)| k == id) {
+                known.push((machine.label.clone(), id.trim().to_string(), false));
+            }
+        }
         if machine.label.trim().is_empty()
             || shown.iter().any(|(l, _)| normalize_device(l) == normalize_device(&machine.label))
         {
@@ -274,8 +289,101 @@ fn build_device_colors() -> DeviceColors {
         aliases,
         assigned: assign_defaults(&roster),
         roster: shown,
+        names: read_device_names(&settings),
+        known,
         loaded_at: std::time::Instant::now(),
     }
+}
+
+fn read_device_names(settings: &serde_json::Value) -> HashMap<String, String> {
+    settings.get("device_names").and_then(|v| v.as_object()).into_iter().flatten()
+        .filter_map(|(id, name)| Some((id.clone(), name.as_str()?.trim().to_string())))
+        .filter(|(_, name)| !name.is_empty())
+        .collect()
+}
+
+/// 사람이 부르는 기기 이름. 계정 설정 `device_names` 가 기기 id 에 붙인 이름이 있으면 그것,
+/// 없으면 받은 이름 그대로다. **보여 줄 때만** 쓴다 — 길(`m/<이름>/`)·명부·별칭·색·아이콘은
+/// 기기 제 이름으로 찾아야 이름을 바꿔도 안 끊긴다.
+pub(crate) fn device_name(label: &str) -> String {
+    with_device_colors(|c| named(&c.aliases, &c.names, label))
+        .flatten()
+        .unwrap_or_else(|| label.to_string())
+}
+
+fn named(aliases: &HashMap<String, String>, names: &HashMap<String, String>, label: &str) -> Option<String> {
+    identity_key(aliases, label).strip_prefix("id:").and_then(|id| names.get(id)).cloned()
+}
+
+/// 「연결 기기」의 이름 줄 하나 — id 를 아는 기기만 이름을 붙일 수 있다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceNameRow {
+    pub id: String,
+    /// 기기 제 이름(컴퓨터 이름·명부 이름).
+    pub label: String,
+    /// 계정이 붙인 이름. 없으면 None.
+    pub name: Option<String>,
+    pub local: bool,
+}
+
+pub(crate) fn device_name_rows() -> Vec<DeviceNameRow> {
+    with_device_colors(|c| {
+        c.known.iter().map(|(label, id, local)| DeviceNameRow {
+            id: id.clone(),
+            label: label.clone(),
+            name: c.names.get(id).cloned(),
+            local: *local,
+        }).collect()
+    })
+    .unwrap_or_default()
+}
+
+/// 계정이 붙인 이름 전부 — 기기 id → 이름.
+pub(crate) fn device_names() -> std::collections::BTreeMap<String, String> {
+    with_device_colors(|c| c.names.iter().map(|(id, name)| (id.clone(), name.clone())).collect())
+        .unwrap_or_default()
+}
+
+/// 기기 id 로 찾은 계정 이름. 없으면 None.
+pub(crate) fn device_name_by_id(id: &str) -> Option<String> {
+    with_device_colors(|c| c.names.get(id.trim_start_matches('~')).cloned()).flatten()
+}
+
+/// 이 기기의 화면 이름 — 계정 이름, 없으면 컴퓨터 이름.
+pub(crate) fn local_device_name() -> Option<String> {
+    local_machine_id()
+        .and_then(|id| device_name_by_id(&id))
+        .or_else(|| crate::info::cached_local_machine_name().map(str::to_string))
+}
+
+pub(crate) fn local_device_id() -> Option<String> {
+    local_machine_id()
+}
+
+/// 기기 이름을 바꾼다. 빈 이름은 계정 이름을 지워 기기 제 이름으로 돌린다.
+pub(crate) fn set_device_name(id: &str, name: &str) -> Result<(), String> {
+    let id = id.trim_start_matches('~');
+    let name = name.trim();
+    if !kasa_mcp::account_sync::schema::valid_machine_id(id) {
+        return Err("기기 id 를 몰라 이름을 못 붙여요".into());
+    }
+    if name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err("이름은 40자까지예요".into());
+    }
+    let path = socket::settings_file_path().ok_or("설정 파일을 못 찾았어요")?;
+    kasa_mcp::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
+        let settings = settings.as_object_mut().ok_or("settings is not an object")?;
+        let names = settings.entry("device_names").or_insert_with(|| serde_json::json!({}));
+        if !names.is_object() { *names = serde_json::json!({}); }
+        let names = names.as_object_mut().ok_or("device_names is not an object")?;
+        if name.is_empty() { names.remove(id); } else { names.insert(id.into(), name.into()); }
+        if names.is_empty() { settings.remove("device_names"); }
+        Ok(())
+    })
+    .map_err(|_| "이름을 저장하지 못했어요".to_string())?;
+    reload_device_colors();
+    kasa_mcp::account_sync::poke();
+    Ok(())
 }
 
 /// 설정과 기계 명부를 다시 읽어 색표를 세운다. 설정을 고친 뒤와 부팅 때 부르고,
@@ -697,7 +805,7 @@ pub(super) fn draw_card(
     }
     if show_machine {
         let machine = &identity.machine;
-        let label = crate::info::fit_text(g, &machine.label, content_w - 36.0, machine_font, false);
+        let label = crate::info::fit_text(g, &machine.name, content_w - 36.0, machine_font, false);
         let label_w = g.measure_chrome_text(&label, machine_font, false);
         let chip_w = label_w + 36.0;
         let chip_x = x + (width - chip_w) / 2.0;
@@ -740,10 +848,11 @@ pub(super) fn draw_card(
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_defaults, hashed_device_color, machine_tint, parse_color_input, read_overrides,
-        terminal_identity_pid, MachineIdentity, DEVICE_COLOR_PRESETS, MINIMAP_BORDER_TINT,
-        MINIMAP_TINT,
+        assign_defaults, device_aliases, hashed_device_color, machine_tint, named, normalize_device,
+        parse_color_input, read_device_names, read_overrides, terminal_identity_pid, MachineIdentity,
+        DEVICE_COLOR_PRESETS, MINIMAP_BORDER_TINT, MINIMAP_TINT,
     };
+    use std::collections::HashMap;
 
     fn distance(a: [u8; 4], b: [u8; 4]) -> f32 {
         (0..3)
@@ -938,10 +1047,27 @@ mod tests {
     }
 
     #[test]
+    fn account_device_names_follow_the_machine_id_not_the_label() {
+        let settings = serde_json::json!({
+            "device_color_ids": {"맥북": "abc"},
+            "device_names": {"abc": " 회사 맥북 ", "gone": "  ", "bad": 3},
+        });
+        let mut aliases = device_aliases(&settings);
+        aliases.insert(normalize_device("MacBook Pro"), "id:abc".into());
+        let names = read_device_names(&settings);
+        assert_eq!(names.len(), 1, "blank and non-text names are ignored");
+        for label in ["MacBook\u{a0}Pro", "macbook pro", "맥북"] {
+            assert_eq!(named(&aliases, &names, label).as_deref(), Some("회사 맥북"), "{label}");
+        }
+        assert_eq!(named(&aliases, &names, "맥미니"), None);
+        assert_eq!(named(&aliases, &HashMap::new(), "맥북"), None);
+    }
+
+    #[test]
     fn remote_pane_background_keeps_viewer_brightness_and_stable_device_tint() {
         for base in [[26, 29, 35, 255], [240, 241, 243, 255]] {
             let mut machine = MachineIdentity {
-                label: "맥미니".into(), detail: "미러".into(), remote: false,
+                label: "맥미니".into(), name: "맥미니".into(), detail: "미러".into(), remote: false,
                 tint: machine_tint("맥미니"),
                 icon: "server".into(),
             };

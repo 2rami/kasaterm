@@ -289,7 +289,7 @@ class _HubScreenState extends State<HubScreen> {
       final folded = _model.view.isFolded(s.machine);
       children.add(
         _SectionHeader(
-          title: title,
+          title: machineName(title, route: s.route, local: s.machine == null),
           icon: icon,
           color: tint,
           root: s.machine == null,
@@ -400,14 +400,17 @@ class _ViewMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final view = model.view;
+    // 고른 값은 기기 제 이름으로 적어 두고(보기 기억이 이름을 바꿔도 안 풀린다) 계정 이름으로 보인다.
     final machines = [
       for (final s in model.sections)
-        if (s.machine != null) s.machine!,
+        if (s.machine != null) (s.machine!, machineName(s.machine!, route: s.route)),
     ];
-    final rootName = model.rootName ?? '이 기계';
+    final rootName = machineName(model.rootName ?? '이 기계', local: true);
     final current = view.machine == null
         ? '전체'
-        : (view.machine!.isEmpty ? rootName : view.machine!);
+        : (view.machine!.isEmpty
+              ? rootName
+              : machines.where((m) => m.$1 == view.machine).firstOrNull?.$2 ?? view.machine!);
     return PopupMenuButton<VoidCallback>(
       tooltip: '보기',
       onSelected: (fn) => fn(),
@@ -431,9 +434,9 @@ class _ViewMenu extends StatelessWidget {
         _pick(rootName, view.machine == '', () {
           model.setView(view.copyWith(machine: ''));
         }),
-        for (final m in machines)
-          _pick(m, view.machine == m, () {
-            model.setView(view.copyWith(machine: m));
+        for (final (label, name) in machines)
+          _pick(name, view.machine == label, () {
+            model.setView(view.copyWith(machine: label));
           }),
         const PopupMenuDivider(),
         const PopupMenuItem(enabled: false, height: 32, child: Text('모양')),

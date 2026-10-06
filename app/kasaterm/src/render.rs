@@ -2230,7 +2230,7 @@ impl App {
                     Some(id.as_str()),
                     crate::info::cached_local_machine_name(),
                 );
-                let machine = identity.remote.then(|| identity.label.clone());
+                let machine = identity.remote.then(|| identity.name.clone());
                 // 기기색은 **남의 기계에서 온 pane 에만** 칠한다 — pane 배경(`pane_background`)과
                 // 같은 규칙이다. 전에는 명부에 기계가 둘 이상이면 로컬 칸까지 이 기기색으로
                 // 물들여, 배치도는 파란데 pane 배경은 그대로인 어긋남이 났다(2026-09-14 지적
@@ -3168,14 +3168,14 @@ impl App {
                 // 원격 pane 이면 어느 기계인지 — 화면은 이 창이지만 학생은 저 기계에서
                 // 돈다. 배지가 없으면 로컬과 겉이 똑같아 「왜 반응이 없지」가 된다
                 // (2026-08-28 실측: 터널이 끊긴 원격 pane 을 로컬로 알고 입력했다).
-                let title_machine: Option<String> = self
+                let title_machine: Option<(String, String)> = self
                     .ws
                     .lock()
                     .ok()
                     .and_then(|w| w.active_pane.clone())
                     .and_then(|id| pane_identities.get(&id))
                     .filter(|identity| identity.machine.remote)
-                    .map(|identity| identity.machine.label.clone());
+                    .map(|identity| (identity.machine.name.clone(), identity.machine.label.clone()));
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
@@ -3256,7 +3256,7 @@ impl App {
                 // 오른쪽에 붙인다 — 잘리는 것보다 낫다.
                 // 포크/백그라운드 세션이면 이름 뒤에 dim 배지(⑂ = 분기 기호).
                 const BG_BADGE: &str = "  ⑂ bg";
-                let machine_badge = title_machine.as_deref().map(|m| format!("  ⇄ {m}"));
+                let machine_badge = title_machine.as_ref().map(|(name, _)| format!("  ⇄ {name}"));
                 let gl = 14.0_f32;
                 let pad = 10.0_f32;
                 let ph = 26.0_f32;
@@ -3411,7 +3411,7 @@ impl App {
                         );
                     }
                     if let (Some(b), Some(machine)) =
-                        (machine_badge.as_deref(), title_machine.as_deref())
+                        (machine_badge.as_deref(), title_machine.as_ref().map(|(_, label)| label.as_str()))
                     {
                         // The title strip must use the same device identity as
                         // the pane header and minimap, not the theme accent.
@@ -6808,7 +6808,7 @@ impl App {
                     let pad = 6.0;
                     let room = (chip_right - h.x - 140.0 - pad * 2.0 - icon - 5.0)
                         .max(0.0).min(156.0);
-                    let label = crate::info::fit_text(g, &machine.label, room, font, false);
+                    let label = crate::info::fit_text(g, &machine.name, room, font, false);
                     if !label.is_empty() {
                         let cw = g.measure_chrome_text(&label, font, false) + pad * 2.0 + icon + 5.0;
                         let ch = PANE_HEADER_HEIGHT - 8.0;
@@ -7814,7 +7814,7 @@ impl App {
                     .map(|identity| {
                         // 칩 하나만 남는 폭까지 좁아져도 이름 앞머리는 읽히게 자른다.
                         let room = (avail - pad_x * 2.0 - icon_sz - icon_gap).max(0.0);
-                        (crate::info::fit_text(g, &identity.machine.label, room, font, false), &identity.machine)
+                        (crate::info::fit_text(g, &identity.machine.name, room, font, false), &identity.machine)
                     })
                     .filter(|(l, _)| !l.is_empty());
                 let machine_w = machine
@@ -9470,9 +9470,9 @@ impl App {
                     // actual selected computer visible and open its own menu.
                     if tunnel_visible {
                         let machine = if self.statusbar.chrome_machine.is_empty() {
-                            crate::info::cached_local_machine_name().unwrap_or("이 기기")
-                        } else { &self.statusbar.chrome_machine };
-                        let name = if compact_tools { String::new() } else { crate::info::fit_text(g, machine, (slot_w - chip - 36.0).max(0.0), fs, false) };
+                            pane_identity::local_device_name().unwrap_or_else(|| "이 기기".to_string())
+                        } else { pane_identity::device_name(&self.statusbar.chrome_machine) };
+                        let name = if compact_tools { String::new() } else { crate::info::fit_text(g, &machine, (slot_w - chip - 36.0).max(0.0), fs, false) };
                         let name_w = g.measure_chrome_text(&name, fs, false);
                         let browser_w = icon + gap + name_w + dot;
                         let bx = rx - browser_w - chip;

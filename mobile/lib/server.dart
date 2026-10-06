@@ -757,11 +757,16 @@ class Server {
     }
   }
 
-  /// 기기 색·아이콘 — 기준 기기가 지금 칠하는 색과 계정 설정의 아이콘. 장식이라 못 받은 쪽은 비운다.
+  /// 기기 색·아이콘·이름 — 기준 기기가 지금 칠하는 색과 계정 설정의 아이콘·이름. 장식이라 못 받은 쪽은 비운다.
   Future<MachineLooks> machineLooks() async {
     Object? appearance;
     Object? icons;
+    Object? names;
+    String? rootId;
     await Future.wait([
+      () async {
+        rootId = await machineId();
+      }(),
       () async {
         try {
           final v = await _getJson('settings/values', timeout: const Duration(seconds: 10));
@@ -774,16 +779,31 @@ class Server {
         final a = account;
         if (a == null) return;
         try {
+          // `device_names` 는 옵트인 키 — 이름을 대야 관문이 싣는다.
           final res = await _client
-              .get(a.origin.resolve('/relay/account-sync'))
+              .get(a.origin.resolve('/relay/account-sync'), headers: {'x-kasa-sync-keys': 'device_names'})
               .timeout(const Duration(seconds: 10));
           if (res.statusCode != 200) return;
           final j = jsonDecode(utf8.decode(res.bodyBytes));
-          if (j is Map && j['settings'] is Map) icons = (j['settings'] as Map)['device_icons'];
+          if (j is Map && j['settings'] is Map) {
+            icons = (j['settings'] as Map)['device_icons'];
+            names = (j['settings'] as Map)['device_names'] ?? const <String, String>{};
+          }
         } catch (_) {}
       }(),
     ]);
-    return MachineLooks.parse(appearance: appearance, deviceIcons: icons);
+    return MachineLooks.parse(appearance: appearance, deviceIcons: icons, deviceNames: names, rootId: rootId);
+  }
+
+  /// 기준 기기의 id(`/version` 의 `machine_id`). 옛 판·끊김이면 null.
+  Future<String?> machineId() async {
+    try {
+      final v = await _getJson('version', timeout: const Duration(seconds: 10));
+      final id = v is Map ? v['machine_id'] : null;
+      return id is String && id.isNotEmpty ? id : null;
+    } on ServerException {
+      return null;
+    }
   }
 
   Future<Me> me() async {
