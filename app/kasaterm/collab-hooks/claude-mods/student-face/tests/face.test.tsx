@@ -14,6 +14,8 @@ function host(on: On, h: Host) {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('ui.render', { component: 'AssistantMessage' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.text] }))
+  on('ui.render', { component: 'Spinner' }, ($, e) => ({ type: 'Text', props: {}, children: [e.props.message ?? e.props.word] }))
+  on('ui.render', { component: 'TurnDuration' }, ($, e) => ({ type: 'Text', props: {}, children: [`${e.props.word} for 3s`] }))
   on('env.get', ($, e, next) => {
     if (e.name === 'KASATERM_CHARACTER') return { value: h.name }
     if (e.name === 'KASASPACE_MCP_PORT') return { value: '4321' }
@@ -36,26 +38,24 @@ async function reply($: Engine, surface: 'terminal' | 'desktop' | 'mobile', prop
   return $.ui.mount({ plugin: 'student-face', surface, component: 'AssistantMessage', requestId: opts.id ?? `m${turns}`, props, viewport: { columns: 100, rows: 30, isFullscreen: true } })
 }
 
-test("a student's pane opens each reply with the face and the name in the student's colour", async ($, on) => {
+test("a student's pane puts the face beside the first reply of a turn, without the name", async ($, on) => {
   const asked = host(on, { name: '유우카', face: FACE })
   await $.session.start(START)
   expect(asked).toEqual(['http://127.0.0.1:4321/claude-mod/face?name=%EC%9C%A0%EC%9A%B0%EC%B9%B4'])
   const ui = await reply($, 'terminal')
   const [image] = await ui.findAll({ type: 'Image' })
   expect(image?.props).toMatchObject({ source: { file: FACE.file, format: 'png', generation: 7 }, columns: 4, rows: 2 })
-  const name = (await ui.findAll({ type: 'Text' })).find(t => t.props.color === FACE.color)
-  expect(name?.text).toBe('유우카')
-  expect(name?.props.bold).toBe(true)
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === '유우카')).toBe(false)
   await ui.unmount()
 })
 
-test('a surface without pictures gets the name alone', async ($, on) => {
+test('a surface without pictures is left as the engine draws it', async ($, on) => {
   host(on, { name: '유우카', face: FACE })
   await $.session.start(START)
   for (const surface of ['desktop', 'mobile'] as const) {
     const ui = await reply($, surface)
     expect(await ui.findAll({ type: 'Image' })).toHaveLength(0)
-    expect((await ui.findAll({ type: 'Text' })).some(t => t.text === '유우카')).toBe(true)
+    expect(await ui.findAll({ type: 'Box' })).toHaveLength(0)
     await ui.unmount()
   }
 })
@@ -92,12 +92,11 @@ test('with the character look turned off nothing is drawn, and turning it back o
   await on_.unmount()
 })
 
-test('a student with no picture gets the name alone', async ($, on) => {
+test('a student with no picture gets no face on the reply', async ($, on) => {
   host(on, { name: '미치루', face: { name: '미치루', color: '#FFB25E' } })
   await $.session.start(START)
   const ui = await reply($, 'terminal')
-  expect(await ui.findAll({ type: 'Image' })).toHaveLength(0)
-  expect((await ui.findAll({ type: 'Text' })).some(t => t.props.color === '#FFB25E' && t.text === '미치루')).toBe(true)
+  expect(await ui.findAll({ type: 'Box' })).toHaveLength(0)
   await ui.unmount()
 })
 
@@ -124,4 +123,26 @@ test('one face per turn: a later reply block in the same turn has none, and the 
   const again = await reply($, 'terminal', REPLY, { newTurn: false, id: 'a' })
   expect(await again.findAll({ type: 'Image' })).toHaveLength(1)
   await again.unmount()
+})
+
+test('the working line says what the student is doing, in Korean', async ($, on) => {
+  host(on, { name: '유우카', face: FACE })
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'student-face', surface: 'terminal', component: 'Spinner', props: { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' } })
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === '유우카가 확인하는 중')).toBe(true)
+  await ui.unmount()
+  const busy = await $.ui.mount({ plugin: 'student-face', surface: 'terminal', component: 'Spinner', props: { word: 'Sauteing', message: 'Compacting', suffix: '…', mode: 'requesting' } })
+  expect((await busy.findAll({ type: 'Text' })).some(t => t.text === 'Compacting')).toBe(true)
+  await busy.unmount()
+})
+
+test('the turn line is in the student colour with the face as its mark', async ($, on) => {
+  host(on, { name: '유우카', face: FACE })
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'student-face', surface: 'terminal', component: 'TurnDuration', props: { word: 'Baked', durationMs: 67000 } })
+  const [image] = await ui.findAll({ type: 'Image' })
+  expect(image?.props).toMatchObject({ columns: 2, rows: 1 })
+  const line = (await ui.findAll({ type: 'Text' })).find(t => t.text === '1분 7초 걸려 끝났어요')
+  expect(line?.props.color).toBe(FACE.color)
+  await ui.unmount()
 })

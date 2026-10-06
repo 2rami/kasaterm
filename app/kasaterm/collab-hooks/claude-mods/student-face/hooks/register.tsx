@@ -14,6 +14,30 @@ const known = { face: null as Face | null, at: 0 }
 const turn = { waiting: false, firsts: new Set<string>() }
 const FIRSTS_MAX = 500
 
+// 엔진이 고른 영어 낱말(Sauteing…) 대신 학생이 무엇을 하는지 한국어로.
+const DOING: Record<string, string> = {
+  requesting: '정리하는 중',
+  thinking: '생각하는 중',
+  responding: '답 쓰는 중',
+  'tool-input': '도구 준비하는 중',
+  'tool-use': '확인하는 중',
+}
+
+// 받침이 있으면 「이」, 없으면 「가」 — 학생 이름 뒤 주격 조사.
+function subject(name: string): string {
+  const last = name.charCodeAt(name.length - 1)
+  const hangul = last >= 0xac00 && last <= 0xd7a3
+  return `${name}${hangul && (last - 0xac00) % 28 !== 0 ? '이' : '가'}`
+}
+
+function took(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const parts = [h ? `${h}시간` : '', m ? `${m}분` : '', h || m ? (s % 60 ? `${s % 60}초` : '') : `${s}초`].filter(Boolean)
+  return `${parts.join(' ')} 걸려 끝났어요`
+}
+
 function same(a: Face | null, b: Face | null): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
@@ -55,9 +79,10 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // 말하는 자리에 얼굴만 — 턴의 첫 답 왼쪽에 아바타처럼. 이름은 칸 머리·상태가 이미 말해 빼었다(2026-10-06).
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const face = known.face
-    if (!face || !e.props.isFirstOfReply) return next(e)
+    if (!face?.file || e.surface !== 'terminal' || !e.props.isFirstOfReply) return next(e)
     if (turn.waiting) {
       turn.waiting = false
       turn.firsts.add(e.requestId)
@@ -65,27 +90,34 @@ export const register: Register = on => {
     }
     if (!turn.firsts.has(e.requestId)) return next(e)
     const body = await next(e)
-    // 그림은 터미널만 그린다(다른 화면의 요소 표에는 Image 가 없다) — 거기엔 이름만.
-    if (e.surface === 'terminal') {
-      const { Box, Image, Text } = $.ui.resolve(e)
-      return (
-        <Box flexDirection="column">
-          {/* 이름을 얼굴 아랫줄에 붙여, 얼굴 두 줄과 답 사이에 빈 줄이 안 생기게 한다. */}
-          <Box flexDirection="row" gap={1} alignItems="flex-end">
-            {face.file ? (
-              <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={4} rows={2} alt=" " />
-            ) : null}
-            <Text bold color={face.color}>{face.name}</Text>
-          </Box>
-          {body}
-        </Box>
-      )
-    }
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Image } = $.ui.resolve(e)
     return (
-      <Box flexDirection="column">
-        <Text bold color={face.color}>{face.name}</Text>
-        {body}
+      <Box flexDirection="row" gap={1}>
+        <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={4} rows={2} alt=" " />
+        <Box flexDirection="column" flexGrow={1} flexShrink={1}>{body}</Box>
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Spinner' }, ($, e, next) => {
+    const face = known.face
+    if (!face || e.props.message !== null) return next(e)
+    return next({ ...e, props: { ...e.props, message: `${subject(face.name)} ${DOING[e.props.mode] ?? '일하는 중'}` } })
+  })
+
+  // 턴 끝 줄: 엔진의 영어 한 줄(Baked for 3s) 대신 학생 색 한국어, 앞 표지는 얼굴.
+  on('ui.render', { component: 'TurnDuration' }, ($, e, next) => {
+    const face = known.face
+    if (!face) return next(e)
+    const { Box, Image, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" gap={1}>
+        {face.file ? (
+          <Image key="student-face-end" source={{ file: face.file, format: 'png', generation: face.generation }} columns={2} rows={1} alt="◆" />
+        ) : (
+          <Text color={face.color}>◆</Text>
+        )}
+        <Text color={face.color}>{took(e.props.durationMs)}</Text>
       </Box>
     )
   })
