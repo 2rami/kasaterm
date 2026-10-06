@@ -25,6 +25,8 @@
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
 - `transcript.rs` — claude-code transcript(jsonl) → board 스냅샷 추출
 - `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
+- `chat_view/live.rs` — 대화 보기 위의 연결 mod 지금(일 상태·도는 도구·승인 요청). 이 기기 칸은 `claude_mod::mirror_view` 를
+  바로, 거울은 원본 `/term/mod-live` 에 매달린다. 승인 창 「Yes」·「No」의 mod 결정(`/term/mod-decide`)도 여기
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
@@ -40,7 +42,7 @@
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
 - `mirror_follow.rs` — 원본 격자는 마지막으로 만진 쪽을 따른다(tmux `window-size latest`). 사람 손(키·IME·왼클릭·SGR 누름·확대)이 닿은 칸을 판정해, 거울이면 `remote::touch_source` 로 원본을 그 칸 크기로 잡고 원본이면 `reclaim_viewer_sizes` 로 되찾는다. 만지기 전 거울은 `mirror_view` 가 뷰어 쪽에서 다시 접는다. 호스트가 `viewport_latest` 를 모르면(옛 판) 확대 때만 키우는 옛 규칙(`layout.rs fit_zoomed_mirror`). 폰까지 묶은 칸 크기 규칙은 `docs/webterm-handoff.md` 「원본 크기는 쓰는 쪽이 쥔다」
-- `mirror_render.rs` — 거울 칸을 어떤 보기로 그릴지 한 곳의 판정(`MirrorKind` Chat·Shell·Grid). Grid(옛 원본)만 만지면 원본 크기를 빌린다(`touch_surface_size` 가 이걸 본다). `docs/mirror-render.md`
+- `mirror_render.rs` — 거울 칸을 어떤 보기로 그릴지 한 곳의 판정(`MirrorKind` Chat·Shell·Grid). Grid(옛 원본)만 만지면 원본 크기를 빌린다(`touch_surface_size` 가 이걸 본다). 보이는 Chat 칸은 대화로 연다(`open_mirror_chats`, 사람이 터미널로 돌린 칸은 그대로). `docs/mirror-render.md`
 - `shell_view.rs` — 거울 셸 칸의 「명령 + 결과」 카드. 원본 `/term/blocks`(긴 폴링, `kasa_mcp::shell_blocks`)를 칸마다 일꾼이 받아 합치고, 자식 `shell_view/paint.rs` 가 칸 폭으로 다시 접어 그린다. 키는 원본 PTY 로(터미널과 같다), 클릭·휠은 카드가 먹는다. 셸 통합 없음·대체 화면이면 격자를 줄여 그린다(`layout.rs pane_display_scale`). 원본 쪽 줄 해석은 `kasa_pty::block_lines`
 - `prompt_nav.rs` — claude 칸의 스크롤바·프롬프트 눈금·프롬프트 이동(Option·Ctrl+↑↓). 그림·누름은 하나, 정본은 둘(`NavSource`): classic 은 이 터미널의 스크롤백(`scrollback_state`, 앵커는 `turnjump.rs` 캐시의 `❯` 줄)이라 `scroll_to_abs` 로 곧장 옮기고 키도 여기서 받는다(`prompt_nav_key`). 풀스크린(대체 화면)은 칸 안 mod(`collab-hooks/claude-mods/prompt-nav`, claude shim 이 `--plugin-dir` 로 싣는다)가 쓴 `<shim>/prompt-nav/<pane>.json` 을 읽어 그리며, 요청 파일 + 장전 화음(`ctrl+x b`) → `armed` 확인 → `ctrl+↑` 로 mod 에 스크롤을 시킨다. classic 칸의 `/prompt-nav` 는 mod 가 상태 파일 `ask` 로 맡긴다. 턴 띠 ↑↓↡ 도 mod 가 있으면 이 길로 간다
 - `trust_prompt.rs` — claude 폴더 신뢰 화면 자동 통과. 화면 펌프(`pump_pty_screens`)가 후보 pane 을 적고 GUI 틱이 판정한다: claude pane·입력 조용·한글 조합 아님일 때만, 초점이 No 면 아래 화살표 한 번, Yes 면 Enter 한 번(같은 화면에 반복 없음). 신뢰 선탑재는 `kasa_socket::claude_trust`(claude shim 이 `kasaterm-cli claude-trust "$PWD"` 로 부름)

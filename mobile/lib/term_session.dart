@@ -306,12 +306,14 @@ class TermSession extends ChangeNotifier {
 
   /// 답장 한 줄. 학생 pane 은 서버가 Enter 타이밍을 맡는 `send` 로, 웹 셸은
   /// 그 창구가 없어 소켓으로 직접.
-  Future<void> reply(String text) async {
+  /// [chat] 이면 대화 보기의 입력 — 원본이 mod 길·빈 입력칸으로 넣는다(`Server.chatSend`).
+  Future<void> reply(String text, {bool chat = false}) async {
     _touched();
     if (pane.isWebShell) {
       sendText('$text\r');
       return;
     }
+    if (chat) return server.chatSend(pane.id, text, machine: pane.machine);
     await server.send(pane.id, text, machine: pane.machine);
   }
 

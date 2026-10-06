@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::live::{self, ModLive};
 use super::parse::{tool_label, Item, Row};
 use super::{ChatPane, Feed};
 use crate::{gpu, native_controls, theme, MdBlock, MdSpan};
@@ -40,6 +41,8 @@ pub(crate) enum Hit {
     Composer,
     Bottom,
     Pick(usize),
+    /// 화면 선택지 없이 mod 요청만 보일 때의 허락·거절.
+    Decide(bool),
     Dismiss,
 }
 
@@ -361,6 +364,8 @@ enum Kind {
     Command { text: String },
     Answered { key: usize },
     Note { icon: &'static str, text: String },
+    /// 맨 아래 「이름 · 지금 하는 일」 — 하는 일은 mod 가 그때그때 알려 그릴 때 채운다.
+    Working,
 }
 
 #[derive(Clone, Debug)]
@@ -548,7 +553,7 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
     }
     layout.shown = out.len();
     if working {
-        push(&mut out, &mut y, 22.0, 10.0, Kind::Note { icon: "sparkles", text: format!("{name} · 작업 중") });
+        push(&mut out, &mut y, 22.0, 10.0, Kind::Working);
     }
     layout.rows = out;
     layout.height = y;
@@ -637,6 +642,77 @@ fn inside(c: (f32, f32), r: Rect) -> bool {
     c.0 >= r.0 && c.0 < r.0 + r.2 && c.1 >= r.1 && c.1 < r.1 + r.3
 }
 
+/// 승인·질문 카드 원문 한 줄 높이.
+const CTX_LINE: f32 = 16.0;
+/// 카드에 펴는 원문 줄 상한 — 그 뒤는 「… N줄 더」로 접고 전부는 터미널 보기에서 본다.
+const CTX_MAX: usize = 8;
+
+struct CardOption {
+    label: String,
+    note: String,
+    current: bool,
+    hit: Hit,
+}
+
+/// 입력칸 위 카드 한 장 — 화면에서 읽은 TUI 선택지, 또는 화면이 아직 없을 때 mod 의 승인 요청.
+struct Card {
+    context: Vec<String>,
+    title: String,
+    options: Vec<CardOption>,
+    /// 거절 선택지 이름 — 그것을 mod 결정으로 보내 입력칸 글이 까닭이 된다.
+    reason_hint: Option<String>,
+}
+
+impl Card {
+    fn height(&self) -> f32 {
+        let ctx = self.context.len() as f32 * CTX_LINE + if self.context.is_empty() { 0.0 } else { 6.0 };
+        let title = if self.title.is_empty() { 0.0 } else { 24.0 };
+        let options: f32 = self.options.iter().map(|o| if o.note.is_empty() { 32.0 } else { 46.0 }).sum();
+        10.0 + ctx + title + options + if self.reason_hint.is_some() { 18.0 } else { 0.0 } + 26.0 + 10.0
+    }
+}
+
+fn clip_lines(mut lines: Vec<String>) -> Vec<String> {
+    if lines.len() > CTX_MAX {
+        let more = lines.len() - (CTX_MAX - 1);
+        lines.truncate(CTX_MAX - 1);
+        lines.push(format!("… {more}줄 더"));
+    }
+    lines
+}
+
+fn card_of(menu: Option<&super::parse::PromptMenu>, live: &ModLive) -> Option<Card> {
+    if let Some(m) = menu {
+        let options = m
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| CardOption { label: format!("{}. {}", o.index, o.label), note: o.note.clone(), current: o.current, hit: Hit::Pick(i) })
+            .collect();
+        return Some(Card {
+            context: clip_lines(m.context.clone()),
+            title: m.title.clone(),
+            options,
+            reason_hint: (0..m.options.len())
+                .find(|&i| live::decision_for(m, live, i).is_some_and(|(allow, _)| !allow))
+                .map(|i| m.options[i].label.clone()),
+        });
+    }
+    // 질문은 허락·거절로 답하는 것이 아니다 — 화면의 선택지를 기다린다.
+    let p = live.permissions.first().filter(|p| live.live && p.tool != "AskUserQuestion")?;
+    let mut context = vec![tool_label(&p.tool).to_string()];
+    context.extend(live::input_lines(p));
+    Some(Card {
+        context: clip_lines(context),
+        title: "허락할까요?".into(),
+        options: vec![
+            CardOption { label: "허락".into(), note: String::new(), current: false, hit: Hit::Decide(true) },
+            CardOption { label: "거절".into(), note: String::new(), current: false, hit: Hit::Decide(false) },
+        ],
+        reason_hint: Some("거절".into()),
+    })
+}
+
 /// 말풍선 바탕. 말한 쪽 아래 모서리만 3 으로 좁혀 누가 한 말인지 꼬리처럼 읽힌다.
 fn bubble(g: &mut gpu::GpuRenderer, r: Rect, fill: [u8; 4], mine: bool) {
     let radius = 10.0_f32.min(r.3 / 2.0);
@@ -666,10 +742,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     let comp_y = y + h - composer_h;
 
     // ── 선택지 카드·기다림 줄 ───────────────────────────────────────────
-    let menu = pane.menu.clone().filter(|_| !slot.mirror);
-    let card_h = match &menu {
-        Some(m) => 10.0 + if m.title.is_empty() { 0.0 } else { 24.0 } + m.options.len() as f32 * 32.0 + 26.0 + 10.0,
-        None if slot.needs_you => 40.0,
+    let mod_live = pane.mod_live();
+    pane.live_painted = pane.live.lock().ok().map(|l| l.clone());
+    let working = slot.working || (mod_live.live && (mod_live.turn_open || mod_live.compacting));
+    let needs_you = slot.needs_you || !mod_live.permissions.is_empty() || mod_live.question;
+    let card = card_of(pane.menu.as_ref(), &mod_live);
+    let card_h = match &card {
+        Some(c) => c.height(),
+        None if needs_you => 40.0,
         None => 0.0,
     };
     let list_y = y + 8.0;
@@ -684,9 +764,9 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             pane.open.clear();
             pane.layout.generation = f.generation;
         }
-        let key = (f.version, f.generation, col_w.to_bits(), theme::ui_font_gen(), pane.layout.open_gen, slot.working);
+        let key = (f.version, f.generation, col_w.to_bits(), theme::ui_font_gen(), pane.layout.open_gen, working);
         if pane.layout.key != Some(key) {
-            build(g, &mut pane.layout, f, &pane.open, col_w, &slot.name, slot.working);
+            build(g, &mut pane.layout, f, &pane.open, col_w, &slot.name, working);
             pane.layout.key = Some(key);
         }
     }
@@ -697,9 +777,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         Some(f) if f.error.is_some() => Some(("대화를 못 읽었어요", f.error.clone().unwrap_or_default())),
         Some(f) if f.missing || pane.layout.shown == 0 => Some((
             "아직 대화가 없어요",
-            if slot.mirror {
-                "다른 기기 학생의 거울이라 대화 기록은 그 기기에 있어요. 터미널 보기로 보세요.".into()
-            } else if f.missing {
+            if f.missing {
                 "이 창에 묶인 대화 기록이 아직 없어요. 학생이 첫 답을 하면 여기에 떠요.".into()
             } else {
                 "말을 걸면 여기에 떠요.".into()
@@ -857,6 +935,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                         draw_block(g, col_x, ry, b, theme::pane_bg(), clip);
                     }
                 }
+                Kind::Working => {
+                    let text = format!("{} · {}", slot.name, mod_live.doing().unwrap_or_else(|| "작업 중".into()));
+                    let t = crate::info::fit_text(g, &text, (col_w - 24.0).max(0.0), 10.5, false);
+                    let tw = g.measure_chrome_text(&t, 10.5, false) + 18.0;
+                    let nx = col_x + (col_w - tw) / 2.0;
+                    g.queue_icon("sparkles", nx, ry + 5.0, 12.0, theme::accent());
+                    label(g, nx + 18.0, ry + 4.5, &t, 10.5, theme::text_dim(), false);
+                }
                 Kind::Note { icon, text } => {
                     let t = crate::info::fit_text(g, text, (col_w - 24.0).max(0.0), 10.5, false);
                     let tw = g.measure_chrome_text(&t, 10.5, false) + 18.0;
@@ -878,25 +964,50 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
 
     // ── 선택지 카드 ───────────────────────────────────────────────────────
     let card_y = comp_y - card_h;
-    if let Some(m) = &menu {
-        let line = if slot.needs_you { theme::attention() } else { theme::accent() };
+    if let Some(c) = &card {
+        let line = if needs_you { theme::attention() } else { theme::accent() };
         g.round_rect_stroke(col_x, card_y, col_w, card_h, theme::radius_md(), theme::border_w().max(1.0), line);
         let mut cy = card_y + 10.0;
-        if !m.title.is_empty() {
-            let t = crate::info::fit_text(g, &m.title, col_w - 20.0, 12.0, true);
-            label(g, col_x + 10.0, cy + 3.0, &t, 12.0, theme::text(), true);
+        // TUI 창 안의 줄 그대로 — 머리(도구·질문 이름)는 굵게, 원문은 고정폭으로.
+        for (i, text) in c.context.iter().enumerate() {
+            if i == 0 {
+                let t = crate::info::fit_text(g, text, col_w - 20.0, 12.0, true);
+                label(g, col_x + 10.0, cy + 1.0, &t, 12.0, theme::text(), true);
+            } else {
+                g.push_clip(col_x + 10.0, cy, col_w - 20.0, CTX_LINE);
+                g.draw_code_text(col_x + 10.0, cy + 2.0, text, 11.0, theme::text_dim());
+                g.pop_clip();
+            }
+            cy += CTX_LINE;
+        }
+        if !c.context.is_empty() {
+            cy += 6.0;
+        }
+        if !c.title.is_empty() {
+            let t = crate::info::fit_text(g, &c.title, col_w - 20.0, 12.0, c.context.is_empty());
+            label(g, col_x + 10.0, cy + 3.0, &t, 12.0, theme::text(), c.context.is_empty());
             cy += 24.0;
         }
-        for (i, o) in m.options.iter().enumerate() {
-            let r = (col_x + 10.0, cy, col_w - 20.0, 26.0);
+        for o in &c.options {
+            let oh = if o.note.is_empty() { 26.0 } else { 40.0 };
+            let r = (col_x + 10.0, cy, col_w - 20.0, oh);
             let hover = inside(cursor, r);
             let edge = if o.current { theme::accent() } else if hover { theme::text_dim() } else { theme::border() };
             g.round_rect_stroke(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::border_w().max(1.0), edge);
-            let t = crate::info::fit_text(g, &format!("{}. {}", o.index, o.label), r.2 - 20.0, 12.0, o.current);
+            let t = crate::info::fit_text(g, &o.label, r.2 - 20.0, 12.0, o.current);
             label(g, r.0 + 10.0, r.1 + 6.5, &t, 12.0, if o.current { theme::accent() } else { theme::text() }, o.current);
+            if !o.note.is_empty() {
+                let n = crate::info::fit_text(g, &o.note, r.2 - 20.0, 10.5, false);
+                label(g, r.0 + 10.0, r.1 + 22.0, &n, 10.5, theme::text_mute(), false);
+            }
             g.hover_pointer |= hover;
-            hits.push((Hit::Pick(i), r));
-            cy += 32.0;
+            hits.push((o.hit.clone(), r));
+            cy += oh + 6.0;
+        }
+        if let Some(deny) = &c.reason_hint {
+            let t = crate::info::fit_text(g, &format!("「{deny}」는 입력칸에 쓴 글을 까닭으로 함께 보내요"), col_w - 20.0, 10.5, false);
+            label(g, col_x + 10.0, cy + 1.0, &t, 10.5, theme::text_mute(), false);
+            cy += 18.0;
         }
         let esc = (col_x + 10.0, cy, 90.0, 26.0);
         native_controls::text_button(g, esc, cursor, "취소 esc", native_controls::Style::default());
@@ -904,7 +1015,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         let term = (col_x + col_w - 10.0 - 120.0, cy, 120.0, 26.0);
         native_controls::text_button(g, term, cursor, "터미널에서 보기", native_controls::Style::default());
         hits.push((Hit::Terminal, term));
-    } else if slot.needs_you {
+    } else if needs_you {
         let mid = card_y + card_h / 2.0 - 4.0;
         g.queue_icon("message-square-warning", col_x + 2.0, mid - 7.0, 14.0, theme::attention());
         let bw = 110.0;
@@ -954,15 +1065,20 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         hits.push((Hit::Send, send));
     }
     let mut hint_right = send.0 - 8.0;
-    if slot.working {
+    if working {
         let stop = (send.0 - 6.0 - 84.0, by, 84.0, 26.0);
         native_controls::text_button(g, stop, cursor, "멈추기 esc", native_controls::Style::default());
         hits.push((Hit::Stop, stop));
         hint_right = stop.0 - 8.0;
     }
     let hint_x = term.0 + term.2 + 10.0;
-    let hint = crate::info::fit_text(g, "Enter 보내기 · ⇧Enter 줄바꿈", (hint_right - hint_x).max(0.0), 10.5, false);
-    label(g, hint_x, by + 7.0, &hint, 10.5, theme::text_mute(), false);
+    let failed = pane.send_error.lock().ok().and_then(|e| e.clone());
+    let (hint, tone) = match &failed {
+        Some(e) => (format!("못 보냈어요 · {e}"), theme::danger()),
+        None => ("Enter 보내기 · ⇧Enter 줄바꿈".to_string(), theme::text_mute()),
+    };
+    let hint = crate::info::fit_text(g, &hint, (hint_right - hint_x).max(0.0), 10.5, false);
+    label(g, hint_x, by + 7.0, &hint, 10.5, tone, false);
 
     g.pop_clip();
     hits

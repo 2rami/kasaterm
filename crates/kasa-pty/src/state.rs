@@ -1569,8 +1569,12 @@ impl PtySession {
                     alacritty_terminal::index::Line(line as i32),
                     alacritty_terminal::index::Column(c),
                 );
-                let ch = grid[point].c;
-                row.push(if ch == '\0' { ' ' } else { ch });
+                let cell = &grid[point];
+                // wide 글리프의 뒤칸은 `' '` 에 플래그만 다르다 — 넣으면 한글마다 한 칸씩 벌어진다.
+                if cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                row.push(if cell.c == '\0' { ' ' } else { cell.c });
             }
             out.push_str(row.trim_end());
             out.push('\n');
@@ -7172,6 +7176,15 @@ mod external_session_tests {
         reader.read(&mut small).unwrap();
         reader.read(&mut small).unwrap();
         assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn visible_text_keeps_wide_glyphs_together() {
+        let (session, events, _, _) = ext_session(30, 4);
+        events.send(ExtEvent::Generation(1)).unwrap();
+        events.send(ExtEvent::Bytes("Reason: 선생님, 작업 a".as_bytes().to_vec())).unwrap();
+        session.screens.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert!(session.visible_text(4).contains("Reason: 선생님, 작업 a"), "{:?}", session.visible_text(4));
     }
 
     #[test]

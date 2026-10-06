@@ -3134,6 +3134,34 @@ fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str, rea
     }
 }
 
+/// `POST /term/chat-send` `{surface, text}` — 거울(다른 기기·폰) 대화 보기의 입력(`docs/mirror-render.md`).
+/// mod 칸이면 mod 에 맡겨 쉬는 순간 정식 턴으로 넣는다(원본 입력칸의 초안·한글 조합을 안 건드린다). 아니면
+/// 안전한 tell(입력칸이 빌 때 붙여넣기), 그것도 거절되면(막 띄워 신원이 안 선 칸) 옛 `/send` 붙여넣기.
+async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    let surface = body["surface"].as_str().unwrap_or("").to_string();
+    let text = body["text"].as_str().unwrap_or("").trim().to_string();
+    if surface.is_empty() || text.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "surface·text 가 필요해요" }));
+    }
+    if let Some(id) = crate::claude_mod::offer_chat(&surface, &text) {
+        return Json(serde_json::json!({ "ok": true, "via": "mod", "id": id }));
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let params = serde_json::json!({
+            "surface_id": surface, "message_id": kasa_socket::tell::new_message_id(), "body": text,
+        });
+        match backend.collab_tell(&params) {
+            Ok(receipt) => serde_json::json!({ "ok": true, "via": "tell", "receipt": receipt }),
+            Err(refused) => match backend.send_text(Some(&surface), &submit_payload(&text)) {
+                Ok(()) => serde_json::json!({ "ok": true, "via": "paste", "tell": refused.to_string() }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            },
+        }
+    })
+    .await;
+    Json(result.unwrap_or_else(|_| serde_json::json!({ "ok": false, "error": "chat-send worker stopped" })))
+}
+
 /// `POST /send?surface=%N` — 학생 pane에 텍스트 주입.
 /// body `{"text":"...","submit":true|false}` or raw text.
 /// `submit` 기본값=true → 끝에 개행 추가(제출). false → 개행 없음(타이핑만).
@@ -4955,7 +4983,11 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // pc 처럼」). session = `/rename` 으로 붙인 세션 이름(codex 는 없다),
                 // harness = claude/codex, context_pct·branch = 상태줄의 그것.
                 "session": b.and_then(pane_session_name),
-                "harness": b.and_then(|p| p.harness.clone()),
+                // 기록이 아직 없는 막 띄운 학생은 board 에 줄이 없다 — 셸 밑 프로세스로 본다. 거울이 첫 말 전부터
+                // 이 칸을 대화형으로 연다.
+                "harness": b
+                    .and_then(|p| p.harness.clone())
+                    .or_else(|| kasa_pty::lookup_session(&id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string())),
                 "context_pct": b.map(|p| p.context_pct).filter(|v| *v > 0),
                 "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),
                 // 모델 표시명(「Fable 5.1 1M」)은 board 가 이미 사람 말로 다듬어 둔 것 —
@@ -7748,6 +7780,7 @@ pub fn spawn_http_server_opts(
                 let layout_backend = backend.clone();
                 let windows_backend = backend.clone();
                 let send_backend = backend.clone();
+                let chat_send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let focus_backend = backend.clone();
                 let close_backend = backend.clone();
@@ -7975,6 +8008,7 @@ pub fn spawn_http_server_opts(
                             .layer(axum::extract::DefaultBodyLimit::max(TRANSCRIPT_UPLOAD_LIMIT)),
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
+                    .route("/term/chat-send", post(move |body: Json<serde_json::Value>| term_chat_send(chat_send_backend.clone(), body)))
                     .merge(crate::claude_mod::routes())
                     .route("/collab/tell", post(move |Json(params): Json<serde_json::Value>| {
                         let backend = tell_backend.clone();

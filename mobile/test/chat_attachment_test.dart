@@ -36,6 +36,14 @@ class ChatServer extends Server {
     sent.add(text);
   }
 
+  /// 대화 보기의 글 — 원본이 mod 길·빈 입력칸으로 넣는다.
+  final chatted = <String>[];
+
+  @override
+  Future<void> chatSend(String pane, String text, {String? machine}) async {
+    chatted.add(text);
+  }
+
   @override
   Future<({String raw, int offset, bool reset})?> transcriptRaw(
     String pane,
@@ -112,14 +120,16 @@ void main() {
     await tester.pump();
     // 서버 `send` 는 Ctrl+U 로 상자를 비워 `[Image #1]` 을 지운다 — 타면 안 된다.
     expect(server.sent, isEmpty);
+    expect(server.chatted, isEmpty);
     expect(session.entered, ['\x1b[200~ 이 화면 봐 줘\x1b[201~', '\r']);
     expect(find.text('보내면 함께 가요'), findsNothing);
 
-    // 사진이 나간 뒤의 글은 원래 길(서버 send)로.
+    // 사진이 나간 뒤의 글은 대화 입력 길(원본이 넣는 `chat-send`)로 — 상자를 비우는 `send` 는 안 탄다.
     await tester.enterText(find.byType(TextField), '고마워');
     await tester.tap(find.byTooltip('보내기'));
     await tester.pump();
-    expect(server.sent, ['고마워']);
+    expect(server.chatted, ['고마워']);
+    expect(server.sent, isEmpty);
     expect(session.entered, hasLength(2));
     await _close(tester);
     semantics.dispose();

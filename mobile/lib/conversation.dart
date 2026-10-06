@@ -472,8 +472,14 @@ const _metaBlocks = [
 ];
 
 /// 시스템이 user 턴에 끼워 넣은 블록과 그림 자리표시 줄을 걷는다.
+/// mod 가 `$.prompt.submit` 으로 넣은 말(tell·거울 입력)을 엔진은 「The `<mod>` plugin sent a message:」와 뒤 설명으로
+/// 감싸 기록한다 — 사람이 보낸 말만 남긴다. 데스크톱 `unwrap_plugin_prompt` 와 같은 규칙.
+final _pluginPrompt = RegExp(
+  r'^The (\S+) plugin sent a message:[ \n]?([\s\S]*?)(\n\nThis is how Claude Code surfaces a prompt a plugin submits[\s\S]*)?$',
+);
+
 String stripMeta(String text) {
-  var s = text;
+  var s = _pluginPrompt.firstMatch(text)?.group(2) ?? text;
   for (final (open, close) in _metaBlocks) {
     while (true) {
       final start = s.indexOf(open);
@@ -662,21 +668,30 @@ String? _workflowName(Map<String, Object?> input) {
 // ── 화면에서 읽는 선택지 ────────────────────────────────────────────────────
 
 class PromptOption {
-  const PromptOption(this.index, this.label, {required this.current});
+  const PromptOption(this.index, this.label, {required this.current, this.note = ''});
 
   /// 화면에 적힌 번호(1부터).
   final int index;
   final String label;
   final bool current;
+
+  /// 이름 밑에 딸린 설명 줄(질문 창의 선택지 설명). 없으면 빈 글.
+  final String note;
 }
 
 class PromptMenu {
-  const PromptMenu(this.title, this.options);
+  const PromptMenu(this.title, this.options, {this.context = const []});
   final String title;
   final List<PromptOption> options;
 
+  /// 제목 위 창 안의 줄들, 화면 차례 그대로 — 도구 이름·설명·명령 원문. 데스크톱 `PromptMenu::context` 와 같은 규칙.
+  final List<String> context;
+
   int get cursor => options.indexWhere((o) => o.current);
 }
+
+/// 창을 가르는 가로줄(`────`) — 창 머리 위나 질문 창 아래 칸막이.
+bool _isRule(String t) => RegExp('[─━]').allMatches(t).length >= 8;
 
 /// A selected chevron distinguishes live choices from numbered response text.
 PromptMenu? parsePromptMenu(List<String> lines) {
@@ -709,11 +724,157 @@ PromptMenu? parsePromptMenu(List<String> lines) {
   if (spread > (ordered ? opts.length * 4 : opts.length + 2)) return null;
   final first = opts.first.$2;
   var title = '';
+  var titleAt = first;
   for (var i = first - 1; i >= 0 && i >= first - 6; i--) {
     final t = lines[i].replaceAll(RegExp(r'^[\s│|]+|[\s│|]+$'), '');
     if (t.isEmpty || RegExp(r'^[─—\-╭╰╮╯>❯›●]').hasMatch(t)) continue;
     title = t;
+    titleAt = i;
     break;
   }
-  return PromptMenu(title, [for (final o in opts) o.$1]);
+  final width = lines.fold<int>(0, (w, l) => l.trimRight().runes.length > w ? l.trimRight().runes.length : w);
+  final options = <PromptOption>[];
+  for (var k = 0; k < opts.length; k++) {
+    final (o, at) = opts[k];
+    final end = k + 1 < opts.length ? opts[k + 1].$2 : (at + 5).clamp(0, lines.length);
+    final numberCol = lines[at].indexOf(RegExp(r'\d'));
+    final more = <String>[];
+    for (var i = at + 1; i < end; i++) {
+      final line = lines[i];
+      final indent = line.length - line.trimLeft().length;
+      final t = line.trim();
+      if (t.isEmpty || indent <= numberCol || _isRule(t)) break;
+      more.add(t);
+    }
+    if (more.isEmpty) {
+      options.add(o);
+    } else if (lines[at].trimRight().runes.length + 4 >= width) {
+      // 이름이 줄 끝까지 찼으면 다음 줄은 접힌 이름의 나머지다(Claude 의 긴 「Yes, and …」).
+      options.add(PromptOption(o.index, '${o.label} ${more.join(' ')}', current: o.current));
+    } else {
+      options.add(PromptOption(o.index, o.label, current: o.current, note: more.join(' ')));
+    }
+  }
+  final context = <String>[];
+  for (var i = titleAt - 1; i >= 0 && i >= titleAt - 16; i--) {
+    final t = lines[i].replaceAll(RegExp(r'^[\s│|]+|[\s│|]+$'), '');
+    if (t.isEmpty || RegExp(r'^[╌┄┈·]+$').hasMatch(t)) continue;
+    if (_isRule(t) || RegExp(r'^[╭╰•⏺●❯›>⎿✻✢✽]').hasMatch(t)) break;
+    context.add(t);
+  }
+  return PromptMenu(title, options, context: context.reversed.toList());
+}
+
+/// mod 가 알린 승인 요청 하나 — 도구와 입력 원문.
+class ModPermission {
+  const ModPermission({required this.id, required this.tool, required this.input, this.preview = ''});
+  final String id;
+  final String tool;
+  final Object? input;
+  final String preview;
+
+  /// 카드에 펼 입력 원문 줄 — Bash 는 명령 전부, 파일 도구는 경로와 바뀔 내용, 그 밖엔 JSON. 데스크톱 `live::input_lines`.
+  List<String> get lines {
+    final m = input is Map ? input as Map : const {};
+    String s(String k) => m[k] is String ? m[k] as String : '';
+    final out = <String>[];
+    switch (tool) {
+      case 'Bash':
+        out.addAll(s('command').split('\n'));
+        if (s('description').isNotEmpty) out.add(s('description'));
+      case 'Write':
+        out.add(s('file_path'));
+        out.addAll(s('content').split('\n'));
+      case 'Edit' || 'MultiEdit' || 'NotebookEdit':
+        out.add(s('file_path'));
+        out.addAll(s('old_string').split('\n').map((l) => '- $l'));
+        out.addAll(s('new_string').split('\n').map((l) => '+ $l'));
+      case 'ExitPlanMode':
+        out.addAll(s('plan').split('\n'));
+      default:
+        out.addAll(input == null ? [preview] : const JsonEncoder.withIndent('  ').convert(input).split('\n'));
+    }
+    return [for (final l in out) if (l.trim().isNotEmpty) l];
+  }
+}
+
+/// 그 칸 mod 의 지금(`/term/mod-live`). 기록 파일은 메시지가 끝나야 써지니 「무엇을 하는 중」과 「무엇을 묻는 중」은
+/// 이것으로 기다림 없이 그린다. 데스크톱 `chat_view/live.rs` 와 같은 규칙.
+class ModLive {
+  const ModLive({
+    this.live = false,
+    this.seq = 0,
+    this.session = '',
+    this.turnOpen = false,
+    this.compacting = false,
+    this.question = false,
+    this.tools = const [],
+    this.permissions = const [],
+  });
+
+  factory ModLive.fromJson(Map j) {
+    String text(Object? m, String k) => m is Map && m[k] is String ? m[k] as String : '';
+    return ModLive(
+      live: j['live'] == true,
+      seq: j['seq'] is int ? j['seq'] as int : 0,
+      session: text(j, 'session'),
+      turnOpen: j['turn_open'] == true,
+      compacting: j['compacting'] == true,
+      question: j['question'] != null,
+      tools: [
+        for (final t in (j['tools'] is List ? j['tools'] as List : const []))
+          (tool: text(t, 'tool'), label: text(t, 'label')),
+      ],
+      // 자리에서 답한 요청은 원본이 닫아 여기 안 온다. 도구 호출이 승인을 감싸 같은 id 의 도구가 함께 돈다.
+      permissions: [
+        for (final p in (j['permissions'] is List ? j['permissions'] as List : const []))
+            ModPermission(
+              id: text(p, 'id'),
+              tool: text(p, 'tool'),
+              input: p is Map ? p['input'] : null,
+              preview: text(p, 'preview'),
+            ),
+      ],
+    );
+  }
+
+  final bool live;
+  final int seq;
+  final String session;
+  final bool turnOpen;
+  final bool compacting;
+  final bool question;
+  final List<({String tool, String label})> tools;
+  final List<ModPermission> permissions;
+
+  /// 작업 줄의 지금 하는 일. mod 칸이 아니면 null.
+  String? get doing {
+    if (!live) return null;
+    if (compacting) return '대화 압축 중';
+    if (permissions.isNotEmpty) {
+      return switch (permissions.first.tool) {
+        'AskUserQuestion' => '답 기다림',
+        'ExitPlanMode' => '계획 승인 기다림',
+        final tool => '승인 기다림 · ${toolLabel(tool)}',
+      };
+    }
+    if (question) return '답 기다림';
+    if (tools.isEmpty) return null;
+    final t = tools.last;
+    final name = toolLabel(t.tool);
+    return t.label.isEmpty ? name : '$name · ${t.label}';
+  }
+
+  /// 화면 선택지 [i] 를 mod 결정으로 보낼 수 있으면 (허락인가, 그 요청). 승인 창 맨 앞 「Yes」와 맨 끝 「No」만 —
+  /// 나머지(다시 묻지 않기·계획 승인·질문)는 TUI 가 하는 일을 그대로 하도록 화면 키로 고른다.
+  (bool, ModPermission)? decisionFor(PromptMenu menu, int i) {
+    if (!live || permissions.isEmpty || menu.options.isEmpty) return null;
+    final p = permissions.first;
+    if (p.tool == 'ExitPlanMode' || p.tool == 'AskUserQuestion') return null;
+    if (menu.options.first.label != 'Yes' || i < 0 || i >= menu.options.length) return null;
+    if (i == 0) return (true, p);
+    final label = menu.options[i].label;
+    if (i == menu.options.length - 1 && (label == 'No' || label.startsWith('No,'))) return (false, p);
+    return null;
+  }
 }

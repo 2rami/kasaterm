@@ -217,6 +217,13 @@ void main() {
     expect((c.items[2] as ChatBubble).mine, isFalse);
   });
 
+  test('mod 가 넣은 말은 사람이 쓴 말만 보인다', () {
+    const raw = "The kasaterm-bridge plugin sent a message:\nUse the Bash tool to run exactly: touch y1.txt\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.";
+    expect(stripMeta(raw), 'Use the Bash tool to run exactly: touch y1.txt');
+    expect(stripMeta('The plan plugin sent a message: is a sentence'), 'is a sentence');
+    expect(stripMeta('The big plan plugin sent a message: x'), 'The big plan plugin sent a message: x');
+  });
+
   test('화면의 선택 메뉴 — ❯ 커서가 있어야 메뉴', () {
     final permission = parsePromptMenu([
       ' Bash command',
@@ -245,5 +252,99 @@ void main() {
     expect(question?.options.length, 3);
 
     expect(parsePromptMenu(['할 일:', '1. 빌드', '2. 테스트', '3. 커밋']), isNull);
+  });
+
+  // Claude Code 2.1.291·codex 0.160.1 의 실제 창(100칸) — 데스크톱 parse.rs 의 같은 이름 시험과 같은 줄.
+  test('실제 승인 창 — 도구·입력 원문과 선택지 문구를 그대로', () {
+    final rule = '─' * 100;
+    final dash = '╌' * 100;
+    final bash = parsePromptMenu([
+      '⏺ Removing nothing-here.txt file with force flag',
+      rule,
+      ' Bash command',
+      '',
+      '   rm -f nothing-here.txt',
+      '   Remove nothing-here.txt file with force flag',
+      '',
+      dash,
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. Yes, and always allow access to /private/tmp/yuzu/tui/work from this project',
+      '   3. No',
+      '',
+      ' Esc to cancel · Tab to amend',
+    ])!;
+    expect(bash.title, 'Do you want to proceed?');
+    expect(bash.context, ['Bash command', 'rm -f nothing-here.txt', 'Remove nothing-here.txt file with force flag']);
+    expect(bash.options.map((o) => o.label), [
+      'Yes',
+      'Yes, and always allow access to /private/tmp/yuzu/tui/work from this project',
+      'No',
+    ]);
+    expect(bash.options.every((o) => o.note.isEmpty), isTrue);
+
+    final write = parsePromptMenu([
+      rule,
+      ' Create file',
+      ' note.txt',
+      dash,
+      '  1 hi',
+      dash,
+      ' Do you want to create note.txt?',
+      ' ❯ 1. Yes',
+      '   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this',
+      '      session (shift+tab)',
+      '   3. No',
+    ])!;
+    expect(write.options[1].label,
+        'Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)');
+    expect(write.context, ['Create file', 'note.txt', '1 hi']);
+
+    final question = parsePromptMenu([
+      rule,
+      ' ☐ 색상 선택',
+      '',
+      '어떤 색을 선호하나요?',
+      '',
+      '❯ 1. 빨강',
+      '     밝고 활기찬 빨간색',
+      '  2. 파랑',
+      '     침착하고 안정적인 파란색',
+      '  3. Type something.',
+      rule,
+      '  4. Chat about this',
+      '',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ])!;
+    expect(question.title, '어떤 색을 선호하나요?');
+    expect(question.context, ['☐ 색상 선택']);
+    expect(question.options.length, 4);
+    expect(question.options[0].note, '밝고 활기찬 빨간색');
+    expect(question.options[2].note, '');
+
+    final codex = parsePromptMenu([
+      '• Running touch hello.txt',
+      '',
+      '  Would you like to run the following command?',
+      '',
+      '  Environment: local',
+      '',
+      '  Reason: Allow me to create hello.txt in the current workspace?',
+      '',
+      '  \$ touch hello.txt',
+      '',
+      '› 1. Yes, proceed (y)',
+      "  2. Yes, and don't ask again for commands that start with `touch hello.txt` (p)",
+      '  3. No, and tell Codex what to do differently (esc)',
+      '',
+      '  Press enter to confirm or esc to cancel',
+    ])!;
+    expect(codex.title, '\$ touch hello.txt');
+    expect(codex.context, [
+      'Would you like to run the following command?',
+      'Environment: local',
+      'Reason: Allow me to create hello.txt in the current workspace?',
+    ]);
+    expect(codex.options[2].label, 'No, and tell Codex what to do differently (esc)');
   });
 }

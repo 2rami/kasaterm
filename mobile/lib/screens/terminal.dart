@@ -197,7 +197,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       } else if (_pendingAttachment) {
         await _session.replyAfterAttachment(text);
       } else {
-        await _session.reply(text);
+        await _session.reply(text, chat: field == _chatInput);
       }
       if (!mounted || widget.server.isClosed) return;
       field.clear();
@@ -656,6 +656,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                   onTerminal: _showTerminal,
                                   bottomTick: _bottomTick,
                                   active: _paging || chat,
+                                  draft: _chatInput,
                                 ),
                               ),
                             ),

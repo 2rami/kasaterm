@@ -12,6 +12,7 @@ import 'package:kasaterm_mobile/photo_attachment_button.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/term_session.dart';
 import 'package:kasaterm_mobile/hub_model.dart';
+import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
 
 const slug = 'abcdefghij0123456789abcde';
@@ -53,6 +54,8 @@ class AttachmentSession extends TermSession {
 }
 
 void main() {
+  // 이 시험들은 터미널 쪽 입력줄의 사진 첨부다 — 기본 얼굴(대화)이 아니라 터미널로 연다.
+  setUp(() => paneView.value = PaneView.terminal);
   disabledReasonTests();
   testWidgets('draft mode can send a photo without text, only after upload', (
     tester,

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show Listenable;
 import 'package:http/http.dart' as http;
 
 import 'app_release.dart';
+import 'conversation.dart' show ModLive;
 import 'kasanet.dart';
 import 'kasanet_native.dart';
 import 'machine_look.dart';
@@ -924,6 +925,93 @@ class Server {
     }
     if (res.statusCode != 200) {
       throw ServerException('답장이 안 갔다 (${res.statusCode})');
+    }
+  }
+
+  /// 대화 보기의 입력 — 원본이 넣는다(`/term/chat-send`): mod 칸은 쉬는 순간 정식 턴으로(데스크톱 입력칸의
+  /// 초안·한글 조합을 안 건드린다), 코덱스·mod 없는 칸은 입력칸이 빌 때. 그 창구를 모르는 옛 데스크톱은 [send].
+  Future<void> chatSend(String pane, String text, {String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _client
+          .post(
+            uri('term/chat-send', machine: machine),
+            headers: {'content-type': 'application/json'},
+            body: jsonEncode({'surface': pane, 'text': text}),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode == 404 || res.statusCode == 405) {
+      return send(pane, text, machine: machine);
+    }
+    final Object? body;
+    try {
+      body = jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      throw ServerException('답장이 안 갔다 (${res.statusCode})');
+    }
+    if (res.statusCode != 200 || body is! Map || body['ok'] != true) {
+      final why = body is Map && body['error'] is String ? ' · ${body['error']}' : '';
+      throw ServerException('답장이 안 갔다$why');
+    }
+  }
+
+  /// 그 칸 mod 의 지금 — 일 상태·도는 도구·승인 요청(입력 원문까지). [seq] 를 주면 바뀔 때까지 서버가 쥔다.
+  /// 그 창구를 모르는 옛 데스크톱이면 null.
+  Future<ModLive?> modLive(String pane, {String? machine, int? seq, int waitMs = 8000}) async {
+    final Object? body;
+    try {
+      body = await _getJson(
+        'term/mod-live',
+        query: {
+          'surface': pane,
+          if (seq != null) 'seq': '$seq',
+          if (seq != null) 'wait_ms': '$waitMs',
+        },
+        machine: machine,
+        timeout: Duration(milliseconds: waitMs + 15000),
+      );
+    } on ServerException catch (e) {
+      if (e.status == 404) return null;
+      rethrow;
+    }
+    return body is Map ? ModLive.fromJson(body) : null;
+  }
+
+  /// 승인 요청에 답한다 — 원격 승인 계약과 같은 요청 id 로 그 칸 mod 에 닿는다. 거절이면 [message] 가 까닭.
+  Future<void> modDecide(
+    String pane, {
+    required String session,
+    required String id,
+    required bool allow,
+    String message = '',
+    String? machine,
+  }) async {
+    final http.Response res;
+    try {
+      res = await _client
+          .post(
+            uri('term/mod-decide', machine: machine),
+            headers: {'content-type': 'application/json'},
+            body: jsonEncode({
+              'surface': pane,
+              'session': session,
+              'id': id,
+              'decision': allow ? 'allow' : 'deny',
+              'message': message,
+              'by': 'phone',
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    final body = res.statusCode == 200 ? jsonDecode(utf8.decode(res.bodyBytes)) : null;
+    if (body is! Map || body['ok'] != true) {
+      final why = body is Map ? '${body['error']}' : '${res.statusCode}';
+      throw ServerException('답이 안 갔다 ($why)');
     }
   }
 

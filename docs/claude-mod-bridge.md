@@ -134,6 +134,9 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 `{ "ok": false, "error": "unknown" | "expired" | "decided" | "mismatch" }`.
 `surface`·`session` 이 요청과 다르면 `mismatch` — 다른 칸의 같은 id 로 결정이 새지 않게 한다.
 
+- 거울(다른 기기·폰)은 `/term/mod-live`·`/term/mod-decide` 로 같은 요청을 보고 답한다 — `/term/*` 처럼 서버 관문(원격이면
+  토큰)을 탄다. 그 거울은 이미 `/send` 로 이 칸에 무엇이든 칠 수 있어 새 권한이 아니다. 감사 줄의 `by` 는 `mirror:<곳>`.
+  규칙은 `docs/mirror-render.md` 「구현 자리」.
 - 이 두 경로는 loopback 전용이다. 폰·다른 기기의 원격 승인은 **그 기기를 계정 주인 기기로 확인하는 쪽**(관문·릴레이)이
   인증한 뒤 앱 안에서 `kasa_mcp::claude_mod::permissions()`·`decide()` 를 부른다. 이 계약은 인증을 하지 않는다.
 - 요청마다 한 번 결정한다. 규칙 추가·모드 전환·「항상 허락」은 원격에 없다.

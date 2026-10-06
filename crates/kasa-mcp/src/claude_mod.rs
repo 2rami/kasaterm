@@ -670,6 +670,36 @@ pub async fn wait_seq(surface: &str, seen: u64, wait: Duration) {
     }
 }
 
+/// 거울(다른 기기·폰)이 대화 보기 위에 덧붙일 이 칸의 지금 — 일 상태, 도는 도구, 열린 승인 요청(입력 원문까지),
+/// 질문. 기록 파일은 메시지가 끝나야 써지니 이것으로 기다림 없이 그린다. mod 칸이 아니면 `live: false`.
+pub fn mirror_view(surface: &str) -> Value {
+    let seq = seq(surface);
+    let Some(state) = live(surface) else {
+        return json!({"live": false, "seq": seq});
+    };
+    let running: Vec<Value> = PANES
+        .lock()
+        .unwrap()
+        .get(surface)
+        .map(|p| {
+            p.focus
+                .tools
+                .iter()
+                .map(|t| json!({"id": t.id, "tool": t.tool, "label": t.label, "agent": t.agent}))
+                .collect()
+        })
+        .unwrap_or_default();
+    let permissions: Vec<Value> = permissions()
+        .into_iter()
+        .filter(|r| r["surface"] == surface && r["session"] == state.session.as_str())
+        .collect();
+    json!({
+        "live": true, "seq": seq, "session": state.session,
+        "turn_open": state.turn_open, "compacting": state.compacting.is_some(),
+        "question": state.question, "tools": running, "permissions": permissions,
+    })
+}
+
 /// 「깃이 바뀌었을 수 있다」 — mod 가 파일을 고친 도구·쓰는 명령 뒤에 알린 것. 내용 없이 칸·폴더·경로만.
 /// Git 열은 이것으로 주기를 기다리지 않고 바로 다시 읽는다(GUI 는 `set_git_listener`, 다른 기기는 `wait_git`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1056,6 +1086,23 @@ pub fn offer(surface: &str, session: &str, id: &str, body: &str) {
     INBOX_WAKE.notify_waiters();
 }
 
+/// 거울(다른 기기·폰)의 대화 입력. tell 처럼 쉬는 순간 mod 가 정식 턴으로 넣지만 영수증 장부는 없다.
+const CHAT_PREFIX: &str = "chat.";
+/// 거울 입력이 학생이 쉬기를 기다리는 한도 — 긴 턴 뒤에도 들어가게 길게 둔다.
+const CHAT_UNTAKEN: Duration = Duration::from_secs(1800);
+
+fn is_chat(id: &str) -> bool {
+    id.starts_with(CHAT_PREFIX)
+}
+
+/// 거울의 대화 입력을 이 칸 mod 에 맡긴다. mod 칸이 아니면 None — 부른 쪽이 다른 길로 넣는다.
+pub fn offer_chat(surface: &str, body: &str) -> Option<String> {
+    let state = live(surface)?;
+    let id = format!("{CHAT_PREFIX}{}", uuid::Uuid::new_v4().simple());
+    offer(surface, &state.session, &id, body);
+    Some(id)
+}
+
 /// 이 칸에 맡겨 둔(아직 끝나지 않은) tell 이 있나 — 있으면 같은 칸의 다음 tell 을 꺼내지 않는다.
 pub fn has_offer(surface: &str) -> bool {
     INBOX.lock().unwrap().get(surface).is_some_and(|l| !l.is_empty())
@@ -1070,6 +1117,9 @@ pub fn sweep_inbox() {
         for letters in inbox.values_mut() {
             letters.retain(|l| {
                 match l.taken {
+                    // 거울 입력은 tell 대기열이 없다 — 학생이 쉴 때까지 여기서 기다린다.
+                    None if is_chat(&l.id) && l.offered.elapsed() < CHAT_UNTAKEN => true,
+                    None if is_chat(&l.id) => false,
                     None if l.offered.elapsed() >= OFFER_UNTAKEN => {
                         done.push((l.id.clone(), kasa_socket::tell::State::Accepted, "mod did not take it while the receiver rested; requeued"));
                         false
@@ -1126,6 +1176,10 @@ pub fn ack(surface: &str, session: &str, id: &str, submitted: bool, reason: &str
         let letters = inbox.get_mut(surface).ok_or("unknown")?;
         let at = letters.iter().position(|l| l.id == id && l.session == session).ok_or("unknown")?;
         letters.remove(at);
+    }
+    if is_chat(id) {
+        bump(surface);
+        return Ok(());
     }
     let (state, reason) = if submitted {
         (kasa_socket::tell::State::Submitted, "submitted by the in-session mod as a prompt of its own; model read is unconfirmed".to_string())
@@ -1212,9 +1266,41 @@ fn hold_of(q: &HashMap<String, String>) -> Duration {
     q.get("wait_ms").and_then(|w| w.parse::<u64>().ok()).map(Duration::from_millis).unwrap_or(HOLD).min(HOLD)
 }
 
-/// `/claude-mod/*` 경로. http.rs 의 큰 라우터에 그대로 붙는다.
+/// `/claude-mod/*` 경로와 거울 창구(`/term/mod-*`). http.rs 의 큰 라우터에 그대로 붙는다.
+///
+/// `/claude-mod/*` 는 loopback 전용(이 기계의 mod·앱)이고, `/term/mod-*` 는 거울이 원본에 묻는 길이라 다른
+/// `/term/*` 처럼 서버 관문(원격이면 토큰)만 탄다 — 그 거울은 이미 `/send` 로 이 칸에 무엇이든 칠 수 있으니
+/// 승인 결정을 열어도 새 권한이 아니다.
 pub fn routes() -> Router {
     Router::new()
+        .route(
+            "/term/mod-live",
+            get(|Query(q): Query<HashMap<String, String>>| async move {
+                let surface = q.get("surface").cloned().unwrap_or_default();
+                if let Some(seen) = q.get("seq").and_then(|s| s.parse::<u64>().ok()) {
+                    wait_seq(&surface, seen, hold_of(&q)).await;
+                }
+                Json(mirror_view(&surface)).into_response()
+            }),
+        )
+        .route(
+            "/term/mod-decide",
+            post(|Json(body): Json<Value>| async move {
+                let result = decide(
+                    &text(&body, "id"),
+                    &text(&body, "surface"),
+                    &text(&body, "session"),
+                    &text(&body, "decision"),
+                    &text(&body, "message"),
+                    &format!("mirror:{}", text(&body, "by")),
+                );
+                Json(match result {
+                    Ok(()) => json!({"ok": true}),
+                    Err(error) => json!({"ok": false, "error": error}),
+                })
+                .into_response()
+            }),
+        )
         .route(
             "/claude-mod/event",
             post(|req: HttpRequest| async move {
@@ -1346,6 +1432,17 @@ mod tests {
         let Some(long_ago) = Instant::now().checked_sub(STATUS_HOLD + Duration::from_millis(1)) else { return };
         PANES.lock().unwrap().get_mut("%st").unwrap().status.as_mut().unwrap().at = long_ago;
         assert_eq!(status_overlay("%st", "xhigh"), None, "엔진이 멈춰도 한도가 지나면 엔진 줄로 돌아간다");
+    }
+
+    #[test]
+    fn the_mirror_view_carries_open_tools_and_wakes_on_every_change() {
+        apply("%t9", "s", &ev(json!({"kind": "hello", "pid": 1})));
+        let before = seq("%t9");
+        apply("%t9", "s", &ev(json!({"kind": "tool", "phase": "start", "id": "a", "tool": "Bash", "label": "cargo test"})));
+        assert!(seq("%t9") > before);
+        assert_eq!(mirror_view("%t9")["live"], false, "no claude runs in this test pane");
+        apply("%t9", "s", &[json!({"kind": "turn", "phase": "start"}), json!({"kind": "turn", "phase": "end", "reason": "aborted"})]);
+        assert!(PANES.lock().unwrap()["%t9"].focus.tools.is_empty(), "an aborted turn leaves no tool spinning");
     }
 
     #[test]

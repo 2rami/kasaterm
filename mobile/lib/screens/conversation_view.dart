@@ -21,13 +21,15 @@ import 'controls.dart';
 /// 「대화 보기」를 주소 둘로 가른 것(2026-08-25)을 한 화면 안의 전환으로 옮겼다.
 enum PaneView { terminal, chat }
 
-/// 마지막으로 고른 얼굴 — 다음 학생도 그 얼굴로 연다.
-final paneView = ValueNotifier<PaneView>(PaneView.terminal);
+/// 마지막으로 고른 얼굴 — 다음 학생도 그 얼굴로 연다. 처음은 대화다 — 거울은 원본 칸 크기를 안 바꾸고
+/// 데이터로 다시 그린다(docs/mirror-render.md).
+final paneView = ValueNotifier<PaneView>(PaneView.chat);
 
 class PaneViewPrefs {
   const PaneViewPrefs();
 
-  static const _key = 'pane.view';
+  /// 대화가 기본이 된 판부터의 열쇠 — 그 전에 고른 「터미널」은 이어받지 않는다.
+  static const _key = 'pane.view.v2';
   static const _storage = FlutterSecureStorage();
 
   Future<PaneView> load() async {
@@ -35,10 +37,10 @@ class PaneViewPrefs {
       final v = await _storage.read(key: _key);
       return PaneView.values.firstWhere(
         (m) => m.name == v,
-        orElse: () => PaneView.terminal,
+        orElse: () => PaneView.chat,
       );
     } catch (_) {
-      return PaneView.terminal;
+      return PaneView.chat;
     }
   }
 
@@ -245,6 +247,7 @@ class ConversationView extends StatefulWidget {
     required this.onTerminal,
     this.bottomTick = 0,
     this.active = true,
+    this.draft,
   });
 
   final Server server;
@@ -258,6 +261,9 @@ class ConversationView extends StatefulWidget {
 
   /// 보이는 쪽인가. 터미널 쪽으로 밀어 둔 동안은 살려만 두고 대화를 받지 않는다.
   final bool active;
+
+  /// 대화 입력칸 — 승인 카드의 거절이 여기 쓴 글을 까닭으로 함께 보낸다.
+  final TextEditingController? draft;
 
   @override
   State<ConversationView> createState() => _ConversationViewState();
@@ -282,6 +288,16 @@ class _ConversationViewState extends State<ConversationView> {
   bool _awayFromBottom = false;
   DateTime _menuHold = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// 그 칸 mod 의 지금. 옛 데스크톱·mod 없는 칸이면 비어 있다.
+  ModLive _live = const ModLive();
+  bool _liveRunning = false;
+  bool _liveGone = false;
+  Timer? _liveRetry;
+  Completer<void>? _liveWake;
+
+  /// 결정을 못 보낸 요청 — 그 요청은 화면 키로 고른다.
+  final _refused = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -303,6 +319,8 @@ class _ConversationViewState extends State<ConversationView> {
   @override
   void dispose() {
     _timer?.cancel();
+    _liveRetry?.cancel();
+    if (_liveWake?.isCompleted == false) _liveWake!.complete();
     BackgroundGrace.instance.removeListener(_graceChanged);
     _scroll.dispose();
     super.dispose();
@@ -320,6 +338,85 @@ class _ConversationViewState extends State<ConversationView> {
   void _start() {
     _poll();
     _timer ??= Timer.periodic(_pollEvery, (_) => _poll());
+    unawaited(_liveLoop());
+  }
+
+  bool get _liveWanted =>
+      mounted && widget.active && BackgroundGrace.instance.live && !_liveGone;
+
+  /// 원본의 `/term/mod-live` 에 매달린다 — 바뀔 때만 답이 온다.
+  Future<void> _liveLoop() async {
+    if (_liveRunning) return;
+    _liveRunning = true;
+    int? seq;
+    try {
+      while (_liveWanted) {
+        try {
+          final next = await widget.server.modLive(
+            widget.pane.id,
+            machine: widget.pane.machine,
+            seq: seq,
+          );
+          if (!mounted) return;
+          if (next == null) {
+            _liveGone = true;
+            return;
+          }
+          seq = next.seq;
+          setState(() => _live = next);
+        } on ServerException catch (e) {
+          // 닿았는데 거절한 것(옛 판·없는 칸)은 다시 묻지 않는다. 끊김만 잠깐 뒤 다시.
+          final status = e.status ?? 0;
+          if (status >= 400 && status < 500) {
+            _liveGone = true;
+            return;
+          }
+          seq = null;
+          final wake = Completer<void>();
+          _liveRetry = Timer(const Duration(seconds: 2), wake.complete);
+          _liveWake = wake;
+          await wake.future;
+        }
+      }
+    } finally {
+      _liveRunning = false;
+    }
+  }
+
+  ModLive get _liveNow {
+    if (_refused.isEmpty) return _live;
+    return ModLive(
+      live: _live.live,
+      seq: _live.seq,
+      session: _live.session,
+      turnOpen: _live.turnOpen,
+      compacting: _live.compacting,
+      question: _live.question,
+      tools: _live.tools,
+      permissions: [for (final p in _live.permissions) if (!_refused.contains(p.id)) p],
+    );
+  }
+
+  /// 승인 요청에 mod 결정으로 답한다(원격 승인 계약과 같은 요청 id). 거절이면 입력칸 글이 까닭이다.
+  Future<void> _decide(ModPermission p, bool allow) async {
+    final draft = widget.draft;
+    final message = allow ? '' : (draft?.text.trim() ?? '');
+    if (!allow) draft?.clear();
+    HapticFeedback.selectionClick();
+    setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
+    _toBottom();
+    try {
+      await widget.server.modDecide(
+        widget.pane.id,
+        session: _live.session,
+        id: p.id,
+        allow: allow,
+        message: message,
+        machine: widget.pane.machine,
+      );
+    } on ServerException {
+      if (mounted) setState(() => _refused.add(p.id));
+    }
   }
 
   Future<void> _poll() async {
@@ -394,18 +491,30 @@ class _ConversationViewState extends State<ConversationView> {
   void _pick(PromptMenu menu, int i) {
     final s = widget.session;
     final current = _menu;
-    if (!s.canSend || current == null || !_sameMenu(menu, current) ||
+    if (current == null || !_sameMenu(menu, current) ||
         i < 0 || i >= current.options.length) {
       return;
     }
+    // 승인 창의 「Yes」·「No」는 요청 id 로 답한다 — 화면 키는 그사이 다른 창이 뜨면 그것을 고른다.
+    final decision = _liveNow.decisionFor(current, i);
+    if (decision != null) {
+      unawaited(_decide(decision.$2, decision.$1));
+      return;
+    }
+    if (!s.canSend) return;
     final delta = i - (menu.cursor < 0 ? 0 : menu.cursor);
     for (var k = 0; k < delta.abs(); k++) {
       s.arrow(delta > 0 ? 'B' : 'A');
     }
-    s.sendText('\r');
     HapticFeedback.selectionClick();
     setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
     _toBottom();
+    // 화살표 바로 뒤의 Enter 는 질문 창이 커서를 옮기기 전에 읽혀 앞 칸을 고른 적이 있다(가상 아이폰 실측).
+    if (delta == 0) {
+      s.sendText('\r');
+    } else {
+      Timer(TermSession.enterGap, () => s.sendText('\r'));
+    }
   }
 
   void _dismiss() {
@@ -437,18 +546,47 @@ class _ConversationViewState extends State<ConversationView> {
 
   @override
   Widget build(BuildContext context) {
-    final menu = widget.session.state == TermState.connected ? _menu : null;
+    final connected = widget.session.state == TermState.connected;
+    final menu = connected ? _menu : null;
+    final live = _liveNow;
+    final asks = live.live && live.permissions.isNotEmpty;
+    // 질문은 허락·거절로 답하는 것이 아니다 — 화면의 선택지를 기다린다.
+    final decidable = asks && live.permissions.first.tool != 'AskUserQuestion';
+    final accent = widget.pane.kind == 'permission' || asks
+        ? StatusStyle.attention
+        : widget.accent;
+    final held = DateTime.now().isBefore(_menuHold);
     return Column(
       children: [
         Expanded(child: _body(context)),
         if (menu != null)
           _MenuCard(
             menu: menu,
-            accent: widget.pane.kind == 'permission'
-                ? StatusStyle.attention
-                : widget.accent,
+            accent: accent,
+            reasonFor: [
+              for (var i = 0; i < menu.options.length; i++)
+                if (live.decisionFor(menu, i)?.$1 == false) menu.options[i].label,
+            ].firstOrNull,
             onPick: (i) => _pick(menu, i),
             onDismiss: _dismiss,
+            onTerminal: widget.onTerminal,
+          )
+        // 화면을 아직 못 받았으면 mod 의 요청만으로 묻는다 — 도구와 입력 원문, 허락·거절.
+        else if (!connected && decidable && !held)
+          _MenuCard(
+            menu: PromptMenu(
+              '허락할까요?',
+              const [
+                PromptOption(1, '허락', current: false),
+                PromptOption(2, '거절', current: false),
+              ],
+              context: [toolLabel(live.permissions.first.tool), ...live.permissions.first.lines],
+            ),
+            accent: accent,
+            reasonFor: '거절',
+            numbered: false,
+            onPick: (i) => unawaited(_decide(live.permissions.first, i == 0)),
+            onDismiss: null,
             onTerminal: widget.onTerminal,
           ),
       ],
@@ -490,7 +628,8 @@ class _ConversationViewState extends State<ConversationView> {
       size: 30,
     );
     final md = _markdownStyle(theme);
-    final typing = pane.isBusy;
+    final live = _liveNow;
+    final typing = pane.isBusy || (live.live && (live.turnOpen || live.compacting));
     final extra = typing ? 1 : 0;
     return LayoutBuilder(
       builder: (context, box) {
@@ -504,7 +643,7 @@ class _ConversationViewState extends State<ConversationView> {
               itemCount: list.length + extra,
               itemBuilder: (context, i) {
                 if (i < extra) {
-                  return _Typing(face: face, label: pane.busyLabel);
+                  return _Typing(face: face, label: live.doing ?? pane.busyLabel);
                 }
                 final at = list.length - 1 - (i - extra);
                 return _row(context, list, at, face, md, maxBubble);
@@ -1289,18 +1428,40 @@ class _MenuCard extends StatelessWidget {
     required this.onPick,
     required this.onDismiss,
     required this.onTerminal,
+    this.reasonFor,
+    this.numbered = true,
   });
 
   final PromptMenu menu;
   final Color accent;
   final ValueChanged<int> onPick;
-  final VoidCallback onDismiss;
+  final VoidCallback? onDismiss;
   final VoidCallback onTerminal;
+
+  /// 거절 선택지 이름 — 그것을 mod 결정으로 보내 입력칸 글이 까닭이 된다.
+  final String? reasonFor;
+  final bool numbered;
+
+  /// 카드에 펴는 원문 줄 상한 — 그 뒤는 「… N줄 더」로 접고 전부는 터미널에서 본다(데스크톱 `CTX_MAX`).
+  static const _contextMax = 8;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final mono = TextStyle(
+      fontFamily: 'TermMono',
+      fontSize: Look.sub,
+      height: 1.4,
+      color: scheme.onSurfaceVariant,
+    );
+    var lines = menu.context;
+    if (lines.length > _contextMax) {
+      lines = [
+        ...lines.take(_contextMax - 1),
+        '… ${lines.length - (_contextMax - 1)}줄 더',
+      ];
+    }
     return Container(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * 0.45,
@@ -1316,14 +1477,23 @@ class _MenuCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // TUI 창 안의 줄 그대로 — 머리(도구·질문 이름)는 굵게, 원문은 고정폭으로.
+            for (final (i, line) in lines.indexed)
+              Text(
+                line,
+                style: i == 0
+                    ? theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)
+                    : mono,
+              ),
+            if (lines.isNotEmpty) const SizedBox(height: 8),
             if (menu.title.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Text(
                   menu.title,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: lines.isEmpty
+                      ? theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)
+                      : theme.textTheme.bodyMedium,
                 ),
               ),
             for (final (i, o) in menu.options.indexed)
@@ -1338,19 +1508,42 @@ class _MenuCard extends StatelessWidget {
                       color: o.current ? accent : scheme.outline,
                     ),
                   ),
-                  child: Text(
-                    '${o.index}. ${o.label}',
-                    style: TextStyle(
-                      fontSize: Look.body,
-                      color: o.current ? accent : scheme.onSurface,
-                      fontWeight: o.current ? FontWeight.w600 : null,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        numbered ? '${o.index}. ${o.label}' : o.label,
+                        style: TextStyle(
+                          fontSize: Look.body,
+                          color: o.current ? accent : scheme.onSurface,
+                          fontWeight: o.current ? FontWeight.w600 : null,
+                        ),
+                      ),
+                      if (o.note.isNotEmpty)
+                        Text(
+                          o.note,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            if (reasonFor != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  '「$reasonFor」는 입력칸에 쓴 글을 까닭으로 함께 보내요',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
                   ),
                 ),
               ),
             Row(
               children: [
-                TextButton(onPressed: onDismiss, child: const Text('취소 (esc)')),
+                if (onDismiss != null)
+                  TextButton(onPressed: onDismiss, child: const Text('취소 (esc)')),
                 const Spacer(),
                 TextButton(
                   onPressed: onTerminal,

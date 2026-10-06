@@ -296,6 +296,8 @@ void main() {
         );
         session.setRows(codexApprovalRows);
         await tester.tap(decline);
+        expect(session.sent, ['\x1b[B'], reason: 'Enter waits until the cursor has moved');
+        await tester.pump(TermSession.enterGap);
         expect(session.sent, ['\x1b[B', '\r']);
         await tester.pumpWidget(const SizedBox());
         server.close();

@@ -371,7 +371,7 @@ const META_BLOCKS: &[(&str, &str)] = &[
 
 /// 시스템이 user 턴에 끼워 넣은 블록과 그림 자리표시 줄을 걷는다.
 pub(crate) fn strip_meta(text: &str) -> String {
-    let mut s = text.to_string();
+    let mut s = unwrap_plugin_prompt(text).to_string();
     for (open, close) in META_BLOCKS {
         while let Some(start) = s.find(open) {
             match s[start + open.len()..].find(close) {
@@ -393,6 +393,19 @@ pub(crate) fn strip_meta(text: &str) -> String {
         })
         .collect();
     replace_image_marks(&kept.join("\n")).trim().to_string()
+}
+
+/// mod 가 `$.prompt.submit` 으로 넣은 말(tell·거울 입력)을 엔진은 「The <mod> plugin sent a message:」와 뒤 설명으로
+/// 감싸 기록한다 — 사람이 보낸 말만 남긴다.
+fn unwrap_plugin_prompt(text: &str) -> &str {
+    let Some((name, body)) = text.strip_prefix("The ").and_then(|r| r.split_once(" plugin sent a message:")) else {
+        return text;
+    };
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return text;
+    }
+    let body = body.strip_prefix('\n').or_else(|| body.strip_prefix(' ')).unwrap_or(body);
+    body.split("\n\nThis is how Claude Code surfaces a prompt a plugin submits").next().unwrap_or(body)
 }
 
 /// `[Image #3]` → `(사진)`.
@@ -653,12 +666,17 @@ pub(crate) struct PromptOption {
     pub(crate) index: usize,
     pub(crate) label: String,
     pub(crate) current: bool,
+    /// 이름 밑에 딸린 설명 줄(질문 창의 선택지 설명). 없으면 빈 글.
+    pub(crate) note: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PromptMenu {
     pub(crate) title: String,
     pub(crate) options: Vec<PromptOption>,
+    /// 제목 위 창 안의 줄들, 화면 차례 그대로 — 도구 이름·설명·명령 원문(Claude `Bash command`,
+    /// 코덱스 `Would you like to run…`·`$ 명령`, 질문 머리). 거울 카드가 TUI 와 같은 정보를 보이는 재료다.
+    pub(crate) context: Vec<String>,
 }
 
 impl PromptMenu {
@@ -700,7 +718,7 @@ pub(crate) fn parse_prompt_menu(lines: &[String]) -> Option<PromptMenu> {
     let mut opts: Vec<(PromptOption, usize)> = Vec::new();
     for (i, line) in lines.iter().enumerate().take(last + 1).skip(start) {
         if let Some((current, index, label)) = option_line(line) {
-            opts.push((PromptOption { index, label, current }, i));
+            opts.push((PromptOption { index, label, current, note: String::new() }, i));
         }
     }
     if opts.len() < 2 || !opts.iter().any(|(o, _)| o.current) {
@@ -723,15 +741,59 @@ pub(crate) fn parse_prompt_menu(lines: &[String]) -> Option<PromptMenu> {
     }
     let first = opts[0].1;
     let mut title = String::new();
+    let mut title_at = first;
     for i in (first.saturating_sub(6)..first).rev() {
         let t = lines[i].trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '|');
         if t.is_empty() || t.starts_with(['─', '—', '-', '╭', '╰', '╮', '╯', '>', '❯', '›', '●']) {
             continue;
         }
         title = t.to_string();
+        title_at = i;
         break;
     }
-    Some(PromptMenu { title, options: opts.into_iter().map(|(o, _)| o).collect() })
+    let width = lines.iter().map(|l| l.trim_end().chars().count()).max().unwrap_or(0);
+    for k in 0..opts.len() {
+        let at = opts[k].1;
+        let end = opts.get(k + 1).map_or((at + 5).min(lines.len()), |n| n.1);
+        let number_col = lines[at].chars().position(|c| c.is_ascii_digit()).unwrap_or(0);
+        let mut more: Vec<String> = Vec::new();
+        for line in &lines[at + 1..end] {
+            let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+            let t = line.trim();
+            if t.is_empty() || indent <= number_col || is_rule(t) {
+                break;
+            }
+            more.push(t.to_string());
+        }
+        if more.is_empty() {
+            continue;
+        }
+        // 이름이 줄 끝까지 찼으면 다음 줄은 접힌 이름의 나머지다(Claude 의 긴 「Yes, and …」).
+        if lines[at].trim_end().chars().count() + 4 >= width {
+            let o = &mut opts[k].0;
+            o.label = format!("{} {}", o.label, more.join(" "));
+        } else {
+            opts[k].0.note = more.join(" ");
+        }
+    }
+    let mut context: Vec<String> = Vec::new();
+    for line in lines[title_at.saturating_sub(16)..title_at].iter().rev() {
+        let t = line.trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '|');
+        if t.is_empty() || t.chars().all(|c| matches!(c, '╌' | '┄' | '┈' | '·')) {
+            continue;
+        }
+        if is_rule(t) || t.starts_with(['╭', '╰', '•', '⏺', '●', '❯', '›', '>', '⎿', '✻', '✢', '✽']) {
+            break;
+        }
+        context.push(t.to_string());
+    }
+    context.reverse();
+    Some(PromptMenu { title, options: opts.into_iter().map(|(o, _)| o).collect(), context })
+}
+
+/// 창을 가르는 가로줄(`────`) — 창 머리 위나 질문 창 아래 칸막이.
+fn is_rule(t: &str) -> bool {
+    t.chars().filter(|c| matches!(c, '─' | '━')).count() >= 8
 }
 
 #[cfg(test)]
@@ -835,6 +897,14 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_the_mod_submitted_shows_only_what_the_person_wrote() {
+        let raw = "The kasaterm-bridge plugin sent a message:\nUse the Bash tool to run exactly: touch y1.txt\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.";
+        assert_eq!(strip_meta(raw), "Use the Bash tool to run exactly: touch y1.txt");
+        assert_eq!(strip_meta("The plan plugin sent a message: is a sentence"), "is a sentence");
+        assert_eq!(strip_meta("The big plan plugin sent a message: x"), "The big plan plugin sent a message: x");
+    }
+
+    #[test]
     fn prompt_menu_needs_a_live_cursor() {
         let screen = |rows: &[&str]| rows.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let menu = parse_prompt_menu(&screen(&[
@@ -849,5 +919,97 @@ mod tests {
         assert_eq!(menu.options[1].label, "Yes, and don't ask again");
         assert_eq!(menu.cursor(), 0);
         assert!(parse_prompt_menu(&screen(&["1. 첫째", "2. 둘째"])).is_none());
+    }
+
+    /// Claude Code 2.1.291·codex 0.160.1 의 실제 창(100칸)에서 뜬 줄.
+    #[test]
+    fn real_approval_windows_keep_the_tool_input_and_every_choice_word_for_word() {
+        let screen = |rows: &[&str]| rows.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let rule = "─".repeat(100);
+        let dash = "╌".repeat(100);
+        let bash = parse_prompt_menu(&screen(&[
+            "⏺ Removing nothing-here.txt file with force flag",
+            &rule,
+            " Bash command",
+            "",
+            "   rm -f nothing-here.txt",
+            "   Remove nothing-here.txt file with force flag",
+            "",
+            &dash,
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. Yes, and always allow access to /private/tmp/yuzu/tui/work from this project",
+            "   3. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ]))
+        .unwrap();
+        assert_eq!(bash.title, "Do you want to proceed?");
+        assert_eq!(bash.context, ["Bash command", "rm -f nothing-here.txt", "Remove nothing-here.txt file with force flag"]);
+        let labels: Vec<&str> = bash.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Yes", "Yes, and always allow access to /private/tmp/yuzu/tui/work from this project", "No"]);
+        assert!(bash.options.iter().all(|o| o.note.is_empty()));
+
+        let write = parse_prompt_menu(&screen(&[
+            &rule,
+            " Create file",
+            " note.txt",
+            &dash,
+            "  1 hi",
+            &dash,
+            " Do you want to create note.txt?",
+            " ❯ 1. Yes",
+            "   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this",
+            "      session (shift+tab)",
+            "   3. No",
+        ]))
+        .unwrap();
+        assert_eq!(write.options[1].label, "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)");
+        assert_eq!(write.context, ["Create file", "note.txt", "1 hi"]);
+
+        let question = parse_prompt_menu(&screen(&[
+            &rule,
+            " ☐ 색상 선택",
+            "",
+            "어떤 색을 선호하나요?",
+            "",
+            "❯ 1. 빨강",
+            "     밝고 활기찬 빨간색",
+            "  2. 파랑",
+            "     침착하고 안정적인 파란색",
+            "  3. Type something.",
+            &rule,
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]))
+        .unwrap();
+        assert_eq!(question.title, "어떤 색을 선호하나요?");
+        assert_eq!(question.context, ["☐ 색상 선택"]);
+        assert_eq!(question.options.len(), 4);
+        assert_eq!(question.options[0].note, "밝고 활기찬 빨간색");
+        assert_eq!(question.options[2].note, "");
+
+        let codex = parse_prompt_menu(&screen(&[
+            "• Running touch hello.txt",
+            "",
+            "  Would you like to run the following command?",
+            "",
+            "  Environment: local",
+            "",
+            "  Reason: Allow me to create hello.txt in the current workspace?",
+            "",
+            "  $ touch hello.txt",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. Yes, and don't ask again for commands that start with `touch hello.txt` (p)",
+            "  3. No, and tell Codex what to do differently (esc)",
+            "",
+            "  Press enter to confirm or esc to cancel",
+        ]))
+        .unwrap();
+        assert_eq!(codex.title, "$ touch hello.txt");
+        assert_eq!(codex.context, ["Would you like to run the following command?", "Environment: local", "Reason: Allow me to create hello.txt in the current workspace?"]);
+        assert_eq!(codex.options[2].label, "No, and tell Codex what to do differently (esc)");
     }
 }

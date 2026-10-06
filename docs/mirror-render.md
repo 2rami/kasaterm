@@ -44,3 +44,24 @@
   모습만 남고, 대체 화면 구간은 버린다(`kasa_pty::block_lines`). 160줄 넘으면 가운데를 비우고 `block=<id>` 로 통째로 받는다.
 - 원본 저장소는 칸마다 50블록·블록마다 256KB, 넘치면 결과의 **앞**을 버린다(끝의 오류·시험 결과가 중요하다).
 - 셸 통합은 카사텀이 띄운 zsh 만 낸다. bash·ssh 너머·셰임을 끈 칸은 줄여 보기다.
+
+## 구현 자리 (대화형)
+
+- 진입: PC `mirror_render.rs` 의 `mirror_kind` — 거울이고 하네스(claude·codex)가 돌면 `Chat`, 보이는 칸을 대화(`chat_view`)로 연다. 사람이 「터미널로
+  보기」로 돌린 칸은 다시 열지 않는다. 폰은 「대화」가 처음 얼굴이다(`PaneViewPrefs` 의 `pane.view.v2`). 하네스는 원본
+  `/term/panes` 의 `harness` — 기록이 아직 없는 막 띄운 학생도 셸 밑 프로세스로 채운다.
+- 크기: `mirror_kind` 가 `Chat` 이면 사람 손이 닿아도 `touch_source` 를 안 부른다(`mirror_follow.rs`, 「터미널로 보기」로 돌려도
+  같다 — 줄여 보기). 폰 대화 보기는 쥐지 않는다.
+- 기록: 거울은 원본의 `/transcript-raw` 를, 지금은 원본의 `GET /term/mod-live?surface=%N[&seq=&wait_ms=]` 를 받는다 —
+  `{live, seq, session, turn_open, compacting, question, tools[{id,tool,label}], permissions[원격 승인 계약의 요청 그대로]}`.
+  `seq` 를 주면 바뀔 때까지 쥔다. mod 없는 칸은 `live:false`. 도구 호출이 승인을 감싸므로 묻는 동안 같은 id 의 도구가
+  `tools` 에도 있다.
+- 승인 카드: 화면의 TUI 창(`parse_prompt_menu`·`parsePromptMenu`)에서 창 안 줄(`context`: 도구·설명·명령 원문)·제목·선택지
+  문구·선택지 설명을 그대로 옮긴다. 승인 창 맨 앞 「Yes」와 맨 끝 「No」는 `POST /term/mod-decide`
+  `{surface, session, id, decision, message}` 로 그 요청 id 에 답한다(거절이면 입력칸 글이 까닭). 나머지(다시 묻지 않기·
+  accept edits·계획 승인·질문)와 코덱스는 화면 키(↑↓ + Enter). 화면을 아직 못 받은 폰은 mod 요청만으로 도구·원문 +
+  허락·거절을 묻는다. 어디서 답하든 원본 창이 닫히고 원본이 요청을 닫으니 다른 거울 카드도 사라진다.
+- 입력: `POST /term/chat-send {surface, text}` — mod 칸이면 mod 에 맡겨 쉬는 순간 `$.prompt.submit`(30분까지 기다림),
+  아니면 안전한 tell(입력칸이 빌 때), 신원이 아직 안 선 칸이면 옛 `/send`. mod 가 넣은 말은 엔진이
+  「The kasaterm-bridge plugin sent a message: …」로 감싸 기록하므로 두 파서가 사람이 쓴 말만 남긴다.
+
