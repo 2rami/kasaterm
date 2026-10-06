@@ -50,6 +50,9 @@ pub struct CommandBlock {
     /// The command entered an alt-screen (vim/htop/less) — its raw output is
     /// not a clean block, so the GUI falls back to a live peek for it.
     pub is_tui: bool,
+    /// 출력이 상한을 넘어 앞에서 버린 줄 수. 거울은 끝(빌드 오류·테스트 결과)이 중요해
+    /// 머리가 아니라 꼬리를 남긴다.
+    pub dropped_lines: usize,
 }
 
 /// What to spawn in the PTY. Sticks close to portable-pty's
@@ -474,6 +477,9 @@ pub struct PtySession {
     /// OSC 133 C/D stream. Shared Arc so the socket/HTTP backend reads them
     /// without routing through the GUI. Bounded (~50), newest last.
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
+    /// 블록 저장소의 바뀜 번호. 0 이면 OSC 133 표지를 한 번도 못 봤다(셸 통합 없음).
+    /// 표지·출력이 올 때마다 오른다 — 거울의 긴 폴링이 이것만 보고 깬다.
+    block_rev: Arc<std::sync::atomic::AtomicU64>,
     /// Shell cwd reported via OSC 9;9 (`ESC]9;9;<path>ST`) — the path-only
     /// working-directory hint Windows Terminal / ConEmu use. The reader stashes
     /// it here so the header breadcrumb tracks PowerShell `cd`, which (unlike
@@ -737,6 +743,7 @@ impl PtySession {
         let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
         let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
         let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let block_rev = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         // Spin up the VT processor loop. Owns the Term, drains the
         // reader, and emits a ScreenUpdate after each batch. Bounded
@@ -798,6 +805,7 @@ impl PtySession {
             Arc::clone(&title_handle),
             Arc::clone(&term),
             Arc::clone(&blocks),
+            Arc::clone(&block_rev),
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
@@ -832,6 +840,7 @@ impl PtySession {
             pane_id: opts.pane_id.clone(),
             tty_short,
             blocks,
+            block_rev,
             cwd_handle,
             inline_imgs,
             scheme_reports,
@@ -864,6 +873,7 @@ impl PtySession {
         let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
         let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(io.writer));
         let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let block_rev = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let title_handle = Arc::new(Mutex::new(None));
         let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let listener = PtyEventForwarder {
@@ -902,6 +912,7 @@ impl PtySession {
             Arc::clone(&title_handle),
             Arc::clone(&term),
             Arc::clone(&blocks),
+            Arc::clone(&block_rev),
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
@@ -934,6 +945,7 @@ impl PtySession {
             pane_id: opts.pane_id.clone(),
             tty_short: None,
             blocks,
+            block_rev,
             cwd_handle,
             inline_imgs,
             scheme_reports,
@@ -979,6 +991,7 @@ impl PtySession {
         let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
         let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
         let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let block_rev = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let title_handle = Arc::new(Mutex::new(None));
         let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let listener = PtyEventForwarder {
@@ -1017,6 +1030,7 @@ impl PtySession {
             Arc::clone(&title_handle),
             Arc::clone(&term),
             Arc::clone(&blocks),
+            Arc::clone(&block_rev),
             Arc::clone(&cwd_handle),
             Arc::clone(&byte_taps),
             Arc::clone(&screen_taps),
@@ -1047,6 +1061,7 @@ impl PtySession {
             pane_id: opts.pane_id.clone(),
             tty_short: None,
             blocks,
+            block_rev,
             cwd_handle,
             inline_imgs,
             scheme_reports,
@@ -1105,6 +1120,16 @@ impl PtySession {
     /// blocks without touching `App.pty` — no per-frame snapshot/clone.
     pub fn blocks_arc(&self) -> Arc<Mutex<VecDeque<CommandBlock>>> {
         Arc::clone(&self.blocks)
+    }
+
+    /// 블록 저장소의 바뀜 번호(0 = 셸 통합 표지를 아직 못 봄).
+    pub fn blocks_rev(&self) -> u64 {
+        self.block_rev.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 지금 대체 화면(vim·less·htop)인가. 스냅샷을 만들지 않고 모드만 본다.
+    pub fn alt_screen(&self) -> bool {
+        self.term.lock().unwrap().mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
     }
 
     /// Best-effort label for what's running in this PTY *right now*.
@@ -2458,6 +2483,7 @@ fn spawn_reader_thread(
     title_handle: Arc<Mutex<Option<String>>>,
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
+    block_rev: Arc<std::sync::atomic::AtomicU64>,
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
     byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
     screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
@@ -2512,6 +2538,10 @@ fn spawn_reader_thread(
         let mut blk_seq: u64 = 0;
         let mut blk_start: Option<Instant> = None;
         let mut blk_prompt: Option<(u16, u16)> = None;
+        // read 경계에서 잘린 다중 바이트 글자 — 다음 배치 앞에 붙여 한글이 깨지지 않게.
+        let mut blk_utf8: Vec<u8> = Vec::new();
+        // 이번 묶음의 C 직전에 읽어 둔 명령 줄(있으면 격자를 다시 읽지 않는다).
+        let mut blk_cmd: Option<String> = None;
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -2769,6 +2799,12 @@ fn spawn_reader_thread(
                         &inline_imgs,
                         &responder,
                     );
+                } else if let Some(at) = find_subslice(processed_bytes, b"\x1b]133;C") {
+                    // 명령의 첫 출력이 C 와 한 묶음으로 오면, 묶음을 다 먹인 뒤엔 명령 줄이
+                    // 이미 출력에 밀려 있다 — C 앞까지 먹이고 그 자리에서 읽는다.
+                    processor.advance(&mut *t, &processed_bytes[..at]);
+                    blk_cmd = Some(command_at_cursor(&t, current_size, blk_prompt));
+                    processor.advance(&mut *t, &processed_bytes[at..]);
                 } else {
                     processor.advance(&mut *t, processed_bytes);
                 }
@@ -2834,10 +2870,13 @@ fn spawn_reader_thread(
                 &term,
                 current_size,
                 &blocks,
+                &block_rev,
+                &mut blk_utf8,
                 &mut blk_capturing,
                 &mut blk_seq,
                 &mut blk_start,
                 blk_prompt,
+                &mut blk_cmd,
             );
             if let Some(upd) = update {
                 // try_send (not send) so the reader is NEVER paced by the
@@ -3148,30 +3187,38 @@ fn parse_command_blocks(
     term: &Arc<Mutex<Term<PtyEventForwarder>>>,
     size: (u16, u16),
     blocks: &Arc<Mutex<VecDeque<CommandBlock>>>,
+    rev: &std::sync::atomic::AtomicU64,
+    utf8_tail: &mut Vec<u8>,
     capturing: &mut bool,
     seq: &mut u64,
     start: &mut Option<Instant>,
     prompt: Option<(u16, u16)>,
+    early_command: &mut Option<String>,
 ) {
     const PREFIX: &[u8] = b"\x1b]133;";
     // Fast path: nothing to do unless we're mid-block or a mark is present.
     if !*capturing && find_subslice(bytes, PREFIX).is_none() {
         return;
     }
+    let bump = || {
+        rev.fetch_add(1, std::sync::atomic::Ordering::Release);
+    };
     let mut data = bytes;
     loop {
         match find_subslice(data, PREFIX) {
             None => {
-                if *capturing {
-                    block_append_output(blocks, data);
+                if *capturing && !data.is_empty() {
+                    block_append_output(blocks, data, utf8_tail);
+                    bump();
                 }
                 return;
             }
             Some(p) => {
                 // Bytes before this mark are command output (when capturing).
                 if *capturing {
-                    block_append_output(blocks, &data[..p]);
+                    block_append_output(blocks, &data[..p], utf8_tail);
                 }
+                bump();
                 let kind_idx = p + PREFIX.len();
                 let kind = data.get(kind_idx).copied();
                 let mut rest = &data[(kind_idx + 1).min(data.len())..];
@@ -3182,7 +3229,10 @@ fn parse_command_blocks(
                         if *capturing {
                             block_finalize(blocks, None, start);
                         }
-                        let command = extract_command(term, size, prompt);
+                        let command = early_command
+                            .take()
+                            .unwrap_or_else(|| command_at_cursor(&term.lock().unwrap(), size, prompt));
+                        utf8_tail.clear();
                         block_begin(blocks, seq, command);
                         *start = Some(Instant::now());
                         *capturing = true;
@@ -3251,25 +3301,64 @@ fn block_begin(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, seq: &mut u64, comma
         started_ms,
         duration_ms: None,
         is_tui: false,
+        dropped_lines: 0,
     });
     while b.len() > BLOCK_CAP {
         b.pop_front();
     }
 }
 
-fn block_append_output(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, chunk: &[u8]) {
+fn block_append_output(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, chunk: &[u8], utf8_tail: &mut Vec<u8>) {
     if chunk.is_empty() {
         return;
     }
     // Alt-screen enter ⇒ a TUI (vim/htop/less); its raw run isn't a clean block.
     let is_tui = find_subslice(chunk, b"\x1b[?1049h").is_some();
+    utf8_tail.extend_from_slice(chunk);
+    let text = take_utf8(utf8_tail);
     let mut b = blocks.lock().unwrap();
     if let Some(last) = b.back_mut() {
         if is_tui {
             last.is_tui = true;
         }
-        if last.output.len() < BLOCK_OUTPUT_CAP {
-            last.output.push_str(&String::from_utf8_lossy(chunk));
+        last.output.push_str(&text);
+        if last.output.len() > BLOCK_OUTPUT_CAP {
+            let keep_from = last.output.len() - BLOCK_OUTPUT_CAP * 3 / 4;
+            let cut = last.output[keep_from..]
+                .find('\n')
+                .map(|nl| keep_from + nl + 1)
+                .unwrap_or_else(|| (keep_from..=last.output.len()).find(|i| last.output.is_char_boundary(*i)).unwrap_or(0));
+            last.dropped_lines += last.output[..cut].matches('\n').count();
+            last.output.drain(..cut);
+        }
+    }
+}
+
+/// 앞에서부터 온전한 UTF-8 만 꺼내고, 끝에 걸린 미완성 글자는 `buf` 에 남긴다.
+/// 깨진 바이트(진짜 잘못된 것)는 대체 문자로 바꿔 넘긴다.
+fn take_utf8(buf: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(buf) {
+            Ok(s) => {
+                out.push_str(s);
+                buf.clear();
+                return out;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                out.push_str(std::str::from_utf8(&buf[..good]).unwrap_or_default());
+                match e.error_len() {
+                    None => {
+                        buf.drain(..good);
+                        return out;
+                    }
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        buf.drain(..good + bad);
+                    }
+                }
+            }
         }
     }
 }
@@ -3300,35 +3389,53 @@ fn block_finalize(
     }
 }
 
-/// Read the typed command out of the grid at C time: the `prompt` row (the B
-/// mark) from its column to line end. Single-line commands only (wrapped
-/// multi-line input is a follow-up). display_offset is 0 here (the reader
-/// snaps to the live tail on output), so the visual row is the grid line.
-fn extract_command(
-    term: &Arc<Mutex<Term<PtyEventForwarder>>>,
+/// Read the typed command out of the grid at C time. Enter moves the cursor to
+/// the next line before preexec emits C — and when the prompt sat on the last
+/// row that newline scrolls the screen, so the B mark's row is stale by one.
+/// The command therefore ends on the row just above the cursor; walk up through
+/// soft-wrapped rows to its first row and start that one at the B column.
+/// display_offset is 0 here (the reader snaps to the live tail on output).
+fn command_at_cursor(
+    t: &Term<PtyEventForwarder>,
     size: (u16, u16),
     prompt: Option<(u16, u16)>,
 ) -> String {
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::cell::Flags;
     let Some((prow, pcol)) = prompt else {
         return String::new();
     };
-    let (cols, _rows) = size;
-    let t = term.lock().unwrap();
     let grid = t.grid();
-    let glines = grid.screen_lines();
-    let gcols = grid.columns();
-    let line = prow as usize;
-    if line >= glines {
+    let glines = grid.screen_lines() as i32;
+    let gcols = grid.columns().min(size.0 as usize);
+    if gcols == 0 {
         return String::new();
     }
-    let end_col = (cols as usize).min(gcols);
+    let cursor = grid.cursor.point;
+    let wrapped = |l: i32| grid[Line(l)][Column(gcols - 1)].flags.contains(Flags::WRAPLINE);
+    let (first, last) = if cursor.column.0 == 0 && cursor.line.0 > 0 {
+        let last = cursor.line.0 - 1;
+        let mut first = last;
+        while first > 0 && wrapped(first - 1) {
+            first -= 1;
+        }
+        (first, last)
+    } else {
+        (prow as i32, prow as i32)
+    };
+    if first < 0 || last >= glines {
+        return String::new();
+    }
     let mut s = String::new();
-    for c in (pcol as usize)..end_col {
-        let point = Point::new(
-            alacritty_terminal::index::Line(line as i32),
-            alacritty_terminal::index::Column(c),
-        );
-        s.push(grid[point].c);
+    for line in first..=last {
+        let from = if line == first { pcol as usize } else { 0 };
+        for c in from..gcols {
+            let cell = &grid[Line(line)][Column(c)];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            s.push(cell.c);
+        }
     }
     s.trim_end().to_string()
 }
@@ -7139,6 +7246,90 @@ mod external_session_tests {
             }
         }
         false
+    }
+
+    fn wait_rev(sess: &PtySession, above: u64) -> u64 {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while Instant::now() < deadline && sess.blocks_rev() <= above {
+            let _ = sess.screens.recv_timeout(std::time::Duration::from_millis(50));
+        }
+        sess.blocks_rev()
+    }
+
+    /// 거울의 셸 묶음 데이터: 통합 표지 전엔 rev 0, 한글이 read 경계에서 잘려도 온전하고,
+    /// 도는 동안 rev 가 오르며, D 가 종료 코드로 닫는다.
+    #[test]
+    fn command_block_store_feeds_mirrors() {
+        let (sess, etx, _w, _) = ext_session(40, 6);
+        assert_eq!(sess.blocks_rev(), 0, "표지 전엔 통합 없음");
+        etx.send(ExtEvent::Bytes(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07".to_vec())).unwrap();
+        let r1 = wait_rev(&sess, 0);
+        assert!(r1 > 0);
+        let han = "한글".as_bytes();
+        etx.send(ExtEvent::Bytes([b"a ".as_slice(), &han[..4]].concat())).unwrap();
+        let r2 = wait_rev(&sess, r1);
+        etx.send(ExtEvent::Bytes([&han[4..], b"\r\n".as_slice()].concat())).unwrap();
+        wait_rev(&sess, r2);
+        {
+            let b = sess.blocks.lock().unwrap();
+            let last = b.back().unwrap();
+            assert_eq!(last.exit_code, None, "D 전엔 도는 중");
+            assert_eq!(last.output, "a 한글\r\n");
+        }
+        let r3 = sess.blocks_rev();
+        etx.send(ExtEvent::Bytes(b"\x1b]133;D;2\x07".to_vec())).unwrap();
+        wait_rev(&sess, r3);
+        let b = sess.blocks.lock().unwrap();
+        assert_eq!(b.back().unwrap().exit_code, Some(2));
+        assert!(!sess.alt_screen());
+    }
+
+    /// 프롬프트가 맨 아랫줄이면 Enter 가 화면을 한 줄 밀고 C 가 온다 — B 행은 낡았다.
+    /// 감긴 긴 명령·한글도 한 줄로 읽혀야 한다.
+    #[test]
+    fn command_text_survives_the_enter_scroll() {
+        let (sess, etx, _w, _) = ext_session(20, 4);
+        let wait_cmd = |n: usize| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let _ = sess.screens.recv_timeout(std::time::Duration::from_millis(50));
+                let b = sess.blocks.lock().unwrap();
+                if b.len() >= n || Instant::now() > deadline {
+                    return b.get(n - 1).map(|b| b.command.clone()).unwrap_or_default();
+                }
+            }
+        };
+        let send = |b: &[u8]| etx.send(ExtEvent::Bytes(b.to_vec())).unwrap();
+        send(b"1\r\n2\r\n3\r\n$ \x1b]133;B\x07");
+        let _ = sess.screens.recv_timeout(std::time::Duration::from_millis(300));
+        send("echo 한글 끝".as_bytes());
+        // 첫 출력이 C 와 한 묶음으로 와서 명령 줄을 밀어 올린다.
+        send("\r\n\x1b]133;C\x07한글 끝\r\n둘\r\n셋\r\n".as_bytes());
+        assert_eq!(wait_cmd(1), "echo 한글 끝");
+        send(b"x\r\n\x1b]133;D;0\x07$ \x1b]133;B\x07");
+        let _ = sess.screens.recv_timeout(std::time::Duration::from_millis(300));
+        send(b"printf abcdefghijklmnopqrstuvwxyz");
+        send(b"\r\n\x1b]133;C\x07");
+        assert_eq!(wait_cmd(2), "printf abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn long_block_output_keeps_the_tail() {
+        let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::default();
+        let mut seq = 0;
+        block_begin(&blocks, &mut seq, "yes".into());
+        let mut tail = Vec::new();
+        let line = format!("{}\n", "y".repeat(99));
+        for _ in 0..(BLOCK_OUTPUT_CAP / 100 + 500) {
+            block_append_output(&blocks, line.as_bytes(), &mut tail);
+        }
+        block_append_output(&blocks, b"END\n", &mut tail);
+        let b = blocks.lock().unwrap();
+        let last = b.back().unwrap();
+        assert!(last.output.len() <= BLOCK_OUTPUT_CAP);
+        assert!(last.output.ends_with("END\n"));
+        assert!(last.output.starts_with('y'), "줄 머리에서 자른다");
+        assert!(last.dropped_lines > 0);
     }
 
     #[test]

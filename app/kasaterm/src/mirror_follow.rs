@@ -20,6 +20,10 @@ pub(crate) struct HumanTouch {
 impl App {
     /// 사람이 이 칸을 만졌다. 거울이면 원본을 이 칸 크기로, 원본이면 뷰어가 쥔 크기를 거둔다.
     pub(crate) fn touch_surface_size(&self, surface: &str) {
+        // 원본 크기를 바꾸지 않는 거울(대화형·셸 묶음)은 빌릴 일이 없다 — docs/mirror-render.md.
+        if self.mirror_kind(surface) != crate::mirror_render::MirrorKind::Grid {
+            return;
+        }
         if kasa_mcp::remote::is_view_pane(surface) {
             kasa_mcp::remote::touch_source(surface);
         } else if let Some(session) = self.pty.get(surface) {

@@ -6440,7 +6440,9 @@ impl ApplicationHandler<UserEvent> for App {
                     ElementState::Pressed => {
                         // 대화로 보는 pane 의 본문 — 밑에 깔린 격자의 링크·선택·마우스
                         // 보고로 새지 않게 먼저 받는다.
-                        if self.chat_view_press(self.cursor_px.0, self.cursor_px.1) {
+                        if self.chat_view_press(self.cursor_px.0, self.cursor_px.1)
+                            || self.shell_view_press(self.cursor_px.0, self.cursor_px.1)
+                        {
                             window.request_redraw();
                             return;
                         }

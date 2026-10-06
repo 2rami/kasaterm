@@ -931,6 +931,33 @@ class Server {
   /// `reset` 으로 준다. 아직 묶인 기록이 없으면(셸·막 띄운 claude) null.
   /// [waitMs] 를 주면 새 줄이 없을 때 서버가 그 칸의 다음 대화 행까지 쥐었다가 답한다(긴 폴링). 그 길을
   /// 모르는 옛 서버와 mod 없는 칸은 바로 답한다.
+  /// 셸 칸의 명령 묶음(OSC 133) — `docs/mirror-render.md`. [since] 가 지금 도장과 같으면
+  /// 바뀔 때까지 [waitMs] 기다렸다 답한다. [block] 은 그 블록 하나를 줄 상한 없이.
+  /// `/term/blocks` 를 모르는 옛 데스크톱이면 404 [ServerException] 이다.
+  Future<Map<String, Object?>?> shellBlocks(
+    String pane, {
+    String? machine,
+    int? since,
+    int have = 0,
+    int? block,
+    int? waitMs,
+  }) async {
+    final body = await _getJson(
+      'term/blocks',
+      query: {
+        'pane': pane,
+        'have': '$have',
+        if (since != null) 'since': '$since',
+        if (block != null) 'block': '$block',
+        if (waitMs != null) 'wait': '$waitMs',
+      },
+      machine: machine,
+      timeout: Duration(milliseconds: (waitMs ?? 0) + 15000),
+    );
+    if (body is! Map || body['ok'] != true) return null;
+    return body.cast<String, Object?>();
+  }
+
   Future<({String raw, int offset, bool reset})?> transcriptRaw(
     String pane,
     int offset, {

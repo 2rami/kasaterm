@@ -55,6 +55,7 @@ pub mod gateway;
 pub mod remoteboard;
 pub mod reposync;
 pub mod share;
+mod shell_blocks;
 mod resume_visibility;
 pub mod standalone;
 pub mod team;

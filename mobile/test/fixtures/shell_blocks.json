@@ -1,0 +1,299 @@
+{
+ "ok": true,
+ "pane": "%0",
+ "since": 112,
+ "integration": true,
+ "alt": false,
+ "cols": 142,
+ "rows": 30,
+ "oldest": 1,
+ "blocks": [
+  {
+   "id": 2,
+   "cmd": "printf '\\e[31mred\\e[0m \\e[1;32mbold green\\e[0m \\e[44m bg \\e[0m 한글 출력\\n'",
+   "start_ms": 1791267290780,
+   "running": false,
+   "count": 1,
+   "exit": 0,
+   "ms": 0,
+   "lines": [
+    [
+     {
+      "t": "red",
+      "f": 1
+     },
+     {
+      "t": " "
+     },
+     {
+      "t": "bold green",
+      "f": 2,
+      "s": 1
+     },
+     {
+      "t": " "
+     },
+     {
+      "t": " bg ",
+      "b": 4
+     },
+     {
+      "t": " 한글 출력"
+     }
+    ]
+   ]
+  },
+  {
+   "id": 3,
+   "cmd": "ls /nope-dir",
+   "start_ms": 1791267290780,
+   "running": false,
+   "count": 1,
+   "exit": 1,
+   "ms": 5,
+   "lines": [
+    [
+     {
+      "t": "ls: /nope-dir: No such file or directory"
+     }
+    ]
+   ]
+  },
+  {
+   "id": 4,
+   "cmd": "git -C /tmp/yuuka/wt log --oneline --color=always -4",
+   "start_ms": 1791267290780,
+   "running": false,
+   "count": 4,
+   "exit": 0,
+   "ms": 41,
+   "lines": [
+    [
+     {
+      "t": "c2ad2964 (",
+      "f": 3
+     },
+     {
+      "t": "HEAD",
+      "f": 6,
+      "s": 1
+     },
+     {
+      "t": " -> ",
+      "f": 3
+     },
+     {
+      "t": "yuuka/mirror-shell-blocks",
+      "f": 2,
+      "s": 1
+     },
+     {
+      "t": ", ",
+      "f": 3
+     },
+     {
+      "t": "yuzu/mirror-chat",
+      "f": 2,
+      "s": 1
+     },
+     {
+      "t": ", ",
+      "f": 3
+     },
+     {
+      "t": "seia/info-focus",
+      "f": 2,
+      "s": 1
+     },
+     {
+      "t": ")",
+      "f": 3
+     },
+     {
+      "t": " 미러를 원본 크기 없이 다시 그리는 규칙 문서"
+     }
+    ],
+    [
+     {
+      "t": "9c560f4b (",
+      "f": 3
+     },
+     {
+      "t": "tag: preview-ready/9c560f4ba0ed902f0aa133ead6b5268c655ec911",
+      "f": 3,
+      "s": 1
+     },
+     {
+      "t": ")",
+      "f": 3
+     },
+     {
+      "t": " 머리 없는 터미널 칸 위 34px 머리 판정 걷기와 리그 AppKit 클릭"
+     }
+    ],
+    [
+     {
+      "t": "c9a021d5 (",
+      "f": 3
+     },
+     {
+      "t": "tag: preview-ready/c9a021d57d5d0b31075d9d2cd71c4c80808a5b46",
+      "f": 3,
+      "s": 1
+     },
+     {
+      "t": ", ",
+      "f": 3
+     },
+     {
+      "t": "yuzu/git-signal",
+      "f": 2,
+      "s": 1
+     },
+     {
+      "t": ")",
+      "f": 3
+     },
+     {
+      "t": " Git 열의 연결 mod 깃 신호 즉시 갱신"
+     }
+    ],
+    [
+     {
+      "t": "d949abc7 (",
+      "f": 3
+     },
+     {
+      "t": "tag: preview-ready/d949abc788e289ab29f6dde4773674f9c11bb40b",
+      "f": 3,
+      "s": 1
+     },
+     {
+      "t": ", ",
+      "f": 3
+     },
+     {
+      "t": "aris/op-faceid",
+      "f": 2,
+      "s": 1
+     },
+     {
+      "t": ")",
+      "f": 3
+     },
+     {
+      "t": " 공증 hardened 서명 목록에 1Password 실행기 kasa-op 추가"
+     }
+    ]
+   ]
+  },
+  {
+   "id": 5,
+   "cmd": "for i in 1 2 3 4 5 6 7 8; do echo \"step $i 진행\"; sleep 1; done",
+   "start_ms": 1791267290780,
+   "running": false,
+   "count": 8,
+   "exit": 0,
+   "ms": 8055,
+   "lines": [
+    [
+     {
+      "t": "step 1 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 2 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 3 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 4 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 5 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 6 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 7 진행"
+     }
+    ],
+    [
+     {
+      "t": "step 8 진행"
+     }
+    ]
+   ]
+  },
+  {
+   "id": 6,
+   "cmd": "echo from-mirror 거울에서",
+   "start_ms": 1791267290780,
+   "running": false,
+   "count": 1,
+   "exit": 0,
+   "ms": 0,
+   "lines": [
+    [
+     {
+      "t": "from-mirror 거울에서"
+     }
+    ]
+   ]
+  },
+  {
+   "id": 7,
+   "cmd": "vim /tmp/yk/x.txt",
+   "start_ms": 1791267290780,
+   "running": false,
+   "count": 0,
+   "exit": 0,
+   "ms": 5012,
+   "tui": true,
+   "lines": []
+  },
+  {
+   "id": 99,
+   "cmd": "cargo build --release",
+   "start_ms": 99999999999999,
+   "running": true,
+   "count": 3,
+   "lines": [
+    [
+     {
+      "t": "   Compiling kasa-pty v0.2.29"
+     }
+    ],
+    [
+     {
+      "t": "   Compiling kasa-mcp v0.2.29"
+     }
+    ],
+    [
+     {
+      "t": "warning",
+      "f": 3,
+      "s": 1
+     },
+     {
+      "t": ": unused variable"
+     }
+    ]
+   ]
+  }
+ ],
+ "newest": 99
+}

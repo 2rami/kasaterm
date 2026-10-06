@@ -22,6 +22,7 @@ import '../term_session.dart';
 import '../theme_prefs.dart';
 import '../weather/scene.dart';
 import 'conversation_view.dart';
+import 'shell_blocks_view.dart';
 import 'controls.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
@@ -99,10 +100,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   /// 쪽 사이에 걸쳐 있는 동안 — 두 쪽 다 깨어 있어야 밀려 들어오는 쪽이 멈춰 보이지 않는다.
   bool _paging = false;
-  late bool _lastCanChat = _canChat(_pane);
+  late bool _lastSecond = _hasSecond(_pane);
 
   int get _shownPage =>
-      _canChat(_pane) && paneView.value == PaneView.chat ? 1 : 0;
+      _hasSecond(_pane) && paneView.value == PaneView.chat ? 1 : 0;
 
   @override
   void initState() {
@@ -342,6 +343,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 대화 기록이 있는 창인가 — 셸·웹 셸엔 학생이 없어 격자만 있다.
   static bool _canChat(Pane p) => !p.isShell && !p.isWebShell;
 
+  /// 데스크톱 셸 칸 — 둘째 쪽이 명령 묶음(`ShellBlocksView`)이다. 폰이 연 웹 셸은 폰 제 터미널이라 뺀다.
+  static bool _canBlocks(Pane p) => p.isShell && !p.isWebShell;
+
+  /// 터미널 옆에 둘째 쪽(대화·명령 묶음)이 있나.
+  static bool _hasSecond(Pane p) => _canChat(p) || _canBlocks(p);
+
   void _showTerminal() => _choose(PaneView.terminal);
 
   /// 단추·점·「터미널로 보기」 — 고른 쪽을 기억하고, 쪽은 [_followView] 가 옮긴다.
@@ -374,7 +381,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 밀기를 받을 자리인가. 뒤로 가기 띠에서 시작한 손가락은 뒤로 가기 몫이고, 격자 그대로
   /// 보기는 손가락이 격자를 상하좌우로 끌어 읽으니 그 쪽에선 단추로만 바꾼다.
   bool _swipeStarts(Offset at) {
-    if (!_canChat(_pane) || !_pages.hasClients) return false;
+    if (!_hasSecond(_pane) || !_pages.hasClients) return false;
     final edge = math.max(MediaQuery.paddingOf(context).left, Look.backEdge);
     if (at.dx < edge) return false;
     return _wrap || (_pages.page ?? 0) >= 0.5;
@@ -392,7 +399,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     }
     final v = -(d.primaryVelocity ?? 0);
     final page = (_pages.page ?? 0) + (v == 0 ? 0 : v.sign * 0.5);
-    _pages.jumpToPage(page.round().clamp(0, _canChat(_pane) ? 1 : 0));
+    _pages.jumpToPage(page.round().clamp(0, _hasSecond(_pane) ? 1 : 0));
   }
 
   /// 쪽이 반을 넘으면 그 쪽이 지금 보기다 — 전환 단추·입력줄·앱바 단추가 따라온다.
@@ -404,14 +411,14 @@ class _TerminalScreenState extends State<TerminalScreen> {
           if (!_paging) setState(() => _paging = true);
         case ScrollUpdateNotification():
           // 학생이 나가 대화 쪽이 사라지며 되돌아가는 것은 고른 보기를 바꾸지 않는다.
-          if (!_canChat(_pane) || !_pages.hasClients) return;
+          if (!_hasSecond(_pane) || !_pages.hasClients) return;
           final v = (_pages.page ?? 0).round() >= 1
               ? PaneView.chat
               : PaneView.terminal;
           if (paneView.value != v) paneView.value = v;
         case ScrollEndNotification():
           if (_paging) setState(() => _paging = false);
-          if (_canChat(_pane)) const PaneViewPrefs().save(paneView.value);
+          if (_hasSecond(_pane)) const PaneViewPrefs().save(paneView.value);
         default:
       }
     });
@@ -445,14 +452,17 @@ class _TerminalScreenState extends State<TerminalScreen> {
       final accent = studentAccent(context, pane, s.tokens);
       final slug = pane.slug;
       final canChat = _canChat(pane);
-      final chat = canChat && paneView.value == PaneView.chat;
+      final blocks = _canBlocks(pane);
+      final second = canChat || blocks;
+      final chat = second && paneView.value == PaneView.chat;
       // 폰 폭으로 접어 보는 터미널에서 친 동안만 원본 격자를 폰 크기로 쥔다(TermSession.holdViewport).
-      final hold = _wrap && !chat;
+      // 셸 칸은 쥐지 않는다 — 명령 묶음·줄여 보기로 원본 크기 없이 그린다(docs/mirror-render.md).
+      final hold = _wrap && !chat && !blocks;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) s.holdViewport = hold;
       });
-      if (canChat != _lastCanChat) {
-        _lastCanChat = canChat;
+      if (second != _lastSecond) {
+        _lastSecond = second;
         WidgetsBinding.instance.addPostFrameCallback((_) => _followView());
       }
       // 자판이 뜨면 머리·전환 줄을 앱바 한 줄로 접는다 — 글 보이는 높이가 307pt(35%)까지 줄었다.
@@ -550,10 +560,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
                 ),
               ],
             ),
-            bottom: canChat && !typing ? const PaneViewSwitch() : null,
+            bottom: second && !typing ? PaneViewSwitch(shell: blocks) : null,
             actions: [
               // 전환 줄을 접은 동안에도 지금 보기가 보이게.
-              if (canChat && typing)
+              if (second && typing)
                 _ViewDots(
                   chat: chat,
                   onTap: () =>
@@ -620,6 +630,19 @@ class _TerminalScreenState extends State<TerminalScreen> {
                               child: _view(s),
                             ),
                           ),
+                          if (blocks)
+                            _page(
+                              1,
+                              chat ? 1 : 0,
+                              ShellBlocksView(
+                                server: widget.server,
+                                pane: pane,
+                                session: s,
+                                onTerminal: _showTerminal,
+                                bottomTick: _bottomTick,
+                                active: _paging || chat,
+                              ),
+                            ),
                           if (canChat)
                             _page(
                               1,
@@ -647,6 +670,22 @@ class _TerminalScreenState extends State<TerminalScreen> {
                   offstage: chat,
                   child: _terminalComposer(s, pane, autofocus: !chat),
                 ),
+                if (blocks)
+                  Offstage(
+                    offstage: !chat,
+                    child: ChatComposer(
+                      controller: _chatInput,
+                      focusNode: _chatFocus,
+                      enabled:
+                          s.state != TermState.gone && !_sending && !_attaching,
+                      onSend: () => _send(_chatInput, _chatFocus),
+                      hint: '명령 보내기',
+                      command: true,
+                      stopTip: '멈추기 (ctrl-c)',
+                      // 셸은 도는지를 칸 상태로 모른다 — 프롬프트에서 눌러도 줄만 비워 해가 없다.
+                      onStop: s.canSend ? () => s.sendText('\x03') : null,
+                    ),
+                  ),
                 if (canChat)
                   Offstage(
                     offstage: !chat,

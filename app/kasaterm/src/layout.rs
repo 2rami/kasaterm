@@ -357,9 +357,15 @@ impl App {
         let active_pid = pane.tabs.get(pane.active_tab)
             .and_then(|tab| tab.pid.as_deref()).unwrap_or(id);
         // A mirror now lays out text at its own columns/rows. Never make its
-        // font smaller merely because the source window is larger.
-        if kasa_mcp::remote::is_view_pane(active_pid) { return manual; }
-        let needs_fit = self.pty.get(active_pid).is_some_and(|session| session.has_viewer_size_control());
+        // font smaller merely because the source window is larger — except a
+        // shell mirror inside a full-screen program, which cannot be re-wrapped
+        // and is only shown shrunk to fit (docs/mirror-render.md).
+        let needs_fit = if kasa_mcp::remote::is_view_pane(active_pid) {
+            self.mirror_kind(active_pid) == crate::mirror_render::MirrorKind::Shell
+                && pane.term().is_some_and(|t| t.alt_screen)
+        } else {
+            self.pty.get(active_pid).is_some_and(|session| session.has_viewer_size_control())
+        };
         if !needs_fit {
             return manual;
         }

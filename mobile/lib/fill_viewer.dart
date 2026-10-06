@@ -15,7 +15,11 @@ class FillViewer extends StatefulWidget {
     required this.background,
     required this.child,
     this.onVerticalPan,
+    this.contain = false,
   });
+
+  /// 화면을 채우는 대신 격자 전체가 들어가게 줄인다 — 셸 거울의 줄여 보기(docs/mirror-render.md).
+  final bool contain;
 
   /// 자식의 본래 크기 — 자식은 이 크기의 상자 안에 그려진다.
   final Size content;
@@ -87,7 +91,9 @@ class _FillViewerState extends State<FillViewer> {
       final h = math.max(widget.content.height, 1.0);
       final fitW = constraints.maxWidth / w;
       final fitH = constraints.maxHeight / h;
-      final fit = FillViewer.fitFor(widget.content, constraints);
+      final fit = widget.contain
+          ? math.min(fitW, fitH)
+          : FillViewer.fitFor(widget.content, constraints);
       if ((fit - _fit).abs() > 1e-6) _applyFit(fit);
       _boxH = constraints.maxHeight;
       return ColoredBox(

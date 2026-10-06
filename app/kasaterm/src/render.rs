@@ -331,7 +331,8 @@ impl App {
                     let (cur_row, cur_col) = position.map(|(row, col)| (row as u16, col as u16))
                         .unwrap_or((0, 0));
                     // 대화로 보는 pane 은 격자를 안 그린다 — 커서 블록만 허공에 뜨면 안 된다.
-                    let cur_vis = source_vis && position.is_some() && !self.chat_view_showing(&id);
+                    let cur_vis = source_vis && position.is_some() && !self.chat_view_showing(&id)
+                        && !self.shell_view_showing(&id);
                     let cols = shift.and_then(|view| view.projection.as_ref())
                         .and_then(|projection| projection.rows.first())
                         .map(|row| row.len().min(u16::MAX as usize) as u16)
@@ -431,8 +432,8 @@ impl App {
             font_size: self.font_size,
             font_scale: pane_font_scale,
             selection: self.selection,
-            suggestion: if active_surface.as_deref().is_some_and(|id| self.chat_view_showing(id))
-                || self.target_pane().is_some_and(|id| self.chat_view_showing(&id))
+            suggestion: if active_surface.as_deref().is_some_and(|id| self.chat_view_showing(id) || self.shell_view_showing(id))
+                || self.target_pane().is_some_and(|id| self.chat_view_showing(&id) || self.shell_view_showing(&id))
             {
                 String::new()
             } else {
@@ -1051,6 +1052,7 @@ impl App {
         // to their pane after the borrow scope ends.
         let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         let mut chat_slots: Vec<crate::chat_view::Slot> = Vec::new();
+        let mut shell_slots: Vec<crate::shell_view::Slot> = Vec::new();
         // pane 마다 화면을 어떻게 옮겨 그렸는지. 락 안에서는 `self` 가 불변이라
         // 여기 모아 두었다가 블록이 끝난 뒤 한 번에 옮긴다(body_rects 와 같은 이유).
         let mut view_shifts: Vec<(String, crate::PaneViewShift)> = Vec::new();
@@ -1293,6 +1295,22 @@ impl App {
                         caret_on: self.cursor_blink_on(Instant::now()),
                     }
                 });
+                // 거울 셸 칸 — 원본이 낸 명령 묶음을 카드로. 원본 PTY 크기는 그대로다.
+                let shell_slot = chat_slot.is_none().then(|| {
+                    let tab = ws.active_tab_pid(&id);
+                    let alt_now = pane.term().is_some_and(|t| t.alt_screen);
+                    self.shell_view_ready(&id, &tab, alt_now).then(|| crate::shell_view::Slot {
+                        pane: id.clone(),
+                        rect: (0.0, 0.0, 0.0, 0.0),
+                        focused: active_id.as_deref() == Some(id.as_str()),
+                        prompt: self.shell_view_prompt(&ws, &id),
+                        caret_on: self.cursor_blink_on(Instant::now()),
+                        now_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as u64),
+                    })
+                }).flatten();
+                let body_view = chat_slot.is_some() || shell_slot.is_some();
                 let composition = self.compose_terminal_pane(
                     &ws, pane, pane.term(), &id, ws.active_tab_pid(&id), cols_now, rows_now,
                     body_left, body_top, pane_font_scale, true, &turn_headers,
@@ -1356,7 +1374,7 @@ impl App {
                 // 학생 판정(제목줄 이름)은 보기와 상관없이 산다.
                 agents_view_panes.extend(composition.agents_view_panes);
                 mirror_claude_panes.extend(composition.mirror_claude_panes);
-                if chat_slot.is_none() {
+                if !body_view {
                     banner_slots.extend(composition.banner_slots);
                     spinner_slots.extend(composition.spinner_slots);
                     waiting_slots.extend(composition.waiting_slots);
@@ -1379,7 +1397,7 @@ impl App {
                     .map(|(_, spans, _)| spans.clone())
                     .unwrap_or_default();
                 slots.push(PaneSlot {
-                    rows: if chat_slot.is_some() { Vec::new() } else { composed },
+                    rows: if body_view { Vec::new() } else { composed },
                     origin_px,
                     // Unfocused panes dim their text only (no box veil). Single
                     // un-split pane is never dimmed.
@@ -1466,6 +1484,10 @@ impl App {
                 if let Some(mut slot) = chat_slot {
                     slot.rect = (bx, by, bw, bh);
                     chat_slots.push(slot);
+                }
+                if let Some(mut slot) = shell_slot {
+                    slot.rect = (bx, by, bw, bh);
+                    shell_slots.push(slot);
                 }
                 if let Some(image) = img {
                     image_slots.push((
@@ -2947,6 +2969,7 @@ impl App {
             self.md_find_rects = find_btn_hits;
             // 대화 보기 — 마크다운과 같은 자리(빈 셀 패스 뒤, pane 머리 앞)에 크롬으로 그린다.
             Self::paint_chat_views(g, &mut self.chat_view, &chat_slots, sb_cursor);
+            Self::paint_shell_views(g, &mut self.shell_view, &shell_slots, sb_cursor);
             // 호버 툴팁 — pane 을 다 그린 뒤에 얹는다. pane 안에서 그리면 툴팁이
             // 경계를 넘는 순간 다음 pane 이 위를 덮어 반쪽만 남는다.
             if let Some((tip, hx, hy)) = self
@@ -13321,6 +13344,7 @@ impl App {
         // cursor blink phase toggles count separately.
         // 대화 보기는 기록이 새로 오면 그려야 한다 — 격자가 그대로여도 게이트를 연다.
         self.pump_chat_views();
+        self.pump_shell_views();
         let blink_changed = blink_on != self.last_blink_on;
         // 보이는 pane 으로 한정한다 — 안 보이는 방의 pane 이 dirty 여도 그릴 그림이
         // 없는데, 전에는 그 하나가 프레임을 통째로 불렀다. 방마다 claude 를 띄우면

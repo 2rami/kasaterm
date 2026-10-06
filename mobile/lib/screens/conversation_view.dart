@@ -53,7 +53,10 @@ class PaneViewPrefs {
 
 /// 앱바 밑의 「터미널 | 대화」. 폭을 반씩 나눠 엄지가 어디를 눌러도 닿게 한다.
 class PaneViewSwitch extends StatelessWidget implements PreferredSizeWidget {
-  const PaneViewSwitch({super.key});
+  const PaneViewSwitch({super.key, this.shell = false});
+
+  /// 셸 칸 — 둘째 얼굴이 대화가 아니라 명령 묶음이다.
+  final bool shell;
 
   static const height = 44.0;
 
@@ -69,16 +72,19 @@ class PaneViewSwitch extends StatelessWidget implements PreferredSizeWidget {
         expandedInsets: EdgeInsets.zero,
         showSelectedIcon: false,
         style: const ButtonStyle(visualDensity: VisualDensity.compact),
-        segments: const [
-          ButtonSegment(
+        segments: [
+          const ButtonSegment(
             value: PaneView.terminal,
             icon: Icon(Icons.terminal, size: 18),
             label: Text('터미널'),
           ),
           ButtonSegment(
             value: PaneView.chat,
-            icon: Icon(Icons.forum_outlined, size: 18),
-            label: Text('대화'),
+            icon: Icon(
+              shell ? Icons.view_agenda_outlined : Icons.forum_outlined,
+              size: 18,
+            ),
+            label: Text(shell ? '명령' : '대화'),
           ),
         ],
         selected: {view},
@@ -102,7 +108,16 @@ class ChatComposer extends StatelessWidget {
     this.leading,
     this.onStop,
     this.photos = const [],
+    this.hint = '메시지 보내기',
+    this.stopTip = '멈추기 (esc)',
+    this.command = false,
   });
+
+  final String hint;
+  final String stopTip;
+
+  /// 셸 명령 칸 — 자동 대문자·고침·똑똑한 따옴표가 명령을 바꾸지 않게 터미널 입력칸처럼 끈다.
+  final bool command;
 
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -141,9 +156,13 @@ class ChatComposer extends StatelessWidget {
           minLines: 1,
           maxLines: Look.inputMaxLines,
           textInputAction: TextInputAction.newline,
+          autocorrect: !command,
+          enableSuggestions: !command,
+          smartDashesType: command ? SmartDashesType.disabled : null,
+          smartQuotesType: command ? SmartQuotesType.disabled : null,
           // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
           style: const TextStyle(fontSize: 16),
-          decoration: const InputDecoration(hintText: '메시지 보내기'),
+          decoration: InputDecoration(hintText: hint),
         ),
       ),
       if (onStop != null) ...[
@@ -151,7 +170,7 @@ class ChatComposer extends StatelessWidget {
         IconButton(
           onPressed: onStop,
           icon: const Icon(Icons.stop_circle_outlined),
-          tooltip: '멈추기 (esc)',
+          tooltip: stopTip,
         ),
       ],
       const SizedBox(width: 8),

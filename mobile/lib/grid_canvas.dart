@@ -574,12 +574,16 @@ class GridCanvas extends StatefulWidget {
     this.fontSize = 13,
     this.composing,
     this.onWheel,
+    this.contain = false,
   });
 
   final Grid grid;
   final int version;
   final TerminalPalette palette;
   final double fontSize;
+
+  /// 격자 전체가 칸에 들어가게 줄여 그린다([FillViewer.contain]).
+  final bool contain;
 
   /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다.
   final String? composing;
@@ -629,6 +633,7 @@ class _GridCanvasState extends State<GridCanvas> {
     return FillViewer(
       content: Size(cols * _metrics.width, rows * _metrics.height),
       background: widget.palette.bg,
+      contain: widget.contain,
       onVerticalPan: wheel == null
           ? null
           : (dy) => _wheel.add(dy, _metrics.height, wheel),

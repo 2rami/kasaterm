@@ -794,7 +794,7 @@ impl App {
     /// to false so the user has an iTerm-style escape hatch back to
     /// our own selection logic.
     pub(crate) fn pane_takes_mouse(&self, pane_id: &str) -> bool {
-        if self.modifiers.shift_key() || self.chat_view_showing(pane_id) {
+        if self.modifiers.shift_key() || self.chat_view_showing(pane_id) || self.shell_view_showing(pane_id) {
             return false;
         }
         let ws = self.ws.lock().unwrap();
@@ -807,7 +807,7 @@ impl App {
     /// 버튼 없는 움직임을 받겠다고 한 TUI(DECSET 1003)인가. Claude Code 의 호버 효과는
     /// 이 이동을 받아야 그려진다 — 누른 채 끌 때만 보내던 동안엔 ×·목록 위에 올려도 반응이 없었다.
     pub(crate) fn pane_takes_hover(&self, pane_id: &str) -> bool {
-        if self.modifiers.shift_key() || self.chat_view_showing(pane_id) {
+        if self.modifiers.shift_key() || self.chat_view_showing(pane_id) || self.shell_view_showing(pane_id) {
             return false;
         }
         let ws = self.ws.lock().unwrap();
@@ -2521,7 +2521,7 @@ impl App {
             return;
         }
         // 대화 칸 — 격자 스크롤백이 아니라 말풍선 목록을 굴린다.
-        if self.chat_view_wheel(delta) {
+        if self.chat_view_wheel(delta) || self.shell_view_wheel(delta) {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }

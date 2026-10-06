@@ -7950,6 +7950,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/path", get(term_path_get))
                     .route("/term/input", post(term_input_post))
                     .route("/term/screen", get(term_screen_get))
+                    .route("/term/blocks", get(crate::shell_blocks::term_blocks_get))
                     .route("/term/session", axum::routing::delete(term_session_delete))
                     .route(
                         "/term/transcript",
