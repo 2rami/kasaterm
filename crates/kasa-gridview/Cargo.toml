@@ -17,5 +17,7 @@ pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+# P3 레이어 손질이 `setColorspace:` 에 CGColorSpaceRef 를 `*mut c_void` 로 넘긴다 — 디버그 빌드의 인자 타입 검사가
+# 그 자리를 막지 않게 한다(본판은 다른 의존이 켜 줘서 드러나지 않았다).
+objc2 = { version = "0.6", features = ["relax-void-encoding"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }

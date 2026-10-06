@@ -16,7 +16,7 @@ default = ["app-update"]
 # 카사텀 앱 재시작·업데이트 작업(`app_restart`·`app_update`, `app.*` 메서드, CLI
 # `app-restart`·`app-update`). 앱을 스스로 갈아 끼우지 않는 호스트(`kasa tui` 는
 # brew·npm·winget 이 올린다)는 끈다.
-app-update = []
+app-update = ["dep:ring"]
 
 [dependencies]
 anyhow.workspace = true
@@ -24,7 +24,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 앱 업데이트 창구가 받은 파일을 직접 잰다(sha256·Sparkle EdDSA·서명 base64). 셋 다 이미 워크스페이스에 있는 판이다.
 base64 = "0.22"
-ring = "0.17"
+# 앱 업데이트 피드 서명 확인에만 쓴다 — 업데이트를 안 하는 호스트(카사라이트·kasa tui)는 안 싣는다.
+ring = { version = "0.17", optional = true }
 sha2 = "0.10"
 # claude 신뢰 키(`claude_trust`)를 claude 와 같이 NFC 로 맞춘다. 이미 워크스페이스에 있는 판이다.
 unicode-normalization = "0.1"
