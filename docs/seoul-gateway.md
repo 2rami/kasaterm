@@ -73,6 +73,12 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 `/etc/kasa-relay/env.bak-20261005`, `/var/lib/kasa-relay-bak-20261005.tar`. 되돌리기는 그 바이너리·env 를 제자리로 놓고
 `sudo systemctl restart kasa-relay`(열쇠 파일은 지워도 되고 남겨도 옛 관문은 안 읽는다).
 
+## 연결 한 번에 교체 기록 (2026-10-05)
+
+99337a7b 관문으로 교체(sha256 a9bad99a…, Google·GitHub 연결 한 번에 로그인과 일 권한). 8c185712 에서 관문 쪽 변경은 이것뿐, env 변경 없음.
+교체 전 백업 `/usr/local/bin/kasa-relay.bak-20261005b`(=8c185712). 되돌리기는 그 파일을 제자리로 놓고 `sudo systemctl restart kasa-relay`.
+확인: `/relay/health` 200, `providers` 의 `connect` 둘 다 참, 무토큰 `/relay/connections` 401, 맥미니·맥북 재접속.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
