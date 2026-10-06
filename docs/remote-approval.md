@@ -24,6 +24,9 @@ mod(tool.check · classic.PermissionRequest)
 | 데스크톱 알림·시트 | `app/kasaterm/src/remote_approval.rs` |
 | 폰 | `mobile/lib/approvals.dart` · `mobile/lib/screens/approval_screen.dart` · `mobile/lib/push.dart` |
 
+같은 창구에 **1Password 비밀 요청**(`kind:"secret"`)도 오른다 — 폰만, Secure Enclave 키 서명이 있어야 허락된다.
+설계·창구·검사는 [op-faceid-approval.md](op-faceid-approval.md). 다른 맥은 이 요청을 띄우지 않는다.
+
 ## 관문 창구
 
 전부 `Authorization: Bearer <기기 토큰>`. 계정은 토큰이 정한다 — 본문은 계정·기기를 말하지 못한다.

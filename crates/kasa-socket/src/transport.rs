@@ -78,6 +78,25 @@ mod imp {
                 inner: self.inner.try_clone()?,
             })
         }
+
+        /// 붙은 프로세스의 pid — 커널이 준 값이라 요청 본문보다 믿을 만하다(비밀 요청이 칸을 이것으로 찾는다).
+        #[cfg(target_os = "macos")]
+        pub fn peer_pid(&self) -> Option<u32> {
+            use std::os::unix::io::AsRawFd;
+            const SOL_LOCAL: libc::c_int = 0;
+            const LOCAL_PEERPID: libc::c_int = 0x002;
+            let mut pid: libc::pid_t = 0;
+            let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockopt(self.inner.as_raw_fd(), SOL_LOCAL, LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut len)
+            };
+            (rc == 0 && pid > 0).then_some(pid as u32)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        pub fn peer_pid(&self) -> Option<u32> {
+            None
+        }
     }
 
     impl std::io::Read for LocalStream {
@@ -304,6 +323,10 @@ mod imp {
             Ok(Self {
                 handle: std::sync::Arc::new(OwnedHandle::new(h)),
             })
+        }
+
+        pub fn peer_pid(&self) -> Option<u32> {
+            None
         }
 
         pub fn try_clone(&self) -> Result<Self> {

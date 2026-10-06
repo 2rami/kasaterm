@@ -4281,6 +4281,11 @@ impl App {
                 self.device_account.fixture(false, false);
                 self.chrome_dirty = true;
             }
+            "device-op" if crate::verification_run() => {
+                self.device_account.op.fixture();
+                self.device_account.fixture(false, false);
+                self.chrome_dirty = true;
+            }
             "device-oauth" | "device-choice" | "device-claim" if crate::verification_run() => {
                 let action = std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default();
                 self.device_account

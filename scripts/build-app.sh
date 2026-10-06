@@ -121,6 +121,18 @@ cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 # 무중단 승격(promote)의 로컬 상주 데몬 — ensure_local_ptyd 가 현재 exe 옆에서 찾는다.
 cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
+# 1Password 실행기(docs/op-faceid-approval.md) — 토큰을 표준 입력으로만 받는 Go 프로그램. 앱이 그 프로세스의 서명을
+# pid 로 확인한 뒤에야 토큰을 넘긴다. Go 가 없는 기계에서 구우면 빠지고, 앱 설정이 「이 판에 실행기가 없어요」라고 말한다.
+GO_BIN="$(command -v go || true)"
+for candidate in /usr/local/go/bin/go /opt/homebrew/bin/go; do
+  [[ -z "$GO_BIN" && -x "$candidate" ]] && GO_BIN="$candidate"
+done
+if [[ -n "$GO_BIN" ]]; then
+  (cd tools/kasa-op && CGO_ENABLED=0 GOFLAGS=-mod=readonly "$GO_BIN" build -trimpath -ldflags="-s -w" \
+    -o "$PWD/../../$APP/Contents/MacOS/kasa-op" .) || { echo "error: kasa-op build failed" >&2; exit 1; }
+else
+  echo "[build-app] go 없음 — 1Password 실행기(kasa-op) 없이 굽는다" >&2
+fi
 # 바탕화면 펫 — 본체와 별개 프로세스라 kasaterm 이 꺼져도 남는다(toggle_pet 이 여기서 찾는다).
 cp "$BINDIR/kasapet" "$APP/Contents/Resources/kasapet"
 # 모델은 번들에 안 담는다 — Live2D 공식 캐릭터는 재배포가 금지다. 처음 켤 때 이 스크립트가
@@ -559,6 +571,7 @@ fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-serve-web"
+[[ -f "$APP/Contents/MacOS/kasa-op" ]] && sign_part "$APP/Contents/MacOS/kasa-op"
 # 펫은 Resources 안의 Mach-O 라 app 서명이 봉인만 하고 서명은 안 한다(링커 ad-hoc 그대로) — 공증은 그것도 거절한다.
 [[ "$HARDENED" == "1" ]] && sign_part "$APP/Contents/Resources/kasapet"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")

@@ -32,6 +32,7 @@
 - `sidebar_pulse.rs` — 사이드바 맨 위 「목록 | 배치도」 전환과 학생 줄 사정(모든 기기 보드의 사람 차례·작업·끝). 수는 `board_digest.rs`(원격 거울 줄 제외)를 백그라운드로 3초마다 읽고 펫 현황판에도 적는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
 - `remote_approval.rs` — 원격 승인의 데스크톱 화면: 같은 계정 **다른 기기** 학생의 권한 요청을 관문 긴 폴링으로 받아 오른쪽 위 결정 알림([보기][나중에], `collab.toast_action` 센티널)과 원문 시트([허락][거절], Return=거절)로 묻고 관문에 보낸다. 이 기기 요청은 `kasa_mcp::approval_bridge` 가 브로커(`claude_mod`)↔관문을 잇는다 — `docs/remote-approval.md`
+- `native_op_secrets.rs` — 설정 「계정」의 1Password: 서비스 계정 토큰 넣기(NSSecureTextField 시트 → `kasa_mcp::op_secret`, 키체인)·지우기, 폰 Face ID 승인 열쇠 믿기(지문 시트, Return=취소)·거두기, 새 열쇠 알림. 학생 요청 길은 소켓 `op.secret`(socket.rs, 칸은 소켓 상대 pid 로) — `docs/op-faceid-approval.md`
 - `update_notice.rs` — 새 판 알림: 업데이터(맥 preview Sparkle 확인·WinSparkle)가 찾은 판을 오른쪽 위 결정 알림으로 세우고, [업데이트]면 끊길 일을 한 번 묻고 설치를 맡긴다, [닫기]면 그 판을 기기 설정에 적는다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`

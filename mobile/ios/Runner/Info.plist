@@ -26,6 +26,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>학생의 1Password 비밀 요청을 그 한 번만 허락할 때 Face ID 로 확인합니다.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>선택한 사진을 현재 학생의 입력창에 첨부합니다.</string>
 	<key>UIApplicationSceneManifest</key>

@@ -1464,6 +1464,12 @@ pub trait Backend: Send + Sync {
         Err(anyhow::anyhow!("이 백엔드는 관문 로그인을 못 해요"))
     }
 
+    /// 1Password 비밀 읽기(`op.secret`, `{op: read|status}`, docs/op-faceid-approval.md). 폰 Face ID 승인과
+    /// 키체인은 kasa-mcp 와 앱이 알아 그 백엔드만 덮어쓴다.
+    fn op_secret(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        Err(anyhow::anyhow!("이 백엔드는 1Password 비밀을 못 읽어요"))
+    }
+
     /// 카사넷 포트 공유(`net.forward`, `{op: forward|list|stop}`) — 다른 기기 포트를 이 기기 localhost 로.
     /// 끌어오기는 kasa-mcp 에 있어 그걸 아는 백엔드만 덮어쓴다.
     fn net_forward(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {

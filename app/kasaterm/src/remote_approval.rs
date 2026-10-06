@@ -171,7 +171,8 @@ impl App {
         let mut fresh = Vec::new();
         for a in &st.items {
             let Some(id) = a["id"].as_str() else { continue };
-            if a["state"] != "pending" || st.me.as_deref() == a["device"].as_str() {
+            // 1Password 비밀 요청은 폰 Face ID 서명으로만 허락된다 — 맥 시트의 [허락]은 관문이 받지 않는다.
+            if a["state"] != "pending" || st.me.as_deref() == a["device"].as_str() || a["kind"] == "secret" {
                 continue;
             }
             if st.announced.insert(id.to_string()) {
@@ -427,7 +428,7 @@ fn open_sheet(
 
 /// 검증 실행이 시트 단추를 누른다 — 0 허락, 1 거절.
 #[cfg(target_os = "macos")]
-fn press_sheet(alert: usize, index: usize) {
+pub(crate) fn press_sheet(alert: usize, index: usize) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     unsafe {
@@ -443,7 +444,7 @@ fn press_sheet(alert: usize, index: usize) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn press_sheet(_alert: usize, _index: usize) {}
+pub(crate) fn press_sheet(_alert: usize, _index: usize) {}
 
 /// 검증 실행이 시트 창을 PNG 로 — 화면 기록 권한 없이 그 창의 뷰를 비트맵으로 그린다.
 #[cfg(target_os = "macos")]

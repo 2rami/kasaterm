@@ -31,6 +31,7 @@ pub fn fields(tool: &str, input: &Value) -> (Vec<Field>, bool) {
         "NotebookEdit" => &[("notebook_path", "노트북"), ("cell_id", "칸"), ("edit_mode", "방식"), ("new_source", "새 내용")],
         "WebFetch" => &[("url", "주소"), ("prompt", "물음")],
         "Read" => &[("file_path", "파일")],
+        "1Password" => &[("refs", "참조"), ("command", "명령")],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -272,6 +273,30 @@ fn mask_pem(text: &str) -> String {
 }
 
 /// 승인 요청의 지문 — 보인 것과 결정한 것이 같은지 견준다. 관문·데스크톱·폰이 같은 값을 내야 한다.
+/// 비밀 요청(docs/op-faceid-approval.md) 서명 대상 머리 — 이 키의 서명이 다른 용도의 글로 쓰이지 않게.
+pub const SECRET_PREFIX: &[u8] = b"kasaterm-secret/1\n";
+
+/// Secure Enclave 공개키(X9.63 비압축 P-256, 65바이트)의 id — 공개키 SHA-256 앞 32자.
+pub fn key_id(public: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(public).iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// 사람이 두 화면(폰·맥)에서 맞춰 보는 지문 — 키 id 앞 12자를 넷씩.
+pub fn key_fingerprint(id: &str) -> String {
+    let head: Vec<char> = id.to_uppercase().chars().take(12).collect();
+    head.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+}
+
+/// 폰 서명(DER ECDSA P-256/SHA-256)이 머리+도전값에 맞나. 관문과 요청한 맥이 같은 함수로 본다.
+pub fn signature_ok(public: &[u8], challenge: &str, sig: &[u8]) -> bool {
+    let mut message = SECRET_PREFIX.to_vec();
+    message.extend_from_slice(challenge.as_bytes());
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, public)
+        .verify(&message, sig)
+        .is_ok()
+}
+
 pub fn digest(parts: &[&str], fields: &[Field]) -> String {
     use sha2::Digest as _;
     let body = serde_json::json!({ "parts": parts, "fields": fields });
@@ -280,6 +305,17 @@ pub fn digest(parts: &[&str], fields: &[Field]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_ids_match_the_phone() {
+        // 폰 시험(mobile/test/approval_secret_test.dart)과 같은 벡터 — 공개키 0x04,1..64.
+        let mut public = vec![4u8];
+        public.extend(1..=64u8);
+        let id = super::key_id(&public);
+        assert_eq!(id, "0ed3a6ab957ff6f59a9630a473d31a7d");
+        assert_eq!(super::key_fingerprint(&id), "0ED3-A6AB-957F");
+        assert!(super::SECRET_PREFIX.ends_with(b"\n"));
+    }
+
     use super::*;
 
     #[test]

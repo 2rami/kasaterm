@@ -2545,8 +2545,10 @@ mod collab_protocol_tests {
         // 아니라 cwd 와 무관하게 모든 학생에게 실리는 이 규약에 둔다.
         // 2026-09-28 겹침 가드 한 줄(이미 83줄로 넘어 있었다)과 KASA-share 결과물 폴더 한 줄로 84줄.
         // 같은 날 학생 소환·완료 기다리기 명령 줄이 main 에 먼저 들어와 7.9 KiB — 바이트 한도를 8 KiB 로.
+        // 2026-10-06 1Password 비밀 읽기(폰 Face ID, docs/op-faceid-approval.md)를 비밀번호 줄에 붙여 8.6 KiB —
+        // 줄 수는 그대로 두고 바이트 한도만 9 KiB 로. 학생이 `op` 를 바로 부르면 맥에 Touch ID 창이 뜬다.
         assert!(
-            protocol.lines().count() <= 84 && protocol.len() <= 8 * 1024 + 512,
+            protocol.lines().count() <= 84 && protocol.len() <= 9 * 1024,
             "규약은 짧게 유지하고 API 상세는 연결된 문서에 둬야 한다"
         );
         // 캐릭터 정체성 문장에 규약이 이어붙으면 한 문단이 된다.

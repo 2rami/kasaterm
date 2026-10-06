@@ -7,9 +7,11 @@
 //! - 결정에는 그 화면이 본 글의 지문이 따라온다. 다르면 받지 않는다(보인 것과 다른 것을 허락하지 않게).
 //! - 요청은 메모리에만 둔다(2분짜리다). 남는 것은 감사 줄뿐 — 누가·언제·어느 기기에서 무엇을.
 //! - 계정 폰이 맡긴 푸시 토큰으로 관문이 직접 알린다. 다른 곳에서 닫히면 같은 알림을 조용히 갈아 끼운다.
+//! - 비밀 요청(`kind:"secret"`, docs/op-faceid-approval.md)은 폰만 허락하고, 그 폰이 맡긴 Secure Enclave
+//!   키로 데스크톱이 만든 도전값에 서명해야 받는다. 요청한 맥이 같은 검사를 한 번 더 한다.
 
 use super::*;
-use crate::approval_text::{self, Field};
+use crate::approval_text::{self, key_id, signature_ok, Field};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -23,6 +25,8 @@ const MAX_WAIT: u64 = 25;
 const MAX_BODY: usize = 128 * 1024;
 const AUDIT_ROTATE: u64 = 2 * 1024 * 1024;
 const MAX_PUSH_PER_DEVICE: usize = 1;
+const MAX_CHALLENGE: usize = 4096;
+const MAX_REFS: usize = 16;
 
 pub(super) fn routes() -> Router<Gate> {
     Router::new()
@@ -30,6 +34,7 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/approvals/audit", get(audit))
         .route("/relay/approvals/approver", axum::routing::post(approver))
         .route("/relay/approvals/push", axum::routing::post(push_register).delete(push_unregister))
+        .route("/relay/approvals/keys", get(keys_list).post(key_register).delete(key_unregister))
         .route("/relay/approvals/{id}", get(one))
         .route("/relay/approvals/{id}/decide", axum::routing::post(decide))
         .route("/relay/approvals/{id}/cancel", axum::routing::post(cancel))
@@ -75,6 +80,11 @@ pub(super) struct Device {
 struct Approval {
     id: String,
     account: String,
+    /// `tool`(학생 권한 요청) 또는 `secret`(1Password 비밀 읽기 — 폰 서명이 있어야 허락).
+    kind: &'static str,
+    /// 비밀 요청의 도전값 원문. 폰은 이 글자 그대로에 서명하고 요청한 맥은 올린 것과 같은지 본다.
+    challenge: Option<String>,
+    proof: Option<(String, String)>,
     origin: Device,
     student: String,
     pane: String,
@@ -95,6 +105,10 @@ impl Approval {
     fn view(&self, now_ms: u64) -> Value {
         json!({
             "id": self.id,
+            "kind": self.kind,
+            "challenge": self.challenge,
+            "key": self.proof.as_ref().map(|p| &p.0),
+            "sig": self.proof.as_ref().map(|p| &p.1),
             "state": self.phase.name(),
             "machine": self.origin.label,
             "device": self.origin.id,
@@ -122,11 +136,66 @@ impl Approval {
     }
 }
 
-fn digest_of(id: &str, origin: &Device, student: &str, pane: &str, cwd: &str, tool: &str, expires_ms: u64, truncated: bool, fields: &[Field]) -> String {
+#[allow(clippy::too_many_arguments)]
+fn digest_of(id: &str, origin: &Device, student: &str, pane: &str, cwd: &str, tool: &str, expires_ms: u64, truncated: bool, fields: &[Field], challenge: Option<&str>) -> String {
     let expires = expires_ms.to_string();
     let cut = if truncated { "1" } else { "0" };
-    approval_text::digest(&[id, &origin.id, &origin.label, student, pane, cwd, tool, &expires, cut], fields)
+    let mut parts = vec![id, &origin.id, &origin.label, student, pane, cwd, tool, &expires, cut];
+    // 도구 요청의 지문은 예전 그대로 둔다 — 옛 폰·맥이 받은 지문이 바뀌지 않게.
+    if let Some(challenge) = challenge {
+        parts.push("secret");
+        parts.push(challenge);
+    }
+    approval_text::digest(&parts, fields)
 }
+
+/// 데스크톱이 만든 비밀 요청 도전값 — 관문은 서명하지 않고 모양과 묶임(계정·기기·만료)만 본다.
+#[derive(Debug)]
+pub(super) struct Challenge {
+    student: String,
+    pane: String,
+    cwd: String,
+    command: String,
+    refs: Vec<String>,
+    exp: u64,
+}
+
+pub(super) fn parse_challenge(text: &str, account: &str, device: &str, now: u64) -> Result<Challenge, Refuse> {
+    if text.is_empty() || text.len() > MAX_CHALLENGE {
+        return Err(Refuse::ChallengeInvalid);
+    }
+    let v: Value = serde_json::from_str(text).map_err(|_| Refuse::ChallengeInvalid)?;
+    let s = |k: &str| v[k].as_str().map(str::to_string);
+    let nonce = s("nonce").unwrap_or_default();
+    let refs: Vec<String> = v["refs"].as_array().into_iter().flatten().filter_map(|r| r.as_str().map(str::to_string)).collect();
+    let ok = v["v"] == 1
+        && v["kind"] == "op.read"
+        && nonce.len() == 32
+        && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+        && s("account").as_deref() == Some(account)
+        && s("device").as_deref() == Some(device)
+        && !refs.is_empty()
+        && refs.len() <= MAX_REFS
+        && v["refs"].as_array().is_some_and(|a| a.len() == refs.len())
+        && refs.iter().all(|r| r.starts_with("op://") && short(r, 256));
+    if !ok {
+        return Err(Refuse::ChallengeInvalid);
+    }
+    let exp = v["exp"].as_u64().ok_or(Refuse::ChallengeInvalid)?;
+    if exp <= now || exp > now + TTL * 1000 + 5_000 {
+        return Err(Refuse::ChallengeInvalid);
+    }
+    let field = |k: &str, max: usize| s(k).filter(|t| short(t, max)).ok_or(Refuse::ChallengeInvalid);
+    Ok(Challenge {
+        student: field("student", 64)?,
+        pane: field("pane", 64)?,
+        cwd: field("cwd", 1024)?,
+        command: s("command").filter(|t| t.len() <= 2048).ok_or(Refuse::ChallengeInvalid)?,
+        refs,
+        exp,
+    })
+}
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Refuse {
@@ -140,13 +209,19 @@ pub(super) enum Refuse {
     DigestMismatch,
     Truncated,
     ApproverRequired,
+    ChallengeInvalid,
+    PhoneOnly,
+    SignatureRequired,
+    KeyUnknown,
+    BadSignature,
 }
 
 impl Refuse {
     fn status(&self) -> StatusCode {
         match self {
-            Self::BadRequest | Self::Truncated => StatusCode::BAD_REQUEST,
-            Self::DesktopOnly | Self::NotOrigin | Self::ApproverRequired => StatusCode::FORBIDDEN,
+            Self::BadRequest | Self::Truncated | Self::ChallengeInvalid => StatusCode::BAD_REQUEST,
+            Self::DesktopOnly | Self::NotOrigin | Self::ApproverRequired | Self::PhoneOnly => StatusCode::FORBIDDEN,
+            Self::SignatureRequired | Self::KeyUnknown | Self::BadSignature => StatusCode::FORBIDDEN,
             Self::TooMany => StatusCode::TOO_MANY_REQUESTS,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Closed | Self::DigestMismatch => StatusCode::CONFLICT,
@@ -165,6 +240,11 @@ impl Refuse {
             Self::DigestMismatch => "digest_mismatch",
             Self::Truncated => "truncated_cannot_allow",
             Self::ApproverRequired => "approver_required",
+            Self::ChallengeInvalid => "challenge_invalid",
+            Self::PhoneOnly => "phone_only",
+            Self::SignatureRequired => "signature_required",
+            Self::KeyUnknown => "key_unknown",
+            Self::BadSignature => "bad_signature",
         }
     }
 }
@@ -178,13 +258,28 @@ pub(super) struct Ask {
     pane: String,
     #[serde(default)]
     cwd: String,
+    #[serde(default)]
     tool: String,
     /// 도구 입력 원본(JSON). 관문은 가려서 칸으로 편 뒤에만 쥔다 — 데스크톱이 이미 가렸어도 한 번 더.
+    #[serde(default)]
     input: Value,
+    /// `secret` 이면 `challenge` 가 정본이다 — 칸·학생·폴더는 도전값에서 편다.
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    challenge: Option<String>,
     /// 데스크톱이 원문을 다 못 실었다(mod 의 `input_truncated`). 잘린 요청은 허락할 수 없다.
     #[serde(default)]
     truncated: bool,
     ttl: Option<u64>,
+}
+
+#[derive(Clone, serde::Serialize, Deserialize)]
+struct KeyReg {
+    /// base64(X9.63 비압축 P-256 공개키)
+    public: String,
+    id: String,
+    added: u64,
 }
 
 #[derive(Clone, serde::Serialize, Deserialize)]
@@ -202,6 +297,9 @@ pub(super) struct Store {
     /// 기기(폰) → 푸시 토큰. 기기가 폐기되면 보내지 않는다(보낼 때 기기 기록을 다시 본다).
     push: Mutex<HashMap<String, Vec<PushReg>>>,
     push_path: Option<PathBuf>,
+    /// 폰 → 그 폰 Secure Enclave 공개키(기기당 하나). 비밀 요청 허락의 서명을 여기 키로 본다.
+    keys: Mutex<HashMap<String, KeyReg>>,
+    keys_path: Option<PathBuf>,
     audit_path: Option<PathBuf>,
     /// 시간이 닫은 요청 — 폰 알림을 「처리됨」으로 한 번 갈아 끼우려고 창구가 꺼내 간다.
     expired: Mutex<Vec<(String, Value)>>,
@@ -237,12 +335,20 @@ impl Store {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        let keys_path = state_path.map(|p| p.with_file_name("relay-approval-keys.json"));
+        let keys = keys_path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         Self {
             open: Mutex::new(HashMap::new()),
             rev: tokio::sync::watch::channel(0).0,
             approvers: Mutex::new(HashMap::new()),
             push: Mutex::new(push),
             push_path,
+            keys: Mutex::new(keys),
+            keys_path,
             audit_path: state_path.map(|p| p.with_file_name("relay-approvals-audit.jsonl")),
             expired: Mutex::new(Vec::new()),
         }
@@ -276,6 +382,8 @@ impl Store {
             "account": a.account,
             "id": a.id,
             "event": event,
+            "kind": a.kind,
+            "key": a.proof.as_ref().map(|p| &p.0),
             "tool": a.tool,
             "preview": a.preview(),
             "digest": a.digest,
@@ -326,6 +434,25 @@ impl Store {
         if origin.kind != "desktop" {
             return Err(Refuse::DesktopOnly);
         }
+        let mut ask = ask;
+        let mut kind = "tool";
+        let mut challenge = None;
+        let mut deadline = None;
+        if ask.kind == "secret" {
+            let text = ask.challenge.take().ok_or(Refuse::ChallengeInvalid)?;
+            let c = parse_challenge(&text, account, &origin.id, now)?;
+            ask.student = c.student;
+            ask.pane = c.pane;
+            ask.cwd = c.cwd;
+            ask.tool = "1Password".into();
+            ask.input = json!({"refs": c.refs.join("\n"), "command": c.command});
+            ask.truncated = false;
+            kind = "secret";
+            deadline = Some(c.exp);
+            challenge = Some(text);
+        } else if !ask.kind.is_empty() && ask.kind != "tool" {
+            return Err(Refuse::BadRequest);
+        }
         if ask.tool.is_empty()
             || !short(&ask.tool, 64)
             || !short(&ask.student, 64)
@@ -340,13 +467,19 @@ impl Store {
             return Err(Refuse::BadRequest);
         }
         self.sweep(account, now);
+        if kind == "secret" && truncated {
+            return Err(Refuse::ChallengeInvalid);
+        }
         let ttl = ask.ttl.unwrap_or(TTL).clamp(5, TTL);
         let id = new_id();
-        let expires_ms = now + ttl * 1000;
-        let digest = digest_of(&id, origin, &ask.student, &ask.pane, &ask.cwd, &ask.tool, expires_ms, truncated, &fields);
+        let expires_ms = deadline.map_or(now + ttl * 1000, |d| d.min(now + ttl * 1000));
+        let digest = digest_of(&id, origin, &ask.student, &ask.pane, &ask.cwd, &ask.tool, expires_ms, truncated, &fields, challenge.as_deref());
         let a = Approval {
             id,
             account: account.to_string(),
+            kind,
+            challenge,
+            proof: None,
             origin: origin.clone(),
             student: ask.student,
             pane: ask.pane,
@@ -422,6 +555,7 @@ impl Store {
         id: &str,
         allow: bool,
         digest: &str,
+        proof: Option<(&str, &str)>,
         ip: &str,
         now: u64,
     ) -> Result<Value, (Refuse, Option<Value>)> {
@@ -446,6 +580,13 @@ impl Store {
             if allow && a.truncated {
                 return Err((Refuse::Truncated, Some(a.view(now))));
             }
+            if allow && a.kind == "secret" {
+                let checked = self.check_proof(who, a.challenge.as_deref().unwrap_or_default(), proof);
+                match checked {
+                    Ok(key) => a.proof = Some(key),
+                    Err(r) => return Err((r, Some(a.view(now)))),
+                }
+            }
             a.phase = if allow { Phase::Allowed } else { Phase::Denied };
             a.closed_ms = Some(now);
             a.by = Some(who.clone());
@@ -454,6 +595,74 @@ impl Store {
         self.audit_line(&decided, decided.phase.name(), Some(who), Some(ip));
         self.bump();
         Ok(decided.view(now))
+    }
+
+    /// 비밀 요청 허락의 증거 — 결정한 기기가 폰이고, 그 폰이 맡긴 키이고, 서명이 도전값에 맞아야 한다.
+    fn check_proof(&self, who: &Device, challenge: &str, proof: Option<(&str, &str)>) -> Result<(String, String), Refuse> {
+        use base64::Engine as _;
+        if who.kind != "phone" {
+            return Err(Refuse::PhoneOnly);
+        }
+        let (key, sig) = proof.ok_or(Refuse::SignatureRequired)?;
+        let reg = self.keys.lock().unwrap().get(&who.id).cloned().ok_or(Refuse::KeyUnknown)?;
+        if reg.id != key {
+            return Err(Refuse::KeyUnknown);
+        }
+        let engine = base64::engine::general_purpose::STANDARD;
+        let public = engine.decode(&reg.public).map_err(|_| Refuse::KeyUnknown)?;
+        let raw = engine.decode(sig).map_err(|_| Refuse::BadSignature)?;
+        if !signature_ok(&public, challenge, &raw) {
+            return Err(Refuse::BadSignature);
+        }
+        Ok((key.to_string(), sig.to_string()))
+    }
+
+    fn save_keys(&self) {
+        let Some(path) = &self.keys_path else { return };
+        let body = serde_json::to_string_pretty(&*self.keys.lock().unwrap()).unwrap_or_default();
+        if let Err(error) = crate::relay_auth::write_private(path, &body) {
+            eprintln!("[gateway] approval keys not saved: {error}");
+        }
+    }
+
+    /// 폰이 Secure Enclave 공개키를 맡긴다. 기기당 하나 — 새로 만들면 갈아 끼운다(옛 서명은 더 안 맞는다).
+    pub(super) fn key_register(&self, account: &str, device: &Device, public: &str) -> Result<Value, Refuse> {
+        use base64::Engine as _;
+        if device.kind != "phone" {
+            return Err(Refuse::PhoneOnly);
+        }
+        let raw = base64::engine::general_purpose::STANDARD.decode(public).map_err(|_| Refuse::BadRequest)?;
+        if raw.len() != 65 || raw[0] != 4 {
+            return Err(Refuse::BadRequest);
+        }
+        let id = key_id(&raw);
+        self.keys.lock().unwrap().insert(
+            device.id.clone(),
+            KeyReg { public: public.to_string(), id: id.clone(), added: crate::relay_auth::now_secs() },
+        );
+        self.save_keys();
+        self.record(json!({"at": now_ms(), "account": account, "event": "key_registered", "device": device.id, "key": id}));
+        Ok(json!({"id": id}))
+    }
+
+    pub(super) fn key_unregister(&self, account: &str, device: &Device) {
+        let removed = self.keys.lock().unwrap().remove(&device.id);
+        if let Some(reg) = removed {
+            self.save_keys();
+            self.record(json!({"at": now_ms(), "account": account, "event": "key_removed", "device": device.id, "key": reg.id}));
+        }
+    }
+
+    /// 주어진 (살아 있는) 폰들의 키.
+    fn keys_for(&self, phones: &[(String, String)]) -> Vec<Value> {
+        let keys = self.keys.lock().unwrap();
+        phones
+            .iter()
+            .filter_map(|(id, label)| {
+                let k = keys.get(id)?;
+                Some(json!({"device": id, "label": label, "id": k.id, "public": k.public, "added": k.added}))
+            })
+            .collect()
     }
 
     /// 요청한 기기만 — 원래 칸에서 답했거나(로컬 권한 창) 그 칸이 사라졌을 때.
@@ -573,9 +782,10 @@ fn push_new(v: &Value) -> Value {
     let tool = v["tool"].as_str().unwrap_or("");
     let first = v["fields"][0]["text"].as_str().unwrap_or("");
     let line: String = first.lines().next().unwrap_or("").chars().take(160).collect();
+    let title = if v["kind"] == "secret" { format!("{student} · 1Password 승인 요청") } else { format!("{student} · 승인 요청") };
     json!({
         "aps": {
-            "alert": {"title": format!("{student} · 승인 요청"), "subtitle": format!("{machine} · {tool}"), "body": line},
+            "alert": {"title": title, "subtitle": format!("{machine} · {tool}"), "body": line},
             "sound": "default",
             "thread-id": "approval",
             "interruption-level": "time-sensitive",
@@ -616,6 +826,17 @@ fn account_phones(gate: &Gate, account: &str) -> Vec<String> {
         .iter()
         .filter(|(_, d)| d.account == account && d.kind == "phone" && d.revoked_at.is_none())
         .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// 이 계정의 살아 있는 폰들과 이름 — 키 목록용.
+fn account_phone_labels(gate: &Gate, account: &str) -> Vec<(String, String)> {
+    gate.devices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, d)| d.account == account && d.kind == "phone" && d.revoked_at.is_none())
+        .map(|(id, d)| (id.clone(), if d.label.is_empty() { "폰".to_string() } else { d.label.clone() }))
         .collect()
 }
 
@@ -790,6 +1011,11 @@ fn notify_expired(gate: &Gate) {
 struct Decision {
     decision: String,
     digest: String,
+    /// 비밀 요청 허락: 폰 키 id 와 base64 DER 서명.
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    sig: Option<String>,
 }
 
 async fn decide(State(gate): State<Gate>, AxPath(id): AxPath<String>, req: axum::extract::Request) -> axum::response::Response {
@@ -811,7 +1037,8 @@ async fn decide(State(gate): State<Gate>, AxPath(id): AxPath<String>, req: axum:
         "deny" => false,
         _ => return refuse(Refuse::BadRequest, None),
     };
-    match gate.approvals.decide(&account, &device, approver.as_deref(), &id, allow, &body.digest, &ip, now_ms()) {
+    let proof = body.key.as_deref().zip(body.sig.as_deref());
+    match gate.approvals.decide(&account, &device, approver.as_deref(), &id, allow, &body.digest, proof, &ip, now_ms()) {
         Ok(view) => {
             send_push(&gate, &account, push_closed(&view));
             axum::Json(json!({"ok": true, "approval": view})).into_response()
@@ -904,6 +1131,46 @@ async fn push_unregister(State(gate): State<Gate>, headers: axum::http::HeaderMa
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyBody {
+    public: String,
+}
+
+async fn key_register(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let (account, device) = match who(&gate, req.headers()) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let body: KeyBody = match read(req).await {
+        Ok(body) => body,
+        Err(refusal) => return refusal,
+    };
+    match gate.approvals.key_register(&account, &device, &body.public) {
+        Ok(v) => axum::Json(json!({"ok": true, "key": v})).into_response(),
+        Err(r) => refuse(r, None),
+    }
+}
+
+async fn key_unregister(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let (account, device) = match who(&gate, &headers) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    gate.approvals.key_unregister(&account, &device);
+    axum::Json(json!({"ok": true})).into_response()
+}
+
+/// 계정의 살아 있는 폰 키 — 맥은 여기 있으면서 사람이 맥에서 믿은 키만 쓴다.
+async fn keys_list(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let (account, _) = match who(&gate, &headers) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let keys = gate.approvals.keys_for(&account_phone_labels(&gate, &account));
+    axum::Json(json!({"ok": true, "keys": keys})).into_response()
+}
+
+#[derive(Deserialize)]
 struct AuditQuery {
     limit: Option<usize>,
 }
@@ -920,6 +1187,7 @@ async fn audit(State(gate): State<Gate>, headers: axum::http::HeaderMap, axum::e
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_text::SECRET_PREFIX;
 
     fn desk(id: &str) -> Device {
         Device { id: id.into(), label: format!("{id} 맥"), kind: "desktop".into() }
@@ -936,8 +1204,51 @@ mod tests {
             input: json!({"command": cmd}),
             truncated: false,
             ttl: None,
+            kind: String::new(),
+            challenge: None,
         }
     }
+
+    struct Signer(ring::signature::EcdsaKeyPair);
+
+    impl Signer {
+        fn new() -> Self {
+            let rng = ring::rand::SystemRandom::new();
+            let alg = &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
+            let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(alg, &rng).unwrap();
+            Self(ring::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8.as_ref(), &rng).unwrap())
+        }
+        fn public(&self) -> String {
+            use base64::Engine as _;
+            use ring::signature::KeyPair as _;
+            base64::engine::general_purpose::STANDARD.encode(self.0.public_key().as_ref())
+        }
+        fn id(&self) -> String {
+            use ring::signature::KeyPair as _;
+            key_id(self.0.public_key().as_ref())
+        }
+        fn sign(&self, challenge: &str) -> String {
+            use base64::Engine as _;
+            let mut message = SECRET_PREFIX.to_vec();
+            message.extend_from_slice(challenge.as_bytes());
+            let sig = self.0.sign(&ring::rand::SystemRandom::new(), &message).unwrap();
+            base64::engine::general_purpose::STANDARD.encode(sig.as_ref())
+        }
+    }
+
+    fn challenge(device: &str, now: u64, nonce: &str) -> String {
+        json!({"v": 1, "kind": "op.read", "nonce": nonce, "account": "geno", "device": device,
+            "student": "유우카", "pane": "%3", "cwd": "/repo",
+            "command": "kasaterm-cli op read op://kasaterm-agents/db/password",
+            "refs": ["op://kasaterm-agents/db/password"], "exp": now + 60_000})
+        .to_string()
+    }
+
+    fn secret_ask(challenge: String) -> Ask {
+        Ask { kind: "secret".into(), challenge: Some(challenge), tool: String::new(), input: Value::Null, ..ask("") }
+    }
+
+    const NONCE: &str = "00112233445566778899aabbccddeeff";
     const KEY: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
 
     fn store() -> (Store, tempdir::Dir) {
@@ -986,15 +1297,15 @@ mod tests {
         let digest = v["digest"].as_str().unwrap();
         s.register_approver("p1", KEY).unwrap();
         s.register_approver("mini", KEY).unwrap();
-        assert_eq!(s.decide("geno", &phone("p1"), None, id, true, digest, "ip", 2_000).unwrap_err().0, Refuse::ApproverRequired);
-        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, true, "nope", "ip", 2_000).unwrap_err().0, Refuse::DigestMismatch);
-        let done = s.decide("geno", &phone("p1"), Some(KEY), id, true, digest, "ip", 2_000).unwrap();
+        assert_eq!(s.decide("geno", &phone("p1"), None, id, true, digest, None, "ip", 2_000).unwrap_err().0, Refuse::ApproverRequired);
+        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, true, "nope", None, "ip", 2_000).unwrap_err().0, Refuse::DigestMismatch);
+        let done = s.decide("geno", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 2_000).unwrap();
         assert_eq!(done["state"], "allowed");
         assert_eq!(done["by"]["kind"], "phone");
-        let (r, view) = s.decide("geno", &desk("mini"), Some(KEY), id, false, digest, "ip", 2_100).unwrap_err();
+        let (r, view) = s.decide("geno", &desk("mini"), Some(KEY), id, false, digest, None, "ip", 2_100).unwrap_err();
         assert_eq!(r, Refuse::Closed);
         assert_eq!(view.unwrap()["by"]["device"], "p1");
-        assert_eq!(s.decide("other", &phone("p1"), Some(KEY), id, true, digest, "ip", 2_000).unwrap_err().0, Refuse::NotFound);
+        assert_eq!(s.decide("other", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 2_000).unwrap_err().0, Refuse::NotFound);
         let audit = s.audit("geno", 10);
         assert_eq!(audit[0]["event"], "allowed");
         assert_eq!(audit[0]["by"]["device"], "p1");
@@ -1009,7 +1320,7 @@ mod tests {
         let id = v["id"].as_str().unwrap();
         s.register_approver("p1", KEY).unwrap();
         let late = 1_000 + TTL * 1000;
-        let (r, view) = s.decide("geno", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), "ip", late).unwrap_err();
+        let (r, view) = s.decide("geno", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), None, "ip", late).unwrap_err();
         assert_eq!(r, Refuse::Expired);
         assert_eq!(view.unwrap()["state"], "expired");
         assert_eq!(s.audit("geno", 1)[0]["event"], "expired");
@@ -1034,8 +1345,8 @@ mod tests {
         s.register_approver("p1", KEY).unwrap();
         let id = v["id"].as_str().unwrap();
         let digest = v["digest"].as_str().unwrap();
-        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, true, digest, "ip", 1_100).unwrap_err().0, Refuse::Truncated);
-        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, false, digest, "ip", 1_100).unwrap()["state"], "denied");
+        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, true, digest, None, "ip", 1_100).unwrap_err().0, Refuse::Truncated);
+        assert_eq!(s.decide("geno", &phone("p1"), Some(KEY), id, false, digest, None, "ip", 1_100).unwrap()["state"], "denied");
     }
 
     #[test]
@@ -1053,5 +1364,124 @@ mod tests {
         let closed = push_closed(&json!({"id":"apv_1","student":"유우카","tool":"Bash","state":"allowed","by":{"label":"맥미니"}}));
         assert_eq!(closed["aps"]["interruption-level"], "passive");
         assert!(closed["aps"].get("sound").is_none());
+    }
+
+    #[test]
+    fn a_secret_request_is_built_from_its_challenge_and_bound_to_account_and_device() {
+        let (s, _d) = store();
+        let c = challenge("book", 1_000, NONCE);
+        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        assert_eq!(v["kind"], "secret");
+        assert_eq!(v["challenge"], c);
+        assert_eq!(v["tool"], "1Password");
+        assert_eq!(v["student"], "유우카");
+        assert_eq!(v["expires"], 61_000, "도전값 만료가 더 이르면 그것이 만료다");
+        assert_eq!(v["fields"][0]["text"], "op://kasaterm-agents/db/password");
+        // 다른 기기·다른 계정을 말하는 도전값, 모양이 틀린 도전값은 받지 않는다.
+        let other = challenge("mini", 1_000, NONCE);
+        assert_eq!(s.create("geno", &desk("book"), secret_ask(other), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("else", &desk("book"), secret_ask(c.clone()), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        let stale = challenge("book", 1_000, NONCE);
+        assert_eq!(s.create("geno", &desk("book"), secret_ask(stale), 70_000).unwrap_err(), Refuse::ChallengeInvalid);
+        let bad = c.replace("op://kasaterm-agents/db/password\"]", "https://x\"]");
+        assert_eq!(s.create("geno", &desk("book"), secret_ask(bad), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+        assert_eq!(s.create("geno", &desk("book"), secret_ask(c.replace(NONCE, "short")), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
+    }
+
+    #[test]
+    fn only_a_registered_phone_key_signing_the_exact_challenge_can_allow_a_secret() {
+        let (s, _d) = store();
+        let phone_key = Signer::new();
+        s.register_approver("p1", KEY).unwrap();
+        s.register_approver("p2", KEY).unwrap();
+        s.register_approver("mini", KEY).unwrap();
+        assert_eq!(s.key_register("geno", &desk("mini"), &phone_key.public()).unwrap_err(), Refuse::PhoneOnly);
+        assert_eq!(s.key_register("geno", &phone("p1"), "AAAA").unwrap_err(), Refuse::BadRequest);
+        let reg = s.key_register("geno", &phone("p1"), &phone_key.public()).unwrap();
+        assert_eq!(reg["id"], phone_key.id());
+
+        let c = challenge("book", 1_000, NONCE);
+        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let id = v["id"].as_str().unwrap();
+        let digest = v["digest"].as_str().unwrap();
+        let good = phone_key.sign(&c);
+        let kid = phone_key.id();
+        let decide = |who: &Device, proof: Option<(&str, &str)>| s.decide("geno", who, Some(KEY), id, true, digest, proof, "ip", 2_000);
+
+        assert_eq!(decide(&desk("mini"), Some((&kid, &good))).unwrap_err().0, Refuse::PhoneOnly);
+        assert_eq!(decide(&phone("p1"), None).unwrap_err().0, Refuse::SignatureRequired);
+        // 다른 폰은 자기 키가 없다 — p1 의 서명을 실어 와도 안 된다.
+        assert_eq!(decide(&phone("p2"), Some((&kid, &good))).unwrap_err().0, Refuse::KeyUnknown);
+        // 변조: 도전값 한 글자만 바꿔 서명한 것.
+        let tampered = phone_key.sign(&c.replace("password", "passwore"));
+        assert_eq!(decide(&phone("p1"), Some((&kid, &tampered))).unwrap_err().0, Refuse::BadSignature);
+        let stranger = Signer::new().sign(&c);
+        assert_eq!(decide(&phone("p1"), Some((&kid, &stranger))).unwrap_err().0, Refuse::BadSignature);
+        assert_eq!(decide(&phone("p1"), Some((&kid, "!!"))).unwrap_err().0, Refuse::BadSignature);
+
+        let done = decide(&phone("p1"), Some((&kid, &good))).unwrap();
+        assert_eq!(done["state"], "allowed");
+        assert_eq!(done["key"], kid);
+        assert_eq!(done["sig"], good);
+        // 같은 서명으로 한 번 더(재사용) — 이미 닫혔다.
+        assert_eq!(decide(&phone("p1"), Some((&kid, &good))).unwrap_err().0, Refuse::Closed);
+        assert_eq!(s.audit("geno", 1)[0]["key"], kid);
+
+        // 거절은 서명 없이 된다 — 거절은 아무것도 열지 않는다.
+        let c2 = challenge("book", 1_000, "ffeeddccbbaa99887766554433221100");
+        let v2 = s.create("geno", &desk("book"), secret_ask(c2), 1_000).unwrap();
+        let denied = s.decide("geno", &phone("p2"), Some(KEY), v2["id"].as_str().unwrap(), false, v2["digest"].as_str().unwrap(), None, "ip", 2_000);
+        assert_eq!(denied.unwrap()["state"], "denied");
+    }
+
+    #[test]
+    fn a_secret_cannot_be_allowed_after_expiry_cancel_or_key_replacement() {
+        let (s, d) = store();
+        let old = Signer::new();
+        s.register_approver("p1", KEY).unwrap();
+        s.key_register("geno", &phone("p1"), &old.public()).unwrap();
+        let c = challenge("book", 1_000, NONCE);
+        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let (id, digest) = (v["id"].as_str().unwrap().to_string(), v["digest"].as_str().unwrap().to_string());
+        let sig = old.sign(&c);
+        let (r, _) = s.decide("geno", &phone("p1"), Some(KEY), &id, true, &digest, Some((&old.id(), &sig)), "ip", 61_000).unwrap_err();
+        assert_eq!(r, Refuse::Expired);
+
+        let c = challenge("book", 1_000, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let id = v["id"].as_str().unwrap();
+        s.cancel("geno", &desk("book"), id, "gone", 1_500).unwrap();
+        let (r, _) = s.decide("geno", &phone("p1"), Some(KEY), id, true, v["digest"].as_str().unwrap(), Some((&old.id(), &old.sign(&c))), "ip", 2_000).unwrap_err();
+        assert_eq!(r, Refuse::Closed);
+
+        // 새 키로 갈아 끼우면 옛 키 서명은 더 안 맞는다. 다시 켜도 키는 남는다.
+        let new = Signer::new();
+        s.key_register("geno", &phone("p1"), &new.public()).unwrap();
+        let again = Store::open(Some(&d.path().join("relay-state.json")));
+        again.register_approver("p1", KEY).unwrap();
+        let c = challenge("book", 1_000, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let v = again.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let id = v["id"].as_str().unwrap();
+        let digest = v["digest"].as_str().unwrap();
+        let (r, _) = again.decide("geno", &phone("p1"), Some(KEY), id, true, digest, Some((&old.id(), &old.sign(&c))), "ip", 2_000).unwrap_err();
+        assert_eq!(r, Refuse::KeyUnknown);
+        assert_eq!(again.decide("geno", &phone("p1"), Some(KEY), id, true, digest, Some((&new.id(), &new.sign(&c))), "ip", 2_000).unwrap()["state"], "allowed");
+
+        // 폰이 키를 지우면(또는 기기가 폐기되어 목록에서 빠지면) 더는 허락이 안 된다.
+        again.key_unregister("geno", &phone("p1"));
+        assert!(again.keys_for(&[("p1".into(), "폰".into())]).is_empty());
+        let c = challenge("book", 1_000, "cccccccccccccccccccccccccccccccc");
+        let v = again.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
+        let (r, _) = again.decide("geno", &phone("p1"), Some(KEY), v["id"].as_str().unwrap(), true, v["digest"].as_str().unwrap(), Some((&new.id(), &new.sign(&c))), "ip", 2_000).unwrap_err();
+        assert_eq!(r, Refuse::KeyUnknown);
+    }
+
+    #[test]
+    fn tool_request_digests_are_unchanged_for_old_clients() {
+        let origin = desk("book");
+        let fields = vec![Field { name: "command".into(), label: "명령".into(), text: "ls".into() }];
+        let now = digest_of("apv_1", &origin, "s", "%1", "/", "Bash", 9, false, &fields, None);
+        let old = approval_text::digest(&["apv_1", "book", "book 맥", "s", "%1", "/", "Bash", "9", "0"], &fields);
+        assert_eq!(now, old);
     }
 }

@@ -2554,4 +2554,71 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 1Password 비밀 요청(docs/op-faceid-approval.md)을 창구 그대로 — 폰 키 맡기기·데스크톱 요청·서명 허락,
+    /// 그리고 폐기된 폰은 키 목록에서 빠지고 결정도 못 한다.
+    #[tokio::test]
+    async fn secret_approval_over_http_needs_a_live_phone_key() {
+        use base64::Engine as _;
+        use ring::signature::KeyPair as _;
+        let dir = std::env::temp_dir().join(format!("kasa-secret-approval-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let (_, desk) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","machine_id":"op-secret-desktop","kind":"desktop"
+        })).await;
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","kind":"phone"
+        })).await;
+        let (desk_token, phone_token) = (desk["token"].as_str().expect(&desk.to_string()), phone["token"].as_str().expect(&phone.to_string()));
+        let rng = ring::rand::SystemRandom::new();
+        let alg = &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
+        let pair = ring::signature::EcdsaKeyPair::from_pkcs8(alg, ring::signature::EcdsaKeyPair::generate_pkcs8(alg, &rng).unwrap().as_ref(), &rng).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let public = b64.encode(pair.public_key().as_ref());
+        assert_eq!(post(addr, "/relay/approvals/keys", Some(desk_token), serde_json::json!({"public": public})).await.0, 403);
+        let (status, reg) = post(addr, "/relay/approvals/keys", Some(phone_token), serde_json::json!({"public": public})).await;
+        assert_eq!(status, 200);
+        let key = reg["key"]["id"].as_str().unwrap().to_string();
+        let keys = get_json(addr, "/relay/approvals/keys", desk_token).await.1;
+        assert_eq!(keys["keys"][0]["id"], key.as_str());
+        assert_eq!(keys["keys"][0]["public"], public.as_str());
+
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let open = |nonce: &str| serde_json::json!({"kind": "secret", "challenge": serde_json::json!({
+            "v": 1, "kind": "op.read", "nonce": nonce, "account": "geno", "device": desk["device_id"],
+            "student": "유우카", "pane": "%3", "cwd": "/repo", "command": "kasaterm-cli op read op://v/i/f",
+            "refs": ["op://v/i/f"], "exp": now + 60_000}).to_string()});
+        let (status, created) = post(addr, "/relay/approvals", Some(desk_token), open("0123456789abcdef0123456789abcdef")).await;
+        assert_eq!(status, 200, "{created}");
+        let a = &created["approval"];
+        let challenge = a["challenge"].as_str().unwrap();
+        let mut message = crate::approval_text::SECRET_PREFIX.to_vec();
+        message.extend_from_slice(challenge.as_bytes());
+        let sig = b64.encode(pair.sign(&rng, &message).unwrap().as_ref());
+        let approver = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
+        assert_eq!(post(addr, "/relay/approvals/approver", Some(phone_token), serde_json::json!({"key": approver})).await.0, 200);
+        let decide = |id: String, token: String, body: serde_json::Value| async move {
+            let r = reqwest::Client::new().post(format!("http://{addr}/relay/approvals/{id}/decide"))
+                .bearer_auth(token).header("x-kasa-approver", approver).json(&body).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        };
+        let id = a["id"].as_str().unwrap().to_string();
+        let unsigned = serde_json::json!({"decision": "allow", "digest": a["digest"]});
+        let (status, refused) = decide(id.clone(), phone_token.into(), unsigned).await;
+        assert_eq!((status, refused["error"].as_str()), (403, Some("signature_required")));
+        let signed = serde_json::json!({"decision": "allow", "digest": a["digest"], "key": key, "sig": sig});
+        let (status, done) = decide(id, phone_token.into(), signed).await;
+        assert_eq!(status, 200, "{done}");
+        assert_eq!(done["approval"]["state"], "allowed");
+        assert_eq!(done["approval"]["sig"], sig.as_str());
+
+        // 폐기된 폰: 키 목록에서 빠지고(맥은 그 키를 더 안 쓴다) 그 토큰으로는 결정도 못 한다.
+        let (_, second) = post(addr, "/relay/approvals", Some(desk_token), open("fedcba9876543210fedcba9876543210")).await;
+        let phone_id = phone["device_id"].as_str().unwrap();
+        assert_eq!(post(addr, &format!("/relay/devices/{phone_id}/revoke"), Some(desk_token), serde_json::json!({})).await.0, 200);
+        assert_eq!(get_json(addr, "/relay/approvals/keys", desk_token).await.1["keys"], serde_json::json!([]));
+        let late = serde_json::json!({"decision": "allow", "digest": second["approval"]["digest"], "key": key, "sig": sig});
+        assert_eq!(decide(second["approval"]["id"].as_str().unwrap().into(), phone_token.into(), late).await.0, 401);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

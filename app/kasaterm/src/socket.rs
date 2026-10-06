@@ -653,6 +653,23 @@ impl PtyBackend {
         Some(cwd)
     }
 
+    /// 이 pid 가 어느 칸 셸 밑에서 도는지 — 부모를 거슬러 올라가 칸 셸 pid 를 만나면 그 칸.
+    fn pane_of_pid(&self, pid: u32) -> Option<String> {
+        let shells: HashMap<u32, String> = self.query_pane_pids().into_iter().map(|(sid, shell)| (shell, sid)).collect();
+        let parents: HashMap<u32, u32> = kasa_pty::fresh_process_table().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
+        let mut at = pid;
+        for _ in 0..64 {
+            if let Some(sid) = shells.get(&at) {
+                return Some(sid.clone());
+            }
+            at = *parents.get(&at)?;
+            if at <= 1 {
+                return None;
+            }
+        }
+        None
+    }
+
     /// 모든 pane 의 `(surface_id, shell_pid)` — GUI 동기 RPC(메모리 즉답).
     fn query_pane_pids(&self) -> Vec<(String, u32)> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3013,6 +3030,35 @@ impl Backend for PtyBackend {
 
     fn net_forward(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         kasa_mcp::netfwd::handle(params)
+    }
+
+    /// 1Password 비밀 읽기(docs/op-faceid-approval.md). 칸·학생·명령·폴더는 요청 본문이 아니라 소켓 상대
+    /// 프로세스에서 찾는다 — 폰에 보이는 「누가」를 요청한 쪽이 지어내지 못하게. 칸 밖 프로세스는 받지 않는다.
+    fn op_secret(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        match params["op"].as_str() {
+            Some("status") => Ok(kasa_mcp::op_secret::status()),
+            Some("read") => {
+                let peer = kasa_socket::server::peer_pid().ok_or_else(|| anyhow::anyhow!("requester_unknown"))?;
+                let pane = self.pane_of_pid(peer).ok_or_else(|| anyhow::anyhow!("not_in_pane"))?;
+                let student = self.ws.lock().unwrap().pane_character.get(&pane).cloned().unwrap_or_default();
+                let refs: Vec<String> = params["refs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r.as_str().map(str::to_string))
+                    .collect();
+                let command = kasa_pty::process_cmdline(peer).unwrap_or_default();
+                let cwd = pid_cwd(peer).map(|p| p.display().to_string()).unwrap_or_default();
+                let origin = kasa_mcp::op_secret::Origin {
+                    pane,
+                    student,
+                    alive: Box::new(move || unsafe { libc::kill(peer as libc::pid_t, 0) == 0 }),
+                };
+                let values = kasa_mcp::op_secret::read(&refs, &command, &cwd, &origin)?;
+                Ok(serde_json::json!({ "values": values }))
+            }
+            _ => Err(anyhow::anyhow!("op read|status")),
+        }
     }
 
     fn collab_tell_identity(&self, surface: &str) -> Result<serde_json::Value> {

@@ -153,6 +153,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "relay.account" => match backend.relay_account(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },
+        "op.secret" => match backend.op_secret(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "net.forward" => match backend.net_forward(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },

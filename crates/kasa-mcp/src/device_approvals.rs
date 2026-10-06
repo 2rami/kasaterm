@@ -79,6 +79,25 @@ pub async fn create(student: &str, pane: &str, cwd: &str, tool: &str, input: &Va
     Ok(call(&cred, reqwest::Method::POST, "", Some(body), None).await?["approval"].clone())
 }
 
+/// 비밀 요청 하나를 올린다(docs/op-faceid-approval.md). 칸·학생·명령·참조는 도전값 안에만 있다.
+pub async fn create_secret(challenge: &str) -> anyhow::Result<Value> {
+    let cred = credential()?;
+    let body = json!({"kind": "secret", "challenge": challenge});
+    Ok(call(&cred, reqwest::Method::POST, "", Some(body), None).await?["approval"].clone())
+}
+
+/// 계정의 살아 있는 폰 열쇠(폐기된 폰은 관문이 뺀다).
+pub async fn keys() -> anyhow::Result<Vec<Value>> {
+    let cred = credential()?;
+    Ok(call(&cred, reqwest::Method::GET, "/keys", None, None).await?["keys"].as_array().cloned().unwrap_or_default())
+}
+
+/// 이 기기의 (계정, 기기 id) — 비밀 요청 도전값이 그 둘에 묶인다.
+pub fn identity() -> anyhow::Result<(String, String)> {
+    let cred = credential()?;
+    Ok((cred.account, cred.device_id))
+}
+
 /// 결정·만료까지 최대 `wait` 초 붙든다. 닫혔으면 그 상태를, 아니면 `pending` 을 준다.
 pub async fn wait_one(id: &str, wait: u64) -> anyhow::Result<Value> {
     let cred = credential()?;
@@ -155,6 +174,22 @@ pub fn closed_view(error: &anyhow::Error) -> Option<Value> {
 /// 런타임이 없는 GUI 뒷실에서 부르는 길 — 부를 때마다 작은 런타임 하나.
 fn blocking<T>(work: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(work)
+}
+
+pub fn create_secret_blocking(challenge: &str) -> anyhow::Result<Value> {
+    blocking(create_secret(challenge))
+}
+
+pub fn wait_one_blocking(id: &str, wait: u64) -> anyhow::Result<Value> {
+    blocking(wait_one(id, wait))
+}
+
+pub fn cancel_blocking(id: &str, reason: &str) -> anyhow::Result<Value> {
+    blocking(cancel(id, reason))
+}
+
+pub fn keys_blocking() -> anyhow::Result<Vec<Value>> {
+    blocking(keys())
 }
 
 pub fn list_blocking(since: Option<u64>, wait: u64) -> anyhow::Result<Value> {

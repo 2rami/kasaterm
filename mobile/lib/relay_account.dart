@@ -253,6 +253,11 @@ String approvalError(String? code, int status) => switch (code) {
   'expired' => '시간이 지나 원래 창으로 돌아갔어요.',
   'truncated_cannot_allow' => '원문이 너무 길어 다 못 실었어요. 허락은 원래 창에서 해 주세요.',
   'not_found' => '이미 처리됐거나 사라진 요청이에요.',
+  'signature_required' => '이 요청은 Face ID 서명이 있어야 허락돼요.',
+  'bad_signature' => '서명이 요청과 맞지 않아요. 다시 열어 확인해 주세요.',
+  'key_unknown' => '관문이 이 폰의 승인 열쇠를 몰라요. 설정 → 계정 → Face ID 승인 열쇠를 다시 만들어 주세요.',
+  'phone_only' => '이 요청은 폰에서만 허락할 수 있어요.',
+  'challenge_invalid' => '요청 모양이 맞지 않아요.',
   _ => status == 404 ? '관문이 원격 승인을 아직 몰라요. 관문 업데이트가 필요해요.' : accountError(status),
 };
 
@@ -688,10 +693,18 @@ class RelayAccountApi {
   );
 
   /// 이 화면이 보인 요청([digest]) 그대로 결정한다. [approver] 는 이 앱 실행 동안만 메모리에 있는 승인 열쇠다.
-  Future<Map<String, dynamic>> decideApproval(String id, String digest, bool allow, String approver) async {
+  /// 비밀 요청 허락이면 [key]·[sig](Face ID 로 푼 승인 열쇠의 서명)를 함께 싣는다.
+  Future<Map<String, dynamic>> decideApproval(
+    String id,
+    String digest,
+    bool allow,
+    String approver, {
+    String? key,
+    String? sig,
+  }) async {
     Future<Map<String, dynamic>> once() => _request(
       'approvals/${Uri.encodeComponent(id)}/decide',
-      body: {'decision': allow ? 'allow' : 'deny', 'digest': digest},
+      body: {'decision': allow ? 'allow' : 'deny', 'digest': digest, 'key': ?key, 'sig': ?sig},
       headers: {'x-kasa-approver': approver},
       error: approvalError,
     );
@@ -710,6 +723,15 @@ class RelayAccountApi {
   }
 
   static final _approvalRegistered = <String>{};
+
+  /// 이 폰의 승인 열쇠 공개키를 관문에 맡긴다(기기당 하나 — 갈아 끼운다). 맥이 지문을 맞춰 보고 믿어야 쓰인다.
+  Future<String> registerApprovalKey(String public) async {
+    final json = await _request('approvals/keys', body: {'public': public}, error: approvalError);
+    final key = json['key'];
+    return key is Map && key['id'] is String ? key['id'] as String : '';
+  }
+
+  Future<void> deleteApprovalKey() => _request('approvals/keys', delete: true, error: approvalError);
 
   /// 원격 승인 알림을 이 폰으로 — 관문이 계정 기기 기록에 묶어 둔다(폐기하면 안 간다).
   Future<void> registerApprovalPush(String token, String env) =>

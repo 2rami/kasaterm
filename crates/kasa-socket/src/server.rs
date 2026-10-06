@@ -129,7 +129,17 @@ impl Drop for Server {
     }
 }
 
+thread_local! {
+    static PEER_PID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// 지금 이 스레드가 처리하는 연결의 상대 pid. 연결마다 스레드 하나라 dispatch 안에서 그대로 맞다.
+pub fn peer_pid() -> Option<u32> {
+    PEER_PID.with(|cell| cell.get())
+}
+
 fn handle_client(stream: LocalStream, backend: Arc<dyn Backend>) {
+    PEER_PID.with(|cell| cell.set(stream.peer_pid()));
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(e) => {

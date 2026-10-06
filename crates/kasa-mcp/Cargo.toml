@@ -70,3 +70,8 @@ path = "src/bin/relay.rs"
 [[bin]]
 name = "kasa-device"
 path = "src/bin/device.rs"
+
+# 1Password 토큰·믿는 폰 열쇠를 로그인 키체인에 두고(op_secret.rs) 실행기 kasa-op 의 코드 서명을 pid 로
+# 확인한다. 잠금 파일에 이미 있는 판이라 새로 받는 것이 없다. 관문(리눅스)에는 안 들어간다.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"

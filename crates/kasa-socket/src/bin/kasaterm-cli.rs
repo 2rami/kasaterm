@@ -144,6 +144,10 @@ fn run() -> Result<Option<Response>> {
     if cmd == "share" {
         return run_share(&args);
     }
+    // `op` — 1Password 비밀을 폰 Face ID 승인 한 번으로(docs/op-faceid-approval.md). 값은 이 프로세스에만 온다.
+    if cmd == "op" {
+        return run_op(&args);
+    }
     // `app-restart` — 등록된 기기의 카사텀 앱 재시작 계획·상태. 실행은 사람 승인 흐름이 생기기 전까지 거부한다.
     if cmd == "app-restart" {
         return run_app_restart(&args);
@@ -1553,6 +1557,11 @@ fn print_help() {
             "mail send --to a@x[,b@y] [--cc …] --subject 제목 --body 본문|- [--reply-to <id>]   보내기 요청(사람이 앱에서 승인)",
             "pr create --repo 주인/레포 --head 브랜치 [--base main] --title 제목 [--body 본문|-] [--draft]   PR 요청(사람이 앱에서 승인)",
             "mail connections                          연결·승인 대기 목록  (--connection <id> 로 연결 고르기)",
+        ]),
+        ("1Password (폰 Face ID 한 번으로 그 요청만)", &[
+            "op run -e 이름=op://금고/항목/필드 [-e …] -- <명령…>   값은 그 명령의 환경으로만, 출력에 나오면 가림",
+            "op read op://금고/항목/필드               값을 표준출력으로(끝 줄바꿈 없음) — x=$(…) 로 담아 쓴다",
+            "op status                                 토큰·금고·믿는 폰 열쇠(값 없음)",
         ]),
         ("앱", &[
             "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
@@ -2984,6 +2993,148 @@ fn run_orchestrator_report(args: &[String]) -> Result<Option<Response>> {
         println!("{}", serde_json::to_string(&receipt)?);
     }
     Ok(None)
+}
+
+const OP_USAGE: &str = "op read <op://금고/항목/필드> | op run -e 이름=<op://…> [-e …] -- <명령…> | op status";
+
+/// 앱에 비밀 읽기를 맡기고 폰 허락을 기다린다. 값은 참조 순서대로.
+fn op_values(refs: &[String]) -> Result<Vec<String>> {
+    let socket_path = resolve_socket_path()?;
+    eprintln!("kasaterm: 폰에서 Face ID 로 허락하면 읽어요(2분 안) — {}", refs.join(", "));
+    let req = Request { id: json!("op"), method: "op.secret".into(), params: json!({ "op": "read", "refs": refs }) };
+    let resp = roundtrip(&socket_path, &req)?;
+    if !resp.ok {
+        let message = resp.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
+        return Err(anyhow!("{}", op_reason(&message)));
+    }
+    let values: Vec<String> = resp.result.as_ref().and_then(|r| r["values"].as_array()).into_iter().flatten()
+        .filter_map(|v| v.as_str().map(str::to_string)).collect();
+    if values.len() != refs.len() {
+        return Err(anyhow!("앱이 값을 다 돌려주지 않았어요"));
+    }
+    Ok(values)
+}
+
+fn op_reason(code: &str) -> String {
+    let head = code.split(':').next().unwrap_or(code).trim();
+    let say = match head {
+        "op_token_missing" => "이 맥에 1Password 토큰이 없어요 — 사람이 설정 → 계정 → 1Password 에서 넣어야 해요",
+        "no_trusted_key" => "이 맥이 믿는 폰 Face ID 열쇠가 없어요 — 폰 설정에서 열쇠를 만들고 맥 설정에서 믿기를 눌러야 해요",
+        "vault_not_allowed" => "허용된 금고 밖의 참조예요",
+        "bad_ref" => "참조 모양이 틀렸어요(op://금고/항목/필드)",
+        "denied" => "폰에서 거절했어요",
+        "expired" => "2분 안에 허락이 오지 않았어요",
+        "cancelled" => "요청이 취소됐어요",
+        "not_in_pane" | "requester_unknown" => "kasaterm 칸 안에서만 쓸 수 있어요",
+        "signed_out" | "isolated_run" => "이 기기가 KASA 계정에 로그인돼 있지 않아요",
+        "helper_missing" => "이 앱 판에 1Password 실행기(kasa-op)가 없어요",
+        "helper_unverified" => "1Password 실행기의 서명을 확인하지 못했어요",
+        "update_required" => "관문이 이 기능을 아직 몰라요",
+        _ => "",
+    };
+    if say.is_empty() { code.to_string() } else { format!("{say} ({head})") }
+}
+
+fn run_op(args: &[String]) -> Result<Option<Response>> {
+    match args.first().map(String::as_str) {
+        Some("status") => {
+            let socket_path = resolve_socket_path()?;
+            let req = Request { id: json!("op"), method: "op.secret".into(), params: json!({ "op": "status" }) };
+            let resp = roundtrip(&socket_path, &req)?;
+            let v = resp.result.unwrap_or_default();
+            println!("토큰: {}", if v["token"] == true { format!("있음 · 금고 {}", v["vault"].as_str().unwrap_or("")) } else { "없음".into() });
+            let keys: Vec<String> = v["trusted"].as_array().into_iter().flatten()
+                .map(|k| format!("{} {}", k["label"].as_str().unwrap_or(""), k["fingerprint"].as_str().unwrap_or(""))).collect();
+            println!("믿는 폰 열쇠: {}", if keys.is_empty() { "없음".into() } else { keys.join(", ") });
+            println!("실행기: {}", if v["helper"] == true { "있음" } else { "없음" });
+            Ok(None)
+        }
+        Some("read") => {
+            let reference = args.iter().skip(1).find(|a| !a.starts_with('-')).ok_or_else(|| anyhow!("{OP_USAGE}"))?;
+            if std::io::IsTerminal::is_terminal(&std::io::stdout()) && !args.iter().any(|a| a == "--reveal") {
+                return Err(anyhow!("값이 화면에 그대로 찍혀요 — `x=$(kasaterm-cli op read …)` 로 담거나 `op run -e` 를 쓰세요(정말 보려면 --reveal)"));
+            }
+            let value = op_values(std::slice::from_ref(reference))?.remove(0);
+            let mut out = std::io::stdout();
+            out.write_all(value.as_bytes())?;
+            out.flush()?;
+            Ok(None)
+        }
+        Some("run") => {
+            let mut names = Vec::new();
+            let mut refs = Vec::new();
+            let mut i = 1;
+            while i < args.len() && args[i] != "--" {
+                let pair = match args[i].as_str() {
+                    "-e" | "--env" => { i += 1; args.get(i).cloned().unwrap_or_default() }
+                    other => other.strip_prefix("--env=").map(str::to_string).ok_or_else(|| anyhow!("{OP_USAGE}"))?,
+                };
+                let (name, reference) = pair.split_once('=').ok_or_else(|| anyhow!("-e 이름=op://… 모양이어야 해요"))?;
+                let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid || !reference.starts_with("op://") {
+                    return Err(anyhow!("-e 이름=op://… 모양이어야 해요: {pair}"));
+                }
+                names.push(name.to_string());
+                refs.push(reference.to_string());
+                i += 1;
+            }
+            let command = args.get(i + 1..).filter(|c| !c.is_empty()).ok_or_else(|| anyhow!("{OP_USAGE}"))?;
+            if refs.is_empty() {
+                return Err(anyhow!("{OP_USAGE}"));
+            }
+            let values = op_values(&refs)?;
+            let code = op_run_child(command, &names, &values)?;
+            std::process::exit(code);
+        }
+        _ => Err(anyhow!("{OP_USAGE}")),
+    }
+}
+
+/// 값을 환경으로만 넘겨 명령을 돌리고, 그 출력에 값이 나오면 가린다(op run 과 같은 생각).
+fn op_run_child(command: &[String], names: &[String], values: &[String]) -> Result<i32> {
+    let mut child = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .envs(names.iter().zip(values))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("실행 못 함: {}", command[0]))?;
+    let mut hidden: Vec<String> = Vec::new();
+    for value in values {
+        hidden.push(value.clone());
+        hidden.extend(value.lines().filter(|l| l.trim().len() >= 6).map(str::to_string));
+    }
+    hidden.retain(|h| h.len() >= 4);
+    hidden.sort_by_key(|h| std::cmp::Reverse(h.len()));
+    let pump = |source: Box<dyn std::io::Read + Send>, err: bool, hidden: Vec<String>| {
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(source);
+            let mut line = Vec::new();
+            while reader.read_until(b'\n', &mut line).map(|n| n > 0).unwrap_or(false) {
+                let mut text = String::from_utf8_lossy(&line).into_owned();
+                for h in &hidden {
+                    text = text.replace(h.as_str(), "<concealed by kasaterm>");
+                }
+                if err { let _ = std::io::stderr().write_all(text.as_bytes()); } else { let _ = std::io::stdout().write_all(text.as_bytes()); }
+                line.clear();
+            }
+        })
+    };
+    let out = pump(Box::new(child.stdout.take().unwrap()), false, hidden.clone());
+    let err = pump(Box::new(child.stderr.take().unwrap()), true, hidden);
+    let status = child.wait()?;
+    let _ = out.join();
+    let _ = err.join();
+    let _ = std::io::stdout().flush();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return Ok(128 + signal);
+        }
+    }
+    Ok(status.code().unwrap_or(1))
 }
 
 fn resolve_socket_path() -> Result<String> {

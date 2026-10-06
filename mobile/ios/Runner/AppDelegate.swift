@@ -1,5 +1,6 @@
 import AuthenticationServices
 import Flutter
+import LocalAuthentication
 import UIKit
 import UserNotifications
 
@@ -137,6 +138,38 @@ import UserNotifications
         result(FlutterError(code: "web_auth", message: "start failed", details: nil))
       }
     }
+    // 1Password 비밀 요청 승인 열쇠(docs/op-faceid-approval.md). 다트는 공개키와 서명만 받는다.
+    let secureKey = FlutterMethodChannel(name: "kasaterm/secure_key", binaryMessenger: messenger)
+    secureKey.setMethodCallHandler { call, result in
+      let args = call.arguments as? [String: Any] ?? [:]
+      switch call.method {
+      case "publicKey":
+        result(ApprovalKey.find().flatMap(ApprovalKey.publicKey))
+      case "create":
+        do {
+          result(try ApprovalKey.create())
+        } catch {
+          result(FlutterError(code: "create_failed", message: error.localizedDescription, details: nil))
+        }
+      case "delete":
+        ApprovalKey.delete()
+        result(nil)
+      case "sign":
+        guard let text = args["message"] as? String, let message = Data(base64Encoded: text),
+              let reason = args["reason"] as? String
+        else { return result(FlutterError(code: "bad_args", message: nil, details: nil)) }
+        ApprovalKey.sign(message: message, reason: reason) { outcome in
+          DispatchQueue.main.async {
+            switch outcome {
+            case .success(let signature): result(signature)
+            case .failure(let error): result(FlutterError(code: "sign_failed", message: error.localizedDescription, details: nil))
+            }
+          }
+        }
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
     let ch = FlutterMethodChannel(name: "kasaterm/push", binaryMessenger: messenger)
     channel = ch
     ch.setMethodCallHandler { [weak self] call, result in
@@ -260,5 +293,92 @@ extension AppDelegate: ASWebAuthenticationPresentationContextProviding {
   func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
     let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
     return windows.first(where: \.isKeyWindow) ?? windows.first ?? ASPresentationAnchor()
+  }
+}
+
+/// 승인 열쇠 — Secure Enclave 의 P-256 개인 키. 폰 밖으로 안 나가고, Face ID 가 그 자리에서 풀어야만 서명한다.
+/// 생체 정보가 바뀌면(`.biometryCurrentSet`) 키가 무효가 되어 다시 만들어야 한다.
+enum ApprovalKey {
+  private static let tag = Data("kasaterm.approval.key".utf8)
+
+  static func find(context: LAContext? = nil) -> SecKey? {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassKey,
+      kSecAttrApplicationTag as String: tag,
+      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecReturnRef as String: true,
+    ]
+    if let context { query[kSecUseAuthenticationContext as String] = context }
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let item else { return nil }
+    return (item as! SecKey)
+  }
+
+  static func publicKey(_ key: SecKey) -> String? {
+    guard let pub = SecKeyCopyPublicKey(key), let data = SecKeyCopyExternalRepresentation(pub, nil) as Data? else { return nil }
+    return data.base64EncodedString()
+  }
+
+  static func delete() {
+    SecItemDelete([kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag] as CFDictionary)
+  }
+
+  static func create() throws -> String {
+    delete()
+    var error: Unmanaged<CFError>?
+    #if targetEnvironment(simulator)
+    // 가상 아이폰에는 Secure Enclave 가 없다 — 검증 리그용 시험 키. 이 갈래는 실기 판에 컴파일되지 않는다.
+    let flags: SecAccessControlCreateFlags = []
+    #else
+    let flags: SecAccessControlCreateFlags = [.privateKeyUsage, .biometryCurrentSet]
+    #endif
+    guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &error) else {
+      throw error!.takeRetainedValue() as Error
+    }
+    var attrs: [String: Any] = [
+      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecAttrKeySizeInBits as String: 256,
+      kSecPrivateKeyAttrs as String: [
+        kSecAttrIsPermanent as String: true,
+        kSecAttrApplicationTag as String: tag,
+        kSecAttrAccessControl as String: access,
+      ] as [String: Any],
+    ]
+    #if !targetEnvironment(simulator)
+    attrs[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
+    #endif
+    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error), let pub = publicKey(key) else {
+      throw error?.takeRetainedValue() as Error? ?? NSError(domain: "kasaterm.approval", code: 1)
+    }
+    return pub
+  }
+
+  /// 사람이 취소하면 `nil`. 서명은 DER(X9.62) ECDSA P-256/SHA-256 — 관문·맥의 `ring` 이 그대로 읽는다.
+  static func sign(message: Data, reason: String, done: @escaping (Result<String?, Error>) -> Void) {
+    let context = LAContext()
+    context.localizedReason = reason
+    context.localizedCancelTitle = "취소"
+    func signNow() {
+      guard let key = find(context: context) else {
+        return done(.failure(NSError(domain: "kasaterm.approval", code: 2, userInfo: [NSLocalizedDescriptionKey: "no_key"])))
+      }
+      var error: Unmanaged<CFError>?
+      guard let signature = SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, message as CFData, &error) as Data? else {
+        let failure = error?.takeRetainedValue() as Error? ?? NSError(domain: "kasaterm.approval", code: 3)
+        let code = (failure as NSError).code
+        // 사람이 취소(LAError.userCancel·appCancel·systemCancel, errSecUserCanceled)면 아무것도 안 보낸다.
+        if [-2, -4, -9, -128].contains(code) { return done(.success(nil)) }
+        return done(.failure(failure))
+      }
+      done(.success(signature.base64EncodedString()))
+    }
+    #if targetEnvironment(simulator)
+    // 시험 키는 Face ID 에 묶이지 않으니 서명 전에 Face ID 를 직접 묻는다(Features → Face ID 로 흉내).
+    context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { ok, _ in
+      if ok { signNow() } else { done(.success(nil)) }
+    }
+    #else
+    DispatchQueue.global(qos: .userInitiated).async { signNow() }
+    #endif
   }
 }

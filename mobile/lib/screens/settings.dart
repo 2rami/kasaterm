@@ -19,6 +19,7 @@ import '../twins_loading.dart';
 import 'controls.dart';
 import 'hub.dart' show parseHexColor;
 import 'oauth_sheet.dart';
+import 'approval_key.dart';
 import 'work_permissions.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -247,6 +248,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (_) => WorkPermissionsScreen(
+                          api: () => RelayAccountApi(account.origin, session: account),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SettingsRow(
+                    key: const Key('approval-key'),
+                    tone: 1,
+                    icon: Icons.fingerprint_rounded,
+                    title: 'Face ID 승인 열쇠',
+                    subtitle: '학생의 1Password 요청을 Face ID 로 한 번씩 허락',
+                    chevron: true,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ApprovalKeyScreen(
                           api: () => RelayAccountApi(account.origin, session: account),
                         ),
                       ),

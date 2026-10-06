@@ -7,6 +7,7 @@ import '../look.dart';
 import '../relay_account.dart';
 import '../status_style.dart';
 import '../twins_loading.dart';
+import 'approval_key.dart';
 
 /// 원격 승인 한 건 — 어느 기기·어느 학생·도구, 입력 원문 전부, [거절]·[허락]. 요청마다 한 번이고
 /// 「항상 허락」은 없다(docs/remote-approval.md). 다른 곳에서 닫히면 이 화면이 그 사실을 말하고 단추를 거둔다.
@@ -25,9 +26,32 @@ class _ApprovalScreenState extends State<ApprovalScreen> {
   bool _busy = false;
   String? _error;
 
+  /// 비밀 요청을 받았는데 이 폰에 승인 열쇠가 없나 — 그러면 여기서 바로 만들러 간다.
+  bool _noKey = false;
+
+  Future<void> _checkKey() async {
+    final none = await widget.center.signer.publicKey() == null;
+    if (mounted && none != _noKey) setState(() => _noKey = none);
+  }
+
+  Future<void> _makeKey() async {
+    final session = widget.center.session;
+    if (session == null) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ApprovalKeyScreen(
+          api: () => RelayAccountApi(session.origin, session: session),
+          signer: widget.center.signer,
+        ),
+      ),
+    );
+    await _checkKey();
+  }
+
   @override
   void initState() {
     super.initState();
+    unawaited(_checkKey());
     widget.center.addListener(_changed);
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => _changed());
     if (widget.center.byId(widget.id) == null) unawaited(widget.center.refresh());
@@ -66,7 +90,7 @@ class _ApprovalScreenState extends State<ApprovalScreen> {
         backgroundColor: Colors.transparent,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
-          title: const Text('승인 요청'),
+          title: Text(a?.isSecret == true ? '1Password 승인 요청' : '승인 요청'),
           leading: IconButton(
             tooltip: '닫기',
             icon: const Icon(Icons.close_rounded),
@@ -81,6 +105,7 @@ class _ApprovalScreenState extends State<ApprovalScreen> {
                 busy: _busy,
                 error: _error,
                 onDecide: (allow) => unawaited(_decide(a, allow)),
+                onMakeKey: a.isSecret && _noKey ? () => unawaited(_makeKey()) : null,
               ),
       ),
     );
@@ -94,6 +119,7 @@ class _Body extends StatelessWidget {
     required this.busy,
     required this.error,
     required this.onDecide,
+    this.onMakeKey,
   });
 
   final Approval approval;
@@ -101,6 +127,7 @@ class _Body extends StatelessWidget {
   final bool busy;
   final String? error;
   final void Function(bool allow) onDecide;
+  final VoidCallback? onMakeKey;
 
   @override
   Widget build(BuildContext context) {
@@ -181,6 +208,32 @@ class _Body extends StatelessWidget {
                   child: SelectableText(f.text.isEmpty ? '(빈 글)' : f.text, style: mono),
                 ),
               ],
+              if (a.isSecret) ...[
+                const SizedBox(height: Look.groupGap),
+                _Band(
+                  key: const Key('approval-secret-note'),
+                  text: a.secretValid
+                      ? '허락하면 이 참조를 이번 한 번만 읽어요. 값은 이 폰과 관문을 지나지 않고 요청한 프로세스에만 가요.'
+                      : '요청 모양이 맞지 않아 허락할 수 없어요.',
+                  color: a.secretValid ? scheme.primary : scheme.error,
+                ),
+                if (onMakeKey case final make?) ...[
+                  const SizedBox(height: Look.rowGap * 2),
+                  _Band(
+                    key: const Key('approval-no-key'),
+                    text: '이 폰에 Face ID 승인 열쇠가 없어요. 열쇠를 만들고 맥에서 지문을 맞춰 믿기를 누르면 허락할 수 있어요.',
+                    color: scheme.error,
+                  ),
+                  const SizedBox(height: Look.rowGap * 2),
+                  _Button(
+                    key: const Key('approval-make-key'),
+                    label: '열쇠 만들기',
+                    fill: scheme.primary.withValues(alpha: 0.14),
+                    ink: scheme.primary,
+                    onPressed: make,
+                  ),
+                ],
+              ],
               if (a.truncated) ...[
                 const SizedBox(height: Look.groupGap),
                 _Band(
@@ -236,11 +289,11 @@ class _Body extends StatelessWidget {
                       Expanded(
                         child: _Button(
                           key: const Key('approval-allow'),
-                          label: '허락',
+                          label: a.isSecret ? 'Face ID 로 허락' : '허락',
                           fill: scheme.primary,
                           ink: scheme.onPrimary,
                           busy: busy,
-                          onPressed: busy || a.truncated ? null : () => onDecide(true),
+                          onPressed: busy || a.truncated || (a.isSecret && !a.secretValid) ? null : () => onDecide(true),
                         ),
                       ),
                     ],
@@ -400,7 +453,7 @@ class ApprovalBanner extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${a.student.isEmpty ? '학생' : a.student} · 승인 요청',
+                                '${a.student.isEmpty ? '학생' : a.student} · ${a.isSecret ? '1Password 승인 요청' : '승인 요청'}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(fontSize: Look.body, fontWeight: FontWeight.w600),

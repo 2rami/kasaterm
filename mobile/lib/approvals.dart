@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'relay_account.dart';
+import 'secure_key.dart';
 
 /// 이 앱 실행 동안만 메모리에 있는 원격 승인 열쇠. 키체인에도 디스크에도 두지 않는다
 /// (docs/remote-approval.md — 결정은 사람이 누른 화면에서만 나간다).
@@ -39,6 +41,10 @@ class Approval {
     this.byLabel,
     this.byKind,
     this.reason,
+    this.kind = 'tool',
+    this.challenge,
+    this.refs = const [],
+    this.secretValid = false,
   });
 
   final String id;
@@ -58,7 +64,26 @@ class Approval {
   final String? byKind;
   final String? reason;
 
+  /// `tool`(학생 권한 요청) 또는 `secret`(1Password 비밀 읽기 — docs/op-faceid-approval.md).
+  final String kind;
+
+  /// 비밀 요청의 도전값 원문. 화면은 이 글에서 편 것만 보이고, Face ID 서명도 이 글 그대로에 한다.
+  final String? challenge;
+  final List<String> refs;
+
+  /// 도전값이 아는 모양인가 — 아니면 허락할 수 없다(거절만).
+  final bool secretValid;
+
   bool get pending => state == 'pending';
+  bool get isSecret => kind == 'secret';
+
+  /// Face ID 창에 뜨는 한 줄.
+  String get signReason {
+    final who = student.isEmpty ? '학생' : student;
+    final first = refs.isEmpty ? '' : refs.first;
+    final more = refs.length > 1 ? ' 외 ${refs.length - 1}개' : '';
+    return '$who · $first$more 읽기를 이번 한 번 허락';
+  }
 
   /// 한 줄 — 알림 띠·목록. 첫 칸(명령·파일)의 첫 줄.
   String get headline {
@@ -84,20 +109,29 @@ class Approval {
     final digest = s('digest');
     if (id.isEmpty || digest.isEmpty) return null;
     final by = raw['by'] is Map ? raw['by'] as Map : const {};
+    final kind = s('kind') == 'secret' ? 'secret' : 'tool';
+    final challenge = raw['challenge'] is String ? raw['challenge'] as String : null;
+    final secret = kind == 'secret' ? _SecretAsk.parse(challenge) : null;
     return Approval(
       id: id,
       state: s('state'),
       machine: s('machine'),
       device: s('device'),
-      student: s('student'),
-      pane: s('pane'),
-      cwd: s('cwd'),
+      student: secret?.student ?? s('student'),
+      pane: secret?.pane ?? s('pane'),
+      cwd: secret?.cwd ?? s('cwd'),
       tool: s('tool'),
-      fields: [
-        for (final f in raw['fields'] is List ? raw['fields'] as List : const [])
-          if (f is Map && f['text'] is String)
-            ApprovalField('${f['name'] ?? ''}', '${f['label'] ?? f['name'] ?? ''}', f['text'] as String),
-      ],
+      kind: kind,
+      challenge: challenge,
+      refs: secret?.refs ?? const [],
+      secretValid: secret != null,
+      fields: secret != null
+          ? [ApprovalField('refs', '참조', secret.refs.join('\n')), ApprovalField('command', '명령', secret.command)]
+          : [
+              for (final f in raw['fields'] is List ? raw['fields'] as List : const [])
+                if (f is Map && f['text'] is String)
+                  ApprovalField('${f['name'] ?? ''}', '${f['label'] ?? f['name'] ?? ''}', f['text'] as String),
+            ],
       truncated: raw['truncated'] == true,
       created: n('created'),
       expires: n('expires'),
@@ -109,17 +143,43 @@ class Approval {
   }
 }
 
+/// 비밀 요청 도전값에서 편 것 — 사람이 보는 것과 서명하는 것이 같은 글에서 나온다.
+class _SecretAsk {
+  const _SecretAsk(this.student, this.pane, this.cwd, this.command, this.refs);
+  final String student;
+  final String pane;
+  final String cwd;
+  final String command;
+  final List<String> refs;
+
+  static _SecretAsk? parse(String? text) {
+    if (text == null || text.length > 4096) return null;
+    try {
+      final v = jsonDecode(text);
+      if (v is! Map || v['v'] != 1 || v['kind'] != 'op.read') return null;
+      final refs = v['refs'];
+      if (refs is! List || refs.isEmpty || refs.any((r) => r is! String || !r.startsWith('op://'))) return null;
+      String s(String k) => v[k] is String ? v[k] as String : '';
+      return _SecretAsk(s('student'), s('pane'), s('cwd'), s('command'), refs.cast<String>());
+    } on FormatException {
+      return null;
+    }
+  }
+}
+
 /// 계정의 원격 승인 요청을 앱이 앞에 있는 동안 긴 폴링으로 지켜본다. 다른 곳에서 닫히면 목록이 그 상태를 말한다.
 class ApprovalCenter extends ChangeNotifier {
-  ApprovalCenter({RelayAccountApi Function(AccountSession)? api, DateTime Function()? clock})
+  ApprovalCenter({RelayAccountApi Function(AccountSession)? api, DateTime Function()? clock, ApprovalSigner? signer})
     : _api = api ?? ((s) => RelayAccountApi(s.origin, session: s)),
-      _clock = clock ?? DateTime.now;
+      _clock = clock ?? DateTime.now,
+      signer = signer ?? const SecureEnclaveSigner();
 
   static final ApprovalCenter instance = ApprovalCenter();
   static const _minRound = Duration(milliseconds: 300);
 
   final RelayAccountApi Function(AccountSession) _api;
   final DateTime Function() _clock;
+  final ApprovalSigner signer;
   AccountSession? _session;
   bool _foreground = true;
   int _gen = 0;
@@ -232,12 +292,31 @@ class ApprovalCenter extends ChangeNotifier {
   }
 
   /// 사람이 이 화면에서 누른 결정. 실패하면 [AccountException] — 이미 닫힌 요청이면 목록을 다시 받아 그 상태를 보인다.
+  /// 비밀 요청의 허락은 Face ID 로 승인 열쇠를 풀어 도전값에 서명해야 나간다. 취소하면 아무것도 안 보낸다.
   Future<Approval> decide(Approval a, bool allow) async {
     final session = _session;
     if (session == null) throw const AccountException('로그인이 풀렸어요.');
+    String? key;
+    String? sig;
+    if (allow && a.isSecret) {
+      if (!a.secretValid || a.challenge == null) {
+        throw const AccountException('요청 모양이 맞지 않아 허락할 수 없어요. 거절만 할 수 있어요.', code: 'challenge_invalid');
+      }
+      final public = await signer.publicKey();
+      if (public == null) {
+        throw const AccountException('Face ID 승인 열쇠가 없어요. 설정 → 계정 → Face ID 승인 열쇠에서 만들어 주세요.', code: 'no_key');
+      }
+      try {
+        sig = await signer.sign(a.challenge!, a.signReason);
+      } on PlatformException catch (e) {
+        throw AccountException('Face ID 로 서명하지 못했어요. 열쇠를 다시 만들어야 할 수 있어요. (${e.message ?? e.code})', code: 'sign_failed');
+      }
+      if (sig == null) throw const AccountException('Face ID 를 취소했어요. 아무것도 보내지 않았어요.', code: 'cancelled');
+      key = approvalKeyId(base64.decode(public));
+    }
     final api = _api(session);
     try {
-      final json = await api.decideApproval(a.id, a.digest, allow, approvalKey);
+      final json = await api.decideApproval(a.id, a.digest, allow, approvalKey, key: key, sig: sig);
       final done = Approval.fromJson(json['approval']);
       if (done != null) {
         _items[done.id] = done;
@@ -286,4 +365,6 @@ Map<String, Object?> _raw(Approval a) => {
   'digest': a.digest,
   'by': a.byLabel == null ? null : {'label': a.byLabel, 'kind': a.byKind},
   'reason': a.reason,
+  'kind': a.kind,
+  'challenge': a.challenge,
 };
