@@ -294,7 +294,6 @@ impl App {
             }
         }
         let ws_screens = self.ws.clone();
-        let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
         let proxy = self.proxy.clone();
         let marker_backend = self.socket_backend.clone();
@@ -302,18 +301,19 @@ impl App {
         // 태워 같은 마커의 재렌더(매 프레임)를 무시한다.
         let mut last_marker: Option<String> = None;
         std::thread::spawn(move || {
-            // winit's `request_redraw` is itself idempotent — repeated
-            // calls within one frame coalesce into a single
-            // RedrawRequested. The previous code added a 16ms throttle
-            // on top of that, which had a sharp edge: a *single*
-            // ScreenUpdate (the user hitting space, echoed once by the
-            // PTY) that landed inside the 16ms window would be
-            // dropped, and nothing would fire the next redraw until
-            // the *next* update arrived — which for a space character
-            // could be ~never. Result was a ~1s perceived cursor lag
-            // after spacebar. Letting winit own the coalescing keeps
-            // streaming-burst CPU bounded while making every dirty
-            // frame visible.
+            // No throttle here: a *single* ScreenUpdate (one echoed space)
+            // that landed inside a 16ms window used to be dropped, giving a
+            // ~1s cursor lag after spacebar. Every update wakes the GUI.
+            //
+            // The wake is the proxy event only — never `Window::request_redraw`
+            // from this thread. On macOS winit hops that call onto the main
+            // thread with a *synchronous* dispatch, so whenever the GUI thread
+            // stalls this pump blocks behind it, stops draining the PTY, and
+            // the agent in the pane freezes on its next write. 2026-10-06 on
+            // the mini: the main thread sat in a realloc for 25+ minutes and
+            // every student in that app stopped with it. `UserEvent::Redraw`
+            // already paints inline (`render_frame` at the end of
+            // `user_event`), so the direct call only added the blocking hop.
             while let Ok(mut update) = screens.recv() {
                 // EOF sentinel: the PTY reader died (shell/claude exited).
                 // The PtySession keeps a Sender alive for scroll/resize, so
@@ -330,9 +330,6 @@ impl App {
                         return;
                     }
                     dead.lock().unwrap().push(update.pane_id.clone());
-                    if let Some(w) = win_screens.as_ref() {
-                        w.request_redraw();
-                    }
                     let _ = proxy.send_event(UserEvent::Redraw);
                     return;
                 }
@@ -422,11 +419,8 @@ impl App {
                 if trust_hint {
                     crate::trust_prompt::note(&pane_for_marker);
                 }
-                if let Some(w) = win_screens.as_ref() {
-                    w.request_redraw();
-                }
-                // Wake the loop even if it's parked on a WaitUntil —
-                // request_redraw alone doesn't do that reliably on macOS.
+                // Also wakes a loop parked on WaitUntil, which request_redraw
+                // didn't do reliably on macOS.
                 let _ = proxy.send_event(UserEvent::Redraw);
                 if let (Some(m), Some(be)) = (marker, marker_backend.as_ref()) {
                     if last_marker.as_deref() != Some(m.as_str()) {
@@ -444,9 +438,6 @@ impl App {
                 return;
             }
             dead.lock().unwrap().push(pane_id);
-            if let Some(w) = win_screens.as_ref() {
-                w.request_redraw();
-            }
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
