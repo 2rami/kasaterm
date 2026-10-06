@@ -4720,8 +4720,8 @@ pub fn agent_pid_for_shell(
 /// 이름으로 못 잡은 pane 을 **명령줄로** 한 번 더 본다 — comm 이 `node`·`Python`
 /// 인 하네스들(gemini·cursor·hermes·amp)이 여기서만 잡힌다.
 ///
-/// ⚠️ 순서가 곧 비용이다. `process_cmdline` 은 표를 500ms 캐시하지만 그 표를
-/// 뜨는 일 자체가 `ps` 한 번이라, 이름 판정보다 **먼저** 놓으면 학생이 아닌 셸
+/// ⚠️ 순서가 곧 비용이다. 명령줄 읽기는 macOS 에선 커널에 pid 하나를 묻는 일이지만
+/// 그 밖에선 `ps` 표 한 번이라, 이름 판정보다 **먼저** 놓으면 학생이 아닌 셸
 /// pane 까지 그 문을 연다. 그래서 ①이름 판정이 실패하고 ②그 자식이 실제로
 /// 런처류일 때만 여기까지 온다. 결과는 아래 캐시가 1초 잡아 둔다.
 fn agent_pid_by_argv(
@@ -4771,9 +4771,8 @@ fn is_argv_probe_launcher(comm: &str) -> bool {
     })
 }
 
-/// pid → argv 판정 결과, 1초 캐시. 아래 `process_cmdline` 이 표를 500ms 쥐므로
-/// 프로세스가 매번 뜨지는 않지만, 판정(문자열 훑기)까지 매 프레임 되풀이할
-/// 이유는 없다.
+/// pid → argv 판정 결과, 1초 캐시. 명령줄 읽기가 싸도(macOS 는 커널에 바로, 그 밖은
+/// `ps` 표 500ms 캐시) 판정(문자열 훑기)까지 매 프레임 되풀이할 이유는 없다.
 ///
 /// pid 는 재사용되지만 TTL 이 1초라 남의 결과를 물려받을 창이 사실상 없다 —
 /// 그 사이에 pid 가 한 바퀴 돌려면 초당 수만 개가 떠야 한다.
@@ -4790,7 +4789,7 @@ fn agent_spec_by_argv_cached(pid: u32) -> Option<&'static AgentSpec> {
                 return *val;
             }
         }
-        let args = process_cmdline(pid).unwrap_or_default();
+        let args = crate::procinfo::process_cmdline(pid).unwrap_or_default();
         let hit = (!args.is_empty())
             .then(|| {
                 AGENT_TABLE
@@ -4947,6 +4946,10 @@ fn process_table_raw() -> Vec<(u32, u32, String)> {
 
 #[cfg(unix)]
 fn process_table_raw() -> Vec<(u32, u32, String)> {
+    #[cfg(target_os = "macos")]
+    if let Some(table) = crate::procinfo::process_table() {
+        return table;
+    }
     let Ok(output) = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])
         .output()
@@ -4964,12 +4967,7 @@ fn process_table_raw() -> Vec<(u32, u32, String)> {
             continue;
         };
         let comm = parts.collect::<Vec<_>>().join(" ");
-        let name = std::path::Path::new(&comm)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&comm)
-            .to_string();
-        out.push((pid, ppid, name));
+        out.push((pid, ppid, crate::procinfo::comm_name(&comm)));
     }
     out
 }
@@ -5150,7 +5148,7 @@ fn claude_agents_argv(shell_pid: u32) -> bool {
     let Some(pid) = claude_pid else {
         return false;
     };
-    let Some(argv) = process_cmdline(pid) else {
+    let Some(argv) = crate::procinfo::process_cmdline(pid) else {
         return false;
     };
     // attach 도 뷰 — agents 목록과 마찬가지로 "남의 세션을 보는 pane"이라, 학생 표시를
