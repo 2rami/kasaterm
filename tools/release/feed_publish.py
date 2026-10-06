@@ -26,6 +26,15 @@ class CasExhausted(Refused):
     """산출물 검사가 아니라 main 경합만 재시도 한도를 넘었다."""
 
 
+class PagesUnfinished(Refused):
+    """피드 커밋은 올라갔고 Pages 빌드·공개 피드 확인만 못 끝냈다 — 게시 job 만 다시 돌리면 된다."""
+
+
+# legacy Pages 빌드는 가끔 까닭 없이 실패하거나 15분씩 「빌드 중」에 머문다(2026-10-02·10-05). 다음 빌드는 대개 된다.
+PAGES_REBUILDS = 2
+PAGES_STALL = 18
+
+
 def item(raw, empty=False):
     if not raw and empty:
         return None
@@ -243,9 +252,13 @@ class Publisher:
         if requested.get("status") not in ("queued", "building", "built"):
             raise Refused("Pages 빌드 요청이 접수되지 않았다")
         http, wait, checked = http or Http(), wait or time.sleep, {}
+        rebuilds, last, still = 0, None, 0
         for attempt in range(1, attempts + 1):
             build = self.pages_api("GET", "/builds/latest")
             status, built = build.get("status"), build.get("commit")
+            seen = (status, built, build.get("created_at"))
+            still = still + 1 if seen == last and status in ("queued", "building") else 0
+            last = seen
             if status not in ("queued", "building", "built", "errored"):
                 raise Refused("Pages 빌드 상태를 확인하지 못했다")
             if built and (not isinstance(built, str) or not re.fullmatch(r"[0-9a-f]{40}", built)):
@@ -255,8 +268,18 @@ class Publisher:
                     self.git("fetch", "-q", "--no-tags", self.remote, built)
                 checked[built] = self.git("merge-base", "--is-ancestor", commit, built, check=False).returncode == 0
             relevant = built and checked[built]
-            if relevant and status == "errored":
-                raise Refused("게시 커밋의 Pages 빌드 실패 — 피드 커밋은 유지된다")
+            if (relevant and status == "errored") or still >= PAGES_STALL:
+                if rebuilds >= PAGES_REBUILDS:
+                    if status == "errored":
+                        raise PagesUnfinished("게시 커밋의 Pages 빌드 실패 — 피드 커밋은 유지된다")
+                else:
+                    rebuilds += 1
+                    if self.pages_api("POST", "/builds").get("status") not in ("queued", "building", "built"):
+                        raise Refused("Pages 빌드 재요청이 접수되지 않았다")
+                    still, last = 0, None
+                    if attempt < attempts:
+                        wait(delay)
+                    continue
             if relevant and status == "built":
                 if any(item(self.file_at(built, path)) != value for path, value in expected.items()):
                     raise Refused("Pages가 빌드한 피드가 검증한 후보에서 바뀌었다")
@@ -273,7 +296,7 @@ class Publisher:
                             "feeds": [PAGES_URL + path.removeprefix("docs/") for path in expected]}
             if attempt < attempts:
                 wait(delay)
-        raise Refused(f"Pages 배포·공개 피드 확인 {attempts}회 소진 — 피드 커밋은 유지되며 배포 완료가 아니다")
+        raise PagesUnfinished(f"Pages 배포·공개 피드 확인 {attempts}회 소진 — 피드 커밋은 유지되며 배포 완료가 아니다")
 
 
 def main(argv=None):
@@ -304,6 +327,8 @@ def main(argv=None):
         print(json.dumps(result))
     except CasExhausted as error:
         parser.exit(75, f"KASATERM_APPCAST_CAS_EXHAUSTED\n::error title=Appcast CAS retries exhausted::{error}\n")
+    except PagesUnfinished as error:
+        parser.exit(1, f"KASATERM_APPCAST_PAGES_UNFINISHED\n{error}\n")
     except (Refused, OSError, ValueError, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"{error}\n")
 

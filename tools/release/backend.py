@@ -29,6 +29,11 @@ TESTS = (["cargo", "test", "-p", "kasaterm", "--release"],
          ["cargo", "test", "-p", "kasa-socket", "--release"])
 PUBLISH_STAGES = ("tag", "release", "feed")
 MAIN_RACE_ATTEMPTS = 5
+# 게시 job 이 남긴 표식 → 그 job 만 다시 돌리면 되는 까닭. feed_publish.main 이 찍는다.
+APPCAST_RETRY_MARKERS = {"KASATERM_APPCAST_CAS_EXHAUSTED": "main 경합 재시도 소진",
+                         "KASATERM_APPCAST_PAGES_UNFINISHED": "Pages 게시 확인 미완"}
+# 실행 시도 번호가 이 값 이하일 때만 controller 가 스스로 다시 돌린다 — 그 뒤는 사람이 본다.
+APPCAST_AUTO_RERUNS = 2
 # Ed25519 SubjectPublicKeyInfo 머리 — Sparkle 공개키(32바이트)를 openssl 이 읽는 PEM 으로 싼다.
 _ED25519_SPKI = bytes.fromhex("302a300506032b6570032100")
 
@@ -194,7 +199,7 @@ class RealBackend:
         (`release vX.Y.Z (both|macos)`, release.yml run-name). 태그의 워크플로는 커밋에 박혀 고칠 수 없어, 태그 실행이
         멈추면 마무리 실행이 뒤를 잇는다. mac 만 마무리한 실행이면 뒤의 산출물 검사가 msi 없음으로 멈춘다(성공으로 안 친다)."""
         r = self.runner.run([self.gh, "run", "list", "--repo", self.slug, "--workflow", "release.yml", "--json",
-                             "databaseId,status,conclusion,headBranch,headSha,event,displayTitle", "--limit", "30"], timeout=60)
+                             "databaseId,status,conclusion,headBranch,headSha,event,displayTitle,attempt", "--limit", "30"], timeout=60)
         if not r.ok:
             raise Refused(f"CI 상태를 읽지 못했다 — {r.tail(2) or '시간 초과'}")
         finish = re.compile(rf"release {re.escape(tag)} \((both|macos)\)")
@@ -202,24 +207,24 @@ class RealBackend:
                 or (x.get("event") == "workflow_dispatch" and finish.fullmatch(x.get("displayTitle") or ""))]
         return runs[0] if runs else None
 
-    def appcast_retry_hint(self, run, plan):
-        # 검사·공증 실패를 재실행으로 가리지 않도록 게시 job의 CAS 소진만 복구 안내한다.
+    def appcast_retry_job(self, run, plan):
+        """게시 job 하나만 다시 돌리면 되는 실패면 (job id, 까닭). 검사·굽기·공증·서명 실패는 재실행으로 가리지 않는다."""
         run_id = run.get("databaseId")
         if run.get("conclusion") != "failure" or type(run_id) is not int or run_id <= 0:
-            return ""
+            return None
         view = self.runner.run([self.gh, "run", "view", str(run_id), "--repo", self.slug, "--json", "jobs"], timeout=60)
         if not view.ok:
-            return ""
+            return None
         try:
             rows = json.loads(view.out).get("jobs", [])
             jobs = {job["name"]: job for job in rows}
             expected = {"resolve": "success", "build-dmg": "success", "appcast": "failure",
                         "build-msi": "success" if "windows" in plan["platforms"] else "skipped"}
             if len(rows) != 4 or set(jobs) != set(expected):
-                return ""
+                return None
             if any(jobs[name].get("status") != "completed" or jobs[name].get("conclusion") != conclusion
                    for name, conclusion in expected.items()):
-                return ""
+                return None
             appcast = jobs["appcast"]
             job_id = appcast.get("databaseId")
             steps = appcast.get("steps", [])
@@ -227,15 +232,43 @@ class RealBackend:
             completed = {step.get("name") for step in steps if step.get("conclusion") == "success"}
             if (type(job_id) is not int or job_id <= 0 or failed != ["Publish verified appcasts"]
                     or not {"Checkout main", "Sparkle signing tools", "Generate signed appcasts"} <= completed):
-                return ""
+                return None
         except (ValueError, KeyError, TypeError, AttributeError):
-            return ""
+            return None
         logs = self.runner.run([self.gh, "run", "view", str(run_id), "--repo", self.slug,
                                 "--job", str(job_id), "--log-failed"], timeout=60)
-        if not logs.ok or not any(line.split()[-1:] == ["KASATERM_APPCAST_CAS_EXHAUSTED"] for line in logs.out.splitlines()):
+        if not logs.ok:
+            return None
+        markers = {line.split()[-1] for line in logs.out.splitlines() if line.split()}
+        for marker, why in APPCAST_RETRY_MARKERS.items():
+            if marker in markers:
+                return job_id, why
+        return None
+
+    def appcast_retry_hint(self, run, plan):
+        retry = self.appcast_retry_job(run, plan)
+        if not retry:
             return ""
-        return (f" — main 경합 재시도 소진. 명시적 게시 job 재실행: gh run rerun {run_id} --job {job_id} --repo {self.slug}"
+        job_id, why = retry
+        return (f" — {why}. 명시적 게시 job 재실행: gh run rerun {run['databaseId']} --job {job_id} --repo {self.slug}"
                 " (검사·굽기·공증 job은 다시 실행하지 않음)")
+
+    def rerun_appcast(self, run, plan):
+        """게시 job 만 실패한 실행을 정해진 횟수까지 그 job 만 다시 돌린다. 요청했으면 알릴 글, 아니면 None.
+        같은 서명 피드를 다시 확인·게시할 뿐 새 릴리스·태그를 만들지 않는다(2026-10-02 Pages 빌드가 15분 걸려 v0.2.28 이
+        나흘 막혔다)."""
+        attempt = run.get("attempt")
+        if type(attempt) is not int or not 1 <= attempt <= APPCAST_AUTO_RERUNS:
+            return None
+        retry = self.appcast_retry_job(run, plan)
+        if not retry:
+            return None
+        job_id, why = retry
+        r = self.runner.run([self.gh, "run", "rerun", str(run["databaseId"]), "--job", str(job_id), "--repo", self.slug],
+                            timeout=60, kind="publish")
+        if r.skipped or not r.ok:
+            return None
+        return f"{why} — 게시 job 만 다시 돌림(시도 {attempt + 1}) · run {run['databaseId']}"
 
     # ── 격리 워크트리 ──────────────────────────────────────────────────────
     def worktree(self, plan, name="wt"):
@@ -688,6 +721,9 @@ class RealBackend:
         if run.get("event") == "push" and expected_commit and run.get("headSha") != expected_commit:
             raise Refused("CI가 검증한 커밋이 이 계획의 태그 커밋과 다르다")
         if run.get("conclusion") != "success":
+            rerun = self.rerun_appcast(run, plan)
+            if rerun:
+                raise Pending(rerun)
             raise Refused(f"CI 실패({run.get('conclusion')}) · run {run.get('databaseId')} — 산출물·appcast 를 확인하지 않는다"
                           + self.appcast_retry_hint(run, plan))
         view = self.runner.run([self.gh, "release", "view", tag, "--repo", self.slug, "--json", "assets,isDraft,isPrerelease"], timeout=60)

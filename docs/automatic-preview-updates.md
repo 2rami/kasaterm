@@ -14,6 +14,14 @@ CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. app
 공개 피드의 버전·주소·서명·크기를 최대 60회(확인 사이 10초) 대조한다. 실패·시간 초과는 CI 실패이며,
 이미 올라간 피드 커밋·태그·산출물을 되돌리거나 새 릴리스를 만들지 않는다. 사이트 설정도 자동 변경하지 않는다.
 원인을 해결한 뒤 해당 appcast job만 명시적으로 재실행하면 같은 검증 피드를 확인하고 Pages 게시를 재시도한다.
+
+legacy Pages 빌드는 가끔 까닭 없이 실패하거나 15분씩 「빌드 중」에 머문다(2026-10-02 v0.2.28: 피드 커밋 빌드가 15분 뒤 실패,
+다음 빌드는 20초). 그래서 게시 커밋을 품은 빌드가 실패했거나 같은 빌드가 3분(`PAGES_STALL` 18회) 넘게 대기·빌드 중이면 빌드를
+두 번까지 다시 요청한다(`PAGES_REBUILDS`). 그래도 못 끝내면 `KASATERM_APPCAST_PAGES_UNFINISHED` 표식을 남기고 실패한다.
+controller 는 게시 job 만 실패하고 표식이 `KASATERM_APPCAST_CAS_EXHAUSTED`·`KASATERM_APPCAST_PAGES_UNFINISHED` 중 하나면 그 job 만
+실행 시도 번호 2까지 스스로 다시 돌린다(`APPCAST_AUTO_RERUNS`, `gh run rerun <run> --job <job>`) — 같은 서명 피드를 다시 확인할
+뿐 새 릴리스·태그는 만들지 않는다. 세 번째 시도도 실패하면 막힌 채 로그에 재실행 명령을 남긴다. v0.2.28 은 이 장치 전에 나흘
+막혀 있다가 2026-10-06 그 job 을 손으로 다시 돌려 풀었다.
 근거: [Pages의 GITHUB_TOKEN 제한](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#troubleshooting-publishing-from-a-branch),
 [Pages 빌드 요청과 권한](https://docs.github.com/en/rest/pages/pages#request-a-github-pages-build).
 

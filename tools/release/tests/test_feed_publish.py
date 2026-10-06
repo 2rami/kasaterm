@@ -1,5 +1,6 @@
 import base64
 import copy
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -7,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools.release import deps, feed_publish
+from tools.release import backend, deps, feed_publish
 from tools.release.backend import RealBackend
 from tools.release.common import CHANNEL_MANIFEST, Refused, channel_manifest, sha256_file
 from tools.release.proc import Result, Runner
@@ -363,12 +364,29 @@ class FeedPublishTests(unittest.TestCase):
     def test_pages_failed_build_is_failure_without_public_success(self):
         published = self.publisher.publish()
         http = mock.Mock()
+        errored = {"status": "errored", "commit": published["commit"]}
         with mock.patch.object(self.publisher, "pages_api", side_effect=[
-                self.pages_site(), {"status": "queued"}, {"status": "errored", "commit": published["commit"]}]), \
-                self.assertRaisesRegex(Refused, "Pages 빌드 실패"):
-            self.publisher.deploy_pages(published, attempts=1, http=http)
+                self.pages_site(), {"status": "queued"}, errored, {"status": "queued"}, errored, {"status": "queued"},
+                errored]) as api, self.assertRaisesRegex(feed_publish.PagesUnfinished, "Pages 빌드 실패"):
+            self.publisher.deploy_pages(published, attempts=5, delay=1, http=http, wait=mock.Mock())
+        self.assertEqual(api.call_args_list.count(mock.call("POST", "/builds")), 1 + feed_publish.PAGES_REBUILDS)
         http.get.assert_not_called()
         self.assertEqual(self.remote_file("docs/appcast-preview.xml"), self.candidate.raw)
+
+    def test_pages_failed_or_stuck_build_is_requested_again(self):
+        # 2026-10-02 v0.2.28: 피드 커밋의 Pages 빌드가 15분 「빌드 중」이다가 실패했고, 다음 빌드는 20초에 됐다.
+        published = self.publisher.publish()
+        stuck = {"status": "building", "commit": published["commit"], "created_at": "2026-10-02T06:33:39Z"}
+        built = {"status": "built", "commit": published["commit"]}
+        for name, middle in (("errored", [{"status": "errored", "commit": published["commit"]}]),
+                             ("stuck", [stuck] * (feed_publish.PAGES_STALL + 1))):
+            http = mock.Mock()
+            http.get.return_value = (200, self.candidate.raw)
+            with self.subTest(name), mock.patch.object(self.publisher, "pages_api", side_effect=[
+                    self.pages_site(), {"status": "queued"}, *middle, {"status": "queued"}, built]) as api:
+                result = self.publisher.deploy_pages(published, attempts=60, delay=1, http=http, wait=mock.Mock())
+            self.assertEqual(result["state"], "deployed")
+            self.assertEqual(api.call_args_list.count(mock.call("POST", "/builds")), 2)
 
     def test_pages_old_build_and_public_failure_have_bounded_waits(self):
         published = self.publisher.publish()
@@ -435,6 +453,31 @@ class RetryClassificationTests(unittest.TestCase):
         self.assertIn("gh run rerun 42 --job 13 --repo 2rami/kasaterm", hint)
         self.assertTrue(all("rerun" not in call.args[0] for call in self.runner.run.call_args_list))
 
+    def test_unfinished_pages_check_gets_the_same_job_only_recovery(self):
+        self.log = "appcast\tPublish verified appcasts\t2026-10-02T06:43:57.000Z KASATERM_APPCAST_PAGES_UNFINISHED\n"
+        hint = self.backend.appcast_retry_hint(self.run, self.plan)
+        self.assertIn("Pages 게시 확인 미완", hint)
+        self.assertIn("gh run rerun 42 --job 13 --repo 2rami/kasaterm", hint)
+
+    def test_controller_reruns_only_the_publish_job_a_bounded_number_of_times(self):
+        reruns = lambda: [call for call in self.runner.run.call_args_list if call.args[0][1:3] == ["run", "rerun"]]
+        for attempt, expected in ((1, True), (backend.APPCAST_AUTO_RERUNS, True), (backend.APPCAST_AUTO_RERUNS + 1, False),
+                                  (None, False)):
+            with self.subTest(attempt=attempt):
+                self.setUp()
+                self.run["attempt"] = attempt
+                said = self.backend.rerun_appcast(self.run, self.plan)
+                self.assertEqual(bool(said), expected)
+                self.assertEqual(len(reruns()), int(expected))
+                if expected:
+                    self.assertEqual(reruns()[0].args[0], ["gh", "run", "rerun", "42", "--job", "13", "--repo", "2rami/kasaterm"])
+                    self.assertEqual(reruns()[0].kwargs["kind"], "publish")
+        self.setUp()
+        self.run["attempt"] = 1
+        self.jobs[1]["conclusion"] = "failure"
+        self.assertIsNone(self.backend.rerun_appcast(self.run, self.plan))
+        self.assertEqual(reruns(), [])
+
     def test_tests_signing_or_validation_failure_never_suggested_for_rerun(self):
         for kind in ("build", "sign", "validation", "cancelled", "extra", "unknown"):
             with self.subTest(kind=kind):
@@ -473,6 +516,18 @@ class RetryClassificationTests(unittest.TestCase):
                 feed_publish.main(args)
             self.assertEqual(error.exception.code, 1)
             publisher.return_value.deploy_pages.assert_not_called()
+
+    def test_cli_marks_an_unfinished_pages_check_for_the_controller(self):
+        args = ["--tag", "v0.2.2", "--channel", "preview", "--commit", "a" * 40,
+                "--mac", "feed", "--dmg", "dmg", "--dmg-sha256", "b" * 64, "--deploy-pages"]
+        with mock.patch.object(feed_publish.Candidate, "read"), mock.patch.object(feed_publish, "Publisher") as publisher, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            publisher.return_value.publish.return_value = {"state": "published", "commit": "c" * 40}
+            publisher.return_value.deploy_pages.side_effect = feed_publish.PagesUnfinished("fixture Pages timeout")
+            with self.assertRaises(SystemExit) as error:
+                feed_publish.main(args)
+        self.assertEqual(error.exception.code, 1)
+        self.assertEqual(err.getvalue().splitlines()[0], "KASATERM_APPCAST_PAGES_UNFINISHED")
 
     def test_cli_pages_failure_cannot_print_publication_success(self):
         args = ["--tag", "v0.2.2", "--channel", "preview", "--commit", "a" * 40,
