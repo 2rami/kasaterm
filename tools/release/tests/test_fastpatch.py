@@ -1834,6 +1834,7 @@ class LocalSigningRepoTests(unittest.TestCase):
             self.assertIn(rel.split("/")[-1], self.bake)
         self.assertIn("SIGN_ARGS+=(--options runtime --timestamp)", self.bake)
         self.assertIn('sign_part "$APP/Contents/Resources/kasapet"', self.bake)
+        self.assertIn('sign_part "$APP/Contents/MacOS/kasa-op"', self.bake)
         self.assertIn("--entitlements \"$ROOT/scripts/kasaterm.entitlements\"", self.bake)
         ent = plistlib.loads((REPO / "scripts/kasaterm.entitlements").read_bytes())
         self.assertEqual(ent, {"com.apple.security.device.audio-input": True, "com.apple.security.automation.apple-events": True})
