@@ -80,6 +80,8 @@ export const register: Register = on => {
   })
 
   // 말하는 자리에 얼굴만 — 턴의 첫 답 왼쪽에 아바타처럼. 이름은 칸 머리·상태가 이미 말해 빼었다(2026-10-06).
+  // 엔진의 답 블록은 첫 줄에 ● 를 달아 얼굴 옆에 점이 하나 더 섰다 — 그 블록은 글을 Markdown 으로 직접 그려
+  // 점 자리를 얼굴이 맡는다. 엔진이 숨기는 부분(<context>)은 e.props.text 에 이미 없다.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const face = known.face
     if (!face?.file || e.surface !== 'terminal' || !e.props.isFirstOfReply) return next(e)
@@ -89,12 +91,13 @@ export const register: Register = on => {
       if (turn.firsts.size > FIRSTS_MAX) turn.firsts.delete(turn.firsts.values().next().value as string)
     }
     if (!turn.firsts.has(e.requestId)) return next(e)
-    const body = await next(e)
-    const { Box, Image } = $.ui.resolve(e)
+    const { Box, Image, Markdown } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" gap={1}>
         <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={4} rows={2} alt=" " />
-        <Box flexDirection="column" flexGrow={1} flexShrink={1}>{body}</Box>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+          <Markdown text={e.props.text} />
+        </Box>
       </Box>
     )
   })

@@ -146,3 +146,14 @@ test('the turn line is in the student colour with the face as its mark', async (
   expect(line?.props.color).toBe(FACE.color)
   await ui.unmount()
 })
+
+test('the face takes the bullet\'s place: the first block is drawn as markdown beside it, without the engine\'s row', async ($, on) => {
+  host(on, { name: '유우카', face: FACE })
+  await $.session.start(START)
+  const ui = await reply($, 'terminal', { text: '**고쳤어요** 이제 돼요', isFirstOfReply: true })
+  expect(await ui.findAll({ type: 'Image' })).toHaveLength(1)
+  const [md] = await ui.findAll({ type: 'Markdown' })
+  expect(md?.props.text).toBe('**고쳤어요** 이제 돼요')
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === '**고쳤어요** 이제 돼요')).toBe(false)
+  await ui.unmount()
+})
