@@ -3807,7 +3807,8 @@ impl App {
         use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
         static PLAN: OnceLock<Option<(Instant, u64, Vec<String>)>> = OnceLock::new();
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        static RELEASE: Mutex<Option<Instant>> = Mutex::new(None);
+        // 뗄 시각과, AppKit 길로 눌렀으면 그 자리(뗌도 같은 길로 보낸다).
+        static RELEASE: Mutex<Option<(Instant, Option<(f32, f32)>)>> = Mutex::new(None);
         let Some((due, gap, points)) = PLAN.get_or_init(|| {
             let spec = std::env::var("KASATERM_AUTOCLICKS").ok()?;
             let points = spec.split(';').map(str::to_string).collect();
@@ -3822,10 +3823,14 @@ impl App {
             app.window_event(event_loop, wid, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left });
         };
         let pending_release = *RELEASE.lock().unwrap();
-        if let Some(at) = pending_release {
+        if let Some((at, native)) = pending_release {
             if Instant::now() >= at {
                 *RELEASE.lock().unwrap() = None;
-                press(self, ElementState::Released);
+                match native {
+                    #[cfg(target_os = "macos")]
+                    Some((x, y)) => self.native_mouse(&[(2, x, y)]),
+                    _ => press(self, ElementState::Released),
+                }
             }
             return;
         }
@@ -3835,6 +3840,17 @@ impl App {
             return;
         }
         NEXT.store(i + 1, Ordering::Relaxed);
+        #[cfg(target_os = "macos")]
+        if let Some(text) = point.strip_prefix("native:") {
+            let Some((x, y)) = self.autoclick_text_px(text) else {
+                eprintln!("[autoclicks] {i}: {text:?} 못 찾음");
+                return;
+            };
+            self.native_mouse(&[(5, x - 12.0, y), (5, x - 6.0, y), (5, x, y), (1, x, y)]);
+            *RELEASE.lock().unwrap() = Some((Instant::now() + std::time::Duration::from_millis(90), Some((x, y))));
+            eprintln!("[autoclicks] {i}: native {text:?} ({x:.0},{y:.0})");
+            return;
+        }
         if let Some(text) = point.strip_prefix("text:") {
             let Some((x, y)) = self.autoclick_text_px(text) else {
                 eprintln!("[autoclicks] {i}: {text:?} 못 찾음");
@@ -3847,7 +3863,7 @@ impl App {
             });
             self.cursor_px = (x, y);
             press(self, ElementState::Pressed);
-            *RELEASE.lock().unwrap() = Some(Instant::now() + std::time::Duration::from_millis(90));
+            *RELEASE.lock().unwrap() = Some((Instant::now() + std::time::Duration::from_millis(90), None));
             eprintln!("[autoclicks] {i}: {text:?} ({x:.0},{y:.0})");
             return;
         }
@@ -3860,6 +3876,39 @@ impl App {
         }
         self.chrome_dirty = true;
         eprintln!("[autoclicks] {i}: ({x:.0},{y:.0}) scale={:.2}", self.effective_scale());
+    }
+    /// AppKit 이 사람 손에서 받는 것과 같은 NSEvent(종류 5 이동·1 누름·2 뗌, 논리 좌표)를 winit 뷰에
+    /// 차례로 넘긴다. `window_event` 를 직접 부르는 `text:` 와 달리 winit 이 누름·뗌마다 먼저 내는
+    /// CursorMoved 와 수정키 갱신까지 탄다. 창 서버(활성화)는 안 거쳐 사람 화면의 초점을 안 뺏는다.
+    #[cfg(target_os = "macos")]
+    fn native_mouse(&self, events: &[(u64, f32, f32)]) {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_foundation::{NSPoint, NSRect};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Some(window) = self.window.as_ref() else { return };
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let view = h.ns_view.as_ptr() as *mut AnyObject;
+        let points = self.effective_scale() as f64 / window.scale_factor();
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            let Some(class) = AnyClass::get(c"NSEvent") else { return };
+            if ns_window.is_null() { return; }
+            let number: isize = msg_send![ns_window, windowNumber];
+            let frame: NSRect = msg_send![view, frame];
+            for &(kind, x, y) in events {
+                let at = NSPoint::new(x as f64 * points, frame.size.height - y as f64 * points);
+                let event: *mut AnyObject = msg_send![class, mouseEventWithType: kind, location: at,
+                    modifierFlags: 0u64, timestamp: 0.0f64, windowNumber: number,
+                    context: std::ptr::null_mut::<AnyObject>(), eventNumber: 0isize, clickCount: 1isize, pressure: 1.0f32];
+                match kind {
+                    1 => { let _: () = msg_send![view, mouseDown: event]; }
+                    2 => { let _: () = msg_send![view, mouseUp: event]; }
+                    _ => { let _: () = msg_send![view, mouseMoved: event]; }
+                }
+            }
+        }
     }
     /// pane 격자(활성 pane 먼저)에서 `text` 가 처음 나오는 칸의 px. 넓은 글자 뒤 칸은 글자가 아니라 건너뛴다.
     fn autoclick_text_px(&self, text: &str) -> Option<(f32, f32)> {

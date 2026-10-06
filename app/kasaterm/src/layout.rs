@@ -3126,6 +3126,11 @@ for p in glob.glob(os.path.join(d, '*.json')):
     }
     /// Pane whose header band contains the cursor (logical px), or None.
     /// Headers only exist when the workspace is split.
+    ///
+    /// 띠 높이는 그 pane 이 실제로 그린 `header_px()` 다. 헤더 없는 터미널 pane 은 그 자리에
+    /// 격자 첫 줄이 그려진다 — 띠를 걷은 뒤(07-12)에도 34px 를 헤더로 잡아, 오른쪽에 붙은
+    /// Claude Code 옆 창의 둘째 줄 단추를 누르면 pane 옮기기 누름이 되어 TUI 에 안 갔다
+    /// (2026-10-06 「마우스로 눌러도 안 바뀌어」).
     pub(crate) fn header_at_px(&self, x: f32, y: f32) -> Option<String> {
         let (cols, rows) = self.window_cells();
         let rects = self.effective_leaf_rects(cols, rows);
@@ -3135,15 +3140,13 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return None;
         }
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
-        for (id, cx, cy, cw, _ch) in rects {
-            let bx = pad + cx as f32 * self.cell.w;
-            let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
-            let bw = cw as f32 * self.cell.w;
-            if x >= bx && x <= bx + bw && y >= by && y <= by + PANE_HEADER_HEIGHT {
-                return Some(id);
-            }
-        }
-        None
+        let ws = self.ws.lock().unwrap();
+        let bands = rects.into_iter().map(|(id, cx, cy, cw, _ch)| {
+            let band = ws.panes.get(&id).map_or(0.0, |pane| pane.header_px());
+            let left = pad + cx as f32 * self.cell.w;
+            (id, left, TITLE_HEIGHT + cy as f32 * self.cell.h, cw as f32 * self.cell.w, band)
+        });
+        header_band_hit(bands, x, y)
     }
     /// Pane + edge the cursor is over, for header drag-and-drop. The zone
     /// is the dominant axis from the pane box centre, so the cursor always
@@ -3594,6 +3597,32 @@ fn relocated_window_layouts(
         Some(source)
     };
     Some((source, destination))
+}
+
+/// `(pane, 왼쪽, 위, 폭, 띠 높이)` 중 `(x, y)` 가 띠 안에 든 pane. 띠가 0 인 pane(헤더 없는
+/// 터미널)은 위 가장자리를 눌러도 헤더가 아니다.
+fn header_band_hit(bands: impl IntoIterator<Item = (String, f32, f32, f32, f32)>, x: f32, y: f32) -> Option<String> {
+    bands.into_iter()
+        .find(|(_, left, top, width, band)| x >= *left && x <= left + width && y >= *top && y < top + band)
+        .map(|(id, ..)| id)
+}
+
+#[cfg(test)]
+mod header_band_tests {
+    use super::*;
+
+    #[test]
+    fn headerless_pane_top_rows_belong_to_the_grid() {
+        // 오른쪽에 붙은 Claude Code 옆 창의 단추는 둘째 줄(위에서 21.5~43px)에 있다.
+        let bands = || vec![
+            ("%0".to_string(), 0.0, 36.0, 600.0, 0.0),
+            ("%1".to_string(), 600.0, 36.0, 600.0, PANE_HEADER_HEIGHT),
+        ];
+        assert_eq!(header_band_hit(bands(), 300.0, 36.0 + 30.0), None);
+        assert_eq!(header_band_hit(bands(), 300.0, 36.0), None);
+        assert_eq!(header_band_hit(bands(), 900.0, 36.0 + 30.0).as_deref(), Some("%1"));
+        assert_eq!(header_band_hit(bands(), 900.0, 36.0 + PANE_HEADER_HEIGHT), None);
+    }
 }
 
 #[cfg(test)]

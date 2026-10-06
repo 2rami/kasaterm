@@ -67,7 +67,13 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
 1. **빌드/실행** — `cargo run -p kasaterm > /tmp/kasaterm-run.log 2>&1 &` (백그라운드)
 2. **누르기** — `KASATERM_AUTOCLICKS="x,y;x,y"`(논리 좌표) · `_MS`(첫 클릭, 기본 6000) · `_GAP_MS`(사이, 기본 1200). `text:<글>` 항목은
    pane 격자에서 그 글자를 찾아 사람 손처럼 옮겨(호버) 누르고 90ms 뒤에 뗀다 — 창 배율이 실행마다 달라 px 를 미리 못 정하는 TUI 단추용
-   (`KASATERM_AUTOCLICKS="text:학생 현황 ];text:메모 ]"`). 팝오버·묶음 알약을
+   (`KASATERM_AUTOCLICKS="text:학생 현황 ];text:메모 ]"`). `native:<글>` 은 같은 자리를 macOS 에서 **AppKit NSEvent 로 winit 뷰에**
+   넘긴다 — winit 이 누름·뗌마다 먼저 내는 CursorMoved(그래서 뗌 앞에 같은 칸 끌기 `32` 가 붙는다)와 수정키 갱신까지 사람 손과
+   같고, 창 서버를 안 거쳐 사람 화면의 초점은 안 뺏는다. `x,y`·`text:` 는 `window_event` 를 직접 불러 그 단계를 건너뛴다.
+   ⚠️ `text:`·`native:` 의 px 는 클릭 판정 함수(`px_to_pane_cell`)로 거꾸로 구한 것이라 **그린 자리와 판정 자리가 어긋나는 버그는
+   원리상 못 잡는다** — 그건 캡처에서 글자 위치를 재서 `x,y` 로 눌러 확인한다. 그리고 **사람이 누르는 배치를 그대로 세워라**:
+   좁은 리그에선 Claude Code 옆 창이 아래에 붙어 단추가 pane 위쪽에 안 오니, pane 위 34px 를 헤더로 잡아먹던 판정(2026-10-06)이
+   통과로 보였다 — 칸 폭 115 이상이면 오른쪽에 붙는다(`KASATERM_WINDOW_SIZE=2300,900` 두 칸). 팝오버·묶음 알약을
    연 채로 `kasaterm-cli capture --window` 로 찍는다. 좌표는 창의 논리 크기(물리 폭 ÷ 로그의 `scale=`) 기준이다 — 캡처 PNG 는 줄여 저장되니 비율로 옮긴다. 표시용 픽스처(`KASATERM_AUTOINFO=execution…`)는
    검증 실행(`KASATERM_WINDOW_SIZE="w,h"`)에서만 선다.
 3. **스크린샷** — `KASATERM_AUTOCAPTURE_MS=8000` 로 N초 후 자동 캡처. 기본 경로 `$TMPDIR/kasaterm.png` (`KASATERM_AUTOCAPTURE_PATH` 로 변경). **판정은 `Read` 로 직접 본다** — 먼저 `sips -s format jpeg -s formatOptions 60 -Z 1200 <png> --out <jpg>` 로 줄여서 연다. 이미지는 대화에 박혀 매 요청마다 다시 전송되고 빼는 수단이 없다(2026-09-05: 한 세션에 47장 8.5MB 가 쌓여 32MB 벽에 걸렸다) — 볼 것을 정한 뒤 한 장씩. macOS `screencapture` 는 권한 막혀 안 됨 — 무조건 자체 캡처.
