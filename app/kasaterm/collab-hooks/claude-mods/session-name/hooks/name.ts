@@ -24,8 +24,17 @@ export function titlesIn(text: string): Titles {
 export function tidy(raw: string): string {
   const line = raw.split('\n').map(s => s.trim()).find(s => s.length > 0) ?? ''
   const bare = line
+    .replace(/^[#>*\-\s]+/, '')
+    .replace(/\*\*/g, '')
     .replace(/^(이름|제목|세션 이름)\s*[:：]\s*/, '')
     .replace(/^["'`「『]+|["'`」』.。]+$/g, '')
     .trim()
   return [...bare].slice(0, NAME_MAX).join('')
+}
+
+// 모델이 이름 대신 자기 얘기(「저는 …」)·사과·시킨 글의 베낌(「작업 세션 이름」)을 내면 이름이 아니다 —
+// 버리고 다음 말에서 다시 짓는다.
+export function usable(name: string): boolean {
+  if (!name) return false
+  return !/세션 이름|작업 이름|이름 한 줄|에이전트|\bAI\b|저는|제가|죄송|할 수 없|모르겠/.test(name)
 }

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { tidy, titlesIn } from '../hooks/name'
+import { tidy, titlesIn, usable } from '../hooks/name'
 
 type World = { transcript?: string; settings?: string; reply?: string }
 
@@ -27,7 +27,7 @@ test('a fresh session is named from its first prompt', async ($, on) => {
   const asked = world(on, { reply: '「Tunnet 비교」' })
   const r = await $.classic.UserPromptSubmit(PROMPT)
   expect(r.sessionTitle).toBe('Tunnet 비교')
-  expect(asked).toEqual([PROMPT.prompt])
+  expect(asked).toEqual([`<말>\n${PROMPT.prompt}\n</말>`])
 })
 
 test('a name a person or kasaterm gave is never replaced', async ($, on) => {
@@ -82,7 +82,7 @@ test('a brand-new session waits for its first prompt', async ($, on) => {
   const asked = world(on, { reply: '카사넷 비교' })
   expect((await $.classic.SessionStart({ ...AT, source: 'startup' })).sessionTitle).toBeUndefined()
   expect((await $.classic.UserPromptSubmit(PROMPT)).sessionTitle).toBe('카사넷 비교')
-  expect(asked).toEqual([PROMPT.prompt])
+  expect(asked).toEqual([`<말>\n${PROMPT.prompt}\n</말>`])
 })
 
 test('after /clear the new transcript gets a name of its own', async ($, on) => {
@@ -98,4 +98,22 @@ test('titles are read from records, not from text that merely mentions them', as
   expect(titlesIn(quoted)).toEqual({ custom: '', ai: '' })
   expect(tidy('이름: "모드 시험."\n둘째 줄')).toBe('모드 시험')
   expect([...tidy('가'.repeat(40))].length).toBe(24)
+})
+
+test('a reply that is not a name is dropped and the next prompt tries again', async ($, on) => {
+  const w: World = { reply: '저는 코딩 에이전트가 아니라 텍스트 기반 AI입니다' }
+  const asked = world(on, w)
+  expect((await $.classic.UserPromptSubmit(PROMPT)).sessionTitle).toBeUndefined()
+  w.reply = '# 작업 세션 이름'
+  expect((await $.classic.UserPromptSubmit(PROMPT)).sessionTitle).toBeUndefined()
+  w.reply = '**Tunnet 비교**'
+  expect((await $.classic.UserPromptSubmit(PROMPT)).sessionTitle).toBe('Tunnet 비교')
+  expect(asked.length).toBe(3)
+})
+
+test('markdown marks are stripped and meta replies are not names', () => {
+  expect(tidy('## 카사넷 비교')).toBe('카사넷 비교')
+  expect(usable('카사넷 비교')).toBe(true)
+  expect(usable('작업 세션 이름')).toBe(false)
+  expect(usable('죄송하지만 이름을 지을 수 없어요')).toBe(false)
 })
