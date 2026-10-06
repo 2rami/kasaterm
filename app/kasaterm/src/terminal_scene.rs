@@ -965,12 +965,12 @@ mod visual_scene_tests {
     #[test]
     fn visual_scene_gpu_fit_preserves_aspect_and_bottom_anchor() {
         for slot in [(0.0, 0.0, 20.0, 60.0), (4.0, 8.0, 100.0, 20.0)] {
-            let (x, y, w, h) = gpu::fit_terminal_art(slot, (96, 96), 2.0, true);
+            let (x, y, w, h) = kasa_gridview::renderer::fit_terminal_art(slot, (96, 96), 2.0, true);
             assert_eq!(w, h);
             assert_eq!(y + h, slot.1 + slot.3);
             assert_eq!(x + w / 2.0, slot.0 + slot.2 / 2.0);
         }
-        let (_, _, w, h) = gpu::fit_terminal_art((0.0, 0.0, 200.0, 200.0), (96, 96), 2.0, false);
+        let (_, _, w, h) = kasa_gridview::renderer::fit_terminal_art((0.0, 0.0, 200.0, 200.0), (96, 96), 2.0, false);
         assert_eq!((w, h), (48.0, 48.0));
     }
 }

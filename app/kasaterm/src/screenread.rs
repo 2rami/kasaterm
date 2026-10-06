@@ -2539,7 +2539,7 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
 /// 그림만 한가운데로 떨어져 나온다. OSC 1337 경로는 PTY 가 셀 수를 재어 주므로
 /// 박스가 이미 맞아 이 손질이 필요 없다.
 pub(crate) fn paint_inline_images(
-    g: &mut gpu::GpuRenderer,
+    g: &mut kasa_gridview::GridRenderer,
     slots: &[crate::render::terminal_scene::InlineSlot],
 ) {
     // 값은 디코드한 픽셀 크기 — `Hug` 가 박스를 좁히는 데 쓴다. `None` 은 디코드
@@ -2571,7 +2571,7 @@ pub(crate) fn paint_inline_images(
 /// 키는 놓는다」라서 여기서 건드리면 본 화면 텍스처가 지워진다. 올린 텍스처는 부른 쪽이
 /// 캡처 뒤 키 머리로 놓는다.
 pub(crate) fn paint_inline_images_once(
-    g: &mut gpu::GpuRenderer,
+    g: &mut kasa_gridview::GridRenderer,
     slots: &[crate::render::terminal_scene::InlineSlot],
 ) {
     for slot in slots {
@@ -2582,7 +2582,7 @@ pub(crate) fn paint_inline_images_once(
 }
 
 fn upload_inline_image(
-    g: &mut gpu::GpuRenderer,
+    g: &mut kasa_gridview::GridRenderer,
     slot: &crate::render::terminal_scene::InlineSlot,
 ) -> Option<(u32, u32)> {
     let img = image::load_from_memory(&std::fs::read(&slot.path).ok()?).ok()?;
@@ -2593,7 +2593,7 @@ fn upload_inline_image(
 }
 
 fn queue_inline_image(
-    g: &mut gpu::GpuRenderer,
+    g: &mut kasa_gridview::GridRenderer,
     slot: &crate::render::terminal_scene::InlineSlot,
     (iw, ih): (u32, u32),
 ) {

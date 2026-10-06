@@ -622,8 +622,8 @@ impl AuxWindow {
         let h = self.find_row_height();
         let editor_x = self.editor_origin_x();
         let editor_w = (width - editor_x).max(1.0);
-        self.gpu
-            .rect(editor_x, y, editor_w, h, self.toolbar_background());
+        let background = self.toolbar_background();
+        self.gpu.rect(editor_x, y, editor_w, h, background);
         self.gpu
             .rect(editor_x, y + h - 1.0, editor_w, 1.0, crate::theme::border());
         self.find_hits = App::draw_find_bar_with_options(

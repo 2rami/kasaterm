@@ -4,15 +4,9 @@
 //! 스캔 위치다(와이드 글자의 '\0' spacer 는 공백으로 친다).
 use super::*;
 
-/// 렌더 밑줄용 URL 범위. `col_start..col_end` (exclusive) 가 밑줄 대상
-/// 셀 범위다. 실제 여는 주소(url)는 hover/click 이 그때그때 행을 다시
+/// 렌더 밑줄용 URL 범위. 실제 여는 주소(url)는 hover/click 이 그때그때 행을 다시
 /// 스캔해 얻으므로 여기엔 담지 않는다.
-#[derive(Debug, Clone)]
-pub(crate) struct LinkSpan {
-    pub row: u16,
-    pub col_start: u16,
-    pub col_end: u16,
-}
+pub(crate) use kasa_gridview::CellSpan as LinkSpan;
 
 /// URL 본문에 들어갈 수 있는 글자. 공백·제어문자와 셸/마크업이 경계로
 /// 쓰는 따옴표류·꺾쇠는 여기서 끊는다.
