@@ -7663,6 +7663,7 @@ pub fn spawn_http_server_opts(
                 let panes_backend = backend.clone();
                 let layout_ws_backend = backend.clone();
                 let gitcol_backend = backend.clone();
+                let gitcol_wait_backend = backend.clone();
                 let colors_backend = backend.clone();
                 let clip_backend = backend.clone();
                 let shot_backend = backend.clone();
@@ -7864,6 +7865,13 @@ pub fn spawn_http_server_opts(
                         "/term/gitcol",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             term_gitcol_get(gitcol_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/term/gitcol/wait",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            let backend = gitcol_wait_backend.clone();
+                            async move { Json(crate::git_panel::wait(backend, q.0).await) }
                         }),
                     )
                     .route("/term/device-colors", get(move || {

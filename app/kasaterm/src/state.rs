@@ -236,6 +236,7 @@ pub(crate) enum StatusbarHit {
 pub(crate) struct GitState {
     pub(crate) col_displayed_target: Option<(std::path::PathBuf, Option<(String, String)>, u64)>,
     pub(crate) col_context: std::sync::Arc<std::sync::Mutex<crate::git_panel::Context>>,
+    pub(crate) col_wake: std::sync::Arc<crate::git_panel::Wake>,
     pub(crate) col_visible: bool,
     pub(crate) col_w_logical: f32,
     pub(crate) col_resize: Option<(f32, f32)>,

@@ -8,6 +8,8 @@
 
 창·기기·폴더 전환은 표시 데이터·펼침 캐시·클릭 대상·커밋 입력을 비운다. 전환 세대와 읽기 요청 번호가 일치하는 응답만 반영하므로 이전 pane의 응답이나 같은 pane의 늦은 요청이 새 상태를 덮지 않는다. 원격 Git의 쓰기 버튼은 제공하지 않는다. 기존 로컬 변경·커밋 동작은 화면 스냅샷의 저장소 루트를 사용한다.
 
+원본이 바뀐 순간은 `GET /term/gitcol/wait?schema=…&machine_id=…&pane=…&surface_key=…&since=<번호>&wait_ms=<≤8000>`로 받는다. 원본은 같은 신원 확인을 거친 뒤 그 pane의 claude나 같은 작업 트리의 claude가 파일을 고치거나 쓰는 명령을 돌릴 때까지(연결 mod의 깃 신호, `docs/claude-mod-bridge.md`) 쥐고 `{schema, ok, seq, changed, live}`로 답한다. `since`가 없으면 지금 번호를 바로 준다. 원본 앱이 다시 떠 번호가 줄었으면 `changed`다. 신호의 경로·명령은 내보내지 않는다. 보기 기기는 감시 스레드 하나가 이 길에 매달려 `changed`면 Git 열 일꾼을 깨우고, `live`(그 pane이 mod 칸)면 그 칸의 주기 조회를 5초로 늦춘다. 이 길이 없는 옛 원본(404)이면 물러나 옛 1.2초 주기로 읽는다.
+
 브랜치 목록은 조회 전용이다. 로컬·원격과 현재 항목을 표시하며 symbolic remote HEAD는 중복 항목에서 제외한다. 분리된 HEAD는 짧은 OID, 첫 커밋 전 브랜치는 해당 상태를 표시한다. 목록은 패널 높이에 맞춰 이전·다음 페이지로 이동한다. 원격 파일 diff·커밋 상세 확장은 아직 지원하지 않는다.
 
-검증은 `cargo test -p kasa-mcp --lib git::panel_snapshot_tests`, `cargo test -p kasa-mcp --lib git_panel::tests`, `cargo test -p kasaterm --bin kasaterm git_panel --no-default-features`로 실행한다. 기존 전체 Git 테스트에는 저장소 변경 테스트가 있어 읽기 전용 검증에서는 지정한 필터만 사용한다. 실제 기기 간 원격 창과 Windows 서버의 통합 검증은 별도 대상이다.
+검증은 `cargo test -p kasa-mcp --lib git::panel_snapshot_tests`, `cargo test -p kasa-mcp --lib git_panel::tests`, `cargo test -p kasa-mcp --lib claude_mod`, `cargo test -p kasaterm --bin kasaterm git_panel --no-default-features`로 실행한다. 기존 전체 Git 테스트에는 저장소 변경 테스트가 있어 읽기 전용 검증에서는 지정한 필터만 사용한다. 실제 기기 간 원격 창과 Windows 서버의 통합 검증은 별도 대상이다.

@@ -1822,6 +1822,7 @@ impl App {
             true
         };
         if changed {
+            self.git.col_wake.kick();
             self.git.clear_panel_hit_targets();
             self.git.path_menu_open = false;
             self.git.branch_menu_open = false;

@@ -125,6 +125,235 @@ pub(crate) fn fetch(target: &Target, generation: u64, commits: usize) -> GitColV
     }
 }
 
+/// 신호 없이 다시 읽는 주기. mod 가 말하는 칸은 고친 순간이 신호로 오므로, 바깥(사람 셸·편집기·codex)이 바꾼 것만
+/// 늦은 주기로 잡는다.
+const POLL: std::time::Duration = std::time::Duration::from_millis(1200);
+const POLL_SIGNALLED: std::time::Duration = std::time::Duration::from_secs(5);
+/// 몰아치는 신호를 한 번의 읽기로 — 마지막 신호 뒤 조용한 틈, 첫 신호부터 미룰 수 있는 한도, 신호로 읽는 사이의 최소
+/// 간격. claude 가 파일을 연달아 고치는 동안 git 을 고칠 때마다 돌리지 않는다.
+const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+const MAX_DEFER: std::time::Duration = std::time::Duration::from_millis(1000);
+const MIN_GAP: std::time::Duration = std::time::Duration::from_millis(800);
+
+fn signal_read_at(first: Instant, last: Instant, last_read: Instant) -> Instant {
+    (last + QUIET).min(first + MAX_DEFER).max(last_read + MIN_GAP)
+}
+
+/// Git 열 일꾼을 깨우는 자리 — 보는 칸이 바뀌었을 때(바로 읽기)와 깃 신호가 왔을 때.
+#[derive(Default)]
+pub(crate) struct Wake {
+    state: Mutex<WakeState>,
+    cond: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct WakeState {
+    kicks: u64,
+    remote_touch: bool,
+    /// 다른 기기 원본이 깃 신호를 주고 그 칸이 mod 칸이다 — (base, 원본 칸).
+    remote_live: Option<(String, String)>,
+}
+
+impl Wake {
+    pub fn kick(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.kicks = state.kicks.wrapping_add(1);
+        }
+        self.cond.notify_all();
+    }
+
+    fn touch_remote(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.remote_touch = true;
+        }
+        self.kick();
+    }
+
+    fn take_remote_touch(&self) -> bool {
+        self.state.lock().map(|mut state| std::mem::take(&mut state.remote_touch)).unwrap_or(false)
+    }
+
+    fn set_remote_live(&self, live: Option<(String, String)>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.remote_live = live;
+        }
+    }
+
+    fn remote_live(&self, base: &str, pane: &str) -> bool {
+        self.state.lock().is_ok_and(|state| state.remote_live.as_ref().is_some_and(|(b, p)| b == base && p == pane))
+    }
+
+    /// `seen` 뒤로 깨우거나 `until` 이 될 때까지 잔다. 지금 번호를 돌려준다.
+    fn wait(&self, seen: u64, until: Instant) -> u64 {
+        let Ok(mut state) = self.state.lock() else { return seen };
+        while state.kicks == seen {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = match self.cond.wait_timeout(state, left) {
+                Ok((state, _)) => state,
+                Err(_) => return seen,
+            };
+        }
+        state.kicks
+    }
+}
+
+fn period(target: &Target, wake: &Wake) -> std::time::Duration {
+    let signalled = match &target.remote {
+        Some((_, base, _)) => wake.remote_live(base, &target.pane),
+        None => kasa_mcp::claude_mod::live(&target.pane).is_some(),
+    };
+    if signalled { POLL_SIGNALLED } else { POLL }
+}
+
+/// 이 칸 또는 같은 작업 트리를 건드린 깃 신호가 있었나. 아직 한 번도 못 읽은 칸은 뿌리를 몰라 그 칸의 신호만 본다.
+fn touched_by(signals: &[kasa_mcp::claude_mod::GitSignal], target: &Target, root: Option<&std::path::Path>) -> bool {
+    signals.iter().any(|signal| match root {
+        Some(root) => kasa_mcp::claude_mod::git_signal_touches(signal, &target.pane, root),
+        None => signal.surface == target.pane,
+    })
+}
+
+/// Git 열 일꾼. 보는 칸이 바뀌면 바로, 깃 신호가 오면 몰아친 것을 합쳐 한 번, 그 밖에는 주기마다 읽는다.
+pub(crate) fn spawn_poller(
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    context: Arc<Mutex<Context>>,
+    data: Arc<Mutex<GitColView>>,
+    want: Arc<std::sync::atomic::AtomicUsize>,
+    wake: Arc<Wake>,
+) {
+    std::thread::spawn(move || {
+        let mut kicks = 0;
+        let mut seen = kasa_mcp::claude_mod::git_seq();
+        let mut read_generation = None;
+        let mut due = Instant::now();
+        let mut pending: Option<(Instant, Instant)> = None;
+        let mut last_read = Instant::now().checked_sub(MIN_GAP).unwrap_or_else(Instant::now);
+        loop {
+            let until = pending.map_or(due, |(first, last)| signal_read_at(first, last, last_read).min(due));
+            kicks = wake.wait(kicks, until);
+            let now = Instant::now();
+            let (generation, target) = match context.lock() {
+                Ok(context) => (context.generation, context.target.clone()),
+                Err(_) => break,
+            };
+            let (seq, signals, lost) = kasa_mcp::claude_mod::git_signals_since(seen);
+            seen = seq;
+            let Some(target) = target else {
+                pending = None;
+                due = now + POLL;
+                continue;
+            };
+            let touched = if target.remote.is_some() {
+                wake.take_remote_touch()
+            } else {
+                let root = data
+                    .lock()
+                    .ok()
+                    .filter(|view| view.generation == generation)
+                    .and_then(|view| view.repo_root.clone().or(view.cwd.clone()))
+                    .or_else(|| target.cwd.clone());
+                lost || touched_by(&signals, &target, root.as_deref())
+            };
+            if touched {
+                pending = Some(pending.map_or((now, now), |(first, _)| (first, now)));
+            }
+            let fresh = read_generation != Some(generation);
+            let signal_due = pending.is_some_and(|(first, last)| now >= signal_read_at(first, last, last_read));
+            if !(fresh || signal_due || now >= due) {
+                continue;
+            }
+            pending = None;
+            let request = match context.lock() {
+                Ok(mut context) => context.next_request(),
+                Err(_) => break,
+            };
+            let Some((generation, request, target)) = request else { continue };
+            let view = fetch(&target, generation, want.load(std::sync::atomic::Ordering::Relaxed));
+            last_read = Instant::now();
+            read_generation = Some(generation);
+            due = last_read + period(&target, &wake);
+            let Ok(context) = context.lock() else { break };
+            if !context.accepts_request(generation, request, &target) {
+                continue;
+            }
+            let Ok(mut data) = data.lock() else { break };
+            if *data != view {
+                *data = view;
+                drop(data);
+                drop(context);
+                if proxy.send_event(UserEvent::Redraw).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// 다른 기기 칸의 Git 열 — 원본 기기의 `/term/gitcol/wait` 에 매달려, 원본이 깃 신호를 받으면 일꾼을 깨운다.
+/// 옛 원본(그 길이 없음)이면 물러나고 일꾼은 옛 주기로 읽는다.
+pub(crate) fn spawn_remote_watcher(context: Arc<Mutex<Context>>, wake: Arc<Wake>) {
+    std::thread::spawn(move || {
+        let mut kicks = 0;
+        let mut since: Option<(String, String, u64)> = None;
+        // 보는 칸이 바뀌거나 `back` 이 지날 때까지 쉰다 — 깃 신호마다 깨는 kick 에 물러남이 끊기지 않게.
+        let rest = |kicks: &mut u64, generation: u64, back: std::time::Duration| {
+            let until = Instant::now() + back;
+            while Instant::now() < until {
+                *kicks = wake.wait(*kicks, until);
+                if context.lock().map_or(true, |c| c.generation != generation) {
+                    return;
+                }
+            }
+        };
+        loop {
+            let Ok((generation, target)) = context.lock().map(|c| (c.generation, c.target.clone())) else { break };
+            let remote = target.filter(|t| t.issue.is_none()).and_then(|t| t.remote.clone().map(|r| (t, r)));
+            let Some((target, (_, base, machine_id))) = remote else {
+                wake.set_remote_live(None);
+                since = None;
+                rest(&mut kicks, generation, std::time::Duration::from_secs(30));
+                continue;
+            };
+            let previous = since.as_ref().filter(|(b, p, _)| *b == base && *p == target.pane).map(|(_, _, seq)| *seq);
+            let query = format!(
+                "/term/gitcol/wait?schema={}&machine_id={}&pane={}&surface_key={}&wait_ms={}{}",
+                kasa_mcp::git_panel::SCHEMA,
+                kasa_mcp::remote::urlencode(&machine_id),
+                kasa_mcp::remote::urlencode(&target.pane),
+                kasa_mcp::remote::urlencode(target.surface_key.as_deref().unwrap_or_default()),
+                kasa_mcp::git_panel::WAIT_CAP_MS,
+                previous.map(|seq| format!("&since={seq}")).unwrap_or_default(),
+            );
+            match kasa_mcp::remote::remote_get_json_bounded(&base, &query, 4096) {
+                Ok(answer) if answer.get("ok").and_then(serde_json::Value::as_bool) == Some(true) => {
+                    let seq = answer.get("seq").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let live = answer.get("live").and_then(serde_json::Value::as_bool) == Some(true);
+                    wake.set_remote_live(live.then(|| (base.clone(), target.pane.clone())));
+                    let same = context.lock().is_ok_and(|c| c.generation == generation);
+                    if same && answer.get("changed").and_then(serde_json::Value::as_bool) == Some(true) {
+                        wake.touch_remote();
+                    }
+                    since = Some((base, target.pane, seq));
+                }
+                Ok(_) => {
+                    wake.set_remote_live(None);
+                    since = None;
+                    rest(&mut kicks, generation, std::time::Duration::from_secs(10));
+                }
+                Err(error) => {
+                    wake.set_remote_live(None);
+                    since = None;
+                    let old_source = error.to_string().contains("404");
+                    rest(&mut kicks, generation, std::time::Duration::from_secs(if old_source { 120 } else { 5 }));
+                }
+            }
+        }
+    });
+}
+
 impl App {
     pub(crate) fn current_git_target(&self) -> Option<Target> {
         let id = self
@@ -589,6 +818,91 @@ mod tests {
             remote: machine.map(|m| (m.into(), format!("https://{m}.invalid"), m.into())),
             issue: None,
         }
+    }
+
+    #[test]
+    fn a_burst_of_git_signals_becomes_one_read_after_a_quiet_gap_or_the_defer_cap() {
+        let t0 = Instant::now();
+        let long_ago = t0.checked_sub(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(signal_read_at(t0, t0, long_ago), t0 + QUIET, "a lone edit is read after the quiet gap");
+        let busy = t0 + std::time::Duration::from_millis(900);
+        assert_eq!(signal_read_at(t0, busy, long_ago), t0 + MAX_DEFER, "a steady stream still reads by the cap");
+        assert_eq!(signal_read_at(t0, t0, t0), t0 + MIN_GAP, "signal reads keep a minimum gap");
+    }
+
+    #[test]
+    fn a_kick_wakes_the_worker_before_its_deadline() {
+        let wake = Arc::new(Wake::default());
+        let started = Instant::now();
+        let kicker = wake.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            kicker.kick();
+        });
+        assert_eq!(wake.wait(0, started + std::time::Duration::from_secs(5)), 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        thread.join().unwrap();
+        assert_eq!(wake.wait(1, Instant::now() + std::time::Duration::from_millis(20)), 1, "no kick: sleeps to the deadline");
+        wake.touch_remote();
+        assert!(wake.take_remote_touch());
+        assert!(!wake.take_remote_touch());
+    }
+
+    #[test]
+    fn signals_from_another_pane_count_only_inside_the_same_tree() {
+        let signal = |surface: &str, path: &str| kasa_mcp::claude_mod::GitSignal {
+            seq: 1,
+            surface: surface.into(),
+            cwd: "/work".into(),
+            paths: vec![path.into()],
+        };
+        let local = target("%7", None, "/work/repo");
+        let root = std::path::Path::new("/work/repo");
+        assert!(touched_by(&[signal("%7", "/elsewhere/a")], &local, Some(root)));
+        assert!(touched_by(&[signal("%8", "/work/repo/a.rs")], &local, Some(root)));
+        assert!(!touched_by(&[signal("%8", "/work/other/a.rs")], &local, Some(root)));
+        assert!(!touched_by(&[signal("%8", "/work/repo/a.rs")], &local, None), "before the first read only the pane's own claude counts");
+    }
+
+    #[test]
+    fn a_source_signal_wakes_the_viewer_column_and_marks_the_pane_as_signalled() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // 첫 번은 답하고 둘째(다음 기다림)는 쥐고 있는다 — 원본이 다음 신호를 기다리는 모양.
+        let server = std::thread::spawn(move || {
+            let mut first = String::new();
+            for round in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let n = socket.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                if round == 0 {
+                    first = String::from_utf8(request).unwrap();
+                    let body = serde_json::json!({"schema": kasa_mcp::git_panel::SCHEMA, "ok": true, "seq": 7, "changed": true, "live": true}).to_string();
+                    write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                } else {
+                    assert!(String::from_utf8(request).unwrap().contains("&since=7"), "the next hold waits past the number it learned");
+                    return (first, socket);
+                }
+            }
+            unreachable!()
+        });
+        let mut remote = target("%7", Some("source-device"), "/stale");
+        remote.remote.as_mut().unwrap().1 = base.clone();
+        let mut context = Context::default();
+        context.select(Some(remote));
+        let context = Arc::new(Mutex::new(context));
+        let wake = Arc::new(Wake::default());
+        spawn_remote_watcher(context, wake.clone());
+        let (request, _held) = server.join().unwrap();
+        assert!(request.starts_with("GET /term/gitcol/wait?schema=kasa.git-panel.v2&machine_id=source-device&pane=%257&surface_key=key-%257&"));
+        assert!(!request.contains("since="), "the first hold only learns the source's number");
+        assert!(wake.remote_live(&base, "%7"));
+        assert!(wake.take_remote_touch());
     }
 
     #[test]

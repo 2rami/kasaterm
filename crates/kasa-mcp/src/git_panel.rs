@@ -48,6 +48,42 @@ pub fn read(backend: &dyn Backend, query: &HashMap<String, String>) -> Value {
     json!({"schema": SCHEMA, "ok": true, "source": source, "view": view})
 }
 
+/// 보기 기기의 Git 열이 기다리는 한도. 원격 GET 이 10초에 끊고, 관문 우회는 답 머리를 20초까지만 기다린다.
+pub const WAIT_CAP_MS: u64 = 8000;
+
+/// 원본 칸의 Git 이 바뀌었을 수 있을 때까지 쥔다 — 그 칸이나 같은 작업 트리의 claude 가 파일을 고쳤거나 쓰는 명령을
+/// 돌렸다(`claude_mod` 의 깃 신호). 보기 기기는 이 답이 오면 `read` 로 다시 읽는다. `since` 가 없으면 지금 번호를
+/// 바로 준다. 답 `{schema, ok, seq, changed, live}` — 신호의 경로·명령은 내보내지 않는다.
+pub async fn wait(backend: std::sync::Arc<dyn Backend>, query: HashMap<String, String>) -> Value {
+    let error = |code: &str| json!({"schema": SCHEMA, "ok": false, "error": code});
+    if query.get("schema").map(String::as_str) != Some(SCHEMA) { return error("update_needed"); }
+    let since = query.get("since").and_then(|s| s.parse::<u64>().ok());
+    let hold = query.get("wait_ms").and_then(|s| s.parse::<u64>().ok()).unwrap_or(WAIT_CAP_MS).min(WAIT_CAP_MS);
+    let resolved = tokio::task::spawn_blocking(move || {
+        let source = resolve(backend.as_ref(), &query)?;
+        let cwd = std::path::PathBuf::from(&source.cwd);
+        let root = crate::git::panel_repo_root(&cwd).unwrap_or(cwd);
+        let live = crate::claude_mod::live(&source.pane).is_some();
+        Ok::<_, &'static str>((source.pane, root, live))
+    }).await;
+    let (pane, root, live) = match resolved { Ok(Ok(found)) => found, Ok(Err(code)) => return error(code), Err(_) => return error("git_unavailable") };
+    // `live` — 그 칸의 claude 가 mod 로 말한다. 보기 기기는 그 칸의 주기 조회를 늦춘다.
+    let answer = |seq: u64, changed: bool| json!({"schema": SCHEMA, "ok": true, "seq": seq, "changed": changed, "live": live});
+    let Some(mut seen) = since else { return answer(crate::claude_mod::git_seq(), false) };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(hold);
+    loop {
+        let (seq, signals, lost) = crate::claude_mod::git_signals_since(seen);
+        // 번호가 줄었으면 원본 앱이 다시 떴다 — 그 사이 무엇이 바뀌었는지 모른다.
+        if seen > seq || lost || signals.iter().any(|s| crate::claude_mod::git_signal_touches(s, &pane, &root)) {
+            return answer(seq, true);
+        }
+        seen = seq;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() { return answer(seq, false); }
+        crate::claude_mod::wait_git(seen, left).await;
+    }
+}
+
 pub fn validate_response(value: &Value, expected: &Source) -> Result<Value, &'static str> {
     if value.get("schema").and_then(Value::as_str) != Some(SCHEMA) { return Err("update_needed"); }
     if value.get("ok").and_then(Value::as_bool) != Some(true) {

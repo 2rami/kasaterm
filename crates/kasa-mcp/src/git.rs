@@ -327,6 +327,14 @@ fn panel_commit_graph(repo: &Path, branches: &[GitBranch], head: Option<&str>, c
     Ok((graph, truncated))
 }
 
+/// 이 폴더가 속한 작업 트리의 뿌리. 저장소가 아니면 None.
+pub fn panel_repo_root(repo: &Path) -> Option<std::path::PathBuf> {
+    let root = run_panel_git(repo, &["rev-parse", "--show-toplevel"], std::time::Instant::now() + PANEL_READ_TIMEOUT).ok()?;
+    let root = root.checked().ok()?;
+    let root = root.trim_end_matches('\n');
+    (!root.is_empty()).then(|| std::path::PathBuf::from(root))
+}
+
 pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> {
     let deadline = std::time::Instant::now() + PANEL_READ_TIMEOUT;
     let status = run_panel_git(repo, &[

@@ -29,6 +29,7 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 | `background` | `tasks`[{`id`,`type`(`subagent`·`shell`·`monitor`·`workflow`),`status`,`label`}] 전부 | `tool.call`·`$.agent.list()`·`classic.Stop` | 상태줄 수·보드 백그라운드 |
 | `tool` | `phase`: `start`·`end`, `id`, `tool`, `label`(시작), `error`·`text`(끝, 결과 600자), `agent`? | `tool.call` 앞뒤 | 보드 활동(`collab.activity`) |
 | `row` | `uuid`, `door` | `session.append`(본 고리만) | 대화 보기를 깨운다(내용은 기록 파일이 정본) |
+| `git` | `tool`, `verb`(명령 첫 낱말, git 이면 `git commit` 처럼 하위 명령까지), `paths`(고친 파일), `cwd` | 고치기 도구(Edit·Write·MultiEdit·NotebookEdit)가 성공한 뒤, 쓰는 Bash 명령이 끝난 뒤(서브에이전트 포함) | 그 칸·같은 작업 트리의 Git 열을 바로 다시 읽는다 |
 | `bye` | `reason` | `session.end` | mod 칸 표시를 거둔다 |
 
 `at` 은 mod 가 이벤트를 본 벽시계(ms). 앱은 도착 순서로 적용하고 `at` 은 표시에만 쓴다.
@@ -44,6 +45,13 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   쓰고, `kasaterm-cli statusline` 이 같은 세션 것만 읽어 한도(50% 넘은 것)·비용·`bg N` 을 덧붙인다.
 - **대화 보기**: 내용은 기록 파일이 정본이다(재개한 세션도 전체가 보여야 한다). `GET /transcript-raw` 에 `wait_ms` 를 주면
   새 줄이 없을 때 그 칸의 다음 `row` 까지 쥐었다가 다시 읽는다 — 폰은 1.5초 바퀴 대신 행이 쌓이는 즉시 받는다.
+
+- **깃 신호**: 「깃이 바뀌었을 수 있다」는 힌트다 — 명령의 인자·파일 내용은 싣지 않는다. 읽기만 하는 명령(`ls`·`rg`·`git status`
+  ·`git log` 같은 것)은 보내지 않는다. 앱은 신호를 칸·폴더·경로로만 쥐고(`claude_mod::git_signals_since`), Git 열 일꾼이 그
+  칸의 신호이거나 고친 경로·claude 폴더가 그 칸 저장소 안이면 몰아친 신호를 합쳐 한 번 읽는다(마지막 신호 뒤 250ms, 첫
+  신호부터 최대 1초, 신호로 읽는 사이 최소 800ms). mod 칸의 주기 조회는 5초로 늦춘다 — 사람 셸·편집기·codex 가 바꾼 것만
+  그 주기로 잡는다. mod 없는 칸은 옛 1.2초 그대로다. 다른 기기 칸은 원본의 `/term/gitcol/wait` 가 같은 신호로 풀린다
+  (`docs/remote-git-panel.md`).
 
 ## 권한 요청 — 원격 승인 계약
 

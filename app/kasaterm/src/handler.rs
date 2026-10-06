@@ -2323,31 +2323,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        {
-            let git_proxy = self.proxy.clone();
-            let panel_context = self.git.col_context.clone();
-            let panel_data = self.git.col_data.clone();
-            let panel_want = self.git.col_commit_want.clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_millis(1200));
-                let request = match panel_context.lock() {
-                    Ok(mut context) => context.next_request(),
-                    Err(_) => break,
-                };
-                let Some((generation, request, target)) = request else { continue };
-                let want = panel_want.load(std::sync::atomic::Ordering::Relaxed);
-                let view = crate::git_panel::fetch(&target, generation, want);
-                let Ok(context) = panel_context.lock() else { break };
-                if !context.accepts_request(generation, request, &target) { continue; }
-                let Ok(mut data) = panel_data.lock() else { break };
-                if *data != view {
-                    *data = view;
-                    drop(data);
-                    drop(context);
-                    if git_proxy.send_event(UserEvent::Redraw).is_err() { break; }
-                }
-            });
-        }
+        crate::git_panel::spawn_poller(
+            self.proxy.clone(),
+            self.git.col_context.clone(),
+            self.git.col_data.clone(),
+            self.git.col_commit_want.clone(),
+            self.git.col_wake.clone(),
+        );
+        crate::git_panel::spawn_remote_watcher(self.git.col_context.clone(), self.git.col_wake.clone());
         // claude 한도 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 조회해 **가장 먼저
         // 닫히는 창**의 사용률을 채운다. Info 탭 머리 계정 행의 소스. curl 로 로컬
         // 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만
