@@ -9,7 +9,7 @@ use std::sync::{
 #[path = "native_work_permissions.rs"]
 pub(crate) mod work;
 
-#[path = "native_op_secrets.rs"]
+#[path = "native_op_approval.rs"]
 pub(crate) mod op;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,7 +270,7 @@ fn safe_error(error: &str) -> String {
 impl App {
     pub(crate) fn device_account_poll(&mut self) {
         self.work_permissions_poll();
-        self.op_secrets_poll();
+        self.op_approval_poll();
         if self.device_account.poll() {
             self.device_account.refresh();
             self.chrome_dirty = true;
@@ -289,7 +289,7 @@ impl App {
             return;
         }
         if let Action::Op(act) = action {
-            self.op_secrets_action(act);
+            self.op_approval_action(act);
             return;
         }
         if action == Action::CancelOAuth {

@@ -711,7 +711,7 @@ mod tests {
     }
 
     /// 손으로 돌리는 시험 — 서명 신원이 있는 기계에서 `KASA_OP_SIGTEST_DIR` 에 서명별 kasa-op 사본을 두고
-    /// `cargo test -p kasa-mcp op_secret::tests::helper_signature -- --ignored` (docs/op-faceid-approval.md).
+    /// `cargo test -p kasa-mcp op_approval::tests::helper_signature -- --ignored` (docs/op-faceid-approval.md).
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore]

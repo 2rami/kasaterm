@@ -107,3 +107,17 @@ class BuildManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepositoryInputNamesTests(unittest.TestCase):
+    def test_no_tracked_build_input_is_named_like_a_credential(self):
+        # 이름에 secret·.key 따위가 든 입력은 지문에서 빠지고, 빠진 것이 하나라도 있으면 굽기 증명서가 「불확실」이 되어
+        # preview controller 가 막힌다(2026-10-06 op_secret.rs 로 실제로 막혔다). 비밀이 아닌 코드는 이름을 바꿔라.
+        root = Path(__file__).resolve().parents[3]
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--", "app", "crates", "web", "scripts", "assets",
+             "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml"],
+            cwd=root, capture_output=True, check=True).stdout
+        named = [p for p in listed.decode().split("\0") if p and proof.credential_path(p)]
+        self.assertEqual(named, [])
+

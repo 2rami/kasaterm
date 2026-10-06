@@ -98,8 +98,8 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.fetch = Some(rx);
         std::thread::spawn(move || {
-            let status = kasa_mcp::op_secret::status();
-            let untrusted = kasa_mcp::op_secret::untrusted_keys().map_err(|e| e.to_string());
+            let status = kasa_mcp::op_approval::status();
+            let untrusted = kasa_mcp::op_approval::untrusted_keys().map_err(|e| e.to_string());
             let _ = tx.send(Done::Loaded(status, untrusted));
         });
     }
@@ -160,10 +160,10 @@ impl State {
 }
 
 impl App {
-    pub(crate) fn op_secrets_poll(&mut self) {
+    pub(crate) fn op_approval_poll(&mut self) {
         if let Some(token) = TOKEN_ANSWER.lock().ok().and_then(|mut a| a.take()) {
             self.device_account.op.run(move || {
-                kasa_mcp::op_secret::set_token(&token)
+                kasa_mcp::op_approval::set_token(&token)
                     .map(|vault| format!("토큰을 넣었어요 · 금고 「{vault}」만 읽어요"))
                     .map_err(|e| e.to_string())
             });
@@ -172,7 +172,7 @@ impl App {
             let key = self.device_account.op.untrusted.iter().find(|k| k["id"] == id.as_str()).cloned();
             if let Some(key) = key {
                 self.device_account.op.run(move || {
-                    kasa_mcp::op_secret::trust(&key)
+                    kasa_mcp::op_approval::trust(&key)
                         .map(|()| format!("{} 의 열쇠를 믿어요", key["label"].as_str().unwrap_or("폰")))
                         .map_err(|e| e.to_string())
                 });
@@ -230,7 +230,7 @@ impl App {
         }
     }
 
-    pub(crate) fn op_secrets_action(&mut self, act: Act) {
+    pub(crate) fn op_approval_action(&mut self, act: Act) {
         if self.device_account.op.busy.is_some() {
             return;
         }
@@ -245,7 +245,7 @@ impl App {
             Act::KeepToken => self.device_account.op.confirm_clear = false,
             Act::Clear => {
                 self.device_account.op.run(|| {
-                    kasa_mcp::op_secret::clear_token().map(|()| "토큰을 지웠어요".to_string()).map_err(|e| e.to_string())
+                    kasa_mcp::op_approval::clear_token().map(|()| "토큰을 지웠어요".to_string()).map_err(|e| e.to_string())
                 });
             }
             Act::Trust(index) => {
@@ -255,10 +255,10 @@ impl App {
                 }
             }
             Act::Untrust(index) => {
-                let list = kasa_mcp::op_secret::trusted().unwrap_or_default();
+                let list = kasa_mcp::op_approval::trusted().unwrap_or_default();
                 let Some(t) = list.get(index).cloned() else { return };
                 self.device_account.op.run(move || {
-                    kasa_mcp::op_secret::untrust(&t.id)
+                    kasa_mcp::op_approval::untrust(&t.id)
                         .map(|()| format!("{} 의 열쇠를 더는 믿지 않아요", t.label))
                         .map_err(|e| e.to_string())
                 });

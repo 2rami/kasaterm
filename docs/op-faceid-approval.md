@@ -118,10 +118,10 @@
 |---|---|
 | 관문 비밀 요청·폰 키·서명 확인 | `crates/kasa-mcp/src/gateway_approvals.rs` |
 | 서명 머리·키 id·지문·서명 검증(관문·맥 공용) | `crates/kasa-mcp/src/approval_text.rs` |
-| 맥: 도전값·재확인·nonce·실행기·키체인·감사 | `crates/kasa-mcp/src/op_secret.rs` |
+| 맥: 도전값·재확인·nonce·실행기·키체인·감사 | `crates/kasa-mcp/src/op_approval.rs` |
 | 맥: 관문 호출(`create_secret`·`keys`) | `crates/kasa-mcp/src/device_approvals.rs` |
 | 맥: 소켓 `op.secret`(칸·명령·폴더를 소켓 상대 pid 에서) | `app/kasaterm/src/socket.rs` · `crates/kasa-socket/src/server.rs`(`peer_pid`) |
-| 맥: 설정 「계정」 1Password(토큰·믿기 시트) | `app/kasaterm/src/native_op_secrets.rs` |
+| 맥: 설정 「계정」 1Password(토큰·믿기 시트) | `app/kasaterm/src/native_op_approval.rs` |
 | CLI | `crates/kasa-socket/src/bin/kasaterm-cli.rs`(`op read|run|status`) |
 | 실행기 | `tools/kasa-op/`(Go, `scripts/build-app.sh` 가 굽고 서명) |
 | 폰 | `mobile/lib/secure_key.dart` · `mobile/lib/approvals.dart` · `mobile/lib/screens/approval_screen.dart` · `mobile/lib/screens/approval_key.dart` · `mobile/ios/Runner/AppDelegate.swift`(`ApprovalKey`) |

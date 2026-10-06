@@ -3036,7 +3036,7 @@ impl Backend for PtyBackend {
     /// 프로세스에서 찾는다 — 폰에 보이는 「누가」를 요청한 쪽이 지어내지 못하게. 칸 밖 프로세스는 받지 않는다.
     fn op_secret(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         match params["op"].as_str() {
-            Some("status") => Ok(kasa_mcp::op_secret::status()),
+            Some("status") => Ok(kasa_mcp::op_approval::status()),
             Some("read") => {
                 let peer = kasa_socket::server::peer_pid().ok_or_else(|| anyhow::anyhow!("requester_unknown"))?;
                 let pane = self.pane_of_pid(peer).ok_or_else(|| anyhow::anyhow!("not_in_pane"))?;
@@ -3049,12 +3049,12 @@ impl Backend for PtyBackend {
                     .collect();
                 let command = kasa_pty::process_cmdline(peer).unwrap_or_default();
                 let cwd = pid_cwd(peer).map(|p| p.display().to_string()).unwrap_or_default();
-                let origin = kasa_mcp::op_secret::Origin {
+                let origin = kasa_mcp::op_approval::Origin {
                     pane,
                     student,
                     alive: Box::new(move || unsafe { libc::kill(peer as libc::pid_t, 0) == 0 }),
                 };
-                let values = kasa_mcp::op_secret::read(&refs, &command, &cwd, &origin)?;
+                let values = kasa_mcp::op_approval::read(&refs, &command, &cwd, &origin)?;
                 Ok(serde_json::json!({ "values": values }))
             }
             _ => Err(anyhow::anyhow!("op read|status")),
