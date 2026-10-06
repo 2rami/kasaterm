@@ -95,39 +95,7 @@ pub fn reverse_port(self_label: &str) -> u16 {
 /// `KASATERM_SELF_LABEL` 로 바꿔 단다(두 리그가 같은 이름으로 서로 알리면 한 항목이 된다).
 pub fn self_label() -> String {
     static L: OnceLock<String> = OnceLock::new();
-    L.get_or_init(|| {
-        if let Ok(v) = std::env::var("KASATERM_SELF_LABEL") {
-            if !v.trim().is_empty() {
-                return v.trim().to_string();
-            }
-        }
-        let by_scutil = std::process::Command::new("scutil")
-            .args(["--get", "ComputerName"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
-        by_scutil
-            // 윈도우엔 scutil 이 없고 hostname.exe 는 `-s` 를 거부한다 — 그 둘만 보면 윈도우
-            // 기기가 다른 기기 보드에 「이 기계」로 떴다(2026-09-27).
-            .or_else(|| {
-                std::env::var("COMPUTERNAME")
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                std::process::Command::new("hostname")
-                    .arg("-s")
-                    .output()
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or_else(|| "이 기계".to_string())
-    })
-    .clone()
+    L.get_or_init(kasa_collab::env::machine_label).clone()
 }
 
 /// 지금 도는 판의 빌드 표식. 앱이 부팅 때 git 리비전(`KASATERM_GIT_REV`)을 넣어 준다 —

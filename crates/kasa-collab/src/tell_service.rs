@@ -4,10 +4,19 @@ use kasa_socket::{Backend, tell::{self, Address, Ledger, Record, State}};
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
 
+static STORAGE_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// 장부를 둘 뿌리를 호스트가 정한다(첫 쓰기 전에 한 번). 장부는 한 프로세스만 쥘 수 있어,
+/// 같은 기계에서 본판과 함께 도는 `kasa tui` 서버는 자기 폴더를 쓴다. 안 정하면 본판 자리다.
+pub fn set_storage_root(root: std::path::PathBuf) -> bool {
+    STORAGE_ROOT.set(root).is_ok()
+}
+
 fn ledger() -> Result<&'static Mutex<Ledger>> {
     static LEDGER: OnceLock<Result<Mutex<Ledger>, String>> = OnceLock::new();
     LEDGER.get_or_init(|| {
-        let root = if let Some(root) = kasa_socket::isolated_collab_root() { root }
+        let root = if let Some(root) = STORAGE_ROOT.get().cloned() { root }
+        else if let Some(root) = kasa_socket::isolated_collab_root() { root }
         else if let Some(path) = std::env::var_os("KASATERM_SESSION_FILE") {
             std::path::PathBuf::from(path).parent().map(std::path::Path::to_path_buf)
                 .ok_or("session storage parent unavailable")?

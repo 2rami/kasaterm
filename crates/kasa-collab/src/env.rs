@@ -40,7 +40,7 @@ struct Standalone;
 
 impl CollabEnv for Standalone {
     fn self_label(&self) -> String {
-        hostname()
+        machine_label()
     }
 }
 
@@ -58,20 +58,27 @@ pub fn env() -> Arc<dyn CollabEnv> {
         .unwrap_or_else(|| Arc::new(Standalone))
 }
 
-/// 이 기계 이름(`KASATERM_SELF_LABEL` 이 앞선다).
-pub fn hostname() -> String {
+/// 이 기계 이름 — 판·`tell 이름@기계` 에 보이는 것. 본판과 `kasa tui` 가 같은 이름을 낸다.
+/// `KASATERM_SELF_LABEL` 이 앞서고, macOS 는 컴퓨터 이름(scutil), 윈도우는 `COMPUTERNAME`,
+/// 그 밖은 `hostname -s` 다. 윈도우엔 scutil 이 없고 hostname.exe 는 `-s` 를 거부한다 — 그 둘만
+/// 보면 윈도우 기기가 다른 기기 판에 「이 기계」로 떴다(2026-09-27).
+pub fn machine_label() -> String {
     if let Ok(v) = std::env::var("KASATERM_SELF_LABEL") {
         if !v.trim().is_empty() {
             return v.trim().to_string();
         }
     }
-    #[cfg(windows)]
-    let name = std::env::var("COMPUTERNAME").ok();
-    #[cfg(not(windows))]
-    let name = std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok());
-    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "this machine".into())
+    let run = |cmd: &str, args: &[&str]| {
+        std::process::Command::new(cmd)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    run("scutil", &["--get", "ComputerName"])
+        .or_else(|| std::env::var("COMPUTERNAME").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+        .or_else(|| run("hostname", &["-s"]))
+        .unwrap_or_else(|| "이 기계".to_string())
 }
