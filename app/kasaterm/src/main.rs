@@ -68,7 +68,8 @@ mod toast;
 mod update_notice;
 mod remote_approval;
 mod themegen;
-mod transcript;
+// 대화 기록 읽기는 kasa-agents 로 옮겼다. `crate::transcript::…` 그대로 쓴다.
+use kasa_agents::transcript;
 mod webpane;
 mod weather;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
@@ -6731,6 +6732,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // reads KASATERM_* vars.
         load_capture_config();
         install_pty_host_policy();
+        kasa_mcp::install_collab_env();
         socket::prepare_session_storage();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야
     // 이름·기기색이 생기거나 렌더 스레드에서 scutil을 띄우지 않도록 한다.

@@ -22,8 +22,8 @@
 //! a transport / framing error.
 
 use anyhow::{anyhow, Context, Result};
-use kasa_socket::protocol::{Request, Response};
-use kasa_socket::transport::LocalStream;
+use crate::protocol::{Request, Response};
+use crate::transport::LocalStream;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -52,7 +52,7 @@ fn parse_api_target(args: &mut Vec<String>) -> Result<Option<ApiTarget>> {
     Ok(Some(ApiTarget {base:base.trim_end_matches('/').to_owned(),token_file}))
 }
 
-fn main() {
+pub fn main() {
     match run() {
         Ok(Some(resp)) => {
             // 사람이 터미널에서 직접 쳤으면(`to 맥미니` 같은 셰임) JSON 덩어리 대신
@@ -454,7 +454,7 @@ fn run() -> Result<Option<Response>> {
     // 소켓을 안 거쳐 앱이 없어도 돈다. 실패는 조용히 — 화면은 앱이 한 번 넘겨 준다.
     if cmd == "claude-trust" {
         if let Some(dir) = args.first() {
-            kasa_socket::claude_trust::preseed(std::path::Path::new(dir));
+            crate::claude_trust::preseed(std::path::Path::new(dir));
         }
         return Ok(None);
     }
@@ -473,7 +473,7 @@ fn run() -> Result<Option<Response>> {
     // 한쪽만 하고 끝내는 일이 생긴다. 보고가 거부되면(비밀처럼 보이는 글·다음 할 일 빠짐) 판 완료도 안 적는다.
     if cmd == "done" {
         let (board_args, report) = split_done_args(&args)?;
-        if kasa_socket::nacho_inbox::origin_from_env().is_some() {
+        if crate::nacho_inbox::origin_from_env().is_some() {
             if let Some(failed) = run_orchestrator_report(&report)? {
                 return Ok(Some(failed));
             }
@@ -496,10 +496,10 @@ fn run() -> Result<Option<Response>> {
     // `--resume` 할 때 되붙인다(`nacho_inbox::remember_origin`). 실패해도 bind 는 성공이다.
     if cmd == "bind-transcript" && response.ok {
         if let (Some(origin), Some(sid)) = (
-            kasa_socket::nacho_inbox::origin_from_env(),
+            crate::nacho_inbox::origin_from_env(),
             args.first().and_then(|p| Path::new(p).file_stem()).and_then(|s| s.to_str()),
         ) {
-            let _ = kasa_socket::nacho_inbox::remember_origin(sid, &origin);
+            let _ = crate::nacho_inbox::remember_origin(sid, &origin);
         }
     }
     if cmd == "tell" && response.ok {
@@ -520,7 +520,7 @@ fn run() -> Result<Option<Response>> {
     }
     if cmd == "tab:server" {
         if let Some(error) = response.error.as_mut() {
-            if error.code == kasa_socket::protocol::codes::METHOD_NOT_FOUND {
+            if error.code == crate::protocol::codes::METHOD_NOT_FOUND {
                 error.message = "이 앱은 서버 복원 등록을 지원하지 않아요. 앱을 업데이트한 뒤 다시 등록해주세요. 서버는 실행하지 않았어요.".into();
             }
         }
@@ -588,8 +588,8 @@ fn await_tell_settled(socket_path: &str, id: &str, address: &Value) -> Option<Va
 fn tell_state_line(receipt: &Value) -> String {
     let state = receipt.get("state").and_then(|s| s.as_str()).unwrap_or("?");
     let reason = receipt.get("reason").and_then(|s| s.as_str()).unwrap_or_default();
-    if let (true, Some(hold)) = (state == "accepted", kasa_socket::tell::Hold::from_reason(reason)) {
-        let until = receipt.get("expires_at_ms").and_then(Value::as_u64).and_then(kasa_socket::tell::clock_hm)
+    if let (true, Some(hold)) = (state == "accepted", crate::tell::Hold::from_reason(reason)) {
+        let until = receipt.get("expires_at_ms").and_then(Value::as_u64).and_then(crate::tell::clock_hm)
             .unwrap_or_else(|| "만료 시각".into());
         return format!("대기 — {}. {} ({until}까지 못 들어가면 버려진다. 버려지면 이 창 위 토스트로만 알린다)", hold.cause(), hold.remedy());
     }
@@ -842,10 +842,10 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
         body.push_str("\n\n");
         body.push_str(SUMMON_DONE_HINT);
     }
-    let title = name.clone().or_else(|| brief_title(&brief)).map(|t| kasa_socket::tell::normalize_title(&t)).transpose()?
+    let title = name.clone().or_else(|| brief_title(&brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
         .filter(|t| !t.is_empty());
     let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
-    let body = kasa_socket::tell::normalize(&body)?;
+    let body = crate::tell::normalize(&body)?;
 
     // codex 는 첫 입력 전엔 대화 기록이 없어 tell 이 겨눌 주소(대화 번호)가 영영 안 선다 — 브리프를 첫
     // 입력 인자로 넘긴다(2026-10-02 실측: `--cmd '호시노 codex'` 가 90초 뒤 「안 떴어요」로 끝났다).
@@ -900,7 +900,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             .find(|p| row_address(p, "surface_id") == surface && !row_address(p, "session_id").is_empty()));
         let timed_out = started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS);
         if let Some(row) = row {
-            let message_id = kasa_socket::tell::new_message_id();
+            let message_id = crate::tell::new_message_id();
             let address = row.get("address").cloned().unwrap_or(Value::Null);
             let mut params = json!({ "message_id": message_id, "address": address, "body": body });
             if let Some(title) = &title { params["title"] = json!(title); }
@@ -1232,7 +1232,7 @@ fn collab_messages_path() -> std::path::PathBuf {
         .chars()
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect();
-    kasa_socket::collab_root().join(enc).join("messages.jsonl")
+    crate::collab_root().join(enc).join("messages.jsonl")
 }
 
 /// Render `window.layout`'s pane rects (window-relative %) as a box diagram.
@@ -1447,7 +1447,7 @@ fn share_topic(words: &[String]) -> String {
 }
 
 fn run_share(args: &[String]) -> Result<Option<Response>> {
-    let root = kasa_socket::share_dir().ok_or_else(|| anyhow!("홈 폴더를 못 찾았다"))?;
+    let root = crate::share_dir().ok_or_else(|| anyhow!("홈 폴더를 못 찾았다"))?;
     let status: Value = std::fs::read_to_string(root.join(".kasaterm").join("status.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -1474,7 +1474,7 @@ fn run_share(args: &[String]) -> Result<Option<Response>> {
                 println!("KASA-share: 아직 안 돌았다 — 새 판 카사텀이 켜져 있어야 한다 ({})", root.display());
                 return Ok(None);
             }
-            let ago = kasa_socket::board::now_ms().saturating_sub(status["updated_ms"].as_u64().unwrap_or(0)) / 1000;
+            let ago = crate::board::now_ms().saturating_sub(status["updated_ms"].as_u64().unwrap_or(0)) / 1000;
             println!(
                 "KASA-share {} · 파일 {}개 · {}초 전 갱신",
                 shown.display(),
@@ -2143,7 +2143,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         "tell" => {
             let mut index = 0;
             let mut stdin = false;
-            let mut params = json!({"message_id":kasa_socket::tell::new_message_id()});
+            let mut params = json!({"message_id":crate::tell::new_message_id()});
             while let Some(arg) = args.get(index) {
                 match arg.as_str() {
                     "--id" => {
@@ -2157,7 +2157,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     "--stdin" => { stdin = true; index += 1; }
                     "--title" => {
                         let title = args.get(index+1).ok_or_else(||anyhow!("--title needs the receiver's current work"))?;
-                        params["title"] = json!(kasa_socket::tell::normalize_title(title)?);
+                        params["title"] = json!(crate::tell::normalize_title(title)?);
                         index += 2;
                     }
                     "--force" => return Err(anyhow!("--force cannot bypass safe tell protection")),
@@ -2185,7 +2185,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 if index != args.len() { return Err(anyhow!("--stdin cannot be combined with a message argument")); }
                 use std::io::Read;
                 let mut body = String::new();
-                std::io::stdin().take(kasa_socket::tell::MAX_BODY as u64 + 1).read_to_string(&mut body)?;
+                std::io::stdin().take(crate::tell::MAX_BODY as u64 + 1).read_to_string(&mut body)?;
                 body
             } else {
                 args.get(index..).filter(|a|!a.is_empty()).ok_or_else(||anyhow!("tell needs a message or --stdin"))?.join(" ")
@@ -2196,8 +2196,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 무테마로 떴다(2026-09-17 지적 「tell 로 보내면 학생 프사 나오면서 그거 왜 안 되지」).
             // 사람이 직접 친 cli 는 env 가 없어 마커 없이(사용자 발신=무색) 나간다.
             let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
-            params["body"] = json!(kasa_socket::tell::normalize(&body)?);
-            kasa_socket::tell::valid_id(params["message_id"].as_str().unwrap())?;
+            params["body"] = json!(crate::tell::normalize(&body)?);
+            crate::tell::valid_id(params["message_id"].as_str().unwrap())?;
             eprintln!("tell receipt ID: {}",params["message_id"].as_str().unwrap());
             ("collab.tell",params)
         }
@@ -2594,7 +2594,7 @@ fn resolve_tell_target(args: &mut Vec<String>) -> Result<Option<String>> {
 
 /// 이 기계에서 보낸 tell 의 ID → 주소. `tell --status ID` 를 주소 없이 치게 해 준다.
 fn receipts_path() -> Option<std::path::PathBuf> {
-    Some(kasa_socket::home_dir()?.join(".config/kasaterm/tell-receipts.json"))
+    Some(crate::home_dir()?.join(".config/kasaterm/tell-receipts.json"))
 }
 
 fn load_receipt(id: &str) -> Option<Value> {
@@ -2620,7 +2620,7 @@ fn save_receipt(id: &str, address: &Value) {
 /// 오케스트레이터 보고(`done` 이 싣는다) 인자 + env → `nacho.report` 파라미터. env 를 함수로 받는 것은 테스트가
 /// 프로세스 env 를 안 건드리고 origin 게이트를 재기 위해서다.
 fn orchestrator_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>) -> Result<Value> {
-    use kasa_socket::nacho_inbox as inbox;
+    use crate::nacho_inbox as inbox;
     let origin = inbox::origin_from(get_env).ok_or_else(|| anyhow!(
         "orchestrator report is only for panes an orchestrator started ({} is not set here) — report to whoever gave you the brief instead",
         inbox::ENV_ORIGIN))?;
@@ -2674,7 +2674,7 @@ fn orchestrator_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<
     params["changed"] = json!(changed.iter().flat_map(|c| c.split(|ch| ch == ',' || ch == '\n')).map(str::trim).filter(|c| !c.is_empty()).collect::<Vec<_>>());
     if params["host"].is_null() {
         let machine_id = get_env("KASATERM_MACHINE_ID").filter(|v| !v.trim().is_empty())
-            .or_else(|| kasa_socket::home_dir().and_then(|h| std::fs::read_to_string(h.join(".config/kasaterm/machine-id")).ok()).map(|t| t.trim().to_string()))
+            .or_else(|| crate::home_dir().and_then(|h| std::fs::read_to_string(h.join(".config/kasaterm/machine-id")).ok()).map(|t| t.trim().to_string()))
             .unwrap_or_default();
         let label = get_env("KASATERM_SELF_LABEL").filter(|v| !v.trim().is_empty())
             .or_else(|| std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()))
@@ -2690,7 +2690,7 @@ fn orchestrator_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<
 /// 승인은 오케스트레이터가 쥔다: 이 CLI 는 키를 모르고, 소비·조회는 이 기기 앱이 오케스트레이터에 대신 한다.
 #[cfg(feature = "app-update")]
 fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
-    use kasa_socket::app_restart as restart;
+    use crate::app_restart as restart;
     let sub = args.first().map(String::as_str).unwrap_or("");
     let mut machines: Vec<String> = Vec::new();
     let mut json_out = false;
@@ -2732,7 +2732,7 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
             let local = facts("").map_err(anyhow::Error::msg)?.machine_id;
             anyhow::ensure!(!local.is_empty(), "이 앱이 자기 machine id 를 대지 못했다");
             if machines.is_empty() { machines.push(local.clone()); }
-            let plan = restart::build_plan(&local, &machines, &facts, kasa_socket::board::now_ms());
+            let plan = restart::build_plan(&local, &machines, &facts, crate::board::now_ms());
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
@@ -2749,7 +2749,7 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
                 boot_timeout: std::time::Duration::from_secs(90),
                 max_status_errors: 40,
             };
-            let outcomes = restart::run(&plan, &approval, &local, &authority, &transport, &policy, &kasa_socket::board::now_ms);
+            let outcomes = restart::run(&plan, &approval, &local, &authority, &transport, &policy, &crate::board::now_ms);
             let mut ok = true;
             for (machine, outcome) in &outcomes {
                 ok &= matches!(outcome, restart::TargetOutcome::Verified { .. } | restart::TargetOutcome::HandedOff { .. });
@@ -2771,8 +2771,8 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
 }
 
 /// `app-update start --machine ID --request FILE|-` · `status JOB [--machine ID]` ·
-/// `run --approval ap_… --rollout FILE [--record FILE]` (조종 쪽 러너 — `kasa_socket::app_update::run`).
-/// 요청(`kasa_socket::app_update::UpdateRequest`)은 조종 쪽이 계획·오케스트레이터 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
+/// `run --approval ap_… --rollout FILE [--record FILE]` (조종 쪽 러너 — `crate::app_update::run`).
+/// 요청(`crate::app_update::UpdateRequest`)은 조종 쪽이 계획·오케스트레이터 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
 /// 받을지·갈아 끼울지는 대상 기기 앱이 자기 사실과 오케스트레이터 승인으로 다시 판정한다.
 #[cfg(feature = "app-update")]
 fn run_app_update(args: &[String]) -> Result<Option<Response>> {
@@ -2806,8 +2806,8 @@ fn run_app_update(args: &[String]) -> Result<Option<Response>> {
                 Some(path) => std::fs::read_to_string(path)?,
                 None => return Err(anyhow!("app-update start needs --request FILE|-")),
             };
-            let parsed: kasa_socket::app_update::UpdateRequest = serde_json::from_str(&text).map_err(|e| anyhow!("요청을 읽지 못했다: {e}"))?;
-            kasa_socket::app_update::check_job(&parsed.job).map_err(|e| anyhow!("요청 모양이 아니다: {e}"))?;
+            let parsed: crate::app_update::UpdateRequest = serde_json::from_str(&text).map_err(|e| anyhow!("요청을 읽지 못했다: {e}"))?;
+            crate::app_update::check_job(&parsed.job).map_err(|e| anyhow!("요청 모양이 아니다: {e}"))?;
             let value = ask("app.update_start", json!({"machine_id": machine, "request": parsed}))?;
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(None)
@@ -2819,12 +2819,12 @@ fn run_app_update(args: &[String]) -> Result<Option<Response>> {
             Ok(None)
         }
         "run" => {
-            use kasa_socket::app_update as update;
+            use crate::app_update as update;
             let path = rollout_path.ok_or_else(|| anyhow!("app-update run needs --rollout FILE"))?;
             anyhow::ensure!(!approval.is_empty(), "app-update run 은 오케스트레이터 대화에서 받은 --approval ap_… 가 있어야 한다");
             let rollout: update::Rollout = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|e| anyhow!("rollout 을 읽지 못했다: {e}"))?;
             let ask_s = |method: &str, params: Value| ask(method, params).map_err(|e| e.to_string());
-            let local: kasa_socket::app_restart::Facts = serde_json::from_value(ask_s("app.restart_facts", json!({})).map_err(anyhow::Error::msg)?)?;
+            let local: crate::app_restart::Facts = serde_json::from_value(ask_s("app.restart_facts", json!({})).map_err(anyhow::Error::msg)?)?;
             // 러너는 조종 기기에 서 있어야 한다 — 승인을 소비하는 기기이고, 자기를 마지막에 넘긴다.
             anyhow::ensure!(local.machine_id == rollout.controller(), "이 기기({})는 rollout 의 조종 기기({})가 아니다", local.machine_id, rollout.controller());
             let record = record_path.clone();
@@ -2841,7 +2841,7 @@ fn run_app_update(args: &[String]) -> Result<Option<Response>> {
             let transport = CliUpdateTransport { ask: &ask_s };
             let authority = CliAuthority { ask: &ask_s };
             let outcomes = update::run(&rollout, &approval, &authority, &transport, &update::RunPolicy::default(), grant.as_ref(), &save,
-                                       &kasa_socket::board::now_ms, &std::thread::sleep);
+                                       &crate::board::now_ms, &std::thread::sleep);
             let mut ok = true;
             for (machine, outcome) in &outcomes {
                 ok &= matches!(outcome, update::Outcome::Updated { .. } | update::Outcome::HandedOff { .. });
@@ -2866,14 +2866,14 @@ struct CliUpdateTransport<'a> {
 }
 
 #[cfg(feature = "app-update")]
-impl kasa_socket::app_update::Transport for CliUpdateTransport<'_> {
-    fn facts(&self, machine_id: &str) -> std::result::Result<kasa_socket::app_restart::Facts, String> {
+impl crate::app_update::Transport for CliUpdateTransport<'_> {
+    fn facts(&self, machine_id: &str) -> std::result::Result<crate::app_restart::Facts, String> {
         serde_json::from_value((self.ask)("app.restart_facts", json!({"machine_id": machine_id}))?).map_err(|e| e.to_string())
     }
-    fn start(&self, machine_id: &str, req: &kasa_socket::app_update::UpdateRequest) -> std::result::Result<Value, kasa_socket::app_update::Reach> {
-        (self.ask)("app.update_start", json!({"machine_id": machine_id, "request": req})).map_err(|e| kasa_socket::app_update::reach_of(&e))
+    fn start(&self, machine_id: &str, req: &crate::app_update::UpdateRequest) -> std::result::Result<Value, crate::app_update::Reach> {
+        (self.ask)("app.update_start", json!({"machine_id": machine_id, "request": req})).map_err(|e| crate::app_update::reach_of(&e))
     }
-    fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<kasa_socket::app_update::Status, String> {
+    fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<crate::app_update::Status, String> {
         serde_json::from_value((self.ask)("app.update_job", json!({"job_id": job_id, "machine_id": machine_id}))?).map_err(|e| e.to_string())
     }
 }
@@ -2882,18 +2882,18 @@ impl kasa_socket::app_update::Transport for CliUpdateTransport<'_> {
 #[cfg(feature = "app-update")]
 struct CliRestartTransport<'a> {
     ask: Ask<'a>,
-    facts: &'a dyn Fn(&str) -> std::result::Result<kasa_socket::app_restart::Facts, String>,
+    facts: &'a dyn Fn(&str) -> std::result::Result<crate::app_restart::Facts, String>,
 }
 
 #[cfg(feature = "app-update")]
-impl kasa_socket::app_restart::Transport for CliRestartTransport<'_> {
-    fn facts(&self, machine_id: &str) -> std::result::Result<kasa_socket::app_restart::Facts, String> {
+impl crate::app_restart::Transport for CliRestartTransport<'_> {
+    fn facts(&self, machine_id: &str) -> std::result::Result<crate::app_restart::Facts, String> {
         (self.facts)(machine_id)
     }
-    fn start(&self, machine_id: &str, req: &kasa_socket::app_restart::JobRequest) -> std::result::Result<(), String> {
+    fn start(&self, machine_id: &str, req: &crate::app_restart::JobRequest) -> std::result::Result<(), String> {
         (self.ask)("app.restart_start", json!({"machine_id": machine_id, "request": req})).map(|_| ())
     }
-    fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<kasa_socket::app_restart::JobState, String> {
+    fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<crate::app_restart::JobState, String> {
         let value = (self.ask)("app.restart_job", json!({"job_id": job_id, "machine_id": machine_id}))?;
         serde_json::from_value(value["state"].clone()).map_err(|e| e.to_string())
     }
@@ -2906,19 +2906,19 @@ struct CliAuthority<'a> {
 }
 
 #[cfg(feature = "app-update")]
-impl kasa_socket::app_restart::Authority for CliAuthority<'_> {
-    fn get(&self, approval_id: &str) -> std::result::Result<kasa_socket::app_restart::ApprovalView, String> {
+impl crate::app_restart::Authority for CliAuthority<'_> {
+    fn get(&self, approval_id: &str) -> std::result::Result<crate::app_restart::ApprovalView, String> {
         serde_json::from_value((self.ask)("app.restart_approval", json!({"approval_id": approval_id}))?).map_err(|e| e.to_string())
     }
-    fn consume(&self, approval_id: &str, scope: &Value, consumer: &str) -> std::result::Result<kasa_socket::app_restart::ApprovalView, String> {
+    fn consume(&self, approval_id: &str, scope: &Value, consumer: &str) -> std::result::Result<crate::app_restart::ApprovalView, String> {
         let value = (self.ask)("app.restart_consume", json!({"approval_id": approval_id, "scope": scope, "consumer_machine_id": consumer}))?;
         serde_json::from_value(value).map_err(|e| e.to_string())
     }
 }
 
 #[cfg(feature = "app-update")]
-fn render_restart_plan(plan: &kasa_socket::app_restart::Plan) -> String {
-    let mut out = format!("재시작 계획 {} · {}분 유효 · 순서대로 한 대씩(조종 기기는 마지막)\n", plan.hash, kasa_socket::app_restart::PLAN_TTL_MS / 60_000);
+fn render_restart_plan(plan: &crate::app_restart::Plan) -> String {
+    let mut out = format!("재시작 계획 {} · {}분 유효 · 순서대로 한 대씩(조종 기기는 마지막)\n", plan.hash, crate::app_restart::PLAN_TTL_MS / 60_000);
     for (n, target) in plan.targets.iter().enumerate() {
         let name = if target.label.is_empty() { target.machine_id.clone() } else { format!("{} ({})", target.label, target.machine_id) };
         out.push_str(&format!("{}. {}{}\n", n + 1, name, if target.controller { " · 조종 기기" } else { "" }));
@@ -2964,7 +2964,7 @@ fn surface_key_in(snapshot: Option<&Value>, surface: &str) -> String {
 }
 
 fn run_orchestrator_report(args: &[String]) -> Result<Option<Response>> {
-    use kasa_socket::nacho_inbox as inbox;
+    use crate::nacho_inbox as inbox;
     let get_env = |k: &str| std::env::var(k).ok();
     let mut params = orchestrator_report_params(args, &get_env)?;
     let key = local_surface_key(params["surface"].as_str().unwrap_or(""));
@@ -3219,11 +3219,11 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
     if !output.status.success() {
         let reason = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v|v["error"].as_str().map(str::to_owned))
             .unwrap_or_else(||"HTTP request failed; check the explicit API address and authentication".into());
-        return Ok(Response::error(request.id.clone(),kasa_socket::protocol::codes::BACKEND_ERROR,reason));
+        return Ok(Response::error(request.id.clone(),crate::protocol::codes::BACKEND_ERROR,reason));
     }
     let value: Value = serde_json::from_slice(&bytes).context("invalid HTTP response JSON")?;
     if value["ok"] == false {
-        return Ok(Response::error(request.id.clone(),kasa_socket::protocol::codes::BACKEND_ERROR,
+        return Ok(Response::error(request.id.clone(),crate::protocol::codes::BACKEND_ERROR,
             value["error"].as_str().unwrap_or("HTTP collaboration request failed")));
     }
     Ok(Response::success(request.id.clone(),value))
@@ -3252,15 +3252,15 @@ fn run_sessions_picker(args: &[String]) -> Result<()> {
         .cloned();
     let cwd = std::env::current_dir().context("cwd")?;
     let list = match only.as_deref() {
-        Some("claude") if here => kasa_socket::sessions::recent_sessions_for(&cwd, limit),
-        Some("claude") => kasa_socket::sessions::recent_claude_sessions_all(limit),
-        Some("codex") if here => kasa_socket::sessions::recent_codex_sessions_for(&cwd, limit),
-        Some("codex") => kasa_socket::sessions::recent_codex_sessions(limit),
-        Some("agy") => kasa_socket::sessions::recent_agy_sessions(limit),
+        Some("claude") if here => crate::sessions::recent_sessions_for(&cwd, limit),
+        Some("claude") => crate::sessions::recent_claude_sessions_all(limit),
+        Some("codex") if here => crate::sessions::recent_codex_sessions_for(&cwd, limit),
+        Some("codex") => crate::sessions::recent_codex_sessions(limit),
+        Some("agy") => crate::sessions::recent_agy_sessions(limit),
         // 하네스를 안 고른 `--here` 는 세 하네스를 가로지른다 — 예전엔 claude 만
         // 봐서, 이 폴더에서 codex 로 일한 기록이 목록에 없는 것이 됐다.
-        _ if here => kasa_socket::sessions::recent_sessions_here(&cwd, limit),
-        _ => kasa_socket::sessions::recent_all_sessions(limit),
+        _ if here => crate::sessions::recent_sessions_here(&cwd, limit),
+        _ => crate::sessions::recent_all_sessions(limit),
     };
     if list.is_empty() {
         if here {
@@ -3270,9 +3270,9 @@ fn run_sessions_picker(args: &[String]) -> Result<()> {
         }
         return Ok(());
     }
-    let home = kasa_socket::home_dir().unwrap_or_default();
-    let config = kasa_socket::isolated_collab_root().unwrap_or_else(|| home.join(".config/kasaterm"));
-    let bindings = read_string_map(&kasa_socket::session_storage::read_path(&config, "session_characters.json"));
+    let home = crate::home_dir().unwrap_or_default();
+    let config = crate::isolated_collab_root().unwrap_or_else(|| home.join(".config/kasaterm"));
+    let bindings = read_string_map(&crate::session_storage::read_path(&config, "session_characters.json"));
     let colors = student_colors(&home.join(".config/kasaterm/characters.json"));
     let live = live_session_ids();
     const RESET: &str = "\x1b[0m";
@@ -3384,7 +3384,7 @@ fn ansi_fg(hex: &str) -> String {
 /// pid 생존(kill -0) 확인. 중복 --resume(프로세스 갈라짐) 방지용.
 fn live_session_ids() -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let home = kasa_socket::home_dir().unwrap_or_default();
+    let home = crate::home_dir().unwrap_or_default();
     let dir = home.join(".claude/sessions");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return out;
@@ -3592,7 +3592,7 @@ fn sl_env(name: &str) -> Option<String> {
 }
 
 fn sl_home() -> std::path::PathBuf {
-    kasa_socket::home_dir().unwrap_or_default()
+    crate::home_dir().unwrap_or_default()
 }
 
 fn sl_read_json(path: &std::path::Path) -> Option<Value> {
@@ -3933,9 +3933,9 @@ fn run_statusline() {
     if !session_id.is_empty()
         && std::env::var("KASATERM_SESSION_ID").ok().as_deref() != Some(session_id)
     {
-        let config = kasa_socket::isolated_collab_root()
+        let config = crate::isolated_collab_root()
             .unwrap_or_else(|| sl_home().join(".config/kasaterm"));
-        let path = kasa_socket::session_storage::read_path(&config, "session_characters.json");
+        let path = crate::session_storage::read_path(&config, "session_characters.json");
         if let Some(bound) = sl_read_json(&path)
             .and_then(|map| map.get(session_id).and_then(Value::as_str).map(str::to_string))
             .filter(|s| !s.is_empty())
@@ -4047,7 +4047,7 @@ mod tests {
         assert_eq!(p["machine_id"],"mini-id"); assert_eq!(p["surface"],"%9"); assert_eq!(p["character"],"와카모");
         assert_eq!(p["harness"],"claude"); assert_eq!(p["host"]["machine_id"],"student-id"); assert_eq!(p["host"]["label"],"맥북");
         assert_eq!(p["changed"],json!(["selfcare.sh","main.py","worklog.py"]));
-        let envelope = kasa_socket::nacho_inbox::build(&p).unwrap();
+        let envelope = crate::nacho_inbox::build(&p).unwrap();
         assert_eq!(envelope["status"],"needs_restart");
         assert!(super::orchestrator_report_params(&["--bogus".into()], &env).is_err());
         assert_eq!(p["run_id"], "", "세대 env 가 없으면 빈 칸");
@@ -4266,7 +4266,7 @@ mod tests {
 
     #[test]
     fn a_held_tell_says_why_and_until_when() {
-        let receipt = serde_json::json!({"state":"accepted","reason":kasa_socket::tell::Hold::Draft.reason(),"expires_at_ms":0});
+        let receipt = serde_json::json!({"state":"accepted","reason":crate::tell::Hold::Draft.reason(),"expires_at_ms":0});
         let line = super::tell_state_line(&receipt);
         assert!(line.contains("쓰던 글") && line.contains("비우면") && line.contains("버려진다"), "{line}");
         let old = serde_json::json!({"state":"accepted","reason":"no bytes written; waiting"});

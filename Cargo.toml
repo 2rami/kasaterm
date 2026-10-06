@@ -12,6 +12,8 @@ members = [
     "crates/kasa-bridge",
     "crates/kasa-screen",
     "crates/kasa-gridview",
+    "crates/kasa-collab",
+    "crates/kasa-agents",
     "crates/kasa-net",
     "crates/kasa-net-ffi",
     "spikes/iced-term",

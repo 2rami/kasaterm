@@ -21,6 +21,8 @@
 //! `ok: false` with an `error` object. See `protocol.rs` for the exact
 //! shapes.
 
+/// `kasaterm-cli` 본체. 바이너리와 `kasa tui`(멀티콜)가 같이 부른다.
+pub mod cli;
 pub mod backend;
 pub mod board;
 pub mod claude_trust;

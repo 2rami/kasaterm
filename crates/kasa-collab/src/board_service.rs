@@ -5,7 +5,9 @@ use kasa_socket::{
     board::{self, field, BoardStore},
 };
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "net")]
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
@@ -13,10 +15,10 @@ use std::time::Duration;
 
 struct Service {
     machine_id: String,
-    configured_machines: Option<Vec<crate::machines::Machine>>,
+    configured_machines: Option<Vec<crate::env::Route>>,
     store: Mutex<BoardStore>,
     backend: Weak<dyn Backend>,
-    routes: Mutex<HashMap<String, crate::machines::Machine>>,
+    routes: Mutex<HashMap<String, crate::env::Route>>,
     aliases: Mutex<HashMap<String, String>>,
     stop: AtomicBool,
     source_override: Option<Value>,
@@ -29,6 +31,7 @@ struct Service {
 /// 닫힌 pane 정리 같은 것은 신호 없이 일어난다.
 const LOCAL_FALLBACK: Duration = Duration::from_secs(2);
 /// 다른 기계 판을 당겨 오는 주기. 저쪽 판도 신호로 곧장 갱신되므로 이 주기가 곧 기계 간 지연이다.
+#[cfg(feature = "net")]
 const REMOTE_EVERY: Duration = Duration::from_secs(2);
 
 pub struct CollectorConfig {
@@ -37,15 +40,15 @@ pub struct CollectorConfig {
     pub journal_path: Option<PathBuf>,
     pub remote_enabled: bool,
     pub source_override: Option<Value>,
-    pub machines: Option<Vec<crate::machines::Machine>>,
+    pub machines: Option<Vec<crate::env::Route>>,
 }
 
 impl Service {
-    fn machines(&self) -> Vec<crate::machines::Machine> {
+    fn machines(&self) -> Vec<crate::env::Route> {
         if let Some(fixed) = self.configured_machines.clone() {
             return fixed;
         }
-        let mut out = crate::machines::machines();
+        let mut out = crate::env::env().machines();
         // 직통 길과 나란히 **관문 우회 길**도 세운다 — 기계 id 를 아는 기계마다 하나. 넷버드·
         // 터널이 죽어도 폴링이 우회로 관측을 잇고, `verified_route` 는 직통이 살아 있는 한
         // 직통을 고른다(하이브리드, 2026-09-16 지시). id 는 명부 값이거나 지난 폴링이 그
@@ -62,10 +65,10 @@ impl Service {
                 continue;
             };
             let Some(base) = relay_base(&id) else { break };
-            if out.iter().any(|x| x.base == base) || relays.iter().any(|x: &crate::machines::Machine| x.base == base) {
+            if out.iter().any(|x| x.base == base) || relays.iter().any(|x: &crate::env::Route| x.base == base) {
                 continue;
             }
-            relays.push(crate::machines::Machine { base, machine_id: Some(id), ..m.clone() });
+            relays.push(crate::env::Route { base, machine_id: Some(id), ..m.clone() });
         }
         out.extend(relays);
         out
@@ -76,8 +79,7 @@ impl Service {
 /// 기계의 업링크로 흘리므로 이 뒤에 `/collab/…` 를 그대로 붙이면 된다. slug 는 이 기계 주인의
 /// 폰 주소(자격)라 토큰이 따로 없다. 관문이 꺼져 있거나 주인 유저가 없으면 None.
 pub fn relay_base(machine_id: &str) -> Option<String> {
-    let gateway = crate::mobile::gateway()?;
-    let slug = crate::mobile::owner()?.slug;
+    let (gateway, slug) = crate::env::env().relay()?;
     Some(format!("{}/u/{slug}/m/~{machine_id}", gateway.trim_end_matches('/')))
 }
 
@@ -163,7 +165,7 @@ pub fn local_id() -> Result<String> {
         return Ok(id.clone());
     }
     let id =
-        crate::mobile::machine_identity().context("persistent machine identity unavailable")?;
+        crate::identity::machine_identity().context("persistent machine identity unavailable")?;
     let _ = ID.set(id.clone());
     Ok(id)
 }
@@ -179,7 +181,7 @@ pub fn address(surface: &str, session: Option<&str>) -> Result<Value> {
 
 pub fn local_source(panes: Vec<Value>, complete: bool) -> Result<Value> {
     Ok(
-        json!({"machine_id":local_id()?,"label":if isolated() {"Verification".into()} else {crate::machines::self_label()},
+        json!({"machine_id":local_id()?,"label":if isolated() {"Verification".into()} else {crate::env::env().self_label()},
         "state":"online","observed_at_ms":board::now_ms(),"complete":complete,"panes":panes}),
     )
 }
@@ -210,7 +212,7 @@ pub fn register(backend: Arc<dyn Backend>, port: u16) -> Result<CollectorGuard> 
     let label = if isolated() {
         "Verification".into()
     } else {
-        crate::machines::self_label()
+        crate::env::env().self_label()
     };
     let source_override = fixture.then(||json!({"machine_id":machine,"label":label,"state":"online",
         "source_kind":"fixture","capabilities":["synthetic"],"complete":true,"observed_at_ms":board::now_ms(),"panes":[]}));
@@ -288,7 +290,14 @@ pub fn register_with_config(
     if !config.remote_enabled {
         return Ok(CollectorGuard(service));
     }
-    let weak = Arc::downgrade(&service);
+    #[cfg(feature = "net")]
+    spawn_remote_observer(&service)?;
+    Ok(CollectorGuard(service))
+}
+
+#[cfg(feature = "net")]
+fn spawn_remote_observer(service: &Arc<Service>) -> Result<()> {
+    let weak = Arc::downgrade(service);
     std::thread::Builder::new()
         .name("collab-remote-observer".into())
         .spawn(move || {
@@ -311,7 +320,7 @@ pub fn register_with_config(
                 }
             });
         })?;
-    Ok(CollectorGuard(service))
+    Ok(())
 }
 
 fn collect_local(service: &Service, machine: &str, label: &str) -> bool {
@@ -408,6 +417,7 @@ pub fn changes(params: &Value) -> Result<Value> {
     Ok(result)
 }
 
+#[cfg(feature = "net")]
 fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -415,6 +425,7 @@ fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+#[cfg(feature = "net")]
 async fn fetch_json(
     client: &reqwest::Client,
     base: &str,
@@ -424,7 +435,7 @@ async fn fetch_json(
     let mut request = client
         .get(format!("{}{path}", base.trim_end_matches('/')))
         .query(query);
-    if let Some(token) = crate::remote::connection_auth_token(base) {
+    if let Some(token) = crate::env::env().auth_token(base) {
         request = request.header("x-kasa-token", token);
     }
     let mut response = request
@@ -457,6 +468,7 @@ async fn fetch_json(
     serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid_response"))
 }
 
+#[cfg(feature = "net")]
 fn source_from_snapshot(value: &Value, expected: Option<&str>) -> Result<Value> {
     if value["schema_version"] != 1 || value["scope"] != "local" {
         bail!("unsupported_api");
@@ -484,6 +496,7 @@ fn source_from_snapshot(value: &Value, expected: Option<&str>) -> Result<Value> 
     Ok(source)
 }
 
+#[cfg(feature = "net")]
 async fn refresh_remotes(service: &Service, client: &reqwest::Client) {
     use futures_util::{stream, StreamExt};
     let local = service.machine_id.clone();
@@ -604,6 +617,7 @@ async fn refresh_remotes(service: &Service, client: &reqwest::Client) {
     }
 }
 
+#[cfg(feature = "net")]
 fn unresolved_id(base: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -685,39 +699,7 @@ pub fn inspect(backend: &dyn Backend, params: &Value) -> Result<Value> {
         if params["local_only"] == true {
             bail!("remote inspection must terminate at its source");
         }
-        let base = known_route(machine)
-            .or_else(|| relay_base(machine))
-            .context("remote source has no current unambiguous route")?;
-        let mut remote_params = params.clone();
-        remote_params["local_only"] = json!(true);
-        remote_params["limit"] = json!(limit);
-        return std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            runtime.block_on(async {
-                let value = fetch_json(
-                    &http_client()?,
-                    &base,
-                    "/collab/inspect",
-                    &[("params", remote_params.to_string())],
-                )
-                .await?;
-                validate_address(&remote_params["address"], &value["address"])?;
-                if value["schema_version"] != 1
-                    || value["bounded"] != true
-                    || value["events"]
-                        .as_array()
-                        .is_none_or(|events| events.len() > limit)
-                    || serde_json::to_vec(&value)?.len() > 132 * 1024
-                {
-                    bail!("invalid bounded inspection response");
-                }
-                Ok(value)
-            })
-        })
-        .join()
-        .map_err(|_| anyhow::anyhow!("remote inspection worker failed"))?;
+        return inspect_remote(machine, params, limit);
     }
     if crate::surface_keys::get(surface).as_deref() != Some(key) {
         bail!("surface identity changed; refresh the board");
@@ -748,6 +730,48 @@ pub fn inspect(backend: &dyn Backend, params: &Value) -> Result<Value> {
     )
 }
 
+#[cfg(not(feature = "net"))]
+fn inspect_remote(_machine: &str, _params: &Value, _limit: usize) -> Result<Value> {
+    bail!("다른 기계 칸을 보려면 kasa-collab feature net 이 필요하다")
+}
+
+#[cfg(feature = "net")]
+fn inspect_remote(machine: &str, params: &Value, limit: usize) -> Result<Value> {
+    let base = known_route(machine)
+        .or_else(|| relay_base(machine))
+        .context("remote source has no current unambiguous route")?;
+    let mut remote_params = params.clone();
+    remote_params["local_only"] = json!(true);
+    remote_params["limit"] = json!(limit);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let value = fetch_json(
+                &http_client()?,
+                &base,
+                "/collab/inspect",
+                &[("params", remote_params.to_string())],
+            )
+            .await?;
+            validate_address(&remote_params["address"], &value["address"])?;
+            if value["schema_version"] != 1
+                || value["bounded"] != true
+                || value["events"]
+                    .as_array()
+                    .is_none_or(|events| events.len() > limit)
+                || serde_json::to_vec(&value)?.len() > 132 * 1024
+            {
+                bail!("invalid bounded inspection response");
+            }
+            Ok(value)
+        })
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("remote inspection worker failed"))?
+}
+
 fn bound_detail(value: &mut Value) {
     match value {
         Value::String(text) => *text = board::detail_text(text, 2048),
@@ -766,11 +790,12 @@ fn bound_detail(value: &mut Value) {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// 시험용 백엔드 — 보드 원천을 부를 때마다 횟수만 센다. 다른 크레이트 시험도 쓴다(feature `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod synthetic {
     use super::*;
     #[derive(Default)]
-    pub(crate) struct SyntheticBackend(pub std::sync::atomic::AtomicUsize);
+    pub struct SyntheticBackend(pub std::sync::atomic::AtomicUsize);
     impl Backend for SyntheticBackend {
         fn list_workspaces(&self) -> Result<Vec<kasa_socket::backend::WorkspaceInfo>> {
             panic!("legacy workspace scan")
@@ -818,6 +843,12 @@ pub(crate) mod tests {
             Ok(json!({"events":[],"synthetic":true}))
         }
     }
+}
+
+#[cfg(all(test, feature = "net"))]
+pub(crate) mod tests {
+    use super::*;
+    pub(crate) use super::synthetic::SyntheticBackend;
 
     #[test]
     fn collector_is_harness_independent_and_cache_readers_do_not_scan() {
@@ -859,41 +890,6 @@ pub(crate) mod tests {
         assert!(!collect_local(&service, "synthetic", "Synthetic"));
     }
 
-    #[test]
-    fn production_source_paths_do_not_reenter_legacy_agent_or_peer_inventory() {
-        let desktop = include_str!("../../../app/kasaterm/src/socket.rs");
-        let source = desktop
-            .split("fn collab_board_source(&self)")
-            .nth(1)
-            .unwrap()
-            .split("fn collab_board(&self)")
-            .next()
-            .unwrap();
-        for forbidden in [
-            "agents_status(",
-            "agents_cached(",
-            "rebind_agents_panes(",
-            "peers::",
-        ] {
-            assert!(!source.contains(forbidden), "new source called {forbidden}");
-        }
-        let standalone = include_str!("standalone.rs");
-        let source = standalone
-            .split("fn collab_board_source(&self)")
-            .nth(1)
-            .unwrap()
-            .split("// --- required")
-            .next()
-            .unwrap();
-        assert!(
-            !source.contains("claude_bin")
-                && !source.contains("Command")
-                && !source.contains("collab_board(")
-        );
-        assert!(
-            source.contains("kasa_pty::live_sessions()") && source.contains("activity_unsupported")
-        );
-    }
     #[test]
     fn remote_requires_local_scope_and_matching_identity() {
         let value = json!({"schema_version":1,"scope":"local","sources":[{"machine_id":"remote",
@@ -979,19 +975,10 @@ pub(crate) mod tests {
         });
         let machines: Vec<_> = ["first", "second"]
             .into_iter()
-            .map(|label| crate::machines::Machine {
+            .map(|label| crate::env::Route {
                 label: label.into(),
                 machine_id: None,
                 base: format!("{base}/{label}"),
-                host: String::new(),
-                kvm: None,
-                roots: Vec::new(),
-                home: false,
-                ssh: None,
-                chrome_port: None,
-                key: None,
-                tunneled: false,
-                guest: false,
             })
             .collect();
         let backend: Arc<dyn Backend> = Arc::new(SyntheticBackend::default());

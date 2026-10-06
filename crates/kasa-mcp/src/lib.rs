@@ -2,8 +2,13 @@
 //! 예전에는 pane 조작을 MCP 도구로도 내보냈지만 `kasaterm-cli` 와 완전히 겹쳐 걷었다.
 
 pub mod character;
+// 보드 수집기·tell 장부·칸 열쇠는 kasa-collab 으로 옮겼다. 옛 경로(`kasa_mcp::board_service`)를 그대로 쓴다.
+pub use kasa_collab::{board_service, surface_keys, tell_service};
+mod collab_env;
+pub use collab_env::install_collab_env;
+#[cfg(test)]
+mod collab_contract_tests;
 pub mod claude_mod;
-pub mod board_service;
 pub mod changes;
 pub mod browser_route;
 pub mod browser_target;
@@ -36,8 +41,6 @@ pub mod account_sync;
 pub mod agent_accounts;
 pub mod remote;
 pub mod remote_restore;
-pub mod surface_keys;
-pub mod tell_service;
 pub mod nacho_service;
 mod nacho_relay;
 #[cfg(unix)]

@@ -1,0 +1,11 @@
+[package]
+name = "kasa-agents"
+description = "Agent harness knowledge shared by the kasaterm app and kasa tui: reading Claude Code / Codex transcripts into turns, activity and errors."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+base64 = "0.22"
+kasa-socket = { path = "../kasa-socket", default-features = false }

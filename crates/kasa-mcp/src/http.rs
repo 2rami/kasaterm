@@ -7613,6 +7613,7 @@ pub fn spawn_http_server_opts(
     preferred_port: u16,
     run_scheduler: bool,
 ) -> std::io::Result<u16> {
+    crate::install_collab_env();
     // Bind synchronously so we can learn (and return) the real port before
     // handing the socket to tokio.
     let addr = bind_addr();
@@ -8703,7 +8704,7 @@ mod tests {
     async fn collaboration_read_routes_share_backend_and_origin_guard() {
         use super::*;
         use axum::http::StatusCode;
-        let backend: Arc<dyn Backend> = Arc::new(crate::board_service::tests::SyntheticBackend::default());
+        let backend: Arc<dyn Backend> = Arc::new(kasa_collab::board_service::synthetic::SyntheticBackend::default());
         let mut router = axum::Router::new();
         for (path,operation) in [("/collab/board","snapshot"),("/collab/changes","changes"),("/collab/inspect","inspect")] {
             let backend = backend.clone();

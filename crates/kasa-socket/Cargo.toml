@@ -5,6 +5,12 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+# 본체는 `src/cli.rs`(라이브러리) — 진입 파일 이름을 바꿔 두어 git 이 옛 `src/bin/kasaterm-cli.rs` 의
+# 이동을 알아본다(다른 가지의 수정이 새 자리로 따라간다).
+[[bin]]
+name = "kasaterm-cli"
+path = "src/bin/kasaterm_cli_main.rs"
+
 [features]
 default = ["app-update"]
 # 카사텀 앱 재시작·업데이트 작업(`app_restart`·`app_update`, `app.*` 메서드, CLI

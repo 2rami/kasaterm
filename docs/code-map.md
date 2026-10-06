@@ -23,12 +23,18 @@
 - `auxterm.rs` — 터미널 pane 을 별도 OS 창으로 뗀다(undock/dock). 창은 `pane_id` 만 들고 셀·PTY 는 App.ws/App.pty 에 그대로 — 그리기는 본창과 같은 `compose_terminal_pane`
 - `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
-- `transcript.rs` — claude-code transcript(jsonl) → board 스냅샷 추출
+- `transcript` — claude-code transcript(jsonl) → board 스냅샷 추출. 본체는 `crates/kasa-agents/src/transcript.rs`(main.rs 가 `use kasa_agents::transcript` 로 옛 경로 유지)
 - `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
 - `chat_view/live.rs` — 대화 보기 위의 연결 mod 지금(일 상태·도는 도구·승인 요청). 이 기기 칸은 `claude_mod::mirror_view` 를
   바로, 거울은 원본 `/term/mod-live` 에 매달린다. 승인 창 「Yes」·「No」의 mod 결정(`/term/mod-decide`)도 여기
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
+- 엔진·협업 크레이트(카사라이트·`kasa tui` 가 git rev 로 함께 쓴다, 설계 `docs/terminal-engine.md`):
+  `kasa-screen`(셀·행·ScreenUpdate·ANSI·리플로우·칸 배치 — kasa-bridge 가 재수출) ·
+  `kasa-collab`(보드 수집기 `board_service`·tell 장부 `tell_service`·칸 열쇠 `surface_keys`·기계 id `identity`·GUI 없는
+  호스트용 tell 전달 `delivery`·claude 훅 설치 `hooks`. 기기 명부·관문·원격 칸은 호스트가 `env::CollabEnv` 로 꽂는다 —
+  본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) ·
+  `kasa-socket::cli`(`kasaterm-cli` 본체 — 바이너리와 `kasa tui` 멀티콜이 부른다)
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
 - `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤, mod 칸이면 `claude_mod::offer` 로 맡기고(mod 가 쉬는 순간 `$.prompt.submit`, ack 가 영수증을 끝맺음) 아니면 빈 입력창을 확인해 붙여넣고 Enter. 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라

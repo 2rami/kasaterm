@@ -138,7 +138,7 @@ fn looks_like_codex(tail: &str) -> bool {
 /// 로그에 실린 대화·지시문·토큰은 일부러 싣지 않는다. 모델 선택, 협업 모드, 구독 한도처럼
 /// 화면과 계정 메뉴가 필요한 공개 상태만 남긴다.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct CodexRolloutSnapshot {
+pub struct CodexRolloutSnapshot {
     pub model: String,
     pub effort: String,
     pub collaboration_mode: String,
@@ -280,7 +280,7 @@ fn codex_rollout_snapshot_part(text: &str) -> CodexRolloutSnapshotParts {
 
 /// Codex rollout의 현재 공개 상태. tail의 최신 turn을 우선하고, 대형 출력에 밀려난
 /// 경우에만 head를 보조값으로 쓴다.
-pub(crate) fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnapshot {
+pub fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnapshot {
     let mut newest = codex_rollout_snapshot_part(tail);
     let older = codex_rollout_snapshot_part(head);
     if !newest.model_seen && older.model_seen {
@@ -305,9 +305,9 @@ pub(crate) fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnap
 /// (API 오류·codex 작업 실패·스트림 끊김)이고, 아니면 도구 하나가 실패한 것이라 턴은
 /// 계속 돈다 — 상태를 Error 로 내리는 건 hard 뿐이고, 도구 실패는 미니맵 삼각형만 켠다.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HarnessError {
-    pub(crate) label: String,
-    pub(crate) hard: bool,
+pub struct HarnessError {
+    pub label: String,
+    pub hard: bool,
 }
 
 fn short_label(text: &str, fallback: &str) -> String {
@@ -323,7 +323,7 @@ fn short_label(text: &str, fallback: &str) -> String {
 ///
 /// 과거 실패를 세는 함수가 아니다. 오류 뒤에 새 도구 호출·답변·사용자 입력이 있으면
 /// 복구가 시작된 것이므로 즉시 None 이 된다. 미니맵·보드는 이 현재 상태만 표시한다.
-pub(crate) fn harness_error(tail: &str) -> Option<HarnessError> {
+pub fn harness_error(tail: &str) -> Option<HarnessError> {
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -390,7 +390,7 @@ pub(crate) fn harness_error(tail: &str) -> Option<HarnessError> {
 }
 
 /// 예전 창구 — 오류가 있기만 하면 참. 미니맵 삼각형이 쓴다.
-pub(crate) fn latest_harness_error(tail: &str) -> bool {
+pub fn latest_harness_error(tail: &str) -> bool {
     harness_error(tail).is_some()
 }
 

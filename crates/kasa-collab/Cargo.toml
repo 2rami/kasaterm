@@ -1,0 +1,32 @@
+[package]
+name = "kasa-collab"
+description = "kasaterm collaboration host: board collector, tell ledger, surface keys and machine identity — shared by the kasaterm app and kasa tui."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# 다른 기계 판 당겨 오기·다른 기계로 tell 보내기(HTTP). 가장 무거운 의존(tokio·reqwest)이 여기서 들어온다.
+net = ["dep:tokio", "dep:reqwest", "dep:futures-util"]
+# 다른 크레이트 시험이 쓰는 가짜 백엔드(`board_service::synthetic`).
+test-support = ["net", "dep:axum", "dep:bytes", "tokio/net", "tokio/rt-multi-thread"]
+
+[dependencies]
+anyhow.workspace = true
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+kasa-socket = { path = "../kasa-socket", default-features = false }
+# 칸 등록부(`lookup_session`)와 칸의 하네스 판정(`active_agent`).
+kasa-pty = { path = "../kasa-pty", default-features = false }
+tokio = { version = "1.52.3", features = ["rt", "time"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"], optional = true }
+futures-util = { version = "0.3", optional = true }
+axum = { version = "0.8.9", optional = true }
+bytes = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+axum = "0.8.9"
+futures-util = "0.3"
+bytes = "1"

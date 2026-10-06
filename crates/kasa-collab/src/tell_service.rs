@@ -27,7 +27,7 @@ pub fn transition(id: &str, state: State, reason: &str) -> Result<Record> {
 pub fn current_address(backend: &dyn Backend, surface: &str) -> Result<Address> {
     let live = kasa_pty::lookup_session(surface).context("target is not a live local PTY")?;
     ensure!(!live.input_closed(), "target pane is closed");
-    ensure!(!crate::remote::is_remote_pane(surface), "use the remote pane's global address");
+    ensure!(!crate::env::env().is_remote_pane(surface), "use the remote pane's global address");
     ensure!(matches!(live.active_agent(),Some(kasa_pty::AgentKind::Claude | kasa_pty::AgentKind::Codex)), "shell or unsupported harness cannot receive tell");
     let value = backend.collab_tell_identity(surface)?;
     Address::parse(&value)
@@ -80,10 +80,16 @@ pub fn status(params: &Value) -> Result<Value> {
     Ok(ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?.status(id,&address)?.receipt())
 }
 
+#[cfg(not(feature = "net"))]
+fn remote(_address: &Address, _params: &Value, _path: &'static str) -> Result<Value> {
+    bail!("다른 기계로 보내려면 kasa-collab feature net 이 필요하다")
+}
+
+#[cfg(feature = "net")]
 fn remote(address: &Address, params: &Value, path: &'static str) -> Result<Value> {
     // 직통(검증된 길) → 명부의 base → 관문 우회. 우회는 넷버드·터널 없이도 닿는다.
     let base = crate::board_service::known_route(&address.machine_id)
-        .or_else(||crate::machines::machines().into_iter()
+        .or_else(||crate::env::env().machines().into_iter()
             .find(|m|m.machine_id.as_deref() == Some(address.machine_id.as_str())).map(|m|m.base))
         .or_else(||crate::board_service::relay_base(&address.machine_id))
         .context("remote machine identity has no verified known route")?;
@@ -93,12 +99,13 @@ fn remote(address: &Address, params: &Value, path: &'static str) -> Result<Value
         tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async move {
             let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5))
                 .redirect(reqwest::redirect::Policy::none()).build()?;
-            let token = crate::remote::connection_auth_token(&base);
+            let token = crate::env::env().auth_token(&base);
             request_remote(&client,&base,token.as_deref(),&expected,&body,path).await
         })
     }).join().map_err(|_|anyhow::anyhow!("remote tell worker failed; inspect status before retrying"))?
 }
 
+#[cfg(feature = "net")]
 async fn bounded_json(mut response: reqwest::Response) -> Result<Value> {
     response = response.error_for_status()?;
     let mut bytes = Vec::new();
@@ -109,6 +116,7 @@ async fn bounded_json(mut response: reqwest::Response) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+#[cfg(feature = "net")]
 async fn request_remote(client: &reqwest::Client, base: &str, token: Option<&str>, expected: &Address, body: &Value, path: &str) -> Result<Value> {
     let request = client.get(format!("{}/collab/board?scope=local",base.trim_end_matches('/')));
     let request = if let Some(token) = token { request.header("x-kasa-token",token) } else { request };
@@ -133,19 +141,20 @@ async fn request_remote(client: &reqwest::Client, base: &str, token: Option<&str
     Ok(value)
 }
 
-#[cfg(test)]
-mod tests {
+/// 시험용 가짜 원격 기계(`/collab/board`·`/collab/tell`). 다른 크레이트 시험도 쓴다(feature `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
     use super::*;
     use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
-    fn address() -> Address { Address {machine_id:"fixture-remote-machine".into(),surface_key:"key".into(),surface_id:"%7".into(),session_id:"session".into(),instance_id:"instance".into()} }
-    async fn fake_server(deny: bool, changed: bool, disconnect: bool) -> (String,Arc<AtomicUsize>,tokio::task::JoinHandle<()>) {
+    pub fn fixture_address() -> Address { Address {machine_id:"fixture-remote-machine".into(),surface_key:"key".into(),surface_id:"%7".into(),session_id:"session".into(),instance_id:"instance".into()} }
+    pub async fn fake_server(deny: bool, changed: bool, disconnect: bool) -> (String,Arc<AtomicUsize>,tokio::task::JoinHandle<()>) {
         fake_server_auth(deny,changed,disconnect,true).await
     }
-    async fn fake_server_auth(deny: bool, changed: bool, disconnect: bool, require_token: bool) -> (String,Arc<AtomicUsize>,tokio::task::JoinHandle<()>) {
+    pub async fn fake_server_auth(deny: bool, changed: bool, disconnect: bool, require_token: bool) -> (String,Arc<AtomicUsize>,tokio::task::JoinHandle<()>) {
         use axum::response::IntoResponse;
         let count = Arc::new(AtomicUsize::new(0));
         let calls = count.clone();
-        let mut target = address(); if changed { target.session_id = "replacement".into(); }
+        let mut target = fixture_address(); if changed { target.session_id = "replacement".into(); }
         let source = json!({"scope":"local","sources":[{"machine_id":"fixture-remote-machine","state":"online"}],"panes":[{"address":target}]});
         let app = axum::Router::new()
             .route("/collab/board",axum::routing::get(move |headers: axum::http::HeaderMap| {
@@ -172,6 +181,13 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener,app).await.unwrap(); });
         (base,count,server)
     }
+}
+
+#[cfg(all(test, feature = "net"))]
+mod tests {
+    use super::*;
+    use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+    use super::testing::{fake_server, fixture_address as address};
     #[tokio::test]
     async fn fake_http_authentication_and_identity_rejection_never_posts() {
         for (deny,changed) in [(true,false),(false,true)] {
@@ -201,52 +217,4 @@ mod tests {
         server.abort();
     }
 
-    #[test]
-    #[ignore = "isolated subprocess invoked by standalone relay contract test"]
-    fn standalone_relay_child() {
-        let Some(params) = std::env::var("KASATERM_TEST_TELL_PARAMS").ok() else { return };
-        assert_eq!(std::env::var("KASATERM_MACHINE_ID").unwrap(),"fixture-local-machine");
-        let params: Value = serde_json::from_str(&params).unwrap();
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
-            let backend: Arc<dyn Backend> = Arc::new(crate::standalone::StandaloneBackend::new(std::env::temp_dir()));
-            let app = axum::Router::new().route("/collab/tell",axum::routing::post(move |body: axum::Json<Value>| {
-                crate::http::collab_tell_post(backend.clone(),body)
-            }));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}/collab/tell",listener.local_addr().unwrap());
-            let server = tokio::spawn(async move { axum::serve(listener,app).await.unwrap(); });
-            let receipt: Value = reqwest::Client::new().post(url).json(&params).send().await.unwrap().json().await.unwrap();
-            if params["local_only"] == true {
-                assert!(receipt["error"].as_str().unwrap().contains("terminate"));
-            } else if std::env::var("KASATERM_TEST_TELL_DENY").as_deref() == Ok("1") {
-                assert!(receipt["error"].as_str().unwrap().contains("authentication rejected"));
-            } else {
-                assert_eq!(receipt["state"],"accepted");
-                assert_eq!(receipt["address"],params["address"]);
-                assert!(receipt.get("read").is_none());
-            }
-            server.abort();
-        });
-    }
-
-    #[tokio::test]
-    async fn standalone_backend_relays_remote_tell_and_preserves_auth_rejection() {
-        for (deny,local_only) in [(false,false),(true,false),(false,true)] {
-            let (base,calls,server) = fake_server_auth(deny,false,false,false).await;
-            let params = json!({"message_id":tell::new_message_id(),"address":address(),"body":"hello from standalone","local_only":local_only});
-            let roster = json!([{"label":"fixture-native","machine_id":"fixture-remote-machine","base":base}]);
-            let output = tokio::task::spawn_blocking(move || {
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact","tell_service::tests::standalone_relay_child","--ignored","--nocapture"])
-                    .env("KASATERM_MACHINE_ID","fixture-local-machine")
-                    .env("KASATERM_MACHINES",roster.to_string())
-                    .env("KASATERM_TEST_TELL_PARAMS",params.to_string())
-                    .env("KASATERM_TEST_TELL_DENY",if deny {"1"} else {"0"})
-                    .output().unwrap()
-            }).await.unwrap();
-            assert!(output.status.success(),"standalone relay child failed: {} {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
-            assert_eq!(calls.load(Ordering::SeqCst),if deny || local_only {0} else {1});
-            server.abort();
-        }
-    }
 }
