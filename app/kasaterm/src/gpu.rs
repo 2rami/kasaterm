@@ -613,12 +613,13 @@ impl GpuRenderer {
             present_mode: wgpu::PresentMode::AutoNoVsync,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            // 1, not the wgpu default of 2: a 2-deep frame queue holds a
-            // freshly-rendered frame for an extra vblank before it's
-            // scanned out, so a keystroke that paints "now" only appears
-            // ~1 frame later. The terminal renders tiny diffs, so a depth
-            // of 1 is plenty and shaves that frame of input latency.
-            desired_maximum_frame_latency: 1,
+            // 2 = 드로어블 3장(wgpu-hal metal 은 값+1 을 maximumDrawableCount 로
+            // 건다). 1(드로어블 2장)이던 때는 앞 장을 컴포지터가 놓아 줄 때까지
+            // `get_current_texture` 가 GUI 스레드를 세워, 스크롤 중 그 스레드의
+            // 36~50%가 그 기다림이었다. 격리 release 리그(방 8·칸 16·claude 10)
+            // A/B 4회: 스크롤 ~78→~100fps, 키→화면 p50 12.5→9.0ms·p95 27.7→17.0ms
+            // (2026-10-06). Immediate 라 장이 늘어도 vsync 큐가 생기지 않는다.
+            desired_maximum_frame_latency: 2,
         };
         eprintln!(
             "[gpu] present_modes={:?} chosen={:?} frame_latency={}",
