@@ -8,6 +8,12 @@ const REFRESH_MS = 30000
 // 모듈 변수는 다시 실릴 때 처음으로 돌아간다 — session.start 가 다시 묻는다.
 const known = { face: null as Face | null, at: 0 }
 
+// 얼굴은 턴마다 한 번 — 그 턴의 첫 답 블록에만. 엔진의 isFirstOfReply 는 도구 줄 뒤 글마다 참이라
+// 그대로 쓰면 한 턴에 얼굴이 몇 번씩 끼었다(2026-10-06 「위치가 이상해」). 블록은 메시지 id(requestId)로
+// 기억해 스크롤로 다시 그려져도 같은 자리에 남는다.
+const turn = { waiting: false, firsts: new Set<string>() }
+const FIRSTS_MAX = 500
+
 function same(a: Face | null, b: Face | null): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
@@ -44,6 +50,7 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    turn.waiting = true
     if (Date.now() - known.at > REFRESH_MS) void ask($)
     return next(e)
   })
@@ -51,13 +58,20 @@ export const register: Register = on => {
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const face = known.face
     if (!face || !e.props.isFirstOfReply) return next(e)
+    if (turn.waiting) {
+      turn.waiting = false
+      turn.firsts.add(e.requestId)
+      if (turn.firsts.size > FIRSTS_MAX) turn.firsts.delete(turn.firsts.values().next().value as string)
+    }
+    if (!turn.firsts.has(e.requestId)) return next(e)
     const body = await next(e)
     // 그림은 터미널만 그린다(다른 화면의 요소 표에는 Image 가 없다) — 거기엔 이름만.
     if (e.surface === 'terminal') {
       const { Box, Image, Text } = $.ui.resolve(e)
       return (
         <Box flexDirection="column">
-          <Box flexDirection="row" gap={1}>
+          {/* 이름을 얼굴 아랫줄에 붙여, 얼굴 두 줄과 답 사이에 빈 줄이 안 생기게 한다. */}
+          <Box flexDirection="row" gap={1} alignItems="flex-end">
             {face.file ? (
               <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={4} rows={2} alt=" " />
             ) : null}

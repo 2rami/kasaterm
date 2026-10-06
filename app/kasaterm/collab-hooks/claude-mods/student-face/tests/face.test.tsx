@@ -30,8 +30,10 @@ function host(on: On, h: Host) {
 const START = { cwd: '/repo', surface: 'terminal', isInteractive: true } as const
 const REPLY = { text: '고쳤어요', isFirstOfReply: true }
 
-async function reply($: Engine, surface: 'terminal' | 'desktop' | 'mobile', props: { text: string; isFirstOfReply: boolean } = REPLY) {
-  return $.ui.mount({ plugin: 'student-face', surface, component: 'AssistantMessage', props, viewport: { columns: 100, rows: 30, isFullscreen: true } })
+let turns = 0
+async function reply($: Engine, surface: 'terminal' | 'desktop' | 'mobile', props: { text: string; isFirstOfReply: boolean } = REPLY, opts: { newTurn?: boolean; id?: string } = {}) {
+  if (opts.newTurn ?? true) await $.turn.start({ text: '해 줘', turnId: `t${++turns}` })
+  return $.ui.mount({ plugin: 'student-face', surface, component: 'AssistantMessage', requestId: opts.id ?? `m${turns}`, props, viewport: { columns: 100, rows: 30, isFullscreen: true } })
 }
 
 test("a student's pane opens each reply with the face and the name in the student's colour", async ($, on) => {
@@ -108,4 +110,18 @@ test('when the app cannot be reached the face it already knew stays', async ($, 
   const ui = await reply($, 'terminal')
   expect(await ui.findAll({ type: 'Image' })).toHaveLength(1)
   await ui.unmount()
+})
+
+test('one face per turn: a later reply block in the same turn has none, and the first keeps its face on redraw', async ($, on) => {
+  host(on, { name: '유우카', face: FACE })
+  await $.session.start(START)
+  const first = await reply($, 'terminal', REPLY, { id: 'a' })
+  expect(await first.findAll({ type: 'Image' })).toHaveLength(1)
+  await first.unmount()
+  const later = await reply($, 'terminal', { text: '도구 뒤 글', isFirstOfReply: true }, { newTurn: false, id: 'b' })
+  expect(await later.findAll({ type: 'Image' })).toHaveLength(0)
+  await later.unmount()
+  const again = await reply($, 'terminal', REPLY, { newTurn: false, id: 'a' })
+  expect(await again.findAll({ type: 'Image' })).toHaveLength(1)
+  await again.unmount()
 })
