@@ -16,10 +16,13 @@ enum TermState { connecting, connected, reconnecting, gone }
 /// 규약: binary 프레임이 키 입력, text 프레임이 제어 JSON 이다. 키를 text 로
 /// 보내면 서버가 JSON 으로 읽고 조용히 버린다.
 class TermSession extends ChangeNotifier {
-  TermSession(this.server, this.pane) {
+  TermSession(this.server, this.pane, {this.holdIdle = defaultHoldIdle}) {
     server.addCloseListener(_serverClosed);
     server.routeChanges?.addListener(_routeChanged);
   }
+
+  /// 폰에서 마지막으로 친 뒤 이만큼 조용하면 쥔 원본 격자를 놓는다.
+  static const defaultHoldIdle = Duration(seconds: 60);
 
   final Server server;
   final Pane pane;
@@ -49,10 +52,9 @@ class TermSession extends ChangeNotifier {
   StreamSubscription<Object?>? _sub;
   Timer? _retry;
 
-  /// 폰 터미널 보기가 원본 격자를 쥘 크기. 열면 바로 가져간다(2026-10-05 지시 「열면 바로」) —
-  /// 데스크톱 칸이 좁으면(24×15) Claude 전체 화면은 스크롤백이 없어 폰에 보일 줄이 그뿐이라
-  /// 위쪽이 통째로 비었다. 원본 기기에서 사람이 그 칸을 만지면 서버가 되찾고 `lost` 를 알린다
-  /// (docs/webterm-handoff.md 「마지막으로 만진 쪽이 이긴다」) — 그 뒤엔 폰에서 입력할 때 다시 쥔다.
+  /// 폰 터미널 보기가 원본 격자를 쥘 크기. 원본 크기는 입력하는 쪽이 쥔다(docs/webterm-handoff.md
+  /// 「원본 크기는 쓰는 쪽이 쥔다」) — 보기만 해서는 안 쥐고, 폰에서 키·답장을 보내면 그때 쥔다.
+  /// 열면 바로 쥐던 때(10-05)는 폰으로 들여다보기만 해도 데스크톱 칸이 폰 크기로 줄었다(10-06 제보).
   (int, int)? _viewSize;
   bool _holdView = false;
 
@@ -62,8 +64,11 @@ class TermSession extends ChangeNotifier {
   /// 이 연결이 쥐겠다고 보낸 크기. 연결이 끊기면 서버가 놓아 준다.
   (int, int)? _held;
 
-  /// 남(원본의 사람·더 늦게 만진 거울)이 가져갔다 — 폰에서 손대기 전엔 다시 안 쥔다.
-  bool _yielded = false;
+  /// 폰에서 친 뒤 [holdIdle] 이 아직 안 지났다. 원본의 사람이나 더 늦게 친 거울이 가져가면
+  /// (`lost`) 바로 내린다 — 폰에서 다시 칠 때까지 보기만으로는 도로 빼앗지 않는다.
+  bool _typing = false;
+  final Duration holdIdle;
+  Timer? _idleTimer;
   Timer? _viewTimer;
   int _backoffSec = 1;
   bool _paused = false;
@@ -146,13 +151,12 @@ class TermSession extends ChangeNotifier {
         if (caps is Map) {
           _canHold = caps['viewport_latest'] != null;
           _held = null;
-          _yielded = false;
           _syncView();
         }
       case 'viewport':
         if (msg['lost'] == true) {
           _held = null;
-          _yielded = true;
+          _rest();
         } else if (msg['granted'] != true && _held != null) {
           _held = null;
         }
@@ -228,7 +232,8 @@ class TermSession extends ChangeNotifier {
     _viewTimer = Timer(const Duration(milliseconds: 250), _syncView);
   }
 
-  /// 터미널 보기가 보이는 동안만 쥔다 — 대화 보기·데스크톱 격자 그대로 보기에선 놓는다.
+  /// 폰 폭으로 접은 터미널 보기가 보이는 동안만 쥘 수 있다 — 대화 보기·데스크톱 격자 그대로
+  /// 보기에선 원본 격자가 폰 크기일 까닭이 없어 놓는다.
   set holdViewport(bool on) {
     if (_holdView == on) return;
     _holdView = on;
@@ -236,8 +241,20 @@ class TermSession extends ChangeNotifier {
   }
 
   void _touched() {
-    if (!_yielded) return;
-    _yielded = false;
+    _idleTimer?.cancel();
+    _idleTimer = Timer(holdIdle, _rest);
+    if (_typing) return;
+    _typing = true;
+    // 자판이 오르내리는 중이면 멈춘 크기로 쥔다 — 그 사이엔 터미널 칸이 한 줄짜리인 프레임도 있다
+    // (가상 아이폰 실측: 첫 키에 42×1 을 쥐었다가 곧 42×33).
+    if (_viewTimer == null) _syncView();
+  }
+
+  void _rest() {
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    if (!_typing) return;
+    _typing = false;
     _syncView();
   }
 
@@ -245,7 +262,7 @@ class TermSession extends ChangeNotifier {
     _viewTimer?.cancel();
     _viewTimer = null;
     if (!_canHold || _channel == null || state != TermState.connected) return;
-    final want = _holdView && !_yielded ? _viewSize : null;
+    final want = _holdView && _typing ? _viewSize : null;
     if (want == _held) return;
     if (want == null) {
       _sendJson({'t': 'viewport', 'op': 'release'});
@@ -267,7 +284,7 @@ class TermSession extends ChangeNotifier {
   bool get scrollsApp => grid.alt && grid.mouse && grid.mouseSgr;
 
   /// 데스크톱 휠과 같은 SGR(64 위·65 아래, `input.rs handle_wheel`). [lines] 가 양수면 위(지난 내용).
-  /// 휠은 보기라 원본 크기를 되찾는 손길로 치지 않는다 — [sendBytes] 를 거치지 않는다.
+  /// 휠은 보기라 원본 크기를 쥐는 입력으로 치지 않는다 — [sendBytes] 를 거치지 않는다.
   void wheel(int lines) {
     final ch = _channel;
     if (lines == 0 || ch == null || !canSend || !scrollsApp) return;
@@ -320,6 +337,9 @@ class TermSession extends ChangeNotifier {
     _paused = true;
     _retry?.cancel();
     _retry = null;
+    // 폰을 떠났다 — 돌아와 다시 붙어도 칠 때까지는 보기만 한다. 쥔 크기는 소켓이 닫히며 서버가 놓는다.
+    _typing = false;
+    _idleTimer?.cancel();
     _closeChannel();
   }
 
@@ -364,6 +384,7 @@ class TermSession extends ChangeNotifier {
     server.removeCloseListener(_serverClosed);
     server.routeChanges?.removeListener(_routeChanged);
     _retry?.cancel();
+    _idleTimer?.cancel();
     _closeChannel();
     super.dispose();
   }

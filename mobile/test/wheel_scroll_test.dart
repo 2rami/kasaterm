@@ -65,6 +65,39 @@ void main() {
     expect(wheels.fold(0, (a, b) => a + b), lessThan(-5));
   });
 
+  testWidgets('폰 폭 보기 — 화면보다 짧은 전체 화면은 바닥이 아니라 위에 붙는다', (tester) async {
+    // 폰이 원본 크기를 안 쥔 동안(보기만)은 데스크톱 칸의 15줄뿐이다 — 바닥에 앉히면 위가 빈다.
+    Future<Rect> body({required bool fullScreen}) async {
+      final g = claudeScreen();
+      await tester.pumpWidget(
+        host(
+          (context) => WrappedCanvas(
+            grid: g,
+            version: g.version,
+            palette: TerminalPalette.of(context),
+            fullScreen: fullScreen,
+          ),
+        ),
+      );
+      await tester.pump();
+      return tester.getRect(
+        find
+            .descendant(
+              of: find.byType(SingleChildScrollView),
+              matching: find.byType(CustomPaint),
+            )
+            .first,
+      );
+    }
+
+    final shell = await body(fullScreen: false);
+    final top = tester.getRect(find.byType(WrappedCanvas)).top;
+    expect(shell.top, greaterThan(top + 200), reason: '셸은 전처럼 바닥(입력줄)에 붙는다');
+    final full = await body(fullScreen: true);
+    expect(full.top, top, reason: '전체 화면은 첫 줄이 맨 위');
+    expect(full.height, 600);
+  });
+
   testWidgets('격자 그대로 보기 — 세로는 휠, 가로는 그대로 민다', (tester) async {
     final g = claudeScreen();
     final wheels = <int>[];

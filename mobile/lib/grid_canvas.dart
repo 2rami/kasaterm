@@ -668,7 +668,13 @@ class WrappedCanvas extends StatefulWidget {
     this.composing,
     this.onViewport,
     this.onWheel,
+    this.fullScreen = false,
   });
+
+  /// 대체 화면(Claude 전체 화면·vim)이다. 지난 줄이 없어 화면보다 짧으면 바닥 대신 위에 붙인다 —
+  /// 폰은 보기만 해서는 원본 크기를 안 바꾸니 데스크톱 칸이 작으면(24×15) 그 줄 수뿐이고, 바닥에
+  /// 앉히면 위쪽이 통째로 빈다. 터미널이 대체 화면을 그리는 자리(맨 위)와도 같다.
+  final bool fullScreen;
 
   /// 앱이 스스로 굴리는 화면(Claude 전체 화면 — 스크롤백 0)이면 세로 끌기를 지난 줄 넘김 대신
   /// 휠 줄로 넘긴다(양수 = 위, 지난 내용).
@@ -959,6 +965,10 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
         }
       }
       final wheel = widget.onWheel;
+      final contentH = math.max(view.rows, 1) * metrics.height;
+      final boxH = widget.fullScreen && constraints.hasBoundedHeight
+          ? math.max(contentH, constraints.maxHeight)
+          : contentH;
       // 스크롤 상자는 내용만큼만 줄어들려 한다 — 느슨한 높이(Row 안 등)에서는 두 줄짜리
       // 상자가 세로 가운데에 떠서 바닥 정렬이 깨진다. 주어진 자리를 통째로 차지시킨다.
       final body = SizedBox.expand(
@@ -981,7 +991,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                       ScrollViewKeyboardDismissBehavior.onDrag,
                   child: SizedBox(
                     width: constraints.maxWidth,
-                    height: math.max(view.rows, 1) * metrics.height,
+                    height: boxH,
                     child: _LinkTaps(
                       lines: view.lines,
                       cols: cols,

@@ -1,9 +1,10 @@
-//! 원본 격자는 마지막으로 만진 쪽을 따른다(tmux `window-size latest`).
+//! 원본 격자는 쓰는 쪽을 따른다(tmux `window-size latest`). 폰까지 묶은 규칙은
+//! docs/webterm-handoff.md 「원본 크기는 쓰는 쪽이 쥔다」 한 곳에 있다.
 //!
 //! 거울만 보고 있을 때는 원본 크기를 안 바꾼다 — 초점 없는 거울은 뷰어 쪽에서
 //! 다시 접어 그린다(`mirror_view`). 데스크톱 뷰어의 사람이 거울 칸에 초점을 두거나
 //! 입력하면 원본 PTY 를 그 칸 크기로 잡고, 원본 기기의 사람이 자기 칸을 만지면
-//! 원본 크기로 되찾는다. 폰은 크기를 몰지 않는다(서버가 폭만 다시 접어 준다).
+//! 원본 크기로 되찾는다(폰이 쥔 것도 같이). 폰은 칠 때만 쥔다.
 //! 옛 호스트는 이 규칙을 몰라 `touch_source` 가 아무것도 안 보낸다.
 use super::*;
 use winit::event::{ElementState, MouseButton, WindowEvent};

@@ -446,7 +446,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       final slug = pane.slug;
       final canChat = _canChat(pane);
       final chat = canChat && paneView.value == PaneView.chat;
-      // 폰 폭으로 접어 보는 터미널이 보이는 동안 원본 격자를 폰 크기로 쥔다(TermSession.holdViewport).
+      // 폰 폭으로 접어 보는 터미널에서 친 동안만 원본 격자를 폰 크기로 쥔다(TermSession.holdViewport).
       final hold = _wrap && !chat;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) s.holdViewport = hold;
@@ -818,6 +818,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         composing: _live ? _composing : null,
         onViewport: s.setViewport,
         onWheel: s.scrollsApp ? s.wheel : null,
+        fullScreen: s.grid.alt,
         // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
         student: pane.isWebShell
             ? null
