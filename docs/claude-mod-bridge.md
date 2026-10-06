@@ -118,3 +118,6 @@ mod 칸에는 붙여넣기 대신 mod 의 `$.prompt.submit` 으로 넣는다 —
 - `submitted` 는 `$.prompt.submit` 이 그 턴을 시작시켰다는 뜻이다(붙여넣기 길의 「Enter 를 썼다」보다 강하다).
   모델이 읽었다는 뜻은 아니다. ack 가 안 오면 영수증은 `uncertain` 이다 — 같은 id 를 다시 내주지 않는다.
 - 옛 붙여넣기 길(`tell_delivery.rs`)은 codex·mod 없는 claude 몫으로 남는다.
+- 길은 받는 칸만 가른다(그 칸 mod 가 살아 있나). 이름(`tell 모모이@기계`)은 CLI 가 보드 주소로 바꿔 `--address` 로 보내고
+  `%N` 은 받는 앱이 같은 주소로 푼다 — 셋 다 같은 영수증 주소다. 같은 칸에 연달아 보낸 쪽지는 앞 것이 들어갈 때까지 줄을 서고,
+  앞 것이 미뤄진 까닭(`waiting:busy` 등)을 함께 싣는다.

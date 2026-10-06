@@ -77,7 +77,15 @@ the input box was visibly empty — 21 of 61 messages on one machine in a day.
 
 Each deferral writes a specific reason, `waiting:<word> — …`, with `<word>` one of
 `draft` (input box has text), `typing` (keystroke in the last 5 s), `composition`,
-`approval`, `closed`, `paste_mode` or `identity`. The CLI prints it in Korean with
+`approval`, `closed`, `paste_mode`, `identity` or `busy` (a mod pane mid-turn).
+Messages to one pane go in order and only the oldest is examined; a deferral copies its
+reason onto the messages queued behind it on that pane, so every receipt, the sender
+notice and the waiting count tell the same story. Before this, a later message kept its
+`stored; waiting for safe empty input` until its turn and looked like it had taken
+another path (2026-10-06: a name tell said `waiting:busy`, an address tell sent two
+seconds later to the same pane still said `stored`, and its sender notice blamed an
+old receiver). A message still `stored` after two minutes is reported to the sender
+as waiting behind an earlier one. The CLI prints the reason in Korean with
 the expiry time. The receiving pane shows `쪽지 N 대기 · <how to release>` on the
 bottom border of its input box while any of its messages has been deferred.
 

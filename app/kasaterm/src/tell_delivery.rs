@@ -313,8 +313,12 @@ fn watch_step(watch: &mut Watch, receipt: &serde_json::Value) -> WatchStep {
         Some("accepted") if !watch.warned && watch.sent_at.elapsed() >= NOTICE_AFTER => {
             watch.warned = true;
             let until = receipt["expires_at_ms"].as_u64().and_then(kasa_socket::tell::clock_hm).unwrap_or_else(||"만료 시각".into());
-            let (cause,remedy) = Hold::from_reason(reason).map_or(("받는 창이 아직 못 받았어요(옛 판이라 까닭을 안 알려 줘요)","받는 창이 비면 들어가요"),
-                |hold|(hold.cause(),hold.remedy()));
+            let (cause,remedy) = match Hold::from_reason(reason) {
+                Some(hold) => (hold.cause(),hold.remedy()),
+                // 받는 쪽이 아직 한 번도 안 본 쪽지 — 같은 칸 앞 쪽지 차례다. 옛 판 탓이 아니다.
+                None if reason == kasa_socket::tell::STORED_REASON => ("받는 창에 먼저 온 쪽지가 아직 안 들어갔어요","앞 쪽지가 들어가면 이어서 들어가요"),
+                None => ("받는 창이 아직 못 받았어요(옛 판이라 까닭을 안 알려 줘요)","받는 창이 비면 들어가요"),
+            };
             WatchStep::Keep(Some(format!(
                 "[쪽지 대기] {head}가 {}분째 못 들어갔어요 — {cause}. {remedy}. {until}까지 못 들어가면 버려져요. 급하면 다른 길로 알리세요. 첫 줄: «{first}»",
                 watch.sent_at.elapsed().as_secs() / 60)))
@@ -903,7 +907,7 @@ mod tests {
     fn held_tells_are_counted_per_receiver_with_the_reason_people_can_act_on() {
         let mut first = record("%15"); first.reason = Hold::Draft.reason().into();
         let mut second = record("%15"); second.reason = Hold::Draft.reason().into();
-        let mut fresh = record("%3"); fresh.reason = "stored; waiting for safe empty input".into();
+        let mut fresh = record("%3"); fresh.reason = kasa_socket::tell::STORED_REASON.into();
         let mut approval = record("%4"); approval.reason = Hold::Approval.reason().into();
         let waiting = waiting_by_surface(&[first,second,fresh,approval]);
         assert_eq!(waiting.get("%15"), Some(&(2,Hold::Draft)));
@@ -930,5 +934,9 @@ mod tests {
         assert!(matches!(watch_step(&mut watch,&delivered), WatchStep::Drop(None)), "들어가면 조용히 놓는다");
         watch.sent_at = Instant::now(); watch.warned = false;
         assert!(matches!(watch_step(&mut watch,&held), WatchStep::Keep(None)), "막 보낸 것은 아직 안 알린다");
+        watch.sent_at = Instant::now() - NOTICE_AFTER;
+        let queued = serde_json::json!({"state":"accepted","reason":kasa_socket::tell::STORED_REASON,"expires_at_ms":0});
+        let WatchStep::Keep(Some(notice)) = watch_step(&mut watch,&queued) else { panic!("줄 선 쪽지도 알린다") };
+        assert!(notice.contains("먼저 온 쪽지") && !notice.contains("옛 판"), "{notice}");
     }
 }

@@ -15,6 +15,8 @@ pub const RECEIPT_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 /// 비운 만큼 길어지고, 만료된 21건 중 9건은 시간이 지나도 뜻이 안 바래는 완료 보고였다. 대신 기다리는 동안
 /// 받는 창 입력칸 아래에 대기 표시가 뜨고, 보낸 창에는 2분 뒤 막힌 까닭과 버릴 시각이, 버리면 그 사실이 간다.
 pub const QUEUE_TTL_SECONDS: u64 = 3600;
+/// 받아 둔 채 전달 고리가 아직 한 번도 안 본 쪽지의 사유. 같은 칸 앞 쪽지 차례를 기다릴 때 남는다.
+pub const STORED_REASON: &str = "stored; waiting for safe empty input";
 
 /// 전달을 미룬 까닭. 영수증 `reason` 의 `waiting:<낱말> — …` 로 실려 보낸 쪽 CLI·받는 쪽 화면이 무엇이
 /// 막았는지 가른다 — 하나로 뭉친 문장으로는 「입력칸이 비었는데 왜」를 못 풀었다(2026-10-01).
@@ -260,7 +262,7 @@ impl Ledger {
         ensure!((1..=3600).contains(&ttl_seconds), "ttl_seconds must be between 1 and 3600");
         let now = now_ms();
         let record = Record { message_id: id.into(), address, body_hash: fingerprint(&body), body,
-            state: State::Accepted, reason: "stored; waiting for safe empty input".into(), accepted_at_ms: now,
+            state: State::Accepted, reason: STORED_REASON.into(), accepted_at_ms: now,
             updated_at_ms: now, expires_at_ms: (now + ttl_seconds * 1000).min(issued_at(id)? + RECEIPT_LIFETIME_MS), reject_if_busy, receiver_agent_pid, title: normalize_title(&title)? };
         self.records.insert(id.into(), record.clone());
         if let Err(error) = self.persist() { self.records.remove(id); return Err(error); }
@@ -289,7 +291,18 @@ impl Ledger {
         record.reason = reason.into();
         record.updated_at_ms = now_ms();
         self.records.insert(id.into(), record.clone());
+        // 전달은 칸마다 맨 앞 쪽지 하나만 본다. 뒤에 줄 선 쪽지는 차례가 올 때까지 받을 때 문장 그대로 남아,
+        // 같은 칸에 보낸 두 쪽지가 앞은 `waiting:busy`, 뒤는 「stored」 로 갈려 다른 길을 탄 것처럼 보였고
+        // 보낸 쪽엔 「옛 판이라 까닭을 안 알려 줘요」가 갔다(2026-10-06). 맨 앞이 미뤄진 까닭을 뒤에도 싣는다.
+        let queued: Vec<Record> = if state == State::Accepted && Hold::from_reason(reason).is_some() {
+            self.records.values().filter(|r| r.state == State::Accepted && r.message_id.as_str() > id
+                && r.address.surface_id == record.address.surface_id && r.reason != reason).cloned().collect()
+        } else { Vec::new() };
+        for behind in &queued {
+            if let Some(r) = self.records.get_mut(&behind.message_id) { r.reason = reason.into(); r.updated_at_ms = record.updated_at_ms; }
+        }
         if let Err(error) = self.persist() {
+            for behind in queued { self.records.insert(behind.message_id.clone(), behind); }
             // A dispatch whose final durable update failed must remain non-retriable.
             self.records.insert(id.into(), if old.state == State::Dispatching { Record {
                 state: State::Uncertain, reason: format!("receipt persistence failed: {error}"), ..old
@@ -427,6 +440,27 @@ mod tests {
         assert!(ledger.pending().is_empty());
         ledger.transition(&first,State::Uncertain,"connection lost").unwrap();
         assert_eq!(ledger.pending().len(),1);
+    }
+    #[test] fn messages_queued_behind_a_held_one_carry_its_reason() {
+        let mut ledger = ledger();
+        let first = new_message_id();
+        let second = new_message_id();
+        let mut other = address(); other.surface_id = "%2".into();
+        let elsewhere = new_message_id();
+        ledger.accept(&first,address(),"first".into(),900).unwrap();
+        ledger.accept(&second,address(),"second".into(),900).unwrap();
+        ledger.accept(&elsewhere,other,"other pane".into(),900).unwrap();
+        ledger.transition(&first,State::Dispatching,"identity proven").unwrap();
+        ledger.transition(&first,State::Accepted,Hold::Busy.reason()).unwrap();
+        assert_eq!(ledger.records[&second].reason, Hold::Busy.reason(), "같은 칸 뒤의 쪽지도 같은 까닭");
+        assert_eq!(ledger.records[&second].state, State::Accepted);
+        assert_eq!(ledger.records[&elsewhere].reason, STORED_REASON, "다른 칸은 그대로");
+        let reopened = Ledger::open({ let path = ledger.path.clone(); drop(ledger); path }).unwrap();
+        assert_eq!(reopened.records[&second].reason, Hold::Busy.reason(), "디스크에도 실린다");
+        let mut ledger = reopened;
+        ledger.transition(&first,State::Dispatching,"handed to the mod").unwrap();
+        ledger.transition(&first,State::Accepted,"mod did not take it while the receiver rested; requeued").unwrap();
+        assert_eq!(ledger.records[&second].reason, Hold::Busy.reason(), "미룬 까닭이 아닌 문장은 뒤로 안 번진다");
     }
     #[test] fn expiration_covers_every_recipient_before_batch_selection() {
         let mut ledger = ledger();
