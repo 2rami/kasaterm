@@ -17,12 +17,16 @@ import UserNotifications
   private var webAuth: ASWebAuthenticationSession?
   private var backgroundChannel: FlutterMethodChannel?
   private var graceTask: UIBackgroundTaskIdentifier = .invalid
+  /// 새 판 설치 뒤 「눌러서 열기」 알림. 새 판이 켜지면 거둔다.
+  private static let releaseNotice = "kasa.release.open"
 
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     UNUserNotificationCenter.current().delegate = self
+    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.releaseNotice])
+    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [Self.releaseNotice])
     if let remote = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
       pendingTap = Self.payload(remote)
     }
@@ -72,6 +76,32 @@ import UserNotifications
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
+      }
+    }
+    // 새 판 설치(다트 `installRelease`). 앞에 떠 있는 앱은 iOS 가 갈아 끼우지 않아 홈으로 비켜서야 설치가 시작되고,
+    // 설치된 앱을 스스로 켤 수는 없어 알림을 남긴다. 비켜서는 공개 API 가 없어 suspend 를 보낸다 — App Store 판이 아니다.
+    let release = FlutterMethodChannel(name: "kasaterm/release", binaryMessenger: messenger)
+    release.setMethodCallHandler { call, result in
+      guard call.method == "stepAside", let args = call.arguments as? [String: Any] else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let content = UNMutableNotificationContent()
+      content.title = args["title"] as? String ?? ""
+      content.body = args["body"] as? String ?? ""
+      content.sound = .default
+      let after = max(5, (args["after"] as? NSNumber)?.doubleValue ?? 45)
+      let request = UNNotificationRequest(
+        identifier: Self.releaseNotice, content: content,
+        trigger: UNTimeIntervalNotificationTrigger(timeInterval: after, repeats: false))
+      let center = UNUserNotificationCenter.current()
+      center.requestAuthorization(options: [.alert, .sound]) { _, _ in
+        center.add(request) { _ in
+          DispatchQueue.main.async {
+            UIApplication.shared.perform(NSSelectorFromString("suspend"))
+            result(nil)
+          }
+        }
       }
     }
     // 계정 로그인 시스템 창. 관문이 kasaterm:// 로 돌려보낸 주소(일회용 code)를 다트에 준다 — 확인 코드 입력이 없다.
@@ -196,6 +226,10 @@ import UserNotifications
   ) {
     // 원격 승인은 앱이 제 띠를 세운다 — 앞에 떠 있을 때 시스템 배너까지 내면 같은 요청이 두 번 보인다.
     let kind = notification.request.content.userInfo["kind"] as? String
+    if notification.request.identifier == Self.releaseNotice {
+      completionHandler([])
+      return
+    }
     if kind == "approval" {
       completionHandler(pushEnabled ? [.list] : [])
       return
@@ -208,7 +242,10 @@ import UserNotifications
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
-    guard pushEnabled else { completionHandler(); return }
+    guard pushEnabled, response.notification.request.identifier != Self.releaseNotice else {
+      completionHandler()
+      return
+    }
     let tap = Self.payload(response.notification.request.content.userInfo)
     if let ch = channel {
       ch.invokeMethod("onTap", arguments: tap)

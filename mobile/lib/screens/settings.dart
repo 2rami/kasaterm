@@ -285,7 +285,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           : (kasaBuild.isEmpty ? '개발 설치' : '빌드 $kasaBuild'),
                       trailing: fresh ? const _Pill('새 판') : null,
                       chevron: fresh,
-                      onTap: fresh ? () => unawaited(r.open()) : null,
+                      onTap: fresh ? () => unawaited(installRelease(context, r)) : null,
                     );
                   },
                 ),
