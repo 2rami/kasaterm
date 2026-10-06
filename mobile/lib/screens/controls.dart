@@ -235,9 +235,13 @@ class SettingsRow extends StatelessWidget {
     this.tone = 0,
     this.chevron = false,
     this.danger = false,
+    this.logo,
   });
 
   final IconData icon;
+
+  /// 타일 안에 아이콘 대신 그릴 그림(공급자 로고). 크기는 아이콘과 같다.
+  final Widget? logo;
   final String title;
   final String? subtitle;
   final Widget? trailing;
@@ -264,7 +268,8 @@ class SettingsRow extends StatelessWidget {
               width: Look.tile,
               height: Look.tile,
               decoration: BoxDecoration(color: tileFill, borderRadius: Look.smallCorners),
-              child: Icon(icon, size: Look.iconSize, color: tileInk),
+              alignment: Alignment.center,
+              child: logo ?? Icon(icon, size: Look.iconSize, color: tileInk),
             ),
             const SizedBox(width: 12),
             Expanded(

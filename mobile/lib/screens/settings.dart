@@ -8,6 +8,8 @@ import '../connection_store.dart';
 import '../main.dart' show designTokens;
 import '../relay_account.dart';
 import '../server.dart';
+import '../status_style.dart';
+import 'account_profile.dart';
 import 'browser_device.dart';
 import 'character_picks.dart';
 import 'device_names.dart';
@@ -51,6 +53,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final Future<AppRelease?> _release = server.latestRelease();
   late final Future<OAuthProviders> _providers = _loadProviders();
 
+  /// 이 계정의 얼굴과 로그인 방법. 계정으로 붙지 않았거나 못 받았으면 null.
+  AccountProfile? _profile;
+  String? _profileError;
+
+  Future<void> _loadProfile() async {
+    final api = _relay();
+    if (api == null) return;
+    try {
+      final profile = await api.profile();
+      if (mounted) {
+        setState(() {
+          _profile = profile;
+          _profileError = null;
+        });
+      }
+    } on AccountException catch (e) {
+      if (mounted) setState(() => _profileError = e.message);
+    } finally {
+      api.close();
+    }
+  }
+
+  Future<void> _editProfile() async {
+    final account = server.account;
+    final profile = _profile;
+    if (account == null || profile == null) return;
+    final next = await showProfileSheet(
+      context,
+      profile: profile,
+      api: () => RelayAccountApi(account.origin, session: account),
+    );
+    if (next != null && mounted) setState(() => _profile = next);
+    // 사진은 시트 안에서 바로 바뀌니 닫기만 해도 다시 받는다.
+    await _loadProfile();
+  }
+
+  Future<void> _editSecret({required bool password}) async {
+    final account = server.account;
+    final profile = _profile;
+    if (account == null || profile == null) return;
+    final next = await showSecretSheet(
+      context,
+      profile: profile,
+      api: () => RelayAccountApi(account.origin, session: account),
+      password: password,
+    );
+    if (next == null || !mounted) return;
+    setState(() => _profile = next);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          password
+              ? '비밀번호를 바꿨어요. 다른 기기의 로그인은 그대로예요.'
+              : '로그인 아이디를 바꿨어요. 다음 로그인부터 새 아이디를 써요.',
+        ),
+      ),
+    );
+  }
+
   Future<OAuthProviders> _loadProviders() async {
     final api = _relay();
     if (api == null) return const OAuthProviders([]);
@@ -60,11 +121,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       api.close();
     }
   }
+
   bool _linking = false;
 
   RelayAccountApi? _relay() {
     final session = server.account;
-    return session == null ? null : RelayAccountApi(session.origin, session: session);
+    return session == null
+        ? null
+        : RelayAccountApi(session.origin, session: session);
   }
 
   /// 지금 계정에 Google·GitHub 로그인을 더한다 — 다음부터 그 단추로 이 계정에 들어온다.
@@ -73,23 +137,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (api == null || _linking) return;
     setState(() => _linking = true);
     try {
-      final id = await (widget.installId ?? const ConnectionStore().installId)();
+      final id =
+          await (widget.installId ?? const ConnectionStore().installId)();
       if (!mounted) return;
       // 같은 허용으로 그 공급자의 일 권한(Gmail·PR)까지 붙인다 — 「일 권한」에서 따로 연결하지 않는다.
-      final r = await showOAuthSheet(context, api: api, provider: provider, machineId: id, link: true, work: true);
+      final r = await showOAuthSheet(
+        context,
+        api: api,
+        provider: provider,
+        machineId: id,
+        link: true,
+        work: true,
+      );
       if (r == null || !mounted) return;
       final text = switch ((r.connected, r.linked)) {
         (true, true) => '${provider.label} 로그인과 일 권한을 연결했어요.',
-        (true, false) => '일 권한을 연결했어요. 이 ${provider.label} 은 다른 KASA 계정의 로그인이라 로그인은 그대로예요.',
+        (true, false) =>
+          '일 권한을 연결했어요. 이 ${provider.label} 은 다른 KASA 계정의 로그인이라 로그인은 그대로예요.',
         (false, true) => '이 계정에 ${provider.label} 로그인을 연결했어요.',
         _ => null,
       };
       if (text != null) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(text)));
       }
       if (r.installUrl case final url?) {
         unawaited(launchUrl(url, mode: LaunchMode.externalApplication));
       }
+      if (r.connected || r.linked) unawaited(_loadProfile());
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -106,6 +182,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _reload();
+    unawaited(_loadProfile());
   }
 
   Future<void> _reload() async {
@@ -131,8 +208,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (t != null && mounted && !server.isClosed) designTokens.value = t;
     } on ServerException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(e.message)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
       }
     } finally {
       if (mounted) setState(() => _pending = null);
@@ -145,7 +223,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) return;
     setState(() {});
     if (problem != null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(problem)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(problem)));
     }
   }
 
@@ -155,8 +235,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (context) => ModalLook(
         child: AlertDialog(
           title: Text(server.account == null ? '폰 주소 지우기' : '로그아웃'),
-          content: Text(server.account == null ? '이 폰에 저장한 주소를 지웁니다.' :
-            '이 폰의 로그인과 연결을 종료합니다. 다른 기기의 로그인은 유지됩니다.'),
+          content: Text(
+            server.account == null
+                ? '이 폰에 저장한 주소를 지웁니다.'
+                : '이 폰의 로그인과 연결을 종료합니다. 다른 기기의 로그인은 유지됩니다.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -179,10 +262,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) => TwinBackdrop(
     child: Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('설정')),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        title: const Text('설정'),
+      ),
       body: FutureBuilder<OAuthProviders>(
         future: _providers,
-        builder: (context, snap) => _list(snap.data?.enabled ?? const <OAuthProvider>[]),
+        builder: (context, snap) =>
+            _list(snap.data?.enabled ?? const <OAuthProvider>[]),
       ),
     ),
   );
@@ -190,147 +277,234 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _list(List<OAuthProvider> providers) {
     final account = server.account;
     // 묶음 차례로 하늘·호박을 번갈아 — 계정 묶음이 빠지면 그 뒤가 한 칸씩 당겨진다.
-    final linking = account != null && providers.isNotEmpty;
-    const phone = 0;
-    final desktop = account != null ? 2 : 1;
+    final look = account != null ? 1 : 0;
+    final desktop = look + 1;
     return ListView(
-          padding: const EdgeInsets.fromLTRB(Look.pagePad, 8, Look.pagePad, Look.groupGap * 2),
+      padding: const EdgeInsets.fromLTRB(
+        Look.pagePad,
+        8,
+        Look.pagePad,
+        Look.groupGap * 2,
+      ),
+      children: [
+        _AccountCard(
+          server: server,
+          profile: _profile,
+          onTap: account != null && _profile != null
+              ? () => unawaited(_editProfile())
+              : null,
+        ),
+        if (account != null)
+          SettingsGroup(
+            title: '계정',
+            children: _accountRows(account, providers),
+          ),
+        SettingsGroup(title: '외형', children: _lookRows(look)),
+        SettingsGroup(title: '데스크톱', children: _desktopRows(desktop)),
+        SettingsGroup(
+          title: '앱',
           children: [
-            _AccountCard(server: server),
-            SettingsGroup(
-              title: '이 폰',
-              children: [
-                SettingsRow(
-                  tone: phone,
-                  icon: Icons.brightness_6_outlined,
-                  title: '밝기',
-                  subtitle: switch (phoneThemeMode.value) {
-                    ThemeMode.system => '데스크톱 테마 그대로',
-                    ThemeMode.light => '밝게 · 같은 테마 색을 밝게',
-                    ThemeMode.dark => '어둡게 · 같은 테마 색을 어둡게',
-                  },
-                  trailing: IconChoice<ThemeMode>(
-                    options: const [
-                      (ThemeMode.system, Icons.desktop_windows_outlined, '데스크톱 따라감'),
-                      (ThemeMode.light, Icons.light_mode_outlined, '밝게'),
-                      (ThemeMode.dark, Icons.dark_mode_outlined, '어둡게'),
-                    ],
-                    selected: phoneThemeMode.value,
-                    onSelect: _setMode,
-                  ),
-                ),
-                ListenableBuilder(
-                  listenable: weather.settings,
-                  builder: (context, _) {
-                    final w = weather.settings.value;
-                    return SettingsRow(
-                      tone: phone,
-                      icon: Icons.umbrella_outlined,
-                      title: '날씨',
-                      subtitle: w.enabled ? '${w.amount.label} · ${w.target.label}' : '꺼짐 · 카드와 단추에 비를 내려요',
-                      chevron: true,
-                      onTap: () => showWeatherSheet(context),
-                    );
-                  },
-                ),
-              ],
-            ),
-            if (account != null)
-              SettingsGroup(
-                title: '계정',
-                children: [
-                  SettingsRow(
-                    key: const Key('work-permissions'),
-                    tone: 1,
-                    icon: Icons.mail_lock_outlined,
-                    title: '일 권한',
-                    subtitle: '연결된 Gmail·GitHub · 메일·PR 승인',
-                    chevron: true,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => WorkPermissionsScreen(
-                          api: () => RelayAccountApi(account.origin, session: account),
-                        ),
-                      ),
-                    ),
-                  ),
-                  SettingsRow(
-                    key: const Key('approval-key'),
-                    tone: 1,
-                    icon: Icons.fingerprint_rounded,
-                    title: 'Face ID 승인 열쇠',
-                    subtitle: '학생의 1Password 요청을 Face ID 로 한 번씩 허락',
-                    chevron: true,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => ApprovalKeyScreen(
-                          api: () => RelayAccountApi(account.origin, session: account),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (linking)
-                  for (final p in providers)
-                    SettingsRow(
-                      key: Key('link-${p.id}'),
-                      tone: 1,
-                      icon: Icons.login_rounded,
-                      title: '${p.label} 연결',
-                      subtitle: p == OAuthProvider.google
-                          ? '로그인과 Gmail 읽기·보내기를 한 번에 붙여요'
-                          : '로그인과 PR 일 권한을 한 번에 붙여요',
-                      chevron: true,
-                      onTap: _linking ? null : () => unawaited(_link(p)),
-                    ),
-                ],
-              ),
-            SettingsGroup(title: '데스크톱', children: _desktopRows(desktop)),
-            SettingsGroup(
-              title: '앱',
-              children: [
-                FutureBuilder<AppRelease?>(
-                  future: _release,
-                  builder: (context, snap) {
-                    final r = snap.data;
-                    final fresh = r != null && r.newer;
-                    return SettingsRow(
-                      tone: desktop + 1,
-                      icon: fresh ? Icons.system_update_outlined : Icons.info_outline_rounded,
-                      title: '앱 판',
-                      subtitle: fresh
-                          ? '새 판 ${r.version} (${r.build}) · 눌러서 설치'
-                          : (kasaBuild.isEmpty ? '개발 설치' : '빌드 $kasaBuild'),
-                      trailing: fresh ? const _Pill('새 판') : null,
-                      chevron: fresh,
-                      onTap: fresh ? () => unawaited(installRelease(context, r)) : null,
-                    );
-                  },
-                ),
-              ],
-            ),
-            SettingsGroup(
-              children: [
-                SettingsRow(
-                  danger: true,
-                  icon: Icons.logout_rounded,
-                  title: account == null ? '주소 바꾸기 · 지우기' : '로그아웃',
-                  subtitle: '이 폰의 연결을 끝내고 로그인 화면으로 돌아가요',
-                  onTap: () => _forget(context),
-                ),
-              ],
+            FutureBuilder<AppRelease?>(
+              future: _release,
+              builder: (context, snap) {
+                final r = snap.data;
+                final fresh = r != null && r.newer;
+                return SettingsRow(
+                  tone: desktop + 1,
+                  icon: fresh
+                      ? Icons.system_update_outlined
+                      : Icons.info_outline_rounded,
+                  title: '앱 판',
+                  subtitle: fresh
+                      ? '새 판 ${r.version} (${r.build}) · 눌러서 설치'
+                      : (kasaBuild.isEmpty ? '개발 설치' : '빌드 $kasaBuild'),
+                  trailing: fresh ? const _Pill('새 판') : null,
+                  chevron: fresh,
+                  onTap: fresh
+                      ? () => unawaited(installRelease(context, r))
+                      : null,
+                );
+              },
             ),
           ],
-        );
+        ),
+        SettingsGroup(
+          children: [
+            SettingsRow(
+              danger: true,
+              icon: Icons.logout_rounded,
+              title: account == null ? '주소 바꾸기 · 지우기' : '로그아웃',
+              subtitle: '이 폰의 연결을 끝내고 로그인 화면으로 돌아가요',
+              onTap: () => _forget(context),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
-  /// 데스크톱 설정을 폰에서 바꾸는 줄 — 강조색·모서리는 데스크톱 「외형」 값이고 누르면 데스크톱이 바뀐다.
-  /// 테마(밝기)는 여기 없다 — 폰에서 밝은 테마를 고르면 맥북까지 밝아졌다(2026-09-10 지적).
-  List<Widget> _desktopRows(int tone) {
+  /// 「계정」 — 로그인 방법(Google·GitHub·아이디·비밀번호)마다 이 계정에 이어졌는지와 그 메일·아이디, 그리고 일 권한.
+  /// 데스크톱 설정 「계정」의 「로그인 방법」과 같은 줄이다.
+  List<Widget> _accountRows(
+    AccountSession account,
+    List<OAuthProvider> providers,
+  ) {
+    const tone = 0;
+    final profile = _profile;
+    final unknown = profile == null ? (_profileError ?? '확인 중이에요') : null;
+    return [
+      for (final p in OAuthProvider.values)
+        _loginRow(
+          p,
+          profile?.linked(p),
+          enabled: providers.contains(p),
+          unknown: unknown,
+        ),
+      if (profile?.login case final login?) ...[
+        SettingsRow(
+          key: const Key('change-login'),
+          tone: tone,
+          icon: Icons.badge_outlined,
+          title: '아이디',
+          subtitle: login,
+          chevron: true,
+          onTap: () => unawaited(_editSecret(password: false)),
+        ),
+        SettingsRow(
+          key: const Key('change-password'),
+          tone: tone,
+          icon: Icons.password_rounded,
+          title: '비밀번호',
+          subtitle: '지금 비밀번호를 확인하고 바꿔요',
+          chevron: true,
+          onTap: () => unawaited(_editSecret(password: true)),
+        ),
+      ] else
+        SettingsRow(
+          tone: tone,
+          icon: Icons.badge_outlined,
+          title: '아이디·비밀번호',
+          subtitle: unknown ?? '없음 · Google·GitHub 로만 들어와요',
+        ),
+      SettingsRow(
+        key: const Key('work-permissions'),
+        tone: tone,
+        icon: Icons.mail_lock_outlined,
+        title: '일 권한',
+        subtitle: '연결된 Gmail·GitHub · 메일·PR 승인',
+        chevron: true,
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => WorkPermissionsScreen(
+              api: () => RelayAccountApi(account.origin, session: account),
+            ),
+          ),
+        ),
+      ),
+      SettingsRow(
+        key: const Key('approval-key'),
+        tone: tone,
+        icon: Icons.fingerprint_rounded,
+        title: 'Face ID 승인 열쇠',
+        subtitle: '학생의 1Password 요청을 Face ID 로 한 번씩 허락',
+        chevron: true,
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ApprovalKeyScreen(
+              api: () => RelayAccountApi(account.origin, session: account),
+            ),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// 공급자 한 줄 — 이어졌으면 메일·아이디와 체크, 아니면 누르면 로그인과 일 권한을 한 번에 붙인다.
+  Widget _loginRow(
+    OAuthProvider p,
+    LinkedLogin? linked, {
+    required bool enabled,
+    String? unknown,
+  }) => SettingsRow(
+    key: Key('link-${p.id}'),
+    tone: 0,
+    icon: Icons.login_rounded,
+    logo: ProviderLogo(p),
+    title: p.label,
+    subtitle: switch (linked) {
+      final LinkedLogin l => l.display.isEmpty ? '연결됨' : l.display,
+      null when unknown != null => unknown,
+      null when !enabled => '이 서버는 아직 연결을 받지 않아요',
+      null =>
+        p == OAuthProvider.google
+            ? '연결하면 로그인과 Gmail 읽기·보내기를 한 번에 붙여요'
+            : '연결하면 로그인과 PR 일 권한을 한 번에 붙여요',
+    },
+    trailing: linked != null
+        ? Icon(
+            Icons.check_circle_rounded,
+            key: Key('linked-${p.id}'),
+            color: StatusStyle.success,
+            size: Look.iconSize,
+          )
+        : null,
+    chevron: enabled,
+    onTap: enabled && !_linking ? () => unawaited(_link(p)) : null,
+  );
+
+  /// 「외형」 — 폰의 밝기·날씨와 데스크톱 강조색·모서리. 데스크톱 설정 「외형」과 같은 묶음이다.
+  List<Widget> _lookRows(int tone) => [
+    SettingsRow(
+      tone: tone,
+      icon: Icons.brightness_6_outlined,
+      title: '밝기',
+      subtitle: switch (phoneThemeMode.value) {
+        ThemeMode.system => '데스크톱 테마 그대로',
+        ThemeMode.light => '밝게 · 같은 테마 색을 밝게',
+        ThemeMode.dark => '어둡게 · 같은 테마 색을 어둡게',
+      },
+      trailing: IconChoice<ThemeMode>(
+        options: const [
+          (ThemeMode.system, Icons.desktop_windows_outlined, '데스크톱 따라감'),
+          (ThemeMode.light, Icons.light_mode_outlined, '밝게'),
+          (ThemeMode.dark, Icons.dark_mode_outlined, '어둡게'),
+        ],
+        selected: phoneThemeMode.value,
+        onSelect: _setMode,
+      ),
+    ),
+    ListenableBuilder(
+      listenable: weather.settings,
+      builder: (context, _) {
+        final w = weather.settings.value;
+        return SettingsRow(
+          tone: tone,
+          icon: Icons.umbrella_outlined,
+          title: '날씨',
+          subtitle: w.enabled
+              ? '${w.amount.label} · ${w.target.label}'
+              : '꺼짐 · 카드와 단추에 비를 내려요',
+          chevron: true,
+          onTap: () => showWeatherSheet(context),
+        );
+      },
+    ),
+    ..._appearanceRows(tone),
+  ];
+
+  /// 데스크톱 「외형」 값을 폰에서 바꾸는 줄 — 강조색·모서리는 누르면 데스크톱이 바뀐다.
+  /// 테마(밝기)는 데스크톱에 안 보낸다 — 폰에서 밝은 테마를 고르면 맥북까지 밝아졌다(2026-09-10 지적).
+  List<Widget> _appearanceRows(int tone) {
     final a = _appearance;
     final busy = _pending != null;
     return [
       if (_loading)
-        SettingsRow(tone: tone, icon: Icons.palette_outlined, title: '외형', subtitle: '데스크톱 설정을 받는 중이에요')
+        SettingsRow(
+          tone: tone,
+          icon: Icons.palette_outlined,
+          title: '외형',
+          subtitle: '데스크톱 설정을 받는 중이에요',
+        )
       else if (a == null)
         SettingsRow(
           tone: tone,
@@ -352,9 +526,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               for (final c in _entries(a, 'accents'))
                 _AccentDot(
                   name: c['name'] as String? ?? '',
-                  color: parseHexColor(c['hex'] as String?) ?? Theme.of(context).colorScheme.primary,
+                  color:
+                      parseHexColor(c['hex'] as String?) ??
+                      Theme.of(context).colorScheme.primary,
                   selected: c['name'] == a['accent'],
-                  onTap: busy || c['name'] is! String ? null : () => _apply('accent', c['name'] as String),
+                  onTap: busy || c['name'] is! String
+                      ? null
+                      : () => _apply('accent', c['name'] as String),
                 ),
             ],
           ),
@@ -379,6 +557,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ],
+    ];
+  }
+
+  /// 데스크톱에서 일어나는 일 — 새 창 학생·학생이 여는 페이지·개발 서버.
+  List<Widget> _desktopRows(int tone) {
+    return [
       // 학생 명단은 계정 공통 설정이라 계정으로 붙었을 때만 — 옛 주소 연결은 계정 동기화가 없다.
       if (server.account case final account?)
         SettingsRow(
@@ -441,7 +625,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _ => Icons.category_outlined,
   };
 
-  static List<Map<String, Object?>> _entries(Map<String, Object?> a, String key) {
+  static List<Map<String, Object?>> _entries(
+    Map<String, Object?> a,
+    String key,
+  ) {
     final v = a[key];
     if (v is! List) return const [];
     return [
@@ -451,11 +638,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
-/// 맨 위 계정 판 — 쌍둥이 그림 · 계정 이름 · 데스크톱까지 가는 길 · 주소.
+/// 맨 위 계정 판 — 계정 사진(없으면 쌍둥이 그림) · 닉네임 · 데스크톱까지 가는 길 · 주소. 누르면 프로필을 바꾼다.
 class _AccountCard extends StatelessWidget {
-  const _AccountCard({required this.server});
+  const _AccountCard({required this.server, this.profile, this.onTap});
 
   final Server server;
+  final AccountProfile? profile;
+  final VoidCallback? onTap;
 
   String _path() => switch (server.pathOf(null)) {
     (true, final int ms) => '${_way()} · ${ms}ms',
@@ -470,25 +659,39 @@ class _AccountCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tone = TwinTone.of(context);
-    final dim = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    final dim = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+    final twins = Container(
+      width: Look.accountArt,
+      height: Look.accountArt,
+      decoration: BoxDecoration(
+        borderRadius: Look.corners,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [tone.skyWash, tone.amberWash],
+        ),
+      ),
+      child: Image.asset(
+        'assets/original/twins.png',
+        cacheWidth: (Look.accountArt * MediaQuery.devicePixelRatioOf(context))
+            .round(),
+      ),
+    );
+    final account = server.account;
     Widget body() => Row(
       children: [
-        Container(
-          width: Look.accountArt,
-          height: Look.accountArt,
-          decoration: BoxDecoration(
-            borderRadius: Look.corners,
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [tone.skyWash, tone.amberWash],
-            ),
+        if (account == null)
+          twins
+        else
+          AccountFace(
+            key: ValueKey(profile?.avatar?.key),
+            avatar: profile?.avatar,
+            api: () => RelayAccountApi(account.origin, session: account),
+            size: Look.accountArt,
+            fallback: twins,
           ),
-          child: Image.asset(
-            'assets/original/twins.png',
-            cacheWidth: (Look.accountArt * MediaQuery.devicePixelRatioOf(context)).round(),
-          ),
-        ),
         const SizedBox(width: Look.cardPad),
         Expanded(
           child: Column(
@@ -496,24 +699,44 @@ class _AccountCard extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                server.account?.label ?? '연결된 주소',
+                profile?.name ?? server.account?.label ?? '연결된 주소',
                 style: theme.textTheme.titleLarge,
                 overflow: TextOverflow.ellipsis,
               ),
               const SizedBox(height: Look.rowGap),
               Text(_path(), style: theme.textTheme.bodySmall),
-              Text(server.describe(), style: dim, overflow: TextOverflow.ellipsis),
+              Text(
+                server.describe(),
+                style: dim,
+                overflow: TextOverflow.ellipsis,
+              ),
             ],
           ),
         ),
       ],
     );
     final changes = server.routeChanges;
-    return Container(
+    final card = Container(
       padding: const EdgeInsets.all(Look.cardPad),
       decoration: tone.cardBox(),
-      child: changes == null ? body() : ListenableBuilder(listenable: changes, builder: (context, _) => body()),
+      child: changes == null
+          ? body()
+          : ListenableBuilder(
+              listenable: changes,
+              builder: (context, _) => body(),
+            ),
     );
+    return onTap == null
+        ? card
+        : Semantics(
+            button: true,
+            label: '프로필 바꾸기',
+            child: GestureDetector(
+              key: const Key('account-card'),
+              onTap: onTap,
+              child: card,
+            ),
+          );
   }
 }
 
@@ -531,8 +754,14 @@ class _Pill extends StatelessWidget {
       height: Look.chipH,
       padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX),
       alignment: Alignment.center,
-      decoration: ShapeDecoration(shape: const StadiumBorder(), color: scheme.primary.withValues(alpha: 0.16)),
-      child: Text(text, style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary)),
+      decoration: ShapeDecoration(
+        shape: const StadiumBorder(),
+        color: scheme.primary.withValues(alpha: 0.16),
+      ),
+      child: Text(
+        text,
+        style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary),
+      ),
     );
   }
 }
@@ -568,9 +797,14 @@ class _AccentDot extends StatelessWidget {
               padding: const EdgeInsets.all(3),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: selected ? scheme.onSurface : Colors.transparent, width: 2),
+                border: Border.all(
+                  color: selected ? scheme.onSurface : Colors.transparent,
+                  width: 2,
+                ),
               ),
-              child: DecoratedBox(decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+              child: DecoratedBox(
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
             ),
           ),
         ),

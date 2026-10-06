@@ -47,6 +47,8 @@ flutter:
     - assets/icons/kasa.png
     - assets/icons/claude.png
     - assets/icons/codex.png
+    - assets/icons/google.png
+    - assets/icons/github.png
     - assets/weather/raindrop_normal.png
   # 데스크톱 렌더러와 같은 짝: 라틴·아이콘은 JetBrains Mono Nerd, 한글은 D2Coding 으로
   # 떨어진다(한글이 정확히 두 칸). 터미널과 UI 글꼴을 분리해 셀 정렬을 보존한다.

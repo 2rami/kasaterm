@@ -20,7 +20,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE=/var/lib/kasa-relay
 MINI_CFG='$HOME/.config/kasaterm'
 # 관문이 --state 옆에서 읽고 쓰는 것 전부. mobile-users.json·relay.json·relay-token 은 데스크톱 쪽이라 뺀다.
-STATE_ITEMS="relay-state.json relay-accounts.json relay-oauth-identities.json relay-usage.json account-sync workspace-assistant connections relay-install"
+STATE_ITEMS="relay-state.json relay-accounts.json relay-oauth-identities.json relay-profiles.json relay-avatars relay-usage.json account-sync workspace-assistant connections relay-install"
 
 seoul() { ssh -o BatchMode=yes "$SEOUL" "$@"; }
 mini() { ssh -o BatchMode=yes "$MINI" "$@"; }

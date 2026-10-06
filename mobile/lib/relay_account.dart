@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
@@ -99,6 +100,105 @@ String accountError(int status) => switch (status) {
   503 => '계정은 로그인되어 있어요. 연결할 데스크톱을 기다리고 있어요.',
   _ => '서버가 요청을 처리하지 못했어요 ($status).',
 };
+
+/// 프로필(닉네임·사진·아이디·비밀번호) 바꾸기의 관문 오류 — 데스크톱 `native_account_profile.rs` 와 같은 말.
+String profileError(String? code, int status) => switch (code) {
+  'bad_credentials' => '지금 비밀번호가 맞지 않아요.',
+  'login_taken' => '이미 누가 쓰는 아이디예요. 다른 아이디를 골라 주세요.',
+  'invalid_login' => '아이디는 소문자·숫자·-·_ 로 2~32자예요.',
+  'weak_password' => '비밀번호는 $minPasswordChars자 이상으로 해 주세요.',
+  'rate_limited' => '시도가 많았어요. 잠시 뒤 다시 해 주세요.',
+  'no_password' => 'Google·GitHub 로 만든 계정이라 비밀번호가 없어요.',
+  'invalid_nickname' => '닉네임은 40자까지예요.',
+  'not_an_image' || 'too_large' => 'PNG·JPEG 사진을 골라 주세요.',
+  _ when status == 404 => '관문이 이 기능을 아직 몰라요. 관문 업데이트가 필요해요.',
+  _ => accountError(status),
+};
+
+/// 관문 `relay_auth::MIN_PASSWORD_CHARS` 와 같다.
+const minPasswordChars = 8;
+
+/// 공급자 사진을 받아도 되는 곳 — 관문 `oauth_accounts::PICTURE_HOSTS` 와 같다.
+const pictureHosts = {'avatars.githubusercontent.com', 'lh3.googleusercontent.com'};
+
+Uri? pictureUrl(Object? value) {
+  final url = value is String ? Uri.tryParse(value) : null;
+  return url != null && url.isScheme('https') && !url.hasPort && url.userInfo.isEmpty && pictureHosts.contains(url.host)
+      ? url
+      : null;
+}
+
+/// 이 계정에 이어진 Google·GitHub 로그인 하나.
+class LinkedLogin {
+  const LinkedLogin({required this.provider, this.display = '', this.picture});
+
+  final OAuthProvider provider;
+
+  /// 확인된 메일(Google)·로그인 이름(GitHub). 화면에만 쓴다.
+  final String display;
+  final Uri? picture;
+}
+
+/// 계정 사진 — 올린 그림(`rev` 가 판)이거나 공급자 사진 주소.
+class ProfileAvatar {
+  const ProfileAvatar({required this.source, this.rev, this.url});
+
+  final String source;
+  final String? rev;
+  final Uri? url;
+
+  bool get uploaded => source == 'upload';
+  String get key => uploaded ? 'upload:$rev' : '$url';
+}
+
+/// 계정의 얼굴과 로그인 방법(`GET /relay/profile`, docs/account-oauth.md 「Profile」).
+class AccountProfile {
+  const AccountProfile({
+    this.login,
+    this.hasPassword = false,
+    this.nickname,
+    this.displayName,
+    this.avatar,
+    this.identities = const [],
+  });
+
+  /// 아이디·비밀번호로 들어올 때 치는 아이디. Google·GitHub 로 만든 계정은 없다.
+  final String? login;
+  final bool hasPassword;
+  final String? nickname;
+  final String? displayName;
+  final ProfileAvatar? avatar;
+  final List<LinkedLogin> identities;
+
+  LinkedLogin? linked(OAuthProvider provider) => identities.where((i) => i.provider == provider).firstOrNull;
+
+  /// 사람에게 보일 이름 — 닉네임, 관문 표시 이름, 아이디 차례.
+  String? get name => [nickname, displayName, login].whereType<String>().where((n) => n.isNotEmpty).firstOrNull;
+
+  factory AccountProfile.fromJson(Map<String, dynamic> json) {
+    String? text(Object? v) => v is String && v.isNotEmpty ? v : null;
+    final avatar = json['avatar'];
+    final source = avatar is Map ? avatar['source'] : null;
+    return AccountProfile(
+      login: text(json['login']),
+      hasPassword: json['has_password'] == true,
+      nickname: text(json['nickname']),
+      displayName: text(json['display_name']),
+      avatar: switch (source) {
+        'upload' when text((avatar as Map)['rev']) != null => ProfileAvatar(source: 'upload', rev: avatar['rev'] as String),
+        'google' || 'github' when pictureUrl((avatar as Map)['url']) != null =>
+          ProfileAvatar(source: source as String, url: pictureUrl(avatar['url'])),
+        _ => null,
+      },
+      identities: [
+        for (final i in (json['identities'] as List?) ?? const [])
+          if (i is Map)
+            if (OAuthProvider.values.where((p) => p.id == i['provider']).firstOrNull case final provider?)
+              LinkedLogin(provider: provider, display: text(i['display']) ?? '', picture: pictureUrl(i['picture'])),
+      ],
+    );
+  }
+}
 
 /// Google·GitHub 로그인의 관문 오류 — 데스크톱 `native_device_account.rs` 의 `safe_error` 와 같은 뜻으로 말한다.
 String oauthError(String? code, int status) => switch (code) {
@@ -403,11 +503,27 @@ class RelayAccountApi {
     String Function(String? code, int status)? error,
     bool delete = false,
     Map<String, String> headers = const {},
+    String? method,
+    List<int>? bytes,
   }) async {
     try {
       final uri = origin.resolve('/relay/$path');
+      Future<http.Response> custom(String method) async {
+        final request = http.Request(method, uri)..headers.addAll(headers);
+        if (bytes != null) {
+          request.headers['content-type'] = 'application/octet-stream';
+          request.bodyBytes = bytes;
+        } else if (body != null) {
+          request.headers['content-type'] = 'application/json';
+          request.body = jsonEncode(body);
+        }
+        return http.Response.fromStream(await _client.send(request));
+      }
+
       final response =
-          await (delete
+          await (method != null
+                  ? custom(method)
+                  : delete
                   ? _client.delete(uri, headers: headers)
                   : body == null
                   ? _client.get(uri, headers: headers)
@@ -649,6 +765,42 @@ class RelayAccountApi {
         return const OAuthResult();
     }
   }
+
+  Future<AccountProfile> profile() async =>
+      AccountProfile.fromJson(await _request('profile', error: profileError));
+
+  /// `nickname` 은 빈 글이면 지운다. `avatar` 는 `google`·`github`(올린 사진을 지운다)·`auto`.
+  Future<AccountProfile> updateProfile({String? nickname, String? avatar}) async => AccountProfile.fromJson(
+    await _request(
+      'profile',
+      method: 'PATCH',
+      body: {'nickname': ?nickname, 'avatar': ?avatar},
+      error: profileError,
+    ),
+  );
+
+  /// 정사각으로 줄인 PNG·JPEG 한 장을 계정 사진으로 올린다.
+  Future<AccountProfile> uploadAvatar(List<int> image) async =>
+      AccountProfile.fromJson(await _request('profile/avatar', method: 'PUT', bytes: image, error: profileError));
+
+  Future<AccountProfile> removeAvatar() async =>
+      AccountProfile.fromJson(await _request('profile/avatar', delete: true, error: profileError));
+
+  /// 올린 계정 사진. 기기 자격증명으로만 받는다.
+  Future<Uint8List> avatarImage() async {
+    final response = await _client.get(origin.resolve('/relay/profile/avatar')).timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200 || !(response.headers['content-type'] ?? '').startsWith('image/')) {
+      throw AccountException(profileError(null, response.statusCode), status: response.statusCode);
+    }
+    return response.bodyBytes;
+  }
+
+  Future<AccountProfile> changeLogin(String password, String login) async => AccountProfile.fromJson(
+    await _request('profile/login', body: {'password': password, 'login': login.trim().toLowerCase()}, error: profileError),
+  );
+
+  Future<void> changePassword(String password, String newPassword) =>
+      _request('profile/password', body: {'password': password, 'new_password': newPassword}, error: profileError);
 
   Future<WorkList> work() async =>
       WorkList.fromJson(await _request('connections', error: workError));
