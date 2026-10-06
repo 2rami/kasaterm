@@ -84,8 +84,7 @@ notice and the waiting count tell the same story. Before this, a later message k
 `stored; waiting for safe empty input` until its turn and looked like it had taken
 another path (2026-10-06: a name tell said `waiting:busy`, an address tell sent two
 seconds later to the same pane still said `stored`, and its sender notice blamed an
-old receiver). A message still `stored` after two minutes is reported to the sender
-as waiting behind an earlier one. The CLI prints the reason in Korean with
+old receiver). The CLI prints the reason in Korean with
 the expiry time. The receiving pane shows `쪽지 N 대기 · <how to release>` on the
 bottom border of its input box while any of its messages has been deferred.
 
@@ -94,16 +93,24 @@ Queue TTL defaults to 3600 s, the maximum. On 2026-10-01 a day of receipts had
 above, and the late deliveries were released at the moment someone pressed Enter.
 What remains is a person's real draft or an approval screen, which lasts as long
 as that person is away, and 9 of the 21 were completion reports whose meaning does
-not age. Waiting is no longer silent, so the longer queue does not hide anything.
+not age. Waiting is visible in the receipt and on the receiving pane, so the longer
+queue does not hide anything.
 
 `notify:{surface,label}` is accepted only on the local socket (the CLI adds the
 sender's `$KASATERM_PANE_ID`; never with `--api`). The sending app removes it before
-routing and watches the receipt every 20 s: after 2 minutes still queued it tells
-the sender pane once, `[쪽지 대기] …` with the reason and the time the message will
-be dropped; on `failed` it sends `[쪽지 못 감] …`, on `uncertain`
-`[쪽지 확인 못 함] …` (same ID only), and on `submitted` it stops silently. Notices
-are ordinary local tells without `notify`, so they never chain. Old receivers
-without reason words still get the notices, with a generic cause.
+routing and watches the receipt every 20 s. It never puts anything into the sender
+pane as a prompt: those notices (`[쪽지 대기]` after 2 minutes queued, `[쪽지 못 감]`,
+`[쪽지 확인 못 함]`) were submitted turns, and on 2026-10-06 they woke senders several
+times an hour mid-work. Waiting and `uncertain` stay in the receipt (`tell --status`)
+and on the receiver's `쪽지 N 대기` label. Only `failed` (dropped) is shown, as a
+20 s toast in the sender pane through its connection mod (`/claude-mod/notices`,
+`docs/claude-mod-bridge.md`): `쪽지 못 감 → <receiver> — <why>. «<first line>»`.
+A toast leaves the transcript and the model untouched, so no turn starts. A status
+line entry was not used because it stays until something clears it and no one owns
+that; a board mark was not used because board changes stream to `board-watch`
+subscribers, often Monitor-driven sessions, which would move the wake-up elsewhere.
+A sender without the mod (codex, claude without it) gets no notice; the receipt is
+the record. `submitted` and `uncertain` end the watch silently.
 A guarded
 input revision detects intervening writes between paste and Enter. Input is never
 cleared; `--force` cannot bypass the checks. A delayed Enter also rechecks the

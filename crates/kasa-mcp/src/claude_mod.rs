@@ -912,6 +912,60 @@ pub fn ack(surface: &str, session: &str, id: &str, submitted: bool, reason: &str
     Ok(())
 }
 
+// ── 보낸 칸 알림 ───────────────────────────────────────────────────────────
+
+/// 보낸 칸에 띄울 한 줄이 mod 를 기다리는 한도. 그동안 안 가져가면(mod 가 죽음·옛 판) 버린다 — 정본은 영수증이다.
+const NOTICE_TTL: Duration = Duration::from_secs(600);
+const NOTICE_CAP: usize = 20;
+
+static NOTICES: LazyLock<Mutex<HashMap<String, Vec<(String, Instant)>>>> = LazyLock::new(Default::default);
+static NOTICES_WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
+
+/// 그 칸 mod 에게 토스트 한 줄을 맡긴다. 프롬프트로 넣으면 그 칸의 턴을 깨운다 — 토스트는 대화에도 모델에도
+/// 안 들어간다. mod 칸이 아니면 띄울 자리가 없어 맡기지 않는다.
+pub fn notice(surface: &str, text: &str) -> bool {
+    if live(surface).is_none() {
+        return false;
+    }
+    push_notice(surface, text);
+    true
+}
+
+fn push_notice(surface: &str, text: &str) {
+    let mut notices = NOTICES.lock().unwrap();
+    let list = notices.entry(surface.to_string()).or_default();
+    list.retain(|(_, at)| at.elapsed() < NOTICE_TTL);
+    if list.len() >= NOTICE_CAP {
+        list.remove(0);
+    }
+    list.push((text.to_string(), Instant::now()));
+    drop(notices);
+    NOTICES_WAKE.notify_waiters();
+}
+
+/// mod 의 긴 폴링 — 그 칸에 맡긴 한 줄을 꺼내 간다. 토스트는 턴과 상관없어 일하는 중에도 연다.
+pub async fn take_notices(surface: &str, hold: Duration) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + hold;
+    loop {
+        let notified = NOTICES_WAKE.notified();
+        let taken: Vec<String> = NOTICES
+            .lock()
+            .unwrap()
+            .remove(surface)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, at)| at.elapsed() < NOTICE_TTL)
+            .map(|(text, _)| text)
+            .collect();
+        if !taken.is_empty() {
+            return taken;
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            return Vec::new();
+        }
+    }
+}
+
 // ── HTTP ─────────────────────────────────────────────────────────────────
 
 async fn local_body(req: HttpRequest) -> Result<Value, Response> {
@@ -997,6 +1051,16 @@ pub fn routes() -> Router {
                 let surface = q.get("surface").cloned().unwrap_or_default();
                 let session = q.get("session").cloned().unwrap_or_default();
                 Json(json!({"messages": take(&surface, &session, hold_of(&q)).await})).into_response()
+            }),
+        )
+        .route(
+            "/claude-mod/notices",
+            get(|Query(q): Query<HashMap<String, String>>, req: HttpRequest| async move {
+                if let Err(r) = local_body(req).await {
+                    return r;
+                }
+                let surface = q.get("surface").cloned().unwrap_or_default();
+                Json(json!({"notices": take_notices(&surface, hold_of(&q)).await})).into_response()
             }),
         )
         .route(
@@ -1209,6 +1273,18 @@ mod tests {
         assert_eq!(got, vec![json!({"id": "kt1.1.a", "body": "hello"})]);
         assert!(take("%t8", "s", Duration::from_millis(10)).await.is_empty());
         assert!(has_offer("%t8"));
+    }
+
+    #[tokio::test]
+    async fn a_notice_wakes_the_waiting_mod_once_and_only_on_its_pane() {
+        let waiting = tokio::spawn(take_notices("%t9", Duration::from_secs(5)));
+        tokio::task::yield_now().await;
+        push_notice("%t9", "쪽지 못 감");
+        assert_eq!(waiting.await.unwrap(), vec!["쪽지 못 감".to_string()]);
+        assert!(take_notices("%t9", Duration::from_millis(10)).await.is_empty());
+        push_notice("%t10", "다른 칸");
+        assert!(take_notices("%t9", Duration::from_millis(10)).await.is_empty());
+        assert!(!notice("%t11", "mod 없는 칸"), "mod 칸이 아니면 맡기지 않는다");
     }
 
     #[test]

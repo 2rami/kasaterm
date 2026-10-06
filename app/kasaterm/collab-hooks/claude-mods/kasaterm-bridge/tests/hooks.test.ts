@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 type Sent = { url: string; body: Record<string, unknown> | null }
@@ -133,4 +133,22 @@ test('a file edit tells the app git may have changed, with the path and the cwd 
     expect.objectContaining({ tool: 'Bash', verb: 'git commit', paths: [], cwd: '/repo' }),
   ])
   expect(JSON.stringify(git)).not.toContain('do not ship')
+})
+
+test('a dropped tell shows as a toast in the sending pane and never as a prompt', async ($, on) => {
+  const clock = mock.clock(on)
+  const submitted: string[] = []
+  const toasts: { text: string; timeoutMs?: number }[] = []
+  const notice = '쪽지 못 감 → 아즈사@맥북 — 기다리다 만료됐어요. «보드 걷기»'
+  const sent = host(on, { '/claude-mod/notices': [{ notices: [notice] }] }, submitted)
+  on('ui.toast', ($, e) => {
+    toasts.push(e)
+  })
+  await $.session.start(START)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(1000)
+  expect(toasts).toEqual([{ text: notice, timeoutMs: 20000 }])
+  expect(submitted).toEqual([])
+  const poll = sent.find(s => s.url.includes('/claude-mod/notices'))
+  expect(poll?.url).toContain('surface=%259')
 })

@@ -22,6 +22,8 @@ const INBOX_WAIT_MS = 20000
 const PERMISSION_ROUNDS = 26
 const SAY_CAP = 2000
 const RESULT_CAP = 600
+// 보낸 쪽지가 버려졌다는 한 줄 — 칸을 보는 사람이 놓치지 않을 만큼 둔다. 포인터를 올리면 더 머문다.
+const NOTICE_TOAST_MS = 20000
 
 type Ask = { id: string; tool: string; agent?: string }
 
@@ -40,6 +42,7 @@ const io = {
   others: [] as Task[],
   lastTasks: '',
   pumping: false,
+  listening: false,
   // 다음 턴을 연 프롬프트가 사람·다른 세션의 말이 아니면(백그라운드 끝남 알림) 활동에 「시킴」으로 안 싣는다.
   quiet: false,
 }
@@ -111,7 +114,10 @@ async function boot($: EngineInterface) {
   await $.env.set('KASATERM_MOD_BRIDGE', '1')
   io.pid = await claudePid($)
   await hello($)
-  $.clock.every(1000, () => void pump($))
+  $.clock.every(1000, () => {
+    void pump($)
+    void listen($)
+  })
 }
 
 async function measure($: EngineInterface) {
@@ -156,6 +162,24 @@ async function pump($: EngineInterface) {
     // 앱이 없으면 다음 박자에 다시 연다.
   } finally {
     io.pumping = false
+  }
+}
+
+// 보낸 칸 알림 — 앱이 맡긴 한 줄(보낸 쪽지가 버려짐)을 토스트로만 띄운다. 프롬프트로 넣으면 이 칸의 턴을
+// 깨워 일을 끊는다 — 토스트는 대화에도 모델에도 안 들어간다. 그래서 일하는 중에도 받는다.
+async function listen($: EngineInterface) {
+  if (io.listening || !io.base) return
+  io.listening = true
+  try {
+    const query = `surface=${encodeURIComponent(io.surface)}&wait_ms=${INBOX_WAIT_MS}`
+    const res = await $.http.fetch(`${io.base}/claude-mod/notices?${query}`)
+    if (!res.ok) return
+    const { notices } = JSON.parse(res.text) as { notices?: string[] }
+    for (const text of notices ?? []) $.ui.toast(text, { timeoutMs: NOTICE_TOAST_MS })
+  } catch {
+    // 앱이 없으면 다음 박자에 다시 연다.
+  } finally {
+    io.listening = false
   }
 }
 

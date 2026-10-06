@@ -479,7 +479,7 @@ fn run() -> Result<Option<Response>> {
         args = board_args;
     }
     let mut request = build_request(&cmd, &args)?;
-    // 줄 선 쪽지가 막히거나 버려지면 보낸 창에 알려 달라고 이 기기 앱에 맡긴다. 다른 기기로 곧장 보내는
+    // 줄 선 쪽지가 버려지면 보낸 창에 토스트로 알려 달라고 이 기기 앱에 맡긴다. 다른 기기로 곧장 보내는
     // `--api` 는 그 기기가 이 창을 모르니 빼고, 창 밖(사람이 친 셸)도 알릴 데가 없어 뺀다.
     if cmd == "tell" && API_TARGET.get().is_none() {
         if let Some(pane) = std::env::var("KASATERM_PANE_ID").ok().filter(|p| !p.is_empty()) {
@@ -589,7 +589,7 @@ fn tell_state_line(receipt: &Value) -> String {
     if let (true, Some(hold)) = (state == "accepted", kasa_socket::tell::Hold::from_reason(reason)) {
         let until = receipt.get("expires_at_ms").and_then(Value::as_u64).and_then(kasa_socket::tell::clock_hm)
             .unwrap_or_else(|| "만료 시각".into());
-        return format!("대기 — {}. {} ({until}까지 못 들어가면 버려지고, 2분 넘게 막히면 이 창에 알려 준다)", hold.cause(), hold.remedy());
+        return format!("대기 — {}. {} ({until}까지 못 들어가면 버려진다. 버려지면 이 창 위 토스트로만 알린다)", hold.cause(), hold.remedy());
     }
     let said = match state {
         "submitted" => "들어갔다(모델이 읽었는지는 별개)",

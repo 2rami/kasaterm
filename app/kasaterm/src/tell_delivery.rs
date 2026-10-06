@@ -212,12 +212,10 @@ fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop
         }
     });
 }
-/// 줄 선 채 이만큼 지나면 보낸 창에 한 번 알린다. 전달은 보통 1초 안에 끝나고(10-01 하루치 중앙값 0.8초),
-/// 그보다 길면 받는 쪽 사람이 풀어야 하는 것이다. 짧은 초안 정리로 울리지 않을 만큼만 둔다.
-const NOTICE_AFTER: Duration = Duration::from_secs(120);
 const WATCH_POLL: Duration = Duration::from_secs(20);
+const WATCH_TICK: Duration = Duration::from_secs(5);
 
-/// 보낸 쪽지 하나 — 보낸 창에 알릴 때까지 지켜본다.
+/// 보낸 쪽지 하나 — 끝날 때까지 지켜본다.
 struct Watch {
     id: String,
     address: serde_json::Value,
@@ -225,7 +223,6 @@ struct Watch {
     label: String,
     first_line: String,
     sent_at: Instant,
-    warned: bool,
     next_poll: Instant,
 }
 
@@ -234,8 +231,8 @@ fn watches() -> &'static std::sync::Mutex<Vec<Watch>> {
     VALUE.get_or_init(Default::default)
 }
 
-/// 이 기기 창이 보낸 쪽지를 맡는다. 보낸 쪽은 `tell --status` 를 따로 보지 않으면 막힌 줄도 버려진 줄도
-/// 몰랐다(2026-10-01: 15분 만료 두 건을 받는 쪽이 먼저 알아챘다).
+/// 이 기기 창이 보낸 쪽지를 맡는다. 보낸 쪽은 `tell --status` 를 따로 보지 않으면 버려진 줄을 몰랐다
+/// (2026-10-01: 15분 만료 두 건을 받는 쪽이 먼저 알아챘다).
 pub(crate) fn watch_sent(receipt: &serde_json::Value, notify: &serde_json::Value, params: &serde_json::Value) {
     if !matches!(receipt["state"].as_str(), Some("accepted" | "dispatching")) { return; }
     let (Some(id), Some(surface)) = (receipt["message_id"].as_str(), notify["surface"].as_str()) else { return };
@@ -248,82 +245,59 @@ pub(crate) fn watch_sent(receipt: &serde_json::Value, notify: &serde_json::Value
     let now = Instant::now();
     watches().lock().unwrap().push(Watch {
         id: id.into(), address: receipt["address"].clone(), notify: surface.into(), label: label.into(),
-        first_line, sent_at: now, warned: false, next_poll: now + WATCH_POLL,
+        first_line, sent_at: now, next_poll: now + WATCH_POLL,
     });
+    // GUI 틱에 붙어 있으면 칸이 다 쉬는 동안 이벤트 루프가 잠들어, 버려진 쪽지를 다음에 화면이 깨어날 때에야
+    // 알렸다(2026-10-06 리그: 만료 뒤 1분 넘게 조용) — 지켜보기는 제 스레드에서 돈다.
+    static WATCHER: std::sync::Once = std::sync::Once::new();
+    WATCHER.call_once(||{ std::thread::spawn(||loop { std::thread::sleep(WATCH_TICK); poll_watches(); }); });
 }
 
-/// 지켜보는 쪽지마다 영수증을 다시 묻고, 알릴 것이 생기면 보낸 창에 tell 한다. 다른 기기 영수증은 HTTP 라
-/// 늦을 수 있어 전달 틱과 다른 스레드에서 돈다.
-fn poll_watches(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 지켜보는 쪽지마다 영수증을 다시 묻고, 버려졌을 때만 보낸 칸 mod 의 토스트로 알린다. 예전엔 대기·버려짐·
+/// 확인 못 함을 보낸 칸에 tell 로 넣었는데, 그것이 정식 프롬프트라 한 시간에 여러 번 보낸 쪽 턴을 깨워 일을
+/// 끊었다(2026-10-06). 대기와 확인 못 함은 영수증과 받는 칸 표시에만 남는다.
+fn poll_watches() {
     let now = Instant::now();
     let due: Vec<(String,serde_json::Value)> = watches().lock().unwrap().iter()
         .filter(|watch|watch.next_poll <= now).map(|watch|(watch.id.clone(),watch.address.clone())).collect();
-    if due.is_empty() || ACTIVE.swap(true,Ordering::AcqRel) { return; }
-    std::thread::spawn(move || {
-        for (id,address) in due {
-            let receipt = kasa_mcp::tell_service::status(&serde_json::json!({"message_id":id,"address":address}));
-            let notice = {
-                let mut list = watches().lock().unwrap();
-                let Some(index) = list.iter().position(|watch|watch.id == id) else { continue };
-                let watch = &mut list[index];
-                watch.next_poll = Instant::now() + WATCH_POLL;
-                let step = match &receipt {
-                    Ok(receipt) => watch_step(watch,receipt),
-                    // 영수증을 못 물으면(다른 기기가 꺼짐 등) 다음 차례에 다시 본다 — 하루가 지나면 영수증째 없다.
-                    Err(_) if watch.sent_at.elapsed() > Duration::from_millis(kasa_socket::tell::RECEIPT_LIFETIME_MS) => WatchStep::Drop(None),
-                    Err(_) => WatchStep::Keep(None),
-                };
-                match step {
-                    WatchStep::Keep(notice) => notice.map(|text|(watch.notify.clone(),text)),
-                    WatchStep::Drop(notice) => {
-                        let notify = watch.notify.clone();
-                        list.remove(index);
-                        notice.map(|text|(notify,text))
-                    }
-                }
+    for (id,address) in due {
+        // 다른 기기 영수증은 HTTP 라 늦을 수 있어 목록 자물쇠 밖에서 묻는다.
+        let receipt = kasa_mcp::tell_service::status(&serde_json::json!({"message_id":id,"address":address}));
+        let notice = {
+            let mut list = watches().lock().unwrap();
+            let Some(index) = list.iter().position(|watch|watch.id == id) else { continue };
+            list[index].next_poll = Instant::now() + WATCH_POLL;
+            let step = match &receipt {
+                Ok(receipt) => watch_step(&list[index],receipt),
+                // 영수증을 못 물으면(다른 기기가 꺼짐 등) 다음 차례에 다시 본다 — 하루가 지나면 영수증째 없다.
+                Err(_) if list[index].sent_at.elapsed() > Duration::from_millis(kasa_socket::tell::RECEIPT_LIFETIME_MS) => WatchStep::Drop(None),
+                Err(_) => WatchStep::Keep,
             };
-            if let Some((surface,text)) = notice {
-                let params = serde_json::json!({"message_id":kasa_socket::tell::new_message_id(),"surface_id":surface,"body":text});
-                let wake = ||proxy.send_event(UserEvent::SafeTellWake).map_err(|_|anyhow::anyhow!("GUI delivery event loop stopped"));
-                if let Err(error) = kasa_mcp::tell_service::submit(&*backend,&params,wake) {
-                    eprintln!("[tell] 보낸 창 {surface} 에 쪽지 알림 실패: {error:#}");
+            match step {
+                WatchStep::Keep => None,
+                WatchStep::Drop(notice) => {
+                    let watch = list.remove(index);
+                    notice.map(|text|(watch.notify,text))
                 }
             }
-        }
-        ACTIVE.store(false,Ordering::Release);
-    });
+        };
+        // mod 없는 칸(codex·mod 없는 claude)에는 턴을 안 깨우고 띄울 자리가 없다 — 영수증이 정본이다.
+        if let Some((surface,text)) = notice { kasa_mcp::claude_mod::notice(&surface,&text); }
+    }
 }
 
-enum WatchStep { Keep(Option<String>), Drop(Option<String>) }
+enum WatchStep { Keep, Drop(Option<String>) }
 
-fn watch_step(watch: &mut Watch, receipt: &serde_json::Value) -> WatchStep {
-    let reason = receipt["reason"].as_str().unwrap_or_default();
-    let head = format!("{} 에게 보낸 쪽지({})", watch.label, watch.id);
-    let first = &watch.first_line;
+fn watch_step(watch: &Watch, receipt: &serde_json::Value) -> WatchStep {
     match receipt["state"].as_str() {
-        Some("submitted") => WatchStep::Drop(None),
         Some("failed") => {
-            let why = if reason == "queued message expired" { "기다리다 만료됐어요".to_string() } else { reason.to_string() };
-            WatchStep::Drop(Some(format!("[쪽지 못 감] {head}가 못 들어가고 버려졌어요 — {why}. 첫 줄: «{first}». 필요하면 새로 보내세요.")))
+            let reason = receipt["reason"].as_str().unwrap_or_default();
+            let why = if reason == "queued message expired" { "기다리다 만료됐어요" } else { reason };
+            // 토스트 칸이 좁아 쪽지 ID 는 잘린다 — 사람은 받는 칸과 첫 줄로 알아보고, ID 는 영수증에 있다.
+            WatchStep::Drop(Some(format!("쪽지 못 감 → {} — {why}. «{}»", watch.label, watch.first_line)))
         }
-        Some("uncertain") => WatchStep::Drop(Some(format!(
-            "[쪽지 확인 못 함] {head}가 들어갔는지 확인 못 했어요 — {reason}. 새로 보내지 말고 `kasaterm-cli tell --status {}` 로 같은 ID 만 확인하세요. 첫 줄: «{first}»",
-            watch.id))),
-        Some("accepted") if !watch.warned && watch.sent_at.elapsed() >= NOTICE_AFTER => {
-            watch.warned = true;
-            let until = receipt["expires_at_ms"].as_u64().and_then(kasa_socket::tell::clock_hm).unwrap_or_else(||"만료 시각".into());
-            let (cause,remedy) = match Hold::from_reason(reason) {
-                Some(hold) => (hold.cause(),hold.remedy()),
-                // 받는 쪽이 아직 한 번도 안 본 쪽지 — 같은 칸 앞 쪽지 차례다. 옛 판 탓이 아니다.
-                None if reason == kasa_socket::tell::STORED_REASON => ("받는 창에 먼저 온 쪽지가 아직 안 들어갔어요","앞 쪽지가 들어가면 이어서 들어가요"),
-                None => ("받는 창이 아직 못 받았어요(옛 판이라 까닭을 안 알려 줘요)","받는 창이 비면 들어가요"),
-            };
-            WatchStep::Keep(Some(format!(
-                "[쪽지 대기] {head}가 {}분째 못 들어갔어요 — {cause}. {remedy}. {until}까지 못 들어가면 버려져요. 급하면 다른 길로 알리세요. 첫 줄: «{first}»",
-                watch.sent_at.elapsed().as_secs() / 60)))
-        }
-        _ => WatchStep::Keep(None),
+        Some("submitted" | "uncertain") => WatchStep::Drop(None),
+        _ => WatchStep::Keep,
     }
 }
 
@@ -509,7 +483,6 @@ impl App {
         }
         let Some(backend) = self.socket_backend.clone() else { return };
         kasa_mcp::claude_mod::sweep_inbox();
-        poll_watches(backend.clone(),self.proxy.clone());
         if BATCH_ACTIVE.swap(true,Ordering::AcqRel) { return; }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -917,26 +890,23 @@ mod tests {
     }
 
     #[test]
-    fn the_sender_hears_once_when_held_and_once_when_dropped() {
-        let mut watch = Watch {
+    fn the_sender_hears_only_a_drop_and_never_while_it_waits() {
+        let watch = Watch {
             id: "kt1.1.0123456789abcdef".into(), address: serde_json::json!({}), notify: "%25".into(),
             label: "아즈사@맥북".into(), first_line: "새 일 — 보드 걷기".into(),
-            sent_at: Instant::now() - NOTICE_AFTER, warned: false, next_poll: Instant::now(),
+            sent_at: Instant::now() - Duration::from_secs(3000), next_poll: Instant::now(),
         };
         let held = serde_json::json!({"state":"accepted","reason":Hold::Draft.reason(),"expires_at_ms":0});
-        let WatchStep::Keep(Some(notice)) = watch_step(&mut watch,&held) else { panic!("2분 넘게 막히면 알린다") };
-        assert!(notice.starts_with("[쪽지 대기] 아즈사@맥북") && notice.contains("쓰던 글") && notice.contains("보드 걷기"), "{notice}");
-        assert!(matches!(watch_step(&mut watch,&held), WatchStep::Keep(None)), "대기 알림은 한 번만");
-        let expired = serde_json::json!({"state":"failed","reason":"queued message expired"});
-        let WatchStep::Drop(Some(gone)) = watch_step(&mut watch,&expired) else { panic!("버려지면 알린다") };
-        assert!(gone.starts_with("[쪽지 못 감]") && gone.contains("만료"), "{gone}");
-        let delivered = serde_json::json!({"state":"submitted","reason":""});
-        assert!(matches!(watch_step(&mut watch,&delivered), WatchStep::Drop(None)), "들어가면 조용히 놓는다");
-        watch.sent_at = Instant::now(); watch.warned = false;
-        assert!(matches!(watch_step(&mut watch,&held), WatchStep::Keep(None)), "막 보낸 것은 아직 안 알린다");
-        watch.sent_at = Instant::now() - NOTICE_AFTER;
+        assert!(matches!(watch_step(&watch,&held), WatchStep::Keep), "오래 막혀도 보낸 칸엔 안 알린다");
         let queued = serde_json::json!({"state":"accepted","reason":kasa_socket::tell::STORED_REASON,"expires_at_ms":0});
-        let WatchStep::Keep(Some(notice)) = watch_step(&mut watch,&queued) else { panic!("줄 선 쪽지도 알린다") };
-        assert!(notice.contains("먼저 온 쪽지") && !notice.contains("옛 판"), "{notice}");
+        assert!(matches!(watch_step(&watch,&queued), WatchStep::Keep));
+        let expired = serde_json::json!({"state":"failed","reason":"queued message expired"});
+        let WatchStep::Drop(Some(gone)) = watch_step(&watch,&expired) else { panic!("버려지면 토스트 한 줄") };
+        assert!(gone.starts_with("쪽지 못 감 → 아즈사@맥북") && gone.contains("만료") && gone.contains("보드 걷기"), "{gone}");
+        assert!(!gone.starts_with('['), "프롬프트 꼴 머리표를 달지 않는다: {gone}");
+        let uncertain = serde_json::json!({"state":"uncertain","reason":"GUI stopped after paste"});
+        assert!(matches!(watch_step(&watch,&uncertain), WatchStep::Drop(None)), "확인 못 함은 영수증에만");
+        let delivered = serde_json::json!({"state":"submitted","reason":""});
+        assert!(matches!(watch_step(&watch,&delivered), WatchStep::Drop(None)), "들어가면 조용히 놓는다");
     }
 }
