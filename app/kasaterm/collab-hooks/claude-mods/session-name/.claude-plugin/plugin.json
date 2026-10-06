@@ -1,0 +1,6 @@
+{
+  "name": "session-name",
+  "version": "0.1.0",
+  "description": "이름 없이 연 claude 세션에 맡은 일로 이름을 한 번 붙인다 — 사람이 붙인 이름은 덮지 않는다",
+  "author": { "name": "kasaterm" }
+}
