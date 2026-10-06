@@ -1,7 +1,12 @@
-//! 풀스크린(대체 화면) claude 칸의 스크롤바·프롬프트 눈금과 프롬프트 이동.
+//! claude 칸의 스크롤바·프롬프트 눈금과 프롬프트 이동. 렌더러가 둘이라 정본도 둘이다.
 //!
-//! 그 화면에서는 claude 가 스크롤을 쥐고 있어 터미널 스크롤백도 줄 번호도 없다. 그래서 칸마다
-//! claude 안에 실은 mod(`collab-hooks/claude-mods/prompt-nav`)가 눈이 되고 손이 된다.
+//! - **classic**: 대화가 이 터미널의 스크롤백에 쌓인다. 줄 번호를 아니 스크롤백(`view_state`)과
+//!   프롬프트 줄(`prompt_anchors`)로 그리고, 이동도 `scroll_to_abs` 한 번이다.
+//! - **풀스크린(대체 화면)**: claude 가 스크롤을 쥐고 있어 터미널 스크롤백도 줄 번호도 없다. 그래서
+//!   칸마다 claude 안에 실은 mod(`collab-hooks/claude-mods/prompt-nav`)가 눈이 되고 손이 된다.
+//!
+//! 막대·눈금 그림과 누름 판정, 단축키(Option·Ctrl+↑↓)는 둘이 같다. 갈리는 것은 이동뿐이다
+//! (`NavSource`). 아래는 풀스크린 쪽 이야기다.
 //!
 //! - **눈**: mod 가 대화 줄의 차례·높이·화면 맨 윗줄을 재서 `<dir>/<pane>.json` 에 쓴다
 //!   (`total`·`top`·`current`·`prompts`). 여기서는 그것을 읽어 칸 오른쪽 여백에 그린다.
@@ -77,6 +82,76 @@ pub(crate) struct NavState {
     pub current: i64,
     #[serde(default)]
     pub prompts: Vec<(i64, String)>,
+    /// classic 칸에서 mod 가 맡긴 이동(`/prompt-nav`). 그 렌더러에선 엔진이 대화 줄을 못 옮긴다.
+    #[serde(default)]
+    pub ask: Option<NavAsk>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub(crate) struct NavAsk {
+    #[serde(default)]
+    pub seq: u64,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub op: String,
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+impl NavAsk {
+    fn op(&self) -> Option<NavOp> {
+        Some(match self.op.as_str() {
+            "prev" => NavOp::Prev,
+            "next" => NavOp::Next,
+            "first" => NavOp::Prompt(0),
+            "last" => NavOp::Last,
+            "bottom" => NavOp::Bottom,
+            "prompt" => NavOp::Prompt(self.index?),
+            _ => return None,
+        })
+    }
+}
+
+/// 막대의 정본 — classic 은 이 터미널의 스크롤백 줄, 풀스크린은 칸 안 mod 가 잰 행.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NavSource {
+    Mod,
+    Scrollback,
+}
+
+/// classic 칸의 스크롤백을 mod 상태와 같은 꼴로 옮긴다 — 같은 막대·같은 판정을 쓰려고.
+/// 행은 세션 시작부터 센 절대 줄이다(`PromptAnchor::abs_line`).
+pub(crate) fn scrollback_state(hist: usize, offset: usize, screen: usize, anchors: &[kasa_pty::PromptAnchor]) -> NavState {
+    let top = hist.saturating_sub(offset) as i64;
+    let prompts: Vec<(i64, String)> = anchors.iter().map(|a| (a.abs_line, a.text.clone())).collect();
+    let current = prompts.iter().rposition(|(row, _)| *row <= top).map_or(-1, |i| i as i64);
+    NavState {
+        session: "scrollback".into(),
+        total: (hist + screen) as i64,
+        top: Some(top),
+        current,
+        prompts,
+        ..Default::default()
+    }
+}
+
+/// 앞뒤 프롬프트 — 지금 턴의 머리가 화면 맨 위보다 위에 있으면 그 머리로, 맨 위에 있으면 하나
+/// 앞으로. mod 의 `target`(nav.ts)과 같은 규칙이다. 다음이 없으면 `None`(대화 끝으로 간다).
+pub(crate) fn step(state: &NavState, down: bool) -> Option<usize> {
+    let n = state.prompts.len();
+    let Some(top) = state.top else {
+        return if down { None } else { n.checked_sub(1) };
+    };
+    let cur = usize::try_from(state.current).ok().filter(|i| *i < n);
+    if down {
+        return cur.map_or(Some(0), |i| Some(i + 1)).filter(|i| *i < n);
+    }
+    match cur {
+        Some(i) if state.prompts[i].0 < top => Some(i),
+        Some(i) => i.checked_sub(1),
+        None => None,
+    }
 }
 
 impl NavState {
@@ -90,7 +165,9 @@ pub(crate) enum NavOp {
     Prev,
     Next,
     Prompt(usize),
+    Last,
     Row(i64),
+    Bottom,
 }
 
 impl NavOp {
@@ -100,6 +177,8 @@ impl NavOp {
             NavOp::Next => r#""op":"next""#.to_string(),
             NavOp::Prompt(i) => format!(r#""op":"prompt","index":{i}"#),
             NavOp::Row(r) => format!(r#""op":"row","row":{r}"#),
+            NavOp::Last => r#""op":"last""#.to_string(),
+            NavOp::Bottom => r#""op":"bottom""#.to_string(),
         };
         format!(r#"{{"seq":{seq},"at":{at},{op}}}"#)
     }
@@ -125,6 +204,7 @@ struct Pending {
 pub(crate) struct NavHit {
     pub pane: String,
     pub pid: String,
+    pub source: NavSource,
     pub track: (f32, f32, f32, f32),
     pub thumb: (f32, f32),
     pub ticks: Vec<(f32, usize)>,
@@ -135,6 +215,7 @@ pub(crate) struct NavHit {
 struct Drag {
     pane: String,
     pid: String,
+    source: NavSource,
     grab: f32,
 }
 
@@ -147,6 +228,8 @@ struct Nav {
     hits: Vec<NavHit>,
     hover: Option<String>,
     drag: Option<Drag>,
+    /// classic 칸마다 이미 한 mod 맡김(`ask`)의 번호.
+    asked: HashMap<String, u64>,
 }
 
 thread_local! {
@@ -159,6 +242,7 @@ thread_local! {
         hits: Vec::new(),
         hover: None,
         drag: None,
+        asked: HashMap::new(),
     });
 }
 
@@ -270,6 +354,81 @@ fn hit_at(x: f32, y: f32) -> Option<NavHit> {
 }
 
 impl crate::App {
+    /// classic 칸의 막대 한 벌 — 그 칸이 스크롤백에 쌓는 claude 가 아니면 `None`.
+    pub(crate) fn scrollback_nav(&mut self, pane: &str) -> Option<NavState> {
+        let (pid, alt_screen) = {
+            let ws = self.ws.lock().ok()?;
+            let alt = ws.panes.get(pane).and_then(|p| p.term()).is_some_and(|t| t.alt_screen);
+            (ws.active_tab_pid(pane), alt)
+        };
+        if alt_screen || kasa_mcp::remote::is_view_pane(&pid) {
+            return None;
+        }
+        let sess = self.pty_for_pane(pane)?.clone();
+        if !matches!(sess.active_agent(), Some(kasa_pty::AgentKind::Claude)) {
+            return None;
+        }
+        let (offset, hist) = sess.view_state();
+        let screen = sess.size().1 as usize;
+        let anchors = self.turn.claude_anchors(&pid, &sess);
+        Some(scrollback_state(hist, offset, screen, &anchors))
+    }
+
+    /// classic 칸 — 스크롤백 줄로 곧장 옮긴다. 갈 곳이 없으면 `false`.
+    fn scrollback_go(&mut self, pane: &str, op: NavOp) -> bool {
+        let Some(state) = self.scrollback_nav(pane) else { return false };
+        let Some(sess) = self.pty_for_pane(pane).cloned() else { return false };
+        let at = |i: Option<usize>| i.and_then(|i| state.prompts.get(i)).map(|(row, _)| *row);
+        let abs = match op {
+            NavOp::Row(row) => Some(row),
+            NavOp::Prompt(i) => at(Some(i)),
+            NavOp::Last => at(state.prompts.len().checked_sub(1)),
+            NavOp::Prev => at(step(&state, false)),
+            NavOp::Next => at(step(&state, true)),
+            NavOp::Bottom => None,
+        };
+        match abs {
+            Some(abs) => {
+                sess.scroll_to_abs(abs);
+            }
+            None if matches!(op, NavOp::Next | NavOp::Bottom) => {
+                if !self.follow_live_tail_at(pane) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    fn nav_go(&mut self, pane: &str, source: NavSource, op: NavOp) {
+        match source {
+            NavSource::Mod => {
+                self.prompt_nav_request(pane, op);
+            }
+            NavSource::Scrollback => {
+                self.scrollback_go(pane, op);
+            }
+        }
+    }
+
+    /// Option·Ctrl+↑↓ — classic claude 칸이면 여기서 스크롤백의 앞뒤 프롬프트로 옮기고 `true`.
+    /// 풀스크린 칸은 `false` 라 키가 그대로 claude 로 가고, 칸 안 mod 의 보이지 않는 단추가 받는다.
+    /// 프롬프트가 하나라도 있으면 갈 곳이 없어도 키를 먹는다 — 흘려 보내면 claude 입력칸이 받는다.
+    pub(crate) fn prompt_nav_key(&mut self, down: bool) -> bool {
+        let Some(pane) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone()) else { return false };
+        let Some(state) = self.scrollback_nav(&pane) else { return false };
+        if state.prompts.is_empty() {
+            return false;
+        }
+        self.scrollback_go(&pane, if down { NavOp::Next } else { NavOp::Prev });
+        true
+    }
+
     fn nav_send(&self, pid: &str, bytes: &[u8]) {
         self.send_bytes_to_surface(Some(pid), bytes);
     }
@@ -382,8 +541,29 @@ impl crate::App {
                 }
             }
         }
+        // classic 칸의 mod 가 맡긴 이동(`/prompt-nav`)을 스크롤백에서 한다. 앱을 다시 켜 처음 보는
+        // 낡은 맡김은 시각으로 거른다.
+        let classic: Vec<(String, String)> = NAV.with(|n| {
+            n.borrow().hits.iter().filter(|h| h.source == NavSource::Scrollback).map(|h| (h.pane.clone(), h.pid.clone())).collect()
+        });
+        for (pane, pid) in classic {
+            let Some(ask) = read_state(&pid, false).and_then(|s| s.ask) else { continue };
+            let done = NAV.with(|n| n.borrow().asked.get(&pid).copied().unwrap_or(0));
+            if ask.seq <= done {
+                continue;
+            }
+            NAV.with(|n| n.borrow_mut().asked.insert(pid.clone(), ask.seq));
+            if (now_ms() as f64 - ask.at).abs() > 3000.0 {
+                continue;
+            }
+            if let Some(op) = ask.op() {
+                self.scrollback_go(&pane, op);
+            }
+        }
         // 그려진 막대의 칸은 mod 가 새로 쓴 것을 보면 다시 그린다.
-        let shown: Vec<String> = NAV.with(|n| n.borrow().hits.iter().map(|h| h.pid.clone()).collect());
+        let shown: Vec<String> = NAV.with(|n| {
+            n.borrow().hits.iter().filter(|h| h.source == NavSource::Mod).map(|h| h.pid.clone()).collect()
+        });
         let mut changed = false;
         for pid in shown {
             let before = NAV.with(|n| n.borrow().cache.get(&pid).and_then(|c| c.mtime));
@@ -402,7 +582,7 @@ impl crate::App {
     pub(crate) fn prompt_nav_press(&mut self, x: f32, y: f32) -> bool {
         let Some(hit) = hit_at(x, y) else { return false };
         if let Some(i) = tick_at(&hit, y) {
-            self.prompt_nav_request(&hit.pane, NavOp::Prompt(i));
+            self.nav_go(&hit.pane, hit.source, NavOp::Prompt(i));
             return true;
         }
         let (ty, th) = hit.thumb;
@@ -410,24 +590,25 @@ impl crate::App {
             y - ty
         } else {
             let row = row_at(&hit, y) - hit.visible / 2;
-            self.prompt_nav_request(&hit.pane, NavOp::Row(row.max(0)));
+            self.nav_go(&hit.pane, hit.source, NavOp::Row(row.max(0)));
             th / 2.0
         };
-        NAV.with(|n| n.borrow_mut().drag = Some(Drag { pane: hit.pane.clone(), pid: hit.pid.clone(), grab }));
+        let drag = Drag { pane: hit.pane.clone(), pid: hit.pid.clone(), source: hit.source, grab };
+        NAV.with(|n| n.borrow_mut().drag = Some(drag));
         self.chrome_dirty = true;
         true
     }
 
     pub(crate) fn prompt_nav_drag_move(&mut self) -> bool {
-        let Some((pane, pid, grab)) =
-            NAV.with(|n| n.borrow().drag.as_ref().map(|d| (d.pane.clone(), d.pid.clone(), d.grab)))
+        let Some((pane, pid, source, grab)) =
+            NAV.with(|n| n.borrow().drag.as_ref().map(|d| (d.pane.clone(), d.pid.clone(), d.source, d.grab)))
         else {
             return false;
         };
         let hit = NAV.with(|n| n.borrow().hits.iter().find(|h| h.pid == pid).cloned());
         if let Some(hit) = hit {
             let row = row_at(&hit, self.cursor_px.1 - grab);
-            self.prompt_nav_request(&pane, NavOp::Row(row));
+            self.nav_go(&pane, source, NavOp::Row(row));
         }
         true
     }
@@ -511,14 +692,30 @@ impl crate::App {
                     self.chrome_dirty = true;
                 }
                 ("state", _) => {
-                    let pid = NAV.with(|n| n.borrow().hits.first().map(|h| h.pid.clone()));
-                    if let Some(s) = pid.and_then(|p| read_state(&p, true)) {
-                        eprintln!("[autonav] state top={:?} total={} current={} prompts={}", s.top, s.total, s.current, s.prompts.len());
+                    let hit = NAV.with(|n| n.borrow().hits.first().cloned());
+                    let s = match &hit {
+                        Some(h) if h.source == NavSource::Scrollback => self.scrollback_nav(&h.pane),
+                        Some(h) => read_state(&h.pid, true),
+                        None => None,
+                    };
+                    if let Some(s) = s {
+                        let src = hit.map(|h| h.source);
+                        eprintln!(
+                            "[autonav] state {src:?} top={:?} total={} current={} prompts={} {:?}",
+                            s.top,
+                            s.total,
+                            s.current,
+                            s.prompts.len(),
+                            s.prompts.iter().map(|(r, t)| format!("{r}:{}", t.chars().take(12).collect::<String>())).collect::<Vec<_>>()
+                        );
                     }
                 }
+                // 사람의 Option+↑↓ 와 같은 길 — classic 칸은 여기서 옮기고, 풀스크린은 claude 로 보낸다.
                 ("key", _) => {
-                    let bytes: &[u8] = if arg == "next" { b"\x1b[1;3B" } else { b"\x1b[1;3A" };
-                    self.send_bytes(bytes);
+                    if !self.prompt_nav_key(arg == "next") {
+                        let bytes: &[u8] = if arg == "next" { b"\x1b[1;3B" } else { b"\x1b[1;3A" };
+                        self.send_bytes(bytes);
+                    }
                 }
                 ("tick", Some(hit)) => {
                     let i = arg.parse::<usize>().unwrap_or(0);
@@ -648,12 +845,59 @@ mod tests {
         assert!(geometry(&s, 0.0, 400.0, 40).is_none());
     }
 
+    fn anchor(abs_line: i64) -> kasa_pty::PromptAnchor {
+        kasa_pty::PromptAnchor { abs_line, text: format!("질문 {abs_line}") }
+    }
+
+    /// classic 칸은 스크롤백 전체가 행이고, 화면 맨 윗줄은 `hist - offset` 이다.
+    #[test]
+    fn scrollback_is_drawn_as_the_same_bar() {
+        let s = scrollback_state(300, 50, 40, &[anchor(10), anchor(200), anchor(280)]);
+        assert_eq!((s.total, s.top, s.current), (340, Some(250), 1));
+        assert_eq!(s.prompts.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![10, 200, 280]);
+        let geo = geometry(&s, 0.0, 340.0, 40).unwrap();
+        assert_eq!(geo.thumb, (250.0, 40.0));
+        let bottom = scrollback_state(300, 0, 40, &[anchor(10)]);
+        assert_eq!((bottom.top, bottom.current), (Some(300), 0));
+        assert_eq!(scrollback_state(0, 0, 40, &[]).current, -1);
+    }
+
+    /// 앞뒤 프롬프트는 mod 의 `target`(nav.ts)과 같은 규칙 — 같은 키가 두 렌더러에서 같게 움직인다.
+    #[test]
+    fn prev_goes_to_the_turn_head_first_and_next_runs_out_at_the_end() {
+        let at = |top| scrollback_state(top as usize, 0, 40, &[anchor(10), anchor(100), anchor(200)]);
+        // 둘째 턴 안을 보는 중 — 먼저 그 턴의 머리로, 머리에 서 있으면 하나 앞으로.
+        assert_eq!(step(&at(150), false), Some(1));
+        assert_eq!(step(&at(100), false), Some(0));
+        assert_eq!(step(&at(10), false), None);
+        assert_eq!(step(&at(150), true), Some(2));
+        assert_eq!(step(&at(250), true), None, "마지막 다음은 대화 끝(맨 아래로)");
+        // 첫 프롬프트보다 위(로고)에서는 다음이 첫 프롬프트다.
+        assert_eq!(step(&at(5), true), Some(0));
+        assert_eq!(step(&at(5), false), None);
+    }
+
+    #[test]
+    fn a_classic_ask_from_the_mod_names_an_op() {
+        let s: NavState = serde_json::from_str(
+            r#"{"session":"s","fullscreen":false,"total":0,"ask":{"op":"prompt","index":2,"seq":4,"at":1791263279302}}"#,
+        )
+        .unwrap();
+        let ask = s.ask.unwrap();
+        assert_eq!((ask.seq, ask.op()), (4, Some(NavOp::Prompt(2))));
+        let next: NavAsk = serde_json::from_str(r#"{"op":"next","seq":1,"at":1}"#).unwrap();
+        assert_eq!(next.op(), Some(NavOp::Next));
+        let odd: NavAsk = serde_json::from_str(r#"{"op":"jump","seq":1,"at":1}"#).unwrap();
+        assert_eq!(odd.op(), None);
+    }
+
     #[test]
     fn a_press_maps_back_to_rows_and_ticks() {
         let geo = geometry(&state(400, 100, &[0, 100, 300]), 0.0, 400.0, 40).unwrap();
         let hit = NavHit {
             pane: "%1".into(),
             pid: "%1".into(),
+            source: NavSource::Mod,
             track: (0.0, 0.0, 9.0, 400.0),
             thumb: geo.thumb,
             ticks: geo.ticks,

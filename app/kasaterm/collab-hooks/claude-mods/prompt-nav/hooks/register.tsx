@@ -1,10 +1,13 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import { freshRequest, metrics, observe, parseCommand, parseItems, target } from './nav'
+import { append, freshRequest, metrics, observe, parseCommand, parseItems, promptLine, target } from './nav'
 import type { Item, Kind, Model, Op, Seen } from './nav'
 
-// 사람이 직접 보낸 줄만 프롬프트다. 이어 온 기록의 줄은 출처 도장이 없어 unclassified 로 온다.
-const PROMPT_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'unclassified'])
+// 턴을 여는 줄은 누가 보냈든 프롬프트다(사람·tell·다른 세션·예약). 이것들만 아니다 — 배경 작업
+// 알림, 다른 세션의 SendMessage 전달, 관찰자 보고, UI 동작의 뒤잇기. bin/transcript-items.py 와 같은 표.
+const NOT_PROMPT = new Set(['task-notification', 'peer-send-message', 'observer', 'observer-activity', 'auto-continuation'])
+// 이동 명령 자신은 턴이 아니다 — 눈금이 되면 「앞 프롬프트」가 먼저 그 줄로 간다.
+const NAV_COMMAND = '/prompt-nav'
 
 const model: Model = { items: [], heights: new Map(), onScreen: new Map(), notPrompt: new Set(), cols: 80, top: null }
 const index = new Map<string, number>()
@@ -21,6 +24,18 @@ const io = {
   loaded: false,
   fullscreen: false,
   agentView: false,
+  ask: null as (Op & { seq: number; at: number }) | null,
+}
+
+// 세션이 바뀌면(/clear·/resume) 줄 차례도 잰 높이도 그 세션 것이 아니다.
+function reset() {
+  io.loaded = false
+  model.items = []
+  index.clear()
+  model.heights.clear()
+  model.onScreen.clear()
+  model.notPrompt.clear()
+  model.top = null
 }
 
 function replace(items: Item[]) {
@@ -30,17 +45,16 @@ function replace(items: Item[]) {
   io.loaded = true
 }
 
-// 기록 도우미가 모르는 줄은 그 뒤에 새로 생긴 줄이다(이번 턴의 질문·답). 그려진 차례로 붙인다.
+// 기록 도우미가 모르는 줄은 그 뒤에 새로 생긴 줄이다(이번 턴의 질문·답).
 function remember(id: string, k: Kind, text: string) {
   if (!io.loaded || io.agentView || index.has(id)) return
   const lines = text.split('\n')
-  index.set(id, model.items.length)
-  model.items.push({
+  append(model, index, {
     id,
     k,
     l: lines.length,
     c: lines.reduce((n, line) => n + line.length, 0),
-    t: k === 'u' ? (lines[0] ?? '').slice(0, 80) : '',
+    t: k === 'u' ? promptLine(text) : '',
   })
 }
 
@@ -87,6 +101,7 @@ async function flush($: EngineInterface) {
     top: m.top,
     current: m.current,
     prompts: m.prompts.map(p => [p.row, p.text]),
+    ask: io.ask,
   }
   const key = JSON.stringify(body)
   if (key === io.last) return
@@ -98,6 +113,7 @@ async function flush($: EngineInterface) {
 // 점프하면 화면을 떠난 줄은 다시 보고되지 않으므로 지금까지의 보고를 비우고 새 보고로만 맨
 // 윗줄을 정한다. 스크롤이 끝날 때까지 보고가 하나도 없으면(이미 그 자리) 목표를 맨 윗줄로 둔다.
 async function go($: EngineInterface, op: Op): Promise<string | undefined> {
+  if (!io.fullscreen) return ask($, op)
   const to = target(model, op)
   if (!to) return 'no prompt there'
   const before = { onScreen: new Map(model.onScreen), top: model.top }
@@ -111,6 +127,15 @@ async function go($: EngineInterface, op: Op): Promise<string | undefined> {
     model.top = { id: to.id, first: 0 }
   }
   return result.deny
+}
+
+// classic 렌더러는 대화가 터미널 스크롤백에 쌓여 엔진이 그 줄을 스크롤하지 못한다. kasaterm 칸이면
+// 상태 파일의 ask 로 맡기고, kasaterm 이 자기 스크롤백의 프롬프트 줄로 옮긴다.
+async function ask($: EngineInterface, op: Op): Promise<string | undefined> {
+  if (!io.state) return 'the classic renderer keeps the transcript in terminal scrollback'
+  io.ask = { ...op, seq: (io.ask?.seq ?? 0) + 1, at: await $.clock.now() }
+  await flush($)
+  return undefined
 }
 
 async function readRequest($: EngineInterface): Promise<(Op & { seq: number }) | null> {
@@ -189,20 +214,25 @@ export const register: Register = on => {
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
     io.session = e.session_id
-    io.loaded = false
+    // 압축 뒤에도 화면은 지난 줄을 그대로 둔다(2026-10-06 실측). 기록은 압축 경계에서 끊기니 다시
+    // 읽으면 화면에 있는 줄을 잃는다 — 가진 차례에 새 줄(경계·요약)을 그려지는 대로 붙인다.
+    if (e.source === 'compact') return result
+    reset()
     void load($, e.transcript_path)
     return result
   })
 
   on('command.run', { command: 'prompt-nav' }, async ($, e) => {
+    io.fullscreen = e.presentation.isFullscreen
     const op = parseCommand(e.args)
     const deny = op ? await go($, op) : 'prev · next · first · last · 번호 중 하나'
     return deny ? { text: `prompt-nav: ${deny}` } : {}
   })
 
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
-    if (!PROMPT_ORIGINS.has(e.props.origin.kind)) model.notPrompt.add(e.requestId)
-    see($, e.requestId, 'u', e.props.text, e.props.onScreen, e.viewport)
+    const prompt = !NOT_PROMPT.has(e.props.origin.kind) && !e.props.text.startsWith(NAV_COMMAND)
+    if (!prompt) model.notPrompt.add(e.requestId)
+    see($, e.requestId, prompt ? 'u' : 'n', e.props.text, e.props.onScreen, e.viewport)
     return next(e)
   })
 
@@ -221,6 +251,7 @@ export const register: Register = on => {
   // 스크롤할 수 있다.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     io.agentView = e.props.view.agentId !== undefined
+    if (e.viewport?.isFullscreen !== undefined) io.fullscreen = e.viewport.isFullscreen
     const below = await next(e)
     if (e.surface !== 'terminal' || e.props.hasSurvey) return below
     const { Box, Button } = $.ui.resolve(e)

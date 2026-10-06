@@ -950,9 +950,10 @@ impl App {
             Option<(f32, f32, f32, f32)>,
         );
         let mut sticky_pill_slots: Vec<StickySlot> = Vec::new();
-        // 풀스크린 claude 칸의 스크롤바 — (pane, 백엔드 pid, 격자 오른쪽 끝, 대화 위, 대화 높이,
-        // 대화 행 수, mod 상태). logical px.
-        let mut nav_slots: Vec<(String, String, f32, f32, f32, i64, crate::prompt_nav::NavState)> = Vec::new();
+        // claude 칸의 스크롤바 — (pane, 백엔드 pid, 정본, 격자 오른쪽 끝, 대화 위, 대화 높이,
+        // 대화 행 수, 상태). logical px.
+        type NavSlot = (String, String, crate::prompt_nav::NavSource, f32, f32, f32, i64, crate::prompt_nav::NavState);
+        let mut nav_slots: Vec<NavSlot> = Vec::new();
         // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, ↡ rect, 헤더 내용). logical px.
         // 화살표 rect 는 갈 곳이 있을 때만 담긴다(흐린 화살표는 눌러도 무반응).
         type TurnSlot = (
@@ -986,11 +987,18 @@ impl App {
                     .filter(|p| p.scroll_from_bottom > 0 || sess.view_state().0 > 0)
                     .and_then(|p| p.top_abs);
                 let pid = self.ws.lock().unwrap().active_tab_pid(&id);
-                if let Some(h) = self.turn.header_at(&pid, &sess, viewer_top) {
+                let claude = matches!(sess.active_agent(), Some(kasa_pty::AgentKind::Claude));
+                if let Some(h) = self.turn.header_at(&pid, &sess, viewer_top, claude) {
                     out.insert(id, h);
                 }
             }
             out
+        };
+        // classic claude 칸의 스크롤바 — 앵커 캐시가 `&mut self` 라 헤더처럼 락 전에 짓는다.
+        let scrollback_navs: std::collections::HashMap<String, crate::prompt_nav::NavState> = {
+            let ids: Vec<String> =
+                self.ws.lock().ok().map(|ws| ws.panes.keys().cloned().collect()).unwrap_or_default();
+            ids.into_iter().filter_map(|id| self.scrollback_nav(&id).map(|s| (id, s))).collect()
         };
         // 인라인 이미지 이번 프레임 배치(`InlineSlot`).
         let mut inline_slots: Vec<crate::render::terminal_scene::InlineSlot> = Vec::new();
@@ -1308,28 +1316,40 @@ impl App {
                 let runs_claude = composition.runs_claude;
                 let true_char = composition.true_char;
                 let tab_pid = composition.tab_pid;
-                // 대체 화면 claude 는 스크롤을 자기가 쥐어 터미널 스크롤백이 없다 — 칸 안의 mod 가
-                // 잰 위치로 오른쪽 여백에 막대를 세운다(prompt_nav.rs).
-                if runs_claude
-                    && !independent_view
-                    && chat_slot.is_none()
-                    && pane.term().is_some_and(|t| t.alt_screen)
-                {
-                    if let Some(state) = crate::prompt_nav::live_state(&tab_pid) {
-                        let ch = self.cell.h * pane_font_scale;
-                        // 입력 상자 위 빈 줄 하나까지는 대화가 아니다.
-                        let rows = crate::screenread::pinned_input_top(&composed)
-                            .unwrap_or(composed.len())
-                            .saturating_sub(1);
-                        let right = body_left + cols_now as f32 * self.cell.w * pane_font_scale;
+                // 칸 오른쪽 여백의 스크롤바(prompt_nav.rs). 대체 화면 claude 는 스크롤을 자기가 쥐어
+                // 터미널 스크롤백이 없으니 칸 안의 mod 가 잰 위치로, classic 은 이 터미널의 스크롤백으로.
+                if runs_claude && !independent_view && chat_slot.is_none() {
+                    let ch = self.cell.h * pane_font_scale;
+                    let right = body_left + cols_now as f32 * self.cell.w * pane_font_scale;
+                    if pane.term().is_some_and(|t| t.alt_screen) {
+                        if let Some(state) = crate::prompt_nav::live_state(&tab_pid) {
+                            // 입력 상자 위 빈 줄 하나까지는 대화가 아니다.
+                            let rows = crate::screenread::pinned_input_top(&composed)
+                                .unwrap_or(composed.len())
+                                .saturating_sub(1);
+                            nav_slots.push((
+                                id.clone(),
+                                tab_pid.clone(),
+                                crate::prompt_nav::NavSource::Mod,
+                                right,
+                                body_top,
+                                rows as f32 * ch,
+                                rows as i64,
+                                state,
+                            ));
+                        }
+                    } else if let Some(state) = scrollback_navs.get(id.as_str()) {
+                        // 화면 전체가 스크롤백의 창이다 — 입력 상자도 대화와 함께 흘러간다.
+                        let rows = composed.len();
                         nav_slots.push((
                             id.clone(),
                             tab_pid.clone(),
+                            crate::prompt_nav::NavSource::Scrollback,
                             right,
                             body_top,
                             rows as f32 * ch,
                             rows as i64,
-                            state,
+                            state.clone(),
                         ));
                     }
                 }
@@ -2684,7 +2704,7 @@ impl App {
             paint_student_overlays(g, &student_slots, anim_ms);
             let nav_active = crate::prompt_nav::hover_pane();
             let mut nav_hits = Vec::new();
-            for (pane_id, pid, right, top, track_h, rows, state) in &nav_slots {
+            for (pane_id, pid, source, right, top, track_h, rows, state) in &nav_slots {
                 let Some(geo) = crate::prompt_nav::geometry(state, *top, *track_h, *rows) else {
                     continue;
                 };
@@ -2695,6 +2715,7 @@ impl App {
                 nav_hits.push(crate::prompt_nav::NavHit {
                     pane: pane_id.clone(),
                     pid: pid.clone(),
+                    source: *source,
                     // 누름 자리는 막대보다 넓되 칸 경계(나누기 손잡이)는 남긴다.
                     track: (right - 4.0, *top, PANE_INNER_X + 3.0, *track_h),
                     thumb: geo.thumb,

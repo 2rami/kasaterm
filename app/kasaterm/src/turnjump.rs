@@ -88,12 +88,12 @@ pub(crate) fn turn_hit_at(x: f32, y: f32) -> Option<(String, TurnHit)> {
 #[derive(Default)]
 pub(crate) struct TurnJump {
     mirror_targets: HashMap<String, i64>,
-    /// pane id → (스캔했을 때의 히스토리 길이, 그때의 앵커들).
+    /// pane id → (스캔했을 때의 히스토리 길이, claude 칸이었나, 훑은 때, 그때의 앵커들).
     ///
     /// 히스토리 길이를 키로 쓰는 이유: 줄이 늘면 앵커의 절대 번호가 그대로여도
     /// **새 질문이 생겼을 수 있고**, 상한에 닿아 회전하면 번호 자체가 밀린다.
     /// 길이가 그대로면 둘 다 아니므로 다시 훑을 필요가 없다.
-    cache: HashMap<String, (usize, Vec<PromptAnchor>)>,
+    cache: HashMap<String, (usize, bool, Instant, Vec<PromptAnchor>)>,
     /// `KASATERM_AUTOTURNCLICK` 예약 — (발사 시각, 누를 자리). struct App 을 안
     /// 늘리려고 여기 둔다(다른 하네스는 App 필드를 쓰지만 이쪽은 자기 통이 있다).
     autoclick: Option<(Instant, String)>,
@@ -104,7 +104,13 @@ impl TurnJump {
     pub(crate) fn clear_mirror_target(&mut self, pid: &str) { self.mirror_targets.remove(pid); }
     /// pane 하나의 이번 프레임 헤더. 라이브 바닥(offset 0)이면 `None` — 평소 화면을
     /// 가리지 않는다는 규칙이 여기 한 줄로 걸린다.
-    pub(crate) fn header_at(&mut self, pane_id: &str, sess: &kasa_pty::PtySession, viewer_top: Option<i64>) -> Option<TurnHeader> {
+    pub(crate) fn header_at(
+        &mut self,
+        pane_id: &str,
+        sess: &kasa_pty::PtySession,
+        viewer_top: Option<i64>,
+        claude: bool,
+    ) -> Option<TurnHeader> {
         let (offset, hist) = sess.view_state();
         if std::env::var_os("KASATERM_TURN_DEBUG").is_some() && offset != 0 {
             eprintln!("[turn] pane={pane_id} offset={offset} hist={hist}");
@@ -112,12 +118,7 @@ impl TurnJump {
         if offset == 0 && viewer_top.is_none() {
             return None;
         }
-        let entry = self.cache.entry(pane_id.to_string());
-        let (cached_hist, anchors) = entry.or_insert_with(|| (usize::MAX, Vec::new()));
-        if *cached_hist != hist {
-            *anchors = sess.prompt_anchors();
-            *cached_hist = hist;
-        }
+        let anchors = self.scan(pane_id, sess, claude);
         if std::env::var_os("KASATERM_TURN_DEBUG").is_some() {
             eprintln!("[turn]   anchors={}", anchors.len());
         }
@@ -139,6 +140,39 @@ impl TurnJump {
             next_abs: anchors.get(cur + 1).map(|a| a.abs_line),
             cells: sess.row_at_abs(cur_abs),
         })
+    }
+
+    /// 스크롤백의 프롬프트 줄 — 히스토리 길이가 그대로면 다시 안 훑는다.
+    ///
+    /// claude 칸은 `❯` 줄만 남긴다. claude 는 tell 같은 plugin 프롬프트 위에 출처 줄(`› Prompt from
+    /// the … plugin`)을 codex 의 마커로 그려(2026-10-06 실측), 거르지 않으면 한 턴이 눈금 둘이 된다.
+    /// 이동 명령(`/prompt-nav`) 줄도 턴이 아니다 — mod 의 `NAV_COMMAND` 와 같다.
+    ///
+    /// 바닥에서 출력이 흐르면 히스토리 길이가 프레임마다 는다. 그때마다 최대 10만 줄을 훑지 않게
+    /// 200ms 에 한 번만 다시 훑는다 — 새 질문은 턴 머리에 생기고, 뒤따르는 출력이 다음 프레임을
+    /// 부른다. 올려 보는 중이거나 길이가 줄면(지우기·폭 바꿈) 곧장 훑는다.
+    fn scan(&mut self, pid: &str, sess: &kasa_pty::PtySession, claude: bool) -> &Vec<PromptAnchor> {
+        let (offset, hist) = sess.view_state();
+        let entry =
+            self.cache.entry(pid.to_string()).or_insert_with(|| (usize::MAX, false, Instant::now(), Vec::new()));
+        let streaming = offset == 0 && entry.0 != usize::MAX && hist > entry.0 && entry.1 == claude;
+        let settled = !streaming || entry.2.elapsed() >= std::time::Duration::from_millis(200);
+        if (entry.0 != hist || entry.1 != claude) && settled {
+            let mut anchors = sess.prompt_anchors();
+            if claude {
+                anchors.retain(|a| {
+                    !a.text.starts_with("/prompt-nav")
+                        && sess.row_at_abs(a.abs_line).and_then(|row| row.first().map(|c| c.ch)) == Some('\u{276f}')
+                });
+            }
+            *entry = (hist, claude, Instant::now(), anchors);
+        }
+        &entry.3
+    }
+
+    /// classic claude 칸의 스크롤바 눈금 — 라이브 바닥에서도 읽으므로 헤더와 달리 offset 을 안 본다.
+    pub(crate) fn claude_anchors(&mut self, pid: &str, sess: &kasa_pty::PtySession) -> Vec<PromptAnchor> {
+        self.scan(pid, sess, true).clone()
     }
 
     /// pane 이 사라졌으면 캐시도 버린다 — 닫힌 pane 의 앵커를 들고 있을 이유가 없고,

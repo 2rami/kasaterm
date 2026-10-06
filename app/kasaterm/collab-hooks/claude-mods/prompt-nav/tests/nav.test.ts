@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { estimate, freshRequest, metrics, observe, parseCommand, parseItems, target } from '../hooks/nav'
+import { append, estimate, freshRequest, metrics, observe, parseCommand, parseItems, promptLine, target } from '../hooks/nav'
 import type { Item, Model } from '../hooks/nav'
 
 function item(id: string, k: Item['k'], l = 1): Item {
@@ -48,6 +48,55 @@ describe('metrics', () => {
     expect(estimate({ id: 'x', k: 'a', l: 3, c: 0, t: '' }, 80)).toBe(4)
     expect(estimate({ id: 'x', k: 'a', l: 1, c: 760, t: '' }, 80)).toBe(11)
     expect(estimate({ id: 'x', k: 't', l: 1, c: 0, t: '' }, 80)).toBe(3)
+    expect(estimate({ id: 'x', k: 'n', l: 1, c: 0, t: '' }, 80)).toBe(2)
+  })
+
+  test('a drawn row that is no prompt keeps its place and takes no tick', () => {
+    const m = model()
+    m.items.splice(2, 0, item('n1', 'n'))
+    m.heights.set('n1', 2)
+    const at = metrics(m)
+    expect(at.total).toBe(44)
+    expect(at.prompts.map(p => [p.id, p.row])).toEqual([['u1', 0], ['u2', 14], ['u3', 36]])
+  })
+})
+
+describe('append', () => {
+  test('a new row goes after the last one', () => {
+    const m = model()
+    const index = new Map(m.items.map((it, i) => [it.id, i]))
+    append(m, index, item('u4', 'u'))
+    expect(m.items.map(it => it.id).slice(-2)).toEqual(['a3', 'u4'])
+    expect(index.get('u4')).toBe(6)
+  })
+
+  test('the same prompt drawn again under a new id takes the old place', () => {
+    const m = model()
+    const index = new Map(m.items.map((it, i) => [it.id, i]))
+    const typed = { id: 'c1', k: 'u' as const, l: 1, c: 8, t: '/compact' }
+    append(m, index, typed)
+    append(m, index, { ...typed, id: 'c2' })
+    expect(m.items.map(it => it.id).slice(-2)).toEqual(['a3', 'c2'])
+    expect(index.has('c1')).toBe(false)
+    expect(metrics(m).prompts.map(p => p.id)).toEqual(['u1', 'u2', 'u3', 'c2'])
+  })
+})
+
+describe('promptLine', () => {
+  test('a tell is named by its body, not the engine framing', () => {
+    expect(promptLine('The kasaterm-bridge plugin sent a message:\n⟦아즈사⟧ 할 일\n\n끝')).toBe('⟦아즈사⟧ 할 일')
+    expect(promptLine('⟦아즈사⟧ 할 일\n\n끝')).toBe('⟦아즈사⟧ 할 일')
+    expect(promptLine('  그냥 질문  ')).toBe('그냥 질문')
+  })
+
+  test('a queued tell and its framed row are one prompt', () => {
+    const m = model()
+    const index = new Map(m.items.map((it, i) => [it.id, i]))
+    const row = (id: string, text: string) => ({ id, k: 'u' as const, l: 1, c: 0, t: promptLine(text) })
+    append(m, index, row('queued', '⟦미도리⟧ 열셋째'))
+    append(m, index, row('placeholder', '⟦미도리⟧ 열셋째'))
+    append(m, index, row('stored', 'The kasaterm-bridge plugin sent a message:\n⟦미도리⟧ 열셋째\n\nThis is how'))
+    expect(metrics(m).prompts.map(p => p.id)).toEqual(['u1', 'u2', 'u3', 'stored'])
   })
 })
 
@@ -86,12 +135,12 @@ describe('target', () => {
     expect(target(m, { op: 'prev' })).toEqual({ id: 'u1', block: 'start' })
   })
 
-  test('next goes to the following prompt and stops after the last', () => {
+  test('next goes to the following prompt and past the last to the end of the conversation', () => {
     const m = model()
     observe(m, 'a2', { first: 5, last: 19, of: 20 }, indexOf(m))
     expect(target(m, { op: 'next' })).toEqual({ id: 'u3', block: 'start' })
     m.top = { id: 'u3', first: 0 }
-    expect(target(m, { op: 'next' })).toBe(null)
+    expect(target(m, { op: 'next' })).toEqual({ id: 'a3', block: 'end' })
   })
 
   test('a row lands on the row that holds it', () => {
@@ -122,8 +171,8 @@ describe('requests', () => {
   })
 
   test('the transcript helper output is read row by row', () => {
-    const items = parseItems('[["a","u",1,4,"hi"],["b","x",1,1,""],["c","t",2,0,""],7]')
-    expect(items.map(it => it.id)).toEqual(['a', 'c'])
+    const items = parseItems('[["a","u",1,4,"hi"],["b","x",1,1,""],["c","t",2,0,""],["d","n",1,0,""],7]')
+    expect(items.map(it => it.id)).toEqual(['a', 'c', 'd'])
     expect(items[0]?.t).toBe('hi')
   })
 })

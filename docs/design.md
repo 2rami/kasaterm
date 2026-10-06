@@ -249,18 +249,24 @@
 - 격리 검증: `KASATERM_CHAT_FIXTURE=<jsonl>`(디버그 판만, 묶인 기록 대신 그 파일) ·
   `KASATERM_AUTOCHAT="11000:toggle;14000:draft=글;14500:send;16000:pick=0;20000:open;21000:scroll=9999;22000:hovermenu"`.
 
-### 풀스크린 claude 스크롤바·프롬프트 눈금 (`prompt_nav.rs`)
+### claude 스크롤바·프롬프트 눈금 (`prompt_nav.rs`)
 
-claude 가 대체 화면에서 스크롤을 쥔 칸에만 선다. 위치는 칸 안 mod(`collab-hooks/claude-mods/prompt-nav`)가 잰
-행 단위다 — 막대·눈금·누름이 같은 행 비례(`행 / 전체 행 × 대화 높이`)를 쓴다.
+claude 칸이면 렌더러와 상관없이 선다. 그림·누름·단축키는 하나이고 정본만 둘이다 — classic 은 이 터미널의
+스크롤백(절대 줄, `prompt_anchors` 의 `❯` 줄), 풀스크린(대체 화면)은 칸 안 mod(`collab-hooks/claude-mods/prompt-nav`)가
+잰 행. 막대·눈금·누름이 같은 행 비례(`행 / 전체 행 × 홈 높이`)를 쓴다.
 
-- 자리: 격자 오른쪽 여백(`PANE_INNER_X` 6) 가운데, 대화 맨 위부터 입력 상자 위 빈 줄 앞까지. 글자 칸을 덮지 않는다.
+- 자리: 격자 오른쪽 여백(`PANE_INNER_X` 6) 가운데. 글자 칸·옆 창·claude 띠를 덮지 않는다. 홈은 classic 이면 칸 높이
+  전체(입력 상자도 대화와 함께 흘러간다), 풀스크린이면 대화 맨 위부터 입력 상자 위 빈 줄 앞까지.
 - 손잡이: 쉴 때 폭 3.5 · `with_alpha(text, 0x66)`(파일 트리 막대와 같다), 올리거나 끄는 중 폭 5 · `0x99` 에 홈
   `with_alpha(text, 0x14)`. 최소 높이 24, 모서리는 `pill_rect`. 전체가 한 화면에 들면 그리지 않는다.
 - 프롬프트 눈금: 폭 6 · 높이 2, `with_alpha(accent, 0x80)`, 지금 보는 턴의 눈금만 `accent`. 누름은 위아래 4.
+  눈금은 턴을 여는 줄마다 하나 — 사람이 친 것, tell·다른 세션·예약이 넣은 것, 슬래시 명령. 배경 작업 알림과
+  SendMessage 전달은 아니다. claude 가 plugin 프롬프트 위에 그리는 출처 줄(`› Prompt from …`)도 세지 않는다.
 - 누름 자리: 격자 끝 4 안쪽부터 여백까지(폭 `PANE_INNER_X + 3`) — 칸 경계의 나누기 손잡이는 남긴다.
-- 동작: 눈금 = 그 프롬프트로, 손잡이 끌기 = 끄는 자리의 줄로, 홈 = 누른 자리가 가운데 오게. 칸 안에서는
-  Option·Ctrl+↑↓ 가 앞뒤 프롬프트(mod 단추), `/prompt-nav 3` 이 셋째 프롬프트다.
+- 동작: 눈금 = 그 프롬프트가 맨 위에, 손잡이 끌기 = 끄는 자리의 줄로, 홈 = 누른 자리가 가운데 오게.
+  Option·Ctrl+↑↓ 가 앞뒤 프롬프트 — 앞은 지금 턴의 머리가 맨 위가 아니면 그 머리로, 맨 위면 하나 앞으로,
+  마지막 다음은 맨 아래(따라가기). classic 은 kasaterm 이 키를 받아 옮기고, 풀스크린은 키가 claude 로 가 mod 단추가
+  받는다. `/prompt-nav 3` 은 셋째 프롬프트(classic 은 mod 가 kasaterm 에 맡긴다).
 
 ### Info 탭 (`info.rs draw_info_col`)
 

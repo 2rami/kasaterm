@@ -4313,6 +4313,21 @@ impl App {
                 return;
             }
         }
+        // Option·Ctrl+↑↓ = 앞뒤 프롬프트. classic claude 칸은 스크롤백이 이쪽에 있어 여기서 옮기고,
+        // 풀스크린 칸이면 그대로 흘러 claude 안 mod 가 같은 키를 받는다(prompt_nav.rs).
+        if let Key::Named(nk @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) = &event.logical_key {
+            let m = self.modifiers;
+            if (m.alt_key() || m.control_key())
+                && !m.super_key()
+                && !m.shift_key()
+                && self.prompt_nav_key(*nk == NamedKey::ArrowDown)
+            {
+                if !commit_prefix.is_empty() {
+                    self.send_bytes(&commit_prefix);
+                }
+                return;
+            }
+        }
         let bytes: Vec<u8> = match &event.logical_key {
             // Shift+Enter / Option(Alt)+Enter insert a newline instead of
             // submitting. claude code reads a bare LF (0x0a, the byte
