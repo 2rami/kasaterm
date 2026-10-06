@@ -3797,26 +3797,14 @@ fn strip_ansi_for_test(s: &str) -> String {
     out
 }
 
-/// mod 칸의 덧붙임 — 한도(5시간·7일)·비용·백그라운드 수. 한도는 절반을 넘은 것만, 90% 넘으면 붉게.
+/// mod 칸의 덧붙임 — 비용만. 한도·백그라운드 수는 상태줄을 붐비게 해 걷었다(2026-10-06).
 fn sl_module_parts(m: &Value) -> Vec<String> {
-    let mut parts = Vec::new();
-    for limit in m.get("limits").and_then(Value::as_array).into_iter().flatten() {
-        let Some(pct) = limit.get("percent").and_then(Value::as_f64).filter(|p| *p >= 50.0) else { continue };
-        let name = match limit.get("kind").and_then(Value::as_str).unwrap_or("") {
-            "five_hour" => "5h",
-            "seven_day" => "7d",
-            other => other,
-        };
-        let c = ansi_fg(if pct >= 90.0 { "f7768e" } else { SL_C_CTX });
-        parts.push(format!("{c}{name} {pct:.0}%{SL_RESET}"));
-    }
-    if let Some(usd) = m.get("cost_usd").and_then(Value::as_f64).filter(|usd| *usd >= 0.01) {
-        parts.push(format!("{SL_DIM}${usd:.2}{SL_RESET}"));
-    }
-    if let Some(n) = m.get("background").and_then(Value::as_u64).filter(|n| *n > 0) {
-        parts.push(format!("{}bg {n}{SL_RESET}", ansi_fg(SL_C_GIT)));
-    }
-    parts
+    m.get("cost_usd")
+        .and_then(Value::as_f64)
+        .filter(|usd| *usd >= 0.01)
+        .map(|usd| format!("{SL_DIM}${usd:.2}{SL_RESET}"))
+        .into_iter()
+        .collect()
 }
 
 /// 앱이 이 칸에 쓴 mod 사실 — 같은 세션 것만(다른 세션이 남긴 낡은 파일을 안 읽게).
@@ -4304,10 +4292,10 @@ mod tests {
     }
 
     #[test]
-    fn module_parts_show_high_limits_cost_and_background() {
+    fn module_parts_show_only_cost() {
         let m = serde_json::json!({"limits": [{"kind": "five_hour", "percent": 93.0}, {"kind": "seven_day", "percent": 12.0}], "cost_usd": 1.234, "background": 2});
         let plain: Vec<String> = super::sl_module_parts(&m).iter().map(|p| super::strip_ansi_for_test(p)).collect();
-        assert_eq!(plain, ["5h 93%", "$1.23", "bg 2"]);
+        assert_eq!(plain, ["$1.23"]);
         assert!(super::sl_module_parts(&serde_json::json!({"limits": [], "cost_usd": 0.0, "background": 0})).is_empty());
     }
 
