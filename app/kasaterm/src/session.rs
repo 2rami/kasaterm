@@ -6176,11 +6176,7 @@ impl App {
         // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
         // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
         // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
-        let bottom_h = if self.docked.is_empty() {
-            0.0
-        } else {
-            DOCK_HEIGHT
-        } + self.status_h();
+        let bottom_h = self.status_h();
         (win_h - bottom_h - top - SIDEBAR_TRAY_H - 24.0).max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
     }
 
@@ -6276,7 +6272,7 @@ impl App {
         let tab_w = (self.tab_strip_w() - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
         // 10px slot above the first tab hosts the overflow chevron-up.
         let top = self.sidebar_content_top();
-        // Rows that fit above the "+" button; the dock strip eats the bottom
+        // Rows that fit above the "+" button; the status bar eats the bottom
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.
         let avail_h = self.sidebar_avail_h(win_h);

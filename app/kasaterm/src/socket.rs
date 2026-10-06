@@ -5190,6 +5190,10 @@ pub fn sync_claude_theme(light: bool) {
 /// default) or "top" (Windows Terminal-style horizontal tabs in the title
 /// strip). Only an explicit "top" opts into the title-strip tabs; anything
 /// else — including a missing key — falls back to the side strip.
+pub fn read_pane_header_bar() -> bool {
+    read_settings().get("pane_header").and_then(|x| x.as_str()) == Some("bar")
+}
+
 pub fn read_tab_position() -> String {
     match read_settings().get("tab_position").and_then(|x| x.as_str()) {
         Some("top") => "top".to_string(),

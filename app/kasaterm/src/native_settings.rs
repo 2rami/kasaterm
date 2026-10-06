@@ -800,6 +800,7 @@ pub(crate) struct Snapshot {
     pub(crate) status_h: f32,
     pub(crate) footer_h: f32,
     pub(crate) tabs_on_top: bool,
+    pub(crate) pane_header_bar: bool,
     pub(crate) cursor_shape: cursor::CursorShape,
     pub(crate) cursor_thickness: f32,
     pub(crate) cursor_color: [u8; 4],
@@ -1044,6 +1045,7 @@ impl App {
             status_h: self.set_status_h,
             footer_h: self.set_pane_footer_h,
             tabs_on_top: self.tabs_on_top,
+            pane_header_bar: crate::PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed),
             cursor_shape: self.cursor_shape,
             cursor_thickness: self.cursor_thickness,
             cursor_color,
@@ -3187,6 +3189,19 @@ fn paint_appearance(
         &[
             ("위", s.tabs_on_top, SettingsAction::TabPosition("top")),
             ("옆", !s.tabs_on_top, SettingsAction::TabPosition("side")),
+        ],
+    );
+    seg_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "칸 머리",
+        &[
+            ("상단바", s.pane_header_bar, SettingsAction::PaneHeader("bar")),
+            ("점 세 개", !s.pane_header_bar, SettingsAction::PaneHeader("handle")),
         ],
     );
     // 외형 칸은 이 페이지 한 곳에 — 상태줄 높이는 「일반」, 글꼴·커서는 「터미널」에 흩어져

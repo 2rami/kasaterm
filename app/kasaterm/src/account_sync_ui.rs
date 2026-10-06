@@ -31,6 +31,7 @@ impl App {
         self.weather.settings = crate::weather::WeatherState::load(settings.get("weather"));
         self.weather_settings_changed();
         self.tabs_on_top = socket::read_tab_position() == "top";
+        self.set_pane_header_bar(socket::read_pane_header_bar());
         self.cursor_shape = socket::read_cursor_shape();
         self.cursor_thickness = socket::read_cursor_thickness();
         self.mouse_cursor = socket::read_mouse_cursor();

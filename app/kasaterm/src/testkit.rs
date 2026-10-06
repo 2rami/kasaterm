@@ -1200,8 +1200,7 @@ impl App {
             self.info.tab = crate::state::SideTab::Sessions;
             self.render_frame();
             eprintln!(
-                "[autoclosereopen] hold — 하단바 칩={:?} 예약={} · 세션 탭 되살리기 줄={:?}",
-                self.dock_chip_rects,
+                "[autoclosereopen] hold — 하단 예약={} · 세션 탭 되살리기 줄={:?}",
                 self.bottom_reserve_h(),
                 self.sessions_col.closed_rects
             );

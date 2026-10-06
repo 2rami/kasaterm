@@ -1301,6 +1301,20 @@ impl App {
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
     }
+    /// 설정 「칸 머리」를 바꾼다. 머리 띠가 셀 그리드에서 한 줄을 먹으므로 PTY 크기를
+    /// 다시 잰다(`toggle_pane_header` 와 같은 이유). 바뀌었으면 true.
+    pub(crate) fn set_pane_header_bar(&mut self, bar: bool) -> bool {
+        if crate::PANE_HEADER_BAR.swap(bar, std::sync::atomic::Ordering::Relaxed) == bar {
+            return false;
+        }
+        for pane in self.ws.lock().unwrap().panes.values_mut() {
+            pane.dirty = true;
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        true
+    }
     /// Flip the pane's top bar (header band), pinning the choice so it stops
     /// following the automatic rule (tabs>1 / image / md).
     ///
@@ -2466,36 +2480,20 @@ impl App {
         let Some(cwd) = self.local_git_panel_cwd("파일 열기") else { return };
         self.open_file(cwd.join(rel), None, false);
     }
-    /// 창 아래쪽이 pane 그리드에서 먹는 높이 — **접힘 dock + 상태줄**.
+    /// 창 아래쪽이 pane 그리드에서 먹는 높이 — 상태줄.
     ///
     /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
     /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다.
     ///
-    /// 상태줄(`self.status_h()`)은 **조건 없이 항상** 들어간다. dock 과 달리 늘 있는
-    /// 띠라, 여기서 안 빼면 마지막 셀 줄 위에 그대로 덮여 그려진다 — 넘친 것이
+    /// 상태줄(`self.status_h()`)은 **조건 없이 항상** 들어간다. 늘 있는 띠라, 여기서 안 빼면 마지막 셀 줄 위에 그대로 덮여 그려진다 — 넘친 것이
     /// 잘리지 않고 **멀쩡해 보이는 채로 겹친다**. 시저가 생겼어도 이건 안 바뀐다:
     /// 클립은 chrome 인스턴스 버퍼를 구간으로 갈라 거는 것이라 **터미널 셀 패스에는
     /// 안 걸린다**. 셀이 차지할 높이는 여기서 미리 빼 두는 수밖에 없다.
     ///
-    /// 닫은 pane 은 여기 안 센다. 되살리기는 Info 의 「되살리기」 섹션이 맡는다 —
-    /// dock 에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
-    /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(사용자).
-    ///
+    /// 칸 아래 칩 띠(접은 칸·확대 중 숨은 칸)는 2026-10-06 에 걷었다 — 확대할 때마다
+    /// 그리드가 40px 줄고 띠가 포커스 테두리 아랫변을 덮었다. 확대 해제는 ⋮·칸 머리로.
     pub(crate) fn bottom_reserve_h(&self) -> f32 {
-        self.dock_reserve_h() + self.status_h()
-    }
-
-    /// 접힘 dock 만의 높이(0 이면 dock 자체가 없다). 상태줄은 안 센다 — dock 을
-    /// 그리는 자리는 상태줄 **위**에 놓여야 해서 둘을 갈라 쓴다.
-    pub(crate) fn dock_reserve_h(&self) -> f32 {
-        if self.internal_room_active_any() {
-            return 0.0;
-        }
-        if self.docked.is_empty() && self.zoomed_pane.is_none() {
-            0.0
-        } else {
-            DOCK_HEIGHT
-        }
+        self.status_h()
     }
 
     /// 사이드바 하단에 붙박인 트레이 — 기기 추가(`+`). 세로 사이드바가 없으면 `None`.
@@ -2509,11 +2507,7 @@ impl App {
         }
         // 사이드바는 pane 그리드를 안 지나므로 `window_cells` 의 예약이 여기까지
         // 오지 않는다 — 상태줄을 직접 빼야 트레이가 그 밑에 깔리지 않는다.
-        let bottom_h = if self.docked.is_empty() {
-            0.0
-        } else {
-            DOCK_HEIGHT
-        } + self.status_h();
+        let bottom_h = self.status_h();
         let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
         Some(sidebar_tray_layout(line_y, self.tab_strip_w()))
     }

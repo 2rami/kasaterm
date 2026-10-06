@@ -4696,22 +4696,6 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    // Dock chip click. While a pane is zoomed the dock shows the
-                    // hidden siblings — clicking one switches the zoom to it
-                    // (toggle off the current, on the clicked, in one call since
-                    // the clicked id isn't the zoomed one).
-                    if let Some(id) = self
-                        .dock_chip_rects
-                        .iter()
-                        .find(|(_, r)| hit(*r))
-                        .map(|(i, _)| i.clone())
-                    {
-                        if self.zoomed_pane.is_some() {
-                            self.toggle_pane_zoom(&id);
-                        }
-                        window.request_redraw();
-                        return;
-                    }
                 }
                 // Pane header × close button. Catches clicks anywhere
                 // in the multi-pane workspace before we drop into the
@@ -4998,8 +4982,11 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             return;
                         }
-                        // Empty sidebar space — swallow the click.
-                        return;
+                        // 빈 사이드바 자리는 삼킨다 — 단 맨 위 띠는 창 제목 띠라 더블클릭 최대화·
+                        // 끌기로 넘긴다. 사이드바가 그 띠까지 칠해져 사람들이 거기를 누른다.
+                        if cy >= TITLE_HEIGHT {
+                            return;
+                        }
                     }
                     // Top-tabs mode: the window tabs live in the title strip,
                     // not the sidebar, so they need their own gate — without it

@@ -2521,7 +2521,6 @@ impl App {
         self.track_instruction_pane();
         let quick_files_list = if self.file_tree.visible { self.quick_files() } else { Vec::new() };
         // 아래 &mut self.gpu 빌림 안에서 &self 메서드를 못 부른다 — 미리 스냅샷.
-        let dock_own_reserve = self.dock_reserve_h();
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
@@ -5094,13 +5093,9 @@ impl App {
                 tree_top += quick_h;
                 let start_y = tree_top;
                 // 본문 geometry 를 스크롤 처리에 넘겨주기 위해 저장: start_y 는 검색박스
-                // + 빠른파일 섹션(항목 수만큼 동적) 아래 첫 행 y, visible_h 는 dock 을
+                // + 빠른파일 섹션(항목 수만큼 동적) 아래 첫 행 y, visible_h 는 상태줄을
                 // 뺀 창 끝까지. input.rs 가 이걸로 max_scroll 을 정확히 clamp 한다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
+                let bottom_h = status_h;
                 let body_visible_h = (sb_win_h - bottom_h - start_y).max(0.0);
                 self.file_tree.body_rect = (row_x, start_y, row_w, body_visible_h);
                 let win_h = win_px.1 / scale;
@@ -5786,8 +5781,7 @@ impl App {
             // poller fills `git_view` off-thread and this paints branch +
             // change list + Commit/Push, caching file-row / button hit rects
             // for the mouse handler. window_cells already reserved its width so
-            // no pane overlaps it; it stops above the dock so the dock bar and
-            // the action buttons never fight for the same strip.
+            // no pane overlaps it; it stops above the status bar.
             self.git.clear_panel_hit_targets();
             // 계정 칩 rect 는 Info 탭 블록에서만 채워진다 — 여기서 매 프레임 비우지
             // 않으면 다른 탭으로 옮기거나 칼럼을 닫아도 옛 좌표가 남아, 그 자리에
@@ -5796,14 +5790,10 @@ impl App {
             self.account_chip_rect = None;
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Git {
                 self.git.use_panel_snapshot(&git_view);
-                // 상태줄은 늘 있으므로 dock 과 달리 조건 없이 함께 뺀다 — 안 빼면
+                // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면
                 // 칼럼 바닥(= 최근 커밋 목록의 마지막 줄)이 그 띠 뒤로 들어가 가려진다.
                 // 높이는 이제 설정에서 바뀌므로 상수가 아니라 `status_h` 를 쓴다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
+                let bottom_h = status_h;
                 let gcx0 = git_col_x + 14.0;
                 let gcw = (git_col_w - 28.0).max(0.0);
                 let top = TITLE_HEIGHT;
@@ -6590,11 +6580,7 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
+                let bottom_h = status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
@@ -6637,11 +6623,7 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
+                let bottom_h = status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
@@ -6672,11 +6654,7 @@ impl App {
                 // 상태줄은 늘 있으므로 조건 없이 함께 뺀다 — 안 빼면 패널 바닥이
                 // 그 띠 위로 덮여 그려진다. 시저는 `push_clip` 을 세운 자리에만
                 // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
+                let bottom_h = status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
@@ -8564,142 +8542,6 @@ impl App {
                         pane_identity::draw_card(g, identity, *rect);
                     }
                 }
-            }
-            // Bottom dock bar: chips for panes folded out of the layout
-            // (window_cells reserves DOCK_HEIGHT below the grid when non-empty).
-            // Click a chip to restore (undock); its × kills the pane.
-            // Dock bar: docked panes (chips, ×=kill) OR — while a pane is zoomed
-            // — the hidden sibling panes, so the maximize visibly "sends the
-            // others to the dock" and a sibling chip click switches the zoom to
-            // it. zoom siblings have no × (they're live panes, not parked).
-            let dock_items: Vec<(String, String, bool)> =
-                if let Some(z) = self.zoomed_pane.clone() {
-                    let ws = self.ws.lock().unwrap();
-                    self.pty_layout
-                        .as_ref()
-                        .map(|t| {
-                            t.leaves()
-                                .iter()
-                                .filter(|l| **l != z.as_str())
-                                .map(|l| {
-                                    let label = ws
-                                        .panes
-                                        .get(*l)
-                                        .and_then(|p| {
-                                            p.tabs.get(p.active_tab).and_then(|tb| tb.title.clone())
-                                        })
-                                        .filter(|s| !s.is_empty())
-                                        .unwrap_or_else(|| l.to_string());
-                                    (l.to_string(), label, false)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    self.docked
-                        .iter()
-                        .map(|d| {
-                            (
-                                d.id.clone(),
-                                if d.label.is_empty() {
-                                    "shell".to_string()
-                                } else {
-                                    d.label.clone()
-                                },
-                                true,
-                            )
-                        })
-                        .collect()
-                };
-            // 닫은 pane 은 여기 안 선다 — 되살리기는 Info 의 「되살리기」 섹션이
-            // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
-            // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(사용자).
-            //
-            // 칩이 하나도 없어도 **예약된** 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
-            // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
-            //
-            // ⚠️판정은 dock **자신의** 예약(`dock_reserve_h`)으로 한다. 상태줄이 생기며
-            // `bottom_reserve_h()`(= dock + 상태줄)가 무조건 양수가 됐는데, 그 값으로
-            // 걸었더니 숨긴 pane 이 하나도 없어도 빈 dock 띠가 항상 칠해져 마지막 셀
-            // 줄들을 덮었다 — 그리드는 상태줄 몫만 비워 둔 상태라 「의문의 하단바」로
-            // 보였다(2026-08-12 지적).
-            if dock_own_reserve > 0.0 {
-                let win_w = win_px.0 / scale;
-                let win_h = win_px.1 / scale;
-                // 상태줄 **위**에 앉는다 — 상태줄은 창 맨 바닥에 고정이고 dock 은
-                // 접힌 pane 이 있을 때만 나타났다 사라지는 띠라, 순서가 반대면
-                // 접을 때마다 상태줄이 위아래로 뛴다.
-                let bar_y = win_h - status_h - DOCK_HEIGHT;
-                // Confine the dock to the pane-grid band: it must not bleed under
-                // the session-tab strip / file tree on the left or the git column
-                // on the right. Same bounds the cell grid uses in window_cells().
-                let grid_x = sidebar_w + WINDOW_PADDING;
-                let grid_right = win_w - git_col_w - WINDOW_PADDING;
-                let grid_w = (grid_right - grid_x).max(0.0);
-                // 크롬 판 색 — 사이드바·우측 칼럼과 같은 층이다. SURFACE 는 코드블록의
-                // 가장 어두운 층이라 여기 쓰면 본문 옆에서 검은 틈처럼 읽혔다.
-                g.rect(grid_x, bar_y, grid_w, DOCK_HEIGHT, theme::panel_bg());
-                g.rect(grid_x, bar_y, grid_w, 1.0, theme::border());
-                let chip_h = DOCK_HEIGHT - 12.0;
-                let cy = bar_y + 6.0;
-                let icon = theme::ICON_SIZE;
-                let (mx, my) = (self.cursor_px.0 / scale, self.cursor_px.1 / scale);
-                let mut cx = grid_x + 8.0;
-                let mut chip_hits = Vec::new();
-                let mut chip_close_hits = Vec::new();
-                for (id, label, killable) in dock_items.iter() {
-                    let lw = g.measure_chrome_text(label, chrome_font, false);
-                    let chip_w = if *killable {
-                        lw + icon + 24.0
-                    } else {
-                        lw + 20.0
-                    };
-                    let hover = mx >= cx && mx <= cx + chip_w && my >= cy && my <= cy + chip_h;
-                    round_rect(
-                        g,
-                        cx,
-                        cy,
-                        chip_w,
-                        chip_h,
-                        theme::radius_sm(),
-                        if hover {
-                            theme::surface_hover()
-                        } else {
-                            theme::surface_active()
-                        },
-                    );
-                    g.draw_text(
-                        cx + 10.0,
-                        cy + (chip_h - chrome_font) / 2.0 + 1.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: chrome_font,
-                            color: theme::text(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                    if *killable {
-                        let close_x = cx + chip_w - icon - 6.0;
-                        g.queue_icon(
-                            "x",
-                            close_x,
-                            cy + (chip_h - icon) / 2.0,
-                            icon,
-                            theme::text_dim(),
-                        );
-                        chip_close_hits.push((id.clone(), (close_x - 2.0, cy, icon + 6.0, chip_h)));
-                        chip_hits.push((id.clone(), (cx, cy, chip_w - icon - 8.0, chip_h)));
-                    } else {
-                        chip_hits.push((id.clone(), (cx, cy, chip_w, chip_h)));
-                    }
-                    cx += chip_w + 6.0;
-                }
-                self.dock_chip_rects = chip_hits;
-                self.dock_chip_close_rects = chip_close_hits;
-            } else {
-                self.dock_chip_rects.clear();
-                self.dock_chip_close_rects.clear();
             }
             // ── 하단 상태줄 ─────────────────────────────────────────────────
             // 창 맨 아래 한 줄. **계정 한도가 늘 보이는 자리**다 — 패널을 열어야

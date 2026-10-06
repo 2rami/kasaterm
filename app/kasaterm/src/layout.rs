@@ -599,7 +599,7 @@ impl App {
             .max(0.0);
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
-        // Reserve the dock bar from the grid only when it carries chips.
+        // The status bar along the window bottom is reserved from the grid too.
         let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - self.bottom_reserve_h()).max(0.0);
         // 하한이 40 이던 시절엔 이 줄이 거짓말을 했다 — 쓸 폭이 160px 뿐인 창에서도
         // 40칸(340px)이라고 PTY 에 알려, 터미널이 우측 칼럼 밑으로 180px 파고들어

@@ -592,6 +592,9 @@ const TRAFFIC_LIGHT_WIDTH: f32 = if cfg!(windows) { 0.0 } else { 78.0 };
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
 const PANE_HEADER_HEIGHT: f32 = 34.0;
+/// 설정 「칸 머리」 — 켜면 모든 칸이 머리 띠(제목·단추·더블클릭 확대)를 갖고, 끄면 hover ⋮ 만
+/// 쓴다. `PaneState::has_header` 가 App 을 못 보므로 전역에 둔다.
+static PANE_HEADER_BAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Per-pane status bar height (logical px) — the strip below a pane's cell grid
 /// holding the cwd / git-branch / diff chips. Mirrors the header band: when a
 /// pane shows its bar, the PTY's usable rows shrink by the equivalent cell
@@ -603,12 +606,9 @@ const PANE_HEADER_HEIGHT: f32 = 34.0;
 /// **기본값**이다 — 실제 높이는 설정에서 바뀌므로 `App::pane_footer_h()` 를 써라.
 /// 이 상수를 직접 참조하면 설정을 내려도 안 따라가는 자리가 하나 생긴다.
 const PANE_FOOTER_HEIGHT_DEFAULT: f32 = 30.0;
-/// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
-/// grid only when the dock is non-empty.
-const DOCK_HEIGHT: f32 = 40.0;
 /// 창 맨 아래 상태줄 높이(logical px) — 계정 한도가 **항상** 보이는 자리.
 ///
-/// dock 과 달리 조건 없이 늘 예약한다. 한도는 「볼 일이 생겼을 때 찾아보는 값」이
+/// 조건 없이 늘 예약한다. 한도는 「볼 일이 생겼을 때 찾아보는 값」이
 /// 아니라 「지금 얼마나 남았나」라서, 접혀 있으면 그걸 확인하려고 패널을 여는 순간
 /// 이미 늦는다. Orca 하단바(24px)와 같은 높이 — 거기서 형식을 가져왔다.
 /// **기본값**이다 — 실제 높이는 설정에서 바뀌므로 `App::status_h()` 를 써라.
@@ -2285,6 +2285,9 @@ impl PaneState {
         // 제목을 쓸 수 있고, md 처럼 자동으로 뜨는 pane 은 접을 수 있다.
         if let Some(forced) = self.header_override {
             return forced;
+        }
+        if PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
         }
         self.tabs.len() > 1
             || self.image().is_some()
@@ -4626,6 +4629,8 @@ pub(crate) enum SettingsAction {
     ResetScale,
     /// Window-tab placement: "top" (title-strip tabs) or "side" (Warp strip).
     TabPosition(&'static str),
+    /// 칸 머리: "bar"(모든 칸에 머리 띠) · "handle"(hover ⋮ 만).
+    PaneHeader(&'static str),
     CursorShape(cursor::CursorShape),
     /// `SettingsAction` 이 `Eq` 를 derive 하므로 f32 를 실을 수 없다 — 굵기는 어차피
     /// 픽셀 정수라 u8 로 나른다.
@@ -5163,18 +5168,6 @@ struct App {
     pane_restart_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// "+" new-tab button hit rect per pane: (pane id, logical rect).
     pane_plus_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// Panes folded into the active session's dock (bottom-bar chips). Mirror of
-    /// the daemon's per-session docked list, so a session switch shows only this
-    /// 지구's dock — render-only.
-    docked: Vec<stream::DockedView>,
-    /// True once the first daemon State has been fully applied. Until then every
-    /// State runs the full layout-adopt path; afterwards a State whose active-
-    /// window leaves (in order) + dock are unchanged (a cwd-only 1s poll) skips
-    /// the heavy resize/repaint so idle stays at 0 GPU passes (ghostty-fast).
-    /// Dock chip hit rects: (pane id, logical rect). Click restores (undock).
-    dock_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// Dock chip × hit rects: (pane id, logical rect). Click kills the pane.
-    dock_chip_close_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Throttle for `refresh_pane_activity`: the working-bar/completion-toast
     /// busy scan walks every pane's grid, so it runs at most a few times a
     /// second rather than per frame. `None` until the first scan.
@@ -6015,6 +6008,7 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>, viewer_only: bool, lite: bool) -> Self {
+        PANE_HEADER_BAR.store(socket::read_pane_header_bar(), std::sync::atomic::Ordering::Relaxed);
         if !viewer_only {
             let visual_proxy = proxy.clone();
             kasa_mcp::visual::register_producer(Arc::new(move || {
@@ -6122,9 +6116,6 @@ impl App {
             pane_tab_close_rects: Vec::new(),
             pane_restart_chip_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
-            docked: Vec::new(),
-            dock_chip_rects: Vec::new(),
-            dock_chip_close_rects: Vec::new(),
             pane_busy_check: None,
             pane_account_quiet_since: HashMap::new(),
             pane_bg_mtime: HashMap::new(),

@@ -1,17 +1,7 @@
 //! GUI-side view types retained from the (now removed) daemon stream protocol.
-//! `DockedView` types `App.docked`, `PaneStatusView` types `App.pane_activity`;
-//! both are read by the renderer. In local mode they stay empty until the dock
-//! UX and the transcript-driven working indicator are re-wired locally
-//! (follow-up). The daemon, its client, and the screen-frame socket are gone.
+//! `PaneStatusView` types `App.pane_activity`, read by the renderer. The daemon, its client, and the screen-frame socket are gone.
 
 use serde::{Deserialize, Serialize};
-
-/// A pane folded into the dock: its id + a display label (cwd basename).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DockedView {
-    pub id: String,
-    pub label: String,
-}
 
 /// One pane's coarse activity for the GUI's working indicator + completion
 /// toast. `status != "idle"` means busy. Derives `PartialEq` so the repaint

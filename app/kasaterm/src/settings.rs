@@ -1229,6 +1229,12 @@ impl App {
                     self.resize_backend(cols, rows);
                 }
             }
+            SettingsAction::PaneHeader(style) => {
+                let bar = style == "bar";
+                if self.set_pane_header_bar(bar) {
+                    socket::write_setting("pane_header", serde_json::Value::String(style.to_string()));
+                }
+            }
             SettingsAction::CursorShape(shape) => {
                 if self.cursor_shape != shape {
                     self.cursor_shape = shape;
@@ -1896,6 +1902,11 @@ impl App {
                 let p = pick(&["top", "side"], id).ok_or_else(|| unknown(id))?;
                 self.settings_apply(SettingsAction::TabPosition(p));
                 Ok(self.tabs_on_top == (p == "top"))
+            }
+            "pane-header" => {
+                let p = pick(&["bar", "handle"], id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::PaneHeader(p));
+                Ok(PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed) == (p == "bar"))
             }
             "cursor-shape" => {
                 let s = crate::cursor::CursorShape::from_str(id).ok_or_else(|| unknown(id))?;
@@ -2797,6 +2808,7 @@ impl App {
                 "footer_default": self.set_footer_default,
                 "autosave_ms": self.set_autosave.map_or(0, |d| d.as_millis() as u64),
                 "tabs_on_top": self.tabs_on_top,
+                "pane_header": if PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed) { "bar" } else { "handle" },
                 "cursor_shape": self.cursor_shape.as_str(),
                 "cursor_thickness": self.cursor_thickness,
                 "mouse_cursor": self.mouse_cursor,
