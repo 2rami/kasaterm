@@ -2291,25 +2291,18 @@ impl ApplicationHandler<UserEvent> for App {
         // Sidebar git-badge poller. The sidebar paint publishes each window's
         // repr cwd into `git_poll_cwds`; this thread shells out to `git_badge`
         // off the main thread and wakes the loop only when a badge actually
-        // changed — an idle repo costs one cheap git call per distinct cwd
-        // every interval, with no repaint. Dedups cwds so N windows in one
-        // repo run git once.
+        // changed. `BadgePoller` reads each repo once however many cwds sit in
+        // it, and only when git's own state moved, a mod git signal touched
+        // it, or `BADGE_IDLE_PERIOD` passed — an idle repo costs a few stats.
         if !self.lite {
             let git_proxy = self.proxy.clone();
             let poll_cwds = self.git_poll_cwds.clone();
             let git_cache = self.window_git.clone();
+            let mut poller = kasa_mcp::git::BadgePoller::default();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 let targets: Vec<std::path::PathBuf> = poll_cwds.lock().unwrap().clone();
-                let mut next: HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge> = HashMap::new();
-                for cwd in targets {
-                    if next.contains_key(&cwd) {
-                        continue;
-                    }
-                    if let Some(b) = kasa_mcp::git::git_badge(&cwd) {
-                        next.insert(cwd, b);
-                    }
-                }
+                let next = poller.poll(&targets);
                 let mut guard = match git_cache.lock() {
                     Ok(g) => g,
                     Err(_) => break,

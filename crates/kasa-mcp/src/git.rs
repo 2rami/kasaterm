@@ -505,6 +505,142 @@ pub fn git_badge(repo: &Path) -> Option<GitBadge> {
     })
 }
 
+/// 레포 하나의 자리 — 작업 트리 뿌리, 그 트리의 git 폴더, 브랜치들이 사는 공용 git 폴더
+/// (워크트리면 둘이 다르다).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoPaths {
+    pub root: std::path::PathBuf,
+    pub git_dir: std::path::PathBuf,
+    pub common_dir: std::path::PathBuf,
+}
+
+/// `dir` 이 git 작업 트리 안이면 그 자리를, 아니면 `None`.
+pub fn repo_paths(dir: &Path) -> Option<RepoPaths> {
+    let (ok, out) = run_git(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"],
+    );
+    if !ok {
+        return None;
+    }
+    let mut lines = out.lines().map(|l| std::path::PathBuf::from(l.trim()));
+    Some(RepoPaths { root: lines.next()?, git_dir: lines.next()?, common_dir: lines.next()? })
+}
+
+/// git 이 아는 상태(HEAD·인덱스·모든 ref·fetch)의 값싼 지문 — 파일 크기·수정 시각만 본다.
+/// 커밋·스테이지·체크아웃·브랜치·fetch 는 이 값을 바꾸고, git 을 띄우는 것보다 수백 배 싸다.
+/// **작업 트리 편집은 못 본다** — 그건 mod 깃 신호와 긴 주기가 맡는다. HEAD 를 못 읽으면
+/// `None`(레포가 사라졌거나 옮겨졌다 — 자리부터 다시 찾을 때다).
+pub fn repo_fingerprint(paths: &RepoPaths) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    fn stamp(h: &mut impl Hasher, path: &Path) {
+        let meta = std::fs::symlink_metadata(path).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        (meta.map(|m| m.len()), modified).hash(h);
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let head = std::fs::read_to_string(paths.git_dir.join("HEAD")).ok()?;
+    head.hash(&mut h);
+    stamp(&mut h, &paths.git_dir.join("index"));
+    stamp(&mut h, &paths.common_dir.join("packed-refs"));
+    stamp(&mut h, &paths.common_dir.join("FETCH_HEAD"));
+    // ref 는 파일 하나씩 바뀐다(잠금 파일을 만들어 이름을 바꾼다) — 폴더 시각은 바로 위
+    // 폴더만 바뀌어 `refs/heads/aris/x` 같은 갈래를 놓치므로 파일을 다 훑는다. 브랜치가
+    // 수백 개여도 stat 몇백 번이다.
+    let mut stack = vec![paths.common_dir.join("refs")];
+    let mut budget = 4096usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut names: Vec<_> = entries.flatten().collect();
+        names.sort_by_key(|e| e.file_name());
+        for entry in names {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(path);
+            } else {
+                path.hash(&mut h);
+                stamp(&mut h, &path);
+            }
+        }
+    }
+    Some(h.finish())
+}
+
+/// 지문이 그대로이고 깃 신호도 없을 때 배지를 다시 읽는 주기 — 바깥 편집기나 mod 없는
+/// 하네스가 고친 작업 트리는 이 주기 안에 잡힌다.
+pub const BADGE_IDLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(10);
+/// git 레포가 아닌 폴더를 다시 확인하는 주기(그 사이 `git init` 했을 수 있다).
+const NOT_A_REPO_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Default)]
+struct BadgeRepo {
+    fingerprint: Option<u64>,
+    read_at: Option<std::time::Instant>,
+    badge: Option<GitBadge>,
+}
+
+/// 사이드바·파일트리 git 배지 폴러의 기억. 배지 한 번이 git 셋(rev-parse·status·diff HEAD)이고
+/// 큰 레포에서 CPU 330ms 남짓이라, 1.5초마다 폴더마다 다 돌리면 레포 하나가 코어의 20%를
+/// 태웠다(2026-10-06 실측, 파일 4,861개). 그래서 ①같은 레포의 여러 폴더는 한 번만 읽고
+/// ②git 이 아는 상태의 지문이 바뀌었거나, 그 레포를 건드린 mod 깃 신호가 왔거나,
+/// `BADGE_IDLE_PERIOD` 가 지났을 때만 git 을 띄운다.
+#[derive(Default)]
+pub struct BadgePoller {
+    cwds: std::collections::HashMap<std::path::PathBuf, (Option<RepoPaths>, std::time::Instant)>,
+    repos: std::collections::HashMap<std::path::PathBuf, BadgeRepo>,
+    seen: u64,
+}
+
+impl BadgePoller {
+    pub fn poll(&mut self, cwds: &[std::path::PathBuf]) -> std::collections::HashMap<std::path::PathBuf, GitBadge> {
+        let now = std::time::Instant::now();
+        let (seq, signals, lost) = crate::claude_mod::git_signals_since(self.seen);
+        self.seen = seq;
+        let mut out = std::collections::HashMap::new();
+        let mut roots = std::collections::HashSet::new();
+        for cwd in cwds {
+            let Some(paths) = self.resolve(cwd, now) else { continue };
+            if roots.insert(paths.root.clone()) {
+                let fingerprint = repo_fingerprint(&paths);
+                if fingerprint.is_none() {
+                    // 자리가 사라졌다 — 다음 바퀴에 다시 찾는다.
+                    self.cwds.remove(cwd);
+                }
+                let touched =
+                    lost || signals.iter().any(|s| crate::claude_mod::git_signal_touches(s, "", &paths.root));
+                let repo = self.repos.entry(paths.root.clone()).or_default();
+                let idle = repo.read_at.is_none_or(|at| now.duration_since(at) >= BADGE_IDLE_PERIOD);
+                if fingerprint.is_none() || fingerprint != repo.fingerprint || touched || idle {
+                    repo.badge = git_badge(&paths.root);
+                    repo.fingerprint = fingerprint;
+                    repo.read_at = Some(now);
+                }
+            }
+            if let Some(badge) = self.repos.get(&paths.root).and_then(|r| r.badge.clone()) {
+                out.insert(cwd.clone(), badge);
+            }
+        }
+        self.repos.retain(|root, _| roots.contains(root));
+        self.cwds.retain(|cwd, _| cwds.contains(cwd));
+        out
+    }
+
+    fn resolve(&mut self, cwd: &Path, now: std::time::Instant) -> Option<RepoPaths> {
+        match self.cwds.get(cwd) {
+            Some((Some(paths), _)) => return Some(paths.clone()),
+            Some((None, at)) if now.duration_since(*at) < NOT_A_REPO_RECHECK => return None,
+            _ => {}
+        }
+        let paths = repo_paths(cwd);
+        self.cwds.insert(cwd.to_path_buf(), (paths.clone(), now));
+        paths
+    }
+}
+
 /// `git status --porcelain=v1 -z` 출력 → `(마커, 레포 루트 상대경로)`. 순수 함수.
 ///
 /// `-z` 를 쓰는 이유: 기본 출력은 공백·따옴표가 든 경로를 `"..."` 로 감싸고
@@ -1523,6 +1659,76 @@ mod tests {
         let v = parse_porcelain_v2("# branch.head main\n# branch.ab +0 -0\n");
         assert_eq!(v["clean"], true);
         assert_eq!(v["ahead"], 0);
+    }
+
+    #[test]
+    fn fingerprint_moves_with_git_state_not_worktree_edits() {
+        use std::process::Command as C;
+        let dir = std::env::temp_dir().join(format!("kasa-git-print-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let git = |args: &[&str]| C::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "tester"]);
+        std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        let paths = repo_paths(&dir.join("sub")).expect("subdir resolves to its repo");
+        assert_eq!(paths.root.canonicalize().unwrap(), dir.canonicalize().unwrap());
+        let print = || repo_fingerprint(&paths).unwrap();
+        let start = print();
+        // 작업 트리 편집은 지문 밖이다(mod 신호·긴 주기 몫).
+        std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+        assert_eq!(print(), start);
+        git(&["add", "a.txt"]);
+        let staged = print();
+        assert_ne!(staged, start, "stage moves the index");
+        git(&["commit", "-qm", "two"]);
+        let committed = print();
+        assert_ne!(committed, staged, "commit moves the branch ref");
+        // 갈래 폴더 안의 브랜치 — 폴더 시각만 보면 놓친다.
+        git(&["branch", "kei/nested"]);
+        let branched = print();
+        assert_ne!(branched, committed);
+        git(&["update-ref", "refs/heads/kei/nested", "HEAD~1"]);
+        assert_ne!(print(), branched, "nested ref update");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn badge_poller_reads_one_repo_once_for_many_cwds() {
+        use std::process::Command as C;
+        let dir = std::env::temp_dir().join(format!("kasa-git-poll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let git = |args: &[&str]| C::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "tester"]);
+        std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        let outside = std::env::temp_dir().join(format!("kasa-git-poll-none-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let cwds = vec![dir.clone(), dir.join("sub"), outside.clone()];
+        let mut poller = BadgePoller::default();
+        let first = poller.poll(&cwds);
+        assert_eq!(first.len(), 2, "both cwds in the repo get a badge, the plain folder none");
+        assert_eq!(first[&dir], first[&dir.join("sub")]);
+        assert_eq!(poller.repos.len(), 1);
+        let read_at = poller.repos.values().next().unwrap().read_at;
+        // 지문이 그대로면 다시 읽지 않는다.
+        std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+        let again = poller.poll(&cwds);
+        assert_eq!(poller.repos.values().next().unwrap().read_at, read_at);
+        assert_eq!(again[&dir].insertions, 0);
+        // 스테이지하면 지문이 움직여 그 바퀴에 다시 읽는다.
+        git(&["add", "a.txt"]);
+        let staged = poller.poll(&cwds);
+        assert_eq!(staged[&dir].insertions, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

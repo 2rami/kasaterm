@@ -129,6 +129,10 @@ pub(crate) fn fetch(target: &Target, generation: u64, commits: usize) -> GitColV
 /// 늦은 주기로 잡는다.
 const POLL: std::time::Duration = std::time::Duration::from_millis(1200);
 const POLL_SIGNALLED: std::time::Duration = std::time::Duration::from_secs(5);
+/// git 이 아는 상태(HEAD·인덱스·ref·fetch)의 지문이 그대로이면 주기가 와도 이만큼은 읽지 않는다. 한 바퀴가 git 여덟 개
+/// (큰 레포에서 CPU 480ms 남짓)라, 열이 열려 있는 것만으로 코어의 30%를 태웠다(2026-10-06 실측). 커밋·스테이지·
+/// 체크아웃·fetch 는 지문이 바로 잡고, mod 칸의 편집은 깃 신호가 잡는다 — 이 주기는 바깥 편집기의 작업 트리 편집 몫이다.
+const IDLE_READ: std::time::Duration = kasa_mcp::git::BADGE_IDLE_PERIOD;
 /// 몰아치는 신호를 한 번의 읽기로 — 마지막 신호 뒤 조용한 틈, 첫 신호부터 미룰 수 있는 한도, 신호로 읽는 사이의 최소
 /// 간격. claude 가 파일을 연달아 고치는 동안 git 을 고칠 때마다 돌리지 않는다.
 const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
@@ -231,6 +235,9 @@ pub(crate) fn spawn_poller(
         let mut due = Instant::now();
         let mut pending: Option<(Instant, Instant)> = None;
         let mut last_read = Instant::now().checked_sub(MIN_GAP).unwrap_or_else(Instant::now);
+        let mut repo: Option<(std::path::PathBuf, Option<kasa_mcp::git::RepoPaths>)> = None;
+        let mut read_print: Option<u64> = None;
+        let mut read_want = 0;
         loop {
             let until = pending.map_or(due, |(first, last)| signal_read_at(first, last, last_read).min(due));
             kicks = wake.wait(kicks, until);
@@ -246,16 +253,19 @@ pub(crate) fn spawn_poller(
                 due = now + POLL;
                 continue;
             };
-            let touched = if target.remote.is_some() {
-                wake.take_remote_touch()
+            let local_root = if target.remote.is_some() {
+                None
             } else {
-                let root = data
-                    .lock()
+                data.lock()
                     .ok()
                     .filter(|view| view.generation == generation)
                     .and_then(|view| view.repo_root.clone().or(view.cwd.clone()))
-                    .or_else(|| target.cwd.clone());
-                lost || touched_by(&signals, &target, root.as_deref())
+                    .or_else(|| target.cwd.clone())
+            };
+            let touched = if target.remote.is_some() {
+                wake.take_remote_touch()
+            } else {
+                lost || touched_by(&signals, &target, local_root.as_deref())
             };
             if touched {
                 pending = Some(pending.map_or((now, now), |(first, _)| (first, now)));
@@ -265,14 +275,30 @@ pub(crate) fn spawn_poller(
             if !(fresh || signal_due || now >= due) {
                 continue;
             }
+            let print = local_root.as_deref().and_then(|root| {
+                if repo.as_ref().is_none_or(|(at, _)| at != root) {
+                    repo = Some((root.to_path_buf(), kasa_mcp::git::repo_paths(root)));
+                }
+                repo.as_ref().and_then(|(_, paths)| paths.as_ref()).and_then(kasa_mcp::git::repo_fingerprint)
+            });
+            let want_now = want.load(std::sync::atomic::Ordering::Relaxed);
+            if !(fresh || signal_due)
+                && print.is_some()
+                && (print, want_now) == (read_print, read_want)
+                && now.duration_since(last_read) < IDLE_READ
+            {
+                due = now + period(&target, &wake);
+                continue;
+            }
             pending = None;
             let request = match context.lock() {
                 Ok(mut context) => context.next_request(),
                 Err(_) => break,
             };
             let Some((generation, request, target)) = request else { continue };
-            let view = fetch(&target, generation, want.load(std::sync::atomic::Ordering::Relaxed));
+            let view = fetch(&target, generation, want_now);
             last_read = Instant::now();
+            (read_print, read_want) = (print, want_now);
             read_generation = Some(generation);
             due = last_read + period(&target, &wake);
             let Ok(context) = context.lock() else { break };
