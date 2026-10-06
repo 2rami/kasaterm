@@ -61,7 +61,7 @@ pub mod team;
 pub mod tunnel;
 pub mod quicktunnel;
 pub use http::{
-    claude_bin, pane_tasks_snapshot, remote_token, schedule_add, schedule_delete,
+    claude_agents_all, claude_bin, pane_tasks_snapshot, remote_token, schedule_add, schedule_delete,
     schedule_snapshot, schedule_toggle, session_token, spawn_http_server,
     spawn_http_server_opts, PaneTaskView, ScheduleItem,
 };

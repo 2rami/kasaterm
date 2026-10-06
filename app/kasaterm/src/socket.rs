@@ -387,6 +387,9 @@ fn agents_cached() -> (
     (cache.status.clone(), cache.names.clone(), cache.errors.clone())
 }
 
+/// 명부 캐시와 배경 에이전트 폴러가 서로의 `claude agents` 결과를 받아 쓰는 나이.
+pub(crate) const AGENTS_SHARE_AGE: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// `claude agents --json` 을 실제로 읽는다 — GUI 밖 스레드에서만 부른다.
 fn read_agents() -> (
     HashMap<String, String>,
@@ -408,48 +411,44 @@ fn read_agents() -> (
     // (/usr/bin:/bin:…)뿐이라 ~/.local/bin 의 claude 가 안 잡혀, 이 캐시가 조용히
     // 늘 빈 값이었다(status 폴백 항상 mtime 휴리스틱 + agents 뷰 이름 매칭 불발 —
     // 사용자: 이번엔 유우카로 떠). GUI 폴러와 같은 claude_bin() 리졸버를 쓴다.
-    if let Ok(out) = crate::proc::command(kasa_mcp::claude_bin())
-        .args(["agents", "--json"])
-        .output()
-    {
-        if out.status.success() {
-            if let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
-                let rank = |s: &str| match s {
-                    "busy" => 3,
-                    "waiting" => 2,
-                    _ => 1,
-                };
-                for it in &items {
-                    let (Some(sid), Some(st)) = (
-                        it.get("sessionId").and_then(|v| v.as_str()),
-                        it.get("status").and_then(|v| v.as_str()),
-                    ) else {
-                        continue;
-                    };
-                    let e = map.entry(sid.to_string()).or_insert_with(|| st.to_string());
-                    if rank(st) > rank(e) {
-                        *e = st.to_string();
-                    }
-                    if st == "waiting"
-                        && it
-                            .get("waitingFor")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|v| v.eq_ignore_ascii_case("error"))
-                    {
-                        errors.insert(sid.to_string());
-                    }
-                    if let Some(n) = it.get("name").and_then(|v| v.as_str()).map(str::trim) {
-                        if !n.is_empty() {
-                            match names.entry(n.to_string()) {
-                                std::collections::hash_map::Entry::Occupied(o) => {
-                                    if o.get() != sid {
-                                        dup_names.insert(n.to_string());
-                                    }
-                                }
-                                std::collections::hash_map::Entry::Vacant(v) => {
-                                    v.insert(sid.to_string());
-                                }
+    //
+    // 배경 에이전트 폴러와 같은 `--all` 한 벌을 나눠 쓴다. `--all` 은 `--json` 에 끝난 배경
+    // 세션만 더하고, 배경 세션에는 `status` 가 없어 아래에서 걸러지므로 결과가 같다.
+    if let Some(items) = kasa_mcp::claude_agents_all(AGENTS_SHARE_AGE) {
+        let rank = |s: &str| match s {
+            "busy" => 3,
+            "waiting" => 2,
+            _ => 1,
+        };
+        for it in items.iter() {
+            let (Some(sid), Some(st)) = (
+                it.get("sessionId").and_then(|v| v.as_str()),
+                it.get("status").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let e = map.entry(sid.to_string()).or_insert_with(|| st.to_string());
+            if rank(st) > rank(e) {
+                *e = st.to_string();
+            }
+            if st == "waiting"
+                && it
+                    .get("waitingFor")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| v.eq_ignore_ascii_case("error"))
+            {
+                errors.insert(sid.to_string());
+            }
+            if let Some(n) = it.get("name").and_then(|v| v.as_str()).map(str::trim) {
+                if !n.is_empty() {
+                    match names.entry(n.to_string()) {
+                        std::collections::hash_map::Entry::Occupied(o) => {
+                            if o.get() != sid {
+                                dup_names.insert(n.to_string());
                             }
+                        }
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(sid.to_string());
                         }
                     }
                 }

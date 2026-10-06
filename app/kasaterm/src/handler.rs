@@ -2840,7 +2840,6 @@ impl ApplicationHandler<UserEvent> for App {
             let bg_proxy = self.proxy.clone();
             let bg_cache = self.bg_agents.clone();
             std::thread::spawn(move || {
-                let bin = kasa_mcp::claude_bin();
                 // pid argv 의 `--resume <path>` basename = 부모 세션 uuid. ←← detach 는
                 // 부모 대화를 fork 해 새 sessionId 로 잇는데 raw json 엔 부모가 없어,
                 // 이 argv 가 원본→background 를 잇는 유일한 끈이다(macOS/Linux ps).
@@ -2867,39 +2866,27 @@ impl ApplicationHandler<UserEvent> for App {
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     let mut next: HashMap<String, Option<String>> = HashMap::new();
-                    if let Ok(out) = crate::proc::command(&bin)
-                        .args(["agents", "--json", "--all"])
-                        .output()
-                    {
-                        if out.status.success() {
-                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                    // 명부 캐시(`socket::read_agents`)와 한 벌을 나눠 쓴다 — 둘 다 node 를 띄우는 일이다.
+                    if let Some(arr) = kasa_mcp::claude_agents_all(crate::socket::AGENTS_SHARE_AGE) {
+                        for a in arr.iter() {
+                            if a.get("kind").and_then(|k| k.as_str()) != Some("background")
                             {
-                                let arr = v
-                                    .as_array()
-                                    .cloned()
-                                    .or_else(|| v.get("agents").and_then(|a| a.as_array().cloned()))
-                                    .unwrap_or_default();
-                                for a in &arr {
-                                    if a.get("kind").and_then(|k| k.as_str()) != Some("background")
-                                    {
-                                        continue;
-                                    }
-                                    let Some(sid) = a.get("sessionId").and_then(|s| s.as_str())
-                                    else {
-                                        continue;
-                                    };
-                                    let parent = a
-                                        .get("parentSessionId")
-                                        .and_then(|s| s.as_str())
-                                        .map(str::to_string)
-                                        .or_else(|| {
-                                            a.get("pid")
-                                                .and_then(|p| p.as_u64())
-                                                .and_then(parent_of)
-                                        });
-                                    next.insert(sid.to_string(), parent);
-                                }
+                                continue;
                             }
+                            let Some(sid) = a.get("sessionId").and_then(|s| s.as_str())
+                            else {
+                                continue;
+                            };
+                            let parent = a
+                                .get("parentSessionId")
+                                .and_then(|s| s.as_str())
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    a.get("pid")
+                                        .and_then(|p| p.as_u64())
+                                        .and_then(parent_of)
+                                });
+                            next.insert(sid.to_string(), parent);
                         }
                     }
                     let mut guard = match bg_cache.lock() {
