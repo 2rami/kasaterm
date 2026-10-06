@@ -672,11 +672,11 @@ impl App {
         path: Option<String>,
         max_w: u32,
     ) -> Option<std::result::Result<serde_json::Value, String>> {
-        let snap = {
+        let (snap, images) = {
             let ws = self.ws.lock().unwrap();
             ws.panes
                 .get(pane)
-                .and_then(|p| p.term().map(|t| t.cells.clone()))
+                .and_then(|p| p.term().map(|t| (t.cells.clone(), t.inline_images.clone())))
         }?;
         let rows = snap.len() as u32;
         let cols = snap.iter().map(Vec::len).max().unwrap_or(0) as u32;
@@ -699,6 +699,17 @@ impl App {
         });
         let default_fg = crate::cells::default_fg();
         let source = crate::mirror_theme::pane_source_palette(pane);
+        // 화면 밖 렌더는 원본 글자판 그대로라 입력창 옮김이 없다(dy 0). 키 머리를 따로 두어
+        // 본 화면 캐시와 섞지 않고 캡처가 끝나면 통째로 놓는다.
+        const KEY_PREFIX: &str = "offscreen-inline:";
+        let cell = (self.cell.w * fs, self.cell.h * fs);
+        let inline: Vec<_> = images
+            .iter()
+            .map(|v| {
+                let key = format!("{KEY_PREFIX}{}:{}", v.id, v.path);
+                terminal_scene::inline_slot(v, key, (0.0, 0.0), cell, rows as usize, 0)
+            })
+            .collect();
         let g = self.gpu.as_mut()?;
         let slot = gpu::PaneSlot {
             rows: &snap,
@@ -709,7 +720,13 @@ impl App {
             default_fg,
             source,
         };
-        Some(match g.render_cells_offscreen(&[slot], w, h, &path, max_w) {
+        let rendered = g.render_cells_offscreen(&[slot], w, h, &path, max_w, |g| {
+            crate::screenread::paint_inline_images_once(g, &inline)
+        });
+        if !inline.is_empty() {
+            g.drop_images_with_prefix(KEY_PREFIX);
+        }
+        Some(match rendered {
             Ok((ow, oh)) => {
                 let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 Ok(serde_json::json!({

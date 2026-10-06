@@ -4948,7 +4948,9 @@ impl GpuRenderer {
     /// 폴백으로 밀리던 원인, 2026-09-02). 본 프레임 경로는 안 건드린다:
     /// 누적 리스트를 통째로 스왑해 두고 셀 전용 미니 패스를 자기 텍스처에
     /// 돌린 뒤 원상복구한다. 커서·스프라이트 오버레이는 안 싣는다 — 알림
-    /// 사진의 목적은 내용이고, 오버레이는 활성 방 실촬영의 몫이다.
+    /// 사진의 목적은 내용이고, 오버레이는 활성 방 실촬영의 몫이다. 칸 안 그림
+    /// (kitty·OSC 1337)은 내용이라 `paint` 가 셀 뒤에 얹는다 — 빼면 학생 얼굴 같은
+    /// 그림 자리가 빈칸으로 찍혀 「이 칸만 그림이 안 그려진다」로 오판한다(2026-10-06).
     pub fn render_cells_offscreen(
         &mut self,
         panes: &[PaneSlot<'_>],
@@ -4956,6 +4958,7 @@ impl GpuRenderer {
         h: u32,
         path: &str,
         max_w: u32,
+        paint: impl FnOnce(&mut Self),
     ) -> Result<(u32, u32), String> {
         let w = w.max(1);
         let h = h.max(1);
@@ -4967,6 +4970,7 @@ impl GpuRenderer {
         let saved_runs = std::mem::take(&mut self.clip_runs);
         let saved_stack = std::mem::take(&mut self.clip_stack);
         self.draw_cells(panes);
+        paint(self);
         let dims = [w as f32, h as f32];
         let (gamma, contrast, sat) = text_render_knobs();
         self.pipeline
@@ -4974,6 +4978,14 @@ impl GpuRenderer {
         self.pipeline
             .write_instances(&self.device, &self.queue, &self.chrome);
         let n = self.chrome.len() as u32;
+        // 본 프레임은 그림 버퍼를 매번 새로 올리므로(`render` 의 chrome_changed) 여기서
+        // 덮어써도 다음 프레임이 되돌린다. 크기 uniform 만 아래에서 되돌린다.
+        if !self.image_quads.is_empty() {
+            self.image_pipeline
+                .write_uniforms_full(&self.queue, dims, gamma, contrast, sat, self.p3_root_owned, 0.0);
+            let quads: Vec<CellInstance> = self.image_quads.iter().map(|(_, inst, ..)| *inst).collect();
+            self.image_pipeline.write_instances(&self.device, &self.queue, &quads);
+        }
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kasaterm offscreen capture"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -5017,6 +5029,19 @@ impl GpuRenderer {
             });
             pass.set_scissor_rect(0, 0, w, h);
             self.pipeline.draw_range(&mut pass, &self.bind_group, 0, n);
+            // 그림은 전부 셀 뒤에 큐잉됐으니 셀 위에 한 번에 얹는다. 클립은 표면 크기로
+            // 잘려 있어 이 텍스처 크기로 한 번 더 자른다 — 넘으면 시저가 패닉한다.
+            for (i, (key, _, _, clip)) in self.image_quads.iter().enumerate() {
+                let Some(entry) = self.images.get(key) else { continue };
+                let [cx, cy, cw, ch] = clip.unwrap_or([0, 0, w, h]);
+                let (x0, y0) = (cx.min(w), cy.min(h));
+                let (x1, y1) = ((cx + cw).min(w), (cy + ch).min(h));
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                self.image_pipeline.draw_at(&mut pass, &entry.bind_group, i as u32);
+            }
         }
         let bpr = w.div_ceil(64) * 256; // align(w*4, 256)
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -5089,6 +5114,8 @@ impl GpuRenderer {
         self.clip_stack = saved_stack;
         let sdims = [self.config.width as f32, self.config.height as f32];
         self.pipeline
+            .write_uniforms_full(&self.queue, sdims, gamma, contrast, sat, self.p3_root_owned, 0.0);
+        self.image_pipeline
             .write_uniforms_full(&self.queue, sdims, gamma, contrast, sat, self.p3_root_owned, 0.0);
         saved.map_err(|e| format!("offscreen png 저장 실패: {e}"))
     }

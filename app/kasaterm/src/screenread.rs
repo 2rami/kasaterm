@@ -2542,7 +2542,6 @@ pub(crate) fn paint_inline_images(
     g: &mut gpu::GpuRenderer,
     slots: &[crate::render::terminal_scene::InlineSlot],
 ) {
-    use crate::render::terminal_scene::InlineFit;
     // 값은 디코드한 픽셀 크기 — `Hug` 가 박스를 좁히는 데 쓴다. `None` 은 디코드
     // 실패라, 매 프레임 같은 파일을 다시 열지 않게 남겨 둔다.
     static UPLOADED: std::sync::OnceLock<
@@ -2559,35 +2558,61 @@ pub(crate) fn paint_inline_images(
         keep
     });
     for slot in slots {
-        let (key, path) = (&slot.key, &slot.path);
-        let (x, y, w, h) = slot.rect;
-        if !up.contains_key(key) {
-            let dims = std::fs::read(path)
-                .ok()
-                .and_then(|b| image::load_from_memory(&b).ok())
-                .map(|img| {
-                    let rgba = img.to_rgba8();
-                    let (iw, ih) = rgba.dimensions();
-                    g.upload_image(key, &rgba, iw, ih);
-                    (iw, ih)
-                });
-            up.insert(key.to_string(), dims);
+        if !up.contains_key(&slot.key) {
+            up.insert(slot.key.clone(), upload_inline_image(g, slot));
         }
-        let Some(Some((iw, ih))) = up.get(key).copied() else { continue };
-        let (cx, cy, cw, ch) = slot.clip;
-        g.push_clip(cx, cy, cw, ch);
-        match slot.fit {
-            InlineFit::Contain => g.queue_image_contain(key, x, y, w, h),
-            InlineFit::Native => g.queue_image(key, x, y, w, h, 1.0, 0.0, 0.0),
-            InlineFit::Hug => {
-                // no-upscale 캡이 있어 그림이 박스보다 작으면 원본 크기로 그려진다 —
-                // 좁힐 폭도 그 실제 크기를 넘지 않아야 왼쪽에 붙는다.
-                let bw = if ih > 0 { (h * iw as f32 / ih as f32).min(iw as f32).min(w) } else { w };
-                g.queue_image(key, x, y, bw, h, 1.0, 0.0, 0.0);
-            }
+        if let Some(Some(dims)) = up.get(&slot.key).copied() {
+            queue_inline_image(g, slot, dims);
         }
-        g.pop_clip();
     }
+}
+
+/// 화면 밖 캡처 한 번 몫 — 위 캐시를 안 거치고 올려 그린다. 캐시는 「이번 프레임에 없는
+/// 키는 놓는다」라서 여기서 건드리면 본 화면 텍스처가 지워진다. 올린 텍스처는 부른 쪽이
+/// 캡처 뒤 키 머리로 놓는다.
+pub(crate) fn paint_inline_images_once(
+    g: &mut gpu::GpuRenderer,
+    slots: &[crate::render::terminal_scene::InlineSlot],
+) {
+    for slot in slots {
+        if let Some(dims) = upload_inline_image(g, slot) {
+            queue_inline_image(g, slot, dims);
+        }
+    }
+}
+
+fn upload_inline_image(
+    g: &mut gpu::GpuRenderer,
+    slot: &crate::render::terminal_scene::InlineSlot,
+) -> Option<(u32, u32)> {
+    let img = image::load_from_memory(&std::fs::read(&slot.path).ok()?).ok()?;
+    let rgba = img.to_rgba8();
+    let (iw, ih) = rgba.dimensions();
+    g.upload_image(&slot.key, &rgba, iw, ih);
+    Some((iw, ih))
+}
+
+fn queue_inline_image(
+    g: &mut gpu::GpuRenderer,
+    slot: &crate::render::terminal_scene::InlineSlot,
+    (iw, ih): (u32, u32),
+) {
+    use crate::render::terminal_scene::InlineFit;
+    let key = &slot.key;
+    let (x, y, w, h) = slot.rect;
+    let (cx, cy, cw, ch) = slot.clip;
+    g.push_clip(cx, cy, cw, ch);
+    match slot.fit {
+        InlineFit::Contain => g.queue_image_contain(key, x, y, w, h),
+        InlineFit::Native => g.queue_image(key, x, y, w, h, 1.0, 0.0, 0.0),
+        InlineFit::Hug => {
+            // no-upscale 캡이 있어 그림이 박스보다 작으면 원본 크기로 그려진다 —
+            // 좁힐 폭도 그 실제 크기를 넘지 않아야 왼쪽에 붙는다.
+            let bw = if ih > 0 { (h * iw as f32 / ih as f32).min(iw as f32).min(w) } else { w };
+            g.queue_image(key, x, y, bw, h, 1.0, 0.0, 0.0);
+        }
+    }
+    g.pop_clip();
 }
 
 /// claude 2.1.228 이 세션명 자리(입력박스 상단 보더 우측 끝)에 그리는 ` ultracode `

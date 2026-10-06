@@ -624,6 +624,36 @@ pub(crate) enum InlineFit {
     Contain,
 }
 
+/// PTY 가 준 그림 배치 한 장을 칸 글자판 원점(`origin`)·셀 크기에 놓는다. 화면 프레임과
+/// 화면 밖 캡처가 같은 자리에 그리도록 한곳에 둔다. `dy` 는 입력창을 바닥으로 내린 칸의
+/// 줄 옮김, `rows` 는 칸 높이(줄) — 그 밖은 잘린다.
+pub(crate) fn inline_slot(
+    v: &kasa_bridge::screen::InlineImageView,
+    key: String,
+    (left, top): (f32, f32),
+    (cw, ch): (f32, f32),
+    rows: usize,
+    dy: i32,
+) -> InlineSlot {
+    let (clip_y0, clip_y1) = (top, top + rows as f32 * ch);
+    let rect = (
+        left + v.col as f32 * cw,
+        top + (v.row + dy) as f32 * ch,
+        v.cols as f32 * cw,
+        v.rows as f32 * ch,
+    );
+    let (clip, fit) = match v.clip {
+        Some(c) => {
+            let y0 = (top + (c.row + dy) as f32 * ch).max(clip_y0);
+            let y1 = (top + (c.row + dy + c.rows as i32) as f32 * ch).min(clip_y1);
+            let x0 = left + c.col as f32 * cw;
+            ((x0, y0, c.cols as f32 * cw, (y1 - y0).max(0.0)), InlineFit::Contain)
+        }
+        None => ((rect.0, clip_y0, rect.2, clip_y1 - clip_y0), InlineFit::Native),
+    };
+    InlineSlot { key, path: v.path.clone(), rect, clip, fit }
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
     pub(crate) animated_cells: bool,
@@ -652,6 +682,31 @@ pub(crate) struct TerminalComposition {
 #[cfg(test)]
 mod visual_scene_tests {
     use super::*;
+
+    #[test]
+    fn inline_slot_keeps_kitty_box_and_clips_to_the_visible_tile() {
+        use kasa_bridge::screen::{CellClip, InlineImageView};
+        // 4칸×2줄 얼굴의 윗줄이 칸 위로 밀려 나가고 아랫줄만 첫 줄에 남은 자리.
+        let face = InlineImageView {
+            id: 7,
+            path: "/tmp/face.png".into(),
+            row: -1,
+            col: 2,
+            cols: 4,
+            rows: 2,
+            clip: Some(CellClip { row: 0, col: 2, cols: 4, rows: 1 }),
+        };
+        let s = inline_slot(&face, "k".into(), (10.0, 20.0), (8.0, 16.0), 24, 0);
+        assert_eq!(s.rect, (26.0, 4.0, 32.0, 32.0));
+        assert_eq!(s.clip, (26.0, 20.0, 32.0, 16.0));
+        assert_eq!(s.fit, InlineFit::Contain);
+        let shifted = inline_slot(&face, "k".into(), (10.0, 20.0), (8.0, 16.0), 24, 3);
+        assert_eq!((shifted.rect.1, shifted.clip.1), (4.0 + 48.0, 20.0 + 48.0));
+        let osc = InlineImageView { row: 22, clip: None, ..face };
+        let s = inline_slot(&osc, "o".into(), (10.0, 20.0), (8.0, 16.0), 24, 0);
+        assert_eq!(s.clip, (26.0, 20.0, 32.0, 24.0 * 16.0));
+        assert_eq!(s.fit, InlineFit::Native);
+    }
 
     #[test]
     fn mirrored_codex_title_uses_host_metadata_without_local_transcript() {
@@ -1125,9 +1180,7 @@ impl App {
         // pane 셀 영역 — 스크롤로 반쯤 나간 그림이 셀과 함께 잘린다.
         if let Some(t) = term.filter(|t| !t.inline_images.is_empty()) {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-            let (icw, ich) = (self.cell.w * fs, self.cell.h * fs);
-            let clip_y0 = body_top;
-            let clip_y1 = body_top + rows_now as f32 * ich;
+            let cell = (self.cell.w * fs, self.cell.h * fs);
             // 앵커는 **뷰포트** 좌표다. 입력창을 바닥으로 내려 그린 pane 은 그림도
             // 같은 옮김을 거쳐야 글 흐름과 안 어긋난다 — 커서·조합 오버레이와 같은
             // 이유다. classic claude 는 OSC 1337 을 안 써서 지금은 셸 pane 만 이
@@ -1147,28 +1200,14 @@ impl App {
                     },
                     None => 0,
                 };
-                let rect = (
-                    body_left + v.col as f32 * icw,
-                    body_top + (v.row + dy) as f32 * ich,
-                    v.cols as f32 * icw,
-                    v.rows as f32 * ich,
-                );
-                let (clip, fit) = match v.clip {
-                    Some(c) => {
-                        let y0 = (body_top + (c.row + dy) as f32 * ich).max(clip_y0);
-                        let y1 = (body_top + (c.row + dy + c.rows as i32) as f32 * ich).min(clip_y1);
-                        let x0 = body_left + c.col as f32 * icw;
-                        ((x0, y0, c.cols as f32 * icw, (y1 - y0).max(0.0)), InlineFit::Contain)
-                    }
-                    None => ((rect.0, clip_y0, rect.2, clip_y1 - clip_y0), InlineFit::Native),
-                };
-                inline_slots.push(InlineSlot {
-                    key: format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
-                    path: v.path.clone(),
-                    rect,
-                    clip,
-                    fit,
-                });
+                inline_slots.push(inline_slot(
+                    v,
+                    format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
+                    (body_left, body_top),
+                    cell,
+                    rows_now,
+                    dy,
+                ));
             }
         }
         // 글 흐름 안 그림 — `[[img:<경로>:<행수>]]` 표식이 잡은 자리에 얹는다.
