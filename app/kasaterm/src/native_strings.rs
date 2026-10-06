@@ -96,6 +96,8 @@ fn english(value: &str) -> Option<&'static str> {
         "작업 방으로" => "Back to workspace",
         "일반" => "General",
         "모양" => "Appearance",
+        "색과 글꼴, 커서, 크기, 기기 색·아이콘을 한 화면에서 맞춥니다" => "Colors, fonts, cursor, sizes, and device colors and icons in one place",
+        "터미널 글꼴·글자 크기·커서는 「외형」에서 바꿔요." => "Change the terminal font, text size, and cursor in Appearance.",
         "하단바" => "Bottom bar",
         "셸" => "Shell",
         "테마" => "Theme",

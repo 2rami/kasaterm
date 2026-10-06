@@ -275,7 +275,7 @@ pub(super) fn rows(gate: &Gate) -> Vec<Row> {
             }
             let used = usage.get(&account).cloned().unwrap_or_default();
             Row {
-                display_name: gate.oauth.display_name(&account),
+                display_name: gate.display_name(&account),
                 signup,
                 created: if created > 0 { created } else { first_login },
                 created_estimated: created == 0 && first_login > 0,

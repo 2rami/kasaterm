@@ -41,6 +41,11 @@ pub struct Account {
     pub created: u64,
     #[serde(default)]
     pub disabled: bool,
+    /// 사람이 바꾼 로그인 아이디. 계정 열쇠(표의 이름)는 기기 기록·OAuth·동기화·봉인함에 박혀 있어
+    /// 그대로 두고, 사람이 치고 보는 아이디만 바꾼다. 바꾼 뒤의 옛 이름은 로그인에 안 쓰이고 남에게도
+    /// 안 풀린다 — 열쇠가 그 이름이라 다른 계정이 같은 이름을 쥐면 둘이 섞인다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -75,6 +80,23 @@ pub fn valid_account_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// 사람이 고를 수 있는 로그인 아이디 — 계정 이름 규칙에 더해, 구글·깃허브로 만든 계정의 열쇠
+/// (`oauth_…`)와 헷갈리는 이름은 받지 않는다.
+pub fn valid_login(name: &str) -> bool {
+    valid_account_name(name) && !name.starts_with("oauth_")
+}
+
+pub const MIN_PASSWORD_CHARS: usize = 8;
+
+/// 이 표에서 아이디가 이미 누구 것인가 — 다른 계정의 열쇠(옛 아이디 포함)이거나 바꾼 아이디면 그 열쇠.
+pub fn login_owner<'a>(file: &'a AccountsFile, name: &str) -> Option<&'a str> {
+    file.accounts
+        .iter()
+        .find(|(_, a)| a.login.as_deref() == Some(name))
+        .or_else(|| file.accounts.get_key_value(name))
+        .map(|(key, _)| key.as_str())
 }
 
 pub fn hash_password_with(pw: &str, iterations: u32) -> PwHash {
@@ -176,6 +198,73 @@ impl Accounts {
     /// 관리 화면용 — 이름·만든 시각·막힘뿐, 비밀번호 해시는 내지 않는다.
     pub(crate) fn summary(&self) -> Vec<(String, u64, bool)> {
         self.with(|f| f.accounts.iter().map(|(name, a)| (name.clone(), a.created, a.disabled)).collect())
+    }
+
+    /// 사람이 친 아이디의 계정 열쇠. 바꾼 아이디는 그 계정으로, 바꾸기 전 이름(열쇠)은 아무 데도
+    /// 안 간다.
+    pub fn resolve(&self, typed: &str) -> Option<String> {
+        self.with(|f| {
+            f.accounts
+                .iter()
+                .find(|(_, a)| a.login.as_deref() == Some(typed))
+                .or_else(|| f.accounts.get_key_value(typed).filter(|(_, a)| a.login.is_none()))
+                .map(|(key, _)| key.clone())
+        })
+    }
+
+    /// 화면에 보일 로그인 아이디. 비밀번호 계정이 아니면(구글·깃허브로 만든 계정) `None`.
+    pub fn login_of(&self, key: &str) -> Option<String> {
+        self.with(|f| f.accounts.get(key).map(|a| a.login.clone().unwrap_or_else(|| key.to_string())))
+    }
+
+    /// 아이디·비밀번호로 들어와서 그 계정 열쇠를 받는다. 없는 아이디도 같은 계산을 거친다.
+    pub fn check_login(&self, typed: &str, pw: &str) -> Option<String> {
+        match self.resolve(typed) {
+            Some(key) => self.check(&key, pw).then_some(key),
+            None => {
+                self.check("\u{0}", pw);
+                None
+            }
+        }
+    }
+
+    /// 계정 표를 디스크에서 새로 읽어 고치고 쓴다. CLI 가 그사이 고친 줄을 덮지 않게 캐시가 아니라
+    /// 파일을 기준으로 한다.
+    fn update(&self, change: impl FnOnce(&mut AccountsFile) -> Result<(), &'static str>) -> Result<(), &'static str> {
+        let path = self.path.as_ref().ok_or("storage_unavailable")?;
+        let mut cache = self.cache.lock().unwrap();
+        let mut file = load_accounts(path);
+        change(&mut file)?;
+        save_accounts(path, &file).map_err(|_| "storage_unavailable")?;
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        *cache = (mtime, file);
+        Ok(())
+    }
+
+    /// 로그인 아이디를 바꾼다. 자기 열쇠 이름으로 되돌리면 바꾼 기록을 지운다.
+    pub fn set_login(&self, key: &str, login: &str) -> Result<(), &'static str> {
+        if !valid_login(login) {
+            return Err("invalid_login");
+        }
+        self.update(|file| {
+            if login_owner(file, login).is_some_and(|owner| owner != key) {
+                return Err("login_taken");
+            }
+            let account = file.accounts.get_mut(key).ok_or("no_password")?;
+            account.login = (login != key).then(|| login.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn set_password(&self, key: &str, pw: &str) -> Result<(), &'static str> {
+        if pw.chars().count() < MIN_PASSWORD_CHARS || pw.len() > 1024 {
+            return Err("weak_password");
+        }
+        let hash = hash_password(pw);
+        self.update(|file| {
+            file.accounts.get_mut(key).ok_or("no_password")?.pbkdf2_sha256 = hash;
+            Ok(())
+        })
     }
 
     /// 비밀번호가 맞는가. 없는 계정·막힌 계정도 같은 계산을 거친다 — 걸린 시간으로 계정 유무를
@@ -309,7 +398,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kasa-acc-{}", uuid::Uuid::new_v4()));
         let p = dir.join("relay-accounts.json");
         let mut f = AccountsFile::default();
-        f.accounts.insert("geno".into(), Account { pbkdf2_sha256: hash_password_with("pw-1", 1000), created: 1, disabled: false });
+        f.accounts.insert("geno".into(), Account { pbkdf2_sha256: hash_password_with("pw-1", 1000), created: 1, disabled: false, login: None });
         save_accounts(&p, &f).unwrap();
         let acc = Accounts::new(Some(p.clone()));
         assert!(acc.check("geno", "pw-1"));
@@ -328,6 +417,38 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_changed_login_signs_in_and_the_old_key_stays_reserved() {
+        let dir = std::env::temp_dir().join(format!("kasa-acc-{}", uuid::Uuid::new_v4()));
+        let p = dir.join("relay-accounts.json");
+        let mut f = AccountsFile::default();
+        for name in ["geno", "other"] {
+            f.accounts.insert(name.into(), Account { pbkdf2_sha256: hash_password_with("pw-1", 1000), created: 1, disabled: false, login: None });
+        }
+        save_accounts(&p, &f).unwrap();
+        let acc = Accounts::new(Some(p.clone()));
+        assert_eq!(acc.set_login("geno", "other"), Err("login_taken"));
+        assert_eq!(acc.set_login("geno", "oauth_x1"), Err("invalid_login"));
+        assert_eq!(acc.set_login("oauth_abc", "fresh"), Err("no_password"));
+        acc.set_login("geno", "kasa").unwrap();
+        assert_eq!(acc.check_login("kasa", "pw-1").as_deref(), Some("geno"));
+        assert_eq!(acc.check_login("geno", "pw-1"), None, "옛 아이디로 들어왔다");
+        assert_eq!(acc.login_of("geno").as_deref(), Some("kasa"));
+        assert_eq!(acc.set_login("other", "geno"), Err("login_taken"), "옛 아이디가 남에게 풀렸다");
+        assert_eq!(acc.set_login("other", "kasa"), Err("login_taken"));
+        acc.set_password("geno", "short").unwrap_err();
+        acc.set_password("geno", "new-password").unwrap();
+        assert_eq!(acc.check_login("kasa", "pw-1"), None);
+        assert_eq!(acc.check_login("kasa", "new-password").as_deref(), Some("geno"));
+        acc.set_login("geno", "geno").unwrap();
+        assert_eq!(acc.check_login("geno", "new-password").as_deref(), Some("geno"));
+        assert_eq!(acc.check_login("kasa", "new-password"), None);
+        let saved = load_accounts(&p);
+        assert!(saved.accounts["geno"].login.is_none(), "되돌린 아이디가 기록에 남았다");
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("new-password"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

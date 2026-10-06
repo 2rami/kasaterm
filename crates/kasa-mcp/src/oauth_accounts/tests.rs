@@ -164,6 +164,7 @@ fn state_cookie_pkce_provider_and_replay_are_bound() {
             provider: Provider::Google,
             subject: "123".into(),
             display: String::new(),
+            picture: None,
         }, None)),
     );
     assert!(oauth.poll(&input, false).unwrap().is_some());
@@ -214,6 +215,7 @@ fn expiration_cancel_and_failed_exchange_are_terminal() {
                 provider: Provider::Google,
                 subject: "123".into(),
                 display: String::new(),
+                picture: None,
             },
             None,
         )),
@@ -270,11 +272,13 @@ fn identities_are_namespaced_never_email_merged_and_conflicts_fail() {
         provider: Provider::Google,
         subject: "123".into(),
         display: String::new(),
+        picture: None,
     };
     let github = Identity {
         provider: Provider::Github,
         subject: "123".into(),
         display: String::new(),
+        picture: None,
     };
     assert_eq!(
         oauth
@@ -323,6 +327,7 @@ fn signup_is_opt_in_and_corrupt_storage_is_not_replaced() {
         provider: Provider::Google,
         subject: "123".into(),
         display: String::new(),
+        picture: None,
     };
     assert_eq!(
         oauth.resolve(&identity, None, |_| false).err(),
@@ -470,6 +475,7 @@ fn native_code(oauth: &OAuth, id: &str) -> String {
                 provider: Provider::Google,
                 subject: "123".into(),
                 display: String::new(),
+                picture: None,
             }, None)),
         )
         .unwrap();

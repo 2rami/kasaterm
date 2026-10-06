@@ -8,6 +8,8 @@ use std::sync::{
 
 #[path = "native_work_permissions.rs"]
 pub(crate) mod work;
+#[path = "native_account_profile.rs"]
+pub(crate) mod profile;
 
 #[path = "native_op_approval.rs"]
 pub(crate) mod op;
@@ -31,6 +33,7 @@ pub(crate) enum Action {
     CancelChoice,
     Work(work::Act),
     Op(op::Act),
+    Profile(profile::Act),
 }
 
 /// An unlinked provider sign-in waiting for the person's answer. The gateway ticket stays in
@@ -63,6 +66,9 @@ pub(crate) struct State {
     choice: Option<Choice>,
     pub(crate) work: work::State,
     pub(crate) op: op::State,
+    pub(crate) profile: profile::State,
+    /// 검증 실행의 로그인 화면 — 느린 틱이 실제 로그인 상태로 덮지 않는다.
+    pinned: bool,
 }
 
 #[derive(Clone)]
@@ -80,15 +86,54 @@ pub(crate) struct View {
     choice: Option<Choice>,
     work: work::View,
     op: op::View,
+    profile: profile::View,
 }
 
 pub(crate) fn mask(value: &str) -> String {
     "•".repeat(value.chars().count())
 }
 
+/// 이 페이지의 입력칸인가.
+pub(crate) fn owns(field: SettingsInput) -> bool {
+    matches!(
+        field,
+        SettingsInput::DeviceAccountName
+            | SettingsInput::DeviceAccountPassword
+            | SettingsInput::DeviceAccountNickname
+            | SettingsInput::DeviceAccountNewLogin
+            | SettingsInput::DeviceAccountNewPassword
+            | SettingsInput::DeviceAccountNewPassword2
+    )
+}
+
+/// 가려 그리고, 되돌림 기록·복사에 안 싣고, Esc 면 비우는 칸.
+pub(crate) fn secret(field: SettingsInput) -> bool {
+    matches!(
+        field,
+        SettingsInput::DeviceAccountPassword
+            | SettingsInput::DeviceAccountNewPassword
+            | SettingsInput::DeviceAccountNewPassword2
+    )
+}
+
 impl State {
+    /// 이 페이지 입력칸의 글. 다른 칸이면 `None`.
+    pub(crate) fn field(&mut self, field: SettingsInput) -> Option<&mut String> {
+        Some(match field {
+            SettingsInput::DeviceAccountName => &mut self.account,
+            SettingsInput::DeviceAccountPassword => &mut self.password,
+            SettingsInput::DeviceAccountNickname => &mut self.profile.nickname,
+            SettingsInput::DeviceAccountNewLogin => &mut self.profile.new_login,
+            SettingsInput::DeviceAccountNewPassword => &mut self.profile.new_password,
+            SettingsInput::DeviceAccountNewPassword2 => &mut self.profile.new_password2,
+            _ => return None,
+        })
+    }
+
     pub(crate) fn refresh(&mut self) {
-        self.status = kasa_mcp::device_auth::status();
+        if !self.pinned {
+            self.status = kasa_mcp::device_auth::status();
+        }
         if self.provider_check.is_none()
             && self
                 .provider_checked
@@ -121,11 +166,21 @@ impl State {
             choice: self.choice.clone(),
             work: self.work.view(self.status["logged_in"] == true),
             op: self.op.view(self.status["logged_in"] == true),
+            profile: self.profile.view(),
         }
     }
 
     /// Verification-run screens of the sign-in page with providers enabled and, optionally, an
     /// unlinked sign-in waiting for the account choice. Holds no gateway capability.
+    /// Signed-in account page with a profile, as if the gateway answered. Holds no capability.
+    pub(crate) fn fixture_signed_in(&mut self, form: Option<profile::Form>) {
+        self.fixture(false, false);
+        self.status = serde_json::json!({"state":"connected","credential_saved":true,"logged_in":true,
+            "account":"fixture","display_name":"건호"});
+        self.pinned = true;
+        self.profile.fixture(form);
+    }
+
     pub(crate) fn fixture(&mut self, choice: bool, claim: bool) {
         self.providers = serde_json::json!({"state":"ready","providers":[
             {"id":"google","enabled":true},{"id":"github","enabled":true}],
@@ -155,6 +210,7 @@ impl State {
         }
         self.work.hide();
         self.op.hide();
+        self.profile.hide();
     }
 
     fn poll(&mut self) -> bool {
@@ -203,6 +259,7 @@ impl State {
             Ok(Action::Login) => {
                 self.form = false;
                 self.choice = None;
+                self.profile.refresh_now();
                 // 관문에 붙은 즉시 다른 기기의 에이전트 계정 목록을 받는다.
                 kasa_mcp::agent_accounts::poke();
                 self.message = Some((
@@ -211,10 +268,12 @@ impl State {
                 ));
             }
             Ok(Action::Linked) => {
+                self.profile.refresh_now();
                 self.message = Some(("이 KASA 계정에 로그인 방법을 연결했어요".into(), false))
             }
             Ok(Action::Connected { linked, install }) => {
                 self.work.refresh_now();
+                self.profile.refresh_now();
                 let text = match (linked, install) {
                     (true, true) => "로그인과 일 권한을 연결했어요. 열린 GitHub 화면에서 PR 올릴 레포를 골라 주세요",
                     (true, false) => "로그인과 일 권한을 연결했어요",
@@ -271,7 +330,8 @@ impl App {
     pub(crate) fn device_account_poll(&mut self) {
         self.work_permissions_poll();
         self.op_approval_poll();
-        if self.device_account.poll() {
+        let profile = self.account_profile_poll();
+        if self.device_account.poll() || profile {
             self.device_account.refresh();
             self.chrome_dirty = true;
             if let Some(window) = &self.window {
@@ -283,6 +343,35 @@ impl App {
         }
     }
 
+    /// 입력칸의 Enter — 다음 칸으로 가거나 그 칸 묶음을 보낸다.
+    pub(crate) fn device_account_enter(&mut self, field: SettingsInput) {
+        use profile::{Act, Form};
+        let form = self.device_account.profile.form;
+        let next = match (field, form) {
+            (SettingsInput::DeviceAccountName, _) | (SettingsInput::DeviceAccountNewLogin, _) => {
+                Some(SettingsInput::DeviceAccountPassword)
+            }
+            (SettingsInput::DeviceAccountPassword, Some(Form::Password)) => {
+                Some(SettingsInput::DeviceAccountNewPassword)
+            }
+            (SettingsInput::DeviceAccountNewPassword, _) => Some(SettingsInput::DeviceAccountNewPassword2),
+            _ => None,
+        };
+        if let Some(next) = next {
+            self.native_settings_focus(next);
+            self.settings_scene.set_keyboard_focus(Some(Target::Focus(next)));
+            self.chrome_dirty = true;
+            return;
+        }
+        let action = match (field, form) {
+            (SettingsInput::DeviceAccountNickname, _) => Action::Profile(Act::SaveNickname),
+            (SettingsInput::DeviceAccountPassword, Some(Form::Login)) => Action::Profile(Act::SaveLogin),
+            (SettingsInput::DeviceAccountNewPassword2, _) => Action::Profile(Act::SavePassword),
+            _ => Action::Login,
+        };
+        self.device_account_action(action);
+    }
+
     pub(crate) fn device_account_action(&mut self, action: Action) {
         if let Action::Work(act) = action {
             self.work_permissions_action(act);
@@ -290,6 +379,10 @@ impl App {
         }
         if let Action::Op(act) = action {
             self.op_approval_action(act);
+            return;
+        }
+        if let Action::Profile(act) = action {
+            self.account_profile_action(act);
             return;
         }
         if action == Action::CancelOAuth {
@@ -346,7 +439,12 @@ impl App {
                     let _ = tx.send(result);
                 });
             }
-            Action::Linked | Action::Connected { .. } | Action::CancelOAuth | Action::Work(_) | Action::Op(_) => {}
+            Action::Linked
+            | Action::Connected { .. }
+            | Action::CancelOAuth
+            | Action::Work(_)
+            | Action::Op(_)
+            | Action::Profile(_) => {}
             Action::OpenClaim => {
                 if let Some(choice) = self.device_account.choice.as_mut() {
                     choice.claim = true;
@@ -469,7 +567,9 @@ pub(super) fn paint(
         *y += 18.0;
     }
     // OAuth 로 만든 계정 이름(oauth_<hex>)은 사람이 못 알아본다 — 관문이 준 이메일·아이디를 쓴다.
-    if let Some(account) = v.status["display_name"].as_str().or(v.status["account"].as_str()) {
+    // 로그인해 있으면 아래 얼굴 줄이 닉네임·아이디를 보인다.
+    let signed_in = v.status["credential_saved"].as_bool() == Some(true);
+    if let Some(account) = v.status["display_name"].as_str().or(v.status["account"].as_str()).filter(|_| !signed_in) {
         let label = fit(g, account, w, 10.5, false);
         draw_text(g, x, *y, &label, 10.5, theme::text_dim(), false);
         *y += 18.0;
@@ -523,10 +623,15 @@ pub(super) fn paint(
             "취소",
             Action::Cancel,
         );
-    } else if v.status["credential_saved"].as_bool() == Some(true) {
+    } else if signed_in {
+        profile::paint_profile(g, s, hits, caret, x, y, w);
+        profile::paint_methods(g, s, hits, caret, x, y, w);
+        if provider_buttons_ready(v) {
+            info_slab(g, x, y, w, link_hint(v));
+        }
         if v.form {
             password_form(g, s, hits, caret, x, y, w, v, "로그인", Action::Cancel);
-        } else {
+        } else if v.profile.form.is_none() {
             account_buttons(
                 g,
                 s,
@@ -540,10 +645,9 @@ pub(super) fn paint(
                 Action::AskLogout,
             );
         }
-        provider_buttons(g, s, hits, x, y, w, v, true);
     } else {
         // Signing in with Google·GitHub is the main path; an ID and password is the fallback.
-        let ready = provider_buttons(g, s, hits, x, y, w, v, false);
+        let ready = provider_buttons(g, s, hits, x, y, w, v);
         if ready {
             info_slab(
                 g,
@@ -611,9 +715,25 @@ fn provider_name(provider: Provider) -> &'static str {
     }
 }
 
-/// Google·GitHub buttons side by side. Signed out they are the primary way in; signed in they link
-/// another login method to this account. Returns whether any provider can be used.
-#[allow(clippy::too_many_arguments)]
+fn provider_buttons_ready(v: &View) -> bool {
+    [Provider::Google, Provider::Github]
+        .into_iter()
+        .any(|provider| provider_enabled(&v.providers, provider))
+}
+
+/// 로그인된 기기의 「연결」이 무엇을 붙이는지 — 관문이 받는 일 권한에 따라 다르다.
+fn link_hint(v: &View) -> &'static str {
+    let work = |provider: &str| v.providers["connect"][provider] == true;
+    match (work("google"), work("github")) {
+        (true, true) => "「연결」은 이 KASA 계정에 로그인 방법을 잇고, 같은 허용으로 Gmail 읽기·보내기와 GitHub PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
+        (true, false) => "「연결」은 이 KASA 계정에 로그인 방법을 잇고, Google 은 같은 허용으로 Gmail 읽기·보내기 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
+        (false, true) => "「연결」은 이 KASA 계정에 로그인 방법을 잇고, GitHub 은 같은 허용으로 PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
+        (false, false) => "「연결」은 이 KASA 계정에 로그인 방법을 잇습니다. 다른 계정과 자동으로 합치지 않습니다.",
+    }
+}
+
+/// Google·GitHub buttons side by side — the primary way in while signed out. Returns whether any
+/// provider can be used.
 fn provider_buttons(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -622,15 +742,10 @@ fn provider_buttons(
     y: &mut f32,
     w: f32,
     v: &View,
-    linked: bool,
 ) -> bool {
     let width = ((w - 8.0) / 2.0).max(0.0);
     for (index, provider) in [Provider::Google, Provider::Github].into_iter().enumerate() {
-        let label = format!(
-            "{} {}",
-            provider_name(provider),
-            if linked { "연결" } else { "로그인" }
-        );
+        let label = format!("{} 로그인", provider_name(provider));
         let rect = (x + index as f32 * (width + 8.0), *y, width, CTL_H);
         if provider_enabled(&v.providers, provider) {
             button(
@@ -640,7 +755,7 @@ fn provider_buttons(
                 rect,
                 &label,
                 Target::Setting(SettingsAction::DeviceAccount(Action::OAuth(provider))),
-                !linked,
+                true,
             );
         } else {
             crate::native_controls::text_button(
@@ -656,9 +771,7 @@ fn provider_buttons(
         }
     }
     *y += ROW_H;
-    let ready = [Provider::Google, Provider::Github]
-        .into_iter()
-        .any(|provider| provider_enabled(&v.providers, provider));
+    let ready = provider_buttons_ready(v);
     if !ready {
         let hint = match v.providers["state"].as_str() {
             Some("setup_required") => {
@@ -671,20 +784,6 @@ fn provider_buttons(
             _ => "Google·GitHub 로그인 사용 가능 여부 확인 중…",
         };
         info_slab(g, x, y, w, hint);
-    } else if linked {
-        let work = |provider: &str| v.providers["connect"][provider] == true;
-        info_slab(
-            g,
-            x,
-            y,
-            w,
-            match (work("google"), work("github")) {
-                (true, true) => "현재 KASA 계정에 로그인 방법을 연결하고, 같은 허용으로 Gmail 읽기·보내기와 GitHub PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
-                (true, false) => "현재 KASA 계정에 로그인 방법을 연결하고, Google 은 같은 허용으로 Gmail 읽기·보내기 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
-                (false, true) => "현재 KASA 계정에 로그인 방법을 연결하고, GitHub 은 같은 허용으로 PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
-                (false, false) => "현재 KASA 계정에 로그인 방법을 연결합니다. 다른 계정과 자동으로 합치지 않습니다.",
-            },
-        );
     }
     ready
 }

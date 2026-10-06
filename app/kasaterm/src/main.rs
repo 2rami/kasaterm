@@ -4487,6 +4487,13 @@ pub(crate) struct StudentRawEdit {
 pub(crate) enum SettingsInput {
     DeviceAccountName,
     DeviceAccountPassword,
+    /// 설정 「계정」 프로필 펼침의 닉네임.
+    DeviceAccountNickname,
+    /// 로그인 아이디 바꾸기의 새 아이디.
+    DeviceAccountNewLogin,
+    /// 비밀번호 바꾸기의 새 비밀번호와 확인 칸.
+    DeviceAccountNewPassword,
+    DeviceAccountNewPassword2,
     CwdPath,
     /// 터미널 편집기 명령줄 필드("파일 열기"가 `terminal` 일 때만 보인다).
     FileOpenCmd,

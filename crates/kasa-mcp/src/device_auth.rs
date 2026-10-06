@@ -19,6 +19,8 @@ mod oauth;
 pub mod connections;
 #[path = "device_approvals.rs"]
 pub mod approvals;
+#[path = "device_profile.rs"]
+pub mod profile;
 
 static CREDENTIALS: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -338,6 +340,8 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
                 "oauth_claim" => oauth::choose(&params, true).await,
                 "connections" | "connections_audit" | "disconnect" | "mail_list" | "mail_read"
                 | "mail_send" | "pr_create" | "reject" => connections::handle(&op, &params).await,
+                "profile" | "profile_update" | "avatar_remove" | "login_change"
+                | "password_change" => profile::handle(&op, &params).await,
                 "login" => {
                     let account = params["account"].as_str().unwrap_or("").trim().to_lowercase();
                     let password = params["password"].as_str().unwrap_or("");

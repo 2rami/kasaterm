@@ -41,6 +41,8 @@ mod workspace;
 mod connections;
 #[path = "gateway_approvals.rs"]
 mod approvals;
+#[path = "gateway_profile.rs"]
+mod profile;
 
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -239,6 +241,8 @@ pub struct Gate {
     enroll: Arc<install::Enroll>,
     /// 원격 승인 요청(메모리)·승인 열쇠·폰 푸시 토큰(`gateway_approvals.rs`).
     approvals: Arc<approvals::Store>,
+    /// 닉네임·올린 프사(`gateway_profile.rs`).
+    profiles: Arc<profile::Profiles>,
     auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
     state_write: Arc<Mutex<()>>,
@@ -338,6 +342,7 @@ impl Gate {
             install_dir: state_path.as_ref().map(|p| p.with_file_name("relay-install")),
             enroll: Arc::new(install::Enroll::from_env()),
             approvals: Arc::new(approvals::Store::open(state_path.as_deref())),
+            profiles: Arc::new(profile::Profiles::open(state_path.as_deref())),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
             state_write: Arc::new(Mutex::new(())),
@@ -363,6 +368,11 @@ impl Gate {
         let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices, agent_accounts })
             .map_err(std::io::Error::other)?;
         crate::relay_auth::write_private(p, &body)
+    }
+
+    /// 사람에게 보일 계정 이름 — 사람이 정한 닉네임, 없으면 구글·깃허브로 만든 계정의 이메일·아이디.
+    fn display_name(&self, account: &str) -> Option<String> {
+        self.profiles.nickname(account).or_else(|| self.oauth.display_name(account))
     }
 
     fn account_active(&self, account: &str) -> bool {
@@ -479,6 +489,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(connections::routes())
         .merge(install::routes())
         .merge(approvals::routes())
+        .merge(profile::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))
@@ -568,16 +579,18 @@ async fn login(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         )
             .into_response();
     }
-    let ok = crate::relay_auth::valid_account_name(&account) && !b.password.is_empty() && b.password.len() <= 1024 && {
+    let key = if crate::relay_auth::valid_account_name(&account) && !b.password.is_empty() && b.password.len() <= 1024 {
         let accounts = gate.accounts.clone();
         let (name, pw) = (account.clone(), b.password);
-        tokio::task::spawn_blocking(move || accounts.check(&name, &pw)).await.unwrap_or(false)
+        tokio::task::spawn_blocking(move || accounts.check_login(&name, &pw)).await.unwrap_or(None)
+    } else {
+        None
     };
-    gate.limiter.record(&account, ok);
-    if !ok {
+    gate.limiter.record(&account, key.is_some());
+    let Some(account) = key else {
         eprintln!("[gateway] 로그인 실패 — 계정 {account:?}, 출처 {ip}");
         return json_err(StatusCode::UNAUTHORIZED, "bad_credentials");
-    }
+    };
     if kind == "desktop" {
         let old: Vec<String> = gate
             .devices
@@ -618,8 +631,8 @@ async fn whoami(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axu
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     axum::Json(serde_json::json!({
-        "ok": true, "account": d.account, "display_name": gate.oauth.display_name(&d.account),
-        "device_id": id, "kind": d.kind, "label": d.label, "machine_id": d.machine_id,
+        "ok": true, "account": d.account, "display_name": gate.display_name(&d.account),
+        "login": gate.accounts.login_of(&d.account), "device_id": id, "kind": d.kind, "label": d.label, "machine_id": d.machine_id,
     }))
     .into_response()
 }
@@ -647,7 +660,7 @@ async fn devices_list(State(gate): State<Gate>, headers: axum::http::HeaderMap) 
             })
         })
         .collect();
-    let display_name = gate.oauth.display_name(&d.account);
+    let display_name = gate.display_name(&d.account);
     axum::Json(serde_json::json!({ "ok": true, "account": d.account, "display_name": display_name, "devices": list }))
         .into_response()
 }
@@ -1011,7 +1024,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             serde_json::json!({
                 "t": "ok", "accepted": acc, "rejected": rej,
                 "proto": 2, "account": account, "device_id": device_id,
-                "display_name": account.as_deref().and_then(|a| gate.oauth.display_name(a)),
+                "display_name": account.as_deref().and_then(|a| gate.display_name(a)),
             })
             .to_string()
             .into(),
@@ -1931,6 +1944,7 @@ mod tests {
                 pbkdf2_sha256: crate::relay_auth::hash_password_with("correct horse", 1000),
                 created: 1,
                 disabled: false,
+                login: None,
             },
         );
         crate::relay_auth::save_accounts(&accounts, &f).unwrap();

@@ -4452,6 +4452,7 @@ impl GpuRenderer {
             "claude" => include_str!("../assets/icons/claude.svg"),
             "codex" => include_str!("../assets/icons/codex.svg"),
             "gmail" => include_str!("../assets/icons/gmail.svg"),
+            "google" => include_str!("../assets/icons/google.svg"),
             "naver" => include_str!("../assets/icons/naver.svg"),
             "mail" => include_str!("../assets/icons/mail.svg"),
             "antigravity" => include_str!("../assets/icons/antigravity.svg"),
@@ -7294,7 +7295,7 @@ mod account_icon_tests {
 
     #[test]
     fn official_email_assets_parse_and_paint_pixels() {
-        for (name, width, height) in [("gmail", 28, 28), ("naver", 84, 16)] {
+        for (name, width, height) in [("gmail", 28, 28), ("google", 16, 16), ("naver", 84, 16)] {
             let svg = GpuRenderer::icon_svg(name).expect("registered account icon");
             let rgba = GpuRenderer::rasterize_icon_color(svg, width, height)
                 .expect("official SVG must parse");

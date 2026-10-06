@@ -1008,7 +1008,7 @@ impl App {
             caret_on: self.last_blink_on,
             input: self.settings_input,
             select_all: scene.field_select_all(),
-            preedit: if self.settings_input == Some(SettingsInput::DeviceAccountPassword) {
+            preedit: if self.settings_input.is_some_and(device_account::secret) {
                 device_account::mask(&self.preedit)
             } else { self.preedit.clone() },
             first_run: scene.first_run(),
@@ -1307,8 +1307,14 @@ impl App {
         self.settings_input = Some(field);
         self.settings_scene.prepare_field_focus(field);
         match field {
-            SettingsInput::DeviceAccountName => self.settings_caret = self.device_account.account.chars().count(),
-            SettingsInput::DeviceAccountPassword => self.settings_caret = self.device_account.password.chars().count(),
+            SettingsInput::DeviceAccountName
+            | SettingsInput::DeviceAccountPassword
+            | SettingsInput::DeviceAccountNickname
+            | SettingsInput::DeviceAccountNewLogin
+            | SettingsInput::DeviceAccountNewPassword
+            | SettingsInput::DeviceAccountNewPassword2 => {
+                self.settings_caret = self.device_account.field(field).map_or(0, |buffer| buffer.chars().count())
+            }
             SettingsInput::CwdPath => self.settings_caret = self.set_cwd_mode.chars().count(),
             SettingsInput::FileOpenCmd => {
                 self.settings_caret = self.set_file_open_cmd.chars().count()
@@ -1373,7 +1379,7 @@ impl App {
     }
 
     fn native_settings_arm_backup(&mut self, field: SettingsInput) {
-        if field == SettingsInput::DeviceAccountPassword { return; }
+        if device_account::secret(field) { return; }
         if self.settings_scene.field_backup_matches(field) {
             return;
         }
@@ -1389,6 +1395,10 @@ impl App {
         match field {
             SettingsInput::DeviceAccountName => (self.device_account.account.clone(), self.settings_caret),
             SettingsInput::DeviceAccountPassword => (device_account::mask(&self.device_account.password), self.settings_caret),
+            SettingsInput::DeviceAccountNickname => (self.device_account.profile.nickname.clone(), self.settings_caret),
+            SettingsInput::DeviceAccountNewLogin => (self.device_account.profile.new_login.clone(), self.settings_caret),
+            SettingsInput::DeviceAccountNewPassword => (device_account::mask(&self.device_account.profile.new_password), self.settings_caret),
+            SettingsInput::DeviceAccountNewPassword2 => (device_account::mask(&self.device_account.profile.new_password2), self.settings_caret),
             SettingsInput::CwdPath => (self.set_cwd_mode.clone(), self.settings_caret),
             SettingsInput::FileOpenCmd => (self.set_file_open_cmd.clone(), self.settings_caret),
             SettingsInput::Shell => (self.set_shell.clone(), self.settings_caret),
@@ -1452,11 +1462,15 @@ impl App {
             self.settings_scene.mark_field_dirty();
         }
         match field {
-            SettingsInput::DeviceAccountName => {
-                crate::lineedit::insert(&mut self.device_account.account, &mut self.settings_caret, text)
-            }
-            SettingsInput::DeviceAccountPassword => {
-                crate::lineedit::insert(&mut self.device_account.password, &mut self.settings_caret, text)
+            SettingsInput::DeviceAccountName
+            | SettingsInput::DeviceAccountPassword
+            | SettingsInput::DeviceAccountNickname
+            | SettingsInput::DeviceAccountNewLogin
+            | SettingsInput::DeviceAccountNewPassword
+            | SettingsInput::DeviceAccountNewPassword2 => {
+                if let Some(buffer) = self.device_account.field(field) {
+                    crate::lineedit::insert(buffer, &mut self.settings_caret, text)
+                }
             }
             SettingsInput::CwdPath => {
                 crate::lineedit::insert(&mut self.set_cwd_mode, &mut self.settings_caret, text)
@@ -1599,8 +1613,16 @@ impl App {
 
     fn native_settings_restore_backup(&mut self, backup: FieldBackup) {
         match backup.field {
-            SettingsInput::DeviceAccountName => self.device_account.account = backup.value,
-            SettingsInput::DeviceAccountPassword => self.device_account.password.clear(),
+            field @ (SettingsInput::DeviceAccountName
+            | SettingsInput::DeviceAccountPassword
+            | SettingsInput::DeviceAccountNickname
+            | SettingsInput::DeviceAccountNewLogin
+            | SettingsInput::DeviceAccountNewPassword
+            | SettingsInput::DeviceAccountNewPassword2) => {
+                if let Some(buffer) = self.device_account.field(field) {
+                    *buffer = if device_account::secret(field) { String::new() } else { backup.value };
+                }
+            }
             SettingsInput::CwdPath => self.set_cwd_mode = backup.value,
             SettingsInput::FileOpenCmd => self.set_file_open_cmd = backup.value,
             SettingsInput::Shell => self.set_shell = backup.value,
@@ -1677,7 +1699,11 @@ impl App {
         }
         self.settings_input = None;
         match field {
-            Some(SettingsInput::DeviceAccountPassword) => self.device_account.password.clear(),
+            Some(field) if device_account::secret(field) => {
+                if let Some(buffer) = self.device_account.field(field) {
+                    buffer.clear();
+                }
+            }
             Some(SettingsInput::ThemeLabel) => self.theme_label_edit = None,
             Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
             Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
@@ -1830,7 +1856,7 @@ impl App {
 
         self.ime_retarget(crate::ImeFocus::Settings(field));
         let host = self.host_mod();
-        if field == SettingsInput::DeviceAccountPassword && host
+        if device_account::secret(field) && host
             && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyZ)) {
             return true;
         }
@@ -1964,14 +1990,8 @@ impl App {
         }
 
         match event.logical_key {
-            Key::Named(NamedKey::Enter) if field == SettingsInput::DeviceAccountName => {
-                self.native_settings_focus(SettingsInput::DeviceAccountPassword);
-                self.settings_scene.set_keyboard_focus(Some(Target::Focus(SettingsInput::DeviceAccountPassword)));
-                self.chrome_dirty = true;
-                return true;
-            }
-            Key::Named(NamedKey::Enter) if field == SettingsInput::DeviceAccountPassword => {
-                if !event.repeat { self.device_account_action(device_account::Action::Login); }
+            Key::Named(NamedKey::Enter) if device_account::owns(field) => {
+                if !event.repeat { self.device_account_enter(field); }
                 return true;
             }
             Key::Named(NamedKey::Enter) if is_multiline(field) => {
@@ -2392,8 +2412,15 @@ fn is_jamo(ch: char) -> bool {
 
 fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mut usize)> {
     match field {
-        SettingsInput::DeviceAccountName => Some((&mut app.device_account.account, &mut app.settings_caret)),
-        SettingsInput::DeviceAccountPassword => Some((&mut app.device_account.password, &mut app.settings_caret)),
+        SettingsInput::DeviceAccountName
+        | SettingsInput::DeviceAccountPassword
+        | SettingsInput::DeviceAccountNickname
+        | SettingsInput::DeviceAccountNewLogin
+        | SettingsInput::DeviceAccountNewPassword
+        | SettingsInput::DeviceAccountNewPassword2 => {
+            let buffer = app.device_account.field(field)?;
+            Some((buffer, &mut app.settings_caret))
+        }
         SettingsInput::CwdPath => Some((&mut app.set_cwd_mode, &mut app.settings_caret)),
         SettingsInput::FileOpenCmd => Some((&mut app.set_file_open_cmd, &mut app.settings_caret)),
         SettingsInput::Shell => Some((&mut app.set_shell, &mut app.settings_caret)),
@@ -2970,30 +2997,6 @@ fn paint_general(
             ),
         ],
     );
-    stepper_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "창 상태줄 높이",
-        &format!("{:.0}px", s.status_h),
-        SettingsAction::StatusBarH((s.status_h - 2.0).max(socket::STATUS_H_MIN) as u32),
-        SettingsAction::StatusBarH((s.status_h + 2.0).min(socket::STATUS_H_MAX) as u32),
-    );
-    stepper_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "pane 하단바 높이",
-        &format!("{:.0}px", s.footer_h),
-        SettingsAction::PaneFooterH((s.footer_h - 2.0).max(socket::PANE_FOOTER_H_MIN) as u32),
-        SettingsAction::PaneFooterH((s.footer_h + 2.0).min(socket::PANE_FOOTER_H_MAX) as u32),
-    );
 }
 
 fn paint_appearance(
@@ -3032,7 +3035,7 @@ fn paint_appearance(
     if disclosure(g, s, hits, x, y, w, "palette-advanced", "세부 색 · 기본색과 ANSI") {
         paint_palette_slots(g, s, hits, x, y, w);
     }
-    if !disclosure(g, s, hits, x, y, w, "appearance", "기타 모양 · 기기, 강조색, 글꼴과 배율") {
+    if !disclosure(g, s, hits, x, y, w, "appearance", "기타 외형 · 기기, 강조색, 글꼴·커서와 크기") {
         return;
     }
     if s.theme == "system" {
@@ -3186,6 +3189,32 @@ fn paint_appearance(
             ("옆", !s.tabs_on_top, SettingsAction::TabPosition("side")),
         ],
     );
+    // 외형 칸은 이 페이지 한 곳에 — 상태줄 높이는 「일반」, 글꼴·커서는 「터미널」에 흩어져
+    // 있었다(2026-10-06 「외형 묶고」).
+    stepper_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "창 상태줄 높이",
+        &format!("{:.0}px", s.status_h),
+        SettingsAction::StatusBarH((s.status_h - 2.0).max(socket::STATUS_H_MIN) as u32),
+        SettingsAction::StatusBarH((s.status_h + 2.0).min(socket::STATUS_H_MAX) as u32),
+    );
+    stepper_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "pane 하단바 높이",
+        &format!("{:.0}px", s.footer_h),
+        SettingsAction::PaneFooterH((s.footer_h - 2.0).max(socket::PANE_FOOTER_H_MIN) as u32),
+        SettingsAction::PaneFooterH((s.footer_h + 2.0).min(socket::PANE_FOOTER_H_MAX) as u32),
+    );
     *y += 10.0;
     button(
         g,
@@ -3197,6 +3226,8 @@ fn paint_appearance(
         false,
     );
     *y += CTL_H + 10.0;
+    crate::native_onboarding::paint_fonts(g, &s.onboarding, hits, x, y, w);
+    paint_cursor(g, s, hits, x, y, w);
 }
 
 fn paint_statusbar(
@@ -4149,13 +4180,19 @@ fn paint_shell(
     y: &mut f32,
     w: f32,
 ) {
-    paint_setup_section(g, s, hits, caret, x, y, w, 3);
-    if !disclosure(g, s, hits, x, y, w, "terminal", "세부 터미널 · 글꼴, 셸 경로와 커서") {
+    if cfg!(target_os = "windows") {
+        crate::native_onboarding::paint_platform(g, &s.onboarding, hits, caret, x, y, w);
+    } else {
+        seg_row(g, s, hits, x, y, w, "기본 셸", &[
+            ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+            ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
+            ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
+        ]);
+    }
+    plain_hint(g, x, y, w, "터미널 글꼴·글자 크기·커서는 「외형」에서 바꿔요.");
+    if !disclosure(g, s, hits, x, y, w, "terminal", "세부 터미널 · 셸 경로") {
         return;
     }
-    crate::native_onboarding::paint_fonts(g, &s.onboarding, hits, x, y, w);
-    section_title(g, x, *y, "셸", "");
-    *y += 54.0;
     let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
     text_field(
         g,
@@ -4180,7 +4217,6 @@ fn paint_shell(
         "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 pane에서 직접 붙여 주세요.",
     );
     *y += 16.0;
-    paint_cursor(g, s, hits, x, y, w);
 }
 
 fn disclosure(
@@ -7169,9 +7205,9 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "시작 위치와 파일, 스크롤의 기본값을 정합니다",
         ),
         SettingsCat::Appearance => (
-            "모양",
+            "외형",
             "sparkles",
-            "색과 글자 크기, 화면 배율을 한 화면에서 맞춥니다",
+            "색과 글꼴, 커서, 크기, 기기 색·아이콘을 한 화면에서 맞춥니다",
         ),
         SettingsCat::Statusbar => (
             "앱 하단바",
@@ -7181,7 +7217,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Shell => (
             "터미널",
             "terminal",
-            "새 pane의 셸과 커서를 정합니다",
+            "새 pane이 어떤 셸로 시작할지 정합니다",
         ),
         SettingsCat::Weather => (
             "날씨",

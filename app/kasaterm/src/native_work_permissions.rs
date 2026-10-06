@@ -448,16 +448,16 @@ pub(crate) fn paint(
     } else if !available("google") && !available("github") {
         info_slab(g, x, y, w, "관문에 Gmail·GitHub 연결이 아직 준비되지 않았어요.");
     } else {
-        // 따로 붙이는 단추는 없다 — 위 「Google·GitHub 연결」 한 번이 로그인과 일 권한을 함께 붙인다.
+        // 따로 붙이는 단추는 없다 — 위 「로그인 방법」의 연결 한 번이 로그인과 일 권한을 함께 붙인다.
         info_slab(
             g,
             x,
             y,
             w,
             if connections.is_empty() {
-                "위 「Google 연결」·「GitHub 연결」을 누르면 로그인과 함께 Gmail 읽기·보내기, GitHub PR 권한이 붙어요."
+                "위 「로그인 방법」에서 Google·GitHub 을 연결하면 로그인과 함께 Gmail 읽기·보내기, GitHub PR 권한이 붙어요."
             } else if connections.iter().any(|c| c["state"] == "reconnect_required") {
-                "「다시 연결 필요」는 위 「Google 연결」·「GitHub 연결」을 한 번 더 누르면 돼요."
+                "「다시 연결 필요」는 위 「로그인 방법」의 그 줄에서 「다시 연결」을 누르면 돼요."
             } else {
                 "학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로, 메일 보내기·PR 만들기는 아래에서 승인해야 나가요."
             },

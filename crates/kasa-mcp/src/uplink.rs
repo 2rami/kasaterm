@@ -255,6 +255,11 @@ pub fn poke() {
     poke_notify().notify_waiters();
 }
 
+/// 사람이 계정 닉네임을 바꾼 뒤 다음 재접속을 기다리지 않고 화면 이름을 맞춘다.
+pub(crate) fn set_display_name(name: Option<String>) {
+    set_status(|s| s.display_name = name);
+}
+
 fn set_status(f: impl FnOnce(&mut Status)) {
     if let Ok(mut s) = state().lock() {
         f(&mut s);

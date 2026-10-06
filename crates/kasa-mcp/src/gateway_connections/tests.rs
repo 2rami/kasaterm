@@ -14,6 +14,7 @@ async fn rig() -> (String, reqwest::Client, String, crate::connections::tests::S
             pbkdf2_sha256: crate::relay_auth::hash_password_with("fixture", 1),
             disabled: false,
             created: 1,
+            login: None,
         },
     );
     crate::relay_auth::save_accounts(&dir.join("accounts.json"), &accounts).unwrap();
@@ -123,6 +124,7 @@ async fn connect_flow_stores_tokens_only_for_the_asking_account_and_writes_need_
         provider: Provider::Google,
         subject: "google-sub".into(),
         display: "me@example.com".into(),
+        picture: None,
     });
     *gate.oauth.mock_grant.lock().unwrap() = Some(Grant {
         provider: Provider::Google,
@@ -149,7 +151,7 @@ async fn connect_flow_stores_tokens_only_for_the_asking_account_and_writes_need_
     assert_eq!(connected["linked"], true);
     assert!(connected.get("installed").is_none());
     assert_eq!(
-        gate.oauth.lookup(&Identity { provider: Provider::Google, subject: "google-sub".into(), display: String::new() }).as_deref(),
+        gate.oauth.lookup(&Identity { provider: Provider::Google, subject: "google-sub".into(), display: String::new(), picture: None }).as_deref(),
         Some("one")
     );
 
@@ -208,7 +210,7 @@ async fn github_connect_uses_the_app_without_scopes() {
 #[tokio::test]
 async fn github_connect_links_the_login_and_reports_a_missing_install() {
     let (base, client, token, calls, gate, dir) = rig().await;
-    let github = |subject: &str| Identity { provider: Provider::Github, subject: subject.into(), display: "octo".into() };
+    let github = |subject: &str| Identity { provider: Provider::Github, subject: subject.into(), display: "octo".into(), picture: None };
     let grant = |subject: &str| Grant {
         provider: Provider::Github,
         subject: subject.into(),

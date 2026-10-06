@@ -57,7 +57,18 @@ New OAuth-only accounts are **not** created by default. `KASA_OAUTH_ALLOW_SIGNUP
 
 OAuth sign-up records the provider, sign-up time and a display name in the identity file: the verified Google email or the GitHub login. It is display-only and never an identity key or merge criterion. Signing in again with the sign-up provider refreshes it; a later linked provider does not rename the account. Password accounts keep their chosen name.
 
-`/relay/whoami`, `/relay/devices`, the uplink welcome and the OAuth `complete` response carry `display_name`. The desktop account screen shows it instead of the `oauth_<hex>` account name.
+`/relay/whoami`, `/relay/devices`, the uplink welcome and the OAuth `complete` response carry `display_name`. The desktop account screen shows it instead of the `oauth_<hex>` account name. A nickname the person set (below) wins over the provider name.
+
+## Profile
+
+`/relay/profile` holds what the account looks like and how the person signs in. The account comes only from the device bearer; no body names an account.
+
+- `GET /relay/profile` returns `login` (the ID typed at the password login, `null` for accounts created by Google·GitHub), `has_password`, `nickname`, `display_name`, `avatar` and `identities`. `identities` lists the logins linked to this account, Google first, each with `provider`, `display` (verified email or GitHub login) and `picture`. Each sign-in, link or connect records that label in the identity file; a login linked before labels existed takes the display of the work connection with the same provider identity, and a GitHub login's picture follows from its numeric id.
+- `avatar` is `{"source":"upload","rev":…}` for a picture the person uploaded, otherwise `{"source":"google"|"github","url":…}`, otherwise `null`. Order: the upload, the provider the person picked, Google, GitHub. Provider picture URLs are kept only for `avatars.githubusercontent.com` and `lh3.googleusercontent.com` over HTTPS; clients fetch them directly. Google sign-in asks for `profile` along with `openid email` so the ID token carries `picture`.
+- `PATCH /relay/profile` takes `nickname` (trimmed, control characters dropped, up to 40 characters, empty clears it) and `avatar` (`google`, `github` or `auto`; picking one deletes the upload).
+- `PUT /relay/profile/avatar` stores one PNG, JPEG or WebP (checked by its first bytes, up to 512 KB; apps send a 256 px square). `GET` returns it with `cache-control: private, no-cache`; `DELETE` removes it. Uploads live in `relay-avatars/` (0700) under a hash of the account name, nicknames in `relay-profiles.json` (0600).
+- `POST /relay/profile/login` (`password`, `login`) changes the login ID; `POST /relay/profile/password` (`password`, `new_password`, at least 8 characters) changes the password. Both check the current password under the login lockout. The account key stays the same — device records, OAuth links, account sync and the sealed connection store keep using it — so devices stay signed in. The new ID is stored as `login` on the account in `relay-accounts.json`. The old ID no longer signs in and is not released: another account cannot take it, because the key with that name still exists. Changing back to the key name clears `login`. `kasa-relay account add` refuses a name in use as someone's login ID; `list` shows it.
+- Desktop `relay.account` operations are `profile`, `profile_update`, `avatar_remove`, `login_change` and `password_change`; the settings screen uploads the picture through `kasa_mcp::device_auth::profile::upload`. A changed nickname is written to the device credential and the connection status at once so the account menu and status bar follow without reconnecting.
 
 ## Client API
 

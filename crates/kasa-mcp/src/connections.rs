@@ -402,6 +402,20 @@ impl Service {
             "pending":book.pending.iter().map(|pending| pending.view(&book.connections)).collect::<Vec<_>>()}))
     }
 
+    /// (provider, provider-side identity, display) of each work connection — the account page
+    /// names logins linked before the gateway kept their labels with this.
+    pub(crate) async fn identities(&self, account: &str) -> Vec<(Provider, String, String)> {
+        let _guard = self.books.lock().await;
+        self.load(account)
+            .map(|book| {
+                book.connections
+                    .iter()
+                    .map(|c| (c.provider, c.subject.clone(), c.display.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Saves a grant from a connect flow; reconnecting the same provider identity replaces it.
     pub async fn store(
         &self,

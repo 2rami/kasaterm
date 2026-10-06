@@ -14,6 +14,7 @@ fn gate_in(dir: &std::path::Path, admins: &str) -> Gate {
                 pbkdf2_sha256: crate::relay_auth::hash_password_with("correct horse", 1000),
                 created: 1,
                 disabled: false,
+                login: None,
             },
         );
     }

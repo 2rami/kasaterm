@@ -547,7 +547,7 @@ fn sign_in(gate: &Gate, account: String, ready: Ready) -> axum::response::Respon
         return json_err(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
     }
     // The requester may lose the response or fail to save it; existing credentials remain explicitly revocable.
-    let display_name = gate.oauth.display_name(&account);
+    let display_name = gate.display_name(&account);
     axum::Json(json!({"ok":true,"status":"complete","account":account,"display_name":display_name,"device_id":device_id,"token":token})).into_response()
 }
 
@@ -609,21 +609,23 @@ async fn claim(State(gate): State<Gate>, req: axum::extract::Request) -> axum::r
         Ok(ready) => ready,
         Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
     };
-    let ok = crate::relay_auth::valid_account_name(&account)
+    let key = if crate::relay_auth::valid_account_name(&account)
         && !input.password.is_empty()
         && input.password.len() <= 1024
-        && {
-            let accounts = gate.accounts.clone();
-            let (name, password) = (account.clone(), input.password);
-            tokio::task::spawn_blocking(move || accounts.check(&name, &password))
-                .await
-                .unwrap_or(false)
-        };
-    gate.limiter.record(&account, ok);
-    if !ok {
+    {
+        let accounts = gate.accounts.clone();
+        let (name, password) = (account.clone(), input.password);
+        tokio::task::spawn_blocking(move || accounts.check_login(&name, &password))
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    gate.limiter.record(&account, key.is_some());
+    let Some(account) = key else {
         gate.oauth.miss(&input.ticket);
         return json_err(StatusCode::UNAUTHORIZED, "bad_credentials");
-    }
+    };
     if !gate.account_active(&account) {
         return json_err(StatusCode::UNAUTHORIZED, "account_disabled");
     }

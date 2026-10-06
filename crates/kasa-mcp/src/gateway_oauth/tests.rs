@@ -13,6 +13,7 @@ fn fixture() -> (Gate, std::path::PathBuf) {
                 pbkdf2_sha256: crate::relay_auth::hash_password_with("fixture", 1),
                 disabled: false,
                 created: 1,
+                login: None,
             },
         );
     }
@@ -29,6 +30,7 @@ fn ready(link: Option<Link>) -> Ready {
             provider: Provider::Github,
             subject: "123".into(),
             display: String::new(),
+            picture: None,
         },
         device: Device {
             provider: Provider::Github,
@@ -92,6 +94,7 @@ async fn mocked_browser_flow_only_returns_device_token_to_bound_poll() {
         provider: Provider::Github,
         subject: "123".into(),
         display: String::new(),
+        picture: None,
     });
     let request = axum::http::Request::builder().body(axum::body::Body::from(json!({
         "provider":"github","kind":"desktop","machine_id":"machine-one","label":"Test laptop"
@@ -502,6 +505,7 @@ async fn redirect_login_skips_code_page_and_redeems_only_with_verifier() {
         provider: Provider::Github,
         subject: "123".into(),
         display: String::new(),
+        picture: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -658,6 +662,7 @@ async fn unlinked_sign_in_asks_then_claims_existing_account_once() {
         provider: Provider::Google,
         subject: "google-sub-1".into(),
         display: "person@example.com".into(),
+        picture: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -745,6 +750,7 @@ async fn unlinked_sign_in_asks_then_claims_existing_account_once() {
         provider: Provider::Google,
         subject: "google-sub-2".into(),
         display: "new@example.com".into(),
+        picture: None,
     });
     let fresh = login().await;
     assert_eq!(fresh["status"], "choose");

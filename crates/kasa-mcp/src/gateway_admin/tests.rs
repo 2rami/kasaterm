@@ -14,6 +14,7 @@ fn fixture(admins: Option<&str>) -> (Gate, std::path::PathBuf) {
                 pbkdf2_sha256: crate::relay_auth::hash_password_with("fixture", 1),
                 disabled: false,
                 created: 1_700_000_000,
+                login: None,
             },
         );
     }
@@ -26,7 +27,7 @@ fn fixture(admins: Option<&str>) -> (Gate, std::path::PathBuf) {
 }
 
 fn identity(provider: Provider, subject: &str, display: &str) -> Identity {
-    Identity { provider, subject: subject.into(), display: display.into() }
+    Identity { provider, subject: subject.into(), display: display.into(), picture: None }
 }
 
 async fn serve(gate: Gate) -> (std::net::SocketAddr, reqwest::Client) {

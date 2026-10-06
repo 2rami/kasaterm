@@ -1453,7 +1453,7 @@ impl App {
         FIRED.store(true, Ordering::Relaxed);
         let cats = [
             ("일반", SettingsCat::General),
-            ("모양", SettingsCat::Appearance),
+            ("외형", SettingsCat::Appearance),
             ("터미널", SettingsCat::Shell),
             ("에이전트", SettingsCat::Claude),
             ("계정", SettingsCat::Accounts),
@@ -4260,6 +4260,12 @@ impl App {
             .filter(|s| !s.is_empty());
         eprintln!("[autosettings] open settings window cat={cat_env} student={student:?}");
         self.open_settings_window(event_loop, Some(cat), student);
+        // 접힌 묶음을 펼친 화면 — `KASATERM_AUTOSETTINGS_DISCLOSE=appearance,terminal`.
+        for id in std::env::var("KASATERM_AUTOSETTINGS_DISCLOSE").unwrap_or_default().split(',') {
+            if let Some(id) = ["appearance", "terminal", "palette-advanced", "other-palettes"].into_iter().find(|known| *known == id) {
+                self.settings_scene.toggle_disclosure(id);
+            }
+        }
         // 클릭이 유일한 진입점인 동작을 헤드리스로 실행한다. 테마 복제는 누르기
         // 전엔 아무 흔적도 안 남겨서, 이 손잡이가 없으면 「눌러 봤다」를 사람 손으로만
         // 확인할 수 있다. UI 래퍼(토스트·폴더 열기)는 건너뛰고 파일을 쓰는 부분만
@@ -4284,6 +4290,20 @@ impl App {
             "device-op" if crate::verification_run() => {
                 self.device_account.op.fixture();
                 self.device_account.fixture(false, false);
+                self.chrome_dirty = true;
+            }
+            "device-profile" | "device-profile-edit" | "device-profile-login" | "device-profile-password"
+                if crate::verification_run() =>
+            {
+                use crate::native_settings::device_account::profile::Form;
+                let form = match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
+                    "device-profile-edit" => Some(Form::Profile),
+                    "device-profile-login" => Some(Form::Login),
+                    "device-profile-password" => Some(Form::Password),
+                    _ => None,
+                };
+                self.device_account.fixture_signed_in(form);
+                self.device_account.work.fixture(false);
                 self.chrome_dirty = true;
             }
             "device-oauth" | "device-choice" | "device-claim" if crate::verification_run() => {

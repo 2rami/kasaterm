@@ -535,7 +535,9 @@ impl App {
     }
 
     pub(crate) fn pump_native_onboarding(&mut self) {
-        if !self.settings_scene.first_run() && self.settings_scene.category() != SettingsCat::Shell
+        // 터미널 글꼴 목록은 「외형」이 그린다(2026-10-06 외형 묶음). 플랫폼 칸은 「터미널」.
+        if !self.settings_scene.first_run()
+            && !matches!(self.settings_scene.category(), SettingsCat::Shell | SettingsCat::Appearance)
         {
             return;
         }

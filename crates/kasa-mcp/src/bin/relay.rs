@@ -70,13 +70,19 @@ fn account_cmd(mut args: Vec<String>) -> anyhow::Result<()> {
             if verb == "add" && exists {
                 anyhow::bail!("{n} 계정이 이미 있어요 — 비밀번호를 바꾸려면 passwd");
             }
+            if verb == "add" {
+                if let Some(owner) = relay_auth::login_owner(&file, &n) {
+                    anyhow::bail!("{n} 은 {owner} 계정이 로그인 아이디로 쓰고 있어요");
+                }
+            }
             if verb == "passwd" && !exists {
                 anyhow::bail!("{n} 계정이 없어요 — 먼저 add");
             }
             let pw = read_new_password()?;
             let created = file.accounts.get(&n).map_or_else(relay_auth::now_secs, |a| a.created);
             let disabled = file.accounts.get(&n).is_some_and(|a| a.disabled);
-            file.accounts.insert(n.clone(), Account { pbkdf2_sha256: relay_auth::hash_password(&pw), created, disabled });
+            let login = file.accounts.get(&n).and_then(|a| a.login.clone());
+            file.accounts.insert(n.clone(), Account { pbkdf2_sha256: relay_auth::hash_password(&pw), created, disabled, login });
             relay_auth::save_accounts(&path, &file)?;
             println!("{n} 계정을 {}어요. 기기는 이 아이디·비밀번호로 로그인하면 돼요.", if verb == "add" { "만들었" } else { "고쳤" });
         }
@@ -94,7 +100,8 @@ fn account_cmd(mut args: Vec<String>) -> anyhow::Result<()> {
             let mut names: Vec<_> = file.accounts.iter().collect();
             names.sort_by_key(|(n, _)| n.as_str());
             for (n, a) in names {
-                println!("{n}{}", if a.disabled { "  (막힘)" } else { "" });
+                let login = a.login.as_ref().map(|login| format!("  (로그인 아이디 {login})")).unwrap_or_default();
+                println!("{n}{login}{}", if a.disabled { "  (막힘)" } else { "" });
             }
         }
         _ => anyhow::bail!("kasa-relay account add|passwd|disable|enable|list [<이름>] [--accounts <파일>]"),
@@ -104,8 +111,8 @@ fn account_cmd(mut args: Vec<String>) -> anyhow::Result<()> {
 
 fn read_new_password() -> anyhow::Result<String> {
     let pw = relay_auth::read_secret("새 비밀번호: ")?;
-    if pw.chars().count() < 8 {
-        anyhow::bail!("비밀번호는 8자 이상이어야 해요");
+    if pw.chars().count() < relay_auth::MIN_PASSWORD_CHARS {
+        anyhow::bail!("비밀번호는 {}자 이상이어야 해요", relay_auth::MIN_PASSWORD_CHARS);
     }
     if relay_auth::stdin_is_tty() && relay_auth::read_secret("한 번 더: ")? != pw {
         anyhow::bail!("두 번 친 비밀번호가 달라요");

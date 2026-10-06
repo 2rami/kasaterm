@@ -258,6 +258,8 @@ pub(crate) struct Identity {
     pub subject: String,
     /// Verified Google email or GitHub login, shown to people only; never an identity key.
     pub display: String,
+    /// The provider's profile picture (https on the provider's own image host), shown only.
+    pub picture: Option<String>,
 }
 
 /// Sign-up record of an account created by OAuth. Holds no conversation or screen content.
@@ -278,6 +280,20 @@ pub(crate) struct AccountInfo {
     pub profile: Option<Profile>,
     pub oauth_created: bool,
     pub active: bool,
+}
+
+/// Hosts a provider profile picture may come from. Clients fetch it directly, so anything else
+/// (a tracking pixel, an internal address) is dropped here.
+pub const PICTURE_HOSTS: &[&str] = &["avatars.githubusercontent.com", "lh3.googleusercontent.com"];
+
+pub fn picture_url(value: Option<&str>) -> Option<String> {
+    let url = reqwest::Url::parse(value?.trim()).ok()?;
+    (url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.host_str().is_some_and(|host| PICTURE_HOSTS.contains(&host))
+        && url.as_str().len() <= 512)
+        .then(|| url.to_string())
 }
 
 fn display_label(value: Option<&str>) -> String {
@@ -386,6 +402,26 @@ struct Book {
     accounts: HashMap<String, bool>,
     #[serde(default)]
     profiles: HashMap<String, Profile>,
+    /// What each linked identity looked like at its last sign-in, keyed like `identities`.
+    #[serde(default)]
+    labels: HashMap<String, Label>,
+}
+
+/// How a linked login shows on the account page. Older links have none until the next sign-in.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct Label {
+    #[serde(default)]
+    pub display: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+}
+
+/// A login linked to an account, as the account page lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Linked {
+    pub provider: Provider,
+    pub subject: String,
+    pub label: Label,
 }
 
 impl OAuth {
@@ -624,7 +660,7 @@ impl OAuth {
         ]);
         match (provider, &exchange.connect) {
             (Provider::Google, Some(features)) => {
-                let scopes: Vec<&str> = ["openid", "email"]
+                let scopes: Vec<&str> = ["openid", "email", "profile"]
                     .into_iter()
                     .chain(features.iter().filter_map(|feature| feature.scope()))
                     .collect();
@@ -638,7 +674,7 @@ impl OAuth {
             }
             (Provider::Google, None) => {
                 url.query_pairs_mut()
-                    .append_pair("scope", "openid email")
+                    .append_pair("scope", "openid email profile")
                     .append_pair("prompt", "select_account");
             }
             // A GitHub App's permissions come from the app itself, not from a scope.
@@ -909,13 +945,25 @@ impl OAuth {
         let now = crate::relay_auth::now_secs();
         let mut guard = self.identities.lock().map_err(|_| "unavailable")?;
         let book = guard.as_ref().ok_or("storage_unavailable")?;
+        let label = Label { display: identity.display.clone(), picture: identity.picture.clone() };
+        // A provider answer without a name or picture keeps what the last one showed.
+        let relabel = (!label.display.is_empty() || label.picture.is_some())
+            && book.labels.get(&key) != Some(&label);
         if let Some(account) = book.identities.get(&key) {
             if link.is_some_and(|link| link != account) {
                 return Err("already_linked");
             }
             let account = account.clone();
-            if link.is_none() && book.accounts.contains_key(&account) {
+            let oauth_profile = link.is_none() && book.accounts.contains_key(&account);
+            if oauth_profile || relabel {
                 let mut next = book.clone();
+                if relabel {
+                    next.labels.insert(key.clone(), label);
+                }
+                if !oauth_profile {
+                    let _ = self.commit(&mut guard, next);
+                    return Ok(account);
+                }
                 let profile = next
                     .profiles
                     .entry(account.clone())
@@ -960,9 +1008,42 @@ impl OAuth {
                 }
             },
         };
+        if relabel {
+            next.labels.insert(key.clone(), label);
+        }
         next.identities.insert(key, account.clone());
         self.commit(&mut guard, next)?;
         Ok(account)
+    }
+
+    /// Logins linked to `account`, Google first.
+    pub(crate) fn linked(&self, account: &str) -> Vec<Linked> {
+        let Ok(book) = self.identities.lock() else {
+            return Vec::new();
+        };
+        let Some(book) = book.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<Linked> = book
+            .identities
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == account)
+            .filter_map(|(key, _)| {
+                let (provider, subject) = key.split_once(':')?;
+                let provider = match provider {
+                    "google" => Provider::Google,
+                    "github" => Provider::Github,
+                    _ => return None,
+                };
+                Some(Linked {
+                    provider,
+                    subject: subject.to_string(),
+                    label: book.labels.get(key).cloned().unwrap_or_default(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| (a.provider.name() != "google", &a.subject).cmp(&(b.provider.name() != "google", &b.subject)));
+        out
     }
 
     fn commit(&self, guard: &mut Option<Book>, next: Book) -> Result<(), &'static str> {
@@ -1215,6 +1296,7 @@ fn github_identity(user: &Value) -> Result<Identity, &'static str> {
         provider: Provider::Github,
         subject: id.to_string(),
         display: display_label(user["login"].as_str()),
+        picture: picture_url(user["avatar_url"].as_str()),
     })
 }
 
@@ -1294,6 +1376,7 @@ fn google_claims(
         provider: Provider::Google,
         subject: subject.into(),
         display: display_label(claims["email"].as_str()),
+        picture: picture_url(claims["picture"].as_str()),
     })
 }
 
