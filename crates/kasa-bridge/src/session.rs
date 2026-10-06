@@ -13,7 +13,8 @@ use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::event::{parse_line, TmuxEvent};
-use crate::screen::{vt_cell, Cell, Row, ScreenUpdate};
+use crate::screen::{Cell, Row, ScreenUpdate};
+use crate::vt::vt_cell;
 
 type ParserMap = Arc<Mutex<HashMap<String, vt100::Parser>>>;
 

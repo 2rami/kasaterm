@@ -6734,6 +6734,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `open`-launched instance. Loaded (and deleted) before anything
     // reads KASATERM_* vars.
         load_capture_config();
+        install_pty_host_policy();
         socket::prepare_session_storage();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야
     // 이름·기기색이 생기거나 렌더 스레드에서 scutil을 띄우지 않도록 한다.
@@ -6971,6 +6972,21 @@ fn write_shim_data(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::R
 /// 붙여 **본판의 claude 래퍼(훅 포함)가 lite pane 에 들어간다.** 상속이 곧 위험이라
 /// 「없을 때만」이 아니다. 뿌리는 `KASATERM_LITE_ROOT`(검증용) 아니면
 /// `~/.config/kasaterm-lite`.
+/// 엔진(kasa-pty)에 이 앱이 누구인지 알린다 — 칸의 `TERM_PROGRAM`, 「Last login」 상태
+/// 파일 자리. 격리 인스턴스(라이트·검증 리그)는 세션 파일 옆에 둬서 본판
+/// `~/.config/kasaterm` 을 건드리지 않는다. 그래서 env 를 읽는 캡처 설정 뒤에 부른다.
+fn install_pty_host_policy() {
+    let last_login_dir = std::env::var_os("KASATERM_SESSION_FILE")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| std::path::PathBuf::from(v).parent().map(|d| d.to_path_buf()))
+        .or_else(|| kasa_socket::home_dir().map(|h| h.join(".config").join("kasaterm")));
+    kasa_pty::set_host_policy(kasa_pty::HostPolicy {
+        term_program: Some(("kasaterm".into(), env!("CARGO_PKG_VERSION").into())),
+        last_login_dir,
+        clipboard: None,
+    });
+}
+
 fn apply_lite_env() {
     let root = std::env::var_os("KASATERM_LITE_ROOT")
         .filter(|v| !v.is_empty())

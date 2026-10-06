@@ -10,6 +10,7 @@ members = [
     "crates/kasa-ime",
     "crates/kasa-pty",
     "crates/kasa-bridge",
+    "crates/kasa-screen",
     "crates/kasa-net",
     "crates/kasa-net-ffi",
     "spikes/iced-term",
@@ -32,6 +33,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 kasa-bridge = { path = "crates/kasa-bridge" }
+kasa-screen = { path = "crates/kasa-screen" }
 
 # Windows rustc/LLVM crashed (STATUS_ACCESS_VIOLATION / OOM) optimizing
 # kasa-mcp at any opt-level >= 1, blamed at the time on its heavy proc-macro

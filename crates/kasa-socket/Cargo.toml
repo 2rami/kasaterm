@@ -5,6 +5,13 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+default = ["app-update"]
+# 카사텀 앱 재시작·업데이트 작업(`app_restart`·`app_update`, `app.*` 메서드, CLI
+# `app-restart`·`app-update`). 앱을 스스로 갈아 끼우지 않는 호스트(`kasa tui` 는
+# brew·npm·winget 이 올린다)는 끈다.
+app-update = []
+
 [dependencies]
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }

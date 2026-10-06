@@ -28,7 +28,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use kasa_bridge::screen::{Cell, Color, Row, ScreenUpdate};
+use kasa_screen::screen::{Cell, Color, Row, ScreenUpdate};
 
 /// One shell command's lifecycle, delimited by OSC 133 `C` (output start)
 /// and `D;<exit>` (command end). Accumulated by the reader thread off the
@@ -618,11 +618,17 @@ impl PtySession {
         // keeps the env simple and avoids breaking on ghostty-less
         // machines that don't have the bundle paths above.
         cmd.env("TERM", "xterm-256color");
-        cmd.env("TERM_PROGRAM", "kasaterm");
-        cmd.env(
-            "TERM_PROGRAM_VERSION",
-            env!("CARGO_PKG_VERSION"),
-        );
+        let host = crate::host::host_policy();
+        match &host.term_program {
+            Some((name, version)) => {
+                cmd.env("TERM_PROGRAM", name);
+                cmd.env("TERM_PROGRAM_VERSION", version);
+            }
+            None => {
+                cmd.env_remove("TERM_PROGRAM");
+                cmd.env_remove("TERM_PROGRAM_VERSION");
+            }
+        }
         cmd.env("COLORTERM", "truecolor");
         // 그림을 장수 단위로 관리하는 TUI(kasaslk)가 이 값을 읽고 그 안에서만
         // 쓴다. 안 주면 옛 한도 16 으로 보고 줄여 그린다.
@@ -764,7 +770,11 @@ impl PtySession {
         // same pattern as initial_scrollback above. We only show it when a
         // previous timestamp exists, so a brand-new install doesn't get a
         // bare "Last login: on ttysNNN" line.
-        if let Some(line) = build_last_login_line(tty_short.as_deref()) {
+        if let Some(line) = host
+            .last_login_dir
+            .as_deref()
+            .and_then(|dir| build_last_login_line(dir, tty_short.as_deref()))
+        {
             let mut proc: Processor<StdSyncHandler> = Processor::new();
             let mut t = term.lock().unwrap();
             proc.advance(&mut *t, line.as_bytes());
@@ -2014,8 +2024,8 @@ fn host_rgb(cell: &std::sync::atomic::AtomicU32) -> (u8, u8, u8) {
 ///   - PtyWrite — raw bytes alacritty already formatted
 ///   - ColorRequest — RGB query; reply with a fixed default
 ///   - TextAreaSizeRequest — geometry query; reply with current grid
-///   - ClipboardLoad — paste request; reply with empty until we wire
-///     real OS clipboard access through arboard
+///   - ClipboardLoad — paste request; reply with what the host's
+///     clipboard sink gives (`HostPolicy::clipboard`)
 ///
 /// MouseCursorDirty / Title / Bell / etc are pure UI signals; the
 /// renderer reads title/cursor state from the snapshot, so we drop
@@ -2173,34 +2183,20 @@ impl EventListener for PtyEventForwarder {
                 self.write_to_pty(reply.as_bytes());
             }
             AlacEvent::ClipboardLoad(_, formatter) => {
-                // Read the OS clipboard and feed it back. Falls back
-                // to empty so a clipboard-open failure doesn't strand
-                // the shell waiting on a paste response.
-                let text = arboard::Clipboard::new()
-                    .ok()
-                    .and_then(|mut cb| cb.get_text().ok())
-                    .unwrap_or_default();
+                // 실패해도 빈 글로 답한다 — 답이 없으면 셸이 붙여넣기 응답을 기다리며 멎는다.
+                let text = crate::host::clipboard_load();
                 let reply = formatter(&text);
                 self.write_to_pty(reply.as_bytes());
             }
             AlacEvent::ClipboardStore(_, text) => {
                 // OSC 52 set — Claude Code, helix, etc. push selected
-                // text into the host clipboard through this. Best-
-                // effort: a clipboard open failure is logged but does
-                // not break the PTY.
+                // text into the host clipboard through this.
                 let preview: String = text.chars().take(40).collect();
                 eprintln!(
                     "[pty-backend] OSC 52 set ({} chars): {preview:?}",
                     text.len()
                 );
-                match arboard::Clipboard::new() {
-                    Ok(mut cb) => {
-                        if let Err(e) = cb.set_text(text) {
-                            eprintln!("[pty-backend] clipboard set failed: {e}");
-                        }
-                    }
-                    Err(e) => eprintln!("[pty-backend] clipboard open failed: {e}"),
-                }
+                crate::host::clipboard_store(&text);
             }
             AlacEvent::Title(name) => {
                 eprintln!("[pty-backend] OSC title set: {name:?}");
@@ -2945,7 +2941,7 @@ fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8>
             );
             row.push(convert_cell(&grid[point]));
         }
-        if let Some(body) = kasa_bridge::screen::row_ansi(&row) {
+        if let Some(body) = kasa_screen::screen::row_ansi(&row) {
             out.push_str(&body);
         }
         if row.last().is_some_and(|cell| cell.wrapped) {
@@ -2955,7 +2951,7 @@ fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8>
                 alacritty_terminal::index::Line(line),
                 alacritty_terminal::index::Column(grid_cols - 1),
             )].flags.contains(alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER);
-            out.push_str(&kasa_bridge::screen::row_wrap_ansi(&row, leading_wide));
+            out.push_str(&kasa_screen::screen::row_wrap_ansi(&row, leading_wide));
         } else {
             out.push_str("\r\n");
         }
@@ -3917,7 +3913,7 @@ fn attach_inline_views_at_offset(
             // 뷰포트와 겹치는 것만 — GUI 는 받은 것만 그리고, 안 온 그림의
             // 텍스처는 놓는다(스크롤로 벗어난 그림의 GPU 메모리 회수).
             (row + (im.rows as i64) > 0 && row < rows as i64).then(|| {
-                kasa_bridge::screen::InlineImageView {
+                kasa_screen::screen::InlineImageView {
                     id: im.id,
                     path: im.path.display().to_string(),
                     row: row as i32,
@@ -4094,21 +4090,13 @@ fn scan_osc_notify(
 /// couldn't resolve a tty name — both cases would render as an
 /// awkward partial line.
 ///
-/// State lives at `$HOME/.config/kasaterm/last_login` as one line of
+/// State lives at `<dir>/last_login` as one line of
 /// pre-formatted text (e.g. "Tue May 26 13:05:54"). We re-emit the
 /// *previous* contents and overwrite with `date(1)`-formatted "now"
-/// so the next spawn sees this run's timestamp.
-fn build_last_login_line(tty: Option<&str>) -> Option<String> {
+/// so the next spawn sees this run's timestamp. `dir` 는 호스트가 정한다
+/// (`HostPolicy::last_login_dir`).
+fn build_last_login_line(dir: &std::path::Path, tty: Option<&str>) -> Option<String> {
     let tty = tty?;
-    // 격리 인스턴스(KasaLite·검증 리그)는 세션 파일이 사는 폴더에 쓴다 — 이 한 줄이
-    // 본판 `~/.config/kasaterm` 을 건드리는 유일한 자리였다.
-    let dir = std::env::var_os("KASATERM_SESSION_FILE")
-        .filter(|v| !v.is_empty())
-        .and_then(|v| std::path::PathBuf::from(v).parent().map(|d| d.to_path_buf()))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".config").join("kasaterm"))
-        })?;
     let path = dir.join("last_login");
     let previous = std::fs::read_to_string(&path)
         .ok()
@@ -6000,7 +5988,7 @@ mod raw_snapshot_wrap_tests {
 }
 
 /// 살아 있는 PTY 로 스냅샷 재생을 검증한다. 순수 변환(`to_ansi`) 쪽 테스트는
-/// kasa-bridge 에 있고, 여기서는 실제 셀 그리드에서 제대로 떠지는지와
+/// kasa-screen 에 있고, 여기서는 실제 셀 그리드에서 제대로 떠지는지와
 /// **구독-스냅샷 원자성**을 본다.
 #[cfg(test)]
 mod snapshot_tap_tests {
@@ -6223,7 +6211,7 @@ mod inline_image_tests {
         sess.send_bytes(cmd.as_bytes()).unwrap();
     }
 
-    fn wait_views(sess: &PtySession, want: usize) -> Vec<kasa_bridge::screen::InlineImageView> {
+    fn wait_views(sess: &PtySession, want: usize) -> Vec<kasa_screen::screen::InlineImageView> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let v = sess.full_snapshot().inline_images;
@@ -6400,7 +6388,7 @@ mod kitty_graphics_tests {
     use super::*;
     use crate::kitty::diacritic;
     use crate::kitty::tests::{b64, png};
-    use kasa_bridge::screen::{CellClip, InlineImageView};
+    use kasa_screen::screen::{CellClip, InlineImageView};
 
     struct Shared(Arc<Mutex<Vec<u8>>>);
     impl Write for Shared {

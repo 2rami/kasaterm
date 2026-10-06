@@ -202,12 +202,19 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
         "surface.turn" => surface_turn(backend, id, &req.params),
         "nacho.report" => nacho_report(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.restart_facts" => app_restart_facts(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.restart_job" => app_restart_job(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.restart_approval" => app_restart_approval(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.restart_consume" => app_restart_consume(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.restart_start" => app_restart_start(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.update_start" => app_update_start(backend, id, &req.params),
+        #[cfg(feature = "app-update")]
         "app.update_job" => app_update_job(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
@@ -583,6 +590,7 @@ fn nacho_report(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
+#[cfg(feature = "app-update")]
 fn app_restart_approval(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let Some(approval_id) = params.get("approval_id").and_then(|v| v.as_str()) else {
         return param_err(id, "app.restart_approval requires `approval_id`");
@@ -593,6 +601,7 @@ fn app_restart_approval(backend: &dyn Backend, id: Value, params: &Value) -> Res
     }
 }
 
+#[cfg(feature = "app-update")]
 fn app_restart_consume(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let (Some(approval_id), Some(scope), Some(consumer)) = (
         params.get("approval_id").and_then(|v| v.as_str()),
@@ -607,6 +616,7 @@ fn app_restart_consume(backend: &dyn Backend, id: Value, params: &Value) -> Resp
     }
 }
 
+#[cfg(feature = "app-update")]
 fn app_restart_start(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let request = match params.get("request").map(|v| serde_json::from_value::<crate::app_restart::JobRequest>(v.clone())) {
         Some(Ok(request)) => request,
@@ -619,6 +629,7 @@ fn app_restart_start(backend: &dyn Backend, id: Value, params: &Value) -> Respon
 }
 
 /// 재시작 계획용 사실 — 읽기만 한다.
+#[cfg(feature = "app-update")]
 fn app_restart_facts(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     match backend.restart_facts(params.get("machine_id").and_then(|v| v.as_str())) {
         Ok(facts) => Response::success(id, serde_json::to_value(facts).unwrap_or_default()),
@@ -626,6 +637,7 @@ fn app_restart_facts(backend: &dyn Backend, id: Value, params: &Value) -> Respon
     }
 }
 
+#[cfg(feature = "app-update")]
 fn app_restart_job(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let Some(job_id) = params.get("job_id").and_then(|v| v.as_str()) else {
         return param_err(id, "app.restart_job requires `job_id`");
@@ -636,6 +648,7 @@ fn app_restart_job(backend: &dyn Backend, id: Value, params: &Value) -> Response
     }
 }
 
+#[cfg(feature = "app-update")]
 fn app_update_start(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let request = match params.get("request").map(|v| serde_json::from_value::<crate::app_update::UpdateRequest>(v.clone())) {
         Some(Ok(request)) => request,
@@ -647,6 +660,7 @@ fn app_update_start(backend: &dyn Backend, id: Value, params: &Value) -> Respons
     }
 }
 
+#[cfg(feature = "app-update")]
 fn app_update_job(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let Some(job_id) = params.get("job_id").and_then(|v| v.as_str()) else {
         return param_err(id, "app.update_job requires `job_id`");

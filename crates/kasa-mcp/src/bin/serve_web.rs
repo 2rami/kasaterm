@@ -77,6 +77,12 @@ fn main() -> anyhow::Result<()> {
     let root = cwd
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+    // 웹 셸도 본판 칸과 같은 이름·「Last login」 파일을 쓴다.
+    kasa_pty::set_host_policy(kasa_pty::HostPolicy {
+        term_program: Some(("kasaterm".into(), env!("CARGO_PKG_VERSION").into())),
+        last_login_dir: kasa_socket::home_dir().map(|h| h.join(".config").join("kasaterm")),
+        clipboard: None,
+    });
     let backend = Arc::new(StandaloneBackend::new(root.clone()));
     // Scheduler OFF: firing/consuming ~/.config/kasaterm/schedule.json is kasaterm's
     // job — a headless run bails on delivery yet would still persist items as consumed.

@@ -5,7 +5,7 @@
 //! BSP where every internal node is a horizontal or vertical split with
 //! a ratio, and every leaf carries a pane id.
 //!
-//! The renderer consumes `kasa_bridge::layout::Layout`, so we expose
+//! The renderer consumes `kasa_screen::layout::Layout`, so we expose
 //! `to_tmux_layout()` that walks our tree and emits the same shape with
 //! pane rectangles already laid out for the given window size. Pane ids
 //! are formatted "%N" by convention; conversion strips the prefix to
@@ -16,7 +16,7 @@
 //! Terminal.app calls "Cmd+D / vertical split". `Vertical` stacks
 //! children with a horizontal divider, matching Cmd+Shift+D.
 
-use kasa_bridge::layout::Layout;
+use kasa_screen::layout::Layout;
 
 const MIN_PANE_COLS: u16 = 20;
 const MIN_PANE_ROWS: u16 = 6;

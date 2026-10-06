@@ -11,11 +11,13 @@
 //! in-process multiplexer (`Workspace` of `PtySession`s).
 
 pub mod layout;
+mod host;
 mod kitty;
 mod procinfo;
 mod state;
 
 pub use crossbeam_channel::Receiver as ScreenReceiver;
+pub use host::{set_host_policy, ClipboardSink, HostPolicy};
 pub use kitty::set_cell_pixels;
 pub use layout::{bento, bento_shape, fleet, fleet_capacity, Bento, Divider, PtyLayout, SplitDir};
 pub use procinfo::{process_cmdline, process_env_var, process_env_vars};

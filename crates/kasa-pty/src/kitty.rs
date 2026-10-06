@@ -24,7 +24,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Cell as TermCell;
 use alacritty_terminal::vte::ansi::Color as VtColor;
 use alacritty_terminal::Term;
-use kasa_bridge::screen::{CellClip, InlineImageView};
+use kasa_screen::screen::{CellClip, InlineImageView};
 
 pub(crate) const PLACEHOLDER: char = '\u{10EEEE}';
 

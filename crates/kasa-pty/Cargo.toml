@@ -1,9 +1,13 @@
 [package]
 name = "kasa-pty"
-description = "Direct PTY + alacritty_terminal backend. Phase C replacement for kasa-bridge so kasaterm can run natively on Windows (via portable-pty's ConPTY) and stop depending on a tmux daemon."
+description = "Direct PTY + alacritty_terminal backend shared by kasaterm, kasalite and kasa tui: PTY, VT, scrollback, OSC 133/1337, kitty graphics, fd handoff and the split layout model."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[features]
+default = ["os-clipboard"]
+os-clipboard = ["dep:arboard"]
 
 [dependencies]
 anyhow.workspace = true
@@ -12,14 +16,10 @@ crossbeam-channel.workspace = true
 serde.workspace = true
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
-# Shared cell / color / ScreenUpdate types — kasaterm's renderer is
-# already keyed off these and we want kasa-pty to be drop-in
-# compatible with kasa-bridge. The kasa-bridge crate itself stops
-# being a runtime dependency once Phase D lands (kasaterm-cli +
-# kasa-bridge can be retired); the type re-use here is just the
-# shared vocabulary the renderer speaks.
-kasa-bridge.workspace = true
-arboard = "3"
+# 셀·색·ScreenUpdate·칸 배치 낱말. 렌더러(본판·라이트·TUI)가 이 낱말로 받는다.
+kasa-screen.workspace = true
+# OS 클립보드로 OSC 52 를 받는 기본 자리. `kasa tui` 는 바깥 터미널로 넘기니 끈다.
+arboard = { version = "3", optional = true }
 # NFC-normalize PTY output so decomposed (NFD) Hangul jamo collapse into
 # precomposed syllables. cosmic_text (sugarloaf path) shaped jamo back
 # together automatically; the swash/cell-renderer GPU path draws one

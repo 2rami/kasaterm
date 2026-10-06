@@ -34,7 +34,9 @@ pub mod transport;
 pub mod transfer;
 pub mod tell;
 pub mod nacho_inbox;
+#[cfg(feature = "app-update")]
 pub mod app_restart;
+#[cfg(feature = "app-update")]
 pub mod app_update;
 
 pub use backend::{Backend, SplitDirection};

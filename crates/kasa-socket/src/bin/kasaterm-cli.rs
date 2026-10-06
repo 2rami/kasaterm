@@ -149,10 +149,12 @@ fn run() -> Result<Option<Response>> {
         return run_op(&args);
     }
     // `app-restart` — 등록된 기기의 카사텀 앱 재시작 계획·상태. 실행은 사람 승인 흐름이 생기기 전까지 거부한다.
+    #[cfg(feature = "app-update")]
     if cmd == "app-restart" {
         return run_app_restart(&args);
     }
     // `app-update` — 기기의 앱 업데이트 작업 걸기·상태. 승인은 조종 기기가 오케스트레이터에서 이미 소비한 것만, 기기 앱이 다시 판정한다.
+    #[cfg(feature = "app-update")]
     if cmd == "app-update" {
         return run_app_update(&args);
     }
@@ -2686,6 +2688,7 @@ fn orchestrator_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<
 /// `app-restart plan [--machine ID]… [--json]` · `status JOB [--machine ID]` · `run --approval ap_… [--machine ID]…`.
 /// 기기는 명부의 안정 id 로만 고른다 — 이 기기는 소켓으로, 다른 기기는 이 앱이 명부 경유로 묻는다.
 /// 승인은 오케스트레이터가 쥔다: 이 CLI 는 키를 모르고, 소비·조회는 이 기기 앱이 오케스트레이터에 대신 한다.
+#[cfg(feature = "app-update")]
 fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
     use kasa_socket::app_restart as restart;
     let sub = args.first().map(String::as_str).unwrap_or("");
@@ -2771,6 +2774,7 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
 /// `run --approval ap_… --rollout FILE [--record FILE]` (조종 쪽 러너 — `kasa_socket::app_update::run`).
 /// 요청(`kasa_socket::app_update::UpdateRequest`)은 조종 쪽이 계획·오케스트레이터 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
 /// 받을지·갈아 끼울지는 대상 기기 앱이 자기 사실과 오케스트레이터 승인으로 다시 판정한다.
+#[cfg(feature = "app-update")]
 fn run_app_update(args: &[String]) -> Result<Option<Response>> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let (mut machine, mut request, mut positional) = (None::<String>, None::<String>, Vec::new());
@@ -2852,13 +2856,16 @@ fn run_app_update(args: &[String]) -> Result<Option<Response>> {
     }
 }
 
+#[cfg(feature = "app-update")]
 type Ask<'a> = &'a dyn Fn(&str, Value) -> std::result::Result<Value, String>;
 
 /// 업데이트 대상에 닿는 길 — 이 기기 앱의 소켓을 거친다(다른 기기는 앱이 명부 경유 HTTP 로 넘긴다).
+#[cfg(feature = "app-update")]
 struct CliUpdateTransport<'a> {
     ask: Ask<'a>,
 }
 
+#[cfg(feature = "app-update")]
 impl kasa_socket::app_update::Transport for CliUpdateTransport<'_> {
     fn facts(&self, machine_id: &str) -> std::result::Result<kasa_socket::app_restart::Facts, String> {
         serde_json::from_value((self.ask)("app.restart_facts", json!({"machine_id": machine_id}))?).map_err(|e| e.to_string())
@@ -2872,11 +2879,13 @@ impl kasa_socket::app_update::Transport for CliUpdateTransport<'_> {
 }
 
 /// 대상 기기에 닿는 길 — 전부 이 기기 앱의 소켓을 거친다(다른 기기는 앱이 명부 경유로 넘긴다).
+#[cfg(feature = "app-update")]
 struct CliRestartTransport<'a> {
     ask: Ask<'a>,
     facts: &'a dyn Fn(&str) -> std::result::Result<kasa_socket::app_restart::Facts, String>,
 }
 
+#[cfg(feature = "app-update")]
 impl kasa_socket::app_restart::Transport for CliRestartTransport<'_> {
     fn facts(&self, machine_id: &str) -> std::result::Result<kasa_socket::app_restart::Facts, String> {
         (self.facts)(machine_id)
@@ -2891,10 +2900,12 @@ impl kasa_socket::app_restart::Transport for CliRestartTransport<'_> {
 }
 
 /// 오케스트레이터 승인 — 소비·조회는 이 기기 앱이 오케스트레이터 앱 창구에 대신 한다(키는 앱 밖으로 안 나온다).
+#[cfg(feature = "app-update")]
 struct CliAuthority<'a> {
     ask: Ask<'a>,
 }
 
+#[cfg(feature = "app-update")]
 impl kasa_socket::app_restart::Authority for CliAuthority<'_> {
     fn get(&self, approval_id: &str) -> std::result::Result<kasa_socket::app_restart::ApprovalView, String> {
         serde_json::from_value((self.ask)("app.restart_approval", json!({"approval_id": approval_id}))?).map_err(|e| e.to_string())
@@ -2905,6 +2916,7 @@ impl kasa_socket::app_restart::Authority for CliAuthority<'_> {
     }
 }
 
+#[cfg(feature = "app-update")]
 fn render_restart_plan(plan: &kasa_socket::app_restart::Plan) -> String {
     let mut out = format!("재시작 계획 {} · {}분 유효 · 순서대로 한 대씩(조종 기기는 마지막)\n", plan.hash, kasa_socket::app_restart::PLAN_TTL_MS / 60_000);
     for (n, target) in plan.targets.iter().enumerate() {
@@ -4256,7 +4268,7 @@ mod tests {
     fn a_held_tell_says_why_and_until_when() {
         let receipt = serde_json::json!({"state":"accepted","reason":kasa_socket::tell::Hold::Draft.reason(),"expires_at_ms":0});
         let line = super::tell_state_line(&receipt);
-        assert!(line.contains("쓰던 글") && line.contains("비우면") && line.contains("버려지고"), "{line}");
+        assert!(line.contains("쓰던 글") && line.contains("비우면") && line.contains("버려진다"), "{line}");
         let old = serde_json::json!({"state":"accepted","reason":"no bytes written; waiting"});
         assert!(super::tell_state_line(&old).starts_with("아직 큐"));
     }

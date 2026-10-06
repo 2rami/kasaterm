@@ -5,13 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-# 와이드 글자(한글·CJK)의 뒷칸 스페이서를 가려내는 데 쓴다 — 셀 그리드에서는
-# 그 칸이 공백과 구분되지 않아 폭으로만 판정할 수 있다(`ScreenUpdate::to_ansi`).
-unicode-width = "0.2"
+kasa-screen.workspace = true
 vt100.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
-serde.workspace = true
-
-[dev-dependencies]
-serde_json = "1"
