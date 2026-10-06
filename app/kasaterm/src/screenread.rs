@@ -2538,82 +2538,15 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
 /// contain-fit 은 박스 안 중앙 정렬이라, 준 박스가 그림보다 넓으면 글 흐름에서
 /// 그림만 한가운데로 떨어져 나온다. OSC 1337 경로는 PTY 가 셀 수를 재어 주므로
 /// 박스가 이미 맞아 이 손질이 필요 없다.
-pub(crate) fn paint_inline_images(
-    g: &mut kasa_gridview::GridRenderer,
-    slots: &[crate::render::terminal_scene::InlineSlot],
-) {
-    // 값은 디코드한 픽셀 크기 — `Hug` 가 박스를 좁히는 데 쓴다. `None` 은 디코드
-    // 실패라, 매 프레임 같은 파일을 다시 열지 않게 남겨 둔다.
-    static UPLOADED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Option<(u32, u32)>>>,
-    > = std::sync::OnceLock::new();
-    let mut up = UPLOADED.get_or_init(Default::default).lock().unwrap();
-    let live: std::collections::HashSet<&str> =
-        slots.iter().map(|s| s.key.as_str()).collect();
-    up.retain(|k, _| {
-        let keep = live.contains(k.as_str());
-        if !keep {
-            g.drop_image(k);
-        }
-        keep
-    });
-    for slot in slots {
-        if !up.contains_key(&slot.key) {
-            up.insert(slot.key.clone(), upload_inline_image(g, slot));
-        }
-        if let Some(Some(dims)) = up.get(&slot.key).copied() {
-            queue_inline_image(g, slot, dims);
-        }
-    }
+pub(crate) fn paint_inline_images(g: &mut kasa_gridview::GridRenderer, slots: &[kasa_gridview::images::InlineSlot]) {
+    static UPLOADED: std::sync::OnceLock<std::sync::Mutex<kasa_gridview::images::InlineImages>> =
+        std::sync::OnceLock::new();
+    UPLOADED.get_or_init(Default::default).lock().unwrap().paint(g, slots);
 }
 
-/// 화면 밖 캡처 한 번 몫 — 위 캐시를 안 거치고 올려 그린다. 캐시는 「이번 프레임에 없는
-/// 키는 놓는다」라서 여기서 건드리면 본 화면 텍스처가 지워진다. 올린 텍스처는 부른 쪽이
-/// 캡처 뒤 키 머리로 놓는다.
-pub(crate) fn paint_inline_images_once(
-    g: &mut kasa_gridview::GridRenderer,
-    slots: &[crate::render::terminal_scene::InlineSlot],
-) {
-    for slot in slots {
-        if let Some(dims) = upload_inline_image(g, slot) {
-            queue_inline_image(g, slot, dims);
-        }
-    }
-}
 
-fn upload_inline_image(
-    g: &mut kasa_gridview::GridRenderer,
-    slot: &crate::render::terminal_scene::InlineSlot,
-) -> Option<(u32, u32)> {
-    let img = image::load_from_memory(&std::fs::read(&slot.path).ok()?).ok()?;
-    let rgba = img.to_rgba8();
-    let (iw, ih) = rgba.dimensions();
-    g.upload_image(&slot.key, &rgba, iw, ih);
-    Some((iw, ih))
-}
 
-fn queue_inline_image(
-    g: &mut kasa_gridview::GridRenderer,
-    slot: &crate::render::terminal_scene::InlineSlot,
-    (iw, ih): (u32, u32),
-) {
-    use crate::render::terminal_scene::InlineFit;
-    let key = &slot.key;
-    let (x, y, w, h) = slot.rect;
-    let (cx, cy, cw, ch) = slot.clip;
-    g.push_clip(cx, cy, cw, ch);
-    match slot.fit {
-        InlineFit::Contain => g.queue_image_contain(key, x, y, w, h),
-        InlineFit::Native => g.queue_image(key, x, y, w, h, 1.0, 0.0, 0.0),
-        InlineFit::Hug => {
-            // no-upscale 캡이 있어 그림이 박스보다 작으면 원본 크기로 그려진다 —
-            // 좁힐 폭도 그 실제 크기를 넘지 않아야 왼쪽에 붙는다.
-            let bw = if ih > 0 { (h * iw as f32 / ih as f32).min(iw as f32).min(w) } else { w };
-            g.queue_image(key, x, y, bw, h, 1.0, 0.0, 0.0);
-        }
-    }
-    g.pop_clip();
-}
+
 
 /// claude 2.1.228 이 세션명 자리(입력박스 상단 보더 우측 끝)에 그리는 ` ultracode `
 /// 배지를 보더 대시로 되메운다 — 모드는 입력박스 글로우가 이미 말하므로 글자는

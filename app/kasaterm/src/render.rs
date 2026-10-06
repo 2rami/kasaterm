@@ -236,7 +236,7 @@ impl App {
     /// headers, cursor block, selection, preedit) is intentionally
     /// not drawn yet — Phase 2b+ will reattach those via the same
     /// pipeline / atlas.
-    /// Self-only snapshot used by `paint_gpu_overlays`. Built before
+    /// Self-only snapshot used by `kasa_gridview::overlay::paint`. Built before
     /// we borrow `self.gpu` mutably so the renderer pass can run
     /// without a re-entrant `&self` read. All coordinates here are
     /// already cell-space — the renderer-side helper applies cell
@@ -429,7 +429,6 @@ impl App {
             preedit,
             preedit_row,
             preedit_col,
-            font_size: self.font_size,
             font_scale: pane_font_scale,
             selection: self.selection,
             suggestion: if active_surface.as_deref().is_some_and(|id| self.chat_view_showing(id) || self.shell_view_showing(id))
@@ -477,81 +476,6 @@ impl App {
         );
     }
 
-    /// Phase 2d overlays — pure free function on the snapshot so it
-    /// doesn't fight a mutable borrow on `self.gpu`.
-    fn paint_gpu_overlays(g: &mut gpu::GpuRenderer, ov: &GpuOverlay) {
-        // Effective cell size for THIS pane: base metric × pane zoom. The
-        // anchor (pad_x/pad_y) stays on the base grid because the pane's
-        // top-left lives there, but every per-column/row step must use the
-        // zoomed size or the cursor/preedit/selection drift right & down
-        // as the pane is shrunk.
-        let cw = ov.cell_w * ov.font_scale;
-        let ch = ov.cell_h * ov.font_scale;
-        if ov.cursor_visible && ov.blink_on && ov.preedit.is_empty() {
-            let cx = ov.pad_x + ov.cursor_col as f32 * cw;
-            let cy = ov.pad_y + ov.cursor_row as f32 * ch;
-            let mut c = ov.cursor_color;
-            c[3] = 140; // ~0.55 alpha
-            for quad in crate::cursor::cursor_primitives(
-                ov.cursor_shape,
-                cx,
-                cy,
-                cw,
-                ch,
-                ov.cursor_w,
-                ov.cursor_thickness,
-            )
-            .as_slice()
-            {
-                g.rect(quad.x, quad.y, quad.width, quad.height, c);
-            }
-        }
-        // Inline autosuggestion ghost text — dim, on the same baseline as
-        // committed cells, starting at the cursor and clipped to the row's
-        // right edge so it never wraps. Drawn only when not composing.
-        if ov.preedit.is_empty() && !ov.suggestion.is_empty() {
-            let gx = ov.pad_x + ov.cursor_col as f32 * cw;
-            let gy = ov.pad_y + ov.cursor_row as f32 * ch;
-            let max_cells = ov.cols.saturating_sub(ov.cursor_col) as u32;
-            if max_cells > 0 {
-                g.draw_ghost(gx, gy, &ov.suggestion, max_cells, ov.font_scale);
-            }
-        }
-        if !ov.preedit.is_empty() {
-            let px = ov.pad_x + ov.preedit_col as f32 * cw;
-            let py = ov.pad_y + ov.preedit_row as f32 * ch;
-            // Route preedit through the cell-grid path so the composing
-            // syllable sits on the same baseline as committed text
-            // instead of floating above the row.
-            g.draw_preedit(px, py, &ov.preedit, ov.cursor_color, ov.font_scale);
-        }
-        if let Some(sel) = ov.selection {
-            let (start, stop) = if (sel.anchor.1, sel.anchor.0) <= (sel.end.1, sel.end.0) {
-                (sel.anchor, sel.end)
-            } else {
-                (sel.end, sel.anchor)
-            };
-            let color = cells::ITERM_SELECTION;
-            if start.1 == stop.1 {
-                let x = ov.pad_x + start.0 as f32 * cw;
-                let y = ov.pad_y + start.1 as f32 * ch;
-                let w = (stop.0 - start.0 + 1) as f32 * cw;
-                g.rect(x, y, w, ch, color);
-            } else {
-                let x = ov.pad_x + start.0 as f32 * cw;
-                let y = ov.pad_y + start.1 as f32 * ch;
-                let row_w = (ov.cols - start.0) as f32 * cw;
-                g.rect(x, y, row_w, ch, color);
-                for r in (start.1 + 1)..stop.1 {
-                    let yy = ov.pad_y + r as f32 * ch;
-                    g.rect(ov.pad_x, yy, ov.cols as f32 * cw, ch, color);
-                }
-                let yy = ov.pad_y + stop.1 as f32 * ch;
-                let last_w = (stop.0 + 1) as f32 * cw;
-                g.rect(ov.pad_x, yy, last_w, ch, color);
-            }
-        }
-    }
 
     /// `surface.capture` — pane 한 칸만 잘라 다음 프레임에 PNG 로 굽도록 무장한다.
     ///
@@ -721,7 +645,7 @@ impl App {
             source,
         };
         let rendered = g.render_cells_offscreen(&[slot], w, h, &path, max_w, |g| {
-            crate::screenread::paint_inline_images_once(g, &inline)
+            kasa_gridview::images::paint_once(g, &inline)
         });
         if !inline.is_empty() {
             g.drop_images_with_prefix(KEY_PREFIX);
@@ -8235,7 +8159,7 @@ impl App {
             if let Some(snapshot) = settings_snapshot.as_ref() {
                 settings_paint = Some(crate::native_settings::paint(g, snapshot));
             }
-            Self::paint_gpu_overlays(g, &overlay);
+            kasa_gridview::overlay::paint(g, &overlay);
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
             // chip that opened it and expanded UPWARD — the bar lives at the

@@ -22,6 +22,7 @@ mod claude_auth;
 mod clipboard;
 mod codexlimits;
 use kasa_gridview::cursor;
+use kasa_gridview::overlay::{PaneOverlay as GpuOverlay, Selection};
 mod eyedropper;
 mod gpu;
 mod handler;
@@ -1033,55 +1034,6 @@ impl Default for CellGeom {
             baseline: 14.0,
         }
     }
-}
-
-/// (col, row) anchor + end for drag selection. Both ends in cell units.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct Selection {
-    anchor: (u16, u16),
-    end: (u16, u16),
-}
-
-/// Snapshot of every field `paint_gpu_overlays` reads. Built before
-/// we hand a `&mut gpu::GpuRenderer` to the painter so the borrow
-/// checker sees the snapshot and the mutable borrow as independent.
-#[allow(dead_code)] // some fields (font_size) are snapshot-only, never read after construction
-struct GpuOverlay {
-    cell_w: f32,
-    cell_h: f32,
-    pad_x: f32,
-    pad_y: f32,
-    cursor_row: u16,
-    cursor_col: u16,
-    /// 커서가 덮는 칸 수. 한글·CJK 는 두 칸을 차지하는데 한 칸만 칠하면 커서가
-    /// 글자의 왼쪽 절반에만 걸려, 그 자리에 뭐가 있는지가 아니라 커서가 깨진 것처럼
-    /// 보인다. 나머지는 전부 1 이다.
-    cursor_w: u16,
-    cursor_shape: cursor::CursorShape,
-    cursor_thickness: f32,
-    /// 지금 보이는 탭의 캐릭터색. 미배정 셸만 테마 커서색으로 떨어진다.
-    cursor_color: [u8; 4],
-    cursor_visible: bool,
-    cols: u16,
-    blink_on: bool,
-    preedit: String,
-    /// Where the preedit box anchors. Resolved via find_prompt_anchor so
-    /// a TUI (Claude Code) that parks its cursor on a statusline still
-    /// gets the composing Hangul drawn on the prompt row. Mirrors the
-    /// sugarloaf render_frame path.
-    preedit_row: u16,
-    preedit_col: u16,
-    font_size: f32,
-    /// Active pane's font multiplier (pane-local zoom). The cursor /
-    /// preedit / selection / ghost overlays must scale their cell size
-    /// by this — `cell_w`/`cell_h` are the base (1.0) metrics, so a
-    /// zoomed pane would otherwise anchor them on the un-zoomed grid and
-    /// drift the composing Hangul off the prompt cell.
-    font_scale: f32,
-    selection: Option<Selection>,
-    /// Inline autosuggestion ghost text (empty = none). Drawn dim,
-    /// starting at the cursor cell, clipped to the row's right edge.
-    suggestion: String,
 }
 
 /// Normalise so (start.row, start.col) <= (end.row, end.col) in reading

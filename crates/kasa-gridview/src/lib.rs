@@ -6,7 +6,9 @@
 pub mod cursor;
 pub mod fonts;
 pub mod geometry;
+pub mod images;
 pub mod macos;
+pub mod overlay;
 pub mod palette;
 pub mod renderer;
 

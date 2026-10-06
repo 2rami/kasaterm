@@ -14,7 +14,7 @@ winit = "0.30"
 raw-window-handle = "0.6"
 anyhow.workspace = true
 pollster = "0.4"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

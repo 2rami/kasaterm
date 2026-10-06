@@ -1,4 +1,5 @@
 //! Shared terminal composition before the GPU or the web consumes a frame.
+pub(crate) use kasa_gridview::images::{inline_slot, InlineFit, InlineSlot};
 use super::*;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
@@ -600,59 +601,8 @@ pub(crate) type TurnSlot = (
     crate::turnjump::TurnHeader,
 );
 
-/// 인라인 그림 한 장의 이번 프레임 자리. 좌표는 LOGICAL px(queue_image 관례).
-#[derive(Clone, Debug)]
-pub(crate) struct InlineSlot {
-    /// 텍스처 키.
-    pub(crate) key: String,
-    pub(crate) path: String,
-    /// 그림 상자.
-    pub(crate) rect: (f32, f32, f32, f32),
-    /// 보이는 영역 — 이 밖은 잘린다.
-    pub(crate) clip: (f32, f32, f32, f32),
-    pub(crate) fit: InlineFit,
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum InlineFit {
-    /// 상자 안 가운데, 원본 크기까지만(OSC 1337 — PTY 가 칸 수를 재어 준다).
-    Native,
-    /// 원본 크기까지만, 상자를 그림 비율로 좁혀 왼쪽에 붙인다(글 흐름 그림 —
-    /// 박스가 그림보다 넓으면 그림만 한가운데로 떨어져 나온다).
-    Hug,
-    /// 비율을 지켜 상자에 꽉 맞춘다, 작으면 키운다(kitty 놓기 규칙).
-    Contain,
-}
 
-/// PTY 가 준 그림 배치 한 장을 칸 글자판 원점(`origin`)·셀 크기에 놓는다. 화면 프레임과
-/// 화면 밖 캡처가 같은 자리에 그리도록 한곳에 둔다. `dy` 는 입력창을 바닥으로 내린 칸의
-/// 줄 옮김, `rows` 는 칸 높이(줄) — 그 밖은 잘린다.
-pub(crate) fn inline_slot(
-    v: &kasa_bridge::screen::InlineImageView,
-    key: String,
-    (left, top): (f32, f32),
-    (cw, ch): (f32, f32),
-    rows: usize,
-    dy: i32,
-) -> InlineSlot {
-    let (clip_y0, clip_y1) = (top, top + rows as f32 * ch);
-    let rect = (
-        left + v.col as f32 * cw,
-        top + (v.row + dy) as f32 * ch,
-        v.cols as f32 * cw,
-        v.rows as f32 * ch,
-    );
-    let (clip, fit) = match v.clip {
-        Some(c) => {
-            let y0 = (top + (c.row + dy) as f32 * ch).max(clip_y0);
-            let y1 = (top + (c.row + dy + c.rows as i32) as f32 * ch).min(clip_y1);
-            let x0 = left + c.col as f32 * cw;
-            ((x0, y0, c.cols as f32 * cw, (y1 - y0).max(0.0)), InlineFit::Contain)
-        }
-        None => ((rect.0, clip_y0, rect.2, clip_y1 - clip_y0), InlineFit::Native),
-    };
-    InlineSlot { key, path: v.path.clone(), rect, clip, fit }
-}
 
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
@@ -682,31 +632,6 @@ pub(crate) struct TerminalComposition {
 #[cfg(test)]
 mod visual_scene_tests {
     use super::*;
-
-    #[test]
-    fn inline_slot_keeps_kitty_box_and_clips_to_the_visible_tile() {
-        use kasa_bridge::screen::{CellClip, InlineImageView};
-        // 4칸×2줄 얼굴의 윗줄이 칸 위로 밀려 나가고 아랫줄만 첫 줄에 남은 자리.
-        let face = InlineImageView {
-            id: 7,
-            path: "/tmp/face.png".into(),
-            row: -1,
-            col: 2,
-            cols: 4,
-            rows: 2,
-            clip: Some(CellClip { row: 0, col: 2, cols: 4, rows: 1 }),
-        };
-        let s = inline_slot(&face, "k".into(), (10.0, 20.0), (8.0, 16.0), 24, 0);
-        assert_eq!(s.rect, (26.0, 4.0, 32.0, 32.0));
-        assert_eq!(s.clip, (26.0, 20.0, 32.0, 16.0));
-        assert_eq!(s.fit, InlineFit::Contain);
-        let shifted = inline_slot(&face, "k".into(), (10.0, 20.0), (8.0, 16.0), 24, 3);
-        assert_eq!((shifted.rect.1, shifted.clip.1), (4.0 + 48.0, 20.0 + 48.0));
-        let osc = InlineImageView { row: 22, clip: None, ..face };
-        let s = inline_slot(&osc, "o".into(), (10.0, 20.0), (8.0, 16.0), 24, 0);
-        assert_eq!(s.clip, (26.0, 20.0, 32.0, 24.0 * 16.0));
-        assert_eq!(s.fit, InlineFit::Native);
-    }
 
     #[test]
     fn mirrored_codex_title_uses_host_metadata_without_local_transcript() {
