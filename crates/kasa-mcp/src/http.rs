@@ -1665,6 +1665,23 @@ async fn character_face_handler(
     }
 }
 
+/// `GET /claude-mod/face?name=<학생>` — 칸 안 「학생 얼굴」 mod 가 답 머리에 그릴 학생. 이름·색·얼굴 파일
+/// 경로를 JSON 으로 준다(바이트가 아니라 경로인 것은 mod 의 HTTP 가 글자만 받아서다). 캐릭터 외형이
+/// 꺼져 있으면 `{}` — mod 는 아무것도 안 그린다. 다른 mod 경로처럼 이 기계 안에서만 연다.
+async fn claude_mod_face_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if is_remote_peer(&req) {
+        return (axum::http::StatusCode::FORBIDDEN, "claude-mod routes are loopback only").into_response();
+    }
+    let name = params.get("name").map(String::as_str).unwrap_or_default();
+    let body = (!name.is_empty()).then(|| backend.claude_mod_face(name)).flatten();
+    Json(body.unwrap_or_else(|| serde_json::json!({}))).into_response()
+}
+
 /// 업로드 한 벌의 상한(base64 부풀림 포함). 프레임 6장 × 4MB 가 상한이므로 그
 /// 4/3 에 여유를 얹었다 — axum 기본 2MB 로는 큰 원본 한 장에도 요청이 통째로
 /// 거부되고, 그 거부는 화면에 이유 없이 실패로만 온다.
@@ -7730,6 +7747,7 @@ pub fn spawn_http_server_opts(
                 let settings_char_save_backend = backend.clone();
                 let settings_action_backend = backend.clone();
                 let character_face_backend = backend.clone();
+                let mod_face_backend = backend.clone();
                 let sprite_get_backend = backend.clone();
                 let sprite_status_backend = backend.clone();
                 let sprite_save_backend = backend.clone();
@@ -8208,6 +8226,12 @@ pub fn spawn_http_server_opts(
                         "/character-face",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             character_face_handler(character_face_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/claude-mod/face",
+                        get(move |q: Query<std::collections::HashMap<String, String>>, req: axum::extract::Request| {
+                            claude_mod_face_handler(mod_face_backend.clone(), q, req)
                         }),
                     )
                     .route(

@@ -111,16 +111,53 @@ struct Pane {
     activity: VecDeque<Value>,
     /// 대화 행이 몇 번 쌓였나 — 대화 보기가 기록 파일을 다시 읽을 때를 안다(내용은 파일이 정본).
     rows: u64,
+    status: Option<StatusLine>,
+}
+
+/// 엔진이 자기 상태줄을 다시 그리기를 기다리는 한도. 엔진은 refreshInterval 1초에 300ms 를 더 미뤄,
+/// 실측 늦을 때 2.5초였다 — 그보다 넉넉히 쥐되 엔진이 멈춰도 옛 줄이 남지 않게 끝을 둔다.
+pub const STATUS_HOLD: Duration = Duration::from_secs(5);
+
+/// 상태줄 mod 가 모델·effort·경로·브랜치·문맥이 바뀐 순간 지은 줄(ANSI). 엔진의 상태줄 명령은 1초 남짓
+/// 뒤에야 다시 돌아서, 그 사이만 화면이 이 줄을 덧그린다(`status_overlay`) — 엔진 줄이 늘 정본이다.
+struct StatusLine {
+    line: String,
+    at: Instant,
+    /// 이 줄을 처음 덧그릴 때 화면의 엔진 줄. 엔진 줄이 이것과 달라지면 엔진이 다시 그린 것이다.
+    base: Option<String>,
+    released: bool,
 }
 
 static PANES: LazyLock<Mutex<HashMap<String, Pane>>> = LazyLock::new(Default::default);
 
 type Listener = Arc<dyn Fn(&str) + Send + Sync>;
 static LISTENER: OnceLock<Listener> = OnceLock::new();
+static STATUS_LISTENER: OnceLock<Listener> = OnceLock::new();
 
 /// 사실이 바뀐 칸을 앱에 알릴 자리(상태 판정 다시·GUI 깨우기). 앱이 한 번 건다.
 pub fn set_listener(listener: impl Fn(&str) + Send + Sync + 'static) {
     let _ = LISTENER.set(Arc::new(listener));
+}
+
+/// 새 상태줄이 온 칸을 알릴 자리 — 판정·보드는 그대로 두고 화면만 다시 그리면 된다.
+pub fn set_status_listener(listener: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = STATUS_LISTENER.set(Arc::new(listener));
+}
+
+/// 화면이 이 칸 상태줄 행에 지금 덧그릴 줄. `engine` 은 그 행에 엔진이 그려 둔 글자(표식 뒤부터)다.
+/// 엔진이 그 뒤 자기 줄을 다시 그렸거나 한도가 지났으면 손을 뗀다.
+pub fn status_overlay(surface: &str, engine: &str) -> Option<String> {
+    let mut panes = PANES.lock().unwrap();
+    let status = panes.get_mut(surface)?.status.as_mut()?;
+    if status.released || status.at.elapsed() > STATUS_HOLD {
+        return None;
+    }
+    let base = status.base.get_or_insert_with(|| engine.to_string());
+    if base != engine {
+        status.released = true;
+        return None;
+    }
+    Some(status.line.clone())
 }
 
 fn changed(surface: &str) {
@@ -149,6 +186,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
     let mut touched = false;
     let mut statusline = false;
     let mut git = Vec::new();
+    let mut status = false;
     {
         let mut panes = PANES.lock().unwrap();
         for event in events {
@@ -159,7 +197,12 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                 if fresh {
                     panes.insert(
                         surface.to_string(),
-                        Pane { state: ModState::new(session, pid, &text(event, "mod")), activity: VecDeque::new(), rows: 0 },
+                        Pane {
+                            state: ModState::new(session, pid, &text(event, "mod")),
+                            activity: VecDeque::new(),
+                            rows: 0,
+                            status: None,
+                        },
                     );
                 }
                 touched = true;
@@ -178,6 +221,14 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                 git.push(git_signal(surface, event));
                 continue;
             }
+            if kind == "status" {
+                let line = text(event, "line");
+                if !line.is_empty() {
+                    pane.status = Some(StatusLine { line, at: Instant::now(), base: None, released: false });
+                    status = true;
+                }
+                continue;
+            }
             touched |= apply_one(pane, &kind, event, &mut statusline);
         }
     }
@@ -189,6 +240,11 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
     }
     if touched {
         changed(surface);
+    }
+    if status {
+        if let Some(listener) = STATUS_LISTENER.get() {
+            listener(surface);
+        }
     }
 }
 
@@ -978,6 +1034,27 @@ mod tests {
         assert!(!PANES.lock().unwrap()["%t1"].state.turn_open);
         apply("%t1", "s1", &ev(json!({"kind": "turn", "phase": "start"})));
         assert!(PANES.lock().unwrap()["%t1"].state.turn_open);
+    }
+
+    #[test]
+    fn a_status_line_is_drawn_until_the_engine_redraws_its_own() {
+        apply("%st", "s", &ev(json!({"kind": "status", "line": "early"})));
+        assert_eq!(status_overlay("%st", "old"), None, "hello 없이 온 줄은 버린다");
+        apply("%st", "s", &ev(json!({"kind": "hello", "pid": 1})));
+        apply("%st", "other", &ev(json!({"kind": "status", "line": "stranger"})));
+        assert_eq!(status_overlay("%st", "old"), None, "다른 세션의 줄은 안 받는다");
+
+        apply("%st", "s", &ev(json!({"kind": "status", "line": "Sonnet 5.5"})));
+        assert_eq!(status_overlay("%st", "Opus 5.5").as_deref(), Some("Sonnet 5.5"));
+        assert_eq!(status_overlay("%st", "Opus 5.5").as_deref(), Some("Sonnet 5.5"), "엔진이 그대로면 계속 덧그린다");
+        assert_eq!(status_overlay("%st", "Sonnet 5.5"), None, "엔진이 다시 그렸으면 손을 뗀다");
+        assert_eq!(status_overlay("%st", "Opus 5.5"), None, "한 번 뗀 줄은 다시 안 쥔다");
+
+        apply("%st", "s", &ev(json!({"kind": "status", "line": "low"})));
+        assert_eq!(status_overlay("%st", "xhigh").as_deref(), Some("low"), "새 줄은 다시 쥔다");
+        let Some(long_ago) = Instant::now().checked_sub(STATUS_HOLD + Duration::from_millis(1)) else { return };
+        PANES.lock().unwrap().get_mut("%st").unwrap().status.as_mut().unwrap().at = long_ago;
+        assert_eq!(status_overlay("%st", "xhigh"), None, "엔진이 멈춰도 한도가 지나면 엔진 줄로 돌아간다");
     }
 
     #[test]

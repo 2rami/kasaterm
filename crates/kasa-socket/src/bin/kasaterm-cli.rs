@@ -3849,8 +3849,32 @@ fn sl_report_due(pane: &str, payload: &str) -> bool {
     true
 }
 
+/// 엔진이 이번에 넘긴 입력 중 상태줄 mod 가 줄을 다시 지을 때 쓰는 것 — 모델 표시명과 effort 는 mod 가
+/// 엔진에 물을 길이 없어(effort 는 첫 턴 전엔 이벤트로도 안 온다) 여기서 마지막 값을 가져간다.
+/// `at_ms` 는 엔진이 이 입력을 지은 무렵이라, mod 는 이보다 늦게 안 사실만 덮어쓴다.
+fn sl_write_engine_facts(pane: &str, d: &Value, at_ms: u128) {
+    let mut facts = serde_json::Map::new();
+    for key in ["session_id", "cwd", "model", "effort", "context_window"] {
+        if let Some(v) = d.get(key) {
+            facts.insert(key.to_string(), v.clone());
+        }
+    }
+    facts.insert("at_ms".to_string(), serde_json::json!(at_ms as u64));
+    let dir = std::env::temp_dir().join("kasaterm-statusline");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{}-engine.json", pane.trim_start_matches('%')));
+    let tmp = dir.join(format!("{}-engine.json.{}", pane.trim_start_matches('%'), std::process::id()));
+    if std::fs::write(&tmp, Value::Object(facts).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
 fn run_statusline() {
     use std::io::Read;
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
     let mut buf = String::new();
     let Some(d) = std::io::stdin()
         .read_to_string(&mut buf)
@@ -3870,11 +3894,16 @@ fn run_statusline() {
         .unwrap_or_default();
     let session_id = d.get("session_id").and_then(Value::as_str).unwrap_or("");
     let pane = sl_env("KASATERM_PANE_ID");
+    // 상태줄 mod 가 바뀐 순간 같은 줄을 지으려 부른 것 — 엔진 입력이 아니라 보고·스냅샷은 엔진이 부른 쪽 몫이다.
+    let drawing_only = sl_env("KASATERM_STATUSLINE_DRAW_ONLY").is_some();
+    if let (Some(pane), false) = (pane.as_deref(), drawing_only) {
+        sl_write_engine_facts(pane, &d, started_ms);
+    }
 
     // claude 내부 cd 와 컨텍스트 창을 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행(비동기).
     // 창을 함께 보내는 이유는 transcript 의 model 에 `[1m]` 이 안 실려 GUI 가 1M 세션을 200k 로
     // 오판하기 때문이다. model 은 `id` **원본** — `[1m]` 을 떼면 복원 때 200k 로 강등된다.
-    if let (Some(pane), false) = (pane.as_deref(), cwd.is_empty()) {
+    if let (Some(pane), false, false) = (pane.as_deref(), cwd.is_empty(), drawing_only) {
         let (win, _, tot) = sl_context(&d);
         let report = [
             "report-cwd".to_string(),
@@ -4305,6 +4334,24 @@ mod tests {
             assert!(statusline(&d, true, None, &serde_json::Value::Null).contains(marker), "{id}");
             assert!(!statusline(&d, false, None, &serde_json::Value::Null).contains(marker), "{id}");
         }
+    }
+
+    #[test]
+    fn engine_facts_keep_only_what_the_mod_redraws_with() {
+        let pane = format!("%engine-test-{}", std::process::id());
+        let d = serde_json::json!({
+            "session_id": "s1", "cwd": "/w", "transcript_path": "/secret.jsonl",
+            "model": {"id": "claude-opus-5-5[1m]", "display_name": "Opus 5.5 (1M context)"},
+            "effort": {"level": "xhigh"}, "context_window": {"used_percentage": 12},
+        });
+        super::sl_write_engine_facts(&pane, &d, 1234);
+        let path = std::env::temp_dir().join("kasaterm-statusline").join(format!("{}-engine.json", pane.trim_start_matches('%')));
+        let facts = super::sl_read_json(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(facts["at_ms"], 1234);
+        assert_eq!(facts["model"]["display_name"], "Opus 5.5 (1M context)");
+        assert_eq!(facts["effort"]["level"], "xhigh");
+        assert!(facts.get("transcript_path").is_none(), "줄 짓기에 안 쓰는 값은 안 남긴다");
     }
 
     #[test]

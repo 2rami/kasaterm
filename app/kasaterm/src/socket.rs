@@ -2504,6 +2504,22 @@ impl Backend for PtyBackend {
         character_sprite_bytes(slug, motion, frame)
     }
 
+    fn claude_mod_face(&self, name: &str) -> Option<serde_json::Value> {
+        if !crate::theme::character_appearance() {
+            return None;
+        }
+        let color = kasa_mcp::character::header_color_any(name);
+        let face = kasa_mcp::character::slug_for_any(name)
+            .filter(|slug| safe_path_component(slug))
+            .and_then(|slug| write_mod_face(&slug));
+        let mut body = serde_json::json!({ "name": name, "color": color });
+        if let Some((file, generation)) = face {
+            body["file"] = serde_json::json!(file.display().to_string());
+            body["generation"] = serde_json::json!(generation);
+        }
+        Some(body)
+    }
+
     fn character_sprite_status(&self, slug: &str) -> serde_json::Value {
         if !safe_path_component(slug) {
             return serde_json::Value::Null;
@@ -5609,6 +5625,29 @@ fn validate_sprite_frames(slug: &str, motion: &str, frames: &[Vec<u8>]) -> anyho
     Ok(())
 }
 
+/// 학생 얼굴(화면이 쓰는 얼굴 자르기 그대로)을 임시 폴더의 PNG 로 두고 `(경로, 세대)` 를 준다. 같은
+/// 그림이면 파일을 다시 쓰지 않는다 — 터미널은 경로와 세대가 같으면 다시 읽지 않는다.
+fn write_mod_face(slug: &str) -> Option<(std::path::PathBuf, u32)> {
+    use std::hash::{Hash, Hasher};
+    let (rgba, w, h) = crate::sprites::student_profile_rgba(slug)?;
+    let image = image::RgbaImage::from_raw(w, h, rgba)?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    let png = png.into_inner();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut hasher);
+    let generation = hasher.finish() as u32;
+    let dir = std::env::temp_dir().join("kasaterm-faces");
+    let path = dir.join(format!("{slug}.png"));
+    if std::fs::read(&path).ok().as_deref() != Some(png.as_slice()) {
+        std::fs::create_dir_all(&dir).ok()?;
+        let tmp = dir.join(format!("{slug}.png.{}", std::process::id()));
+        std::fs::write(&tmp, &png).ok()?;
+        std::fs::rename(&tmp, &path).ok()?;
+    }
+    Some((path, generation))
+}
+
 pub(crate) fn character_sprite_bytes(
     slug: &str,
     motion: &str,
@@ -8122,6 +8161,25 @@ mod codex_session_lookup_tests {
             Some(sid)
         );
         assert_eq!(codex_resume_id_from_argv("/bin/codex fresh"), None);
+    }
+}
+
+#[cfg(test)]
+mod mod_face_tests {
+    use super::*;
+
+    #[test]
+    fn the_mod_face_is_the_cropped_profile_written_once() {
+        let (path, generation) = write_mod_face("yuuka").expect("번들 학생은 얼굴이 있다");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG"), "터미널이 디코딩할 PNG 여야 한다");
+        let face = image::load_from_memory(&bytes).unwrap();
+        let (_, w, h) = crate::sprites::student_profile_rgba("yuuka").unwrap();
+        assert_eq!((face.width(), face.height()), (w, h), "화면이 쓰는 자르기 그대로");
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(write_mod_face("yuuka").unwrap().1, generation, "같은 그림은 같은 세대");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), written, "같은 그림은 다시 안 쓴다");
+        assert!(write_mod_face("no-such-student").is_none());
     }
 }
 

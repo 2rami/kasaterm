@@ -30,6 +30,7 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 | `tool` | `phase`: `start`·`end`, `id`, `tool`, `label`(시작), `error`·`text`(끝, 결과 600자), `agent`? | `tool.call` 앞뒤 | 보드 활동(`collab.activity`) |
 | `row` | `uuid`, `door` | `session.append`(본 고리만) | 대화 보기를 깨운다(내용은 기록 파일이 정본) |
 | `git` | `tool`, `verb`(명령 첫 낱말, git 이면 `git commit` 처럼 하위 명령까지), `paths`(고친 파일), `cwd` | 고치기 도구(Edit·Write·MultiEdit·NotebookEdit)가 성공한 뒤, 쓰는 Bash 명령이 끝난 뒤(서브에이전트 포함) | 그 칸·같은 작업 트리의 Git 열을 바로 다시 읽는다 |
+| `status` | `line`(`kasaterm-cli statusline` 의 ANSI 출력 한 줄) | 모델·effort·문맥·경로·브랜치가 바뀐 순간(`statusline` mod) | 엔진이 자기 상태줄을 다시 그릴 때까지 그 행에 덧그린다 |
 | `bye` | `reason` | `session.end` | mod 칸 표시를 거둔다 |
 
 `at` 은 mod 가 이벤트를 본 벽시계(ms). 앱은 도착 순서로 적용하고 `at` 은 표시에만 쓴다.
@@ -43,6 +44,21 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   창에 답한 순간을 알리지 않으므로, 요청이 열린 뒤 그 칸에 사람이 무언가를 누르면(휠·호버 제외) 답한 것으로 본다.
 - **상태줄**: `usage`·`background` 를 받으면 앱이 `$TMPDIR/kasaterm-statusline/<N>-mod.json`(세션·한도·비용·백그라운드 수)을
   쓰고, `kasaterm-cli statusline` 이 같은 세션 것만 읽어 한도(50% 넘은 것)·비용·`bg N` 을 덧붙인다.
+- **바로 그리는 상태줄**(`statusline` mod): 엔진은 상태줄 명령을 `refreshInterval` 1초 박자에 300ms 를 더 미뤄 다시 돌려,
+  모델·effort·브랜치를 바꾼 뒤 실측 0.1~2.6초(브랜치는 늘 0.6~1.1초) 늦게 그렸다. 엔진엔 mod 가 상태줄 명령을 다시 돌리게 할
+  길이 없고(칸 크기 흔들기로도 안 돈다, 2.1.291 실측), 상태줄은 `ui.render` 자리도 아니다. 그래서 mod 가 바뀐 순간을
+  안다 — `classic.PostModelSwitch`·`command.run`(`/effort` 는 인자로)·`turn.step`(요청마다 실제 effort)·`session.measure`·
+  `classic.CwdChanged`·Bash 끝·150ms 마다 `.git/HEAD` 와 cwd 다시 읽기. 알면 엔진이 마지막으로 넘긴 입력
+  (`kasaterm-cli statusline` 이 매번 `$TMPDIR/kasaterm-statusline/<N>-engine.json` 에 남긴다) 위에 그보다 늦게 안 사실만
+  얹어 같은 명령을 `KASATERM_STATUSLINE_DRAW_ONLY=1`(보고·스냅샷 안 함)로 돌려 줄을 짓고 `status` 로 보낸다. 모양은 Rust
+  한 곳이다. 앱은 그 줄을 학생 표식(없으면 모델 표식) 행에 덧그리고(`screenread::paint_status_line`), 엔진이 그 행을
+  다시 그리거나 5초(`STATUS_HOLD`)가 지나면 손을 뗀다 — 엔진 줄이 늘 정본이라 mod 가 틀려도 1초 남짓 뒤 바로잡힌다.
+  사람이 「상태줄 직접 설정」으로 다른 상태줄을 고른 칸은 건드리지 않는다. kasaterm 밖(칸 id 없음)에서는 상태줄 자리가
+  명령 상태줄 전용이라, 같은 차례·색의 줄을 프롬프트 아래 모드 자리(`SessionMode`)에 직접 그린다.
+- **학생 얼굴**(`student-face` mod): 답의 첫 블록 위에 그 칸 학생의 얼굴(4×2칸 그림)과 이름을 학생 색으로 그린다.
+  `GET /claude-mod/face?name=<KASATERM_CHARACTER>` 가 `{name, color, file, generation}` 을 준다 — 얼굴은 화면이 쓰는 자르기
+  그대로 `$TMPDIR/kasaterm-faces/<slug>.png` 에 두고 경로만 넘긴다(mod 의 HTTP 는 글자만 받는다). 「캐릭터 외형」이
+  꺼져 있으면 `{}` 라 아무것도 안 그리고, 그림이 없으면 이름만, 학생이 없는 칸은 손대지 않는다. 그림은 터미널만 그린다.
 - **대화 보기**: 내용은 기록 파일이 정본이다(재개한 세션도 전체가 보여야 한다). `GET /transcript-raw` 에 `wait_ms` 를 주면
   새 줄이 없을 때 그 칸의 다음 `row` 까지 쥐었다가 다시 읽는다 — 폰은 1.5초 바퀴 대신 행이 쌓이는 즉시 받는다.
 

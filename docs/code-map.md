@@ -5,7 +5,7 @@
 `main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main` + tests 만. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
 
 - `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지
-- `screenread.rs` — claude/codex **화면 그리드 판독·재작성** 자유함수: 스피너(`find_claude_spinner`)·입력박스(`prompt_box`)·배너/픽커/앵커 감지, 팀메시지(tell/SendMessage) 색칠·프사 배치
+- `screenread.rs` — claude/codex **화면 그리드 판독·재작성** 자유함수: 스피너(`find_claude_spinner`)·입력박스(`prompt_box`)·배너/픽커/앵커 감지, 팀메시지(tell/SendMessage) 색칠·프사 배치·상태줄 mod 가 막 지은 줄 덧칠(`paint_status_line`)
 - `sprites.rs` — 학생 스프라이트·프사 **에셋 적재와 드로잉**: 번들/override 프레임, idle GIF 캐시, `draw_student_*`
 - `handler.rs` — winit `ApplicationHandler`(`window_event`/`user_event`/`new_events`/`resumed`/`exiting`/`about_to_wait`). 소켓 백엔드 위임(`SocketBytes`/`SocketSplit`/`SocketFocus`) 처리·`window.json` 저장(`exiting`)/복원(`resumed`)·header/divider drag·tab-drag move·socket 명령 드레인
 - `layout.rs` — pane 조작(`split_active_pane`/`move_pane`/`close_active_pane`/`spawn_new_tab`/`swap_dir`/`focus_dir`/`drop_*`/`divider_at_px`/`toggle_pane_zoom`/`close_tab`) + `resize_backend`/`publish_pty_layout`/좌표·`target_*`
@@ -25,7 +25,7 @@
 - `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
-- `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함. 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
+- `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
 - `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤, mod 칸이면 `claude_mod::offer` 로 맡기고(mod 가 쉬는 순간 `$.prompt.submit`, ack 가 영수증을 끝맺음) 아니면 빈 입력창을 확인해 붙여넣고 Enter. 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
 - `board_digest.rs` — 모든 기기 보드 스냅샷(`collab.snapshot`)의 요약: 사람 차례·하는 중·끝 수와 사람을 기다리는 학생. 사이드바 학생 줄·펫 현황판이 쓴다. 보드 판은 걷었다(나쵸 대화·작업은 나쵸 독립 앱)

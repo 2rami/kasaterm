@@ -1335,6 +1335,13 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// 칸 안 claude 의 「학생 얼굴」 mod 가 답 머리에 그릴 학생 — `{name, color, file?, generation?}`.
+    /// 얼굴은 화면이 쓰는 자르기 그대로 PNG 파일로 두고 그 경로를 준다(터미널이 파일을 직접 읽는다).
+    /// 캐릭터 외형이 꺼져 있으면 None — mod 는 아무것도 안 그린다.
+    fn claude_mod_face(&self, _name: &str) -> Option<serde_json::Value> {
+        None
+    }
+
     /// 한 캐릭터·모션의 프레임 이미지 바이트. 사용자가 넣은 그림이 있으면 그것,
     /// 없으면 번들 — **화면이 지금 쓰는 것과 같은 순서**여야 미리보기가 실제와
     /// 어긋나지 않는다.

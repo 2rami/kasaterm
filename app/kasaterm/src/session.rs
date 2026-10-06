@@ -8495,6 +8495,10 @@ impl App {
             hub.invalidate();
             let _ = proxy.send_event(UserEvent::SafeTellWake);
         });
+        let status_proxy = self.proxy.clone();
+        kasa_mcp::claude_mod::set_status_listener(move |_| {
+            let _ = status_proxy.send_event(UserEvent::Redraw);
+        });
         crate::tell_delivery::listen_module_acks(self.proxy.clone());
         let git_wake = self.git.col_wake.clone();
         kasa_mcp::claude_mod::set_git_listener(move || git_wake.kick());

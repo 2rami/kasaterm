@@ -4201,9 +4201,151 @@ pub(crate) fn collapse_statusline_face(rows: &mut [Vec<GridCell>]) -> Option<(us
     Some(anchor)
 }
 
+/// 상태줄 mod 가 막 지은 줄을 얹을 `(행, 열)` — 학생 표식이 있던 자리, 학생이 없는 칸은 모델 표식 자리.
+/// 둘 다 kasaterm 상태줄만 찍는 글자라 다른 줄을 덮을 일이 없다.
+pub(crate) fn status_line_anchor(
+    rows: &[Vec<GridCell>],
+    face: Option<(usize, usize, usize)>,
+) -> Option<(usize, usize)> {
+    if let Some((row, col, _)) = face {
+        return Some((row, col));
+    }
+    rows.iter().enumerate().rev().find_map(|(r, row)| {
+        row.iter()
+            .position(|c| matches!(c.ch, STATUS_MODEL_CLAUDE_MARKER | STATUS_MODEL_GPT_MARKER))
+            .map(|c| (r, c))
+    })
+}
+
+/// 상태줄 행에 엔진이 그려 둔 글자. 덧그린 줄을 언제 뗄지(엔진이 다시 그렸나) 견주는 데만 쓴다.
+pub(crate) fn status_line_text(row: &[GridCell], col: usize) -> String {
+    row.iter().skip(col).map(|c| c.ch).collect::<String>().trim_end().to_string()
+}
+
+/// 엔진 상태줄 행을 상태줄 mod 가 지은 줄(`kasaterm-cli statusline` 의 ANSI 출력)로 덧칠한다. 같은
+/// 명령이 지은 줄이라 엔진이 다시 그렸을 때와 칸 단위로 같다. 엔진 줄 오른쪽 끝의 모드 표시(넉 칸 넘는
+/// 빈칸 너머)는 그대로 두고, 학생 표식은 이미 접힌 자리라 건너뛴다.
+pub(crate) fn paint_status_line(row: &mut [GridCell], col: usize, line: &str) {
+    let mut end = col;
+    let mut blanks = 0;
+    for (i, cell) in row.iter().enumerate().skip(col) {
+        if matches!(cell.ch, ' ' | '\0') {
+            blanks += 1;
+            if blanks >= 4 {
+                break;
+            }
+        } else {
+            blanks = 0;
+            end = i + 1;
+        }
+    }
+    for cell in row.iter_mut().take(end).skip(col) {
+        let bg = cell.bg.clone();
+        *cell = GridCell { bg, ..GridCell::blank() };
+    }
+    let mut fg = None;
+    let (mut bold, mut dim) = (false, false);
+    let mut at = col;
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            let mut params = String::new();
+            let mut fin = None;
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    fin = Some(c);
+                    break;
+                }
+                params.push(c);
+            }
+            if fin != Some('m') {
+                continue;
+            }
+            let codes: Vec<u16> = params
+                .trim_start_matches('[')
+                .split(';')
+                .map(|p| p.parse().unwrap_or(0))
+                .collect();
+            let mut i = 0;
+            while i < codes.len() {
+                match codes[i] {
+                    0 => (fg, bold, dim) = (None, false, false),
+                    1 => bold = true,
+                    2 => dim = true,
+                    22 => (bold, dim) = (false, false),
+                    39 => fg = None,
+                    38 if codes.get(i + 1) == Some(&2) && i + 4 < codes.len() => {
+                        fg = Some(kasa_bridge::screen::Color::Rgb(codes[i + 2] as u8, codes[i + 3] as u8, codes[i + 4] as u8));
+                        i += 4;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if matches!(ch, '\u{fffc}' | '\n' | '\r') {
+            continue;
+        }
+        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if at + width > row.len() {
+            break;
+        }
+        let mut cell = GridCell { bg: row[at].bg.clone(), ..GridCell::blank() };
+        cell.ch = ch;
+        if let Some(color) = &fg {
+            cell.fg = color.clone();
+        }
+        cell.bold = bold;
+        cell.dim = dim;
+        row[at] = cell.clone();
+        for spacer in 1..width {
+            row[at + spacer] = GridCell { ch: ' ', ..cell.clone() };
+        }
+        at += width;
+    }
+}
+
 #[cfg(test)]
 mod statusline_marker_tests {
     use super::*;
+
+    fn cells(text: &str, cols: usize) -> Vec<GridCell> {
+        let mut row = vec![GridCell::blank(); cols];
+        for (i, ch) in text.chars().enumerate().take(cols) {
+            row[i].ch = ch;
+        }
+        row
+    }
+
+    fn plain(row: &[GridCell]) -> String {
+        row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string()
+    }
+
+    #[test]
+    fn a_fresh_status_line_replaces_the_engine_line_but_keeps_the_mode_labels() {
+        let mut row = cells("  \u{e0c0} Opus 5.5 1M ┃ main ┃ repo ┃ 3% ┃ xhigh          focus", 70);
+        let focus = row.iter().position(|c| c.ch == 'f').unwrap();
+        let line = "\u{fffc}\x1b[38;2;122;162;247m\x1b[1m\u{e0c0} Sonnet 5.5\x1b[0m\x1b[2m 200k\x1b[0m \x1b[2m\x1b[38;2;86;95;137m┃\x1b[0m \x1b[38;2;115;218;202mfeat/비\x1b[0m\n";
+        paint_status_line(&mut row, 2, line);
+        let text = plain(&row);
+        assert!(text.starts_with("  \u{e0c0} Sonnet 5.5 200k ┃ feat/비 "), "{text}");
+        assert!(!text.contains("xhigh") && !text.contains("repo"), "엔진의 옛 줄은 남지 않는다: {text}");
+        assert_eq!(row[focus].ch, 'f', "오른쪽 모드 표시는 제자리에 남는다");
+        assert_eq!(row[4].fg, kasa_bridge::screen::Color::Rgb(122, 162, 247));
+        assert!(row[4].bold && !row[16].bold && row[16].dim, "굵게·흐리게가 칸마다 따라온다");
+        let wide = row.iter().position(|c| c.ch == '비').unwrap();
+        assert_eq!(row[wide + 1].ch, ' ', "넓은 글자는 두 칸을 쓴다");
+    }
+
+    #[test]
+    fn the_status_line_sits_on_the_face_marker_or_else_the_model_marker() {
+        let rows = vec![cells("transcript", 30), cells("  \u{e0c0} Opus 5.5", 30), cells("  ⏵⏵ bypass", 30)];
+        assert_eq!(status_line_anchor(&rows, None), Some((1, 2)));
+        assert_eq!(status_line_anchor(&rows, Some((1, 3, 1))), Some((1, 3)));
+        assert_eq!(status_line_anchor(&[cells("plain shell", 30)], None), None);
+        assert_eq!(status_line_text(&rows[1], 2), "\u{e0c0} Opus 5.5");
+    }
 
     #[test]
     fn hidden_face_marker_collapses_and_keeps_anchor() {

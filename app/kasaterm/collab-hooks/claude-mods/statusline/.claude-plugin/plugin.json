@@ -1,0 +1,6 @@
+{
+  "name": "statusline",
+  "version": "0.1.0",
+  "description": "모델·effort·문맥·경로·브랜치가 바뀌는 그 순간 상태줄을 다시 그린다 — kasaterm 칸은 kasaterm 상태줄을 바로 덧그리고, kasaterm 밖에서는 같은 줄을 프롬프트 아래에 그린다",
+  "author": { "name": "kasaterm" }
+}

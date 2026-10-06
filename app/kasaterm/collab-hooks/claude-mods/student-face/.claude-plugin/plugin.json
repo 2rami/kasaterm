@@ -1,0 +1,6 @@
+{
+  "name": "student-face",
+  "version": "0.1.0",
+  "description": "kasaterm 학생 칸의 답 머리에 그 학생의 얼굴과 이름을 학생 색으로 그린다 — 학생이 없는 칸은 그대로 둔다",
+  "author": { "name": "kasaterm" }
+}

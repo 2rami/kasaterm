@@ -1099,6 +1099,14 @@ impl App {
         // 표식은 모델 아이콘 자리를 잡기 전에 뺀다 — 뒤에서 빼면 줄만 당겨지고 아이콘은 옛 칸에 남는다.
         // 내부 자리표시는 그림이 꺼져 있어도 감추되, 앵커는 뒤의 판정·서 있는 자리에 넘긴다.
         let statusline_face = runs_claude.then(|| collapse_statusline_face(&mut composed)).flatten();
+        // 모델·effort·브랜치가 바뀐 순간 칸 안 mod 가 지어 보낸 줄 — 엔진이 1초 남짓 뒤 자기 줄을 다시
+        // 그릴 때까지만 덧그린다. 모델 표식이 줄에 실려 와 아래 로고 자리도 그대로 잡힌다.
+        if let Some((row, col)) = runs_claude.then(|| status_line_anchor(&composed, statusline_face)).flatten() {
+            let engine = status_line_text(&composed[row], col);
+            if let Some(line) = kasa_mcp::claude_mod::status_overlay(tab_pid.as_str(), &engine) {
+                paint_status_line(&mut composed[row], col, &line);
+            }
+        }
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             if let Some(slot) = take_status_model_icon_slot(
