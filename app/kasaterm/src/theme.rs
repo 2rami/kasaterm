@@ -9,6 +9,7 @@
 //! Values are raw sRGB bytes — the gpu path sRGB-decodes on upload and the
 //! sugarloaf path divides by 255 (see `f32_rgba`).
 
+use kasa_gridview::palette::{contrast_of, luminance};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const fn pack(c: [u8; 4]) -> u32 {
@@ -1353,31 +1354,6 @@ pub fn set_min_contrast(v: f32) {
     S_MIN_CONTRAST.store(v.clamp(1.0, 21.0).to_bits(), Ordering::Relaxed);
 }
 
-/// sRGB byte → linear, cached: the guard runs per cell, and `powf` on six
-/// channels of every colored glyph is real work for a table of 256 answers.
-fn srgb_lut() -> &'static [f32; 256] {
-    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| {
-        let mut t = [0.0f32; 256];
-        for (i, v) in t.iter_mut().enumerate() {
-            let c = i as f32 / 255.0;
-            *v = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-        }
-        t
-    })
-}
-
-/// WCAG relative luminance.
-fn luminance(c: [u8; 4]) -> f32 {
-    let l = srgb_lut();
-    0.2126 * l[c[0] as usize] + 0.7152 * l[c[1] as usize] + 0.0722 * l[c[2] as usize]
-}
-
-fn contrast_of(a: f32, b: f32) -> f32 {
-    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
-    (hi + 0.05) / (lo + 0.05)
-}
-
 /// Push `fg` toward black or white — whichever the background isn't — until it
 /// clears the contrast floor. Hue rides along the lerp rather than being
 /// recomputed, so a washed-out orange darkens into orange instead of turning
@@ -1394,34 +1370,7 @@ pub const CONTRAST_PRESETS: &[(&str, f32)] =
 /// `enforce_min_contrast` against an explicit floor — lets the settings screen
 /// preview each preset without disturbing the live one.
 pub fn enforce_contrast_at(fg: [u8; 4], bg: [u8; 4], min: f32) -> [u8; 4] {
-    if min <= 1.0 {
-        return fg;
-    }
-    let l_bg = luminance(bg);
-    if contrast_of(luminance(fg), l_bg) >= min {
-        return fg;
-    }
-    let target = if l_bg > 0.18 { 0.0f32 } else { 255.0 };
-    let mix = |t: f32| {
-        let mut c = fg;
-        for i in 0..3 {
-            c[i] = (fg[i] as f32 + (target - fg[i] as f32) * t).round() as u8;
-        }
-        c
-    };
-    // The floor may be unreachable (a mid-grey background caps how far either
-    // direction gets), so settle on the closest the search reached rather than
-    // looping forever chasing it.
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    for _ in 0..8 {
-        let mid = (lo + hi) * 0.5;
-        if contrast_of(luminance(mix(mid)), l_bg) >= min {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    mix(hi)
+    kasa_gridview::palette::enforce_contrast_at(fg, bg, min)
 }
 
 /// 채움 위의 작은 UI 글자색. 검정과 흰색 중 대비가 더 큰 쪽을 골라 어떤 accent나

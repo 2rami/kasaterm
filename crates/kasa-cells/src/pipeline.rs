@@ -33,22 +33,16 @@ impl CellInstance {
     /// WezTerm text gamma/contrast curve. That curve sharpens font stems but
     /// hard-edges thin SVG strokes, which read as jagged pixels on hover.
     pub const FLAG_ICON: u32 = 2;
-    /// Bit 2 set = a working-bar quad. The fragment shader ignores the atlas and
-    /// draws an indeterminate sweep over a faint track using `u.time`, so a busy
-    /// pane's loading bar animates on the GPU with no per-frame CPU rebuild.
-    pub const FLAG_WORKING_BAR: u32 = 4;
-    /// Bit 3 set = a pulse-bar quad. Like the working bar it ignores the atlas,
-    /// but instead of a sweeping segment it fills the full width and breathes its
-    /// alpha on a slow 3s sine — the "background job / Monitor running" signal,
-    /// whose slower rhythm reads as distinct from the working-bar sweep.
-    pub const FLAG_PULSE_BAR: u32 = 8;
-    /// Bit 4 set = a compact-bar quad. Same atlas-free, GPU-animated deal as the
-    /// two above, but the fill grows from the left and restarts — the shape people
-    /// read as "this has an end and it's getting there", which a sweeping segment
-    /// does not. Used while claude compacts its conversation: that runs for
-    /// seconds and the on-screen notice can be covered by a teammate-message
-    /// overlay, so the pane header has to carry the signal.
-    pub const FLAG_COMPACT_BAR: u32 = 16;
+    /// 장식 띠 셋(비트 2~4). 아틀라스를 안 보고 `u.time` 으로 셰이더가 움직이므로, 띠 인스턴스를 한 번
+    /// 내 두면 CPU 가 프레임마다 다시 짓지 않는다(일하는 동안에도 유휴 CPU 0). `uv.x` 가 0..1 가로 위치다.
+    ///
+    /// 쓸기: 32% 조각이 옅은 길 위를 1.2초마다 지나간다 — 끝을 모르는 「도는 중」.
+    pub const FLAG_BAND_SWEEP: u32 = 4;
+    /// 숨쉬기: 띠 전체의 알파가 3초 사인으로 오르내린다 — 쓸기보다 느린 박자라 다른 신호로 읽힌다.
+    pub const FLAG_BAND_BREATH: u32 = 8;
+    /// 채우기: 왼쪽부터 2.4초에 걸쳐 차고 다시 시작한다 — 「끝이 있고 거기로 가는 중」. 시간으로 채우므로
+    /// 찬 칸이 실제 진행률은 아니다.
+    pub const FLAG_BAND_FILL: u32 = 16;
 }
 
 #[repr(C)]
@@ -73,7 +67,7 @@ pub struct Uniforms {
     /// produces the same byte values sugarloaf measures (e.g. byte
     /// (255,0,0) → stored (234,52,35), display shows P3-red).
     pub p3_convert: f32,
-    /// Monotonic seconds for GPU-driven animation (the working-bar sweep).
+    /// Monotonic seconds for GPU-driven animation (the decoration bands).
     /// Rewritten every present; the bar quad itself never re-emits.
     pub time: f32,
     pub _pad: f32,
@@ -318,7 +312,7 @@ impl Pipeline {
     }
 
     /// Refresh only the `time` field for per-present GPU animation (the
-    /// working-bar sweep) without re-sending the full uniform block or
+    /// decoration bands) without re-sending the full uniform block or
     /// re-reading render knobs. Offset-targeted write into the existing buffer.
     pub fn write_time(&self, queue: &wgpu::Queue, time: f32) {
         let off = std::mem::offset_of!(Uniforms, time) as u64;

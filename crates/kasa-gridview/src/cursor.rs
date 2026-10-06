@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum CursorShape {
+pub enum CursorShape {
     #[default]
     Block,
     Bar,
@@ -12,7 +12,7 @@ pub(crate) enum CursorShape {
 }
 
 impl CursorShape {
-    pub(crate) const ALL: [Self; 8] = [
+    pub const ALL: [Self; 8] = [
         Self::Block,
         Self::Bar,
         Self::Underline,
@@ -23,7 +23,7 @@ impl CursorShape {
         Self::CornerMarks,
     ];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Block => "block",
             Self::Bar => "bar",
@@ -36,27 +36,27 @@ impl CursorShape {
         }
     }
 
-    pub(crate) fn from_str(value: &str) -> Option<Self> {
+    pub fn from_str(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|shape| shape.as_str() == value)
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct CursorQuad {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) width: f32,
-    pub(crate) height: f32,
+pub struct CursorQuad {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct CursorPrimitives {
+pub struct CursorPrimitives {
     quads: [CursorQuad; 8],
     len: u8,
 }
 
 impl CursorPrimitives {
-    pub(crate) fn as_slice(&self) -> &[CursorQuad] {
+    pub fn as_slice(&self) -> &[CursorQuad] {
         &self.quads[..self.len as usize]
     }
 
@@ -83,7 +83,7 @@ fn clamped_thickness(requested: f32, limit: f32) -> f32 {
     requested.min(limit.max(0.0))
 }
 
-pub(crate) fn cursor_primitives(
+pub fn cursor_primitives(
     shape: CursorShape,
     x: f32,
     y: f32,

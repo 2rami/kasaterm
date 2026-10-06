@@ -6766,13 +6766,13 @@ impl App {
                 } else if h.busy {
                     let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
-                    // One FLAG_WORKING_BAR quad — the shader sweeps the segment
+                    // One FLAG_BAND_SWEEP quad — the shader sweeps the segment
                     // over a faint track from u.time, so there's no per-frame
                     // CPU phase math and no chrome rebuild to keep it moving.
                     g.working_bar(h.x, by, h.w, bar_h, theme::accent());
                 } else if h.bg_active {
                     // Not visibly working, but a background shell / Monitor is
-                    // in-flight — one FLAG_PULSE_BAR quad breathes the same accent
+                    // in-flight — one FLAG_BAND_BREATH quad breathes the same accent
                     // rail on a slow 3s sine, a distinct rhythm from the sweep.
                     let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;

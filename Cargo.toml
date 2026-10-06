@@ -11,6 +11,7 @@ members = [
     "crates/kasa-pty",
     "crates/kasa-bridge",
     "crates/kasa-screen",
+    "crates/kasa-gridview",
     "crates/kasa-net",
     "crates/kasa-net-ffi",
     "spikes/iced-term",

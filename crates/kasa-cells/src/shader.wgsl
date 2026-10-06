@@ -31,7 +31,7 @@ struct Uniforms {
     //   washes colours out — the bytes become P3-encoded but the layer
     //   is still treated as sRGB by macOS, so they display dim.
     p3_convert: f32,
-    // Monotonic seconds for GPU-driven animation (the working-bar sweep). The
+    // Monotonic seconds for GPU-driven animation (the decoration bands). The
     // CPU rewrites only this each present, so a busy pane animates without
     // re-emitting any chrome instances — idle stays at 0 CPU rebuild work.
     time: f32,
@@ -151,10 +151,8 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas_tex, atlas_sampler, in.uv);
-    // Working-bar (flags & 4): an indeterminate ~32% segment sweeps a faint
-    // track on a 1.2s loop, driven entirely by `u.time` — the CPU emits the
-    // bar quad once and the GPU animates the sweep, so a busy pane costs no
-    // per-frame chrome rebuild. `in.uv.x` is the 0..1 horizontal position.
+    // 쓸기 띠(flags & 4, FLAG_BAND_SWEEP): ~32% 조각이 옅은 길 위를 1.2초마다 지나간다. `u.time` 만으로
+    // 움직여 CPU 는 띠 인스턴스를 한 번만 낸다. `in.uv.x` 가 0..1 가로 위치.
     if ((in.flags & 4u) != 0u) {
         let seg = 0.32;
         let head = -seg + (1.0 + seg) * fract(u.time / 1.2);
@@ -163,11 +161,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
         return vec4<f32>(prepare_output(rgb), a);
     }
-    // Compact-bar (flags & 16): fills from the left on a 2.4s loop, then
-    // restarts. compact 는 몇 초에서 수십 초 걸리는 **끝이 있는** 작업이라,
-    // 「칸이 차는」 모양이 「쓸고 지나가는」 working bar 보다 상태를 옳게 읽힌다.
-    // 진행률 자체는 claude 가 화면에만 내놓고 우리에게 주지 않으므로 시간으로
-    // 채운다(indeterminate) — 그래서 채운 칸이 실제 퍼센트는 아니다.
+    // 채우기 띠(flags & 16, FLAG_BAND_FILL): 왼쪽부터 2.4초에 걸쳐 차고 다시 시작한다 — 끝이 있는 일을
+    // 「칸이 차는」 모양으로 보인다. 시간으로 채우므로 찬 칸이 실제 퍼센트는 아니다.
     if ((in.flags & 16u) != 0u) {
         let fill = fract(u.time / 2.4);
         let infill = step(in.uv.x, fill);
@@ -175,9 +170,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
         return vec4<f32>(prepare_output(rgb), a);
     }
-    // Pulse-bar (flags & 8): a full-width rail whose alpha breathes on a slow
-    // 3s sine — a background/Monitor job is running with no on-screen spinner.
-    // The gentler, slower rhythm keeps it distinct from the working-bar sweep.
+    // 숨쉬기 띠(flags & 8, FLAG_BAND_BREATH): 띠 전체의 알파가 3초 사인으로 오르내린다. 쓸기보다
+    // 느린 박자라 다른 신호로 읽힌다.
     if ((in.flags & 8u) != 0u) {
         let breath = 0.30 + 0.45 * (0.5 + 0.5 * sin(u.time * 2.0943951)); // 2π/3 → 3s period
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);

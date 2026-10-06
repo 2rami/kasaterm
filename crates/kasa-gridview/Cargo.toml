@@ -1,0 +1,9 @@
+[package]
+name = "kasa-gridview"
+description = "Draws terminal panes for kasaterm and kasalite: cell grid, cursor, selection, IME preedit, inline images, palette, font lookup, macOS layer and frame pacing."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kasa-screen.workspace = true

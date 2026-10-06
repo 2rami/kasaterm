@@ -28,8 +28,9 @@ bytes ──► alacritty_terminal / wezterm-term ──► cell grid ──► 
   ~30–50 ms with shape-every-glyph drops to well under a millisecond.
 - **Batteries included.** Per-cell RGBA, bold/italic, CJK/wide-char
   layout, emoji bitmaps, Nerd-icon cell fitting, box-drawing quads, and
-  an optional sRGB→DisplayP3 conversion in the shader. Two Nerd fonts
-  are bundled, so icons render with no system-font install.
+  an optional sRGB→DisplayP3 conversion in the shader. Fonts come from
+  the host as a path or as bytes (`Shaper::add_fallback_bytes`); the
+  crate ships no font files.
 
 ## Status
 
@@ -43,7 +44,7 @@ versions may break it until 1.0.
 ```rust
 use kasa_cells::{Atlas, GlyphKey, Pipeline, Shaper};
 
-// 1. load a font (or use a bundled one: kasa_cells::CASCADIA_CODE_NF)
+// 1. load a font (a path, or bytes via shaper.add_fallback_bytes for fallbacks)
 let mut shaper = Shaper::from_path("/System/Library/Fonts/Menlo.ttc", 0)?;
 
 // 2. one atlas + one pipeline per surface
@@ -72,6 +73,3 @@ Dual-licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
-
-Bundled fonts are under their own licenses — see
-[assets/THIRD-PARTY-FONTS.md](assets/THIRD-PARTY-FONTS.md).

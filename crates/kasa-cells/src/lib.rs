@@ -17,8 +17,10 @@
 //!
 //! Included: per-cell RGBA color, bold/italic, CJK/wide-char layout,
 //! emoji bitmaps, Nerd-icon cell fitting, box-drawing quads, and an
-//! optional sRGB→DisplayP3 conversion in the shader. Two Nerd fonts
-//! are bundled so icons render without a system-font install.
+//! optional sRGB→DisplayP3 conversion in the shader. Fonts come from
+//! the host — a path, or bytes via `Shaper::add_fallback_bytes`. The
+//! crate ships no font files, so it builds the same from a git
+//! dependency (cargo does not fetch git-lfs objects).
 //!
 //! See `examples/grid_bw.rs` for a self-contained winit window that
 //! scrolls a 600-line buffer through the pipeline.
@@ -30,14 +32,3 @@ pub mod shaper;
 pub use atlas::{Atlas, AtlasEntry, GlyphKey};
 pub use pipeline::{CellInstance, Pipeline};
 pub use shaper::{Rasterized, Shaper};
-
-/// CascadiaCodeNF — broad Misc-Technical + Nerd icon coverage. Same
-/// bundled font sugarloaf 0.4.4 shipped, so we get parity on the
-/// claude code icon set without a system-font install requirement.
-pub const CASCADIA_CODE_NF: &[u8] = include_bytes!("../assets/CascadiaCodeNF.ttf");
-
-/// SymbolsNerdFontMono — fills any remaining nerd icon (U+E000..F8FF
-/// + U+F0000..1FFFD) holes when D2Coding's Nerd patch shipped an
-/// empty outline for the codepoint.
-pub const SYMBOLS_NERD_FONT_MONO: &[u8] =
-    include_bytes!("../assets/SymbolsNerdFontMono-Regular.ttf");

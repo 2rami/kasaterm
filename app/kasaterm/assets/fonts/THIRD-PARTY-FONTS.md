@@ -1,15 +1,15 @@
 # Bundled fonts
 
-This crate bundles two fonts via `include_bytes!` so that Nerd-style
-icons render without requiring a system-font install. They are
+The app bundles two fonts via `include_bytes!` (`src/gpu.rs`) so that
+Nerd-style icons render without requiring a system-font install. They are
 redistributed here under their own licenses, which are independent of
-this crate's MIT/Apache-2.0 dual license.
+the app's license.
 
 ## CascadiaCodeNF.ttf
 
 - **Family:** Cascadia Code (Nerd Font patched)
 - **Upstream:** https://github.com/microsoft/cascadia-code
-- **License:** SIL Open Font License, Version 1.1 — full text in [OFL.txt](OFL.txt)
+- **License:** SIL Open Font License, Version 1.1 — full text in [OFL-CascadiaCode.txt](OFL-CascadiaCode.txt)
 - **Copyright:** © Microsoft Corporation
 - Nerd Font glyph patches: https://github.com/ryanoasis/nerd-fonts
 
@@ -23,4 +23,4 @@ this crate's MIT/Apache-2.0 dual license.
 ---
 
 Both font licenses (OFL 1.1, MIT) permit redistribution. The OFL text
-ships alongside the font in [OFL.txt](OFL.txt), as the license requires.
+ships alongside the font in [OFL-CascadiaCode.txt](OFL-CascadiaCode.txt), as the license requires.

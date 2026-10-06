@@ -199,17 +199,17 @@ fn cell_of(styles: &[Style], id: u16, ch: char) -> GridCell {
 fn draw_row(g: &mut gpu::GpuRenderer, cells: &[GridCell], x: f32, y: f32, line_h: f32, clip: (f32, f32)) {
     let cw = g.cell_w;
     let size = g.term_font_size();
-    let dfg = cells::default_fg();
-    let dbg = cells::default_bg();
+    let pal = cells::palette();
+    let (dfg, dbg) = (pal.fg, pal.bg);
     let mut col = 0.0;
     let mut glyphs: Vec<(char, [u8; 4])> = Vec::with_capacity(cells.len());
     for c in cells {
         let w = if gpu::is_wide_char(c.ch) { 2.0 } else { 1.0 };
-        let bg = cells::cell_bg_with(c, dfg);
+        let bg = pal.cell_bg_with(c, dfg);
         if bg != dbg {
             g.rect(x + col * cw, y, w * cw, line_h, bg);
         }
-        let fg = cells::cell_fg_with(c, dfg);
+        let fg = pal.cell_fg_with(c, dfg);
         if c.underline {
             g.rect(x + col * cw, y + line_h - 2.0, w * cw, 1.0, fg);
         }

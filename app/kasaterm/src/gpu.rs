@@ -49,6 +49,11 @@ pub(crate) fn fit_terminal_art(
 /// assets/fonts/OFL-Galmuri.txt). Shipped verbatim, not subset: a subset is a
 /// Modified Version under that license, and the few MB saved aren't worth it.
 const GALMURI_11: &[u8] = include_bytes!("../assets/fonts/Galmuri11.ttf");
+/// Nerd 아이콘을 시스템 글꼴 설치 없이 그리려고 싣는 두 글꼴(assets/fonts/THIRD-PARTY-FONTS.md).
+/// CascadiaCodeNF 는 Misc-Technical·Nerd 아이콘을 넓게 덮고, SymbolsNerdFontMono 는 주 글꼴의 Nerd 패치가
+/// 빈 아웃라인으로 남긴 아이콘(U+E000..F8FF·U+F0000..1FFFD) 구멍을 메운다.
+const CASCADIA_CODE_NF: &[u8] = include_bytes!("../assets/fonts/CascadiaCodeNF.ttf");
+const SYMBOLS_NERD_FONT_MONO: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
 /// Device px per Galmuri dot — every cut draws one dot per `upem/100` units, so
 /// Galmuri11 (upem 1200) is crisp only at whole multiples of 12.
 const GALMURI_DOT_PX: u32 = 12;
@@ -911,7 +916,7 @@ impl GpuRenderer {
         });
     }
 
-    /// Working-indicator rail (logical px). Pushes ONE `FLAG_WORKING_BAR`
+    /// Working-indicator rail (logical px). Pushes ONE `FLAG_BAND_SWEEP`
     /// instance; the shader sweeps an indeterminate ~32% segment over a faint
     /// track from `u.time`, so a busy pane's loading bar animates on the GPU
     /// and the CPU never re-emits the bar per frame — the key to idle-0 CPU
@@ -923,12 +928,12 @@ impl GpuRenderer {
             uv_min: [0.0, 0.0],
             uv_max: [1.0, 1.0],
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
-            flags: CellInstance::FLAG_WORKING_BAR,
+            flags: CellInstance::FLAG_BAND_SWEEP,
             ..Default::default()
         });
     }
 
-    /// Pulse-indicator rail (logical px). Pushes ONE `FLAG_PULSE_BAR` instance;
+    /// Pulse-indicator rail (logical px). Pushes ONE `FLAG_BAND_BREATH` instance;
     /// the shader breathes a full-width fill's alpha on a slow 3s sine from
     /// `u.time`, so a pane with a background/Monitor job animates on the GPU with
     /// no per-frame CPU rebuild — same idle-0-CPU property as `working_bar`.
@@ -939,12 +944,12 @@ impl GpuRenderer {
             uv_min: [0.0, 0.0],
             uv_max: [1.0, 1.0],
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
-            flags: CellInstance::FLAG_PULSE_BAR,
+            flags: CellInstance::FLAG_BAND_BREATH,
             ..Default::default()
         });
     }
 
-    /// Compact-progress rail (logical px). Pushes ONE `FLAG_COMPACT_BAR` instance;
+    /// Compact-progress rail (logical px). Pushes ONE `FLAG_BAND_FILL` instance;
     /// the shader fills from the left on a 2.4s loop and restarts, so the header
     /// says "something with an end is running" — the shape a sweep can't say.
     /// Same idle-0-CPU property as the two bars above.
@@ -959,7 +964,7 @@ impl GpuRenderer {
             uv_min: [0.0, 0.0],
             uv_max: [1.0, 1.0],
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
-            flags: CellInstance::FLAG_COMPACT_BAR,
+            flags: CellInstance::FLAG_BAND_FILL,
             ..Default::default()
         });
     }
@@ -5106,6 +5111,7 @@ impl GpuRenderer {
         // Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep
         // full alpha — only the text fades, so the box doesn't darken.
         const DIM_TEXT_ALPHA: f32 = 0.70;
+        let pal = crate::cells::palette();
         // Pass 1: backgrounds only. A tall CJK glyph bleeds a little
         // into the row below; emitting EVERY background first stops the
         // next row's bg fill from painting over the previous glyph's
@@ -5124,7 +5130,7 @@ impl GpuRenderer {
                     let cell = adapted.as_ref();
                     let want_bg = !matches!(cell.bg, kasa_bridge::screen::Color::Default)
                         || cell.inverse;
-                    let bg = cell_bg_rgba(cell, pane.default_fg);
+                    let bg = pal.cell_bg_with(cell, pane.default_fg);
                     if want_bg && bg[3] > 0 {
                         let cx = pane.origin_px.0 + col as f32 * cell_w_px;
                         let cy = pane.origin_px.1 + r as f32 * cell_h_px;
@@ -5170,7 +5176,7 @@ impl GpuRenderer {
                     // `box_line_rects`(px), 면은 `block_rects`(비율). 혼합 굵기
                     // 교차처럼 안 다루는 글자만 폰트로 떨어진다.
                     if ('\u{2500}'..='\u{259F}').contains(&ch) {
-                        let mut fg = cell_fg_rgba(cell, pane.default_fg);
+                        let mut fg = pal.cell_fg_with(cell, pane.default_fg);
                         if pane.dim {
                             fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
                         }
@@ -5207,7 +5213,7 @@ impl GpuRenderer {
                     }
                     let cell_x = pane.origin_px.0 + col as f32 * cell_w_px;
                     let cell_y = pane.origin_px.1 + r as f32 * cell_h_px;
-                    let mut fg = cell_fg_rgba(cell, pane.default_fg);
+                    let mut fg = pal.cell_fg_with(cell, pane.default_fg);
                     if pane.links.iter().any(|l| {
                         l.row as usize == r
                             && (col as u16) >= l.col_start
@@ -6018,14 +6024,6 @@ fn is_icon_codepoint(cp: u32) -> bool {
         || (0x100000..=0x10FFFD).contains(&cp) // Supplementary PUA-B
 }
 
-fn cell_fg_rgba(cell: &Cell, default_fg: [u8; 4]) -> [u8; 4] {
-    crate::cells::cell_fg_with(cell, default_fg)
-}
-
-fn cell_bg_rgba(cell: &Cell, default_fg: [u8; 4]) -> [u8; 4] {
-    crate::cells::cell_bg_with(cell, default_fg)
-}
-
 /// Normalize u8 RGBA to 0..1 with NO colour-space conversion. The
 /// Source colours are authored in sRGB. The CAMetalLayer is tagged with
 /// the Display P3 colorspace (`patch_p3_colorspace_safe`), so the bytes
@@ -6144,8 +6142,8 @@ fn attach_fallback_chain(shaper: &mut Shaper) {
         let bold = sibling_bold_font_path(&path);
         shaper.add_fallback_with_bold(&path, idx, bold);
     }
-    shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
-    shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
+    shaper.add_fallback_bytes(CASCADIA_CODE_NF, 0);
+    shaper.add_fallback_bytes(SYMBOLS_NERD_FONT_MONO, 0);
 }
 
 fn fallback_font_paths() -> Vec<(String, u32)> {

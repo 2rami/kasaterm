@@ -21,7 +21,7 @@ mod chrome;
 mod claude_auth;
 mod clipboard;
 mod codexlimits;
-mod cursor;
+use kasa_gridview::cursor;
 mod eyedropper;
 mod gpu;
 mod handler;
