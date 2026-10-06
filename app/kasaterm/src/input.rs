@@ -1239,6 +1239,9 @@ impl App {
     /// 바깥주소(터널) 칩 상태 — 조회에 pgrep 서브프로세스가 들어가므로 5초
     /// 박자로만 본다(칩을 누른 손은 handler 가 낙관 반영하고 이 폴이 확정한다).
     fn refresh_tunnel_chip(&mut self) {
+        if let Some(sample) = self.statusbar.probe.take() {
+            self.apply_status_sample(sample);
+        }
         let now = Instant::now();
         if self
             .statusbar
@@ -1248,60 +1251,30 @@ impl App {
             return;
         }
         self.statusbar.tunnel_checked = Some(now);
-        self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
-        self.statusbar.tunnel_host = kasa_mcp::tunnel::host();
-        // Explicit browser selection remains selected even when disconnected.
-        // This poll is read-only: a remote settings request may arrive while
-        // reachability is being sampled. Never write the sampled old selection.
-        {
-            let chosen = kasa_mcp::machines::kasachrome_machine();
-            let port = if chosen.is_empty() {
-                Some(kasa_mcp::machines::KASACHROME_PORT)
-            } else {
-                kasa_mcp::machines::kasachrome_target_port(&chosen)
-            };
-            self.statusbar.chrome_machine = chosen;
-            self.statusbar.chrome_reach = port.map(|p| {
-                std::net::TcpStream::connect_timeout(
-                    &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
-                    std::time::Duration::from_millis(250),
-                )
-                .is_ok()
-            });
+        self.statusbar.probe.kick(now);
+    }
+
+    /// 뒤 스레드가 뜬 표본을 상태줄에 붙인다. 터널·크롬 칸은 표본을 부탁한 뒤
+    /// 아무도 `tunnel_checked` 를 새로 세우지 않았을 때만 덮는다 — 칩을 누른 손의
+    /// 낙관 반영(그 자리에서 `tunnel_checked` 를 세운다)을 그보다 먼저 뜬 표본이
+    /// 되돌리면 안 된다.
+    fn apply_status_sample(&mut self, sample: StatusSample) {
+        if self.statusbar.tunnel_checked == Some(sample.kicked) {
+            self.statusbar.tunnel_on = Some(sample.tunnel_on);
+            self.statusbar.tunnel_host = sample.tunnel_host;
+            self.statusbar.chrome_machine = sample.chrome_machine;
+            self.statusbar.chrome_reach = sample.chrome_reach;
+            self.statusbar.chrome_bridge = sample.chrome_bridge;
         }
-        // 본진→이 맥 카사크롬 다리 — 본진 상주 학생이 지금 어느 크롬을 쓰게 되는지.
-        // 폴백은 실패 기반이라 사람이 상태를 볼 창이 따로 필요하다(2026-08-30
-        // 지시 「하단에 맥북 열림 닫힘을 표시해둬서 나도 볼 수 있게」). 다리의
-        // 실체 = 이 맥의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
-        // (-R 18800→8777)을 실은 ssh 가 살아 있는 것. 기계 명부가 비면 잴 이유가
-        // 없다(칩도 안 그린다).
-        self.statusbar.chrome_bridge = if kasa_mcp::machines::machines().is_empty() {
-            None
-        } else {
-            let bridge = std::net::TcpStream::connect_timeout(
-                &std::net::SocketAddr::from(([127, 0, 0, 1], 8777)),
-                std::time::Duration::from_millis(250),
-            )
-            .is_ok();
-            let tunnel = crate::proc::command("pgrep")
-                .args(["-f", "18800:127.0.0.1:8777"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            Some(bridge && tunnel)
-        };
-        // 같은 5초 박자에 얹는다 — 포트는 사실상 상수지만 파일이 bind 뒤에
-        // 써지므로 폴로 읽어야 부팅 직후의 폴백(8765)이 굳지 않는다.
-        self.statusbar.port = Some(crate::mcp_panel_port());
-        if let Some(u) = sample_process_tree_usage(&mut self.statusbar.cpu_track) {
+        self.statusbar.port = Some(sample.port);
+        if let Some(u) = sample.usage {
             self.statusbar.res = Some((u.cpu, u.rss));
             self.statusbar.usage_top = u.top;
             self.statusbar.usage_rows = u.rows;
             self.statusbar.usage_outside = u.outside;
             self.statusbar.usage_self = (u.self_cpu, u.self_hot);
         }
-        // 같은 박자에 물리 메모리도 — 이쪽은 서브프로세스가 없어 사실상 공짜다.
-        self.statusbar.mem = crate::sysmem::sample();
+        self.statusbar.mem = sample.mem;
         // 계속 코어를 태우는 앱은 메모리와 **다른 축**이라 따로 말한다. 팬이
         // 도는 이유를 물었을 때 「메모리는 정상입니다」만 답하면 소용이 없다
         // (2026-08-27: 「안조용한데 위젯좀 잘만들어봐」).
@@ -4804,6 +4777,109 @@ impl AppUsage {
     /// 튀는 것과 가르려고 폴 수까지 본다.
     pub(crate) fn is_hog(&self) -> bool {
         is_hot(self.hot)
+    }
+}
+
+/// 상태줄 5초 표본 하나 — 터널·크롬 다리·포트·사용량·물리 메모리.
+pub(crate) struct StatusSample {
+    /// 이 표본을 부탁한 시각(`tunnel_checked` 와 견준다).
+    kicked: Instant,
+    tunnel_on: bool,
+    tunnel_host: Option<String>,
+    chrome_machine: String,
+    chrome_reach: Option<bool>,
+    chrome_bridge: Option<bool>,
+    port: String,
+    usage: Option<UsageSample>,
+    mem: Option<crate::sysmem::MemSample>,
+}
+
+/// 상태줄 표본을 GUI 스레드 밖에서 뜬다. `ps -axo` 와 프로세스마다의 rusage 는
+/// 프로세스 수에 비례해서, 1,600개 남짓인 기계에서 한 번에 170~860ms(심하면 3초)
+/// 걸렸다 — GUI 스레드에서 돌던 시절엔 5초마다 키·스크롤·그리기가 그만큼 통째로
+/// 멎었다(2026-10-06 리그 실측, 190초에 33번). `pgrep` 과 연결 확인(최대 250ms)도
+/// 같은 사정이라 함께 옮긴다.
+#[derive(Default)]
+pub(crate) struct StatusProbe {
+    kick: Option<std::sync::mpsc::Sender<Instant>>,
+    done: Arc<Mutex<Option<StatusSample>>>,
+}
+
+impl StatusProbe {
+    /// 표본을 부탁한다. 일꾼은 처음 부탁할 때 하나 세운다. 앞 표본이 아직 도는
+    /// 중이면 부탁이 쌓였다가 차례로 돈다(5초 박자라 사실상 쌓이지 않는다).
+    pub(crate) fn kick(&mut self, at: Instant) {
+        let tx = self.kick.get_or_insert_with(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+            let done = self.done.clone();
+            std::thread::Builder::new()
+                .name("statusbar-probe".into())
+                .spawn(move || {
+                    let mut track = CpuTrack::default();
+                    while let Ok(kicked) = rx.recv() {
+                        let sample = take_status_sample(kicked, &mut track);
+                        if let Ok(mut slot) = done.lock() {
+                            *slot = Some(sample);
+                        }
+                    }
+                })
+                .expect("statusbar probe thread");
+            tx
+        });
+        let _ = tx.send(at);
+    }
+
+    pub(crate) fn take(&self) -> Option<StatusSample> {
+        self.done.lock().ok()?.take()
+    }
+}
+
+fn take_status_sample(kicked: Instant, track: &mut CpuTrack) -> StatusSample {
+    // 브라우저 선택은 읽기만 한다 — 설정 요청이 표본을 뜨는 중에 와도 옛 선택을
+    // 다시 쓰지 않는다.
+    let chrome_machine = kasa_mcp::machines::kasachrome_machine();
+    let port = if chrome_machine.is_empty() {
+        Some(kasa_mcp::machines::KASACHROME_PORT)
+    } else {
+        kasa_mcp::machines::kasachrome_target_port(&chrome_machine)
+    };
+    let reach = |p: u16| {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
+            std::time::Duration::from_millis(250),
+        )
+        .is_ok()
+    };
+    let chrome_reach = port.map(reach);
+    // 본진→이 맥 카사크롬 다리 — 본진 상주 학생이 지금 어느 크롬을 쓰게 되는지.
+    // 폴백은 실패 기반이라 사람이 상태를 볼 창이 따로 필요하다(2026-08-30
+    // 지시 「하단에 맥북 열림 닫힘을 표시해둬서 나도 볼 수 있게」). 다리의
+    // 실체 = 이 맥의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
+    // (-R 18800→8777)을 실은 ssh 가 살아 있는 것. 기계 명부가 비면 잴 이유가
+    // 없다(칩도 안 그린다).
+    let chrome_bridge = if kasa_mcp::machines::machines().is_empty() {
+        None
+    } else {
+        let tunnel = crate::proc::command("pgrep")
+            .args(["-f", "18800:127.0.0.1:8777"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        Some(reach(8777) && tunnel)
+    };
+    StatusSample {
+        kicked,
+        tunnel_on: kasa_mcp::tunnel::is_on(),
+        tunnel_host: kasa_mcp::tunnel::host(),
+        chrome_machine,
+        chrome_reach,
+        chrome_bridge,
+        // 포트는 사실상 상수지만 파일이 bind 뒤에 써지므로 폴로 읽어야 부팅
+        // 직후의 폴백(8765)이 굳지 않는다.
+        port: crate::mcp_panel_port(),
+        usage: sample_process_tree_usage(track),
+        // 물리 메모리는 서브프로세스가 없어 사실상 공짜지만 같은 표본으로 묶는다.
+        mem: crate::sysmem::sample(),
     }
 }
 

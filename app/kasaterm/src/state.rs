@@ -77,9 +77,8 @@ pub(crate) struct StatusbarState {
     /// 이 앱 트리 자신의 구간 사용률(%)과 그게 이어진 폴 수. 바깥 앱과 같은
     /// 잣대지만 목록에는 안 넣는다 — 자기에게 끄기 버튼을 붙일 수는 없다.
     pub(crate) usage_self: (f32, u16),
-    /// 앱별 CPU 시간을 폴 사이에 이어 두는 자리. 여기 있는 이유는 `ps` 를 부르는
-    /// 자유함수가 상태를 못 갖기 때문이다.
-    pub(crate) cpu_track: crate::input::CpuTrack,
+    /// 5초 표본(터널·크롬 다리·사용량·메모리)을 뜨는 뒤 스레드와 그 결과 자리.
+    pub(crate) probe: crate::input::StatusProbe,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
     /// 기기 연결 위젯(직통·중계·왕복)의 눌림 사각.
     pub(crate) link_rect: Option<(f32, f32, f32, f32)>,
