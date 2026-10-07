@@ -224,9 +224,10 @@ enum OAuthProvider {
   final String label;
 }
 
-/// 연결 한 번에 함께 붙는 그 공급자의 일 권한.
+/// 연결 한 번에 함께 붙는 그 공급자의 일 권한. Google 은 로그인 신원만 잇는다 — Gmail 범위를 실으면 동의 화면에
+/// 「확인되지 않은 앱」 경고가 떠서 걷었다(docs/account-connections.md).
 List<String> workFeatures(OAuthProvider provider) => switch (provider) {
-  OAuthProvider.google => const ['mail.read', 'mail.send'],
+  OAuthProvider.google => const [],
   OAuthProvider.github => const ['github.pr'],
 };
 
@@ -300,7 +301,7 @@ class OAuthChoice {
 }
 
 /// 기다리는 중이면 모두 null, 로그인이면 [session], 연결이면 [linked], 계정을 골라야 하면 [choice],
-/// 일 권한(Gmail·GitHub)을 붙였으면 [connected]. 일 권한과 함께 로그인도 이 계정에 붙었으면 [linked] 도 참이다.
+/// 일 권한(GitHub PR)을 붙였으면 [connected]. 일 권한과 함께 로그인도 이 계정에 붙었으면 [linked] 도 참이다.
 class OAuthResult {
   const OAuthResult({this.session, this.linked = false, this.choice, this.connected = false, this.installUrl});
   final AccountSession? session;
@@ -318,7 +319,6 @@ class WorkList {
   const WorkList({
     this.connections = const [],
     this.pending = const [],
-    this.mail = false,
     this.github = false,
     this.installUrl,
   });
@@ -332,7 +332,6 @@ class WorkList {
     return WorkList(
       connections: maps(json['connections']),
       pending: maps(json['pending']),
-      mail: available is Map && available['google'] == true,
       github: available is Map && available['github'] == true,
       installUrl: install != null && install.scheme == 'https' && install.host == 'github.com' ? install : null,
     );
@@ -340,7 +339,6 @@ class WorkList {
 
   final List<Map<String, dynamic>> connections;
   final List<Map<String, dynamic>> pending;
-  final bool mail;
   final bool github;
   final Uri? installUrl;
 }
@@ -367,8 +365,8 @@ String workError(String? code, int status) => switch (code) {
   'reconnect_required' => '연결이 풀렸어요. 다시 연결해 주세요.',
   'feature_missing' => '이 연결에 그 권한이 없어요. 다시 연결하며 권한을 허용해 주세요.',
   'repo_not_accessible' => '그 레포에 GitHub 앱이 설치되지 않았어요. 앱을 설치한 뒤 다시 승인해 주세요.',
-  'provider_rejected' => '받는 쪽이 거절했어요.',
-  'result_unknown' => '보냈지만 결과를 못 받았어요. 메일함·GitHub 에서 확인해 주세요.',
+  'provider_rejected' => 'GitHub 이 거절했어요.',
+  'result_unknown' => '보냈지만 결과를 못 받았어요. GitHub 에서 확인해 주세요.',
   'not_found' => '이미 처리됐거나 사라진 항목이에요.',
   'setup_required' => '관문에 이 연결이 아직 준비되지 않았어요.',
   _ => status == 404 ? '관문이 이 기능을 아직 몰라요. 관문 업데이트가 필요해요.' : accountError(status),
@@ -384,7 +382,7 @@ class OAuthProviders {
   });
   final List<OAuthProvider> enabled;
 
-  /// 연결할 때 일 권한(Gmail·GitHub PR)까지 함께 붙일 수 있는 공급자 id.
+  /// 연결할 때 일 권한(GitHub PR)까지 함께 붙일 수 있는 공급자 id.
   final Set<String> connect;
 
   /// 처음 보는 Google·GitHub 신원으로 새 계정을 만드는 서버인가.
@@ -610,7 +608,7 @@ class RelayAccountApi {
   /// [link] 면 지금 로그인한 계정에 이 로그인 방법을 더한다(기기 토큰이 실려야 한다), 아니면 그 신원으로 로그인.
   /// [redirect] 면(이 기기가 시스템 로그인 창을 띄울 수 있으면) 관문이 아는 한 확인 코드 없는 앱 리다이렉트로 시작한다.
   ///
-  /// [connect] 를 주면(`mail.read`·`mail.send`·`github.pr`) 로그인 대신 지금 계정에 일 권한을 붙인다 — 공급자 토큰이
+  /// [connect] 를 주면(`github.pr`) 로그인 대신 지금 계정에 일 권한을 붙인다 — 공급자 토큰이
   /// 이 기기 verifier 로만 넘어가게 앱 리다이렉트가 있어야 한다.
   ///
   /// [work] 면 연결([link])할 때 관문이 받을 수 있는 한 그 공급자의 일 권한도 같은 허용으로 붙인다.

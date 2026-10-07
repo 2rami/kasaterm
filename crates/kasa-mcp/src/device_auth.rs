@@ -338,8 +338,9 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
                 "oauth_cancel" => oauth::cancel(&params).await,
                 "oauth_signup" => oauth::choose(&params, false).await,
                 "oauth_claim" => oauth::choose(&params, true).await,
-                "connections" | "connections_audit" | "disconnect" | "mail_list" | "mail_read"
-                | "mail_send" | "pr_create" | "reject" => connections::handle(&op, &params).await,
+                "connections" | "connections_audit" | "disconnect" | "pr_create" | "reject" => {
+                    connections::handle(&op, &params).await
+                }
                 "profile" | "profile_update" | "avatar_remove" | "login_change"
                 | "password_change" => profile::handle(&op, &params).await,
                 "login" => {

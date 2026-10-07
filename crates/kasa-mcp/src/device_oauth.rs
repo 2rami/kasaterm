@@ -181,9 +181,8 @@ pub(super) async fn providers() -> anyhow::Result<Value> {
     } else {
         "setup_required"
     };
-    // Which providers also bring work permissions when linked from settings.
-    let connect = json!({"google":value["redirect_login"] == true && value["connect"]["google"] == true,
-        "github":value["redirect_login"] == true && value["connect"]["github"] == true});
+    // Whether linking GitHub from settings also brings its work permissions. Google links sign-in only.
+    let connect = json!({"github":value["redirect_login"] == true && value["connect"]["github"] == true});
     Ok(json!({"state":state,"providers":providers,"connect":connect}))
 }
 
@@ -196,7 +195,7 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
         .into_iter()
         .flatten()
         .filter_map(|feature| feature.as_str())
-        .filter(|feature| matches!(*feature, "mail.read" | "mail.send" | "github.pr"))
+        .filter(|feature| *feature == "github.pr")
         .map(str::to_string)
         .collect();
     let link = params["link"].as_bool().unwrap_or(false) || !connect.is_empty();
@@ -225,18 +224,17 @@ pub(super) async fn start(params: &Value) -> anyhow::Result<Value> {
     if !link && capabilities["choose_account"] == true {
         body["choose"] = json!(true);
     }
-    // Linking Google·GitHub from settings also brings that provider's work permissions in the same
-    // consent, when the gateway can hold them; an older or unprepared gateway links the sign-in only.
+    // Linking GitHub from settings also brings its pull-request permission in the same consent, when
+    // the gateway can hold it; an older or unprepared gateway links the sign-in only. Google never
+    // asks for more than identity, whatever the gateway answers — mail scopes warn of an unverified app.
     if link
         && connect.is_empty()
         && params["work"] == true
+        && provider == Provider::Github
         && capabilities["redirect_login"] == true
-        && capabilities["connect"][provider.name()] == true
+        && capabilities["connect"]["github"] == true
     {
-        connect = match provider {
-            Provider::Google => vec!["mail.read".into(), "mail.send".into()],
-            Provider::Github => vec!["github.pr".into()],
-        };
+        connect = vec!["github.pr".into()];
     }
     if !connect.is_empty() {
         // Provider tokens are only handed over through the PKCE redirect, never the typed code.

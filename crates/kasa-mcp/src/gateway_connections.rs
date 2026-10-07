@@ -1,9 +1,9 @@
-//! `/relay/connections` — Gmail and GitHub work permissions of the device's account
+//! `/relay/connections` — GitHub work permissions of the device's account
 //! (`connections.rs`, docs/account-connections.md). The account comes only from the device
 //! credential; a body never names one.
 
 use super::*;
-use crate::connections::{Caller, MailDraft, PrDraft, Write};
+use crate::connections::{Caller, PrDraft, Write};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -14,9 +14,6 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/connections", get(list))
         .route("/relay/connections/{id}", axum::routing::delete(disconnect))
         .route("/relay/connections/audit", get(audit))
-        .route("/relay/connections/mail/list", axum::routing::post(mail_list))
-        .route("/relay/connections/mail/read", axum::routing::post(mail_read))
-        .route("/relay/connections/mail/send", axum::routing::post(mail_send))
         .route("/relay/connections/pr/create", axum::routing::post(pr_create))
         .route("/relay/connections/approver", axum::routing::post(approver))
         .route("/relay/connections/pending/{id}/approve", axum::routing::post(approve))
@@ -36,6 +33,15 @@ async fn no_store(mut response: axum::response::Response) -> axum::response::Res
         );
     }
     response
+}
+
+impl Gate {
+    /// Gmail connections sealed before the feature was withdrawn are revoked before serving.
+    pub async fn retire_gmail(&self) {
+        if let Some(service) = &self.connections {
+            service.retire_gmail().await;
+        }
+    }
 }
 
 /// The authenticated device and its account, or the response that refuses the request.
@@ -143,88 +149,6 @@ async fn audit(
     };
     let lines = service.audit(&who.account, query.limit.unwrap_or(50).min(200));
     axum::Json(json!({"ok":true,"audit":lines})).into_response()
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MailList {
-    connection: Option<String>,
-    #[serde(default)]
-    query: String,
-    max: Option<usize>,
-}
-
-async fn mail_list(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
-    let (who, service) = match who(&gate, req.headers()) {
-        Ok(found) => found,
-        Err(refusal) => return refusal,
-    };
-    let input: MailList = match read(req).await {
-        Ok(input) => input,
-        Err(refusal) => return refusal,
-    };
-    answer(
-        service
-            .mail_list(&who.caller(), input.connection.as_deref(), &input.query, input.max.unwrap_or(10))
-            .await,
-    )
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MailRead {
-    connection: Option<String>,
-    id: String,
-}
-
-async fn mail_read(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
-    let (who, service) = match who(&gate, req.headers()) {
-        Ok(found) => found,
-        Err(refusal) => return refusal,
-    };
-    let input: MailRead = match read(req).await {
-        Ok(input) => input,
-        Err(refusal) => return refusal,
-    };
-    answer(service.mail_read(&who.caller(), input.connection.as_deref(), &input.id).await)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MailSend {
-    connection: Option<String>,
-    to: Vec<String>,
-    #[serde(default)]
-    cc: Vec<String>,
-    subject: String,
-    body: String,
-    reply_to: Option<String>,
-}
-
-async fn mail_send(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
-    let (who, service) = match who(&gate, req.headers()) {
-        Ok(found) => found,
-        Err(refusal) => return refusal,
-    };
-    let input: MailSend = match read(req).await {
-        Ok(input) => input,
-        Err(refusal) => return refusal,
-    };
-    answer(
-        service
-            .request(
-                &who.caller(),
-                input.connection.as_deref(),
-                Write::Mail(MailDraft {
-                    to: input.to,
-                    cc: input.cc,
-                    subject: input.subject,
-                    body: input.body,
-                    reply_to: input.reply_to,
-                }),
-            )
-            .await,
-    )
 }
 
 #[derive(Deserialize)]

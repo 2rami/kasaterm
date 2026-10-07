@@ -1,5 +1,5 @@
-//! 설정 「계정」의 「일 권한」 — 이 계정에 붙인 Gmail·GitHub 연결과, 학생·나쵸가 낸 메일·PR 이
-//! 사람 승인을 기다리는 목록(docs/account-connections.md). 토큰은 관문에만 있고 여기엔 목록뿐이다.
+//! 설정 「계정」의 「일 권한」 — 이 계정에 붙인 GitHub 연결과, 학생·나쵸가 낸 PR 이 사람 승인을
+//! 기다리는 목록(docs/account-connections.md). 토큰은 관문에만 있고 여기엔 목록뿐이다.
 
 use super::*;
 use std::collections::HashSet;
@@ -62,7 +62,7 @@ fn readable(error: &str) -> String {
             "받는 쪽이 거절했어요 — {}",
             error.split_once(": ").map_or("", |(_, detail)| detail)
         ),
-        "result_unknown" => "보냈지만 결과를 못 받았어요. 메일함·GitHub 에서 확인해 주세요".into(),
+        "result_unknown" => "보냈지만 결과를 못 받았어요. GitHub 에서 확인해 주세요".into(),
         "setup_required" => "관문에 이 연결이 아직 준비되지 않았어요".into(),
         "update_required" => "관문이 이 기능을 아직 몰라요. 관문 업데이트가 필요해요".into(),
         "cancelled" => "연결을 취소했어요".into(),
@@ -166,19 +166,19 @@ impl State {
         (changed, fresh)
     }
 
-    /// Verification-run screens: two connections and one pending mail, opened when `open`.
+    /// Verification-run screens: two connections and two pending PRs, the first opened when `open`.
     pub(crate) fn fixture(&mut self, open: bool) {
         self.fixture = true;
         self.data = serde_json::json!({
-            "available":{"google":true,"github":true},
+            "available":{"google":false,"github":true},
             "github_install_url":"https://github.com/apps/kasa-work/installations/new",
             "connections":[
-                {"id":"con_a","provider":"google","display":"me@example.com","features":["mail.read","mail.send"],"state":"ok"},
-                {"id":"con_b","provider":"github","display":"octo","features":["github.pr"],"state":"reconnect_required"}],
+                {"id":"con_a","provider":"github","display":"octo","features":["github.pr"],"state":"ok"},
+                {"id":"con_b","provider":"github","display":"octo-work","features":["github.pr"],"state":"reconnect_required"}],
             "pending":[
-                {"id":"pw_a","digest":"d","provider":"google","display":"me@example.com","device_label":"건호의 MacBook Pro · 케이",
-                 "write":{"kind":"mail","to":["team@example.com","lead@example.com"],"cc":[],"subject":"주간 보고 초안",
-                 "body":"이번 주 한 일\n- 로그인 첫 화면 정리\n- 메일·PR 일 권한\n\n다음 주에는 폰 화면을 붙입니다."}},
+                {"id":"pw_a","digest":"d","provider":"github","display":"octo","device_label":"건호의 MacBook Pro · 케이",
+                 "write":{"kind":"pr","repo":"2rami/kasaterm","base":"main","head":"feat/login-first","title":"로그인 첫 화면 정리",
+                 "body":"이번 판에서 한 일\n- 로그인 첫 화면 정리\n- PR 일 권한\n\n폰 화면은 다음 판에 붙입니다.","draft":false}},
                 {"id":"pw_b","digest":"d","provider":"github","display":"octo","device_label":"맥미니 · 나쵸",
                  "write":{"kind":"pr","repo":"2rami/kasaterm","base":"main","head":"feat/work","title":"일 권한 화면","body":"","draft":true}}]});
         self.open = open.then(|| ("pw_a".to_string(), "d".to_string()));
@@ -206,16 +206,6 @@ impl State {
 fn summary(pending: &serde_json::Value) -> String {
     let write = &pending["write"];
     match write["kind"].as_str() {
-        Some("mail") => {
-            let to: Vec<&str> = write["to"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).collect();
-            let more = to.len() + write["cc"].as_array().map_or(0, Vec::len) - 1;
-            let who = match (to.first(), more) {
-                (Some(first), 0) => first.to_string(),
-                (Some(first), more) => format!("{first} 외 {more}"),
-                (None, _) => String::new(),
-            };
-            format!("메일 · {who} · {}", write["subject"].as_str().unwrap_or(""))
-        }
         Some("pr") => format!(
             "PR · {} {} → {} · {}",
             write["repo"].as_str().unwrap_or(""),
@@ -227,38 +217,14 @@ fn summary(pending: &serde_json::Value) -> String {
     }
 }
 
-/// The whole write as the person approves it: every recipient, the full subject and body.
+/// The whole write as the person approves it: repository, branches, the full title and body.
 fn detail(pending: &serde_json::Value) -> Vec<(String, String)> {
     let write = &pending["write"];
-    let list = |key: &str| {
-        write[key]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|a| a.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     let mut rows = vec![(
         "보낼 계정".to_string(),
-        format!(
-            "{} · {}",
-            if pending["provider"] == "github" { "GitHub" } else { "Gmail" },
-            pending["display"].as_str().unwrap_or("")
-        ),
+        format!("GitHub · {}", pending["display"].as_str().unwrap_or("")),
     )];
     match write["kind"].as_str() {
-        Some("mail") => {
-            rows.push(("받는 사람".into(), list("to")));
-            if !list("cc").is_empty() {
-                rows.push(("참조".into(), list("cc")));
-            }
-            rows.push(("제목".into(), write["subject"].as_str().unwrap_or("").into()));
-            if write["reply_to"].is_string() {
-                rows.push(("답장".into(), "받은 메일의 스레드에 이어 보냄".into()));
-            }
-            rows.push(("본문".into(), write["body"].as_str().unwrap_or("").into()));
-        }
         Some("pr") => {
             rows.push(("레포".into(), write["repo"].as_str().unwrap_or("").into()));
             rows.push((
@@ -330,7 +296,7 @@ impl App {
                     Ok(if value["provider_revoked"] == true {
                         "연결을 끊고 권한도 돌려줬어요".into()
                     } else {
-                        "연결을 끊었어요. 구글·깃허브 보안 설정에서도 앱 권한을 지울 수 있어요".into()
+                        "연결을 끊었어요. 깃허브 보안 설정에서도 앱 권한을 지울 수 있어요".into()
                     })
                 });
             }
@@ -346,7 +312,6 @@ impl App {
                     let value = kasa_mcp::device_auth::connections::approve(&id, &digest)
                         .map_err(|error| error.to_string())?;
                     Ok(match value["status"].as_str() {
-                        Some("sent") => "메일을 보냈어요".to_string(),
                         Some("created") => format!("PR #{} 을 만들었어요", value["number"]),
                         _ => "처리했어요".to_string(),
                     })
@@ -369,19 +334,12 @@ fn act(a: Act) -> Target {
     Target::Setting(SettingsAction::DeviceAccount(Action::Work(a)))
 }
 
-fn feature_label(features: &serde_json::Value) -> String {
-    let names: Vec<&str> = features
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|f| match f.as_str()? {
-            "mail.read" => Some("메일 읽기"),
-            "mail.send" => Some("보내기 요청"),
-            "github.pr" => Some("PR 요청"),
-            _ => None,
-        })
-        .collect();
-    if names.is_empty() { "권한 없음".into() } else { names.join(" · ") }
+fn feature_label(features: &serde_json::Value) -> &'static str {
+    if features.as_array().is_some_and(|features| features.iter().any(|f| f == "github.pr")) {
+        "PR 요청"
+    } else {
+        "권한 없음"
+    }
 }
 
 pub(crate) fn paint(
@@ -402,33 +360,31 @@ pub(crate) fn paint(
             x,
             y,
             w,
-            "KASA 계정에 로그인하면 Gmail·GitHub 을 연결해 학생·나쵸가 메일을 읽고, 메일·PR 을 요청하게 할 수 있어요. 보내는 일은 늘 여기서 승인해야 나가요.",
+            "KASA 계정에 로그인하면 GitHub 을 연결해 학생·나쵸가 PR 을 요청하게 할 수 있어요. PR 은 늘 여기서 승인해야 열려요.",
         );
         *y += 14.0;
         return;
     }
     let connections = v.data["connections"].as_array().cloned().unwrap_or_default();
     for (index, connection) in connections.iter().enumerate() {
-        let provider = connection["provider"].as_str().unwrap_or("");
-        let (icon, name) = if provider == "google" { ("gmail", "Gmail") } else { ("github", "GitHub") };
         let broken = connection["state"] == "reconnect_required";
         let confirming = v.disconnect.as_deref() == connection["id"].as_str();
         let controls_w = if confirming { 150.0 } else { 64.0 };
-        g.queue_icon(icon, x, *y + 11.0, 14.0, theme::text());
+        g.queue_icon("github", x, *y + 11.0, 14.0, theme::text());
         let label = fit(
             g,
-            &format!("{name} · {}", connection["display"].as_str().unwrap_or("")),
+            &format!("GitHub · {}", connection["display"].as_str().unwrap_or("")),
             w - controls_w - 28.0,
             12.0,
             false,
         );
         draw_text(g, x + 22.0, *y + 4.0, &label, 12.0, theme::text(), false);
-        let sub = if broken { "다시 연결 필요".to_string() } else { feature_label(&connection["features"]) };
+        let sub = if broken { "다시 연결 필요" } else { feature_label(&connection["features"]) };
         draw_text(
             g,
             x + 22.0,
             *y + 21.0,
-            &sub,
+            sub,
             10.5,
             if broken { theme::danger() } else { theme::text_dim() },
             false,
@@ -442,11 +398,10 @@ pub(crate) fn paint(
         }
         *y += ROW_H;
     }
-    let available = |provider: &str| v.data["available"][provider] == true;
     if v.data.is_null() {
         info_slab(g, x, y, w, "연결 목록을 받는 중…");
-    } else if !available("google") && !available("github") {
-        info_slab(g, x, y, w, "관문에 Gmail·GitHub 연결이 아직 준비되지 않았어요.");
+    } else if v.data["available"]["github"] != true {
+        info_slab(g, x, y, w, "관문에 GitHub 연결이 아직 준비되지 않았어요.");
     } else {
         // 따로 붙이는 단추는 없다 — 위 「로그인 방법」의 연결 한 번이 로그인과 일 권한을 함께 붙인다.
         info_slab(
@@ -455,11 +410,11 @@ pub(crate) fn paint(
             y,
             w,
             if connections.is_empty() {
-                "위 「로그인 방법」에서 Google·GitHub 을 연결하면 로그인과 함께 Gmail 읽기·보내기, GitHub PR 권한이 붙어요."
+                "위 「로그인 방법」에서 GitHub 을 연결하면 로그인과 함께 PR 권한이 붙어요."
             } else if connections.iter().any(|c| c["state"] == "reconnect_required") {
                 "「다시 연결 필요」는 위 「로그인 방법」의 그 줄에서 「다시 연결」을 누르면 돼요."
             } else {
-                "학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로, 메일 보내기·PR 만들기는 아래에서 승인해야 나가요."
+                "학생은 kasaterm-cli pr, 나쵸는 kasa-device work 로 써요. PR 만들기는 아래에서 승인해야 열려요."
             },
         );
         if connections.iter().any(|c| c["provider"] == "github") && v.data["github_install_url"].is_string() {
@@ -520,7 +475,7 @@ pub(crate) fn paint(
         let complete = detail(item)
             .iter()
             .all(|(_, value)| value.lines().count() <= MAX_SHOWN_LINES);
-        let go = if item["write"]["kind"] == "pr" { "PR 만들기" } else { "보내기" };
+        let go = "PR 만들기";
         if v.busy {
             draw_text(g, x, *y + 4.0, "처리 중…", 12.0, theme::text_dim(), false);
             *y += ROW_H;
@@ -551,9 +506,9 @@ mod tests {
     use super::*;
 
     fn pending(id: &str) -> serde_json::Value {
-        serde_json::json!({"id":id,"digest":format!("d-{id}"),"provider":"google","display":"me@example.com",
-            "device_label":"Laptop","write":{"kind":"mail","to":["a@example.com","b@example.com"],"cc":[],
-            "subject":"주간 보고","body":"한 줄\n두 줄"}})
+        serde_json::json!({"id":id,"digest":format!("d-{id}"),"provider":"github","display":"octo",
+            "device_label":"Laptop","write":{"kind":"pr","repo":"2rami/kasaterm","base":"main","head":"feat/x",
+            "title":"주간 정리","body":"한 줄\n두 줄","draft":true}})
     }
 
     #[test]
@@ -588,13 +543,13 @@ mod tests {
         let fresh = state.poll().1;
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].0, "pw_new");
-        assert_eq!(fresh[0].1, "메일 · a@example.com 외 1 · 주간 보고");
+        assert_eq!(fresh[0].1, "PR · 2rami/kasaterm feat/x → main · 주간 정리");
     }
 
     #[test]
-    fn the_approval_view_shows_every_recipient_and_the_whole_body() {
+    fn the_approval_view_shows_the_branches_and_the_whole_body() {
         let rows = detail(&pending("pw_a"));
-        assert!(rows.contains(&("받는 사람".into(), "a@example.com, b@example.com".into())));
+        assert!(rows.contains(&("브랜치".into(), "feat/x → main (초안)".into())));
         assert!(rows.contains(&("본문".into(), "한 줄\n두 줄".into())));
     }
 }

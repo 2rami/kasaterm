@@ -101,13 +101,10 @@ impl Config {
         }
     }
 
-    /// Whether work permissions for this provider can be connected: Gmail rides on the sign-in
-    /// Google client, GitHub needs the separate GitHub App.
+    /// Whether work permissions for this provider can be connected. Only GitHub has any, through
+    /// the separate GitHub App; Google stays a sign-in identity.
     pub fn connect_enabled(&self, provider: Provider) -> bool {
-        match provider {
-            Provider::Google => self.enabled(Provider::Google),
-            Provider::Github => self.github_app.is_some(),
-        }
+        provider == Provider::Github && self.github_app.is_some()
     }
 
     pub(crate) fn credentials(&self, provider: Provider, connect: bool) -> Option<(&str, &str)> {
@@ -659,20 +656,8 @@ impl OAuth {
             ("code_challenge_method", "S256"),
         ]);
         match (provider, &exchange.connect) {
-            (Provider::Google, Some(features)) => {
-                let scopes: Vec<&str> = ["openid", "email", "profile"]
-                    .into_iter()
-                    .chain(features.iter().filter_map(|feature| feature.scope()))
-                    .collect();
-                // Offline access with fresh consent is what returns a refresh token; earlier
-                // grants (sign-in) stay included so the new token covers them too.
-                url.query_pairs_mut()
-                    .append_pair("scope", &scopes.join(" "))
-                    .append_pair("access_type", "offline")
-                    .append_pair("include_granted_scopes", "true")
-                    .append_pair("prompt", "consent select_account");
-            }
-            (Provider::Google, None) => {
+            // Identity scopes only: anything more puts an unverified-app warning on the consent.
+            (Provider::Google, _) => {
                 url.query_pairs_mut()
                     .append_pair("scope", "openid email profile")
                     .append_pair("prompt", "select_account");
@@ -1277,13 +1262,6 @@ fn grant(identity: &Identity, token: &Value, now: u64) -> Result<Grant, &'static
         refresh_expires: token["refresh_token_expires_in"]
             .as_u64()
             .map_or(0, |secs| now + secs),
-        scopes: token["scope"]
-            .as_str()
-            .unwrap_or("")
-            .split([' ', ','])
-            .filter(|scope| !scope.is_empty())
-            .map(str::to_string)
-            .collect(),
     })
 }
 

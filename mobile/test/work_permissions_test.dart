@@ -11,18 +11,20 @@ import 'package:kasaterm_mobile/screens/work_permissions.dart';
 final origin = Uri.parse('https://gateway.invalid');
 final session = AccountSession(origin: origin, account: 'one', deviceId: 'dev_phone', token: 'kdt_phone');
 
-Map<String, dynamic> pendingMail() => {
+Map<String, dynamic> pendingPr() => {
   'id': 'pw_a',
   'digest': 'digest-a',
-  'provider': 'google',
-  'display': 'me@example.com',
+  'provider': 'github',
+  'display': 'octo',
   'device_label': 'MacBook · 케이',
   'write': {
-    'kind': 'mail',
-    'to': ['team@example.com', 'lead@example.com'],
-    'cc': [],
-    'subject': '주간 보고',
+    'kind': 'pr',
+    'repo': '2rami/kasaterm',
+    'base': 'main',
+    'head': 'feat/work',
+    'title': '일 권한 화면',
     'body': '첫 줄\n둘째 줄',
+    'draft': true,
   },
 };
 
@@ -32,7 +34,7 @@ class FakeWork {
   bool forgetOnce;
   final requests = <http.Request>[];
   final registered = <String>{};
-  var pending = [pendingMail()];
+  var pending = [pendingPr()];
 
   http.Client client() => MockClient((req) async {
     requests.add(req);
@@ -43,9 +45,9 @@ class FakeWork {
         return http.Response(
           jsonEncode({
             'ok': true,
-            'available': {'google': true, 'github': false},
+            'available': {'google': false, 'github': true},
             'connections': [
-              {'id': 'con_a', 'provider': 'google', 'display': 'me@example.com', 'features': ['mail.read', 'mail.send'], 'state': 'ok'},
+              {'id': 'con_a', 'provider': 'github', 'display': 'octo', 'features': ['github.pr'], 'state': 'ok'},
             ],
             'pending': pending,
           }),
@@ -64,7 +66,7 @@ class FakeWork {
         if (!registered.contains(key)) return http.Response('{"ok":false,"error":"approver_required"}', 403);
         expect(body, {'digest': 'digest-a'});
         pending = [];
-        return http.Response('{"ok":true,"status":"sent","id":"m1"}', 200);
+        return http.Response('{"ok":true,"status":"created","number":7,"url":"https://github.com/2rami/kasaterm/pull/7"}', 200);
       case ('POST', '/relay/connections/pending/pw_a/reject'):
         pending = [];
         return http.Response('{"ok":true}', 200);
@@ -87,22 +89,22 @@ Widget host(FakeWork fake) => MaterialApp(
 );
 
 void main() {
-  testWidgets('승인 대기를 펼치면 받는 사람·본문 전부를 보이고, 승인은 그 내용의 digest 와 앱 열쇠로만 간다', (tester) async {
+  testWidgets('승인 대기를 펼치면 레포·브랜치·본문 전부를 보이고, 승인은 그 내용의 digest 와 앱 열쇠로만 간다', (tester) async {
     final fake = FakeWork(forgetOnce: true);
     await tester.pumpWidget(host(fake));
     await until(tester, () => find.byKey(const Key('pending-pw_a')).evaluate().isNotEmpty);
-    expect(find.text('메일 · team@example.com 외 1 · 주간 보고'), findsOneWidget);
-    expect(find.text('Gmail · me@example.com'), findsOneWidget);
-    expect(find.text('메일 읽기 · 보내기 요청'), findsOneWidget);
+    expect(find.text('PR · 2rami/kasaterm · 일 권한 화면'), findsOneWidget);
+    expect(find.text('GitHub · octo'), findsOneWidget);
+    expect(find.text('PR 요청'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('pending-pw_a')));
     await tester.pumpAndSettle();
-    expect(find.text('team@example.com, lead@example.com'), findsOneWidget);
+    expect(find.text('feat/work → main (초안)'), findsOneWidget);
     expect(find.text('첫 줄\n둘째 줄'), findsOneWidget);
     await tester.tap(find.byKey(const Key('approve-write')));
-    await until(tester, () => find.text('메일을 보냈어요.').evaluate().isNotEmpty);
+    await until(tester, () => find.text('PR #7 을 만들었어요.').evaluate().isNotEmpty);
     await tester.pumpAndSettle();
-    expect(find.text('메일을 보냈어요.'), findsOneWidget);
+    expect(find.text('PR #7 을 만들었어요.'), findsOneWidget);
 
     final approves = fake.requests.where((r) => r.url.path.endsWith('/approve')).toList();
     expect(approves.length, 2, reason: '관문이 열쇠를 잊었을 때 한 번 다시 등록하고 다시 묻지 않았다');
@@ -132,7 +134,7 @@ void main() {
       client: MockClient((req) async {
         switch (req.url.path) {
           case '/relay/oauth/providers':
-            return http.Response('{"ok":true,"redirect_login":true,"choose_account":true,"providers":[{"id":"google","enabled":true}],"connect":{"google":true}}', 200);
+            return http.Response('{"ok":true,"redirect_login":true,"choose_account":true,"providers":[{"id":"github","enabled":true}],"connect":{"github":true}}', 200);
           case '/relay/oauth/start':
             started = jsonDecode(req.body) as Map;
             return http.Response(jsonEncode({'ok': true, 'request_id': 'r', 'expires_in': 600,
@@ -146,21 +148,21 @@ void main() {
         return http.Response('{}', 404);
       }),
     );
-    final flow = await api.oauthStart(OAuthProvider.google, 'machine-phone-0001', redirect: true, connect: ['mail.read', 'mail.send']);
+    final flow = await api.oauthStart(OAuthProvider.github, 'machine-phone-0001', redirect: true, connect: ['github.pr']);
     expect(started['link'], isTrue);
-    expect(started['connect'], ['mail.read', 'mail.send']);
+    expect(started['connect'], ['github.pr']);
     expect(started.containsKey('choose'), isFalse);
     final r = await api.oauthRedeem(flow, Uri.parse('kasaterm://oauth?code=c&state=${flow.redirect!.state}'));
     expect(r.connected, isTrue);
     expect(r.session, isNull);
     await expectLater(
-      api.oauthStart(OAuthProvider.google, 'machine-phone-0001', connect: ['mail.read']),
+      api.oauthStart(OAuthProvider.github, 'machine-phone-0001', connect: ['github.pr']),
       throwsA(isA<AccountException>()),
       reason: '리다이렉트 없이 연결을 시작했다',
     );
   });
 
-  test('설정의 Google·GitHub 연결은 관문이 받는 한 일 권한도 같은 허용으로 붙인다', () async {
+  test('설정의 GitHub 연결은 관문이 받는 한 PR 일 권한도 같은 허용으로 붙이고, Google 은 로그인만 잇는다', () async {
     final starts = <Map>[];
     var connect = '{"google":true,"github":false}';
     var tokenReply = '';
@@ -181,8 +183,9 @@ void main() {
         return http.Response('{}', 404);
       }),
     );
+    // 옛 관문이 Google 일 권한을 받는다고 해도 Gmail 범위는 싣지 않는다.
     final google = await api.oauthStart(OAuthProvider.google, 'machine-phone-0001', link: true, redirect: true, work: true);
-    expect(starts.last['connect'], ['mail.read', 'mail.send']);
+    expect(starts.last.containsKey('connect'), isFalse);
     expect(starts.last['link'], isTrue);
     // 관문이 GitHub 일 권한을 못 받으면 로그인 연결만 한다.
     await api.oauthStart(OAuthProvider.github, 'machine-phone-0001', link: true, redirect: true, work: true);
@@ -191,9 +194,9 @@ void main() {
     final github = await api.oauthStart(OAuthProvider.github, 'machine-phone-0001', link: true, redirect: true, work: true);
     expect(starts.last['connect'], ['github.pr']);
 
-    tokenReply = '{"ok":true,"status":"connected","account":"one","connection":{"id":"con_a"},"linked":true}';
+    tokenReply = '{"ok":true,"status":"linked","account":"one"}';
     final linked = await api.oauthRedeem(google, Uri.parse('kasaterm://oauth?code=c&state=${google.redirect!.state}'));
-    expect((linked.connected, linked.linked, linked.installUrl), (true, true, null));
+    expect((linked.connected, linked.linked, linked.installUrl), (false, true, null));
     tokenReply = '{"ok":true,"status":"connected","account":"one","connection":{"id":"con_b"},"linked":false,'
         '"link_error":"already_linked","installed":false,"install_url":"https://github.com/apps/kasaterm/installations/new"}';
     final install = await api.oauthRedeem(github, Uri.parse('kasaterm://oauth?code=c&state=${github.redirect!.state}'));

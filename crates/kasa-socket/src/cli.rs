@@ -1554,11 +1554,9 @@ fn print_help() {
             "machines move [%N] <기기|local> [--cwd /레포] [--force]   칸의 claude 를 그 기기로 이사(대화·미커밋 변경까지)",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
         ]),
-        ("계정 일 권한 (설정 → 계정에서 연결한 Gmail·GitHub)", &[
-            "mail [list] [--query 'is:unread'] [--max N] · mail read <id>   메일 목록·본문",
-            "mail send --to a@x[,b@y] [--cc …] --subject 제목 --body 본문|- [--reply-to <id>]   보내기 요청(사람이 앱에서 승인)",
+        ("계정 일 권한 (설정 → 계정에서 연결한 GitHub)", &[
             "pr create --repo 주인/레포 --head 브랜치 [--base main] --title 제목 [--body 본문|-] [--draft]   PR 요청(사람이 앱에서 승인)",
-            "mail connections                          연결·승인 대기 목록  (--connection <id> 로 연결 고르기)",
+            "pr connections                            연결·승인 대기 목록  (--connection <id> 로 연결 고르기)",
         ]),
         ("1Password (폰 Face ID 한 번으로 그 요청만)", &[
             "op run -e 이름=op://금고/항목/필드 [-e …] -- <명령…>   값은 그 명령의 환경으로만, 출력에 나오면 가림",
@@ -1701,7 +1699,7 @@ fn split_done_args(args: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     Ok((board, report))
 }
 
-/// `--body -` reads the text from standard input so long mail and PR bodies need no quoting.
+/// `--body -` reads the text from standard input so long PR bodies need no quoting.
 fn body_flag(args: &[String]) -> Result<Option<String>> {
     match flag_value(args, "--body").as_deref() {
         Some("-") => {
@@ -1713,41 +1711,12 @@ fn body_flag(args: &[String]) -> Result<Option<String>> {
     }
 }
 
-fn address_list(args: &[String], flag: &str) -> Vec<String> {
-    flag_value(args, flag)
-        .map(|list| list.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect())
-        .unwrap_or_default()
-}
-
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     // Caller-supplied id so async clients can correlate; we just stamp
     // a process-id-based string for the CLI path where nobody cares.
     let id = json!(format!("cli-{}", std::process::id()));
     let (method, params): (&str, Value) = match cmd {
         // 계정 일 권한(docs/account-connections.md) — 관문이 대신 부르고, 쓰기는 사람이 앱 화면에서 승인할 때까지 기다린다.
-        "mail" => {
-            let connection = flag_value(args, "--connection");
-            match args.first().map(String::as_str) {
-                Some("list") | None => ("relay.account", json!({ "op": "mail_list", "connection": connection,
-                    "query": flag_value(args, "--query").unwrap_or_default(),
-                    "max": flag_value(args, "--max").and_then(|m| m.parse::<u64>().ok()) })),
-                Some("read") => {
-                    let message = args.get(1).filter(|a| !a.starts_with("--")).ok_or_else(|| anyhow!("mail read <id>"))?;
-                    ("relay.account", json!({ "op": "mail_read", "connection": connection, "id": message }))
-                }
-                Some("send") => {
-                    let (to, subject, body) = (address_list(args, "--to"), flag_value(args, "--subject"), body_flag(args)?);
-                    let (Some(subject), Some(body)) = (subject, body) else {
-                        return Err(anyhow!("mail send --to a@x --subject 제목 --body 본문|-"));
-                    };
-                    ("relay.account", json!({ "op": "mail_send", "connection": connection, "to": to,
-                        "cc": address_list(args, "--cc"), "subject": subject, "body": body,
-                        "reply_to": flag_value(args, "--reply-to") }))
-                }
-                Some("connections") => ("relay.account", json!({ "op": "connections" })),
-                Some(other) => return Err(anyhow!("mail list|read|send|connections — 모르는 것: {other}")),
-            }
-        }
         "pr" => match args.first().map(String::as_str) {
             Some("create") => {
                 let (repo, head, title) = (flag_value(args, "--repo"), flag_value(args, "--head"), flag_value(args, "--title"));
@@ -1759,7 +1728,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     "title": title, "body": body_flag(args)?.unwrap_or_default(),
                     "draft": args.iter().any(|a| a == "--draft") }))
             }
-            _ => return Err(anyhow!("pr create --repo 주인/레포 --head 브랜치 --title 제목")),
+            Some("connections") => ("relay.account", json!({ "op": "connections" })),
+            _ => return Err(anyhow!("pr create --repo 주인/레포 --head 브랜치 --title 제목 · pr connections")),
         },
         // 카사넷 포트 공유 — 다른 기기 개발 서버를 이 기기 localhost 로 끌어온다(docs/kasanet.md P3).
         "net" => match args.first().map(String::as_str) {

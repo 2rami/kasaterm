@@ -89,18 +89,6 @@ pub(super) async fn handle(op: &str, params: &Value) -> anyhow::Result<Value> {
             let id = segment(params["id"].as_str().unwrap_or(""))?;
             call(&credential, reqwest::Method::DELETE, &format!("/{id}"), None, None).await
         }
-        "mail_list" => {
-            let body = pick(params, &["connection", "query", "max"]);
-            call(&credential, post, "/mail/list", Some(body), None).await
-        }
-        "mail_read" => {
-            let body = pick(params, &["connection", "id"]);
-            call(&credential, post, "/mail/read", Some(body), None).await
-        }
-        "mail_send" => {
-            let body = pick(params, &["connection", "to", "cc", "subject", "body", "reply_to"]);
-            call(&credential, post, "/mail/send", Some(body), None).await
-        }
         "pr_create" => {
             let body = pick(params, &["connection", "repo", "base", "head", "title", "body", "draft"]);
             call(&credential, post, "/pr/create", Some(body), None).await

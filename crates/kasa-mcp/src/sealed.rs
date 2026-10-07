@@ -180,6 +180,17 @@ impl Vault {
         Ok(self.directory.join(format!("{account}.sealed")))
     }
 
+    /// Accounts that have a sealed file in this store.
+    pub(crate) fn accounts(&self) -> Vec<String> {
+        std::fs::read_dir(&self.directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| Some(entry.file_name().to_str()?.strip_suffix(".sealed")?.to_string()))
+            .filter(|account| crate::relay_auth::valid_account_name(account))
+            .collect()
+    }
+
     pub(crate) fn read<T: DeserializeOwned>(&self, account: &str) -> Result<Option<T>> {
         let Some(bytes) = read_private(&self.path(account)?, MAX_ENVELOPE)? else {
             return Ok(None);

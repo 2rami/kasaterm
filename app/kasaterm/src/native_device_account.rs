@@ -23,7 +23,7 @@ pub(crate) enum Action {
     Logout,
     OAuth(Provider),
     Linked,
-    /// A settings link that also brought the provider's work permissions (Gmail·PR).
+    /// A settings link that also brought GitHub's pull-request permission.
     Connected { linked: bool, install: bool },
     CancelOAuth,
     /// The provider signed in an identity no account has yet; the person picks one.
@@ -184,7 +184,7 @@ impl State {
     pub(crate) fn fixture(&mut self, choice: bool, claim: bool) {
         self.providers = serde_json::json!({"state":"ready","providers":[
             {"id":"google","enabled":true},{"id":"github","enabled":true}],
-            "connect":{"google":true,"github":true}});
+            "connect":{"google":false,"github":true}});
         self.provider_check = None;
         self.provider_checked = Some(std::time::Instant::now());
         self.choice = choice.then(|| Choice {
@@ -721,14 +721,12 @@ fn provider_buttons_ready(v: &View) -> bool {
         .any(|provider| provider_enabled(&v.providers, provider))
 }
 
-/// 로그인된 기기의 「연결」이 무엇을 붙이는지 — 관문이 받는 일 권한에 따라 다르다.
+/// 로그인된 기기의 「연결」이 무엇을 붙이는지 — 관문이 GitHub 일 권한을 받는지에 따라 다르다.
 fn link_hint(v: &View) -> &'static str {
-    let work = |provider: &str| v.providers["connect"][provider] == true;
-    match (work("google"), work("github")) {
-        (true, true) => "「연결」은 이 KASA 계정에 로그인 방법을 잇고, 같은 허용으로 Gmail 읽기·보내기와 GitHub PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
-        (true, false) => "「연결」은 이 KASA 계정에 로그인 방법을 잇고, Google 은 같은 허용으로 Gmail 읽기·보내기 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
-        (false, true) => "「연결」은 이 KASA 계정에 로그인 방법을 잇고, GitHub 은 같은 허용으로 PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다.",
-        (false, false) => "「연결」은 이 KASA 계정에 로그인 방법을 잇습니다. 다른 계정과 자동으로 합치지 않습니다.",
+    if v.providers["connect"]["github"] == true {
+        "「연결」은 이 KASA 계정에 로그인 방법을 잇고, GitHub 은 같은 허용으로 PR 일 권한도 붙여요. 다른 계정과 자동으로 합치지 않습니다."
+    } else {
+        "「연결」은 이 KASA 계정에 로그인 방법을 잇습니다. 다른 계정과 자동으로 합치지 않습니다."
     }
 }
 
@@ -941,7 +939,7 @@ fn run_oauth(
     let call = |params| {
         kasa_mcp::device_auth::handle(&params).map_err(|error| safe_error(&error.to_string()))
     };
-    // 로그인된 기기에서 연결하면 같은 동의로 그 공급자의 일 권한(Gmail·PR)까지 붙인다.
+    // 로그인된 기기에서 GitHub 을 연결하면 같은 동의로 PR 일 권한까지 붙인다. Google 은 로그인만.
     let started =
         call(serde_json::json!({"op":"oauth_start","provider":provider,"link":link,"work":link}))?;
     let flow_id = started["flow_id"]

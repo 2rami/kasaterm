@@ -19,7 +19,7 @@ final String _approver = () {
       .replaceAll('=', '');
 }();
 
-/// 계정에 붙인 Gmail·GitHub 과, 학생·나쵸가 낸 메일·PR 이 사람 승인을 기다리는 목록.
+/// 계정에 붙인 GitHub 과, 학생·나쵸가 낸 PR 이 사람 승인을 기다리는 목록.
 class WorkPermissionsScreen extends StatefulWidget {
   const WorkPermissionsScreen({super.key, required this.api});
 
@@ -69,8 +69,7 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
   }
 
   Future<void> _disconnect(Map<String, dynamic> connection) async {
-    final name =
-        '${connection['provider'] == 'github' ? 'GitHub' : 'Gmail'} · ${connection['display'] ?? ''}';
+    final name = 'GitHub · ${connection['display'] ?? ''}';
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => ModalLook(
@@ -99,7 +98,7 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
       _say(
         revoked
             ? '연결을 끊고 권한도 돌려줬어요.'
-            : '연결을 끊었어요. 구글·깃허브 보안 설정에서도 앱 권한을 지울 수 있어요.',
+            : '연결을 끊었어요. 깃허브 보안 설정에서도 앱 권한을 지울 수 있어요.',
       );
     } on AccountException catch (e) {
       _say(e.message);
@@ -180,9 +179,7 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
                         SettingsRow(
                           key: Key('pending-${p['id']}'),
                           tone: 1,
-                          icon: p['write']?['kind'] == 'pr'
-                              ? Icons.merge_type_rounded
-                              : Icons.mail_outline_rounded,
+                          icon: Icons.merge_type_rounded,
                           title: pendingSummary(p),
                           subtitle: '요청: ${p['device_label'] ?? ''}',
                           chevron: true,
@@ -197,11 +194,8 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
                       for (final c in list.connections)
                         SettingsRow(
                           key: Key('connection-${c['id']}'),
-                          icon: c['provider'] == 'github'
-                              ? Icons.code_rounded
-                              : Icons.mail_outline_rounded,
-                          title:
-                              '${c['provider'] == 'github' ? 'GitHub' : 'Gmail'} · ${c['display'] ?? ''}',
+                          icon: Icons.code_rounded,
+                          title: 'GitHub · ${c['display'] ?? ''}',
                           subtitle: c['state'] == 'reconnect_required'
                               ? '다시 연결 필요'
                               : featureLabel(c['features']),
@@ -231,10 +225,10 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   child: Text(
                     list.connections.isEmpty
-                        ? '설정 「계정」의 Google 연결·GitHub 연결 한 번이면 로그인과 함께 Gmail 읽기·보내기, GitHub PR 권한이 붙어요.'
+                        ? '설정 「계정」의 GitHub 연결 한 번이면 로그인과 함께 PR 권한이 붙어요.'
                         : list.connections.any((c) => c['state'] == 'reconnect_required')
-                        ? '「다시 연결 필요」는 설정 「계정」의 Google 연결·GitHub 연결을 한 번 더 누르면 돼요.'
-                        : '학생은 kasaterm-cli mail·pr, 나쵸는 kasa-device work 로 써요. 읽기는 바로 되고, 메일 보내기·PR 만들기는 여기나 데스크톱 설정에서 승인해야 나가요.',
+                        ? '「다시 연결 필요」는 설정 「계정」의 GitHub 연결을 한 번 더 누르면 돼요.'
+                        : '학생은 kasaterm-cli pr, 나쵸는 kasa-device work 로 써요. PR 만들기는 여기나 데스크톱 설정에서 승인해야 나가요.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -249,37 +243,16 @@ class _WorkPermissionsScreenState extends State<WorkPermissionsScreen> {
   }
 }
 
-String featureLabel(Object? features) {
-  final names = [
-    for (final f in features is List ? features : const [])
-      switch (f) {
-        'mail.read' => '메일 읽기',
-        'mail.send' => '보내기 요청',
-        'github.pr' => 'PR 요청',
-        _ => null,
-      },
-  ].whereType<String>();
-  return names.isEmpty ? '권한 없음' : names.join(' · ');
-}
-
-List<String> _strings(Object? list) => [
-  for (final a in list is List ? list : const [])
-    if (a is String) a,
-];
+String featureLabel(Object? features) =>
+    features is List && features.contains('github.pr') ? 'PR 요청' : '권한 없음';
 
 String pendingSummary(Map<String, dynamic> pending) {
   final write = pending['write'];
-  if (write is! Map) return '알 수 없는 쓰기';
-  if (write['kind'] == 'pr') {
-    return 'PR · ${write['repo'] ?? ''} · ${write['title'] ?? ''}';
-  }
-  final to = _strings(write['to']);
-  final more = to.length + _strings(write['cc']).length - 1;
-  final who = to.isEmpty ? '' : (more > 0 ? '${to.first} 외 $more' : to.first);
-  return '메일 · $who · ${write['subject'] ?? ''}';
+  if (write is! Map || write['kind'] != 'pr') return '알 수 없는 쓰기';
+  return 'PR · ${write['repo'] ?? ''} · ${write['title'] ?? ''}';
 }
 
-/// 승인할 쓰기 전부 — 받는 사람 모두, 제목, 본문 전체. 이 시트가 보인 내용(digest)만 실행된다.
+/// 승인할 PR 전부 — 레포·브랜치·제목·본문 전체. 이 시트가 보인 내용(digest)만 실행된다.
 class PendingWriteSheet extends StatefulWidget {
   const PendingWriteSheet({
     super.key,
@@ -309,11 +282,9 @@ class _PendingWriteSheetState extends State<PendingWriteSheet> {
       String done;
       if (approve) {
         final r = await widget.approve();
-        done = switch (r['status']) {
-          'sent' => '메일을 보냈어요.',
-          'created' => 'PR #${r['number']} 을 만들었어요.',
-          _ => '처리했어요.',
-        };
+        done = r['status'] == 'created'
+            ? 'PR #${r['number']} 을 만들었어요.'
+            : '처리했어요.';
       } else {
         await widget.reject();
         done = '요청을 버렸어요.';
@@ -334,28 +305,15 @@ class _PendingWriteSheetState extends State<PendingWriteSheet> {
     final theme = Theme.of(context);
     final p = widget.pending;
     final write = p['write'] is Map ? p['write'] as Map : const {};
-    final pr = write['kind'] == 'pr';
     final rows = <(String, String)>[
+      ('보낼 계정', 'GitHub · ${p['display'] ?? ''}'),
+      ('레포', '${write['repo'] ?? ''}'),
       (
-        '보낼 계정',
-        '${p['provider'] == 'github' ? 'GitHub' : 'Gmail'} · ${p['display'] ?? ''}',
+        '브랜치',
+        '${write['head'] ?? ''} → ${write['base'] ?? ''}${write['draft'] == true ? ' (초안)' : ''}',
       ),
-      if (pr) ...[
-        ('레포', '${write['repo'] ?? ''}'),
-        (
-          '브랜치',
-          '${write['head'] ?? ''} → ${write['base'] ?? ''}${write['draft'] == true ? ' (초안)' : ''}',
-        ),
-        ('제목', '${write['title'] ?? ''}'),
-        ('본문', '${write['body'] ?? ''}'),
-      ] else ...[
-        ('받는 사람', _strings(write['to']).join(', ')),
-        if (_strings(write['cc']).isNotEmpty)
-          ('참조', _strings(write['cc']).join(', ')),
-        ('제목', '${write['subject'] ?? ''}'),
-        if (write['reply_to'] is String) ('답장', '받은 메일의 스레드에 이어 보냄'),
-        ('본문', '${write['body'] ?? ''}'),
-      ],
+      ('제목', '${write['title'] ?? ''}'),
+      ('본문', '${write['body'] ?? ''}'),
       ('요청한 곳', '${p['device_label'] ?? ''}'),
     ];
     final dim = theme.textTheme.bodySmall?.copyWith(
@@ -372,10 +330,7 @@ class _PendingWriteSheetState extends State<PendingWriteSheet> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              pr ? 'PR 만들기 승인' : '메일 보내기 승인',
-              style: theme.textTheme.titleLarge,
-            ),
+            Text('PR 만들기 승인', style: theme.textTheme.titleLarge),
             const SizedBox(height: Look.fieldGap),
             for (final (name, value) in rows) ...[
               Text(name, style: dim),
@@ -404,7 +359,7 @@ class _PendingWriteSheetState extends State<PendingWriteSheet> {
                       dimension: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : Text(pr ? 'PR 만들기' : '보내기'),
+                  : const Text('PR 만들기'),
             ),
             const SizedBox(height: 8),
             OutlinedButton(

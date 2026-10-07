@@ -1,10 +1,11 @@
-# 계정에 구글·깃허브 일 권한 붙이기
+# 계정에 깃허브 일 권한 붙이기
 
 관문 계정 로그인은 구글·깃허브로 **신원만** 확인한다(`openid email`, `read:user` —
-[account-oauth.md](account-oauth.md)). 이 문서는 같은 계정에 메일·PR 같은 **일 권한**을
+[account-oauth.md](account-oauth.md)). 이 문서는 같은 계정에 PR 같은 **일 권한**을
 붙여, 어느 기기·어느 에이전트든 계정 이름으로 그 일을 하게 하는 설계다. 로그인된 기기의 설정에서
-「Google 연결」·「GitHub 연결」을 누르면 한 번의 허용으로 로그인 연결과 일 권한이 함께 붙는다
-([연결 한 번에 둘 다](#연결-한-번에-둘-다)).
+「GitHub 연결」을 누르면 한 번의 허용으로 로그인 연결과 일 권한이 함께 붙는다
+([연결 한 번에 둘 다](#연결-한-번에-둘-다)). 「Google 연결」은 로그인 신원만 잇는다 — Gmail 읽기·보내기는
+2026-10-07 걷었다([구글 메일 범위를 걷은 까닭](#구글-메일-범위를-걷은-까닭)).
 
 지금 나쵸는 맥미니에서 `gws`·`gh` CLI 로 한 사람 계정만 쓴다. 그 자격증명은 미니 한 대에
 묶여 있고, 누가 무엇을 보냈는지 남는 곳이 없고, 다른 기기·폰은 같은 일을 못 한다.
@@ -14,7 +15,7 @@
 | 갈림길 | 고른 것 | 근거 절 |
 |---|---|---|
 | 토큰 보관 | A. 관문 보관 + 관문이 대신 부름 | [토큰을 어디 두나](#토큰을-어디-두나) |
-| 구글 메일 범위 제약 | 게시·미검증(경고 한 번, 평생 100명, 만료 없음) | [구글 메일 범위 제약](#구글-메일-범위-제약) |
+| 구글 메일 범위 | 싣지 않는다 — Google 은 로그인 신원만 | [구글 메일 범위를 걷은 까닭](#구글-메일-범위를-걷은-까닭) |
 | 깃허브 앱 종류 | GitHub App 새로 | [깃허브 OAuth 앱 대 GitHub App](#깃허브-oauth-앱-대-github-app) |
 | 쓰기 확인선 | 에이전트가 낸 쓰기는 전부 앱 화면 승인 | [쓰기는 사람 확인을 거친다](#쓰기는-사람-확인을-거친다) |
 
@@ -35,8 +36,8 @@
 
 | 안 | 모습 | 얻는 것 | 잃는 것 |
 |---|---|---|---|
-| **A. 관문 보관 + 관문이 대신 부름** | 갱신 토큰은 관문 봉인함에만. 기기는 「메일 목록」「PR 만들기」 같은 **동작**을 관문에 요청하고, 관문이 공급자를 부른다 | 토큰이 기기로 안 나간다. 쓰기 확인·감사 기록을 관문 한 곳에서 강제. 나쵸·폰·CLI 가 같은 길 | 관문(미니)이 모든 토큰을 쥔다. 관문이 꺼지면 일도 멈춘다. 공급자 API 를 동작 단위로 하나씩 감싸야 한다 |
-| B. 관문 보관 + 짧은 토큰을 기기에 내줌 | 갱신 토큰은 관문, 1시간짜리 access token 을 기기에 준다 | `gh`·`gws` 를 거의 그대로 쓴다 | 받은 토큰으로 무엇이든 보낼 수 있어 쓰기 확인을 못 강제한다. 감사 기록도 비는 구간이 생긴다 |
+| **A. 관문 보관 + 관문이 대신 부름** | 갱신 토큰은 관문 봉인함에만. 기기는 「PR 만들기」 같은 **동작**을 관문에 요청하고, 관문이 공급자를 부른다 | 토큰이 기기로 안 나간다. 쓰기 확인·감사 기록을 관문 한 곳에서 강제. 나쵸·폰·CLI 가 같은 길 | 관문(미니)이 모든 토큰을 쥔다. 관문이 꺼지면 일도 멈춘다. 공급자 API 를 동작 단위로 하나씩 감싸야 한다 |
+| B. 관문 보관 + 짧은 토큰을 기기에 내줌 | 갱신 토큰은 관문, 짧은 access token 을 기기에 준다 | `gh` 를 거의 그대로 쓴다 | 받은 토큰으로 무엇이든 보낼 수 있어 쓰기 확인을 못 강제한다. 감사 기록도 비는 구간이 생긴다 |
 | C. 각 기기 키체인 | 기기마다 따로 연결 | 관문이 토큰을 안 쥔다 | 기기마다 동의를 다시 받고, 나쵸·폰은 따로 연결. 「계정 하나로 어디서든」이 아니다 |
 
 ### A 일 때의 보관·갱신·폐기·감사
@@ -44,52 +45,43 @@
 - **보관**: 관문 상태 폴더 옆 `connections/` 에 계정별 봉인 파일(`<계정>.sealed`). 봉인은
   개인비서와 같은 `sealed.rs`(AES-256-GCM, 폴더 0700, `master.key` 0600, AAD 에 저장소 이름과 계정 이름)
   이지만 **폴더와 열쇠는 따로** 둔다 — 한쪽 열쇠가 새도 다른 쪽은 안 열린다.
-  봉인 안에는 공급자·공급자 쪽 신원(sub/id)·표시 이름(이메일/로그인)·받은 범위·갱신 토큰·
-  access token 과 만료 시각만. 메일 본문·PR 내용은 쓰기 대기 동안만 넣고 끝나면 지운다.
-- **갱신**: 구글 access token 은 1시간. 만료 60초 전부터 갱신 토큰으로 새로 받는다.
+  봉인 안에는 공급자·공급자 쪽 신원(id)·표시 이름(로그인)·갱신 토큰·
+  access token 과 만료 시각만. PR 내용은 쓰기 대기 동안만 넣고 끝나면 지운다.
+- **갱신**: 만료 60초 전부터 갱신 토큰으로 새로 받는다.
   GitHub App 사용자 토큰은 8시간·갱신 토큰 6개월이고 **갱신할 때마다 갱신 토큰이 바뀐다** —
   새 것을 봉인에 먼저 쓰고 나서 쓴다. 갱신이 `invalid_grant` 면 연결을 「다시 연결 필요」로
   표시하고 토큰을 지운다(재시도로 잠긴 계정을 두드리지 않는다).
-- **폐기**: 사람이 「연결 끊기」를 누르면 공급자에 먼저 철회를 보낸다(구글 `oauth2.googleapis.com/revoke`,
-  깃허브 `DELETE /applications/{client_id}/grant`). 철회가 실패해도 관문 봉인은 지운다 —
-  화면에는 「공급자 쪽 철회 확인 못 함, 구글·깃허브 보안 설정에서 지울 수 있음」을 남긴다.
+- **폐기**: 사람이 「연결 끊기」를 누르면 공급자에 먼저 철회를 보낸다(깃허브 `DELETE /applications/{client_id}/grant`).
+  철회가 실패해도 관문 봉인은 지운다 — 화면에는 「공급자 쪽 철회 확인 못 함, 깃허브 보안 설정에서 지울 수 있음」을 남긴다.
   관문 계정이 비활성화되면 그 계정의 연결 동작은 바로 거절한다(봉인은 남긴다, 다시 켜면 산다).
 - **감사**: `connections/audit.jsonl` 에 동작마다 한 줄 — 시각·계정·기기 id·쓰는 쪽(사람/에이전트)·
-  동작(`mail.list`·`mail.read`·`mail.send`·`pr.create`·`connect`·`disconnect`·`approve`·`reject`)·
-  대상 요약(메일 id, 받는 사람 **수**, 레포·브랜치)·결과. 본문·제목·주소·토큰은 안 적는다.
+  동작(`pr.create`·`connect`·`disconnect`·`approve`·`reject`·`gmail.retire`)·
+  대상 요약(레포·브랜치)·결과. 본문·제목·토큰은 안 적는다.
   2 MB 를 넘으면 `audit.jsonl.1` 로 한 번 돌린다. `GET /relay/connections/audit` 으로 계정 것만 본다.
 
 ## 범위를 필요할 때 더 받는다
 
-처음 로그인(아직 기기 자격증명이 없는 쪽)은 지금처럼 신원 범위만 받는다. 일 권한 범위는 로그인된 기기가
-설정에서 그 공급자를 **연결할 때** 받는다 — 모든 새 로그인에 메일 범위를 물으면 「확인되지 않은 앱」 경고와
-평생 100명 한도가 로그인 전체에 걸리기 때문이다.
+처음 로그인(아직 기기 자격증명이 없는 쪽)은 신원 범위만 받는다. 일 권한은 로그인된 기기가
+설정에서 GitHub 을 **연결할 때** 받는다.
 
-| 기능 | 구글 범위 | 깃허브 |
-|---|---|---|
-| `mail.read` | `gmail.readonly` | — |
-| `mail.send` | `gmail.send` | — |
-| `github.pr` | — | (OAuth 앱) `repo` / (GitHub App) Pull requests·Contents 쓰기 |
+| 기능 | 깃허브 |
+|---|---|
+| `github.pr` | (GitHub App) Pull requests·Contents 쓰기 |
 
-- 구글은 `include_granted_scopes=true`·`access_type=offline`·`prompt=consent` 로 부른다.
-  `openid email` 을 같이 받아 어느 메일 계정이 연결됐는지 화면에 보인다.
-- 구글은 사용자가 동의 화면에서 범위 일부만 체크할 수 있다. 토큰 응답의 `scope` 를 보고
-  **받은 것만** 켠다(읽기만 받았으면 보내기는 꺼진 채 「보내기 권한 없음」).
-- 메일 연결은 처음 로그인한 구글 계정과 같을 필요가 없다(개인 계정으로 로그인하고 회사 메일을
-  연결할 수 있다). 연결은 `(공급자, 공급자 쪽 신원)` 으로 구분하고 계정당 여럿 둘 수 있다.
+- 연결은 `(공급자, 공급자 쪽 신원)` 으로 구분하고 계정당 여럿 둘 수 있다.
   로그인 연결(`relay-oauth-identities.json`)과 일 연결(봉인함)은 장부는 다르지만 한 번의 허용으로 함께 적힌다.
-- 흐름은 기존 `/relay/oauth/start` 에 `connect: ["mail.read", …]` 만 더한다. 기기 자격증명(`link:true`)과
+- 흐름은 기존 `/relay/oauth/start` 에 `connect: ["github.pr"]` 만 더한다. 기기 자격증명(`link:true`)과
   PKCE 앱 리다이렉트가 둘 다 있어야 시작된다 — 공급자 토큰은 그 요청을 낸 기기가 verifier 로 받아 갈 때만
   그 계정 봉인함에 들어간다(남에게 넘긴 링크로는 남의 계정에 못 붙는다).
 
 ### 연결 한 번에 둘 다
 
-2026-10-05 결정: 설정의 「Google 연결」·「GitHub 연결」과 「일 권한」의 Gmail·GitHub 연결을 따로 누르게 하지 않는다.
+2026-10-05 결정: 설정의 「GitHub 연결」과 「일 권한」의 GitHub 연결을 따로 누르게 하지 않는다.
 
 - 클라이언트(PC `device_oauth.rs`, 폰 `relay_account.dart`)는 로그인된 기기의 연결에 `work` 를 싣고, 관문
-  `providers` 의 `connect.<공급자>` 가 참이면 그 공급자의 기능 전부(Google `mail.read`·`mail.send`, GitHub
-  `github.pr`)를 `connect` 로 보낸다. 관문이 그 공급자를 못 받거나(옛 관문·GitHub App 미설정) 앱 리다이렉트가 없으면
-  지금처럼 로그인 연결만 한다.
+  `providers` 의 `connect.github` 가 참이면 `github.pr` 을 `connect` 로 보낸다. 관문이 못 받거나(옛 관문·GitHub App
+  미설정) 앱 리다이렉트가 없으면 로그인 연결만 한다. Google 은 관문이 무엇이라 답하든 로그인 연결만 한다 —
+  관문도 `connect.google` 을 늘 거짓으로 답하고 `connect` 에 실린 메일 기능은 `bad_request` 로 거절한다.
 - 관문은 `connect` 흐름이 끝나면 토큰을 봉인함에 넣는 것과 함께 같은 신원을 그 계정의 로그인으로 잇는다
   (`resolve(identity, Some(account))`, 기기 잠금을 쥔 채 — `complete` 와 같다). 그 신원이 이미 **다른** 계정의
   로그인이면 그 로그인은 그대로 두고 일 권한만 이 계정에 넣는다 — 응답 `linked:false`, `link_error:"already_linked"`.
@@ -99,26 +91,17 @@
   바로 열어 레포를 고르게 한다. GitHub 이 답을 안 주면 두 값 다 없다.
 - GitHub 로그인용 OAuth 앱과 일 권한용 GitHub App 은 다른 클라이언트지만 `GET /user` 의 숫자 id 가 같아 같은 신원으로 잇는다.
 
-## 구글 메일 범위 제약
+## 구글 메일 범위를 걷은 까닭
 
-[Gmail 범위 분류](https://developers.google.com/workspace/gmail/api/auth/scopes): `gmail.send` 는
-**민감**, `gmail.readonly`·`gmail.compose`·`gmail.modify`·`gmail.metadata` 는 **제한** 범위다.
-제한 범위를 서버로 받아 쓰는 앱이 공개 검증을 받으려면 연 1회 제3자 보안 평가(CASA)까지 가야 한다.
-그래서 쓰는 범위는 위 표의 둘(`readonly`·`send`)로 좁힌다 — 초안·라벨·삭제는 안 한다.
+2026-10-05 부터 설정의 「Google 연결」이 `gmail.readonly`(제한 범위)·`gmail.send`(민감 범위)를 로그인과 같은 동의에
+실었다. 앱이 검증 전이라 동의 화면마다 「Google 에서 확인하지 않은 앱」 경고와 개발자 이메일이 떴다. 검증을 받으려면
+제한 범위 때문에 연 1회 제3자 보안 평가(CASA)까지 가야 해서, 2026-10-07 Gmail 기능을 통째로 걷었다.
 
-[앱 공개 상태별 동작](https://developers.google.com/identity/protocols/oauth2/production-readiness/overview):
-
-| 상태 | 누가 | 메일 연결 시 | 연결 수명 |
-|---|---|---|---|
-| 테스트(외부) | 등록한 테스트 사용자 100명까지 | 「테스트 중인 앱」 경고 | **동의 7일 뒤 만료**(갱신 토큰도) — 매주 다시 연결 |
-| 게시·미검증(외부) | 누구나, 단 이 범위를 받는 사용자는 **프로젝트 평생 100명** | 「확인되지 않은 앱」 경고 | 만료 없음 |
-| 내부(Workspace 조직 소유 프로젝트) | 그 조직 사람만 | 경고 없음 | 만료 없음 |
-| 조직 관리자가 「신뢰함」 표시 | 그 조직 사람 | 경고 없음 | 7일·100명 제한이 그 조직엔 안 걸림 |
-| 검증 완료 | 누구나 | 앱 이름 표시 | 만료 없음. 수개월·연 1회 보안 평가 |
-
-로그인은 신원 범위만 쓰므로 어느 상태든 지금처럼 누구나 된다. 상태는 메일 연결에만 걸린다.
-Workspace 조직은 관리자가 미검증 앱의 민감·제한 범위를 막아 둘 수 있다 — 회사 메일 연결이
-「관리자가 차단」으로 끝나면 그 조직 관리자에게 이 OAuth 클라이언트를 신뢰 목록에 올려 달라고 해야 한다.
+- Google 연결의 동의 범위는 `openid email profile` 뿐이다. 신원 범위만이면 미검증 앱이어도 경고가 없다.
+- 관문은 켤 때 봉인함에 남은 Google 연결을 찾아 `oauth2.googleapis.com/revoke` 로 철회하고 장부에서 지운다
+  (그 연결의 메일 대기 쓰기도 함께). 감사 기록에 `gmail.retire` 한 줄, 관문 로그에 철회 수만 남긴다 — 토큰 값은 안 찍는다.
+  철회를 확인 못 하면 로그에 `unconfirmed` 수가 남고, 그 사람은 구글 계정 보안 설정 → 서드파티 앱에서 지울 수 있다.
+- 메일을 다시 붙이려면 Workspace 조직 소유 프로젝트(내부)로 옮기거나 검증을 받은 뒤, 로그인과 **다른** 동의로 붙여야 한다.
 
 ## 깃허브 OAuth 앱 대 GitHub App
 
@@ -134,11 +117,11 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
 
 ## 쓰기는 사람 확인을 거친다
 
-메일 보내기·PR 만들기는 밖으로 나가는 일이라 되돌리기 어렵다. 확인선은 다음과 같다.
+PR 만들기는 밖으로 나가는 일이라 되돌리기 어렵다. 확인선은 다음과 같다.
 
 - 에이전트(나쵸·학생 CLI·나쵸 앱의 모델 턴)가 낸 쓰기는 관문에 **대기 쓰기**로 쌓인다.
-  내용 전체(받는 사람·제목·본문 / 레포·base·head·제목·본문)를 봉인해 두고 24시간 뒤 버린다.
-- 계정 기기(PC·폰)에 알림이 가고, 사람이 **내용을 그대로 본 화면에서** [보내기]/[만들기] 또는
+  내용 전체(레포·base·head·제목·본문)를 봉인해 두고 24시간 뒤 버린다.
+- 계정 기기(PC·폰)에 알림이 가고, 사람이 **내용을 그대로 본 화면에서** [PR 만들기] 또는
   [버리기]를 누른다. 관문은 그 승인을 받은 뒤에만 공급자를 부른다.
 - 승인은 앱 화면에서만 난다. 앱(PC·폰)은 프로세스 메모리에만 있는 승인 열쇠를 처음 승인할 때 관문에
   등록하고(`POST /relay/connections/approver`), 승인 요청 머리 `x-kasa-approver` 에 싣는다. 관문은 기기마다
@@ -147,11 +130,10 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
   정해진 길로는 승인하지 못한다. 같은 사용자 권한의 프로세스가 작정하고 등록 길을 직접 부르는 것까지는
   막지 못한다 — 막는 것은 에이전트가 쓰기를 내고 스스로 승인까지 해 버리는 사고다.
 - 승인은 화면이 보여 준 내용의 해시(`digest`)에 묶인다. 열어 본 뒤 내용이 바뀌었으면 `content_changed` 로
-  거절한다. 한 번 승인한 쓰기는 대기에서 빠지고 두 번 실행되지 않는다. 화면은 받는 사람 전부·제목·본문
+  거절한다. 한 번 승인한 쓰기는 대기에서 빠지고 두 번 실행되지 않는다. 화면은 레포·브랜치·제목·본문
   전부를 보여 주며, 본문이 40줄을 넘는 쓰기는 승인 단추를 세우지 않는다.
 - 실행이 공급자에 닿기 전에 막히면(토큰 갱신 실패·앱 미설치·공급자의 거절) 대기로 되돌려 다시 승인할 수
   있다. 요청이 나간 뒤 답을 못 받으면 `result_unknown` — 다시 보내지 않는다.
-- 읽기(`mail.list`·`mail.read`)는 확인 없이 되고 감사 기록에만 남는다.
 
 ## 관문 API
 
@@ -159,36 +141,30 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
 
 | 길 | 하는 일 |
 |---|---|
-| `GET /relay/oauth/providers` | `connect: {google, github}` — 이 관문에서 연결할 수 있는 것 |
+| `GET /relay/oauth/providers` | `connect: {google, github}` — 이 관문에서 연결할 수 있는 것(`google` 은 늘 거짓) |
 | `POST /relay/oauth/start` + `link:true`, `connect:[기능]`, PKCE 리다이렉트 | 연결 시작. 끝은 `token` 이 `{"status":"connected","connection":…,"linked":…}` 를 준다(기기 자격증명은 안 준다). 로그인을 못 이었으면 `link_error`, GitHub 앱이 설치 전이면 `installed:false`·`install_url` |
 | `GET /relay/connections` | 연결 목록(공급자·표시 이름·기능·`state`)·승인 대기 전체·`available`·`github_install_url`. 토큰 없음 |
 | `DELETE /relay/connections/{id}` | 끊기(공급자 철회 + 봉인 삭제 + 그 연결의 대기 버림). `provider_revoked` 로 철회 확인 여부 |
-| `POST /relay/connections/mail/list` | `{connection?, query?, max?(1~25)}` → 보낸 이·받는 이·제목·날짜·미리보기·안 읽음 |
-| `POST /relay/connections/mail/read` | `{connection?, id}` → 머리·본문 글(평문 우선, 없으면 HTML 을 글로)·첨부 이름 |
-| `POST /relay/connections/mail/send` | `{connection?, to[], cc[], subject, body, reply_to?}` → 대기 쓰기 |
 | `POST /relay/connections/pr/create` | `{connection?, repo, base, head, title, body, draft}` → 대기 쓰기 |
 | `POST /relay/connections/approver` | `{key}` — 이 기기 앱 화면의 승인 열쇠 등록 |
 | `POST /relay/connections/pending/{id}/approve` | 머리 `x-kasa-approver`, `{digest}` → 실행 결과 |
 | `POST /relay/connections/pending/{id}/reject` | 버리기 |
 | `GET /relay/connections/audit?limit=` | 이 계정의 최근 감사 기록 |
 
-연결이 여럿이면(회사·개인 Gmail) `connection` 을 안 주면 `connection_required` 로 거절한다. 오류 코드:
+연결이 여럿이면(회사·개인 GitHub) `connection` 을 안 주면 `connection_required` 로 거절한다. 오류 코드:
 `feature_missing`(그 권한 없음)·`reconnect_required`(갱신 토큰이 죽음)·`repo_not_accessible`(앱이 그 레포에 설치 안 됨)·
 `provider_rejected`+`detail`(공급자의 이유)·`approver_required`·`content_changed`·`result_unknown`.
 
 ## 화면과 CLI
 
-- PC 설정 → 계정: 위 [Google 연결]·[GitHub 연결] 한 번이 로그인과 일 권한을 함께 붙인다(GitHub 앱이 설치 전이면
-  설치 화면을 바로 연다). 「일 권한」: 연결 줄(Gmail·GitHub, 권한, 「다시 연결 필요」 — 위 연결을 다시 누르면 된다)과
-  [끊기]→[정말 끊기], [PR 올릴 레포 고르기], 「승인을 기다리는 일」 목록 → [보기] 로 펼쳐 내용 전부 →
-  [보내기]/[PR 만들기]·[버리기]. 앱은 로그인돼 있으면 1분마다 목록을 받고 새 대기가 오면 데스크톱 알림을 띄운다
+- PC 설정 → 계정: 위 [GitHub 연결] 한 번이 로그인과 일 권한을 함께 붙인다(GitHub 앱이 설치 전이면
+  설치 화면을 바로 연다). [Google 연결]은 로그인만 잇는다. 「일 권한」: 연결 줄(GitHub, 권한, 「다시 연결 필요」 —
+  위 연결을 다시 누르면 된다)과 [끊기]→[정말 끊기], [PR 올릴 레포 고르기], 「승인을 기다리는 일」 목록 → [보기] 로
+  펼쳐 내용 전부 → [PR 만들기]·[버리기]. 앱은 로그인돼 있으면 1분마다 목록을 받고 새 대기가 오면 데스크톱 알림을 띄운다
   (앱을 켤 때 이미 있던 대기는 알리지 않는다).
-- 학생: `kasaterm-cli mail [list] [--query …] [--max N]`, `mail read <id>`,
-  `mail send --to a@x,b@y [--cc …] --subject … --body 본문|- [--reply-to <id>]`,
-  `pr create --repo 주인/레포 --head 브랜치 [--base main] --title … [--body 본문|-] [--draft]`, `mail connections`.
-  모두 `--connection <id>` 로 연결을 고른다. 쓰기는 대기 id 를 돌려주고 끝난다.
-- 앱 없는 기기·나쵸: `kasa-device work <동작> '<JSON>'`(동작 `connections`·`mail_list`·`mail_read`·`mail_send`·
-  `pr_create`·`reject`·`connections_audit`). 나쵸는 미니의 기기 자격증명(`kasa-device login 2rami`)으로 같은 길을 쓴다.
+- 학생: `kasaterm-cli pr create --repo 주인/레포 --head 브랜치 [--base main] --title … [--body 본문|-] [--draft]`,
+  `pr connections`. `--connection <id>` 로 연결을 고른다. 쓰기는 대기 id 를 돌려주고 끝난다.
+- 앱 없는 기기·나쵸: `kasa-device work <동작> '<JSON>'`(동작 `connections`·`pr_create`·`reject`·`connections_audit`). 나쵸는 미니의 기기 자격증명(`kasa-device login 2rami`)으로 같은 길을 쓴다.
 - PR 은 이미 올라간 브랜치로 연다. 브랜치 푸시는 지금처럼 각 기기 git 이 한다.
 
 ## 배포와 처음 한 번 할 일
@@ -197,14 +173,9 @@ PR 만들기는 **이미 올라간 브랜치**로 PR 을 여는 것까지다. �
 
 - `KASA_GITHUB_APP_CLIENT_ID`·`KASA_GITHUB_APP_CLIENT_SECRET` — GitHub App 의 OAuth 자격. 없으면 GitHub 연결 단추가 꺼진다.
 - `KASA_GITHUB_APP_SLUG` — 앱 주소 이름. GitHub 연결 직후 설치 화면과 「PR 올릴 레포 고르기」가 `https://github.com/apps/<slug>/installations/new` 를 연다.
-- Gmail 은 로그인용 Google 클라이언트를 그대로 쓴다(새 환경 없음).
 
-Google Cloud(로그인 OAuth 클라이언트가 있는 프로젝트):
-
-1. API 라이브러리에서 **Gmail API** 사용 설정.
-2. 데이터 액세스에 `gmail.readonly`·`gmail.send` 범위 추가.
-3. 대상(Audience)에서 **앱 게시**(게시·미검증). 메일 연결 때 「확인되지 않은 앱」 경고가 한 번 뜬다 —
-   「고급 → 이동」으로 넘어간다. 평생 100명 제한은 메일을 연결한 사람만 센다.
+Google Cloud(로그인 OAuth 클라이언트가 있는 프로젝트): 데이터 액세스에 `gmail.*` 범위를 두지 않는다. 2026-10-05 에 더했던
+`gmail.readonly`·`gmail.send` 는 걷는다 — 범위 목록에 남아 있으면 동의 화면 검토 대상이 된다.
 
 GitHub App(설정 → Developer settings → GitHub Apps → New):
 

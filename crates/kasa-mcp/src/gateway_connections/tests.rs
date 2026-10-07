@@ -110,61 +110,46 @@ async fn connect_flow_stores_tokens_only_for_the_asking_account_and_writes_need_
         let request = client.post(format!("{base}/oauth/start")).json(&body);
         if bearer { request.bearer_auth(&token) } else { request }
     };
-    let mut unlinked = start_body("google", json!(["mail.read"]), true);
+    let mut unlinked = start_body("github", json!(["github.pr"]), true);
     unlinked["link"] = json!(false);
     for (body, bearer) in [
         (unlinked, false),
-        (start_body("google", json!(["mail.read"]), false), true),
+        (start_body("github", json!(["github.pr"]), false), true),
         (start_body("google", json!(["github.pr"]), true), true),
     ] {
         assert_eq!(start(body, bearer).send().await.unwrap().status(), 400);
     }
 
     *gate.oauth.mock_identity.lock().unwrap() = Some(Identity {
-        provider: Provider::Google,
-        subject: "google-sub".into(),
-        display: "me@example.com".into(),
+        provider: Provider::Github,
+        subject: "1001".into(),
+        display: "octo".into(),
         picture: None,
     });
     *gate.oauth.mock_grant.lock().unwrap() = Some(Grant {
-        provider: Provider::Google,
-        subject: "google-sub".into(),
-        display: "me@example.com".into(),
-        access_token: "g-access-1".into(),
-        access_expires: crate::relay_auth::now_secs() + 3600,
-        refresh_token: Some("g-refresh".into()),
+        provider: Provider::Github,
+        subject: "1001".into(),
+        display: "octo".into(),
+        access_token: "gh-access-1".into(),
+        access_expires: crate::relay_auth::now_secs() + 28800,
+        refresh_token: Some("gh-refresh-1".into()),
         refresh_expires: 0,
-        scopes: vec![
-            "https://www.googleapis.com/auth/gmail.readonly".into(),
-            "https://www.googleapis.com/auth/gmail.send".into(),
-        ],
     });
-    let (query, connected) =
-        round_trip(&client, &base, &token, start_body("google", json!(["mail.read", "mail.send"]), true)).await;
-    assert_eq!(query["access_type"], "offline");
-    assert!(query["scope"].contains("gmail.readonly") && query["scope"].contains("gmail.send"));
-    assert!(query["prompt"].contains("consent"));
+    let (_, connected) = round_trip(&client, &base, &token, start_body("github", json!(["github.pr"]), true)).await;
     assert_eq!(connected["status"], "connected");
-    assert_eq!(connected["connection"]["features"], json!(["mail.read", "mail.send"]));
+    assert_eq!(connected["connection"]["features"], json!(["github.pr"]));
     assert!(connected.get("token").is_none(), "a connect flow handed out a device credential");
-    // One consent connects both: the same Google now also signs in to this account.
-    assert_eq!(connected["linked"], true);
-    assert!(connected.get("installed").is_none());
-    assert_eq!(
-        gate.oauth.lookup(&Identity { provider: Provider::Google, subject: "google-sub".into(), display: String::new(), picture: None }).as_deref(),
-        Some("one")
-    );
 
     let listed: Value = client.get(format!("{base}/connections")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
     assert_eq!(listed["connections"].as_array().unwrap().len(), 1);
-    assert_eq!(listed["available"], json!({"google":true,"github":true}));
+    assert_eq!(listed["available"], json!({"google":false,"github":true}));
     assert_eq!(listed["github_install_url"], "https://github.com/apps/kasa-work/installations/new");
-    assert!(!listed.to_string().contains("g-access"));
+    assert!(!listed.to_string().contains("gh-access"));
 
     let queued: Value = client
-        .post(format!("{base}/connections/mail/send"))
+        .post(format!("{base}/connections/pr/create"))
         .bearer_auth(&token)
-        .json(&json!({"to":["a@example.com"],"subject":"hi","body":"body"}))
+        .json(&json!({"repo":"2rami/kasaterm","base":"main","head":"feat/x","title":"t"}))
         .send().await.unwrap().json().await.unwrap();
     assert_eq!(queued["status"], "pending");
     let (pending, digest) = (queued["pending"]["id"].as_str().unwrap(), queued["pending"]["digest"].as_str().unwrap());
@@ -180,12 +165,47 @@ async fn connect_flow_stores_tokens_only_for_the_asking_account_and_writes_need_
     assert_eq!(refused.json::<Value>().await.unwrap()["error"], "approver_required");
     let key = crate::oauth_accounts::secret();
     assert_eq!(client.post(format!("{base}/connections/approver")).bearer_auth(&token).json(&json!({"key":key})).send().await.unwrap().status(), 200);
-    let sent: Value = approve(Some(&key)).send().await.unwrap().json().await.unwrap();
-    assert_eq!(sent["status"], "sent");
-    assert_eq!(crate::connections::tests::seen(&calls, "gmail/send").len(), 1);
+    let created: Value = approve(Some(&key)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(created["status"], "created");
+    assert_eq!(crate::connections::tests::seen(&calls, "github/pulls").len(), 1);
 
     let audit: Value = client.get(format!("{base}/connections/audit")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
-    assert!(audit["audit"].as_array().unwrap().iter().any(|line| line["action"] == "mail.send" && line["result"] == "ok"));
+    assert!(audit["audit"].as_array().unwrap().iter().any(|line| line["action"] == "pr.create" && line["result"] == "ok"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn google_links_sign_in_only_and_mail_is_gone() {
+    let (base, client, token, _, gate, dir) = rig().await;
+    let providers: Value = client.get(format!("{base}/oauth/providers")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(providers["connect"], json!({"google":false,"github":true}));
+    // An older app still asking for Gmail is refused before any consent screen opens.
+    for features in [json!(["mail.read", "mail.send"]), json!(["mail.read"])] {
+        let refused = client
+            .post(format!("{base}/oauth/start"))
+            .bearer_auth(&token)
+            .json(&start_body("google", features, true))
+            .send().await.unwrap();
+        assert_eq!(refused.status(), 400);
+    }
+    for path in ["mail/list", "mail/read", "mail/send"] {
+        let gone = client.post(format!("{base}/connections/{path}")).bearer_auth(&token).json(&json!({})).send().await.unwrap();
+        assert!(matches!(gone.status().as_u16(), 404 | 405), "{path} still answers");
+    }
+
+    // Linking Google from settings asks for identity scopes and nothing else.
+    *gate.oauth.mock_identity.lock().unwrap() = Some(Identity {
+        provider: Provider::Google,
+        subject: "google-sub".into(),
+        display: "me@example.com".into(),
+        picture: None,
+    });
+    let (query, linked) = round_trip(&client, &base, &token, start_body("google", json!([]), true)).await;
+    assert_eq!(query["scope"], "openid email profile");
+    assert!(!query.contains_key("access_type") && !query.contains_key("include_granted_scopes"));
+    assert_eq!(linked["status"], "linked");
+    let listed: Value = client.get(format!("{base}/connections")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert!(listed["connections"].as_array().unwrap().is_empty(), "a Google link kept provider tokens");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -219,7 +239,6 @@ async fn github_connect_links_the_login_and_reports_a_missing_install() {
         access_expires: crate::relay_auth::now_secs() + 28800,
         refresh_token: Some("gh-refresh-1".into()),
         refresh_expires: crate::relay_auth::now_secs() + 15897600,
-        scopes: Vec::new(),
     };
     *gate.oauth.mock_identity.lock().unwrap() = Some(github("1001"));
     *gate.oauth.mock_grant.lock().unwrap() = Some(grant("1001"));

@@ -140,7 +140,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final id =
           await (widget.installId ?? const ConnectionStore().installId)();
       if (!mounted) return;
-      // 같은 허용으로 그 공급자의 일 권한(Gmail·PR)까지 붙인다 — 「일 권한」에서 따로 연결하지 않는다.
+      // GitHub 은 같은 허용으로 PR 일 권한까지 붙인다 — 「일 권한」에서 따로 연결하지 않는다.
       final r = await showOAuthSheet(
         context,
         api: api,
@@ -389,9 +389,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       SettingsRow(
         key: const Key('work-permissions'),
         tone: tone,
-        icon: Icons.mail_lock_outlined,
+        icon: Icons.merge_type_rounded,
         title: '일 권한',
-        subtitle: '연결된 Gmail·GitHub · 메일·PR 승인',
+        subtitle: '연결된 GitHub · PR 승인',
         chevron: true,
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute<void>(
@@ -419,7 +419,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ];
   }
 
-  /// 공급자 한 줄 — 이어졌으면 메일·아이디와 체크, 아니면 누르면 로그인과 일 권한을 한 번에 붙인다.
+  /// 공급자 한 줄 — 이어졌으면 메일·아이디와 체크, 아니면 누르면 로그인을 붙인다(GitHub 은 PR 일 권한도 한 번에).
   Widget _loginRow(
     OAuthProvider p,
     LinkedLogin? linked, {
@@ -437,7 +437,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       null when !enabled => '이 서버는 아직 연결을 받지 않아요',
       null =>
         p == OAuthProvider.google
-            ? '연결하면 로그인과 Gmail 읽기·보내기를 한 번에 붙여요'
+            ? '연결하면 이 계정에 Google 로그인을 더해요'
             : '연결하면 로그인과 PR 일 권한을 한 번에 붙여요',
     },
     trailing: linked != null
