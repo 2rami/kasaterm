@@ -16,6 +16,7 @@ pub mod codexhome;
 pub mod dispatch;
 pub mod git;
 pub mod git_panel;
+pub mod git_watch;
 pub mod pane_info;
 pub mod gridwire;
 pub mod visual;

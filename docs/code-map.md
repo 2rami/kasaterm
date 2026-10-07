@@ -14,7 +14,7 @@
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
 - `info_focus.rs` — Info 열 맨 위 「지금 보는 칸」 카드. 사실은 `observe` 한 곳(칸 종류·폴더·모델·mod 사실·그 칸 포트)이고, 이 기기 칸은 감시 스레드가 mod 신호(`claude_mod::set_focus_listener`)·프로세스 지문·느린 주기로, 다른 기기 칸은 원본의 `/term/pane-info`(`kasa_mcp::pane_info`, 같은 `observe` 를 부른다) 롱폴로 받는다. 포트(lsof)는 뒤에서 읽어 mod 반영을 막지 않는다
-- `git_panel.rs` — 오른쪽 Git 열의 원본 pane·기기 식별, 읽기 요청 순서·문맥 검증, 현재/로컬/원격 브랜치 표시. 원격 조회 계약은 `kasa_mcp::git_panel`의 `kasa.git-panel.v2`이며 원본 기기가 cwd를 확인한다. 일꾼(`spawn_poller`)은 칸이 바뀌면 바로, 연결 mod 의 깃 신호(`claude_mod::git_signals_since`)가 오면 합쳐 한 번, 그 밖에는 주기로 읽고, 다른 기기 칸은 `spawn_remote_watcher` 가 원본의 `/term/gitcol/wait` 에 매달린다
+- `git_panel.rs` — 오른쪽 Git 열의 원본 pane·기기 식별, 읽기 요청 순서·문맥 검증, 현재/로컬/원격 브랜치 표시. 원격 조회 계약은 `kasa_mcp::git_panel`의 `kasa.git-panel.v2`이며 원본 기기가 cwd를 확인한다. 일꾼(`spawn_poller`)은 칸이 바뀌면 바로, 작업 트리 파일이 바뀌면(`kasa_mcp::git_watch`, 누가 고쳤든) 합쳐 한 번, 그 밖에는 git 지문이 바뀔 때만 읽고, 다른 기기 칸은 `spawn_remote_watcher` 가 원본의 `/term/gitcol/wait` 에 매달린다. 칸 폴더가 여러 레포를 담은 부모면 그 아래 레포를 최근에 만진 순으로 골라 보이고 머리 메뉴에서 칸마다 고른다(`kasa_mcp::git_panel::panel_view`)
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`·호버 전달 `forward_hover`·손가락 커서 판정 `refresh_hover_pointer`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
 - `testkit.rs` — `schedule_auto*`·`arm_auto*`·`run_pending_auto*` (env 자동테스트 하네스)

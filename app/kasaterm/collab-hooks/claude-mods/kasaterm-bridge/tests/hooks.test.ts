@@ -121,19 +121,13 @@ test('without kasaterm env the mod stays silent', async ($, on) => {
   expect(sent).toHaveLength(0)
 })
 
-test('a file edit tells the app git may have changed, with the path and the cwd only', async ($, on) => {
+test('file edits and commands send no git event — the app watches the files itself', async ($, on) => {
   const sent = host(on)
   await $.session.start(START)
   await $.tool.call({ tool: 'Edit', file_path: '/repo/a.rs', old_string: 'x', new_string: 'y' })
-  await $.tool.call({ tool: 'Bash', command: 'git status' })
   await $.tool.call({ tool: 'Bash', command: 'git commit -m "do not ship this text"' })
   await settle()
-  const git = events(sent).filter(e => e.kind === 'git')
-  expect(git).toEqual([
-    expect.objectContaining({ tool: 'Edit', paths: ['/repo/a.rs'], cwd: '/repo' }),
-    expect.objectContaining({ tool: 'Bash', verb: 'git commit', paths: [], cwd: '/repo' }),
-  ])
-  expect(JSON.stringify(git)).not.toContain('do not ship')
+  expect(events(sent).filter(e => e.kind === 'git')).toEqual([])
 })
 
 test('a dropped tell shows as a toast in the sending pane and never as a prompt', async ($, on) => {

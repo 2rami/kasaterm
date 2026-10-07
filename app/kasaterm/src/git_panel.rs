@@ -11,6 +11,10 @@ pub(crate) struct Target {
     pub cwd: Option<std::path::PathBuf>,
     pub remote: Option<(String, String, String)>,
     pub issue: Option<String>,
+    /// 칸의 셸 — 그 아래에서 도는 명령의 폴더가 「지금 만지는 레포」의 단서다.
+    pub pid: Option<u32>,
+    /// 부모 폴더 칸에서 사람이 고른 하위 레포. 없으면 최근에 만진 것.
+    pub repo: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -103,7 +107,14 @@ fn message(code: &str) -> String {
     .into()
 }
 
-pub(crate) fn fetch(target: &Target, generation: u64, commits: usize) -> GitColView {
+/// `same_refs` — 이 칸을 바로 앞에 읽은 열이고 그 뒤 git 지문이 그대로다(작업 트리만 바뀌었다).
+pub(crate) fn fetch(
+    target: &Target,
+    generation: u64,
+    commits: usize,
+    busy: &[(std::path::PathBuf, std::time::SystemTime)],
+    same_refs: Option<&GitColView>,
+) -> GitColView {
     if let Some(issue) = &target.issue {
         return placeholder(target, generation, Some(issue.clone()));
     }
@@ -139,7 +150,7 @@ pub(crate) fn fetch(target: &Target, generation: u64, commits: usize) -> GitColV
         target
             .cwd
             .as_ref()
-            .and_then(|cwd| handler::fetch_git_col_view(cwd, commits))
+            .and_then(|cwd| handler::fetch_git_col_view(cwd, target.repo.as_deref(), busy, commits, same_refs))
             .ok_or("git_unavailable")
     };
     match result {
@@ -157,25 +168,71 @@ pub(crate) fn fetch(target: &Target, generation: u64, commits: usize) -> GitColV
     }
 }
 
-/// 신호 없이 다시 읽는 주기. mod 가 말하는 칸은 고친 순간이 신호로 오므로, 바깥(사람 셸·편집기·codex)이 바꾼 것만
-/// 늦은 주기로 잡는다.
+/// git 지문(stat 몇백 번)을 보는 주기. 작업 트리를 감시하는 칸은 HEAD·ref 변경도 감시로 오므로 지문은 스테이지 몫만 남아
+/// 늦춘다.
 const POLL: std::time::Duration = std::time::Duration::from_millis(1200);
-const POLL_SIGNALLED: std::time::Duration = std::time::Duration::from_secs(5);
-/// git 이 아는 상태(HEAD·인덱스·ref·fetch)의 지문이 그대로이면 주기가 와도 이만큼은 읽지 않는다. 한 바퀴가 git 여덟 개
-/// (큰 레포에서 CPU 480ms 남짓)라, 열이 열려 있는 것만으로 코어의 30%를 태웠다(2026-10-06 실측). 커밋·스테이지·
-/// 체크아웃·fetch 는 지문이 바로 잡고, mod 칸의 편집은 깃 신호가 잡는다 — 이 주기는 바깥 편집기의 작업 트리 편집 몫이다.
-const IDLE_READ: std::time::Duration = kasa_mcp::git::BADGE_IDLE_PERIOD;
-/// 몰아치는 신호를 한 번의 읽기로 — 마지막 신호 뒤 조용한 틈, 첫 신호부터 미룰 수 있는 한도, 신호로 읽는 사이의 최소
-/// 간격. claude 가 파일을 연달아 고치는 동안 git 을 고칠 때마다 돌리지 않는다.
+const POLL_WATCHED: std::time::Duration = std::time::Duration::from_secs(5);
+/// 몰아치는 변경을 한 번의 읽기로 — 마지막 변경 뒤 조용한 틈, 첫 변경부터 미룰 수 있는 한도, 변경으로 읽는 사이의 최소
+/// 간격. 파일을 연달아 고치는 동안 git 을 고칠 때마다 돌리지 않는다.
 const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 const MAX_DEFER: std::time::Duration = std::time::Duration::from_millis(1000);
 const MIN_GAP: std::time::Duration = std::time::Duration::from_millis(800);
 
-fn signal_read_at(first: Instant, last: Instant, last_read: Instant) -> Instant {
-    (last + QUIET).min(first + MAX_DEFER).max(last_read + MIN_GAP)
+/// 변경으로 읽었는데 열이 그대로였던 횟수만큼 간격을 늘린다(0.8·1.6·3.2·6.4초) — 감시 목록에 없는 gitignore 폴더(로그·
+/// 산출물)가 쉬지 않고 바뀌어도 git 을 그 속도로 돌리지 않는다. 열이 달라지면 처음으로.
+fn signal_read_at(first: Instant, last: Instant, last_read: Instant, quiet: u32) -> Instant {
+    (last + QUIET).min(first + MAX_DEFER).max(last_read + MIN_GAP * (1 << quiet.min(3)))
 }
 
-/// Git 열 일꾼을 깨우는 자리 — 보는 칸이 바뀌었을 때(바로 읽기)와 깃 신호가 왔을 때.
+/// 지금 그 칸에서 도는 명령들의 폴더 — 셸 아래 자손 프로세스의 cwd. claude·codex 가 하위 레포로 들어가 돌리는 빌드·
+/// 시험이 여기 잡힌다. 프로세스 표는 앱이 이미 쥔 캐시를 쓰고, 폴더는 syscall 하나라 git 보다 훨씬 싸다.
+fn busy_dirs(shell: Option<u32>) -> Vec<std::path::PathBuf> {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        let Some(shell) = shell else { return Vec::new() };
+        let table = kasa_pty::process_table_shared();
+        let mut frontier = vec![shell];
+        let mut dirs = Vec::new();
+        while let Some(parent) = frontier.pop() {
+            for (pid, _, _) in table.iter().filter(|(_, ppid, _)| *ppid == parent) {
+                frontier.push(*pid);
+                if let Some(cwd) = crate::socket::pid_cwd(*pid) {
+                    if !dirs.contains(&cwd) {
+                        dirs.push(cwd);
+                    }
+                }
+                if dirs.len() >= 32 {
+                    return dirs;
+                }
+            }
+        }
+        dirs
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = shell;
+        Vec::new()
+    }
+}
+
+/// 열이 보이는 것을 고치는 변경이 왔나 — 보이는 레포(아직 못 읽었으면 칸 폴더) 아래.
+fn touched_by(changes: &[kasa_mcp::git_watch::Change], shown: Option<&std::path::Path>, target: &Target) -> bool {
+    match shown.or(target.cwd.as_deref()) {
+        Some(root) => kasa_mcp::git_watch::touched(changes, root),
+        None => false,
+    }
+}
+
+/// 부모 폴더 칸에서 지금 가장 최근에 만진 하위 레포가 보이는 것과 다른가 — 그러면 바로 옮겨 읽는다.
+fn moved_to_another_repo(target: &Target, shown: Option<&std::path::Path>, busy: &[(std::path::PathBuf, std::time::SystemTime)]) -> bool {
+    if target.repo.is_some() {
+        return false;
+    }
+    let Some(cwd) = target.cwd.as_deref() else { return false };
+    kasa_mcp::git_panel::rank_repos(cwd, busy).first().map(|p| p.as_path()) != shown
+}
+
+/// Git 열 일꾼을 깨우는 자리 — 보는 칸이 바뀌었을 때(바로 읽기)와 작업 트리가 바뀌었을 때.
 #[derive(Default)]
 pub(crate) struct Wake {
     state: Mutex<WakeState>,
@@ -186,7 +243,7 @@ pub(crate) struct Wake {
 struct WakeState {
     kicks: u64,
     remote_touch: bool,
-    /// 다른 기기 원본이 깃 신호를 주고 그 칸이 mod 칸이다 — (base, 원본 칸).
+    /// 다른 기기 원본이 그 칸의 작업 트리를 감시한다 — (base, 원본 칸).
     remote_live: Option<(String, String)>,
 }
 
@@ -236,23 +293,15 @@ impl Wake {
     }
 }
 
-fn period(target: &Target, wake: &Wake) -> std::time::Duration {
-    let signalled = match &target.remote {
+fn watched(target: &Target, wake: &Wake) -> bool {
+    match &target.remote {
         Some((_, base, _)) => wake.remote_live(base, &target.pane),
-        None => kasa_mcp::claude_mod::live(&target.pane).is_some(),
-    };
-    if signalled { POLL_SIGNALLED } else { POLL }
+        None => target.issue.is_none() && target.cwd.as_deref().is_some_and(kasa_mcp::git_panel::watch_panel),
+    }
 }
 
-/// 이 칸 또는 같은 작업 트리를 건드린 깃 신호가 있었나. 아직 한 번도 못 읽은 칸은 뿌리를 몰라 그 칸의 신호만 본다.
-fn touched_by(signals: &[kasa_mcp::claude_mod::GitSignal], target: &Target, root: Option<&std::path::Path>) -> bool {
-    signals.iter().any(|signal| match root {
-        Some(root) => kasa_mcp::claude_mod::git_signal_touches(signal, &target.pane, root),
-        None => signal.surface == target.pane,
-    })
-}
-
-/// Git 열 일꾼. 보는 칸이 바뀌면 바로, 깃 신호가 오면 몰아친 것을 합쳐 한 번, 그 밖에는 주기마다 읽는다.
+/// Git 열 일꾼. 보는 칸이 바뀌면 바로, 작업 트리가 바뀌면 몰아친 것을 합쳐 한 번, 그 밖에는 git 지문이 바뀌었을 때만 읽는다.
+/// 누가 바꿨는지(claude·codex·사람)는 보지 않는다.
 pub(crate) fn spawn_poller(
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     context: Arc<Mutex<Context>>,
@@ -262,7 +311,7 @@ pub(crate) fn spawn_poller(
 ) {
     std::thread::spawn(move || {
         let mut kicks = 0;
-        let mut seen = kasa_mcp::claude_mod::git_seq();
+        let mut seen = kasa_mcp::git_watch::seq();
         let mut read_generation = None;
         let mut due = Instant::now();
         let mut pending: Option<(Instant, Instant)> = None;
@@ -271,44 +320,56 @@ pub(crate) fn spawn_poller(
         let mut read_print: Option<u64> = None;
         let mut read_want = 0;
         let mut failures = 0u32;
+        let mut quiet = 0u32;
+        // 도는 명령의 폴더와 처음 본 때 — 오래 도는 개발 서버가 방금 고친 다른 레포를 이기지 않게, 명령이 시작된 때로 센다.
+        let mut busy_since: HashMap<std::path::PathBuf, std::time::SystemTime> = HashMap::new();
         loop {
-            let until = pending.map_or(due, |(first, last)| signal_read_at(first, last, last_read).min(due));
+            let until = pending.map_or(due, |(first, last)| signal_read_at(first, last, last_read, quiet).min(due));
             kicks = wake.wait(kicks, until);
             let now = Instant::now();
             let (generation, target) = match context.lock() {
                 Ok(context) => (context.generation, context.target.clone()),
                 Err(_) => break,
             };
-            let (seq, signals, lost) = kasa_mcp::claude_mod::git_signals_since(seen);
+            let (seq, changes, lost) = kasa_mcp::git_watch::changes_since(seen);
             seen = seq;
             let Some(target) = target else {
                 pending = None;
                 due = now + POLL;
                 continue;
             };
-            let local_root = if target.remote.is_some() {
-                None
-            } else {
+            let local = target.remote.is_none();
+            let (shown, nested) = if local {
                 data.lock()
                     .ok()
                     .filter(|view| view.generation == generation)
-                    .and_then(|view| view.repo_root.clone().or(view.cwd.clone()))
-                    .or_else(|| target.cwd.clone())
-            };
-            let touched = if target.remote.is_some() {
-                wake.take_remote_touch()
+                    .map(|view| (view.repo_root.clone().or(view.cwd.clone()), !view.repos.is_empty()))
+                    .unwrap_or((None, false))
             } else {
-                lost || touched_by(&signals, &target, local_root.as_deref())
+                (None, false)
+            };
+            let watching = watched(&target, &wake);
+            let running = if nested { busy_dirs(target.pid) } else { Vec::new() };
+            busy_since.retain(|dir, _| running.contains(dir));
+            for dir in running {
+                busy_since.entry(dir).or_insert_with(std::time::SystemTime::now);
+            }
+            let busy: Vec<_> = busy_since.iter().map(|(dir, at)| (dir.clone(), *at)).collect();
+            let touched = if local {
+                lost || touched_by(&changes, shown.as_deref(), &target)
+            } else {
+                wake.take_remote_touch()
             };
             if touched {
                 pending = Some(pending.map_or((now, now), |(first, _)| (first, now)));
             }
-            let fresh = read_generation != Some(generation);
-            let signal_due = pending.is_some_and(|(first, last)| now >= signal_read_at(first, last, last_read));
+            let moved = nested && (!changes.is_empty() || !busy.is_empty()) && moved_to_another_repo(&target, shown.as_deref(), &busy);
+            let fresh = read_generation != Some(generation) || moved;
+            let signal_due = pending.is_some_and(|(first, last)| now >= signal_read_at(first, last, last_read, quiet));
             if !(fresh || signal_due || now >= due) {
                 continue;
             }
-            let print = local_root.as_deref().and_then(|root| {
+            let print = shown.as_deref().filter(|_| local).and_then(|root| {
                 if repo.as_ref().is_none_or(|(at, _)| at != root) {
                     repo = Some((root.to_path_buf(), kasa_mcp::git::repo_paths(root)));
                 }
@@ -318,18 +379,23 @@ pub(crate) fn spawn_poller(
             if !(fresh || signal_due)
                 && print.is_some()
                 && (print, want_now) == (read_print, read_want)
-                && now.duration_since(last_read) < IDLE_READ
+                && now.duration_since(last_read) < kasa_mcp::git::idle_period(watching)
             {
-                due = now + period(&target, &wake);
+                due = now + if watching { POLL_WATCHED } else { POLL };
                 continue;
             }
+            let by_change = signal_due && !fresh;
             pending = None;
             let request = match context.lock() {
                 Ok(mut context) => context.next_request(),
                 Err(_) => break,
             };
             let Some((generation, request, target)) = request else { continue };
-            let view = fetch(&target, generation, want_now);
+            // 작업 트리만 바뀌었다 — 지문·요청 커밋 수가 앞 읽기 그대로고 그 열이 이 칸의 성한 열이다.
+            let same_refs = (by_change && print.is_some() && (print, want_now) == (read_print, read_want))
+                .then(|| data.lock().ok().filter(|view| view.generation == generation && !view.stale && view.issue.is_none() && !view.loading).map(|view| view.clone()))
+                .flatten();
+            let view = fetch(&target, generation, want_now, &busy, same_refs.as_ref());
             last_read = Instant::now();
             read_generation = Some(generation);
             let failed = view.issue.is_some() && target.issue.is_none();
@@ -340,7 +406,7 @@ pub(crate) fn spawn_poller(
             } else {
                 failures = 0;
                 (read_print, read_want) = (print, want_now);
-                due = last_read + period(&target, &wake);
+                due = last_read + if watching { POLL_WATCHED } else { POLL };
             }
             let Ok(mut context) = context.lock() else { break };
             if !context.accepts_request(generation, request, &target) {
@@ -355,6 +421,8 @@ pub(crate) fn spawn_poller(
                 }
                 view
             };
+            let same = data.same_content(&view);
+            quiet = if by_change && same { quiet.saturating_add(1) } else if same { quiet } else { 0 };
             if *data != view {
                 *data = view;
                 drop(data);
@@ -365,6 +433,23 @@ pub(crate) fn spawn_poller(
             }
         }
     });
+}
+
+/// 지금 바로 다시 읽어 싣는다 — 스테이지·되돌리기 같은 열의 단추 뒤에. 일꾼과 같은 요청 번호 규칙이라 늦은 답이 새 칸을
+/// 덮지 않고, 실패하면 보이던 열을 그대로 둔다.
+pub(crate) fn read_now(context: &Arc<Mutex<Context>>, data: &Arc<Mutex<GitColView>>, want: usize) {
+    let Some((generation, request, target)) = context.lock().ok().and_then(|mut c| c.next_request()) else { return };
+    let view = fetch(&target, generation, want, &[], None);
+    let Ok(mut context) = context.lock() else { return };
+    if !context.accepts_request(generation, request, &target) || view.issue.is_some() {
+        return;
+    }
+    if target.issue.is_none() {
+        context.remember(&target, &view);
+    }
+    if let Ok(mut data) = data.lock() {
+        *data = view;
+    }
 }
 
 /// 다른 기기 칸의 Git 열 — 원본 기기의 `/term/gitcol/wait` 에 매달려, 원본이 깃 신호를 받으면 일꾼을 깨운다.
@@ -430,12 +515,12 @@ pub(crate) fn spawn_remote_watcher(context: Arc<Mutex<Context>>, wake: Arc<Wake>
 }
 
 impl App {
+    pub(crate) fn git_active_pane(&self) -> Option<String> {
+        self.ws.lock().ok().and_then(|w| w.active_pane.as_deref().map(|id| w.active_tab_pid(id)))
+    }
+
     pub(crate) fn current_git_target(&self) -> Option<Target> {
-        let id = self
-            .ws
-            .lock()
-            .ok()
-            .and_then(|w| w.active_pane.as_deref().map(|id| w.active_tab_pid(id)))?;
+        let id = self.git_active_pane()?;
         if let Some(info) = kasa_mcp::remote::remote_info(&id) {
             let label = kasa_mcp::machines::label_for_base(&info.base)
                 .or_else(|| (!info.label.is_empty()).then_some(info.label.clone()))
@@ -463,6 +548,8 @@ impl App {
                 cwd,
                 remote: Some((label, info.base, machine_id)),
                 issue,
+                pid: None,
+                repo: None,
             });
         }
         let cwd = self
@@ -473,12 +560,15 @@ impl App {
         let issue = cwd
             .is_none()
             .then(|| "현재 창의 폴더를 확인 중이에요".into());
+        let repo = self.git.col_pinned_cwd.is_none().then(|| self.git.col_repo_choice.get(&id).cloned()).flatten();
         Some(Target {
             pane: id.clone(),
             surface_key: kasa_mcp::surface_keys::get(&id),
             cwd,
             remote: None,
             issue,
+            pid: self.pty.get(&id).and_then(|session| session.shell_pid()),
+            repo,
         })
     }
 }
@@ -496,19 +586,16 @@ pub(crate) fn header(
         Some((label, _)) => crate::render::pane_identity::device_name(label),
         None => crate::render::pane_identity::local_device_name().unwrap_or_else(|| "이 기기".to_string()),
     };
-    let repo = view
-        .repo_root
-        .as_ref()
-        .or(view.cwd.as_ref())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "폴더 확인 중".into());
-    let repo = repo
-        .trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&repo);
-    let source = format!("{machine} / {repo}");
+    let name = |path: &std::path::Path| {
+        let text = path.to_string_lossy();
+        text.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(&text).to_string()
+    };
+    let repo = view.repo_root.as_ref().or(view.cwd.as_ref()).map(|p| name(p)).unwrap_or_else(|| "폴더 확인 중".into());
+    // 부모 폴더 칸이면 칸 폴더 › 지금 보이는 하위 레포.
+    let source = match view.cwd.as_ref().filter(|_| !view.repos.is_empty()) {
+        Some(cwd) => format!("{machine} / {} › {repo}", name(cwd)),
+        None => format!("{machine} / {repo}"),
+    };
     let rect = icon_label_button(
         g,
         (x, y, width, native_controls::CONTROL_HEIGHT),
@@ -893,17 +980,21 @@ mod tests {
             cwd: Some(cwd.into()),
             remote: machine.map(|m| (m.into(), format!("https://{m}.invalid"), m.into())),
             issue: None,
+            pid: None,
+            repo: None,
         }
     }
 
     #[test]
-    fn a_burst_of_git_signals_becomes_one_read_after_a_quiet_gap_or_the_defer_cap() {
+    fn a_burst_of_changes_becomes_one_read_after_a_quiet_gap_or_the_defer_cap() {
         let t0 = Instant::now();
         let long_ago = t0.checked_sub(std::time::Duration::from_secs(10)).unwrap();
-        assert_eq!(signal_read_at(t0, t0, long_ago), t0 + QUIET, "a lone edit is read after the quiet gap");
+        assert_eq!(signal_read_at(t0, t0, long_ago, 0), t0 + QUIET, "a lone edit is read after the quiet gap");
         let busy = t0 + std::time::Duration::from_millis(900);
-        assert_eq!(signal_read_at(t0, busy, long_ago), t0 + MAX_DEFER, "a steady stream still reads by the cap");
-        assert_eq!(signal_read_at(t0, t0, t0), t0 + MIN_GAP, "signal reads keep a minimum gap");
+        assert_eq!(signal_read_at(t0, busy, long_ago, 0), t0 + MAX_DEFER, "a steady stream still reads by the cap");
+        assert_eq!(signal_read_at(t0, t0, t0, 0), t0 + MIN_GAP, "change reads keep a minimum gap");
+        assert_eq!(signal_read_at(t0, t0, t0, 2), t0 + MIN_GAP * 4, "reads that changed nothing stretch the gap");
+        assert_eq!(signal_read_at(t0, t0, t0, 9), t0 + MIN_GAP * 8, "up to a cap");
     }
 
     #[test]
@@ -925,19 +1016,14 @@ mod tests {
     }
 
     #[test]
-    fn signals_from_another_pane_count_only_inside_the_same_tree() {
-        let signal = |surface: &str, path: &str| kasa_mcp::claude_mod::GitSignal {
-            seq: 1,
-            surface: surface.into(),
-            cwd: "/work".into(),
-            paths: vec![path.into()],
-        };
-        let local = target("%7", None, "/work/repo");
-        let root = std::path::Path::new("/work/repo");
-        assert!(touched_by(&[signal("%7", "/elsewhere/a")], &local, Some(root)));
-        assert!(touched_by(&[signal("%8", "/work/repo/a.rs")], &local, Some(root)));
-        assert!(!touched_by(&[signal("%8", "/work/other/a.rs")], &local, Some(root)));
-        assert!(!touched_by(&[signal("%8", "/work/repo/a.rs")], &local, None), "before the first read only the pane's own claude counts");
+    fn a_change_counts_when_it_is_under_the_repository_on_show_whoever_made_it() {
+        let change = |path: &str| kasa_mcp::git_watch::Change { seq: 1, path: path.into() };
+        let pane = target("%7", None, "/work");
+        let shown = std::path::Path::new("/work/repo-a");
+        assert!(touched_by(&[change("/work/repo-a/src/a.rs")], Some(shown), &pane));
+        assert!(!touched_by(&[change("/work/repo-b/src/a.rs")], Some(shown), &pane), "another repo under the same parent does not reread this one");
+        assert!(touched_by(&[change("/work/repo-b/src/a.rs")], None, &pane), "before the first read the pane folder counts");
+        assert!(!touched_by(&[change("/elsewhere/a.rs")], None, &pane));
     }
 
     #[test]
@@ -1106,7 +1192,7 @@ mod tests {
         let (base, server) = serve_once(serde_json::json!({"ok":false,"error":"path required"}));
         let mut target = target("%7", Some("source-device"), "/same-path");
         target.remote.as_mut().unwrap().1 = base;
-        let view = fetch(&target, 5, 20);
+        let view = fetch(&target, 5, 20, &[], None);
         assert!(view.issue.as_deref().unwrap().contains("업데이트"));
         assert!(view.branch_list.is_empty() && !view.no_repo && view.remote.is_some());
         let request = server.join().unwrap();
@@ -1142,7 +1228,7 @@ mod tests {
         );
         let mut target = target("%7", Some("source-device"), "/stale-board-path");
         target.remote.as_mut().unwrap().1 = base;
-        let view = fetch(&target, 9, 20);
+        let view = fetch(&target, 9, 20, &[], None);
         assert!(view.issue.is_none() && !view.loading && view.remote.is_some());
         assert_eq!(view.cwd, Some("C:\\source\\repo".into()));
         assert_eq!(view.generation, 9);

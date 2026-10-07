@@ -864,6 +864,7 @@ impl App {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
+        let git_repo_choice = self.git_active_pane().and_then(|id| self.git.col_repo_choice.get(&id).cloned());
         // Remote paths must never become local repository picker targets.
         let git_repo_list: Vec<std::path::PathBuf> = {
             let mut set: std::collections::BTreeSet<std::path::PathBuf> = self.pane_cwd_cache.iter()
@@ -6467,6 +6468,9 @@ impl App {
                     &git_repo_list,
                     &self.git.col_pinned_cwd,
                     &mut self.git.path_menu_rects,
+                    if git_view.remote.is_none() { &git_view.repos } else { &[] },
+                    git_view.repos.iter().find(|r| Some(*r) == git_repo_choice.as_ref()).map(|r| r.as_path()),
+                    &mut self.git.path_menu_repo_rects,
                 );
                 git_panel::branches(g, &mut self.git, &git_view, self.cursor_px, gcx0, gcw, bottom);
                 // ── Commit-button dropdown (Commit / Push / Create PR)

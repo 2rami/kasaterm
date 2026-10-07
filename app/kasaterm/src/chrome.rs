@@ -2,8 +2,14 @@
 use super::*;
 
 impl GitColView {
+    /// 펼친 diff·커밋 캐시가 기대는 자리. 부모 폴더 칸은 같은 칸에서도 보이는 하위 레포가 바뀌므로 레포 뿌리로 가른다.
     fn target(&self) -> Option<(std::path::PathBuf, Option<(String, String)>, u64)> {
-        self.cwd.clone().map(|cwd| (cwd, self.remote.clone(), self.generation))
+        self.repo_root.clone().or_else(|| self.cwd.clone()).map(|root| (root, self.remote.clone(), self.generation))
+    }
+    /// 세대·「다시 읽는 중」 표시를 빼고 같은 열인가.
+    pub(crate) fn same_content(&self, other: &GitColView) -> bool {
+        let bare = |view: &GitColView| GitColView { generation: 0, stale: false, ..view.clone() };
+        bare(self) == bare(other)
     }
     fn local_cwd(&self, action: &str) -> Result<std::path::PathBuf, String> {
         if let Some((label, _)) = &self.remote {
@@ -53,6 +59,7 @@ impl state::GitState {
         self.path_hdr_rect = None;
         self.branch_hdr_rect = None;
         self.path_menu_rects.clear();
+        self.path_menu_repo_rects.clear();
         self.branch_page_rects.clear();
     }
 }
@@ -2073,19 +2080,13 @@ impl App {
     pub(crate) fn commits_grip_release(&mut self) -> bool {
         if self.git.col_commits_resize.take().is_none() { return false; }
         let context = self.git.col_context.clone();
-        let request = context.lock().ok().and_then(|mut c| c.next_request());
-        if let Some((generation, request, target)) = request {
-            let proxy = self.proxy.clone();
-            let data = self.git.col_data.clone();
-            let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
-            std::thread::spawn(move || {
-                let view = crate::git_panel::fetch(&target, generation, want);
-                let Ok(context) = context.lock() else { return };
-                if !context.accepts_request(generation, request, &target) { return; }
-                if let Ok(mut data) = data.lock() { *data = view; }
-                let _ = proxy.send_event(crate::UserEvent::Redraw);
-            });
-        }
+        let proxy = self.proxy.clone();
+        let data = self.git.col_data.clone();
+        let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
+        std::thread::spawn(move || {
+            crate::git_panel::read_now(&context, &data, want);
+            let _ = proxy.send_event(crate::UserEvent::Redraw);
+        });
         true
     }
     /// Persist the current window frame (logical size + physical position).

@@ -29,7 +29,6 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 | `background` | `tasks`[{`id`,`type`(`subagent`·`shell`·`monitor`·`workflow`),`status`,`label`}] 전부 | `tool.call`·`$.agent.list()`·`classic.Stop` | 상태줄 수·보드 백그라운드 |
 | `tool` | `phase`: `start`·`end`, `id`, `tool`, `label`(시작), `error`·`text`(끝, 결과 600자), `agent`? | `tool.call` 앞뒤 | 보드 활동(`collab.activity`) |
 | `row` | `uuid`, `door` | `session.append`(본 고리만) | 대화 보기를 깨운다(내용은 기록 파일이 정본) |
-| `git` | `tool`, `verb`(명령 첫 낱말, git 이면 `git commit` 처럼 하위 명령까지), `paths`(고친 파일), `cwd` | 고치기 도구(Edit·Write·MultiEdit·NotebookEdit)가 성공한 뒤, 쓰는 Bash 명령이 끝난 뒤(서브에이전트 포함) | 그 칸·같은 작업 트리의 Git 열을 바로 다시 읽는다 |
 | `status` | `line`(`kasaterm-cli statusline` 의 ANSI 출력 한 줄) | 모델·effort·문맥·경로·브랜치가 바뀐 순간(`statusline` mod) | 엔진이 자기 상태줄을 다시 그릴 때까지 그 행에 덧그린다 |
 | `bye` | `reason` | `session.end` | mod 칸 표시를 거둔다 |
 
@@ -62,12 +61,9 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 - **대화 보기**: 내용은 기록 파일이 정본이다(재개한 세션도 전체가 보여야 한다). `GET /transcript-raw` 에 `wait_ms` 를 주면
   새 줄이 없을 때 그 칸의 다음 `row` 까지 쥐었다가 다시 읽는다 — 폰은 1.5초 바퀴 대신 행이 쌓이는 즉시 받는다.
 
-- **깃 신호**: 「깃이 바뀌었을 수 있다」는 힌트다 — 명령의 인자·파일 내용은 싣지 않는다. 읽기만 하는 명령(`ls`·`rg`·`git status`
-  ·`git log` 같은 것)은 보내지 않는다. 앱은 신호를 칸·폴더·경로로만 쥐고(`claude_mod::git_signals_since`), Git 열 일꾼이 그
-  칸의 신호이거나 고친 경로·claude 폴더가 그 칸 저장소 안이면 몰아친 신호를 합쳐 한 번 읽는다(마지막 신호 뒤 250ms, 첫
-  신호부터 최대 1초, 신호로 읽는 사이 최소 800ms). mod 칸의 주기 조회는 5초로 늦춘다 — 사람 셸·편집기·codex 가 바꾼 것만
-  그 주기로 잡는다. mod 없는 칸은 옛 1.2초 그대로다. 다른 기기 칸은 원본의 `/term/gitcol/wait` 가 같은 신호로 풀린다
-  (`docs/remote-git-panel.md`).
+- **깃 신호는 없다**: Git 열·배지는 누가 고쳤든 같은 길로 안다 — 작업 트리 파일 감시(`kasa_mcp::git_watch`, macOS FSEvents·
+  Windows ReadDirectoryChangesW)와 git 지문. codex·셸 칸에도 같아야 해서 mod 신호(`git` 이벤트)는 걷었다(2026-10-07). 옛 mod 가
+  보내는 `git` 이벤트는 앱이 버린다. 상세는 `docs/remote-git-panel.md`.
 - **Info 카드**(오른쪽 Info 열 맨 위 「지금 보는 칸」, `app/kasaterm/src/info_focus.rs`): 새 이벤트 없이 `tool`·`turn`·
   `background`·`usage`·`permission` 으로 짓는다. 앱은 칸마다 도는 도구(시작 시각)·끝난 도구 최근 5개(걸린 시간·실패)·
   백그라운드를 처음 본 때를 쥐고 `claude_mod::focus_facts` 로 내준다(나이는 부른 순간 기준 ms — 거울로 건너가도 시계가

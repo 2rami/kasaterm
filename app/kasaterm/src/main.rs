@@ -356,6 +356,9 @@ fn hover_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32) 
     round_rect(g, x, y, w, h, r, theme::surface_hover());
 }
 
+/// 하위 레포 고르기 메뉴에 싣는 줄 수 — 그 아래는 덜 최근이라 고를 일이 드물다.
+const GIT_NESTED_MENU_ROWS: usize = 8;
+
 /// Paint the git-column header dropdowns (repo path picker + branch switcher)
 /// and fill their click rects. A free fn, not a method, so it can run inside
 /// the `&mut self.gpu` block (which can't re-borrow `&self`): the caller hands
@@ -371,6 +374,9 @@ fn git_paint_dropdowns(
     repos: &[std::path::PathBuf],
     pinned: &Option<std::path::PathBuf>,
     path_rects: &mut Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
+    nested: &[std::path::PathBuf],
+    chosen: Option<&std::path::Path>,
+    nested_rects: &mut Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
 ) {
     let item_h = 28.0_f32;
     let pad = 6.0_f32;
@@ -416,15 +422,24 @@ fn git_paint_dropdowns(
     };
     if path_open {
         if let Some((_hx, hy, _hw, hh)) = path_hdr {
-            let n = repos.len() + 1; // +1 for the "자동 추적" toggle
+            // 부모 폴더 칸의 하위 레포 — 최근에 만진 순, 맨 위가 자동으로 보이는 것.
+            let nested = &nested[..nested.len().min(GIT_NESTED_MENU_ROWS)];
+            let n = repos.len() + nested.len() + 1; // +1 for the "자동 추적" toggle
             let menu_h = n as f32 * item_h + pad * 2.0;
             let my = hy + hh + 2.0;
             panel(g, my, menu_h);
             let mut iy = my + pad;
-            // "자동 추적" — selected when nothing is pinned.
-            row(g, iy, "자동 추적 (활성 pane)", pinned.is_none());
+            // "자동 추적" — selected when nothing is pinned or chosen.
+            row(g, iy, "자동 추적 (활성 pane)", pinned.is_none() && chosen.is_none());
             path_rects.push((None, (px, iy, pw, item_h)));
             iy += item_h;
+            for (i, r) in nested.iter().enumerate() {
+                let name = r.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+                let label = if i == 0 { format!("› {name}  ·  최근") } else { format!("› {name}") };
+                row(g, iy, &label, pinned.is_none() && chosen == Some(r.as_path()));
+                nested_rects.push((r.clone(), (px, iy, pw, item_h)));
+                iy += item_h;
+            }
             for r in repos {
                 let name = r.file_name().and_then(|s| s.to_str()).unwrap_or("?");
                 let sel = pinned.as_ref() == Some(r);
@@ -4197,6 +4212,9 @@ struct GitColView {
     graph_supported: bool,
     #[serde(default)]
     graph_truncated: bool,
+    /// 칸 폴더가 여러 저장소를 담은 부모일 때 그 아래 저장소들(최근에 만진 순). 보이는 것은 `repo_root`.
+    #[serde(default)]
+    repos: Vec<std::path::PathBuf>,
 }
 
 /// 파일트리 우클릭 컨텍스트 메뉴 항목. `NewFile`/`NewFolder`/`Rename` 은 인라인

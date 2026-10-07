@@ -3,7 +3,6 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   activityLabel,
   askKey,
-  gitTouch,
   launchedTask,
   mergeTasks,
   permissionPreview,
@@ -83,27 +82,5 @@ describe('usage', () => {
       limits: [{ kind: 'five_hour', percent: 23.5, resets_at: 'T' }],
       cost_usd: 0.42,
     })
-  })
-})
-
-describe('git touch', () => {
-  test('an edit names the file it wrote', () => {
-    expect(gitTouch('Edit', { file_path: '/repo/a.rs', old_string: 'x', new_string: 'y' })).toEqual({ tool: 'Edit', verb: '', paths: ['/repo/a.rs'] })
-    expect(gitTouch('NotebookEdit', { notebook_path: '/repo/n.ipynb' })?.paths).toEqual(['/repo/n.ipynb'])
-  })
-
-  test('reading commands leave the git column alone', () => {
-    for (const command of ['ls -la', 'git status --short', 'cd /repo && git log --oneline -5', 'rg foo | head', 'cat a > /dev/null 2>&1', 'sed -n 1,20p a.rs', 'git --no-pager diff']) {
-      expect(gitTouch('Bash', { command })).toBe(null)
-    }
-    expect(gitTouch('Read', { file_path: '/repo/a.rs' })).toBe(null)
-  })
-
-  test('a command that may change the tree names only its verb', () => {
-    expect(gitTouch('Bash', { command: 'cd /repo && git commit -m "secret words"' })).toEqual({ tool: 'Bash', verb: 'git commit', paths: [] })
-    expect(gitTouch('Bash', { command: 'git -C /repo checkout -b x' })?.verb).toBe('git checkout')
-    expect(gitTouch('Bash', { command: 'TOKEN=abc cargo fmt' })?.verb).toBe('cargo')
-    expect(gitTouch('Bash', { command: 'sed -i "" s/a/b/ f.rs' })?.verb).toBe('sed')
-    expect(gitTouch('Bash', { command: "cat > notes.md <<'EOF'\nhello world\nEOF" })?.verb).toBe('cat')
   })
 })

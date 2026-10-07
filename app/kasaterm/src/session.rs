@@ -8521,8 +8521,6 @@ impl App {
         kasa_mcp::claude_mod::set_status_listener(move |_| {
             let _ = status_proxy.send_event(UserEvent::Redraw);
         });
-        let git_wake = self.git.col_wake.clone();
-        kasa_mcp::claude_mod::set_git_listener(move || git_wake.kick());
         crate::info_focus::start(&self.info.focus, self.info.sites.clone(), backend.clone(), self.proxy.clone());
         // GUI 쪽에도 핸들 보관 — ResumeSession 이 attach/재개 pane 의 transcript 를
         // bind hook 없이 즉석 확정(bind_transcript)할 때 쓴다.

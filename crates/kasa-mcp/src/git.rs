@@ -328,12 +328,18 @@ pub fn panel_repo_root(repo: &Path) -> Option<std::path::PathBuf> {
 }
 
 pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> {
-    git_panel_snapshot_within(repo, commits, PANEL_READ_TIMEOUT)
+    git_panel_snapshot_within(repo, commits, PANEL_READ_TIMEOUT, None)
 }
+
+/// ref 에서 나오는 열 재료 — 커밋·체크아웃·브랜치·fetch 가 없으면 그대로다.
+const REF_FIELDS: &[&str] = &["branches", "branch_list", "repo_root", "recent_commits", "commit_graph", "graph_truncated"];
 
 /// `budget` 안에 Git 열 재료를 다 읽는다. status 가 저장소인지 정한 뒤 나머지(브랜치·뿌리·numstat 셋·log·그래프)는
 /// 서로 기다릴 것이 없어 한꺼번에 돌린다 — 기다림이 대부분인 느린 디스크·큰 부하에서 합이 아니라 가장 긴 하나만 걸린다.
-pub fn git_panel_snapshot_within(repo: &Path, commits: usize, budget: std::time::Duration) -> Result<Value, String> {
+///
+/// `same_refs` 는 같은 레포를 바로 앞에 읽은 열이고 그 뒤 git 지문(HEAD·ref·인덱스)이 그대로다 — 작업 트리만 바뀌었으니
+/// ref 쪽 재료는 그것을 쓰고 status·numstat 넷만 돌린다(git 열 개 → 네 개). HEAD 가 달라졌으면 다 읽는다.
+pub fn git_panel_snapshot_within(repo: &Path, commits: usize, budget: std::time::Duration, same_refs: Option<&Value>) -> Result<Value, String> {
     let deadline = std::time::Instant::now() + budget;
     let status = run_panel_git(repo, &[
         "status", "--porcelain=v2", "--branch", "-z", "--ignore-submodules=none",
@@ -347,6 +353,9 @@ pub fn git_panel_snapshot_within(repo: &Path, commits: usize, budget: std::time:
     let mut view = parse_panel_status(repo, &status.checked()?);
     let unborn = view["unborn"].as_bool().unwrap_or(false);
     let head = view["head_oid"].as_str().map(str::to_owned);
+    if let Some(prior) = same_refs.filter(|prior| prior["head_oid"] == view["head_oid"] && prior["branch"] == view["branch"]) {
+        return worktree_only(repo, view, prior, unborn, deadline);
+    }
     let diff_args = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--numstat", "-z"];
     let staged_args = [&diff_args[..], &["--cached"]].concat();
     let head_args = [&diff_args[..], &["HEAD"]].concat();
@@ -424,6 +433,43 @@ pub fn git_panel_snapshot_within(repo: &Path, commits: usize, budget: std::time:
     };
     view["commit_graph"] = json!(graph);
     view["graph_truncated"] = json!(truncated);
+    Ok(view)
+}
+
+fn worktree_only(repo: &Path, mut view: Value, prior: &Value, unborn: bool, deadline: std::time::Instant) -> Result<Value, String> {
+    let diff_args = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--numstat", "-z"];
+    let staged_args = [&diff_args[..], &["--cached"]].concat();
+    let head_args = [&diff_args[..], &["HEAD"]].concat();
+    let read = |args: &[&str]| run_panel_git(repo, args, deadline).and_then(GitReadOutput::checked);
+    let (worktree, staged, totals) = std::thread::scope(|scope| {
+        let worktree = scope.spawn(|| read(&diff_args));
+        let staged = scope.spawn(|| read(&staged_args));
+        let totals = (!unborn).then(|| scope.spawn(|| read(&head_args)));
+        let join = |handle: std::thread::ScopedJoinHandle<'_, Result<String, String>>| {
+            handle.join().unwrap_or_else(|_| Err("git panel reader panicked".into()))
+        };
+        (join(worktree), join(staged), totals.map(join))
+    });
+    let mut numstat = parse_panel_numstat(&worktree?);
+    let staged = parse_panel_numstat(&staged?);
+    for (path, (ins, del)) in &staged {
+        let entry = numstat.entry(path.clone()).or_insert((0, 0));
+        entry.0 = entry.0.max(*ins);
+        entry.1 = entry.1.max(*del);
+    }
+    let totals = match totals {
+        Some(totals) => parse_panel_numstat(&totals?),
+        None => staged,
+    };
+    let (insertions, deletions) = totals.values().fold((0u32, 0u32), |(a, d), (ins, del)| {
+        (a.saturating_add(*ins), d.saturating_add(*del))
+    });
+    view["insertions"] = json!(insertions);
+    view["deletions"] = json!(deletions);
+    view["numstat"] = json!(numstat);
+    for field in REF_FIELDS {
+        view[*field] = prior[*field].clone();
+    }
     Ok(view)
 }
 
@@ -568,7 +614,7 @@ pub fn repo_paths(dir: &Path) -> Option<RepoPaths> {
 
 /// git 이 아는 상태(HEAD·인덱스·모든 ref·fetch)의 값싼 지문 — 파일 크기·수정 시각만 본다.
 /// 커밋·스테이지·체크아웃·브랜치·fetch 는 이 값을 바꾸고, git 을 띄우는 것보다 수백 배 싸다.
-/// **작업 트리 편집은 못 본다** — 그건 mod 깃 신호와 긴 주기가 맡는다. HEAD 를 못 읽으면
+/// **작업 트리 편집은 못 본다** — 그건 파일 감시(`git_watch`)와 긴 주기가 맡는다. HEAD 를 못 읽으면
 /// `None`(레포가 사라졌거나 옮겨졌다 — 자리부터 다시 찾을 때다).
 pub fn repo_fingerprint(paths: &RepoPaths) -> Option<u64> {
     use std::hash::{Hash, Hasher};
@@ -609,14 +655,20 @@ pub fn repo_fingerprint(paths: &RepoPaths) -> Option<u64> {
     Some(h.finish())
 }
 
-/// 지문이 그대로이고 깃 신호도 없을 때 배지를 다시 읽는 주기 — 바깥 편집기나 mod 없는
-/// 하네스가 고친 작업 트리는 이 주기 안에 잡힌다.
-pub const BADGE_IDLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(10);
+/// 지문이 그대로이고 바뀐 파일도 없을 때 다시 읽는 주기. 작업 트리를 감시하면 편집은 감시가 잡으니 이 주기는 놓친 것을
+/// 메우는 안전망일 뿐이라 길게, 감시가 없으면(감시 못 하는 플랫폼·폴더) 작업 트리 편집이 이 주기 안에 잡힌다.
+pub fn idle_period(watched: bool) -> std::time::Duration {
+    std::time::Duration::from_secs(if watched { 30 } else { 10 })
+}
+/// 파일 변경으로 배지를 다시 읽는 사이의 최소 간격 — 고치는 동안 1.5초 바퀴마다 git 셋을 돌리지 않게.
+const BADGE_CHANGE_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 /// git 레포가 아닌 폴더를 다시 확인하는 주기(그 사이 `git init` 했을 수 있다).
 const NOT_A_REPO_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Default)]
 struct BadgeRepo {
+    /// 마지막 읽기 뒤 파일이 바뀌었다 — 간격이 차면 읽는다.
+    changed: bool,
     fingerprint: Option<u64>,
     read_at: Option<std::time::Instant>,
     badge: Option<GitBadge>,
@@ -625,8 +677,8 @@ struct BadgeRepo {
 /// 사이드바·파일트리 git 배지 폴러의 기억. 배지 한 번이 git 셋(rev-parse·status·diff HEAD)이고
 /// 큰 레포에서 CPU 330ms 남짓이라, 1.5초마다 폴더마다 다 돌리면 레포 하나가 코어의 20%를
 /// 태웠다(2026-10-06 실측, 파일 4,861개). 그래서 ①같은 레포의 여러 폴더는 한 번만 읽고
-/// ②git 이 아는 상태의 지문이 바뀌었거나, 그 레포를 건드린 mod 깃 신호가 왔거나,
-/// `BADGE_IDLE_PERIOD` 가 지났을 때만 git 을 띄운다.
+/// ②git 이 아는 상태의 지문이 바뀌었거나, 그 레포의 파일이 바뀌었거나(`git_watch`, 누가 고쳤든),
+/// `idle_period` 가 지났을 때만 git 을 띄운다.
 #[derive(Default)]
 pub struct BadgePoller {
     cwds: std::collections::HashMap<std::path::PathBuf, (Option<RepoPaths>, std::time::Instant)>,
@@ -637,23 +689,31 @@ pub struct BadgePoller {
 impl BadgePoller {
     pub fn poll(&mut self, cwds: &[std::path::PathBuf]) -> std::collections::HashMap<std::path::PathBuf, GitBadge> {
         let now = std::time::Instant::now();
-        let (seq, signals, lost) = crate::claude_mod::git_signals_since(self.seen);
+        let (seq, changes, lost) = crate::git_watch::changes_since(self.seen);
         self.seen = seq;
         let mut out = std::collections::HashMap::new();
         let mut roots = std::collections::HashSet::new();
         for cwd in cwds {
-            let Some(paths) = self.resolve(cwd, now) else { continue };
+            let Some(paths) = self.resolve(cwd, now) else {
+                // 여러 저장소를 담은 부모 폴더 칸 — 그 아래 저장소들을 늘 감시해 둬야 Git 열이 그 칸으로 왔을 때
+                // 「최근에 만진 레포」가 열기 전의 편집까지 안다.
+                crate::git_panel::watch_panel(cwd);
+                continue;
+            };
             if roots.insert(paths.root.clone()) {
                 let fingerprint = repo_fingerprint(&paths);
                 if fingerprint.is_none() {
                     // 자리가 사라졌다 — 다음 바퀴에 다시 찾는다.
                     self.cwds.remove(cwd);
                 }
-                let touched =
-                    lost || signals.iter().any(|s| crate::claude_mod::git_signal_touches(s, "", &paths.root));
+                let watched = crate::git_watch::ensure(&paths.root);
                 let repo = self.repos.entry(paths.root.clone()).or_default();
-                let idle = repo.read_at.is_none_or(|at| now.duration_since(at) >= BADGE_IDLE_PERIOD);
-                if fingerprint.is_none() || fingerprint != repo.fingerprint || touched || idle {
+                repo.changed |= lost || crate::git_watch::touched(&changes, &paths.root);
+                let since = repo.read_at.map(|at| now.duration_since(at));
+                let idle = since.is_none_or(|since| since >= idle_period(watched));
+                let changed = repo.changed && since.is_none_or(|since| since >= BADGE_CHANGE_GAP);
+                if fingerprint.is_none() || fingerprint != repo.fingerprint || changed || idle {
+                    repo.changed = false;
                     repo.badge = git_badge(&paths.root);
                     repo.fingerprint = fingerprint;
                     repo.read_at = Some(now);

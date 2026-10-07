@@ -2058,7 +2058,7 @@ impl Backend for PtyBackend {
     }
 
     fn git_col_view(&self, path: &str, commits: usize) -> Result<serde_json::Value> {
-        let view = crate::handler::fetch_git_col_view(std::path::Path::new(path), commits)
+        let view = crate::handler::fetch_git_col_view(std::path::Path::new(path), None, &[], commits, None)
             .ok_or_else(|| anyhow::anyhow!("여기는 git 레포가 아니에요"))?;
         Ok(serde_json::to_value(view)?)
     }

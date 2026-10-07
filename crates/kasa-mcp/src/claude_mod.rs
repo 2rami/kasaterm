@@ -178,7 +178,6 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
     }
     let mut touched = false;
     let mut statusline = false;
-    let mut git = Vec::new();
     let mut status = false;
     {
         let mut panes = PANES.lock().unwrap();
@@ -211,8 +210,8 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
             }
             let Some(pane) = panes.get_mut(surface).filter(|p| p.state.session == session) else { continue };
             pane.state.last_event = Instant::now();
+            // 옛 mod 의 깃 신호 — 이제 Git 열은 파일 감시(`git_watch`)로 안다. 활동 줄에 남기지 않는다.
             if kind == "git" {
-                git.push(git_signal(surface, event));
                 continue;
             }
             if kind == "status" {
@@ -228,9 +227,6 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
     }
     if !events.is_empty() {
         bump(surface);
-    }
-    if !git.is_empty() {
-        record_git(git);
     }
     if statusline {
         write_statusline(surface);
@@ -688,114 +684,6 @@ pub fn mirror_view(surface: &str) -> Value {
         "live": true, "seq": seq, "session": state.session,
         "turn_open": state.turn_open, "compacting": state.compacting.is_some(),
         "question": state.question, "tools": running, "permissions": permissions,
-    })
-}
-
-/// 「깃이 바뀌었을 수 있다」 — mod 가 파일을 고친 도구·쓰는 명령 뒤에 알린 것. 내용 없이 칸·폴더·경로만.
-/// Git 열은 이것으로 주기를 기다리지 않고 바로 다시 읽는다(GUI 는 `set_git_listener`, 다른 기기는 `wait_git`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitSignal {
-    pub seq: u64,
-    pub surface: String,
-    pub cwd: String,
-    pub paths: Vec<String>,
-}
-
-const GIT_SIGNAL_CAP: usize = 64;
-const GIT_PATH_CAP: usize = 32;
-
-#[derive(Default)]
-struct GitSignals {
-    seq: u64,
-    recent: VecDeque<GitSignal>,
-}
-
-static GIT_SIGNALS: LazyLock<Mutex<GitSignals>> = LazyLock::new(Default::default);
-static GIT_WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
-type GitListener = Arc<dyn Fn() + Send + Sync>;
-static GIT_LISTENER: OnceLock<GitListener> = OnceLock::new();
-
-/// 깃 신호가 쌓이면 부를 자리 — GUI 의 Git 열 일꾼을 깨운다. 앱이 한 번 건다.
-pub fn set_git_listener(listener: impl Fn() + Send + Sync + 'static) {
-    let _ = GIT_LISTENER.set(Arc::new(listener));
-}
-
-fn git_signal(surface: &str, event: &Value) -> GitSignal {
-    let clean = |s: &str| (!s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control)).then(|| s.to_string());
-    GitSignal {
-        seq: 0,
-        surface: surface.to_string(),
-        cwd: clean(&text(event, "cwd")).unwrap_or_default(),
-        paths: event
-            .get("paths")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter_map(clean)
-            .take(GIT_PATH_CAP)
-            .collect(),
-    }
-}
-
-fn record_git(signals: Vec<GitSignal>) {
-    {
-        let mut store = GIT_SIGNALS.lock().unwrap();
-        for mut signal in signals {
-            store.seq += 1;
-            signal.seq = store.seq;
-            if store.recent.len() >= GIT_SIGNAL_CAP {
-                store.recent.pop_front();
-            }
-            store.recent.push_back(signal);
-        }
-    }
-    GIT_WAKE.notify_waiters();
-    if let Some(listener) = GIT_LISTENER.get() {
-        listener();
-    }
-}
-
-pub fn git_seq() -> u64 {
-    GIT_SIGNALS.lock().unwrap().seq
-}
-
-/// `seen` 뒤의 신호와 지금 번호. 고리에서 밀려난 신호가 있으면 `lost` — 무엇이 바뀌었는지 모르니 다시 읽을 때다.
-pub fn git_signals_since(seen: u64) -> (u64, Vec<GitSignal>, bool) {
-    let store = GIT_SIGNALS.lock().unwrap();
-    let lost = store.recent.front().is_some_and(|first| first.seq > seen.saturating_add(1));
-    let fresh = store.recent.iter().filter(|s| s.seq > seen).cloned().collect();
-    (store.seq, fresh, lost)
-}
-
-/// 깃 신호 번호가 `seen` 을 넘거나 `wait` 가 지날 때까지 기다린다. 지금 번호를 돌려준다.
-pub async fn wait_git(seen: u64, wait: Duration) -> u64 {
-    let deadline = tokio::time::Instant::now() + wait;
-    loop {
-        let notified = GIT_WAKE.notified();
-        let seq = git_seq();
-        if seq > seen || tokio::time::Instant::now() >= deadline {
-            return seq;
-        }
-        if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return git_seq();
-        }
-    }
-}
-
-/// 이 신호가 이 칸 또는 이 저장소(`root`)를 건드렸을 수 있나. 고친 파일이 있으면 그 경로로, 명령이면 그 claude 의
-/// 폴더로 가른다 — 같은 작업 트리를 함께 쓰는 다른 칸의 claude 가 고친 것도 이 칸의 Git 열에 바로 닿는다.
-pub fn git_signal_touches(signal: &GitSignal, surface: &str, root: &std::path::Path) -> bool {
-    if signal.surface == surface {
-        return true;
-    }
-    let cwd = std::path::Path::new(&signal.cwd);
-    if signal.paths.is_empty() {
-        return !signal.cwd.is_empty() && cwd.starts_with(root);
-    }
-    signal.paths.iter().any(|path| {
-        let path = std::path::Path::new(path);
-        if path.is_absolute() { path.starts_with(root) } else { !signal.cwd.is_empty() && cwd.join(path).starts_with(root) }
     })
 }
 
@@ -1318,19 +1206,10 @@ mod tests {
         assert_eq!(row_count("%none"), None);
     }
 
-    #[tokio::test]
-    async fn a_git_signal_wakes_the_reader_and_names_only_its_pane_folder_and_paths() {
+    #[test]
+    fn an_old_mods_git_signal_is_ignored() {
         apply("%t20", "s", &ev(json!({"kind": "hello", "pid": 1})));
-        let seen = git_seq();
-        let wait = tokio::spawn(async move { wait_git(seen, Duration::from_secs(5)).await });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        apply("%t20", "other", &ev(json!({"kind": "git", "tool": "Edit", "paths": ["/repo/x.rs"], "cwd": "/repo"})));
-        apply("%t20", "s", &ev(json!({"kind": "git", "tool": "Edit", "paths": ["/repo/a.rs", "bad\npath"], "cwd": "/repo"})));
-        assert!(tokio::time::timeout(Duration::from_secs(1), wait).await.unwrap().unwrap() > seen);
-        let (_, signals, _) = git_signals_since(seen);
-        let mine: Vec<_> = signals.iter().filter(|s| s.surface == "%t20").collect();
-        assert_eq!(mine.len(), 1, "a signal from another session is dropped like any other event");
-        assert_eq!(mine[0].paths, vec!["/repo/a.rs".to_string()]);
+        apply("%t20", "s", &ev(json!({"kind": "git", "tool": "Edit", "paths": ["/repo/a.rs"], "cwd": "/repo"})));
         assert!(!PANES.lock().unwrap()["%t20"].activity.iter().any(|row| row["kind"] == "git"));
     }
 
@@ -1372,32 +1251,6 @@ mod tests {
         let recent = facts_of("%f2", &state).unwrap().recent;
         assert_eq!(recent.len(), RECENT_TOOLS);
         assert_eq!(recent[0].label, "f7");
-    }
-
-    #[test]
-    fn a_git_signal_reaches_its_own_pane_and_any_pane_on_the_same_repository() {
-        let root = std::path::Path::new("/work/repo");
-        let edit = GitSignal { seq: 1, surface: "%1".into(), cwd: "/work/repo".into(), paths: vec!["/work/repo/src/a.rs".into()] };
-        assert!(git_signal_touches(&edit, "%1", std::path::Path::new("/elsewhere")));
-        assert!(git_signal_touches(&edit, "%2", root));
-        assert!(!git_signal_touches(&edit, "%2", std::path::Path::new("/work/repo-other")));
-        let relative = GitSignal { paths: vec!["src/a.rs".into()], ..edit.clone() };
-        assert!(git_signal_touches(&relative, "%2", root));
-        let outside = GitSignal { cwd: "/work/repo".into(), paths: vec!["/tmp/scratch.txt".into()], ..edit.clone() };
-        assert!(!git_signal_touches(&outside, "%2", root), "an edit outside the tree leaves another pane's column alone");
-        let command = GitSignal { paths: vec![], cwd: "/work/repo/sub".into(), ..edit.clone() };
-        assert!(git_signal_touches(&command, "%2", root));
-        let homeless = GitSignal { paths: vec![], cwd: String::new(), ..edit };
-        assert!(!git_signal_touches(&homeless, "%2", root));
-    }
-
-    #[test]
-    fn signals_pushed_out_of_the_ring_are_reported_as_lost() {
-        let start = git_seq();
-        record_git((0..GIT_SIGNAL_CAP + 3).map(|_| GitSignal { seq: 0, surface: "%r".into(), cwd: String::new(), paths: vec![] }).collect());
-        let (seq, _, lost) = git_signals_since(start);
-        assert!(lost);
-        assert_eq!(git_signals_since(seq), (seq, vec![], false));
     }
 
     #[tokio::test]

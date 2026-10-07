@@ -303,6 +303,10 @@ pub(crate) struct GitState {
     pub(crate) op: Option<&'static str>,
     pub(crate) col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     pub(crate) col_pinned_cwd: Option<std::path::PathBuf>,
+    /// 부모 폴더 칸마다 사람이 고른 하위 레포(칸 id → 레포). 없으면 최근에 만진 레포를 따라간다.
+    pub(crate) col_repo_choice: HashMap<String, std::path::PathBuf>,
+    /// 머리 메뉴의 하위 레포 줄 — 누르면 그 칸의 레포로 고른다.
+    pub(crate) path_menu_repo_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
     pub(crate) path_menu_open: bool,
     pub(crate) branch_menu_open: bool,
     pub(crate) branch_page: usize,

@@ -4,7 +4,6 @@ import {
   activityLabel,
   askKey,
   clip,
-  gitTouch,
   launchedTask,
   mergeTasks,
   permissionPreview,
@@ -271,12 +270,10 @@ export const register: Register = on => {
       send($, { kind: 'question', phase: 'start', id })
     }
     let failed = true
-    let ran = false
     let text = ''
     try {
       const result = await next(e)
-      ran = !('deny' in result && result.deny !== undefined)
-      failed = !ran || result.isError === true
+      failed = 'deny' in result && result.deny !== undefined ? true : result.isError === true
       text = clip(result.deny ?? result.text ?? '', RESULT_CAP)
       if (!failed) {
         const task = launchedTask(e.tool, e, result.result)
@@ -297,14 +294,6 @@ export const register: Register = on => {
         send($, { kind: 'question', phase: 'end', id })
       }
       send($, { kind: 'tool', phase: 'end', id, tool: e.tool, error: failed, text, agent: e.agentId ?? null })
-      // 실패한 명령도 파일을 반쯤 바꿨을 수 있다. 고치기 도구는 실패면 아무것도 안 썼다.
-      const touch = ran ? gitTouch(String(e.tool), e) : null
-      if (touch && (!failed || touch.tool === 'Bash')) {
-        void $.session.cwd().then(
-          cwd => send($, { kind: 'git', ...touch, cwd }),
-          () => send($, { kind: 'git', ...touch, cwd: '' }),
-        )
-      }
     }
   })
 
