@@ -4157,8 +4157,8 @@ enum NotifyPath {
 /// 애플 서명 표식이 있는데도 macOS 가 등록을 거절해 허락이 늘 없으므로 사실상 매번
 /// 그랬다. 허락이 있으면 알림센터, 없으면(거절·아직 답 없음) osascript 다.
 ///
-/// 배너가 남는 것은 OS 알림을 낼 수 없는 실행뿐이다 — 번들 없는 맨 바이너리(검증
-/// 리그·`cargo run`)는 알림센터 등록 자체가 안 되고, Windows 는 이 경로가 없다.
+/// 배너가 남는 것은 Windows(OS 알림 경로가 없다)와, 맥의 번들 없는 실행에서
+/// `KASATERM_NOTIFY_BANNER` 로 배너를 일부러 켠 검증뿐이다.
 fn notify_path(macos_bundle: bool, authorized: bool) -> NotifyPath {
     match (macos_bundle, authorized) {
         (false, _) => NotifyPath::Banner,
@@ -4184,6 +4184,13 @@ pub(crate) fn notify_desktop(
 ) {
     // lite 는 알림(시스템·자체 배너)을 내지 않는다.
     if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) {
+        return;
+    }
+    // 번들 없는 맥 실행(검증 리그·`cargo run`)은 알리지 않는다 — 리그가 띄운 자체 배너가 사람
+    // 화면에 계속 떴다(2026-10-07 「테스트하는 거에서 자체 알림 배너 왜 자꾸 떠」). 배너를
+    // 검증할 때만 `KASATERM_NOTIFY_BANNER` 로 켠다.
+    #[cfg(target_os = "macos")]
+    if !is_bundled() && std::env::var_os("KASATERM_NOTIFY_BANNER").is_none() {
         return;
     }
     #[cfg(target_os = "macos")]

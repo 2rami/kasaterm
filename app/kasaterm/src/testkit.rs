@@ -129,6 +129,7 @@ impl App {
     /// 어느 경로(native/osascript)로 갔고 아이콘이 무엇으로 떴나」를 헤드리스로
     /// 재현할 길이 없었다(2026-08-17 「os알림 아직도 기본아이콘인데」 조사).
     /// 격리 인스턴스에서 이 훅으로 쏘고 stderr 의 `[notify]` 줄과 화면을 본다.
+    /// 번들 없는 맥 리그는 알림을 안 내므로 배너를 볼 때는 `KASATERM_NOTIFY_BANNER=1` 도 준다.
     pub(crate) fn run_pending_autonotify(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
