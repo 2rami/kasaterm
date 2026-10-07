@@ -68,6 +68,19 @@ pub(crate) const FAKE_CLAUDE_SCRIPT: &str = concat!(
 
 static AUTOSETTINGS_SCROLL: std::sync::Mutex<Option<f32>> = std::sync::Mutex::new(None);
 
+/// `KASATERM_AUTOSETTINGS_TOUR` 진행 상태. 칸마다 리그를 새로 켜면 열두 번 부팅해야 해서
+/// 한 번 띄운 앱이 칸을 넘기며 찍는다.
+struct SettingsTour {
+    dir: std::path::PathBuf,
+    cats: Vec<SettingsCat>,
+    index: usize,
+    page: usize,
+    captured: bool,
+    next_at: Instant,
+}
+
+static AUTOSETTINGS_TOUR: std::sync::Mutex<Option<SettingsTour>> = std::sync::Mutex::new(None);
+
 impl App {
     /// Headless verification: arm a clean exit after KASATERM_AUTOQUIT_MS so a
     /// background run exercises the save-on-exit path (and thus the next
@@ -4261,6 +4274,104 @@ impl App {
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
+        }
+    }
+
+    /// `KASATERM_AUTOSETTINGS_TOUR=<폴더>` — 설정이 열린 뒤 옆 목록의 칸(+캐릭터 테마)을
+    /// 차례로 열고 `<번호>-<칸>-<쪽>.png` 로 찍는다. 0쪽은 사람이 처음 보는 접힌 화면이고,
+    /// 1쪽부터는 보이는 펼침을 다 열고 한 화면씩 내려간다 — 접힌 칸 안의 잔재가 안 보이면
+    /// 정리할 목록에서 빠진다. 그림·한도 같은 캐시가 늦게 차므로 한 걸음마다 0.8초를 둔다.
+    pub(crate) fn pump_autosettings_tour(&mut self) {
+        let mut guard = AUTOSETTINGS_TOUR.lock().unwrap();
+        if guard.is_none() {
+            static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let Some(dir) = std::env::var("KASATERM_AUTOSETTINGS_TOUR").ok().filter(|d| !d.is_empty()) else {
+                return;
+            };
+            let _ = std::fs::create_dir_all(&dir);
+            let mut cats = SettingsCat::nav().to_vec();
+            if !cats.contains(&SettingsCat::Theme) {
+                cats.push(SettingsCat::Theme);
+            }
+            *guard = Some(SettingsTour {
+                dir: dir.into(),
+                cats,
+                index: 0,
+                page: 0,
+                captured: false,
+                next_at: Instant::now() + std::time::Duration::from_millis(1500),
+            });
+            let first = guard.as_ref().unwrap().cats[0];
+            self.settings_scene.set_category(first);
+            self.refresh_native_settings_media_cache();
+        }
+        let Some(tour) = guard.as_mut() else { return };
+        if Instant::now() < tour.next_at
+            || self.gpu.as_ref().is_some_and(|g| g.capture_next.is_some())
+        {
+            return;
+        }
+        tour.next_at = Instant::now() + std::time::Duration::from_millis(800);
+        if !tour.captured && tour.page > 0 {
+            let closed: Vec<&'static str> = self
+                .settings_scene
+                .hits()
+                .iter()
+                .filter_map(|hit| match hit.target {
+                    crate::native_settings::Target::Disclosure(id)
+                        if !self.settings_scene.disclosures().contains(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            if !closed.is_empty() {
+                for id in closed {
+                    self.settings_scene.toggle_disclosure(id);
+                }
+                self.chrome_dirty = true;
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+                return;
+            }
+        }
+        if !tour.captured {
+            let cat = tour.cats[tour.index];
+            let path = tour.dir.join(format!(
+                "{:02}-{}-{}.png",
+                tour.index + 1,
+                format!("{cat:?}").to_lowercase(),
+                tour.page
+            ));
+            eprintln!("[autosettings-tour] {}", path.display());
+            if let Some(g) = self.gpu.as_mut() {
+                g.capture_next = Some(path.to_string_lossy().into_owned());
+            }
+            tour.captured = true;
+        } else if tour.page == 0 {
+            tour.page = 1;
+            tour.captured = false;
+        } else if tour.page < 12 && self.settings_scene.scroll_page(true) {
+            tour.page += 1;
+            tour.captured = false;
+        } else if tour.index + 1 < tour.cats.len() {
+            tour.index += 1;
+            tour.page = 0;
+            tour.captured = false;
+            let cat = tour.cats[tour.index];
+            self.native_settings_blur();
+            self.settings_scene.set_category(cat);
+            self.refresh_native_settings_media_cache();
+        } else {
+            eprintln!("[autosettings-tour] 끝");
+            *guard = None;
+            return;
+        }
+        self.chrome_dirty = true;
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 

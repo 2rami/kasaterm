@@ -4376,16 +4376,18 @@ impl SettingsCat {
     /// 옆 목록에 실제로 서는 칸 — `Theme` 은 「캐릭터」 밑으로 들어가 목록에서 빠졌다
     /// (2026-09-10 목업 IA: 셸+커서→터미널, 테마+캐릭터→캐릭터). 페이지 자체는
     /// 캐릭터 페이지의 「테마 관리」로 연다. 웹 대조는 그대로 `ALL` 이다.
+    /// 묶음(화면·에이전트·앱)과 그 안의 순서는 자주 여는 것이 위다 — 시스템 테마를
+    /// 찾는 사람이 캐릭터 칸부터 지나야 했다(2026-10-07). 묶음 머리는 `native_settings::NAV_GROUPS`.
     pub(crate) const NAV: [SettingsCat; 11] = [
-        Self::Students,
         Self::Appearance,
-        Self::Claude,
         Self::Shell,
-        Self::Accounts,
-        Self::Machines,
-        Self::General,
         Self::Statusbar,
         Self::Weather,
+        Self::Accounts,
+        Self::Claude,
+        Self::Students,
+        Self::General,
+        Self::Machines,
         Self::Pet,
         Self::Feedback,
     ];
@@ -4572,6 +4574,8 @@ pub(crate) enum SettingsAction {
     Shape(&'static str),
     /// 크롬 글꼴: "terminal" · "system" · 설치 글꼴 이름. 재시작 없이 바로 먹는다.
     UiFont(String),
+    /// 터미널 격자 글꼴(가족 이름). 첫 실행 화면의 글꼴 고르기와 같은 길로 저장한다.
+    TerminalFont(String),
     /// Font-size stepper: −1 / +1 logical px on the base cell font.
     FontSizeDelta(i8),
     /// UI 배율 스테퍼(±10%). Cmd+/− 와 같은 축이지만, 키로만 있으면 얼마나

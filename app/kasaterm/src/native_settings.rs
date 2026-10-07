@@ -301,7 +301,7 @@ impl SettingsCache {
             .iter()
             .find(|(key, _, _)| *key == system_key)
         {
-            palettes.push(palette_choice("system", &format!("System · {label}")));
+            palettes.push(palette_choice("system", &format!("시스템 따라가기 · {label}")));
         }
         palettes.extend(
             theme::THEME_PRESETS
@@ -594,6 +594,9 @@ pub(crate) enum HitCursor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DropdownId {
     UiFont,
+    /// 시스템 따라가기에서 밝은(true)·어두운(false) 화면에 입힐 팔레트.
+    SystemPalette(bool),
+    TerminalFont,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -966,6 +969,7 @@ impl App {
         self.poll_feedback_delivery();
         if self.settings_room_active() {
             self.pump_autosettings_scroll();
+            self.pump_autosettings_tour();
         }
         if self.settings_room_active() && self.settings_scene.dynamic_refresh_due() {
             self.refresh_native_settings_dynamic_cache();
@@ -2474,12 +2478,20 @@ struct NavigationLayout {
     content_height: f32,
 }
 
+/// 옆 목록의 묶음 머리 — (`SettingsCat::NAV` 에서 그 묶음이 시작하는 자리, 이름).
+pub(crate) const NAV_GROUPS: [(usize, &str); 3] = [(0, "화면"), (4, "에이전트"), (7, "앱")];
+const NAV_GROUP_H: f32 = 24.0;
+
+fn nav_groups_before(index: usize) -> usize {
+    NAV_GROUPS.iter().filter(|(start, _)| *start <= index).count()
+}
+
 fn navigation_layout(area: Rect, nav_width: f32, count: usize) -> NavigationLayout {
     let (x, y, _, height) = area;
     let close = (x + 12.0, y + (height - 46.0).max(0.0), nav_width - 24.0, 32.0_f32.min(height));
     let top = (y + 56.0).min(close.1);
     let viewport = (x, top, nav_width, (close.1 - 8.0 - top).max(0.0));
-    let groups_height = if count > 4 { 48.0 } else if count > 0 { 24.0 } else { 0.0 };
+    let groups_height = NAV_GROUPS.iter().filter(|(start, _)| *start < count).count() as f32 * NAV_GROUP_H;
     let groups = count as f32 * 36.0 + groups_height <= viewport.3;
     let (row_height, row_step) = if groups { (32.0, 36.0) } else { (CTL_H, CTL_H + 4.0) };
     NavigationLayout {
@@ -2489,7 +2501,7 @@ fn navigation_layout(area: Rect, nav_width: f32, count: usize) -> NavigationLayo
 }
 
 fn navigation_row(layout: &NavigationLayout, index: usize, scroll: f32) -> Rect {
-    let group_offset = if layout.groups { if index >= 4 { 48.0 } else { 24.0 } } else { 0.0 };
+    let group_offset = if layout.groups { nav_groups_before(index) as f32 * NAV_GROUP_H } else { 0.0 };
     (layout.viewport.0 + 12.0,
         layout.viewport.1 + index as f32 * layout.row_step + group_offset - scroll,
         layout.viewport.2 - 24.0, layout.row_height)
@@ -2521,8 +2533,8 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     g.push_clip(navigation.viewport.0, navigation.viewport.1, navigation.viewport.2, navigation.viewport.3);
     for (index, &cat) in SettingsCat::nav().iter().enumerate() {
         let rect = navigation_row(&navigation, index, navigation_scroll);
-        if navigation.groups && (index == 0 || index == 4) {
-            draw_text(g, ax + 20.0, rect.1 - 24.0, if index == 0 { "내 작업 환경" } else { "연결과 앱" }, 10.5, theme::text_mute(), false);
+        if let Some((_, group)) = NAV_GROUPS.iter().find(|(start, _)| *start == index).filter(|_| navigation.groups) {
+            draw_text(g, ax + 20.0, rect.1 - NAV_GROUP_H, group, 10.5, theme::text_mute(), false);
         }
         let (label, icon, _) = category_meta(cat);
         // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
@@ -2952,17 +2964,6 @@ fn paint_general(
         s.file_tree_default,
         SettingsAction::ToggleFileTree,
     );
-    toggle_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "pane 하단바 기본으로 켜기",
-        s.footer_default,
-        SettingsAction::ToggleFooter,
-    );
 
     *y += 12.0;
     section_title(
@@ -3016,15 +3017,44 @@ fn paint_appearance(
     y: &mut f32,
     w: f32,
 ) {
+    // 시스템 따라가기는 팔레트 하나가 아니라 고르는 방식이라 맨 위 토글로 둔다 — 「다른 팔레트」
+    // 칩 사이에 「System · Light」로 묻혀 있어 그런 모드가 있는 줄 몰랐다(2026-10-07).
+    let follow = s.theme == "system";
+    let fixed = if theme::system_theme_key() == "light" { &s.system_light } else { &s.system_dark };
+    toggle_row_hint(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "시스템 따라가기",
+        "운영체제가 밝은 화면·어두운 화면을 바꾸면 팔레트도 함께 바뀝니다",
+        follow,
+        SettingsAction::ThemeMode(if follow { fixed.clone() } else { "system".to_string() }),
+    );
+    if follow {
+        for (light, label, current) in [
+            (true, "밝은 화면", &s.system_light),
+            (false, "어두운 화면", &s.system_dark),
+        ] {
+            let value = s.palettes.iter().find(|palette| &palette.key == current)
+                .map_or(current.as_str(), |palette| palette.label.as_str());
+            dropdown_row(g, s, hits, x, y, w, label, value, DropdownId::SystemPalette(light));
+        }
+        plain_hint(g, x, y, w, "아래에서 팔레트를 하나 고르면 시스템 따라가기가 꺼지고 그 팔레트로 고정됩니다.");
+    }
+    row_label(g, x, y, "팔레트");
     *y += appearance_preview::paint_palette_strip(g, s, hits, x, *y, w);
-    if !appearance_preview::FEATURED_PALETTES.contains(&s.theme.as_str()) {
+    if !follow && !appearance_preview::FEATURED_PALETTES.contains(&s.theme.as_str()) {
         if let Some(current) = s.palettes.iter().find(|palette| palette.key == s.theme) {
             plain_hint(g, x, y, w, &format!("현재 · {}", current.label));
         }
     }
     if disclosure(g, s, hits, x, y, w, "other-palettes", "다른 팔레트") {
         let choices = s.palettes.iter()
-            .filter(|palette| !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
+            .filter(|palette| palette.key != "system"
+                && !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
             .map(|palette| (palette.label.clone(), s.theme == palette.key,
                 SettingsAction::ThemeMode(palette.key.clone()))).collect();
         chips_owned(g, s, hits, x, y, w, choices);
@@ -3045,37 +3075,6 @@ fn paint_appearance(
     }
     if !disclosure(g, s, hits, x, y, w, "appearance", "기타 외형 · 기기, 강조색, 글꼴·커서와 크기") {
         return;
-    }
-    if s.theme == "system" {
-        section_title(
-            g,
-            x,
-            *y,
-            "시스템 밝기별 테마",
-            "운영체제가 밝음/어두움을 바꿀 때 입을 팔레트입니다",
-        );
-        *y += 52.0;
-        for (light, label, current) in [
-            (true, "밝은 화면", s.system_light.as_str()),
-            (false, "어두운 화면", s.system_dark.as_str()),
-        ] {
-            draw_text(g, x + 2.0, *y + 9.0, label, 11.5, theme::text_dim(), false);
-            let choices = s
-                .palettes
-                .iter()
-                .filter(|palette| palette.key != "system")
-                .map(|palette| {
-                    (
-                        palette.label.clone(),
-                        palette.key == current,
-                        SettingsAction::ThemeSystemSlot(light, palette.key.clone()),
-                    )
-                })
-                .collect();
-            *y += 28.0;
-            chips_owned(g, s, hits, x, y, w, choices);
-        }
-        *y += 8.0;
     }
     if !s.custom_active.is_empty() {
         let label = s
@@ -3122,7 +3121,7 @@ fn paint_appearance(
         .iter()
         .map(|(name, _)| {
             (
-                (*name).to_string(),
+                preset_label(name).to_string(),
                 s.accent == *name,
                 SettingsAction::Accent((*name).to_string()),
             )
@@ -3134,19 +3133,28 @@ fn paint_appearance(
         return;
     }
     let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
-        (*label, s.shape == *key, SettingsAction::Shape(key))).collect();
+        (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
     seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
     let contrast: Vec<(&str, bool, SettingsAction)> = theme::CONTRAST_PRESETS
         .iter()
         .map(|(label, value)| {
             (
-                *label,
+                preset_label(label),
                 (s.min_contrast - *value).abs() < 0.01,
                 SettingsAction::MinContrast(label),
             )
         })
         .collect();
     seg_row(g, s, hits, x, y, w, "최소 대비", &contrast);
+
+    // 한 펼침 안에 열다섯 줄이 이름 없이 이어져 있었다 — 무엇을 바꾸는 줄인지 묶음 이름으로 가른다.
+    // 터미널 글꼴은 설치 폴더의 얼굴 이백여 개를 칩으로 깔아 세 화면을 차지했고, 그 끝에
+    // 「글자 크기」가 한 번 더 있었다(2026-10-07). 선택 상자 하나와 크기 하나로 줄인다.
+    *y += 12.0;
+    section_title(g, x, *y, "글자와 배율", "");
+    *y += 54.0;
+    let (_, terminal_font) = s.onboarding.terminal_fonts();
+    dropdown_row(g, s, hits, x, y, w, "터미널 글꼴", terminal_font.unwrap_or("시스템 기본"), DropdownId::TerminalFont);
     stepper_row(
         g,
         s,
@@ -3154,22 +3162,10 @@ fn paint_appearance(
         x,
         y,
         w,
-        "글자 크기",
+        "터미널 글자 크기",
         &format!("{:.0}px", s.font_size),
         SettingsAction::FontSizeDelta(-1),
         SettingsAction::FontSizeDelta(1),
-    );
-    stepper_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "UI 배율",
-        &format!("{:.0}%", s.ui_zoom * 100.0),
-        SettingsAction::UiZoomDelta(-1),
-        SettingsAction::UiZoomDelta(1),
     );
     // 크롬 글꼴. 터미널 격자와 별개다 — 격자는 고정폭이어야 하지만 탭·설정·상태줄은
     // 산세리프가 더 잘 읽힌다. 바로 먹고 재시작이 필요 없다.
@@ -3180,10 +3176,39 @@ fn paint_appearance(
         x,
         y,
         w,
-        "UI 글꼴",
+        "화면 글꼴",
         &ui_font_label(&s.ui_font),
         DropdownId::UiFont,
     );
+    stepper_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "화면 배율",
+        &format!("{:.0}%", s.ui_zoom * 100.0),
+        SettingsAction::UiZoomDelta(-1),
+        SettingsAction::UiZoomDelta(1),
+    );
+    *y += 10.0;
+    button(
+        g,
+        s,
+        hits,
+        (x, *y, 130.0, CTL_H),
+        "배율 1:1로 되돌리기",
+        Target::Setting(SettingsAction::ResetScale),
+        false,
+    );
+    *y += CTL_H + 10.0;
+
+    // 외형 칸은 이 페이지 한 곳에 — 상태줄 높이는 「일반」, 글꼴·커서는 「터미널」에 흩어져
+    // 있었다(2026-10-06 「외형 묶고」). 칸 하단바를 켜는 줄도 높이 옆으로 왔다.
+    *y += 12.0;
+    section_title(g, x, *y, "창 배치", "");
+    *y += 54.0;
     seg_row(
         g,
         s,
@@ -3210,8 +3235,6 @@ fn paint_appearance(
             ("점 세 개", !s.pane_header_bar, SettingsAction::PaneHeader("handle")),
         ],
     );
-    // 외형 칸은 이 페이지 한 곳에 — 상태줄 높이는 「일반」, 글꼴·커서는 「터미널」에 흩어져
-    // 있었다(2026-10-06 「외형 묶고」).
     stepper_row(
         g,
         s,
@@ -3219,11 +3242,22 @@ fn paint_appearance(
         x,
         y,
         w,
-        "창 상태줄 높이",
+        "앱 하단바 높이",
         &format!("{:.0}px", s.status_h),
         SettingsAction::StatusBarH((s.status_h - 2.0).max(socket::STATUS_H_MIN) as u32),
         SettingsAction::StatusBarH((s.status_h + 2.0).min(socket::STATUS_H_MAX) as u32),
     );
+    toggle_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "칸 하단바 기본으로 켜기",
+        s.footer_default,
+        SettingsAction::ToggleFooter,
+    );
     stepper_row(
         g,
         s,
@@ -3231,23 +3265,11 @@ fn paint_appearance(
         x,
         y,
         w,
-        "pane 하단바 높이",
+        "칸 하단바 높이",
         &format!("{:.0}px", s.footer_h),
         SettingsAction::PaneFooterH((s.footer_h - 2.0).max(socket::PANE_FOOTER_H_MIN) as u32),
         SettingsAction::PaneFooterH((s.footer_h + 2.0).min(socket::PANE_FOOTER_H_MAX) as u32),
     );
-    *y += 10.0;
-    button(
-        g,
-        s,
-        hits,
-        (x, *y, 130.0, CTL_H),
-        "배율 1:1로 되돌리기",
-        Target::Setting(SettingsAction::ResetScale),
-        false,
-    );
-    *y += CTL_H + 10.0;
-    crate::native_onboarding::paint_fonts(g, &s.onboarding, hits, x, y, w);
     paint_cursor(g, s, hits, x, y, w);
 }
 
@@ -3318,7 +3340,10 @@ fn paint_statusbar(
         *y += 4.0;
     }
 
-    toggle_row(
+    *y += 12.0;
+    section_title(g, x, *y, "구분선과 기본값", "");
+    *y += 54.0;
+    toggle_row_hint(
         g,
         s,
         hits,
@@ -3326,29 +3351,21 @@ fn paint_statusbar(
         y,
         w,
         "묶음 사이 구분선",
+        "계정 · 작업 정보 · 기기 상태가 바뀌는 자리만 얇게 나눕니다",
         s.statusbar_separators,
         SettingsAction::ToggleStatusbarSeparators,
     );
-    draw_text(
-        g,
-        x + 12.0,
-        *y - 9.0,
-        "계정 · 작업 정보 · 기기 상태가 바뀌는 자리만 얇게 나눕니다",
-        10.5,
-        theme::text_mute(),
-        false,
-    );
-    *y += 16.0;
+    *y += 12.0;
     button(
         g,
         s,
         hits,
-        (x, *y, 132.0, 34.0),
+        (x, *y, 132.0, CTL_H),
         "기본값으로",
         Target::Setting(SettingsAction::ResetStatusbar),
         false,
     );
-    *y += 48.0;
+    *y += CTL_H + 14.0;
 }
 
 fn statusbar_widget_label(id: &str) -> &'static str {
@@ -3362,6 +3379,7 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "tunnel" => "모바일 연결",
         "link" => "기기 연결",
         "version" => "앱 버전",
+        "schedules" => "예약",
         _ => "알 수 없는 항목",
     }
 }
@@ -3391,6 +3409,7 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
     }
     match id {
         "ports" => ":3000 · :5173",
+        "schedules" => "예약 2",
         "pet" => "펫 2명",
         "clipboard" => "클립보드",
         "resources" => "CPU 18% · RAM 42%",
@@ -4057,8 +4076,6 @@ fn paint_cursor(
         "모양만 고르면 색은 현재 캐릭터를 따라가요",
     );
     *y += 54.0;
-    draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
-    *y += 24.0;
     cursor_shape_grid(
         g,
         s,
@@ -4083,7 +4100,7 @@ fn paint_cursor(
             g,
             x + 2.0,
             *y,
-            "고급 · 기존 설정",
+            "예전에 고른 모양",
             11.5,
             theme::text_dim(),
             true,
@@ -4183,7 +4200,7 @@ fn paint_cursor(
                 SettingsAction::MouseCursor("arrow"),
             ),
             (
-                "I-빔",
+                "글자 입력",
                 s.mouse_cursor == "ibeam",
                 SettingsAction::MouseCursor("ibeam"),
             ),
@@ -4235,7 +4252,7 @@ fn paint_shell(
         x,
         y,
         w,
-        "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 pane에서 직접 붙여 주세요.",
+        "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 칸에서 직접 붙여 주세요.",
     );
     *y += 16.0;
 }
@@ -4301,7 +4318,7 @@ pub(crate) fn paint_setup_section(
             }
             if !crate::lite_mode() {
                 let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
-                    (*label, s.shape == *key, SettingsAction::Shape(key))).collect();
+                    (preset_label(label), s.shape == *key, SettingsAction::Shape(key))).collect();
                 seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
             }
         }
@@ -4399,17 +4416,7 @@ fn paint_claude(
         "새로 띄우는 Claude와 Codex 작업대에 적용됩니다",
     );
     *y += 54.0;
-    toggle_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "캐릭터 성격 넣기",
-        s.claude_persona,
-        SettingsAction::ToggleClaudePersona,
-    );
+    // 「캐릭터 성격 넣기」는 「캐릭터」 페이지의 「캐릭터 페르소나」와 같은 값이라 거기 한 곳에 둔다.
     toggle_row(
         g,
         s,
@@ -4702,7 +4709,7 @@ fn machines_view() -> Vec<MachineRow> {
         let build = m.get("build").and_then(|v| v.as_str());
         rows.push(MachineRow {
             label,
-            ssh: "그쪽이 터널로 열어 둔 길 — 이 기계 명부엔 안 적혀요".to_string(),
+            ssh: "그쪽이 터널로 열어 둔 길 — 이 기기 목록엔 안 적혀요".to_string(),
             status: machine_status(online, build_match, build, ago),
             online,
             build_match,
@@ -4747,10 +4754,8 @@ fn paint_pet(
         on,
         SettingsAction::TogglePet,
     );
-    *y += 16.0;
-
-    draw_text(g, x, *y, "캐릭터", 12.5, theme::text(), true);
-    *y += 24.0;
+    section_title(g, x, *y, "캐릭터", "");
+    *y += 54.0;
     if chars.is_empty() {
         draw_text(
             g,
@@ -4823,9 +4828,7 @@ fn paint_pet(
         "휠로 크기 조절 · 말풍선을 누르면 그 창으로",
         "우클릭으로 행동 선택과 기능 켜고 끄기",
     ] {
-        let text = fit(g, text, w, 11.0, false);
-        draw_text(g, x, *y, &text, 11.0, theme::text_dim(), false);
-        *y += 22.0;
+        plain_hint(g, x, y, w, text);
     }
 }
 
@@ -4908,9 +4911,9 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
 }
 
 fn pet_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str) {
-    *y += 18.0;
-    draw_text(g, x, *y, title, 12.5, theme::text(), true);
-    *y += 24.0;
+    *y += 12.0;
+    section_title(g, x, *y, title, "");
+    *y += 54.0;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5010,23 +5013,23 @@ fn paint_machines(
         x,
         *y,
         "터미널에서 `to <이름>` 으로 오갑니다 — `to` 만 치면 목록이 나옵니다",
-        11.0,
+        10.5,
         theme::text_dim(),
         false,
     );
-    *y += 30.0;
+    *y += 12.0;
     paint_device_names(g, s, hits, caret, x, y, w);
     // 카사크롬(브라우저 도구)이 어느 기계의 크롬을 조작할지 — 이 기계가 기본이고,
     // 명부에 ssh 나 chrome_port 가 있는 기계만 고를 수 있다(다리로 갈 길이 있어야 한다).
     // 고른 기계가 안 닿으면 MCP 는 이 기계 크롬으로 물러난다(하단바 「모바일」 칩이 말한다).
-    draw_text(g, x, *y + 5.0, "카사크롬이 쓰는 크롬", 12.5, theme::text(), true);
-    *y += 28.0;
+    section_title(g, x, *y, "카사크롬이 쓰는 크롬", "");
+    *y += 54.0;
     {
         let chosen = kasa_mcp::machines::kasachrome_machine();
         let candidates = kasa_mcp::machines::kasachrome_candidates();
         let names: Vec<String> = candidates.iter().map(|l| crate::render::pane_identity::device_name(l)).collect();
         let mut cells: Vec<(&str, bool, SettingsAction)> = vec![(
-            "이 기계",
+            "이 기기",
             chosen.is_empty(),
             SettingsAction::ChromeMachine(String::new()),
         )];
@@ -5037,7 +5040,7 @@ fn paint_machines(
                 SettingsAction::ChromeMachine(label.clone()),
             ));
         }
-        seg_row(g, s, hits, x, y, w, "크롬 기계", &cells);
+        seg_row(g, s, hits, x, y, w, "크롬이 있는 기기", &cells);
         *y += 6.0;
         let note = if chosen.is_empty() {
             "학생의 브라우저 도구가 이 맥의 크롬을 씁니다".to_string()
@@ -5051,21 +5054,21 @@ fn paint_machines(
         }
         *y += 11.0;
     }
-    draw_text(g, x, *y + 5.0, "명부", 12.5, theme::text(), true);
+    section_title(g, x, *y, "기기 목록", "");
     button(
         g,
         s,
         hits,
-        (x + w - 104.0, *y, 104.0, 30.0),
-        "＋ 기계 추가",
+        (x + w - 92.0, *y + 22.0, 92.0, CTL_H),
+        "기기 추가",
         Target::Setting(SettingsAction::AddMachine),
         false,
     );
-    // 버튼(30px) 아래로 내려서 시작하고, 폭에 맞춰 접는다 — 한 줄로 두면 버튼
+    // 단추 아래로 내려서 시작하고, 폭에 맞춰 접는다 — 한 줄로 두면 단추
     // 밑을 지나 오른쪽 경계 너머까지 흘렀다(2026-09-07 지적 「박스 마감」).
-    *y += 34.0;
+    *y += 54.0;
     let guide = crate::native_strings::text(
-        "이름과 ssh 대상(user@host)만 적으면 됩니다 — 열쇠는 ~/.ssh 에서 찾아 짝짓고, 다른 망의 기계는 넷버드(VPN)로 먼저 이어 두세요",
+        "이름과 ssh 대상(user@host)만 적으면 됩니다 — 열쇠는 ~/.ssh 에서 찾아 짝짓고, 다른 망의 기기는 넷버드(VPN)로 먼저 이어 두세요",
     );
     for line in wrap_words(g, &guide, w, 10.5) {
         draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
@@ -5077,7 +5080,7 @@ fn paint_machines(
             g,
             x,
             *y,
-            "아직 등록된 기계가 없어요 — 위 「기계 추가」로 하나 넣어 주세요",
+            "아직 등록된 기기가 없어요 — 위 「기기 추가」로 하나 넣어 주세요",
             11.0,
             theme::text_mute(),
             false,
@@ -5113,8 +5116,8 @@ fn paint_device_names(
     y: &mut f32,
     w: f32,
 ) {
-    draw_text(g, x, *y + 5.0, "기기 이름", 12.5, theme::text(), true);
-    *y += 28.0;
+    section_title(g, x, *y, "기기 이름", "");
+    *y += 54.0;
     let note = crate::native_strings::text(
         "여기서 바꾼 이름이 같은 KASA 계정의 PC·폰 화면에 함께 떠요 — `to` 로 부르는 명부 이름과 기기색은 그대로예요",
     );
@@ -5289,7 +5292,7 @@ fn machine_row(
                 g,
                 text_x + 2.0,
                 rect.1 + 72.0,
-                "Enter 저장 · Esc 취소 · 열쇠 로그인만 받는 기계는 별칭에 열쇠를 짝지어 두세요",
+                "Enter 저장 · Esc 취소 · 열쇠 로그인만 받는 기기는 별칭에 열쇠를 짝지어 두세요",
                 10.5,
                 theme::text_dim(),
                 false,
@@ -5731,14 +5734,14 @@ fn paint_students(
             g,
             s,
             hits,
-            (x, *y, 98.0, 32.0),
+            (x, *y, 98.0, CTL_H),
             "목록으로",
             Target::Setting(SettingsAction::CloseStudent),
             false,
         );
         let selected_label = fit(g, selected, (w - 194.0).max(0.0), 17.0, true);
         draw_text(g, x + 112.0, *y + 6.0, &selected_label, 17.0, theme::text(), true);
-        let selected_theme = fit(g, if s.student_theme.is_empty() { "Bundled" } else { &s.student_theme }, (w - 194.0).max(0.0), 10.5, false);
+        let selected_theme = fit(g, if s.student_theme.is_empty() { "기본 캐릭터" } else { &s.student_theme }, (w - 194.0).max(0.0), 10.5, false);
         draw_text(
             g,
             x + 112.0,
@@ -5804,7 +5807,7 @@ fn paint_students(
                 g,
                 s,
                 hits,
-                (x + 242.0, *y, 104.0, 34.0),
+                (x + 242.0, *y, 104.0, CTL_H),
                 "원본 저장",
                 Target::Setting(SettingsAction::SaveStudentRaw),
                 true,
@@ -6197,23 +6200,23 @@ fn paint_feedback(
         g,
         s,
         hits,
-        (x, *y, 120.0, 36.0),
+        (x, *y, 120.0, CTL_H),
         "피드백 보내기",
         Target::Setting(SettingsAction::SendFeedback),
         true,
     ); } else {
-        draw_text(g, x, *y + 8.0, "보내는 중…", 12.0, theme::text_dim(), false);
+        draw_text(g, x, *y + 6.0, "보내는 중…", 12.0, theme::text_dim(), false);
     }
     button(
         g,
         s,
         hits,
-        (x + 132.0, *y, 116.0, 36.0),
+        (x + 132.0, *y, 116.0, CTL_H),
         "저장 폴더 열기",
         Target::Setting(SettingsAction::OpenFeedbackDir),
         false,
     );
-    *y += 52.0;
+    *y += CTL_H + 16.0;
     if let Some((message, error)) = &s.feedback_delivery {
         for line in wrap_words(g, &crate::native_strings::text(message), w, 10.5) {
             draw_text(g, x, *y, &line, 10.5, if *error { theme::danger() } else { theme::text_dim() }, false);
@@ -7323,7 +7326,9 @@ fn seg_row(
 /// 선택 줄(`segmented`) 위에 서는 한 줄 이름표. 줄이 둘 이상 잇달아 서면 어느 줄이
 /// 무엇을 고르는지 칸 글자만으로는 안 읽혔다(「끔 · 1초 · 3초」가 무엇의 간격인지) —
 /// 2026-09-07 「자잘한 것들 다 수정」.
+/// 칩·카드 묶음 위의 이름. 바로 위 행의 밑줄에 글자가 붙지 않게 10 을 띄운다.
 fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
+    *y += 10.0;
     draw_text(g, x + 2.0, *y, label, 12.0, theme::text_dim(), false);
     *y += 20.0;
 }
@@ -7484,6 +7489,25 @@ fn chips_owned(
 }
 
 /// 선택 상자에 뜨는 값 이름. 「terminal」·「system」·빈 값은 사람 말로 바꾼다.
+/// 테마 표의 영어 이름(값이자 웹 설정의 키라 못 바꾼다)을 설정 화면에 보일 이름으로.
+fn preset_label(name: &str) -> &str {
+    match name {
+        "blue" => "파랑",
+        "green" => "초록",
+        "orange" => "주황",
+        "purple" => "보라",
+        "pink" => "분홍",
+        "Rounded" => "둥글게",
+        "Sharp" => "각지게",
+        "Pixel" => "픽셀",
+        "Off" => "끔",
+        "Low" => "낮게",
+        "Default" => "기본",
+        "High" => "높게",
+        other => other,
+    }
+}
+
 fn ui_font_label(value: &str) -> String {
     match value {
         "" | "terminal" => "터미널 글꼴 그대로".to_string(),
@@ -7518,7 +7542,49 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
             }));
             items
         }
+        DropdownId::SystemPalette(light) => {
+            let current = if light { &s.system_light } else { &s.system_dark };
+            s.palettes
+                .iter()
+                .filter(|palette| palette.key != "system")
+                .map(|palette| {
+                    (
+                        palette.label.clone(),
+                        &palette.key == current,
+                        SettingsAction::ThemeSystemSlot(light, palette.key.clone()),
+                    )
+                })
+                .collect()
+        }
+        DropdownId::TerminalFont => {
+            let (fonts, current) = s.onboarding.terminal_fonts();
+            terminal_font_families(fonts, current)
+                .into_iter()
+                .map(|font| (font.to_string(), Some(font) == current, SettingsAction::TerminalFont(font.to_string())))
+                .collect()
+        }
     }
+}
+
+/// 글꼴 목록에서 굵기·기울임 얼굴을 걷는다. 설치 폴더를 그대로 훑어 한 가족이 스무 줄로
+/// 갈려 들어오는데(JetBrainsMonoNerdFont-Bold·-ExtraLightItalic …) 격자는 보통 얼굴 하나로
+/// 굵게·기울임을 스스로 만든다. 지금 쓰는 얼굴은 무엇이든 남긴다.
+fn terminal_font_families<'a>(fonts: &'a [String], current: Option<&str>) -> Vec<&'a str> {
+    const STYLE: [&str; 13] = [
+        "thin", "extralight", "ultralight", "light", "medium", "semibold", "demibold",
+        "bold", "extrabold", "ultrabold", "black", "heavy", "italic",
+    ];
+    let styled = |font: &str| {
+        let lower = font.to_ascii_lowercase();
+        let tail = lower.rsplit(['-', ' ']).next().unwrap_or("");
+        lower.contains("italic")
+            || ((lower.contains('-') || lower.contains(' ')) && STYLE.iter().any(|style| tail == *style))
+    };
+    fonts
+        .iter()
+        .map(String::as_str)
+        .filter(|font| Some(*font) == current || !styled(font))
+        .collect()
 }
 
 const DROPDOWN_FIELD_W: f32 = 260.0;
@@ -8337,12 +8403,46 @@ mod navigation_layout_tests {
         assert!(layout.groups);
         assert_eq!(layout.row_height, 32.0);
         assert_eq!(navigation_row(&layout, 4, 0.0).1 - navigation_row(&layout, 3, 0.0).1, 60.0);
+        assert_eq!(navigation_row(&layout, 7, 0.0).1 - navigation_row(&layout, 6, 0.0).1, 60.0);
+        assert_eq!(navigation_row(&layout, 6, 0.0).1 - navigation_row(&layout, 5, 0.0).1, 36.0);
+    }
+
+    #[test]
+    fn group_starts_match_the_navigation_order() {
+        use crate::SettingsCat;
+        let nav = SettingsCat::NAV;
+        let starts: Vec<SettingsCat> = super::NAV_GROUPS.iter().map(|(start, _)| nav[*start]).collect();
+        assert_eq!(starts, [SettingsCat::Appearance, SettingsCat::Accounts, SettingsCat::General]);
+        let layout = navigation_layout((0.0, 36.0, 1000.0, 900.0), 200.0, nav.len());
+        assert_eq!(layout.content_height, nav.len() as f32 * 36.0 + 72.0);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_font_list_keeps_families_and_the_current_face() {
+        let fonts: Vec<String> = [
+            "Courier New", "Courier New Bold", "D2Coding-Ver1.3.2-20180524", "JetBrainsMonoNerdFont",
+            "JetBrainsMonoNerdFont-Bold", "JetBrainsMonoNerdFont-ExtraLightItalic", "JetBrainsMonoNerdFont-Light",
+            "MonoplexKR-Text", "SFNSMonoItalic", "SpaceMono", "SpaceMono-Bold",
+        ].iter().map(|f| f.to_string()).collect();
+        assert_eq!(
+            terminal_font_families(&fonts, None),
+            ["Courier New", "D2Coding-Ver1.3.2-20180524", "JetBrainsMonoNerdFont", "MonoplexKR-Text", "SpaceMono"],
+        );
+        assert!(terminal_font_families(&fonts, Some("JetBrainsMonoNerdFont-Light"))
+            .contains(&"JetBrainsMonoNerdFont-Light"));
+    }
+
+    #[test]
+    fn statusbar_widgets_all_have_names() {
+        for id in crate::statusbar_config::WIDGETS {
+            assert_ne!(statusbar_widget_label(id), "알 수 없는 항목", "{id}");
+        }
+    }
 
     #[test]
     fn compact_color_picker_stays_inside_narrow_and_wide_columns() {

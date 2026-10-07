@@ -498,6 +498,13 @@ pub(crate) struct Snapshot {
     language: String,
 }
 
+impl Snapshot {
+    /// 설정 「터미널」의 글꼴 고르기가 같은 목록·같은 현재 값을 쓴다.
+    pub(crate) fn terminal_fonts(&self) -> (&[String], Option<&str>) {
+        (&self.state.data.fonts, self.state.data.font_family.as_deref())
+    }
+}
+
 pub(crate) fn snapshot(app: &App, area: Rect) -> Snapshot {
     Snapshot {
         area,

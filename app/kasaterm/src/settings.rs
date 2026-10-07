@@ -1207,6 +1207,9 @@ impl App {
                 }
                 self.repaint_all();
             }
+            SettingsAction::TerminalFont(family) => {
+                self.native_onboarding_action(crate::native_onboarding::Action::Font(family));
+            }
             SettingsAction::MinContrast(label) => {
                 let v = theme::CONTRAST_PRESETS
                     .iter()
