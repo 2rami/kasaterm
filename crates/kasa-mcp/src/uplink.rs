@@ -266,9 +266,16 @@ fn set_status(f: impl FnOnce(&mut Status)) {
     }
 }
 
+/// Only the machine Nacho actually runs on advertises `nacho_app`. A hub whose descriptor points at another
+/// machine (a mesh address) forwards over that mesh, and the gateway does not fail over between hubs — so
+/// when the mesh dropped, account requests that landed on that hub died with `nacho_unreachable` even
+/// though the machine running Nacho was connected the whole time.
 fn valid_nacho_app_target(url: &str, key: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some() && url.username().is_empty() && url.password().is_none()
+        && url.host_str().is_some_and(|host| host.eq_ignore_ascii_case("localhost")
+            || host.trim_start_matches('[').trim_end_matches(']')
+                .parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+        && url.username().is_empty() && url.password().is_none()
         && url.fragment().is_none() && url.query().is_none())
         && !key.trim().is_empty() && axum::http::HeaderValue::from_str(key).is_ok()
 }
@@ -850,7 +857,10 @@ mod tests {
     #[test]
     fn nacho_capability_requires_a_valid_local_url_and_header_key() {
         assert!(valid_nacho_app_target("http://127.0.0.1:8878", "synthetic-app-key"));
-        for url in ["http://", "file:///tmp/nacho", "https://user:password@hub.example", "https://hub.example/#key", "https://hub.example/?key=x"] {
+        assert!(valid_nacho_app_target("http://localhost:8878", "synthetic-app-key"));
+        assert!(valid_nacho_app_target("http://[::1]:8878", "synthetic-app-key"));
+        for url in ["http://", "file:///tmp/nacho", "https://user:password@127.0.0.1", "http://127.0.0.1:8878/#key", "http://127.0.0.1:8878/?key=x",
+                    "http://100.83.26.209:8792", "https://hub.example"] {
             assert!(!valid_nacho_app_target(url, "synthetic-app-key"));
         }
         for key in ["", "  ", "x\nX-Kasa-Owner: 1", "x\r\ny"] {
