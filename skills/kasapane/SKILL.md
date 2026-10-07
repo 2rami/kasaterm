@@ -79,7 +79,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `done <succeeded\|failed\|blocked\|needs_restart\|needs_approval> '<요약>' [--changed …] [--tests …] [--next …]` | 내 작업 보고 — 보드에 실리고, 오케스트레이터가 띄운 창이면 그 보고함에도 들어간다 | — |
 | `window-new --machine <기계>` | **그 기계에 새 방**을 만들고 여기 보기 창으로 연다(§5 원격 방) | `surface`·`window`·`summary` |
 | `split <방향> %N@<기계>` / `tab %N@<기계>` | 그 기계의 그 pane **옆**/**탭**에 셸 pane. 축은 저쪽이 칸 종횡비로 고른다(방향 인자는 힌트). `--cwd` 가능. 여기 보기 창엔 몇 초 안에 거울이 붙는다 | `surface`·`window` |
-| `machines` / `machines connect <기계> [--here]` | 명부 기계 목록(내가 있는 곳 *) / 그 기계 셸을 칸으로 | plain text |
+| `machines` / `machines connect <기계> [--here]` | 명부 기계 목록(내가 있는 곳 *) / 그 기계에 **새 방**을 세워 셸(보기 창은 뒤에 앉아 보던 방을 안 뺏는다, `--run` 가능) · `--here` 면 이 칸 자리를 그 셸로 | plain text |
 | 셸 `to <기계>` / `to <기계> <명령>` / `to ..` | 저쪽 활성 방에 셸 pane 을 세우고 이 pane 이 비춤 / 거기서 명령 / 로컬 복귀 | — |
 
 **배치·현황 조회 (read-only, 부작용 없음)**

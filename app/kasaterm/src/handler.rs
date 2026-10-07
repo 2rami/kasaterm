@@ -566,6 +566,13 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_deref()
                             .ok_or_else(|| anyhow::anyhow!("--here 는 기준 pane 이 있어야 한다"))?;
                         self.remote_shell_here(pid, &base, cwd.as_deref())?
+                    } else if let Some(pid) = rpane
+                        .is_none()
+                        .then(|| self.connect_remote_room(&base, cwd.as_deref()))
+                        .transpose()?
+                        .flatten()
+                    {
+                        pid
                     } else {
                         self.spawn_remote_pane(&base, cwd.as_deref(), rpane.as_deref(), from.as_deref())?
                     };

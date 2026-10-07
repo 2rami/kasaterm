@@ -1658,6 +1658,39 @@ impl App {
         Ok((remote_id, window))
     }
 
+    /// `machines connect <기기>`(`--here` 없이)의 새 셸. 부른 칸 옆에 연결 칸을 붙이면 다른 기기
+    /// 셸이 이 기기 방에 섞였다 — 그 기기에 새 방을 세워 기기 방으로 둔다(2026-10-07 지적 「그
+    /// 기기방에서 하게 돼있지 않나」). 보기 창은 뒤에 앉히고 보던 방으로 돌아온다 — 학생이 부르는
+    /// 일이라 사람이 치던 글자가 저쪽 셸로 새면 안 된다. 저쪽이 칸을 못 세우면 `None`(옛 길로).
+    pub(crate) fn connect_remote_room(&mut self, base: &str, cwd: Option<&str>) -> Result<Option<String>> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let at = kasa_socket::backend::SpawnShellAt {
+            cwd: cwd.map(str::to_string),
+            window: Some(kasa_socket::backend::SpawnWindow::New),
+            ..Default::default()
+        };
+        let (remote_id, window) = match kasa_mcp::remote::spawn_shell_pane_at(base, &at, None) {
+            Ok(seat) => seat,
+            Err(e) => {
+                eprintln!("[connect] {base} 에 방을 못 세워 옆 연결 칸으로 물러섬: {e:#}");
+                return Ok(None);
+            }
+        };
+        let label = kasa_mcp::machines::label_for_base(base).unwrap_or_default();
+        let back = self.active_window;
+        let seated = self.seat_remote_view_window(&label, base, &remote_id, true, window.map(|w| format!("방 {}", w + 1)));
+        let host = self.ws.lock().unwrap().active_pane.clone();
+        self.switch_window(back);
+        if let Err(e) = seated {
+            let _ = kasa_mcp::remote::close_remote_pane(base, &remote_id, None, true);
+            return Err(e);
+        }
+        self.set_toast(format!("{label} 에 새 방 — 사이드바 {label} 에서 보세요"));
+        host.map(Some).ok_or_else(|| anyhow::anyhow!("보기 창의 칸을 못 얻었다"))
+    }
+
     /// 보기 창의 배치를 **원본 방의 배치**에 맞춘다. 거울은 순서대로 쪼개져 앉거나(옛 unfold·
     /// 자동 동기) 저장본대로 되살아나서, 미니맵은 원본 좌표로 같아 보여도 안의 배치는 달랐다
     /// (2026-09-17 지적 「미니맵은 똑같은데 안에 배치가 달라」). 원본이 정본이다 — 2초마다

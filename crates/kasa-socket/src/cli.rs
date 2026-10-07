@@ -1550,7 +1550,7 @@ fn print_help() {
         ]),
         ("기기·네트워크", &[
             "machines [--names]                        명부 기계 목록",
-            "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기의 셸을 칸으로",
+            "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기에 새 방(보기 창은 뒤에) · --here 면 이 칸 자리를 그 기기 셸로",
             "machines move [%N] <기기|local> [--cwd /레포] [--force]   칸의 claude 를 그 기기로 이사(대화·미커밋 변경까지)",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
         ]),
