@@ -225,9 +225,13 @@ fn settings_path() -> Option<PathBuf> {
     }
 }
 
-/// 이 기기에서 신원을 아는 슬롯들. 네트워크·키체인을 안 건드리고 앱이 남겨 둔 것만 읽는다:
+/// 이 기기에서 신원을 아는 슬롯들. 네트워크는 안 건드린다:
 /// Claude 는 앱이 슬롯 토큰으로 확인해 적어 둔 이메일·조직(`claude_account_emails`·`_orgs`),
 /// Codex 는 슬롯의 `auth.json` id_token. 신원을 모르는 슬롯(아직 로그인 전)은 빠진다.
+///
+/// Claude 는 적어 둔 신원만으로 「이 기기」라고 하지 않는다 — 로그인이 풀린 뒤에도 표는
+/// 남아서, 풀린 슬롯이 목록에 이 기기 몫으로 올라갔다(2026-10-07 맥북 acct-1·acct-8).
+/// 그 슬롯 저장소에 쓸 수 있는 로그인이 남아 있는지 보고, 확실히 없을 때만 뺀다.
 ///
 /// Claude 기본 로그인(`""`)은 고른 슬롯이 없을 때만 넣는다 — 슬롯을 고르면 기본 자리는
 /// 그 슬롯을 옮겨 담은 작업대라 같은 계정이고, 적어 둔 기본 신원은 옛 값일 수 있다(`claude_auth.rs`).
@@ -239,7 +243,10 @@ pub fn local_snapshot() -> Vec<LocalAccount> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null);
     let base = path.parent().map(PathBuf::from);
-    let mut out = claude_slots(&settings);
+    let mut out = claude_slots(&settings, |slot| {
+        let store = claude_store(base.as_deref(), &settings, slot);
+        crate::http::claude_slot_login(store.as_deref().and_then(|p| p.to_str()))
+    });
     let default_auth = kasa_socket::home_dir().map(|home| home.join(".codex/auth.json"));
     out.extend(codex_slots(&settings, base.as_deref(), default_auth.as_deref()));
     out
@@ -261,7 +268,25 @@ fn slots(settings: &Value, key: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn claude_slots(settings: &Value) -> Vec<LocalAccount> {
+/// 그 슬롯의 로그인이 실제로 사는 저장소. 기본 로그인과, 작업대에 실려 있는 활성
+/// 계정은 claude 의 기본 자리(`None`)다 — 그 계정의 금고는 작업대보다 낡아 있다.
+fn claude_store(base: Option<&std::path::Path>, settings: &Value, slot: &str) -> Option<PathBuf> {
+    if slot.is_empty() {
+        return None;
+    }
+    let root = base?.join("claude-accounts");
+    let active = settings.get("claude_account").and_then(Value::as_str) == Some(slot);
+    let on_bench = std::fs::read_to_string(root.join("_active/workbench-stamp.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|v| v.get("account").and_then(Value::as_str) == Some(slot));
+    (!(active && on_bench)).then(|| root.join(slot))
+}
+
+fn claude_slots(
+    settings: &Value,
+    login: impl Fn(&str) -> crate::http::SlotLogin,
+) -> Vec<LocalAccount> {
     let remembered = |map: &str, id: &str| {
         settings
             .get(map)
@@ -278,7 +303,10 @@ fn claude_slots(settings: &Value) -> Vec<LocalAccount> {
     ids.into_iter()
         .filter_map(|(id, label)| {
             let email = remembered("claude_account_emails", &id);
-            email.contains('@').then(|| LocalAccount {
+            if !email.contains('@') || login(&id) == crate::http::SlotLogin::LoggedOut {
+                return None;
+            }
+            Some(LocalAccount {
                 provider: "claude".into(),
                 org: remembered("claude_account_orgs", &id),
                 slot: id,
@@ -702,7 +730,7 @@ mod tests {
             "claude_account_orgs": {"acct-1": "g@gmail.com's Organization"},
             "codex_accounts": [{"id": "codex-1", "label": "사이오닉팀"}],
         });
-        let claude = claude_slots(&settings);
+        let claude = claude_slots(&settings, |_| crate::http::SlotLogin::LoggedIn);
         assert_eq!(claude.len(), 1, "로그인 전 자리와 작업대(기본)가 섞였다: {claude:?}");
         assert_eq!((claude[0].slot.as_str(), claude[0].label.as_str()), ("acct-1", "지메일"));
         let codex = codex_slots(&settings, Some(&dir), None);
@@ -714,8 +742,40 @@ mod tests {
             "claude_accounts": [{"id": "acct-9", "label": ""}],
             "claude_account_emails": {"": "r@s.ai"},
         });
-        let bare = claude_slots(&bare);
+        let bare = claude_slots(&bare, |_| crate::http::SlotLogin::LoggedIn);
         assert_eq!((bare.len(), bare[0].slot.as_str()), (1, ""), "고른 슬롯이 없으면 기본 로그인이 이 기기의 계정이다");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signed_out_slots_are_not_claimed_for_this_device() {
+        use crate::http::SlotLogin;
+        let settings = serde_json::json!({
+            "claude_accounts": [
+                {"id": "acct-5", "label": "개인"}, {"id": "acct-1", "label": "지메일"}, {"id": "acct-8", "label": "네이버"},
+            ],
+            "claude_account": "acct-5",
+            "claude_account_emails": {"acct-5": "r@s.ai", "acct-1": "g@gmail.com", "acct-8": "n@naver.com"},
+        });
+        let got = claude_slots(&settings, |slot| match slot {
+            "acct-1" => SlotLogin::LoggedOut,
+            "acct-8" => SlotLogin::Unknown,
+            _ => SlotLogin::LoggedIn,
+        });
+        let slots: Vec<&str> = got.iter().map(|a| a.slot.as_str()).collect();
+        assert_eq!(slots, ["acct-5", "acct-8"], "풀린 슬롯은 빠지고, 못 읽은 슬롯은 로그아웃으로 단정하지 않는다");
+    }
+
+    #[test]
+    fn active_slot_on_the_workbench_is_read_from_the_default_store() {
+        let base = std::env::temp_dir().join(format!("kasa-agents-store-{}", uuid::Uuid::new_v4()));
+        let settings = serde_json::json!({ "claude_account": "acct-5" });
+        assert_eq!(claude_store(Some(&base), &settings, ""), None);
+        assert_eq!(claude_store(Some(&base), &settings, "acct-5"), Some(base.join("claude-accounts/acct-5")), "지문이 없으면 금고가 정본");
+        std::fs::create_dir_all(base.join("claude-accounts/_active")).unwrap();
+        std::fs::write(base.join("claude-accounts/_active/workbench-stamp.json"), r#"{"account":"acct-5","digest":"x"}"#).unwrap();
+        assert_eq!(claude_store(Some(&base), &settings, "acct-5"), None, "작업대에 실린 활성 계정은 기본 자리를 본다");
+        assert_eq!(claude_store(Some(&base), &settings, "acct-1"), Some(base.join("claude-accounts/acct-1")));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

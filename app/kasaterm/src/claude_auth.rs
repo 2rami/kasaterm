@@ -403,7 +403,7 @@ fn credentials_match(a: &[u8], b: &[u8]) -> bool {
 /// 자리), 나머지는 각자 금고다.
 ///
 /// 사용량 폴러가 이걸 써야 하는 이유가 결정적이다: 폴러는 만료된 토큰을 만나면 그
-/// 슬롯으로 claude 를 한 번 돌려 **갱신을 유발한다**(`refresh_slot_once`). refresh
+/// 슬롯 토큰을 **직접 갱신한다**(`refresh_claude_token`). refresh
 /// token 은 1회용이라, 활성 계정을 금고에서 갱신해 버리면 같은 계정을 작업대에서 쓰는
 /// 도는 pane 들의 토큰이 그 순간 죽은 값이 된다 — 세션 전부가 로그아웃된다. 살아 있는
 /// 신원 하나당 자리도 하나여야 한다.
@@ -419,7 +419,7 @@ pub(crate) fn runtime_dir_for(account_id: &str, _active_account: &str) -> Option
                 // ⚠️ 지문이 「이 계정이 작업대에 있다」고 말하면 **작업대 읽기가
                 // 실패해도 금고로 떨어지지 않는다.** `read_credentials` 는 macOS 에서
                 // `security` 자식 프로세스라 일시 실패가 있고, 그 한 번이 금고 경로를
-                // 폴러에 흘리면 사용량 조회 실패 → `refresh_slot_once(금고)` → 활성
+                // 폴러에 흘리면 사용량 조회 실패 → 금고 갱신 → 활성
                 // 계정 금고가 따로 갱신되며 **작업대의 refresh token 이 소비된 죽은
                 // 값이 된다**(1회용). 도는 pane 들은 access token 으로 버텨 멀쩡해
                 // 보이다가, 재시작하면 새 claude 들이 refresh 를 시도해 전부

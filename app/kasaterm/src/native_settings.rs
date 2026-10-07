@@ -447,6 +447,11 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
                 }
             })
             .unwrap_or_else(|| "확인 중…".to_string());
+        let org_note = crate::settings::account_org_note(&account.id);
+        let sub = match &org_note {
+            Some(note) => format!("{sub} · {note}"),
+            None => sub,
+        };
         let dir = crate::claude_auth::runtime_dir_for_cached(&account.id, &active_id)
             .map_or(String::new(), |path| path.to_string_lossy().into_owned());
         let usage = app.claude_account_usage(&account.id);
@@ -475,6 +480,7 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             ),
             sub,
             sub_kind: match probe {
+                _ if org_note.is_some() => "danger",
                 Some(ref value) if value.verified && !value.logged_in => "danger",
                 Some(_) => "mute",
                 None => "faint",
@@ -6874,7 +6880,8 @@ fn account_row(
             rx,
             by,
             "rotate-cw",
-            "재인증",
+            // 풀린 줄에서는 이 단추가 할 일이 「다시 인증」이 아니라 「로그인」이다.
+            if matches!(row.usage_state, AccountUsageState::LoggedOut) { "로그인" } else { "재인증" },
             Target::Setting(SettingsAction::ReauthAccount(
                 row.provider,
                 row.id.clone(),

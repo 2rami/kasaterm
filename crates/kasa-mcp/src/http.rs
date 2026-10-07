@@ -3443,9 +3443,79 @@ fn claude_keychain_service(dir: Option<&str>) -> String {
 /// 캐시 키와 조회 대상이 같은 값에서 나오고, 테스트가 서로 env 를 안 밟는다.
 fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
     let (v, _) = read_claude_credentials(account_dir)?;
+    // claude 는 갱신이 `invalid_grant` 로 거부되면 그 자리에 빈 토큰을 써 둔다. 빈 값을
+    // 토큰으로 넘기면 프로필 조회가 「일시 실패」로 읽혀 로그아웃 슬롯이 로그인돼 보였다.
     v.pointer("/claudeAiOauth/accessToken")
         .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
         .map(str::to_string)
+}
+
+/// 슬롯 로그인 상태. `claude auth status` 와 같은 판정을 claude 를 띄우지 않고 한다 —
+/// 띄우면 만료 토큰을 그 자리에서 회전시켜 다른 갱신과 부딪힌다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotLogin {
+    LoggedIn,
+    LoggedOut,
+    /// 저장소를 못 열었다(ssh 세션의 잠긴 키체인 등). 로그아웃으로 단정하지 않는다.
+    Unknown,
+}
+
+/// 그 슬롯에 쓸 수 있는 로그인이 있나. 값은 꺼내지 않고 있음/없음만 본다.
+///
+/// 로그인 = 갱신 토큰이 있거나 아직 안 끝난 access token 이 있음. 단 이 프로세스가
+/// 그 갱신 토큰을 서버에서 거부당했고(`dead_refresh`) access token 도 끝났으면 로그아웃이다.
+pub fn claude_slot_login(account_dir: Option<&str>) -> SlotLogin {
+    let account_dir = account_dir.filter(|s| !s.is_empty());
+    let Some(creds_dir) = account_dir
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(kasa_socket::home_dir()?.join(".claude")))
+    else {
+        return SlotLogin::Unknown;
+    };
+    let mut docs: Vec<serde_json::Value> = std::fs::read_to_string(creds_dir.join(".credentials.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .into_iter()
+        .collect();
+    let mut unknown = false;
+    if cfg!(target_os = "macos") {
+        let svc = claude_keychain_service(account_dir);
+        let read = |args: &[&str]| crate::no_window_command("security").args(args).output().ok();
+        let out = keychain_user()
+            .and_then(|u| read(&["find-generic-password", "-s", &svc, "-a", &u, "-w"]))
+            .filter(|o| o.status.success())
+            .or_else(|| read(&["find-generic-password", "-s", &svc, "-w"]));
+        match out {
+            Some(o) if o.status.success() => {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(o.stdout.trim_ascii()) {
+                    docs.push(v);
+                }
+            }
+            // 44 = errSecItemNotFound. 그 밖(36 잠김 등)은 있는지조차 모른다.
+            Some(o) if o.status.code() == Some(44) => {}
+            _ => unknown = true,
+        }
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let rejected = account_dir.is_some_and(|d| dead_refresh().lock().is_ok_and(|g| g.contains(d)));
+    if docs.iter().any(|v| oauth_usable(v, now_ms, rejected)) {
+        SlotLogin::LoggedIn
+    } else if unknown {
+        SlotLogin::Unknown
+    } else {
+        SlotLogin::LoggedOut
+    }
+}
+
+fn oauth_usable(doc: &serde_json::Value, now_ms: u64, refresh_rejected: bool) -> bool {
+    let Some(o) = doc.get("claudeAiOauth") else { return false };
+    let has = |k: &str| o.get(k).and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+    let live_access = has("accessToken")
+        && o.get("expiresAt").and_then(|v| v.as_u64()).is_some_and(|e| e > now_ms);
+    live_access || (has("refreshToken") && !refresh_rejected)
 }
 
 /// 자격증명이 **어디서 왔는지**. 갱신한 값은 읽은 자리에 그대로 되써야 한다 —
@@ -3608,6 +3678,12 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
         eprintln!("[claude-token] 활성 계정 금고 회전 거부 — 작업대가 정본이다");
         return None;
     }
+    // 사용량·신원 창구가 같은 슬롯을 동시에 물으면 둘 다 같은 갱신 토큰으로 회전을
+    // 시도했다. 진 쪽은 400 이고, 서버가 재사용을 감지하면 이긴 쪽의 새 토큰까지 무효가
+    // 돼 슬롯이 통째로 죽는다(2026-09-24 맥북: 같은 주기에 두 슬롯이 함께 끊겼다).
+    // 슬롯마다 한 줄로 세우고, 기다린 쪽은 앞사람이 저장한 새 토큰을 다시 읽는다.
+    let gate = refresh_gate(dir);
+    let _turn = gate.lock().await;
     let (mut creds, src) = read_claude_credentials(Some(dir))?;
     let oauth = creds.get("claudeAiOauth")?.as_object()?;
     let expires_at = oauth.get("expiresAt")?.as_u64()?;
@@ -3622,7 +3698,7 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
     if slot_has_live_claude(dir) {
         return None;
     }
-    let refresh = oauth.get("refreshToken")?.as_str()?.to_string();
+    let refresh = oauth.get("refreshToken")?.as_str().filter(|r| !r.is_empty())?.to_string();
     let resp = reqwest::Client::new()
         .post(CLAUDE_OAUTH_TOKEN_URL)
         .form(&[
@@ -3668,6 +3744,14 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
     Some(access)
 }
 
+fn refresh_gate(dir: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static GATES: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    gates.entry(dir.to_string()).or_default().clone()
+}
+
 /// `GET /claude-usage` — claude oauth usage API(5시간/주간 한도·사용률·리셋)를 그대로
 /// 프록시한다. rate limit 은 claude CLI 가 안 내보내지만 `/api/oauth/usage` 가 직접 준다
 /// (사용자: ba모드 사용량 패널). 토큰 만료/실패는 그 상태를 ok:false 로 전달.
@@ -3691,14 +3775,6 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 ///
 /// 슬롯별 TTL 캐시: 설정 화면이 프레임마다 probe 를 부르는 자리라 캐시 없이는
 /// upstream 을 두들겨 429 를 부른다. 신원은 거의 안 바뀌므로 5분이면 넉넉하다.
-/// 그 슬롯으로 `claude` 를 한 번 조용히 돌려 만료된 access token 을 갱신시킨다.
-/// 갱신 자체는 Claude Code 가 하고 우리는 방아쇠만 당긴다 — 토큰을 직접 만지는
-/// 길은 버전 의존이라 조용히 깨지고, 잘못하면 그 슬롯 로그인이 날아간다.
-///
-/// **프로세스 수명당 슬롯마다 한 번만.** 설정 화면은 이 조회를 프레임마다 부르므로,
-/// 가드가 없으면 로그인이 진짜로 죽은 슬롯 하나가 초당 수십 개의 claude 를 낳는다.
-/// 실패해도 다시 시도하지 않는 건 그래서다 — 진짜 죽은 슬롯은 사람이 다시 로그인해야
-/// 하지 반복 실행으로는 안 살아난다.
 /// 이 금고 dir 이 **활성 계정**의 것인가 — 작업대 지문(workbench-stamp.json)이
 /// 정본이다. 활성 계정의 refresh token 사슬은 작업대와 공유(1회용)라, 금고 쪽에서
 /// 소비하면 도는 pane 전체가 다음 refresh 에 로그아웃된다(2026-08-18 22:04 실측 —
@@ -3758,64 +3834,6 @@ fn managed_vault_refresh_forbidden_in(path: &std::path::Path, stamp: Option<&str
     }
 }
 
-fn refresh_slot_once(dir: &str) {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    // ⚠️ **활성 계정의 금고는 절대 refresh 하지 않는다**(is_active_vault_dir 주석).
-    // kasaterm 쪽 runtime_dir_for 도 같은 이유로 금고 폴백을 막지만, 이 프록시는
-    // 아로나 UI 등 다른 클라이언트도 부르므로 여기 자체 가드가 이중 방어다.
-    if managed_vault_refresh_forbidden(dir) {
-        eprintln!("[usage] 활성 계정 금고 refresh 거부 — 작업대가 정본이다");
-        return;
-    }
-    // ⚠️ 임시 폴더 슬롯으로는 **절대** 띄우지 않는다. 그렇게 띄운 claude 는 그 폴더
-    // 이름으로 **키체인 항목을 새로 만들고**(`/tmp/claude-accounts/_active` →
-    // `Claude Code-credentials-e187bae6`), 그 항목은 claude 소유라 이후 우리가 읽을
-    // 때마다 macOS 가 사용자에게 암호 창을 띄운다. 2026-08-15~16 에 사용자가 반복해서
-    // 겪은 그 창이 정확히 이 경로였다 — 시험을 한 번 돌릴 때마다 하나씩 되살아났다.
-    //
-    // `cfg(test)` 로는 못 막는다. 이 crate 는 kasaterm 의 **의존성**으로 컴파일되므로
-    // kasaterm 시험이 도는 동안에도 여기의 `cfg(test)` 는 꺼져 있다.
-    if !dir.is_empty() {
-        let p = std::path::Path::new(dir);
-        let temp = std::env::temp_dir();
-        if p.starts_with(&temp)
-            || p.starts_with("/tmp")
-            || p.starts_with("/private/tmp")
-            || p.starts_with("/private/var/folders")
-        {
-            return;
-        }
-    }
-    static TRIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    {
-        let Ok(mut t) = TRIED.get_or_init(Default::default).lock() else {
-            return;
-        };
-        if !t.insert(dir.to_string()) {
-            return;
-        }
-    }
-    let dir = dir.to_string();
-    std::thread::spawn(move || {
-        let mut cmd = crate::no_window_command(claude_bin().to_string_lossy().as_ref());
-        if !dir.is_empty() {
-            // 슬롯을 가르는 건 **자격증명 저장소**뿐이다. 처음엔 `CLAUDE_CONFIG_DIR`
-            // 를 줬는데 그건 설정 전체를 옮기는 변수라, 정작 인증은 기본 슬롯 그대로
-            // 붙어 (갱신하려던 슬롯이 아니라) 기본 토큰만 살아나고, 대신 슬롯 폴더에
-            // `.claude.json`·`projects/` 가 통째로 생겼다. 갱신은 영영 안 되니 그 슬롯은
-            // 계속 빈칸 — 이 함수가 고치려던 증상 그대로다.
-            cmd.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &dir);
-        }
-        // 가장 짧은 왕복이면 된다 — 목적은 답이 아니라 토큰 갱신이다.
-        let _ = cmd
-            .args(["-p", "ok", "--max-turns", "1"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
-}
-
 async fn claude_identity_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -3841,8 +3859,10 @@ async fn claude_identity_handler(
         Some(t) => Some(t),
         None => read_claude_token_from(Some(dir.as_str())),
     };
-    let Some(token) = token else {
-        // 토큰이 없으면 그 슬롯은 로그인 자체가 안 된 것 — 호출자가 그대로 표시한다.
+    // 토큰 문자열이 남아 있어도 갱신이 거부된 채 끝난 슬롯은 로그아웃이다. 그걸
+    // 「프로필 일시 실패」로 답하면 화면이 표에 남은 옛 신원으로 「로그인됨」을 그린다.
+    let logged_out = claude_slot_login(Some(dir.as_str())) == SlotLogin::LoggedOut;
+    let Some(token) = token.filter(|_| !logged_out) else {
         return (cors, Json(serde_json::json!({ "ok": false, "error": "no token" })));
     };
     let resp = reqwest::Client::new()
@@ -3860,17 +3880,10 @@ async fn claude_identity_handler(
         _ => None,
     };
     let Some(body) = body else {
-        // 십중팔구 access token 이 만료된 것이다. 안 쓰는 슬롯은 Claude Code 가
-        // 갱신할 일이 없어 며칠이면 죽고, 그러면 이 자리가 영영 빈칸으로 남아
-        // "계정이 하나밖에 안 보인다"가 된다(사용자, 2026-08-02. 실측: 기본 슬롯만
-        // 유효하고 나머지 둘은 이틀 전 만료였다).
-        //
-        // **토큰은 우리가 만지지 않는다.** refresh 를 직접 구현하려면 Anthropic 의
-        // OAuth client_id·엔드포인트를 흉내내야 하는데 그건 Claude Code 내부 상수라
-        // 버전이 오르면 조용히 깨지고, 회전된 refresh token 을 잘못 쓰면 그 슬롯의
-        // 로그인이 통째로 날아간다. 대신 Claude Code 에게 시킨다 — 그 슬롯으로 한 번
-        // 돌려 주면 자기 로직으로 갱신한다(실측으로 두 슬롯 다 이 방법으로 살아났다).
-        refresh_slot_once(&dir);
+        // 여기서 claude 를 그 슬롯으로 띄워 갱신을 시키던 길은 걷었다. 갱신은 위의
+        // `refresh_claude_token` 한 곳만 한다 — 갱신하는 쪽이 둘이면 1회용 갱신 토큰을
+        // 서로 먼저 쓰려다 슬롯을 죽이고, 진 claude 는 그 자리에 빈 토큰을 써 둔다
+        // (2026-10-05 맥북 acct-1·4·8 이 앱 재시작 직후 그 꼴이 됐다).
         // 실패는 캐시하지 않는다 — 네트워크가 돌아오면 바로 진짜 값을 보여야 한다.
         return (cors, Json(serde_json::json!({ "ok": false, "error": "profile api unavailable" })));
     };
@@ -9711,6 +9724,39 @@ mod tests {
         // e3b0c442(빈 입력의 sha256)라는 그럴듯한 이름이 나와 조용히 빗나간다.
         assert_eq!(claude_keychain_service(None), "Claude Code-credentials");
         assert_eq!(claude_keychain_service(Some("")), "Claude Code-credentials");
+    }
+
+    /// claude 가 갱신 거부 뒤 남기는 빈 토큰 자리를 토큰으로 읽으면 안 된다.
+    #[test]
+    fn wiped_slot_has_no_token_and_is_signed_out() {
+        let d = temp_dir("acct-wiped");
+        std::fs::write(
+            d.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"subscriptionType":"max"}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_claude_token_from(Some(d.to_str().unwrap())), None);
+        let doc = serde_json::from_str(&std::fs::read_to_string(d.join(".credentials.json")).unwrap()).unwrap();
+        assert!(!oauth_usable(&doc, 1, false));
+    }
+
+    #[test]
+    fn slot_login_follows_refresh_token_and_server_rejection() {
+        let doc = |access: &str, refresh: &str, exp: u64| {
+            serde_json::json!({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh, "expiresAt": exp}})
+        };
+        assert!(oauth_usable(&doc("a", "r", 10), 100, false), "만료돼도 갱신 토큰이 있으면 로그인");
+        assert!(!oauth_usable(&doc("a", "r", 10), 100, true), "갱신 토큰이 거부됐고 access 도 끝났으면 로그아웃");
+        assert!(oauth_usable(&doc("a", "r", 1000), 100, true), "거부됐어도 access 가 살아 있는 동안은 로그인");
+        assert!(oauth_usable(&doc("a", "", 1000), 100, false));
+        assert!(!oauth_usable(&doc("a", "", 10), 100, false));
+    }
+
+    #[test]
+    fn one_refresh_turn_per_slot() {
+        let a = refresh_gate("/x/acct-1");
+        assert!(std::sync::Arc::ptr_eq(&a, &refresh_gate("/x/acct-1")), "같은 슬롯은 같은 줄에 선다");
+        assert!(!std::sync::Arc::ptr_eq(&a, &refresh_gate("/x/acct-2")), "다른 슬롯은 서로 안 기다린다");
     }
 
     /// 계정을 고르면 그 저장소에서 토큰을 읽어야 한다 — 안 그러면 pill 이 계정을

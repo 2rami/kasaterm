@@ -2615,7 +2615,7 @@ impl App {
                 //
                 // 코드가 붙는 것은 우리가 지어낸 말 셋뿐이다. 이메일·조직명은
                 // 데이터라 옮길 것이 없다.
-                let (mut sub, kind, mut sub_code) = match &probe {
+                let (mut sub, mut kind, mut sub_code) = match &probe {
                     Some(p) if p.verified && !p.logged_in => {
                         ("로그인 필요".to_string(), "danger", Some("account_login_required"))
                     }
@@ -2626,6 +2626,11 @@ impl App {
                     sub = format!("{sub} · {org}");
                     // 조직명이 붙으면 더는 통문장이 아니다 — 코드로 갈면 조직이
                     // 사라지므로 그때는 서버 문구를 그대로 쓰게 둔다.
+                    sub_code = None;
+                }
+                if let Some(note) = account_org_note(&id) {
+                    sub = format!("{sub} · {note}");
+                    kind = "danger";
                     sub_code = None;
                 }
                 let numbered = format!("계정 {}", idx + 1);
@@ -5025,6 +5030,22 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
                 })
             }
         };
+        let (email, org) = match &probe {
+            Some(p) if p.verified && p.logged_in => (p.email.clone(), p.org.clone()),
+            _ => remembered_identity(&key),
+        };
+        let slots: Vec<(String, String, String, String)> = socket::read_claude_accounts()
+            .into_iter()
+            .map(|a| {
+                let (e, o) = remembered_identity(&a.id);
+                (a.id, a.label, e, o)
+            })
+            .collect();
+        let label = slots.iter().find(|s| s.0 == key).map(|s| s.1.clone()).unwrap_or_default();
+        let note = org_mismatch_note(&label, &email, &org, probe.as_ref().is_some_and(|p| p.logged_in))
+            .map(str::to_string)
+            .or_else(|| same_account_note(&key, &email, &org, &slots));
+        org_notes().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), note);
         {
             probe_generation().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut m = probe_cache().lock().unwrap();
@@ -5295,6 +5316,64 @@ fn label_is_auto(label: &str) -> bool {
 
 /// 화면에 띄울 조직명 — 팀 조직일 때만 Some. 개인 조직은 이름이 `<이메일>'s
 /// Organization` 이라 이메일을 한 번 더 읽는 것과 다름없어 노이즈만 된다.
+/// 그 Claude 슬롯이 로그인 풀림으로 **확인**됐나. 조회 중·일시 실패는 아니다.
+pub(crate) fn claude_signed_out(id: &str) -> bool {
+    auth_probe(id).is_some_and(|p| p.verified && !p.logged_in)
+}
+
+type OrgNotes = std::sync::Mutex<std::collections::HashMap<String, Option<String>>>;
+
+fn org_notes() -> &'static OrgNotes {
+    static NOTES: std::sync::OnceLock<OrgNotes> = std::sync::OnceLock::new();
+    NOTES.get_or_init(Default::default)
+}
+
+/// 신원 조회 스레드가 채워 둔 그 슬롯의 별명·조직 어긋남 알림. 화면은 읽기만 한다.
+pub(crate) fn account_org_note(id: &str) -> Option<String> {
+    org_notes().lock().ok()?.get(id).cloned().flatten()
+}
+
+/// 앞 슬롯과 같은 계정(같은 이메일·조직)이면 그 슬롯 이름. 승인 화면이 브라우저에 이미
+/// 로그인된 claude.ai 계정으로 넘어가면 엉뚱한 슬롯에 같은 계정이 또 들어가고, 한도가
+/// 하나인데 둘로 보인다(2026-10-07 맥미니 acct-6 「개인사이오닉」이 지메일로 들어갔다).
+/// 관문 목록처럼 앞의 것을 주인으로 보고 뒤에 온 슬롯에만 단다.
+fn same_account_note(id: &str, email: &str, org: &str, slots: &[(String, String, String, String)]) -> Option<String> {
+    if !email.contains('@') {
+        return None;
+    }
+    let mine = kasa_mcp::agent_accounts::account_key("claude", email, org, "");
+    slots
+        .iter()
+        .take_while(|(other, ..)| other != id)
+        .filter(|(other, ..)| !other.is_empty())
+        .find(|(_, _, e, o)| e.contains('@') && kasa_mcp::agent_accounts::account_key("claude", e, o, "") == mine)
+        .map(|(other, label, ..)| {
+            let name = if label.trim().is_empty() { other.as_str() } else { label.as_str() };
+            format!("「{name}」과 같은 계정이에요")
+        })
+}
+
+/// 별명이 말하는 조직과 실제 조직이 어긋나면 알릴 말. 같은 이메일의 개인 조직과 팀
+/// 조직은 한도가 따로인 다른 계정인데, 승인 화면에서 조직을 잘못 고르면 「사이오닉팀」
+/// 슬롯이 개인 조직으로 로그인되고, 목록은 진짜 팀 계정을 「로그인 필요 — 다른 기기」로
+/// 본다(2026-10-07 맥북 acct-4: 별명 사이오닉팀, 실제 2rami@sionic.ai's Organization).
+pub(crate) fn org_mismatch_note(label: &str, email: &str, org: &str, signed_in: bool) -> Option<&'static str> {
+    if email.trim().is_empty() || org.trim().is_empty() {
+        return None;
+    }
+    let personal = team_org(email, org).is_none();
+    let label = label.to_lowercase();
+    let says_team = label.contains('팀') || label.contains("team");
+    let says_personal = label.contains("개인") || label.contains("personal");
+    match (says_team && personal, says_personal && !personal, signed_in) {
+        (true, _, true) => Some("이름은 팀인데 개인 조직으로 로그인돼 있어요"),
+        (true, _, false) => Some("지난 로그인이 개인 조직이었어요 — 팀 조직을 골라 로그인"),
+        (_, true, true) => Some("이름은 개인인데 팀 조직으로 로그인돼 있어요"),
+        (_, true, false) => Some("지난 로그인이 팀 조직이었어요 — 개인 조직을 골라 로그인"),
+        _ => None,
+    }
+}
+
 fn team_org(email: &str, org: &str) -> Option<String> {
     let personal = format!("{email}'s Organization");
     (!org.is_empty() && org != personal).then(|| org.to_string())
@@ -5339,8 +5418,41 @@ pub(crate) fn claude_usage_state(
 #[cfg(test)]
 mod account_label_tests {
     use super::{
-        codex_account_display_from_identity, label_is_auto, merge_web_codes, put_web_code,
+        codex_account_display_from_identity, label_is_auto, merge_web_codes, org_mismatch_note,
+        put_web_code, same_account_note,
     };
+
+    #[test]
+    fn a_second_slot_on_the_same_account_is_called_out() {
+        let slot = |id: &str, label: &str, email: &str, org: &str| {
+            (id.to_string(), label.to_string(), email.to_string(), org.to_string())
+        };
+        let gmail_org = "g@gmail.com's Organization";
+        let slots = [
+            slot("acct-1", "지메일", "g@gmail.com", gmail_org),
+            slot("acct-5", "사이오닉팀", "r@s.ai", "Sionic AI"),
+            slot("acct-6", "개인사이오닉", "g@gmail.com", gmail_org),
+            slot("", "", "g@gmail.com", gmail_org),
+        ];
+        assert_eq!(same_account_note("acct-6", "g@gmail.com", gmail_org, &slots).as_deref(), Some("「지메일」과 같은 계정이에요"));
+        assert_eq!(same_account_note("acct-5", "r@s.ai", "Sionic AI", &slots), None);
+        assert_eq!(same_account_note("acct-1", "g@gmail.com", gmail_org, &slots), None, "앞의 것이 주인이다");
+        assert_eq!(same_account_note("acct-5", "r@s.ai", "r@s.ai's Organization", &slots), None, "같은 이메일의 개인·팀 조직은 다른 계정");
+        assert_eq!(same_account_note("acct-9", "", "", &slots), None);
+    }
+
+    #[test]
+    fn team_label_on_a_personal_org_is_called_out() {
+        let me = "2rami@sionic.ai";
+        let personal = "2rami@sionic.ai's Organization";
+        assert!(org_mismatch_note("사이오닉팀", me, personal, true).is_some());
+        assert!(org_mismatch_note("사이오닉팀", me, personal, false).unwrap().contains("팀 조직을 골라"));
+        assert_eq!(org_mismatch_note("사이오닉팀", me, "Sionic AI", true), None);
+        assert!(org_mismatch_note("개인사이오닉", me, "Sionic AI", true).is_some());
+        assert_eq!(org_mismatch_note("개인사이오닉", me, personal, true), None);
+        assert_eq!(org_mismatch_note("지메일", "g@gmail.com", "g@gmail.com's Organization", true), None);
+        assert_eq!(org_mismatch_note("사이오닉팀", me, "", true), None, "조직을 모르면 말하지 않는다");
+    }
 
     #[test]
     fn claude_usage_does_not_mask_auth_failure_or_stale_observations() {
