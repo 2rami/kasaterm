@@ -39,6 +39,7 @@ pub use workspace_assistant::DesktopSession as WorkspaceDesktopSession;
 pub mod device_auth;
 pub mod account_sync;
 pub mod agent_accounts;
+pub mod agent_chains;
 pub mod remote;
 pub mod remote_restore;
 pub mod nacho_service;

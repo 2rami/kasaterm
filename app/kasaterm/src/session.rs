@@ -8459,6 +8459,7 @@ impl App {
                 crate::app_update::mark_update_booted();
                 if !crate::verification_run() {
                     kasa_mcp::agent_accounts::spawn();
+                    kasa_mcp::agent_chains::spawn();
                     kasa_mcp::unregister_clients();
                 }
                 Some(port)

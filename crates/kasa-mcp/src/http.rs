@@ -3423,7 +3423,7 @@ async fn events_handler(
 /// account the panes are actually running as. `dir` must be the same string the
 /// shim exports — the CLI NFC-normalises it before hashing, and a path that is
 /// already NFC (everything we generate) hashes identically.
-fn claude_keychain_service(dir: Option<&str>) -> String {
+pub(crate) fn claude_keychain_service(dir: Option<&str>) -> String {
     const BASE: &str = "Claude Code-credentials";
     match dir.filter(|d| !d.is_empty()) {
         None => BASE.to_string(),
@@ -3607,7 +3607,7 @@ fn write_claude_credentials(src: &CredSource, v: &serde_json::Value) -> bool {
 
 /// claude 가 키체인 항목의 계정 칸에 쓰는 로그인 사용자명. env 가 비면 홈 폴더
 /// 이름으로 — Finder 로 띄운 앱은 USER 가 없을 수 있다.
-fn keychain_user() -> Option<String> {
+pub(crate) fn keychain_user() -> Option<String> {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .ok()

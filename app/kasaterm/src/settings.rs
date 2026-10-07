@@ -448,12 +448,12 @@ impl App {
         self.set_toast(add_account_toast());
     }
 
-    /// 다른 기기에 로그인된 계정을 이 기기에도 붙인다. 목록은 관문에서 왔고(`agent_accounts`)
-    /// 자격증명은 안 옮긴다 — 이 기기에서 새로 로그인한다. 갱신 토큰을 기기끼리 나누면
-    /// 먼저 갱신한 쪽이 나머지를 로그아웃시킨다.
+    /// 다른 기기에 로그인된 계정을 이 기기에도 붙인다. 목록은 관문에서 왔다(`agent_accounts`).
     ///
-    /// Claude 는 쓰던 브라우저의 승인 한 번(이메일을 미리 채운다), Codex 는 기기 코드 —
-    /// 코드를 폰에서 넣어도 된다. 끝나면 신원을 대조해 다른 계정으로 붙었으면 알린다.
+    /// Claude 는 관문이 그 계정 사슬을 쥐고 있으면 로그인 없이 새 슬롯에 접근 토큰만 받아 온다
+    /// (`agent_chains`, docs/agent-chains.md). 갱신은 관문 혼자 하므로 기기끼리 로그아웃시키지 않는다.
+    /// 사슬이 없으면 이 기기에서 새로 로그인한다 — 쓰던 브라우저의 승인 한 번(이메일을 미리 채운다).
+    /// Codex 는 기기 코드 — 코드를 폰에서 넣어도 된다. 끝나면 신원을 대조해 다른 계정으로 붙었으면 알린다.
     fn adopt_shared_account(&mut self, provider: AccountProvider, key: &str) {
         if hidden_login_running() {
             self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
@@ -487,6 +487,13 @@ impl App {
         let Some((id, dir)) = slot else {
             return;
         };
+        if provider == AccountProvider::Claude && kasa_mcp::agent_chains::held(&acct.key) {
+            remember_account_identity(&id, &acct.email, &acct.org);
+            kasa_mcp::agent_chains::adopt(&id, &acct.key);
+            kasa_mcp::agent_accounts::poke();
+            self.set_toast(format!("관문에서 「{name}」 로그인을 받아 와요 — 로그인 없이 곧 쓸 수 있어요"));
+            return;
+        }
         let opts = LoginOpts {
             email: (provider == AccountProvider::Claude).then(|| acct.email.clone()),
             device_code: provider == AccountProvider::Codex,
@@ -4683,6 +4690,8 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState) {
         crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
         crate::codexlimits::invalidate();
         kasa_mcp::agent_accounts::poke();
+        // 새 로그인의 사슬을 곧 관문에 맡긴다 — 다른 기기가 바로 쓸 수 있게.
+        kasa_mcp::agent_chains::poke();
     }
     if let Ok(mut c) = login_cell().lock() {
         if c.0

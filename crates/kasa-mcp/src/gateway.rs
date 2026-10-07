@@ -43,6 +43,8 @@ mod connections;
 mod approvals;
 #[path = "gateway_profile.rs"]
 mod profile;
+#[path = "gateway_agent_chains.rs"]
+mod chains;
 
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -226,6 +228,8 @@ pub struct Gate {
     devices: Arc<Mutex<HashMap<String, DeviceRec>>>,
     /// 관문 계정 → 그 계정 기기들이 올린 코딩 에이전트 계정 목록(`agent_accounts.rs`).
     agents: Arc<Mutex<HashMap<String, crate::agent_accounts::Book>>>,
+    /// 기기들이 맡긴 Claude 로그인 사슬(`agent_chains.rs`). 상태 폴더가 없으면 `None`.
+    agent_chains: Option<Arc<crate::agent_chains::Service>>,
     accounts: Arc<crate::relay_auth::Accounts>,
     oauth: Arc<crate::oauth_accounts::OAuth>,
     admins: Arc<admin::Admins>,
@@ -339,6 +343,7 @@ impl Gate {
             )),
             workspace: workspace::Service::open(state_path.as_deref()),
             connections: crate::connections::Service::open(state_path.as_deref(), oauth_config),
+            agent_chains: crate::agent_chains::Service::open(state_path.as_deref()),
             install_dir: state_path.as_ref().map(|p| p.with_file_name("relay-install")),
             enroll: Arc::new(install::Enroll::from_env()),
             approvals: Arc::new(approvals::Store::open(state_path.as_deref())),
@@ -490,6 +495,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(install::routes())
         .merge(approvals::routes())
         .merge(profile::routes())
+        .merge(chains::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))

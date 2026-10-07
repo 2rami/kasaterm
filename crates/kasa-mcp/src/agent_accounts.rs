@@ -1,10 +1,13 @@
 //! 코딩 에이전트 계정 목록 — 관문 계정 하나에 딸린 Claude·Codex 로그인을 기기끼리 나눈다.
 //!
-//! 나누는 것은 **목록뿐**이다(종류·신원·이름·어느 기기에 로그인돼 있나). 자격증명은 기기마다
-//! 따로 로그인한다. 두 길을 재 보고 버렸다(2026-09-28):
+//! 여기서 나누는 것은 **목록뿐**이다(종류·신원·이름·어느 기기에 로그인돼 있나). 2026-09-28 에 두 길을
+//! 재 보고 버렸다:
 //! - 갱신 토큰을 여러 기기가 나누면 한 번 쓰일 때마다 바뀌어 먼저 갱신한 쪽이 나머지를 로그아웃시킨다.
 //! - `claude setup-token` 1년 토큰은 `user:inference` 권한뿐이라 claude.ai 커넥터·Chrome·사용량
 //!   조회가 꺼진다. `codex login --with-access-token` 은 Enterprise 전용 에이전트 토큰만 받는다.
+//!
+//! Claude 자격증명은 이제 관문 하나가 사슬을 쥐고 기기들에 접근 토큰만 나눈다(`agent_chains.rs`).
+//! Codex 는 아직 기기마다 로그인한다.
 //!
 //! 흐름: 기기가 자기 슬롯 중 신원을 아는 것을 올리면(`POST /relay/agent-accounts`) 관문이 같은
 //! 계정의 다른 기기 몫과 합쳐 돌려준다. 받은 기기는 없는 계정 자리를 「로그인 필요」로 만든다(앱).
@@ -218,7 +221,7 @@ pub fn prune(book: &mut Book, alive: &HashSet<String>) -> bool {
 
 // ── 기기 쪽 ─────────────────────────────────────────────────────────────────────
 
-fn settings_path() -> Option<PathBuf> {
+pub(crate) fn settings_path() -> Option<PathBuf> {
     match std::env::var("KASATERM_SETTINGS_FILE") {
         Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
         _ => Some(kasa_socket::home_dir()?.join(".config/kasaterm/settings.json")),
@@ -252,7 +255,7 @@ pub fn local_snapshot() -> Vec<LocalAccount> {
     out
 }
 
-fn slots(settings: &Value, key: &str) -> Vec<(String, String)> {
+pub(crate) fn slots(settings: &Value, key: &str) -> Vec<(String, String)> {
     settings
         .get(key)
         .and_then(Value::as_array)
@@ -270,7 +273,7 @@ fn slots(settings: &Value, key: &str) -> Vec<(String, String)> {
 
 /// 그 슬롯의 로그인이 실제로 사는 저장소. 기본 로그인과, 작업대에 실려 있는 활성
 /// 계정은 claude 의 기본 자리(`None`)다 — 그 계정의 금고는 작업대보다 낡아 있다.
-fn claude_store(base: Option<&std::path::Path>, settings: &Value, slot: &str) -> Option<PathBuf> {
+pub(crate) fn claude_store(base: Option<&std::path::Path>, settings: &Value, slot: &str) -> Option<PathBuf> {
     if slot.is_empty() {
         return None;
     }
