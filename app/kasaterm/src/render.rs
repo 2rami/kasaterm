@@ -305,6 +305,7 @@ impl App {
                             )
                         })
                         .unwrap_or_else(theme::cursor);
+                        let cursor_color = theme::cursor_on_pane(cursor_color);
                     // Preedit sits exactly on the reported PTY cursor —
                     // that's where the next char lands. We used to bump
                     // the column to the row's last filled cell to dodge

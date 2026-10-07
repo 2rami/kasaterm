@@ -545,6 +545,7 @@ impl App {
                     )
                 })
                 .unwrap_or_else(theme::cursor);
+                let cursor_color = theme::cursor_on_pane(cursor_color);
             (composition, student, labels, tab_state, tab_pid, cursor, cursor_color, pane.is_some())
         };
         // 색은 실제로 학생이 도는 pane 만(본창 pane 테두리와 같은 규칙), 이름은

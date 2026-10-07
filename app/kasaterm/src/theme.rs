@@ -1367,6 +1367,12 @@ pub fn enforce_min_contrast(fg: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
 pub const CONTRAST_PRESETS: &[(&str, f32)] =
     &[("Off", 1.0), ("Low", 2.0), ("Default", 2.5), ("High", 3.5)];
 
+/// 커서·조합 중인 글자 색. 학생 색은 어두운 바탕에 맞춰 골라 밝은 테마 바탕에선 거의 안 보였다(2026-10-07) —
+/// 칸 바탕과 3:1(글자 아닌 표시의 WCAG 바닥)이 안 되면 바탕 반대쪽으로 민다.
+pub fn cursor_on_pane(color: [u8; 4]) -> [u8; 4] {
+    enforce_contrast_at(color, pane_bg(), 3.0)
+}
+
 /// `enforce_min_contrast` against an explicit floor — lets the settings screen
 /// preview each preset without disturbing the live one.
 pub fn enforce_contrast_at(fg: [u8; 4], bg: [u8; 4], min: f32) -> [u8; 4] {
@@ -2308,6 +2314,17 @@ mod roster_tests {
 #[cfg(test)]
 mod custom_theme_tests {
     use super::*;
+    #[test]
+    fn a_pale_student_cursor_stays_visible_on_a_light_pane() {
+        use kasa_gridview::palette::{contrast_of, luminance};
+        let light = [250, 250, 250, 255];
+        let dark = [37, 44, 53, 255];
+        let pale = [235, 235, 245, 255];
+        let on = |fg, bg| contrast_of(luminance(fg), luminance(bg));
+        assert!(on(pale, light) < 3.0);
+        assert!(on(enforce_contrast_at(pale, light, 3.0), light) >= 2.95);
+        assert!(on(enforce_contrast_at(pale, dark, 3.0), dark) >= 2.95);
+    }
     #[test]
     fn custom_surfaces_are_independent_and_legacy_colors_keep_their_defaults() {
         let legacy = custom_palette(&serde_json::json!({"base":"dark", "bg":"#102030"}));
