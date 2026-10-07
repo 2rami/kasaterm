@@ -61,8 +61,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    /// 다른 쪽(서버·거울 스레드)이 그 상태에 닿을 때까지 기다린다. 판정은 상태로만 한다 — 시간 한도는 멈춘
+    /// 시험을 끊는 울타리일 뿐이라 부하가 걸린 검사 기계에서도 넉넉하게 둔다.
     fn wait(what: &str, mut ok: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !ok() {
             assert!(std::time::Instant::now() < deadline, "timed out: {what}");
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -82,9 +84,10 @@ mod tests {
             cols: 32, rows: 23, ..Default::default()
         }).unwrap());
         kasa_pty::register_session(&id, &source);
-        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
-            kasa_mcp::standalone::StandaloneBackend::new(std::env::temp_dir()),
-        );
+        // 열쇠를 먼저 붙여 거울이 실제 앱처럼 늘 열쇠로 원본을 되찾는 재접속 길을 탄다 — 안 붙이면 보드
+        // 수집기가 악수보다 먼저 도느냐에 따라 길이 갈린다(`mirror_host` 머리말).
+        kasa_mcp::surface_keys::ensure(&id);
+        let backend = kasa_mcp::standalone::mirror_host::MirrorHost::new(&[&id]);
         let port = kasa_mcp::spawn_http_server_opts(backend, 0, false).unwrap();
         let mirror = kasa_mcp::remote::connect_view(kasa_mcp::remote::RemoteSpec {
             base: format!("http://127.0.0.1:{port}"), pane: Some(id),
@@ -92,9 +95,11 @@ mod tests {
         }, &local).unwrap();
         wait("latest capability", || kasa_mcp::remote::follows_latest(&local));
 
+        // 손대지 않은 거울은 칸 크기를 적어 두기만 하고 아무것도 안 보낸다 — 쥔 크기가 없으니 보낼 길이 없다.
         assert!(kasa_mcp::remote::set_viewport(&local, 150, 40));
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert_eq!(source.size(), (32, 23), "an untouched mirror only reflows locally");
+        assert_eq!(kasa_mcp::remote::held_source_size(&local), None);
+        assert_eq!(source.viewer_size_owner(), None, "an untouched mirror only reflows locally");
+        assert_eq!(source.size(), (32, 23));
 
         assert!(kasa_mcp::remote::touch_source(&local));
         wait("viewer size", || source.size() == (150, 40));
@@ -108,10 +113,13 @@ mod tests {
         assert_eq!(source.size(), (120, 30), "a source layout change alone is not a touch");
         assert!(source.reclaim_viewer_sizes().unwrap());
         assert_eq!(source.size(), (40, 20));
+        // 서버는 같은 연결에 「잃음」을 먼저, 닫기를 그 뒤에 보낸다. 거울은 그 순서대로 쥔 크기를 비우고 다시
+        // 붙으므로, 다시 붙는 악수에 되잡기(acquire)를 실을 근거가 없다 — 소유자가 비어 있으면 아무도 안 잡은 것이다.
         wait("lost notice", || kasa_mcp::remote::held_source_size(&local).is_none());
         wait("mirror reattached", || mirror.session.size() == (40, 20));
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        assert_eq!(source.size(), (40, 20), "reconnect does not steal back the reclaimed grid");
+        assert_eq!(kasa_mcp::remote::held_source_size(&local), None);
+        assert_eq!(source.viewer_size_owner(), None, "reconnect does not steal back the reclaimed grid");
+        assert_eq!(source.size(), (40, 20));
 
         assert!(kasa_mcp::remote::touch_source(&local));
         wait("touch again", || source.size() == (120, 30));

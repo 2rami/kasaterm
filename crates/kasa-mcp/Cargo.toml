@@ -6,6 +6,11 @@ license.workspace = true
 
 # kasaterm 호스트의 HTTP 서버(보드·원격 방·모바일·웹 pane). 이름은 MCP 서버였던 시절의 것이다.
 
+[features]
+default = []
+# 다른 크레이트 시험이 쓰는 거울 원본 호스트(`standalone::mirror_host`).
+test-support = []
+
 [dependencies]
 kasa-socket = { path = "../kasa-socket" }
 # 웹 터미널: PTY 세션 레지스트리에 붙어 raw 바이트를 웹소켓으로 중계한다.

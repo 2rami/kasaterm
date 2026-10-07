@@ -3393,8 +3393,9 @@ mod tests {
 
     #[test]
     fn viewport_mirror_preserves_source_and_last_cell_input() {
+        // 한도는 멈춘 시험을 끊는 울타리일 뿐 — 판정은 상태로만 한다(`standalone::mirror_host` 머리말).
         fn wait_for(mut condition: impl FnMut() -> bool, message: &str) {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
             while !condition() {
                 assert!(std::time::Instant::now() < deadline, "{message}");
                 std::thread::sleep(Duration::from_millis(10));
@@ -3426,9 +3427,7 @@ mod tests {
         // 보드 수집기가 악수보다 먼저 도느냐에 따라 길이 갈렸다 — 앞 검사가 프로세스 표 캐시를
         // 데워 두면 수집기가 먼저 돌아 열쇠를 붙였고, 단독으로는 악수가 이겨 열쇠 없이 붙었다.
         let key = crate::surface_keys::ensure(&id);
-        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
-            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
-        );
+        let backend = crate::standalone::mirror_host::MirrorHost::new(&[&id]);
         let port = crate::spawn_http_server_opts(backend, 0, false).unwrap();
         let spec = RemoteSpec {
             base: format!("http://127.0.0.1:{port}"), pane: Some(id.clone()),
@@ -3438,7 +3437,8 @@ mod tests {
         assert!(set_viewport("%viewport-passive-first", 21, 6));
         let second = connect_view(spec, "%viewport-passive-second").unwrap();
         assert!(set_viewport("%viewport-passive-second", 200, 60));
-        std::thread::sleep(Duration::from_millis(300));
+        // 손대지 않은 거울은 칸 크기를 적어 두기만 한다 — 쥔 크기가 없으니 보낼 길이 없다.
+        assert_eq!((held_source_size("%viewport-passive-first"), held_source_size("%viewport-passive-second")), (None, None));
         assert_eq!(source.size(), (120, 40), "viewer bounds changed the source grid");
         assert!(!source.has_viewer_size_control(), "a mirror acquired source ownership");
         assert_eq!(mirror.session.size(), (120, 40));
@@ -3471,7 +3471,7 @@ mod tests {
     #[test]
     fn zoomed_mirror_expands_source_then_restores_it() {
         fn wait_for(mut condition: impl FnMut() -> bool, message: &str) {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
             while !condition() {
                 assert!(std::time::Instant::now() < deadline, "{message}");
                 std::thread::sleep(Duration::from_millis(10));
@@ -3488,9 +3488,7 @@ mod tests {
             },
         ).unwrap());
         kasa_pty::register_session(&id, &source);
-        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
-            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
-        );
+        let backend = crate::standalone::mirror_host::MirrorHost::new(&[&id]);
         let port = crate::spawn_http_server_opts(backend, 0, false).unwrap();
         let local = format!("%zoom-mirror-{}", uuid::Uuid::new_v4());
         let mirror = connect_view(RemoteSpec {
@@ -3501,7 +3499,7 @@ mod tests {
 
         // 평상시 창 크기 기록은 원본에 닿지 않는다 — 「줄이면 저쪽도 줄어들어」의 자리.
         assert!(set_viewport(&local, 200, 60));
-        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(held_source_size(&local), None, "viewport 기록이 원본 격자를 잡으러 갔다");
         assert_eq!(source.size(), (100, 30), "viewport 기록이 원본 격자를 흔들었다");
 
         assert!(expand_source(&local, 200, 60, (100, 30)));
@@ -3518,8 +3516,8 @@ mod tests {
         wait_for(|| source.size() == (220, 70), "확대 중 재확대가 안 먹었다");
 
         // 좁히는 요청은 보내지 않는다 — 호스트에 앉은 사람 화면만 망가진다.
+        // 보내지 않았다는 답(false)이 곧 판정이다 — 보낸 것이 없으니 기다려 볼 것도 없다.
         assert!(!expand_source(&local, 40, 10, (220, 70)), "확대가 원본을 좁히려 했다");
-        std::thread::sleep(Duration::from_millis(200));
         assert_eq!(source.size(), (220, 70), "좁히는 요청이 원본에 닿았다");
 
         assert!(restore_source(&local));

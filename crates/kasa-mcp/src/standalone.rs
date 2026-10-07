@@ -233,3 +233,43 @@ impl Backend for StandaloneBackend {
             .collect())
     }
 }
+
+/// 거울 시험의 원본 호스트 — `/term/ws`·`/term/panes` 만 쓰는 시험이 띄우는 서버의 백엔드. 다른 크레이트 시험도
+/// 쓴다(feature `test-support`).
+///
+/// `StandaloneBackend` 를 쓰면 안 되는 까닭이 둘이다. ①창이 없어 거기 등록한 칸이 `/term/panes` 에 「닫힘」으로
+/// 실려, 열쇠로 원본을 되찾는 재접속(`remote_restore::resolve`)이 원본을 못 찾고 물러선다. ②보드를 부를 때마다
+/// 진짜 `claude agents` 를 띄워 목록 한 번이 몇 초 걸리고 기계마다 다르다. 둘 다 시험을 시간에 매달았다 — 열쇠가
+/// 악수보다 먼저 붙느냐(보드 수집기가 먼저 도느냐)에 따라 재접속 길이 갈려 부하가 걸리면 떨어졌다.
+#[cfg(any(test, feature = "test-support"))]
+pub mod mirror_host {
+    use anyhow::{bail, Result};
+    use kasa_socket::backend::{Backend, SurfaceInfo, WorkspaceInfo};
+    use std::sync::Arc;
+
+    /// `open` 칸은 0번 방에 열려 있다.
+    pub struct MirrorHost {
+        open: Vec<String>,
+    }
+
+    impl MirrorHost {
+        pub fn new(open: &[&str]) -> Arc<dyn Backend> {
+            Arc::new(Self { open: open.iter().map(|id| id.to_string()).collect() })
+        }
+    }
+
+    impl Backend for MirrorHost {
+        fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> Result<()> { bail!("mirror host has no layout") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> Result<SurfaceInfo> {
+            bail!("mirror host has no layout")
+        }
+        fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> { bail!("mirror host takes input over /term/ws") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> Result<()> { bail!("mirror host takes input over /term/ws") }
+        fn pane_windows(&self) -> Vec<(String, usize)> {
+            self.open.iter().map(|id| (id.clone(), 0)).collect()
+        }
+    }
+}

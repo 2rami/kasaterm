@@ -107,6 +107,9 @@ qrcodegen = "1.8"
 # macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
 # AppKit doesn't stretch stale layer contents during live window resize.
 # ghostty's trick — same gravity, no presentsWithTransaction needed.
+[dev-dependencies]
+kasa-mcp = { path = "../../crates/kasa-mcp", features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "NSData", "NSGeometry", "objc2-core-services"] }
