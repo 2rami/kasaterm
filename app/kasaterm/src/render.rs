@@ -221,7 +221,7 @@ fn signal_alpha(quiet: bool, period: f32) -> u8 {
 }
 
 /// compact 진행 띠 한 줄 — 배치도 칸·별도창 칸·사이드바 목록 줄이 같은 모양을 쓴다. 끝이 있는 일이라
-/// 차오르는 눈금으로 말한다. 끝을 모르는 「도는 중」은 띠가 아니라 `breath_mark` 의 테두리 숨이다.
+/// 차오르는 눈금으로 말한다. 끝을 모르는 「도는 중」은 띠가 아니라 `activity_mark` 의 움직이는 테두리다.
 pub(crate) fn progress_bar(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, compact_pct: Option<u8>) {
     if let Some(pct) = compact_pct {
         g.rect(x, y, w, MINI_BAR_H, theme::with_alpha(theme::accent(), 0x3a));
@@ -232,27 +232,32 @@ pub(crate) fn progress_bar(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, com
     }
 }
 
-/// 배치도 칸·별도창 칸·사이드바 목록 줄의 「도는 중」 — 그 칸(줄) 윤곽이 pane 테두리와 같은 결로 숨쉰다
-/// (2026-10-07 「미니맵·목록의 작은 막대도 같은 결로」). 고른 칸은 또렷하게, 나머지는 옅게.
+/// 배치도 칸·별도창 칸·사이드바 목록 줄의 「도는 중」 — 그 칸(줄) 윤곽을 pane 테두리와 같은 결로 빛 조각이
+/// 돌거나(일하는 중) 점선이 흐른다(뒤에서 도는 중). 고른 칸은 또렷하게, 나머지는 옅게. `inside` 는 칸 가장자리에
+/// 이미 그어 둔 멈춘 테두리(고른 칸 표시)의 굵기 — 움직이는 윤곽은 그 안쪽을 돈다. 같은 색 실선 위에 겹치면
+/// 꼬리가 묻혀 「여기」와 「도는 중」이 한 줄로 뭉친다.
 ///
 /// `bg_active` 는 `refresh_pane_activity` 가 busy 일 때 false 로 넣으니(input.rs) busy 와 겹칠 일이 없다.
-/// 대기 중은 부르지 않는다 — 멈춘 것인데 숨쉬면 「일하는 줄」 알고 지나친다.
-pub(crate) fn breath_mark(
+/// 대기 중은 부르지 않는다 — 멈춘 것인데 움직이면 「일하는 줄」 알고 지나친다.
+pub(crate) fn activity_mark(
     g: &mut gpu::GpuRenderer,
-    rect: (f32, f32, f32, f32),
+    (x, y, w, h): (f32, f32, f32, f32),
     radius: f32,
     busy: bool,
     bg_active: bool,
     focused: bool,
+    inside: f32,
 ) {
     let kind = if busy {
-        theme::BreathKind::Working
+        theme::Activity::Working
     } else if bg_active {
-        theme::BreathKind::Background
+        theme::Activity::Background
     } else {
         return;
     };
-    g.breath_outline(rect, radius, theme::accent(), theme::breath(kind, focused, true));
+    let rect = (x + inside, y + inside, w - 2.0 * inside, h - 2.0 * inside);
+    let col = theme::beside_still_edge(theme::accent(), inside > 0.0);
+    g.activity_outline(rect, (radius - inside).max(0.0), col, theme::activity_edge(kind, focused, true));
 }
 
 impl App {
@@ -4102,9 +4107,9 @@ impl App {
                         // 「나를 기다린다」가 급한 소식이다.
                         if let Some((c, _)) = signal {
                             c
-                        } else if cur && !(info.busy || info.bg_active) {
-                            // 도는 칸은 숨쉬는 윤곽(`breath_mark`)이 「여기」까지 말한다 — 고정
-                            // 강조 테두리를 깔면 그 위 숨이 묻혀 안 보인다.
+                        } else if cur {
+                            // 「여기」는 도는 칸에서도 멈춘 테두리가 말한다 — 움직이는 윤곽
+                            // (`activity_mark`)은 그 안쪽을 돌아 둘이 한 줄로 뭉치지 않는다.
                             theme::accent()
                         } else if hov {
                             theme::surface_hover()
@@ -4244,7 +4249,7 @@ impl App {
                         progress_bar(g, bx, by, bw, info.compact_pct);
                     }
                     if signal.is_none() {
-                        breath_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, cur);
+                        activity_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, cur, if cur { 1.5 } else { 0.0 });
                     }
                     // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
                     // 나와 있는지. 전엔 뒷장이 우상단으로 계단지는 카드 덱이었는데,
@@ -4383,7 +4388,7 @@ impl App {
                         progress_bar(g, mx + 2.0, by, mw - 4.0, info.compact_pct);
                     }
                     if signal.is_none() {
-                        breath_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, false);
+                        activity_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, false, 0.0);
                     }
                     if mw >= 22.0 {
                         g.queue_icon("external-link", mx + mw - 10.0, my + 2.0, 8.0, theme::text_mute());
@@ -7455,28 +7460,10 @@ impl App {
                                 theme::character_accent_n(n, theme::character_ordinal(&pane_chars, fid))
                             })
                     };
-                    // 끝을 모르는 일은 테두리가 숨쉰다 — 쓸려 지나가던 로딩바를 걷고 그 자리를
-                    // 칸 윤곽이 잇는다(2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로, 포커스
-                    // 안 되면 옅게」). 셰이더가 `u.time` 으로 숨쉬므로 CPU 는 위상을 안 센다.
-                    // 손을 기다리는 칸(아래 깜빡임)과는 상태가 배타적이라 같이 서지 않는다.
-                    let breath_kind = self.pane_activity.get(fid).and_then(|a| {
-                        if a.state.is_busy() {
-                            Some(theme::BreathKind::Working)
-                        } else if a.bg_active {
-                            Some(theme::BreathKind::Background)
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(kind) = breath_kind {
-                        let look = theme::breath(kind, focused || zoom_focus, false);
-                        g.breath_outline((*fx, *fy, *fw, *fbox_h), 0.0, edge_col.unwrap_or(accent), look);
-                        border_inset.insert(fid.clone(), look.thick.0);
-                    } else if zoom_focus
-                        || (is_split && focused && claude_panes.contains(fid.as_str()))
-                    {
-                        // 줌은 학생이 없는 순수 셸에서도 테두리가 있어야 한다 — 없으면 줌
-                        // 자체가 안 보인다.
+                    // 멈춘 테두리는 「지금 보는 칸」(분할 초점·줌)만 말한다. 줌은 학생이 없는 순수
+                    // 셸에서도 테두리가 있어야 한다 — 없으면 줌 자체가 안 보인다.
+                    let mut still_t = 0.0_f32;
+                    if zoom_focus || (is_split && focused && claude_panes.contains(fid.as_str())) {
                         let border_col = edge_col.or_else(|| zoom_focus.then_some(accent));
                         if let Some(col) = border_col {
                             // 줌은 조금 두껍게 — 여백 위에 홀로 뜬 카드의 윤곽선이다.
@@ -7486,9 +7473,32 @@ impl App {
                             g.rect(*fx, *fy, t, *fbox_h, col);
                             g.rect(fx + fw - t, *fy, t, *fbox_h, col);
                             border_inset.insert(fid.clone(), t);
+                            still_t = t;
                         }
                     }
-                    // compact 중이면 box 상단에 왼쪽부터 채워지는 바 — 끝이 있는 일이라 숨이
+                    // 끝을 모르는 일은 테두리가 움직인다 — 일하는 중은 빛 조각이 한 바퀴씩 돌고, 뒤에서
+                    // 도는 중은 점선이 흐른다. 숨쉬던 테두리는 가장 진할 때 초점 테두리와 같아 고른
+                    // 칸이 어디인지 흐려졌다(2026-10-07 「숨쉬는 거 헷갈리는데 선택이랑. 한 바퀴 도는
+                    // 거로 하자 아웃라인을」). 멈춘 테두리가 있으면 그 안쪽을 돈다 — 같은 색 실선 위에
+                    // 겹치면 꼬리가 묻힌다. 셰이더가 `u.time` 으로 움직이므로 CPU 는 위상을 안 센다.
+                    // 손을 기다리는 칸(아래 깜빡임)과는 상태가 배타적이라 같이 서지 않는다.
+                    let activity = self.pane_activity.get(fid).and_then(|a| {
+                        if a.state.is_busy() {
+                            Some(theme::Activity::Working)
+                        } else if a.bg_active {
+                            Some(theme::Activity::Background)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(kind) = activity {
+                        let look = theme::activity_edge(kind, focused || zoom_focus, false);
+                        let rect = (fx + still_t, fy + still_t, fw - 2.0 * still_t, fbox_h - 2.0 * still_t);
+                        let col = edge_col.unwrap_or(accent);
+                        g.activity_outline(rect, 0.0, theme::beside_still_edge(col, still_t > 0.0), look);
+                        border_inset.insert(fid.clone(), still_t + look.reach());
+                    }
+                    // compact 중이면 box 상단에 왼쪽부터 채워지는 바 — 끝이 있는 일이라 도는 빛이
                     // 아니라 차오르는 모양으로 말한다(헤더 pane 과 같은 형태 언어).
                     if !headered.contains(fid.as_str()) {
                         const BAR_H: f32 = 2.5;
@@ -7524,8 +7534,8 @@ impl App {
                         }
                     }
                     // 손을 기다리는 pane — 네 변이 핑크로 깜빡인다(사용자: "내가
-                    // 엔터해야되거나 그런거는 핑크색으로 깜빡이게"). 일하는 중의 숨쉬는
-                    // 테두리와 **뜻이 정반대**라 색과 박자로 갈랐다: 학생색 느린 숨은 "놔둬도
+                    // 엔터해야되거나 그런거는 핑크색으로 깜빡이게"). 일하는 중의 도는
+                    // 테두리와 **뜻이 정반대**라 색과 움직임으로 갈랐다: 학생색으로 도는 빛은 "놔둬도
                     // 진행된다", 핑크 깜빡임은 "내가 손대야 풀린다". 상태가 배타적이라
                     // (working ≠ waiting) 둘이 한 pane 에 같이 뜨지 않는다.
                     //

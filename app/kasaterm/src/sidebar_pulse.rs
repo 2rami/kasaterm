@@ -254,7 +254,7 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     let ink = if p.muted { theme::text_mute() } else { theme::text() };
     g.draw_text(tx, ry + 5.0, &title, gpu::DrawOpts { font_size: 12.0, color: ink, bold: false, italic: false });
     // 둘째 줄은 배치도 칸 바닥과 같다 — compact 눈금과 경과 시간. 시간은 오른쪽 끝을 내주고 눈금이 그만큼
-    // 짧아진다. 「도는 중」은 띠가 아니라 줄 윤곽이 숨쉰다(배치도 칸과 같은 결).
+    // 짧아진다. 「도는 중」은 띠가 아니라 줄 윤곽이 움직인다(배치도 칸과 같은 결).
     let line_y = ry + 22.0;
     let mut bar_w = right - tx;
     if let Some((txt, color, bold)) = crate::render::elapsed_mark(p.busy_secs, p.busy || p.bg_active) {
@@ -267,7 +267,7 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
         crate::render::progress_bar(g, tx, bar_y, bar_w, p.compact_pct);
     }
     if band.is_none() {
-        crate::render::breath_mark(g, rect, theme::radius_sm(), p.busy, p.bg_active, p.cur);
+        crate::render::activity_mark(g, rect, theme::radius_sm(), p.busy, p.bg_active, p.cur, 0.0);
     }
 }
 

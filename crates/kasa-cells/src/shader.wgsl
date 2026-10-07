@@ -151,29 +151,84 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas_tex, atlas_sampler, in.uv);
-    // 미분은 균일 흐름에서만 부를 수 있어 갈래 밖에서 미리 잰다(테두리 숨이 쓴다).
+    // 미분은 균일 흐름에서만 부를 수 있어 갈래 밖에서 미리 잰다(테두리 갈래가 쓴다).
     let duv = fwidth(in.uv);
-    // 테두리 숨(flags & 32, FLAG_EDGE_BREATH): 쿼드 전체가 둥근 사각 윤곽 하나다. uv 가 -1..1 이라
-    // 1/fwidth(uv) 가 쿼드의 장치 px 반폭·반높이이고, 거기서 둥근 사각까지의 거리를 잰다. 굵기와 진하기가
-    // 함께 사인으로 숨쉬고(가장 옅을 때 굵기 min·진하기 low), 안팎 경계를 1px 로 부드럽게 끊는다.
-    if ((in.flags & 32u) != 0u) {
-        let t_max = f32((in.flags >> 6u) & 0x3fu) * 0.25;
-        let t_min = f32((in.flags >> 12u) & 0x3fu) * 0.25;
+    // 테두리(flags & 4 한 바퀴 · flags & 8 점선): 쿼드 전체가 둥근 사각 윤곽 하나다. uv 가 -1..1 이라
+    // 1/fwidth(uv) 가 쿼드의 장치 px 반폭·반높이이고, 거기서 둥근 사각까지의 거리 d 와 윤곽 위 자리 s(왼쪽 위
+    // 직선 시작에서 시계 방향 거리)를 잰다. 안팎 경계는 1px 로 부드럽게 끊는다. 모양은 상위 비트에 실려 온다
+    // (pipeline.rs `edge_shape_bits`).
+    if ((in.flags & 12u) != 0u) {
+        let f_a = f32((in.flags >> 6u) & 0x3fu);
+        let f_b = f32((in.flags >> 12u) & 0x3fu);
         let half = 1.0 / max(duv, vec2<f32>(1e-6, 1e-6));
         let r = min(f32((in.flags >> 18u) & 0x3fu) * 0.5, min(half.x, half.y));
         let period = max(f32((in.flags >> 24u) & 0xfu) * 0.5, 0.5);
-        let low = f32((in.flags >> 28u) & 0xfu) / 15.0;
-        let b = 0.5 - 0.5 * cos(u.time * 6.2831853 / period);
-        let reach = mix(t_min, t_max, b);
-        let q = abs(in.uv * half) - (half - vec2<f32>(r, r));
-        let sdf = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
-        let d = -sdf;
+        let frac = f32((in.flags >> 28u) & 0xfu) / 15.0;
+        let p = in.uv * half;
+        let q = abs(p) - (half - vec2<f32>(r, r));
+        let d = -(length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r);
+        let a = max(half.x - r, 0.0);
+        let b = max(half.y - r, 0.0);
+        let qa = 1.5707963 * r;
+        let perim = 4.0 * (a + b + qa);
+        let dx = abs(p.x) - a;
+        let dy = abs(p.y) - b;
+        var s: f32;
+        if (dx > 0.0 && dy > 0.0) {
+            let v = p - vec2<f32>(sign(p.x) * a, sign(p.y) * b);
+            if (p.x > 0.0 && p.y < 0.0) {
+                s = 2.0 * a + r * atan2(v.x, -v.y);
+            } else if (p.x > 0.0) {
+                s = 2.0 * a + qa + 2.0 * b + r * atan2(v.y, v.x);
+            } else if (p.y > 0.0) {
+                s = 4.0 * a + 2.0 * qa + 2.0 * b + r * atan2(-v.x, v.y);
+            } else {
+                s = 4.0 * a + 3.0 * qa + 4.0 * b + r * atan2(-v.y, -v.x);
+            }
+        } else if (dy >= dx) {
+            if (p.y < 0.0) {
+                s = p.x + a;
+            } else {
+                s = 4.0 * a + 2.0 * qa + 2.0 * b - (p.x + a);
+            }
+        } else if (p.x > 0.0) {
+            s = 2.0 * a + qa + p.y + b;
+        } else {
+            s = 4.0 * a + 3.0 * qa + 4.0 * b - (p.y + b);
+        }
+        var reach: f32;
+        var shade: f32;
+        if ((in.flags & 4u) != 0u) {
+            // 한 바퀴: 머리가 지나간 뒤 얼마나 됐는지(behind)로 꼬리를 그린다. 머리에서 가장 굵고 진하며 꼬리
+            // 끝으로 가며 가늘어지고 옅어진다. 머리 앞 1px 은 부드럽게 — 잘린 앞머리가 튀어 보이지 않게.
+            let head = fract(u.time / period) * perim;
+            let behind = head - s + select(0.0, perim, s > head);
+            let k = max(1.0 - behind / max(frac * perim, 1.0), 0.0);
+            let lead = clamp(1.0 - (perim - behind), 0.0, 1.0);
+            shade = max(k, lead);
+            if (shade <= 0.0) {
+                discard;
+            }
+            reach = mix(f_b * 0.25, f_a * 0.25, max(k, lead));
+        } else {
+            // 점선: 둘레를 한 칸 길이에 가장 가까운 정수 칸으로 나눠 이음매(s = 0 = 둘레)에서 무늬가 안 끊긴다.
+            // 무늬가 `period` 초에 한 칸씩 시계 방향으로 흐르고, 선의 양 끝은 1px 로 부드럽다.
+            let n = max(round(perim / max(f_b, 1.0)), 1.0);
+            let cyc = perim / n;
+            let ph = fract(s / cyc - u.time / period) * cyc;
+            let on = frac * cyc;
+            shade = clamp(min(ph, on - ph) + 0.5, 0.0, 1.0);
+            if (shade <= 0.0) {
+                discard;
+            }
+            reach = f_a * 0.25;
+        }
         let cover = clamp(reach - d + 0.5, 0.0, 1.0) * clamp(d + 0.5, 0.0, 1.0);
         if (cover <= 0.0) {
             discard;
         }
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
-        return vec4<f32>(prepare_output(rgb), in.fg.a * mix(low, 1.0, b) * cover);
+        return vec4<f32>(prepare_output(rgb), in.fg.a * shade * cover);
     }
     // 채우기 띠(flags & 16, FLAG_BAND_FILL): 왼쪽부터 2.4초에 걸쳐 차고 다시 시작한다 — 끝이 있는 일을
     // 「칸이 차는」 모양으로 보인다. 시간으로 채우므로 찬 칸이 실제 퍼센트는 아니다.

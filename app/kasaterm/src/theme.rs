@@ -1487,39 +1487,65 @@ pub fn clean_notice_text(message: &str) -> &str {
 /// Base glyph size for chrome icons (logical px; draw_text multiplies by scale).
 pub const ICON_SIZE: f32 = 16.0;
 
-/// 「일하는 중」·「뒤에서 도는 중」 테두리 숨 한 벌(docs/design.md 「일하는 중 표시」). 끝을 모르는 일은 막대가
-/// 아니라 윤곽이 숨쉰다 — 굵기 `thick`(가장 굵을 때, 가장 가늘 때, 논리 px)와 진하기(`alpha` ↔ 그 `low` 배)가
-/// `period` 초 사인으로 함께 오르내린다.
+/// 「일하는 중」·「뒤에서 도는 중」 테두리 한 벌(docs/design.md 「일하는 중 표시」). 끝을 모르는 일은 막대가 아니라
+/// 윤곽이 움직인다 — 초점 테두리는 멈춘 실선이라 움직이는 윤곽과 한눈에 갈린다(2026-10-07 「숨쉬는 거 헷갈리는데
+/// 선택이랑. 한 바퀴 도는 거로 하자 아웃라인을」). 굵기·길이는 논리 px.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Breath {
-    pub thick: (f32, f32),
-    pub period: f32,
-    pub low: f32,
-    pub alpha: u8,
+pub enum ActivityEdge {
+    /// 빛 조각 하나가 `lap` 초에 한 바퀴 돈다. 머리 굵기 `head` 에서 꼬리 끝 `tail_end` 로 가늘어지고, 꼬리는
+    /// 둘레의 `tail` 몫이다.
+    Orbit { head: f32, tail_end: f32, lap: f32, tail: f32, alpha: u8 },
+    /// 점선(선+틈 한 칸 `cycle`, 그중 선 몫 `duty`)이 `step` 초에 한 칸씩 흐른다.
+    Dash { thick: f32, cycle: f32, step: f32, duty: f32, alpha: u8 },
+}
+
+impl ActivityEdge {
+    /// 가장 굵은 자리 — 하단바가 그만큼 물러선다.
+    pub fn reach(self) -> f32 {
+        match self {
+            Self::Orbit { head, .. } => head,
+            Self::Dash { thick, .. } => thick,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BreathKind {
+pub enum Activity {
     /// 학생이 직접 일하는 중(스피너·compact).
     Working,
     /// 화면엔 안 보이게 뒤에서 도는 일(백그라운드 셸·Monitor·서브에이전트).
     Background,
 }
 
-/// 숨 모양 — 일하는 중은 3초에 굵기까지 숨쉬고, 뒤에서 도는 중은 6초에 굵기 없이 옅게만 숨쉰다(리듬과 진하기
-/// 둘 다로 갈린다). 초점 있는 칸은 또렷하게, 없는 칸은 같은 숨을 옅게. `small` 은 배치도 칸·목록 줄 — 칸이
-/// 작아 옅게 줄이면 안 보여서 초점 없는 쪽도 진하다.
-pub fn breath(kind: BreathKind, focused: bool, small: bool) -> Breath {
-    let b = |thick, period, low, alpha| Breath { thick, period, low, alpha };
+/// 일하는 중은 2초에 한 바퀴 도는 빛 조각, 뒤에서 도는 중은 2초에 한 칸씩 흐르는 옅은 점선. 뒤에서 도는 칸은
+/// 프레임을 펌프하지 않아(handler.rs 펌프·render.rs `bar_animating` 은 busy 만 센다) 점선이 자주 멈춰 서는데,
+/// 멈춰도 실선과 갈리는 모양이라 고른 것이다 — 숨은 멈추면 옅은 초점 테두리와 같았다. 초점 있는 칸은 또렷하게,
+/// 없는 칸은 같은 움직임을 옅게. `small` 은 배치도 칸·목록 줄 — 칸이 작아 옅게 줄이면 안 보여서 초점 없는 쪽도
+/// 진하다.
+pub fn activity_edge(kind: Activity, focused: bool, small: bool) -> ActivityEdge {
+    const LAP: f32 = 2.0;
+    const TAIL: f32 = 0.2;
+    let orbit = |head, alpha| ActivityEdge::Orbit { head, tail_end: 1.0, lap: LAP, tail: TAIL, alpha };
+    let dash = |thick, cycle, alpha| ActivityEdge::Dash { thick, cycle, step: 2.0, duty: 0.6, alpha };
     match (kind, focused, small) {
-        (BreathKind::Working, true, false) => b((2.5, 1.5), 3.0, 0.45, 0xff),
-        (BreathKind::Working, false, false) => b((1.5, 1.0), 3.0, 0.35, 0x73),
-        (BreathKind::Background, true, false) => b((1.5, 1.5), 6.0, 0.35, 0xcc),
-        (BreathKind::Background, false, false) => b((1.0, 1.0), 6.0, 0.35, 0x59),
-        (BreathKind::Working, true, true) => b((2.0, 1.0), 3.0, 0.45, 0xff),
-        (BreathKind::Working, false, true) => b((1.5, 1.0), 3.0, 0.35, 0xb3),
-        (BreathKind::Background, true, true) => b((1.0, 1.0), 6.0, 0.35, 0xcc),
-        (BreathKind::Background, false, true) => b((1.0, 1.0), 6.0, 0.35, 0x80),
+        (Activity::Working, true, false) => orbit(3.0, 0xff),
+        (Activity::Working, false, false) => orbit(2.5, 0xb3),
+        (Activity::Background, true, false) => dash(1.5, 8.0, 0xcc),
+        (Activity::Background, false, false) => dash(1.0, 8.0, 0x80),
+        (Activity::Working, true, true) => orbit(2.5, 0xff),
+        (Activity::Working, false, true) => orbit(2.0, 0xcc),
+        (Activity::Background, true, true) => dash(1.0, 6.0, 0xcc),
+        (Activity::Background, false, true) => dash(1.0, 6.0, 0x99),
+    }
+}
+
+/// 멈춘 테두리 바로 안쪽을 도는 윤곽의 색 — 같은 색이면 실선과 한 줄로 뭉쳐 꼬리가 안 보이므로, 글자색 쪽으로
+/// 40% 옮긴다(어두운 판에선 밝게, 밝은 판에선 진하게 — 어느 쪽이든 바탕과 더 갈린다). 실선이 없으면 그대로.
+pub fn beside_still_edge(col: [u8; 4], beside: bool) -> [u8; 4] {
+    if beside {
+        with_alpha(lerp(col, text(), 0.4), col[3])
+    } else {
+        col
     }
 }
 
@@ -2571,32 +2597,45 @@ mod accent_tests {
 }
 
 #[cfg(test)]
-mod breath_tests {
+mod activity_edge_tests {
     use super::*;
 
+    fn alpha(e: ActivityEdge) -> u8 {
+        match e {
+            ActivityEdge::Orbit { alpha, .. } | ActivityEdge::Dash { alpha, .. } => alpha,
+        }
+    }
+
     #[test]
-    fn focused_breath_is_clearer_than_unfocused() {
-        for kind in [BreathKind::Working, BreathKind::Background] {
+    fn focused_edge_is_clearer_than_unfocused_with_the_same_motion() {
+        for kind in [Activity::Working, Activity::Background] {
             for small in [false, true] {
-                let on = breath(kind, true, small);
-                let off = breath(kind, false, small);
-                assert!(on.alpha > off.alpha, "{kind:?} small={small}");
-                assert!(on.thick.0 >= off.thick.0, "{kind:?} small={small}");
-                assert_eq!(on.period, off.period, "초점은 진하기만 바꾸고 박자는 같다");
+                let on = activity_edge(kind, true, small);
+                let off = activity_edge(kind, false, small);
+                assert!(alpha(on) > alpha(off), "{kind:?} small={small}");
+                assert!(on.reach() >= off.reach(), "{kind:?} small={small}");
+                assert_eq!(std::mem::discriminant(&on), std::mem::discriminant(&off), "초점은 진하기만 바꾸고 움직임은 같다");
             }
         }
     }
 
     #[test]
-    fn background_breath_is_slower_and_fainter_than_working() {
+    fn working_orbits_and_background_flows_as_dashes() {
         for focused in [false, true] {
             for small in [false, true] {
-                let w = breath(BreathKind::Working, focused, small);
-                let b = breath(BreathKind::Background, focused, small);
-                assert!(b.period > w.period);
-                assert!(b.alpha <= w.alpha);
-                assert_eq!(b.thick.0, b.thick.1, "뒤에서 도는 일은 굵기 없이 진하기만 숨쉰다");
-                assert!(w.thick.0 > w.thick.1, "일하는 중은 굵기도 숨쉰다");
+                let ActivityEdge::Orbit { head, tail_end, lap, tail, .. } = activity_edge(Activity::Working, focused, small)
+                else {
+                    panic!("일하는 중은 한 바퀴")
+                };
+                assert!((1.5..=2.5).contains(&lap), "한 바퀴 1.5~2.5초 — 느리면 멈춘 줄, 빠르면 경고로 읽힌다");
+                assert!(head > tail_end, "머리가 꼬리보다 굵다");
+                assert!(tail > 0.0 && tail < 0.5, "짧은 빛 조각 — 둘레의 반을 넘으면 테두리 전체처럼 보인다");
+                let ActivityEdge::Dash { step, duty, .. } = activity_edge(Activity::Background, focused, small) else {
+                    panic!("뒤에서 도는 중은 점선")
+                };
+                assert!(step >= lap, "점선은 한 바퀴보다 느린 박자");
+                assert!(duty > 0.0 && duty < 1.0, "틈이 있어야 실선(초점)과 갈린다");
+                assert!(alpha(activity_edge(Activity::Background, focused, small)) <= alpha(activity_edge(Activity::Working, focused, small)));
             }
         }
     }

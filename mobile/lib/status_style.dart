@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import 'look.dart';
@@ -185,11 +183,11 @@ class Appear extends StatelessWidget {
   );
 }
 
-/// 「일하는 중」의 테두리 숨 — 칸 윤곽이 학생색으로 3초마다 굵기·진하기를 함께 오르내린다. 데스크톱 pane
-/// 테두리와 같은 결이다(2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로」). 쉬면 아무것도 안 그린다.
-/// 동작 줄이기면 숨 없이 가장 굵은 쪽으로 서 있는다.
-class BreathEdge extends StatefulWidget {
-  const BreathEdge({
+/// 「일하는 중」의 테두리 한 바퀴 — 학생색 빛 조각 하나가 칸 윤곽을 2초에 한 바퀴씩 돌고 꼬리가 옅어진다.
+/// 데스크톱 pane 테두리와 같은 결이다(2026-10-07 「숨쉬는 거 헷갈리는데 선택이랑. 한 바퀴 도는 거로 하자
+/// 아웃라인을」). 쉬면 아무것도 안 그린다. 동작 줄이기면 돌지 않고 윤곽 전체가 옅게 서 있는다.
+class OrbitEdge extends StatefulWidget {
+  const OrbitEdge({
     super.key,
     required this.live,
     required this.color,
@@ -203,14 +201,14 @@ class BreathEdge extends StatefulWidget {
   final Widget child;
 
   @override
-  State<BreathEdge> createState() => _BreathEdgeState();
+  State<OrbitEdge> createState() => _OrbitEdgeState();
 }
 
-class _BreathEdgeState extends State<BreathEdge>
+class _OrbitEdgeState extends State<OrbitEdge>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctl = AnimationController(
     vsync: this,
-    duration: Look.breathPeriod,
+    duration: Look.orbitLap,
   );
 
   @override
@@ -220,7 +218,7 @@ class _BreathEdgeState extends State<BreathEdge>
   }
 
   @override
-  void didUpdateWidget(BreathEdge old) {
+  void didUpdateWidget(OrbitEdge old) {
     super.didUpdateWidget(old);
     _sync();
   }
@@ -241,7 +239,7 @@ class _BreathEdgeState extends State<BreathEdge>
   Widget build(BuildContext context) {
     if (!widget.live) return widget.child;
     return CustomPaint(
-      foregroundPainter: _BreathPainter(
+      foregroundPainter: OrbitPainter(
         _ctl,
         color: widget.color,
         radius: widget.radius,
@@ -252,8 +250,10 @@ class _BreathEdgeState extends State<BreathEdge>
   }
 }
 
-class _BreathPainter extends CustomPainter {
-  _BreathPainter(
+/// 꼬리를 잘게 나눈 토막을 머리에서부터 굵고 진하게 긋는다 — 토막마다 굵기·진하기가 머리에서 꼬리 끝으로
+/// 가늘고 옅어진다(데스크톱 셰이더와 같은 직선).
+class OrbitPainter extends CustomPainter {
+  OrbitPainter(
     this.t, {
     required this.color,
     required this.radius,
@@ -265,28 +265,67 @@ class _BreathPainter extends CustomPainter {
   final BorderRadius radius;
   final bool still;
 
-  /// 0 = 가장 옅고 가늘 때, 1 = 가장 진하고 굵을 때. 데스크톱 셰이더와 같은 반 코사인.
-  double get breath =>
-      still ? 1.0 : 0.5 - 0.5 * math.cos(t.value * 2 * math.pi);
+  static const _pieces = 24;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final b = breath;
-    final w = Look.breathThin + (Look.breathThick - Look.breathThin) * b;
-    final a = Look.breathLow + (1 - Look.breathLow) * b;
-    // 안쪽으로 그린다 — 칸 밖으로 번지면 옆 칸 경계와 겹친다.
-    final rect = (Offset.zero & size).deflate(w / 2);
-    canvas.drawRRect(
-      radius.toRRect(rect),
-      Paint()
+    if (still) {
+      final rect = (Offset.zero & size).deflate(Look.orbitTailEnd / 2);
+      canvas.drawRRect(
+        radius.toRRect(rect),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = Look.orbitTailEnd
+          ..color = color.withValues(alpha: color.a * 0.6),
+      );
+      return;
+    }
+    // 안쪽으로 그린다 — 칸 밖으로 번지면 옆 칸 경계와 겹친다. 가장 굵은 머리 기준으로 한 번 줄인 윤곽을
+    // 모든 토막이 같이 쓴다(토막마다 줄이면 굵기가 바뀌는 자리에서 선이 계단진다).
+    final rect = (Offset.zero & size).deflate(Look.orbitHead / 2);
+    final metric = _clockwise(radius.toRRect(rect)).computeMetrics().first;
+    final len = metric.length;
+    final head = t.value * len;
+    final piece = Look.orbitTail * len / _pieces;
+    for (var i = 0; i < _pieces; i++) {
+      final k = 1 - i / _pieces;
+      final paint = Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = w
-        ..color = color.withValues(alpha: color.a * a),
-    );
+        ..strokeCap = i == 0 ? StrokeCap.round : StrokeCap.butt
+        ..strokeWidth =
+            Look.orbitTailEnd + (Look.orbitHead - Look.orbitTailEnd) * k
+        ..color = color.withValues(alpha: color.a * k);
+      final end = head - i * piece;
+      final start = end - piece;
+      for (final (a, b) in _wrap(start, end, len)) {
+        canvas.drawPath(metric.extractPath(a, b), paint);
+      }
+    }
+  }
+
+  /// 왼쪽 위 직선 시작에서 시계 방향으로 — 데스크톱 셰이더와 같은 출발점·방향이라 두 화면이 같은 자리에서 돈다.
+  /// `addRRect` 는 출발점이 모서리 모양에 따라 달라(직각이면 왼쪽 아래) 직접 긋는다.
+  static Path _clockwise(RRect r) => Path()
+    ..moveTo(r.left + r.tlRadiusX, r.top)
+    ..lineTo(r.right - r.trRadiusX, r.top)
+    ..arcToPoint(Offset(r.right, r.top + r.trRadiusY), radius: r.trRadius)
+    ..lineTo(r.right, r.bottom - r.brRadiusY)
+    ..arcToPoint(Offset(r.right - r.brRadiusX, r.bottom), radius: r.brRadius)
+    ..lineTo(r.left + r.blRadiusX, r.bottom)
+    ..arcToPoint(Offset(r.left, r.bottom - r.blRadiusY), radius: r.blRadius)
+    ..lineTo(r.left, r.top + r.tlRadiusY)
+    ..arcToPoint(Offset(r.left + r.tlRadiusX, r.top), radius: r.tlRadius)
+    ..close();
+
+  /// 둘레를 넘는 토막은 둘로 — 시작점(0)을 지나는 꼬리가 끊기지 않게.
+  static List<(double, double)> _wrap(double a, double b, double len) {
+    if (a >= 0) return [(a, b)];
+    if (b <= 0) return [(a + len, b + len)];
+    return [(a + len, len), (0, b)];
   }
 
   @override
-  bool shouldRepaint(_BreathPainter o) =>
+  bool shouldRepaint(OrbitPainter o) =>
       o.color != color || o.radius != radius || o.still != still;
 }
 

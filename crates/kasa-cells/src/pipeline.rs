@@ -37,26 +37,43 @@ impl CellInstance {
     /// CPU 가 프레임마다 다시 짓지 않는다. `uv.x` 가 0..1 가로 위치다. 왼쪽부터 2.4초에 걸쳐 차고 다시
     /// 시작한다 — 「끝이 있고 거기로 가는 중」. 시간으로 채우므로 찬 칸이 실제 진행률은 아니다.
     ///
-    /// 끝을 모르는 「도는 중」을 말하던 쓸기·숨쉬기 띠(비트 2·3)는 걷었다 — 테두리 숨(`FLAG_EDGE_BREATH`)이
-    /// 그 자리를 잇는다(2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로」).
+    /// 끝을 모르는 「도는 중」은 띠가 아니라 테두리가 말한다 — 한 바퀴(`FLAG_EDGE_ORBIT`)·점선(`FLAG_EDGE_DASH`)
+    /// (2026-10-07 「프로세스바 걷어내고」, 같은 날 「숨쉬는 거 헷갈리는데 선택이랑. 한 바퀴 도는 거로 하자」).
     pub const FLAG_BAND_FILL: u32 = 16;
-    /// 테두리 숨(비트 5): 쿼드 하나가 둥근 사각 윤곽 전체다. uv 가 -1..1 이고 셰이더가 `fwidth` 로 쿼드의 장치 px
-    /// 크기를 되짚어 가장자리까지의 거리를 재므로 네 변·모서리가 한 번에 겹침 없이 선다. 굵기·진하기가 `u.time`
-    /// 사인으로 오르내려 일하는 칸도 CPU 가 테두리를 다시 짓지 않는다. 숨의 모양은 상위 비트에 싣는다
-    /// (`edge_breath_flags`).
-    pub const FLAG_EDGE_BREATH: u32 = 32;
+    /// 테두리 한 바퀴(비트 2): 빛 조각 하나가 둥근 사각 윤곽을 따라 시계 방향으로 돈다. 머리가 가장 굵고
+    /// 진하며 꼬리로 갈수록 가늘고 옅어진다(혜성). 「일하는 중」이 정지한 초점 테두리와 한눈에 갈리게 숨이 아니라
+    /// 움직임으로 말한다 — 숨은 가장 진할 때 초점 테두리와 같아 보였다. 모양은 `edge_orbit_flags`.
+    pub const FLAG_EDGE_ORBIT: u32 = 4;
+    /// 테두리 점선(비트 3): 같은 윤곽을 점선으로 긋고 그 무늬가 천천히 시계 방향으로 흐른다 — 「뒤에서 도는 중」.
+    /// 뒤에서 도는 칸은 프레임을 펌프하지 않아 무늬가 자주 멈춰 서는데, 멈춘 점선도 실선(초점)과는 갈린다.
+    /// 모양은 `edge_dash_flags`.
+    pub const FLAG_EDGE_DASH: u32 = 8;
 
-    /// `FLAG_EDGE_BREATH` 와 그 숨 모양을 플래그 한 칸에 싼다 — 인스턴스 배치를 안 바꾸고 실을 자리가 여기뿐이다.
-    /// 굵기는 장치 px 1/4 단위(6비트, 최대 15.75), 모서리 반지름은 장치 px 1/2 단위(6비트, 최대 31.5),
-    /// 주기는 0.5초 단위(4비트, 0.5~7.5), 가장 옅을 때 진하기는 가장 진할 때(fg 알파)의 1/15 단위(4비트).
-    pub fn edge_breath_flags(thick_max_px: f32, thick_min_px: f32, radius_px: f32, period_s: f32, low: f32) -> u32 {
+    /// 두 테두리 갈래 공통: 쿼드 하나가 둥근 사각 윤곽 전체다. uv 가 -1..1 이고 셰이더가 `fwidth` 로 쿼드의 장치
+    /// px 크기를 되짚어 가장자리까지의 거리와 둘레 위 자리를 재므로 네 변·모서리가 한 번에 겹침 없이 서고, 움직임은
+    /// `u.time` 으로 셰이더가 셈해 CPU 는 위상을 안 센다. 인스턴스 배치를 안 바꾸고 모양을 실을 자리가 플래그 상위
+    /// 비트뿐이라 거기 싼다 — 굵기는 장치 px 1/4 단위(6비트, 최대 15.75), 모서리 반지름은 장치 px 1/2 단위(6비트,
+    /// 최대 31.5), 주기는 0.5초 단위(4비트, 0.5~7.5), 끝 칸은 1/15 단위 몫(4비트).
+    ///
+    /// 한 바퀴: 굵기 둘이 머리·꼬리 끝, 주기가 한 바퀴 시간, 몫은 둘레에서 꼬리가 차지하는 만큼. 몫이라 칸
+    /// 크기와 상관없이 같은 모양으로 보인다.
+    pub fn edge_orbit_flags(thick_head_px: f32, thick_tail_px: f32, radius_px: f32, lap_s: f32, tail: f32) -> u32 {
+        Self::FLAG_EDGE_ORBIT | Self::edge_shape_bits(thick_head_px * 4.0, thick_tail_px * 4.0, radius_px, lap_s, tail)
+    }
+
+    /// 점선: 굵기, 무늬 한 칸(선+틈) 길이(장치 px 1 단위, 6비트 — 최대 63), 무늬가 한 칸 흐르는 시간, 몫은 한
+    /// 칸에서 선이 차지하는 만큼.
+    pub fn edge_dash_flags(thick_px: f32, cycle_px: f32, radius_px: f32, step_s: f32, duty: f32) -> u32 {
+        Self::FLAG_EDGE_DASH | Self::edge_shape_bits(thick_px * 4.0, cycle_px, radius_px, step_s, duty)
+    }
+
+    fn edge_shape_bits(a: f32, b: f32, radius_px: f32, period_s: f32, frac: f32) -> u32 {
         let q = |v: f32, max: u32| (v.round().max(0.0) as u32).min(max);
-        Self::FLAG_EDGE_BREATH
-            | q(thick_max_px * 4.0, 63) << 6
-            | q(thick_min_px * 4.0, 63) << 12
+        q(a, 63) << 6
+            | q(b, 63) << 12
             | q(radius_px * 2.0, 63) << 18
             | q(period_s * 2.0, 15).max(1) << 24
-            | q(low * 15.0, 15) << 28
+            | q(frac * 15.0, 15) << 28
     }
 }
 
@@ -408,26 +425,37 @@ mod tests {
     use super::CellInstance;
 
     #[test]
-    fn edge_breath_flags_pack_without_touching_other_flags() {
-        let f = CellInstance::edge_breath_flags(5.0, 3.0, 4.0, 3.0, 0.45);
-        assert_ne!(f & CellInstance::FLAG_EDGE_BREATH, 0);
-        // 아래 다섯 비트(색 글리프·아이콘·채우기 띠)를 건드리면 셰이더가 다른 갈래로 샌다.
-        assert_eq!(f & 0x1f, 0);
-        assert_eq!((f >> 6) & 0x3f, 20, "굵기 최대 5px → 1/4 단위 20");
-        assert_eq!((f >> 12) & 0x3f, 12, "굵기 최소 3px → 12");
+    fn edge_orbit_flags_pack_without_touching_other_flags() {
+        let f = CellInstance::edge_orbit_flags(5.0, 3.0, 4.0, 2.0, 0.2);
+        // 아래 여섯 비트에선 한 바퀴 비트만 — 색 글리프·아이콘·점선·채우기 띠를 건드리면 셰이더가 다른 갈래로 샌다.
+        assert_eq!(f & 0x3f, CellInstance::FLAG_EDGE_ORBIT);
+        assert_eq!((f >> 6) & 0x3f, 20, "머리 5px → 1/4 단위 20");
+        assert_eq!((f >> 12) & 0x3f, 12, "꼬리 끝 3px → 12");
         assert_eq!((f >> 18) & 0x3f, 8, "반지름 4px → 1/2 단위 8");
-        assert_eq!((f >> 24) & 0xf, 6, "3초 → 0.5초 단위 6");
-        assert_eq!((f >> 28) & 0xf, 7, "0.45 → 1/15 단위 7");
+        assert_eq!((f >> 24) & 0xf, 4, "2초 → 0.5초 단위 4");
+        assert_eq!((f >> 28) & 0xf, 3, "꼬리 0.2 → 1/15 단위 3");
     }
 
     #[test]
-    fn edge_breath_flags_clamp_instead_of_spilling_into_neighbours() {
-        let f = CellInstance::edge_breath_flags(100.0, 100.0, 100.0, 100.0, 9.0);
+    fn edge_dash_flags_carry_the_cycle_in_whole_device_px() {
+        let f = CellInstance::edge_dash_flags(2.0, 20.0, 4.0, 3.0, 0.6);
+        assert_eq!(f & 0x3f, CellInstance::FLAG_EDGE_DASH);
+        assert_eq!((f >> 6) & 0x3f, 8, "굵기 2px → 1/4 단위 8");
+        assert_eq!((f >> 12) & 0x3f, 20, "한 칸 20px 그대로");
+        assert_eq!((f >> 24) & 0xf, 6, "3초 → 6");
+        assert_eq!((f >> 28) & 0xf, 9, "선 몫 0.6 → 9");
+    }
+
+    #[test]
+    fn edge_flags_clamp_instead_of_spilling_into_neighbours() {
+        let f = CellInstance::edge_orbit_flags(100.0, 100.0, 100.0, 100.0, 9.0);
+        assert_eq!(f & 0x3f, CellInstance::FLAG_EDGE_ORBIT);
         assert_eq!((f >> 6) & 0x3f, 63);
         assert_eq!((f >> 12) & 0x3f, 63);
         assert_eq!((f >> 18) & 0x3f, 63);
         assert_eq!((f >> 24) & 0xf, 15);
         assert_eq!((f >> 28) & 0xf, 15);
-        assert_eq!((CellInstance::edge_breath_flags(1.0, 1.0, 0.0, 0.0, 0.0) >> 24) & 0xf, 1, "주기 0 은 0.5초로");
+        assert_eq!((CellInstance::edge_dash_flags(1.0, 999.0, 0.0, 0.0, 0.0) >> 12) & 0x3f, 63);
+        assert_eq!((CellInstance::edge_orbit_flags(1.0, 1.0, 0.0, 0.0, 0.0) >> 24) & 0xf, 1, "주기 0 은 0.5초로");
     }
 }

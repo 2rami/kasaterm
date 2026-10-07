@@ -368,7 +368,7 @@ fn draw_cell(
         theme::accent()
     } else if let Some((c, _)) = signal {
         c
-    } else if cur && !busy {
+    } else if cur {
         theme::accent()
     } else if hover {
         theme::surface_hover()
@@ -397,7 +397,7 @@ fn draw_cell(
     }
     let has_bar = crate::render::minimap_has_bar(mw, mh);
     if signal.is_none() {
-        crate::render::breath_mark(g, (mx, my, mw, mh), 2.0, busy, false, cur);
+        crate::render::activity_mark(g, (mx, my, mw, mh), 2.0, busy, false, cur, if cur { 1.5 } else { 0.0 });
     }
     // 탭은 바닥의 점 줄 — 첫 점(바깥 자리)이 넓고, 나머지는 흐리게. 본기기와 같은 그림.
     if deck.len() > 1 && mw > 16.0 && mh > 16.0 {

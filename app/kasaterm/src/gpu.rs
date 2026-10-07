@@ -402,17 +402,24 @@ impl GpuRenderer {
 
 
 
-    /// 「일하는 중」·「뒤에서 도는 중」 테두리 숨(논리 px 둥근 사각). 모양은 `theme::breath` 한 곳에서 정하고,
-    /// 셰이더가 `u.time` 으로 숨쉬게 하므로 일하는 동안에도 CPU 는 테두리를 다시 짓지 않는다.
-    pub fn breath_outline(&mut self, rect: (f32, f32, f32, f32), radius: f32, col: [u8; 4], look: crate::theme::Breath) {
-        let c = crate::theme::with_alpha(col, (col[3] as u32 * look.alpha as u32 / 255) as u8);
-        self.grid.edge_breath(rect, c, look.thick, radius, look.period, look.low);
+    /// 「일하는 중」 한 바퀴·「뒤에서 도는 중」 흐르는 점선(논리 px 둥근 사각). 모양은 `theme::activity_edge` 한
+    /// 곳에서 정하고, 셰이더가 `u.time` 으로 움직이므로 일하는 동안에도 CPU 는 테두리를 다시 짓지 않는다.
+    pub fn activity_outline(&mut self, rect: (f32, f32, f32, f32), radius: f32, col: [u8; 4], look: crate::theme::ActivityEdge) {
+        let fade = |a: u8| crate::theme::with_alpha(col, (col[3] as u32 * a as u32 / 255) as u8);
+        match look {
+            crate::theme::ActivityEdge::Orbit { head, tail_end, lap, tail, alpha } => {
+                self.grid.edge_orbit(rect, fade(alpha), (head, tail_end), radius, lap, tail)
+            }
+            crate::theme::ActivityEdge::Dash { thick, cycle, step, duty, alpha } => {
+                self.grid.edge_dash(rect, fade(alpha), thick, cycle, radius, step, duty)
+            }
+        }
     }
 
     /// Compact-progress rail (logical px). Pushes ONE `FLAG_BAND_FILL` instance;
     /// the shader fills from the left on a 2.4s loop and restarts, so the header
     /// says "something with an end is running" — the shape a sweep can't say.
-    /// Same idle-0-CPU property as `breath_outline`.
+    /// Same idle-0-CPU property as `activity_outline`.
     ///
     /// 채운 칸이 실제 진행률은 아니다. claude 는 compact 진행률을 화면에만 내놓고
     /// 우리에게 넘기지 않으므로 시간으로 채운다. 그 화면 표시가 teammate 메시지

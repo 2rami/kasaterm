@@ -1011,9 +1011,9 @@ class _MiniCellState extends State<_MiniCell> {
             ),
           ),
         );
-        // 작업 중은 칸 윤곽이 학생색으로 숨쉰다 — 바닥에 흐르던 막대를 걷었다(2026-10-07 「프로세스바
-        // 걷어내고 숨쉬기 모션으로」). 기다림의 고정 테(상태색)와는 상태가 배타적이라 같이 서지 않는다.
-        final cell = BreathEdge(
+        // 작업 중은 학생색 빛 조각이 칸 윤곽을 한 바퀴씩 돈다 — 바닥에 흐르던 막대를 걷었다(2026-10-07).
+        // 기다림의 고정 테(상태색)와는 상태가 배타적이라 같이 서지 않는다.
+        final cell = OrbitEdge(
           live: busy && !waiting,
           color: accent,
           radius: Look.smallCorners,
@@ -1190,13 +1190,13 @@ class _PaneTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     final slug = pane.slug;
     final st = StatusStyle.of(pane, scheme);
-    // 왼쪽 알약 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례만 주황. 하는 중은 띠가 아니라 줄 윤곽이
-    // 숨쉰다(지도 칸·데스크톱 목록 줄과 같은 결, 2026-10-07).
+    // 왼쪽 알약 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례만 주황. 하는 중은 띠가 아니라 줄 윤곽을 빛
+    // 조각이 돈다(지도 칸·데스크톱 목록 줄과 같은 결, 2026-10-07).
     final stripe = st.needsYou ? StatusStyle.attention : null;
     // 글은 세션 이름과 도는 시간뿐 — 데스크톱 사이드바 목록 줄과 같다(2026-10-01). 학생 이름은
-    // 얼굴이, 상태는 띠와 숨이 말한다.
+    // 얼굴이, 상태는 띠와 도는 윤곽이 말한다.
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
-    return BreathEdge(
+    return OrbitEdge(
       live: st.live,
       color: scheme.primary,
       radius: Look.smallCorners,

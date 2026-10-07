@@ -396,24 +396,44 @@ impl GridRenderer {
         });
     }
 
-    /// 숨쉬는 둥근 사각 윤곽 하나(논리 px). 굵기는 논리 px 로 받아 장치 px 로 실어 보낸다 — 셰이더가 장치 px
-    /// 거리로 그린다. 쿼드 하나라 네 변이 모서리에서 겹쳐 진해지지 않는다.
-    pub fn edge_breath(
+    /// 빛 조각 하나가 한 바퀴씩 도는 둥근 사각 윤곽(논리 px). 굵기·반지름은 논리 px 로 받아 장치 px 로 실어
+    /// 보낸다 — 셰이더가 장치 px 거리로 그린다. 쿼드 하나라 네 변이 모서리에서 겹쳐 진해지지 않는다.
+    pub fn edge_orbit(
         &mut self,
-        (x, y, w, h): (f32, f32, f32, f32),
+        rect: (f32, f32, f32, f32),
         rgba_u8: [u8; 4],
-        (thick_max, thick_min): (f32, f32),
+        (head, tail_end): (f32, f32),
         radius: f32,
-        period_s: f32,
-        low: f32,
+        lap_s: f32,
+        tail: f32,
     ) {
+        let s = self.scale;
+        self.edge(rect, rgba_u8, CellInstance::edge_orbit_flags(head * s, tail_end * s, radius * s, lap_s, tail));
+    }
+
+    /// 무늬가 천천히 흐르는 점선 둥근 사각 윤곽(논리 px). `cycle` 은 선+틈 한 칸 길이.
+    pub fn edge_dash(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        rgba_u8: [u8; 4],
+        thick: f32,
+        cycle: f32,
+        radius: f32,
+        step_s: f32,
+        duty: f32,
+    ) {
+        let s = self.scale;
+        self.edge(rect, rgba_u8, CellInstance::edge_dash_flags(thick * s, cycle * s, radius * s, step_s, duty));
+    }
+
+    fn edge(&mut self, (x, y, w, h): (f32, f32, f32, f32), rgba_u8: [u8; 4], flags: u32) {
         let s = self.scale;
         self.chrome.push(CellInstance {
             cell_px: [x * s, y * s, w * s, h * s],
             uv_min: [-1.0, -1.0],
             uv_max: [1.0, 1.0],
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
-            flags: CellInstance::edge_breath_flags(thick_max * s, thick_min * s, radius * s, period_s, low),
+            flags,
             ..Default::default()
         });
     }

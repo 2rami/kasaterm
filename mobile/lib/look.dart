@@ -145,12 +145,12 @@ abstract final class Look {
   /// 바탕 머리 빛이 닿는 위쪽 높이(`TwinBackdrop`).
   static const glowH = 240.0;
 
-  /// 「일하는 중」 테두리 숨 — 데스크톱 `theme::breath` 와 같은 박자(design.md 「일하는 중 표시」). 굵기는
-  /// 가장 가늘 때·가장 굵을 때, 진하기는 가장 옅을 때 몫. 끝을 모르는 일은 막대 대신 칸 윤곽이 숨쉰다.
-  static const breathPeriod = Duration(seconds: 3);
-  static const breathThin = 1.5;
-  static const breathThick = 2.5;
-  static const breathLow = 0.45;
+  /// 「일하는 중」 테두리 한 바퀴 — 데스크톱 `theme::activity_edge` 와 같은 박자·모양(design.md 「일하는 중 표시」).
+  /// 빛 조각이 한 바퀴 시간에 칸 윤곽을 돈다. 머리 굵기에서 꼬리 끝 굵기로 가늘어지고, 꼬리는 둘레의 몫.
+  static const orbitLap = Duration(seconds: 2);
+  static const orbitHead = 2.5;
+  static const orbitTailEnd = 1.0;
+  static const orbitTail = 0.2;
 
   /// 확인 중 띠 — 두께, 빛이 한 번 흐르는 시간.
   static const twinBarH = 2.0;
