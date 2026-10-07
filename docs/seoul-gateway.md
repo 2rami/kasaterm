@@ -79,6 +79,16 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 교체 전 백업 `/usr/local/bin/kasa-relay.bak-20261005b`(=8c185712). 되돌리기는 그 파일을 제자리로 놓고 `sudo systemctl restart kasa-relay`.
 확인: `/relay/health` 200, `providers` 의 `connect` 둘 다 참, 무토큰 `/relay/connections` 401, 맥미니·맥북 재접속.
 
+## Gmail 걷기 교체 기록 (2026-10-07)
+
+472d2b9d 관문으로 교체(13:53:13, sha256 f69933a2…, Gmail 일 권한 걷기 — [account-connections.md](account-connections.md)). env 변경 없음.
+켜면서 봉인함의 Google 연결 1개를 Google 에서 철회·삭제했다(로그 `gmail connections retired=1 revoked=1`, 감사 `gmail.retire`).
+교체 전 백업 `/usr/local/bin/kasa-relay.bak-20261007`(sha256 73c25cc0…), `/var/lib/kasa-relay-bak-20261007-connections.tar`
+(철회된 토큰이라 되살려도 메일은 안 열린다). 되돌리기는 그 바이너리를 제자리로 놓고 `sudo systemctl restart kasa-relay`.
+확인: `/relay/health` 200, `providers` 의 `connect` google 거짓·github 참, 무토큰 `/relay/connections` 401, 메일 기능을 실은
+`oauth/start` 400, 설정 Google 연결의 동의 URL scope `openid email profile` 뿐(교체 전엔 `gmail.readonly`·`gmail.send` 가 함께),
+기기 whoami·GitHub 연결 정상, 맥미니·맥북 재접속.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서
