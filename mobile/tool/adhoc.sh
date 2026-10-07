@@ -102,9 +102,12 @@ fi
 mv "$2" "$3"
 prev=$(cat latest 2>/dev/null || true)
 printf %s "$3" > latest.tmp && mv latest.tmp latest
+# 같은 창구에 다른 앱 판(나쵸 앱 — 포인터 latest-<번들>)도 있다. 이 앱 번들의 옛 판만 지운다.
+bundle_of() { sed -n 's/.*"bundle_id": *"\([^"]*\)".*/\1/p' "$1/meta.json" 2>/dev/null; }
+mine=$(bundle_of "$3")
 for d in */; do
   d=${d%/}
-  [ "$d" = "$3" ] || [ "$d" = "$prev" ] || rm -rf -- "$d"
+  [ "$d" = "$3" ] || [ "$d" = "$prev" ] || [ "$(bundle_of "$d")" != "$mine" ] || rm -rf -- "$d"
 done
 SH
 

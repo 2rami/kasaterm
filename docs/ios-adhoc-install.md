@@ -43,6 +43,15 @@ mobile/tool/adhoc.sh --show   # 링크를 사람이 보는 기기로도 띄운�
 
 관문 기계(서명 준비가 있는 기계)에서 돌리면 ssh 없이 그 자리에서 올리고, 개발 인증서 없이 서명 없는 아카이브를 그 기계의 배포 인증서로 한 번에 서명한다(권한은 프로파일에서 고르되 `keychain-access-groups` 는 뺀다 — 넣으면 폰에 저장된 로그인을 못 읽는다). 판마다 token 이 새로 나오고 지금 판과 바로 앞 판만 남는다. 기기 손 등록은 `mobile/tool/asc.py device <UDID> <이름>`.
 
+## 다른 앱도 같은 창구 — 나쵸 앱
+
+나쵸 폰 앱(`com.nachoneko.chat`, 나쵸 레포 `app/iosApp/adhoc.sh`)도 같은 창구·서명기·기기 등록을 쓴다. 판 폴더 꼴은 같고
+(`relay-install/<token>/{kasaterm.ipa, meta.json}` — 파일 이름은 관문이 아는 하나라 그대로), 앱마다 포인터만 다르다:
+카사텀 앱은 `latest`, 다른 앱은 `latest-<번들 id>`. 관문의 `/relay/install/latest`(폰 새 판 알림·관리 화면)는 `latest` 만 보고,
+나쵸 앱은 나쵸 서버 `GET /api/app/release` 가 제 포인터를 읽어 알린다. 옛 판 지우기는 **같은 번들의 판만** 지운다(`adhoc.sh`·
+나쵸 `adhoc.sh` 둘 다) — 다른 앱의 지금 판을 지우지 않는다. 새 번들은 서명 전에 한 번 `tool/asc.py bundle-id <번들> <이름>` 으로
+App ID 를 등록한다(`com.nachoneko.chat` 은 10-07 등록). 서울 동기화(`gateway.sh sync-install`)는 폴더째 옮기니 다른 앱 판도 따라간다.
+
 ## 어디서 무엇이 도나
 
 | 자리 | 하는 일 |
