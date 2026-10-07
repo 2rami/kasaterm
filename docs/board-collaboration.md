@@ -52,6 +52,21 @@ surface ID and (when present on the pane) matching session/instance identity.
 HTTP uses the existing terminal authentication and origin guard. Remote source
 requests always use `scope=local`, preventing recursive federation.
 
+Optional `spawned_by` is the `surface_key` of the pane that split or tabbed this one
+(`summon`, `split`, `tab` from a pane), read from that machine's `spawned-by.json`;
+`null` when unknown. Mirror rows never carry it — the source machine's row is canonical.
+
+`collab.peek {address,lines}`, `collab.capture {address,path,max_width}` and
+`collab.where {machine_id}` / `GET /collab/peek|capture|where?params=...` read a pane's
+screen text, a pane's PNG, and a machine's room layout. They take the same row
+`address` as inspection (`where` takes a machine ID; empty means this machine) and
+follow the same route: verified direct → roster `base` → gateway relay. The source
+validates surface key and identity, answers only its own panes (`local_only`), caps
+text at 256 KiB and PNGs at 2.5 MB. Over HTTP a capture always returns
+`png_base64` and ignores any `path`; the requesting machine writes the file. CLI:
+`peek|capture %N@machine` (or `name@machine`, or `--address JSON`) and
+`where --machine <label|id>`.
+
 `board --all|--local` selects this API. `board-watch --all --json --since CURSOR`
 streams changes and reports reset requirements explicitly. Legacy invocations
 without the new switches retain their output format.
@@ -87,7 +102,7 @@ last observed room. Machine-level events have no `pane_id` or room fields.
 
 HTTP-only hosts need no Unix socket. Use the explicit global option
 `kasaterm-cli --api http://127.0.0.1:8765 board --all`, with the same prefix for
-`board-watch`, `rooms`, `activity --address`, `tell`, and `tell-status`. The CLI maps only
+`board-watch`, `rooms`, `activity --address`, `peek`, `capture`, `where`, `tell`, and `tell-status`. The CLI maps only
 the new collaboration RPCs to their guarded HTTP endpoints, using system curl
 with redirects disabled and bounded responses. `--api-token-file FILE`, before
 the command, reuses an existing server token when authentication is required;

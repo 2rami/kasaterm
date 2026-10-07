@@ -7575,10 +7575,17 @@ async fn collab_read_handler(
         }
         value
     };
+    let mut params = params;
+    // HTTP 로 온 캡처는 늘 본문으로 돌려준다 — 요청에 실린 경로를 이 기기 디스크에 쓰지 않는다.
+    if operation == "capture" {
+        params["inline"] = serde_json::json!(true);
+        if let Some(object) = params.as_object_mut() { object.remove("path"); }
+    }
     match tokio::task::spawn_blocking(move || match operation {
         "snapshot" => backend.collab_snapshot(&params),
         "changes" => backend.collab_changes(&params),
-        _ => backend.collab_inspect(&params),
+        "inspect" => backend.collab_inspect(&params),
+        view => backend.collab_view(view,&params),
     }).await {
         Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(error)) => (StatusCode::CONFLICT,Json(serde_json::json!({"error":error.to_string()}))).into_response(),
@@ -7747,6 +7754,9 @@ pub fn spawn_http_server_opts(
                 let collab_snapshot_backend = backend.clone();
                 let collab_changes_backend = backend.clone();
                 let collab_inspect_backend = backend.clone();
+                let collab_peek_backend = backend.clone();
+                let collab_capture_backend = backend.clone();
+                let collab_where_backend = backend.clone();
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
@@ -7869,6 +7879,12 @@ pub fn spawn_http_server_opts(
                         collab_read_handler(collab_changes_backend.clone(),"changes",q)))
                     .route("/collab/inspect", get(move |q: Query<std::collections::HashMap<String,String>>|
                         collab_read_handler(collab_inspect_backend.clone(),"inspect",q)))
+                    .route("/collab/peek", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_peek_backend.clone(),"peek",q)))
+                    .route("/collab/capture", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_capture_backend.clone(),"capture",q)))
+                    .route("/collab/where", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_where_backend.clone(),"where",q)))
                     .route("/machines/announce", post(machines_announce_handler))
                     .route("/claude-login-code", post(move |body: axum::body::Bytes|
                         claude_login_code_handler(login_code_backend.clone(), body)))
@@ -8752,7 +8768,8 @@ mod tests {
         use axum::http::StatusCode;
         let backend: Arc<dyn Backend> = Arc::new(kasa_collab::board_service::synthetic::SyntheticBackend::default());
         let mut router = axum::Router::new();
-        for (path,operation) in [("/collab/board","snapshot"),("/collab/changes","changes"),("/collab/inspect","inspect")] {
+        for (path,operation) in [("/collab/board","snapshot"),("/collab/changes","changes"),("/collab/inspect","inspect"),
+            ("/collab/peek","peek"),("/collab/capture","capture"),("/collab/where","where")] {
             let backend = backend.clone();
             router = router.route(path,get(move |q: Query<std::collections::HashMap<String,String>>|
                 collab_read_handler(backend.clone(),operation,q)));
@@ -8764,13 +8781,19 @@ mod tests {
             axum::serve(listener,router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
         });
         let client = reqwest::Client::new();
-        for path in ["/collab/board","/collab/changes","/collab/inspect"] {
+        for path in ["/collab/board","/collab/changes","/collab/inspect","/collab/peek","/collab/capture","/collab/where"] {
             let response = client.get(format!("{base}{path}?scope=local")).send().await.unwrap();
             assert_eq!(response.status(),StatusCode::OK);
             assert_eq!(response.json::<serde_json::Value>().await.unwrap()["synthetic"],true);
             let blocked = client.get(format!("{base}{path}")).header("sec-fetch-site","cross-site").send().await.unwrap();
             assert_eq!(blocked.status(),StatusCode::FORBIDDEN);
         }
+        // HTTP 로 온 캡처는 요청의 경로를 버리고 본문으로 답한다 — 원격이 이 기기 디스크 아무 데나 쓰게 두지 않는다.
+        let shot: serde_json::Value = client.get(format!("{base}/collab/capture"))
+            .query(&[("params",r#"{"path":"/tmp/elsewhere.png","address":{}}"#)]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(shot["op"],"capture");
+        assert_eq!(shot["params"]["inline"],true);
+        assert!(shot["params"].get("path").is_none());
         server.abort();
     }
 

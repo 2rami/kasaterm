@@ -114,8 +114,8 @@ fn run() -> Result<Option<Response>> {
         _ => cmd,
     };
     if API_TARGET.get().is_some() {
-        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status") {
-            return Err(anyhow!("--api supports board, board-watch, activity and tell"));
+        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status"|"peek"|"capture"|"where") {
+            return Err(anyhow!("--api supports board, board-watch, activity, tell, peek, capture and where"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
@@ -462,6 +462,12 @@ fn run() -> Result<Option<Response>> {
     // 사람은 주소 JSON 을 안 친다(2026-09-16 지시 「몇 개 안 쳐도 바로 되게」) —
     // `tell 이름 본문` 은 보드에서 주소를 찾고, `tell --status ID` 는 보낼 때 적어 둔 주소를 쓴다.
     let tell_label = if cmd == "tell" { resolve_tell_target(&mut args)? } else { None };
+    if matches!(cmd.as_str(), "peek" | "capture") {
+        resolve_view_target(&cmd, &mut args)?;
+    }
+    if cmd == "where" {
+        resolve_where_machine(&mut args)?;
+    }
     if cmd == "tell:status" && args.len() == 1 && !args[0].starts_with("--") {
         let address = load_receipt(&args[0]).ok_or_else(|| anyhow!(
             "이 ID 의 주소를 모르겠어요 — 이 기계에서 보낸 것이 아니면 --address 를 함께 주세요"
@@ -527,9 +533,23 @@ fn run() -> Result<Option<Response>> {
     }
     // 칸이 열리고 닫힐 때마다 격자가 다시 짜이고 웹·문서는 연 칸의 탭으로 열린다 — 번호만 들고는
     // 제 창도 남의 창도 못 찾으니, 방·행·열·탭으로 말해 준다. `--json` 이면 그대로.
+    if request.method == "collab.capture" && response.ok {
+        let path = request.params["path"].as_str().map(str::to_owned);
+        if let Some(result) = response.result.as_mut() {
+            write_inline_capture(result, path.as_deref())?;
+        }
+    }
     if cmd == "where" && response.ok && !args.iter().any(|a| a == "--json") {
-        let query: Vec<&str> = args.iter().map(String::as_str).filter(|a| !a.starts_with("--")).collect();
-        let me = std::env::var("KASATERM_PANE_ID").ok();
+        let machine_value = args.iter().position(|a| a == "--machine-id").map(|i| i + 1);
+        let query: Vec<&str> = args.iter().enumerate()
+            .filter(|(i, a)| !a.starts_with("--") && Some(*i) != machine_value)
+            .map(|(_, a)| a.as_str()).collect();
+        // 다른 기기 배치에서 「← 나」를 붙이면 그 기기의 같은 번호 칸을 나로 잘못 짚는다.
+        let me = std::env::var("KASATERM_PANE_ID").ok().filter(|_| request.method == "window.where");
+        if let Some(label) = response.result.as_ref().filter(|_| request.method == "collab.where")
+            .and_then(|r| r.get("machine_label")).and_then(Value::as_str) {
+            println!("[{label}]");
+        }
         println!("{}", render_where(&response, &query.join(" "), me.as_deref()));
         return Ok(None);
     }
@@ -1077,17 +1097,117 @@ fn row_address<'a>(row: &'a Value, key: &str) -> &'a str {
 
 /// 사람이 부르는 이름(`미도리`·`미도리@맥미니`·`%12`)에 맞는 줄 — 세션이 붙은 pane 만.
 fn board_matches<'a>(rows: &'a [Value], target: &str) -> Vec<&'a Value> {
+    board_rows_named(rows, target).into_iter()
+        .filter(|p| p.get("address").and_then(|a| a.get("session_id")).is_some())
+        .collect()
+}
+
+/// 이름·제목·`%N` 에 `@기계` 를 붙여 고른 줄 — 셸 칸도 든다(화면 보기는 학생만의 일이 아니다).
+fn board_rows_named<'a>(rows: &'a [Value], target: &str) -> Vec<&'a Value> {
     let (name, machine) = target.rsplit_once('@').map(|(n, m)| (n, Some(m))).unwrap_or((target, None));
-    // macOS 컴퓨터 이름은 띄어쓰기가 줄바꿈 없는 공백(U+00A0)이라, 목록을 보고 그대로 친 `이름@건호의 MacBook Pro`
-    // 가 「보드에 없어요」로 떨어졌다(2026-10-01). 공백 종류는 가리지 않는다.
-    let spaced = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let machine = machine.map(spaced);
     rows.iter().filter(|p| {
-        let label = spaced(&row_text(p, "machine_label"));
+        let label = spaced(row_text(p, "machine_label"));
         (name == row_text(p, "character") || name == row_text(p, "title") || name == row_address(p, "surface_id"))
             && machine.as_deref().is_none_or(|m| m == label || label.starts_with(m))
-            && p.get("address").and_then(|a| a.get("session_id")).is_some()
     }).collect()
+}
+
+// macOS 컴퓨터 이름은 띄어쓰기가 줄바꿈 없는 공백(U+00A0)이라, 목록을 보고 그대로 친 `이름@건호의 MacBook Pro`
+// 가 「보드에 없어요」로 떨어졌다(2026-10-01). 공백 종류는 가리지 않는다.
+fn spaced(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `peek`·`capture` 의 대상이 `%N@기계`·`이름[@기계]` 이면 보드에서 주소로 바꾼다 — 다른 기기 칸도 같은 줄로 본다.
+/// `%N`(기계 없음)·`--address`·`--window` 는 그대로 둔다. 기계 없이 친 이름이 보드에 없으면 이 기기 칸 id 로 본다
+/// (`web-…` 같은 탭 id).
+fn resolve_view_target(cmd: &str, args: &mut Vec<String>) -> Result<()> {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--address" | "--window" => return Ok(()),
+            "--max-width" | "-w" => i += 2,
+            a if a.starts_with("--") => i += 1,
+            _ => break,
+        }
+    }
+    let Some(target) = args.get(i).cloned() else { return Ok(()) };
+    if (target.starts_with('%') && !target.contains('@')) || (cmd == "peek" && target.parse::<u64>().is_ok()) {
+        return Ok(());
+    }
+    let panes = snapshot_rows(&resolve_socket_path()?, false)?;
+    match board_rows_named(&panes, &target).as_slice() {
+        [] if !target.contains('@') => Ok(()),
+        [] => Err(anyhow!("「{target}」 이(가) 보드에 없어요 — `kasaterm-cli board --all` 로 이름·기계를 확인하세요")),
+        [one] => {
+            let address = one.get("address").cloned().unwrap_or(Value::Null);
+            eprintln!("→ {} {}", row_address(one, "surface_id"), describe_row(one));
+            args.splice(i..i + 1, ["--address".to_string(), address.to_string()]);
+            Ok(())
+        }
+        many => Err(anyhow!("「{target}」 이(가) 여럿이에요 — %N@기계 로 골라 주세요:\n{}",
+            many.iter().map(|p| format!("  {} {}", row_address(p, "surface_id"), describe_row(p))).collect::<Vec<_>>().join("\n"))),
+    }
+}
+
+fn view_address(raw: Option<&String>) -> Result<Value> {
+    let address: Value = serde_json::from_str(raw.ok_or_else(|| anyhow!("--address requires JSON"))?)
+        .context("invalid address JSON")?;
+    if !address.is_object() { return Err(anyhow!("--address must be a JSON object from board --all")); }
+    Ok(address)
+}
+
+/// HTTP 로 받은 캡처(`png_base64`)를 이 기기 파일로 푼다 — `--api` 호스트는 그림을 본문으로만 준다.
+fn write_inline_capture(result: &mut Value, path: Option<&str>) -> Result<()> {
+    use base64::Engine as _;
+    let Some(encoded) = result.get("png_base64").and_then(Value::as_str) else { return Ok(()) };
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).context("capture image is not base64")?;
+    if !bytes.starts_with(b"\x89PNG") { return Err(anyhow!("capture image is not a PNG")); }
+    let path = path.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        let surface: String = result.pointer("/address/surface_id").and_then(Value::as_str).unwrap_or("x")
+            .chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect();
+        std::env::temp_dir().join(format!("kasaterm-capture-api-{surface}.png"))
+    });
+    std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+    let object = result.as_object_mut().ok_or_else(|| anyhow!("capture response must be an object"))?;
+    object.remove("png_base64");
+    object.insert("path".into(), json!(path.to_string_lossy()));
+    object.insert("bytes".into(), json!(bytes.len()));
+    Ok(())
+}
+
+/// `where --machine <기계>` 의 기계를 보드 출처에서 찾는다 — 안정 id 그대로, 또는 표시 이름(앞부분). 이 기기면 None.
+fn resolve_where_machine(args: &mut Vec<String>) -> Result<()> {
+    let Some(pos) = args.iter().position(|a| a == "--machine") else { return Ok(()) };
+    let query = args.get(pos + 1).cloned().ok_or_else(|| anyhow!("--machine 뒤에 기계 이름이나 id 를 주세요"))?;
+    let resp = roundtrip(&resolve_socket_path()?, &Request {
+        id: json!("snapshot"),
+        method: "collab.snapshot".into(),
+        params: json!({ "scope": "all" }),
+    })?;
+    let empty = Vec::new();
+    let sources = resp.result.as_ref().and_then(|r| r.get("sources")).and_then(Value::as_array).unwrap_or(&empty);
+    let wanted = spaced(&query);
+    let exact: Vec<&Value> = sources.iter().filter(|s| row_text(s, "machine_id") == query || spaced(row_text(s, "label")) == wanted).collect();
+    let found = if exact.is_empty() {
+        sources.iter().filter(|s| spaced(row_text(s, "label")).starts_with(&wanted)).collect()
+    } else {
+        exact
+    };
+    let source = match found.as_slice() {
+        [one] => *one,
+        [] => return Err(anyhow!("「{query}」 기계가 보드에 없어요 — `kasaterm-cli board --all` 의 sources 를 확인하세요")),
+        many => return Err(anyhow!("「{query}」 기계가 여럿이에요:\n{}",
+            many.iter().map(|s| format!("  {} ({})", row_text(s, "label"), row_text(s, "machine_id"))).collect::<Vec<_>>().join("\n"))),
+    };
+    let local = source.get("is_local").and_then(Value::as_bool).unwrap_or(false);
+    if local && API_TARGET.get().is_none() {
+        args.drain(pos..pos + 2);
+    } else {
+        args.splice(pos..pos + 2, ["--machine-id".to_string(), row_text(source, "machine_id").to_string()]);
+    }
+    Ok(())
 }
 
 fn describe_row(p: &Value) -> String {
@@ -1513,12 +1633,12 @@ fn print_help() {
     // 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 CLI 정리).
     let groups: &[(&str, &[&str])] = &[
         ("보기 — 누가 무엇을 하나, 어디 있나", &[
-            "where [찾을 말] [--json]                  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
+            "where [찾을 말] [--json] [--machine 기계]  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
             "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서",
             "board --wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
             "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
-            "peek [%N] [줄수]                          pane 화면 글자",
-            "capture [%N] [경로] | --window [경로]      pane 또는 창 전체 스크린샷",
+            "peek [%N | %N@기계 | 이름@기계 | --address JSON] [줄수]   pane 화면 글자(다른 기기 칸은 카사넷으로)",
+            "capture [%N | %N@기계 | 이름@기계 | --address JSON] [경로] | --window [경로]   pane 또는 창 전체 스크린샷",
             "transcript [%N] [N]                       claude 최근 대화 N 턴",
             "activity [%N | --address JSON] [N]        실제로 한 도구·인자·결과(시간순)",
         ]),
@@ -2367,7 +2487,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "outcome": outcome, "summary": summary }),
             )
         }
-        "where" => ("window.where", json!({})),
+        "where" => match args.iter().position(|a| a == "--machine-id") {
+            Some(pos) => {
+                let machine = args.get(pos + 1).ok_or_else(|| anyhow!("--machine-id needs a machine id"))?;
+                ("collab.where", json!({ "machine_id": machine }))
+            }
+            // HTTP 로 붙은 호스트는 `window.where` 길이 없다 — 그 호스트 자신의 배치를 같은 협업 길로 묻는다.
+            None if API_TARGET.get().is_some() => ("collab.where", json!({})),
+            None => ("window.where", json!({})),
+        },
         "bind-transcript" => {
             // The pane registers its own transcript: surface_id from the
             // host-injected env, path from the hook's stdin (passed as the
@@ -2419,6 +2547,17 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 둔 것은 사람의 말에 맞추기 위해서다 — 실제로 하는 일은 읽기다.
             ("clipboard.get", json!({}))
         }
+        "peek" if args.first().is_some_and(|a| a == "--address") => {
+            // 보드 주소로 고른 칸 — 다른 기기 칸이면 그 기기가 답한다(activity --address 와 같은 길).
+            //   peek --address '<주소 JSON>' [줄수]   ·   peek %N@기계 [줄수]
+            let address = view_address(args.get(1))?;
+            if args.len() > 3 { return Err(anyhow!("peek --address JSON [lines]")); }
+            let mut params = json!({ "address": address });
+            if let Some(lines) = args.get(2) {
+                params["lines"] = json!(lines.parse::<u64>().context("invalid peek line count")?);
+            }
+            ("collab.peek", params)
+        }
         "peek" => {
             // Default to this pane if no id given — handy for "what does my
             // own screen look like" but the usual case is peeking a sibling.
@@ -2445,10 +2584,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let mut positional: Vec<String> = Vec::new();
             let mut max_width: Option<u64> = None;
             let mut whole_window = false;
+            let mut address: Option<Value> = None;
             let mut it = args.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--window" => whole_window = true,
+                    // 보드 주소로 고른 칸(`capture %N@기계` 가 이리로 바뀐다) — 다른 기기 칸이면 그 기기가 찍어
+                    // 그림을 실어 보내고, 이 기기 파일로 푼다.
+                    "--address" => address = Some(view_address(it.next())?),
                     "--max-width" | "-w" => {
                         max_width = it.next().and_then(|s| s.parse().ok());
                     }
@@ -2457,6 +2600,13 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     }
                     s => positional.push(s.to_string()),
                 }
+            }
+            if let Some(address) = address {
+                if whole_window { return Err(anyhow!("capture: --window 와 --address 는 함께 못 쓴다")); }
+                let mut params = json!({ "address": address });
+                if let Some(p) = positional.first() { params["path"] = json!(p); }
+                if let Some(w) = max_width { params["max_width"] = json!(w); }
+                return Ok(Request { id, method: "collab.capture".into(), params });
             }
             let surface = if whole_window {
                 String::new()
@@ -3159,6 +3309,9 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
         "collab.snapshot" => ("/collab/board",false),
         "collab.changes" => ("/collab/changes",false),
         "collab.inspect" => ("/collab/inspect",false),
+        "collab.peek" => ("/collab/peek",false),
+        "collab.capture" => ("/collab/capture",false),
+        "collab.where" => ("/collab/where",false),
         "collab.tell" => ("/collab/tell",true),
         "collab.tell_status" => ("/collab/tell/status",true),
         "nacho.report" => ("/nacho/report",true),
@@ -4256,6 +4409,42 @@ mod tests {
         assert_eq!(super::board_matches(&nbsp, "유우카@건호의 MacBook Pro").len(), 1, "줄바꿈 없는 공백도 띄어쓰기로 본다");
         assert_eq!(super::board_matches(&rows, "%5").len(), 1);
         assert!(super::board_matches(&rows, "유즈").is_empty());
+        assert_eq!(super::board_rows_named(&rows, "유즈").len(), 1, "화면 보기는 셸 칸도 고른다");
+        assert_eq!(super::board_rows_named(&rows, "%3@맥미니").len(), 1);
+    }
+
+    /// 주소로 고른 칸은 다른 기기여도 협업 길(`collab.*`)로 간다 — `surface.*` 는 이 기기 칸만 안다.
+    #[test]
+    fn address_views_use_the_collaboration_route() {
+        let address = r#"{"machine_id":"m","surface_key":"k","surface_id":"%3"}"#;
+        let peek = super::build_request("peek", &["--address".into(), address.into(), "40".into()]).unwrap();
+        assert_eq!(peek.method, "collab.peek");
+        assert_eq!(peek.params["lines"], 40);
+        assert_eq!(peek.params["address"]["surface_id"], "%3");
+        assert_eq!(super::build_request("peek", &["%3".into()]).unwrap().method, "surface.peek");
+        let shot = super::build_request("capture", &["--address".into(), address.into(), "/tmp/a.png".into(), "-w".into(), "800".into()]).unwrap();
+        assert_eq!(shot.method, "collab.capture");
+        assert_eq!(shot.params["path"], "/tmp/a.png");
+        assert_eq!(shot.params["max_width"], 800);
+        assert!(super::build_request("capture", &["--window".into(), "--address".into(), address.into()]).is_err());
+        let place = super::build_request("where", &["--machine-id".into(), "m".into()]).unwrap();
+        assert_eq!((place.method.as_str(), &place.params["machine_id"]), ("collab.where", &serde_json::json!("m")));
+        assert_eq!(super::build_request("where", &[]).unwrap().method, "window.where");
+    }
+
+    #[test]
+    fn inline_capture_lands_in_a_local_png() {
+        use base64::Engine as _;
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        let path = std::env::temp_dir().join(format!("kasa-inline-capture-{}.png", std::process::id()));
+        let mut result = serde_json::json!({"address":{"surface_id":"%3"},
+            "png_base64": base64::engine::general_purpose::STANDARD.encode(png)});
+        super::write_inline_capture(&mut result, path.to_str()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        assert!(result.get("png_base64").is_none() && result["bytes"] == png.len());
+        let _ = std::fs::remove_file(path);
+        let mut bad = serde_json::json!({"png_base64": base64::engine::general_purpose::STANDARD.encode(b"<html>")});
+        assert!(super::write_inline_capture(&mut bad, None).is_err(), "PNG 가 아니면 파일로 안 푼다");
     }
 
     fn statusline(d: &serde_json::Value, in_pane: bool, character: Option<&str>, settings: &serde_json::Value) -> String {

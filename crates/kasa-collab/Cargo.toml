@@ -16,6 +16,8 @@ test-support = ["net", "dep:axum", "dep:bytes", "tokio/net", "tokio/rt-multi-thr
 anyhow.workspace = true
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+# 다른 기기로 실어 보내는 칸 캡처(`board_service::view`). kasa-socket 이 이미 쓰는 판이다.
+base64 = "0.22"
 kasa-socket = { path = "../kasa-socket", default-features = false }
 # 칸 등록부(`lookup_session`)와 칸의 하네스 판정(`active_agent`).
 kasa-pty = { path = "../kasa-pty", default-features = false }

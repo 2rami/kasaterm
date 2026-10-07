@@ -3021,6 +3021,10 @@ impl Backend for PtyBackend {
         kasa_mcp::board_service::inspect(self,params)
     }
 
+    fn collab_view(&self, op: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::board_service::view(self,op,params)
+    }
+
     fn collab_tell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         // 알릴 창은 이 기기의 창이다 — 받는 기기로 넘기기 전에 뗀다.
         let mut params = params.clone();
@@ -3173,6 +3177,8 @@ impl Backend for PtyBackend {
         // 그 표식을 못 본다(try_lock) — 여기서는 아무 잠금도 없다.
         self.hub.refresh();
         let origin_tasks = kasa_socket::nacho_inbox::origin_tasks();
+        // 부른 칸(자식 키 → 부모 키). 메모리 짝은 적을 때 파일에도 같이 적히니 파일 하나로 충분하다.
+        let spawners: HashMap<String,String> = read_spawner_pairs(&spawner_file()).into_iter().collect();
         let mut panes = Vec::new();
         let mut observed_bindings = Vec::new();
         for id in live {
@@ -3241,6 +3247,9 @@ impl Backend for PtyBackend {
             // 표시용 출처(`nacho_inbox::origin_tasks`). 거울 줄엔 안 싣는다 — 정본은 원본 기계 줄이다.
             if let Some(task) = session.as_deref().and_then(|sid| origin_tasks.get(sid)).filter(|_| !mirrored) {
                 row["origin_task_env"] = json!(task);
+            }
+            if let Some(parent) = row["address"]["surface_key"].as_str().and_then(|key| spawners.get(key)).filter(|_| !mirrored) {
+                row["spawned_by"] = json!(parent);
             }
             panes.push(row);
             observed_bindings.push((id,binding,managed));

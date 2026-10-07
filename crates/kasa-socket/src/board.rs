@@ -39,6 +39,9 @@ const TRACKED: &[&str] = &[
     // 나쵸가 띄운 세션이면 bind 때 env 에 있던 일 id — 표시용 출처일 뿐 판정·등록 근거가 아니다
     // (일↔창의 정본은 나쵸 장부의 machine_id·surface_key). 대화 id·본문은 안 싣는다.
     "origin_task_env",
+    // 이 칸을 부른(summon·split) 칸의 surface_key — 그 칸이 사는 기기의 `spawned-by.json` 기준. 모르면 null.
+    // 나쵸가 「누가 누구를 불렀나」를 ssh 로 각 기기 파일을 읽지 않고 판 하나로 안다.
+    "spawned_by",
 ];
 
 pub fn now_ms() -> u64 {
@@ -285,7 +288,7 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
             let mut clean = json!({"id":id,"address":{"machine_id":machine,
             "surface_key":key,"surface_id":surface},"machine_label":short(label,256),
             "room_label":"","title":"","request":"","progress":"","status":"unknown",
-            "observed_at_ms":at,"freshness":"fresh"});
+            "spawned_by":null,"observed_at_ms":at,"freshness":"fresh"});
             for name in ["session_id", "instance_id"] {
                 if let Ok(value) = identity(address, name) {
                     clean["address"][name] = json!(value);
@@ -386,6 +389,19 @@ mod normalize_panes_tests {
         let moved = json!({"machine_id":"m","surface_key":"k2","surface_id":"%1"});
         assert!(!guard_observation(&mut row, &moved, true, true));
         assert!(row["background"].is_null() && row["subagents"].is_null());
+    }
+
+    /// 부른 칸은 판을 건너 다른 기기로도 간다. 모르는 칸은 빠지지 않고 null 로 선다 — 읽는 쪽이 칸이 없는
+    /// 옛 판과 「부른 칸 없음」을 같은 모양으로 받는다.
+    #[test]
+    fn spawned_by_rides_the_board_and_defaults_to_null() {
+        let rows = vec![
+            json!({"address":{"machine_id":"m","surface_key":"child","surface_id":"%2"},"status":"working","spawned_by":"parent"}),
+            json!({"address":{"machine_id":"m","surface_key":"alone","surface_id":"%3"},"status":"idle"}),
+        ];
+        let out = normalize_panes("m", "M", &rows, 1).unwrap();
+        assert_eq!(out[0]["spawned_by"], "parent");
+        assert!(out[1].as_object().unwrap().contains_key("spawned_by") && out[1]["spawned_by"].is_null());
     }
 }
 

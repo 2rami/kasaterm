@@ -1456,6 +1456,12 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("collaboration inspection unsupported by this backend")
     }
 
+    /// 주소로 고른 칸의 화면 글(`peek`)·그림(`capture`)과 기기의 방 배치(`where`). 주소의 기기가 이 기기가
+    /// 아니면 그 기기로 넘긴다 — 그 길(카사넷·관문)을 아는 백엔드만 덮어쓴다.
+    fn collab_view(&self, _op: &str, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration view unsupported by this backend")
+    }
+
     fn collab_pane_identity(&self, _surface_id: &str) -> Result<serde_json::Value> {
         anyhow::bail!("collaboration pane identity unsupported by this backend")
     }

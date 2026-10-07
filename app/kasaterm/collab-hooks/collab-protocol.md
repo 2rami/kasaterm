@@ -6,7 +6,7 @@
 
 - `kasaterm-cli board --all`로 기기·방·캐릭터·상태를 본다. 현재 기기만 보면 `board --local`을 쓴다.
 - 응답의 최신 `address` 전체와 `cursor`를 보관한다. 세션 이름·창 번호로 주소를 추측하지 않는다.
-- 창·탭이 화면 어디 있는지(방·행·열·탭, 웹 주소·문서 경로)는 `kasaterm-cli where [찾을 말]`로 본다. 칸은 열고 닫을 때마다 다시 짜인다.
+- 창·탭이 화면 어디 있는지(방·행·열·탭, 웹 주소·문서 경로)는 `kasaterm-cli where [찾을 말] [--machine 기계]`로 본다. 칸은 열고 닫을 때마다 다시 짜인다.
 - HTTP 전용 호스트는 `kasaterm-cli --api BASE board --all`로 접속한다. 조회·추적·전달에도 이 접두부를 쓴다.
 - 기기 연결 끊김은 작업 종료가 아니다. 오래된 관측과 `unknown`은 미확인으로 표시한다.
 - 업무 범위는 선생님이 정한다. 다른 방에 임의로 일을 배정하지 않는다.
@@ -14,7 +14,7 @@
 
 ## 필요한 상세만 읽기
 
-- 문제가 의심되는 캐릭터만 `kasaterm-cli activity --address '<주소 JSON>' [limit]`로 확인한다. 주소는 `board --all`의 `address` 전체다(surface_key 하나로는 안 된다).
+- 문제가 의심되는 캐릭터만 `kasaterm-cli activity --address '<주소 JSON>' [limit]`로 확인한다. 화면은 `peek`·`capture`에 같은 주소나 `%N@기계`를 준다(다른 기기도 ssh 없이). 주소는 `board --all`의 `address` 전체다(surface_key 하나로는 안 된다).
 - 요약만으로 도구 성공·실패를 단정하지 않는다. 상세도 확인한 범위만 설명한다.
 - 주소가 오래됐거나 신원이 다르면 board를 다시 읽는다. 다른 세션으로 바꿔 끼우지 않는다.
 

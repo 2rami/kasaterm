@@ -419,8 +419,13 @@ pub fn changes(params: &Value) -> Result<Value> {
 
 #[cfg(feature = "net")]
 fn http_client() -> Result<reqwest::Client> {
+    http_client_within(Duration::from_secs(3))
+}
+
+#[cfg(feature = "net")]
+fn http_client_within(timeout: Duration) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
 }
@@ -772,6 +777,167 @@ fn inspect_remote(machine: &str, params: &Value, limit: usize) -> Result<Value> 
     .map_err(|_| anyhow::anyhow!("remote inspection worker failed"))?
 }
 
+/// 원본 기기가 화면 글을 이만큼까지만 돌려준다 — 판 원천(`MAX_SOURCE_BYTES`)보다 한참 작게.
+const VIEW_TEXT_MAX: usize = 256 * 1024;
+/// 다른 기기로 실어 보내는 캡처 PNG 상한. base64 로 4/3 배가 되어도 `MAX_SOURCE_BYTES` 안에 든다.
+const VIEW_PNG_MAX: usize = 2_500_000;
+
+/// 칸 하나의 화면 글(`peek`)·그림(`capture`)과 기기 하나의 방 배치(`where`). 주소의 기기(`where` 는
+/// `machine_id`, 없으면 이 기기)가 다른 기기면 activity 와 같은 길(직통 → 관문 우회)로 그 기기에 묻는다.
+/// 다른 기기에서 온 요청(`local_only`)은 이 기기 칸만 답하고, 그림은 파일 대신 본문(`png_base64`)으로 준다 —
+/// 요청에 실린 경로를 이 기기 디스크에 쓰지 않는다.
+pub fn view(backend: &dyn Backend, op: &str, params: &Value) -> Result<Value> {
+    let local = local_id()?;
+    let machine = match op {
+        "where" => params["machine_id"].as_str().filter(|m| !m.is_empty()).unwrap_or(local.as_str()).to_owned(),
+        "peek" | "capture" => {
+            let address = params.get("address").filter(|a| a.is_object()).context("view requires address")?;
+            field(address, "machine_id").context("view requires machine_id")?.to_owned()
+        }
+        _ => bail!("unknown view {op:?}"),
+    };
+    if machine != local {
+        if params["local_only"] == true {
+            bail!("remote view must terminate at its source");
+        }
+        return view_remote(op, &machine, params);
+    }
+    let inline = params["inline"] == true || params["local_only"] == true;
+    if op == "where" {
+        let mut map = backend.where_map()?;
+        map["machine_id"] = json!(local);
+        map["machine_label"] = json!(if isolated() { "Verification".into() } else { crate::env::env().self_label() });
+        return Ok(map);
+    }
+    let address = &params["address"];
+    let surface = field(address, "surface_id").context("view requires surface_id")?;
+    let key = field(address, "surface_key").context("view requires surface_key")?;
+    if crate::surface_keys::get(surface).as_deref() != Some(key) {
+        bail!("surface identity changed; refresh the board");
+    }
+    validate_address(&backend.collab_pane_identity(surface)?, address)?;
+    if op == "peek" {
+        let lines = params["lines"].as_u64().unwrap_or(30).clamp(1, 2000) as usize;
+        let text = backend.peek(surface, lines)?;
+        let truncated = text.len() > VIEW_TEXT_MAX;
+        let text = if truncated {
+            let mut start = text.len() - VIEW_TEXT_MAX;
+            while !text.is_char_boundary(start) {
+                start += 1;
+            }
+            text[start..].to_owned()
+        } else {
+            text
+        };
+        return Ok(json!({"address": address, "text": text, "truncated": truncated}));
+    }
+    let max_width = params["max_width"].as_u64().unwrap_or(1200).min(4096) as u32;
+    if !inline {
+        let mut out = backend.capture_surface(surface, params["path"].as_str().filter(|p| !p.is_empty()), max_width)?;
+        out["address"] = address.clone();
+        return Ok(out);
+    }
+    let scratch = std::env::temp_dir().join(format!("kasaterm-view-{}.png", uuid::Uuid::new_v4()));
+    let scratch_text = scratch.to_string_lossy().into_owned();
+    let shot = backend.capture_surface(surface, Some(&scratch_text), max_width);
+    let bytes = std::fs::read(&scratch);
+    let _ = std::fs::remove_file(&scratch);
+    let shot = shot?;
+    let bytes = bytes.context("capture produced no file")?;
+    if bytes.len() > VIEW_PNG_MAX {
+        bail!("capture is too large to send ({} bytes) — lower --max-width", bytes.len());
+    }
+    use base64::Engine as _;
+    let mut out = json!({"address": address, "bytes": bytes.len(),
+        "png_base64": base64::engine::general_purpose::STANDARD.encode(&bytes)});
+    for key in ["width", "height", "offscreen"] {
+        if !shot[key].is_null() {
+            out[key] = shot[key].clone();
+        }
+    }
+    Ok(out)
+}
+
+/// 다른 기기에서 받아 온 캡처 본문을 이 기기 파일로 푼다. `path` 가 없으면 임시 폴더에 기기·칸 이름으로.
+pub fn write_view_capture(value: &mut Value, path: Option<&str>) -> Result<()> {
+    use base64::Engine as _;
+    let encoded = value["png_base64"].as_str().context("capture response has no image")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("capture image is not base64")?;
+    if bytes.len() > VIEW_PNG_MAX || !bytes.starts_with(b"\x89PNG") {
+        bail!("capture image is not a bounded PNG");
+    }
+    let path = path.filter(|p| !p.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
+        let tag = |key: &str| {
+            field(&value["address"], key).unwrap_or("x")
+                .chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect::<String>()
+        };
+        std::env::temp_dir().join(format!("kasaterm-capture-{}-{}.png", tag("machine_id"), tag("surface_id")))
+    });
+    std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+    let object = value.as_object_mut().context("capture response must be an object")?;
+    object.remove("png_base64");
+    object.insert("path".into(), json!(path.to_string_lossy()));
+    object.insert("bytes".into(), json!(bytes.len()));
+    object.insert("remote".into(), json!(true));
+    Ok(())
+}
+
+#[cfg(not(feature = "net"))]
+fn view_remote(_op: &str, _machine: &str, _params: &Value) -> Result<Value> {
+    bail!("다른 기계 칸을 보려면 kasa-collab feature net 이 필요하다")
+}
+
+#[cfg(feature = "net")]
+fn view_remote(op: &str, machine: &str, params: &Value) -> Result<Value> {
+    // tell 과 같은 길: 직통(검증된 길) → 명부의 base → 관문 우회.
+    let base = known_route(machine)
+        .or_else(|| crate::env::env().machines().into_iter()
+            .find(|m| m.machine_id.as_deref() == Some(machine)).map(|m| m.base))
+        .or_else(|| relay_base(machine))
+        .context("remote source has no current unambiguous route")?;
+    let mut remote_params = params.clone();
+    remote_params["local_only"] = json!(true);
+    if let Some(object) = remote_params.as_object_mut() {
+        object.remove("path");
+        object.remove("inline");
+    }
+    // 원본 앱은 그림 한 장을 그리고 읽어 내는 데 5초까지 쓴다(`capture_surface`).
+    let timeout = Duration::from_secs(if op == "capture" { 12 } else { 5 });
+    let (op_owned, machine_owned) = (op.to_owned(), machine.to_owned());
+    let sent = remote_params.clone();
+    let mut value = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            fetch_json(
+                &http_client_within(timeout)?,
+                &base,
+                &format!("/collab/{op_owned}"),
+                &[("params", sent.to_string())],
+            )
+            .await
+        })
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("remote view worker failed"))??;
+    if op == "where" {
+        if value["machine_id"].as_str() != Some(machine_owned.as_str()) || !value["rooms"].is_array() {
+            bail!("identity_mismatch");
+        }
+        return Ok(value);
+    }
+    validate_address(&remote_params["address"], &value["address"])?;
+    if op == "capture" {
+        write_view_capture(&mut value, params["path"].as_str())?;
+    } else if !value["text"].is_string() {
+        bail!("invalid peek response");
+    }
+    Ok(value)
+}
+
 fn bound_detail(value: &mut Value) {
     match value {
         Value::String(text) => *text = board::detail_text(text, 2048),
@@ -841,6 +1007,9 @@ pub mod synthetic {
         }
         fn collab_inspect(&self, _: &Value) -> Result<Value> {
             Ok(json!({"events":[],"synthetic":true}))
+        }
+        fn collab_view(&self, op: &str, params: &Value) -> Result<Value> {
+            Ok(json!({"synthetic":true,"op":op,"params":params}))
         }
     }
 }

@@ -90,3 +90,77 @@ async fn standalone_backend_relays_remote_tell_and_preserves_auth_rejection() {
         server.abort();
     }
 }
+
+fn view_address() -> Value {
+    json!({"machine_id":"fixture-remote-machine","surface_key":"key","surface_id":"%7","session_id":"session","instance_id":"instance"})
+}
+
+/// 다른 기기 칸의 화면 글·그림과 그 기기 방 배치가 그 기기에 물어 돌아온다. 저쪽에는 「여기서 끝내라」
+/// (`local_only`)가 실리고 캡처 경로는 안 실린다 — 그림은 이 기기 파일로 푼다.
+#[tokio::test]
+async fn remote_views_reach_their_source_and_capture_lands_locally() {
+    use axum::extract::{Path, Query};
+    use base64::Engine as _;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+    let recorder = seen.clone();
+    let app = axum::Router::new().route("/collab/{op}", axum::routing::get(
+        move |Path(op): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>| {
+            let recorder = recorder.clone();
+            async move {
+                let params: Value = serde_json::from_str(q.get("params").map(String::as_str).unwrap_or("{}")).unwrap();
+                recorder.lock().unwrap().push((op.clone(), params.clone()));
+                let png = b"\x89PNG\r\n\x1a\nfixture";
+                axum::Json(match op.as_str() {
+                    "board" => json!({"schema_version":1,"scope":"local","panes":[],"sources":[]}),
+                    "peek" => json!({"address":params["address"],"text":"remote screen","truncated":false}),
+                    "where" => json!({"machine_id":"fixture-remote-machine","machine_label":"Fixture","rooms":[]}),
+                    "capture" => json!({"address":params["address"],"bytes":png.len(),
+                        "png_base64":base64::engine::general_purpose::STANDARD.encode(png)}),
+                    _ => json!({}),
+                })
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let roster = json!([{"label":"fixture-native","machine_id":"fixture-remote-machine","base":base}]);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "collab_contract_tests::remote_view_child", "--ignored", "--nocapture"])
+            .env("KASATERM_MACHINE_ID", "fixture-local-machine")
+            .env("KASATERM_MACHINES", roster.to_string())
+            .env("KASATERM_TEST_VIEW", "1")
+            .output().unwrap()
+    }).await.unwrap();
+    assert!(output.status.success(), "remote view child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let seen = seen.lock().unwrap();
+    let ops: Vec<&str> = seen.iter().map(|(op, _)| op.as_str()).filter(|op| *op != "board").collect();
+    assert_eq!(ops, ["peek", "where", "capture"]);
+    for (op, params) in seen.iter().filter(|(op, _)| op != "board") {
+        assert_eq!(params["local_only"], true, "{op} must terminate at its source");
+        assert!(params.get("path").is_none(), "{op} must not carry a path to the source");
+    }
+    server.abort();
+}
+
+#[test]
+#[ignore = "isolated subprocess invoked by remote view contract test"]
+fn remote_view_child() {
+    if std::env::var("KASATERM_TEST_VIEW").is_err() { return; }
+    crate::install_collab_env();
+    let backend = crate::standalone::StandaloneBackend::new(std::env::temp_dir());
+    let view = |op: &str, params: Value| kasa_collab::board_service::view(&backend, op, &params);
+    let peek = view("peek", json!({"address":view_address(),"lines":12})).unwrap();
+    assert_eq!(peek["text"], "remote screen");
+    let place = view("where", json!({"machine_id":"fixture-remote-machine"})).unwrap();
+    assert_eq!(place["machine_label"], "Fixture");
+    let path = std::env::temp_dir().join(format!("kasa-remote-view-{}.png", std::process::id()));
+    let shot = view("capture", json!({"address":view_address(),"path":path})).unwrap();
+    assert_eq!(shot["remote"], true);
+    assert!(shot.get("png_base64").is_none());
+    assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
+    let _ = std::fs::remove_file(&path);
+    let echoed = view("peek", json!({"address":view_address(),"local_only":true})).unwrap_err();
+    assert!(echoed.to_string().contains("terminate"), "{echoed}");
+}
