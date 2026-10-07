@@ -18,7 +18,7 @@ import type { BridgeEvent, Task } from './bridge'
 const MOD_VERSION = '0.1.0'
 const QUEUE_CAP = 500
 // 긴 폴링 한 번의 한도(앱이 이보다 오래 쥐지 않는다). 승인 요청은 앱의 만료(10분)를 넘겨 다시 열지 않는다.
-const INBOX_WAIT_MS = 20000
+const POLL_WAIT_MS = 20000
 const PERMISSION_ROUNDS = 26
 const SAY_CAP = 2000
 const RESULT_CAP = 600
@@ -41,14 +41,9 @@ const io = {
   question: '',
   others: [] as Task[],
   lastTasks: '',
-  pumping: false,
   listening: false,
   // 다음 턴을 연 프롬프트가 사람·다른 세션의 말이 아니면(백그라운드 끝남 알림) 활동에 「시킴」으로 안 싣는다.
   quiet: false,
-}
-
-function resting(): boolean {
-  return !io.turnOpen && io.permissions.size === 0 && io.question === ''
 }
 
 function send($: EngineInterface, event: Omit<BridgeEvent, 'at'>) {
@@ -114,10 +109,7 @@ async function boot($: EngineInterface) {
   await $.env.set('KASATERM_MOD_BRIDGE', '1')
   io.pid = await claudePid($)
   await hello($)
-  $.clock.every(1000, () => {
-    void pump($)
-    void listen($)
-  })
+  $.clock.every(1000, () => void listen($))
 }
 
 async function measure($: EngineInterface) {
@@ -134,35 +126,13 @@ async function reportTasks($: EngineInterface) {
   send($, { kind: 'background', tasks })
 }
 
-// 거울(다른 기기·폰) 대화 입력 받기 — 쉬는 동안만 받은편지함을 연다. 받은 글은 입력칸을 안 거치고 턴 하나로
-// 들어간다. tell·done 은 여기로 안 온다 — 앱이 입력칸에 붙여넣고 Enter 를 친다(일하는 중에도 그 턴 안으로).
-async function pump($: EngineInterface) {
-  if (io.pumping || !io.base || !io.session || !resting()) return
-  io.pumping = true
-  try {
-    const query = `surface=${encodeURIComponent(io.surface)}&session=${encodeURIComponent(io.session)}&wait_ms=${INBOX_WAIT_MS}`
-    const res = await $.http.fetch(`${io.base}/claude-mod/inbox?${query}`)
-    if (!res.ok) return
-    const { messages } = JSON.parse(res.text) as { messages?: { id: string; body: string }[] }
-    for (const letter of messages ?? []) {
-      // 엔진이 거절해도 다시 내주지 않는다 — 두 번 들어가는 것보다 낫다. 앱은 끝났다는 것만 받는다.
-      await $.prompt.submit({ text: letter.body }).catch(() => undefined)
-      await post($, '/claude-mod/inbox/ack', { surface: io.surface, session: io.session, id: letter.id })
-    }
-  } catch {
-    // 앱이 없으면 다음 박자에 다시 연다.
-  } finally {
-    io.pumping = false
-  }
-}
-
 // 보낸 칸 알림 — 앱이 맡긴 한 줄(보낸 쪽지가 버려짐)을 토스트로만 띄운다. 프롬프트로 넣으면 이 칸의 턴을
 // 깨워 일을 끊는다 — 토스트는 대화에도 모델에도 안 들어간다. 그래서 일하는 중에도 받는다.
 async function listen($: EngineInterface) {
   if (io.listening || !io.base) return
   io.listening = true
   try {
-    const query = `surface=${encodeURIComponent(io.surface)}&wait_ms=${INBOX_WAIT_MS}`
+    const query = `surface=${encodeURIComponent(io.surface)}&wait_ms=${POLL_WAIT_MS}`
     const res = await $.http.fetch(`${io.base}/claude-mod/notices?${query}`)
     if (!res.ok) return
     const { notices } = JSON.parse(res.text) as { notices?: string[] }
@@ -226,7 +196,6 @@ export const register: Register = on => {
       io.turnOpen = false
       io.question = ''
       send($, { kind: 'turn', phase: 'end', turn: e.turnId, reason: e.reason, answer: clip(result.text, SAY_CAP) })
-      void pump($)
     }
     void reportTasks($)
     return result

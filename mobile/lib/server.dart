@@ -928,8 +928,8 @@ class Server {
     }
   }
 
-  /// 대화 보기의 입력 — 원본이 넣는다(`/term/chat-send`): mod 칸은 쉬는 순간 정식 턴으로(데스크톱 입력칸의
-  /// 초안·한글 조합을 안 건드린다), 코덱스·mod 없는 칸은 입력칸이 빌 때. 그 창구를 모르는 옛 데스크톱은 [send].
+  /// 대화 보기의 입력 — 원본이 넣는다(`/term/chat-send`): 데스크톱 입력칸이 빌 때 붙여넣고(초안·한글 조합·승인 창은
+  /// 기다린다), 일하는 칸이면 진행 중인 턴 안으로 든다. 그 창구를 모르는 옛 데스크톱은 [send].
   Future<void> chatSend(String pane, String text, {String? machine}) async {
     final http.Response res;
     try {

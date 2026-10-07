@@ -395,7 +395,7 @@ pub(crate) fn strip_meta(text: &str) -> String {
     replace_image_marks(&kept.join("\n")).trim().to_string()
 }
 
-/// mod 가 `$.prompt.submit` 으로 넣은 말(tell·거울 입력)을 엔진은 「The <mod> plugin sent a message:」와 뒤 설명으로
+/// 10-07 전 mod 가 `$.prompt.submit` 으로 넣은 말(tell·거울 입력)을 엔진은 「The <mod> plugin sent a message:」와 뒤 설명으로
 /// 감싸 기록한다 — 사람이 보낸 말만 남긴다.
 fn unwrap_plugin_prompt(text: &str) -> &str {
     let Some((name, body)) = text.strip_prefix("The ").and_then(|r| r.split_once(" plugin sent a message:")) else {

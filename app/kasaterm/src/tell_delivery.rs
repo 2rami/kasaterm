@@ -463,7 +463,6 @@ impl App {
             *last = Some(Instant::now());
         }
         let Some(backend) = self.socket_backend.clone() else { return };
-        kasa_mcp::claude_mod::sweep_inbox();
         if BATCH_ACTIVE.swap(true,Ordering::AcqRel) { return; }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {

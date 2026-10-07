@@ -566,8 +566,8 @@ impl App {
         pane.scroll = 0.0;
         // 보낸 직후 한 번 더 읽는다 — 내 말이 기다림 없이 말풍선으로 선다.
         pane.polled = None;
-        // 거울은 원본이 넣는다 — mod 칸이면 쉬는 순간 정식 턴으로(원본 입력칸의 초안·조합을 안 건드린다),
-        // 코덱스·mod 없는 칸은 입력칸이 빌 때 붙여넣는다(`/term/chat-send`, docs/mirror-render.md).
+        // 거울은 원본이 넣는다 — 안전한 tell 로 입력칸이 빌 때 붙여넣고, 일하는 칸이면 진행 중인 턴 안으로 든다
+        // (`/term/chat-send`, docs/mirror-render.md).
         if let Some((base, rid)) = pane.remote.clone() {
             let failed = Arc::clone(&pane.send_error);
             if let Ok(mut f) = failed.lock() {

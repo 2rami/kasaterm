@@ -23,8 +23,6 @@ use serde_json::{json, Value};
 pub const PERMISSION_TTL: Duration = Duration::from_secs(600);
 /// 긴 폴링 한 번이 쥐는 시간. mod 는 같은 요청·같은 칸으로 다시 연다.
 const HOLD: Duration = Duration::from_secs(25);
-/// 꺼내 간 거울 입력의 결과(ack)를 기다리는 한도. 넘으면 버린다 — 다시 내주면 두 번 들어갈 수 있다.
-const OFFER_UNACKED: Duration = Duration::from_secs(90);
 const ACTIVITY_CAP: usize = 200;
 const INPUT_CAP: usize = 64 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -1046,103 +1044,9 @@ fn cap_input(input: Value) -> (Value, bool) {
     (Value::String(raw[..cut].to_string()), true)
 }
 
-// ── 거울 대화 입력 받은편지함 ───────────────────────────────────────────────
-// tell·done 은 여기를 거치지 않는다 — 모든 claude 칸에 입력칸 붙여넣기+Enter 로 넣는다(`tell_delivery.rs`).
-// mod 의 `$.prompt.submit` 은 엔진이 쉰 뒤에야 돌려 일하는 칸에 턴 내내 묶였고, 받는 쪽 대화에
-// 「The kasaterm-bridge plugin sent a message」 머리가 붙었다(2026-10-06 걷음).
-
-#[derive(Clone, Debug)]
-struct Letter {
-    id: String,
-    session: String,
-    body: String,
-    offered: Instant,
-    taken: Option<Instant>,
-}
-
-static INBOX: LazyLock<Mutex<HashMap<String, Vec<Letter>>>> = LazyLock::new(Default::default);
-static INBOX_WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
-
-fn offer(surface: &str, session: &str, id: &str, body: &str) {
-    let mut inbox = INBOX.lock().unwrap();
-    let letters = inbox.entry(surface.to_string()).or_default();
-    if !letters.iter().any(|l| l.id == id) {
-        letters.push(Letter { id: id.into(), session: session.into(), body: body.into(), offered: Instant::now(), taken: None });
-    }
-    drop(inbox);
-    INBOX_WAKE.notify_waiters();
-}
-
-/// 거울(다른 기기·폰)의 대화 입력. 쉬는 순간 mod 가 정식 턴으로 넣고, 영수증 장부는 없다.
-const CHAT_PREFIX: &str = "chat.";
-/// 거울 입력이 학생이 쉬기를 기다리는 한도 — 긴 턴 뒤에도 들어가게 길게 둔다.
-const CHAT_UNTAKEN: Duration = Duration::from_secs(1800);
-
-fn is_chat(id: &str) -> bool {
-    id.starts_with(CHAT_PREFIX)
-}
-
-/// 거울의 대화 입력을 이 칸 mod 에 맡긴다. mod 칸이 아니면 None — 부른 쪽이 다른 길로 넣는다.
-pub fn offer_chat(surface: &str, body: &str) -> Option<String> {
-    let state = live(surface)?;
-    let id = format!("{CHAT_PREFIX}{}", uuid::Uuid::new_v4().simple());
-    offer(surface, &state.session, &id, body);
-    Some(id)
-}
-
-/// 오래된 거울 입력을 버린다 — 쉬기를 30분 넘게 못 기다린 것, 꺼내 갔는데 답이 없는 것. 앱의 tell 틱이 부른다.
-pub fn sweep_inbox() {
-    let mut inbox = INBOX.lock().unwrap();
-    for letters in inbox.values_mut() {
-        letters.retain(|l| match l.taken {
-            None => l.offered.elapsed() < CHAT_UNTAKEN,
-            Some(at) => at.elapsed() < OFFER_UNACKED,
-        });
-    }
-    inbox.retain(|_, l| !l.is_empty());
-}
-
-/// mod 의 긴 폴링 — 이 칸·세션에 맡긴 것 중 아직 안 꺼낸 것을 꺼내 간다.
-pub async fn take(surface: &str, session: &str, hold: Duration) -> Vec<Value> {
-    let deadline = tokio::time::Instant::now() + hold;
-    loop {
-        let notified = INBOX_WAKE.notified();
-        let taken: Vec<Value> = {
-            let mut inbox = INBOX.lock().unwrap();
-            inbox
-                .get_mut(surface)
-                .map(|letters| {
-                    letters
-                        .iter_mut()
-                        .filter(|l| l.taken.is_none() && l.session == session)
-                        .map(|l| {
-                            l.taken = Some(Instant::now());
-                            json!({"id": l.id, "body": l.body})
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        if !taken.is_empty() {
-            return taken;
-        }
-        if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return Vec::new();
-        }
-    }
-}
-
-/// mod 가 넣었다(또는 엔진이 거절했다). 대화 보기를 깨운다.
-pub fn ack(surface: &str, session: &str, id: &str) -> Result<(), &'static str> {
-    {
-        let mut inbox = INBOX.lock().unwrap();
-        let letters = inbox.get_mut(surface).ok_or("unknown")?;
-        let at = letters.iter().position(|l| l.id == id && l.session == session).ok_or("unknown")?;
-        letters.remove(at);
-    }
-    bump(surface);
-    Ok(())
-}
+// tell·done·거울 대화 입력은 mod 를 거치지 않는다 — 모든 claude 칸에 입력칸 붙여넣기+Enter 로 넣는다
+// (`tell_delivery.rs`). mod 의 `$.prompt.submit` 은 엔진이 쉰 뒤에야 돌려 일하는 칸에 턴 내내 묶였고, 받는 쪽
+// 대화에 「The kasaterm-bridge plugin sent a message」 머리가 붙었다(2026-10-06~07 걷음).
 
 // ── 보낸 칸 알림 ───────────────────────────────────────────────────────────
 
@@ -1307,17 +1211,6 @@ pub fn routes() -> Router {
             }),
         )
         .route(
-            "/claude-mod/inbox",
-            get(|Query(q): Query<HashMap<String, String>>, req: HttpRequest| async move {
-                if let Err(r) = local_body(req).await {
-                    return r;
-                }
-                let surface = q.get("surface").cloned().unwrap_or_default();
-                let session = q.get("session").cloned().unwrap_or_default();
-                Json(json!({"messages": take(&surface, &session, hold_of(&q)).await})).into_response()
-            }),
-        )
-        .route(
             "/claude-mod/notices",
             get(|Query(q): Query<HashMap<String, String>>, req: HttpRequest| async move {
                 if let Err(r) = local_body(req).await {
@@ -1325,21 +1218,6 @@ pub fn routes() -> Router {
                 }
                 let surface = q.get("surface").cloned().unwrap_or_default();
                 Json(json!({"notices": take_notices(&surface, hold_of(&q)).await})).into_response()
-            }),
-        )
-        .route(
-            "/claude-mod/inbox/ack",
-            post(|req: HttpRequest| async move {
-                let body = match local_body(req).await {
-                    Ok(body) => body,
-                    Err(r) => return r,
-                };
-                let result = ack(&text(&body, "surface"), &text(&body, "session"), &text(&body, "id"));
-                Json(match result {
-                    Ok(()) => json!({"ok": true}),
-                    Err(error) => json!({"ok": false, "error": error}),
-                })
-                .into_response()
             }),
         )
 }
@@ -1566,18 +1444,6 @@ mod tests {
         let request = json!({"id": "toolu_z", "tool": "Bash"});
         let answer = open_and_wait("%t7", "s", &request, Duration::from_millis(30)).await;
         assert_eq!(answer, json!({"decision": "none", "pending": true}));
-    }
-
-    #[tokio::test]
-    async fn the_inbox_hands_a_letter_once_to_the_matching_session() {
-        offer("%t8", "s", "chat.a", "hello");
-        assert!(take("%t8", "other", Duration::from_millis(10)).await.is_empty());
-        let got = take("%t8", "s", Duration::from_millis(10)).await;
-        assert_eq!(got, vec![json!({"id": "chat.a", "body": "hello"})]);
-        assert!(take("%t8", "s", Duration::from_millis(10)).await.is_empty());
-        assert_eq!(ack("%t8", "other", "chat.a"), Err("unknown"));
-        assert_eq!(ack("%t8", "s", "chat.a"), Ok(()));
-        assert_eq!(ack("%t8", "s", "chat.a"), Err("unknown"), "한 번만 끝맺는다");
     }
 
     #[tokio::test]

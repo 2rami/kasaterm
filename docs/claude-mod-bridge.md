@@ -143,26 +143,16 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 - 결정마다 감사 기록 한 줄(`<collab root>/claude-mod/permission-audit.jsonl`: 시각·칸·세션·id·도구·입력 지문·결정·by).
 - 새 요청이 열리면 `kasa_mcp::claude_mod::subscribe()` 가 알린다(푸시 알림을 붙이는 자리).
 
-## tell 받기 — mod 를 거치지 않는다
+## tell·거울 대화 입력 받기 — mod 를 거치지 않는다
 
-tell·done 은 mod 칸에도 입력칸 붙여넣기+Enter 로 넣는다(`tell_delivery.rs`, `docs/tell-protocol.md`). 쉬는 칸은 새 턴,
-일하는 칸은 사람이 일하는 중에 친 말처럼 진행 중인 턴 안으로 들어간다. 승인·질문 창 대기, 초안·한글 조합 보존, 영수증·순서·
-같은 ID 멱등은 붙여넣기 길의 것 그대로다.
+tell·done 과 거울(다른 기기·폰) 대화 보기의 입력(`POST /term/chat-send`)은 mod 칸에도 입력칸 붙여넣기+Enter 로 넣는다
+(`tell_delivery.rs`, `docs/tell-protocol.md`). 쉬는 칸은 새 턴, 일하는 칸은 사람이 일하는 중에 친 말처럼 진행 중인 턴
+안으로 들어간다. 승인·질문 창 대기, 초안·한글 조합 보존, 영수증·순서·같은 ID 멱등은 붙여넣기 길의 것 그대로다.
 
-10-02~10-06 에는 mod 의 `$.prompt.submit` 으로 넣었다. 엔진은 plugin 의 프롬프트를 쉰 뒤에만 돌려(`wait` 가 거짓) 일하는
-칸에서는 턴이 끝날 때까지 `waiting:busy` 로 묶였고, 받는 쪽 대화에 「The kasaterm-bridge plugin sent a message」 머리가
-붙었다. 그래서 걷었다.
-
-## 거울 대화 입력 받기
-
-거울(다른 기기·폰) 대화 보기의 입력(`POST /term/chat-send`)만 mod 의 받은편지함으로 들어간다 — 원본 입력칸의 초안·한글
-조합을 안 건드리고 쉬는 순간 정식 턴으로 넣는다. 영수증 장부는 없다. 받는 길은 긴 폴링
-`GET /claude-mod/inbox?surface=%N&session=<sid>` → `{ "messages": [ { "id": "chat.…", "body": "…" } ] }`, mod 가 넣은 뒤
-`POST /claude-mod/inbox/ack` `{ "surface", "session", "id" }`.
-
-- mod 는 **쉬는 순간에만** 받는다(턴이 없고, 승인 창·질문이 없을 때). 쉬기를 30분 못 기다린 것, 꺼내 갔는데 90초 안에
-  ack 가 없는 것은 앱이 버린다 — 다시 내주면 두 번 들어갈 수 있다.
-- mod 칸이 아니면 `/term/chat-send` 는 안전한 tell(위 붙여넣기 길)로 넣는다.
+10-02~10-07 에는 mod 의 받은편지함(`/claude-mod/inbox`)과 `$.prompt.submit` 으로 넣었다. 엔진은 plugin 의 프롬프트를
+쉰 뒤에만 돌려(`wait` 가 거짓) 일하는 칸에서는 턴이 끝날 때까지 `waiting:busy` 로 묶였고, 받는 쪽 대화에
+「The kasaterm-bridge plugin sent a message」 머리가 붙었다. 그래서 받은편지함째 걷었다 — mod 는 이제 프롬프트를 스스로
+넣지 않는다.
 
 ## 보낸 칸 알림 — 토스트
 

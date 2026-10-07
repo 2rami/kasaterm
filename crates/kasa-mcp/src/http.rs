@@ -3135,16 +3135,14 @@ fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str, rea
 }
 
 /// `POST /term/chat-send` `{surface, text}` — 거울(다른 기기·폰) 대화 보기의 입력(`docs/mirror-render.md`).
-/// mod 칸이면 mod 에 맡겨 쉬는 순간 정식 턴으로 넣는다(원본 입력칸의 초안·한글 조합을 안 건드린다). 아니면
-/// 안전한 tell(입력칸이 빌 때 붙여넣기), 그것도 거절되면(막 띄워 신원이 안 선 칸) 옛 `/send` 붙여넣기.
+/// 안전한 tell 로 넣는다 — 승인·질문 창이면 기다리고 초안·한글 조합은 안 건드리며, 일하는 칸이면 진행 중인 턴
+/// 안으로 들어간다. 그것도 거절되면(막 띄워 신원이 안 선 칸) 옛 `/send` 붙여넣기. mod 칸을 mod 에 맡기던 길은
+/// 일하는 내내 묶고 plugin 머리를 붙여 걷었다(2026-10-07).
 async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let surface = body["surface"].as_str().unwrap_or("").to_string();
     let text = body["text"].as_str().unwrap_or("").trim().to_string();
     if surface.is_empty() || text.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "surface·text 가 필요해요" }));
-    }
-    if let Some(id) = crate::claude_mod::offer_chat(&surface, &text) {
-        return Json(serde_json::json!({ "ok": true, "via": "mod", "id": id }));
     }
     let result = tokio::task::spawn_blocking(move || {
         let params = serde_json::json!({
@@ -8700,6 +8698,41 @@ pub(crate) async fn collab_tell_post(backend: Arc<dyn Backend>, Json(params): Js
 
 #[cfg(test)]
 mod tests {
+    /// 거울 대화 입력은 mod 칸이어도 안전한 tell 로 간다 — mod 에 맡기던 길은 일하는 칸에 턴 내내 묶이고 plugin
+    /// 머리가 붙었다. tell 이 거절되면(신원이 안 선 칸) 옛 `/send` 붙여넣기.
+    #[tokio::test]
+    async fn mirror_chat_input_goes_through_the_safe_tell() {
+        use super::*;
+        #[derive(Default)]
+        struct Desk { refuse: bool, tells: std::sync::Mutex<Vec<serde_json::Value>>, pasted: std::sync::Mutex<Vec<String>> }
+        impl Backend for Desk {
+            fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+            fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+            fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+            fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+            fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn send_text(&self, _: Option<&str>, text: &str) -> anyhow::Result<()> { self.pasted.lock().unwrap().push(text.into()); Ok(()) }
+            fn collab_tell(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                anyhow::ensure!(!self.refuse, "identity not established");
+                self.tells.lock().unwrap().push(params.clone());
+                Ok(serde_json::json!({"state": "accepted"}))
+            }
+        }
+        let desk = Arc::new(Desk::default());
+        let Json(answer) = term_chat_send(desk.clone(), Json(serde_json::json!({"surface": "%3", "text": " 폰에서 친 말 "}))).await;
+        assert_eq!(answer["via"], "tell");
+        let tells = desk.tells.lock().unwrap();
+        assert_eq!((tells[0]["surface_id"].as_str(), tells[0]["body"].as_str()), (Some("%3"), Some("폰에서 친 말")));
+        assert!(tells[0]["message_id"].as_str().is_some_and(|id| id.starts_with("kt1.")));
+        assert!(desk.pasted.lock().unwrap().is_empty());
+
+        let fresh = Arc::new(Desk { refuse: true, ..Default::default() });
+        let Json(answer) = term_chat_send(fresh.clone(), Json(serde_json::json!({"surface": "%4", "text": "막 뜬 칸"}))).await;
+        assert_eq!(answer["via"], "paste");
+        assert_eq!(fresh.pasted.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn collaboration_read_routes_share_backend_and_origin_guard() {
         use super::*;
