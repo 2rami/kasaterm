@@ -94,16 +94,16 @@ test('a request answered at the desk hands the dialog back to the engine', async
   expect(result.decision).toBe(undefined)
 })
 
-test('a resting session takes a tell as a prompt of its own and acknowledges it', async ($, on) => {
+test('a resting session takes a mirror chat input as a prompt of its own and acknowledges it', async ($, on) => {
   const submitted: string[] = []
-  const sent = host(on, { '/claude-mod/inbox': [{ messages: [{ id: 'kt1.1.a', body: '⟦유우카⟧ 확인해 줘' }] }] }, submitted)
+  const sent = host(on, { '/claude-mod/inbox': [{ messages: [{ id: 'chat.a', body: '폰에서 친 말' }] }] }, submitted)
   await $.session.start(START)
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await settle()
-  expect(submitted).toContain('⟦유우카⟧ 확인해 줘')
+  expect(submitted).toContain('폰에서 친 말')
   const ack = sent.find(s => s.url.endsWith('/claude-mod/inbox/ack'))
-  expect(ack?.body).toMatchObject({ surface: '%9', session: 'sess-1', id: 'kt1.1.a', state: 'submitted' })
+  expect(ack?.body).toEqual({ surface: '%9', session: 'sess-1', id: 'chat.a' })
 })
 
 test('without kasaterm env the mod stays silent', async ($, on) => {

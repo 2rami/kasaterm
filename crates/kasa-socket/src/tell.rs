@@ -20,6 +20,7 @@ pub const STORED_REASON: &str = "stored; waiting for safe empty input";
 
 /// 전달을 미룬 까닭. 영수증 `reason` 의 `waiting:<낱말> — …` 로 실려 보낸 쪽 CLI·받는 쪽 화면이 무엇이
 /// 막았는지 가른다 — 하나로 뭉친 문장으로는 「입력칸이 비었는데 왜」를 못 풀었다(2026-10-01).
+/// `Busy` 는 옛 판 받는 쪽만 쓴다 — mod 칸 tell 을 쉴 때까지 붙들던 때의 사유로, 새 CLI 가 그 영수증을 읽을 수 있게 둔다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hold { Draft, Typing, Composition, Approval, Closed, PasteMode, Identity, Busy }
 

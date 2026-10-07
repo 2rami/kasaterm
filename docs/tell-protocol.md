@@ -58,12 +58,12 @@ replaced sessions are never retargeted. Queue policy is independent of readiness
 
 Delivery requires a live Claude/Codex PTY, full current identity,
 an empty supported input prompt, and no approval/question or IME composition.
-A Claude pane whose in-session bridge mod is live (`docs/claude-mod-bridge.md`) is not pasted into: once the
-mod reports the session resting (no turn, permission dialog, question or compaction) the message is handed to the
-mod, which submits it as a prompt of its own (`$.prompt.submit`, the input box and any draft untouched). The receipt
-stays `dispatching` until the mod acknowledges: `submitted` once that prompt started its turn, `failed` if the engine
-refused it. A message the mod did not take within 20 s goes back to `accepted`; one it took but never acknowledged
-within 90 s becomes `uncertain`. While the pane works the hold reason is `waiting:busy`.
+A Claude pane whose in-session bridge mod is live (`docs/claude-mod-bridge.md`) is pasted into like any other.
+From 2026-10-02 to 2026-10-06 such a pane got the message through the mod's `$.prompt.submit` instead. The engine
+runs a plugin's prompt only once the session is idle, so a working pane held every message as `waiting:busy` until
+its turn ended, and the receiver's transcript showed it under a "The kasaterm-bridge plugin sent a message" header.
+A paste with Enter starts a turn in a resting pane and joins the running turn in a working one, the way a person's
+mid-turn message does. Older receivers may still report `waiting:busy`; the CLI keeps reading it.
 Working/thinking/building alone does not defer a message. Approval/question
 screens defer it until the selection UI is gone. An existing draft or IME
 composition is preserved; an independent message cannot be submitted through
@@ -77,7 +77,7 @@ the input box was visibly empty — 21 of 61 messages on one machine in a day.
 
 Each deferral writes a specific reason, `waiting:<word> — …`, with `<word>` one of
 `draft` (input box has text), `typing` (keystroke in the last 5 s), `composition`,
-`approval`, `closed`, `paste_mode`, `identity` or `busy` (a mod pane mid-turn).
+`approval`, `closed`, `paste_mode` or `identity` (`busy` only from older receivers, above).
 Messages to one pane go in order and only the oldest is examined; a deferral copies its
 reason onto the messages queued behind it on that pane, so every receipt, the sender
 notice and the waiting count tell the same story. Before this, a later message kept its

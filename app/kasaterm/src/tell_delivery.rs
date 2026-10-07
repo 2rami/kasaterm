@@ -314,25 +314,6 @@ pub(crate) fn take_session_title(surface: &str) -> Option<String> {
     (at.elapsed() < Duration::from_secs(kasa_socket::tell::QUEUE_TTL_SECONDS)).then_some(title)
 }
 
-/// 칸 안 mod 에게 맡긴 tell 의 「지금 일」 — mod 가 넣었다고 답하면 그 창 이름을 바꾼다.
-fn module_titles() -> &'static std::sync::Mutex<HashMap<String,String>> {
-    static VALUE: std::sync::OnceLock<std::sync::Mutex<HashMap<String,String>>> = std::sync::OnceLock::new();
-    VALUE.get_or_init(Default::default)
-}
-
-/// mod 의 결과(ack)를 GUI 로 잇는다. 앱이 뜰 때 한 번 건다.
-pub(crate) fn listen_module_acks(proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
-    kasa_mcp::claude_mod::set_ack_listener(move |surface, id, submitted| {
-        let title = module_titles().lock().unwrap().remove(id);
-        match title {
-            Some(title) if submitted => { let _ = proxy.send_event(UserEvent::SocketRename(surface.to_string(),title)); }
-            Some(_) => { session_titles().lock().unwrap().remove(surface); }
-            None => {}
-        }
-        let _ = proxy.send_event(UserEvent::SafeTellWake);
-    });
-}
-
 /// 받는 pane 입력박스 아래에 뜨는 한 줄 — 긴 것, 좁은 칸용 짧은 것.
 pub(crate) fn waiting_label(count: usize, hold: Hold) -> [String; 2] {
     let short = match hold {
@@ -495,39 +476,16 @@ impl App {
         });
     }
 
-    /// mod 가 실린 claude 칸이면 붙여넣지 않고 그 mod 에게 맡긴다 — mod 가 쉬는 순간 `$.prompt.submit` 으로 턴
-    /// 하나를 시작하니 입력칸의 초안·한글 조합·승인 창과 겹칠 일이 없다. 맡았으면 참.
-    fn tell_to_module(&self, delivery: &Commit) -> bool {
-        let record = &delivery.record;
-        let surface = record.address.surface_id.as_str();
-        let Some(module) = kasa_mcp::claude_mod::live(surface).filter(|m| m.session == record.address.session_id) else { return false };
-        if !self.tell_proof_current(delivery) {
-            finish(record,if record.reject_if_busy { State::Failed } else { State::Accepted },Hold::Identity.reason());
-            return true;
-        }
-        if !module.resting() || self.collab.hub.state(surface).needs_you() || kasa_mcp::claude_mod::has_offer(surface) {
-            finish(record,if record.reject_if_busy { State::Failed } else { State::Accepted },Hold::Busy.reason());
-            return true;
-        }
-        if !record.title.is_empty() {
-            session_titles().lock().unwrap().insert(surface.to_string(),(record.title.clone(),Instant::now()));
-            module_titles().lock().unwrap().insert(record.message_id.clone(),record.title.clone());
-        }
-        kasa_mcp::claude_mod::offer(surface,&module.session,&record.message_id,&record.body);
-        // 영수증은 dispatching 으로 남고 mod 의 ack(또는 `sweep_inbox`)가 끝맺는다. 같은 칸의 다음 tell 은 그때까지
-        // 대장(같은 칸에 dispatching 이 있으면 꺼내지 않음)이 붙든다.
-        release(surface);
-        true
-    }
-
     pub(crate) fn safe_tell_ready(&mut self, delivery: &Commit) {
         if let Some(why) = self.tell_target_change(delivery) {
             eprintln!("[tell] {} → {} 실패: {why}", delivery.record.message_id, delivery.record.address.surface_id);
             finish(&delivery.record,State::Failed,&format!("{why} before the first write"));
             return;
         }
+        // 연결 mod 가 실린 claude 칸도 여기로 붙여넣는다. mod 의 `$.prompt.submit` 에 맡기던 때는 엔진이 쉰 뒤에야
+        // 돌려 일하는 칸에 턴 내내 묶였고, 받는 쪽 대화에 plugin 머리가 붙었다(2026-10-06 걷음). 붙여넣고 Enter 를
+        // 치면 쉬는 칸은 새 턴, 일하는 칸은 사람이 일하는 중에 친 말처럼 진행 중인 턴 안으로 들어간다.
         let proof = delivery.proof.as_ref().unwrap();
-        if proof.harness == kasa_pty::AgentKind::Claude && self.tell_to_module(delivery) { return; }
         let hold = if self.tell_proof_current(delivery) { self.tell_ready(&delivery.record,&delivery.pty,proof.harness,true).err() }
             else { Some(Hold::Identity) };
         if let Some(hold) = hold {

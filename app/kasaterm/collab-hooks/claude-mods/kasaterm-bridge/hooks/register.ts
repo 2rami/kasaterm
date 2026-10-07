@@ -134,7 +134,8 @@ async function reportTasks($: EngineInterface) {
   send($, { kind: 'background', tasks })
 }
 
-// tell 받기 — 쉬는 동안만 받은편지함을 연다. 받은 글은 입력칸을 안 거치고 턴 하나로 들어간다.
+// 거울(다른 기기·폰) 대화 입력 받기 — 쉬는 동안만 받은편지함을 연다. 받은 글은 입력칸을 안 거치고 턴 하나로
+// 들어간다. tell·done 은 여기로 안 온다 — 앱이 입력칸에 붙여넣고 Enter 를 친다(일하는 중에도 그 턴 안으로).
 async function pump($: EngineInterface) {
   if (io.pumping || !io.base || !io.session || !resting()) return
   io.pumping = true
@@ -144,19 +145,9 @@ async function pump($: EngineInterface) {
     if (!res.ok) return
     const { messages } = JSON.parse(res.text) as { messages?: { id: string; body: string }[] }
     for (const letter of messages ?? []) {
-      let state = 'submitted'
-      let reason = ''
-      try {
-        const result = await $.prompt.submit({ text: letter.body })
-        if ('drop' in result && result.drop) {
-          state = 'failed'
-          reason = String(result.drop)
-        }
-      } catch (error) {
-        state = 'failed'
-        reason = error instanceof Error ? error.message : String(error)
-      }
-      await post($, '/claude-mod/inbox/ack', { surface: io.surface, session: io.session, id: letter.id, state, reason })
+      // 엔진이 거절해도 다시 내주지 않는다 — 두 번 들어가는 것보다 낫다. 앱은 끝났다는 것만 받는다.
+      await $.prompt.submit({ text: letter.body }).catch(() => undefined)
+      await post($, '/claude-mod/inbox/ack', { surface: io.surface, session: io.session, id: letter.id })
     }
   } catch {
     // 앱이 없으면 다음 박자에 다시 연다.

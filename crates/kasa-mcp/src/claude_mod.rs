@@ -23,9 +23,7 @@ use serde_json::{json, Value};
 pub const PERMISSION_TTL: Duration = Duration::from_secs(600);
 /// 긴 폴링 한 번이 쥐는 시간. mod 는 같은 요청·같은 칸으로 다시 연다.
 const HOLD: Duration = Duration::from_secs(25);
-/// mod 가 꺼내 가지 않은 tell 은 이만큼 뒤 대기열로 되돌린다 — 꺼내 가지 않았으니 넣지 않은 것이 확실하다.
-const OFFER_UNTAKEN: Duration = Duration::from_secs(20);
-/// 꺼내 간 tell 의 결과(ack)를 기다리는 한도. 넘으면 넣었는지 모르는 것(uncertain)이다.
+/// 꺼내 간 거울 입력의 결과(ack)를 기다리는 한도. 넘으면 버린다 — 다시 내주면 두 번 들어갈 수 있다.
 const OFFER_UNACKED: Duration = Duration::from_secs(90);
 const ACTIVITY_CAP: usize = 200;
 const INPUT_CAP: usize = 64 * 1024;
@@ -95,11 +93,6 @@ impl ModState {
             background: Vec::new(),
             last_event: now,
         }
-    }
-
-    /// 쉬는가 — tell 을 `$.prompt.submit` 으로 넣어도 되는 순간.
-    pub fn resting(&self) -> bool {
-        !self.turn_open && self.compacting.is_none() && self.permissions.is_empty() && self.question.is_none()
     }
 
     pub fn running_tasks(&self) -> impl Iterator<Item = &Task> {
@@ -1053,7 +1046,10 @@ fn cap_input(input: Value) -> (Value, bool) {
     (Value::String(raw[..cut].to_string()), true)
 }
 
-// ── tell 받은편지함 ───────────────────────────────────────────────────────
+// ── 거울 대화 입력 받은편지함 ───────────────────────────────────────────────
+// tell·done 은 여기를 거치지 않는다 — 모든 claude 칸에 입력칸 붙여넣기+Enter 로 넣는다(`tell_delivery.rs`).
+// mod 의 `$.prompt.submit` 은 엔진이 쉰 뒤에야 돌려 일하는 칸에 턴 내내 묶였고, 받는 쪽 대화에
+// 「The kasaterm-bridge plugin sent a message」 머리가 붙었다(2026-10-06 걷음).
 
 #[derive(Clone, Debug)]
 struct Letter {
@@ -1067,16 +1063,7 @@ struct Letter {
 static INBOX: LazyLock<Mutex<HashMap<String, Vec<Letter>>>> = LazyLock::new(Default::default);
 static INBOX_WAKE: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
 
-type AckListener = Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
-static ACK_LISTENER: OnceLock<AckListener> = OnceLock::new();
-
-/// mod 가 tell 을 넣었다고 알린 칸·메시지를 앱에 넘길 자리(창 이름 바꾸기 등). 앱이 한 번 건다.
-pub fn set_ack_listener(listener: impl Fn(&str, &str, bool) + Send + Sync + 'static) {
-    let _ = ACK_LISTENER.set(Arc::new(listener));
-}
-
-/// tell 하나를 그 칸의 mod 에게 맡긴다. 영수증은 이미 dispatching 이고, mod 의 ack 가 끝맺는다.
-pub fn offer(surface: &str, session: &str, id: &str, body: &str) {
+fn offer(surface: &str, session: &str, id: &str, body: &str) {
     let mut inbox = INBOX.lock().unwrap();
     let letters = inbox.entry(surface.to_string()).or_default();
     if !letters.iter().any(|l| l.id == id) {
@@ -1086,7 +1073,7 @@ pub fn offer(surface: &str, session: &str, id: &str, body: &str) {
     INBOX_WAKE.notify_waiters();
 }
 
-/// 거울(다른 기기·폰)의 대화 입력. tell 처럼 쉬는 순간 mod 가 정식 턴으로 넣지만 영수증 장부는 없다.
+/// 거울(다른 기기·폰)의 대화 입력. 쉬는 순간 mod 가 정식 턴으로 넣고, 영수증 장부는 없다.
 const CHAT_PREFIX: &str = "chat.";
 /// 거울 입력이 학생이 쉬기를 기다리는 한도 — 긴 턴 뒤에도 들어가게 길게 둔다.
 const CHAT_UNTAKEN: Duration = Duration::from_secs(1800);
@@ -1103,40 +1090,16 @@ pub fn offer_chat(surface: &str, body: &str) -> Option<String> {
     Some(id)
 }
 
-/// 이 칸에 맡겨 둔(아직 끝나지 않은) tell 이 있나 — 있으면 같은 칸의 다음 tell 을 꺼내지 않는다.
-pub fn has_offer(surface: &str) -> bool {
-    INBOX.lock().unwrap().get(surface).is_some_and(|l| !l.is_empty())
-}
-
-/// 오래된 맡김을 정리한다: 안 꺼내 간 것은 대기열로 되돌리고(넣지 않은 것이 확실), 꺼내 갔는데 답이 없는
-/// 것은 uncertain 으로 끝낸다. 앱의 tell 틱이 부른다.
+/// 오래된 거울 입력을 버린다 — 쉬기를 30분 넘게 못 기다린 것, 꺼내 갔는데 답이 없는 것. 앱의 tell 틱이 부른다.
 pub fn sweep_inbox() {
-    let mut done: Vec<(String, kasa_socket::tell::State, &'static str)> = Vec::new();
-    {
-        let mut inbox = INBOX.lock().unwrap();
-        for letters in inbox.values_mut() {
-            letters.retain(|l| {
-                match l.taken {
-                    // 거울 입력은 tell 대기열이 없다 — 학생이 쉴 때까지 여기서 기다린다.
-                    None if is_chat(&l.id) && l.offered.elapsed() < CHAT_UNTAKEN => true,
-                    None if is_chat(&l.id) => false,
-                    None if l.offered.elapsed() >= OFFER_UNTAKEN => {
-                        done.push((l.id.clone(), kasa_socket::tell::State::Accepted, "mod did not take it while the receiver rested; requeued"));
-                        false
-                    }
-                    Some(at) if at.elapsed() >= OFFER_UNACKED => {
-                        done.push((l.id.clone(), kasa_socket::tell::State::Uncertain, "mod took it but never confirmed the submit; automatic retry prohibited"));
-                        false
-                    }
-                    _ => true,
-                }
-            });
-        }
-        inbox.retain(|_, l| !l.is_empty());
+    let mut inbox = INBOX.lock().unwrap();
+    for letters in inbox.values_mut() {
+        letters.retain(|l| match l.taken {
+            None => l.offered.elapsed() < CHAT_UNTAKEN,
+            Some(at) => at.elapsed() < OFFER_UNACKED,
+        });
     }
-    for (id, state, reason) in done {
-        let _ = crate::tell_service::transition(&id, state, reason);
-    }
+    inbox.retain(|_, l| !l.is_empty());
 }
 
 /// mod 의 긴 폴링 — 이 칸·세션에 맡긴 것 중 아직 안 꺼낸 것을 꺼내 간다.
@@ -1169,27 +1132,15 @@ pub async fn take(surface: &str, session: &str, hold: Duration) -> Vec<Value> {
     }
 }
 
-/// mod 가 넣은 결과. 영수증을 끝맺는다.
-pub fn ack(surface: &str, session: &str, id: &str, submitted: bool, reason: &str) -> Result<(), &'static str> {
+/// mod 가 넣었다(또는 엔진이 거절했다). 대화 보기를 깨운다.
+pub fn ack(surface: &str, session: &str, id: &str) -> Result<(), &'static str> {
     {
         let mut inbox = INBOX.lock().unwrap();
         let letters = inbox.get_mut(surface).ok_or("unknown")?;
         let at = letters.iter().position(|l| l.id == id && l.session == session).ok_or("unknown")?;
         letters.remove(at);
     }
-    if is_chat(id) {
-        bump(surface);
-        return Ok(());
-    }
-    let (state, reason) = if submitted {
-        (kasa_socket::tell::State::Submitted, "submitted by the in-session mod as a prompt of its own; model read is unconfirmed".to_string())
-    } else {
-        (kasa_socket::tell::State::Failed, format!("in-session mod refused the submit: {reason}"))
-    };
-    let _ = crate::tell_service::transition(id, state, &reason);
-    if let Some(listener) = ACK_LISTENER.get() {
-        listener(surface, id, submitted);
-    }
+    bump(surface);
     Ok(())
 }
 
@@ -1383,8 +1334,7 @@ pub fn routes() -> Router {
                     Ok(body) => body,
                     Err(r) => return r,
                 };
-                let submitted = text(&body, "state") == "submitted";
-                let result = ack(&text(&body, "surface"), &text(&body, "session"), &text(&body, "id"), submitted, &text(&body, "reason"));
+                let result = ack(&text(&body, "surface"), &text(&body, "session"), &text(&body, "id"));
                 Json(match result {
                     Ok(()) => json!({"ok": true}),
                     Err(error) => json!({"ok": false, "error": error}),
@@ -1467,17 +1417,6 @@ mod tests {
         let kinds: Vec<_> = panes["%t10"].activity.iter().map(|a| a["kind"].as_str().unwrap().to_string()).collect();
         assert_eq!(kinds, ["prompt", "tool", "result", "say"]);
         assert_eq!(panes["%t10"].activity[2]["is_error"], true);
-    }
-
-    #[test]
-    fn resting_needs_no_turn_permission_question_or_compaction() {
-        let mut s = ModState::new("s", 1, "");
-        assert!(s.resting());
-        s.permissions.push(("p".into(), "Bash".into()));
-        assert!(!s.resting());
-        s.permissions.clear();
-        s.question = Some("q".into());
-        assert!(!s.resting());
     }
 
     #[test]
@@ -1631,12 +1570,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_inbox_hands_a_letter_once_to_the_matching_session() {
-        offer("%t8", "s", "kt1.1.a", "hello");
+        offer("%t8", "s", "chat.a", "hello");
         assert!(take("%t8", "other", Duration::from_millis(10)).await.is_empty());
         let got = take("%t8", "s", Duration::from_millis(10)).await;
-        assert_eq!(got, vec![json!({"id": "kt1.1.a", "body": "hello"})]);
+        assert_eq!(got, vec![json!({"id": "chat.a", "body": "hello"})]);
         assert!(take("%t8", "s", Duration::from_millis(10)).await.is_empty());
-        assert!(has_offer("%t8"));
+        assert_eq!(ack("%t8", "other", "chat.a"), Err("unknown"));
+        assert_eq!(ack("%t8", "s", "chat.a"), Ok(()));
+        assert_eq!(ack("%t8", "s", "chat.a"), Err("unknown"), "한 번만 끝맺는다");
     }
 
     #[tokio::test]

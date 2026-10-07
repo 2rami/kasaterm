@@ -36,7 +36,7 @@
   본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) ·
   `kasa-socket::cli`(`kasaterm-cli` 본체 — 바이너리와 `kasa tui` 멀티콜이 부른다)
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
-- `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤, mod 칸이면 `claude_mod::offer` 로 맡기고(mod 가 쉬는 순간 `$.prompt.submit`, ack 가 영수증을 끝맺음) 아니면 빈 입력창을 확인해 붙여넣고 Enter. 계약 `docs/tell-protocol.md`
+- `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤 빈 입력창을 확인해 붙여넣고 Enter(mod 칸도 같다 — 일하는 칸은 진행 중인 턴에 들어간다). 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
 - `board_digest.rs` — 모든 기기 보드 스냅샷(`collab.snapshot`)의 요약: 사람 차례·하는 중·끝 수와 사람을 기다리는 학생. 사이드바 학생 줄·펫 현황판이 쓴다. 보드 판은 걷었다(나쵸 대화·작업은 나쵸 독립 앱)
 - `sidebar_pulse.rs` — 사이드바 맨 위 「목록 | 배치도」 전환과 학생 줄 사정(모든 기기 보드의 사람 차례·작업·끝). 수는 `board_digest.rs`(원격 거울 줄 제외)를 백그라운드로 3초마다 읽고 펫 현황판에도 적는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)

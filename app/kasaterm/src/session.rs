@@ -8476,7 +8476,7 @@ impl App {
             self.collab.hub.clone(),
         ));
         backend.start_session_discovery();
-        // 칸 안 mod 가 사실을 알리면 다음 판정이 메모를 건너뛰고, 쉬게 된 칸에 밀린 tell 을 곧바로 꺼낸다.
+        // 칸 안 mod 가 사실을 알리면 다음 판정이 메모를 건너뛰고, 승인·질문이 닫힌 칸에 밀린 tell 을 곧바로 꺼낸다.
         let (hub, proxy) = (self.collab.hub.clone(), self.proxy.clone());
         kasa_mcp::claude_mod::set_listener(move |_| {
             hub.invalidate();
@@ -8486,7 +8486,6 @@ impl App {
         kasa_mcp::claude_mod::set_status_listener(move |_| {
             let _ = status_proxy.send_event(UserEvent::Redraw);
         });
-        crate::tell_delivery::listen_module_acks(self.proxy.clone());
         let git_wake = self.git.col_wake.clone();
         kasa_mcp::claude_mod::set_git_listener(move || git_wake.kick());
         crate::info_focus::start(&self.info.focus, self.info.sites.clone(), backend.clone(), self.proxy.clone());
