@@ -42,10 +42,16 @@ export function branchOf(head: string): string {
 /**
  * kasaterm 상태줄 명령에 넣을 입력 — 엔진이 마지막으로 넘긴 입력 위에 그보다 늦게 안 사실만 얹는다.
  * 엔진은 1초 남짓마다 다시 넘기므로, 이벤트로 잘못 안 값이 있어도 그 안에 엔진 값이 이긴다.
+ *
+ * 모델을 막 바꿨고 그 뒤의 effort 를 모르면 null — 엔진은 모델을 바꾸면 effort 를 그 모델의 기본으로 되돌리는데
+ * (Opus xhigh → Sonnet medium), 옛 effort 를 얹으면 틀린 줄이 엔진 줄과 번갈아 1초 남짓 보였다(2026-10-07 실측).
+ * 그때는 엔진 줄을 기다린다(엔진은 모델을 바꾼 뒤 0.1~0.2초 안에 다시 그린다).
  */
-export function statuslineInput(engine: Engine, facts: Facts, session: string): Record<string, unknown> {
+export function statuslineInput(engine: Engine, facts: Facts, session: string): Record<string, unknown> | null {
   const at = engine.at_ms ?? 0
   const fresh = <T>(fact?: Fact<T>) => (fact && fact.at > at ? fact.value : undefined)
+  const switched = fresh(facts.model) !== undefined && facts.model?.value !== engine.model?.id
+  if (switched && !(facts.effort && facts.model && facts.effort.at >= facts.model.at)) return null
   const input: Record<string, unknown> = { session_id: session || engine.session_id, cwd: fresh(facts.cwd) ?? engine.cwd }
   const model = fresh(facts.model)
   input.model =

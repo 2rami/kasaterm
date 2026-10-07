@@ -103,13 +103,21 @@ async function redraw($: EngineInterface) {
       const engine = await readEngine($)
       if (!engine) return
       const session = await $.session.id()
+      const input = statuslineInput(engine, io.facts, session)
+      if (!input) continue
       const run = await $.process.run(['kasaterm-cli', 'statusline'], {
-        stdin: JSON.stringify(statuslineInput(engine, io.facts, session)),
+        stdin: JSON.stringify(input),
         env: { KASATERM_STATUSLINE_DRAW_ONLY: '1' },
         timeoutMs: 3000,
       })
       const line = run.stdout.replace(/\n+$/, '')
       if (run.exitCode !== 0 || !line || line === io.last) continue
+      // 짓는 사이 엔진이 새 입력으로 자기 줄을 그렸다 — 옛 입력으로 지은 줄을 보내면 앱이 그 새 줄을 다음 엔진
+      // 박자까지 덮는다. 새 입력으로 다시 짓는다.
+      if ((await readEngine($))?.at_ms !== engine.at_ms) {
+        io.again = true
+        continue
+      }
       io.last = line
       await $.http.fetch(`${io.base}/claude-mod/event`, {
         method: 'POST',

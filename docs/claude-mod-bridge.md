@@ -50,7 +50,10 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   `classic.CwdChanged`·Bash 끝·150ms 마다 `.git/HEAD` 와 cwd 다시 읽기. 알면 엔진이 마지막으로 넘긴 입력
   (`kasaterm-cli statusline` 이 매번 `$TMPDIR/kasaterm-statusline/<N>-engine.json` 에 남긴다) 위에 그보다 늦게 안 사실만
   얹어 같은 명령을 `KASATERM_STATUSLINE_DRAW_ONLY=1`(보고·스냅샷 안 함)로 돌려 줄을 짓고 `status` 로 보낸다. 모양은 Rust
-  한 곳이다. 앱은 그 줄을 학생 표식(없으면 모델 표식) 행에 덧그리고(`screenread::paint_status_line`), 엔진이 그 행을
+  한 곳이다. 두 경우는 짓지 않는다 — ①모델을 막 바꿨는데 그 뒤의 effort 를 모를 때: 엔진은 모델을 바꾸면 effort 를 그 모델의
+  기본으로 되돌려(Opus xhigh → Sonnet medium) 옛 effort 를 얹은 줄이 엔진 줄과 번갈아 1초 남짓 보였다. 엔진은 0.1~0.2초 안에
+  다시 그린다. ②짓는 사이 엔진 입력이 새로 왔을 때: 옛 입력으로 지은 줄이 엔진의 새 줄을 다음 박자까지 덮으니 새 입력으로
+  다시 짓는다(2026-10-07 실측). 앱은 그 줄을 학생 표식(없으면 모델 표식) 행에 덧그리고(`screenread::paint_status_line`), 엔진이 그 행을
   다시 그리거나 5초(`STATUS_HOLD`)가 지나면 손을 뗀다 — 엔진 줄이 늘 정본이라 mod 가 틀려도 1초 남짓 뒤 바로잡힌다.
   사람이 「상태줄 직접 설정」으로 다른 상태줄을 고른 칸은 건드리지 않는다. kasaterm 밖(칸 id 없음)에서는 상태줄 자리가
   명령 상태줄 전용이라, 같은 차례·색의 줄을 프롬프트 아래 모드 자리(`SessionMode`)에 직접 그린다.

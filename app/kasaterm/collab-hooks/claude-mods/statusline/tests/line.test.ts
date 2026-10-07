@@ -29,8 +29,8 @@ test('HEAD reads as the branch the kasaterm status line shows', () => {
 test('what the engine handed last stands until something fresher is known', () => {
   expect(statuslineInput(ENGINE, {}, 'now')).toEqual({ ...ENGINE, at_ms: undefined, session_id: 'now' } as never)
   const stale = statuslineInput(ENGINE, { effort: { value: 'low', at: 900 }, model: { value: 'claude-sonnet-5-5', at: 900 } }, 'now')
-  expect(stale.effort).toEqual({ level: 'xhigh' })
-  expect(stale.model).toEqual(ENGINE.model)
+  expect(stale?.effort).toEqual({ level: 'xhigh' })
+  expect(stale?.model).toEqual(ENGINE.model)
 })
 
 test('a fresh model, effort, folder and context replace the engine values', () => {
@@ -44,16 +44,29 @@ test('a fresh model, effort, folder and context replace the engine values', () =
     },
     'now',
   )
-  expect(input.model).toEqual({ id: 'claude-sonnet-5-5', display_name: 'Sonnet 5.5' })
-  expect(input.effort).toEqual({ level: 'low' })
-  expect(input.cwd).toBe('/repo/sub')
-  expect(input.context_window).toEqual({ used_percentage: 41, context_window_size: 200000, total_input_tokens: 82000 })
+  expect(input?.model).toEqual({ id: 'claude-sonnet-5-5', display_name: 'Sonnet 5.5' })
+  expect(input?.effort).toEqual({ level: 'low' })
+  expect(input?.cwd).toBe('/repo/sub')
+  expect(input?.context_window).toEqual({ used_percentage: 41, context_window_size: 200000, total_input_tokens: 82000 })
   const back = statuslineInput(ENGINE, { model: { value: 'claude-opus-5-5[1m]', at: 2000 } }, 'now')
-  expect(back.model).toEqual(ENGINE.model)
+  expect(back?.model).toEqual(ENGINE.model)
+})
+
+test('right after a model switch the line waits for the engine unless effort was learned after it', () => {
+  expect(statuslineInput(ENGINE, { model: { value: 'claude-sonnet-5-5', at: 2000 } }, 'now')).toBeNull()
+  expect(
+    statuslineInput(ENGINE, { model: { value: 'claude-sonnet-5-5', at: 2000 }, effort: { value: 'xhigh', at: 1500 } }, 'now'),
+  ).toBeNull()
+  const learned = statuslineInput(
+    ENGINE,
+    { model: { value: 'claude-sonnet-5-5', at: 2000 }, effort: { value: 'medium', at: 2100 } },
+    'now',
+  )
+  expect(learned?.effort).toEqual({ level: 'medium' })
 })
 
 test('a model without effort drops the effort part', () => {
-  expect(statuslineInput(ENGINE, { effort: { value: '', at: 2000 } }, 'now').effort).toBeUndefined()
+  expect(statuslineInput(ENGINE, { effort: { value: '', at: 2000 } }, 'now')?.effort).toBeUndefined()
 })
 
 test('outside kasaterm the line has the kasaterm order and colours', () => {

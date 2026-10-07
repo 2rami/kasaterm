@@ -72,14 +72,17 @@ test('in a kasaterm pane an effort change is drawn at once with the kasaterm lin
   expect(runs.at(-1)?.session_id).toBe('sess-1')
 })
 
-test('a model switch is drawn at once with the new name', async ($, on) => {
+test('a model switch waits for the engine line, which resets effort with the model', async ($, on) => {
   const w: World = { ...KASATERM }
   const { sent } = world(on, w)
   await $.session.start(START)
   w.model = 'claude-sonnet-5-5'
   await $.classic.PostModelSwitch({ from_model: 'claude-opus-5-5', to_model: 'claude-sonnet-5-5', requested_model: 'sonnet', source: 'command', context_tokens: 0 } as never)
   await settle()
-  expect(sent.at(-1)?.line).toBe('Sonnet 5.5 xhigh')
+  expect(sent.map(s => s.line)).not.toContain('Sonnet 5.5 xhigh')
+  await $.command.run({ command: 'effort', args: 'medium', origin: { kind: 'composer' } } as never)
+  await settle()
+  expect(sent.at(-1)?.line).toBe('Sonnet 5.5 medium')
 })
 
 test('a branch switched from elsewhere is drawn at the next look', async ($, on) => {
