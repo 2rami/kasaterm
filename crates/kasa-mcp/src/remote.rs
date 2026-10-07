@@ -1483,9 +1483,13 @@ pub fn paste_remote_image(base: &str, surface: &str, bytes: Vec<u8>) -> Result<(
     anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 32 << 20, "image must be at most 32 MiB");
     let auth = connection_auth_token(base);
     let url = format!("{}/paste-image?surface={}", base.trim_end_matches('/'), urlencode(surface));
+    // 고정 20초는 32MiB 까지 받는 업로드에 1.6MiB/s 를 요구한다. 네트워크 메모리가 바닥난 기계의 루프백은
+    // 3MiB 에 37초가 걸렸고(2026-10-07) 그 길은 느린 중계에서도 같다 — 안 닿는 기계는 연결 단계에서 10초 안에
+    // 거르고, 전송은 최소 64KiB/s 를 기준으로 크기에 맞춰 준다.
+    let transfer = Duration::from_secs(20 + bytes.len() as u64 / (64 << 10));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(20))
+        let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(transfer)
             .redirect(reqwest::redirect::Policy::none()).build()?;
         let mut request = client.post(url).header("content-type", "application/octet-stream").body(bytes);
         if let Some(token) = auth { request = request.header("x-kasa-token", token); }
@@ -3206,6 +3210,14 @@ mod tests {
         let rs = connect(spec.clone(), "%rmt0", 60, 12).expect("connect");
         assert!(rs.remote_id.starts_with("web-"), "id={}", rs.remote_id);
         assert!(is_remote_pane("%rmt0"));
+        // 셸이 프롬프트를 그린 뒤에 친다 — 그 전에 들어간 글은 셸이 시작하며 입력 큐를 비울 때 사라져, 부하가
+        // 걸린 기계에서 셸이 늦게 뜨면 에코가 영영 안 맺혔다.
+        let shell_up = (0..300).any(|_| {
+            let up = !rs.session.visible_text(50).trim().is_empty();
+            if !up { std::thread::sleep(Duration::from_millis(100)); }
+            up
+        });
+        assert!(shell_up, "셸 프롬프트가 30초 안에 안 떴다");
         // 셸이 뜨고 에코가 로컬 그리드에 맺힌다 — 원격 파싱이 아니라 로컬 파싱.
         rs.session
             .send_bytes(b"printf 'hi-remote-42\\n'\r")
