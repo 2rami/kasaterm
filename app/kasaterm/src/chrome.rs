@@ -1854,7 +1854,10 @@ impl App {
         let changed = {
             let Ok(mut context) = self.git.col_context.lock() else { return };
             if !context.select(target.clone()) { return; }
-            let view = target.as_ref().map(|target| git_panel::placeholder(target, context.generation, target.issue.clone()))
+            let view = target.as_ref().map(|target| {
+                    target.issue.is_none().then(|| context.recall(target, context.generation)).flatten()
+                        .unwrap_or_else(|| git_panel::placeholder(target, context.generation, target.issue.clone()))
+                })
                 .unwrap_or_else(|| GitColView { generation: context.generation,
                     issue: Some("현재 터미널 창을 선택해 주세요".into()), ..Default::default() });
             if let Ok(mut remote) = self.git.col_remote.lock() { *remote = view.remote.clone(); }

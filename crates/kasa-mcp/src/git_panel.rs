@@ -34,12 +34,15 @@ fn resolve(backend: &dyn Backend, query: &HashMap<String, String>) -> Result<Sou
     Ok(Source { machine_id, pane: pane.clone(), surface_key: key.clone(), cwd })
 }
 
+const READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
 pub fn read(backend: &dyn Backend, query: &HashMap<String, String>) -> Value {
     let error = |code: &str| json!({"schema": SCHEMA, "ok": false, "error": code});
     if query.get("schema").map(String::as_str) != Some(SCHEMA) { return error("update_needed"); }
     let source = match resolve(backend, query) { Ok(source) => source, Err(code) => return error(code) };
     let commits = query.get("commits").and_then(|s| s.parse().ok()).unwrap_or(20usize).clamp(1, 200);
-    let view = match crate::git::git_panel_snapshot(std::path::Path::new(&source.cwd), commits) {
+    // 보기 기기의 원격 GET 이 10초에 끊으므로 그 안에 답한다.
+    let view = match crate::git::git_panel_snapshot_within(std::path::Path::new(&source.cwd), commits, READ_BUDGET) {
         Ok(view) => view,
         Err(_) => return error("git_unavailable"),
     };

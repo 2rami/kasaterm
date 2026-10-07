@@ -18,7 +18,12 @@ pub(crate) struct Context {
     pub generation: u64,
     request: u64,
     pub target: Option<Target>,
+    /// 칸마다 마지막으로 잘 읽은 열 — 돌아오면 git 을 기다리지 않고 이것부터 보인다.
+    recent: Vec<(Target, GitColView)>,
 }
+
+/// 기억해 두는 칸 수. 그래프 200개짜리 열 하나가 수십 KB 라 이만큼이면 넉넉하고 가볍다.
+const RECENT: usize = 8;
 
 impl Context {
     pub fn select(&mut self, target: Option<Target>) -> bool {
@@ -43,6 +48,33 @@ impl Context {
     pub fn accepts_request(&self, generation: u64, request: u64, target: &Target) -> bool {
         self.request == request && self.accepts(generation, target)
     }
+
+    fn remember(&mut self, target: &Target, view: &GitColView) {
+        self.recent.retain(|(seen, _)| seen != target);
+        self.recent.push((target.clone(), view.clone()));
+        if self.recent.len() > RECENT {
+            self.recent.remove(0);
+        }
+    }
+
+    /// 이 칸의 마지막 열을 지금 세대로 — 다시 읽는 중이라는 표시를 달고.
+    pub fn recall(&self, target: &Target, generation: u64) -> Option<GitColView> {
+        let (_, view) = self.recent.iter().rev().find(|(seen, _)| seen == target)?;
+        Some(GitColView { generation, stale: true, ..view.clone() })
+    }
+}
+
+/// 실패한 읽기를 다시 해 보는 때 — 2·4·8초, 길어도 15초. 옛날엔 실패도 지문을 남겨 10초씩 오류에 머물렀다.
+fn retry_after(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << failures.clamp(1, 4)).min(15))
+}
+
+/// 읽기가 실패했을 때 보일 것. 같은 칸을 잘 읽은 적이 있으면 그것을 지키고(다시 읽는 중 표시), 없을 때만 오류를 보인다.
+fn after_failure(shown: &GitColView, context: &Context, target: &Target, generation: u64, failed: GitColView) -> GitColView {
+    if shown.generation == generation && !shown.loading && shown.issue.is_none() {
+        return GitColView { stale: true, ..shown.clone() };
+    }
+    context.recall(target, generation).unwrap_or(failed)
 }
 
 pub(crate) fn placeholder(target: &Target, generation: u64, issue: Option<String>) -> GitColView {
@@ -238,6 +270,7 @@ pub(crate) fn spawn_poller(
         let mut repo: Option<(std::path::PathBuf, Option<kasa_mcp::git::RepoPaths>)> = None;
         let mut read_print: Option<u64> = None;
         let mut read_want = 0;
+        let mut failures = 0u32;
         loop {
             let until = pending.map_or(due, |(first, last)| signal_read_at(first, last, last_read).min(due));
             kicks = wake.wait(kicks, until);
@@ -298,14 +331,30 @@ pub(crate) fn spawn_poller(
             let Some((generation, request, target)) = request else { continue };
             let view = fetch(&target, generation, want_now);
             last_read = Instant::now();
-            (read_print, read_want) = (print, want_now);
             read_generation = Some(generation);
-            due = last_read + period(&target, &wake);
-            let Ok(context) = context.lock() else { break };
+            let failed = view.issue.is_some() && target.issue.is_none();
+            if failed {
+                failures = failures.saturating_add(1);
+                read_print = None;
+                due = last_read + retry_after(failures);
+            } else {
+                failures = 0;
+                (read_print, read_want) = (print, want_now);
+                due = last_read + period(&target, &wake);
+            }
+            let Ok(mut context) = context.lock() else { break };
             if !context.accepts_request(generation, request, &target) {
                 continue;
             }
             let Ok(mut data) = data.lock() else { break };
+            let view = if failed {
+                after_failure(&data, &context, &target, generation, view)
+            } else {
+                if target.issue.is_none() {
+                    context.remember(&target, &view);
+                }
+                view
+            };
             if *data != view {
                 *data = view;
                 drop(data);
@@ -526,6 +575,7 @@ pub(crate) fn header(
         } else {
             "추적 브랜치 없음".into()
         };
+        let tracking = if view.stale { format!("{tracking}  ·  다시 읽는 중") } else { tracking };
         label(
             g,
             x + 10.0,
@@ -960,6 +1010,43 @@ mod tests {
         assert!(view.remote.is_some() && view.issue.is_some());
         assert!(view.branch.is_empty() && view.branch_list.is_empty() && view.staged.is_empty());
         assert!(!view.no_repo && !view.loading);
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_good_column_and_retries_soon() {
+        let local = target("%7", None, "/repo");
+        let mut context = Context::default();
+        context.select(Some(local.clone()));
+        let generation = context.generation;
+        let good = GitColView { generation, branch: "main".into(), cwd: Some("/repo".into()), ..Default::default() };
+        let failed = placeholder(&local, generation, Some(message("git_unavailable")));
+        let kept = after_failure(&good, &context, &local, generation, failed.clone());
+        assert!(kept.stale && kept.issue.is_none() && kept.branch == "main", "a slow or failing read must not erase the panel");
+        let loading = placeholder(&local, generation, None);
+        assert!(after_failure(&loading, &context, &local, generation, failed.clone()) == failed, "with nothing read yet the error shows");
+        let older = GitColView { generation: generation - 1, ..good.clone() };
+        assert!(after_failure(&older, &context, &local, generation, failed.clone()) == failed, "another pane's column never stands in");
+        assert_eq!(
+            (1..=6).map(|n| retry_after(n).as_secs()).collect::<Vec<_>>(),
+            [2, 4, 8, 15, 15, 15]
+        );
+    }
+
+    #[test]
+    fn returning_to_a_pane_shows_its_last_column_while_it_is_read_again() {
+        let (a, b) = (target("%1", None, "/a"), target("%2", None, "/b"));
+        let mut context = Context::default();
+        context.select(Some(a.clone()));
+        context.remember(&a, &GitColView { branch: "main".into(), ..Default::default() });
+        context.select(Some(b.clone()));
+        assert!(context.recall(&b, context.generation).is_none());
+        context.select(Some(a.clone()));
+        let shown = context.recall(&a, context.generation).unwrap();
+        assert!(shown.stale && shown.branch == "main" && shown.generation == context.generation);
+        for n in 0..RECENT + 2 {
+            context.remember(&target(&format!("%{}", n + 10), None, "/x"), &GitColView::default());
+        }
+        assert!(context.recall(&a, 1).is_none(), "only the latest few panes are remembered");
     }
 
     #[test]

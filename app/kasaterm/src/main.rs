@@ -4148,6 +4148,9 @@ struct GitColView {
     loading: bool,
     #[serde(skip)]
     issue: Option<String>,
+    /// 보이는 것이 마지막으로 잘 읽은 열이고 새로 읽는 중이거나 방금 읽기가 실패했다.
+    #[serde(skip)]
+    stale: bool,
     #[serde(default)]
     repo_root: Option<std::path::PathBuf>,
     #[serde(default)]

@@ -9,7 +9,9 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
-const PANEL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Git 열 한 번 읽기의 한도. git 열 개를 돌리는데, 부하가 큰 맥(load 70~110)에서는 status 하나가 2.6초 걸려
+/// 옛 5초 한도에 통째로 실패했다(2026-10-07, 워크트리 30개 레포). 넘기면 그 읽기만 버리고 화면은 마지막 결과를 지킨다.
+pub const PANEL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const PANEL_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const BRANCH_LIST_ARGS: &[&str] = &[
     "for-each-ref", "--format=%(refname)%00%(HEAD)%00%(symref)%00%(objectname)%00%(upstream)%00%(upstream:track)",
@@ -309,22 +311,12 @@ fn parse_graph_log(text: &str, branches: &[GitBranch], head: Option<&str>) -> Re
     }).collect()
 }
 
-fn panel_commit_graph(repo: &Path, branches: &[GitBranch], head: Option<&str>, commits: usize,
-    deadline: std::time::Instant) -> Result<(Vec<GitGraphCommit>, bool), String> {
-    if head.is_none() && branches.is_empty() { return Ok((Vec::new(), false)); }
-    let limit = commits.clamp(1, 200);
-    let count = format!("--max-count={}", limit + 1);
-    let mut args = vec!["log", count.as_str(), "--topo-order", "--no-show-signature", "--no-decorate",
+fn graph_log_args(count: &str, head: bool) -> Vec<&str> {
+    let mut args = vec!["log", count, "--topo-order", "--no-show-signature", "--no-decorate",
         "--format=%H%x00%P%x00%ct%x00%an%x00%s", "-z", "--branches", "--remotes"];
-    if head.is_some() { args.push("HEAD"); }
+    if head { args.push("HEAD"); }
     args.push("--");
-    let output = run_panel_git(repo, &args, deadline)?.checked()?;
-    let mut graph = parse_graph_log(&output, branches, head)?;
-    let shallow = run_panel_git(repo, &["rev-parse", "--is-shallow-repository"], deadline)?.checked()?;
-    // A shallow repository can look like a root even though its ancestry is unavailable locally.
-    let truncated = graph.len() > limit || shallow.trim() == "true";
-    graph.truncate(limit);
-    Ok((graph, truncated))
+    args
 }
 
 /// 이 폴더가 속한 작업 트리의 뿌리. 저장소가 아니면 None.
@@ -336,7 +328,13 @@ pub fn panel_repo_root(repo: &Path) -> Option<std::path::PathBuf> {
 }
 
 pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> {
-    let deadline = std::time::Instant::now() + PANEL_READ_TIMEOUT;
+    git_panel_snapshot_within(repo, commits, PANEL_READ_TIMEOUT)
+}
+
+/// `budget` 안에 Git 열 재료를 다 읽는다. status 가 저장소인지 정한 뒤 나머지(브랜치·뿌리·numstat 셋·log·그래프)는
+/// 서로 기다릴 것이 없어 한꺼번에 돌린다 — 기다림이 대부분인 느린 디스크·큰 부하에서 합이 아니라 가장 긴 하나만 걸린다.
+pub fn git_panel_snapshot_within(repo: &Path, commits: usize, budget: std::time::Duration) -> Result<Value, String> {
+    let deadline = std::time::Instant::now() + budget;
     let status = run_panel_git(repo, &[
         "status", "--porcelain=v2", "--branch", "-z", "--ignore-submodules=none",
     ], deadline)?;
@@ -347,30 +345,58 @@ pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> 
         return Ok(view);
     }
     let mut view = parse_panel_status(repo, &status.checked()?);
-    let branches = parse_branch_list(&run_panel_git(repo, BRANCH_LIST_ARGS, deadline)?.checked()?);
+    let unborn = view["unborn"].as_bool().unwrap_or(false);
+    let head = view["head_oid"].as_str().map(str::to_owned);
+    let diff_args = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--numstat", "-z"];
+    let staged_args = [&diff_args[..], &["--cached"]].concat();
+    let head_args = [&diff_args[..], &["HEAD"]].concat();
+    let log_count = format!("-{}", if commits == 0 { 5 } else { commits.min(100) });
+    let log_args = ["log", log_count.as_str(), "--no-show-signature", "--format=%h%x1f%s", "-z"];
+    let limit = commits.clamp(1, 200);
+    let graph_count = format!("--max-count={}", limit + 1);
+    let graph_args = graph_log_args(&graph_count, head.is_some());
+    let read = |args: &[&str]| run_panel_git(repo, args, deadline).and_then(GitReadOutput::checked);
+    let (branches, root, worktree, staged, totals, log, graph, shallow) = std::thread::scope(|scope| {
+        let branches = scope.spawn(|| read(BRANCH_LIST_ARGS));
+        let root = scope.spawn(|| run_panel_git(repo, &["rev-parse", "--show-toplevel"], deadline));
+        let worktree = scope.spawn(|| read(&diff_args));
+        let staged = scope.spawn(|| read(&staged_args));
+        let totals = (!unborn).then(|| scope.spawn(|| read(&head_args)));
+        let log = (!unborn).then(|| scope.spawn(|| read(&log_args)));
+        // HEAD 가 없으면 그래프는 브랜치가 있을 때만 읽는다 — 아래에서 브랜치를 보고 따로.
+        let graph = head.is_some().then(|| scope.spawn(|| read(&graph_args)));
+        let shallow = scope.spawn(|| read(&["rev-parse", "--is-shallow-repository"]));
+        let join = |handle: std::thread::ScopedJoinHandle<'_, Result<String, String>>| {
+            handle.join().unwrap_or_else(|_| Err("git panel reader panicked".into()))
+        };
+        (
+            join(branches),
+            root.join().unwrap_or_else(|_| Err("git panel reader panicked".into())),
+            join(worktree),
+            join(staged),
+            totals.map(join),
+            log.map(join),
+            graph.map(join),
+            join(shallow),
+        )
+    });
+    let branches = parse_branch_list(&branches?);
     view["branches"] = json!(branches.iter().filter(|b| !b.remote).map(|b| &b.name).collect::<Vec<_>>());
     view["branch_list"] = json!(&branches);
-    let root = run_panel_git(repo, &["rev-parse", "--show-toplevel"], deadline)?;
+    let root = root?;
     if root.success {
         view["repo_root"] = json!(root.stdout.strip_suffix('\n').unwrap_or(&root.stdout));
     }
-    let diff_args = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--numstat", "-z"];
-    let mut numstat = parse_panel_numstat(&run_panel_git(repo, &diff_args, deadline)?.checked()?);
-    let mut staged_args = diff_args.to_vec();
-    staged_args.push("--cached");
-    let staged = parse_panel_numstat(&run_panel_git(repo, &staged_args, deadline)?.checked()?);
+    let mut numstat = parse_panel_numstat(&worktree?);
+    let staged = parse_panel_numstat(&staged?);
     for (path, (ins, del)) in &staged {
         let entry = numstat.entry(path.clone()).or_insert((0, 0));
         entry.0 = entry.0.max(*ins);
         entry.1 = entry.1.max(*del);
     }
-    let unborn = view["unborn"].as_bool().unwrap_or(false);
-    let totals = if unborn {
-        staged
-    } else {
-        let mut head_args = diff_args.to_vec();
-        head_args.push("HEAD");
-        parse_panel_numstat(&run_panel_git(repo, &head_args, deadline)?.checked()?)
+    let totals = match totals {
+        Some(totals) => parse_panel_numstat(&totals?),
+        None => staged,
     };
     let (insertions, deletions) = totals.values().fold((0u32, 0u32), |(a, d), (ins, del)| {
         (a.saturating_add(*ins), d.saturating_add(*del))
@@ -378,16 +404,24 @@ pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> 
     view["insertions"] = json!(insertions);
     view["deletions"] = json!(deletions);
     view["numstat"] = json!(numstat);
-    if !unborn {
-        let count = if commits == 0 { 5 } else { commits.min(100) };
-        let count = format!("-{count}");
-        let log = run_panel_git(repo, &[
-            "log", &count, "--no-show-signature", "--format=%h%x1f%s", "-z",
-        ], deadline)?.checked()?;
-        view["recent_commits"] = json!(parse_panel_log(&log));
+    if let Some(log) = log {
+        view["recent_commits"] = json!(parse_panel_log(&log?));
     }
-    let head = view["head_oid"].as_str();
-    let (graph, truncated) = panel_commit_graph(repo, &branches, head, commits, deadline)?;
+    let graph = match graph {
+        Some(graph) => Some(graph?),
+        None if !branches.is_empty() => Some(read(&graph_args)?),
+        None => None,
+    };
+    let (graph, truncated) = match graph {
+        Some(output) => {
+            let mut graph = parse_graph_log(&output, &branches, head.as_deref())?;
+            // A shallow repository can look like a root even though its ancestry is unavailable locally.
+            let truncated = graph.len() > limit || shallow?.trim() == "true";
+            graph.truncate(limit);
+            (graph, truncated)
+        }
+        None => (Vec::new(), false),
+    };
     view["commit_graph"] = json!(graph);
     view["graph_truncated"] = json!(truncated);
     Ok(view)
@@ -398,8 +432,13 @@ pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> 
 /// flashes a fresh console window — and a Defender-throttled call (~5s) leaves
 /// that empty window on screen the whole time. CREATE_NO_WINDOW keeps it
 /// hidden. No-op on other platforms.
+///
+/// PATH 는 도구 자리를 덧붙인 것으로 — Finder 로 띄운 앱은 `/usr/bin:/bin` 뿐이라 LFS 레포에서 status·diff 가
+/// filter 로 부르는 `git-lfs` 를 못 찾고 rc 128 로 끝나, Git 열이 「읽지 못했어요」에 머물렀다(2026-10-07, 0.2.42).
 fn git_cmd() -> Command {
-    crate::no_window_command("git")
+    let mut command = crate::no_window_command("git");
+    command.env("PATH", crate::reposync::tool_path());
+    command
 }
 
 /// Run `git status` in `repo` and return a JSON snapshot the webview can
@@ -1262,6 +1301,13 @@ pub fn status_marks<'a>(
 
 #[cfg(test)]
 mod panel_snapshot_tests {
+    #[test]
+    fn panel_git_finds_the_lfs_filter_when_the_app_has_a_bare_path() {
+        let command = super::git_cmd();
+        let path = command.get_envs().find(|(key, _)| *key == "PATH").and_then(|(_, value)| value);
+        assert_eq!(path.and_then(|p| p.to_str()), Some(crate::reposync::tool_path()));
+    }
+
     use super::*;
 
     #[test]
