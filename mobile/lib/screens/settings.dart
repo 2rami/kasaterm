@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../app_release.dart';
@@ -51,6 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loading = true;
   String? _pending;
   late final Future<AppRelease?> _release = server.latestRelease();
+  late final Future<List<String>> _trail = releaseTrail();
   late final Future<OAuthProviders> _providers = _loadProviders();
 
   /// 이 계정의 얼굴과 로그인 방법. 계정으로 붙지 않았거나 못 받았으면 null.
@@ -229,6 +231,70 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// 새 판 설치가 실기에서 어디까지 갔는지(`ReleaseTrail`) — 원인을 찾는 사람에게 넘길 수 있게 복사·데스크톱 보내기.
+  Future<void> _showTrail(List<String> lines) {
+    final text = lines.join('\n');
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheet) {
+        final theme = Theme.of(sheet);
+        void done(String msg) {
+          Navigator.of(sheet).pop();
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(msg)));
+        }
+
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheet).height * 0.8,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: SingleChildScrollView(
+                    reverse: true,
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                    child: SelectableText(
+                      text,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontFamily: 'TermMono',
+                      ),
+                    ),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.copy),
+                  title: const Text('복사'),
+                  onTap: () async {
+                    await Clipboard.setData(ClipboardData(text: text));
+                    done('설치 기록을 복사했어요');
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.desktop_mac_outlined),
+                  title: const Text('데스크톱 클립보드로 보내기'),
+                  onTap: () async {
+                    try {
+                      await server.clipboardPush(text);
+                      done('데스크톱 클립보드로 보냈어요');
+                    } on Object {
+                      done('데스크톱에 못 보냈어요 — 복사해서 붙여 주세요');
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _forget(BuildContext context) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -321,8 +387,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   trailing: fresh ? const _Pill('새 판') : null,
                   chevron: fresh,
                   onTap: fresh
-                      ? () => unawaited(installRelease(context, r))
+                      ? () => unawaited(
+                          installRelease(context, r, from: '설정 앱 판'),
+                        )
                       : null,
+                );
+              },
+            ),
+            FutureBuilder<List<String>>(
+              future: _trail,
+              builder: (context, snap) {
+                final lines = snap.data ?? const <String>[];
+                if (lines.isEmpty) return const SizedBox.shrink();
+                return SettingsRow(
+                  tone: desktop + 1,
+                  icon: Icons.receipt_long_outlined,
+                  title: '지난 설치 기록',
+                  subtitle: '${lines.length}줄 · 눌러서 복사하거나 데스크톱으로 보내요',
+                  chevron: true,
+                  onTap: () => unawaited(_showTrail(lines)),
                 );
               },
             ),

@@ -3,6 +3,7 @@ import Flutter
 import LocalAuthentication
 import UIKit
 import UserNotifications
+import os
 
 /// 푸시(APNs) 다리. 다트가 `request` 를 부르면 권한을 묻고 애플에 등록하고, 토큰이
 /// 오면 `onToken` 으로 넘긴다(다트가 카사텀 서버에 맡긴다). 알림을 눌러 앱이 뜨면
@@ -18,6 +19,8 @@ import UserNotifications
   private var webAuth: ASWebAuthenticationSession?
   private var backgroundChannel: FlutterMethodChannel?
   private var graceTask: UIBackgroundTaskIdentifier = .invalid
+  /// 설치에 앞자리를 내주는 중 — 뒤로 간 앱이 시간을 더 받아 살아 있으면 설치가 그만큼 밀릴 수 있다.
+  private var leavingForInstall = false
   /// 새 판 설치 뒤 「눌러서 열기」 알림. 새 판이 켜지면 거둔다.
   private static let releaseNotice = "kasa.release.open"
 
@@ -28,6 +31,7 @@ import UserNotifications
     UNUserNotificationCenter.current().delegate = self
     UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.releaseNotice])
     UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [Self.releaseNotice])
+    ReleaseTrail.launched()
     if let remote = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
       pendingTap = Self.payload(remote)
     }
@@ -65,7 +69,7 @@ import UserNotifications
       guard let self else { return result(nil) }
       switch call.method {
       case "begin":
-        if self.graceTask == .invalid {
+        if !self.leavingForInstall && self.graceTask == .invalid {
           self.graceTask = UIApplication.shared.beginBackgroundTask(withName: "kasaterm.grace") { [weak self] in
             self?.backgroundChannel?.invokeMethod("expired", arguments: nil)
             self?.endGrace()
@@ -73,6 +77,7 @@ import UserNotifications
         }
         result(self.graceTask != .invalid)
       case "end":
+        self.leavingForInstall = false
         self.endGrace()
         result(nil)
       default:
@@ -81,28 +86,24 @@ import UserNotifications
     }
     // 새 판 설치(다트 `installRelease`). 앞에 떠 있는 앱은 iOS 가 갈아 끼우지 않아 홈으로 비켜서야 설치가 시작되고,
     // 설치된 앱을 스스로 켤 수는 없어 알림을 남긴다. 비켜서는 공개 API 가 없어 suspend 를 보낸다 — App Store 판이 아니다.
+    // suspend 가 먹지 않는 iOS 면 사파리로 설치 화면을 연다(공개 API 로 앞자리를 내주는 길).
     let release = FlutterMethodChannel(name: "kasaterm/release", binaryMessenger: messenger)
-    release.setMethodCallHandler { call, result in
-      guard call.method == "stepAside", let args = call.arguments as? [String: Any] else {
+    release.setMethodCallHandler { [weak self] call, result in
+      let args = call.arguments as? [String: Any] ?? [:]
+      switch call.method {
+      case "log":
+        ReleaseTrail.add(args["line"] as? String ?? "")
+        result(nil)
+      case "arm":
+        ReleaseTrail.arm()
+        result(nil)
+      case "trail":
+        result(ReleaseTrail.lines)
+      case "stepAside":
+        self?.stepAside(args)
+        result(nil)
+      default:
         result(FlutterMethodNotImplemented)
-        return
-      }
-      let content = UNMutableNotificationContent()
-      content.title = args["title"] as? String ?? ""
-      content.body = args["body"] as? String ?? ""
-      content.sound = .default
-      let after = max(5, (args["after"] as? NSNumber)?.doubleValue ?? 45)
-      let request = UNNotificationRequest(
-        identifier: Self.releaseNotice, content: content,
-        trigger: UNTimeIntervalNotificationTrigger(timeInterval: after, repeats: false))
-      let center = UNUserNotificationCenter.current()
-      center.requestAuthorization(options: [.alert, .sound]) { _, _ in
-        center.add(request) { _ in
-          DispatchQueue.main.async {
-            UIApplication.shared.perform(NSSelectorFromString("suspend"))
-            result(nil)
-          }
-        }
       }
     }
     // 계정 로그인 시스템 창. 관문이 kasaterm:// 로 돌려보낸 주소(일회용 code)를 다트에 준다 — 확인 코드 입력이 없다.
@@ -286,6 +287,127 @@ import UserNotifications
       pendingTap = tap
     }
     completionHandler()
+  }
+}
+
+extension AppDelegate {
+  fileprivate func stepAside(_ args: [String: Any]) {
+    ReleaseTrail.add("비켜서기 요청")
+    leavingForInstall = true
+    endGrace()
+    let content = UNMutableNotificationContent()
+    content.title = args["title"] as? String ?? ""
+    content.body = args["body"] as? String ?? ""
+    content.sound = .default
+    let after = max(5, (args["after"] as? NSNumber)?.doubleValue ?? 45)
+    let request = UNNotificationRequest(
+      identifier: Self.releaseNotice, content: content,
+      trigger: UNTimeIntervalNotificationTrigger(timeInterval: after, repeats: false))
+    let page = (args["page"] as? String).flatMap(URL.init(string:))
+    let center = UNUserNotificationCenter.current()
+    center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+      center.add(request) { error in
+        ReleaseTrail.add("열기 알림 \(error == nil ? "걸음" : "실패 \(error!.localizedDescription)") · 권한 \(granted)")
+        DispatchQueue.main.async { self.leaveForeground(page) }
+      }
+    }
+  }
+
+  private func leaveForeground(_ page: URL?) {
+    let app = UIApplication.shared
+    let suspend = NSSelectorFromString("suspend")
+    if app.responds(to: suspend) {
+      ReleaseTrail.add("suspend 보냄 · 앱 \(ReleaseTrail.state(app.applicationState))")
+      app.perform(suspend)
+    } else {
+      ReleaseTrail.add("suspend 없음")
+    }
+    // 비켜섰으면 이 블록은 앱이 뒤로 간 채로 돌거나(상태 background) 아예 돌지 않는다.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+      let state = app.applicationState
+      ReleaseTrail.add("1.2초 뒤 앱 \(ReleaseTrail.state(state))")
+      guard state == .active, let page else { return }
+      app.open(page) { ok in ReleaseTrail.add("사파리로 설치 화면 열기 → \(ok)") }
+    }
+  }
+}
+
+/// 새 판 설치가 실기에서 어디까지 갔는지 남기는 기록(10-07: 앱이 비켜서지 않았는데 가상 아이폰은 Ad Hoc 설치를 못
+/// 재현한다). [설치]를 누른 뒤 10분 동안만 앱 상태 바뀜까지 적고, 판이 바뀌어 켜지면 그 사실과 걸린 시간을 적는다.
+/// 설정 「지난 설치 기록」이 보여 주고, 같은 줄이 통합 로그(subsystem 번들 id, category release)에도 간다.
+enum ReleaseTrail {
+  private static let key = "kasaReleaseTrail"
+  private static let armedKey = "kasaReleaseArmedAt"
+  private static let buildKey = "kasaReleaseLastBuild"
+  private static let keep = 120
+  private static let window: TimeInterval = 600
+  private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kasaterm", category: "release")
+  private static var observing = false
+  private static let stamp: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "MM-dd HH:mm:ss.SSS"
+    return f
+  }()
+
+  static var build: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?" }
+  static var lines: [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
+
+  static func add(_ line: String) {
+    let entry = "\(stamp.string(from: Date())) [\(build)] \(line)"
+    log.notice("\(entry, privacy: .public)")
+    var all = lines
+    all.append(entry)
+    UserDefaults.standard.set(Array(all.suffix(keep)), forKey: key)
+  }
+
+  static func arm() {
+    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: armedKey)
+    watchScenes()
+  }
+
+  private static var armedAt: TimeInterval? {
+    let t = UserDefaults.standard.double(forKey: armedKey)
+    return t > 0 && Date().timeIntervalSince1970 - t < window ? t : nil
+  }
+
+  static func launched() {
+    let before = UserDefaults.standard.string(forKey: buildKey)
+    UserDefaults.standard.set(build, forKey: buildKey)
+    if let before, before != build {
+      let since = armedAt.map { " · [설치] 누른 지 \(Int(Date().timeIntervalSince1970 - $0))초" } ?? " · 앱 안 [설치]를 거치지 않음"
+      add("새 판으로 켜짐 \(before) → \(build)\(since)")
+      UserDefaults.standard.removeObject(forKey: armedKey)
+    } else if armedAt != nil {
+      add("같은 판으로 다시 켜짐")
+      watchScenes()
+    }
+  }
+
+  static func state(_ s: UIApplication.State) -> String {
+    switch s {
+    case .active: return "active"
+    case .inactive: return "inactive"
+    case .background: return "background"
+    @unknown default: return "unknown"
+    }
+  }
+
+  /// 다트가 보는 상태는 엔진을 한 번 거친 것이라, 시스템이 실제로 보낸 알림을 따로 적는다.
+  private static func watchScenes() {
+    guard !observing else { return }
+    observing = true
+    let names: [(Notification.Name, String)] = [
+      (UIScene.willDeactivateNotification, "scene 비활성"),
+      (UIScene.didActivateNotification, "scene 활성"),
+      (UIScene.didEnterBackgroundNotification, "scene 뒤로"),
+      (UIScene.willEnterForegroundNotification, "scene 앞으로"),
+    ]
+    for (name, label) in names {
+      NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+        if armedAt != nil { add(label) }
+      }
+    }
   }
 }
 

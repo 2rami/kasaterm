@@ -101,7 +101,7 @@ class _HubScreenState extends State<HubScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text('새 판 ${r.version} (${r.build})이 있어요'),
       duration: const Duration(seconds: 10),
-      action: SnackBarAction(label: '설치', onPressed: () => unawaited(installRelease(context, r))),
+      action: SnackBarAction(label: '설치', onPressed: () => unawaited(installRelease(context, r, from: '허브 띠'))),
     ));
   }
 
