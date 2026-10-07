@@ -67,7 +67,7 @@
 | `kasaterm-cli op run -e NAME=<op://…> [-e …] -- <명령…>` | 승인 한 번으로 여러 참조. 값은 자식 환경으로만 가고, 자식 출력에 그 값이 나오면 `<concealed>` 로 가린다 |
 | `kasaterm-cli op status` | 토큰 있음/없음·허용 금고·믿는 폰 열쇠 수(값 없음) |
 
-학생 지침(`collab-protocol.md`)에 「1Password 비밀은 `op` 를 직접 부르지 말고 `kasaterm-cli op`」을 넣는다.
+학생 협업 규약(kasapane 스킬 `skills/kasapane/collab.md`)에 「1Password 비밀은 `op` 를 직접 부르지 말고 `kasaterm-cli op`」을 넣는다.
 `op` 자체를 가로채는 셔틀은 두지 않는다.
 
 거절 코드: `op_token_missing`(맥에 토큰 없음) · `vault_not_allowed` · `no_trusted_key`(믿는 폰 열쇠 없음) ·

@@ -1,6 +1,8 @@
 # 캐릭터 협업
 
-상태 확인 → 상세 읽기 → 전달 → 완료 확인 순서다. [조회](../../../docs/board-collaboration.md)·[전달 계약](../../../docs/tell-protocol.md)을 따른다.
+카사텀 칸에서 다른 학생과 함께 일할 때 읽는다. 학생 프롬프트에는 말투만 실리고 이 규약은 실리지 않는다(2026-10-07) — 보드·전달·소환·완료 보고를 쓰기 전에 여기를 본다.
+
+상태 확인 → 상세 읽기 → 전달 → 완료 확인 순서다. [조회](../../docs/board-collaboration.md)·[전달 계약](../../docs/tell-protocol.md)을 따른다.
 
 ## 상태 확인
 
@@ -61,12 +63,12 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 맡긴 작업·막힘·실패를 추적한다. `reset_required`면 새 snapshot과 커서를 받고 빠진 구간은 미확인으로 남긴다.
 - `idle`과 침묵은 완료가 아니다. done 보고와 결과 확인 후 맡겼던 창을 정리한다.
 - 본인 작업이 끝나면 `kasaterm-cli done succeeded '완료·미확인·남은 것'`으로 한 번 보고한다. 실패는 `failed`, 막힘·승인 필요는 `blocked`·`needs_approval`. 부른 창에는 done이 전하니 완료를 tell로 따로 알리지 않는다.
-- 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../../docs/automatic-preview-updates.md)). 폰 앱(`mobile/`)은 main 푸시 후 `mobile/tool/adhoc.sh`로 설치 링크 새 판을 올리고 TestFlight는 쓰지 않는다([절차](../../../docs/ios-adhoc-install.md)).
+- 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../docs/automatic-preview-updates.md)). 폰 앱(`mobile/`)은 main 푸시 후 `mobile/tool/adhoc.sh`로 설치 링크 새 판을 올리고 TestFlight는 쓰지 않는다([절차](../../docs/ios-adhoc-install.md)).
 - 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. sleep을 반복하지 않고, 계속 지켜볼 일은 변경분·진행·실패·끊김만 받는다.
 
 ## 오케스트레이터가 띄운 일
 
-env `KASATERM_ORIGIN`(브리프 첫 줄 `[origin=… task=…]`)이 있는 창만 해당한다. 상세는 [오케스트레이터 계약](../../../docs/nacho-orchestrator.md).
+env `KASATERM_ORIGIN`(브리프 첫 줄 `[origin=… task=…]`)이 있는 창만 해당한다. 상세는 [오케스트레이터 계약](../../docs/nacho-orchestrator.md).
 
 - 끝났을 때·못 풀고 막혔을 때(blocked)·재시작이 있어야 이어질 때(needs_restart)·머지·배포처럼 승인이 필요할 때(needs_approval) **즉시** `kasaterm-cli done <succeeded|blocked|needs_restart|needs_approval> "한 일" --changed "파일,파일" --tests "검사와 결과" --next "오케스트레이터가 할 것"` 으로 보고한다. 이 한 줄이 판 완료와 오케스트레이터 보고함에 함께 들어간다. 재시작·머지·배포는 직접 하지 않는다.
 - blocked·needs_restart 는 `--next` 를 채운다. 토큰·비밀이 들어가면 접수가 거부된다.
@@ -80,5 +82,5 @@ env `KASATERM_ORIGIN`(브리프 첫 줄 `[origin=… task=…]`)이 있는 창�
 - 선생님이 볼 결과물은 `kasaterm-cli share new <주제>` 폴더(바탕화면 `KASA-share`, 모든 기기·폰에 옮겨짐)에 넣고 열어 준다.
 - 결론 뒤에 끝난 것 / 남은 것 / 선생님이 할 것을 쓴다. 기본 5줄·최대 10줄, 없는 칸은 「없음」으로 채운다.
 - 남은 것에는 막힘·미확인·이어받을 캐릭터를 적는다. 쉬운 기능 이름을 쓰고 기술 상세·근거는 기록과 커밋에 남긴다.
-- 메모리 핸드오프도 세 칸과 상세 링크로 두 줄·200자 이내에 쓴다. 오래된 상태는 재확인 전까지 미확인이다.
-- 캐릭터가 정해졌으면 그 호칭과 말투를 유지한다. 인사·반복 요약·마무리 제안은 생략한다.
+- 메모리(~/내 드라이브/MEMORY)에는 핸드오프·진행 현황·날짜별 경과·커밋 나열을 쓰지 않는다. 무엇이 문제였고 어떻게 풀었나·하는 법·함정만 남긴다. 남은 일·선생님 차례는 done 보고로 나쵸 작업현황에 남긴다.
+- 인사·반복 요약·마무리 제안은 생략한다.

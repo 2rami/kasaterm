@@ -2,8 +2,10 @@
 
 나쵸네코(거노 개인비서, `nacho-neko` 상주 프로세스)가 카사텀 학생을 띄워 일을 맡기고,
 학생이 끝나거나 막혔을 때 **구조화 보고 한 통**으로 나쵸를 깨우는 규약이다.
-학생 쪽 규약 문장은 [collab-protocol.md](../app/kasaterm/collab-hooks/collab-protocol.md)의
-「나쵸네코가 띄운 일」 절이 정본이고, 이 문서는 그 밑의 기계 계약이다.
+학생 쪽 규약 문장은 나쵸 브리프 첫 줄(`[origin=nacho task=…]` 뒤의 `kasaterm-cli done …` 한 줄)과
+kasapane 스킬 [collab.md](../skills/kasapane/collab.md)의 「오케스트레이터가 띄운 일」 절이고, 이 문서는
+그 밑의 기계 계약이다. 학생 프롬프트에 규약을 덧붙이던 것은 2026-10-07 에 걷었다 — 그래서 보고 명령은
+브리프가 매번 싣는다.
 
 ## 왜 이 길 하나인가
 

@@ -8,7 +8,7 @@
 - 실폴더 `~/.config/kasaterm/share`, 바탕화면 `KASA-share` 는 거기를 가리키는 링크(맥 symlink, 윈도우 정션).
   바탕화면을 실폴더로 두지 않는 이유: iCloud 바탕화면 동기화와 겹치고, 「저장 공간 최적화」가 파일을 비우면
   지운 것으로 읽혀 삭제가 다른 기기로 번진다. 같은 이름이 이미 있으면 링크를 안 만든다.
-- 학생은 `kasaterm-cli share new <주제>` 가 찍어 주는 `<날짜>-<주제>/` 에 넣는다(전역 지침·`collab-protocol.md`).
+- 학생은 `kasaterm-cli share new <주제>` 가 찍어 주는 `<날짜>-<주제>/` 에 넣는다(전역 지침·kasapane 스킬 `collab.md`).
 - 색인·상태·휴지통은 `<share>/.kasaterm/` — `index.json`, `status.json`, `trash/<ms>/`(7일), `tmp/*.part`.
 
 ## 판정 (`version.rs`)

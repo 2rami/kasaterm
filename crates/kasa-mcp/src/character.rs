@@ -821,12 +821,17 @@ fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
 }
 
 /// 캐릭터의 persona 텍스트(leader/leaders/members 통합 풀에서 이름 매칭).
+///
+/// 학생 프롬프트에 덧붙는 것은 이것뿐이다 — 정체성·호칭·말투. 협업 규약을 뒤에 붙이던
+/// 것을 2026-10-07 에 걷었다(사용자 결정: 덧붙임은 말투·페르소나만, 작업에 영향 가는
+/// 것은 빼기). 규약은 kasapane 스킬(`skills/kasapane/collab.md`)로 가서 필요할 때 읽고,
+/// 빠지면 협업이 깨지는 것은 문장 대신 장치가 맡는다 — 완료 보고는 summon·`tell --title`
+/// 이 브리프 끝에 붙이고, 셸·닫힌 창 전달과 서브에이전트 위임·파일 겹침은 서버·훅이 막는다.
 pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
     find_character(chars, name)
         .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
         .filter(|p| !p.is_empty())
-        // 캐릭터 정체성 뒤에 공통 협업 규약을 붙여 모든 학생에 1회 주입(캐시).
-        .map(|p| format!("{p}{}", collab_protocol()))
+        .map(String::from)
 }
 
 /// 이 학생이 뜰 때 붙일 `--model` 값. `claude-opus-5[1m]` 처럼 CLI 가 그대로
@@ -922,93 +927,6 @@ pub fn model_choices(chars: &Value) -> Vec<ModelChoice> {
     out
 }
 
-/// 협업 규약 파일이 놓일 자리 — 읽기는 `characters.json` 과 **같은 우선순위**다
-/// (테마 → 사용자 override → 번들 → 개발 트리). 로스터와 규약을 한 벌로 갈아끼울
-/// 수 있어야 테마가 자기 규칙을 들고 올 수 있다.
-fn protocol_candidate_paths() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Some(d) = active_theme_dir() {
-        v.push(d.join("collab-protocol.md"));
-    }
-    if let Some(home) = home() {
-        v.push(home.join(".config/kasaterm/collab-protocol.md"));
-    }
-    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
-        v.push(PathBuf::from(p).join("collab-protocol.md"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(res) = exe
-            .parent()
-            .and_then(|m| m.parent())
-            .map(|c| c.join("Resources/collab-hooks/collab-protocol.md"))
-        {
-            v.push(res);
-        }
-        if let Some(adj) = exe.parent().map(|d| d.join("collab-hooks/collab-protocol.md")) {
-            v.push(adj);
-        }
-    }
-    v.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../app/kasaterm/collab-hooks/collab-protocol.md"),
-    );
-    v
-}
-
-/// 설정 화면이 협업 규약을 저장할 자리 — `protocol_candidate_paths` 의 최우선
-/// 슬롯과 **같아야 한다**. 어긋나면 저장은 성공하는데 테마 쪽이 읽기에서 이겨,
-/// 고친 규약이 학생에게 영영 안 실린다(오류도 안 난다). `user_characters_path`
-/// 가 같은 이유로 같은 모양이다.
-pub fn user_collab_protocol_path() -> Option<PathBuf> {
-    if let Some(d) = active_theme_dir() {
-        return Some(d.join("collab-protocol.md"));
-    }
-    Some(home()?.join(".config/kasaterm/collab-protocol.md"))
-}
-
-/// 모든 학생 persona 뒤에 붙는 협업 규약. 파일이 있으면 그것, 없으면 코드 기본값.
-///
-/// 파일로 뺀 이유: 규약이 Rust 상수로만 있으면 **배포본을 받은 사람은 손댈 방법이
-/// 아예 없다** — 소스를 받아 다시 굽는 것 말고는(2026-08-13 지적: "카사텀
-/// 쓰는사람들은 못바꾸잖아"). 캐릭터 성격은 이미 characters.json 이라 편집
-/// 가능했는데 공통 규약만 코드에 남아 있었다.
-///
-/// 기본값을 코드에 남겨 두는 것은 파일이 없어도 앱이 온전히 돌게 하기 위해서다 —
-/// 규약이 빈 채로 학생이 뜨면 서로를 못 부르고 보고도 안 올라온다.
-///
-/// 캐시하지 않는다. 이 함수는 pane 이 뜰 때만 불리므로(persona 는 spawn 시 env 로
-/// 박힌다) 비용이 무시할 만하고, 캐시하면 파일을 고쳐도 앱을 껐다 켜기 전엔 안
-/// 먹어 「고쳤는데 그대로다」가 된다. 지금 방식은 **다음에 뜨는 pane 부터** 적용이라
-/// 예측이 쉽다.
-pub fn collab_protocol() -> String {
-    for p in protocol_candidate_paths() {
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if !s.trim().is_empty() {
-                // 캐릭터 정체성과 규약 사이를 늘 빈 줄로 벌린다 — 파일 첫 줄이
-                // 바로 대괄호 섹션이면 앞 문장에 이어붙어 한 문단이 된다.
-                return format!("\n\n{}", s.trim_start_matches('\n'));
-            }
-        }
-    }
-    DEFAULT_COLLAB_PROTOCOL.to_string()
-}
-
-/// 말투 토글이 꺼진 학생에게 싣는 지시 — 협업 규약만, 앞 빈 줄 없이.
-///
-/// 토글의 뜻은 「말투만 끄기」다. 규약이 persona 뒤에만 붙던 동안 말투를 끄면 보드·전달·
-/// 나쵸 보고 안내와 카사텀 화면 규칙까지 함께 빠졌다(2026-09-25 확인). 정체성과 무관한
-/// 하네스라 토글과 상관없이 싣는다 — 게이트마다 「꺼짐」 갈래가 이 값을 쓴다.
-pub fn protocol_only() -> String {
-    collab_protocol().trim_start_matches('\n').to_string()
-}
-
-/// The editable source can differ from the preferred save location before an override exists.
-pub fn collab_protocol_source_path() -> Option<PathBuf> {
-    protocol_candidate_paths().into_iter().find(|path| {
-        std::fs::read_to_string(path).is_ok_and(|text| !text.trim().is_empty())
-    })
-}
-
 /// 캐릭터의 claude_color(characters.json) — teammate 스폰 `--agent-color` 용. 팔레트 밖
 /// 값(프라나=magenta)이 실재하므로 8색 정규화는 team::normalize_agent_color 가 맡는다.
 pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {
@@ -1027,9 +945,8 @@ pub fn header_color_for(chars: &Value, name: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// 편집용 원본 persona — persona_for 와 달리 COLLAB_PROTOCOL 을 붙이지 않는다.
-/// 설정 폼은 사용자가 실제로 쓴 텍스트만 로드/저장해야 하므로(규약은 주입 시 자동
-/// 부착), 편집 왕복에서 규약이 중복 누적되지 않게 한다.
+/// 편집용 원본 persona — persona_for 와 달리 빈 문자열도 그대로 돌려준다(설정 폼이
+/// 사용자가 실제로 쓴 텍스트를 그대로 로드/저장해야 해서).
 pub fn raw_persona_for(chars: &Value, name: &str) -> Option<String> {
     find_character(chars, name)
         .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
@@ -1364,31 +1281,6 @@ fn update_member_at(
 pub fn member_def(chars: &Value, name: &str) -> Option<Value> {
     find_character(chars, name).cloned()
 }
-
-/// 협업 규약의 **정본은 코드가 아니라 `collab-hooks/collab-protocol.md`** 이고,
-/// 여기서는 그것을 컴파일 타임에 박아 둘 뿐이다(`collab_protocol()` 의 최종 fallback).
-///
-/// 이 방향인 이유: 규약이 Rust 문자열 리터럴이면 편집이 사실상 불가능하다 —
-/// 줄마다 `\n\` 이스케이프가 붙고, 고치면 다시 구워야 하고, **배포본을 받은
-/// 사람은 손댈 창구가 아예 없다**(2026-08-13 지적 "카사텀 쓰는사람들은 못바꾸잖아").
-/// 반대로 파일만 두고 상수를 없애면 파일이 유실됐을 때 규약이 통째로 빠져 학생이
-/// 서로를 못 부른다. 그래서 **파일이 정본, 상수는 그 파일의 컴파일 타임 사본**이다 —
-/// `include_str!` 이라 둘이 어긋날 수가 없다(손으로 베낀 기본값이었다면 한쪽만
-/// 고쳐지는 사고가 반드시 난다).
-///
-/// 내용 자체의 배경: 동료에게는 보고 경로(SendMessage)가 있으니 그것만으로 되는
-/// 일이면 그냥 기다리면 된다(사용자 2026-08-10: "어차피 끝나면 보고하는데 필요없지
-/// 않나"). 문제는 그 말을 **감시 금지**로 적어 둔 것이었다 — 캐릭터들이 금지를
-/// 빌드·CI 추적에까지 넓혀 읽고, 남은 길인 「몇 초마다 확인하겠습니다」로 자기 턴
-/// 안에서 sleep 을 돌렸다(세션 로그에 `sleep N; done` 수백 건).
-///
-/// 그래서 2026-09-10 에 금지를 걷었다. 동료 대기 절에 남은 것은 규칙이 아니라 실무
-/// 함정뿐이고(필터 필수·`idle` 은 완료가 아님·침묵은 도달 증명이 아님), 기계 추적은
-/// [추적 — 기계를 지켜볼 때] 절로 갈라 「몇 번 알려야 하나」로 도구를 고르게 했다.
-const DEFAULT_COLLAB_PROTOCOL: &str = concat!(
-    "\n\n",
-    include_str!("../../../app/kasaterm/collab-hooks/collab-protocol.md")
-);
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 ///
@@ -2529,108 +2421,33 @@ mod tests {
 }
 
 #[cfg(test)]
-mod collab_protocol_tests {
+mod persona_text_tests {
     use super::*;
 
-    /// 규약이 빈 채로 나가면 학생이 서로를 못 부르고 보고도 안 올라온다 — 그런데
-    /// 규약은 화면에 안 보이므로 비어도 알아챌 방법이 없다. 파일이 지워지거나
-    /// 경로가 어긋나면 여기서 먼저 걸린다.
     #[test]
-    fn default_protocol_is_concise_and_keeps_the_collaboration_flow() {
-        let protocol = DEFAULT_COLLAB_PROTOCOL.trim();
-        // 2026-09-17 나쵸네코 절(7줄)이 들어오며 한도를 65→75줄·6→7 KiB 로 올렸다 —
-        // 그 절도 명령 한 줄과 규칙 넷뿐이고 봉투·인박스 상세는 docs/nacho-orchestrator.md 다.
-        // 2026-09-25 카사텀 화면 절(8줄)로 82줄·7.5 KiB. 학생이 HTML 시안을 claude.ai
-        // 페이지로 올려 「이게 실제 화면인가」를 되묻게 한 일이 있어, 프로젝트 지침만이
-        // 아니라 cwd 와 무관하게 모든 학생에게 실리는 이 규약에 둔다.
-        // 2026-09-28 겹침 가드 한 줄(이미 83줄로 넘어 있었다)과 KASA-share 결과물 폴더 한 줄로 84줄.
-        // 같은 날 학생 소환·완료 기다리기 명령 줄이 main 에 먼저 들어와 7.9 KiB — 바이트 한도를 8 KiB 로.
-        // 2026-10-06 1Password 비밀 읽기(폰 Face ID, docs/op-faceid-approval.md)를 비밀번호 줄에 붙여 8.6 KiB —
-        // 줄 수는 그대로 두고 바이트 한도만 9 KiB 로. 학생이 `op` 를 바로 부르면 맥에 Touch ID 창이 뜬다.
-        assert!(
-            protocol.lines().count() <= 84 && protocol.len() <= 9 * 1024,
-            "규약은 짧게 유지하고 API 상세는 연결된 문서에 둬야 한다"
-        );
-        // 캐릭터 정체성 문장에 규약이 이어붙으면 한 문단이 된다.
-        assert!(DEFAULT_COLLAB_PROTOCOL.starts_with("\n\n"));
-        assert!(protocol.starts_with("# "), "규약은 Markdown 제목으로 시작한다");
-        for command in [
-            "kasaterm-cli board --all",
-            "kasaterm-cli tell --address",
-            "kasaterm-cli done",
-        ] {
-            assert!(protocol.contains(command), "핵심 협업 흐름 누락: {command}");
-        }
-        for rule in ["Claude 아티팩트", "Rust+wgpu/winit", "Flutter 실제 위젯", "웹 제품"] {
-            assert!(protocol.contains(rule), "카사텀 화면 규칙 누락: {rule}");
-        }
-    }
-
-    /// 규칙이 파일에만 있고 학생 프롬프트에 안 붙으면 아무도 모른다. claude
-    /// (`--append-system-prompt`)·codex(`CODEX_HOME/AGENTS.md`)·런처가 전부
-    /// `persona_for` 한 곳에서 받으므로 여기서 규약이 뒤에 붙는지만 본다.
-    /// 규약 본문을 직접 비교하지 않는 것은 옆 테스트가 규약 경로 env 를 잠깐
-    /// 바꾸기 때문이다 — 두 번 읽으면 서로 다른 파일을 볼 수 있다.
-    #[test]
-    fn protocol_only_is_the_protocol_without_a_leading_gap() {
-        let got = protocol_only();
-        assert!(got.starts_with("# "), "말투를 꺼도 규약은 제목부터 실린다: {got:.40}");
-    }
-
-    /// 말투 게이트가 있는 자리는 꺼짐 갈래에서 규약을 실어야 한다 — 한 곳이라도 빈 값을
-    /// 내리면 그 경로로 뜬 학생만 보드·보고 안내 없이 뜨고, 화면에서는 티가 안 난다.
-    #[test]
-    fn every_persona_gate_keeps_the_protocol_when_the_voice_is_off() {
-        for (name, source, gates) in [
-            ("session.rs", include_str!("../../../app/kasaterm/src/session.rs"), 2),
-            ("transfer_endpoints.rs", include_str!("../../../app/kasaterm/src/transfer_endpoints.rs"), 1),
-            ("agent_identity.rs", include_str!("../../../app/kasaterm/src/agent_identity.rs"), 1),
-            ("main.rs 학생 런처", include_str!("../../../app/kasaterm/src/main.rs"), 1),
-            ("http.rs 재주입", include_str!("http.rs"), 1),
-        ] {
-            let found = source.matches("character::protocol_only()").count();
-            assert!(found >= gates, "{name}: 말투 꺼짐 갈래 {gates}곳 중 {found}곳만 규약을 싣는다");
-        }
-    }
-
-    #[test]
-    fn persona_carries_the_protocol_after_identity() {
+    fn persona_is_the_identity_alone() {
         let chars = serde_json::json!({
             "members": [{ "name": "치나츠", "persona": "너는 치나츠." }]
         });
-        let got = persona_for(&chars, "치나츠").expect("persona");
-        assert!(got.starts_with("너는 치나츠.\n\n# "), "정체성 뒤 빈 줄 두 칸과 규약 제목: {got:.40}");
+        assert_eq!(persona_for(&chars, "치나츠").as_deref(), Some("너는 치나츠."));
     }
 
-    /// 파일에서 읽은 규약도 코드 기본값과 **같은 모양**이어야 한다 — 앞의 빈 줄
-    /// 두 칸까지. 한쪽만 벌어지면 사용자가 파일을 놓는 순간 규약이 앞 문장에
-    /// 달라붙는데, 그건 학생 프롬프트 안에서만 일어나 눈에 안 띈다.
+    /// 덧붙임은 말투·정체성만 싣는다(2026-10-07 사용자 결정). 내장 명단에 일하는 방식
+    /// 문장이 다시 들어오면 그 학생만 다르게 일하는데, 프롬프트는 화면에 안 보여 아무도
+    /// 모른다 — 여기서 먼저 걸린다.
     #[test]
-    fn file_backed_protocol_keeps_the_same_leading_gap() {
-        let dir = std::env::temp_dir().join(format!("kasa-proto-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("collab-protocol.md"), "# 협업 테스트\n\n본문\n").unwrap();
-        // SAFETY: 이 테스트만 이 변수를 읽는다(같은 프로세스의 다른 테스트는 규약
-        // 파일 경로를 안 본다).
-        unsafe { std::env::set_var("KASATERM_COLLAB_HOOKS_DIR", &dir) };
-        let got = collab_protocol();
-        unsafe { std::env::remove_var("KASATERM_COLLAB_HOOKS_DIR") };
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // 테마·홈 override 가 실재하면 그쪽이 먼저 이긴다 — 그때는 이 단언을 건너뛴다.
-        if got.contains("# 협업 테스트") {
-            assert!(got.starts_with("\n\n# "), "앞 빈 줄 두 칸이 유지돼야 한다");
+    fn bundled_personas_carry_no_work_instructions() {
+        let chars: Value = serde_json::from_str(include_str!(
+            "../../../app/kasaterm/collab-hooks/characters.json"
+        ))
+        .unwrap();
+        for m in entries_of(&chars) {
+            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let persona = m.get("persona").and_then(|v| v.as_str()).unwrap_or("");
+            for word in ["커밋", "보고는", "kasaterm-cli", "오케스트레이터", "pane", "검증"] {
+                assert!(!persona.contains(word), "{name} 페르소나에 작업 지시({word}): {persona}");
+            }
         }
-    }
-
-    /// 저장 자리가 읽기 최우선 슬롯과 어긋나면, 고친 규약이 조용히 안 실린다
-    /// (`user_characters_path` 가 같은 이유로 같은 모양이다).
-    #[test]
-    fn save_path_matches_the_first_read_candidate() {
-        let Some(save) = user_collab_protocol_path() else {
-            return; // HOME 없음 — CI 컨테이너
-        };
-        assert_eq!(Some(&save), protocol_candidate_paths().first());
     }
 
     /// 원본 뷰의 왕복 — 여기가 깨지면 사용자가 YAML 로 한 번 보기만 해도 학생

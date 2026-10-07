@@ -234,8 +234,8 @@ fn memory_instruction_files(root: Option<&std::path::Path>, vault: Option<&std::
         }
     };
     // A project's .memory often points to the entire vault, not project-only notes.
-    if let Some(vault) = vault { add("메모리 핸드오프", vault.join("MEMORY.md")); }
-    if let Some(root) = root { add("메모리 핸드오프 · 프로젝트", root.join(".memory/MEMORY.md")); }
+    if let Some(vault) = vault { add("메모리 인덱스", vault.join("MEMORY.md")); }
+    if let Some(root) = root { add("메모리 인덱스 · 프로젝트", root.join(".memory/MEMORY.md")); }
     if let (Some(name), Some(vault)) = (root.and_then(|p| p.file_name()).and_then(|p| p.to_str()), vault) {
         add("프로젝트 메모리", vault.join(name).join(format!("{name}.md")));
     }
@@ -258,7 +258,7 @@ mod quick_instruction_tests {
         std::os::unix::fs::symlink(&vault, project.join(".memory")).unwrap();
         let rows = memory_instruction_files(Some(&project), Some(&vault));
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "메모리 핸드오프");
+        assert_eq!(rows[0].0, "메모리 인덱스");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3127,9 +3127,6 @@ impl App {
             for (label, path, icon) in instruction_pair("프로젝트 지침", root.join("CLAUDE.md"), root.join("AGENTS.md")) {
                 add(label, path, icon);
             }
-        }
-        if let Some(path) = kasa_mcp::character::collab_protocol_source_path() {
-            add("카사텀 협업 지침".into(), path, "braces");
         }
         for (label, path, icon) in memory_instruction_files(self.file_tree.root.as_deref(), memory_vault_dir().as_deref()) {
             add(label, path, icon);

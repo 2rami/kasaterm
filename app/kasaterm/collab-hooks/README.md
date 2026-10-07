@@ -19,7 +19,7 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 
 ## 협업 흐름
 
-사용자가 정한 범위에서 [협업 지침](collab-protocol.md)을 따른다. 지침은 학생 정체성(말투) 뒤에 붙어 실리고, 설정의 「말투」를 꺼도 정체성만 빠지고 지침은 그대로 실린다(`character::protocol_only`). `board --all`로 최신 주소를 확인하고, 필요한 대상만 `activity --address`로 읽고, `tell 이름@기계 "본문"`(또는 `tell --address`)으로 전달한다 — 다른 기기의 학생도 같은 한 줄이다. 변경 추적은 `board-watch --all --json`, 전송 확인은 `tell-status`, 본인 완료 보고는 `done`을 사용한다.
+사용자가 정한 범위에서 [협업 지침](../../../skills/kasapane/collab.md)을 따른다. 학생 프롬프트에는 정체성(말투)만 실리고 지침은 kasapane 스킬로 필요할 때 읽는다(2026-10-07). 완료 보고 안내는 summon·`tell --title` 이 브리프 끝에 붙인다. `board --all`로 최신 주소를 확인하고, 필요한 대상만 `activity --address`로 읽고, `tell 이름@기계 "본문"`(또는 `tell --address`)으로 전달한다 — 다른 기기의 학생도 같은 한 줄이다. 변경 추적은 `board-watch --all --json`, 전송 확인은 `tell-status`, 본인 완료 보고는 `done`을 사용한다.
 
 세부 형식과 지원 범위는 [조회 계약](../../../docs/board-collaboration.md)과 [전달 계약](../../../docs/tell-protocol.md)에 있다. 나쵸네코가 띄운 학생의 완료·막힘 보고(`nacho-report`)는 [나쵸 오케스트레이터 계약](../../../docs/nacho-orchestrator.md)이다. 접수·입력 전달은 모델이 읽었다는 보장이 아니며, 새 API 미지원 시 구형 전송으로 우회하지 않는다.
 
@@ -29,7 +29,7 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 
 | 파일 | 용도 |
 |---|---|
-| `kasaterm-collab-hint.sh` | 수동 등록 환경을 위한 SessionStart 안내. 기본 주입은 `collab-protocol.md` 사용 |
+| `kasaterm-collab-hint.sh` | 수동 등록 환경을 위한 SessionStart 안내. 협업 규약은 kasapane 스킬 `collab.md` |
 
 ## 설계 불변식
 

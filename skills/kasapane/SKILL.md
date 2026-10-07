@@ -1,6 +1,6 @@
 ---
 name: kasapane
-description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board·tell·peek — 다른 기기의 학생까지 한 줄로), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
+description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board·tell·summon·done — 다른 기기의 학생까지 한 줄로, 학생 협업 규약은 collab.md), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "학생 불러", "일 맡겨", "끝나면 보고", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
 version: 0.4.0
 user-invocable: true
 argument-hint: "[pane 작업 또는 검증할 UI 항목]"
@@ -15,6 +15,13 @@ argument-hint: "[pane 작업 또는 검증할 UI 항목]"
 3. **kasaterm 자체검증** — UI 코드를 고친 뒤 너 자신이 빌드→스폰→스크린샷→확인을 돌려 진짜 동작하는지 본다 (사용자에게 "테스트해보세요" 떠넘기지 않음).
 
 raw tmux(예: debi-marlene 배포)는 [tmux-pane-job 스킬]로. 이 스킬은 kasaterm을 전제로 한다.
+
+## 캐릭터 협업 규약 — [collab.md](collab.md)
+
+다른 학생과 일할 때(보드 보기·tell·summon·done 보고·선생님께 알리기) 먼저 읽는다. 학생 프롬프트
+뒤에 덧붙던 규약을 이 파일로 옮겼다(2026-10-07) — 프롬프트에는 이제 말투만 실린다. 빠지면 협업이
+깨지는 몫은 문장 대신 장치가 맡는다: 완료 보고 안내는 summon·`tell --title` 이 브리프 끝에 붙이고,
+셸·닫힌 창 전달은 서버가, 서브에이전트 위임과 파일 겹침은 훅이 막는다.
 
 ## 전제: kasaterm 셸 안에서만 동작 (1·2번에 한함)
 

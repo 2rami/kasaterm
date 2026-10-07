@@ -818,8 +818,16 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
     }
 }
 
-/// 학생 소환 브리프 끝에 붙이는 한 줄 — 완료 보고가 없으면 `wait` 가 끝나지 않는다.
-const SUMMON_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '한 줄 요약'`(못 끝냈으면 failed)으로 보고해 주세요.";
+/// 새 일을 건네는 브리프(summon·`tell --title`) 끝에 붙이는 한 줄 — 완료 보고가 없으면 `wait` 가
+/// 끝나지 않고 부른 창도 모른다. 학생 프롬프트에 협업 규약을 덧붙이던 것을 걷은 뒤(2026-10-07)로는
+/// 학생이 done 을 아는 길이 이것뿐이라, 일을 건넬 때마다 싣는다.
+const BRIEF_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed, 막히거나 승인이 필요하면 blocked·needs_approval)으로 한 번 보고해 주세요.";
+
+/// 브리프가 이미 done 을 말하면(나쵸 브리프처럼) 그대로 둔다 — 두 벌이면 어느 쪽 형식인지 헷갈린다.
+fn with_done_hint(brief: &str) -> String {
+    let body = brief.trim();
+    if body.contains("kasaterm-cli done") { body.to_string() } else { format!("{body}\n\n{BRIEF_DONE_HINT}") }
+}
 /// 부팅한 claude 가 보드에 설 때까지 기다리는 상한.
 const SUMMON_BOOT_SECS: u64 = 90;
 
@@ -900,11 +908,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             params: json!({ "surface_id": surface, "title": title }) });
     }
 
-    let mut body = brief.trim().to_string();
-    if !body.contains("kasaterm-cli done") {
-        body.push_str("\n\n");
-        body.push_str(SUMMON_DONE_HINT);
-    }
+    let body = with_done_hint(&brief);
     let title = name.clone().or_else(|| brief_title(&brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
         .filter(|t| !t.is_empty());
     let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
@@ -1041,11 +1045,7 @@ fn run_summon_remote(socket_path: &str, spot: RemoteSpot, name: Option<String>, 
         let _ = roundtrip(socket_path, &act(json!("summon"), "rename", json!({ "address": placed, "title": title })));
     }
 
-    let mut body = brief.trim().to_string();
-    if !body.contains("kasaterm-cli done") {
-        body.push_str("\n\n");
-        body.push_str(SUMMON_DONE_HINT);
-    }
+    let body = with_done_hint(brief);
     let title = name.clone().or_else(|| brief_title(brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
         .filter(|t| !t.is_empty());
     let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
@@ -2631,6 +2631,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // `⟦이름⟧` 을 collab.tell 로 옮기며 빠뜨려, 남이 보낸 tell 이 사용자 발신처럼
             // 무테마로 떴다(2026-09-17 지적 「tell 로 보내면 학생 프사 나오면서 그거 왜 안 되지」).
             // 사람이 직접 친 cli 는 env 가 없어 마커 없이(사용자 발신=무색) 나간다.
+            // 제목이 붙은 tell 은 새 일이다 — 답장·알림과 갈리는 표지가 그것뿐이라 거기에만 붙인다.
+            let body = if params.get("title").is_some() { with_done_hint(&body) } else { body };
             let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
             params["body"] = json!(crate::tell::normalize(&body)?);
             crate::tell::valid_id(params["message_id"].as_str().unwrap())?;
@@ -4739,7 +4741,12 @@ mod tests {
         assert!(err.to_string().contains("본문 뒤"), "{err}");
         let ok = super::build_request("tell", &v(&["%1", "--title", "보드 걷기", "본문", "한 줄"])).unwrap();
         assert_eq!(ok.params["title"], "보드 걷기");
-        assert!(ok.params["body"].as_str().unwrap().ends_with("본문 한 줄"));
+        let body = ok.params["body"].as_str().unwrap();
+        assert!(body.contains("본문 한 줄\n\n") && body.ends_with(super::BRIEF_DONE_HINT), "새 일에는 done 안내가 붙는다: {body}");
+        let reply = super::build_request("tell", &v(&["%1", "답장", "한 줄"])).unwrap();
+        assert!(reply.params["body"].as_str().unwrap().ends_with("답장 한 줄"), "제목 없는 답장엔 안 붙는다");
+        let told = super::build_request("tell", &v(&["%1", "--title", "일", "끝나면 kasaterm-cli done 으로"])).unwrap();
+        assert_eq!(told.params["body"].as_str().unwrap().matches("kasaterm-cli done").count(), 1, "이미 말한 브리프엔 겹쳐 붙이지 않는다");
         let dashed = super::build_request("tell", &v(&["%1", "--", "--로 시작하는 본문"])).unwrap();
         assert!(dashed.params["body"].as_str().unwrap().ends_with("--로 시작하는 본문"));
         assert!(super::build_request("tell", &v(&["%1", "옵션 --title 이야기"])).is_ok(), "한 덩어리 본문 속 낱말은 옵션이 아니다");

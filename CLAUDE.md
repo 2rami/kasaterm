@@ -62,8 +62,8 @@ transcript 저장이 꺼진다.
 
 **시안도 실제 화면으로 만든다.** 카사텀 PC·모바일 화면을 HTML 페이지나 Claude 아티팩트로 설계하지
 마라 — PC 는 Rust+wgpu/winit, 모바일은 Flutter 위젯을 격리 실행해 스크린샷으로 보인다. 이미 있는
-별도 웹 제품은 이 규칙을 이유로 지우지 않는다. 학생 전원에게 실리는 정본은
-`app/kasaterm/collab-hooks/collab-protocol.md` 의 「카사텀 화면 만들기」다.
+별도 웹 제품은 이 규칙을 이유로 지우지 않는다. 학생 협업 규약 쪽 정본은
+`skills/kasapane/collab.md` 의 「카사텀 화면 만들기」다(학생 프롬프트엔 말투만 실리고 규약은 스킬로 읽는다).
 
 ## 코드 맵
 

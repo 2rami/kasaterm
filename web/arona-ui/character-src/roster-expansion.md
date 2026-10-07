@@ -19,7 +19,7 @@
 ### 페르소나 주입 경로 (5d032ac → a45d2eb 이후 현행)
 
 - per-prompt 훅(board-context.py)·`kasaterm-assign-character.py` 는 **폐기됨**. 현행은 kasaterm 백엔드가 pane 생성 시점에 env(`KASATERM_CHARACTER`/`KASATERM_SESSION_ID`/`KASATERM_PERSONA`)를 직접 심고, 그 pane 에서 `claude` 를 치면 shim 이 `--session-id`·`--append-system-prompt` 로 1회 주입(캐시).
-- persona 텍스트 = characters.json 의 `persona` + `COLLAB_PROTOCOL`(wake-watch 규약, character.rs 상수) 자동 부착 → **페르소나에 협업 규약을 다시 쓰지 말 것**.
+- persona 텍스트 = characters.json 의 `persona` 그대로 실린다 → **페르소나에는 정체성·호칭·말투만 쓰고 협업 규약·일하는 방식은 쓰지 말 것**(규약은 kasapane 스킬 `collab.md`).
 - 배정 = `pick_random`(전역 유사난수) + `assigned_global()`(전 방 character-* 마커 합산)으로 중복 회피. **members 풀이 4명뿐이라 5명째 학생부터 중복이 나는 것**이 이번 확장의 배경.
 - 마커: `/tmp/kasaterm-collab/<rslug>/character-<N>` → board 의 `row.character`.
 

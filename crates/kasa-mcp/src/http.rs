@@ -2328,8 +2328,7 @@ async fn persona_handler(
     let body = if sid.is_empty() {
         String::new()
     } else if !crate::character::persona_enabled() {
-        // 말투만 끈다 — 협업 규약은 포크에도 다시 싣는다.
-        crate::character::protocol_only()
+        String::new()
     } else {
         // 활성 명부에 없는 이름(다른 테마 팩에서 고른 학생)도 합집합으로 찾는다 —
         // 활성만 보면 그 학생의 resume 부팅에 빈 답이 가서 shim 이 spawn 때의 말투를

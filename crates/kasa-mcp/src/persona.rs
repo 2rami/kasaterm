@@ -31,24 +31,9 @@ pub fn slug_for(name: &str) -> Option<String> {
     None
 }
 
-/// 그 캐릭터의 정체성 문구. `character::persona_for` 와 달리 협업 규약을 붙이지
-/// 않는다 — 그건 일하는 pane 을 위한 규칙이고, 말상대에겐 「커밋은 네가 책임진다」
-/// 같은 조항이 오히려 거짓말을 시킨다.
+/// 그 캐릭터의 정체성 문구.
 pub fn identity_for(name: &str) -> Option<String> {
-    let chars = crate::character::characters_json()?;
-    let want = name.trim();
-    for key in ["leaders", "members"] {
-        for m in chars.get(key)?.as_array().into_iter().flatten() {
-            if m.get("name").and_then(|x| x.as_str()) == Some(want) {
-                return m
-                    .get("persona")
-                    .and_then(|x| x.as_str())
-                    .filter(|p| !p.is_empty())
-                    .map(|p| p.to_string());
-            }
-        }
-    }
-    None
+    crate::character::persona_for(&crate::character::characters_json()?, name.trim())
 }
 
 /// 패널에 세울 전신 그림. 도트 스프라이트가 아니라 위키 원본이라 세로로 긴
