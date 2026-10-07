@@ -1988,12 +1988,19 @@ impl Drop for PtySession {
         }
         match &self.io {
             SessionIo::Local { child, .. } => {
-                if let Ok(mut child) = child.lock() {
-                    let _ = child.kill();
-                    // 죽인 뒤 거둔다 — 안 거두면 닫은 pane 마다 좀비(<defunct>)가
-                    // 앱이 끝날 때까지 남는다(2026-09-22 실측). SIGKILL 이라 바로 돌아온다.
-                    let _ = child.wait();
-                }
+                // 죽이고 거두는 일은 뒤 스레드에서 한다. 칸 출력을 아무도 안 빼면(읽기 스레드가
+                // 죽은 칸) 끝나는 셸이 tty 를 닫으며 남은 출력이 빠지기를 커널에서 기다리는데,
+                // 그 기다림은 master 가 닫혀야 풀리고 master 는 이 drop 이 끝난 뒤에야 닫힌다.
+                // 여기서 wait 하면 영영 안 돌아와 메인 스레드가 묶였다(2026-10-07 「응답 없음」
+                // 두 번: close_pane → Drop → wait4). 안 거두면 좀비가 남으므로(2026-09-22)
+                // 거두기는 그대로 한다.
+                let child = Arc::clone(child);
+                let _ = std::thread::Builder::new().name("pty-reap".into()).spawn(move || {
+                    if let Ok(mut child) = child.lock() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                });
             }
             // External: 원격 세션은 detach 로 살아남는 것이 목적이다 — 정말 죽일
             // 때는 호출자가 제어 메시지(kill)를 원격에 보낸다. 전송 스레드는
@@ -7355,6 +7362,31 @@ mod external_session_tests {
         assert!(last.output.len() <= BLOCK_OUTPUT_CAP);
         assert!(last.output.starts_with('하'));
         assert!(last.output.ends_with('a'));
+    }
+
+    #[test]
+    fn dropping_a_pane_whose_output_nobody_reads_returns_at_once() {
+        let sess = PtySession::start(PtyOptions {
+            pane_id: format!("undrained-{}", std::process::id()),
+            shell: Some("/bin/sh".into()),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .unwrap();
+        // 읽기 스레드가 패닉으로 죽은 칸과 같은 자리 — 출력을 아무도 안 뺀다.
+        sess.stop_reader();
+        sess.send_bytes(b"echo x\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        sess.send_bytes(b"yes\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(sess);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(3))
+            .expect("Drop 이 끝나지 못하는 셸을 기다리며 부른 스레드를 붙들었다");
     }
 
     #[test]
