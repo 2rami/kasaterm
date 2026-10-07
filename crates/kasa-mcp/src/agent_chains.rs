@@ -25,6 +25,9 @@ const SEAL_SETTLE_MS: u64 = 2 * 60 * 1000;
 const OFFER_MIN_LEFT_MS: u64 = 30 * 60 * 1000;
 /// 갱신이 일시 실패하면 이만큼 쉬고 다시 — 매분 두드리면 429 로 더 막힌다.
 const RETRY_MS: u64 = 5 * 60 * 1000;
+/// 접근 토큰이 이만큼 안 남았는데 아직 갱신을 못 했으면 사람에게 알린다 — 관문은 3시간 앞서 갱신하므로
+/// 여기까지 왔다면 몇 번을 내리 실패했거나 관문이 멈춘 것이다.
+const ALERT_LEFT_MS: u64 = 60 * 60 * 1000;
 const MAX_CHAINS: usize = 16;
 const MAX_TOKEN: usize = 4096;
 const MAX_RESPONSE: usize = 1024 * 1024;
@@ -62,6 +65,9 @@ struct Chain {
     /// 서버가 갱신 토큰을 거부했다 — 어느 기기에서든 다시 로그인해야 이어진다.
     #[serde(default)]
     broken: bool,
+    /// 「곧 끊긴다」 알림을 이미 보냈다. 갱신에 성공하면 내린다.
+    #[serde(default)]
+    warned: bool,
 }
 
 impl Chain {
@@ -72,6 +78,15 @@ impl Chain {
             scopes: self.scopes.clone(),
             subscription_type: self.subscription_type.clone(),
             rate_limit_tier: self.rate_limit_tier.clone(),
+        }
+    }
+
+    fn label(&self) -> String {
+        let org = self.org.trim();
+        if org.is_empty() || org.to_lowercase().contains(&self.email.to_lowercase()) {
+            self.email.clone()
+        } else {
+            format!("{org}({})", self.email)
         }
     }
 
@@ -128,6 +143,18 @@ pub struct Held {
     pub state: String,
     #[serde(default)]
     pub access: Option<Access>,
+    /// 관문이 마지막으로 맡거나 갱신한 시각(ms). 첫 실제 갱신을 확인할 때 본다.
+    #[serde(default)]
+    pub updated: u64,
+}
+
+/// 관문이 사람에게 알릴 일 — 그 관문 계정의 폰으로 간다(`gateway_agent_chains.rs`).
+pub(crate) struct Notice {
+    pub account: String,
+    /// 사슬 열쇠 — 같은 사슬의 알림은 폰에서 한 자리를 갈아 끼운다.
+    pub key: String,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -334,6 +361,7 @@ impl Service {
             updated: now,
             retry_at: 0,
             broken: false,
+            warned: false,
         };
         let access = chain.access();
         book.insert(key.clone(), chain);
@@ -354,14 +382,16 @@ impl Service {
                 org: chain.org.clone(),
                 state: if chain.broken { "reconnect_required" } else { "ok" }.into(),
                 access: (!chain.broken).then(|| chain.access()),
+                updated: chain.updated,
             })
             .collect();
         Ok(json!({"ok":true,"chains":chains}))
     }
 
-    /// 만료가 다가온 사슬을 갱신한다. 갱신한 수를 돌려준다.
-    pub async fn refresh_due(&self) -> usize {
+    /// 만료가 다가온 사슬을 갱신한다. 갱신한 수와, 사람에게 알릴 일을 돌려준다.
+    pub(crate) async fn refresh_due(&self) -> (usize, Vec<Notice>) {
         let mut refreshed = 0;
+        let mut notices = Vec::new();
         for account in self.vault.accounts() {
             let _guard = self.books.lock().await;
             let Ok(mut book) = self.load(&account) else { continue };
@@ -385,10 +415,28 @@ impl Service {
                         chain.refresh_token.clear();
                         chain.updated = now;
                         self.record(&account, "", "refresh", &key, "reconnect_required");
+                        notices.push(Notice {
+                            account: account.clone(),
+                            key: key.clone(),
+                            title: "Claude 로그인이 끊겼어요".into(),
+                            body: format!("{} — 아무 기기에서 한 번 다시 로그인하면 모든 기기가 이어져요", chain.label()),
+                        });
                     }
                     Err(error) => {
-                        book.get_mut(&key).expect("key came from the book").retry_at = now + RETRY_MS;
+                        let chain = book.get_mut(&key).expect("key came from the book");
+                        chain.retry_at = now + RETRY_MS;
                         eprintln!("[agent-chains] 갱신 일시 실패({}) — {}분 뒤 다시", error.code(), RETRY_MS / 60_000);
+                        if !chain.warned && chain.expires_at < now + ALERT_LEFT_MS {
+                            chain.warned = true;
+                            self.record(&account, "", "refresh", &key, "stalled");
+                            notices.push(Notice {
+                                account: account.clone(),
+                                key: key.clone(),
+                                title: "Claude 로그인 갱신이 막혔어요".into(),
+                                body: format!("{} — {}분 안에 갱신 못 하면 모든 기기에서 끊겨요",
+                                    chain.label(), chain.expires_at.saturating_sub(now) / 60_000),
+                            });
+                        }
                     }
                 }
             }
@@ -396,7 +444,7 @@ impl Service {
                 eprintln!("[agent-chains] 갱신 결과 저장 실패 — 다음 갱신은 옛 토큰으로 나간다");
             }
         }
-        refreshed
+        (refreshed, notices)
     }
 
     async fn refresh(&self, chain: &Chain, now: u64) -> Result<Chain, Error> {
@@ -440,18 +488,9 @@ impl Service {
         }
         next.updated = now;
         next.retry_at = 0;
+        next.warned = false;
         Ok(next)
     }
-}
-
-/// 관문 프로세스가 도는 동안 1분마다 갱신을 본다.
-pub(crate) fn spawn_refresher(service: Arc<Service>) {
-    tokio::spawn(async move {
-        loop {
-            service.refresh_due().await;
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
-    });
 }
 
 // ── 기기 쪽 ─────────────────────────────────────────────────────────────────────
@@ -768,14 +807,14 @@ impl<'a> Gateway<'a> {
 }
 
 /// 한 주기: 갱신 토큰이 있는 슬롯은 맡기고, 관문이 쥔 계정의 슬롯은 접근 토큰을 받아 채운다.
-/// 이번에 새로 안 슬롯 → 사슬 열쇠를 돌려준다.
+/// 이번에 새로 안 슬롯 → 사슬 열쇠와, 관문이 보여 준 사슬 목록을 돌려준다.
 pub(crate) async fn sync_once(
     gateway: &Gateway<'_>,
     slots: &[Slot],
     map: &BTreeMap<String, String>,
     stores: &dyn Stores,
     authorized: &(dyn Fn() -> bool + Sync),
-) -> Result<BTreeMap<String, String>, SyncError> {
+) -> Result<(BTreeMap<String, String>, Vec<Held>), SyncError> {
     let mut learned = BTreeMap::new();
     let now = now_ms();
     // 같은 사슬이 두 자리에 있으면 한 번만 맡긴다(갱신 토큰 → 결과).
@@ -848,7 +887,80 @@ pub(crate) async fn sync_once(
             }
         }
     }
-    Ok(learned)
+    Ok((learned, chains))
+}
+
+/// 데스크톱이 사람에게 알릴 일.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alert {
+    pub title: String,
+    pub body: String,
+}
+
+/// 관문에서 받아 쓰는 슬롯이 곧 끊기거나 끊겼는지. 관문이 멈추면 관문은 알리지 못하므로 기기가 본다.
+/// (같은 계정 열쇠, 알림)을 돌려준다 — 같은 계정 슬롯이 둘이어도 한 번만 알린다.
+pub(crate) fn device_alerts(
+    slots: &[Slot],
+    map: &BTreeMap<String, String>,
+    stores: &dyn Stores,
+    chains: Option<&[Held]>,
+    now: u64,
+) -> BTreeMap<String, Alert> {
+    let mut out = BTreeMap::new();
+    for slot in slots {
+        let Some(key) = map.get(&slot.id) else { continue };
+        let Read::Present(doc) = stores.read(slot) else { continue };
+        if text(&doc, "refreshToken").is_some() || text(&doc, "accessToken").is_none() {
+            continue;
+        }
+        let label = key.strip_prefix("claude:").unwrap_or(key);
+        let chain = chains.and_then(|c| c.iter().find(|c| &c.key == key));
+        if chain.is_some_and(|c| c.state == "reconnect_required") {
+            out.insert(format!("broken|{key}"), Alert {
+                title: "Claude 로그인이 끊겼어요".into(),
+                body: format!("{label} — 아무 기기에서 한 번 다시 로그인하면 모든 기기가 이어져요"),
+            });
+            continue;
+        }
+        let left = expires(&doc);
+        if left >= now + ALERT_LEFT_MS {
+            continue;
+        }
+        let why = if chains.is_none() { "관문에 닿지 않아" } else { "관문이 갱신하지 못해" };
+        let body = if left > now {
+            format!("{label} — {why} {}분 뒤 이 기기에서 끊겨요", (left - now) / 60_000)
+        } else {
+            format!("{label} — {why} 이 기기에서 끊겼어요")
+        };
+        out.insert(format!("stalled|{key}"), Alert { title: "Claude 로그인 갱신이 막혔어요".into(), body });
+    }
+    out
+}
+
+/// 새로 생긴 알림만 쌓는다. 풀린 것은 잊어 다음에 다시 생기면 또 알린다.
+fn raise(current: BTreeMap<String, Alert>) {
+    static RAISED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut raised) = RAISED.lock() else { return };
+    let fresh: Vec<Alert> = current.iter().filter(|(k, _)| !raised.contains(k)).map(|(_, a)| a.clone()).collect();
+    *raised = current.into_keys().collect();
+    if !fresh.is_empty() {
+        for alert in &fresh {
+            eprintln!("[agent-chains] 알림: {} — {}", alert.title, alert.body);
+        }
+        if let Ok(mut pending) = pending().lock() {
+            pending.extend(fresh);
+        }
+    }
+}
+
+fn pending() -> &'static std::sync::Mutex<Vec<Alert>> {
+    static PENDING: std::sync::Mutex<Vec<Alert>> = std::sync::Mutex::new(Vec::new());
+    &PENDING
+}
+
+/// 아직 사람에게 안 보인 알림 — 앱이 데스크톱 알림·토스트로 띄운다.
+pub fn take_alerts() -> Vec<Alert> {
+    pending().lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
 }
 
 /// 이 기기 슬롯으로 한 주기를 돌고, 새로 안 자리를 적는다. 적기 전에 파일을 다시 읽는다 — 그 사이
@@ -856,13 +968,29 @@ pub(crate) async fn sync_once(
 async fn sync_local(gateway: &Gateway<'_>, authorized: &(dyn Fn() -> bool + Sync)) -> Result<(), SyncError> {
     let Some((path, settings)) = load_settings() else { return Ok(()) };
     let slots = local_slots(path.parent(), &settings);
-    let learned = sync_once(gateway, &slots, &load_map(), &Local, authorized).await?;
-    if !learned.is_empty() {
-        let mut map = load_map();
-        map.extend(learned);
-        save_map(&map);
+    let mut map = load_map();
+    let (outcome, chains) = match sync_once(gateway, &slots, &map, &Local, authorized).await {
+        Ok((learned, chains)) => {
+            if !learned.is_empty() {
+                map = load_map();
+                map.extend(learned);
+                save_map(&map);
+            }
+            (Ok(()), Some(chains))
+        }
+        Err(error) => (Err(error), None),
+    };
+    raise(device_alerts(&slots, &map, &Local, chains.as_deref(), now_ms()));
+    outcome
+}
+
+/// 관문 로그인이 없을 때도 관문 토큰으로 도는 슬롯은 끊기기 전에 알린다.
+fn alert_offline() {
+    let Some((path, settings)) = load_settings() else { return };
+    let map = load_map();
+    if !map.is_empty() {
+        raise(device_alerts(&local_slots(path.parent(), &settings), &map, &Local, None, now_ms()));
     }
-    Ok(())
 }
 
 fn display(id: &str) -> &str {
@@ -895,6 +1023,8 @@ pub fn spawn() {
                     }
                     Err(_) => {}
                 }
+            } else {
+                alert_offline();
             }
             for _ in 0..60 {
                 std::thread::sleep(Duration::from_secs(5));

@@ -4015,6 +4015,8 @@ enum UserEvent {
         label: String,
     },
     ClaudeQuotaWarning(quota_alerts::QuotaAlert),
+    /// 관문 사슬로 도는 Claude 로그인이 곧 끊기거나 끊겼다(`kasa_mcp::agent_chains`). (제목, 본문)
+    AgentChainAlert(String, String),
     /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
     /// 마크다운 풀 뷰어. `SocketOpenPreview`(현재 창 split)와 달리 별도 탭의
     /// 단독 pane 으로 띄워 기존 작업 워크스페이스를 안 건드린다. 페이로드 = 경로.

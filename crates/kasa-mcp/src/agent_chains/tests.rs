@@ -136,13 +136,17 @@ async fn the_gateway_refreshes_ahead_of_expiry_and_marks_refused_chains() {
     service.seal("one", "d", offer("access-personal-1", "refresh-1", 2 * HOUR)).await.unwrap();
     service.seal("one", "d", offer("access-team-1", "refresh-dead", 2 * HOUR)).await.unwrap();
     // Fresh seals settle first: the sealing device's claude may still hold the refresh token for a moment.
-    assert_eq!(service.refresh_due().await, 0);
+    assert_eq!(service.refresh_due().await.0, 0);
     assert!(seen_calls(&calls, "token").is_empty());
 
     let mut book = service.load("one").unwrap();
     book.values_mut().for_each(|c| c.sealed_at = 0);
     service.save("one", &book).unwrap();
-    assert_eq!(service.refresh_due().await, 1);
+    let (refreshed, notices) = service.refresh_due().await;
+    assert_eq!(refreshed, 1);
+    assert_eq!(notices.len(), 1, "a refused chain must reach the account's phones");
+    assert_eq!((notices[0].account.as_str(), notices[0].key.as_str()), ("one", "claude:fixture team"));
+    assert!(notices[0].body.contains("Fixture Team") && !notices[0].body.contains("refresh"));
     let bodies = seen_calls(&calls, "token");
     assert_eq!(bodies.len(), 2);
     let sent: Value = serde_json::from_str(&bodies[0]).unwrap();
@@ -163,7 +167,7 @@ async fn the_gateway_refreshes_ahead_of_expiry_and_marks_refused_chains() {
     assert_eq!(states, vec![("reconnect_required", true), ("ok", false)]);
 
     // Not due again for hours; a broken chain is never retried.
-    assert_eq!(service.refresh_due().await, 0);
+    assert_eq!(service.refresh_due().await.0, 0);
     assert_eq!(seen_calls(&calls, "token").len(), 2);
 
     // Signing in again anywhere replaces the broken chain.
@@ -179,8 +183,8 @@ async fn a_throttled_refresh_backs_off_and_keeps_the_chain() {
     let mut book = service.load("one").unwrap();
     book.values_mut().for_each(|c| c.sealed_at = 0);
     service.save("one", &book).unwrap();
-    assert_eq!(service.refresh_due().await, 0);
-    assert_eq!(service.refresh_due().await, 0);
+    assert_eq!(service.refresh_due().await.0, 0);
+    assert_eq!(service.refresh_due().await.0, 0);
     assert_eq!(seen_calls(&calls, "token").len(), 1, "a throttled chain was retried at once");
     let chain = &service.load("one").unwrap()["claude:fixture@example.invalid"];
     assert!(!chain.broken && chain.refresh_token == "refresh-busy" && chain.retry_at > now_ms());
@@ -257,4 +261,60 @@ pub(crate) fn age_chains(service: &Service, account: &str) {
 
 pub(crate) fn chain_refresh(service: &Service, account: &str, key: &str) -> String {
     service.load(account).unwrap()[key].refresh_token.clone()
+}
+
+#[tokio::test]
+async fn a_refresh_stuck_close_to_expiry_alerts_once() {
+    let (service, _, _) = service().await;
+    service.seal("one", "d", offer("access-personal-1", "refresh-busy", 2 * HOUR)).await.unwrap();
+    let mut book = service.load("one").unwrap();
+    book.values_mut().for_each(|c| {
+        c.sealed_at = 0;
+        c.expires_at = now_ms() + 40 * 60 * 1000;
+    });
+    service.save("one", &book).unwrap();
+    let (_, notices) = service.refresh_due().await;
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].title.contains("막혔어요"));
+    let mut book = service.load("one").unwrap();
+    book.values_mut().for_each(|c| c.retry_at = 0);
+    service.save("one", &book).unwrap();
+    assert!(service.refresh_due().await.1.is_empty(), "the same stall alerted twice");
+}
+
+struct Docs(std::sync::Mutex<HashMap<String, Value>>);
+
+impl Stores for Docs {
+    fn read(&self, slot: &Slot) -> Read {
+        self.0.lock().unwrap().get(&slot.id).cloned().map_or(Read::Absent, Read::Present)
+    }
+    fn write(&self, slot: &Slot, doc: &Value) -> bool {
+        self.0.lock().unwrap().insert(slot.id.clone(), doc.clone());
+        true
+    }
+    fn same(&self, _: &Slot) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_device_warns_when_gateway_tokens_run_out_even_with_the_gateway_down() {
+    let now = now_ms();
+    let docs = Docs(std::sync::Mutex::new(HashMap::from([
+        ("a".to_string(), slot_doc("g", None, 20 * 60 * 1000)),
+        ("b".to_string(), slot_doc("g", None, 20 * 60 * 1000)),
+        ("own".to_string(), slot_doc("mine", Some("r"), 10 * 60 * 1000)),
+        ("fresh".to_string(), slot_doc("g2", None, 5 * HOUR as i64)),
+        ("team".to_string(), slot_doc("t", None, 5 * HOUR as i64)),
+    ])));
+    let slots: Vec<Slot> = ["a", "b", "own", "fresh", "team", "unmapped"].iter()
+        .map(|id| Slot { id: id.to_string(), store: None, table_key: None }).collect();
+    let map: BTreeMap<String, String> = [("a", "claude:x@y"), ("b", "claude:x@y"), ("own", "claude:x@y"),
+        ("fresh", "claude:z@y"), ("team", "claude:team")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let down = device_alerts(&slots, &map, &docs, None, now);
+    assert_eq!(down.keys().collect::<Vec<_>>(), vec!["stalled|claude:x@y"], "one alert per account, none for healthy or own chains");
+    assert!(down["stalled|claude:x@y"].body.contains("관문에 닿지 않아"));
+    let chains = vec![Held { key: "claude:team".into(), state: "reconnect_required".into(), ..Default::default() }];
+    let up = device_alerts(&slots, &map, &docs, Some(&chains), now);
+    assert!(up.contains_key("broken|claude:team") && up["stalled|claude:x@y"].body.contains("갱신하지 못해"));
 }

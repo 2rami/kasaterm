@@ -12,12 +12,36 @@ pub(super) fn routes() -> Router<Gate> {
 }
 
 impl Gate {
-    /// 관문이 도는 동안 맡긴 사슬을 만료 전에 갱신한다.
+    /// 관문이 도는 동안 1분마다 맡긴 사슬을 만료 전에 갱신한다. 사슬이 끊기거나 갱신이 계속 막히면 그
+    /// 관문 계정의 폰으로 알린다 — 한 사슬이 막히면 그 계정을 쓰는 모든 기기가 함께 끊긴다.
     pub fn spawn_agent_chains(&self) {
-        if let Some(service) = &self.agent_chains {
-            crate::agent_chains::spawn_refresher(service.clone());
-        }
+        let Some(service) = self.agent_chains.clone() else { return };
+        let gate = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let (_, notices) = service.refresh_due().await;
+                for notice in notices {
+                    approvals::send_push(&gate, &notice.account, push_payload(&notice));
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
     }
+}
+
+fn push_payload(notice: &crate::agent_chains::Notice) -> serde_json::Value {
+    use sha2::Digest as _;
+    let collapse = format!("chain-{:x}", sha2::Sha256::digest(notice.key.as_bytes()));
+    serde_json::json!({
+        "collapse": &collapse[..22],
+        "aps": {
+            "alert": {"title": notice.title, "body": notice.body},
+            "sound": "default",
+            "thread-id": "agent-chains",
+            "interruption-level": "time-sensitive",
+        },
+        "kind": "agent_chain",
+    })
 }
 
 /// (관문 계정, 기기 id, 저장소). 폐기된 기기·막힌 계정은 401.

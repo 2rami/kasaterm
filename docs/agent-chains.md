@@ -109,6 +109,31 @@
 | 관문 프로세스 둘 | 봉인 저장소가 단일 쓰기 잠금(flock)이라 둘째는 이 기능이 꺼진 채 뜬다 |
 | 30일 절대 만료(미확인) | 끝나기 전 표시 → 한 기기에서 다시 로그인 → 규칙 3 |
 
+## 알림 — 사슬 하나가 막히면 그 계정을 쓰는 모든 기기가 함께 끊긴다
+
+- **관문 → 폰**: 갱신이 거부돼 사슬이 끊기면, 또는 일시 실패가 이어져 접근 토큰이 1시간 안 남았는데 아직
+  갱신을 못 했으면 그 관문 계정의 폰으로 푸시를 보낸다(원격 승인과 같은 APNs 길, `thread-id`
+  `agent-chains`, 사슬마다 한 자리). 「막혔어요」는 사슬마다 한 번, 갱신에 성공하면 다시 울릴 수 있다.
+- **기기 → 데스크톱 알림·토스트**: 관문이 멈추면 관문은 알리지 못한다. 그래서 각 기기도 관문에서 받아 쓰는
+  슬롯의 토큰이 1시간 안 남았거나 끝났으면(「관문에 닿지 않아」/「관문이 갱신하지 못해」), 또는 관문이 그
+  사슬을 「다시 로그인」으로 보이면 알린다. 계정마다 한 번, 풀리면 잊는다. 관문 로그인이 없을 때도 본다.
+- 관문은 3시간 앞서 갱신하므로 1시간 알림까지 2시간의 여유가 있다. 알림을 받으면: 관문이면
+  `tools/kasa-gateway-seoul/gateway.sh status`, 사슬이 끊겼으면 아무 기기에서 그 계정 한 번 다시 로그인.
+
+## 첫 실제 갱신 확인
+
+관문은 접근 토큰이 3시간 안 남은 사슬부터 갱신한다(맡긴 직후 2분은 쉰다). 맡긴 토큰이 몇 시간 남았느냐에
+따라 첫 갱신은 교체 뒤 0~5시간 사이에 일어난다.
+
+```sh
+ssh kasanet-relay 'sudo tail -n 20 /var/lib/kasa-relay/agent-chains/audit.jsonl'   # action=refresh result=ok
+ssh kasanet-relay 'sudo journalctl -u kasa-relay --since -6h -o cat | grep agent-chains'  # 실패만 찍힌다
+```
+
+`result` 가 `ok` 면 실제 토큰 창구가 관문 IP 에서 받았다는 뜻이다. `reconnect_required` 면 그 사슬이 거부됐고,
+`stalled` 면 일시 실패가 이어지는 중이다. 기기 쪽에서는 `GET /relay/agent-chains` 의 `updated` 가 맡긴 시각에서
+바뀐다. 감사 줄에는 토큰이 없다.
+
 ## 검증 (2026-10-07)
 
 - 관문·기기 시험 12개(`agent_chains/tests.rs`·`gateway_agent_chains/tests.rs`): 가짜 Anthropic 창구로

@@ -155,7 +155,7 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
     // The laptop signed in once; its slot hands the chain over and keeps only the access token.
     let laptop_slots = [slot("acct-1", Some(PERSONAL))];
     let laptop_store = Memory::with(&[("acct-1", logged_in("access-personal-1", "refresh-1"))]);
-    let learned = sync_once(&laptop, &laptop_slots, &BTreeMap::new(), &laptop_store, &allow).await.unwrap();
+    let (learned, _) = sync_once(&laptop, &laptop_slots, &BTreeMap::new(), &laptop_store, &allow).await.unwrap();
     assert_eq!(learned.get("acct-1").map(String::as_str), Some(PERSONAL));
     assert!(!laptop_store.holds_refresh(), "the laptop kept a refresh token after sealing");
     assert_eq!(laptop_store.oauth("acct-1")["accessToken"], "access-personal-1");
@@ -166,7 +166,7 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
     let husk = json!({"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"scopes":["user:inference"]}});
     let mini_slots = [slot("acct-6", Some(PERSONAL)), slot("acct-5", None), slot("acct-9", Some(PERSONAL))];
     let mini_store = Memory::with(&[("acct-6", husk), ("acct-5", logged_in("access-team-1", "refresh-t1"))]);
-    let learned = sync_once(&mini, &mini_slots, &BTreeMap::new(), &mini_store, &allow).await.unwrap();
+    let (learned, _) = sync_once(&mini, &mini_slots, &BTreeMap::new(), &mini_store, &allow).await.unwrap();
     assert_eq!(mini_store.oauth("acct-6")["accessToken"], "access-personal-1");
     assert_eq!(mini_store.oauth("acct-5")["accessToken"], "access-team-1");
     assert!(mini_store.oauth("acct-9").is_null());
@@ -182,7 +182,7 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
     }
     assert_eq!(book.len(), 2);
     crate::agent_chains::tests::age_chains(&service, "one");
-    assert_eq!(service.refresh_due().await, 2);
+    assert_eq!(service.refresh_due().await.0, 2);
     let mapped: BTreeMap<String, String> = [("acct-1".to_string(), PERSONAL.to_string())].into();
     sync_once(&laptop, &laptop_slots, &mapped, &laptop_store, &allow).await.unwrap();
     sync_once(&mini, &mini_slots, &[("acct-5".to_string(), TEAM.to_string())].into(), &mini_store, &allow).await.unwrap();
@@ -230,7 +230,7 @@ async fn a_slot_whose_chain_moved_on_is_not_overwritten_and_an_old_gateway_is_le
     let old = crate::agent_chains::Gateway::new(&format!("{base}/nowhere"), &token);
     let store = Memory::with(&[("acct-1", logged_in("access-personal-1", "refresh-1"))]);
     let unsupported = sync_once(&old, &slots, &BTreeMap::new(), &store, &|| true).await;
-    assert_eq!(unsupported.unwrap_err(), crate::agent_chains::SyncError::Unsupported);
+    assert_eq!(unsupported.err(), Some(crate::agent_chains::SyncError::Unsupported));
     assert_eq!(store.oauth("acct-1")["refreshToken"], "refresh-1");
     drop(client);
 }

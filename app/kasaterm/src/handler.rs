@@ -1896,6 +1896,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::AgentChainAlert(title, body) => {
+                self.set_toast(body.clone());
+                crate::chrome::notify_desktop(&title, &body, None, None, None);
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::BgAgentsChanged => {
                 // agents/attach 뷰 pane 재바인딩을 board 폴링에만 맡기지 않는다 — 웹뷰/
                 // CLI 가 board 를 안 부르는 세션에선 rebind 가 영영 안 돌아 pane 이 스폰
@@ -2403,6 +2410,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // 조회가 같은 판정을 쓰게 한다 — 도중에 닫히면 반쪽만 캐시를
                     // 건너뛰어, 같은 화면의 숫자가 서로 다른 시각의 것이 된다.
                     let menu_open = usage_menu_open().load(std::sync::atomic::Ordering::Relaxed);
+                    // 관문이 갱신을 못 해 곧 끊길 Claude 로그인 — 관문이 멈추면 관문은 못 알리니 기기가 띄운다.
+                    for alert in kasa_mcp::agent_chains::take_alerts() {
+                        let _ = usage_proxy.send_event(UserEvent::AgentChainAlert(alert.title, alert.body));
+                    }
                     // 코덱스 한도는 **코덱스에게 직접 묻는다** — 대화 기록에서
                     // 읽던 길이 2026-09-05 무렵 막혔다(그 뒤 세션에 한도 줄이
                     // 없다). app-server 를 띄우는 값이라 자주 부를 자리가 아니라,

@@ -842,13 +842,13 @@ fn account_phone_labels(gate: &Gate, account: &str) -> Vec<(String, String)> {
 
 /// 닫힘 알림은 결정한 폰에도 간다 — 소리 없이 그 폰 알림 센터의 「승인 요청」을 「처리됨」으로 바꿔 둔다.
 /// 닫힘도 우선순위 10 이다 — 5 는 몇 분씩 늦어(가상 아이폰 실측) 이미 닫힌 요청이 「승인 요청」으로 남는다.
-fn send_push(gate: &Gate, account: &str, payload: Value) {
+pub(super) fn send_push(gate: &Gate, account: &str, payload: Value) {
     let targets = gate.approvals.push_targets(&account_phones(gate, account));
     if targets.is_empty() {
         return;
     }
     let store = gate.approvals.clone();
-    let collapse = payload["approval"].as_str().unwrap_or("approval").to_string();
+    let collapse = payload["approval"].as_str().or(payload["collapse"].as_str()).unwrap_or("approval").to_string();
     tokio::spawn(async move {
         for t in targets {
             match crate::push::send_to(&t.env, &t.token, &payload, &collapse).await {
