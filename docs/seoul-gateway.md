@@ -89,6 +89,20 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 `oauth/start` 400, 설정 Google 연결의 동의 URL scope `openid email profile` 뿐(교체 전엔 `gmail.readonly`·`gmail.send` 가 함께),
 기기 whoami·GitHub 연결 정상, 맥미니·맥북 재접속.
 
+## Claude 사슬 관문 갱신 교체 기록 (2026-10-07)
+
+ee19de7b 관문으로 교체(15:05:52, sha256 f82c1c78…, Claude 로그인 사슬 맡기기·1분 갱신·끊김/막힘 폰 푸시 —
+[agent-chains.md](agent-chains.md)). env 변경 없음. 켜면서 상태 옆에 `agent-chains/`(봉인 저장소·`audit.jsonl`)가 생긴다.
+교체 전 백업 `/usr/local/bin/kasa-relay.bak-20261007b`(=472d2b9d, sha256 f69933a2…, 옆에 `.info`). 되돌리기는 그 파일을
+제자리로 놓고 `sudo systemctl restart kasa-relay`(옛 관문은 `agent-chains/` 를 안 읽는다. 맡긴 사슬이 있었다면 기기들은
+그 계정을 다시 로그인해야 한다).
+전후 같음: `/relay/health` 200, 무토큰 whoami·connections 401, 기기 whoami 200, 없는 계정 로그인 401, `providers` connect
+github 참·google 거짓, GitHub 연결 ok, 폰 `/u/<slug>/` 200, 맥미니·맥북 재접속(계정 2rami). 새 창구 `/relay/agent-chains` 는
+404 → 200(빈 목록), 무토큰 401. 서울 IP 에서 토큰 창구는 가짜 갱신 토큰에 400 `invalid_grant`(막힘 없음 — curl 기본
+UA 만 429, 관문은 `KASA-AgentChains/1`), 프로필 창구는 무토큰 401.
+첫 사슬은 새 앱 판(ee19de7b 이상)을 받은 기기가 맡기고, 첫 실제 갱신은 그 뒤 0~5시간 안이다 — 확인 방법은
+[agent-chains.md](agent-chains.md) 「첫 실제 갱신 확인」.
+
 ## 되돌리기
 
 1. Cloudflare DNS `kasaterm` 을 A → 터널 CNAME 으로: 레코드를 지우고 이 맥에서

@@ -142,8 +142,9 @@ ssh kasanet-relay 'sudo journalctl -u kasa-relay --since -6h -o cat | grep agent
   응답·봉인 파일·감사 기록에 토큰이 없는지도 본다.
 - 실제 키체인 쓰기: 실험 슬롯에 `security -i` 로 쓴 항목(갱신 토큰 칸 없음)을 claude 2.1.292 가 읽어
   `auth status` 로그인·`-p` 응답·커넥터 9개 정상. 실험 항목은 지웠다.
-- 미확인: 관문의 실제 갱신 POST(실제 사슬을 회전시켜야 해서 운영 관문 교체 뒤에 본다), 서버 IP 에서
-  토큰 창구가 막히는지, 30일 절대 만료.
+- 서울 관문 IP 에서 토큰 창구: 가짜 갱신 토큰에 400 `invalid_grant`(정상 처리, 막힘 없음). curl 기본 UA 는 429
+  라 관문은 자기 UA(`KASA-AgentChains/1`)로 부른다. 운영 관문 교체 2026-10-07 15:05([seoul-gateway.md](seoul-gateway.md)).
+- 미확인: 관문의 실제 갱신 POST(새 앱 판을 받은 기기가 사슬을 맡긴 뒤 0~5시간 안), 30일 절대 만료.
 
 ## 범위 밖
 
