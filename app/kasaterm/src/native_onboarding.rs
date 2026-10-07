@@ -499,7 +499,7 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    /// 설정 「터미널」의 글꼴 고르기가 같은 목록·같은 현재 값을 쓴다.
+    /// 설정 「외형」의 글꼴 고르기가 같은 목록·같은 현재 값을 쓴다.
     pub(crate) fn terminal_fonts(&self) -> (&[String], Option<&str>) {
         (&self.state.data.fonts, self.state.data.font_family.as_deref())
     }
@@ -542,9 +542,9 @@ impl App {
     }
 
     pub(crate) fn pump_native_onboarding(&mut self) {
-        // 터미널 글꼴 목록은 「외형」이 그린다(2026-10-06 외형 묶음). 플랫폼 칸은 「터미널」.
+        // 터미널 글꼴 목록은 「외형」이 그린다(2026-10-06 외형 묶음). 플랫폼 칸은 「앱 일반」의 셸 묶음.
         if !self.settings_scene.first_run()
-            && !matches!(self.settings_scene.category(), SettingsCat::Shell | SettingsCat::Appearance)
+            && !matches!(self.settings_scene.category(), SettingsCat::General | SettingsCat::Appearance)
         {
             return;
         }

@@ -4378,9 +4378,10 @@ impl SettingsCat {
     /// 캐릭터 페이지의 「테마 관리」로 연다. 웹 대조는 그대로 `ALL` 이다.
     /// 묶음(화면·에이전트·앱)과 그 안의 순서는 자주 여는 것이 위다 — 시스템 테마를
     /// 찾는 사람이 캐릭터 칸부터 지나야 했다(2026-10-07). 묶음 머리는 `native_settings::NAV_GROUPS`.
-    pub(crate) const NAV: [SettingsCat; 11] = [
+    /// `Shell` 은 글꼴·커서가 「외형」으로 간 뒤 셸 하나만 남아 「앱 일반」에 합쳤다(2026-10-07 승인) —
+    /// 값은 딥링크·웹 키로 남고, 열면 「앱 일반」이 선다(`SettingsScene::set_category`).
+    pub(crate) const NAV: [SettingsCat; 10] = [
         Self::Appearance,
-        Self::Shell,
         Self::Statusbar,
         Self::Weather,
         Self::Accounts,

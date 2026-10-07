@@ -2479,7 +2479,7 @@ struct NavigationLayout {
 }
 
 /// 옆 목록의 묶음 머리 — (`SettingsCat::NAV` 에서 그 묶음이 시작하는 자리, 이름).
-pub(crate) const NAV_GROUPS: [(usize, &str); 3] = [(0, "화면"), (4, "에이전트"), (7, "앱")];
+pub(crate) const NAV_GROUPS: [(usize, &str); 3] = [(0, "화면"), (3, "에이전트"), (6, "앱")];
 const NAV_GROUP_H: f32 = 24.0;
 
 fn nav_groups_before(index: usize) -> usize {
@@ -2629,7 +2629,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut y = body_top - snapshot.scroll;
 
     match snapshot.cat {
-        SettingsCat::General => paint_general(
+        SettingsCat::General | SettingsCat::Shell => paint_general(
             g,
             snapshot,
             &mut hits,
@@ -2653,15 +2653,6 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             g,
             snapshot,
             &mut hits,
-            content_x,
-            &mut y,
-            content_w,
-        ),
-        SettingsCat::Shell => paint_shell(
-            g,
-            snapshot,
-            &mut hits,
-            &mut caret_rect,
             content_x,
             &mut y,
             content_w,
@@ -2964,6 +2955,38 @@ fn paint_general(
         s.file_tree_default,
         SettingsAction::ToggleFileTree,
     );
+
+    // 「터미널」 페이지에 셸 하나만 남아 여기로 합쳤다(2026-10-07 승인). 새 칸이 어떤 셸로 뜨는지는
+    // 시작 폴더와 같은 「새로 열 때」 결정이다.
+    *y += 12.0;
+    section_title(g, x, *y, "셸", "");
+    *y += 54.0;
+    if cfg!(target_os = "windows") {
+        crate::native_onboarding::paint_platform(g, &s.onboarding, hits, caret, x, y, w);
+    } else {
+        seg_row(g, s, hits, x, y, w, "기본 셸", &[
+            ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+            ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
+            ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
+        ]);
+    }
+    let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
+    text_field(
+        g,
+        s,
+        hits,
+        caret,
+        x,
+        *y,
+        w,
+        "직접 경로",
+        if known { "" } else { &s.shell },
+        SettingsInput::Shell,
+        s.settings_caret,
+        false,
+    );
+    *y += ROW_H;
+    plain_hint(g, x, y, w, "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 칸에서 직접 붙여 주세요. 터미널 글꼴·글자 크기·커서는 「외형」에서 바꿔요.");
 
     *y += 12.0;
     section_title(
@@ -4058,7 +4081,7 @@ fn hsv_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     ]
 }
 
-/// 「터미널」 페이지의 커서 절. 목업 IA(셸+커서→터미널)대로 「모양」에서 여기로
+/// 「외형」 페이지의 커서 절. 목업 IA(셸+커서→터미널)대로 「모양」에서 여기로
 /// 옮겼다 — 커서는 색·글꼴이 아니라 pane 안 동작이라 셸 옆이 맞다.
 fn paint_cursor(
     g: &mut gpu::GpuRenderer,
@@ -4209,54 +4232,6 @@ fn paint_cursor(
     *y += 8.0;
 }
 
-fn paint_shell(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    if cfg!(target_os = "windows") {
-        crate::native_onboarding::paint_platform(g, &s.onboarding, hits, caret, x, y, w);
-    } else {
-        seg_row(g, s, hits, x, y, w, "기본 셸", &[
-            ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
-            ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
-            ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
-        ]);
-    }
-    plain_hint(g, x, y, w, "터미널 글꼴·글자 크기·커서는 「외형」에서 바꿔요.");
-    if !disclosure(g, s, hits, x, y, w, "terminal", "세부 터미널 · 셸 경로") {
-        return;
-    }
-    let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
-    text_field(
-        g,
-        s,
-        hits,
-        caret,
-        x,
-        *y,
-        w,
-        "직접 경로",
-        if known { "" } else { &s.shell },
-        SettingsInput::Shell,
-        s.settings_caret,
-        false,
-    );
-    *y += 64.0;
-    info_slab(
-        g,
-        x,
-        y,
-        w,
-        "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 칸에서 직접 붙여 주세요.",
-    );
-    *y += 16.0;
-}
-
 fn disclosure(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4292,12 +4267,30 @@ pub(crate) fn paint_setup_section(
             toggle_row(g, s, hits, x, y, w, "캐릭터 외형", theme::character_appearance(), SettingsAction::ToggleCharacterAppearance);
             toggle_row(g, s, hits, x, y, w, "캐릭터 페르소나", s.claude_persona, SettingsAction::ToggleClaudePersona);
             plain_hint(g, x, y, w, "외형은 그림과 장식에 즉시 적용됩니다. 페르소나는 새로 시작하는 에이전트의 말투에 적용됩니다.");
-            row_label(g, x, y, "캐릭터 테마");
-            let choices = s.themes.iter().map(|row| (
-                row.label.clone(), s.character_theme == row.id,
-                SettingsAction::SelectTheme(row.id.clone()),
-            )).collect();
-            chips_owned(g, s, hits, x, y, w, choices);
+            if s.first_run {
+                row_label(g, x, y, "캐릭터 테마");
+                let choices = s.themes.iter().map(|row| (
+                    row.label.clone(), s.character_theme == row.id,
+                    SettingsAction::SelectTheme(row.id.clone()),
+                )).collect();
+                chips_owned(g, s, hits, x, y, w, choices);
+            } else {
+                // 같은 고르기가 「캐릭터 테마」 페이지 카드로 또 있어 칩 줄을 걷었다(2026-10-07 승인).
+                // 지금 테마만 보이고 바꾸는 길은 「테마 관리」 하나다.
+                let current = s.themes.iter().find(|row| row.id == s.character_theme)
+                    .map_or("기본 캐릭터", |row| row.label.as_str());
+                let rect = flat_row(g, x, *y, w, "캐릭터 테마", current, w - 112.0);
+                button(
+                    g,
+                    s,
+                    hits,
+                    (rect.0 + rect.2 - 92.0 - crate::native_controls::CONTROL_PADDING_X, rect.1 + (ROW_H - CTL_H) / 2.0, 92.0, CTL_H),
+                    "테마 관리",
+                    Target::Category(SettingsCat::Theme),
+                    false,
+                );
+                *y += ROW_H;
+            }
         }
         1 => {
             row_label(g, x, y, "색상 테마");
@@ -8402,9 +8395,10 @@ mod navigation_layout_tests {
         let layout = navigation_layout((0.0, 36.0, 1000.0, 700.0), 200.0, 10);
         assert!(layout.groups);
         assert_eq!(layout.row_height, 32.0);
-        assert_eq!(navigation_row(&layout, 4, 0.0).1 - navigation_row(&layout, 3, 0.0).1, 60.0);
-        assert_eq!(navigation_row(&layout, 7, 0.0).1 - navigation_row(&layout, 6, 0.0).1, 60.0);
-        assert_eq!(navigation_row(&layout, 6, 0.0).1 - navigation_row(&layout, 5, 0.0).1, 36.0);
+        for (start, _) in super::NAV_GROUPS.iter().skip(1) {
+            assert_eq!(navigation_row(&layout, *start, 0.0).1 - navigation_row(&layout, start - 1, 0.0).1, 60.0);
+            assert_eq!(navigation_row(&layout, start + 1, 0.0).1 - navigation_row(&layout, *start, 0.0).1, 36.0);
+        }
     }
 
     #[test]

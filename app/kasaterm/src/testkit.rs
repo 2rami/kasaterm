@@ -1466,7 +1466,6 @@ impl App {
         let cats = [
             ("일반", SettingsCat::General),
             ("외형", SettingsCat::Appearance),
-            ("터미널", SettingsCat::Shell),
             ("에이전트", SettingsCat::Claude),
             ("계정", SettingsCat::Accounts),
             ("기계", SettingsCat::Machines),

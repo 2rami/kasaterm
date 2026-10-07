@@ -190,6 +190,8 @@ impl SettingsScene {
     }
 
     pub(crate) fn set_category(&mut self, category: SettingsCat) {
+        // 「터미널」 페이지는 「앱 일반」의 셸 묶음으로 합쳤다 — 옛 딥링크(`shell`)도 그리로 간다.
+        let category = if category == SettingsCat::Shell { SettingsCat::General } else { category };
         if self.category != category {
             self.category = category;
             self.scroll = 0.0;
