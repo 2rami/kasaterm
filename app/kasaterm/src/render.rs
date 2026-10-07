@@ -9692,13 +9692,11 @@ impl App {
                         () => {{
                     self.statusbar.pet_rect = None;
                     if status_prefs.visible("pet") {
-                        let on = crate::chrome::pet_pid().is_some();
+                        let shown = crate::chrome::pet_shown_cached();
+                        let on = shown.is_some();
                         // 누가 나와 있는지도 적는다 — 아홉 중 하나라 아이콘만으로는
                         // 지금 누가 서 있는지 알 길이 없다(2026-09-07 지시).
-                        let name = on
-                            .then(crate::chrome::pet_current_character)
-                            .flatten()
-                            .unwrap_or_default();
+                        let name = shown.unwrap_or_default();
                         let name = if compact_tools { String::new() } else { crate::info::fit_text(g, &name, (slot_w - chip - 24.0).max(0.0), fs, false) };
                         let icon = tool_icon;
                         let gap = if compact_tools { 0.0 } else { 4.0_f32 };
@@ -13121,6 +13119,24 @@ impl App {
         hits
     }
 
+    /// PTY 출력·redraw 요청처럼 몰려오는 자리의 그리기. 직전 그림이 한 주기 안이면 이번 것을
+    /// 주기 끝으로 미뤄 한 장으로 합친다(`frame_pace`). 사람이 한 동작 뒤의 그림·캡처·하네스는
+    /// `render_frame` 을 그대로 불러 미루지 않는다.
+    pub(crate) fn render_frame_paced(&mut self) {
+        if let (Some(w), Some(g)) = (self.window.as_ref(), self.gpu.as_ref()) {
+            let size = w.inner_size();
+            // 크기가 바뀐 그림은 미루지 않는다 — 창을 끄는 동안엔 그 자리에서 그려야 늘어난
+            // 옛 그림이 안 비친다. 캡처가 걸린 그림도 그 순간의 화면이어야 한다.
+            if g.surface_size() == (size.width, size.height)
+                && g.capture_next.is_none()
+                && crate::frame_pace::hold(w, &self.proxy)
+            {
+                return;
+            }
+        }
+        self.render_frame();
+    }
+
     pub(crate) fn render_frame(&mut self) {
         // 유휴인데 프레임이 나가는지를 **숫자로** 본다(`KASATERM_PUMP_DEBUG=1`).
         // 펌프 사유는 그 옆 계측이 찍지만, 사유가 참인 것과 실제로 몇 장이
@@ -13312,6 +13328,7 @@ impl App {
             // render_frame_gpu로 cells를 다시 그려 echo가 stale되지 않게.
             let _ = rebuild;
             self.render_frame_gpu(scale, time_secs);
+            crate::frame_pace::drew(t0);
             // 리드백은 render_frame_gpu 안에서 device.poll(Wait) 로 끝나므로 여기선
             // 파일이 이미 디스크에 있다. 회신을 여기 두는 이유가 그것 — 무장 시점에
             // 답하면 받는 쪽이 아직 없는 파일을 Read 한다.

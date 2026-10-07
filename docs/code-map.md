@@ -53,6 +53,8 @@
 - `prompt_nav.rs` — claude 칸의 스크롤바·프롬프트 눈금·프롬프트 이동(Option·Ctrl+↑↓). 그림·누름은 하나, 정본은 둘(`NavSource`): classic 은 이 터미널의 스크롤백(`scrollback_state`, 앵커는 `turnjump.rs` 캐시의 `❯` 줄)이라 `scroll_to_abs` 로 곧장 옮기고 키도 여기서 받는다(`prompt_nav_key`). 풀스크린(대체 화면)은 칸 안 mod(`collab-hooks/claude-mods/prompt-nav`, claude shim 이 `--plugin-dir` 로 싣는다)가 쓴 `<shim>/prompt-nav/<pane>.json` 을 읽어 그리며, 요청 파일 + 장전 화음(`ctrl+x b`) → `armed` 확인 → `ctrl+↑` 로 mod 에 스크롤을 시킨다. classic 칸의 `/prompt-nav` 는 mod 가 상태 파일 `ask` 로 맡긴다. 턴 띠 ↑↓↡ 도 mod 가 있으면 이 길로 간다
 - `trust_prompt.rs` — claude 폴더 신뢰 화면 자동 통과. 화면 펌프(`pump_pty_screens`)가 후보 pane 을 적고 GUI 틱이 판정한다: claude pane·입력 조용·한글 조합 아님일 때만, 초점이 No 면 아래 화살표 한 번, Yes 면 Enter 한 번(같은 화면에 반복 없음). 신뢰 선탑재는 `kasa_socket::claude_trust`(claude shim 이 `kasaterm-cli claude-trust "$PWD"` 로 부름)
 - `own_room.rs` — 이 기기 방 지키기: 현지에 세울 칸(셸·학생·연결 칸)의 기준이 다른 기기 방의 보기 창이면 이 기기 방으로 옮기고(`own_spawn_host` — 섞이면 그 방이 통째로 「이 기기」 절로 넘어가 저쪽 학생이 이쪽 학생처럼 보인다), 자기 칸이 0 이 되면(닫기·이사·미러만 복원) 이 기기 셸 방을 하나 세운다(`keep_own_room`, 1초 틱)
+- `frame_pace.rs` — 몰려오는 그리기(PTY 출력 끝·`RedrawRequested`, `render_frame_paced`)를 화면 주사율 이상은 한 장으로 합친다. 미룬 그림은 `frame-pace` 스레드가 주기 끝에 `UserEvent::Redraw` 로 깨워 반드시 그린다. 사람 동작 직후·캡처·하네스는 `render_frame` 을 그대로 불러 미루지 않는다
+- `turn_probe.rs` — 이벤트 루프 한 바퀴의 메인 스레드 시간. 1초 넘는 바퀴는 늘 `[stall]`, `KASATERM_PROFILE` 이면 클릭 바퀴·50ms 넘는 바퀴도, `KASATERM_LAG_PROBE` 면 이벤트가 처리되기까지 줄 선 시간을 `[lag]` 로 찍는다
 - `agent_transitions.rs` — 상태 전이 → 알림 이벤트(TurnDone/Waiting/Error/…) 순수 함수. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].

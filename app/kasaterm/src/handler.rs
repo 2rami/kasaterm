@@ -229,6 +229,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if matches!(&event, UserEvent::Redraw) {
+            crate::turn_probe::lag_received();
             self.drain_drag_transfers();
             self.aux_request_redraws();
         }
@@ -1968,7 +1969,7 @@ impl ApplicationHandler<UserEvent> for App {
         // channel to reach us; bouncing through request_redraw adds
         // another winit cycle of latency. Painting inline gets the echo
         // on screen this turn.
-        self.render_frame();
+        self.render_frame_paced();
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -3074,6 +3075,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 누르는 손이 이 방에 와 있다 — 이 방 칸들의 깜빡임을 멈춘다.
                 if *state == ElementState::Pressed {
                     self.quiet_room_blinks(self.active_window);
+                    crate::turn_probe::note_click();
                 }
             }
             if let WindowEvent::CursorMoved { position, .. } = &event {
@@ -7466,7 +7468,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.send_bytes(quoted.as_bytes());
             }
             WindowEvent::RedrawRequested => {
-                self.render_frame();
+                self.render_frame_paced();
                 self.maybe_update_window_title();
             }
             _ => {}
@@ -7474,6 +7476,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _turn = crate::turn_probe::TurnEnd;
         self.poll_viewer_vault();
         self.poll_document_theme();
         if self.viewer_only {
@@ -8211,6 +8214,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        crate::turn_probe::begin();
         // The blink-timer fire path. When winit wakes us because the
         // WaitUntil deadline elapsed (no other events arrived), repaint
         // so the cursor block toggles its phase. Other wake causes

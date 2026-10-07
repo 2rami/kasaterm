@@ -3860,8 +3860,17 @@ impl App {
     /// 말은 **한 사람씩 돌아가며** 한다(2026-09-07 지시 「누구는 뭐하고 있고」). 「셋이
     /// 일하는 중」은 한 번 읽고 나면 더 알 것이 없어 화면에 붙어만 있었다.
     pub(crate) fn pet_publish_board(&self) {
-        // 펫이 꺼져 있으면 적을 일이 없다. pid 확인은 syscall 하나라 매 틱 불러도 싸다.
-        if pet_pid().is_none() {
+        // 루프 바퀴마다 불린다 — 창이 많으면 초당 수백 번이라, 판을 엮는 일은 이 박자로만.
+        // 초점이 옮겨 간 것도 이만큼 늦게 펫에 닿을 뿐이다.
+        static TICK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        {
+            let mut tick = TICK.lock().unwrap();
+            if tick.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(250)) {
+                return;
+            }
+            *tick = Some(std::time::Instant::now());
+        }
+        if pet_shown_cached().is_none() {
             return;
         }
         // 상태를 App 필드가 아니라 여기 두는 이유는 공유 워킹트리다 — `struct App` 은
@@ -4627,6 +4636,7 @@ pub(crate) fn set_pet_character(name: &str) -> Result<(), String> {
     let d = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
     std::fs::write(d.join("current"), name)
         .map_err(|_| "펫 캐릭터를 저장하지 못했어요. 다시 선택해 주세요")?;
+    forget_pet_shown();
     if pet_pid().is_some() {
         toggle_pet()?;
         toggle_pet()?;
@@ -4655,6 +4665,31 @@ pub(crate) fn set_pet_preference(change: kasa_pet_config::PreferenceChange) -> s
         std::io::ErrorKind::NotFound, "pet settings directory unavailable",
     ))?;
     kasa_pet_config::update(&dir, change).map(|_| ())
+}
+
+/// 프레임마다·루프 바퀴마다 묻는 자리용 — 떠 있나와 누구인가를 1초 안이면 지난 답으로.
+/// 파일 둘을 매 프레임 열던 것이 창이 많아 프레임이 잦을 때 메인 스레드의 한 몫이었다
+/// (2026-10-07 표본). 켜고 끄는 판정은 `pet_pid` 를 그대로 써라 — 늦은 답으로 펫을 두 번
+/// 띄우면 안 된다.
+pub(crate) fn pet_shown_cached() -> Option<String> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(1);
+    let mut c = PET_SHOWN.lock().unwrap();
+    if let Some((at, shown)) = c.as_ref() {
+        if at.elapsed() < TTL {
+            return shown.clone();
+        }
+    }
+    let shown = pet_pid().map(|_| pet_current_character().unwrap_or_default());
+    *c = Some((std::time::Instant::now(), shown.clone()));
+    shown
+}
+
+static PET_SHOWN: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    std::sync::Mutex::new(None);
+
+/// 켜고 끄거나 캐릭터를 바꾼 직후엔 다음 프레임이 바로 새 답을 보게 한다.
+fn forget_pet_shown() {
+    *PET_SHOWN.lock().unwrap() = None;
 }
 
 /// 바탕화면 펫이 지금 떠 있나. pid 파일 하나로 판정한다 — 앱을 껐다 켜도 펫은 살아
@@ -4820,6 +4855,12 @@ printf Ren > "$1/current"
 }
 
 pub(crate) fn toggle_pet() -> Result<PetToggle, String> {
+    let out = toggle_pet_now();
+    forget_pet_shown();
+    out
+}
+
+fn toggle_pet_now() -> Result<PetToggle, String> {
     if let Some(pid) = pet_pid() {
         terminate_process(pid);
         if let Some(p) = pet_pid_path() {

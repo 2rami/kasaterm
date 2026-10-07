@@ -7365,9 +7365,26 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
 /// ResumeSession(attach/재개)이 세션 id 만 아는 시점에 bind_transcript 로 pane↔세션을
 /// 즉석 확정할 때 쓴다 — cwd 로 프로젝트 dir 슬러그를 재현하는 대신 실재 파일을 찾아
 /// claude 의 슬러그 규칙 드리프트에 무해하다. 세션 id 는 uuid 라 전역 유일.
+///
+/// 제목 동기화가 도는 pane 마다 2초에 한 번 부른다 — 프로젝트 폴더를 전부 stat 하면 창 26개에
+/// 1천 번이 넘는다(2026-10-07). 찾은 경로는 30초 기억하고 그 사이엔 파일이 아직 있는지만 본다.
+/// 같은 sid 가 다른 폴더에 새로 생기는 일(손수 복구)은 30초 안에 따라잡는다.
 pub(crate) fn transcript_path_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    type Found = std::collections::HashMap<String, (std::time::Instant, std::path::PathBuf)>;
+    static FOUND: std::sync::Mutex<Option<Found>> = std::sync::Mutex::new(None);
+    const KEEP: std::time::Duration = std::time::Duration::from_secs(30);
+    if let Some((at, path)) = FOUND.lock().unwrap().get_or_insert_with(Default::default).get(sid) {
+        if at.elapsed() < KEEP && path.is_file() {
+            return Some(path.clone());
+        }
+    }
     let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
-    scan_projects_for_session(&projects, sid)
+    let path = scan_projects_for_session(&projects, sid)?;
+    let mut found = FOUND.lock().unwrap();
+    let found = found.get_or_insert_with(Default::default);
+    found.retain(|_, (at, _)| at.elapsed() < KEEP);
+    found.insert(sid.to_string(), (std::time::Instant::now(), path.clone()));
+    Some(path)
 }
 
 /// `transcript_path_for_session` 의 순수 부분 — projects 루트를 인자로 받아

@@ -452,31 +452,29 @@ pub(crate) fn runtime_dir_for_cached(
     account_id: &str,
     active_account: &str,
 ) -> Option<PathBuf> {
-    // 활성 계정이 아니면 원본도 순수 경로 파생이라 프로세스를 안 띄운다. 캐시를
-    // 태울 이유가 없고, 태우면 계정이 늘어날수록 맵만 커진다.
-    if account_id != active_account {
-        return runtime_dir_for(account_id, active_account);
-    }
+    // 활성 계정이 아니어도 원본은 작업대 지문 파일을 연다(`read_stamp_in`). 상태줄과 계정
+    // 메뉴가 계정마다 이걸 프레임마다 불러, 창이 많아 프레임이 잦으면 파일 열기가 메인
+    // 스레드 시간의 한 몫이 됐다(2026-10-07 표본). 계정 수만큼만 자라는 맵이라 다 담는다.
     const TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = std::time::Instant::now();
     let mut c = runtime_dir_cache().lock().unwrap();
-    if let Some((at, gen, hit)) = c.as_ref() {
-        if *gen == workbench_generation() && now.duration_since(*at) < TTL && hit.0 == account_id {
-            return hit.1.clone();
+    if let Some((at, gen, hit)) = c.get(account_id) {
+        if *gen == workbench_generation() && now.duration_since(*at) < TTL {
+            return hit.clone();
         }
     }
     let v = runtime_dir_for(account_id, active_account);
-    *c = Some((now, workbench_generation(), (account_id.to_string(), v.clone())));
+    c.insert(account_id.to_string(), (now, workbench_generation(), v.clone()));
     v
 }
 
 type RuntimeDirCache = std::sync::Mutex<
-    Option<(std::time::Instant, u64, (String, Option<PathBuf>))>,
+    std::collections::HashMap<String, (std::time::Instant, u64, Option<PathBuf>)>,
 >;
 
 fn runtime_dir_cache() -> &'static RuntimeDirCache {
     static C: std::sync::OnceLock<RuntimeDirCache> = std::sync::OnceLock::new();
-    C.get_or_init(|| std::sync::Mutex::new(None))
+    C.get_or_init(Default::default)
 }
 
 /// 작업대가 바뀔 때마다 오른다. 캐시는 이 값이 그대로일 때만 유효하다 — 시각
@@ -755,12 +753,12 @@ mod tests {
     /// 쟀다(2026-08-18: render_frame 4024 샘플 중 3550 → 0).
     #[test]
     fn cached_runtime_dir_agrees_with_source() {
-        // 활성이 아닌 계정 — 캐시를 안 타는 길(원본도 순수 경로 파생이라 싸다).
+        // 활성이 아닌 계정도 캐시를 탄다 — 원본이 작업대 지문 파일을 열기 때문이다.
         assert_eq!(
             runtime_dir_for_cached("acct-9", "acct-1"),
             runtime_dir_for("acct-9", "acct-1"),
         );
-        // 활성 계정 — 캐시를 타는 길. 두 번 불러도 답이 흔들리지 않는다.
+        // 활성 계정. 두 번 불러도 답이 흔들리지 않는다.
         let a = runtime_dir_for_cached("acct-1", "acct-1");
         let b = runtime_dir_for_cached("acct-1", "acct-1");
         assert_eq!(a, b, "같은 인자에 두 답이 나오면 화면이 프레임마다 떤다");

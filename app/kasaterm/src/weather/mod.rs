@@ -437,8 +437,9 @@ impl App {
         }
         let Some(f) = self.weather_frame_cached() else { return };
         let Some(g) = self.gpu.as_mut() else { return };
+        let started = std::time::Instant::now();
         match g.render_weather_only(f) {
-            Ok(true) => {}
+            Ok(true) => crate::frame_pace::drew(started),
             // No copy of the app frame yet (first frame, resize): take a full one.
             Ok(false) => {
                 self.chrome_dirty = true;

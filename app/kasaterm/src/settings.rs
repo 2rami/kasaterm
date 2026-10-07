@@ -5204,15 +5204,37 @@ fn codex_auth_path(id: &str) -> Option<std::path::PathBuf> {
 
 /// 토큰 값은 직렬화·저장·로그하지 않고 알려진 자리가 비어 있지 않은지만 본다.
 pub(crate) fn codex_logged_in(id: &str) -> bool {
-    let Some(path) = codex_auth_path(id) else {
-        return false;
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
+    codex_auth_facts(id).0
+}
+
+pub(crate) fn codex_identity(id: &str) -> Option<String> {
+    codex_auth_facts(id).1
+}
+
+/// 로그인 여부와 이메일을 한 번에. 상태줄·계정 메뉴가 둘 다 프레임마다 불러, 창이 많아
+/// 프레임이 잦으면 auth.json 을 열고 푸는 일이 메인 스레드의 한 몫이 됐다(2026-10-07 표본).
+/// 1초 안이면 지난 답을 쓴다 — 로그인을 마친 뒤 화면이 1초 늦게 따라올 뿐이다. 담는 것은
+/// 판정 결과뿐이고 토큰 값은 담지 않는다.
+fn codex_auth_facts(id: &str) -> (bool, Option<String>) {
+    type Facts = (bool, Option<String>);
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, (std::time::Instant, Facts)>>> =
+        std::sync::Mutex::new(None);
+    const TTL: std::time::Duration = std::time::Duration::from_secs(1);
+    let now = std::time::Instant::now();
+    if let Some((at, facts)) = CACHE.lock().unwrap().get_or_insert_with(Default::default).get(id) {
+        if now.duration_since(*at) < TTL {
+            return facts.clone();
+        }
+    }
+    let facts = codex_auth_path(id)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .map_or((false, None), |v| (codex_auth_signed_in(&v), codex_auth_email(&v)));
+    CACHE.lock().unwrap().get_or_insert_with(Default::default).insert(id.to_string(), (now, facts.clone()));
+    facts
+}
+
+fn codex_auth_signed_in(v: &serde_json::Value) -> bool {
     let nonempty = |p: &str| {
         v.pointer(p)
             .and_then(|x| x.as_str())
@@ -5226,10 +5248,8 @@ pub(crate) fn codex_logged_in(id: &str) -> bool {
             .is_some_and(|s| !s.is_empty())
 }
 
-pub(crate) fn codex_identity(id: &str) -> Option<String> {
+fn codex_auth_email(v: &serde_json::Value) -> Option<String> {
     use base64::Engine as _;
-    let path = codex_auth_path(id)?;
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let tok = v.get("tokens")?.get("id_token")?.as_str()?;
     // JWT = header.payload.signature — 가운데만 필요하다. 패딩 없는 URL-safe base64.
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD

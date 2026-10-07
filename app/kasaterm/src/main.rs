@@ -116,6 +116,8 @@ mod statusbar_config;
 mod syntax;
 mod turnjump;
 mod prompt_nav;
+mod turn_probe;
+mod frame_pace;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
 mod version;
 // 물리 메모리 압박 판정 — 하단바 사용량 위젯의 「재시작 권장」 근거.
@@ -6788,6 +6790,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
     macos_open::prepare_open_doc_handler(proxy.clone());
+    turn_probe::start_lag_probe(proxy.clone());
     // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-mcp 는 창을 모른다.
     if !launch.viewer_only {
         let p = std::sync::Mutex::new(proxy.clone());

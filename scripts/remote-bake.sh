@@ -115,7 +115,7 @@ applog() {
   local f="${tmp}kasaterm-app.log"
   say "── $f"
   if [[ -f "$f" ]]; then
-    grep -nE '\[board\]|\[state\]|panicked|invalid|skipped' "$f" | tail -n 40 | cut -c1-240
+    grep -nE '\[board\]|\[state\]|\[stall\]|panicked|invalid|skipped' "$f" | tail -n 40 | cut -c1-240
   else
     say "(없음)"
   fi
