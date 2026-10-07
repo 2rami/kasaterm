@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/chat_markdown.dart';
 import 'package:kasaterm_mobile/main.dart' show buildTheme;
-import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/term_session.dart';
@@ -78,8 +77,6 @@ final _png = Uint8List.fromList([
 ]);
 
 Future<(ChatServer, ChatSession)> _openChat(WidgetTester tester) async {
-  paneView.value = PaneView.chat;
-  addTearDown(() => paneView.value = PaneView.terminal);
   final server = ChatServer();
   final session = ChatSession(server, target);
   await tester.pumpWidget(

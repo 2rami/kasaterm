@@ -103,13 +103,19 @@ void viewport(WidgetTester tester, double width) {
 Widget host(
   Server server,
   CodexFixtureSession session,
-  Brightness brightness,
-) => MaterialApp(
+  Brightness brightness, {
+  PaneView? view,
+}) => MaterialApp(
   debugShowCheckedModeBanner: false,
   theme: buildTheme(brightness),
   home: TickerMode(
     enabled: false,
-    child: TerminalScreen(server: server, pane: session.pane, session: session),
+    child: TerminalScreen(
+      server: server,
+      pane: session.pane,
+      session: session,
+      initialView: view,
+    ),
   ),
 );
 
@@ -221,17 +227,18 @@ void main() {
           tester,
         ) async {
           viewport(tester, width);
-          paneView.value = PaneView.terminal;
           phoneThemeMode.value = brightness == Brightness.dark
               ? ThemeMode.dark
               : ThemeMode.light;
           final server = fixtureServer(scene);
           final session = CodexFixtureSession(server, codexPane(scene), scene);
-          await tester.pumpWidget(host(server, session, brightness));
+          await tester.pumpWidget(
+            host(server, session, brightness, view: PaneView.terminal),
+          );
           await tester.pump(const Duration(milliseconds: 200));
           expect(tester.takeException(), isNull);
           expect(find.text('Codex'), findsOneWidget);
-          expect(find.byType(PaneViewSwitch), findsOneWidget);
+          expect(find.byTooltip('대화로 보기'), findsOneWidget);
           expect(
             find.text(switch (scene) {
               CodexScene.progress => '하는 중 · exec_command flutter test',
@@ -262,7 +269,6 @@ void main() {
       'Codex approval $width: native choices, 44px targets and stale-input rejection',
       (tester) async {
         viewport(tester, width);
-        paneView.value = PaneView.chat;
         final server = fixtureServer(CodexScene.approval);
         final session = CodexFixtureSession(
           server,
@@ -308,7 +314,6 @@ void main() {
       'Codex complete $width chat shows rollout-shaped tool output and Korean response',
       (tester) async {
         viewport(tester, width);
-        paneView.value = PaneView.chat;
         final server = fixtureServer(CodexScene.complete);
         final session = CodexFixtureSession(
           server,

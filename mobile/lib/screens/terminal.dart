@@ -34,10 +34,15 @@ class TerminalScreen extends StatefulWidget {
     this.initialScroll,
     this.session,
     this.pickImage,
+    this.initialView,
   });
 
   final Server server;
   final Pane pane;
+
+  /// 열 때의 쪽. 없으면 둘째 쪽(대화·명령 묶음)이 먼저다 — 지난번에 고른 쪽을 이어받지 않는다
+  /// (2026-10-07 「대화를 기본으로 하고 x 옆에 터미널 아이콘으로 터미널 보기」).
+  final PaneView? initialView;
 
   /// 검증용 — 열자마자 위로 이만큼(px) 넘긴 상태로.
   final double? initialScroll;
@@ -93,6 +98,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _toBottom() => setState(() => _bottomTick++);
 
+  /// 지금 보는 쪽 — 화면마다 따로다(아이패드 여러 열이 서로의 쪽을 끌고 가지 않게).
+  late final _facing = ValueNotifier<PaneView>(
+    widget.initialView ?? PaneView.chat,
+  );
+
   /// 터미널(0) ↔ 대화(1) 두 쪽. 손가락은 PageView 가 아니라 [_ViewSwipe] 가 받는다 —
   /// 기본 밀기엔 각도·시작 자리 판정이 없어 비스듬히 읽어 내리다 쪽이 넘어간다.
   late final PageController _pages = PageController(initialPage: _shownPage);
@@ -103,12 +113,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
   late bool _lastSecond = _hasSecond(_pane);
 
   int get _shownPage =>
-      _hasSecond(_pane) && paneView.value == PaneView.chat ? 1 : 0;
+      _hasSecond(_pane) && _facing.value == PaneView.chat ? 1 : 0;
 
   @override
   void initState() {
     super.initState();
-    paneView.addListener(_followView);
+    _facing.addListener(_followView);
     BackgroundGrace.instance.addListener(_graceChanged);
     _inputFocus.onKeyEvent = _onHardwareKey;
     _session.connect();
@@ -159,7 +169,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
   @override
   void dispose() {
     _stopPaneRefresh();
-    paneView.removeListener(_followView);
+    _facing
+      ..removeListener(_followView)
+      ..dispose();
     BackgroundGrace.instance.removeListener(_graceChanged);
     _session.dispose();
     _input.dispose();
@@ -351,13 +363,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _showTerminal() => _choose(PaneView.terminal);
 
-  /// 단추·점·「터미널로 보기」 — 고른 쪽을 기억하고, 쪽은 [_followView] 가 옮긴다.
-  void _choose(PaneView v) {
-    paneView.value = v;
-    const PaneViewPrefs().save(v);
-  }
+  /// 닫기 옆 단추·「터미널로 보기」 — 쪽은 [_followView] 가 옮긴다.
+  void _choose(PaneView v) => _facing.value = v;
 
-  /// 쪽을 [paneView] 에 맞춘다. 밀어서 바뀐 것이면 이미 그 쪽이라 그대로 둔다. 입력칸에 초점이
+  /// 쪽을 [_facing] 에 맞춘다. 밀어서 바뀐 것이면 이미 그 쪽이라 그대로 둔다. 입력칸에 초점이
   /// 있었으면 새 쪽 입력칸으로 옮긴다 — 두 칸 다 살아 있어 자판이 내려갔다 올라오지 않는다.
   void _followView() {
     if (!mounted) return;
@@ -402,7 +411,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _pages.jumpToPage(page.round().clamp(0, _hasSecond(_pane) ? 1 : 0));
   }
 
-  /// 쪽이 반을 넘으면 그 쪽이 지금 보기다 — 전환 단추·입력줄·앱바 단추가 따라온다.
+  /// 쪽이 반을 넘으면 그 쪽이 지금 보기다 — 입력줄·앱바 단추가 따라온다.
   bool _onPageScroll(ScrollNotification n) {
     if (n.depth != 0 || n.metrics.axis != Axis.horizontal) return false;
     _afterLayout(() {
@@ -415,10 +424,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
           final v = (_pages.page ?? 0).round() >= 1
               ? PaneView.chat
               : PaneView.terminal;
-          if (paneView.value != v) paneView.value = v;
+          if (_facing.value != v) _facing.value = v;
         case ScrollEndNotification():
           if (_paging) setState(() => _paging = false);
-          if (_hasSecond(_pane)) const PaneViewPrefs().save(paneView.value);
         default:
       }
     });
@@ -443,7 +451,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([_session, paneView]),
+    listenable: Listenable.merge([_session, _facing]),
     builder: (context, _) {
       final theme = Theme.of(context);
       final scheme = theme.colorScheme;
@@ -454,7 +462,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       final canChat = _canChat(pane);
       final blocks = _canBlocks(pane);
       final second = canChat || blocks;
-      final chat = second && paneView.value == PaneView.chat;
+      final chat = second && _facing.value == PaneView.chat;
       // 폰 폭으로 접어 보는 터미널에서 친 동안만 원본 격자를 폰 크기로 쥔다(TermSession.holdViewport).
       // 셸 칸은 쥐지 않는다 — 명령 묶음·줄여 보기로 원본 크기 없이 그린다(docs/mirror-render.md).
       final hold = _wrap && !chat && !blocks;
@@ -465,7 +473,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         _lastSecond = second;
         WidgetsBinding.instance.addPostFrameCallback((_) => _followView());
       }
-      // 자판이 뜨면 머리·전환 줄을 앱바 한 줄로 접는다 — 글 보이는 높이가 307pt(35%)까지 줄었다.
+      // 자판이 뜨면 머리를 앱바 한 줄로 접는다 — 글 보이는 높이가 307pt(35%)까지 줄었다.
       final typing = MediaQuery.viewInsetsOf(context).bottom > 0;
       return _StudentFrame(
         accent: accent,
@@ -560,15 +568,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                 ),
               ],
             ),
-            bottom: second && !typing ? PaneViewSwitch(shell: blocks) : null,
             actions: [
-              // 전환 줄을 접은 동안에도 지금 보기가 보이게.
-              if (second && typing)
-                _ViewDots(
-                  chat: chat,
-                  onTap: () =>
-                      _choose(chat ? PaneView.terminal : PaneView.chat),
-                ),
               // 글자 선택·접기는 격자 얘기다 — 대화 보기에선 말풍선을 꾹 눌러 복사한다.
               if (!chat) ...[
                 // 글자 선택 — 격자는 손가락으로 못 긁으니 화면 글자를 그대로 선택 상자에
@@ -585,6 +585,24 @@ class _TerminalScreenState extends State<TerminalScreen> {
                   icon: const Icon(Icons.wrap_text),
                 ),
               ],
+              // 닫기 바로 옆 — 아이콘은 누르면 갈 쪽이다. 앱바 밑 전환 줄 44 를 걷어 그만큼 글이 더 보인다.
+              if (second)
+                IconButton(
+                  tooltip: chat
+                      ? '터미널로 보기'
+                      : blocks
+                      ? '명령으로 보기'
+                      : '대화로 보기',
+                  onPressed: () =>
+                      _choose(chat ? PaneView.terminal : PaneView.chat),
+                  icon: Icon(
+                    chat
+                        ? Icons.terminal
+                        : blocks
+                        ? Icons.view_agenda_outlined
+                        : Icons.forum_outlined,
+                  ),
+                ),
               IconButton(
                 tooltip: 'pane 닫기',
                 onPressed: () => _closePane(pane),
@@ -960,40 +978,6 @@ class _KeepPageState extends State<_KeepPage>
   Widget build(BuildContext context) {
     super.build(context);
     return widget.child;
-  }
-}
-
-/// 자판이 떠 전환 줄을 접었을 때의 지금 보기 — 왼쪽 점이 터미널, 오른쪽 점이 대화.
-/// 누르면 다른 쪽으로 간다.
-class _ViewDots extends StatelessWidget {
-  const _ViewDots({required this.chat, required this.onTap});
-
-  final bool chat;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    Widget dot(bool on) => Container(
-      width: Look.viewDot,
-      height: Look.viewDot,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: on ? scheme.primary : scheme.outline,
-      ),
-    );
-    return IconButton(
-      tooltip: chat ? '대화 보기 · 눌러 터미널로' : '터미널 보기 · 눌러 대화로',
-      onPressed: onTap,
-      icon: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          dot(!chat),
-          const SizedBox(width: Look.viewDotGap),
-          dot(chat),
-        ],
-      ),
-    );
   }
 }
 

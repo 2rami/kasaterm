@@ -89,12 +89,8 @@ abstract final class Look {
   /// 여기서 시작한 밀기는 쪽 넘김이 받지 않는다.
   static const backEdge = 20.0;
 
-  /// 단추·점으로 바꿀 때 쪽이 미끄러지는 시간. 동작 줄이기면 바로 바뀐다.
+  /// 단추로 바꿀 때 쪽이 미끄러지는 시간. 동작 줄이기면 바로 바뀐다.
   static const viewFlip = Duration(milliseconds: 240);
-
-  /// 자판이 떠 전환 줄을 접었을 때 지금 보기를 알리는 점 둘.
-  static const viewDot = 6.0;
-  static const viewDotGap = 6.0;
 
   /// 격자 밖 흐르는 글(인라인 코드·코드 칸·도구 결과·글자 선택)의 고정폭 대체 글꼴. TermHangul 은
   /// 한글 진행 폭이 반 칸이라 칸마다 놓는 격자에서만 맞고, 흐르는 글에선 한글이 서로 포개진다 —

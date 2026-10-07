@@ -35,7 +35,6 @@ final designTokens = ValueNotifier<DesignTokens?>(null);
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   AppLinkObserver.instance.install();
-  const PaneViewPrefs().load().then((v) => paneView.value = v);
   runApp(const KasatermApp());
 }
 
@@ -466,8 +465,13 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     nav.popUntil((r) => r.isFirst);
     nav.push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            TerminalScreen(server: s, pane: found, initialScroll: link.scroll),
+        // 스크롤 자리는 격자 얘기라 그 링크만 터미널 쪽으로 연다.
+        builder: (_) => TerminalScreen(
+          server: s,
+          pane: found,
+          initialScroll: link.scroll,
+          initialView: link.scroll == null ? null : PaneView.terminal,
+        ),
       ),
     );
   }

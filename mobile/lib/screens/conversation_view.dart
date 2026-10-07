@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../background_grace.dart';
 import '../chat_markdown.dart';
@@ -17,87 +16,9 @@ import '../look.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
 
-/// 학생 화면의 두 얼굴 — 격자 그대로(터미널)와 말풍선(대화). 웹이 「웹 터미널」과
+/// 학생 화면의 두 얼굴 — 격자 그대로(터미널)와 다시 그린 쪽(대화, 셸 칸은 명령 묶음). 웹이 「웹 터미널」과
 /// 「대화 보기」를 주소 둘로 가른 것(2026-08-25)을 한 화면 안의 전환으로 옮겼다.
 enum PaneView { terminal, chat }
-
-/// 마지막으로 고른 얼굴 — 다음 학생도 그 얼굴로 연다. 처음은 대화다 — 거울은 원본 칸 크기를 안 바꾸고
-/// 데이터로 다시 그린다(docs/mirror-render.md).
-final paneView = ValueNotifier<PaneView>(PaneView.chat);
-
-class PaneViewPrefs {
-  const PaneViewPrefs();
-
-  /// 대화가 기본이 된 판부터의 열쇠 — 그 전에 고른 「터미널」은 이어받지 않는다.
-  static const _key = 'pane.view.v2';
-  static const _storage = FlutterSecureStorage();
-
-  Future<PaneView> load() async {
-    try {
-      final v = await _storage.read(key: _key);
-      return PaneView.values.firstWhere(
-        (m) => m.name == v,
-        orElse: () => PaneView.chat,
-      );
-    } catch (_) {
-      return PaneView.chat;
-    }
-  }
-
-  Future<void> save(PaneView v) async {
-    try {
-      await _storage.write(key: _key, value: v.name);
-    } catch (_) {
-      // 저장소가 막혀도 이번 실행은 고른 대로 보인다.
-    }
-  }
-}
-
-/// 앱바 밑의 「터미널 | 대화」. 폭을 반씩 나눠 엄지가 어디를 눌러도 닿게 한다.
-class PaneViewSwitch extends StatelessWidget implements PreferredSizeWidget {
-  const PaneViewSwitch({super.key, this.shell = false});
-
-  /// 셸 칸 — 둘째 얼굴이 대화가 아니라 명령 묶음이다.
-  final bool shell;
-
-  static const height = 44.0;
-
-  @override
-  Size get preferredSize => const Size.fromHeight(height);
-
-  @override
-  Widget build(BuildContext context) => ValueListenableBuilder(
-    valueListenable: paneView,
-    builder: (context, view, _) => Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
-      child: SegmentedButton<PaneView>(
-        expandedInsets: EdgeInsets.zero,
-        showSelectedIcon: false,
-        style: const ButtonStyle(visualDensity: VisualDensity.compact),
-        segments: [
-          const ButtonSegment(
-            value: PaneView.terminal,
-            icon: Icon(Icons.terminal, size: 18),
-            label: Text('터미널'),
-          ),
-          ButtonSegment(
-            value: PaneView.chat,
-            icon: Icon(
-              shell ? Icons.view_agenda_outlined : Icons.forum_outlined,
-              size: 18,
-            ),
-            label: Text(shell ? '명령' : '대화'),
-          ),
-        ],
-        selected: {view},
-        onSelectionChanged: (s) {
-          paneView.value = s.first;
-          const PaneViewPrefs().save(s.first);
-        },
-      ),
-    ),
-  );
-}
 
 /// 대화 보기의 입력줄. 바로 치기가 없다 — 화면의 입력상자를 안 보고 치니 한 번에 보낸다.
 class ChatComposer extends StatelessWidget {

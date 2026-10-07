@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
+import 'package:kasaterm_mobile/screens/shell_blocks_view.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/term_session.dart';
@@ -54,6 +55,16 @@ class SwipeServer extends Server {
 
   @override
   Future<List<Pane>> panes({String? machine}) async => const [target];
+
+  @override
+  Future<Map<String, Object?>?> shellBlocks(
+    String pane, {
+    String? machine,
+    int? since,
+    int have = 0,
+    int? block,
+    int? waitMs,
+  }) async => null;
 }
 
 class SwipeSession extends TermSession {
@@ -87,17 +98,25 @@ class SwipeSession extends TermSession {
 double _page(WidgetTester tester) =>
     tester.widget<PageView>(find.byType(PageView)).controller!.page!;
 
+/// 앱바 오른쪽 단추들의 툴팁 — 왼쪽부터(뒤로 가기는 뺀다).
+List<String?> _actions(WidgetTester tester) => [
+  for (final b in tester.widgetList<IconButton>(
+    find.descendant(of: find.byType(AppBar), matching: find.byType(IconButton)),
+  ))
+    if (b.tooltip != 'Back') b.tooltip,
+];
+
+/// [view] 가 없으면 앱처럼 열린다(첫 쪽은 화면이 고른다).
 Future<void> _open(
   WidgetTester tester, {
-  PaneView view = PaneView.terminal,
+  PaneView? view = PaneView.terminal,
+  Pane pane = target,
   String? transcript,
   bool still = false,
 }) async {
   tester.view.physicalSize = const Size(390, 844);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  paneView.value = view;
-  addTearDown(() => paneView.value = PaneView.terminal);
   final server = SwipeServer(transcript: transcript);
   await tester.pumpWidget(
     MaterialApp(
@@ -114,8 +133,9 @@ Future<void> _open(
                 MaterialPageRoute<void>(
                   builder: (_) => TerminalScreen(
                     server: server,
-                    pane: target,
-                    session: SwipeSession(server, target),
+                    pane: pane,
+                    session: SwipeSession(server, pane),
+                    initialView: view,
                   ),
                 ),
               ),
@@ -166,17 +186,17 @@ void main() {
 
     await _swipe(tester, const Offset(300, 400), const Offset(-220, 0));
     expect(_page(tester), 1);
-    expect(paneView.value, PaneView.chat);
     expect(find.byType(ChatComposer), findsOneWidget);
     expect(find.byTooltip('글자 선택·복사'), findsNothing);
+    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
 
     await _swipe(tester, const Offset(100, 400), const Offset(220, 0));
     expect(_page(tester), 0);
-    expect(paneView.value, PaneView.terminal);
     expect(find.byType(ChatComposer), findsNothing);
     expect(find.byTooltip('글자 선택·복사'), findsOneWidget);
+    expect(find.byTooltip('대화로 보기'), findsOneWidget);
 
-    await tester.tap(find.text('대화'));
+    await tester.tap(find.byTooltip('대화로 보기'));
     await tester.pumpAndSettle();
     expect(_page(tester), 1);
     await _close(tester);
@@ -188,14 +208,12 @@ void main() {
     // 40° — 가로 18 을 먼저 지나지만 세로의 1.5배가 안 된다.
     await _swipe(tester, const Offset(100, 300), const Offset(200, 168));
     expect(_page(tester), 1);
-    expect(paneView.value, PaneView.chat);
     // 25° 는 넘긴다.
     await _swipe(tester, const Offset(100, 300), const Offset(220, 103));
     expect(_page(tester), 0);
     // 터미널 쪽 — 세로 스크롤이 있는 곳에서 40° 는 읽기 스크롤로 간다.
     await _swipe(tester, const Offset(300, 300), const Offset(-200, 168));
     expect(_page(tester), 0);
-    expect(paneView.value, PaneView.terminal);
     await _close(tester);
   });
 
@@ -204,7 +222,6 @@ void main() {
     await _swipe(tester, const Offset(6, 400), const Offset(300, 0));
     expect(find.byType(TerminalScreen), findsNothing);
     expect(find.text('열기'), findsOneWidget);
-    expect(paneView.value, PaneView.chat);
     await _close(tester);
   });
 
@@ -241,7 +258,9 @@ void main() {
     await tester.pump();
     await _swipe(tester, const Offset(300, 400), const Offset(-220, 0));
     expect(_page(tester), 0);
-    expect(paneView.value, PaneView.terminal);
+    await tester.tap(find.byTooltip('대화로 보기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 1);
     await _close(tester);
   });
 
@@ -272,21 +291,105 @@ void main() {
     await _close(tester);
   });
 
-  testWidgets('자판이 뜨면 전환 줄 대신 점 둘, 눌러서 바꾼다', (tester) async {
+  testWidgets('자판이 떠도 닫기 옆 보기 단추가 그 자리에서 바꾼다', (tester) async {
     await _open(tester);
     tester.view.viewInsets = const FakeViewPadding(bottom: 300);
     await tester.pumpAndSettle();
-    expect(find.byType(PaneViewSwitch), findsNothing);
-    await tester.tap(find.byTooltip('터미널 보기 · 눌러 대화로'));
+    expect(_actions(tester).last, 'pane 닫기');
+    await tester.tap(find.byTooltip('대화로 보기'));
     await tester.pumpAndSettle();
     expect(_page(tester), 1);
-    expect(find.byTooltip('대화 보기 · 눌러 터미널로'), findsOneWidget);
+    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
+    await _close(tester);
+  });
+
+  testWidgets('학생 칸은 열면 대화가 먼저, 닫기 옆 터미널 단추로 오간다', (tester) async {
+    await _open(tester, view: null);
+    expect(_page(tester), 1);
+    expect(find.byType(ChatComposer), findsOneWidget);
+    expect(_actions(tester), ['터미널로 보기', 'pane 닫기']);
+    final toggle = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.terminal),
+    );
+    expect(toggle.tooltip, '터미널로 보기');
+    final r = tester.getRect(find.widgetWithIcon(IconButton, Icons.terminal));
+    expect(r.width, greaterThanOrEqualTo(44));
+    expect(r.height, greaterThanOrEqualTo(44));
+    // 닫기 바로 왼쪽.
+    final close = tester.getRect(find.widgetWithIcon(IconButton, Icons.close));
+    expect(close.left, closeTo(r.right, 1));
+
+    await tester.tap(find.byTooltip('터미널로 보기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 0);
+    expect(find.byType(ChatComposer), findsNothing);
+    expect(_actions(tester), ['글자 선택·복사', isA<String>(), '대화로 보기', 'pane 닫기']);
+    expect(find.widgetWithIcon(IconButton, Icons.forum_outlined), findsOneWidget);
+
+    await tester.tap(find.byTooltip('대화로 보기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 1);
+    expect(find.byType(ChatComposer), findsOneWidget);
+    await _close(tester);
+  });
+
+  testWidgets('고른 쪽은 다음 칸으로 넘어가지 않는다 — 다시 열면 대화부터', (tester) async {
+    await _open(tester, view: null);
+    await tester.tap(find.byTooltip('터미널로 보기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 0);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('열기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 1);
+    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
+    await _close(tester);
+  });
+
+  testWidgets('셸 칸은 명령 쪽이 먼저, 단추는 터미널 ↔ 명령', (tester) async {
+    const shell = Pane(
+      id: '%3',
+      name: '',
+      title: '',
+      status: 'idle',
+      window: 0,
+      cwd: '/m',
+    );
+    await _open(tester, view: null, pane: shell);
+    expect(_page(tester), 1);
+    expect(find.byType(ShellBlocksView), findsOneWidget);
+    expect(_actions(tester), ['터미널로 보기', 'pane 닫기']);
+    await tester.tap(find.byTooltip('터미널로 보기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 0);
+    expect(find.widgetWithIcon(IconButton, Icons.view_agenda_outlined), findsOneWidget);
+    await tester.tap(find.byTooltip('명령으로 보기'));
+    await tester.pumpAndSettle();
+    expect(_page(tester), 1);
+    await _close(tester);
+  });
+
+  testWidgets('폰이 연 웹 셸은 터미널뿐, 보기 단추가 없다', (tester) async {
+    const web = Pane(
+      id: 'web-1',
+      name: '',
+      title: '',
+      status: 'idle',
+      window: 0,
+      cwd: '/m',
+    );
+    await _open(tester, view: null, pane: web);
+    expect(_page(tester), 0);
+    expect(find.byTooltip('터미널로 보기'), findsNothing);
+    expect(find.byTooltip('대화로 보기'), findsNothing);
+    expect(_actions(tester).last, 'pane 닫기');
     await _close(tester);
   });
 
   testWidgets('동작 줄이기면 단추·밀기 모두 미끄러지지 않고 바로 바뀐다', (tester) async {
     await _open(tester, still: true);
-    await tester.tap(find.text('대화'));
+    await tester.tap(find.byTooltip('대화로 보기'));
     await tester.pump();
     expect(_page(tester), 1);
 

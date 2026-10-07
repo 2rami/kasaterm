@@ -7,7 +7,6 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:kasaterm_mobile/grid.dart';
 import 'package:kasaterm_mobile/main.dart';
-import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/screens/shell_blocks_view.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/shell_blocks.dart';
@@ -114,7 +113,6 @@ void main() {
         home: Scaffold(
           appBar: AppBar(
             title: const Text('~/Desktop'),
-            bottom: const PaneViewSwitch(shell: true),
           ),
           body: ShellBlocksView(
             server: server,
@@ -128,7 +126,6 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
     expect(asked.first.queryParameters['pane'], '%0');
-    expect(find.text('명령'), findsOneWidget);
     expect(find.text('cargo build --release'), findsOneWidget);
     expect(find.text('도는 중'), findsOneWidget);
     expect(find.textContaining('전체 화면 프로그램이었어요'), findsOneWidget);
@@ -152,8 +149,6 @@ void main() {
     tester.view.physicalSize = const Size(390 * 3, 844 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
-    paneView.value = PaneView.chat;
-    addTearDown(() => paneView.value = PaneView.terminal);
     final server = _BlocksServer();
     const pane = Pane(id: '%3', name: '', title: '', status: 'idle', window: 0, cwd: '/m');
     final session = _HoldSession(server, pane);
@@ -167,7 +162,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(session.held, isFalse, reason: '셸 칸은 명령 묶음·줄여 보기로 원본 크기 없이 그린다');
     expect(find.byType(ShellBlocksView), findsOneWidget);
-    expect(find.text('명령'), findsOneWidget);
+    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
     expect(find.text('cargo build --release'), findsOneWidget);
     await tester.enterText(find.widgetWithText(TextField, '명령 보내기'), 'git status');
     await tester.tap(find.byType(SendButton).last);
@@ -206,6 +201,12 @@ class _BlocksServer extends FixtureServer {
 
   @override
   Future<void> send(String pane, String text, {String? machine}) async {
+    replies.add(text);
+  }
+
+  /// 명령 쪽 입력줄은 대화 보기의 것이라 원본이 넣는 창구로 간다.
+  @override
+  Future<void> chatSend(String pane, String text, {String? machine}) async {
     replies.add(text);
   }
 }

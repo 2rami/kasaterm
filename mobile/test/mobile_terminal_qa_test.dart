@@ -122,7 +122,6 @@ void main() {
           addTearDown(tester.view.resetPhysicalSize);
           addTearDown(tester.view.resetDevicePixelRatio);
           addTearDown(tester.view.resetViewInsets);
-          paneView.value = PaneView.terminal;
           phoneThemeMode.value = harness == 'codex'
               ? ThemeMode.light
               : ThemeMode.dark;
@@ -140,6 +139,7 @@ void main() {
                 server: server,
                 pane: pane,
                 session: session,
+                initialView: PaneView.terminal,
               ),
             ),
           );

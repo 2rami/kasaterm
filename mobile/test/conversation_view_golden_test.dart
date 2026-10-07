@@ -92,7 +92,6 @@ void main() {
         home: Scaffold(
           appBar: AppBar(
             title: const Text('아리스'),
-            bottom: const PaneViewSwitch(),
           ),
           body: ConversationView(
             server: server,

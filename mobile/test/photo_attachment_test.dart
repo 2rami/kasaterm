@@ -55,7 +55,6 @@ class AttachmentSession extends TermSession {
 
 void main() {
   // 이 시험들은 터미널 쪽 입력줄의 사진 첨부다 — 기본 얼굴(대화)이 아니라 터미널로 연다.
-  setUp(() => paneView.value = PaneView.terminal);
   disabledReasonTests();
   testWidgets('draft mode can send a photo without text, only after upload', (
     tester,
@@ -69,6 +68,7 @@ void main() {
           pane: target,
           session: session,
           pickImage: () async => Uint8List.fromList([1]),
+          initialView: PaneView.terminal,
         ),
       ),
     );
@@ -384,6 +384,7 @@ void disabledReasonTests() {
           pane: shell,
           session: session,
           pickImage: () async => Uint8List.fromList([1]),
+          initialView: PaneView.terminal,
         ),
       ),
     );
