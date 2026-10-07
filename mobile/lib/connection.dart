@@ -33,6 +33,13 @@ class ConnectionController extends ChangeNotifier {
   List<Map<String, dynamic>> devices = [];
   int _generation = 0;
   bool _disposed = false;
+
+  /// 데스크톱을 확인하지 못해 기다리는 동안 스스로 다시 묻는다. 관문이 다시 켜지는 몇 초·데스크톱 업링크가 다시 붙는
+  /// 2초 사이에 앱을 켜면 단추를 누를 때까지 「기다림」에 머물렀다. 못 닿을수록 두 배씩 [waitRetryMax] 까지 쉰다.
+  static const waitRetryFirst = Duration(seconds: 2);
+  static const waitRetryMax = Duration(seconds: 30);
+  Timer? _waitRetry;
+  int _waitFails = 0;
   Future<void> _storageQueue = Future.value();
 
   bool _current(int generation) => !_disposed && generation == _generation;
@@ -50,6 +57,9 @@ class ConnectionController extends ChangeNotifier {
 
   int _reset() {
     _generation++;
+    _waitRetry?.cancel();
+    _waitRetry = null;
+    _waitFails = 0;
     server?.close();
     server = null;
     account = null;
@@ -136,7 +146,23 @@ class ConnectionController extends ChangeNotifier {
 
   Future<void> retry() async {
     if (account == null || phase == ConnectionPhase.checking) return;
+    _waitRetry?.cancel();
+    _waitRetry = null;
     await _check(_generation);
+  }
+
+  void _retryLater(int generation) {
+    if (phase != ConnectionPhase.waiting) {
+      _waitFails = 0;
+      return;
+    }
+    final wait = waitRetryFirst * (1 << _waitFails.clamp(0, 4));
+    _waitFails++;
+    _waitRetry?.cancel();
+    _waitRetry = Timer(wait > waitRetryMax ? waitRetryMax : wait, () {
+      _waitRetry = null;
+      if (_current(generation)) unawaited(retry());
+    });
   }
 
   Future<void> _check(int generation) async {
@@ -195,7 +221,10 @@ class ConnectionController extends ChangeNotifier {
       candidate?.close();
       api.close();
     }
-    if (_current(generation)) _notify();
+    if (_current(generation)) {
+      _retryLater(generation);
+      _notify();
+    }
   }
 
   Future<void> _expired(int generation) async {

@@ -419,27 +419,35 @@ class AccountSyncConflict implements Exception {
 /// [direct] 가 참인 주소는 앱 안 카사넷 입구(데스크톱 직통)다 — 자격을 싣지 않는다(데스크톱 폰 입구가 관문과 같은
 /// 자격을 준다). 입구로 간 GET 이 길에서 끊기면 [fallback] 이 준 관문 주소로 한 번 더 간다. 다른 요청은 다시 보내지
 /// 않는다 — 데스크톱이 받았는데 답만 끊겼을 수 있다(키 입력이 두 번 간다).
+///
+/// 관문 GET 도 길에서 끊기면 한 번 더 간다. 다른 앱에 다녀오면 묶어 둔 연결이 그 사이 끊겨 있는데(iOS 가 멈춘 앱의
+/// 소켓을 정리하지 못한다) 다트는 그걸 모르고 집어 쓴다 — 요청은 관문에 닿지도 못하고 「닿지 못했다」가 떴다.
 class OriginClient extends http.BaseClient {
   OriginClient(
     this.origin, {
     http.Client? client,
+    http.Client Function()? connect,
     this.token,
     this.onUnauthorized,
     this.direct,
     this.fallback,
-  }) : _inner = client ?? http.Client();
+  }) : _make = client == null ? (connect ?? http.Client.new) : null,
+       _inner = client ?? (connect ?? http.Client.new)();
   final Uri origin;
   final String? token;
   final void Function()? onUnauthorized;
   final bool Function(Uri)? direct;
   final Uri? Function(Uri)? fallback;
-  final http.Client _inner;
+
+  /// 연결 묶음을 새로 만드는 법. 밖에서 받은 클라이언트(시험)는 갈아 끼우지 않는다.
+  final http.Client Function()? _make;
+  http.Client _inner;
   bool _closed = false;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final viaDirect = direct?.call(request.url) ?? false;
-    if (!viaDirect) return _send(request, false);
+    if (!viaDirect) return _gateway(request);
     try {
       return await _send(request, true);
     } on AccountException {
@@ -447,8 +455,27 @@ class OriginClient extends http.BaseClient {
     } catch (_) {
       final back = fallback?.call(request.url);
       if (back == null || request is! http.Request || request.method != 'GET') rethrow;
-      return _send(http.Request('GET', back)..headers.addAll(request.headers), false);
+      return _gateway(http.Request('GET', back)..headers.addAll(request.headers));
     }
+  }
+
+  Future<http.StreamedResponse> _gateway(http.BaseRequest request) async {
+    try {
+      return await _send(request, false);
+    } on http.ClientException {
+      if (_closed || request is! http.Request || request.method != 'GET') rethrow;
+      return _send(http.Request('GET', request.url)..headers.addAll(request.headers), false);
+    }
+  }
+
+  /// 묶어 둔 연결을 버리고 다음 요청부터 새로 맺는다 — 앱이 뒤에 있다 돌아왔을 때. 날아가던 요청은 끊기고
+  /// GET 이면 새 묶음으로 한 번 더 간다.
+  void freshConnections() {
+    final make = _make;
+    if (_closed || make == null) return;
+    final old = _inner;
+    _inner = make();
+    old.close();
   }
 
   Future<http.StreamedResponse> _send(http.BaseRequest request, bool viaDirect) async {

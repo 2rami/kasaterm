@@ -518,6 +518,15 @@ class Server {
   /// 이 주소가 앱 안 카사넷 입구(데스크톱 직통)로 가는가.
   bool isDirect(Uri u) => _kasanet?.owns(u) ?? false;
 
+  /// 앱이 뒤에 있다 돌아왔다 — 그 사이 끊겼을 묶어 둔 연결을 버린다(`main.dart` 복귀).
+  void freshConnections() => _client.freshConnections();
+
+  /// 앱을 다시 켜도 같은 연결인지 가리는 값(`resume_spot.dart`) — 계정이면 관문과 계정, 옛 주소면 그 주소.
+  String get resumeScope => switch (account) {
+    final a? => '${a.origin}|${a.account}',
+    null => root.toString(),
+  };
+
   /// (직통인가, 왕복 ms). 아직 모르는 기계·옛 주소면 null.
   (bool, int?)? pathOf(String? machine) => _kasanet?.pathOf(machine);
 
@@ -537,7 +546,7 @@ class Server {
 
   final Uri root;
   final AccountSession? account;
-  late final http.Client _client;
+  late final OriginClient _client;
   final Object _accountCacheIdentity = Object();
   Object get cacheIdentity => account == null ? root.toString() : _accountCacheIdentity;
   final Set<void Function()> _closeListeners = {};

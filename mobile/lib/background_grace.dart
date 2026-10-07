@@ -22,6 +22,10 @@ class BackgroundGrace extends ChangeNotifier with WidgetsBindingObserver {
 
   bool _live = true;
   bool get live => _live;
+
+  /// 뒤에 갔다 돌아온 순간 — 화면들이 다시 붙기 전에 먼저 부른다. 유예 안에 돌아와도 부른다: 묶어 둔 HTTP 연결은
+  /// 그 사이 끊겼을 수 있다.
+  VoidCallback? onReturn;
   bool _away = false;
   bool _attached = false;
   Timer? _cap;
@@ -40,6 +44,7 @@ class BackgroundGrace extends ChangeNotifier with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.resumed:
+        if (_away) onReturn?.call();
         _away = false;
         _cap?.cancel();
         _cap = null;

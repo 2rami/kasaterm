@@ -13,6 +13,7 @@ import 'hub_prefs.dart';
 import 'kasanet.dart';
 import 'look.dart';
 import 'push.dart';
+import 'resume_spot.dart';
 import 'screens/approval_screen.dart';
 import 'screens/controls.dart';
 import 'screens/connect.dart';
@@ -358,6 +359,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   Server? _boundServer;
   AppLink? _pendingLink;
 
+  /// 앱이 거둬지기 전에 보던 학생 화면 — 연결이 서면 그리로 돌아간다.
+  ResumeSpot? _spot;
+
   /// 기다림 화면을 한 번 봤나 — 그 뒤의 「다시 확인」은 그 화면의 단추가 진행을 보이고,
   /// 쌍둥이는 켜고 처음 확인할 때만 나온다.
   bool _waited = false;
@@ -371,13 +375,16 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    BackgroundGrace.instance.attach();
+    BackgroundGrace.instance
+      ..attach()
+      ..onReturn = () => _connection.server?.freshConnections();
     phoneThemeSync.bind(null);
     weather.bind(null);
     _connection.addListener(_changed);
     _connection.beforeDisconnect = PushBridge.instance.unbind;
     unawaited(PushBridge.instance.unbind());
     _connection.restore(bakedRoot: _baked, preferBaked: _preferBaked);
+    unawaited(_takeSpot());
     AppLinkObserver.instance.attach(_openLink);
     ApprovalCenter.instance.onNew = _announceApproval;
     if (_openApproval.isNotEmpty) {
@@ -398,6 +405,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     ApprovalCenter.instance.onNew = null;
+    BackgroundGrace.instance.onReturn = null;
     _approvalBanner?.remove();
     AppLinkObserver.instance.detach();
     _connection.removeListener(_changed);
@@ -424,7 +432,30 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _openLink(AppLink link) async {
+  /// 링크·알림·검증 손잡이로 켜졌으면 그쪽이 먼저다 — 이미 다른 화면을 열었으면 끼어들지 않는다.
+  Future<void> _takeSpot() async {
+    final spot = await const ResumeSpotStore().take();
+    if (!mounted || spot == null || !spot.freshAt(DateTime.now())) return;
+    _spot = spot;
+    _resumeSpot();
+  }
+
+  void _resumeSpot() {
+    final spot = _spot;
+    final server = _connection.server;
+    if (spot == null || server == null || server.isClosed) return;
+    _spot = null;
+    if (spot.scope != server.resumeScope ||
+        _pendingLink != null ||
+        _openPane.isNotEmpty ||
+        _openApproval.isNotEmpty ||
+        (navigatorKey.currentState?.canPop() ?? true)) {
+      return;
+    }
+    unawaited(_openLink(AppLink(pane: spot.pane, machine: spot.machine), spot: spot));
+  }
+
+  Future<void> _openLink(AppLink link, {ResumeSpot? spot}) async {
     if (link.approval case final id?) {
       if (_connection.account == null) {
         if (_connection.phase == ConnectionPhase.restoring) _pendingLink = link;
@@ -470,7 +501,13 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
           server: s,
           pane: found,
           initialScroll: link.scroll,
-          initialView: link.scroll == null ? null : PaneView.terminal,
+          initialView: spot != null
+              ? PaneView.values.asNameMap()[spot.view]
+              : link.scroll == null
+              ? null
+              : PaneView.terminal,
+          initialChatDraft: spot?.chatDraft ?? '',
+          initialTermDraft: spot?.termDraft ?? '',
         ),
       ),
     );
@@ -583,6 +620,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
           final pending = _pendingLink;
           _pendingLink = null;
           if (server != null && pending != null) unawaited(_openLink(pending));
+          if (pending == null) _resumeSpot();
         }
       });
       if (server != null) _loadTokens(server);

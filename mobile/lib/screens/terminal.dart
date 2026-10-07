@@ -12,6 +12,7 @@ import '../grid_canvas.dart';
 import '../grid_select.dart';
 import '../hardware_keys.dart';
 import '../live_input.dart';
+import '../resume_spot.dart';
 import '../image_attachment.dart';
 import '../photo_attachment_button.dart';
 import '../hub_model.dart';
@@ -36,10 +37,17 @@ class TerminalScreen extends StatefulWidget {
     this.session,
     this.pickImage,
     this.initialView,
+    this.initialChatDraft = '',
+    this.initialTermDraft = '',
   });
 
   final Server server;
   final Pane pane;
+
+  /// 앱이 거둬졌다 다시 켜졌을 때 이어 쓰는 글(`resume_spot.dart`). 터미널 쪽 글이 있으면 적어 두기로 연다 —
+  /// 바로 치기였으면 그 글은 이미 화면 입력상자에 있어 남기지 않는다.
+  final String initialChatDraft;
+  final String initialTermDraft;
 
   /// 열 때의 쪽. 없으면 둘째 쪽(대화·명령 묶음)이 먼저다 — 지난번에 고른 쪽을 이어받지 않는다
   /// (2026-10-07 「대화를 기본으로 하고 x 옆에 터미널 아이콘으로 터미널 보기」).
@@ -83,7 +91,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   /// 바로 치기(기본) — 확정된 글자가 곧바로 화면의 입력상자에 붙는다. 끄면 아래
   /// 칸에 적어 두었다 한 번에 보낸다(긴 글을 다듬을 때).
-  bool _live = true;
+  late bool _live = widget.initialTermDraft.isEmpty;
   final _liveInput = LiveInput();
   String _composing = '';
   DateTime _lastLiveSend = DateTime.fromMillisecondsSinceEpoch(0);
@@ -128,9 +136,28 @@ class _TerminalScreenState extends State<TerminalScreen> {
   int get _shownPage =>
       _hasSecond(_pane) && _facing.value == PaneView.chat ? 1 : 0;
 
+  /// 뒤로 가는 순간 보던 자리를 적어 둔다 — 그 사이 iOS 가 앱을 거두면 다시 켤 때 여기로 돌아온다.
+  late final AppLifecycleListener _lifecycle;
+
+  void _keepSpot() {
+    if (widget.server.isClosed) return;
+    unawaited(const ResumeSpotStore().save(ResumeSpot(
+      scope: widget.server.resumeScope,
+      pane: _pane.id,
+      machine: _pane.machine,
+      view: _facing.value.name,
+      chatDraft: _chatInput.text,
+      termDraft: _live ? '' : _input.text,
+      at: DateTime.now(),
+    )));
+  }
+
   @override
   void initState() {
     super.initState();
+    _chatInput.text = widget.initialChatDraft;
+    _input.text = widget.initialTermDraft;
+    _lifecycle = AppLifecycleListener(onHide: _keepSpot);
     _facing.addListener(_followView);
     BackgroundGrace.instance.addListener(_graceChanged);
     _inputFocus.onKeyEvent = _onHardwareKey;
@@ -183,6 +210,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   void dispose() {
+    _lifecycle.dispose();
+    // 닫고 나간 화면으로 다시 끌려오지 않게.
+    unawaited(const ResumeSpotStore().clear());
     _stopPaneRefresh();
     _facing
       ..removeListener(_followView)

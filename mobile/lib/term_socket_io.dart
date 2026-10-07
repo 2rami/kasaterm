@@ -27,14 +27,21 @@ class _HandshakeClient implements HttpClient {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-WebSocketChannel connectTermSocket(Uri uri, {List<String>? protocols}) {
-  if (protocols == null) return WebSocketChannel.connect(uri);
+/// [ping] 마다 핑을 보내고 그만큼 안에 퐁이 안 오면 닫는다. 폰이 망을 갈아타거나 앱이 멈춘 사이 끊긴 소켓은 닫힘
+/// 신호 없이 반쯤 열린 채 남아, 핑이 없으면 화면이 멈춘 채 다시 붙지 않았다.
+WebSocketChannel connectTermSocket(
+  Uri uri, {
+  List<String>? protocols,
+  Duration? ping,
+}) {
+  if (protocols == null) return IOWebSocketChannel.connect(uri, pingInterval: ping);
   final origin = uri.replace(scheme: uri.scheme == 'wss' ? 'https' : 'http');
   final client = _HandshakeClient(origin);
   final channel = IOWebSocketChannel.connect(
     uri,
     protocols: protocols,
     customClient: client,
+    pingInterval: ping,
     connectTimeout: const Duration(seconds: 15),
   );
   channel.ready.then(

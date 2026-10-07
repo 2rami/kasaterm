@@ -178,17 +178,46 @@ void main() {
     model.dispose();
   });
 
-  test('주소 기계에 못 닿으면 지난 목록을 두고 오류만 알린다', () async {
+  test('주소 기계에 거듭 못 닿으면 지난 목록을 두고 오류만 알린다', () async {
     final server = LiveServer();
     final first = HubModel(server);
     await first.refresh();
     first.dispose();
     final broken = _FailingServer(server);
     final model = HubModel(broken);
+    // 한 번은 띠 없이 — 관문이 다시 켜지거나 업링크가 다시 붙는 몇 초다.
     await model.refresh();
-    expect(model.error, isNotNull);
+    expect(model.error, isNull);
+    expect(section(model, null)?.studentCount, 1);
+    await model.refresh();
+    expect(model.error, contains('다시 잇는 중'));
     expect(model.showingCached, isFalse);
     expect(section(model, null)?.studentCount, 1);
+    model.dispose();
+  });
+
+  testWidgets('주소 기계를 못 받으면 박자를 기다리지 않고 1초 뒤 다시 묻고, 못 받을수록 길게 쉬다 돌아오면 띠를 걷는다', (tester) async {
+    final server = _FlakyServer()..statusAware = false;
+    final model = HubModel(server)..start();
+    await tester.pump();
+    expect(model.error, isNull);
+    server.down = true;
+    final before = server.count('panes:');
+    await tester.pump(HubModel.pollEvery);
+    expect(server.count('panes:'), before + 1);
+    expect(model.error, isNull);
+    await tester.pump(HubModel.retryFirst);
+    expect(server.count('panes:'), before + 2);
+    expect(model.error, contains('닿지 못했다'));
+    // 다음은 2초 뒤 — 1초 만에 또 묻지 않는다.
+    await tester.pump(const Duration(seconds: 1));
+    expect(server.count('panes:'), before + 2);
+    await tester.pump(const Duration(seconds: 1));
+    expect(server.count('panes:'), before + 3);
+    server.down = false;
+    await tester.pump(const Duration(seconds: 4));
+    expect(server.count('panes:'), before + 4);
+    expect(model.error, isNull);
     model.dispose();
   });
 
@@ -363,6 +392,20 @@ void main() {
     expect(buzz, ['HapticFeedbackType.mediumImpact']);
     model.dispose();
   });
+}
+
+/// 주소 기계에만 끊겼다 붙는 서버.
+class _FlakyServer extends LiveServer {
+  bool down = false;
+
+  @override
+  Future<List<Pane>> panes({String? machine}) async {
+    if (down && machine == null) {
+      calls.add('panes:');
+      throw const ServerException('관문 에 닿지 못했다');
+    }
+    return super.panes(machine: machine);
+  }
 }
 
 /// 주소 기계에 전혀 닿지 않는 서버 — 같은 주소라 기억은 공유한다.

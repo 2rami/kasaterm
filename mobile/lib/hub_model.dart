@@ -106,6 +106,10 @@ class HubModel extends ChangeNotifier {
   /// 목록 요청 하나의 상한. 관문 왕복이 1초 안팎이라 넉넉하고, 넘으면 그 기계만 직전 것을 둔다.
   static const listTimeout = Duration(seconds: 10);
 
+  /// 주소 기계 목록을 못 받으면 박자를 기다리지 않고 이만큼 뒤 다시 묻고, 못 받을수록 두 배씩 [retryMax] 까지 쉰다.
+  static const retryFirst = Duration(seconds: 1);
+  static const retryMax = Duration(seconds: 30);
+
   static final Map<Object, _Snapshot> _cache = {};
 
   static void clearCache() => _cache.clear();
@@ -181,6 +185,12 @@ class HubModel extends ChangeNotifier {
   bool _disposed = false;
   bool _prefsLoaded = false;
   Timer? _timer;
+
+  /// 주소 기계 목록을 잇달아 못 받은 횟수. 보던 목록이 있으면 한 번은 띠를 안 띄운다 — 관문이 다시 켜지는 몇 초,
+  /// 데스크톱 업링크가 다시 붙는 2초(맥북은 20분쯤마다 그런다), 폰이 망을 갈아타는 순간이 그렇다(2026-10-07
+  /// 「relay … 닿지 못했다」 제보). 그동안은 [_rootRetry] 가 박자 대신 다시 묻는다.
+  int _rootFails = 0;
+  Timer? _rootRetry;
 
   final Map<String, Future<void>> _inflight = {};
   final Set<String> _again = {};
@@ -278,6 +288,8 @@ class HubModel extends ChangeNotifier {
     _running = false;
     _timer?.cancel();
     _timer = null;
+    _rootRetry?.cancel();
+    _rootRetry = null;
     _watch.clear();
     _watchOk.clear();
     for (final e in _sleeps.entries) {
@@ -332,7 +344,7 @@ class HubModel extends ChangeNotifier {
 
   void _tick() {
     for (final key in [
-      _rootKey,
+      if (_rootFails == 0) _rootKey,
       for (final m in _machines)
         if (m.online) m.route,
     ]) {
@@ -362,14 +374,31 @@ class HubModel extends ChangeNotifier {
       _seeded.remove(_rootKey);
       error = null;
       updatedAt = DateTime.now();
+      _rootFails = 0;
+      _rootRetry?.cancel();
+      _rootRetry = null;
     } on ServerException catch (e) {
-      error = e.message;
+      _rootFailed(e.message);
     } on TimeoutException {
-      error = '${server.describe()} 응답이 늦다';
+      _rootFailed('${server.describe()} 응답이 늦다');
     } catch (_) {
-      error = '${server.describe()} 에 닿지 못했다';
+      _rootFailed('${server.describe()} 에 닿지 못했다');
     }
     _compose();
+  }
+
+  void _rootFailed(String why) {
+    if (_disposed) return;
+    _rootFails++;
+    if (_rootPanes == null || _rootFails > 1) error = '$why — 다시 잇는 중';
+    _rootRetry?.cancel();
+    _rootRetry = null;
+    if (!_running) return;
+    final wait = retryFirst * (1 << (_rootFails - 1).clamp(0, 5));
+    _rootRetry = Timer(wait > retryMax ? retryMax : wait, () {
+      _rootRetry = null;
+      unawaited(_refreshSource(_rootKey));
+    });
   }
 
   /// 명부를 받으면 새로 켜졌거나 처음 보는 기계를 바로 읽기 시작한다 — 주소 기계의

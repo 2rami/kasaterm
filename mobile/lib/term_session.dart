@@ -16,13 +16,22 @@ enum TermState { connecting, connected, reconnecting, gone }
 /// 규약: binary 프레임이 키 입력, text 프레임이 제어 JSON 이다. 키를 text 로
 /// 보내면 서버가 JSON 으로 읽고 조용히 버린다.
 class TermSession extends ChangeNotifier {
-  TermSession(this.server, this.pane, {this.holdIdle = defaultHoldIdle}) {
+  TermSession(
+    this.server,
+    this.pane, {
+    this.holdIdle = defaultHoldIdle,
+    this.ping = defaultPing,
+  }) {
     server.addCloseListener(_serverClosed);
     server.routeChanges?.addListener(_routeChanged);
   }
 
   /// 폰에서 마지막으로 친 뒤 이만큼 조용하면 쥔 원본 격자를 놓는다.
   static const defaultHoldIdle = Duration(seconds: 60);
+
+  /// 반쯤 열린 소켓을 알아채는 박자 — 핑 뒤 이만큼 퐁이 없으면 끊긴 것으로 보고 다시 붙는다(최대 두 배 걸린다).
+  static const defaultPing = Duration(seconds: 15);
+  final Duration ping;
 
   final Server server;
   final Pane pane;
@@ -97,7 +106,7 @@ class TermSession extends ChangeNotifier {
     }
     final uri = _wsUri();
     _direct = server.isDirect(uri.replace(scheme: 'http'));
-    final ch = connectTermSocket(uri, protocols: server.wsProtocolsFor(uri));
+    final ch = connectTermSocket(uri, protocols: server.wsProtocolsFor(uri), ping: ping);
     _channel = ch;
     var opened = false;
     _sub = ch.stream.listen(

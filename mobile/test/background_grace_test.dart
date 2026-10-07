@@ -53,6 +53,21 @@ void main() {
     expect(grace.live, isTrue);
   });
 
+  testWidgets('유예 안에 돌아와도 돌아온 순간을 알린다 — 묶어 둔 연결은 그 사이 끊겼을 수 있다', (tester) async {
+    var returns = 0;
+    grace.onReturn = () => returns++;
+    addTearDown(() => grace.onReturn = null);
+    grace.didChangeAppLifecycleState(AppLifecycleState.inactive);
+    grace.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    expect(returns, 0);
+    grace.didChangeAppLifecycleState(AppLifecycleState.hidden);
+    await tester.pump(const Duration(seconds: 3));
+    grace.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    expect(returns, 1);
+    expect(grace.live, isTrue);
+    await tester.pump();
+  });
+
   testWidgets('받은 시간이 다 되면 닫고, 돌아오면 다시 연다', (tester) async {
     grace.didChangeAppLifecycleState(AppLifecycleState.hidden);
     await tester.pump(BackgroundGrace.cap);

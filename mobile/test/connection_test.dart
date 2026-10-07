@@ -213,4 +213,45 @@ void main() {
       connection.dispose();
     },
   );
+
+  testWidgets('데스크톱을 못 찾아 기다리는 동안 스스로 다시 묻고, 닿으면 허브로 간다', (tester) async {
+    var desktopStatus = 503;
+    var asked = 0;
+    final store = MemoryStore()..value = SavedConnection(account: session());
+    final connection = ConnectionController(
+      store: store,
+      relayFactory: (origin, credentials) => RelayAccountApi(
+        origin,
+        session: credentials,
+        client: MockClient((request) async => request.url.path == '/relay/whoami'
+            ? http.Response('{"ok":true,"account":"fixture","device_id":"phone-fixture","kind":"phone"}', 200)
+            : http.Response('{"ok":true,"devices":[]}', 200)),
+      ),
+      serverFactory: (session) => Server.account(
+        session,
+        client: MockClient((_) async {
+          asked++;
+          return http.Response('{"name":"desktop","owner":true}', desktopStatus);
+        }),
+      ),
+    );
+    await connection.restore();
+    expect(connection.phase, ConnectionPhase.waiting);
+    expect(asked, 1);
+    await tester.pump(ConnectionController.waitRetryFirst);
+    await tester.pump();
+    expect(asked, 2);
+    expect(connection.phase, ConnectionPhase.waiting);
+    // 둘째부터는 두 배 — 2초 만에 또 묻지 않는다.
+    await tester.pump(ConnectionController.waitRetryFirst);
+    expect(asked, 2);
+    desktopStatus = 200;
+    await tester.pump(ConnectionController.waitRetryFirst);
+    await tester.pump();
+    expect(asked, 3);
+    expect(connection.phase, ConnectionPhase.ready);
+    await tester.pump(ConnectionController.waitRetryMax);
+    expect(asked, 3);
+    connection.dispose();
+  });
 }
