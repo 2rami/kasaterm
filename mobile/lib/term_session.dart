@@ -232,8 +232,8 @@ class TermSession extends ChangeNotifier {
     _viewTimer = Timer(const Duration(milliseconds: 250), _syncView);
   }
 
-  /// 폰 폭으로 접은 터미널 보기가 보이는 동안만 쥘 수 있다 — 대화 보기·데스크톱 격자 그대로
-  /// 보기에선 원본 격자가 폰 크기일 까닭이 없어 놓는다.
+  /// 폰 폭으로 접은 터미널 보기가 보이는 동안만 쥘 수 있다 — 대화 보기에선 원본 격자가 폰 크기일
+  /// 까닭이 없어 놓는다.
   set holdViewport(bool on) {
     if (_holdView == on) return;
     _holdView = on;

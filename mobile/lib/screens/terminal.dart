@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
 import '../grid_canvas.dart';
+import '../grid_select.dart';
 import '../hardware_keys.dart';
 import '../live_input.dart';
 import '../image_attachment.dart';
@@ -90,13 +91,25 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 입력칸을 프로그램이 비우는 동안 — 그 변화를 지우기로 보내지 않게.
   bool _resetting = false;
 
-  /// 폰 폭으로 접어 보기(기본). 끄면 데스크톱 격자 그대로를 옆으로 밀어 읽는다.
-  bool _wrap = true;
+  /// 터미널 쪽 글자 고르기 — 마크다운 글처럼 길게 눌러 고르고 손잡이로 넓힌다. 초점은 잡지 않는다:
+  /// 잡으면 터미널을 누를 때마다 입력칸이 초점을 잃어 자판이 내려간다. 대신 치기·쪽 넘김에 고름을 걷는다.
+  final _selection = GlobalKey<SelectionAreaState>();
+  final _selectionFocus = FocusNode(canRequestFocus: false, skipTraversal: true);
 
   /// 답장·키를 보낼 때마다 올린다 — 화면이 맨 아래로 내려간다.
   int _bottomTick = 0;
 
-  void _toBottom() => setState(() => _bottomTick++);
+  void _toBottom() {
+    _dropSelection();
+    setState(() => _bottomTick++);
+  }
+
+  void _dropSelection() =>
+      _selection.currentState?.selectableRegion.clearSelection();
+
+  void _focusMoved() {
+    if (_inputFocus.hasFocus || _chatFocus.hasFocus) _dropSelection();
+  }
 
   /// 지금 보는 쪽 — 화면마다 따로다(아이패드 여러 열이 서로의 쪽을 끌고 가지 않게).
   late final _facing = ValueNotifier<PaneView>(
@@ -121,6 +134,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _facing.addListener(_followView);
     BackgroundGrace.instance.addListener(_graceChanged);
     _inputFocus.onKeyEvent = _onHardwareKey;
+    _inputFocus.addListener(_focusMoved);
+    _chatFocus.addListener(_focusMoved);
     _session.connect();
     _startPaneRefresh();
   }
@@ -178,6 +193,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _inputFocus.dispose();
     _chatInput.dispose();
     _chatFocus.dispose();
+    _selectionFocus.dispose();
     _pages.dispose();
     super.dispose();
   }
@@ -197,6 +213,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   Future<void> _send(TextEditingController field, FocusNode focus) async {
     final text = field.text;
     if (_sending || _attaching || (text.isEmpty && !_pendingAttachment)) return;
+    _dropSelection();
     setState(() {
       _sending = true;
       _bottomTick++;
@@ -227,6 +244,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _sendLive(List<int> bytes) {
     if (bytes.isEmpty) return;
+    _dropSelection();
     _session.sendBytes(bytes);
     _lastLiveSend = DateTime.now();
     _bottomTick++;
@@ -370,6 +388,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 있었으면 새 쪽 입력칸으로 옮긴다 — 두 칸 다 살아 있어 자판이 내려갔다 올라오지 않는다.
   void _followView() {
     if (!mounted) return;
+    _dropSelection();
     final want = _shownPage;
     if (_inputFocus.hasFocus || _chatFocus.hasFocus) {
       (want == 1 ? _chatFocus : _inputFocus).requestFocus();
@@ -387,14 +406,28 @@ class _TerminalScreenState extends State<TerminalScreen> {
     }
   }
 
-  /// 밀기를 받을 자리인가. 뒤로 가기 띠에서 시작한 손가락은 뒤로 가기 몫이고, 격자 그대로
-  /// 보기는 손가락이 격자를 상하좌우로 끌어 읽으니 그 쪽에선 단추로만 바꾼다.
+  /// 밀기를 받을 자리인가. 뒤로 가기 띠에서 시작한 손가락은 뒤로 가기 몫이다.
   bool _swipeStarts(Offset at) {
     if (!_hasSecond(_pane) || !_pages.hasClients) return false;
     final edge = math.max(MediaQuery.paddingOf(context).left, Look.backEdge);
-    if (at.dx < edge) return false;
-    return _wrap || (_pages.page ?? 0) >= 0.5;
+    return at.dx >= edge;
   }
+
+  Map<Type, GestureRecognizerFactory> get _swipeGestures => {
+    _ViewSwipe: GestureRecognizerFactoryWithHandlers<_ViewSwipe>(
+      () => _ViewSwipe(debugOwner: this),
+      (r) => r
+        ..starts = _swipeStarts
+        ..onStart = _swipeStart
+        ..onUpdate = (d) {
+          _drag?.update(d);
+        }
+        ..onEnd = _swipeEnd
+        ..onCancel = () {
+          _drag?.cancel();
+        },
+    ),
+  };
 
   void _swipeStart(DragStartDetails d) =>
       _drag = _pages.position.drag(d, () => _drag = null);
@@ -417,6 +450,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _afterLayout(() {
       switch (n) {
         case ScrollStartNotification():
+          _dropSelection();
           if (!_paging) setState(() => _paging = true);
         case ScrollUpdateNotification():
           // 학생이 나가 대화 쪽이 사라지며 되돌아가는 것은 고른 보기를 바꾸지 않는다.
@@ -465,7 +499,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       final chat = second && _facing.value == PaneView.chat;
       // 폰 폭으로 접어 보는 터미널에서 친 동안만 원본 격자를 폰 크기로 쥔다(TermSession.holdViewport).
       // 셸 칸은 쥐지 않는다 — 명령 묶음·줄여 보기로 원본 크기 없이 그린다(docs/mirror-render.md).
-      final hold = _wrap && !chat && !blocks;
+      final hold = !chat && !blocks;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) s.holdViewport = hold;
       });
@@ -568,23 +602,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
                 ),
               ],
             ),
+            // 보기 단추와 닫기 둘뿐이다. 글자는 터미널을 길게 눌러 바로 고른다 — 앱바의 「글자 선택·복사」 시트와
+            // 「격자 그대로 보기」는 걷었다(2026-10-07 「상단 버튼은 전환 버튼만 남겨 두자」).
             actions: [
-              // 글자 선택·접기는 격자 얘기다 — 대화 보기에선 말풍선을 꾹 눌러 복사한다.
-              if (!chat) ...[
-                // 글자 선택 — 격자는 손가락으로 못 긁으니 화면 글자를 그대로 선택 상자에
-                // 띄운다(2026-09-10 지시 「꾹 누르는 건 선택이 안 되는데 클립보드 기능」).
-                IconButton(
-                  tooltip: '글자 선택·복사',
-                  onPressed: () => _selectText(s),
-                  icon: const Icon(Icons.content_copy_outlined),
-                ),
-                IconButton(
-                  tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
-                  isSelected: _wrap,
-                  onPressed: () => setState(() => _wrap = !_wrap),
-                  icon: const Icon(Icons.wrap_text),
-                ),
-              ],
               // 닫기 바로 옆 — 아이콘은 누르면 갈 쪽이다. 앱바 밑 전환 줄 44 를 걷어 그만큼 글이 더 보인다.
               if (second)
                 IconButton(
@@ -618,22 +638,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                     onNotification: _onPageScroll,
                     child: RawGestureDetector(
                       behavior: HitTestBehavior.translucent,
-                      gestures: {
-                        _ViewSwipe:
-                            GestureRecognizerFactoryWithHandlers<_ViewSwipe>(
-                              () => _ViewSwipe(debugOwner: this),
-                              (r) => r
-                                ..starts = _swipeStarts
-                                ..onStart = _swipeStart
-                                ..onUpdate = (d) {
-                                  _drag?.update(d);
-                                }
-                                ..onEnd = _swipeEnd
-                                ..onCancel = () {
-                                  _drag?.cancel();
-                                },
-                            ),
-                      },
+                      gestures: _swipeGestures,
                       child: PageView(
                         controller: _pages,
                         physics: const NeverScrollableScrollPhysics(),
@@ -645,7 +650,18 @@ class _TerminalScreenState extends State<TerminalScreen> {
                             chat ? 1 : 0,
                             Padding(
                               padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                              child: _view(s),
+                              child: SelectionArea(
+                                key: _selection,
+                                focusNode: _selectionFocus,
+                                contextMenuBuilder: gridSelectionMenu,
+                                // 고르기 영역의 가로 끌기(마우스 고르기용)보다 먼저 밀기를 판정한다 —
+                                // 안쪽에 한 벌 더 둔다. 어느 쪽이 이겨도 같은 쪽 넘김이다.
+                                child: RawGestureDetector(
+                                  behavior: HitTestBehavior.translucent,
+                                  gestures: _swipeGestures,
+                                  child: _view(s),
+                                ),
+                              ),
                             ),
                           ),
                           if (blocks)
@@ -798,64 +814,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
     }),
   );
 
-  /// 지난 줄과 살아 있는 화면을 글자로 이어 붙여 iOS 선택 손잡이가 붙는 상자에 띄운다.
-  /// 끝 공백은 걷고 빈 줄 뭉치는 하나로 — 격자 그대로 붙이면 절반이 공백이다.
-  Future<void> _selectText(TermSession s) {
-    final lines = <String>[
-      for (final r in s.history) r.map((x) => x.text).join().trimRight(),
-      for (final r in s.grid.lines) r.map((x) => x.text).join().trimRight(),
-    ];
-    final buf = <String>[];
-    for (final l in lines) {
-      if (l.isEmpty && (buf.isEmpty || buf.last.isEmpty)) continue;
-      buf.add(l);
-    }
-    final text = buf.join('\n').trim();
-    return showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheet) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.7,
-        minChildSize: 0.3,
-        maxChildSize: 0.95,
-        builder: (context, controller) => Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 8, 4),
-              child: Row(
-                children: [
-                  Text('글자 선택', style: Theme.of(context).textTheme.titleMedium),
-                  const Spacer(),
-                  TextButton.icon(
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(text: text));
-                      if (sheet.mounted) Navigator.of(sheet).pop();
-                    },
-                    icon: const Icon(Icons.copy, size: 18),
-                    label: const Text('전부 복사'),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                controller: controller,
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                child: SelectableText(
-                  text.isEmpty ? '(빈 화면)' : text,
-                  style: const TextStyle(fontFamily: 'TermMono',
-                    fontFamilyFallback: Look.flowMonoFallback, fontSize: 14),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _view(TermSession s) {
     final tokens = s.tokens;
     final palette = TerminalPalette.forViewer(
@@ -863,45 +821,36 @@ class _TerminalScreenState extends State<TerminalScreen> {
       mode: phoneThemeMode.value,
       source: tokens,
     );
-    if (_wrap) {
-      final pane = _pane;
-      return WrappedCanvas(
-        grid: s.grid,
-        history: s.history,
-        historyVersion: s.historyVersion,
-        version: s.grid.version + s.historyVersion,
-        palette: palette,
-        bottomTick: _bottomTick,
-        initialScroll: widget.initialScroll,
-        composing: _live ? _composing : null,
-        onViewport: s.setViewport,
-        onWheel: s.scrollsApp ? s.wheel : null,
-        fullScreen: s.grid.alt,
-        // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
-        student: pane.isWebShell
-            ? null
-            : StudentStyle(
-                slug: pane.slug,
-                name: pane.name,
-                accent: studentAccent(context, pane, tokens),
-                bg: palette.bg,
-                codex: pane.harness == 'codex',
-                session: pane.session,
-                branch: pane.branch,
-                project: pane.cwd
-                    .split('/')
-                    .where((s) => s.isNotEmpty)
-                    .lastOrNull,
-                cwd: pane.cwd,
-              ),
-      );
-    }
-    return GridCanvas(
+    final pane = _pane;
+    return WrappedCanvas(
       grid: s.grid,
-      version: s.grid.version,
+      history: s.history,
+      historyVersion: s.historyVersion,
+      version: s.grid.version + s.historyVersion,
       palette: palette,
+      bottomTick: _bottomTick,
+      initialScroll: widget.initialScroll,
       composing: _live ? _composing : null,
+      onViewport: s.setViewport,
       onWheel: s.scrollsApp ? s.wheel : null,
+      fullScreen: s.grid.alt,
+      // 웹 셸엔 학생이 없다 — 데스크톱 pane 만 학생 꾸밈을 입는다.
+      student: pane.isWebShell
+          ? null
+          : StudentStyle(
+              slug: pane.slug,
+              name: pane.name,
+              accent: studentAccent(context, pane, tokens),
+              bg: palette.bg,
+              codex: pane.harness == 'codex',
+              session: pane.session,
+              branch: pane.branch,
+              project: pane.cwd
+                  .split('/')
+                  .where((s) => s.isNotEmpty)
+                  .lastOrNull,
+              cwd: pane.cwd,
+            ),
     );
   }
 }

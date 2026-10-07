@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -10,6 +11,7 @@ import 'contrast.dart';
 import 'desktop_palette.dart';
 import 'fill_viewer.dart';
 import 'grid.dart';
+import 'grid_select.dart';
 import 'links.dart';
 import 'reflow.dart';
 import 'server.dart';
@@ -572,8 +574,6 @@ class GridCanvas extends StatefulWidget {
     required this.version,
     required this.palette,
     this.fontSize = 13,
-    this.composing,
-    this.onWheel,
     this.contain = false,
   });
 
@@ -584,12 +584,6 @@ class GridCanvas extends StatefulWidget {
 
   /// 격자 전체가 칸에 들어가게 줄여 그린다([FillViewer.contain]).
   final bool contain;
-
-  /// 조합 중인 한글 — 커서 자리에 겹쳐 보인다.
-  final String? composing;
-
-  /// 앱이 스스로 굴리는 화면이면 세로 끌기를 휠 줄로 넘긴다(양수 = 위, 지난 내용).
-  final void Function(int lines)? onWheel;
 
   @override
   State<GridCanvas> createState() => _GridCanvasState();
@@ -613,7 +607,6 @@ class _WheelDrag {
 
 class _GridCanvasState extends State<GridCanvas> {
   final _cache = _RowCache();
-  final _wheel = _WheelDrag();
   late _CellMetrics _metrics = _CellMetrics(widget.fontSize);
 
   @override
@@ -629,18 +622,15 @@ class _GridCanvasState extends State<GridCanvas> {
     final grid = widget.grid;
     final cols = math.max(grid.cols, 1);
     final rows = math.max(grid.rows, 1);
-    final wheel = widget.onWheel;
     return FillViewer(
       content: Size(cols * _metrics.width, rows * _metrics.height),
       background: widget.palette.bg,
       contain: widget.contain,
-      onVerticalPan: wheel == null
-          ? null
-          : (dy) => _wheel.add(dy, _metrics.height, wheel),
       child: _LinkTaps(
         lines: grid.lines,
         cols: grid.cols,
         metrics: _metrics,
+        copyLines: true,
         child: CustomPaint(
           painter: _GridPainter(
             grid: grid,
@@ -648,7 +638,6 @@ class _GridCanvasState extends State<GridCanvas> {
             palette: widget.palette,
             metrics: _metrics,
             cache: _cache,
-            composing: widget.composing,
           ),
         ),
       ),
@@ -970,6 +959,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
         }
       }
       final wheel = widget.onWheel;
+      final selection =
+          DefaultSelectionStyle.of(context).selectionColor ??
+          widget.palette.fg.withValues(alpha: 0.3);
       final contentH = math.max(view.rows, 1) * metrics.height;
       final boxH = widget.fullScreen && constraints.hasBoundedHeight
           ? math.max(contentH, constraints.maxHeight)
@@ -1001,7 +993,12 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                       lines: view.lines,
                       cols: cols,
                       metrics: metrics,
-                      child: CustomPaint(painter: painter(view)),
+                      child: GridSelectable(
+                        text: GridText(view.lines, folds: view.folds),
+                        cell: Size(metrics.width, metrics.height),
+                        color: selection,
+                        child: CustomPaint(painter: painter(view)),
+                      ),
                     ),
                   ),
                 ),
@@ -1012,11 +1009,14 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                   right: 0,
                   bottom: 0,
                   height: math.max(tail.rows, 1) * metrics.height,
-                  child: _LinkTaps(
-                    lines: tail.lines,
-                    cols: cols,
-                    metrics: metrics,
-                    child: CustomPaint(painter: painter(tail)),
+                  // 붙잡아 둔 입력상자는 스크롤 속 같은 줄의 사본이다 — 고르기는 스크롤 쪽에서만.
+                  child: SelectionContainer.disabled(
+                    child: _LinkTaps(
+                      lines: tail.lines,
+                      cols: cols,
+                      metrics: metrics,
+                      child: CustomPaint(painter: painter(tail)),
+                    ),
                   ),
                 ),
             ],
@@ -1038,41 +1038,69 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
   );
 }
 
-/// 격자 위 손가락 — 주소를 누르면 열기·복사 시트, 아무 줄이나 길게 누르면 그 줄 복사
-/// (2026-09-10 지시 「pane 에서 링크 누르면 브라우저 열리거나 복사」). 스크롤·핀치는
-/// 바깥이 맡고 여기는 탭·길게 누름만 받는다.
+/// 격자 위 손가락 — 주소를 누르면 열기·복사 시트(2026-09-10 지시 「pane 에서 링크 누르면 브라우저
+/// 열리거나 복사」). 주소 위에서 시작한 탭만 받는다 — 나머지 탭은 둘레의 선택 영역이 고름을 걷는 몫이다.
+/// [copyLines] 면 아무 줄이나 길게 눌러 그 줄을 복사한다(선택 영역이 없는 셸 줄여 보기).
+/// 스크롤·핀치는 바깥이 맡는다.
 class _LinkTaps extends StatelessWidget {
   const _LinkTaps({
     required this.lines,
     required this.cols,
     required this.metrics,
     required this.child,
+    this.copyLines = false,
   });
 
   final List<List<Run>> lines;
   final int cols;
   final _CellMetrics metrics;
+  final bool copyLines;
   final Widget child;
 
   (int, int) _cell(Offset p) =>
       ((p.dy / metrics.height).floor(), (p.dx / metrics.width).floor());
 
+  LinkHit? _link(Offset p) {
+    final (row, col) = _cell(p);
+    return linkAt(lines, cols, row, col);
+  }
+
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) => RawGestureDetector(
     behavior: HitTestBehavior.opaque,
-    onTapUp: (d) {
-      final (row, col) = _cell(d.localPosition);
-      final hit = linkAt(lines, cols, row, col);
-      if (hit != null) showLinkSheet(context, hit.url);
-    },
-    onLongPressStart: (d) {
-      final (row, _) = _cell(d.localPosition);
-      if (row < 0 || row >= lines.length) return;
-      HapticFeedback.selectionClick();
-      copyLine(context, lines[row]);
+    gestures: {
+      _LinkTap: GestureRecognizerFactoryWithHandlers<_LinkTap>(
+        _LinkTap.new,
+        (r) => r
+          ..onLink = _link
+          ..onTapUp = (d) {
+            final hit = _link(d.localPosition);
+            if (hit != null) showLinkSheet(context, hit.url);
+          },
+      ),
+      if (copyLines)
+        LongPressGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+              LongPressGestureRecognizer.new,
+              (r) => r.onLongPressStart = (d) {
+                final (row, _) = _cell(d.localPosition);
+                if (row < 0 || row >= lines.length) return;
+                HapticFeedback.selectionClick();
+                copyLine(context, lines[row]);
+              },
+            ),
     },
     child: child,
   );
+}
+
+/// 주소 위에 내린 손가락만 탭 경기에 든다.
+class _LinkTap extends TapGestureRecognizer {
+  LinkHit? Function(Offset local) onLink = (_) => null;
+
+  @override
+  bool isPointerAllowed(PointerDownEvent event) =>
+      onLink(event.localPosition) != null && super.isPointerAllowed(event);
 }
 
 /// 살아 있는 화면의 꼬리(입력상자 위 테두리부터 끝까지) — 붙잡아 둘 부분만 든 격자.

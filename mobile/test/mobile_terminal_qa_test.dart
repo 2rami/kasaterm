@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/claude_style.dart';
 import 'package:kasaterm_mobile/grid_canvas.dart';
+import 'package:kasaterm_mobile/grid_select.dart';
 import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/screens/connect.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
@@ -185,15 +186,24 @@ void main() {
           await tester.drag(scroll, const Offset(0, 160));
           await tester.pump();
           expect(tester.takeException(), isNull);
-          await tester.tap(find.byTooltip('글자 선택·복사'));
-          await tester.pumpAndSettle();
-          final selected = tester.widget<SelectableText>(
-            find.byType(SelectableText),
+          // 고르기는 터미널 위에서 바로 — 전체 선택이면 지난 줄과 화면이 한 글로, 폰 폭에 접힌 줄은 이어서.
+          tester
+              .state<SelectableRegionState>(find.byType(SelectableRegion))
+              .selectAll(SelectionChangedCause.toolbar);
+          await tester.pump();
+          final selected = tester
+              .renderObject<RenderGridSelectable>(find.byType(GridSelectable))
+              .getSelectedContent()!
+              .plainText;
+          expect(
+            selected,
+            contains('한글과 English가 섞인 문장도 폰 화면에서 자연스럽게 이어집니다.'),
           );
-          expect(selected.data, contains('한글과 English'));
-          expect(selected.data, contains('검증 16'));
-          Navigator.of(tester.element(find.byType(SelectableText))).pop();
-          await tester.pumpAndSettle();
+          expect(selected, contains('검증 16'));
+          tester
+              .state<SelectableRegionState>(find.byType(SelectableRegion))
+              .clearSelection();
+          await tester.pump();
           final field = find.byType(TextField).last;
           await tester.tap(field);
           tester.testTextInput.updateEditingValue(

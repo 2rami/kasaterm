@@ -13,12 +13,16 @@ class ReflowedGrid implements GridLines {
     required this.cursorCol,
     required this.cursorVisible,
     this.slots = const [],
+    this.folds = const [],
   });
 
   @override
   final int cols;
   @override
   final List<List<Run>> lines;
+
+  /// 줄마다 앞 줄에서 접혀 이어진 조각인지(새 줄이면 null). 비어 있으면 모두 새 줄이다.
+  final List<Fold?> folds;
   @override
   int get rows => lines.length;
   @override
@@ -30,6 +34,10 @@ class ReflowedGrid implements GridLines {
   @override
   final List<SpriteSlot> slots;
 }
+
+/// 접혀 이어진 조각의 이음새 — 복사할 때 줄바꿈 대신 이어 붙인다. [indent] 는 조각 앞에 채운
+/// 빈 칸 수, [gap] 은 끊으며 버린 빈칸이 있었나.
+typedef Fold = ({int indent, bool gap});
 
 class _Cell {
   _Cell(this.rune, this.run) : width = cellWidth(rune);
@@ -59,13 +67,21 @@ class _Cell {
 /// 한 행을 접은 결과. `starts` 는 각 조각이 원본의 몇 번째 열에서 시작하는지 —
 /// 커서를 어느 조각으로 옮길지 여기서 찾는다.
 class RowReflow {
-  const RowReflow(this.chunks, this.starts, {this.indent = 0});
+  const RowReflow(
+    this.chunks,
+    this.starts, {
+    this.indent = 0,
+    this.gaps = const [],
+  });
   final List<List<Run>> chunks;
   final List<int> starts;
 
   /// 둘째 조각부터 앞에 붙인 빈 칸 수 — 글머리(- • ⎿ 1.)와 들여쓰기 아래로 이어져
   /// 문단이 한 덩어리로 읽힌다.
   final int indent;
+
+  /// `gaps[k]` — k 번째 조각 뒤에서 끊으며 빈칸 하나를 버렸나. 복사할 때 그 빈칸을 되살린다.
+  final List<bool> gaps;
 }
 
 /// `paneCols` 는 원본 pane 의 폭 — 폰보다 좁은 pane(맥미니 창을 다섯으로 쪼갠 30열)의
@@ -149,8 +165,10 @@ RowReflow _reflowCells(List<_Cell> cells, int cols, {int paneCols = 0}) {
   final pad = <_Cell>[for (var p = 0; p < indent; p++) _Cell(0x20, _blank)];
   final chunks = <List<Run>>[];
   final starts = <int>[];
-  void emit(List<_Cell> line) {
+  final gaps = <bool>[];
+  void emit(List<_Cell> line, {bool gap = false}) {
     chunks.add(_runs(chunks.isEmpty ? line : [...pad, ...line]));
+    gaps.add(gap);
   }
 
   var i = 0;
@@ -174,7 +192,7 @@ RowReflow _reflowCells(List<_Cell> cells, int cols, {int paneCols = 0}) {
     if (j < trimmed.length) {
       // 넘쳤다 — 낱말 가운데가 갈리지 않게 가까운 빈칸에서 끊고 그 빈칸은 버린다.
       if (trimmed[j].rune == 0x20) {
-        emit(line);
+        emit(line, gap: true);
         starts.add(start);
         i = j + 1;
         col = start + lineWidth + 1;
@@ -192,7 +210,7 @@ RowReflow _reflowCells(List<_Cell> cells, int cols, {int paneCols = 0}) {
         for (final c in kept) {
           keptWidth += c.width;
         }
-        emit(kept);
+        emit(kept, gap: true);
         starts.add(start);
         i += k + 1;
         col = start + keptWidth + 1;
@@ -204,7 +222,7 @@ RowReflow _reflowCells(List<_Cell> cells, int cols, {int paneCols = 0}) {
     i = j;
     col = start + lineWidth;
   }
-  return RowReflow(chunks, starts, indent: indent);
+  return RowReflow(chunks, starts, indent: indent, gaps: gaps);
 }
 
 /// 글머리 기호 — 이 뒤의 빈칸까지가 이어지는 줄의 들여쓰기다.
@@ -626,6 +644,7 @@ class Reflow {
   ReflowedGrid apply(GridLines grid, int cols) {
     final src = grid.lines;
     final lines = <List<Run>>[];
+    final folds = <Fold?>[];
     int? cursorRow;
     var cursorCol = 0;
     final lineStart = <int>[];
@@ -687,7 +706,18 @@ class Reflow {
           );
         }
       }
-      lines.addAll(e.row.chunks);
+      final row = e.row;
+      for (var k = 0; k < row.chunks.length; k++) {
+        folds.add(
+          k == 0
+              ? null
+              : (
+                  indent: row.indent,
+                  gap: k <= row.gaps.length && row.gaps[k - 1],
+                ),
+        );
+      }
+      lines.addAll(row.chunks);
       r += n;
     }
     var end = lines.length;
@@ -704,6 +734,7 @@ class Reflow {
     return ReflowedGrid(
       cols: cols,
       lines: end == lines.length ? lines : lines.sublist(0, end),
+      folds: end == folds.length ? folds : folds.sublist(0, end),
       cursorRow: cursorRow ?? 0,
       cursorCol: cursorCol,
       cursorVisible: grid.cursorVisible,

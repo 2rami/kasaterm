@@ -187,14 +187,12 @@ void main() {
     await _swipe(tester, const Offset(300, 400), const Offset(-220, 0));
     expect(_page(tester), 1);
     expect(find.byType(ChatComposer), findsOneWidget);
-    expect(find.byTooltip('글자 선택·복사'), findsNothing);
-    expect(find.byTooltip('터미널로 보기'), findsOneWidget);
+    expect(_actions(tester), ['터미널로 보기', 'pane 닫기']);
 
     await _swipe(tester, const Offset(100, 400), const Offset(220, 0));
     expect(_page(tester), 0);
     expect(find.byType(ChatComposer), findsNothing);
-    expect(find.byTooltip('글자 선택·복사'), findsOneWidget);
-    expect(find.byTooltip('대화로 보기'), findsOneWidget);
+    expect(_actions(tester), ['대화로 보기', 'pane 닫기']);
 
     await tester.tap(find.byTooltip('대화로 보기'));
     await tester.pumpAndSettle();
@@ -249,18 +247,6 @@ void main() {
     expect(_page(tester), 1);
     expect(pos.axis, Axis.horizontal);
     expect(pos.pixels, greaterThan(0));
-    await _close(tester);
-  });
-
-  testWidgets('격자 그대로 보기에선 손가락이 격자를 끌고 쪽은 단추로만', (tester) async {
-    await _open(tester);
-    await tester.tap(find.byTooltip('데스크톱 격자 그대로 보기'));
-    await tester.pump();
-    await _swipe(tester, const Offset(300, 400), const Offset(-220, 0));
-    expect(_page(tester), 0);
-    await tester.tap(find.byTooltip('대화로 보기'));
-    await tester.pumpAndSettle();
-    expect(_page(tester), 1);
     await _close(tester);
   });
 
@@ -323,7 +309,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(_page(tester), 0);
     expect(find.byType(ChatComposer), findsNothing);
-    expect(_actions(tester), ['글자 선택·복사', isA<String>(), '대화로 보기', 'pane 닫기']);
+    expect(_actions(tester), ['대화로 보기', 'pane 닫기']);
     expect(find.widgetWithIcon(IconButton, Icons.forum_outlined), findsOneWidget);
 
     await tester.tap(find.byTooltip('대화로 보기'));
