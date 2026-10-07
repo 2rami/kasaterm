@@ -67,6 +67,65 @@ text at 256 KiB and PNGs at 2.5 MB. Over HTTP a capture always returns
 `peek|capture %N@machine` (or `name@machine`, or `--address JSON`) and
 `where --machine <label|id>`.
 
+`collab.transcript {address,turns}` / `GET /collab/transcript` is the same read route
+for a pane's recent conversation turns (user and agent text, at most 50 turns,
+256 KiB). A source refusal (stale address, no bound transcript) comes back as
+`remote_error: <reason>`.
+
+### Writing to panes and rooms on any machine
+
+`collab.act {op,address|machine_id,...}` / `POST /collab/act` (64 KiB body) writes
+to a pane or room. It routes like `tell` — verified direct → roster `base` →
+gateway relay — and checks the route the same way (`/collab/board?scope=local`
+must name the machine as online, with the same token), then sends the request
+with `local_only`. The receiving machine validates `surface_key` and identity
+against its own pane and refuses stale addresses
+(`surface identity changed; refresh the board`). Raw input has no tell guard:
+no receipt, no empty-prompt wait. Text and keys are refused for mirror panes; use
+the source machine's address. An old receiver answers `unsupported_api`.
+
+| op | parameters | effect on the addressed machine |
+|---|---|---|
+| `send_text` / `send_key` | `address`, `text` (≤ 48 KiB) / `key` | raw input (`surface.send_text` / `send_key`) |
+| `spawn` | `address` + `tab`, or `machine_id` + `window:"new"`, or `machine_id` alone; `cwd` (must exist there) | shell pane beside / as a tab of the address, in a new room, or in the viewed room; returns its `address` |
+| `focus`, `rename` (`title`), `color` (`color`), `rename_room` (`title`), `persona` (`character`) | `address` | same as the local commands |
+| `move` | `address`, `target` (same machine), `direction` | moves the pane beside the target |
+| `close` | `address`, `force` | refuses (`closed:false`, `dirty`) when the pane's folder has uncommitted changes there |
+| `attach` | `source` (another machine's pane), optional `address` (tab host) or `machine_id`, `focus` | opens `source` as a mirror tab on that machine without taking focus unless `focus` |
+
+CLI forms (the same on every machine; `%N@machine`, `name@machine` and
+`--address JSON` are interchangeable in the pane slot):
+
+```sh
+kasaterm-cli summon --machine <machine> [--beside <pane>] [--tab] [--cwd <folder there>] [--name T] [--cmd B] [--json] --stdin
+kasaterm-cli window-new --on <machine> [--cwd <folder there>]      # new room there; prints the empty pane's address
+kasaterm-cli tell --raw <pane> <text> · tell --key <pane> <key>
+kasaterm-cli transcript <pane> [N]
+kasaterm-cli move <pane> <target pane> [left|right|up|down]      # both on one machine
+kasaterm-cli close <pane>… [--force]
+kasaterm-cli rename-window <pane> <title> | <pane> --color #rrggbb | --room <pane> <room title>
+kasaterm-cli focus <pane>
+kasaterm-cli attach <pane> [--on <machine>] [--into <pane>] [--focus]
+kasaterm-cli machines [--json] · identify --machine <machine>   # route: local|direct|relay|none; exit 0 reachable, 1 not
+```
+
+`summon --machine` places the shell (`spawn`), types `cd <folder> && <boot>`
+(`send_text`), waits for the row with that `surface_key` to carry a session, then
+sends the brief with a remote `tell`. Its result is the pane's board address
+(`--json`: `{surface,address,message_id,state,wait}`). The caller is on another
+machine, so `done` does not come back to the calling pane; wait with
+`board --wait name@machine --since <ms>` or use the orchestrator origin env.
+A room tidy across machines is `window-new --on` → `move` → `close` the empty
+shell → `rename-window --room`.
+
+Board rows carry `cwd`: the pane's shell folder (or the folder Claude reports),
+omitted for mirror rows, secret-looking paths and paths over 1 KiB.
+
+`collab.reach` lists every board source with `route` — `local`, `direct`
+(verified roster route), `relay` (gateway) or `none` — even when it has no panes.
+There is no separate web-link command: open a remote pane on a machine with
+`attach`; the phone app reaches every machine's panes directly.
+
 `board --all|--local` selects this API. `board-watch --all --json --since CURSOR`
 streams changes and reports reset requirements explicitly. Legacy invocations
 without the new switches retain their output format.
@@ -102,7 +161,8 @@ last observed room. Machine-level events have no `pane_id` or room fields.
 
 HTTP-only hosts need no Unix socket. Use the explicit global option
 `kasaterm-cli --api http://127.0.0.1:8765 board --all`, with the same prefix for
-`board-watch`, `rooms`, `activity --address`, `peek`, `capture`, `where`, `tell`, and `tell-status`. The CLI maps only
+`board-watch`, `rooms`, `activity --address`, `peek`, `capture`, `where`, `transcript`, `tell`, `tell-status`
+and the address forms of `tell --raw/--key`, `focus`, `move`, `rename-window`, `window-new --on` and `attach`. The CLI maps only
 the new collaboration RPCs to their guarded HTTP endpoints, using system curl
 with redirects disabled and bounded responses. `--api-token-file FILE`, before
 the command, reuses an existing server token when authentication is required;

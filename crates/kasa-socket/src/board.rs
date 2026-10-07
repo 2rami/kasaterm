@@ -42,6 +42,9 @@ const TRACKED: &[&str] = &[
     // 이 칸을 부른(summon·split) 칸의 surface_key — 그 칸이 사는 기기의 `spawned-by.json` 기준. 모르면 null.
     // 나쵸가 「누가 누구를 불렀나」를 ssh 로 각 기기 파일을 읽지 않고 판 하나로 안다.
     "spawned_by",
+    // 칸의 작업 폴더(셸 cwd, claude 칸은 claude 가 알린 폴더). 방 경로는 방 첫 칸 것이라 칸마다 다를 수 있다 —
+    // 나쵸가 다른 기기 칸 폴더를 ssh 없이 안다. 비밀처럼 보이거나 너무 긴 경로는 싣지 않는다(자르면 틀린 경로가 된다).
+    "cwd",
 ];
 
 pub fn now_ms() -> u64 {
@@ -295,6 +298,14 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
                 }
             }
             for name in TRACKED.iter().copied().filter(|name| *name != "address") {
+                if name == "cwd" {
+                    if let Some(path) = row[name].as_str()
+                        .filter(|p| p.len() <= 1024 && crate::nacho_inbox::secret_like(p).is_none())
+                    {
+                        clean[name] = json!(path);
+                    }
+                    continue;
+                }
                 if let Some(text) = row[name].as_str() {
                     clean[name] = json!(short(text, 512));
                 } else if let Some(flag) = row[name].as_bool() {
@@ -389,6 +400,18 @@ mod normalize_panes_tests {
         let moved = json!({"machine_id":"m","surface_key":"k2","surface_id":"%1"});
         assert!(!guard_observation(&mut row, &moved, true, true));
         assert!(row["background"].is_null() && row["subagents"].is_null());
+    }
+
+    /// 칸 폴더는 판에 그대로 실린다 — 다만 비밀처럼 보이는 경로는 빠진다.
+    #[test]
+    fn pane_cwd_rides_the_board_unless_it_looks_secret() {
+        let rows = vec![
+            json!({"address":{"machine_id":"m","surface_key":"a","surface_id":"%2"},"cwd":"/Users/me/repo"}),
+            json!({"address":{"machine_id":"m","surface_key":"b","surface_id":"%3"},"cwd":"/tmp/sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"}),
+        ];
+        let out = normalize_panes("m", "M", &rows, 1).unwrap();
+        assert_eq!(out[0]["cwd"], "/Users/me/repo");
+        assert!(out[1].get("cwd").is_none());
     }
 
     /// 부른 칸은 판을 건너 다른 기기로도 간다. 모르는 칸은 빠지지 않고 null 로 선다 — 읽는 쪽이 칸이 없는

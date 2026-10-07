@@ -1,5 +1,5 @@
 //! One local observer plus an independent remote I/O lane; readers only copy cache.
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use kasa_socket::{
     backend::Backend,
     board::{self, field, BoardStore},
@@ -451,6 +451,13 @@ async fn fetch_json(
         200..=299 => (),
         404 | 405 | 501 => bail!("unsupported_api"),
         401 | 403 => bail!("authentication_required"),
+        // 원본이 거절한 까닭(낡은 주소·기록 없는 칸) — 짧게 잘라 그대로 준다. 판 당겨 오기는 409 를 안 낸다.
+        409 => {
+            let reason = response.json::<Value>().await.ok()
+                .and_then(|v| v["error"].as_str().map(|e| board::short(e, 200)))
+                .unwrap_or_default();
+            bail!("remote_error: {reason}")
+        }
         _ => bail!("remote_error"),
     }
     if response
@@ -630,7 +637,7 @@ fn unresolved_id(base: &str) -> String {
     format!("unresolved:{:016x}", hash.finish())
 }
 
-fn validate_address(actual: &Value, requested: &Value) -> Result<()> {
+pub(crate) fn validate_address(actual: &Value, requested: &Value) -> Result<()> {
     for key in [
         "machine_id",
         "surface_key",
@@ -643,6 +650,47 @@ fn validate_address(actual: &Value, requested: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 다른 기기로 넘기는 일(tell·화면 보기·칸 쓰기)이 쓰는 길: 검증된 직통 → 명부의 base → 관문 우회.
+/// 우회는 넷버드·터널 없이도 닿는다. 받는 기기가 제 칸 신원을 다시 확인한다.
+pub fn remote_base(machine_id: &str) -> Option<String> {
+    known_route(machine_id)
+        .or_else(|| crate::env::env().machines().into_iter()
+            .find(|m| m.machine_id.as_deref() == Some(machine_id)).map(|m| m.base))
+        .or_else(|| relay_base(machine_id))
+}
+
+/// 그 기기를 이 기기 명부에서 부르는 이름 — 거울 칸은 명부 이름으로 연다. 관문 우회 길만 있으면 None.
+pub fn roster_label(machine_id: &str) -> Option<String> {
+    let aliases = service().ok()
+        .and_then(|service| service.aliases.lock().ok().map(|a| a.clone()))
+        .unwrap_or_default();
+    crate::env::env().machines().into_iter()
+        .filter(|m| !is_relay_base(&m.base))
+        .find(|m| m.machine_id.as_deref() == Some(machine_id)
+            || (m.machine_id.is_none() && aliases.get(&m.base).is_some_and(|id| id == machine_id)))
+        .map(|m| m.label)
+}
+
+/// 기기마다 지금 닿는 길 — 직통·관문 중계·끊김. 판 출처 기준이라 그 기기에 칸이 하나도 없어도 줄이 선다.
+pub fn reach() -> Result<Value> {
+    let board = snapshot(&json!({"scope": "all"}))?;
+    let machines: Vec<Value> = board["sources"].as_array().into_iter().flatten().map(|source| {
+        let id = source["machine_id"].as_str().unwrap_or("");
+        let route = if source["is_local"] == true {
+            "local"
+        } else {
+            match known_route(id) {
+                Some(base) if is_relay_base(&base) => "relay",
+                Some(_) => "direct",
+                None => "none",
+            }
+        };
+        json!({"machine_id": id, "label": source["label"], "roster_label": roster_label(id), "state": source["state"],
+            "route": route, "observed_at_ms": source["observed_at_ms"]})
+    }).collect();
+    Ok(json!({"machines": machines}))
 }
 
 /// Internal routing only; callers must still validate the receiving pane.
@@ -782,7 +830,7 @@ const VIEW_TEXT_MAX: usize = 256 * 1024;
 /// 다른 기기로 실어 보내는 캡처 PNG 상한. base64 로 4/3 배가 되어도 `MAX_SOURCE_BYTES` 안에 든다.
 const VIEW_PNG_MAX: usize = 2_500_000;
 
-/// 칸 하나의 화면 글(`peek`)·그림(`capture`)과 기기 하나의 방 배치(`where`). 주소의 기기(`where` 는
+/// 칸 하나의 화면 글(`peek`)·그림(`capture`)·최근 대화(`transcript`)와 기기 하나의 방 배치(`where`). 주소의 기기(`where` 는
 /// `machine_id`, 없으면 이 기기)가 다른 기기면 activity 와 같은 길(직통 → 관문 우회)로 그 기기에 묻는다.
 /// 다른 기기에서 온 요청(`local_only`)은 이 기기 칸만 답하고, 그림은 파일 대신 본문(`png_base64`)으로 준다 —
 /// 요청에 실린 경로를 이 기기 디스크에 쓰지 않는다.
@@ -790,7 +838,7 @@ pub fn view(backend: &dyn Backend, op: &str, params: &Value) -> Result<Value> {
     let local = local_id()?;
     let machine = match op {
         "where" => params["machine_id"].as_str().filter(|m| !m.is_empty()).unwrap_or(local.as_str()).to_owned(),
-        "peek" | "capture" => {
+        "peek" | "capture" | "transcript" => {
             let address = params.get("address").filter(|a| a.is_object()).context("view requires address")?;
             field(address, "machine_id").context("view requires machine_id")?.to_owned()
         }
@@ -816,6 +864,16 @@ pub fn view(backend: &dyn Backend, op: &str, params: &Value) -> Result<Value> {
         bail!("surface identity changed; refresh the board");
     }
     validate_address(&backend.collab_pane_identity(surface)?, address)?;
+    if op == "transcript" {
+        let turns = params["turns"].as_u64().unwrap_or(6).clamp(1, 50) as usize;
+        let mut turns = backend.transcript_tail(surface, turns)?;
+        let mut truncated = false;
+        while turns.len() > 1 && serde_json::to_vec(&turns)?.len() > VIEW_TEXT_MAX {
+            turns.remove(0);
+            truncated = true;
+        }
+        return Ok(json!({"address": address, "turns": turns, "truncated": truncated}));
+    }
     if op == "peek" {
         let lines = params["lines"].as_u64().unwrap_or(30).clamp(1, 2000) as usize;
         let text = backend.peek(surface, lines)?;
@@ -891,12 +949,7 @@ fn view_remote(_op: &str, _machine: &str, _params: &Value) -> Result<Value> {
 
 #[cfg(feature = "net")]
 fn view_remote(op: &str, machine: &str, params: &Value) -> Result<Value> {
-    // tell 과 같은 길: 직통(검증된 길) → 명부의 base → 관문 우회.
-    let base = known_route(machine)
-        .or_else(|| crate::env::env().machines().into_iter()
-            .find(|m| m.machine_id.as_deref() == Some(machine)).map(|m| m.base))
-        .or_else(|| relay_base(machine))
-        .context("remote source has no current unambiguous route")?;
+    let base = remote_base(machine).context("remote source has no current unambiguous route")?;
     let mut remote_params = params.clone();
     remote_params["local_only"] = json!(true);
     if let Some(object) = remote_params.as_object_mut() {
@@ -932,6 +985,8 @@ fn view_remote(op: &str, machine: &str, params: &Value) -> Result<Value> {
     validate_address(&remote_params["address"], &value["address"])?;
     if op == "capture" {
         write_view_capture(&mut value, params["path"].as_str())?;
+    } else if op == "transcript" {
+        ensure!(value["turns"].is_array(), "invalid transcript response");
     } else if !value["text"].is_string() {
         bail!("invalid peek response");
     }
@@ -1010,6 +1065,9 @@ pub mod synthetic {
         }
         fn collab_view(&self, op: &str, params: &Value) -> Result<Value> {
             Ok(json!({"synthetic":true,"op":op,"params":params}))
+        }
+        fn collab_act(&self, params: &Value) -> Result<Value> {
+            Ok(json!({"synthetic":true,"op":params["op"],"params":params}))
         }
     }
 }

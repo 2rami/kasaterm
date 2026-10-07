@@ -1038,6 +1038,12 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(out);
                 return;
             }
+            UserEvent::SocketMirrorPane { label, remote_id, name, cwd, anchor, focus, reply } => {
+                let out = self.mirror_remote_pane_at(anchor.clone(), label, remote_id, name, cwd, *focus)
+                    .map_err(|e| format!("{e:#}"));
+                let _ = reply.send(out);
+                return;
+            }
             UserEvent::RemoteNewRoom(label, reply) => {
                 let out = self.new_remote_room(&label).map_err(|e| format!("{e:#}"));
                 let _ = reply.send(out);

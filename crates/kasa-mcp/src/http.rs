@@ -7757,6 +7757,8 @@ pub fn spawn_http_server_opts(
                 let collab_peek_backend = backend.clone();
                 let collab_capture_backend = backend.clone();
                 let collab_where_backend = backend.clone();
+                let collab_transcript_backend = backend.clone();
+                let collab_act_backend = backend.clone();
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
@@ -7885,6 +7887,20 @@ pub fn spawn_http_server_opts(
                         collab_read_handler(collab_capture_backend.clone(),"capture",q)))
                     .route("/collab/where", get(move |q: Query<std::collections::HashMap<String,String>>|
                         collab_read_handler(collab_where_backend.clone(),"where",q)))
+                    .route("/collab/transcript", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_transcript_backend.clone(),"transcript",q)))
+                    // 다른 기기가 이 기기 칸·방에 쓰는 일(raw 입력·칸 세우기·옮기기·닫기·이름). tell 과 같은 인증·origin
+                    // 가드를 탄다. 칸 신원은 `act_service` 가 이 기기 칸에서 다시 확인한다.
+                    .route("/collab/act", post(move |Json(params): Json<serde_json::Value>| {
+                        let backend = collab_act_backend.clone();
+                        async move {
+                            match tokio::task::spawn_blocking(move || backend.collab_act(&params)).await {
+                                Ok(Ok(value)) => Json(value),
+                                Ok(Err(error)) => Json(serde_json::json!({"ok":false,"error":error.to_string()})),
+                                Err(_) => Json(serde_json::json!({"ok":false,"error":"act worker stopped"})),
+                            }
+                        }
+                    }).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
                     .route("/machines/announce", post(machines_announce_handler))
                     .route("/claude-login-code", post(move |body: axum::body::Bytes|
                         claude_login_code_handler(login_code_backend.clone(), body)))
@@ -8769,7 +8785,7 @@ mod tests {
         let backend: Arc<dyn Backend> = Arc::new(kasa_collab::board_service::synthetic::SyntheticBackend::default());
         let mut router = axum::Router::new();
         for (path,operation) in [("/collab/board","snapshot"),("/collab/changes","changes"),("/collab/inspect","inspect"),
-            ("/collab/peek","peek"),("/collab/capture","capture"),("/collab/where","where")] {
+            ("/collab/peek","peek"),("/collab/capture","capture"),("/collab/where","where"),("/collab/transcript","transcript")] {
             let backend = backend.clone();
             router = router.route(path,get(move |q: Query<std::collections::HashMap<String,String>>|
                 collab_read_handler(backend.clone(),operation,q)));
@@ -8781,7 +8797,7 @@ mod tests {
             axum::serve(listener,router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
         });
         let client = reqwest::Client::new();
-        for path in ["/collab/board","/collab/changes","/collab/inspect","/collab/peek","/collab/capture","/collab/where"] {
+        for path in ["/collab/board","/collab/changes","/collab/inspect","/collab/peek","/collab/capture","/collab/where","/collab/transcript"] {
             let response = client.get(format!("{base}{path}?scope=local")).send().await.unwrap();
             assert_eq!(response.status(),StatusCode::OK);
             assert_eq!(response.json::<serde_json::Value>().await.unwrap()["synthetic"],true);

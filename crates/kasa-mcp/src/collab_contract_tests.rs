@@ -164,3 +164,73 @@ fn remote_view_child() {
     let echoed = view("peek", json!({"address":view_address(),"local_only":true})).unwrap_err();
     assert!(echoed.to_string().contains("terminate"), "{echoed}");
 }
+
+/// 다른 기기 칸에 쓰는 일(raw 입력·칸 세우기)과 대화 기록이 그 기기로 가서 끝난다(`local_only`). 받는 기기의 답이
+/// 다른 일·다른 기기 것이면 믿지 않는다.
+#[tokio::test]
+async fn remote_acts_and_transcript_reach_their_source() {
+    use axum::extract::{Path, Query};
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+    let (reads, writes) = (seen.clone(), seen.clone());
+    let app = axum::Router::new()
+        .route("/collab/{op}", axum::routing::get(
+            move |Path(op): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>| {
+                let reads = reads.clone();
+                async move {
+                    let params: Value = serde_json::from_str(q.get("params").map(String::as_str).unwrap_or("{}")).unwrap();
+                    reads.lock().unwrap().push((op.clone(), params.clone()));
+                    axum::Json(match op.as_str() {
+                        "board" => json!({"schema_version":1,"scope":"local","panes":[],
+                            "sources":[{"machine_id":"fixture-remote-machine","state":"online"}]}),
+                        "transcript" => json!({"address":params["address"],"turns":[{"role":"user","text":"hi"}]}),
+                        _ => json!({}),
+                    })
+                }
+            }))
+        .route("/collab/act", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let writes = writes.clone();
+            async move {
+                writes.lock().unwrap().push(("act".into(), body.clone()));
+                axum::Json(json!({"ok":true,"op":body["op"],"machine_id":"fixture-remote-machine",
+                    "address":{"machine_id":"fixture-remote-machine","surface_key":"new","surface_id":"%9"}}))
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let roster = json!([{"label":"fixture-native","machine_id":"fixture-remote-machine","base":base}]);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "collab_contract_tests::remote_act_child", "--ignored", "--nocapture"])
+            .env("KASATERM_MACHINE_ID", "fixture-local-machine")
+            .env("KASATERM_MACHINES", roster.to_string())
+            .env("KASATERM_TEST_ACT", "1")
+            .output().unwrap()
+    }).await.unwrap();
+    assert!(output.status.success(), "remote act child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let seen = seen.lock().unwrap();
+    let acts: Vec<&Value> = seen.iter().filter(|(op, _)| op == "act").map(|(_, body)| body).collect();
+    assert_eq!(acts.iter().map(|b| b["op"].as_str().unwrap()).collect::<Vec<_>>(), ["send_text", "spawn"]);
+    assert!(acts.iter().all(|b| b["local_only"] == true), "every write must terminate at its source");
+    let talk = seen.iter().find(|(op, _)| op == "transcript").expect("transcript asked the source");
+    assert_eq!(talk.1["local_only"], true);
+    server.abort();
+}
+
+#[test]
+#[ignore = "isolated subprocess invoked by remote act contract test"]
+fn remote_act_child() {
+    if std::env::var("KASATERM_TEST_ACT").is_err() { return; }
+    crate::install_collab_env();
+    let backend = crate::standalone::StandaloneBackend::new(std::env::temp_dir());
+    let act = |params: Value| kasa_collab::act_service::act(&backend, &params);
+    let typed = act(json!({"op":"send_text","address":view_address(),"text":"ls\n"})).unwrap();
+    assert_eq!(typed["machine_id"], "fixture-remote-machine");
+    let placed = act(json!({"op":"spawn","machine_id":"fixture-remote-machine","window":"new"})).unwrap();
+    assert_eq!(placed["address"]["surface_id"], "%9");
+    let talk = kasa_collab::board_service::view(&backend, "transcript", &json!({"address":view_address(),"turns":3})).unwrap();
+    assert_eq!(talk["turns"][0]["text"], "hi");
+    let echoed = act(json!({"op":"focus","address":view_address(),"local_only":true})).unwrap_err();
+    assert!(echoed.to_string().contains("terminate"), "{echoed}");
+}

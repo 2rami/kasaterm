@@ -97,10 +97,7 @@ fn remote(_address: &Address, _params: &Value, _path: &'static str) -> Result<Va
 #[cfg(feature = "net")]
 fn remote(address: &Address, params: &Value, path: &'static str) -> Result<Value> {
     // 직통(검증된 길) → 명부의 base → 관문 우회. 우회는 넷버드·터널 없이도 닿는다.
-    let base = crate::board_service::known_route(&address.machine_id)
-        .or_else(||crate::env::env().machines().into_iter()
-            .find(|m|m.machine_id.as_deref() == Some(address.machine_id.as_str())).map(|m|m.base))
-        .or_else(||crate::board_service::relay_base(&address.machine_id))
+    let base = crate::board_service::remote_base(&address.machine_id)
         .context("remote machine identity has no verified known route")?;
     let expected = address.clone();
     let mut body = params.clone(); body["local_only"] = json!(true);
@@ -115,7 +112,7 @@ fn remote(address: &Address, params: &Value, path: &'static str) -> Result<Value
 }
 
 #[cfg(feature = "net")]
-async fn bounded_json(mut response: reqwest::Response) -> Result<Value> {
+pub(crate) async fn bounded_json(mut response: reqwest::Response) -> Result<Value> {
     response = response.error_for_status()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {

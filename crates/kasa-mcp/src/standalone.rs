@@ -77,6 +77,14 @@ impl Backend for StandaloneBackend {
         crate::board_service::view(self,op,params)
     }
 
+    fn collab_act(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::act_service::act(self,params)
+    }
+
+    fn collab_reach(&self) -> Result<serde_json::Value> {
+        crate::board_service::reach()
+    }
+
     fn collab_pane_identity(&self, surface: &str) -> Result<serde_json::Value> {
         if kasa_pty::lookup_session(surface).is_none() { anyhow::bail!("managed place no longer exists"); }
         crate::board_service::address(surface,None)

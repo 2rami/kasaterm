@@ -114,12 +114,17 @@ fn run() -> Result<Option<Response>> {
         _ => cmd,
     };
     if API_TARGET.get().is_some() {
-        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status"|"peek"|"capture"|"where") {
-            return Err(anyhow!("--api supports board, board-watch, activity, tell, peek, capture and where"));
+        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status"|"peek"|"capture"|"where"
+            |"tell:raw"|"tell:key"|"transcript"|"focus"|"move"|"rename-window"|"window-new"|"attach") {
+            return Err(anyhow!("--api supports board, board-watch, activity, tell, peek, capture, where, transcript and address forms of tell --raw/--key, focus, move, rename-window, window-new --on, attach"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
         }
+    }
+    resolve_pane_targets(&cmd, &mut args)?;
+    if matches!(cmd.as_str(), "window-new" | "attach" | "summon") {
+        resolve_machine_flag(&mut args, if cmd == "summon" { "--machine" } else { "--on" })?;
     }
     // `board-watch` is a polling loop, not a single round-trip: it streams one
     // line per *changed* pane so a Claude Code Monitor can watch the board and
@@ -340,8 +345,32 @@ fn run() -> Result<Option<Response>> {
     }
     // `machines` — 명부 기계 목록을 사람 눈에 맞춰 찍는다(`to` 셰임의 `ls`). 이 pane
     // 이 어느 기계의 거울이면 그 줄에 `*`, 아니면 「이 기계」 줄에 `*`.
+    // `identify --machine <기계>` — 그 기기에 지금 닿는 길(직통·관문 중계·끊김). 판에 그 기기 칸이 없어도 된다.
+    // 종료 코드 0 닿음 · 1 끊김 — 「맥북이 켜져 있나」를 이 한 줄로 묻는다.
+    if cmd == "identify" && args.first().is_some_and(|a| a == "--machine") {
+        let query = args.get(1).ok_or_else(|| anyhow!("identify --machine <기계 이름|id>"))?;
+        let reach = roundtrip(&resolve_socket_path()?, &Request { id: json!("reach"), method: "collab.reach".into(), params: json!({}) })?;
+        let rows = reach_rows(&reach)?;
+        let wanted = spaced(query);
+        let found: Vec<&Value> = rows.iter().filter(|r| row_text(r, "machine_id") == query
+            || spaced(row_text(r, "label")).starts_with(&wanted) || spaced(row_text(r, "roster_label")) == wanted).collect();
+        let row = match found.as_slice() {
+            [one] => *one,
+            [] => return Err(anyhow!("「{query}」 기계가 판에 없어요 — `kasaterm-cli machines --json` 으로 확인하세요")),
+            _ => return Err(anyhow!("「{query}」 기계가 여럿이에요 — 기계 id 로 주세요")),
+        };
+        println!("{row}");
+        std::process::exit(if reach_up(row) { 0 } else { 1 });
+    }
     if cmd == "machines" {
         let socket_path = resolve_socket_path()?;
+        // 기기마다 닿는 길 — 옛 앱이면 비어 있고 목록은 그대로 찍는다.
+        let reach = roundtrip(&socket_path, &Request { id: json!("reach"), method: "collab.reach".into(), params: json!({}) })
+            .ok().and_then(|r| reach_rows(&r).ok()).unwrap_or_default();
+        if args.iter().any(|a| a == "--json") {
+            println!("{}", json!({ "machines": reach }));
+            return Ok(None);
+        }
         let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
         let resp = roundtrip(
             &socket_path,
@@ -405,6 +434,12 @@ fn run() -> Result<Option<Response>> {
                 }
                 s
             };
+            let route = reach.iter().find(|r| row_text(r, "roster_label") == label).map(|r| match row_text(r, "route") {
+                _ if !reach_up(r) => "   길 끊김",
+                "relay" => "   길 서울 중계",
+                _ => "   길 직통",
+            }).unwrap_or("");
+            let state = format!("{state}{route}");
             let mark = if label == here { "*" } else { " " };
             let ssh = m
                 .get("ssh")
@@ -809,7 +844,8 @@ fn tell_target_booting(why: &str) -> bool {
 /// 입력창으로 들어온다(`spawned_by`). 창은 실패해도 닫지 않는다 — 사람이 무엇이 멎었는지 봐야 한다.
 fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     let (mut cwd, mut name, mut boot) = (None::<String>, None::<String>, "claude".to_string());
-    let (mut tab, mut stdin) = (false, false);
+    let (mut tab, mut stdin, mut json_out) = (false, false, false);
+    let (mut machine, mut beside) = (None::<String>, None::<String>);
     let mut words: Vec<String> = Vec::new();
     let value = |i: usize| args.get(i + 1).cloned().ok_or_else(|| anyhow!("{} 뒤에 값이 필요해요", args[i]));
     let mut i = 0;
@@ -818,6 +854,9 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             "--cwd" => { cwd = Some(value(i)?); i += 2; }
             "--cmd" => { boot = value(i)?; i += 2; }
             "--name" => { name = Some(value(i)?); i += 2; }
+            "--machine" => { machine = Some(value(i)?); i += 2; }
+            "--beside" => { beside = Some(value(i)?); i += 2; }
+            "--json" => { json_out = true; i += 1; }
             "--tab" => { tab = true; i += 1; }
             "--stdin" => { stdin = true; i += 1; }
             "--" => { words.extend(args[i + 1..].iter().cloned()); break; }
@@ -835,6 +874,10 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     };
     if brief.trim().is_empty() {
         return Err(anyhow!("summon 은 브리프가 필요해요 — kasaterm-cli summon --cwd <레포> \"할 일\""));
+    }
+    if machine.is_some() || beside.is_some() {
+        let spot = RemoteSpot { machine, beside, cwd, tab };
+        return run_summon_remote(socket_path, spot, name, &boot, &brief, json_out);
     }
     let cwd = match cwd { Some(dir) => std::path::PathBuf::from(dir), None => std::env::current_dir()? };
     let cwd = cwd.canonicalize().with_context(|| format!("{} 폴더가 없어요", cwd.display()))?;
@@ -950,6 +993,131 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     } else {
         println!("기다리려면: {wait}");
     }
+    Ok(())
+}
+
+/// 다른 기기에 세울 자리 — 기기(보드 id)·옆에 둘 칸 주소·그 기기의 작업 폴더·탭 여부.
+struct RemoteSpot {
+    machine: Option<String>,
+    beside: Option<String>,
+    cwd: Option<String>,
+    tab: bool,
+}
+
+/// `summon --machine <기계> [--beside <칸>] [--tab] [--cwd <그 기기 폴더>]` — 그 기기 카사텀이 자기 방(지정이
+/// 없으면 보던 방)에 칸을 세우고 claude 를 띄운 뒤 브리프를 tell 로 건넨다. 칸 세우기·부팅 줄은 `collab.act`,
+/// 브리프는 기기 너머 tell 이라 ssh 가 없다. 결과는 그 칸의 보드 주소다. 부른 칸이 다른 기기라 done 은 이 창으로
+/// 안 온다 — `board --wait 이름@기계` 나 오케스트레이터 표식(KASATERM_ORIGIN)으로 받는다.
+fn run_summon_remote(socket_path: &str, spot: RemoteSpot, name: Option<String>, boot: &str, brief: &str, json_out: bool) -> Result<()> {
+    let since = epoch_ms();
+    let mut params = json!({ "tab": spot.tab });
+    if let Some(anchor) = &spot.beside {
+        if !anchor.starts_with('{') {
+            return Err(anyhow!("--beside 는 %N@기계·이름@기계·주소 JSON 으로 주세요"));
+        }
+        let anchor = view_address(Some(anchor))?;
+        if spot.machine.as_deref().is_some_and(|m| m != row_text(&anchor, "machine_id")) {
+            return Err(anyhow!("--beside 칸이 --machine 기계에 없어요"));
+        }
+        params["address"] = anchor;
+    } else {
+        params["machine_id"] = json!(spot.machine.clone().unwrap_or_default());
+    }
+    if let Some(dir) = &spot.cwd {
+        if !dir.starts_with('/') {
+            return Err(anyhow!("--cwd 는 그 기기의 절대 경로로 주세요: {dir}"));
+        }
+        params["cwd"] = json!(dir);
+    }
+    let made = roundtrip(socket_path, &act(json!("summon"), "spawn", params))?;
+    if !made.ok {
+        return Err(anyhow!("칸을 못 세웠어요: {}", made.error.map(|e| e.message).unwrap_or_default()));
+    }
+    let placed = made.result.as_ref().and_then(|r| r.get("address")).filter(|a| a.is_object()).cloned()
+        .ok_or_else(|| anyhow!("새 칸 주소를 못 받았어요"))?;
+    let (machine, key, surface) = (row_text(&placed, "machine_id").to_string(), row_text(&placed, "surface_key").to_string(),
+        row_text(&placed, "surface_id").to_string());
+    if let Some(title) = &name {
+        let _ = roundtrip(socket_path, &act(json!("summon"), "rename", json!({ "address": placed, "title": title })));
+    }
+
+    let mut body = brief.trim().to_string();
+    if !body.contains("kasaterm-cli done") {
+        body.push_str("\n\n");
+        body.push_str(SUMMON_DONE_HINT);
+    }
+    let title = name.clone().or_else(|| brief_title(brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
+        .filter(|t| !t.is_empty());
+    let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
+    let body = crate::tell::normalize(&body)?;
+    let first_prompt = boots_fresh_codex(boot);
+    let cd = spot.cwd.as_deref().map(|dir| format!("cd {} && ", shell_quote(dir))).unwrap_or_default();
+    let line = if first_prompt { format!("{cd}{boot} {}\n", shell_quote(&body)) } else { format!("{cd}{boot}\n") };
+    let mut refused = None;
+    for attempt in 0..3 {
+        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
+        let sent = roundtrip(socket_path, &act(json!("summon"), "send_text", json!({ "address": placed, "text": line })))?;
+        refused = (!sent.ok).then(|| sent.error.map(|e| e.message).unwrap_or_default());
+        if refused.is_none() { break; }
+    }
+    if let Some(why) = refused {
+        return Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {why}"));
+    }
+
+    // 다른 기기 줄은 그 기기 판을 2초마다 당겨 와서 선다 — 칸은 번호가 아니라 열쇠로 찾는다.
+    let booted = || snapshot_rows(socket_path, false).ok().and_then(|rows| rows.into_iter().find(|p|
+        row_address(p, "machine_id") == machine && row_address(p, "surface_key") == key && !row_address(p, "session_id").is_empty()));
+    let started = std::time::Instant::now();
+    let timed_out = || started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS);
+    let not_up = || anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek --address '{placed}'` 로 화면을 보세요(창은 그대로 뒀어요)");
+    let (row, receipt) = if first_prompt {
+        let row = loop {
+            if let Some(row) = booted() { break row; }
+            if timed_out() { return Err(not_up()); }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        };
+        (row, None)
+    } else {
+        loop {
+            if let Some(row) = booted() {
+                let message_id = crate::tell::new_message_id();
+                let address = row.get("address").cloned().unwrap_or(Value::Null);
+                let mut params = json!({ "message_id": message_id, "address": address, "body": body });
+                if let Some(title) = &title { params["title"] = json!(title); }
+                let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(), params })?;
+                if told.ok {
+                    save_receipt(&message_id, &address);
+                    let state = await_tell_settled(socket_path, &message_id, &address)
+                        .map(|receipt| tell_state_line(&receipt)).unwrap_or_else(|| "접수".into());
+                    break (row, Some((message_id, state)));
+                }
+                let why = told.error.map(|e| e.message).unwrap_or_default();
+                if timed_out() || !tell_target_booting(&why) {
+                    return Err(anyhow!("{surface} 에 학생은 떴는데 지시를 못 넣었어요: {why}"));
+                }
+            } else if timed_out() {
+                return Err(not_up());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    };
+    let address = row.get("address").cloned().unwrap_or(Value::Null);
+    let character = row_text(&row, "character");
+    let wait = format!("kasaterm-cli board --wait '{}@{}' --since {since}", if character.is_empty() { &surface } else { character },
+        row_text(&row, "machine_label"));
+    if json_out {
+        println!("{}", json!({ "ok": true, "surface": surface, "machine_label": row_text(&row, "machine_label"),
+            "character": character, "address": address, "message_id": receipt.as_ref().map(|r| &r.0),
+            "state": receipt.as_ref().map(|r| &r.1), "wait": wait }));
+        return Ok(());
+    }
+    let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
+    match &receipt {
+        Some((id, state)) => println!("{who}@{} 소환 · 지시 {state} · 영수증 {id}", row_text(&row, "machine_label")),
+        None => println!("{who}@{} 소환 · 지시는 첫 입력으로 넣음", row_text(&row, "machine_label")),
+    }
+    println!("주소 {address}");
+    println!("기다리려면: {wait}");
     Ok(())
 }
 
@@ -1177,10 +1345,8 @@ fn write_inline_capture(result: &mut Value, path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `where --machine <기계>` 의 기계를 보드 출처에서 찾는다 — 안정 id 그대로, 또는 표시 이름(앞부분). 이 기기면 None.
-fn resolve_where_machine(args: &mut Vec<String>) -> Result<()> {
-    let Some(pos) = args.iter().position(|a| a == "--machine") else { return Ok(()) };
-    let query = args.get(pos + 1).cloned().ok_or_else(|| anyhow!("--machine 뒤에 기계 이름이나 id 를 주세요"))?;
+/// 보드 출처에서 기계 하나 — 안정 id 그대로, 또는 표시 이름(앞부분).
+fn machine_source(query: &str) -> Result<Value> {
     let resp = roundtrip(&resolve_socket_path()?, &Request {
         id: json!("snapshot"),
         method: "collab.snapshot".into(),
@@ -1188,19 +1354,99 @@ fn resolve_where_machine(args: &mut Vec<String>) -> Result<()> {
     })?;
     let empty = Vec::new();
     let sources = resp.result.as_ref().and_then(|r| r.get("sources")).and_then(Value::as_array).unwrap_or(&empty);
-    let wanted = spaced(&query);
+    let wanted = spaced(query);
     let exact: Vec<&Value> = sources.iter().filter(|s| row_text(s, "machine_id") == query || spaced(row_text(s, "label")) == wanted).collect();
     let found = if exact.is_empty() {
         sources.iter().filter(|s| spaced(row_text(s, "label")).starts_with(&wanted)).collect()
     } else {
         exact
     };
-    let source = match found.as_slice() {
-        [one] => *one,
-        [] => return Err(anyhow!("「{query}」 기계가 보드에 없어요 — `kasaterm-cli board --all` 의 sources 를 확인하세요")),
-        many => return Err(anyhow!("「{query}」 기계가 여럿이에요:\n{}",
+    match found.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(anyhow!("「{query}」 기계가 보드에 없어요 — `kasaterm-cli board --all` 의 sources 를 확인하세요")),
+        many => Err(anyhow!("「{query}」 기계가 여럿이에요:\n{}",
             many.iter().map(|s| format!("  {} ({})", row_text(s, "label"), row_text(s, "machine_id"))).collect::<Vec<_>>().join("\n"))),
+    }
+}
+
+/// `--on 기계` 같은 기계 자리를 보드의 안정 id 로 바꾼다 — 이 기기여도 id 로(협업 길은 id 로 가른다).
+fn resolve_machine_flag(args: &mut [String], flag: &str) -> Result<()> {
+    let Some(pos) = args.iter().position(|a| a == flag) else { return Ok(()) };
+    let query = args.get(pos + 1).cloned().ok_or_else(|| anyhow!("{flag} 뒤에 기계 이름이나 id 를 주세요"))?;
+    args[pos + 1] = row_text(&machine_source(&query)?, "machine_id").to_string();
+    Ok(())
+}
+
+/// 칸 자리에 온 인자 하나를 보드 주소로 — `%N@기계`·`이름@기계` 는 보드에서 찾고 `{…}` 는 그대로 읽는다.
+/// 이 기기 칸 번호(`%N`)나 그 밖의 글은 None — 하던 대로 이 기기 칸으로 간다.
+fn pane_address(arg: &str, rows: &mut Option<Vec<Value>>) -> Result<Option<Value>> {
+    if arg.starts_with('{') {
+        return view_address(Some(&arg.to_string())).map(Some);
+    }
+    if !arg.contains('@') || arg.starts_with('-') {
+        return Ok(None);
+    }
+    if rows.is_none() {
+        *rows = Some(snapshot_rows(&resolve_socket_path()?, false)?);
+    }
+    match board_rows_named(rows.as_deref().unwrap_or_default(), arg).as_slice() {
+        [one] => {
+            eprintln!("→ {} {}", row_address(one, "surface_id"), describe_row(one));
+            Ok(one.get("address").cloned())
+        }
+        [] => Err(anyhow!("「{arg}」 이(가) 보드에 없어요 — `kasaterm-cli board --all` 로 이름·기계를 확인하세요")),
+        many => Err(anyhow!("「{arg}」 이(가) 여럿이에요 — %N@기계 로 골라 주세요:\n{}",
+            many.iter().map(|p| format!("  {} {}", row_address(p, "surface_id"), describe_row(p))).collect::<Vec<_>>().join("\n"))),
+    }
+}
+
+/// 칸·방을 바꾸는 명령의 대상 자리에 온 `%N@기계`·`이름@기계`·`--address JSON` 을 주소 JSON 한 토막으로 바꾼다.
+/// `build_request` 는 `{` 로 시작하는 대상을 협업 길(`collab.act`)로 보낸다 — 다른 기기 칸도 이 기기 칸과 같은 줄로 다룬다.
+fn resolve_pane_targets(cmd: &str, args: &mut Vec<String>) -> Result<()> {
+    let raw = matches!(cmd, "tell:raw" | "tell:key");
+    if !raw && !matches!(cmd, "focus" | "transcript" | "attach" | "move" | "rename-window" | "close" | "summon") {
+        return Ok(());
+    }
+    // `--address JSON` 은 대상 자리 그대로 JSON 한 토막으로. raw 입력은 맨 앞만 본다 — 뒤는 넣을 글이다.
+    if raw {
+        if args.first().is_some_and(|a| a == "--address") { args.remove(0); }
+    } else {
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--address" && args.get(i + 1).is_some_and(|a| a.starts_with('{')) { args.remove(i); } else { i += 1; }
+        }
+    }
+    let positions: Vec<usize> = match cmd {
+        "tell:raw" | "tell:key" => vec![usize::from(args.first().is_some_and(|a| a == "--surface"))],
+        "focus" | "transcript" | "attach" => vec![0],
+        "move" => vec![0, 1],
+        "rename-window" => vec![usize::from(args.first().is_some_and(|a| a == "--room"))],
+        "close" => (0..args.len()).collect(),
+        _ => Vec::new(),
     };
+    // 글이 올 수도 있는 자리(raw 입력의 첫 낱말, 방 이름)는 `%N@기계` 만 칸으로 읽는다 — `user@host` 는 글이다.
+    let pane_only = raw || (cmd == "rename-window" && args.first().is_some_and(|a| a != "--room"));
+    let flagged: Vec<usize> = ["--into", "--beside"].iter()
+        .filter_map(|flag| args.iter().position(|a| a == flag).map(|i| i + 1)).collect();
+    let mut rows = None;
+    for i in positions.into_iter().chain(flagged) {
+        let Some(arg) = args.get(i).cloned() else { continue };
+        if pane_only && !arg.starts_with('%') && !arg.starts_with('{') {
+            continue;
+        }
+        if let Some(address) = pane_address(&arg, &mut rows)? {
+            args[i] = address.to_string();
+        }
+    }
+    Ok(())
+}
+
+/// `where --machine <기계>` 의 기계를 보드 출처에서 찾는다 — 안정 id 그대로, 또는 표시 이름(앞부분). 이 기기면 None.
+fn resolve_where_machine(args: &mut Vec<String>) -> Result<()> {
+    let Some(pos) = args.iter().position(|a| a == "--machine") else { return Ok(()) };
+    let query = args.get(pos + 1).cloned().ok_or_else(|| anyhow!("--machine 뒤에 기계 이름이나 id 를 주세요"))?;
+    let source = machine_source(&query)?;
+    let source = &source;
     let local = source.get("is_local").and_then(Value::as_bool).unwrap_or(false);
     if local && API_TARGET.get().is_none() {
         args.drain(pos..pos + 2);
@@ -1228,11 +1474,35 @@ fn describe_row(p: &Value) -> String {
 /// 둘 다 "무엇이 닫혔고 무엇이 남았나" 한 눈에 보는 편이 싸다.
 fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
     let force = args.iter().any(|a| a == "--force");
+    // 주소로 고른 칸(`%N@기계`·`--address`)은 그 칸이 사는 기기가 닫는다 — 커밋 안 된 변경 검사도 그 기기에서.
+    let mut kept = 0usize;
+    for address in args.iter().filter(|a| a.starts_with('{')) {
+        let address = view_address(Some(address))?;
+        let id = row_text(&address, "surface_id").to_string();
+        let resp = roundtrip(socket_path, &act(json!("close"), "close", json!({ "address": address, "force": force })))?;
+        match resp.result.filter(|_| resp.ok) {
+            Some(r) if r["closed"] == true => println!("closed  {id} — {}", row_text(&r, "cwd")),
+            Some(r) => {
+                kept += 1;
+                println!("kept    {id} — {}: 커밋 안 된 변경 {}개", row_text(&r, "cwd"), r["dirty"]);
+            }
+            None => {
+                kept += 1;
+                println!("failed  {id} — {}", resp.error.map(|e| e.message).unwrap_or_else(|| "close 실패".into()));
+            }
+        }
+    }
     let targets: Vec<String> = args
         .iter()
         .filter(|a| a.starts_with('%'))
         .cloned()
         .collect();
+    if targets.is_empty() && args.iter().any(|a| a.starts_with('{')) {
+        if kept > 0 {
+            println!("\n남은 {kept}개는 손대지 않았다 — 회수하거나 --force 로 다시.");
+        }
+        return Ok(());
+    }
     if targets.is_empty() {
         return Err(anyhow!(
             "close 는 닫을 pane 을 명시해야 한다 (예: close %3 %4 [--force])"
@@ -1267,7 +1537,6 @@ fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
     .and_then(|v| v.get("surfaces").cloned())
     .and_then(|v| v.as_array().cloned())
     .unwrap_or_default();
-    let mut kept = 0usize;
     for id in &targets {
         let entry = board
             .iter()
@@ -1331,7 +1600,7 @@ fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
 /// 그 디렉토리의 커밋 안 된 변경 개수. git 이 아니거나 실패하면 0 — "모르면 닫는다"
 /// 가 아니라 "모르면 막지 않는다" 쪽인데, 여기서 막으면 git 아닌 cwd 의 pane 을
 /// 영영 못 닫는다. 진짜 회수 대상은 워크트리이고 그건 git 이다.
-fn git_dirty_count(cwd: &str) -> usize {
+pub fn git_dirty_count(cwd: &str) -> usize {
     std::process::Command::new("git")
         .args(["-C", cwd, "--no-optional-locks", "status", "--porcelain"])
         .output()
@@ -1639,14 +1908,15 @@ fn print_help() {
             "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
             "peek [%N | %N@기계 | 이름@기계 | --address JSON] [줄수]   pane 화면 글자(다른 기기 칸은 카사넷으로)",
             "capture [%N | %N@기계 | 이름@기계 | --address JSON] [경로] | --window [경로]   pane 또는 창 전체 스크린샷",
-            "transcript [%N] [N]                       claude 최근 대화 N 턴",
+            "transcript [%N | %N@기계 | --address JSON] [N]   claude 최근 대화 N 턴(다른 기기 칸은 카사넷으로)",
             "activity [%N | --address JSON] [N]        실제로 한 도구·인자·결과(시간순)",
         ]),
         ("학생·협업", &[
             "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
             "tell --status ID                          전달 영수증 조회",
-            "tell --raw [%N] <글> · tell --key [%N] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
+            "tell --raw [%N|%N@기계|--address JSON] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
             "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
+            "summon --machine 기계 [--beside 칸] [--tab] [--cwd 그 기기 폴더] [--json] …   다른 기기 방에 학생(답: 그 칸 주소)",
             "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약] [--changed 파일]… [--tests 글] [--next 글]",
             "                                          내 일 보고. 오케스트레이터가 띄운 창이면 그쪽 보고함에도 넣는다",
             "sessions [N]                              최근 claude·codex 세션 목록",
@@ -1657,10 +1927,14 @@ fn print_help() {
             "tab [%N] [--focus]                        그 칸에 새 탭",
             "tab --server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   서버 실행·복원 등록(비밀값 금지)",
             "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기)",
-            "move %N <대상> [방향] · resize %N <0..1>  칸 옮기기 · 비율",
+            "window-new --on 기계 [--cwd 폴더]         그 기계 자신의 새 방(거울 아님, 답: 빈 칸 주소)",
+            "move %N <대상> [방향] · resize %N <0..1>  칸 옮기기 · 비율 (move 는 %N@기계 둘도)",
             "focus %N · closed [%N]                    포커스 · 되살리기 목록(%N 을 주면 진짜 끈다)",
             "close %N… [--force]                       칸 닫기(미커밋 변경이 있으면 안 닫는다)",
             "rename-window [%N] <이름> | rename-window [%N] --color #rrggbb   %N 이면 그 칸 이름·색, 없으면 방 이름",
+            "rename-window --room <칸> <이름>          그 칸이 든 방 이름",
+            "  다른 기기 칸: focus·close·move·rename-window 의 %N 자리에 %N@기계 · 이름@기계 · --address JSON",
+            "attach <%N@기계|주소> [--on 기계] [--into 칸] [--focus]   다른 기기 칸을 거울 탭으로(--on 그 기계 화면에)",
         ]),
         ("클립보드·결과물", &[
             "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
@@ -1669,7 +1943,8 @@ fn print_help() {
             "share open <url>                          사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
         ]),
         ("기기·네트워크", &[
-            "machines [--names]                        명부 기계 목록",
+            "machines [--names|--json]                 명부 기계 목록과 닿는 길(직통·서울 중계·끊김)",
+            "identify --machine 기계                   그 기계에 닿나(0 닿음 · 1 끊김) — 판에 칸이 없어도",
             "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기에 새 방(보기 창은 뒤에) · --here 면 이 칸 자리를 그 기기 셸로",
             "machines move [%N] <기기|local> [--cwd /레포] [--force]   칸의 claude 를 그 기기로 이사(대화·미커밋 변경까지)",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
@@ -1705,6 +1980,24 @@ fn print_help() {
 }
 
 /// `--flag 값` 꼴의 값.
+fn reach_rows(resp: &Response) -> Result<Vec<Value>> {
+    if !resp.ok {
+        return Err(anyhow!("{}", resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("collab.reach 실패")));
+    }
+    Ok(resp.result.as_ref().and_then(|r| r.get("machines")).and_then(Value::as_array).cloned().unwrap_or_default())
+}
+
+/// 닿는 기기 — 이 기기이거나, 판이 살아 있고 길(직통·중계)이 있는 기기.
+fn reach_up(row: &Value) -> bool {
+    row_text(row, "state") == "online" && row_text(row, "route") != "none"
+}
+
+/// 칸·방에 쓰는 협업 요청(`collab.act`) — 주소의 기기가 다른 기기면 그 기기가 한다.
+fn act(id: Value, op: &str, mut params: Value) -> Request {
+    params["op"] = json!(op);
+    Request { id, method: "collab.act".into(), params }
+}
+
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with("--")).cloned()
 }
@@ -1886,15 +2179,49 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             Some(other) => return Err(anyhow!("net forward|list|stop — 모르는 것: {other}")),
         },
         "identify" => ("system.identify", json!({})),
+        // `attach <다른 기기 칸> [--on 기계] [--into 칸] [--focus]` — 그 칸을 거울 탭으로 연다. `--on` 이 없으면 이 기기,
+        // `--into` 가 없으면 그 기기가 보던 칸의 탭. 사람이 그 기기 화면에서 승인·질문에 답하는 길이다.
+        "attach" => {
+            let source = args.first().filter(|a| a.starts_with('{'))
+                .ok_or_else(|| anyhow!("attach <%N@기계|이름@기계|주소 JSON> [--on 기계] [--into 칸] [--focus]"))?;
+            let mut params = json!({ "source": view_address(Some(source))?, "focus": args.iter().any(|a| a == "--focus") });
+            if let Some(machine) = flag_value(args, "--on") { params["machine_id"] = json!(machine); }
+            if let Some(into) = flag_value(args, "--into") {
+                if !into.starts_with('{') { return Err(anyhow!("--into 는 %N@기계 나 주소로 주세요")); }
+                params["address"] = view_address(Some(&into))?;
+            }
+            return Ok(act(id, "attach", params));
+        }
         "focus" => {
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("focus needs a surface_id"))?;
+            if surface.starts_with('{') {
+                return Ok(act(id, "focus", json!({ "address": view_address(Some(surface))? })));
+            }
             ("surface.focus", json!({ "surface_id": surface }))
         }
         // rename-window [%N] <이름> | rename-window [%N] --color #rrggbb — %N 을 주면 그 칸의 이름(고정 —
         // claude 가 붙이는 제목이 못 덮는다)·색, 없으면 이 칸이 속한 방의 이름. 제목에 공백이 있으면 따옴표로.
         "rename-window" => {
+            // `--room <칸> <이름>` — 그 칸이 든 방의 이름. 다른 기기 방은 이 꼴로만 고른다(이 칸이 그 방에 없다).
+            if args.first().is_some_and(|a| a == "--room") {
+                let (Some(pane), Some(title), None) = (args.get(1), args.get(2), args.get(3)) else {
+                    return Err(anyhow!("rename-window --room <%N|%N@기계|주소 JSON> <이름>"));
+                };
+                if pane.starts_with('{') {
+                    return Ok(act(id, "rename_room", json!({ "address": view_address(Some(pane))?, "title": title })));
+                }
+                return Ok(Request { id, method: "window.rename".into(), params: json!({ "surface_id": pane, "title": title }) });
+            }
+            if let Some(target) = args.first().filter(|a| a.starts_with('{')) {
+                let address = view_address(Some(target))?;
+                return Ok(match (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
+                    (Some("--color"), Some(color), None) => act(id, "color", json!({ "address": address, "color": color })),
+                    (Some(title), None, None) if !title.starts_with("--") => act(id, "rename", json!({ "address": address, "title": title })),
+                    _ => return Err(anyhow!("rename-window <%N@기계|주소 JSON> <이름> | --color #rrggbb")),
+                });
+            }
             let pane_like = |s: &str| {
                 s.strip_prefix('%')
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
@@ -2010,6 +2337,12 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         }
         // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
         "window-new" => {
+            // `--on 기계` — 그 기기 자신의 새 방(거울 아님). 답은 새 방 빈 칸의 보드 주소다.
+            if let Some(machine) = flag_value(args, "--on") {
+                let mut params = json!({ "machine_id": machine, "window": "new" });
+                if let Some(cwd) = flag_value(args, "--cwd") { params["cwd"] = json!(cwd); }
+                return Ok(act(id, "spawn", params));
+            }
             // `--machine 기계` — 저쪽에 새 방을 만들고 여기 보기 창으로 연다.
             if let Some(machine) = flag_value(args, "--machine") {
                 return Ok(Request { id, method: "remote.spawn_shell".into(),
@@ -2189,6 +2522,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .get(1)
                 .ok_or_else(|| anyhow!("move needs a target surface to land beside"))?;
             let dir = args.get(2).map(String::as_str).unwrap_or("right");
+            // 주소로 고른 칸은 그 칸이 사는 기기가 옮긴다 — 둘 다 같은 기기 칸이어야 한다.
+            if moving.starts_with('{') || target.starts_with('{') {
+                if !(moving.starts_with('{') && target.starts_with('{')) {
+                    return Err(anyhow!("move: 다른 기기 칸은 둘 다 %N@기계(또는 주소)로 주세요"));
+                }
+                return Ok(act(id, "move", json!({ "address": view_address(Some(moving))?,
+                    "target": view_address(Some(target))?, "direction": dir })));
+            }
             (
                 "surface.move",
                 json!({ "surface_id": moving, "target": target, "direction": dir }),
@@ -2216,13 +2557,18 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     Some(args.get(1).ok_or_else(|| anyhow!("--surface needs an id"))?.clone()),
                     args.get(2..).unwrap_or(&[]),
                 ),
-                Some(a) if a.starts_with('%') => (Some(a.to_string()), args.get(1..).unwrap_or(&[])),
+                Some(a) if a.starts_with('%') || a.starts_with('{') => (Some(a.to_string()), args.get(1..).unwrap_or(&[])),
                 _ => (None, &args[..]),
             };
             let what = if cmd == "tell:raw" { "text" } else { "key" };
             let value = rest.join(" ");
             if value.is_empty() {
                 return Err(anyhow!("tell --{} needs a {what}", &cmd[5..]));
+            }
+            // 주소로 고른 칸(`%N@기계`·`--address`)은 그 칸이 사는 기기가 넣는다 — 안전장치 없는 것은 같다.
+            if let Some(target) = surface.as_ref().filter(|s| s.starts_with('{')) {
+                let op = if cmd == "tell:raw" { "send_text" } else { "send_key" };
+                return Ok(act(id, op, json!({ "address": view_address(Some(target))?, what: value })));
             }
             let mut params = json!({ what: value });
             if let Some(s) = surface {
@@ -2624,6 +2970,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["max_width"] = json!(w);
             }
             ("surface.capture", params)
+        }
+        "transcript" if args.first().is_some_and(|a| a.starts_with('{')) => {
+            // 보드 주소로 고른 칸 — 다른 기기 칸이면 그 기기가 답한다(peek --address 와 같은 길).
+            let mut params = json!({ "address": view_address(args.first())? });
+            if let Some(turns) = args.get(1) {
+                params["turns"] = json!(turns.parse::<u64>().context("invalid transcript turn count")?);
+            }
+            ("collab.transcript", params)
         }
         "transcript" => {
             // Structured dialogue of a sibling pane's claude: the last N turns
@@ -3312,6 +3666,8 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
         "collab.peek" => ("/collab/peek",false),
         "collab.capture" => ("/collab/capture",false),
         "collab.where" => ("/collab/where",false),
+        "collab.transcript" => ("/collab/transcript",false),
+        "collab.act" => ("/collab/act",true),
         "collab.tell" => ("/collab/tell",true),
         "collab.tell_status" => ("/collab/tell/status",true),
         "nacho.report" => ("/nacho/report",true),
@@ -3319,7 +3675,9 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
     };
     let quote = |text: &str| format!("\"{}\"",text.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n").replace('\r',"\\r"));
     // Credentials and message bodies travel through stdin, never process arguments.
-    let mut config = format!("silent\nshow-error\nfail-with-body\nmax-time = 5\nconnect-timeout = 3\nmax-filesize = 4194304\nproto = \"=http,https\"\nmax-redirs = 0\nurl = {}\n",quote(&format!("{}{path}",target.base)));
+    // 칸 세우기·옮기기·닫기는 원본 앱이 GUI 답을 20초까지 기다린다.
+    let max_time = if request.method == "collab.act" { 30 } else { 5 };
+    let mut config = format!("silent\nshow-error\nfail-with-body\nmax-time = {max_time}\nconnect-timeout = 3\nmax-filesize = 4194304\nproto = \"=http,https\"\nmax-redirs = 0\nurl = {}\n",quote(&format!("{}{path}",target.base)));
     if let Some(path) = &target.token_file {
         let mut token = String::new();
         std::fs::File::open(path).context("open API token file")?.take(4097).read_to_string(&mut token)?;
@@ -4430,6 +4788,58 @@ mod tests {
         let place = super::build_request("where", &["--machine-id".into(), "m".into()]).unwrap();
         assert_eq!((place.method.as_str(), &place.params["machine_id"]), ("collab.where", &serde_json::json!("m")));
         assert_eq!(super::build_request("where", &[]).unwrap().method, "window.where");
+    }
+
+    /// 주소로 고른 칸에 쓰는 명령은 협업 쓰기(`collab.act`)로 간다 — 이 기기 칸 번호(`%N`)는 하던 대로 `surface.*`.
+    #[test]
+    fn address_writes_use_the_collaboration_act() {
+        let a = r#"{"machine_id":"m","surface_key":"k","surface_id":"%3"}"#;
+        let b = r#"{"machine_id":"m","surface_key":"j","surface_id":"%4"}"#;
+        let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let raw = super::build_request("tell:raw", &v(&[a, "cd", "/x"])).unwrap();
+        assert_eq!((raw.method.as_str(), &raw.params["op"], &raw.params["text"]), ("collab.act", &json!("send_text"), &json!("cd /x")));
+        let key = super::build_request("tell:key", &v(&["--surface", a, "enter"])).unwrap();
+        assert_eq!((key.params["op"].as_str(), key.params["key"].as_str()), (Some("send_key"), Some("enter")));
+        assert_eq!(super::build_request("tell:raw", &v(&["%3", "ls"])).unwrap().method, "surface.send_text");
+        assert_eq!(super::build_request("focus", &v(&[a])).unwrap().params["op"], "focus");
+        let moved = super::build_request("move", &v(&[a, b, "down"])).unwrap();
+        assert_eq!((moved.params["target"]["surface_id"].as_str(), moved.params["direction"].as_str()), (Some("%4"), Some("down")));
+        assert!(super::build_request("move", &v(&[a, "%4"])).is_err(), "한쪽만 주소면 어느 기기인지 모른다");
+        assert_eq!(super::build_request("rename-window", &v(&[a, "작업"])).unwrap().params["op"], "rename");
+        assert_eq!(super::build_request("rename-window", &v(&[a, "--color", "#ff0000"])).unwrap().params["op"], "color");
+        let room = super::build_request("rename-window", &v(&["--room", a, "나쵸"])).unwrap();
+        assert_eq!((room.params["op"].as_str(), room.params["title"].as_str()), (Some("rename_room"), Some("나쵸")));
+        assert_eq!(super::build_request("rename-window", &v(&["--room", "%3", "나쵸"])).unwrap().method, "window.rename");
+        let fresh = super::build_request("window-new", &v(&["--on", "m", "--cwd", "/repo"])).unwrap();
+        assert_eq!((fresh.params["op"].as_str(), fresh.params["window"].as_str(), fresh.params["cwd"].as_str()),
+            (Some("spawn"), Some("new"), Some("/repo")));
+        assert_eq!(super::build_request("window-new", &[]).unwrap().method, "window.new");
+        let talk = super::build_request("transcript", &v(&[a, "4"])).unwrap();
+        assert_eq!((talk.method.as_str(), talk.params["turns"].as_u64()), ("collab.transcript", Some(4)));
+        let mirror = super::build_request("attach", &v(&[a, "--on", "n", "--into", b])).unwrap();
+        assert_eq!((mirror.params["op"].as_str(), mirror.params["machine_id"].as_str()), (Some("attach"), Some("n")));
+        assert_eq!((mirror.params["source"]["surface_id"].as_str(), mirror.params["address"]["surface_id"].as_str()), (Some("%3"), Some("%4")));
+    }
+
+    /// `--address JSON` 은 대상 자리의 JSON 한 토막이 된다. raw 입력은 맨 앞만 대상이다 — 뒤는 넣을 글이다.
+    #[test]
+    fn address_flags_collapse_into_the_target_slot() {
+        let a = r#"{"machine_id":"m","surface_key":"k","surface_id":"%3"}"#.to_string();
+        let mut close = vec!["--address".into(), a.clone(), "--force".into()];
+        let same = |x: &str| serde_json::from_str::<serde_json::Value>(x).unwrap() == serde_json::from_str::<serde_json::Value>(&a).unwrap();
+        super::resolve_pane_targets("close", &mut close).unwrap();
+        assert!(close.len() == 2 && same(&close[0]) && close[1] == "--force", "{close:?}");
+        let mut raw = vec!["--address".into(), a.clone(), "echo".into(), "--address".into()];
+        super::resolve_pane_targets("tell:raw", &mut raw).unwrap();
+        assert!(raw.len() == 3 && same(&raw[0]) && raw[1..] == ["echo", "--address"], "{raw:?}");
+        let mut local = vec!["%3".to_string(), "user@host".to_string()];
+        super::resolve_pane_targets("tell:raw", &mut local).unwrap();
+        assert_eq!(local[1], "user@host", "넣을 글의 @ 는 기계로 읽지 않는다");
+        let mut text = vec!["user@host".to_string()];
+        super::resolve_pane_targets("tell:raw", &mut text).unwrap();
+        let mut room = vec!["메일@회사".to_string()];
+        super::resolve_pane_targets("rename-window", &mut room).unwrap();
+        assert_eq!((text[0].as_str(), room[0].as_str()), ("user@host", "메일@회사"), "글 자리의 이름@기계 는 보드를 안 찾는다");
     }
 
     #[test]

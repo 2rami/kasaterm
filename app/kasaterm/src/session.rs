@@ -630,7 +630,7 @@ impl App {
     /// (re)init — used by new_session.
     pub(crate) fn spawn_session_pane(&mut self) -> Result<()> {
         let (cols, rows) = self.window_cells();
-        let cwd = resolve_initial_cwd();
+        let cwd = self.pending_spawn_cwd.clone().or_else(resolve_initial_cwd);
         let id = self.alloc_pane_id();
         // 방별 분리(사용자): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
         // 훅이 방별 slug 를 쓰게 한다. pane_room 에도 기록(Rust collab slug 계산용).
@@ -963,16 +963,33 @@ impl App {
         name: &str,
         remote_cwd: &str,
     ) -> Result<String> {
+        self.mirror_remote_pane_at(None, label, remote_id, name, remote_cwd, true)
+    }
+
+    /// `mirror_remote_pane` 의 자리 지정판 — `anchor` 칸의 탭으로(없으면 포커스된 칸). `focus` 가 거짓이면 보던
+    /// 화면을 안 뺏는다: 다른 기기가 이 기기에 거울을 열어 줄 때(`collab.act attach`) 사람이 보던 것이 그대로 남아야 한다.
+    pub(crate) fn mirror_remote_pane_at(
+        &mut self,
+        anchor: Option<String>,
+        label: &str,
+        remote_id: &str,
+        name: &str,
+        remote_cwd: &str,
+        focus: bool,
+    ) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
-        let anchor = self
-            .ws
-            .lock()
-            .unwrap()
-            .active_pane
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("포커스된 pane 이 없다"))?;
+        let anchor = match anchor {
+            Some(pane) => pane,
+            None => self
+                .ws
+                .lock()
+                .unwrap()
+                .active_pane
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("포커스된 pane 이 없다"))?,
+        };
         // 포커스가 보조 탭에 있어도 새 탭은 그 바깥 pane 에 붙는다.
         let outer = self
             .ws
@@ -990,13 +1007,15 @@ impl App {
             kasa_mcp::remote::remote_info(id)
                 .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)
         }) {
-            self.reveal_pane_tab(&existing);
+            if focus {
+                self.reveal_pane_tab(&existing);
+            }
             return Ok(existing);
         }
         if self.window_of_pane(&outer).is_none() {
-            anyhow::bail!("포커스된 pane {outer} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
+            anyhow::bail!("pane {outer} 이 없다 — 종료·재시작으로 사라졌는지 확인해라");
         }
-        self.attach_remote_view_tab(&outer, &m, remote_id, name, remote_cwd, true)
+        self.attach_remote_view_tab(&outer, &m, remote_id, name, remote_cwd, focus)
     }
 
     /// 거울 하나를 `outer` 의 탭으로 앉힌다. `focus` 면 그 탭을 앞으로 내고 포커스까지 —

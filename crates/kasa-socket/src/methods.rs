@@ -141,6 +141,12 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.inspect" => match backend.collab_inspect(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },
+        "collab.act" => match backend.collab_act(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
+        "collab.reach" => match backend.collab_reach() {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "collab.peek" | "collab.capture" | "collab.where" => {
             match backend.collab_view(&req.method["collab.".len()..], &req.params) {
                 Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
@@ -199,6 +205,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Err(e) => backend_err(id, e),
         },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
+        // 보드 주소로 고른 칸은 다른 기기여도 그 기기가 답한다(peek --address 와 같은 길).
+        "collab.transcript" if req.params.get("address").is_some() => match backend.collab_view("transcript", &req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "collab.transcript" => collab_transcript(backend, id, &req.params),
         "collab.activity" => collab_activity(backend, id, &req.params),
         "surface.notify" => surface_notify(backend, id, &req.params),
@@ -343,6 +353,8 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.peek",
                 "collab.capture",
                 "collab.where",
+                "collab.act",
+                "collab.reach",
                 "window.layout",
                 "window.list",
                 "window.where",

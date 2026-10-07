@@ -908,7 +908,10 @@ impl App {
         // 새 방 — 이쪽 「+」 와 같다. 그 방의 첫 pane 이 곧 자리다.
         if matches!(at.window, Some(SpawnWindow::New)) {
             self.pending_character = None;
+            // 폴더를 지정하면 새 방 첫 칸도 거기서 — 다른 기기가 `window-new --on 기계 --cwd` 로 연 방.
+            self.pending_spawn_cwd = at.cwd.clone();
             self.new_window();
+            self.pending_spawn_cwd = None;
             let Some(surface) = self.ws.lock().unwrap().active_pane.clone() else {
                 return failed("새 방의 첫 pane 을 못 얻었어요".into());
             };

@@ -3793,6 +3793,16 @@ enum UserEvent {
     SocketSpawnShell(Option<String>, std::sync::mpsc::Sender<String>),
     /// 자리를 지정한 셸 pane(새 방·pane 옆·탭) — 다른 기계의 보기 창이 같은 자리에 세울 때.
     SocketSpawnShellAt(kasa_socket::backend::SpawnShellAt, std::sync::mpsc::Sender<kasa_socket::backend::SpawnShellReply>),
+    /// 다른 기기 칸을 이 기기 칸의 거울 탭으로(`collab.act attach`). anchor 가 없으면 보던 칸, 회신=새 거울 칸 번호.
+    SocketMirrorPane {
+        label: String,
+        remote_id: String,
+        name: String,
+        cwd: String,
+        anchor: Option<String>,
+        focus: bool,
+        reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    },
     /// CLI `window-new --machine` — 저쪽에 새 방을 만들고 여기 보기 창으로(GUI 스레드).
     RemoteNewRoom(String, std::sync::mpsc::Sender<std::result::Result<(String, Option<usize>), String>>),
     TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),

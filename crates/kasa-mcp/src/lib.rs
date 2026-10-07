@@ -3,7 +3,7 @@
 
 pub mod character;
 // 보드 수집기·tell 장부·칸 열쇠는 kasa-collab 으로 옮겼다. 옛 경로(`kasa_mcp::board_service`)를 그대로 쓴다.
-pub use kasa_collab::{board_service, surface_keys, tell_service};
+pub use kasa_collab::{act_service, board_service, surface_keys, tell_service};
 mod collab_env;
 pub use collab_env::install_collab_env;
 #[cfg(test)]

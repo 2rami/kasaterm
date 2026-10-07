@@ -1456,10 +1456,26 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("collaboration inspection unsupported by this backend")
     }
 
-    /// 주소로 고른 칸의 화면 글(`peek`)·그림(`capture`)과 기기의 방 배치(`where`). 주소의 기기가 이 기기가
-    /// 아니면 그 기기로 넘긴다 — 그 길(카사넷·관문)을 아는 백엔드만 덮어쓴다.
+    /// 주소로 고른 칸의 화면 글(`peek`)·그림(`capture`)·최근 대화(`transcript`)와 기기의 방 배치(`where`).
+    /// 주소의 기기가 이 기기가 아니면 그 기기로 넘긴다 — 그 길(카사넷·관문)을 아는 백엔드만 덮어쓴다.
     fn collab_view(&self, _op: &str, _params: &serde_json::Value) -> Result<serde_json::Value> {
         anyhow::bail!("collaboration view unsupported by this backend")
+    }
+
+    /// 주소로 고른 칸·기기에 쓰는 일(raw 입력·칸 세우기·옮기기·닫기·이름·색·포커스·거울 탭) — `kasa_collab::act_service`.
+    fn collab_act(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration act unsupported by this backend")
+    }
+
+    /// 기기마다 지금 닿는 길(직통·관문 중계·끊김).
+    fn collab_reach(&self) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration reach unsupported by this backend")
+    }
+
+    /// 다른 기기 칸 `remote_id`(명부 이름 `label`)를 이 기기에 거울 탭으로 연다 — `anchor` 칸의 탭, 없으면 보던 칸의 탭.
+    /// 새 거울 칸 번호를 돌려준다. GUI 백엔드만 구현한다.
+    fn mirror_pane(&self, _label: &str, _remote_id: &str, _name: &str, _cwd: &str, _anchor: Option<&str>, _focus: bool) -> Result<String> {
+        anyhow::bail!("mirror tabs unsupported by this backend")
     }
 
     fn collab_pane_identity(&self, _surface_id: &str) -> Result<serde_json::Value> {
