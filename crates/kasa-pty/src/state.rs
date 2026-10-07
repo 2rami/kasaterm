@@ -3327,11 +3327,9 @@ fn block_append_output(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, chunk: &[u8]
         }
         last.output.push_str(&text);
         if last.output.len() > BLOCK_OUTPUT_CAP {
-            let keep_from = last.output.len() - BLOCK_OUTPUT_CAP * 3 / 4;
-            let cut = last.output[keep_from..]
-                .find('\n')
-                .map(|nl| keep_from + nl + 1)
-                .unwrap_or_else(|| (keep_from..=last.output.len()).find(|i| last.output.is_char_boundary(*i)).unwrap_or(0));
+            // 한글 한가운데서 자르면 슬라이스가 패닉해 그 칸의 읽기 스레드가 죽고 화면이 멈춘다.
+            let keep_from = last.output.ceil_char_boundary(last.output.len() - BLOCK_OUTPUT_CAP * 3 / 4);
+            let cut = last.output[keep_from..].find('\n').map_or(keep_from, |nl| keep_from + nl + 1);
             last.dropped_lines += last.output[..cut].matches('\n').count();
             last.output.drain(..cut);
         }
@@ -7341,6 +7339,22 @@ mod external_session_tests {
         assert!(last.output.ends_with("END\n"));
         assert!(last.output.starts_with('y'), "줄 머리에서 자른다");
         assert!(last.dropped_lines > 0);
+    }
+
+    #[test]
+    fn long_block_output_cuts_on_a_char_boundary() {
+        let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::default();
+        let mut seq = 0;
+        block_begin(&blocks, &mut seq, "claude".into());
+        let mut tail = Vec::new();
+        // 3바이트 글자만 이어지다 끝에 1바이트가 붙으면 자를 자리가 글자 한가운데에 떨어진다.
+        let text = format!("{}a", "하".repeat(BLOCK_OUTPUT_CAP / 3 + 10));
+        block_append_output(&blocks, text.as_bytes(), &mut tail);
+        let b = blocks.lock().unwrap();
+        let last = b.back().unwrap();
+        assert!(last.output.len() <= BLOCK_OUTPUT_CAP);
+        assert!(last.output.starts_with('하'));
+        assert!(last.output.ends_with('a'));
     }
 
     #[test]
