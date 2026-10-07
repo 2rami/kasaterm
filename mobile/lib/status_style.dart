@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'look.dart';
@@ -183,31 +185,109 @@ class Appear extends StatelessWidget {
   );
 }
 
-/// 타일 바닥의 진행 막대 — 작업 중이면 빛이 흐르고, 아니면 자리를 안 차지한다
-/// (2026-09-07 지시 「프로세스바 애니메이션」). 끝을 모르는 일이라 정해진 길이가
-/// 아니라 흐름으로 보인다.
-class WorkingBar extends StatelessWidget {
-  const WorkingBar({super.key, required this.style});
+/// 「일하는 중」의 테두리 숨 — 칸 윤곽이 학생색으로 3초마다 굵기·진하기를 함께 오르내린다. 데스크톱 pane
+/// 테두리와 같은 결이다(2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로」). 쉬면 아무것도 안 그린다.
+/// 동작 줄이기면 숨 없이 가장 굵은 쪽으로 서 있는다.
+class BreathEdge extends StatefulWidget {
+  const BreathEdge({
+    super.key,
+    required this.live,
+    required this.color,
+    required this.radius,
+    required this.child,
+  });
 
-  final StatusStyle style;
+  final bool live;
+  final Color color;
+  final BorderRadius radius;
+  final Widget child;
 
   @override
-  Widget build(BuildContext context) => AnimatedSize(
-    duration: const Duration(milliseconds: 240),
-    curve: Curves.easeOut,
-    alignment: Alignment.topCenter,
-    child: style.live
-        ? SizedBox(
-            height: 3,
-            child: LinearProgressIndicator(
-              minHeight: 3,
-              borderRadius: BorderRadius.circular(3),
-              color: style.color,
-              backgroundColor: style.color.withValues(alpha: 0.16),
-            ),
-          )
-        : const SizedBox(height: 0, width: double.infinity),
+  State<BreathEdge> createState() => _BreathEdgeState();
+}
+
+class _BreathEdgeState extends State<BreathEdge>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctl = AnimationController(
+    vsync: this,
+    duration: Look.breathPeriod,
   );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(BreathEdge old) {
+    super.didUpdateWidget(old);
+    _sync();
+  }
+
+  void _sync() {
+    final run = widget.live && !Look.still(context);
+    if (run && !_ctl.isAnimating) _ctl.repeat();
+    if (!run && _ctl.isAnimating) _ctl.stop();
+  }
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.live) return widget.child;
+    return CustomPaint(
+      foregroundPainter: _BreathPainter(
+        _ctl,
+        color: widget.color,
+        radius: widget.radius,
+        still: Look.still(context),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+class _BreathPainter extends CustomPainter {
+  _BreathPainter(
+    this.t, {
+    required this.color,
+    required this.radius,
+    required this.still,
+  }) : super(repaint: t);
+
+  final Animation<double> t;
+  final Color color;
+  final BorderRadius radius;
+  final bool still;
+
+  /// 0 = 가장 옅고 가늘 때, 1 = 가장 진하고 굵을 때. 데스크톱 셰이더와 같은 반 코사인.
+  double get breath =>
+      still ? 1.0 : 0.5 - 0.5 * math.cos(t.value * 2 * math.pi);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final b = breath;
+    final w = Look.breathThin + (Look.breathThick - Look.breathThin) * b;
+    final a = Look.breathLow + (1 - Look.breathLow) * b;
+    // 안쪽으로 그린다 — 칸 밖으로 번지면 옆 칸 경계와 겹친다.
+    final rect = (Offset.zero & size).deflate(w / 2);
+    canvas.drawRRect(
+      radius.toRRect(rect),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = w
+        ..color = color.withValues(alpha: color.a * a),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_BreathPainter o) =>
+      o.color != color || o.radius != radius || o.still != still;
 }
 
 /// 도는 시간 — 데스크톱 배치도 칸·사이드바 목록 줄(`render::elapsed_mark`)과 같은 말·같은 단계.

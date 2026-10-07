@@ -151,15 +151,29 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas_tex, atlas_sampler, in.uv);
-    // 쓸기 띠(flags & 4, FLAG_BAND_SWEEP): ~32% 조각이 옅은 길 위를 1.2초마다 지나간다. `u.time` 만으로
-    // 움직여 CPU 는 띠 인스턴스를 한 번만 낸다. `in.uv.x` 가 0..1 가로 위치.
-    if ((in.flags & 4u) != 0u) {
-        let seg = 0.32;
-        let head = -seg + (1.0 + seg) * fract(u.time / 1.2);
-        let inseg = step(head, in.uv.x) * step(in.uv.x, head + seg);
-        let a = in.fg.a * mix(0.22, 1.0, inseg);
+    // 미분은 균일 흐름에서만 부를 수 있어 갈래 밖에서 미리 잰다(테두리 숨이 쓴다).
+    let duv = fwidth(in.uv);
+    // 테두리 숨(flags & 32, FLAG_EDGE_BREATH): 쿼드 전체가 둥근 사각 윤곽 하나다. uv 가 -1..1 이라
+    // 1/fwidth(uv) 가 쿼드의 장치 px 반폭·반높이이고, 거기서 둥근 사각까지의 거리를 잰다. 굵기와 진하기가
+    // 함께 사인으로 숨쉬고(가장 옅을 때 굵기 min·진하기 low), 안팎 경계를 1px 로 부드럽게 끊는다.
+    if ((in.flags & 32u) != 0u) {
+        let t_max = f32((in.flags >> 6u) & 0x3fu) * 0.25;
+        let t_min = f32((in.flags >> 12u) & 0x3fu) * 0.25;
+        let half = 1.0 / max(duv, vec2<f32>(1e-6, 1e-6));
+        let r = min(f32((in.flags >> 18u) & 0x3fu) * 0.5, min(half.x, half.y));
+        let period = max(f32((in.flags >> 24u) & 0xfu) * 0.5, 0.5);
+        let low = f32((in.flags >> 28u) & 0xfu) / 15.0;
+        let b = 0.5 - 0.5 * cos(u.time * 6.2831853 / period);
+        let reach = mix(t_min, t_max, b);
+        let q = abs(in.uv * half) - (half - vec2<f32>(r, r));
+        let sdf = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+        let d = -sdf;
+        let cover = clamp(reach - d + 0.5, 0.0, 1.0) * clamp(d + 0.5, 0.0, 1.0);
+        if (cover <= 0.0) {
+            discard;
+        }
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
-        return vec4<f32>(prepare_output(rgb), a);
+        return vec4<f32>(prepare_output(rgb), in.fg.a * mix(low, 1.0, b) * cover);
     }
     // 채우기 띠(flags & 16, FLAG_BAND_FILL): 왼쪽부터 2.4초에 걸쳐 차고 다시 시작한다 — 끝이 있는 일을
     // 「칸이 차는」 모양으로 보인다. 시간으로 채우므로 찬 칸이 실제 퍼센트는 아니다.
@@ -169,13 +183,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let a = in.fg.a * mix(0.18, 1.0, infill);
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
         return vec4<f32>(prepare_output(rgb), a);
-    }
-    // 숨쉬기 띠(flags & 8, FLAG_BAND_BREATH): 띠 전체의 알파가 3초 사인으로 오르내린다. 쓸기보다
-    // 느린 박자라 다른 신호로 읽힌다.
-    if ((in.flags & 8u) != 0u) {
-        let breath = 0.30 + 0.45 * (0.5 + 0.5 * sin(u.time * 2.0943951)); // 2π/3 → 3s period
-        let rgb = boost_saturation(in.fg.rgb, u.color_sat);
-        return vec4<f32>(prepare_output(rgb), in.fg.a * breath);
     }
     // Color glyphs (emoji) are baked as full RGBA — draw them verbatim,
     // letting fg.a act as a global opacity. Coverage masks are baked as

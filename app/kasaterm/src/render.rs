@@ -73,6 +73,8 @@ struct SidebarRowInfo {
     alert: bool,
     /// 승인·입력을 기다리는 중 — 줄 끝 점이 주황으로, 두 배 빠르게 깜빡인다.
     waiting: bool,
+    /// 사람이 이 방을 보러 와서 깜빡임을 멈춘 pane — 위 두 표시가 깜빡이지 않고 멈춰 선다.
+    quiet: bool,
     /// 에이전트가 오류 복구를 기다리는 중 — 미니맵에만 빨간 삼각형으로 표시한다.
     error: bool,
     /// 지금 도는 중 — 학생이 걷는다. 기다리는 중은 여기 안 든다(그건 멈춘 것이다).
@@ -208,25 +210,49 @@ pub(crate) fn elapsed_mark(busy_secs: Option<u64>, running: bool) -> Option<(Str
     Some((elapsed_label(secs)?, color, bold))
 }
 
-/// 진행 띠 한 줄 — 배치도 칸·별도창 칸·사이드바 목록 줄이 같은 모양을 쓴다. 헤더와
-/// 같은 한 벌(`working_bar`·`pulse_bar`)이라 같은 pane 이 자리마다 다른 리듬으로 흔들리지 않는다.
-///
-/// compact 를 busy 보다 **먼저** 본다 — compact 중에도 스피너가 돌아 busy 가 함께 참이라,
-/// 뒤로 미루면 늘 쓸림바가 이겨 「얼마나 남았나」가 사라진다. `bg_active` 는
-/// `refresh_pane_activity` 가 busy 일 때 false 로 넣으니(input.rs) busy 와 겹칠 일이 없다.
-/// 대기 중은 부르지 않는다 — 멈춘 것인데 띠가 차오르면 「일하는 줄」 알고 지나친다.
-pub(crate) fn progress_bar(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, compact_pct: Option<u8>, busy: bool, bg_active: bool) {
+/// 배치도 칸 신호 채움의 진하기 — 깜빡이거나(`period` 초), 사람이 그 방을 보러 와 멈췄으면 깜빡임의
+/// 가운데쯤에 멈춰 선다. 상태(기다림·못 본 완료)는 남고 움직임만 멎는다.
+fn signal_alpha(quiet: bool, period: f32) -> u8 {
+    if quiet {
+        90
+    } else {
+        (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8
+    }
+}
+
+/// compact 진행 띠 한 줄 — 배치도 칸·별도창 칸·사이드바 목록 줄이 같은 모양을 쓴다. 끝이 있는 일이라
+/// 차오르는 눈금으로 말한다. 끝을 모르는 「도는 중」은 띠가 아니라 `breath_mark` 의 테두리 숨이다.
+pub(crate) fn progress_bar(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, compact_pct: Option<u8>) {
     if let Some(pct) = compact_pct {
         g.rect(x, y, w, MINI_BAR_H, theme::with_alpha(theme::accent(), 0x3a));
         let done = w * (pct as f32 / 100.0).clamp(0.0, 1.0);
         if done > 0.5 {
             g.rect(x, y, done, MINI_BAR_H, theme::accent());
         }
-    } else if busy {
-        g.working_bar(x, y, w, MINI_BAR_H, theme::accent());
-    } else if bg_active {
-        g.pulse_bar(x, y, w, MINI_BAR_H, theme::accent());
     }
+}
+
+/// 배치도 칸·별도창 칸·사이드바 목록 줄의 「도는 중」 — 그 칸(줄) 윤곽이 pane 테두리와 같은 결로 숨쉰다
+/// (2026-10-07 「미니맵·목록의 작은 막대도 같은 결로」). 고른 칸은 또렷하게, 나머지는 옅게.
+///
+/// `bg_active` 는 `refresh_pane_activity` 가 busy 일 때 false 로 넣으니(input.rs) busy 와 겹칠 일이 없다.
+/// 대기 중은 부르지 않는다 — 멈춘 것인데 숨쉬면 「일하는 줄」 알고 지나친다.
+pub(crate) fn breath_mark(
+    g: &mut gpu::GpuRenderer,
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    busy: bool,
+    bg_active: bool,
+    focused: bool,
+) {
+    let kind = if busy {
+        theme::BreathKind::Working
+    } else if bg_active {
+        theme::BreathKind::Background
+    } else {
+        return;
+    };
+    g.breath_outline(rect, radius, theme::accent(), theme::breath(kind, focused, true));
 }
 
 impl App {
@@ -2308,6 +2334,7 @@ impl App {
                     // 겹쳐 어느 쪽도 안 읽힌다. 급한 쪽이 이긴다.
                     alert: !waiting && self.unread_panes.contains(id),
                     waiting,
+                    quiet: self.blink_quiet.contains(id),
                     error: act.is_some_and(|a| a.has_error),
                     busy,
                     stashed: self
@@ -2365,6 +2392,15 @@ impl App {
                     .iter()
                     .chain(self.room_undocked(i).iter())
                     .any(|id| self.pane_needs_you(id))
+            })
+            .collect();
+        // 그 기다림이 아직 깜빡일 자격이 있나 — 사람이 그 방을 보러 와 멈춘 칸만 기다리면 점은 서 있다.
+        let sb_wait_loud: Vec<bool> = (0..sb_labels.len())
+            .map(|i| {
+                self.window_leaves(i)
+                    .iter()
+                    .chain(self.room_undocked(i).iter())
+                    .any(|id| self.pane_needs_you(id) && !self.blink_quiet.contains(id))
             })
             .collect();
         // Per-window "unseen notification" flag: a pane finished / needs
@@ -3582,14 +3618,11 @@ impl App {
                     // 세로 사이드바와 같은 규칙 — 자리 고정, 색이 말하고, 깜빡인다.
                     // 여기도 모서리 두 곳을 오가던 점 쌍을 하나로 합쳤다.
                     if sb_wait.get(*i).copied().unwrap_or(false) {
-                        blink_dot(
-                            g,
-                            icon_x + isz - 3.0,
-                            icon_y - 3.0,
-                            6.0,
-                            theme::attention(),
-                            0.9,
-                        );
+                        if sb_wait_loud.get(*i).copied().unwrap_or(false) {
+                            blink_dot(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::attention(), 0.9);
+                        } else {
+                            circle_rect(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, theme::attention());
+                        }
                     } else if sb_alert.get(*i).copied().unwrap_or(false) {
                         blink_dot(
                             g,
@@ -3812,7 +3845,11 @@ impl App {
                         } else {
                             (theme::accent(), 1.6)
                         };
-                        blink_dot(g, dot_x, dot_y, dsz, c, period);
+                        if head_wait && !sb_wait_loud.get(*i).copied().unwrap_or(false) {
+                            circle_rect(g, dot_x, dot_y, dsz, c);
+                        } else {
+                            blink_dot(g, dot_x, dot_y, dsz, c, period);
+                        }
                     }
                     // 두 줄짜리 라벨 — 상태 점 칸 오른쪽.
                     let text_x = dot_x + dsz + dot_gap;
@@ -4064,7 +4101,9 @@ impl App {
                         // 「나를 기다린다」가 급한 소식이다.
                         if let Some((c, _)) = signal {
                             c
-                        } else if cur {
+                        } else if cur && !(info.busy || info.bg_active) {
+                            // 도는 칸은 숨쉬는 윤곽(`breath_mark`)이 「여기」까지 말한다 — 고정
+                            // 강조 테두리를 깔면 그 위 숨이 묻혀 안 보인다.
                             theme::accent()
                         } else if hov {
                             theme::surface_hover()
@@ -4102,7 +4141,7 @@ impl App {
                     if let Some((col, period)) = signal {
                         if mw > 5.0 && mh > 5.0 {
                             let mut c = col;
-                            c[3] = (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8;
+                            c[3] = signal_alpha(info.quiet, period);
                             round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
                         }
                     }
@@ -4154,9 +4193,9 @@ impl App {
                             );
                         }
                     }
-                    // 진행 바 — 칸 바닥의 2px 띠. 도는 칸에는 **걷기와 함께** 그린다
-                    // (사용자 2026-08-24 「미니맵에서 진행중이면 걷기나 프로세스바가
-                    // 아니라 둘다 나오게」).
+                    // 도는 칸은 **걷기와 함께** 칸 윤곽이 숨쉰다(사용자 2026-08-24 「미니맵에서
+                    // 진행중이면 걷기나 프로세스바가 아니라 둘다 나오게」 → 2026-10-07 바를 숨으로).
+                    // 바닥 띠 자리는 compact 눈금과 경과 시간이 쓴다.
                     //
                     // 처음 넣을 때는(2026-08-20) 걷는 칸에서 바를 뺐다 — 같은 뜻을 두
                     // 겹으로 칠했다 되돌린 기록이 이 파일에 두 군데 있어서다(줄 vs 카드
@@ -4201,7 +4240,10 @@ impl App {
                                 bw -= lw + 3.0;
                             }
                         }
-                        progress_bar(g, bx, by, bw, info.compact_pct, info.busy, info.bg_active);
+                        progress_bar(g, bx, by, bw, info.compact_pct);
+                    }
+                    if signal.is_none() {
+                        breath_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, cur);
                     }
                     // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
                     // 나와 있는지. 전엔 뒷장이 우상단으로 계단지는 카드 덱이었는데,
@@ -4287,7 +4329,7 @@ impl App {
                     if let Some((col, period)) = signal {
                         if mw > 5.0 && mh > 5.0 {
                             let mut c = col;
-                            c[3] = (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8;
+                            c[3] = signal_alpha(info.quiet, period);
                             round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
                         }
                     }
@@ -4337,7 +4379,10 @@ impl App {
                     }
                     if minimap_has_bar(mw, mh) {
                         let by = my + mh - MINI_BAR_H - MINI_BAR_PAD;
-                        progress_bar(g, mx + 2.0, by, mw - 4.0, info.compact_pct, info.busy, info.bg_active);
+                        progress_bar(g, mx + 2.0, by, mw - 4.0, info.compact_pct);
+                    }
+                    if signal.is_none() {
+                        breath_mark(g, (mx, my, mw, mh), 2.0, info.busy, info.bg_active, false);
                     }
                     if mw >= 22.0 {
                         g.queue_icon("external-link", mx + mw - 10.0, my + 2.0, 8.0, theme::text_mute());
@@ -4541,8 +4586,12 @@ impl App {
                         // 이름은 오류 없이 아무것도 안 그린다(실측: "disabled" 로 두어
                         // 표시가 통째로 사라졌고, 흐린 글자만 남아 원인이 안 보였다).
                         g.queue_icon("minus", dot_x - 1.5, dot_y - 1.5, 9.0, theme::text_mute());
+                    } else if info.waiting && info.quiet {
+                        circle_rect(g, dot_x, dot_y, 6.0, theme::attention());
                     } else if info.waiting {
                         blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
+                    } else if info.alert && info.quiet {
+                        circle_rect(g, dot_x, dot_y, 6.0, theme::accent());
                     } else if info.alert {
                         blink_dot(g, dot_x, dot_y, 6.0, theme::accent(), 1.6);
                     } else {
@@ -6666,11 +6715,9 @@ impl App {
                     None => theme::header_bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
-                // Working indicator: a ~32% segment sweeps the header bottom on
-                // a 1.2s loop while this pane is busy (claude running) — the
-                // "로딩바" the user picked. 2px over a faint accent rail; idle
-                // panes draw nothing. about_to_wait keeps frames coming (a
-                // cheap GPU-time present, no chrome rebuild) while a pane is busy.
+                // 「일하는 중」은 머리 띠가 아니라 칸 테두리가 숨쉰다(아래 footer 루프,
+                // 2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로」). 머리에 남는 건 끝이
+                // 있는 compact 진행뿐이다.
                 if h.compacting {
                     // compact 중 — 쓸림 대신 왼쪽부터 채워지는 바. compact 는 끝이 있는
                     // 작업이라 이 모양이 상태를 옳게 읽히고, 화면에 뜨는 알림이 teammate
@@ -6705,20 +6752,6 @@ impl App {
                     } else {
                         g.compact_bar(h.x, by, h.w, bar_h, theme::accent());
                     }
-                } else if h.busy {
-                    let bar_h = 3.0;
-                    let by = h.y + PANE_HEADER_HEIGHT - bar_h;
-                    // One FLAG_BAND_SWEEP quad — the shader sweeps the segment
-                    // over a faint track from u.time, so there's no per-frame
-                    // CPU phase math and no chrome rebuild to keep it moving.
-                    g.working_bar(h.x, by, h.w, bar_h, theme::accent());
-                } else if h.bg_active {
-                    // Not visibly working, but a background shell / Monitor is
-                    // in-flight — one FLAG_BAND_BREATH quad breathes the same accent
-                    // rail on a slow 3s sine, a distinct rhythm from the sweep.
-                    let bar_h = 3.0;
-                    let by = h.y + PANE_HEADER_HEIGHT - bar_h;
-                    g.pulse_bar(h.x, by, h.w, bar_h, theme::accent());
                 }
                 // 계정이 바뀌었는데 이 pane 은 옛 계정으로 돈다 — 헤더에 「⟳ 재시작」
                 // 칩을 띄운다. 계정은 프로세스 env 라 뜰 때 박히고 도는 프로세스는 못
@@ -7385,7 +7418,7 @@ impl App {
             // 유일한 시각 단서라서(하단 dock 칩 하나로는 안 읽힌다). g(=&mut
             // self.gpu) 를 잡기 전에 스냅샷.
             let zoomed_now = self.zoomed_pane.clone();
-            // 헤더를 실제로 그린 pane 집합 — 헤더 working bar 가 거기 뜨므로 footer 로딩바는
+            // 헤더를 실제로 그린 pane 집합 — compact 바가 헤더에 뜨므로 footer 쪽 바는
             // 이 pane 들을 건너뛴다. `ws.panes.has_header()` 가 아니라 방금 그린 `headers`
             // (pty_layout 기반)에서 뽑아야 ws.panes↔pty_layout 데싱크로 한 pane 에 헤더(위)·
             // footer(아래) 스윕바가 동시에 뜨는 "로딩바 두개" 버그가 안 난다(사용자).
@@ -7405,33 +7438,42 @@ impl App {
                     // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은
                     // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(사용자).
                     let zoom_focus = zoomed_now.as_deref() == Some(fid.as_str());
-                    if zoom_focus
-                        || (is_split
-                            && active_pane.as_deref() == Some(fid.as_str())
-                            && claude_panes.contains(fid.as_str()))
-                    {
-                        // 목록의 포커스는 앱 강조색을 따라야 한다.
-                        let border_col = if agents_view_panes.contains(fid.as_str()) {
-                            Some(theme::accent())
+                    let focused = active_pane.as_deref() == Some(fid.as_str());
+                    // 학생색은 claude 가 도는 pane 에만 — 순수 셸에 남의 학생색이 둘러지면
+                    // 「저 pane 에 누가 있다」로 잘못 읽힌다. 목록 보기는 앱 강조색을 따른다.
+                    let edge_col = if agents_view_panes.contains(fid.as_str()) {
+                        Some(theme::accent())
+                    } else {
+                        pane_chars
+                            .get(fid.as_str())
+                            .filter(|_| claude_panes.contains(fid.as_str()))
+                            .and_then(|n| {
+                                theme::character_accent_n(n, theme::character_ordinal(&pane_chars, fid))
+                            })
+                    };
+                    // 끝을 모르는 일은 테두리가 숨쉰다 — 쓸려 지나가던 로딩바를 걷고 그 자리를
+                    // 칸 윤곽이 잇는다(2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로, 포커스
+                    // 안 되면 옅게」). 셰이더가 `u.time` 으로 숨쉬므로 CPU 는 위상을 안 센다.
+                    // 손을 기다리는 칸(아래 깜빡임)과는 상태가 배타적이라 같이 서지 않는다.
+                    let breath_kind = self.pane_activity.get(fid).and_then(|a| {
+                        if a.state.is_busy() {
+                            Some(theme::BreathKind::Working)
+                        } else if a.bg_active {
+                            Some(theme::BreathKind::Background)
                         } else {
-                            pane_chars
-                                .get(fid.as_str())
-                                // 학생색은 claude 가 도는 pane 에만 — 순수 셸을
-                                // 줌했을 때 남의 학생색이 둘러지면 「저 pane 에
-                                // 누가 있다」로 잘못 읽힌다. 줌은 accent 로.
-                                .filter(|_| claude_panes.contains(fid.as_str()))
-                                .and_then(|n| {
-                                    theme::character_accent_n(
-                                        n,
-                                        theme::character_ordinal(&pane_chars, fid),
-                                    )
-                                })
-                                // 줌은 학생이 없는 순수 셸에서도 테두리가 있어야
-                                // 한다 — 없으면 줌 자체가 안 보인다.
-                                .or_else(|| {
-                                    zoom_focus.then(|| theme::accent_color(theme::accent_name()))
-                                })
-                        };
+                            None
+                        }
+                    });
+                    if let Some(kind) = breath_kind {
+                        let look = theme::breath(kind, focused || zoom_focus, false);
+                        g.breath_outline((*fx, *fy, *fw, *fbox_h), 0.0, edge_col.unwrap_or(accent), look);
+                        border_inset.insert(fid.clone(), look.thick.0);
+                    } else if zoom_focus
+                        || (is_split && focused && claude_panes.contains(fid.as_str()))
+                    {
+                        // 줌은 학생이 없는 순수 셸에서도 테두리가 있어야 한다 — 없으면 줌
+                        // 자체가 안 보인다.
+                        let border_col = edge_col.or_else(|| zoom_focus.then_some(accent));
                         if let Some(col) = border_col {
                             // 줌은 조금 두껍게 — 여백 위에 홀로 뜬 카드의 윤곽선이다.
                             let t = if zoom_focus { 2.0_f32 } else { 1.5_f32 };
@@ -7442,12 +7484,8 @@ impl App {
                             border_inset.insert(fid.clone(), t);
                         }
                     }
-                    // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
-                    // 얇은 스윕바. 헤더 띠 폐기 후 일반 pane 의 유일한 진행 표시(사용자).
-                    // 학생이름은 타이틀바(claude 실행 시), 로딩바는 working 시 — 역할 분리.
-                    // compact 중이면 쓸림 대신 왼쪽부터 채워지는 바 — 헤더 pane 과 같은
-                    // 형태 언어다. working 만 보던 시절엔 status 가 "compacting" 으로
-                    // 좁혀지는 순간 헤더 없는 pane 은 표시가 통째로 사라졌다.
+                    // compact 중이면 box 상단에 왼쪽부터 채워지는 바 — 끝이 있는 일이라 숨이
+                    // 아니라 차오르는 모양으로 말한다(헤더 pane 과 같은 형태 언어).
                     if !headered.contains(fid.as_str()) {
                         const BAR_H: f32 = 2.5;
                         let (st, pct) = self
@@ -7479,22 +7517,12 @@ impl App {
                                 g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
                                 g.compact_bar(*fx, *fy, *fw, BAR_H, accent);
                             }
-                        } else if matches!(st, crate::agent_state::AgentState::Working) {
-                            g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
-                            let seg = (fw * 0.32).clamp(36.0, 160.0);
-                            let span = fw + seg;
-                            let off = (anim_phase * 0.5).fract() * span - seg;
-                            let sx = (fx + off).max(*fx);
-                            let ex = (fx + off + seg).min(fx + fw);
-                            if ex > sx {
-                                g.rect(sx, *fy, ex - sx, BAR_H, accent);
-                            }
                         }
                     }
                     // 손을 기다리는 pane — 네 변이 핑크로 깜빡인다(사용자: "내가
-                    // 엔터해야되거나 그런거는 핑크색으로 깜빡이게"). 로딩바(숨쉬기)
-                    // 와 **뜻이 정반대**라 형태부터 갈랐다: 스윕바는 "놔둬도 진행
-                    // 된다", 이 테두리는 "내가 손대야 풀린다". 상태가 배타적이라
+                    // 엔터해야되거나 그런거는 핑크색으로 깜빡이게"). 일하는 중의 숨쉬는
+                    // 테두리와 **뜻이 정반대**라 색과 박자로 갈랐다: 학생색 느린 숨은 "놔둬도
+                    // 진행된다", 핑크 깜빡임은 "내가 손대야 풀린다". 상태가 배타적이라
                     // (working ≠ waiting) 둘이 한 pane 에 같이 뜨지 않는다.
                     //
                     // 포커스 테두리(학생색) 위에 덧그린다 — 지금 보고 있는 pane 이
@@ -7508,7 +7536,12 @@ impl App {
                         .is_some_and(|a| a.state.needs_you())
                     {
                         let mut col = theme::attention();
-                        col[3] = (90.0 + 165.0 * breathe(anim_phase, 1.1)) as u8;
+                        // 사람이 이 방을 보러 왔으면 테두리는 그대로 두고 깜빡임만 멈춘다.
+                        col[3] = if self.blink_quiet.contains(fid) {
+                            0xd0
+                        } else {
+                            (90.0 + 165.0 * breathe(anim_phase, 1.1)) as u8
+                        };
                         let t = 2.0_f32;
                         g.rect(*fx, *fy, *fw, t, col);
                         g.rect(*fx, fy + fbox_h - t, *fw, t, col);
@@ -13158,7 +13191,8 @@ impl App {
         // (사이드바에 뜨는 다른 방의 상태 표시는 정적이고, 깜빡이는 것들은
         // `window_alert`·`needs_you` 가 따로 펌프를 건다 — 여기서 좁혀도 안 멈춘다.)
         let bar_animating = self.pane_activity.iter().any(|(id, a)| {
-            (a.state.is_busy() || a.state.needs_you()) && visible_panes.contains(id)
+            (a.state.is_busy() || (a.state.needs_you() && !self.blink_quiet.contains(id)))
+                && visible_panes.contains(id)
         });
         // Split "needs a full chrome+grid rebuild" from "only the working-bar
         // sweep advances". A bar-only frame redraws cached chrome with a fresh

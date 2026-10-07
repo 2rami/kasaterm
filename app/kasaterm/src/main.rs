@@ -5465,6 +5465,10 @@ struct App {
     /// pulses until the user switches to that window, which clears the entry —
     /// a persistent "you missed this" cue, unlike the brief `notify_flash`.
     window_alert: std::collections::HashSet<usize>,
+    /// 깜빡임을 멈춘 pane(leaf id). 사람이 그 방을 보러 오면 그 방 칸이 다 든다 — 손이 필요한 상태
+    /// 표시는 그대로 서고 움직임만 멎는다. 끝남·기다림·오류가 새로 나면 그 pane 이 빠져 다시 깜빡인다
+    /// (`quiet_room_blinks`·`wake_blink`, 2026-10-07 「방 포커스하면 없어지게」).
+    blink_quiet: std::collections::HashSet<String>,
     /// 사이드바에서 pane 목록을 펴 둔 방. **펼친 것만** 담으므로 기본은 접힘이다
     /// (info.rs 의 `group_collapsed` 는 기본이 열림이라 반대 뜻 — 한 집합에 못 담아
     /// 따로 둔다). 방 인덱스가 키라 `reorder_window` 의 remap 을 반드시 통과해야
@@ -6157,6 +6161,7 @@ impl App {
             turn_done_panes: std::collections::HashSet::new(),
             booted_at: std::time::Instant::now(),
             window_alert: std::collections::HashSet::new(),
+            blink_quiet: std::collections::HashSet::new(),
             expanded_windows: std::collections::HashSet::new(),
             expand_anim: None,
             sidebar_row_drag: None,

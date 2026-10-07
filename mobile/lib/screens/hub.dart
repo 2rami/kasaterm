@@ -979,7 +979,7 @@ class _MiniCellState extends State<_MiniCell> {
                     Positioned(
                       left: 0,
                       right: 0,
-                      bottom: busy ? 5 : 3,
+                      bottom: 3,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -1006,21 +1006,20 @@ class _MiniCellState extends State<_MiniCell> {
                       right: 3,
                       child: Icon(st!.icon, size: 12, color: st.color),
                     ),
-                  // 작업 중은 칸 바닥에 흐르는 막대 — 허브 타일은 얼굴 테가 돌아
-                  // 같은 뜻을 두 번 말하지 않는다(2026-09-07 지시 「둘 중 하나만」).
-                  if (busy)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: WorkingBar(style: st!),
-                    ),
                 ],
               ),
             ),
           ),
         );
-        if (!tabbed) return front;
+        // 작업 중은 칸 윤곽이 학생색으로 숨쉰다 — 바닥에 흐르던 막대를 걷었다(2026-10-07 「프로세스바
+        // 걷어내고 숨쉬기 모션으로」). 기다림의 고정 테(상태색)와는 상태가 배타적이라 같이 서지 않는다.
+        final cell = BreathEdge(
+          live: busy && !waiting,
+          color: accent,
+          radius: Look.smallCorners,
+          child: front,
+        );
+        if (!tabbed) return cell;
         // 좌우로 쓸면 다음·이전 탭. 겹친 뒷장은 두지 않는다 — 몇째인지는 밑의 점이
         // 말하고, 칸이 작아 덱까지 들어가면 얼굴이 밀린다(2026-09-08 지시).
         return GestureDetector(
@@ -1030,7 +1029,7 @@ class _MiniCellState extends State<_MiniCell> {
             if (v.abs() < 120) return;
             _flip(v < 0 ? 1 : -1);
           },
-          child: front,
+          child: cell,
         );
       },
     );
@@ -1191,107 +1190,109 @@ class _PaneTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     final slug = pane.slug;
     final st = StatusStyle.of(pane, scheme);
-    // 왼쪽 알약 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례 주황, 하는 중 강조, 쉬는 중 없음.
-    final stripe = st.needsYou
-        ? StatusStyle.attention
-        : (st.live ? scheme.primary : null);
+    // 왼쪽 알약 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례만 주황. 하는 중은 띠가 아니라 줄 윤곽이
+    // 숨쉰다(지도 칸·데스크톱 목록 줄과 같은 결, 2026-10-07).
+    final stripe = st.needsYou ? StatusStyle.attention : null;
     // 글은 세션 이름과 도는 시간뿐 — 데스크톱 사이드바 목록 줄과 같다(2026-10-01). 학생 이름은
-    // 얼굴이, 상태는 띠와 막대가 말한다. 막대는 지도 칸 바닥의 그것과 같은 위젯이다.
+    // 얼굴이, 상태는 띠와 숨이 말한다.
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
-    return InkWell(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: CustomPaint(
-        // 줄 사이 선은 글자 시작점부터 — 판 안의 안쪽 선(design.md 「행」).
-        painter: _InsetLine(scheme.outline, Look.cardPad + Look.face + 12),
-        child: Stack(
-          children: [
-            if (stripe != null)
-              Positioned(
-                left: Look.stripeX,
-                top: 0,
-                bottom: 0,
-                child: Center(
-                  child: Container(
-                    width: Look.stripe,
-                    height: Look.stripeH,
-                    decoration: BoxDecoration(
-                      color: stripe,
-                      borderRadius: BorderRadius.circular(Look.stripe),
+    return BreathEdge(
+      live: st.live,
+      color: scheme.primary,
+      radius: Look.smallCorners,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: CustomPaint(
+          // 줄 사이 선은 글자 시작점부터 — 판 안의 안쪽 선(design.md 「행」).
+          painter: _InsetLine(scheme.outline, Look.cardPad + Look.face + 12),
+          child: Stack(
+            children: [
+              if (stripe != null)
+                Positioned(
+                  left: Look.stripeX,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: Container(
+                      width: Look.stripe,
+                      height: Look.stripeH,
+                      decoration: BoxDecoration(
+                        color: stripe,
+                        borderRadius: BorderRadius.circular(Look.stripe),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            Container(
-              constraints: const BoxConstraints(minHeight: Look.row2),
-              padding: const EdgeInsets.fromLTRB(
-                Look.cardPad,
-                8,
-                Look.cardPad,
-                8,
-              ),
-              child: Row(
-                children: [
-                  Hero(
-                    tag: 'face-${pane.machine}-${pane.id}',
-                    child: StudentFace(
-                      server: server,
-                      slug: slug,
-                      url: slug == null
-                          ? null
-                          : server.avatar(slug, machine: pane.machine),
-                      shell: pane.isShell,
-                      size: Look.face,
+              Container(
+                constraints: const BoxConstraints(minHeight: Look.row2),
+                padding: const EdgeInsets.fromLTRB(
+                  Look.cardPad,
+                  8,
+                  Look.cardPad,
+                  8,
+                ),
+                child: Row(
+                  children: [
+                    Hero(
+                      tag: 'face-${pane.machine}-${pane.id}',
+                      child: StudentFace(
+                        server: server,
+                        slug: slug,
+                        url: slug == null
+                            ? null
+                            : server.avatar(slug, machine: pane.machine),
+                        shell: pane.isShell,
+                        size: Look.face,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                pane.rowTitle,
-                                style: theme.textTheme.titleSmall,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if ((pane.mirrorOf ?? '').isNotEmpty) ...[
-                              const SizedBox(width: 6),
-                              MirrorTag(pane.mirrorOf!),
-                            ],
-                          ],
-                        ),
-                        const SizedBox(height: Look.rowGap),
-                        // 둘째 줄 자리는 늘 잡아 둔다 — 일이 시작·끝날 때마다 이름이 위아래로 튀지 않게.
-                        SizedBox(
-                          height: Look.subLine,
-                          child: Row(
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
                             children: [
-                              Expanded(
-                                child: Center(child: WorkingBar(style: st)),
-                              ),
-                              if (time != null) ...[
-                                const SizedBox(width: 6),
-                                Text(
-                                  time,
-                                  style: elapsedStyle(pane.busySecs!, theme),
+                              Flexible(
+                                child: Text(
+                                  pane.rowTitle,
+                                  style: theme.textTheme.titleSmall,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
+                              ),
+                              if ((pane.mirrorOf ?? '').isNotEmpty) ...[
+                                const SizedBox(width: 6),
+                                MirrorTag(pane.mirrorOf!),
                               ],
                             ],
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: Look.rowGap),
+                          // 둘째 줄 자리는 늘 잡아 둔다 — 일이 시작·끝날 때마다 이름이 위아래로 튀지 않게.
+                          SizedBox(
+                            height: Look.subLine,
+                            child: Row(
+                              children: [
+                                const Spacer(),
+                                if (time != null) ...[
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    time,
+                                    style: elapsedStyle(pane.busySecs!, theme),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

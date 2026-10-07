@@ -499,6 +499,7 @@ impl App {
         // 턴이 끝났다 = 사용량이 방금 움직였다. 폴러를 깨워 남은 잠을 건너뛰게 한다
         // (`usage_poke`) — 그러지 않으면 방금 쓴 몫이 최대 1분 뒤에야 표에 뜬다.
         crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
+        self.wake_blink(surface_id);
         // A pane in a *background* window finished — pulse that window's sidebar
         // tab until the user switches to it (switch_window clears the entry).
         if let Some(wi) = self.window_of_pane(surface_id) {
@@ -556,6 +557,7 @@ impl App {
         let character = self.pane_character_if_known(surface_id);
         let reason = reason.trim();
         self.notify_flash.insert(surface_id.to_string(), now);
+        self.wake_blink(surface_id);
         // Attention raised in a background window — pulse its sidebar tab too.
         if let Some(wi) = self.window_of_pane(surface_id) {
             if wi != self.active_window {
@@ -631,6 +633,7 @@ impl App {
         match ev {
             Transition::TurnDone => {
                 self.notify_flash.insert(id.to_string(), now);
+                self.wake_blink(id);
                 self.turn_done_panes.insert(id.to_string());
                 crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
                 if let Some(wi) = background_window {
@@ -693,6 +696,7 @@ impl App {
             Transition::Waiting { kind: crate::agent_state::WaitKind::Idle, .. } => {}
             Transition::Waiting { kind, reason } => {
                 self.notify_flash.remove(id);
+                self.wake_blink(id);
                 if let Some(wi) = background_window {
                     self.window_alert.insert(wi);
                 }
@@ -766,6 +770,7 @@ impl App {
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
         let sid = self.pane_claude_sid.get(id).cloned();
         let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(id);
+        self.wake_blink(id);
         if let Some(wi) = self.window_of_pane(id).filter(|wi| *wi != self.active_window) {
             self.window_alert.insert(wi);
         }
@@ -907,6 +912,28 @@ impl App {
     /// 그 pane 이 **내 손을 기다리는 중**인가 — 승인 프롬프트든 질문이든.
     pub(crate) fn pane_needs_you(&self, id: &str) -> bool {
         self.agent_state(id).needs_you()
+    }
+
+    /// 사람이 그 방을 보러 왔다 — 그 방 칸들의 깜빡임을 멈춘다(2026-10-07 「pane 깜빡거리는 거 방
+    /// 포커스하면 없어지게」). 승인 대기·못 본 완료 같은 상태 표시는 남고 움직임만 멎는다. 방으로 옮겨 올
+    /// 때, 앱 창이 다시 초점을 받을 때, 그 방을 누를 때 부른다.
+    pub(crate) fn quiet_room_blinks(&mut self, wi: usize) {
+        let mut ids = self.window_leaves(wi);
+        ids.extend(self.room_undocked(wi));
+        let before = self.blink_quiet.len();
+        self.blink_quiet.extend(ids);
+        if self.blink_quiet.len() != before {
+            self.chrome_dirty = true;
+        }
+    }
+
+    /// 새 일이 생겼다(끝남·기다림·오류) — 그 pane 이 다시 깜빡인다. 탭 pid 로 와도 바깥 pane 으로 접는다.
+    pub(crate) fn wake_blink(&mut self, id: &str) {
+        let outer = self.ws.lock().ok().and_then(|w| w.outer_for_pty(id));
+        self.blink_quiet.remove(id);
+        if let Some(o) = outer {
+            self.blink_quiet.remove(&o);
+        }
     }
 
     /// 계정 전환 반짝임의 진행도 `1.0 → 0.0`. 끝났으면 `None` — 호출부가 그걸로

@@ -33,16 +33,31 @@ impl CellInstance {
     /// WezTerm text gamma/contrast curve. That curve sharpens font stems but
     /// hard-edges thin SVG strokes, which read as jagged pixels on hover.
     pub const FLAG_ICON: u32 = 2;
-    /// 장식 띠 셋(비트 2~4). 아틀라스를 안 보고 `u.time` 으로 셰이더가 움직이므로, 띠 인스턴스를 한 번
-    /// 내 두면 CPU 가 프레임마다 다시 짓지 않는다(일하는 동안에도 유휴 CPU 0). `uv.x` 가 0..1 가로 위치다.
+    /// 채우기 띠(비트 4). 아틀라스를 안 보고 `u.time` 으로 셰이더가 움직이므로, 띠 인스턴스를 한 번 내 두면
+    /// CPU 가 프레임마다 다시 짓지 않는다. `uv.x` 가 0..1 가로 위치다. 왼쪽부터 2.4초에 걸쳐 차고 다시
+    /// 시작한다 — 「끝이 있고 거기로 가는 중」. 시간으로 채우므로 찬 칸이 실제 진행률은 아니다.
     ///
-    /// 쓸기: 32% 조각이 옅은 길 위를 1.2초마다 지나간다 — 끝을 모르는 「도는 중」.
-    pub const FLAG_BAND_SWEEP: u32 = 4;
-    /// 숨쉬기: 띠 전체의 알파가 3초 사인으로 오르내린다 — 쓸기보다 느린 박자라 다른 신호로 읽힌다.
-    pub const FLAG_BAND_BREATH: u32 = 8;
-    /// 채우기: 왼쪽부터 2.4초에 걸쳐 차고 다시 시작한다 — 「끝이 있고 거기로 가는 중」. 시간으로 채우므로
-    /// 찬 칸이 실제 진행률은 아니다.
+    /// 끝을 모르는 「도는 중」을 말하던 쓸기·숨쉬기 띠(비트 2·3)는 걷었다 — 테두리 숨(`FLAG_EDGE_BREATH`)이
+    /// 그 자리를 잇는다(2026-10-07 「프로세스바 걷어내고 숨쉬기 모션으로」).
     pub const FLAG_BAND_FILL: u32 = 16;
+    /// 테두리 숨(비트 5): 쿼드 하나가 둥근 사각 윤곽 전체다. uv 가 -1..1 이고 셰이더가 `fwidth` 로 쿼드의 장치 px
+    /// 크기를 되짚어 가장자리까지의 거리를 재므로 네 변·모서리가 한 번에 겹침 없이 선다. 굵기·진하기가 `u.time`
+    /// 사인으로 오르내려 일하는 칸도 CPU 가 테두리를 다시 짓지 않는다. 숨의 모양은 상위 비트에 싣는다
+    /// (`edge_breath_flags`).
+    pub const FLAG_EDGE_BREATH: u32 = 32;
+
+    /// `FLAG_EDGE_BREATH` 와 그 숨 모양을 플래그 한 칸에 싼다 — 인스턴스 배치를 안 바꾸고 실을 자리가 여기뿐이다.
+    /// 굵기는 장치 px 1/4 단위(6비트, 최대 15.75), 모서리 반지름은 장치 px 1/2 단위(6비트, 최대 31.5),
+    /// 주기는 0.5초 단위(4비트, 0.5~7.5), 가장 옅을 때 진하기는 가장 진할 때(fg 알파)의 1/15 단위(4비트).
+    pub fn edge_breath_flags(thick_max_px: f32, thick_min_px: f32, radius_px: f32, period_s: f32, low: f32) -> u32 {
+        let q = |v: f32, max: u32| (v.round().max(0.0) as u32).min(max);
+        Self::FLAG_EDGE_BREATH
+            | q(thick_max_px * 4.0, 63) << 6
+            | q(thick_min_px * 4.0, 63) << 12
+            | q(radius_px * 2.0, 63) << 18
+            | q(period_s * 2.0, 15).max(1) << 24
+            | q(low * 15.0, 15) << 28
+    }
 }
 
 #[repr(C)]
@@ -385,5 +400,34 @@ impl Pipeline {
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..6, instance_index..instance_index + 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CellInstance;
+
+    #[test]
+    fn edge_breath_flags_pack_without_touching_other_flags() {
+        let f = CellInstance::edge_breath_flags(5.0, 3.0, 4.0, 3.0, 0.45);
+        assert_ne!(f & CellInstance::FLAG_EDGE_BREATH, 0);
+        // 아래 다섯 비트(색 글리프·아이콘·채우기 띠)를 건드리면 셰이더가 다른 갈래로 샌다.
+        assert_eq!(f & 0x1f, 0);
+        assert_eq!((f >> 6) & 0x3f, 20, "굵기 최대 5px → 1/4 단위 20");
+        assert_eq!((f >> 12) & 0x3f, 12, "굵기 최소 3px → 12");
+        assert_eq!((f >> 18) & 0x3f, 8, "반지름 4px → 1/2 단위 8");
+        assert_eq!((f >> 24) & 0xf, 6, "3초 → 0.5초 단위 6");
+        assert_eq!((f >> 28) & 0xf, 7, "0.45 → 1/15 단위 7");
+    }
+
+    #[test]
+    fn edge_breath_flags_clamp_instead_of_spilling_into_neighbours() {
+        let f = CellInstance::edge_breath_flags(100.0, 100.0, 100.0, 100.0, 9.0);
+        assert_eq!((f >> 6) & 0x3f, 63);
+        assert_eq!((f >> 12) & 0x3f, 63);
+        assert_eq!((f >> 18) & 0x3f, 63);
+        assert_eq!((f >> 24) & 0xf, 15);
+        assert_eq!((f >> 28) & 0xf, 15);
+        assert_eq!((CellInstance::edge_breath_flags(1.0, 1.0, 0.0, 0.0, 0.0) >> 24) & 0xf, 1, "주기 0 은 0.5초로");
     }
 }

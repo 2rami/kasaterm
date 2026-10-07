@@ -7293,7 +7293,18 @@ impl App {
                 Some(id.to_string())
             };
             let Some(target) = target else { continue };
-            self.pane_activity.entry(target).or_default().status = st.into();
+            let a = self.pane_activity.entry(target).or_default();
+            // 그림은 `status` 낱말이 아니라 `state` 를 본다 — 낱말만 심으면 테두리 숨·깜빡임이 안 선다.
+            // `working`(일하는 중)·`bg`(뒤에서 도는 중)도 심을 수 있다.
+            match st {
+                "working" => a.state = crate::agent_state::AgentState::Working,
+                "bg" => a.bg_active = true,
+                _ => {
+                    let kind = crate::agent_state::WaitKind::Permission;
+                    a.state = crate::agent_state::AgentState::Waiting { kind, reason: kind.default_reason().into() };
+                }
+            }
+            a.status = st.into();
         }
     }
     /// Headless 학생 오버레이 repro: `KASATERM_AUTOSTUDENT_MS`.

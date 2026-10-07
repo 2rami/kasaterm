@@ -402,27 +402,17 @@ impl GpuRenderer {
 
 
 
-    /// Working-indicator rail (logical px). Pushes ONE `FLAG_BAND_SWEEP`
-    /// instance; the shader sweeps an indeterminate ~32% segment over a faint
-    /// track from `u.time`, so a busy pane's loading bar animates on the GPU
-    /// and the CPU never re-emits the bar per frame — the key to idle-0 CPU
-    /// while any pane is working. uv carries the 0..1 horizontal sweep coord.
-    pub fn working_bar(&mut self, x: f32, y: f32, w: f32, h: f32, rgba_u8: [u8; 4]) {
-        self.grid.band(x, y, w, h, rgba_u8, CellInstance::FLAG_BAND_SWEEP);
-    }
-
-    /// Pulse-indicator rail (logical px). Pushes ONE `FLAG_BAND_BREATH` instance;
-    /// the shader breathes a full-width fill's alpha on a slow 3s sine from
-    /// `u.time`, so a pane with a background/Monitor job animates on the GPU with
-    /// no per-frame CPU rebuild — same idle-0-CPU property as `working_bar`.
-    pub fn pulse_bar(&mut self, x: f32, y: f32, w: f32, h: f32, rgba_u8: [u8; 4]) {
-        self.grid.band(x, y, w, h, rgba_u8, CellInstance::FLAG_BAND_BREATH);
+    /// 「일하는 중」·「뒤에서 도는 중」 테두리 숨(논리 px 둥근 사각). 모양은 `theme::breath` 한 곳에서 정하고,
+    /// 셰이더가 `u.time` 으로 숨쉬게 하므로 일하는 동안에도 CPU 는 테두리를 다시 짓지 않는다.
+    pub fn breath_outline(&mut self, rect: (f32, f32, f32, f32), radius: f32, col: [u8; 4], look: crate::theme::Breath) {
+        let c = crate::theme::with_alpha(col, (col[3] as u32 * look.alpha as u32 / 255) as u8);
+        self.grid.edge_breath(rect, c, look.thick, radius, look.period, look.low);
     }
 
     /// Compact-progress rail (logical px). Pushes ONE `FLAG_BAND_FILL` instance;
     /// the shader fills from the left on a 2.4s loop and restarts, so the header
     /// says "something with an end is running" — the shape a sweep can't say.
-    /// Same idle-0-CPU property as the two bars above.
+    /// Same idle-0-CPU property as `breath_outline`.
     ///
     /// 채운 칸이 실제 진행률은 아니다. claude 는 compact 진행률을 화면에만 내놓고
     /// 우리에게 넘기지 않으므로 시간으로 채운다. 그 화면 표시가 teammate 메시지

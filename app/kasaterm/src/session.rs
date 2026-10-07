@@ -4287,8 +4287,9 @@ impl App {
         }
         self.win_tab_reveal(idx);
         // The user is now looking at this window — clear any unseen-notification
-        // pulse on its sidebar tab.
+        // pulse on its sidebar tab, and stop its panes blinking (states stay shown).
         self.window_alert.remove(&idx);
+        self.quiet_room_blinks(idx);
         // Swapping in a stashed window produces no new PTY output, so nothing
         // would flip a pane's `dirty` and the damage-tracked render would skip
         // the frame — the screen stays on the old window. Mark every leaf of

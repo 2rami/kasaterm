@@ -396,6 +396,28 @@ impl GridRenderer {
         });
     }
 
+    /// 숨쉬는 둥근 사각 윤곽 하나(논리 px). 굵기는 논리 px 로 받아 장치 px 로 실어 보낸다 — 셰이더가 장치 px
+    /// 거리로 그린다. 쿼드 하나라 네 변이 모서리에서 겹쳐 진해지지 않는다.
+    pub fn edge_breath(
+        &mut self,
+        (x, y, w, h): (f32, f32, f32, f32),
+        rgba_u8: [u8; 4],
+        (thick_max, thick_min): (f32, f32),
+        radius: f32,
+        period_s: f32,
+        low: f32,
+    ) {
+        let s = self.scale;
+        self.chrome.push(CellInstance {
+            cell_px: [x * s, y * s, w * s, h * s],
+            uv_min: [-1.0, -1.0],
+            uv_max: [1.0, 1.0],
+            fg_rgba: srgb_rgba_to_linear(rgba_u8),
+            flags: CellInstance::edge_breath_flags(thick_max * s, thick_min * s, radius * s, period_s, low),
+            ..Default::default()
+        });
+    }
+
     /// Logical-pixel solid rect (sugarloaf.rect drop-in). Caller
     /// passes the same logical coordinates main.rs has been using;
     /// we promote to physical pixels here to stay consistent with

@@ -1487,6 +1487,42 @@ pub fn clean_notice_text(message: &str) -> &str {
 /// Base glyph size for chrome icons (logical px; draw_text multiplies by scale).
 pub const ICON_SIZE: f32 = 16.0;
 
+/// 「일하는 중」·「뒤에서 도는 중」 테두리 숨 한 벌(docs/design.md 「일하는 중 표시」). 끝을 모르는 일은 막대가
+/// 아니라 윤곽이 숨쉰다 — 굵기 `thick`(가장 굵을 때, 가장 가늘 때, 논리 px)와 진하기(`alpha` ↔ 그 `low` 배)가
+/// `period` 초 사인으로 함께 오르내린다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Breath {
+    pub thick: (f32, f32),
+    pub period: f32,
+    pub low: f32,
+    pub alpha: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreathKind {
+    /// 학생이 직접 일하는 중(스피너·compact).
+    Working,
+    /// 화면엔 안 보이게 뒤에서 도는 일(백그라운드 셸·Monitor·서브에이전트).
+    Background,
+}
+
+/// 숨 모양 — 일하는 중은 3초에 굵기까지 숨쉬고, 뒤에서 도는 중은 6초에 굵기 없이 옅게만 숨쉰다(리듬과 진하기
+/// 둘 다로 갈린다). 초점 있는 칸은 또렷하게, 없는 칸은 같은 숨을 옅게. `small` 은 배치도 칸·목록 줄 — 칸이
+/// 작아 옅게 줄이면 안 보여서 초점 없는 쪽도 진하다.
+pub fn breath(kind: BreathKind, focused: bool, small: bool) -> Breath {
+    let b = |thick, period, low, alpha| Breath { thick, period, low, alpha };
+    match (kind, focused, small) {
+        (BreathKind::Working, true, false) => b((2.5, 1.5), 3.0, 0.45, 0xff),
+        (BreathKind::Working, false, false) => b((1.5, 1.0), 3.0, 0.35, 0x73),
+        (BreathKind::Background, true, false) => b((1.5, 1.5), 6.0, 0.35, 0xcc),
+        (BreathKind::Background, false, false) => b((1.0, 1.0), 6.0, 0.35, 0x59),
+        (BreathKind::Working, true, true) => b((2.0, 1.0), 3.0, 0.45, 0xff),
+        (BreathKind::Working, false, true) => b((1.5, 1.0), 3.0, 0.35, 0xb3),
+        (BreathKind::Background, true, true) => b((1.0, 1.0), 6.0, 0.35, 0xcc),
+        (BreathKind::Background, false, true) => b((1.0, 1.0), 6.0, 0.35, 0x80),
+    }
+}
+
 /// Same color with an explicit alpha override (overlays / drop-zones).
 pub const fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
     [c[0], c[1], c[2], a]
@@ -2531,5 +2567,37 @@ mod accent_tests {
         // 로스터 밖 특례.
         assert!(character_accent("샬레").is_some());
         assert!(character_accent("없는학생").is_none());
+    }
+}
+
+#[cfg(test)]
+mod breath_tests {
+    use super::*;
+
+    #[test]
+    fn focused_breath_is_clearer_than_unfocused() {
+        for kind in [BreathKind::Working, BreathKind::Background] {
+            for small in [false, true] {
+                let on = breath(kind, true, small);
+                let off = breath(kind, false, small);
+                assert!(on.alpha > off.alpha, "{kind:?} small={small}");
+                assert!(on.thick.0 >= off.thick.0, "{kind:?} small={small}");
+                assert_eq!(on.period, off.period, "초점은 진하기만 바꾸고 박자는 같다");
+            }
+        }
+    }
+
+    #[test]
+    fn background_breath_is_slower_and_fainter_than_working() {
+        for focused in [false, true] {
+            for small in [false, true] {
+                let w = breath(BreathKind::Working, focused, small);
+                let b = breath(BreathKind::Background, focused, small);
+                assert!(b.period > w.period);
+                assert!(b.alpha <= w.alpha);
+                assert_eq!(b.thick.0, b.thick.1, "뒤에서 도는 일은 굵기 없이 진하기만 숨쉰다");
+                assert!(w.thick.0 > w.thick.1, "일하는 중은 굵기도 숨쉰다");
+            }
+        }
     }
 }

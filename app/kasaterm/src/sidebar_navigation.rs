@@ -368,7 +368,7 @@ fn draw_cell(
         theme::accent()
     } else if let Some((c, _)) = signal {
         c
-    } else if cur {
+    } else if cur && !busy {
         theme::accent()
     } else if hover {
         theme::surface_hover()
@@ -396,9 +396,8 @@ fn draw_cell(
         g.queue_icon("terminal", mx + (mw - size) / 2.0, my + (mh - size) / 2.0, size, theme::text_dim());
     }
     let has_bar = crate::render::minimap_has_bar(mw, mh);
-    if has_bar && busy {
-        let (bar_h, pad) = (crate::render::MINI_BAR_H, crate::render::MINI_BAR_PAD);
-        g.working_bar(mx + 2.0, my + mh - bar_h - pad, mw - 4.0, bar_h, theme::accent());
+    if signal.is_none() {
+        crate::render::breath_mark(g, (mx, my, mw, mh), 2.0, busy, false, cur);
     }
     // 탭은 바닥의 점 줄 — 첫 점(바깥 자리)이 넓고, 나머지는 흐리게. 본기기와 같은 그림.
     if deck.len() > 1 && mw > 16.0 && mh > 16.0 {

@@ -3052,6 +3052,10 @@ impl ApplicationHandler<UserEvent> for App {
         if main_window {
             if let WindowEvent::MouseInput { state, button: MouseButton::Left, .. } = &event {
                 self.weather.mouse_down = *state == ElementState::Pressed;
+                // 누르는 손이 이 방에 와 있다 — 이 방 칸들의 깜빡임을 멈춘다.
+                if *state == ElementState::Pressed {
+                    self.quiet_room_blinks(self.active_window);
+                }
             }
             if let WindowEvent::CursorMoved { position, .. } = &event {
                 let dpi = self.window.as_ref().map(|window| window.scale_factor()).unwrap_or(1.0);
@@ -3277,6 +3281,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
                 if focused {
+                    // 앱으로 돌아온 사람은 지금 방을 본다 — 그 방 칸들의 깜빡임을 멈춘다.
+                    self.quiet_room_blinks(self.active_window);
                     // A restored pane can acquire its footer after the first
                     // PTY snapshot, making its initially assigned grid a few
                     // rows too tall. Focus return is a reliable reconciliation
@@ -8006,7 +8012,7 @@ impl ApplicationHandler<UserEvent> for App {
             if !self.window_alert.is_empty() {
                 why.push("window_alert");
             }
-            if self.pane_activity.values().any(|a| a.state.needs_you()) {
+            if self.pane_activity.iter().any(|(id, a)| a.state.needs_you() && !self.blink_quiet.contains(id)) {
                 why.push("needs_you");
             }
             if !self.md_scroll_anim.is_empty() {
@@ -8095,7 +8101,11 @@ impl ApplicationHandler<UserEvent> for App {
             // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
             // 손을 기다리는 pane 의 핑크 깜빡임(사이드바 줄 + pane 테두리)도 같은 이유로.
-            || self.pane_activity.values().any(|a| a.state.needs_you())
+            // 사람이 그 방을 보러 와 멈춘 칸은 서 있으니 펌프하지 않는다.
+            || self
+                .pane_activity
+                .iter()
+                .any(|(id, a)| a.state.needs_you() && !self.blink_quiet.contains(id))
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()
             // 테마 전환 디졸브가 걷히는 동안.
