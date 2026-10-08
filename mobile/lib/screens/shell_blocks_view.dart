@@ -254,9 +254,49 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
       if (!_feed.integration || _feed.alt || s.grid.alt) {
         return _shrunkGrid(context, s, palette);
       }
+      final cwd = _feed.cwd;
+      final branch = _feed.branch;
+      final dim = mixToward(palette.fg, palette.bg, 0.4);
+      // 워프의 입력칸 위 맥락 — 지금 폴더와 브랜치. 셸 프롬프트 대신 여기서 어디인지 말한다.
+      final place = cwd == null
+          ? null
+          : Padding(
+              padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 6),
+              child: Row(
+                children: [
+                  Icon(Icons.folder_outlined, size: 14, color: dim),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      tildePath(cwd),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: _mono.copyWith(color: dim),
+                    ),
+                  ),
+                  if (branch != null) ...[
+                    const SizedBox(width: 12),
+                    Icon(Icons.call_split, size: 14, color: dim),
+                    const SizedBox(width: 4),
+                    Text(branch, maxLines: 1, style: _mono.copyWith(color: dim)),
+                  ],
+                ],
+              ),
+            );
       return ColoredBox(
         color: palette.bg,
-        child: Stack(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: _list(palette)),
+            ?place,
+          ],
+        ),
+      );
+    },
+  );
+
+  Widget _list(TerminalPalette palette) => Stack(
           children: [
             if (_feed.blocks.isEmpty)
               Center(
@@ -290,10 +330,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
                 ),
               ),
           ],
-        ),
-      );
-    },
-  );
+        );
 
   /// 셸 통합 없음·전체 화면 프로그램 — 원본 격자를 폭에 맞춰 줄여 보기만 한다.
   Widget _shrunkGrid(BuildContext context, TermSession s, TerminalPalette palette) {

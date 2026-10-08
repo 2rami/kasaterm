@@ -50,6 +50,8 @@ const TAIL_ROWS: usize = 6;
 /// 도는 명령은 끝이 중요하다 — 뒤 이만큼만.
 const LIVE_ROWS: usize = 16;
 const PROMPT_ROWS: usize = 4;
+/// 입력 줄 위 맥락 줄(폴더·브랜치) 높이.
+const CONTEXT_H: f32 = 20.0;
 
 /// (글자색, 바탕색, 꾸밈, 고리 번호) — 고리 번호는 `Layout::links` 의 1 기반 자리, 0 이면 고리 아님.
 type Style = (Color, Color, u8, u16);
@@ -339,11 +341,31 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         prompt_rows.drain(..keep);
         caret = caret.and_then(|(r, c)| r.checked_sub(keep).map(|r| (r, c)));
     }
-    let input_h = if prompt_rows.is_empty() { 0.0 } else { 1.0 + 6.0 * 2.0 + prompt_rows.len() as f32 * line_h };
+    // 워프의 입력 칸: 위에 폴더·브랜치, 아래에 친 글. 셸 프롬프트는 맥락 줄이 대신한다.
+    let context = feed.cwd.as_deref().filter(|_| !prompt_rows.is_empty());
+    let context_h = if context.is_some() { CONTEXT_H } else { 0.0 };
+    let input_h = if prompt_rows.is_empty() { 0.0 } else { 1.0 + 6.0 * 2.0 + context_h + prompt_rows.len() as f32 * line_h };
     let input_y = y + h - input_h;
     if input_h > 0.0 {
         g.rect(x, input_y, w, 1.0, theme::with_alpha(theme::border(), 140));
-        let ty = input_y + 1.0 + 6.0;
+        if let Some(cwd) = context {
+            let cy = input_y + 1.0 + 6.0;
+            let mut cx = text_x;
+            g.queue_icon("folder", cx, cy + (CONTEXT_H - 12.0) / 2.0 - 2.0, 12.0, theme::text_mute());
+            cx += 16.0;
+            let dir = crate::info::tilde_path(std::path::Path::new(cwd));
+            let room = (x + w - PAD_X - cx).max(0.0);
+            let dir = crate::info::fit_text(g, &dir, room * 0.7, 11.0, false);
+            label(g, cx, cy + 1.0, &dir, 11.0, theme::text_dim());
+            cx += g.measure_chrome_text(&dir, 11.0, false) + 12.0;
+            if let Some(branch) = feed.branch.as_deref() {
+                g.queue_icon("git-branch", cx, cy + (CONTEXT_H - 12.0) / 2.0 - 2.0, 12.0, theme::text_mute());
+                cx += 16.0;
+                let branch = crate::info::fit_text(g, branch, (x + w - PAD_X - cx).max(0.0), 11.0, false);
+                label(g, cx, cy + 1.0, &branch, 11.0, theme::text_dim());
+            }
+        }
+        let ty = input_y + 1.0 + 6.0 + context_h;
         for (r, row) in prompt_rows.iter().enumerate() {
             draw_row(g, row, text_x, ty + r as f32 * line_h, line_h, (x, x + w));
         }
@@ -372,15 +394,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         g.pop_clip();
         return hits;
     }
+    // 친 명령이 없으면 비워 둔다 — 워프처럼 아래 입력 칸 하나가 곧 시작점이다.
     layout(pane, feed, cols);
-    if pane.layout.cards.is_empty() {
-        let sub = if slot.local {
-            "아래 줄에서 치면 명령마다 카드로 쌓여요"
-        } else {
-            "여기서 치면 원본 칸에서 돌아요 · 원본 칸 크기는 그대로예요"
-        };
-        center(g, "아직 친 명령이 없어요", sub);
-    }
     let total: f32 = pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
         + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32;
     pane.scroll_max = (total - list_h).max(0.0);

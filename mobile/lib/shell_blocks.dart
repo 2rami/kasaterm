@@ -35,6 +35,10 @@ class ShellLink {
   final String path;
 }
 
+/// 홈 폴더를 `~` 로 줄인다 — 원본 기계의 홈은 몰라도 macOS·리눅스 꼴이면 알아본다.
+String tildePath(String path) =>
+    path.replaceFirstMapped(RegExp(r'^/(Users|home)/[^/]+(?=/|$)'), (_) => '~');
+
 /// 셸에 그대로 칠 수 있게 작은따옴표로 감싼다.
 String shellQuote(String path) => "'${path.replaceAll("'", r"'\''")}'";
 
@@ -115,6 +119,10 @@ class ShellFeed {
   bool alt = false;
   final List<ShellBlock> blocks = [];
 
+  /// 셸이 마지막으로 알린 폴더와 그 저장소 브랜치 — 입력칸 위 맥락 줄(워프의 폴더·브랜치).
+  String? cwd;
+  String? branch;
+
   /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 그린다.
   int version = 0;
 
@@ -130,6 +138,8 @@ class ShellFeed {
     since = (answer['since'] as num?)?.toInt();
     integration = answer['integration'] == true;
     alt = answer['alt'] == true;
+    cwd = answer['cwd'] is String ? answer['cwd'] as String : null;
+    branch = answer['branch'] is String ? answer['branch'] as String : null;
     final oldest = (answer['oldest'] as num?)?.toInt() ?? 0;
     final incoming = ((answer['blocks'] as List?) ?? const [])
         .map(ShellBlock.parse)

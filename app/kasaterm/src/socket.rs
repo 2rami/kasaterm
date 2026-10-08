@@ -4338,26 +4338,7 @@ pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// 폴더가 든 저장소의 지금 브랜치 — `git rev-parse --abbrev-ref HEAD` 와 같은 답을 `HEAD` 파일에서
-/// 읽는다. board 는 폴마다 폴더 수만큼 git 을 띄워 `/term/panes` 한 번에 47ms(폴더 넷)를 썼다(2026-10-02
-/// `sample`). 워크트리·서브모듈의 `.git` 파일(`gitdir: …`)도 따라간다. 떨어진 HEAD 는 None.
-fn head_branch(dir: &std::path::Path) -> Option<String> {
-    for at in dir.ancestors() {
-        let dot = at.join(".git");
-        let Ok(meta) = std::fs::metadata(&dot) else { continue };
-        let git_dir = if meta.is_dir() {
-            dot
-        } else {
-            let link = std::fs::read_to_string(&dot).ok()?;
-            at.join(link.trim().strip_prefix("gitdir:")?.trim())
-        };
-        let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-        let name = head.trim().strip_prefix("ref:")?.trim();
-        let name = name.strip_prefix("refs/heads/").unwrap_or(name);
-        return (!name.is_empty()).then(|| name.to_string());
-    }
-    None
-}
+use kasa_mcp::git::head_branch;
 
 /// 채팅뷰 증분 읽기 — `offset` 이후 append 된 **완전한 줄**만 돌려준다. offset==0
 /// (첫 로드)이거나 파일이 줄었으면(세션 교체) 마지막 `TRANSCRIPT_TAIL` 바이트 윈도를

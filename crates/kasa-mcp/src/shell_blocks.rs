@@ -94,7 +94,12 @@ fn answer(pane: &str, sess: &PtySession, stamp: u64, q: &HashMap<String, String>
         _ => LINES_DEFAULT,
     };
     let blocks: Vec<Value> = blocks.iter().map(|b| block_json(b, max_lines)).collect();
+    // 입력 줄 위 맥락(워프의 폴더·브랜치) — 셸이 마지막으로 알린 폴더와 그 저장소의 브랜치.
+    let cwd = sess.reported_cwd();
+    let branch = cwd.as_deref().and_then(crate::git::head_branch);
     json!({
+        "cwd": cwd.map(|p| p.display().to_string()),
+        "branch": branch,
         "ok": true,
         "pane": pane,
         "since": stamp,

@@ -71,6 +71,9 @@ pub(crate) struct Feed {
     pub(crate) gone: bool,
     pub(crate) error: Option<String>,
     pub(crate) blocks: Vec<Block>,
+    /// 셸이 마지막으로 알린 폴더와 그 저장소 브랜치 — 입력 줄 위 맥락(워프의 폴더·브랜치).
+    pub(crate) cwd: Option<String>,
+    pub(crate) branch: Option<String>,
     /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 그린다.
     pub(crate) version: u64,
     /// 통째로 다시 받는 중인 블록(펼치기).
@@ -177,6 +180,9 @@ impl Feed {
         self.since = answer.get("since").and_then(|v| v.as_u64());
         self.integration = answer.get("integration").and_then(|v| v.as_bool()).unwrap_or(false);
         self.alt = answer.get("alt").and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = |k: &str| answer.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        self.cwd = text("cwd");
+        self.branch = text("branch");
         let oldest = answer.get("oldest").and_then(|v| v.as_u64()).unwrap_or(0);
         let incoming: Vec<Block> = answer
             .get("blocks")
@@ -418,7 +424,8 @@ impl App {
         }
     }
 
-    /// 원본 격자의 커서 줄(감긴 줄은 이어 붙여)을 입력 줄로 — 글자·색과 커서 칸.
+    /// 원본 격자의 커서 줄(감긴 줄은 이어 붙여)을 입력 줄로 — 글자·색과 커서 칸. 셸 프롬프트(PS1)는
+    /// 떼고 친 글만 남긴다: 폴더·브랜치는 위 맥락 줄이 말한다(워프처럼). 프롬프트 끝(OSC 133 B)을 모르면 줄 통째.
     pub(crate) fn shell_view_prompt(&self, ws: &Workspace, id: &str) -> Option<(Vec<GridCell>, usize)> {
         let term = ws.panes.get(id)?.term()?;
         let row = term.cursor_row as usize;
@@ -431,7 +438,14 @@ impl App {
         for r in start..=row {
             cells.extend(term.cells.get(r)?.iter().cloned());
         }
-        let cursor = (row - start) * cols + term.cursor_col as usize;
+        let mut cursor = (row - start) * cols + term.cursor_col as usize;
+        if let Some((pr, pc)) = term.prompt_end {
+            let mark = (pr as usize).checked_sub(start).map(|r| r * cols + pc as usize);
+            if let Some(mark) = mark.filter(|m| (pr as usize) <= row && *m <= cursor && *m <= cells.len()) {
+                cells.drain(..mark);
+                cursor -= mark;
+            }
+        }
         while cells.len() > cursor && cells.last().is_some_and(|c| (c.ch == ' ' || c.ch == '\0') && c.bg == kasa_bridge::screen::Color::Default) {
             cells.pop();
         }
