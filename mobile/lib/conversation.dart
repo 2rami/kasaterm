@@ -12,14 +12,18 @@ class ChatBubble extends ChatItem {
     required this.text,
     this.at,
     this.from,
+    this.via,
     this.queued = false,
   });
 
-  /// user 턴 — 선생님 말이거나, [from] 이 있으면 다른 학생이 보낸 쪽지.
+  /// user 턴 — 선생님 말이거나, [from] 이 있으면 사람 대신 다른 칸·카사텀·나쵸가 넣은 말.
   final bool user;
   final String text;
   final DateTime? at;
   final String? from;
+
+  /// [from] 이 넣은 말의 종류 — 쪽지·완료 보고·맡긴 일.
+  final String? via;
 
   /// 작업 중에 넣어 둔 예약 — 아직 학생이 안 읽었다.
   bool queued;
@@ -295,11 +299,11 @@ class Conversation {
     }
     final clean = stripMeta(raw);
     if (clean.isEmpty || isInjection(clean)) return;
-    final mate = teammateMessage(clean);
+    final mate = relayedMessage(clean);
     items.add(
       mate == null
           ? ChatBubble(user: true, text: clean, at: at)
-          : ChatBubble(user: true, text: mate.$2, at: at, from: mate.$1),
+          : ChatBubble(user: true, text: mate.body, at: at, from: mate.name, via: mate.via),
     );
   }
 
@@ -479,7 +483,8 @@ final _pluginPrompt = RegExp(
 );
 
 String stripMeta(String text) {
-  var s = _pluginPrompt.firstMatch(text)?.group(2) ?? text;
+  // 붙여넣은 글(긴 tell 도)은 `<pasted_content id="…">글</pasted_content id="…">` 로 감겨 남는다 — 표만 걷는다.
+  var s = (_pluginPrompt.firstMatch(text)?.group(2) ?? text).replaceAll(_pasted, '');
   for (final (open, close) in _metaBlocks) {
     while (true) {
       final start = s.indexOf(open);
@@ -504,6 +509,8 @@ String stripMeta(String text) {
   return s.replaceAll(RegExp(r'\[Image #\d+\]'), '(사진)').trim();
 }
 
+final _pasted = RegExp(r'</?pasted_content\b[^>]*>');
+
 final _injection = RegExp(
   r'\[Request interrupted|^\s*##\s*Context Usage|^\s*Caveat:\s|^\s*This session is being continued from a previous conversation',
   caseSensitive: false,
@@ -511,6 +518,36 @@ final _injection = RegExp(
 
 /// 사람이 친 말처럼 보이지만 하네스가 넣은 것 — 압축 요약 이어가기 등.
 bool isInjection(String text) => _injection.hasMatch(text);
+
+/// 사람이 아니라 다른 칸·카사텀·나쵸가 이 학생 입력칸에 넣은 말이면 보낸 쪽과 본문. 데스크톱
+/// `chat_view::parse::relayed` 와 같은 규칙 — 표식을 안 읽으면 남의 말이 선생님 말풍선에 담긴다.
+({String name, String via, String body})? relayedMessage(String text) {
+  final mate = teammateMessage(text);
+  if (mate != null) return (name: mate.$1, via: '쪽지', body: mate.$2);
+  final t = text.trim();
+  final tell = RegExp(r'^⟦([^⟧\n]{1,24})⟧([\s\S]*)$').firstMatch(t);
+  if (tell != null) {
+    final name = tell[1]!.trim();
+    return name.isEmpty ? null : (name: name, via: '쪽지', body: tell[2]!.trim());
+  }
+  final done = RegExp(r'^\[(완료|실패)\]\s*([^(\n]+)\((%[^)]*)\)\s*(?:—\s*)?([\s\S]*)$').firstMatch(t);
+  if (done != null) {
+    return (name: done[2]!.trim(), via: '${done[1]} 보고', body: done[4]!.trim());
+  }
+  if (t.startsWith('[완료]') || t.startsWith('[실패]')) return null;
+  if (t.startsWith('[origin=nacho')) {
+    final nl = t.indexOf('\n');
+    final more = nl < 0 ? '' : t.substring(nl + 1).trim();
+    final first = nl < 0 ? t : t.substring(0, nl);
+    final close = first.indexOf(']');
+    final body = more.isNotEmpty ? more : (close < 0 ? first : first.substring(close + 1)).trim();
+    return (name: '나쵸', via: '맡긴 일', body: body);
+  }
+  if (t.startsWith('[쪽지 확인 못 함]')) {
+    return (name: '카사텀', via: '쪽지 확인 못 함', body: t.substring('[쪽지 확인 못 함]'.length).trim());
+  }
+  return null;
+}
 
 /// `<teammate-message teammate_id="…">본문</teammate-message>` 이 턴 전체일 때만.
 (String, String)? teammateMessage(String text) {

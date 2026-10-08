@@ -148,6 +148,7 @@ void main() {
     final queued = c.items[2] as ChatBubble;
     expect(queued.queued, isTrue);
     expect((c.items[3] as ChatBubble).from, '유즈');
+    expect((c.items[3] as ChatBubble).via, '쪽지');
     expect(groupRows(c.items).whereType<ChatAnswered>(), isEmpty);
 
     c.apply(
@@ -222,6 +223,23 @@ void main() {
     expect(stripMeta(raw), 'Use the Bash tool to run exactly: touch y1.txt');
     expect(stripMeta('The plan plugin sent a message: is a sentence'), 'is a sentence');
     expect(stripMeta('The big plan plugin sent a message: x'), 'The big plan plugin sent a message: x');
+  });
+
+  test('tell·완료 보고·나쵸가 맡긴 일은 보낸 쪽 이름을 단다', () {
+    String? who(String raw) {
+      final m = relayedMessage(stripMeta(raw));
+      return m == null ? null : '${m.name}|${m.via}|${m.body}';
+    }
+
+    expect(who('⟦아즈사⟧ 폰 판 구워서 올려'), '아즈사|쪽지|폰 판 구워서 올려');
+    expect(
+      who('\n\n<pasted_content id="95ad">\n⟦유우카⟧ 나쵸 쪽 답\n둘째 줄\n</pasted_content id="95ad">\n'),
+      '유우카|쪽지|나쵸 쪽 답\n둘째 줄',
+    );
+    expect(who('[완료] 코유키(%0) — 카사넷 끝'), '코유키|완료 보고|카사넷 끝');
+    expect(who('[origin=nacho task=w1] 보고는 이렇게 한다\n거노 지시 그대로: 고쳐 줘'), '나쵸|맡긴 일|거노 지시 그대로: 고쳐 줘');
+    expect(who('[완료] 표시만 친 사람 말'), isNull);
+    expect(who('사람 말'), isNull);
   });
 
   test('화면의 선택 메뉴 — ❯ 커서가 있어야 메뉴', () {

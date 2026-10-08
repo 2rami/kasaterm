@@ -6,10 +6,17 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+/// 사람 대신 입력칸에 말을 넣은 쪽 — 이름과 무슨 말인지(쪽지·완료 보고·맡긴 일).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Sender {
+    pub(crate) name: String,
+    pub(crate) via: &'static str,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Item {
-    /// user 턴이면 사람 말이거나, `from` 이 있으면 다른 학생이 보낸 쪽지.
-    Bubble { user: bool, text: String, from: Option<String>, queued: bool, images: usize },
+    /// user 턴이면 사람 말이거나, `from` 이 있으면 사람 대신 다른 칸·카사텀·나쵸가 넣은 말.
+    Bubble { user: bool, text: String, from: Option<Sender>, queued: bool, images: usize },
     Thinking(String),
     Tool { name: String, summary: String, result: Option<String>, error: bool },
     /// 슬래시 명령(`/model`)이나 `!` 셸 한 줄.
@@ -230,7 +237,7 @@ impl Conversation {
         if clean.is_empty() || is_injection(&clean) {
             return;
         }
-        let item = match teammate_message(&clean) {
+        let item = match relayed(&clean) {
             Some((from, body)) => Item::Bubble { user: true, text: body, from: Some(from), queued: false, images: 0 },
             None => Item::Bubble { user: true, text: clean, from: None, queued: false, images: 0 },
         };
@@ -374,7 +381,7 @@ const META_BLOCKS: &[(&str, &str)] = &[
 
 /// 시스템이 user 턴에 끼워 넣은 블록과 그림 자리표시 줄을 걷는다.
 pub(crate) fn strip_meta(text: &str) -> String {
-    let mut s = unwrap_plugin_prompt(text).to_string();
+    let mut s = unwrap_pasted(unwrap_plugin_prompt(text));
     for (open, close) in META_BLOCKS {
         while let Some(start) = s.find(open) {
             match s[start + open.len()..].find(close) {
@@ -411,6 +418,25 @@ fn unwrap_plugin_prompt(text: &str) -> &str {
     body.split("\n\nThis is how Claude Code surfaces a prompt a plugin submits").next().unwrap_or(body)
 }
 
+/// 붙여넣은 글은 `<pasted_content id="…">글</pasted_content id="…">` 로 감겨 기록된다 — 긴 tell 도
+/// 붙여넣기로 들어가 이렇게 남는다. 감싼 표만 걷고 글은 둔다.
+fn unwrap_pasted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("<pasted_content").or_else(|| rest.find("</pasted_content")) {
+        out.push_str(&rest[..at]);
+        match rest[at..].find('>') {
+            Some(end) => rest = &rest[at + end + 1..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `[Image #3]` → `(사진)`.
 fn replace_image_marks(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -438,6 +464,45 @@ pub(crate) fn is_injection(text: &str) -> bool {
         || lower.strip_prefix("##").is_some_and(|r| r.trim_start().starts_with("context usage"))
         || lower.strip_prefix("caveat:").is_some_and(|r| r.starts_with(char::is_whitespace))
         || lower.starts_with("this session is being continued from a previous conversation")
+}
+
+/// 사람이 아니라 다른 칸·카사텀·나쵸가 이 학생 입력칸에 넣은 말이면 보낸 쪽과 본문. 모두 입력칸에
+/// 붙여넣어 들어가 기록에는 사람이 친 말과 같은 user 턴으로 남는다 — 표식을 안 읽으면 대화 보기가
+/// 남의 말을 사람 말풍선에 담는다(2026-10-08 지적). 터미널 화면은 `screenread` 가 같은 표식을 읽는다.
+pub(crate) fn relayed(text: &str) -> Option<(Sender, String)> {
+    let sender = |name: &str, via| Sender { name: name.trim().to_string(), via };
+    if let Some((name, body)) = teammate_message(text) {
+        return Some((sender(&name, "쪽지"), body));
+    }
+    let t = text.trim();
+    // `kasaterm-cli tell` 이 보낸 칸의 학생 이름을 심는다.
+    if let Some((name, body)) = t.strip_prefix('⟦').and_then(|r| r.split_once('⟧')) {
+        let ok = !name.trim().is_empty() && name.chars().count() <= 24 && !name.contains('\n');
+        return ok.then(|| (sender(name, "쪽지"), body.trim().to_string()));
+    }
+    // 학생의 `done` 을 연 칸에 알리는 줄 — `[완료] 이름(%N) — 요약`(socket.rs `pane_done`).
+    for (mark, via) in [("[완료]", "완료 보고"), ("[실패]", "실패 보고")] {
+        let Some(rest) = t.strip_prefix(mark) else { continue };
+        let rest = rest.trim_start();
+        let open = rest.find('(')?;
+        let close = open + rest[open..].find(')')?;
+        if open == 0 || !rest[open + 1..close].starts_with('%') {
+            return None;
+        }
+        let body = rest[close + 1..].trim_start();
+        let body = body.strip_prefix('—').unwrap_or(body).trim();
+        return Some((sender(&rest[..open], via), body.to_string()));
+    }
+    // 나쵸가 일을 맡기며 붙이는 첫 줄은 보고 방법 안내라 걷고, 그 아래 맡긴 글만 남긴다.
+    if let Some(rest) = t.strip_prefix("[origin=nacho") {
+        let (first, more) = rest.split_once('\n').unwrap_or((rest, ""));
+        let body = if more.trim().is_empty() { first.split_once(']').map_or(first, |(_, b)| b) } else { more };
+        return Some((sender("나쵸", "맡긴 일"), body.trim().to_string()));
+    }
+    if let Some(body) = t.strip_prefix("[쪽지 확인 못 함]") {
+        return Some((sender("카사텀", "쪽지 확인 못 함"), body.trim().to_string()));
+    }
+    None
 }
 
 /// `<teammate-message teammate_id="…">본문</teammate-message>` 이 턴 전체일 때만.
@@ -886,7 +951,34 @@ mod tests {
         ]);
         assert_eq!(c.items[0], Item::Command { name: "/model".into(), args: "opus".into() });
         assert_eq!(c.items[1], Item::Output("바꿈".into()));
-        assert!(matches!(&c.items[2], Item::Bubble { from: Some(f), text, .. } if f == "아로나" && text == "끝났어요"));
+        assert!(matches!(&c.items[2], Item::Bubble { from: Some(f), text, .. } if f.name == "아로나" && text == "끝났어요"));
+    }
+
+    /// tell·완료 보고·나쵸가 맡긴 일은 사람 말풍선이 아니라 보낸 쪽 이름을 단 말이다.
+    #[test]
+    fn relayed_turns_name_who_put_them_in() {
+        let c = conv(&[
+            r#"{"type":"user","message":{"content":"⟦아즈사⟧ 폰 판 구워서 올려"}}"#,
+            r#"{"type":"user","message":{"content":"\n\n<pasted_content id=\"95ad\">\n⟦유우카⟧ 나쵸 쪽 답\n둘째 줄\n</pasted_content id=\"95ad\">\n"}}"#,
+            r#"{"type":"user","message":{"content":"[완료] 코유키(%0) — 카사넷 끝"}}"#,
+            r#"{"type":"user","message":{"content":"[origin=nacho task=w1] 보고는 이렇게 한다\n거노 지시 그대로: 고쳐 줘"}}"#,
+            r#"{"type":"user","message":{"content":"[완료] 표시만 친 사람 말"}}"#,
+            r#"{"type":"user","message":{"content":"사람 말"}}"#,
+        ]);
+        let who: Vec<Option<(&str, &str, &str)>> = c
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Bubble { from, text, .. } => from.as_ref().map(|f| (f.name.as_str(), f.via, text.as_str())),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(who[0], Some(("아즈사", "쪽지", "폰 판 구워서 올려")));
+        assert_eq!(who[1], Some(("유우카", "쪽지", "나쵸 쪽 답\n둘째 줄")));
+        assert_eq!(who[2], Some(("코유키", "완료 보고", "카사넷 끝")));
+        assert_eq!(who[3], Some(("나쵸", "맡긴 일", "거노 지시 그대로: 고쳐 줘")));
+        assert_eq!(who[4], None, "괄호 속 칸 번호가 없으면 사람이 친 글이다");
+        assert_eq!(who[5], None);
     }
 
     #[test]

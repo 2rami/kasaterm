@@ -403,8 +403,10 @@ enum Status {
 
 #[derive(Clone, Debug)]
 enum Kind {
-    Name { text: String },
-    Bubble { item: usize, mine: bool, queued: bool },
+    /// 턴 머리 — `via` 는 사람 대신 넣은 말일 때 이름 뒤에 붙는 「쪽지」·「완료 보고」.
+    Name { text: String, via: &'static str },
+    /// `relay` 는 사람 대신 다른 칸·카사텀·나쵸가 넣은 말 — 왼쪽 테두리 말풍선.
+    Bubble { item: usize, mine: bool, queued: bool, relay: bool },
     /// 접는 머리 한 줄 — 도구 묶음·생각·출력.
     Fold { key: usize, icon: &'static str, label: String, detail: String, open: bool, failed: usize, live: bool },
     Tool { item: usize, status: Status, name: String, summary: String, open: bool, has_result: bool },
@@ -516,12 +518,13 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
         *y += h;
     };
     // 머리를 세웠으면 다음 줄은 바짝(4), 이어지는 턴이면 보통 간격.
-    let head = |out: &mut Vec<LRow>, y: &mut f32, header: &mut Option<String>, who: &str, gap: f32| -> f32 {
-        if header.as_deref() == Some(who) {
+    let head = |out: &mut Vec<LRow>, y: &mut f32, header: &mut Option<String>, who: &str, via: &'static str, gap: f32| -> f32 {
+        let key = format!("{who}\u{0}{via}");
+        if header.as_deref() == Some(key.as_str()) {
             return gap;
         }
-        *header = Some(who.to_string());
-        push(out, y, 22.0, 18.0, Kind::Name { text: who.to_string() });
+        *header = Some(key);
+        push(out, y, 22.0, 18.0, Kind::Name { text: who.to_string(), via });
         4.0
     };
     if skip > 0 {
@@ -536,7 +539,7 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                 let live = working && ri + 1 == n_rows && run.iter().any(|&i| matches!(&items[i], Item::Tool { result: None, .. }));
                 let names: Vec<&str> = run.iter().filter_map(|&i| match &items[i] { Item::Tool { name, .. } => Some(name.as_str()), _ => None }).collect();
                 let (icon, label) = tools_summary(&names);
-                let gap = head(&mut out, &mut y, &mut header, name, 8.0);
+                let gap = head(&mut out, &mut y, &mut header, name, "", 8.0);
                 let detail = run.last().and_then(|&i| match &items[i] {
                     Item::Tool { name, summary, .. } => Some(if summary.is_empty() { tool_label(name).to_string() } else { format!("{} · {summary}", tool_label(name)) }),
                     _ => None,
@@ -575,13 +578,14 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                 match &items[i] {
                     Item::Bubble { user, text, from, queued, images } => {
                         let mine = *user && from.is_none();
+                        let relay = from.is_some();
                         let gap = if mine {
                             let gap = if header.is_some() || out.last().is_some_and(|r| !matches!(r.kind, Kind::Bubble { mine: true, .. })) { 18.0 } else { 8.0 };
                             header = None;
                             gap
                         } else {
-                            let who = from.clone().unwrap_or_else(|| name.to_string());
-                            head(&mut out, &mut y, &mut header, &who, 8.0)
+                            let (who, via) = from.as_ref().map_or((name, ""), |f| (f.name.as_str(), f.via));
+                            head(&mut out, &mut y, &mut header, who, via, 8.0)
                         };
                         if layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
                             let mut body = text.clone();
@@ -591,19 +595,19 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                             }
                             let tone = if *queued { Tone::Dim } else { Tone::Text };
                             // 내 말만 말풍선에 담는다 — 학생 답은 열 폭을 다 쓰는 글이다(design.md 「학생 대화 보기」).
-                            let max_w = if mine { bubble_max - 28.0 } else { col_w };
+                            let max_w = if mine || relay { bubble_max - 28.0 } else { col_w };
                             let b = markdown_block(g, &body, max_w, tone);
                             layout.blocks.insert(i, (wbits, b));
                         }
                         let b = &layout.blocks[&i].1;
-                        let h = if mine { b.h + 20.0 } else { b.h } + if *queued { 18.0 } else { 0.0 };
-                        push(&mut out, &mut y, h, gap, Kind::Bubble { item: i, mine, queued: *queued });
+                        let h = if mine || relay { b.h + 20.0 } else { b.h } + if *queued { 18.0 } else { 0.0 };
+                        push(&mut out, &mut y, h, gap, Kind::Bubble { item: i, mine, queued: *queued, relay });
                     }
                     Item::Thinking(text) | Item::Output(text) => {
                         let thinking = matches!(&items[i], Item::Thinking(_));
                         let is_open = open.contains(&i);
                         let (icon, label) = if thinking { ("lightbulb", "생각") } else { ("terminal", "출력") };
-                        let gap = head(&mut out, &mut y, &mut header, name, 8.0);
+                        let gap = head(&mut out, &mut y, &mut header, name, "", 8.0);
                         push(&mut out, &mut y, 28.0, gap, Kind::Fold { key: i, icon, label: label.into(), detail: first_line(text).to_string(), open: is_open, failed: 0, live: false });
                         if is_open {
                             if layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
@@ -895,12 +899,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         )),
         Some(_) => None,
     };
-    // PC 는 터미널처럼 위에서부터 쌓는다 — 말이 적으면 입력 상자가 마지막 말 바로 아래에 서고, 칸이 차면
-    // 바닥에 붙는다. 아래에 붙여 쌓으면 넓은 칸의 위쪽이 통째로 빈다(폰은 대화 앱처럼 아래에 붙인다).
-    let slack = if empty.is_none() { (list_h - pane.layout.height - 16.0).max(0.0) } else { 0.0 };
-    let comp_y = comp_y - slack;
-    let list_bottom = list_bottom - slack;
-    let list_h = list_h - slack;
     if let Some((title, body)) = &empty {
         let tw = g.measure_chrome_text(title, 15.0, true);
         let cy = list_y + (list_h / 2.0 - 44.0).max(0.0);
@@ -935,8 +933,10 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         let content_h = layout.height;
         pane.scroll_max = (content_h + 16.0 - list_h).max(0.0);
         pane.scroll = pane.scroll.clamp(0.0, pane.scroll_max);
-        // 아래에 붙여 쌓는다 — 새 말이 입력 상자 바로 위에 선다(대화 앱과 같은 자리).
-        let top = list_y + list_h - 8.0 - content_h + pane.scroll;
+        // PC 는 Claude 앱처럼 말이 적으면 위에서부터 서고 입력 상자는 바닥에 둔다. 아래에 붙여 쌓으면 넓은
+        // 칸의 위가 통째로 비고, 입력 상자를 말 바로 아래로 끌어올리면 상자가 칸 가운데 떠 대화 앱으로 안
+        // 읽힌다(2026-10-08 둘 다 「이상하다」). 칸이 차면 새 말이 입력 상자 바로 위에 선다(폰은 늘 아래에 붙인다).
+        let top = (list_y + list_h - 8.0 - content_h + pane.scroll).min(list_y + 8.0);
         g.push_clip(x, list_y, w, list_h);
         let mine_fill = theme::lerp(slot.bg, theme::text(), 0.08);
         let clip = (list_y, list_bottom);
@@ -947,14 +947,30 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                 continue;
             }
             match &row.kind {
-                Kind::Name { text } => {
+                Kind::Name { text, via } => {
                     // 얼굴 그림은 자르기를 안 타고 위에 얹힌다 — 줄이 목록 안에 다 들어올 때만 그린다.
                     let face = ry + 3.0 >= list_y && ry + 19.0 <= list_bottom && crate::sprites::draw_student_face(g, text, col_x, ry + 3.0, 16.0);
                     let nx = col_x + if face { 22.0 } else { 0.0 };
                     let t = crate::info::fit_text(g, text, (col_x + col_w - nx).max(0.0), 12.0, true);
                     label(g, nx, ry + 4.0, &t, 12.0, theme::text_dim(), true);
+                    if !via.is_empty() {
+                        let vx = nx + g.measure_chrome_text(&t, 12.0, true) + 6.0;
+                        label(g, vx, ry + 4.0, &format!("· {via}"), 12.0, theme::text_mute(), false);
+                    }
                 }
-                Kind::Bubble { item, mine, queued } => {
+                Kind::Bubble { item, relay: true, .. } => {
+                    let Some((_, b)) = layout.blocks.get(item) else { continue };
+                    let bw = (b.w + 28.0).max(40.0);
+                    let r = (col_x, ry, bw, row.h);
+                    g.round_rect_stroke(r.0, r.1, r.2, r.3, 16.0_f32.min(r.3 / 2.0), 1.0, theme::border());
+                    draw_block(g, col_x + 14.0, ry + 10.0, b, slot.bg, clip);
+                    let cr = (col_x + bw + 4.0, ry, 26.0, 26.0);
+                    if in_list(cursor) && (inside(cursor, r) || inside(cursor, cr)) {
+                        native_controls::icon_button(g, cr, cursor, "copy", native_controls::Style::default());
+                        hits.push((Hit::Copy(*item), cr));
+                    }
+                }
+                Kind::Bubble { item, mine, queued, relay: false } => {
                     let Some((_, b)) = layout.blocks.get(item) else { continue };
                     if *mine {
                         let bw = (b.w + 28.0).max(40.0);

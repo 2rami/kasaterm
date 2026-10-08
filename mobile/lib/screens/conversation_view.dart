@@ -786,9 +786,18 @@ class _Bubble extends StatelessWidget {
                 if (head)
                   Padding(
                     padding: const EdgeInsets.only(left: 3, bottom: 3),
-                    child: Text(
-                      name,
-                      style: theme.textTheme.labelMedium?.copyWith(color: accent),
+                    child: Text.rich(
+                      TextSpan(
+                        text: name,
+                        style: theme.textTheme.labelMedium?.copyWith(color: accent),
+                        children: [
+                          if (bubble.via != null)
+                            TextSpan(
+                              text: ' · ${bubble.via}',
+                              style: theme.textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 Row(
