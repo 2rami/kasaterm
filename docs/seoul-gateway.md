@@ -38,8 +38,12 @@ Nagle 이 프레임마다 상대의 지연 ACK(40ms)를 기다리게 해 요청 
 - **80/tcp** 는 iroh-relay(사로잡힌 포털 `/generate_204`)가 쓴다. Caddy 는 HTTP 챌린지를 끄고 TLS-ALPN 만 쓴다(443 → nginx → 9443).
 - **실제 접속자 주소**: nginx 가 Caddy 에 PROXY 프로토콜을 싣고, Caddy 가 관문에 `CF-Connecting-IP` 를 덮어써 넘긴다.
   관문은 루프백 상대면 그 머리를 접속자로 본다 — 로그인·OAuth·피드백 횟수 제한이 접속자마다 걸린다. 접속자가 보낸 값은 덮인다.
-- **미니 역터널** 미니 launchd `com.geono.kasa-seoul-tunnel`(`ssh -N -R 127.0.0.1:18790:… -R 127.0.0.1:18794:…`). 서울 쪽
-  사용자 `kasa-tunnel` 의 키는 `restrict,port-forwarding,permitlisten=…,command="/bin/false"` 로 그 두 포트 열기만 된다.
+- **미니 역터널** 미니 launchd `com.geono.kasa-seoul-tunnel`(`ssh -N -R 127.0.0.1:18790:… -R 127.0.0.1:18794:… -R 127.0.0.1:18722:127.0.0.1:22`).
+  서울 쪽 사용자 `kasa-tunnel` 의 키는 `restrict,port-forwarding,permitlisten=…,command="/bin/false"` 로 그 세 포트 열기만 된다
+  (`/var/lib/kasa-tunnel/.ssh/authorized_keys`). 포트를 더하면 키의 `permitlisten` 도 같이 더한다 — 빠지면 `ExitOnForwardFailure`
+  로 역터널 전체가 내려가 설치·LFS 까지 끊긴다.
+- **미니 ssh**: 18722 는 서울 루프백에만 열린 미니 22 번이다. 다른 기기는 `ProxyJump` 로 서울 운영 계정을 거쳐 붙는다
+  (`HostName 127.0.0.1`·`Port 18722`·`HostKeyAlias` 로 미니 호스트키를 따로 둔다). Cloudflare `access ssh` 길이 흔들릴 때 쓰는 기본 길.
   Cloudflare 터널 주소 `kasaterm-mini.debimarlene.com`(미니 터널 ingress 맨 위)도 같은 곳을 가리키지만 서울(ICN)에서 미니
   커넥터까지 0.5MB/s 라 안 쓴다(역터널 100MB/s, 폰 설치 파일 8MB/s). 역터널이 죽으면 Caddyfile 두 곳을 그 주소로 바꿔 넘긴다.
 - **미니 관문은 설치 전용**: plist 에 `--state ~/.config/kasaterm/install-only/relay-state.json` 을 더해 빈 계정 상태로 돈다.
