@@ -1,7 +1,8 @@
 # 카사넷 국내 중계 — tools/kasanet-relay/relay.sh 가 allowlist 로 짠다. 서버에서 손으로 고치지 않는다.
 enable_relay = true
-# 네이버 클라우드 VPC 서버는 IPv6 가 꺼져 있어 `[::]` 로 묶으면 뜨지 않는다.
-http_bind_addr = "0.0.0.0:80"
+# 80 은 nginx 가 받아 이 이름(사로잡힌 포털 확인 /generate_204)만 여기로 넘기고 나머지는 https 로 돌린다
+# (tools/kasa-gateway-seoul/nginx-http.conf). 네이버 클라우드 VPC 서버는 IPv6 가 꺼져 있어 `[::]` 로 묶으면 뜨지 않는다.
+http_bind_addr = "127.0.0.1:8480"
 # 이것이 없으면 기기가 공인 주소를 못 배워 직통 후보가 사라진다(docs/kasanet.md 「자체 중계」).
 enable_quic_addr_discovery = true
 enable_metrics = false

@@ -1,0 +1,28 @@
+# 기계들이 ssh 역터널로 넘기는 웹 주소(2026-10-08, 전엔 Cloudflare 터널). 포트 표는 docs/seoul-gateway.md 「웹 주소」.
+# CF-Connecting-IP 를 접속자로 덮어쓴다 — 뒤의 앱들이 그 값으로 횟수 제한을 건다(Cloudflare 가 하던 일, 접속자가 보낸 값은 버린다).
+(tunneled) {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:{args[0]} {
+		header_up CF-Connecting-IP {remote_host}
+		flush_interval -1
+	}
+}
+
+# 미니 debimarlene Caddy(8090)가 Host 로 가른다 — 뎁마 대시보드·웹패널, 나쵸 웹, mm. 미니 launchd com.geono.kasa-seoul-web-tunnel.
+debimarlene.com, www.debimarlene.com, panel.debimarlene.com, nacho.debimarlene.com, mm.debimarlene.com {
+	import tunneled 18890
+}
+
+# 디자인 미리보기 — 미니 문지기(gate.mjs, 4791). 이름은 DNS 와일드카드로 그때그때 생긴다. 위와 같은 미니 터널.
+# `*.debimarlene.com` 으로 쓰지 않는다: 그 on-demand 정책이 kasaterm·gw-kr 까지 덮어, 저장된 인증서를 안 읽고 허가 질의로
+# 가서 거절돼 관문 TLS 가 통째로 깨졌다(2026-10-08 20초). 주소 없는 사이트는 다른 사이트에 안 걸린 이름만 받는다.
+https:// {
+	import tunneled 18891
+}
+
+# geono 허브 — 맥북 :4749(geono-hub scripts/serve-public.sh). 맥북 launchd com.geono.kasa-seoul-tunnel.
+geono.debimarlene.com {
+	import tunneled 18892
+}

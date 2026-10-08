@@ -9,6 +9,8 @@
 #   gateway.sh state      미니 관문 상태(계정·기기·봉인 저장소·설치 판)를 서울로 복사한다. 관문이 꺼진 채로 부른다.
 #   gateway.sh sync-install   미니 relay-install/ 만 서울로 — 폰 새 판을 올린 뒤(latest·관리 화면이 서울에서 그것을 본다).
 #   gateway.sh upgrade <kasa-relay 리눅스 바이너리>   관문만 갈아 끼우고 다시 켠다(업링크가 몇 초 끊겼다 다시 붙는다).
+#   gateway.sh edge       Caddyfile·sites·nginx 설정만 올리고 Caddy 를 다시 켠다(admin off 라 재시작 — 관문 연결이 몇 초 끊긴다).
+#   gateway.sh allow <이름>…   역터널 웹 주소의 인증서 발급을 허가한다(재시작 없음). DNS 를 이 서버로 돌리는 그때 부른다.
 #   gateway.sh status
 #
 # 서울 서버는 ssh 별칭 `kasanet-relay`, 미니는 `nacho-neko`(KASANET_RELAY_SSH·KASA_MINI_SSH 로 바꾼다).
@@ -111,6 +113,32 @@ EOF' | seoul 'sudo tee /etc/kasa-relay/env >/dev/null && sudo chown root:kasa-re
     mini "cd $MINI_CFG && tar -cf - relay-install" | seoul "sudo rm -rf $STATE/relay-install.new && sudo mkdir $STATE/relay-install.new && sudo tar -C $STATE/relay-install.new -xf - --no-same-owner && sudo rm -rf $STATE/relay-install && sudo mv $STATE/relay-install.new/relay-install $STATE/relay-install && sudo rmdir $STATE/relay-install.new"
     fix_owner
     seoul "sudo python3 -c 'import json; t=open(\"$STATE/relay-install/latest\").read().strip(); m=json.load(open(\"$STATE/relay-install/\"+t+\"/meta.json\")); print(\"서울에 놓은 판:\", m[\"version\"], m[\"build\"])'"
+    ;;
+  edge)
+    COPYFILE_DISABLE=1 tar -C "$HERE" -cf - nginx-sni.conf nginx-http.conf Caddyfile sites | seoul 'rm -rf /tmp/kasa-gw && mkdir /tmp/kasa-gw && tar -C /tmp/kasa-gw -xf -'
+    seoul "set -e
+      sudo env \$(sudo cat /etc/kasa-edge/env) XDG_DATA_HOME=/tmp/kasa-gw-validate XDG_CONFIG_HOME=/tmp/kasa-gw-validate \
+        /usr/local/bin/caddy validate --config /tmp/kasa-gw/Caddyfile --adapter caddyfile >/dev/null 2>/tmp/kasa-gw-validate.log \
+        || { cat /tmp/kasa-gw-validate.log; exit 1; }
+      sudo rm -rf /tmp/kasa-gw-validate /tmp/kasa-gw-validate.log
+      bak=/etc/kasa-edge.bak-\$(date +%Y%m%d-%H%M%S)
+      sudo cp -a /etc/kasa-edge \$bak && echo "백업 \$bak"
+      sudo install -d -m 0755 /etc/kasa-edge/on-demand
+      sudo install -m 0644 /tmp/kasa-gw/nginx-sni.conf /etc/nginx/stream.d/kasa-sni.conf
+      sudo install -m 0644 /tmp/kasa-gw/nginx-http.conf /etc/nginx/conf.d/kasa-http.conf
+      sudo install -m 0644 /tmp/kasa-gw/Caddyfile /etc/kasa-edge/Caddyfile
+      for f in /tmp/kasa-gw/sites/*.caddy; do sudo install -m 0644 \$f /etc/kasa-edge/sites/; done
+      rm -rf /tmp/kasa-gw
+      sudo nginx -t -q && sudo systemctl reload nginx
+      sudo systemctl restart kasa-edge && sleep 2 && systemctl is-active nginx kasa-edge"
+    ;;
+  allow)
+    shift
+    [ $# -gt 0 ] || { echo "허가할 이름을 준다" >&2; exit 1; }
+    for name in "$@"; do
+      case "$name" in *[!a-z0-9.-]*|'') echo "이름이 이상하다: $name" >&2; exit 1 ;; esac
+    done
+    seoul "sudo install -d -m 0755 /etc/kasa-edge/on-demand && cd /etc/kasa-edge/on-demand && sudo touch $* && ls"
     ;;
   status)
     seoul 'systemctl is-active nginx kasa-edge kasa-relay kasanet-relay; free -m | sed -n 2,3p; sudo journalctl -u kasa-relay -u kasa-edge -n 15 --no-pager -o cat'

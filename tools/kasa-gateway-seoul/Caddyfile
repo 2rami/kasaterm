@@ -2,6 +2,11 @@
 {
 	admin off
 	email {$KASA_EDGE_CONTACT}
+	# 역터널 웹 주소(sites/web.caddy)는 인증서를 첫 접속 때 받는다 — DNS 를 이 서버로 돌린 직후의 접속도 발급을 기다렸다
+	# 붙어 끊기지 않고, 미리보기 이름은 그때그때 생긴다. 받아도 되는 이름인지는 아래 127.0.0.1:18899 가 답한다.
+	on_demand_tls {
+		ask http://127.0.0.1:18899/ask
+	}
 	# 80 은 iroh-relay(사로잡힌 포털 확인)가 쓴다 — HTTP 챌린지 없이 TLS-ALPN 만(443 → nginx → 9443).
 	http_port 8081
 	https_port 9443
@@ -48,6 +53,24 @@
 			header_up CF-Connecting-IP {remote_host}
 			flush_interval -1
 		}
+	}
+}
+
+# on-demand 허가. 고정 이름은 /etc/kasa-edge/on-demand/<이름> 파일이 있으면(gateway.sh allow), 그 밖은 미니 미리보기
+# 문지기가 등록 목록으로 답한다. DNS 를 이 서버로 돌리는 그때 허가한다 — 먼저 허가하면 누가 그 이름으로 여기 붙을 때
+# 발급이 실패해 Let's Encrypt 실패 한도(이름당 시간 5회)를 먹는다.
+http://127.0.0.1:18899 {
+	bind 127.0.0.1
+	@allowed file {
+		root /etc/kasa-edge/on-demand
+		try_files /{query.domain}
+	}
+	handle @allowed {
+		respond 200
+	}
+	handle {
+		rewrite * /__dp/ask
+		reverse_proxy 127.0.0.1:18891
 	}
 }
 
