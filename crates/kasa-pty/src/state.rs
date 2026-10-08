@@ -53,6 +53,9 @@ pub struct CommandBlock {
     /// 출력이 상한을 넘어 앞에서 버린 줄 수. 거울은 끝(빌드 오류·테스트 결과)이 중요해
     /// 머리가 아니라 꼬리를 남긴다.
     pub dropped_lines: usize,
+    /// 명령이 돈 폴더 — C 순간에 셸이 마지막으로 알린 cwd(OSC 9;9). 결과 속 상대 경로를
+    /// 이 폴더 기준으로 풀어 고리로 만든다. 알림이 없는 셸이면 None.
+    pub cwd: Option<String>,
 }
 
 /// What to spawn in the PTY. Sticks close to portable-pty's
@@ -2880,6 +2883,7 @@ fn spawn_reader_thread(
                 processed_bytes,
                 &term,
                 current_size,
+                &cwd_handle,
                 &blocks,
                 &block_rev,
                 &mut blk_utf8,
@@ -3197,6 +3201,7 @@ fn parse_command_blocks(
     bytes: &[u8],
     term: &Arc<Mutex<Term<PtyEventForwarder>>>,
     size: (u16, u16),
+    cwd: &Mutex<Option<std::path::PathBuf>>,
     blocks: &Arc<Mutex<VecDeque<CommandBlock>>>,
     rev: &std::sync::atomic::AtomicU64,
     utf8_tail: &mut Vec<u8>,
@@ -3244,7 +3249,8 @@ fn parse_command_blocks(
                             .take()
                             .unwrap_or_else(|| command_at_cursor(&term.lock().unwrap(), size, prompt));
                         utf8_tail.clear();
-                        block_begin(blocks, seq, command);
+                        let cwd = cwd.lock().ok().and_then(|c| c.clone()).map(|p| p.display().to_string());
+                        block_begin(blocks, seq, command, cwd);
                         *start = Some(Instant::now());
                         *capturing = true;
                         rest = &rest[skip_terminator(rest)..];
@@ -3297,7 +3303,7 @@ fn parse_d_payload(data: &[u8]) -> (Option<i32>, usize) {
     (exit, end + term_len)
 }
 
-fn block_begin(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, seq: &mut u64, command: String) {
+fn block_begin(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, seq: &mut u64, command: String, cwd: Option<String>) {
     *seq += 1;
     let started_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3313,6 +3319,7 @@ fn block_begin(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, seq: &mut u64, comma
         duration_ms: None,
         is_tui: false,
         dropped_lines: 0,
+        cwd,
     });
     while b.len() > BLOCK_CAP {
         b.pop_front();
@@ -7300,6 +7307,22 @@ mod external_session_tests {
         assert!(!sess.alt_screen());
     }
 
+    /// 블록은 C 순간에 셸이 마지막으로 알린 폴더(OSC 9;9)를 단다 — 명령 뒤의 cd 는 다음 블록 몫이다.
+    #[test]
+    fn command_block_remembers_where_it_ran() {
+        let (sess, etx, _w, _) = ext_session(40, 6);
+        etx.send(ExtEvent::Bytes(b"\x1b]9;9;/tmp/a b\x07$ \x1b]133;B\x07cd x\r\n\x1b]133;C\x07".to_vec())).unwrap();
+        let r1 = wait_rev(&sess, 0);
+        etx.send(ExtEvent::Bytes(b"\x1b]133;D;0\x07\x1b]9;9;/tmp/a b/x\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07".to_vec())).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while sess.blocks.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            wait_rev(&sess, r1);
+        }
+        let b = sess.blocks.lock().unwrap();
+        let cwds: Vec<_> = b.iter().map(|b| b.cwd.as_deref()).collect();
+        assert_eq!(cwds, vec![Some("/tmp/a b"), Some("/tmp/a b/x")]);
+    }
+
     /// 프롬프트가 맨 아랫줄이면 Enter 가 화면을 한 줄 밀고 C 가 온다 — B 행은 낡았다.
     /// 감긴 긴 명령·한글도 한 줄로 읽혀야 한다.
     #[test]
@@ -7333,7 +7356,7 @@ mod external_session_tests {
     fn long_block_output_keeps_the_tail() {
         let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::default();
         let mut seq = 0;
-        block_begin(&blocks, &mut seq, "yes".into());
+        block_begin(&blocks, &mut seq, "yes".into(), None);
         let mut tail = Vec::new();
         let line = format!("{}\n", "y".repeat(99));
         for _ in 0..(BLOCK_OUTPUT_CAP / 100 + 500) {
@@ -7352,7 +7375,7 @@ mod external_session_tests {
     fn long_block_output_cuts_on_a_char_boundary() {
         let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::default();
         let mut seq = 0;
-        block_begin(&blocks, &mut seq, "claude".into());
+        block_begin(&blocks, &mut seq, "claude".into(), None);
         let mut tail = Vec::new();
         // 3바이트 글자만 이어지다 끝에 1바이트가 붙으면 자를 자리가 글자 한가운데에 떨어진다.
         let text = format!("{}a", "하".repeat(BLOCK_OUTPUT_CAP / 3 + 10));

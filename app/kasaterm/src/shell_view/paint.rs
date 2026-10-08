@@ -30,6 +30,8 @@ pub(crate) enum Hit {
     Fold(u64),
     Copy(u64),
     Bottom,
+    /// 결과 속 폴더 고리 — 그 셸을 그 폴더로 옮긴다. 값은 절대 경로.
+    Dir(String),
 }
 
 const PAD_X: f32 = 10.0;
@@ -49,7 +51,8 @@ const TAIL_ROWS: usize = 6;
 const LIVE_ROWS: usize = 16;
 const PROMPT_ROWS: usize = 4;
 
-type Style = (Color, Color, u8);
+/// (글자색, 바탕색, 꾸밈, 고리 번호) — 고리 번호는 `Layout::links` 의 1 기반 자리, 0 이면 고리 아님.
+type Style = (Color, Color, u8, u16);
 
 pub(super) struct Card {
     id: u64,
@@ -65,6 +68,7 @@ pub(super) struct Card {
 pub(super) struct Layout {
     key: Option<(u64, u32, u64)>,
     styles: Vec<Style>,
+    links: Vec<String>,
     cards: Vec<Card>,
 }
 
@@ -94,20 +98,33 @@ fn wrap(chars: impl IntoIterator<Item = (char, u16)>, cols: usize, out: &mut Vec
     out.push(row);
 }
 
-fn block_rows(b: &Block, cols: usize, styles: &mut Vec<Style>) -> (Vec<Vec<(char, u16)>>, Option<usize>) {
+fn block_rows(
+    b: &Block,
+    cols: usize,
+    styles: &mut Vec<Style>,
+    links: &mut Vec<String>,
+) -> (Vec<Vec<(char, u16)>>, Option<usize>) {
     let mut rows = Vec::new();
     let mut gap_row = None;
     for (i, line) in b.lines.iter().enumerate() {
         if b.gap > 0 && b.gap_at == Some(i) {
             gap_row = Some(rows.len());
         }
-        let chars: Vec<(char, u16)> = line
-            .iter()
-            .flat_map(|s| {
-                let id = style_id(styles, (s.fg.clone(), s.bg.clone(), s.flags));
-                s.text.chars().map(move |c| (c, id))
-            })
-            .collect();
+        let mut here: Vec<(usize, usize, u16)> = Vec::new();
+        for (_, start, len, path) in b.links.iter().filter(|l| l.0 == i) {
+            links.push(path.clone());
+            here.push((*start, start + len, links.len() as u16));
+        }
+        let link_at = |k: usize| here.iter().find(|(a, z, _)| (*a..*z).contains(&k)).map_or(0, |l| l.2);
+        let mut k = 0;
+        let mut chars: Vec<(char, u16)> = Vec::new();
+        for s in line {
+            for c in s.text.chars() {
+                let id = style_id(styles, (s.fg.clone(), s.bg.clone(), s.flags, link_at(k)));
+                chars.push((c, id));
+                k += 1;
+            }
+        }
         wrap(chars, cols, &mut rows);
     }
     (rows, gap_row)
@@ -131,12 +148,13 @@ fn layout(pane: &mut ShellPane, feed: &Feed, cols: usize) {
     }
     let mut styles = std::mem::take(&mut pane.layout.styles);
     styles.clear();
+    let mut links = Vec::new();
     let ch = 1.0;
     let cards = feed
         .blocks
         .iter()
         .map(|b| {
-            let (all, gap_row) = block_rows(b, cols, &mut styles);
+            let (all, gap_row) = block_rows(b, cols, &mut styles, &mut links);
             let all: Vec<_> = if all.len() == 1 && all[0].is_empty() { Vec::new() } else { all };
             let open = pane.open.contains(&b.id);
             let hidden_extra = b.gap;
@@ -175,7 +193,7 @@ fn layout(pane: &mut ShellPane, feed: &Feed, cols: usize) {
             Card { id: b.id, rows, fold_at, fold_label, note, height }
         })
         .collect();
-    pane.layout = Layout { key: Some(key), styles, cards };
+    pane.layout = Layout { key: Some(key), styles, links, cards };
 }
 
 /// 높이 계산은 행 수로 하고 픽셀은 그릴 때 곱한다 — 접기 결과는 글꼴 크기에 매이지 않는다.
@@ -184,7 +202,7 @@ fn card_px(card: &Card, line_h: f32) -> f32 {
 }
 
 fn cell_of(styles: &[Style], id: u16, ch: char) -> GridCell {
-    let (fg, bg, flags) = styles.get(id as usize).cloned().unwrap_or((Color::Default, Color::Default, 0));
+    let (fg, bg, flags, link) = styles.get(id as usize).cloned().unwrap_or((Color::Default, Color::Default, 0, 0));
     let mut c = GridCell::blank();
     c.ch = ch;
     c.fg = fg;
@@ -192,9 +210,32 @@ fn cell_of(styles: &[Style], id: u16, ch: char) -> GridCell {
     c.bold = flags & kasa_pty::block_lines::SPAN_BOLD != 0;
     c.dim = flags & kasa_pty::block_lines::SPAN_DIM != 0;
     c.italic = flags & kasa_pty::block_lines::SPAN_ITALIC != 0;
-    c.underline = flags & kasa_pty::block_lines::SPAN_UNDERLINE != 0;
+    c.underline = flags & kasa_pty::block_lines::SPAN_UNDERLINE != 0 || link != 0;
     c.inverse = flags & kasa_pty::block_lines::SPAN_INVERSE != 0;
+    if link != 0 {
+        let [r, g, b, _] = theme::accent();
+        c.fg = Color::Rgb(r, g, b);
+        c.dim = false;
+    }
     c
+}
+
+/// 한 행의 폴더 고리 자리 — (고리 번호, 첫 칸, 칸 수). 넓은 글자는 두 칸.
+fn link_runs(styles: &[Style], row: &[(char, u16)]) -> Vec<(u16, usize, usize)> {
+    let mut runs: Vec<(u16, usize, usize)> = Vec::new();
+    let mut col = 0;
+    for &(ch, st) in row {
+        let w = if gpu::is_wide_char(ch) { 2 } else { 1 };
+        let link = styles.get(st as usize).map_or(0, |s| s.3);
+        if link != 0 {
+            match runs.last_mut() {
+                Some(run) if run.0 == link && run.1 + run.2 == col => run.2 += w,
+                _ => runs.push((link, col, w)),
+            }
+        }
+        col += w;
+    }
+    runs
 }
 
 /// 한 행: 바탕 칠 → 글자 → 밑줄. 칸 폭은 터미널과 같다.
@@ -386,6 +427,15 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                 ry = fold_row(g, cursor, &mut hits, b.id, &card.fold_label, (text_x, ry, text_w));
             }
             if ry + line_h >= list_top - PAD_TOP && ry <= list_bottom {
+                for (link, at, n) in link_runs(&styles, row) {
+                    let r = (text_x + at as f32 * cw, ry, n as f32 * cw, line_h);
+                    let Some(path) = pane.layout.links.get(link as usize - 1) else { continue };
+                    if inside(cursor, r) && r.1 >= list_top - PAD_TOP && r.1 + r.3 <= list_bottom + PAD_TOP {
+                        g.round_rect_fill(r.0 - 2.0, r.1, r.2 + 4.0, r.3, theme::radius_sm(), theme::surface_hover());
+                        g.hover_pointer = true;
+                    }
+                    hits.push((Hit::Dir(path.clone()), r));
+                }
                 let cells: Vec<GridCell> = row.iter().map(|&(ch, st)| cell_of(&styles, st, ch)).collect();
                 draw_row(g, &cells, text_x, ry, line_h, (card_x, card_x + card_w));
             }

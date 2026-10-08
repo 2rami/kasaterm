@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -26,6 +27,7 @@ class ShellBlocksView extends StatefulWidget {
     required this.pane,
     required this.session,
     required this.onTerminal,
+    this.onCommand,
     this.bottomTick = 0,
     this.active = true,
   });
@@ -34,6 +36,9 @@ class ShellBlocksView extends StatefulWidget {
   final Pane pane;
   final TermSession session;
   final VoidCallback onTerminal;
+
+  /// 명령 한 줄을 이 셸에 보낸다(입력칸에 쓰던 글은 건드리지 않는다) — 폴더 고리가 `cd` 를 친다.
+  final Future<void> Function(String command)? onCommand;
 
   /// 보낼 때마다 오른다 — 맨 아래로 내려간다.
   final int bottomTick;
@@ -68,6 +73,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
   final _open = <int>{};
   final _fetching = <int>{};
   final _scroll = ScrollController();
+  final _taps = <String, TapGestureRecognizer>{};
   Timer? _timer;
   bool _polling = false;
   bool _old = false;
@@ -94,6 +100,9 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
     _timer?.cancel();
     BackgroundGrace.instance.removeListener(_graceChanged);
     _scroll.dispose();
+    for (final t in _taps.values) {
+      t.dispose();
+    }
     super.dispose();
   }
 
@@ -186,6 +195,22 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
   /// 명령이 도는 곳 — 데스크톱 칸이거나, 창 밖 셸 그 자체.
   String get _where => widget.pane.isWebShell ? '이 셸' : '데스크톱 칸';
 
+  /// 폴더 고리 하나의 누름 — 같은 폴더는 같은 인식기를 다시 쓴다.
+  GestureRecognizer _tapFor(String path) =>
+      _taps[path] ??= TapGestureRecognizer()..onTap = () => _goTo(path);
+
+  void _goTo(String path) {
+    final send = widget.onCommand;
+    if (send == null) return;
+    if (_feed.running) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('명령이 도는 중이라 지금은 못 가요 — 끝나면 눌러 주세요')),
+      );
+      return;
+    }
+    send('cd -- ${shellQuote(path)}');
+  }
+
   void _copy(ShellBlock b) {
     Clipboard.setData(ClipboardData(text: '\$ ${b.cmd}\n${b.plain}'));
     ScaffoldMessenger.of(context).showSnackBar(
@@ -251,6 +276,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
                   open: _open.contains(_feed.blocks[_feed.blocks.length - 1 - i].id),
                   onToggle: _toggle,
                   onCopy: _copy,
+                  tapFor: widget.onCommand == null ? null : _tapFor,
                 ),
               ),
             if (_away)
@@ -308,6 +334,7 @@ class _Card extends StatelessWidget {
     required this.open,
     required this.onToggle,
     required this.onCopy,
+    this.tapFor,
   });
 
   final ShellBlock block;
@@ -316,6 +343,9 @@ class _Card extends StatelessWidget {
   final ValueChanged<ShellBlock> onToggle;
   final ValueChanged<ShellBlock> onCopy;
 
+  /// 폴더 고리의 누름 인식기. 없으면 고리를 그리지 않는다.
+  final GestureRecognizer Function(String path)? tapFor;
+
   @override
   Widget build(BuildContext context) {
     final b = block;
@@ -323,37 +353,38 @@ class _Card extends StatelessWidget {
     final dim = mixToward(palette.fg, palette.bg, 0.4);
     final (dot, meta) = _status(b, palette, dim, Theme.of(context).colorScheme.error);
     final lines = b.lines;
-    // 접기: (보일 줄 목록, 접기 줄을 끼울 자리, 접기 줄 글).
-    final (List<List<Run>> shown, int? foldAt, String foldText) =
+    final all = [for (var i = 0; i < lines.length; i++) i];
+    // 접기: (보일 줄 번호, 접기 줄을 끼울 자리, 접기 줄 글). 번호는 고리가 가리키는 줄과 같다.
+    final (List<int> shown, int? foldAt, String foldText) =
         b.running && !open && lines.length > _live
         ? (
-            lines.sublist(lines.length - _live),
+            all.sublist(lines.length - _live),
             0,
             '앞 ${lines.length - _live + b.gap}줄',
           )
         : !b.running && !open && lines.length > _foldOver
         ? (
-            [...lines.take(_head), ...lines.skip(lines.length - _tail)],
+            [...all.take(_head), ...all.skip(lines.length - _tail)],
             _head,
             '가운데 ${lines.length - _head - _tail + b.gap}줄 더 보기',
           )
         : open && b.gap > 0
-        ? (lines, b.gapAt ?? lines.length, '${b.gap}줄 받는 중…')
+        ? (all, b.gapAt ?? lines.length, '${b.gap}줄 받는 중…')
         : open && lines.length > _foldOver
-        ? (lines, lines.length, '접기')
-        : (lines, null, '');
+        ? (all, lines.length, '접기')
+        : (all, null, '');
     final note = b.tui
         ? '전체 화면 프로그램이었어요 — 그 화면은 데스크톱 칸에만 있어요'
         : b.dropped > 0
         ? '너무 길어 앞 ${b.dropped}줄은 데스크톱도 버렸어요'
         : null;
-    Widget out(List<List<Run>> part) => SelectableText.rich(
+    Widget out(List<int> part) => SelectableText.rich(
       TextSpan(
         style: _mono.copyWith(color: palette.fg),
         children: [
           for (var i = 0; i < part.length; i++) ...[
             if (i > 0) const TextSpan(text: '\n'),
-            for (final r in part[i]) _span(r, fill),
+            ..._lineSpans(part[i], fill),
           ],
         ],
       ),
@@ -466,6 +497,49 @@ class _Card extends StatelessWidget {
       final int code => (danger, withTook('종료 $code')),
       null => (dim, withTook('멈춤')),
     };
+  }
+
+  /// 한 줄을 조각으로 — 폴더 고리 자리는 조각을 갈라 강조색·밑줄과 누름을 단다.
+  List<TextSpan> _lineSpans(int index, Color fill) {
+    final runs = block.lines[index];
+    final tap = tapFor;
+    final links = block.links.where((l) => l.line == index).toList();
+    if (tap == null || links.isEmpty) return [for (final r in runs) _span(r, fill)];
+    final out = <TextSpan>[];
+    var at = 0;
+    for (final r in runs) {
+      final chars = r.text.runes.toList();
+      var from = 0;
+      while (from < chars.length) {
+        final pos = at + from;
+        final link = links.where((l) => pos >= l.start && pos < l.start + l.length).firstOrNull;
+        final end = link != null
+            ? (link.start + link.length - at).clamp(from + 1, chars.length)
+            : (links
+                      .map((l) => l.start - at)
+                      .where((s) => s > from)
+                      .fold(chars.length, (m, s) => s < m ? s : m))
+                  .clamp(from + 1, chars.length);
+        final piece = Run(String.fromCharCodes(chars.sublist(from, end)), r.fg, r.bg, r.flags);
+        final span = _span(piece, fill);
+        out.add(
+          link == null
+              ? span
+              : TextSpan(
+                  text: span.text,
+                  style: span.style?.copyWith(
+                    color: palette.cursor,
+                    decoration: TextDecoration.underline,
+                    decorationColor: palette.cursor,
+                  ),
+                  recognizer: tap(link.path),
+                ),
+        );
+        from = end;
+      }
+      at += chars.length;
+    }
+    return out;
   }
 
   /// 격자와 같은 색 규칙(grid_canvas `_RowCache`) — 반전·흐림·스스로 고른 색의 대비 바닥.

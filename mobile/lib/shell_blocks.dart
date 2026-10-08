@@ -25,6 +25,19 @@ List<Run> _line(Object? raw) => raw is List
       ]
     : const [];
 
+/// 결과 속 폴더 고리 — [line] 번째 줄의 [start]부터 [length] 글자가 [path] 폴더다.
+/// 원본 기계가 실제로 있는 폴더만 준다(`kasa-mcp shell_blocks.rs dir_links`).
+class ShellLink {
+  const ShellLink(this.line, this.start, this.length, this.path);
+  final int line;
+  final int start;
+  final int length;
+  final String path;
+}
+
+/// 셸에 그대로 칠 수 있게 작은따옴표로 감싼다.
+String shellQuote(String path) => "'${path.replaceAll("'", r"'\''")}'";
+
 class ShellBlock {
   ShellBlock({
     required this.id,
@@ -38,6 +51,7 @@ class ShellBlock {
     this.dropped = 0,
     this.gapAt,
     this.gap = 0,
+    this.links = const [],
   });
 
   final int id;
@@ -57,6 +71,7 @@ class ShellBlock {
   final List<List<Run>> lines;
   final int? gapAt;
   final int gap;
+  final List<ShellLink> links;
 
   static ShellBlock? parse(Object? raw) {
     if (raw is! Map || raw['id'] is! int) return null;
@@ -75,6 +90,17 @@ class ShellBlock {
           : const [],
       gapAt: n('gap_at'),
       gap: n('gap') ?? 0,
+      links: [
+        if (raw['links'] is List)
+          for (final l in raw['links'] as List)
+            if (l is List &&
+                l.length >= 4 &&
+                l[0] is int &&
+                l[1] is int &&
+                l[2] is int &&
+                l[3] is String)
+              ShellLink(l[0] as int, l[1] as int, l[2] as int, l[3] as String),
+      ],
     );
   }
 

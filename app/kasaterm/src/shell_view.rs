@@ -91,6 +91,8 @@ pub(crate) struct Block {
     pub(crate) lines: Vec<Vec<Span>>,
     pub(crate) gap_at: Option<usize>,
     pub(crate) gap: usize,
+    /// 결과 속 폴더 고리 — (줄, 글자 시작, 글자 수, 절대 경로). 원본 기계가 실제로 있는 폴더만 준다.
+    pub(crate) links: Vec<(usize, usize, usize, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -144,7 +146,24 @@ pub(crate) fn parse_block(v: &serde_json::Value) -> Option<Block> {
             .unwrap_or_default(),
         gap_at: num("gap_at").map(|n| n as usize),
         gap: num("gap").unwrap_or(0) as usize,
+        links: v
+            .get("links")
+            .and_then(|l| l.as_array())
+            .map(|l| {
+                l.iter()
+                    .filter_map(|e| {
+                        let n = |i: usize| e.get(i).and_then(|v| v.as_u64()).map(|v| v as usize);
+                        Some((n(0)?, n(1)?, n(2)?, e.get(3)?.as_str()?.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
+}
+
+/// 셸에 그대로 칠 수 있게 작은따옴표로 감싼다.
+pub(crate) fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
 impl Feed {
@@ -494,6 +513,24 @@ impl App {
             Some(Hit::Bottom) => {
                 if let Some(pane) = self.shell_view.panes.get_mut(&id) {
                     pane.scroll = 0.0;
+                }
+            }
+            Some(Hit::Dir(path)) => {
+                let running = self
+                    .shell_view
+                    .panes
+                    .get(&id)
+                    .is_some_and(|pane| pane.feed.lock().is_ok_and(|f| f.blocks.iter().any(|b| b.running)));
+                if running {
+                    self.set_toast("명령이 도는 중이라 지금은 못 가요 — 끝나면 눌러 주세요".to_string());
+                } else {
+                    // 쓰다 만 줄은 지우고(Ctrl-U) 간다 — 그 뒤에 붙으면 엉뚱한 명령이 된다.
+                    let tab = self.ws.lock().unwrap().active_tab_pid(&id);
+                    let line = format!("\x15cd -- {}\r", shell_quote(&path));
+                    self.send_bytes_to_surface(Some(&tab), line.as_bytes());
+                    if let Some(pane) = self.shell_view.panes.get_mut(&id) {
+                        pane.scroll = 0.0;
+                    }
                 }
             }
             None => {}

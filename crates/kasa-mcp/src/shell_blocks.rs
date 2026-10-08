@@ -7,8 +7,12 @@
 //! `since` 가 지금 도장과 같으면 바뀔 때까지(최대 `wait`) 기다렸다 답한다.
 //! `have` 보다 id 가 큰 블록과, 아직 도는 블록은 늘 싣는다. `block=<id>` 는 그 블록 하나를
 //! 줄 상한 없이 준다(접힌 긴 결과 펼치기).
+//!
+//! 블록마다 `cwd`(명령이 돈 폴더)와 `links`(`[[줄, 글자 시작, 글자 수, 절대 경로], …]`)를 싣는다.
+//! 결과 속 낱말 가운데 이 기계에 실제로 있는 폴더만 고리다 — 보는 쪽은 그 자리를 눌러 `cd` 한다.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Query, RawQuery};
@@ -23,6 +27,10 @@ const POLL_EVERY: Duration = Duration::from_millis(100);
 /// 묶음 목록에서 블록 하나에 싣는 줄 상한. 넘으면 앞 1/4 · 뒤 3/4 만 싣고 가운데를 비운다.
 const LINES_DEFAULT: usize = 160;
 const LINES_FULL_MAX: usize = 20_000;
+/// 블록 하나에서 폴더인지 확인해 보는 낱말 수와 싣는 고리 수 — 도는 명령은 250ms 마다
+/// 다시 실리므로 stat 을 무한정 돌리지 않는다.
+const LINK_CHECKS: usize = 400;
+const LINKS_MAX: usize = 200;
 
 pub(crate) async fn term_blocks_get(
     RawQuery(raw): RawQuery,
@@ -124,16 +132,92 @@ fn block_json(b: &CommandBlock, max_lines: usize) -> Value {
     if b.dropped_lines > 0 {
         o.insert("dropped".into(), json!(b.dropped_lines));
     }
-    if count > max_lines {
+    let sent: Vec<&StyledLine> = if count > max_lines {
         let head = max_lines / 4;
         let tail = max_lines - head;
-        let mut sent: Vec<Value> = lines[..head].iter().map(line_json).collect();
-        sent.extend(lines[count - tail..].iter().map(line_json));
         o.insert("gap_at".into(), json!(head));
         o.insert("gap".into(), json!(count - head - tail));
-        o.insert("lines".into(), Value::Array(sent));
+        lines[..head].iter().chain(lines[count - tail..].iter()).collect()
     } else {
-        o.insert("lines".into(), Value::Array(lines.iter().map(line_json).collect()));
+        lines.iter().collect()
+    };
+    if let Some(cwd) = &b.cwd {
+        o.insert("cwd".into(), json!(cwd));
+    }
+    let links = dir_links(&sent, b.cwd.as_deref().map(Path::new));
+    if !links.is_empty() {
+        o.insert("links".into(), Value::Array(links));
+    }
+    o.insert("lines".into(), Value::Array(sent.into_iter().map(line_json).collect()));
+    out
+}
+
+/// 결과 줄 속 폴더 이름 — 빈칸으로 가른 낱말을 명령이 돈 폴더 기준으로 풀어 실제로 있는
+/// 폴더만 고른다. 앞뒤 따옴표·괄호·쌍점과 끝의 `/` 는 떼고 잰다(`ls -F`·`grep` 의 `경로:`).
+/// 폴더를 모르는 블록은 절대 경로·`~` 만 푼다.
+fn dir_links(lines: &[&StyledLine], cwd: Option<&Path>) -> Vec<Value> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut checks = 0;
+    let mut out = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        let text: String = line.iter().map(|s| s.text.as_str()).collect();
+        let chars: Vec<char> = text.chars().collect();
+        // `ls -1` 의 「with space」처럼 빈칸 든 이름은 낱말로 가르면 못 찾는다 — 줄 통째가 폴더인지 먼저 본다.
+        let whole = text.trim();
+        if whole.contains(char::is_whitespace) && whole.chars().count() <= 255 && checks < LINK_CHECKS {
+            checks += 1;
+            let path = if whole.starts_with('/') { Some(std::path::PathBuf::from(whole)) } else { cwd.map(|c| c.join(whole)) };
+            if let Some(path) = path.filter(|p| p.is_dir()) {
+                let a = text.chars().take_while(|c| c.is_whitespace()).count();
+                let abs = std::fs::canonicalize(&path).unwrap_or(path);
+                out.push(json!([row, a, whole.chars().count(), abs.display().to_string()]));
+                if out.len() >= LINKS_MAX {
+                    return out;
+                }
+                continue;
+            }
+        }
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i].is_whitespace() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            let lead = chars[start..i].iter().take_while(|c| "\"'(<[`".contains(**c)).count();
+            let trail = chars[start + lead..i].iter().rev().take_while(|c| "\"'),;:>]`".contains(**c)).count();
+            let (a, z) = (start + lead, i - trail);
+            if a >= z || z - a > 255 {
+                continue;
+            }
+            let word: String = chars[a..z].iter().collect();
+            if word.contains("://") || word.chars().all(|c| c == '-') {
+                continue;
+            }
+            let bare = word.trim_end_matches('/');
+            let path = if word.starts_with('/') {
+                Some(std::path::PathBuf::from(if bare.is_empty() { "/" } else { bare }))
+            } else if bare == "~" || bare.starts_with("~/") {
+                home.as_ref().map(|h| h.join(bare.trim_start_matches('~').trim_start_matches('/')))
+            } else {
+                cwd.map(|c| c.join(bare))
+            };
+            let Some(path) = path else { continue };
+            if checks >= LINK_CHECKS {
+                return out;
+            }
+            checks += 1;
+            if path.is_dir() {
+                let abs = std::fs::canonicalize(&path).unwrap_or(path);
+                out.push(json!([row, a, z - a, abs.display().to_string()]));
+                if out.len() >= LINKS_MAX {
+                    return out;
+                }
+            }
+        }
     }
     out
 }
@@ -193,6 +277,7 @@ mod tests {
             duration_ms: Some(12),
             is_tui: false,
             dropped_lines: 0,
+            cwd: None,
         };
         let v = block_json(&b, 160);
         assert_eq!(v["count"], 300);
@@ -213,6 +298,26 @@ mod tests {
         assert_eq!(v[0], json!({"t": "E", "f": 1, "s": 1}));
         assert_eq!(v[1], json!({"t": "x", "f": 0x100_0000 | 0x010203}));
         assert_eq!(v[2], json!({"t": "."}));
+    }
+
+    #[test]
+    fn folder_words_become_links_with_absolute_paths() {
+        let dir = std::env::temp_dir().join(format!("kt-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("with space")).unwrap();
+        std::fs::write(dir.join("a.txt"), "").unwrap();
+        let lines = block_lines("src/  a.txt  'src':\r\n없는폴더 ..\r\n");
+        let refs: Vec<&StyledLine> = lines.iter().collect();
+        let links = dir_links(&refs, Some(&dir));
+        let canon = std::fs::canonicalize(&dir).unwrap();
+        let src = canon.join("src").display().to_string();
+        let parent = canon.parent().unwrap().display().to_string();
+        assert_eq!(links, vec![json!([0, 0, 4, src]), json!([0, 14, 3, src]), json!([1, 5, 2, parent])]);
+        assert!(dir_links(&refs, None).is_empty(), "폴더를 모르면 상대 경로는 안 푼다");
+        let spaced = block_lines("with space\r\n");
+        let spaced: Vec<&StyledLine> = spaced.iter().collect();
+        assert_eq!(dir_links(&spaced, Some(&dir)), vec![json!([0, 0, 10, canon.join("with space").display().to_string()])]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

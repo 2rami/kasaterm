@@ -272,6 +272,22 @@ class _TerminalScreenState extends State<TerminalScreen> {
     }
   }
 
+  /// 명령 묶음의 폴더 고리 — 입력칸에 쓰던 글은 그대로 두고 그 명령만 보낸다.
+  Future<void> _runCommand(String command) async {
+    if (_sending) return;
+    setState(() {
+      _sending = true;
+      _bottomTick++;
+    });
+    try {
+      await _session.reply(command, chat: true);
+    } on ServerException catch (e) {
+      if (mounted) _toast(e.message);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
   void _sendLive(List<int> bytes) {
     if (bytes.isEmpty) return;
     _dropSelection();
@@ -703,6 +719,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                 pane: pane,
                                 session: s,
                                 onTerminal: _showTerminal,
+                                onCommand: _runCommand,
                                 bottomTick: _bottomTick,
                                 active: _paging || chat,
                               ),

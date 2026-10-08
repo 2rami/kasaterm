@@ -7105,6 +7105,8 @@ fn install_pane_shims(lite: bool) {
     // re-wrapping a static PS1 while still re-wrapping themes that rebuild it
     // each precmd (powerlevel10k / starship). zsh-only — other shells ignore
     // ZDOTDIR and just get the PATH prepend.
+    // precmd 는 OSC 9;9 로 지금 폴더도 알린다 — 다음 명령 블록이 어디서 돌았는지(`CommandBlock::cwd`)가
+    // 되어, 명령 묶음 보기에서 결과 속 폴더 이름을 눌러 그리로 갈 수 있다.
     // (3) `to` 의 탭 완성 — 첫 인자는 명부 기계 이름(+`..`), 둘째부터는 명령 이름.
     // 사용자 .zshrc 가 compinit 을 안 돌렸으면 우리 덤프 파일로 조용히 돌린다
     // (2026-09-07 지시 「자동완성 되나 → 붙여줘」).
@@ -7115,6 +7117,7 @@ fn install_pane_shims(lite: bool) {
              export PATH=\"{0}:${{PATH}}\"\n\
              _kasaterm_osc133(){{ local __ec=$?; \
              [[ -n $_kasaterm_ran ]] && {{ printf $'\\e]133;D;%d\\a' \"$__ec\"; _kasaterm_ran=; }}; \
+             printf $'\\e]9;9;%s\\a' \"$PWD\"; \
              [[ \"$PS1\" == *$'\\e]133;B'* ]] && return; \
              PS1=$'%{{\\e]133;A\\a%}}'\"$PS1\"$'%{{\\e]133;B\\a%}}'; }}\n\
              _kasaterm_preexec133(){{ printf $'\\e]133;C\\a'; _kasaterm_ran=1; }}\n\

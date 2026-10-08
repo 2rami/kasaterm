@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -83,6 +84,17 @@ void main() {
       expect(tookLabel(12000), '12초');
       expect(tookLabel(184000), '3분 4초');
     });
+  });
+
+  testWidgets('결과 속 폴더를 누르면 그 폴더로 cd 한다 — 파일은 고리가 아니다', (tester) async {
+    expect(await _tapFolder(tester, running: false), [
+      "cd -- '/w/docs'",
+      "cd -- '/w/it'\\''s dir'",
+    ]);
+  });
+
+  testWidgets('명령이 도는 동안은 폴더를 눌러도 안 보낸다', (tester) async {
+    expect(await _tapFolder(tester, running: true), isEmpty);
   });
 
   testWidgets('셸 명령 묶음 보기', (tester) async {
@@ -183,6 +195,71 @@ class _HoldSession extends FixtureSession {
     held = value;
     super.holdViewport = value;
   }
+}
+
+Future<List<String>> _tapFolder(WidgetTester tester, {required bool running}) async {
+  final answer = _answer(3, 1, [
+    {
+      ..._block(2, 'ls', running: running, exit: running ? null : 0, lines: [
+        [
+          {'t': 'docs  '},
+          {'t': 'a.txt  ', 'f': 2},
+          {'t': "it's dir"},
+        ],
+      ]),
+      'cwd': '/w',
+      'links': [
+        [0, 0, 4, '/w/docs'],
+        [0, 13, 8, "/w/it's dir"],
+      ],
+    },
+  ]);
+  final server = Server(
+    Uri.parse('http://127.0.0.1:1/'),
+    client: MockClient((req) async => http.Response(
+      jsonEncode(answer),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    )),
+  );
+  const pane = Pane(id: '%0', name: '', title: '', status: 'idle', window: 0, cwd: '/w');
+  final session = TermSession(server, pane)..state = TermState.connected;
+  final sent = <String>[];
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: buildTheme(Brightness.dark),
+      home: Scaffold(
+        body: ShellBlocksView(
+          server: server,
+          pane: pane,
+          session: session,
+          onTerminal: () {},
+          onCommand: (c) async => sent.add(c),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 50));
+  // SelectableText 는 RichText 가 아니라 글자 범위 찾기가 안 닿는다 — 글자 자리를 재서 진짜로 누른다.
+  final RenderEditable edit = tester
+      .state<EditableTextState>(
+        find.descendant(of: find.byType(SelectableText), matching: find.byType(EditableText)),
+      )
+      .renderEditable;
+  Future<void> tapWord(String word) async {
+    final at = edit.text!.toPlainText().indexOf(word);
+    final caret = edit.getLocalRectForCaret(TextPosition(offset: at + 1));
+    await tester.tapAt(edit.localToGlobal(caret.center));
+    await tester.pump(const Duration(milliseconds: 400));
+  }
+
+  await tapWord('docs');
+  await tapWord("it's dir");
+  await tapWord('a.txt');
+  await tester.pumpWidget(const SizedBox());
+  session.dispose();
+  return sent;
 }
 
 class _BlocksServer extends FixtureServer {
