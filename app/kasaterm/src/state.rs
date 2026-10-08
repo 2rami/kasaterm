@@ -852,9 +852,9 @@ pub(crate) struct InfoState {
     /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
     pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
     pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
-    /// 메뉴를 연 pane 이 학생이면 `Some(지금 대화로 보는가)`, 셸이면 None — 그리는 쪽이
-    /// App 을 못 보므로 여는 자리에서 적어 둔다.
-    pub(crate) pane_menu_chat: Option<bool>,
+    /// 메뉴를 연 pane 의 보기 전환 `Some((셸 칸인가, 켜졌나))` — 학생은 대화, 셸은 명령 묶음.
+    /// 전환할 것이 없으면 None. 그리는 쪽이 App 을 못 보므로 여는 자리에서 적어 둔다.
+    pub(crate) pane_menu_chat: Option<(bool, bool)>,
     /// Device heading hit rect: click collapses, right-click opens its menu.
     pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) machine_collapsed: std::collections::HashSet<String>,

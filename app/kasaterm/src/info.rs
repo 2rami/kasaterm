@@ -3799,8 +3799,12 @@ fn draw_pane_menu(
                 }
             }
             items.push((M::Focus, MenuRow::new("pane 으로 가기").sep()));
-            if let Some(on) = info.pane_menu_chat {
-                let (label, icon) = if on { ("터미널로 보기", "terminal") } else { ("대화로 보기", "message-circle") };
+            if let Some((shell, on)) = info.pane_menu_chat {
+                let (label, icon) = match (shell, on) {
+                    (_, true) => ("터미널로 보기", "terminal"),
+                    (true, false) => ("명령으로 보기", "list"),
+                    (false, false) => ("대화로 보기", "message-circle"),
+                };
                 items.push((M::ChatView, MenuRow::new(label).icon(icon)));
             }
             items.push((M::Zoom, MenuRow::new("크게 보기")));

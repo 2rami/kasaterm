@@ -6,6 +6,9 @@
 //!
 //! 셸 통합 표지가 없거나(bash·ssh 너머) 전체 화면 프로그램이 도는 동안은 카드를 접고
 //! 원본 격자를 칸에 맞춰 줄여 보기만 한다(`layout.rs pane_display_scale`).
+//!
+//! 이 기기 셸 칸도 ⋮ 「명령으로 보기」로 같은 카드가 된다(워프처럼). 데이터는 같은 창구를
+//! 제 HTTP 로 읽는다. 학생(claude·codex)이 뜨면 터미널로 돌아가고, 나가면 다시 카드다.
 
 use super::*;
 
@@ -32,6 +35,8 @@ pub(crate) struct ShellViews {
     hits: Vec<(String, Hit, Rect)>,
     /// `/term/blocks` 를 모르는 옛 원본(404) — 그 거울은 옛 격자 보기로 남는다.
     old_sources: HashSet<String>,
+    /// 명령으로 보기를 켠 이 기기 셸 칸(바깥 pane id).
+    local: HashSet<String>,
 }
 
 pub(crate) struct ShellPane {
@@ -179,7 +184,10 @@ impl Feed {
 }
 
 fn source_of(tab: &str) -> Option<(String, String)> {
-    kasa_mcp::remote::remote_info(tab).map(|info| (info.base, info.remote_id))
+    kasa_mcp::remote::remote_info(tab).map(|info| (info.base, info.remote_id)).or_else(|| {
+        let port = std::env::var("KASASPACE_MCP_PORT").ok()?;
+        Some((format!("http://127.0.0.1:{port}"), tab.to_string()))
+    })
 }
 
 fn spawn_feed(tab: String, feed: Arc<Mutex<Feed>>, stop: Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
@@ -267,7 +275,9 @@ impl App {
     /// 거울 셸 칸이 지금 카드로 그려질 수 있나 — 원본이 셸 통합 표지를 냈고 전체 화면
     /// 프로그램이 아닐 때. 아니면 격자를 줄여 보인다.
     pub(crate) fn shell_view_ready(&self, id: &str, tab: &str, alt_now: bool) -> bool {
-        if self.mirror_kind(tab) != crate::mirror_render::MirrorKind::Shell || alt_now {
+        let shell = self.mirror_kind(tab) == crate::mirror_render::MirrorKind::Shell
+            || (self.shell_view.local.contains(id) && !kasa_mcp::remote::is_view_pane(tab));
+        if !shell || alt_now {
             return false;
         }
         self.shell_view.panes.get(id).is_some_and(|p| {
@@ -279,20 +289,80 @@ impl App {
         self.shell_view.drawn.contains_key(id)
     }
 
+    /// 명령으로 볼 수 있는 이 기기 셸 칸 — 터미널 탭이고 학생이 안 돈다. 거울 셸은 이미
+    /// 카드로 그려지니 고를 것이 없다. lite 는 HTTP 창구가 없어 못 읽는다.
+    pub(crate) fn pane_can_blocks(&self, ws: &Workspace, id: &str) -> bool {
+        let Some(pane) = ws.panes.get(id) else { return false };
+        if self.lite || !pane.tabs.get(pane.active_tab).is_some_and(|t| t.term().is_some()) {
+            return false;
+        }
+        let tab = ws.active_tab_pid(id);
+        !kasa_mcp::remote::is_view_pane(&tab) && !self.pane_can_chat(ws, id)
+    }
+
+    pub(crate) fn shell_view_on(&self, id: &str) -> bool {
+        self.shell_view.local.contains(id)
+    }
+
+    pub(crate) fn toggle_shell_view(&mut self, id: &str) {
+        if !self.shell_view.local.remove(id) {
+            self.shell_view.local.insert(id.to_string());
+            self.selection = None;
+            self.drag_anchor = None;
+            self.focus_pane(id);
+        }
+        self.chrome_dirty = true;
+    }
+
+    /// ⋮ 의 보기 전환이 이 칸에서 무엇인가 — `Some((셸 칸인가, 켜졌나))`. 학생 칸은 대화,
+    /// 셸 칸은 명령 묶음이다.
+    pub(crate) fn pane_view_toggle(&self, ws: &Workspace, id: &str) -> Option<(bool, bool)> {
+        if self.pane_can_chat(ws, id) {
+            Some((false, self.chat_view_on(id)))
+        } else if self.pane_can_blocks(ws, id) {
+            Some((true, self.shell_view_on(id)))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn toggle_pane_view(&mut self, id: &str) {
+        let shell = {
+            let ws = self.ws.lock().unwrap();
+            self.pane_view_toggle(&ws, id).map(|(shell, _)| shell)
+        };
+        match shell {
+            Some(true) => self.toggle_shell_view(id),
+            Some(false) => self.toggle_chat_view(id),
+            None => {}
+        }
+    }
+
     /// 셸 거울마다 받기를 열고, 닫히거나 셸이 아니게 된 칸은 거둔다. 받은 것이 바뀌었으면
     /// 이번 프레임을 다시 그리게 한다.
     pub(crate) fn pump_shell_views(&mut self) {
-        let wanted: Vec<(String, String)> = {
+        let (mirrors, locals): (Vec<(String, String)>, Vec<(String, String)>) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
+            self.shell_view.local.retain(|id| ws.panes.contains_key(id));
+            let locals = self
+                .shell_view
+                .local
+                .iter()
+                .filter(|id| self.pane_can_blocks(&ws, id))
+                .map(|id| (id.clone(), ws.active_tab_pid(id)))
+                .collect();
+            let mirrors = ws
+                .panes
                 .keys()
                 .map(|id| (id.clone(), ws.active_tab_pid(id)))
                 .filter(|(_, tab)| kasa_mcp::remote::is_view_pane(tab))
-                .collect()
+                .collect();
+            (mirrors, locals)
         };
-        let wanted: Vec<(String, String)> = wanted
+        let wanted: Vec<(String, String)> = mirrors
             .into_iter()
             .filter(|(_, tab)| self.mirror_kind(tab) == crate::mirror_render::MirrorKind::Shell)
+            .chain(locals)
             .collect();
         self.shell_view
             .panes

@@ -4208,7 +4208,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(pane) = pane {
                         self.info.pane_menu_chat = {
                             let ws = self.ws.lock().unwrap();
-                            self.pane_can_chat(&ws, &pane).then(|| self.chat_view_on(&pane))
+                            self.pane_view_toggle(&ws, &pane)
                         };
                         self.info.pane_menu = Some((cx, cy, pane, state::PaneMenuPage::Root));
                         self.chrome_dirty = true;
@@ -5408,7 +5408,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 Some(M::ChatView) => {
                                     self.info.pane_menu = None;
-                                    self.toggle_chat_view(&pane);
+                                    self.toggle_pane_view(&pane);
                                 }
                                 Some(M::Close) => {
                                     self.info.pane_menu = None;
@@ -5904,7 +5904,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.undock_active_tab_of(&menu_pid, event_loop)
                                 }
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
-                                ActionKind::ChatView => self.toggle_chat_view(&menu_pid),
+                                ActionKind::ChatView => self.toggle_pane_view(&menu_pid),
                                 // md 토글·웹 컨트롤은 헤더 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
                                 // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
@@ -6022,7 +6022,7 @@ impl ApplicationHandler<UserEvent> for App {
                             ActionKind::RefreshRenderer => {
                                 self.refresh_renderer();
                             }
-                            ActionKind::ChatView => self.toggle_chat_view(&pid),
+                            ActionKind::ChatView => self.toggle_pane_view(&pid),
                             // 탭 띠의 ⋮ — 헤더 우클릭과 같은 메뉴를 연다(두 번 누르면 닫힘).
                             ActionKind::HandleMenu => {
                                 self.handle_menu = if self.handle_menu.as_deref() == Some(pid.as_str()) {

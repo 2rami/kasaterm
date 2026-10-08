@@ -29,6 +29,8 @@ const MENU_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 /// 격리 검증용 자동 조작 한 걸음(`KASATERM_AUTOCHAT`).
 enum AutoStep {
     Toggle,
+    /// 셸 칸의 명령으로 보기 전환(`shell_view.rs`).
+    Blocks,
     Draft(String),
     Send,
     Pick(usize),
@@ -759,6 +761,7 @@ impl App {
                     let (name, arg) = step.split_once('=').unwrap_or((step, ""));
                     let step = match name.trim() {
                         "toggle" => AutoStep::Toggle,
+                        "blocks" => AutoStep::Blocks,
                         "draft" => AutoStep::Draft(arg.replace("\\n", "\n")),
                         "send" => AutoStep::Send,
                         "pick" => AutoStep::Pick(arg.trim().parse().ok()?),
@@ -788,6 +791,7 @@ impl App {
         for step in due {
             match step {
                 AutoStep::Toggle => self.toggle_chat_view(&id),
+                AutoStep::Blocks => self.toggle_shell_view(&id),
                 AutoStep::Draft(text) => {
                     if let Some(pane) = self.chat_view.panes.get_mut(&id) {
                         pane.draft = text;

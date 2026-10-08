@@ -13,10 +13,11 @@ pub(crate) mod terminal_scene;
 #[path = "account_popover.rs"]
 mod account_popover;
 
-/// ⋮ 메뉴 칸에 올리면 뜨는 이름.
-fn handle_menu_tip(action: ActionKind, chat_on: bool) -> &'static str {
+/// ⋮ 메뉴 칸에 올리면 뜨는 이름. `view` 는 보기 전환의 `(셸 칸인가, 켜졌나)`.
+fn handle_menu_tip(action: ActionKind, view: (bool, bool)) -> &'static str {
     match action {
-        ActionKind::ChatView if chat_on => "터미널로 보기",
+        ActionKind::ChatView if view.1 => "터미널로 보기",
+        ActionKind::ChatView if view.0 => "명령으로 보기",
         ActionKind::ChatView => "대화로 보기",
         ActionKind::NewTab => "새 탭",
         ActionKind::SplitH => "좌우로 나누기",
@@ -2429,7 +2430,7 @@ impl App {
         // ⋮ 메뉴의 대화 보기 칸 — 아래 그리기 패스는 gpu 를 빌린 채라 메서드를 못 부른다.
         let handle_chat = self.handle_menu.clone().map(|pid| {
             let ws = self.ws.lock().unwrap();
-            (pid.clone(), self.pane_can_chat(&ws, &pid), self.chat_view_on(&pid))
+            (pid.clone(), self.pane_view_toggle(&ws, &pid))
         });
         let sb_hover = sb_tabs
             .iter()
@@ -7624,12 +7625,18 @@ impl App {
                                 }),
                             )
                         };
-                        // 대화 보기 전환은 학생 pane 에만 — 셸에는 펼칠 대화가 없다.
-                        let (can_chat, chat_on) = handle_chat
+                        // 보기 전환 — 학생 pane 은 대화, 셸 pane 은 명령 묶음.
+                        let view = handle_chat
                             .as_ref()
-                            .filter(|(pid, ..)| pid == fid)
-                            .map_or((false, false), |(_, can, on)| (*can, *on));
-                        let chat_icon = if chat_on { "terminal" } else { "message-circle" };
+                            .filter(|(pid, _)| pid == fid)
+                            .and_then(|(_, view)| *view);
+                        let can_chat = view.is_some();
+                        let view = view.unwrap_or((false, false));
+                        let chat_icon = match view {
+                            (_, true) => "terminal",
+                            (true, false) => "list",
+                            (false, false) => "message-circle",
+                        };
                         let hdr_icon = if hdr_vis {
                             "panel-top"
                         } else {
@@ -7729,7 +7736,7 @@ impl App {
                             );
                             // 아이콘만으로는 뜻이 갈리는 칸이 있다 — 올리면 이름을 띄운다.
                             if on {
-                                let tip = handle_menu_tip(act, chat_on);
+                                let tip = handle_menu_tip(act, view);
                                 if !tip.is_empty() {
                                     tip_at = Some((tip, bx2, by2 + bh + 6.0));
                                 }
