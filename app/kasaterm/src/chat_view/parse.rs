@@ -299,8 +299,11 @@ impl Conversation {
                 self.push(Item::Interrupted);
             }
             ("response_item", "function_call" | "custom_tool_call") => {
-                let name = p["name"].as_str().unwrap_or("tool");
-                let input = codex_input(if p["arguments"].is_null() { &p["input"] } else { &p["arguments"] });
+                let raw = if p["arguments"].is_null() { &p["input"] } else { &p["arguments"] };
+                let (name, input) = match (p["name"].as_str().unwrap_or("tool"), raw.as_str().and_then(codex_exec)) {
+                    ("exec", Some(shell)) => ("shell", shell),
+                    (name, _) => (name, codex_input(raw)),
+                };
                 if name == "spawn_agent" {
                     self.push(Item::Launch(tool_summary(name, &input)));
                     return;
@@ -620,6 +623,47 @@ fn codex_text(content: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// codex 의 `exec` 는 인자가 JS 코드다 — `await tools.exec_command({cmd:"…"})`, 여럿이면 `Promise.all([…])`.
+/// 사람이 읽을 것은 그 안의 명령이라 꺼내 셸 도구로 편다(코드를 그대로 두면 「const r = await tools…」가 떠
+/// 무엇을 했는지 안 보인다, 2026-10-08). 명령이 없으면(다른 도구만 부른 코드) None.
+fn codex_exec(js: &str) -> Option<Value> {
+    let mut cmds: Vec<String> = Vec::new();
+    let mut rest = js;
+    while let Some(at) = rest.find("cmd:") {
+        rest = rest[at + 4..].trim_start();
+        let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) else { continue };
+        let mut out = String::new();
+        let mut chars = rest[1..].char_indices();
+        let mut end = None;
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some((_, 'n')) => out.push('\n'),
+                    Some((_, 't')) => out.push('\t'),
+                    Some((_, e)) => out.push(e),
+                    None => break,
+                },
+                c if c == quote => {
+                    end = Some(i + 1 + c.len_utf8());
+                    break;
+                }
+                c => out.push(c),
+            }
+        }
+        let Some(end) = end else { break };
+        rest = &rest[end..];
+        if !out.trim().is_empty() {
+            cmds.push(out.trim().to_string());
+        }
+    }
+    let first = cmds.first()?;
+    let command = match cmds.len() {
+        1 => first.clone(),
+        n => format!("{} 외 {}개", first.lines().next().unwrap_or(""), n - 1),
+    };
+    Some(serde_json::json!({ "command": command }))
+}
+
 fn codex_input(args: &Value) -> Value {
     match args {
         Value::String(s) => {
@@ -886,6 +930,16 @@ mod tests {
         ]);
         assert_eq!(c.items.len(), 3);
         assert_eq!(c.items[1], Item::Tool { name: "shell".into(), summary: "cargo test".into(), result: Some("fail".into()), error: true });
+    }
+
+    #[test]
+    fn codex_exec_code_shows_the_commands_inside() {
+        let one = conv(&[r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"e","input":"const r = await tools.exec_command({cmd:\"kasaslk thread -w sionic 'https://x' | tail -n 120\",\"workdir\":\"/w\"}); text(r.output)"}}"#]);
+        assert_eq!(one.items[0], Item::Tool { name: "shell".into(), summary: "kasaslk thread -w sionic 'https://x' | tail -n 120".into(), result: None, error: false });
+        let many = conv(&[r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"e","input":"const rs = await Promise.all([\n  tools.exec_command({cmd:\"git pull --ff-only\"}),\n  tools.exec_command({cmd: 'ls -la'})\n]);"}}"#]);
+        assert_eq!(many.items[0], Item::Tool { name: "shell".into(), summary: "git pull --ff-only 외 1개".into(), result: None, error: false });
+        let other = conv(&[r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"e","input":"await tools.view_image({path:\"/a.png\"})"}}"#]);
+        assert!(matches!(&other.items[0], Item::Tool { name, .. } if name == "exec"));
     }
 
     #[test]

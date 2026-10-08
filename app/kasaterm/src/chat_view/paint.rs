@@ -454,7 +454,7 @@ fn first_line(text: &str) -> &str {
 fn tools_summary(names: &[&str]) -> (&'static str, String) {
     let kind = |name: &str| -> (&'static str, &'static str) {
         match super::parse::tool_label(name) {
-            "Bash" | "BashOutput" | "KillShell" | "KillBash" | "Monitor" => ("terminal", "명령"),
+            "Bash" | "BashOutput" | "KillShell" | "KillBash" | "Monitor" | "shell" | "exec_command" => ("terminal", "명령"),
             "Read" | "NotebookRead" => ("file-text", "읽기"),
             "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ("pencil", "수정"),
             "Grep" | "Glob" | "LS" => ("folder", "찾기"),
