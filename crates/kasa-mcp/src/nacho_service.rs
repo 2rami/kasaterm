@@ -18,7 +18,11 @@ pub fn submit(params: &Value) -> Result<Value> {
     if host_id.is_empty() {
         params["host"] = json!({"machine_id": local, "label": self_label});
     }
-    let target = params.get("machine_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let target = params.get("machine_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+        // 사람이 띄운 칸(board)은 나쵸가 어디 사는지 안 실어 온다 — 명부의 본진(home)이 나쵸 기계다.
+        // 본진이 없으면(본진 자신) 이 기계 인박스로 간다.
+        .or_else(|| (params["origin"] == nacho_inbox::ORIGIN_BOARD).then(crate::machines::home_machine).flatten()
+            .map(|m| m.machine_id.filter(|id| !id.is_empty()).unwrap_or(m.label)));
     match target {
         Some(m) if m != local && m != self_label => {
             ensure!(params["local_only"] != true, "nacho report must terminate at nacho's machine ({m}); this machine is not it");

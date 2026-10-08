@@ -518,6 +518,26 @@ fn run() -> Result<Option<Response>> {
             if let Some(failed) = run_orchestrator_report(&report)? {
                 return Ok(Some(failed));
             }
+        } else {
+            // 사람이 띄운 칸의 남은 일은 나쵸 「선생님 할 일」로 간다(origin board). 끝난 보고는 이 칸이 연 줄이
+            // 있을 때만 보내 나쵸가 그 줄을 닫게 한다. 덧붙는 길이라 못 가도 판 완료는 적는다 — 판 완료까지
+            // 막으면 부른 창이 끝을 영영 모른다.
+            let due = board_report_due(&report);
+            let marker = board_open_marker();
+            let closes = !due && marker.as_ref().is_some_and(|m| m.exists());
+            if due || closes {
+                match run_board_report(&report) {
+                    Ok(()) => if let Some(m) = &marker {
+                        if due {
+                            let _ = m.parent().map(std::fs::create_dir_all);
+                            let _ = std::fs::write(m, b"");
+                        } else {
+                            let _ = std::fs::remove_file(m);
+                        }
+                    },
+                    Err(e) => eprintln!("kasaterm: 나쵸 작업현황에 못 넣었어요(판 완료는 적어요) — {e:#}"),
+                }
+            }
         }
         args = board_args;
     }
@@ -3100,8 +3120,57 @@ fn orchestrator_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<
     let origin = inbox::origin_from(get_env).ok_or_else(|| anyhow!(
         "orchestrator report is only for panes an orchestrator started ({} is not set here) — report to whoever gave you the brief instead",
         inbox::ENV_ORIGIN))?;
+    report_params(args, get_env, Some(origin))
+}
+
+/// 사람이 띄운 칸의 done 이 나쵸에 갈 몫인가 — 막힘·재시작·승인이거나 남은 일(`--next`)이 있을 때.
+/// 끝났고 남은 것도 없으면 판 완료로 충분하다.
+fn board_report_due(report: &[String]) -> bool {
+    let value = |flag: &str| report.iter().position(|a| a == flag).and_then(|i| report.get(i + 1)).map(|v| v.trim().to_string());
+    matches!(value("--status").as_deref(), Some("blocked" | "needs_restart" | "needs_approval"))
+        || value("--next").is_some_and(|n| !n.is_empty())
+}
+
+/// 이 칸이 나쵸에 「선생님 할 일」 줄을 열어 두었다는 표식 — 판 주소(UUID)로, 없으면 칸 번호로 가른다.
+fn board_open_marker() -> Option<std::path::PathBuf> {
+    let pane = std::env::var("KASATERM_PANE_ID").ok().filter(|p| !p.is_empty())?;
+    let key = Some(local_surface_key(&pane)).filter(|k| !k.is_empty())
+        .unwrap_or_else(|| pane.chars().filter(|c| c.is_ascii_alphanumeric()).collect());
+    Some(crate::home_dir()?.join(".config/kasaterm/nacho-board-open").join(key))
+}
+
+/// origin board 보고. 세션·선생님 지시 원문·나쵸 기계(본진)는 그 칸의 기록과 명부를 쥔 앱이 채우므로
+/// 파일로 바로 놓지 않고 늘 앱을 거친다.
+fn run_board_report(args: &[String]) -> Result<()> {
+    use crate::nacho_inbox as inbox;
+    let get_env = |k: &str| std::env::var(k).ok();
+    let mut params = report_params(args, &get_env, None)?;
+    let key = local_surface_key(params["surface"].as_str().unwrap_or(""));
+    if !key.is_empty() {
+        params["surface_key"] = json!(key);
+    }
+    params.as_object_mut().map(|o| o.remove("dry_run"));
+    inbox::build(&params)?;
+    let request = Request { id: json!(format!("cli-{}", std::process::id())), method: "nacho.report".into(), params };
+    let response = roundtrip(&resolve_socket_path()?, &request)?;
+    if !response.ok {
+        return Err(anyhow!("{}", response.error.map(|e| e.message).unwrap_or_default()));
+    }
+    let receipt = response.result.unwrap_or(json!({}));
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        println!("나쵸 작업현황(선생님 할 일) {} · {}", receipt["state"].as_str().unwrap_or("?"), receipt["report_id"].as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
+/// 보고 봉투 재료. `origin` 이 None 이면 사람이 띄운 칸(board) — 대화·일 번호가 없다.
+fn report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>, origin: Option<crate::nacho_inbox::Origin>) -> Result<Value> {
+    use crate::nacho_inbox as inbox;
+    let board = origin.is_none();
+    let origin = origin.unwrap_or(inbox::Origin { conv: String::new(), task_id: String::new(), machine: String::new(), run: String::new() });
     let mut params = json!({
-        "origin": inbox::ORIGIN,
+        "origin": if board { inbox::ORIGIN_BOARD } else { inbox::ORIGIN },
         "conv": origin.conv,
         "task_id": origin.task_id,
         "machine_id": origin.machine,
@@ -4708,6 +4777,10 @@ mod tests {
     #[test]
     fn done_splits_board_outcome_and_orchestrator_report() {
         let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let due = |a: &[&str]| super::board_report_due(&super::split_done_args(&v(a)).unwrap().1);
+        assert!(!due(&["succeeded", "다 했다"]), "끝났고 남은 게 없으면 판 완료만");
+        assert!(due(&["succeeded", "다 했다", "--next", "선생님이 배포 눌러 주세요"]));
+        assert!(due(&["failed", "막힘"]) && due(&["blocked", "x"]) && due(&["needs_approval", "x"]) && due(&["needs_restart", "x", "--next", "y"]));
         let (board, report) = super::split_done_args(&v(&["succeeded", "다", "했다", "--tests", "12 ok"])).unwrap();
         assert_eq!(board, v(&["succeeded", "다 했다"]));
         assert_eq!(report, v(&["--tests", "12 ok", "--status", "done", "--summary", "다 했다"]));

@@ -27,6 +27,11 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = "nacho-report/1";
 pub const ORIGIN: &str = "nacho";
+/// 사람이 손으로 띄운 칸의 보고 — 나쵸가 맡긴 일이 없어 위임 대조를 안 하고, 나쵸가 「선생님 할 일」
+/// 줄로 받는다(docs/nacho-orchestrator.md 「origin board」).
+pub const ORIGIN_BOARD: &str = "board";
+/// board 봉투에 싣는 「그 칸에 선생님이 마지막으로 친 지시」 상한. 16 KiB 봉투 안에 들어야 한다.
+const REQUEST_MAX_BYTES: usize = 8 * 1024;
 pub const STATUSES: [&str; 4] = ["done", "blocked", "needs_restart", "needs_approval"];
 /// 봉투 전체(JSON) 상한. tell 본문과 같은 급.
 pub const MAX_BYTES: usize = 16 * 1024;
@@ -215,6 +220,23 @@ fn tag_field(params: &Value, key: &str) -> String {
     if ok { value } else { String::new() }
 }
 
+/// 선생님 지시 원문 — 길면 앞을 남기고 자르고, 비밀처럼 보이면 통째로 뺀다. 원문 하나 때문에 보고가
+/// 거부되면 안 된다(tag_field 와 같은 이유).
+fn request_field(params: &Value) -> String {
+    let Ok(text) = clean(&text_field(params, "request"), "request") else { return String::new() };
+    if secret_like(&text).is_some() {
+        return String::new();
+    }
+    if text.len() <= REQUEST_MAX_BYTES {
+        return text;
+    }
+    let mut end = REQUEST_MAX_BYTES - "…".len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 /// 인박스 루트. 검증 앱(isolated)은 자기 루트 아래, 그다음 env, 그다음 홈.
 pub fn inbox_root() -> Result<PathBuf> {
     if let Some(root) = crate::isolated_collab_root() {
@@ -350,7 +372,8 @@ pub fn fingerprint(envelope: &Value) -> String {
 pub fn build(params: &Value) -> Result<Value> {
     ensure!(params.is_object(), "report must be a JSON object");
     let origin = text_field(params, "origin");
-    ensure!(origin == ORIGIN, "origin must be \"nacho\" — this pane was not started by nacho, do not report");
+    ensure!(origin == ORIGIN || origin == ORIGIN_BOARD, "origin must be \"nacho\" (a pane nacho started) or \"board\" (a pane a person started), got \"{origin}\"");
+    let board = origin == ORIGIN_BOARD;
     let status = text_field(params, "status");
     ensure!(STATUSES.contains(&status.as_str()), "status must be one of done|blocked|needs_restart|needs_approval, got \"{status}\"");
     let summary = clean(&text_field(params, "summary"), "summary")?;
@@ -358,7 +381,8 @@ pub fn build(params: &Value) -> Result<Value> {
     let tests = clean(&text_field(params, "tests"), "tests")?;
     let next = clean(&text_field(params, "next"), "next")?;
     let changed = list_field(params, "changed").into_iter().map(|c| clean(&c, "changed")).collect::<Result<Vec<_>>>()?;
-    ensure!(status == "done" || !next.is_empty() || status == "needs_approval", "blocked/needs_restart reports need `next`: what nacho should do or decide");
+    // board 는 나쵸가 다음 일을 고르는 보고가 아니라 선생님 할 일 줄이다 — next 가 없으면 나쵸가 상태에 맞는 문장을 쓴다.
+    ensure!(board || status == "done" || !next.is_empty() || status == "needs_approval", "blocked/needs_restart reports need `next`: what nacho should do or decide");
     for (what, text) in [("summary", &summary), ("tests", &tests), ("next", &next)] {
         if let Some(kind) = secret_like(text) {
             bail!("{what} looks like it contains a secret ({kind}); reports must not carry tokens or credentials");
@@ -383,14 +407,17 @@ pub fn build(params: &Value) -> Result<Value> {
         "schema": SCHEMA,
         "report_id": report_id,
         "at_ms": now_ms(),
-        "origin": ORIGIN,
-        "conv": clean(&text_field(params, "conv"), "conv")?,
-        "task_id": clean(&text_field(params, "task_id"), "task_id")?,
+        "origin": origin,
+        "conv": if board { String::new() } else { clean(&text_field(params, "conv"), "conv")? },
+        "task_id": if board { String::new() } else { clean(&text_field(params, "task_id"), "task_id")? },
         "surface": clean(&text_field(params, "surface"), "surface")?,
         // 아래 둘은 지문에 안 든다 — 나쵸의 지문 검사가 고정 칸만 보므로 넣으면 봉투가 거부된다.
         // `surface_key` 는 판 주소의 UUID(창 번호는 재사용된다), `run_id` 는 나쵸의 실행 세대.
         "surface_key": tag_field(params, "surface_key"),
         "run_id": tag_field(params, "run_id"),
+        // 아래 둘도 지문 밖이다. board 줄의 열쇠(기계·세션)와, 나쵸 요구 카드가 선생님 말과 잇는 원문.
+        "session_id": tag_field(params, "session_id"),
+        "request": request_field(params),
         "host": host,
         "cwd": clean(&text_field(params, "cwd"), "cwd")?,
         "harness": clean(&text_field(params, "harness"), "harness")?,
@@ -568,6 +595,34 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nacho-inbox-test-{tag}-{}-{}", std::process::id(), now_ms()));
         let _ = std::fs::remove_dir_all(&root);
         root
+    }
+
+    #[test]
+    fn board_reports_carry_no_task_and_keep_the_fingerprint_rule() {
+        let p = json!({"origin":"board","conv":"discord:1","task_id":"t-1","surface":"%3","status":"blocked",
+                       "summary":"미니 회선 막힘","session_id":"44b41676-8d39-49c8-b96d-34e52960d00f",
+                       "request":"미니도 최신으로 구워서 재시작해줘"});
+        let e = build(&p).unwrap();
+        assert_eq!((e["origin"].as_str(), e["conv"].as_str(), e["task_id"].as_str()), (Some("board"), Some(""), Some("")));
+        assert_eq!(e["session_id"], "44b41676-8d39-49c8-b96d-34e52960d00f");
+        assert_eq!(e["request"], "미니도 최신으로 구워서 재시작해줘");
+        assert_eq!(e["fingerprint"].as_str().unwrap(), fingerprint(&e));
+        let mut other = e.clone();
+        other["request"] = json!("다른 말");
+        other["session_id"] = json!("x");
+        assert_eq!(fingerprint(&other), fingerprint(&e), "원문·세션은 지문 밖");
+        assert!(build(&json!({"origin":"someone","status":"done","summary":"x"})).is_err());
+    }
+
+    #[test]
+    fn board_request_is_capped_and_secrets_are_dropped() {
+        let long = "가".repeat(5000);
+        let e = build(&json!({"origin":"board","surface":"%3","status":"needs_approval","summary":"x","request":long})).unwrap();
+        let r = e["request"].as_str().unwrap();
+        assert!(r.len() <= super::REQUEST_MAX_BYTES && r.ends_with('…'));
+        let e = build(&json!({"origin":"board","surface":"%3","status":"done","summary":"x","next":"y",
+                              "request":"키는 sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 야"})).unwrap();
+        assert_eq!(e["request"], "");
     }
 
     fn params(status: &str, summary: &str) -> Value {

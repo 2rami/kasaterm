@@ -30,8 +30,7 @@ kasapane 스킬 [collab.md](../skills/kasapane/collab.md)의 「오케스트레�
 | `KASATERM_ORIGIN_RUN` | (선택) 나쵸 오케스트레이터의 실행 세대 `<task>.r<n>`. 봉투의 `run_id` 로 간다 |
 
 브리프 첫 줄에도 같은 표식을 사람이 읽게 넣는다: `[origin=nacho task=<번호>]`.
-사람이 손수 띄운 학생에는 이 env 가 없다. `kasaterm-cli done` 은 env 가 없으면 오케스트레이터
-보고를 안 만들고(판 완료만 적는다), 서버(`nacho.report`)도 `origin != "nacho"` 를 거부한다.
+사람이 손수 띄운 학생에는 이 env 가 없다. 그 칸의 `kasaterm-cli done` 은 아래 「origin board」 길을 탄다.
 새 학생을 `split`/`tab` 으로 띄우면 env 는 **물려지지 않는다**(pane env 는 앱이 새로
 만든다) — 나쵸 학생이 띄운 손자 학생은 나쵸 것이 아니다.
 
@@ -62,6 +61,35 @@ kasapane 스킬 [collab.md](../skills/kasapane/collab.md)의 「오케스트레�
   `KASATERM_PANE_ID` 로 찾는다(같은 번호가 둘이거나 판을 못 읽으면 빈 값 — 창 번호는 재사용되므로
   나쵸는 이 열쇠로 등록 줄을 찾는다). `run_id` 는 `--run` > `KASATERM_ORIGIN_RUN`. 모양이 어긋나면
   보고를 막지 않고 칸만 비운다.
+
+## origin board — 사람이 띄운 칸의 남은 일 (2026-10-08)
+
+나쵸 앱은 「거노가 한 말 하나 = 카드 하나, 어디서 한 말이든」으로 간다(nacho-neko
+`docs/development/requests.md`). 사람이 카사텀 학생에게 직접 맡긴 일의 남은 몫이 새면 그 설계가
+구멍 나므로, env 없는 칸의 `done` 도 나쵸에 간다. 나쵸는 이걸 일감이 아니라 **「선생님 할 일」 줄**로
+받는다(위임 대조를 안 하는 길이라는 표식이 `origin: "board"`).
+
+- **언제**: `KASATERM_ORIGIN` 이 없는 칸의 `done` 이 `blocked`·`needs_approval`·`needs_restart`
+  (`failed` 는 `blocked` 로 간다)이거나 `--next` 가 있을 때. `succeeded` 에 `--next` 가 없으면 판 완료만 —
+  다만 이 칸이 앞서 board 보고로 줄을 열어 두었으면(`~/.config/kasaterm/nacho-board-open/<판 주소>`)
+  그 `succeeded` 도 보내 나쵸가 줄을 닫게 하고 표식을 지운다.
+- **봉투**: 위 `nacho-report/1` 그대로, `origin: "board"`, `conv`·`task_id` 는 빈 글. 지문 계산식은 같다.
+  `next` 는 없어도 된다(나쵸가 상태에 맞는 기본 문장을 쓴다). 더 싣는 것(둘 다 지문 밖):
+  - `session_id` — 그 칸의 대화 세션. 나쵸 줄의 열쇠가 (`host.machine_id`, `session_id`)다.
+  - `request` — 그 칸에 선생님이 마지막으로 친 말 전문(판 `last_prompt` 는 100자로 잘린다). 8 KiB 까지,
+    비밀처럼 보이면 빈 글. 나쵸 요구 카드가 이걸로 선생님 말과 잇는다.
+- **채우는 자리**: CLI 는 env 가 없어 둘을 모른다 — 그 칸의 기록 파일을 쥔 앱(`nacho.report` 를 받는
+  `socket.rs`)이 기록 이름에서 세션을, 꼬리 2MB 에서 마지막 사람 말을 채운다. 그래서 board 보고는
+  파일로 바로 놓지 않고 늘 앱을 거친다.
+- **어디로**: `machine_id` 가 비면 명부의 본진(`home: true`)이 나쵸 기계다. 본진이 없는 기계(본진 자신)는
+  제 인박스에 놓는다. 이송은 아래 「전달 경로」와 같다.
+- **실패해도 판 완료는 적는다** — 덧붙는 길이라 나쵸에 못 가도(앱 꺼짐·본진 안 닿음) 경고만 내고
+  부른 창에는 끝을 알린다. nacho origin 은 종전대로 보고가 거부되면 판 완료도 안 적는다.
+- **나쵸 쪽 받기**(nacho-neko, 유우카 정리): `inbox.validate` 가 origin board 를 받되 위임 대조 대신
+  ①그 기계 판에 그 surface·character·session_id 가 있는지 ②같은 지문 두 번 안 받기. 접수는 worklog
+  kind handoff 한 줄 — 열쇠 (host.machine_id, session_id), teacher = next(없으면 상태 기본 문장),
+  title = summary 첫 줄, project = cwd 첫 폴더, source = `board:<character>@<label>`, raw 에 request.
+  같은 칸이 뒤에 `succeeded`(next 없음)로 보고하거나 거노가 앱에서 [했어요]로 닫으면 닫힌다.
 
 ## 재시작 뒤 표식 복원
 
