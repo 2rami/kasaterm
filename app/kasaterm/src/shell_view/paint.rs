@@ -1,4 +1,4 @@
-//! 셸 카드 칸의 배치와 그리기. 치수는 `docs/design.md` 「거울 셸 명령 묶음」에 있다.
+//! 셸 명령 묶음 칸의 배치와 그리기. 치수는 `docs/design.md` 「거울 셸 명령 묶음」에 있다.
 //!
 //! 결과 줄은 터미널과 같은 글꼴·칸 폭으로 이 칸 폭에 맞춰 다시 접는다. 접기는 블록이
 //! 바뀌거나 폭·펼침이 바뀔 때만 한다(`Layout`) — 긴 출력을 프레임마다 접으면 그 값이
@@ -42,7 +42,8 @@ pub(crate) enum Hit {
 
 const PAD_X: f32 = 10.0;
 const PAD_TOP: f32 = 8.0;
-const CARD_GAP: f32 = 6.0;
+/// 묶음 사이 선 — 테두리 카드 대신 워프처럼 선 하나로 나눈다(4장 「카드는 쓰지 않는다」).
+const CARD_GAP: f32 = 1.0;
 const CARD_PAD: f32 = 10.0;
 const HEAD_H: f32 = 26.0;
 const OUT_PAD: f32 = 6.0;
@@ -355,9 +356,34 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     let context = feed.cwd.as_deref().filter(|_| !prompt_rows.is_empty());
     let context_h = if context.is_some() { CONTEXT_H } else { 0.0 };
     let input_h = if prompt_rows.is_empty() { 0.0 } else { 1.0 + 6.0 * 2.0 + context_h + prompt_rows.len() as f32 * line_h };
-    let input_y = y + h - input_h;
+    let list_top = y + PAD_TOP;
+    if !feed.loaded {
+        let (title, sub) = if slot.local {
+            ("명령을 받는 중…", "이 칸 셸의 OSC 133 구간을 읽어요")
+        } else {
+            ("원본 칸의 명령을 받는 중…", "원본 기기에서 OSC 133 구간을 읽어요")
+        };
+        let sub = feed.error.as_deref().unwrap_or(sub);
+        let mid = y + h / 2.0;
+        let tw = g.measure_chrome_text(title, 12.0, false);
+        label(g, x + (w - tw) / 2.0, mid - 20.0, title, 12.0, theme::text_dim());
+        let sw = g.measure_chrome_text(sub, 10.5, false);
+        label(g, x + (w - sw) / 2.0, mid + 2.0, sub, 10.5, theme::text_mute());
+        g.pop_clip();
+        return hits;
+    }
+    layout(pane, feed, cols);
+    let empty = pane.layout.cards.is_empty() && !running;
+    let total: f32 = pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
+        + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32;
+    // 터미널처럼 위에서부터 쌓고 입력 칸은 마지막 묶음 바로 아래에 세운다 — 칸이 차면 바닥에 붙는다.
+    // 아래에 붙여 쌓으면 명령이 적은 넓은 칸의 위쪽이 통째로 빈다(폰은 대화 앱처럼 아래에 붙인다).
+    let gap = if input_h > 0.0 { 6.0 } else { PAD_TOP };
+    let input_y = if empty { y + 1.0 } else { list_top + total + gap }.min(y + h - input_h);
     if input_h > 0.0 {
-        g.rect(x, input_y, w, 1.0, theme::with_alpha(theme::border(), 140));
+        if !empty {
+            g.rect(x, input_y, w, 1.0, theme::with_alpha(theme::border(), 140));
+        }
         if let Some(cwd) = context {
             let cy = input_y + 1.0 + 6.0;
             let mut cx = text_x;
@@ -384,53 +410,32 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         }
     }
 
-    // ── 카드 목록(아래부터 쌓기) ──────────────────────────────────────────
-    let list_top = y + PAD_TOP;
-    let list_bottom = input_y - if input_h > 0.0 { 6.0 } else { PAD_TOP };
+    // ── 묶음 목록(아래부터 그린다) ─────────────────────────────────────────
+    let list_bottom = input_y - gap;
     let list_h = (list_bottom - list_top).max(0.0);
-    let center = |g: &mut gpu::GpuRenderer, title: &str, sub: &str| {
-        let tw = g.measure_chrome_text(title, 12.0, false);
-        label(g, x + (w - tw) / 2.0, list_top + list_h / 2.0 - 20.0, title, 12.0, theme::text_dim());
-        let sw = g.measure_chrome_text(sub, 10.5, false);
-        label(g, x + (w - sw) / 2.0, list_top + list_h / 2.0 + 2.0, sub, 10.5, theme::text_mute());
-    };
-    if !feed.loaded {
-        let (title, sub) = if slot.local {
-            ("명령을 받는 중…", "이 칸 셸의 OSC 133 구간을 읽어요")
-        } else {
-            ("원본 칸의 명령을 받는 중…", "원본 기기에서 OSC 133 구간을 읽어요")
-        };
-        center(g, title, feed.error.as_deref().unwrap_or(sub));
-        g.pop_clip();
-        return hits;
-    }
-    // 친 명령이 없으면 가운데에 시작 칩 몇 개만 — 워프처럼 아래 입력 칸이 시작점이고, 칩은 지름길이다.
-    layout(pane, feed, cols);
-    if pane.layout.cards.is_empty() && !running {
+    // 친 명령이 없으면 입력 칸 아래에 시작 칩 몇 개만 — 워프처럼 입력 칸이 시작점이고, 칩은 지름길이다.
+    if empty {
         let starts: Vec<&str> = ["ls"].into_iter().chain(feed.branch.as_ref().map(|_| "git status")).chain(["claude"]).collect();
-        let widths: Vec<f32> = starts.iter().map(|c| g.measure_chrome_text(c, 11.5, false) + CHIP_PAD * 2.0).collect();
-        let total = widths.iter().sum::<f32>() + CHIP_GAP * (starts.len() as f32 - 1.0);
-        let mut cx = x + (w - total) / 2.0;
-        let cy = list_top + list_h / 2.0 - CHIP_H / 2.0;
-        for (cmd, cw_) in starts.into_iter().zip(widths) {
-            let r = (cx, cy, cw_, CHIP_H);
+        let mut cx = text_x;
+        let cy = if input_h > 0.0 { input_y + input_h + 10.0 } else { list_top };
+        for cmd in starts {
+            let r = (cx, cy, g.measure_chrome_text(cmd, 11.5, false) + CHIP_PAD * 2.0, CHIP_H);
             let hover = inside(cursor, r);
             g.round_rect_fill(r.0, r.1, r.2, r.3, CHIP_H / 2.0, if hover { theme::surface_hover() } else { theme::panel_bg() });
             g.round_rect_stroke(r.0, r.1, r.2, r.3, CHIP_H / 2.0, 1.0, theme::with_alpha(theme::border(), 200));
             g.draw_code_text(r.0 + CHIP_PAD, r.1 + (CHIP_H - 11.5) / 2.0, cmd, 11.5, if hover { theme::text() } else { theme::text_dim() });
             g.hover_pointer |= hover;
             hits.push((Hit::Run(cmd.to_string()), r));
-            cx += cw_ + CHIP_GAP;
+            cx += r.2 + CHIP_GAP;
         }
     }
-    let total: f32 = pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
-        + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32;
     pane.scroll_max = (total - list_h).max(0.0);
     pane.scroll = pane.scroll.min(pane.scroll_max);
     let mut bottom = list_bottom + pane.scroll;
     g.push_clip(x, list_top - PAD_TOP, w, list_h + PAD_TOP);
     let styles = std::mem::take(&mut pane.layout.styles);
-    for card in pane.layout.cards.iter().rev() {
+    let count = pane.layout.cards.len();
+    for (i, card) in pane.layout.cards.iter().enumerate().rev() {
         let ch_px = card_px(card, line_h);
         let top = bottom - ch_px;
         bottom = top - CARD_GAP;
@@ -438,8 +443,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             continue;
         }
         let Some(b) = feed.blocks.iter().find(|b| b.id == card.id) else { continue };
-        let edge = if b.running { theme::accent() } else { theme::with_alpha(theme::border(), 140) };
-        g.round_rect_stroke(card_x, top, card_w, ch_px, theme::radius_md(), theme::border_w().max(1.0), edge);
+        if i + 1 < count {
+            g.rect(x, top + ch_px, w, CARD_GAP, theme::with_alpha(theme::border(), 140));
+        }
+        if b.running {
+            g.rect(x + 3.0, top + 6.0, 2.0, (ch_px - 12.0).max(0.0), theme::accent());
+        }
         // 머리: 상태 점 · 명령 · 걸린 시간(올리면 복사)
         let (dot, meta) = status(b, slot.now_ms);
         crate::circle_rect(g, card_x + CARD_PAD, top + (HEAD_H - DOT) / 2.0, DOT, dot);

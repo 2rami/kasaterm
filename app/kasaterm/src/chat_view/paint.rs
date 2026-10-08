@@ -892,6 +892,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         )),
         Some(_) => None,
     };
+    // PC 는 터미널처럼 위에서부터 쌓는다 — 말이 적으면 입력 상자가 마지막 말 바로 아래에 서고, 칸이 차면
+    // 바닥에 붙는다. 아래에 붙여 쌓으면 넓은 칸의 위쪽이 통째로 빈다(폰은 대화 앱처럼 아래에 붙인다).
+    let slack = if empty.is_none() { (list_h - pane.layout.height - 16.0).max(0.0) } else { 0.0 };
+    let comp_y = comp_y - slack;
+    let list_bottom = list_bottom - slack;
+    let list_h = list_h - slack;
     if let Some((title, body)) = &empty {
         let tw = g.measure_chrome_text(title, 15.0, true);
         let cy = list_y + (list_h / 2.0 - 44.0).max(0.0);
