@@ -22,6 +22,9 @@ pub(crate) struct Slot {
     pub(crate) now_ms: u64,
     /// 이 기기 셸 칸(명령으로 보기) — 거울이 아니라 「원본」이라 부를 것이 없다.
     pub(crate) local: bool,
+    /// 이 칸에 실제로 깔린 바탕. 거울 칸은 기기색이 섞여 테마 바탕과 다르다 — 채움을 테마 바탕에서
+    /// 끌어내면 분홍 칸 위에 푸른 회색 상자가 떠 따로 논다(2026-10-08).
+    pub(crate) bg: [u8; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -421,7 +424,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         for cmd in starts {
             let r = (cx, cy, g.measure_chrome_text(cmd, 11.5, false) + CHIP_PAD * 2.0, CHIP_H);
             let hover = inside(cursor, r);
-            g.round_rect_fill(r.0, r.1, r.2, r.3, CHIP_H / 2.0, if hover { theme::surface_hover() } else { theme::panel_bg() });
+            g.round_rect_fill(r.0, r.1, r.2, r.3, CHIP_H / 2.0, if hover { theme::lerp(slot.bg, theme::text(), 0.08) } else { slot.bg });
             g.round_rect_stroke(r.0, r.1, r.2, r.3, CHIP_H / 2.0, 1.0, theme::with_alpha(theme::border(), 200));
             g.draw_code_text(r.0 + CHIP_PAD, r.1 + (CHIP_H - 11.5) / 2.0, cmd, 11.5, if hover { theme::text() } else { theme::text_dim() });
             g.hover_pointer |= hover;
@@ -496,14 +499,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         }
         for (i, row) in card.rows.iter().enumerate() {
             if card.fold_at == Some(i) {
-                ry = fold_row(g, cursor, &mut hits, b.id, &card.fold_label, (text_x, ry, text_w));
+                ry = fold_row(g, cursor, &mut hits, b.id, &card.fold_label, (text_x, ry, text_w), theme::lerp(slot.bg, theme::text(), 0.08));
             }
             if ry + line_h >= list_top - PAD_TOP && ry <= list_bottom {
                 for (link, at, n) in link_runs(&styles, row) {
                     let r = (text_x + at as f32 * cw, ry, n as f32 * cw, line_h);
                     let Some(path) = pane.layout.links.get(link as usize - 1) else { continue };
                     if inside(cursor, r) && r.1 >= list_top - PAD_TOP && r.1 + r.3 <= list_bottom + PAD_TOP {
-                        g.round_rect_fill(r.0 - 2.0, r.1, r.2 + 4.0, r.3, theme::radius_sm(), theme::surface_hover());
+                        g.round_rect_fill(r.0 - 2.0, r.1, r.2 + 4.0, r.3, theme::radius_sm(), theme::lerp(slot.bg, theme::text(), 0.08));
                         g.hover_pointer = true;
                     }
                     hits.push((Hit::Dir(path.clone()), r));
@@ -514,7 +517,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             ry += line_h;
         }
         if card.fold_at.is_some_and(|at| at >= card.rows.len()) {
-            fold_row(g, cursor, &mut hits, b.id, &card.fold_label, (text_x, ry, text_w));
+            fold_row(g, cursor, &mut hits, b.id, &card.fold_label, (text_x, ry, text_w), theme::lerp(slot.bg, theme::text(), 0.08));
         }
     }
     pane.layout.styles = styles;
@@ -528,12 +531,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     hits
 }
 
-fn fold_row(g: &mut gpu::GpuRenderer, cursor: (f32, f32), hits: &mut Vec<(Hit, Rect)>, id: u64, text: &str, at: (f32, f32, f32)) -> f32 {
+fn fold_row(g: &mut gpu::GpuRenderer, cursor: (f32, f32), hits: &mut Vec<(Hit, Rect)>, id: u64, text: &str, at: (f32, f32, f32), hover_fill: [u8; 4]) -> f32 {
     let (x, y, w) = at;
     let r = (x, y, w, FOLD_H);
     let hover = inside(cursor, r);
     if hover {
-        g.round_rect_fill(r.0 - 4.0, r.1, r.2 + 8.0, r.3, theme::radius_sm(), theme::surface_hover());
+        g.round_rect_fill(r.0 - 4.0, r.1, r.2 + 8.0, r.3, theme::radius_sm(), hover_fill);
     }
     g.queue_icon("chevron-down", x, y + (FOLD_H - 12.0) / 2.0, 12.0, theme::text_dim());
     label(g, x + 18.0, y + (FOLD_H - 11.0) / 2.0, text, 11.0, if hover { theme::text() } else { theme::text_dim() });

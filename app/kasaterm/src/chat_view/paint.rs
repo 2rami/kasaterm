@@ -26,6 +26,9 @@ pub(crate) struct Slot {
     pub(crate) mirror: bool,
     pub(crate) preedit: String,
     pub(crate) caret_on: bool,
+    /// 이 칸에 실제로 깔린 바탕. 거울 칸은 기기색이 섞여 테마 바탕과 다르다 — 채움을 테마 바탕에서
+    /// 끌어내면 분홍 칸 위에 푸른 회색 상자가 떠 따로 논다(2026-10-08).
+    pub(crate) bg: [u8; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -921,7 +924,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             }
         }
         let bx = col_x + (col_w - bw) / 2.0;
-        draw_block(g, bx, cy + 28.0, &b, theme::pane_bg(), (f32::MIN, f32::MAX));
+        draw_block(g, bx, cy + 28.0, &b, slot.bg, (f32::MIN, f32::MAX));
         let btn = (col_x + (col_w - 110.0) / 2.0, cy + 40.0 + bh, 110.0, 26.0);
         native_controls::text_button(g, btn, cursor, "터미널로 보기", native_controls::Style::default());
         hits.push((Hit::Terminal, btn));
@@ -935,7 +938,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         // 아래에 붙여 쌓는다 — 새 말이 입력 상자 바로 위에 선다(대화 앱과 같은 자리).
         let top = list_y + list_h - 8.0 - content_h + pane.scroll;
         g.push_clip(x, list_y, w, list_h);
-        let mine_fill = theme::lerp(theme::pane_bg(), theme::text(), 0.08);
+        let mine_fill = theme::lerp(slot.bg, theme::text(), 0.08);
         let clip = (list_y, list_bottom);
         let in_list = |c: (f32, f32)| inside(c, (x, list_y, w, list_h));
         for row in &layout.rows {
@@ -957,7 +960,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                         let bw = (b.w + 28.0).max(40.0);
                         let bh = row.h - if *queued { 18.0 } else { 0.0 };
                         let bx = col_x + col_w - bw;
-                        let fill = if *queued { theme::lerp(theme::pane_bg(), theme::attention(), 0.12) } else { mine_fill };
+                        let fill = if *queued { theme::lerp(slot.bg, theme::attention(), 0.12) } else { mine_fill };
                         let r = (bx, ry, bw, bh);
                         bubble(g, r, fill);
                         draw_block(g, bx + 14.0, ry + 10.0, b, fill, clip);
@@ -973,7 +976,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                             hits.push((Hit::Copy(*item), cr));
                         }
                     } else {
-                        draw_block(g, col_x, ry, b, theme::pane_bg(), clip);
+                        draw_block(g, col_x, ry, b, slot.bg, clip);
                         let r = (col_x, ry, col_w, row.h);
                         let cr = (col_x + col_w - 26.0, ry, 26.0, 26.0);
                         if in_list(cursor) && inside(cursor, r) {
@@ -1015,7 +1018,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                     let r = (col_x + 20.0, ry, col_w - 20.0, row.h);
                     let mid = ry + row.h / 2.0;
                     if *has_result && inside(cursor, r) && in_list(cursor) {
-                        g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
+                        g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::lerp(slot.bg, theme::text(), 0.08));
                         g.hover_pointer = true;
                     }
                     let (icon, color) = match status {
@@ -1038,7 +1041,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                 }
                 Kind::Body { key } => {
                     if let Some((_, b)) = layout.blocks.get(key) {
-                        draw_block(g, col_x + 20.0, ry, b, theme::pane_bg(), clip);
+                        draw_block(g, col_x + 20.0, ry, b, slot.bg, clip);
                     }
                 }
                 Kind::Command { text } => {
@@ -1053,7 +1056,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                     if let Some((_, b)) = layout.blocks.get(key) {
                         let r = (col_x, ry, (b.w + 14.0).min(col_w), row.h);
                         g.round_rect_stroke(r.0, r.1, r.2, r.3, 12.0, theme::border_w().max(1.0), theme::border());
-                        draw_block(g, col_x, ry, b, theme::pane_bg(), clip);
+                        draw_block(g, col_x, ry, b, slot.bg, clip);
                     }
                 }
                 Kind::Working => {
@@ -1074,7 +1077,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         g.pop_clip();
         if pane.scroll > 240.0 {
             let r = (col_x + col_w - 30.0, list_bottom - 34.0, 26.0, 26.0);
-            g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::pane_bg());
+            g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), slot.bg);
             g.round_rect_stroke(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::border_w().max(1.0), theme::border());
             native_controls::icon_button(g, r, cursor, "chevron-down", native_controls::Style::default());
             hits.push((Hit::Bottom, r));
@@ -1148,7 +1151,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     // ── 입력 상자 ─────────────────────────────────────────────────────────
     let box_r = (col_x, comp_y + 8.0, col_w, box_h);
     let edge = if slot.focused { theme::accent() } else { theme::border() };
-    g.round_rect_fill(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, theme::pane_bg());
+    g.round_rect_fill(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, slot.bg);
     g.round_rect_stroke(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, theme::border_w().max(1.0), edge);
     let tx = box_r.0 + 14.0;
     let ty = box_r.1 + 10.0 + 3.0;
@@ -1176,7 +1179,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     let send = (box_r.0 + box_r.2 - 10.0 - 28.0, bmid - 14.0, 28.0, 28.0);
     if ready {
         g.round_rect_fill(send.0, send.1, send.2, send.3, 14.0, theme::accent());
-        g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, theme::pane_bg());
+        g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, slot.bg);
         g.hover_pointer |= inside(cursor, send);
         hits.push((Hit::Send, send));
     } else {
@@ -1198,7 +1201,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     let term = (box_r.0 + 6.0, bmid - 13.0, term_w, 26.0);
     let term_hover = inside(cursor, term);
     if term_hover {
-        g.round_rect_fill(term.0, term.1, term.2, term.3, theme::radius_sm(), theme::surface_hover());
+        g.round_rect_fill(term.0, term.1, term.2, term.3, theme::radius_sm(), theme::lerp(slot.bg, theme::text(), 0.08));
         g.hover_pointer = true;
     }
     g.queue_icon("terminal", term.0 + 8.0, bmid - 6.5, 13.0, theme::text_dim());

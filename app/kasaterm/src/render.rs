@@ -1268,6 +1268,7 @@ impl App {
                             || kasa_mcp::remote::remote_info(&id).is_some(),
                         preedit: self.chat_view_preedit(&id),
                         caret_on: self.cursor_blink_on(Instant::now()),
+                        bg: theme::pane_bg(),
                     }
                 });
                 // 거울 셸 칸 — 원본이 낸 명령 묶음을 카드로. 원본 PTY 크기는 그대로다.
@@ -1284,6 +1285,7 @@ impl App {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_millis() as u64),
                         local: !kasa_mcp::remote::is_view_pane(&tab),
+                        bg: theme::pane_bg(),
                     })
                 }).flatten();
                 let body_view = chat_slot.is_some() || shell_slot.is_some();
@@ -2674,14 +2676,20 @@ impl App {
             // that disappears for a single pane. Default terminal cells are
             // transparent, so paint below them; explicit syntax/diff/prompt
             // fills and character accents remain above this local-mode tint.
+            let pane_bg_of = |id: &str| pane_identities.get(id)
+                .and_then(|identity| identity.machine.pane_background(theme::pane_bg()))
+                .unwrap_or_else(theme::pane_bg);
             for (id, x, y, w, h) in &footer_slots {
                 // Only a decoded user background replaces the themed surface.
                 if g.has_image("schale:classroom")
                     && classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
-                let background = pane_identities.get(id)
-                    .and_then(|identity| identity.machine.pane_background(theme::pane_bg()))
-                    .unwrap_or_else(theme::pane_bg);
-                g.rect(*x, *y, *w, *h, background);
+                g.rect(*x, *y, *w, *h, pane_bg_of(id));
+            }
+            for slot in &mut chat_slots {
+                slot.bg = pane_bg_of(&slot.pane);
+            }
+            for slot in &mut shell_slots {
+                slot.bg = pane_bg_of(&slot.pane);
             }
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
