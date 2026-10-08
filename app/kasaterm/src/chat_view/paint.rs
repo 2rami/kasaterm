@@ -405,8 +405,11 @@ enum Status {
 enum Kind {
     /// 턴 머리 — `via` 는 사람 대신 넣은 말일 때 이름 뒤에 붙는 「쪽지」·「완료 보고」.
     Name { text: String, via: &'static str },
-    /// `relay` 는 사람 대신 다른 칸·카사텀·나쵸가 넣은 말 — 왼쪽 테두리 말풍선.
+    /// `mine` 은 사람이 친 말 — 셸 묶음의 명령 줄처럼 점과 함께 묶음 머리에 선다. `relay` 는 사람 대신
+    /// 다른 칸·카사텀·나쵸가 넣은 말 — 이름 줄 아래 왼쪽 막대 글.
     Bubble { item: usize, mine: bool, queued: bool, relay: bool },
+    /// 사람 쪽 줄(내 말·남이 넣은 말·명령)이 여는 새 묶음의 위 선 — 칸 전체 폭.
+    Rule,
     /// 접는 머리 한 줄 — 도구 묶음·생각·출력.
     Fold { key: usize, icon: &'static str, label: String, detail: String, open: bool, failed: usize, live: bool },
     Tool { item: usize, status: Status, name: String, summary: String, open: bool, has_result: bool },
@@ -524,7 +527,9 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
             return gap;
         }
         *header = Some(key);
-        push(out, y, 22.0, 18.0, Kind::Name { text: who.to_string(), via });
+        // 사람 쪽 머리 바로 아래 답은 같은 묶음이라 바짝 붙인다.
+        let after_head = out.last().is_some_and(|r| matches!(r.kind, Kind::Bubble { mine: true, .. } | Kind::Command { .. }));
+        push(out, y, 22.0, if after_head { 10.0 } else { 18.0 }, Kind::Name { text: who.to_string(), via });
         4.0
     };
     if skip > 0 {
@@ -579,13 +584,20 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                     Item::Bubble { user, text, from, queued, images } => {
                         let mine = *user && from.is_none();
                         let relay = from.is_some();
-                        let gap = if mine {
-                            let gap = if header.is_some() || out.last().is_some_and(|r| !matches!(r.kind, Kind::Bubble { mine: true, .. })) { 18.0 } else { 8.0 };
+                        let gap = if mine || relay {
+                            if !out.is_empty() {
+                                push(&mut out, &mut y, 1.0, 14.0, Kind::Rule);
+                            }
                             header = None;
-                            gap
+                            match from {
+                                Some(f) => {
+                                    push(&mut out, &mut y, 22.0, 8.0, Kind::Name { text: f.name.clone(), via: f.via });
+                                    4.0
+                                }
+                                None => 8.0,
+                            }
                         } else {
-                            let (who, via) = from.as_ref().map_or((name, ""), |f| (f.name.as_str(), f.via));
-                            head(&mut out, &mut y, &mut header, who, via, 8.0)
+                            head(&mut out, &mut y, &mut header, name, "", 8.0)
                         };
                         if layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
                             let mut body = text.clone();
@@ -594,13 +606,13 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                                 body = if body.is_empty() { mark } else { format!("{mark}\n{body}") };
                             }
                             let tone = if *queued { Tone::Dim } else { Tone::Text };
-                            // 내 말만 말풍선에 담는다 — 학생 답은 열 폭을 다 쓰는 글이다(design.md 「학생 대화 보기」).
-                            let max_w = if mine || relay { bubble_max - 28.0 } else { col_w };
+                            // 내 말은 점 뒤(16)부터, 남이 넣은 말은 막대 뒤(12)부터 — 오른쪽 34 는 올리면 서는 복사 자리.
+                            let max_w = if mine { col_w - 16.0 - 34.0 } else if relay { col_w - 12.0 - 34.0 } else { col_w };
                             let b = markdown_block(g, &body, max_w, tone);
                             layout.blocks.insert(i, (wbits, b));
                         }
                         let b = &layout.blocks[&i].1;
-                        let h = if mine || relay { b.h + 20.0 } else { b.h } + if *queued { 18.0 } else { 0.0 };
+                        let h = if mine { b.h + 12.0 } else { b.h } + if *queued { 18.0 } else { 0.0 };
                         push(&mut out, &mut y, h, gap, Kind::Bubble { item: i, mine, queued: *queued, relay });
                     }
                     Item::Thinking(text) | Item::Output(text) => {
@@ -626,7 +638,10 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                     Item::Command { name: cmd, args } => {
                         header = None;
                         let text = if cmd == "!" { format!("! {args}") } else { format!("{cmd} {args}").trim().to_string() };
-                        push(&mut out, &mut y, 24.0, 12.0, Kind::Command { text });
+                        if !out.is_empty() {
+                            push(&mut out, &mut y, 1.0, 14.0, Kind::Rule);
+                        }
+                        push(&mut out, &mut y, 26.0, 8.0, Kind::Command { text });
                     }
                     Item::Answered { pairs: Some(pairs), .. } => {
                         header = None;
@@ -829,30 +844,25 @@ fn card_of(menu: Option<&super::parse::PromptMenu>, live: &ModLive) -> Option<Ca
     })
 }
 
-/// 내 말 말풍선 바탕 — 꼬리 없이 둥글게. 누가 한 말인지는 오른쪽 자리가 말한다.
-fn bubble(g: &mut gpu::GpuRenderer, r: Rect, fill: [u8; 4]) {
-    g.round_rect_fill(r.0, r.1, r.2, r.3, 16.0_f32.min(r.3 / 2.0), fill);
-}
-
 pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, pane: &mut ChatPane, feed: Option<&Feed>) -> Vec<(Hit, Rect)> {
     let mut hits: Vec<(Hit, Rect)> = Vec::new();
     let (x, y, w, h) = slot.rect;
     if w < 60.0 || h < 80.0 {
         return hits;
     }
-    let pad = if w >= 480.0 { 16.0 } else { 10.0 };
-    let col_w = (w - pad * 2.0).min(760.0).max(40.0);
-    let col_x = x + ((w - col_w) / 2.0).floor();
+    // PC 는 명령 묶음 보기와 같은 판 — 가운데 읽기 열 없이 칸 폭을 다 쓰고 글은 왼쪽 20 에서 선다
+    // (2026-10-08 「셸 대화형과 모양 비슷하게, 양옆 여백 없이」).
+    let col_x = x + 20.0;
+    let col_w = (w - 40.0).max(40.0);
     g.push_clip(x, y, w, h);
 
-    // ── 입력 상자(아래 고정) — 글 줄 위, 그 아래 단추 줄 32 ─────────────────
-    let inner_w = (col_w - 28.0).max(20.0);
+    // ── 입력 띠 — 위 선, 글 줄, 그 아래 단추 줄 32 ─────────────────────────
+    let inner_w = col_w.max(20.0);
     let (lines, caret_line, caret_x, pre) = composer_lines(g, &pane.draft, pane.cursor, &slot.preedit, inner_w);
     let shown = lines.len().clamp(1, 6);
     let first = (caret_line + 1).saturating_sub(shown).min(lines.len().saturating_sub(shown));
     let text_h = shown as f32 * 20.0;
-    let box_h = 10.0 + text_h + 2.0 + 32.0;
-    let composer_h = 8.0 + box_h + 12.0;
+    let composer_h = 1.0 + 8.0 + text_h + 2.0 + 32.0 + 6.0;
     let comp_y = y + h - composer_h;
 
     // ── 선택지 판·기다림 줄 ─────────────────────────────────────────────
@@ -867,7 +877,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         None => 0.0,
     };
     let list_y = y + 8.0;
-    let list_bottom = comp_y - card_h - if card_h > 0.0 { 8.0 } else { 0.0 };
+    let list_bottom = comp_y - 6.0 - card_h - if card_h > 0.0 { 8.0 } else { 0.0 };
     let list_h = (list_bottom - list_y).max(0.0);
 
     // ── 대화 목록 ─────────────────────────────────────────────────────────
@@ -899,6 +909,11 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         )),
         Some(_) => None,
     };
+    // 셸 묶음처럼 위에서부터 쌓고 입력 띠는 마지막 말 바로 아래에 세운다 — 칸이 차면 바닥에 붙는다.
+    let slack = if empty.is_none() { (list_h - pane.layout.height - 16.0).max(0.0) } else { 0.0 };
+    let comp_y = comp_y - slack;
+    let list_bottom = list_bottom - slack;
+    let list_h = list_h - slack;
     if let Some((title, body)) = &empty {
         let tw = g.measure_chrome_text(title, 15.0, true);
         let cy = list_y + (list_h / 2.0 - 44.0).max(0.0);
@@ -933,12 +948,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         let content_h = layout.height;
         pane.scroll_max = (content_h + 16.0 - list_h).max(0.0);
         pane.scroll = pane.scroll.clamp(0.0, pane.scroll_max);
-        // PC 는 Claude 앱처럼 말이 적으면 위에서부터 서고 입력 상자는 바닥에 둔다. 아래에 붙여 쌓으면 넓은
-        // 칸의 위가 통째로 비고, 입력 상자를 말 바로 아래로 끌어올리면 상자가 칸 가운데 떠 대화 앱으로 안
-        // 읽힌다(2026-10-08 둘 다 「이상하다」). 칸이 차면 새 말이 입력 상자 바로 위에 선다(폰은 늘 아래에 붙인다).
-        let top = (list_y + list_h - 8.0 - content_h + pane.scroll).min(list_y + 8.0);
+        let top = list_y + list_h - 8.0 - content_h + pane.scroll;
         g.push_clip(x, list_y, w, list_h);
-        let mine_fill = theme::lerp(slot.bg, theme::text(), 0.08);
         let clip = (list_y, list_bottom);
         let in_list = |c: (f32, f32)| inside(c, (x, list_y, w, list_h));
         for row in &layout.rows {
@@ -958,14 +969,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                         label(g, vx, ry + 4.0, &format!("· {via}"), 12.0, theme::text_mute(), false);
                     }
                 }
+                Kind::Rule => g.rect(x, ry, w, 1.0, theme::with_alpha(theme::border(), 140)),
                 Kind::Bubble { item, relay: true, .. } => {
                     let Some((_, b)) = layout.blocks.get(item) else { continue };
-                    let bw = (b.w + 28.0).max(40.0);
-                    let r = (col_x, ry, bw, row.h);
-                    g.round_rect_stroke(r.0, r.1, r.2, r.3, 16.0_f32.min(r.3 / 2.0), 1.0, theme::border());
-                    draw_block(g, col_x + 14.0, ry + 10.0, b, slot.bg, clip);
-                    let cr = (col_x + bw + 4.0, ry, 26.0, 26.0);
-                    if in_list(cursor) && (inside(cursor, r) || inside(cursor, cr)) {
+                    g.rect(col_x, ry, 2.0, row.h, theme::border());
+                    draw_block(g, col_x + 12.0, ry, b, slot.bg, clip);
+                    let r = (col_x, ry, col_w, row.h);
+                    let cr = (col_x + col_w - 26.0, ry, 26.0, 26.0);
+                    if in_list(cursor) && inside(cursor, r) {
                         native_controls::icon_button(g, cr, cursor, "copy", native_controls::Style::default());
                         hits.push((Hit::Copy(*item), cr));
                     }
@@ -973,21 +984,16 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                 Kind::Bubble { item, mine, queued, relay: false } => {
                     let Some((_, b)) = layout.blocks.get(item) else { continue };
                     if *mine {
-                        let bw = (b.w + 28.0).max(40.0);
-                        let bh = row.h - if *queued { 18.0 } else { 0.0 };
-                        let bx = col_x + col_w - bw;
-                        let fill = if *queued { theme::lerp(slot.bg, theme::attention(), 0.12) } else { mine_fill };
-                        let r = (bx, ry, bw, bh);
-                        bubble(g, r, fill);
-                        draw_block(g, bx + 14.0, ry + 10.0, b, fill, clip);
+                        let dot = if *queued { theme::attention() } else { theme::accent() };
+                        crate::circle_rect(g, col_x, ry + 6.0 + (LINE - 8.0) / 2.0, 8.0, dot);
+                        draw_block(g, col_x + 16.0, ry + 6.0, b, slot.bg, clip);
                         if *queued {
-                            let t = "예약 · 지금 일이 끝나면 읽어요";
-                            let tw = g.measure_chrome_text(t, 11.0, false);
-                            label(g, bx + bw - tw, ry + bh + 3.0, t, 11.0, theme::text_mute(), false);
+                            label(g, col_x + 16.0, ry + row.h - 15.0, "예약 · 지금 일이 끝나면 읽어요", 11.0, theme::text_mute(), false);
                         }
-                        // 올리면 옆에 복사 — 글 고르기가 없어 이것이 꺼내는 길이다.
-                        let cr = (bx - 30.0, ry, 26.0, 26.0);
-                        if cr.0 >= col_x - pad + 2.0 && in_list(cursor) && (inside(cursor, r) || inside(cursor, cr)) {
+                        // 올리면 오른쪽에 복사 — 글 고르기가 없어 이것이 꺼내는 길이다.
+                        let r = (col_x, ry, col_w, row.h);
+                        let cr = (col_x + col_w - 26.0, ry + 3.0, 26.0, 26.0);
+                        if in_list(cursor) && inside(cursor, r) {
                             native_controls::icon_button(g, cr, cursor, "copy", native_controls::Style::default());
                             hits.push((Hit::Copy(*item), cr));
                         }
@@ -1061,11 +1067,9 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                     }
                 }
                 Kind::Command { text } => {
-                    let tw = g.measure_code_text(text, 12.0).min(col_w - 20.0);
-                    let r = (col_x + col_w - tw - 20.0, ry, tw + 20.0, row.h);
-                    g.round_rect_stroke(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::border_w().max(1.0), theme::border());
-                    g.push_clip(r.0, r.1, r.2, r.3);
-                    g.draw_code_text(r.0 + 10.0, ry + 5.5, text, 12.0, theme::text_dim());
+                    crate::circle_rect(g, col_x, ry + (row.h - 8.0) / 2.0, 8.0, theme::text_mute());
+                    g.push_clip(col_x + 16.0, ry, (col_w - 16.0).max(0.0), row.h);
+                    g.draw_code_text(col_x + 16.0, ry + (row.h - 12.0) / 2.0, text, 12.0, theme::text_dim());
                     g.pop_clip();
                 }
                 Kind::Answered { key } => {
@@ -1083,10 +1087,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                 }
                 Kind::Note { icon, text } => {
                     let t = crate::info::fit_text(g, text, (col_w - 24.0).max(0.0), 11.0, false);
-                    let tw = g.measure_chrome_text(&t, 11.0, false) + 18.0;
-                    let nx = col_x + (col_w - tw) / 2.0;
-                    g.queue_icon(icon, nx, ry + 6.0, 12.0, theme::text_mute());
-                    label(g, nx + 18.0, ry + 5.5, &t, 11.0, theme::text_mute(), false);
+                    g.queue_icon(icon, col_x, ry + 6.0, 12.0, theme::text_mute());
+                    label(g, col_x + 18.0, ry + 5.5, &t, 11.0, theme::text_mute(), false);
                 }
             }
         }
@@ -1101,7 +1103,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     }
 
     // ── 선택지 판 ─────────────────────────────────────────────────────────
-    let card_y = comp_y - card_h;
+    let card_y = comp_y - 6.0 - card_h;
     if let Some(c) = &card {
         let line = if needs_you { theme::attention() } else { theme::accent() };
         g.round_rect_stroke(col_x, card_y, col_w, card_h, theme::radius_md(), theme::border_w().max(1.0), line);
@@ -1164,18 +1166,16 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         hits.push((Hit::Terminal, r));
     }
 
-    // ── 입력 상자 ─────────────────────────────────────────────────────────
-    let box_r = (col_x, comp_y + 8.0, col_w, box_h);
-    let edge = if slot.focused { theme::accent() } else { theme::border() };
-    g.round_rect_fill(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, slot.bg);
-    g.round_rect_stroke(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, theme::border_w().max(1.0), edge);
-    let tx = box_r.0 + 14.0;
-    let ty = box_r.1 + 10.0 + 3.0;
+    // ── 입력 띠 — 셸 묶음의 입력 칸처럼 위 선 하나, 상자 없이 ─────────────────
+    let box_r = (x, comp_y, w, composer_h);
+    g.rect(x, comp_y, w, 1.0, theme::with_alpha(theme::border(), 140));
+    let tx = col_x;
+    let ty = comp_y + 1.0 + 8.0 + 3.0;
     if pane.draft.is_empty() && slot.preedit.is_empty() {
         let hint = if slot.mirror { "다른 기기 학생에게 보내기" } else { "메시지 보내기" };
         label(g, tx, ty, hint, 13.0, theme::text_mute(), false);
     }
-    g.push_clip(box_r.0 + 2.0, box_r.1 + 2.0, box_r.2 - 4.0, 10.0 + text_h);
+    g.push_clip(x, comp_y + 1.0, w, 8.0 + text_h + 2.0);
     for (i, line) in lines.iter().enumerate().skip(first).take(shown) {
         label(g, tx, ty + (i - first) as f32 * 20.0, line, 13.0, theme::text(), false);
     }
@@ -1189,10 +1189,10 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     }
     g.pop_clip();
 
-    // 상자 안 아래 줄 — 왼쪽 터미널로 보기, 가운데 안내, 오른쪽 멈추기·보내기 원.
-    let bmid = box_r.1 + 10.0 + text_h + 2.0 + 16.0;
+    // 띠 아래 줄 — 왼쪽 터미널로 보기, 가운데 안내, 오른쪽 멈추기·보내기 원.
+    let bmid = comp_y + 1.0 + 8.0 + text_h + 2.0 + 16.0;
     let ready = !pane.draft.trim().is_empty();
-    let send = (box_r.0 + box_r.2 - 10.0 - 28.0, bmid - 14.0, 28.0, 28.0);
+    let send = (col_x + col_w - 28.0, bmid - 14.0, 28.0, 28.0);
     if ready {
         g.round_rect_fill(send.0, send.1, send.2, send.3, 14.0, theme::accent());
         g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, slot.bg);
@@ -1214,7 +1214,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     }
     let term_label = "터미널로 보기";
     let term_w = g.measure_chrome_text(term_label, 11.5, false) + 34.0;
-    let term = (box_r.0 + 6.0, bmid - 13.0, term_w, 26.0);
+    let term = (col_x - 8.0, bmid - 13.0, term_w, 26.0);
     let term_hover = inside(cursor, term);
     if term_hover {
         g.round_rect_fill(term.0, term.1, term.2, term.3, theme::radius_sm(), theme::lerp(slot.bg, theme::text(), 0.08));
