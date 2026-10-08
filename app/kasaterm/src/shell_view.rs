@@ -529,28 +529,42 @@ impl App {
                     pane.scroll = 0.0;
                 }
             }
-            Some(Hit::Dir(path)) => {
-                let running = self
-                    .shell_view
-                    .panes
-                    .get(&id)
-                    .is_some_and(|pane| pane.feed.lock().is_ok_and(|f| f.blocks.iter().any(|b| b.running)));
-                if running {
-                    self.set_toast("명령이 도는 중이라 지금은 못 가요 — 끝나면 눌러 주세요".to_string());
-                } else {
-                    // 쓰다 만 줄은 지우고(Ctrl-U) 간다 — 그 뒤에 붙으면 엉뚱한 명령이 된다.
-                    let tab = self.ws.lock().unwrap().active_tab_pid(&id);
-                    let line = format!("\x15cd -- {}\r", shell_quote(&path));
-                    self.send_bytes_to_surface(Some(&tab), line.as_bytes());
-                    if let Some(pane) = self.shell_view.panes.get_mut(&id) {
-                        pane.scroll = 0.0;
-                    }
+            Some(Hit::Dir(path)) => self.shell_view_type(&id, &format!("cd -- {}", shell_quote(&path)), true),
+            Some(Hit::Run(cmd)) => self.shell_view_type(&id, &cmd, true),
+            Some(Hit::Rerun(block)) | Some(Hit::Edit(block)) => {
+                let cmd = self.shell_view.panes.get(&id).and_then(|pane| {
+                    let f = pane.feed.lock().ok()?;
+                    f.blocks.iter().find(|b| b.id == block).map(|b| b.cmd.clone())
+                });
+                if let Some(cmd) = cmd {
+                    let run = matches!(hit, Some(Hit::Rerun(_)));
+                    self.shell_view_type(&id, &cmd, run);
                 }
             }
             None => {}
         }
         self.chrome_dirty = true;
         true
+    }
+
+    /// 셸 입력 줄에 명령을 넣는다 — 쓰다 만 줄은 지우고(Ctrl-U), `run` 이면 Enter 까지. 도는 명령이 있으면
+    /// 그 프로그램의 입력이 되니 안 보낸다.
+    fn shell_view_type(&mut self, id: &str, command: &str, run: bool) {
+        let running = self
+            .shell_view
+            .panes
+            .get(id)
+            .is_some_and(|pane| pane.feed.lock().is_ok_and(|f| f.blocks.iter().any(|b| b.running)));
+        if running {
+            self.set_toast("명령이 도는 중이라 지금은 못 쳐요 — 끝나면 눌러 주세요".to_string());
+            return;
+        }
+        let tab = self.ws.lock().unwrap().active_tab_pid(id);
+        let line = format!("\x15{command}{}", if run { "\r" } else { "" });
+        self.send_bytes_to_surface(Some(&tab), line.as_bytes());
+        if let Some(pane) = self.shell_view.panes.get_mut(id) {
+            pane.scroll = 0.0;
+        }
     }
 
     /// 휠 — 커서 밑이 셸 카드 칸이면 카드를 굴린다.

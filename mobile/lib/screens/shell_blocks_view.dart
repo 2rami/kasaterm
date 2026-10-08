@@ -28,6 +28,7 @@ class ShellBlocksView extends StatefulWidget {
     required this.session,
     required this.onTerminal,
     this.onCommand,
+    this.onDraft,
     this.bottomTick = 0,
     this.active = true,
   });
@@ -37,8 +38,11 @@ class ShellBlocksView extends StatefulWidget {
   final TermSession session;
   final VoidCallback onTerminal;
 
-  /// 명령 한 줄을 이 셸에 보낸다(입력칸에 쓰던 글은 건드리지 않는다) — 폴더 고리가 `cd` 를 친다.
+  /// 명령 한 줄을 이 셸에 보낸다(입력칸에 쓰던 글은 건드리지 않는다) — 폴더 고리·다시 실행·시작 칩.
   final Future<void> Function(String command)? onCommand;
+
+  /// 입력칸을 이 글로 채운다(보내지 않는다) — 추천 칩·카드 명령 누르기. 고쳐서 보낸다.
+  final ValueChanged<String>? onDraft;
 
   /// 보낼 때마다 오른다 — 맨 아래로 내려간다.
   final int bottomTick;
@@ -199,16 +203,32 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
   GestureRecognizer _tapFor(String path) =>
       _taps[path] ??= TapGestureRecognizer()..onTap = () => _goTo(path);
 
-  void _goTo(String path) {
+  void _goTo(String path) => _run('cd -- ${shellQuote(path)}');
+
+  /// 명령을 바로 친다. 도는 명령이 있으면 그 프로그램의 입력이 되니 안 보낸다.
+  void _run(String command) {
     final send = widget.onCommand;
     if (send == null) return;
     if (_feed.running) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('명령이 도는 중이라 지금은 못 가요 — 끝나면 눌러 주세요')),
+        const SnackBar(content: Text('명령이 도는 중이라 지금은 못 쳐요 — 끝나면 눌러 주세요')),
       );
       return;
     }
-    send('cd -- ${shellQuote(path)}');
+    send(command);
+  }
+
+  /// 입력칸 위 추천 — 늘 쓰는 것 몇 개와 최근에 친 명령 셋(겹치면 한 번).
+  List<String> _suggestions() {
+    final fixed = ['cd ..', 'ls', if (_feed.branch != null) ...['git status', 'git pull']];
+    final recent = <String>[];
+    for (final b in _feed.blocks.reversed) {
+      final cmd = b.cmd.trim();
+      if (cmd.isEmpty || fixed.contains(cmd) || recent.contains(cmd)) continue;
+      recent.add(cmd);
+      if (recent.length == 3) break;
+    }
+    return [...recent, ...fixed];
   }
 
   void _copy(ShellBlock b) {
@@ -283,6 +303,31 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
                 ],
               ),
             );
+      final draft = widget.onDraft;
+      // 추천 칩 — 누르면 입력칸에 채우고(고쳐서 보낸다), 길게 누르면 바로 친다. 자판으로 치기 번거로운 폰 몫.
+      final chips = draft == null || _feed.blocks.isEmpty
+          ? null
+          : SizedBox(
+              height: Look.tap,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+                children: [
+                  for (final c in _suggestions())
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Center(
+                        child: _Chip(
+                          label: c,
+                          palette: palette,
+                          onTap: () => draft(c),
+                          onLongPress: () => _run(c),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
       return ColoredBox(
         color: palette.bg,
         child: Column(
@@ -290,6 +335,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
           children: [
             Expanded(child: _list(palette)),
             ?place,
+            ?chips,
           ],
         ),
       );
@@ -301,7 +347,18 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
             if (_feed.blocks.isEmpty)
               Center(
                 child: TwinsNotice(
-                  text: '아직 친 명령이 없어요\n아래에서 치면 $_where에서 돌아요',
+                  text: '아직 친 명령이 없어요\n아래에서 치거나 하나 골라 시작해요',
+                  action: widget.onCommand == null
+                      ? null
+                      : Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          alignment: WrapAlignment.center,
+                          children: [
+                            for (final c in ['ls', if (_feed.branch != null) 'git status', 'claude'])
+                              _Chip(label: c, palette: palette, onTap: () => _run(c)),
+                          ],
+                        ),
                 ),
               )
             else
@@ -316,6 +373,8 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
                   open: _open.contains(_feed.blocks[_feed.blocks.length - 1 - i].id),
                   onToggle: _toggle,
                   onCopy: _copy,
+                  onRun: widget.onCommand == null ? null : _run,
+                  onDraft: widget.onDraft,
                   tapFor: widget.onCommand == null ? null : _tapFor,
                 ),
               ),
@@ -364,6 +423,45 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
   }
 }
 
+/// 명령 칩 — 고정폭 글자의 알약. 긴 명령은 줄인다.
+class _Chip extends StatelessWidget {
+  const _Chip({required this.label, required this.palette, required this.onTap, this.onLongPress});
+
+  final String label;
+  final TerminalPalette palette;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final edge = mixToward(palette.fg, palette.bg, 0.7);
+    return Material(
+      color: mixToward(palette.bg, palette.fg, 0.06),
+      shape: StadiumBorder(side: BorderSide(color: edge)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 32, maxWidth: 200),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Align(
+              widthFactor: 1,
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: _mono.copyWith(color: palette.fg),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _Card extends StatelessWidget {
   const _Card({
     required this.block,
@@ -371,6 +469,8 @@ class _Card extends StatelessWidget {
     required this.open,
     required this.onToggle,
     required this.onCopy,
+    this.onRun,
+    this.onDraft,
     this.tapFor,
   });
 
@@ -379,6 +479,12 @@ class _Card extends StatelessWidget {
   final bool open;
   final ValueChanged<ShellBlock> onToggle;
   final ValueChanged<ShellBlock> onCopy;
+
+  /// 이 명령을 다시 친다.
+  final ValueChanged<String>? onRun;
+
+  /// 명령 줄을 누르면 입력칸으로 — 고쳐서 다시 친다.
+  final ValueChanged<String>? onDraft;
 
   /// 폴더 고리의 누름 인식기. 없으면 고리를 그리지 않는다.
   final GestureRecognizer Function(String path)? tapFor;
@@ -459,6 +565,7 @@ class _Card extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               InkWell(
+                onTap: b.cmd.isEmpty || onDraft == null ? null : () => onDraft!(b.cmd),
                 onLongPress: () => onCopy(b),
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(minHeight: Look.tap),
@@ -486,6 +593,14 @@ class _Card extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Text(meta, style: TextStyle(fontSize: Look.sub, color: dim)),
+                      if (onRun != null && b.cmd.isNotEmpty && !b.running)
+                        IconButton(
+                          tooltip: '다시 실행',
+                          onPressed: () => onRun!(b.cmd),
+                          iconSize: 18,
+                          color: dim,
+                          icon: const Icon(Icons.replay),
+                        ),
                       IconButton(
                         tooltip: '명령과 결과 복사',
                         onPressed: () => onCopy(b),

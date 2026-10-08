@@ -97,6 +97,36 @@ void main() {
     expect(await _tapFolder(tester, running: true), isEmpty);
   });
 
+  testWidgets('추천 칩은 입력칸을 채우고, 길게 누르면 바로 친다 — 최근 명령이 먼저', (tester) async {
+    final (ran, drafted) = await _pumpChips(tester, [
+      _block(1, 'make test', exit: 0),
+      _block(2, 'ls', exit: 0),
+    ], branch: 'main');
+    expect(find.text('main'), findsOneWidget, reason: '맥락 줄의 브랜치');
+    final row = find.ancestor(of: find.text('git status'), matching: find.byType(ListView));
+    expect(
+      tester.widgetList<Text>(find.descendant(of: row, matching: find.byType(Text))).map((t) => t.data),
+      ['make test', 'cd ..', 'ls', 'git status', 'git pull'],
+    );
+    await tester.tap(find.descendant(of: row, matching: find.text('make test')));
+    await tester.longPress(find.descendant(of: row, matching: find.text('cd ..')));
+    expect(drafted, ['make test']);
+    expect(ran, ['cd ..']);
+    await tester.tap(find.byTooltip('다시 실행').first);
+    await tester.tap(find.text('make test').first);
+    expect(ran.last, 'ls', reason: '맨 아래 카드가 첫 다시 실행');
+    expect(drafted.last, 'make test', reason: '카드 명령 줄을 누르면 입력칸으로');
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('빈 셸은 시작 칩을 누르면 바로 친다', (tester) async {
+    final (ran, _) = await _pumpChips(tester, const []);
+    expect(find.text('git status'), findsNothing, reason: '저장소 밖이면 git 칩이 없다');
+    await tester.tap(find.text('claude'));
+    expect(ran, ['claude']);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('셸 명령 묶음 보기', (tester) async {
     await loadFonts();
     tester.view.physicalSize = const Size(390 * 3, 844 * 3);
@@ -175,7 +205,7 @@ void main() {
     expect(session.held, isFalse, reason: '셸 칸은 명령 묶음·줄여 보기로 원본 크기 없이 그린다');
     expect(find.byType(ShellBlocksView), findsOneWidget);
     expect(find.byTooltip('터미널로 보기'), findsOneWidget);
-    expect(find.text('cargo build --release'), findsOneWidget);
+    expect(find.text('cargo build --release'), findsWidgets, reason: '카드와 추천 칩');
     await tester.enterText(find.widgetWithText(TextField, '명령 보내기'), 'git status');
     await tester.tap(find.byType(SendButton).last);
     await tester.pump(const Duration(milliseconds: 50));
@@ -260,6 +290,45 @@ Future<List<String>> _tapFolder(WidgetTester tester, {required bool running}) as
   await tester.pumpWidget(const SizedBox());
   session.dispose();
   return sent;
+}
+
+Future<(List<String>, List<String>)> _pumpChips(
+  WidgetTester tester,
+  List<Map<String, Object?>> blocks, {
+  String? branch,
+}) async {
+  final answer = {..._answer(3, 1, blocks), 'cwd': '/w', 'branch': ?branch};
+  final server = Server(
+    Uri.parse('http://127.0.0.1:1/'),
+    client: MockClient((req) async => http.Response(
+      jsonEncode(answer),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    )),
+  );
+  const pane = Pane(id: '%0', name: '', title: '', status: 'idle', window: 0, cwd: '/w');
+  final session = TermSession(server, pane)..state = TermState.connected;
+  final ran = <String>[];
+  final drafted = <String>[];
+  addTearDown(session.dispose);
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: buildTheme(Brightness.dark),
+      home: Scaffold(
+        body: ShellBlocksView(
+          server: server,
+          pane: pane,
+          session: session,
+          onTerminal: () {},
+          onCommand: (c) async => ran.add(c),
+          onDraft: drafted.add,
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 50));
+  return (ran, drafted);
 }
 
 class _BlocksServer extends FixtureServer {

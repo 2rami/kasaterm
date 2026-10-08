@@ -32,6 +32,12 @@ pub(crate) enum Hit {
     Bottom,
     /// 결과 속 폴더 고리 — 그 셸을 그 폴더로 옮긴다. 값은 절대 경로.
     Dir(String),
+    /// 카드의 명령을 다시 친다.
+    Rerun(u64),
+    /// 카드의 명령 줄 — 입력 줄에 채워 고쳐 치게 한다.
+    Edit(u64),
+    /// 빈 화면의 시작 칩 — 그 명령을 바로 친다.
+    Run(String),
 }
 
 const PAD_X: f32 = 10.0;
@@ -52,6 +58,10 @@ const LIVE_ROWS: usize = 16;
 const PROMPT_ROWS: usize = 4;
 /// 입력 줄 위 맥락 줄(폴더·브랜치) 높이.
 const CONTEXT_H: f32 = 20.0;
+/// 빈 화면 시작 칩 — 높이·안 여백·사이.
+const CHIP_H: f32 = 26.0;
+const CHIP_PAD: f32 = 12.0;
+const CHIP_GAP: f32 = 8.0;
 
 /// (글자색, 바탕색, 꾸밈, 고리 번호) — 고리 번호는 `Layout::links` 의 1 기반 자리, 0 이면 고리 아님.
 type Style = (Color, Color, u8, u16);
@@ -394,8 +404,25 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         g.pop_clip();
         return hits;
     }
-    // 친 명령이 없으면 비워 둔다 — 워프처럼 아래 입력 칸 하나가 곧 시작점이다.
+    // 친 명령이 없으면 가운데에 시작 칩 몇 개만 — 워프처럼 아래 입력 칸이 시작점이고, 칩은 지름길이다.
     layout(pane, feed, cols);
+    if pane.layout.cards.is_empty() && !running {
+        let starts: Vec<&str> = ["ls"].into_iter().chain(feed.branch.as_ref().map(|_| "git status")).chain(["claude"]).collect();
+        let widths: Vec<f32> = starts.iter().map(|c| g.measure_chrome_text(c, 11.5, false) + CHIP_PAD * 2.0).collect();
+        let total = widths.iter().sum::<f32>() + CHIP_GAP * (starts.len() as f32 - 1.0);
+        let mut cx = x + (w - total) / 2.0;
+        let cy = list_top + list_h / 2.0 - CHIP_H / 2.0;
+        for (cmd, cw_) in starts.into_iter().zip(widths) {
+            let r = (cx, cy, cw_, CHIP_H);
+            let hover = inside(cursor, r);
+            g.round_rect_fill(r.0, r.1, r.2, r.3, CHIP_H / 2.0, if hover { theme::surface_hover() } else { theme::panel_bg() });
+            g.round_rect_stroke(r.0, r.1, r.2, r.3, CHIP_H / 2.0, 1.0, theme::with_alpha(theme::border(), 200));
+            g.draw_code_text(r.0 + CHIP_PAD, r.1 + (CHIP_H - 11.5) / 2.0, cmd, 11.5, if hover { theme::text() } else { theme::text_dim() });
+            g.hover_pointer |= hover;
+            hits.push((Hit::Run(cmd.to_string()), r));
+            cx += cw_ + CHIP_GAP;
+        }
+    }
     let total: f32 = pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
         + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32;
     pane.scroll_max = (total - list_h).max(0.0);
@@ -420,16 +447,37 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         let meta_w = g.measure_chrome_text(&meta, 10.5, false);
         let right = card_x + card_w - CARD_PAD;
         let copy_r = (right - 22.0, top + 2.0, 22.0, 22.0);
-        let meta_x = if inside(cursor, head) { copy_r.0 - 6.0 - meta_w } else { right - meta_w };
+        let rerun = !b.running && !b.cmd.is_empty();
+        let rerun_r = (copy_r.0 - 2.0 - 22.0, top + 2.0, 22.0, 22.0);
+        let head_on = inside(cursor, head);
+        let meta_x = match (head_on, rerun) {
+            (true, true) => rerun_r.0 - 6.0 - meta_w,
+            (true, false) => copy_r.0 - 6.0 - meta_w,
+            _ => right - meta_w,
+        };
         let cmd_x = card_x + CARD_PAD + DOT + 8.0;
         let cmd_w = (meta_x - 10.0 - cmd_x).max(0.0);
         let cmd = if b.cmd.is_empty() { "(명령 줄을 못 읽었어요)" } else { b.cmd.as_str() };
         let shown = crate::info::fit_text(g, cmd, cmd_w, 12.0, false);
+        // 명령 줄을 누르면 입력 줄로 — 올리면 밑줄로 누를 수 있음을 알린다.
+        let cmd_r = (cmd_x, top, g.measure_chrome_text(&shown, 12.0, false).min(cmd_w), HEAD_H);
+        let cmd_on = !b.cmd.is_empty() && inside(cursor, cmd_r);
         g.draw_code_text(cmd_x, top + (HEAD_H - 12.0) / 2.0, &shown, 12.0, if b.cmd.is_empty() { theme::text_mute() } else { theme::text() });
+        if cmd_on {
+            g.rect(cmd_r.0, top + (HEAD_H + 12.0) / 2.0 + 1.0, cmd_r.2, 1.0, theme::text_dim());
+            g.hover_pointer = true;
+        }
+        if !b.cmd.is_empty() {
+            hits.push((Hit::Edit(b.id), cmd_r));
+        }
         label(g, meta_x, top + (HEAD_H - 10.5) / 2.0, &meta, 10.5, theme::text_mute());
-        if inside(cursor, head) {
+        if head_on {
+            if rerun {
+                native_controls::icon_button(g, rerun_r, cursor, "rotate-cw", native_controls::Style::default());
+                hits.insert(0, (Hit::Rerun(b.id), rerun_r));
+            }
             native_controls::icon_button(g, copy_r, cursor, "copy", native_controls::Style::default());
-            hits.push((Hit::Copy(b.id), copy_r));
+            hits.insert(0, (Hit::Copy(b.id), copy_r));
         }
         // 결과
         let mut ry = top + HEAD_H + OUT_PAD;

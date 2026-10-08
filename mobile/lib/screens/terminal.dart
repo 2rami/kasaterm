@@ -272,7 +272,16 @@ class _TerminalScreenState extends State<TerminalScreen> {
     }
   }
 
-  /// 명령 묶음의 폴더 고리 — 입력칸에 쓰던 글은 그대로 두고 그 명령만 보낸다.
+  /// 추천 칩·카드 명령 — 입력칸을 그 글로 채우고 자판을 올린다. 보내기는 사람이 한다.
+  void _draftCommand(String command) {
+    _chatInput.value = TextEditingValue(
+      text: command,
+      selection: TextSelection.collapsed(offset: command.length),
+    );
+    _chatFocus.requestFocus();
+  }
+
+  /// 명령 묶음의 폴더 고리·다시 실행·시작 칩 — 입력칸에 쓰던 글은 그대로 두고 그 명령만 보낸다.
   Future<void> _runCommand(String command) async {
     if (_sending) return;
     setState(() {
@@ -720,6 +729,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                 session: s,
                                 onTerminal: _showTerminal,
                                 onCommand: _runCommand,
+                                onDraft: _draftCommand,
                                 bottomTick: _bottomTick,
                                 active: _paging || chat,
                               ),
