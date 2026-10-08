@@ -101,6 +101,8 @@ enum Action {
     CloseRoom { label: String, window: Option<u64>, room: String },
     /// 「창 밖 셸」 줄 접기·펴기. 라벨이 비면 이 기기.
     WebShells(String),
+    /// 창 밖 셸 하나를 포커스된 칸의 탭으로 본다.
+    OpenWebShell { label: String, id: String, cwd: String },
     /// 창 밖 셸 하나를 닫는다. 폰·웹 화면이 붙어 있으면 그쪽이 거절한다.
     CloseWebShell { label: String, id: String },
     /// 도는 명령이 없는 창 밖 셸만 한꺼번에 닫는다.
@@ -302,6 +304,9 @@ fn draw_web_shells(
         let line = (x + 8.0, y + PANE_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H, w - 16.0, SIDEBAR_ROW_H);
         let close = (line.0 + line.2 - 18.0, line.1 + (SIDEBAR_ROW_H - 16.0) / 2.0, 16.0, 16.0);
         let x_hover = hit(cursor, close);
+        let line_hover = !x_hover && clipped(line, view).is_some_and(|r| hit(cursor, r));
+        if line_hover { hover_rect(g, line.0, line.1, line.2, line.3, theme::radius_sm()); }
+        g.hover_pointer |= line_hover;
         if x_hover { hover_rect(g, close.0, close.1, close.2, close.3, theme::radius_sm()); }
         g.queue_icon("x", close.0 + 2.0, close.1 + 2.0, 12.0, if x_hover { theme::text() } else { theme::text_mute() });
         let (state_text, state_color) = match &shell.job {
@@ -320,6 +325,9 @@ fn draw_web_shells(
             11.0, theme::text_dim(), false);
         if let Some(r) = clipped(close, view) {
             hits.push((Action::CloseWebShell { label: label.to_string(), id: shell.id.clone() }, r));
+        }
+        if let Some(r) = clipped(line, view) {
+            hits.push((Action::OpenWebShell { label: label.to_string(), id: shell.id.clone(), cwd: shell.cwd.clone() }, r));
         }
     }
     web_block_h(shells, true)
@@ -919,7 +927,7 @@ impl App {
         step.1 += 1;
     }
 
-    /// 격리 앱에서 「창 밖 셸」 줄을 눌러 보는 프로브 — 펴기 → 빈 셸 닫기 → 남은 수. 켜려면
+    /// 격리 앱에서 「창 밖 셸」 줄을 눌러 보는 프로브 — 펴기 → 하나 열기 → 빈 셸 닫기 → 남은 수. 켜려면
     /// `KASATERM_WINDOW_SIZE`(검증 실행)와 `KASATERM_AUTOWEBSHELL_DIR`. 셸은 부르는 쪽이 그 앱의
     /// `/term/spawn` 으로 미리 띄운다. 결과는 그 폴더의 `web-shells.log` 와 단계별 png.
     pub(crate) fn run_pending_web_shell_probe(&mut self, event_loop: &ActiveEventLoop) {
@@ -928,7 +936,7 @@ impl App {
         let Ok(folder) = std::env::var("KASATERM_AUTOWEBSHELL_DIR") else { return; };
         static STEP: OnceLock<Mutex<(Instant, usize)>> = OnceLock::new();
         let mut step = STEP.get_or_init(|| Mutex::new((Instant::now(), 0))).lock().unwrap();
-        if step.1 >= 5 || step.0.elapsed().as_millis() < if step.1 == 0 { 12000 } else { 2500 } { return; }
+        if step.1 >= 7 || step.0.elapsed().as_millis() < if step.1 == 0 { 12000 } else { 2500 } { return; }
         let Some(window) = self.window.as_ref().map(|w| w.id()) else { return; };
         let click = |app: &mut Self, r: Rect| {
             app.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
@@ -953,13 +961,24 @@ impl App {
                 format!("row_hit={} open={}", row.is_some(), self.info.navigation.web_open.contains(""))
             }
             2 => {
+                let line = find(self, &|a| matches!(a, Action::OpenWebShell { label, .. } if label.is_empty()));
+                if let Some(r) = line { click(self, r); }
+                format!("open_line={}", line.is_some())
+            }
+            3 => {
+                let ws = self.ws.lock().unwrap();
+                let tab = ws.active_pane.as_ref().map(|p| ws.active_tab_pid(p)).unwrap_or_default();
+                drop(ws);
+                format!("active_tab={tab} view={} kind={:?}", kasa_mcp::remote::is_view_pane(&tab), self.mirror_kind(&tab))
+            }
+            4 => {
                 let rows = self.info.navigation.hits.iter().filter(|(a, _)| matches!(a, Action::CloseWebShell { label, .. } if label.is_empty())).count();
                 let button = find(self, &|a| matches!(a, Action::CloseIdleWebShells(l) if l.is_empty()));
                 if let Some(r) = button { click(self, r); }
                 format!("close_buttons={rows} idle_button={}", button.is_some())
             }
-            3 => counts,
-            4 => {
+            5 => counts,
+            6 => {
                 let remote = find(self, &|a| matches!(a, Action::WebShells(l) if !l.is_empty()));
                 if let Some(r) = remote { click(self, r); }
                 format!("remote_row={}", remote.is_some())
@@ -1028,6 +1047,12 @@ impl App {
             }
             Action::WebShells(label) => {
                 if !self.info.navigation.web_open.remove(&label) { self.info.navigation.web_open.insert(label); }
+            }
+            Action::OpenWebShell { label, id, cwd } => {
+                let label = if label.is_empty() { kasa_mcp::machines::self_label() } else { label };
+                if let Err(e) = self.mirror_remote_pane(&label, &id, "", &cwd) {
+                    self.set_toast(format!("창 밖 셸 열기 실패 — {e:#}"));
+                }
             }
             Action::CloseWebShell { label, id } => self.close_web_shells(&label, vec![id]),
             Action::CloseIdleWebShells(label) => {

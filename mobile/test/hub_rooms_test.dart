@@ -102,6 +102,18 @@ void main() {
     expect(Pane.fromJson({'id': '%7'}).closed, isFalse);
   });
 
+  test('창 밖 셸은 첫 방에 안 섞이고 따로 선다', () {
+    final web = Pane.fromJson({'id': 'web-1', 'cwd': '/tmp'});
+    final busy = Pane.fromJson({
+      'id': 'web-2',
+      'harness': 'claude',
+      'status': 'working',
+    });
+    final all = [pane('%1', 0), web, busy];
+    expect(HubModel.rooms(all, const []).single.panes.map((p) => p.id), ['%1']);
+    expect(HubModel.webShells(all).map((p) => p.id), ['web-2', 'web-1']);
+  });
+
   test('서버가 배치를 안 주면 옛날과 같다', () {
     final rooms = HubModel.rooms([pane('%1', 0)], const []);
     expect(rooms.single.rects, isEmpty);

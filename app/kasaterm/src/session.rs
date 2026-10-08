@@ -160,6 +160,25 @@ fn ensure_transfer_agent(expected: Option<u32>, current: Option<u32>) -> Result<
     Ok(())
 }
 
+fn self_view_machine() -> Result<kasa_mcp::machines::Machine> {
+    let port = std::env::var("KASASPACE_MCP_PORT")
+        .map_err(|_| anyhow::anyhow!("이 기기 HTTP 창구가 안 떠 있어요"))?;
+    Ok(kasa_mcp::machines::Machine {
+        label: kasa_mcp::machines::self_label(),
+        machine_id: None,
+        base: format!("http://127.0.0.1:{port}"),
+        host: String::new(),
+        kvm: None,
+        roots: Vec::new(),
+        home: false,
+        ssh: None,
+        chrome_port: None,
+        key: None,
+        tunneled: false,
+        guest: false,
+    })
+}
+
 impl App {
     /// Drain a PtySession's screen-update channel into shared workspace
     /// state. Used both by `start_pty` (initial pane) and by
@@ -998,8 +1017,13 @@ impl App {
             &outer,
             crate::settings_room::SettingsMutation::RemoteMirror,
         )?;
-        let m = kasa_mcp::machines::find(label)
-            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        let m = match kasa_mcp::machines::find(label) {
+            Some(m) => m,
+            // 이 기기의 창 밖 셸 — 명부엔 제 자신이 없으니 제 HTTP 창구로 붙는다. 보기 연결이라
+            // 폰이 쥔 셸 크기를 안 건드리고, 셸이면 거울 셸처럼 명령 묶음으로 그려진다.
+            None if label == kasa_mcp::machines::self_label() => self_view_machine()?,
+            None => anyhow::bail!("기계 {label} 가 명부(machines.json)에 없다"),
+        };
         if let Some(existing) = kasa_pty::live_sessions().into_iter().find(|id| {
             kasa_mcp::remote::remote_info(id)
                 .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)

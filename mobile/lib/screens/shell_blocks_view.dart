@@ -136,7 +136,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
       );
       if (!mounted) return;
       if (answer == null) {
-        if (!_feed.loaded) setState(() => _error = '데스크톱 칸을 못 찾았어요');
+        if (!_feed.loaded) setState(() => _error = '$_where을 못 찾았어요');
         return;
       }
       setState(() {
@@ -182,6 +182,9 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
       _fetching.remove(b.id);
     }
   }
+
+  /// 명령이 도는 곳 — 데스크톱 칸이거나, 창 밖 셸 그 자체.
+  String get _where => widget.pane.isWebShell ? '이 셸' : '데스크톱 칸';
 
   void _copy(ShellBlock b) {
     Clipboard.setData(ClipboardData(text: '\$ ${b.cmd}\n${b.plain}'));
@@ -233,7 +236,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
             if (_feed.blocks.isEmpty)
               Center(
                 child: TwinsNotice(
-                  text: '아직 친 명령이 없어요\n아래에서 치면 데스크톱 칸에서 돌아요',
+                  text: '아직 친 명령이 없어요\n아래에서 치면 $_where에서 돌아요',
                 ),
               )
             else
@@ -270,8 +273,8 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
   Widget _shrunkGrid(BuildContext context, TermSession s, TerminalPalette palette) {
     final theme = Theme.of(context);
     final why = _feed.integration
-        ? '전체 화면 프로그램이 도는 중이에요 · 데스크톱 칸을 줄여 보여요(두 손가락으로 키워 봐요)'
-        : '이 칸은 셸 통합이 없어 명령을 못 나눠요 · 데스크톱 칸을 줄여 보여요(두 손가락으로 키워 봐요)';
+        ? '전체 화면 프로그램이 도는 중이에요 · $_where을 줄여 보여요(두 손가락으로 키워 봐요)'
+        : '이 칸은 셸 통합이 없어 명령을 못 나눠요 · $_where을 줄여 보여요(두 손가락으로 키워 봐요)';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

@@ -356,7 +356,7 @@ void main() {
     await _close(tester);
   });
 
-  testWidgets('폰이 연 웹 셸은 터미널뿐, 보기 단추가 없다', (tester) async {
+  testWidgets('창 밖 셸도 데스크톱 셸처럼 명령 쪽이 먼저다', (tester) async {
     const web = Pane(
       id: 'web-1',
       name: '',
@@ -366,10 +366,10 @@ void main() {
       cwd: '/m',
     );
     await _open(tester, view: null, pane: web);
-    expect(_page(tester), 0);
-    expect(find.byTooltip('터미널로 보기'), findsNothing);
+    expect(_page(tester), 1);
+    expect(find.byType(ShellBlocksView), findsOneWidget);
     expect(find.byTooltip('대화로 보기'), findsNothing);
-    expect(_actions(tester).last, 'pane 닫기');
+    expect(_actions(tester), ['터미널로 보기', 'pane 닫기']);
     await _close(tester);
   });
 

@@ -57,6 +57,7 @@ class HubSection {
     this.route,
     required this.online,
     required this.rooms,
+    this.webShells = const [],
   });
 
   /// null 이면 주소가 가리키는 그 기계.
@@ -66,6 +67,9 @@ class HubSection {
   final String? route;
   final bool online;
   final List<HubRoom> rooms;
+
+  /// 어느 방에도 없는 셸 — 웹 터미널·도구가 연 셸이라 데스크톱 방 밖에 산다(데스크톱 사이드바의 「창 밖 셸」).
+  final List<Pane> webShells;
 
   /// 학생 수 — 학생이 안 도는 셸은 세지 않는다.
   int get studentCount =>
@@ -559,6 +563,7 @@ class HubModel extends ChangeNotifier {
           machine: null,
           online: true,
           rooms: rooms(root, _rootLabels, _rootLayouts),
+          webShells: webShells(root),
         ),
       for (final m in _machines)
         HubSection(
@@ -572,6 +577,9 @@ class HubModel extends ChangeNotifier {
                   _remoteLayouts[m.route] ?? const [],
                 )
               : rooms(m.panes, const []),
+          webShells: m.online
+              ? webShells(_remotePanes[m.route] ?? m.panes)
+              : const [],
         ),
     ];
     _noteWaiting(next);
@@ -701,6 +709,8 @@ class HubModel extends ChangeNotifier {
       // 거울(다른 기기 방의 보기 창)은 몸통이 저쪽이라 저쪽 기기 절에 따로 온다 —
       // 여기 실으면 맥북 학생이 맥미니 절에, 맥미니 학생이 맥북 절에 겹쳐 뜬다(09-17).
       if (p.mirrorOf != null && p.mirrorOf!.isNotEmpty) continue;
+      // 창 밖 셸은 창 번호가 없어 0 으로 읽힌다 — 첫 방에 섞이지 않게 [webShells] 로 뺀다.
+      if (p.isWebShell) continue;
       byWindow.putIfAbsent(p.window, () => []).add(p);
     }
     final layoutOf = {for (final l in layouts) l.idx: l};
@@ -721,6 +731,13 @@ class HubModel extends ChangeNotifier {
         ),
     ];
   }
+
+  /// 창 밖 셸 — 방 안 순서처럼 내 차례·하는 중을 앞에.
+  @visibleForTesting
+  static List<Pane> webShells(List<Pane> panes) => [
+    for (final p in panes)
+      if (p.isWebShell && !p.closed && (p.mirrorOf ?? '').isEmpty) p,
+  ]..sort((a, b) => _rank(a).compareTo(_rank(b)));
 
   @override
   void dispose() {

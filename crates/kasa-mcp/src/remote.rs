@@ -257,8 +257,15 @@ pub fn cached_fresh_pane(local_id: &str) -> Option<serde_json::Value> {
 
 /// 캐시가 없거나 구 호스트가 실행 상태를 안 주는 것은 종료 증거가 아니다.
 pub fn cached_agent_running(local_id: &str) -> Option<bool> {
-    let row = cached_pane(local_id)?;
-    row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()))
+    if let Some(row) = cached_pane(local_id) {
+        return row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()));
+    }
+    // 이 기기의 창 밖 셸을 제 창구로 본 탭 — 명부 캐시에 제 자신은 없으니 세션을 직접 본다.
+    let info = remote_info(local_id)?;
+    if info.label != crate::machines::self_label() {
+        return None;
+    }
+    kasa_pty::lookup_session(&info.remote_id).map(|s| s.active_agent().is_some())
 }
 
 /// 이 pane 이 거울 연결인가. 구 호스트에서는 기존 읽기 미러로 남는다.

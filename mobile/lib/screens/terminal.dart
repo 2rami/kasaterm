@@ -403,8 +403,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 대화 기록이 있는 창인가 — 셸·웹 셸엔 학생이 없어 격자만 있다.
   static bool _canChat(Pane p) => !p.isShell && !p.isWebShell;
 
-  /// 데스크톱 셸 칸 — 둘째 쪽이 명령 묶음(`ShellBlocksView`)이다. 폰이 연 웹 셸은 폰 제 터미널이라 뺀다.
-  static bool _canBlocks(Pane p) => p.isShell && !p.isWebShell;
+  /// 셸 칸 — 둘째 쪽이 명령 묶음(`ShellBlocksView`)이다. 창 밖 셸(`web-`)도 같다(워프처럼 치고 결과를 카드로).
+  static bool _canBlocks(Pane p) => p.isShell;
 
   /// 터미널 옆에 둘째 쪽(대화·명령 묶음)이 있나.
   static bool _hasSecond(Pane p) => _canChat(p) || _canBlocks(p);

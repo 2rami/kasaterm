@@ -370,6 +370,33 @@ class _HubScreenState extends State<HubScreen> {
           ),
         );
       }
+      // 웹 터미널·도구가 연 셸은 데스크톱 방 밖에 산다 — 첫 방에 섞으면 정체 모를 「셸」로 보인다.
+      if (s.webShells.isNotEmpty) {
+        rooms.add(
+          _RoomBox(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _RoomHeader(
+                  title: '창 밖 셸 · 데스크톱 창에 없는 셸',
+                  icon: icon,
+                  color: tint,
+                ),
+                for (final (i, p) in s.webShells.indexed)
+                  Appear(
+                    key: ValueKey('web-${p.machine}-${p.id}'),
+                    delayIndex: i,
+                    child: _PaneTile(
+                      server: widget.server,
+                      pane: p,
+                      onTap: s.online ? () => _open(p) : null,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      }
       if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
     }
     // 당기면 쌍둥이가 내려온다 — 머티리얼 빙글이 대신(design.md 「쌍둥이 결」).
