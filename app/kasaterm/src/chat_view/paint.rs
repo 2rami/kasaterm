@@ -78,13 +78,17 @@ struct Run {
 
 #[derive(Clone, Copy, Debug)]
 enum DecoKind {
-    /// 코드 칸 바탕.
+    /// 코드 칸 바탕 + 테두리.
     Code,
     /// 글 사이 `code` 바탕.
     Chip,
     /// 인용 왼쪽 줄.
     Bar,
     Rule,
+    /// 표 바깥 테두리.
+    Frame,
+    /// 표 머리 줄 바탕.
+    Shade,
 }
 
 #[derive(Clone, Debug)]
@@ -136,7 +140,8 @@ impl Pen<'_> {
     fn flush(&mut self) {
         let Some((run, w)) = self.cur.take() else { return };
         if run.code {
-            self.out.decos.push(Deco { x: run.x - 3.0, y: run.y - 1.0, w: w + 6.0, h: self.line - 2.0, kind: DecoKind::Chip });
+            // 글자 높이에 맞춰 가운데 — 줄 높이로 깔면 줄이 넓은 본문에서 칩이 아래로 처진다.
+            self.out.decos.push(Deco { x: run.x - 3.0, y: run.y - 3.0, w: w + 6.0, h: run.size + 7.0, kind: DecoKind::Chip });
         }
         self.out.w = self.out.w.max(run.x + w + if run.code { 3.0 } else { 0.0 });
         self.out.runs.push(run);
@@ -230,14 +235,17 @@ fn flow_plain(g: &mut gpu::GpuRenderer, out: &mut Block, text: &str, x0: f32, y0
     pen.finish(y0)
 }
 
+/// 본문 줄 높이 — 글 14 에 22.
+const LINE: f32 = 22.0;
+
 fn body_style(tone: Tone) -> Style {
-    Style { size: 12.0, bold: false, code: false, tone }
+    Style { size: 14.0, bold: false, code: false, tone }
 }
 
-/// 코드 칸 — 고정폭 11, 줄 16, 안 여백 8. 줄은 글자 단위로 접는다(코드에 낱말 경계가 없다).
-fn code_block(g: &mut gpu::GpuRenderer, out: &mut Block, code: &str, y0: f32, max_w: f32, max_lines: usize) -> f32 {
-    let st = Style { size: 11.0, bold: false, code: true, tone: Tone::Text };
-    let inner = (max_w - 16.0).max(20.0);
+/// 코드 칸 — 고정폭 12.5, 줄 19, 안 여백 12, 언어가 있으면 머리 줄 24. 줄은 글자 단위로 접는다(코드에 낱말 경계가 없다).
+fn code_block(g: &mut gpu::GpuRenderer, out: &mut Block, code: &str, lang: &str, y0: f32, max_w: f32, max_lines: usize) -> f32 {
+    let st = Style { size: 12.5, bold: false, code: true, tone: Tone::Text };
+    let inner = (max_w - 24.0).max(20.0);
     let mut lines: Vec<String> = Vec::new();
     for raw in code.trim_end_matches('\n').split('\n') {
         let raw = raw.replace('\t', "    ");
@@ -260,21 +268,76 @@ fn code_block(g: &mut gpu::GpuRenderer, out: &mut Block, code: &str, y0: f32, ma
     if hidden > 0 {
         lines.push(format!("… {hidden}줄 더"));
     }
-    let mut widest: f32 = 0.0;
-    for (i, line) in lines.iter().enumerate() {
-        let w = measure(g, line, &st);
-        widest = widest.max(w);
-        let tone = if hidden > 0 && i == lines.len() - 1 { Tone::Mute } else { Tone::Text };
-        out.runs.push(Run { x: 8.0, y: y0 + 6.0 + i as f32 * 16.0 + 2.0, text: line.clone(), size: 11.0, bold: false, code: true, tone });
+    let lang = lang.trim();
+    // 머리 줄이 있으면 그 줄이 위 여백을 대신한다 — 따로 더하면 언어 이름과 첫 줄 사이가 휑하다.
+    let (head, top) = if lang.is_empty() { (0.0, 12.0) } else { (24.0, 2.0) };
+    if head > 0.0 {
+        out.runs.push(Run { x: 12.0, y: y0 + 7.0, text: lang.to_string(), size: 11.0, bold: false, code: false, tone: Tone::Mute });
     }
-    let h = lines.len() as f32 * 16.0 + 12.0;
-    let w = (widest + 16.0).min(max_w);
-    out.decos.push(Deco { x: 0.0, y: y0, w, h, kind: DecoKind::Code });
-    out.w = out.w.max(w);
+    for (i, line) in lines.iter().enumerate() {
+        let tone = if hidden > 0 && i == lines.len() - 1 { Tone::Mute } else { Tone::Text };
+        out.runs.push(Run { x: 12.0, y: y0 + head + top + i as f32 * 19.0 + 2.0, text: line.clone(), size: 12.5, bold: false, code: true, tone });
+    }
+    let h = head + top + lines.len() as f32 * 19.0 + 12.0;
+    // Claude 앱처럼 열 폭을 다 쓴다 — 글 폭에 맞추면 칸마다 오른쪽 끝이 들쭉날쭉하다.
+    out.decos.push(Deco { x: 0.0, y: y0, w: max_w, h, kind: DecoKind::Code });
+    out.w = out.w.max(max_w);
     h
 }
 
-/// 말풍선 본문 — 마크다운을 문단·제목·목록·인용·코드로 편다. 표는 칸을 `│` 로 이은 줄.
+/// 표 — 바깥 테두리·칸 선·머리 바탕, 열 폭은 내용 폭에 비례(최소 48), 칸 안에서 접는다.
+fn table_block(g: &mut gpu::GpuRenderer, out: &mut Block, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSpan>>], y0: f32, max_w: f32, tone: Tone) -> f32 {
+    const PAD_X: f32 = 10.0;
+    const PAD_Y: f32 = 6.0;
+    const TLINE: f32 = 20.0;
+    let lines: Vec<&[Vec<MdSpan>]> = std::iter::once(head).chain(rows.iter().map(Vec::as_slice)).filter(|r| !r.is_empty()).collect();
+    let cols = lines.iter().map(|r| r.len()).max().unwrap_or(0);
+    if cols == 0 {
+        return 0.0;
+    }
+    let style = |bold: bool| Style { size: 13.0, bold, code: false, tone };
+    let mut natural = vec![0.0f32; cols];
+    for (ri, row) in lines.iter().enumerate() {
+        for (ci, cell) in row.iter().enumerate() {
+            let w: f32 = cell.iter().map(|s| measure(g, &s.text, &span_style(s, &style(ri == 0)))).sum();
+            natural[ci] = natural[ci].max(w + PAD_X * 2.0);
+        }
+    }
+    let total: f32 = natural.iter().sum();
+    let widths: Vec<f32> = if total <= max_w { natural } else { natural.iter().map(|w| (w / total * max_w).max(48.0)).collect() };
+    let table_w = widths.iter().sum::<f32>().min(max_w);
+    let mut y = y0;
+    for (ri, row) in lines.iter().enumerate() {
+        let st = style(ri == 0);
+        // 머리 바탕은 그 줄의 글·칩보다 먼저 깔려야 한다 — 줄을 편 뒤 자리를 알고 앞에 끼운다.
+        let deco_at = out.decos.len();
+        let mut row_h = TLINE;
+        let mut x = 0.0;
+        for (ci, cw) in widths.iter().enumerate() {
+            if let Some(cell) = row.get(ci) {
+                row_h = row_h.max(flow_spans(g, out, cell, x + PAD_X, y + PAD_Y, (cw - PAD_X * 2.0).max(10.0), &st, TLINE));
+            }
+            x += cw;
+        }
+        let h = row_h + PAD_Y * 2.0;
+        if ri == 0 {
+            out.decos.insert(deco_at, Deco { x: 1.0, y: y + 1.0, w: table_w - 2.0, h: h - 1.0, kind: DecoKind::Shade });
+        } else {
+            out.decos.push(Deco { x: 0.0, y, w: table_w, h: 1.0, kind: DecoKind::Rule });
+        }
+        y += h;
+    }
+    let mut x = 0.0;
+    for cw in &widths[..widths.len() - 1] {
+        x += cw;
+        out.decos.push(Deco { x, y: y0, w: 1.0, h: y - y0, kind: DecoKind::Rule });
+    }
+    out.decos.push(Deco { x: 0.0, y: y0, w: table_w, h: y - y0, kind: DecoKind::Frame });
+    out.w = out.w.max(table_w);
+    y - y0
+}
+
+/// 답·말풍선 본문 — 마크다운을 문단·제목·목록·인용·코드·표로 편다.
 fn markdown_block(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, tone: Tone) -> Block {
     let mut out = Block::default();
     let (blocks, _) = crate::parse_markdown(text);
@@ -282,66 +345,49 @@ fn markdown_block(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, tone: Tone) 
     let body = body_style(tone);
     for (i, block) in blocks.iter().enumerate() {
         if i > 0 {
-            y += 6.0;
+            y += 10.0;
         }
         y += match block {
             MdBlock::Heading { level, spans } => {
                 let big = *level <= 2;
-                let st = Style { size: if big { 14.0 } else { 12.0 }, bold: true, code: false, tone };
-                flow_spans(g, &mut out, spans, 0.0, y, max_w, &st, if big { 22.0 } else { 18.0 })
+                let st = Style { size: if big { 17.0 } else { 14.0 }, bold: true, code: false, tone };
+                flow_spans(g, &mut out, spans, 0.0, y, max_w, &st, if big { 26.0 } else { LINE })
             }
-            MdBlock::Para { spans } => flow_spans(g, &mut out, spans, 0.0, y, max_w, &body, 18.0),
-            MdBlock::Code { code, .. } => code_block(g, &mut out, code, y, max_w, 40),
+            MdBlock::Para { spans } => flow_spans(g, &mut out, spans, 0.0, y, max_w, &body, LINE),
+            MdBlock::Code { code, lang } => code_block(g, &mut out, code, lang, y, max_w, 40),
             MdBlock::ListItem { depth, marker, spans, task } => {
-                let indent = *depth as f32 * 14.0;
+                let indent = *depth as f32 * 18.0;
                 let mark = match task {
                     Some(true) => "☑".to_string(),
                     Some(false) => "☐".to_string(),
                     None => marker.clone(),
                 };
-                let mw = g.measure_chrome_text(&mark, 12.0, false);
-                let lead = mw.max(10.0) + 6.0;
-                out.runs.push(Run { x: indent, y: y + 2.0, text: mark, size: 12.0, bold: false, code: false, tone: Tone::Dim });
-                flow_spans(g, &mut out, spans, indent + lead, y, (max_w - indent - lead).max(20.0), &body, 18.0)
+                let mw = g.measure_chrome_text(&mark, 14.0, false);
+                let lead = mw.max(12.0) + 8.0;
+                out.runs.push(Run { x: indent, y: y + 3.0, text: mark, size: 14.0, bold: false, code: false, tone: Tone::Dim });
+                flow_spans(g, &mut out, spans, indent + lead, y, (max_w - indent - lead).max(20.0), &body, LINE)
             }
             MdBlock::Quote { spans } | MdBlock::Callout { spans, .. } => {
-                let h = flow_spans(g, &mut out, spans, 10.0, y, (max_w - 10.0).max(20.0), &body_style(Tone::Dim), 18.0);
+                let h = flow_spans(g, &mut out, spans, 12.0, y, (max_w - 12.0).max(20.0), &body_style(Tone::Dim), LINE);
                 out.decos.push(Deco { x: 0.0, y, w: 2.0, h, kind: DecoKind::Bar });
                 h
             }
             MdBlock::Rule => {
-                out.decos.push(Deco { x: 0.0, y: y + 6.0, w: max_w, h: 1.0, kind: DecoKind::Rule });
-                13.0
+                out.decos.push(Deco { x: 0.0, y: y + 10.0, w: max_w, h: 1.0, kind: DecoKind::Rule });
+                21.0
             }
             MdBlock::Meta { rows } => {
                 let text = rows.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n");
-                flow_plain(g, &mut out, &text, 0.0, y, max_w, &body_style(Tone::Dim), 18.0)
+                flow_plain(g, &mut out, &text, 0.0, y, max_w, &body_style(Tone::Dim), LINE)
             }
             MdBlock::Image { alt, .. } => {
                 let text = if alt.is_empty() { "(그림)".to_string() } else { format!("(그림) {alt}") };
-                flow_plain(g, &mut out, &text, 0.0, y, max_w, &body_style(Tone::Dim), 18.0)
+                flow_plain(g, &mut out, &text, 0.0, y, max_w, &body_style(Tone::Dim), LINE)
             }
-            MdBlock::Table { head, rows, .. } => {
-                let mut h = 0.0;
-                for (ri, row) in std::iter::once(head).chain(rows.iter()).enumerate() {
-                    if row.is_empty() {
-                        continue;
-                    }
-                    let mut spans: Vec<MdSpan> = Vec::new();
-                    for (ci, cell) in row.iter().enumerate() {
-                        if ci > 0 {
-                            spans.push(MdSpan { text: "  │  ".into(), bold: false, italic: false, code: false, strike: false, link: None });
-                        }
-                        spans.extend(cell.iter().cloned());
-                    }
-                    let st = Style { size: 12.0, bold: ri == 0, code: false, tone };
-                    h += flow_spans(g, &mut out, &spans, 0.0, y + h, max_w, &st, 18.0);
-                }
-                h
-            }
+            MdBlock::Table { head, rows, .. } => table_block(g, &mut out, head, rows, y, max_w, tone),
         };
     }
-    out.h = y.max(18.0);
+    out.h = y.max(LINE);
     out
 }
 
@@ -404,16 +450,60 @@ fn first_line(text: &str) -> &str {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
 
+/// 이어진 도구 묶음을 사람 말 한 줄로 — 「명령 2개 실행 · 파일 1개 수정」. 아이콘은 첫 갈래의 것.
+fn tools_summary(names: &[&str]) -> (&'static str, String) {
+    let kind = |name: &str| -> (&'static str, &'static str) {
+        match super::parse::tool_label(name) {
+            "Bash" | "BashOutput" | "KillShell" | "KillBash" | "Monitor" => ("terminal", "명령"),
+            "Read" | "NotebookRead" => ("file-text", "읽기"),
+            "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ("pencil", "수정"),
+            "Grep" | "Glob" | "LS" => ("folder", "찾기"),
+            "WebFetch" | "WebSearch" => ("globe", "웹"),
+            "Agent" | "Task" => ("users", "서브에이전트"),
+            "TodoWrite" | "TaskCreate" | "TaskUpdate" => ("square-check", "할 일"),
+            _ => ("terminal", "도구"),
+        }
+    };
+    let mut groups: Vec<((&'static str, &'static str), usize)> = Vec::new();
+    for name in names {
+        let k = kind(name);
+        match groups.iter_mut().find(|(g, _)| *g == k) {
+            Some((_, n)) => *n += 1,
+            None => groups.push((k, 1)),
+        }
+    }
+    let words = |(icon, what): (&'static str, &'static str), n: usize| -> String {
+        let _ = icon;
+        match what {
+            "명령" => format!("명령 {n}개 실행"),
+            "읽기" => format!("파일 {n}개 읽음"),
+            "수정" => format!("파일 {n}개 수정"),
+            "찾기" => format!("{n}번 찾음"),
+            "웹" => format!("웹 {n}번"),
+            "서브에이전트" => format!("서브에이전트 {n}개"),
+            "할 일" => "할 일 정리".to_string(),
+            _ => format!("도구 {n}개"),
+        }
+    };
+    let icon = groups.first().map(|((icon, _), _)| *icon).unwrap_or("terminal");
+    let mut parts: Vec<String> = groups.iter().take(3).map(|(k, n)| words(*k, *n)).collect();
+    if groups.len() > 3 {
+        parts.push(format!("외 {}", groups.len() - 3));
+    }
+    (icon, parts.join(" · "))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &HashSet<usize>, col_w: f32, name: &str, working: bool) {
     let items = &feed.conv.items;
     let rows = super::parse::group_rows(items);
     let skip = rows.len().saturating_sub(ROW_CAP);
-    let bubble_max = (col_w * 0.8).min(560.0).max(80.0);
+    let bubble_max = (col_w * 0.75).min(560.0).max(80.0);
     let wbits = col_w.to_bits();
     let mut out: Vec<LRow> = Vec::new();
     let mut y = 0.0;
-    let mut last_speaker: Option<String> = None;
+    // 턴 머리(얼굴·이름)는 학생 쪽 첫 줄 앞에 한 번 — 도구·생각이 끼어도 같은 턴이면 다시 안 선다.
+    let mut header: Option<String> = None;
     let n_rows = rows.len();
     let push = |out: &mut Vec<LRow>, y: &mut f32, h: f32, gap: f32, kind: Kind| {
         if !out.is_empty() {
@@ -422,22 +512,33 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
         out.push(LRow { y: *y, h, kind });
         *y += h;
     };
+    // 머리를 세웠으면 다음 줄은 바짝(4), 이어지는 턴이면 보통 간격.
+    let head = |out: &mut Vec<LRow>, y: &mut f32, header: &mut Option<String>, who: &str, gap: f32| -> f32 {
+        if header.as_deref() == Some(who) {
+            return gap;
+        }
+        *header = Some(who.to_string());
+        push(out, y, 22.0, 18.0, Kind::Name { text: who.to_string() });
+        4.0
+    };
     if skip > 0 {
-        push(&mut out, &mut y, 22.0, 0.0, Kind::Note { icon: "info", text: format!("앞의 {skip}개는 터미널 보기에 있어요") });
+        push(&mut out, &mut y, 24.0, 0.0, Kind::Note { icon: "info", text: format!("앞의 {skip}개는 터미널 보기에 있어요") });
     }
     for (ri, row) in rows.iter().enumerate().skip(skip) {
         match row {
             Row::Tools(run) => {
-                last_speaker = None;
                 let key = run[0];
                 let is_open = open.contains(&key);
                 let failed = run.iter().filter(|&&i| matches!(&items[i], Item::Tool { error: true, .. })).count();
                 let live = working && ri + 1 == n_rows && run.iter().any(|&i| matches!(&items[i], Item::Tool { result: None, .. }));
+                let names: Vec<&str> = run.iter().filter_map(|&i| match &items[i] { Item::Tool { name, .. } => Some(name.as_str()), _ => None }).collect();
+                let (icon, label) = tools_summary(&names);
+                let gap = head(&mut out, &mut y, &mut header, name, 8.0);
                 let detail = run.last().and_then(|&i| match &items[i] {
                     Item::Tool { name, summary, .. } => Some(if summary.is_empty() { tool_label(name).to_string() } else { format!("{} · {summary}", tool_label(name)) }),
                     _ => None,
                 }).unwrap_or_default();
-                push(&mut out, &mut y, 26.0, 6.0, Kind::Fold { key, icon: "terminal", label: format!("도구 {}개", run.len()), detail, open: is_open, failed, live });
+                push(&mut out, &mut y, 28.0, gap, Kind::Fold { key, icon, label, detail, open: is_open, failed, live });
                 if !is_open {
                     continue;
                 }
@@ -450,19 +551,19 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                     };
                     let has_result = result.as_deref().is_some_and(|r| !r.trim().is_empty());
                     let tool_open = has_result && open.contains(&i);
-                    push(&mut out, &mut y, 22.0, 0.0, Kind::Tool { item: i, status, name: tool_label(name).to_string(), summary: summary.clone(), open: tool_open, has_result });
+                    push(&mut out, &mut y, 24.0, 0.0, Kind::Tool { item: i, status, name: tool_label(name).to_string(), summary: summary.clone(), open: tool_open, has_result });
                     if tool_open {
                         let result = result.as_deref().unwrap_or("");
                         let fresh = layout.result_len.get(&i) != Some(&result.len());
                         if fresh || layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
                             let mut b = Block::default();
                             let text = super::parse::strip_ansi(result);
-                            b.h = code_block(g, &mut b, text.trim_end(), 0.0, (col_w - 18.0).max(40.0), 14);
+                            b.h = code_block(g, &mut b, text.trim_end(), "", 0.0, (col_w - 20.0).max(40.0), 14);
                             layout.blocks.insert(i, (wbits, b));
                             layout.result_len.insert(i, result.len());
                         }
                         let h = layout.blocks[&i].1.h;
-                        push(&mut out, &mut y, h, 2.0, Kind::Body { key: i });
+                        push(&mut out, &mut y, h, 4.0, Kind::Body { key: i });
                     }
                 }
             }
@@ -471,13 +572,14 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                 match &items[i] {
                     Item::Bubble { user, text, from, queued, images } => {
                         let mine = *user && from.is_none();
-                        let speaker = if mine { String::new() } else { from.clone().unwrap_or_else(|| name.to_string()) };
-                        let new_speaker = last_speaker.as_deref() != Some(speaker.as_str());
-                        if new_speaker && !mine {
-                            push(&mut out, &mut y, 18.0, 14.0, Kind::Name { text: speaker.clone() });
-                        }
-                        let gap = if new_speaker && mine { 14.0 } else if new_speaker { 2.0 } else { 6.0 };
-                        last_speaker = Some(speaker);
+                        let gap = if mine {
+                            let gap = if header.is_some() || out.last().is_some_and(|r| !matches!(r.kind, Kind::Bubble { mine: true, .. })) { 18.0 } else { 8.0 };
+                            header = None;
+                            gap
+                        } else {
+                            let who = from.clone().unwrap_or_else(|| name.to_string());
+                            head(&mut out, &mut y, &mut header, &who, 8.0)
+                        };
                         if layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
                             let mut body = text.clone();
                             if *images > 0 {
@@ -485,66 +587,65 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
                                 body = if body.is_empty() { mark } else { format!("{mark}\n{body}") };
                             }
                             let tone = if *queued { Tone::Dim } else { Tone::Text };
-                            let b = markdown_block(g, &body, bubble_max - 24.0, tone);
+                            // 내 말만 말풍선에 담는다 — 학생 답은 열 폭을 다 쓰는 글이다(design.md 「학생 대화 보기」).
+                            let max_w = if mine { bubble_max - 28.0 } else { col_w };
+                            let b = markdown_block(g, &body, max_w, tone);
                             layout.blocks.insert(i, (wbits, b));
                         }
                         let b = &layout.blocks[&i].1;
-                        let h = b.h + 16.0 + if *queued { 16.0 } else { 0.0 };
+                        let h = if mine { b.h + 20.0 } else { b.h } + if *queued { 18.0 } else { 0.0 };
                         push(&mut out, &mut y, h, gap, Kind::Bubble { item: i, mine, queued: *queued });
                     }
                     Item::Thinking(text) | Item::Output(text) => {
-                        last_speaker = None;
                         let thinking = matches!(&items[i], Item::Thinking(_));
                         let is_open = open.contains(&i);
                         let (icon, label) = if thinking { ("lightbulb", "생각") } else { ("terminal", "출력") };
-                        push(&mut out, &mut y, 22.0, 6.0, Kind::Fold { key: i, icon, label: label.into(), detail: first_line(text).to_string(), open: is_open, failed: 0, live: false });
+                        let gap = head(&mut out, &mut y, &mut header, name, 8.0);
+                        push(&mut out, &mut y, 28.0, gap, Kind::Fold { key: i, icon, label: label.into(), detail: first_line(text).to_string(), open: is_open, failed: 0, live: false });
                         if is_open {
                             if layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
                                 let mut b = Block::default();
                                 b.h = if thinking {
-                                    flow_plain(g, &mut b, text, 8.0, 6.0, (col_w - 34.0).max(40.0), &Style { size: 11.0, bold: false, code: false, tone: Tone::Dim }, 16.0) + 12.0
+                                    flow_plain(g, &mut b, text, 0.0, 4.0, (col_w - 20.0).max(40.0), &Style { size: 12.5, bold: false, code: false, tone: Tone::Dim }, 19.0) + 8.0
                                 } else {
-                                    code_block(g, &mut b, text, 0.0, (col_w - 18.0).max(40.0), 40)
+                                    code_block(g, &mut b, text, "", 0.0, (col_w - 20.0).max(40.0), 40)
                                 };
                                 layout.blocks.insert(i, (wbits, b));
                             }
                             let h = layout.blocks[&i].1.h;
-                            push(&mut out, &mut y, h, 2.0, Kind::Body { key: i });
+                            push(&mut out, &mut y, h, 4.0, Kind::Body { key: i });
                         }
                     }
                     Item::Command { name: cmd, args } => {
-                        last_speaker = None;
+                        header = None;
                         let text = if cmd == "!" { format!("! {args}") } else { format!("{cmd} {args}").trim().to_string() };
-                        push(&mut out, &mut y, 22.0, 10.0, Kind::Command { text });
+                        push(&mut out, &mut y, 24.0, 12.0, Kind::Command { text });
                     }
                     Item::Answered { pairs: Some(pairs), .. } => {
-                        last_speaker = None;
+                        header = None;
                         if layout.blocks.get(&i).is_none_or(|(w, _)| *w != wbits) {
                             let mut b = Block::default();
-                            let mut by = 8.0;
-                            let inner = (bubble_max - 24.0).max(40.0);
+                            let mut by = 10.0;
+                            let inner = (bubble_max - 28.0).max(40.0);
                             for (q, a) in pairs {
-                                by += flow_plain(g, &mut b, q, 12.0, by, inner, &Style { size: 10.5, bold: false, code: false, tone: Tone::Dim }, 16.0);
-                                by += flow_plain(g, &mut b, a, 12.0, by, inner, &body_style(Tone::Text), 18.0) + 4.0;
+                                by += flow_plain(g, &mut b, q, 14.0, by, inner, &Style { size: 11.0, bold: false, code: false, tone: Tone::Dim }, 17.0);
+                                by += flow_plain(g, &mut b, a, 14.0, by, inner, &body_style(Tone::Text), LINE) + 4.0;
                             }
-                            b.h = by + 4.0;
-                            b.w = b.w + 12.0;
+                            b.h = by + 6.0;
+                            b.w += 14.0;
                             layout.blocks.insert(i, (wbits, b));
                         }
                         let h = layout.blocks[&i].1.h;
-                        push(&mut out, &mut y, h, 10.0, Kind::Answered { key: i });
+                        push(&mut out, &mut y, h, 12.0, Kind::Answered { key: i });
                     }
                     Item::Launch(label) => {
-                        last_speaker = None;
-                        push(&mut out, &mut y, 22.0, 6.0, Kind::Note { icon: "users", text: format!("서브에이전트 · {label}") });
+                        push(&mut out, &mut y, 24.0, 8.0, Kind::Note { icon: "users", text: format!("서브에이전트 · {label}") });
                     }
                     Item::System(text) => {
-                        last_speaker = None;
-                        push(&mut out, &mut y, 22.0, 6.0, Kind::Note { icon: "info", text: text.clone() });
+                        push(&mut out, &mut y, 24.0, 8.0, Kind::Note { icon: "info", text: text.clone() });
                     }
                     Item::Interrupted => {
-                        last_speaker = None;
-                        push(&mut out, &mut y, 22.0, 6.0, Kind::Note { icon: "octagon-alert", text: "작업을 멈췄어요".into() });
+                        push(&mut out, &mut y, 24.0, 8.0, Kind::Note { icon: "octagon-alert", text: "작업을 멈췄어요".into() });
                     }
                     Item::Tool { .. } | Item::Answered { pairs: None, .. } | Item::Gone => {}
                 }
@@ -553,7 +654,7 @@ fn build(g: &mut gpu::GpuRenderer, layout: &mut Layout, feed: &Feed, open: &Hash
     }
     layout.shown = out.len();
     if working {
-        push(&mut out, &mut y, 22.0, 10.0, Kind::Working);
+        push(&mut out, &mut y, 24.0, 12.0, Kind::Working);
     }
     layout.rows = out;
     layout.height = y;
@@ -584,7 +685,7 @@ fn composer_lines(g: &mut gpu::GpuRenderer, draft: &str, cursor: usize, preedit:
             continue;
         }
         let mut buf = [0u8; 4];
-        let cw = g.measure_chrome_text(ch.encode_utf8(&mut buf), 12.0, false);
+        let cw = g.measure_chrome_text(ch.encode_utf8(&mut buf), 13.0, false);
         if w + cw > width && w > 0.0 {
             lines.push(String::new());
             w = 0.0;
@@ -613,16 +714,24 @@ fn draw_run(g: &mut gpu::GpuRenderer, ox: f32, oy: f32, run: &Run) {
 }
 
 fn draw_block(g: &mut gpu::GpuRenderer, ox: f32, oy: f32, b: &Block, fill: [u8; 4], clip: (f32, f32)) {
-    let code_bg = theme::lerp(fill, theme::text(), 0.07);
+    let chip_bg = theme::lerp(fill, theme::text(), 0.07);
+    let panel_bg = theme::lerp(fill, theme::text(), 0.04);
+    let edge = theme::border_w().max(1.0);
     for d in &b.decos {
         if oy + d.y + d.h < clip.0 || oy + d.y > clip.1 {
             continue;
         }
+        let (dx, dy) = (ox + d.x, oy + d.y);
         match d.kind {
-            DecoKind::Code => g.round_rect_fill(ox + d.x, oy + d.y, d.w, d.h, theme::radius_sm(), code_bg),
-            DecoKind::Chip => g.round_rect_fill(ox + d.x, oy + d.y, d.w, d.h, 3.0, code_bg),
-            DecoKind::Bar => g.rect(ox + d.x, oy + d.y, d.w, d.h, theme::text_mute()),
-            DecoKind::Rule => g.rect(ox + d.x, oy + d.y, d.w, d.h, theme::border()),
+            DecoKind::Code => {
+                g.round_rect_fill(dx, dy, d.w, d.h, theme::radius_md(), panel_bg);
+                g.round_rect_stroke(dx, dy, d.w, d.h, theme::radius_md(), edge, theme::border());
+            }
+            DecoKind::Chip => g.round_rect_fill(dx, dy, d.w, d.h, 4.0, chip_bg),
+            DecoKind::Bar => g.rect(dx, dy, d.w, d.h, theme::text_mute()),
+            DecoKind::Rule => g.rect(dx, dy, d.w, d.h, theme::border()),
+            DecoKind::Shade => g.rect(dx, dy, d.w, d.h, panel_bg),
+            DecoKind::Frame => g.round_rect_stroke(dx, dy, d.w, d.h, theme::radius_sm(), edge, theme::border()),
         }
     }
     for run in &b.runs {
@@ -642,8 +751,8 @@ fn inside(c: (f32, f32), r: Rect) -> bool {
     c.0 >= r.0 && c.0 < r.0 + r.2 && c.1 >= r.1 && c.1 < r.1 + r.3
 }
 
-/// 승인·질문 카드 원문 한 줄 높이.
-const CTX_LINE: f32 = 16.0;
+/// 승인·질문 판 원문 한 줄 높이.
+const CTX_LINE: f32 = 17.0;
 /// 카드에 펴는 원문 줄 상한 — 그 뒤는 「… N줄 더」로 접고 전부는 터미널 보기에서 본다.
 const CTX_MAX: usize = 8;
 
@@ -666,9 +775,9 @@ struct Card {
 impl Card {
     fn height(&self) -> f32 {
         let ctx = self.context.len() as f32 * CTX_LINE + if self.context.is_empty() { 0.0 } else { 6.0 };
-        let title = if self.title.is_empty() { 0.0 } else { 24.0 };
-        let options: f32 = self.options.iter().map(|o| if o.note.is_empty() { 32.0 } else { 46.0 }).sum();
-        10.0 + ctx + title + options + if self.reason_hint.is_some() { 18.0 } else { 0.0 } + 26.0 + 10.0
+        let title = if self.title.is_empty() { 0.0 } else { 26.0 };
+        let options: f32 = self.options.iter().map(|o| if o.note.is_empty() { 36.0 } else { 50.0 }).sum();
+        12.0 + ctx + title + options + if self.reason_hint.is_some() { 18.0 } else { 0.0 } + 26.0 + 12.0
     }
 }
 
@@ -713,12 +822,9 @@ fn card_of(menu: Option<&super::parse::PromptMenu>, live: &ModLive) -> Option<Ca
     })
 }
 
-/// 말풍선 바탕. 말한 쪽 아래 모서리만 3 으로 좁혀 누가 한 말인지 꼬리처럼 읽힌다.
-fn bubble(g: &mut gpu::GpuRenderer, r: Rect, fill: [u8; 4], mine: bool) {
-    let radius = 10.0_f32.min(r.3 / 2.0);
-    g.round_rect_fill(r.0, r.1, r.2, r.3, radius, fill);
-    let x = if mine { r.0 + r.2 - radius } else { r.0 };
-    g.round_rect_fill(x, r.1 + r.3 - radius, radius, radius, 3.0_f32.min(radius / 2.0), fill);
+/// 내 말 말풍선 바탕 — 꼬리 없이 둥글게. 누가 한 말인지는 오른쪽 자리가 말한다.
+fn bubble(g: &mut gpu::GpuRenderer, r: Rect, fill: [u8; 4]) {
+    g.round_rect_fill(r.0, r.1, r.2, r.3, 16.0_f32.min(r.3 / 2.0), fill);
 }
 
 pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, pane: &mut ChatPane, feed: Option<&Feed>) -> Vec<(Hit, Rect)> {
@@ -728,20 +834,21 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         return hits;
     }
     let pad = if w >= 480.0 { 16.0 } else { 10.0 };
-    let col_w = (w - pad * 2.0).min(800.0).max(40.0);
+    let col_w = (w - pad * 2.0).min(760.0).max(40.0);
     let col_x = x + ((w - col_w) / 2.0).floor();
     g.push_clip(x, y, w, h);
 
-    // ── 입력칸(아래 고정) ────────────────────────────────────────────────
-    let inner_w = (col_w - 20.0).max(20.0);
+    // ── 입력 상자(아래 고정) — 글 줄 위, 그 아래 단추 줄 32 ─────────────────
+    let inner_w = (col_w - 28.0).max(20.0);
     let (lines, caret_line, caret_x, pre) = composer_lines(g, &pane.draft, pane.cursor, &slot.preedit, inner_w);
     let shown = lines.len().clamp(1, 6);
     let first = (caret_line + 1).saturating_sub(shown).min(lines.len().saturating_sub(shown));
-    let input_h = 40.0 + (shown - 1) as f32 * 18.0;
-    let composer_h = 10.0 + input_h + 8.0 + 26.0 + 10.0;
+    let text_h = shown as f32 * 20.0;
+    let box_h = 10.0 + text_h + 2.0 + 32.0;
+    let composer_h = 8.0 + box_h + 12.0;
     let comp_y = y + h - composer_h;
 
-    // ── 선택지 카드·기다림 줄 ───────────────────────────────────────────
+    // ── 선택지 판·기다림 줄 ─────────────────────────────────────────────
     let mod_live = pane.mod_live();
     pane.live_painted = pane.live.lock().ok().map(|l| l.clone());
     let working = slot.working || (mod_live.live && (mod_live.turn_open || mod_live.compacting));
@@ -786,12 +893,13 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         Some(_) => None,
     };
     if let Some((title, body)) = &empty {
-        let tw = g.measure_chrome_text(title, 14.0, true);
-        let cy = list_y + (list_h / 2.0 - 40.0).max(0.0);
-        label(g, col_x + (col_w - tw) / 2.0, cy, title, 14.0, theme::text(), true);
+        let tw = g.measure_chrome_text(title, 15.0, true);
+        let cy = list_y + (list_h / 2.0 - 44.0).max(0.0);
+        label(g, col_x + (col_w - tw) / 2.0, cy, title, 15.0, theme::text(), true);
         let mut b = Block::default();
-        let bw = col_w.min(360.0);
-        let bh = if body.is_empty() { 0.0 } else { flow_plain(g, &mut b, body, 0.0, 0.0, bw, &body_style(Tone::Dim), 18.0) };
+        let bw = col_w.min(380.0);
+        let body_st = Style { size: 13.0, bold: false, code: false, tone: Tone::Dim };
+        let bh = if body.is_empty() { 0.0 } else { flow_plain(g, &mut b, body, 0.0, 0.0, bw, &body_st, 20.0) };
         // 줄마다 가운데로 — 왼쪽 맞춤이면 둘째 줄이 제목 아래에서 어긋나 보인다.
         let mut ends: Vec<(f32, f32)> = Vec::new();
         for r in &b.runs {
@@ -807,8 +915,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             }
         }
         let bx = col_x + (col_w - bw) / 2.0;
-        draw_block(g, bx, cy + 26.0, &b, theme::pane_bg(), (f32::MIN, f32::MAX));
-        let btn = (col_x + (col_w - 110.0) / 2.0, cy + 34.0 + bh, 110.0, 26.0);
+        draw_block(g, bx, cy + 28.0, &b, theme::pane_bg(), (f32::MIN, f32::MAX));
+        let btn = (col_x + (col_w - 110.0) / 2.0, cy + 40.0 + bh, 110.0, 26.0);
         native_controls::text_button(g, btn, cursor, "터미널로 보기", native_controls::Style::default());
         hits.push((Hit::Terminal, btn));
         pane.scroll_max = 0.0;
@@ -818,12 +926,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         let content_h = layout.height;
         pane.scroll_max = (content_h + 16.0 - list_h).max(0.0);
         pane.scroll = pane.scroll.clamp(0.0, pane.scroll_max);
-        // 아래에 붙여 쌓는다 — 새 말이 입력칸 바로 위에 선다(대화 앱과 같은 자리).
+        // 아래에 붙여 쌓는다 — 새 말이 입력 상자 바로 위에 선다(대화 앱과 같은 자리).
         let top = list_y + list_h - 8.0 - content_h + pane.scroll;
         g.push_clip(x, list_y, w, list_h);
-        let mine_fill = theme::lerp(theme::pane_bg(), theme::accent(), 0.22);
-        let their_fill = theme::lerp(theme::pane_bg(), theme::text(), 0.07);
+        let mine_fill = theme::lerp(theme::pane_bg(), theme::text(), 0.08);
         let clip = (list_y, list_bottom);
+        let in_list = |c: (f32, f32)| inside(c, (x, list_y, w, list_h));
         for row in &layout.rows {
             let ry = top + row.y;
             if ry + row.h < list_y || ry > list_bottom {
@@ -831,69 +939,76 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             }
             match &row.kind {
                 Kind::Name { text } => {
-                    let t = crate::info::fit_text(g, text, col_w, 10.5, false);
-                    label(g, col_x + 2.0, ry + 3.0, &t, 10.5, theme::text_dim(), false);
+                    // 얼굴 그림은 자르기를 안 타고 위에 얹힌다 — 줄이 목록 안에 다 들어올 때만 그린다.
+                    let face = ry + 3.0 >= list_y && ry + 19.0 <= list_bottom && crate::sprites::draw_student_face(g, text, col_x, ry + 3.0, 16.0);
+                    let nx = col_x + if face { 22.0 } else { 0.0 };
+                    let t = crate::info::fit_text(g, text, (col_x + col_w - nx).max(0.0), 12.0, true);
+                    label(g, nx, ry + 4.0, &t, 12.0, theme::text_dim(), true);
                 }
                 Kind::Bubble { item, mine, queued } => {
                     let Some((_, b)) = layout.blocks.get(item) else { continue };
-                    let bw = (b.w + 24.0).max(36.0);
-                    let bh = row.h - if *queued { 16.0 } else { 0.0 };
-                    let bx = if *mine { col_x + col_w - bw } else { col_x };
-                    let fill = if *queued {
-                        theme::lerp(theme::pane_bg(), theme::attention(), 0.12)
-                    } else if *mine {
-                        mine_fill
+                    if *mine {
+                        let bw = (b.w + 28.0).max(40.0);
+                        let bh = row.h - if *queued { 18.0 } else { 0.0 };
+                        let bx = col_x + col_w - bw;
+                        let fill = if *queued { theme::lerp(theme::pane_bg(), theme::attention(), 0.12) } else { mine_fill };
+                        let r = (bx, ry, bw, bh);
+                        bubble(g, r, fill);
+                        draw_block(g, bx + 14.0, ry + 10.0, b, fill, clip);
+                        if *queued {
+                            let t = "예약 · 지금 일이 끝나면 읽어요";
+                            let tw = g.measure_chrome_text(t, 11.0, false);
+                            label(g, bx + bw - tw, ry + bh + 3.0, t, 11.0, theme::text_mute(), false);
+                        }
+                        // 올리면 옆에 복사 — 글 고르기가 없어 이것이 꺼내는 길이다.
+                        let cr = (bx - 30.0, ry, 26.0, 26.0);
+                        if cr.0 >= col_x - pad + 2.0 && in_list(cursor) && (inside(cursor, r) || inside(cursor, cr)) {
+                            native_controls::icon_button(g, cr, cursor, "copy", native_controls::Style::default());
+                            hits.push((Hit::Copy(*item), cr));
+                        }
                     } else {
-                        their_fill
-                    };
-                    let r = (bx, ry, bw, bh);
-                    bubble(g, r, fill, *mine);
-                    draw_block(g, bx + 12.0, ry + 8.0, b, fill, clip);
-                    if *queued {
-                        let t = "예약 · 지금 일이 끝나면 읽어요";
-                        let tw = g.measure_chrome_text(t, 10.5, false);
-                        label(g, bx + bw - tw, ry + bh + 2.0, t, 10.5, theme::text_mute(), false);
-                    }
-                    // 올리면 옆에 복사 — 말풍선 안 글은 고르기가 없어 이것이 꺼내는 길이다.
-                    let hover = inside(cursor, r) && inside(cursor, (x, list_y, w, list_h));
-                    let cr = if *mine { (bx - 28.0, ry, 26.0, 26.0) } else { (bx + bw + 2.0, ry, 26.0, 26.0) };
-                    let room = cr.0 >= col_x - pad + 2.0 && cr.0 + cr.2 <= col_x + col_w + pad - 2.0;
-                    if room && (hover || inside(cursor, cr)) {
-                        native_controls::icon_button(g, cr, cursor, "copy", native_controls::Style::default());
-                        hits.push((Hit::Copy(*item), cr));
+                        draw_block(g, col_x, ry, b, theme::pane_bg(), clip);
+                        let r = (col_x, ry, col_w, row.h);
+                        let cr = (col_x + col_w - 26.0, ry, 26.0, 26.0);
+                        if in_list(cursor) && inside(cursor, r) {
+                            native_controls::icon_button(g, cr, cursor, "copy", native_controls::Style::default());
+                            hits.push((Hit::Copy(*item), cr));
+                        }
                     }
                 }
                 Kind::Fold { key, icon, label: name, detail, open, failed, live } => {
                     let r = (col_x, ry, col_w, row.h);
-                    let hover = inside(cursor, r);
-                    if hover {
-                        g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
-                        g.hover_pointer = true;
-                    }
+                    let hover = inside(cursor, r) && in_list(cursor);
+                    g.hover_pointer |= hover;
                     let mid = ry + row.h / 2.0;
-                    g.queue_icon(if *open { "chevron-down" } else { "chevron-right" }, col_x + 4.0, mid - 6.0, 12.0, theme::text_mute());
-                    g.queue_icon(icon, col_x + 20.0, mid - 6.0, 12.0, theme::text_dim());
-                    let mut tx = col_x + 38.0;
-                    label(g, tx, mid - 6.5, name, 11.0, theme::text_dim(), false);
-                    tx += g.measure_chrome_text(name, 11.0, false) + 8.0;
+                    g.queue_icon(icon, col_x, mid - 6.5, 13.0, theme::text_mute());
+                    let mut tx = col_x + 20.0;
+                    let main = if hover { theme::text() } else { theme::text_dim() };
+                    let n = crate::info::fit_text(g, name, (col_w - 40.0).max(0.0), 12.5, false);
+                    label(g, tx, mid - 7.5, &n, 12.5, main, false);
+                    tx += g.measure_chrome_text(&n, 12.5, false) + 8.0;
                     if *live {
                         let t = "도는 중";
-                        label(g, tx, mid - 6.5, t, 11.0, theme::accent(), false);
-                        tx += g.measure_chrome_text(t, 11.0, false) + 8.0;
+                        label(g, tx, mid - 7.0, t, 12.0, theme::accent(), false);
+                        tx += g.measure_chrome_text(t, 12.0, false) + 8.0;
                     }
                     if *failed > 0 {
                         let t = format!("실패 {failed}");
-                        label(g, tx, mid - 6.5, &t, 11.0, theme::danger(), false);
-                        tx += g.measure_chrome_text(&t, 11.0, false) + 8.0;
+                        label(g, tx, mid - 7.0, &t, 12.0, theme::danger(), false);
+                        tx += g.measure_chrome_text(&t, 12.0, false) + 8.0;
                     }
-                    let d = crate::info::fit_text(g, detail, (col_x + col_w - 8.0 - tx).max(0.0), 11.0, false);
-                    label(g, tx, mid - 6.5, &d, 11.0, theme::text_mute(), false);
+                    let d = crate::info::fit_text(g, detail, (col_x + col_w - 20.0 - tx).max(0.0), 12.0, false);
+                    if !d.is_empty() {
+                        label(g, tx, mid - 7.0, &d, 12.0, theme::text_mute(), false);
+                        tx += g.measure_chrome_text(&d, 12.0, false) + 6.0;
+                    }
+                    g.queue_icon(if *open { "chevron-down" } else { "chevron-right" }, tx, mid - 6.0, 12.0, theme::text_mute());
                     hits.push((Hit::Fold(*key), r));
                 }
                 Kind::Tool { item, status, name, summary, open, has_result } => {
-                    let r = (col_x + 18.0, ry, col_w - 18.0, row.h);
+                    let r = (col_x + 20.0, ry, col_w - 20.0, row.h);
                     let mid = ry + row.h / 2.0;
-                    if *has_result && inside(cursor, r) {
+                    if *has_result && inside(cursor, r) && in_list(cursor) {
                         g.round_rect_fill(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
                         g.hover_pointer = true;
                     }
@@ -904,12 +1019,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                     };
                     g.queue_icon(icon, r.0 + 4.0, mid - 6.0, 12.0, color);
                     let nx = r.0 + 22.0;
-                    let nm = crate::info::fit_text(g, name, (r.2 * 0.4).max(0.0), 11.0, false);
-                    label(g, nx, mid - 6.5, &nm, 11.0, theme::text(), false);
-                    let sx = nx + g.measure_chrome_text(&nm, 11.0, false) + 8.0;
+                    let nm = crate::info::fit_text(g, name, (r.2 * 0.4).max(0.0), 12.0, false);
+                    label(g, nx, mid - 7.0, &nm, 12.0, theme::text(), false);
+                    let sx = nx + g.measure_chrome_text(&nm, 12.0, false) + 8.0;
                     let right = r.0 + r.2 - if *has_result { 22.0 } else { 6.0 };
-                    let s = crate::info::fit_text(g, summary, (right - sx).max(0.0), 11.0, false);
-                    label(g, sx, mid - 6.5, &s, 11.0, theme::text_dim(), false);
+                    let sm = crate::info::fit_text(g, summary, (right - sx).max(0.0), 12.0, false);
+                    label(g, sx, mid - 7.0, &sm, 12.0, theme::text_dim(), false);
                     if *has_result {
                         g.queue_icon(if *open { "chevron-up" } else { "chevron-down" }, r.0 + r.2 - 18.0, mid - 6.0, 12.0, theme::text_mute());
                         hits.push((Hit::Tool(*item), r));
@@ -917,38 +1032,36 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
                 }
                 Kind::Body { key } => {
                     if let Some((_, b)) = layout.blocks.get(key) {
-                        draw_block(g, col_x + 18.0, ry, b, theme::pane_bg(), clip);
+                        draw_block(g, col_x + 20.0, ry, b, theme::pane_bg(), clip);
                     }
                 }
                 Kind::Command { text } => {
-                    let tw = g.measure_code_text(text, 11.0).min(col_w - 16.0);
-                    let r = (col_x + col_w - tw - 16.0, ry, tw + 16.0, row.h);
+                    let tw = g.measure_code_text(text, 12.0).min(col_w - 20.0);
+                    let r = (col_x + col_w - tw - 20.0, ry, tw + 20.0, row.h);
                     g.round_rect_stroke(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::border_w().max(1.0), theme::border());
                     g.push_clip(r.0, r.1, r.2, r.3);
-                    g.draw_code_text(r.0 + 8.0, ry + 5.0, text, 11.0, theme::text_dim());
+                    g.draw_code_text(r.0 + 10.0, ry + 5.5, text, 12.0, theme::text_dim());
                     g.pop_clip();
                 }
                 Kind::Answered { key } => {
                     if let Some((_, b)) = layout.blocks.get(key) {
-                        let r = (col_x, ry, (b.w + 12.0).min(col_w), row.h);
-                        g.round_rect_stroke(r.0, r.1, r.2, r.3, 10.0, theme::border_w().max(1.0), theme::border());
+                        let r = (col_x, ry, (b.w + 14.0).min(col_w), row.h);
+                        g.round_rect_stroke(r.0, r.1, r.2, r.3, 12.0, theme::border_w().max(1.0), theme::border());
                         draw_block(g, col_x, ry, b, theme::pane_bg(), clip);
                     }
                 }
                 Kind::Working => {
                     let text = format!("{} · {}", slot.name, mod_live.doing().unwrap_or_else(|| "작업 중".into()));
-                    let t = crate::info::fit_text(g, &text, (col_w - 24.0).max(0.0), 10.5, false);
-                    let tw = g.measure_chrome_text(&t, 10.5, false) + 18.0;
-                    let nx = col_x + (col_w - tw) / 2.0;
-                    g.queue_icon("sparkles", nx, ry + 5.0, 12.0, theme::accent());
-                    label(g, nx + 18.0, ry + 4.5, &t, 10.5, theme::text_dim(), false);
+                    let t = crate::info::fit_text(g, &text, (col_w - 24.0).max(0.0), 12.0, false);
+                    g.queue_icon("sparkles", col_x, ry + 5.5, 13.0, theme::accent());
+                    label(g, col_x + 20.0, ry + 5.0, &t, 12.0, theme::text_dim(), false);
                 }
                 Kind::Note { icon, text } => {
-                    let t = crate::info::fit_text(g, text, (col_w - 24.0).max(0.0), 10.5, false);
-                    let tw = g.measure_chrome_text(&t, 10.5, false) + 18.0;
+                    let t = crate::info::fit_text(g, text, (col_w - 24.0).max(0.0), 11.0, false);
+                    let tw = g.measure_chrome_text(&t, 11.0, false) + 18.0;
                     let nx = col_x + (col_w - tw) / 2.0;
-                    g.queue_icon(icon, nx, ry + 5.0, 12.0, theme::text_mute());
-                    label(g, nx + 18.0, ry + 4.5, &t, 10.5, theme::text_mute(), false);
+                    g.queue_icon(icon, nx, ry + 6.0, 12.0, theme::text_mute());
+                    label(g, nx + 18.0, ry + 5.5, &t, 11.0, theme::text_mute(), false);
                 }
             }
         }
@@ -962,20 +1075,20 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         }
     }
 
-    // ── 선택지 카드 ───────────────────────────────────────────────────────
+    // ── 선택지 판 ─────────────────────────────────────────────────────────
     let card_y = comp_y - card_h;
     if let Some(c) = &card {
         let line = if needs_you { theme::attention() } else { theme::accent() };
         g.round_rect_stroke(col_x, card_y, col_w, card_h, theme::radius_md(), theme::border_w().max(1.0), line);
-        let mut cy = card_y + 10.0;
+        let mut cy = card_y + 12.0;
         // TUI 창 안의 줄 그대로 — 머리(도구·질문 이름)는 굵게, 원문은 고정폭으로.
         for (i, text) in c.context.iter().enumerate() {
             if i == 0 {
-                let t = crate::info::fit_text(g, text, col_w - 20.0, 12.0, true);
-                label(g, col_x + 10.0, cy + 1.0, &t, 12.0, theme::text(), true);
+                let t = crate::info::fit_text(g, text, col_w - 24.0, 13.0, true);
+                label(g, col_x + 12.0, cy + 1.0, &t, 13.0, theme::text(), true);
             } else {
-                g.push_clip(col_x + 10.0, cy, col_w - 20.0, CTX_LINE);
-                g.draw_code_text(col_x + 10.0, cy + 2.0, text, 11.0, theme::text_dim());
+                g.push_clip(col_x + 12.0, cy, col_w - 24.0, CTX_LINE);
+                g.draw_code_text(col_x + 12.0, cy + 2.5, text, 12.0, theme::text_dim());
                 g.pop_clip();
             }
             cy += CTX_LINE;
@@ -984,101 +1097,117 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             cy += 6.0;
         }
         if !c.title.is_empty() {
-            let t = crate::info::fit_text(g, &c.title, col_w - 20.0, 12.0, c.context.is_empty());
-            label(g, col_x + 10.0, cy + 3.0, &t, 12.0, theme::text(), c.context.is_empty());
-            cy += 24.0;
+            let t = crate::info::fit_text(g, &c.title, col_w - 24.0, 13.0, c.context.is_empty());
+            label(g, col_x + 12.0, cy + 4.0, &t, 13.0, theme::text(), c.context.is_empty());
+            cy += 26.0;
         }
         for o in &c.options {
-            let oh = if o.note.is_empty() { 26.0 } else { 40.0 };
-            let r = (col_x + 10.0, cy, col_w - 20.0, oh);
+            let oh = if o.note.is_empty() { 30.0 } else { 44.0 };
+            let r = (col_x + 12.0, cy, col_w - 24.0, oh);
             let hover = inside(cursor, r);
             let edge = if o.current { theme::accent() } else if hover { theme::text_dim() } else { theme::border() };
             g.round_rect_stroke(r.0, r.1, r.2, r.3, theme::radius_sm(), theme::border_w().max(1.0), edge);
-            let t = crate::info::fit_text(g, &o.label, r.2 - 20.0, 12.0, o.current);
-            label(g, r.0 + 10.0, r.1 + 6.5, &t, 12.0, if o.current { theme::accent() } else { theme::text() }, o.current);
+            let t = crate::info::fit_text(g, &o.label, r.2 - 24.0, 13.0, o.current);
+            label(g, r.0 + 12.0, r.1 + 7.5, &t, 13.0, if o.current { theme::accent() } else { theme::text() }, o.current);
             if !o.note.is_empty() {
-                let n = crate::info::fit_text(g, &o.note, r.2 - 20.0, 10.5, false);
-                label(g, r.0 + 10.0, r.1 + 22.0, &n, 10.5, theme::text_mute(), false);
+                let n = crate::info::fit_text(g, &o.note, r.2 - 24.0, 11.0, false);
+                label(g, r.0 + 12.0, r.1 + 25.0, &n, 11.0, theme::text_mute(), false);
             }
             g.hover_pointer |= hover;
             hits.push((o.hit.clone(), r));
             cy += oh + 6.0;
         }
         if let Some(deny) = &c.reason_hint {
-            let t = crate::info::fit_text(g, &format!("「{deny}」는 입력칸에 쓴 글을 까닭으로 함께 보내요"), col_w - 20.0, 10.5, false);
-            label(g, col_x + 10.0, cy + 1.0, &t, 10.5, theme::text_mute(), false);
+            let t = crate::info::fit_text(g, &format!("「{deny}」는 입력칸에 쓴 글을 까닭으로 함께 보내요"), col_w - 24.0, 11.0, false);
+            label(g, col_x + 12.0, cy + 1.0, &t, 11.0, theme::text_mute(), false);
             cy += 18.0;
         }
-        let esc = (col_x + 10.0, cy, 90.0, 26.0);
+        let esc = (col_x + 12.0, cy, 90.0, 26.0);
         native_controls::text_button(g, esc, cursor, "취소 esc", native_controls::Style::default());
         hits.push((Hit::Dismiss, esc));
-        let term = (col_x + col_w - 10.0 - 120.0, cy, 120.0, 26.0);
+        let term = (col_x + col_w - 12.0 - 120.0, cy, 120.0, 26.0);
         native_controls::text_button(g, term, cursor, "터미널에서 보기", native_controls::Style::default());
         hits.push((Hit::Terminal, term));
     } else if needs_you {
         let mid = card_y + card_h / 2.0 - 4.0;
         g.queue_icon("message-square-warning", col_x + 2.0, mid - 7.0, 14.0, theme::attention());
         let bw = 110.0;
-        let t = crate::info::fit_text(g, "답을 기다려요 · 고를 것은 터미널 보기에서 확인해요", (col_w - bw - 34.0).max(0.0), 12.0, false);
-        label(g, col_x + 22.0, mid - 7.0, &t, 12.0, theme::text(), false);
+        let t = crate::info::fit_text(g, "답을 기다려요 · 고를 것은 터미널 보기에서 확인해요", (col_w - bw - 34.0).max(0.0), 13.0, false);
+        label(g, col_x + 22.0, mid - 7.5, &t, 13.0, theme::text(), false);
         let r = (col_x + col_w - bw, mid - 13.0, bw, 26.0);
         native_controls::text_button(g, r, cursor, "터미널로 보기", native_controls::Style::default());
         hits.push((Hit::Terminal, r));
     }
 
-    // ── 입력칸 ────────────────────────────────────────────────────────────
-    g.rect(x, comp_y, w, 1.0, theme::border());
-    let box_r = (col_x, comp_y + 10.0, col_w, input_h);
+    // ── 입력 상자 ─────────────────────────────────────────────────────────
+    let box_r = (col_x, comp_y + 8.0, col_w, box_h);
     let edge = if slot.focused { theme::accent() } else { theme::border() };
-    g.round_rect_stroke(box_r.0, box_r.1, box_r.2, box_r.3, theme::radius_sm(), theme::border_w().max(1.0), edge);
-    hits.push((Hit::Composer, box_r));
-    let tx = box_r.0 + 10.0;
-    let ty = box_r.1 + 11.0;
+    g.round_rect_fill(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, theme::pane_bg());
+    g.round_rect_stroke(box_r.0, box_r.1, box_r.2, box_r.3, 14.0, theme::border_w().max(1.0), edge);
+    let tx = box_r.0 + 14.0;
+    let ty = box_r.1 + 10.0 + 3.0;
     if pane.draft.is_empty() && slot.preedit.is_empty() {
         let hint = if slot.mirror { "다른 기기 학생에게 보내기" } else { "메시지 보내기" };
-        label(g, tx, ty, hint, 12.0, theme::text_mute(), false);
+        label(g, tx, ty, hint, 13.0, theme::text_mute(), false);
     }
-    g.push_clip(box_r.0 + 2.0, box_r.1 + 2.0, box_r.2 - 4.0, box_r.3 - 4.0);
+    g.push_clip(box_r.0 + 2.0, box_r.1 + 2.0, box_r.2 - 4.0, 10.0 + text_h);
     for (i, line) in lines.iter().enumerate().skip(first).take(shown) {
-        label(g, tx, ty + (i - first) as f32 * 18.0, line, 12.0, theme::text(), false);
+        label(g, tx, ty + (i - first) as f32 * 20.0, line, 13.0, theme::text(), false);
     }
     if let Some((pl, px, pw)) = pre {
         if pl >= first && pl < first + shown && pw > 0.0 {
-            g.rect(tx + px, ty + (pl - first) as f32 * 18.0 + 15.0, pw, 1.0, theme::text());
+            g.rect(tx + px, ty + (pl - first) as f32 * 20.0 + 16.0, pw, 1.0, theme::text());
         }
     }
     if slot.focused && slot.caret_on && caret_line >= first && caret_line < first + shown {
-        g.rect(tx + caret_x, ty + (caret_line - first) as f32 * 18.0 - 1.0, 1.5, 16.0, theme::accent());
+        g.rect(tx + caret_x, ty + (caret_line - first) as f32 * 20.0 - 1.5, 1.5, 17.0, theme::accent());
     }
     g.pop_clip();
 
-    let by = box_r.1 + input_h + 8.0;
-    let term_w = g.measure_chrome_text("터미널로 보기", 12.0, false) + 20.0;
-    let term = (col_x, by, term_w, 26.0);
-    native_controls::text_button(g, term, cursor, "터미널로 보기", native_controls::Style::default());
-    hits.push((Hit::Terminal, term));
+    // 상자 안 아래 줄 — 왼쪽 터미널로 보기, 가운데 안내, 오른쪽 멈추기·보내기 원.
+    let bmid = box_r.1 + 10.0 + text_h + 2.0 + 16.0;
     let ready = !pane.draft.trim().is_empty();
-    let send_w = 76.0;
-    let send = (col_x + col_w - send_w, by, send_w, 26.0);
-    native_controls::text_button(g, send, cursor, "보내기", native_controls::Style { primary: ready, enabled: ready, ..Default::default() });
+    let send = (box_r.0 + box_r.2 - 10.0 - 28.0, bmid - 14.0, 28.0, 28.0);
     if ready {
+        g.round_rect_fill(send.0, send.1, send.2, send.3, 14.0, theme::accent());
+        g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, theme::pane_bg());
+        g.hover_pointer |= inside(cursor, send);
         hits.push((Hit::Send, send));
+    } else {
+        g.round_rect_stroke(send.0, send.1, send.2, send.3, 14.0, theme::border_w().max(1.0), theme::border());
+        g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, theme::text_mute());
     }
-    let mut hint_right = send.0 - 8.0;
+    let mut hint_right = send.0 - 10.0;
     if working {
-        let stop = (send.0 - 6.0 - 84.0, by, 84.0, 26.0);
-        native_controls::text_button(g, stop, cursor, "멈추기 esc", native_controls::Style::default());
+        let stop = (send.0 - 6.0 - 28.0, send.1, 28.0, 28.0);
+        let hover = inside(cursor, stop);
+        g.round_rect_stroke(stop.0, stop.1, stop.2, stop.3, 14.0, theme::border_w().max(1.0), if hover { theme::text_dim() } else { theme::border() });
+        g.queue_icon("square", stop.0 + 8.0, stop.1 + 8.0, 12.0, theme::text_dim());
+        g.hover_pointer |= hover;
         hits.push((Hit::Stop, stop));
-        hint_right = stop.0 - 8.0;
+        hint_right = stop.0 - 10.0;
     }
+    let term_label = "터미널로 보기";
+    let term_w = g.measure_chrome_text(term_label, 11.5, false) + 34.0;
+    let term = (box_r.0 + 6.0, bmid - 13.0, term_w, 26.0);
+    let term_hover = inside(cursor, term);
+    if term_hover {
+        g.round_rect_fill(term.0, term.1, term.2, term.3, theme::radius_sm(), theme::surface_hover());
+        g.hover_pointer = true;
+    }
+    g.queue_icon("terminal", term.0 + 8.0, bmid - 6.5, 13.0, theme::text_dim());
+    label(g, term.0 + 26.0, bmid - 7.0, term_label, 11.5, if term_hover { theme::text() } else { theme::text_dim() }, false);
+    hits.push((Hit::Terminal, term));
     let hint_x = term.0 + term.2 + 10.0;
     let failed = pane.send_error.lock().ok().and_then(|e| e.clone());
     let (hint, tone) = match &failed {
         Some(e) => (format!("못 보냈어요 · {e}"), theme::danger()),
         None => ("Enter 보내기 · ⇧Enter 줄바꿈".to_string(), theme::text_mute()),
     };
-    let hint = crate::info::fit_text(g, &hint, (hint_right - hint_x).max(0.0), 10.5, false);
-    label(g, hint_x, by + 7.0, &hint, 10.5, tone, false);
+    let hint = crate::info::fit_text(g, &hint, (hint_right - hint_x).max(0.0), 11.0, false);
+    label(g, hint_x, bmid - 6.5, &hint, 11.0, tone, false);
+    // 단추가 먼저 — 판정은 처음 맞는 것이 이긴다(`chat_view.rs` 클릭).
+    hits.push((Hit::Composer, box_r));
 
     g.pop_clip();
     hits
