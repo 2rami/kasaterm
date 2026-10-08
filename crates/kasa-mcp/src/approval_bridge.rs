@@ -74,10 +74,16 @@ async fn run() {
     }
 }
 
+/// 관문에 올릴 요청인가. 질문(AskUserQuestion)은 허락·거절로 답하는 일이 아니라 올리지 않는다 — 올리면 폰·다른 맥에
+/// [허락]·[거절] 창이 뜨고, 따로 가는 「질문 기다림」 알림과 두 번 울린다. 그 알림을 누르면 학생 칸이 열려 거기서 고른다.
+fn remote(request: &Value) -> bool {
+    request["tool"].as_str() != Some("AskUserQuestion")
+}
+
 /// 요청마다 한 번 — 올리고 결정을 따라가는 일을 따로 돌린다(관문이 느려도 다른 요청을 막지 않게).
 fn start(request: Value, tried: &mut HashMap<String, std::time::Instant>, tx: &tokio::sync::mpsc::UnboundedSender<Note>) {
     let id = request["id"].as_str().unwrap_or_default().to_string();
-    if id.is_empty() || tried.contains_key(&id) {
+    if id.is_empty() || tried.contains_key(&id) || !remote(&request) {
         return;
     }
     tried.insert(id.clone(), std::time::Instant::now());
@@ -161,5 +167,18 @@ async fn follow(local: &str, up: &Up) {
             eprintln!("[approval-bridge] 브로커가 결정을 안 받음({error}): {local}");
         }
         return;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn questions_stay_off_the_gateway() {
+        assert!(!remote(&serde_json::json!({"id": "q", "tool": "AskUserQuestion"})));
+        for tool in ["Bash", "Edit", "ExitPlanMode", ""] {
+            assert!(remote(&serde_json::json!({"id": "t", "tool": tool})), "{tool}");
+        }
     }
 }
