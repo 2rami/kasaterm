@@ -2930,6 +2930,8 @@ async fn transcript_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+const TRANSCRIPT_FILE_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// `GET /transcript-raw?surface=%N&offset=<n>` — a pane's bound transcript jsonl,
 /// raw and *incremental*. `offset=0` (or omitted) returns the tail window with
 /// `reset:true`; `offset>0` returns only whole lines appended since that byte
@@ -2950,11 +2952,26 @@ async fn transcript_raw_handler(
         .map(|ms| std::time::Duration::from_millis(ms.min(25_000)));
     let seen = wait.and_then(|_| crate::claude_mod::row_count(surface));
     let mut chunk = (!surface.is_empty()).then(|| backend.transcript_raw(surface, offset));
-    if let (Some(wait), Some(seen), Some(Ok(c))) = (wait, seen, chunk.as_ref()) {
-        if c.raw.is_empty() && !c.reset {
-            crate::claude_mod::wait_rows(surface, seen, wait).await;
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    if let (Some(wait), Some(mut seen)) = (wait, seen) {
+        // 행 알림만 기다리면 행이 아닌 줄(작업 중에 보낸 말의 큐 기록·사진 첨부)이 다음 행까지
+        // 묶여 폰에 몇 초씩 늦게 떴다. 짧은 박자로 파일이 자랐는지도 본다 — 안 바뀌면 stat 하나다.
+        let deadline = tokio::time::Instant::now() + wait;
+        while matches!(&chunk, Some(Ok(c)) if c.raw.is_empty() && !c.reset) {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            crate::claude_mod::wait_rows(surface, seen, left.min(TRANSCRIPT_FILE_TICK)).await;
+            let rows = crate::claude_mod::row_count(surface);
+            if let Some(n) = rows.filter(|&n| n > seen) {
+                seen = n;
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
             chunk = Some(backend.transcript_raw(surface, offset));
+            // mod 가 떠난 칸은 wait_rows 가 곧바로 돌아온다 — 헛돌지 않고 지금 것으로 답한다.
+            if rows.is_none() {
+                break;
+            }
         }
     }
     let body = match chunk {

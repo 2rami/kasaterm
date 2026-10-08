@@ -852,6 +852,21 @@ mod tests {
     }
 
     #[test]
+    fn a_photo_line_longer_than_the_tail_window_is_kept_whole() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-chat-photo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let photo = format!("{{\"photo\":\"{}\"}}\n", "A".repeat(700 * 1024));
+        std::fs::write(&path, format!("{{\"old\":1}}\n{photo}{{\"after\":2}}\n")).unwrap();
+        let first = crate::socket::read_incremental(&path, 0).unwrap();
+        assert!(first.reset);
+        assert!(first.raw.starts_with("{\"photo\":\""), "{:?}", &first.raw[..40]);
+        assert!(first.raw.ends_with("{\"after\":2}\n"));
+        assert!(!first.raw.contains("old"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn multiline_drafts_are_pasted_so_newlines_do_not_submit() {
         assert_eq!(submit_bytes("안녕", true), "안녕\r".as_bytes());
         assert_eq!(submit_bytes("a\nb", true), "\x1b[200~a\nb\x1b[201~\r".as_bytes());

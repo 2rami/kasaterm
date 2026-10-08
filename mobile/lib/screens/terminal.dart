@@ -8,6 +8,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
+import '../conversation.dart';
 import '../grid_canvas.dart';
 import '../grid_select.dart';
 import '../hardware_keys.dart';
@@ -81,6 +82,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 입력상자에 붙여 두고 아직 안 보낸 사진. 대화 보기는 상자를 안 보여 주니 입력줄 위에 띄운다.
   final List<Uint8List> _pendingPhotos = [];
   bool get _pendingAttachment => _pendingPhotos.isNotEmpty;
+
+  /// 대화 보기의 기록 — 보낸 말을 기록보다 먼저 세우려고 화면이 쥔다.
+  final _conversation = Conversation();
 
   /// 지금의 pane — 열 때 받은 것으로 시작해 목록을 다시 받아 갈아 끼운다. 셸에서
   /// claude 를 띄우면 이름·얼굴·상태가 따라오고, 사진 버튼도 그때 켜진다(2026-09-17
@@ -244,6 +248,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final text = field.text;
     if (_sending || _attaching || (text.isEmpty && !_pendingAttachment)) return;
     _dropSelection();
+    // 보낸 말은 누른 순간 말풍선으로 — 기록 파일을 거쳐 돌아오기를 기다리면 몇 초 빈다.
+    final echo = field == _chatInput && _canChat(_pane)
+        ? _conversation.echo(text, photos: List.of(_pendingPhotos))
+        : null;
     setState(() {
       _sending = true;
       _bottomTick++;
@@ -263,6 +271,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
       _ctrl = false;
       _pendingPhotos.clear();
     } on ServerException catch (e) {
+      if (echo != null) _conversation.withdraw(echo);
       if (mounted) _toast(e.message);
     } finally {
       if (mounted) {
@@ -741,6 +750,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                               WeatherScene(
                                 child: ConversationView(
                                   server: widget.server,
+                                  conversation: _conversation,
                                   pane: pane,
                                   session: s,
                                   accent: accent,

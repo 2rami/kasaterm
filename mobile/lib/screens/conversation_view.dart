@@ -56,7 +56,8 @@ class ChatComposer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(4, 8, Look.pagePad, 8),
+    // 앞 단추(사진)는 제 누름 영역에 숨을 갖고 있다 — 없으면 화면 여백만큼 띄운다.
+    padding: EdgeInsets.fromLTRB(leading == null ? Look.pagePad : 4, 8, Look.pagePad, 8),
     child: Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -169,9 +170,14 @@ class ConversationView extends StatefulWidget {
     this.bottomTick = 0,
     this.active = true,
     this.draft,
+    this.conversation,
   });
 
   final Server server;
+
+  /// 화면이 쥔 기록 — 보낸 말을 기록보다 먼저 세운다([Conversation.echo]). 없으면 제 것을 쓴다.
+  final Conversation? conversation;
+
   final Pane pane;
   final TermSession session;
   final Color accent;
@@ -196,7 +202,7 @@ class _ConversationViewState extends State<ConversationView> {
   /// 서버가 다음 대화 행을 기다려 주는 한도. 그동안 타이머 바퀴는 `_polling` 에 걸려 쉰다.
   static const _waitMs = 15000;
 
-  final _conv = Conversation();
+  late final _conv = widget.conversation ?? Conversation();
   final _scroll = ScrollController();
   final _open = Set<Object>.identity();
   List<Object> _rows = const [];
@@ -401,7 +407,7 @@ class _ConversationViewState extends State<ConversationView> {
 
   List<Object> get rows {
     if (_rowsVersion != _conv.version) {
-      _rows = groupRows(_conv.items);
+      _rows = [...groupRows(_conv.items), ..._conv.echoes];
       _rowsVersion = _conv.version;
     }
     return _rows;
@@ -479,7 +485,7 @@ class _ConversationViewState extends State<ConversationView> {
     final held = DateTime.now().isBefore(_menuHold);
     return Column(
       children: [
-        Expanded(child: _body(context)),
+        Expanded(child: DismissKeyboard(child: _body(context))),
         if (menu != null)
           _MenuCard(
             menu: menu,
@@ -510,6 +516,18 @@ class _ConversationViewState extends State<ConversationView> {
             onDismiss: null,
             onTerminal: widget.onTerminal,
           ),
+        // 셸 명령 쪽과 같은 맥락 줄 — 앱바엔 경로가 들어갈 폭이 없다.
+        if (widget.pane.cwd.isNotEmpty)
+          PlaceLine(
+            cwd: widget.pane.cwd,
+            branch: widget.pane.branch,
+            style: TextStyle(
+              fontFamily: 'TermMono',
+              fontFamilyFallback: Look.flowMonoFallback,
+              fontSize: Look.sub,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
       ],
     );
   }
@@ -527,7 +545,11 @@ class _ConversationViewState extends State<ConversationView> {
             );
     }
     final list = rows;
-    if (_missing || list.isEmpty) {
+    final pane = widget.pane;
+    final live = _liveNow;
+    final typing = pane.isBusy || (live.live && (live.turnOpen || live.compacting));
+    // 기록이 아직 없어도 일하는 중이면 그 줄은 보인다 — 빈 화면이 「쉬는 중」으로 읽혔다.
+    if (list.isEmpty && !typing) {
       return _Empty(
         icon: Icons.forum_outlined,
         title: '아직 대화가 없어요',
@@ -539,7 +561,6 @@ class _ConversationViewState extends State<ConversationView> {
         onTerminal: widget.onTerminal,
       );
     }
-    final pane = widget.pane;
     final face = StudentFace(
       server: widget.server,
       slug: pane.slug,
@@ -549,8 +570,6 @@ class _ConversationViewState extends State<ConversationView> {
       size: 30,
     );
     final md = _markdownStyle(theme);
-    final live = _liveNow;
-    final typing = pane.isBusy || (live.live && (live.turnOpen || live.compacting));
     final extra = typing ? 1 : 0;
     return LayoutBuilder(
       builder: (context, box) {
@@ -560,11 +579,16 @@ class _ConversationViewState extends State<ConversationView> {
             ListView.builder(
               controller: _scroll,
               reverse: true,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
               itemCount: list.length + extra,
               itemBuilder: (context, i) {
                 if (i < extra) {
-                  return _Typing(face: face, label: live.doing ?? pane.busyLabel);
+                  return _Typing(
+                    face: face,
+                    accent: widget.accent,
+                    detail: live.doing ?? pane.busyDetail,
+                  );
                 }
                 final at = list.length - 1 - (i - extra);
                 return _row(context, list, at, face, md, maxBubble);
@@ -739,7 +763,13 @@ class _Bubble extends StatelessWidget {
         child: content,
       ),
     );
-    final clock = tail && bubble.at != null ? _clock(bubble.at!) : null;
+    final clock = !tail
+        ? null
+        : bubble.sending
+        ? '보내는 중'
+        : bubble.at != null
+        ? _clock(bubble.at!)
+        : null;
     final meta = theme.textTheme.labelSmall?.copyWith(
       color: scheme.onSurfaceVariant,
     );
@@ -765,7 +795,8 @@ class _Bubble extends StatelessWidget {
                   Text(clock, style: meta),
                   const SizedBox(width: 5),
                 ],
-                Flexible(child: box),
+                // 아직 기록에 안 닿은 말 — 간 말과 같은 자리에 조금 옅게.
+                Flexible(child: bubble.sending ? Opacity(opacity: 0.7, child: box) : box),
               ],
             ),
           ],
@@ -1267,28 +1298,55 @@ class _Note extends StatelessWidget {
 }
 
 class _Typing extends StatelessWidget {
-  const _Typing({required this.face, required this.label});
+  const _Typing({required this.face, required this.accent, this.detail});
   final Widget face;
-  final String label;
+  final Color accent;
+
+  /// 「하는 중」 뒤의 사정 — 지금 도는 도구·백그라운드.
+  final String? detail;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final dim = theme.colorScheme.onSurfaceVariant;
+    final scheme = theme.colorScheme;
+    final style = theme.textTheme.labelMedium;
+    // 흐린 한 줄은 일하는지 안 보였다 — 도구 묶음과 같은 판에 학생색 「하는 중」을 세운다.
     return Padding(
       padding: const EdgeInsets.only(top: 12),
       child: Row(
         children: [
           SizedBox(width: 30, child: face),
           const SizedBox(width: 8),
-          PulseDot(color: theme.colorScheme.primary, size: 7),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.labelMedium?.copyWith(color: dim),
+          Flexible(
+            child: Container(
+              constraints: const BoxConstraints(minHeight: Look.tap),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                borderRadius: Look.corners,
+                color: scheme.surfaceContainerHigh.withValues(alpha: 0.6),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PulseDot(color: accent, size: 8),
+                  const SizedBox(width: 8),
+                  Text(
+                    '하는 중',
+                    style: style?.copyWith(color: accent, fontWeight: FontWeight.w600),
+                  ),
+                  if (detail != null && detail!.isNotEmpty) ...[
+                    Text('  ·  ', style: style?.copyWith(color: scheme.onSurfaceVariant)),
+                    Flexible(
+                      child: Text(
+                        detail!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: style?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ],

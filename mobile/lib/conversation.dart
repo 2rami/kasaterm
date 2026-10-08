@@ -14,11 +14,14 @@ class ChatBubble extends ChatItem {
     this.from,
     this.via,
     this.queued = false,
+    this.sending = false,
   });
 
   /// user 턴 — 선생님 말이거나, [from] 이 있으면 사람 대신 다른 칸·카사텀·나쵸가 넣은 말.
   final bool user;
-  final String text;
+
+  /// 사진이 붙으면 그 자리의 「(사진)」 표는 걷힌다 — 그래서 고칠 수 있다.
+  String text;
   final DateTime? at;
   final String? from;
 
@@ -27,7 +30,22 @@ class ChatBubble extends ChatItem {
 
   /// 작업 중에 넣어 둔 예약 — 아직 학생이 안 읽었다.
   bool queued;
+
+  /// 이 폰에서 보냈고 기록에는 아직 안 닿은 말([Conversation.echo]).
+  final bool sending;
   final List<Uint8List> images = [];
+
+  /// 붙은 사진 수만큼 앞에서부터 「(사진)」 표를 걷는다 — 사람이 친 「(사진)」은 뒤에 남는다.
+  void addPhotos(Iterable<Uint8List> photos) {
+    for (final p in photos) {
+      images.add(p);
+      final at = text.indexOf(_photoMark);
+      if (at < 0) continue;
+      text = (text.substring(0, at) + text.substring(at + _photoMark.length))
+          .replaceAll(RegExp(r'[ \t]{2,}'), ' ')
+          .trim();
+    }
+  }
 
   bool get mine => user && from == null;
 }
@@ -91,9 +109,15 @@ class Conversation {
   /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 그린다.
   int version = 0;
 
+  /// 이 폰에서 보내고 기록에 아직 안 닿은 말 — 보낸 순간 말풍선으로 선다. 기록에 같은 말이 오면 걷는다.
+  final List<ChatBubble> echoes = [];
+
   String? _sessionId;
   final Map<String, ChatItem> _byToolId = {};
   final List<ChatBubble?> _queue = [];
+
+  /// 방금 작업 중에 흡수된 예약 — 바로 뒤 `queued_command` 첨부가 그 말의 사진을 싣는다.
+  ChatBubble? _absorbed;
   String? _lastCodexSay;
   String? _lastCodexPrompt;
 
@@ -104,9 +128,51 @@ class Conversation {
     _sessionId = null;
     _lastCodexSay = null;
     _lastCodexPrompt = null;
+    _absorbed = null;
     offset = 0;
     version++;
   }
+
+  /// 보낸 말을 기록보다 먼저 세운다. 보내기가 실패하면 [withdraw].
+  ChatBubble echo(String text, {List<Uint8List> photos = const []}) {
+    final b = ChatBubble(
+      user: true,
+      text: text.trim(),
+      at: DateTime.now(),
+      sending: true,
+    )..images.addAll(photos);
+    echoes.add(b);
+    version++;
+    return b;
+  }
+
+  void withdraw(ChatBubble b) {
+    if (echoes.remove(b)) version++;
+  }
+
+  /// 기록에 새로 선 내 말과 맞는 메아리를 걷는다. 끝내 안 닿은 것(메뉴가 먹은 글 등)은 오래 두지 않는다.
+  void _settleEchoes(Iterable<ChatItem> fresh) {
+    if (echoes.isEmpty) return;
+    final before = echoes.length;
+    for (final it in fresh) {
+      if (it is! ChatBubble || !it.mine || it.sending) continue;
+      final said = _squash(it.text);
+      final i = echoes.indexWhere((e) {
+        // 폰과 데스크톱 시계는 조금 어긋난다 — 보낸 때보다 한참 앞선 옛 말만 거른다.
+        if (it.at != null && it.at!.isBefore(e.at!.subtract(_echoSkew))) return false;
+        return e.text.isEmpty ? it.images.isNotEmpty : said.contains(_squash(e.text));
+      });
+      if (i >= 0) echoes.removeAt(i);
+    }
+    final now = DateTime.now();
+    echoes.removeWhere((e) => now.difference(e.at!) > _echoLife);
+    if (echoes.length != before) version++;
+  }
+
+  static const _echoSkew = Duration(seconds: 30);
+  static const _echoLife = Duration(minutes: 2);
+
+  static String _squash(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
 
   /// 서버 조각 하나. 세션이 바뀐 것을 알아채면 false — 호출부가 처음부터 다시 받는다.
   /// 서버는 파일이 줄어들 때만 꼬리를 다시 주므로, `/clear` 뒤 새 파일이 옛 자리보다
@@ -123,6 +189,8 @@ class Conversation {
       }
     }
     if (reset) clear();
+    final from = items.length;
+    final touched = <ChatItem>[];
     if (!reset && _sessionId != null) {
       for (final e in events) {
         final sid = e['sessionId'];
@@ -135,9 +203,11 @@ class Conversation {
       if (e['payload'] is Map) {
         _codex(e);
       } else {
-        _claude(e);
+        final photoTarget = _claude(e);
+        if (photoTarget != null) touched.add(photoTarget);
       }
     }
+    _settleEchoes([...items.skip(from), ...touched]);
     offset = next;
     if (events.isNotEmpty || reset) version++;
     return true;
@@ -145,33 +215,38 @@ class Conversation {
 
   // ── claude ────────────────────────────────────────────────────────────────
 
-  void _claude(Map<String, Object?> ev) {
-    if (ev['isSidechain'] == true) return;
+  /// 앞서 선 말풍선에 사진을 붙였으면 그 말풍선 — 메아리 맞추기가 새 칸처럼 본다.
+  ChatBubble? _claude(Map<String, Object?> ev) {
+    if (ev['isSidechain'] == true) return null;
     final type = ev['type'];
     final at = _time(ev['timestamp']);
     switch (type) {
       case 'system':
         final text = _systemText(ev);
         if (text != null) items.add(ChatSystem(text));
-        return;
+        return null;
       case 'queue-operation':
         _queueOp(ev, at);
-        return;
+        return null;
       case 'attachment':
         final att = ev['attachment'];
-        if (att is Map && att['type'] == 'hook_success') {
-          final msg = _hookMessage(att['stdout']);
-          if (msg != null) items.add(ChatSystem(msg));
+        if (att is! Map) return null;
+        switch (att['type']) {
+          case 'hook_success':
+            final msg = _hookMessage(att['stdout']);
+            if (msg != null) items.add(ChatSystem(msg));
+          case 'queued_command':
+            return _queuedPhotos(att['prompt'], at);
         }
-        return;
+        return null;
       case 'user':
       case 'assistant':
         break;
       default:
-        return;
+        return null;
     }
     // 스킬 본문·caveat 처럼 사람이 친 적 없는 주입 — 선생님 말풍선으로 새면 안 된다.
-    if (type == 'user' && ev['isMeta'] == true) return;
+    if (type == 'user' && ev['isMeta'] == true) return null;
     final message = ev['message'];
     final content = message is Map ? message['content'] : null;
     final user = type == 'user';
@@ -179,7 +254,7 @@ class Conversation {
       if (items.isEmpty || items.last is! ChatInterrupted) {
         items.add(ChatInterrupted());
       }
-      return;
+      return null;
     }
     if (content is String) {
       if (user) {
@@ -187,9 +262,9 @@ class Conversation {
       } else if (content.trim().isNotEmpty) {
         items.add(ChatBubble(user: false, text: content.trim(), at: at));
       }
-      return;
+      return null;
     }
-    if (content is! List) return;
+    if (content is! List) return null;
     for (final block in content) {
       if (block is! Map) continue;
       switch (block['type']) {
@@ -206,7 +281,7 @@ class Conversation {
           if (bytes == null) break;
           final last = items.isEmpty ? null : items.last;
           if (last is ChatBubble && last.mine && last.at == at) {
-            last.images.add(bytes);
+            last.addPhotos([bytes]);
           } else {
             items.add(
               ChatBubble(user: true, text: '', at: at)..images.add(bytes),
@@ -223,6 +298,40 @@ class Conversation {
           _toolResult(block);
       }
     }
+    return null;
+  }
+
+  /// 작업 중에 보낸 말의 사진은 큐 기록(글만)이 아니라 흡수될 때의 `queued_command` 첨부에만 실린다.
+  /// 그 말풍선을 글로 찾아 사진을 붙인다 — 없으면(큐 기록이 창 밖) 첨부만으로 세운다.
+  ChatBubble? _queuedPhotos(Object? prompt, DateTime? at) {
+    final absorbed = _absorbed;
+    _absorbed = null;
+    if (prompt is! List) return null;
+    final photos = [
+      for (final b in prompt)
+        if (b is Map && b['type'] == 'image') ?_imageBytes(b['source']),
+    ];
+    if (photos.isEmpty) return null;
+    final said = stripMeta(
+      prompt
+          .whereType<Map>()
+          .where((b) => b['type'] == 'text')
+          .map((b) => b['text'])
+          .whereType<String>()
+          .join('\n'),
+    );
+    if (isInjection(said)) return null;
+    ChatBubble? target = absorbed != null && absorbed.text == said ? absorbed : null;
+    for (var i = items.length - 1; target == null && i >= 0; i--) {
+      final it = items[i];
+      if (it is ChatBubble && it.mine && it.images.isEmpty && it.text == said) target = it;
+    }
+    if (target == null) {
+      target = ChatBubble(user: true, text: said, at: at);
+      items.add(target);
+    }
+    target.addPhotos(photos);
+    return target;
   }
 
   void _toolUse(Map<Object?, Object?> b) {
@@ -328,7 +437,9 @@ class Conversation {
           if (b != null) items.remove(b);
         }
       case 'remove':
-        if (_queue.isNotEmpty) _queue.removeAt(0)?.queued = false;
+        final b = _queue.isEmpty ? null : _queue.removeAt(0);
+        b?.queued = false;
+        _absorbed = b;
     }
   }
 
@@ -506,8 +617,11 @@ String stripMeta(String text) {
             (t.startsWith('[Image #') && t.endsWith(']')));
       })
       .join('\n');
-  return s.replaceAll(RegExp(r'\[Image #\d+\]'), '(사진)').trim();
+  return s.replaceAll(RegExp(r'\[Image #\d+\]'), _photoMark).trim();
 }
+
+/// 그림 자리표(`[Image #3]`)의 글 — 사진을 못 실은 말풍선은 이것으로 자리를 말한다.
+const _photoMark = '(사진)';
 
 final _pasted = RegExp(r'</?pasted_content\b[^>]*>');
 

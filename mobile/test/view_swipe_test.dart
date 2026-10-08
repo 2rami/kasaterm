@@ -277,6 +277,22 @@ void main() {
     await _close(tester);
   });
 
+  testWidgets('대화 목록의 빈 곳을 누르면 자판이 내려간다', (tester) async {
+    await _open(tester, view: PaneView.chat);
+    final chatField = find.descendant(
+      of: find.byType(ChatComposer),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(chatField, '쓰던 글');
+    await tester.pump();
+    expect(tester.widget<TextField>(chatField).focusNode!.hasFocus, isTrue);
+    await tester.tapAt(const Offset(195, 300));
+    await tester.pump();
+    expect(tester.widget<TextField>(chatField).focusNode!.hasFocus, isFalse);
+    expect(tester.widget<TextField>(chatField).controller!.text, '쓰던 글');
+    await _close(tester);
+  });
+
   testWidgets('자판이 떠도 닫기 옆 보기 단추가 그 자리에서 바꾼다', (tester) async {
     await _open(tester);
     tester.view.viewInsets = const FakeViewPadding(bottom: 300);

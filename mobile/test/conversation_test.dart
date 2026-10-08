@@ -170,6 +170,105 @@ void main() {
     expect(answered.pairs, [('어디에 둘까?', '위')]);
   });
 
+  // 1×1 PNG — 사진 자리만 확인한다.
+  const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  Map<String, Object?> photo() => {
+    'type': 'image',
+    'source': {'type': 'base64', 'media_type': 'image/png', 'data': png},
+  };
+
+  test('사진 든 말: 자리표 대신 사진, 사람이 친 「(사진)」은 남는다', () {
+    final c = Conversation();
+    c.apply(
+      lines([
+        user([
+          {'type': 'text', 'text': '[Image #1] [Image #2] 경로가 안 보여'},
+          photo(),
+          photo(),
+        ]),
+      ]),
+      reset: true,
+      next: 1,
+    );
+    final b = c.items.single as ChatBubble;
+    expect(b.images, hasLength(2));
+    expect(b.text, '경로가 안 보여');
+  });
+
+  test('작업 중에 보낸 말의 사진은 흡수 첨부에서 붙는다', () {
+    final c = Conversation();
+    c.apply(
+      lines([
+        {
+          'type': 'queue-operation',
+          'operation': 'enqueue',
+          'content': '[Image #4] 사진은 왜 (사진)임',
+          'timestamp': '2026-09-25T01:01:00Z',
+        },
+      ]),
+      reset: true,
+      next: 1,
+    );
+    final b = c.items.single as ChatBubble;
+    expect(b.queued, isTrue);
+    expect(b.text, '(사진) 사진은 왜 (사진)임');
+    c.apply(
+      lines([
+        {'type': 'queue-operation', 'operation': 'remove'},
+        {
+          'type': 'attachment',
+          'attachment': {
+            'type': 'queued_command',
+            'prompt': [
+              {'type': 'text', 'text': '[Image #4] 사진은 왜 (사진)임'},
+              photo(),
+            ],
+          },
+        },
+      ]),
+      reset: false,
+      next: 2,
+    );
+    expect(c.items.single, same(b));
+    expect(b.queued, isFalse);
+    expect(b.images, hasLength(1));
+    expect(b.text, '사진은 왜 (사진)임');
+  });
+
+  test('보낸 말은 곧바로 서고 기록에 닿으면 걷힌다', () {
+    final c = Conversation();
+    final echo = c.echo('  끝나면 커밋 ');
+    expect(c.echoes, [echo]);
+    expect(echo.sending, isTrue);
+    final v = c.version;
+    c.apply(
+      lines([
+        {
+          'type': 'queue-operation',
+          'operation': 'enqueue',
+          'content': '끝나면 커밋',
+          'timestamp': DateTime.now().toUtc().toIso8601String(),
+        },
+      ]),
+      reset: false,
+      next: 1,
+    );
+    expect(c.echoes, isEmpty);
+    expect(c.version, greaterThan(v));
+
+    final failed = c.echo('안 간 말');
+    c.withdraw(failed);
+    expect(c.echoes, isEmpty);
+  });
+
+  test('옛 기록의 같은 말은 새로 보낸 메아리를 걷지 않는다', () {
+    final c = Conversation();
+    c.echo('응');
+    c.apply(lines([user('응')]), reset: true, next: 1);
+    expect(c.echoes, hasLength(1));
+  });
+
   test('이어진 도구는 한 묶음', () {
     final a = ChatTool('Read', 'a');
     final b = ChatTool('Grep', 'b');

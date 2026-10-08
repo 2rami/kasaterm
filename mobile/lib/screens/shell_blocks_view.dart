@@ -15,6 +15,7 @@ import '../status_style.dart';
 import '../term_session.dart';
 import '../theme_prefs.dart';
 import '../twins_loading.dart';
+import 'controls.dart';
 
 /// 셸 칸을 「명령 + 결과」 카드로 — 데스크톱 원본이 모은 OSC 133 구간(`/term/blocks`)을
 /// 폰 폭으로 다시 접어 보인다. 원본 칸 크기는 안 건드린다(`docs/mirror-render.md`).
@@ -274,34 +275,15 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
       if (!_feed.integration || _feed.alt || s.grid.alt) {
         return _shrunkGrid(context, s, palette);
       }
-      final cwd = _feed.cwd;
+      // 셸이 폴더를 아직 안 알렸으면(막 연 셸) 칸의 폴더 — 비워 두면 어디인지 안 보였다.
+      final cwd = _feed.cwd ?? (widget.pane.cwd.isEmpty ? null : widget.pane.cwd);
       final branch = _feed.branch;
-      final dim = mixToward(palette.fg, palette.bg, 0.4);
-      // 워프의 입력칸 위 맥락 — 지금 폴더와 브랜치. 셸 프롬프트 대신 여기서 어디인지 말한다.
       final place = cwd == null
           ? null
-          : Padding(
-              padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 6),
-              child: Row(
-                children: [
-                  Icon(Icons.folder_outlined, size: 14, color: dim),
-                  const SizedBox(width: 4),
-                  Flexible(
-                    child: Text(
-                      tildePath(cwd),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: _mono.copyWith(color: dim),
-                    ),
-                  ),
-                  if (branch != null) ...[
-                    const SizedBox(width: 12),
-                    Icon(Icons.call_split, size: 14, color: dim),
-                    const SizedBox(width: 4),
-                    Text(branch, maxLines: 1, style: _mono.copyWith(color: dim)),
-                  ],
-                ],
-              ),
+          : PlaceLine(
+              cwd: cwd,
+              branch: branch,
+              style: _mono.copyWith(color: mixToward(palette.fg, palette.bg, 0.4)),
             );
       final draft = widget.onDraft;
       // 추천 칩 — 누르면 입력칸에 채우고(고쳐서 보낸다), 길게 누르면 바로 친다. 자판으로 치기 번거로운 폰 몫.
@@ -333,7 +315,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(child: _list(palette)),
+            Expanded(child: DismissKeyboard(child: _list(palette))),
             ?place,
             ?chips,
           ],
@@ -365,6 +347,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
               ListView.builder(
                 controller: _scroll,
                 reverse: true,
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                 itemCount: _feed.blocks.length,
                 itemBuilder: (context, i) => _Card(

@@ -4363,14 +4363,49 @@ use kasa_mcp::git::head_branch;
 /// raw="" 라 프론트 재파싱·리렌더가 0.
 const TRANSCRIPT_TAIL: u64 = 512 * 1024;
 
+/// 꼬리 창이 한 줄 가운데서 시작하면 그 줄 머리까지 이만큼은 물린다. 사진 든 말 한 줄(base64)이
+/// 창보다 길어 창이 늘 그 줄 안에서 시작했고, 깨진 첫 줄을 버리니 그 말이 대화에서 통째로 빠졌다.
+const TRANSCRIPT_LINE_REACH: u64 = 4 * 1024 * 1024;
+
+/// `start` 가 든 줄의 머리. [`TRANSCRIPT_LINE_REACH`] 안에 개행이 없으면 None.
+fn line_start_before(f: &mut std::fs::File, start: u64) -> std::io::Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const STEP: u64 = 64 * 1024;
+    let floor = start.saturating_sub(TRANSCRIPT_LINE_REACH);
+    let mut end = start;
+    let mut buf = Vec::new();
+    while end > 0 {
+        if end <= floor && floor > 0 {
+            return Ok(None);
+        }
+        let from = end.saturating_sub(STEP).max(floor);
+        buf.resize((end - from) as usize, 0);
+        f.seek(SeekFrom::Start(from))?;
+        f.read_exact(&mut buf)?;
+        if let Some(i) = buf.iter().rposition(|&b| b == b'\n') {
+            return Ok(Some(from + i as u64 + 1));
+        }
+        end = from;
+    }
+    Ok(Some(0))
+}
+
 pub(crate) fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<TranscriptChunk> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
     // offset==0 = 첫 로드, offset>len = 파일이 줄어듦(세션 교체) → 둘 다 tail 재로드.
     let reset = offset == 0 || offset > len;
+    let mut whole_first = !reset;
     let start = if reset {
-        len.saturating_sub(TRANSCRIPT_TAIL)
+        let tail = len.saturating_sub(TRANSCRIPT_TAIL);
+        match line_start_before(&mut f, tail)? {
+            Some(head) => {
+                whole_first = true;
+                head
+            }
+            None => tail,
+        }
     } else {
         offset
     };
@@ -4389,9 +4424,9 @@ pub(crate) fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::
     let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let next_offset = start + end as u64;
     let mut slice = &buf[..end];
-    // tail(reset)이 파일 중간에서 시작했으면 깨진 앞 첫 줄을 버린다. 처음(0)부터 읽었으면
-    // 그 줄은 온전하다 — 버리면 짧은 기록의 첫 말이 대화에서 빠진다.
-    if reset && start > 0 {
+    // tail(reset)이 줄 가운데서 시작했으면(물릴 상한을 넘는 줄) 깨진 앞 첫 줄을 버린다.
+    // 줄 머리에서 읽었으면 그 줄은 온전하다 — 버리면 그 말이 대화에서 빠진다.
+    if !whole_first {
         if let Some(i) = slice.iter().position(|&b| b == b'\n') {
             slice = &slice[i + 1..];
         }

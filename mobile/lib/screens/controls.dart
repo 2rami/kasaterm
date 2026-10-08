@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../look.dart';
+import '../shell_blocks.dart' show tildePath;
 
 /// 입력칸 오른쪽 보내기 44×44 — 글이 있으면 강조 채움·화살표, 없으면 톤 채움·흐린 화살표.
 /// 대화(`round`)는 A 이전 모습이라 늘 강조색으로 채운 원이다.
@@ -403,4 +404,55 @@ class ErrorBand extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 대화·명령 목록을 톡 누르면 자판을 내린다 — iOS 는 입력칸 밖을 눌러도 안 내려가 글이 가려진 채였다.
+/// 입력칸의 바깥 누름으로 하지 않는 까닭: 쪽을 미는 첫 손가락에 초점이 빠져 새 쪽 입력칸으로 못 옮긴다.
+class DismissKeyboard extends StatelessWidget {
+  const DismissKeyboard({super.key, required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.translucent,
+    onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+    child: child,
+  );
+}
+
+/// 워프의 입력칸 위 맥락 — 지금 폴더와 브랜치. 프롬프트 대신 여기서 어디인지 말한다.
+/// 셸의 명령 쪽과 학생의 대화 쪽이 같은 줄을 쓴다.
+class PlaceLine extends StatelessWidget {
+  const PlaceLine({super.key, required this.cwd, this.branch, required this.style});
+
+  final String cwd;
+  final String? branch;
+
+  /// 글자색까지 — 셸은 판 글자색 40% 흐림, 대화는 테마의 흐린 글자.
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 6),
+    child: Row(
+      children: [
+        Icon(Icons.folder_outlined, size: 14, color: style.color),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            tildePath(cwd),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+        ),
+        if (branch != null && branch!.isNotEmpty) ...[
+          const SizedBox(width: 12),
+          Icon(Icons.call_split, size: 14, color: style.color),
+          const SizedBox(width: 4),
+          Text(branch!, maxLines: 1, style: style),
+        ],
+      ],
+    ),
+  );
 }
