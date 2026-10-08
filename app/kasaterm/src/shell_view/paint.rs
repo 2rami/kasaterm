@@ -20,6 +20,8 @@ pub(crate) struct Slot {
     pub(crate) prompt: Option<(Vec<GridCell>, usize)>,
     pub(crate) caret_on: bool,
     pub(crate) now_ms: u64,
+    /// 이 기기 셸 칸(명령으로 보기) — 거울이 아니라 「원본」이라 부를 것이 없다.
+    pub(crate) local: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -320,13 +322,23 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         label(g, x + (w - sw) / 2.0, list_top + list_h / 2.0 + 2.0, sub, 10.5, theme::text_mute());
     };
     if !feed.loaded {
-        center(g, "원본 칸의 명령을 받는 중…", feed.error.as_deref().unwrap_or("원본 기기에서 OSC 133 구간을 읽어요"));
+        let (title, sub) = if slot.local {
+            ("명령을 받는 중…", "이 칸 셸의 OSC 133 구간을 읽어요")
+        } else {
+            ("원본 칸의 명령을 받는 중…", "원본 기기에서 OSC 133 구간을 읽어요")
+        };
+        center(g, title, feed.error.as_deref().unwrap_or(sub));
         g.pop_clip();
         return hits;
     }
     layout(pane, feed, cols);
     if pane.layout.cards.is_empty() {
-        center(g, "아직 친 명령이 없어요", "여기서 치면 원본 칸에서 돌아요 · 원본 칸 크기는 그대로예요");
+        let sub = if slot.local {
+            "아래 줄에서 치면 명령마다 카드로 쌓여요"
+        } else {
+            "여기서 치면 원본 칸에서 돌아요 · 원본 칸 크기는 그대로예요"
+        };
+        center(g, "아직 친 명령이 없어요", sub);
     }
     let total: f32 = pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
         + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32;

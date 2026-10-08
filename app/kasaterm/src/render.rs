@@ -1283,6 +1283,7 @@ impl App {
                         now_ms: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_millis() as u64),
+                        local: !kasa_mcp::remote::is_view_pane(&tab),
                     })
                 }).flatten();
                 let body_view = chat_slot.is_some() || shell_slot.is_some();
