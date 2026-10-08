@@ -1949,6 +1949,7 @@ impl App {
         // 자원이 사라진 자리를 매 턴 훑는다. 죽음 알림(`dead_panes`)이 오지 않은
         // 어긋남은 여기서만 잡히고, 그걸 놓치면 사용자가 손댈 수 없는 상태로 굳는다.
         self.sweep_orphan_leaves();
+        self.sweep_rekey_cells();
         self.sweep_lost_panes();
         self.sweep_empty_rooms();
         // Last pane closed (e.g. user typed `exit` in the only shell): shut the
@@ -2005,6 +2006,70 @@ impl App {
     /// (2026-08-25 실측: 방 하나에 %8 이 그 상태로 남아 있었고, 앱조차 「그런 pane
     /// 없다」고 답하면서 화면에는 자리를 차지했다). 태어나는 자리를 하나씩 막는 대신
     /// 매 턴 훑는 이유는, 자원을 놓는 경로가 앞으로 더 생겨도 여기서 잡히기 때문이다.
+    /// 제 셸 탭이 사라져 남의 탭만 품은 칸을 첫 탭의 pid 이름으로 바꾼다.
+    ///
+    /// 칸 번호와 PTY 번호는 같은 `%N` 이름을 나눠 쓴다. 칸 `%19` 가 제 셸을 잃고 학생 `%7` 만 탭으로
+    /// 품으면, `%19` 는 칸 이름일 뿐인데 PTY 이름처럼 쓰이는 자리(닫기·자원 놓기·화면 갱신 경로)에서
+    /// 남의 PTY 를 건드리고(2026-10-08 히후미 칸 얼어붙음·엉뚱한 Ctrl-C), 탭이 다 끝나면 탭 0개 빈 칸으로
+    /// 남았다(같은 날 kasaframe 방). 첫 탭을 닫거나 저장·복원을 거치면 이렇게 갈린다. 칸 이름을 실제로
+    /// 보여 주는 PTY 이름에 맞추면 둘이 다시 갈릴 일이 없다.
+    fn sweep_rekey_cells(&mut self) {
+        let mut moves: Vec<(String, String)> = Vec::new();
+        {
+            let ws = self.ws.lock().unwrap();
+            for tree in std::iter::once(self.pty_layout.as_ref())
+                .chain(self.windows.iter().map(|w| w.as_ref()))
+                .flatten()
+            {
+                for leaf in tree.leaves() {
+                    if let Some(new) = cell_rekey(&ws, leaf) {
+                        if !self.leaf_lingers_anywhere(&new) {
+                            moves.push((leaf.to_string(), new));
+                        }
+                    }
+                }
+            }
+        }
+        moves.sort();
+        moves.dedup();
+        for (old, new) in moves {
+            self.rekey_cell(&old, &new);
+        }
+    }
+
+    fn rekey_cell(&mut self, old: &str, new: &str) {
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let Some(pane) = ws.panes.remove(old) else { return };
+            ws.panes.insert(new.to_string(), pane);
+            if let Some(room) = ws.pane_room.remove(old) {
+                ws.pane_room.entry(new.to_string()).or_insert(room);
+            }
+            if ws.active_pane.as_deref() == Some(old) {
+                ws.active_pane = Some(new.to_string());
+            }
+            ws.rebuild_pid_map();
+        }
+        for tree in std::iter::once(&mut self.pty_layout).chain(self.windows.iter_mut()).flatten() {
+            let holds = tree.leaves().contains(&old);
+            if holds {
+                tree.replace_leaf(old, kasa_pty::PtyLayout::single(new));
+            }
+        }
+        if let Some(opener) = self.pane_opener.remove(old) {
+            self.pane_opener.insert(new.to_string(), opener);
+        }
+        for set in [&mut self.statusbar.hidden, &mut self.statusbar.shown] {
+            if set.remove(old) {
+                set.insert(new.to_string());
+            }
+        }
+        eprintln!("[layout] 칸 {old} 은 제 셸이 없어 보여 주는 탭 {new} 의 이름으로 바꿨다");
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+    }
+
     fn sweep_orphan_leaves(&mut self) {
         let mut orphans: Vec<String> = Vec::new();
         {
@@ -3669,6 +3734,17 @@ mod cross_room_move_tests {
 /// 한쪽만 보고 판정하면 멀쩡한 pane 을 걷는다. PTY 만 있는 것은 갓 split 해 첫
 /// 화면이 아직 안 온 pane 이고, 그리드만 있는 것은 이미지·마크다운·웹 pane 이라
 /// 셸이 원래 없다(`resize_backend` 도 `self.pty` 미스로 그냥 건너뛴다).
+/// 칸 `leaf` 의 새 이름 — 모든 탭이 pid 를 받았고 그중 칸 이름과 같은 것이 없을 때 첫 탭의 pid.
+/// pid 없는 탭(첫 프레임 전)이 있거나 그 이름의 칸이 이미 있으면 그대로 둔다.
+fn cell_rekey(ws: &Workspace, leaf: &str) -> Option<String> {
+    let pane = ws.panes.get(leaf)?;
+    if pane.tabs.iter().any(|t| t.pid.as_deref().is_none_or(|pid| pid == leaf)) {
+        return None;
+    }
+    let first = pane.tabs.first()?.pid.clone()?;
+    (!ws.panes.contains_key(&first)).then_some(first)
+}
+
 /// 이 칸이 그릴 것을 하나라도 들고 있나. 탭이 하나도 없는 칸은 그리드가 있어도 빈 껍데기다 —
 /// 제 PTY 가 끝나 「빈 자리」로 남아 남의 학생을 탭으로 품던 칸은 그 탭들까지 끝나면 탭 0개로
 /// 남는데, 「그리드 있음·터미널 탭 없음」이라 웹·그림 칸처럼 산 것으로 읽혀 영영 안 걷혔다
@@ -3931,7 +4007,22 @@ mod drop_zone_tests {
 
 #[cfg(test)]
 mod orphan_leaf_tests {
-    use super::{leaf_is_orphan, pane_shows_anything, PaneState, Workspace};
+    use super::{cell_rekey, leaf_is_orphan, pane_shows_anything, PaneState, PaneTab, Workspace};
+
+    /// 제 셸 탭을 잃고 남의 탭만 품은 칸은 첫 탭 이름으로, 제 탭이 있거나 아직 pid 를 못 받은 칸은 그대로.
+    #[test]
+    fn a_cell_without_its_own_tab_takes_the_first_tab_name() {
+        let tab = |pid: Option<&str>| PaneTab { pid: pid.map(str::to_string), ..PaneTab::default() };
+        let mut ws = Workspace::default();
+        ws.panes.insert("%19".into(), PaneState { tabs: vec![tab(Some("%7")), tab(Some("%9"))], ..PaneState::default() });
+        ws.panes.insert("%4".into(), PaneState { tabs: vec![tab(Some("%4")), tab(Some("%8"))], ..PaneState::default() });
+        ws.panes.insert("%5".into(), PaneState { tabs: vec![tab(None)], ..PaneState::default() });
+        assert_eq!(cell_rekey(&ws, "%19").as_deref(), Some("%7"));
+        assert_eq!(cell_rekey(&ws, "%4"), None, "제 셸 탭이 있다");
+        assert_eq!(cell_rekey(&ws, "%5"), None, "첫 프레임 전");
+        ws.panes.insert("%7".into(), PaneState::default());
+        assert_eq!(cell_rekey(&ws, "%19"), None, "그 이름의 칸이 이미 있으면 안 바꾼다");
+    }
 
     /// 탭이 하나도 없는 칸은 그리드가 있어도 그릴 것이 없다 — 걷어야 할 빈 껍데기.
     #[test]
