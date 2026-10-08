@@ -68,12 +68,16 @@ fi
 # 라벨은 **정확히** 맞춘다 — `com.geono.kasaterm-gateway-tunnel` 같은 이웃이 정규식에 같이
 # 걸리면 pid 가 둘이 되어 lsof 가 죽고, 그 결과가 「학생: 없음」으로 읽혀 도는 학생 위로
 # 앱을 갈아 끼운다(2026-09-07 새벽 두 번 그랬다 — 넷이 resume 으로 돌아왔지만 하던 턴은 끊겼다).
-FIND_SOCK='P=$(launchctl list | awk "\$3 == \"'"$LABEL"'\" {print \$1}"); [ -n "$P" ] && [ "$P" != "-" ] && lsof -p $P 2>/dev/null | grep -o "/var/folders/[^ ]*kasaterm-$P.sock" | head -1'
+# 그런데 앱은 라벨 밖에서(`open` 으로) 돌기도 한다 — 그때 라벨로 찾으면 pid 가 비어 같은 사고가
+# 난다(2026-10-08: 학생 넷이 일하는데 라벨엔 앱이 없었다). 그래서 실행 파일 경로로 찾고, 끝을
+# 묶어 같은 폴더의 kasaterm-cli 가 함께 걸리지 않게 한다.
+FIND_PID='pgrep -f "Applications/kasaterm.app/Contents/MacOS/kasaterm( |\$)" | head -1'
+FIND_SOCK='P=$('"$FIND_PID"'); [ -n "$P" ] && lsof -p $P 2>/dev/null | grep -o "/var/folders/[^ ]*kasaterm-$P.sock" | head -1'
 CLI='~/Applications/kasaterm.app/Contents/MacOS/kasaterm-cli'
 
 if [ "$PROMOTE" = 1 ]; then
   # 앱이 도는데 board 를 못 읽으면 「없음」이 아니라 「모름」이다 — 모르면 갈지 않는다.
-  RUNNING=$(rmt "launchctl list | awk '\$3 == \"$LABEL\" && \$1 != \"-\" {print \$1}'" || true)
+  RUNNING=$(rmt "$FIND_PID" || true)
   BOARD=$(rmt "S=\$($FIND_SOCK); [ -n \"\$S\" ] && KASATERM_SOCKET_PATH=\"\$S\" $CLI board 2>/dev/null" || true)
   if [ -n "$RUNNING" ] && [ -z "$BOARD" ]; then
     say "앱(pid $RUNNING)은 도는데 학생 목록을 못 읽었어요 — 도는 학생 위로 갈아 끼울 수 없어 멈춥니다."
@@ -116,7 +120,9 @@ fi
 rm -rf ~/Applications/kasaterm.app
 cp -R ~/kasaterm-dist/kasaterm.app ~/Applications/
 touch ~/Applications/kasaterm.app
-launchctl bootstrap "gui/$U" ~/Library/LaunchAgents/$L.plist
+# ssh 에서는 bootstrap 이 「5: Input/output error」로 거절되곤 한다 — set -e 에 걸려 새 판이
+# 깔린 채 앱이 안 뜨지 않게 open 으로 받친다(그 앱은 라벨 밖에서 돈다, FIND_PID 가 그래서 경로로 찾는다).
+launchctl bootstrap "gui/$U" ~/Library/LaunchAgents/$L.plist 2>/dev/null || open -a ~/Applications/kasaterm.app
 echo ok
 REMOTE
 )
