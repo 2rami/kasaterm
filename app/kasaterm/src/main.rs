@@ -3514,14 +3514,21 @@ impl Workspace {
     /// layout/tab mutation; the panes-contains-key fallback only fires
     /// in the brief window before the first `ScreenUpdate` for a fresh
     /// shell has populated the tab's pid.
+    ///
+    /// 칸 번호와 PTY 번호는 같은 `%N` 이름을 나눠 쓴다. 제 PTY 가 끝나 「빈 자리」로 남은 칸(`%4`)에
+    /// 남의 학생이 탭으로 앉고 `%4` 라는 PTY 가 다른 칸에 있을 수 있다 — 그때 표나 이름만 믿으면
+    /// 그 PTY 의 화면이 엉뚱한 칸의 첫 탭에 써지고, 정작 보이는 칸은 얼어붙는다(2026-10-08 히후미).
+    /// 그래서 실제로 그 pid 의 탭을 든 칸만 돌려준다.
     fn outer_for_pty(&self, pty_id: &str) -> Option<String> {
-        if let Some(outer) = self.pid_to_pane.get(pty_id) {
+        let hosts = |p: &PaneState| p.tabs.iter().any(|t| t.pid.as_deref() == Some(pty_id));
+        if let Some(outer) = self.pid_to_pane.get(pty_id).filter(|o| self.panes.get(*o).is_some_and(hosts)) {
             return Some(outer.clone());
         }
-        if self.panes.contains_key(pty_id) {
-            return Some(pty_id.to_string());
+        if let Some((outer, _)) = self.panes.iter().find(|(_, p)| hosts(p)) {
+            return Some(outer.clone());
         }
-        None
+        // 바깥 칸 번호를 그대로 물은 것이거나, 첫 프레임 전의 새 셸이다.
+        self.panes.contains_key(pty_id).then(|| pty_id.to_string())
     }
 
     /// `outer_for_pty` 의 반대 — 바깥 pane 이 **지금 보여 주는 탭**의 pid.
@@ -3544,6 +3551,9 @@ impl Workspace {
     /// Locate `(outer_pane, tab_index)` for a backend pty id. Used by
     /// `pump_pty_screens` to write the right tab's content even when the
     /// update came from a non-active or secondary-tab shell.
+    ///
+    /// 그 pid 의 탭도, pid 를 아직 못 받은 탭도 없으면 None — 번호만 같은 남의 칸의 첫 탭에
+    /// 이 PTY 화면을 쓰지 않는다.
     fn find_tab_by_pty<'a>(&'a mut self, pty_id: &str) -> Option<(&'a mut PaneState, usize)> {
         let outer = self.outer_for_pty(pty_id)?;
         let pane = self.panes.get_mut(&outer)?;
@@ -3551,7 +3561,8 @@ impl Workspace {
             .tabs
             .iter()
             .position(|t| t.pid.as_deref() == Some(pty_id))
-            .unwrap_or(0);
+            .or_else(|| pane.tabs.iter().position(|t| t.pid.is_none()))
+            .or_else(|| pane.tabs.is_empty().then_some(0))?;
         Some((pane, idx))
     }
 }
@@ -9613,6 +9624,27 @@ mod tests {
     /// (`usize::MAX`) 인덱스가 터지면서 **앱이 통째로 죽었다**. 비게 만드는
     /// 경로는 각각 막았지만 `Deref` 는 `PaneState` 를 쓰는 **모든** 자리가
     /// 지나는 길이라, 불변식이 또 깨져도 렌더가 살아남는지를 여기서 못 박는다.
+    /// 칸 `%4` 가 「빈 자리」로 남아 남의 학생(`%13`)을 탭으로 들고, `%4` 라는 PTY 는 다른 칸 `%19`
+    /// 의 탭에 있을 때 — 표가 낡아 `%4 → %4` 를 가리켜도 화면은 `%19` 로 가야 한다(2026-10-08 히후미
+    /// 칸이 15:00 에 얼어붙은 꼴). 아무 칸도 안 든 번호는 남의 칸에 앉히지 않는다.
+    #[test]
+    fn pty_updates_route_to_the_pane_that_actually_hosts_them() {
+        let tab = |pid: &str| PaneTab { pid: Some(pid.to_string()), ..PaneTab::default() };
+        let mut ws = Workspace::default();
+        ws.panes.insert("%4".into(), PaneState { tabs: vec![tab("%13")], ..PaneState::default() });
+        ws.panes.insert("%19".into(), PaneState { tabs: vec![tab("%4")], ..PaneState::default() });
+        ws.pid_to_pane.insert("%4".into(), "%4".into());
+        assert_eq!(ws.outer_for_pty("%4").as_deref(), Some("%19"), "낡은 표보다 실제로 든 칸");
+        let (pane, idx) = ws.find_tab_by_pty("%4").unwrap();
+        assert_eq!((pane.tabs[idx].pid.as_deref(), idx), (Some("%4"), 0));
+        assert_eq!(ws.outer_for_pty("%13").as_deref(), Some("%4"));
+        assert_eq!(ws.outer_for_pty("%77"), None);
+        ws.panes.remove("%19");
+        assert!(ws.find_tab_by_pty("%4").is_none(), "번호만 같은 남의 칸의 첫 탭에 쓰지 않는다");
+        ws.panes.insert("%5".into(), PaneState::default());
+        assert_eq!(ws.find_tab_by_pty("%5").map(|(_, i)| i), Some(0), "첫 프레임 전의 새 셸은 제 칸");
+    }
+
     #[test]
     fn empty_tabs_never_panic_the_render() {
         let mut ps = PaneState::default();

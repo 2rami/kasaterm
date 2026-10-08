@@ -65,10 +65,13 @@ impl App {
         *state = None;
     }
 
+    /// 닫는 칸이 든 PTY 들 — 탭의 pid 로만 센다. 칸 번호를 그대로 PTY 이름으로 쓰면, 제 PTY 가 끝난
+    /// 「빈 자리」 칸을 닫을 때 같은 번호로 다른 칸에 사는 학생의 입력이 막히고 Ctrl-C 까지 맞는다
+    /// (2026-10-08 히후미: 14:59:45 에 끊긴 뒤 tell 이 20분 동안 「target input closed」).
     pub(crate) fn close_grace_pids(&self, pane: &str) -> Vec<String> {
         let ws = self.ws.lock().unwrap();
-        let mut ids = vec![pane.to_string()];
-        if let Some(p) = ws.panes.get(pane) { ids.extend(p.tabs.iter().filter_map(|t| t.pid.clone())); }
+        let mut ids: Vec<String> = ws.panes.get(pane).map(|p| p.tabs.iter().filter_map(|t| t.pid.clone()).collect()).unwrap_or_default();
+        if ids.is_empty() && ws.outer_for_pty(pane).is_none_or(|o| o == pane) { ids.push(pane.to_string()); }
         ids.sort(); ids.dedup(); ids
     }
 
@@ -101,8 +104,9 @@ impl App {
         let ids: Vec<_> = self.closed_panes.iter().filter(|c| expired(c, now, grace))
             .map(|c| c.pane_id.clone()).collect();
         for id in ids {
-            // kill_hidden_pane also checks this; never expire a resurrected ID.
-            if self.leaf_lingers_anywhere(&id) { continue; }
+            // kill_hidden_pane also checks this; never expire a resurrected ID. 화면에 다시 선 칸은 닫힌
+            // 게 아니다 — 입력 문을 열어 둔다. 안 열면 보이는 학생에게 tell 이 「target input closed」로 막힌다.
+            if self.leaf_lingers_anywhere(&id) { self.close_grace_input(&id, false); continue; }
             for pid in self.close_grace_pids(&id) {
                 if let Some(pty) = self.pty.get(&pid) { pty.terminate_local(); }
             }

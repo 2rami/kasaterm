@@ -2665,8 +2665,12 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.notify_source_closed(target);
         let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
-        self.pty.remove(target);
-        kasa_mcp::surface_keys::remove(target);
+        // 칸 번호와 같은 이름의 PTY 가 **다른 칸**의 탭에 살면 그건 이 칸 것이 아니다 — 놓지 않는다.
+        let hosted_elsewhere = self.ws.lock().unwrap().outer_for_pty(target).is_some_and(|o| o != target);
+        if !hosted_elsewhere {
+            self.pty.remove(target);
+            kasa_mcp::surface_keys::remove(target);
+        }
         Self::cleanup_collab_markers(target, closed_cwd.as_deref());
         // Free the GPU texture if this was an image pane (no-op otherwise).
         if let Some(g) = self.gpu.as_mut() {

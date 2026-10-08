@@ -208,6 +208,11 @@ impl App {
         // when the first update from a freshly-spawned shell arrives.
         // Mirrors retain source rows/columns, including TUI mouse coordinates.
         // Display-only scaling is shared by rendering, hit testing and IME.
+        // 같은 번호의 칸이 있는데 이 PTY 를 안 든다 — 번호만 겹친 남의 칸이다. 그 칸의 첫 탭을
+        // 빼앗으면 남의 화면이 이 PTY 로 덮인다. 이 화면은 보일 자리가 없으니 버린다.
+        if ws.panes.contains_key(&update.pane_id) && ws.find_tab_by_pty(&update.pane_id).is_none() {
+            return;
+        }
         let (pane, tab_idx) = match ws.find_tab_by_pty(&update.pane_id) {
             Some(p) => p,
             None => {
@@ -416,6 +421,8 @@ impl App {
                 // 세대 가드를 두면 `to ..` 직후 새 로컬 화면을 옛 원격 한 프레임이
                 // 다시 덮는다.
                 if pane_replaced(&update.pane_id, &sess_weak) {
+                    // 칸 화면이 얼어붙으면 여기부터 본다 — 이 일꾼이 끝나면 그 PTY 의 화면은 더 안 온다.
+                    eprintln!("[pump] {} 에 다른 세션이 앉아 화면 받기를 멈춤", update.pane_id);
                     return;
                 }
                 // 세션 진입 즉시 감지(사용자): dirty 행에 statusline 세션 id 마커가 있으면
