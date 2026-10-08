@@ -2016,7 +2016,7 @@ impl App {
                 for leaf in tree.leaves() {
                     if leaf_is_orphan(
                         self.pty.contains_key(leaf),
-                        ws.panes.contains_key(leaf),
+                        pane_shows_anything(&ws, leaf),
                         self.grid_needs_pty(&ws, leaf),
                     ) {
                         orphans.push(leaf.to_string());
@@ -2711,7 +2711,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let (has_grid, needs_pty) = {
             let ws = self.ws.lock().unwrap();
             (
-                ws.panes.contains_key(target),
+                pane_shows_anything(&ws, target),
                 self.grid_needs_pty(&ws, target),
             )
         };
@@ -3669,6 +3669,14 @@ mod cross_room_move_tests {
 /// 한쪽만 보고 판정하면 멀쩡한 pane 을 걷는다. PTY 만 있는 것은 갓 split 해 첫
 /// 화면이 아직 안 온 pane 이고, 그리드만 있는 것은 이미지·마크다운·웹 pane 이라
 /// 셸이 원래 없다(`resize_backend` 도 `self.pty` 미스로 그냥 건너뛴다).
+/// 이 칸이 그릴 것을 하나라도 들고 있나. 탭이 하나도 없는 칸은 그리드가 있어도 빈 껍데기다 —
+/// 제 PTY 가 끝나 「빈 자리」로 남아 남의 학생을 탭으로 품던 칸은 그 탭들까지 끝나면 탭 0개로
+/// 남는데, 「그리드 있음·터미널 탭 없음」이라 웹·그림 칸처럼 산 것으로 읽혀 영영 안 걷혔다
+/// (2026-10-08 kasaframe 방: 지도엔 칸 여섯, 화면 아래 반은 검은 빈칸).
+fn pane_shows_anything(ws: &Workspace, id: &str) -> bool {
+    ws.panes.get(id).is_some_and(|p| !p.tabs.is_empty())
+}
+
 fn leaf_is_orphan(has_pty: bool, has_grid: bool, grid_needs_pty: bool) -> bool {
     if has_pty {
         return false;
@@ -3923,7 +3931,19 @@ mod drop_zone_tests {
 
 #[cfg(test)]
 mod orphan_leaf_tests {
-    use super::leaf_is_orphan;
+    use super::{leaf_is_orphan, pane_shows_anything, PaneState, Workspace};
+
+    /// 탭이 하나도 없는 칸은 그리드가 있어도 그릴 것이 없다 — 걷어야 할 빈 껍데기.
+    #[test]
+    fn a_cell_with_no_tabs_shows_nothing() {
+        let mut ws = Workspace::default();
+        ws.panes.insert("%19".into(), PaneState { tabs: Vec::new(), ..PaneState::default() });
+        ws.panes.insert("%4".into(), PaneState::default());
+        assert!(!pane_shows_anything(&ws, "%19"));
+        assert!(pane_shows_anything(&ws, "%4"));
+        assert!(!pane_shows_anything(&ws, "%99"));
+        assert!(leaf_is_orphan(false, pane_shows_anything(&ws, "%19"), false), "PTY 도 탭도 없는 칸은 걷는다");
+    }
 
     /// 2026-08-24: 숨긴 pane 의 낡은 레코드가 같은 번호를 물려받은 **산 pane** 의
     /// 자원을 놓으면서 트리는 안 걷어, 클릭도 안 되는 검은 사각형이 남았다.
