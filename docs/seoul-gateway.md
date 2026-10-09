@@ -80,7 +80,7 @@ Cloudflare 터널·`access ssh` 로 닿던 길을 전부 이 서버 경유로 �
 | 집 데스크톱 ssh `windesk-wan` | 윈도우 서비스 `cloudflared` | 18724 ← 예약 작업 `kasa-seoul-tunnel`(SYSTEM, 부팅 때) | 18:38 |
 | `debimarlene.com`·`www`·`panel`(뎁마 봇 웹), `nacho`, `mm` | 미니 터널 `debimarlene`(LaunchDaemon) → 미니 Caddy 8090 | 18890 ← 미니 LaunchAgent `com.geono.kasa-seoul-web-tunnel` | 18:54~19:06 |
 | 디자인 미리보기 `<이름>-<4자>` | 미니 터널 `design-preview` → 문지기 4791 | 18891 ← 같은 웹 터널 | 18:58~19:03 |
-| `geono` | 맥북 터널 `geono-hub` → 4749 | 18892 ← 맥북 LaunchAgent `com.geono.kasa-seoul-tunnel` | 18:53 |
+| `geono` | 맥북 터널 `geono-hub` → 4749 | 18892 ← 미니 웹 터널(운영 서버 4749 도 미니). 처음엔 맥북 LaunchAgent `com.geono.kasa-seoul-tunnel` 이 걸었다 | 18:53, 미니로 10-09 |
 | `kasaterm-mini` | 미니 kasaterm 터널 → 관문·LFS | 안 옮김 — 서울이 역터널 18790·18794 로 직접 닿는다. 그 역터널의 예비라 Cloudflare 를 끌 때 같이 없어진다 | — |
 
 DNS 레코드는 `homehub`·`homepc`·`macmini`·`kasaterm-mini` 만 터널 CNAME 으로 남았다. ssh 는 DNS 를 안 보므로(127.0.0.1 로 간다)
@@ -90,8 +90,10 @@ DNS 레코드는 `homehub`·`homepc`·`macmini`·`kasaterm-mini` 만 터널 CNAM
 ### 역터널 키
 
 서울 `/var/lib/kasa-tunnel/.ssh/authorized_keys` 한 줄에 한 기계, 모두 `restrict,port-forwarding,permitlisten="127.0.0.1:<자기 포트>",
-permitopen="127.0.0.1:1",command="/bin/false"`. 미니 키만 permitlisten 이 여럿(18790·18794·18722·18890·18891)이고 permitopen 이
+permitopen="127.0.0.1:1",command="/bin/false"`. 미니 키만 permitlisten 이 여럿(18790·18794·18722·18890·18891·18892)이고 permitopen 이
 18723·18724 다 — 미니가 집 기계로 ssh 할 때 이 키로 `ProxyJump`(미니 `~/.ssh/config` 의 `kasa-seoul-jump`)한다.
+맥북 키(18892)는 geono 를 미니로 옮긴 뒤에도 되돌리기용으로 남겨 두었다 — 맥북 터널은 plist 를 `.disabled-20261009` 로 바꿔 꺼 두었고,
+두 기계가 18892 를 함께 잡으면 늦게 건 쪽 터널이 통째로 내려가니 되돌릴 땐 미니 웹 터널에서 그 줄을 먼저 뺀다(geono-hub README 「바깥 주소」).
 
 - ⚠️ authorized_keys 의 `permitopen` 은 `none` 을 못 받는다 — 쓰면 그 키 줄이 통째로 무효가 되어 「Permission denied (publickey)」만
   남는다(sshd_config 의 PermitOpen 은 받는다). -L 을 막으려면 아무도 안 듣는 `127.0.0.1:1` 을 준다.
