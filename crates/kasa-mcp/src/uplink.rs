@@ -416,6 +416,8 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                 "[uplink] {gateway} 에 붙었어요 — 주소 {n}개{}",
                 account.map(|a| format!(", 계정 {a}")).unwrap_or_default()
             );
+            // 관문에 다시 닿았다 — 끊긴 동안 만료된 접근 토큰을 다음 주기(최대 5분)까지 두지 않고 바로 받는다.
+            crate::agent_chains::poke();
         }
         other => anyhow::bail!("관문의 첫 답이 이상해요: {other:?}"),
     }

@@ -1011,6 +1011,9 @@ pub fn spawn() {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         let mut unsupported_said = false;
         loop {
+            // 관문·네트워크가 안 닿아 이번 주기를 놓쳤으면 5분이 아니라 30초 뒤 다시 — 기기엔 갱신 토큰이 없어
+            // 받기를 놓친 시간만큼 claude 칸이 만료 토큰으로 멈춘다(잠들었다 깬 맥북, 2026-10-09).
+            let mut missed = false;
             if let Some((cred, stamp)) = crate::device_auth::capture() {
                 let gateway = Gateway::new(&cred.relay, &cred.token);
                 let authorized = || crate::device_auth::stamp_is_current(&stamp);
@@ -1021,12 +1024,13 @@ pub fn spawn() {
                         unsupported_said = true;
                         eprintln!("[agent-chains] 관문이 사슬 맡기기를 모르는 옛 판이에요 — 기기마다 로그인을 그대로 써요");
                     }
+                    Err(SyncError::Failed) => missed = true,
                     Err(_) => {}
                 }
             } else {
                 alert_offline();
             }
-            for _ in 0..60 {
+            for _ in 0..if missed { 6 } else { 60 } {
                 std::thread::sleep(Duration::from_secs(5));
                 if POKED.swap(false, Ordering::AcqRel) {
                     break;

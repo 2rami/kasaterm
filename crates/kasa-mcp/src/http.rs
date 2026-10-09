@@ -4128,6 +4128,11 @@ async fn claude_usage_handler(
                         g.insert(key, Instant::now() + BACKOFF_FOR);
                     }
                 }
+                // 이 슬롯의 접근 토큰이 죽었다 — 기기엔 갱신 토큰이 없어(관문이 쥔다) claude 가 스스로 못 살린다.
+                // 5분 주기를 기다리면 그동안 칸마다 「OAuth token revoked」로 멈춘다(2026-10-09 실측).
+                if matches!(code, 401 | 403) {
+                    crate::agent_chains::poke();
+                }
                 // 상태만 남긴다(토큰은 절대). 조용한 실패는 현장에서 못 가른다.
                 eprintln!("[claude-usage] upstream {code} — slot={}", slot_label(&dir));
             }
