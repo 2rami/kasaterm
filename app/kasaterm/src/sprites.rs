@@ -687,6 +687,37 @@ pub(crate) fn draw_student_face(
     true
 }
 
+/// 테마 캐릭터가 없는 학생 칸의 얼굴 자리 — 하네스 로고. 같은 하네스 칸이 여럿이면 같은 학생 여러 칸과
+/// 같은 규칙(`accent_variant` 순번)으로 색을 갈라 어느 칸인지 가린다(2026-10-09 「테마 없는 클로드·코덱스는
+/// 로고, 겹치면 색 다르게」). 학생 하네스가 아니면 아무것도 안 그리고 false.
+pub(crate) fn draw_harness_logo(g: &mut gpu::GpuRenderer, harness: &str, pane: &str, x: f32, y: f32, size: f32) -> bool {
+    let icon = match harness {
+        "claude" => "claude",
+        "codex" => "codex",
+        "agy" => "antigravity",
+        _ => return false,
+    };
+    g.queue_icon(icon, x, y, size, theme::accent_variant(theme::accent(), logo_ordinal(harness, pane)));
+    true
+}
+
+/// 같은 하네스의 로고 칸 가운데 이 칸의 순번 — 칸 번호 순. 그리는 자리가 여럿(사이드바·대화 보기)이라
+/// 최근 몇 초 안에 그려진 칸만 센다. 닫힌 칸은 그려지지 않아 곧 빠지고 뒷 순번이 당겨진다.
+fn logo_ordinal(harness: &str, pane: &str) -> usize {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static SEEN: OnceLock<Mutex<HashMap<(String, String), Instant>>> = OnceLock::new();
+    let mut seen = SEEN.get_or_init(Default::default).lock().unwrap();
+    let now = Instant::now();
+    seen.insert((harness.to_string(), pane.to_string()), now);
+    seen.retain(|_, at| now.duration_since(*at) < Duration::from_secs(5));
+    let num = |p: &str| p.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX);
+    let mut panes: Vec<&str> = seen.keys().filter(|(h, _)| h == harness).map(|(_, p)| p.as_str()).collect();
+    panes.sort_by(|a, b| num(a).cmp(&num(b)).then(a.cmp(b)));
+    panes.iter().position(|p| *p == pane).unwrap_or(0)
+}
+
 /// 0..1 을 오가는 부드러운 호흡 — `period` 초에 한 번 왕복한다.
 ///
 /// 켰다 끄는 깜빡임과 갈리는 건 **가장자리 시야**에서다. 밝기가 뚝 끊기면 눈이

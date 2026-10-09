@@ -64,6 +64,10 @@ struct SidebarRowInfo {
     student: crate::sidebar_pulse::RowStudent,
     /// 배정 학생명(얼굴용). claude 가 안 붙은 pane 은 빈 문자열.
     who: String,
+    /// 이 칸에서 도는 학생 하네스(claude·codex) — 학생 얼굴이 없을 때 그 자리에 로고를 놓는다.
+    agent: String,
+    /// 칸 id. 로고 칸이 여럿일 때 색 순번을 가르는 열쇠.
+    pane: String,
     /// 줄에 적는 것 — 그 pane 이 지금 무엇인가(claude · zsh · 편집기…).
     label: String,
     /// 오른쪽 끝 상태 점 색(`pane_state_color`).
@@ -2332,6 +2336,8 @@ impl App {
                 SidebarRowInfo {
                     student,
                     who,
+                    agent: self.pty.get(id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()).unwrap_or_default(),
+                    pane: id.clone(),
                     label,
                     color: self.pane_state_color(id),
                     is_cur,
@@ -4201,14 +4207,12 @@ impl App {
                         {
                             // 학생이 없는 자리 — 빈 칸으로 두면 "여긴 뭐지"가 되므로
                             // 그 칸이 무엇인지 말해 둔다(웹=globe · 이미지 · md · 터미널).
+                            // 테마 없이 claude·codex 가 돌면 그 로고(칸마다 다른 색).
                             let isz = face.min(16.0);
-                            g.queue_icon(
-                                info.icon,
-                                mx + (mw - isz) / 2.0,
-                                my + (mh - isz) / 2.0,
-                                isz,
-                                theme::text_dim(),
-                            );
+                            let (ix, iy) = (mx + (mw - isz) / 2.0, my + (mh - isz) / 2.0);
+                            if !crate::sprites::draw_harness_logo(g, &info.agent, &info.pane, ix, iy, isz) {
+                                g.queue_icon(info.icon, ix, iy, isz, theme::text_dim());
+                            }
                         }
                     }
                     // 도는 칸은 **걷기와 함께** 칸 윤곽이 숨쉰다(사용자 2026-08-24 「미니맵에서
@@ -4386,13 +4390,10 @@ impl App {
                             && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs())
                         {
                             let isz = face.min(16.0);
-                            g.queue_icon(
-                                info.icon,
-                                mx + (mw - isz) / 2.0,
-                                my + (mh - isz) / 2.0,
-                                isz,
-                                theme::text_dim(),
-                            );
+                            let (ix, iy) = (mx + (mw - isz) / 2.0, my + (mh - isz) / 2.0);
+                            if !crate::sprites::draw_harness_logo(g, &info.agent, &info.pane, ix, iy, isz) {
+                                g.queue_icon(info.icon, ix, iy, isz, theme::text_dim());
+                            }
                         }
                     }
                     if minimap_has_bar(mw, mh) {
@@ -4496,6 +4497,8 @@ impl App {
                             face,
                             anim_phase_secs(),
                         );
+                    let has_face = has_face
+                        || crate::sprites::draw_harness_logo(g, &info.agent, &info.pane, rx + 7.0, ry + 3.0, face);
                     if !has_face {
                         if info.icon != "terminal" {
                             // 웹·이미지·md pane 줄 — 상태 점 대신 종류 아이콘.

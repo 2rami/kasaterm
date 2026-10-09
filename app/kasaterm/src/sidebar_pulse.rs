@@ -184,6 +184,10 @@ pub(crate) struct RowStudent {
     /// 세션(창) 이름. 학생 없는 pane 은 그 pane 이름(zsh·웹…).
     pub(crate) title: String,
     pub(crate) turn: RowTurn,
+    /// 학생 얼굴이 없는데 claude·codex 가 돌면 그 하네스 — 얼굴 자리에 로고를 놓는다.
+    pub(crate) agent: String,
+    /// 칸 id. 로고 칸이 여럿일 때 색 순번을 가르는 열쇠.
+    pub(crate) pane: String,
 }
 
 /// 줄의 차례. 사람 손이 필요한 기다림과 안 본 보고가 「내 차례」다.
@@ -245,7 +249,10 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     let (fx, fy) = (rx + 8.0, ry + 5.0);
     // 걷는 그림은 전신 + 여백이라 얼굴 칸 그대로면 작아 보인다 — 줄 높이 안에서 키운다.
     let walked = p.busy && crate::sprites::draw_student_walk(g, &s.who, fx - 5.0, fy - 4.0, FACE + 10.0, phase);
-    if !walked && !crate::sprites::draw_student_face_anim(g, &s.who, fx, fy, FACE, phase) {
+    if !walked
+        && !crate::sprites::draw_student_face_anim(g, &s.who, fx, fy, FACE, phase)
+        && !crate::sprites::draw_harness_logo(g, &s.agent, &s.pane, fx + 2.0, fy + 2.0, FACE - 4.0)
+    {
         g.queue_icon(p.icon, fx + 4.0, fy + 4.0, 12.0, theme::text_dim());
     }
     let tx = fx + FACE + 8.0;
@@ -296,7 +303,7 @@ fn fixture_entry(pane: &str) -> Option<(&'static str, &'static str, RowTurn, Opt
 
 fn fixture_row(pane: &str) -> Option<RowStudent> {
     let (name, title, turn, _) = fixture_entry(pane)?;
-    Some(RowStudent { who: name.into(), title: title.into(), turn })
+    Some(RowStudent { who: name.into(), title: title.into(), turn, agent: String::new(), pane: pane.into() })
 }
 
 /// 가짜 학생이 도는 중이면 그 경과 초 — 렌더가 배치도 칸과 목록 줄에 같이 싣는다.
@@ -414,7 +421,12 @@ impl App {
         } else {
             row_title(&label, kind)
         };
-        RowStudent { who, title, turn }
+        let agent = if who.is_empty() {
+            self.pty.get(id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        RowStudent { who, title, turn, agent, pane: id.to_string() }
     }
 
     /// 목록 보기에 설 이 방 pane — 거울 줄을 빼고(원본 기기 줄과 같은 학생) 내 차례 → 하는 중 →

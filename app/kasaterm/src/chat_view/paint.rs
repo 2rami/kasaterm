@@ -964,7 +964,10 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
             match &row.kind {
                 Kind::Name { text, via } => {
                     // 얼굴 그림은 자르기를 안 타고 위에 얹힌다 — 줄이 목록 안에 다 들어올 때만 그린다.
-                    let face = ry + 3.0 >= list_y && ry + 19.0 <= list_bottom && crate::sprites::draw_student_face(g, text, col_x, ry + 3.0, 16.0);
+                    // 테마 캐릭터가 없으면 이름이 곧 하네스(claude·codex)다 — 얼굴 대신 그 로고.
+                    let fits = ry + 3.0 >= list_y && ry + 19.0 <= list_bottom;
+                    let face = fits && (crate::sprites::draw_student_face(g, text, col_x, ry + 3.0, 16.0)
+                        || crate::sprites::draw_harness_logo(g, text, &slot.pane, col_x, ry + 3.0, 16.0));
                     let nx = col_x + if face { 22.0 } else { 0.0 };
                     let t = crate::info::fit_text(g, text, (col_x + col_w - nx).max(0.0), 12.0, true);
                     label(g, nx, ry + 4.0, &t, 12.0, theme::text_dim(), true);

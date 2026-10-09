@@ -3254,8 +3254,13 @@ fn draw_group_head(
     // 두면 같은 학생이 두 줄로 서서 「왜 둘이지」가 된다(2026-09-14 실측). 자리
     // 번호 알약과 탭 수만 남겨 「한 자리를 N 개가 번갈아 쓴다」로 읽히게 한다.
     let tabbed = gp.tabs.len() > 1;
-    let shell_pane = gp.label.is_empty() || tabbed;
-    let tx = if shell_pane {
+    // 테마 캐릭터 없이 claude·codex 가 도는 칸은 이름이 비어도 셸이 아니다 — 번호 알약 대신 하네스 로고.
+    let logo_pane = gp.label.is_empty() && !tabbed && matches!(gp.harness.as_str(), "claude" | "codex" | "agy");
+    let shell_pane = (gp.label.is_empty() && !logo_pane) || tabbed;
+    let tx = if logo_pane {
+        crate::sprites::draw_harness_logo(g, &gp.harness, &gp.pane, fx, y + 3.0, FACE);
+        fx + FACE + 6.0
+    } else if shell_pane {
         let id = fit_text(g, &gp.pane, 44.0, 9.0, false);
         let iw = g.measure_chrome_text(&id, 9.0, false);
         pill_rect(g, fx, y + 4.0, iw + 8.0, GROUP_H - 8.0, theme::surface());
@@ -3426,7 +3431,8 @@ fn draw_tab_row(
     let tint = theme::character_accent_any(&t.label).unwrap_or_else(theme::text_mute);
     // 그룹 머리와 같은 규칙 — 배정된 학생이면 얼굴, 아니면 색 점. 셸만 도는 탭은
     // 이름이 비어 있어 늘 점이 된다.
-    let has_face = crate::render::draw_student_face(g, &t.label, cx, y + 3.0, FACE);
+    let has_face = crate::render::draw_student_face(g, &t.label, cx, y + 3.0, FACE)
+        || (t.label.is_empty() && crate::sprites::draw_harness_logo(g, &t.harness, &t.pane, cx, y + 3.0, FACE));
     if !has_face {
         circle_rect(g, cx + 3.0, y + 8.0, 6.0, tint);
     }

@@ -442,6 +442,8 @@ fn remote_student(machine: &state::MachinesColMachine, deck: &[&state::MachinesC
         who: head.name.clone(),
         title: crate::sidebar_pulse::row_title(&head.title, "터미널"),
         turn: crate::sidebar_pulse::row_turn(waiting, false, deck_busy(deck)),
+        agent: String::new(),
+        pane: format!("{}{}", machine.label, head.remote_id),
     }
 }
 
