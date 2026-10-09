@@ -1269,6 +1269,7 @@ impl App {
                         preedit: self.chat_view_preedit(&id),
                         caret_on: self.cursor_blink_on(Instant::now()),
                         bg: theme::pane_bg(),
+                        zoom: self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1),
                     }
                 });
                 // 거울 셸 칸 — 원본이 낸 명령 묶음을 카드로. 원본 PTY 크기는 그대로다.
@@ -1286,6 +1287,7 @@ impl App {
                             .map_or(0, |d| d.as_millis() as u64),
                         local: !kasa_mcp::remote::is_view_pane(&tab),
                         bg: theme::pane_bg(),
+                        zoom: self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1),
                     })
                 }).flatten();
                 let body_view = chat_slot.is_some() || shell_slot.is_some();

@@ -1082,7 +1082,7 @@ impl GpuRenderer {
 
     /// 터미널 격자 글꼴 크기(논리 px) — `cell_w`·`cell_h` 와 짝이다.
     pub(crate) fn term_font_size(&self) -> f32 {
-        self.grid.font_size_px as f32 / self.grid.scale
+        self.grid.font_size_px as f32 * self.grid.zoom / self.grid.scale
     }
 
     pub(crate) fn measure_code_text(&mut self, text: &str, size: f32) -> f32 {

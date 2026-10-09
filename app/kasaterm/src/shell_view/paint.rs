@@ -25,6 +25,8 @@ pub(crate) struct Slot {
     /// 이 칸에 실제로 깔린 바탕. 거울 칸은 기기색이 섞여 테마 바탕과 다르다 — 채움을 테마 바탕에서
     /// 끌어내면 분홍 칸 위에 푸른 회색 상자가 떠 따로 논다(2026-10-08).
     pub(crate) bg: [u8; 4],
+    /// 이 칸만 키운 배율(⌘⇧+, `pane_font_scales`). 그릴 때 좌표계를 이만큼 키운다.
+    pub(crate) zoom: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -307,7 +309,9 @@ fn status(b: &Block, now_ms: u64) -> ([u8; 4], String) {
 
 pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, pane: &mut ShellPane, feed: &Feed) -> Vec<(Hit, Rect)> {
     let mut hits = Vec::new();
-    let (x, y, w, h) = slot.rect;
+    let z = slot.zoom;
+    let (x, y, w, h) = (slot.rect.0 / z, slot.rect.1 / z, slot.rect.2 / z, slot.rect.3 / z);
+    let cursor = (cursor.0 / z, cursor.1 / z);
     if w < 80.0 || h < 60.0 {
         return hits;
     }

@@ -38,6 +38,8 @@ enum AutoStep {
     Decide(bool),
     OpenAll,
     Scroll(f32),
+    /// 그 칸만 확대(⌘⇧+ 와 같은 길) — 배율을 이만큼 더한다.
+    Zoom(f32),
     /// ⋮ 메뉴의 대화 보기 칸 위에 커서를 둔다(툴팁 확인).
     HoverMenu,
 }
@@ -403,6 +405,8 @@ impl App {
             let Some(pane) = views.panes.get_mut(&slot.pane) else { continue };
             views.drawn.insert(slot.pane.clone(), slot.rect);
             let feed = Arc::clone(&pane.feed);
+            let z = slot.zoom;
+            g.begin_zoom(z);
             let hits = match feed.try_lock() {
                 Ok(f) => {
                     pane.painted = f.version;
@@ -410,7 +414,8 @@ impl App {
                 }
                 Err(_) => paint::paint(g, cursor, slot, pane, None),
             };
-            views.hits.extend(hits.into_iter().map(|(h, r)| (slot.pane.clone(), h, r)));
+            g.end_zoom(z);
+            views.hits.extend(hits.into_iter().map(|(h, r)| (slot.pane.clone(), h, (r.0 * z, r.1 * z, r.2 * z, r.3 * z))));
         }
     }
 
@@ -768,6 +773,7 @@ impl App {
                         "decide" => AutoStep::Decide(arg.trim() == "allow"),
                         "open" => AutoStep::OpenAll,
                         "scroll" => AutoStep::Scroll(arg.trim().parse().ok()?),
+                        "zoom" => AutoStep::Zoom(arg.trim().parse().ok()?),
                         "hovermenu" => AutoStep::HoverMenu,
                         _ => return None,
                     };
@@ -818,6 +824,7 @@ impl App {
                         pane.scroll = px;
                     }
                 }
+                AutoStep::Zoom(delta) => self.change_pane_font(delta),
                 AutoStep::HoverMenu => {
                     if let Some((_, r)) = self.handle_menu_hits.iter().find(|(a, _)| *a == ActionKind::ChatView) {
                         self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);

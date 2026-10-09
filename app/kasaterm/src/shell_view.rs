@@ -465,8 +465,11 @@ impl App {
                 continue;
             };
             pane.painted = f.version;
+            let z = slot.zoom;
+            g.begin_zoom(z);
             let hits = paint::paint(g, cursor, slot, pane, &f);
-            views.hits.extend(hits.into_iter().map(|(h, r)| (slot.pane.clone(), h, r)));
+            g.end_zoom(z);
+            views.hits.extend(hits.into_iter().map(|(h, r)| (slot.pane.clone(), h, (r.0 * z, r.1 * z, r.2 * z, r.3 * z))));
         }
     }
 

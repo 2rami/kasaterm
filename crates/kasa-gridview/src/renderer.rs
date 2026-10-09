@@ -54,6 +54,9 @@ pub struct GridRenderer {
     pub chrome: Vec<CellInstance>,
     /// Scale we cached on init. winit logical→physical conversion.
     pub scale: f32,
+    /// [`begin_zoom`](Self::begin_zoom) 이 `scale` 에 곱해 둔 몫. 물리 크기에서 논리 크기를 되짚는 값
+    /// (터미널 글꼴 크기)이 확대 중에도 확대 전 논리값을 내려면 이것으로 되돌려야 한다.
+    pub zoom: f32,
     /// True when KASATERM_P3_ROOT installed our own root metal layer and
     /// wgpu was given that layer via `SurfaceTargetUnsafe::CoreAnimationLayer`.
     /// In this mode the legacy per-frame P3 re-apply / re-promote calls must
@@ -360,6 +363,7 @@ impl GridRenderer {
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
             scale,
+            zoom: 1.0,
             p3_root_owned: p3_root,
             image_pipeline,
             image_sampler,
@@ -467,6 +471,27 @@ impl GridRenderer {
         // size_px keys are stale either way.
         self.atlas.set_oversample(oversample_for(scale));
         self.atlas.request_reset();
+    }
+
+    /// 이 뒤로 그리는 것을 `z` 배로 키운다 — 칸 하나만 확대(⌘⇧+)한 대화·명령 묶음 보기처럼 격자가 아닌
+    /// 그림을 그 칸만 키울 때. 논리 좌표가 `z` 배 커지므로 그리는 쪽은 자기 상자를 `z` 로 나눠 넘기고,
+    /// 돌려받은 히트렉트는 `z` 를 곱해 되돌린다. 글리프는 키운 크기로 새로 굽는다(아틀라스는 크기별
+    /// 열쇠라 비울 일이 없다 — `set_scale` 과 달리). 서 있는 클립은 같은 좌표계로 옮겨 둔다.
+    /// 반드시 [`end_zoom`](Self::end_zoom) 과 같은 `z` 로 짝을 맞춘다.
+    pub fn begin_zoom(&mut self, z: f32) {
+        self.scale *= z;
+        self.zoom *= z;
+        for c in &mut self.clip_stack {
+            c.iter_mut().for_each(|v| *v /= z);
+        }
+    }
+
+    pub fn end_zoom(&mut self, z: f32) {
+        self.scale /= z;
+        self.zoom /= z;
+        for c in &mut self.clip_stack {
+            c.iter_mut().for_each(|v| *v *= z);
+        }
     }
 
     /// Current effective render scale the GPU side is drawing with. Used by
