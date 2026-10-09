@@ -2779,7 +2779,7 @@ impl Backend for PtyBackend {
             .panes
             .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
-        Ok(pane.tab_for_pid(surface_id).visible_text(lines))
+        Ok(pane.tab_for_pid(surface_id).peek_text(lines))
     }
 
     /// pane 을 스크롤백 안에서 움직인다 — 휠과 **같은 경로**(alacritty display_offset).

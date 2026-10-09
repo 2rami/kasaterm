@@ -1072,6 +1072,46 @@ fn normalise(sel: Selection) -> ((u16, u16), (u16, u16)) {
 /// after each syllable ("한글" → "한 글"). We peek: a cell right after a
 /// wide char is its spacer and gets skipped. Genuine blanks (empty cell
 /// not following a wide char) still render as a single space.
+/// 입력칸 줄(`❯ `·`› `)의 글이 흐린 글씨면 붙일 표시. 다 흐리면 추천·안내 글, 뒤만 흐리면 자동완성 제안이다.
+/// 고른 선택지(`❯ 1. Yes`)처럼 흐리지 않은 줄은 그대로 둔다.
+fn ghost_note(cells: &[(char, bool)]) -> Option<&'static str> {
+    let blank = |c: char| c == ' ' || c == '\0';
+    let first = cells.iter().position(|(c, _)| !blank(*c))?;
+    if !matches!(cells[first].0, '❯' | '›') {
+        return None;
+    }
+    let body: Vec<bool> = cells[first + 1..].iter().filter(|(c, _)| !blank(*c)).map(|(_, d)| *d).collect();
+    let dim = body.iter().filter(|d| **d).count();
+    if dim == 0 {
+        None
+    } else if dim == body.len() {
+        Some("  ⟨흐린 글 — 추천·안내일 뿐, 입력된 글 아님⟩")
+    } else if body.iter().skip_while(|d| !**d).all(|d| *d) {
+        Some("  ⟨뒤의 흐린 부분은 추천일 뿐, 입력된 글 아님⟩")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod ghost_note_tests {
+    use super::ghost_note;
+
+    fn row(text: &str, dim_from: usize) -> Vec<(char, bool)> {
+        text.chars().enumerate().map(|(i, c)| (c, i >= dim_from)).collect()
+    }
+
+    #[test]
+    fn only_a_dim_prompt_line_gets_the_note() {
+        assert_eq!(ghost_note(&row("❯ 깔았어 확인해봐", 2)), Some("  ⟨흐린 글 — 추천·안내일 뿐, 입력된 글 아님⟩"));
+        assert_eq!(ghost_note(&row("› Ask Codex to do anything", 2)), Some("  ⟨흐린 글 — 추천·안내일 뿐, 입력된 글 아님⟩"));
+        assert_eq!(ghost_note(&row("❯ 깔았 어떻게", 6)), Some("  ⟨뒤의 흐린 부분은 추천일 뿐, 입력된 글 아님⟩"));
+        assert_eq!(ghost_note(&row("❯ 1. Yes", 99)), None, "고른 선택지는 흐리지 않다");
+        assert_eq!(ghost_note(&row("❯ ", 0)), None, "빈 입력칸");
+        assert_eq!(ghost_note(&row("  흐린 안내 줄", 0)), None, "입력칸 줄이 아니면 안 붙인다");
+    }
+}
+
 fn append_cells_text<'a>(cells: impl IntoIterator<Item = &'a GridCell>, out: &mut String) {
     let mut skip_spacer = false;
     for cell in cells {
@@ -2040,6 +2080,18 @@ impl PaneTab {
     /// `surface.peek` / the board's `screen_lines` so a sibling can read what
     /// this pane is currently showing (a prompt, a menu, build output).
     pub(crate) fn visible_text(&self, lines: usize) -> String {
+        self.screen_text(lines, false)
+    }
+
+    /// `surface.peek` 이 주는 화면 — `visible_text` 에 입력칸의 흐린 글 표시만 더한다. Claude Code 는 빈
+    /// 입력칸에 다음에 칠 만한 말을 흐린 글씨(SGR 2)로 띄우는데, 색이 빠진 글자만으로는 사람이 친 글과 안
+    /// 갈려 에이전트가 그걸 선생님 말로 읽었다(2026-10-09). 보드 `screen_lines` 처럼 화면을 판정하는 길이
+    /// 표시 글자를 입력으로 오해하지 않게 `visible_text` 와 따로 둔다.
+    pub(crate) fn peek_text(&self, lines: usize) -> String {
+        self.screen_text(lines, true)
+    }
+
+    fn screen_text(&self, lines: usize, mark_ghost: bool) -> String {
         let Some(t) = self.term() else {
             return String::new();
         };
@@ -2047,7 +2099,14 @@ impl PaneTab {
         for row in t.cells.iter() {
             let mut s = String::new();
             append_cells_text(row.iter(), &mut s);
-            out.push(s.trim_end().to_string());
+            let mut s = s.trim_end().to_string();
+            if mark_ghost {
+                let cells: Vec<(char, bool)> = row.iter().filter(|c| !c.leading_wide_spacer).map(|c| (c.ch, c.dim)).collect();
+                if let Some(note) = ghost_note(&cells) {
+                    s.push_str(note);
+                }
+            }
+            out.push(s);
         }
         while out.last().map_or(false, |l| l.is_empty()) {
             out.pop();
