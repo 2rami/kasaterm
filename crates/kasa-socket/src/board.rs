@@ -14,6 +14,8 @@ const TRACKED: &[&str] = &[
     "address",
     "room_id",
     "room_label",
+    // 사람이 부르는 방 번호(⌘N, 1부터). room_id 는 방 인덱스라 보기 방이 끼면 화면 번호와 갈린다.
+    "room_number",
     "character",
     "harness",
     "title",

@@ -355,6 +355,10 @@ pub struct PaneActivity {
     /// 0 기본 — board 빌더(socket.rs)가 윈도우별로 채운다.
     #[serde(default)]
     pub window_idx: usize,
+    /// 그 방의 사이드바 번호(⌘N, 1부터) — 사람이 「N번방」이라 부르는 번호. `window_idx`+1 과 다를 수
+    /// 있다(보기 방은 이 기기 방 뒤로 센다). 화면에 없는 칸·옛 판은 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_number: Option<usize>,
     /// 구독 한도 사용률(%) — **codex 전용**, claude pane 은 None.
     ///
     /// 사용자 2026-08-05: codex 는 정액제라 비용($)이 무의미하고(그래서 board 비용 칸은
@@ -554,9 +558,25 @@ impl SpawnShellAt {
 pub struct SpawnShellReply {
     pub surface: String,
     pub window: Option<usize>,
+    /// 그 방의 사이드바 번호(⌘N, 1부터) — `window` 는 인덱스라 보기 방이 끼면 화면 번호와 다르다.
+    pub room_number: Option<usize>,
     /// 못 세웠으면 그 이유 — 부른 기기가 그대로 보여 준다. 전엔 이유를 로그에만 남기고
     /// 「설정 화면이 앞이거나 쪼갤 자리가 없음」 한 줄로 뭉개 원인을 짐작도 못 했다.
     pub error: Option<String>,
+}
+
+/// 다른 기기에 세운 칸이 든 방 — 그 기기 기준 인덱스(0부터)와 사이드바 번호(⌘N, 1부터).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SeatRoom {
+    pub window: Option<usize>,
+    pub number: Option<usize>,
+}
+
+impl SeatRoom {
+    /// 사람에게 말할 방 번호. 번호를 안 주는 옛 판은 인덱스+1 로 — 그쪽에 보기 방이 끼면 틀릴 수 있다.
+    pub fn shown(&self) -> Option<usize> {
+        self.number.or(self.window.map(|w| w + 1))
+    }
 }
 
 /// Plug point for terminal operations. Host apps implement this on a
@@ -804,7 +824,7 @@ pub trait Backend: Send + Sync {
     /// (2026-09-17). 옛 백엔드는 자리를 모르고 활성 방에 세운다.
     fn spawn_shell_at(&self, at: &SpawnShellAt) -> Result<SpawnShellReply> {
         let surface = self.spawn_shell(at.cwd.as_deref())?;
-        Ok(SpawnShellReply { surface, window: None, error: None })
+        Ok(SpawnShellReply { surface, window: None, room_number: None, error: None })
     }
     fn transfer_snapshot(&self) -> Result<crate::transfer::MachineSnapshot> {
         anyhow::bail!("room transfer unsupported by this backend")

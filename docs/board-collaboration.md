@@ -15,7 +15,7 @@ queries Claude's agent registry or remote peers.
  "panes":[{"id":"stable-machine/stable-surface","address":{
      "machine_id":"stable-machine","surface_key":"stable-surface","surface_id":"%1",
      "session_id":"optional-session","instance_id":"optional-process-identity"},
-   "machine_label":"Machine","room_id":"room","room_label":"Room",
+   "machine_label":"Machine","room_id":"room","room_label":"Room","room_number":1,
    "character":null,"harness":null,"title":"","request":"","progress":"",
    "status":"unknown","status_reason":"no supported activity evidence",
    "observed_at_ms":0,"freshness":"fresh"}],"recent_changes":[]}
@@ -26,6 +26,11 @@ IDs validate control, not identity. A closed/detached seat is not proof that its
 agent exited. Unsupported activity stays `unknown`. No connection tokens appear
 in this contract. Source failures retain the last pane rows with stale freshness;
 only a complete, successful source can prove that its own pane disappeared.
+
+`room_number` is the number that machine's own sidebar shows for the room (the
+same as its ⌘N, from 1) — the number a person means by "room 2". It is not
+`room_id`/window index + 1: rooms that view another machine are counted after
+that machine's own rooms. Absent on older builds and for panes not on screen.
 
 Optional `origin_task_env` names the nacho task ID that was in the pane's env when
 its session was bound (`nacho-origins.json`). It is display provenance only — it

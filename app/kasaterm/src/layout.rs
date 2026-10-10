@@ -147,6 +147,31 @@ fn projection_grid_size(projection: &crate::mirror_view::Projection) -> (u16, u1
     )
 }
 
+/// `moving` 이 `target` 의 `zone` 쪽에 맞붙었나 — `insert_beside` 가 남기는 모양(둘이 한 칸을 그 방향으로
+/// 나눠 가진다)을 칸 좌표로 잰다.
+fn leaf_beside(tree: &kasa_pty::PtyLayout, moving: &str, target: &str, zone: DropZone) -> bool {
+    let rects = tree.leaf_rects(10_000, 10_000);
+    let find = |id: &str| rects.iter().find(|r| r.0 == id).map(|&(_, x, y, w, h)| (x, y, w, h));
+    let (Some((mx, my, mw, mh)), Some((tx, ty, tw, th))) = (find(moving), find(target)) else { return false };
+    match zone {
+        DropZone::Right => mx == tx + tw && my == ty && mh == th,
+        DropZone::Left => mx + mw == tx && my == ty && mh == th,
+        DropZone::Down => my == ty + th && mx == tx && mw == tw,
+        DropZone::Up => my + mh == ty && mx == tx && mw == tw,
+        DropZone::Center => false,
+    }
+}
+
+fn zone_word(zone: DropZone) -> &'static str {
+    match zone {
+        DropZone::Left => "왼쪽",
+        DropZone::Right => "오른쪽",
+        DropZone::Up => "위",
+        DropZone::Down => "아래",
+        DropZone::Center => "가운데",
+    }
+}
+
 #[cfg(test)]
 mod mirror_hit_bounds_tests {
     #[test]
@@ -915,7 +940,7 @@ impl App {
             let Some(surface) = self.ws.lock().unwrap().active_pane.clone() else {
                 return failed("새 방의 첫 pane 을 못 얻었어요".into());
             };
-            return SpawnShellReply { surface, window: Some(self.active_window), error: None };
+            return SpawnShellReply { surface, window: Some(self.active_window), room_number: None, error: None };
         }
         // 탭 — 그 자리의 탭으로. 활성 탭은 안 뺏는다(저쪽 사람이 보던 화면).
         if let Some(outer) = at.tab_of.as_deref() {
@@ -925,7 +950,7 @@ impl App {
             let out = self.spawn_new_tab(&outer, false);
             self.pending_spawn_cwd = None;
             return match out {
-                Ok(surface) => SpawnShellReply { window: self.window_of_pane(&surface), surface, error: None },
+                Ok(surface) => SpawnShellReply { window: self.window_of_pane(&surface), surface, room_number: None, error: None },
                 Err(e) => {
                     eprintln!("[spawn_shell] tab failed: {e:#}");
                     failed(format!("{e:#}"))
@@ -955,7 +980,7 @@ impl App {
                 Ok(Some(surface)) => {
                     let window = self.window_of_pane(&surface);
                     self.publish_pty_layout();
-                    SpawnShellReply { surface, window, error: None }
+                    SpawnShellReply { surface, window, room_number: None, error: None }
                 }
                 Ok(None) => failed("쪼갤 자리가 없어요".into()),
                 Err(e) => {
@@ -965,7 +990,7 @@ impl App {
             };
         }
         let surface = self.spawn_shell_pane(at.cwd.as_deref());
-        SpawnShellReply { window: self.window_of_pane(&surface), surface, error: None }
+        SpawnShellReply { window: self.window_of_pane(&surface), surface, room_number: None, error: None }
     }
     /// pane 여러 개를 **한 번에** 배치한다 — 방 전체가 크기가 같은 벤토 격자로 다시 짜이고
     /// 학생들은 부른 pane 옆에 붙는다(`rebento_window`). 다른 기기 방의 보기 창만 옛 모양
@@ -2290,46 +2315,6 @@ impl App {
         {
             return;
         }
-        // 1. Lift the tab out of source.
-        let (moved, src_empty): (Option<PaneTab>, bool) = {
-            let mut ws = self.ws.lock().unwrap();
-            let Some(src) = ws.panes.get_mut(&td.pane) else {
-                return;
-            };
-            if td.from >= src.tabs.len() {
-                return;
-            }
-            let t = src.tabs.remove(td.from);
-            if td.from < src.active_tab && src.active_tab > 0 {
-                src.active_tab -= 1;
-            }
-            if src.active_tab >= src.tabs.len() && !src.tabs.is_empty() {
-                src.active_tab = src.tabs.len() - 1;
-            }
-            src.dirty = true;
-            let empty = src.tabs.is_empty();
-            (Some(t), empty)
-        };
-        let Some(moved) = moved else { return };
-        // 2. If source emptied, drop it from layout (PtySession survives —
-        //    it's the very shell we're about to re-attach as a new leaf).
-        if src_empty {
-            self.ws.lock().unwrap().panes.remove(&td.pane);
-            self.collapse_layout_only(&td.pane);
-        }
-        // 3. Allocate a fresh layout id for the new pane. Layout ids and
-        //    pty ids decoupled from stage-3 onward, so this avoids any
-        //    clash with the moved tab's pid (which may have been the old
-        //    source's outer id).
-        //    다만 그 pid 가 지금 어디에도 안 쓰이면(방금 비운 소스의 옛 바깥 번호가 보통
-        //    그렇다) **그 번호를 그대로 쓴다** — 거울 등록·학생 자리·PTY 가 전부 그 번호에
-        //    걸려 있어, 새 번호를 주면 거울이 「PTY 없는 빈 자리」가 되고 자리 배정은 옛
-        //    번호 주인으로 둔갑한다(2026-09-18: 거울 방에서 아리스를 탭으로 합쳤다 빼내니
-        //    미도리 이름을 달고 보드에서 거울이 아니게 됐다).
-        let reusable = moved.pid.clone().filter(|pid| {
-            !self.ws.lock().unwrap().panes.contains_key(pid) && self.window_of_pane(pid).is_none()
-        });
-        let new_outer = reusable.unwrap_or_else(|| self.alloc_pane_id());
         let (dir, before) = match zone {
             DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
             DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
@@ -2339,6 +2324,7 @@ impl App {
             // slips through here, abort the split so we don't double-spawn.
             DropZone::Center => return,
         };
+        let Some(new_outer) = self.lift_tab_into_own_pane(&td.pane, td.from) else { return };
         if let Some(tree) = self.pty_layout.as_mut() {
             if !tree.insert_beside(target, dir, before, new_outer.clone()) {
                 // Target gone — fall back to inserting at the first leaf.
@@ -2349,27 +2335,6 @@ impl App {
         } else {
             self.pty_layout = Some(kasa_pty::PtyLayout::single(&new_outer));
         }
-        // 4. Build the new PaneState with the moved tab as its only tab.
-        let moved_pid = moved.pid.clone();
-        {
-            let mut ws = self.ws.lock().unwrap();
-            let mut ps = PaneState::default();
-            ps.tabs.clear();
-            ps.tabs.push(moved);
-            ps.active_tab = 0;
-            ps.dirty = true;
-            ws.panes.insert(new_outer.clone(), ps);
-            // 새 leaf 번호는 자기 PTY 가 없다 — 그 이름으로 남은 매핑은 죽은 탭의
-            // 찌꺼기라 걷는다. 남겨 두면 이 pane 을 누를 때 `outer_for_pty` 가 옛
-            // 바깥으로 접어 클릭 포커스가 통째로 죽는다.
-            ws.pid_to_pane.remove(&new_outer);
-            if let Some(pid) = moved_pid {
-                // Rebind the pid map so future ScreenUpdates / find_tab_by_pty
-                // route to new_outer even when pid != new_outer.
-                ws.pid_to_pane.insert(pid, new_outer.clone());
-            }
-            ws.active_pane = Some(new_outer.clone());
-        }
         self.handoff_ime_to_active_surface();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -2378,6 +2343,123 @@ impl App {
             w.request_redraw();
         }
     }
+    /// `outer` 칸의 `idx` 번째 탭을 들어내 그 탭 하나만 든 새 칸으로 세운다. 트리에는 아직 안 넣는다 —
+    /// 어디에 붙일지는 부르는 쪽이 정한다. 돌려주는 것은 새 칸 번호. 탭을 다 들어내 빈 소스는 트리에서 걷는다
+    /// (PtySession 은 살아 있다 — 지금 새 칸으로 다시 붙일 바로 그 셸이다).
+    fn lift_tab_into_own_pane(&mut self, outer: &str, idx: usize) -> Option<String> {
+        let (moved, src_empty) = {
+            let mut ws = self.ws.lock().unwrap();
+            let src = ws.panes.get_mut(outer)?;
+            if idx >= src.tabs.len() {
+                return None;
+            }
+            let t = src.tabs.remove(idx);
+            if idx < src.active_tab && src.active_tab > 0 {
+                src.active_tab -= 1;
+            }
+            if src.active_tab >= src.tabs.len() && !src.tabs.is_empty() {
+                src.active_tab = src.tabs.len() - 1;
+            }
+            src.dirty = true;
+            (t, src.tabs.is_empty())
+        };
+        if src_empty {
+            self.ws.lock().unwrap().panes.remove(outer);
+            self.collapse_layout_only(outer);
+        }
+        // 칸 번호와 PTY 번호는 갈라졌지만, 그 pid 가 지금 어디에도 안 쓰이면(방금 비운 소스의 옛
+        // 바깥 번호가 보통 그렇다) **그 번호를 그대로 쓴다** — 거울 등록·학생 자리·PTY 가 전부 그
+        // 번호에 걸려 있어, 새 번호를 주면 거울이 「PTY 없는 빈 자리」가 되고 자리 배정은 옛 번호
+        // 주인으로 둔갑한다(2026-09-18: 거울 방에서 아리스를 탭으로 합쳤다 빼내니 미도리 이름을 달고
+        // 보드에서 거울이 아니게 됐다).
+        let reusable = moved.pid.clone().filter(|pid| {
+            !self.ws.lock().unwrap().panes.contains_key(pid) && self.window_of_pane(pid).is_none()
+        });
+        let new_outer = reusable.unwrap_or_else(|| self.alloc_pane_id());
+        let moved_pid = moved.pid.clone();
+        let mut ws = self.ws.lock().unwrap();
+        let mut ps = PaneState::default();
+        ps.tabs.clear();
+        ps.tabs.push(moved);
+        ps.active_tab = 0;
+        ps.dirty = true;
+        ws.panes.insert(new_outer.clone(), ps);
+        // 새 leaf 번호는 자기 PTY 가 없다 — 그 이름으로 남은 매핑은 죽은 탭의 찌꺼기라 걷는다.
+        // 남겨 두면 이 pane 을 누를 때 `outer_for_pty` 가 옛 바깥으로 접어 클릭 포커스가 통째로 죽는다.
+        ws.pid_to_pane.remove(&new_outer);
+        if let Some(pid) = moved_pid {
+            ws.pid_to_pane.insert(pid, new_outer.clone());
+        }
+        ws.active_pane = Some(new_outer.clone());
+        Some(new_outer)
+    }
+
+    /// 소켓 `move`. 드래그(`move_pane`)는 실패해도 화면이 말해 주지만 소켓은 답으로 말해야 한다 —
+    /// 탭을 칸으로 보고 옮기면 트리에 그 번호가 없어 아무 일도 없는데 「같은 방에 있다」로 성공이라
+    /// 답했고, 거울 칸 옆은 기기 간 이사 길로 빠져 「트리에서 떨어졌다」만 남겼다(2026-10-09).
+    /// 그래서 탭·거울을 먼저 가르고, 옮긴 뒤 **실제로 대상의 그 방향에 붙었는지** 재서 돌려준다.
+    pub(crate) fn socket_move_pane(&mut self, moving: &str, target: &str, zone: DropZone) -> Result<String, String> {
+        if moving == target {
+            return Err("자기 자신 옆으로는 못 옮긴다".into());
+        }
+        let Some(target_window) = self.window_of_pane(target) else { return Err(format!("놓을 자리 {target} 이 없다")) };
+        if self.window_of_pane(moving).is_none() {
+            return Err(format!("옮길 pane {moving} 이 없다"));
+        }
+        let mirror = |id: &str| kasa_mcp::remote::remote_info(id)
+            .or_else(|| kasa_mcp::remote::remote_info(&self.leaf_pty_id(&self.outer_of(id))));
+        if let Some(info) = mirror(moving) {
+            return Err(format!(
+                "옮길 칸 {moving} 은 「{}」 기기 칸 {} 의 거울이다 — 그 기기 주소 둘({}@{} 와 대상@{})로 옮겨라",
+                info.label, info.remote_id, info.remote_id, info.label, info.label
+            ));
+        }
+        if let Some((label, _)) = self.remote_view_of_window(target_window) {
+            return Err(format!("{target} 은 「{label}」 기기 방의 보기 칸이다 — 이 기기 칸은 다른 기기 방으로 못 옮긴다"));
+        }
+        if let Some(info) = mirror(target) {
+            return Err(format!("놓을 칸 {target} 은 「{}」 기기 칸 {} 의 거울이다 — 이 기기 칸은 거울 옆에 못 붙인다", info.label, info.remote_id));
+        }
+        let target = self.outer_of(target);
+        let outer = self.outer_of(moving);
+        let tabs = self.ws.lock().unwrap().panes.get(&outer).map(|p| {
+            (p.tabs.len(), p.tabs.iter().position(|t| t.pid.as_deref() == Some(moving)))
+        });
+        let moving = match tabs {
+            // 여러 탭 중 하나를 고른 것이면 그 탭만 들어내 제 칸 옆에 세운 뒤 옮긴다.
+            Some((n, Some(idx))) if n > 1 && outer != moving => {
+                let lifted = self.lift_tab_into_own_pane(&outer, idx)
+                    .ok_or_else(|| format!("{moving} 탭을 칸에서 못 들어냈다"))?;
+                let beside = lifted.clone();
+                if !self.edit_layout_of_pane(&outer, |tree| {
+                    tree.insert_beside(&outer, kasa_pty::SplitDir::Horizontal, false, beside)
+                }) {
+                    return Err(format!("{moving} 탭을 들어냈지만 {outer} 옆에 못 세웠다"));
+                }
+                lifted
+            }
+            _ => outer,
+        };
+        if moving == target {
+            return Err("자기 자신 옆으로는 못 옮긴다".into());
+        }
+        self.move_pane(&moving, &target, zone);
+        let landed = self.window_of_pane(&target).and_then(|w| {
+            let tree = if w == self.active_window { self.pty_layout.as_ref() } else { self.windows.get(w)?.as_ref() };
+            tree.map(|t| leaf_beside(t, &moving, &target, zone))
+        });
+        if landed == Some(true) {
+            Ok(moving)
+        } else {
+            Err(format!("{moving} 이 {target} 의 {} 에 안 붙었다 — where 로 배치를 확인해라", zone_word(zone)))
+        }
+    }
+
+    /// 탭 번호를 그 탭을 든 칸 번호로 접는다. 칸 번호면 그대로.
+    fn outer_of(&self, id: &str) -> String {
+        self.ws.lock().unwrap().outer_for_pty(id).unwrap_or_else(|| id.to_string())
+    }
+
     /// pane 을 통째로 `dst` 의 탭 스트립 안에 넣는다 — 드래그를 헤더/본문 중앙에
     /// 놓았을 때(`DropZone::Center`). 소스의 탭 **전부**가 순서대로 dst 뒤에 붙고
     /// 소스는 레이아웃에서 사라진다. split 과 달리 화면이 더 쪼개지지 않는다.
@@ -3726,6 +3808,20 @@ mod cross_room_move_tests {
         assert!(relocated_window_layouts(&source, &destination, "moving", "missing", kasa_pty::SplitDir::Vertical, false).is_none());
         assert!(relocated_window_layouts(&source, &source, "moving", "moving", kasa_pty::SplitDir::Vertical, false).is_none());
         assert_eq!(source.leaves(), vec!["moving"]);
+    }
+
+    /// 소켓 move 의 성공 판정 — 같은 방에 있다는 것만으로는 성공이 아니다(2026-10-09 거짓 성공).
+    #[test]
+    fn move_is_judged_by_the_requested_side_not_the_same_room() {
+        let mut tree = kasa_pty::PtyLayout::single("%6");
+        tree.insert_beside("%6", kasa_pty::SplitDir::Horizontal, false, "%9".into());
+        assert!(!leaf_beside(&tree, "%5", "%9", DropZone::Right), "트리에 없는 탭 번호");
+        assert!(leaf_beside(&tree, "%9", "%6", DropZone::Right));
+        assert!(!leaf_beside(&tree, "%9", "%6", DropZone::Down), "같은 방이지만 아래가 아니다");
+        tree.insert_beside("%9", kasa_pty::SplitDir::Vertical, false, "%5".into());
+        assert!(leaf_beside(&tree, "%5", "%9", DropZone::Down));
+        assert!(leaf_beside(&tree, "%9", "%5", DropZone::Up));
+        assert!(!leaf_beside(&tree, "%5", "%6", DropZone::Right), "%6 옆 반쪽만 차지하면 붙은 게 아니다");
     }
 }
 

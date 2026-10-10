@@ -612,6 +612,14 @@ impl App {
         self.window_labels = out;
         self.window_labels_at = Some(now);
         self.overlay_room_rename_label();
+        let numbers: Vec<crate::RoomNumber> = (0..n).map(|i| crate::RoomNumber {
+            shown: self.room_number_for_window(i).map(|k| k + 1),
+            view_of: self.remote_view_of_window(i).map(|(label, _)| label),
+        }).collect();
+        let mut ws = self.ws.lock().unwrap();
+        if ws.room_numbers != numbers {
+            ws.room_numbers = numbers;
+        }
     }
 
     /// 편집 중인 방의 라벨을 버퍼(+조합 중인 글자+캐럿)로 덮는다. 별도 입력칸을

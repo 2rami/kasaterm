@@ -591,6 +591,7 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         effort_default: String::new(),
         branch: None,
         window_idx: 0,
+        room_number: None,
         rate_used_pct: rollout.rate_used_pct,
         rate_window_minutes: rollout.rate_window_minutes,
         rate_resets_at: rollout.rate_resets_at,
@@ -782,6 +783,7 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         effort_default: String::new(),
         branch: None,
         window_idx: 0,
+        room_number: None,
         rate_used_pct: None,
         rate_window_minutes: None,
         rate_resets_at: None,
@@ -1108,6 +1110,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         effort_default: String::new(), // collab_board 가 settings.json effortLevel 로 채운다.
         branch: None,
         window_idx: 0,
+        room_number: None,
         // claude 는 종량제라 이 지표가 없다 — 비용($)이 그 자리를 대신한다.
         rate_used_pct: None,
         rate_window_minutes: None,

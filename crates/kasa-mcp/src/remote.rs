@@ -1056,12 +1056,12 @@ pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> R
 }
 
 /// 자리를 지정해 세운다 — 새 방(`window=new`)·pane 옆(`beside`)·탭(`tab_of`). 돌려주는
-/// 것은 `(pane id, 그 방 번호)`. 옛 서버는 자리를 몰라 활성 방에 세우고 번호를 안 준다.
+/// 것은 `(pane id, 그 방)`. 옛 서버는 자리를 몰라 활성 방에 세우고 방을 안 준다.
 pub fn spawn_shell_pane_at(
     base: &str,
     at: &kasa_socket::backend::SpawnShellAt,
     token: Option<&str>,
-) -> Result<(String, Option<usize>)> {
+) -> Result<(String, kasa_socket::backend::SeatRoom)> {
     use kasa_socket::backend::SpawnWindow;
     let mut q: Vec<String> = Vec::new();
     if let Some(c) = &at.cwd {
@@ -1119,8 +1119,8 @@ pub fn spawn_shell_pane_at(
     if id.is_empty() {
         anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
     }
-    let window = v.get("window").and_then(|x| x.as_u64()).map(|n| n as usize);
-    Ok((id, window))
+    let number = |key: &str| v.get(key).and_then(|x| x.as_u64()).map(|n| n as usize);
+    Ok((id, kasa_socket::backend::SeatRoom { window: number("window"), number: number("room_number") }))
 }
 
 fn transfer_request(base: &str, action: &str, body: Option<serde_json::Value>, seconds: u64) -> Result<serde_json::Value> {

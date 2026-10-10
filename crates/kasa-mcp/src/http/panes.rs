@@ -77,7 +77,7 @@ async fn spawn_shell_handler(
     let at = kasa_socket::backend::SpawnShellAt::from_query(&params);
     let body = match backend.spawn_shell_at(&at) {
         Ok(reply) if !reply.surface.is_empty() => {
-            serde_json::json!({ "ok": true, "surface": reply.surface, "window": reply.window })
+            serde_json::json!({ "ok": true, "surface": reply.surface, "window": reply.window, "room_number": reply.room_number })
         }
         Ok(reply) => serde_json::json!({
             "ok": false,

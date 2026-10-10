@@ -1688,6 +1688,15 @@ fn render_activity(resp: &Response) -> String {
     out
 }
 
+/// 「방 N」의 N — 사이드바 ⌘N 과 같은 `room_number`. 그 칸이 없는 옛 판은 인덱스+1, 번호 없는 보기 방은 「?」.
+fn room_number_text(room: &Value) -> String {
+    match room.get("room_number") {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(_) => "?".into(),
+        None => (room["window"].as_u64().unwrap_or(0) + 1).to_string(),
+    }
+}
+
 /// 방마다 칸을 행·열로, 칸 안의 탭을 한 줄씩. 찾을 말을 주면 맞는 탭만 「방 · 행·열(칸) · 탭 · 종류 · 누구·제목·주소」 한 줄로.
 fn render_where(resp: &Response, query: &str, me: Option<&str>) -> String {
     let empty = Vec::new();
@@ -1704,7 +1713,8 @@ fn render_where(resp: &Response, query: &str, me: Option<&str>) -> String {
     let mut out = Vec::new();
     for room in rooms {
         let label = room["label"].as_str().filter(|s| !s.is_empty()).map(|s| format!(" 「{s}」")).unwrap_or_default();
-        let head = format!("방 {}{label}{}", room["window"].as_u64().unwrap_or(0) + 1,
+        let head = format!("방 {}{}{label}{}", room_number_text(room),
+            room["view_of"].as_str().map(|m| format!(" · {m} 보기")).unwrap_or_default(),
             if room["active"] == true { " (보는 중)" } else { "" });
         let mut lines = Vec::new();
         for cell in room["cells"].as_array().unwrap_or(&empty) {
@@ -1923,7 +1933,8 @@ fn print_help() {
     let groups: &[(&str, &[&str])] = &[
         ("보기 — 누가 무엇을 하나, 어디 있나", &[
             "where [찾을 말] [--json] [--machine 기계]  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
-            "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서",
+            "                                          「방 N」= 사이드바 ⌘N(--json 의 room_number). window 는 0부터 센 인덱스라 다를 수 있다",
+            "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서. 방 번호는 room_number(⌘N)",
             "board --wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
             "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
             "peek [%N | %N@기계 | 이름@기계 | --address JSON] [줄수]   pane 화면 글자(다른 기기 칸은 카사넷으로)",
@@ -4754,6 +4765,22 @@ mod tests {
         let web = super::render_where(&resp, "example", None);
         assert_eq!(web, "방 1 「kasaterm」 (보는 중) · 1행 1열(%1) · 탭 2/2 · 웹 · Example · https://example.com");
         assert!(super::render_where(&resp, "없는학생", None).contains("맞는 칸·탭이 없어요"));
+    }
+
+    /// 보기 방(인덱스 1)이 끼면 화면 ⌘N 은 이 기기 방부터 센다 — 「방 N」은 인덱스+1 이 아니라
+    /// `room_number` 로 찍는다(2026-10-09 「2번방」을 빈 보기 방으로 알아들었다).
+    #[test]
+    fn where_numbers_rooms_like_the_sidebar() {
+        let room = |window: u64, number: Value, view: Value, label: &str| serde_json::json!({
+            "window": window, "room_number": number, "view_of": view, "label": label, "active": false, "cells": []});
+        let resp: super::Response = serde_json::from_value(serde_json::json!({"id":"t","ok":true,"result":{"rooms":[
+            room(0, json!(1), Value::Null, "나쵸"), room(1, json!(5), json!("개인맥북"), "개인맥북"),
+            room(2, json!(2), Value::Null, "카사텀"), room(3, Value::Null, json!("데스크탑"), "데스크탑"),
+            {"window":4,"label":"옛 판","active":false,"cells":[]}]}})).unwrap();
+        let all = super::render_where(&resp, "", None);
+        for head in ["방 1 「나쵸」", "방 5 · 개인맥북 보기 「개인맥북」", "방 2 「카사텀」", "방 ? · 데스크탑 보기 「데스크탑」", "방 5 「옛 판」"] {
+            assert!(all.lines().any(|l| l == head), "{head} 없음: {all}");
+        }
     }
 
     #[test]

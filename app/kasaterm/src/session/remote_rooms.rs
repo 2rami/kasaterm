@@ -876,7 +876,7 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, Option<usize>)> {
+    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, kasa_socket::backend::SeatRoom)> {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
@@ -888,10 +888,10 @@ impl App {
             window: Some(kasa_socket::backend::SpawnWindow::New),
             ..Default::default()
         };
-        let (remote_id, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
-        self.seat_remote_view_window(&m.label, &m.base, &remote_id, true, window.map(|w| format!("방 {}", w + 1)))?;
+        let (remote_id, room) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+        self.seat_remote_view_window(&m.label, &m.base, &remote_id, true, room.shown().map(|n| format!("방 {n}")))?;
         self.set_toast(format!("{label} 에 새 방 — {remote_id}"));
-        Ok((remote_id, window))
+        Ok((remote_id, room))
     }
 
     /// `machines connect <기기>`(`--here` 없이)의 새 셸. 부른 칸 옆에 연결 칸을 붙이면 다른 기기
@@ -907,7 +907,7 @@ impl App {
             window: Some(kasa_socket::backend::SpawnWindow::New),
             ..Default::default()
         };
-        let (remote_id, window) = match kasa_mcp::remote::spawn_shell_pane_at(base, &at, None) {
+        let (remote_id, room) = match kasa_mcp::remote::spawn_shell_pane_at(base, &at, None) {
             Ok(seat) => seat,
             Err(e) => {
                 eprintln!("[connect] {base} 에 방을 못 세워 옆 연결 칸으로 물러섬: {e:#}");
@@ -916,7 +916,7 @@ impl App {
         };
         let label = kasa_mcp::machines::label_for_base(base).unwrap_or_default();
         let back = self.active_window;
-        let seated = self.seat_remote_view_window(&label, base, &remote_id, true, window.map(|w| format!("방 {}", w + 1)));
+        let seated = self.seat_remote_view_window(&label, base, &remote_id, true, room.shown().map(|n| format!("방 {n}")));
         let host = self.ws.lock().unwrap().active_pane.clone();
         self.switch_window(back);
         if let Err(e) = seated {

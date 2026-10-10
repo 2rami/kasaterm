@@ -598,15 +598,16 @@ impl App {
             });
             return;
         }
-        let bracketed = {
+        let (pid, bracketed) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
+            let bracketed = ws.panes
                 .get(id)
                 .and_then(|p| p.tabs.get(p.active_tab))
                 .and_then(|t| t.term())
-                .is_some_and(|t| t.bracketed_paste)
+                .is_some_and(|t| t.bracketed_paste);
+            (ws.active_tab_pid(id), bracketed)
         };
-        let _ = self.proxy.send_event(UserEvent::SocketBytes(Some(id.to_string()), submit_bytes(&text, bracketed)));
+        let _ = self.proxy.send_event(UserEvent::SocketBytes(Some(pid), submit_bytes(&text, bracketed)));
     }
 
     pub(crate) fn chat_view_insert(&mut self, id: &str, text: &str) {

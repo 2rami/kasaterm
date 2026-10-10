@@ -3557,6 +3557,19 @@ struct Workspace {
     window_layouts: HashMap<usize, Layout>,
     /// pane 영역 가로÷세로(픽셀). 모든 방이 같은 창을 쓰므로 하나면 된다.
     grid_aspect: Option<f32>,
+    /// 방(윈도우 인덱스)마다 사람이 보는 번호. GUI 가 방 이름을 다시 지을 때 미러한다 — 소켓 쪽(where·
+    /// board)은 `App.windows` 를 못 봐서 인덱스+1 을 찍었고, 보기 방이 끼면 화면 ⌘N 과 하나씩 밀려
+    /// 사람이 부른 「2번방」이 엉뚱한 방이 됐다(2026-10-09).
+    room_numbers: Vec<RoomNumber>,
+}
+
+/// 사이드바가 그 방에 다는 번호(⌘N 과 같다, 1부터)와, 다른 기기 방의 보기 창이면 그 기기 이름.
+/// 번호는 이 기기 방을 먼저 세고 보기 방을 뒤에 붙인다(`room_number_for_window`). 사이드바에 없는
+/// 보기 방은 번호가 없다.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RoomNumber {
+    shown: Option<usize>,
+    view_of: Option<String>,
 }
 
 impl Default for Workspace {
@@ -3576,6 +3589,7 @@ impl Default for Workspace {
             compacting: HashMap::new(),
             window_layouts: HashMap::new(),
             grid_aspect: None,
+            room_numbers: Vec::new(),
         }
     }
 }
@@ -3652,6 +3666,27 @@ impl Workspace {
             .unwrap_or_else(|| outer.to_string())
     }
 
+    /// 주소로 받은 `%N` 에 글을 쓸 PTY. 그 번호의 PTY 가 살아 있으면 **그것뿐**이다.
+    ///
+    /// 칸 번호와 첫 탭 PTY 번호가 같아서, 칸 번호로 활성 탭을 고르면 뒤 탭(`%9`, 학생)에 보낸
+    /// 브리프가 같은 칸 앞 탭(`%5`, 서버가 돌던 셸)에 들어가 서버를 멈추는 순간 셸 명령으로
+    /// 실행됐다(2026-10-09). 칸 번호만 남은 자리는 탭이 하나일 때만 그 탭으로 잇고, 탭이 여럿이면
+    /// 어느 탭인지 모르므로 거절한다.
+    fn surface_pty(&self, surface: &str, live: impl Fn(&str) -> bool) -> Result<String, String> {
+        if live(surface) {
+            return Ok(surface.to_string());
+        }
+        let pane = self.panes.get(surface).ok_or_else(|| format!("surface {surface} 없음"))?;
+        match pane.tabs.as_slice() {
+            [] => Ok(surface.to_string()),
+            [only] => Ok(only.pid.clone().unwrap_or_else(|| surface.to_string())),
+            tabs => Err(format!(
+                "칸 {surface} 에 탭이 {}개다 — 받을 탭의 번호(where 의 탭 줄 %N)로 보내라",
+                tabs.len()
+            )),
+        }
+    }
+
     /// Locate `(outer_pane, tab_index)` for a backend pty id. Used by
     /// `pump_pty_screens` to write the right tab's content even when the
     /// update came from a non-active or secondary-tab shell.
@@ -3706,7 +3741,7 @@ enum UserEvent {
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
-    /// None = active pane.
+    /// None = active pane, Some = that PTY (`Workspace::surface_pty`), not its pane's active tab.
     SocketBytes(Option<String>, Vec<u8>),
     SafeTellWake,
     SafeTellReady(tell_delivery::Commit),
@@ -3921,7 +3956,7 @@ enum UserEvent {
         reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
     },
     /// CLI `window-new --machine` — 저쪽에 새 방을 만들고 여기 보기 창으로(GUI 스레드).
-    RemoteNewRoom(String, std::sync::mpsc::Sender<std::result::Result<(String, Option<usize>), String>>),
+    RemoteNewRoom(String, std::sync::mpsc::Sender<std::result::Result<(String, kasa_socket::backend::SeatRoom), String>>),
     TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),
     TransferPrepareSpawn(kasa_socket::transfer::SpawnRequest, std::sync::mpsc::Sender<std::result::Result<transfer_endpoints::SpawnPlan, String>>),
     TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>, bool),
@@ -7039,6 +7074,24 @@ mod tests {
         assert!(ws.find_tab_by_pty("%4").is_none(), "번호만 같은 남의 칸의 첫 탭에 쓰지 않는다");
         ws.panes.insert("%5".into(), PaneState::default());
         assert_eq!(ws.find_tab_by_pty("%5").map(|(_, i)| i), Some(0), "첫 프레임 전의 새 셸은 제 칸");
+    }
+
+    /// 칸 `%9` 이 탭 둘(뒤 `%9` 학생, 앞 `%5` 서버 셸)을 들 때 `%9` 로 보낸 글은 `%9` 에만 간다
+    /// (2026-10-09 브리프가 `%5` 셸에서 명령으로 실행됐다). 칸 번호만 남은 자리는 탭이 하나일 때만 잇는다.
+    #[test]
+    fn send_reaches_the_addressed_tab_not_the_cells_front_tab() {
+        let tab = |pid: &str| PaneTab { pid: Some(pid.to_string()), ..PaneTab::default() };
+        let mut ws = Workspace::default();
+        ws.panes.insert("%9".into(), PaneState { tabs: vec![tab("%9"), tab("%5")], active_tab: 1, ..PaneState::default() });
+        let live = |p: &str| matches!(p, "%9" | "%5" | "%7");
+        assert_eq!(ws.surface_pty("%9", live).as_deref(), Ok("%9"), "뒤 탭");
+        assert_eq!(ws.surface_pty("%5", live).as_deref(), Ok("%5"), "앞 탭");
+        assert_eq!(ws.active_tab_pid("%9"), "%5", "옛 길이 고르던 앞 탭");
+        ws.panes.insert("%3".into(), PaneState { tabs: vec![tab("%7")], ..PaneState::default() });
+        assert_eq!(ws.surface_pty("%3", live).as_deref(), Ok("%7"), "탭 하나뿐인 칸 번호");
+        ws.panes.insert("%4".into(), PaneState { tabs: vec![tab("%9"), tab("%7")], ..PaneState::default() });
+        assert!(ws.surface_pty("%4", live).is_err(), "탭 여럿인 칸 번호는 고르지 않는다");
+        assert!(ws.surface_pty("%77", live).is_err());
     }
 
     #[test]
