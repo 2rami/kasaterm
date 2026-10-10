@@ -179,9 +179,11 @@ fn write_frame(w: &mut impl Write, body: &str) -> std::io::Result<()> {
 /// 메시지면 `None` — 그 밖의 알림·응답은 이 클라이언트가 쓰지 않는다.
 ///
 /// 줄 텍스트를 넘기는 이유는 UTF-16 열을 char 로 바꾸려면 그 줄이 필요해서다.
-/// 파일을 다시 읽지 않고 열려 있는 버퍼를 쓰도록 호출자가 준다.
+/// 파일을 다시 읽지 않고 열려 있는 버퍼를 쓰도록 호출자가 준다. `resolve` 는 서버가
+/// 돌려준 경로를 우리 쪽 키로 되돌린다(`restore_known_prefix`) — 줄 조회와 저장이 같은 키를 쓴다.
 pub fn parse_diagnostics(
     msg: &serde_json::Value,
+    resolve: impl Fn(PathBuf) -> PathBuf,
     line_text: impl Fn(&Path, usize) -> Option<String>,
 ) -> Option<(PathBuf, Vec<Diag>)> {
     if msg.get("method")?.as_str()? != "textDocument/publishDiagnostics" {
@@ -189,7 +191,7 @@ pub fn parse_diagnostics(
     }
     let p = msg.get("params")?;
     let uri = p.get("uri")?.as_str()?;
-    let path = uri_to_path(uri)?;
+    let path = resolve(uri_to_path(uri)?);
     let mut out = Vec::new();
     for d in p.get("diagnostics")?.as_array()? {
         let r = d.get("range")?;
@@ -271,13 +273,55 @@ fn percent_encode_into(out: &mut String, s: &str) {
 // 없는 `file:///tmp/x`·깨진 URI)은 위의 예전 갈래로 넘겨 패닉 없이 그대로 둔다.
 #[cfg(windows)]
 fn windows_uri_path(uri: &str) -> Option<PathBuf> {
-    let p = url::Url::parse(uri).ok()?.to_file_path().ok()?;
-    Some(PathBuf::from(upper_drive_letter(&p.to_string_lossy())))
+    url::Url::parse(uri).ok()?.to_file_path().ok()
 }
 
-/// rust-analyzer 는 Windows 드라이브 문자를 소문자로 바꿔 보낸다(url_from_abs_path, VS Code 관례).
-/// 편집기 버퍼·진단 맵 키는 시스템이 준 대문자 경로라, 그대로 두면 진단이 다른 키로 들어가 안 뜬다.
-#[cfg(any(windows, test))]
+/// 서버가 돌려준 경로를 우리가 건넨 경로(열린 문서·프로젝트 뿌리)의 원래 꼴로 되돌린다. 진단 맵·줄 조회는
+/// 우리 쪽 경로가 키인데, rust-analyzer 는 Windows 앞머리를 바꿔 돌려준다 — 드라이브 문자를 소문자로
+/// (url_from_abs_path, VS Code 관례), UNC 서버 이름을 소문자로(url 의 호스트 정규화), `\\?\` 는 벗기고.
+/// 앞머리만 다른 같은 파일을 못 찾으면 진단이 안 뜨고 정의 이동이 다른 탭을 연다. 유닉스는 그대로.
+fn restore_known_prefix<'a>(got: PathBuf, known: impl IntoIterator<Item = &'a Path>) -> PathBuf {
+    if !cfg!(windows) {
+        return got;
+    }
+    let known: Vec<String> = known.into_iter().map(|k| k.to_string_lossy().into_owned()).collect();
+    PathBuf::from(restore_prefix_str(&got.to_string_lossy(), &known))
+}
+
+/// `restore_known_prefix` 의 문자열판(Windows 규칙) — 어느 OS 에서든 시험한다. 아는 경로 중 앞머리를
+/// 맞춘 비교로 이 경로이거나 그 밑인 가장 긴 것을 골라 그 원래 글자에 나머지를 붙인다. 나머지(폴더·
+/// 파일 이름)는 대소문자까지 그대로 비교하고 그대로 둔다. 아무것에도 안 맞으면 드라이브만 대문자로.
+fn restore_prefix_str(got: &str, known: &[String]) -> String {
+    let g = prefix_key(got);
+    let mut best: Option<(usize, String)> = None;
+    for k in known {
+        let kk = prefix_key(k);
+        let Some(rest) = g.strip_prefix(kk.as_str()) else { continue };
+        if !(rest.is_empty() || rest.starts_with('\\') || kk.ends_with('\\')) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(len, _)| kk.len() > *len) {
+            best = Some((kk.len(), format!("{k}{rest}")));
+        }
+    }
+    best.map(|(_, p)| p).unwrap_or_else(|| upper_drive_letter(got))
+}
+
+/// 비교용 앞머리 — `\\?\` 벗김, 구분자 `\`, 드라이브 문자 대문자, UNC 서버 이름 소문자. 공유 이름부터는 그대로.
+fn prefix_key(p: &str) -> String {
+    let s = p.replace('/', "\\");
+    let s = match (s.strip_prefix(r"\\?\UNC\"), s.strip_prefix(r"\\?\")) {
+        (Some(unc), _) => format!(r"\\{unc}"),
+        (None, Some(disk)) => disk.to_string(),
+        _ => s,
+    };
+    if let Some(unc) = s.strip_prefix(r"\\") {
+        let (server, rest) = unc.split_at(unc.find('\\').unwrap_or(unc.len()));
+        return format!(r"\\{}{rest}", server.to_ascii_lowercase());
+    }
+    upper_drive_letter(&s)
+}
+
 fn upper_drive_letter(p: &str) -> String {
     let mut s = p.to_string();
     if s.as_bytes().get(1) == Some(&b':') && s.as_bytes()[0].is_ascii_lowercase() {
@@ -401,6 +445,7 @@ impl LspClient {
         let dsink = Arc::clone(&definitions);
         let hovers: Arc<Mutex<Option<(i64, String)>>> = Arc::new(Mutex::new(None));
         let hsink = Arc::clone(&hovers);
+        let root_key = root.to_path_buf();
         std::thread::spawn(move || {
             let mut r = BufReader::new(stdout);
             while let Some(body) = read_frame(&mut r) {
@@ -409,6 +454,14 @@ impl LspClient {
                 };
                 let line_of = |p: &Path, li: usize| -> Option<String> {
                     tsink.lock().ok()?.get(p)?.get(li).cloned()
+                };
+                let resolve = |p: PathBuf| -> PathBuf {
+                    if !cfg!(windows) {
+                        return p;
+                    }
+                    let docs: Vec<PathBuf> =
+                        tsink.lock().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                    restore_known_prefix(p, docs.iter().map(PathBuf::as_path).chain([root_key.as_path()]))
                 };
                 if debug {
                     let what = v
@@ -435,7 +488,7 @@ impl LspClient {
                 // 본다: 정의 응답도 배열이라 자동완성 파서가 먼저 보면 "후보 0개"
                 // 로 삼켜 버린다.
                 if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
-                    if let Some(at) = parse_definition(&v) {
+                    if let Some(at) = parse_definition(&v).map(|(p, l, c)| (resolve(p), l, c)) {
                         if debug {
                             eprintln!("[lsp] 정의 {at:?} (id={id})");
                         }
@@ -458,7 +511,7 @@ impl LspClient {
                         }
                     }
                 }
-                if let Some((path, ds)) = parse_diagnostics(&v, line_of) {
+                if let Some((path, ds)) = parse_diagnostics(&v, resolve, line_of) {
                     if debug {
                         eprintln!("[lsp] 진단 {} 개 {path:?}", ds.len());
                     }
@@ -767,6 +820,76 @@ mod tests {
         }
     }
 
+    /// 서버가 돌려준 경로가 우리가 연 문서·뿌리의 **원래 앞머리**로 돌아오는지(Windows 규칙, 문자열판).
+    /// 앞머리(드라이브 대소문자·UNC 서버 이름·`\\?\`)만 맞추고 폴더·파일 이름은 대소문자까지 그대로다.
+    #[test]
+    fn server_paths_come_back_with_our_original_windows_prefix() {
+        let known = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let cases: [(&[&str], &str, &str); 9] = [
+            // c:\ 로 연 문서 — rust-analyzer 도 c: 로 돌려주지만 대문자로 올리면 안 된다.
+            (&[r"c:\repo\src\main.rs"], r"c:\repo\src\main.rs", r"c:\repo\src\main.rs"),
+            (&[r"c:\repo\src\main.rs"], r"C:\repo\src\main.rs", r"c:\repo\src\main.rs"),
+            // url 이 소문자로 바꾼 UNC 서버 이름 → 우리가 연 \\SERVER 로.
+            (&[r"\\SERVER\share\repo"], r"\\server\share\repo\src\main.rs", r"\\SERVER\share\repo\src\main.rs"),
+            // canonicalize 가 준 verbatim 뿌리 — 서버는 \\?\ 없이 c: 로 돌려준다.
+            (&[r"\\?\C:\repo"], r"c:\repo\src\main.rs", r"\\?\C:\repo\src\main.rs"),
+            (&[r"\\?\UNC\SERVER\share\repo"], r"\\server\share\repo\x.rs", r"\\?\UNC\SERVER\share\repo\x.rs"),
+            // 열린 문서가 뿌리보다 구체적이면 문서의 꼴이 이긴다.
+            (&[r"\\?\C:\repo", r"C:\repo\src\main.rs"], r"c:\repo\src\main.rs", r"C:\repo\src\main.rs"),
+            // 이름은 대소문자까지 그대로 비교한다 — Repo 와 repo 를 합치지 않고, 드라이브만 올린다.
+            (&[r"C:\Repo"], r"c:\repo\x.rs", r"C:\repo\x.rs"),
+            // 글자 경계 — repo 가 repository 의 앞부분이라고 그 밑으로 보지 않는다.
+            (&[r"C:\repo"], r"c:\repository\x.rs", r"C:\repository\x.rs"),
+            // 드라이브 뿌리.
+            (&[r"C:\"], r"c:\x.rs", r"C:\x.rs"),
+        ];
+        for (ks, got, want) in cases {
+            assert_eq!(restore_prefix_str(got, &known(ks)), want, "{ks:?} ← {got}");
+        }
+        // 공유 이름은 url 이 안 바꾸니 대소문자가 다르면 다른 자리다.
+        assert_eq!(restore_prefix_str(r"\\server\share\x", &known(&[r"\\SERVER\Share"])), r"\\server\share\x");
+        // 아는 경로가 없으면 드라이브만.
+        assert_eq!(restore_prefix_str(r"c:\a\B.rs", &[]), r"C:\a\B.rs");
+    }
+
+    /// 실제 Path 로 한 바퀴 — 우리가 연 문서 셋(c:\·\\SERVER·\\?\C:)에 rust-analyzer 가 돌려보내는 URI 가
+    /// 진단 저장 키·줄 조회(UTF-16 열 변환)·정의 이동에서 같은 문서로 찾히는지.
+    #[cfg(windows)]
+    #[test]
+    fn rust_analyzer_uris_find_the_documents_we_opened() {
+        for (doc, root, back) in [
+            (r"c:\repo\src\main.rs", r"c:\repo", "file:///c:/repo/src/main.rs"),
+            (r"\\SERVER\share\repo\src\main.rs", r"\\SERVER\share\repo", "file://server/share/repo/src/main.rs"),
+            (r"\\?\C:\repo\src\main.rs", r"\\?\C:\repo", "file:///c:/repo/src/main.rs"),
+        ] {
+            let doc = Path::new(doc);
+            let mut texts: HashMap<PathBuf, Vec<String>> = HashMap::new();
+            texts.insert(doc.to_path_buf(), vec!["🙂🙂abcd".to_string()]);
+            let resolve = |p: PathBuf| {
+                restore_known_prefix(p, texts.keys().map(PathBuf::as_path).chain([Path::new(root)]))
+            };
+            let line_of = |p: &Path, li: usize| texts.get(p)?.get(li).cloned();
+            let msg = serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                "params": {"uri": back, "diagnostics": [{
+                    "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 6}},
+                    "message": "x"}]}
+            });
+            let (key, ds) = parse_diagnostics(&msg, resolve, line_of).unwrap();
+            let mut diags: HashMap<PathBuf, Vec<Diag>> = HashMap::new();
+            diags.insert(key, ds);
+            let found = diags.get(doc).unwrap_or_else(|| panic!("{back} 의 진단이 {doc:?} 키로 안 찾힌다: {:?}", diags.keys()));
+            // 줄 조회가 같은 키로 됐으면 이모지 둘(UTF-16 4유닛)이 char 2 로 바뀐다. 못 찾았으면 4 그대로다.
+            assert_eq!((found[0].col, found[0].end_col), (2, 4), "{back}: 줄 조회가 다른 키로 갔다");
+            let def = serde_json::json!({"id": 9, "result": {"uri": back,
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}});
+            let (p, _, _) = parse_definition(&def).unwrap();
+            assert_eq!(resolve(p), doc, "{back}: 정의 이동이 다른 경로를 연다");
+        }
+        // 우리가 보내는 쪽 — 서버 이름은 url 이 소문자로 보낸다(그래서 되돌림이 필요하다).
+        assert_eq!(path_to_uri(Path::new(r"\\SERVER\share\repo")), "file://server/share/repo");
+    }
+
     /// Windows 경로 ↔ URI 가 rust-analyzer(url 크레이트)와 같은 꼴이고, 서버가 돌려보낸 꼴로 진단 키가 맞는지.
     #[cfg(windows)]
     #[test]
@@ -782,12 +905,10 @@ mod tests {
         // canonicalize 가 주는 verbatim 경로도 같은 URI.
         assert_eq!(path_to_uri(Path::new(r"\\?\C:\repo\main.rs")), "file:///C:/repo/main.rs");
         // 서버가 돌려보내는 꼴 — rust-analyzer 의 소문자 드라이브, VS Code 의 c%3A, localhost — 이
-        // 편집기 경로(대문자 드라이브) 키로 진단 맵에서 찾혀야 한다.
+        // 편집기 경로(대문자 드라이브)로 되돌아와야 한다.
         let editor = Path::new(r"C:\Users\x.rs");
         for back in ["file:///c:/Users/x.rs", "file:///c%3A/Users/x.rs", "file://localhost/C:/Users/x.rs"] {
-            let mut diags: HashMap<PathBuf, ()> = HashMap::new();
-            diags.insert(uri_to_path(back).unwrap(), ());
-            assert!(diags.contains_key(editor), "{back} → {:?}", uri_to_path(back));
+            assert_eq!(restore_known_prefix(uri_to_path(back).unwrap(), [editor]), editor, "{back}");
         }
         // url 이 못 바꾸는 입력은 패닉 없이 예전 갈래로 간다.
         for rel in [r"src\main.rs", r"\tmp\x.rs", ""] {
@@ -821,7 +942,7 @@ mod tests {
                 }]
             }
         });
-        let (p, ds) = parse_diagnostics(&msg, |_, _| Some("🙂🙂abcd".to_string())).unwrap();
+        let (p, ds) = parse_diagnostics(&msg, |p| p, |_, _| Some("🙂🙂abcd".to_string())).unwrap();
         assert_eq!(p, PathBuf::from("/tmp/x.rs"));
         assert_eq!(ds.len(), 1);
         // UTF-16 4·6 → char 2·4 (이모지 둘이 4 유닛).
@@ -829,6 +950,6 @@ mod tests {
         assert_eq!(ds[0].severity, 2);
         // 진단이 아닌 메시지는 무시.
         let other = serde_json::json!({"jsonrpc":"2.0","method":"$/progress","params":{}});
-        assert!(parse_diagnostics(&other, |_, _| None).is_none());
+        assert!(parse_diagnostics(&other, |p| p, |_, _| None).is_none());
     }
 }
