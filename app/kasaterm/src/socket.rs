@@ -969,6 +969,13 @@ impl PtyBackend {
         }
         Ok(())
     }
+    /// 받는 PTY 를 소켓 쪽에서 미리 가른다 — GUI 가 같은 규칙(`Workspace::surface_pty`)으로 다시
+    /// 고르지만, 탭이 여럿인 칸 번호처럼 못 고르는 주소는 여기서 실패로 돌려줘야 보낸 쪽이 안다.
+    fn addressed_pty(&self, sid: &str) -> Result<String> {
+        self.ws.lock().unwrap()
+            .surface_pty(sid, |p| kasa_pty::lookup_session(p).is_some())
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 impl Backend for PtyBackend {
@@ -1830,22 +1837,24 @@ impl Backend for PtyBackend {
                 .send_event(UserEvent::RemoteNewRoom(m.label.clone(), tx))
                 .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
             return match rx.recv_timeout(std::time::Duration::from_secs(60)) {
-                Ok(Ok((surface, window))) => Ok(serde_json::json!({
-                    "machine": m.label, "surface": surface, "window": window, "viewed": true,
+                Ok(Ok((surface, room))) => Ok(serde_json::json!({
+                    "machine": m.label, "surface": surface, "window": room.window,
+                    "room_number": room.shown(), "viewed": true,
                     "summary": format!("{} 에 새 방 — {surface}{} · 여기 보기 창으로 열었어요", m.label,
-                        window.map(|w| format!(" (방 {})", w + 1)).unwrap_or_default()),
+                        room.shown().map(|n| format!(" (방 {n})")).unwrap_or_default()),
                 })),
                 Ok(Err(why)) => anyhow::bail!("{why}"),
                 Err(_) => anyhow::bail!("새 방 응답 없음(60초)"),
             };
         }
         let at = SpawnShellAt { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of"), ..Default::default() };
-        let (surface, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+        let (surface, room) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
         let how = if at.tab_of.is_some() { "탭으로" } else if at.beside.is_some() { "옆에" } else { "활성 방에" };
         Ok(serde_json::json!({
-            "machine": m.label, "surface": surface, "window": window, "viewed": false,
+            "machine": m.label, "surface": surface, "window": room.window,
+            "room_number": room.shown(), "viewed": false,
             "summary": format!("{} 에 {how} 세움 — {surface}{}", m.label,
-                window.map(|w| format!(" (방 {})", w + 1)).unwrap_or_default()),
+                room.shown().map(|n| format!(" (방 {n})")).unwrap_or_default()),
         }))
     }
 
@@ -2085,7 +2094,10 @@ impl Backend for PtyBackend {
                 json!({"cell": rect.surface_id, "row": row, "col": col,
                     "x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h, "tabs": tabs})
             }).collect();
-            json!({"window": room.idx, "label": labels.get(room.idx), "active": room.active, "cells": cells})
+            let number = ws.room_numbers.get(room.idx);
+            json!({"window": room.idx, "room_number": number.and_then(|n| n.shown),
+                "view_of": number.and_then(|n| n.view_of.clone()),
+                "label": labels.get(room.idx), "active": room.active, "cells": cells})
         }).collect();
         Ok(json!({ "rooms": rooms }))
     }
@@ -2312,7 +2324,7 @@ impl Backend for PtyBackend {
             if !known {
                 anyhow::bail!("surface {sid} 없음 — 재시작·종료로 사라진 pane (오발송 방지)");
             }
-            let pid = self.ws.lock().unwrap().active_tab_pid(sid);
+            let pid = self.addressed_pty(sid)?;
             if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
                 anyhow::bail!("surface {sid} is closed — reopen it before assigning work");
             }
@@ -2335,7 +2347,7 @@ impl Backend for PtyBackend {
 
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
         if let Some(sid) = surface_id {
-            let pid = self.ws.lock().unwrap().active_tab_pid(sid);
+            let pid = self.addressed_pty(sid)?;
             if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
                 anyhow::bail!("surface {sid} is closed — reopen it before sending keys");
             }
@@ -3201,14 +3213,14 @@ impl Backend for PtyBackend {
         // query Claude's agent inventory or the cross-session peer registry.
         self.discover_unbound(&live);
         let table = kasa_pty::process_table_shared();
-        let (rooms,characters,windows,screens) = {
+        let (rooms,characters,windows,screens,room_numbers) = {
             let ws = self.ws.lock().unwrap();
             let screens: HashMap<String,Option<String>> = live.iter().filter_map(|id| {
                 let outer = ws.outer_for_pty(id).unwrap_or_else(||id.clone());
                 let pane = ws.panes.get(&outer)?.tab_for_pid(id);
                 Some((id.clone(),pane.title.clone()))
             }).collect();
-            (ws.pane_room.clone(),ws.pane_character.clone(),ws.pane_window.clone(),screens)
+            (ws.pane_room.clone(),ws.pane_character.clone(),ws.pane_window.clone(),screens,ws.room_numbers.clone())
         };
         let labels = self.sessions().labels;
         // 상태는 허브 판정 하나 — 훅 턴 경계·기록 턴 경계·attention·명부·박동을 모은 것이고,
@@ -3259,6 +3271,7 @@ impl Backend for PtyBackend {
             let mut row = json!({"address":observed_address,
                 "room_id":rooms.get(&id).cloned().or_else(||window.map(|n|n.to_string())),
                 "room_label":window.and_then(|n|labels.get(n)).cloned().unwrap_or_else(||"Unplaced".into()),
+                "room_number":window.and_then(|n|room_numbers.get(n)).and_then(|n|n.shown),
                 "character":characters.get(&id),"harness":harness,"title":title,
                 "request":meta.last_prompt,"progress":if meta.last_reply.is_empty() {meta.intent} else {meta.last_reply},
                 "status":status,"status_reason":reason,"detached":detached,
@@ -3350,12 +3363,13 @@ impl Backend for PtyBackend {
         // 전 윈도우(방) pane → window_idx — board 를 활성 방으로 한정하지 않고 모든 방의 학생을
         // 실어 arona-ui 좌측이 방별 학생 트리를 영속한다(사용자: 좌측 통합·전 방 영속). 이 맵은
         // GUI(App)의 publish_pty_layout 이 ws 로 미러한다 — PtyBackend 는 App.windows 를 못 본다.
-        let (pane_room, pane_character, pane_window) = {
+        let (pane_room, pane_character, pane_window, room_numbers) = {
             let ws = self.ws.lock().unwrap();
             (
                 ws.pane_room.clone(),
                 ws.pane_character.clone(),
                 ws.pane_window.clone(),
+                ws.room_numbers.clone(),
             )
         };
         // pane 셸 프로세스 env 의 KASATERM_CHARACTER — 데몬이 영속하는 세션 정체성.
@@ -3439,6 +3453,7 @@ impl Backend for PtyBackend {
                     row.subagents = subagents;
                 }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
+                row.room_number = pane_window.get(sid.as_str()).and_then(|w| room_numbers.get(*w)).and_then(|n| n.shown);
                 // pane_window 는 모든 방의 split 트리 leaf 집합이다(publish_pty_layout).
                 // 거기 없는 pane = 사용자가 닫았거나 숨겨 화면에 없다 — PTY 는
                 // 재부착 대비로 돌지만, 학생들이 그런 pane 에 새 일을 시키면 안
@@ -4097,6 +4112,7 @@ fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
     let mut current = PaneActivity {
         surface_id: row.surface_id.clone(),
         window_idx: row.window_idx,
+        room_number: row.room_number,
         detached: row.detached,
         machine: row.machine.clone(),
         cwd: text("cwd").unwrap_or_else(|| row.cwd.clone()),

@@ -93,7 +93,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 | 명령 | 반환 |
 |---|---|
-| `where [찾을 말] [--json]` | 방마다 칸 배치도 + 칸·탭 목록(plain text). `--json` 은 `result.rooms[].cells[].tabs[]`(kind·surface·character·title·url·path) |
+| `where [찾을 말] [--json]` | 방마다 칸 배치도 + 칸·탭 목록(plain text, 「방 N」= 사이드바 ⌘N). `--json` 은 `result.rooms[]` 에 `window`(인덱스, 0부터)·`room_number`(⌘N, 1부터 — 사람이 「N번방」이라 하면 이것)·`view_of`(다른 기기 방의 보기 창이면 그 기기 이름), 그 아래 `cells[].tabs[]`(kind·surface·character·title·url·path) |
 | `identify` | `result.surface.id` = **지금 내가 어느 pane인지**(`$KASATERM_PANE_ID`와 동일) |
 | `peek [<id>] [lines]` | `result.text` = 그 pane 화면 tail(문자열). id 생략=자기 자신 (§5) |
 | `transcript [<id>] [N]` | `result.turns` = `[{"role":"user\|assistant","text":"…"},…]` 마지막 N턴 (§5) |
@@ -102,7 +102,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 **`board` 항목 필드** — 협업 판단엔 이것만 보면 된다(원소당 필드가 20+개지만 나머지는 노이즈):
 
-`surface_id` · `character`(학생 이름) · `status`(`idle`\|`working`) · `intent`(지금 하려는 것) · `last_prompt` · `last_reply` · `cwd`(셸 위치) · `view_cwd`(파일트리 위치) · `changed_files`(수정한 파일 절대경로) · `recent_tools` · `model` · `context_pct` · `window_idx` · `title`.
+`surface_id` · `character`(학생 이름) · `status`(`idle`\|`working`) · `intent`(지금 하려는 것) · `last_prompt` · `last_reply` · `cwd`(셸 위치) · `view_cwd`(파일트리 위치) · `changed_files`(수정한 파일 절대경로) · `recent_tools` · `model` · `context_pct` · `window_idx`(방 인덱스, 0부터) · `room_number`(사람이 부르는 방 번호 = 사이드바 ⌘N, 1부터) · `title`.
 → **충돌 회피는 `status`+`changed_files`+`intent` 세 개면 충분.**
 
 ⚠️ **board 는 도구의 성패를 안 싣는다.** `recent_tools` 는 호출 라벨 최근 **8개**뿐이라

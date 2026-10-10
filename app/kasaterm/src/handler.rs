@@ -288,7 +288,10 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SocketBytes(sid, bytes) => {
                 {
                     let target = match sid.as_deref() {
-                        Some(id) => self.pty_for_pane(id),
+                        Some(id) => {
+                            let pid = self.ws.lock().unwrap().surface_pty(id, |p| self.pty.contains_key(p));
+                            pid.ok().and_then(|pid| self.pty.get(&pid))
+                        }
                         None => self.active_pty(),
                     };
                     if let Some(p) = target {
@@ -391,24 +394,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(outcome);
             }
             UserEvent::SocketMovePane(moving, target, zone, reply) => {
-                let outcome = if self.window_of_pane(moving).is_none() {
-                    Err(format!("옮길 pane {moving} 이 없다"))
-                } else if self.window_of_pane(target).is_none() {
-                    Err(format!("놓을 자리 {target} 이 없다"))
-                } else if moving == target {
-                    Err("자기 자신 옆으로는 못 옮긴다".to_string())
-                } else {
-                    self.move_pane(moving, target, *zone);
-                    // `move_pane` 은 성공/실패를 안 돌려준다(드래그 경로라 실패해도
-                    // 화면이 그대로면 사용자가 안다). 소켓은 그럴 수 없으니 **옮겨진
-                    // 자리로 판정한다** — 대상과 같은 창에 있으면 붙은 것이다.
-                    match self.window_of_pane(moving) {
-                        Some(w) if Some(w) == self.window_of_pane(target) => Ok(moving.clone()),
-                        _ => Err(format!(
-                            "{moving} 이 {target} 옆으로 안 붙었다 — 트리에서 떨어졌는지 확인해라"
-                        )),
-                    }
-                };
+                let outcome = self.socket_move_pane(moving, target, *zone);
                 let _ = reply.send(outcome);
             }
             UserEvent::SocketClosedPanes(discard, reply) => {
@@ -1035,7 +1021,8 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketSpawnShellAt(at, reply) => {
-                let out = self.spawn_shell_pane_at(&at);
+                let mut out = self.spawn_shell_pane_at(&at);
+                out.room_number = out.window.and_then(|w| self.room_number_for_window(w)).map(|n| n + 1);
                 let _ = reply.send(out);
                 return;
             }
