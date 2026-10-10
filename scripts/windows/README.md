@@ -48,8 +48,22 @@ Parallels 기준: 새 VM → "Windows 11 설치" 선택 시 ARM64 ISO를 자동�
 cd C:\kasaterm
 powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1
 ```
-MSVC 빌드툴 + Rust(rustup) + Node + Git를 winget으로 깐다. 끝나면 새 창을 열고
-`rustc -vV`의 host가 `aarch64-pc-windows-msvc`인지 확인(네이티브면 이게 맞다).
+MSVC 빌드툴 + Rust(rustup) + Node + Git + Python 3.12를 winget으로 깐다. 끝나면 새 창을 열고 확인한다
+(아무것도 안 깔고 보기만 한다):
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1 -Check
+```
+`rustc -vV`의 host가 `aarch64-pc-windows-msvc`면 네이티브다.
+
+### 앱이 실행 중에 빌리는 것 (설치본도 같다)
+
+| 무엇 | 왜 | 앱이 찾는 법 |
+|---|---|---|
+| Git for Windows 의 `sh.exe` | 칸 훅·`.cmd` 짝을 돌리는 POSIX sh, 셸 고르기의 Git Bash | `Program Files\Git\bin\bash.exe` 옆 `sh.exe` |
+| Python 3 (실물) | 훅·`kasacollab`·하네스 신원 확인 | `python3` → `python` → `py` 중 `--version` 이 `Python 3` 인 첫 것 |
+
+`WindowsApps` 의 `python3.exe`·`python.exe` 는 스토어 바로가기 껍데기라 실행이 실패한다 — 그것만 있으면 훅이 소리
+없이 멈춘다. 실물을 깔거나 설정 → 앱 → 앱 실행 별칭에서 둘을 끈다. `-Check` 가 껍데기를 따로 표시한다.
 
 ---
 
@@ -145,3 +159,10 @@ scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-porta
   칸 셸이 정말 그 셸인지까지 본다. 없는 셸은 건너뛰지 않고 실패하니 빼려면 `-SmokeShells default,cmd` 처럼 적는다.
 - `-UserProfileOnly` 는 HOME 을 빼고(탐색기로 뜬 GUI 와 같다) `-NoRedirect` 는 표준 핸들 없이 띄워 앱이 stderr 를
   격리 TEMP 의 `kasaterm-app.log` 로 돌리는 갈래를 본다. CI 의 portable smoke 가 둘 다 쓴다.
+
+자동 smoke 가 **증명하지 않는 것** — 실기기에서 사람이 따로 본다.
+- 한글 IME 조합: smoke 의 입력은 `tell --raw` 로 PTY 에 바로 넣는 글자라 IME 조합 경로를 안 지난다.
+- NTFS 링크 권한: 진짜 심볼릭 링크는 개발자 모드·관리자에서만 걸리고, 없으면 폴더는 정션·파일은 하드 링크로
+  물러선다. Codex 계정 슬롯의 `auth.json` 처럼 대상이 아직 없는 링크는 하드 링크로 못 거니 권한 없는 사용자
+  계정·임시 폴더가 NTFS 가 아닌 경우는 러너(관리자)에서 재현되지 않는다.
+- Codex·Claude 로그인과 토큰 갱신: 러너에는 계정이 없다.

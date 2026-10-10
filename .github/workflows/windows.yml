@@ -228,6 +228,16 @@ jobs:
           cache: npm
           cache-dependency-path: web/arona-ui/package-lock.json
 
+      # 앱이 실행 중에 빌리는 Python 3(훅·kasacollab·하네스 신원)과 Git 의 sh.exe(칸 훅)를 smoke 전에 기록한다.
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Runtime dependencies
+        shell: pwsh
+        run: ./scripts/windows/setup.ps1 -Check
+
       - name: Release build (app + CLI + arona-ui)
         shell: pwsh
         run: ./scripts/windows/verify.ps1 -Stage build
