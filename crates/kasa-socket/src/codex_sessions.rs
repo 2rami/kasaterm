@@ -392,6 +392,9 @@ mod tests {
     const ID: &str = "01a05db2-2814-7db3-bfa0-84e22e2467bc";
     const PARENT_ID: &str = "01a05d83-4ec4-7e73-b66b-8bf5d5309d9f";
 
+    /// Codex 가 적는 그 OS 의 절대 cwd. Windows 에서 `/Users/…` 는 절대경로가 아니라 머리말 검사에 걸린다.
+    const PROJECT: &str = if cfg!(windows) { r"C:\Users\kasa\project" } else { "/Users/kasa/project" };
+
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     struct TempRoot(PathBuf);
@@ -436,16 +439,16 @@ mod tests {
     #[test]
     fn current_thread_id_wins_over_parent_session_id() {
         let root = TempRoot::new("parent-id");
-        let path = rollout(&root.0, ID, ID, "/Users/kasa/project");
+        let path = rollout(&root.0, ID, ID, PROJECT);
         let got = locate_codex_session_at(&root.0, &path).unwrap();
         assert_eq!(got.session_id, ID);
-        assert_eq!(got.cwd, Path::new("/Users/kasa/project"));
+        assert_eq!(got.cwd, Path::new(PROJECT));
     }
 
     #[test]
     fn bundle_contains_only_the_rollout_and_plans_the_remote_path() {
         let root = TempRoot::new("bundle");
-        let path = rollout(&root.0, ID, ID, "/Users/kasa/project");
+        let path = rollout(&root.0, ID, ID, PROJECT);
         let expected = std::fs::read(&path).unwrap();
         let bundle = bundle_codex_session(&root.0, &path).unwrap();
         assert_eq!(bundle.version, CODEX_SESSION_BUNDLE_VERSION);
@@ -473,11 +476,23 @@ mod tests {
     #[test]
     fn header_and_filename_must_name_the_same_thread() {
         let root = TempRoot::new("mismatch");
-        let path = rollout(&root.0, ID, PARENT_ID, "/Users/kasa/project");
+        let path = rollout(&root.0, ID, PARENT_ID, PROJECT);
         let err = locate_codex_session_at(&root.0, &path)
             .unwrap_err()
             .to_string();
         assert!(err.contains("header id와 파일명 id가 다름"), "{err}");
+    }
+
+    /// 상대경로와 다른 OS 꼴의 cwd 는 이 기기에서 절대경로가 아니라 받지 않는다.
+    #[test]
+    fn a_cwd_that_is_not_absolute_here_is_refused() {
+        let foreign = if cfg!(windows) { "/Users/kasa/project" } else { r"C:\Users\kasa\project" };
+        for cwd in ["relative/project", foreign] {
+            let root = TempRoot::new("relative-cwd");
+            let path = rollout(&root.0, ID, ID, cwd);
+            let err = locate_codex_session_at(&root.0, &path).unwrap_err().to_string();
+            assert!(err.contains("절대경로가 아님"), "{cwd}: {err}");
+        }
     }
 
     #[test]
@@ -501,7 +516,7 @@ mod tests {
     #[test]
     fn find_by_id_walks_the_verified_date_layout() {
         let root = TempRoot::new("find");
-        let path = rollout(&root.0, ID, ID, "/Users/kasa/project");
+        let path = rollout(&root.0, ID, ID, PROJECT);
         let got = find_codex_session(&root.0, ID).unwrap().unwrap();
         assert_eq!(got.rollout_path, std::fs::canonicalize(path).unwrap());
     }
@@ -509,14 +524,14 @@ mod tests {
     #[test]
     fn duplicate_histories_are_ambiguous_not_newest_wins() {
         let root = TempRoot::new("duplicate");
-        rollout(&root.0, ID, ID, "/Users/kasa/project");
+        rollout(&root.0, ID, ID, PROJECT);
         let second = root.0.join(format!(
             "sessions/2026/09/01/rollout-2026-09-01T23-00-00-{ID}.jsonl"
         ));
         std::fs::create_dir_all(second.parent().unwrap()).unwrap();
         let header = serde_json::json!({
             "type": "session_meta",
-            "payload": {"id": ID, "cwd": "/Users/kasa/project"}
+            "payload": {"id": ID, "cwd": PROJECT}
         });
         std::fs::write(second, format!("{header}\n")).unwrap();
         let err = find_codex_session(&root.0, ID).unwrap_err().to_string();
@@ -526,7 +541,7 @@ mod tests {
     #[test]
     fn restore_rejects_parent_traversal_even_with_valid_bytes() {
         let root = TempRoot::new("traversal");
-        let path = rollout(&root.0, ID, ID, "/Users/kasa/project");
+        let path = rollout(&root.0, ID, ID, PROJECT);
         let mut bundle = bundle_codex_session(&root.0, &path).unwrap();
         bundle.files[0].codex_home_relative_path = PathBuf::from("sessions/../auth.json");
         assert!(codex_restore_files(Path::new("/dest/.codex"), &bundle).is_err());
@@ -543,7 +558,7 @@ mod tests {
         std::fs::create_dir_all(real_home.join("sessions")).unwrap();
         std::fs::create_dir_all(&pane_home).unwrap();
         symlink(real_home.join("sessions"), pane_home.join("sessions")).unwrap();
-        let path = rollout(&real_home, ID, ID, "/Users/kasa/project");
+        let path = rollout(&real_home, ID, ID, PROJECT);
         let via_pane = pane_home
             .join("sessions/2026/09/02")
             .join(path.file_name().unwrap());

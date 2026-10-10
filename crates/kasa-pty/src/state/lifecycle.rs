@@ -766,7 +766,7 @@ mod external_session_tests {
     fn dropping_a_pane_whose_output_nobody_reads_returns_at_once() {
         let sess = PtySession::start(PtyOptions {
             pane_id: format!("undrained-{}", std::process::id()),
-            shell: Some("/bin/sh".into()),
+            shell: Some(test_posix_shell()),
             cols: 80,
             rows: 24,
             ..Default::default()

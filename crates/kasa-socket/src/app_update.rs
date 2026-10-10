@@ -1305,7 +1305,8 @@ mod tests {
             capability: app_restart::CAPABILITY,
             app_path: installed.display().to_string(),
             pid: 4242,
-            running_exe: installed.join("Contents/MacOS/kasaterm").display().to_string(),
+            // 대상 맥이 보고하는 문자열 그대로 — `join` 은 Windows 에서 `\` 를 섞어 `app_exe()` 와 갈린다.
+            running_exe: format!("{}/Contents/MacOS/kasaterm", installed.display()),
             binary: BinaryId { inode: 1, mtime_ms: 2, build: "8933a0ca".into() },
             observed_at_ms: NOW,
             ..Facts::default()

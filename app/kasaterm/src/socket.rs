@@ -4211,8 +4211,10 @@ mod remote_board_tests {
     #[test]
     fn board_shell_pids_come_from_the_registry_without_the_gui() {
         let id = format!("%board-pid-{}", uuid::Uuid::new_v4());
+        // 셸 pid 만 보면 되니 어느 OS 에나 있는 셸이면 된다.
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         let sess = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
-            shell: Some("/bin/sh".into()), cols: 20, rows: 5, pane_id: id.clone(), ..Default::default()
+            shell: Some(shell.into()), cols: 20, rows: 5, pane_id: id.clone(), ..Default::default()
         }).expect("PTY"));
         kasa_pty::register_session(&id, &sess);
         let shell = |p: &str| kasa_pty::lookup_session(p).and_then(|s| s.shell_pid());
@@ -7745,7 +7747,7 @@ fn codex_repair_thread_paths_at(db: &std::path::Path, sessions: &std::path::Path
     };
     let _ = conn.busy_timeout(std::time::Duration::from_millis(300));
     let Ok(mut stmt) = conn.prepare(
-        "SELECT id, rollout_path FROM threads WHERE rollout_path LIKE '%/kasaterm-shim-%'",
+        "SELECT id, rollout_path FROM threads WHERE rollout_path LIKE '%kasaterm-shim-%'",
     ) else {
         return 0;
     };
@@ -7759,8 +7761,8 @@ fn codex_repair_thread_paths_at(db: &std::path::Path, sessions: &std::path::Path
         if std::path::Path::new(&path).exists() {
             continue;
         }
-        let Some(at) = path.find("/sessions/") else { continue };
-        let real = sessions.join(&path[at + "/sessions/".len()..]);
+        let Some(tail) = shim_rollout_tail(&path) else { continue };
+        let real = tail.iter().fold(sessions.to_path_buf(), |p, part| p.join(part));
         if !real.exists() {
             continue;
         }
@@ -7775,6 +7777,21 @@ fn codex_repair_thread_paths_at(db: &std::path::Path, sessions: &std::path::Path
         }
     }
     fixed
+}
+
+/// shim 아래 rollout 경로에서 `sessions` 다음 성분들. codex 는 제 OS 의 구분자로 적으니(Windows 는 `\`)
+/// 둘 다 가른다. 꼬리는 실체 자리 아래로만 이어 붙이므로 순수 이름 성분만 받는다 — `..`·`.` 은 밖을 가리키고,
+/// 콜론은 Windows 에서 드라이브(`C:` 를 `join` 하면 기준이 통째로 바뀐다)나 대체 스트림(`a.jsonl:x`)이 된다.
+fn shim_rollout_tail(path: &str) -> Option<Vec<&str>> {
+    let parts: Vec<&str> = path.split(['/', '\\']).collect();
+    let shim = parts.iter().position(|p| p.starts_with("kasaterm-shim-"))?;
+    let at = shim + parts[shim..].iter().position(|p| *p == "sessions")?;
+    let tail = &parts[at + 1..];
+    let plain = |part: &&str| {
+        !part.contains(':')
+            && matches!(std::path::Path::new(part).components().collect::<Vec<_>>()[..], [std::path::Component::Normal(_)])
+    };
+    (!tail.is_empty() && tail.iter().all(plain)).then(|| tail.to_vec())
 }
 
 fn newest_time(
@@ -9081,30 +9098,68 @@ mod codex_repair_tests {
     fn 죽은_shim_경로만_실체_자리로_옮긴다() {
         let dir = std::env::temp_dir().join(format!("kasaterm-codex-repair-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let sessions = dir.join("sessions/2026/09/08");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::write(sessions.join("rollout-a.jsonl"), "x").unwrap();
-        let alive = dir.join("alive/sessions/2026/09/08");
+        let day = ["2026", "09", "08"].iter().fold(dir.join("sessions"), |p, c| p.join(c));
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-a.jsonl"), "x").unwrap();
+        std::fs::write(day.join("rollout-w.jsonl"), "w").unwrap();
+        let alive = dir.join("alive").join("sessions");
         std::fs::create_dir_all(&alive).unwrap();
         std::fs::write(alive.join("rollout-b.jsonl"), "y").unwrap();
         let db = dir.join("state.sqlite");
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)").unwrap();
+        // codex 는 제 OS 구분자로 적는다 — 맥·리눅스의 `/`, Windows 의 `\`. 어느 OS 의 앱이 읽든 둘 다 고친다.
         let dead = "/tmp/kasaterm-shim-1/codex-home-%3/sessions/2026/09/08/rollout-a.jsonl";
+        let dead_win = r"C:\Users\x\AppData\Local\Temp\kasaterm-shim-7\codex-home-%5\sessions\2026\09\08\rollout-w.jsonl";
         // 실재하는 경로는 이름에 shim 이 들어도 안 건드린다.
         let live_real = alive.join("rollout-b.jsonl").to_string_lossy().into_owned();
         let gone = "/tmp/kasaterm-shim-2/codex-home-%4/sessions/2026/09/08/rollout-none.jsonl";
-        conn.execute("INSERT INTO threads VALUES ('a', ?1), ('b', ?2), ('c', ?3)", rusqlite::params![dead, live_real, gone]).unwrap();
+        let escape = r"C:\Temp\kasaterm-shim-8\codex-home-%6\sessions\..\state.sqlite";
+        // 드라이브 성분 — Windows 에서 통째 `join` 이면 `C:\Windows\win.ini` 로 바뀌어 실재한다.
+        let drive = "/tmp/kasaterm-shim-9/codex-home-%7/sessions/C:/Windows/win.ini";
+        // 콜론 이름 — 맥에선 실제 파일 이름, Windows 에선 rollout-s.jsonl 의 대체 스트림이 된다.
+        let _ = std::fs::write(day.join("rollout-s.jsonl:ads"), "s");
+        let stream = "/tmp/kasaterm-shim-9/codex-home-%7/sessions/2026/09/08/rollout-s.jsonl:ads";
+        conn.execute(
+            "INSERT INTO threads VALUES ('a', ?1), ('w', ?2), ('b', ?3), ('c', ?4), ('e', ?5), ('d', ?6), ('s', ?7)",
+            rusqlite::params![dead, dead_win, live_real, gone, escape, drive, stream],
+        ).unwrap();
         drop(conn);
-        assert_eq!(codex_repair_thread_paths_at(&db, &dir.join("sessions")), 1);
+        assert_eq!(codex_repair_thread_paths_at(&db, &dir.join("sessions")), 2);
         let conn = rusqlite::Connection::open(&db).unwrap();
-        let a: String = conn.query_row("SELECT rollout_path FROM threads WHERE id='a'", [], |r| r.get(0)).unwrap();
-        assert_eq!(a, sessions.join("rollout-a.jsonl").to_string_lossy());
-        let b: String = conn.query_row("SELECT rollout_path FROM threads WHERE id='b'", [], |r| r.get(0)).unwrap();
-        assert_eq!(b, live_real, "실재하는 경로는 그대로");
-        let c: String = conn.query_row("SELECT rollout_path FROM threads WHERE id='c'", [], |r| r.get(0)).unwrap();
-        assert_eq!(c, gone, "실체가 없으면 손대지 않는다");
+        let row = |id: &'static str| -> String {
+            conn.query_row("SELECT rollout_path FROM threads WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(row("a"), day.join("rollout-a.jsonl").to_string_lossy());
+        assert_eq!(row("w"), day.join("rollout-w.jsonl").to_string_lossy());
+        assert_eq!(row("b"), live_real, "실재하는 경로는 그대로");
+        assert_eq!(row("c"), gone, "실체가 없으면 손대지 않는다");
+        assert_eq!(row("e"), escape, "sessions 밖을 가리키는 꼬리는 버린다");
+        assert_eq!(row("d"), drive, "드라이브 성분은 기준을 바꾸니 버린다");
+        assert_eq!(row("s"), stream, "대체 스트림 꼴 콜론 이름은 버린다");
+        drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollout_tail_takes_only_plain_names_under_sessions() {
+        use super::shim_rollout_tail;
+        let tail = |p: &str| shim_rollout_tail(p).map(|t| t.join("|"));
+        assert_eq!(tail("/tmp/kasaterm-shim-1/h/sessions/2026/09/08/r.jsonl").as_deref(), Some("2026|09|08|r.jsonl"));
+        assert_eq!(tail(r"C:\T\kasaterm-shim-1\h\sessions\2026\09\08\r.jsonl").as_deref(), Some("2026|09|08|r.jsonl"));
+        for bad in [
+            "/tmp/kasaterm-shim-1/h/sessions/C:/Windows/win.ini",
+            r"C:\T\kasaterm-shim-1\h\sessions\C:\Windows\win.ini",
+            "/tmp/kasaterm-shim-1/h/sessions/2026/r.jsonl:stream",
+            "/tmp/kasaterm-shim-1/h/sessions/../state.sqlite",
+            "/tmp/kasaterm-shim-1/h/sessions/./r.jsonl",
+            "/tmp/kasaterm-shim-1/h/sessions//r.jsonl",
+            "/tmp/kasaterm-shim-1/h/sessions/",
+            "/tmp/kasaterm-shim-1/h/sessions",
+            "/tmp/h/sessions/2026/r.jsonl",
+        ] {
+            assert_eq!(tail(bad), None, "{bad}");
+        }
     }
 }
 

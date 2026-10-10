@@ -167,13 +167,12 @@ pub fn refusals(asked: &str, facts: &Facts, now_ms: u64) -> Vec<Refusal> {
 }
 
 /// 재기동에 쓸 번들 경로로 받아들이는 모양 — 사용자·시스템 Applications 의 `kasaterm.app` 만.
-/// 임의 경로를 `open -a` 에 넘기지 않는다.
+/// 임의 경로를 `open -a` 에 넘기지 않는다. 대상은 늘 macOS(`refusals` 의 os 검사)라 이건 맥 경로다 —
+/// 판정하는 쪽이 Windows 여도 같은 답이 나오게 호스트 `Path` 가 아니라 POSIX 규칙으로 잰다.
 pub fn valid_app_path(path: &str) -> bool {
-    let p = Path::new(path);
-    p.is_absolute()
-        && p.file_name().is_some_and(|n| n == "kasaterm.app")
-        && p.parent().and_then(|d| d.file_name()).is_some_and(|n| n == "Applications")
-        && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+    let Some(rest) = path.strip_prefix('/') else { return false };
+    let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+    matches!(parts.as_slice(), [.., "Applications", "kasaterm.app"]) && !parts.contains(&"..")
 }
 
 pub(crate) fn fnv(parts: &[&str]) -> String {
@@ -959,7 +958,10 @@ mod tests {
     fn only_installed_bundles_can_be_relaunched() {
         assert!(valid_app_path("/Users/x/Applications/kasaterm.app"));
         assert!(valid_app_path("/Applications/kasaterm.app"));
-        for bad in ["/tmp/kasaterm.app", "/Users/x/Applications/Other.app", "Applications/kasaterm.app", "/Users/x/Applications/../kasaterm.app"] {
+        assert!(valid_app_path("/Applications/kasaterm.app/"));
+        // 맥 경로 계약이라 판정하는 호스트와 무관하다 — Windows 꼴은 어디서든 거부.
+        for bad in ["/tmp/kasaterm.app", "/Users/x/Applications/Other.app", "Applications/kasaterm.app", "/Users/x/Applications/../kasaterm.app",
+            "/Users/x/Applications/../Applications/kasaterm.app", r"C:\Users\x\Applications\kasaterm.app", r"\Applications\kasaterm.app", ""] {
             assert!(!valid_app_path(bad), "{bad}");
             assert!(launch_command(bad).is_err());
         }
