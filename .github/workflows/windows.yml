@@ -5,7 +5,8 @@ name: Windows
 # 그 사이 회귀가 쌓인다(v0.2.0 뒤로 Windows 빌드가 3주 동안 깨진 채였다). 그래서 Rust·Windows 굽기
 # 재료가 바뀌는 push·PR 마다 windows-latest(MSVC) 에서 돈다.
 #
-#   prepare — Windows 스크립트 구문(PowerShell 파서) · Cargo.lock 한 번 풀기(레포에 없다, .gitignore)
+#   prepare — Windows 스크립트 구문(PowerShell 7 파서) · Cargo.lock 한 번 풀기(레포에 없다, .gitignore)
+#   ps51    — 같은 스크립트를 Windows PowerShell 5.1 파서로 · 한글이 든 .ps1 의 UTF-8 BOM
 #   rust    — 경계 검사 · 기본 제품 전체 targets check · 가벼운 소비자 조합 · 제품 테스트
 #   app     — release 앱·CLI 굽기 · 격리 실행 smoke(창·ConPTY·named pipe·HTTP) · MSI/portable 조립 검증
 #
@@ -112,9 +113,47 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # README 의 `powershell -File` 은 Windows PowerShell 5.1 이다. 5.1 은 BOM 없는 파일을 시스템 ANSI 코드
+  # 페이지로 읽어서, 한글 UTF-8 바이트가 ‘ ’ “ ” 같은 따옴표 글자로 읽혀 구문·문자열이 깨질 수 있다.
+  # run 본문은 ASCII 로만 쓴다 — 이 블록 자체도 5.1 이 읽는다.
+  ps51:
+    name: Windows PowerShell 5.1 syntax
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Parse and encoding (powershell.exe)
+        shell: powershell
+        run: |
+          Write-Host "Windows PowerShell $($PSVersionTable.PSVersion) at $((Get-Process -Id $PID).Path)"
+          $failed = $false
+          foreach ($file in Get-ChildItem -Path scripts/windows -Filter *.ps1) {
+            $bytes = [IO.File]::ReadAllBytes($file.FullName)
+            $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+            $nonAscii = 0
+            foreach ($b in $bytes) { if ($b -ge 0x80) { $nonAscii++ } }
+            if ($nonAscii -gt 0 -and -not $bom) {
+              Write-Host "::error file=scripts/windows/$($file.Name)::non-ASCII text without a UTF-8 BOM - Windows PowerShell 5.1 reads it as ANSI"
+              $failed = $true
+            }
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($e in $errors) {
+              Write-Host "::error file=scripts/windows/$($file.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $failed = $true
+            }
+            Write-Host "$($file.Name): $(@($errors).Count) parse errors, utf8 bom=$bom, non-ascii bytes=$nonAscii"
+          }
+          if ($failed) { exit 1 }
+
   rust:
     name: check · test
-    needs: prepare
+    needs: [prepare, ps51]
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
@@ -176,7 +215,7 @@ jobs:
 
   app:
     name: release · smoke · package
-    needs: prepare
+    needs: [prepare, ps51]
     runs-on: windows-latest
     timeout-minutes: 150
     steps:

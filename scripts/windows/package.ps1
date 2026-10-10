@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Repo = (Resolve-Path "$PSScriptRoot\..\.."),
     [string]$OutputDirectory,

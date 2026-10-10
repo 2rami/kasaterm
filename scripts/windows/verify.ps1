@@ -1,4 +1,4 @@
-# kasaterm — Windows 회귀 검사. CI(.github/workflows/windows.yml)와 손으로 돌릴 때가 같은 절차를 쓴다.
+﻿# kasaterm — Windows 회귀 검사. CI(.github/workflows/windows.yml)와 손으로 돌릴 때가 같은 절차를 쓴다.
 #
 #   scripts\windows\verify.ps1 -GenerateLockfile            # 전부(경계·check·test·굽기·smoke·조립), lock 없으면 만든다
 #   scripts\windows\verify.ps1 -Stage boundaries,check      # 빠른 것만

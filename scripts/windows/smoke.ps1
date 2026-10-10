@@ -1,4 +1,4 @@
-# kasaterm — 격리 실행 smoke. 굽힌 앱을 실제로 띄워 창(GPU)·ConPTY 칸·named pipe 소켓·HTTP 를
+﻿# kasaterm — 격리 실행 smoke. 굽힌 앱을 실제로 띄워 창(GPU)·ConPTY 칸·named pipe 소켓·HTTP 를
 # 한 번씩 지나가 보고, 스스로 끝나게 둔 뒤 사용자 상태를 건드리지 않았는지 확인한다.
 #
 #   scripts\windows\smoke.ps1                                   # target\release 를 띄운다

@@ -1,4 +1,4 @@
-# kasaterm — Windows 개발 툴체인 1회 설치와 런타임 의존성 확인.
+﻿# kasaterm — Windows 개발 툴체인 1회 설치와 런타임 의존성 확인.
 # winget 으로 MSVC/Rust/Node/Git/Python 을 깐다. 관리자 PowerShell 에서 실행하고,
 # 끝나면 새 창을 열어 PATH 를 반영한 뒤 -Check 로 확인할 것.
 #

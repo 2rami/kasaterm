@@ -1,4 +1,4 @@
-# kasaterm — VM(Windows 11 ARM) 안에서 네이티브 빌드 + 실행.
+﻿# kasaterm — VM(Windows 11 ARM) 안에서 네이티브 빌드 + 실행.
 # 레포 루트 기준으로 동작한다. arona 웹뷰까지 뜨게 하려면 dist 가 있어야 해서
 # npm 빌드를 먼저 돌린 뒤 cargo build 한다.
 #
