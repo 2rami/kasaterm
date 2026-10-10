@@ -38,6 +38,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_Security",
+    # 소유자 전용 저장소(private_store.rs): 열린 핸들의 소유자·DACL 읽기/쓰기와 ACE 종류·설명자 판 상수.
+    "Win32_Security_Authorization",
+    "Win32_System_SystemServices",
     # kasaterm-cli share new 가 폴더 이름에 이 기기 날짜를 붙인다.
     "Win32_System_SystemInformation",
 ] }

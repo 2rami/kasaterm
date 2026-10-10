@@ -193,39 +193,43 @@ pub fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub struct Ledger { path: PathBuf, records: BTreeMap<String, Record>, _lock: fs::File }
+pub struct Ledger { path: PathBuf, records: BTreeMap<String, Record>, _lock: fs::File,
+    #[cfg(windows)] _directory: crate::private_store::DirGuard }
 impl Ledger {
     pub fn open(path: PathBuf) -> Result<Self> {
-        #[cfg(windows)] anyhow::bail!("private tell receipt storage requires Windows ACL enforcement");
         let directory = path.parent().context("tell storage parent unavailable")?;
-        fs::create_dir_all(directory)?;
-        ensure!(!fs::symlink_metadata(directory)?.file_type().is_symlink(),"tell directory cannot be a symlink");
-        let mut options = fs::OpenOptions::new(); options.read(true).write(true).create(true);
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        let lock = {
+            fs::create_dir_all(directory)?;
+            ensure!(!fs::symlink_metadata(directory)?.file_type().is_symlink(),"tell directory cannot be a symlink");
+            let mut options = fs::OpenOptions::new(); options.read(true).write(true).create(true);
             use std::os::unix::fs::{MetadataExt,OpenOptionsExt,PermissionsExt};
             ensure!(fs::metadata(directory)?.uid() == unsafe { libc::geteuid() },"tell directory owner mismatch");
             fs::set_permissions(directory,fs::Permissions::from_mode(0o700))?;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let lock = options.open(directory.join("receiver.lock"))?;
-        #[cfg(unix)] {
+            let lock = options.open(directory.join("receiver.lock"))?;
             use std::os::fd::AsRawFd;
             ensure!(unsafe { libc::flock(lock.as_raw_fd(),libc::LOCK_EX | libc::LOCK_NB) } == 0,"another receiver owns this tell storage");
-        }
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),"tell ledger must be a regular file");
-        }
-        let records: BTreeMap<String, Record> = match fs::read(&path) {
-            Ok(bytes) => { ensure!(bytes.len() <= MAX_STORAGE, "tell ledger exceeds storage limit"); serde_json::from_slice(&bytes).context("corrupt tell ledger; delivery stopped")? },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(e.into()),
+            lock
+        };
+        #[cfg(windows)]
+        let directory_guard = private_dir(directory)?;
+        #[cfg(windows)]
+        let lock = {
+            let lock = crate::private_store::open_or_create(&directory.join("receiver.lock")).context("tell receiver lock must be owner-only")?;
+            ensure!(lock.try_lock().is_ok(),"another receiver owns this tell storage");
+            lock
+        };
+        let records: BTreeMap<String, Record> = match read_ledger(&path)? {
+            Some(bytes) => { ensure!(bytes.len() <= MAX_STORAGE, "tell ledger exceeds storage limit"); serde_json::from_slice(&bytes).context("corrupt tell ledger; delivery stopped")? },
+            None => BTreeMap::new(),
         };
         ensure!(records.len() <= MAX_RECORDS,"tell ledger exceeds record limit");
         for (id,record) in &records {
             ensure!(id == &record.message_id && issued_at(id).is_ok() && normalize(&record.body)? == record.body
                 && fingerprint(&record.body) == record.body_hash,"tell ledger record integrity mismatch");
         }
-        let mut ledger = Self { path, records, _lock: lock };
+        let mut ledger = Self { path, records, _lock: lock, #[cfg(windows)] _directory: directory_guard };
         let mut recovered = false;
         for record in ledger.records.values_mut() {
             if record.state == State::Dispatching {
@@ -331,24 +335,74 @@ impl Ledger {
 }
 
 fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    #[cfg(windows)] anyhow::bail!("private tell receipt storage is unsupported until Windows ACL enforcement is available");
     let dir = path.parent().context("tell storage needs a parent directory")?;
-    fs::create_dir_all(dir)?;
-    ensure!(!fs::symlink_metadata(dir)?.file_type().is_symlink(), "tell storage directory must not be a symlink");
     #[cfg(unix)] {
+        fs::create_dir_all(dir)?;
+        ensure!(!fs::symlink_metadata(dir)?.file_type().is_symlink(), "tell storage directory must not be a symlink");
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         ensure!(fs::metadata(dir)?.uid() == unsafe { libc::geteuid() }, "tell directory owner mismatch");
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
-    let tmp = dir.join(format!(".tell-{}-{}.tmp", std::process::id(), now_ms()));
-    let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
-    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
-    let mut file = options.open(&tmp)?;
-    let result = (|| -> Result<()> { file.write_all(bytes)?; file.sync_all()?; fs::rename(&tmp, path)?;
+    #[cfg(windows)] let _directory = private_dir(dir)?;
+    // 바꿔 넣기 전에 이미 있는 대상도 매번 본다 — 재분석 지점·다른 소유자·넓은 DACL 이면 덮지 않는다(Vault.write 와 같다).
+    #[cfg(windows)]
+    if fs::symlink_metadata(path).is_ok() {
+        crate::private_store::open_existing(path, false).context("existing tell storage file must be owner-only before it is replaced")?;
+    }
+    // 같은 ms 에 두 번 써도 create_new 가 부딪히지 않게 프로세스 안 순번을 붙인다.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".tell-{}-{}-{seq}.tmp", std::process::id(), now_ms()));
+    #[cfg(unix)]
+    let file = { let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
+        use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); options.open(&tmp)? };
+    #[cfg(windows)]
+    let file = crate::private_store::create_new(&tmp).context("tell storage file must be owner-only")?;
+    let result = (|| -> Result<()> {
+        let mut file = file;
+        file.write_all(bytes)?; file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)?;
         #[cfg(unix)] fs::File::open(dir)?.sync_all()?;
+        // Windows 엔 디렉터리 fsync 가 없다(NTFS 가 이름 바꾸기를 메타데이터 로그에 남긴다). 대신 바뀐 자리의
+        // 파일이 tmp 의 소유자 전용 모양 그대로인지 다시 본다.
+        #[cfg(windows)] crate::private_store::open_existing(path, false).context("tell storage file lost its owner-only DACL")?;
         Ok(()) })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }
     result
+}
+
+/// 장부 바이트. 아직 없으면 None.
+fn read_ledger(path: &Path) -> Result<Option<Vec<u8>>> {
+    #[cfg(unix)] {
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),"tell ledger must be a regular file");
+        }
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(windows)] {
+        use std::io::Read as _;
+        let file = match crate::private_store::open_existing(path, false) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(anyhow::Error::new(e).context("tell ledger must be an owner-only regular file")),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_STORAGE as u64 + 1).read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
+    }
+}
+
+/// Unix 의 「소유자 확인 뒤 0700」 자리. 상위 폴더는 보통대로 만들고 그 칸만 소유자 전용으로 세운다. 이미 있는데
+/// 소유자 전용이 아니면 바로잡지 않고 거부한다 — 이유는 `private_store::ensure_dir`.
+#[cfg(windows)]
+fn private_dir(dir: &Path) -> Result<crate::private_store::DirGuard> {
+    if let Some(parent) = dir.parent() { fs::create_dir_all(parent)?; }
+    crate::private_store::ensure_dir(dir).context("tell directory must be an owner-only directory of this user")
 }
 
 #[cfg(test)]
@@ -483,5 +537,86 @@ mod tests {
         ledger.transition(&id,State::Dispatching,"writing").unwrap();
         ledger.transition(&id,State::Uncertain,"connection lost").unwrap();
         assert!(ledger.transition(&id,State::Accepted,"retry").is_err());
+    }
+}
+
+/// Windows 소유자 전용 장부 — 만든 것의 모양, 넓어진 장부 거부, 저장 실패 때 원본 보존.
+#[cfg(all(test, windows))]
+mod windows_storage_tests {
+    use super::*;
+    use crate::private_store::{describe, testing::*};
+    fn address() -> Address { Address { machine_id:"machine".into(),surface_key:"key".into(),surface_id:"%1".into(),session_id:"session".into(),instance_id:"instance".into() } }
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect()
+    }
+
+    #[test] fn ledger_directory_lock_and_file_are_owner_only() {
+        let dir = scratch("tell").join("receipts");
+        let mut ledger = Ledger::open(dir.join("ledger.json")).unwrap();
+        ledger.accept(&new_message_id(),address(),"hello".into(),900).unwrap();
+        ledger.accept(&new_message_id(),address(),"again".into(),900).unwrap();
+        assert_eq!(describe(&dir).unwrap(), PRIVATE_DIR);
+        assert_eq!(describe(&dir.join("receiver.lock")).unwrap(), PRIVATE_FILE);
+        assert_eq!(describe(&dir.join("ledger.json")).unwrap(), PRIVATE_FILE, "덮어쓴 뒤에도 tmp 의 모양 그대로");
+        assert!(leftovers(&dir).is_empty());
+        assert!(fs::rename(&dir, dir.with_file_name("moved")).is_err(), "장부가 열린 동안 폴더를 치울 수 없다");
+        drop(ledger);
+        assert_eq!(Ledger::open(dir.join("ledger.json")).unwrap().pending().len(), 2);
+    }
+
+    /// 이미 있는 넓은 폴더에 장부를 열지 않고, 그 안의 기존 파일 DACL 도 건드리지 않는다.
+    #[test] fn an_existing_shared_directory_is_refused_and_its_files_kept() {
+        let dir = scratch("tell-shared").join("receipts");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("other.txt"), "x").unwrap();
+        let before = describe(&dir.join("other.txt")).unwrap();
+        assert!(Ledger::open(dir.join("ledger.json")).is_err());
+        assert_eq!(describe(&dir.join("other.txt")).unwrap(), before);
+        assert!(!dir.join("ledger.json").exists() && !dir.join("receiver.lock").exists());
+    }
+
+    #[test] fn a_widened_ledger_or_a_foreign_directory_is_refused() {
+        let dir = scratch("tell-wide").join("receipts");
+        let mut ledger = Ledger::open(dir.join("ledger.json")).unwrap();
+        ledger.accept(&new_message_id(),address(),"hello".into(),900).unwrap();
+        drop(ledger);
+        add_everyone(&dir.join("ledger.json"));
+        assert!(Ledger::open(dir.join("ledger.json")).is_err(), "Everyone 이 붙은 장부는 읽지 않는다");
+
+        let base = scratch("tell-junction");
+        let real = base.join("real");
+        drop(Ledger::open(real.join("ledger.json")).unwrap());
+        junction(&base.join("link"), &real);
+        assert!(Ledger::open(base.join("link").join("ledger.json")).is_err(), "정션 폴더는 따라가지 않는다");
+    }
+
+    /// 열려 있는 동안 누가 장부를 넓혀 놓았으면 그 위에 바꿔 넣지 않는다 — 원본도 tmp 도 남는 것 없이 그대로.
+    #[test] fn a_widened_ledger_is_not_replaced() {
+        let dir = scratch("tell-replace").join("receipts");
+        let mut ledger = Ledger::open(dir.join("ledger.json")).unwrap();
+        ledger.accept(&new_message_id(),address(),"kept".into(),900).unwrap();
+        add_everyone(&dir.join("ledger.json"));
+        let before = fs::read(dir.join("ledger.json")).unwrap();
+        assert!(ledger.accept(&new_message_id(),address(),"refused".into(),900).is_err());
+        assert_eq!(fs::read(dir.join("ledger.json")).unwrap(), before);
+        assert!(leftovers(&dir).is_empty());
+    }
+
+    /// 바꿔 넣지 못하면 실패로 끝나고 원본은 그대로, tmp 는 남지 않는다. 지우기 공유만 뺀 채 쥐면 사전 검사(읽기)는
+    /// 지나 tmp 를 만든 뒤 교체에서 막히고, 공유 0 이면 사전 검사에서 먼저 막힌다 — 두 갈래 다 본다.
+    #[test] fn a_failed_save_keeps_the_previous_ledger_and_no_tmp() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let dir = scratch("tell-busy").join("receipts");
+        let mut ledger = Ledger::open(dir.join("ledger.json")).unwrap();
+        ledger.accept(&new_message_id(),address(),"kept".into(),900).unwrap();
+        let before = fs::read(dir.join("ledger.json")).unwrap();
+        for share in [FILE_SHARE_READ | FILE_SHARE_WRITE, 0] {
+            let held = fs::OpenOptions::new().read(true).share_mode(share).open(dir.join("ledger.json")).unwrap();
+            assert!(ledger.accept(&new_message_id(),address(),"lost".into(),900).is_err(), "share {share}");
+            drop(held);
+            assert_eq!(fs::read(dir.join("ledger.json")).unwrap(), before, "share {share}");
+            assert!(leftovers(&dir).is_empty(), "share {share}");
+        }
     }
 }

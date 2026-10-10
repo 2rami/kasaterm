@@ -35,6 +35,9 @@ pub mod session_storage;
 pub mod transport;
 pub mod transfer;
 pub mod tell;
+/// Windows 소유자 전용 저장소(tell 장부·kasa-mcp 보관함) — Unix 0700/0600 의 대응.
+#[cfg(windows)]
+pub mod private_store;
 pub mod nacho_inbox;
 #[cfg(feature = "app-update")]
 pub mod app_restart;
