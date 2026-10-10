@@ -4,14 +4,14 @@
 //! 부팅이 되살렸고 남은 항목은 사라진 `/mcp` 를 가리킨다. 모든 기기가 새 판으로
 //! 한 번씩 부팅하고 나면 이 모듈은 할 일이 없다.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
 /// 우리가 썼던 모양(`127.0.0.1:<포트>/mcp`)일 때만 지운다 — 같은 이름을 사람이
 /// 다른 서버에 붙여 뒀을 수도 있다. 파일에 없으면 건드리지 않는다.
 pub fn unregister_clients() {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+    let Some(home) = kasa_socket::home_dir() else { return };
     remove_kasaspace(&home.join(".claude.json"), "url");
     remove_kasaspace(&home.join(".gemini/antigravity/mcp_config.json"), "serverUrl");
 }

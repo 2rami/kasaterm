@@ -161,7 +161,7 @@ fn block_json(b: &CommandBlock, max_lines: usize) -> Value {
 /// 폴더만 고른다. 앞뒤 따옴표·괄호·쌍점과 끝의 `/` 는 떼고 잰다(`ls -F`·`grep` 의 `경로:`).
 /// 폴더를 모르는 블록은 절대 경로·`~` 만 푼다.
 fn dir_links(lines: &[&StyledLine], cwd: Option<&Path>) -> Vec<Value> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = kasa_socket::home_dir();
     let mut checks = 0;
     let mut out = Vec::new();
     for (row, line) in lines.iter().enumerate() {

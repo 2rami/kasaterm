@@ -3,6 +3,7 @@
 #   scripts\windows\verify.ps1 -GenerateLockfile            # 전부(경계·check·test·굽기·smoke·조립), lock 없으면 만든다
 #   scripts\windows\verify.ps1 -Stage boundaries,check      # 빠른 것만
 #   scripts\windows\verify.ps1 -Stage build,smoke -SkipUi   # arona-ui dist 가 이미 있을 때
+#   scripts\windows\verify.ps1 -Stage smoke -SmokeShells default,cmd   # 이 기계에 없는 셸을 명시적으로 뺄 때
 #
 # 맥의 `cargo check` 는 `#[cfg(windows)]` 를 한 줄도 안 보고, 맥에서 MSVC 로 크로스 체크하면 ring 이
 # Windows SDK 헤더를 못 찾아 의존성에서 죽는다. 그래서 Windows 경로의 검증처는 Windows 뿐이다.
@@ -18,7 +19,9 @@ param(
     [ValidateRange(1, 64)][int]$TestThreads = 2,
     [string]$ExpectedVersion,
     [switch]$SkipUi,
-    [switch]$GenerateLockfile
+    [switch]$GenerateLockfile,
+    [ValidateSet("default", "winps51", "cmd", "gitbash")]
+    [string[]]$SmokeShells = @("default", "winps51", "cmd", "gitbash")
 )
 
 $ErrorActionPreference = "Stop"
@@ -125,7 +128,42 @@ foreach ($current in $stages) {
             }
         }
         "smoke" {
-            & (Join-Path $PSScriptRoot "smoke.ps1") -Repo $repoRoot -Label "release"
+            # 셸마다 앱을 따로 띄운다(칸 셸은 앱 단위 KASATERM_SHELL 로만 고른다). 고른 셸이 이 기계에 없으면
+            # 건너뛰지 않고 멈춘다 — 빼려면 -SmokeShells 로 명시한다. 한 셸이 실패해도 나머지는 끝까지 돌린다.
+            $known = [ordered]@{
+                default = ""
+                winps51 = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+                cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
+                gitbash = Join-Path $env:ProgramFiles "Git\bin\bash.exe"
+            }
+            $inventory = foreach ($name in $SmokeShells) {
+                $path = $known[$name]
+                $present = (-not $path) -or (Test-Path -LiteralPath $path)
+                $version = if ($path -and $present) { (Get-Item -LiteralPath $path).VersionInfo.ProductVersion } else { "" }
+                [pscustomobject]@{ shell = $name; path = $(if ($path) { $path } else { "(app default)" }); present = $present; version = $version }
+            }
+            $inventory | Format-Table -AutoSize | Out-String | Write-Host
+            if ($env:GITHUB_STEP_SUMMARY) {
+                $rows = $inventory | ForEach-Object { "| $($_.shell) | $($_.path) | $(if ($_.present) { 'present' } else { 'MISSING' }) | $($_.version) |" }
+                $table = @("### Smoke shells", "", "| shell | path | | version |", "|---|---|---|---|") + $rows + @("")
+                Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($table -join "`n") -Encoding utf8
+            }
+            $missing = @($inventory | Where-Object { -not $_.present })
+            if ($missing.Count) {
+                throw "required smoke shells missing: $(($missing | ForEach-Object { "$($_.shell) ($($_.path))" }) -join ', ')"
+            }
+            $failed = @()
+            foreach ($name in $SmokeShells) {
+                try {
+                    & (Join-Path $PSScriptRoot "smoke.ps1") -Repo $repoRoot -Label "release-$name" -Shell $known[$name]
+                } catch {
+                    Write-Host "smoke release-$name failed: $($_.Exception.Message)"
+                    $failed += $name
+                }
+            }
+            if ($failed.Count) {
+                throw "smoke failed for shells: $($failed -join ', ')"
+            }
         }
         "package" {
             $arguments = @{ Repo = $repoRoot; SkipBuild = $true; SkipUi = $true }

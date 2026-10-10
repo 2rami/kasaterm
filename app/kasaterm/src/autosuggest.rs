@@ -64,12 +64,12 @@ impl History {
                 return Some(p);
             }
         }
-        let home = std::env::var_os("HOME")?;
-        let zsh = PathBuf::from(&home).join(".zsh_history");
+        let home = kasa_socket::home_dir()?;
+        let zsh = home.join(".zsh_history");
         if zsh.exists() {
             return Some(zsh);
         }
-        let bash = PathBuf::from(&home).join(".bash_history");
+        let bash = home.join(".bash_history");
         if bash.exists() {
             return Some(bash);
         }

@@ -132,11 +132,16 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 scripts\windows\verify.ps1                               # 경계·check·test·굽기·smoke·조립 전부
 scripts\windows\verify.ps1 -Stage boundaries,check       # 빠른 것만
 scripts\windows\smoke.ps1                                # 이미 구운 target\release 만 띄워 본다
-scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-portable.zip -Label portable
+scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-portable.zip -Label portable -UserProfileOnly -NoRedirect
 ```
 
 - 병렬은 `-Jobs 2`, 테스트 스레드는 `-TestThreads 2` 가 기본이다(코어 많은 기계에서 rustc 가 메모리 경합으로 죽는다).
 - smoke 는 `docs/verify-app.md` 의 격리 키에 더해 HOME·USERPROFILE·APPDATA·LOCALAPPDATA·TEMP 를 이번 실행 폴더로
   옮기고, 소켓은 실행마다 다른 named pipe 를 쓴다. 창(GPU)·첫 칸과 쪼갠 칸의 ConPTY 입출력·`kasaterm-cli`·
-  HTTP `/version`·자동 캡처·자동 종료를 확인하고, 이번에 띄운 PID 와 그 자손만 거둔다. 결과는
-  `target\windows-smoke\<라벨>\`(로그·`window.png`·`summary.json`).
+  HTTP `/version`·자동 캡처·자동 종료·사용자 파일/레지스트리(`HKCU\Software\momewomo`) 무변경·종료 뒤 자식 정리를
+  확인하고, 이번에 띄운 PID 와 그 자손만 거둔다. 결과는 `target\windows-smoke\<라벨>-<시각>-<id>\`
+  (로그·`window.png`·`summary.json`) — 있던 결과는 지우지 않는다.
+- `verify.ps1 -Stage smoke` 는 앱 기본 셸과 Windows PowerShell 5.1·cmd·Git Bash 를 명시 경로로 한 번씩 띄워
+  칸 셸이 정말 그 셸인지까지 본다. 없는 셸은 건너뛰지 않고 실패하니 빼려면 `-SmokeShells default,cmd` 처럼 적는다.
+- `-UserProfileOnly` 는 HOME 을 빼고(탐색기로 뜬 GUI 와 같다) `-NoRedirect` 는 표준 핸들 없이 띄워 앱이 stderr 를
+  격리 TEMP 의 `kasaterm-app.log` 로 돌리는 갈래를 본다. CI 의 portable smoke 가 둘 다 쓴다.

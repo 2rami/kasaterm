@@ -27,7 +27,7 @@ pub(crate) struct Target {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    kasa_socket::home_dir()
 }
 
 fn descriptor_path() -> Option<PathBuf> {

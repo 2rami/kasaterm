@@ -164,11 +164,13 @@ pub(crate) fn scrub_inherited_claude_markers() {
 /// 하루에 세 번(아침 %5·%2, 저녁 우사기) 「재시작하니 pane 이 사라졌다」를 원인
 /// 미확정으로 남겼다. 터미널에 붙어 있으면(`cargo run`) 그대로 둔다. 5MB 를 넘으면
 /// 부팅 때 한 번 비운다 — 최근 부팅 몇 번이 남는 쪽이 디스크보다 값이 있다.
-#[cfg(target_os = "macos")]
+///
+/// Windows 판도 GUI 서브시스템이라 탐색기·바로가기로 뜨면 stderr 핸들이 아예 없고, eprintln 은
+/// 오류 없이 사라진다. 같은 자리(`%TEMP%`)·같은 이름으로 남긴다. 핸들이 있으면(콘솔, `2> 파일`,
+/// smoke 의 `-RedirectStandardError`) 받는 쪽이 있으니 그대로 둔다.
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn install_stderr_log(suffix: &str) {
-    use std::os::unix::io::AsRawFd;
-    // SAFETY: isatty 는 fd 번호 하나를 읽기만 한다.
-    if unsafe { libc::isatty(2) } == 1 {
+    if stderr_is_received() {
         return;
     }
     let log = std::env::temp_dir().join(format!("kasaterm{suffix}-app.log"));
@@ -185,10 +187,8 @@ pub(crate) fn install_stderr_log(suffix: &str) {
     else {
         return;
     };
-    // SAFETY: f 는 열린 파일이고 dup2 는 fd 2 를 그 파일의 복제로 바꾼다. f 가 여기서
-    // 닫혀도 fd 2 는 독립된 복제라 남는다.
-    unsafe {
-        libc::dup2(f.as_raw_fd(), 2);
+    if !redirect_stderr(f) {
+        return;
     }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -197,8 +197,45 @@ pub(crate) fn install_stderr_log(suffix: &str) {
     eprintln!("==== boot epoch={ts} pid={} ====", std::process::id());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn install_stderr_log(_suffix: &str) {}
+
+#[cfg(target_os = "macos")]
+fn stderr_is_received() -> bool {
+    // SAFETY: isatty 는 fd 번호 하나를 읽기만 한다.
+    unsafe { libc::isatty(2) == 1 }
+}
+
+#[cfg(target_os = "macos")]
+fn redirect_stderr(f: std::fs::File) -> bool {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: f 는 열린 파일이고 dup2 는 fd 2 를 그 파일의 복제로 바꾼다. f 가 여기서
+    // 닫혀도 fd 2 는 독립된 복제라 남는다.
+    unsafe { libc::dup2(f.as_raw_fd(), 2) != -1 }
+}
+
+#[cfg(windows)]
+fn stderr_is_received() -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+    // SAFETY: 프로세스의 표준 핸들 칸을 읽기만 한다.
+    let h = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    !h.is_null() && h != INVALID_HANDLE_VALUE
+}
+
+/// Rust 의 stderr 는 쓸 때마다 표준 핸들 칸을 다시 읽어서 칸만 바꾸면 eprintln 이 따라온다.
+#[cfg(windows)]
+fn redirect_stderr(f: std::fs::File) -> bool {
+    use std::os::windows::io::{AsRawHandle, IntoRawHandle};
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+    // SAFETY: f 가 살아 있는 동안 그 핸들을 표준 칸에 건다.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, f.as_raw_handle()) } == 0 {
+        return false;
+    }
+    // 걸렸으면 표준 칸이 프로세스 끝까지 쥔다 — File 이 닫지 않게 소유권을 놓는다(실패면 위에서 닫힌다).
+    let _ = f.into_raw_handle();
+    true
+}
 
 pub(crate) fn install_panic_logger(suffix: &str) {
     let prev = std::panic::take_hook();
@@ -584,6 +621,56 @@ mod tests {
         assert!(log.contains("install FAILED, previous restored"), "{log}");
         assert_eq!(read(&inst).as_deref(), Some("new"));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 받는 쪽 없는 stderr 가 격리 TEMP 의 로그로 가고, 받는 쪽이 있으면(Windows 의 리다이렉트) 그대로인지.
+    /// 이 시험 프로세스의 stderr 를 바꾸면 시험 출력이 사라지니 앱이 부르는 함수를 자식 프로세스에서 돌린다.
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn an_unheard_stderr_is_kept_in_the_temp_log() {
+        const CHILD: &str = "KT_STDERR_LOG_CHILD";
+        if let Some(mode) = std::env::var_os(CHILD) {
+            // 탐색기로 뜬 GUI 판처럼 stderr 칸을 비운다. 맥은 파이프가 tty 가 아니라 그대로 해당된다.
+            #[cfg(windows)]
+            if mode == "unheard" {
+                use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+                // SAFETY: 이 자식 프로세스의 표준 핸들 칸만 비운다.
+                unsafe { SetStdHandle(STD_ERROR_HANDLE, std::ptr::null_mut()) };
+            }
+            let _ = mode;
+            install_stderr_log("-kttest");
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(b"after-redirect\n");
+            return;
+        }
+        let run = |mode: &str| {
+            let tmp = std::env::temp_dir().join(format!("kt-stderr-log-{}-{mode}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "bootstrap::tests::an_unheard_stderr_is_kept_in_the_temp_log"])
+                .args(["--nocapture", "--test-threads=1"])
+                .env(CHILD, mode)
+                .env("TMPDIR", &tmp)
+                .env("TMP", &tmp)
+                .env("TEMP", &tmp)
+                .output()
+                .unwrap();
+            let log = std::fs::read_to_string(tmp.join("kasaterm-kttest-app.log")).ok();
+            let _ = std::fs::remove_dir_all(&tmp);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            (log, String::from_utf8_lossy(&out.stderr).into_owned())
+        };
+        let (log, _) = run("unheard");
+        let log = log.expect("격리 TEMP 에 kasaterm-kttest-app.log 가 안 생겼다");
+        assert!(log.contains("==== boot epoch=") && log.contains("after-redirect"), "{log:?}");
+        // 리다이렉트로 띄운 실행(smoke·`2> 파일`)은 그 파일이 계속 받아야 한다. 맥은 tty 만 두는 규칙이라 해당 없다.
+        #[cfg(windows)]
+        {
+            let (log, stderr) = run("heard");
+            assert!(log.is_none(), "받는 쪽이 있는데 로그 파일로 빼앗았다");
+            assert!(stderr.contains("after-redirect"), "{stderr:?}");
+        }
     }
 
     #[test]

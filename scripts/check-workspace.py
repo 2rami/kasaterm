@@ -72,7 +72,7 @@ DEP_TABLES = ("dependencies", "dev-dependencies", "dev_dependencies", "build-dep
 def cargo_metadata():
     out = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
+        cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8",
     )
     return json.loads(out.stdout)
 
@@ -168,7 +168,7 @@ def check_metadata(meta):
 def check_manifests(meta):
     errors = []
     root = Path(meta["workspace_root"])
-    root_text = (root / "Cargo.toml").read_text()
+    root_text = (root / "Cargo.toml").read_text(encoding="utf-8")
     root_doc = tomllib.loads(root_text)
     ws = root_doc["workspace"]
     ws_deps = ws.get("dependencies", {})
@@ -189,7 +189,7 @@ def check_manifests(meta):
     declared = {}
     for name, pkg in packages.items():
         path = Path(pkg["manifest_path"])
-        doc = tomllib.loads(path.read_text())
+        doc = tomllib.loads(path.read_text(encoding="utf-8"))
         spike = rel(path, root).startswith(SPIKE_DIR)
         for table, dep, spec in manifest_deps(doc):
             real = spec.get("package", dep) if isinstance(spec, dict) else dep
@@ -302,4 +302,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # 보고는 한글이다. Windows 의 파이프·콘솔은 로캘 코드 페이지(cp1252 등)라 그대로 쓰면 인코딩에서 죽는다.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     sys.exit(main())

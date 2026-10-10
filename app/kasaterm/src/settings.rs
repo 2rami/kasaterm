@@ -541,10 +541,10 @@ impl App {
     /// characters.json(사용자 override 슬롯)을 기본 앱으로 연다. 아직 없으면
     /// 현재 활성 정본을 그 자리에 복사해 seed 한다 — 빈 파일 대신 채워진 걸 편집.
     fn open_characters_json(&self) {
-        let Some(home) = std::env::var_os("HOME") else {
+        let Some(home) = kasa_socket::home_dir() else {
             return;
         };
-        let p = std::path::PathBuf::from(home).join(".config/kasaterm/characters.json");
+        let p = home.join(".config/kasaterm/characters.json");
         if !p.exists() {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);

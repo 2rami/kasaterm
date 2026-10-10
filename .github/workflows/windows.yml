@@ -228,9 +228,10 @@ jobs:
         shell: pwsh
         run: ./scripts/windows/verify.ps1 -Stage build
 
-      - name: Smoke (target\release)
+      # 앱 기본 셸 + Windows PowerShell 5.1·cmd·Git Bash 를 명시 경로로 한 번씩 — 러너에 없으면 실패한다.
+      - name: Smoke (target\release, per shell)
         shell: pwsh
-        run: ./scripts/windows/smoke.ps1 -Label release
+        run: ./scripts/windows/verify.ps1 -Stage smoke
 
       - name: Package (MSI + portable, payload verified)
         shell: pwsh
@@ -248,13 +249,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 조립된 zip 을 풀어 그 배치 그대로 다시 띄운다 — exe 옆의 arona-ui·fonts·collab-hooks·WinSparkle 을 찾는지.
+      # 조립된 zip 을 풀어 사람이 탐색기로 여는 것처럼 띄운다 — exe 옆의 arona-ui·fonts·collab-hooks·WinSparkle 을
+      # 찾는지, HOME 없이 USERPROFILE 로만 풀리는지, 표준 핸들 없을 때 stderr 가 격리 TEMP 로그로 가는지.
       - name: Smoke (portable zip)
         shell: pwsh
         run: |
           $zip = Get-ChildItem -Path dist -Filter *-windows-x86_64-portable.zip | Select-Object -First 1
           if (-not $zip) { throw "portable zip is missing from dist" }
-          ./scripts/windows/smoke.ps1 -Label portable -PortableZip $zip.FullName
+          ./scripts/windows/smoke.ps1 -Label portable -PortableZip $zip.FullName -UserProfileOnly -NoRedirect
 
       - name: Upload smoke logs
         if: always()

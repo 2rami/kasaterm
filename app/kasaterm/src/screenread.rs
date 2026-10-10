@@ -1627,8 +1627,7 @@ pub(crate) fn peer_name_by_sid(sid: &str) -> Option<String> {
         .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(2));
     if !fresh {
         let mut map = std::collections::HashMap::new();
-        if let Some(rd) = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
+        if let Some(rd) = kasa_socket::home_dir()
             .and_then(|h| std::fs::read_dir(h.join(".claude/sessions")).ok())
         {
             for e in rd.flatten() {
@@ -1650,7 +1649,7 @@ pub(crate) fn peer_name_by_sid(sid: &str) -> Option<String> {
 /// 명부 한 바퀴 → 이름별 sessionId. 파일 훑기와 접기를 갈라 둔 것은 검증 때문이다 —
 /// 충돌 규칙이 틀리면 남의 얼굴이 조용히 붙을 뿐 아무 오류도 안 난다.
 fn scan_peer_names() -> std::collections::HashMap<String, Option<String>> {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+    let Some(home) = kasa_socket::home_dir() else {
         return Default::default();
     };
     let Ok(rd) = std::fs::read_dir(home.join(".claude/sessions")) else {
@@ -1796,7 +1795,7 @@ pub(crate) fn socket_pid(from: &str) -> Option<&str> {
 /// 직접 물을 수 있다. 이름은 그래도 화면에 뭐라도 쓰기 위해 함께 들고 온다.
 pub(crate) fn peer_ident_from_socket(from: &str) -> Option<(Option<String>, Option<String>)> {
     let pid = socket_pid(from)?;
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let home = kasa_socket::home_dir()?;
     let path = home.join(".claude/sessions").join(format!("{pid}.json"));
     Some(peer_ident_from_json(&std::fs::read_to_string(path).ok()?))
 }

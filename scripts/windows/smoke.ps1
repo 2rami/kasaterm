@@ -2,7 +2,12 @@
 # 한 번씩 지나가 보고, 스스로 끝나게 둔 뒤 사용자 상태를 건드리지 않았는지 확인한다.
 #
 #   scripts\windows\smoke.ps1                                   # target\release 를 띄운다
-#   scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v…-portable.zip -Label portable
+#   scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v…-portable.zip -Label portable -UserProfileOnly -NoRedirect
+#   scripts\windows\smoke.ps1 -Shell "$env:SystemRoot\System32\cmd.exe" -Label release-cmd
+#
+# -UserProfileOnly 는 자식에게서 HOME 을 뺀다(USERPROFILE 격리는 그대로) — 탐색기로 뜬 Windows GUI 에는 HOME 이
+# 없어서, HOME 을 주면 USERPROFILE 로만 풀리는 경로가 가려진다. -NoRedirect 는 표준 핸들 없이 띄운다 — 그때
+# 앱은 stderr 를 격리 TEMP 의 kasaterm-app.log 로 돌리고, 리다이렉트로 띄우면 받은 핸들을 그대로 쓴다.
 #
 # 격리 키는 docs/verify-app.md 의 부팅 줄과 같다. 거기에 HOME·USERPROFILE·APPDATA·LOCALAPPDATA·TEMP 를
 # 이번 실행 폴더로 옮긴다 — Windows 의 `~/.config/kasaterm` 은 HOME→USERPROFILE 순으로 풀리고,
@@ -20,7 +25,9 @@ param(
     [string]$Shell,
     [ValidateRange(30, 600)][int]$AutoQuitSeconds = 90,
     [ValidateRange(10, 300)][int]$ReadyTimeoutSeconds = 60,
-    [ValidateRange(1, 120)][int]$ChildGraceSeconds = 15
+    [ValidateRange(1, 120)][int]$ChildGraceSeconds = 15,
+    [switch]$UserProfileOnly,
+    [switch]$NoRedirect
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,8 +84,20 @@ function Read-Shared {
     }
 }
 
+# 앱이 stderr 를 스스로 파일로 돌리는 판이면(아무도 안 듣는 GUI 실행 대비) 줄이 격리 TEMP 의
+# kasaterm-app.log 에 쌓인다 — 리다이렉트로 받은 것과 둘 다 읽는다.
+$script:appLog = $null
+
+function Get-AppLog {
+    $text = Read-Shared $stderrLog
+    if ($script:appLog) {
+        $text += "`n" + (Read-Shared $script:appLog)
+    }
+    return $text
+}
+
 function Get-LogTail {
-    $lines = (Read-Shared $stderrLog) -split "`r?`n"
+    $lines = (Get-AppLog) -split "`r?`n"
     return ($lines | Select-Object -Last 40) -join "`n"
 }
 
@@ -231,12 +250,18 @@ function Test-PaneRoundTrip {
     # 친 줄에는 base64 만 있고 nonce 는 없다. 그래서 화면의 `kasaterm-smoke-out:<nonce>` 는 셸이 실제로
     # 실행해 낸 출력이고(base64 에는 '-'·':' 가 없다), 파일 내용은 입력이 프로세스까지 닿았다는 증거다.
     # powershell.exe 는 칸의 셸이 pwsh·Windows PowerShell·cmd·Git Bash 어느 것이어도 같은 줄로 부를 수 있다.
+    # 파일 둘째 줄에는 이 줄을 실행한 부모(= 칸의 셸) 경로를 적는다 — 고른 셸이 정말 칸에 섰는지 본다.
+    # 경로에 한글 사용자 이름이 올 수 있어 BOM 없는 UTF-8 로 쓰고 Read-Shared(UTF-8)로 읽는다.
     $nonce = "ks" + [guid]::NewGuid().ToString("N").Substring(0, 16)
     $expected = "kasaterm-smoke-out:$nonce"
     $marker = Join-Path $script:scratch "$nonce.txt"
-    $quotedMarker = $marker.Replace("'", "''")
-    $payload = "Set-Content -LiteralPath '$quotedMarker' -Value '$nonce' -Encoding ascii -NoNewline; " +
-        "Write-Output ('kasaterm-smoke-out:' + '$nonce')"
+    $payload = @'
+$self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+$shell = (Get-CimInstance Win32_Process -Filter ("ProcessId=" + $self.ParentProcessId)).ExecutablePath
+[IO.File]::WriteAllText('__MARKER__', ('__NONCE__' + [char]10 + $shell), (New-Object Text.UTF8Encoding $false))
+Write-Output ('kasaterm-smoke-out:' + '__NONCE__')
+'@
+    $payload = $payload.Replace("__MARKER__", $marker.Replace("'", "''")).Replace("__NONCE__", $nonce)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
     $line = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded"
 
@@ -257,9 +282,16 @@ function Test-PaneRoundTrip {
     }
     Assert-Check -Name "$Name ConPTY output" -Condition $printed `
         -Detail "peek $Surface shows '$expected' printed by the encoded command"
-    $content = if (Test-Path -LiteralPath $marker) { (Read-Shared $marker).Trim() } else { "<missing>" }
+    $parts = @(((Read-Shared $marker) -split "`n", 2) | ForEach-Object { $_.Trim() })
+    $content = if ($parts[0]) { $parts[0] } else { "<missing>" }
+    $ranIn = if ($parts.Count -gt 1) { $parts[1] } else { "" }
     Assert-Check -Name "$Name ConPTY input" -Condition ($content -eq $nonce) `
         -Detail "marker file holds '$content' (expected $nonce)"
+    # Git Bash 의 bin\bash.exe 는 usr\bin\bash.exe 를 띄우는 껍데기라 경로가 아니라 실행 파일 이름으로 맞춘다.
+    $wanted = if ($Shell) { [IO.Path]::GetFileName($Shell) } else { "" }
+    $shellOk = if ($wanted) { [IO.Path]::GetFileName($ranIn) -ieq $wanted } else { [bool]$ranIn }
+    Assert-Check -Name "$Name shell" -Condition $shellOk `
+        -Detail "ran in '$ranIn' ($(if ($wanted) { "asked $Shell" } else { 'app default' }))"
 }
 
 $appEnvironmentSaved = $null
@@ -301,6 +333,7 @@ try {
     foreach ($dir in @("home", "appdata", "localappdata", "tmp", "students", "collab", "share")) {
         New-Item -ItemType Directory -Path (Join-Path $script:scratch $dir) | Out-Null
     }
+    $script:appLog = Join-Path $script:scratch "tmp\kasaterm-app.log"
     $socketPath = Join-Path $script:scratch "ks-$nonce.sock"
     $portFile = [IO.Path]::ChangeExtension($socketPath, ".mcp_port")
     $realHome = [Environment]::GetFolderPath("UserProfile")
@@ -341,6 +374,9 @@ try {
         KASATERM_LITE_ROOT = $null
         NO_COLOR = $null
     }
+    if ($UserProfileOnly) {
+        $appEnvironment["HOME"] = $null
+    }
     $bundledUi = Join-Path $appDir "arona-ui\index.html"
     $repoUi = Join-Path $repoRoot "web\arona-ui\dist"
     if (-not (Test-Path -LiteralPath $bundledUi) -and (Test-Path -LiteralPath (Join-Path $repoUi "index.html"))) {
@@ -352,14 +388,21 @@ try {
     Write-Host "   artifacts: $artifacts"
     $appEnvironmentSaved = Set-ProcessEnvironment $appEnvironment
     try {
-        $script:proc = Start-Process -FilePath $appExe -WorkingDirectory $script:scratch -PassThru `
-            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+        if ($NoRedirect) {
+            $script:proc = Start-Process -FilePath $appExe -WorkingDirectory $script:scratch -PassThru
+        } else {
+            $script:proc = Start-Process -FilePath $appExe -WorkingDirectory $script:scratch -PassThru `
+                -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+        }
         $null = $script:proc.Handle
     } finally {
         Restore-ProcessEnvironment $appEnvironmentSaved
         $appEnvironmentSaved = $null
     }
-    Add-Result -Name "launch" -Ok $true -Detail "pid $($script:proc.Id)"
+    $mode = @($(if ($NoRedirect) { "no std handles" } else { "stderr redirected" }),
+        $(if ($UserProfileOnly) { "USERPROFILE only" } else { "HOME+USERPROFILE" }),
+        $(if ($Shell) { "shell $Shell" } else { "default shell" })) -join ", "
+    Add-Result -Name "launch" -Ok $true -Detail "pid $($script:proc.Id) ($mode)"
 
     $cliEnvironmentSaved = Set-ProcessEnvironment ([ordered]@{
         KASATERM_SOCKET_PATH = $socketPath
@@ -368,11 +411,21 @@ try {
     })
 
     $ready = Wait-Until -What "socket and HTTP" -Seconds $ReadyTimeoutSeconds -Condition {
-        (Test-Path -LiteralPath $portFile) -and ((Read-Shared $stderrLog) -match '\[agent-socket\] listening on')
+        (Test-Path -LiteralPath $portFile) -and ((Get-AppLog) -match '\[agent-socket\] listening on')
     }
     Assert-Check -Name "boot" -Condition $ready -Detail "socket + HTTP port within ${ReadyTimeoutSeconds}s`n$(if (-not $ready) { Get-LogTail })"
 
-    $log = Read-Shared $stderrLog
+    $fileLog = Read-Shared $script:appLog
+    if ($NoRedirect) {
+        Assert-Check -Name "stderr file log" `
+            -Condition (($fileLog -match "==== boot epoch=\d+ pid=$($script:proc.Id) ") -and ($fileLog -match '\[agent-socket\] listening on')) `
+            -Detail "$($script:appLog) has this boot's header and the socket line"
+    } else {
+        Assert-Check -Name "stderr kept on given handle" `
+            -Condition ((-not $fileLog) -and ((Read-Shared $stderrLog) -match '\[agent-socket\] listening on')) `
+            -Detail "redirected stderr got the socket line; no $($script:appLog)"
+    }
+    $log = Get-AppLog
     $gpu = [regex]::Match($log, '\[gpu\] backend=(\S+) device="([^"]*)" type=(\S+)')
     Assert-Check -Name "GPU surface" -Condition $gpu.Success `
         -Detail $(if ($gpu.Success) { "$($gpu.Groups[1].Value) / $($gpu.Groups[2].Value) / $($gpu.Groups[3].Value)" } else { "no [gpu] line" })
