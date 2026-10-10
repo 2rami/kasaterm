@@ -48,7 +48,7 @@ default-members = [
 # 그 줄을 정규식으로 읽고 고친다(scripts/build-app.sh·tag-release.sh, tools/release).
 [workspace.package]
 edition = "2021"
-version = "0.2.65"
+version = "0.2.66"
 license = "MIT"
 
 # 제품 크레이트 둘 이상이 함께 쓰는 판은 여기 한 곳에 둔다. 크레이트는
