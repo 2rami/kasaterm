@@ -669,8 +669,16 @@ impl PtyBackend {
         None
     }
 
-    /// 모든 pane 의 `(surface_id, shell_pid)` — GUI 동기 RPC(메모리 즉답).
+    /// 모든 pane 의 `(surface_id, shell_pid)`. 정본은 전역 PTY 레지스트리다 — GUI 에 묻던 때는 GUI 가
+    /// 멈추면(2026-10-09 맥북, nextDrawable 대기) 300ms 뒤 빈 목록이 와서 board 가 하네스를 못 찾고 이 기기
+    /// 학생 줄을 통째로 버렸다(거울 줄만 남았다). 레지스트리가 비었을 때만 GUI 에 묻는다.
     fn query_pane_pids(&self) -> Vec<(String, u32)> {
+        let pids = registry_shell_pids(&self.live_surfaces(), &kasa_pty::live_sessions(), |id| {
+            kasa_pty::lookup_session(id).and_then(|s| s.shell_pid())
+        });
+        if !pids.is_empty() {
+            return pids;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         if self
             .proxy
@@ -4092,6 +4100,15 @@ impl Backend for PtyBackend {
     }
 }
 
+/// 레지스트리의 PTY 중 칸으로 셀 것의 셸 pid. 창 없는 웹 셸(`web-…`)은 GUI 가 칸으로 든 것만 — GUI 의 PTY 표
+/// (`App.pty`)와 같은 집합을 GUI 없이 만든다. 거울은 셸이 없어 저절로 빠진다.
+fn registry_shell_pids(known: &HashSet<String>, ids: &[String], shell: impl Fn(&str) -> Option<u32>) -> Vec<(String, u32)> {
+    ids.iter()
+        .filter(|id| known.contains(*id) || !id.starts_with("web-"))
+        .filter_map(|id| shell(id).map(|pid| (id.clone(), pid)))
+        .collect()
+}
+
 fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
     if facts.get("state_fresh").and_then(|v| v.as_bool()) == Some(false) {
         row.status = "unknown".into();
@@ -4188,6 +4205,27 @@ mod web_shell_close_tests {
 #[cfg(test)]
 mod remote_board_tests {
     use super::*;
+
+    /// GUI 가 답하지 않아도(이 시험엔 GUI 가 아예 없다) board 가 하네스를 찾을 셸 pid 를 레지스트리에서 얻는다
+    /// — 빈 목록이면 이 기기 학생 줄이 통째로 빠졌다(2026-10-09). 창 없는 웹 셸은 칸이 든 것만 센다.
+    #[test]
+    fn board_shell_pids_come_from_the_registry_without_the_gui() {
+        let id = format!("%board-pid-{}", uuid::Uuid::new_v4());
+        let sess = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: Some("/bin/sh".into()), cols: 20, rows: 5, pane_id: id.clone(), ..Default::default()
+        }).expect("PTY"));
+        kasa_pty::register_session(&id, &sess);
+        let shell = |p: &str| kasa_pty::lookup_session(p).and_then(|s| s.shell_pid());
+        let pids = registry_shell_pids(&HashSet::from([id.clone()]), &kasa_pty::live_sessions(), shell);
+        assert_eq!(pids.iter().find(|(p, _)| p == &id).map(|(_, pid)| *pid), sess.shell_pid());
+        assert!(sess.shell_pid().is_some());
+
+        let fake = |_: &str| Some(7);
+        let ids = ["%3".to_string(), "web-a".to_string(), "web-b".to_string()];
+        let known = HashSet::from(["web-b".to_string()]);
+        let got: Vec<String> = registry_shell_pids(&known, &ids, fake).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(got, ["%3", "web-b"]);
+    }
 
     #[test]
     fn stopped_remote_agent_clears_transcript_identity_but_keeps_its_seat() {
