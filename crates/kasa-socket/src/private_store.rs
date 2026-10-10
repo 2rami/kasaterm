@@ -37,7 +37,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
-    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_LIST_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_EXISTING, READ_CONTROL,
 };
@@ -48,6 +48,9 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 /// 디렉터리 핸들은 지우기 공유를 빼서 쥐고 있는 동안 그 디렉터리의 이름 바꾸기·지우기를 막는다.
 const SHARE_NO_DELETE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+/// 디렉터리 핸들의 접근. 공유 검사는 데이터 접근(읽기·쓰기·지우기·실행)을 연 핸들만 센다 — 소유자·DACL·속성만
+/// 읽는 핸들은 공유 모드가 무시돼 이름 바꾸기를 못 막는다(러너 실측). 그래서 목록 읽기를 함께 연다.
+const DIR_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY;
 
 /// 검사한 디렉터리 핸들. 쥐고 있는 동안 그 디렉터리를 치우고 같은 이름에 정션을 세우는 바꿔치기가 막힌다 —
 /// 안의 파일은 경로로 다시 여는데, 파일 쪽 `OPEN_REPARSE_POINT` 는 마지막 구성요소만 보기 때문이다.
@@ -71,7 +74,7 @@ pub fn create_dir(dir: &Path) -> io::Result<DirGuard> {
 /// 있는 디렉터리가 소유자 전용인지 본다. 넓으면 고치지 않고 거부한다(Vault — Unix 의 `mode & 077` 거부).
 pub fn verify_dir(dir: &Path) -> io::Result<DirGuard> {
     let user = User::current()?;
-    let handle = open(dir, READ_CONTROL | FILE_READ_ATTRIBUTES, true)?;
+    let handle = open(dir, DIR_ACCESS, true)?;
     require(shape_of(&handle, &user)?, true)?;
     Ok(DirGuard { _handle: handle })
 }
