@@ -216,7 +216,15 @@ pub fn parse_diagnostics(
 /// `file://` URI 를 경로로. 퍼센트 인코딩을 되돌린다 — 경로에 공백이나 한글이
 /// 있으면 서버가 `%20`·`%ED%95%9C` 로 보내오고, 그대로 쓰면 파일이 안 맞는다.
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(p) = windows_uri_path(uri) {
+        return Some(p);
+    }
     let raw = uri.strip_prefix("file://")?;
+    Some(PathBuf::from(percent_decode(raw)?))
+}
+
+fn percent_decode(raw: &str) -> Option<String> {
     let b = raw.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -232,13 +240,22 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
         out.push(b[i]);
         i += 1;
     }
-    Some(PathBuf::from(String::from_utf8(out).ok()?))
+    String::from_utf8(out).ok()
 }
 
 /// 경로를 `file://` URI 로. 퍼센트 인코딩이 필요한 바이트만 감싼다.
 pub fn path_to_uri(p: &Path) -> String {
+    #[cfg(windows)]
+    if let Ok(u) = url::Url::from_file_path(p) {
+        return u.into();
+    }
     let s = p.to_string_lossy();
     let mut out = String::from("file://");
+    percent_encode_into(&mut out, &s);
+    out
+}
+
+fn percent_encode_into(out: &mut String, s: &str) {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
@@ -247,7 +264,26 @@ pub fn path_to_uri(p: &Path) -> String {
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
-    out
+}
+
+// Windows 는 rust-analyzer 와 같은 url 크레이트로 바꾼다. 그대로 감싸면 `C:\x` 가 `file://C%3A%5Cx`
+// (드라이브가 호스트 자리)가 되어 서버가 경로로 못 되돌린다. url 이 못 바꾸는 것(상대 경로·드라이브
+// 없는 `file:///tmp/x`·깨진 URI)은 위의 예전 갈래로 넘겨 패닉 없이 그대로 둔다.
+#[cfg(windows)]
+fn windows_uri_path(uri: &str) -> Option<PathBuf> {
+    let p = url::Url::parse(uri).ok()?.to_file_path().ok()?;
+    Some(PathBuf::from(upper_drive_letter(&p.to_string_lossy())))
+}
+
+/// rust-analyzer 는 Windows 드라이브 문자를 소문자로 바꿔 보낸다(url_from_abs_path, VS Code 관례).
+/// 편집기 버퍼·진단 맵 키는 시스템이 준 대문자 경로라, 그대로 두면 진단이 다른 키로 들어가 안 뜬다.
+#[cfg(any(windows, test))]
+fn upper_drive_letter(p: &str) -> String {
+    let mut s = p.to_string();
+    if s.as_bytes().get(1) == Some(&b':') && s.as_bytes()[0].is_ascii_lowercase() {
+        s[..1].make_ascii_uppercase();
+    }
+    s
 }
 
 /// 살아 있는 rust-analyzer 하나.
@@ -719,6 +755,47 @@ mod tests {
             let uri = path_to_uri(Path::new(p));
             assert!(!uri.contains(' '), "URI 에 날 공백이 남으면 서버가 파일을 못 찾는다");
             assert_eq!(uri_to_path(&uri).unwrap(), PathBuf::from(p));
+        }
+    }
+
+    /// rust-analyzer 가 소문자로 보낸 드라이브만 대문자로 — 다른 꼴(UNC·유닉스·짧은 문자열·멀티바이트)은 그대로.
+    #[test]
+    fn only_a_lowercase_drive_letter_is_raised() {
+        assert_eq!(upper_drive_letter(r"c:\Users\x.rs"), r"C:\Users\x.rs");
+        for same in [r"C:\x", r"\\server\share\x", "/tmp/x", "", "c", "한:", "é:x"] {
+            assert_eq!(upper_drive_letter(same), same);
+        }
+    }
+
+    /// Windows 경로 ↔ URI 가 rust-analyzer(url 크레이트)와 같은 꼴이고, 서버가 돌려보낸 꼴로 진단 키가 맞는지.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_round_trip_like_rust_analyzer() {
+        for (path, uri) in [
+            (r"C:\Users\사용자\a b\x#1%.rs", "file:///C:/Users/%EC%82%AC%EC%9A%A9%EC%9E%90/a%20b/x%231%25.rs"),
+            (r"C:\", "file:///C:/"),
+            (r"\\server\share\a b\x.rs", "file://server/share/a%20b/x.rs"),
+        ] {
+            assert_eq!(path_to_uri(Path::new(path)), uri, "{path}");
+            assert_eq!(uri_to_path(uri).unwrap(), Path::new(path), "{uri}");
+        }
+        // canonicalize 가 주는 verbatim 경로도 같은 URI.
+        assert_eq!(path_to_uri(Path::new(r"\\?\C:\repo\main.rs")), "file:///C:/repo/main.rs");
+        // 서버가 돌려보내는 꼴 — rust-analyzer 의 소문자 드라이브, VS Code 의 c%3A, localhost — 이
+        // 편집기 경로(대문자 드라이브) 키로 진단 맵에서 찾혀야 한다.
+        let editor = Path::new(r"C:\Users\x.rs");
+        for back in ["file:///c:/Users/x.rs", "file:///c%3A/Users/x.rs", "file://localhost/C:/Users/x.rs"] {
+            let mut diags: HashMap<PathBuf, ()> = HashMap::new();
+            diags.insert(uri_to_path(back).unwrap(), ());
+            assert!(diags.contains_key(editor), "{back} → {:?}", uri_to_path(back));
+        }
+        // url 이 못 바꾸는 입력은 패닉 없이 예전 갈래로 간다.
+        for rel in [r"src\main.rs", r"\tmp\x.rs", ""] {
+            assert!(path_to_uri(Path::new(rel)).starts_with("file://"));
+        }
+        assert_eq!(uri_to_path("file:///tmp/x.rs").unwrap(), Path::new("/tmp/x.rs"));
+        for bad in ["file://", "file:///C:/%ZZ", "http://x/y", "file://C%3A%5Cx"] {
+            let _ = uri_to_path(bad);
         }
     }
 
