@@ -142,8 +142,19 @@ Local injection into standalone managed web PTYs also remains unsupported until
 full conversation and IME/input evidence is available. These restrictions do not
 prevent a standalone or Windows sender from forwarding a complete remote address
 to a known supported receiver. Remote routing runs before local injection/storage
-checks. POSIX receipt storage enforces private permissions; Windows local receipt
-storage is unsupported until private ACL enforcement is implemented.
+checks. POSIX receipt storage enforces private permissions. Windows local receipt
+storage requires the process token's user SID as owner and a protected DACL with
+exactly one allow ACE for that user. New directories, locks and data files receive
+that security descriptor at creation; existing objects are checked through open
+handles. Reparse points, missing or broad DACLs and another owner are refused.
+An existing non-private directory is never repaired in place, because changing
+its inheritable ACEs could also change unrelated children. The receiver keeps the
+verified directory handle open without delete sharing to prevent replacement,
+and an exclusive file lock prevents a second receiver. Saves use a private
+temporary file and replacement, checking the destination before and after the
+write; failures do not fall back to unprotected storage. Windows does not perform
+the POSIX directory fsync. These storage checks do not bypass the separate live
+identity and input-readiness checks above.
 
 ## Native integration fixture
 
