@@ -542,6 +542,9 @@ mod tests {
 
     /// 나쵸의 카오모지는 주 글꼴에 없어도 사슬에서 빌려 온다 — 네모로 찍히면 말투가
     /// 깨진 것처럼 보인다. 어느 글꼴에도 없는 ᴗ 는 닮은꼴 ◡ 로 찍는다.
+    /// 빌려 오는 사슬이 맥 시스템 글꼴이고 펫도 맥에서만 띄운다(카사텀이 다른 OS 에선 「macOS 에서
+    /// 사용할 수 있어요」로 막는다).
+    #[cfg(target_os = "macos")]
     #[test]
     fn kaomoji_glyphs_are_borrowed_from_the_font_chain() {
         let faces = faces();

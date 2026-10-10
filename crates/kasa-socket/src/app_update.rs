@@ -1550,10 +1550,20 @@ mod tests {
             Ok(self.identities.borrow().get(&app.display().to_string()).cloned().unwrap_or_default())
         }
         fn copy_bundle(&self, from: &Path, to: &Path) -> std::result::Result<(), String> {
-            let status = std::process::Command::new("/bin/cp").args(["-R", &from.display().to_string(), &to.display().to_string()]).status().unwrap();
+            // 실제 번들 복사는 맥 도구가 하지만, 가짜는 어느 OS 에서든 같은 `cp -R` 결과(없는 `to` 를 사본으로)를 낸다.
+            fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+                std::fs::create_dir_all(to)?;
+                for entry in std::fs::read_dir(from)? {
+                    let entry = entry?;
+                    let dest = to.join(entry.file_name());
+                    if entry.file_type()?.is_dir() { copy_tree(&entry.path(), &dest)? } else { std::fs::copy(entry.path(), dest).map(|_| ())? }
+                }
+                Ok(())
+            }
+            let copied = copy_tree(from, to);
             let ident = self.identities.borrow().get(&from.display().to_string()).cloned().unwrap_or_default();
             self.identities.borrow_mut().insert(to.display().to_string(), ident);
-            status.success().then_some(()).ok_or_else(|| "cp 실패".into())
+            copied.map_err(|e| format!("복사 실패: {e}"))
         }
     }
 

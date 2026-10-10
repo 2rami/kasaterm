@@ -359,15 +359,17 @@ mod tests {
         std::fs::write(parent.join("b/new.txt"), "x").unwrap();
         age(&parent.join("a"), 600);
         age(&parent.join("b"), 60);
+        // repo_root 는 git 이 준 뿌리라 Windows 에선 `C:/…` 꼴이다 — 같은 곳인지를 제품과 같은 `same_tree` 로 본다.
+        let root_is = |view: &Value, want: &Path| same_tree(Path::new(view["repo_root"].as_str().unwrap_or_default()), want);
         let view = panel_view(&parent, None, &[], 5, Duration::from_secs(20), None).unwrap();
         assert_eq!(view["cwd"], json!(parent.to_string_lossy()), "the column still belongs to the pane folder");
-        assert_eq!(view["repo_root"], json!(parent.join("b").to_string_lossy()));
+        assert!(root_is(&view, &parent.join("b")), "{}", view["repo_root"]);
         assert_eq!(view["no_repo"], json!(false));
         assert_eq!(view["repos"], json!([parent.join("b"), parent.join("a")]));
         let chosen = panel_view(&parent, Some(&parent.join("a")), &[], 5, Duration::from_secs(20), None).unwrap();
-        assert_eq!(chosen["repo_root"], json!(parent.join("a").to_string_lossy()));
+        assert!(root_is(&chosen, &parent.join("a")), "{}", chosen["repo_root"]);
         let foreign = panel_view(&parent, Some(Path::new("/etc")), &[], 5, Duration::from_secs(20), None).unwrap();
-        assert_eq!(foreign["repo_root"], json!(parent.join("b").to_string_lossy()), "only a repository under the pane folder can be chosen");
+        assert!(root_is(&foreign, &parent.join("b")), "only a repository under the pane folder can be chosen: {}", foreign["repo_root"]);
         let inside = panel_view(&parent.join("a"), None, &[], 5, Duration::from_secs(20), None).unwrap();
         assert!(inside.get("repos").is_none(), "a pane inside a repository reads it as before");
         let empty = scratch("empty");

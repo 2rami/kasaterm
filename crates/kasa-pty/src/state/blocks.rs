@@ -333,20 +333,25 @@ mod command_block_tests {
         assert!(r1 > 0);
         let han = "한글".as_bytes();
         etx.send(ExtEvent::Bytes([b"a ".as_slice(), &han[..4]].concat())).unwrap();
-        let r2 = wait_rev(&sess, r1);
+        wait_rev(&sess, r1);
         etx.send(ExtEvent::Bytes([&han[4..], b"\r\n".as_slice()].concat())).unwrap();
-        wait_rev(&sess, r2);
-        {
-            let b = sess.blocks.lock().unwrap();
-            let last = b.back().unwrap();
-            assert_eq!(last.exit_code, None, "D 전엔 도는 중");
-            assert_eq!(last.output, "a 한글\r\n");
-        }
-        let r3 = sess.blocks_rev();
+        // rev 한 번 오른 것만 보고 단언하면 느린 러너에선 나머지 바이트가 아직 안 붙었다. 원하는 모양이 될
+        // 때까지 기다리고, 단언은 잠금 밖에서 한다 — 잠금을 쥔 채 실패하면 읽기 스레드까지 Poison 으로 죽는다.
+        let last = |want: &dyn Fn(&CommandBlock) -> bool| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let got = sess.blocks.lock().unwrap().back().cloned();
+                if got.as_ref().is_some_and(want) || Instant::now() >= deadline {
+                    return got;
+                }
+                let _ = sess.screens.recv_timeout(std::time::Duration::from_millis(50));
+            }
+        };
+        let running = last(&|b| b.output == "a 한글\r\n").unwrap();
+        assert_eq!(running.exit_code, None, "D 전엔 도는 중");
+        assert_eq!(running.output, "a 한글\r\n");
         etx.send(ExtEvent::Bytes(b"\x1b]133;D;2\x07".to_vec())).unwrap();
-        wait_rev(&sess, r3);
-        let b = sess.blocks.lock().unwrap();
-        assert_eq!(b.back().unwrap().exit_code, Some(2));
+        assert_eq!(last(&|b| b.exit_code.is_some()).unwrap().exit_code, Some(2));
         assert!(!sess.alt_screen());
     }
 
