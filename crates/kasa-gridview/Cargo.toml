@@ -7,17 +7,17 @@ license.workspace = true
 
 [dependencies]
 kasa-screen.workspace = true
-kasa-cells = { path = "../kasa-cells" }
-wgpu = "28"
-wgpu-hal = { version = "28", features = ["metal"] }
-winit = "0.30"
-raw-window-handle = "0.6"
+kasa-cells.workspace = true
+wgpu.workspace = true
+wgpu-hal.workspace = true
+winit.workspace = true
+raw-window-handle.workspace = true
 anyhow.workspace = true
-pollster = "0.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+pollster.workspace = true
+image.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # P3 레이어 손질이 `setColorspace:` 에 CGColorSpaceRef 를 `*mut c_void` 로 넘긴다 — 디버그 빌드의 인자 타입 검사가
 # 그 자리를 막지 않게 한다(본판은 다른 의존이 켜 줘서 드러나지 않았다).
-objc2 = { version = "0.6", features = ["relax-void-encoding"] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
+objc2 = { workspace = true, features = ["relax-void-encoding"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry"] }

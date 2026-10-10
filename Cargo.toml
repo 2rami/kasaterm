@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+# 크레이트 층과 의존 방향은 docs/workspace.md, 검사는 scripts/check-workspace.py.
 members = [
     "app/kasaterm",
     "app/kasapet",
@@ -16,6 +17,8 @@ members = [
     "crates/kasa-agents",
     "crates/kasa-net",
     "crates/kasa-net-ffi",
+    # 실험(spikes/)은 제품이 아니다. 아무도 의존하지 않고, 루트에서 `-p` 없이 부르는
+    # cargo 명령에도 들지 않는다(아래 default-members). 굽기는 `--workspace` 나 `-p` 로.
     "spikes/iced-term",
     "spikes/egui-term",
     "spikes/gpui-term",
@@ -23,20 +26,87 @@ members = [
     "spikes/winit-ime-test",
     "spikes/p3-poc",
 ]
+default-members = [
+    "app/kasaterm",
+    "app/kasapet",
+    "crates/kasa-pet-config",
+    "crates/kasa-socket",
+    "crates/kasa-mcp",
+    "crates/kasa-cells",
+    "crates/kasa-ime",
+    "crates/kasa-pty",
+    "crates/kasa-bridge",
+    "crates/kasa-screen",
+    "crates/kasa-gridview",
+    "crates/kasa-collab",
+    "crates/kasa-agents",
+    "crates/kasa-net",
+    "crates/kasa-net-ffi",
+]
 
+# 이 표의 `version` 줄이 파일의 첫 `version = ` 줄이어야 한다 — 굽기·릴리스 도구가
+# 그 줄을 정규식으로 읽고 고친다(scripts/build-app.sh·tag-release.sh, tools/release).
 [workspace.package]
 edition = "2021"
 version = "0.2.61"
 license = "MIT"
 
+# 제품 크레이트 둘 이상이 함께 쓰는 판은 여기 한 곳에 둔다. 크레이트는
+# `workspace = true` 로 받고 자기 몫 features·optional 만 더한다.
+#
+# default-features: 여기서 끈 것은 받는 쪽이 `default-features = true` 로만 다시 켤 수
+# 있고, 여기서 켠 것은 받는 쪽이 끌 수 없다(cargo 가 경고만 하고 무시한다). 그래서
+# 가벼운 소비자가 있는 것은 여기서 꺼 둔다.
 [workspace.dependencies]
-vt100 = "0.15"
-crossbeam-channel = "0.5"
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-bincode = "1"
+# 내부 크레이트. kasa-socket·kasa-pty 의 기본 기능(앱 업데이트 서명 확인 ring, OS
+# 클립보드 arboard)은 앱·호스트만 싣는다 — kasa-agents·kasa-collab·`kasa tui` 는 끈 채 받는다.
+kasa-agents = { path = "crates/kasa-agents" }
 kasa-bridge = { path = "crates/kasa-bridge" }
+kasa-cells = { path = "crates/kasa-cells" }
+kasa-collab = { path = "crates/kasa-collab" }
+kasa-gridview = { path = "crates/kasa-gridview" }
+kasa-ime = { path = "crates/kasa-ime" }
+kasa-mcp = { path = "crates/kasa-mcp" }
+kasa-net = { path = "crates/kasa-net" }
+kasa-pet-config = { path = "crates/kasa-pet-config" }
+kasa-pty = { path = "crates/kasa-pty", default-features = false }
 kasa-screen = { path = "crates/kasa-screen" }
+kasa-socket = { path = "crates/kasa-socket", default-features = false }
+
+anyhow = "1"
+arboard = "3"
+axum = "0.8.9"
+base64 = "0.22"
+bincode = "1"
+bytemuck = { version = "1", features = ["derive"] }
+bytes = "1"
+crossbeam-channel = "0.5"
+futures-util = "0.3"
+# 셸에서 여는 형식만 싣는다. 기본 기능은 모든 코덱과 rayon 을 끌어온다.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+libc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+pollster = "0.4"
+portable-pty = "0.9"
+raw-window-handle = "0.6"
+# rustls 로 시스템 openssl 의존을 피한다. 기본 기능(native-tls)을 켜면 그게 돌아온다.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"] }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+swash = "0.2"
+tokio = "1.52.3"
+unicode-normalization = "0.1"
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4"] }
+vt100 = "0.15"
+wgpu = "28"
+wgpu-hal = { version = "28", features = ["metal"] }
+windows-sys = "0.59"
+winit = "0.30"
 
 # Windows rustc/LLVM crashed (STATUS_ACCESS_VIOLATION / OOM) optimizing
 # kasa-mcp at any opt-level >= 1, blamed at the time on its heavy proc-macro

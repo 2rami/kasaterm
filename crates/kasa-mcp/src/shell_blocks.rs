@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::{Query, RawQuery};
 use axum::Json;
-use kasa_bridge::screen::Color;
+use kasa_screen::screen::Color;
 use kasa_pty::block_lines::{block_lines, StyledLine};
 use kasa_pty::{CommandBlock, PtySession};
 use serde_json::{json, Value};

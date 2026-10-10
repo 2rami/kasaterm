@@ -1,15 +1,27 @@
 # 코드 맵 — main.rs 와 기능 모듈들
 
 프로젝트 지침(`CLAUDE.md`)의 「코드 맵」이 여기를 가리킨다. Rust 를 만지기 전에 읽어라.
+크레이트 사이 층과 의존 방향은 [`workspace.md`](workspace.md)(검사 `scripts/check-workspace.py`).
 
-`main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main` + tests 만. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
+`main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 그리기·문서 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main`(부팅 순서 조립) + tests 만. 부팅 자유함수는 아래 세 모듈에 있고 main.rs 가 옛 경로(`crate::verification_run` 등)로 재수출한다. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
 
-- `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지
+- `bootstrap.rs` — `main()` 이 창을 띄우기 전에 부르는 것: 패닉·stderr 로그, 물려받은 claude 표식 지우기(`CLAUDE_MARKER_ENV`), 라이트(`lite_mode`·`apply_lite_env`)·캡처 env·검증 실행 판정(`verification_run`), 엔진 호스트 정책(`install_pty_host_policy`), 자기설치(`install_pending`·`arm_self_install`), 끝난 태스크·빈 인박스 청소, 살아 있는 인스턴스 pid
+- `pane_shims.rs` — 칸 셸 PATH 앞에 놓는 shim 설치(`install_pane_shims`, 원자 교체 `write_shim`)·미리보기/`open`/tmux/rust-analyzer shim·칸 env(`proxy_env`·`agent_name_suffix`·신원 도우미)·학생 shim(`install_student_shims`). 하네스별 래퍼는 자식: `pane_shims/claude.rs`(claude 래퍼·협업 훅·연결 mod·계정 줄) · `pane_shims/codex.rs`(codex 래퍼·계정 파일·`codex_binary`) · `pane_shims/agy.rs`(agy 훅 래퍼)
+- `spawn_env.rs` — 칸이 뜰 자리: 시작 cwd(`resolve_spawn_cwd`)·기본 셸·훅용 셸(`hook_shell_program`)·고를 수 있는 셸, 이 인스턴스의 소켓 경로(`resolve_kasaterm_socket_path`)와 HTTP 포트(`mcp_panel_port`)
+
+- `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지.
+  `render_frame_gpu` 는 그리는 **차례**를 보여 주고, 화면 구역별 패스는 자식 모듈이 그린다: `render/sidebar.rs`(방 카드·배치도/별도창 띠·pane 줄·목록 가장자리·줄 우클릭 메뉴) · `render/file_tree_column.rs`(파일트리 칼럼) · `render/side_column.rs`(오른쪽 Git·Info·세션·MCP 칼럼) · `render/status_bar.rs`(하단 상태줄) · `account_popover.rs`(계정 드롭다운 배치와 그리기). 자식 패스는 `g` 와 이 프레임에 읽는 작은 `Frame`, 고쳐 쓸 상태 `&mut` 만 받는다 — `g` 가 `self.gpu` 를 잡은 안쪽이라 `&self` 메서드로 구할 값은 부르는 쪽이 미리 풀어 넘긴다. 클립·히트렉트·그리는 순서는 옮기기 전과 같다
 - `screenread.rs` — claude/codex **화면 그리드 판독·재작성** 자유함수: 스피너(`find_claude_spinner`)·입력박스(`prompt_box`)·배너/픽커/앵커 감지, 팀메시지(tell/SendMessage) 색칠·프사 배치·상태줄 mod 가 막 지은 줄 덧칠(`paint_status_line`)
 - `sprites.rs` — 학생 스프라이트·프사 **에셋 적재와 드로잉**: 번들/override 프레임, idle GIF 캐시, `draw_student_*`
 - `handler.rs` — winit `ApplicationHandler`(`window_event`/`user_event`/`new_events`/`resumed`/`exiting`/`about_to_wait`). 소켓 백엔드 위임(`SocketBytes`/`SocketSplit`/`SocketFocus`) 처리·`window.json` 저장(`exiting`)/복원(`resumed`)·header/divider drag·tab-drag move·socket 명령 드레인
 - `layout.rs` — pane 조작(`split_active_pane`/`move_pane`/`close_active_pane`/`spawn_new_tab`/`swap_dir`/`focus_dir`/`drop_*`/`divider_at_px`/`toggle_pane_zoom`/`close_tab`) + `resize_backend`/`publish_pty_layout`/좌표·`target_*`
-- `session.rs` — `start_pty`(로컬 pane spawn)·`start_socket_pty`(cmux 소켓 + `socket::PtyBackend`)·window/session/cwd·label·tmux/socket·`save_session_state`·`apply_screen_update`/`pump_pty_screens`
+- `session.rs` — 칸 번호(`used_pane_ids`·`alloc_pane_id`)·새 칸 세우기(`spawn_session_pane`·`bring_pane_home`)·PTY 등록(`insert_pty`)·칸 판정(`window_leaves`·`pane_bypass_on`·`pane_agent_working`). 기능별 몸통은 `session/` 자식(옛 `session::…` 경로는 재수출):
+  `boot.rs`(첫 칸 `start_pty`·옛 tmux·소켓 서버 `start_socket_pty`) · `screen_pump.rs`(`apply_screen_update`·`pump_pty_screens`) ·
+  `agent_launch.rs`(칸에 학생 env 심기·학생/페르소나 바꾸기·`restart_pane_agent`) · `accounts.rs`(claude·codex 계정 전환과 재시작 대기) ·
+  `save.rs`(`session_state_json`·`save_session_state`) · `restore.rs`(`restore_session_state`·복원 명령·복원 전 수 세기) ·
+  `titles.rs`(대화 기록 꼬리 → 칸 제목·effort) · `rooms.rs`(방 만들기·고르기·순서·닫기·이름, 칸·탭 초점) ·
+  `closed_panes.rs`(닫은 칸 기록·되살리기) · `file_tree.rs`(cwd·파일 트리·파일 열기) · `sidebar.rs`(방 카드 높이·스크롤) ·
+  `remote_rooms.rs`(원격 셸·거울 칸·원격 방 보기 창) · `migrate.rs`(칸 이사·되돌리기)
 - `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
@@ -35,6 +47,14 @@
   호스트용 tell 전달 `delivery`·claude 훅 설치 `hooks`. 기기 명부·관문·원격 칸은 호스트가 `env::CollabEnv` 로 꽂는다 —
   본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) ·
   `kasa-socket::cli`(`kasaterm-cli` 본체 — 바이너리와 `kasa tui` 멀티콜이 부른다)
+- `kasa-pty/src/state.rs` — `PtySession` 의 필드 한 곳, 책임별 `impl` 은 `state/` 자식: `lifecycle`(띄우기·입양·닫기) ·
+  `reader`(읽기 스레드) · `vt`(파서·답장) · `grid`(격자 → 행·ANSI) · `screen`(읽기·구독) · `viewport`(크기의 주인) ·
+  `input`(쓰기 관문) · `blocks`(OSC 133) · `inline`(OSC 1337·kitty) · `process`·`agents`(프로세스·에이전트 감지) ·
+  `registry`(세션 등록부). 상세 지도는 `state.rs` 머리말이 정본
+- `kasa-mcp/src/http.rs` — 호스트 HTTP 서버. `http/router.rs` 가 모듈마다의 `routes()` 를 한 표로 합치고 공통 레이어
+  (`auth`)를 두른다. 자식은 기능별: `socket`(`/term/ws`) · `term_*`(웹 터미널) · `sessions`·`panes`·`pane_read`(세션·칸) ·
+  `collab`(보드·tell) · `migrate` · `claude_account` · `schedule`·`tasks` · `files` · `git_api` · `settings` · `phone` ·
+  `machine_proxy` 등. 상세 지도는 `http.rs` 머리말이 정본
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
 - `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤 빈 입력창을 확인해 붙여넣고 Enter(mod 칸도 같다 — 일하는 칸은 진행 중인 턴에 들어간다). 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라

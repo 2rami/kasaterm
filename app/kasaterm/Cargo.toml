@@ -9,32 +9,32 @@ license.workspace = true
 [dependencies]
 crossbeam-channel = { workspace = true }
 kasa-bridge.workspace = true
-kasa-pty = { path = "../../crates/kasa-pty" }
-kasa-agents = { path = "../../crates/kasa-agents" }
-kasa-pet-config = { path = "../../crates/kasa-pet-config" }
+kasa-pty = { workspace = true, default-features = true }
+kasa-agents.workspace = true
+kasa-pet-config.workspace = true
 # 계정 전환의 keychain 서비스명 계산 — claude 실물(2.1.233 WZ())과 같은 식으로
 # sha256(저장 경로 NFC).hex[..8] 을 접미로 쓴다. 둘 다 이미 워크스페이스에 있다.
-sha2 = "0.10"
-unicode-normalization = "0.1"
-kasa-socket = { path = "../../crates/kasa-socket" }
-kasa-ime = { path = "../../crates/kasa-ime" }
-kasa-cells = { path = "../../crates/kasa-cells" }
-kasa-gridview = { path = "../../crates/kasa-gridview" }
-wgpu = "28"
-bytemuck = { version = "1", features = ["derive"] }
+sha2.workspace = true
+unicode-normalization.workspace = true
+kasa-socket = { workspace = true, default-features = true }
+kasa-ime.workspace = true
+kasa-cells.workspace = true
+kasa-gridview.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
 # Direct HAL access — needed to reach wgpu's actual CAMetalLayer for
 # Display P3 colorspace tagging. The high-level wgpu Surface API
 # doesn't expose this knob and macOS layer-walk from the NSView root
 # misses the real render layer (verified: Color Meter still showed
 # pure sRGB 255,0,0 after walk-based tagging).
-wgpu-hal = { version = "28", features = ["metal"] }
-winit = "0.30"
-raw-window-handle = "0.6"
+wgpu-hal.workspace = true
+winit.workspace = true
+raw-window-handle.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 # preserve_order: 남이 쓰는 설정 파일(`~/.claude.json`)을 고쳐 쓰기 때문이다. 기본
 # 맵은 키를 알파벳순으로 재정렬해, 한 줄만 바꿔도 4000줄짜리 파일이 통째로 흔들린다.
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
 # Codex는 훅 없이 시작하면 세션 UUID를 argv에 남기지 않는다. 대신 자신이 관리하는
 # state_5.sqlite에 pane별 CODEX_HOME을 포함한 rollout 경로를 기록하므로, 같은 cwd의
 # 여러 pane을 추측 없이 구분하려면 그 정본을 직접 읽어야 한다. bundled는 Windows에도
@@ -46,28 +46,28 @@ toml_edit = "0.22"
 # bincode-framed ScreenUpdate stream between daemon and GUI (src/stream.rs).
 # Far more compact than JSON for the high-frequency per-frame cell payload.
 bincode.workspace = true
-pollster = "0.4"
-arboard = "3"
+pollster.workspace = true
+arboard.workspace = true
 # 접힌 팀메시지 인라인 전개 — 그리드 셀에 한글(와이드) 본문을 써넣을 때
 # 글리프 폭 판정(와이드 = 셀 2칸: 글자 + 스페이서).
-unicode-width = "0.2"
-kasa-mcp = { path = "../../crates/kasa-mcp" }
+unicode-width.workspace = true
+kasa-mcp.workspace = true
 # Git-status panel webview. Separate OS window so it can't touch the wgpu
 # surface the terminal renders into — wry runs WKWebView/WebView2/WebKitGTK
 # in its own layer. raw-window-handle 0.6 matches the workspace's winit 0.30.
 # devtools: 웹 pane 의 인스펙터(Cmd+Opt+I). 이 feature 없이는 release 빌드에서
 # open_devtools 심볼 자체가 사라진다(debug_assertions 게이트).
 wry = { version = "0.55", features = ["devtools"] }
-uuid = { version = "1", features = ["v4"] }
+uuid.workspace = true
 muda = "0.19.2"
 # Encode image bytes into a self-contained data: URI for the preview
 # window's <img> (the webview loads via with_html / null origin, so a
 # file:// src is unreliable across the origin boundary).
-base64 = "0.22"
+base64.workspace = true
 # Decode image files to raw RGBA8 for the in-pane GPU image viewer
 # (uploaded straight into a wgpu texture). default-features off so we
 # only pull the codecs we actually open from a shell.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+image.workspace = true
 # Parse markdown into an event stream for the in-pane document renderer
 # (headings/paragraphs/code/lists laid out directly with the cell renderer).
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -108,11 +108,11 @@ qrcodegen = "1.8"
 # AppKit doesn't stretch stale layer contents during live window resize.
 # ghostty's trick — same gravity, no presentsWithTransaction needed.
 [dev-dependencies]
-kasa-mcp = { path = "../../crates/kasa-mcp", features = ["test-support"] }
+kasa-mcp = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "NSData", "NSGeometry", "objc2-core-services"] }
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "NSData", "NSGeometry", "objc2-core-services"] }
 # Native desktop notifications (UNUserNotificationCenter) so the alert carries
 # kasaterm's own .app icon; block2 builds the authorization completion handler.
 # UNNotificationAttachment 는 알림 오른쪽 썸네일 — pane 마다 그 학생 프사를 붙인다.
@@ -120,16 +120,16 @@ objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCen
 objc2-intents = { version = "0.3", default-features = false, features = ["std", "INPerson", "INPersonHandle", "INImage", "INIntent", "INIntentResponse", "INSendMessageIntent", "INOutgoingMessageType", "INInteraction", "INSpeakableString", "INSendMessageAttachment", "block2"] }
 # Dock tile badge (unread-notification count) via NSApplication.dockTile,
 # 그리고 창마다 NSWindow.tabbingMode 를 끄는 데 NSWindow/NSView 가 필요하다.
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
 # 웹 pane 스크린샷(web-shot) — WKWebView 자체 스냅샷이라 화면 녹화 권한이 필요 없다.
 # 버전은 wry 0.55 가 쓰는 것과 같아야 타입이 이어진다(WryWebView → WKWebView deref).
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
 block2 = "0.6"
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     # Read a shell process's live cwd (status-bar path picker / breadcrumb):
@@ -148,7 +148,7 @@ windows-sys = { version = "0.59", features = [
 # bg SendMessage 브리지(bridge.rs)가 `claude attach` 를 ConPTY 로 몰고 간다 —
 # unix 는 그 자리에 `/usr/bin/expect` 를 쓰는데 Windows 엔 없다. kasa-pty 가 쓰는
 # 것과 같은 크레이트·버전.
-portable-pty = "0.9"
+portable-pty.workspace = true
 
 # Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
 # taskbar / Start menu / .msi installer show the real icon, not the default.

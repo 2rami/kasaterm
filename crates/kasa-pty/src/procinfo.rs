@@ -245,6 +245,12 @@ mod tests {
         let r = raw(2, b"/opt/homebrew/bin/node\0\0\0npm run dev\0--x\0A=1\0\0");
         assert_eq!(parse_argv0(&r).as_deref(), Some("npm run dev"));
         assert!(parse_argv0(&raw(0, b"/bin/x\0\0")).is_none());
+    }
+
+    /// `comm_name` 은 유닉스 프로세스 표만 쓴다 — 윈도우엔 함수가 없어 시험도 유닉스에서만 돈다.
+    #[cfg(unix)]
+    #[test]
+    fn comm_name_keeps_the_last_path_piece() {
         assert_eq!(comm_name("/Users/k/.local/bin/claude"), "claude");
         assert_eq!(comm_name("postgres: checkpointer "), "postgres: checkpointer");
     }

@@ -1,0 +1,36 @@
+name: Workspace
+
+# 크레이트 경계 검사(scripts/check-workspace.py, docs/workspace.md). `cargo metadata --no-deps` 와
+# Cargo.toml 만 읽어 몇 초면 끝난다 — 레지스트리를 받지도 굽지도 않으니 캐시·LFS·Cargo.lock 이 필요 없다.
+# 매니페스트나 검사 자체가 바뀐 push·PR 에서만 돈다.
+on:
+  push:
+    paths:
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'scripts/check-workspace.py'
+      - 'docs/workspace.md'
+      - '.github/workflows/workspace.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'scripts/check-workspace.py'
+      - 'docs/workspace.md'
+      - '.github/workflows/workspace.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  boundaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: 경계 검사
+        run: python3 scripts/check-workspace.py
+      - name: 심은 위반을 잡는지
+        run: python3 scripts/check-workspace.py --self-test

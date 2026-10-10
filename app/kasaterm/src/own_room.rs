@@ -172,7 +172,7 @@ mod tests {
             assert!(guard < planted, "{name}: 기준을 바꾼 뒤에 꽂아야 한다");
         }
         let layout = include_str!("layout.rs");
-        let session = include_str!("session.rs");
+        let session = include_str!("session/remote_rooms.rs");
         before(between(layout, "fn split_active_pane_as(", "pub(crate) fn split_active_pane_focused"),
             "split_active_pane_as", "spawn_split_session(");
         before(between(layout, "pub(crate) fn split_fleet(", "fn live_remote_anchor"), "split_fleet", "spawn_split_session(");

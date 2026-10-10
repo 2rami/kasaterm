@@ -14,23 +14,23 @@ anyhow.workspace = true
 crossbeam-channel.workspace = true
 # Serialize the BSP layout tree so the daemon can ship it to an attaching GUI.
 serde.workspace = true
-portable-pty = "0.9"
+portable-pty.workspace = true
 alacritty_terminal = "0.26"
 # 셀·색·ScreenUpdate·칸 배치 낱말. 렌더러(본판·라이트·TUI)가 이 낱말로 받는다.
 kasa-screen.workspace = true
 # OS 클립보드로 OSC 52 를 받는 기본 자리. `kasa tui` 는 바깥 터미널로 넘기니 끈다.
-arboard = { version = "3", optional = true }
+arboard = { workspace = true, optional = true }
 # NFC-normalize PTY output so decomposed (NFD) Hangul jamo collapse into
 # precomposed syllables. cosmic_text (sugarloaf path) shaped jamo back
 # together automatically; the swash/cell-renderer GPU path draws one
 # glyph per codepoint, so NFD shows as split jamo without this.
-unicode-normalization = "0.1"
+unicode-normalization.workspace = true
 # Fast SIMD substring search — used in the reader hot path to short-circuit
 # the OSC 1337 / kitty graphics scans when neither prefix is present.
 memchr = "2"
 # 인라인 그림 머리말에서 픽셀 수만 읽는다(픽셀 합계 한도). 앱과 같은 판·같은
 # 형식 집합이라 GUI 가 디코드할 수 있는 그림만 셈에 든다.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+image.workspace = true
 # kitty 그림 프로토콜의 `o=z`(zlib) 본문 풀기. png 가 이미 끌어오는 판이다.
 miniz_oxide = "0.8"
 
@@ -40,10 +40,10 @@ miniz_oxide = "0.8"
 # id detection work natively.
 # 핸드오프(산 채로 fd 넘기기): poll 기반 reader 정지·TIOCSWINSZ·dup·kill.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Diagnostics_Debug",

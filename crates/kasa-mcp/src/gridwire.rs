@@ -8,7 +8,7 @@
 //! 이미 파싱해 둔 그리드를 ANSI 로 되돌려 보내면 받는 쪽이 그걸 또 파싱해야 하고,
 //! 그 파서(xterm.js)가 자기 방식으로 키 입력까지 가로채 모바일 IME 를 깨뜨렸다.
 
-use kasa_bridge::screen::{Cell, Color, ScreenUpdate};
+use kasa_screen::screen::{Cell, Color, ScreenUpdate};
 use serde_json::{json, Value};
 use unicode_width::UnicodeWidthChar;
 

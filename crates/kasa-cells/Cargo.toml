@@ -25,13 +25,13 @@ include = [
 name = "kasa_cells"
 
 [dependencies]
-wgpu = "28"
-swash = "0.2"
-bytemuck = { version = "1", features = ["derive"] }
+wgpu.workspace = true
+swash.workspace = true
+bytemuck.workspace = true
 anyhow = { workspace = true }
 memmap2 = "0.9"
 
 [dev-dependencies]
-winit = "0.30"
-pollster = "0.4"
-raw-window-handle = "0.6"
+winit.workspace = true
+pollster.workspace = true
+raw-window-handle.workspace = true

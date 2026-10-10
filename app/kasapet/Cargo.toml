@@ -10,20 +10,20 @@ edition.workspace = true
 # 순수 러스트 Cubism 런타임. wgpu 피처는 **켜지 않는다** — 그쪽은 wgpu 30 을 물어
 # 우리 28 과 타입이 안 맞는다. 파싱·모션·물리만 받고 그리기는 우리가 한다.
 mocari = "0.4"
-wgpu = "28"
-winit = "0.30"
-pollster = "0.4"
-bytemuck = { version = "1", features = ["derive"] }
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
 png = "0.17"
-libc = "0.2"
-serde_json = "1"
+libc.workspace = true
+serde_json.workspace = true
 # 말풍선 글자 래스터 — 워크스페이스(kasa-cells)가 이미 쓰는 판이라 의존 트리가 안 는다.
-swash = "0.2"
-raw-window-handle = "0.6"
-kasa-pet-config = { path = "../../crates/kasa-pet-config" }
-sha2 = "0.10"
+swash.workspace = true
+raw-window-handle.workspace = true
+kasa-pet-config.workspace = true
+sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen", "NSRunningApplication", "NSPanel", "NSTextField", "NSText", "NSButton", "NSControl", "NSFont", "NSBezierPath", "NSImage", "NSImageView", "NSBox", "NSCell", "objc2-core-foundation"] }
-objc2-foundation = "0.3"
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSCursor", "NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen", "NSRunningApplication", "NSPanel", "NSTextField", "NSText", "NSButton", "NSControl", "NSFont", "NSBezierPath", "NSImage", "NSImageView", "NSBox", "NSCell", "objc2-core-foundation"] }
+objc2-foundation.workspace = true

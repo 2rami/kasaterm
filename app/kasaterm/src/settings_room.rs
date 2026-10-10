@@ -938,7 +938,7 @@ mod tests {
             );
         }
 
-        let session = include_str!("session.rs");
+        let session = concat!(include_str!("session/remote_rooms.rs"), include_str!("session/file_tree.rs"));
         before(
             between(session, "pub(crate) fn spawn_remote_pane", "pub(crate) fn mirror_remote_pane"),
             "SettingsMutation::RemotePane",

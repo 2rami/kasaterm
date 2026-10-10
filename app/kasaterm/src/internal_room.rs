@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn internal_rooms_can_be_reordered_in_the_sidebar() {
-        let session = include_str!("session.rs");
+        let session = include_str!("session/rooms.rs");
         let after = session
             .split_once("pub(crate) fn reorder_window")
             .expect("reorder_window")

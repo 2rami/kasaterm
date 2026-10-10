@@ -12,34 +12,35 @@ default = []
 test-support = []
 
 [dependencies]
-kasa-socket = { path = "../kasa-socket" }
+kasa-socket = { workspace = true, default-features = true }
 # 웹 터미널: PTY 세션 레지스트리에 붙어 raw 바이트를 웹소켓으로 중계한다.
 # kasa-pty 는 kasa-mcp 를 모르므로 순환이 아니다.
-kasa-pty = { path = "../kasa-pty" }
+kasa-pty = { workspace = true, default-features = true }
 # 보드 수집기·tell 장부·칸 열쇠·기계 id. 다른 기계 판·원격 tell(HTTP)까지 켠다.
-kasa-collab = { path = "../kasa-collab", features = ["net"] }
+kasa-collab = { workspace = true, features = ["net"] }
 # 카사넷 — 다른 기기로 가는 길을 직통 QUIC 로(kasanet.rs, docs/kasanet.md).
-kasa-net = { path = "../kasa-net" }
-# 셀 그리드 타입(ScreenUpdate·Cell) — gridwire 인코더가 쓴다.
-kasa-bridge = { path = "../kasa-bridge" }
+kasa-net.workspace = true
+# 셀 그리드 타입(ScreenUpdate·Cell)·리플로우 — gridwire 인코더와 웹 거울이 쓴다. 옛 tmux
+# 백엔드(kasa-bridge)를 거치지 않고 낱말 크레이트를 바로 받는다.
+kasa-screen.workspace = true
 # wide 글자(한글) 폭 판정 — 스페이서를 걸러내는 데 쓴다.
-unicode-width = "0.2"
+unicode-width.workspace = true
 # KASA-share 는 맥(NFD 로 저장되기도 함)과 윈도우 사이에서 같은 이름을 같은 파일로 봐야 한다.
-unicode-normalization = "0.1"
+unicode-normalization.workspace = true
 anyhow.workspace = true
 # remote 모듈의 ExtEvent 채널 — kasa-pty 의 start_external 과 같은 채널 타입.
 crossbeam-channel.workspace = true
 # "ws" — 웹 터미널의 양방향 채널. 기본 feature 에는 안 들어 있다.
-axum = { version = "0.8.9", features = ["ws"] }
+axum = { workspace = true, features = ["ws"] }
 # 라우팅 **전에** 도는 레이어(`/u/<slug>/` 접두 벗기기)는 Router::layer 로는 못 건다 —
 # 그건 라우팅 뒤다. ServiceBuilder 로 라우터 바깥에 두른다.
 tower = "0.5"
 # 업링크가 관문에서 흘러온 요청 바디를 reqwest 스트림으로 넘길 때.
 tokio-stream = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-base64 = "0.22"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 # 원격 PTY 호스트에 붙는 WS 클라이언트(remote 모듈). 서버(axum ws)와 같은 crate 에
 # 두어 term-ws 프로토콜 지식이 한 곳에 모인다. lock 에 이미 있는 버전 — 전이 의존 0.
 # rustls 로 wss:// — 업링크가 공용 관문(https 호스트)에 붙는다. 없으면 「TLS support not
@@ -48,19 +49,19 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "s
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # ccglass-style capture proxy: forward claude의 Anthropic API 호출을 가로채 messages[]
 # 를 깨끗하게 캡처(peek/jsonl 없이 라이브 대화). rustls 로 시스템 openssl 의존 회피.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"] }
+reqwest.workspace = true
 # APNs 푸시의 ES256 서명(push.rs) — rustls 가 이미 쓰는 것이라 새 빌드 비용은 없다.
-ring = "0.17"
-futures-util = "0.3"
-bytes = "1"
+ring.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
 # tell(standalone): forkpty 로 `claude attach` 를 띄워 background 세션 stdin 에 주입.
-libc = "0.2"
+libc.workspace = true
 notify = "8.2"
 # pane session id: claude --session-id 가 엄격 UUID 요구(Windows 엔 uuidgen 없음).
-uuid = { version = "1", features = ["v4"] }
+uuid.workspace = true
 # 계정별 Keychain 항목 찾기: claude 가 서비스명에 sha256(저장소 경로) 앞 8자를 붙인다.
 # 이미 잠금 파일에 있던 버전이라 새로 받는 게 없다.
-sha2 = "0.10"
+sha2.workspace = true
 
 # Standalone webview backend: serves the arona-ui daemon view off a second
 # port so the webview survives kasaterm exiting.
@@ -85,4 +86,4 @@ path = "src/bin/device.rs"
 security-framework = "3"
 
 [dev-dependencies]
-kasa-collab = { path = "../kasa-collab", features = ["net", "test-support"] }
+kasa-collab = { workspace = true, features = ["net", "test-support"] }

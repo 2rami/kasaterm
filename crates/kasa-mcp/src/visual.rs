@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use kasa_bridge::screen::{Color, Row, ScreenUpdate};
+use kasa_screen::screen::{Color, Row, ScreenUpdate};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
@@ -320,7 +320,7 @@ pub fn builtin_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kasa_bridge::screen::Cell;
+    use kasa_screen::screen::Cell;
 
     fn raw() -> ScreenUpdate {
         let mut row = vec![Cell::blank(); 4];
