@@ -60,26 +60,75 @@ if [ ! -e "$CH" ] && [ "$(uname)" = Darwin ]; then
   fi
 fi
 mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
-# ~/.codex 를 심볼릭으로 미러 — 세션·플러그인·스킬·캐시·인증을 원본과 공유해 pane 안
-# codex 가 pane 밖 codex 와 같은 것을 본다. auth.json 도 심볼릭이라 토큰 갱신이 원본에
+# Git Bash 의 `ln -s` 는 기본이 복사다(MSYS2 winsymlinks:deepcopy). 그러면 토큰 갱신·새 세션이
+# pane 홈의 사본에만 남고, 다음 실행이 낡은 원본을 다시 복사해 갱신으로 버려진 토큰을 싣는다.
+# Windows 에선 진짜 심볼릭(개발자 모드·관리자)을 먼저 걸고, 안 되면 폴더는 정션·파일은 하드
+# 링크로 건다 — 둘 다 권한 없이 된다. 하드 링크로 충분한 건 codex 가 auth.json 을 제자리에서
+# 덮어쓰기 때문이다(FileAuthStorage::save 가 truncate 로 연다 — 임시 파일+rename 으로 바뀌면 끊긴다).
+# 걸고 나서 같은 파일인지 확인하고, 못 이으면 사본으로 띄우지 않고 멈춘다(kt_stop).
+KT_WIN=; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) KT_WIN=1 ;; esac
+kt_link() {
+  [ -n "$KT_WIN" ] || { ln -sfn "$1" "$2" 2>/dev/null; return 0; }
+  [ "$1" -ef "$2" ] && return 0
+  if [ -L "$2" ]; then
+    rm -f "$2" 2>/dev/null
+  elif [ -e "$2" ]; then
+    # 다른 이름이 남은 하드 링크면 이 이름만 걷어도 잃는 게 없다. 혼자인 파일·진짜 폴더는 옛 래퍼가
+    # 남긴 사본이라 그 안에만 있는 갱신 토큰·세션이 있을 수 있다 — 지우지 않고 옆으로 옮긴다.
+    if [ ! -d "$2" ] && [ "$(ls -ld "$2" | awk '{print $2}')" -gt 1 ] 2>/dev/null; then
+      rm -f "$2" 2>/dev/null
+    else
+      # pid 는 재사용되니 이미 있는 이름은 건너뛰고, 그래도 덮지 않게 mv -n 뒤 옮겨졌는지 본다.
+      b="$2.copy-$$"; i=0
+      while [ -e "$b" ] || [ -L "$b" ]; do i=$((i+1)); b="$2.copy-$$-$i"; done
+      mv -n "$2" "$b" 2>/dev/null
+      [ -e "$b" ] || [ -L "$b" ] || return 1
+    fi
+  fi
+  if [ -e "$2" ] || [ -L "$2" ]; then return 1; fi
+  # 진짜 심볼릭은 대상이 아직 없어도 걸린다(로그인 전 슬롯).
+  MSYS=winsymlinks:nativestrict ln -sfn "$1" "$2" 2>/dev/null && return 0
+  [ -e "$1" ] || return 1
+  if [ -d "$1" ]; then
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+  else
+    ln -f "$1" "$2" 2>/dev/null
+  fi
+  [ "$1" -ef "$2" ]
+}
+kt_stop() {
+  echo "kasaterm: $1" >&2
+  exit 1
+}
+# ~/.codex 를 링크로 미러 — 세션·플러그인·스킬·캐시·인증을 원본과 공유해 pane 안
+# codex 가 pane 밖 codex 와 같은 것을 본다. auth.json 도 링크라 토큰 갱신이 원본에
 # 그대로 써져 로그인이 안 갈린다(실측: doctor 가 stored ChatGPT tokens=true). 매 실행
-# ln -sfn 이라 pane 안에서 생긴 드리프트는 다음 실행에 원상복구된다.
+# 다시 걸어 pane 안에서 생긴 드리프트는 다음 실행에 원상복구된다.
+# 계정 슬롯을 골랐으면 auth.json 은 아래에서 슬롯 것만 건다 — 기본 계정 것을 잠깐이라도 걸지 않는다.
+ACCT=$(cat "$SELF_DIR/codex-account" 2>/dev/null)
 for e in "$SRC"/* "$SRC"/.[!.]*; do
   [ -e "$e" ] || continue
   n=${e##*/}
-  case "$n" in config.toml|hooks.json|AGENTS.md) continue ;; esac
-  ln -sfn "$e" "$CH/$n" 2>/dev/null
+  case "$n" in
+    config.toml|hooks.json|AGENTS.md) continue ;;
+    auth.json) [ -n "$ACCT" ] && continue ;;
+  esac
+  kt_link "$e" "$CH/$n" || kt_stop "codex pane 홈에 $n 을 원본과 이어 걸지 못해 멈췄어요 — 사본으로 띄우면 토큰 갱신·새 세션이 원본에 안 남아요. 임시 폴더($CH)가 NTFS 인지 확인해 주세요."
 done
 # 계정 슬롯 — 이 파일 한 줄이 활성 슬롯의 auth 디렉터리다. **매 실행 읽으므로**
 # 설정에서 계정을 바꾸면 이미 열려 있는 pane 도 다음 codex 부터 그 계정으로 뜬다.
 # 갈아 끼우는 건 auth.json 하나뿐 — 세션·플러그인·스킬·캐시는 위 미러 그대로라
 # pane 안 codex 가 pane 밖과 같은 것을 계속 본다. 빈 파일/없는 파일 = 기본 로그인.
 # 아직 로그인 안 한 슬롯은 링크가 대상 없이 걸리는데, 그게 맞다: codex 는 로그인
-# 필요로 보고, `codex login` 이 쓰는 순간 그 파일이 슬롯 안에 생긴다.
-ACCT=$(cat "$SELF_DIR/codex-account" 2>/dev/null)
+# 필요로 보고, `codex login` 이 쓰는 순간 그 파일이 슬롯 안에 생긴다. Windows 에서 심볼릭 권한이
+# 없으면 대상 없는 링크를 못 걸어(하드 링크는 원본이 있어야 한다) 그 로그인이 슬롯에 안 남으니 멈춘다.
 if [ -n "$ACCT" ]; then
   mkdir -p "$ACCT" 2>/dev/null
-  ln -sfn "$ACCT/auth.json" "$CH/auth.json" 2>/dev/null
+  if ! kt_link "$ACCT/auth.json" "$CH/auth.json"; then
+    # 사본이나 남아 있던 기본 계정 것으로 띄우면 고른 계정이 아닌 계정으로 돈다 — 멈춘다.
+    [ -e "$ACCT/auth.json" ] || kt_stop "고른 codex 계정에 아직 로그인하지 않았어요. 설정의 계정 화면에서 그 계정으로 로그인해 주세요(Windows 개발자 모드를 켜면 칸 안에서도 로그인할 수 있어요)."
+    kt_stop "codex pane 홈에 고른 계정의 auth.json 을 이어 걸지 못해 멈췄어요 — 사본으로 띄우면 토큰 갱신이 계정에 안 남아요."
+  fi
 fi
 cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
 # 디렉터리 신뢰 프롬프트 선해결 — 무인 스폰이 여기서 멈춘다("Do you trust the contents
@@ -369,6 +418,174 @@ mod tests {
         }
         assert!(!args.iter().any(|a| a.contains("PERSONA") || a.contains("KASANET_KEY")), "{args:?}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum HomeCase {
+        /// 고른 계정 슬롯에 로그인돼 있다.
+        Slot,
+        /// 슬롯 없음 — 기본 로그인(~/.codex/auth.json).
+        Default,
+        /// 고른 슬롯이 아직 로그인 전이고 기본 로그인은 있다(첫 로그인).
+        EmptySlot,
+        /// 옛 래퍼(복사 ln)가 pane 홈에 남긴 사본 폴더·사본 auth.json 이 있다.
+        Migration,
+    }
+
+    /// pane 홈에서 codex 가 쓴 것이 원본에 닿는지 — 토큰 갱신은 고른 계정의 auth.json 에, 새 세션은
+    /// ~/.codex 에. 쓰기는 codex 의 FileAuthStorage::save 와 같은 열기(truncate·create·write, 제자리)인
+    /// sh `>` 로 흉내 낸다. 모든 파일은 이 시험이 만든 fixture 다.
+    ///
+    /// `msys` 판은 권한 없는 Git Bash 다: 기본 `ln -s` 는 복사(MSYS2 winsymlinks:deepcopy)이고 native
+    /// 심볼릭은 거부된다. Windows 에선 진짜 Git Bash 위에 가짜 `ln` 하나로 권한만 빼고, 다른 OS 에선
+    /// `uname`·`cmd`(정션)·`cygpath` 까지 흉내 낸다.
+    #[test]
+    fn codex_pane_home_writes_reach_the_original_auth_and_sessions() {
+        let sh = crate::pane_shims::tests::test_posix_shell().expect("셰임을 돌릴 POSIX sh");
+        for mode in ["native", "msys"] {
+            for case in [HomeCase::Slot, HomeCase::Default, HomeCase::EmptySlot, HomeCase::Migration] {
+                // 옛 사본은 복사 ln 에서만 생긴다 — 유닉스 래퍼는 그 자리를 다루지 않는다.
+                if case == HomeCase::Migration && mode == "native" && !cfg!(windows) {
+                    continue;
+                }
+                run_codex_home_fixture(&sh, mode, case);
+            }
+        }
+    }
+
+    fn run_codex_home_fixture(sh: &std::path::Path, mode: &str, case: HomeCase) {
+        let fwd = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+        let base = std::env::temp_dir().join(format!("kt-codex-home-{}-{mode}-{case:?}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, slot_dir, shim, fakes) = (base.join("home/.codex"), base.join("slot"), base.join("shim"), base.join("fakes"));
+        let ch = shim.join("codex-home-%1");
+        for d in [src.join("sessions"), slot_dir.clone(), ch.clone(), fakes.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(src.join("auth.json"), "default-old").unwrap();
+        std::fs::write(src.join("sessions/old.jsonl"), "old").unwrap();
+        if case != HomeCase::EmptySlot {
+            std::fs::write(slot_dir.join("auth.json"), "slot-old").unwrap();
+        }
+        if case == HomeCase::Migration {
+            std::fs::create_dir_all(ch.join("sessions")).unwrap();
+            std::fs::write(ch.join("sessions/pane-only.jsonl"), "pane-only").unwrap();
+            std::fs::write(ch.join("auth.json"), "copy-with-newer-token").unwrap();
+        }
+        install_codex_shim(&shim);
+        // 설치가 앱 설정의 활성 슬롯을 적으므로 그 뒤에 덮는다. 앱이 쓰는 그대로 — Windows 면 역슬래시 경로다.
+        let slot = case != HomeCase::Default;
+        let account = if slot { slot_dir.display().to_string() } else { String::new() };
+        std::fs::write(shim.join("codex-account"), account).unwrap();
+        let body = std::fs::read_to_string(shim.join("codex")).unwrap();
+        let from = body.find("mkdir -p \"$CH\" 2>/dev/null || exec").unwrap();
+        let from = from + body[from..].find('\n').unwrap() + 1;
+        let to = body.find("cp \"$SRC/config.toml\"").unwrap();
+        let block = &body[from..to];
+
+        if mode == "msys" {
+            write_shim(
+                &fakes.join("ln"),
+                "#!/bin/sh\nsym=; for a in \"$@\"; do case \"$a\" in -*s*) sym=1 ;; esac; done\n\
+                 if [ -n \"$sym\" ]; then\n\
+                   case \"$MSYS\" in *nativestrict*) echo 'ln: Operation not permitted' >&2; exit 1 ;; esac\n\
+                   if [ -n \"$EMULATE_COPY\" ]; then\n\
+                     eval \"t=\\${$(($#-1))}\"; eval \"l=\\${$#}\"\n\
+                     [ -e \"$t\" ] || exit 1\n\
+                     rm -f \"$l\" 2>/dev/null; exec cp -R \"$t\" \"$l\"\n\
+                   fi\n\
+                 fi\n\
+                 PATH=\"$REAL_PATH\" exec ln \"$@\"\n",
+            )
+            .unwrap();
+            if !cfg!(windows) {
+                write_shim(&fakes.join("uname"), "#!/bin/sh\necho MINGW64_NT-10.0-26100\n").unwrap();
+                write_shim(&fakes.join("cygpath"), "#!/bin/sh\n[ \"$1\" = -w ] && shift\nprintf '%s\\n' \"$1\"\n").unwrap();
+                write_shim(
+                    &fakes.join("cmd"),
+                    "#!/bin/sh\n[ \"$1 $2 $3\" = '/c mklink /J' ] || exit 1\n[ -e \"$4\" ] && exit 1\n[ -d \"$5\" ] || exit 1\n\
+                     PATH=\"$REAL_PATH\" exec ln -s \"$5\" \"$4\"\n",
+                )
+                .unwrap();
+            }
+        }
+        // 실제 래퍼처럼 POSIX 경로로 돌린다(Git Bash 의 $HOME·pwd 는 /c/... 꼴, 슬롯만 앱이 쓴 Windows 경로).
+        let prelude = "case \"$SRC\" in ?:*) SRC=$(cygpath -u \"$SRC\"); CH=$(cygpath -u \"$CH\"); \
+                       SELF_DIR=$(cygpath -u \"$SELF_DIR\"); FAKES=$(cygpath -u \"$FAKES\") ;; esac\n\
+                       if [ \"$MODE\" = msys ]; then REAL_PATH=$PATH; PATH=\"$FAKES:$PATH\"; export REAL_PATH PATH; fi\n\
+                       if [ -n \"$PRESEED\" ]; then mkdir -p \"$CH/sessions.copy-$$\" && printf earlier-backup > \"$CH/sessions.copy-$$/keep.jsonl\"; \
+                       printf earlier-token-backup > \"$CH/auth.json.copy-$$\"; fi\n";
+        let launch = |write: &str| {
+            let script = format!(
+                "{prelude}{block}echo LAUNCHED\nprintf '%s' '{write}' > \"$CH/auth.json\"\nprintf '%s' '{write}' > \"$CH/sessions/{write}.jsonl\"\n"
+            );
+            let mut cmd = std::process::Command::new(sh);
+            cmd.arg("-c")
+                .arg(script)
+                .env("SRC", fwd(&src))
+                .env("CH", fwd(&ch))
+                .env("SELF_DIR", fwd(&shim))
+                .env("FAKES", fwd(&fakes))
+                .env("MODE", mode)
+                .env_remove("MSYS");
+            if mode == "msys" && !cfg!(windows) {
+                cmd.env("EMULATE_COPY", "1");
+            }
+            // pid 가 재사용돼 이 셸의 pid 로 된 백업이 이미 있는 자리 — 같은 셸에서 `$$` 로 미리 만든다.
+            if case == HomeCase::Migration && write == "refreshed-1" {
+                cmd.env("PRESEED", "1");
+            }
+            cmd.output().unwrap()
+        };
+        let read = |p: std::path::PathBuf| std::fs::read_to_string(p).ok();
+        let tag = format!("{mode}/{case:?}");
+
+        // 권한 없는 Windows 에선 로그인 전 슬롯을 이어 걸 길이 없다 — 기본 계정으로 뜨지 않고 멈춰야 한다.
+        if case == HomeCase::EmptySlot && mode == "msys" {
+            let out = launch("refreshed-1");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success() && !String::from_utf8_lossy(&out.stdout).contains("LAUNCHED"), "{tag}: 빈 슬롯인데 띄웠다");
+            assert!(stderr.contains("아직 로그인하지 않았어요"), "{tag}: {stderr}");
+            assert_eq!(read(src.join("auth.json")).as_deref(), Some("default-old"), "{tag}");
+            assert!(read(slot_dir.join("auth.json")).is_none(), "{tag}");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        // 두 번 띄운다 — 두 번째 실행도 이미 걸린 링크를 사본으로 바꾸거나 폴더 안에 겹쳐 걸면 안 된다.
+        for write in ["refreshed-1", "refreshed-2"] {
+            let out = launch(write);
+            assert!(out.status.success(), "{tag}: {}", String::from_utf8_lossy(&out.stderr));
+            let (got, untouched, before) = if slot {
+                (slot_dir.join("auth.json"), src.join("auth.json"), "default-old")
+            } else {
+                (src.join("auth.json"), slot_dir.join("auth.json"), "slot-old")
+            };
+            assert_eq!(read(got).as_deref(), Some(write), "{tag}: 갱신된 토큰이 고른 계정에 안 닿았다 — 다음 실행이 낡은 토큰을 다시 싣는다");
+            assert_eq!(read(untouched).as_deref(), Some(before), "{tag}: 고르지 않은 계정의 auth.json 이 바뀌었다");
+            assert_eq!(read(src.join(format!("sessions/{write}.jsonl"))).as_deref(), Some(write), "{tag}: pane 의 새 세션이 ~/.codex 에 없다");
+            assert!(!ch.join("sessions/sessions").exists(), "{tag}: 다시 띄울 때 폴더 안에 겹쳐 걸었다");
+        }
+        assert_eq!(read(src.join("sessions/old.jsonl")).as_deref(), Some("old"));
+        if case == HomeCase::Migration {
+            // 사본에만 있던 세션·토큰은 지우지 않고 옆으로 옮기고, 같은 이름의 예전 백업은 덮지도 안에 겹치지도 않는다.
+            let aside: Vec<std::path::PathBuf> = std::fs::read_dir(&ch)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.to_string_lossy().contains(".copy-"))
+                .collect();
+            let named = |prefix: &str| -> Vec<std::path::PathBuf> {
+                aside.iter().filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix)).cloned().collect()
+            };
+            let dirs = named("sessions.copy-");
+            let earlier: Vec<_> = dirs.iter().filter(|d| read(d.join("keep.jsonl")).as_deref() == Some("earlier-backup")).collect();
+            let moved: Vec<_> = dirs.iter().filter(|d| read(d.join("pane-only.jsonl")).as_deref() == Some("pane-only")).collect();
+            assert!(earlier.len() == 1 && moved.len() == 1 && earlier[0] != moved[0], "{tag}: {aside:?}");
+            assert!(!earlier[0].join("sessions").exists() && !earlier[0].join("pane-only.jsonl").exists(), "{tag}: 예전 백업 안에 겹쳐 옮겼다");
+            let mut tokens: Vec<String> = named("auth.json.copy-").into_iter().filter_map(read).collect();
+            tokens.sort();
+            assert_eq!(tokens, ["copy-with-newer-token", "earlier-token-backup"], "{tag}: 백업 토큰을 덮었다");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

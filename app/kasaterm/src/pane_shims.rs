@@ -497,7 +497,13 @@ LAUNCH_PID=$$
 if [ -n "$KASATERM_VIA_BACKEND" ] && [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ] && [ -d "$KASATERM_IDENTITY_DIR" ]; then
   IDENTITY="$KASATERM_IDENTITY_DIR"
 else
-  IDENTITY=$(KASATERM_LAUNCH_PID=$LAUNCH_PID python3 -X utf8 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || exit 1
+  IDENTITY=$(KASATERM_LAUNCH_PID=$LAUNCH_PID python3 -X utf8 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || {
+    # 도우미는 실패를 스스로 알리고 1 로 끝난다. 다른 코드는 python3 자체가 못 돈 것이다 — Windows 는
+    # 127(없음)이나 49(MS Store 스텁)라 스텁 안내만 남고 왜 칸이 안 뜨는지 안 보였다. 실행은 그대로 막는다.
+    RC=$?
+    [ "$RC" -ne 1 ] && echo "kasaterm: 학생 지침을 맞추려면 Python 3 이 필요한데 python3 을 실행하지 못했어요(종료 코드 $RC). Python 3 을 설치하고 kasaterm 을 다시 켜 주세요." >&2
+    exit 1
+  }
 fi
 export KASATERM_IDENTITY_DIR="$IDENTITY"
 export KASATERM_CHARACTER="$(cat "$IDENTITY/character")"
@@ -732,6 +738,37 @@ mod tests {
         let args: Vec<&str> = args.lines().collect();
         assert_eq!(args[..2], ["-X", "utf8"], "{args:?}");
         assert!(args[2].ends_with("agent-identity.py") && args[3] == "claude", "{args:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Python 이 없는 설치 — 신원 확인을 못 하면 하네스를 띄우지 않는다(이전 학생 말투로 뜨는 것보다
+    /// 낫다). 그 대신 python3 자체가 못 돈 경우(127 없음·49 Windows MS Store 스텁)는 이유를 알린다.
+    /// 도우미가 스스로 실패한 경우(1)는 도우미가 이미 알렸으니 겹쳐 말하지 않는다.
+    #[test]
+    fn identity_bootstrap_stops_and_explains_when_python_cannot_run() {
+        let sh = test_posix_shell().expect("셰임을 돌릴 POSIX sh");
+        let dir = std::env::temp_dir().join(format!("kt-identity-nopy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.to_string_lossy().replace('\\', "/");
+        let script = format!(
+            "SELF_DIR=$(cd \"{out}\" && pwd)\nCLEAN_PATH=$PATH\n{}echo LAUNCHED\n",
+            identity_bootstrap_sh("codex", "")
+        );
+        for (rc, explains) in [(127, true), (49, true), (1, false)] {
+            write_shim(&dir.join("python3"), format!("#!/bin/sh\necho stub-said-something >&2\nexit {rc}\n")).unwrap();
+            let run = std::process::Command::new(&sh)
+                .arg("-c")
+                .arg(&script)
+                .env_remove("KASATERM_VIA_BACKEND")
+                .env_remove("KASATERM_IDENTITY_DIR")
+                .output()
+                .unwrap();
+            let (stdout, stderr) = (String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+            assert_eq!(run.status.code(), Some(1), "rc={rc}: {stderr}");
+            assert!(!stdout.contains("LAUNCHED"), "rc={rc}: 신원 없이 하네스가 떴다");
+            assert_eq!(stderr.contains("Python 3 이 필요한데"), explains, "rc={rc}: {stderr}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
