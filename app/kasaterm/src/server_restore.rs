@@ -43,10 +43,91 @@ impl ServerSpec {
         Ok(())
     }
 
-    fn shell_input(&self) -> String {
-        let cwd = self.cwd.replace('\'', "'\\''");
-        format!("(cd '{cwd}' && {})\r", self.command)
+    /// 그 셸 문법으로 「cwd 에서 명령을 돌리고, 끝나면 셸은 원래 자리」 입력. 명령은 사용자가 그 셸에
+    /// 맞춰 적은 그대로 넣는다 — 다른 셸 문법으로 옮기지 않는다. cwd 로 못 가면 명령을 돌리지 않는다.
+    fn shell_input(&self, shell: ShellKind) -> String {
+        let command = &self.command;
+        match shell {
+            ShellKind::Posix => {
+                let cwd = self.cwd.replace('\'', "'\\''");
+                format!("(cd '{cwd}' && {command})\r")
+            }
+            // 위치는 런스페이스 하나라 하위 범위로는 못 가둔다 — 스택에 넣고 finally 로 꺼낸다(Ctrl+C 에도 돈다).
+            // 명령 뒤에서 줄을 바꾸는 건 명령 속 `#` 가 닫는 중괄호까지 주석으로 먹지 않게다. 첫 Enter 는
+            // 중괄호가 안 닫혀 실행되지 않고 이어 쓰기가 된다.
+            ShellKind::PowerShell => {
+                let cwd = powershell_quote(&self.cwd);
+                format!("if (Push-Location -LiteralPath {cwd} -PassThru) {{ try {{ {command}\r}} finally {{ Pop-Location }} }}\r")
+            }
+            // cmd 엔 서브셸이 없고 pushd/popd 는 Ctrl+C 에 줄 나머지가 안 돌아 칸이 서버 폴더에 남는다 — 그래서
+            // 자식 cmd 로 돌린다. 폴더는 도우미가 WorkingDirectory 로 주고 명령은 `cmd /d /s /c` 에 그대로
+            // 넘긴다(/s 는 바깥 따옴표만 벗긴다). cmd 줄을 건너는 건 base64 뿐이라 경로·명령을 cmd 가 다시
+            // 해석할 틈이 없다. 도우미·cmd 는 절대경로로 불러 현재 폴더의 같은 이름 실행 파일을 타지 않는다.
+            ShellKind::Cmd => {
+                use base64::Engine as _;
+                let script = cmd_helper_script(&self.cwd, command);
+                let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+                format!("\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}\r")
+            }
+        }
     }
+}
+
+/// cmd 칸의 서버를 자식 cmd 로 띄우는 PowerShell 도우미. 사용자 명령은 PowerShell 문자열 값일 뿐 실행은
+/// cmd 가 한다. 콘솔을 물려받아 출력·입력·Ctrl+C 가 그 칸으로 오고, 끝나면 그 종료 코드로 나간다.
+fn cmd_helper_script(cwd: &str, command: &str) -> String {
+    let cwd = powershell_quote(cwd);
+    let command = powershell_quote(command);
+    format!(
+        "$ErrorActionPreference = 'Stop'; try {{ \
+         $s = New-Object System.Diagnostics.ProcessStartInfo (Join-Path ([Environment]::SystemDirectory) 'cmd.exe'); \
+         $s.Arguments = '/d /s /c \"' + {command} + '\"'; $s.WorkingDirectory = {cwd}; $s.UseShellExecute = $false; \
+         $p = [System.Diagnostics.Process]::Start($s); $p.WaitForExit(); exit $p.ExitCode \
+         }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
+    )
+}
+
+/// 서버 명령을 받을 셸의 문법. 저장 형식엔 없다 — 보낼 때 그 칸 셸 프로세스 이름에서 고른다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellKind {
+    Posix,
+    PowerShell,
+    Cmd,
+}
+
+impl ShellKind {
+    fn from_process_name(name: &str) -> Option<Self> {
+        let name = name.trim_start_matches('-').to_ascii_lowercase();
+        match name.strip_suffix(".exe").unwrap_or(&name) {
+            "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" => Some(Self::Posix),
+            "pwsh" | "powershell" => Some(Self::PowerShell),
+            "cmd" => Some(Self::Cmd),
+            _ => None,
+        }
+    }
+
+    /// 칸 입력줄에 남은 글자를 먼저 지우는 키. Ctrl+U 는 readline 의 줄 지우기라 POSIX 셸에만 보낸다.
+    fn clear_line(self) -> &'static str {
+        match self {
+            Self::Posix => "\x15",
+            Self::PowerShell | Self::Cmd => "",
+        }
+    }
+}
+
+/// PowerShell 작은따옴표 문자열. 그 안에서 특별한 건 작은따옴표뿐인데, PowerShell 은 굽은 작은따옴표
+/// (U+2018~U+201B)도 같은 따옴표로 읽어서 둘 다 겹쳐 쓴다.
+fn powershell_quote(text: &str) -> String {
+    let mut out = String::from("'");
+    for c in text.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 fn contains_literal_secret(command: &str) -> bool {
@@ -134,10 +215,7 @@ fn child_process(table: &[(u32, u32, String)], shell: u32) -> Option<u32> {
 }
 
 fn is_shell_name(name: &str) -> bool {
-    matches!(
-        name.trim_start_matches('-').trim_end_matches(".exe"),
-        "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "pwsh" | "powershell" | "cmd"
-    )
+    ShellKind::from_process_name(name).is_some()
 }
 
 fn update_run_state(
@@ -199,21 +277,21 @@ impl RegisteredServer {
             return Ok(());
         }
         let table = kasa_pty::fresh_process_table();
-        let shell = session.shell_pid();
-        let idle = shell.is_some_and(|shell| {
-            child_process(&table, shell).is_none()
-                && table
-                    .iter()
-                    .any(|(pid, _, name)| *pid == shell && is_shell_name(name))
+        let idle_shell = session.shell_pid().filter(|shell| child_process(&table, *shell).is_none()).and_then(|shell| {
+            table
+                .iter()
+                .find(|(pid, _, _)| *pid == shell)
+                .and_then(|(_, _, name)| ShellKind::from_process_name(name))
         });
-        if !Weak::ptr_eq(&self.session, &Arc::downgrade(session)) || !idle || session.input_closed()
-        {
+        let Some(shell) = idle_shell.filter(|_| {
+            Weak::ptr_eq(&self.session, &Arc::downgrade(session)) && !session.input_closed()
+        }) else {
             *state = RunState::Ended;
             anyhow::bail!("server start canceled because the terminal changed or became busy");
-        }
+        };
         // The queue belongs to the registration itself: clear/re-registration
         // drops the old recipe before it can type into a replacement terminal.
-        session.send_bytes(format!("\x15{}", self.spec.shell_input()).as_bytes())?;
+        session.send_bytes(format!("{}{}", shell.clear_line(), self.spec.shell_input(shell)).as_bytes())?;
         *state = RunState::Starting(Instant::now() + Duration::from_secs(10));
         Ok(())
     }
@@ -591,18 +669,167 @@ pub(crate) fn verification_restore_fixture() -> bool {
 mod tests {
     use super::*;
 
+    /// 서버 cwd 는 이 기기의 절대경로여야 한다 — Windows 에서 `/tmp` 는 절대경로가 아니다.
+    const ROOT: &str = if cfg!(windows) { r"C:\tmp" } else { "/tmp" };
+
     #[test]
     fn server_command_keeps_cwd_quoted_and_only_runs_in_subshell() {
+        let (cwd, quoted) = if cfg!(windows) {
+            (r"C:\tmp\a b'c", r"'C:\tmp\a b'\''c'")
+        } else {
+            ("/tmp/a b'c", r"'/tmp/a b'\''c'")
+        };
         let spec = ServerSpec {
             command: "npm run dev".into(),
-            cwd: "/tmp/a b'c".into(),
+            cwd: cwd.into(),
             name: None,
         };
-        assert_eq!(spec.shell_input(), "(cd '/tmp/a b'\\''c' && npm run dev)\r");
+        assert_eq!(spec.shell_input(ShellKind::Posix), format!("(cd {quoted} && npm run dev)\r"));
         assert!(spec.validate().is_ok());
         let mut invalid = spec;
         invalid.command.push('\n');
         assert!(invalid.validate().is_err());
+        let foreign = if cfg!(windows) { "/tmp" } else { r"C:\tmp" };
+        for cwd in ["relative/dir", foreign] {
+            let spec = ServerSpec { command: "npm run dev".into(), cwd: cwd.into(), name: None };
+            assert!(spec.validate().is_err(), "{cwd}");
+        }
+    }
+
+    #[test]
+    fn each_shell_gets_its_own_grammar_and_keeps_the_command_verbatim() {
+        let spec = |cwd: &str, command: &str| ServerSpec { command: command.into(), cwd: cwd.into(), name: None };
+        let ps = spec(r"C:\srv\한글 it's ‘x’", "npm run dev # 주석").shell_input(ShellKind::PowerShell);
+        assert_eq!(
+            ps,
+            "if (Push-Location -LiteralPath 'C:\\srv\\한글 it''s ‘‘x’’' -PassThru) { try { npm run dev # 주석\r} finally { Pop-Location } }\r"
+        );
+        assert_eq!(ShellKind::Posix.clear_line(), "\x15");
+        assert_eq!(ShellKind::PowerShell.clear_line(), "");
+        assert_eq!(ShellKind::Cmd.clear_line(), "");
+    }
+
+    /// cmd 줄은 절대경로 도우미 + base64 뿐이고, 풀어 보면 cwd·명령이 PowerShell 문자열 값으로만 들어 있다.
+    #[test]
+    fn cmd_runs_the_command_verbatim_in_a_child_cmd_from_the_helper() {
+        use base64::Engine as _;
+        let cwd = r"C:\srv\%PATH% it's";
+        let command = r#"echo "a & b" 'q' & npm run dev"#;
+        let line = ServerSpec { command: command.into(), cwd: cwd.into(), name: None }.shell_input(ShellKind::Cmd);
+        let prefix = "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -EncodedCommand ";
+        let encoded = line.strip_prefix(prefix).and_then(|rest| rest.strip_suffix('\r')).expect(&line);
+        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)), "cmd 가 해석할 글자가 없다");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let units: Vec<u16> = bytes.chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let script = String::from_utf16(&units).unwrap();
+        assert_eq!(script, cmd_helper_script(cwd, command));
+        assert!(script.contains(r#"$s.Arguments = '/d /s /c "' + 'echo "a & b" ''q'' & npm run dev' + '"'"#), "{script}");
+        assert!(script.contains(r"$s.WorkingDirectory = 'C:\srv\%PATH% it''s'"), "{script}");
+        assert!(script.contains("[Environment]::SystemDirectory"), "cmd 도 절대경로로");
+    }
+
+    #[test]
+    fn shell_kind_comes_from_the_shell_process_name() {
+        for (name, kind) in [
+            ("-zsh", Some(ShellKind::Posix)),
+            ("bash", Some(ShellKind::Posix)),
+            ("pwsh.exe", Some(ShellKind::PowerShell)),
+            ("PowerShell.exe", Some(ShellKind::PowerShell)),
+            ("cmd.exe", Some(ShellKind::Cmd)),
+            ("CMD.EXE", Some(ShellKind::Cmd)),
+            ("node.exe", None),
+            ("claude", None),
+        ] {
+            assert_eq!(ShellKind::from_process_name(name), kind, "{name}");
+        }
+    }
+
+    /// 만든 줄을 그 셸에 실제로 먹이고 `after` 를 이어, 줄이 끝난 뒤 셸이 어디 서 있는지 파일로 남긴다.
+    /// 경로 문자열 대신 파일로 보는 건 짧은 이름(RUNNER~1)·콘솔 코드 페이지에 비교가 흔들리지 않게다.
+    fn run_line(shell: ShellKind, program: &str, line: &str, start: &std::path::Path) -> std::process::Output {
+        // 키 입력의 Enter 를 스크립트의 줄바꿈으로 — PowerShell 줄은 명령 뒤에 한 번 더 Enter 가 있다.
+        let line = line.trim_end_matches('\r').replace('\r', "\n");
+        let mut command = std::process::Command::new(program);
+        command.current_dir(start);
+        match shell {
+            ShellKind::Posix => {
+                command.arg("-c").arg(format!("{line}; echo x > after.txt"));
+            }
+            ShellKind::PowerShell => {
+                command.args(["-NoProfile", "-NonInteractive", "-Command"]).arg(format!(
+                    "try {{ {line} }} catch {{ }}; Set-Content -LiteralPath after.txt -Value x"
+                ));
+            }
+            ShellKind::Cmd => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.raw_arg(format!("/d /s /c \"{line} & echo x> after.txt\""));
+                }
+            }
+        }
+        command.output().unwrap()
+    }
+
+    /// 공백·한글·작은따옴표가 든 폴더에서 성공·실패하는 명령을 그 OS 의 실제 셸로 돌린다 — 명령은 그
+    /// 폴더에서 돌고, 끝나면(실패해도) 셸은 원래 자리이고, 폴더가 없으면 명령을 아예 안 돌린다.
+    #[test]
+    fn server_line_runs_in_its_cwd_and_leaves_the_shell_where_it_was() {
+        let mut shells: Vec<(ShellKind, String, Vec<&str>)> = Vec::new();
+        if cfg!(windows) {
+            shells.push((ShellKind::Cmd, "cmd.exe".into(), vec![
+                "echo (ok)> here.txt",
+                r#"echo "a & b" 'q'> here.txt"#,
+                "echo ok> here.txt && dir kasaterm-missing-xyz",
+            ]));
+            let ps = vec![
+                "Set-Content -LiteralPath here.txt -Value ok",
+                "Set-Content -LiteralPath here.txt -Value ok # 주석이 닫는 중괄호를 먹으면 안 된다",
+                "Set-Content -LiteralPath here.txt -Value ok; cmd /c exit 3",
+                "Set-Content -LiteralPath here.txt -Value ok; throw 'boom'",
+            ];
+            shells.push((ShellKind::PowerShell, "powershell.exe".into(), ps.clone()));
+            let pwsh = std::process::Command::new("where.exe").arg("pwsh").output();
+            match pwsh.ok().filter(|o| o.status.success()) {
+                Some(found) => {
+                    let path = String::from_utf8_lossy(&found.stdout).lines().next().unwrap_or("pwsh.exe").trim().to_string();
+                    shells.push((ShellKind::PowerShell, path, ps));
+                }
+                None => eprintln!("pwsh 가 없어 Windows PowerShell 로만 본다"),
+            }
+        } else {
+            shells.push((ShellKind::Posix, "/bin/sh".into(), vec!["echo ok > here.txt", "echo ok > here.txt && false"]));
+        }
+        let base = std::env::temp_dir().join(format!("kasaterm-server-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let start = base.join("start");
+        let target = base.join("srv 한글 it's %PATH%");
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let clean = || {
+            for dir in [&start, &target] {
+                for f in ["here.txt", "after.txt"] {
+                    let _ = std::fs::remove_file(dir.join(f));
+                }
+            }
+        };
+        for (kind, program, commands) in &shells {
+            for command in commands {
+                clean();
+                let spec = ServerSpec { command: command.to_string(), cwd: target.to_string_lossy().into_owned(), name: None };
+                let out = run_line(*kind, program, &spec.shell_input(*kind), &start);
+                let why = format!("{program} `{command}`: {}", String::from_utf8_lossy(&out.stderr));
+                assert!(target.join("here.txt").exists() && !start.join("here.txt").exists(), "명령이 그 폴더에서 돌아야 한다 — {why}");
+                assert!(start.join("after.txt").exists() && !target.join("after.txt").exists(), "끝나면 셸은 원래 자리 — {why}");
+            }
+            clean();
+            let missing = ServerSpec { command: commands[0].to_string(), cwd: base.join("없는 폴더 it's").to_string_lossy().into_owned(), name: None };
+            let out = run_line(*kind, program, &missing.shell_input(*kind), &start);
+            let why = format!("{program}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(!start.join("here.txt").exists(), "폴더가 없으면 명령을 안 돌린다 — {why}");
+            assert!(start.join("after.txt").exists(), "셸은 그대로 다음 줄을 받는다 — {why}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -640,7 +867,7 @@ mod tests {
             surface_key: "stable".into(),
             server: ServerSpec {
                 command: "npm run dev".into(),
-                cwd: "/tmp".into(),
+                cwd: ROOT.into(),
                 name: None,
             },
         };
