@@ -157,6 +157,7 @@ exec "$REAL" "$@"
         eprintln!("[shim] write codex wrapper failed: {e}");
         return;
     }
+    write_cmd_launcher(shim_dir, "codex");
     write_codex_account_file(shim_dir);
 }
 

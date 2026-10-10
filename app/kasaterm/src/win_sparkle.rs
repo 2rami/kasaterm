@@ -68,6 +68,13 @@ pub(crate) fn version_newer(a: &str, b: &str) -> bool {
     }
 }
 
+/// 이 실행에 WinSparkle 을 얹어도 되나. DLL 은 init 만으로 HKCU 에 제 설정을 쓰고 체커는 설치본
+/// 피드를 보니, 검증 리그·격리 env·라이트 실행은 DLL 을 싣기 전에 거른다(맥 Sparkle 과 같은 판정).
+#[cfg(any(windows, test))]
+fn may_start(verification: bool, lite: bool, has: impl Fn(&str) -> bool) -> bool {
+    !verification && !lite && !crate::version::isolated_environment(has)
+}
+
 /// 새 판 알림 [업데이트] → WinSparkle 다운로드·설치로 위임. mac 에선 no-op
 /// (부르는 쪽이 `available()` 로 먼저 거르지만 심볼은 공용으로 둔다).
 #[cfg(not(windows))]
@@ -124,6 +131,9 @@ mod ffi {
     /// 자체 appcast 버전 체커 스레드를 띄운다(프로세스당 한 번). DLL 이 없으면
     /// 조용히 no-op. `resumed()` 가 사실상 1회라 STARTED 가드는 이중 안전장치.
     pub(crate) fn init() {
+        if !super::may_start(crate::verification_run(), crate::lite_mode(), |key| std::env::var_os(key).is_some()) {
+            return;
+        }
         if STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -239,5 +249,23 @@ mod tests {
         assert!(!version_newer("0.1.9", "0.1.9"));
         assert!(!version_newer("0.1.8", "0.1.9"));
         assert!(!version_newer("0.2.0-beta", "0.1.9")); // 비숫자 → 보수적 false
+    }
+
+    #[test]
+    fn winsparkle_stays_off_in_verification_isolated_and_lite_runs() {
+        assert!(may_start(false, false, |_| false));
+        assert!(!may_start(true, false, |_| false));
+        assert!(!may_start(false, true, |_| false));
+        assert!(!may_start(false, false, |key| key == "KASATERM_SETTINGS_FILE"));
+    }
+
+    /// 판정이 DLL 적재·STARTED 보다 앞에 있어야 격리 실행이 HKCU 를 한 번도 안 건드린다.
+    #[test]
+    fn init_refuses_isolated_runs_before_touching_the_dll() {
+        let src = include_str!("win_sparkle.rs");
+        let init = &src[src.find("pub(crate) fn init()").unwrap()..];
+        let guard = init.find("may_start(").unwrap();
+        assert!(guard < init.find("STARTED.swap").unwrap());
+        assert!(guard < init.find("LoadLibraryW(").unwrap());
     }
 }

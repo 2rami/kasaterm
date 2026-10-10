@@ -1,6 +1,5 @@
 //! 부팅 처리 — `main()` 이 창을 띄우기 전에 부르는 것: 로그·패닉 기록, 물려받은 claude 표식
 //! 지우기, 라이트·캡처·검증 실행 env, 엔진 호스트 정책, 자기설치, 팀 저장소 청소.
-use super::*;
 
 /// 종료 뒤 새 빌드를 스스로 설치하도록 도우미를 띄운다 — 껐다 켜면 최신이 되게.
 ///
@@ -25,7 +24,7 @@ use super::*;
 /// 반환은 (설치본 번들, 새로 구운 번들). `None` 이면 움직일 이유가 없다.
 pub(crate) fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     #[cfg(target_os = "macos")]
-    if macos_sparkle::owns_installation() { return None; }
+    if crate::macos_sparkle::owns_installation() { return None; }
     let installed =
         std::path::PathBuf::from(kasa_socket::home_var().ok()?).join("Applications/kasaterm.app");
     let running = installed.join("Contents/MacOS/kasaterm");
@@ -357,7 +356,8 @@ pub(crate) const TASK_OPEN_KEEP_DAYS: u64 = 14;
 /// 되돌릴 수 없는 삭제라 판정을 좁게 잡는다: 파일이 파싱되고 status 를 읽을 수 있을
 /// 때만 손댄다(깨진 파일·모르는 형식은 그대로 둔다).
 pub(crate) fn prune_finished_tasks() {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+    // Windows GUI 프로세스엔 HOME 이 없다 — claude 저장소는 USERPROFILE 밑이다.
+    let Some(home) = kasa_socket::home_dir() else {
         return;
     };
     let days = |k: &str, d: u64| {
@@ -408,7 +408,7 @@ pub(crate) fn prune_finished_tasks() {
 /// 있었다). 하루가 지나야 손대는 것도 같은 이유 — 방금 만들어진 빈 파일은 지금 막 뜬
 /// 학생의 것이다.
 pub(crate) fn prune_empty_inboxes() {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+    let Some(home) = kasa_socket::home_dir() else {
         return;
     };
     let day = std::time::Duration::from_secs(86_400);
@@ -540,13 +540,15 @@ pub(crate) fn live_kasaterm_pids() -> std::collections::HashSet<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     /// 자기설치 도우미를 실제 sh 로 돌린다 — 성공하면 이전 판이 곁에 남고, 복사가 실패하면
     /// 설치본이 되돌아오고(앱이 사라지면 다음 판을 받을 길도 사라진다), 더 새것이 아니면 손대지 않는다.
+    /// 자기설치는 macOS `.app` 번들 계약이다 — 다른 OS 에서는 설치본 경로가 `current_exe` 와 안 맞아 움직이지 않는다.
+    #[cfg(target_os = "macos")]
     #[test]
     fn self_install_keeps_the_previous_bundle_and_restores_it_on_failure() {
         use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
         let tmp = std::env::temp_dir().join(format!("selfinstall-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let bundle = |dir: &std::path::Path, body: &str| {

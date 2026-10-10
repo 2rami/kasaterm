@@ -145,7 +145,8 @@ exec "$REAL" "$@"
     );
     let wrapper_path = shim_dir.join("agy");
     let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("agy", ""));
-    if let Err(e) = write_shim(&wrapper_path, wrapper) {
-        eprintln!("[shim] write agy wrapper failed: {e}");
+    match write_shim(&wrapper_path, wrapper) {
+        Ok(()) => write_cmd_launcher(shim_dir, "agy"),
+        Err(e) => eprintln!("[shim] write agy wrapper failed: {e}"),
     }
 }

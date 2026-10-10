@@ -253,8 +253,7 @@ pub(crate) fn resolve_kasaterm_socket_path() -> String {
         // PID 경로로 격리한다. start_socket_with 가 resolved 경로를 자식 pane 에 다시
         // export 하므로 자식 창 pane 들도 자동으로 우리 소켓을 따라온다.
         Some(p) => {
-            #[cfg(unix)]
-            if std::os::unix::net::UnixStream::connect(&p).is_ok() {
+            if socket_has_listener(&p) {
                 return own();
             }
             p
@@ -263,9 +262,38 @@ pub(crate) fn resolve_kasaterm_socket_path() -> String {
     }
 }
 
+/// 그 소켓 경로에 지금 듣는 앱이 있는가. Windows 의 경로는 named pipe 이름으로 바뀌는데,
+/// 파이프는 같은 이름으로 서버 인스턴스를 하나 더 만들 수 있어서 거기 bind 하면 덮어쓰지
+/// 않고 **나란히** 선다 — 클라이언트가 두 앱 중 아무 쪽에나 붙어 board 가 섞인다.
+fn socket_has_listener(path: &str) -> bool {
+    match kasa_socket::transport::LocalStream::connect(std::path::Path::new(path)) {
+        Ok(_) => true,
+        // ERROR_PIPE_BUSY — 살아 있는 서버가 다음 인스턴스를 아직 못 세운 순간이다.
+        Err(e) => cfg!(windows) && e.raw_os_error() == Some(231),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 물려받은 소켓에 듣는 앱이 있으면 그 경로를 피해야 한다 — 유닉스 소켓이든 Windows named
+    /// pipe 든 같은 판정이어야 pane 에서 띄운 인스턴스가 부모 앱 자리에 끼어들지 않는다.
+    #[test]
+    fn a_listening_socket_is_seen_as_taken_on_every_platform() {
+        let path = std::env::temp_dir().join(format!("kt-sock-live-{}.sock", std::process::id()));
+        let path_str = path.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(&path);
+        assert!(!socket_has_listener(&path_str), "아무도 안 듣는 경로를 산 것으로 봤다");
+        // 죽은 앱이 남긴 파일 자리. 진짜 소켓을 닫아서 만들지 않는 건, macOS 가 소켓의 close-on-exec 을
+        // 한 번에 못 걸어 병렬로 도는 다른 시험의 자식 셸이 듣는 소켓을 물려받아 닫은 뒤에도 연결되기 때문이다.
+        std::fs::write(&path, "").unwrap();
+        assert!(!socket_has_listener(&path_str), "남은 파일을 산 앱으로 봤다 — 영영 자기 자리를 못 쓴다");
+        std::fs::remove_file(&path).unwrap();
+        let _listener = kasa_socket::transport::LocalListener::bind(&path).unwrap();
+        assert!(socket_has_listener(&path_str), "듣는 앱을 못 봤다 — 그 자리에 bind 해 부모 앱과 겹친다");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn port_file_is_paired_with_its_socket_not_its_directory() {

@@ -120,3 +120,23 @@ scripts\windows\package.ps1
 ```powershell
 scripts\windows\package.ps1 -SkipBuild -SkipUi
 ```
+
+---
+
+## 7. 회귀 검사 (CI 와 같은 절차)
+
+`.github/workflows/windows.yml` 이 Rust·굽기 재료가 바뀌는 push·PR 마다 windows-latest 에서 아래를
+돌린다. 같은 스크립트를 Windows 기계에서 손으로 돌려도 된다(x64, 레포 루트에서).
+
+```powershell
+scripts\windows\verify.ps1                               # 경계·check·test·굽기·smoke·조립 전부
+scripts\windows\verify.ps1 -Stage boundaries,check       # 빠른 것만
+scripts\windows\smoke.ps1                                # 이미 구운 target\release 만 띄워 본다
+scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-portable.zip -Label portable
+```
+
+- 병렬은 `-Jobs 2`, 테스트 스레드는 `-TestThreads 2` 가 기본이다(코어 많은 기계에서 rustc 가 메모리 경합으로 죽는다).
+- smoke 는 `docs/verify-app.md` 의 격리 키에 더해 HOME·USERPROFILE·APPDATA·LOCALAPPDATA·TEMP 를 이번 실행 폴더로
+  옮기고, 소켓은 실행마다 다른 named pipe 를 쓴다. 창(GPU)·첫 칸과 쪼갠 칸의 ConPTY 입출력·`kasaterm-cli`·
+  HTTP `/version`·자동 캡처·자동 종료를 확인하고, 이번에 띄운 PID 와 그 자손만 거둔다. 결과는
+  `target\windows-smoke\<라벨>\`(로그·`window.png`·`summary.json`).

@@ -1,0 +1,266 @@
+name: Windows
+
+# Windows 회귀 검사. 맥의 `cargo check` 는 `#[cfg(windows)]` 를 한 줄도 안 보고, 맥에서 MSVC 로
+# 크로스 체크하면 ring 이 Windows SDK 헤더를 못 찾아 의존성에서 죽는다. 릴리스 때만 Windows 를 구우면
+# 그 사이 회귀가 쌓인다(v0.2.0 뒤로 Windows 빌드가 3주 동안 깨진 채였다). 그래서 Rust·Windows 굽기
+# 재료가 바뀌는 push·PR 마다 windows-latest(MSVC) 에서 돈다.
+#
+#   prepare — Windows 스크립트 구문(PowerShell 파서) · Cargo.lock 한 번 풀기(레포에 없다, .gitignore)
+#   rust    — 경계 검사 · 기본 제품 전체 targets check · 가벼운 소비자 조합 · 제품 테스트
+#   app     — release 앱·CLI 굽기 · 격리 실행 smoke(창·ConPTY·named pipe·HTTP) · MSI/portable 조립 검증
+#
+# 두 Windows 잡은 prepare 가 올린 같은 Cargo.lock 으로 `--locked` 굽기를 한다 — 잡마다 따로 풀면
+# 그 사이 새로 나온 판이 한쪽에만 들어가 두 잡이 다른 의존성을 시험할 수 있다.
+#
+# 태그·릴리스·피드·설치는 하지 않는다(release.yml 몫). 절차 본문은 scripts/windows/verify.ps1·smoke.ps1 —
+# Windows 기계에서 손으로 돌릴 때도 같은 스크립트를 쓴다. 병렬은 2 로 묶는다(rustc LLVM 메모리 경합).
+on:
+  push:
+    branches:
+      - main
+      - 'codex/windows-**'
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'app/**'
+      - 'crates/**'
+      - 'assets/**'
+      - 'web/arona-ui/**'
+      - 'scripts/windows/**'
+      - 'scripts/check-workspace.py'
+      - '.github/actions/lfs-pull/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'app/**'
+      - 'crates/**'
+      - 'assets/**'
+      - 'web/arona-ui/**'
+      - 'scripts/windows/**'
+      - 'scripts/check-workspace.py'
+      - '.github/actions/lfs-pull/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  RUST_TEST_THREADS: '2'
+  RUST_BACKTRACE: '1'
+  # 디버그 정보는 줄 번호만 — 패닉 위치는 남기고 LLVM 메모리와 캐시 크기를 줄인다.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  prepare:
+    name: script syntax · Cargo.lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      # smoke.ps1 은 release 굽기(수십 분) 뒤에야 불린다 — 구문 오류는 여기서 1분 안에 드러낸다.
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem -Path scripts/windows -Filter *.ps1) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($e in $errors) {
+              Write-Host "::error file=scripts/windows/$($file.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $failed = $true
+            }
+            Write-Host "$($file.Name): $(@($errors).Count) parse errors"
+          }
+          if ($failed) { exit 1 }
+
+      - name: Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # 레포에 lock 이 생기면 그것을 그대로 검사해 쓰고, 없으면 지금 한 번 푼다.
+      - name: Resolve Cargo.lock
+        run: |
+          if [[ -f Cargo.lock ]]; then
+            cargo metadata --locked --format-version 1 > /dev/null
+            echo "using tracked Cargo.lock"
+          else
+            cargo generate-lockfile
+            echo "generated Cargo.lock"
+          fi
+          sha256sum Cargo.lock
+
+      - name: Upload Cargo.lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-${{ github.run_attempt }}
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 14
+
+  rust:
+    name: check · test
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      # build.rs 가 LFS 포인터 그림을 보면 굽기를 세운다 — check 도 build.rs 를 돌리니 그림이 필요하다.
+      # 받은 그림은 객체 목록 해시로 캐시해 매 실행 미니에서 80 MB 를 다시 받지 않는다.
+      - name: LFS cache key
+        id: lfs_key
+        shell: pwsh
+        run: |
+          $ids = (git lfs ls-files -l | Out-String)
+          $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($ids))).Replace('-', '')
+          "key=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: LFS cache
+        uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: lfs-windows-${{ steps.lfs_key.outputs.key }}
+          restore-keys: lfs-windows-
+
+      - name: Fetch LFS assets
+        uses: ./.github/actions/lfs-pull
+        with:
+          skip: mobile/ web/arona-ui/character-src/
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cargo.lock from prepare
+        uses: actions/download-artifact@v4
+        with:
+          name: cargo-lock-${{ github.run_attempt }}
+          path: .
+
+      - name: Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Boundaries and check
+        shell: pwsh
+        run: ./scripts/windows/verify.ps1 -Stage boundaries,check
+
+      - name: Tests
+        shell: pwsh
+        run: ./scripts/windows/verify.ps1 -Stage test
+
+  app:
+    name: release · smoke · package
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: LFS cache key
+        id: lfs_key
+        shell: pwsh
+        run: |
+          $ids = (git lfs ls-files -l | Out-String)
+          $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($ids))).Replace('-', '')
+          "key=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: LFS cache
+        uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: lfs-windows-${{ steps.lfs_key.outputs.key }}
+          restore-keys: lfs-windows-
+
+      - name: Fetch LFS assets
+        uses: ./.github/actions/lfs-pull
+        with:
+          skip: mobile/ web/arona-ui/character-src/
+
+      - name: Cargo.lock from prepare
+        uses: actions/download-artifact@v4
+        with:
+          name: cargo-lock-${{ github.run_attempt }}
+          path: .
+
+      - name: Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/arona-ui/package-lock.json
+
+      - name: Release build (app + CLI + arona-ui)
+        shell: pwsh
+        run: ./scripts/windows/verify.ps1 -Stage build
+
+      - name: Smoke (target\release)
+        shell: pwsh
+        run: ./scripts/windows/smoke.ps1 -Label release
+
+      - name: Package (MSI + portable, payload verified)
+        shell: pwsh
+        run: ./scripts/windows/verify.ps1 -Stage package
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages-${{ github.run_attempt }}
+          path: |
+            dist/*-windows-x86_64.msi
+            dist/*-windows-x86_64.msi.sha256
+            dist/*-windows-x86_64-portable.zip
+            dist/*-windows-x86_64-portable.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      # 조립된 zip 을 풀어 그 배치 그대로 다시 띄운다 — exe 옆의 arona-ui·fonts·collab-hooks·WinSparkle 을 찾는지.
+      - name: Smoke (portable zip)
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path dist -Filter *-windows-x86_64-portable.zip | Select-Object -First 1
+          if (-not $zip) { throw "portable zip is missing from dist" }
+          ./scripts/windows/smoke.ps1 -Label portable -PortableZip $zip.FullName
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-${{ github.run_attempt }}
+          path: target/windows-smoke/**
+          if-no-files-found: ignore
+          retention-days: 14

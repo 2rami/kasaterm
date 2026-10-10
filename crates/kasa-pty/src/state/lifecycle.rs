@@ -260,7 +260,7 @@ impl PtySession {
         if let Some(cwd) = opts.cwd.as_deref() {
             if std::path::Path::new(cwd).is_dir() {
                 cmd.cwd(cwd);
-            } else if let Some(home) = std::env::var_os("HOME") {
+            } else if let Some(home) = home_dir() {
                 cmd.cwd(home);
             }
         }
@@ -634,6 +634,13 @@ const PWSH_CWD_SHIM: &str = concat!(
     "; if($env:KASATERM_TMUX_SHIM_DIR){$__kts=Join-Path $env:KASATERM_TMUX_SHIM_DIR 'claude.cmd'; $__ktq=(Test-Path function:claude) -and (\"$function:claude\" -match '__ktcs'); if((Test-Path $__kts) -and (-not $__ktq)){$__ktf=@(); if(Test-Path function:claude){$__ktf=@([regex]::Matches(\"$function:claude\",'--[a-z][a-z0-9-]*')|ForEach-Object{$_.Value}|Select-Object -Unique)}; $global:__ktcs=$__kts; $global:__ktcf=$__ktf; function global:claude { $a=$global:__ktcf; & $global:__ktcs @a @args }}}",
 );
 
+/// 셸이 떨어질 홈. Windows GUI 프로세스엔 `HOME` 이 없고 `USERPROFILE` 만 있다.
+fn home_dir() -> Option<std::ffi::OsString> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()))
+}
+
 /// Build the "Last login: <time> on <tty>" banner Terminal.app shows.
 /// Returns None on first ever spawn (no stored timestamp) or when we
 /// couldn't resolve a tty name — both cases would render as an
@@ -695,7 +702,13 @@ mod missing_cwd_tests {
         })
         .expect("없는 폴더여도 셸은 떠야 한다");
         s.send_bytes(b"pwd\n").unwrap();
-        let home = std::env::var("HOME").unwrap();
+        let home = home_dir().expect("HOME/USERPROFILE").to_string_lossy().into_owned();
+        // Windows 의 테스트 셸은 Git sh 라 `C:\Users\x` 를 `/c/Users/x` 로 보여 준다.
+        #[cfg(windows)]
+        let home = match home.split_once(":\\") {
+            Some((drive, rest)) => format!("/{}/{}", drive.to_ascii_lowercase(), rest.replace('\\', "/")),
+            None => home,
+        };
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         while Instant::now() < deadline {
             if s.visible_text(10).contains(&home) {

@@ -211,7 +211,7 @@ pub(crate) const RENAME_CMD_MARK: &str = "<!-- kasaterm-managed -->";
 /// 부팅마다 우리 표식이 붙은 것만 골라 지운다. 표식 없는 파일 = 사용자가 쓴 것이라
 /// 그대로 둔다 — 자동 정리가 남의 편집을 지우면 그게 더 나쁘다.
 pub(crate) fn remove_rename_command() {
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+    let Some(home) = kasa_socket::home_dir() else {
         return;
     };
     let path = home.join(".claude/commands/rename.md");
@@ -766,20 +766,7 @@ exec kasaterm-cli machines connect \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATER
             eprintln!("[shim] write to failed: {e}");
         }
     }
-    #[cfg(windows)]
-    {
-        // PowerShell does not execute the extensionless POSIX wrapper and
-        // otherwise sends it to the Windows "open with" dialog.
-        let cmd_path = shim_dir.join("claude.cmd");
-        let cmd = format!(
-            "@echo off\r\n\"{}\" \"%~dp0claude\" %*\r\n",
-            hook_shell_program().replace('/', "\\")
-        );
-        if let Err(e) = write_shim(&cmd_path, cmd) {
-            eprintln!("[shim] write claude.cmd wrapper failed: {e}");
-            return;
-        }
-    }
+    write_cmd_launcher(shim_dir, "claude");
     // kasacollab(협업 CLI)도 pane PATH 에 스테이징 — 훅이 아니라 셸/claude 가
     // 직접 부르는 명령이라 settings 주입으로는 못 싣는다. 예전엔 ~/.local/bin
     // 수동 설치(개인 설정 오염 + 정본 이동 시 무음 고장)였다.
@@ -790,6 +777,7 @@ exec kasaterm-cli machines connect \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATER
         eprintln!("[shim] write kasacollab wrapper failed: {e}");
         return;
     }
+    write_cmd_launcher(shim_dir, "kasacollab");
     // sh 훅 아홉 개가 전부 `python3` 을 이름으로 부른다(bind-transcript·steer·
     // stop-drain·notify·auto-imgopen …). Windows 에서 그 이름은 MS Store 스텁이라
     // exit 49 로 죽고, 훅들은 죄다 `2>/dev/null || true` 라 **무음으로 통째 정지**
@@ -798,8 +786,9 @@ exec kasaterm-cli machines connect \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATER
     // 이름이 이미 맞으면(unix) 아무것도 안 만든다.
     if cfg!(windows) && py != "python3" && python3_program().is_some() {
         let bridge = format!("#!/bin/sh\nexec {py} -X utf8 \"$@\"\n");
-        if let Err(e) = write_shim(&shim_dir.join("python3"), bridge) {
-            eprintln!("[shim] write python3 bridge failed: {e}");
+        match write_shim(&shim_dir.join("python3"), bridge) {
+            Ok(()) => write_cmd_launcher(shim_dir, "python3"),
+            Err(e) => eprintln!("[shim] write python3 bridge failed: {e}"),
         }
     }
 }
@@ -807,20 +796,7 @@ exec kasaterm-cli machines connect \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATER
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_posix_shell() -> Option<std::path::PathBuf> {
-        #[cfg(unix)]
-        {
-            return Some("sh".into());
-        }
-        #[cfg(windows)]
-        {
-            let sh = std::path::PathBuf::from(hook_shell_program());
-            return sh.is_file().then_some(sh);
-        }
-        #[allow(unreachable_code)]
-        None
-    }
+    use crate::pane_shims::tests::test_posix_shell;
 
     /// No account selected must emit *nothing*. An `export` with an empty value
     /// would not be inert — Claude Code treats a defined-but-empty
@@ -997,7 +973,7 @@ mod tests {
                 "Windows hook must use the absolute sh.exe path: {session_start}"
             );
             let cmd = std::fs::read_to_string(dir.join("claude.cmd")).unwrap();
-            assert!(cmd.contains("sh.exe\" \"%~dp0claude\" %*"));
+            assert!(cmd.contains("sh.exe\" \"%~dpn0\" %*"), "{cmd}");
         }
         let Some(sh) = test_posix_shell() else { return };
         let ok = std::process::Command::new(sh)

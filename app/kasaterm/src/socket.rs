@@ -3110,7 +3110,7 @@ impl Backend for PtyBackend {
                 let origin = kasa_mcp::op_approval::Origin {
                     pane,
                     student,
-                    alive: Box::new(move || unsafe { libc::kill(peer as libc::pid_t, 0) == 0 }),
+                    alive: Box::new(move || pid_alive(peer)),
                 };
                 let values = kasa_mcp::op_approval::read(&refs, &command, &cwd, &origin)?;
                 Ok(serde_json::json!({ "values": values }))
@@ -4720,6 +4720,31 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
         })();
         CloseHandle(handle);
         result
+    }
+}
+
+/// 그 pid 가 아직 살아 있나. `libc` 는 맥 블록에만 있어 공용 코드가 직접 부르면
+/// Windows 빌드가 선다.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
     }
 }
 

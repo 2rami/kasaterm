@@ -177,6 +177,8 @@ fn reads_device_attributes_out_of_the_signed_envelope() {
     }
 }
 
+/// 서명기는 관문 호스트(맥·리눅스)의 실행 파일이라 가짜도 sh 스크립트다.
+#[cfg(unix)]
 fn fake_signer(dir: &std::path::Path, reply: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let path = dir.join("signer.sh");
@@ -192,6 +194,7 @@ fn fake_signer(dir: &std::path::Path, reply: &str) -> std::path::PathBuf {
     path
 }
 
+#[cfg(unix)]
 async fn device_post(client: &reqwest::Client, addr: std::net::SocketAddr, challenge: &str, udid: &str) -> reqwest::Response {
     let plist = format!(
         "<plist version=\"1.0\"><dict><key>CHALLENGE</key><string>{challenge}</string><key>UDID</key><string>{udid}</string>\
@@ -202,6 +205,7 @@ async fn device_post(client: &reqwest::Client, addr: std::net::SocketAddr, chall
     client.post(format!("http://{addr}/relay/install/{TOKEN}/enroll")).body(body).send().await.unwrap()
 }
 
+#[cfg(unix)]
 async fn new_challenge(client: &reqwest::Client, addr: std::net::SocketAddr) -> String {
     let res = client.get(format!("http://{addr}/relay/install/{TOKEN}/enroll.mobileconfig")).send().await.unwrap();
     assert_eq!(res.headers()[header::CONTENT_TYPE], "application/x-apple-aspen-config");
@@ -212,6 +216,7 @@ async fn new_challenge(client: &reqwest::Client, addr: std::net::SocketAddr) -> 
     text[at..at + text[at..].find('<').unwrap()].to_string()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_new_phone_registers_itself_and_comes_back_to_install() {
     let dir = std::env::temp_dir().join(format!("kasa-install-{}", uuid::Uuid::new_v4()));
@@ -277,14 +282,18 @@ async fn a_new_phone_registers_itself_and_comes_back_to_install() {
 }
 
 #[tokio::test]
-async fn enrollment_is_hidden_and_closed_without_a_signer_and_limited_per_ip() {
+async fn enrollment_is_hidden_and_closed_without_a_signer() {
     let dir = std::env::temp_dir().join(format!("kasa-install-{}", uuid::Uuid::new_v4()));
     put_release(&dir, TOKEN, "2610011200");
     let addr = serve(gate_in(&dir, "boss")).await;
     let page = reqwest::get(format!("http://{addr}/relay/install/{TOKEN}/")).await.unwrap().text().await.unwrap();
     assert!(!page.contains("enroll.mobileconfig"));
     assert_eq!(reqwest::get(format!("http://{addr}/relay/install/{TOKEN}/enroll.mobileconfig")).await.unwrap().status(), 404);
+}
 
+#[cfg(unix)]
+#[tokio::test]
+async fn enrollment_is_limited_per_ip() {
     let dir = std::env::temp_dir().join(format!("kasa-install-{}", uuid::Uuid::new_v4()));
     let mut gate = gate_in(&dir, "boss");
     gate.enroll = Arc::new(Enroll::new(Some(fake_signer(&dir, r#"{"ok":true,"new":false}"#)), 10));

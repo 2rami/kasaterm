@@ -147,6 +147,13 @@ pub(crate) enum UpdateEntry {
     Download(&'static str),
 }
 
+/// 검증 리그가 설정·세션·창 파일을 옮겨 띄운 격리 실행인가. 업데이터(맥 Sparkle·Windows WinSparkle)는
+/// 사용자 기본값(NSUserDefaults·HKCU)과 설치본을 건드리니, 격리판이 얹으면 리그 밖으로 샌다.
+pub(crate) fn isolated_environment(has: impl Fn(&str) -> bool) -> bool {
+    ["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_WINDOW_FILE",
+        "KASATERM_AUTOQUIT_MS", "KASATERM_LITE_ROOT"].iter().any(|key| has(key))
+}
+
 pub(crate) fn update_entry(sparkle: bool, winsparkle: bool, windows: bool) -> UpdateEntry {
     match (sparkle, winsparkle, windows) {
         (true, _, false) => UpdateEntry::Sparkle,
@@ -194,5 +201,13 @@ mod tests {
             assert!(why.contains("업데이터가 없어요"));
         }
         assert!(RELEASES.starts_with("https://github.com/2rami/kasaterm/releases"));
+    }
+
+    #[test]
+    fn rig_redirects_mark_an_isolated_run() {
+        assert!(!isolated_environment(|_| false));
+        for key in ["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_WINDOW_FILE", "KASATERM_AUTOQUIT_MS", "KASATERM_LITE_ROOT"] {
+            assert!(isolated_environment(|candidate| candidate == key));
+        }
     }
 }

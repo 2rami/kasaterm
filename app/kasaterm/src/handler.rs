@@ -2041,7 +2041,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 없는 동안 눌린 알림은 앱만 깨우고 어디로 갈지 없이 사라진다.
         #[cfg(target_os = "macos")]
         crate::macos_notify::install_notification_click_handler(self.proxy.clone());
-        // Windows 자동 업데이트 시작 — WinSparkle.dll 이 있을 때만(없으면 no-op).
+        // Windows 자동 업데이트 시작 — 설치본만(DLL 없음·검증·격리·라이트 실행은 init 이 거른다).
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
         crate::win_sparkle::init();

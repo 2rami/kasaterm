@@ -92,11 +92,6 @@ fn installed_app(exe: &Path, home: &Path, verification: bool) -> bool {
         || exe == Path::new("/Applications/kasaterm.app/Contents/MacOS/kasaterm"))
 }
 
-fn isolated_environment(has: impl Fn(&str) -> bool) -> bool {
-    ["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_WINDOW_FILE",
-        "KASATERM_AUTOQUIT_MS", "KASATERM_LITE_ROOT"].iter().any(|key| has(key))
-}
-
 /// 검증 리그 전용 피드(`docs/verify-app.md` 「업데이트 리그」). 루프백만 받는다 — 리그 번들은 시험 키를
 /// 담아 그 키로 서명한 판만 믿고, 본판은 이 값이 있어도 운영 키로 서명된 판밖에 못 받는다.
 fn rig_feed(value: Option<&str>) -> Option<String> {
@@ -276,7 +271,7 @@ unsafe fn configure_session(defaults: &NSUserDefaults) -> Option<()> {
 pub(crate) fn init() -> Option<Updater> {
     let exe = std::env::current_exe().ok()?;
     let home = kasa_socket::home_dir()?;
-    let isolated = crate::verification_run() || isolated_environment(|key| std::env::var_os(key).is_some());
+    let isolated = crate::verification_run() || crate::version::isolated_environment(|key| std::env::var_os(key).is_some());
     let rig = rig_feed(std::env::var("KASATERM_UPDATE_RIG_FEED").ok().as_deref());
     if rig.is_none() && !installed_app(&exe, &home, isolated) { return None; }
     let preview = preview_opted_in(&crate::socket::read_settings());
@@ -394,10 +389,6 @@ mod tests {
         assert!(!installed_app(&installed, home, true));
         assert!(!installed_app(Path::new("/tmp/rig/kasaterm.app/Contents/MacOS/kasaterm"), home, false));
         assert!(!installed_app(Path::new("/repo/target/debug/kasaterm"), home, false));
-        assert!(!isolated_environment(|_| false));
-        for key in ["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_WINDOW_FILE", "KASATERM_AUTOQUIT_MS", "KASATERM_LITE_ROOT"] {
-            assert!(isolated_environment(|candidate| candidate == key));
-        }
     }
 
     #[test]

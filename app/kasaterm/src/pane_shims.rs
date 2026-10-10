@@ -55,6 +55,31 @@ pub(crate) fn write_shim_data(path: &std::path::Path, body: impl AsRef<[u8]>) ->
     write_shim_inner(path, body.as_ref(), false)
 }
 
+/// Windows 에서 sh 셰임 `name` 옆에 `.cmd` 짝을 둔다. PowerShell 은 PATH 앞쪽의 확장자 없는
+/// 파일을 실행하지 않고 「연결 프로그램 선택」 창으로 열고, cmd 는 그 파일을 못 봐 셰임을
+/// 건너뛰고 진짜를 띄운다. 같은 폴더에 `.cmd` 가 있으면 둘 다 그것을 먼저 고른다.
+pub(crate) fn write_cmd_launcher(shim_dir: &std::path::Path, name: &str) {
+    if !cfg!(windows) {
+        return;
+    }
+    let path = shim_dir.join(format!("{name}.cmd"));
+    let body = cmd_launcher_body(&hook_shell_program());
+    // 설정을 바꿀 때마다 셰임을 다시 굽는데, 본문은 sh 경로뿐이라 거의 안 바뀐다. 실행 중인 배치를
+    // 갈아 끼우는 rename 은 Windows 에서 막힐 수 있으니 같으면 손대지 않는다.
+    if std::fs::read(&path).is_ok_and(|cur| cur == body.as_bytes()) {
+        return;
+    }
+    if let Err(e) = write_shim(&path, body) {
+        eprintln!("[shim] write {name}.cmd failed: {e}");
+    }
+}
+
+/// 셰임 이름을 본문에 안 적고 `%~dpn0`(이 파일 경로에서 확장자만 뺀 것)으로 부른다 — cmd 는
+/// 배치 본문을 콘솔 코드페이지로 읽어서, UTF-8 로 적은 학생 이름(`시로코`)이 깨진다.
+pub(crate) fn cmd_launcher_body(sh: &str) -> String {
+    format!("@echo off\r\n\"{}\" \"%~dpn0\" %*\r\n", sh.replace('/', "\\"))
+}
+
 /// `lite` 면 최소 shim 만 — rc 셋 + `kasaterm-cli`. claude 래퍼·훅·미리보기
 /// 셰임은 전부 뺀다. CLI 는 이 shim dir 로만 pane PATH 에 오르므로 shim 을 통째로
 /// 끄는 `shim_inject=off` 와는 다르다(그러면 lite 안에서 split/send 가 안 된다).
@@ -464,10 +489,15 @@ pub(crate) fn install_agent_identity_helper(shim_dir: &std::path::Path) {
 
 pub(crate) fn identity_bootstrap_sh(harness: &str, anchor: &str) -> String {
     r#"export PATH="$SELF_DIR:$CLEAN_PATH"
+# 앱은 이 번호가 프로세스 표에 살아 있는 동안 자리를 지킨다. Git Bash 의 $$ 는 MSYS 번호라
+# Windows 표에 없어서 학생이 뜨자마자 자리를 잃는다 — 그 셸의 Windows pid 를 쓴다.
+# -X utf8: Windows python 은 로케일(cp949)로 읽고 써서 한글 이름·경로가 깨진다.
+LAUNCH_PID=$$
+[ -r "/proc/$$/winpid" ] && LAUNCH_PID=$(cat "/proc/$$/winpid")
 if [ -n "$KASATERM_VIA_BACKEND" ] && [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ] && [ -d "$KASATERM_IDENTITY_DIR" ]; then
   IDENTITY="$KASATERM_IDENTITY_DIR"
 else
-  IDENTITY=$(KASATERM_LAUNCH_PID=$$ python3 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || exit 1
+  IDENTITY=$(KASATERM_LAUNCH_PID=$LAUNCH_PID python3 -X utf8 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || exit 1
 fi
 export KASATERM_IDENTITY_DIR="$IDENTITY"
 export KASATERM_CHARACTER="$(cat "$IDENTITY/character")"
@@ -489,7 +519,7 @@ export KASATERM_LAUNCH_OWNER="$SELF_DIR:$KASATERM_PANE_ID"
 /// (theme::accent_variant)로 구분. characters.json 기준 부팅 1회 생성(다른 shim
 /// 노브와 동일하게 변경은 재시작 후 적용).
 pub(crate) fn install_student_shims(shim_dir: &std::path::Path) {
-    // POSIX sh 스크립트 — Windows pane 셸도 Git bash 라 그대로 동작(curl 포함).
+    // POSIX sh 스크립트 — Windows 는 Git Bash 의 sh 로 돌고, PowerShell·cmd 칸은 `.cmd` 짝으로 닿는다.
     let Some(chars) = kasa_mcp::character::characters_json() else {
         return;
     };
@@ -547,7 +577,9 @@ exec \"$H\" \"$@\"\n",
             let path = shim_dir.join(&cmd);
             if let Err(e) = write_shim(&path, &script) {
                 eprintln!("[shim] write student shim {cmd} failed: {e}");
+                continue;
             }
+            write_cmd_launcher(shim_dir, &cmd);
         }
     }
 }
@@ -610,7 +642,158 @@ pub(crate) fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    /// 셰임을 돌려 볼 POSIX sh — Windows 는 칸의 훅·`.cmd` 짝이 실제로 부르는 Git 의 sh.exe 다.
+    pub(crate) fn test_posix_shell() -> Option<std::path::PathBuf> {
+        if cfg!(windows) {
+            let sh = std::path::PathBuf::from(hook_shell_program());
+            return sh.is_file().then_some(sh);
+        }
+        Some("sh".into())
+    }
+
+    /// 신원 확인에 넘기는 pid 는 **OS 프로세스 표의 번호**여야 한다 — 앱은 그 번호가 표에 살아 있는
+    /// 동안만 학생 자리를 지킨다. Git Bash 의 `$$` 는 MSYS 번호라 Windows 표에 없어서, 학생이 뜨자마자
+    /// 자리가 걷혔다. 그래서 「sh 를 띄운 쪽이 받은 pid 이거나 그 자손(Git 의 sh.exe 는 진짜 bash 를
+    /// 자식으로 띄우는 런처다)이고, 실행 중 표에 있다」를 실제 셸로 잰다.
+    #[test]
+    fn identity_bootstrap_sends_the_os_pid_of_the_launching_shell() {
+        let sh = test_posix_shell().expect("Windows 칸의 셰임은 Git for Windows 의 sh.exe 로 돈다");
+        let dir = std::env::temp_dir().join(format!("kt-identity-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = dir.join("id");
+        std::fs::create_dir_all(&id).unwrap();
+        for key in ["character", "persona", "slug", "model", "backend", "session_id"] {
+            std::fs::write(id.join(key), key).unwrap();
+        }
+        // 가짜 python3 — 받은 pid·인자를 적고, 시험이 그 pid 를 표에서 찾을 때까지 셸을 붙잡아 둔다.
+        write_shim(
+            &dir.join("python3"),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OUT/args\"\n\
+             printf '%s' \"$KASATERM_LAUNCH_PID\" > \"$OUT/pid.tmp\" && mv \"$OUT/pid.tmp\" \"$OUT/pid\"\n\
+             i=0; while [ ! -f \"$OUT/go\" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\n\
+             printf '%s' \"$OUT/id\"\n",
+        )
+        .unwrap();
+        // Git Bash 의 sh 에는 슬래시 경로로 건넨다 — 칸 셰임이 경로를 굽는 방식과 같다.
+        let out = dir.to_string_lossy().replace('\\', "/");
+        let script = format!(
+            "SELF_DIR=$(cd \"{out}\" && pwd)\nCLEAN_PATH=$PATH\n{}printf '%s' \"$KASATERM_CHARACTER\"\n",
+            identity_bootstrap_sh("claude", "")
+        );
+        let mut child = std::process::Command::new(&sh)
+            .arg("-c")
+            .arg(&script)
+            .env("OUT", &out)
+            .env_remove("KASATERM_VIA_BACKEND")
+            .env_remove("KASATERM_IDENTITY_DIR")
+            .env_remove("KASATERM_LAUNCH_OWNER")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid_file = dir.join("pid");
+        let started = Instant::now();
+        while !pid_file.exists() {
+            if child.try_wait().unwrap().is_some() {
+                let out = child.wait_with_output().unwrap();
+                panic!("신원 확인 전에 셸이 끝났다: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            assert!(started.elapsed() < Duration::from_secs(60), "가짜 python3 에 60초 동안 안 닿았다");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let reported: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let table = kasa_pty::fresh_process_table();
+        let launcher = child.id();
+        let mut cur = reported;
+        let mut under_launcher = cur == launcher;
+        for _ in 0..16 {
+            let Some(&(_, parent, _)) = table.iter().find(|(p, _, _)| *p == cur) else { break };
+            if parent == launcher {
+                under_launcher = true;
+            }
+            if under_launcher || parent <= 1 || parent == cur {
+                break;
+            }
+            cur = parent;
+        }
+        let in_table = table.iter().any(|(p, _, _)| *p == reported);
+        std::fs::write(dir.join("go"), "").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            in_table && under_launcher,
+            "넘긴 pid {reported} 가 띄운 셸({launcher})의 살아 있는 OS 프로세스가 아니다 — 앱이 자리를 바로 걷는다"
+        );
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "character");
+        // Windows python 은 -X utf8 없이 로케일(cp949)로 읽어 한글 학생 이름과 경로가 깨진다.
+        let args = std::fs::read_to_string(dir.join("args")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        assert_eq!(args[..2], ["-X", "utf8"], "{args:?}");
+        assert!(args[2].ends_with("agent-identity.py") && args[3] == "claude", "{args:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `.cmd` 짝은 셰임 이름을 본문에 안 적고 ASCII 로만 남는다 — cmd 가 배치 본문을 콘솔 코드페이지로
+    /// 읽어서 한글 이름을 적으면 깨진다.
+    #[test]
+    fn cmd_launcher_reaches_its_sibling_without_naming_it() {
+        let body = cmd_launcher_body("C:/Program Files/Git/bin/sh.exe");
+        assert_eq!(body, "@echo off\r\n\"C:\\Program Files\\Git\\bin\\sh.exe\" \"%~dpn0\" %*\r\n");
+        assert!(body.is_ascii());
+    }
+
+    /// PowerShell·cmd 칸에서 셰임이 실제로 닿는지 — 한글 이름, 공백·한글 인자 그대로.
+    /// PowerShell 이 확장자 없는 셰임을 고르면 「연결 프로그램」 창이 떠 매달리므로 시간 상한을 둔다.
+    #[cfg(windows)]
+    #[test]
+    fn cmd_launcher_runs_the_sh_shim_from_cmd_and_powershell() {
+        assert!(test_posix_shell().is_some(), "Windows 칸의 셰임은 Git for Windows 의 sh.exe 로 돈다");
+        let dir = std::env::temp_dir().join(format!("kt-cmd-launcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["시로코", "probe"] {
+            write_shim(&dir.join(name), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+            write_cmd_launcher(&dir, name);
+            assert!(dir.join(format!("{name}.cmd")).is_file(), "{name}.cmd 를 안 썼다");
+        }
+        let run = |cmd: &mut std::process::Command| -> String {
+            let mut child = cmd
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            while child.try_wait().unwrap().is_none() {
+                if started.elapsed() > Duration::from_secs(60) {
+                    let _ = child.kill();
+                    panic!("60초 안에 안 끝났다 — 확장자 없는 셰임이 「연결 프로그램」 창으로 갔나");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().replace("\r\n", "\n")
+        };
+        // Rust 는 .cmd 를 cmd.exe 로 띄우고 인자를 배치 규칙대로 감싼다 — PowerShell 이 .cmd 를 부르는 자리와 같다.
+        assert_eq!(run(std::process::Command::new(dir.join("시로코.cmd")).args(["a", "b c", "한글"])), "a\nb c\n한글\n");
+        let path = format!("{};{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+        assert_eq!(
+            run(std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "probe a 'b c'"])
+                .env("PATH", &path)),
+            "a\nb c\n",
+            "PowerShell 이 이름으로 찾을 때 같은 폴더의 확장자 없는 셰임이 아니라 .cmd 를 골라야 한다"
+        );
+        assert_eq!(
+            run(std::process::Command::new("cmd.exe").args(["/d", "/c", "probe a"]).env("PATH", &path)),
+            "a\n",
+            "cmd 는 확장자 없는 셰임을 못 보니 .cmd 가 없으면 셰임을 건너뛴다"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 셰임 교체가 **제자리 덮어쓰기가 아니라 rename** 인지 — inode 로 잰다.
     ///
