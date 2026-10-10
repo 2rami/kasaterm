@@ -159,10 +159,12 @@ jobs:
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
+      # 스모크·테스트가 실패해도 이미 끝난 긴 굽기는 캐시에 남긴다 — 저장만 할 뿐 잡의 실패는 그대로다.
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
 
       - name: Boundaries and check
         shell: pwsh
@@ -212,10 +214,12 @@ jobs:
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
+      # 스모크·테스트가 실패해도 이미 끝난 긴 굽기는 캐시에 남긴다 — 저장만 할 뿐 잡의 실패는 그대로다.
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
 
       - name: Setup Node
         uses: actions/setup-node@v4
