@@ -205,11 +205,19 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
 
-      - name: Boundaries and check
+      # 경계 검사가 실패해도 check 는 돌린다 — 한 가지 실패가 컴파일 결과까지 가리지 않게(잡은 그대로 실패한다).
+      - name: Boundaries
         shell: pwsh
-        run: ./scripts/windows/verify.ps1 -Stage boundaries,check
+        run: ./scripts/windows/verify.ps1 -Stage boundaries
+
+      - name: Check
+        id: check
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/windows/verify.ps1 -Stage check
 
       - name: Tests
+        if: ${{ !cancelled() && steps.check.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/windows/verify.ps1 -Stage test
 

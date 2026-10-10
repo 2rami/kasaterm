@@ -78,7 +78,8 @@ def cargo_metadata():
 
 
 def rel(path, root):
-    return str(Path(path).resolve().relative_to(Path(root).resolve()))
+    # 판정(SPIKE_DIR)과 보고가 `/` 를 쓴다 — Windows 경로의 `\` 로는 spikes/ 가 제품 크레이트로 읽힌다.
+    return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
 
 
 def is_spike(pkg, root):
