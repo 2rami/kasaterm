@@ -306,7 +306,7 @@ fn hello_json(token: Option<&str>) -> Option<String> {
         hello["device_token"] = t.into();
         let nacho_app = crate::nacho_relay::app_target().ok()
             .is_some_and(|(url, key)| valid_nacho_app_target(&url, &key));
-        hello["capabilities"] = serde_json::json!({"nacho_app": nacho_app});
+        hello["capabilities"] = serde_json::json!({"nacho_app": nacho_app, "agent_chains": true});
         if crate::mobile::published() {
             if let Some(owner) = crate::mobile::owner() {
                 if slugs.contains(&owner.slug) { hello["owner_slug"] = owner.slug.into(); }
@@ -515,6 +515,7 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                             }
                             break Err(anyhow::anyhow!("관문 오류: {why}"));
                         }
+                        Some("agent_chains") => crate::agent_chains::poke(),
                         _ => {}
                     }
                 }

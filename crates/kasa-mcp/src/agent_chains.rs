@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 /// claude CLI 의 공개 OAuth 클라이언트 — 갱신된 토큰을 CLI 가 그대로 이어 쓴다.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-/// 관문은 남은 시간이 이보다 짧아지면 갱신한다. 기기는 5분마다 받아 가니 늘 2시간 55분 넘게 남는다.
+/// 관문 갱신 실패를 만료 전에 여러 번 재시도할 여유다. 성공하면 옛 토큰은 즉시 폐기되므로 배포는 별도 힌트/pull이 맡는다.
 const REFRESH_AHEAD_MS: u64 = 3 * 60 * 60 * 1000;
 /// 맡긴 직후에는 갱신하지 않는다 — 맡긴 기기의 claude 가 키체인 캐시(30초)로 옛 갱신 토큰을 잠깐 더 쥔다.
 const SEAL_SETTLE_MS: u64 = 2 * 60 * 1000;
@@ -32,11 +32,32 @@ const MAX_CHAINS: usize = 16;
 const MAX_TOKEN: usize = 4096;
 const MAX_RESPONSE: usize = 1024 * 1024;
 const AUDIT_ROTATE: u64 = 1024 * 1024;
+/// 사슬마다 기억하는 이전 접근 토큰 지문 수. 갱신은 몇 시간에 한 번이라 claude 의 30초 캐시를 넘기에 넉넉하다.
+const LINEAGE: usize = 4;
+/// 힌트를 놓쳐도 두 번의 5분 pull 안에는 옛 Bearer 를 같은 세대의 새 토큰에 결속할 수 있어야 한다.
+const LINEAGE_TTL_MS: u64 = 10 * 60 * 1000;
+
+pub(crate) mod recovery;
+pub use recovery::{Recovered, Ticket};
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// 접근 토큰의 지문. 관문과 기기가 같은 값을 낸다 — 관문은 사슬이 낸 이전 토큰을 이것으로만 기억해 알리고,
+/// 기기는 401 난 Bearer 가 어느 사슬의 것이었는지 토큰 없이 가린다(`agent_chains/recovery.rs`).
+pub(crate) fn fingerprint(token: &str) -> String {
+    use sha2::Digest as _;
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"kasa.agent-chains.access\0");
+    hash.update(token.as_bytes());
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn valid_fingerprint(fp: &str) -> bool {
+    fp.len() == 64 && fp.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 // ── 관문 쪽 ─────────────────────────────────────────────────────────────────────
@@ -68,6 +89,38 @@ struct Chain {
     /// 「곧 끊긴다」 알림을 이미 보냈다. 갱신에 성공하면 내린다.
     #[serde(default)]
     warned: bool,
+    /// 봉인 세대. 새로 맡을 때마다 바뀌고 갱신으로는 안 바뀐다 — 다시 로그인해 맡긴 사슬의 토큰을 끊긴
+    /// 옛 사슬의 401 에 내주지 않게 기기가 이것으로 가른다. 이 기능 전에 맡긴 사슬은 비어 있다가 처음 볼 때 붙는다.
+    #[serde(default)]
+    generation: String,
+    /// 이 세대가 앞서 낸 접근 토큰들(오래된 것부터). 갱신하면 옛 토큰은 곧바로 죽는데 도는 claude 는 30초
+    /// 캐시로 그것을 더 보낸다 — 기기가 그 401 을 이 사슬의 것으로 알아보게 알려 준다. 끊기면 비운다.
+    #[serde(default)]
+    lineage: Vec<Spent>,
+}
+
+/// 사슬이 앞서 낸 접근 토큰 하나 — 지문과 그 토큰의 원래 만료만, 토큰 값은 없다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Spent {
+    pub fingerprint: String,
+    pub expires_at: u64,
+    /// 같은 계정이 다시 봉인된 뒤 옛 지문이 새 사슬에 붙지 않게 한다.
+    #[serde(default)]
+    pub generation: String,
+}
+
+fn new_generation() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// 세대 없이 맡겨진 사슬(이 기능 전)에 세대를 붙인다. 붙였으면 true.
+fn settle_generations(book: &mut Book) -> bool {
+    let mut changed = false;
+    for chain in book.values_mut().filter(|c| c.generation.is_empty() && !c.broken) {
+        chain.generation = new_generation();
+        changed = true;
+    }
+    changed
 }
 
 impl Chain {
@@ -146,6 +199,12 @@ pub struct Held {
     /// 관문이 마지막으로 맡거나 갱신한 시각(ms). 첫 실제 갱신을 확인할 때 본다.
     #[serde(default)]
     pub updated: u64,
+    /// 봉인 세대(`Chain::generation`). 옛 관문은 안 보낸다 — 비어 있으면 기기는 이 사슬의 401 을 살리지 않는다.
+    #[serde(default)]
+    pub generation: String,
+    /// 이 세대의 이전 접근 토큰(`Chain::lineage`).
+    #[serde(default)]
+    pub lineage: Vec<Spent>,
 }
 
 /// 관문이 사람에게 알릴 일 — 그 관문 계정의 폰으로 간다(`gateway_agent_chains.rs`).
@@ -362,6 +421,8 @@ impl Service {
             retry_at: 0,
             broken: false,
             warned: false,
+            generation: new_generation(),
+            lineage: Vec::new(),
         };
         let access = chain.access();
         book.insert(key.clone(), chain);
@@ -373,7 +434,13 @@ impl Service {
     /// 이 관문 계정이 맡긴 사슬들과 그 접근 토큰.
     pub async fn list(&self, account: &str) -> Result<Value, Error> {
         let _guard = self.books.lock().await;
-        let book = self.load(account)?;
+        let mut book = self.load(account)?;
+        let stored = book.clone();
+        // 붙인 세대를 못 남기면 다음에 다른 세대를 보이게 된다 — 그럴 바엔 세대 없이 보낸다(기기는 복구를 끈다).
+        if settle_generations(&mut book) && self.save(account, &book).is_err() {
+            book = stored;
+        }
+        let now = now_ms();
         let chains: Vec<Held> = book
             .iter()
             .map(|(key, chain)| Held {
@@ -383,15 +450,34 @@ impl Service {
                 state: if chain.broken { "reconnect_required" } else { "ok" }.into(),
                 access: (!chain.broken).then(|| chain.access()),
                 updated: chain.updated,
+                generation: if chain.broken { String::new() } else { chain.generation.clone() },
+                lineage: if chain.broken || chain.updated.saturating_add(LINEAGE_TTL_MS) < now {
+                    Vec::new()
+                } else {
+                    chain
+                        .lineage
+                        .iter()
+                        .filter(|spent| {
+                            spent.expires_at > now
+                                && spent.generation == chain.generation
+                                && valid_fingerprint(&spent.fingerprint)
+                        })
+                        .rev()
+                        .take(LINEAGE)
+                        .cloned()
+                        .collect()
+                },
             })
             .collect();
         Ok(json!({"ok":true,"chains":chains}))
     }
 
-    /// 만료가 다가온 사슬을 갱신한다. 갱신한 수와, 사람에게 알릴 일을 돌려준다.
-    pub(crate) async fn refresh_due(&self) -> (usize, Vec<Notice>) {
+    /// 만료가 다가온 사슬을 갱신한다. 갱신한 수, 사람에게 알릴 일, 그리고 기기가 다시 받아 가야 할 관문
+    /// 계정(갱신·끊김이 봉인 저장소에 저장까지 된 것만)을 돌려준다.
+    pub(crate) async fn refresh_due(&self) -> (usize, Vec<Notice>, Vec<String>) {
         let mut refreshed = 0;
         let mut notices = Vec::new();
+        let mut changed_accounts = Vec::new();
         for account in self.vault.accounts() {
             let _guard = self.books.lock().await;
             let Ok(mut book) = self.load(&account) else { continue };
@@ -400,12 +486,15 @@ impl Service {
             if due.is_empty() {
                 continue;
             }
+            settle_generations(&mut book);
+            let mut changed = false;
             for key in due {
                 let chain = book[&key].clone();
                 match self.refresh(&chain, now).await {
                     Ok(next) => {
                         book.insert(key.clone(), next);
                         refreshed += 1;
+                        changed = true;
                         self.record(&account, "", "refresh", &key, "ok");
                     }
                     Err(Error::Rejected) => {
@@ -413,7 +502,9 @@ impl Service {
                         chain.broken = true;
                         chain.access_token.clear();
                         chain.refresh_token.clear();
+                        chain.lineage.clear();
                         chain.updated = now;
+                        changed = true;
                         self.record(&account, "", "refresh", &key, "reconnect_required");
                         notices.push(Notice {
                             account: account.clone(),
@@ -442,9 +533,11 @@ impl Service {
             }
             if self.save(&account, &book).is_err() {
                 eprintln!("[agent-chains] 갱신 결과 저장 실패 — 다음 갱신은 옛 토큰으로 나간다");
+            } else if changed {
+                changed_accounts.push(account.clone());
             }
         }
-        (refreshed, notices)
+        (refreshed, notices, changed_accounts)
     }
 
     async fn refresh(&self, chain: &Chain, now: u64) -> Result<Chain, Error> {
@@ -486,6 +579,18 @@ impl Service {
                 next.scopes = scopes;
             }
         }
+        next.lineage.retain(|spent| {
+            spent.expires_at > now
+                && spent.generation == next.generation
+                && valid_fingerprint(&spent.fingerprint)
+        });
+        next.lineage.push(Spent {
+            fingerprint: fingerprint(&chain.access_token),
+            expires_at: chain.expires_at,
+            generation: chain.generation.clone(),
+        });
+        let spare = next.lineage.len().saturating_sub(LINEAGE);
+        next.lineage.drain(..spare);
         next.updated = now;
         next.retry_at = 0;
         next.warned = false;
@@ -575,21 +680,102 @@ pub(crate) enum Read {
     Unknown,
 }
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn bounded_child_output(
+    mut child: std::process::Child,
+    timeout: Duration,
+    limit: usize,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Read as _;
+    use std::sync::mpsc::TryRecvError;
+
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other("child stdout missing"));
+    };
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = std::thread::Builder::new()
+        .name("kasa-chain-store-read".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout.take(limit as u64 + 1).read_to_end(&mut bytes).map(|_| bytes);
+            let _ = sent.send(result);
+        });
+    if let Err(error) = reader {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut status = None;
+    let mut output = None;
+    loop {
+        match received.try_recv() {
+            Ok(Ok(bytes)) if bytes.len() <= limit => output = Some(bytes),
+            Ok(Ok(_)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "child output too large"));
+            }
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            Err(TryRecvError::Disconnected) if output.is_none() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child output reader stopped"));
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(done) => status = done,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+        }
+        if status.is_some() && output.is_some() {
+            return Ok((status.expect("checked"), output.take().expect("checked")));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "child output timed out"));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn read_store(store: Option<&Path>) -> Read {
     let dir = store.and_then(Path::to_str);
     let Some(user) = crate::http::keychain_user() else { return Read::Unknown };
-    let out = crate::no_window_command("security")
-        .args(["find-generic-password", "-a", &user, "-w", "-s", &crate::http::claude_keychain_service(dir)])
+    let service = crate::http::claude_keychain_service(dir);
+    let Ok(child) = crate::no_window_command("security")
+        .args(["find-generic-password", "-a", &user, "-w", "-s", &service])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => match serde_json::from_slice(o.stdout.trim_ascii()) {
+        .spawn()
+    else {
+        return Read::Unknown;
+    };
+    let Ok((status, stdout)) = bounded_child_output(child, Duration::from_secs(5), 8 * 1024 * 1024) else {
+        return Read::Unknown;
+    };
+    match status {
+        status if status.success() => match serde_json::from_slice(stdout.trim_ascii()) {
             Ok(v) => Read::Present(v),
             Err(_) => Read::Unknown,
         },
         // 44 = errSecItemNotFound.
-        Ok(o) if o.status.code() == Some(44) => Read::Absent,
+        status if status.code() == Some(44) => Read::Absent,
         _ => Read::Unknown,
     }
 }
@@ -748,11 +934,28 @@ pub fn adopt(slot: &str, key: &str) {
     poke();
 }
 
-static POKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn waker() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
+    static WAKER: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+    &WAKER
+}
 
-/// 다음 주기를 기다리지 않고 곧 한 번 돈다 — 로그인·슬롯 추가 뒤에 부른다.
+/// 다음 주기를 기다리지 않고 곧바로 한 번 돈다 — 로그인·슬롯 추가 뒤, 관문이 사슬이 바뀌었다고 알릴 때.
+/// 관문은 갱신하자마자 옛 접근 토큰을 죽이므로 이 깨움이 늦은 만큼 claude 칸이 401 을 본다.
 pub fn poke() {
-    POKED.store(true, std::sync::atomic::Ordering::Release);
+    let (poked, wake) = waker();
+    if let Ok(mut poked) = poked.lock() {
+        *poked = true;
+        wake.notify_all();
+    }
+}
+
+/// 다음 주기까지 쉰다. `poke` 가 오면 곧바로 깬다.
+fn rest(period: Duration) {
+    let (poked, wake) = waker();
+    let Ok(guard) = poked.lock() else { return std::thread::sleep(period) };
+    if let Ok((mut guard, _)) = wake.wait_timeout_while(guard, period, |poked| !*poked) {
+        *guard = false;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -814,8 +1017,11 @@ pub(crate) async fn sync_once(
     map: &BTreeMap<String, String>,
     stores: &dyn Stores,
     authorized: &(dyn Fn() -> bool + Sync),
+    ledger: &recovery::Ledger,
 ) -> Result<(BTreeMap<String, String>, Vec<Held>), SyncError> {
     let mut learned = BTreeMap::new();
+    // 네트워크가 막혀도 삭제된 실제 슬롯이 이전 성공 때의 복구 권한을 계속 갖지 않게 먼저 줄인다.
+    ledger.manage(managed_keys(slots, map, &learned));
     let now = now_ms();
     // 같은 사슬이 두 자리에 있으면 한 번만 맡긴다(갱신 토큰 → 결과).
     let mut offered: HashMap<String, (String, Access)> = HashMap::new();
@@ -852,6 +1058,8 @@ pub(crate) async fn sync_once(
     if let Ok(mut s) = seen().lock() {
         *s = chains.iter().map(|c| (c.key.clone(), c.state.clone())).collect();
     }
+    ledger.manage(managed_keys(slots, map, &learned));
+    ledger.observe(&chains);
     for slot in slots {
         let mapped = learned.get(&slot.id).or(map.get(&slot.id)).cloned();
         let Some(key) = mapped.clone().or(slot.table_key.clone()) else { continue };
@@ -888,6 +1096,18 @@ pub(crate) async fn sync_once(
         }
     }
     Ok((learned, chains))
+}
+
+/// 삭제된 슬롯의 map 흔적이나 표시용 신원으로는 401 복구 대상을 만들 수 없게 실제 슬롯과 정확한 map만 교차한다.
+fn managed_keys(
+    slots: &[Slot],
+    map: &BTreeMap<String, String>,
+    learned: &BTreeMap<String, String>,
+) -> Vec<String> {
+    slots
+        .iter()
+        .filter_map(|slot| learned.get(&slot.id).or(map.get(&slot.id)).cloned())
+        .collect()
 }
 
 /// 데스크톱이 사람에게 알릴 일.
@@ -966,10 +1186,13 @@ pub fn take_alerts() -> Vec<Alert> {
 /// 이 기기 슬롯으로 한 주기를 돌고, 새로 안 자리를 적는다. 적기 전에 파일을 다시 읽는다 — 그 사이
 /// 설정 화면이 `adopt` 로 적은 자리를 덮지 않게.
 async fn sync_local(gateway: &Gateway<'_>, authorized: &(dyn Fn() -> bool + Sync)) -> Result<(), SyncError> {
-    let Some((path, settings)) = load_settings() else { return Ok(()) };
+    let Some((path, settings)) = load_settings() else {
+        recovery::ledger().manage(Vec::new());
+        return Ok(());
+    };
     let slots = local_slots(path.parent(), &settings);
     let mut map = load_map();
-    let (outcome, chains) = match sync_once(gateway, &slots, &map, &Local, authorized).await {
+    let (outcome, chains) = match sync_once(gateway, &slots, &map, &Local, authorized, recovery::ledger()).await {
         Ok((learned, chains)) => {
             if !learned.is_empty() {
                 map = load_map();
@@ -1015,27 +1238,29 @@ pub fn spawn() {
             // 받기를 놓친 시간만큼 claude 칸이 만료 토큰으로 멈춘다(잠들었다 깬 맥북, 2026-10-09).
             let mut missed = false;
             if let Some((cred, stamp)) = crate::device_auth::capture() {
+                recovery::ledger().begin(&stamp);
                 let gateway = Gateway::new(&cred.relay, &cred.token);
                 let authorized = || crate::device_auth::stamp_is_current(&stamp);
                 match runtime.block_on(sync_local(&gateway, &authorized)) {
                     Ok(()) => unsupported_said = false,
-                    Err(SyncError::Unauthorized) => crate::device_auth::reject_if(&stamp, || true),
-                    Err(SyncError::Unsupported) if !unsupported_said => {
-                        unsupported_said = true;
-                        eprintln!("[agent-chains] 관문이 사슬 맡기기를 모르는 옛 판이에요 — 기기마다 로그인을 그대로 써요");
+                    Err(SyncError::Unauthorized) => {
+                        recovery::ledger().clear();
+                        crate::device_auth::reject_if(&stamp, || true);
+                    }
+                    Err(SyncError::Unsupported) => {
+                        recovery::ledger().clear();
+                        if !unsupported_said {
+                            unsupported_said = true;
+                            eprintln!("[agent-chains] 관문이 사슬 맡기기를 모르는 옛 판이에요 — 기기마다 로그인을 그대로 써요");
+                        }
                     }
                     Err(SyncError::Failed) => missed = true,
-                    Err(_) => {}
                 }
             } else {
+                recovery::ledger().clear();
                 alert_offline();
             }
-            for _ in 0..if missed { 6 } else { 60 } {
-                std::thread::sleep(Duration::from_secs(5));
-                if POKED.swap(false, Ordering::AcqRel) {
-                    break;
-                }
-            }
+            rest(Duration::from_secs(if missed { 30 } else { 300 }));
         }
     });
 }

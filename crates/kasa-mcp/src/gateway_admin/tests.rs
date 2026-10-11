@@ -295,6 +295,7 @@ fn uplink_usage_is_folded_per_account_and_survives_restart() {
         device_id: Some("dev_fixture".into()),
         owner_slug: None,
         nacho_app: AtomicBool::new(false),
+        agent_chains: AtomicBool::new(false),
         kick: tokio::sync::Notify::new(),
         rx_bytes: AtomicU64::new(1000),
         tx_bytes: AtomicU64::new(24),

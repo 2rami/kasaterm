@@ -2,9 +2,25 @@
 //! 공통 레이어(Origin·토큰 가드 → 폰 주소 접두 벗기기).
 
 use super::*;
-use super::auth::{bind_addr, mobile_prefix_mw, via_phone_mw, via_uplink_mw};
+use super::auth::{bind_addr, mobile_prefix_mw, via_phone_mw, via_uplink_mw, ViaUplink};
 use super::machine_proxy::PROXY_BODY_LIMIT;
 use super::schedule::schedule_loop;
+
+fn direct_loopback_proxy_caller(
+    peer: Option<std::net::SocketAddr>,
+    via_uplink: bool,
+    mobile_auth: bool,
+    headers: &HeaderMap,
+) -> bool {
+    // 루프백 peer 만 봐서는 같은 기기의 터널 되쏘기를 로컬 Claude 와 구분할 수 없다.
+    let proxied = ["cf-connecting-ip", "x-forwarded-for", "forwarded", "x-real-ip"]
+        .into_iter()
+        .any(|name| headers.contains_key(name));
+    peer.is_some_and(|peer| peer.ip().is_loopback())
+        && !via_uplink
+        && !mobile_auth
+        && !proxied
+}
 
 /// Bind the host HTTP server at `127.0.0.1:<port>` and run it on a background
 /// thread. Tries `preferred_port` first, then falls back to an OS-assigned
@@ -195,8 +211,17 @@ pub fn spawn_http_server_opts(
                             move |AxPath((pane, rest)): AxPath<(String, String)>,
                                   method: Method,
                                   headers: HeaderMap,
+                                  peer: Option<axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+                                  via_uplink: Option<axum::extract::Extension<ViaUplink>>,
+                                  mobile_auth: Option<axum::extract::Extension<MobileAuth>>,
                                   body: Bytes| {
-                                crate::proxy::proxy_handler(
+                                let direct_loopback = direct_loopback_proxy_caller(
+                                    peer.map(|peer| peer.0.0),
+                                    via_uplink.is_some(),
+                                    mobile_auth.is_some(),
+                                    &headers,
+                                );
+                                crate::proxy::proxy_handler_with_recovery(
                                     store.clone(),
                                     client.clone(),
                                     pane,
@@ -204,6 +229,7 @@ pub fn spawn_http_server_opts(
                                     method,
                                     headers,
                                     body,
+                                    direct_loopback,
                                 )
                             }
                         })
@@ -258,4 +284,64 @@ pub fn spawn_http_server_opts(
         })?;
 
     Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn peer(ip: &str) -> std::net::SocketAddr {
+        format!("{ip}:42000").parse().unwrap()
+    }
+
+    #[test]
+    fn recovery_requires_proven_direct_loopback() {
+        let headers = HeaderMap::new();
+        assert!(direct_loopback_proxy_caller(
+            Some(peer("127.0.0.1")),
+            false,
+            false,
+            &headers,
+        ));
+        assert!(direct_loopback_proxy_caller(
+            Some(peer("[::1]")),
+            false,
+            false,
+            &headers,
+        ));
+        assert!(!direct_loopback_proxy_caller(None, false, false, &headers));
+        assert!(!direct_loopback_proxy_caller(
+            Some(peer("192.0.2.10")),
+            false,
+            false,
+            &headers,
+        ));
+        assert!(!direct_loopback_proxy_caller(
+            Some(peer("127.0.0.1")),
+            true,
+            false,
+            &headers,
+        ));
+        assert!(!direct_loopback_proxy_caller(
+            Some(peer("127.0.0.1")),
+            false,
+            true,
+            &headers,
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_proxy_provenance_headers() {
+        for name in ["cf-connecting-ip", "x-forwarded-for", "forwarded", "x-real-ip"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static("198.51.100.8"));
+            assert!(!direct_loopback_proxy_caller(
+                Some(peer("127.0.0.1")),
+                false,
+                false,
+                &headers,
+            ));
+        }
+    }
 }

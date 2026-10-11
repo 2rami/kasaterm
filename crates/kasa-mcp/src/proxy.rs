@@ -6,17 +6,48 @@
 //! 스트림을 그대로 흘린다(터미널의 라이브 스트리밍 유지). 캡처는 side-effect 라
 //! 파싱이 실패해도 claude 는 정상 동작한다. auth(authorization/x-api-key)는 손대지
 //! 않고 그대로 통과 — claude 가 보내는 그대로 Anthropic 이 받는다.
+//!
+//! 예외 하나: 관문이 사슬을 갱신하면 옛 접근 토큰은 원래 만료 전에 죽는데, claude 는 키체인을
+//! 30초 캐시해 그 토큰을 한동안 더 보낸다. 그 요청이 첫 응답으로 401 을 맞으면 같은 계정의 더
+//! 새 토큰으로 한 번만 다시 보낸다(`agent_chains::Ticket`). 계정은 원래 Bearer 로만 찾는다.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
 
 const ANTHROPIC: &str = "https://api.anthropic.com";
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+
+trait RecoveryAdapter: Send + Sync {
+    fn issue(&self, headers: &HeaderMap) -> Option<BoxFuture<'static, Option<HeaderValue>>>;
+}
+
+struct AgentChainRecovery;
+
+impl RecoveryAdapter for AgentChainRecovery {
+    fn issue(&self, headers: &HeaderMap) -> Option<BoxFuture<'static, Option<HeaderValue>>> {
+        let ticket = crate::agent_chains::Ticket::issue(headers)?;
+        Some(Box::pin(async move {
+            ticket
+                .recover()
+                .await
+                .map(|recovered| recovered.authorization())
+        }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProxyConfig<'a> {
+    upstream: &'a str,
+    recovery_timeout: Duration,
+}
 
 #[derive(Clone, serde::Serialize)]
 pub struct Turn {
@@ -481,6 +512,10 @@ fn iso_utc(secs: u64) -> String {
 /// 실사격 curl 로 손수 갈랐다; 이 한 줄이 있으면 tail 한 번으로 끝난다. 로그가
 /// 중계를 깨면 본말전도라 모든 실패를 조용히 삼킨다. 5MB 넘으면 .1 로 한 단 밀기.
 fn gateway_log(pane: &str, method: &str, rest: &str, status: &str, ms: u128) {
+    // 시험이 가짜 상류로 포워드해도 사용자의 진단 로그에 가짜 줄이 섞이면 안 된다.
+    if cfg!(test) {
+        return;
+    }
     static GATE: Mutex<()> = Mutex::new(());
     let Some(home) =
         std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
@@ -506,9 +541,89 @@ fn gateway_log(pane: &str, method: &str, rest: &str, status: &str, ms: u128) {
     }
 }
 
-/// `/p/{pane}/{*rest}` — claude 의 Anthropic API 호출 가로채기. 캡처(side-effect) 후
-/// api.anthropic.com 으로 투명 포워드, 응답 스트림 tee.
-pub async fn proxy_handler(
+fn recovery_path(method: &Method, rest: &str) -> bool {
+    method == Method::POST && matches!(rest, "v1/messages" | "v1/messages/count_tokens")
+}
+
+async fn forward(
+    client: &reqwest::Client,
+    method: &Method,
+    url: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+    authorization: Option<&HeaderValue>,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut forwarded = headers.clone();
+    forwarded.remove(axum::http::header::HOST);
+    forwarded.remove(axum::http::header::CONTENT_LENGTH);
+    forwarded.remove(axum::http::header::ACCEPT_ENCODING);
+    forwarded.insert(
+        axum::http::header::ACCEPT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
+    if let Some(authorization) = authorization {
+        forwarded.remove(axum::http::header::AUTHORIZATION);
+        forwarded.insert(axum::http::header::AUTHORIZATION, authorization.clone());
+    }
+    client
+        .request(method.clone(), url)
+        .headers(forwarded)
+        .body(body.clone())
+        .send()
+        .await
+}
+
+fn is_sse_response(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|content_type| content_type.to_str().ok())
+        .is_some_and(|content_type| content_type.contains("event-stream"))
+}
+
+fn downstream_builder(status: StatusCode, headers: &HeaderMap) -> axum::http::response::Builder {
+    let mut out = Response::builder().status(status.as_u16());
+    for (name, value) in headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "transfer-encoding" | "content-length" | "connection"
+        ) {
+            continue;
+        }
+        out = out.header(name.as_str(), value.as_bytes());
+    }
+    out
+}
+
+struct BufferedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+impl BufferedResponse {
+    async fn read(response: reqwest::Response) -> Self {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.bytes().await.unwrap_or_default();
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    fn annotated_error(self) -> Response {
+        let body = annotate_upstream_error(&self.body).unwrap_or_else(|| self.body.to_vec());
+        downstream_builder(self.status, &self.headers)
+            .body(Body::from(body))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    }
+}
+
+/// 내장 HTTP 라우터가 호출자 출처를 증명해 넘기는 복구 가능 입구.
+pub(crate) async fn proxy_handler_with_recovery(
     store: ConvStore,
     client: reqwest::Client,
     pane: String,
@@ -516,6 +631,37 @@ pub async fn proxy_handler(
     method: Method,
     headers: HeaderMap,
     body: Bytes,
+    direct_loopback: bool,
+) -> Response {
+    proxy_handler_inner(
+        store,
+        client,
+        pane,
+        rest,
+        method,
+        headers,
+        body,
+        direct_loopback,
+        &AgentChainRecovery,
+        ProxyConfig {
+            upstream: ANTHROPIC,
+            recovery_timeout: RECOVERY_TIMEOUT,
+        },
+    )
+    .await
+}
+
+async fn proxy_handler_inner(
+    store: ConvStore,
+    client: reqwest::Client,
+    pane: String,
+    rest: String,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+    direct_loopback: bool,
+    recovery: &dyn RecoveryAdapter,
+    config: ProxyConfig<'_>,
 ) -> Response {
     // 캡처: 실제 생성 호출(POST /v1/messages)이면서 **메인 대화**일 때만. count_tokens·
     // 프롬프트 제안·제목·요약 등 유틸 호출은 포워드만(응답 SSE 도 캡처 안 함 → capture).
@@ -571,26 +717,18 @@ pub async fn proxy_handler(
         }
     }
 
-    // 포워드. host/content-length 는 reqwest 가 재설정하므로 제외.
+    // 복구 표는 원요청 Bearer 가 어느 관리 계정·세대에 속했는지 I/O 없이 묶는다.
+    // 첫 401 뒤 현재 선택 슬롯을 보고 추측하면 계정 전환 틈에 다른 계정 토큰을 보낼 수 있다.
+    let recovery = (direct_loopback && recovery_path(&method, &rest))
+        .then(|| recovery.issue(&headers))
+        .flatten();
+
+    // 포워드. host/content-length 는 reqwest 가 재설정하므로 제외한다. 압축을 풀지 않는
+    // reqwest 구성에서도 SSE 를 읽도록 accept-encoding 은 identity 로 고정한다.
     let method_s = method.to_string();
-    let url = format!("{ANTHROPIC}/{rest}");
-    let mut rb = client.request(method, &url);
-    for (k, val) in headers.iter() {
-        // accept-encoding 도 빼고 아래서 identity 강제 — Anthropic 이 gzip/br 로 압축하면
-        // reqwest(압축 feature 없음)가 압축 바이트를 그대로 흘려 SSE tee 가 "data:" 를 못
-        // 찾아 streaming 이 0 이었다(사용자 실측: 답변이 다음 턴까지 안 뜸). 평문으로 받아야
-        // 라이브 캡처가 되고, claude 로 보내는 응답에도 content-encoding 이 안 붙어 정상.
-        if k == axum::http::header::HOST
-            || k == axum::http::header::CONTENT_LENGTH
-            || k == axum::http::header::ACCEPT_ENCODING
-        {
-            continue;
-        }
-        rb = rb.header(k.as_str(), val.as_bytes());
-    }
-    rb = rb.header(axum::http::header::ACCEPT_ENCODING, "identity");
+    let url = format!("{}/{rest}", config.upstream.trim_end_matches('/'));
     let t0 = std::time::Instant::now();
-    let upstream = match rb.body(body.to_vec()).send().await {
+    let mut upstream = match forward(&client, &method, &url, &headers, &body, None).await {
         Ok(r) => r,
         Err(e) => {
             // 여기 걸렸을 때만 게이트웨이 책임이다 — 응답이 아예 없었다는 뜻.
@@ -603,15 +741,58 @@ pub async fn proxy_handler(
         }
     };
 
-    let status = upstream.status();
+    let first_status = upstream.status();
     // 소요는 첫 응답(상태코드)까지 — SSE 는 스트림이 분 단위라 완료까지 재면 로그가
     // 한참 늦게 찍힌다.
-    gateway_log(&pane, &method_s, &rest, &status.as_u16().to_string(), t0.elapsed().as_millis());
-    let upstream_is_sse = upstream
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|c| c.to_str().ok())
-        .is_some_and(|c| c.contains("event-stream"));
+    gateway_log(
+        &pane,
+        &method_s,
+        &rest,
+        &first_status.as_u16().to_string(),
+        t0.elapsed().as_millis(),
+    );
+    let first_is_sse = is_sse_response(&upstream);
+    let mut retried_response = false;
+
+    // 첫 401 응답은 아직 클라이언트에 한 바이트도 쓰지 않았다. 표 발급에 성공한 요청만
+    // 최대 8초 동안 같은 계정·세대의 새 토큰을 찾고, Authorization 하나만 바꿔 한 번 더 보낸다.
+    if first_status == StatusCode::UNAUTHORIZED && !first_is_sse {
+        if let Some(recovery) = recovery {
+            // 재전송 연결이 실패해도 상류 연결 수명과 무관하게 원래 401 을 돌려야 한다.
+            let original = BufferedResponse::read(upstream).await;
+            let Ok(Some(authorization)) =
+                tokio::time::timeout(config.recovery_timeout, recovery).await
+            else {
+                return original.annotated_error();
+            };
+            let retry_started = std::time::Instant::now();
+            let retried = match forward(
+                &client,
+                &method,
+                &url,
+                &headers,
+                &body,
+                Some(&authorization),
+            )
+            .await
+            {
+                Ok(retried) => retried,
+                Err(_) => return original.annotated_error(),
+            };
+            gateway_log(
+                &pane,
+                &method_s,
+                &rest,
+                &retried.status().as_u16().to_string(),
+                retry_started.elapsed().as_millis(),
+            );
+            upstream = retried;
+            retried_response = true;
+        }
+    }
+
+    let status = upstream.status();
+    let upstream_is_sse = is_sse_response(&upstream);
     // 응답 SSE 누적은 메인 대화(capture) 호출일 때만 — 유틸 호출 응답은 대화에 안 섞는다.
     let is_sse = capture && upstream_is_sse;
     if std::env::var_os("KASATERM_PROXY_DIAG").is_some() {
@@ -620,22 +801,18 @@ pub async fn proxy_handler(
             status.as_u16()
         );
     }
-    let mut out = Response::builder().status(status.as_u16());
-    for (k, val) in upstream.headers().iter() {
-        let kl = k.as_str().to_ascii_lowercase();
-        // hop-by-hop / 길이 헤더는 스트림 재구성하므로 빼고, 나머지는 그대로.
-        if matches!(kl.as_str(), "transfer-encoding" | "content-length" | "connection") {
-            continue;
-        }
-        out = out.header(k.as_str(), val.as_bytes());
-    }
+    let out = downstream_builder(status, upstream.headers());
 
     // 오류 응답은 통짜로 받아 표식을 붙인다 — 스트리밍이 필요한 건 2xx SSE 뿐이고
-    // 오류 본문은 작다. 529 가 정확히 이 모양(통짜 JSON)이다. content-length 헤더는
-    // 위에서 이미 걸러졌으므로 재계산 충돌이 없다.
+    // 오류 본문은 작다. 다만 재전송이 HTTP 응답까지 받았으면 그 판정을 원래 401 로
+    // 덮지 않고 그대로 돌려야 한다. content-length 는 위에서 걸러 재계산 충돌이 없다.
     if status.as_u16() >= 400 && !upstream_is_sse {
         let raw = upstream.bytes().await.unwrap_or_default();
-        let body_out = annotate_upstream_error(&raw).unwrap_or_else(|| raw.to_vec());
+        let body_out = if retried_response {
+            raw.to_vec()
+        } else {
+            annotate_upstream_error(&raw).unwrap_or_else(|| raw.to_vec())
+        };
         return out
             .body(Body::from(body_out))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
@@ -868,6 +1045,9 @@ mod tests {
         assert_eq!(c.streaming, "한글"); // 깨지지 않고 온전히 누적
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 /// 저장된 pane 대화를 채팅용 JSON 으로. turns + 진행 중 streaming(라이브 응답).
 pub fn conversation_json(store: &ConvStore, pane: &str) -> serde_json::Value {

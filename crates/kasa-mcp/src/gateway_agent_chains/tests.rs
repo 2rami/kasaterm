@@ -3,6 +3,7 @@ use crate::agent_chains::tests::{anthropic, endpoints, offer, state_dir};
 use crate::agent_chains::{Read, Slot, Stores, sync_once};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use futures_util::{SinkExt, StreamExt};
 
 async fn rig() -> (String, reqwest::Client, String, String, Gate) {
     let dir = state_dir();
@@ -151,11 +152,14 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
         crate::agent_chains::Gateway::new(&base, &mini_token),
         crate::agent_chains::Gateway::new(&base, &spare_token),
     );
+    let laptop_ledger = crate::agent_chains::recovery::Ledger::default();
+    let mini_ledger = crate::agent_chains::recovery::Ledger::default();
+    let spare_ledger = crate::agent_chains::recovery::Ledger::default();
 
     // The laptop signed in once; its slot hands the chain over and keeps only the access token.
     let laptop_slots = [slot("acct-1", Some(PERSONAL))];
     let laptop_store = Memory::with(&[("acct-1", logged_in("access-personal-1", "refresh-1"))]);
-    let (learned, _) = sync_once(&laptop, &laptop_slots, &BTreeMap::new(), &laptop_store, &allow).await.unwrap();
+    let (learned, _) = sync_once(&laptop, &laptop_slots, &BTreeMap::new(), &laptop_store, &allow, &laptop_ledger).await.unwrap();
     assert_eq!(learned.get("acct-1").map(String::as_str), Some(PERSONAL));
     assert!(!laptop_store.holds_refresh(), "the laptop kept a refresh token after sealing");
     assert_eq!(laptop_store.oauth("acct-1")["accessToken"], "access-personal-1");
@@ -166,7 +170,7 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
     let husk = json!({"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"scopes":["user:inference"]}});
     let mini_slots = [slot("acct-6", Some(PERSONAL)), slot("acct-5", None), slot("acct-9", Some(PERSONAL))];
     let mini_store = Memory::with(&[("acct-6", husk), ("acct-5", logged_in("access-team-1", "refresh-t1"))]);
-    let (learned, _) = sync_once(&mini, &mini_slots, &BTreeMap::new(), &mini_store, &allow).await.unwrap();
+    let (learned, _) = sync_once(&mini, &mini_slots, &BTreeMap::new(), &mini_store, &allow, &mini_ledger).await.unwrap();
     assert_eq!(mini_store.oauth("acct-6")["accessToken"], "access-personal-1");
     assert_eq!(mini_store.oauth("acct-5")["accessToken"], "access-team-1");
     assert!(mini_store.oauth("acct-9").is_null());
@@ -184,8 +188,8 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
     crate::agent_chains::tests::age_chains(&service, "one");
     assert_eq!(service.refresh_due().await.0, 2);
     let mapped: BTreeMap<String, String> = [("acct-1".to_string(), PERSONAL.to_string())].into();
-    sync_once(&laptop, &laptop_slots, &mapped, &laptop_store, &allow).await.unwrap();
-    sync_once(&mini, &mini_slots, &[("acct-5".to_string(), TEAM.to_string())].into(), &mini_store, &allow).await.unwrap();
+    sync_once(&laptop, &laptop_slots, &mapped, &laptop_store, &allow, &laptop_ledger).await.unwrap();
+    sync_once(&mini, &mini_slots, &[("acct-5".to_string(), TEAM.to_string())].into(), &mini_store, &allow, &mini_ledger).await.unwrap();
     assert_eq!(laptop_store.oauth("acct-1")["accessToken"], "access-personal-2");
     assert_eq!(mini_store.oauth("acct-6")["accessToken"], "access-personal-2");
     assert!(!laptop_store.holds_refresh() && !mini_store.holds_refresh());
@@ -193,7 +197,7 @@ async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
     // A third device that logged in on its own gives up its chain for the one the gateway holds.
     let spare_slots = [slot("acct-2", None)];
     let spare_store = Memory::with(&[("acct-2", logged_in("access-personal-c", "refresh-c"))]);
-    sync_once(&spare, &spare_slots, &BTreeMap::new(), &spare_store, &allow).await.unwrap();
+    sync_once(&spare, &spare_slots, &BTreeMap::new(), &spare_store, &allow, &spare_ledger).await.unwrap();
     assert_eq!(spare_store.oauth("acct-2")["accessToken"], "access-personal-2");
     assert!(!spare_store.holds_refresh());
     let chain = crate::agent_chains::tests::chain_refresh(&service, "one", PERSONAL);
@@ -205,6 +209,7 @@ async fn a_slot_whose_chain_moved_on_is_not_overwritten_and_an_old_gateway_is_le
     let (base, client, token, _, _) = rig().await;
     let base = base.trim_end_matches("/relay").to_string();
     let device = crate::agent_chains::Gateway::new(&base, &token);
+    let ledger = crate::agent_chains::recovery::Ledger::default();
     // claude rotated the slot between the offer and the write: the stale offer must not strip the new chain.
     struct Rotating(Memory, std::sync::atomic::AtomicUsize);
     impl Stores for Rotating {
@@ -223,14 +228,81 @@ async fn a_slot_whose_chain_moved_on_is_not_overwritten_and_an_old_gateway_is_le
     }
     let store = Rotating(Memory::with(&[("acct-1", logged_in("access-personal-1", "refresh-1"))]), Default::default());
     let slots = [slot("acct-1", None)];
-    sync_once(&device, &slots, &BTreeMap::new(), &store, &|| true).await.unwrap();
+    sync_once(&device, &slots, &BTreeMap::new(), &store, &|| true, &ledger).await.unwrap();
     assert_eq!(store.0.oauth("acct-1")["refreshToken"], "refresh-rotated");
 
     // A gateway without the endpoint answers 404: the device stops and keeps every login as it is.
     let old = crate::agent_chains::Gateway::new(&format!("{base}/nowhere"), &token);
     let store = Memory::with(&[("acct-1", logged_in("access-personal-1", "refresh-1"))]);
-    let unsupported = sync_once(&old, &slots, &BTreeMap::new(), &store, &|| true).await;
+    let unsupported = sync_once(&old, &slots, &BTreeMap::new(), &store, &|| true, &ledger).await;
     assert_eq!(unsupported.err(), Some(crate::agent_chains::SyncError::Unsupported));
     assert_eq!(store.oauth("acct-1")["refreshToken"], "refresh-1");
     drop(client);
+}
+
+async fn chain_uplink(base: &str, token: &str, machine: &str, capable: bool) -> tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+> {
+    let url = format!("{}/uplink", base.replacen("http://", "ws://", 1));
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({
+            "t":"hello", "key":format!("fixture-key-{machine}-0123456789"), "slugs":[],
+            "machine":machine, "machine_id":machine, "device_token":token, "proto":2,
+            "capabilities":{"agent_chains":capable}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let answer = ws.next().await.unwrap().unwrap();
+    let tokio_tungstenite::tungstenite::Message::Text(answer) = answer else { panic!("missing hello answer") };
+    assert_eq!(serde_json::from_str::<Value>(answer.as_str()).unwrap()["t"], "ok");
+    ws
+}
+
+async fn receives_chain_hint(
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(150);
+    loop {
+        let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, ws.next()).await else { return false };
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+            let value: Value = serde_json::from_str(text.as_str()).unwrap_or_default();
+            if value["t"] == "agent_chains" {
+                assert_eq!(value.as_object().unwrap().len(), 1, "the hint carried account or token data");
+                return true;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn saved_chains_hint_only_capable_authenticated_uplinks_in_the_same_account() {
+    let (base, client, token, other, gate) = rig().await;
+    let mut capable = chain_uplink(&base, &token, "machine-one", true).await;
+    let mut legacy = chain_uplink(&base, &format!("{token}b"), "machine-one", false).await;
+    let mut foreign = chain_uplink(&base, &other, "machine-two", true).await;
+
+    let sealed = client
+        .post(format!("{base}/agent-chains/seal"))
+        .bearer_auth(&token)
+        .json(&offer("access-personal-1", "refresh-1", 7 * 3_600_000))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sealed.status(), 200);
+    assert!(receives_chain_hint(&mut capable).await);
+    assert!(!receives_chain_hint(&mut legacy).await);
+    assert!(!receives_chain_hint(&mut foreign).await);
+
+    let service = gate.agent_chains.clone().unwrap();
+    crate::agent_chains::tests::age_chains(&service, "one");
+    let (_, _, changed) = service.refresh_due().await;
+    assert_eq!(changed, vec!["one"]);
+    for account in changed {
+        gate.hint_agent_chains(&account);
+    }
+    assert!(receives_chain_hint(&mut capable).await);
 }

@@ -75,6 +75,8 @@ struct Uplink {
     device_id: Option<String>,
     owner_slug: Option<String>,
     nacho_app: AtomicBool,
+    /// 옛 앱에는 갱신 힌트를 보내지 않아 모르는 제어 프레임이 기존 연결에 영향을 주지 않게 한다.
+    agent_chains: AtomicBool,
     /// 기기가 폐기되면 이 연결을 끊는다.
     kick: tokio::sync::Notify,
     /// 지난번 계량 뒤로 오간 프레임 바이트·요청 수(`admin::Gate::meter` 가 접어 간다). 내용은 안 센다.
@@ -858,6 +860,7 @@ struct Hello {
     device_token: Option<String>,
     owner_slug: Option<String>,
     nacho_app: bool,
+    agent_chains: bool,
 }
 
 fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
@@ -922,7 +925,9 @@ fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
         .map(str::to_string);
     let nacho_app = v.get("capabilities").and_then(|v| v.get("nacho_app"))
         .and_then(|v| v.as_bool()).unwrap_or(false);
-    Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug, nacho_app })
+    let agent_chains = v.get("capabilities").and_then(|v| v.get("agent_chains"))
+        .and_then(|v| v.as_bool()).unwrap_or(false);
+    Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug, nacho_app, agent_chains })
 }
 
 /// 연결 `conn` 만 그 slug 에서 뗀다 — 같은 slug 의 다른 살아 있는 연결은 남는다.
@@ -942,7 +947,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<serde_json::Value>(t.as_str()).ok(),
         _ => None,
     };
-    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug, nacho_app }) = hello.as_ref().and_then(parse_hello)
+    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug, nacho_app, agent_chains }) = hello.as_ref().and_then(parse_hello)
     else {
         let _ = tx
             .send(Message::Text(r#"{"t":"err","error":"hello 가 없거나 이상해요"}"#.into()))
@@ -988,6 +993,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         device_id: device_id.clone(),
         owner_slug: owner_slug.filter(|slug| gate.claim(slug, &hash)),
         nacho_app: AtomicBool::new(nacho_app && account.is_some()),
+        agent_chains: AtomicBool::new(agent_chains && account.is_some()),
         kick: tokio::sync::Notify::new(),
         rx_bytes: AtomicU64::new(0),
         tx_bytes: AtomicU64::new(0),
@@ -1098,7 +1104,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             Ok(Message::Text(t)) => {
                 up.touch();
                 // hello 를 다시 보내면 slug 목록 갱신(유저가 늘었다).
-                if let Some(Hello { key: k2, slugs: slugs2, device_token, nacho_app, .. }) = serde_json::from_str::<serde_json::Value>(t.as_str())
+                if let Some(Hello { key: k2, slugs: slugs2, device_token, nacho_app, agent_chains, .. }) = serde_json::from_str::<serde_json::Value>(t.as_str())
                     .ok()
                     .as_ref()
                     .and_then(parse_hello)
@@ -1111,6 +1117,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
                             && up.device_id.as_deref() == Some(id.as_str())
                             && up.account.as_deref() == Some(rec.account.as_str()));
                     up.nacho_app.store(nacho_app && authenticated, Ordering::Relaxed);
+                    up.agent_chains.store(agent_chains && authenticated, Ordering::Relaxed);
                     let (acc2, rej2) = apply(&slugs2);
                     // 빠진 slug(유저 삭제)는 이 연결에서 뗀다. 잠금은 블록 안에서만 —
                     // 아래 await 를 넘기면 이 future 가 Send 가 아니게 된다.
@@ -1586,6 +1593,7 @@ mod tests {
             device_id: None,
             owner_slug: None,
             nacho_app: AtomicBool::new(false),
+            agent_chains: AtomicBool::new(false),
             kick: tokio::sync::Notify::new(),
             rx_bytes: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
@@ -1617,6 +1625,7 @@ mod tests {
         assert!(h.aliases.contains(&"맥북".to_string()));
         assert!(h.device_token.is_none());
         assert!(!h.nacho_app);
+        assert!(!h.agent_chains);
         assert!(parse_hello(&serde_json::json!({"t":"hello","key":"short","slugs":[]})).is_none());
         assert!(parse_hello(&serde_json::json!({"t":"nope"})).is_none());
     }
@@ -1630,6 +1639,12 @@ mod tests {
         }
         hello["capabilities"]["nacho_app"] = true.into();
         assert!(parse_hello(&hello).unwrap().nacho_app);
+        for value in [serde_json::json!(null), serde_json::json!("true"), serde_json::json!(1), serde_json::json!(false)] {
+            hello["capabilities"]["agent_chains"] = value;
+            assert!(!parse_hello(&hello).unwrap().agent_chains);
+        }
+        hello["capabilities"]["agent_chains"] = true.into();
+        assert!(parse_hello(&hello).unwrap().agent_chains);
         for path in ["nacho/app", "nacho/app/events", "m/~mini/nacho/app/messages"] {
             assert!(nacho_app_path(path));
         }

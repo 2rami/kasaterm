@@ -19,13 +19,35 @@ impl Gate {
         let gate = self.clone();
         tokio::spawn(async move {
             loop {
-                let (_, notices) = service.refresh_due().await;
+                let (_, notices, changed_accounts) = service.refresh_due().await;
+                for account in changed_accounts {
+                    gate.hint_agent_chains(&account);
+                }
                 for notice in notices {
                     approvals::send_push(&gate, &notice.account, push_payload(&notice));
                 }
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         });
+    }
+
+    fn hint_agent_chains(&self, account: &str) {
+        let uplinks: Vec<_> = self
+            .live
+            .lock()
+            .map(|live| {
+                live.values()
+                    .filter(|(_, uplink)| {
+                        uplink.account.as_deref() == Some(account)
+                            && uplink.agent_chains.load(Ordering::Acquire)
+                    })
+                    .map(|(_, uplink)| uplink.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for uplink in uplinks {
+            let _ = uplink.tx.try_send(Message::Text(r#"{"t":"agent_chains"}"#.into()));
+        }
     }
 }
 
@@ -91,7 +113,15 @@ async fn seal(State(gate): State<Gate>, req: axum::extract::Request) -> axum::re
     let Ok(offer) = serde_json::from_slice::<crate::agent_chains::Offer>(&bytes) else {
         return agent_accounts_error(StatusCode::BAD_REQUEST, "bad_request");
     };
-    answer(service.seal(&account, &device, offer).await)
+    match service.seal(&account, &device, offer).await {
+        Ok(value) => {
+            if value["held"] == false {
+                gate.hint_agent_chains(&account);
+            }
+            answer(Ok(value))
+        }
+        Err(error) => answer(Err(error)),
+    }
 }
 
 #[cfg(test)]

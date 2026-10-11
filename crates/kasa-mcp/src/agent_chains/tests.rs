@@ -142,8 +142,9 @@ async fn the_gateway_refreshes_ahead_of_expiry_and_marks_refused_chains() {
     let mut book = service.load("one").unwrap();
     book.values_mut().for_each(|c| c.sealed_at = 0);
     service.save("one", &book).unwrap();
-    let (refreshed, notices) = service.refresh_due().await;
+    let (refreshed, notices, changed) = service.refresh_due().await;
     assert_eq!(refreshed, 1);
+    assert_eq!(changed, vec!["one"]);
     assert_eq!(notices.len(), 1, "a refused chain must reach the account's phones");
     assert_eq!((notices[0].account.as_str(), notices[0].key.as_str()), ("one", "claude:fixture team"));
     assert!(notices[0].body.contains("Fixture Team") && !notices[0].body.contains("refresh"));
@@ -158,10 +159,15 @@ async fn the_gateway_refreshes_ahead_of_expiry_and_marks_refused_chains() {
     let personal = &book["claude:fixture@example.invalid"];
     assert_eq!((personal.access_token.as_str(), personal.refresh_token.as_str()), ("access-personal-2", "refresh-2"));
     assert!(personal.expires_at > now_ms() + 7 * HOUR);
+    assert_eq!(personal.lineage.len(), 1);
+    assert_eq!(personal.lineage[0].fingerprint, fingerprint("access-personal-1"));
+    assert_eq!(personal.lineage[0].generation, personal.generation);
     let team = &book["claude:fixture team"];
     assert!(team.broken && team.refresh_token.is_empty() && team.access_token.is_empty());
+    let broken_generation = team.generation.clone();
 
     let listed = service.list("one").await.unwrap();
+    assert!(!listed.to_string().contains("access-personal-1"), "lineage leaked the retired token");
     let states: Vec<(&str, bool)> = listed["chains"].as_array().unwrap().iter()
         .map(|c| (c["state"].as_str().unwrap(), c["access"].is_null())).collect();
     assert_eq!(states, vec![("reconnect_required", true), ("ok", false)]);
@@ -173,7 +179,9 @@ async fn the_gateway_refreshes_ahead_of_expiry_and_marks_refused_chains() {
     // Signing in again anywhere replaces the broken chain.
     let again = service.seal("one", "d", offer("access-team-2", "refresh-t2", 7 * HOUR)).await.unwrap();
     assert_eq!(again["held"], false);
-    assert!(!service.load("one").unwrap()["claude:fixture team"].broken);
+    let book = service.load("one").unwrap();
+    assert!(!book["claude:fixture team"].broken);
+    assert_ne!(book["claude:fixture team"].generation, broken_generation);
 }
 
 #[tokio::test]
@@ -188,6 +196,37 @@ async fn a_throttled_refresh_backs_off_and_keeps_the_chain() {
     assert_eq!(seen_calls(&calls, "token").len(), 1, "a throttled chain was retried at once");
     let chain = &service.load("one").unwrap()["claude:fixture@example.invalid"];
     assert!(!chain.broken && chain.refresh_token == "refresh-busy" && chain.retry_at > now_ms());
+}
+
+#[tokio::test]
+async fn server_lineage_covers_two_pull_cycles_but_not_grace_or_original_expiry() {
+    let (service, _, _) = service().await;
+    service.seal("one", "d", offer("access-personal-1", "refresh-1", 7 * HOUR)).await.unwrap();
+    let key = "claude:fixture@example.invalid";
+    let clock = now_ms();
+    let mut book = service.load("one").unwrap();
+    let chain = book.get_mut(key).unwrap();
+    chain.updated = clock - 5 * 60_000 - 30_000;
+    chain.lineage = vec![Spent {
+        fingerprint: fingerprint("retired-token"),
+        expires_at: clock + HOUR,
+        generation: chain.generation.clone(),
+    }];
+    service.save("one", &book).unwrap();
+    let listed = service.list("one").await.unwrap();
+    assert_eq!(listed["chains"][0]["lineage"].as_array().unwrap().len(), 1);
+
+    let mut book = service.load("one").unwrap();
+    book.get_mut(key).unwrap().updated = clock.saturating_sub(LINEAGE_TTL_MS + 1);
+    service.save("one", &book).unwrap();
+    assert!(service.list("one").await.unwrap()["chains"][0]["lineage"].as_array().unwrap().is_empty());
+
+    let mut book = service.load("one").unwrap();
+    let chain = book.get_mut(key).unwrap();
+    chain.updated = clock;
+    chain.lineage[0].expires_at = clock.saturating_sub(1);
+    service.save("one", &book).unwrap();
+    assert!(service.list("one").await.unwrap()["chains"][0]["lineage"].as_array().unwrap().is_empty());
 }
 
 fn slot_doc(access: &str, refresh: Option<&str>, left_ms: i64) -> Value {
@@ -273,7 +312,7 @@ async fn a_refresh_stuck_close_to_expiry_alerts_once() {
         c.expires_at = now_ms() + 40 * 60 * 1000;
     });
     service.save("one", &book).unwrap();
-    let (_, notices) = service.refresh_due().await;
+    let (_, notices, _) = service.refresh_due().await;
     assert_eq!(notices.len(), 1);
     assert!(notices[0].title.contains("막혔어요"));
     let mut book = service.load("one").unwrap();
@@ -317,4 +356,48 @@ fn a_device_warns_when_gateway_tokens_run_out_even_with_the_gateway_down() {
     let chains = vec![Held { key: "claude:team".into(), state: "reconnect_required".into(), ..Default::default() }];
     let up = device_alerts(&slots, &map, &docs, Some(&chains), now);
     assert!(up.contains_key("broken|claude:team") && up["stalled|claude:x@y"].body.contains("갱신하지 못해"));
+}
+
+#[test]
+fn stale_slot_mappings_and_current_identity_do_not_manage_a_deleted_account() {
+    let slots = vec![Slot {
+        id: "current".into(),
+        store: None,
+        table_key: Some("claude:fixture@example.invalid".into()),
+    }];
+    let stale = BTreeMap::from([("deleted".into(), "claude:fixture@example.invalid".into())]);
+    assert!(managed_keys(&slots, &stale, &BTreeMap::new()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_child_output_drains_more_than_a_pipe_buffer_before_exit() {
+    let child = crate::no_window_command("sh")
+        .args(["-c", "i=0; while [ \"$i\" -lt 8192 ]; do printf 0123456789abcdef; i=$((i+1)); done"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (status, output) = bounded_child_output(child, Duration::from_secs(2), 1024 * 1024).unwrap();
+    assert!(status.success());
+    assert_eq!(output.len(), 8192 * 16);
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_child_output_times_out_kills_and_reaps_the_child() {
+    let child = crate::no_window_command("sh")
+        .args(["-c", "while :; do :; done"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let error = bounded_child_output(child, Duration::from_millis(50), 1024).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    let alive = unsafe { libc::kill(pid as i32, 0) };
+    assert_eq!(alive, -1, "timed-out child was not reaped");
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
 }
