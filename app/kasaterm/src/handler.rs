@@ -29,6 +29,66 @@ fn blocks_obscured_button(button: MouseButton, modal: bool, workspace: Option<(f
         }))
 }
 
+fn take_chrome_double_click(
+    previous: &mut Option<(Instant, (f32, f32))>,
+    now: Instant,
+    position: (f32, f32),
+) -> bool {
+    let is_double = previous.is_some_and(|(time, point)| {
+        now.duration_since(time).as_millis() < 400
+            && (point.0 - position.0).abs() < 5.0
+            && (point.1 - position.1).abs() < 5.0
+    });
+    *previous = (!is_double).then_some((now, position));
+    is_double
+}
+
+#[cfg(test)]
+mod chrome_double_click_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn nearby_second_press_zooms_and_consumes_the_pair() {
+        let now = Instant::now();
+        let mut previous = None;
+        assert!(!take_chrome_double_click(&mut previous, now, (100.0, 40.0)));
+        assert!(take_chrome_double_click(
+            &mut previous, now + Duration::from_millis(150), (104.0, 44.0),
+        ));
+        assert!(previous.is_none());
+        assert!(!take_chrome_double_click(
+            &mut previous, now + Duration::from_millis(250), (104.0, 44.0),
+        ));
+    }
+
+    #[test]
+    fn slow_or_distant_handle_presses_remain_menu_clicks() {
+        let now = Instant::now();
+        for (delay, point) in [
+            (400, (100.0, 40.0)),
+            (150, (105.0, 40.0)),
+            (150, (100.0, 45.0)),
+        ] {
+            let mut previous = Some((now, (100.0, 40.0)));
+            let next = now + Duration::from_millis(delay);
+            assert!(!take_chrome_double_click(&mut previous, next, point));
+            assert_eq!(previous, Some((next, point)));
+        }
+    }
+
+    #[test]
+    fn another_pair_can_restore_the_zoomed_pane() {
+        let now = Instant::now();
+        let mut previous = None;
+        for (delay, expected) in [(0, false), (120, true), (1200, false), (1320, true)] {
+            assert_eq!(take_chrome_double_click(
+                &mut previous, now + Duration::from_millis(delay), (100.0, 40.0),
+            ), expected);
+        }
+    }
+}
+
 #[cfg(test)]
 mod main_pointer_tests {
     use super::*;
@@ -3943,6 +4003,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let dy = self.cursor_px.1 - hd.start.1;
                     if !hd.active && dx * dx + dy * dy > 25.0 {
                         hd.active = true;
+                        self.last_left_click = None;
                     }
                     let active = hd.active;
                     if active {
@@ -5861,6 +5922,16 @@ impl ApplicationHandler<UserEvent> for App {
                         .iter()
                         .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, _)| id.clone());
+                    if let Some(pid) = handle_hit.as_deref() {
+                        // 첫 클릭이 연 메뉴가 두 번째 누름을 닫기로 삼키기 전에 헤더와 같은 제스처로 판정한다.
+                        if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
+                            self.handle_menu = None;
+                            self.header_drag = None;
+                            self.focus_pane(pid);
+                            self.toggle_pane_zoom(pid);
+                            return;
+                        }
+                    }
                     if let Some(menu_pid) = self.handle_menu.clone() {
                         if let Some(action) = self
                             .handle_menu_hits
@@ -6326,22 +6397,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // so the pill must share the header band's zoom gesture
                         // (otherwise only the empty strip right of the tabs
                         // zoomed, which felt broken).
-                        let (dx, dy) = self.cursor_px;
-                        let now = Instant::now();
-                        let is_double = matches!(
-                            self.last_left_click,
-                            Some((t, (x, y)))
-                                if now.duration_since(t).as_millis() < 400
-                                    && (x - dx).abs() < 5.0
-                                    && (y - dy).abs() < 5.0
-                        );
-                        self.last_left_click = Some((now, (dx, dy)));
-                        if is_double {
+                        if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
                             // pane_tab_rects keys off the outer pane id (same
                             // value we push into active_pane below), which is
                             // exactly what toggle_pane_zoom wants.
                             self.toggle_pane_zoom(&pid);
-                            self.last_left_click = None;
                             return;
                         }
                         // Focus the pane now; arm a tab drag. A plain press
@@ -6372,19 +6432,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // A double-click on a pane header toggles tmux-style
                         // zoom (that pane alone fills the work area). Reuse the
                         // same last_left_click window as the titlebar maximize.
-                        let (dx, dy) = self.cursor_px;
-                        let now = Instant::now();
-                        let is_double = matches!(
-                            self.last_left_click,
-                            Some((t, (x, y)))
-                                if now.duration_since(t).as_millis() < 400
-                                    && (x - dx).abs() < 5.0
-                                    && (y - dy).abs() < 5.0
-                        );
-                        self.last_left_click = Some((now, (dx, dy)));
-                        if is_double {
+                        if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
                             self.toggle_pane_zoom(&pane);
-                            self.last_left_click = None;
                             return;
                         }
                         self.focus_pane(&pane);
@@ -6417,19 +6466,7 @@ impl ApplicationHandler<UserEvent> for App {
                     matches!(state, ElementState::Pressed) && self.cursor_px.1 < TITLE_HEIGHT;
                 if titlebar_press {
                     let (cx, cy) = self.cursor_px;
-                    let now = Instant::now();
-                    let is_double = match self.last_left_click {
-                        Some((t, (x, y)))
-                            if now.duration_since(t).as_millis() < 400
-                                && (x - cx).abs() < 5.0
-                                && (y - cy).abs() < 5.0 =>
-                        {
-                            true
-                        }
-                        _ => false,
-                    };
-                    self.last_left_click = Some((now, (cx, cy)));
-                    if is_double {
+                    if take_chrome_double_click(&mut self.last_left_click, Instant::now(), (cx, cy)) {
                         // Drive the frame swap ourselves with animate:NO —
                         // winit's set_maximized routes through AppKit zoom,
                         // which animates the frame slowly ("늦게 커짐").
@@ -6445,7 +6482,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.is_maximized()
                             );
                         }
-                        self.last_left_click = None;
                         self.titlebar_drag_pending = None;
                         return;
                     }
