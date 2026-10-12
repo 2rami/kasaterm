@@ -15,6 +15,7 @@ import 'look.dart';
 import 'push.dart';
 import 'resume_spot.dart';
 import 'screens/approval_screen.dart';
+import 'screens/claude_accounts.dart';
 import 'screens/controls.dart';
 import 'screens/connect.dart';
 import 'screens/dev_server.dart';
@@ -458,7 +459,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   Future<void> _openLink(AppLink link, {ResumeSpot? spot}) async {
     if (link.approval case final id?) {
       if (_connection.account == null) {
-        if (_connection.phase == ConnectionPhase.restoring) _pendingLink = link;
+        if (_connection.phase != ConnectionPhase.signedOut) _pendingLink = link;
         return;
       }
       _showApproval(id);
@@ -467,11 +468,17 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     final server = _connection.server;
     // Links navigate the current session; they cannot install credentials.
     if (server == null || server.isClosed) {
-      if (_connection.phase == ConnectionPhase.restoring) _pendingLink = link;
+      if (_connection.phase != ConnectionPhase.signedOut) _pendingLink = link;
       return;
     }
     final url = Uri.tryParse(link.url ?? '');
     final nav = navigatorKey.currentState;
+    if (link.agentAccounts) {
+      if (nav == null) { _pendingLink = link; return; }
+      nav.popUntil((route) => route.isFirst);
+      unawaited(nav.push(MaterialPageRoute<void>(builder: (_) => ClaudeAccountsScreen(server: server))));
+      return;
+    }
     if (url != null && url.hasScheme && nav != null) {
       await openShownLink(nav, server, url, machine: link.machine);
       return;
@@ -617,8 +624,8 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _connection.server == server) {
           navigatorKey.currentState?.popUntil((route) => route.isFirst);
-          final pending = _pendingLink;
-          _pendingLink = null;
+          final pending = server == null ? null : _pendingLink;
+          if (server != null) _pendingLink = null;
           if (server != null && pending != null) unawaited(_openLink(pending));
           if (pending == null) _resumeSpot();
         }

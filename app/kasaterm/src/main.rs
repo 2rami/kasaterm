@@ -3709,6 +3709,37 @@ impl Workspace {
     }
 }
 
+#[derive(Clone)]
+struct SettingsActionArgs {
+    id: Option<String>,
+    label: Option<String>,
+}
+
+impl std::fmt::Debug for SettingsActionArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SettingsActionArgs([redacted])")
+    }
+}
+
+#[cfg(test)]
+mod settings_action_privacy_tests {
+    use super::*;
+
+    #[test]
+    fn event_debug_never_contains_flow_capabilities_or_authorization_codes() {
+        let (reply, _) = std::sync::mpsc::channel();
+        let event = UserEvent::SocketSettingsAction(
+            "claude-phone-login-code".into(),
+            SettingsActionArgs { id: Some("fixture-flow-capability".into()), label: Some("fixture-authorization-code".into()) },
+            reply,
+        );
+        let debug = format!("{event:?}");
+        assert!(!debug.contains("fixture-flow-capability"));
+        assert!(!debug.contains("fixture-authorization-code"));
+        assert!(debug.contains("[redacted]"));
+    }
+}
+
 /// Cross-thread wakeup. The PTY ScreenUpdate thread can't reliably wake
 /// a parked `WaitUntil` via `request_redraw` on macOS (winit defers the
 /// paint to the deadline), so it sends this through the EventLoopProxy
@@ -4101,8 +4132,7 @@ enum UserEvent {
     /// `(액션, 테마 id, 새 이름, 회신)`.
     SocketSettingsAction(
         String,
-        Option<String>,
-        Option<String>,
+        SettingsActionArgs,
         std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
     ),
     /// `POST /paste-image?surface=%N` — 아로나 프롬프트 입력창에 이미지 드롭(webview).
@@ -4177,6 +4207,7 @@ enum UserEvent {
     /// 스레드는 토스트를 못 띄우므로(App 상태) GUI 로 넘긴다.
     SocketToast(String),
     AccountSyncResult(session::AccountSyncReport),
+    PhoneLoginReady(settings::phone_login::Ready),
     /// A pane's claude is blocked on a permission / input prompt (its
     /// `Notification` hook → `kasaterm-cli attention`). Toast + flash the pane
     /// and, unless it's the focused pane, raise a desktop alert — the case cmux

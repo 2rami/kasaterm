@@ -117,8 +117,10 @@ impl Stores for Memory {
         self.0.lock().unwrap().get(&slot.id).cloned().map_or(Read::Absent, Read::Present)
     }
 
-    fn write(&self, slot: &Slot, doc: &Value) -> bool {
-        self.0.lock().unwrap().insert(slot.id.clone(), doc.clone());
+    fn compare_and_write(&self, slot: &Slot, expected: Option<&Value>, doc: &Value) -> bool {
+        let mut values = self.0.lock().unwrap();
+        if values.get(&slot.id) != expected { return false; }
+        values.insert(slot.id.clone(), doc.clone());
         true
     }
 
@@ -140,6 +142,56 @@ fn logged_in(access: &str, refresh: &str) -> Value {
 
 const PERSONAL: &str = "claude:fixture@example.invalid";
 const TEAM: &str = "claude:fixture team";
+
+struct LoginBeforeCommit {
+    memory: Memory,
+    replacement: std::sync::Mutex<Option<Value>>,
+    commits: std::sync::atomic::AtomicUsize,
+}
+
+impl Stores for LoginBeforeCommit {
+    fn read(&self, slot: &Slot) -> Read { self.memory.read(slot) }
+    fn same(&self, _: &Slot) -> bool { true }
+    fn compare_and_write(&self, slot: &Slot, expected: Option<&Value>, next: &Value) -> bool {
+        self.commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut values = self.memory.0.lock().unwrap();
+        if let Some(login) = self.replacement.lock().unwrap().take() {
+            values.insert(slot.id.clone(), login);
+        }
+        if values.get(&slot.id) != expected { return false; }
+        values.insert(slot.id.clone(), next.clone());
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_delayed_pull_or_seal_never_erases_a_completed_phone_login() {
+    for sealing in [false, true] {
+        let (base, _, token, _, gate) = rig().await;
+        let base = base.trim_end_matches("/relay");
+        let mut old = logged_in("access-personal-old", "refresh-old");
+        if !sealing {
+            old["claudeAiOauth"].as_object_mut().unwrap().remove("refreshToken");
+            old["claudeAiOauth"]["expiresAt"] = json!(offer("fixture", "fixture", 60_000).expires_at);
+            gate.agent_chains.as_ref().unwrap().seal("one", "dev_desktop_one",
+                offer("access-personal-gateway", "refresh-gateway", 7 * 3_600_000)).await.unwrap();
+        }
+        let fresh = logged_in("access-personal-phone", "refresh-phone");
+        let store = LoginBeforeCommit {
+            memory: Memory::with(&[("acct-1", old)]),
+            replacement: std::sync::Mutex::new(Some(fresh.clone())),
+            commits: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let gateway = crate::agent_chains::Gateway::new(base, &token);
+        let ledger = crate::agent_chains::recovery::Ledger::default();
+        let (learned, _) = sync_once(&gateway, &[slot("acct-1", Some(PERSONAL))],
+            &BTreeMap::new(), &store, &|| true, &ledger).await.unwrap();
+        assert_eq!(store.commits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(store.memory.0.lock().unwrap().get("acct-1"), Some(&fresh));
+        assert!(store.memory.holds_refresh());
+        assert!(learned.is_empty(), "a refused stale commit must not adopt the old chain");
+    }
+}
 
 #[tokio::test]
 async fn devices_hand_their_chains_to_the_gateway_and_share_one_rotation() {
@@ -215,12 +267,12 @@ async fn a_slot_whose_chain_moved_on_is_not_overwritten_and_an_old_gateway_is_le
     impl Stores for Rotating {
         fn read(&self, slot: &Slot) -> Read {
             if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-                self.0.write(slot, &logged_in("access-personal-r", "refresh-rotated"));
+                self.0.0.lock().unwrap().insert(slot.id.clone(), logged_in("access-personal-r", "refresh-rotated"));
             }
             self.0.read(slot)
         }
-        fn write(&self, slot: &Slot, doc: &Value) -> bool {
-            self.0.write(slot, doc)
+        fn compare_and_write(&self, slot: &Slot, expected: Option<&Value>, doc: &Value) -> bool {
+            self.0.compare_and_write(slot, expected, doc)
         }
         fn same(&self, _: &Slot) -> bool {
             true

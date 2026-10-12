@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show Listenable;
 import 'package:http/http.dart' as http;
 
 import 'app_release.dart';
+import 'claude_login.dart';
 import 'conversation.dart' show ModLive;
 import 'kasanet.dart';
 import 'kasanet_native.dart';
@@ -12,8 +13,9 @@ import 'relay_account.dart';
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
 class ServerException implements Exception {
-  const ServerException(this.message, {this.status});
+  const ServerException(this.message, {this.status, this.code});
   final String message;
+  final String? code;
 
   /// HTTP 응답 번호 — 닿기는 했을 때만. 404 는 「그 길이 없는 옛 판」이라 부르는 쪽이 가른다.
   final int? status;
@@ -764,6 +766,72 @@ class Server {
     }
     if (res.statusCode != 200) {
       throw ServerException('설정이 안 바뀌었다 (${res.statusCode})');
+    }
+  }
+
+  Future<List<ClaudeAccount>> claudeAccounts({String? machine}) async {
+    final raw = await _getJson('settings/values', machine: machine, timeout: const Duration(seconds: 15));
+    try {
+      return ClaudeAccount.parse(raw);
+    } on FormatException {
+      throw const ServerException('이 기기의 KASA를 새 판으로 업데이트해 주세요.', status: 404);
+    }
+  }
+
+  Future<ClaudePhoneLogin> claudePhoneLogin({
+    required String action,
+    required String id,
+    required String machineId,
+    required String slotId,
+    String? label,
+    String? machine,
+    Duration? timeout = const Duration(seconds: 20),
+  }) async {
+    if (isClosed) throw const ServerException('연결이 바뀌었어요. 계정 목록을 다시 열어 주세요.');
+    if (!const {'start', 'status', 'code', 'cancel', 'confirm'}.contains(action) ||
+        machineId.isEmpty || slotId.isEmpty || id.isEmpty ||
+        (action == 'start' && (id != slotId || label == null || !claudeLoginNonce(label))) ||
+        (machine != null && machine != '~$machineId')) {
+      throw const ServerException('로그인할 기기와 계정을 확인하지 못했어요.');
+    }
+    if (action == 'code' && (label == null || !claudeLoginCode(label))) {
+      throw ServerException(claudeLoginError('phone_login_invalid_code'), code: 'phone_login_invalid_code');
+    }
+    final http.Response response;
+    try {
+      final request = _client.post(
+        uri('settings/action', machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'action': 'claude-phone-login-$action', 'id': id,
+          'label': ?(action == 'start' ? jsonEncode({'nonce': label, 'machine_id': machineId}) : label)}),
+      );
+      response = await (timeout == null ? request : request.timeout(timeout));
+    } catch (_) {
+      throw const ServerException('기기에 닿지 못했어요. 연결을 확인하고 다시 시도해 주세요.');
+    }
+    if (isClosed) throw const ServerException('연결이 바뀌었어요. 계정 목록을 다시 열어 주세요.');
+    if (response.statusCode != 200) {
+      throw ServerException(switch (response.statusCode) {
+        400 || 404 || 405 => '이 기기의 KASA를 새 판으로 업데이트해 주세요.',
+        401 || 403 => '접근할 수 없어요. KASA 계정과 기기 연결을 확인해 주세요.',
+        _ => '기기에 닿지 못했어요. 연결을 확인하고 다시 시도해 주세요.',
+      }, status: response.statusCode);
+    }
+    try {
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      if (body is! Map) throw const FormatException('phone_login_reply');
+      if (body['ok'] != true) {
+        final code = body['error_code'] is String ? body['error_code'] as String : null;
+        throw ServerException(claudeLoginError(code), code: code);
+      }
+      final login = ClaudePhoneLogin.parse(body['phone_login']);
+      if (login.machineId != machineId || login.slotId != slotId ||
+          (action != 'start' && login.flowId != id)) {
+        throw const ServerException('응답한 기기나 계정이 달라요. 목록을 새로 받아 주세요.');
+      }
+      return login;
+    } on FormatException {
+      throw const ServerException('로그인 응답을 확인하지 못했어요. 이 기기의 KASA를 업데이트해 주세요.');
     }
   }
 

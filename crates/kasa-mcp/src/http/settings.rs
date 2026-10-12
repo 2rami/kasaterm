@@ -494,9 +494,11 @@ async fn settings_character_handler(
 /// 를 다시 읽는다. GUI 가 세 캐시(테마 해석·로스터·GPU)를 비운 **뒤에** 이 응답이
 /// 나가므로 그 다음 읽기는 새 상태가 보장되고, 스냅샷 만드는 코드가 두 벌이 되는
 /// 것도 막는다.
-async fn settings_action_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
-    let cors = || [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-    let bad = |msg: String| (cors(), Json(serde_json::json!({ "ok": false, "error": msg })));
+async fn settings_action_handler(backend: Arc<dyn Backend>, auth: Option<MobileAuth>, body: String) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    let cors = || [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"), (header::CACHE_CONTROL, "no-store")];
+    let answer = |status, value| (status, cors(), Json(value));
+    let bad = |msg: String| answer(StatusCode::OK, serde_json::json!({ "ok": false, "error": msg }));
     let v: serde_json::Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(e) => return bad(format!("bad body: {e}")),
@@ -504,6 +506,13 @@ async fn settings_action_handler(backend: Arc<dyn Backend>, body: String) -> imp
     let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("").trim();
     if action.is_empty() {
         return bad("action required".to_string());
+    }
+    let phone_login = action.starts_with("claude-phone-login-");
+    if phone_login && auth.as_ref().is_some_and(|auth| !auth.0.owner) {
+        return answer(StatusCode::FORBIDDEN, serde_json::json!({"ok": false, "error_code": "phone_login_owner_only"}));
+    }
+    if phone_login && body.len() > 16 * 1024 {
+        return answer(StatusCode::BAD_REQUEST, serde_json::json!({"ok": false, "error_code": "phone_login_invalid"}));
     }
     // 테마 폴더 이름은 경로 조각이 된다. 탈출은 저장 쪽(`safe_theme_id`)도 막지만
     // 여기서 먼저 걸러 **이유를 웹에 돌려준다** — 저쪽 거부는 토스트로만 말한다.
@@ -513,7 +522,9 @@ async fn settings_action_handler(backend: Arc<dyn Backend>, body: String) -> imp
     }
     let label = v.get("label").and_then(|x| x.as_str());
     match backend.settings_action(action, id, label) {
-        Ok(v) => (cors(), Json(v)),
+        Ok(v) => answer(StatusCode::OK, v),
+        // A transport error may quote request fields; an authorization code must not be echoed.
+        Err(_) if phone_login => answer(StatusCode::OK, serde_json::json!({"ok": false, "error_code": "phone_login_unavailable"})),
         Err(e) => bad(e.to_string()),
     }
 }
@@ -553,8 +564,8 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         )
         .route(
             "/settings/action",
-            post(move |body: String| {
-                settings_action_handler(settings_action_backend.clone(), body)
+            post(move |auth: Option<axum::Extension<MobileAuth>>, body: String| {
+                settings_action_handler(settings_action_backend.clone(), auth.map(|value| value.0), body)
             }),
         )
         .route(
@@ -626,6 +637,72 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct LoginDesk {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl Backend for LoginDesk {
+        fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn settings_action(&self, _: &str, _: Option<&str>, label: Option<&str>) -> anyhow::Result<serde_json::Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.fail { anyhow::bail!("transport failed: {}", label.unwrap_or_default()); }
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    async fn login_action(desk: Arc<LoginDesk>, owner: Option<bool>, action: &str, label: &str) -> axum::response::Response {
+        use tower::ServiceExt;
+        let backend: Arc<dyn Backend> = desk;
+        let mut request = axum::http::Request::builder()
+            .method("POST").uri("/settings/action")
+            .body(axum::body::Body::from(serde_json::json!({"action": action, "id": "flow", "label": label}).to_string())).unwrap();
+        if let Some(owner) = owner {
+            request.extensions_mut().insert(MobileAuth(crate::mobile::MobileUser {
+                name: "fixture".into(), slug: "fixture-only".into(), created: 0, owner,
+            }));
+        }
+        routes(&backend).oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn phone_login_is_owner_only_and_never_cached() {
+        use std::sync::atomic::Ordering;
+        let desk = Arc::new(LoginDesk::default());
+        for action in ["start", "status", "code", "cancel", "confirm"] {
+            let response = login_action(desk.clone(), Some(false), &format!("claude-phone-login-{action}"), "fixture-code").await;
+            assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        assert_eq!(desk.calls.load(Ordering::Relaxed), 0);
+        for owner in [Some(true), None] {
+            let response = login_action(desk.clone(), owner, "claude-phone-login-status", "").await;
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        assert_eq!(desk.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn phone_login_errors_do_not_echo_codes_or_forward_oversized_requests() {
+        let desk = Arc::new(LoginDesk { fail: true, ..Default::default() });
+        let response = login_action(desk.clone(), Some(true), "claude-phone-login-code", "fixture-sensitive-code").await;
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("phone_login_unavailable"));
+        assert!(!body.contains("fixture-sensitive-code"));
+        let response = login_action(desk.clone(), Some(true), "claude-phone-login-code", &"x".repeat(17 * 1024)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(desk.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn first_valid_json_skips_broken_files() {

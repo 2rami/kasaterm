@@ -36,6 +36,7 @@
 - `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 문서(마크다운) 창 + 별도창 공용 틀(`AuxWindows`, 이벤트 위임, documents.json)
 - `auxterm.rs` — 터미널 pane 을 별도 OS 창으로 뗀다(undock/dock). 창은 `pane_id` 만 들고 셀·PTY 는 App.ws/App.pty 에 그대로 — 그리기는 본창과 같은 `compose_terminal_pane`
 - `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
+- `settings/phone_login.rs` — 폰 Claude 재로그인의 요청별 상태·CLI 점유·확인·취소. 자격 반영은 `claude_auth/phone_credentials.rs`, 폰 화면은 `mobile/lib/screens/claude_accounts.dart`; 계약은 `docs/mobile-claude-login.md`.
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
 - `transcript` — Claude/Codex 기록(jsonl) → board 스냅샷 추출. 본체는 `crates/kasa-agents/src/transcript.rs`(main.rs 가 `use kasa_agents::transcript` 로 옛 경로 유지), `transcript/signals.rs`는 정상 종료·중단 구분과 Codex 질문 호출/접수/답변 추적
 - `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다

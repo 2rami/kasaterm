@@ -323,13 +323,25 @@ async fn a_refresh_stuck_close_to_expiry_alerts_once() {
 
 struct Docs(std::sync::Mutex<HashMap<String, Value>>);
 
+#[test]
+fn a_store_commit_requires_the_complete_original_document() {
+    let old = slot_doc("old", None, HOUR as i64);
+    let mut changed = old.clone();
+    changed["claudeAiOauth"]["refreshToken"] = json!("new-phone-refresh");
+    assert!(matches_document(Read::Present(old.clone()), Some(&old)));
+    assert!(!matches_document(Read::Present(changed), Some(&old)));
+    let mut changed = old.clone();
+    changed["mcpOAuth"]["server|abc"]["accessToken"] = json!("new-connector-token");
+    assert!(!matches_document(Read::Present(changed), Some(&old)));
+    assert!(!matches_document(Read::Unknown, None));
+    assert!(!matches_document(Read::Absent, Some(&old)));
+    assert!(matches_document(Read::Absent, None));
+    assert!(!Local.compare_and_write(&Slot {id:"fixture".into(),store:None,table_key:None}, None, &old));
+}
+
 impl Stores for Docs {
     fn read(&self, slot: &Slot) -> Read {
         self.0.lock().unwrap().get(&slot.id).cloned().map_or(Read::Absent, Read::Present)
-    }
-    fn write(&self, slot: &Slot, doc: &Value) -> bool {
-        self.0.lock().unwrap().insert(slot.id.clone(), doc.clone());
-        true
     }
     fn same(&self, _: &Slot) -> bool {
         true

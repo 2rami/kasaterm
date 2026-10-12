@@ -28,5 +28,13 @@ void main() {
       expect(AppLink.parse(Uri.parse('https://h/u/abc/')), isNull);
       expect(AppLink.parse(null), isNull);
     });
+
+    test('Claude account links carry only a navigation destination', () {
+      final link = AppLink.parse(Uri.parse('kasaterm://open?agent_accounts=1&slot=untrusted&code=untrusted'));
+      expect(link!.agentAccounts, isTrue);
+      expect(link.pane, isNull);
+      expect(AppLink.parse(Uri.parse('/?agent_accounts=1'))!.agentAccounts, isTrue);
+      expect(AppLink.parse(Uri.parse('https://other.invalid/?agent_accounts=1')), isNull);
+    });
   });
 }
