@@ -4,6 +4,8 @@
 use super::*;
 use crate::render::pane_identity;
 
+pub(crate) mod phone_login;
+
 type Rect = (f32, f32, f32, f32);
 
 fn inside(r: Rect, p: (f32, f32)) -> bool {
@@ -4078,6 +4080,7 @@ pub(crate) fn submit_login_code(code: &str) -> bool {
 }
 
 pub(crate) fn cancel_hidden_login() {
+    if phone_login::cancel_from_local() { return; }
     let pgid = login_cell().lock().ok().and_then(|mut cell| {
         cell.0 = None;
         // stdin 을 놓아 EOF 를 준다 — 코드를 기다리던 CLI 는 이걸로 즉시 끝난다.
@@ -4203,7 +4206,7 @@ fn spawn_hidden_login(
     if cell
         .0
         .as_ref()
-        .is_some_and(|job| job.state == LoginState::Running)
+        .is_some_and(|job| matches!(job.state, LoginState::Running | LoginState::NeedCode))
     {
         return;
     }

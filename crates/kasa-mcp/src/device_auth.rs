@@ -37,10 +37,16 @@ pub fn cancel_oauth() {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Stamp {
     epoch: u64,
     identity: String,
+}
+
+impl std::fmt::Debug for Stamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Stamp([redacted])")
+    }
 }
 
 impl Stamp {
@@ -81,7 +87,14 @@ pub(crate) fn capture() -> Option<(DeviceCred, Stamp)> {
     Some((credential, Stamp { epoch: EPOCH.load(Ordering::Acquire), identity }))
 }
 
-pub(crate) fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+/// A completion must not outlive the device login that authorized it.
+pub fn current_stamp() -> Option<Stamp> {
+    capture().map(|(_, stamp)| stamp)
+}
+
+/// Keeps a bounded credential update indivisible with this process's logout or account change.
+/// The operation must not call back into device authentication: the credential lock is held.
+pub fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     if !sync_environment_allowed() { return Err("account synchronization disabled in isolated run".into()); }
     let _guard = CREDENTIALS.lock().map_err(|_| "credential lock unavailable")?;
     let credential = current().ok_or("account changed")?;
@@ -95,7 +108,7 @@ pub(crate) fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<
 }
 
 /// Narrow check for other crates: the stamp still names the signed-in device account.
-/// Callers that need to act under the credential stay inside this crate via `with_current`.
+/// A subsequent credential update must use `with_current` rather than rely on this earlier check.
 pub fn stamp_is_current(stamp: &Stamp) -> bool {
     with_current(stamp, || Ok(())).is_ok()
 }
@@ -399,6 +412,14 @@ mod tests {
             assert!(sync_isolated(|name| name == variable), "{variable}");
         }
         assert!(capture().is_none());
+        assert!(current_stamp().is_none());
+        let called = std::cell::Cell::new(false);
+        assert!(with_current(&Stamp::fixture(), || {
+            called.set(true);
+            Ok(())
+        }).is_err());
+        assert!(!called.get());
+        assert_eq!(format!("{:?}", Stamp::fixture()), "Stamp([redacted])");
     }
 
     #[test]

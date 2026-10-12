@@ -50,6 +50,7 @@
 //! 지문은 값이 아니라 **해시**만 남긴다 — 토큰을 우리 파일에 두 벌로 늘리지 않는다.
 
 use std::path::{Path, PathBuf};
+pub(crate) mod phone_credentials;
 
 /// 지문 파일이 사는 폴더 이름. 계정 id 로는 못 쓰는 이름이라(슬롯 id 는 `acct-N`)
 /// 실제 계정과 충돌하지 않는다. 자격증명은 여기 살지 않는다 — 작업대는 claude 의

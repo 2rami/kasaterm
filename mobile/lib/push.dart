@@ -233,6 +233,10 @@ class PushBridge {
   }
 
   void _tap(Map<String, Object?> m) {
+    if (m['kind'] == 'agent_chain') {
+      _onTap?.call(const AppLink(agentAccounts: true));
+      return;
+    }
     final approval = m['approval'] as String?;
     if (m['kind'] == 'approval' && approval != null && approval.isNotEmpty) {
       _onTap?.call(AppLink(approval: approval));

@@ -933,8 +933,7 @@ impl PtyBackend {
         let (tx, _rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketSettingsAction(
             "refresh-assets".to_string(),
-            None,
-            None,
+            crate::SettingsActionArgs { id: None, label: None },
             tx,
         ));
     }
@@ -2655,8 +2654,7 @@ impl Backend for PtyBackend {
         self.proxy
             .send_event(UserEvent::SocketSettingsAction(
                 action.to_string(),
-                id.map(str::to_string),
-                label.map(str::to_string),
+                crate::SettingsActionArgs { id: id.map(str::to_string), label: label.map(str::to_string) },
                 tx,
             ))
             .map_err(|_| anyhow::anyhow!("gui event loop is gone"))?;
@@ -2664,10 +2662,13 @@ impl Backend for PtyBackend {
         // 오래 걸릴 수 있어 여유를 더 준다. 무한 대기는 여전히 안 된다(소켓 워커가
         // 물리면 다른 명령까지 함께 멈춘다).
         let mut value = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            // Login capabilities belong to this reply, never the shared settings metadata cell.
+            Ok(Ok(v)) if action.starts_with("claude-phone-login-") => v,
             Ok(Ok(v)) => crate::settings::merge_web_codes(v),
             // 거부도 **JSON 으로** 돌려준다. `Err` 로 올려보내면 문자열 하나만 남아
             // 문구 코드를 실을 자리가 없다(웹은 그 코드로 자기 말로 옮긴다) — 회신
             // 형식은 HTTP 쪽이 만들던 `{ok:false, error}` 와 같다.
+            Ok(Err(_)) if action.starts_with("claude-phone-login-") => serde_json::json!({"ok": false, "error_code": "phone_login_unavailable"}),
             Ok(Err(e)) => crate::settings::reject_json(e),
             Err(_) => anyhow::bail!("시간 안에 안 끝났어요"),
         };

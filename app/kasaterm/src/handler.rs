@@ -1145,6 +1145,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply_account_sync_report(report);
                 return;
             }
+            UserEvent::PhoneLoginReady(ready) => {
+                self.apply_phone_login_ready(ready);
+                return;
+            }
             UserEvent::SocketSwapCharacter(pane, character) => {
                 self.swap_character(pane, character);
                 return;
@@ -1524,7 +1528,20 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(self.apply_account_sync(request.clone()));
                 return;
             }
-            UserEvent::SocketSettingsAction(action, id, label, reply) => {
+            UserEvent::SocketSettingsAction(action, args, reply) => {
+                let (id, label) = (&args.id, &args.label);
+                if action.starts_with("claude-phone-login-") {
+                    let value = match self.phone_login_action(action, id.as_deref().unwrap_or_default(), label.as_deref().unwrap_or_default()) {
+                        Ok(value) => value,
+                        Err(code) => serde_json::json!({"ok": false, "error_code": code, "error": crate::settings::phone_login::error_message(code)}),
+                    };
+                    let _ = reply.send(Ok(value));
+                    if action != "claude-phone-login-status" {
+                        self.chrome_dirty = true;
+                        if let Some(window) = &self.window { window.request_redraw(); }
+                    }
+                    return;
+                }
                 // 성공 판정을 토스트로 하지 않는다 — Step 5 의 캐릭터 저장과 다른
                 // 점이다. 거기선 토스트가 뜨는 것 자체가 거부였지만, 여기선
                 // `select_theme`·`delete_theme` 이 **성공에도** 토스트를 띄운다.

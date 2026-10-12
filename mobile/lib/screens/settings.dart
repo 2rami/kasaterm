@@ -13,6 +13,7 @@ import '../status_style.dart';
 import 'account_profile.dart';
 import 'browser_device.dart';
 import 'character_picks.dart';
+import 'claude_accounts.dart';
 import 'device_names.dart';
 import 'dev_server.dart';
 import '../theme_prefs.dart';
@@ -646,6 +647,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 데스크톱에서 일어나는 일 — 새 창 학생·학생이 여는 페이지·개발 서버.
   List<Widget> _desktopRows(int tone) {
     return [
+      SettingsRow(
+        key: const Key('claude-accounts'),
+        tone: tone,
+        icon: Icons.person_outline_rounded,
+        title: 'Claude 계정',
+        subtitle: '기기에 등록된 계정을 폰에서 다시 로그인',
+        chevron: true,
+        onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => ClaudeAccountsScreen(server: server),
+        )),
+      ),
       // 학생 명단은 계정 공통 설정이라 계정으로 붙었을 때만 — 옛 주소 연결은 계정 동기화가 없다.
       if (server.account case final account?)
         SettingsRow(

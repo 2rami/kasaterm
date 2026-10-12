@@ -797,14 +797,20 @@ fn write_store(store: Option<&Path>, doc: &Value) -> bool {
     let Ok(mut child) = crate::no_window_command("security")
         .arg("-i")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
     else {
         return false;
     };
     let wrote = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(line.as_bytes()).is_ok());
-    child.wait().is_ok_and(|status| status.success()) && wrote
+    if !wrote {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    }
+    bounded_child_output(child, Duration::from_secs(5), 64 * 1024)
+        .is_ok_and(|(status, _)| status.success())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -846,7 +852,8 @@ pub(crate) struct Slot {
 /// 사용자 키체인을 건드리면 안 된다.
 pub(crate) trait Stores {
     fn read(&self, slot: &Slot) -> Read;
-    fn write(&self, slot: &Slot, doc: &Value) -> bool;
+    // Read-only recovery probes cannot acquire a write capability.
+    fn compare_and_write(&self, _slot: &Slot, _expected: Option<&Value>, _doc: &Value) -> bool { false }
     /// 쓰기 직전에 그 슬롯이 아직 같은 저장소를 가리키나 — 그 사이 계정을 바꿨으면 작업대에는
     /// 다른 계정이 실려 있다.
     fn same(&self, slot: &Slot) -> bool;
@@ -859,14 +866,34 @@ impl Stores for Local {
         read_store(slot.store.as_deref())
     }
 
-    fn write(&self, slot: &Slot, doc: &Value) -> bool {
-        write_store(slot.store.as_deref(), doc)
-    }
-
     fn same(&self, slot: &Slot) -> bool {
         load_settings().is_some_and(|(path, settings)| {
-            crate::agent_accounts::claude_store(path.parent(), &settings, &slot.id) == slot.store
+            local_slots(path.parent(), &settings).iter().any(|current|
+                current.id == slot.id && current.store == slot.store && current.table_key == slot.table_key)
         })
+    }
+}
+
+struct GuardedLocal<'a>(&'a crate::device_auth::Stamp);
+
+impl Stores for GuardedLocal<'_> {
+    fn read(&self, slot: &Slot) -> Read { Local.read(slot) }
+    fn same(&self, slot: &Slot) -> bool { Local.same(slot) }
+
+    fn compare_and_write(&self, slot: &Slot, expected: Option<&Value>, doc: &Value) -> bool {
+        // Phone promotion holds this same device lock; a delayed pull must not erase a new login.
+        crate::device_auth::with_current(self.0, || {
+            if !self.same(slot) || !matches_document(self.read(slot), expected) { return Ok(false); }
+            Ok(write_store(slot.store.as_deref(), doc))
+        }).unwrap_or(false)
+    }
+}
+
+fn matches_document(current: Read, expected: Option<&Value>) -> bool {
+    match (current, expected) {
+        (Read::Present(current), Some(expected)) => &current == expected,
+        (Read::Absent, None) => true,
+        _ => false,
     }
 }
 
@@ -1049,7 +1076,7 @@ pub(crate) async fn sync_once(
         if text(&current, "refreshToken") != Some(offer.refresh_token.as_str()) {
             continue;
         }
-        if stores.write(slot, &with_access(Some(&current), &access)) {
+        if stores.compare_and_write(slot, Some(&current), &with_access(Some(&current), &access)) {
             eprintln!("[agent-chains] {} 슬롯 사슬을 관문에 맡겼어요", display(&slot.id));
             learned.insert(slot.id.clone(), key);
         }
@@ -1088,7 +1115,7 @@ pub(crate) async fn sync_once(
         {
             continue;
         }
-        if stores.write(slot, &with_access(current.as_ref(), access)) {
+        if stores.compare_and_write(slot, current.as_ref(), &with_access(current.as_ref(), access)) {
             eprintln!("[agent-chains] {} 슬롯에 관문 접근 토큰을 실었어요", display(&slot.id));
             if mapped.as_ref() != Some(&key) {
                 learned.insert(slot.id.clone(), key);
@@ -1185,14 +1212,15 @@ pub fn take_alerts() -> Vec<Alert> {
 
 /// 이 기기 슬롯으로 한 주기를 돌고, 새로 안 자리를 적는다. 적기 전에 파일을 다시 읽는다 — 그 사이
 /// 설정 화면이 `adopt` 로 적은 자리를 덮지 않게.
-async fn sync_local(gateway: &Gateway<'_>, authorized: &(dyn Fn() -> bool + Sync)) -> Result<(), SyncError> {
+async fn sync_local(gateway: &Gateway<'_>, stamp: &crate::device_auth::Stamp) -> Result<(), SyncError> {
     let Some((path, settings)) = load_settings() else {
         recovery::ledger().manage(Vec::new());
         return Ok(());
     };
     let slots = local_slots(path.parent(), &settings);
     let mut map = load_map();
-    let (outcome, chains) = match sync_once(gateway, &slots, &map, &Local, authorized, recovery::ledger()).await {
+    let authorized = || crate::device_auth::stamp_is_current(stamp);
+    let (outcome, chains) = match sync_once(gateway, &slots, &map, &GuardedLocal(stamp), &authorized, recovery::ledger()).await {
         Ok((learned, chains)) => {
             if !learned.is_empty() {
                 map = load_map();
@@ -1240,8 +1268,7 @@ pub fn spawn() {
             if let Some((cred, stamp)) = crate::device_auth::capture() {
                 recovery::ledger().begin(&stamp);
                 let gateway = Gateway::new(&cred.relay, &cred.token);
-                let authorized = || crate::device_auth::stamp_is_current(&stamp);
-                match runtime.block_on(sync_local(&gateway, &authorized)) {
+                match runtime.block_on(sync_local(&gateway, &stamp)) {
                     Ok(()) => unsupported_said = false,
                     Err(SyncError::Unauthorized) => {
                         recovery::ledger().clear();

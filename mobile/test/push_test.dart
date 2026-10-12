@@ -92,6 +92,25 @@ void main() {
     expect(events, ['first:register', 'first:remove', 'second:register']);
   });
 
+  test('agent chain notifications open the account list without choosing a target', () async {
+    final bridge = PushBridge.forTesting();
+    bridge.accountApi = (s) => RelayAccountApi(s.origin, session: s,
+      client: MockClient((_) async => http.Response('{"ok":true}', 200)));
+    final links = <AppLink>[];
+    await bridge.bindAccount(session(), (link) async => links.add(link));
+    const codec = StandardMethodCodec();
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.handlePlatformMessage(
+      'kasaterm/push', codec.encodeMethodCall(const MethodCall('onTap', {
+        'kind': 'agent_chain', 'machine': '~untrusted', 'slot': 'untrusted',
+        'pane': '%7', 'url': 'https://untrusted.invalid/',
+      })), (_) {},
+    );
+    expect(links.single.agentAccounts, isTrue);
+    expect(links.single.machine, isNull);
+    expect(links.single.pane, isNull);
+    expect(links.single.url, isNull);
+  });
+
   test(
     'failed disconnect cleanup is retried before another server registers',
     () async {

@@ -1166,10 +1166,6 @@ mod tests {
                 .map_or(Read::Absent, Read::Present)
         }
 
-        fn write(&self, _: &Slot, _: &serde_json::Value) -> bool {
-            false
-        }
-
         fn same(&self, _: &Slot) -> bool {
             true
         }
@@ -1184,10 +1180,6 @@ mod tests {
         fn read(&self, _: &Slot) -> Read {
             self.same.store(false, Ordering::SeqCst);
             Read::Present(self.doc.clone())
-        }
-
-        fn write(&self, _: &Slot, _: &serde_json::Value) -> bool {
-            false
         }
 
         fn same(&self, _: &Slot) -> bool {
