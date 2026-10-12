@@ -408,6 +408,8 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(5)); continue;
                     };
                     std::thread::spawn(move || {
+                        // macOS inherits O_NONBLOCK; an early read must not mistake WouldBlock for EOF.
+                        socket.set_nonblocking(false).unwrap();
                         let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
                         let mut request = Vec::new();
                         while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
