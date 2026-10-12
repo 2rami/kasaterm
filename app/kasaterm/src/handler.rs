@@ -6391,8 +6391,11 @@ impl ApplicationHandler<UserEvent> for App {
                         })
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        // A tab press must not prime a later handle double-click.
-                        self.last_left_click = None;
+                        // Visible tabs replace the floating handle, so keep their zoom gesture.
+                        if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
+                            self.toggle_pane_zoom(&pid);
+                            return;
+                        }
                         // Focus the pane now; arm a tab drag. A plain press
                         // (no movement) switches to this tab on release; a
                         // drag past the threshold reorders instead.
