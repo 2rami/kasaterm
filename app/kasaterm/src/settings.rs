@@ -1389,6 +1389,10 @@ impl App {
                 if let Some(path) = dir.as_ref() {
                     let _ = std::fs::create_dir_all(path);
                 }
+                if p == AccountProvider::Claude {
+                    self.cancel_account_sync();
+                    remember_account_sync_identity(&id, None);
+                }
                 spawn_hidden_login(p, id, dir, browser, LoginOpts::default());
                 self.set_toast(
                     match browser {
@@ -1546,6 +1550,7 @@ impl App {
                 }
             }
             SettingsAction::RemoveClaudeAccount(id) => {
+                self.cancel_account_sync();
                 self.set_claude_accounts.retain(|a| a.id != id);
                 // 목록에서 제거해도 실행 중인 로그인과 대화는 그대로 보존한다.
                 if self.set_claude_account == id {
@@ -2239,27 +2244,26 @@ impl App {
                 }
                 Ok(awaiting || self.set_claude_account == id)
             }
-            // 다른 기기가 계정을 바꿨다 — 같은 신원(id 자리에 이메일·조직)이나 별명의 내
-            // 슬롯으로 따라간다. 확인 창 없이 바로 적용한다(그쪽에서 이미 정한 일이다).
-            "claude-account-identity" => {
+            // An email alone can name both personal and team slots; an org alone can name many users.
+            "claude-account-identity" => Err(reject("account_sync_update_needed",
+                "계정을 보낸 기기의 카사텀을 업데이트해 주세요. 이메일·조직을 함께 확인해야 해요".into())),
+            "claude-account-sync-v1" => {
                 let want = id.trim();
-                let Some(slot) = self.peer_account_slot(want, &arg) else {
-                    return Err(no_slot(if want.is_empty() { arg.as_str() } else { want }));
-                };
-                if slot == self.set_claude_account {
-                    return Ok(true);
-                }
+                let (slot, expected) = self.peer_account_sync_slot(want, &arg)
+                    .map_err(|error| reject(error.code(), error.message().into()))?;
+                let same = slot == self.set_claude_account;
                 self.account_switch_from_peer = true;
-                let (_, to_label, restarted, deferred, focused, live) =
-                    self.apply_claude_account_switch(&slot);
+                let result = self.apply_claude_account_switch_checked(&slot, Some(&expected));
                 self.account_switch_from_peer = false;
-                if !live {
-                    return Err(reject("account_switch_failed", "계정을 전환하지 못했어요. 로그인 상태를 확인해 주세요".into()));
+                let (_, to_label, restarted, deferred, focused, live) = result
+                    .map_err(|error| reject(error.failure_code(), error.failure_message().into()))?;
+                if !same {
+                    self.account_flash = Some(std::time::Instant::now());
                 }
-                self.account_flash = Some(std::time::Instant::now());
+                put_web_code("account_sync_identity", serde_json::Value::String(want.into()));
                 self.set_toast(format!(
                     "다른 기기를 따라 {}",
-                    crate::session::account_switch_toast(&to_label, false, restarted, deferred, focused, live)
+                    crate::session::account_switch_toast(&to_label, same, restarted, deferred, focused, live)
                 ));
                 self.chrome_dirty = true;
                 Ok(true)
@@ -4565,7 +4569,8 @@ fn verify_login_identity(
     use kasa_mcp::agent_accounts::account_key;
     let got = match provider {
         AccountProvider::Claude => match slot_identity_full(dir) {
-            SlotIdentity::Known { email, org } => {
+            SlotIdentity::Known { email, org, sync_identity } => {
+                remember_account_sync_identity(id, sync_identity);
                 remember_account_identity(id, &email, &org);
                 Some((account_key("claude", &email, &org, ""), email))
             }
@@ -4928,18 +4933,14 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         // `read_claude_credentials` 가 계정 칸까지 맞춰 해결), 일시 실패는 표에 남은
         // 마지막 진짜 신원으로 그린다 — 틀린 이메일보다 옛 진짜 값이 낫다.
         let probe = match slot_identity_full(dir.as_deref()) {
-            SlotIdentity::Known { email, org } => Some(AuthProbe {
-                logged_in: true,
-                verified: true,
-                email,
-                org,
-            }),
-            SlotIdentity::NoToken => Some(AuthProbe {
-                logged_in: false,
-                verified: true,
-                email: String::new(),
-                org: String::new(),
-            }),
+            SlotIdentity::Known { email, org, sync_identity } => {
+                if dir.is_some() { remember_account_sync_identity(&key, sync_identity); }
+                Some(AuthProbe { logged_in: true, verified: true, email, org })
+            }
+            SlotIdentity::NoToken => {
+                if dir.is_some() { remember_account_sync_identity(&key, None); }
+                Some(AuthProbe { logged_in: false, verified: true, email: String::new(), org: String::new() })
+            }
             SlotIdentity::Unavailable => {
                 let (email, org) = remembered_identity(&key);
                 (!email.is_empty()).then(|| AuthProbe {
@@ -5010,6 +5011,7 @@ enum SlotIdentity {
     Known {
         email: String,
         org: String,
+        sync_identity: Option<crate::session::AccountIdentity>,
     },
     /// 저장소에 토큰이 없다 — 로그인이 필요한 슬롯(껍데기).
     NoToken,
@@ -5048,6 +5050,7 @@ fn slot_identity_full(dir: Option<&std::path::Path>) -> SlotIdentity {
         return SlotIdentity::Known {
             email: field(&v, "email"),
             org: field(&v, "org"),
+            sync_identity: crate::session::AccountIdentity::from_profile(&v),
         };
     }
     if field(&v, "error") == "no token" {
@@ -5092,6 +5095,76 @@ pub(crate) fn account_identity(id: &str) -> Option<String> {
         Some(p) if !p.org.is_empty() && !p.org.contains(&p.email) => Some(p.org),
         Some(p) if !p.email.is_empty() => Some(p.email),
         _ => None,
+    }
+}
+
+pub(crate) fn account_sync_identity(id: &str) -> Option<crate::session::AccountIdentity> {
+    if !account_sync_probe_allowed() {
+        return None;
+    }
+    // The active row describes the workbench, which an outside /login may have replaced.
+    let identity = account_sync_identities().lock().ok()?.get(id).cloned();
+    if identity.is_none() { request_account_sync_identity(id); }
+    identity
+}
+
+fn account_sync_probe_allowed() -> bool {
+    !cfg!(test) && !crate::version::isolated_environment(|key| std::env::var_os(key).is_some())
+        && !["KASATERM_DEVICE_FILE", "KASATERM_MACHINES_FILE", "KASATERM_WINDOW_SIZE", "KASATERM_WINDOW_POS"]
+            .iter().any(|key| std::env::var_os(key).is_some())
+}
+
+pub(crate) fn request_account_sync_identity(id: &str) {
+    if !account_sync_probe_allowed() || id.is_empty() { return; }
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    let pending = PENDING.get_or_init(Default::default);
+    if !pending.lock().unwrap_or_else(|error| error.into_inner()).insert(id.to_string()) { return; }
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        struct Guard(&'static std::sync::Mutex<std::collections::HashSet<String>>, String);
+        impl Drop for Guard {
+            fn drop(&mut self) { self.0.lock().unwrap_or_else(|error| error.into_inner()).remove(&self.1); }
+        }
+        let _guard = Guard(pending, id.clone());
+        if sync_probe_needs_workbench(crate::claude_auth::workbench_account().as_deref(), &id) {
+            let _ = slot_identity_full(None);
+        }
+        if let Some(dir) = socket::claude_account_dir(&id) {
+            let identity = match slot_identity_full(Some(&dir)) {
+                SlotIdentity::Known { sync_identity, .. } => sync_identity,
+                _ => None,
+            };
+            remember_account_sync_identity(&id, identity);
+        }
+    });
+}
+
+fn sync_probe_needs_workbench(owner: Option<&str>, slot: &str) -> bool {
+    owner.is_none_or(|owner| owner.is_empty() || owner == slot)
+}
+
+#[cfg(test)]
+mod account_sync_probe_tests {
+    #[test]
+    fn missing_or_blank_ownership_still_probes_the_actual_workbench() {
+        assert!(super::sync_probe_needs_workbench(None, "b"));
+        assert!(super::sync_probe_needs_workbench(Some(""), "b"));
+        assert!(super::sync_probe_needs_workbench(Some("b"), "b"));
+        assert!(!super::sync_probe_needs_workbench(Some("a"), "b"));
+    }
+}
+
+fn account_sync_identities() -> &'static std::sync::Mutex<std::collections::HashMap<String, crate::session::AccountIdentity>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, crate::session::AccountIdentity>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn remember_account_sync_identity(id: &str, identity: Option<crate::session::AccountIdentity>) {
+    let Ok(mut cache) = account_sync_identities().lock() else { return };
+    if let Some(identity) = identity {
+        cache.insert(id.to_string(), identity);
+    } else {
+        cache.remove(id);
     }
 }
 
@@ -5233,6 +5306,7 @@ fn remembered_identity(id: &str) -> (String, String) {
 /// 같은 번호를 다시 쓰는 슬롯이 **옛 계정의 이메일로 불린다** — statusline 은 이 표만
 /// 보므로 화면이 조용히 거짓말을 한다.
 fn forget_account_email(id: &str) {
+    remember_account_sync_identity(id, None);
     let settings = socket::read_settings();
     for key in ["claude_account_emails", "claude_account_orgs"] {
         let Some(serde_json::Value::Object(mut m)) = settings.get(key).cloned() else {

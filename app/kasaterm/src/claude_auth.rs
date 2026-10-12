@@ -56,6 +56,12 @@ use std::path::{Path, PathBuf};
 /// 기본 자리다(모듈 머리말).
 pub(crate) const ACTIVE_SLOT: &str = "_active";
 
+fn credential_mutation() -> std::sync::MutexGuard<'static, ()> {
+    // The usage worker must not read back a half-finished GUI account switch.
+    static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    MUTATION.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// 처음 전환하기 전에 기본 자리에 있던 로그인을 떠 두는 금고. 등록 안 된 계정이라도
 /// 전환 한 번에 유실되지 않게 — 복구는 이 슬롯을 읽으면 된다.
 const DEFAULT_BACKUP_SLOT: &str = "_default-backup";
@@ -167,12 +173,39 @@ fn read_stamp_in(active: &Path) -> Option<(String, String)> {
     ))
 }
 
+#[cfg(test)]
 fn write_stamp_in(active: &Path, account: &str, digest: &str) {
+    write_stamp_with_identity_in(active, account, digest, None);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct IdentityKey {
+    account_uuid: String,
+    organization_uuid: String,
+}
+
+impl IdentityKey {
+    fn from_verified(identity: kasa_mcp::VerifiedClaudeIdentity) -> Self {
+        Self { account_uuid: identity.account_uuid, organization_uuid: identity.organization_uuid }
+    }
+}
+
+fn blob_identity_key(blob: &[u8]) -> Option<IdentityKey> {
+    verified_blob_identity(blob).map(IdentityKey::from_verified)
+}
+
+fn read_stamp_identity_in(active: &Path) -> Option<IdentityKey> {
+    let raw = std::fs::read_to_string(stamp_path_in(active)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    serde_json::from_value(value.get("identity")?.clone()).ok()
+}
+
+fn write_stamp_with_identity_in(active: &Path, account: &str, digest: &str, identity: Option<&IdentityKey>) {
     let p = stamp_path_in(active);
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let v = serde_json::json!({ "account": account, "digest": digest });
+    let v = serde_json::json!({ "account": account, "digest": digest, "identity": identity });
     let _ = std::fs::write(p, v.to_string());
 }
 
@@ -352,6 +385,7 @@ pub(crate) fn workbench_account() -> Option<String> {
 }
 
 pub(crate) fn recover_workbench_account(accounts: &[crate::socket::ClaudeAccount]) -> Option<String> {
+    let _mutation = credential_mutation();
     let stamp_home = active_dir()?;
     recover_workbench_account_in(
         &stamp_home,
@@ -383,7 +417,7 @@ fn recover_workbench_account_in(
         return None;
     }
     // A different workbench digest must remain pending so read-back saves refreshed tokens before switching away.
-    write_stamp_in(stamp_home, &id, &vault_digest);
+    write_stamp_with_identity_in(stamp_home, &id, &vault_digest, blob_identity_key(&current).as_ref());
     bump_workbench_generation();
     Some(id)
 }
@@ -501,6 +535,38 @@ pub(crate) enum SwapOutcome {
     VaultEmpty,
     /// 쓰기 실패 — keychain 이 막혔거나 경로를 못 만들었다.
     WriteFailed,
+    IdentityUnverified,
+    PreservationPending,
+    WorkbenchChanged,
+}
+
+impl SwapOutcome {
+    pub(crate) fn failure_code(self) -> &'static str {
+        match self {
+            Self::WorkbenchChanged => "account_sync_workbench_changed",
+            Self::PreservationPending => "account_sync_preservation_pending",
+            Self::IdentityUnverified => "account_sync_identity_unverified",
+            Self::WriteFailed => "account_sync_storage_failed",
+            _ => "account_switch_failed",
+        }
+    }
+
+    pub(crate) fn failure_message(self) -> &'static str {
+        match self {
+            Self::WorkbenchChanged => "현재 로그인이 다른 계정으로 바뀌어 보존했어요. 계정 화면에서 현재 로그인 계정을 추가·로그인한 뒤 그 계정을 먼저 선택해 주세요",
+            Self::PreservationPending => "현재 로그인을 안전하게 보관하기 전에는 전환하지 않아요. 신원을 다시 확인 중이니 잠시 뒤 같은 계정을 다시 선택해 주세요",
+            Self::IdentityUnverified => "계정 신원을 다시 확인 중이에요. 잠시 뒤 같은 계정을 다시 선택해 주세요",
+            Self::WriteFailed => "계정 저장소 접근·저장을 확인하지 못했어요. 저장소 접근을 확인한 뒤 다시 선택해 주세요",
+            _ => "선택한 계정에 로그인이 없어요. 계정 화면에서 로그인한 뒤 다시 선택해 주세요",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadBack {
+    Unchanged,
+    Saved,
+    Deferred(SwapOutcome),
 }
 
 /// 도는 세션이 갱신해 둔 자격증명을 **금고로 되받는다**. 전환 직전과 주기적으로
@@ -509,6 +575,7 @@ pub(crate) enum SwapOutcome {
 ///
 /// 반환: 되받았으면 true.
 pub(crate) fn read_back(vault_dir_of: impl Fn(&str) -> Option<PathBuf>) -> bool {
+    let _mutation = credential_mutation();
     let Some(stamp_home) = active_dir() else { return false };
     read_back_in(&stamp_home, workbench_store().as_deref(), vault_dir_of)
 }
@@ -518,32 +585,68 @@ fn read_back_in(
     store: Option<&Path>,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> bool {
+    read_back_verified_in(stamp_home, store, vault_dir_of, blob_identity_key) == ReadBack::Saved
+}
+
+fn read_back_verified_in(
+    stamp_home: &Path,
+    store: Option<&Path>,
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+    identity_of: impl Fn(&[u8]) -> Option<IdentityKey>,
+) -> ReadBack {
     let Some((stamped_account, stamped_digest)) = read_stamp_in(stamp_home) else {
         // 아직 한 번도 우리가 쓴 적 없는 작업대 — 되받을 정본이 없다.
-        return false;
+        return ReadBack::Unchanged;
     };
     if stamped_account.is_empty() {
-        return false;
+        return ReadBack::Unchanged;
     }
-    let Some(now) = read_credentials(store) else { return false };
+    let defer = ReadBack::Deferred(SwapOutcome::PreservationPending);
+    let Some(now) = read_credentials(store) else { return defer };
     let digest = digest_of(&now);
-    if digest == stamped_digest {
-        return false; // 우리가 넣은 그대로다.
-    }
-    // 달라졌다 = 그 계정으로 도는 세션이 갱신했다. 금고를 그 값으로 맞춘다 —
-    // 단 금고 쪽이 더 새것이면 손대지 않는다(옛 슬롯에 묶인 pane 이 금고를 먼저
-    // 갱신했을 수 있고, 그 위에 낡은 값을 덮으면 계정이 통째로 로그아웃된다).
-    let vault = vault_dir_of(&stamped_account);
-    if let Some(cur) = read_credentials(vault.as_deref()) {
-        if is_newer(&now, &cur) {
-            return false;
+    let Some(vault) = vault_dir_of(&stamped_account) else { return defer };
+    let Some(previous) = read_credentials(Some(&vault)) else { return defer };
+    let previous_digest = digest_of(&previous);
+    if digest == previous_digest {
+        if read_stamp_in(stamp_home).as_ref() != Some(&(stamped_account.clone(), stamped_digest.clone()))
+            || read_credentials(store).is_none_or(|current| digest_of(&current) != digest)
+            || read_credentials(Some(&vault)).is_none_or(|current| digest_of(&current) != digest) { return defer; }
+        if digest == stamped_digest && read_stamp_identity_in(stamp_home).is_none()
+            && read_credentials(store).is_some_and(|current| digest_of(&current) == digest)
+            && read_stamp_in(stamp_home).as_ref() == Some(&(stamped_account.clone(), stamped_digest.clone())) {
+            if let Some(identity) = identity_of(&now) {
+                write_stamp_with_identity_in(stamp_home, &stamped_account, &digest, Some(&identity));
+            }
         }
+        return ReadBack::Unchanged;
     }
-    if !write_credentials(vault.as_deref(), &now) {
-        return false;
+    let Some(identity) = identity_of(&now) else { return defer };
+    let stamped_identity = read_stamp_identity_in(stamp_home);
+    let previous_identity = identity_of(&previous)
+        .or_else(|| (previous_digest == stamped_digest).then(|| stamped_identity.clone()).flatten());
+    let expected = stamped_identity.as_ref().or(previous_identity.as_ref());
+    // An outside /login can replace the workbench with another account, not a token refresh.
+    if expected.is_some_and(|expected| expected != &identity)
+        || previous_identity.as_ref().is_some_and(|previous| previous != &identity) {
+        return ReadBack::Deferred(SwapOutcome::WorkbenchChanged);
     }
-    write_stamp_in(stamp_home, &stamped_account, &digest);
-    true
+    if expected.is_none() || previous_identity.is_none() {
+        return defer;
+    }
+    if read_stamp_in(stamp_home).as_ref() != Some(&(stamped_account.clone(), stamped_digest))
+        || read_credentials(store).is_none_or(|current| digest_of(&current) != digest)
+        || read_credentials(Some(&vault)).is_none_or(|current| digest_of(&current) != previous_digest) {
+        return defer;
+    }
+    if is_newer(&now, &previous) {
+        return ReadBack::Unchanged;
+    }
+    if !write_credentials(Some(&vault), &now)
+        || read_credentials(Some(&vault)).as_deref() != Some(now.as_slice()) {
+        return ReadBack::Deferred(SwapOutcome::WriteFailed);
+    }
+    write_stamp_with_identity_in(stamp_home, &stamped_account, &digest, Some(&identity));
+    ReadBack::Saved
 }
 
 /// 앱이 뜰 때·shim 을 다시 깔 때 작업대를 활성 계정으로 맞추고, pane 이 가리킬 경로를
@@ -557,12 +660,16 @@ pub(crate) fn ensure_active(
     if account_id.is_empty() {
         return Some(PathBuf::new());
     }
-    match swap_active(account_id, vault_dir_of) {
+    let _mutation = credential_mutation();
+    let Some(stamp_home) = active_dir() else { return None };
+    let outcome = swap_active_with_identity_in(&stamp_home, workbench_store().as_deref(), account_id,
+        vault_dir_of, None, blob_identity_key, false);
+    match outcome {
         // 빈 경로 = 작업대(기본 자리). shim 은 이 경우 env 를 아예 안 붙인다.
         SwapOutcome::Swapped | SwapOutcome::AlreadyActive => Some(PathBuf::new()),
-        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed
+        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed | SwapOutcome::IdentityUnverified | SwapOutcome::PreservationPending | SwapOutcome::WorkbenchChanged
             if workbench_account().as_deref() == Some(account_id) => Some(PathBuf::new()),
-        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed => None,
+        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed | SwapOutcome::IdentityUnverified | SwapOutcome::PreservationPending | SwapOutcome::WorkbenchChanged => None,
     }
 }
 
@@ -571,8 +678,51 @@ pub(crate) fn swap_active(
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> SwapOutcome {
+    let _mutation = credential_mutation();
     let Some(stamp_home) = active_dir() else { return SwapOutcome::WriteFailed };
     swap_active_in(&stamp_home, workbench_store().as_deref(), account_id, vault_dir_of)
+}
+
+fn verified_blob_identity(blob: &[u8]) -> Option<kasa_mcp::VerifiedClaudeIdentity> {
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let token = live_access_token_at(blob, now_ms)?;
+    kasa_mcp::verified_claude_identity_for_token(&token)
+}
+
+fn live_access_token_at(blob: &[u8], now_ms: u128) -> Option<String> {
+    if expires_at(blob).is_none_or(|expires| expires <= 0 || expires as u128 <= now_ms) { return None; }
+    let value: serde_json::Value = serde_json::from_slice(blob).ok()?;
+    let token = value.pointer("/claudeAiOauth/accessToken")
+        .or_else(|| value.get("accessToken"))?.as_str()?;
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+pub(crate) fn verified_workbench_identity() -> Option<kasa_mcp::VerifiedClaudeIdentity> {
+    if !account_sync_credentials_allowed() {
+        return None;
+    }
+    let _mutation = credential_mutation();
+    verified_blob_identity(&read_credentials(workbench_store().as_deref())?)
+}
+
+pub(crate) fn swap_active_verified(
+    account_id: &str,
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+    expected: &crate::session::AccountIdentity,
+) -> SwapOutcome {
+    if !account_sync_credentials_allowed() {
+        return SwapOutcome::IdentityUnverified;
+    }
+    let _mutation = credential_mutation();
+    let Some(stamp_home) = active_dir() else { return SwapOutcome::WriteFailed };
+    swap_active_checked_in(&stamp_home, workbench_store().as_deref(), account_id, vault_dir_of,
+        Some(&|blob| verified_blob_identity(blob).is_some_and(|actual| expected.matches_verified(actual))))
+}
+
+fn account_sync_credentials_allowed() -> bool {
+    !cfg!(test) && !crate::version::isolated_environment(|key| std::env::var_os(key).is_some())
+        && !["KASATERM_DEVICE_FILE", "KASATERM_MACHINES_FILE", "KASATERM_WINDOW_SIZE", "KASATERM_WINDOW_POS"]
+            .iter().any(|key| std::env::var_os(key).is_some())
 }
 
 fn swap_active_in(
@@ -581,26 +731,87 @@ fn swap_active_in(
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> SwapOutcome {
+    swap_active_checked_in(stamp_home, store, account_id, vault_dir_of, None)
+}
+
+fn swap_active_checked_in(
+    stamp_home: &Path,
+    store: Option<&Path>,
+    account_id: &str,
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+    verify: Option<&dyn Fn(&[u8]) -> bool>,
+) -> SwapOutcome {
+    swap_active_with_identity_in(stamp_home, store, account_id, vault_dir_of, verify, blob_identity_key, true)
+}
+
+fn swap_active_with_identity_in(
+    stamp_home: &Path,
+    store: Option<&Path>,
+    account_id: &str,
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+    verify: Option<&dyn Fn(&[u8]) -> bool>,
+    identity_of: impl Fn(&[u8]) -> Option<IdentityKey>,
+    explicit: bool,
+) -> SwapOutcome {
     if account_id.is_empty() {
         return SwapOutcome::VaultEmpty;
     }
+    let accepts = |blob: &[u8]| verify.is_none_or(|verify| verify(blob));
+    if verify.is_some() {
+        let target = vault_dir_of(account_id);
+        let candidate = read_credentials(target.as_deref());
+        if !candidate.as_deref().is_some_and(&accepts) {
+            return SwapOutcome::IdentityUnverified;
+        }
+        // Reapplying may retain a newer workbench, so proving the vault alone is insufficient.
+        if read_stamp_in(stamp_home).is_some_and(|(account, _)| account == account_id) {
+            let current = read_credentials(store);
+            if !current.as_deref().is_some_and(&accepts) {
+                if let (Some(target), Some(current)) = (candidate.as_deref().and_then(&identity_of), current.as_deref().and_then(&identity_of)) {
+                    if target != current { return SwapOutcome::WorkbenchChanged; }
+                }
+                return SwapOutcome::IdentityUnverified;
+            }
+        }
+    }
+    let workbench_before = read_credentials(store).map(|blob| digest_of(&blob));
     // 지문이 아직 없다 = 작업대를 한 번도 우리 것으로 채운 적이 없다. 기본 자리에
     // 있던 원래 로그인을 먼저 떠 둔다 — 등록 안 된 계정이었으면 이 백업이 유일한
     // 사본이 된다. 백업 금고가 이미 차 있으면 안 덮는다(첫 백업이 원본이다).
     if read_stamp_in(stamp_home).is_none_or(|(account, _)| account.is_empty()) {
         if let Some(original) = read_credentials(store) {
             let backup = vault_dir_of(DEFAULT_BACKUP_SLOT);
-            if backup.is_some() && read_credentials(backup.as_deref()).is_none() {
-                write_credentials(backup.as_deref(), &original);
+            let Some(backup) = backup else { return SwapOutcome::PreservationPending };
+            match read_credentials(Some(&backup)) {
+                Some(saved) if saved == original => {}
+                Some(_) => {
+                    if !explicit { return SwapOutcome::PreservationPending; }
+                    let Some(target) = vault_dir_of(account_id) else { return SwapOutcome::PreservationPending };
+                    if let ReadBack::Deferred(reason) = preserve_in_selected_slot(store, &target, &identity_of, SwapOutcome::PreservationPending) {
+                        return reason;
+                    }
+                }
+                None if write_credentials(Some(&backup), &original)
+                    && read_credentials(Some(&backup)).is_some_and(|saved| saved == original) => {}
+                None => return SwapOutcome::WriteFailed,
             }
         }
     }
     // 먼저 되받는다 — 지금 작업대에 있는 것이 떠나는 계정의 최신 토큰일 수 있다.
-    read_back_in(stamp_home, store, &vault_dir_of);
+    if let ReadBack::Deferred(reason) = read_back_verified_in(stamp_home, store, &vault_dir_of, &identity_of) {
+        if !explicit { return reason; }
+        let Some(target) = vault_dir_of(account_id) else { return reason };
+        if let ReadBack::Deferred(reason) = preserve_in_selected_slot(store, &target, &identity_of, reason) {
+            return reason;
+        }
+    }
     let vault = vault_dir_of(account_id);
     let Some(blob) = read_credentials(vault.as_deref()) else {
         return SwapOutcome::VaultEmpty;
     };
+    if !accepts(&blob) {
+        return SwapOutcome::IdentityUnverified;
+    }
     // 만료 시각이 없거나 0 이면 로그인 안 된 껍데기다(실측: acct-1 금고가
     // `expiresAt: 0` 으로 저장돼 있었다). 이걸 작업대에 덮으면 「전환했더니
     // 로그아웃」이 된다 — 전환을 거부하고 빈 금고 취급하면, 재시작 폴백이 그
@@ -610,9 +821,10 @@ fn swap_active_in(
         return SwapOutcome::VaultEmpty;
     }
     let digest = digest_of(&blob);
-    if read_stamp_in(stamp_home).is_some_and(|(a, d)| a == account_id && d == digest)
-        && read_credentials(store).is_some_and(|cur| digest_of(&cur) == digest)
+    if read_stamp_in(stamp_home).is_some_and(|(a, _)| a == account_id)
+        && read_credentials(store).is_some_and(|cur| digest_of(&cur) == digest && accepts(&cur))
     {
+        write_stamp_with_identity_in(stamp_home, account_id, &digest, identity_of(&blob).as_ref());
         return SwapOutcome::AlreadyActive;
     }
     // 같은 계정을 다시 적용하는데 작업대 쪽이 더 새것이면 덮지 않는다 — read_back
@@ -622,7 +834,17 @@ fn swap_active_in(
     if read_stamp_in(stamp_home).is_some_and(|(a, _)| a == account_id) {
         match read_credentials(store) {
             Some(cur) => {
-                if is_newer(&blob, &cur) || expires_at(&blob).zip(expires_at(&cur)).is_some_and(|(a, b)| a == b) {
+                if !accepts(&cur) { return SwapOutcome::IdentityUnverified; }
+                let same_identity = match (identity_of(&blob), identity_of(&cur)) {
+                    (Some(target), Some(current)) => target == current,
+                    _ if verify.is_none() && read_stamp_in(stamp_home).is_some_and(|(_, stamped)| stamped == digest_of(&cur)) => {
+                        // Startup may precede profile probing; retaining our exact bytes grants nothing new.
+                        return SwapOutcome::AlreadyActive;
+                    }
+                    _ => return SwapOutcome::IdentityUnverified,
+                };
+                if !same_identity && !explicit { return SwapOutcome::IdentityUnverified; }
+                if same_identity && (is_newer(&blob, &cur) || expires_at(&blob).zip(expires_at(&cur)).is_some_and(|(a, b)| a == b)) {
                     eprintln!(
                         "[account] {account_id} 재적용 — 작업대가 금고보다 새것이라 덮지 않음"
                     );
@@ -640,16 +862,50 @@ fn swap_active_in(
             }
         }
     }
+    if read_credentials(store).map(|current| digest_of(&current)) != workbench_before {
+        return SwapOutcome::PreservationPending;
+    }
     if !write_credentials(store, &blob) {
         return SwapOutcome::WriteFailed;
     }
-    write_stamp_in(stamp_home, account_id, &digest);
-    eprintln!(
-        "[account] 작업대 ← {account_id} 금고 (digest {}.., 만료 {:?})",
-        &digest[..8],
-        expires_at(&blob)
-    );
+    // Ownership must follow a successful write even if the final proof read is unavailable.
+    write_stamp_with_identity_in(stamp_home, account_id, &digest, identity_of(&blob).as_ref());
+    if verify.is_some() && !read_credentials(store).as_deref().is_some_and(&accepts) {
+        return SwapOutcome::IdentityUnverified;
+    }
     SwapOutcome::Swapped
+}
+
+fn preserve_in_selected_slot(
+    store: Option<&Path>,
+    target: &Path,
+    identity_of: impl Fn(&[u8]) -> Option<IdentityKey>,
+    reason: SwapOutcome,
+) -> ReadBack {
+    preserve_in_selected_slot_with(store, target, identity_of, reason, |target, blob| write_credentials(Some(target), blob))
+}
+
+fn preserve_in_selected_slot_with(
+    store: Option<&Path>,
+    target: &Path,
+    identity_of: impl Fn(&[u8]) -> Option<IdentityKey>,
+    reason: SwapOutcome,
+    write: impl Fn(&Path, &[u8]) -> bool,
+) -> ReadBack {
+    let deferred = ReadBack::Deferred(reason);
+    let Some(current) = read_credentials(store) else { return deferred };
+    let Some(previous) = read_credentials(Some(target)) else { return deferred };
+    let (Some(current_identity), Some(target_identity)) = (identity_of(&current), identity_of(&previous)) else { return deferred };
+    if current_identity != target_identity { return deferred; }
+    if read_credentials(store).as_deref() != Some(current.as_slice())
+        || read_credentials(Some(target)).as_deref() != Some(previous.as_slice()) { return deferred; }
+    // Only an explicitly selected, proven same-account slot can preserve an unowned workbench.
+    if previous == current || is_newer(&current, &previous) { return ReadBack::Unchanged; }
+    if !write(target, &current)
+        || read_credentials(Some(target)).as_deref() != Some(current.as_slice()) {
+        return ReadBack::Deferred(SwapOutcome::WriteFailed);
+    }
+    ReadBack::Saved
 }
 
 /// 전환 뒤 `~/.claude.json` 의 `oauthAccount` 캐시를 새 계정 것으로 갈아 끼운다.
@@ -883,6 +1139,10 @@ mod tests {
         format!(r#"{{"claudeAiOauth":{{"expiresAt":{expires},"tag":"{tag}"}}}}"#).into_bytes()
     }
 
+    fn proof(account: &str) -> IdentityKey {
+        IdentityKey { account_uuid: account.into(), organization_uuid: "test-org".into() }
+    }
+
     #[test]
     fn unselected_switch_preserves_workbench_and_named_stamp() {
         let s = Slots::new("unselected");
@@ -894,6 +1154,344 @@ mod tests {
         assert_eq!(read_credentials(Some(&bench)), Some(original));
         assert_eq!(read_stamp_in(&stamp).unwrap().0, "a");
         assert!(!s.dir("vault-").exists());
+    }
+
+    #[test]
+    fn verified_switch_refuses_changed_credentials_before_any_write() {
+        let s = Slots::new("sync-identity-changed");
+        let (stamp, bench) = s.bench();
+        let previous = creds(1000, "previous");
+        let changed = creds(2000, "unexpected-account");
+        let proven = creds(2000, "expected-account");
+        assert!(write_credentials(Some(&bench), &previous));
+        write_stamp_in(&stamp, "b", &digest_of(&previous));
+        assert!(write_credentials(Some(&s.dir("vault-a")), &changed));
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(),
+            Some(&|blob| blob == proven.as_slice())), SwapOutcome::IdentityUnverified);
+        assert_eq!(read_credentials(Some(&bench)), Some(previous.clone()));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(changed));
+        assert_eq!(read_stamp_in(&stamp), Some(("b".into(), digest_of(&previous))));
+    }
+
+    #[test]
+    fn verified_reselection_checks_the_newer_workbench_not_only_the_vault() {
+        let s = Slots::new("sync-newer-workbench");
+        let (stamp, bench) = s.bench();
+        let proven = creds(1000, "expected-account");
+        let changed = creds(2000, "unexpected-account");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &proven));
+        assert!(write_credentials(Some(&bench), &changed));
+        write_stamp_in(&stamp, "a", &digest_of(&proven));
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(),
+            Some(&|blob| blob == proven.as_slice())), SwapOutcome::IdentityUnverified);
+        assert_eq!(read_credentials(Some(&bench)), Some(changed));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(proven));
+    }
+
+    #[test]
+    fn verified_switch_rechecks_the_blob_read_after_readback() {
+        let s = Slots::new("sync-between-reads");
+        let (stamp, bench) = s.bench();
+        let previous = creds(1000, "previous");
+        let proven = creds(2000, "expected-account");
+        let changed = creds(3000, "unexpected-account");
+        assert!(write_credentials(Some(&bench), &previous));
+        assert!(write_credentials(Some(&s.dir("vault-b")), &previous));
+        write_stamp_in(&stamp, "b", &digest_of(&previous));
+        assert!(write_credentials(Some(&s.dir("vault-a")), &proven));
+        let calls = std::cell::Cell::new(0);
+        let verify = |blob: &[u8]| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { assert!(write_credentials(Some(&s.dir("vault-a")), &changed)); }
+            blob == proven.as_slice()
+        };
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(), Some(&verify)), SwapOutcome::IdentityUnverified);
+        assert_eq!(read_credentials(Some(&bench)), Some(previous));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn verified_switch_accepts_only_the_proven_blob_and_reselection_stays_checked() {
+        let s = Slots::new("sync-verified");
+        let (stamp, bench) = s.bench();
+        let proven = creds(2000, "expected-account");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &proven));
+        let verify = |blob: &[u8]| blob == proven.as_slice();
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(), Some(&verify)), SwapOutcome::Swapped);
+        assert_eq!(read_credentials(Some(&bench)), Some(proven.clone()));
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(), Some(&verify)), SwapOutcome::AlreadyActive);
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(), Some(&|_| false)), SwapOutcome::IdentityUnverified);
+    }
+
+    #[test]
+    fn a_failed_postwrite_proof_still_records_the_bytes_that_were_written() {
+        let s = Slots::new("sync-postwrite-expiry");
+        let (stamp, bench) = s.bench();
+        let previous = creds(1000, "b");
+        let target = creds(2000, "a");
+        assert!(write_credentials(Some(&bench), &previous));
+        assert!(write_credentials(Some(&s.dir("vault-b")), &previous));
+        assert!(write_credentials(Some(&s.dir("vault-a")), &target));
+        write_stamp_in(&stamp, "b", &digest_of(&previous));
+        let calls = std::cell::Cell::new(0);
+        let verify = |_: &[u8]| { calls.set(calls.get() + 1); calls.get() < 3 };
+        assert_eq!(swap_active_checked_in(&stamp, Some(&bench), "a", s.vault_of(), Some(&verify)), SwapOutcome::IdentityUnverified);
+        assert_eq!(read_credentials(Some(&bench)), Some(target.clone()));
+        assert_eq!(read_stamp_in(&stamp), Some(("a".into(), digest_of(&target))));
+        assert!(!read_back_in(&stamp, Some(&bench), s.vault_of()));
+        assert_eq!(read_credentials(Some(&s.dir("vault-b"))), Some(previous));
+    }
+
+    #[test]
+    fn expired_access_tokens_cannot_receive_a_verified_switch_ack() {
+        let blob = |expires| format!(r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","expiresAt":{expires}}}}}"#).into_bytes();
+        assert_eq!(live_access_token_at(&blob(101), 100).as_deref(), Some("fixture-access"));
+        assert!(live_access_token_at(&blob(100), 100).is_none());
+        assert!(live_access_token_at(&blob(99), 100).is_none());
+        assert!(live_access_token_at(&blob(0), 100).is_none());
+        assert!(live_access_token_at(br#"{"claudeAiOauth":{"accessToken":"fixture-access"}}"#, 100).is_none());
+    }
+
+    #[test]
+    fn external_login_never_copies_account_b_into_account_a_vault() {
+        let s = Slots::new("readback-external-login");
+        let (stamp, bench) = s.bench();
+        let a = creds(1000, "a");
+        let b = creds(9000, "b");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &a));
+        assert!(write_credentials(Some(&bench), &b));
+        write_stamp_with_identity_in(&stamp, "a", &digest_of(&a), Some(&proof("a")));
+        let identity = |blob: &[u8]| Some(proof(if blob == a.as_slice() { "a" } else { "b" }));
+        assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), identity), ReadBack::Deferred(SwapOutcome::WorkbenchChanged));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(a.clone()));
+        assert_eq!(read_credentials(Some(&bench)), Some(b));
+        assert_eq!(read_stamp_in(&stamp), Some(("a".into(), digest_of(&a))));
+    }
+
+    #[test]
+    fn readback_defers_unknown_proof_then_accepts_verified_same_account_refresh() {
+        let s = Slots::new("readback-proof-later");
+        let (stamp, bench) = s.bench();
+        let old = creds(1000, "old-a");
+        let fresh = creds(9000, "new-a");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &old));
+        assert!(write_credentials(Some(&bench), &fresh));
+        write_stamp_with_identity_in(&stamp, "a", &digest_of(&old), Some(&proof("a")));
+        assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), |_| None), ReadBack::Deferred(SwapOutcome::PreservationPending));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(old.clone()));
+        let identity = |blob: &[u8]| (blob == fresh.as_slice()).then(|| proof("a"));
+        assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), identity), ReadBack::Saved, "the stamp proves unchanged old vault bytes after the old token proof expires");
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(fresh));
+    }
+
+    #[test]
+    fn legacy_stamp_gains_identity_only_while_exact_bytes_are_unchanged() {
+        let s = Slots::new("readback-legacy-proof");
+        let (stamp, bench) = s.bench();
+        let a = creds(1000, "a");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &a));
+        assert!(write_credentials(Some(&bench), &a));
+        write_stamp_in(&stamp, "a", &digest_of(&a));
+        assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), |_| Some(proof("a"))), ReadBack::Unchanged);
+        assert_eq!(read_stamp_identity_in(&stamp), Some(proof("a")));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(a));
+    }
+
+    #[test]
+    fn readback_rechecks_current_and_vault_after_identity_lookup() {
+        for change_vault in [false, true] {
+            let s = Slots::new(if change_vault { "readback-vault-race" } else { "readback-current-race" });
+            let (stamp, bench) = s.bench();
+            let old = creds(1000, "old-a");
+            let fresh = creds(9000, "new-a");
+            let b = creds(10000, "b");
+            assert!(write_credentials(Some(&s.dir("vault-a")), &old));
+            assert!(write_credentials(Some(&bench), &fresh));
+            write_stamp_with_identity_in(&stamp, "a", &digest_of(&old), Some(&proof("a")));
+            let calls = std::cell::Cell::new(0);
+            let identity = |_: &[u8]| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    let target = if change_vault { s.dir("vault-a") } else { bench.clone() };
+                    assert!(write_credentials(Some(&target), &b));
+                }
+                Some(proof("a"))
+            };
+            assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), identity), ReadBack::Deferred(SwapOutcome::PreservationPending));
+            assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(if change_vault { b } else { old }));
+        }
+    }
+
+    #[test]
+    fn unpreserved_other_identity_is_not_discarded_even_by_explicit_reselection() {
+        let s = Slots::new("reselection-other-identity");
+        let (stamp, bench) = s.bench();
+        let a = creds(1000, "a");
+        let b = creds(9000, "b");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &a));
+        assert!(write_credentials(Some(&bench), &b));
+        write_stamp_with_identity_in(&stamp, "a", &digest_of(&a), Some(&proof("a")));
+        let identity = |blob: &[u8]| Some(proof(if blob == a.as_slice() { "a" } else { "b" }));
+        assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "a", s.vault_of(), None, identity, false), SwapOutcome::WorkbenchChanged);
+        assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "a", s.vault_of(), None, identity, true), SwapOutcome::WorkbenchChanged);
+        assert_eq!(read_credentials(Some(&bench)), Some(b));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(a));
+    }
+
+    #[test]
+    fn unchanged_startup_needs_no_new_proof_but_changed_unknown_bytes_are_deferred() {
+        let s = Slots::new("startup-without-proof");
+        let (stamp, bench) = s.bench();
+        let a = creds(1000, "a");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &a));
+        assert!(write_credentials(Some(&bench), &a));
+        write_stamp_in(&stamp, "a", &digest_of(&a));
+        assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "a", s.vault_of(), None, |_| None, false), SwapOutcome::AlreadyActive);
+        let changed = creds(9000, "unknown");
+        assert!(write_credentials(Some(&bench), &changed));
+        assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "a", s.vault_of(), None, |_| None, true), SwapOutcome::PreservationPending);
+        assert_eq!(read_credentials(Some(&bench)), Some(changed));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(a));
+    }
+
+    #[test]
+    fn switching_away_waits_for_proof_and_preserves_the_only_refreshed_credentials() {
+        for strict in [false, true] {
+            let s = Slots::new(if strict { "pending-readback-peer" } else { "pending-readback-local" });
+            let (stamp, bench) = s.bench();
+            let old = creds(1000, "a1");
+            let fresh = creds(9000, "a2");
+            let b = creds(4000, "b");
+            assert!(write_credentials(Some(&s.dir("vault-a")), &old));
+            assert!(write_credentials(Some(&s.dir("vault-b")), &b));
+            assert!(write_credentials(Some(&bench), &fresh));
+            write_stamp_with_identity_in(&stamp, "a", &digest_of(&old), Some(&proof("a")));
+            let target_guard = |blob: &[u8]| blob == b.as_slice();
+            let verify: Option<&dyn Fn(&[u8]) -> bool> = strict.then_some(&target_guard);
+            let missing_fresh = |blob: &[u8]| if blob == b.as_slice() { Some(proof("b")) } else { None };
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), verify, missing_fresh, true), SwapOutcome::PreservationPending);
+            assert_eq!(read_credentials(Some(&bench)), Some(fresh.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(old.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-b"))), Some(b.clone()));
+            assert_eq!(read_stamp_in(&stamp), Some(("a".into(), digest_of(&old))));
+            let proven = |blob: &[u8]| Some(proof(if blob == b.as_slice() { "b" } else { "a" }));
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), verify, proven, true), SwapOutcome::Swapped);
+            assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(fresh));
+            assert_eq!(read_credentials(Some(&bench)), Some(b));
+        }
+    }
+
+    #[test]
+    fn explicit_matching_slot_preserves_the_current_login_before_rebinding_ownership() {
+        for current_is_newer in [false, true] {
+            let s = Slots::new(if current_is_newer { "adopt-current-newer" } else { "adopt-target-newer" });
+            let (stamp, bench) = s.bench();
+            let a = creds(1000, "a");
+            let current = creds(if current_is_newer { 9000 } else { 2000 }, "current-b");
+            let target = creds(4000, "target-b");
+            assert!(write_credentials(Some(&s.dir("vault-a")), &a));
+            assert!(write_credentials(Some(&s.dir("vault-b")), &target));
+            assert!(write_credentials(Some(&bench), &current));
+            write_stamp_with_identity_in(&stamp, "a", &digest_of(&a), Some(&proof("a")));
+            let identity = |blob: &[u8]| Some(proof(if blob == a.as_slice() { "a" } else { "b" }));
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, identity, false), SwapOutcome::WorkbenchChanged);
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, identity, true), SwapOutcome::Swapped);
+            let newest = if current_is_newer { current } else { target };
+            assert_eq!(read_credentials(Some(&bench)), Some(newest.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-b"))), Some(newest.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(a));
+            assert_eq!(read_stamp_in(&stamp), Some(("b".into(), digest_of(&newest))));
+        }
+    }
+
+    #[test]
+    fn failed_explicit_preservation_leaves_current_and_target_untouched() {
+        let s = Slots::new("adopt-storage-failure");
+        let (_, bench) = s.bench();
+        let current = creds(9000, "current-b");
+        let previous = creds(1000, "target-b");
+        assert!(write_credentials(Some(&bench), &current));
+        assert!(write_credentials(Some(&s.dir("vault-b")), &previous));
+        let result = preserve_in_selected_slot_with(Some(&bench), &s.dir("vault-b"), |_| Some(proof("b")),
+            SwapOutcome::WorkbenchChanged, |_, _| false);
+        assert_eq!(result, ReadBack::Deferred(SwapOutcome::WriteFailed));
+        assert_eq!(read_credentials(Some(&bench)), Some(current));
+        assert_eq!(read_credentials(Some(&s.dir("vault-b"))), Some(previous));
+    }
+
+    #[test]
+    fn unstamped_explicit_same_identity_recovery_keeps_the_original_backup_untouched() {
+        for blank_stamp in [false, true] {
+            let s = Slots::new(if blank_stamp { "blank-stamp-explicit-recovery" } else { "unstamped-explicit-recovery" });
+            let (stamp, bench) = s.bench();
+            let backup = s.vault_of()(DEFAULT_BACKUP_SLOT).unwrap();
+            let a = creds(1000, "saved-a");
+            let current = creds(9000, "current-b2");
+            let target = creds(4000, "saved-b1");
+            assert!(write_credentials(Some(&backup), &a));
+            assert!(write_credentials(Some(&s.dir("vault-a")), &a));
+            assert!(write_credentials(Some(&s.dir("vault-b")), &target));
+            assert!(write_credentials(Some(&bench), &current));
+            if blank_stamp { write_stamp_in(&stamp, "", "legacy"); }
+            let stamp_before = read_stamp_in(&stamp);
+            let missing_current = |blob: &[u8]| (blob == target.as_slice()).then(|| proof("b"));
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, missing_current, true), SwapOutcome::PreservationPending);
+            assert_eq!(read_credentials(Some(&bench)), Some(current.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-b"))), Some(target.clone()));
+            assert_eq!(read_credentials(Some(&backup)), Some(a.clone()));
+            assert_eq!(read_stamp_in(&stamp), stamp_before);
+            let known = |blob: &[u8]| Some(proof(if blob == a.as_slice() { "a" } else { "b" }));
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, known, false), SwapOutcome::PreservationPending);
+            assert_eq!(read_credentials(Some(&bench)), Some(current.clone()));
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, known, true), SwapOutcome::Swapped);
+            assert_eq!(read_credentials(Some(&bench)), Some(current.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-b"))), Some(current.clone()));
+            assert_eq!(read_credentials(Some(&backup)), Some(a.clone()));
+            assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(a));
+            assert_eq!(read_stamp_in(&stamp), Some(("b".into(), digest_of(&current))));
+        }
+    }
+
+    #[test]
+    fn workbench_changed_after_preservation_is_not_overwritten() {
+        let s = Slots::new("change-after-readback");
+        let (stamp, bench) = s.bench();
+        let old = creds(1000, "a1");
+        let fresh = creds(9000, "a2");
+        let newer = creds(10000, "a3");
+        let b = creds(4000, "b");
+        assert!(write_credentials(Some(&s.dir("vault-a")), &old));
+        assert!(write_credentials(Some(&s.dir("vault-b")), &b));
+        assert!(write_credentials(Some(&bench), &fresh));
+        write_stamp_with_identity_in(&stamp, "a", &digest_of(&old), Some(&proof("a")));
+        let target_reads = std::cell::Cell::new(0);
+        let vault_of = |id: &str| {
+            if id == "b" {
+                target_reads.set(target_reads.get() + 1);
+                assert!(write_credentials(Some(&bench), &newer));
+            }
+            s.vault_of()(id)
+        };
+        let identity = |blob: &[u8]| Some(proof(if blob == b.as_slice() { "b" } else { "a" }));
+        assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", vault_of, None, identity, true), SwapOutcome::PreservationPending);
+        assert_eq!(read_credentials(Some(&bench)), Some(newer));
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))), Some(fresh));
+        assert_eq!(target_reads.get(), 1);
+    }
+
+    #[test]
+    fn failure_messages_explain_safe_recovery_without_requesting_an_unavailable_save_button() {
+        assert!(SwapOutcome::PreservationPending.failure_message().contains("잠시 뒤"));
+        assert!(SwapOutcome::WorkbenchChanged.failure_message().contains("추가·로그인"));
+        assert!(SwapOutcome::WorkbenchChanged.failure_message().contains("먼저 선택"));
+        assert_eq!(SwapOutcome::PreservationPending.failure_code(), "account_sync_preservation_pending");
+    }
+
+    #[test]
+    fn account_sync_test_helpers_never_open_real_credential_stores() {
+        assert!(!account_sync_credentials_allowed());
+        assert!(verified_workbench_identity().is_none());
+        assert!(crate::settings::account_sync_identity("fixture-no-store").is_none());
     }
 
     #[test]
@@ -923,7 +1521,8 @@ mod tests {
         assert_eq!(recover_workbench_account_in(&stamp, Some(&bench), &["a", "b"], s.vault_of()).as_deref(), Some("a"));
         assert_eq!(read_stamp_in(&stamp).unwrap().1, digest_of(vault));
         assert!(write_credentials(Some(&s.dir("vault-b")), &creds(1000, "b")));
-        assert_eq!(swap_active_in(&stamp, Some(&bench), "b", s.vault_of()), SwapOutcome::Swapped);
+        let identity = |blob: &[u8]| Some(proof(if blob == current.as_slice() || blob == vault.as_slice() { "a" } else { "b" }));
+        assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, identity, true), SwapOutcome::Swapped);
         assert_eq!(read_credentials(Some(&s.dir("vault-a"))).unwrap(), current);
     }
 
@@ -1056,7 +1655,7 @@ mod tests {
 
         // 도는 claude 가 갱신했다 — 작업대에만 새 토큰이 있다.
         assert!(write_credentials(Some(&bench), &creds(9000, "a2")));
-        assert!(read_back_in(&stamp, Some(&bench), s.vault_of()), "되받아야 한다");
+        assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), |_| Some(proof("a"))), ReadBack::Saved, "같은 공급자 계정이 확인됐을 때 되받아야 한다");
         assert_eq!(read_credentials(Some(&s.dir("vault-a"))).unwrap(), creds(9000, "a2"));
         // 두 번째 호출은 할 일이 없다.
         assert!(!read_back_in(&stamp, Some(&bench), s.vault_of()));
@@ -1089,8 +1688,8 @@ mod tests {
         assert!(write_credentials(Some(&s.dir("vault-a")), &creds(9000, "vault-new")));
         // 작업대에는 그보다 낡은 값이 들어온다.
         assert!(write_credentials(Some(&bench), &creds(2000, "active-old")));
-        assert!(
-            !read_back_in(&stamp, Some(&bench), s.vault_of()),
+        assert_eq!(
+            read_back_verified_in(&stamp, Some(&bench), s.vault_of(), |_| Some(proof("a"))), ReadBack::Unchanged,
             "낡은 값으로 덮으면 안 된다"
         );
         assert_eq!(

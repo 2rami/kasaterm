@@ -3425,6 +3425,7 @@ impl GpuRenderer {
             "gmail" => include_str!("../assets/icons/gmail.svg"),
             "google" => include_str!("../assets/icons/google.svg"),
             "naver" => include_str!("../assets/icons/naver.svg"),
+            "sionic" => include_str!("../assets/icons/sionic.svg"),
             "mail" => include_str!("../assets/icons/mail.svg"),
             "antigravity" => include_str!("../assets/icons/antigravity.svg"),
             // 마크다운 콜아웃(`> [!NOTE]` …) 표지. 이모지 대신 SVG 를 쓰는 이유는
@@ -4348,7 +4349,7 @@ mod account_icon_tests {
 
     #[test]
     fn official_email_assets_parse_and_paint_pixels() {
-        for (name, width, height) in [("gmail", 28, 28), ("google", 16, 16), ("naver", 84, 16)] {
+        for (name, width, height) in [("gmail", 28, 28), ("google", 16, 16), ("naver", 84, 16), ("sionic", 14, 14), ("sionic", 28, 28)] {
             let svg = GpuRenderer::icon_svg(name).expect("registered account icon");
             let rgba = GpuRenderer::rasterize_icon_color(svg, width, height)
                 .expect("official SVG must parse");

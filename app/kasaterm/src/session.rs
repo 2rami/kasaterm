@@ -20,6 +20,7 @@ mod sidebar;
 mod titles;
 
 pub(crate) use self::accounts::{
+    account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice,
     account_switch_confirm_text, account_switch_toast, AccountSwitchBtn, AccountSwitchImpact,
     AccountSwitchProvider, PendingAccountSwitch,
 };

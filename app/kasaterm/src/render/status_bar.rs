@@ -104,6 +104,13 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         );
         x += 17.0;
     }
+    if let Some(brand) = crate::account_brand::Brand::for_account(AccountProvider::Claude, f.accounts.claude) {
+        let width = brand.width(12.0);
+        if account_right - x >= width + 6.0 {
+            brand.paint(g, x, sy + (status_h - 12.0) / 2.0, 12.0);
+            x += width + 6.0;
+        }
+    }
 
     let account_state = claude_observations.get(f.accounts.claude).map_or("unselected", |(_, state)| *state);
     if account_state != "ready" {
@@ -427,6 +434,13 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
                 status_prefs.color("codex", theme::text_dim()),
             );
             x += icon + 6.0;
+            if let Some(brand) = crate::account_brand::Brand::for_account(AccountProvider::Codex, codex_id) {
+                let width = brand.width(12.0);
+                if account_right - x >= width + 6.0 {
+                    brand.paint(g, x, sy + (status_h - 12.0) / 2.0, 12.0);
+                    x += width + 6.0;
+                }
+            }
 
             let all_names: Vec<String> = std::iter::once(codex_account_name(
                 "",
