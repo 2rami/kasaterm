@@ -82,6 +82,7 @@ foreach ($current in $stages) {
     Write-Host "== stage: $current =="
     switch ($current) {
         "boundaries" {
+            & "$PSScriptRoot\process-tree.Tests.ps1"
             $python = Get-Python
             Invoke-Native -FilePath $python -ArgumentList @("scripts/check-workspace.py")
             Invoke-Native -FilePath $python -ArgumentList @("scripts/check-workspace.py", "--self-test")

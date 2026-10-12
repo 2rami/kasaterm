@@ -557,7 +557,7 @@ async fn term_ws_run(
     // 화면이 위로 밀려 스크롤백으로 들어간 줄을 거울에게도 흘린다(`scrolled`). 이게
     // 없으면 폰은 살아 있는 화면만 받아 위로 넘길 지난 줄이 없다.
     let mut last_hist = sess.view_state().1;
-    let mut to_browser = tokio::spawn(async move {
+    let to_browser = tokio::spawn(async move {
         // Migration/replacement preserves the pane id but installs another
         // PtySession. A quiet terminal must reconnect too; this timer is local
         // only and must not turn the 30-second keepalive into a ping flood.
@@ -568,8 +568,7 @@ async fn term_ws_run(
             if !websocket_session_is_current(&output_session_id, &sess_sz) {
                 // No `gone`: the pane still exists under the same id. Closing
                 // makes viewers reconnect, resubscribe and receive its new snapshot.
-                let _ = ws_tx.send(Message::Close(None)).await;
-                break;
+                return ws_tx.send(Message::Close(None)).await.is_ok();
             }
             // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
             // 끊는데(Cloudflare 무료 플랜 ~100초), 터미널은 아무 출력 없는 시간이
@@ -591,8 +590,7 @@ async fn term_ws_run(
                         SelfSized::At(size) => size != sess_sz.size(),
                     };
                     if !want_grid && sess_sz.size() != last_size && foreign {
-                        let _ = ws_tx.send(Message::Close(None)).await;
-                        break;
+                        return ws_tx.send(Message::Close(None)).await.is_ok();
                     }
                     continue;
                 },
@@ -618,8 +616,7 @@ async fn term_ws_run(
             // A queued EOF or frame may belong to the previous session. Check
             // again after awaiting it so it cannot terminate the replacement.
             if !websocket_session_is_current(&output_session_id, &sess_sz) {
-                let _ = ws_tx.send(Message::Close(None)).await;
-                break;
+                return ws_tx.send(Message::Close(None)).await.is_ok();
             }
             match incoming {
                 Ok(Some(chunk)) => {
@@ -783,9 +780,10 @@ async fn term_ws_run(
                 }
             }
         }
+        false
     });
     let pong_shell = last_pong.clone();
-    let mut to_shell = tokio::spawn(async move {
+    let to_shell = tokio::spawn(async move {
         let mut logical_viewport = false;
         while let Some(Ok(msg)) = ws_rx.next().await {
             if !websocket_session_is_current(&input_session_id, &sess_in) {
@@ -922,7 +920,8 @@ async fn term_ws_run(
                         break;
                     }
                 }
-                Message::Close(_) => break,
+                // A further read flushes Tungstenite's automatically queued close reply.
+                Message::Close(_) => continue,
                 // 브라우저 네트워크 스택이 우리 Ping 에 자동으로 돌려주는 응답 —
                 // 이 시각이 to_browser 의 잠든-피어 판정 재료다.
                 Message::Pong(_) => {
@@ -937,16 +936,36 @@ async fn term_ws_run(
     // 한쪽이 끝나면 다른 쪽도 접는다. **셸은 여기서 안 죽는다** — `keep_session` 이
     // 붙들고 있어서, 다시 붙으면 하던 작업이 그대로 있다(셸이 exit 하면 EOF 를 보고
     // 스스로 빠진다).
-    tokio::select! {
-        _ = &mut to_browser => to_shell.abort(),
-        _ = &mut to_shell => to_browser.abort(),
-    }
+    finish_websocket_tasks(to_browser, to_shell, std::time::Duration::from_secs(2)).await;
     unregister_viewer_ctl(&ctl_pane, ctl_token);
     drop(viewport);
 }
 
 fn websocket_session_is_current(id: &str, session: &Arc<kasa_pty::PtySession>) -> bool {
     kasa_pty::lookup_session(id).is_some_and(|current| Arc::ptr_eq(&current, session))
+}
+
+async fn finish_websocket_tasks(
+    mut output: tokio::task::JoinHandle<bool>,
+    mut input: tokio::task::JoinHandle<()>,
+    close_grace: std::time::Duration,
+) {
+    tokio::select! {
+        sent_close = &mut output => {
+            // Dropping the reader immediately after sending Close can reset TCP with
+            // unread input. Drive the peer's close reply before releasing the socket.
+            let drained = matches!(sent_close, Ok(true))
+                && tokio::time::timeout(close_grace, &mut input).await.is_ok();
+            if !drained {
+                input.abort();
+                let _ = input.await;
+            }
+        }
+        _ = &mut input => {
+            output.abort();
+            let _ = output.await;
+        }
+    }
 }
 
 /// 이 모듈 창구의 라우트. `router` 가 한 표로 합친 뒤 공통 레이어(Origin·토큰 가드)를 두른다.
@@ -964,6 +983,43 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_sent_close_keeps_the_reader_until_the_peer_reply() {
+        let (reply, peer_reply) = tokio::sync::oneshot::channel::<()>();
+        let input = tokio::spawn(async move { let _ = peer_reply.await; });
+        let output = tokio::spawn(async { true });
+        let mut finish = tokio::spawn(super::finish_websocket_tasks(
+            output, input, std::time::Duration::from_secs(60),
+        ));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut finish).await.is_err());
+        reply.send(()).expect("reader was cancelled before the close reply");
+        tokio::time::timeout(std::time::Duration::from_secs(1), finish).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_missing_close_reply_is_bounded_and_a_failed_sender_does_not_wait() {
+        for sent_close in [true, false] {
+            let (reply, peer_reply) = tokio::sync::oneshot::channel::<()>();
+            let input = tokio::spawn(async move { let _ = peer_reply.await; });
+            let output = tokio::spawn(async move { sent_close });
+            let grace = if sent_close { std::time::Duration::ZERO } else { std::time::Duration::from_secs(60) };
+            tokio::time::timeout(std::time::Duration::from_secs(1), super::finish_websocket_tasks(output, input, grace))
+                .await.unwrap();
+            assert!(reply.send(()).is_err(), "unfinished reader leaked after shutdown");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_reader_stops_a_waiting_sender() {
+        let (wake, wait) = tokio::sync::oneshot::channel::<()>();
+        let output = tokio::spawn(async move { let _ = wait.await; false });
+        let input = tokio::spawn(async {});
+        tokio::time::timeout(std::time::Duration::from_secs(1), super::finish_websocket_tasks(
+            output, input, std::time::Duration::from_secs(60),
+        )).await.unwrap();
+        assert!(wake.send(()).is_err());
+    }
+
     #[derive(Clone)]
     struct MirrorInput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -1072,7 +1128,8 @@ mod tests {
 
         async fn replaced_close(client: &mut Client) {
             tokio::time::timeout(std::time::Duration::from_millis(750), async {
-                while let Some(Ok(message)) = client.next().await {
+                while let Some(message) = client.next().await {
+                    let message = message.expect("replacement dropped TCP before the close frame");
                     match message {
                         Message::Close(_) => return,
                         Message::Text(text) => assert_ne!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["t"], "gone"),

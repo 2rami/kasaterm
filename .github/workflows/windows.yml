@@ -90,6 +90,10 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Process ancestry tests (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/windows/process-tree.Tests.ps1
+
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
@@ -150,6 +154,10 @@ jobs:
             Write-Host "$($file.Name): $(@($errors).Count) parse errors, utf8 bom=$bom, non-ascii bytes=$nonAscii"
           }
           if ($failed) { exit 1 }
+
+      - name: Process ancestry tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./scripts/windows/process-tree.Tests.ps1
 
   rust:
     name: check · test

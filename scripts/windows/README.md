@@ -154,7 +154,10 @@ scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-porta
   옮기고, 소켓은 실행마다 다른 named pipe 를 쓴다. 창(GPU)·첫 칸과 쪼갠 칸의 ConPTY 입출력·`kasaterm-cli`·
   HTTP `/version`·자동 캡처·자동 종료·사용자 파일/레지스트리(`HKCU\Software\momewomo`) 무변경·종료 뒤 자식 정리를
   확인하고, 이번에 띄운 PID 와 그 자손만 거둔다. 결과는 `target\windows-smoke\<라벨>-<시각>-<id>\`
-  (로그·`window.png`·`summary.json`) — 있던 결과는 지우지 않는다.
+  (로그·`window.png`·`summary.json`·`processes.json`) — 있던 결과는 지우지 않는다.
+- 자식 판정은 PID뿐 아니라 생성 시각을 모든 부모·자식 연결에서 확인한다. PID가 재사용돼 부모보다 먼저 생긴
+  다른 프로세스는 자식으로 세거나 종료하지 않는다([Win32_Process 계약](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process)).
+  `process-tree.Tests.ps1`의 가짜 목록 시험은 PowerShell 7·5.1에서 모두 돌며, 실제 자식은 이름과 관계없이 종료 검사를 받는다.
 - `verify.ps1 -Stage smoke` 는 앱 기본 셸과 Windows PowerShell 5.1·cmd·Git Bash 를 명시 경로로 한 번씩 띄워
   칸 셸이 정말 그 셸인지까지 본다. 없는 셸은 건너뛰지 않고 실패하니 빼려면 `-SmokeShells default,cmd` 처럼 적는다.
 - `-UserProfileOnly` 는 HOME 을 빼고(탐색기로 뜬 GUI 와 같다) `-NoRedirect` 는 표준 핸들 없이 띄워 앱이 stderr 를

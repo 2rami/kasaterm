@@ -32,6 +32,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+. "$PSScriptRoot\process-tree.ps1"
 
 if ($Label -notmatch '^[A-Za-z0-9_-]+$') {
     throw "Label must be letters, digits, '-' or '_': $Label"
@@ -134,6 +135,7 @@ function Restore-ProcessEnvironment {
 }
 
 $script:proc = $null
+$script:rootProcess = $null
 $script:tracked = @{}
 
 function Update-Descendants {
@@ -141,29 +143,19 @@ function Update-Descendants {
         return
     }
     $table = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name, CommandLine)
-    $queue = New-Object System.Collections.Generic.Queue[int]
-    $seen = New-Object System.Collections.Generic.HashSet[int]
-    $queue.Enqueue($script:proc.Id)
-    while ($queue.Count -gt 0) {
-        $parent = $queue.Dequeue()
-        if (-not $seen.Add($parent)) {
-            continue
-        }
-        foreach ($child in $table | Where-Object { $_.ParentProcessId -eq $parent }) {
-            $childId = [int]$child.ProcessId
-            if (-not $script:tracked.ContainsKey($childId)) {
-                $script:tracked[$childId] = $child
-            }
-            $queue.Enqueue($childId)
-        }
+    if (-not $script:rootProcess -and -not $script:proc.HasExited) {
+        $script:rootProcess = $table | Where-Object { $_.ProcessId -eq $script:proc.Id } | Select-Object -First 1
+    }
+    foreach ($child in @(Get-SmokeDescendants -Snapshot $table -Root $script:rootProcess -Known @($script:tracked.Values))) {
+        $script:tracked[(Get-SmokeProcessKey $child)] = $child
     }
 }
 
 function Get-LiveTracked {
     # PID 는 재사용되니 만든 시각까지 같은 것만 이번 실행의 자손으로 본다.
     foreach ($entry in @($script:tracked.GetEnumerator())) {
-        $live = Get-CimInstance Win32_Process -Filter "ProcessId = $($entry.Key)" -ErrorAction SilentlyContinue
-        if ($live -and $live.CreationDate -eq $entry.Value.CreationDate) {
+        $live = Get-CimInstance Win32_Process -Filter "ProcessId = $($entry.Value.ProcessId)" -ErrorAction SilentlyContinue
+        if ($live -and (Get-SmokeProcessKey $live) -eq $entry.Key) {
             $entry.Value
         }
     }
@@ -414,6 +406,9 @@ try {
         (Test-Path -LiteralPath $portFile) -and ((Get-AppLog) -match '\[agent-socket\] listening on')
     }
     Assert-Check -Name "boot" -Condition $ready -Detail "socket + HTTP port within ${ReadyTimeoutSeconds}s`n$(if (-not $ready) { Get-LogTail })"
+    Update-Descendants
+    Assert-Check -Name "process identity" -Condition ([bool](Get-SmokeProcessKey $script:rootProcess)) `
+        -Detail "app PID and creation time captured for descendant checks"
 
     $fileLog = Read-Shared $script:appLog
     if ($NoRedirect) {
@@ -478,13 +473,14 @@ try {
     # 앱이 끝나면 칸 셸·콘솔 호스트·웹뷰도 따라 끝나야 한다. 유예 뒤에도 남으면 ConPTY·자식 정리 회귀다.
     $deadline = (Get-Date).AddSeconds($ChildGraceSeconds)
     do {
+        Update-Descendants
         $lingering = @(Get-LiveTracked)
         if ($lingering.Count -eq 0) {
             break
         }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-    $lingeringText = ($lingering | ForEach-Object { "$($_.Name)#$($_.ProcessId) [$($_.CommandLine)]" }) -join "; "
+    $lingeringText = ($lingering | ForEach-Object { "$($_.Name)#$($_.ProcessId) parent=$($_.ParentProcessId) created=$($_.CreationDate.ToUniversalTime().ToString('o')) [$($_.CommandLine)]" }) -join "; "
     Assert-Check -Name "children exit with app" -Condition ($lingering.Count -eq 0) `
         -Detail $(if ($lingering.Count) { "still running ${ChildGraceSeconds}s after exit: $lingeringText" } else { "all $($script:tracked.Count) descendants gone" })
 
@@ -524,6 +520,16 @@ try {
         Restore-ProcessEnvironment $cliEnvironmentSaved
     }
     [Console]::OutputEncoding = $consoleEncoding
+    try {
+        [pscustomobject]@{
+            root = ($script:rootProcess | Select-Object ProcessId, ParentProcessId, CreationDate, Name)
+            descendants = @($script:tracked.Values | Select-Object ProcessId, ParentProcessId, CreationDate, Name)
+        } |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifacts "processes.json") -Encoding utf8
+    } catch {
+        # Diagnostics must not prevent cleanup if the artifact disk is full.
+        Write-Warning "Could not record process identities: $($_.Exception.Message)"
+    }
     Stop-Tracked
     # 이번 실행이 만든 폴더만 지운다 — 기록할 상태 파일은 먼저 결과 폴더로 옮긴다.
     if ($script:scratch -and (Test-Path -LiteralPath $script:scratch)) {
