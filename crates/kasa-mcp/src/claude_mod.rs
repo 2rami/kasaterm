@@ -60,6 +60,7 @@ pub struct ModState {
     pub version: String,
     pub turn_open: bool,
     pub turn_at: Instant,
+    pub turn_completed: bool,
     /// 지난 턴이 오류로 끝났으면 그 까닭(`error`·`refusal`). 다음 턴이 지운다.
     pub turn_error: Option<String>,
     pub compacting: Option<Instant>,
@@ -82,6 +83,7 @@ impl ModState {
             version: version.into(),
             turn_open: false,
             turn_at: now,
+            turn_completed: false,
             turn_error: None,
             compacting: None,
             permissions: Vec::new(),
@@ -291,6 +293,7 @@ fn apply_one(pane: &mut Pane, kind: &str, event: &Value, statusline: &mut bool) 
             "start" => {
                 s.turn_open = true;
                 s.turn_at = now;
+                s.turn_completed = false;
                 s.turn_error = None;
             }
             "end" => {
@@ -301,6 +304,7 @@ fn apply_one(pane: &mut Pane, kind: &str, event: &Value, statusline: &mut bool) 
                 s.permissions.clear();
                 s.permission_since = None;
                 let reason = text(event, "reason");
+                s.turn_completed = reason == "answer";
                 s.turn_error = matches!(reason.as_str(), "error" | "refusal").then_some(reason);
             }
             _ => return false,
@@ -1160,6 +1164,19 @@ mod tests {
         assert_eq!(mirror_view("%t9")["live"], false, "no claude runs in this test pane");
         apply("%t9", "s", &[json!({"kind": "turn", "phase": "start"}), json!({"kind": "turn", "phase": "end", "reason": "aborted"})]);
         assert!(PANES.lock().unwrap()["%t9"].focus.tools.is_empty(), "an aborted turn leaves no tool spinning");
+    }
+
+    #[test]
+    fn only_a_normal_engine_answer_is_completion_not_an_abort_or_provisional_stop() {
+        for reason in ["answer", "aborted", "dropped", "refusal", "error", "", "unknown"] {
+            let surface = format!("%completion-{reason}");
+            apply(&surface, "s", &ev(json!({"kind":"hello","pid":1})));
+            apply(&surface, "s", &[json!({"kind":"turn","phase":"start"}),
+                json!({"kind":"turn","phase":"end","reason":reason})]);
+            assert_eq!(PANES.lock().unwrap()[&surface].state.turn_completed, reason == "answer");
+            apply(&surface, "s", &ev(json!({"kind":"turn","phase":"start"})));
+            assert!(!PANES.lock().unwrap()[&surface].state.turn_completed);
+        }
     }
 
     #[test]

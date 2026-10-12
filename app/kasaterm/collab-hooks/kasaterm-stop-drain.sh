@@ -1,5 +1,6 @@
 #!/bin/bash
-# Stop hook: 이 pane 의 claude 가 턴을 끝내려 한다. 작업 완료 데스크탑 알림을 띄운다.
+# Older pane settings still reference this file. Stop is provisional: another
+# hook may block it, so only the engine/transcript can authorize completion.
 #
 # **제목 갱신은 2026-09-07 에 걷어냈다.** claude 는 자기 세션 이름(`ai-title`)을 스스로
 # 짓고 `/rename` 이라는 공식 창구도 갖고 있는데, 우리가 그 위에 같은 자리(custom-title)로
@@ -28,6 +29,5 @@ input=$(cat 2>/dev/null)
 # 온다. grep 으로 보는 이유는 이 판정 하나에 파이썬을 띄울 값이 없어서다.
 printf '%s' "$input" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && exit 0
 
-dir="${PWD##*/}"
-kasaterm-cli notify "✓ ${dir} — claude 완료" "작업을 마쳤어" >/dev/null 2>&1 || true
+printf '%s' "$input" | "$(dirname "$0")/kasaterm-turn.sh" end >/dev/null 2>&1 || true
 exit 0

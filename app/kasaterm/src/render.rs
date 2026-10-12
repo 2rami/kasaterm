@@ -2505,7 +2505,7 @@ impl App {
         // `self.gpu` (the header loop can't call `&self` while `g` is live).
         let header_flash: Vec<Option<f32>> = headers
             .iter()
-            .map(|h| self.notify_flash_factor(&h.id))
+            .map(|h| self.notify_flash_factor(&h.active_tab_pid))
             .collect();
         // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
         // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).

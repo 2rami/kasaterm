@@ -3895,14 +3895,7 @@ impl Backend for PtyBackend {
     }
 
     fn notify(&self, surface_id: &str, title: &str, body: &str) -> Result<()> {
-        // The turn finished → the pane can't still be blocked waiting. Clear any
-        // attention flag so the board drops back to idle even if the resume
-        // didn't write enough transcript to flip `idle` first.
-        self.attention.lock().unwrap().remove(surface_id);
-        // Stop 훅의 drain 이 부른다 — 턴이 닫혔다는 정본 신호. 기록이 닫는 줄을 아직 못
-        // 썼어도 여기서 닫힌다.
-        self.hub.turn(surface_id, "end", None);
-        kasa_mcp::board_service::poke();
+        // Explicit messages and OSC notifications do not prove that an agent's turn ended.
         // Hand off to the GUI thread — the desktop alert (objc/osascript) and
         // any pane/sidebar flash both need App state we can't touch here.
         let _ = self.proxy.send_event(UserEvent::Notify {

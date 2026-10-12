@@ -35,7 +35,7 @@
 - `auxterm.rs` — 터미널 pane 을 별도 OS 창으로 뗀다(undock/dock). 창은 `pane_id` 만 들고 셀·PTY 는 App.ws/App.pty 에 그대로 — 그리기는 본창과 같은 `compose_terminal_pane`
 - `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
-- `transcript` — claude-code transcript(jsonl) → board 스냅샷 추출. 본체는 `crates/kasa-agents/src/transcript.rs`(main.rs 가 `use kasa_agents::transcript` 로 옛 경로 유지)
+- `transcript` — Claude/Codex 기록(jsonl) → board 스냅샷 추출. 본체는 `crates/kasa-agents/src/transcript.rs`(main.rs 가 `use kasa_agents::transcript` 로 옛 경로 유지), `transcript/signals.rs`는 정상 종료·중단 구분과 Codex 질문 호출/접수/답변 추적
 - `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
 - `chat_view/status.rs` — 입력칸 아래 기기·모델·추론 강도·컨텍스트 정보와 좁은 폭의 단추 배치. 활성 탭의 보고만 읽고, 원격 칸은 원본 캐시만 쓴다. `ChatPane::use_source`는 탭·원본이 바뀌면 읽기 통을 바꿔 늦은 응답을 이전 통에만 남긴다
 - `chat_view/live.rs` — 대화 보기 위의 연결 mod 지금(일 상태·도는 도구·승인 요청). 이 기기 칸은 `claude_mod::mirror_view` 를
@@ -76,6 +76,6 @@
 - `own_room.rs` — 이 기기 방 지키기: 현지에 세울 칸(셸·학생·연결 칸)의 기준이 다른 기기 방의 보기 창이면 이 기기 방으로 옮기고(`own_spawn_host` — 섞이면 그 방이 통째로 「이 기기」 절로 넘어가 저쪽 학생이 이쪽 학생처럼 보인다), 자기 칸이 0 이 되면(닫기·이사·미러만 복원) 이 기기 셸 방을 하나 세운다(`keep_own_room`, 1초 틱)
 - `frame_pace.rs` — 몰려오는 그리기(PTY 출력 끝·`RedrawRequested`, `render_frame_paced`)를 화면 주사율 이상은 한 장으로 합친다. 미룬 그림은 `frame-pace` 스레드가 주기 끝에 `UserEvent::Redraw` 로 깨워 반드시 그린다. 사람 동작 직후·캡처·하네스는 `render_frame` 을 그대로 불러 미루지 않는다
 - `turn_probe.rs` — 이벤트 루프 한 바퀴의 메인 스레드 시간. 1초 넘는 바퀴는 늘 `[stall]`, `KASATERM_PROFILE` 이면 클릭 바퀴·50ms 넘는 바퀴도, `KASATERM_LAG_PROBE` 면 이벤트가 처리되기까지 줄 선 시간을 `[lag]` 로 찍는다
-- `agent_transitions.rs` — 상태 전이 → 알림 이벤트(TurnDone/Waiting/Error/…) 순수 함수. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
+- `agent_transitions.rs` — 실제 PTY·세션별 알림 관찰자와 상태 전이 순수 함수. 완료는 새 정상 종료 신호가 2초 유지된 경우만, 질문은 호출 ID별 한 번이다. 탭 선택이나 조용한 idle 전이는 완료가 아니다. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].

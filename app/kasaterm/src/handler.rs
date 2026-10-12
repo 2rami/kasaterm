@@ -8207,6 +8207,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // 자체 배너가 유일한 애니메이션/미확인 상태여도 정확히 수명 만기에
                 // 깨어나야 한다. hover 중에는 deadline이 None이라 타이머가 멈춘다.
                 .chain(self.next_banner_deadline())
+                // Completion can settle after the last PTY output has stopped waking the window.
+                .chain(self.collab.hub.notification_deadline())
                 .chain(web_visual_deadline)
                 // 조용한 셸에서도 이사·복원 명령이 제때 발사되어야 한다. 이 만기를
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.

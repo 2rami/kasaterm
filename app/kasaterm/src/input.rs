@@ -1509,7 +1509,6 @@ impl App {
         self.collab.hub.refresh();
 
         let claude_error_sids = crate::socket::agents_error_sids_cached();
-        let mut events: Vec<(String, Vec<crate::agent_transitions::Transition>)> = Vec::new();
         // 어느 pane 이든 판정이 달라졌으면 보드도 바로 따라오게 관측을 깨운다 — 훅이 없는
         // 하네스(codex·agy)의 기록 변화는 이 틱에서만 보인다.
         let mut state_changed = false;
@@ -1550,7 +1549,6 @@ impl App {
             state_changed |= prev.as_ref() != Some(&state);
             own_moved |= !prev.as_ref().is_some_and(|p| p.same_kind(&state))
                 && !kasa_mcp::remote::is_remote_pane(tab);
-            let evs = crate::agent_transitions::transitions(prev.as_ref(), &state);
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
@@ -1575,9 +1573,6 @@ impl App {
                     stalled,
                     busy_since: running.then_some(now),
                 });
-            if !evs.is_empty() {
-                events.push((id.clone(), evs));
-            }
         }
         // Drop entries for panes that no longer exist (closed/undocked).
         self.pane_activity.retain(|k, _| panes.iter().any(|(id, _)| id == k));
@@ -1599,6 +1594,9 @@ impl App {
         }
         self.flush_held_trouble();
 
+        // Each PTY keeps its own history, including hidden tabs. Switching the visible
+        // tab must not look like the previous tab finishing its work.
+        let events = self.collab.hub.notification_events();
         if events.is_empty() {
             return;
         }

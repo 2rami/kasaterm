@@ -13,7 +13,8 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 | `kasaterm-bind-transcript.sh` | SessionStart/PreToolUse | claude transcript 경로 등록(**board 데이터 소스**) + agent-roster 영속 기록(재시작 후 `claude --resume` 복원용) |
 | `kasaterm-conflict-guard.py` | PreToolUse(Edit/Write/MultiEdit) | 같은 파일 동시편집 차단 + 커밋 전까지 고친 학생이 잡기(`claims.json`, `release`·`list`) + 최신 board 주소로 담당 조율 안내 |
 | `kasaterm-subagent-guard.py` | PreToolUse(Agent) | pane 안의 범용 서브에이전트를 막고 `kasaterm-cli summon` 으로 학생을 세우게 안내(Explore·Plan·안내형은 통과, description 에 `[subagent]` 면 통과) |
-| `kasaterm-stop-drain.sh` | Stop | 미읽 협업 메시지 있으면 멈춤 차단(inbox drain) + 작업 완료 알림 |
+| `kasaterm-turn.sh` | UserPromptSubmit/Stop/PreCompact | 잠정 턴 경계·압축 알림. Stop 자체는 완료 알림의 근거가 아님 |
+| `kasaterm-stop-drain.sh` | 구형 Stop 설정 호환 | 턴 종료 경계만 전달. 새 설정에는 주입하지 않으며 완료 알림을 직접 보내지 않음 |
 | `kasaterm-notify-attention.sh` | Notification | 권한/입력 대기 alert |
 | `auto-imgopen.sh` | PostToolUse(SendUserFile) | 보낸 이미지를 image pane 으로 자동 표시 |
 

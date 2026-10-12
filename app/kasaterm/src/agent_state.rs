@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -143,6 +144,8 @@ pub(crate) struct Evidence {
     pub compact_age: Option<Duration>,
     /// 기록: 턴 상태·mtime 나이·있음·마지막 오류.
     pub transcript_turn: Option<TurnState>,
+    pub transcript_completion: Option<u64>,
+    pub questions: Vec<crate::transcript::PendingQuestion>,
     pub transcript_age: Option<Duration>,
     pub transcript_present: bool,
     pub transcript_error: Option<HarnessError>,
@@ -180,6 +183,7 @@ pub(crate) struct ScreenSigns {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ModuleSigns {
     pub turn_open: bool,
+    pub completed_at: Option<Instant>,
     /// 지난 턴이 오류·거절로 끝났으면 그 까닭.
     pub turn_error: Option<String>,
     pub compacting: bool,
@@ -193,6 +197,9 @@ pub(crate) struct ModuleSigns {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Resolved {
     pub state: AgentState,
+    pub source: Option<String>,
+    pub completion: Option<u64>,
+    pub questions: Vec<crate::transcript::PendingQuestion>,
     /// 보드 `status_reason` — 판정의 근거 한 마디.
     pub reason: &'static str,
     pub bg_active: bool,
@@ -390,6 +397,9 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
     if let Some(m) = &e.module {
         return resolve_module(e, m);
     }
+    if let Some(question) = e.questions.iter().find(|q| q.blocking || turn_open(e).is_none()) {
+        return (AgentState::Waiting { kind: WaitKind::Question, reason: question.prompt.clone() }, "transcript question");
+    }
     // 화면이 살아 돈다(스피너 + 출력 박동) = 사람이 이미 답했다. 훅 attention 표식은 Stop·기록
     // 성장이 와야 풀리는데 그 사이 몇 초를 「대기」로 남기던 것을 화면이 먼저 푼다.
     let screen_running = e.screen.as_ref().is_some_and(|s| s.spinner) && e.heartbeat;
@@ -462,6 +472,7 @@ pub(crate) struct StateHub {
     pub screen: Mutex<HashMap<String, ScreenSigns>>,
     transcript: Mutex<HashMap<String, TurnObservation>>,
     resolved: Mutex<(Option<Instant>, HashMap<String, Resolved>)>,
+    notifications: Mutex<crate::agent_transitions::Observer>,
 }
 
 /// 같은 틱 안에서 두 번 읽어도 파일은 한 번만 본다.
@@ -535,6 +546,13 @@ impl StateHub {
     pub(crate) fn resolved(&self, surface: &str) -> Option<Resolved> {
         self.resolved.lock().unwrap().1.get(surface).cloned()
     }
+    pub(crate) fn notification_events(&self) -> Vec<(String, Vec<crate::agent_transitions::Transition>)> {
+        let resolved = self.resolved.lock().unwrap();
+        self.notifications.lock().unwrap().update(&resolved.1)
+    }
+    pub(crate) fn notification_deadline(&self) -> Option<Instant> {
+        self.notifications.lock().unwrap().next_deadline()
+    }
     /// 이사·정지 게이트용 — 모르는 것은 일하는 중으로 친다(턴을 자르는 쪽이 더 나쁘다).
     pub(crate) fn is_working(&self, surface: &str) -> bool {
         matches!(self.state(surface), AgentState::Working | AgentState::Compacting | AgentState::Unknown)
@@ -567,13 +585,15 @@ impl StateHub {
             Err(_) => self.transcript.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.path.clone())).collect(),
         };
         let mut next: HashMap<String, Resolved> = HashMap::with_capacity(live.len());
-        let previous = std::mem::take(&mut self.resolved.lock().unwrap().1);
+        // Readers must keep seeing the last complete snapshot while another caller refreshes it.
+        let previous = self.resolved.lock().unwrap().1.clone();
         let mut transcript = self.transcript.lock().unwrap();
         transcript.retain(|id, _| live.contains(id));
         for id in &live {
             let session = kasa_pty::lookup_session(id);
             let harness = session.as_ref().and_then(|p| p.active_agent());
             let mut evidence = Evidence { harness, ..Default::default() };
+            let mut source = None;
             if kasa_mcp::remote::is_remote_pane(id) {
                 let facts = kasa_mcp::remote::cached_fresh_pane(id);
                 let word = facts
@@ -586,6 +606,7 @@ impl StateHub {
                     .and_then(|v| v.get("waiting_for").and_then(|s| s.as_str()))
                     .map(str::to_string);
                 let kind = facts.as_ref().and_then(wait_kind_of_row);
+                source = facts.as_ref().and_then(|v| v["session_id"].as_str()).map(|sid| format!("remote:{sid}"));
                 evidence.remote = Some((word, why, kind));
             } else if harness.is_some() {
                 if let Some(p) = session.as_ref() {
@@ -593,7 +614,10 @@ impl StateHub {
                     evidence.last_submit_age = p.last_submit().map(|s| now.duration_since(s));
                 }
                 if let Some(obs) = Self::observe(&mut transcript, id, bound.get(id)) {
+                    source = Some(obs.path.to_string_lossy().into_owned());
                     evidence.transcript_turn = Some(obs.state);
+                    evidence.transcript_completion = obs.completion;
+                    evidence.questions = obs.questions.pending();
                     evidence.transcript_age = obs.mtime.and_then(|m| m.elapsed().ok());
                     evidence.transcript_present = true;
                     evidence.transcript_error = obs.error.clone();
@@ -629,6 +653,7 @@ impl StateHub {
                 evidence.screen = self.screen.lock().unwrap().get(id).cloned();
                 if harness == Some(kasa_pty::AgentKind::Claude) {
                     if let Some(m) = kasa_mcp::claude_mod::live(id) {
+                        source = Some(format!("claude-mod:{}:{}", m.session, m.pid));
                         let key = session.as_ref().and_then(|p| p.last_key());
                         let answered = m.permission_since.zip(key).is_some_and(|(asked, key)| key > asked);
                         if let Some(key) = key.filter(|_| answered) {
@@ -637,6 +662,7 @@ impl StateHub {
                         evidence.bg_active = m.running_tasks().next().is_some();
                         evidence.module = Some(ModuleSigns {
                             turn_open: m.turn_open,
+                            completed_at: m.turn_completed.then_some(m.turn_at),
                             turn_error: m.turn_error.clone(),
                             compacting: m.compacting.is_some_and(|at| at.elapsed() < COMPACT_MAX),
                             permission: m.permissions.first().map(|(_, tool)| tool.clone()),
@@ -647,6 +673,7 @@ impl StateHub {
                 }
             }
             let (state, reason) = resolve(&evidence);
+            let completion = completion_evidence(&evidence);
             let since = previous
                 .get(id)
                 .filter(|prev| prev.state.same_kind(&state))
@@ -657,7 +684,8 @@ impl StateHub {
                 || matches!(evidence.official, Some(Official::Waiting { error: true }));
             next.insert(
                 id.clone(),
-                Resolved { state, reason, bg_active: evidence.bg_active, has_error, intent: evidence.intent, since },
+                Resolved { state, source, completion, questions: evidence.questions, reason,
+                    bg_active: evidence.bg_active, has_error, intent: evidence.intent, since },
             );
         }
         drop(transcript);
@@ -682,13 +710,20 @@ impl StateHub {
             .is_some_and(|o| o.path == path && o.len == len && o.mtime == mtime);
         if !unchanged {
             let (tail, idle) = crate::socket::read_tail(&path, TAIL_WINDOW);
-            let state = crate::transcript::turn_state_from_tail(&tail)?;
+            let previous = cache.get(id).filter(|o| o.path == path && len >= o.len);
+            let signal = crate::transcript::turn_signal_from_tail(&tail);
+            let state = signal.map(crate::transcript::TurnSignal::state).or_else(|| previous.map(|o| o.state))?;
+            let mut questions = previous.map(|o| o.questions.clone()).unwrap_or_default();
+            questions.update_tail(&tail);
             let sid = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             let snap = crate::transcript::snapshot_from_tail(&sid, &tail, idle);
             cache.insert(
                 id.to_string(),
                 TurnObservation {
                     state,
+                    // Unrecognized appended data cannot renew old completion evidence.
+                    completion: signal.and_then(crate::transcript::TurnSignal::completion),
+                    questions,
                     path,
                     len,
                     mtime,
@@ -700,6 +735,17 @@ impl StateHub {
         }
         cache.get(id)
     }
+}
+
+fn completion_evidence(e: &Evidence) -> Option<u64> {
+    if e.remote.is_some() || e.harness.is_none() { return None; }
+    if let Some(m) = &e.module {
+        let at = m.completed_at?;
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        at.hash(&mut hash);
+        return Some(hash.finish());
+    }
+    e.transcript_completion
 }
 
 #[cfg(test)]
@@ -716,6 +762,69 @@ mod tests {
     }
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
+    }
+
+    #[test]
+    fn provisional_stop_quiet_timeout_and_interruption_are_not_completion_evidence() {
+        let mut e = claude();
+        e.hook_turn = Some((HookTurn::Closed, secs(0)));
+        e.transcript_turn = Some(TurnState::Idle);
+        assert_eq!(completion_evidence(&e), None);
+        e.transcript_turn = Some(TurnState::Working);
+        e.transcript_age = Some(secs(8));
+        e.hook_turn = Some((HookTurn::Open, secs(8)));
+        sc(&mut e);
+        assert_eq!(resolve(&e).0, AgentState::Idle);
+        assert_eq!(completion_evidence(&e), None);
+        e.transcript_completion = Some(7);
+        assert_eq!(completion_evidence(&e), Some(7));
+        e.module = Some(ModuleSigns::default());
+        assert_eq!(completion_evidence(&e), None, "the module must not inherit an old transcript completion");
+        e.module.as_mut().unwrap().completed_at = Some(Instant::now());
+        assert!(completion_evidence(&e).is_some());
+    }
+
+    #[test]
+    fn codex_questions_are_distinct_from_finished_or_still_running_turns() {
+        let mut e = Evidence { harness: Some(AgentKind::Codex), transcript_present: true,
+            transcript_turn: Some(TurnState::Working), transcript_age: Some(secs(0)), ..Default::default() };
+        e.questions.push(crate::transcript::PendingQuestion { id: "call".into(), prompt: "어느 기기인가요?".into(), blocking: true });
+        assert!(matches!(resolve(&e).0, AgentState::Waiting { kind: WaitKind::Question, .. }));
+        e.questions[0].blocking = false;
+        assert_eq!(resolve(&e).0, AgentState::Working, "an async question does not stop work that is still running");
+        e.transcript_turn = Some(TurnState::Idle);
+        assert!(matches!(resolve(&e).0, AgentState::Waiting { kind: WaitKind::Question, .. }));
+        e.questions.clear();
+        assert_eq!(resolve(&e).0, AgentState::Idle);
+    }
+
+    #[test]
+    fn pending_questions_survive_tail_rollover_but_not_a_different_session() {
+        use std::io::Write;
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("kasa-notify-{}-{nonce}.jsonl", std::process::id()));
+        let other = path.with_extension("other.jsonl");
+        let args = serde_json::json!({"questions":[{"title":"어느 기기인가요?"}]}).to_string();
+        let tail = [
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"q","arguments":args}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"q","output":"{\"accepted\":true}"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t"}}),
+        ].map(|v| v.to_string()).join("\n");
+        std::fs::write(&path, tail).unwrap();
+        let mut cache = HashMap::new();
+        let first = StateHub::observe(&mut cache, "%fixture", Some(&path)).unwrap();
+        assert_eq!(first.questions.pending().len(), 1);
+        assert!(first.completion.is_some());
+        let metadata = serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","padding":"x".repeat(TAIL_WINDOW as usize + 100)}});
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "\n{metadata}").unwrap();
+        let later = StateHub::observe(&mut cache, "%fixture", Some(&path)).unwrap();
+        assert_eq!(later.questions.pending().len(), 1);
+        assert_eq!(later.completion, None);
+        std::fs::write(&other, "{\"type\":\"session_meta\",\"payload\":{}}\n").unwrap();
+        let rebound = StateHub::observe(&mut cache, "%fixture", Some(&other)).unwrap();
+        assert!(rebound.questions.pending().is_empty());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(other).unwrap();
     }
 
     #[test]

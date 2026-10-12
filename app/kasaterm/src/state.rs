@@ -1136,6 +1136,8 @@ mod hook_activity_tests {
 /// 다시 읽지 않는다 — 틱마다 stat 하나로 끝난다.
 pub(crate) struct TurnObservation {
     pub(crate) state: crate::transcript::TurnState,
+    pub(crate) completion: Option<u64>,
+    pub(crate) questions: crate::transcript::Questions,
     pub(crate) path: std::path::PathBuf,
     pub(crate) len: u64,
     pub(crate) mtime: Option<std::time::SystemTime>,

@@ -339,13 +339,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             "PreCompact": [
                 { "hooks": [cmd("kasaterm-turn.sh compact_start", 5)] }
             ],
-            // 두 훅을 **다른 그룹**으로 나눠 둔다 — stop-drain 은 인박스가 있으면
-            // stdout 에 block JSON 을 내는데, 같은 그룹이면 진행 표시 훅의 출력과
-            // 섞여 그 결정이 깨질 수 있다. agent-status 는 stdout 을 안 쓰지만
-            // 나란히 두는 것 자체가 나중에 그 규칙을 잊게 만든다.
+            // Stop can be blocked by another hook; completion notifications require
+            // a normal engine/transcript end rather than this provisional boundary.
             "Stop": [
                 { "hooks": [cmd("kasaterm-turn.sh end", 5)] },
-                { "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
             // 종류별로 나눠 건다 — 승인(permission) · 질문/선택(question) · 답 없이 방치

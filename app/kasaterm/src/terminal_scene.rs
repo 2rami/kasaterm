@@ -415,8 +415,9 @@ impl App {
             .map(|a| (a.status.as_str(), a.stalled.is_some()))
             .hash(&mut hash);
         self.pane_ultracode.contains(id).hash(&mut hash);
-        self.turn_done_panes.contains(id).hash(&mut hash);
-        self.notify_flash_factor(id).is_some().hash(&mut hash);
+        let notification_surface = ws.active_tab_pid(id);
+        self.turn_done_panes.contains(&notification_surface).hash(&mut hash);
+        self.notify_flash_factor(&notification_surface).is_some().hash(&mut hash);
         format!("{:?}", self.agent_state(id)).hash(&mut hash);
         if let Some(session) = self.pty.get(id) {
             format!("{:?}", session.active_agent()).hash(&mut hash);
@@ -1621,8 +1622,8 @@ impl App {
                 spinner_hit.is_some(),
                 prompt_hit.is_some(),
                 stand_anchor.is_some(),
-                self.turn_done_panes.contains(id),
-                self.notify_flash_factor(&id).is_some(),
+                self.turn_done_panes.contains(&tab_pid),
+                self.notify_flash_factor(&tab_pid).is_some(),
             );
             match plan {
                 crate::screenread::SpritePlan::WalkAtSpinner => {

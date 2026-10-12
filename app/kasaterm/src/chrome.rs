@@ -1,6 +1,32 @@
 //! 사이드바·git col·파일트리 토글·패널·줌/폰트·toast 등 chrome UI 메서드.
 use super::*;
 
+fn visible_notification_surface(ws: &Workspace) -> Option<String> {
+    ws.active_pane.as_ref().map(|outer| ws.active_tab_pid(outer))
+}
+
+#[cfg(test)]
+mod notification_surface_tests {
+    use super::*;
+
+    #[test]
+    fn the_visible_tab_not_its_outer_pane_is_read() {
+        let mut ws = Workspace::default();
+        ws.active_pane = Some("%0".into());
+        ws.panes.insert("%0".into(), PaneState {
+            tabs: vec![PaneTab { pid: Some("%0".into()), ..Default::default() },
+                PaneTab { pid: Some("%1".into()), ..Default::default() }],
+            active_tab: 1,
+            ..Default::default()
+        });
+        assert_eq!(visible_notification_surface(&ws).as_deref(), Some("%1"));
+        ws.panes.get_mut("%0").unwrap().active_tab = 0;
+        assert_eq!(visible_notification_surface(&ws).as_deref(), Some("%0"));
+        ws.active_pane = None;
+        assert_eq!(visible_notification_surface(&ws), None);
+    }
+}
+
 impl GitColView {
     /// 펼친 diff·커밋 캐시가 기대는 자리. 부모 폴더 칸은 같은 칸에서도 보이는 하위 레포가 바뀌므로 레포 뿌리로 가른다.
     fn target(&self) -> Option<(std::path::PathBuf, Option<(String, String)>, u64)> {
@@ -478,34 +504,13 @@ impl App {
         }
     }
 
-    /// A pane's claude finished (Stop hook → `kasaterm-cli notify` → socket →
-    /// `UserEvent::Notify`). Flash the pane's header and, unless the user is
-    /// already looking at that exact pane (our window focused + it's the
-    /// active pane), raise a desktop alert. cmux-style suppression keeps the
-    /// alert for the cases that actually need attention (background window or
-    /// a sibling pane).
+    /// Explicit messages are separate from verified response completion so a
+    /// shell's OSC notification cannot finish an unrelated agent turn.
     pub(crate) fn handle_notify(&mut self, surface_id: &str, title: &str, body: &str) {
         if self.lite {
             return;
         }
-        let now = std::time::Instant::now();
-        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
-        // claude's Stop hook fired → this pane's turn is DONE. Trust this push
-        // over the glyph heuristic: force the pane idle right now so the working
-        // bar can't linger on a stale "✻ Churned for 42s" line, and drop the
-        // busy-grace timer. The glyph working→idle path in
-        // `refresh_pane_activity` then sees the pane is already idle.
-        //
-        // 완료 화면 토스트는 제거(사용자 2026-07-27) — 학생이 많아 턴마다 떠서 시야를
-        // 가린다. 완료 신호는 탭 펄스·dock 배지·백그라운드 데스크톱 알림(아래)으로
-        // 전달된다.
-        // 상태 자체는 허브가 닫는다(`PtyBackend::notify` → `turn end`); 다음 틱의 전이
-        // 관찰자가 TurnDone 으로 펄스·cheer 를 켠다. 여기서는 바로 되투영만 시킨다.
-        self.pane_busy_check = None;
-        let _ = now;
-        // 턴이 끝났다 = 사용량이 방금 움직였다. 폴러를 깨워 남은 잠을 건너뛰게 한다
-        // (`usage_poke`) — 그러지 않으면 방금 쓴 몫이 최대 1분 뒤에야 표에 뜬다.
-        crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
+        let is_active_pane = self.notification_surface_is_visible(surface_id);
         self.wake_blink(surface_id);
         // A pane in a *background* window finished — pulse that window's sidebar
         // tab until the user switches to it (switch_window clears the entry).
@@ -521,22 +526,20 @@ impl App {
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
         }
-        let who = self.pane_character_if_known(surface_id);
+        let who = self.notification_character(surface_id);
         // 누구 알림인지는 프사(오른쪽 썸네일)와 제목 둘 다로 말한다 — 캐릭터가 없는
         // 순정 pane 은 프사가 안 붙으므로 제목만 남는다.
         let titled = match who.as_deref() {
             Some(c) => format!("{c} · {title}"),
             None => title.to_string(),
         };
-        // 열쇠는 pane 별 `done:<id>` — 전이 관찰자(`apply_transition_event` 의 TurnDone)가
-        // 같은 열쇠로 한 번 더 내므로, 8초 창 안에서 먼저 온 이쪽(훅) 하나만 나간다. pane 이
-        // 다르면 열쇠도 달라 학생 여럿의 완료가 겹쳐 뜨는 것은 그대로다.
+        // Explicit messages must not consume the dedup slot of a later verified completion.
         let sid = self.pane_claude_sid.get(surface_id).cloned();
         notify_desktop(
             &titled,
             body,
             who.as_deref(),
-            Some(&format!("done:{surface_id}")),
+            Some(&format!("message:{surface_id}")),
             Some((surface_id, sid.as_deref())),
         );
         // 배너는 `notify_desktop` 이 줄 세운다 — 한때 여기서 따로 push 했는데,
@@ -559,9 +562,9 @@ impl App {
             return;
         }
         let now = std::time::Instant::now();
-        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
+        let is_active_pane = self.notification_surface_is_visible(surface_id);
         // 캐릭터명(pane 고정) + hook reason(완료 순간). OSC 작업명은 안 쓴다.
-        let character = self.pane_character_if_known(surface_id);
+        let character = self.notification_character(surface_id);
         let reason = reason.trim();
         self.notify_flash.insert(surface_id.to_string(), now);
         self.wake_blink(surface_id);
@@ -625,20 +628,26 @@ impl App {
         // 읽지 않음 표시를 거기서 세우면 껐다 켤 때마다 안 본 것이 쌓인 것처럼 보인다
         // (2026-09-21 「껐다 켜면 확인 안 한 것처럼 깜빡이는 거」). 오류는 예외다 — 그건
         // 켜자마자 알아야 하고, 흔들림으로 생기지도 않는다.
-        if self.booted_at.elapsed() < Self::BOOT_QUIET && !matches!(ev, Transition::Error { .. }) {
+        if self.booted_at.elapsed() < Self::BOOT_QUIET
+            && !matches!(ev, Transition::Error { .. } | Transition::Waiting { key: Some(_), .. }) {
             self.chrome_dirty = true;
             return;
         }
         if std::env::var_os("KASATERM_STATE_LOG").is_some() {
             eprintln!("[state] {id} {ev:?}");
         }
-        let character = self.pane_character_if_known(id);
+        let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
         let sid = self.pane_claude_sid.get(id).cloned();
-        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(id);
+        let is_active_pane = self.notification_surface_is_visible(id);
         let background_window = self.window_of_pane(id).filter(|wi| *wi != self.active_window);
         match ev {
-            Transition::TurnDone => {
+            Transition::TurnDone { key } => {
+                let Some(resolved) = self.collab.hub.resolved(id).filter(|r| {
+                    r.completion == Some(key) && !r.has_error && !r.bg_active && r.questions.is_empty()
+                        && matches!(r.state, crate::agent_state::AgentState::Idle
+                            | crate::agent_state::AgentState::Waiting { kind: crate::agent_state::WaitKind::Idle, .. })
+                }) else { return };
                 self.notify_flash.insert(id.to_string(), now);
                 self.wake_blink(id);
                 self.turn_done_panes.insert(id.to_string());
@@ -648,14 +657,7 @@ impl App {
                 }
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
-                    let activity = self.pane_activity.get(id);
-                    let intent = activity.map(|a| a.intent.clone()).unwrap_or_default();
-                    // 멈춘 것을 「완료」로 부르면 알림 전체가 못 믿을 것이 된다 — 사람이
-                    // 그 줄을 보고 「끝났구나」로 읽고 넘기기 때문이다(2026-09-21 지시
-                    // 「api error 로 일시정지된 것도 완료로 알림이 와」). 화면 문구가 놓친
-                    // 종류도 기록·명부가 남긴 오류 표식으로 한 번 더 거른다.
-                    let stalled = self.collab.hub.resolved(id).is_some_and(|r| r.has_error);
-                    let why = activity.and_then(|a| a.stalled.clone());
+                    let intent = resolved.intent;
                     // 본문이 비면 이름만 뜬 알림이 된다 — 무엇을 하다 그리 됐는지가 빠지면
                     // 사람은 그 pane 을 열어 봐야 하고, 그러느니 안 보게 된다(2026-09-21
                     // 「캐릭터랑 세션 이름만 오던데」). 있는 재료를 순서대로 잇는다.
@@ -666,28 +668,11 @@ impl App {
                             .collect::<Vec<_>>()
                             .join(" · ")
                     };
-                    let (title, key, body) = if stalled {
-                        (
-                            format!("{who} · 멈춤"),
-                            format!("stalled:{id}"),
-                            {
-                                let text = detail([why, Some(intent.clone())]);
-                                if text.is_empty() { "까닭은 그 창 화면에 있어요".to_string() } else { text }
-                            },
-                        )
-                    } else {
-                        (
-                            format!("{who} · 완료"),
-                            format!("done:{id}"),
-                            // 끝났을 때 사람이 알고 싶은 것은 「무슨 도구를 썼나」가 아니라
-                            // **뭐라고 했나**다(2026-09-21 지시). 마지막 말이 있으면 그것을
-                            // 싣고, 아직 아무 말도 없었을 때만 하던 일로 대신한다.
-                            {
-                                let text = detail([self.pane_last_reply(id), Some(intent)]);
-                                if text.is_empty() { "한 턴을 마쳤어요".to_string() } else { text }
-                            },
-                        )
-                    };
+                    // An engine's turn end proves a response ended, not that the whole project succeeded.
+                    let title = format!("{who} · 응답 완료");
+                    let key = format!("done:{id}:{key}");
+                    let text = detail([self.pane_last_reply(id), Some(intent)]);
+                    let body = if text.is_empty() { "응답을 마쳤어요".to_string() } else { text };
                     notify_desktop(
                         &title,
                         &body,
@@ -701,7 +686,7 @@ impl App {
             // 입력창 위 손 흔들기가 이미 말했다. 여기서 토스트·알림·읽지 않음을 세우면 승인처럼
             // 보인다(2026-09-18 코유키).
             Transition::Waiting { kind: crate::agent_state::WaitKind::Idle, .. } => {}
-            Transition::Waiting { kind, reason } => {
+            Transition::Waiting { kind, reason, key } => {
                 self.notify_flash.remove(id);
                 self.wake_blink(id);
                 if let Some(wi) = background_window {
@@ -720,7 +705,8 @@ impl App {
                     crate::agent_state::WaitKind::Idle => "⏸ 대기",
                 };
                 let body = if reason.is_empty() { who.clone() } else { format!("{who} — {reason}") };
-                notify_desktop(title, &body, character.as_deref(), Some(&format!("approval:{id}")), Some((id, sid.as_deref())));
+                let key = key.map(|key| format!("question:{id}:{key}")).unwrap_or_else(|| format!("approval:{id}"));
+                notify_desktop(title, &body, character.as_deref(), Some(&key), Some((id, sid.as_deref())));
             }
             // 스스로 다시 시도하는 오류는 붙들어 둔다 — 하루에도 몇 번 스쳐 가는 끊김마다 알림이
             // 오면 진짜 멈춘 것까지 안 보게 된다(2026-09-29 「가끔 연결 끊기면 알림 오는 것」).
@@ -773,10 +759,10 @@ impl App {
     }
 
     fn notify_trouble(&mut self, id: &str, label: &str) {
-        let character = self.pane_character_if_known(id);
+        let character = self.notification_character(id);
         let who = character.clone().unwrap_or_else(|| "pane".to_string());
         let sid = self.pane_claude_sid.get(id).cloned();
-        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(id);
+        let is_active_pane = self.notification_surface_is_visible(id);
         self.wake_blink(id);
         if let Some(wi) = self.window_of_pane(id).filter(|wi| *wi != self.active_window) {
             self.window_alert.insert(wi);
@@ -803,6 +789,21 @@ impl App {
         // 한 줄만 — 알림은 두어 줄이면 잘리고, 첫 문장이 대개 결론이다.
         let first = said.lines().find(|line| !line.trim().is_empty())?.trim();
         (!first.is_empty()).then(|| first.chars().take(120).collect())
+    }
+
+    fn notification_surface_is_visible(&self, surface: &str) -> bool {
+        let ws = self.ws.lock().unwrap();
+        visible_notification_surface(&ws).as_deref() == Some(surface)
+    }
+
+    fn notification_character(&self, surface: &str) -> Option<String> {
+        // A hidden first tab shares the outer pane id; folding it to the active
+        // tab would attribute its notification to a different agent.
+        let running = kasa_mcp::remote::cached_agent_running(surface).unwrap_or_else(|| {
+            self.pty.get(surface).and_then(|p| p.active_agent()).is_some()
+                || self.pane_claude_sid.contains_key(surface)
+        });
+        running.then(|| self.ws.lock().unwrap().pane_character.get(surface).cloned()).flatten()
     }
 
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
@@ -873,7 +874,8 @@ impl App {
     /// tick from `about_to_wait` — cheap unless the count actually moves.
     pub(crate) fn sync_dock_badge(&mut self) {
         if self.window_focused {
-            if let Some(active) = self.ws.lock().unwrap().active_pane.clone() {
+            let ws = self.ws.lock().unwrap();
+            if let Some(active) = visible_notification_surface(&ws) {
                 self.unread_panes.remove(&active);
             }
         }

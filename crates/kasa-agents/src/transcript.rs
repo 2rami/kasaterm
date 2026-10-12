@@ -13,6 +13,9 @@
 
 use kasa_socket::backend::{ActivityEvent, ConversationTurn, PaneActivity};
 
+mod signals;
+pub use signals::{turn_signal_from_tail, PendingQuestion, Questions, TurnSignal};
+
 /// transcript에서 뽑은 한 번의 도구 사용.
 #[derive(Clone, Debug)]
 pub struct ToolEvent {
@@ -1484,55 +1487,7 @@ pub enum TurnState {
 ///   없던 것이다.
 /// - 그 밖의 포맷(agy 등)은 `None` — 호출자가 화면 폴백으로 간다.
 pub fn turn_state_from_tail(tail: &str) -> Option<TurnState> {
-    let mut codex_activity = false;
-    for line in tail.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if let Some(p) = v.get("payload").and_then(|p| p.as_object()) {
-            let sub = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            match (kind, sub) {
-                ("event_msg", "task_started") => return Some(TurnState::Working),
-                ("event_msg", "task_complete" | "turn_aborted") => return Some(TurnState::Idle),
-                ("session_meta", _) => return Some(TurnState::Idle),
-                ("response_item", _) => codex_activity = true,
-                ("event_msg", "token_count" | "thread_settings_applied") => {}
-                ("event_msg", _) => codex_activity = true,
-                _ => {}
-            }
-            continue;
-        }
-        let Some(m) = v.get("message") else { continue };
-        match kind {
-            "assistant" => {
-                return Some(match m.get("stop_reason").and_then(|s| s.as_str()) {
-                    Some("tool_use") | None => TurnState::Working,
-                    Some(_) => TurnState::Idle,
-                });
-            }
-            "user" => {
-                if v.get("isMeta").and_then(|b| b.as_bool()) == Some(true) {
-                    continue;
-                }
-                let content = m.get("content");
-                let text: String = match content {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(serde_json::Value::Array(items)) => items
-                        .iter()
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    _ => String::new(),
-                };
-                if text.contains("<command-name>") || text.contains("<local-command-stdout>") {
-                    continue;
-                }
-                let interrupted = text.trim_start().starts_with("[Request interrupted");
-                return Some(if interrupted { TurnState::Idle } else { TurnState::Working });
-            }
-            _ => {}
-        }
-    }
-    codex_activity.then_some(TurnState::Working)
+    turn_signal_from_tail(tail).map(TurnSignal::state)
 }
 
 #[cfg(test)]
