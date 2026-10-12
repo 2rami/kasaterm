@@ -100,6 +100,23 @@ pub(super) struct MenuState<'a> {
     pub submenu_hit_start: &'a mut usize,
 }
 
+fn sync_notice_height(summary_lines: usize, detail_lines: usize) -> f32 {
+    if summary_lines + detail_lines == 0 { 0.0 } else { (summary_lines + detail_lines) as f32 * 18.0 + 4.0 }
+}
+
+fn sync_notice_icon(failed: bool, pending: bool) -> &'static str {
+    if failed { "triangle-alert" } else if pending { "rotate-cw" } else { "check" }
+}
+
+fn current_account_retry(provider: AccountProvider, id: &str, active: bool, signed_out: bool) -> Option<(&'static str, AccountMenuItem)> {
+    (provider == AccountProvider::Claude && active && !id.is_empty() && !signed_out)
+        .then(|| ("다른 기기에 다시 보내기", AccountMenuItem::Select(provider, id.to_string())))
+}
+
+fn account_retry_height(has_retry: bool) -> f32 {
+    if has_retry { crate::native_controls::CONTROL_HEIGHT + 4.0 } else { 0.0 }
+}
+
 /// 계정 드롭다운. 닫혀 있어도 지난 프레임의 히트렉트·틀은 비운다.
 pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'_>) {
     st.hits.clear();
@@ -198,6 +215,15 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
     let win_h_row = 22.0_f32;
     let blk_top = 6.0_f32;
     let blk_bot = 4.0_f32;
+    let sync_notice: Option<crate::session::SyncNotice> = crate::session::account_sync_notice(frame.accounts.claude);
+    let sync_width = (mw - pad_x * 2.0 - 21.0).max(0.0);
+    let sync_summary = sync_notice.as_ref().map_or_else(Vec::new, |notice| {
+        crate::native_settings::wrap_words(g, &notice.summary, sync_width, 10.5)
+    });
+    let sync_details = sync_notice.as_ref().map_or_else(Vec::new, |notice| {
+        crate::native_settings::wrap_words(g, &notice.details, sync_width, 10.5)
+    });
+    let sync_h = sync_notice_height(sync_summary.len(), sync_details.len());
     struct WinRow {
         lab: String,
         pct: f32,
@@ -350,9 +376,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
         // 전환되므로 눌러 보고 판단할 수가 없다. 막대 두 벌은 이름과 한 줄에
         // 못 들어가니 행을 두 줄로 키운다 — 「간단히」 밀도에서는 예전처럼
         // 한 줄에 글자로만.
+        let row_retries: Vec<_> = rows.iter().map(|(id, _, active)| {
+            current_account_retry(p, id, *active,
+                p == AccountProvider::Claude && crate::settings::claude_signed_out(id))
+        }).collect();
         let row_heights: Vec<f32> = rows
             .iter()
-            .map(|(id, _, _)| {
+            .enumerate()
+            .map(|(index, (id, _, _))| {
                 if compact && p == AccountProvider::Codex {
                     return 28.0 + 16.0 + 30.0;
                 }
@@ -385,13 +416,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                     }
                 };
                 28.0 + 16.0 * lines.max(1) as f32 + 30.0
+                    + account_retry_height(row_retries[index].is_some())
             })
             .collect();
 
         let empty_h = if rows.is_empty() { 32.0 } else { 0.0 };
-        (p, rows, row_heights, codex_note, lab_h, empty_h)
+        (p, rows, row_heights, row_retries, codex_note, lab_h, empty_h)
     });
-    let content_h = provs.iter().map(|(p, _)| provider_h(*p)).sum::<f32>();
+    let content_h = provs.iter().map(|(p, _)| provider_h(*p)).sum::<f32>() + sync_h;
     // 초기화권은 머리 바로 아래 고정 줄이다 — 제공자 블록은 사용률 순으로 자리를
     // 바꾸고 목록은 굴러가므로, 그 안에 두면 누를 단추가 매번 다른 곳에 있다.
     // 「간단히」에서도 세운다: 드물게 생기는 것이고, 접힌 쪽에 숨으면 가진 줄을 모른다.
@@ -640,9 +672,20 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
         };
         let af = f - 2.5;
         let nw = g.measure_chrome_text(p.label(), nf, true);
-        let acct = crate::info::fit_text(g, &acct, (mw * 0.30).max(0.0), af, false);
+        let selected_id = match p {
+            AccountProvider::Claude => frame.accounts.claude,
+            AccountProvider::Codex => frame.accounts.codex,
+        };
+        let brand = crate::account_brand::Brand::for_account(p, selected_id);
+        let mut acct_x = name_x + nw + 7.0;
+        let brand_w = brand.map_or(0.0, |brand| brand.width(pi) + 6.0);
+        if let Some(brand) = brand {
+            brand.paint(g, acct_x, hy + (ph_h - pi) / 2.0, pi);
+            acct_x += brand_w;
+        }
+        let acct = crate::info::fit_text(g, &acct, (mw * 0.30 - brand_w).max(0.0), af, false);
         g.draw_text(
-            name_x + nw + 7.0,
+            acct_x,
             hy + (ph_h - af) / 2.0 - 1.0,
             &acct,
             gpu::DrawOpts {
@@ -717,8 +760,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
         };
         if !rt.is_empty() {
             let tf = if rbold { f - 1.0 } else { f - 2.5 };
-            let avail = right
-                - (name_x + nw + 7.0 + g.measure_chrome_text(&acct, af, false) + 8.0);
+            let avail = right - (acct_x + g.measure_chrome_text(&acct, af, false) + 8.0);
             let rt = crate::info::fit_text(g, &rt, avail.max(0.0), tf, rbold);
             let tw = g.measure_chrome_text(&rt, tf, rbold);
             g.draw_text(
@@ -774,6 +816,24 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
         ry += prow_h;
         if open {
             submenu_anchor = g.clip_hit((mx, ry - prow_h, mw, prow_h));
+        }
+        if p == AccountProvider::Claude {
+            if let Some(notice) = sync_notice.as_ref().filter(|_| sync_h > 0.0) {
+                // This is a persistent readout, not another account-switch target.
+                g.queue_icon(sync_notice_icon(notice.failed, notice.pending), mx + pad_x,
+                    ry + 2.0, 14.0, if notice.failed { theme::danger() } else { theme::text_dim() });
+                for (line, summary) in sync_summary.iter().map(|line| (line, true))
+                    .chain(sync_details.iter().map(|line| (line, false))) {
+                    g.draw_text(ix, ry + 2.0, line, gpu::DrawOpts {
+                        font_size: 10.5,
+                        color: if summary && notice.failed { theme::danger() } else if summary { theme::text() } else { theme::text_dim() },
+                        bold: false,
+                        italic: false,
+                    });
+                    ry += 18.0;
+                }
+                ry += 4.0;
+            }
         }
     }
 
@@ -949,7 +1009,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
     g.pop_clip();
     if let (
         Some(provider_rect),
-        Some((p, rows, row_heights, codex_note, lab_h, empty_h)),
+        Some((p, rows, row_heights, row_retries, codex_note, lab_h, empty_h)),
     ) = (submenu_anchor, expanded_accounts.as_ref())
     {
         let p = *p;
@@ -1085,6 +1145,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
         }
         for (row_index, (id, label, active)) in rows.into_iter().enumerate() {
             let arow_h = row_heights[row_index];
+            let retry = row_retries[row_index].clone();
+            let base_row_h = arow_h - account_retry_height(retry.is_some());
             let two_line = !compact || p == AccountProvider::Claude;
             let on = body_hover
                 && hmx >= sx
@@ -1105,10 +1167,16 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                 );
             }
             let line1 = sry + 7.0;
+            let brand = crate::account_brand::Brand::for_account(p, &id);
+            let brand_w = brand.map_or(0.0, |brand| brand.width(14.0) + 6.0);
+            let label_x = sx + pad_x + brand_w;
+            if let Some(brand) = brand {
+                brand.paint(g, sx + pad_x, line1 + (f - 14.0) / 2.0, 14.0);
+            }
             let label =
-                crate::info::fit_text(g, &label, sw - pad_x * 2.0 - 56.0, f, active);
+                crate::info::fit_text(g, &label, (sw - pad_x * 2.0 - 56.0 - brand_w).max(0.0), f, active);
             g.draw_text(
-                sx + pad_x,
+                label_x,
                 line1,
                 &label,
                 gpu::DrawOpts {
@@ -1139,7 +1207,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                 who.filter(|who| !who.is_empty() && !label.contains(who.as_str()))
             {
                 let lw = g.measure_chrome_text(&label, f, active);
-                let wx = sx + pad_x + lw + 8.0;
+                let wx = label_x + lw + 8.0;
                 let room = right - 52.0 - wx;
                 if room > 30.0 {
                     let who = crate::info::fit_text(g, &who, room, tf, false);
@@ -1215,7 +1283,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                         );
                         g.draw_text(
                             sx + pad_x,
-                            sry + arow_h - 22.0,
+                            sry + base_row_h - 22.0,
                             &note,
                             gpu::DrawOpts {
                                 font_size: tf,
@@ -1333,7 +1401,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                                 );
                                 g.draw_text(
                                     sx + pad_x,
-                                    sry + arow_h - 22.0,
+                                    sry + base_row_h - 22.0,
                                     &t,
                                     gpu::DrawOpts {
                                         font_size: tf,
@@ -1464,7 +1532,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
             // Action hits follow selection so the topmost painted control wins.
             {
                 let bf = tf - 0.5;
-                let by = sry + arow_h - 22.0;
+                let by = sry + base_row_h - 22.0;
                 let mut bx = right;
                 for (label, item, skip) in [
                     (
@@ -1517,6 +1585,17 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                     st.hits.push((item, r));
                 }
             }
+            if let Some((label, action)) = retry {
+                // A third footer action would overlap the reset time in narrow account flyouts.
+                let width = (g.measure_chrome_text(label, 12.0, false)
+                    + 2.0 * crate::native_controls::CONTROL_PADDING_X)
+                    .min((sw - 2.0 * pad_x).max(0.0));
+                let rect = crate::native_controls::text_button(g,
+                    (sx + pad_x, sry + base_row_h, width, crate::native_controls::CONTROL_HEIGHT),
+                    if body_hover { frame.cursor } else { (f32::NEG_INFINITY, f32::NEG_INFINITY) },
+                    label, Default::default());
+                st.hits.push((action, rect));
+            }
             sry += arow_h;
         }
 
@@ -1561,6 +1640,53 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_results_increase_scroll_space_without_moving_fixed_controls() {
+        assert_eq!(sync_notice_height(0, 0), 0.0);
+        assert_eq!(sync_notice_height(1, 0), 22.0);
+        assert_eq!(sync_notice_height(2, 8), 184.0);
+        let ordinary = layout((800.0, 400.0), (620.0, 372.0, 100.0, 28.0), 380.0, 127.0, 120.0);
+        let with_results = layout((800.0, 400.0), (620.0, 372.0, 100.0, 28.0), 380.0, 127.0,
+            120.0 + sync_notice_height(2, 8));
+        assert!(with_results.scroll_max > ordinary.scroll_max);
+        assert_eq!(with_results.body_height + with_results.scroll_max, 304.0);
+        assert_eq!(with_results.frame.3 - with_results.body_height, 127.0);
+    }
+
+    #[test]
+    fn sync_results_distinguish_waiting_failure_and_success() {
+        assert_eq!(sync_notice_icon(false, true), "rotate-cw");
+        assert_eq!(sync_notice_icon(true, false), "triangle-alert");
+        assert_eq!(sync_notice_icon(false, false), "check");
+        assert_eq!(sync_notice_icon(true, true), "triangle-alert");
+    }
+
+    #[test]
+    fn current_claude_has_an_explicit_resend_using_the_existing_selection_route() {
+        assert!(matches!(current_account_retry(AccountProvider::Claude, "current", true, false),
+            Some(("다른 기기에 다시 보내기", AccountMenuItem::Select(AccountProvider::Claude, id))) if id == "current"));
+        assert!(current_account_retry(AccountProvider::Codex, "current", true, false).is_none());
+        assert!(current_account_retry(AccountProvider::Claude, "other", false, false).is_none());
+        assert!(current_account_retry(AccountProvider::Claude, "current", true, true).is_none());
+        assert!(current_account_retry(AccountProvider::Claude, "", true, false).is_none());
+    }
+
+    #[test]
+    fn resend_row_is_below_reset_and_management_controls_at_narrow_flyout_widths() {
+        assert_eq!(account_retry_height(false), 0.0);
+        assert_eq!(account_retry_height(true), 30.0);
+        for width in [284.0, 380.0, 384.0] {
+            let base_height = 28.0 + 16.0 + 30.0;
+            let total_height = base_height + account_retry_height(true);
+            let reset_y = base_height - 22.0;
+            let footer_bottom = reset_y - 3.0 + 18.0;
+            let retry = (10.0, base_height, width - 20.0, crate::native_controls::CONTROL_HEIGHT);
+            assert!(retry.1 > footer_bottom);
+            assert!(retry.0 + retry.2 <= width - 10.0);
+            assert_eq!(retry.1 + retry.3 + 4.0, total_height);
+        }
+    }
 
     #[test]
     fn flyout_prefers_right_and_connects_only_provider_row() {

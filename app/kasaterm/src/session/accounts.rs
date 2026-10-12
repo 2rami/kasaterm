@@ -2,6 +2,9 @@
 //! 조용해진 칸부터 다시 띄운다. 웹(폰) 확인 카드도 같은 대기표를 쓴다.
 use super::*;
 
+mod sync;
+pub(crate) use sync::{account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice};
+
 impl App {
     /// agent 프로세스의 환경을 읽는다. 계정 전환의 판단은 설정값이 아니라 이 값처럼
     /// 이미 떠 있는 process가 실제로 물고 있는 인증 경로를 기준으로 해야 한다.
@@ -79,12 +82,10 @@ impl App {
         // 바뀐 자리를 반짝여 준다 — 우상단 토스트만으로는 정작 계정 칩이 아무 변화
         // 없이 그대로라 「바뀐 줄 모르겠다」가 된다. 같은 계정을 다시 누른 경우엔
         // 켜지 않는다(아무것도 안 바뀌었는데 축포를 터뜨리는 꼴이다).
-        let (_, to_label, restarted, deferred, focused, live) =
-            self.apply_claude_account_switch(id);
-        if !live {
-            self.set_toast("계정을 전환하지 못했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
-            return false;
-        }
+        let (_, to_label, restarted, deferred, focused, live) = match self.apply_claude_account_switch_checked(id, None) {
+            Ok(result) => result,
+            Err(error) => { self.set_toast(error.failure_message().into()); return false; }
+        };
         if !same {
             self.account_flash = Some(std::time::Instant::now());
         }
@@ -402,18 +403,41 @@ impl App {
         &mut self,
         to: &str,
     ) -> (String, String, usize, usize, bool, bool) {
+        match self.apply_claude_account_switch_checked(to, None) {
+            Ok(result) => result,
+            Err(error) => {
+                self.set_toast(error.failure_message().into());
+                (self.claude_account_display(&self.set_claude_account), self.claude_account_display(to), 0, 0, false, false)
+            }
+        }
+    }
+
+    pub(crate) fn apply_claude_account_switch_checked(
+        &mut self,
+        to: &str,
+        expected: Option<&AccountIdentity>,
+    ) -> Result<(String, String, usize, usize, bool, bool), crate::claude_auth::SwapOutcome> {
         let from_label = self.claude_account_display(&self.set_claude_account.clone());
         let to_label = self.claude_account_display(to);
         if to.is_empty() || !self.set_claude_accounts.iter().any(|account| account.id == to) {
-            return (from_label, to_label, 0, 0, false, false);
+            return Err(crate::claude_auth::SwapOutcome::VaultEmpty);
         }
         // ① 작업대를 새 계정으로 갈아 끼운다. 이것만으로 **작업대를 보고 도는 pane 은
         // 전부** 다음 요청부터 새 계정이 된다 — 재시작도, 대화 끊김도 없다. claude 가
         // 요청 직전마다 저장소를 다시 읽고, 자기 것과 다른 토큰이 있으면 그대로
         // 채택하기 때문이다(claude_auth 모듈 머리말).
-        let swapped = crate::claude_auth::swap_active(to, socket::claude_account_dir);
-        if matches!(swapped, crate::claude_auth::SwapOutcome::VaultEmpty | crate::claude_auth::SwapOutcome::WriteFailed) {
-            return (from_label, to_label, 0, 0, false, false);
+        let swapped = match expected {
+            Some(identity) => crate::claude_auth::swap_active_verified(to, socket::claude_account_dir, identity),
+            None => crate::claude_auth::swap_active(to, socket::claude_account_dir),
+        };
+        if !matches!(swapped, crate::claude_auth::SwapOutcome::Swapped | crate::claude_auth::SwapOutcome::AlreadyActive) {
+            if expected.is_some() || matches!(swapped, crate::claude_auth::SwapOutcome::IdentityUnverified | crate::claude_auth::SwapOutcome::PreservationPending | crate::claude_auth::SwapOutcome::WorkbenchChanged) {
+                if let Some(departing) = crate::claude_auth::workbench_account() {
+                    crate::settings::request_account_sync_identity(&departing);
+                }
+                crate::settings::request_account_sync_identity(to);
+            }
+            return Err(swapped);
         }
         // /status 가 보여주는 신원 캐시(~/.claude.json oauthAccount)도 함께 갈아
         // 끼운다 — 저장소만 바꾸면 과금은 새 계정인데 /status 는 옛말을 한다.
@@ -444,44 +468,55 @@ impl App {
                 .insert(f.id, (boot_label, to_label.clone()));
         }
         self.set_claude_account = to.to_string();
+        // A peer or a newer local choice supersedes unsent work from the old choice.
+        sync::cancel();
         // shim 재굽기가 재시작보다 **먼저**여야 새로 뜨는 claude 가 새 계정을 탄다.
         self.settings_save();
         let restarted = self.run_pending_account_restarts();
         let (deferred, focused_pending) =
             self.pending_account_restart_state(kasa_pty::AgentKind::Claude);
+        let applied_identity = crate::claude_auth::verified_workbench_identity()
+            .and_then(AccountIdentity::from_verified);
+        if expected.is_some_and(|expected| applied_identity.as_ref() != Some(expected)) {
+            crate::settings::request_account_sync_identity(to);
+            return Err(crate::claude_auth::SwapOutcome::IdentityUnverified);
+        }
         // 연결된 기기들도 같은 계정으로 — 본진에서 바꾸면 작업대가, 작업대에서 바꾸면
         // 본진이 따라온다(2026-09-18 지시). 자격증명은 기계마다 따로라 옮기지 않고
         // 신원(이메일·조직)과 별명만 보내며, 받는 쪽은 자기 슬롯 중 같은 것을 고른다.
         if !self.account_switch_from_peer {
-            let identity = crate::settings::account_identity(to).unwrap_or_default();
+            if applied_identity.is_none() { crate::settings::request_account_sync_identity(to); }
             let label = self.set_claude_accounts.iter().find(|a| a.id == to)
                 .map(|a| a.label.clone()).filter(|l| !l.is_empty())
                 .unwrap_or_else(|| to_label.clone());
-            propagate_account_switch(identity, label);
+            sync::start(to.to_string(), applied_identity, label, self.proxy.clone());
         }
-        (
+        Ok((
             from_label,
             to_label,
             restarted,
             deferred,
             focused_pending,
             true,
-        )
+        ))
     }
 
-    /// 다른 기기가 보낸 신원·별명에 맞는 내 슬롯. 신원이 같은 슬롯이 먼저, 없으면 별명이
-    /// 같은 슬롯. 비어 있거나 중복된 후보는 고르지 않는다.
-    pub(crate) fn peer_account_slot(&self, identity: &str, label: &str) -> Option<String> {
-        let slots: Vec<(String, String)> = self.set_claude_accounts.iter()
-            .filter(|a| !a.id.is_empty()).map(|a| (a.id.clone(), a.label.clone()))
-            .collect();
-        peer_account_slot_in(
-            &slots,
-            |id| crate::settings::account_identity(id),
-            |id| self.claude_account_display(id),
-            identity,
-            label,
-        )
+    pub(crate) fn peer_account_sync_slot(&self, encoded: &str, label: &str) -> Result<(String, AccountIdentity), sync::MatchError> {
+        let identity = sync::AccountIdentity::decode(encoded)?;
+        let slots: Vec<_> = self.set_claude_accounts.iter()
+            .map(|account| (account.id.clone(), account.label.clone())).collect();
+        let slot = sync::match_slot(&slots, crate::settings::account_sync_identity, |id| self.claude_account_display(id), &identity, label)?;
+        Ok((slot, identity))
+    }
+
+    pub(crate) fn apply_account_sync_report(&mut self, report: &AccountSyncReport) {
+        if let Some(message) = sync::accept_report(report, &self.set_claude_account) {
+            self.set_toast(message);
+        }
+    }
+
+    pub(crate) fn cancel_account_sync(&self) {
+        sync::cancel();
     }
 
     /// Codex 계정 전환을 현재 pane에도 적용한다. Codex는 실행 중인 process의 auth link를
@@ -1131,59 +1166,6 @@ pub(crate) fn account_switch_toast_for(
     format!("{head} — {}{tail}", parts.join(" · "))
 }
 
-/// 빈 id는 미선택이므로 다른 기기의 계정 요청과 매칭하지 않는다.
-pub(crate) fn peer_account_slot_in(
-    slots: &[(String, String)],
-    identity_of: impl Fn(&str) -> Option<String>,
-    display_of: impl Fn(&str) -> String,
-    identity: &str,
-    label: &str,
-) -> Option<String> {
-    if !identity.is_empty() {
-        let mut matches = slots.iter().filter(|(id, _)| !id.is_empty() && identity_of(id).as_deref() == Some(identity));
-        if let Some((id, _)) = matches.next() {
-            if matches.next().is_some() {
-                return None;
-            }
-            return Some(id.clone());
-        }
-    }
-    if label.is_empty() {
-        return None;
-    }
-    let mut matches = slots.iter()
-        .filter(|(id, l)| !id.is_empty() && ((!l.is_empty() && l == label) || display_of(id) == label));
-    let id = matches.next()?.0.clone();
-    matches.next().is_none().then_some(id)
-}
-
-/// 계정 전환을 명부의 다른 기기 전부에 알린다 — `claude-account-identity` 액션. 닿지 않는
-/// 기기는 건너뛴다(그쪽이 켜지면 사람이 한 번 맞추면 된다).
-pub(super) fn propagate_account_switch(identity: String, label: String) {
-    let peers: Vec<kasa_mcp::machines::Machine> = kasa_mcp::machines::machines()
-        .into_iter()
-        .filter(|m| !m.base.trim().is_empty())
-        .collect();
-    if peers.is_empty() {
-        return;
-    }
-    std::thread::spawn(move || {
-        for m in peers {
-            let r = kasa_mcp::remote::settings_action(
-                &m.base, "claude-account-identity", Some(&identity), Some(&label), None,
-            );
-            match r {
-                Ok(v) if v.get("ok").and_then(|b| b.as_bool()) == Some(false) => eprintln!(
-                    "[account] {} 는 같은 계정을 못 골랐다: {}", m.label,
-                    v.get("error").and_then(|e| e.as_str()).unwrap_or("?")
-                ),
-                Ok(_) => {}
-                Err(e) => eprintln!("[account] {} 에 계정 전환을 못 전했다: {e:#}", m.label),
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod account_switch_tests {
     use super::{
@@ -1269,29 +1251,6 @@ mod account_switch_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn peer_account_slot_prefers_identity_then_label_and_never_guesses() {
-        let slots = vec![
-            (String::new(), String::new()),
-            ("acct-1".to_string(), "지메일".to_string()),
-            ("acct-4".to_string(), "사이오닉팀".to_string()),
-            ("acct-9".to_string(), String::new()),
-        ];
-        let identity_of = |id: &str| match id {
-            "" | "acct-1" => Some("me@gmail.com".to_string()),
-            "acct-4" => Some("Sionic".to_string()),
-            _ => None,
-        };
-        let display_of = |id: &str| match id { "acct-9" => "계정 5".to_string(), "" => "기본 계정".to_string(), _ => id.to_string() };
-        let pick = |identity: &str, label: &str| super::peer_account_slot_in(&slots, identity_of, display_of, identity, label);
-        assert_eq!(pick("Sionic", "엉뚱한 별명").as_deref(), Some("acct-4"), "신원이 별명보다 먼저");
-        assert_eq!(pick("me@gmail.com", "").as_deref(), Some("acct-1"), "같은 신원의 기본 작업대는 후보가 아니다");
-        assert_eq!(pick("nobody@x", "지메일").as_deref(), Some("acct-1"), "신원이 없으면 별명");
-        assert_eq!(pick("", "계정 5").as_deref(), Some("acct-9"), "별명이 비면 표시 이름");
-        assert_eq!(pick("", "기본 계정"), None, "미선택은 계정 후보가 아니다");
-        assert_eq!(pick("nobody@x", ""), None, "아무것도 안 맞으면 안 바꾼다");
-    }
 
     fn fact(boot: Option<&str>) -> PaneAccountFact {
         PaneAccountFact {

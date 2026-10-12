@@ -93,6 +93,7 @@ pub(crate) struct SharedChoice {
     key: String,
     name: String,
     sub: String,
+    email: String,
 }
 
 fn shared_choices(seen: Option<&kasa_mcp::agent_accounts::Seen>) -> (Vec<SharedChoice>, Option<String>) {
@@ -111,6 +112,7 @@ fn shared_choices(seen: Option<&kasa_mcp::agent_accounts::Seen>) -> (Vec<SharedC
                 key: a.key.clone(),
                 name: if a.label.is_empty() { a.email.clone() } else { a.label.clone() },
                 sub: format!("{who} · {}에 로그인돼 있어요", a.elsewhere().join("·")),
+                email: a.email.clone(),
             });
         }
     }
@@ -6427,7 +6429,12 @@ fn shared_rows(
     }
     let bw = 72.0;
     for a in rows {
-        flat_row(g, x, *y, w, &a.name, &a.sub, w - bw - 16.0);
+        let brand = crate::account_brand::Brand::from_email(&a.email);
+        let indent = if a.email.is_empty() { 0.0 } else { brand.width(14.0) + 6.0 };
+        if indent > 0.0 {
+            brand.paint(g, x, *y + (ROW_H - 14.0) / 2.0, 14.0);
+        }
+        flat_row(g, x + indent, *y, (w - indent).max(0.0), &a.name, &a.sub, (w - bw - 16.0 - indent).max(0.0));
         if !busy {
             button(
                 g,
@@ -6588,10 +6595,9 @@ fn account_row(
     // 메일 서비스 표지는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태
     // 문구 앞에 세우면 그게 주소인 줄로 읽힌다.
     if job_sub.is_none() && !row.email.is_empty() && w >= 100.0 {
-        let d = email_provider_mark(g, sub_x, rect.1 + 27.0, &row.email, 14.0);
-        if d > 0.0 {
-            sub_x += d + 6.0;
-        }
+        let brand = crate::account_brand::Brand::from_email(&row.email);
+        brand.paint(g, sub_x, rect.1 + 27.0, 14.0);
+        sub_x += brand.width(14.0) + 6.0;
     }
     let sub_room = rect.0 + w - 14.0 - sub_x;
     if !sub_value.is_empty() && sub_room >= 24.0 {
@@ -7825,7 +7831,7 @@ fn draw_preedit_and_caret(
 
 /// 안내문을 낱말 경계에서 접는다. `wrap_text` 는 글자 단위라 편집 중인 입력에는
 /// 맞지만, 읽기만 하는 안내문에 쓰면 「넷버드(VP / N)」처럼 낱말 가운데가 갈린다.
-fn wrap_words(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec<String> {
+pub(crate) fn wrap_words(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec<String> {
     let translated = crate::native_strings::text(text);
     wrap_measured(&translated, max_w, |line| g.measure_chrome_text(line, font, false))
 }
@@ -7960,57 +7966,6 @@ fn mini_icon_button(
 ) {
     let rect = crate::native_controls::icon_button(g, rect, s.cursor, icon, Default::default());
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
-}
-
-/// 이름 옆에 붙는 알약. 상태를 한 낱말로 못박아 두면 어느 줄이 지금 쓰이는
-/// 것인지 카드 테두리 색을 해석하지 않고도 읽힌다.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EmailProviderMark {
-    Gmail,
-    Naver,
-    Generic,
-}
-
-fn email_provider(email: &str) -> EmailProviderMark {
-    match email
-        .rsplit_once('@')
-        .map(|(_, domain)| domain.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("gmail.com" | "googlemail.com") => EmailProviderMark::Gmail,
-        Some("naver.com") => EmailProviderMark::Naver,
-        _ => EmailProviderMark::Generic,
-    }
-}
-
-/// 이메일 앞에는 서비스가 제공한 공식 표지만 쓴다. 모르는 도메인을 임의 색과
-/// 첫 글자로 꾸미면 실제 브랜드처럼 보이므로, 그때는 정직한 일반 메일 아이콘으로
-/// 물러난다.
-fn email_provider_mark(
-    g: &mut gpu::GpuRenderer,
-    x: f32,
-    y: f32,
-    email: &str,
-    size: f32,
-) -> f32 {
-    match email_provider(email) {
-        EmailProviderMark::Gmail => {
-            g.queue_icon_colored("gmail", x, y, size, 1.0);
-            size
-        }
-        EmailProviderMark::Naver => {
-            // 공식 NAVER 워드마크는 2315:444다. 정사각형 칸에 구기지 않고
-            // 원래 비율 그대로, 부제 글자 높이에 맞춘다.
-            let h = 8.0;
-            let w = h * 2315.0 / 444.0;
-            g.queue_icon_colored_rect("naver", x, y + (size - h) / 2.0, w, h, 1.0);
-            w
-        }
-        EmailProviderMark::Generic => {
-            g.queue_icon("mail", x, y, size, theme::text_mute());
-            size
-        }
-    }
 }
 
 fn pill(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str, accent: bool) -> f32 {
@@ -8371,18 +8326,6 @@ mod tests {
             usage_windows,
             usage_state: AccountUsageState::Ready,
         }
-    }
-
-    #[test]
-    fn email_marks_use_real_brands_only_for_known_services() {
-        assert_eq!(email_provider("me@gmail.com"), EmailProviderMark::Gmail);
-        assert_eq!(
-            email_provider("me@googlemail.com"),
-            EmailProviderMark::Gmail
-        );
-        assert_eq!(email_provider("me@naver.com"), EmailProviderMark::Naver);
-        assert_eq!(email_provider("me@example.com"), EmailProviderMark::Generic);
-        assert_eq!(email_provider("not-an-email"), EmailProviderMark::Generic);
     }
 
     #[test]

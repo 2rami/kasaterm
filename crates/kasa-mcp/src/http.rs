@@ -54,6 +54,7 @@ pub use schedule::{ScheduleItem, schedule_add, schedule_delete, schedule_snapsho
 pub use sessions::{claude_agents_all, claude_bin};
 pub use socket::push_viewer_control;
 pub use tasks::{PaneTaskView, pane_tasks_snapshot};
+pub use claude_account::{VerifiedClaudeIdentity, verified_claude_identity_for_token};
 pub(crate) use auth::{MobileAuth, guest_denied, is_remote_peer, origin_guard_mw, ws_origin_ok};
 pub(crate) use claude_account::{
     SlotLogin, claude_keychain_service, claude_slot_login, keychain_user,

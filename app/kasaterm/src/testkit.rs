@@ -8849,6 +8849,9 @@ impl App {
                 },
             ];
             self.set_claude_account = "acct-1".to_string();
+            if want.contains("-sync") {
+                crate::session::seed_account_sync_notice_for_verify("acct-1");
+            }
             // 리셋 시각을 심는다 — 이 목록은 「지금 옮길까 기다릴까」를 정하는
             // 자리라, 퍼센트만 있으면 90% 가 12분 뒤 풀리는 것인지 3시간 뒤인지
             // 구별이 안 된다(사용자 2026-08-25).
@@ -8901,8 +8904,8 @@ impl App {
                 Some(crate::settings::AuthProbe {
                     logged_in: true,
                     verified: true,
-                    email: "sampleuser@mailb.example.test".to_string(),
-                    org: "sampleuser@mailb.example.test's Organization".to_string(),
+                    email: "sampleuser@gmail.com".to_string(),
+                    org: "sampleuser@gmail.com's Organization".to_string(),
                 }),
             );
             crate::settings::seed_auth_probe(
@@ -8910,7 +8913,7 @@ impl App {
                 Some(crate::settings::AuthProbe {
                     logged_in: true,
                     verified: true,
-                    email: "workuser@work.example.test".to_string(),
+                    email: "workuser@sionic.ai".to_string(),
                     org: "Sionic AI".to_string(),
                 }),
             );
@@ -8919,8 +8922,8 @@ impl App {
                 Some(crate::settings::AuthProbe {
                     logged_in: false,
                     verified: true,
-                    email: String::new(),
-                    org: String::new(),
+                    email: "sampleuser@naver.com".to_string(),
+                    org: "sampleuser@naver.com's Organization".to_string(),
                 }),
             );
             // 코덱스도 함께 — 5시간은 비었는데 주간이 꽉 찬 조합이다. 글자로만

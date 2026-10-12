@@ -61,6 +61,7 @@ mod session_transfer;
 mod drag_transfer;
 mod settings;
 mod agent_preferences;
+mod account_brand;
 mod settings_media;
 mod settings_room;
 mod socket;
@@ -4173,6 +4174,7 @@ enum UserEvent {
     /// 그릇이라, 알리지 않으면 붙여넣기 전까지 무엇이 담겼는지 알 수가 없다. 소켓
     /// 스레드는 토스트를 못 띄우므로(App 상태) GUI 로 넘긴다.
     SocketToast(String),
+    AccountSyncResult(session::AccountSyncReport),
     /// A pane's claude is blocked on a permission / input prompt (its
     /// `Notification` hook → `kasaterm-cli attention`). Toast + flash the pane
     /// and, unless it's the focused pane, raise a desktop alert — the case cmux

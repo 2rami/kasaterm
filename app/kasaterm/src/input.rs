@@ -100,6 +100,18 @@ fn account_menu_contains(rect: Option<(f32, f32, f32, f32)>, point: (f32, f32)) 
     })
 }
 
+fn account_menu_scroll_key(key: &Key, scroll: f32, maximum: f32, body_height: f32) -> Option<f32> {
+    let maximum = maximum.max(0.0);
+    let page = (body_height - 18.0).max(18.0);
+    Some(match key {
+        Key::Named(NamedKey::PageUp) => (scroll - page).clamp(0.0, maximum),
+        Key::Named(NamedKey::PageDown) => (scroll + page).clamp(0.0, maximum),
+        Key::Named(NamedKey::Home) => 0.0,
+        Key::Named(NamedKey::End) => maximum,
+        _ => return None,
+    })
+}
+
 #[derive(PartialEq, Eq)]
 enum AccountMenuPress {
     Dismiss,
@@ -384,6 +396,23 @@ impl App {
                     self.chrome_dirty = true;
                     return false;
                 }
+                if event.state == ElementState::Pressed && self.modifiers.is_empty() {
+                    if let Some(scroll) = account_menu_scroll_key(&event.logical_key,
+                        self.account_menu_scroll, self.account_menu_scroll_max,
+                        self.account_menu_body_rect.map_or(0.0, |rect| rect.3)) {
+                        self.account_menu_scroll = scroll;
+                        // Paging reads the main result list; stale flyout hits must not select an account.
+                        self.account_menu_provider = None;
+                        self.account_menu_hits.clear();
+                        self.account_menu_submenu_rect = None;
+                        self.account_menu_submenu_body_rect = None;
+                        self.account_menu_corridor_rect = None;
+                        self.account_menu_submenu_hit_start = 0;
+                        self.chrome_dirty = true;
+                        if let Some(window) = &self.window { window.request_redraw(); }
+                        return true;
+                    }
+                }
                 if escape && event.state == ElementState::Pressed {
                     self.account_menu_escape_release = true;
                     self.close_account_menu();
@@ -493,6 +522,20 @@ impl App {
 #[cfg(test)]
 mod account_menu_input_tests {
     use super::*;
+
+    #[test]
+    fn keyboard_paging_reads_the_body_without_selecting_an_account() {
+        let key = |key, at| account_menu_scroll_key(&Key::Named(key), at, 400.0, 118.0);
+        assert_eq!(key(NamedKey::PageDown, 0.0), Some(100.0));
+        assert_eq!(key(NamedKey::PageDown, 375.0), Some(400.0));
+        assert_eq!(key(NamedKey::PageUp, 100.0), Some(0.0));
+        assert_eq!(key(NamedKey::PageUp, 25.0), Some(0.0));
+        assert_eq!(key(NamedKey::Home, 300.0), Some(0.0));
+        assert_eq!(key(NamedKey::End, 0.0), Some(400.0));
+        assert_eq!(key(NamedKey::Enter, 100.0), None);
+        assert_eq!(key(NamedKey::ArrowDown, 100.0), None);
+        assert_eq!(account_menu_scroll_key(&Key::Named(NamedKey::End), 0.0, -1.0, 0.0), Some(0.0));
+    }
 
     #[test]
     fn reopened_parent_keeps_actions_without_a_flyout() {

@@ -4,6 +4,8 @@
 use super::*;
 #[cfg(test)]
 use super::test_support::temp_dir;
+mod identity;
+pub use identity::{VerifiedClaudeIdentity, verified_claude_identity_for_token};
 
 /// Keychain service name holding one account's credentials.
 ///
@@ -428,95 +430,37 @@ fn managed_vault_refresh_forbidden_in(path: &std::path::Path, stamp: Option<&str
 async fn claude_identity_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, serde_json::Value)>>> = OnceLock::new();
-    const TTL: Duration = Duration::from_secs(300);
-    let cache = CACHE.get_or_init(Default::default);
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-
     let dir = params.get("dir").cloned().unwrap_or_default();
-    if let Ok(m) = cache.lock() {
-        if let Some((at, v)) = m.get(&dir) {
-            if at.elapsed() < TTL {
-                return (cors, Json(v.clone()));
-            }
+    let current = || {
+        if claude_slot_login(Some(&dir)) == SlotLogin::LoggedOut { return None; }
+        read_claude_token_from(Some(&dir))
+    };
+    // A slot path survives account changes; only the credential actually present can select a cache entry.
+    if let Some(token) = current() {
+        if let Some(response) = identity::cached_response(&token) {
+            return (cors, Json(response));
         }
     }
-    // 사용량과 같은 이유로 여기서도 먼저 되살린다 — 신원을 못 읽으면 화면은 라벨만
-    // 남고, 그 라벨이 낡았을 때(재로그인으로 슬롯이 겹쳤을 때) 알아챌 길이 사라진다.
-    let token = match refresh_claude_token(dir.as_str()).await {
-        Some(t) => Some(t),
-        None => read_claude_token_from(Some(dir.as_str())),
-    };
-    // 토큰 문자열이 남아 있어도 갱신이 거부된 채 끝난 슬롯은 로그아웃이다. 그걸
-    // 「프로필 일시 실패」로 답하면 화면이 표에 남은 옛 신원으로 「로그인됨」을 그린다.
-    let logged_out = claude_slot_login(Some(dir.as_str())) == SlotLogin::LoggedOut;
-    let Some(token) = token.filter(|_| !logged_out) else {
-        return (cors, Json(serde_json::json!({ "ok": false, "error": "no token" })));
-    };
-    let resp = reqwest::Client::new()
-        .get("https://api.anthropic.com/api/oauth/profile")
-        .header("authorization", format!("Bearer {token}"))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-        .await;
-    let body = match resp {
-        Ok(r) if r.status().is_success() => r
-            .text()
-            .await
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-        _ => None,
-    };
-    let Some(body) = body else {
-        // 여기서 claude 를 그 슬롯으로 띄워 갱신을 시키던 길은 걷었다. 갱신은 위의
-        // `refresh_claude_token` 한 곳만 한다 — 갱신하는 쪽이 둘이면 1회용 갱신 토큰을
-        // 서로 먼저 쓰려다 슬롯을 죽이고, 진 claude 는 그 자리에 빈 토큰을 써 둔다
-        // (2026-10-05 맥북 acct-1·4·8 이 앱 재시작 직후 그 꼴이 됐다).
-        // 실패는 캐시하지 않는다 — 네트워크가 돌아오면 바로 진짜 값을 보여야 한다.
-        return (cors, Json(serde_json::json!({ "ok": false, "error": "profile api unavailable" })));
-    };
-    // 응답 어디에 이메일이 들리는지는 버전에 따라 갈리므로 후보를 순서대로 훑는다.
-    let pick = |paths: &[&str]| -> Option<String> {
-        paths
-            .iter()
-            .filter_map(|p| body.pointer(p).and_then(|v| v.as_str()))
-            .find(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    let email = pick(&["/account/email_address", "/account/email", "/email_address", "/email"]);
-    let org = pick(&["/organization/name", "/account/organization_name", "/organization_name"]);
-    // `~/.claude.json` 의 oauthAccount 와 같은 모양(camelCase)으로도 내보낸다 —
-    // 계정 전환이 저장소와 함께 이 캐시를 갈아 끼우는 데 쓴다. /status 의
-    // Email/Organization 은 토큰이 아니라 이 캐시를 보여주므로(2026-08-16 실측:
-    // 파일만 바꿔도 도는 pane 의 /status 가 즉시 따라왔다), 캐시를 안 바꾸면
-    // 과금은 새 계정인데 /status 는 옛말을 한다. organizationRole/workspaceRole
-    // 은 프로필 응답에 없어 못 채운다 — 표시용 캐시라 비어도 동작엔 지장 없다.
-    let account = (email.is_some()).then(|| {
-        let g = |p: &str| body.pointer(p).cloned().unwrap_or(serde_json::Value::Null);
-        serde_json::json!({
-            "accountUuid": g("/account/uuid"),
-            "emailAddress": email.clone(),
-            "displayName": g("/account/display_name"),
-            "accountCreatedAt": g("/account/created_at"),
-            "organizationUuid": g("/organization/uuid"),
-            "organizationName": org.clone(),
-            "organizationType": g("/organization/organization_type"),
-            "billingType": g("/organization/billing_type"),
-            "organizationRateLimitTier": g("/organization/rate_limit_tier"),
-            "seatTier": g("/organization/seat_tier"),
-            "hasExtraUsageEnabled": g("/organization/has_extra_usage_enabled"),
-            "subscriptionCreatedAt": g("/organization/subscription_created_at"),
-        })
-    });
-    let out = serde_json::json!({ "ok": email.is_some(), "email": email, "org": org, "account": account });
-    if out["ok"] == serde_json::Value::Bool(true) {
-        if let Ok(mut m) = cache.lock() {
-            m.insert(dir, (Instant::now(), out.clone()));
+    // Keep token rotation in its existing owner; identity lookup must not introduce a second refresh path.
+    let _ = refresh_claude_token(&dir).await;
+    let out = identity::resolve(current, |token| async move {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none())
+            .build().ok()?;
+        let mut response = client.get("https://api.anthropic.com/api/oauth/profile")
+            .bearer_auth(token)
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .send().await.ok()?;
+        if !response.status().is_success() { return None; }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if body.len().saturating_add(chunk.len()) > 64 * 1024 { return None; }
+            body.extend_from_slice(&chunk);
         }
-    }
+        serde_json::from_slice(&body).ok()
+    }).await;
     (cors, Json(out))
 }
 

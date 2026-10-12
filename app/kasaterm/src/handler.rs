@@ -1141,6 +1141,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_toast(msg.clone());
                 return;
             }
+            UserEvent::AccountSyncResult(report) => {
+                self.apply_account_sync_report(report);
+                return;
+            }
             UserEvent::SocketSwapCharacter(pane, character) => {
                 self.swap_character(pane, character);
                 return;
@@ -1918,9 +1922,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let same = *to == self.set_claude_account;
                 let (from_label, to_label, restarted, deferred, focused, live) =
                     self.apply_claude_account_switch(to);
-                if !live {
-                    self.set_toast("자동 계정 전환에 실패했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
-                } else {
+                if live {
                     if !same {
                         self.account_flash = Some(std::time::Instant::now());
                     }

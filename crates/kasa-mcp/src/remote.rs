@@ -2446,7 +2446,25 @@ pub fn settings_action(
     label: Option<&str>,
     token: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let inherited_token = connection_auth_token(base);
+    let v = settings_action_reply(base, action, id, label, token)?;
+    if v.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+        anyhow::bail!(
+            "{}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(v)
+}
+
+/// Typed callers need rejection codes and an acknowledgement, not an error string alone.
+pub fn settings_action_reply(
+    base: &str,
+    action: &str,
+    id: Option<&str>,
+    label: Option<&str>,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let inherited_token = token.is_none().then(|| connection_auth_token(base)).flatten();
     let token = token.or(inherited_token.as_deref());
     let u = format!("{}/settings/action", base.trim_end_matches('/'));
     let mut body = serde_json::json!({ "action": action });
@@ -2463,6 +2481,7 @@ pub fn settings_action(
     let v: serde_json::Value = rt.block_on(async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("http client")?;
         // reqwest 의 json feature 를 안 켠 빌드라 본문을 직접 만든다.
@@ -2476,21 +2495,63 @@ pub fn settings_action(
         let r = req.send().await.context("설정 동작 요청")?;
         let status = r.status();
         let text = r.text().await.unwrap_or_default();
-        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+        let mut answer: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
             serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
-        }))
+        });
+        if !status.is_success() {
+            if let Some(object) = answer.as_object_mut() {
+                object.insert("ok".into(), false.into());
+            } else {
+                answer = serde_json::json!({"ok":false,"error":format!("HTTP {status}")});
+            }
+        }
+        Ok::<_, anyhow::Error>(answer)
     })?;
-    if v.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
-        anyhow::bail!(
-            "{}",
-            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
-        );
-    }
     Ok(v)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_action_reply_preserves_structured_rejection_and_acknowledgement() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                ("200 OK", r#"{"ok":false,"error":"choose an alias","error_code":"account_sync_ambiguous"}"#),
+                ("200 OK", r#"{"ok":true,"account_sync_identity":"fixture-identity"}"#),
+                ("503 Service Unavailable", r#"{"ok":true,"account_sync_identity":"fixture-identity"}"#),
+                ("200 OK", r#"{"ok":false,"error":"choose an alias","error_code":"account_sync_ambiguous"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut input = Vec::new();
+                let mut byte = [0; 1];
+                while !input.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    input.push(byte[0]);
+                }
+                let header = String::from_utf8(input).unwrap();
+                let length: usize = header.lines().find_map(|line| line.to_ascii_lowercase()
+                    .strip_prefix("content-length:").and_then(|length| length.trim().parse().ok())).unwrap();
+                let mut request = vec![0; length];
+                stream.read_exact(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                assert_eq!(request["action"], "claude-account-sync-v1");
+                assert_eq!(request["id"], "fixture-identity");
+                assert!(header.contains("fixture-token"));
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let call = || super::settings_action_reply(&base, "claude-account-sync-v1", Some("fixture-identity"), Some("fixture-label"), Some("fixture-token")).unwrap();
+        assert_eq!(call()["error_code"], "account_sync_ambiguous");
+        assert_eq!(call()["account_sync_identity"], "fixture-identity");
+        assert_eq!(call()["ok"], false);
+        assert!(super::settings_action(&base, "claude-account-sync-v1", Some("fixture-identity"), Some("fixture-label"), Some("fixture-token")).is_err());
+        server.join().unwrap();
+    }
+
     fn identity_connection_test(mode: &'static str) {
         use axum::{extract::{Query, WebSocketUpgrade, ws::Message as WsMessage}, routing::get, Router};
         let stage = Arc::new(std::sync::atomic::AtomicUsize::new(0));
