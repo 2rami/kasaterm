@@ -4822,6 +4822,54 @@ fn pet_cards(
     *y += rows * (CARD_H + gap) + 8.0;
 }
 
+/// 덮으면 이사 — 학생이 일하는 중에 덮으면 고른 기기로 옮기고 잔다. 잠자기를 막는 허락(sudo)은
+/// 비밀번호가 필요해 여기서 못 깔고 터미널 명령을 알려 준다.
+#[cfg(target_os = "macos")]
+fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+    section_title(g, x, *y, "덮으면 이사", "");
+    *y += 54.0;
+    let chosen = crate::lid_away::chosen_machine();
+    let labels: Vec<String> = kasa_mcp::machines::listed_machines().into_iter().map(|m| m.label).collect();
+    let names: Vec<String> = labels.iter().map(|l| crate::render::pane_identity::device_name(l)).collect();
+    let mut cells: Vec<(&str, bool, SettingsAction)> =
+        vec![("끄기", chosen.is_empty(), SettingsAction::LidAwayMachine(String::new()))];
+    for (label, name) in labels.iter().zip(&names) {
+        cells.push((name.as_str(), chosen == *label, SettingsAction::LidAwayMachine(label.clone())));
+    }
+    seg_row(g, s, hits, x, y, w, "옮길 기기", &cells);
+    if !chosen.is_empty() {
+        let cap = crate::lid_away::cap_minutes();
+        let minutes: Vec<String> = crate::lid_away::MINUTE_CHOICES.iter().map(|m| format!("{m}분")).collect();
+        let cells: Vec<(&str, bool, SettingsAction)> = crate::lid_away::MINUTE_CHOICES
+            .iter()
+            .zip(&minutes)
+            .map(|(m, text)| (text.as_str(), cap == *m, SettingsAction::LidAwayMinutes(*m)))
+            .collect();
+        seg_row(g, s, hits, x, y, w, "덮인 뒤 최대", &cells);
+    }
+    *y += 6.0;
+    let note = if chosen.is_empty() {
+        "학생이 일하는 중에 덮으면 하던 턴을 마저 끝내고 고른 기기로 옮긴 뒤 잠듭니다".to_string()
+    } else {
+        match crate::lid_away::sudo_ready() {
+            None => "잠자기를 막을 허락이 있는지 확인하는 중입니다".to_string(),
+            Some(false) => "처음 한 번 터미널에서 kasaterm-cli lid-away install 을 실행해 주세요 — 잠자기를 막고 푸는 pmset 명령만 비밀번호 없이 허락합니다. 이 계정의 다른 프로그램도 그 명령을 쓸 수 있게 됩니다".to_string(),
+            Some(true) => match crate::lid_away::status_line() {
+                Some(now) => now.to_string(),
+                None => format!(
+                    "학생이 일하는 동안 잠자기를 막고, 덮으면 일하던 학생을 턴이 끝나는 대로 {} 로 옮긴 뒤 잠듭니다. 쉬던 학생과 셸은 이 맥에 남습니다",
+                    crate::render::pane_identity::device_name(&chosen)
+                ),
+            },
+        }
+    };
+    for line in wrap_words(g, &note, w, 10.5) {
+        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+        *y += 15.0;
+    }
+    *y += 11.0;
+}
+
 fn paint_machines(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4878,6 +4926,8 @@ fn paint_machines(
         }
         *y += 11.0;
     }
+    #[cfg(target_os = "macos")]
+    paint_lid_away(g, s, hits, x, y, w);
     section_title(g, x, *y, "기기 목록", "");
     button(
         g,

@@ -497,6 +497,23 @@ fn run() -> Result<Option<Response>> {
         run_statusline();
         return Ok(None);
     }
+    // `lid-away install|uninstall|status` — 덮으면 이사의 sudoers 규칙·감시를 깐다. sudo 가
+    // 비밀번호를 물어야 해서 앱이 아니라 사람의 터미널에서 돈다.
+    if cmd == "lid-away" {
+        #[cfg(target_os = "macos")]
+        {
+            let out = match args.first().map(String::as_str) {
+                Some("install") => crate::lid_away::install()?,
+                Some("uninstall") => crate::lid_away::uninstall()?,
+                None | Some("status") => crate::lid_away::status(),
+                Some(other) => return Err(anyhow!("lid-away {other} 는 없어요 — install · uninstall · status")),
+            };
+            println!("{out}");
+            return Ok(None);
+        }
+        #[cfg(not(target_os = "macos"))]
+        return Err(anyhow!("덮으면 이사는 맥북 전용이에요"));
+    }
     // `claude-trust <폴더>` — pane claude shim 이 실행 직전에 부른다(폴더 신뢰 화면 선해결).
     // 소켓을 안 거쳐 앱이 없어도 돈다. 실패는 조용히 — 화면은 앱이 한 번 넘겨 준다.
     if cmd == "claude-trust" {
@@ -1992,6 +2009,7 @@ fn print_help() {
             "machines move [%N] <기기|local>            claude·codex 세션을 다른 기기로 옮기기. 생략하면 내 칸, local 은 이쪽 거울을 데려오기",
             "  예: machines move %3 맥미니 · machines move %3 local --cwd /레포 · 상세: machines move --help",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
+            "lid-away install|uninstall|status         덮으면 이사(맥북): 잠자기 막음 허락(sudo)·감시 설치",
         ]),
         ("계정 일 권한 (설정 → 계정에서 연결한 GitHub)", &[
             "pr create --repo 주인/레포 --head 브랜치 [--base main] --title 제목 [--body 본문|-] [--draft]   PR 요청(사람이 앱에서 승인)",

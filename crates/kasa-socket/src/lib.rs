@@ -39,6 +39,8 @@ pub mod tell;
 #[cfg(windows)]
 pub mod private_store;
 pub mod nacho_inbox;
+#[cfg(target_os = "macos")]
+pub mod lid_away;
 #[cfg(feature = "app-update")]
 pub mod app_restart;
 #[cfg(feature = "app-update")]

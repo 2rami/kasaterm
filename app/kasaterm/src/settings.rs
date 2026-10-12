@@ -833,6 +833,16 @@ impl App {
             SettingsAction::UiLanguage(language) => {
                 socket::write_setting("language", serde_json::json!(language));
             }
+            SettingsAction::LidAwayMachine(machine) => {
+                socket::write_setting("lid_away_machine", serde_json::json!(machine));
+                #[cfg(target_os = "macos")]
+                crate::lid_away::forget_config();
+            }
+            SettingsAction::LidAwayMinutes(minutes) => {
+                socket::write_setting("lid_away_minutes", serde_json::json!(minutes));
+                #[cfg(target_os = "macos")]
+                crate::lid_away::forget_config();
+            }
             SettingsAction::ChromeMachine(machine) => {
                 if let Err(error) = socket::save_browser_target(&machine) {
                     self.collab.toast = Some((error.to_string(), Instant::now()));

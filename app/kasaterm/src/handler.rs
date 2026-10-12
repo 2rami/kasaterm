@@ -22,6 +22,14 @@ impl PointerSample {
     }
 }
 
+/// 덮으면 이사가 깨어 있는 동안 — 덮이면 화면 이벤트가 없어 루프가 `Wait` 에 잠든다.
+fn lid_away_deadline() -> Option<Instant> {
+    #[cfg(target_os = "macos")]
+    return crate::lid_away::wake_deadline();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 fn blocks_obscured_button(button: MouseButton, modal: bool, workspace: Option<(f32, f32, f32, f32)>, cursor: (f32, f32)) -> bool {
     matches!(button, MouseButton::Right | MouseButton::Middle)
         && (modal || workspace.is_some_and(|(x, y, w, h)| {
@@ -2020,6 +2028,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        crate::lid_away::shutdown();
         self.save_aux_windows_state();
         if self.viewer_only {
             return;
@@ -7857,6 +7867,8 @@ impl ApplicationHandler<UserEvent> for App {
         // 이사 예약 — 턴 중이라 미뤄 둔 이사를, 스피너가 꺼진 것을 보고 실행한다.
         // 큐가 비어 있으면 즉시 나가므로 매 턴 불러도 공짜다.
         self.run_pending_migrations();
+        #[cfg(target_os = "macos")]
+        self.tick_lid_away();
         self.note_claude_panes();
         self.apply_autowait();
         self.apply_autounread();
@@ -8214,6 +8226,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
                 .chain(self.migrate_handoff.as_ref().map(|h| h.at))
+                .chain(lid_away_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))
                 .min();

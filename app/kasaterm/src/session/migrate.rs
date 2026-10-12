@@ -474,7 +474,7 @@ impl App {
             .is_some_and(|p| p.pane == pane && p.finished.is_none())
     }
 
-    pub(super) fn migrate_running_any(&self) -> bool {
+    pub(crate) fn migrate_running_any(&self) -> bool {
         self.info
             .machines_col
             .progress
@@ -529,6 +529,10 @@ impl App {
                 });
                 result = result.map_err(|why| format!("{why}\n대화는 출발 기기에 남아 있어요. 그 기기에서 세션을 다시 켜야 해요"));
             }
+        }
+        if let Err(why) = &result {
+            // 덮인 채 도는 이사(lid_away)는 토스트를 볼 사람이 없다 — 남는 기록은 로그뿐이다.
+            eprintln!("[migrate] {pid} 이사 실패: {why}");
         }
         let mc = &mut self.info.machines_col;
         let ok = result.is_ok();
@@ -932,7 +936,9 @@ impl App {
     pub(crate) fn run_pending_migrations(&mut self) {
         #[cfg(unix)]
         {
-            if self.migrate_queue.is_empty() {
+            // 이사는 한 번에 하나다 — 도는 동안 발사하면 「이미 도는 중」으로 실패하고 그 예약은
+            // 큐에서 빠진 채 사라진다(예약이 둘 이상일 때).
+            if self.migrate_queue.is_empty() || self.migrate_running_any() {
                 return;
             }
             // 닫힌 pane 의 예약부터 걷는다 — index 판정보다 먼저.
