@@ -22,8 +22,6 @@ pub(crate) struct Slot {
     pub(crate) now_ms: u64,
     /// 이 기기 셸 칸(명령으로 보기) — 거울이 아니라 「원본」이라 부를 것이 없다.
     pub(crate) local: bool,
-    /// 이 칸에 실제로 깔린 바탕. 거울 칸은 기기색이 섞여 테마 바탕과 다르다 — 채움을 테마 바탕에서
-    /// 끌어내면 분홍 칸 위에 푸른 회색 상자가 떠 따로 논다(2026-10-08).
     pub(crate) bg: [u8; 4],
     /// 이 칸만 키운 배율(⌘⇧+, `pane_font_scales`). 그릴 때 좌표계를 이만큼 키운다.
     pub(crate) zoom: f32,

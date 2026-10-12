@@ -7,13 +7,12 @@ pub(super) struct PaneIdentity {
 }
 
 pub(super) struct MachineIdentity {
-    /// 기기 제 이름 — 색·아이콘·명부를 찾는 열쇠.
+    /// 화면 이름을 바꿔도 아이콘·명부의 열쇠는 유지한다.
     pub label: String,
     /// 화면에 쓰는 이름(계정의 `device_names`, 없으면 `label`).
     pub name: String,
     pub detail: String,
     pub remote: bool,
-    tint: [u8; 4],
     icon: String,
 }
 
@@ -55,14 +54,12 @@ impl MachineIdentity {
                 false,
             ),
         };
-        let tint = machine_tint(&label);
         let icon = crate::device_icons::icon(&label);
         Self {
             name: device_name(&label),
             label,
             detail,
             remote: is_remote,
-            tint,
             icon,
         }
     }
@@ -72,26 +69,15 @@ impl MachineIdentity {
     }
 
     pub fn background(&self, base: [u8; 4]) -> [u8; 4] {
-        theme::lerp(base, self.tint, 0.12)
-    }
-
-    /// Local panes keep the viewer's base; remote panes carry the same subtle
-    /// device tint as their header, without importing the source's light/dark mode.
-    pub fn pane_background(&self, base: [u8; 4]) -> Option<[u8; 4]> {
-        self.remote.then(|| self.background(base))
+        theme::lerp(base, theme::text(), 0.08)
     }
 
     pub fn foreground(&self, background: [u8; 4]) -> [u8; 4] {
-        theme::enforce_contrast_at(self.tint, background, 4.5)
+        theme::enforce_contrast_at(theme::text_dim(), background, 4.5)
     }
 }
 
-/// 기기색 기본 팔레트 — 색상환에서 서로 60° 넘게 떨어진 다섯 색. 작업 상태의
-/// 빨강·주황·초록은 빌리지 않는다(주황은 「내 손을 기다린다」, 초록은 「끝남」,
-/// 빨강은 「고장」이라 기기 이름에 붙으면 신호로 읽힌다). 채도를 높게 둔 이유는
-/// 이 색이 그대로 칠해지는 자리가 없기 때문이다 — 헤더 칩은 12%, 배치도 칸은
-/// 34% 로 바탕에 섞이는데, 흐린 색은 그 비율에서 밝은 테마의 흰 바탕과 어두운
-/// 테마의 검정 바탕 양쪽에서 회색으로 뭉개진다.
+/// 구형 클라이언트의 저장값·동기화 계약을 보존한다. 데스크톱 그리기에는 쓰지 않는다.
 pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
     ("blue", [76, 134, 228, 255]),
     ("violet", [158, 104, 230, 255]),
@@ -100,20 +86,6 @@ pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
     ("amber", [208, 154, 34, 255]),
 ];
 
-/// 배치도 칸이 기기색을 섞는 비율. 헤더 칩(12%)보다 진한 이유는 칸이 작아서다 —
-/// 20px 남짓한 사각이 12% 로 물들면 옆 칸과 갈라 보이지 않는다. 채움은 은은하게
-/// 두고 **테두리**가 기기색을 더 진하게 문다(2026-09-14 승인: 「은은한 채움+테두리」).
-const MINIMAP_TINT: f32 = 0.22;
-const MINIMAP_BORDER_TINT: f32 = 0.55;
-/// 기기 칸 채움이 이 기기 칸에서 떨어져야 하는 거리(RGB). 바탕과 색조가 비슷한 기기색은
-/// 22% 로 섞으면 이 기기 칸과 같아 보여(2026-10-01 실측: 이 기기 #374046, 맥미니 #38454b)
-/// 이 거리가 날 때까지 더 섞는다.
-const MINIMAP_MIN_GAP: f32 = 32.0;
-const MINIMAP_TINT_MAX: f32 = 0.6;
-
-/// 스포이드 슬롯 번호에서 기기 칸을 가르는 기준. 팔레트 칸(0..27)과 한 통을
-/// 쓰므로 그보다 훨씬 위에 둔다.
-pub(crate) const DEVICE_SLOT_BASE: usize = 1000;
 
 /// 설정 화면 한 줄 — 기기 하나와 지금 색·기본 색.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,7 +359,7 @@ pub(crate) fn set_device_name(id: &str, name: &str) -> Result<(), String> {
 }
 
 /// 설정과 기계 명부를 다시 읽어 색표를 세운다. 설정을 고친 뒤와 부팅 때 부르고,
-/// 그 사이에는 `machine_tint` 가 몇 초에 한 번 스스로 새로 읽는다 — 명부는
+/// 그 사이에는 기기 이름 조회가 몇 초에 한 번 스스로 새로 읽는다 — 명부는
 /// 기계가 알려 오면서 늘어나는데 그때마다 신호를 받을 길이 없어서다.
 pub(crate) fn reload_device_colors() {
     let fresh = build_device_colors();
@@ -415,19 +387,6 @@ fn with_device_colors<T>(f: impl FnOnce(&DeviceColors) -> T) -> Option<T> {
     DEVICE_COLORS.read().ok().and_then(|slot| slot.as_ref().map(f))
 }
 
-/// 기기 이름 → 기기색. 사용자가 고른 색 → 명부 배정색 → 이름 해시 순이다.
-/// 같은 이름은 앱을 다시 열거나 로컬/원격 위치가 바뀌어도 같은 색을 갖는다.
-pub(crate) fn machine_tint(label: &str) -> [u8; 4] {
-    let key = normalize_device(label);
-    with_device_colors(|c| {
-        c.overrides
-            .get(&identity_key(&c.aliases, label))
-            .or_else(|| c.assigned.get(&key))
-            .copied()
-    })
-    .flatten()
-    .unwrap_or_else(|| hashed_device_color(&key))
-}
 
 /// 설정 화면에 늘어놓을 기기 목록 — 이 기기가 맨 위, 그 뒤 명부 순서.
 pub(crate) fn device_color_rows() -> Vec<DeviceColorRow> {
@@ -682,47 +641,6 @@ pub(crate) fn reset_all_device_colors() {
     });
 }
 
-/// The interior is opaque so active/hover fills cannot erase device identity.
-/// Attention still owns the outer border and its pulse is painted above this.
-/// 넓은 판(파일트리·깃 패널)에 기기색을 묻히는 정도. 배치도 칸(22%)만큼 칠하면 옆 pane 과
-/// 딴 색이 되어 어색하다(2026-09-17 지적) — 어느 기기인지만 알리게 옅게.
-const PANEL_TINT: f32 = 0.07;
-
-/// 파일트리·깃 패널 배경 — 다른 기기 것을 볼 때만 기기색을 옅게 묻힌다.
-pub(crate) fn panel_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
-    machine.map_or(base, |label| theme::lerp(base, machine_tint(label), PANEL_TINT))
-}
-
-pub(crate) fn minimap_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
-    machine.map_or(base, |label| minimap_fill(base, machine_tint(label)))
-}
-
-/// 이 기기 칸이 보이는 색 — 반투명 테두리색(`border` 0x66)이 판 바탕에 얹힌 것.
-fn minimap_local_cell(base: [u8; 4]) -> [u8; 4] {
-    theme::lerp(base, theme::border(), 0x66 as f32 / 255.0)
-}
-
-fn rgb_gap(a: [u8; 4], b: [u8; 4]) -> f32 {
-    (0..3).map(|i| (a[i] as f32 - b[i] as f32).powi(2)).sum::<f32>().sqrt()
-}
-
-/// 기기색을 22% 부터 섞되, 이 기기 칸과 `MINIMAP_MIN_GAP` 만큼 떨어질 때까지 더 섞는다.
-fn minimap_fill(base: [u8; 4], tint: [u8; 4]) -> [u8; 4] {
-    let local = minimap_local_cell(base);
-    let mut t = MINIMAP_TINT;
-    loop {
-        let fill = theme::lerp(base, tint, t);
-        if t >= MINIMAP_TINT_MAX || rgb_gap(fill, local) >= MINIMAP_MIN_GAP {
-            return fill;
-        }
-        t = (t + 0.02).min(MINIMAP_TINT_MAX);
-    }
-}
-
-/// 배치도 칸 테두리 — 채움보다 진하게 기기색을 문다. 기기가 없으면 `fallback`.
-pub(crate) fn minimap_border(base: [u8; 4], machine: Option<&str>, fallback: [u8; 4]) -> [u8; 4] {
-    machine.map_or(fallback, |label| theme::lerp(base, machine_tint(label), MINIMAP_BORDER_TINT))
-}
 
 pub(super) fn draw_card(
     g: &mut gpu::GpuRenderer,
@@ -848,53 +766,11 @@ pub(super) fn draw_card(
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_defaults, device_aliases, hashed_device_color, machine_tint, named, normalize_device,
+        assign_defaults, device_aliases, hashed_device_color, named, normalize_device,
         parse_color_input, read_device_names, read_overrides, terminal_identity_pid, MachineIdentity,
-        DEVICE_COLOR_PRESETS, MINIMAP_BORDER_TINT, MINIMAP_TINT,
     };
     use std::collections::HashMap;
 
-    fn distance(a: [u8; 4], b: [u8; 4]) -> f32 {
-        (0..3)
-            .map(|i| (a[i] as f32 - b[i] as f32).powi(2))
-            .sum::<f32>()
-            .sqrt()
-    }
-
-    #[test]
-    fn minimap_keeps_machine_fill_when_active_or_inactive_in_both_modes() {
-        for base in [[25, 27, 34, 255], [45, 47, 54, 255], [240, 240, 246, 255]] {
-            assert_eq!(super::minimap_background(base, None), base);
-            let mini = super::minimap_background(base, Some("맥미니"));
-            let book = super::minimap_background(base, Some("맥북"));
-            assert_ne!(mini, base);
-            assert_ne!(book, base);
-        }
-    }
-
-    /// 기본 팔레트의 어느 두 색도, 헤더 칩·배치도 칸 비율로 밝은/어두운 바탕에
-    /// 섞인 뒤에도 서로 갈라 보여야 한다 — 「확실히 구별」의 수치 기준.
-    #[test]
-    fn default_device_colors_stay_apart_on_light_and_dark_bases() {
-        for base in [[25, 27, 34, 255], [240, 240, 246, 255]] {
-            for (i, (_, a)) in DEVICE_COLOR_PRESETS.iter().enumerate() {
-                for (_, b) in &DEVICE_COLOR_PRESETS[i + 1..] {
-                    let mini_a = crate::theme::lerp(base, *a, MINIMAP_BORDER_TINT);
-                    let mini_b = crate::theme::lerp(base, *b, MINIMAP_BORDER_TINT);
-                    assert!(distance(mini_a, mini_b) >= 24.0, "{a:?} vs {b:?} on {base:?}");
-                    let fill_a = crate::theme::lerp(base, *a, MINIMAP_TINT);
-                    let fill_b = crate::theme::lerp(base, *b, MINIMAP_TINT);
-                    assert!(distance(fill_a, fill_b) >= 12.0, "{a:?} vs {b:?} on {base:?}");
-                    let chip_a = crate::theme::lerp(base, *a, 0.12);
-                    let chip_b = crate::theme::lerp(base, *b, 0.12);
-                    assert!(distance(chip_a, chip_b) >= 8.0, "{a:?} vs {b:?} on {base:?}");
-                }
-                // 섞인 뒤에도 바탕에서 떠야 한다.
-                assert!(distance(crate::theme::lerp(base, *a, MINIMAP_BORDER_TINT), base) >= 24.0);
-                assert!(distance(crate::theme::lerp(base, *a, MINIMAP_TINT), base) >= 12.0);
-            }
-        }
-    }
 
     /// 명부의 기기들은 서로 다른 기본색을 받고, 같은 영구 id 는 이름이 달라도
     /// (저쪽에선 「이 기기」 이름, 이쪽에선 명부 이름) 같은 색을 받는다.
@@ -946,7 +822,7 @@ mod tests {
         assert_eq!(o.get("맥미니"), Some(&[1, 2, 3, 255]));
         assert_eq!(o.get("bad"), None);
         assert_eq!(hashed_device_color(" MACBOOK "), hashed_device_color(" MACBOOK "));
-        assert_eq!(machine_tint(" MACBOOK "), machine_tint("macbook"));
+assert_eq!(normalize_device(" MACBOOK "), normalize_device("macbook"));
     }
 
     /// 같은 기계를 기기마다 다른 이름으로 불러도(명부 이름·컴퓨터 이름·NBSP) id 로 한 색이다.
@@ -1022,16 +898,6 @@ mod tests {
         assert!(plan.newer.is_empty(), "같은 시각은 다시 들이지 않는다: {:?}", plan.newer);
     }
 
-    /// 기기색이 바탕과 색조가 비슷해도 기기 칸은 이 기기 칸과 갈려 보여야 한다.
-    #[test]
-    fn device_cell_stands_apart_from_local_cell_even_with_a_muted_tint() {
-        for base in [[0x30, 0x31, 0x3b, 255], [25, 27, 34, 255], [240, 240, 246, 255]] {
-            for tint in [[0x54, 0x8a, 0x84, 255], [0xf0, 0xdb, 0xae, 255], DEVICE_COLOR_PRESETS[2].1] {
-                let fill = super::minimap_fill(base, tint);
-                assert!(distance(fill, super::minimap_local_cell(base)) >= 24.0, "{tint:?} on {base:?} → {fill:?}");
-            }
-        }
-    }
 
     #[test]
     fn color_input_accepts_hex_short_hex_and_rgb_triples() {
@@ -1064,20 +930,20 @@ mod tests {
     }
 
     #[test]
-    fn remote_pane_background_keeps_viewer_brightness_and_stable_device_tint() {
+    fn device_badges_share_neutral_colors_for_local_and_remote_panes() {
+        let local = MachineIdentity {
+            label: "book".into(), name: "노트북".into(), detail: "로컬".into(),
+            remote: false, icon: "laptop".into(),
+        };
+        let remote = MachineIdentity {
+            label: "mini".into(), name: "서버".into(), detail: "미러".into(),
+            remote: true, icon: "server".into(),
+        };
         for base in [[26, 29, 35, 255], [240, 241, 243, 255]] {
-            let mut machine = MachineIdentity {
-                label: "맥미니".into(), name: "맥미니".into(), detail: "미러".into(), remote: false,
-                tint: machine_tint("맥미니"),
-                icon: "server".into(),
-            };
-            assert_eq!(machine.pane_background(base), None);
-            machine.remote = true;
-            let tinted = machine.pane_background(base).unwrap();
-            assert_ne!(tinted, base);
-            assert_eq!(tinted, machine.background(base));
-            let light = |c: [u8; 4]| c[..3].iter().map(|v| u16::from(*v)).sum::<u16>() > 380;
-            assert_eq!(light(tinted), light(base));
+            assert_eq!(local.background(base), remote.background(base));
+            assert_eq!(local.foreground(base), remote.foreground(base));
+            assert_ne!(local.icon(), remote.icon());
+            assert_ne!(local.name, remote.name);
         }
     }
 

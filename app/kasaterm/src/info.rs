@@ -3007,7 +3007,6 @@ fn draw_device_head(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     label: &str,
-    tint_key: &str,
     status: &str,
     online: bool,
     panes: usize,
@@ -3028,7 +3027,7 @@ fn draw_device_head(
     if hov {
         g.rect(x, y, w, DEV_H, theme::surface_hover());
     }
-    let tint = crate::render::machine_tint(tint_key);
+    let tint = theme::text_dim();
     let dot = if online { tint } else { theme::with_alpha(tint, 0x80) };
     circle_rect(g, x0 + 2.0, y + (DEV_H - 8.0) / 2.0, 8.0, dot);
     let n = format!("{panes} pane");
@@ -3287,10 +3286,9 @@ fn draw_group_head(
         let bw = g.measure_chrome_text(&badge, 10.0, true);
         if bw > 0.0 {
             let bx = text_right - bw - 8.0;
-            let tint = crate::render::machine_tint(machine);
-            pill_rect(g, bx, y + 3.0, bw + 8.0, 18.0, theme::lerp(theme::panel_bg(), tint, 0.18));
+            pill_rect(g, bx, y + 3.0, bw + 8.0, 18.0, theme::surface_hover());
             g.draw_text(bx + 4.0, y + 6.0, &badge,
-                gpu::DrawOpts { font_size: 10.0, color: theme::lerp(theme::text(), tint, 0.35),
+                gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(),
                     bold: true, italic: false });
             text_right = bx - 4.0;
         }

@@ -10,6 +10,7 @@ use super::*;
 
 mod live;
 mod paint;
+pub(crate) mod status;
 pub(crate) mod parse;
 
 pub(crate) use paint::{Hit, Slot};
@@ -77,6 +78,7 @@ pub(crate) struct ChatPane {
     painted: u64,
     /// 그 칸 mod 의 지금(일 상태·도는 도구·승인 요청).
     live: Arc<Mutex<live::ModLive>>,
+    live_tab: Option<String>,
     live_read: Option<Instant>,
     /// 마지막으로 그린 mod 판.
     live_painted: Option<live::ModLive>,
@@ -105,6 +107,7 @@ impl ChatPane {
             polled: None,
             painted: 0,
             live: Arc::new(Mutex::new(live::ModLive::default())),
+            live_tab: None,
             live_read: None,
             live_painted: None,
             remote: None,
@@ -112,6 +115,42 @@ impl ChatPane {
             refused: Arc::default(),
             send_error: Arc::default(),
         }
+    }
+
+    fn use_source(&mut self, tab: &str, remote: Option<&(String, String)>) {
+        if self.live_tab.as_deref() == Some(tab) && self.remote.as_ref() == remote {
+            return;
+        }
+        // 진행 중인 이전 읽기가 끝나도 새 탭의 통에는 쓸 수 없어야 한다.
+        self.live = Arc::default();
+        self.feed = Arc::default();
+        self.refused = Arc::default();
+        self.send_error = Arc::default();
+        self.live_tab = Some(tab.to_string());
+        self.remote = remote.cloned();
+        self.watching = None;
+        self.live_read = None;
+        self.live_painted = None;
+        self.polled = None;
+        self.painted = 0;
+        self.menu = None;
+        self.menu_read = None;
+        self.menu_hold = None;
+        self.layout = paint::Layout::default();
+        self.open.clear();
+        self.scroll = 0.0;
+        self.scroll_max = 0.0;
+    }
+
+    fn prepare_input(&mut self, tab: &str, remote: Option<&(String, String)>) -> bool {
+        if self.live_tab.as_deref() == Some(tab) && self.remote.as_ref() == remote {
+            return true;
+        }
+        self.use_source(tab, remote);
+        if let Ok(mut error) = self.send_error.lock() {
+            *error = Some("탭이 바뀌었어요. 내용을 확인한 뒤 다시 보내 주세요".into());
+        }
+        false
     }
 
     /// 그릴·고를 때 보는 mod 의 지금. 결정을 못 보낸 요청은 뺀다.
@@ -257,6 +296,22 @@ fn submit_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 impl App {
+    fn chat_view_input_target(&mut self, id: &str) -> Option<String> {
+        let tab = {
+            let ws = self.ws.lock().ok()?;
+            if !self.pane_can_chat(&ws, id) { return None; }
+            ws.active_tab_pid(id)
+        };
+        let remote = kasa_mcp::remote::remote_meta(&tab);
+        let pane = self.chat_view.panes.get_mut(id)?;
+        if !pane.prepare_input(&tab, remote.as_ref()) {
+            self.chrome_dirty = true;
+            if let Some(window) = &self.window { window.request_redraw(); }
+            return None;
+        }
+        Some(tab)
+    }
+
     /// 대화로 볼 수 있는 pane — 지금 학생(claude·codex)이 돌고 있는 터미널 탭. 셸은 숨긴다
     /// (폰의 `_canChat` 과 같은 규칙). 거울은 원본 기기의 판정을 따른다.
     pub(crate) fn pane_can_chat(&self, ws: &Workspace, id: &str) -> bool {
@@ -330,17 +385,14 @@ impl App {
                 continue;
             }
             let showing = self.chat_view.drawn.contains_key(&id);
-            let remote = [tab.as_str(), id.as_str()]
-                .into_iter()
-                .find(|p| kasa_mcp::remote::is_view_pane(p))
-                .and_then(kasa_mcp::remote::remote_meta);
+            let remote = kasa_mcp::remote::remote_meta(&tab);
             let path = self
                 .collab
                 .hub
                 .bound
                 .lock()
                 .ok()
-                .and_then(|b| b.get(&tab).or_else(|| b.get(&id)).cloned());
+                .and_then(|b| b.get(&tab).cloned());
             // 격리 검증 — 로그인 안 된 리그에서도 도구·코드·표가 섞인 대화를 그려 본다.
             #[cfg(debug_assertions)]
             let path = std::env::var_os("KASATERM_CHAT_FIXTURE").map(std::path::PathBuf::from).or(path);
@@ -348,6 +400,9 @@ impl App {
                 Some((base, rid)) => Some(Source::Remote(base.clone(), rid.clone())),
                 None => path.map(Source::File),
             };
+            if let Some(pane) = self.chat_view.panes.get_mut(&id) {
+                pane.use_source(&tab, remote.as_ref());
+            }
             let menu_lines = {
                 let pane = &self.chat_view.panes[&id];
                 showing
@@ -361,7 +416,6 @@ impl App {
                 pane.polled = Some(now);
                 poll_feed(Arc::clone(&pane.feed), source, proxy.clone());
             }
-            pane.remote = remote.clone();
             match &remote {
                 Some(r) if pane.watching.as_ref() != Some(r) => {
                     pane.watching = Some(r.clone());
@@ -403,6 +457,8 @@ impl App {
         views.hits.clear();
         for slot in slots {
             let Some(pane) = views.panes.get_mut(&slot.pane) else { continue };
+            // 탭 전환 이벤트의 즉시 그리기는 다음 펌프보다 먼저 올 수 있다.
+            pane.use_source(&slot.tab, slot.remote.as_ref());
             views.drawn.insert(slot.pane.clone(), slot.rect);
             let feed = Arc::clone(&pane.feed);
             let z = slot.zoom;
@@ -498,6 +554,7 @@ impl App {
     /// 화면 선택지의 한 칸을 고른다 — 지금 커서 자리에서 그만큼 ↑↓ 옮기고 Enter. 번호
     /// 단축키는 AskUserQuestion 의 다중 선택에서 뜻이 달라 쓰지 않는다.
     fn chat_view_pick(&mut self, id: &str, i: usize) {
+        if self.chat_view_input_target(id).is_none() { return; }
         let Some(menu) = self.chat_view.panes.get(id).and_then(|p| p.menu.clone()) else { return };
         if i >= menu.options.len() {
             return;
@@ -523,7 +580,7 @@ impl App {
     /// 승인 요청에 mod 결정으로 답한다(원격 승인 계약과 같은 요청 id). 거절이면 입력칸 글이 까닭이다.
     /// 결정은 뒤에서 보낸다 — 거울이면 원본까지 네트워크를 탄다. 못 보내면 그 요청은 화면 키로 고르게 남긴다.
     fn chat_view_decide(&mut self, id: &str, request: &str, session: &str, allow: bool) {
-        let tab = self.ws.lock().unwrap().active_tab_pid(id);
+        let Some(tab) = self.chat_view_input_target(id) else { return };
         let proxy = self.proxy.clone();
         let Some(pane) = self.chat_view.panes.get_mut(id) else { return };
         let message = if allow {
@@ -552,12 +609,13 @@ impl App {
     }
 
     /// 키 그대로(Esc·화살표) — 붙여넣기로 감싸지 않는다. 바깥 pane id 를 지금 탭으로 바꿔 보낸다.
-    fn chat_send_raw(&self, id: &str, bytes: &[u8]) {
-        let tab = self.ws.lock().unwrap().active_tab_pid(id);
+    fn chat_send_raw(&mut self, id: &str, bytes: &[u8]) {
+        let Some(tab) = self.chat_view_input_target(id) else { return };
         self.send_bytes_to_surface(Some(&tab), bytes);
     }
 
     fn chat_view_submit(&mut self, id: &str) {
+        let Some(tab) = self.chat_view_input_target(id) else { return };
         if let Some(flushed) = self.hangul.flush() {
             self.chat_view_insert(id, &flushed);
         }
@@ -568,6 +626,7 @@ impl App {
         if text.is_empty() {
             return;
         }
+        if let Ok(mut error) = pane.send_error.lock() { *error = None; }
         pane.draft.clear();
         pane.cursor = 0;
         pane.scroll = 0.0;
@@ -598,16 +657,15 @@ impl App {
             });
             return;
         }
-        let (pid, bracketed) = {
+        let bracketed = {
             let ws = self.ws.lock().unwrap();
-            let bracketed = ws.panes
+            ws.panes
                 .get(id)
                 .and_then(|p| p.tabs.get(p.active_tab))
                 .and_then(|t| t.term())
-                .is_some_and(|t| t.bracketed_paste);
-            (ws.active_tab_pid(id), bracketed)
+                .is_some_and(|t| t.bracketed_paste)
         };
-        let _ = self.proxy.send_event(UserEvent::SocketBytes(Some(pid), submit_bytes(&text, bracketed)));
+        let _ = self.proxy.send_event(UserEvent::SocketBytes(Some(tab), submit_bytes(&text, bracketed)));
     }
 
     pub(crate) fn chat_view_insert(&mut self, id: &str, text: &str) {
@@ -844,6 +902,68 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_before_the_next_pump_refuses_a_changed_target_without_taking_the_draft() {
+        let a = ("a".to_string(), "%1".to_string());
+        let b = ("b".to_string(), "%2".to_string());
+        for (old_tab, old_remote, tab, remote) in [
+            ("%10", Some(&a), "%11", Some(&b)),
+            ("%10", Some(&a), "%10", Some(&b)),
+            ("%10", Some(&a), "%11", None),
+            ("%10", None, "%11", Some(&b)),
+            ("%10", None, "%11", None),
+        ] {
+            let mut pane = ChatPane::new();
+            pane.use_source(old_tab, old_remote);
+            pane.draft = "보내지 않은 글".into();
+            pane.cursor = 4;
+            assert!(!pane.prepare_input(tab, remote));
+            assert_eq!(pane.draft, "보내지 않은 글");
+            assert_eq!(pane.cursor, 4);
+            assert!(pane.send_error.lock().unwrap().is_some());
+            assert_eq!(pane.remote.as_ref(), remote);
+            assert!(pane.prepare_input(tab, remote));
+        }
+    }
+
+    #[test]
+    fn changing_tabs_detaches_old_readers_and_keeps_the_unsent_draft() {
+        let mut pane = ChatPane::new();
+        let a = ("https://fixture-a.invalid".into(), "%1".into());
+        let b = ("https://fixture-b.invalid".into(), "%2".into());
+        pane.use_source("%10", Some(&a));
+        pane.draft = "아직 안 보낸 글".into();
+        let old = pane.live.clone();
+        let old_feed = pane.feed.clone();
+        let old_weak = Arc::downgrade(&old);
+        pane.use_source("%11", Some(&b));
+        *old.lock().unwrap() = live::ModLive { live: true, context_percent: Some(91.0), ..Default::default() };
+        old_feed.lock().unwrap().error = Some("late old response".into());
+        assert_eq!(pane.mod_live(), live::ModLive::default());
+        assert!(pane.feed.lock().unwrap().error.is_none());
+        assert_eq!(pane.draft, "아직 안 보낸 글");
+        drop(old);
+        assert!(old_weak.upgrade().is_none());
+        let same = pane.live.clone();
+        pane.use_source("%11", Some(&b));
+        assert!(Arc::ptr_eq(&same, &pane.live));
+        pane.use_source("%12", None);
+        assert!(!Arc::ptr_eq(&same, &pane.live));
+        assert!(pane.remote.is_none());
+        assert!(pane.watching.is_none());
+        pane.use_source("%10", Some(&a));
+        assert_eq!(pane.mod_live(), live::ModLive::default());
+    }
+
+    #[test]
+    fn a_retargeted_remote_with_the_same_local_number_gets_a_new_reader() {
+        let mut pane = ChatPane::new();
+        pane.use_source("%1", Some(&("a".into(), "%2".into())));
+        let old = Arc::downgrade(&pane.live);
+        pane.use_source("%1", Some(&("b".into(), "%2".into())));
+        assert!(old.upgrade().is_none());
+    }
 
     #[test]
     fn a_short_transcript_keeps_its_first_line_and_appends_whole_lines() {

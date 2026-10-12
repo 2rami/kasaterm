@@ -56,7 +56,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 ## 1) Pane 제어 — kasaterm-cli 완전 명령 레퍼런스
 
-> **`kasaterm-cli --help` / `<cmd> --help`를 실행하지 마라.** 아래가 모든 서브명령·인자·반환을 그대로 담는다. help는 컨텍스트만 태운다. 이 표에 없는 걸 만나면 그때만 `--help`.
+> 자주 쓰는 명령은 아래 레퍼런스로 찾는다. **세션 이동은 `kasaterm-cli machines move --help`가 정본**이다. 표에 없는 명령·옵션도 해당 도움말로 확인하고 추측하지 않는다.
 
 **공통 규약** (한 번만 외우면 됨):
 - 모든 명령은 **한 줄 JSON**으로 응답. 성공 `{"ok":true,"result":{…}}`, 실패 `{"ok":false,"error":{"code":-32603,"message":"no such pane: %9"}}` — 성공 판정은 최상위 `.ok`.
@@ -87,6 +87,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `window-new --machine <기계>` | **그 기계에 새 방**을 만들고 여기 보기 창으로 연다(§5 원격 방) | `surface`·`window`·`summary` |
 | `split <방향> %N@<기계>` / `tab %N@<기계>` | 그 기계의 그 pane **옆**/**탭**에 셸 pane. 축은 저쪽이 칸 종횡비로 고른다(방향 인자는 힌트). `--cwd` 가능. 여기 보기 창엔 몇 초 안에 거울이 붙는다 | `surface`·`window` |
 | `machines` / `machines connect <기계> [--here]` | 명부 기계 목록(내가 있는 곳 *) / 그 기계에 **새 방**을 세워 셸(보기 창은 뒤에 앉아 보던 방을 안 뺏는다, `--run` 가능) · `--here` 면 이 칸 자리를 그 셸로 | plain text |
+| `machines move [%N] <기계\|local> [--cwd 경로] [--run 명령] [--force]` | claude·codex 세션 이동. %N 생략=내 칸, local=이쪽 거울 칸의 세션을 데려오기. 기본은 턴 종료 후 이동, --force는 턴 중단·충돌 덮어쓰기 허용 | `result.remote_id` = 도착 칸 또는 예약 안내 |
 | 셸 `to <기계>` / `to <기계> <명령>` / `to ..` | 저쪽 활성 방에 셸 pane 을 세우고 이 pane 이 비춤 / 거기서 명령 / 로컬 복귀 | — |
 
 **배치·현황 조회 (read-only, 부작용 없음)**
@@ -832,9 +833,28 @@ kasaterm-cli tell --status kt1.1789582774860.13972-…                    # 영�
 - **보기 창** — 원격 방 카드나 칸을 누르면 그 방이 이쪽에 **보기 창**으로 열린다: leaf 전부가 그 기계의 거울인 창. 로컬 방 목록엔 안 서고 그 기기 절의 카드가 탭 노릇을 한다(보는 중이면 강조). 셸을 하나라도 로컬로 끼워 넣으면 그 순간 보통 방이 된다.
 - **저쪽에 새 방** — 절 머리의 「+」(GUI) 또는 `kasaterm-cli window-new --machine <기계>`. 저쪽 「+」 를 누른 것과 같은 방이 생기고, 그 첫 pane 이 여기 보기 창으로 열린다.
 - **저쪽 pane 옆·탭** — 보기 창 안에서 split/탭(GUI)을 하면 저쪽 그 방의 같은 자리에 pane 이 서고 여기 거울로 붙는다. CLI 는 `split <방향> %N@<기계>` / `tab %N@<기계>` — 보드 `panes[].address.surface_id` 의 `%N` 에 `@기계` 를 붙인다. 응답의 `surface` 가 저쪽 pane id 이고, 여기 보기 창엔 mirror_sync 가 몇 초 안에 거울을 붙인다.
-- **거기서 명령 돌리기** — `to <기계>` 로 세운 셸(owned)에 `to <기계> <명령>`. 학생을 통째로 옮기는 것은 `migrate`(이사), 학생 전부를 보는 것은 `unfold`.
+- **거기서 명령 돌리기** — `to <기계>` 로 세운 셸(owned)에 `to <기계> <명령>`. 도는 claude·codex 세션을 옮기는 정본은 `machines move`다(아래 절차).
 - ⚠️ 옛 판 기기는 자리 지정을 몰라 **활성 방에** 세운다(`window` 응답 없음). 원격에 세운 pane 은 `board --all` 에 곧 뜨니 그 주소로 `tell` 하면 된다.
 - ⚠️ `ssh` 로 그 기계에 들어가 거기 CLI 를 치지 마라 — 소켓 경로를 몰라 실패한다. 위 명령은 전부 **이 기계의** CLI 로 친다.
+
+### 도는 세션을 다른 기기로 옮기기 — machines move
+
+```bash
+kasaterm-cli machines
+kasaterm-cli where
+kasaterm-cli machines move %3 맥미니
+kasaterm-cli machines move 맥미니
+kasaterm-cli machines move %3 맥미니 --cwd /Users/me/project
+kasaterm-cli machines move %3 local --cwd /Users/me/project
+```
+
+- 먼저 `machines`로 등록된 도착 기기 이름·연결 상태를, `where`로 옮길 이쪽 칸 번호를 확인한다. 내 칸은 번호를 생략한다(`$KASATERM_PANE_ID`). 공백 있는 기기 이름은 따옴표로 감싼다.
+- 여러 기기와 맞는 짧은 이름·알 수 없는 이름·잘못된 옵션은 이동 요청 전에 거부한다. 주소·SSH 포트를 추측하지 않는다.
+- `%3`은 **이 기기의 칸 번호**다. `local` 데려오기도 이쪽에 열린 거울 번호를 쓴다. `%N@기계`를 이동 대상으로 주지 않는다.
+- 기본은 일하는 세션의 턴 종료 후 이동한다. `예약됨`은 완료가 아니다. `--force`는 턴 중단과 도착지 충돌 덮어쓰기를 허용하므로 실패를 우회하려고 붙이지 않는다.
+- 순방향은 미커밋 작업도 운반하지만 `local` 데려오기는 대화만 옮긴다. 작업 파일은 별도로 확인한다. `--cwd`는 도착지 경로이며, 생략하면 등록된 경로 매핑을 쓴다.
+- 실패·응답 없음이면 `where`·`board --all`·`peek`으로 원본·거울 상태부터 확인한다. 확인 전 `close`·`closed`·세션 종료·이동 재시도를 하지 않는다.
+- 전용 도움말은 `kasaterm-cli machines move --help`다(소켓 없이 읽기만 한다). 상세는 [세션 이동 절차](../../docs/session-transfer.md).
 
 ### 함정
 

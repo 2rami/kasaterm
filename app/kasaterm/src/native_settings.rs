@@ -171,7 +171,6 @@ pub(crate) struct SettingsCache {
     custom_themes: Arc<Vec<CustomThemeChoice>>,
     custom_active: String,
     palette_hex: Arc<Vec<String>>,
-    pub(crate) device_colors: Arc<Vec<crate::render::pane_identity::DeviceColorRow>>,
     device_icons: Arc<Vec<crate::device_icons::Row>>,
     theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
     ordered_picks: Arc<Vec<(String, Vec<String>)>>,
@@ -333,9 +332,9 @@ impl SettingsCache {
             &saved,
             (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
         ));
-        self.device_colors = Arc::new(crate::render::pane_identity::device_color_rows());
+        let devices = crate::render::pane_identity::device_color_rows();
         crate::device_icons::reload(&saved);
-        self.device_icons = Arc::new(crate::device_icons::rows(&self.device_colors));
+        self.device_icons = Arc::new(crate::device_icons::rows(&devices));
     }
 
     pub(crate) fn refresh_palette(&mut self) {
@@ -788,7 +787,6 @@ pub(crate) struct Snapshot {
     pub(crate) custom_active: String,
     pub(crate) custom_theme_label_edit: Option<(String, String)>,
     pub(crate) palette_hex: Arc<Vec<String>>,
-    pub(crate) device_colors: Arc<Vec<crate::render::pane_identity::DeviceColorRow>>,
     pub(crate) device_icons: Arc<Vec<crate::device_icons::Row>>,
     pub(crate) palette_edit: String,
     pub(crate) picker_hsv: (f32, f32, f32),
@@ -1039,7 +1037,6 @@ impl App {
             custom_active: cache.custom_active.clone(),
             custom_theme_label_edit: self.custom_theme_label_edit.clone(),
             palette_hex: cache.palette_hex.clone(),
-            device_colors: cache.device_colors.clone(),
             device_icons: cache.device_icons.clone(),
             palette_edit: self.set_palette_edit.clone(),
             picker_hsv: self.set_picker_hsv,
@@ -1205,7 +1202,7 @@ impl App {
                 if matches!(action, SettingsAction::PickerSV | SettingsAction::PickerHue) {
                     if !matches!(
                         self.settings_input,
-                        Some(SettingsInput::PaletteHex(_) | SettingsInput::DeviceHex(_))
+                        Some(SettingsInput::PaletteHex(_))
                     ) {
                         self.settings_apply(SettingsAction::FocusPaletteHex(0));
                         self.native_settings_arm_backup(SettingsInput::PaletteHex(0));
@@ -1268,7 +1265,6 @@ impl App {
         if ended {
             match self.settings_input {
                 Some(SettingsInput::PaletteHex(slot)) => self.apply_palette_edit(slot),
-                Some(SettingsInput::DeviceHex(slot)) => self.apply_device_edit(slot),
                 _ => {}
             }
         }
@@ -1305,7 +1301,6 @@ impl App {
             self.native_settings_blur();
             match field {
                 SettingsInput::PaletteHex(slot) => self.settings_apply(SettingsAction::FocusPaletteHex(slot)),
-                SettingsInput::DeviceHex(slot) => self.settings_apply(SettingsAction::FocusDeviceHex(slot)),
                 SettingsInput::CustomThemeLabel if self.custom_theme_label_edit.is_none() => {
                     if let Some(slug) = theme::active_custom_slug() {
                         self.settings_apply(SettingsAction::FocusCustomThemeLabel(slug));
@@ -1365,8 +1360,7 @@ impl App {
                     .count();
             }
             SettingsInput::ThemeLabel
-            | SettingsInput::PaletteHex(_)
-            | SettingsInput::DeviceHex(_) => {}
+            | SettingsInput::PaletteHex(_) => {}
         }
         self.ime_focus = Some(crate::ImeFocus::Settings(field));
         self.preedit.clear();
@@ -1456,7 +1450,7 @@ impl App {
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
-            SettingsInput::PaletteHex(_) | SettingsInput::DeviceHex(_) => {
+            SettingsInput::PaletteHex(_) => {
                 (self.set_palette_edit.clone(), self.settings_caret)
             }
         }
@@ -1542,10 +1536,6 @@ impl App {
             SettingsInput::PaletteHex(slot) => {
                 crate::lineedit::insert(&mut self.set_palette_edit, &mut self.settings_caret, text);
                 self.apply_palette_edit(slot);
-            }
-            SettingsInput::DeviceHex(slot) => {
-                crate::lineedit::insert(&mut self.set_palette_edit, &mut self.settings_caret, text);
-                self.apply_device_edit(slot);
             }
         }
         if matches!(
@@ -1673,10 +1663,6 @@ impl App {
             SettingsInput::PaletteHex(slot) => {
                 self.set_palette_edit = backup.value;
                 self.apply_palette_edit(slot);
-            }
-            SettingsInput::DeviceHex(slot) => {
-                self.set_palette_edit = backup.value;
-                self.apply_device_edit(slot);
             }
         }
         match backup.field {
@@ -2050,7 +2036,6 @@ impl App {
             }
             match field {
                 SettingsInput::PaletteHex(slot) => self.apply_palette_edit(slot),
-                SettingsInput::DeviceHex(slot) => self.apply_device_edit(slot),
                 _ => {}
             }
         }
@@ -2463,7 +2448,7 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
             .theme_label_edit
             .as_mut()
             .map(|(_, buffer)| (buffer, &mut app.settings_caret)),
-        SettingsInput::PaletteHex(_) | SettingsInput::DeviceHex(_) => {
+        SettingsInput::PaletteHex(_) => {
             Some((&mut app.set_palette_edit, &mut app.settings_caret))
         }
     }
@@ -3137,7 +3122,6 @@ fn paint_appearance(
         );
         *y += 58.0;
     }
-    paint_device_colors(g, s, hits, caret, x, y, w);
     paint_device_icons(g, s, hits, x, y, w);
     row_label(g, x, y, "강조색");
     let accents: Vec<(String, bool, SettingsAction)> = theme::ACCENT_PRESETS
@@ -3871,9 +3855,6 @@ fn paint_color_picker(
     layout.height
 }
 
-/// 기기별 색 — 이 기기와 명부의 기계 한 줄씩. 줄을 고르면 프리셋과 선택기가
-/// 그 밑에 펼쳐진다. 색은 pane 헤더 칩·배치도 칸·정보 탭·거울 pane 바탕이 함께
-/// 쓰므로, 여기서 바꾸면 그 넷이 한꺼번에 따라온다.
 fn paint_device_icons(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3910,156 +3891,6 @@ fn paint_device_icons(
     }
 }
 
-fn paint_device_colors(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    section_title(
-        g,
-        x,
-        *y,
-        "기기 색",
-        "pane 헤더·배치도·정보 탭이 기기를 이 색으로 가릅니다",
-    );
-    *y += 54.0;
-    if s.device_colors.is_empty() {
-        draw_text(
-            g,
-            x + 2.0,
-            *y,
-            "아직 이름을 알아낸 기기가 없어요",
-            11.5,
-            theme::text_dim(),
-            false,
-        );
-        *y += 30.0;
-        return;
-    }
-    let selected = match s.input {
-        Some(SettingsInput::DeviceHex(index)) if index < s.device_colors.len() => Some(index),
-        _ => None,
-    };
-    let to_rgba = |hex: &str| {
-        theme::parse_hex(hex)
-            .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
-            .unwrap_or([0, 0, 0, 255])
-    };
-    for (index, row) in s.device_colors.iter().enumerate() {
-        let rect = (x, *y, w, 40.0);
-        let is_sel = selected == Some(index);
-        stroke_round(g, rect, theme::radius_md(), if is_sel { theme::accent() } else { theme::border() });
-        let color = to_rgba(&row.hex);
-        let swatch = (x + 8.0, *y + 8.0, 24.0, 24.0);
-        round_rect(g, swatch.0, swatch.1, swatch.2, swatch.3, theme::radius_sm(), color);
-        stroke_round(g, swatch, theme::radius_sm(), theme::edge_on(color));
-        let shown_name = crate::render::pane_identity::device_name(&row.label);
-        let name = if row.local {
-            format!("{shown_name} · 이 기기")
-        } else {
-            shown_name
-        };
-        let right_w = 176.0;
-        let name_w = (w - 42.0 - right_w).max(60.0);
-        let shown = fit(g, &name, name_w, 12.5, is_sel);
-        draw_text(g, x + 42.0, *y + 12.0, &shown, 12.5, theme::text(), is_sel);
-        let hex_x = x + w - right_w + 8.0;
-        draw_text(g, hex_x, *y + 13.0, &row.hex, 11.0, theme::text_dim(), false);
-        register_clipped(
-            g,
-            hits,
-            Target::Setting(SettingsAction::FocusDeviceHex(index)),
-            rect,
-            HitCursor::Pointer,
-        );
-        if row.custom {
-            button(
-                g,
-                s,
-                hits,
-                (x + w - 78.0, *y + 5.0, 70.0, 30.0),
-                "기본값",
-                Target::Setting(SettingsAction::ResetDeviceColor(index)),
-                false,
-            );
-        } else {
-            draw_text(g, x + w - 62.0, *y + 13.0, "기본값", 11.0, theme::text_mute(), false);
-        }
-        *y += 46.0;
-    }
-    if let Some(index) = selected {
-        let row = &s.device_colors[index];
-        *y += 4.0;
-        row_label(g, x, y, "프리셋 — 서로 갈라 보이는 다섯 색");
-        let mut cx = x;
-        for (_, color) in crate::render::pane_identity::DEVICE_COLOR_PRESETS {
-            let hex = theme::hex_str([color[0], color[1], color[2]]);
-            let is_cur = row.hex.eq_ignore_ascii_case(&hex);
-            let rect = (cx, *y, 34.0, 30.0);
-            round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), *color);
-            stroke_round(
-                g,
-                rect,
-                theme::radius_sm(),
-                if is_cur { theme::text() } else { theme::edge_on(*color) },
-            );
-            if is_cur {
-                stroke_round(g, (rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0), (theme::radius_sm() - 2.0).max(0.0), theme::bg());
-            }
-            register_clipped(
-                g,
-                hits,
-                Target::Setting(SettingsAction::DevicePreset(index, hex)),
-                rect,
-                HitCursor::Pointer,
-            );
-            cx += 41.0;
-        }
-        *y += 42.0;
-        let value = if s.input == Some(SettingsInput::DeviceHex(index)) {
-            s.palette_edit.clone()
-        } else {
-            row.hex.clone()
-        };
-        *y += paint_color_picker(
-            g,
-            s,
-            hits,
-            caret,
-            x,
-            *y,
-            w,
-            SettingsInput::DeviceHex(index),
-            &row.label,
-            &value,
-            s.eyedropper.then(|| SettingsAction::DeviceEyedropper(index)),
-        );
-        draw_text(
-            g,
-            x + 2.0,
-            *y - 12.0,
-            "HEX 칸은 #rrggbb 말고 rgb(r, g, b) · r, g, b 도 받아요",
-            10.5,
-            theme::text_dim(),
-            false,
-        );
-        *y += 10.0;
-    }
-    button(
-        g,
-        s,
-        hits,
-        (x, *y, 172.0, 34.0),
-        "모든 기기 색 기본값으로",
-        Target::Setting(SettingsAction::ResetAllDeviceColors),
-        false,
-    );
-    *y += 50.0;
-}
 
 fn hsv_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     let h = h.rem_euclid(360.0) / 60.0;

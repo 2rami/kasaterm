@@ -684,6 +684,7 @@ pub fn mirror_view(surface: &str) -> Value {
         "live": true, "seq": seq, "session": state.session,
         "turn_open": state.turn_open, "compacting": state.compacting.is_some(),
         "question": state.question, "tools": running, "permissions": permissions,
+        "context_percent": state.usage.as_ref().and_then(|u| u.context_percent),
     })
 }
 

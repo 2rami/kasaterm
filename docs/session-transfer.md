@@ -1,0 +1,59 @@
+# CLI 세션 이동
+
+도는 Claude·Codex 세션을 다른 기기로 옮길 때는 `kasaterm-cli machines move`를 쓴다. 이동 후 대화·모델을 이어 쓰고, 원래 칸에는 도착 세션의 거울이 남는다.
+
+## 기기와 칸 고르기
+
+현재 기기의 CLI에서 등록된 기기 이름과 옮길 칸 번호를 확인한다.
+
+```sh
+kasaterm-cli machines
+kasaterm-cli where
+kasaterm-cli machines move %3 맥미니
+```
+
+기기 이름은 목록의 이름을 그대로 쓴다. 공백이 있으면 `"Mac Mini"`처럼 따옴표로 감싼다. 짧은 이름은 정확히 한 기기와 맞을 때만 전체 이름으로 풀린다. 알 수 없는 이름·중복 이름·여러 후보·연결되지 않은 기기는 이동 요청 전에 거부된다. `mini`도 등록된 이름이나 유일한 이름 앞부분일 때만 통한다. 주소와 SSH 포트를 추측하거나 다른 기기에 SSH로 들어가 CLI를 실행할 필요가 없다.
+
+`%3`은 **현재 기기의 칸 번호**다. 이동 대상에 `%3@맥미니`를 주지 않는다. 현재 칸 안에서 자신의 세션을 옮길 때는 칸 번호를 생략할 수 있다.
+
+```sh
+kasaterm-cli machines move 맥미니
+```
+
+생략한 번호는 `$KASATERM_PANE_ID`에서 읽는다. 칸 밖에서는 `where`로 확인한 번호를 명시한다.
+
+## 도착 경로와 데려오기
+
+`--cwd`를 생략하면 등록된 기기의 경로 매핑을 사용한다. 경로 매핑이 없으면 도착 기기 기준의 경로를 지정한다.
+
+```sh
+kasaterm-cli machines move %3 맥미니 --cwd /Users/me/project
+```
+
+다른 기기에서 도는 세션을 이쪽으로 데려올 때는 도착지에 `local`을 준다. 대상은 이쪽에 열린 **거울 칸**의 번호다. 거울이 아직 없으면 `board --all`에서 원격 칸을 확인하고 `attach %N@기기`로 연 뒤 `where`에서 이쪽 번호를 확인한다.
+
+```sh
+kasaterm-cli machines move %3 local --cwd /Users/me/project
+```
+
+순방향 이동은 미커밋 변경과 안 올린 커밋도 운반한다. `local` 데려오기는 대화만 옮기므로 작업 파일을 별도로 확인하고, 도착 작업 트리가 다른 세션의 파일을 덮지 않도록 경로를 고른다.
+
+`--run '<명령>'`은 필요할 때 도착 셸에 실행 명령을 준다. 한 인자로 인용하며 `local`에서는 지원하지 않는다.
+
+## 예약·실패 확인
+
+기본 이동은 진행 중인 턴이 끝나기를 기다린다. 응답의 `result.remote_id`에 `예약됨`이 있으면 예약 접수다. 턴을 마친 뒤 `where`, `board --all`, `peek %3`으로 도착 세션과 거울을 확인한다.
+
+`--force`는 진행 중 턴의 중단과 도착지 충돌 덮어쓰기를 허용한다. 기본 절차에는 필요하지 않다.
+
+실패 응답이나 응답 시간 초과를 이동 완료로 판단하지 않는다. 먼저 원본과 거울 상태를 확인한다. 확인 전 `close`, `closed`, 세션 종료, `--force` 재시도를 하지 않는다. CLI는 잘못된 입력과 도착지 선택을 이동 요청 전에 거부하며, 이동 응답이 실패하거나 불확실해도 종료 요청이나 자동 재시도를 보내지 않는다.
+
+## 도움말과 검증
+
+```sh
+kasaterm-cli machines --help
+kasaterm-cli machines move --help
+kasaterm-cli help machines move
+```
+
+이 도움말은 앱·소켓 없이 출력된다. 파서와 명부 선택, 이동 실패·응답 없음의 처리는 `crates/kasa-socket/src/cli/session_move.rs`의 회귀 검사에서 가짜 전송으로 검증한다. 실제 세션 이동 없이 `cargo test -p kasa-socket cli::session_move::tests`로 실행한다.

@@ -25,6 +25,7 @@ pub(crate) struct ModLive {
     pub(crate) turn_open: bool,
     pub(crate) compacting: bool,
     pub(crate) question: bool,
+    pub(crate) context_percent: Option<f64>,
     /// 도는 도구(도구, 이름표). 서브에이전트 것도 함께.
     pub(crate) tools: Vec<(String, String)>,
     /// 아직 답 없는 승인 요청. 자리에서 답한 것은 원본이 닫아 여기 안 온다. 도구 호출이 승인을 감싸므로
@@ -59,6 +60,7 @@ impl ModLive {
             turn_open: v["turn_open"].as_bool().unwrap_or(false),
             compacting: v["compacting"].as_bool().unwrap_or(false),
             question: !v["question"].is_null() && v.get("question").is_some(),
+            context_percent: v["context_percent"].as_f64().filter(|p| p.is_finite() && (0.0..=100.0).contains(p)),
             tools,
             permissions,
         }
@@ -197,6 +199,16 @@ pub(crate) fn remote_chunk(base: &str, surface: &str, offset: u64) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_usage_survives_mirroring_without_inventing_an_unknown_value() {
+        assert_eq!(ModLive::from_json(&json!({"live": true, "context_percent": 0.0})).context_percent, Some(0.0));
+        assert_eq!(ModLive::from_json(&json!({"live": true, "context_percent": 37.5})).context_percent, Some(37.5));
+        for value in [json!(null), json!("37%"), json!(-1), json!(101)] {
+            assert_eq!(ModLive::from_json(&json!({"context_percent": value})).context_percent, None);
+        }
+        assert_eq!(ModLive::from_json(&json!({"live": true})).context_percent, None);
+    }
 
     #[test]
     fn an_open_request_wins_the_working_line_and_spreads_its_raw_input() {

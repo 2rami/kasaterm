@@ -6,7 +6,6 @@ pub(crate) use crate::sprites::*;
 
 #[path = "pane_identity.rs"]
 pub(crate) mod pane_identity;
-pub(crate) use pane_identity::machine_tint;
 use pane_identity::{MachineIdentity, PaneIdentity};
 #[path = "terminal_scene.rs"]
 pub(crate) mod terminal_scene;
@@ -134,10 +133,6 @@ struct SidebarRowInfo {
     /// 원격 pane 이면 그 기계 이름. 페인트 루프는 self 를 못 읽으므로(2887 주석)
     /// 여기서 프레임당 1회 떠 둔다.
     machine: Option<String>,
-    /// 배치도 칸을 물들일 기기 이름 — 로컬 pane 도 든다. 헤더 칩과 **같은 이름
-    /// 풀이**(`MachineIdentity::for_pane`)를 쓴다: 링크에 적힌 이름과 명부 이름이
-    /// 다르면 같은 기계가 헤더와 배치도에서 다른 색이 된다(2026-09-10 지적).
-    device: Option<String>,
 }
 
 /// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
@@ -865,19 +860,8 @@ impl App {
         // 0 when the column is hidden (so the pane keeps hugging the edge).
         let git_col_w = self.git_col_w();
         let git_col_x = (win_px.0 / scale - git_col_w).max(0.0);
-        // 다른 기기 레포를 보는 중이면 칼럼이 그 기기색을 문다 — 어느 기계 것인지 배경이 말한다.
-        let git_col_bg = self
-            .git
-            .col_remote
-            .lock()
-            .ok()
-            .and_then(|r| r.as_ref().map(|(label, _)| label.clone()))
-            .map_or(theme::side_panel_bg(), |label| {
-                pane_identity::panel_background(theme::side_panel_bg(), Some(&label))
-            });
-        let tree_col_bg = self.file_tree.remote.as_ref().map_or(theme::panel_bg(), |(label, _)| {
-            pane_identity::panel_background(theme::panel_bg(), Some(label))
-        });
+        let git_col_bg = theme::side_panel_bg();
+        let tree_col_bg = theme::panel_bg();
         let git_reserve = if git_col_w > 0.0 {
             git_col_w + WINDOW_PADDING
         } else {
@@ -1273,6 +1257,8 @@ impl App {
                     let state = self.pane_activity.get(&id).map(|a| &a.state);
                     crate::chat_view::Slot {
                         pane: id.clone(),
+                        tab: tab.clone(),
+                        remote: kasa_mcp::remote::remote_meta(&tab),
                         rect: (0.0, 0.0, 0.0, 0.0),
                         name: ws
                             .pane_character
@@ -1283,11 +1269,11 @@ impl App {
                         working: state.is_some_and(|s| s.is_busy()),
                         needs_you: state.is_some_and(|s| s.needs_you()),
                         focused: active_id.as_deref() == Some(id.as_str()),
-                        mirror: kasa_mcp::remote::remote_info(&tab).is_some()
-                            || kasa_mcp::remote::remote_info(&id).is_some(),
+                        mirror: kasa_mcp::remote::is_remote_pane(&tab),
                         preedit: self.chat_view_preedit(&id),
                         caret_on: self.cursor_blink_on(Instant::now()),
                         bg: theme::pane_bg(),
+                        status: crate::chat_view::status::StatusLine::default(),
                         zoom: self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1),
                     }
                 });
@@ -2272,11 +2258,6 @@ impl App {
                     crate::info::cached_local_machine_name(),
                 );
                 let machine = identity.remote.then(|| identity.name.clone());
-                // 기기색은 **남의 기계에서 온 pane 에만** 칠한다 — pane 배경(`pane_background`)과
-                // 같은 규칙이다. 전에는 명부에 기계가 둘 이상이면 로컬 칸까지 이 기기색으로
-                // 물들여, 배치도는 파란데 pane 배경은 그대로인 어긋남이 났다(2026-09-14 지적
-                // 「연결된 기기 말고는 기본색이어야 하는 거 아니야」).
-                let device = identity.remote.then_some(identity.label);
                 let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
@@ -2383,7 +2364,6 @@ impl App {
                     compact_pct: act.and_then(|a| a.compact_pct),
                     busy_secs,
                     machine,
-                    device,
                 }
             }
         };
@@ -2600,6 +2580,21 @@ impl App {
                 })
                 .collect()
         };
+        if !chat_slots.is_empty() {
+            let reported = self.socket_backend.as_ref().map(|b| b.agent_cfg_snapshot()).unwrap_or_default();
+            let ws = self.ws.lock().unwrap();
+            for slot in &mut chat_slots {
+                let Some(identity) = pane_identities.get(&slot.pane) else { continue };
+                let tab = ws.active_tab_pid(&slot.pane);
+                let cells = ws.panes.get(&slot.pane).and_then(|p| p.term()).map(|t| t.cells.as_slice()).unwrap_or(&[]);
+                slot.status = crate::chat_view::status::StatusLine {
+                    machine: identity.machine.name.clone(),
+                    icon: identity.machine.icon().to_string(),
+                    session: (!identity.machine.remote).then(|| self.pane_claude_sid.get(&tab).cloned()).flatten(),
+                    facts: self.chat_status_facts(&tab, cells, reported.get(&tab)),
+                };
+            }
+        }
         // Resolve before borrowing the GPU; the titlebar uses the same active-tab
         // identity as terminal art, never a stale local session binding.
         let titlebar_character = {
@@ -2695,24 +2690,11 @@ impl App {
                     g.upload_image("schale:classroom", &rgba, w, h);
                 }
             }
-            // Device identity belongs to the whole terminal, not only a header
-            // that disappears for a single pane. Default terminal cells are
-            // transparent, so paint below them; explicit syntax/diff/prompt
-            // fills and character accents remain above this local-mode tint.
-            let pane_bg_of = |id: &str| pane_identities.get(id)
-                .and_then(|identity| identity.machine.pane_background(theme::pane_bg()))
-                .unwrap_or_else(theme::pane_bg);
-            for (id, x, y, w, h) in &footer_slots {
+            for (_, x, y, w, h) in &footer_slots {
                 // Only a decoded user background replaces the themed surface.
                 if g.has_image("schale:classroom")
                     && classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
-                g.rect(*x, *y, *w, *h, pane_bg_of(id));
-            }
-            for slot in &mut chat_slots {
-                slot.bg = pane_bg_of(&slot.pane);
-            }
-            for slot in &mut shell_slots {
-                slot.bg = pane_bg_of(&slot.pane);
+                g.rect(*x, *y, *w, *h, theme::pane_bg());
             }
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
@@ -3470,11 +3452,7 @@ impl App {
                             },
                         );
                     }
-                    if let (Some(b), Some(machine)) =
-                        (machine_badge.as_deref(), title_machine.as_ref().map(|(_, label)| label.as_str()))
-                    {
-                        // The title strip must use the same device identity as
-                        // the pane header and minimap, not the theme accent.
+                    if let Some(b) = machine_badge.as_deref() {
                         g.draw_text(
                             tx + tw + bw,
                             ty,
@@ -3482,7 +3460,7 @@ impl App {
                             gpu::DrawOpts {
                                 font_size: chrome_font,
                                 color: theme::enforce_contrast_at(
-                                    machine_tint(machine), theme::panel_bg(), 4.5,
+                                    theme::text_dim(), theme::panel_bg(), 4.5,
                                 ),
                                 bold: true,
                                 italic: false,
@@ -4022,12 +4000,6 @@ impl App {
                 // alert is suppressed (focused pane).
                 let hdr_bg = match header_flash[hi] {
                     Some(k) => theme::lerp(theme::header_bg(), theme::success(), 0.7 * k),
-                    // 원격 pane 은 헤더 바탕을 강조색으로 은은히 물들인다 — 칩 하나로는
-                    // 여러 pane 이 깔린 화면에서 훑을 때 안 걸린다(어느 pane 이 저
-                    // 기계 것인지는 바탕색이 먼저 말해야 한다).
-                    None if pane_identities.get(&h.id).is_some_and(|p| p.machine.remote) => {
-                        pane_identities[&h.id].machine.background(theme::header_bg())
-                    }
                     None => theme::header_bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
@@ -4127,10 +4099,7 @@ impl App {
                         let ch = PANE_HEADER_HEIGHT - 8.0;
                         let cx = chip_right - cw;
                         let cy = h.y + 4.0;
-                        // 플랫 문법: 칩은 채우지 않고 기기색 **테두리+글자**로 말한다
-                        // (2026-09-14 승인 목업). 바탕은 헤더 바탕 그대로다.
-                        let bg = theme::bg();
-                        let fg = machine.foreground(bg);
+                        let fg = machine.foreground(hdr_bg);
                         g.round_rect_stroke(cx, cy, cw, ch, 4.0, 1.0, fg);
                         g.queue_icon(machine.icon(), cx + pad, cy + (ch - icon) / 2.0, icon, fg);
                         g.draw_text(

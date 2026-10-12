@@ -4698,24 +4698,6 @@ impl App {
                     self.settings_apply(SettingsAction::FocusPaletteHex(i));
                 }
             }
-            // `focus-device:<i>` — 기기 색 i 번째 줄이 골라져 프리셋·선택기가 펼쳐진 상태.
-            a if a.starts_with("focus-device:") => {
-                if let Ok(i) = a.trim_start_matches("focus-device:").parse::<usize>() {
-                    eprintln!("[autosettings] 기기 색 {i} 포커스");
-                    self.settings_apply(SettingsAction::FocusDeviceHex(i));
-                }
-            }
-            // `device-preset:<i>:<hex>` — 기기 i 의 색을 프리셋처럼 한 번에 굳힌다.
-            // 설정 파일의 `device_colors` 와 캡처의 색이 함께 바뀌는지 본다.
-            a if a.starts_with("device-preset:") => {
-                let mut parts = a.trim_start_matches("device-preset:").splitn(2, ':');
-                if let (Some(Ok(i)), Some(hex)) =
-                    (parts.next().map(str::parse::<usize>), parts.next())
-                {
-                    eprintln!("[autosettings] 기기 {i} 색 → {hex}");
-                    self.settings_apply(SettingsAction::DevicePreset(i, hex.to_string()));
-                }
-            }
             // `picker-probe:<i>` — 클릭 없이 픽 로직만 검증: Hue 1/3(=120°),
             // SV (0.75, 위에서 1/4) 를 찍고 결과 hex 를 로그로 남긴다.
             // 기대값 #30bf30 — hsv(120, .75, .75). 캡처는 렌더를, 이건 수학을 본다.

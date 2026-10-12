@@ -16,6 +16,8 @@ type Rect = (f32, f32, f32, f32);
 /// 한 프레임에 대화로 그릴 pane 하나 — 그리는 쪽이 `self` 를 못 빌려 렌더 루프가 미리 뜬다.
 pub(crate) struct Slot {
     pub(crate) pane: String,
+    pub(crate) tab: String,
+    pub(crate) remote: Option<(String, String)>,
     pub(crate) rect: Rect,
     /// 말풍선 머리에 붙는 이름 — 학생 이름, 없으면 하네스.
     pub(crate) name: String,
@@ -26,9 +28,8 @@ pub(crate) struct Slot {
     pub(crate) mirror: bool,
     pub(crate) preedit: String,
     pub(crate) caret_on: bool,
-    /// 이 칸에 실제로 깔린 바탕. 거울 칸은 기기색이 섞여 테마 바탕과 다르다 — 채움을 테마 바탕에서
-    /// 끌어내면 분홍 칸 위에 푸른 회색 상자가 떠 따로 논다(2026-10-08).
     pub(crate) bg: [u8; 4],
+    pub(crate) status: super::status::StatusLine,
     /// 이 칸만 키운 배율(⌘⇧+, `pane_font_scales`). 그릴 때 좌표계를 이만큼 키운다.
     pub(crate) zoom: f32,
 }
@@ -1196,10 +1197,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     }
     g.pop_clip();
 
-    // 띠 아래 줄 — 왼쪽 터미널로 보기, 가운데 안내, 오른쪽 멈추기·보내기 원.
     let bmid = comp_y + 1.0 + 8.0 + text_h + 2.0 + 16.0;
     let ready = !pane.draft.trim().is_empty();
-    let send = (col_x + col_w - 28.0, bmid - 14.0, 28.0, 28.0);
+    let term_label = "터미널로 보기";
+    let term_w = g.measure_chrome_text(term_label, 11.5, false) + 34.0;
+    let device_prefix: String = slot.status.machine.chars().take(4).collect();
+    let status_min = 19.0 + g.measure_chrome_text(&device_prefix, 11.0, false);
+    let footer = super::status::footer(col_x - 8.0, col_x + col_w, bmid, working, term_w, status_min);
+    let send = footer.send;
     if ready {
         g.round_rect_fill(send.0, send.1, send.2, send.3, 14.0, theme::accent());
         g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, slot.bg);
@@ -1209,35 +1214,41 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         g.round_rect_stroke(send.0, send.1, send.2, send.3, 14.0, theme::border_w().max(1.0), theme::border());
         g.queue_icon("arrow-up", send.0 + 7.0, send.1 + 7.0, 14.0, theme::text_mute());
     }
-    let mut hint_right = send.0 - 10.0;
-    if working {
-        let stop = (send.0 - 6.0 - 28.0, send.1, 28.0, 28.0);
+    if let Some(stop) = footer.stop {
         let hover = inside(cursor, stop);
         g.round_rect_stroke(stop.0, stop.1, stop.2, stop.3, 14.0, theme::border_w().max(1.0), if hover { theme::text_dim() } else { theme::border() });
         g.queue_icon("square", stop.0 + 8.0, stop.1 + 8.0, 12.0, theme::text_dim());
         g.hover_pointer |= hover;
         hits.push((Hit::Stop, stop));
-        hint_right = stop.0 - 10.0;
     }
-    let term_label = "터미널로 보기";
-    let term_w = g.measure_chrome_text(term_label, 11.5, false) + 34.0;
-    let term = (col_x - 8.0, bmid - 13.0, term_w, 26.0);
-    let term_hover = inside(cursor, term);
-    if term_hover {
-        g.round_rect_fill(term.0, term.1, term.2, term.3, theme::radius_sm(), theme::lerp(slot.bg, theme::text(), 0.08));
-        g.hover_pointer = true;
+    if let Some(term) = footer.terminal {
+        let term_hover = inside(cursor, term);
+        if term_hover {
+            g.round_rect_fill(term.0, term.1, term.2, term.3, theme::radius_sm(), theme::lerp(slot.bg, theme::text(), 0.08));
+            g.hover_pointer = true;
+        }
+        g.queue_icon("terminal", term.0 + 8.0, bmid - 6.5, 13.0, theme::text_dim());
+        if footer.terminal_label {
+            label(g, term.0 + 26.0, bmid - 7.0, term_label, 11.5, if term_hover { theme::text() } else { theme::text_dim() }, false);
+        }
+        hits.push((Hit::Terminal, term));
     }
-    g.queue_icon("terminal", term.0 + 8.0, bmid - 6.5, 13.0, theme::text_dim());
-    label(g, term.0 + 26.0, bmid - 7.0, term_label, 11.5, if term_hover { theme::text() } else { theme::text_dim() }, false);
-    hits.push((Hit::Terminal, term));
-    let hint_x = term.0 + term.2 + 10.0;
     let failed = pane.send_error.lock().ok().and_then(|e| e.clone());
-    let (hint, tone) = match &failed {
-        Some(e) => (format!("못 보냈어요 · {e}"), theme::danger()),
-        None => ("Enter 보내기 · ⇧Enter 줄바꿈".to_string(), theme::text_mute()),
-    };
-    let hint = crate::info::fit_text(g, &hint, (hint_right - hint_x).max(0.0), 11.0, false);
-    label(g, hint_x, bmid - 6.5, &hint, 11.0, tone, false);
+    let (sx, sy, sw, sh) = footer.status;
+    if sw > 0.0 {
+        g.push_clip(sx, sy, sw, sh);
+        if let Some(error) = failed {
+            let hint = crate::info::fit_text(g, &format!("못 보냈어요 · {error}"), sw, 11.0, false);
+            label(g, sx, sy, &hint, 11.0, theme::danger(), false);
+        } else if sw >= 19.0 {
+            let tone = theme::enforce_contrast_at(theme::text_dim(), slot.bg, 4.5);
+            g.queue_icon(&slot.status.icon, sx, sy, 13.0, tone);
+            let context = slot.status.live_context(&mod_live);
+            let text = slot.status.fit(sw - 19.0, context, |s| g.measure_chrome_text(s, 11.0, false));
+            label(g, sx + 19.0, sy, &text, 11.0, tone, false);
+        }
+        g.pop_clip();
+    }
     // 단추가 먼저 — 판정은 처음 맞는 것이 이긴다(`chat_view.rs` 클릭).
     hits.push((Hit::Composer, box_r));
 

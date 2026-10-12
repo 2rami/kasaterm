@@ -381,12 +381,11 @@ fn draw_cell(
     } else if hover {
         theme::surface_hover()
     } else {
-        // 칸은 기기색을 문다 — 본기기 배치도의 다른 기기 칸과 같은 규칙.
-        crate::render::pane_identity::minimap_border(theme::panel_bg(), Some(&machine.label), theme::with_alpha(theme::border(), 0x66))
+        theme::with_alpha(theme::border(), 0x66)
     });
     if mw > 5.0 && mh > 5.0 {
         round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5,
-            crate::render::pane_identity::minimap_background(theme::panel_bg(), Some(&machine.label)));
+            theme::panel_bg());
     }
     if let Some((col, period)) = signal {
         if mw > 5.0 && mh > 5.0 {
@@ -725,7 +724,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         let plus = (width - 54.0, y + 7.0, 22.0, 22.0);
         let text_x = if compact { 12.0 } else { 36.0 };
         let text_right = plus.0 - 4.0;
-        if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 14.0, y + 11.0, 14.0, crate::render::machine_tint(&machine.label)); }
+        if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 14.0, y + 11.0, 14.0, theme::text_dim()); }
         text(g, &crate::render::pane_identity::device_name(&machine.label), text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
         text(g, &status(machine), text_x, y + 20.0, text_right - text_x, 9.5, theme::text_dim(), false);
         g.hover_pointer |= clipped(menu, viewport).is_some_and(|r| hit(cursor, r))

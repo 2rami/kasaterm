@@ -28,6 +28,8 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+mod session_move;
+
 struct ApiTarget { base: String, token_file: Option<std::path::PathBuf> }
 static API_TARGET: std::sync::OnceLock<ApiTarget> = std::sync::OnceLock::new();
 
@@ -91,6 +93,10 @@ pub fn main() {
 fn run() -> Result<Option<Response>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(target) = parse_api_target(&mut args)? { let _ = API_TARGET.set(target); }
+    if let Some(help) = session_move::help_for(&args) {
+        eprintln!("{help}");
+        return Ok(None);
+    }
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
         print_help();
         return Ok(None);
@@ -121,6 +127,12 @@ fn run() -> Result<Option<Response>> {
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
         }
+    }
+    if cmd == "machines:move" {
+        let pane = std::env::var("KASATERM_PANE_ID").ok();
+        return session_move::execute(&args, pane.as_deref(), |request| {
+            roundtrip(&resolve_socket_path()?, request)
+        }).map(Some);
     }
     resolve_pane_targets(&cmd, &mut args)?;
     if matches!(cmd.as_str(), "window-new" | "attach" | "summon") {
@@ -1977,7 +1989,8 @@ fn print_help() {
             "machines [--names|--json]                 명부 기계 목록과 닿는 길(직통·서울 중계·끊김)",
             "identify --machine 기계                   그 기계에 닿나(0 닿음 · 1 끊김) — 판에 칸이 없어도",
             "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기에 새 방(보기 창은 뒤에) · --here 면 이 칸 자리를 그 기기 셸로",
-            "machines move [%N] <기기|local> [--cwd /레포] [--force]   칸의 claude 를 그 기기로 이사(대화·미커밋 변경까지)",
+            "machines move [%N] <기기|local>            claude·codex 세션을 다른 기기로 옮기기. 생략하면 내 칸, local 은 이쪽 거울을 데려오기",
+            "  예: machines move %3 맥미니 · machines move %3 local --cwd /레포 · 상세: machines move --help",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
         ]),
         ("계정 일 권한 (설정 → 계정에서 연결한 GitHub)", &[
@@ -2401,55 +2414,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                         .filter(|s| !s.is_empty())
                 });
             ("surface.open_url", json!({ "url": url, "target": target }))
-        }
-        // machines move — 칸의 claude 를 다른 기계로 이사(대화·미커밋 변경까지 운반, 같은 자리에서 재개).
-        "machines:move" => {
-            let mut positional: Vec<String> = Vec::new();
-            let mut i = 0usize;
-            while i < args.len() {
-                let a = &args[i];
-                if a == "--cwd" || a == "--run" {
-                    i += 2;
-                    continue;
-                }
-                if a.starts_with('%') || a.starts_with("--") {
-                    i += 1;
-                    continue;
-                }
-                positional.push(a.clone());
-                i += 1;
-            }
-            let base = positional.first().cloned().ok_or_else(|| {
-                anyhow!("machines move 는 목적지가 필요해요 (예: machines move 맥미니 · machines move %3 맥미니 · 데려오기: machines move %3 local)")
-            })?;
-            let flagval = |name: &str| {
-                args.iter()
-                    .position(|a| a == name)
-                    .and_then(|i| args.get(i + 1))
-                    .cloned()
-            };
-            let pane = args
-                .iter()
-                .find(|a| a.starts_with('%'))
-                .cloned()
-                .or_else(|| {
-                    std::env::var("KASATERM_PANE_ID")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .ok_or_else(|| {
-                    anyhow!("machines move 는 대상 pane 이 필요해요 (예: machines move %3 맥미니)")
-                })?;
-            (
-                "surface.migrate",
-                json!({
-                    "pane": pane,
-                    "base": base,
-                    "cwd": flagval("--cwd"),
-                    "run": flagval("--run"),
-                    "force": args.iter().any(|a| a == "--force"),
-                }),
-            )
         }
         "machines:connect" => {
             // 플래그 값(--cwd /x)이 base 로 오인되지 않게 위치 인자만 걷는다.

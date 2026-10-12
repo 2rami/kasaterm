@@ -11,6 +11,7 @@ The surfaces are a Rust/wgpu desktop app and Flutter mobile app. Extend their ex
 ## Current direction
 
 - Keep terminal content and controls readable in both light and dark themes. Mobile login label contrast is checked by `mobile/test/mobile_account_layout_test.dart`; this is not a claim that every legacy color pairing was audited.
+- Desktop device identity uses neutral icons and names, not device-specific fills or borders. The chat composer footer carries the device and reported runtime status next to the terminal toggle; details remain in `docs/design.md`. Character and attention colors retain their existing meaning.
 - Remove default franchise branding without destroying users' character bindings, custom themes or stored identifiers. Original art is available in `assets/original/`; native and web bundled-character migration remains separate work.
 - Mobile UI uses bundled Pretendard regular/semibold; terminal cells retain the existing monospace and Korean fallback contract. `KASA Mobile` is the display name, not a new bundle identifier.
 - Rain-wet glass is a future visual direction, not a shipped shader. Repeated input and scrolling must not acquire decorative motion.

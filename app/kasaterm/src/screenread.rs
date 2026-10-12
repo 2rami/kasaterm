@@ -584,21 +584,38 @@ impl StatusSpan {
     }
 }
 
-/// Codex의 고정 status-line 항목을 Claude Code와 같은 한 줄 문법·색으로 다시 그린다.
-///
-/// Codex 자체 설정은 항목의 순서만 받고 임의 아이콘·구분자를 받지 않는다. 그래서 PTY가
-/// 확정해서 보낸 모델·effort·context 값은 그대로 읽고, 카사텀이 알고 있는 cwd/Git 값만
-/// 보태 시각 표현만 바꾼다. Codex pane에서만 호출하며, 판독에 실패하면 원본을 그대로 둔다.
-pub(crate) fn restyle_codex_status_line(
-    rows: &mut [Vec<GridCell>],
-    project: Option<&str>,
-    branch: Option<&str>,
-) -> bool {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+pub(crate) struct CodexStatusLine {
+    pub(crate) model: String,
+    pub(crate) effort: String,
+    pub(crate) context: Option<String>,
+}
 
+pub(crate) fn codex_status_line(rows: &[Vec<GridCell>]) -> Option<CodexStatusLine> {
+    parse_codex_status_line(rows).map(|(row, model, effort, _, _)| CodexStatusLine {
+        model, effort, context: codex_context_used(&row_text_only(&rows[row])),
+    })
+}
+
+fn codex_context_used(line: &str) -> Option<String> {
+    line.split(" · ").find_map(|part| {
+        let lower = part.to_ascii_lowercase();
+        let words: Vec<_> = lower.split_whitespace().collect();
+        if !words.contains(&"context") { return None; }
+        let used = words.contains(&"used");
+        let remaining = words.contains(&"left") || words.contains(&"remaining");
+        if used == remaining { return None; }
+        let pct = words.iter().find_map(|word| word.strip_suffix('%')?.parse::<u8>().ok())?;
+        (pct <= 100).then(|| format!("{}%", if used { pct } else { 100 - pct }))
+    })
+}
+
+type ParsedCodexStatus = (usize, String, String, Option<String>, Vec<String>);
+
+// 보기 모드에 따라 값이 달라지지 않게 원본 상태줄 판독을 공유한다.
+fn parse_codex_status_line(rows: &[Vec<GridCell>]) -> Option<ParsedCodexStatus> {
     const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-    let parsed = rows
+    rows
         .iter()
         .enumerate()
         .rev()
@@ -644,7 +661,21 @@ pub(crate) fn restyle_codex_status_line(
                 .map(str::to_string)
                 .collect();
             Some((row_idx, model, effort.to_string(), context, middle))
-        });
+        })
+}
+
+/// Codex의 고정 status-line 항목을 Claude Code와 같은 한 줄 문법·색으로 다시 그린다.
+///
+/// Codex 자체 설정은 항목의 순서만 받고 임의 아이콘·구분자를 받지 않는다. 그래서 PTY가
+/// 확정해서 보낸 모델·effort·context 값은 그대로 읽고, 카사텀이 알고 있는 cwd/Git 값만
+/// 보태 시각 표현만 바꾼다. Codex pane에서만 호출하며, 판독에 실패하면 원본을 그대로 둔다.
+pub(crate) fn restyle_codex_status_line(
+    rows: &mut [Vec<GridCell>],
+    project: Option<&str>,
+    branch: Option<&str>,
+) -> bool {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let parsed = parse_codex_status_line(rows);
 
     let Some((row_idx, raw_model, effort, context, middle)) = parsed else {
         return false;
@@ -826,6 +857,25 @@ pub(crate) fn restyle_codex_status_line(
 #[cfg(test)]
 mod codex_status_line_tests {
     use super::*;
+
+    #[test]
+    fn composer_context_converts_remaining_and_ignores_unidentified_percentages() {
+        for (source, expected) in [
+            ("Context 32% used", Some("32%")),
+            ("Context 68% left", Some("32%")),
+            ("68% context left", Some("32%")),
+            ("0% context used", Some("0%")),
+            ("100% context remaining", Some("0%")),
+            ("5h 32%", None),
+            ("context 32%", None),
+            ("context 101% used", None),
+        ] {
+            let rows = vec![row(&format!("GPT-6.1-Sol xhigh · {source}"), 100)];
+            let info = codex_status_line(&rows).unwrap();
+            assert_eq!(info.model, "GPT-6.1-Sol");
+            assert_eq!(info.context.as_deref(), expected, "{source}");
+        }
+    }
 
     fn row(text: &str, cols: usize) -> Vec<GridCell> {
         let mut row = vec![GridCell::blank(); cols];
