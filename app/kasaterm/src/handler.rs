@@ -5923,7 +5923,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, _)| id.clone());
                     if let Some(pid) = handle_hit.as_deref() {
-                        // 첫 클릭이 연 메뉴가 두 번째 누름을 닫기로 삼키기 전에 헤더와 같은 제스처로 판정한다.
+                        // 첫 클릭이 연 메뉴가 두 번째 누름을 닫기로 삼키기 전에 확대를 판정한다.
                         if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
                             self.handle_menu = None;
                             self.header_drag = None;
@@ -6391,19 +6391,8 @@ impl ApplicationHandler<UserEvent> for App {
                         })
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        // A double-click anywhere on the header — including the
-                        // tab pill itself — toggles tmux-style zoom. Users aim
-                        // at the tab label when they "double-click the header",
-                        // so the pill must share the header band's zoom gesture
-                        // (otherwise only the empty strip right of the tabs
-                        // zoomed, which felt broken).
-                        if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
-                            // pane_tab_rects keys off the outer pane id (same
-                            // value we push into active_pane below), which is
-                            // exactly what toggle_pane_zoom wants.
-                            self.toggle_pane_zoom(&pid);
-                            return;
-                        }
+                        // A tab press must not prime a later handle double-click.
+                        self.last_left_click = None;
                         // Focus the pane now; arm a tab drag. A plain press
                         // (no movement) switches to this tab on release; a
                         // drag past the threshold reorders instead.
@@ -6429,13 +6418,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // a real drag once the cursor passes the threshold, so
                     // a plain header click just focuses.
                     if let Some(pane) = self.header_at_px(self.cursor_px.0, self.cursor_px.1) {
-                        // A double-click on a pane header toggles tmux-style
-                        // zoom (that pane alone fills the work area). Reuse the
-                        // same last_left_click window as the titlebar maximize.
-                        if take_chrome_double_click(&mut self.last_left_click, Instant::now(), self.cursor_px) {
-                            self.toggle_pane_zoom(&pane);
-                            return;
-                        }
+                        self.last_left_click = None;
                         self.focus_pane(&pane);
                         self.begin_drag_identity(self.drag_endpoint(&pane));
                         self.header_drag = Some(HeaderDrag {
