@@ -213,6 +213,17 @@ impl App {
             .unwrap_or_default()
     }
 
+    pub(crate) fn saved_room_collapses(state: &serde_json::Value) -> (Vec<usize>, Vec<String>) {
+        let active = state.get("active_session").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let session = state.get("sessions").and_then(|v| v.as_array())
+            .and_then(|v| v.get(active).or_else(|| v.first()));
+        let local = session.and_then(|s| s.get("collapsed_rooms")).and_then(|v| v.as_array())
+            .into_iter().flatten().filter_map(|v| usize::try_from(v.as_u64()?).ok()).collect();
+        let remote = session.and_then(|s| s.get("remote_collapsed_rooms")).and_then(|v| v.as_array())
+            .into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+        (local, remote)
+    }
+
     /// 저장본의 leaf 가 쥐고 있던 학생 이름 — 트리 순서대로, 빈 이름은 뺀다.
     pub(crate) fn saved_characters(state: &serde_json::Value) -> Vec<String> {
         fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
@@ -348,11 +359,13 @@ impl App {
         self.reserve_saved_characters(state);
         let (cols, rows) = self.window_cells();
         let mut restored_active = 0usize;
+        let mut restored_indices = vec![None; windows.len()];
         for (j, w) in windows.iter().enumerate() {
             if crate::internal_room::is_saved_window(w) {
                 continue;
             }
             let tree = self.restore_window_layout(w, cols, rows);
+            restored_indices[j] = Some(self.windows.len());
             if j == active_window {
                 restored_active = self.windows.len();
                 self.pty_layout = tree;
@@ -396,7 +409,14 @@ impl App {
         }
         // 방별 본문 보기(목록/배치도)도 방 번호가 굳은 지금 되살린다 — 고른 것이
         // 재시작에 전역 기본으로 되돌아가면 방마다 따로 둔 뜻이 없어진다.
-        self.room_list_body = Self::saved_room_bodies(state).into_iter().collect();
+        self.room_list_body = Self::saved_room_bodies(state).into_iter()
+            .filter_map(|(old, body)| Some((restored_indices.get(old).copied().flatten()?, body)))
+            .collect();
+        let (collapsed, remote_collapsed) = Self::saved_room_collapses(state);
+        self.collapsed_windows = collapsed.into_iter()
+            .filter_map(|old| restored_indices.get(old).copied().flatten()).collect();
+        self.info.navigation.collapsed_rooms = remote_collapsed.into_iter().collect();
+        self.expand_anim = None;
         // 별도창으로 뗀 pane — 트리에 안 꽂고 pane 만 살린 뒤(셸·`--resume` 큐잉은
         // leaf 와 같은 길) 창은 다음 틱의 `flush_aux_opens` 가 연다(여기엔 event
         // loop 가 없다). 방 번호는 방 복원이 끝나 인덱스가 굳은 지금 환산한다.
@@ -1690,6 +1710,17 @@ mod agy_restore_tests {
 
 #[cfg(test)]
 mod room_body_tests {
+    #[test]
+    fn rooms_open_by_default_and_explicit_collapses_survive_restart() {
+        let old = serde_json::json!({ "sessions": [{"windows": [{}]}] });
+        assert_eq!(crate::App::saved_room_collapses(&old), (vec![], vec![]));
+        let state = serde_json::json!({ "active_session": 1, "sessions": [
+            {"collapsed_rooms": [0]},
+            {"collapsed_rooms": [2, 5, -1, "bad"], "remote_collapsed_rooms": ["machine:window:2", null]}
+        ]});
+        assert_eq!(crate::App::saved_room_collapses(&state), (vec![2, 5], vec!["machine:window:2".into()]));
+    }
+
     #[test]
     fn saved_room_bodies_reads_the_active_session_only() {
         let state = serde_json::json!({

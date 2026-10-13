@@ -1,6 +1,22 @@
 use super::*;
 
 type Rect = (f32, f32, f32, f32);
+
+pub(crate) fn collapsed_summary(busy: usize, attention: usize) -> String {
+    format!("작업 {busy} · 확인 {attention}")
+}
+
+fn remote_collapsed_summary(online: bool, rows: &[&state::MachinesColRow]) -> String {
+    if !online {
+        return "연결 끊김".into();
+    }
+    let stacks = decks(rows);
+    collapsed_summary(
+        stacks.iter().filter(|deck| deck.iter().any(|r| !r.closed
+            && matches!(r.status.as_str(), "working" | "compacting"))).count(),
+        stacks.iter().filter(|deck| deck.iter().any(|r| r.needs_you())).count(),
+    )
+}
 pub(crate) const HEADER_H: f32 = 48.0;
 const PANE_H: f32 = 44.0;
 const SECTION_H: f32 = 36.0;
@@ -16,7 +32,7 @@ pub(crate) struct NavigationState {
     /// 보는 중인 원격 방에서 지금 포커스한 칸의 원격 pane id.
     pub(crate) viewing_cur: Option<String>,
     device_views: Vec<(String, Rect)>,
-    collapsed_rooms: std::collections::HashSet<String>,
+    pub(crate) collapsed_rooms: std::collections::HashSet<String>,
     /// 방마다 고른 본문 보기와 전체 기본 — 본기기 카드의 「목록으로 보기」와 같다.
     pub(crate) list_rooms: RoomViews,
     /// 펼친 「창 밖 셸」 줄 — 기기 라벨, 이 기기는 빈 문자열.
@@ -595,6 +611,8 @@ fn draw_rows(
             let badge_w = if stacks.len() >= 10 { 44.0 } else { 37.0 };
             let badge = (tab_x + tab_w - 8.0 - badge_w, y + 26.0, badge_w, 20.0);
             let (name, folder) = room_title(room);
+            let summary = remote_collapsed_summary(machine.online, list);
+            let folder = if collapsed { summary.as_str() } else { folder };
             let compact = tab_w < 180.0;
             let text_x = tab_x + if compact { 8.0 } else { 26.0 };
             let tab_right = tab_x + tab_w;
@@ -1043,6 +1061,7 @@ impl App {
             }
             Action::Room(key) => {
                 if !self.info.navigation.collapsed_rooms.remove(&key) { self.info.navigation.collapsed_rooms.insert(key); }
+                self.session_touched = true;
             }
             Action::WebShells(label) => {
                 if !self.info.navigation.web_open.remove(&label) { self.info.navigation.web_open.insert(label); }
@@ -1187,6 +1206,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapsed_room_summary_counts_cells_not_tabs_and_does_not_guess_offline() {
+        let mut m = machine();
+        m.remote[0].status = "working".into();
+        m.remote[1].status = "compacting".into();
+        m.remote[1].tab_of = Some(m.remote[0].remote_id.clone());
+        m.mirrored[0].status = "waiting".into();
+        m.mirrored[0].attention_kind = Some("question".into());
+        let list = rows(&m);
+        assert_eq!(remote_collapsed_summary(true, &list), "작업 1 · 확인 1");
+        assert_eq!(remote_collapsed_summary(false, &list), "연결 끊김");
+        m.mirrored[0].attention_kind = Some("idle".into());
+        m.remote[0].closed = true;
+        m.remote[1].closed = true;
+        assert_eq!(remote_collapsed_summary(true, &rows(&m)), "작업 0 · 확인 0");
+    }
 
     fn machine() -> state::MachinesColMachine {
         let row = |pane: &str, remote: &str, room: &str| state::MachinesColRow {

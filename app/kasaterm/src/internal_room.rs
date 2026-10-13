@@ -264,7 +264,7 @@ mod tests {
         for field in [
             "window_name_override",
             "window_alert",
-            "expanded_windows",
+            "collapsed_windows",
             "expand_anim",
             "closed_panes",
         ] {

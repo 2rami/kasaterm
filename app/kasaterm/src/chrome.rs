@@ -2139,7 +2139,7 @@ impl App {
     /// 애니메이션이 없으면 0 이나 1 이고, 도는 중이면 그 사이다. 목록 높이·행
     /// 투명도가 이 하나를 같이 보므로 밀림과 나타남이 어긋나지 않는다.
     pub(crate) fn expand_progress(&self, idx: usize) -> f32 {
-        let target = if self.expanded_windows.contains(&idx) {
+        let target = if !self.collapsed_windows.contains(&idx) {
             1.0
         } else {
             0.0
@@ -2316,13 +2316,14 @@ impl App {
         if self.internal_room_kind_at(idx).is_some() {
             return;
         }
-        let opening = !self.expanded_windows.contains(&idx);
+        let opening = self.collapsed_windows.contains(&idx);
         if opening {
-            self.expanded_windows.insert(idx);
+            self.collapsed_windows.remove(&idx);
         } else {
-            self.expanded_windows.remove(&idx);
+            self.collapsed_windows.insert(idx);
         }
         self.expand_anim = Some((idx, opening, std::time::Instant::now()));
+        self.session_touched = true;
         self.chrome_dirty = true;
     }
 

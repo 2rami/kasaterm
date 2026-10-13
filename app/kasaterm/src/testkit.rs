@@ -202,9 +202,9 @@ impl App {
         // 드래그 장전 여부까지 찍는다 — 버튼을 카드에서 도려내는 변경은 그 자리의
         // tear-off 를 조용히 죽일 수 있고(빌드도 클릭도 멀쩡하다), 신호가 여기뿐이다.
         eprintln!(
-            "[autoexpandclick] ({x:.0},{y:.0}) handled={handled} 활성 {before}->{} 펼침={:?} 드래그장전={}",
+            "[autoexpandclick] ({x:.0},{y:.0}) handled={handled} 활성 {before}->{} 접힘={:?} 드래그장전={}",
             self.active_window,
-            self.expanded_windows,
+            self.collapsed_windows,
             self.win_tab_drag.is_some()
         );
         // 펼침 모션 프레임은 **클릭 기준**으로 잡아야 한다. 시작 기준
@@ -2180,7 +2180,7 @@ impl App {
         let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
         // pane 줄과 배치도는 **펼친 방**에만 그려진다 — 접힌 카드에는 rect 가 하나도
         // 안 실려, 펼치지 않으면 목록이 빈 채로 "못 찾음"이 된다.
-        if !self.expanded_windows.contains(&self.active_window) {
+        if self.collapsed_windows.contains(&self.active_window) {
             self.toggle_window_expand(self.active_window);
         }
         // 펼침은 애니메이션이라 첫 프레임엔 카드가 아직 납작하고 줄 rect 가 하나도 안
@@ -2388,7 +2388,7 @@ impl App {
         let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
         let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
         let wi0 = self.active_window;
-        if !self.expanded_windows.contains(&wi0) {
+        if self.collapsed_windows.contains(&wi0) {
             self.toggle_window_expand(wi0);
         }
         // ★ **다 펴질 때까지** 기다린다 — rect 가 생기자마자 세면 안 된다. 목록은
@@ -5464,7 +5464,7 @@ impl App {
                 if !self.sidebar_visible {
                     self.toggle_sidebar();
                 }
-                if !self.expanded_windows.contains(&self.active_window) {
+                if self.collapsed_windows.contains(&self.active_window) {
                     self.toggle_window_expand(self.active_window);
                 }
                 if !self.git.col_visible {
@@ -8011,9 +8011,9 @@ impl App {
     pub(crate) fn arm_autoexpand(&mut self) {
         let Ok(v) = std::env::var("KASATERM_AUTOEXPAND") else { return };
         for i in v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()) {
-            self.expanded_windows.insert(i);
+            self.collapsed_windows.remove(&i);
         }
-        eprintln!("[autoexpand] {:?}", self.expanded_windows);
+        eprintln!("[autoexpand] collapsed={:?}", self.collapsed_windows);
     }
     pub(crate) fn arm_autotoggle(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOTOGGLE_SIDEBAR_MS") else { return };

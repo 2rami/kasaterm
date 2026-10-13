@@ -297,8 +297,8 @@ impl App {
             .collect();
         let alerts = std::mem::take(&mut self.window_alert);
         self.window_alert = alerts.into_iter().map(remap).collect();
-        let expanded = std::mem::take(&mut self.expanded_windows);
-        self.expanded_windows = expanded.into_iter().map(remap).collect();
+        let collapsed = std::mem::take(&mut self.collapsed_windows);
+        self.collapsed_windows = collapsed.into_iter().map(remap).collect();
         let bodies = std::mem::take(&mut self.room_list_body);
         self.room_list_body = bodies.into_iter().map(|(i, v)| (remap(i), v)).collect();
         // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
@@ -480,7 +480,7 @@ impl App {
             .filter(|i| *i != idx)
             .map(remap)
             .collect();
-        self.expanded_windows = std::mem::take(&mut self.expanded_windows)
+        self.collapsed_windows = std::mem::take(&mut self.collapsed_windows)
             .into_iter()
             .filter(|i| *i != idx)
             .map(remap)

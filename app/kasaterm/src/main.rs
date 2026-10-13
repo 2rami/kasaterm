@@ -5687,11 +5687,8 @@ struct App {
     /// 표시는 그대로 서고 움직임만 멎는다. 끝남·기다림·오류가 새로 나면 그 pane 이 빠져 다시 깜빡인다
     /// (`quiet_room_blinks`·`wake_blink`, 2026-10-07 「방 포커스하면 없어지게」).
     blink_quiet: std::collections::HashSet<String>,
-    /// 사이드바에서 pane 목록을 펴 둔 방. **펼친 것만** 담으므로 기본은 접힘이다
-    /// (info.rs 의 `group_collapsed` 는 기본이 열림이라 반대 뜻 — 한 집합에 못 담아
-    /// 따로 둔다). 방 인덱스가 키라 `reorder_window` 의 remap 을 반드시 통과해야
-    /// 한다 — 안 그러면 2번을 펴 두고 3번 자리로 끌어 옮겼을 때 3번이 펴진 채 뜬다.
-    expanded_windows: std::collections::HashSet<usize>,
+    /// 방 인덱스는 재배치·삭제·저장 때 함께 환산해야 다른 방이 접힘을 물려받지 않는다.
+    collapsed_windows: std::collections::HashSet<usize>,
     /// 펼친 카드를 **목록**으로 보는 방. 기본(비어 있음)은 배치도다.
     ///
     /// 지금 펴지거나 접히는 중인 방 — `(방, 펴는 중인가, 시작 시각)`.
@@ -6138,7 +6135,7 @@ struct App {
     /// 됐다(2026-09-15 지적). 방마다 쓰임이 다르다 — 학생이 여럿인 방은 누가
     /// 무엇을 하는지 줄로 읽고 싶고, pane 배치를 자주 바꾸는 방은 지도가 낫다.
     ///
-    /// 방 인덱스가 키라 `expanded_windows` 와 똑같이 **remap 을 반드시 통과**해야
+    /// 방 인덱스가 키라 `collapsed_windows` 와 똑같이 **remap 을 반드시 통과**해야
     /// 한다 — 안 그러면 2번 방을 목록으로 두고 3번 자리로 끌어 옮겼을 때 엉뚱한
     /// 방이 목록으로 뜬다.
     room_list_body: std::collections::HashMap<usize, bool>,
@@ -6382,7 +6379,7 @@ impl App {
             booted_at: std::time::Instant::now(),
             window_alert: std::collections::HashSet::new(),
             blink_quiet: std::collections::HashSet::new(),
-            expanded_windows: std::collections::HashSet::new(),
+            collapsed_windows: std::collections::HashSet::new(),
             expand_anim: None,
             sidebar_row_drag: None,
             pane_claude_seen: std::collections::HashSet::new(),

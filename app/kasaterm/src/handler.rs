@@ -8110,7 +8110,7 @@ impl ApplicationHandler<UserEvent> for App {
             if self.expand_anim.is_some() {
                 why.push("expand_anim");
             }
-            if self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty() {
+            if self.sidebar_visible && !self.tabs_on_top && self.has_expanded_rooms() {
                 why.push("sidebar_gif");
             }
             let line = why.join(",");
@@ -8200,7 +8200,7 @@ impl ApplicationHandler<UserEvent> for App {
             || self.expand_anim.is_some()
             // 펼친 목록의 학생 얼굴은 idle gif 라 프레임을 계속 넘겨야 한다.
             // 접으면 멈춘다 — 안 보이는 그림에 프레임을 태우지 않는다.
-            || (self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty())
+            || (self.sidebar_visible && !self.tabs_on_top && self.has_expanded_rooms())
             // 설정 상세의 모션 미리보기는 보일 때만 30fps 펌프를 탄다.
             || self.settings_media_animating()
             // 비가 오는 동안(꺼져 있으면 여기서 끝난다 — 끈 사람은 깨우지 않는다).

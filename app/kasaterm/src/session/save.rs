@@ -1,6 +1,33 @@
 //! 세션 저장 — 방·칸 배치와 칸마다의 복원 기록을 session.json 에 쓴다.
 use super::*;
 
+fn persisted_collapses(collapsed: &std::collections::HashSet<usize>, indices: &[Option<usize>]) -> Vec<usize> {
+    let mut kept: Vec<_> = collapsed.iter().filter_map(|old| indices.get(*old).copied().flatten()).collect();
+    kept.sort_unstable();
+    kept
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_rooms_are_not_reassigned_to_a_neighbor_when_saved() {
+        assert_eq!(persisted_collapses(&[0, 1, 3, 99].into(), &[Some(0), None, Some(1), Some(2)]), vec![0, 2]);
+        assert!(persisted_collapses(&Default::default(), &[Some(0)]).is_empty());
+    }
+
+    #[test]
+    fn explicit_room_collapses_round_trip_through_the_saved_session() {
+        let state = serde_json::json!({"sessions": [{
+            "collapsed_rooms": persisted_collapses(&[0, 2, 4].into(),
+                &[Some(0), None, Some(1), Some(2), None]),
+            "remote_collapsed_rooms": ["mini:window:2"]
+        }]});
+        assert_eq!(App::saved_room_collapses(&state), (vec![0, 1], vec!["mini:window:2".into()]));
+    }
+}
+
 pub(super) fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
     obj.insert("surface_key".into(), serde_json::json!(kasa_mcp::surface_keys::ensure(surface)));
     if let Some(key) = kasa_mcp::remote::remote_surface_key(surface) {
@@ -193,6 +220,14 @@ impl App {
                 "active_window": new_active,
                 "undocked": undocked_json,
                 "room_body": room_body_json,
+                "collapsed_rooms": if i == self.active_session {
+                    persisted_collapses(&self.collapsed_windows, &persisted_idx)
+                } else { Vec::new() },
+                "remote_collapsed_rooms": if i == self.active_session {
+                    let mut keys: Vec<_> = self.info.navigation.collapsed_rooms.iter().cloned().collect();
+                    keys.sort();
+                    keys
+                } else { Vec::new() },
             }));
         }
         if sessions_json.is_empty() {

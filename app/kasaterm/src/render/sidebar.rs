@@ -28,6 +28,7 @@ pub(super) struct Rooms<'a> {
     pub expand: &'a [Option<Rect>],
     pub expand_t: &'a [f32],
     pub dots: &'a [Vec<[u8; 4]>],
+    pub summary: &'a [String],
     pub closes: &'a [(usize, Rect)],
 }
 
@@ -85,6 +86,7 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         expand: sb_expand,
         expand_t: sb_expand_t,
         dots: sb_dots,
+        summary: sb_summary,
         closes: sb_closes,
     } = *r;
     // 칼럼 바닥과 오른쪽 실선은 위 크롬 판에서 한 번에 칠했다.
@@ -151,6 +153,10 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
             .get(*i)
             .cloned()
             .unwrap_or_else(|| (format!("win {}", i + 1), String::new()));
+        let collapsed = sb_expand_t.get(*i).copied().unwrap_or(1.0) < 0.5;
+        let subtitle = if collapsed {
+            sb_summary.get(*i).filter(|text| !text.is_empty()).map_or(cwd.as_str(), String::as_str)
+        } else { cwd.as_str() };
         // 이름 왼쪽은 **상태 점 한 칸**이다. 예전엔 여기 터미널 글리프가
         // 있었는데 `tab_icon_glyph` 은 이름이 `.md` 로 끝날 때만 갈리고
         // 방 이름은 폴더명이라 그럴 일이 없어서, 모든 방이 같은 글리프를
@@ -272,7 +278,7 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         // 경로 줄이 서는가 — 아래 cwd 분기와 같은 조건이어야 한다.
         // 내부 방(설정·보드)은 경로가 없어 이름을 윗줄에 두면 카드 아래
         // 절반이 빈 상자로 남았다. 줄이 없으면 이름을 카드 가운데로.
-        let cwd_shown = !cwd.is_empty() && sb_dens.at_least_compact();
+        let cwd_shown = !subtitle.is_empty() && sb_dens.at_least_compact();
         let name_y = if cwd_shown {
             *ty + 11.0
         } else {
@@ -308,7 +314,7 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         // 가르지도 못하면서 이름과 자리만 다툰다. 그 폭에서는 아예 접고
         // 이름을 카드 가운데로 놓는다.
         if cwd_shown {
-            let cwd_txt = clip_px(g, &cwd, 11.0, false, cwd_budget);
+            let cwd_txt = clip_px(g, subtitle, 11.0, false, cwd_budget);
             g.draw_text(
                 text_x,
                 *ty + 30.0,

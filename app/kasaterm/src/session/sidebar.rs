@@ -1,7 +1,70 @@
 //! 사이드바 방 카드 — 카드 높이·스크롤 범위·배치 계산.
 use super::*;
 
+fn summarize_cells(cells: Vec<Vec<String>>, mut flags: impl FnMut(&str) -> (bool, bool)) -> String {
+    let (mut busy, mut attention) = (0, 0);
+    for cell in cells {
+        let (mut working, mut waiting) = (false, false);
+        for pid in cell {
+            let (b, a) = flags(&pid);
+            working |= b;
+            waiting |= a;
+        }
+        busy += usize::from(working);
+        attention += usize::from(waiting);
+    }
+    crate::sidebar_navigation::collapsed_summary(busy, attention)
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::summarize_cells;
+
+    #[test]
+    fn hidden_tabs_contribute_without_counting_a_cell_twice() {
+        let cells = vec![vec!["front".into(), "busy".into(), "busy".into(), "question".into()],
+            vec!["idle".into()], vec!["unread".into()]];
+        let summary = summarize_cells(cells, |id| (id == "busy", matches!(id, "question" | "unread")));
+        assert_eq!(summary, "작업 1 · 확인 2");
+    }
+
+    #[test]
+    fn empty_or_quiet_cells_do_not_claim_work_or_completion() {
+        assert_eq!(summarize_cells(vec![], |_| unreachable!()), "작업 0 · 확인 0");
+        assert_eq!(summarize_cells(vec![vec!["shell".into()]], |_| (false, false)), "작업 0 · 확인 0");
+    }
+}
+
 impl App {
+    pub(crate) fn has_expanded_rooms(&self) -> bool {
+        (0..self.windows.len()).any(|i| !self.collapsed_windows.contains(&i)
+            && self.internal_room_kind_at(i).is_none())
+    }
+
+    pub(crate) fn collapsed_room_summary(&self, room: usize) -> String {
+        let panes = self.window_leaves(room).into_iter().chain(self.room_undocked(room));
+        let cells = {
+            let ws = self.ws.lock().unwrap();
+            panes.map(|id| {
+                let mut pids: Vec<_> = ws.panes.get(&id).into_iter().flat_map(|p| p.tabs.iter())
+                    .filter_map(|tab| tab.pid.clone()).collect();
+                if !pids.contains(&id) { pids.push(id); }
+                pids
+            }).collect()
+        };
+        // A hidden tab can need an answer while the front tab is idle. Count its cell once.
+        summarize_cells(cells, |pid| {
+            let mut working = self.pane_activity.get(pid)
+                .is_some_and(|view| view.state.is_busy() || view.bg_active);
+            let mut waiting = self.pane_needs_you(pid) || self.unread_panes.contains(pid);
+            if let Some(state) = self.collab.hub.resolved(pid) {
+                working |= state.state.is_busy() || state.bg_active;
+                waiting |= state.state.needs_you() || !state.questions.is_empty();
+            }
+            (working, waiting)
+        })
+    }
+
     /// 방 카드 한 장의 치수 — `(body_h, list_h, hidden, undocked)`. 카드 전체 높이는
     /// `SIDEBAR_TAB_H + list_h` 이고, 접힌 방은 `list_h == 0` 이다.
     ///

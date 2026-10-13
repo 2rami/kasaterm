@@ -2173,6 +2173,10 @@ impl App {
         let sb_expand_t: Vec<f32> = (0..sb_labels.len())
             .map(|i| self.expand_progress(i))
             .collect();
+        let sb_summary: Vec<String> = (0..sb_labels.len()).map(|i| {
+            if self.collapsed_windows.contains(&i) { self.collapsed_room_summary(i) }
+            else { String::new() }
+        }).collect();
         let sb_row_drop: Option<(String, crate::DropZone, String)> = self
             .sidebar_row_drag
             .as_ref()
@@ -3735,6 +3739,7 @@ impl App {
                         expand: &sb_expand,
                         expand_t: &sb_expand_t,
                         dots: &sb_dots,
+                        summary: &sb_summary,
                         closes: &sb_closes,
                     },
                 );

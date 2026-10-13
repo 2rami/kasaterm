@@ -793,7 +793,7 @@ impl App {
             .filter(|idx| *idx != settings_idx)
             .map(remap)
             .collect();
-        self.expanded_windows = std::mem::take(&mut self.expanded_windows)
+        self.collapsed_windows = std::mem::take(&mut self.collapsed_windows)
             .into_iter()
             .filter(|idx| *idx != settings_idx)
             .map(remap)
