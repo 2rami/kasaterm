@@ -985,8 +985,8 @@ mod tests {
             "    - 미치루 수정이 오면, 이 수리까지 같이 반영할게요."]);
     }
 
-    /// 풀스크린 Claude 는 지난 줄을 앱 안에만 둔다. 원본보다 넓고 높은 칸에 다시 접으면 위가 비고, 같은
-    /// 크기나 좁은 칸은 채워진다 — 비는 칸만 원본 격자 그대로 키워 맞춘다(`layout.rs mirror_source_fit`).
+    /// 풀스크린 Claude 는 지난 줄을 앱 안에만 둔다. 원본보다 넓거나 높은 칸에 다시 접으면 위가 비고, 같은
+    /// 크기나 좁고 낮은 칸은 채워진다 — 비는 칸만 원본 격자 그대로 맞춘다(`layout.rs mirror_source_fit`).
     #[test]
     fn wider_taller_viewer_underfills_a_full_screen_agent() {
         let words = "문단은 원본 폭에서 접힌 긴 줄이라 넓은 칸에서는 다음 줄과 다시 이어진다".repeat(12);
@@ -1004,6 +1004,8 @@ mod tests {
         assert!(underfills(&source, cursor, 118, source.len()));
         assert!(!underfills(&source, cursor, 60, source.len()));
         assert!(!underfills(&source, cursor, 40, source.len()));
+        // 좁고 높은 칸(Info 를 열어 좁아진 칸) — 다시 접어도 위가 빈다. 이때는 줄여서 원본을 다 보인다.
+        assert!(underfills(&source, cursor, 50, source.len() * 2));
     }
 
     #[test]

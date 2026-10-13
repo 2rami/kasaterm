@@ -432,9 +432,10 @@ impl App {
         )
     }
 
-    /// 풀스크린(alt-screen) Claude·코덱스 거울을 다시 접지 않고 원본 격자 그대로 키워 맞춘 배율.
-    /// 풀스크린 앱은 지난 줄을 앱 안에만 두어, 원본보다 넓고 높은 칸에 다시 접으면 위를 채울 줄이
-    /// 없다(docs/mirror-render.md). 제 크기로 다시 접은 화면이 칸을 채우거나 키울 자리가 없으면 None.
+    /// 풀스크린(alt-screen) Claude·코덱스 거울을 다시 접지 않고 원본 격자 그대로 칸에 맞춘 배율.
+    /// 풀스크린 앱은 지난 줄을 앱 안에만 두어, 다시 접은 화면이 칸보다 짧으면 위를 채울 줄이 없다
+    /// (docs/mirror-render.md). 그때 원본보다 큰 칸은 키우고, 원본보다 좁은 칸은 줄여서라도 원본을 다
+    /// 보인다. 넓고 낮은 칸은 다시 접는 편이 글자가 커서 그대로 둔다. 다시 접은 화면이 칸을 채우면 None.
     pub(crate) fn mirror_source_fit(&self, ws: &Workspace, id: &str) -> Option<f32> {
         let pane = ws.panes.get(id)?;
         let pid = ws.active_tab_pid(id);
@@ -448,10 +449,10 @@ impl App {
         let usable = self.pane_body_px(ws, pane, id);
         let source = (term.cols.max(1), term.cells.len().max(1));
         let fit = (usable.0 / (source.0 as f32 * cw)).min(usable.1 / (source.1 as f32 * ch)) * 0.999;
-        if !fit.is_finite() || fit <= manual {
+        let view = ((usable.0 / (cw * manual)).floor() as u16, (usable.1 / (ch * manual)).floor() as u16);
+        if !fit.is_finite() || (fit <= manual && view.0 >= source.0) {
             return None;
         }
-        let view = ((usable.0 / (cw * manual)).floor() as u16, (usable.1 / (ch * manual)).floor() as u16);
         let key = [view.0, view.1, source.0, source.1 as u16];
         MIRROR_FIT.with(|cache| {
             let mut cache = cache.borrow_mut();
