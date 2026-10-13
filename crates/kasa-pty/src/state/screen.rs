@@ -213,8 +213,7 @@ impl PtySession {
     /// 절대 줄 `abs` 가 뷰포트 맨 위에 오도록 **한 번에** 이동한다.
     ///
     /// 좌표가 확정이라 정확히 닿는다 — 휠을 한 노치씩 쏘며 목표 텍스트가 화면에
-    /// 나타나는지 지켜보던 방식(mouse-tracking TUI 용 `sticky_seek`)과 달리
-    /// 되짚기가 없다. 반환값은 이동 뒤의 display offset.
+    /// 나타나는지 지켜보는 방식과 달리 되짚기가 없다. 반환값은 이동 뒤의 display offset.
     pub fn scroll_to_abs(&self, abs: i64) -> usize {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();

@@ -1194,32 +1194,6 @@ impl App {
             let _ = pty.send_bytes(payload.as_bytes());
         }
     }
-    /// sticky 클릭 seek 한 틱: 다음 노치가 필요하면 wheel-up SGR 을 그 pane 에
-    /// 쏘고 redraw 를 건다. 종료·대기 판정은 전부 render::sticky_seek_step 안에서.
-    /// about_to_wait 가 매 틱 호출한다.
-    pub(crate) fn run_pending_sticky_seek(&mut self) {
-        if let Some((pane, col, row, down)) = crate::render::sticky_seek_step() {
-            // 노치당 여러 줄 스크롤 — 1줄씩이라 너무 느렸다(사용자). 여러 번 쏴
-            // 체감 속도를 올린다. sticky_seek_step 의 reached 판정이 매 틱 화면을
-            // 확인하므로 목표가 뷰에 들면 즉시 멈춘다(약간의 overshoot 는 허용 —
-            // 한 화면 지나가도 프롬프트는 보인다).
-            let button = if down { 65 } else { 64 };
-            // 되짚는 동안 게이트를 열어 둔다. 이 노치는 `handle_wheel` 을 안 거치므로
-            // 표시를 여기서 직접 남긴다 — 안 남기면 화면이 움직이는 사이 안내 문구가
-            // 잠깐 사라질 때 게이트가 닫히고, 도착을 보는 눈(`note_sticky_view`)이
-            // 함께 감겨 목적지를 지나쳐 버린다.
-            crate::screenread::note_scroll_forwarded(&pane);
-            // 멀 때는 네 노치씩 성큼, **목적지가 보이기 시작하면 한 노치씩**. 끝까지
-            // 성큼 가면 그 줄을 훌쩍 지나쳐 「딱 붙는」 자리에 못 선다.
-            let notches = if crate::render::sticky_seek_near() { 1 } else { 4 };
-            for _ in 0..notches {
-                self.send_mouse_sgr(&pane, button, col, row, true);
-            }
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        }
-    }
     /// Resolve the user-visible label for a pane: OSC 0/2 title set
     /// by the shell or a TUI → foreground process comm → cwd. Used by
     /// both the per-pane header strip and the single-pane native
@@ -1474,14 +1448,6 @@ impl App {
         }
         self.pane_busy_check = Some(now);
         self.release_finished_agent_identities();
-        // 지난 프레임에 위로 스크롤돼 있던 pane 의 프롬프트 목록을 깊게 채운다.
-        // **표시를 비우면서** 가져간다 — 아래로 내린 pane 이 목록에 남아 있으면
-        // 틱마다 파일을 되짚게 된다. 계속 올려다보는 중이면 렌더가 다음 프레임에
-        // 다시 남기므로(틱보다 훨씬 잦다) 끊기지 않는다.
-        let want = std::mem::take(&mut *self.pane_deep_want.borrow_mut());
-        for id in want {
-            self.ensure_deep_prompts(&id);
-        }
         // 이사(agent-stop)로 학생을 내준 pane 의 sid 주장 걷기 — HTTP 핸들러는 App
         // 상태를 못 만져 큐로 넘긴다. 걷자마자 저장까지 해 둔다: 몇 초 안에 앱이
         // 꺼져도 낡은 주장이 leaf 에 안 남아, 재시작 복원이 남의 기계로 이사 간
@@ -1683,138 +1649,6 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-    }
-
-    /// 이 pane 에 **화면 밖에서 도는 일**이 있나 — `run_in_background` 셸·`Monitor`,
-    /// 그리고 아직 안 돌아온 **서브에이전트**.
-    ///
-    /// 서브에이전트를 같이 보는 이유: 세션 자체는 idle(스피너 없음)인데 Task 가 정보를
-    /// 모아 오는 동안, 화면에서 그 pane 이 **정말 노는 pane 과 구별되지 않았다**(사용자
-    /// 2026-08-11 제안). 표시는 이미 갈려 있다 — 도는 중은 쓸어가는 sweep, 이쪽은
-    /// 3초 숨쉬기 pulse(`render.rs` 의 `working_bar` vs `pulse_bar`).
-    ///
-    /// 답은 두 군데서 온다. **훅이 정본**이고(`kasaterm-agent-status.sh` 가 시작·종료를
-    /// 그 순간 밀어 넣는다), transcript 꼬리는 폴백이다 — 앱이 나중에 떠서 시작을 못 본
-    /// pane, Windows(python3 없어 훅이 안 도는 경우), 옛 세션이 그 폴백으로 산다.
-    /// 순서가 이 방향인 이유: 꼬리는 64KB 라 세션이 커지면 런치 기록이 밀려나 **오래
-    /// 기다리는 작업일수록 안 보였다**(실측: 3.8MB 7건 / 8.3MB·24MB 0건). 훅이 「있다」고
-    /// 하면 그것으로 판정이 끝난다.
-    ///
-    /// ⚠️ 다만 훅이 「있다」고 **곧장 빠져나가지는 않는다**. 같은 꼬리에서 sticky 띠의
-    /// 글감(마지막 프롬프트)도 함께 꺼내므로, 일찍 반환하면 **일하는 pane 일수록 그
-    /// 글감이 영영 안 채워진다** — 훅 없는 임시창에서만 띠가 뜨고 실사용 창에서는 안
-    /// 뜨는 어긋남이 그래서 났다(2026-08-30). 읽기는 mtime 게이트가 막고 있어 싸다.
-    fn pane_tail_state(&mut self, pane_id: &str, source_id: &str) -> (bool, bool) {
-        let hook_bg = self
-            .collab
-            .hook_activity
-            .lock()
-            .unwrap()
-            .get(pane_id)
-            .is_some_and(|a| !a.is_empty());
-        let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
-            let Some(sid) = self.pane_claude_sid.get(source_id).cloned() else {
-                return (hook_bg, false);
-            };
-            return self.pane_tail_state_for_sid(pane_id, &sid, hook_bg);
-        };
-        self.pane_tail_state_for_sid(pane_id, &sid, hook_bg)
-    }
-
-    fn pane_tail_state_for_sid(&mut self, pane_id: &str, sid: &str, hook_bg: bool) -> (bool, bool) {
-        let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
-            return (hook_bg, false);
-        };
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if let Some(mt) = mtime {
-            if let Some((cached_mt, cached, _, error)) = self.pane_bg_mtime.get(pane_id) {
-                if *cached_mt == mt {
-                    return (hook_bg || *cached, *error);
-                }
-            }
-        }
-        // 512KB — `collab_board`(socket.rs)와 **같은 값이어야 한다**. board 는 64KB
-        // 로는 런치가 대량 출력에 밀려 안 잡힌다는 걸 알고 진작 늘렸는데 이쪽만
-        // 64KB 로 남아, 같은 pane 을 두고 board 는 「서브에이전트 돌는 중」이라 하고
-        // 화면은 아무 표시도 안 하는 어긋남이 있었다(2026-08-11). 판정 재료가 다르면
-        // 판정도 다르다 — 두 벌을 둘 거면 최소한 창 크기는 맞춰 둔다.
-        let (tail, idle) = crate::socket::read_tail(&path, 512 * 1024);
-        let snap = crate::transcript::snapshot_from_tail(sid, &tail, idle);
-        let bg = !snap.background.is_empty() || !snap.subagents.is_empty();
-        let error = crate::transcript::latest_harness_error(&tail);
-        if let Some(mt) = mtime {
-            // 512KB 꼬리에서 나온 **빈 목록으로는 덮지 않는다.** 일하는 창은 도구
-            // 출력이 커서 그 창에 질문이 하나도 안 들어가고(2026-09-03 실측: 925KB
-            // 기록의 512KB 꼬리에서 0개, 전체에서 1개), 그대로 넣으면 스크롤 중에
-            // 깊게 읽어 채워 둔 목록이 **기록이 자랄 때마다** 빈 것으로 지워진다.
-            // 그러면 띠는 일하는 창에서만 안 뜨는데, 그 창이 바로 사람이 올려다보는
-            // 창이다.
-            //
-            // 한계: pane 이 다른 세션으로 갈아탔는데 새 기록의 꼬리에도 질문이 없으면
-            // 옛 목록이 잠시 남는다. 새 세션은 기록이 작아 꼬리가 곧 전체라 실제로는
-            // 거의 첫 질문에서 교체된다.
-            let fresh = crate::transcript::prompts_from_tail(&tail);
-            let prompts = match self.pane_bg_mtime.get(pane_id) {
-                Some((_, _, prev, _)) if fresh.is_empty() && !prev.is_empty() => prev.clone(),
-                _ => fresh,
-            };
-            self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg, prompts, error));
-        }
-        (hook_bg || bg, error)
-    }
-
-    /// 위로 스크롤한 pane 의 프롬프트 목록을 **깊은 꼬리**로 다시 채운다.
-    ///
-    /// `pane_bg_active` 가 채우는 목록은 512KB 꼬리에서 나온다. 그 크기는 헤더
-    /// 펄스바(백그라운드 작업 감지)에는 넉넉하지만 프롬프트에는 턱없다 — 도구
-    /// 출력 한 덩이가 1MB 를 넘는 일이 흔해서, 일하던 창은 그 창에 질문이 **하나**
-    /// 밖에 안 들어간다(2026-08-31 실측: 24MB 기록에서 0.5MB→1개, 8MB→26개).
-    /// 후보가 하나면 띠는 늘 그 하나를 그리고, 올려다보는 사람 눈에는 「엉뚱한
-    /// 질문이 붙는다」로 보인다.
-    ///
-    /// 그래서 스크롤 게이트가 열린 pane 에서만 부른다. transcript mtime 으로 잠가
-    /// 두므로 한 번 올려다보는 동안 8MB 읽기는 많아야 한 번이고, 스크롤을 안 하는
-    /// 평상시에는 아예 일어나지 않는다.
-    pub(crate) fn ensure_deep_prompts(&mut self, pane_id: &str) {
-        // 8MB. 위 실측에서 26개를 얻은 크기다. 더 키워도 얻는 질문 수는 완만하게
-        // 늘지만 읽기·파싱이 선형으로 는다.
-        const DEEP_BYTES: u64 = 8 * 1024 * 1024;
-        // 그 이상은 올려다봐도 못 닿는다. 캐시를 pane 마다 들고 있으므로 상한이
-        // 없으면 창 여럿에서 메모리가 그대로 는다.
-        const KEEP: usize = 24;
-        let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
-            return;
-        };
-        let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
-            return;
-        };
-        let Ok(mt) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
-            return;
-        };
-        if self.pane_deep_prompts.get(pane_id) == Some(&mt) {
-            return;
-        }
-        // 넣을 칸이 없으면 그냥 돌아간다 — `pane_bg_active` 가 아직 이 pane 을 안
-        // 훑었다는 뜻이고, mtime 만 적어 두면 다음부터 영영 건너뛰게 된다.
-        if !self.pane_bg_mtime.contains_key(pane_id) {
-            return;
-        }
-        let (tail, _) = crate::socket::read_tail(&path, DEEP_BYTES);
-        let mut prompts = crate::transcript::prompts_from_tail(&tail);
-        if prompts.len() > KEEP {
-            prompts.drain(..prompts.len() - KEEP);
-        }
-        self.pane_deep_prompts.insert(pane_id.to_string(), mt);
-        if let Some(slot) = self.pane_bg_mtime.get_mut(pane_id) {
-            slot.2 = prompts;
-        }
-    }
-
-    /// 그 pane 에서 사람이 친 프롬프트들(오래된 것부터). 스크롤 sticky 띠의 글감 —
-    /// claude 가 그 행을 더 이상 그려 주지 않으므로 kasaterm 이 직접 채운다.
-    /// `pane_bg_active` 가 같은 tail 에서 채워 둔 캐시를 읽기만 한다(무IO).
-    pub(crate) fn pane_prompts(&self, pane_id: &str) -> &[(String, Vec<String>)] {
-        self.pane_bg_mtime.get(pane_id).map_or(&[], |(_, _, p, _)| p.as_slice())
     }
 
     /// 커서가 멎은 `[Image #N]` 참조를 받아 툴팁 상태를 옮기고, 이번 프레임에
@@ -3085,35 +2919,14 @@ impl App {
         }
         // 마우스를 받는 앱이라도 **본화면(non-alt)에 그리는 앱이면 휠을 넘기지
         // 않는다.** 넘기면 그 앱이 자기 버퍼를 굴리고 터미널 스크롤백(alacritty
-        // display_offset)은 0 에 머무는데, 우리 대화 턴 헤더는 그 값이 0 이 아닐
-        // 때만 뜬다(`TurnJump::header`) — 즉 넘기는 순간 헤더가 통째로 죽는다.
-        //
-        // claude 가 정확히 그 경우다. 본화면 렌더러(`tui: "default"`)로 돌면서
-        // 마우스를 켜므로 휠이 전부 그쪽으로 갔고, 그래서 「올려다볼 때 위에 붙는
-        // 질문 띠」가 안 떴다(2026-08-29 지적: "스크롤조금올리면 위에 고정돼서
-        // 클릭하면 올라가고내려가고 그거 왜 안되지"). 스크롤백에 같은 내용이 그대로
-        // 쌓여 있으니 터미널이 굴리는 편이 사용자에게 손해가 없고, 헤더는 절대 줄
-        // 번호를 알아 한 번에 그 질문 자리로 간다.
+        // display_offset)은 0 에 머문다. 본화면 렌더러(`tui: "default"`)로 도는 claude 가
+        // 그 경우인데, 스크롤백에 같은 내용이 그대로 쌓여 있으니 터미널이 굴리는 편이
+        // 사람에게 손해가 없다(2026-08-29).
         //
         // alt-screen 앱(vim·htop)은 그대로 넘긴다 — 그쪽은 터미널 스크롤백이 아예
         // 없어서 우리가 굴릴 것이 없다.
-        if std::env::var_os("KASATERM_TURN_DEBUG").is_some() {
+        if wdbg {
             eprintln!("[wheel] alt={alt} mouse_on={mouse_on} sgr={mouse_sgr} lines={lines}");
-        }
-        // 대체화면 앱으로 **위쪽 스크롤을 넘긴다**는 사실을 적어 둔다. 아래 두 갈래
-        // (SGR·PageUp)가 모두 그 길이라 여기서 한 번에 적는다.
-        //
-        // 두 가지가 여기 걸려 있다. ①띠 게이트가 화면 안내(`Jump to bottom`)를
-        // 기다리는 동안의 빈틈을 이 표시가 메운다 — claude 는 굴린 뒤 정착하고 나서야
-        // 그 줄을 그려서, 안내만 보면 「조금 올렸을 때」를 통째로 놓친다. ②띠에 쓸
-        // 질문 목록을 **미리** 깊게 읽는다. 게이트가 열린 뒤에 예약하면 그 프레임엔
-        // 목록이 비어(얕은 꼬리에는 일하는 창의 질문이 하나도 안 들어간다) 띠가 한
-        // 박자 늦거나, 그 사이 화면이 더 움직여 엉뚱한 턴을 문다.
-        if alt && lines > 0 {
-            if let Some(id) = target_pane_id.as_deref() {
-                crate::screenread::note_scroll_forwarded(id);
-                self.pane_deep_want.borrow_mut().insert(id.to_string());
-            }
         }
         if mouse_on && mouse_sgr && alt {
             let (col, row) = self
@@ -3553,32 +3366,21 @@ impl App {
     /// 지금 pane 이 스크롤백을 보고 있으면 살아 있는 끝으로 되돌린다.
     /// 이미 끝에 있으면 아무 일도 안 한다(공짜 질의라 매번 물어도 된다).
     fn follow_live_tail_now(&mut self) {
-        let Some(id) = self.target_surface() else { return };
-        self.follow_live_tail_at(&id);
-    }
-
-    /// 그 pane 의 **터미널 스크롤백**을 살아 있는 끝으로 되돌렸나.
-    ///
-    /// `false` 는 「되돌릴 스크롤백이 없다」는 뜻이고, 그것이 곧 **대체화면 claude**
-    /// 다 — 그쪽은 스크롤을 자기가 쥐고 있어 파서 offset 이 늘 0 이라, 맨 아래로
-    /// 가려면 휠을 넘겨 주는 길(`begin_sticky_bottom`)밖에 없다. 모드를 바꿔
-    /// 통일하지 않는 이유는 `TurnHit::SeekBottom` 주석에 적었다.
-    pub(crate) fn follow_live_tail_at(&mut self, pane: &str) -> bool {
-        // 거울 스크롤 기억과 턴 목적지는 **백엔드 pid** 로 적힌다(`handle_wheel`·
+        let Some(pane) = self.target_surface() else { return };
+        // 거울 스크롤 기억과 거울 이동 목적지는 **백엔드 pid** 로 적힌다(`handle_wheel`·
         // `jump_mirror_abs`). 바깥 pane id 로만 지우면 탭이 있는 pane 에서 기억이
         // 남아, 끝으로 왔는데도 다음 프레임이 다시 옛 자리로 끌어올린다.
-        let pid = self.ws.lock().map(|ws| ws.active_tab_pid(pane)).unwrap_or_else(|_| pane.into());
-        for key in [pane, pid.as_str()] {
+        let pid = self.ws.lock().map(|ws| ws.active_tab_pid(&pane)).unwrap_or_else(|_| pane.clone());
+        for key in [pane.as_str(), pid.as_str()] {
             self.mirror_view_scroll.remove(key);
             self.turn.clear_mirror_target(key);
         }
-        let Some(sess) = self.pty_for_pane(pane) else { return false };
+        let Some(sess) = self.pty_for_pane(&pane) else { return };
         if sess.view_state().0 == 0 {
-            return false;
+            return;
         }
         sess.scroll_to_bottom();
         self.chrome_dirty = true;
-        true
     }
 
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {

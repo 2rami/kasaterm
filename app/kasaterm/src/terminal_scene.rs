@@ -513,7 +513,6 @@ impl App {
                 0.0,
                 1.0,
                 false,
-                &Default::default(),
             );
             ready.push((id, raw, source_key, context, composition));
         }
@@ -580,31 +579,6 @@ impl App {
     }
 }
 
-/// 띠 한 줄: 자리(x·y·w·h) · 글 · pane id · ↑ · ↓ · ↡(맨 아래로) 의 클릭 rect.
-pub(crate) type StickySlot = (
-    f32,
-    f32,
-    f32,
-    f32,
-    String,
-    String,
-    Option<(f32, f32, f32, f32)>,
-    Option<(f32, f32, f32, f32)>,
-    Option<(f32, f32, f32, f32)>,
-);
-/// 헤더 한 줄: pane id · 바 전체 · ↑ · ↓ · ↡ · 그린 내용.
-pub(crate) type TurnSlot = (
-    String,
-    (f32, f32, f32, f32),
-    Option<(f32, f32, f32, f32)>,
-    Option<(f32, f32, f32, f32)>,
-    Option<(f32, f32, f32, f32)>,
-    crate::turnjump::TurnHeader,
-);
-
-
-
-
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
     pub(crate) animated_cells: bool,
@@ -618,8 +592,6 @@ pub(crate) struct TerminalComposition {
     pub(crate) schale_logo_slots: Vec<(f32, f32, f32, f32)>,
     pub(crate) title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])>,
     pub(crate) status_model_icons: Vec<StatusModelIconSlot>,
-    pub(crate) sticky_pill_slots: Vec<StickySlot>,
-    pub(crate) turn_header_slots: Vec<TurnSlot>,
     pub(crate) view_shifts: Vec<(String, crate::PaneViewShift)>,
     pub(crate) tip_hit: Option<(String, u32, (f32, f32, f32, f32))>,
     pub(crate) agents_view_panes: std::collections::HashSet<String>,
@@ -918,7 +890,6 @@ impl App {
         body_top: f32,
         font_scale: f32,
         desktop_view: bool,
-        turn_headers: &std::collections::HashMap<String, crate::turnjump::TurnHeader>,
     ) -> TerminalComposition {
         // The parser always follows the source's canonical screen. Only this
         // viewer's presentation is reflowed, at its own unchanged font size.
@@ -1000,8 +971,6 @@ impl App {
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Default::default();
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Default::default();
         let mut status_model_icons: Vec<StatusModelIconSlot> = Default::default();
-        let mut sticky_pill_slots: Vec<StickySlot> = Default::default();
-        let mut turn_header_slots: Vec<TurnSlot> = Default::default();
         let mut view_shifts: Vec<(String, crate::PaneViewShift)> = Default::default();
         let mut tip_hit: Option<(String, u32, (f32, f32, f32, f32))> = Default::default();
         let mut agents_view_panes: std::collections::HashSet<String> = Default::default();
@@ -1194,237 +1163,6 @@ impl App {
                         ));
                     }
                 }
-            }
-        }
-        // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. mouse-tracking
-        // 중이라 뷰포트 스크롤 여부를 직접 못 안다 — "Jump to bottom" 힌트로
-        // 게이트한다(find_sticky_prompt). 감지 행 셀은 스냅샷에서 blank 처리해
-        // 원본 흐릿한 텍스트를 지우고, 그 자리에 pill 을 얹는다. 클릭 rect 는
-        // 아래 chrome 패스에서 STICKY_PILLS 로 mouse handler 에 넘긴다.
-        //
-        // pill 은 **프롬프트 띠 재도색과 같은 테마 스타일**로 칠한다 — 흰
-        // pill 은 없애기로 했다(사용자 2026-08-19: "흰색없애기로했었는데 클릭은
-        // 되게하면서"). 08-15 재도색이 흰 pill 을 덮으면서 pill 이 박아 둔
-        // 검은 글자만 남아 줄이 통째로 안 보였는데, 그 답은 흰색 복원이
-        // 아니라 pill 자체를 테마 띠로 그리는 것이다. 클릭 rect·↑↓·seek 는
-        // 색과 무관하게 그대로 산다.
-        //
-        // 재도색 스캔은 이 행을 건너뛴다 — pill 이 여기서 fg 까지 완성하므로
-        // (재도색은 fg 를 ❯ 만 만진다) 다시 칠하면 이 선명화가 무너진다.
-        let mut sticky_pill_row: Option<usize> = None;
-        // 게이트를 먼저 본다. 열렸을 때만 프롬프트 목록을 깊게 다시 읽게
-        // 표시를 남긴다 — 512KB 꼬리에는 일하던 창의 질문이 하나밖에 안
-        // 들어가서, 그대로 두면 띠가 늘 그 하나를 그린다. 평상시(닫힌
-        // 게이트)에는 이 줄에서 끝나므로 매 프레임 비용은 종전과 같다.
-        // 화면 안내가 정본이고, 방금 우리가 넘긴 위쪽 스크롤이 그것이 그려지기
-        // 전까지의 빈틈을 메운다(`scroll_forwarded_recently` 주석 참조).
-        let scrolled = crate::screenread::scrolled_gate(&composed)
-            || (desktop_view && crate::screenread::scroll_forwarded_recently(id.as_str()));
-        let web_sticky =
-            std::cell::RefCell::new(std::collections::HashMap::<String, String>::new());
-        let sticky_turn = if desktop_view {
-            &self.pane_sticky_turn
-        } else {
-            &web_sticky
-        };
-        if scrolled && desktop_view {
-            // seek 이 「더 올라갈 데가 없다」를 알아채려면 화면이 움직였는지를
-            // 알아야 한다 — 그 유일한 단서를 여기서 적는다.
-            crate::screenread::note_sticky_view(id.as_str(), &composed);
-            self.pane_deep_want.borrow_mut().insert(id.to_string());
-        } else {
-            // 맨 아래로 돌아왔으면 기억을 버린다 — 다음에 올려다볼 때는
-            // 그때 본 머리줄로 새로 확정해야 한다.
-            sticky_turn.borrow_mut().remove(id.as_str());
-        }
-        let sticky = scrolled.then(|| {
-            let mut memo = sticky_turn.borrow_mut();
-            let slot = memo.entry(id.to_string()).or_default();
-            let mut cur = (!slot.is_empty()).then(|| slot.clone());
-            let got = find_sticky_prompt(&composed, self.pane_prompts(id.as_str()), &mut cur);
-            *slot = cur.unwrap_or_default();
-            got
-        });
-        // 목적지에 도착했으면 띠를 감춘다 — 실물이 화면에 있으면 띠는 할
-        // 일을 마쳤고, 같은 문장이 두 번 뜨면 어느 쪽이 지금 자리인지 되레
-        // 헷갈린다(2026-09-05 지시: 「길잡이 띠 없이 코덱스처럼 딱 붙게」).
-        // 띠가 빠지면 그 줄이 화면 맨 위에 딱 붙는다.
-        let sticky = sticky
-            .flatten()
-            .filter(|s| !crate::screenread::sticky_prompt_visible_below(&composed, s.row, &s.text));
-        if let Some(sticky) = sticky {
-            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-            let scw = self.cell.w * fs;
-            let sch = self.cell.h * fs;
-            let ncols = composed.get(sticky.row).map_or(0, |r| r.len());
-            sticky_pill_row = Some(sticky.row);
-            // 흰 배경 pill 을 pane 양끝(col 0..ncols)까지 채운다(사용자: "흰색
-            // 바탕 pane 양끝으로 다 채워"). 클릭 rect 도 행 전체 폭 — 흰 바탕
-            // 어디를 눌러도 seek(begin_sticky_seek)가 걸린다.
-            let px = body_left;
-            let py = body_top + sticky.row as f32 * sch;
-            let arrow_rect = |c: usize| {
-                // 한 칸은 손가락으로 누르기 좁다 — 좌우 반 칸씩 넓혀 잡는다.
-                (px + c as f32 * scw - scw * 0.5, py, scw * 2.0, sch)
-            };
-            let arrows = crate::turnjump::sticky_arrow_cols(ncols);
-            sticky_pill_slots.push((
-                px,
-                py,
-                ncols as f32 * scw,
-                sch,
-                sticky.text.clone(),
-                id.clone(),
-                arrows.up.map(arrow_rect),
-                arrows.down.map(arrow_rect),
-                arrows.bottom.map(arrow_rect),
-            ));
-            if let Some(row) = composed.get_mut(sticky.row) {
-                // 원본 셀(등폭 그리드)을 지우지 않고 그 자리에서 선명화만
-                // 한다 — draw_text(proportional)로 다시 그리던 옛 방식은
-                // 한글 wide glyph 를 ink 폭으로 tighten 해 자간이 어긋났다
-                // (사용자: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭이라
-                // 폭·자간이 원본과 정확히 일치한다.
-                //
-                // 색은 프롬프트 띠 재도색과 **같은 공식**(테마 배경에 학생
-                // accent 를 살짝 섞은 fill + accent ❯) — sticky 는 「내가
-                // 친 프롬프트 줄」의 대리이니 같은 시각 언어여야 하고, 흰
-                // pill 은 없애기로 했다(위 주석). 본문 글자만 테마 텍스트색
-                // 으로 밝힌다 — claude 원본은 흐릿한 회색이라 띠 위에서
-                // 안 읽힌다. ↑↓(앞뒤 질문 건너뛰기)는 accent 로 세워 이
-                // 줄이 일반 띠가 아니라 조작 가능한 pill 임을 말한다.
-                // ⚠️`pane.character` 로 폴백하지 마라 — 그 필드는 매 화면
-                // 업데이트마다 `ws.pane_character` 를 **날것으로 복사**한
-                // 것이라(session.rs), 폴백하는 순간 바로 윗줄에서 지난
-                // 관문이 무효가 된다(2026-08-22). 셸 pane 에 남의 학생색이
-                // 둘리면 「저기 누가 있다」로 잘못 읽힌다(pane_accent 주석).
-                let accent = self
-                    .display_tab_char(&ws, &tab_pid)
-                    .as_deref()
-                    .and_then(|n| {
-                        theme::character_accent_n(
-                            n,
-                            theme::character_ordinal(&ws.pane_character, &tab_pid),
-                        )
-                    })
-                    .unwrap_or_else(|| theme::accent_color(theme::accent_name()));
-                let base = theme::pane_bg();
-                let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
-                let amount = if light { 0.10 } else { 0.18 };
-                let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
-                let text = theme::text();
-                let arrows = crate::turnjump::sticky_arrow_cols(row.len());
-                let (up_col, down_col, bottom_col) = (arrows.up, arrows.down, arrows.bottom);
-                // 그 질문 줄이 화면에 그려져 있으면 **셀을 그대로 옮긴다.**
-                // 눌러서 그 줄이 맨 위에 서면 띠와 본문이 같은 그림이라 딱
-                // 겹친다(2026-09-03 지시: 「코덱스처럼 딱붙게 클로드도」).
-                // 다시 칠하면 같은 질문이 두 모양으로 보인다.
-                if let Some(src) = &sticky.cells {
-                    let blank = kasa_bridge::screen::Cell::blank();
-                    for c in row.iter_mut() {
-                        *c = blank.clone();
-                    }
-                    for (dst, s) in row.iter_mut().zip(src.iter()) {
-                        *dst = s.clone();
-                    }
-                    // 화살표는 그 칸 배경을 그대로 두고 글자만 얹는다.
-                    // ↡ = 맨 아래로(라이브 바닥). 띠가 떠 있다는 것 자체가 스크롤이
-                    // 올라가 있다는 뜻이라 늘 갈 곳이 있다.
-                    for (at, ch) in
-                        [(up_col, '\u{2191}'), (down_col, '\u{2193}'), (bottom_col, '\u{21A1}')]
-                    {
-                        if let Some(i) = at {
-                            if let Some(c) = row.get_mut(i) {
-                                c.ch = ch;
-                                c.fg = kasa_bridge::screen::Color::Rgb(
-                                    accent[0], accent[1], accent[2],
-                                );
-                                c.bold = true;
-                                c.dim = false;
-                            }
-                        }
-                    }
-                } else {
-                    // 질문이 화면 밖이라 옮겨 올 셀이 없다 — 그때만 우리가 칠한다.
-                    use unicode_width::UnicodeWidthChar;
-                    let room = up_col.unwrap_or(row.len()).saturating_sub(2);
-                    for cell in row.iter_mut() {
-                        cell.ch = ' ';
-                    }
-                    let mut w = 1usize; // 왼쪽 한 칸 들여쓴다
-                    for ch in format!("\u{276f} {}", sticky.text).chars() {
-                        let cw = ch.width().unwrap_or(1).max(1);
-                        if w + cw > room {
-                            break;
-                        }
-                        row[w].ch = ch;
-                        // wide 글리프의 뒤칸은 **공백 셀**로 둔다 — 이 레포의
-                        // 셀 표현 관례다(`paint_header_row` 와 같은 모양).
-                        if cw == 2 {
-                            row[w + 1].ch = ' ';
-                        }
-                        w += cw;
-                    }
-                    for (i, cell) in row.iter_mut().enumerate() {
-                        cell.dim = false;
-                        cell.inverse = false;
-                        cell.bg = fill.clone();
-                        let is_arrow =
-                            [up_col, down_col, bottom_col].iter().any(|c| *c == Some(i));
-                        cell.fg = if cell.ch == '\u{276f}' || is_arrow {
-                            kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
-                        } else {
-                            kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
-                        };
-                        if Some(i) == up_col {
-                            cell.ch = '\u{2191}';
-                            cell.bold = true;
-                            continue;
-                        }
-                        if Some(i) == down_col {
-                            cell.ch = '\u{2193}';
-                            cell.bold = true;
-                            continue;
-                        }
-                        if Some(i) == bottom_col {
-                            cell.ch = '\u{21A1}';
-                            cell.bold = true;
-                        }
-                    }
-                }
-            }
-        }
-        // 대화 턴 헤더 — 터미널 스크롤백을 올려다볼 때만 첫 행을 덮어쓴다.
-        // 라이브 바닥이면 `turn_headers` 에 항목 자체가 없어서 평소 화면은
-        // 손대지 않는다. 바로 위 sticky pill 과 자리를 다툴 일은 없다 —
-        // 저쪽은 claude 가 **자기 버퍼를** 스크롤할 때뿐이고, 그때 터미널
-        // 쪽 offset 은 0 이라 이 헤더가 아예 안 뜬다.
-        if let Some(h) = turn_headers.get(id.as_str()) {
-            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-            let (hcw, hch) = (self.cell.w * fs, self.cell.h * fs);
-            if let Some(row) = composed.get_mut(0) {
-                let cols = crate::turnjump::paint_header_row(row, h);
-                if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
-                    crate::turnjump::localize_mirror_header(row, theme::surface());
-                }
-                let rect_at = |c: usize| {
-                    // 화살표 한 칸은 손가락으로 누르기엔 좁다 — 좌우로 반 칸씩
-                    // 넓혀 잡는다. 그래도 서로 두 칸 떨어져 있어 안 겹친다.
-                    (
-                        body_left + c as f32 * hcw - hcw * 0.5,
-                        body_top,
-                        hcw * 2.0,
-                        hch,
-                    )
-                };
-                turn_header_slots.push((
-                    id.clone(),
-                    (body_left, body_top, cols_now as f32 * hcw, hch),
-                    cols.up.map(rect_at),
-                    cols.down.map(rect_at),
-                    cols.bottom.map(rect_at),
-                    h.clone(),
-                ));
             }
         }
         // agents 목록 뷰 판정. 목록 뷰면 아래 학생 스프라이트(배너·스피너·
@@ -2345,11 +2083,6 @@ impl App {
             let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
             let mut r = 0;
             while r < composed.len() {
-                // sticky pill 행은 재도색 금지 — 위 sticky 블록 주석 참고.
-                if Some(r) == sticky_pill_row {
-                    r += 1;
-                    continue;
-                }
                 let Some(band) = user_prompt_band(&composed[r]) else {
                     r += 1;
                     continue;
@@ -2375,8 +2108,6 @@ impl App {
             schale_logo_slots,
             title_outline_slots,
             status_model_icons,
-            sticky_pill_slots,
-            turn_header_slots,
             view_shifts,
             tip_hit,
             agents_view_panes,

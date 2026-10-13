@@ -523,7 +523,6 @@ impl App {
                         cell_top,
                         font_scale,
                         true,
-                        &HashMap::new(),
                     )
                 })
             });

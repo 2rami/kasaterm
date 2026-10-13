@@ -3143,7 +3143,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_auto_pane_merge();
         self.arm_autoopen();
         self.arm_autoconfirm();
-        self.arm_autoturnclick();
         self.arm_autonav();
         self.schedule_autoquit();
     }
@@ -4729,8 +4728,8 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     // 웹 pane 주소창 편집 중 그 pill 밖을 누르면 blur(취소).
                     // git 커밋 칸과 같은 규칙 — 클릭은 이후 제 몫을 계속한다.
-                    // **가장 이른 Pressed 블록에 둔다** — 아래 sticky pill·설정
-                    // 버튼처럼 자기 일만 하고 return 하는 경로 뒤에 두면, 그리로
+                    // **가장 이른 Pressed 블록에 둔다** — 아래 설정 버튼처럼
+                    // 자기 일만 하고 return 하는 경로 뒤에 두면, 그리로
                     // 나간 클릭이 blur 를 건너뛰어 보이지 않는 편집이 키보드를
                     // 계속 삼킨다(리뷰 지적). pill 자기 클릭은 pane_action_hits
                     // 매칭이 편집 유지로 처리한다.
@@ -4766,52 +4765,6 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // 풀스크린 claude 칸 오른쪽 여백의 스크롤바·프롬프트 눈금(prompt_nav.rs).
                     if self.prompt_nav_press(cx, cy) {
-                        window.request_redraw();
-                        return;
-                    }
-                    // 대화 턴 헤더 클릭 — 바는 그 질문 자리로, ↑↓ 는 앞뒤 질문으로.
-                    // SGR 전달보다 먼저 잡아 클릭이 pane 안 TUI 로 새지 않게 한다.
-                    if self.turn_header_click(cx, cy) {
-                        window.request_redraw();
-                        return;
-                    }
-                    // Claude Code 스크롤 sticky prompt pill 클릭 → 그 프롬프트가
-                    // 화면에 들어올 때까지 위로 스크롤. mouse-tracking TUI 라 정확한
-                    // 오프셋은 모르지만, 화면에 프롬프트 행이 나타났는지는 kasaterm 이
-                    // 직접 본다 — 클릭 텍스트를 target 으로 잡고 about_to_wait 가 매 틱
-                    // wheel-up 한 노치씩 보내며 관찰(begin_sticky_seek → sticky_seek_step).
-                    // pane_takes_mouse SGR 전달보다 먼저 잡아 클릭이 Claude Code 로
-                    // 새지 않게 한다.
-                    if let Some((pane_id, target)) = crate::render::STICKY_PILLS.with(|s| {
-                        s.borrow()
-                            .iter()
-                            .find(|(_, r, _)| hit(*r))
-                            .map(|(id, _, text)| (id.clone(), text.clone()))
-                    }) {
-                        if self.jump_mirror_prompt(&pane_id, &target, None) {
-                            window.request_redraw();
-                            return;
-                        }
-                        // claude 안의 mod 가 있으면 지금 턴의 질문 자리로 곧장 — 휠로 되짚지 않는다.
-                        if self.prompt_nav_current(&pane_id).is_some_and(|i| {
-                            self.prompt_nav_request(&pane_id, crate::prompt_nav::NavOp::Prompt(i))
-                        }) {
-                            window.request_redraw();
-                            return;
-                        }
-                        // wheel 을 쏠 pane-local 셀 = 클릭 지점(그 pane 안이므로 안전).
-                        let cell = self
-                            .px_to_pane_cell(cx, cy)
-                            .map(|(_, c, r)| (c, r))
-                            .unwrap_or((1, 1));
-                        // 바 본체 = **지금 띠에 뜬 그 질문 자리로**. 앞뒤로 옮기는 것은
-                        // 화살표 몫이다 — 바에까지 「앞 질문」을 물리면 한 턴을 더 올라가고,
-                        // 그 앞 질문이 화면에 안 나타나면 최상단까지 굴러간다(2026-09-03
-                        // 지적: 「둘째질문누르면 맨위로가는데」). 스크롤백을 쥔 창에서
-                        // 바가 `TurnHit::Jump` 로 그 줄에 서는 것과 같은 뜻이어야, 두 창이
-                        // 같은 기능으로 읽힌다.
-                        let want = Some(target.clone());
-                        crate::render::begin_sticky_seek(pane_id, target, cell, false, want);
                         window.request_redraw();
                         return;
                     }
@@ -7942,10 +7895,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_auto_pane_merge();
         self.run_pending_autowheel();
         self.run_pending_autocloseburst();
-        self.run_pending_sticky_seek();
         self.pump_prompt_nav();
         self.run_pending_autonav();
-        self.run_pending_autoturnclick();
         self.run_pending_autotoggle();
         self.run_pending_autochat();
         self.run_pending_autotabs();
@@ -8092,9 +8043,6 @@ impl ApplicationHandler<UserEvent> for App {
             if crate::testkit::autoundock_pending() {
                 why.push("autoundock");
             }
-            if crate::render::sticky_seek_active() {
-                why.push("sticky_seek");
-            }
             if !self.window_alert.is_empty() {
                 why.push("window_alert");
             }
@@ -8180,9 +8128,6 @@ impl ApplicationHandler<UserEvent> for App {
             || crate::testkit::mdscript_pending()
             // 별도창 하네스의 undock·캡처·dock 단계도 틱이 이어져야 발화한다.
             || crate::testkit::autoundock_pending()
-            // sticky 클릭 seek 이 도는 동안엔 스크롤이 목표 프롬프트에 닿을 때까지
-            // 프레임을 펌프해야 노치가 계속 나가고 화면 관찰이 이어진다.
-            || crate::render::sticky_seek_active()
             // 못 본 알림이 있는 방 탭은 숨쉰다 — 그 호흡이 이어지려면 프레임이
             // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()

@@ -5365,51 +5365,6 @@ struct App {
     /// 죽었다("하다가 계정전환하니까 너가 없어졌어"). 연속으로 조용한 시간을 재서
     /// 그 틈을 건너뛴다.
     pane_account_quiet_since: HashMap<String, Instant>,
-    /// pane id → (transcript mtime, bg_active, (질문, 그 답변 줄들) 목록) — an
-    /// mtime-gated cache for the header pulse bar. An idle pane's transcript
-    /// rarely changes, so the bar's "background/Monitor running" check reads the
-    /// tail only when mtime moves.
-    ///
-    /// 프롬프트를 함께 담는 이유: 스크롤 sticky 띠가 claude 화면에서 읽어 오던
-    /// 프롬프트 행이 사라져(2026-08-30 실측: 스크롤해도 최상단 행이 빈 채로 온다)
-    /// 띠의 글감이 없어졌다. 같은 tail 을 이미 읽고 있으므로 여기서 함께 꺼내면
-    /// 추가 IO 없이 kasaterm 이 그 띠를 직접 그릴 수 있다.
-    pane_bg_mtime: HashMap<
-        String,
-        (
-            std::time::SystemTime,
-            bool,
-            Vec<(String, Vec<String>)>,
-            bool,
-        ),
-    >,
-    /// pane id → 그 pane 의 프롬프트 목록을 **깊게** 읽어 둔 transcript mtime.
-    ///
-    /// `pane_bg_mtime` 이 담는 목록은 512KB 꼬리에서 나온다. 일하는 pane 은 도구
-    /// 출력 하나가 1MB 를 넘어서, 그 창에는 질문이 **한 개**밖에 안 들어간다
-    /// (2026-08-31 실측: 24MB 기록에서 0.5MB→1개, 8MB→26개). 후보가 하나뿐이면
-    /// 스크롤 띠는 무엇을 골라도 늘 그 하나라 「엉뚱한 질문이 붙는다」가 된다.
-    ///
-    /// 그렇다고 늘 8MB 를 읽을 수는 없다 — 이 캐시는 pane 마다, transcript 가
-    /// 바뀔 때마다 갱신되므로 창 열두 개면 틱마다 100MB 를 읽게 된다. 그래서
-    /// **위로 스크롤한 pane 에서만** 깊게 다시 읽고 그 mtime 을 여기 적어 둔다.
-    pane_deep_prompts: HashMap<String, std::time::SystemTime>,
-    /// 이번 프레임에 **위로 스크롤돼 있던** pane 들. 렌더는 ws 락을 쥔 채 도는
-    /// `&self` 자리라 `&mut self` 를 못 부른다 — 표시만 남기고, 실제 깊은 읽기는
-    /// 다음 틱(`refresh_pane_activity`)이 한다. 한 프레임 늦지만 스크롤은 사람이
-    /// 붙들고 있는 상태라 눈에 안 띈다.
-    pane_deep_want: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// pane id → 올려다보는 동안 **마지막으로 확정한** 질문.
-    ///
-    /// 띠는 화면에 보이는 `❯ 질문` 머리줄로 어느 턴인지 확정한다. 긴 답변 한가운데를
-    /// 보고 있으면 그 머리줄이 화면 밖이라 확정할 재료가 없어지는데, 거기서 짐작으로
-    /// 떨어지면 엉뚱한 질문이 붙는다. 스크롤은 한 번에 몇 줄씩만 움직이고 claude 는
-    /// 그때마다 화면을 다시 그리므로 머리줄이 뷰포트를 가로지르는 장면을 우리가 반드시
-    /// 본다 — 그때 갱신해 두면 파묻힌 자리에서도 답이 정확하다.
-    ///
-    /// 맨 아래로 돌아가면(스크롤 게이트가 닫히면) 버린다. 렌더가 `&self` 자리라
-    /// RefCell 이다.
-    pane_sticky_turn: std::cell::RefCell<std::collections::HashMap<String, String>>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -5854,7 +5809,7 @@ struct App {
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
     statusbar: state::StatusbarState,
-    /// 대화 턴 헤더의 pane 별 앵커 캐시. 본체는 turnjump.rs — 여기 필드 한 줄만
+    /// 거울 칸의 질문 자리 이동 목적지. 본체는 turnjump.rs — 여기 필드 한 줄만
     /// 두는 것도 statusbar 와 같은 이유다(CLAUDE.md 병렬 규칙).
     turn: turnjump::TurnJump,
     /// Last `refresh_pane_cwds` sweep — rate-limits the lsof calls.
@@ -6308,10 +6263,6 @@ impl App {
             pane_plus_rects: Vec::new(),
             pane_busy_check: None,
             pane_account_quiet_since: HashMap::new(),
-            pane_bg_mtime: HashMap::new(),
-            pane_deep_prompts: HashMap::new(),
-            pane_deep_want: Default::default(),
-            pane_sticky_turn: Default::default(),
             window_tab_rects: Vec::new(),
             close_freeze: CloseFreeze::default(),
             sidebar_row_rects: Vec::new(),
@@ -6885,207 +6836,6 @@ mod tests {
         let base: Vec<Vec<GridCell>> = (0..3).map(|i| grid_row(&format!("b{i}"), W)).collect();
         let view = PaneViewShift::default().compose(&base);
         assert_eq!(view, base);
-    }
-
-    /// 올려다보는 화면의 **맨 윗줄에 본문이 있어도** 띠가 붙는다.
-    ///
-    /// 전에는 최상단 행이 빈 화면에만 얹었는데, 실화면의 맨 윗줄은 대개 접힌 본문
-    /// 조각이라 그 조건이 거의 안 걸렸다 — 「스크롤하면 붙는다」가 아니라 「됐다
-    /// 안 됐다 한다」로 보인 원인이다(2026-08-31 실측).
-    #[test]
-    fn sticky_band_covers_top_row_with_body() {
-        const W: usize = 80;
-        let screen = [
-            "신호입니다.",
-            "- 하지만 굽기엔 codex 작업이 안 들어갔어요.",
-            "두 가지 여쭤요 -",
-            "❯ 끝났어 워크트리깨끗하게 커밋푸시하고 빌드해줘",
-            "⏺ 끝났으면 커밋·푸시·빌드까지 하겠습니다.",
-            "Jump to bottom: fn+↓ to scroll",
-        ];
-        let rows: Vec<Vec<GridCell>> = screen.iter().map(|l| grid_row(l, W)).collect();
-        assert!(
-            crate::screenread::scrolled_gate(&rows),
-            "안내 문구가 있으면 게이트가 열려야 한다"
-        );
-
-        let prompts = vec![
-            (
-                "codex 작업 상태 알려줘".to_string(),
-                vec!["앞 턴의 답변 한 줄".to_string()],
-            ),
-            (
-                "끝났어 워크트리깨끗하게 커밋푸시하고 빌드해줘".to_string(),
-                vec!["끝났으면 커밋·푸시·빌드까지 하겠습니다.".to_string()],
-            ),
-        ];
-        let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
-            .expect("맨 윗줄에 본문이 있어도 띠가 나와야 한다");
-        assert!(
-            got.cells.is_none(),
-            "답은 화면 밖의 앞 질문이라 옮겨 올 셀이 없다"
-        );
-        assert_eq!(got.row, 0);
-        // 화면에 보이는 질문의 **바로 앞** 질문 — 그 위는 화면 밖이다.
-        assert_eq!(got.text, "codex 작업 상태 알려줘");
-        assert_eq!(memo.as_deref(), Some("codex 작업 상태 알려줘"));
-    }
-
-    /// 머리줄이 화면 밖으로 나가도 **직전에 확정한 턴**을 그대로 문다.
-    #[test]
-    fn sticky_band_remembers_turn_past_header() {
-        const W: usize = 80;
-        let rows: Vec<Vec<GridCell>> = [
-            "앞 턴 답변 한가운데",
-            "이어지는 줄",
-            "Jump to bottom (click) ↓",
-        ]
-        .iter()
-        .map(|l| grid_row(l, W))
-        .collect();
-        let prompts = vec![
-            (
-                "codex 작업 상태 알려줘".to_string(),
-                vec!["앞 턴 답변 한가운데".to_string()],
-            ),
-            (
-                "끝났어 커밋푸시하고 빌드해줘".to_string(),
-                vec!["끝났으면 커밋까지".to_string()],
-            ),
-        ];
-        let mut memo = Some("codex 작업 상태 알려줘".to_string());
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
-            .expect("띠가 나와야 한다");
-        assert_eq!(got.text, "codex 작업 상태 알려줘");
-    }
-
-    fn grid_row_dim(s: &str, width: usize) -> Vec<GridCell> {
-        let mut row = grid_row(s, width);
-        for c in row.iter_mut() {
-            c.dim = true;
-        }
-        row
-    }
-
-    /// 머리줄이 **화면 첫 줄**이면 띠는 그 질문 자신이다 — 한 칸 앞이 아니다.
-    #[test]
-    fn sticky_band_uses_own_turn_when_header_is_first_row() {
-        const W: usize = 80;
-        let rows: Vec<Vec<GridCell>> = [
-            "❯ 끝났어 커밋푸시하고 빌드해줘",
-            "⏺ 끝났으면 커밋·푸시까지 하겠습니다.",
-            "Jump to bottom (click) ↓",
-        ]
-        .iter()
-        .map(|l| grid_row(l, W))
-        .collect();
-        let prompts = vec![
-            (
-                "codex 작업 상태 알려줘".to_string(),
-                vec!["앞 턴 답변".to_string()],
-            ),
-            (
-                "끝났어 커밋푸시하고 빌드해줘".to_string(),
-                vec!["끝났으면 커밋·푸시까지 하겠습니다.".to_string()],
-            ),
-        ];
-        let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
-            .expect("띠가 나와야 한다");
-        assert_eq!(got.text, "끝났어 커밋푸시하고 빌드해줘");
-    }
-
-    /// 한 화면씩 뛰어 머리줄을 놓쳤을 때, 낡은 기억보다 **보이는 본문**이 세다.
-    #[test]
-    fn sticky_band_prefers_body_over_stale_memo() {
-        const W: usize = 80;
-        let rows: Vec<Vec<GridCell>> = [
-            "첫 턴에만 있는 고유한 문장",
-            "이어지는 줄 하나",
-            "Jump to bottom (click) ↓",
-        ]
-        .iter()
-        .map(|l| grid_row(l, W))
-        .collect();
-        let prompts = vec![
-            (
-                "첫 질문".to_string(),
-                vec!["첫 턴에만 있는 고유한 문장".to_string()],
-            ),
-            ("둘째 질문".to_string(), vec!["둘째 턴 문장".to_string()]),
-            ("셋째 질문".to_string(), vec!["셋째 턴 문장".to_string()]),
-        ];
-        let mut memo = Some("셋째 질문".to_string());
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
-            .expect("띠가 나와야 한다");
-        assert_eq!(got.text, "첫 질문");
-        assert_eq!(
-            memo.as_deref(),
-            Some("첫 질문"),
-            "본문으로 되짚었으면 기억도 갱신된다"
-        );
-    }
-
-    /// 흐릿한 `>` 로 시작해도 **아는 질문이 아니면** 잡지 않는다(본문 인용·diff).
-    #[test]
-    fn sticky_band_ignores_unknown_marked_row() {
-        const W: usize = 80;
-        let mut rows: Vec<Vec<GridCell>> = vec![grid_row_dim("> 남의 말을 인용한 줄입니다", W)];
-        rows.push(grid_row("첫 턴에만 있는 고유한 문장", W));
-        rows.push(grid_row("Jump to bottom (click) ↓", W));
-        let prompts = vec![
-            (
-                "첫 질문".to_string(),
-                vec!["첫 턴에만 있는 고유한 문장".to_string()],
-            ),
-            ("둘째 질문".to_string(), vec!["둘째 턴 문장".to_string()]),
-        ];
-        let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
-            .expect("띠가 나와야 한다");
-        assert!(
-            got.cells.is_none(),
-            "인용 줄을 그 자리에서 하이라이트하면 안 된다"
-        );
-        assert_eq!(got.text, "첫 질문");
-    }
-
-    /// 질문 넷이 **같은 말로 시작할 때** 머리글자만으로 가리면 전부 첫 질문이 된다.
-    /// 실측에서 띠가 어느 자리에서든 1번 질문을 물었던 자리다(2026-08-31).
-    #[test]
-    fn sticky_band_does_not_confuse_same_prefixed_questions() {
-        const W: usize = 100;
-        let rows: Vec<Vec<GridCell>> = [
-            "  붉은 사막에 모래바람이 길게 분다.",
-            "  붉은 사막에 모래바람이 길게 분다.",
-            "❯ 아무 도구도 쓰지 말고 「푸른 숲에 새벽 종소리가 울린다」 를 40줄 적어라.",
-            "  푸른 숲에 새벽 종소리가 울린다.",
-            "Jump to bottom (click) ↓",
-        ]
-        .iter()
-        .map(|l| grid_row(l, W))
-        .collect();
-        let q = |tail: &str| format!("아무 도구도 쓰지 말고 「{tail}」 를 40줄 적어라.");
-        let prompts = vec![
-            (
-                q("고요한 호수 위로 물안개가 피어오른다"),
-                vec!["고요한 호수 위로 물안개가 피어오른다.".to_string()],
-            ),
-            (
-                q("붉은 사막에 모래바람이 길게 분다"),
-                vec!["붉은 사막에 모래바람이 길게 분다.".to_string()],
-            ),
-            (
-                q("푸른 숲에 새벽 종소리가 울린다"),
-                vec!["푸른 숲에 새벽 종소리가 울린다.".to_string()],
-            ),
-        ];
-        let mut memo = None;
-        let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
-            .expect("띠가 나와야 한다");
-        // 화면 맨 위는 「붉은 사막」 턴의 꼬리다. 머리글자로 가리면 여기서 첫 질문이 나왔다.
-        assert_eq!(got.text, q("붉은 사막에 모래바람이 길게 분다"));
     }
 
     fn ms(t: Instant, n: u64) -> Instant {

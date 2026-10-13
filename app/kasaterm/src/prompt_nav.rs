@@ -14,7 +14,7 @@
 //! 요청은 도착한 위치를 보고 한 번 더 보내 바로 세운다(두 번째는 잰 구간이라 정확하다).
 //!
 //! 상태는 GUI 스레드의 지역 통에 둔다 — 그리기(불변 `&self`)에서도 읽어야 하고 App 을 안
-//! 늘리려는 것이다(턴 헤더 `TURN_HITS` 와 같은 방식).
+//! 늘리려는 것이다.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -26,8 +26,6 @@ use std::time::{Duration, Instant, SystemTime};
 const ARM: &[u8] = b"\x18b";
 /// 앞 단추 — `app:diffFileListUp`(ctrl+↑). 사람이 직접 누르면 앞 프롬프트로 간다.
 const FIRE: &[u8] = b"\x1b[1;5A";
-/// 맨 아래로 — 엔진 자신의 `scroll:bottom`(ctrl+end). 바닥에 붙어 따라가기까지 되살린다.
-const BOTTOM: &[u8] = b"\x1b[1;5F";
 
 const ARM_TIMEOUT: Duration = Duration::from_millis(700);
 const DONE_TIMEOUT: Duration = Duration::from_millis(900);
@@ -87,8 +85,6 @@ impl NavState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum NavOp {
-    Prev,
-    Next,
     Prompt(usize),
     Row(i64),
 }
@@ -96,8 +92,6 @@ pub(crate) enum NavOp {
 impl NavOp {
     fn json(self, seq: u64, at: u128) -> String {
         let op = match self {
-            NavOp::Prev => r#""op":"prev""#.to_string(),
-            NavOp::Next => r#""op":"next""#.to_string(),
             NavOp::Prompt(i) => format!(r#""op":"prompt","index":{i}"#),
             NavOp::Row(r) => format!(r#""op":"row","row":{r}"#),
         };
@@ -311,22 +305,6 @@ impl crate::App {
         true
     }
 
-    /// 맨 아래로는 엔진 자신의 키 하나로 끝난다 — 바닥에 붙어 따라가는 것까지 되살아난다.
-    pub(crate) fn prompt_nav_bottom(&self, pane: &str) -> bool {
-        let pid = self.ws.lock().map(|ws| ws.active_tab_pid(pane)).unwrap_or_else(|_| pane.to_string());
-        if live_state(&pid).is_none() {
-            return false;
-        }
-        self.nav_send(&pid, BOTTOM);
-        true
-    }
-
-    pub(crate) fn prompt_nav_current(&self, pane: &str) -> Option<usize> {
-        let pid = self.ws.lock().ok()?.active_tab_pid(pane);
-        let state = live_state(&pid)?;
-        usize::try_from(state.current).ok()
-    }
-
     /// about_to_wait 매 틱 — 장전을 확인하면 쏘고, 도착을 보고 한 번 바로 세우고, 막대가
     /// 그려진 칸의 상태가 바뀌었으면 다시 그린다(사람이 claude 안에서 휠로 굴린 경우).
     pub(crate) fn pump_prompt_nav(&mut self) {
@@ -467,7 +445,7 @@ thread_local! {
 impl crate::App {
     /// `KASATERM_AUTONAV="6000:tick=3;8000:cap=a;9000:track=0.2;11000:drag=0.2>0.8;13000:key=prev"`
     /// (+ `KASATERM_AUTONAV_CAP_DIR`). 누를 자리는 **이번 프레임에 실제로 그린 막대**에서 읽는다 —
-    /// 좌표를 손으로 적으면 막대가 안 떠도 「눌렀다」고 적힌다(턴 헤더 하네스와 같은 이유).
+    /// 좌표를 손으로 적으면 막대가 안 떠도 「눌렀다」고 적힌다.
     pub(crate) fn arm_autonav(&mut self) {
         let Ok(plan) = std::env::var("KASATERM_AUTONAV") else { return };
         let start = Instant::now();
@@ -633,7 +611,6 @@ mod tests {
     fn requests_carry_seq_and_op() {
         assert_eq!(NavOp::Prompt(3).json(9, 100), r#"{"seq":9,"at":100,"op":"prompt","index":3}"#);
         assert_eq!(NavOp::Row(42).json(1, 2), r#"{"seq":1,"at":2,"op":"row","row":42}"#);
-        assert_eq!(NavOp::Prev.json(1, 2), r#"{"seq":1,"at":2,"op":"prev"}"#);
     }
 
     #[test]

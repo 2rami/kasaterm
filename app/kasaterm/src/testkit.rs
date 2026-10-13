@@ -478,10 +478,9 @@ impl App {
     /// `KASATERM_AUTOTURNSCROLL="<줄수>"` (+ `_MS`) — 그 시각에 활성 pane 을 그만큼
     /// **과거로** 민다(휠 위와 같은 경로: alacritty display_offset).
     ///
-    /// 대화 턴 헤더는 스크롤백을 올려다볼 때만 뜨는데, claude pane 에서 휠은
-    /// mouse-tracking 으로 전부 TUI 쪽에 넘어가 헤드리스로는 그 상태를 만들 길이
-    /// 없었다. 줄 수는 **화면 높이의 배수가 아닌 값**을 주는 게 좋다 — 딱 떨어지면
-    /// 경계에 걸치는 경우를 못 본다.
+    /// claude pane 에서 휠은 mouse-tracking 으로 전부 TUI 쪽에 넘어가 헤드리스로는
+    /// 스크롤백을 올려다본 상태를 만들 길이 없다. 줄 수는 **화면 높이의 배수가 아닌
+    /// 값**을 주는 게 좋다 — 딱 떨어지면 경계에 걸치는 경우를 못 본다.
     pub(crate) fn schedule_autoturnscroll(&self) {
         let Ok(spec) = std::env::var("KASATERM_AUTOTURNSCROLL") else { return };
         let Ok(lines) = spec.parse::<i32>() else { return };
@@ -8461,8 +8460,7 @@ impl App {
     /// 아래로 굴린다. `KASATERM_AUTOWHEEL_PX=<px>` 를 주면 노치(LineDelta) 대신 그
     /// 픽셀만큼의 트랙패드 델타로 보낸다 — 문서 뷰의 픽셀 스크롤 경로는 노치로는
     /// 밟히지 않아, 이것 없이는 헤드리스로 확인할 방법이 없다.
-    /// mouse-tracking TUI(claude)면 SGR 로 그 pane 에 전달돼 실제 스크롤 경로를 밟아
-    /// sticky prompt 를 재현한다 — sticky pill 감지/표시를 헤드리스로 확인하려는 용도.
+    /// mouse-tracking TUI(claude)면 SGR 로 그 pane 에 전달돼 실제 스크롤 경로를 밟는다.
     pub(crate) fn run_pending_autowheel(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;

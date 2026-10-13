@@ -523,7 +523,6 @@ impl App {
         );
     }
 
-
     /// `surface.capture` — pane 한 칸만 잘라 다음 프레임에 PNG 로 굽도록 무장한다.
     ///
     /// 좌표는 렌더가 셀을 놓는 식 그대로다(`render_frame_gpu` 의 pad_x/pad_y 와 같은
@@ -914,42 +913,12 @@ impl App {
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
-        // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
-        // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
-        // (px, py, pw, ph, 텍스트, pane_id, ↑ rect, ↓ rect, ↡ rect). 화살표 자리는 셀
-        // 폭을 아는 스캔 루프에서 미리 재 둔다 — chrome 패스에서 되재면 어긋난다.
-        type StickySlot = (
-            f32,
-            f32,
-            f32,
-            f32,
-            String,
-            String,
-            Option<(f32, f32, f32, f32)>,
-            Option<(f32, f32, f32, f32)>,
-            Option<(f32, f32, f32, f32)>,
-        );
-        let mut sticky_pill_slots: Vec<StickySlot> = Vec::new();
         // 풀스크린 claude 칸의 스크롤바 — (pane, 백엔드 pid, 격자 오른쪽 끝, 대화 위, 대화 높이,
         // 대화 행 수, mod 상태). logical px.
         type NavSlot = (String, String, f32, f32, f32, i64, crate::prompt_nav::NavState);
         let mut nav_slots: Vec<NavSlot> = Vec::new();
-        // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, ↡ rect, 헤더 내용). logical px.
-        // 화살표 rect 는 갈 곳이 있을 때만 담긴다(흐린 화살표는 눌러도 무반응).
-        type TurnSlot = (
-            String,
-            (f32, f32, f32, f32),
-            Option<(f32, f32, f32, f32)>,
-            Option<(f32, f32, f32, f32)>,
-            Option<(f32, f32, f32, f32)>,
-            crate::turnjump::TurnHeader,
-        );
-        let mut turn_header_slots: Vec<TurnSlot> = Vec::new();
-        // pane 별 헤더는 **여기서** 지어 둔다. 짓는 데 `&mut self`(앵커 캐시)가 필요한데
-        // 아래 pane 루프는 ws 락을 쥔 채 돌아, 그 안에서 `pty_for_pane`(자체 락)을
-        // 부르면 같은 뮤텍스를 두 번 잡는다. 락을 잡기 전에 끝내는 것이 그 함정을
-        // 구조적으로 없앤다.
-        let turn_headers: std::collections::HashMap<String, crate::turnjump::TurnHeader> = {
+        // 사라진 칸의 거울 이동 목적지를 걷는다. ws 락을 쥐고 도는 아래 pane 루프보다 먼저 한다.
+        {
             let ids: Vec<String> = self
                 .ws
                 .lock()
@@ -957,23 +926,7 @@ impl App {
                 .map(|ws| ws.panes.keys().cloned().collect())
                 .unwrap_or_default();
             self.turn.retain_panes(|id| ids.iter().any(|k| k == id) || self.pty.contains_key(id));
-            let mut out = std::collections::HashMap::new();
-            for id in ids {
-                // Arc 를 복제해 self 빌림을 끊는다 — 참조를 든 채로는 캐시를 못 고친다.
-                let Some(sess) = self.pty_for_pane(&id).cloned() else {
-                    continue;
-                };
-                let viewer_top = self.pane_view_shift.get(&id).and_then(|s| s.projection.as_ref())
-                    .filter(|p| p.scroll_from_bottom > 0 || sess.view_state().0 > 0)
-                    .and_then(|p| p.top_abs);
-                let pid = self.ws.lock().unwrap().active_tab_pid(&id);
-                let claude = matches!(sess.active_agent(), Some(kasa_pty::AgentKind::Claude));
-                if let Some(h) = self.turn.header_at(&pid, &sess, viewer_top, claude) {
-                    out.insert(id, h);
-                }
-            }
-            out
-        };
+        }
         // 인라인 이미지 이번 프레임 배치(`InlineSlot`).
         let mut inline_slots: Vec<crate::render::terminal_scene::InlineSlot> = Vec::new();
         // 커서가 멎은 `[Image #N]` — (pane, 번호, 그 글자의 화면 박스). 박스는
@@ -1296,7 +1249,7 @@ impl App {
                 let body_view = chat_slot.is_some() || shell_slot.is_some();
                 let composition = self.compose_terminal_pane(
                     &ws, pane, pane.term(), &id, ws.active_tab_pid(&id), cols_now, rows_now,
-                    body_left, body_top, pane_font_scale, true, &turn_headers,
+                    body_left, body_top, pane_font_scale, true,
                 );
                 let composed = composition.rows;
                 if self.weather.settings.enabled && active_id.as_deref() == Some(id.as_str()) {
@@ -1343,8 +1296,6 @@ impl App {
                     schale_logo_slots.extend(composition.schale_logo_slots);
                     title_outline_slots.extend(composition.title_outline_slots);
                     status_model_icons.extend(composition.status_model_icons);
-                    sticky_pill_slots.extend(composition.sticky_pill_slots);
-                    turn_header_slots.extend(composition.turn_header_slots);
                     view_shifts.extend(composition.view_shifts);
                     if tip_hit.is_none() {
                         tip_hit = composition.tip_hit;
@@ -2721,61 +2672,6 @@ impl App {
                 });
             }
             crate::prompt_nav::set_hits(nav_hits);
-            // Claude Code 스크롤 sticky prompt: 텍스트·흰 배경은 위 스캔에서 원본
-            // 셀을 선명화(등폭 유지)해 이미 그려졌다. 여기선 클릭 rect(셀 영역)만
-            // STICKY_PILLS 로 mouse handler·seek 에 넘긴다 — 클릭 = "그 프롬프트가
-            // 화면에 들어올 때까지 위로 스크롤"(begin_sticky_seek).
-            STICKY_PILLS.with(|s| s.borrow_mut().clear());
-            // 클릭 영역은 **여기서 한 번만** 비운다. 아래 sticky 루프와 그보다 뒤의
-            // 턴 헤더 루프가 같은 통에 담으므로, 뒤쪽에서 또 비우면 앞에서 담은
-            // 화살표가 통째로 사라진다 — 화면은 멀쩡한데 안 눌리는, 스크린샷이
-            // 절대 못 잡는 부류다(실제로 그렇게 짰다가 여기서 잡았다).
-            crate::turnjump::TURN_HITS.with(|s| s.borrow_mut().clear());
-            for (px, py, pw, ph, text, pane_id, a_up, a_down, a_bottom) in &sticky_pill_slots {
-                STICKY_PILLS.with(|s| {
-                    s.borrow_mut()
-                        .push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
-                });
-                // pill 에 얹은 ↑↓ — 바 클릭(위로 되짚기)보다 **나중에** 담아야
-                // 겹치는 자리에서 화살표가 이긴다(조회가 역순이다).
-                crate::turnjump::TURN_HITS.with(|s| {
-                    let mut v = s.borrow_mut();
-                    if let Some(r) = a_up {
-                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekPrev));
-                    }
-                    if let Some(r) = a_down {
-                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekNext));
-                    }
-                    if let Some(r) = a_bottom {
-                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekBottom));
-                    }
-                });
-            }
-            // 대화 턴 헤더의 클릭 영역. 그림은 이미 셀로 그려졌고 여기선 자리만
-            // 넘긴다. **바를 먼저, 화살표를 나중에** 담는 순서가 곧 우선순위다 —
-            // 조회가 역순이라 겹치는 자리에서 화살표가 이긴다(화면에서 위에 있는
-            // 것이 클릭도 가져간다).
-            for (pane_id, bar, up, down, bottom, h) in &turn_header_slots {
-                crate::turnjump::TURN_HITS.with(|s| {
-                    let mut v = s.borrow_mut();
-                    v.push((
-                        pane_id.clone(),
-                        *bar,
-                        crate::turnjump::TurnHit::Jump(h.cur_abs),
-                    ));
-                    if let (Some(r), Some(a)) = (up, h.prev_abs) {
-                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Prev(a)));
-                    }
-                    if let (Some(r), Some(a)) = (down, h.next_abs) {
-                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Next(a)));
-                    }
-                    // 맨 아래로는 **갈 곳 조건이 없다** — 헤더가 떠 있다는 것이 이미
-                    // 스크롤이 올라가 있다는 뜻이라, 앞뒤 화살표처럼 흐려질 일이 없다.
-                    if let Some(r) = bottom {
-                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Bottom));
-                    }
-                });
-            }
             if g.has_image("schale:classroom") {
                 for (bx, by, bw, bh) in &classroom_slots {
                     g.queue_image_cover("schale:classroom", *bx, *by, *bw, *bh);
