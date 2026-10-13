@@ -489,13 +489,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         key: const Key('approval-key'),
         tone: tone,
         icon: Icons.fingerprint_rounded,
-        title: 'Face ID 승인 열쇠',
-        subtitle: '학생의 1Password 요청을 Face ID 로 한 번씩 허락',
+        title: '1Password',
+        subtitle: '학생의 1Password 요청을 Face ID 로 허락',
         chevron: true,
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => ApprovalKeyScreen(
               api: () => RelayAccountApi(account.origin, session: account),
+              server: server,
             ),
           ),
         ),

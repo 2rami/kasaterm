@@ -4,12 +4,14 @@
 //! 서명 → 여기서 도전값·믿은 키·관문의 살아 있는 키·서명·nonce·만료를 다시 본 뒤에만 실행기(`kasa-op`)에 토큰을
 //! 파이프로 넘겨 값을 받는다. 값은 소켓으로 요청한 프로세스에만 간다.
 //!
-//! 토큰 넣기·지우기와 폰 열쇠 믿기는 앱 화면 코드만 부른다 — 소켓에는 [`read`] 와 [`status`] 뿐이다.
+//! 토큰 넣기·지우기는 앱 화면 코드만 부른다 — 소켓에는 [`read`]·[`status`]·[`sync`] 뿐이다. [`sync`] 가 믿는 폰
+//! 열쇠는 [`auto_pick`] 의 규칙을 따른 것뿐이라, 폰이 「연결」을 누른 뒤 맥이 1분 주기를 기다리지 않게 하는 문이다.
 //! 토큰은 로그인 키체인(접근: 이 앱)에만 있고 대화·로그·감사 줄 어디에도 안 적는다.
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -24,6 +26,8 @@ use crate::device_auth::approvals as gateway;
 const SERVICE: &str = "kasaterm.1password";
 const SETTINGS: &str = "service-account";
 const TRUSTED: &str = "trusted-keys";
+/// 사람이 맥에서 거둔 열쇠 id — 자동 믿기가 다시 집어 들지 않게.
+const REFUSED: &str = "refused-keys";
 /// 관문 원격 승인과 같은 2분.
 const TTL_MS: u64 = 120_000;
 const MAX_REFS: usize = 16;
@@ -144,6 +148,17 @@ fn settings() -> anyhow::Result<Option<Settings>> {
 
 pub fn trusted() -> anyhow::Result<Vec<Trusted>> {
     Ok(store_get(TRUSTED)?.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default())
+}
+
+fn refused() -> anyhow::Result<Vec<String>> {
+    Ok(store_get(REFUSED)?.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default())
+}
+
+/// 보관한 것이 바뀌었다 — 화면은 다음 poll 에 1분 주기를 기다리지 않고 다시 읽는다(소켓 [`sync`] 가 바꾼 것도).
+static CHANGED: AtomicBool = AtomicBool::new(false);
+
+pub fn take_changed() -> bool {
+    CHANGED.swap(false, Ordering::Relaxed)
 }
 
 // ── 감사 ──────────────────────────────────────────────────────────────────────
@@ -418,7 +433,12 @@ fn run_helper(op: &str, token: &str, refs: &[String]) -> anyhow::Result<Value> {
 pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyhow::Result<Vec<String>> {
     let s = settings()?.ok_or_else(|| anyhow!("op_token_missing"))?;
     check_refs(refs, &s)?;
-    let trusted = trusted()?;
+    let mut trusted = trusted()?;
+    if trusted.is_empty() {
+        // 폰이 막 「연결」했으면 화면의 1분 주기 전이라도 여기서 믿는다.
+        let _ = sync();
+        trusted = self::trusted()?;
+    }
     if trusted.is_empty() {
         bail!("no_trusted_key");
     }
@@ -530,33 +550,69 @@ pub fn set_token(token: &str) -> anyhow::Result<String> {
         added: now_ms(),
     };
     store_set(SETTINGS, &serde_json::to_string(&s)?)?;
+    CHANGED.store(true, Ordering::Relaxed);
     audit(json!({"event": "token_set", "vault": name}));
     Ok(name)
 }
 
 pub fn clear_token() -> anyhow::Result<()> {
     store_delete(SETTINGS)?;
+    CHANGED.store(true, Ordering::Relaxed);
     audit(json!({"event": "token_cleared"}));
     Ok(())
+}
+
+fn same_key(k: &Value, t: &Trusted) -> bool {
+    k["id"] == t.id.as_str() && k["device"] == t.device.as_str()
+}
+
+fn with_fingerprint(mut k: Value) -> Value {
+    let id = k["id"].as_str().unwrap_or_default().to_string();
+    k["fingerprint"] = json!(key_fingerprint(&id));
+    k
 }
 
 /// 관문에 맡겨졌지만 이 맥이 아직 안 믿은 폰 열쇠 — 화면이 지문과 함께 「믿기」를 묻는다.
 pub fn untrusted_keys() -> anyhow::Result<Vec<Value>> {
     let trusted = trusted()?;
     let live = gateway::keys_blocking()?;
-    Ok(live
-        .into_iter()
-        .filter(|k| !trusted.iter().any(|t| k["id"] == t.id.as_str() && k["device"] == t.device.as_str()))
-        .map(|mut k| {
-            let id = k["id"].as_str().unwrap_or_default().to_string();
-            k["fingerprint"] = json!(key_fingerprint(&id));
-            k
-        })
-        .collect())
+    Ok(live.into_iter().filter(|k| !trusted.iter().any(|t| same_key(k, t))).map(with_fingerprint).collect())
 }
 
-/// 사람이 맥 화면에서 지문을 맞춰 보고 누른 「믿기」. 공개키가 그 id 의 키인지 다시 본다.
+/// 사람 확인 없이 믿을 폰 열쇠(2026-10-13 결정 — 연결은 폰 Face ID 한 번으로 끝난다).
+/// 이미 믿은 기기가 갈아 끼운 열쇠(Face ID 재등록)는 언제나 믿는다. 그런 열쇠가 없고 이 맥이 믿는 열쇠 중 관문에 살아
+/// 있는 것도 없으면 들어온 열쇠를 다 믿는다(처음 연결). 그 밖의 새 기기는 맥 화면의 「믿기」로 남긴다.
+/// 사람이 맥에서 거둔 열쇠는 다시 집지 않는다. 관문이 열쇠를 끼워 넣으면 막지 못한다는 것을 받아들인 규칙이다.
+pub fn auto_pick(trusted: &[Trusted], live: &[Value], refused: &[String]) -> Vec<Value> {
+    let alive = trusted.iter().any(|t| live.iter().any(|k| same_key(k, t)));
+    let fresh: Vec<Value> = live
+        .iter()
+        .filter(|k| !trusted.iter().any(|t| same_key(k, t)))
+        .filter(|k| !refused.iter().any(|id| k["id"] == id.as_str()))
+        .cloned()
+        .collect();
+    let renewed: Vec<Value> = fresh.iter().filter(|k| trusted.iter().any(|t| k["device"] == t.device.as_str())).cloned().collect();
+    if alive || !renewed.is_empty() { renewed } else { fresh }
+}
+
+/// 관문 열쇠 목록을 한 번 보고 [`auto_pick`] 이 고른 열쇠를 믿은 뒤, 지금 상태와 아직 사람이 믿어야 할 열쇠를 준다.
+pub fn sync() -> anyhow::Result<(Value, Vec<Value>)> {
+    let live = gateway::keys_blocking()?;
+    for key in auto_pick(&trusted()?, &live, &refused()?) {
+        keep(&key, "key_auto_trusted")?;
+    }
+    let trusted = trusted()?;
+    let rest = live.into_iter().filter(|k| !trusted.iter().any(|t| same_key(k, t))).map(with_fingerprint).collect();
+    Ok((status(), rest))
+}
+
+/// 사람이 맥 화면에서 누른 「믿기」.
 pub fn trust(key: &Value) -> anyhow::Result<()> {
+    keep(key, "key_trusted")
+}
+
+/// 공개키가 그 id 의 키인지 다시 보고 믿는다. 같은 기기의 옛 열쇠는 갈아 끼운다.
+fn keep(key: &Value, event: &str) -> anyhow::Result<()> {
     let public = key["public"].as_str().ok_or_else(|| anyhow!("bad_key"))?;
     let raw = base64::engine::general_purpose::STANDARD.decode(public).map_err(|_| anyhow!("bad_key"))?;
     let id = key["id"].as_str().unwrap_or_default();
@@ -572,7 +628,13 @@ pub fn trust(key: &Value) -> anyhow::Result<()> {
         added: now_ms(),
     });
     store_set(TRUSTED, &serde_json::to_string(&list)?)?;
-    audit(json!({"event": "key_trusted", "device": device, "key": id}));
+    let mut no = refused()?;
+    if no.iter().any(|r| r == id) {
+        no.retain(|r| r != id);
+        store_set(REFUSED, &serde_json::to_string(&no)?)?;
+    }
+    CHANGED.store(true, Ordering::Relaxed);
+    audit(json!({"event": event, "device": device, "key": id}));
     Ok(())
 }
 
@@ -580,6 +642,13 @@ pub fn untrust(id: &str) -> anyhow::Result<()> {
     let mut list = trusted()?;
     list.retain(|t| t.id != id);
     store_set(TRUSTED, &serde_json::to_string(&list)?)?;
+    let mut no = refused()?;
+    if !no.iter().any(|r| r == id) {
+        no.push(id.to_string());
+        let keep = no.len().saturating_sub(64);
+        store_set(REFUSED, &serde_json::to_string(&no[keep..])?)?;
+    }
+    CHANGED.store(true, Ordering::Relaxed);
     audit(json!({"event": "key_untrusted", "key": id}));
     Ok(())
 }
@@ -733,6 +802,24 @@ mod tests {
         assert!(!check("adhoc/kasa-op"), "서명 없는(ad-hoc) 실행기를 받았다");
         assert!(!check("renamed/kasa-op"), "다른 이름으로 서명한 실행기를 받았다");
         assert!(!check("other-team/kasa-op"), "다른 팀이 서명한 실행기를 받았다");
+    }
+
+    #[test]
+    fn the_first_phone_is_trusted_without_a_person_but_a_second_device_is_not() {
+        let (first, second) = (Phone::new(), Phone::new());
+        let mut second_live = second.live();
+        second_live["device"] = json!("p2");
+        // 처음 연결 — 믿는 열쇠가 없으니 들어온 것을 다 믿는다.
+        assert_eq!(auto_pick(&[], &[first.live()], &[]), vec![first.live()]);
+        // 첫 폰이 살아 있으면 다른 기기는 사람이 맥에서 믿는다.
+        assert!(auto_pick(&[first.trusted()], &[first.live(), second_live.clone()], &[]).is_empty());
+        // 같은 기기가 Face ID 를 다시 등록해 열쇠를 갈아 끼우면 새 열쇠를 믿는다.
+        let renewed = Phone::new();
+        assert_eq!(auto_pick(&[first.trusted()], &[renewed.live(), second_live.clone()], &[]), vec![renewed.live()]);
+        // 믿던 열쇠가 관문에서 모두 사라졌으면 다시 처음 연결이다.
+        assert_eq!(auto_pick(&[first.trusted()], &[second_live.clone()], &[]), vec![second_live.clone()]);
+        // 사람이 맥에서 거둔 열쇠는 다시 집지 않는다.
+        assert!(auto_pick(&[], &[first.live()], &[first.id()]).is_empty());
     }
 
     #[test]

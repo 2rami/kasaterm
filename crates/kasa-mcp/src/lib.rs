@@ -35,6 +35,7 @@ pub mod connections;
 pub mod approval_text;
 pub mod approval_bridge;
 pub mod op_approval;
+pub mod op_connect;
 pub mod workspace_assistant;
 pub use workspace_assistant::DesktopSession as WorkspaceDesktopSession;
 pub mod device_auth;

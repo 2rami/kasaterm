@@ -221,13 +221,13 @@ class _Body extends StatelessWidget {
                   const SizedBox(height: Look.rowGap * 2),
                   _Band(
                     key: const Key('approval-no-key'),
-                    text: '이 폰에 Face ID 승인 열쇠가 없어요. 열쇠를 만들고 맥에서 지문을 맞춰 믿기를 누르면 허락할 수 있어요.',
+                    text: '이 폰이 아직 1Password 에 연결되지 않았어요. 「Face ID 로 연결」을 한 번 누르면 맥까지 이어져 허락할 수 있어요.',
                     color: scheme.error,
                   ),
                   const SizedBox(height: Look.rowGap * 2),
                   _Button(
                     key: const Key('approval-make-key'),
-                    label: '열쇠 만들기',
+                    label: '1Password 연결',
                     fill: scheme.primary.withValues(alpha: 0.14),
                     ink: scheme.primary,
                     onPressed: make,

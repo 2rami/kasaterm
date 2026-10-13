@@ -70,6 +70,9 @@ class FakeSigner implements ApprovalSigner {
     if (answer == 'throw') throw PlatformException(code: 'sign_failed', message: 'biometry changed');
     return answer;
   }
+
+  @override
+  Future<bool> confirm(String reason) async => answer != null;
 }
 
 void main() {

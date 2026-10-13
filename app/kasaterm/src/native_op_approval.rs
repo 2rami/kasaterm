@@ -1,6 +1,7 @@
 //! 설정 「계정」의 「1Password」 — 학생이 폰 Face ID 한 번으로 비밀을 읽게 하는 맥 쪽 설정
-//! (docs/op-faceid-approval.md). 토큰 넣기·지우기와 폰 열쇠 믿기는 이 화면에서만 난다 — 소켓·CLI 에는 없다.
-//! 토큰은 암호 칸(NSSecureTextField)에서 곧장 kasa-mcp 로 가 키체인에 들어가고, 이 화면 상태에는 남지 않는다.
+//! (docs/op-faceid-approval.md). 토큰 넣기·지우기는 이 화면에서만 난다 — 소켓·CLI 에는 없다.
+//! 토큰은 「1Password 연결」(kasa-mcp `op_connect`)이나 암호 칸(NSSecureTextField)에서 곧장 kasa-mcp 로 가 키체인에
+//! 들어가고, 이 화면 상태에는 남지 않는다. 폰 열쇠는 `op_approval::auto_pick` 규칙대로 알아서 믿고, 그 밖의 것만 묻는다.
 
 use super::*;
 use std::collections::HashSet;
@@ -10,6 +11,7 @@ const REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Act {
+    Connect,
     AskToken,
     AskClear,
     Clear,
@@ -22,11 +24,14 @@ pub(crate) enum Act {
 enum Done {
     Loaded(serde_json::Value, Result<Vec<serde_json::Value>, String>),
     Acted(Result<String, String>),
+    /// 1Password 계정이 여럿이라 사람이 고른다 — 고른 번호(취소면 None)를 돌려보낸다.
+    Choose(Vec<kasa_mcp::op_connect::Account>, mpsc::Sender<Option<usize>>),
 }
 
 /// 시트의 답 — 완료 처리기는 App 을 못 잡으니 여기 두고 다음 poll 이 꺼내 간다.
 static TOKEN_ANSWER: Mutex<Option<String>> = Mutex::new(None);
 static TRUST_ANSWER: Mutex<Option<String>> = Mutex::new(None);
+static ACCOUNT_ANSWER: Mutex<Option<Option<usize>>> = Mutex::new(None);
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -35,9 +40,12 @@ pub(crate) struct State {
     fetched: Option<std::time::Instant>,
     fetch: Option<Receiver<Done>>,
     busy: Option<Receiver<Done>>,
+    connecting: bool,
+    choosing: Option<mpsc::Sender<Option<usize>>>,
     confirm_clear: bool,
     message: Option<(String, bool)>,
     notified: HashSet<String>,
+    believed: HashSet<String>,
     loaded_once: bool,
     fixture: bool,
     /// 검증 실행 전용 — 띄운 믿기 시트와 그 단추를 누를 시각(`KASATERM_OP_AUTOTRUST_MS`).
@@ -51,6 +59,7 @@ pub(crate) struct View {
     untrusted: Vec<serde_json::Value>,
     confirm_clear: bool,
     busy: bool,
+    connecting: bool,
     message: Option<(String, bool)>,
 }
 
@@ -71,6 +80,17 @@ fn readable(error: &str) -> String {
         "signed_out" => "KASA 계정에 로그인해야 해요".into(),
         "gateway_unreachable" => "관문에 닿지 못했어요".into(),
         "update_required" => "관문이 이 기능을 아직 몰라요. 관문 업데이트가 필요해요".into(),
+        "cli_missing" => "1Password CLI(op)가 없어요. brew install 1password-cli 로 설치한 뒤 1Password 설정 → 개발자 → 「1Password CLI 와 연동」을 켜 주세요".into(),
+        "cli_unverified" => "op 가 1Password 가 서명한 것이 아니에요. 1Password CLI 를 다시 설치해 주세요".into(),
+        "no_account" => "1Password 앱이 계정을 내주지 않았어요. 1Password 설정 → 개발자 → 「1Password CLI 와 연동」을 켜 주세요".into(),
+        "cancelled" => "연결을 그만뒀어요".into(),
+        "cli_timeout" => "1Password 에서 허락을 받지 못했어요. 다시 눌러 1Password 창에서 허락해 주세요".into(),
+        "cli_error" => format!("1Password 가 거절했어요 — {}", error.split_once(": ").map_or("", |(_, d)| d)),
+        "service_account" => format!(
+            "서비스 계정을 만들지 못했어요 — {}. 권한이 없으면 관리자에게 부탁해 만든 토큰을 「토큰 넣기」로 넣어 주세요",
+            error.rsplit_once(": ").map_or("", |(_, d)| d)
+        ),
+        "made_unusable" => "서비스 계정은 만들었지만 그 토큰을 확인하지 못했어요. 1Password 에서 「kasaterm」 서비스 계정을 지우고 다시 연결해 주세요".into(),
         _ => "요청을 마치지 못했어요. 다시 시도해 주세요".into(),
     }
 }
@@ -83,6 +103,7 @@ impl State {
             untrusted: self.untrusted.clone(),
             confirm_clear: self.confirm_clear,
             busy: self.busy.is_some(),
+            connecting: self.connecting,
             message: self.message.clone(),
         }
     }
@@ -98,19 +119,30 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.fetch = Some(rx);
         std::thread::spawn(move || {
-            let status = kasa_mcp::op_approval::status();
-            let untrusted = kasa_mcp::op_approval::untrusted_keys().map_err(|e| e.to_string());
-            let _ = tx.send(Done::Loaded(status, untrusted));
+            let done = match kasa_mcp::op_approval::sync() {
+                Ok((status, rest)) => Done::Loaded(status, Ok(rest)),
+                Err(error) => Done::Loaded(kasa_mcp::op_approval::status(), Err(error.to_string())),
+            };
+            let _ = tx.send(done);
         });
     }
 
-    /// 새로 맡겨진 폰 열쇠 — 알림으로 한 번 알린다(앱을 켤 때 이미 있던 것은 조용히).
-    fn poll(&mut self) -> (bool, Vec<serde_json::Value>) {
+    /// 새로 맡겨진 폰 열쇠(사람이 믿어야 할 것)와 새로 믿게 된 열쇠 — 알림으로 한 번씩 알린다(앱을 켤 때 이미 있던 것은 조용히).
+    /// 셋째는 계정 고르기를 기다리는 1Password 계정 목록.
+    fn poll(&mut self) -> (bool, Vec<serde_json::Value>, Vec<serde_json::Value>, Option<Vec<kasa_mcp::op_connect::Account>>) {
         let mut changed = false;
         let mut fresh = Vec::new();
+        let mut believed = Vec::new();
+        let mut choose = None;
         if let Some(Ok(Done::Loaded(status, untrusted))) = self.fetch.as_ref().map(Receiver::try_recv) {
             self.fetch = None;
             changed = true;
+            for key in status["trusted"].as_array().into_iter().flatten() {
+                let print = key["fingerprint"].as_str().unwrap_or_default().to_string();
+                if self.believed.insert(print) && self.loaded_once {
+                    believed.push(key.clone());
+                }
+            }
             self.status = status;
             if let Ok(list) = untrusted {
                 for key in &list {
@@ -123,17 +155,33 @@ impl State {
             }
             self.loaded_once = true;
         }
-        if let Some(Ok(Done::Acted(result))) = self.busy.as_ref().map(Receiver::try_recv) {
-            self.busy = None;
-            changed = true;
-            self.confirm_clear = false;
-            self.message = Some(match result {
-                Ok(message) => (message, false),
-                Err(error) => (readable(&error), true),
-            });
+        match self.busy.as_ref().map(Receiver::try_recv) {
+            Some(Ok(Done::Acted(result))) => {
+                self.busy = None;
+                self.connecting = false;
+                changed = true;
+                self.confirm_clear = false;
+                self.message = Some(match result {
+                    Ok(message) => (message, false),
+                    Err(error) => (readable(&error), true),
+                });
+                self.fetched = None;
+            }
+            Some(Ok(Done::Choose(accounts, reply))) => {
+                self.choosing = Some(reply);
+                choose = Some(accounts);
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.busy = None;
+                self.connecting = false;
+                changed = true;
+            }
+            _ => {}
+        }
+        if kasa_mcp::op_approval::take_changed() {
             self.fetched = None;
         }
-        (changed, fresh)
+        (changed, fresh, believed, choose)
     }
 
     fn run(&mut self, work: impl FnOnce() -> Result<String, String> + Send + 'static) {
@@ -145,10 +193,14 @@ impl State {
         });
     }
 
-    /// 검증 실행 화면: 토큰이 든 상태, 믿는 폰 하나, 새로 맡겨진 열쇠 하나.
-    pub(crate) fn fixture(&mut self) {
+    /// 검증 실행 화면: 토큰이 든 상태, 믿는 폰 하나, 새로 맡겨진 열쇠 하나. [empty] 면 처음 연결 전(토큰도 열쇠도 없음).
+    pub(crate) fn fixture(&mut self, empty: bool) {
         self.fixture = true;
-        self.status = serde_json::json!({"token": true, "vault": "kasaterm-agents", "helper": true,
+        if empty {
+            self.status = serde_json::json!({"token": false, "helper": true, "trusted": []});
+            return;
+        }
+        self.status = serde_json::json!({"token": true, "vault": "KASA 학생", "helper": true,
             "trusted": [{"label": "건호의 iPhone", "fingerprint": "3F2A-91C0-7D4E"}]});
         self.untrusted = vec![serde_json::json!({"device": "dev_ipad", "label": "건호의 iPad", "id": "b81c55e0aa04",
             "fingerprint": "B81C-55E0-AA04", "public": ""})];
@@ -168,6 +220,11 @@ impl App {
                     .map_err(|e| e.to_string())
             });
         }
+        if let Some(answer) = ACCOUNT_ANSWER.lock().ok().and_then(|mut a| a.take()) {
+            if let Some(reply) = self.device_account.op.choosing.take() {
+                let _ = reply.send(answer);
+            }
+        }
         if let Some(id) = TRUST_ANSWER.lock().ok().and_then(|mut a| a.take()) {
             let key = self.device_account.op.untrusted.iter().find(|k| k["id"] == id.as_str()).cloned();
             if let Some(key) = key {
@@ -183,7 +240,22 @@ impl App {
         // 화면 상태(`logged_in`)는 설정을 열 때만 갱신된다 — 새 열쇠 알림은 설정을 안 열어도 떠야 하니
         // 로그인 여부는 뒷실 조회(로그인 없으면 빈 목록)가 판단한다.
         op.refresh_due(false);
-        let (changed, fresh) = op.poll();
+        let (changed, fresh, believed, choose) = op.poll();
+        if let (Some(accounts), Some(window)) = (choose, &self.window) {
+            account_sheet(window, &accounts);
+        }
+        for key in believed {
+            crate::chrome::notify_desktop(
+                "1Password 승인 폰을 믿어요",
+                &format!(
+                    "{} — 학생의 1Password 요청은 이제 이 폰에서 Face ID 로 허락해요",
+                    key["label"].as_str().unwrap_or("폰")
+                ),
+                None,
+                Some(&format!("op-trusted:{}", key["fingerprint"].as_str().unwrap_or(""))),
+                None,
+            );
+        }
         for key in fresh {
             crate::chrome::notify_desktop(
                 "새 Face ID 승인 열쇠",
@@ -236,6 +308,24 @@ impl App {
         }
         self.device_account.op.message = None;
         match act {
+            Act::Connect => {
+                let (tx, rx) = mpsc::channel();
+                let op = &mut self.device_account.op;
+                op.busy = Some(rx);
+                op.connecting = true;
+                std::thread::spawn(move || {
+                    let ask = tx.clone();
+                    let mut choose = |accounts: &[kasa_mcp::op_connect::Account]| {
+                        let (reply, answer) = mpsc::channel();
+                        ask.send(Done::Choose(accounts.to_vec(), reply)).ok()?;
+                        answer.recv_timeout(std::time::Duration::from_secs(300)).ok().flatten()
+                    };
+                    let result = kasa_mcp::op_connect::connect(&mut choose)
+                        .map(|done| format!("1Password 와 이었어요 · 금고 {done}"))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(Done::Acted(result));
+                });
+            }
             Act::AskToken => {
                 if let Some(window) = &self.window {
                     token_sheet(window);
@@ -329,6 +419,37 @@ fn token_sheet(window: &winit::window::Window) {
     }
 }
 
+/// 1Password 계정 고르기 — 금고와 서비스 계정을 만들 계정. 단추 응답 1000 이 첫 계정이고, 맨 끝 「취소」는 Esc.
+#[cfg(target_os = "macos")]
+fn account_sheet(window: &winit::window::Window, accounts: &[kasa_mcp::op_connect::Account]) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+    let info = format!(
+        "학생 전용 금고 「{}」와 그 금고만 읽는 서비스 계정을 고른 계정에 만들어요.",
+        kasa_mcp::op_connect::VAULT
+    );
+    let Some((alert, ns_window)) = alert(window, "어느 1Password 계정에 만들까요?", &info) else { return };
+    let shown = accounts.len().min(4);
+    unsafe {
+        for account in &accounts[..shown] {
+            let title = if account.email.is_empty() { account.url.clone() } else { format!("{} · {}", account.url, account.email) };
+            let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str(&title)];
+        }
+        let cancel: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str("취소")];
+        let _: () = msg_send![cancel, setKeyEquivalent: &*NSString::from_str("\u{1b}")];
+        let addr = alert as usize;
+        let handler = block2::RcBlock::new(move |resp: isize| {
+            let picked = usize::try_from(resp - 1000).ok().filter(|i| *i < shown);
+            if let Ok(mut answer) = ACCOUNT_ANSWER.lock() {
+                *answer = Some(picked);
+            }
+            let _: () = msg_send![addr as *mut AnyObject, release];
+        });
+        let _: () = msg_send![alert, beginSheetModalForWindow: ns_window, completionHandler: &*handler];
+    }
+}
+
 /// 폰 열쇠 믿기 — 두 화면의 지문을 사람이 맞춰 본다. Return 은 취소다(치던 Enter 가 새도 믿음이 나가지 않게).
 #[cfg(target_os = "macos")]
 fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Option<usize> {
@@ -413,6 +534,13 @@ fn shot_alert(_alert: usize, _path: &str) {}
 fn token_sheet(_window: &winit::window::Window) {}
 
 #[cfg(not(target_os = "macos"))]
+fn account_sheet(_window: &winit::window::Window, _accounts: &[kasa_mcp::op_connect::Account]) {
+    if let Ok(mut answer) = ACCOUNT_ANSWER.lock() {
+        *answer = Some(None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn trust_sheet(_window: &winit::window::Window, _key: &serde_json::Value) -> Option<usize> {
     None
 }
@@ -458,7 +586,9 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
         false,
     );
     let cy = *y + (ROW_H - CTL_H) / 2.0;
-    if v.busy {
+    if v.connecting {
+        draw_text(g, x + w - 168.0, cy + 5.0, "1Password 허락을 기다려요…", 12.0, theme::text_dim(), false);
+    } else if v.busy {
         draw_text(g, x + w - 64.0, cy + 5.0, "처리 중…", 12.0, theme::text_dim(), false);
     } else if v.confirm_clear {
         button(g, s, hits, (x + w - 150.0, cy, 82.0, CTL_H), "정말 지우기", act(Act::Clear), false);
@@ -467,7 +597,8 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
         button(g, s, hits, (x + w - 150.0, cy, 82.0, CTL_H), "바꾸기", act(Act::AskToken), false);
         button(g, s, hits, (x + w - 60.0, cy, 60.0, CTL_H), "지우기", act(Act::AskClear), false);
     } else {
-        button(g, s, hits, (x + w - 96.0, cy, 96.0, CTL_H), "토큰 넣기", act(Act::AskToken), true);
+        button(g, s, hits, (x + w - 214.0, cy, 82.0, CTL_H), "토큰 넣기", act(Act::AskToken), false);
+        button(g, s, hits, (x + w - 124.0, cy, 124.0, CTL_H), "1Password 연결", act(Act::Connect), true);
     }
     *y += ROW_H;
 
@@ -490,7 +621,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
         let label = format!("{} · {}", key["label"].as_str().unwrap_or("폰"), key["fingerprint"].as_str().unwrap_or(""));
         let label = fit(g, &label, w - 80.0, 12.0, true);
         draw_text(g, x, *y + 4.0, &label, 12.0, theme::text(), true);
-        draw_text(g, x, *y + 21.0, "새 열쇠 — 폰의 지문과 맞춰 보고 믿기", 10.5, theme::text_dim(), false);
+        draw_text(g, x, *y + 21.0, "다른 기기의 새 열쇠 — 폰의 지문과 맞춰 보고 믿기", 10.5, theme::text_dim(), false);
         if !v.busy {
             button(g, s, hits, (x + w - 64.0, *y + (ROW_H - CTL_H) / 2.0, 64.0, CTL_H), "믿기…", act(Act::Trust(index)), true);
         }
@@ -501,8 +632,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
         x,
         y,
         w,
-        if trusted.is_empty() {
-            "폰 설정 → 계정 → Face ID 승인 열쇠를 만들면 여기 새 열쇠로 떠요. 믿기를 누른 폰만 학생의 1Password 요청을 허락할 수 있어요."
+        if !has_token {
+            "「1Password 연결」을 누르면 1Password 창이 떠요. 허락하면 학생 전용 금고와 그 금고만 읽는 서비스 계정을 만들고 토큰은 이 맥 키체인에만 넣어요."
+        } else if trusted.is_empty() {
+            "폰 설정 → 계정 → 1Password 에서 「Face ID 로 연결」을 누르면 이 맥이 그 폰을 바로 믿어요."
         } else {
             "학생은 kasaterm-cli op run -e 이름=op://… -- 명령 으로 써요. 요청마다 폰 Face ID 한 번, 값은 관문·폰을 지나지 않아요."
         },

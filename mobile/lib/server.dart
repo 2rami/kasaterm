@@ -296,6 +296,28 @@ class WindowLayout {
   }
 }
 
+/// 맥 한 대의 1Password 연결 — 토큰이 있나, 어느 금고인가, 믿는 폰 열쇠의 지문. 토큰 값은 없다.
+class OpLink {
+  const OpLink({required this.token, required this.vault, required this.trusted});
+
+  final bool token;
+  final String vault;
+  final List<String> trusted;
+
+  static OpLink? parse(Object? body) {
+    final op = body is Map ? body['op'] : null;
+    if (op is! Map) return null;
+    return OpLink(
+      token: op['token'] == true,
+      vault: op['vault'] is String ? op['vault'] as String : '',
+      trusted: [
+        for (final t in (op['trusted'] as List?) ?? const [])
+          if (t is Map && t['fingerprint'] is String) t['fingerprint'] as String,
+      ],
+    );
+  }
+}
+
 class Machine {
   const Machine({
     required this.label,
@@ -768,6 +790,29 @@ class Server {
     }
     if (res.statusCode != 200) {
       throw ServerException('설정이 안 바뀌었다 (${res.statusCode})');
+    }
+  }
+
+  /// 그 맥의 1Password 연결 — 부르면 맥이 폰 열쇠 자동 믿기 규칙을 지금 돌리고 상태를 준다
+  /// (docs/op-faceid-approval.md). 옛 판은 이 동작을 몰라 null.
+  Future<OpLink?> opLink({String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _client
+          .post(
+            uri('settings/action', machine: machine),
+            headers: {'content-type': 'application/json'},
+            body: jsonEncode({'action': 'op-link'}),
+          )
+          .timeout(const Duration(seconds: 45));
+    } catch (_) {
+      throw const ServerException('맥에 닿지 못했어요.');
+    }
+    if (res.statusCode != 200) throw ServerException('맥에 닿지 못했어요.', status: res.statusCode);
+    try {
+      return OpLink.parse(jsonDecode(utf8.decode(res.bodyBytes)));
+    } on FormatException {
+      return null;
     }
   }
 

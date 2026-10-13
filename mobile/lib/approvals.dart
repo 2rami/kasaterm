@@ -304,7 +304,7 @@ class ApprovalCenter extends ChangeNotifier {
       }
       final public = await signer.publicKey();
       if (public == null) {
-        throw const AccountException('Face ID 승인 열쇠가 없어요. 설정 → 계정 → Face ID 승인 열쇠에서 만들어 주세요.', code: 'no_key');
+        throw const AccountException('이 폰이 아직 1Password 에 연결되지 않았어요. 설정 → 계정 → 1Password 에서 「Face ID 로 연결」을 눌러 주세요.', code: 'no_key');
       }
       try {
         sig = await signer.sign(a.challenge!, a.signReason);

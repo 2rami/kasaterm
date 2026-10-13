@@ -2622,6 +2622,14 @@ impl Backend for PtyBackend {
         if action == "onboarding-state" {
             return Ok(crate::settings::onboarding_state_json());
         }
+        // 폰이 「Face ID 로 연결」 뒤 부른다 — 화면의 1분 주기를 기다리지 않고 자동 믿기 규칙을 지금 돌린다.
+        // 믿는 것은 `op_approval::auto_pick` 규칙이 고른 열쇠뿐이고 토큰은 이 길로 안 다닌다.
+        if action == "op-link" {
+            return Ok(match kasa_mcp::op_approval::sync() {
+                Ok((status, rest)) => serde_json::json!({"ok": true, "op": status, "waiting": rest.len()}),
+                Err(error) => serde_json::json!({"ok": true, "op": kasa_mcp::op_approval::status(), "error": error.to_string()}),
+            });
+        }
         if action == "set-browser-target" {
             let wanted = label.unwrap_or("");
             let own_id = kasa_mcp::mobile::machine_identity();

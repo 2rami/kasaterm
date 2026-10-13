@@ -32,9 +32,10 @@
   연다). 앱은 참조의 금고가 허용 목록에 있는지 한 번 더 본다 — 틀린 참조는 폰에 띄우기 전에 거절한다.
 - **요청마다 한 번.** nonce 128비트, 만료는 관문 승인과 같은 2분, 결정 하나. 쓴 nonce·요청 id 는 만료까지 앱이
   기억해 같은 허락을 두 번 쓰지 않는다. 연달아 읽기는 [묶음](#정할-것)에서 정한다.
-- **서명은 두 곳에서 본다.** 관문은 폰이 맡긴 공개키로, 맥은 **사람이 맥 화면에서 믿은** 공개키로. 맥은 그 키가
-  관문 목록에도 살아 있어야 쓴다(관문에서 폐기된 폰은 맥에서도 바로 막힌다). 그래서 관문 혼자서는 허락을 지어낼
-  수 없고, 관문이 키를 지우는 쪽으로만 영향을 준다.
+- **서명은 두 곳에서 본다.** 관문은 폰이 맡긴 공개키로, 맥은 **맥이 믿은** 공개키로. 맥은 그 키가 관문 목록에도
+  살아 있어야 쓴다(관문에서 폐기된 폰은 맥에서도 바로 막힌다). 맥이 키를 믿는 규칙은 [연결](#연결--버튼-하나와-face-id-한-번)에
+  있다 — 2026-10-13 부터 처음 들어온 폰 열쇠는 사람 확인 없이 믿으므로, **관문이 열쇠를 끼워 넣으면 막지 못한다**(선택한 대가).
+  끼워 넣지 않는 한 관문 혼자서는 허락을 지어낼 수 없다.
 - **보인 것 그대로.** 서명 대상은 도전값 전체(정규 JSON — 키 정렬, 공백 없음)다. 관문 지문(digest)도 도전값을
   묶는다. 명령·참조·학생·칸·만료 중 하나라도 바뀌면 서명이 안 맞는다. 잘린 요청은 원격 승인과 같이 허락할 수 없다.
 - **Face ID 는 폰 안에서만.** 「Face ID 성공」 참/거짓을 서버가 믿지 않는다. 키가 `.biometryCurrentSet` 으로 묶여
@@ -85,13 +86,37 @@
 
 새 거절 코드: `signature_required` · `bad_signature` · `phone_only` · `key_unknown` · `challenge_invalid`.
 
-## 등록 — 폰 열쇠를 맥이 믿기까지
+## 연결 — 버튼 하나와 Face ID 한 번
 
-1. 폰 설정 → 계정 → 「Face ID 승인 열쇠」 [만들기]: Secure Enclave 에 P-256 키(`.privateKeyUsage` +
-   `.biometryCurrentSet`)를 만들고 공개키를 관문에 맡긴다. 화면에 지문(공개키 SHA-256 앞 12자, `ABCD-EFGH-IJKL`).
-2. 맥 앱은 관문 키 목록에서 아직 안 믿은 키를 보면 알림 「새 Face ID 열쇠 · 폰 이름」 → [보기] 시트에 같은 지문.
-   사람이 폰 화면과 같은지 보고 [믿기]. 시트의 Return 은 [취소]다. 믿은 키는 맥 키체인(앱 전용)에 둔다.
-3. 거두기: 폰에서 열쇠 지우기 · 관문에서 기기 폐기 · 맥 설정에서 믿음 거두기 — 어느 하나면 막힌다.
+2026-10-13 결정: 웹에서 서비스 계정을 만들어 토큰을 붙여 넣고, 폰에서 열쇠를 만들고, 맥에서 12자리 지문을 맞춰 믿던 네 걸음이
+너무 번거로워 둘로 줄였다. 지문 맞춰 보기는 없앴다(위 「서명은 두 곳에서 본다」의 대가).
+
+**맥 — 「1Password 연결」**(설정 → 계정 → 1Password, `kasa_mcp::op_connect`): 1Password 앱의 CLI 연동으로
+1. `op account list` — 계정이 여럿이면 시트로 고른다(최대 넷).
+2. `op vault list` 에서 금고 「KASA 학생」을 찾고, 없으면 `op vault create`.
+3. `op service-account create "kasaterm <호스트>" --vault <금고 id>:read_items --raw` → 토큰은 `op` 의 표준 출력에서 이 앱으로만
+   오고 곧장 `set_token`(실행기로 금고가 하나인지 확인 → 키체인). 막 만든 계정이 퍼질 때까지 몇 번 다시 확인한다.
+4. `op signout`, 셸을 닫는다.
+
+1Password 의 CLI 연동 허락은 tty 와 그 세션 시작 시각에 묶인다. 명령마다 프로세스를 띄우면 명령마다 1Password 창이 뜨므로,
+가짜 터미널(openpty) 하나에 세션 지도자 `/bin/sh` 를 세우고(setsid·TIOCSCTTY) 명령을 표준 입력으로 한 줄씩 넣는다 — `op` 의
+표준 출력만 앱으로 오고 1Password 의 말은 tty 로 가서 오류 문구가 된다. 허락은 한 번이고, 셸을 닫으면 그 tty 의 허락도 끝난다.
+부르는 `op` 는 `/opt/homebrew/bin`·`/usr/local/bin` 의 것이고 1Password 서명(`com.1password.op`, 팀 `2BUA8C4S2C`)을 본 뒤에만
+쓴다. 서비스 계정을 만들 권한이 없는 계정(회사 계정의 일반 구성원 등)이면 1Password 의 거절 문구를 그대로 보이고, 관리자가 만든
+토큰을 「토큰 넣기」로 넣는 옛 길이 남아 있다.
+
+**폰 — 「Face ID 로 연결」**(설정 → 계정 → 1Password, `approval_key.dart`): Secure Enclave 열쇠를 만들고(없을 때만) Face ID 로
+`kasaterm-link/1\n` 에 한 번 서명해 본다(이 머리는 승인 머리와 달라 어떤 허락으로도 안 읽히고 어디에도 안 보낸다). 공개키를
+관문에 맡긴 뒤 계정의 켜진 맥마다 설정 동작 `op-link` 를 부른다 → 맥이 아래 규칙을 지금 돌리고 토큰·금고·믿는 열쇠 지문을 준다.
+폰은 맥마다 「연결됨」·「1Password 연결이 남았어요」를 줄로 보인다.
+
+**맥이 폰 열쇠를 믿는 규칙**(`op_approval::auto_pick`, 화면 1분 주기·`op-link`·학생 요청 직전에 돈다):
+- 이미 믿은 기기가 갈아 끼운 열쇠(Face ID 재등록)는 늘 믿는다.
+- 그런 열쇠가 없고 믿는 열쇠 중 관문에 살아 있는 것도 없으면, 들어온 열쇠를 다 믿는다(처음 연결).
+- 그 밖의 새 기기(믿는 폰이 이미 있는데 들어온 다른 기기)는 옛 지문 시트로 사람이 믿는다.
+- 사람이 맥에서 거둔 열쇠 id 는 기억해 다시 집지 않는다(`refused-keys`, 최근 64개).
+
+거두기: 폰에서 「연결 끊기」 · 관문에서 기기 폐기 · 맥 설정에서 믿음 거두기 — 어느 하나면 막힌다.
 
 ## 시험
 
@@ -111,6 +136,8 @@
 | 토큰 저장 자리 | 로그인 키체인, 접근은 kasaterm 앱 하나(설정 → 계정 → 1Password 의 암호 칸) |
 | 연달아 읽기 | 묶음 없음 — 요청마다 Face ID. 대신 `op run -e A=… -e B=…` 한 요청에 참조 여럿(최대 16) |
 | 실행기 | Go SDK 실행기 `kasa-op`(앱 번들 `Contents/MacOS/kasa-op`, 토큰은 표준 입력) |
+| 폰 열쇠 믿기(2026-10-13) | 지문 맞춰 보기 대신 처음 들어온 열쇠를 자동으로 믿는다 — 관문 끼워 넣기를 못 막는 대가를 받아들였다 |
+| 토큰 얻기(2026-10-13) | 맥이 op CLI 로 금고·읽기 전용 서비스 계정을 직접 만든다. 붙여 넣기는 권한 없는 계정의 예비 길 |
 
 ## 자리
 
@@ -121,7 +148,9 @@
 | 맥: 도전값·재확인·nonce·실행기·키체인·감사 | `crates/kasa-mcp/src/op_approval.rs` |
 | 맥: 관문 호출(`create_secret`·`keys`) | `crates/kasa-mcp/src/device_approvals.rs` |
 | 맥: 소켓 `op.secret`(칸·명령·폴더를 소켓 상대 pid 에서) | `app/kasaterm/src/socket.rs` · `crates/kasa-socket/src/server.rs`(`peer_pid`) |
-| 맥: 설정 「계정」 1Password(토큰·믿기 시트) | `app/kasaterm/src/native_op_approval.rs` |
+| 맥: 설정 「계정」 1Password(연결·토큰·계정 고르기·믿기 시트) | `app/kasaterm/src/native_op_approval.rs` |
+| 맥: 「1Password 연결」 — op CLI 한 tty 세션으로 금고·서비스 계정 | `crates/kasa-mcp/src/op_connect.rs` |
+| 맥: 폰이 부르는 `op-link`(자동 믿기 지금 돌리기) | `app/kasaterm/src/socket.rs` 설정 동작 |
 | CLI | `crates/kasa-socket/src/bin/kasaterm-cli.rs`(`op read|run|status`) |
 | 실행기 | `tools/kasa-op/`(Go, `scripts/build-app.sh` 가 굽고 서명) |
 | 폰 | `mobile/lib/secure_key.dart` · `mobile/lib/approvals.dart` · `mobile/lib/screens/approval_screen.dart` · `mobile/lib/screens/approval_key.dart` · `mobile/ios/Runner/AppDelegate.swift`(`ApprovalKey`) |
@@ -134,7 +163,12 @@
 KASATERM_OP_STORE_DIR=/tmp/<리그>/op        # 키체인 대신 이 폴더(격리 실행은 키체인을 절대 안 쓴다)
 KASATERM_OP_HELPER=/tmp/<리그>/fake-op      # 가짜 실행기(이때만 서명 확인을 건너뛴다)
 KASATERM_OP_AUTOTRUST_MS=5000 KASATERM_OP_AUTOTRUST_SHOT=/tmp/<리그>/trust.png   # 검증 실행: 새 열쇠 믿기 시트를 찍고 누른다
+KASATERM_OP_CLI=/tmp/<리그>/fake-op         # 「1Password 연결」이 부를 가짜 op(격리 실행에서만, 서명 확인을 건너뛴다)
 ```
+
+설정 화면만 볼 때는 `KASATERM_AUTOSETTINGS=accounts KASATERM_AUTOSETTINGS_ACTION=device-op`(토큰·믿는 폰·새 열쇠) 또는
+`device-op-empty`(처음 연결 전) 로 띄운다. op CLI 쪽은 `cargo test -p kasa-mcp op_connect` 가 가짜 `op` 로 한 tty·한 세션에서
+금고·서비스 계정을 만드는지, 계정 고르기·취소·1Password 거절 문구를 본다. 실제 1Password 창의 허락은 사람이 확인한다.
 
 를 준다. 학생 요청은 리그 칸 안에서 `kasaterm-cli op read …` 로 낸다(칸 밖 프로세스는 `not_in_pane`). 가상 아이폰은 Secure
 Enclave 가 없어 시뮬레이터 전용 시험 키(접근 제어 없음)를 만들고 서명 전에 Face ID 를 따로 묻는다 — Features → Face ID →
@@ -146,5 +180,6 @@ Matching Face 로 흉내 낸다. 이 갈래는 `#if targetEnvironment(simulator)
   `relay-approval-keys.json`(0600)에 남는다.
 - 맥: 실행기는 `scripts/build-app.sh` 가 Go 로 굽는다. Go 가 없는 기계에서 구운 판에는 실행기가 없고, 설정이 「이 판에 실행기가
   없어요」라고 말한다. 빠른 업데이트를 굽는 controller 기계에 Go 가 있어야 preview 판에 들어간다.
-- 사람이 처음 한 번: 1Password 에서 전용 금고를 만들고 그 금고 「읽기」만 가진 서비스 계정을 만든다 → 맥 설정 → 계정 →
-  1Password → 토큰 넣기 → 폰 설정 → 계정 → Face ID 승인 열쇠 → 열쇠 만들기 → 맥에 뜬 새 열쇠의 지문을 맞춰 보고 믿기.
+- 사람이 처음 한 번: 맥 설정 → 계정 → 1Password → 「1Password 연결」(1Password 창에서 허락) → 폰 설정 → 계정 → 1Password →
+  「Face ID 로 연결」. 맥에 1Password CLI(`brew install 1password-cli`)와 1Password 설정 → 개발자 → 「1Password CLI 와 연동」이
+  있어야 한다.

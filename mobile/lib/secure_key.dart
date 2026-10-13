@@ -29,7 +29,13 @@ abstract class ApprovalSigner {
 
   /// [challenge] 를 머리와 함께 서명한다(Face ID). 사람이 취소하면 null — 그때는 아무것도 보내지 않는다.
   Future<String?> sign(String challenge, String reason);
+
+  /// 연결할 때 Face ID 를 한 번 묻고 열쇠가 실제로 서명하는지 본다. 취소면 false.
+  Future<bool> confirm(String reason);
 }
+
+/// 연결 확인 서명의 머리 — [secretPrefix] 와 달라서 이 서명은 어떤 승인으로도 읽히지 않는다. 어디로도 보내지 않는다.
+const linkPrefix = 'kasaterm-link/1\n';
 
 class SecureEnclaveSigner implements ApprovalSigner {
   const SecureEnclaveSigner();
@@ -60,4 +66,8 @@ class SecureEnclaveSigner implements ApprovalSigner {
     'message': base64.encode(utf8.encode('$secretPrefix$challenge')),
     'reason': reason,
   });
+
+  @override
+  Future<bool> confirm(String reason) async =>
+      await _ch.invokeMethod<String>('sign', {'message': base64.encode(utf8.encode(linkPrefix)), 'reason': reason}) != null;
 }
