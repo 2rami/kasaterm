@@ -117,7 +117,10 @@ SH
 # 함께 보므로 판을 서울에도 놓는다(docs/seoul-gateway.md).
 # 맨 위에서 이미 mobile/ 로 들어왔다 — `$0` 이 상대 경로면 여기서 다시 따라가면 어긋난다.
 seoul_sync="$(cd .. && pwd)/tools/kasa-gateway-seoul/gateway.sh"
-if [ "$host" != local ] && [ -x "$seoul_sync" ]; then
+if [ "$host" = local ]; then
+  # 관문 기계(미니)엔 서울 관리 ssh 가 없다 — 설치 링크는 되지만 폰의 새 판 알림은 서울이 판을 받아야 뜬다.
+  echo "주의: 서울 관문에는 아직 이 판이 없다 — 서울 관리 별칭(kasanet-relay)이 있는 기계에서 tools/kasa-gateway-seoul/gateway.sh sync-install" >&2
+elif [ -x "$seoul_sync" ]; then
   KASA_MINI_SSH="$host" "$seoul_sync" sync-install >/dev/null \
     || echo "주의: 서울 관문에 판을 못 놓았다 — tools/kasa-gateway-seoul/gateway.sh sync-install" >&2
 fi
