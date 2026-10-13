@@ -4050,6 +4050,7 @@ impl Backend for PtyBackend {
                     ws.panes.get(surface_id).and_then(|p| p.character.clone())
                 })
             })
+            .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| surface_id.to_string());
         let mark = if outcome == "succeeded" { "완료" } else { "실패" };
         let line = if summary.is_empty() {

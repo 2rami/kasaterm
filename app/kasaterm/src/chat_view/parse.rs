@@ -486,12 +486,17 @@ pub(crate) fn relayed(text: &str) -> Option<(Sender, String)> {
         let rest = rest.trim_start();
         let open = rest.find('(')?;
         let close = open + rest[open..].find(')')?;
-        if open == 0 || !rest[open + 1..close].starts_with('%') {
+        if !rest[open + 1..close].starts_with('%') {
             return None;
         }
+        // 캐릭터가 빈 칸의 보고는 `[실패] (%1)` 로 남아 있다 — 이름 대신 칸 번호로 단다.
+        let name = match rest[..open].trim() {
+            "" => &rest[open + 1..close],
+            name => name,
+        };
         let body = rest[close + 1..].trim_start();
         let body = body.strip_prefix('—').unwrap_or(body).trim();
-        return Some((sender(&rest[..open], via), body.to_string()));
+        return Some((sender(name, via), body.to_string()));
     }
     // 나쵸가 일을 맡기며 붙이는 첫 줄은 보고 방법 안내라 걷고, 그 아래 맡긴 글만 남긴다.
     if let Some(rest) = t.strip_prefix("[origin=nacho") {
@@ -1016,6 +1021,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"[origin=nacho task=w1] 보고는 이렇게 한다\n거노 지시 그대로: 고쳐 줘"}}"#,
             r#"{"type":"user","message":{"content":"[완료] 표시만 친 사람 말"}}"#,
             r#"{"type":"user","message":{"content":"사람 말"}}"#,
+            r#"{"type":"user","message":{"content":"[실패] (%1) — CI 깨짐"}}"#,
         ]);
         let who: Vec<Option<(&str, &str, &str)>> = c
             .items
@@ -1031,6 +1037,7 @@ mod tests {
         assert_eq!(who[3], Some(("나쵸", "맡긴 일", "거노 지시 그대로: 고쳐 줘")));
         assert_eq!(who[4], None, "괄호 속 칸 번호가 없으면 사람이 친 글이다");
         assert_eq!(who[5], None);
+        assert_eq!(who[6], Some(("%1", "실패 보고", "CI 깨짐")));
     }
 
     #[test]
