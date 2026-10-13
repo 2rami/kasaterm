@@ -1250,9 +1250,20 @@ impl PaneViewShift {
         }
     }
 
-    fn term_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+    /// 화면 칸을 앱이 아는 칸으로. 줄 글 뒤 빈칸은 다시 그린 칸이라 원본 자리가 안 실려 있다 — 그 줄 원본
+    /// 자리에서 이어 센다(`source_cols` 안으로). 안 그러면 거울에서 줄 끝 빈칸을 누른 것이 흘려지고 휠이 앱의
+    /// 첫 칸으로 갔다. 줄 통째로 원본에 없는 칸(당겨 온 지난 줄·덧댄 빈 줄)은 그대로 `None`.
+    fn term_pos(&self, row: usize, col: usize, source_cols: usize) -> Option<(usize, usize)> {
         match &self.projection {
-            Some(projection) => projection.source_map.get(row)?.get(col).copied().flatten(),
+            Some(projection) => {
+                let cells = projection.source_map.get(row)?;
+                if let Some(pos) = cells.get(col).copied().flatten() {
+                    return Some(pos);
+                }
+                let (at, (r, c)) = cells.iter().take(col.min(cells.len())).enumerate().rev()
+                    .find_map(|(i, pos)| pos.map(|pos| (i, pos)))?;
+                Some((r, (c + col - at).min(source_cols.saturating_sub(1)).max(c)))
+            }
             None => self.term_row(row).map(|row| (row, col)),
         }
     }

@@ -251,6 +251,19 @@ impl ScreenUpdate {
         if self.alt_screen {
             out.push_str("\x1b[?1049h");
         }
+        // 앱이 켜 둔 입력 모드도 다시 켠다. 켜는 바이트는 붙기 전에 지나가 다시 안 온다 — 늦게 붙은 거울은
+        // 마우스를 몰라 휠이 원본 앱에 안 가고 거울 안에서만 굴렀다(풀스크린 claude, 2026-10-13).
+        for (on, mode) in [
+            (self.mouse_enabled, "1000"),
+            (self.mouse_motion, "1003"),
+            (self.mouse_sgr, "1006"),
+            (self.app_cursor, "1"),
+            (self.bracketed_paste, "2004"),
+        ] {
+            if on {
+                out.push_str(&format!("\x1b[?{mode}h"));
+            }
+        }
         out.push_str("\x1b[H\x1b[2J");
 
         let mut continued_at = None;
@@ -436,6 +449,21 @@ mod ansi_tests {
         assert!(ansi(&s).starts_with("\x1b[?1049h"));
         // 대체 화면이 아니면 붙이지 않는다 — 짝 없는 복귀를 만들면 안 된다.
         assert!(!ansi(&upd(vec![])).contains("1049"));
+    }
+
+    #[test]
+    fn replays_the_input_modes_the_app_turned_on() {
+        let mut s = upd(vec![(0, vec![cell('x')])]);
+        assert!(!ansi(&s).contains("\x1b[?1000h"));
+        s.mouse_enabled = true;
+        s.mouse_sgr = true;
+        s.app_cursor = true;
+        s.bracketed_paste = true;
+        let a = ansi(&s);
+        for mode in ["1000", "1006", "1", "2004"] {
+            assert!(a.contains(&format!("\x1b[?{mode}h")), "{mode} missing: {a:?}");
+        }
+        assert!(!a.contains("\x1b[?1003h"), "motion is only for apps that asked for it");
     }
 
     #[test]

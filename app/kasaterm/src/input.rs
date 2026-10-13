@@ -728,13 +728,36 @@ mod mirror_input_tests {
         }).collect()];
         let projection = crate::mirror_view::project(&source, (0, 7), 4, 3, None, None);
         let shift = crate::PaneViewShift { projection: Some(std::sync::Arc::new(projection)) };
-        assert_eq!(shift.term_pos(1, 3), Some((0, 7)));
+        assert_eq!(shift.term_pos(1, 3, 8), Some((0, 7)));
         assert_eq!(shift.display_pos(0, 7), Some((1, 3)));
-        assert_eq!(shift.term_pos(2, 0), None, "viewer-only padding is not a source cell");
+        assert_eq!(shift.term_pos(2, 0, 8), None, "viewer-only padding is not a source cell");
         let clipped = crate::PaneViewShift {
             projection: Some(std::sync::Arc::new(crate::mirror_view::project(&source, (0, 7), 4, 1, None, Some(1)))),
         };
         assert_eq!(clipped.display_pos(0, 7), None, "offscreen cursor/IME must stay hidden");
+    }
+}
+
+#[cfg(test)]
+mod mirror_blank_cell_tests {
+    /// 거울에서 줄 글 뒤 빈칸 — 같은 원본 줄의 이어지는 칸이다. 원본 폭 밖으로는 안 나간다.
+    #[test]
+    fn blank_cells_after_a_line_map_to_the_same_source_row() {
+        let row = |text: &str| -> Vec<crate::GridCell> {
+            let mut cells: Vec<_> = text.chars().map(|ch| crate::GridCell { ch, ..crate::GridCell::blank() }).collect();
+            cells.resize(10, crate::GridCell::blank());
+            cells
+        };
+        let source = vec![row("abc"), row(""), row("de")];
+        let projection = crate::mirror_view::project(&source, (2, 2), 10, 5, None, None);
+        let shift = crate::PaneViewShift { projection: Some(std::sync::Arc::new(projection)) };
+        assert_eq!(shift.term_pos(0, 1, 10), Some((0, 1)));
+        assert_eq!(shift.term_pos(0, 7, 10), Some((0, 7)), "blank tail of row 0");
+        assert_eq!(shift.term_pos(2, 9, 10), Some((2, 9)));
+        assert_eq!(shift.term_pos(2, 9, 6), Some((2, 5)), "never past the source width");
+        let wide = crate::mirror_view::project(&source, (2, 2), 30, 5, None, None);
+        let shift = crate::PaneViewShift { projection: Some(std::sync::Arc::new(wide)) };
+        assert_eq!(shift.term_pos(0, 25, 10), Some((0, 9)), "a wider viewer still lands inside the source row");
     }
 }
 
@@ -1144,8 +1167,9 @@ impl App {
         // 그대로 넘기면 그 TUI 는 다른 줄이 눌린 것으로 안다(2026-09-05). 당겨 온
         // 구간은 스크롤백이라 앱 화면에 자리가 없어 그 클릭은 흘린다 — 없는 줄을
         // 눌렀다고 알리느니 아무 일도 안 하는 편이 낫다.
+        let source_cols = self.ws.lock().unwrap().panes.get(pane_id).and_then(|p| p.term()).map_or(0, |t| t.cols as usize);
         let (row, col) = match self.pane_view_shift.get(pane_id) {
-            Some(shift) => match shift.term_pos(row as usize, col as usize) {
+            Some(shift) => match shift.term_pos(row as usize, col as usize, source_cols) {
                 Some((r, c)) => (r as u16, c as u16),
                 None => return,
             },
@@ -3102,9 +3126,11 @@ impl App {
             // 앱이 다른 줄에서 굴린 것으로 안다. 당겨 온 구간(스크롤백)은 앱 화면에
             // 자리가 없으니 첫 줄로 친다: 휠은 어느 줄인지보다 **그 pane 안**인지가
             // 중요해서, 클릭과 달리 흘리지 않고 보낸다.
+            let source_cols = target_pane_id.as_ref().and_then(|id| self.ws.lock().unwrap().panes.get(id)
+                .and_then(|p| p.term()).map(|t| t.cols as usize)).unwrap_or(0);
             let (row, col) = target_pane_id.as_ref()
                 .and_then(|id| self.pane_view_shift.get(id))
-                .map(|shift| shift.term_pos(row as usize, col as usize)
+                .map(|shift| shift.term_pos(row as usize, col as usize, source_cols)
                     .map(|(r, c)| (r as u16, c as u16)).unwrap_or((0, 0)))
                 .unwrap_or((row, col));
             let button = if lines > 0 { 64 } else { 65 };

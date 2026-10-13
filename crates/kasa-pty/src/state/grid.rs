@@ -579,6 +579,20 @@ mod raw_snapshot_wrap_tests {
         }
     }
 
+    /// 풀스크린 claude 처럼 붙기 전에 마우스를 켠 앱 — 늦게 붙은 거울도 같은 입력 모드로 시작해야 휠이 원본으로 간다.
+    #[test]
+    fn late_subscriber_inherits_the_apps_input_modes() {
+        let mut source = parser(8, 4);
+        feed(&mut source, b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1h\x1b[?2004hscreen");
+        let title = Arc::new(Mutex::new(None));
+        let frame = snapshot(&mut source, 8, 4, "%mode-test", &title, true);
+        let mut replay = parser(8, 4);
+        feed(&mut replay, &raw_screen_ansi(&frame));
+        let got = snapshot(&mut replay, 8, 4, "%mode-test", &title, true);
+        assert_eq!((got.alt_screen, got.mouse_enabled, got.mouse_sgr, got.mouse_motion, got.app_cursor, got.bracketed_paste),
+            (true, true, true, false, true, true));
+    }
+
     #[test]
     fn alternate_screen_wraps_do_not_populate_primary_history() {
         let mut source = parser(8, 4);
