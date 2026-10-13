@@ -2266,12 +2266,12 @@ pub(crate) fn draw_side_tabs(
     ty + 27.0
 }
 
-const ROW_H: f32 = 22.0;
+pub(crate) const ROW_H: f32 = 22.0;
 /// 섹션 본문과 다음 섹션 머리 사이 숨. 없으면 목록 마지막 행과 다음 머리가
 /// 붙어 두 섹션이 한 덩어리로 읽힌다.
-const SEC_GAP: f32 = 8.0;
+pub(crate) const SEC_GAP: f32 = 8.0;
 /// 기기 머리 — 색 점 · 이름 · 상태 · pane 수.
-const DEV_H: f32 = 30.0;
+pub(crate) const DEV_H: f32 = 30.0;
 /// 방 머리와 「닫힌 pane」 줄. 위 4px 는 앞 줄과의 숨이다.
 const ROOM_H: f32 = 22.0;
 /// 학생(pane) 한 줄.
@@ -2496,10 +2496,13 @@ pub(crate) enum ExecutionLine<'a> {
     Context(String),
     Process(&'a ProcRow),
     Schedule(&'a kasa_mcp::ScheduleItem),
+    /// 카드 아래 「내 프롬프트」 묶음 통째(`info_prompts`). 줄마다 누름 자리를 새로 매기므로 안 보여도 부른다.
+    Prompts,
 }
 impl ExecutionLine<'_> {
     fn height(&self) -> f32 {
         match self {
+            Self::Prompts => crate::info_prompts::height(),
             Self::Section(_) | Self::Fold { .. } => DEV_H,
             Self::Group(..) | Self::Schedule(_) | Self::Head { .. } => GROUP_H,
             Self::Now(_) => NOW_H,
@@ -2761,6 +2764,7 @@ pub(crate) fn draw_info_col(
     info.focus_rects.clear();
     let value_w = (w - 26.0 - kv_name_w(w - 26.0)).max(0.0);
     let mut lines = crate::info_focus::card_lines(&info.focus_view, info.focus_alt);
+    lines.push(ExecutionLine::Prompts);
     let rooms_open = info.pane_expanded.contains(ROOMS_FOLD);
     lines.push(ExecutionLine::Fold { title: format!("모든 방 · 칸 {}개", snap.panes.iter().filter(|g| !g.closed).count()), key: ROOMS_FOLD.into() });
     if rooms_open {
@@ -2786,8 +2790,14 @@ pub(crate) fn draw_info_col(
     g.push_clip(x, top, w.max(0.0), (bottom - top).max(0.0));
     for line in &lines {
         let row_h = line.height();
+        if matches!(line, ExecutionLine::Prompts) {
+            crate::info_prompts::draw(g, cursor, &mut info.tip_rects, x, w, y, top, bottom);
+            y += row_h;
+            continue;
+        }
         if y + row_h > top && y < bottom {
             match line {
+                ExecutionLine::Prompts => {}
                 ExecutionLine::Section(title) => draw_room_head(g, title, x0, right, y + 3.0),
                 ExecutionLine::Head { title, note } => {
                     let nw = if note.is_empty() { 0.0 } else { g.measure_chrome_text(note, 10.0, false).min((right - x0) * 0.5) };
@@ -3061,7 +3071,7 @@ fn draw_device_head(
 
 /// 방 머리 — 흐린 이름과 오른쪽으로 이어지는 실선. 들여쓰기 대신 이 줄로만 방을
 /// 가른다: 좁은 칼럼에서 한 단 더 들이면 학생 줄의 제목 자리가 없다.
-fn draw_room_head(g: &mut gpu::GpuRenderer, text: &str, x0: f32, right: f32, y: f32) {
+pub(crate) fn draw_room_head(g: &mut gpu::GpuRenderer, text: &str, x0: f32, right: f32, y: f32) {
     let tx = x0 + 12.0;
     let t = fit_text(g, text, (right - tx - 24.0).max(0.0), 10.0, false);
     g.draw_text(
@@ -3169,7 +3179,7 @@ fn dur_label(s: u64) -> String {
     }
 }
 
-fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
+pub(crate) fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
     cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
 }
 

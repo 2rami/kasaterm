@@ -737,6 +737,7 @@ impl App {
         self.publish_git_col_cwd();
         // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
         self.pump_info();
+        self.pump_info_prompts();
         self.pump_sessions_col();
         self.pump_mcp_col();
         // Every pane's status bar wants its own repo badge — feed all pane cwds

@@ -5699,6 +5699,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            if self.info_prompt_press(cx, cy) {
+                                window.request_redraw();
+                                return;
+                            }
                             // pane 그룹 머리 → 그 그룹만 접기.
                             if let Some(pane) = self
                                 .info

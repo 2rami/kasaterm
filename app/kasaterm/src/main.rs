@@ -86,6 +86,7 @@ mod gitdiff;
 mod git_panel;
 mod info;
 mod info_focus;
+mod info_prompts;
 mod context_info;
 mod internal_room;
 mod links;

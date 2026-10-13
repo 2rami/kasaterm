@@ -405,7 +405,7 @@ impl crate::App {
         true
     }
 
-    fn nav_go(&mut self, pane: &str, source: NavSource, op: NavOp) {
+    pub(crate) fn nav_go(&mut self, pane: &str, source: NavSource, op: NavOp) {
         match source {
             NavSource::Mod => {
                 self.prompt_nav_request(pane, op);

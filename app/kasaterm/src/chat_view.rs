@@ -8,7 +8,7 @@
 
 use super::*;
 
-mod live;
+pub(crate) mod live;
 mod paint;
 pub(crate) mod status;
 pub(crate) mod parse;
