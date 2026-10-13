@@ -5,8 +5,9 @@
 //! 화면만 보면 되니 꼬리만 읽지만, 여기는 모아보기라 파일을 처음부터 읽는다 — 사람 턴만 JSON 으로 푼다.
 //!
 //! 기록에는 화면 자리가 없다. 자리는 칸이 이미 가진 정본에서 글로 맞춰 찾는다 — 풀스크린 claude 는 칸 안 mod 가
-//! 잰 행(`prompt_nav`), 거울은 받은 화면의 앵커. mod 가 없는 풀스크린 codex 는 자리를 아는 곳이 없어 휠을 굴려
-//! 그 질문이 화면 맨 위에 설 때까지 찾아간다. 붙여넣기 접힘·그림 자리표시처럼 화면에 다른 글로 남는 말은 앞뒤로
+//! 잰 행(`prompt_nav`), 거울은 받은 화면의 앵커. mod 가 없는 풀스크린 codex 와 풀스크린 원본의 거울은 자리를
+//! 아는 곳이 없어 휠을 굴려 그 질문이 화면 맨 위에 설 때까지 찾아간다. 질문 사이를 옮겨 다니는 길은 이것
+//! 하나다 — 칸 맨 위에 띄우던 질문 띠는 걷었다. 붙여넣기 접힘·그림 자리표시처럼 화면에 다른 글로 남는 말은 앞뒤로
 //! 맞은 두 질문 사이의 차례로 메운다.
 //!
 //! 상태는 GUI 스레드의 지역 통에 둔다 — 그리기(`draw_info_col`)는 App 을 못 보고, App·InfoState 를 안
@@ -328,8 +329,8 @@ enum Shelf {
     Mod(crate::prompt_nav::NavState),
     /// 거울 — 받은 화면이 이 기기 스크롤백에 쌓인다.
     Mirror(Vec<kasa_pty::PromptAnchor>, i64),
-    /// mod 없는 풀스크린 칸(codex). 대화를 TUI 가 통째로 쥐고 있어 자리를 모른다 — 휠을 굴려 그 질문이
-    /// 화면 맨 위에 설 때까지 찾아간다(`Seek`). 값은 지금 화면에 보이는 질문 줄.
+    /// mod 없는 풀스크린 칸(codex)과 풀스크린 원본의 거울. 대화를 TUI 가 통째로 쥐고 있어 자리를 모른다 —
+    /// 휠을 굴려 그 질문이 화면 맨 위에 설 때까지 찾아간다(`Seek`). 값은 지금 화면에 보이는 질문 줄.
     Screen(Vec<String>),
 }
 
@@ -360,8 +361,7 @@ fn row_text(row: &[kasa_bridge::screen::Cell]) -> String {
     row.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect::<String>().trim_end().to_string()
 }
 
-/// 휠로 찾아가는 중인 이동 하나. 띠 되짚기(`sticky_seek`)는 띠가 떠 있어야 시작하는데, 여기는 라이브
-/// 바닥에서도 떠나야 해서 따로 둔다.
+/// 휠로 찾아가는 중인 이동 하나.
 #[derive(Clone)]
 struct Seek {
     pane: String,
@@ -371,7 +371,23 @@ struct Seek {
     near: bool,
     /// 한쪽 끝까지 가도 없어 반대쪽으로 돌았다. 그쪽 끝에서도 없으면 그만둔다.
     turned: bool,
+    /// 원본 격자 좌표 — 거울도 받은 원본 화면의 가운데다.
     cell: (u16, u16),
+    /// 거울 — 휠이 원본까지 갔다가 화면이 돌아오는 데 네트워크 한 바퀴가 걸린다.
+    remote: bool,
+    /// 거울에서 보낸 휠의 답을 기다리는 중 — (보낼 때 화면, 보낸 때).
+    waiting: Option<(u64, Instant)>,
+    /// 거울 — 지난번 보낸 노치 수와 그때 화면. 답이 오면 글이 몇 줄 옮겨 갔는지로 노치당 줄 수(`rate`)를 잰다.
+    sent_notches: usize,
+    sent_rows: Vec<String>,
+    rate: Option<f32>,
+    /// 거울 — 친 말 머리글 차례와 그 가운데 목적지. 화면에 보이는 질문의 차례로 목적지를 지나쳤는지 안다.
+    keys: Vec<String>,
+    index: usize,
+    /// 거울 — 한 번에 가는 거리(화면 몇 장). 안 지나쳤으면 늘리고, 지나쳤으면(`back`) 돌아서서 화면보다 짧게만
+    /// 걷는다 — 긴 답 한가운데에 내리면 질문이 안 보여 지나쳤는지 모르므로, 되돌아갈 때는 건너뛰지 않게 걷는다.
+    screens: f32,
+    back: bool,
     last: Instant,
     sent: u32,
     stall: u32,
@@ -382,6 +398,16 @@ const SEEK_EVERY: Duration = Duration::from_millis(30);
 const SEEK_MAX: u32 = 400;
 /// 화면이 이만큼 연달아 그대로면 끝(맨 위·맨 아래)에 닿은 것이다.
 const SEEK_STALL: u32 = 12;
+/// 거울은 휠을 보내고 화면이 바뀌어 올 때까지 다음 휠을 미룬다 — 답을 안 보고 쏘아 대면 보이기 시작한
+/// 목적지를 길에 있던 휠이 지나쳐 버린다. 이만큼 기다려도 그대로면 끝에 닿은 것으로 센다.
+const REMOTE_WAIT: Duration = Duration::from_millis(900);
+const REMOTE_STALL: u32 = 2;
+/// 노치당 줄 수의 위 끝 — 잰 값이 이보다 크면 잘못 잰 것으로 보고 자른다.
+const RATE_MAX: f32 = 12.0;
+/// 거울 한 걸음의 거리(화면 장 수). 한 장보다 짧으면 목적지가 화면을 건너뛸 수 없다. 위 끝은 지나쳤을 때 되돌아
+/// 걸을 거리의 상한이다.
+const SCREENS_MIN: f32 = 0.6;
+const SCREENS_MAX: f32 = 4.0;
 
 thread_local! {
     static SEEK: RefCell<Option<Seek>> = const { RefCell::new(None) };
@@ -586,6 +612,47 @@ fn age(at: u64) -> String {
     }
 }
 
+/// 거울에서 한 번에 보낼 노치. 답을 보고 나서야 다음을 보내므로 한 번에 멀리 가야 빠르다 — 목적지가 안 보이면
+/// 화면 `screens` 장만큼(지나치면 돌아서며 줄인다), 보이면 그 줄을 맨 위로 올리는 만큼. 노치당 줄 수를 아직
+/// 못 쟀으면 조금씩.
+fn remote_notches(near: bool, at: Option<usize>, rate: Option<f32>, rows: usize, screens: f32) -> usize {
+    match (near, at, rate) {
+        (true, Some(r), Some(rate)) => ((r as f32 / rate).floor() as usize).max(1),
+        (true, ..) => 1,
+        (false, _, Some(rate)) => ((rows as f32 * screens / rate).floor() as usize).clamp(1, 400),
+        (false, ..) => 4,
+    }
+}
+
+/// 휠을 보낸 뒤 글이 옮겨 갔나 — 같은 자리에 같은 줄이 8할 넘게 남았으면 안 움직인 것이다(입력칸·상태줄은
+/// 늘 제자리다).
+fn moved(before: &[String], after: &[String]) -> bool {
+    let rows: Vec<usize> = (0..after.len().min(before.len())).filter(|&i| !after[i].trim().is_empty()).collect();
+    let kept = rows.iter().filter(|&&i| after[i] == before[i]).count();
+    !rows.is_empty() && (kept as f32) < rows.len() as f32 * 0.8
+}
+
+/// 두 화면 사이에 글이 몇 줄 옮겨 갔나(아래로 밀렸으면 양수). 앞 화면에 한 번만 나오는 줄이 셋 이상 같은
+/// 거리로 맞아야 믿는다 — 접힌 문단 꼬리·빈 줄·구분선처럼 되풀이되는 줄은 엉뚱한 거리에도 맞는다. 입력칸·
+/// 상태줄은 제자리라 옮김 0 은 보지 않는다.
+fn scroll_shift(before: &[String], after: &[String]) -> Option<isize> {
+    let mut seen: std::collections::HashMap<&str, Option<usize>> = std::collections::HashMap::new();
+    for (j, row) in before.iter().enumerate().filter(|(_, r)| !r.trim().is_empty()) {
+        seen.entry(row.as_str()).and_modify(|at| *at = None).or_insert(Some(j));
+    }
+    let mut votes: std::collections::HashMap<isize, usize> = std::collections::HashMap::new();
+    for (i, row) in after.iter().enumerate() {
+        if let Some(&Some(j)) = seen.get(row.as_str()) {
+            let d = i as isize - j as isize;
+            if d != 0 {
+                *votes.entry(d).or_default() += 1;
+            }
+        }
+    }
+    let (d, n) = votes.into_iter().max_by_key(|&(d, n)| (n, -d.abs()))?;
+    (n >= 3).then_some(d)
+}
+
 /// 지금 보는 칸 `(칸, 보고 있는 탭)` — Info 카드와 같은 칸(활성 칸의 보고 있는 터미널 탭)이다. 기록은 탭에
 /// 묶이고 이동은 칸으로 시킨다(탭이 여럿이면 둘이 다르다).
 fn focused(ws: &crate::Workspace) -> Option<(String, String)> {
@@ -603,6 +670,10 @@ impl crate::App {
             let sess = self.pty.get(&pid)?.clone();
             // 거울은 원본이 claude 든 codex 든 받은 화면 그대로다 — 마커로 가르지 않고 다 받는다. 출처 줄 같은
             // 군더더기는 맞추기(`place`)가 안 센다.
+            // 풀스크린 원본은 지난 줄을 앱 안에만 둬서 받은 기록에 앵커가 없다 — 원본에 휠을 보내 찾아간다.
+            if let Some(rows) = self.screen_rows(pane).filter(|_| self.mirror_takes_wheel(pane)) {
+                return Some(Shelf::Screen(rows.into_iter().filter(|r| prompt_row(r)).collect()));
+            }
             let anchors = sess.prompt_anchors();
             let top = self
                 .pane_view_shift
@@ -620,6 +691,12 @@ impl crate::App {
         }
         let rows = self.screen_rows(pane)?;
         Some(Shelf::Screen(rows.into_iter().filter(|r| prompt_row(r)).collect()))
+    }
+
+    /// 거울의 원본이 SGR 휠을 받는 풀스크린 앱인가.
+    fn mirror_takes_wheel(&self, pane: &str) -> bool {
+        let Ok(ws) = self.ws.lock() else { return false };
+        ws.panes.get(pane).and_then(|p| p.term()).is_some_and(|t| t.alt_screen && t.mouse_enabled && t.mouse_sgr)
     }
 
     /// 대체 화면 칸의 지금 화면 글자(줄마다). 대체 화면이 아니면 `None`.
@@ -644,7 +721,28 @@ impl crate::App {
         let cols = self.ws.lock().ok().and_then(|ws| ws.panes.get(pane)?.term().map(|t| t.cells.first().map_or(0, Vec::len))).unwrap_or(0);
         let cell = ((cols / 2) as u16, (rows.len() / 2) as u16);
         let now = Instant::now();
-        let seek = Seek { pane: pane.to_string(), want: keys[index].clone(), down, near: false, turned: false, cell, last: now.checked_sub(SEEK_EVERY).unwrap_or(now), sent: 0, stall: 0, print: 0 };
+        let remote = self.ws.lock().is_ok_and(|ws| kasa_mcp::remote::is_view_pane(&ws.active_tab_pid(pane)));
+        let seek = Seek {
+            pane: pane.to_string(),
+            want: keys[index].clone(),
+            down,
+            near: false,
+            turned: false,
+            cell,
+            remote,
+            waiting: None,
+            sent_notches: 0,
+            sent_rows: Vec::new(),
+            rate: None,
+            keys: keys.clone(),
+            index,
+            screens: SCREENS_MIN,
+            back: false,
+            last: now.checked_sub(SEEK_EVERY).unwrap_or(now),
+            sent: 0,
+            stall: 0,
+            print: 0,
+        };
         SEEK.with(|s| *s.borrow_mut() = Some(seek));
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -682,26 +780,76 @@ impl crate::App {
             rows.hash(&mut h);
             h.finish()
         };
-        seek.stall = if print == seek.print { seek.stall + 1 } else { 0 };
+        if seek.remote {
+            if let Some((sent_print, sent_at)) = seek.waiting {
+                // 바뀌기 시작했으면 한 틱 더 그대로인지 본다 — 다시 그리는 중간 화면으로 판단하지 않는다.
+                let settling = print != sent_print && print != seek.print;
+                if (print == sent_print || settling) && sent_at.elapsed() < REMOTE_WAIT {
+                    seek.print = print;
+                    SEEK.with(|s| *s.borrow_mut() = Some(seek));
+                    return;
+                }
+                seek.waiting = None;
+                let moved = moved(&seek.sent_rows, &rows);
+                seek.stall = if moved { 0 } else { seek.stall + 1 };
+                if let Some(d) = moved.then(|| scroll_shift(&seek.sent_rows, &rows)).flatten() {
+                    seek.rate = Some((d.unsigned_abs() as f32 / seek.sent_notches.max(1) as f32).clamp(1.0, RATE_MAX));
+                }
+                // 보이는 질문이 목적지보다 앞(위로 가는 중)이나 뒤(아래로 가는 중)면 지나친 것이다. 크게 걷다 끝에
+                // 부딪혀도(마지막 질문은 바닥 화면에 안 보이기도 한다) 돌아서며 줄인다 — 헛돈 끝으로 세지 않는다.
+                if !seek.near {
+                    let seen = rows.iter().filter(|r| prompt_row(r)).filter_map(|r| seek.keys.iter().rposition(|k| same(k, &head_key(r))));
+                    let passed = seen.into_iter().any(|k| if seek.down { k > seek.index } else { k < seek.index });
+                    if passed || !moved && seek.screens > SCREENS_MIN {
+                        seek.down = !seek.down;
+                        seek.screens = SCREENS_MIN;
+                        seek.stall = 0;
+                        seek.back = true;
+                    } else if moved && !seek.back {
+                        seek.screens = (seek.screens * 2.0).min(SCREENS_MAX);
+                    }
+                }
+            }
+            // 한 노치에 옮기는 줄보다 가까우면 더 다가갈 수 없다 — 지나치느니 여기서 선다.
+            if seek.near && at.zip(seek.rate).is_some_and(|(r, rate)| (r as f32) < rate) {
+                SEEK.with(|s| *s.borrow_mut() = None);
+                return;
+            }
+        } else {
+            seek.stall = if print == seek.print { seek.stall + 1 } else { 0 };
+        }
         seek.print = print;
+        let stall_max = if seek.remote { REMOTE_STALL } else { SEEK_STALL };
         // 더 못 굴리는데 보이면 거기가 갈 수 있는 끝이다(마지막 질문은 바닥에서도 맨 위까지 못 온다).
-        if seek.stall >= SEEK_STALL && at.is_some() {
+        if seek.stall >= stall_max && at.is_some() {
             SEEK.with(|s| *s.borrow_mut() = None);
             return;
         }
-        if seek.stall >= SEEK_STALL && !seek.turned {
+        if seek.stall >= stall_max && !seek.turned {
             seek.turned = true;
             seek.down = !seek.down;
             seek.stall = 0;
         }
-        if seek.stall >= SEEK_STALL || seek.sent >= SEEK_MAX {
+        if seek.stall >= stall_max || seek.sent >= SEEK_MAX {
             SEEK.with(|s| *s.borrow_mut() = None);
             self.set_toast("그 질문까지 못 찾았어요".into());
             return;
         }
         let button = if seek.down { 65 } else { 64 };
-        for _ in 0..if seek.near { 1 } else { 4 } {
-            self.send_mouse_sgr(&seek.pane, button, seek.cell.0, seek.cell.1, true);
+        let notches = if seek.remote { remote_notches(seek.near, at, seek.rate, rows.len(), seek.screens) } else if seek.near { 1 } else { 4 };
+        if seek.remote {
+            // 거울 화면에 비춘 자리로 옮기는 `send_mouse_sgr` 를 건너뛴다 — 칸은 이미 원본 격자 좌표다.
+            let wheel = format!("\x1b[<{button};{};{}M", seek.cell.0 + 1, seek.cell.1 + 1).repeat(notches);
+            if let Some(pty) = self.pty_for_pane(&seek.pane) {
+                let _ = pty.send_bytes(wheel.as_bytes());
+            }
+            seek.waiting = Some((print, Instant::now()));
+            seek.sent_notches = notches;
+            seek.sent_rows = rows;
+        } else {
+            for _ in 0..notches {
+                self.send_mouse_sgr(&seek.pane, button, seek.cell.0, seek.cell.1, true);
+            }
         }
         seek.sent += 1;
         seek.last = Instant::now();
@@ -1026,6 +1174,28 @@ mod tests {
                 Prompt { text: "고른 답".into(), at: Some(1791878640), asked: Some("어느 쪽?".into()) },
             ]
         );
+    }
+
+    #[test]
+    fn a_mirror_seek_measures_how_far_the_text_moved_ignoring_repeated_rows() {
+        let screen = |top: usize| -> Vec<String> {
+            let mut rows: Vec<String> = (top..top + 10).map(|i| if i % 3 == 0 { "  올라가요.".into() } else { format!("{i}번 줄") }).collect();
+            rows.push("❯ ".into());
+            rows
+        };
+        assert_eq!(scroll_shift(&screen(20), &screen(14)), Some(6), "위로 굴리면 글이 아래로 밀린다");
+        assert_eq!(scroll_shift(&screen(20), &screen(23)), Some(-3));
+        assert_eq!(scroll_shift(&screen(20), &screen(80)), None, "겹치는 줄이 없으면 모른다");
+        assert!(moved(&screen(20), &screen(14)));
+        assert!(!moved(&screen(20), &screen(20)), "끝에 닿아 그대로면 안 움직인 것이다");
+    }
+
+    #[test]
+    fn a_mirror_seek_strides_by_screens_until_near_then_lifts_the_row_to_the_top() {
+        assert_eq!(remote_notches(false, None, None, 48, SCREENS_MIN), 4, "줄 수를 못 쟀으면 조금씩");
+        assert_eq!(remote_notches(false, None, Some(3.0), 48, 4.0), 64);
+        assert_eq!(remote_notches(true, Some(31), Some(3.0), 48, 4.0), 10, "보이면 그 줄을 맨 위로 올리는 만큼");
+        assert_eq!(remote_notches(true, Some(2), Some(3.0), 48, 4.0), 1);
     }
 
     #[test]
