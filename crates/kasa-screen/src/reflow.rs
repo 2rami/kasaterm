@@ -422,22 +422,21 @@ fn info_of(t: &[Glyph]) -> Info {
     }
 }
 
-/// 저쪽이 제 폭에서 낱말 끝으로 접어 둔 줄은 이만큼까지 짧을 수 있다.
-const JOIN_SLACK: usize = 12;
-
-/// `b` 가 `a` 의 이어지는 줄인가 — `a` 가 원본 폭을 거의 채우고, `b` 가 `a` 의 들여쓰기
-/// 자리에서 글머리 없이 시작하면 저쪽(Ink)이 한 문단을 접어 둔 것이다. `a` 가 마지막
-/// 칸까지 찼는데 `b` 가 0열에서 시작하면 터미널이 글자 단위로 자른 것(셸 출력) —
+/// `b` 가 `a` 의 이어지는 줄인가 — `a` 뒤 남은 자리에 `b` 의 첫 낱말이 못 들어가고, `b` 가
+/// `a` 의 들여쓰기 자리에서 글머리 없이 시작하면 저쪽(Ink)이 한 문단을 접어 둔 것이다. `a` 가
+/// 마지막 칸까지 찼는데 `b` 가 0열에서 시작하면 터미널이 글자 단위로 자른 것(셸 출력) —
 /// 그것도 이어진 줄이다.
+///
+/// 앞줄이 얼마나 짧은지는 따로 안 본다 — 긴 낱말(경로·주소) 앞에서 접힌 줄은 그만큼 짧게 남는다.
 fn continues(a: &Info, b: &Info, src_cols: usize) -> bool {
     let hard = a.width == src_cols && b.lead == 0;
     a.prose
         && b.prose
         && a.words > 1
-        && a.width + JOIN_SLACK >= src_cols
         && a.width <= src_cols
-        // 뒷줄 첫 낱말이 앞줄 남은 자리에 들어갔다면 거기서 접혔을 리가 없다.
-        && a.width + 1 + b.first_word > src_cols
+        // 뒷줄 첫 낱말이 앞줄 남은 자리에 들어갔다면 거기서 접혔을 리가 없다. Claude(Ink)는 마지막
+        // 칸을 비우고 접어서(60열 칸의 글줄은 59칸이 끝) 딱 마지막 칸까지 차는 낱말도 넘긴다.
+        && a.width + 1 + b.first_word >= src_cols
         && (b.lead == a.indent || hard)
         && !b.marked()
 }
@@ -507,6 +506,11 @@ pub fn paragraph_continuation(previous: &Row, next: &Row, src_cols: usize) -> Op
     let from = b.lead.min(next.len());
     let separator = !(a.width == src_cols && token_break(&previous, &next[from..]));
     Some((b.lead, separator))
+}
+
+/// 글머리(`- ` `• ` `1. ` …)로 시작하는 줄인가 — 이어지는 줄을 글머리 뒤에 맞추는 목록 항목.
+pub fn list_item(row: &Row) -> bool {
+    info_of(&trimmed(row)).marked()
 }
 
 /// 다시 접은 격자.
@@ -686,6 +690,32 @@ mod tests {
         let s: String = g.iter().map(|x| x.ch()).collect();
         assert_eq!(s.trim_end(), "가나 다");
         assert_eq!(out.rows[0].len(), 40);
+    }
+
+    /// 2026-10-13 나쵸네코 풀스크린 Claude(60열) 화면에서 떠 온 줄들. Claude 는 마지막 칸을 비우고
+    /// 접어서, 첫 낱말이 마지막 칸까지 딱 차는 자리(합 60)도 접힌 것이다. 긴 낱말 앞에서 접힌 줄은
+    /// 그만큼 짧게 남는다.
+    #[test]
+    fn claude_wraps_before_the_last_column_and_before_long_tokens() {
+        let cases = [
+            ("  쓰는 법(nacho-hands 스킬)이 바뀌면 home_hash 가 잡고,", "  이번 반영은 명령줄이 --mcp-config → env NACHO_SEAT 로"),
+            ("    - 반영 뒤 같은 채널에서 다시 태그만 쳐 보시면, 그", "      링크를 보고 답할 거예요."),
+            ("  127.0.0.1:8793」. 옛 판으로 떠 있는 요청", "  창(np-46970bfc)은 옛 MCP 주소라 나쵸 손이 끊겨요. 덤: 앱"),
+        ];
+        for (a, b) in cases {
+            assert!(paragraph_continuation(&row(a, 60), &row(b, 60), 60).is_some(), "{a} / {b}");
+        }
+        // 첫 낱말이 앞줄 남은 자리에 들어갔으면 저쪽이 일부러 끊은 줄이다.
+        assert!(paragraph_continuation(&row("  짧은 줄 하나", 60), &row("  다음 줄", 60), 60).is_none());
+        assert_eq!(lines(&[cases[0].0, cases[0].1], 60, 120, 4).len(), 1);
+    }
+
+    #[test]
+    fn list_items_are_bulleted_rows_not_indented_code() {
+        assert!(list_item(&row("    - 반영 뒤 같은 채널에서", 40)));
+        assert!(list_item(&row("    2. 둘째", 40)));
+        assert!(!list_item(&row("    let x = 1;", 40)));
+        assert!(!list_item(&row("    -->", 40)));
     }
 
     fn lines(src: &[&str], src_cols: usize, cols: u16, rows: u16) -> Vec<String> {

@@ -1174,7 +1174,10 @@ impl App {
                             .max(scaled_ch);
                     let layout_cols = (usable_w / scaled_cw).floor() as usize;
                     let layout_rows = (usable_h / scaled_ch).floor() as usize;
-                    if independent_view {
+                    if independent_view && self.mirror_source_fit(&ws, &id).is_some() {
+                        // 원본 격자 그대로 키워 맞춘 거울은 다시 접지 않는다 — 남는 자리는 칸 여백이다.
+                        (layout_cols.min(pty_cols).max(2), layout_rows.min(pty_rows).max(1))
+                    } else if independent_view {
                         (layout_cols.max(2), layout_rows.max(1))
                     } else {
                         (layout_cols.min(pty_cols).max(1), layout_rows.min(pty_rows))

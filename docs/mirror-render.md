@@ -71,6 +71,11 @@
   `/term/panes` 의 `harness` — 기록이 아직 없는 막 띄운 학생도 셸 밑 프로세스로 채운다.
 - 크기: `mirror_kind` 가 `Chat` 이면 사람 손이 닿아도 `touch_source` 를 안 부른다(`mirror_follow.rs`, 「터미널로 보기」로 돌려도
   같다 — 줄여 보기). 폰 대화 보기는 쥐지 않는다.
+- 풀스크린(alt-screen) Claude·코덱스 칸을 터미널로 볼 때, 거울 칸 크기로 다시 접은 화면이 칸을 다 못 채우면 다시 접지 않고
+  원본 격자 그대로 칸에 맞춰 키운다(`layout.rs mirror_source_fit`, 남는 자리는 칸 여백). 풀스크린 앱은 지난 줄을 앱 안에만
+  두어, 원본보다 넓고 높은 칸에 다시 접으면 위를 채울 줄이 없다(2026-10-13 나쵸네코 60×44 원본을 118열 칸에서 보니 위 60% 가
+  비었다). 판정은 칸·원본 크기·탭이 바뀔 때만 다시 잰다 — 글마다 재면 글자 크기가 오락가락한다. 원본보다 낮은 칸처럼 키울
+  자리가 없으면 그대로 다시 접는다.
 - 기록: 거울은 원본의 `/transcript-raw` 를, 지금은 원본의 `GET /term/mod-live?surface=%N[&seq=&wait_ms=]` 를 받는다 —
   `{live, seq, session, turn_open, compacting, question, tools[{id,tool,label}], permissions[원격 승인 계약의 요청 그대로]}`.
   `seq` 를 주면 바뀔 때까지 쥔다. mod 없는 칸은 `live:false`. 도구 호출이 승인을 감싸므로 묻는 동안 같은 id 의 도구가

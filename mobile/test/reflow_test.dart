@@ -231,6 +231,23 @@ void joinTests() {
     expect(Reflow().apply(g, 30).lines.length, 3);
   });
 
+  test('Claude 는 마지막 칸을 비우고 접는다 — 첫 낱말이 마지막 칸까지 딱 차도 접어 둔 것이다', () {
+    // 2026-10-13 풀스크린 Claude(60열): 앞줄 55칸 + 빈칸 + 「이번」 4칸 = 60.
+    final g = gridRows(60, [
+      '  쓰는 법(nacho-hands 스킬)이 바뀌면 home_hash 가 잡고,',
+      '  이번 반영은 명령줄이 --mcp-config → env NACHO_SEAT 로',
+    ]);
+    expect(Reflow().apply(g, 120).lines.length, 1);
+  });
+
+  test('긴 낱말 앞에서 접혀 짧게 남은 줄도 되잇는다', () {
+    final g = gridRows(60, [
+      '  127.0.0.1:8793」. 옛 판으로 떠 있는 요청',
+      '  창(np-46970bfc)은 옛 MCP 주소라 나쵸 손이 끊겨요. 덤: 앱',
+    ]);
+    expect(Reflow().apply(g, 120).lines.length, 1);
+  });
+
   test('빈칸 없는 긴 토큰 하나는 문단이 아니다', () {
     final g = gridRows(100, ['a' * 95, 'prompt']);
     expect(Reflow().apply(g, 40).lines.map(text).last, 'prompt');

@@ -241,7 +241,9 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
         let codex_title = codex_tool_title(&source[first_row]);
         let exploration = explored.then(|| explored_entry(source, first_row, end)).flatten();
         let diff_indent = crate::mirror_diff::gutter(&source[first_row]);
-        let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4;
+        // 넷 칸 이상 들여쓴 줄은 코드로 보고 접힌 그대로 둔다. 들여쓴 글머리 목록(`    - `)은 글이다.
+        let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4
+            && !kasa_bridge::reflow::list_item(&source[first_row]);
         let mut logical: Vec<(GridCell, Option<SourcePos>)> = Vec::new();
         let mut omit_leading = 0;
         let fill;
@@ -428,6 +430,14 @@ pub(crate) fn project(
         source_map: visible.into_iter().map(|line| line.source_map).collect(),
         cursor, body_lines, max_scroll, scroll_from_bottom, top_source_row, top_abs: None,
     }
+}
+
+/// Whether reflowing at the viewer's own size leaves padding rows: a full-screen
+/// TUI keeps its earlier lines inside the app, so nothing can fill them.
+pub(crate) fn underfills(source: &[Vec<GridCell>], cursor: SourcePos, cols: usize, rows: usize) -> bool {
+    let input_top = crate::screenread::pinned_input_top(source).filter(|top| *top <= cursor.0);
+    project(source, cursor, cols, rows, input_top, None).source_map.iter()
+        .any(|row| row.iter().all(Option::is_none))
 }
 
 /// History is viewer-local too. Keep the real live input below it, and never
@@ -959,6 +969,41 @@ mod tests {
             let view = project(&source, (body.len() + 1, 3), 100, 20, Some(body.len()), None);
             assert_eq!(view.body_lines.len(), body.len(), "code/table/list hard break was merged: {body:?}");
         }
+    }
+
+    /// 2026-10-13 풀스크린 Claude(60열)의 들여쓴 글머리 목록. 코드로 보여 원본 폭에 남는 바람에 한 화면에
+    /// 60열 줄과 118열 줄이 섞였다.
+    #[test]
+    fn indented_bullet_list_rejoins_at_viewer_width() {
+        let body = ["    - 반영 뒤 같은 채널에서 다시 태그만 쳐 보시면, 그", "      링크를 보고 답할 거예요.",
+            "    - 미치루 수정이 오면, 이 수리까지 같이 반영할게요."];
+        let source = agent_screen(&body, 60, false);
+        let view = project(&source, (body.len() + 1, 3), 118, 20, Some(body.len()), None);
+        let lines: Vec<String> = view.body_lines.iter().map(|line| line.cells.iter()
+            .filter(|cell| cell.ch != '\0').map(|cell| cell.ch).collect::<String>().trim_end().to_string()).collect();
+        assert_eq!(lines, ["    - 반영 뒤 같은 채널에서 다시 태그만 쳐 보시면, 그 링크를 보고 답할 거예요.",
+            "    - 미치루 수정이 오면, 이 수리까지 같이 반영할게요."]);
+    }
+
+    /// 풀스크린 Claude 는 지난 줄을 앱 안에만 둔다. 원본보다 넓고 높은 칸에 다시 접으면 위가 비고, 같은
+    /// 크기나 좁은 칸은 채워진다 — 비는 칸만 원본 격자 그대로 키워 맞춘다(`layout.rs mirror_source_fit`).
+    #[test]
+    fn wider_taller_viewer_underfills_a_full_screen_agent() {
+        let words = "문단은 원본 폭에서 접힌 긴 줄이라 넓은 칸에서는 다음 줄과 다시 이어진다".repeat(12);
+        let mut body = vec![String::from("  ")];
+        for word in words.split(' ') {
+            let last = body.last_mut().unwrap();
+            let width = |s: &str| s.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
+            if width(last) > 2 && width(last) + 1 + width(word) > 59 { body.push(format!("  {word}")); }
+            else { if width(last) > 2 { last.push(' '); } last.push_str(word); }
+        }
+        let body: Vec<&str> = body.iter().map(String::as_str).collect();
+        let source = agent_screen(&body, 60, false);
+        let cursor = (body.len() + 1, 3);
+        assert!(underfills(&source, cursor, 118, source.len() * 2));
+        assert!(underfills(&source, cursor, 118, source.len()));
+        assert!(!underfills(&source, cursor, 60, source.len()));
+        assert!(!underfills(&source, cursor, 40, source.len()));
     }
 
     #[test]

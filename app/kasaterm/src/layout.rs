@@ -338,6 +338,15 @@ pub(crate) fn drop_edge_for_offsets(nx: f32, ny: f32) -> DropZone {
     }
 }
 
+/// 「원본 격자 그대로 키워 맞춤」 판정과 그때의 (탭, 칸 격자, 원본 격자).
+type MirrorFit = (String, [u16; 4], bool);
+
+thread_local! {
+    /// 칸마다 판정을 크기·탭이 바뀔 때만 다시 잰다 — 글이 바뀔 때마다 재면 문단 몇 줄 차이로 글자 크기가
+    /// 오락가락한다.
+    static MIRROR_FIT: std::cell::RefCell<HashMap<String, MirrorFit>> = Default::default();
+}
+
 impl App {
     /// 지금 화면에 보이는 pane id — 활성 방(`active_window`)의 BSP leaf 와, 그 leaf
     /// 자리에 사는 보조 탭들.
@@ -379,6 +388,9 @@ impl App {
     pub(crate) fn pane_display_scale(&self, ws: &Workspace, id: &str) -> f32 {
         let manual = self.pane_font_scales.get(id).copied().unwrap_or(1.0).max(0.1);
         let Some(pane) = ws.panes.get(id) else { return manual };
+        if let Some(fit) = self.mirror_source_fit(ws, id) {
+            return fit;
+        }
         let active_pid = pane.tabs.get(pane.active_tab)
             .and_then(|tab| tab.pid.as_deref()).unwrap_or(id);
         // A mirror now lays out text at its own columns/rows. Never make its
@@ -395,6 +407,12 @@ impl App {
             return manual;
         }
         let Some(term) = pane.term() else { return manual };
+        contained_cell_scale(manual, self.pane_body_px(ws, pane, id),
+            (term.cols.max(1) as f32, term.cells.len().max(1) as f32), (self.cell.w.max(1.0), self.cell.h.max(1.0)))
+    }
+
+    /// 칸 본문(헤더·상태줄·안쪽 여백을 뺀) 논리 px.
+    fn pane_body_px(&self, ws: &Workspace, pane: &PaneState, id: &str) -> (f32, f32) {
         let (cols, rows) = self.window_cells();
         let bounds = self.effective_leaf_rects(cols, rows).into_iter()
             .find(|(pane_id, ..)| pane_id == id)
@@ -408,12 +426,49 @@ impl App {
             .unwrap_or((cols, rows));
         let cw = self.cell.w.max(1.0);
         let ch = self.cell.h.max(1.0);
-        let usable = (
+        (
             (bounds.0 as f32 * cw - 2.0 * PANE_INNER_X).max(cw),
             (bounds.1 as f32 * ch - pane.header_px() - self.statusbar_px(id) - 2.0 * PANE_INNER_Y).max(ch),
-        );
-        contained_cell_scale(manual, usable,
-            (term.cols.max(1) as f32, term.cells.len().max(1) as f32), (cw, ch))
+        )
+    }
+
+    /// 풀스크린(alt-screen) Claude·코덱스 거울을 다시 접지 않고 원본 격자 그대로 키워 맞춘 배율.
+    /// 풀스크린 앱은 지난 줄을 앱 안에만 두어, 원본보다 넓고 높은 칸에 다시 접으면 위를 채울 줄이
+    /// 없다(docs/mirror-render.md). 제 크기로 다시 접은 화면이 칸을 채우거나 키울 자리가 없으면 None.
+    pub(crate) fn mirror_source_fit(&self, ws: &Workspace, id: &str) -> Option<f32> {
+        let pane = ws.panes.get(id)?;
+        let pid = ws.active_tab_pid(id);
+        let term = pane.term().filter(|t| t.alt_screen)?;
+        if !kasa_mcp::remote::is_view_pane(&pid) || self.chat_view_on(id)
+            || self.mirror_kind(&pid) != crate::mirror_render::MirrorKind::Chat {
+            return None;
+        }
+        let manual = self.pane_font_scales.get(id).copied().unwrap_or(1.0).max(0.1);
+        let (cw, ch) = (self.cell.w.max(1.0), self.cell.h.max(1.0));
+        let usable = self.pane_body_px(ws, pane, id);
+        let source = (term.cols.max(1), term.cells.len().max(1));
+        let fit = (usable.0 / (source.0 as f32 * cw)).min(usable.1 / (source.1 as f32 * ch)) * 0.999;
+        if !fit.is_finite() || fit <= manual {
+            return None;
+        }
+        let view = ((usable.0 / (cw * manual)).floor() as u16, (usable.1 / (ch * manual)).floor() as u16);
+        let key = [view.0, view.1, source.0, source.1 as u16];
+        MIRROR_FIT.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some((tab, at, underfills)) = cache.get(id) {
+                if *tab == pid && *at == key {
+                    return *underfills;
+                }
+            }
+            // 글이 아직 없는 화면으로 판정하면 그 크기 동안 굳는다.
+            if term.cells.iter().flatten().all(|cell| matches!(cell.ch, ' ' | '\0')) {
+                return false;
+            }
+            let underfills = crate::mirror_view::underfills(&term.cells,
+                (term.cursor_row as usize, term.cursor_col as usize), view.0.max(2) as usize, view.1.max(1) as usize);
+            cache.insert(id.to_string(), (pid.clone(), key, underfills));
+            underfills
+        }).then_some(fit)
     }
 
     /// Convert logical-pixel position into a (pane_id, col, row) cell

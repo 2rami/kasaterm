@@ -372,19 +372,17 @@ _Info _infoOf(List<Run> runs) {
   return _Info(width, i, _hangingIndent(trimmed), prose, words, firstWord);
 }
 
-/// 데스크톱이 제 폭에서 낱말 끝으로 접어 둔 줄은 이만큼까지 짧을 수 있다.
-const _joinSlack = 12;
-
-/// `b` 가 `a` 의 이어지는 줄인가 — `a` 가 pane 폭을 거의 채우고, `b` 가 `a` 의
-/// 들여쓰기 자리에서 글머리 없이 시작하면 데스크톱(Ink)이 한 문단을 접어 둔 것이다.
+/// `b` 가 `a` 의 이어지는 줄인가 — `a` 뒤 남은 자리에 `b` 의 첫 낱말이 못 들어가고, `b` 가
+/// `a` 의 들여쓰기 자리에서 글머리 없이 시작하면 데스크톱(Ink)이 한 문단을 접어 둔 것이다.
+/// 앞줄이 얼마나 짧은지는 따로 안 본다 — 긴 낱말(경로·주소) 앞에서 접힌 줄은 그만큼 짧게 남는다.
 bool _continues(_Info a, _Info b, int gridCols) =>
     a.prose &&
     b.prose &&
     a.words > 1 &&
-    a.width >= gridCols - _joinSlack &&
     a.width <= gridCols &&
-    // 뒷줄 첫 낱말이 앞줄 남은 자리에 들어갔다면 거기서 접혔을 리가 없다.
-    a.width + 1 + b.firstWord > gridCols &&
+    // 뒷줄 첫 낱말이 앞줄 남은 자리에 들어갔다면 거기서 접혔을 리가 없다. Claude(Ink)는 마지막
+    // 칸을 비우고 접어서(60열 칸의 글줄은 59칸이 끝) 딱 마지막 칸까지 차는 낱말도 넘긴다.
+    a.width + 1 + b.firstWord >= gridCols &&
     b.lead == a.indent &&
     !b.marked;
 
