@@ -15,6 +15,7 @@ class ServerImage extends StatefulWidget {
     this.semanticLabel,
     this.alignment = Alignment.center,
     this.fallback = const SizedBox.shrink(),
+    this.filterQuality = FilterQuality.medium,
   });
   final Server server;
   final Uri uri;
@@ -24,6 +25,7 @@ class ServerImage extends StatefulWidget {
   final Alignment alignment;
   final String? semanticLabel;
   final Widget fallback;
+  final FilterQuality filterQuality;
 
   @override
   State<ServerImage> createState() => _ServerImageState();
@@ -56,6 +58,7 @@ class _ServerImageState extends State<ServerImage> {
         fit: widget.fit,
         alignment: widget.alignment,
         semanticLabel: widget.semanticLabel,
+        filterQuality: widget.filterQuality,
         errorBuilder: (_, _, _) => widget.fallback,
       );
     },

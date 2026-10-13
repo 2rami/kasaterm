@@ -1683,6 +1683,12 @@ pub struct TranscriptChunk {
     pub raw: String,
     pub offset: u64,
     pub reset: bool,
+    /// Which file the `offset` belongs to (its file name). A pane number is reused
+    /// by the next pane and a pane can switch sessions, so a client holding an
+    /// offset into the old file must hear that the file changed — codex rollout
+    /// lines carry no `sessionId` for it to notice on its own.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// One turn of a pane's claude conversation, extracted from its transcript

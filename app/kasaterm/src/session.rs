@@ -238,6 +238,11 @@ impl App {
     pub(crate) fn insert_pty(&mut self, id: String, sess: std::sync::Arc<kasa_pty::PtySession>) {
         crate::close_grace::clear_marker(&id);
         kasa_mcp::surface_keys::ensure(&id);
+        if !self.pty.get(&id).is_some_and(|old| std::sync::Arc::ptr_eq(old, &sess)) {
+            if let Some(backend) = &self.socket_backend {
+                backend.forget_transcript(&id);
+            }
+        }
         kasa_pty::register_session(&id, &sess);
         self.pty.insert(id, sess);
     }

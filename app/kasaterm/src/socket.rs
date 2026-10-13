@@ -512,6 +512,17 @@ impl PtyBackend {
     pub(crate) fn tell_binding_epoch(&self, surface: &str) -> u64 {
         self.tell_binding_epochs.lock().unwrap().get(surface).copied().unwrap_or(0)
     }
+    /// 새 PTY 가 이 번호에 들어왔다 — 앞 주인의 기록 결속을 걷는다. 결속은 파일이 살아 있는 한
+    /// 다시 찾지 않으므로, 남겨 두면 다음 칸이 첫 결속을 받기 전까지 옛 대화가 그 칸의 것으로
+    /// 보였다(10-13 폰 대화 보기에 어제 같은 번호 칸의 codex 대화).
+    pub(crate) fn forget_transcript(&self, surface: &str) {
+        if self.bound.lock().unwrap().remove(surface).is_none() {
+            return;
+        }
+        *self.tell_binding_epochs.lock().unwrap().entry(surface.into()).or_default() += 1;
+        self.codex_rollouts.lock().unwrap().remove(surface);
+        self.codex_bound_pids.lock().unwrap().remove(surface);
+    }
     /// 살아 있는 surface 전부 — BSP leaf(`ws.panes`) **와 탭 pid**(`ws.pid_to_pane`).
     ///
     /// `panes` 만 모으면 탭으로 띄운 학생이 transcript 바인딩 후보에서부터 빠지고,
@@ -4465,6 +4476,7 @@ pub(crate) fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::
             raw: String::new(),
             offset: len,
             reset: false,
+            source: transcript_source(path),
         });
     }
     f.seek(SeekFrom::Start(start))?;
@@ -4496,7 +4508,13 @@ pub(crate) fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::
         raw,
         offset: next_offset,
         reset,
+        source: transcript_source(path),
     })
+}
+
+/// `TranscriptChunk::source` — 파일 이름. claude 는 세션 id, codex 는 `rollout-…-<id>` 라 그 파일을 가린다.
+pub(crate) fn transcript_source(path: &std::path::Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// `[0, start)` 구간에서 queue-operation(예약 enqueue/dequeue/remove/popAll) 줄만 모은다.

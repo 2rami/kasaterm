@@ -167,6 +167,8 @@ impl ChatPane {
 pub(crate) struct Feed {
     path: Option<std::path::PathBuf>,
     offset: u64,
+    /// `offset` 이 가리키는 파일(`TranscriptChunk::source`). 거울의 원본 칸이 다른 파일로 옮겨 가면 다르다.
+    source: String,
     pub(crate) conv: parse::Conversation,
     /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 편다.
     pub(crate) version: u64,
@@ -193,12 +195,10 @@ impl Source {
         }
     }
 
-    fn read(&self, offset: u64) -> Result<Option<kasa_socket::backend::TranscriptChunk>, String> {
+    fn read(&self, offset: u64, held: &str) -> Result<Option<kasa_socket::backend::TranscriptChunk>, String> {
         match self {
             Source::File(p) => crate::socket::read_incremental(p, offset).map(Some).map_err(|e| e.to_string()),
-            Source::Remote(base, rid) => live::remote_chunk(base, rid, offset)
-                .map(|c| c.map(|(raw, offset, reset)| kasa_socket::backend::TranscriptChunk { raw, offset, reset }))
-                .map_err(|e| e.to_string()),
+            Source::Remote(base, rid) => live::remote_chunk(base, rid, offset, held).map_err(|e| e.to_string()),
         }
     }
 }
@@ -223,11 +223,11 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
     std::thread::spawn(move || {
         let Some(source) = source else { return };
         let path = source.key();
-        let (offset, same) = match feed.lock() {
-            Ok(f) => (f.offset, f.path.as_ref() == Some(&path)),
+        let (offset, same, held) = match feed.lock() {
+            Ok(f) => (f.offset, f.path.as_ref() == Some(&path), f.source.clone()),
             Err(_) => return,
         };
-        let chunk = source.read(if same { offset } else { 0 });
+        let chunk = if same { source.read(offset, &held) } else { source.read(0, "") };
         let Ok(mut f) = feed.lock() else { return };
         f.busy = false;
         let mut changed = !f.loaded || f.missing;
@@ -252,6 +252,7 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
                     f.generation += 1;
                     changed = true;
                 }
+                f.source = chunk.source.clone();
                 if !chunk.raw.is_empty() {
                     changed = true;
                     if f.conv.apply(&chunk.raw) {

@@ -44,11 +44,12 @@ class ChatServer extends Server {
   }
 
   @override
-  Future<({String raw, int offset, bool reset})?> transcriptRaw(
+  Future<({String raw, int offset, bool reset, String source})?> transcriptRaw(
     String pane,
     int offset, {
     String? machine,
     int? waitMs,
+    String source = '',
   }) async => null;
 
   @override

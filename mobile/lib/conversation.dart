@@ -109,6 +109,10 @@ class Conversation {
   /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 그린다.
   int version = 0;
 
+  /// [offset] 이 가리키는 기록 파일(서버 답의 `source`). 같은 칸 번호를 다음 칸이 물려받거나 칸이 세션을 갈아타면
+  /// 달라진다 — codex 줄엔 `sessionId` 가 없어 줄만 보고는 못 가른다(10-13 옛 codex 대화 밑에 새 기록이 붙었다).
+  String source = '';
+
   /// 이 폰에서 보내고 기록에 아직 안 닿은 말 — 보낸 순간 말풍선으로 선다. 기록에 같은 말이 오면 걷는다.
   final List<ChatBubble> echoes = [];
 
@@ -130,6 +134,7 @@ class Conversation {
     _lastCodexPrompt = null;
     _absorbed = null;
     offset = 0;
+    source = '';
     version++;
   }
 
@@ -177,7 +182,10 @@ class Conversation {
   /// 서버 조각 하나. 세션이 바뀐 것을 알아채면 false — 호출부가 처음부터 다시 받는다.
   /// 서버는 파일이 줄어들 때만 꼬리를 다시 주므로, `/clear` 뒤 새 파일이 옛 자리보다
   /// 길면 새 파일의 중간부터 읽게 된다. 줄마다 붙은 sessionId 로 그 경우를 가른다.
-  bool apply(String raw, {required bool reset, required int next}) {
+  bool apply(String raw, {required bool reset, required int next, String source = ''}) {
+    if (!reset && source.isNotEmpty && this.source.isNotEmpty && source != this.source) {
+      return false;
+    }
     final events = <Map<String, Object?>>[];
     for (final line in const LineSplitter().convert(raw)) {
       if (line.trim().isEmpty) continue;
@@ -209,6 +217,7 @@ class Conversation {
     }
     _settleEchoes([...items.skip(from), ...touched]);
     offset = next;
+    if (source.isNotEmpty) this.source = source;
     if (events.isNotEmpty || reset) version++;
     return true;
   }
@@ -845,13 +854,14 @@ class PromptMenu {
 bool _isRule(String t) => RegExp('[─━]').allMatches(t).length >= 8;
 
 /// A selected chevron distinguishes live choices from numbered response text.
-PromptMenu? parsePromptMenu(List<String> lines) {
+PromptMenu? parsePromptMenu(List<String> screen) {
   final opts = <(PromptOption, int)>[];
   final re = RegExp(r'^\s*[│|]?\s*([❯›●]?)\s*(\d+)\.\s+(.+?)\s*[│|]?\s*$');
   // Match the native bottom-anchored approval scan, not old choices in history.
-  final last = lines.lastIndexWhere((line) => line.trim().isNotEmpty);
+  final last = screen.lastIndexWhere((line) => line.trim().isNotEmpty);
   if (last < 0) return null;
-  final start = (last - 13).clamp(0, last);
+  final lines = [for (final line in screen) _leftOfPreview(line)];
+  final start = _questionTop(screen, last) ?? (last - 13).clamp(0, last);
   for (var i = start; i <= last; i++) {
     final m = re.firstMatch(lines[i]);
     if (m == null) continue;
@@ -862,6 +872,15 @@ PromptMenu? parsePromptMenu(List<String> lines) {
     ));
   }
   if (opts.length < 2 || !opts.any((o) => o.$1.current)) return null;
+  // 미리보기 질문 — 선택지 줄 오른쪽에 그림 상자가 섰다. 상자만 있는 줄(과 그 밑 메모 안내)은 메뉴의 일부가 아니고,
+  // 선택지 설명은 왼쪽에 안 찍혀 이어지는 줄은 좁은 칸에 접힌 이름이다.
+  final previewing = opts.any((o) => lines[o.$2] != screen[o.$2]);
+  if (previewing) {
+    for (var i = opts.first.$2 + 1; i <= last; i++) {
+      final t = lines[i].trim();
+      if (RegExp(r'^[│┌└├]').hasMatch(t) || t.startsWith('Notes:')) lines[i] = '';
+    }
+  }
   if (lines.skip(opts.last.$2 + 1).any((line) =>
       RegExp(r'^\s*[│|]?\s*[❯›]').hasMatch(line) && !re.hasMatch(line))) {
     return null;
@@ -899,7 +918,7 @@ PromptMenu? parsePromptMenu(List<String> lines) {
     }
     if (more.isEmpty) {
       options.add(o);
-    } else if (lines[at].trimRight().runes.length + 4 >= width) {
+    } else if (previewing || lines[at].trimRight().runes.length + 4 >= width) {
       // 이름이 줄 끝까지 찼으면 다음 줄은 접힌 이름의 나머지다(Claude 의 긴 「Yes, and …」).
       options.add(PromptOption(o.index, '${o.label} ${more.join(' ')}', current: o.current));
     } else {
@@ -914,6 +933,30 @@ PromptMenu? parsePromptMenu(List<String> lines) {
     context.add(t);
   }
   return PromptMenu(title, options, context: context.reversed.toList());
+}
+
+/// 선택지 이름 뒤 두 칸 넘는 틈에 이어 선 상자(미리보기 그림)를 떼어 낸다. 글자 칸으로 자르지 않는다 — 한글은
+/// 화면에서 두 칸인데 줄 글에선 한 자라 칸 번호가 줄마다 어긋난다. 줄 머리의 테(`│ 1. Yes │`)는 앞에 글이 없어 남는다.
+String _leftOfPreview(String line) {
+  final m = RegExp(r'(?<=\S)\s{2,}[│┌└├]').firstMatch(line);
+  return m == null ? line : line.substring(0, m.start);
+}
+
+/// 질문 창(`Chat about this` 가 딸린 고르기)의 맨 위 칸막이. 미리보기가 붙으면 선택지가 그림 상자 높이만큼 위로
+/// 밀려 바닥 13줄 밖에 선다(10-13 유우카 칸 — 대화 보기에 질문이 안 떴다). 창 안만 훑어 지난 대화의 번호 줄은 안 섞는다.
+int? _questionTop(List<String> lines, int last) {
+  final from = (last - 60).clamp(0, last);
+  final bottom = lines.sublist(from, last + 1).map((l) => l.trim()).toList();
+  if (!bottom.any((t) => t.contains('Chat about this')) ||
+      !bottom.any((t) => t.startsWith('Enter to select'))) {
+    return null;
+  }
+  // 가로줄만으로 된 줄 — 미리보기 상자의 `└────┘` 도 가로줄이 많지만 칸막이가 아니다.
+  final rules = [
+    for (var i = last; i >= from; i--)
+      if (RegExp(r'^[─━]{8,}$').hasMatch(lines[i].trim())) i,
+  ];
+  return rules.length >= 2 ? rules[1] : null;
 }
 
 /// mod 가 알린 승인 요청 하나 — 도구와 입력 원문.

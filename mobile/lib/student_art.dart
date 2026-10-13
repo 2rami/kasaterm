@@ -99,6 +99,45 @@ class StudentSprite extends StatelessWidget {
   }
 }
 
+/// 학생이 서 있는 그림 — 칸 주인이 비어 있는 화면에 선다(쌍둥이 자리). 데스크톱이 입힌 테마의 idle 움직임을 받고,
+/// 못 받으면 그 학생 프사. 도트라 늘리지 않고 칸을 그대로 옮긴다.
+class StudentStanding extends StatelessWidget {
+  const StudentStanding({
+    super.key,
+    required this.server,
+    required this.slug,
+    this.machine,
+    this.size = 96,
+  });
+
+  final Server server;
+  final String slug;
+  final String? machine;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final face = StudentFace(
+      server: server,
+      slug: slug,
+      url: server.avatar(slug, machine: machine),
+      size: size * 0.6,
+    );
+    return SizedBox.square(
+      dimension: size,
+      child: ServerImage(
+        server: server,
+        uri: server.standing(slug, machine: machine),
+        width: size,
+        height: size,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.none,
+        fallback: Center(child: face),
+      ),
+    );
+  }
+}
+
 /// pane 의 색 → 없으면 데스크톱의 학생별 색 → 그것도 없으면 테마 강조색.
 Color studentAccent(BuildContext context, Pane pane, DesignTokens? tokens) {
   final own = DesignTokens.parseHex(pane.color);

@@ -39,18 +39,19 @@ class SwipeServer extends Server {
   final String? transcript;
 
   @override
-  Future<({String raw, int offset, bool reset})?> transcriptRaw(
+  Future<({String raw, int offset, bool reset, String source})?> transcriptRaw(
     String pane,
     int offset, {
     String? machine,
     int? waitMs,
+    String source = '',
   }) async {
     final t = transcript;
     if (t == null) return null;
     final end = utf8.encode(t).length;
     return offset == 0
-        ? (raw: t, offset: end, reset: true)
-        : (raw: '', offset: end, reset: false);
+        ? (raw: t, offset: end, reset: true, source: 'swipe.jsonl')
+        : (raw: '', offset: end, reset: false, source: 'swipe.jsonl');
   }
 
   @override

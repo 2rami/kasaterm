@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show Listenable;
 import 'package:http/http.dart' as http;
@@ -1007,18 +1009,30 @@ class Server {
 
   /// 대화 보기의 입력 — 원본이 넣는다(`/term/chat-send`): 데스크톱 입력칸이 빌 때 붙여넣고(초안·한글 조합·승인 창은
   /// 기다린다), 일하는 칸이면 진행 중인 턴 안으로 든다. 그 창구를 모르는 옛 데스크톱은 [send].
+  ///
+  /// 길에서 끊기면 같은 표식(`message_id`)으로 두 번까지 다시 보낸다 — 다른 앱에 다녀온 직후엔 망이 늦게 붙어 첫
+  /// 요청이 관문에 못 닿고 「닿지 못했다」가 떴다(10-13). 데스크톱은 이미 받은 표식이면 다시 넣지 않는다. 20초를
+  /// 넘긴 것은 다시 보내지 않는다 — 데스크톱이 느리게 받는 중일 수 있다.
   Future<void> chatSend(String pane, String text, {String? machine}) async {
-    final http.Response res;
-    try {
-      res = await _client
-          .post(
-            uri('term/chat-send', machine: machine),
-            headers: {'content-type': 'application/json'},
-            body: jsonEncode({'surface': pane, 'text': text}),
-          )
-          .timeout(const Duration(seconds: 20));
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
+    final id = _messageId();
+    late final http.Response res;
+    for (var attempt = 0;; attempt++) {
+      try {
+        res = await _client
+            .post(
+              uri('term/chat-send', machine: machine),
+              headers: {'content-type': 'application/json'},
+              body: jsonEncode({'surface': pane, 'text': text, 'message_id': id}),
+            )
+            .timeout(const Duration(seconds: 20));
+        break;
+      } on TimeoutException {
+        throw ServerException('${describe()} 에 닿지 못했다');
+      } catch (_) {
+        if (attempt >= 2 || isClosed) throw ServerException('${describe()} 에 닿지 못했다');
+        freshConnections();
+        await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+      }
     }
     if (res.statusCode == 404 || res.statusCode == 405) {
       return send(pane, text, machine: machine);
@@ -1123,17 +1137,21 @@ class Server {
     return body.cast<String, Object?>();
   }
 
-  Future<({String raw, int offset, bool reset})?> transcriptRaw(
+  /// [source] 는 [offset] 이 가리키는 파일(지난 답의 `source`) — 그 칸이 다른 파일로 옮겨 갔으면 서버가 새 파일
+  /// 꼬리를 `reset` 으로 준다. 옛 서버는 `source` 를 모르고 빈 글로 온다.
+  Future<({String raw, int offset, bool reset, String source})?> transcriptRaw(
     String pane,
     int offset, {
     String? machine,
     int? waitMs,
+    String source = '',
   }) async {
     final body = await _getJson(
       'transcript-raw',
       query: {
         'surface': pane,
         'offset': '$offset',
+        if (source.isNotEmpty) 'source': source,
         if (waitMs != null) 'wait_ms': '$waitMs',
       },
       machine: machine,
@@ -1145,6 +1163,7 @@ class Server {
       raw: body['raw'] is String ? body['raw'] as String : '',
       offset: next is int ? next : offset,
       reset: body['reset'] == true,
+      source: body['source'] is String ? body['source'] as String : '',
     );
   }
 
@@ -1329,6 +1348,10 @@ class Server {
 
   Uri avatar(String slug, {String? machine}) =>
       uri('term/avatar/${Uri.encodeComponent(slug)}.png', machine: machine);
+
+  /// 학생이 서 있는 움직임 — 그 데스크톱이 지금 입힌 테마의 idle 그림(GIF). 없으면 404.
+  Uri standing(String slug, {String? machine}) =>
+      uri('character-sprite', query: {'slug': slug, 'motion': 'gif'}, machine: machine);
 
   /// 데스크톱 설정 캐릭터 탭과 같은 테마 카드 — 폰엔 테마 폴더가 없어 고를 후보는 붙은 데스크톱 것을 본다.
   Future<Map<String, Object?>> characterChoices() async {
@@ -1769,4 +1792,11 @@ class _KasanetGateway implements KasanetGateway {
     final ttl = (jsonDecode(utf8.decode(res.bodyBytes)) as Map)['ttl_secs'];
     return ttl is num && ttl > 0 ? Duration(seconds: ttl.toInt()) : null;
   }
+}
+
+/// 데스크톱 tell 표식 꼴(`kt1.<unix-ms>.<16자 넘는 16진>`) — 같은 말의 다시 보내기를 데스크톱이 알아본다.
+String _messageId() {
+  final rand = Random.secure();
+  final nonce = [for (var i = 0; i < 12; i++) rand.nextInt(256).toRadixString(16).padLeft(2, '0')].join();
+  return 'kt1.${DateTime.now().millisecondsSinceEpoch}.$nonce';
 }

@@ -96,7 +96,9 @@ const TRANSCRIPT_FILE_TICK: std::time::Duration = std::time::Duration::from_mill
 /// `reset:true`; `offset>0` returns only whole lines appended since that byte
 /// (`reset:false`, empty when unchanged). The BA GUI accumulates `offset` and
 /// appends, instead of re-parsing the whole (multi-MB) file every poll. Response
-/// `{ ok, surface_id, raw, offset, reset }`.
+/// `{ ok, surface_id, raw, offset, reset, source }` — send `source` back with the
+/// next `offset`; when the pane's file is no longer that one, the answer is the new
+/// file's tail with `reset:true` instead of bytes from the old file's offset.
 async fn transcript_raw_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -110,7 +112,9 @@ async fn transcript_raw_handler(
         .and_then(|s| s.parse::<u64>().ok())
         .map(|ms| std::time::Duration::from_millis(ms.min(25_000)));
     let seen = wait.and_then(|_| crate::claude_mod::row_count(surface));
-    let mut chunk = (!surface.is_empty()).then(|| backend.transcript_raw(surface, offset));
+    let held = params.get("source").map(String::as_str).unwrap_or("");
+    let read = || read_for_source(backend.as_ref(), surface, offset, held);
+    let mut chunk = (!surface.is_empty()).then(read);
     if let (Some(wait), Some(mut seen)) = (wait, seen) {
         // 행 알림만 기다리면 행이 아닌 줄(작업 중에 보낸 말의 큐 기록·사진 첨부)이 다음 행까지
         // 묶여 폰에 몇 초씩 늦게 떴다. 짧은 박자로 파일이 자랐는지도 본다 — 안 바뀌면 stat 하나다.
@@ -126,7 +130,7 @@ async fn transcript_raw_handler(
                 seen = n;
                 tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             }
-            chunk = Some(backend.transcript_raw(surface, offset));
+            chunk = Some(read());
             // mod 가 떠난 칸은 wait_rows 가 곧바로 돌아온다 — 헛돌지 않고 지금 것으로 답한다.
             if rows.is_none() {
                 break;
@@ -138,12 +142,29 @@ async fn transcript_raw_handler(
         Some(chunk) => match chunk {
             Ok(c) => serde_json::json!({
                 "ok": true, "surface_id": surface,
-                "raw": c.raw, "offset": c.offset, "reset": c.reset,
+                "raw": c.raw, "offset": c.offset, "reset": c.reset, "source": c.source,
             }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         },
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `held` 는 클라이언트가 쥔 `offset` 의 파일. 그 칸이 다른 파일로 옮겨 갔으면 그 자리는 새 파일과
+/// 상관없다 — 새 파일 꼬리를 처음부터로 준다. 빈 새 파일이어도 `reset` 이어야 옛 대화가 걷힌다.
+fn read_for_source(
+    backend: &dyn Backend,
+    surface: &str,
+    offset: u64,
+    held: &str,
+) -> anyhow::Result<kasa_socket::backend::TranscriptChunk> {
+    let chunk = backend.transcript_raw(surface, offset)?;
+    if held.is_empty() || chunk.source.is_empty() || chunk.source == held {
+        return Ok(chunk);
+    }
+    let mut fresh = if offset == 0 { chunk } else { backend.transcript_raw(surface, 0)? };
+    fresh.reset = true;
+    Ok(fresh)
 }
 
 /// `GET /session-transcript-raw?id=<uuid>&cwd=<abs>` — a *past* (offline)
@@ -289,4 +310,46 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
                 blocks_handler(blocks_backend.clone(), q)
             }),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 칸 번호는 다음 칸이 물려받고, 칸은 세션을 갈아탄다 — 옛 파일의 자리로 새 파일을 읽으면 중간부터 이어
+    /// 붙어 옛 대화 밑에 새 기록이 쌓였다(10-13, codex 줄엔 sessionId 가 없어 폰이 못 알아챘다).
+    #[test]
+    fn a_held_offset_into_another_file_restarts_from_the_new_tail() {
+        struct Desk { len: u64 }
+        impl Backend for Desk {
+            fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+            fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+            fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+            fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+            fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn transcript_raw(&self, _: &str, offset: u64) -> anyhow::Result<kasa_socket::backend::TranscriptChunk> {
+                let source = "new.jsonl".to_string();
+                Ok(if offset == 0 && self.len > 0 {
+                    kasa_socket::backend::TranscriptChunk { raw: "tail\n".into(), offset: self.len, reset: true, source }
+                } else if offset < self.len {
+                    kasa_socket::backend::TranscriptChunk { raw: "middle\n".into(), offset: self.len, reset: false, source }
+                } else {
+                    kasa_socket::backend::TranscriptChunk { raw: String::new(), offset: self.len, reset: false, source }
+                })
+            }
+        }
+        let desk = Desk { len: 900 };
+        let moved = read_for_source(&desk, "%9", 400, "old-rollout.jsonl").unwrap();
+        assert_eq!((moved.raw.as_str(), moved.reset, moved.source.as_str()), ("tail\n", true, "new.jsonl"));
+        let same = read_for_source(&desk, "%9", 400, "new.jsonl").unwrap();
+        assert_eq!((same.raw.as_str(), same.reset), ("middle\n", false));
+        // 옛 폰은 source 를 안 보낸다 — 예전 그대로.
+        let unknown = read_for_source(&desk, "%9", 400, "").unwrap();
+        assert_eq!((unknown.raw.as_str(), unknown.reset), ("middle\n", false));
+        // 막 뜬 칸의 빈 새 파일이어도 옛 대화를 걷으라고 알린다.
+        let empty = read_for_source(&Desk { len: 0 }, "%9", 400, "old-rollout.jsonl").unwrap();
+        assert_eq!((empty.raw.as_str(), empty.reset), ("", true));
+    }
 }

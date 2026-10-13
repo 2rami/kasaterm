@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/conversation.dart';
 
+import 'fixtures/preview_question.dart';
+
 
 String lines(List<Map<String, Object?>> events) =>
     '${events.map(jsonEncode).join('\n')}\n';
@@ -463,5 +465,51 @@ void main() {
       'Reason: Allow me to create hello.txt in the current workspace?',
     ]);
     expect(codex.options[2].label, 'No, and tell Codex what to do differently (esc)');
+  });
+
+  test('미리보기 붙은 질문 — 선택지가 상자 높이만큼 위에 서도 메뉴, 상자 글은 안 섞인다', () {
+    final menu = parsePromptMenu(previewQuestionScreen)!;
+    expect(menu.title, '나쵸 앱에서 세션을 어떻게 보여줄까?');
+    expect(menu.context, ['☐ 폰 모양']);
+    expect([for (final o in menu.options) o.label], ['세션 목록 → 누르면 그 대화 (추천)', '대화 안에 세션별 탭']);
+    expect([for (final o in menu.options) o.note], ['', '']);
+    expect(menu.cursor, 0);
+
+    // 고른 뒤 입력창으로 돌아온 화면 — 지난 질문은 이제 메뉴가 아니다.
+    expect(
+      parsePromptMenu([
+        ...previewQuestionScreen.take(previewQuestionScreen.indexOf('  Chat about this') - 1),
+        '',
+        '⏺ User answered: 세션 목록 → 누르면 그 대화 (추천)',
+        '─' * 40,
+        '❯ ',
+        '─' * 40,
+      ]),
+      isNull,
+    );
+  });
+
+  test('같은 칸 번호의 다른 파일 — sessionId 없는 codex 줄 뒤에도 옛 대화에 잇지 않는다', () {
+    final c = Conversation();
+    final codex = lines([
+      {
+        'timestamp': '2026-10-12T13:42:00Z',
+        'type': 'event_msg',
+        'payload': {'type': 'user_message', 'message': '지금 폴더 이름만 한 줄로 알려줘'},
+      },
+    ]);
+    expect(c.apply(codex, reset: true, next: 900, source: 'rollout-2026-10-12-01a1.jsonl'), isTrue);
+    expect(c.items, isNotEmpty);
+    // 새 칸의 claude 기록이 옛 자리보다 길게 자라 서버가 이어 받기로 답했다(옛 서버) — 출처가 다르면 거절.
+    final fresh = lines([user('새 칸의 첫 말')]);
+    expect(c.apply(fresh, reset: false, next: 1400, source: '16957aca.jsonl'), isFalse);
+    // 출처를 모르는 옛 서버의 답은 예전처럼 받는다.
+    final old = Conversation()..apply(codex, reset: true, next: 900);
+    expect(old.apply(fresh, reset: false, next: 1400), isTrue);
+    expect(old.source, '');
+    c.clear();
+    expect((c.offset, c.source), (0, ''));
+    expect(c.apply(fresh, reset: true, next: 120, source: '16957aca.jsonl'), isTrue);
+    expect(c.source, '16957aca.jsonl');
   });
 }

@@ -821,9 +821,10 @@ fn option_line(line: &str) -> Option<(bool, usize, String)> {
 }
 
 /// 고른 표식(❯)이 있어야 살아 있는 선택지다 — 답글 속 번호 목록과 가른다.
-pub(crate) fn parse_prompt_menu(lines: &[String]) -> Option<PromptMenu> {
-    let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    let start = last.saturating_sub(13);
+pub(crate) fn parse_prompt_menu(screen: &[String]) -> Option<PromptMenu> {
+    let last = screen.iter().rposition(|l| !l.trim().is_empty())?;
+    let mut lines: Vec<String> = screen.iter().map(|l| left_of_preview(l).to_string()).collect();
+    let start = question_top(screen, last).unwrap_or(last.saturating_sub(13));
     let mut opts: Vec<(PromptOption, usize)> = Vec::new();
     for (i, line) in lines.iter().enumerate().take(last + 1).skip(start) {
         if let Some((current, index, label)) = option_line(line) {
@@ -832,6 +833,17 @@ pub(crate) fn parse_prompt_menu(lines: &[String]) -> Option<PromptMenu> {
     }
     if opts.len() < 2 || !opts.iter().any(|(o, _)| o.current) {
         return None;
+    }
+    // 미리보기 질문 — 선택지 줄 오른쪽에 그림 상자가 섰다. 상자만 있는 줄(과 그 밑 메모 안내)은 메뉴의 일부가 아니고,
+    // 선택지 설명은 왼쪽에 안 찍혀 이어지는 줄은 좁은 칸에 접힌 이름이다.
+    let previewing = opts.iter().any(|(_, i)| lines[*i] != screen[*i]);
+    if previewing {
+        for line in &mut lines[opts[0].1 + 1..=last] {
+            let t = line.trim();
+            if t.starts_with(['│', '┌', '└', '├']) || t.starts_with("Notes:") {
+                line.clear();
+            }
+        }
     }
     let after_last = opts.last()?.1 + 1;
     if lines[after_last.min(lines.len())..].iter().any(|l| {
@@ -878,7 +890,7 @@ pub(crate) fn parse_prompt_menu(lines: &[String]) -> Option<PromptMenu> {
             continue;
         }
         // 이름이 줄 끝까지 찼으면 다음 줄은 접힌 이름의 나머지다(Claude 의 긴 「Yes, and …」).
-        if lines[at].trim_end().chars().count() + 4 >= width {
+        if previewing || lines[at].trim_end().chars().count() + 4 >= width {
             let o = &mut opts[k].0;
             o.label = format!("{} {}", o.label, more.join(" "));
         } else {
@@ -898,6 +910,46 @@ pub(crate) fn parse_prompt_menu(lines: &[String]) -> Option<PromptMenu> {
     }
     context.reverse();
     Some(PromptMenu { title, options: opts.into_iter().map(|(o, _)| o).collect(), context })
+}
+
+/// 선택지 이름 뒤 두 칸 넘는 틈에 이어 선 상자(미리보기 그림)를 떼어 낸다. 글자 칸으로 자르지 않는다 — 한글은
+/// 화면에서 두 칸인데 줄 글에선 한 자라 칸 번호가 줄마다 어긋난다. 줄 머리의 테(`│ 1. Yes │`)는 앞에 글이 없어 남는다.
+fn left_of_preview(line: &str) -> &str {
+    let mut seen_text = false;
+    let mut gap: Option<(usize, usize)> = None;
+    for (i, c) in line.char_indices() {
+        if c.is_whitespace() {
+            if seen_text {
+                gap = Some(gap.map_or((i, 1), |(at, n)| (at, n + 1)));
+            }
+            continue;
+        }
+        if let Some((at, n)) = gap.take() {
+            if n >= 2 && matches!(c, '│' | '┌' | '└' | '├') {
+                return &line[..at];
+            }
+        }
+        seen_text = true;
+    }
+    line
+}
+
+/// 질문 창(`Chat about this` 가 딸린 고르기)의 맨 위 칸막이. 미리보기가 붙으면 선택지가 그림 상자 높이만큼 위로
+/// 밀려 바닥 13줄 밖에 선다(10-13 유우카 칸). 창 안만 훑어 지난 대화의 번호 줄은 안 섞는다.
+fn question_top(lines: &[String], last: usize) -> Option<usize> {
+    let from = last.saturating_sub(60);
+    let bottom = &lines[from..=last];
+    if !bottom.iter().any(|l| l.contains("Chat about this"))
+        || !bottom.iter().any(|l| l.trim().starts_with("Enter to select"))
+    {
+        return None;
+    }
+    // 가로줄만으로 된 줄 — 미리보기 상자의 `└────┘` 도 가로줄이 많지만 칸막이가 아니다.
+    let full_rule = |l: &String| {
+        let t = l.trim();
+        t.chars().count() >= 8 && t.chars().all(|c| matches!(c, '─' | '━'))
+    };
+    (from..=last).rev().filter(|&i| full_rule(&lines[i])).nth(1)
 }
 
 /// 창을 가르는 가로줄(`────`) — 창 머리 위나 질문 창 아래 칸막이.
@@ -1048,6 +1100,45 @@ mod tests {
         assert_eq!(strip_meta(raw), "Use the Bash tool to run exactly: touch y1.txt");
         assert_eq!(strip_meta("The plan plugin sent a message: is a sentence"), "is a sentence");
         assert_eq!(strip_meta("The big plan plugin sent a message: x"), "The big plan plugin sent a message: x");
+    }
+
+    /// 미리보기 붙은 질문(10-13 실화면, 150열) — 선택지가 그림 상자 높이만큼 위에 서도 메뉴이고 상자 글은 안 섞인다.
+    #[test]
+    fn preview_question_menu_sits_above_its_picture() {
+        let screen: Vec<String> = [
+            r#""#,
+            r#"──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"#,
+            r#" ☐ 폰 모양"#,
+            r#""#,
+            r#"나쵸 앱에서 세션을 어떻게 보여줄까?"#,
+            r#""#,
+            r#"❯ 1. 세션 목록 → 누르면 그        ┌──────────────────────────────────────────┐"#,
+            r#"    대화 (추천)                   │ ┌────────────────────┐                   │"#,
+            r#"  2. 대화 안에 세션별 탭          │ │ 세션 목록            │                 │"#,
+            r#"                                  │ ├────────────────────┤                   │"#,
+            r#"                                  │ │ ▸ 기획 대화           │                │"#,
+            r#"                                  │ │   버그 수정           │                │"#,
+            r#"                                  │ │   배포 확인           │                │"#,
+            r#"                                  │ │   리뷰 요청           │                │"#,
+            r#"                                  │ └────────────────────┘                   │"#,
+            r#"                                  └──────────────────────────────────────────┘"#,
+            r#""#,
+            r#"                                  Notes: press n to add notes"#,
+            r#""#,
+            r#"──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"#,
+            r#"  Chat about this"#,
+            r#""#,
+            r#"Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"#,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let menu = parse_prompt_menu(&screen).expect("menu");
+        assert_eq!(menu.title, "나쵸 앱에서 세션을 어떻게 보여줄까?");
+        assert_eq!(menu.context, vec!["☐ 폰 모양".to_string()]);
+        let labels: Vec<_> = menu.options.iter().map(|o| (o.label.as_str(), o.note.as_str(), o.current)).collect();
+        assert_eq!(labels, vec![("세션 목록 → 누르면 그 대화 (추천)", "", true), ("대화 안에 세션별 탭", "", false)]);
+        assert_eq!(left_of_preview("  │ 1. Yes                │"), "  │ 1. Yes");
     }
 
     #[test]

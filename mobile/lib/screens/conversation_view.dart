@@ -359,6 +359,7 @@ class _ConversationViewState extends State<ConversationView> {
         from,
         machine: pane.machine,
         waitMs: waited ? _waitMs : null,
+        source: _conv.source,
       );
       if (!mounted) return;
       if (chunk == null) {
@@ -371,7 +372,7 @@ class _ConversationViewState extends State<ConversationView> {
       }
       // 기다려 받은 새 줄이면 곧바로 다음 줄을 기다린다 — 타이머 박자를 안 기다린다.
       again = waited && !chunk.reset && chunk.offset > from && widget.active;
-      if (!_conv.apply(chunk.raw, reset: chunk.reset, next: chunk.offset)) {
+      if (!_conv.apply(chunk.raw, reset: chunk.reset, next: chunk.offset, source: chunk.source)) {
         // 세션이 바뀌었다 — 다음 바퀴가 꼬리부터 다시 받는다.
         _conv.clear();
         _open.clear();
@@ -559,6 +560,15 @@ class _ConversationViewState extends State<ConversationView> {
             ? '${widget.pane.mirrorOf} 의 거울이라 대화 기록은 그 기계에 있어요. 허브의 ${widget.pane.mirrorOf} 칸에서 열면 보여요.'
             : '이 창에 묶인 대화 기록이 아직 없어요. claude 가 첫 답을 하면 여기에 떠요.',
         onTerminal: widget.onTerminal,
+        // 학생 칸의 첫 화면은 그 학생이 선다 — 쌍둥이는 칸 주인이 없는 화면의 얼굴이다.
+        art: pane.slug == null || pane.isShell
+            ? null
+            : StudentStanding(
+                server: widget.server,
+                slug: pane.slug!,
+                machine: pane.machine,
+                size: Look.twinsSmall,
+              ),
       );
     }
     final face = StudentFace(
@@ -1361,12 +1371,16 @@ class _Empty extends StatelessWidget {
     required this.title,
     required this.body,
     required this.onTerminal,
+    this.art,
   });
 
   final IconData icon;
   final String title;
   final String body;
   final VoidCallback onTerminal;
+
+  /// 서 있는 그림. 없으면 쌍둥이.
+  final Widget? art;
 
   @override
   Widget build(BuildContext context) {
@@ -1379,7 +1393,7 @@ class _Empty extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             // 빈·실패 화면은 서 있는 쌍둥이(design.md 「쌍둥이 결」). 뜻 아이콘은 제목 앞에 작게.
-            const ExcludeSemantics(child: TwinsStage(t: 0, size: Look.twinsSmall)),
+            ExcludeSemantics(child: art ?? const TwinsStage(t: 0, size: Look.twinsSmall)),
             const SizedBox(height: 12),
             Row(
               mainAxisSize: MainAxisSize.min,

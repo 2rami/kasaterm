@@ -73,16 +73,25 @@ pub(super) fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text
 /// 안전한 tell 로 넣는다 — 승인·질문 창이면 기다리고 초안·한글 조합은 안 건드리며, 일하는 칸이면 진행 중인 턴
 /// 안으로 들어간다. 그것도 거절되면(막 띄워 신원이 안 선 칸) 옛 `/send` 붙여넣기. mod 칸을 mod 에 맡기던 길은
 /// 일하는 내내 묶고 plugin 머리를 붙여 걷었다(2026-10-07).
+///
+/// `message_id`(`kt1.…`)를 보내면 같은 말의 다시 보내기다 — 폰은 답을 못 받으면 같은 표식으로 다시 보낸다(앱에
+/// 돌아온 직후엔 망이 늦게 붙어 첫 요청이 길에서 끊겼다). 이미 받은 표식이면 다시 넣지 않고 받았다고 답한다.
 async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let surface = body["surface"].as_str().unwrap_or("").to_string();
     let text = body["text"].as_str().unwrap_or("").trim().to_string();
     if surface.is_empty() || text.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "surface·text 가 필요해요" }));
     }
+    let sent = body["message_id"].as_str().filter(|id| kasa_socket::tell::valid_id(id).is_ok());
+    if let Some(id) = sent {
+        if !chat_sends::claim(id) {
+            return Json(serde_json::json!({ "ok": true, "via": "repeat" }));
+        }
+    }
+    let id = sent.map_or_else(kasa_socket::tell::new_message_id, str::to_string);
+    let claimed = sent.map(str::to_string);
     let result = tokio::task::spawn_blocking(move || {
-        let params = serde_json::json!({
-            "surface_id": surface, "message_id": kasa_socket::tell::new_message_id(), "body": text,
-        });
+        let params = serde_json::json!({ "surface_id": surface, "message_id": id, "body": text });
         match backend.collab_tell(&params) {
             Ok(receipt) => serde_json::json!({ "ok": true, "via": "tell", "receipt": receipt }),
             Err(refused) => match backend.send_text(Some(&surface), &submit_payload(&text)) {
@@ -91,8 +100,39 @@ async fn term_chat_send(backend: Arc<dyn Backend>, Json(body): Json<serde_json::
             },
         }
     })
-    .await;
-    Json(result.unwrap_or_else(|_| serde_json::json!({ "ok": false, "error": "chat-send worker stopped" })))
+    .await
+    .unwrap_or_else(|_| serde_json::json!({ "ok": false, "error": "chat-send worker stopped" }));
+    if result["ok"] != true {
+        if let Some(id) = claimed {
+            chat_sends::release(&id);
+        }
+    }
+    Json(result)
+}
+
+/// 폰이 보낸 말 표식 — 같은 말이 두 번 들어가지 않게. 못 넣은 말은 풀어 줘서 다시 보내기가 들어간다.
+mod chat_sends {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    const KEEP: usize = 256;
+    static SEEN: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+    pub(super) fn claim(id: &str) -> bool {
+        let mut seen = SEEN.lock().unwrap();
+        if seen.iter().any(|s| s == id) {
+            return false;
+        }
+        if seen.len() == KEEP {
+            seen.pop_front();
+        }
+        seen.push_back(id.to_string());
+        true
+    }
+
+    pub(super) fn release(id: &str) {
+        SEEN.lock().unwrap().retain(|s| s != id);
+    }
 }
 
 /// `POST /send?surface=%N` — 학생 pane에 텍스트 주입.
@@ -550,6 +590,42 @@ mod tests {
         let Json(answer) = term_chat_send(fresh.clone(), Json(serde_json::json!({"surface": "%4", "text": "막 뜬 칸"}))).await;
         assert_eq!(answer["via"], "paste");
         assert_eq!(fresh.pasted.lock().unwrap().len(), 1);
+    }
+
+    /// 폰이 답을 못 받아 같은 표식으로 다시 보내면 한 번만 들어간다. 못 넣은 말은 다시 보내기가 들어간다.
+    #[tokio::test]
+    async fn phone_resend_with_the_same_id_lands_once() {
+        use super::*;
+        #[derive(Default)]
+        struct Desk { fail: std::sync::atomic::AtomicBool, tells: std::sync::Mutex<Vec<serde_json::Value>> }
+        impl Backend for Desk {
+            fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+            fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+            fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+            fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+            fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+            fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("no pane") }
+            fn collab_tell(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                anyhow::ensure!(!self.fail.load(std::sync::atomic::Ordering::SeqCst), "identity not established");
+                self.tells.lock().unwrap().push(params.clone());
+                Ok(serde_json::json!({"state": "accepted"}))
+            }
+        }
+        let id = kasa_socket::tell::new_message_id();
+        let send = || serde_json::json!({"surface": "%5", "text": "돌아와서 친 말", "message_id": id});
+        let desk = Arc::new(Desk::default());
+        desk.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let Json(first) = term_chat_send(desk.clone(), Json(send())).await;
+        assert_eq!(first["ok"], false);
+        desk.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let Json(again) = term_chat_send(desk.clone(), Json(send())).await;
+        assert_eq!(again["via"], "tell");
+        let Json(repeat) = term_chat_send(desk.clone(), Json(send())).await;
+        assert_eq!((repeat["ok"].as_bool(), repeat["via"].as_str()), (Some(true), Some("repeat")));
+        let tells = desk.tells.lock().unwrap();
+        assert_eq!(tells.len(), 1);
+        assert_eq!(tells[0]["message_id"].as_str(), Some(id.as_str()));
     }
 
     #[tokio::test]
