@@ -909,6 +909,17 @@ impl App {
         }
         let Some(pid) = self.aux_active_term_pid(&pane_id) else { return };
         let step = lines.abs().ceil() as i32;
+        // 마우스를 받는 전체 화면 앱(claude `tui: fullscreen`)은 지난 줄이 앱 안에만 있다 — 휠을 앱에 넘긴다.
+        let owns = self.ws.lock().ok()
+            .and_then(|ws| ws.panes.get(&pane_id).and_then(|p| p.term()).map(crate::input::app_owns_wheel))
+            .unwrap_or(false);
+        if owns {
+            if let Some(pty) = self.pty.get(&pid) {
+                let one = format!("\x1b[<{};1;1M", if lines > 0.0 { 64 } else { 65 });
+                let _ = pty.send_bytes(one.repeat(step.min(8) as usize).as_bytes());
+            }
+            return;
+        }
         let projection = self.aux.terminals.get(idx)
             .and_then(|term| term.view_shift.as_ref())
             .and_then(|shift| shift.projection.clone());

@@ -49,9 +49,6 @@ enum AutoStep {
 pub(crate) struct ChatViews {
     /// 대화로 보는 pane(바깥 pane id). 없으면 터미널이다. pane 마다 따로 기억한다.
     panes: HashMap<String, ChatPane>,
-    /// 사람이 터미널로 돌려 둔 거울 — 대화형 기본(`mirror_render`)이 다시 열지 않는다.
-    pub(crate) declined: HashSet<String>,
-    pub(crate) mirror_checked: Option<Instant>,
     /// 이번 프레임에 실제로 대화로 그린 pane 의 본문 자리. 입력·휠·클릭은 이것만 본다 —
     /// 대화 모드여도 학생이 나가 셸만 남았으면 터미널을 그리고, 그때 키는 셸로 가야 한다.
     drawn: HashMap<String, Rect>,
@@ -342,12 +339,10 @@ impl App {
     pub(crate) fn toggle_chat_view(&mut self, id: &str) {
         if self.chat_view.panes.remove(id).is_some() {
             self.chat_view.drawn.remove(id);
-            self.chat_view.declined.insert(id.to_string());
             if matches!(&self.ime_focus, Some(crate::ImeFocus::Chat(p)) if p == id) {
                 self.handoff_ime_to_active_surface();
             }
         } else {
-            self.chat_view.declined.remove(id);
             self.chat_view.panes.insert(id.to_string(), ChatPane::new());
             self.selection = None;
             self.drag_anchor = None;
@@ -358,18 +353,9 @@ impl App {
         self.chrome_dirty = true;
     }
 
-    /// 초점·IME 는 그대로 두고 대화로 연다 — 거울의 대화형 기본(`mirror_render`).
-    pub(crate) fn open_chat_view_quietly(&mut self, id: &str) {
-        if !self.chat_view.panes.contains_key(id) {
-            self.chat_view.panes.insert(id.to_string(), ChatPane::new());
-            self.chrome_dirty = true;
-        }
-    }
-
     /// 닫힌 pane 의 대화 상태를 버리고, 대화 pane 마다 기록과 화면 선택지를 읽는다.
     /// 그릴 것이 바뀌었으면 이번 프레임을 다시 그리게 한다.
     pub(crate) fn pump_chat_views(&mut self) {
-        self.open_mirror_chats();
         if self.chat_view.panes.is_empty() {
             return;
         }

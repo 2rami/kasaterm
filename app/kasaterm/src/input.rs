@@ -645,6 +645,11 @@ mod restore_image_input_tests {
     }
 }
 
+/// 마우스를 받는 전체 화면 앱 — 지난 줄은 그 앱 안에만 있어 휠을 앱에 넘겨야 굴러간다.
+pub(crate) fn app_owns_wheel(term: &TerminalPane) -> bool {
+    term.alt_screen && term.mouse_enabled && term.mouse_sgr
+}
+
 /// None means the viewer already exhausted its local rows toward older history.
 fn mirror_scroll_offset(current: usize, maximum: usize, lines: i32) -> Option<usize> {
     let current = current.min(maximum);
@@ -3020,10 +3025,15 @@ impl App {
         }
         // A mirror scrolls its own projected viewport first. Only an upward
         // request beyond all locally available rows may ask for older history.
+        // 마우스를 받는 전체 화면 앱(claude `tui: fullscreen`)은 예외다 — 지난 줄이 그 앱
+        // 안에만 있어 거울 파서엔 굴릴 것이 0줄이다. 아래 SGR 갈래로 원본 앱에 넘긴다(원본 화면도 함께 굴러간다).
         let mirror = target_pane_id.as_ref().and_then(|outer| {
             let projection = self.pane_view_shift.get(outer)?.projection.clone()?;
-            let pid = self.ws.lock().ok()?.active_tab_pid(outer);
-            Some((pid, projection))
+            let ws = self.ws.lock().ok()?;
+            if ws.panes.get(outer).and_then(|p| p.term()).is_some_and(app_owns_wheel) {
+                return None;
+            }
+            Some((ws.active_tab_pid(outer), projection))
         });
         if let Some((pid, projection)) = mirror {
             if self.scroll_mirror_view(&pid, &projection, lines) { return; }
