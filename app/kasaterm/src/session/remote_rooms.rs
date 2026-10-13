@@ -73,7 +73,7 @@ impl App {
                     token: None,
                     identity: identity.clone(),
                 };
-                match kasa_mcp::remote::connect_view(spec, pid) {
+                match kasa_mcp::remote::open_view(spec, pid) {
                     Ok(r) => r,
                     Err(e) => {
                         // 세운 자리를 못 비추면 저쪽에 빈 pane 만 남는다 — 걷고 실패.
@@ -194,10 +194,7 @@ impl App {
         }
         // 몸통이 남의 기계라도 **이 창의 학생은 같은 사람**이어야 한다 — 안 그러면
         // 이름·색·얼굴이 없는 무명 pane 이 된다(사용자: 「옮기면 왜 테마가 없어져」).
-        if let Some(name) = remote_pane
-            .and_then(|p| kasa_mcp::remote::remote_pane_character(base, p, None))
-            .filter(|n| !n.is_empty())
-        {
+        if let Some(name) = remote_pane.and_then(|p| cached_remote_name(base, p)) {
             self.relabel_pane(&new_id, &name);
         }
         if foreign.is_none() {
@@ -300,7 +297,7 @@ impl App {
         focus: bool,
     ) -> Result<String> {
         let new_id = self.alloc_pane_id();
-        let remote = kasa_mcp::remote::connect_view(
+        let remote = kasa_mcp::remote::open_view(
             kasa_mcp::remote::RemoteSpec {
                 base: m.base.clone(),
                 pane: Some(remote_id.to_string()),
@@ -347,7 +344,7 @@ impl App {
         }
         // 몸통이 남의 기계라도 이 창의 학생은 같은 사람 — 무명 탭 방지.
         let name = if name.is_empty() {
-            kasa_mcp::remote::remote_pane_character(&m.base, remote_id, None).unwrap_or_default()
+            cached_remote_name(&m.base, remote_id).unwrap_or_default()
         } else {
             name.to_string()
         };
@@ -486,7 +483,7 @@ impl App {
             },
         };
         let new_id = self.alloc_pane_id();
-        let remote = kasa_mcp::remote::connect_view(
+        let remote = kasa_mcp::remote::open_view(
             kasa_mcp::remote::RemoteSpec {
                 base: m.base.clone(),
                 pane: Some(remote_id.to_string()),
@@ -520,7 +517,7 @@ impl App {
             anyhow::bail!("보기 창 트리에 못 끼웠다");
         }
         let name = if name.is_empty() {
-            kasa_mcp::remote::remote_pane_character(&m.base, remote_id, None).unwrap_or_default()
+            cached_remote_name(&m.base, remote_id).unwrap_or_default()
         } else {
             name.to_string()
         };
@@ -721,7 +718,7 @@ impl App {
                     owned: false,
                 },
             };
-            match kasa_mcp::remote::connect_view(spec, &local_id) {
+            match kasa_mcp::remote::open_view(spec, &local_id) {
                 Ok(remote) => {
                     if seated.is_empty() {
                         if let Some(old) = self.pty.get(&host).cloned() {
@@ -776,7 +773,7 @@ impl App {
                 .find(|r| &r.remote_id == rid)
                 .map(|r| r.name.clone())
                 .filter(|n| !n.is_empty())
-                .or_else(|| kasa_mcp::remote::remote_pane_character(&m.base, rid, None))
+                .or_else(|| cached_remote_name(&m.base, rid))
                 .unwrap_or_default();
             if !name.is_empty() {
                 self.relabel_pane(local, &name);
@@ -836,7 +833,7 @@ impl App {
         let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
             anyhow::bail!("새 창의 기본 pane 을 못 얻었다");
         };
-        let remote = kasa_mcp::remote::connect_view(
+        let remote = kasa_mcp::remote::open_view(
             kasa_mcp::remote::RemoteSpec {
                 base: base.to_string(),
                 pane: Some(remote_id.to_string()),
@@ -876,22 +873,55 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, kasa_socket::backend::SeatRoom)> {
-        if self.tmux.is_some() {
-            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
-        }
-        let m = kasa_mcp::machines::find(label)
-            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
-        self.set_toast(format!("{label} 에 새 방 여는 중…"));
-        self.render_frame();
-        let at = kasa_socket::backend::SpawnShellAt {
-            window: Some(kasa_socket::backend::SpawnWindow::New),
-            ..Default::default()
+    /// 저쪽에 칸을 세우는 요청은 일꾼이 한다 — 원본이 느리거나 안 닿으면 30초까지 걸려, GUI
+    /// 스레드에서 기다리면 그동안 무지개 커서다. 보기 창은 `finish_new_remote_room` 이 앉힌다.
+    pub(crate) fn new_remote_room(&mut self, label: &str, reply: Option<NewRoomReply>) {
+        let machine = if self.tmux.is_some() {
+            Err("tmux 백엔드에선 원격 pane 을 쓰지 않는다".to_string())
+        } else {
+            kasa_mcp::machines::find(label).ok_or_else(|| format!("기계 {label} 가 명부(machines.json)에 없다"))
         };
-        let (remote_id, room) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
-        self.seat_remote_view_window(&m.label, &m.base, &remote_id, true, room.shown().map(|n| format!("방 {n}")))?;
-        self.set_toast(format!("{label} 에 새 방 — {remote_id}"));
-        Ok((remote_id, room))
+        let m = match machine {
+            Ok(m) => m,
+            Err(why) => {
+                self.set_toast(format!("{} 에 새 방 실패 — {why}", crate::render::pane_identity::device_name(label)));
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(why));
+                }
+                return;
+            }
+        };
+        self.set_toast(format!("{label} 에 새 방 여는 중…"));
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let at = kasa_socket::backend::SpawnShellAt {
+                window: Some(kasa_socket::backend::SpawnWindow::New),
+                ..Default::default()
+            };
+            let outcome = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None).map_err(|e| format!("{e:#}"));
+            let done = RoomSpawned { label: m.label, base: m.base, outcome: Mutex::new(Some(outcome)), reply };
+            let _ = proxy.send_event(UserEvent::RemoteRoomSpawned(Arc::new(done)));
+        });
+    }
+
+    pub(crate) fn finish_new_remote_room(&mut self, done: &RoomSpawned) {
+        let Some(outcome) = done.outcome.lock().unwrap().take() else { return };
+        let outcome = outcome.and_then(|(remote_id, room)| {
+            let name = room.shown().map(|n| format!("방 {n}"));
+            self.seat_remote_view_window(&done.label, &done.base, &remote_id, true, name)
+                .map_err(|e| format!("{e:#}"))?;
+            Ok((remote_id, room))
+        });
+        match &outcome {
+            Ok((remote_id, _)) => self.set_toast(format!("{} 에 새 방 — {remote_id}", done.label)),
+            Err(why) => self.set_toast(format!(
+                "{} 에 새 방 실패 — {why}", crate::render::pane_identity::device_name(&done.label),
+            )),
+        }
+        self.info.machines_col.last_refresh = None;
+        if let Some(reply) = &done.reply {
+            let _ = reply.send(outcome);
+        }
     }
 
     /// `machines connect <기기>`(`--here` 없이)의 새 셸. 부른 칸 옆에 연결 칸을 붙이면 다른 기기
@@ -1192,7 +1222,6 @@ impl App {
             rooms.last_mut().unwrap().push((rid, name, cwd));
         }
         let room_n = rooms.len();
-        let total: usize = rooms.iter().map(Vec::len).sum();
         let mut ok_n = 0usize;
         let mut fail: Vec<String> = Vec::new();
         for room in rooms {
@@ -1207,20 +1236,15 @@ impl App {
             let (win_cols, win_rows) = self.window_cells();
             let mut seated: Vec<(String, String, String)> = Vec::new();
             for (rid, name, rcwd) in &room {
-                self.set_toast(format!(
-                    "{label} 펼치는 중 — {}/{total}",
-                    ok_n + fail.len() + 1
-                ));
-                self.render_frame();
                 let local_id = if seated.is_empty() {
                     host.clone()
                 } else {
                     self.alloc_pane_id()
                 };
-                // connect 가 아니라 connect_view — 거울은 원본 세션 크기를 절대
+                // connect 가 아니라 거울(open_view) — 거울은 원본 세션 크기를 절대
                 // 바꾸지 않는다(사용자: 「미러링할때 크기 줄이면 미러링되는곳도
                 // 줄어들어」). 격자가 pane 보다 크면 렌더가 그 pane 만 배율을 줄인다.
-                match kasa_mcp::remote::connect_view(
+                match kasa_mcp::remote::open_view(
                     kasa_mcp::remote::RemoteSpec {
                         base: m.base.clone(),
                         pane: Some(rid.clone()),
@@ -1290,16 +1314,9 @@ impl App {
             }
             // 몸통이 남의 기계라도 이 창의 학생은 같은 사람이어야 한다 —
             // 이름·색·얼굴이 없는 무명 pane 방지(spawn_remote_pane 과 같은 규칙).
-            for (id, name, rid) in &seated {
-                // 스냅샷에 이름이 없으면(막 뜬 학생·옛 원격) 그 기계에 직접 묻는다 —
-                // 거울(mirror_remote_pane)과 같은 규칙.
-                let name = if name.is_empty() {
-                    kasa_mcp::remote::remote_pane_character(&m.base, rid, None).unwrap_or_default()
-                } else {
-                    name.clone()
-                };
+            for (id, name, _) in &seated {
                 if !name.is_empty() {
-                    self.relabel_pane(id, &name);
+                    self.relabel_pane(id, name);
                 }
             }
             self.ws.lock().unwrap().active_pane = Some(seated[0].0.clone());
@@ -1316,6 +1333,27 @@ impl App {
         self.set_toast(msg.clone());
         Ok(msg)
     }
+}
+
+pub(crate) type NewRoomReply =
+    std::sync::mpsc::Sender<std::result::Result<(String, kasa_socket::backend::SeatRoom), String>>;
+
+/// 새 방의 저쪽 칸 요청이 끝난 결과. 보기 창을 앉히는 일은 GUI 스레드 몫이라 사건으로 넘긴다.
+#[derive(Debug)]
+pub(crate) struct RoomSpawned {
+    label: String,
+    base: String,
+    outcome: Mutex<Option<std::result::Result<(String, kasa_socket::backend::SeatRoom), String>>>,
+    reply: Option<NewRoomReply>,
+}
+
+/// 원격 칸의 학생 이름 — 명부 캐시에서만 읽는다. 원본에 직접 묻던 길(`remote_pane_character`)은
+/// 거울을 앉힐 때마다 GUI 스레드를 칸당 최대 10초 붙잡았다. 캐시에 아직 없으면
+/// `refresh_mirror_theme` 이 캐시가 차는 대로 붙인다.
+fn cached_remote_name(base: &str, remote_id: &str) -> Option<String> {
+    let label = kasa_mcp::machines::label_for_base(base)?;
+    let row = kasa_mcp::machines::cached_pane(&label, remote_id)?;
+    row.get("name")?.as_str().filter(|name| !name.is_empty()).map(str::to_string)
 }
 
 /// 거울의 분할선 밀어내기는 한 줄로 세워 보낸다. 드래그 중 칸 경계마다 스레드를 띄우면 도착

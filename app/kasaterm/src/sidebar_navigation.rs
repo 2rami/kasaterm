@@ -1034,9 +1034,7 @@ impl App {
                 }
             },
             Action::NewRoom(label) => {
-                if let Err(e) = self.new_remote_room(&label) {
-                    self.set_toast(format!("{} 에 새 방 실패 — {e:#}", crate::render::pane_identity::device_name(&label)));
-                }
+                self.new_remote_room(&label, None);
                 self.info.machines_col.last_refresh = None;
             }
             Action::NewLocalRoom => self.new_window(),

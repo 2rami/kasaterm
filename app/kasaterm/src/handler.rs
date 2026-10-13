@@ -1101,8 +1101,11 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::RemoteNewRoom(label, reply) => {
-                let out = self.new_remote_room(&label).map_err(|e| format!("{e:#}"));
-                let _ = reply.send(out);
+                self.new_remote_room(&label, Some(reply.clone()));
+                return;
+            }
+            UserEvent::RemoteRoomSpawned(done) => {
+                self.finish_new_remote_room(&done);
                 return;
             }
             UserEvent::TransferSnapshot(machine, sender) => {

@@ -504,13 +504,32 @@ pub fn connect(
     // 되살리면 두 창이 크기를 번갈아 덮으므로 기존 GUI 자리만 거울로 승계한다.
     // 새 셸과 web-* 소유 연결의 생성·종료 책임은 그대로 둔다.
     let view = is_gui_pane(spec.pane.as_deref());
-    connect_inner(spec, local_pane_id, cols, rows, view, false, None)
+    connect_inner(spec, local_pane_id, cols, rows, view, Attach::Wait, None)
+}
+
+/// 접속을 누가 어떻게 기다리나.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attach {
+    /// 첫 악수까지 호출한 스레드가 기다린다. 못 붙으면 몇 번 뒤 포기하고 Err 로 돌려준다.
+    Wait,
+    /// 칸부터 세우고 화면은 붙는 대로 채운다. 첫 악수 실패도 뒤에서 계속 다시 붙는다.
+    Background,
+    /// `Background` 에 더해, 원본이 아직 그 칸을 되살리지 않았다(`gone`)는 답에도 기다린다.
+    Restore,
 }
 
 /// Mirrors follow the server's grid and fit it locally; they take size control only
 /// when a person touches them (`touch_source`).
 pub fn connect_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
-    connect_inner(spec, local_pane_id, 0, 0, true, false, None)
+    connect_inner(spec, local_pane_id, 0, 0, true, Attach::Wait, None)
+}
+
+/// 사람이 연 거울. `connect_view` 는 첫 악수까지 붙잡는데, 원본이 느리거나 꺼져 있으면
+/// 칸마다 최대 15초를 GUI 스레드가 그대로 멈춘다(2026-10-13 맥북: 기기 펼치기·새 방에서
+/// 무지개 커서 1~19초). 격자는 원본의 첫 `size` 가 바로 덮으니 그 전까지만 임시 크기다.
+pub fn open_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
+    anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing remote pane");
+    connect_inner(spec, local_pane_id, 80, 24, true, Attach::Background, None)
 }
 
 /// Restore a known remote identity immediately, even while its host is starting.
@@ -522,7 +541,7 @@ pub fn restore_connection(
     // Old snapshots may have saved GUI panes as own=1. Deferred restore must
     // preserve the same host-owned dimensions as a normal legacy attach.
     let view = view || is_gui_pane(spec.pane.as_deref());
-    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true, None)
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, Attach::Restore, None)
 }
 
 /// Deferred restoration with a source-issued identity. Resolution is read-only
@@ -533,7 +552,7 @@ pub fn restore_connection_identified(
 ) -> Result<RemoteSession> {
     anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing restored remote pane");
     let view = view || is_gui_pane(spec.pane.as_deref());
-    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true, Some(hint))
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, Attach::Restore, Some(hint))
 }
 
 fn connect_inner(
@@ -542,9 +561,10 @@ fn connect_inner(
     cols: u16,
     rows: u16,
     view: bool,
-    deferred: bool,
+    attach: Attach,
     hint: Option<crate::remote_restore::RestoreIdentity>,
 ) -> Result<RemoteSession> {
+    let deferred = attach != Attach::Wait;
     // Additional mirrors use the same authenticated host connection without
     // putting its credential into pane/session snapshots.
     if spec.token.is_none() {
@@ -583,7 +603,7 @@ fn connect_inner(
             // Deferred links must be registered before the manager may finish
             // and unlink them (a fast "gone" reply otherwise leaves a stale link).
             if deferred && start_rx.recv().is_err() { return; }
-            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport, deferred, hint));
+            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport, attach, hint));
         })
         .context("remote-ws 스레드")?;
     let (remote_id, rc, rr) = if deferred {
@@ -652,9 +672,10 @@ async fn manager(
     htx: std::sync::mpsc::SyncSender<std::result::Result<(String, u16, u16), String>>,
     view: bool,
     viewport: Arc<ViewportState>,
-    retry_initial: bool,
+    attach: Attach,
     mut hint: Option<crate::remote_restore::RestoreIdentity>,
 ) {
+    let retry_initial = attach == Attach::Restore;
     // 어떤 길로 나가든 명부를 걷는다 — 안 걷으면 pane 번호가 재사용될 때 새 로컬
     // pane 이 「원격」으로 오판된다. 세대 표식이 맞을 때만 걷는 이유는 Link 주석에.
     struct Unlink(String, u64);
@@ -966,7 +987,7 @@ async fn manager(
                 *viewport.connection_error.lock().unwrap() = Some("기기에 연결하지 못했어요. 자동으로 다시 시도하고 있어요".into());
                 if !had_attach {
                     attempts_before_first += 1;
-                    if attempts_before_first >= 6 && !retry_initial {
+                    if attempts_before_first >= 6 && attach == Attach::Wait {
                         let _ = htx.try_send(Err(format!("원격 호스트에 못 붙었어요: {e}")));
                         return;
                     }
@@ -2759,6 +2780,36 @@ mod tests {
                 if let Ok(socket) = tokio_tungstenite::accept_async(stream).await { return socket; }
             }
         }).await.unwrap()
+    }
+
+    #[test]
+    fn open_view_seats_before_the_source_answers_and_takes_its_grid_later() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (answer, answer_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            answer_rx.recv().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"late-source"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"SEATED FIRST".to_vec().into())).await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            });
+        });
+        let local = format!("open-view-{}", uuid::Uuid::new_v4());
+        let started = std::time::Instant::now();
+        let mirror = open_view(RemoteSpec { base: format!("http://{address}"), pane: Some("late-source".into()),
+            cwd: None, token: None, identity: Default::default() }, &local).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "open_view waited for the source");
+        assert_eq!(mirror.remote_id, "late-source");
+        answer.send(()).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("SEATED FIRST"));
+        assert_eq!(mirror.session.size(), (40, 4));
+        drop(mirror);
+        server.join().unwrap();
     }
 
     #[test]

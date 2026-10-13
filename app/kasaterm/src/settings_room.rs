@@ -947,7 +947,7 @@ mod tests {
         before(
             between(session, "pub(crate) fn mirror_remote_pane", "pub(crate) fn reveal_pane_tab"),
             "SettingsMutation::RemoteMirror",
-            "remote::connect_view(",
+            "remote::open_view(",
         );
         before(
             between(session, "pub(crate) fn open_file(", "pub(crate) fn open_markdown_window"),

@@ -3995,6 +3995,8 @@ enum UserEvent {
     },
     /// CLI `window-new --machine` — 저쪽에 새 방을 만들고 여기 보기 창으로(GUI 스레드).
     RemoteNewRoom(String, std::sync::mpsc::Sender<std::result::Result<(String, kasa_socket::backend::SeatRoom), String>>),
+    /// 새 방의 원격 칸이 저쪽에 섰다(또는 못 섰다) — 보기 창은 GUI 스레드가 앉힌다.
+    RemoteRoomSpawned(Arc<session::RoomSpawned>),
     TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),
     TransferPrepareSpawn(kasa_socket::transfer::SpawnRequest, std::sync::mpsc::Sender<std::result::Result<transfer_endpoints::SpawnPlan, String>>),
     TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>, bool),
