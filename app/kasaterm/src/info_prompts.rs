@@ -33,6 +33,8 @@ pub(crate) struct Prompt {
     pub(crate) text: String,
     /// 기록 줄의 시각(유닉스 초).
     pub(crate) at: Option<u64>,
+    /// 묻는 말(AskUserQuestion·codex 질문)에 고른 답이면 그 질문. 화면에 질문 줄로 서지 않아 자리 맞추기에서 뺀다.
+    pub(crate) asked: Option<String>,
 }
 
 enum Source {
@@ -60,10 +62,13 @@ impl Source {
     }
 }
 
-/// 사람 턴일 수 있는 줄 — claude 의 user 줄(도구 결과 빼고)과 예약, codex 의 사람 말. 본문 안의 따옴표는
-/// 이스케이프돼 있어 이 열쇠들은 실제 키에만 걸린다. 나머지(도구 출력이 대부분)는 JSON 으로 풀지도 않는다.
+/// 사람 턴일 수 있는 줄 — claude 의 user 줄(도구 결과 빼고)과 예약, codex 의 사람 말, 그리고 AskUserQuestion 의
+/// 물음·답 한 쌍(답은 도구 결과라 물음 줄이 있어야 짝을 찾는다). 본문 안의 따옴표는 이스케이프돼 있어 이 열쇠들은
+/// 실제 키에만 걸린다. 나머지(도구 출력이 대부분)는 JSON 으로 풀지도 않는다.
 fn wanted(line: &str) -> bool {
-    (line.contains(r#""type":"user""#) && !line.contains(r#""tool_use_id""#))
+    let answer = line.contains(r#""answers":{"#) && line.contains(r#""questions":["#);
+    (line.contains(r#""type":"user""#) && (!line.contains(r#""tool_use_id""#) || answer))
+        || line.contains(r#""name":"AskUserQuestion""#)
         || line.contains(r#""queue-operation""#)
         || line.contains(r#""user_message""#)
         || line.contains(r#""UserMessage""#)
@@ -125,39 +130,74 @@ impl Feed {
     /// 기록 조각 하나. 세션이 바뀐 것을 알아채면 false — 다음 바퀴가 처음부터 다시 읽는다.
     fn take(&mut self, raw: &str) -> bool {
         for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let asking: Vec<usize> = (0..self.conv.items.len())
+                .filter(|&i| matches!(self.conv.items[i], parse::Item::Answered { pairs: None, .. }))
+                .collect();
             if !self.conv.apply(line) {
                 return false;
             }
             self.stamps.resize(self.conv.items.len(), stamp(line));
+            // 답은 물은 때가 아니라 고른 때다 — 자리를 비운 사이 몇 시간 묵기도 한다.
+            for i in asking {
+                if matches!(self.conv.items[i], parse::Item::Answered { pairs: Some(_), .. }) {
+                    self.stamps[i] = stamp(line);
+                }
+            }
         }
         self.prompts = own_prompts(&self.conv.items, &self.stamps);
         true
     }
 }
 
-/// 사람이 친 말만. claude 는 `parse` 가 이미 다른 쪽이 넣은 말에 `from` 을 달지만 codex 쪽은 안 달아서
-/// 여기서 한 번 더 `relayed` 로 거른다. 예약(아직 안 보낸 말)·꺼내진 예약·슬래시 명령은 질문이 아니다.
-/// codex 가 묻고 사람이 고른 답도 user 턴으로 남지만, claude 쪽 같은 답(AskUserQuestion)처럼 질문이 아니다.
+/// 사람이 친 말과 묻는 말에 고른 답. claude 는 `parse` 가 이미 다른 쪽이 넣은 말에 `from` 을 달지만 codex
+/// 쪽은 안 달아서 여기서 한 번 더 `relayed` 로 거른다. 예약(아직 안 보낸 말)·꺼내진 예약·슬래시 명령은 질문이
+/// 아니다. 답은 claude 는 AskUserQuestion 결과로, codex 는 사람 턴 안의 `<send_user_message_question_reply>` 로 온다.
 pub(crate) fn own_prompts(items: &[parse::Item], stamps: &[Option<u64>]) -> Vec<Prompt> {
+    let answers = |pairs: Vec<(String, String)>, at: Option<u64>| -> Vec<Prompt> {
+        pairs
+            .into_iter()
+            .filter(|(_, a)| !a.trim().is_empty() && a != "—")
+            .map(|(q, a)| Prompt { text: a, at, asked: Some(q) })
+            .collect()
+    };
     items
         .iter()
         .enumerate()
-        .filter_map(|(i, item)| match item {
-            parse::Item::Bubble { user: true, from: None, queued: false, text, images } => {
-                let text = text.trim();
-                if parse::relayed(text).is_some() || text.starts_with("<send_user_message_question_reply>") {
-                    return None;
+        .flat_map(|(i, item)| {
+            let at = stamps.get(i).copied().flatten();
+            match item {
+                parse::Item::Bubble { user: true, from: None, queued: false, text, images } => {
+                    let text = text.trim();
+                    if let Some(pairs) = codex_answers(text) {
+                        return answers(pairs, at);
+                    }
+                    if parse::relayed(text).is_some() {
+                        return Vec::new();
+                    }
+                    let text = match (text.is_empty(), *images) {
+                        (false, _) => text.to_string(),
+                        (true, 0) => return Vec::new(),
+                        (true, n) => format!("그림 {n}장"),
+                    };
+                    vec![Prompt { text, at, asked: None }]
                 }
-                let text = match (text.is_empty(), *images) {
-                    (false, _) => text.to_string(),
-                    (true, 0) => return None,
-                    (true, n) => format!("그림 {n}장"),
-                };
-                Some(Prompt { text, at: stamps.get(i).copied().flatten() })
+                parse::Item::Answered { pairs: Some(pairs), .. } => answers(pairs.clone(), at),
+                _ => Vec::new(),
             }
-            _ => None,
         })
         .collect()
+}
+
+/// codex 가 묻고 사람이 고른 답 — `[{"question":…,"answer":…}]` 를 감싼 사람 턴. 못 읽어도 사람 말로 세지 않는다.
+fn codex_answers(text: &str) -> Option<Vec<(String, String)>> {
+    let body = text.strip_prefix("<send_user_message_question_reply>")?;
+    let body = body.trim().strip_suffix("</send_user_message_question_reply>").unwrap_or(body);
+    let list: Vec<serde_json::Value> = serde_json::from_str(body.trim()).unwrap_or_default();
+    Some(
+        list.iter()
+            .filter_map(|v| Some((v["question"].as_str()?.to_string(), v["answer"].as_str()?.to_string())))
+            .collect(),
+    )
 }
 
 fn poll(feed: Arc<Mutex<Feed>>, source: Source, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
@@ -349,8 +389,13 @@ thread_local! {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Line {
-    /// `Feed::prompts` 의 번호 — 누르면 이 번호로 다시 맞춰 옮긴다.
+    /// 사람이 친 말(`asked` 없는 `Feed::prompts`) 가운데 몇 번째인지 — 누르면 이 번호로 다시 맞춰 옮긴다. 답 줄은
+    /// 그 질문을 받은 턴, 곧 바로 앞의 친 말이다.
     pub(crate) index: usize,
+    /// 체크 표시를 기억하는 열쇠(`check_key`).
+    pub(crate) key: String,
+    /// 묻는 말에 고른 답 줄 — 앞에 「답」 표지를 단다.
+    pub(crate) answer: bool,
     pub(crate) head: String,
     pub(crate) tip: String,
     pub(crate) at: Option<u64>,
@@ -383,22 +428,127 @@ struct State {
     lines: Vec<Line>,
     /// (칸, 질문 번호, 그린 자리).
     hits: Vec<(String, usize, Rect)>,
+    /// (체크 열쇠, 체크칸 자리).
+    boxes: Vec<(String, Rect)>,
 }
 
 thread_local! {
     static PROMPTS: RefCell<State> = RefCell::new(State::default());
+    static CHECKS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// 기억하는 체크 상한 — 넘으면 오래된 것부터 잊는다.
+const CHECKS_MAX: usize = 2000;
+/// 체크칸 그림 크기와 글이 비켜 서는 폭.
+const BOX: f32 = 11.0;
+const BOX_ADVANCE: f32 = 17.0;
+/// 취소선 높이 — 11 글자 줄(`y + 5`)의 글자 가운데(실측: 줄 머리에서 글자 4.4~14.8).
+const STRIKE_Y: f32 = 9.5;
+const ANSWER_MARK: &str = "답";
+
+/// 같은 말을 거울로 보든 그 기기에서 보든 같은 열쇠 — 친 시각과 머리글로 가른다(「ㅇㅇ」 같은 짧은 말이 겹쳐도
+/// 초까지 같은 일은 드물다).
+fn check_key(p: &Prompt) -> String {
+    let asked = p.asked.as_deref().map(head_key).unwrap_or_default();
+    format!("{}|{}|{}", p.at.unwrap_or(0), head_key(&p.text), asked)
+}
+
+/// 설정 파일 옆 — 검증용 앱은 설정 파일을 격리하므로 사람의 체크를 건드리지 않는다.
+fn checks_path() -> Option<PathBuf> {
+    Some(crate::socket::settings_file_path()?.with_file_name("prompt-checks.json"))
+}
+
+fn with_checks<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
+    CHECKS.with(|c| {
+        let mut c = c.borrow_mut();
+        let list = c.get_or_insert_with(|| {
+            checks_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        });
+        f(list)
+    })
+}
+
+fn checked(key: &str) -> bool {
+    with_checks(|list| list.iter().any(|k| k == key))
+}
+
+fn toggle_check(key: &str) {
+    let text = with_checks(|list| {
+        match list.iter().position(|k| k == key) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => {
+                list.push(key.to_string());
+                let over = list.len().saturating_sub(CHECKS_MAX);
+                list.drain(..over);
+            }
+        }
+        serde_json::to_string(list).unwrap_or_default()
+    });
+    if let Some(path) = checks_path() {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// 목록 줄, 새 것이 위. `spots`·`current` 는 친 말(`typed_texts`)의 화면 자리다. 첫 친 말보다 앞선 답은 갈 턴이
+/// 없어(앞 세션에서 이어진 기록) 뺀다.
+fn lines_for(prompts: &[Prompt], spots: &[Option<usize>], current: Option<usize>, anywhere: bool) -> Vec<Line> {
+    let mut typed = 0usize;
+    let mut lines: Vec<Line> = prompts
+        .iter()
+        .filter_map(|p| {
+            if p.asked.is_none() {
+                typed += 1;
+            }
+            let index = typed.checked_sub(1)?;
+            let spot = spots.get(index).copied().flatten();
+            let reachable = anywhere || spot.is_some();
+            Some(Line {
+                index,
+                key: check_key(p),
+                answer: p.asked.is_some(),
+                head: first_line(&p.text),
+                tip: tip_text(p, reachable),
+                at: p.at,
+                reachable,
+                current: p.asked.is_none() && current.is_some() && spot == current,
+            })
+        })
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// 화면에 질문 줄로 서는 말 — 자리 맞추기(`place`)와 이동은 이 목록의 번호로 한다.
+fn typed_texts(prompts: &[Prompt]) -> Vec<String> {
+    prompts.iter().filter(|p| p.asked.is_none()).map(|p| p.text.clone()).collect()
 }
 
 fn first_line(text: &str) -> String {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect()
 }
 
-fn tip_text(text: &str, reachable: bool) -> String {
-    let mut tip: String = text.trim().chars().take(TIP_CHARS).collect();
-    if tip.len() < text.trim().len() {
-        tip.push('…');
-    }
-    tip.push_str(if reachable { "\n누르면 이 질문 자리로 가요" } else { "\n화면 기록에 없어 옮길 수 없어요" });
+fn tip_text(p: &Prompt, reachable: bool) -> String {
+    let clip = |s: &str| {
+        let mut out: String = s.trim().chars().take(TIP_CHARS).collect();
+        if out.len() < s.trim().len() {
+            out.push('…');
+        }
+        out
+    };
+    let mut tip = match &p.asked {
+        Some(q) => format!("질문 · {}\n답 · {}", clip(q), clip(&p.text)),
+        None => clip(&p.text),
+    };
+    tip.push_str(match (reachable, p.asked.is_some()) {
+        (true, false) => "\n누르면 이 질문 자리로 가요",
+        (true, true) => "\n누르면 이 질문을 받은 자리로 가요",
+        (false, _) => "\n화면 기록에 없어 옮길 수 없어요",
+    });
     tip
 }
 
@@ -606,32 +756,15 @@ impl crate::App {
             return;
         }
         let prompts = feed.lock().map(|f| f.prompts.clone()).unwrap_or_default();
+        let texts = typed_texts(&prompts);
         let shelf = self.prompt_shelf(&pane);
         // 풀스크린 TUI 는 대화를 처음부터 쥐고 있어 어느 질문이든 휠로 닿는다.
         let anywhere = matches!(shelf, Some(Shelf::Screen(_)));
         let (spots, current) = match &shelf {
-            Some(shelf) => {
-                let texts: Vec<String> = prompts.iter().map(|p| p.text.clone()).collect();
-                (place(&texts, &shelf.texts()), shelf.current())
-            }
-            None => (vec![None; prompts.len()], None),
+            Some(shelf) => (place(&texts, &shelf.texts()), shelf.current()),
+            None => (vec![None; texts.len()], None),
         };
-        let lines: Vec<Line> = prompts
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(i, p)| {
-                let reachable = anywhere || spots[i].is_some();
-                Line {
-                    index: i,
-                    head: first_line(&p.text),
-                    tip: tip_text(&p.text, reachable),
-                    at: p.at,
-                    reachable,
-                    current: current.is_some() && spots[i] == current,
-                }
-            })
-            .collect();
+        let lines = lines_for(&prompts, &spots, current, anywhere);
         let status = match error {
             Some(e) if !loaded || prompts.is_empty() => Status::Error(format!("기록을 못 읽었어요 · {e}")),
             _ if !loaded => Status::Loading,
@@ -652,18 +785,19 @@ impl crate::App {
     /// 목록 줄을 누른 것. 누른 순간의 화면 목록으로 다시 맞춘다 — 그린 뒤 질문이 늘었거나 스크롤백이
     /// 돌았으면 그린 때의 번호는 남의 자리다.
     pub(crate) fn info_prompt_press(&mut self, x: f32, y: f32) -> bool {
-        let hit = PROMPTS.with(|p| {
-            p.borrow().hits.iter().find(|(_, _, r)| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3).map(|(pane, i, _)| (pane.clone(), *i))
-        });
+        let inside = |r: &Rect| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3;
+        if let Some(key) = PROMPTS.with(|p| p.borrow().boxes.iter().find(|(_, r)| inside(r)).map(|(k, _)| k.clone())) {
+            toggle_check(&key);
+            self.chrome_dirty = true;
+            return true;
+        }
+        let hit = PROMPTS.with(|p| p.borrow().hits.iter().find(|(_, _, r)| inside(r)).map(|(pane, i, _)| (pane.clone(), *i)));
         let Some((pane, index)) = hit else { return false };
         let now = self.ws.lock().ok().and_then(|ws| focused(&ws));
         if now.is_none() || now != PROMPTS.with(|p| p.borrow().seen.clone()) {
             return true;
         }
-        let texts: Vec<String> = PROMPTS.with(|p| {
-            p.borrow().feed.as_ref().and_then(|f| f.lock().ok().map(|f| f.prompts.iter().map(|p| p.text.clone()).collect()))
-        })
-        .unwrap_or_default();
+        let texts = PROMPTS.with(|p| p.borrow().feed.as_ref().and_then(|f| f.lock().ok().map(|f| typed_texts(&f.prompts)))).unwrap_or_default();
         let shelf = self.prompt_shelf(&pane);
         let spot = shelf.as_ref().and_then(|s| place(&texts, &s.texts()).get(index).copied().flatten());
         match (shelf, spot) {
@@ -741,10 +875,13 @@ pub(crate) fn draw(
         }
         let pane = p.seen.as_ref().map(|(pane, _)| pane.clone()).unwrap_or_default();
         let mut hits = Vec::new();
+        let mut boxes = Vec::new();
         for line in &p.lines {
             if y + ROW_H > top && y < bottom {
                 let rect = (x, y, w, ROW_H);
-                let hot = line.reachable && crate::info::hit(cursor, &rect);
+                let check_rect = (x, y, x0 + BOX_ADVANCE - x, ROW_H);
+                let on_box = crate::info::hit(cursor, &check_rect);
+                let hot = (line.reachable || on_box) && crate::info::hit(cursor, &rect);
                 if hot {
                     g.rect(x, y, w, ROW_H, theme::surface());
                     g.hover_pointer = true;
@@ -752,15 +889,44 @@ pub(crate) fn draw(
                 if line.current {
                     g.rect(x + 6.0, y + 5.0, 2.0, ROW_H - 10.0, theme::accent());
                 }
+                let done = checked(&line.key);
+                let (icon, ink) = if done { ("square-check", theme::success()) } else { ("square", theme::text_mute()) };
+                g.queue_icon(icon, x0, y + (ROW_H - BOX) / 2.0, BOX, ink);
+                let tx = x0 + BOX_ADVANCE;
                 let when = line.at.map(clock).unwrap_or_default();
                 let when_w = if when.is_empty() { 0.0 } else { g.measure_chrome_text(&when, 10.0, false) };
                 if when_w > 0.0 {
                     g.draw_text(right - when_w, y + 6.0, &when, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
                 }
-                let room = (right - x0 - if when_w > 0.0 { when_w + 8.0 } else { 0.0 }).max(0.0);
+                let mark_w = if line.answer {
+                    let mark_w = g.measure_chrome_text(ANSWER_MARK, 10.0, false);
+                    g.draw_text(tx, y + 6.0, ANSWER_MARK, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
+                    mark_w + 6.0
+                } else {
+                    0.0
+                };
+                let room = (right - tx - mark_w - if when_w > 0.0 { when_w + 8.0 } else { 0.0 }).max(0.0);
                 let head = fit_text(g, &line.head, room, 11.0, false);
-                let color = if line.current { theme::accent() } else if line.reachable { theme::text() } else { theme::text_dim() };
-                g.draw_text(x0, y + 5.0, &head, gpu::DrawOpts { font_size: 11.0, color, bold: false, italic: false });
+                let color = if done {
+                    theme::text_mute()
+                } else if line.current {
+                    theme::accent()
+                } else if line.reachable {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                };
+                g.draw_text(tx + mark_w, y + 5.0, &head, gpu::DrawOpts { font_size: 11.0, color, bold: false, italic: false });
+                if done {
+                    let head_w = g.measure_chrome_text(&head, 11.0, false);
+                    g.rect(tx + mark_w, y + STRIKE_Y, head_w, 1.0, theme::text_mute());
+                }
+                // 말풍선은 먼저 담긴 자리가 이긴다 — 체크칸 설명을 줄 전문보다 앞에 둔다.
+                if let Some(r) = g.clip_hit(check_rect) {
+                    let tip = if done { "누르면 체크를 풀어요" } else { "누르면 끝낸 것으로 체크해요" };
+                    tips.push((tip.to_string(), r));
+                    boxes.push((line.key.clone(), r));
+                }
                 if let Some(r) = g.clip_hit(rect) {
                     tips.push((line.tip.clone(), r));
                     if line.reachable {
@@ -771,6 +937,7 @@ pub(crate) fn draw(
             y += ROW_H;
         }
         p.hits = hits;
+        p.boxes = boxes;
     });
 }
 
@@ -828,22 +995,49 @@ mod tests {
             r#"{"type":"user","sessionId":"s","isMeta":true,"message":{"content":"스킬 본문"}}"#,
             r#"{"type":"user","sessionId":"s","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"출력"}]}}"#,
             r#"{"type":"user","sessionId":"s","message":{"content":"<command-name>/model</command-name>"}}"#,
+            r#"{"type":"assistant","sessionId":"s","timestamp":"2026-10-13T08:00:30Z","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"색은?"}]}}]}}"#,
+            r#"{"type":"user","sessionId":"s","timestamp":"2026-10-13T08:05:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"q1","content":"Your questions have been answered: \"색은?\"=\"파랑\". You can now continue."}]},"toolUseResult":{"questions":[{"question":"색은?"}],"answers":{"색은?":"파랑"}}}"#,
         ]
         .join("\n");
         let mut feed = Feed::default();
         assert!(feed.take(&keep_wanted(&(raw + "\n"))));
-        assert_eq!(feed.prompts, [Prompt { text: "직접 친 질문".into(), at: Some(1791878400) }]);
+        assert_eq!(
+            feed.prompts,
+            [
+                Prompt { text: "직접 친 질문".into(), at: Some(1791878400), asked: None },
+                Prompt { text: "파랑".into(), at: Some(1791878700), asked: Some("색은?".into()) },
+            ],
+            "답의 시각은 물은 때가 아니라 고른 때다"
+        );
 
         let codex = [
             r#"{"timestamp":"2026-10-13T08:01:00Z","type":"event_msg","payload":{"type":"user_message","message":"codex 에 친 말"}}"#,
             r#"{"timestamp":"2026-10-13T08:02:00Z","type":"event_msg","payload":{"type":"user_message","message":"⟦유즈⟧ 쪽지"}}"#,
             r#"{"timestamp":"2026-10-13T08:03:00Z","type":"event_msg","payload":{"type":"agent_message","message":"답"}}"#,
-            r#"{"timestamp":"2026-10-13T08:04:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"<send_user_message_question_reply>\n[{\"answer\":\"고른 답\"}]\n</send_user_message_question_reply>"}]}}}"#,
+            r#"{"timestamp":"2026-10-13T08:04:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"<send_user_message_question_reply>\n[{\"answer\":\"고른 답\",\"question\":\"어느 쪽?\"}]\n</send_user_message_question_reply>"}]}}}"#,
         ]
         .join("\n");
         let mut feed = Feed::default();
         assert!(feed.take(&keep_wanted(&(codex + "\n"))));
-        assert_eq!(feed.prompts, [Prompt { text: "codex 에 친 말".into(), at: Some(1791878460) }]);
+        assert_eq!(
+            feed.prompts,
+            [
+                Prompt { text: "codex 에 친 말".into(), at: Some(1791878460), asked: None },
+                Prompt { text: "고른 답".into(), at: Some(1791878640), asked: Some("어느 쪽?".into()) },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_answer_row_goes_to_the_turn_that_asked_and_stays_out_of_placing() {
+        let p = |text: &str, asked: Option<&str>| Prompt { text: text.into(), at: None, asked: asked.map(Into::into) };
+        let prompts = [p("앞 세션 답", Some("이어진 질문")), p("첫 질문", None), p("파랑", Some("색은?")), p("둘째 질문", None)];
+        assert_eq!(typed_texts(&prompts), ["첫 질문", "둘째 질문"]);
+        let lines = lines_for(&prompts, &[Some(4), None], Some(4), false);
+        let got: Vec<(&str, usize, bool, bool, bool)> =
+            lines.iter().map(|l| (l.head.as_str(), l.index, l.answer, l.reachable, l.current)).collect();
+        assert_eq!(got, [("둘째 질문", 1, false, false, false), ("파랑", 0, true, true, false), ("첫 질문", 0, false, true, true)]);
+        assert!(lines[1].tip.starts_with("질문 · 색은?\n답 · 파랑"));
     }
 
     #[test]
