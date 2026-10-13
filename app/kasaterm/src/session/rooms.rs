@@ -1,6 +1,19 @@
 //! 방(창)과 초점 — 방 만들기·고르기·순서 바꾸기·닫기, 방 이름 짓기, 칸·탭 초점 옮기기.
 use super::*;
 
+fn room_number_plan<T>(views: &[Option<T>], mut remote_number: impl FnMut(&T) -> Option<usize>) -> Vec<Option<usize>> {
+    let local_count = views.iter().filter(|view| view.is_none()).count();
+    let mut next_local = 0;
+    views.iter().map(|view| match view {
+        Some(view) => remote_number(view).map(|number| local_count + number),
+        None => {
+            let number = next_local;
+            next_local += 1;
+            Some(number)
+        }
+    }).collect()
+}
+
 pub(super) fn forward_backend_focus<T>(pane_id: String, send: impl FnOnce(String) -> T) -> T {
     send(pane_id)
 }
@@ -113,18 +126,25 @@ impl App {
     }
 
     pub(crate) fn room_number_for_window(&self, window: usize) -> Option<usize> {
-        let local: Vec<_> = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).collect();
-        if let Some(n) = local.iter().position(|&i| i == window) { return Some(n); }
-        let (label, ids) = self.remote_view_of_window(window)?;
-        let machine = self.info.machines_col.machines.iter().find(|m| m.label == label)?;
-        let source = machine.remote.iter().chain(&machine.mirrored).find(|row| ids.contains(&row.remote_id))?;
-        self.remote_room_navigation().iter().position(|(l, w, name)| {
-            l == &label && match (*w, source.window) {
-                (Some(a), Some(b)) => a == b,
-                (None, None) => name == &source.room,
-                _ => false,
-            }
-        }).map(|n| local.len() + n)
+        self.room_numbers_for_windows().get(window).copied().flatten()
+    }
+
+    pub(crate) fn room_numbers_for_windows(&self) -> Vec<Option<usize>> {
+        // Computing each number separately revisited every remote window on
+        // every frame, multiplying roster work as mirror rooms accumulated.
+        let views: Vec<_> = (0..self.windows.len()).map(|i| self.remote_view_of_window(i)).collect();
+        let remote = self.remote_room_navigation();
+        room_number_plan(&views, |(label, ids)| {
+            let machine = self.info.machines_col.machines.iter().find(|m| &m.label == label)?;
+            let source = machine.remote.iter().chain(&machine.mirrored).find(|row| ids.contains(&row.remote_id))?;
+            remote.iter().position(|(l, w, name)| {
+                l == label && match (*w, source.window) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, None) => name == &source.room,
+                    _ => false,
+                }
+            })
+        })
     }
 
     pub(crate) fn goto_room_number(&mut self, number: usize) {
@@ -612,8 +632,9 @@ impl App {
         self.window_labels = out;
         self.window_labels_at = Some(now);
         self.overlay_room_rename_label();
+        let shown = self.room_numbers_for_windows();
         let numbers: Vec<crate::RoomNumber> = (0..n).map(|i| crate::RoomNumber {
-            shown: self.room_number_for_window(i).map(|k| k + 1),
+            shown: shown[i].map(|k| k + 1),
             view_of: self.remote_view_of_window(i).map(|(label, _)| label),
         }).collect();
         let mut ws = self.ws.lock().unwrap();
@@ -1005,5 +1026,22 @@ mod tests {
         }
         drop(tx);
         assert_eq!(rx.into_iter().collect::<Vec<_>>(), ["%a", "%b", "%a"]);
+    }
+
+    #[test]
+    fn bulk_room_numbers_preserve_local_order_duplicate_views_and_unknown_sources() {
+        let views = [None, Some(1), None, Some(1), Some(2), None];
+        assert_eq!(room_number_plan(&views, |id| (*id == 1).then_some(1)),
+            [Some(0), Some(4), Some(1), Some(4), None, Some(2)]);
+        assert_eq!(room_number_plan::<()>(&[], |_| None), Vec::<Option<usize>>::new());
+    }
+
+    #[test]
+    fn a_frame_resolves_each_remote_number_only_once() {
+        let views: Vec<_> = (0..1000).map(|i| (i % 2 == 1).then_some(i / 2)).collect();
+        let mut reads = 0;
+        let numbers = room_number_plan(&views, |number| { reads += 1; Some(*number) });
+        assert_eq!(reads, 500);
+        assert_eq!((numbers[998], numbers[999]), (Some(499), Some(999)));
     }
 }

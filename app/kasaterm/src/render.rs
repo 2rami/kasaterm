@@ -1960,8 +1960,7 @@ impl App {
             .flatten();
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
-        let sb_room_numbers: Vec<_> = (0..self.windows.len())
-            .map(|i| self.room_number_for_window(i)).collect();
+        let sb_room_numbers = self.room_numbers_for_windows();
         let local_count = (0..self.windows.len())
             .filter(|&i| self.remote_view_of_window(i).is_none()).count();
         self.info.navigation.room_numbers = self.remote_room_navigation().into_iter().enumerate()

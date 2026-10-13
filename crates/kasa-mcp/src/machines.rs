@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+mod display;
+pub use display::{DisplayIdentity, display_identity};
+
 const POLL_EVERY: Duration = Duration::from_secs(5);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 /// `/term/changes` 롱폴 한 번의 길이. 관문 우회는 답 머리를 20초까지만 기다린다.
@@ -974,6 +977,7 @@ fn raw_machines() -> Vec<Machine> {
 pub fn machines() -> Vec<Machine> {
     let list = raw_machines();
     let Ok(c) = cache().lock() else { return list };
+    display::publish(&list, &c);
     canonical_roster(list, &c)
 }
 
@@ -1467,6 +1471,7 @@ pub async fn poll_loop() {
     loop {
         let list = raw_machines();
         let labels: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
+        if let Ok(c) = cache().lock() { display::publish(&list, &c); }
         if labels != announced {
             eprintln!("[machines] {} 곳 폴링: {}", list.len(), labels.join(", "));
             announced = labels;
@@ -1509,6 +1514,7 @@ pub async fn poll_loop() {
             let Some((m, seen)) = done else { continue };
             if let Ok(mut c) = cache().lock() {
                 if merge_seen(&mut c, &m.label, seen) {
+                    display::publish(&list, &c);
                     GENERATION.fetch_add(1, Ordering::Relaxed);
                 }
             }

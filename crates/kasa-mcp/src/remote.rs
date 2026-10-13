@@ -238,7 +238,7 @@ pub fn is_remote_pane(local_id: &str) -> bool {
 pub fn cached_pane(local_id: &str) -> Option<serde_json::Value> {
     let info = remote_info(local_id)?;
     let label = if info.label.is_empty() {
-        crate::machines::label_for_base(&info.base)?
+        crate::machines::display_identity().label_for_base(&info.base)?.to_string()
     } else {
         info.label
     };
@@ -248,7 +248,7 @@ pub fn cached_pane(local_id: &str) -> Option<serde_json::Value> {
 pub fn cached_fresh_pane(local_id: &str) -> Option<serde_json::Value> {
     let info = remote_info(local_id)?;
     let label = if info.label.is_empty() {
-        crate::machines::label_for_base(&info.base)?
+        crate::machines::display_identity().label_for_base(&info.base)?.to_string()
     } else {
         info.label
     };

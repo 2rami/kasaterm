@@ -1104,11 +1104,13 @@ impl App {
     /// 방 카드가 탭 노릇을 한다(2026-09-16 지시 「새로 여는 게 아니라 눌러서 보이게」).
     /// 셸을 하나라도 끼워 넣으면 그 순간 보통 방이 된다 — 표식이 아니라 내용으로 가른다.
     pub(crate) fn remote_view_of_window(&self, i: usize) -> Option<(String, Vec<String>)> {
+        let identity = kasa_mcp::machines::display_identity();
         let leaves = self.window_leaves(i);
         if leaves.is_empty() {
             return None;
         }
         let mut base: Option<String> = None;
+        let mut saved_label = String::new();
         let mut ids = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
             let pid = self.leaf_pty_id(leaf);
@@ -1119,14 +1121,15 @@ impl App {
             }
             let info = kasa_mcp::remote::remote_info(&pid).filter(|r| r.view)?;
             match &base {
-                Some(b) if !kasa_mcp::machines::same_machine_bases(b, &info.base) => return None,
-                None => base = Some(info.base.clone()),
+                Some(b) if !identity.same_machine(b, &info.base) => return None,
+                None => { base = Some(info.base.clone()); saved_label = info.label.clone(); }
                 _ => {}
             }
             ids.push(info.remote_id);
         }
         let base = base?;
-        let label = kasa_mcp::machines::label_for_base(&base).unwrap_or(base);
+        let label = identity.label_for_base(&base).map(str::to_string)
+            .unwrap_or_else(|| if saved_label.is_empty() { base } else { saved_label });
         Some((label, ids))
     }
 
