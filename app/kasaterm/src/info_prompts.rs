@@ -402,9 +402,29 @@ fn tip_text(text: &str, reachable: bool) -> String {
     tip
 }
 
+/// 친 날짜·시각 `10.12 22:46`(해가 다르면 앞에 해). 지역 시각은 OS 에 맡기고 못 구하면 나이로 물러난다.
+fn clock(at: u64) -> String {
+    #[cfg(target_os = "macos")]
+    if let (Some(t), Some(now)) = (local_tm(at), local_tm(now_secs())) {
+        let day = format!("{:02}.{:02} {:02}:{:02}", t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
+        return if t.tm_year == now.tm_year { day } else { format!("{}.{day}", t.tm_year + 1900) };
+    }
+    age(at)
+}
+
+#[cfg(target_os = "macos")]
+fn local_tm(secs: u64) -> Option<libc::tm> {
+    let t = secs.min(libc::time_t::MAX as u64) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    (!unsafe { libc::localtime_r(&t, &mut tm) }.is_null()).then_some(tm)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 fn age(at: u64) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(at);
-    let ago = now.saturating_sub(at);
+    let ago = now_secs().saturating_sub(at);
     if ago < 60 {
         "방금".into()
     } else if ago < 3600 {
@@ -732,7 +752,7 @@ pub(crate) fn draw(
                 if line.current {
                     g.rect(x + 6.0, y + 5.0, 2.0, ROW_H - 10.0, theme::accent());
                 }
-                let when = line.at.map(age).unwrap_or_default();
+                let when = line.at.map(clock).unwrap_or_default();
                 let when_w = if when.is_empty() { 0.0 } else { g.measure_chrome_text(&when, 10.0, false) };
                 if when_w > 0.0 {
                     g.draw_text(right - when_w, y + 6.0, &when, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
@@ -760,6 +780,14 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prompt_rows_show_the_date_and_time_they_were_typed() {
+        let today = clock(now_secs());
+        assert_eq!(today.len(), "10.12 22:46".len(), "{today}");
+        assert!(clock(0).starts_with("19"), "다른 해에 친 말은 해를 앞에 단다: {}", clock(0));
     }
 
     #[test]
