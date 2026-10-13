@@ -59,6 +59,7 @@ class IdentityTests(unittest.TestCase):
                     self.assertEqual(marker["path"], str(target / "append.md"))
                     self.assertEqual(marker["launch_token"], str(len(queries)))
                     self.assertEqual(queries[-1]["sid"], [SID])
+                    self.assertEqual(queries[-1].get("resumed"), ["1"], "a resume lets the app ask other devices")
                 self.assertEqual(len(queries), 2, "one request per launch, not separate name/persona reads")
                 fresh_sids = []
                 for _ in range(2):
@@ -67,6 +68,7 @@ class IdentityTests(unittest.TestCase):
                     target = Path(result.stdout.strip())
                     fresh_sids.append((target / "session_id").read_text())
                     self.assertEqual(queries[-1]["sid"], [fresh_sids[-1]])
+                    self.assertNotIn("resumed", queries[-1], "a fresh conversation has nothing to look up")
                     self.assertNotEqual(fresh_sids[-1], "stale-pane-anchor")
                 self.assertNotEqual(*fresh_sids, "two fresh runs in one pane need distinct conversation IDs")
         finally:

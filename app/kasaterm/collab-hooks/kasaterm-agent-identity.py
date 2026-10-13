@@ -60,7 +60,9 @@ def main():
         raise ValueError("pane app port unavailable")
     fresh = fresh_conversation(harness, args)
     sid = session_id(harness, args, str(uuid.uuid4()) if fresh else anchor)
+    # resumed: 이 기기가 그 대화의 학생을 모르면 앱이 다른 기기에 묻는다 — 새 대화는 물을 것이 없다.
     query = urllib.parse.urlencode({"surface": pane, "sid": sid, "character": requested,
+                                   "resumed": "" if fresh else "1",
                                    "pid": os.environ.get("KASATERM_LAUNCH_PID", str(os.getppid()))})
     request = urllib.request.Request(f"http://127.0.0.1:{int(port)}/agent-identity?{query}", data=b"", method="POST")
     with urllib.request.urlopen(request, timeout=5) as response:

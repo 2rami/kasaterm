@@ -192,10 +192,32 @@ async fn agent_identity_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let field = |key| params.get(key).map(String::as_str).unwrap_or("");
+    let sid = field("sid");
+    // 이어 여는 대화를 이 기기가 모르면 다른 기기에 묻는다. GUI 로 넘기기 전에 여기서 기다려야 GUI 가
+    // 네트워크에 묶이지 않는다. 받은 학생은 이사(`/repersona?sid=`)와 같이 못박는다 — 이 기기 명단에 없는
+    // 학생이어도 그 대화에는 그대로 앉는다.
+    if field("resumed") == "1" && !sid.is_empty() && crate::character::session_character(sid).is_none() {
+        let found = crate::machines::peer_session_character(sid).await
+            .filter(|name| crate::character::persona_for_any(name).is_some());
+        if let Some(name) = found {
+            let _ = crate::character::bind_session_character(sid, &name);
+            crate::character::mark_manual_pick(sid);
+        }
+    }
     match backend.prepare_agent_identity(field("surface"), field("sid"), field("character"), field("pid").parse().unwrap_or(0)) {
         Ok(identity) => (axum::http::StatusCode::OK, Json(identity)),
         Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": error.to_string()}))),
     }
+}
+
+/// `GET /session-character?sid=<id>` — 이 기기가 그 대화에 묶어 둔 학생(없으면 빈 이름). 다른 기기가
+/// 그 대화를 이어 열 때 묻는다(`machines::peer_session_character`).
+async fn session_character_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let character = params.get("sid").filter(|sid| !sid.is_empty())
+        .and_then(|sid| crate::character::session_character(sid)).unwrap_or_default();
+    Json(serde_json::json!({ "ok": true, "character": character }))
 }
 
 /// `POST /term/character-theme?theme=<id>` (body = `character_picks` JSON) —
@@ -578,6 +600,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         )
         .route("/teamname", get(teamname_handler))
         .route("/agent-identity", post(move |q| agent_identity_handler(agent_identity_backend.clone(), q)))
+        .route("/session-character", get(session_character_handler))
         .route("/persona", get(persona_handler))
         .route("/persona-portrait", get(persona_portrait_handler))
         .route(

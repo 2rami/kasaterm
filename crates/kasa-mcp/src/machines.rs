@@ -1675,6 +1675,31 @@ fn native_character_names<'a>(rows: impl Iterator<Item = (&'a str, &'a Value)>) 
     names
 }
 
+/// 다른 기기들이 그 대화에 묶어 둔 학생. 대화↔학생 묶음은 기기마다 따로 적혀서, 다른 기기에서
+/// `claude --resume` 으로 이어 열면 이 기기는 그 대화를 몰라 다음 차례 학생을 앉혔다(2026-10-14 맥북 히후미
+/// 대화를 맥미니 새 칸에서 열자 세이아가 되어 이름·말투·테마가 바뀌었다). 실행 직전 한 번이라 짧게만 기다린다.
+pub async fn peer_session_character(sid: &str) -> Option<String> {
+    let bases: Vec<String> = machines().into_iter().map(|m| m.base).collect();
+    first_session_character(&bases, sid, PEER_CHARACTER_TIMEOUT).await
+}
+
+const PEER_CHARACTER_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// 기기들에 한꺼번에 묻고 명부 차례로 첫 답을 쓴다 — 꺼진 기기 하나가 다른 기기의 답을 막지 않게.
+async fn first_session_character(bases: &[String], sid: &str, timeout: Duration) -> Option<String> {
+    let client = reqwest::Client::new();
+    let asks = bases.iter().map(|base| {
+        let request = client.get(format!("{}/session-character", base.trim_end_matches('/')))
+            .query(&[("sid", sid)]).timeout(timeout);
+        async move {
+            let response = request.send().await.ok().filter(|r| r.status().is_success())?;
+            let body: Value = response.json().await.ok()?;
+            body.get("character").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_string)
+        }
+    });
+    futures_util::future::join_all(asks).await.into_iter().flatten().next()
+}
+
 /// GET /machines 응답 본체. 캐시만 읽으므로 기계가 죽어 있어도 즉시다.
 pub fn snapshot() -> Vec<Value> {
     snapshot_with_uplinks(&[])
@@ -1814,6 +1839,33 @@ mod tunnel_backoff_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 이어 여는 대화의 학생은 그 대화를 아는 기기에서 온다. 모르는 기기(빈 답)와 꺼진 기기는 건너뛰고,
+    /// 꺼진 기기가 기다림을 늘리지 않는다.
+    #[tokio::test]
+    async fn a_resumed_conversation_keeps_the_student_another_device_bound() {
+        async fn serve(name: &'static str) -> String {
+            let app = axum::Router::new().route("/session-character", axum::routing::get(
+                move |q: axum::extract::Query<HashMap<String, String>>| async move {
+                    let known = q.get("sid").map(String::as_str) == Some("aaf2028c-0da5-4419-892f-330ba9aa7ad2");
+                    axum::Json(serde_json::json!({"ok": true, "character": if known { name } else { "" }}))
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            base
+        }
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let bases = [closed, serve("").await, serve("히후미").await];
+        let started = Instant::now();
+        let found = first_session_character(&bases, "aaf2028c-0da5-4419-892f-330ba9aa7ad2", Duration::from_secs(2)).await;
+        assert_eq!(found.as_deref(), Some("히후미"));
+        assert!(started.elapsed() < Duration::from_secs(2), "a dead device must not hold the launch");
+        assert_eq!(first_session_character(&bases, "unknown-session", Duration::from_secs(2)).await, None);
+    }
 
     fn move_seen(requested_at: Instant, window: u64) -> Seen {
         Seen {
