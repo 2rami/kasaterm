@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../server.dart';
 import '../twins_loading.dart';
@@ -143,6 +144,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
     });
     try {
       await widget.onLogin(origin, _account.text, _password.text);
+      // 들어간 뒤에만 1Password·키체인에 저장을 묻는다 — 틀린 비밀번호를 저장하자고 하지 않게.
+      TextInput.finishAutofillContext();
       if (mounted) _password.clear();
     } on AccountException catch (e) {
       if (mounted) setState(() => _error = e.message);
@@ -226,40 +229,49 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       onPressed: _busy ? null : () => setState(() => _passwordOpen = true),
                       child: const Text('아이디로 로그인'),
                     )
-                  else ...[
-                    LabeledField(
-                      label: '아이디',
-                      child: TextField(
-                        key: const Key('account-input'),
-                        controller: _account,
-                        enabled: !_busy,
-                        autofocus: oauth,
-                        style: const TextStyle(fontSize: 16),
-                        autofillHints: const [AutofillHints.username],
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(),
+                  else
+                    // 아이디·비밀번호를 한 묶음으로 알려야 1Password·키체인이 관문 주소의 계정을 키보드 위에 바로 띄운다
+                    // (앱과 관문 주소는 Runner.entitlements 의 webcredentials 와 관문의 apple-app-site-association 으로 묶인다).
+                    AutofillGroup(
+                      onDisposeAction: AutofillContextAction.cancel,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          LabeledField(
+                            label: '아이디',
+                            child: TextField(
+                              key: const Key('account-input'),
+                              controller: _account,
+                              enabled: !_busy,
+                              autofocus: oauth,
+                              style: const TextStyle(fontSize: 16),
+                              autofillHints: const [AutofillHints.username],
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              textInputAction: TextInputAction.next,
+                              decoration: const InputDecoration(),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          LabeledField(
+                            label: '비밀번호',
+                            child: TextField(
+                              key: const Key('password-input'),
+                              controller: _password,
+                              enabled: !_busy,
+                              style: const TextStyle(fontSize: 16),
+                              obscureText: true,
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              autofillHints: const [AutofillHints.password],
+                              textInputAction: TextInputAction.go,
+                              onSubmitted: (_) => _login(),
+                              decoration: const InputDecoration(),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    LabeledField(
-                      label: '비밀번호',
-                      child: TextField(
-                        key: const Key('password-input'),
-                        controller: _password,
-                        enabled: !_busy,
-                        style: const TextStyle(fontSize: 16),
-                        obscureText: true,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        autofillHints: const [AutofillHints.password],
-                        textInputAction: TextInputAction.go,
-                        onSubmitted: (_) => _login(),
-                        decoration: const InputDecoration(),
-                      ),
-                    ),
-                  ],
                   if (_error ?? widget.message case final message?) ...[
                     const SizedBox(height: 12),
                     Semantics(

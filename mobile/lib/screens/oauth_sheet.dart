@@ -240,6 +240,9 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
       final session = claim
           ? await widget.api.oauthClaim(choice, _account.text, _password.text)
           : await widget.api.oauthSignup(choice);
+      if (claim) {
+        TextInput.finishAutofillContext();
+      }
       if (mounted) Navigator.of(context).pop(OAuthResult(session: session));
     } on AccountException catch (e) {
       if (!mounted) return;
@@ -296,33 +299,41 @@ class _OAuthSheetState extends State<_OAuthSheet> with WidgetsBindingObserver {
           style: dim,
         ),
       ] else ...[
-        LabeledField(
-          label: '아이디',
-          child: TextField(
-            key: const Key('claim-account'),
-            controller: _account,
-            enabled: !_busy,
-            style: const TextStyle(fontSize: 16),
-            autofillHints: const [AutofillHints.username],
-            autocorrect: false,
-            enableSuggestions: false,
-            textInputAction: TextInputAction.next,
-          ),
-        ),
-        const SizedBox(height: 12),
-        LabeledField(
-          label: '비밀번호',
-          child: TextField(
-            key: const Key('claim-password'),
-            controller: _password,
-            enabled: !_busy,
-            style: const TextStyle(fontSize: 16),
-            obscureText: true,
-            autocorrect: false,
-            enableSuggestions: false,
-            autofillHints: const [AutofillHints.password],
-            textInputAction: TextInputAction.go,
-            onSubmitted: (_) => unawaited(_answer(claim: true)),
+        AutofillGroup(
+          onDisposeAction: AutofillContextAction.cancel,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              LabeledField(
+                label: '아이디',
+                child: TextField(
+                  key: const Key('claim-account'),
+                  controller: _account,
+                  enabled: !_busy,
+                  style: const TextStyle(fontSize: 16),
+                  autofillHints: const [AutofillHints.username],
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+              const SizedBox(height: 12),
+              LabeledField(
+                label: '비밀번호',
+                child: TextField(
+                  key: const Key('claim-password'),
+                  controller: _password,
+                  enabled: !_busy,
+                  style: const TextStyle(fontSize: 16),
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  autofillHints: const [AutofillHints.password],
+                  textInputAction: TextInputAction.go,
+                  onSubmitted: (_) => unawaited(_answer(claim: true)),
+                ),
+              ),
+            ],
           ),
         ),
         if (_claimError case final error?) ...[

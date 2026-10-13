@@ -85,13 +85,19 @@ def all_devices():
     return asc.call("GET", "/devices", params={"filter[platform]": "IOS", "limit": 200}).get("data", [])
 
 
-def profile_for(bid, cert_id, device_ids):
-    """그 번들의 Ad Hoc 프로파일 — 기기·인증서가 그대로고 한 주 넘게 남았으면 받아 둔 것을 쓴다."""
+def profile_entitlements(profile):
+    return plistlib.loads(run("security", "cms", "-D", "-i", str(profile)))["Entitlements"]
+
+
+def profile_for(bid, cert_id, device_ids, needs=()):
+    """그 번들의 Ad Hoc 프로파일 — 기기·인증서가 그대로고 한 주 넘게 남았고 [needs] 권한을 다 담았으면 받아 둔 것을 쓴다.
+    앱 ID 에 능력을 새로 켜면(Associated Domains 등) 옛 프로파일엔 그 권한이 없어 새로 받는다."""
     book_path = STATE / "profiles.json"
     book = json.loads(book_path.read_text()) if book_path.exists() else {}
     saved = STATE / f"{bid}.mobileprovision"
     rec = book.get(bid)
-    if rec and saved.exists() and rec["cert"] == cert_id and rec["devices"] == device_ids and rec["until"] > time.time() + 7 * 86400:
+    if rec and saved.exists() and rec["cert"] == cert_id and rec["devices"] == device_ids and rec["until"] > time.time() + 7 * 86400 \
+            and all(k in profile_entitlements(saved) for k in needs):
         return saved
     name = f"kasaterm adhoc {bid}"
     old = asc.call("GET", "/profiles", params={"filter[name]": name, "limit": 20}).get("data", [])
@@ -113,17 +119,29 @@ def profile_for(bid, cert_id, device_ids):
 # 넣으면 키체인 기본 그룹이 바뀌어 폰에 저장된 로그인을 못 읽는다.
 PROFILE_KEYS = ("application-identifier", "com.apple.developer.team-identifier", "get-task-allow",
                 "aps-environment", "com.apple.developer.usernotifications.communication")
+# 프로파일에는 「*」로만 있어 앱이 바라는 값(판과 함께 올라온 entitlements.plist)을 써야 하는 권한.
+WANTED_KEYS = ("com.apple.developer.associated-domains",)
 
 
-def entitlements(bundle, profile, out):
+def wanted(release):
+    path = release / "entitlements.plist"
+    if not path.exists():
+        return {}
+    ent = plistlib.loads(path.read_bytes())
+    return {k: ent[k] for k in WANTED_KEYS if k in ent}
+
+
+def entitlements(bundle, profile, out, want):
     try:
         out.write_bytes(run("codesign", "-d", "--entitlements", "-", "--xml", str(bundle)))
         if plistlib.loads(out.read_bytes()):
             return
     except (RuntimeError, plistlib.InvalidFileException, ValueError):
         pass
-    ent = plistlib.loads(run("security", "cms", "-D", "-i", str(profile)))["Entitlements"]
-    out.write_bytes(plistlib.dumps({k: ent[k] for k in PROFILE_KEYS if k in ent}))
+    ent = profile_entitlements(profile)
+    chosen = {k: ent[k] for k in PROFILE_KEYS if k in ent}
+    chosen.update({k: v for k, v in want.items() if k in ent})
+    out.write_bytes(plistlib.dumps(chosen))
 
 
 def cmd_resign(release):
@@ -136,14 +154,16 @@ def cmd_resign(release):
         run("unzip", "-q", str(release / IPA), "-d", str(work / "x"))
         app = next((work / "x/Payload").glob("*.app"))
         bundles = sorted(app.glob("PlugIns/*.appex")) + [app]
+        want = wanted(release)
         sign = ["codesign", "-f", "-s", c["sha1"], "--keychain", str(KC)]
         for b in bundles:
             for fw in sorted(b.glob("Frameworks/*.framework")) + sorted(b.glob("Frameworks/*.dylib")):
                 run(*sign, str(fw))
             bid = plistlib.loads((b / "Info.plist").read_bytes())["CFBundleIdentifier"]
-            profile = profile_for(bid, c["id"], device_ids)
+            mine = want if b == app else {}
+            profile = profile_for(bid, c["id"], device_ids, needs=tuple(mine))
             ent = work / f"{bid}.entitlements"
-            entitlements(b, profile, ent)
+            entitlements(b, profile, ent, mine)
             shutil.copyfile(profile, b / "embedded.mobileprovision")
             run(*sign, "--entitlements", str(ent), "--generate-entitlement-der", str(b))
         run("codesign", "--verify", "--deep", "--strict", str(app))

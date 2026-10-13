@@ -71,6 +71,8 @@ json.dump({"bundle_id": p["CFBundleIdentifier"], "version": p["CFBundleShortVers
            "build": p["CFBundleVersion"], "title": p.get("CFBundleDisplayName") or p["CFBundleName"],
            "uploaded": int(time.time())}, open(sys.argv[2], "w"))
 PY
+  # 서명 없이 아카이브하면 앱이 바라는 권한이 판에 안 남는다 — 관문 기계의 재서명이 프로파일과 함께 읽는다.
+  cp ios/Runner/Runner.entitlements "$out/entitlements.plist"
   echo "ipa — $out/kasaterm.ipa ($(du -h "$out/kasaterm.ipa" | cut -f1))"
 fi
 [ "$mode" = build ] && exit 0
@@ -85,7 +87,7 @@ put() { local dest=$1; shift; if [ "$host" = local ]; then cp "$@" "$HOME/$dest/
 on_host "$remote/$up" "$tooldir" "$remote" <<'SH'
 mkdir -p "$1" "$2" && chmod 700 "$3"
 SH
-put "$remote/$up" "$out/kasaterm.ipa" "$out/meta.json"
+put "$remote/$up" "$out/kasaterm.ipa" "$out/meta.json" $( [ -f "$out/entitlements.plist" ] && echo "$out/entitlements.plist" )
 put "$tooldir" tool/asc.py tool/adhoc_sign.py
 # 판 바꾸기는 디렉터리 이름 바꾸기 → latest 갈아 끼우기 순이라, 관문은 반쯤 올라간 판을 보지 않는다.
 on_host "$remote" "$up" "$token" "$tooldir" <<'SH'

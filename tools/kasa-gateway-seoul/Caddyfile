@@ -47,6 +47,12 @@
 			flush_interval -1
 		}
 	}
+	# 카사모바일 로그인 칸에 1Password·키체인이 이 주소의 계정을 바로 띄우게 앱과 묶는다(앱 Runner.entitlements 의
+	# webcredentials). 애플 CDN 이 넘김 없이 200 JSON 으로 받아 가야 한다.
+	handle /.well-known/apple-app-site-association {
+		header Content-Type application/json
+		respond `{"webcredentials":{"apps":["L366799VND.com.debimarlene.kasaterm"]}}` 200
+	}
 	handle {
 		# 관문은 루프백 상대면 CF-Connecting-IP 를 접속자로 본다 — 접속자가 보낸 값을 덮어쓴다.
 		reverse_proxy 127.0.0.1:8790 {
