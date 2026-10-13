@@ -24,7 +24,6 @@ const io = {
   loaded: false,
   fullscreen: false,
   agentView: false,
-  ask: null as (Op & { seq: number; at: number }) | null,
 }
 
 // 세션이 바뀌면(/clear·/resume) 줄 차례도 잰 높이도 그 세션 것이 아니다.
@@ -101,7 +100,6 @@ async function flush($: EngineInterface) {
     top: m.top,
     current: m.current,
     prompts: m.prompts.map(p => [p.row, p.text]),
-    ask: io.ask,
   }
   const key = JSON.stringify(body)
   if (key === io.last) return
@@ -113,7 +111,9 @@ async function flush($: EngineInterface) {
 // 점프하면 화면을 떠난 줄은 다시 보고되지 않으므로 지금까지의 보고를 비우고 새 보고로만 맨
 // 윗줄을 정한다. 스크롤이 끝날 때까지 보고가 하나도 없으면(이미 그 자리) 목표를 맨 윗줄로 둔다.
 async function go($: EngineInterface, op: Op): Promise<string | undefined> {
-  if (!io.fullscreen) return ask($, op)
+  // classic 렌더러는 대화가 터미널 스크롤백에 쌓여 엔진이 그 줄을 스크롤하지 못한다. kasaterm 은
+  // claude·codex 를 풀스크린 TUI 로만 받는다.
+  if (!io.fullscreen) return 'works in the fullscreen renderer only (/tui fullscreen)'
   const to = target(model, op)
   if (!to) return 'no prompt there'
   const before = { onScreen: new Map(model.onScreen), top: model.top }
@@ -127,15 +127,6 @@ async function go($: EngineInterface, op: Op): Promise<string | undefined> {
     model.top = { id: to.id, first: 0 }
   }
   return result.deny
-}
-
-// classic 렌더러는 대화가 터미널 스크롤백에 쌓여 엔진이 그 줄을 스크롤하지 못한다. kasaterm 칸이면
-// 상태 파일의 ask 로 맡기고, kasaterm 이 자기 스크롤백의 프롬프트 줄로 옮긴다.
-async function ask($: EngineInterface, op: Op): Promise<string | undefined> {
-  if (!io.state) return 'the classic renderer keeps the transcript in terminal scrollback'
-  io.ask = { ...op, seq: (io.ask?.seq ?? 0) + 1, at: await $.clock.now() }
-  await flush($)
-  return undefined
 }
 
 async function readRequest($: EngineInterface): Promise<(Op & { seq: number }) | null> {

@@ -170,11 +170,6 @@ impl TurnJump {
         &entry.3
     }
 
-    /// classic claude 칸의 스크롤바 눈금 — 라이브 바닥에서도 읽으므로 헤더와 달리 offset 을 안 본다.
-    pub(crate) fn claude_anchors(&mut self, pid: &str, sess: &kasa_pty::PtySession) -> Vec<PromptAnchor> {
-        self.scan(pid, sess, true).clone()
-    }
-
     /// pane 이 사라졌으면 캐시도 버린다 — 닫힌 pane 의 앵커를 들고 있을 이유가 없고,
     /// 같은 id 가 재사용되면 남의 스크롤백을 가리키게 된다.
     pub(crate) fn retain_panes(&mut self, alive: impl Fn(&str) -> bool) {

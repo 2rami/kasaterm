@@ -5,8 +5,9 @@
 //! 화면만 보면 되니 꼬리만 읽지만, 여기는 모아보기라 파일을 처음부터 읽는다 — 사람 턴만 JSON 으로 푼다.
 //!
 //! 기록에는 화면 자리가 없다. 자리는 칸이 이미 가진 정본에서 글로 맞춰 찾는다 — 풀스크린 claude 는 칸 안 mod 가
-//! 잰 행, classic claude·codex 는 스크롤백 앵커, 거울은 받은 화면의 앵커(`prompt_nav`·`turnjump` 와 같은 정본).
-//! 붙여넣기 접힘·그림 자리표시처럼 화면에 다른 글로 남는 말은 앞뒤로 맞은 두 질문 사이의 차례로 메운다.
+//! 잰 행(`prompt_nav`), 거울은 받은 화면의 앵커. mod 가 없는 풀스크린 codex 는 자리를 아는 곳이 없어 휠을 굴려
+//! 그 질문이 화면 맨 위에 설 때까지 찾아간다. 붙여넣기 접힘·그림 자리표시처럼 화면에 다른 글로 남는 말은 앞뒤로
+//! 맞은 두 질문 사이의 차례로 메운다.
 //!
 //! 상태는 GUI 스레드의 지역 통에 둔다 — 그리기(`draw_info_col`)는 App 을 못 보고, App·InfoState 를 안
 //! 늘리려는 것이다(`prompt_nav` 의 `NAV` 와 같은 방식).
@@ -283,24 +284,67 @@ pub(crate) fn place(prompts: &[String], shown: &[String]) -> Vec<Option<usize>> 
 
 /// 칸이 가진 질문 자리 목록 — 이동은 그 목록의 번호로 한다.
 enum Shelf {
-    Nav(crate::prompt_nav::NavSource, crate::prompt_nav::NavState),
+    /// 풀스크린 claude — 칸 안 mod 가 잰 행. 이동도 mod 에 시킨다.
+    Mod(crate::prompt_nav::NavState),
+    /// 거울 — 받은 화면이 이 기기 스크롤백에 쌓인다.
     Mirror(Vec<kasa_pty::PromptAnchor>, i64),
+    /// mod 없는 풀스크린 칸(codex). 대화를 TUI 가 통째로 쥐고 있어 자리를 모른다 — 휠을 굴려 그 질문이
+    /// 화면 맨 위에 설 때까지 찾아간다(`Seek`). 값은 지금 화면에 보이는 질문 줄.
+    Screen(Vec<String>),
 }
 
 impl Shelf {
     fn texts(&self) -> Vec<String> {
         match self {
-            Shelf::Nav(_, s) => s.prompts.iter().map(|(_, t)| t.clone()).collect(),
+            Shelf::Mod(s) => s.prompts.iter().map(|(_, t)| t.clone()).collect(),
             Shelf::Mirror(a, _) => a.iter().map(|a| a.text.clone()).collect(),
+            Shelf::Screen(rows) => rows.clone(),
         }
     }
 
     fn current(&self) -> Option<usize> {
         match self {
-            Shelf::Nav(_, s) => usize::try_from(s.current).ok(),
+            Shelf::Mod(s) => usize::try_from(s.current).ok(),
             Shelf::Mirror(a, top) => a.iter().rposition(|a| a.abs_line <= *top),
+            Shelf::Screen(_) => None,
         }
     }
+}
+
+/// 풀스크린 TUI 의 질문 줄 — claude 는 `❯`, codex 는 `›` 로 연다.
+fn prompt_row(row: &str) -> bool {
+    row.trim_start().starts_with(['\u{276f}', '\u{203a}'])
+}
+
+fn row_text(row: &[kasa_bridge::screen::Cell]) -> String {
+    row.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect::<String>().trim_end().to_string()
+}
+
+/// 휠로 찾아가는 중인 이동 하나. 띠 되짚기(`sticky_seek`)는 띠가 떠 있어야 시작하는데, 여기는 라이브
+/// 바닥에서도 떠나야 해서 따로 둔다.
+#[derive(Clone)]
+struct Seek {
+    pane: String,
+    want: String,
+    down: bool,
+    /// 목적지가 화면에 보이기 시작했다 — 한 노치씩 다가간다.
+    near: bool,
+    /// 한쪽 끝까지 가도 없어 반대쪽으로 돌았다. 그쪽 끝에서도 없으면 그만둔다.
+    turned: bool,
+    cell: (u16, u16),
+    last: Instant,
+    sent: u32,
+    stall: u32,
+    print: u64,
+}
+
+const SEEK_EVERY: Duration = Duration::from_millis(30);
+const SEEK_MAX: u32 = 400;
+/// 화면이 이만큼 연달아 그대로면 끝(맨 위·맨 아래)에 닿은 것이다.
+const SEEK_STALL: u32 = 12;
+
+thread_local! {
+    static SEEK: RefCell<Option<Seek>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -402,13 +446,101 @@ impl crate::App {
             return Some(Shelf::Mirror(anchors, top));
         }
         if let Some(state) = crate::prompt_nav::live_state(&pid) {
-            return Some(Shelf::Nav(crate::prompt_nav::NavSource::Mod, state));
+            return Some(Shelf::Mod(state));
         }
-        self.scrollback_nav(pane).map(|s| Shelf::Nav(crate::prompt_nav::NavSource::Scrollback, s))
+        let rows = self.screen_rows(pane)?;
+        Some(Shelf::Screen(rows.into_iter().filter(|r| prompt_row(r)).collect()))
+    }
+
+    /// 대체 화면 칸의 지금 화면 글자(줄마다). 대체 화면이 아니면 `None`.
+    fn screen_rows(&self, pane: &str) -> Option<Vec<String>> {
+        let ws = self.ws.lock().ok()?;
+        let t = ws.panes.get(pane)?.term()?;
+        t.alt_screen.then(|| t.cells.iter().map(|r| row_text(r)).collect())
+    }
+
+    /// 화면에 보이는 질문과 견줘 위·아래를 정하고 휠로 떠난다. 보이는 질문이 없으면(라이브 바닥의 긴 답)
+    /// 위로 — 지난 질문은 위에 있다. 견줄 때는 글이 맞는 줄만 센다 — 차례 메우기(`place`)는 입력칸
+    /// (`› Ask Codex…`)까지 질문으로 짝지어 방향을 거꾸로 잡는다.
+    fn begin_screen_seek(&mut self, pane: &str, texts: &[String], index: usize) {
+        let Some(rows) = self.screen_rows(pane) else { return };
+        let keys: Vec<String> = texts.iter().map(|t| head_key(t)).collect();
+        let last_seen = rows
+            .iter()
+            .filter(|r| prompt_row(r))
+            .filter_map(|r| keys.iter().rposition(|k| same(k, &head_key(r))))
+            .max();
+        let down = last_seen.is_some_and(|last| index > last);
+        let cols = self.ws.lock().ok().and_then(|ws| ws.panes.get(pane)?.term().map(|t| t.cells.first().map_or(0, Vec::len))).unwrap_or(0);
+        let cell = ((cols / 2) as u16, (rows.len() / 2) as u16);
+        let now = Instant::now();
+        let seek = Seek { pane: pane.to_string(), want: keys[index].clone(), down, near: false, turned: false, cell, last: now.checked_sub(SEEK_EVERY).unwrap_or(now), sent: 0, stall: 0, print: 0 };
+        SEEK.with(|s| *s.borrow_mut() = Some(seek));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 한 틱 — 목적지가 맨 위 세 줄 안에 서면 끝, 아래쪽에 보이면 방향을 아래로 돌려 한 노치씩 올린다
+    /// (화면의 줄을 위로 올리려면 아래로 굴려야 한다).
+    fn pump_screen_seek(&mut self) {
+        let Some(mut seek) = SEEK.with(|s| s.borrow().clone()) else { return };
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        if seek.last.elapsed() < SEEK_EVERY {
+            return;
+        }
+        let Some(rows) = self.screen_rows(&seek.pane) else {
+            SEEK.with(|s| *s.borrow_mut() = None);
+            return;
+        };
+        // codex 는 맨 윗줄에 지금 보는 턴의 질문을 띠로 붙인다 — 거기 걸린 것은 아래에서 다가와 닿았을 때만
+        // 진짜 그 줄이다. 처음부터 맨 윗줄에 있으면 그 턴의 꼬리를 보는 중이라 더 올라간다.
+        let at = rows.iter().position(|r| prompt_row(r) && same(&head_key(r), &seek.want));
+        if at.is_some_and(|r| (1..=2).contains(&r) || r == 0 && seek.near) {
+            SEEK.with(|s| *s.borrow_mut() = None);
+            return;
+        }
+        if at.is_some_and(|r| r > 2) {
+            seek.near = true;
+            seek.down = true;
+        }
+        let print = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            rows.hash(&mut h);
+            h.finish()
+        };
+        seek.stall = if print == seek.print { seek.stall + 1 } else { 0 };
+        seek.print = print;
+        // 더 못 굴리는데 보이면 거기가 갈 수 있는 끝이다(마지막 질문은 바닥에서도 맨 위까지 못 온다).
+        if seek.stall >= SEEK_STALL && at.is_some() {
+            SEEK.with(|s| *s.borrow_mut() = None);
+            return;
+        }
+        if seek.stall >= SEEK_STALL && !seek.turned {
+            seek.turned = true;
+            seek.down = !seek.down;
+            seek.stall = 0;
+        }
+        if seek.stall >= SEEK_STALL || seek.sent >= SEEK_MAX {
+            SEEK.with(|s| *s.borrow_mut() = None);
+            self.set_toast("그 질문까지 못 찾았어요".into());
+            return;
+        }
+        let button = if seek.down { 65 } else { 64 };
+        for _ in 0..if seek.near { 1 } else { 4 } {
+            self.send_mouse_sgr(&seek.pane, button, seek.cell.0, seek.cell.1, true);
+        }
+        seek.sent += 1;
+        seek.last = Instant::now();
+        SEEK.with(|s| *s.borrow_mut() = Some(seek));
     }
 
     /// render 매 틱 — Info 가 열려 있을 때만 지금 보는 칸의 기록을 따라 읽고 화면 자리와 맞춘다.
     pub(crate) fn pump_info_prompts(&mut self) {
+        self.pump_screen_seek();
         let open = self.info.tab == crate::state::SideTab::Info && self.git.col_visible;
         let seen = if open { self.ws.lock().ok().and_then(|ws| focused(&ws)) } else { None };
         let source = seen.as_ref().and_then(|(_, pid)| match kasa_mcp::remote::remote_meta(pid) {
@@ -455,6 +587,8 @@ impl crate::App {
         }
         let prompts = feed.lock().map(|f| f.prompts.clone()).unwrap_or_default();
         let shelf = self.prompt_shelf(&pane);
+        // 풀스크린 TUI 는 대화를 처음부터 쥐고 있어 어느 질문이든 휠로 닿는다.
+        let anywhere = matches!(shelf, Some(Shelf::Screen(_)));
         let (spots, current) = match &shelf {
             Some(shelf) => {
                 let texts: Vec<String> = prompts.iter().map(|p| p.text.clone()).collect();
@@ -467,7 +601,7 @@ impl crate::App {
             .enumerate()
             .rev()
             .map(|(i, p)| {
-                let reachable = spots[i].is_some();
+                let reachable = anywhere || spots[i].is_some();
                 Line {
                     index: i,
                     head: first_line(&p.text),
@@ -513,10 +647,13 @@ impl crate::App {
         let shelf = self.prompt_shelf(&pane);
         let spot = shelf.as_ref().and_then(|s| place(&texts, &s.texts()).get(index).copied().flatten());
         match (shelf, spot) {
-            (Some(Shelf::Nav(source, _)), Some(i)) => self.nav_go(&pane, source, crate::prompt_nav::NavOp::Prompt(i)),
+            (Some(Shelf::Mod(_)), Some(i)) => {
+                self.prompt_nav_request(&pane, crate::prompt_nav::NavOp::Prompt(i));
+            }
             (Some(Shelf::Mirror(anchors, _)), Some(i)) => {
                 self.jump_mirror_abs(&pane, anchors[i].abs_line);
             }
+            (Some(Shelf::Screen(_)), _) if index < texts.len() => self.begin_screen_seek(&pane, &texts, index),
             _ => self.set_toast("이 질문은 화면 기록에 없어 옮길 수 없어요".into()),
         }
         PROMPTS.with(|p| p.borrow_mut().placed = None);

@@ -3117,8 +3117,7 @@ pub(crate) fn scrolled_gate(rows: &[Vec<GridCell>]) -> bool {
 ///
 /// pane 의 claude 는 no-flicker(대체화면)로 돈다. 스크롤을 claude 가 쥐어 터미널은
 /// 위치를 모르므로, 띠를 화면 글자로 짐작해야 한다. 정확한 쪽(`turnjump.rs`, 절대
-/// 줄 번호)은 classic 렌더러에서만 성립하는데 그건 사람이 claude `/tui default` 로
-/// 고른 pane 뿐이다 — kasaterm 은 렌더러를 강제하지 않는다(`kasa-pty` spawn 주석).
+/// 줄 번호)은 스크롤백이 있는 거울 칸에서만 성립한다 — classic 렌더러는 받지 않는다.
 ///
 /// 그러니 **띠가 엉뚱한 질문을 물면 고칠 곳은 여기다.** 렌더러를 되돌리는 것으로
 /// 때우지 마라.
