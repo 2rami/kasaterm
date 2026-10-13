@@ -4308,6 +4308,16 @@ impl App {
             self.preedit.clear();
             self.in_preedit = false;
         }
+        // 셸 프롬프트의 `# 자연어 요청` + 맨 Enter 는 셸에 안 보내고 명령으로 바꾼다(nl_command.rs).
+        if matches!(event.logical_key, Key::Named(NamedKey::Enter))
+            && !self.modifiers.shift_key()
+            && !self.modifiers.alt_key()
+            && !self.modifiers.control_key()
+            && !self.modifiers.super_key()
+            && self.nl_command_enter(&commit_prefix)
+        {
+            return;
+        }
         // Readline-style delete shortcuts. Defaults match iTerm2 /
         // Terminal.app on macOS and Windows Terminal on Windows:
         //   Option/Alt+Backspace → `\e\x7f`  (backward-kill-word)

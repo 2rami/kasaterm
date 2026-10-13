@@ -1325,6 +1325,54 @@ impl App {
         );
     }
 
+    /// 자연어 명령(nl_command.rs) 한 바퀴: `KASATERM_AUTONLCMD="요청"` 을 `_MS`(기본 6000)
+    /// 뒤에 `# 요청` 으로 쳐 넣고, 0.8초 뒤 맨 Enter 를 받은 것처럼 판정을 부른 다음, 12초 뒤
+    /// 입력줄을 찍는다. 키 이벤트는 합성할 수 없어 Enter 훅 세 줄만 빼고 전부 지난다.
+    /// `KASATERM_AUTONLCMD_UNDER="cat"` 이면 그 명령을 먼저 돌려 둔다 — 셸이 아니라 그
+    /// 명령이 입력을 받는 중이니 가로채면 안 된다(받음=false 가 맞다).
+    pub(crate) fn run_pending_autonlcmd(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STAGE: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTONLCMD").ok()?;
+            let ms = std::env::var("KASATERM_AUTONLCMD_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = *due else { return };
+        let at = |ms: u64| due + std::time::Duration::from_millis(ms);
+        let now = Instant::now();
+        match STAGE.load(Ordering::Relaxed) {
+            0 if now >= due => {
+                STAGE.store(1, Ordering::Relaxed);
+                if let Ok(under) = std::env::var("KASATERM_AUTONLCMD_UNDER") {
+                    self.send_bytes(format!("{under}\r").as_bytes());
+                }
+            }
+            1 if now >= at(600) => {
+                STAGE.store(2, Ordering::Relaxed);
+                let req = std::env::var("KASATERM_AUTONLCMD").unwrap_or_default();
+                self.send_bytes(format!("# {req}").as_bytes());
+            }
+            2 if now >= at(1400) => {
+                STAGE.store(3, Ordering::Relaxed);
+                let pid = self.target_surface().unwrap_or_default();
+                let grid = self.shell_prompt_grid(&pid);
+                let taken = self.nl_command_enter(&[]);
+                eprintln!("[autonlcmd] 프롬프트줄={grid:?} 받음={taken}");
+            }
+            3 if now >= at(13400) => {
+                STAGE.store(4, Ordering::Relaxed);
+                let pid = self.target_surface().unwrap_or_default();
+                let grid = self.shell_prompt_grid(&pid);
+                let toast = self.collab.toast.as_ref().map(|(m, _)| m.clone());
+                eprintln!("[autonlcmd] 결과줄={grid:?} 알림={toast:?}");
+            }
+            _ => {}
+        }
+    }
+
     /// `KASATERM_AUTOTOAST="제목 · 설명"` 을 `KASATERM_AUTOTOAST_MS` 뒤에 띄운다 — 알림은
     /// 복사·완료·권한 같은 바깥 일이 있어야 서는데 격리 창엔 그 일이 없다.
     /// `KASATERM_AUTOTOAST_ACTION=1` 이면 승인 칩이 붙은 서 있는 알림.

@@ -114,6 +114,7 @@ mod own_room;
 mod mirror_layout;
 mod mirror_diff;
 mod mcpcol;
+mod nl_command;
 mod proc;
 mod sesscol;
 mod state;
@@ -3770,6 +3771,9 @@ enum UserEvent {
     /// A background git op (push/pull/commit) finished — clears the panel's
     /// spinner. Carries nothing: only one git op runs at a time.
     GitOpDone,
+    /// 자연어 명령 요청 하나가 끝났다(`nl_command.rs`). `seq` 가 지금 기다리는 것과
+    /// 다르면 그 사이 새 요청이 나간 것이라 버린다.
+    NlCommand { pane: String, seq: u64, result: Result<String, String> },
     /// 다른 기기 레포에 시킨 깃 동작이 실패했다 — 사유를 토스트로.
     GitOpFailed(String),
     /// Local cmux socket backend → GUI delegation. The socket server runs on
@@ -6107,6 +6111,8 @@ struct App {
     /// Recomputed at render time in `update_suggestion`; read by the key
     /// handler so → / Ctrl-E can accept exactly what's on screen.
     current_suggestion: Option<String>,
+    /// 셸 입력줄의 `# 자연어 요청` 을 명령으로 바꾸는 중인 요청. See nl_command.rs.
+    nl: nl_command::NlState,
     /// Whether the left window-tab sidebar is shown. Toggled by the
     /// title-bar button (next to the traffic lights). When false the cell
     /// grid reflows to full width — every origin/layout calc reads
@@ -6581,6 +6587,7 @@ impl App {
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
+            nl: nl_command::NlState::default(),
             // Default closed — single-pane, no chrome reads as a plain
             // terminal at first launch. User toggles via the title-bar
             // button or the "보기 → 세션 패널" menu item.

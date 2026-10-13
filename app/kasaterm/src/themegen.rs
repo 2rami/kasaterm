@@ -256,7 +256,7 @@ fn og_key_path() -> Option<PathBuf> {
     kasa_socket::home_dir().map(|h| h.join(".config/opengateway.key"))
 }
 
-fn og_key() -> Option<String> {
+pub(crate) fn og_key() -> Option<String> {
     let p = og_key_path()?;
     let s = std::fs::read_to_string(p).ok()?;
     let s = s.trim().to_string();
@@ -644,12 +644,17 @@ const DESC_PROMPT: &str = "Describe this character's appearance for a sprite gen
 ///
 /// 설정을 **stdin** 으로 준다 — URL·헤더·본문 파일 경로가 전부 거기 실려서 argv 에는
 /// `curl --config -` 만 남는다. 키가 `ps` 에 안 보이는 건 이 때문이다.
-fn curl_post(url: &str, auth_header: &str, body: &str) -> Result<String, String> {
+///
+/// 본문 임시 파일 이름에 순번을 붙인다 — 테마 굽기와 자연어 명령(`nl_command.rs`)이
+/// 동시에 부르면 같은 이름을 서로 덮어 남의 본문을 보낸다.
+pub(crate) fn curl_post(url: &str, auth_header: &str, body: &str, max_secs: u32) -> Result<String, String> {
     use std::io::Write;
-    let tmp = std::env::temp_dir().join(format!("kasaterm-desc-{}.json", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("kasaterm-post-{}-{n}.json", std::process::id()));
     std::fs::write(&tmp, body).map_err(|e| format!("본문 임시 저장 실패: {e}"))?;
     let cfg = format!(
-        "url = \"{url}\"\nheader = \"Content-Type: application/json\"\nheader = \"{auth_header}\"\ndata = \"@{}\"\nsilent\nshow-error\nmax-time = 120\n",
+        "url = \"{url}\"\nheader = \"Content-Type: application/json\"\nheader = \"{auth_header}\"\ndata = \"@{}\"\nsilent\nshow-error\nmax-time = {max_secs}\n",
         tmp.display()
     );
     let mut child = std::process::Command::new("curl")
@@ -716,6 +721,7 @@ fn describe(kind: &str, ref_jpg: &Path) -> String {
                 "https://apis.opengateway.ai/v1/chat/completions",
                 &format!("Authorization: Bearer {key}"),
                 &body,
+                120,
             )
             .ok()
             .and_then(|txt| {
@@ -739,6 +745,7 @@ fn describe(kind: &str, ref_jpg: &Path) -> String {
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
                 &format!("x-goog-api-key: {key}"),
                 &body,
+                120,
             )
             .ok()
             .and_then(|txt| {

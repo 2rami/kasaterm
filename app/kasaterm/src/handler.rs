@@ -1924,6 +1924,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::NlCommand { pane, seq, result } => {
+                self.nl_command_done(pane.clone(), *seq, result.clone());
+                self.render_frame();
+                return;
+            }
             UserEvent::ClaudeAccountAutoswitch {
                 from,
                 to,
@@ -7960,6 +7965,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_hover_pointer();
         self.run_pending_autoghost();
         self.run_pending_autotoast();
+        self.run_pending_autonlcmd();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_sidebar_navigation_probe(event_loop);
