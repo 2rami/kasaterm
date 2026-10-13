@@ -277,18 +277,35 @@ async function measureRoom(tabId) {
   return prev
 }
 
-// 클릭이 네비게이션을 유발했으면 그것이 끝난 뒤에 결과를 준다. 안 그러면 곧바로 이어지는 read_page 가
-// 이동 직전 페이지를 읽는다.
-async function settle(tabId, ms = 300) {
+// 본문 문서의 신원과 준비 상태. timeOrigin 은 문서가 새로 뜰 때만 바뀌어, 같은 주소로 다시 뜬
+// 페이지(폼 POST 등)도 이동으로 잡는다. 이동 중에 문서가 갈리면 주입이 실패한다 — null.
+// 주입도 메인 스레드가 돌아야 답이 오므로 상한을 건다(page.js 의 ASK_TIMEOUT_MS 주석).
+async function docState(tabId) {
+  const [r] = await withTimeout(chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({ state: document.readyState, origin: performance.timeOrigin, url: location.href }),
+  }), 2000, 'DOC_STATE_SLOW').catch(() => [])
+  return r?.result ?? null
+}
+
+// 클릭이 네비게이션을 유발했으면 새 문서가 읽힐 때까지 기다렸다가 결과를 준다. 안 그러면 곧바로
+// 이어지는 read_page 가 이동 직전 페이지를 읽는다. ⚠️탭의 status 는 보지 않는다 — 광고 iframe 이
+// 도는 동안 계속 'loading' 이라 그걸 기다리면 나무위키 검색 클릭 하나가 16초 걸렸다(SPA 이동이라
+// 본문은 0.2초에 끝났는데). 본문 이동이 걸려 있는지(pendingUrl)와 본문 readyState 만 본다.
+async function settle(tabId, before, ms = 300) {
   await new Promise((r) => setTimeout(r, ms))
-  let tab = await chrome.tabs.get(tabId).catch(() => null)
-  if (!tab) return { closed: true }
-  if (tab.status === 'loading') {
-    await waitForLoad(tabId, 15000)
-    tab = await chrome.tabs.get(tabId).catch(() => null)
-    return { navigated: true, url: tab?.url, title: tab?.title }
+  const deadline = Date.now() + 15000
+  for (;;) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (!tab) return { closed: true }
+    const doc = tab.pendingUrl ? null : await docState(tabId)
+    const ready = doc ? doc.state !== 'loading' : !tab.pendingUrl && tab.status === 'complete'
+    if (ready || Date.now() > deadline) {
+      const navigated = doc && before ? doc.url !== before.url || doc.origin !== before.origin : undefined
+      return { navigated, url: tab.url, title: tab.title, readyState: doc?.state ?? (ready ? 'unknown' : 'timeout') }
+    }
+    await new Promise((r) => setTimeout(r, 100))
   }
-  return { navigated: false, url: tab.url }
 }
 
 async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, modifiers, trusted = false, retry = true }, client) {
@@ -311,8 +328,18 @@ async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, m
 
   const { box: aim, name: aimName } = await page(id, 'box', { ref })
   await showCursor(client, id, aim.x, aim.y, true)
-  const res = await page(id, 'click', { ref })
+  const children = async () => (await tabsQuery({})).filter((t) => t.openerTabId === id).map((t) => t.id)
+  const known = new Set(await children())
+  const res = await page(id, 'click', { ref }).catch((e) => {
+    // 이동이 답보다 먼저 끝나 문서가 bfcache 로 들어가면 통로가 닫혀 오류로 온다 — 클릭은 먹었다.
+    // 오류로 돌려주면 부르는 쪽이 성공을 실패로 세고 다시 누른다.
+    if (/back\/forward cache|message channel (is )?closed/i.test(e.message)) return { changed: true, box: aim, leftPage: true }
+    throw e
+  })
   if (res.changed) return { ...res, target: aimName, via: 'content' }
+  // 새 탭으로 여는 링크는 이 문서에 흔적을 안 남긴다 — 무반응으로 읽고 다시 누르면 탭이 둘 뜬다.
+  const opened = (await children()).find((t) => !known.has(t))
+  if (opened) return { ...res, changed: true, openedTabId: opened, target: aimName, via: 'content' }
   if (!retry) {
     return { ...res, target: aimName, via: 'content', reason: 'no-op but retry disabled', note: '합성 클릭이 변화를 못 만들었지만 retry:false 라 재시도하지 않았습니다. 정말 안 먹었다면 trusted:true 로 다시 부르세요.' }
   }
@@ -927,8 +954,9 @@ const handlers = {
 
   async click({ tabId, ...rest }, ctx = {}) {
     const id = await resolveTabId(tabId)
+    const before = await docState(id)
     const out = await clickOn(id, rest, ctx.client)
-    return { ...out, page: await settle(id) }
+    return { ...out, page: await settle(id, before) }
   },
 
   async hover({ tabId, ref, coordinate }) {
@@ -986,13 +1014,14 @@ const handlers = {
       b = { ...a, [axis]: a[axis] + (direction === 'left' || direction === 'up' ? -d : d) }
     }
 
+    const before = await docState(id)
     const r = await cdp.swipe(id, { from: a, to: b, steps })
     return {
       ...r,
       ...(from && to ? {} : { direction }),
       // 앞으로 보냈다는 사실을 밝힌다 — 탭이 바뀐 것을 모르면 다음 조작이 엉뚱한 탭에 간 줄 안다.
       ...(activated ? { activated: true, note: '터치는 보이는 탭에서만 처리되므로 이 탭을 앞으로 보냈습니다(창은 그대로).' } : {}),
-      page: await settle(id),
+      page: await settle(id, before),
     }
   },
 

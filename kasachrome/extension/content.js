@@ -173,11 +173,18 @@ if (!window.__ccInjected) {
     let mutated = false
     const mo = new MutationObserver(() => { mutated = true })
     mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true })
+    // 문서째 바뀌는 이동은 응답이 올 때까지 DOM·주소·포커스·스크롤이 그대로라 안 보인다 — 느린 서버의
+    // 링크·폼이 「무반응」으로 읽혀 한 번 더 눌린다. 이동이 시작되는 순간 오는 navigate 이벤트로 잡는다.
+    let navigating = false
+    const onNavigate = () => { navigating = true }
+    window.navigation?.addEventListener('navigate', onNavigate)
     fn()
     return new Promise((resolve) => {
       setTimeout(() => {
         mo.disconnect()
+        window.navigation?.removeEventListener('navigate', onNavigate)
         const changed = mutated
+          || navigating
           || location.href !== before.url
           || document.activeElement !== before.active
           || window.scrollY !== before.scrollY

@@ -351,6 +351,13 @@ SPA 에서 해시는 화면을 가르는 라우트다). 사람이 열어둔 탭�
   재시도가 두 번째 클릭이 된다. 관찰 창은 350ms 이고(250ms 일 때 Mission Control 필터에서 실제로 오판했다),
   승격 시 결과에 `doubleFireRisk` 를 실어 보낸다. 멱등하지 않은 버튼(제출·좋아요·수량)은
   `trusted:true`(진짜 입력 한 번) 또는 `retry:false` 를 쓸 것.
+  문서째 바뀌는 이동(느린 서버의 링크·폼)은 응답 전까지 DOM·주소가 그대로라, Navigation API 의 `navigate`
+  이벤트로 시작을 잡는다. 새 탭으로 여는 링크는 이 탭의 `openerTabId` 자식이 생겼는지로 잡는다.
+  이동이 답보다 빨라 문서가 bfcache 로 들어가면 통로가 닫혀 오류가 오는데, 그것도 클릭이 먹은 것으로 센다.
+- **클릭 뒤 대기는 탭 status 를 보지 않는다.** 광고 iframe 이 도는 동안 탭은 계속 'loading' 이라
+  `complete` 를 기다리면 SPA 이동이 0.2초에 끝나도 15초를 잔다(나무위키 검색, 2026-10-13 실측: 3번 중 1번 16초).
+  본문 이동이 걸려 있는지(`pendingUrl`)와 본문 `readyState` 만 본다. `navigated` 는 주소나 문서
+  (`performance.timeOrigin`)가 바뀌었는지다 — 같은 주소로 다시 뜬 폼 결과도 이동으로 잡힌다.
 - 스킴 없는 URL(`example.com`)을 `chrome.tabs.create` 에 그대로 넘기면 **확장 상대경로**로 해석된다.
   `normalizeUrl` 을 거쳐야 하고, `localhost`·`127.0.0.1` 은 `http://` 로 붙인다.
 - **MV3 service worker 는 유휴 30초에 죽고 메모리를 통째로 잃는다.** 세션 상태를 메모리에만 두면
