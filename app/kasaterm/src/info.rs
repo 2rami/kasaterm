@@ -3823,11 +3823,6 @@ fn draw_pane_menu(
             }
             items.push((M::Zoom, MenuRow::new("크게 보기")));
             items.push((M::Close, MenuRow::new("닫기")));
-            if kasa_mcp::remote::remote_info(pane)
-                .is_some_and(|i| i.owned && i.remote_id.starts_with('%'))
-            {
-                items.push((M::CloseKeep, MenuRow::new("닫기 — 저쪽 pane 은 남김")));
-            }
         }
         P::Themes => {
             items.push((M::Root, MenuRow::new("‹ 뒤로")));

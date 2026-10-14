@@ -3426,7 +3426,7 @@ impl App {
         } else {
             PendingClose::Pane { pane: pane.to_string() }
         };
-        if self.guard_mirror_close(&mirror_action) { return; }
+        let mirrored = !self.mirror_close_targets(&mirror_action).is_empty();
         let action = if tabs_len > 1 {
             PendingClose::Tab {
                 pane: pane.to_string(),
@@ -3434,7 +3434,7 @@ impl App {
             }
         } else {
             let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
-            if leaves <= 1 {
+            if leaves <= 1 && !mirrored {
                 // 이 방의 마지막 pane. 방이 여럿이면 **방을 닫는 것**으로 잇는다 —
                 // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(사용자).
                 // 방이 하나뿐이면 그건 앱 종료라 OS 닫기 버튼에 맡기고 no-op.
@@ -3491,7 +3491,6 @@ impl App {
         if self.guard_dirty(&action) {
             return;
         }
-        if self.guard_mirror_close(&action) { return; }
         match self.pane_busy(pane) {
             Some(proc) => self.open_confirm_close(proc, action),
             None => self.do_close(action),
@@ -3832,6 +3831,12 @@ impl App {
     /// Run a non-window close action immediately. `Window` is left to the
     /// caller (it needs the event loop to exit).
     pub(crate) fn do_close(&mut self, action: PendingClose) {
+        if self.guard_mirror_close(&action) { return; }
+        self.do_close_locally(action);
+    }
+
+    // The remote acknowledgement must not enter the request path a second time.
+    pub(crate) fn do_close_locally(&mut self, action: PendingClose) {
         match action {
             PendingClose::Tab { pane, idx } => {
                 self.close_tab(&pane, idx);

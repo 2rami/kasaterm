@@ -6333,11 +6333,11 @@ impl App {
                             .map(|t| format!("{} {}", if t.label.is_empty() { "원본 기기" } else { &t.label }, t.source))
                             .collect::<Vec<_>>().join(", ");
                         if *closing {
-                            ("원본 기기의 창을 닫는 중".to_string(), source)
+                            ("닫는 중이에요".to_string(), source)
                         } else if error.is_some() {
-                            ("원본을 닫지 못했어".to_string(), "거울은 그대로 있어. 다시 시도하거나 거울만 닫을 수 있어".to_string())
+                            ("닫지 못했어요".to_string(), format!("{source} · {}", error.as_deref().unwrap_or_default()))
                         } else {
-                            ("원본 기기의 창도 닫을까?".to_string(), source)
+                            ("닫기를 다시 시도할까요?".to_string(), source)
                         }
                     }
                     crate::CloseWhy::Busy(proc) => {
@@ -6375,6 +6375,7 @@ impl App {
                 let sub_w = g.measure_chrome_text(subtitle, 13.0, false);
                 let card_w = (title_w.max(sub_w) + pad * 2.0)
                     .clamp(if dirty || mirror { 420.0 } else { 360.0 }, (win_w - 48.0).max(420.0));
+                let subtitle = info::fit_text(g, subtitle, card_w - pad * 2.0, 13.0, false);
                 let card_h = 168.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
@@ -6401,7 +6402,7 @@ impl App {
                 g.draw_text(
                     cx0 + pad,
                     cy0 + 60.0,
-                    subtitle,
+                    &subtitle,
                     gpu::DrawOpts {
                         font_size: 13.0,
                         color: theme::text_dim(),
@@ -6461,8 +6462,7 @@ impl App {
                     hits.push((btn, (x, btn_y, w, btn_h)));
                 };
                 if mirror && !mirror_closing {
-                    button(g, &mut confirm_btn_hits, "원본도 닫기", crate::ConfirmBtn::CloseSource, Some(theme::danger()));
-                    button(g, &mut confirm_btn_hits, "거울만 닫기", crate::ConfirmBtn::Close, Some(theme::accent()));
+                    button(g, &mut confirm_btn_hits, "다시 시도", crate::ConfirmBtn::Close, Some(theme::danger()));
                 } else if dirty {
                     // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이
                     // 걸리게. 편집분을 버리는 "저장 안 함" 은 그 왼쪽에 빨강으로.

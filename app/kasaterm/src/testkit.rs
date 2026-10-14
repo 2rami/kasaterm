@@ -6795,6 +6795,8 @@ impl App {
         // separately isolated app; this helper never spawns a remote shell.
         static VIEW_DUE: OnceLock<Option<(Instant, String, String)>> = OnceLock::new();
         static VIEW_OPENED: AtomicBool = AtomicBool::new(false);
+        static VIEW_ID: OnceLock<String> = OnceLock::new();
+        static VIEW_CLOSED: AtomicBool = AtomicBool::new(false);
         if let Some((due, label, pane)) = VIEW_DUE.get_or_init(|| {
             if !crate::verification_run() { return None; }
             let label = std::env::var("KASATERM_TEST_MIRROR_LABEL").ok()?;
@@ -6803,9 +6805,22 @@ impl App {
         }) {
             if Instant::now() >= *due && !VIEW_OPENED.swap(true, Ordering::Relaxed) {
                 match self.mirror_remote_pane(label, pane, "", "") {
-                    Ok(id) => eprintln!("[mirror-view-test] source={pane} viewer={id} read_only={}",
-                        kasa_mcp::remote::is_view_pane(&id)),
+                    Ok(id) => {
+                        eprintln!("[mirror-view-test] source={pane} viewer={id} read_only={}",
+                            kasa_mcp::remote::is_view_pane(&id));
+                        let _ = VIEW_ID.set(id);
+                    }
                     Err(error) => eprintln!("[mirror-view-test] FAIL {error:#}"),
+                }
+            }
+            if let (Some(id), Some(ms)) = (VIEW_ID.get(), std::env::var("KASATERM_TEST_MIRROR_CLOSE_MS")
+                .ok().and_then(|s| s.parse::<u64>().ok()))
+            {
+                if Instant::now() >= *due + std::time::Duration::from_millis(ms)
+                    && !VIEW_CLOSED.swap(true, Ordering::Relaxed)
+                {
+                    self.confirm_or_close_pane(id);
+                    eprintln!("[mirror-view-test] close={id} pending={}", self.confirm_close.is_some());
                 }
             }
             return;

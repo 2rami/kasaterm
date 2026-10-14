@@ -5454,12 +5454,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 Some(M::Close) => {
                                     self.info.pane_menu = None;
-                                    self.close_pane(&pane);
-                                }
-                                Some(M::CloseKeep) => {
-                                    self.info.pane_menu = None;
-                                    self.remote_keep.insert(pane.clone());
-                                    self.close_pane(&pane);
+                                    self.confirm_or_close_pane(&pane);
                                 }
                                 None => self.info.pane_menu = None,
                             }

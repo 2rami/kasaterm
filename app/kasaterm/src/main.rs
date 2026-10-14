@@ -1513,7 +1513,6 @@ enum ConfirmBtn {
     Cancel,
     Close,
     Save,
-    CloseSource,
 }
 
 /// The two buttons in the Chrome-style session-restore prompt shown at launch
@@ -5721,8 +5720,7 @@ struct App {
     /// 다음 split 이 셸을 띄울 폴더를 강제한다(`spawn_shell_pane` 이 세웠다 걷는다) —
     /// 다른 기계의 `to` 가 「이 폴더에서」를 실어 오는 유일한 길이다.
     pending_spawn_cwd: Option<String>,
-    /// 닫을 때 **저쪽 pane 은 남길** 원격 pane(메뉴 「닫기 — 저쪽 pane 은 남김」).
-    /// `to` 로 세운 자리는 기본이 함께 끄기라, 예외만 여기 적는다.
+    /// 이사·원본 종료 알림의 뒷정리가 원격 닫기를 다시 보내지 않게 한다.
     remote_keep: std::collections::HashSet<String>,
     /// `to` 로 보낸 자리의 뒤처리 — 명령이 저쪽에 닿은 뒤 이 자리를 걷고 그 기기 방을 보기 창으로
     /// 연다(2026-09-17 결정: 원래 자리에 거울을 남기지 않는다).

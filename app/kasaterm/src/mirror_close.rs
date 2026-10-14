@@ -1,4 +1,4 @@
-//! Closing a mirror is a choice between this view and its source device.
+//! A mirror must remain visible until its source accepts the same close action.
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7,6 +7,7 @@ pub(crate) struct MirrorTarget {
     pub base: String,
     pub source: String,
     pub label: String,
+    source_key: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -22,8 +23,7 @@ fn choice_effect(button: ConfirmBtn, unchanged: bool) -> CloseEffect {
     if button == ConfirmBtn::Cancel { return CloseEffect::Cancel; }
     if !unchanged { return CloseEffect::Stale; }
     match button {
-        ConfirmBtn::Close => CloseEffect::Local,
-        ConfirmBtn::CloseSource => CloseEffect::Source,
+        ConfirmBtn::Close => CloseEffect::Source,
         _ => CloseEffect::Cancel,
     }
 }
@@ -45,6 +45,26 @@ fn request_source_close(targets: &[MirrorTarget]) -> Result<(), String> {
     })
 }
 
+fn close_surface_ids(ws: &Workspace, action: &PendingClose) -> Vec<String> {
+    let mut ids = match action {
+        // A document tab has no PTY; falling back to its container closes a different tab.
+        PendingClose::Tab { pane, idx } => ws.panes.get(pane)
+            .and_then(|p| p.tabs.get(*idx))
+            .and_then(|tab| tab.pid.clone()).into_iter().collect(),
+        PendingClose::Pane { pane } => {
+            let mut ids = vec![pane.clone()];
+            if let Some(p) = ws.panes.get(pane) {
+                ids.extend(p.tabs.iter().filter_map(|tab| tab.pid.clone()));
+            }
+            ids
+        }
+        _ => Vec::new(),
+    };
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 impl App {
     /// Closing a source is a layout event even while its PTY is kept for undo.
     /// Do not use EOF or the socket disconnect as a proxy for this decision.
@@ -59,27 +79,12 @@ impl App {
         for id in ids { kasa_mcp::push_viewer_control(&id, r#"{"t":"source-closed"}"#); }
     }
 
-    fn mirror_close_targets(&self, action: &PendingClose) -> Vec<MirrorTarget> {
-        let ws = self.ws.lock().unwrap();
-        let mut ids = match action {
-            PendingClose::Tab { pane, idx } => ws.panes.get(pane)
-                .and_then(|p| p.tabs.get(*idx))
-                .map(|tab| vec![tab.pid.clone().unwrap_or_else(|| pane.clone())])
-                .unwrap_or_default(),
-            PendingClose::Pane { pane } => {
-                let mut ids = vec![pane.clone()];
-                if let Some(p) = ws.panes.get(pane) {
-                    ids.extend(p.tabs.iter().filter_map(|tab| tab.pid.clone()));
-                }
-                ids
-            }
-            _ => Vec::new(),
-        };
-        ids.sort();
-        ids.dedup();
+    pub(crate) fn mirror_close_targets(&self, action: &PendingClose) -> Vec<MirrorTarget> {
+        let ids = close_surface_ids(&self.ws.lock().unwrap(), action);
         ids.into_iter().filter_map(|local| {
             let info = kasa_mcp::remote::remote_info(&local)?;
             info.view.then_some(MirrorTarget {
+                source_key: kasa_mcp::remote::remote_surface_key(&local),
                 local, base: info.base, source: info.remote_id, label: info.label,
             })
         }).collect()
@@ -88,13 +93,7 @@ impl App {
     pub(crate) fn guard_mirror_close(&mut self, action: &PendingClose) -> bool {
         let targets = self.mirror_close_targets(action);
         if targets.is_empty() { return false; }
-        if self.guard_dirty(action) { return true; }
-        self.confirm_close = Some(ConfirmClose {
-            why: CloseWhy::Mirror { targets, closing: false, error: None },
-            action: action.clone(),
-        });
-        self.chrome_dirty = true;
-        if let Some(w) = &self.window { w.request_redraw(); }
+        self.choose_mirror_close(action.clone(), targets, ConfirmBtn::Close);
         true
     }
 
@@ -102,11 +101,6 @@ impl App {
         &mut self, action: PendingClose, targets: Vec<MirrorTarget>, button: ConfirmBtn,
     ) {
         match choice_effect(button, self.mirror_close_targets(&action) == targets) {
-            CloseEffect::Local => {
-                self.remote_keep.extend(targets.iter().map(|t| t.local.clone()));
-                self.do_close(action);
-                return;
-            }
             CloseEffect::Source => {}
             CloseEffect::Stale => {
                 self.set_toast("거울이 바뀌었어. 닫을 창을 다시 골라줘".into());
@@ -118,6 +112,8 @@ impl App {
             why: CloseWhy::Mirror { targets: targets.clone(), closing: true, error: None },
             action: action.clone(),
         });
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window { w.request_redraw(); }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let result = request_source_close(&targets);
@@ -138,7 +134,7 @@ impl App {
             }
             CloseEffect::Local => {
                 self.remote_keep.extend(targets.iter().map(|t| t.local.clone()));
-                self.do_close(action);
+                self.do_close_locally(action);
                 self.info.machines_col.last_refresh = None;
             }
             _ => self.set_toast("원본은 닫혔어. 바뀐 거울 목록은 그대로 뒀어".into()),
@@ -154,11 +150,12 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
-    fn cancel_and_mirror_only_never_call_the_source() {
+    fn cancel_never_calls_the_source_and_close_always_targets_it() {
         let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         source.set_nonblocking(true).unwrap();
         assert_eq!(choice_effect(ConfirmBtn::Cancel, true), CloseEffect::Cancel);
-        assert_eq!(choice_effect(ConfirmBtn::Close, true), CloseEffect::Local);
+        assert_eq!(choice_effect(ConfirmBtn::Close, true), CloseEffect::Source);
+        assert_eq!(choice_effect(ConfirmBtn::Save, true), CloseEffect::Cancel);
         assert_eq!(source.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     }
 
@@ -181,8 +178,8 @@ mod tests {
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             1
         });
-        let target = MirrorTarget { local: "%2".into(), base, source: "%16".into(), label: "fake source".into() };
-        assert_eq!(choice_effect(ConfirmBtn::CloseSource, true), CloseEffect::Source);
+        let target = MirrorTarget { local: "%2".into(), base, source: "%16".into(), label: "fake source".into(), source_key: None };
+        assert_eq!(choice_effect(ConfirmBtn::Close, true), CloseEffect::Source);
         let worker = std::thread::spawn(move || request_source_close(&[target.clone(), target]));
         received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(!worker.is_finished(), "local close cannot be approved before the source replies");
@@ -207,8 +204,34 @@ mod tests {
 
     #[test]
     fn changed_target_is_never_closed_by_an_old_confirmation() {
-        assert_eq!(choice_effect(ConfirmBtn::CloseSource, false), CloseEffect::Stale);
+        assert_eq!(choice_effect(ConfirmBtn::Close, false), CloseEffect::Stale);
         assert_eq!(completion_effect(Ok(()), false), CloseEffect::Stale);
         assert_eq!(choice_effect(ConfirmBtn::Cancel, false), CloseEffect::Cancel);
+    }
+
+    #[test]
+    fn a_document_tab_never_closes_its_container_surface() {
+        let mut ws = Workspace::default();
+        ws.pane_mut("%1").tabs = vec![
+            PaneTab { pid: Some("%1".into()), ..Default::default() },
+            PaneTab::default(),
+            PaneTab { pid: Some("%2".into()), ..Default::default() },
+        ];
+        let tab = |idx| PendingClose::Tab { pane: "%1".into(), idx };
+        assert_eq!(close_surface_ids(&ws, &tab(0)), vec!["%1"]);
+        assert!(close_surface_ids(&ws, &tab(1)).is_empty());
+        assert_eq!(close_surface_ids(&ws, &tab(2)), vec!["%2"]);
+        assert!(close_surface_ids(&ws, &tab(9)).is_empty());
+        assert_eq!(close_surface_ids(&ws, &PendingClose::Pane { pane: "%1".into() }), vec!["%1", "%2"]);
+        assert!(close_surface_ids(&ws, &PendingClose::Window).is_empty());
+    }
+
+    #[test]
+    fn a_reused_source_number_does_not_match_a_pending_close() {
+        let old = MirrorTarget { local: "%2".into(), base: "http://127.0.0.1:1".into(),
+            source: "%16".into(), label: "fixture".into(), source_key: Some("old-source".into()) };
+        let new = MirrorTarget { source_key: Some("new-source".into()), ..old.clone() };
+        assert_eq!(choice_effect(ConfirmBtn::Close, old == new), CloseEffect::Stale);
+        assert_eq!(completion_effect(Ok(()), old == new), CloseEffect::Stale);
     }
 }

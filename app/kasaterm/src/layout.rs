@@ -3052,7 +3052,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
 
     fn close_owned_remote_surface(&mut self, target: &str) {
         // `to` 로 저쪽 창에 세운 자리는 그 pane 까지 함께 걷는다 — ssh 를 끊으면
-        // 저쪽 셸도 끝나듯이. 남기고 싶을 때만 메뉴(`remote_keep`)로 예외를 둔다.
+        // 저쪽 셸도 끝나듯이. 이사·종료 알림의 뒷정리(`remote_keep`)만 예외다.
         // kill_remote 는 우리 링크만 끊고 GUI pane 은 저쪽 앱이 Arc 를 쥐어 안 죽는다.
         // HTTP 라 GUI 스레드 밖에서 — 저쪽이 안 닿으면 10초를 여기서 멈추게 된다.
         if let Some(info) = kasa_mcp::remote::remote_info(target) {
