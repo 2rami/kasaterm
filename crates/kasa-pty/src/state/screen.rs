@@ -296,7 +296,7 @@ impl PtySession {
     }
 
     /// raw PTY 바이트 스트림을 구독한다. 받는 쪽이 자기 VT 파서를 갖고 있을 때
-    /// 쓴다(브라우저 xterm.js). 돌려준 `Receiver` 를 떨어뜨리면 다음 read 때
+    /// 쓴다(브라우저 kasaterm.js). 돌려준 `Receiver` 를 떨어뜨리면 다음 read 때
     /// reader 가 알아서 걷어내므로 해지 API 가 따로 없다.
     ///
     /// 버퍼는 64청크 — 64KB read 기준 최악 4MB다. 소비가 이보다 밀리면 reader 가

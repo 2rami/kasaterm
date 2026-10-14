@@ -86,7 +86,7 @@ pub fn spawn_http_server_opts(
         // 「왜 403 이냐」로 헤매다 결국 토큰을 끄는 쪽으로 가게 된다.
         eprintln!(
             "[kasaspace-mcp] {addr}:{port} 로 열었습니다 — 원격 접속에는 토큰이 필요합니다.\n\
-             [kasaspace-mcp]   http://<이 기기의 주소>:{port}/term/grid?t=$(cat ~/.config/kasaterm/remote-token)"
+             [kasaspace-mcp]   http://<이 기기의 주소>:{port}/term?t=$(cat ~/.config/kasaterm/remote-token)"
         );
         // 파일을 미리 만들어 둔다 — 첫 원격 요청 때 만들면 그 요청이 먼저 튕긴다.
         let _ = remote_token();

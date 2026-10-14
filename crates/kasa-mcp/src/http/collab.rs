@@ -448,14 +448,6 @@ async fn collab_read_handler(
     }
 }
 
-pub(crate) async fn nacho_report_post(backend: Arc<dyn Backend>, Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
-    match tokio::task::spawn_blocking(move || backend.nacho_report(&params)).await {
-        Ok(Ok(value)) => Json(value),
-        Ok(Err(error)) => Json(serde_json::json!({"ok":false,"error":error.to_string()})),
-        Err(_) => Json(serde_json::json!({"ok":false,"error":"nacho report worker stopped; check the inbox before re-sending"})),
-    }
-}
-
 pub(crate) async fn collab_tell_post(backend: Arc<dyn Backend>, Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
     match tokio::task::spawn_blocking(move || backend.collab_tell(&params)).await {
         Ok(Ok(value)) => Json(value),
@@ -479,7 +471,6 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let chat_send_backend = backend.clone();
     let tell_backend = backend.clone();
     let tell_status_backend = backend.clone();
-    let nacho_report_backend = backend.clone();
     let events_backend = backend.clone();
     let messages_backend = backend.clone();
     axum::Router::new()
@@ -517,10 +508,6 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         .route("/collab/tell", post(move |Json(params): Json<serde_json::Value>| {
             let backend = tell_backend.clone();
             collab_tell_post(backend,Json(params))
-        }).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)))
-        .route("/nacho/report", post(move |Json(params): Json<serde_json::Value>| {
-            let backend = nacho_report_backend.clone();
-            nacho_report_post(backend, Json(params))
         }).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)))
         .route("/collab/tell/status", post(move |Json(params): Json<serde_json::Value>| {
             let backend = tell_status_backend.clone();

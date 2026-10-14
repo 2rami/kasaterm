@@ -1681,8 +1681,8 @@ impl crate::App {
             }
             Some(state::StatusbarHit::OpenWebTerm) => {
                 if let Some(port) = self.statusbar.port.clone() {
-                    // grid — 옛 `/term`(xterm.js)은 폰 IME 에서 한글이 자모로 쪼개진다.
-                    self.open_url(&format!("http://127.0.0.1:{port}/term/grid"));
+                    // `/term` 은 kasaterm.js(앱과 같은 해석기) 보기다. 서버 격자는 `?renderer=grid`.
+                    self.open_url(&format!("http://127.0.0.1:{port}/term"));
                 }
                 return true;
             }

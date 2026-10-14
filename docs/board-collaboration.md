@@ -32,12 +32,6 @@ same as its ⌘N, from 1) — the number a person means by "room 2". It is not
 `room_id`/window index + 1: rooms that view another machine are counted after
 that machine's own rooms. Absent on older builds and for panes not on screen.
 
-Optional `origin_task_env` names the nacho task ID that was in the pane's env when
-its session was bound (`nacho-origins.json`). It is display provenance only — it
-can point at an older task after a live pane is handed new work, so never use it
-to register or accept reports; the task↔pane source of truth is nacho's ledger
-`(machine_id, surface_key)`. Conversation IDs and bodies are not carried.
-
 Optional `background` and `subagents` list the pane's still-running background
 shells/monitors and subagents (short labels, at most 8, secret-looking labels
 become `[redacted]`). A pane whose turn closed (`waiting`/`idle`) but carries a
@@ -119,7 +113,7 @@ kasaterm-cli machines [--json] · identify --machine <machine>   # route: local|
 sends the brief with a remote `tell`. Its result is the pane's board address
 (`--json`: `{surface,address,message_id,state,wait}`). The caller is on another
 machine, so `done` does not come back to the calling pane; wait with
-`board --wait name@machine --since <ms>` or use the orchestrator origin env.
+`board --wait name@machine --since <ms>`.
 A room tidy across machines is `window-new --on` → `move` → `close` the empty
 shell → `rename-window --room`.
 

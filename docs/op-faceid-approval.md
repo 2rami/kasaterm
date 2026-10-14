@@ -1,7 +1,7 @@
 # 1Password 비밀 읽기 — 폰 Face ID 한 번으로
 
 학생이 맥에서 1Password 비밀이 필요할 때, 맥의 Touch ID 창 대신 **폰 Face ID 승인 한 번**으로 그 요청 하나만
-풀리게 한다. 2026-10-06 결정으로 [nacho-orchestrator.md](nacho-orchestrator.md) 「앱 안 승인(Face ID) 설계」
+풀리게 한다. 2026-10-06 결정으로 [nacho-app.md](nacho-app.md) 「앱 안 승인(Face ID) 설계」
 3절의 「1Password 잠금 해제는 안 한다」를 이 길로 바꾼다. 1Password 데스크톱 앱의 잠금을 밖에서 푸는 공식 길은
 없으므로, 잠금을 풀지 않고 **전용 금고만 읽는 서비스 계정 토큰**을 맥에 두고 그 토큰을 쓰는 순간마다 폰 서명을 받는다.
 

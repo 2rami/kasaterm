@@ -367,7 +367,7 @@ pub(super) fn spawn_reader_thread(
             let update = {
                 let mut t = term.lock().unwrap();
                 let follow_live_tail = t.grid().display_offset() == 0;
-                // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
+                // 외부 구독자(브라우저 kasaterm.js 등)에게 raw 바이트를 그대로 흘린다.
                 // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
                 //
                 // ⚠️ term 락을 **든 채로** 뿌려야 한다. 밖에서 뿌리면 뿌리기와

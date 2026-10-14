@@ -4,7 +4,7 @@
   const terminalColors = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
     'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'];
 
-  function xtermTheme(tokens) {
+  function terminalTheme(tokens) {
     const palette = tokens?.palette || {};
     const theme = { background: palette.bg, foreground: palette.fg, cursor: palette.accent,
       selectionBackground: palette.surface_active };
@@ -116,5 +116,5 @@
     start();
     return { updatePane, refresh, setPane(id) { paneId = id; updatePane(lastRows.find(pane => pane.id === id)); refresh(); } };
   }
-  global.KasaTermChrome = { create, xtermTheme };
+  global.KasaTermChrome = { create, terminalTheme };
 })(window);

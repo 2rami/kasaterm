@@ -326,7 +326,7 @@ void main() {
     expect(stripMeta('The big plan plugin sent a message: x'), 'The big plan plugin sent a message: x');
   });
 
-  test('tell·완료 보고·나쵸가 맡긴 일은 보낸 쪽 이름을 단다', () {
+  test('tell·완료 보고는 보낸 쪽 이름을 단다', () {
     String? who(String raw) {
       final m = relayedMessage(stripMeta(raw));
       return m == null ? null : '${m.name}|${m.via}|${m.body}';
@@ -338,7 +338,6 @@ void main() {
       '유우카|쪽지|나쵸 쪽 답\n둘째 줄',
     );
     expect(who('[완료] 코유키(%0) — 카사넷 끝'), '코유키|완료 보고|카사넷 끝');
-    expect(who('[origin=nacho task=w1] 보고는 이렇게 한다\n거노 지시 그대로: 고쳐 줘'), '나쵸|맡긴 일|거노 지시 그대로: 고쳐 줘');
     expect(who('[완료] 표시만 친 사람 말'), isNull);
     expect(who('사람 말'), isNull);
   });

@@ -38,8 +38,9 @@ cargo build -p kasa-mcp --bin kasa-serve-web
 
 | 라우트 | 하는 일 |
 |---|---|
-| `GET /term` | pane 선택을 보존한 뒤 앱 본문 grid 보기로 이동 |
-| `GET /term?renderer=ansi` | 기존 xterm.js 기본 문자 보기 |
+| `GET /term` | **기본 터미널** — kasaterm.js(`web/kasaterm-js`, 앱과 같은 해석기)가 raw 바이트를 브라우저에서 해석해 그린다 |
+| `GET /term?renderer=grid` | pane 선택을 보존한 뒤 서버가 해석한 격자를 그리는 `/term/grid` 로 이동(학생 그림 장면 포함) |
+| `GET /term?renderer=ansi` | 옛 링크 — 기본과 같다 |
 | `GET /term/ws` | **웹 전용 셸을 새로 띄운다.** 연결이 끊기면 셸도 끝난다 |
 | `GET /term/ws?pane=%1` | 기존 kasaterm pane 을 **미러**한다 (아래 ⚠️) |
 | `GET /term/panes` | 살아 있는 pane 목록(미러 대상 고르기용) |
@@ -143,9 +144,9 @@ FontFaceSet의 로드된 얼굴과 실제 폰트 요청을 함께 확인한다. 
 motion에서는 멈춘다. 늦은 자산 응답에는 scene 세대 가드를 둔다. 같은 idle scene의 일시
 실패도 제한된 backoff로 회복하되, 계속 실패하면 visibility/online 복귀까지 재시도를 쉰다.
 
-`/term` 기본 전환은 WebSocket을 열기 전이므로 owned 셸을 중복 생성하지 않는다.
-서버가 알려준 셸 ID는 URL과 재접속에 유지한다. `renderer=ansi`에서는 원래 문자 로고가
-보이는 기본 터미널임을 표시하고, 같은 세션을 앱 보기로 여는 링크를 제공한다.
+`renderer=grid` 전환은 WebSocket을 열기 전이므로 owned 셸을 중복 생성하지 않는다.
+서버가 알려준 셸 ID는 URL과 재접속에 유지한다. 기본 터미널 보기는 위에 「터미널 보기」 표지와
+같은 세션을 앱 격자 보기로 여는 링크를 둔다. 경로 판정 시험은 `node scripts/test-webterm-routing.cjs`.
 
 실측: 격리 GUI의 실제 Claude 첫 응답을 고정 60×41에서 추적해 native 67회, raw 폴백
 0회를 확인했다. 이 구간에는 창 캡처와 `/term/shot`을 실행하지 않았다. 작업 중 창 캡처를
@@ -167,9 +168,9 @@ motion에서는 멈춘다. 늦은 자산 응답에는 scene 세대 가드를 둔
 
 | 주소 | 하는 일 |
 |---|---|
-| `/u/<slug>/` | **허브** — 이 기계·명부 기계의 pane 목록(대기 ● 먼저), 누르면 터미널 |
-| `/u/<slug>/term/grid?pane=%25N` | 그리드 터미널(폰 기본) |
-| `/u/<slug>/term`, `/u/<slug>/arona-ui/` | xterm 판 · 아로나 — 전부 같은 접두 아래 |
+| `/u/<slug>/` | **허브** — 이 기계·명부 기계의 pane 목록(대기 ● 먼저), 누르면 `term?pane=` 터미널 |
+| `/u/<slug>/term?pane=%25N` | 터미널(kasaterm.js, 폰 기본) |
+| `/u/<slug>/term/grid?pane=%25N`, `/u/<slug>/arona-ui/` | 서버 격자 보기 · 아로나 — 전부 같은 접두 아래 |
 | `/u/<slug>/m/<기계>/…` | **다른 기계로 넘기는 문** — machines.json 의 그 기계 `/…` 로 프록시(HTTP·WS) |
 | `/hub`, `/m/<기계>/…` | 로컬(127.0.0.1)에서는 접두 없이도 같은 화면 |
 | `GET/POST/DELETE /mobile/users?name=` | 유저 목록·추가(`&rotate=1` 이면 새 주소)·삭제 — **주인 주소나 로컬에서만** |
@@ -252,7 +253,7 @@ motion에서는 멈춘다. 늦은 자산 응답에는 scene 세대 가드를 둔
 - **끊기면 다시 붙는다**(`grid.html`·`index.html`). 폰은 화면을 끄는 것만으로 소켓이
   죽는데 예전엔 「끊김」만 찍고 새로고침을 기다렸다. 백오프 1→10초, 화면이 보일 때만,
   `visibilitychange`·`online`·`pageshow` 에서 즉시. 멈추는 신호는 서버의 `gone` 뿐이다.
-  xterm 판은 재접속 때 `term.reset()` 뒤 스냅샷을 받는다.
+  문자 보기는 재접속 때 터미널을 새로 만든 뒤 스냅샷을 받는다(끊긴 연결의 반쯤 읽은 이스케이프가 섞이지 않게).
 
 실측(2026-09-02, 격리 `kasa-serve-web` 두 대 A·B, B 명부에 A 를 「에이」로): 원격 판정
 (`X-Forwarded-For`) + 토큰 없음 → `/term/grid` 403 / `/u/<slug>/term/grid` 200 / 엉뚱
@@ -264,7 +265,9 @@ slug 404 / 슬래시 없는 `/u/<slug>?pane=%250` → 307 로 쿼리 보존 / �
 ## 그리드 모드 `/term/grid` — xterm.js 를 안 거치는 길 (2026-08-25)
 
 **폰에서 한글을 치면 자모가 낱개로 나가던 것**(「이렇게」→ `ㅇㅣㄹㅓㅎㄱㅔ`)을 고치면서
-생긴 두 번째 경로다. 옛 `/term`(xterm.js)은 **그대로 두었다** — 회귀 위험 0.
+생긴 두 번째 경로다. 그때 옛 `/term`(xterm.js)은 그대로 두었다. 2026-10 에 `/term` 이 xterm.js 를 걷고
+자체 kasaterm.js 로 바뀌면서 기본으로 돌아왔다 — 입력은 아래와 같은 textarea 차이 방식이라 같은 폰에서도
+자모가 안 샌다. 이 격자 보기는 `?renderer=grid` 로 남았다.
 
 원인은 실측으로 확정했다. 그 폰 키보드는 `compositionstart` 를 **아예 안 쏘고**,
 `keyCode 0` 으로 자모를 보내면서 textarea 를 `deleteContentBackward` + `insertText` 로
@@ -324,7 +327,7 @@ http://127.0.0.1:<포트>/term/grid?pane=%250 # 미러(`%` 는 %25 로)
 ### 아직 안 붙은 것
 
 세션·pane 고르는 목록, ⤢ 강제 맞춤 단추, esc/tab 터치 바, 스크롤백, 마우스 리포팅,
-학생 프사. 전부 옛 `/term` 에는 있다.
+학생 프사. 전부 `/term` 에는 있다.
 
 ## 설계에서 건드리면 안 되는 것
 
@@ -498,7 +501,7 @@ cloudflared tunnel run kasaterm     # 켜기. 끄면 그 주소는 530 이 된�
    빈다. 아이콘은 양쪽 다 500(1셀)이라 논-Mono 로 잃는 것이 없다. `gpu.rs` 의 폴백
    체인이 한글만 논-Mono 에 맡기는 이유와 같은 사실이다.
 
-   ⚠️ 웹폰트는 늦게 온다. xterm 은 그 사이 폴백 폰트로 글자 폭을 재서 격자를 잡아
+   ⚠️ 웹폰트는 늦게 온다. 터미널은 그 사이 폴백 폰트로 글자 폭을 재서 격자를 잡아
    두므로, **로드 후 다시 재지 않으면 글자가 칸에서 어긋난다**(`document.fonts.load`
    뒤에 `syncSize`).
 
@@ -538,7 +541,7 @@ cloudflared tunnel run kasaterm     # 켜기. 끄면 그 주소는 530 이 된�
    끊길 때는 안 건드리는지. 실측 통과: 228×54 → 48×60 → (force 없는 200×90 무시) →
    228×54 복구.
 
-8. **답장 입력창은 아직 없다.** 지금은 xterm 에 직접 친다 — 자동 축소로 글자가 13px 가
+8. **답장 입력창은 아직 없다.** 지금은 터미널에 직접 친다 — 자동 축소로 글자가 13px 가
    되어 칠 수는 있지만, 소프트 키보드가 화면을 반으로 덮으면 좁다. 하단 바에 16px
    입력 필드를 두고 거기 쓴 것을 보내는 쪽이 폰에서는 더 편하다(claude code 는 그냥
    텍스트를 받으므로 붙여 넣는 것과 다르지 않다).
@@ -577,9 +580,10 @@ Origin 이 아예 없으면 브라우저가 아닌 로컬 클라이언트라 통
 
 ## 밟았던 함정
 
-- **UMD 두 개를 concat 할 땐 사이에 세미콜론.** xterm.js 가 세미콜론 없이 끝나
-  addon-fit 의 `!function(){}` 이 인자로 먹혔고, `FitAddon is not defined` 로 죽었다.
-  `Terminal` 은 떠 있는데 addon 만 없으면 이걸 의심할 것.
-- **xterm 기본 스크롤바는 밝다** — 어두운 배경에서 흰 띠로 튄다. CSS 로 눌러 놨다.
+- **(2026-10 까지) xterm.js 시절의 함정** — UMD 두 개를 세미콜론 없이 이으면 addon 이 인자로 먹힌다,
+  기본 스크롤바가 밝다. 지금은 kasaterm.js 파일 하나(빌드가 IIFE 하나로 묶는다)라 둘 다 해당 없다.
+- **문자 보기는 프로그램의 질의(DA·CPR)에 답하지 않는다.** 서버 쪽 kasa-pty 가 이미 답하므로,
+  브라우저까지 답하면 프로그램이 같은 답을 두 번 받는다(xterm.js 시절엔 `onData` 로 그대로 보냈다).
+  사람이 친 것만(`term.on('input')`) 보낸다.
 - 브라우저 자동화로 `\033` 을 타이핑하면 실제 ESC 로 전송된다. 검증할 땐
   `echo` 같은 단순 명령으로 확인하는 게 확실하다.

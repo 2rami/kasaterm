@@ -1,7 +1,7 @@
-//! 웹 터미널 페이지와 정적 자산 — xterm.js·그리드·크롬·아이콘·그림 자산·학생 얼굴.
+//! 웹 터미널 페이지와 정적 자산 — kasaterm.js·그리드·크롬·아이콘·그림 자산·학생 얼굴.
 //!
-//! xterm.js 는 vendored 다(assets/term, MIT). CDN 을 쓰면 오프라인에서 죽고
-//! 사내망 정책에도 걸린다 — 바이너리에 박아 넣으면 서버 하나로 자족한다.
+//! kasaterm.js 는 `web/kasaterm-js` 의 빌드 결과를 assets/term 에 실은 것이다(`node build.mjs`).
+//! CDN 을 쓰면 오프라인에서 죽고 사내망 정책에도 걸린다 — 바이너리에 박아 넣으면 서버 하나로 자족한다.
 
 use super::*;
 use super::auth::html_with_token_cookie;
@@ -30,14 +30,15 @@ async fn term_asset_font() -> impl IntoResponse {
     )
 }
 
+/// 브라우저 안 VT 파서·렌더러. 앱과 같은 바이트에 같은 화면을 낸다(`web/kasaterm-js/README.md`).
 async fn term_asset_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
-        include_str!("../../assets/term/xterm.js"),
+        include_str!("../../assets/term/kasaterm.js"),
     )
 }
 
-/// 셀 그리드 렌더러. xterm.js 와 달리 VT 파서가 없다 — 서버가 파싱한 그리드를
+/// 셀 그리드 렌더러. kasaterm.js 와 달리 VT 파서가 없다 — 서버가 파싱한 그리드를
 /// 그대로 그린다(`gridwire.rs`).
 async fn term_grid_js() -> impl IntoResponse {
     (
@@ -122,13 +123,6 @@ async fn term_grid_page(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     html_with_token_cookie(include_str!("../../assets/term/grid.html"), &q)
-}
-
-async fn term_asset_css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../../assets/term/xterm.css"),
-    )
 }
 
 /// 프사가 있는 학생 슬러그. `term_avatar` 의 목록과 짝이므로 여기 없는 이름은
@@ -220,8 +214,7 @@ pub(super) fn routes() -> axum::Router {
     axum::Router::new()
         // 웹 터미널 — 브라우저에서 독립으로 여는 셸.
         .route("/term", get(term_page_handler))
-        .route("/term/xterm.js", get(term_asset_js))
-        .route("/term/xterm.css", get(term_asset_css))
+        .route("/term/kasaterm.js", get(term_asset_js))
         .route("/term/grid", get(term_grid_page))
         .route("/term/grid.js", get(term_grid_js))
         .route("/term/viewport.js", get(term_viewport_js))

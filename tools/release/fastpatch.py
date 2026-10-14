@@ -33,7 +33,7 @@ SCHEMA = "kasa-release-plan/2"
 CORE_KEYS = ("schema", "commit", "branch", "remote", "version", "tag", "channel", "platforms", "ios_build", "devices",
              "device_ids", "controller", "feed_base", "stages")
 # 창 안(학생·에이전트)에서 도는 표식. 나쵸 도구는 이것들을 걷은 env 로 부르고 KASATERM_RELEASE_INVOKER 를 단다.
-PANE_MARKERS = ("KASATERM_PANE_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_SANDBOX", "KASATERM_ORIGIN")
+PANE_MARKERS = ("KASATERM_PANE_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_SANDBOX")
 STAGES = ["verify", "build", "tag", "release", "feed", "devices"]
 STATE_DIR = Path(os.environ.get("KASATERM_RELEASE_DIR", Path.home() / ".config/kasaterm/releases"))
 RELEASES = "https://github.com/2rami/kasaterm/releases/latest"

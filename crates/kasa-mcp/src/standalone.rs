@@ -144,10 +144,6 @@ impl Backend for StandaloneBackend {
         crate::tell_service::status(params)
     }
 
-    fn nacho_report(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        crate::nacho_service::submit(params)
-    }
-
     fn relay_account(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         crate::device_auth::handle(params)
     }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-/// 사람 대신 입력칸에 말을 넣은 쪽 — 이름과 무슨 말인지(쪽지·완료 보고·맡긴 일).
+/// 사람 대신 입력칸에 말을 넣은 쪽 — 이름과 무슨 말인지(쪽지·완료 보고).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Sender {
     pub(crate) name: String,
@@ -586,12 +586,6 @@ pub(crate) fn relayed(text: &str) -> Option<(Sender, String)> {
         let body = body.strip_prefix('—').unwrap_or(body).trim();
         return Some((sender(name, via), body.to_string()));
     }
-    // 나쵸가 일을 맡기며 붙이는 첫 줄은 보고 방법 안내라 걷고, 그 아래 맡긴 글만 남긴다.
-    if let Some(rest) = t.strip_prefix("[origin=nacho") {
-        let (first, more) = rest.split_once('\n').unwrap_or((rest, ""));
-        let body = if more.trim().is_empty() { first.split_once(']').map_or(first, |(_, b)| b) } else { more };
-        return Some((sender("나쵸", "맡긴 일"), body.trim().to_string()));
-    }
     if let Some(body) = t.strip_prefix("[쪽지 확인 못 함]") {
         return Some((sender("카사텀", "쪽지 확인 못 함"), body.trim().to_string()));
     }
@@ -1080,14 +1074,13 @@ mod tests {
         assert!(matches!(&c.items[2], Item::Bubble { from: Some(f), text, .. } if f.name == "아로나" && text == "끝났어요"));
     }
 
-    /// tell·완료 보고·나쵸가 맡긴 일은 사람 말풍선이 아니라 보낸 쪽 이름을 단 말이다.
+    /// tell·완료 보고는 사람 말풍선이 아니라 보낸 쪽 이름을 단 말이다.
     #[test]
     fn relayed_turns_name_who_put_them_in() {
         let c = conv(&[
             r#"{"type":"user","message":{"content":"⟦아즈사⟧ 폰 판 구워서 올려"}}"#,
             r#"{"type":"user","message":{"content":"\n\n<pasted_content id=\"95ad\">\n⟦유우카⟧ 나쵸 쪽 답\n둘째 줄\n</pasted_content id=\"95ad\">\n"}}"#,
             r#"{"type":"user","message":{"content":"[완료] 코유키(%0) — 카사넷 끝"}}"#,
-            r#"{"type":"user","message":{"content":"[origin=nacho task=w1] 보고는 이렇게 한다\n거노 지시 그대로: 고쳐 줘"}}"#,
             r#"{"type":"user","message":{"content":"[완료] 표시만 친 사람 말"}}"#,
             r#"{"type":"user","message":{"content":"사람 말"}}"#,
             r#"{"type":"user","message":{"content":"[실패] (%1) — CI 깨짐"}}"#,
@@ -1103,10 +1096,9 @@ mod tests {
         assert_eq!(who[0], Some(("아즈사", "쪽지", "폰 판 구워서 올려")));
         assert_eq!(who[1], Some(("유우카", "쪽지", "나쵸 쪽 답\n둘째 줄")));
         assert_eq!(who[2], Some(("코유키", "완료 보고", "카사넷 끝")));
-        assert_eq!(who[3], Some(("나쵸", "맡긴 일", "거노 지시 그대로: 고쳐 줘")));
-        assert_eq!(who[4], None, "괄호 속 칸 번호가 없으면 사람이 친 글이다");
-        assert_eq!(who[5], None);
-        assert_eq!(who[6], Some(("%1", "실패 보고", "CI 깨짐")));
+        assert_eq!(who[3], None, "괄호 속 칸 번호가 없으면 사람이 친 글이다");
+        assert_eq!(who[4], None);
+        assert_eq!(who[5], Some(("%1", "실패 보고", "CI 깨짐")));
     }
 
     #[test]

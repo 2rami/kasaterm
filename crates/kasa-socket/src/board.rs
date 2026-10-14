@@ -38,9 +38,6 @@ const TRACKED: &[&str] = &[
     "done_at_ms",
     "detached",
     "place_state",
-    // 나쵸가 띄운 세션이면 bind 때 env 에 있던 일 id — 표시용 출처일 뿐 판정·등록 근거가 아니다
-    // (일↔창의 정본은 나쵸 장부의 machine_id·surface_key). 대화 id·본문은 안 싣는다.
-    "origin_task_env",
     // 이 칸을 부른(summon·split) 칸의 surface_key — 그 칸이 사는 기기의 `spawned-by.json` 기준. 모르면 null.
     // 나쵸가 「누가 누구를 불렀나」를 ssh 로 각 기기 파일을 읽지 않고 판 하나로 안다.
     "spawned_by",
@@ -239,12 +236,69 @@ pub fn guard_observation(
     for key in ["title", "request", "progress"] {
         row[key] = json!("");
     }
-    for key in ["character", "harness", "done_outcome", "done_summary", "done_at_ms", "origin_task_env", "background", "subagents"] {
+    for key in ["character", "harness", "done_outcome", "done_summary", "done_at_ms", "background", "subagents"] {
         row[key] = Value::Null;
     }
     row["status"] = json!("unknown");
     row["status_reason"] = json!("binding changed during observation; refreshing");
     false
+}
+
+/// 토큰·비밀처럼 보이는 조각. 정규식 없이 손으로 훑는다(이 크레이트는 의존성이 셋뿐이다).
+/// 판은 다른 기기까지 가므로 잡히면 그 칸을 싣지 않는다.
+fn secret_like(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("-----begin") && lower.contains("private key") {
+        return Some("private key block");
+    }
+    let is_tok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.';
+    let run_after = |start: usize| text[start..].chars().take_while(|c| is_tok(*c)).count();
+    for (prefix, min, what) in [
+        ("sk-", 16, "sk- API key"),
+        ("xoxb-", 8, "Slack bot token"),
+        ("xoxp-", 8, "Slack user token"),
+        ("xoxa-", 8, "Slack token"),
+        ("xapp-", 8, "Slack app token"),
+        ("ghp_", 16, "GitHub token"),
+        ("gho_", 16, "GitHub token"),
+        ("github_pat_", 16, "GitHub token"),
+        ("akia", 16, "AWS access key"),
+        ("eyj", 24, "JWT"),
+    ] {
+        let mut from = 0;
+        while let Some(pos) = lower[from..].find(prefix) {
+            let at = from + pos;
+            // AKIA/eyJ 는 대소문자가 증거의 일부다 — 소문자 우연(예: "akia" 단어)은 거른다.
+            let literal_ok = match prefix {
+                "akia" => text[at..].starts_with("AKIA"),
+                "eyj" => text[at..].starts_with("eyJ"),
+                _ => true,
+            };
+            if literal_ok && run_after(at + prefix.len()) >= min {
+                return Some(what);
+            }
+            from = at + prefix.len();
+        }
+    }
+    if let Some(pos) = lower.find("bearer ") {
+        if run_after(pos + 7) >= 20 {
+            return Some("Bearer token");
+        }
+    }
+    // key=value / key: value 꼴 — 키 이름에 token·secret·password·api_key 가 들고 값이 길면.
+    for line in text.lines() {
+        for piece in line.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+            let Some((key, value)) = piece.split_once(|c| c == '=' || c == ':') else { continue };
+            let key = key.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            let secret_key = key.ends_with("token") || key.ends_with("secret") || key.contains("password") || key.contains("passwd")
+                || key.ends_with("api_key") || key.ends_with("apikey") || key.ends_with("access_key") || key.ends_with("private_key");
+            if secret_key && value.chars().count() >= 8 && value.chars().all(|c| !c.is_whitespace()) {
+                return Some("credential assignment");
+            }
+        }
+    }
+    None
 }
 
 pub fn detail_text(text: &str, max: usize) -> String {
@@ -302,7 +356,7 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
             for name in TRACKED.iter().copied().filter(|name| *name != "address") {
                 if name == "cwd" {
                     if let Some(path) = row[name].as_str()
-                        .filter(|p| p.len() <= 1024 && crate::nacho_inbox::secret_like(p).is_none())
+                        .filter(|p| p.len() <= 1024 && secret_like(p).is_none())
                     {
                         clean[name] = json!(path);
                     }
@@ -322,7 +376,7 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
                         .filter_map(Value::as_str)
                         .filter(|s| !s.trim().is_empty())
                         .take(MAX_LIST_ITEMS)
-                        .map(|s| match crate::nacho_inbox::secret_like(s) {
+                        .map(|s| match secret_like(s) {
                             Some(_) => "[redacted]".to_owned(),
                             None => short(s, 128),
                         })
@@ -372,17 +426,23 @@ mod normalize_panes_tests {
         assert!(normalize_panes("m", "M", &other, 1).is_err(), "기계가 다른 줄은 여전히 관측 실패다");
     }
 
-    /// 표시용 출처는 판을 건너 다른 기계로도 가고, 관측 도중 바인딩이 바뀌면 함께 비워진다 —
-    /// 앞 학생의 일 id 가 새 학생 줄에 남으면 출처가 거짓말이 된다.
     #[test]
-    fn origin_task_hint_survives_normalizing_and_clears_on_binding_change() {
-        let rows = vec![json!({"address":{"machine_id":"m","surface_key":"k1","surface_id":"%1"},"status":"working","origin_task_env":"we409f946"})];
-        let out = normalize_panes("m", "M", &rows, 1).unwrap();
-        assert_eq!(out[0]["origin_task_env"], "we409f946");
-        let mut row = out[0].clone();
-        let moved = json!({"machine_id":"m","surface_key":"k2","surface_id":"%1"});
-        assert!(!guard_observation(&mut row, &moved, true, true));
-        assert!(row["origin_task_env"].is_null());
+    fn secret_guard_flags_tokens() {
+        for bad in [
+            "used sk-abcdefghijklmnopqrstuvwxyz1234",
+            "token xoxb-1234567890-abc",
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "api_key=verysecretvalue123",
+            "ghp_abcdefghijklmnopqrstuvwxyz",
+            "AKIAABCDEFGHIJKLMNOP",
+            "jwt eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ",
+        ] {
+            assert!(secret_like(bad).is_some(), "should flag: {bad}");
+        }
+        for ok in ["Skipped the token counter", "password prompt appeared, asked geono", "changed akia handling", "status: ok=true"] {
+            assert!(secret_like(ok).is_none(), "should pass: {ok}");
+        }
     }
 
     /// 감시 중인 학생은 턴이 닫혀도 판에서 감시 중으로 보인다. 목록은 짧게 잘리고, 비밀처럼
