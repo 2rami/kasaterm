@@ -77,6 +77,8 @@ class View {
     this.listen(term, 'colors', () => { this.renderer.rgb.clear(); this.renderer.invalidate(); this.schedule(); });
     this.listen(term, 'cursorstyle', () => this.schedule());
     this.listen(term, 'sync-end', () => this.schedule());
+    // Scrolling through the core API (term.scrollLines and friends) moves the viewport too.
+    this.listen(term, 'viewport', () => this.schedule());
     this.bindInput();
     this.bindPointer();
     this.renderer.resize();
@@ -674,4 +676,10 @@ Terminal.prototype.open = function open(parent, options = {}) {
 Terminal.prototype.focus = function focus() { if (this.view) this.view.focus(); };
 Terminal.prototype.fit = function fit() { return this.view ? this.view.fit() : null; };
 Terminal.prototype.setTheme = function setTheme(theme) { if (this.view) this.view.setTheme(theme); };
-Terminal.prototype.dispose = function dispose() { if (this.view) this.view.dispose(); this.view = null; };
+// The core may have its own dispose (add-ons, listeners); the view is torn down first, then that.
+const disposeCore = Terminal.prototype.dispose;
+Terminal.prototype.dispose = function dispose() {
+  if (this.view) this.view.dispose();
+  this.view = null;
+  if (disposeCore) disposeCore.call(this);
+};
