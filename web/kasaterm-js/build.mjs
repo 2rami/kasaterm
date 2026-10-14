@@ -5,8 +5,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const ORDER = ['width-table.js', 'width.js', 'grid.js', 'terminal.js'];
-const EXPORTS = ['Terminal', 'Grid', 'Row', 'charWidth', 'MODE',
+const ORDER = ['width-table.js', 'width.js', 'grid.js', 'terminal.js', 'box-table.js', 'render.js', 'view.js'];
+const EXPORTS = ['Terminal', 'Grid', 'Row', 'charWidth', 'MODE', 'View', 'Renderer', 'themeFromTokens', 'DEFAULT_THEME',
   'DEFAULT_FG', 'DEFAULT_BG', 'COLOR_INDEXED', 'COLOR_RGB',
   'INVERSE', 'BOLD', 'ITALIC', 'UNDERLINE', 'WRAPLINE', 'WIDE_CHAR', 'WIDE_CHAR_SPACER', 'DIM', 'HIDDEN',
   'STRIKEOUT', 'LEADING_WIDE_CHAR_SPACER', 'DOUBLE_UNDERLINE', 'UNDERCURL', 'DOTTED_UNDERLINE', 'DASHED_UNDERLINE'];
@@ -24,4 +24,6 @@ return { ${EXPORTS.join(', ')} };
 `;
 mkdirSync(join(root, 'dist'), { recursive: true });
 writeFileSync(join(root, 'dist', 'kasaterm.js'), out);
-console.log(`dist/kasaterm.js ${out.length} bytes`);
+// The web terminal (`/term`) serves this copy, compiled into the app.
+writeFileSync(join(root, '..', '..', 'crates', 'kasa-mcp', 'assets', 'term', 'kasaterm.js'), out);
+console.log(`dist/kasaterm.js + crates/kasa-mcp/assets/term/kasaterm.js ${out.length} bytes`);
