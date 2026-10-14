@@ -86,6 +86,9 @@ node test/api.mjs                                        # 파서 훅·reset·cl
 | `htop` | htop — 색 막대·도움말·트리·크기 바꿈 (가짜 프로세스만 보이게) |
 | `claude-classic` / `claude-fullscreen` | Claude Code 두 화면 꼴 — 한글 답·표·코드 블록·크기 바꿈·휠 |
 | `codex` | Codex — 폴더 신뢰·한글 답·표·코드 블록·크기 바꿈 |
+| `fzf-fullscreen` / `fzf-inline` | fzf — 대체 화면·미리 보기·여러 고르기 / `--height` 인라인(CPR 로 자리 잡기)·테두리, 한글 찾기·크기 바꿈 |
+| `tmux` | tmux 3.6(빈 설정, 따로 소켓) — 세로·가로 나누기·확대·상태 줄·한글·색, 크기 바꿈 |
+| `git-color` | git — `log --graph` 색·`log -p` 를 less 로 넘기기·찾기·단어 단위 diff 색, 크기 바꿈 |
 
 새로 녹화하려면 `tools/record.py`(PTY read 한 번 = 사건 하나, 질의는 kasaterm.js 가 답함, 자식은 `env -i` 같은 깨끗한
 환경)로 찍고, **반드시** `tools/scrub.py` 를 거친다. 계정 이름·호스트 이름·홈 경로·전자우편·세션 id 를 같은 길이로
