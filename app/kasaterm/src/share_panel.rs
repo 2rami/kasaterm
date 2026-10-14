@@ -233,6 +233,16 @@ impl Default for State {
 }
 
 impl State {
+    fn home(&mut self) {
+        self.view = View::Recent;
+        self.directory.clear();
+        self.query.clear();
+        self.caret = 0;
+        self.select_all = false;
+        self.select(None);
+        self.scroll = 0.0;
+        self.rebuild();
+    }
     fn deferred_ime(&mut self, event: &Ime) -> bool {
         if !self.pending_search_commit {
             return false;
@@ -351,6 +361,8 @@ impl App {
             self.return_from_settings_room();
         }
         self.info.tab = state::SideTab::Share;
+        // The global entry must expose new arrivals, not a previously filtered folder.
+        self.share.home();
         if !self.git.col_visible {
             self.toggle_git_col();
         }
@@ -654,5 +666,24 @@ mod tests {
         assert!(!state.deferred_ime(&Ime::Preedit("새 조합".into(), None)));
         assert!(!state.deferred_ime(&Ime::Commit("새 조합".into())));
         assert_eq!(state.query, "검색");
+    }
+
+    #[test]
+    fn global_entry_exposes_recent_files_without_an_old_folder_or_query() {
+        let mut state = State::default();
+        state.replace_catalog(Catalog {
+            files: vec![file("새 결과.md", 1)],
+            ..Default::default()
+        });
+        state.view = View::Folders;
+        state.directory = "옛 폴더".into();
+        state.query = "옛 검색".into();
+        state.select(Some("옛 파일".into()));
+        state.home();
+        assert_eq!(state.view, View::Recent);
+        assert!(state.query.is_empty());
+        assert!(state.directory.is_empty());
+        assert!(state.selected.is_none());
+        assert_eq!(state.rows[0].path, "새 결과.md");
     }
 }
