@@ -13,9 +13,20 @@ const MODE = {
 };
 const MOUSE_MODE = MODE.MOUSE_REPORT_CLICK | MODE.MOUSE_MOTION | MODE.MOUSE_DRAG;
 const DEFAULT_MODE = MODE.SHOW_CURSOR | MODE.LINE_WRAP | MODE.ALTERNATE_SCROLL | MODE.URGENCY_HINTS;
+// Kitty keyboard flags sit in the mode word from this bit up, as alacritty keeps them.
+const KITTY_SHIFT = 18;
+const KITTY_MODE = 0x1f << KITTY_SHIFT;
+const KEYBOARD_STACK_MAX = 4096;
 
-// Private modes the reference terminal knows; anything else is ignored (and reported as 0).
-const PRIVATE_MODES = new Set([1, 3, 6, 7, 12, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1042, 1049, 2004, 2026]);
+// Modes only `profile: 'xterm'` knows; kept apart so `mode` stays alacritty's word.
+const XMODE = { REVERSE_WRAP: 1, X10_MOUSE: 2, SGR_PIXELS_MOUSE: 4, WIN32_INPUT: 8, COLOR_SCHEME_REPORTS: 16 };
+
+const VERSION = '0.1.0';
+
+const G_INDEX = { 0x28: 0, 0x29: 1, 0x2a: 2, 0x2b: 3 };
+const XTERM_G_INDEX = { 0x2d: 1, 0x2e: 2 };
+// ESC n, o, |, }, ~: LS2, LS3, LS3R, LS2R, LS1R.
+const XTERM_SHIFTS = { 0x6e: 2, 0x6f: 3, 0x7c: 3, 0x7d: 2, 0x7e: 1 };
 
 const DEC_SPECIAL = {
   0x5f: 0x20, 0x60: 0x25c6, 0x61: 0x2592, 0x62: 0x2409, 0x63: 0x240c, 0x64: 0x240d, 0x65: 0x240a,
@@ -24,6 +35,25 @@ const DEC_SPECIAL = {
   0x74: 0x251c, 0x75: 0x2524, 0x76: 0x2534, 0x77: 0x252c, 0x78: 0x2502, 0x79: 0x2264, 0x7a: 0x2265,
   0x7b: 0x3c0, 0x7c: 0x2260, 0x7d: 0xa3, 0x7e: 0xb7,
 };
+
+// VT220 national replacement sets (`ESC ( F` with these finals, xterm profile): each string
+// gives the replacements for `#@[\]^_`{|}~` in order, a space where the ASCII glyph stays.
+const NRCS_SLOTS = '#@[\\]^_`{|}~';
+const NRCS = (() => {
+  const sets = {
+    A: '£           ', 4: '£¾ĳ½|   ¨f¼´', C: '  ÄÖÅÜ éäöåü', R: '£à°ç§   éùè¨', Q: ' àâçêî ôéùèû',
+    K: ' §ÄÖÜ   äöüß', Y: '£§°çé  ùàòèì', E: ' ÄÆØÅÜ äæøåü', Z: '£§¡Ñ¿   °ñç ', H: ' ÉÄÖÅÜ éäöåü',
+    '=': 'ùàéçêîèôäöüû',
+  };
+  sets[5] = sets.C; sets[6] = sets.E; sets[7] = sets.H;
+  const out = {};
+  for (const [k, s] of Object.entries(sets)) {
+    const map = {};
+    [...s].forEach((ch, i) => { if (ch !== ' ') map[NRCS_SLOTS.charCodeAt(i)] = ch.codePointAt(0); });
+    out[k] = map;
+  }
+  return out;
+})();
 
 const CURSOR_SHAPES = ['block', 'underline', 'beam'];
 const DEFAULT_CURSOR_STYLE = { shape: 'block', blinking: false };
@@ -52,6 +82,13 @@ function strictUtf8(bytes) {
 }
 
 function hex2(n) { return n.toString(16).padStart(2, '0'); }
+
+// Parameter groups in xterm.js's public form: `1;2:3` is [1, 2, [3]].
+function paramsArray(groups) {
+  const out = [];
+  for (const g of groups) { out.push(g[0]); if (g.length > 1) out.push(g.slice(1)); }
+  return out;
+}
 
 // XParseColor: `#rgb`…`#rrrrggggbbbb` or `rgb:r/g/b` with 1–4 hex digits per channel.
 function parseXColor(s) {
@@ -95,7 +132,6 @@ class Terminal {
     this.grid = new Grid(rows, cols, this.scrollback);
     this.inactive = new Grid(rows, cols, 0);
     this.mode = DEFAULT_MODE;
-    this.tabs = Terminal.makeTabs(cols);
     this.top = 0;
     this.bottom = rows;
     this.activeCharset = 0;
@@ -111,14 +147,29 @@ class Terminal {
     this.syncLen = 0;
     this.terminated = false;
     this.normalize = options.normalize ?? true;
+    // 'alacritty' (default) interprets exactly as the app window does. 'xterm' adds what xterm.js
+    // understands and the app ignores — the mirror would then disagree with the app.
+    this.xterm = options.profile === 'xterm';
+    this.convertEol = !!options.convertEol;
+    this.tabStopWidth = options.tabStopWidth || 8;
+    this.tabs = this.makeTabs(cols);
+    this.cellPixels = options.cellPixels || null;
+    this.colorScheme = options.colorScheme || null;
+    this.iconName = null;
+    this.iconStack = [];
+    this.xmode = 0;
+    this.keyboardStack = [];
+    this.inactiveKeyboardStack = [];
+    this.handlers = null;
+    this.parser = this.parserApi();
     this.heldUtf8 = new Uint8Array(0);
     this.resetParser();
     this.u8need = 0; this.u8cp = 0; this.u8lo = 0x80; this.u8hi = 0xbf;
   }
 
-  static makeTabs(cols, old) {
-    const t = new Uint8Array(cols);
-    for (let i = 0; i < cols; i++) t[i] = old && i < old.length ? old[i] : (i % 8 === 0 ? 1 : 0);
+  makeTabs(cols, old) {
+    const t = new Uint8Array(cols), every = this.tabStopWidth;
+    for (let i = 0; i < cols; i++) t[i] = old && i < old.length ? old[i] : (i % every === 0 ? 1 : 0);
     return t;
   }
 
@@ -151,14 +202,116 @@ class Terminal {
   // Bytes from the PTY. Between `CSI ? 2026 h` and `CSI ? 2026 l` (synchronized output) they are
   // held and applied in one go, as kasaterm does — so a resize arriving mid-update reflows the
   // screen as it was before the update, and no half-drawn frame is ever visible.
-  write(data) {
+  write(data, callback) {
     const bytes = typeof data === 'string' ? textEncoder.encode(this.normalize ? data.normalize('NFC') : data)
       : this.normalize ? this.composeBatch(data) : data;
+    const cur = this.grid.cursor, line = cur.line, col = cur.col, scrolled = this.grid.scrolled;
     let i = 0;
     while (i < bytes.length) {
       i += this.syncPending ? this.advanceSync(bytes.subarray(i)) : this.parse(bytes, i, true);
     }
+    if (this.grid.scrolled !== scrolled) this.emit('scroll', this.grid.scrolled - scrolled);
+    const now = this.grid.cursor;
+    if (now !== cur || now.line !== line || now.col !== col) this.emit('cursormove');
     this.emit('write');
+    if (callback) callback();
+  }
+
+  writeln(data, callback) { this.write(data); this.write('\r\n', callback); }
+
+  // Back to a freshly made terminal: RIS plus whatever the parser was in the middle of.
+  reset() {
+    this.state = S_GROUND;
+    this.resetParser();
+    this.u8need = 0; this.u8lo = 0x80; this.u8hi = 0xbf;
+    this.heldUtf8 = new Uint8Array(0);
+    this.syncPending = false;
+    this.syncLen = 0;
+    this.resetState();
+    this.colors.fill(null);
+    this.precedingChar = null;
+    this.iconName = null;
+    this.iconStack = [];
+    this.emit('reset');
+  }
+
+  // Drop everything but the cursor's line, which becomes the top line.
+  clear() {
+    const grid = this.grid, cur = grid.cursor;
+    if (cur.line > 0) grid.raw.swap(0, cur.line);
+    grid.resetRegion(1, grid.lines, DEFAULT_BG);
+    grid.clearHistory();
+    cur.line = 0;
+    this.emit('scroll', 0);
+  }
+
+  get modes() {
+    const m = this.mode, x = this.xmode, on = bit => (m & bit) !== 0;
+    let mouseTrackingMode = 'none';
+    if (x & XMODE.X10_MOUSE) mouseTrackingMode = 'x10';
+    else if (on(MODE.MOUSE_MOTION)) mouseTrackingMode = 'any';
+    else if (on(MODE.MOUSE_DRAG)) mouseTrackingMode = 'drag';
+    else if (on(MODE.MOUSE_REPORT_CLICK)) mouseTrackingMode = 'vt200';
+    return {
+      applicationCursorKeysMode: on(MODE.APP_CURSOR), applicationKeypadMode: on(MODE.APP_KEYPAD),
+      bracketedPasteMode: on(MODE.BRACKETED_PASTE), insertMode: on(MODE.INSERT), mouseTrackingMode,
+      mouseEncoding: x & XMODE.SGR_PIXELS_MOUSE ? 'sgr-pixels' : on(MODE.SGR_MOUSE) ? 'sgr' : on(MODE.UTF8_MOUSE) ? 'utf8' : 'default',
+      originMode: on(MODE.ORIGIN), reverseWraparoundMode: (x & XMODE.REVERSE_WRAP) !== 0, sendFocusMode: on(MODE.FOCUS_IN_OUT),
+      showCursor: on(MODE.SHOW_CURSOR), synchronizedOutputMode: this.syncPending, win32InputMode: (x & XMODE.WIN32_INPUT) !== 0,
+      wraparoundMode: on(MODE.LINE_WRAP), alternateScrollMode: on(MODE.ALTERNATE_SCROLL),
+      colorSchemeReports: (x & XMODE.COLOR_SCHEME_REPORTS) !== 0,
+    };
+  }
+
+  // Kitty keyboard progressive-enhancement flags in force (0 when the protocol is off).
+  get keyboardFlags() { return (this.mode & KITTY_MODE) >>> KITTY_SHIFT; }
+
+  // The host's light/dark scheme: answers `CSI ? 996 n`, and is reported unasked while a program
+  // keeps mode 2031 set (xterm profile).
+  setColorScheme(scheme) {
+    this.colorScheme = scheme;
+    if (this.xmode & XMODE.COLOR_SCHEME_REPORTS) this.reportColorScheme();
+  }
+
+  reportColorScheme() {
+    if (this.colorScheme) this.reply(`\x1b[?997;${this.colorScheme === 'light' ? 2 : 1}n`);
+  }
+
+  // ── parser hooks (xterm.js `term.parser`) ──
+  //
+  // Handlers run newest first before the built-in one; returning true ends the sequence there.
+  // An identifier is {prefix, intermediates, final} as in xterm.js (OSC takes the number).
+  // Only synchronous handlers: a returned promise counts as not handled.
+
+  parserApi() {
+    const add = (kind, key, fn) => {
+      if (!this.handlers) this.handlers = { csi: new Map(), esc: new Map(), osc: new Map(), dcs: new Map(), apc: new Map() };
+      const map = this.handlers[kind];
+      if (!map.has(key)) map.set(key, []);
+      const list = map.get(key);
+      list.unshift(fn);
+      return { dispose: () => { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } };
+    };
+    const ident = id => (id.prefix || '') + (id.intermediates || '') + id.final;
+    return {
+      registerCsiHandler: (id, fn) => add('csi', ident(id), fn),
+      registerEscHandler: (id, fn) => add('esc', ident(id), fn),
+      registerDcsHandler: (id, fn) => add('dcs', ident(id), fn),
+      registerApcHandler: (id, fn) => add('apc', ident(id), fn),
+      registerOscHandler: (number, fn) => add('osc', String(number), fn),
+    };
+  }
+
+  hooked(kind, key, ...args) {
+    const list = this.handlers && this.handlers[kind].get(key);
+    if (!list) return false;
+    for (const fn of list) if (fn(...args) === true) return true;
+    return false;
+  }
+
+  hasHandler(kind, key) {
+    const list = this.handlers && this.handlers[kind].get(key);
+    return !!(list && list.length);
   }
 
   // kasaterm composes each PTY read to NFC before parsing (so decomposed Hangul from macOS file
@@ -252,7 +405,10 @@ class Terminal {
         if (b >= this.u8lo && b <= this.u8hi) {
           this.u8cp = (this.u8cp << 6) | (b & 0x3f);
           this.u8lo = 0x80; this.u8hi = 0xbf;
-          if (--this.u8need === 0 && this.u8cp >= 0xa0) this.print(this.u8cp);
+          if (--this.u8need === 0) {
+            if (this.u8cp >= 0xa0) this.print(this.u8cp);
+            else if (this.xterm && this.c1(this.u8cp)) return i;
+          }
           continue;
         }
         this.u8need = 0;
@@ -336,9 +492,9 @@ class Terminal {
         if (this.isExecute(b)) this.execute(b);
         else if (b <= 0x2f && b >= 0x20) { this.collect(b); this.state = S_ESC_INT; }
         else if (b === 0x50) { this.resetParser(); this.state = S_DCS_ENTRY; }
-        else if (b === 0x58 || b === 0x5e || b === 0x5f) this.state = S_SOS;
+        else if (b === 0x58 || b === 0x5e || b === 0x5f) this.stringStart(b);
         else if (b === 0x5b) { this.resetParser(); this.state = S_CSI_ENTRY; }
-        else if (b === 0x5d) { this.oscRaw = []; this.oscBounds = []; this.state = S_OSC; }
+        else if (b === 0x5d) this.oscStart();
         else if (b >= 0x30 && b <= 0x7e) { this.escDispatch(b); this.state = S_GROUND; }
         else if (b === 0x18 || b === 0x1a) { this.execute(b); this.state = S_GROUND; }
         return;
@@ -386,16 +542,26 @@ class Terminal {
         this.dcsStep(b);
         return;
       case S_DCS_PASS:
-        if (b === 0x18 || b === 0x1a) { this.execute(b); this.state = S_GROUND; }
-        else if (b === 0x1b) { this.resetParser(); this.state = S_ESC; }
-        else if (b === 0x9c) this.state = S_GROUND;
+        if (b === 0x18 || b === 0x1a) { this.dcs = null; this.execute(b); this.state = S_GROUND; }
+        else if (b === 0x1b) { this.dcsEnd(false); this.resetParser(); this.state = S_ESC; }
+        // A raw 0x9C ends it, even inside a UTF-8 character, as in the app; xterm.js decodes
+        // first, so there only C2 9C (U+009C) does.
+        else if (b === 0x9c && (!this.xterm || this.dcsLast === 0xc2)) { this.dcsEnd(true); this.state = S_GROUND; }
+        else { this.dcsLast = b; if (this.dcs && b !== 0x7f) this.collectString(this.dcs, b); }
         return;
       case S_DCS_IGNORE:
-      case S_SOS:
         this.anywhere(b);
+        return;
+      case S_SOS:
+        if (b === 0x18 || b === 0x1a || b === 0x1b) { if (b === 0x1b) this.apcEnd(); this.apc = null; this.anywhere(b); }
+        else if (b === 0x9c && this.xterm && this.sosLast === 0xc2) {
+          if (this.apc) this.apc.buf.pop();
+          this.apcEnd(); this.apc = null; this.state = S_GROUND;
+        } else { this.sosLast = b; if (this.apc) this.collectString(this.apc, b); }
         return;
       case S_OSC:
         if (b === 0x07) { this.oscEnd(true); this.state = S_GROUND; }
+        else if (b === 0x9c && this.xterm && this.oscRaw[this.oscRaw.length - 1] === 0xc2) { this.oscRaw.pop(); this.oscEnd(false); this.state = S_GROUND; }
         else if (b === 0x18 || b === 0x1a) { this.oscEnd(false); this.execute(b); this.state = S_GROUND; }
         else if (b === 0x1b) { this.oscEnd(false); this.resetParser(); this.state = S_ESC; }
         else if (b === 0x3b) this.oscParam();
@@ -413,7 +579,7 @@ class Terminal {
       else if (b === 0x3a) { this.paramPush(true); this.state = S_DCS_PARAM; }
       else if (b === 0x3b) { this.paramPush(false); this.state = S_DCS_PARAM; }
       else if (b >= 0x3c && b <= 0x3f) { this.collect(b); this.state = S_DCS_PARAM; }
-      else if (b >= 0x40 && b <= 0x7e) this.dcsHook();
+      else if (b >= 0x40 && b <= 0x7e) this.dcsHook(b);
       else this.anywhere(b);
     } else if (s === S_DCS_PARAM) {
       if (b >= 0x20 && b <= 0x2f) { this.collect(b); this.state = S_DCS_INT; }
@@ -421,20 +587,61 @@ class Terminal {
       else if (b === 0x3a) this.paramPush(true);
       else if (b === 0x3b) this.paramPush(false);
       else if (b >= 0x3c && b <= 0x3f) this.state = S_DCS_IGNORE;
-      else if (b >= 0x40 && b <= 0x7e) this.dcsHook();
+      else if (b >= 0x40 && b <= 0x7e) this.dcsHook(b);
       else this.anywhere(b);
     } else {
       if (b >= 0x20 && b <= 0x2f) this.collect(b);
       else if (b >= 0x30 && b <= 0x3f) this.state = S_DCS_IGNORE;
-      else if (b >= 0x40 && b <= 0x7e) this.dcsHook();
+      else if (b >= 0x40 && b <= 0x7e) this.dcsHook(b);
       else this.anywhere(b);
     }
   }
 
-  dcsHook() {
+  dcsHook(final) {
     if (this.plen === MAX_PARAMS) this.ignoring = true; else this.paramPush(false);
     this.state = S_DCS_PASS;
+    this.dcsLast = 0;
+    const key = this.inter.map(c => String.fromCharCode(c)).join('') + String.fromCharCode(final);
+    this.dcs = !this.ignoring && (this.hasHandler('dcs', key) || (this.xterm && key === '$q'))
+      ? { key, params: this.groups(), buf: [], over: false } : null;
   }
+
+  // DCS and APC payloads are only kept when someone will read them. xterm.js's cap.
+  collectString(s, b) {
+    if (s.buf.length >= 10000000) s.over = true; else s.buf.push(b);
+  }
+
+  // A C1 ST arriving as UTF-8 (C2 9C) ends the string; its first byte is already collected.
+  c1Terminated(s) {
+    if (!s || s.buf[s.buf.length - 1] !== 0xc2) return false;
+    s.buf.pop();
+    return true;
+  }
+
+  dcsEnd(c1) {
+    const d = this.dcs;
+    this.dcs = null;
+    if (!d || d.over) return;
+    if (c1 && this.xterm) this.c1Terminated(d);
+    const data = utf8(Uint8Array.from(d.buf));
+    if (this.hooked('dcs', d.key, data, paramsArray(d.params))) return;
+    if (this.xterm && d.key === '$q') this.requestStatusString(data);
+  }
+
+  stringStart(kind) {
+    this.state = S_SOS;
+    this.sosLast = 0;
+    this.apc = kind === 0x5f && this.handlers && this.handlers.apc.size ? { buf: [], over: false } : null;
+  }
+
+  // APC: the first character names the handler (`G` for kitty graphics), the rest is data.
+  apcEnd() {
+    const a = this.apc;
+    if (!a || a.over || a.buf.length === 0) return;
+    this.hooked('apc', String.fromCharCode(a.buf[0]), utf8(Uint8Array.from(a.buf.slice(1))));
+  }
+
+  oscStart() { this.oscRaw = []; this.oscBounds = []; this.state = S_OSC; }
 
   oscParam() {
     if (this.oscBounds.length === MAX_OSC_PARAMS) return;
@@ -448,6 +655,8 @@ class Terminal {
     for (const end of this.oscBounds) { params.push(raw.subarray(start, end)); start = end; }
     this.oscRaw = [];
     this.oscBounds = [];
+    if (this.handlers && params.length && this.hasHandler('osc', utf8(params[0]))
+      && this.hooked('osc', utf8(params[0]), params.slice(1).map(p => utf8(p)).join(';'))) return;
     this.oscDispatch(params, bell ? '\x07' : '\x1b\\');
   }
 
@@ -458,11 +667,31 @@ class Terminal {
       case 0x09: this.putTab(1); break;
       case 0x08: this.backspace(); break;
       case 0x0d: this.carriageReturn(); break;
-      case 0x0a: case 0x0b: case 0x0c: this.linefeed(); break;
+      case 0x0a: case 0x0b: case 0x0c:
+        this.linefeed();
+        // The app ignores LNM; xterm.js treats it as its convertEol option.
+        if (this.convertEol || (this.xterm && (this.mode & MODE.LINE_FEED_NEW_LINE))) this.carriageReturn();
+        this.emit('linefeed');
+        break;
       case 0x07: this.emit('bell'); break;
       case 0x0f: this.activeCharset = 0; break;
       case 0x0e: this.activeCharset = 1; break;
     }
+  }
+
+  // A C1 control that arrived as a UTF-8 code point (xterm profile; the app drops them).
+  // Returns true when it opened a sequence, so the ground loop hands over to the state machine.
+  c1(cp) {
+    switch (cp) {
+      case 0x84: this.linefeed(); return false;
+      case 0x85: this.linefeed(); this.carriageReturn(); return false;
+      case 0x88: this.tabs[this.grid.cursor.col] = 1; return false;
+      case 0x90: this.resetParser(); this.state = S_DCS_ENTRY; return true;
+      case 0x9b: this.resetParser(); this.state = S_CSI_ENTRY; return true;
+      case 0x9d: this.oscStart(); return true;
+      case 0x98: case 0x9e: case 0x9f: this.stringStart(cp === 0x9f ? 0x5f : 0x58); return true;
+    }
+    return false;
   }
 
   // ── printing ──
@@ -521,7 +750,9 @@ class Terminal {
   }
 
   mapCharset(cp) {
-    if (this.grid.cursor.charsets[this.activeCharset] === 1) return DEC_SPECIAL[cp] ?? cp;
+    const set = this.grid.cursor.charsets[this.activeCharset];
+    if (set === 1) return DEC_SPECIAL[cp] ?? cp;
+    if (set !== 0) return NRCS[set][cp] ?? cp;
     return cp;
   }
 
@@ -590,7 +821,22 @@ class Terminal {
 
   backspace() {
     const c = this.grid.cursor;
+    if (this.xmode & XMODE.REVERSE_WRAP) { this.reverseBackspace(); return; }
     if (c.col > 0) { c.col -= 1; c.wrap = false; }
+  }
+
+  // Reverse wraparound (mode 45, xterm profile): a pending wrap is undone in place, and at the
+  // left edge of a line that continues the one above, back to that line's last cell.
+  reverseBackspace() {
+    const grid = this.grid, c = grid.cursor, last = grid.cols - 1;
+    if (c.wrap) { c.wrap = false; return; }
+    if (c.col > 0) { c.col -= 1; return; }
+    if (c.line <= this.top || c.line >= this.bottom) return;
+    const above = grid.row(c.line - 1);
+    if (!(above.flags(last) & WRAPLINE)) return;
+    above.d[last * 4 + 3] &= ~WRAPLINE;
+    c.line -= 1;
+    c.col = above.flags(last) & LEADING_WIDE_CHAR_SPACER ? last - 1 : last;
   }
 
   putTab(count) {
@@ -634,6 +880,7 @@ class Terminal {
       this.grid.saved = this.grid.cursor.clone();
       this.inactive.resetRegion(0, this.inactive.lines, this.inactive.cursor.bg);
     }
+    this.swapKeyboardStacks();
     const g = this.grid; this.grid = this.inactive; this.inactive = g;
     this.mode ^= MODE.ALT_SCREEN;
     this.emit('screen', this.isAltScreen);
@@ -647,7 +894,7 @@ class Terminal {
     this.grid.resize(!alt, rows, cols);
     this.inactive.resize(alt, rows, cols);
     if (oldCols !== cols) {
-      this.tabs = Terminal.makeTabs(cols, this.tabs);
+      this.tabs = this.makeTabs(cols, this.tabs);
       // kasa-pty re-applies the scrollback cap to whichever screen is active, so a width change
       // during an alternate-screen program gives that screen scrollback too. Mirrored for parity.
       this.grid.updateHistory(this.scrollback);
@@ -665,24 +912,37 @@ class Terminal {
     this.inactive.reset();
     this.top = 0;
     this.bottom = this.rows;
-    this.tabs = Terminal.makeTabs(this.cols);
+    this.tabs = this.makeTabs(this.cols);
     this.titleStack = [];
     this.title = null;
     this.mode = DEFAULT_MODE;
+    this.xmode = 0;
+    this.keyboardStack = [];
+    this.inactiveKeyboardStack = [];
   }
 
   // ── ESC ──
 
   escDispatch(b) {
     const inter = this.inter;
-    const charsetIndex = () => ({ 0x28: 0, 0x29: 1, 0x2a: 2, 0x2b: 3 })[inter.length === 1 ? inter[0] : -1];
-    if (b === 0x42 || b === 0x30) {
-      const index = charsetIndex();
-      if (index !== undefined) this.grid.cursor.charsets[index] = b === 0x30 ? 1 : 0;
+    if (this.handlers && this.hooked('esc', inter.map(c => String.fromCharCode(c)).join('') + String.fromCharCode(b))) return;
+    const nrcs = this.xterm && NRCS[String.fromCharCode(b)];
+    if (b === 0x42 || b === 0x30 || nrcs) {
+      if (inter.length !== 1) return;
+      let index = G_INDEX[inter[0]];
+      if (index === undefined && this.xterm) index = XTERM_G_INDEX[inter[0]];
+      if (index !== undefined) this.grid.cursor.charsets[index] = b === 0x30 ? 1 : b === 0x42 ? 0 : String.fromCharCode(b);
       return;
     }
     if (b === 0x38 && inter.length === 1 && inter[0] === 0x23) { this.decaln(); return; }
+    if (this.xterm && inter.length === 1 && inter[0] === 0x25 && (b === 0x40 || b === 0x47)) {
+      this.activeCharset = 0;
+      this.grid.cursor.charsets[0] = 0;
+      return;
+    }
     if (inter.length) return;
+    // Locking shifts to G2/G3 (and their right-half forms, which xterm.js also applies to GL).
+    if (this.xterm && XTERM_SHIFTS[b] !== undefined) { this.activeCharset = XTERM_SHIFTS[b]; return; }
     switch (b) {
       case 0x44: this.linefeed(); break;
       case 0x45: this.linefeed(); this.carriageReturn(); break;
@@ -712,7 +972,9 @@ class Terminal {
     if (this.plen === MAX_PARAMS) this.ignoring = true; else this.paramPush(false);
     this.state = S_GROUND;
     if (this.ignoring || this.inter.length > 2) return;
-    this.csiDispatch(b, this.groups(), this.inter.map(c => String.fromCharCode(c)).join(''));
+    const groups = this.groups(), inter = this.inter.map(c => String.fromCharCode(c)).join('');
+    if (this.handlers && this.hooked('csi', inter + String.fromCharCode(b), paramsArray(groups))) return;
+    this.csiDispatch(b, groups, inter);
   }
 
   csiDispatch(final, groups, inter) {
@@ -790,11 +1052,19 @@ class Terminal {
         const m = next(1);
         if (m === 14) { this.emit('pxsize'); this.emit('data', this.pixelSizeReply()); }
         else if (m === 18) this.reply(`\x1b[8;${this.rows};${this.cols}t`);
-        else if (m === 22) {
-          if (this.titleStack.length >= TITLE_STACK_MAX) this.titleStack.shift();
-          this.titleStack.push(this.title);
-        } else if (m === 23) {
-          if (this.titleStack.length) this.setTitle(this.titleStack.pop());
+        else if (m === 22 || m === 23) {
+          // The second parameter picks title (2), icon name (1) or both (0); the app only has titles.
+          const which = this.xterm ? next(0) : 2;
+          if (which === 0 || which === 2) {
+            if (m === 23) { if (this.titleStack.length) this.setTitle(this.titleStack.pop()); }
+            else { if (this.titleStack.length >= TITLE_STACK_MAX) this.titleStack.shift(); this.titleStack.push(this.title); }
+          }
+          if (this.xterm && (which === 0 || which === 1)) {
+            if (m === 23) { if (this.iconStack.length) this.setIconName(this.iconStack.pop()); }
+            else { if (this.iconStack.length >= TITLE_STACK_MAX) this.iconStack.shift(); this.iconStack.push(this.iconName); }
+          }
+        } else if (m === 16 && this.xterm && this.cellPixels) {
+          this.reply(`\x1b[6;${this.cellPixels.height};${this.cellPixels.width}t`);
         }
         break;
       }
@@ -808,12 +1078,191 @@ class Terminal {
       }
       case 'Z': this.moveBackwardTabs(next(1)); break;
       default:
+        if (this.xterm && this.xtermCsi(key, groups)) break;
         // DA asks with no parameter or 0; the `>` form is secondary DA.
         if (f === 'c' && next(0) === 0) {
           if (inter === '') this.reply(DA1_REPLY);
           else if (inter[0] === '>') this.reply(DA2_REPLY);
         }
     }
+  }
+
+  // Sequences only the xterm profile understands; false for anything else.
+  xtermCsi(key, groups) {
+    const p = (k, def) => { const g = groups[k]; return g && g[0] !== 0 ? g[0] : def; };
+    const cur = this.grid.cursor;
+    switch (key) {
+      case ' @': this.shiftColumns(0, -p(0, 1)); return true;
+      case ' A': this.shiftColumns(0, p(0, 1)); return true;
+      case "'}": this.shiftColumns(cur.col, p(0, 1)); return true;
+      case "'~": this.shiftColumns(cur.col, -p(0, 1)); return true;
+      case '^': this.scrollDownRelative(this.top, p(0, 1)); return true;
+      case '?J': this.selectiveEraseDisplay(p(0, 0)); return true;
+      case '?K': this.selectiveEraseLine(p(0, 0)); return true;
+      case '"q': {
+        const m = p(0, 0);
+        if (m === 1) cur.fl |= PROTECTED; else if (m === 0 || m === 2) cur.fl &= ~PROTECTED;
+        return true;
+      }
+      case '!p': this.softReset(); return true;
+      case '>q': if (p(0, 0) === 0) this.reply(`\x1bP>|kasaterm.js(${VERSION})\x1b\\`); return true;
+      case '?n': {
+        const m = p(0, 0);
+        if (m === 6) this.reply(`\x1b[?${cur.line + 1};${cur.col + (cur.wrap ? 2 : 1)}R`);
+        else if (m === 996) this.reportColorScheme();
+        return true;
+      }
+      case '?u': {
+        const top = this.keyboardStack.length ? this.keyboardStack[this.keyboardStack.length - 1] : 0;
+        this.reply(`\x1b[?${top}u`);
+        return true;
+      }
+      case '=u': this.setKeyboardMode(p(0, 0) & 0x1f, p(1, 1)); return true;
+      case '>u': this.pushKeyboardMode(p(0, 0) & 0x1f); return true;
+      case '<u': this.popKeyboardModes(p(0, 1)); return true;
+    }
+    return false;
+  }
+
+  // SL/SR (from column 0) and DECIC/DECDC (from the cursor) on every line of the scroll region:
+  // n > 0 inserts blank columns, n < 0 deletes. Nothing happens with the cursor outside it.
+  shiftColumns(at, n) {
+    const grid = this.grid, cur = grid.cursor, cols = grid.cols, bg = cur.bg;
+    if (cur.line < this.top || cur.line >= this.bottom) return;
+    const k = Math.min(Math.abs(n), cols - at);
+    for (let y = this.top; y < this.bottom; y++) {
+      const row = grid.row(y);
+      row.touchAll();
+      if (n > 0) {
+        for (let x = cols - 1; x >= at + k; x--) row.swap(x, x - k);
+        row.blankRange(at, at + k, bg);
+      } else {
+        for (let x = at; x < cols - k; x++) row.swap(x, x + k);
+        row.blankRange(cols - k, cols, bg);
+      }
+      // Moved columns no longer continue onto the next line.
+      for (let x = 0; x < cols; x++) row.d[x * 4 + 3] &= ~(WRAPLINE | LEADING_WIDE_CHAR_SPACER);
+      this.repairWide(row, bg);
+    }
+  }
+
+  // A wide glyph cut from its spacer, or a spacer cut from its glyph, becomes a blank.
+  repairWide(row, bg) {
+    for (let x = 0; x < row.len; x++) {
+      const f = row.flags(x);
+      if ((f & WIDE_CHAR) && (x + 1 >= row.len || !(row.flags(x + 1) & WIDE_CHAR_SPACER))) row.blank(x, bg);
+      else if ((f & WIDE_CHAR_SPACER) && (x === 0 || !(row.flags(x - 1) & WIDE_CHAR))) row.blank(x, bg);
+    }
+  }
+
+  // DECSEL/DECSED: EL and ED that leave cells written under DECSCA protection alone.
+  selectiveErase(y, from, to) {
+    const row = this.grid.row(y), bg = this.grid.cursor.bg;
+    row.touchTo(to);
+    for (let x = from; x < to; x++) if (!(row.flags(x) & PROTECTED)) row.blank(x, bg);
+  }
+
+  selectiveEraseLine(mode) {
+    const cur = this.grid.cursor, cols = this.cols;
+    if (mode === 0) { if (!cur.wrap) this.selectiveErase(cur.line, cur.col, cols); }
+    else if (mode === 1) this.selectiveErase(cur.line, 0, Math.min(cur.col + 1, cols));
+    else if (mode === 2) this.selectiveErase(cur.line, 0, cols);
+  }
+
+  selectiveEraseDisplay(mode) {
+    const cur = this.grid.cursor, cols = this.cols;
+    if (mode === 0) {
+      this.selectiveEraseLine(0);
+      for (let y = cur.line + 1; y < this.rows; y++) this.selectiveErase(y, 0, cols);
+    } else if (mode === 1) {
+      for (let y = 0; y < cur.line; y++) this.selectiveErase(y, 0, cols);
+      this.selectiveEraseLine(1);
+    } else if (mode === 2) {
+      for (let y = 0; y < this.rows; y++) this.selectiveErase(y, 0, cols);
+    } else if (mode === 3) {
+      this.grid.clearHistory();
+    }
+  }
+
+  // DECSTR: modes, attributes, charsets, margins and the saved cursor go back to their defaults;
+  // the screen and the cursor position stay.
+  softReset() {
+    const cur = this.grid.cursor;
+    this.mode = (this.mode & ~(MODE.APP_CURSOR | MODE.APP_KEYPAD | MODE.BRACKETED_PASTE | MODE.ORIGIN | MODE.INSERT
+      | MODE.FOCUS_IN_OUT)) | MODE.LINE_WRAP | MODE.SHOW_CURSOR;
+    this.xmode &= ~(XMODE.REVERSE_WRAP | XMODE.WIN32_INPUT | XMODE.COLOR_SCHEME_REPORTS);
+    this.top = 0;
+    this.bottom = this.rows;
+    cur.fg = DEFAULT_FG; cur.bg = DEFAULT_BG; cur.fl = 0; cur.ext = null;
+    cur.charsets = [0, 0, 0, 0];
+    this.activeCharset = 0;
+    this.grid.saved = new Cursor();
+  }
+
+  // ── kitty keyboard flags (alacritty's handling, which the app has switched off) ──
+
+  setKeyboardMode(flags, behavior) {
+    const active = (this.mode & KITTY_MODE) >>> KITTY_SHIFT;
+    const next = behavior === 3 ? active & ~flags : behavior === 2 ? active | flags : flags;
+    this.mode = (this.mode & ~KITTY_MODE) | (next << KITTY_SHIFT);
+  }
+
+  // alacritty drops the bottom of its *title* stack when this one is full (and panics if that
+  // is empty); the oldest keyboard entry is dropped here instead.
+  pushKeyboardMode(flags) {
+    if (this.keyboardStack.length >= KEYBOARD_STACK_MAX) this.keyboardStack.shift();
+    this.keyboardStack.push(flags);
+    this.setKeyboardMode(flags, 1);
+  }
+
+  popKeyboardModes(n) {
+    this.keyboardStack.length = Math.max(0, this.keyboardStack.length - n);
+    this.setKeyboardMode(this.keyboardStack.length ? this.keyboardStack[this.keyboardStack.length - 1] : 0, 1);
+  }
+
+  swapKeyboardStacks() {
+    const t = this.keyboardStack;
+    this.keyboardStack = this.inactiveKeyboardStack;
+    this.inactiveKeyboardStack = t;
+    this.setKeyboardMode(this.keyboardStack.length ? this.keyboardStack[this.keyboardStack.length - 1] : 0, 1);
+  }
+
+  // DECRQSS (xterm profile). DECSCL answers the VT220 level DA1 claims.
+  requestStatusString(data) {
+    const cur = this.grid.cursor, ok = s => this.reply(`\x1bP1$r${s}\x1b\\`);
+    if (data === 'm') ok(this.sgrString() + 'm');
+    else if (data === 'r') ok(`${this.top + 1};${this.bottom}r`);
+    else if (data === '"q') ok(`${cur.fl & PROTECTED ? 1 : 0}"q`);
+    else if (data === '"p') ok('62;1"p');
+    else if (data === ' q') {
+      const st = this.resolvedCursorStyle;
+      ok(`${{ block: 2, underline: 4, beam: 6 }[st.shape] - (st.blinking ? 1 : 0)} q`);
+    } else this.reply('\x1bP0$r\x1b\\');
+  }
+
+  sgrString() {
+    const cur = this.grid.cursor, f = cur.fl, out = ['0'];
+    const color = (c, base, bright, ext) => {
+      if (c === DEFAULT_FG || c === DEFAULT_BG) return;
+      if (c >= COLOR_RGB) out.push(`${ext};2;${(c >> 16) & 0xff};${(c >> 8) & 0xff};${c & 0xff}`);
+      else if (c >= COLOR_INDEXED) out.push(`${ext};5;${c & 0xff}`);
+      else if (c < 8) out.push(String(base + c));
+      else if (c < 16) out.push(String(bright + c - 8));
+    };
+    if (f & BOLD) out.push('1');
+    if (f & DIM) out.push('2');
+    if (f & ITALIC) out.push('3');
+    const ul = f & ALL_UNDERLINES;
+    if (ul) out.push(ul === UNDERLINE ? '4' : '4:' + (ul === DOUBLE_UNDERLINE ? 2 : ul === UNDERCURL ? 3 : ul === DOTTED_UNDERLINE ? 4 : 5));
+    if (f & BLINK) out.push('5');
+    if (f & INVERSE) out.push('7');
+    if (f & HIDDEN) out.push('8');
+    if (f & STRIKEOUT) out.push('9');
+    if (f & OVERLINE) out.push('53');
+    color(cur.fg, 30, 90, 38);
+    color(cur.bg, 40, 100, 48);
+    if (cur.ext && cur.ext.ul >= 0) color(cur.ext.ul, -1, -1, 58);
+    return out.join(';');
   }
 
   pixelSizeReply() {
@@ -916,17 +1365,45 @@ class Terminal {
         this.emit('cursorstyle');
         break;
       case 25: flag(M.SHOW_CURSOR); break;
-      case 1000: if (on) this.mode &= ~MOUSE_MODE; flag(M.MOUSE_REPORT_CLICK); break;
-      case 1002: if (on) this.mode &= ~MOUSE_MODE; flag(M.MOUSE_DRAG); break;
-      case 1003: if (on) this.mode &= ~MOUSE_MODE; flag(M.MOUSE_MOTION); break;
+      case 1000: if (on) this.mode &= ~MOUSE_MODE; flag(M.MOUSE_REPORT_CLICK); this.xmode &= ~XMODE.X10_MOUSE; break;
+      case 1002: if (on) this.mode &= ~MOUSE_MODE; flag(M.MOUSE_DRAG); this.xmode &= ~XMODE.X10_MOUSE; break;
+      case 1003: if (on) this.mode &= ~MOUSE_MODE; flag(M.MOUSE_MOTION); this.xmode &= ~XMODE.X10_MOUSE; break;
       case 1004: flag(M.FOCUS_IN_OUT); break;
       case 1005: if (on) this.mode &= ~M.SGR_MOUSE; flag(M.UTF8_MOUSE); break;
-      case 1006: if (on) this.mode &= ~M.UTF8_MOUSE; flag(M.SGR_MOUSE); break;
+      case 1006: if (on) this.mode &= ~M.UTF8_MOUSE; flag(M.SGR_MOUSE); if (on) this.xmode &= ~XMODE.SGR_PIXELS_MOUSE; break;
       case 1007: flag(M.ALTERNATE_SCROLL); break;
       case 1042: flag(M.URGENCY_HINTS); break;
       case 1049: if (on !== this.isAltScreen) this.swapAlt(); break;
       case 2004: flag(M.BRACKETED_PASTE); break;
+      default: if (this.xterm) this.setXtermMode(m, on);
     }
+  }
+
+  setXtermMode(m, on) {
+    const xflag = bit => { this.xmode = on ? this.xmode | bit : this.xmode & ~bit; };
+    switch (m) {
+      case 2: if (on) { this.grid.cursor.charsets = [0, 0, 0, 0]; } break;
+      case 9: if (on) this.mode &= ~MOUSE_MODE; xflag(XMODE.X10_MOUSE); break;
+      case 45: xflag(XMODE.REVERSE_WRAP); break;
+      case 66: this.mode = on ? this.mode | MODE.APP_KEYPAD : this.mode & ~MODE.APP_KEYPAD; break;
+      case 1016: xflag(XMODE.SGR_PIXELS_MOUSE); break;
+      case 1048: if (on) this.grid.saved = this.grid.cursor.clone(); else this.grid.cursor = this.grid.saved.clone(); break;
+      case 47: case 1047: if (on !== this.isAltScreen) this.swapScreenPlain(on); break;
+      case 2031: xflag(XMODE.COLOR_SCHEME_REPORTS); break;
+      case 9001: xflag(XMODE.WIN32_INPUT); break;
+    }
+  }
+
+  // xterm's 47/1047: the alternate screen without alacritty's cursor save — the cursor carries
+  // over both ways, and the alternate screen is cleared on the way in.
+  swapScreenPlain(on) {
+    const cur = this.grid.cursor.clone();
+    if (on) this.inactive.resetRegion(0, this.inactive.lines, cur.bg);
+    const g = this.grid; this.grid = this.inactive; this.inactive = g;
+    this.grid.cursor = cur;
+    this.mode ^= MODE.ALT_SCREEN;
+    this.swapKeyboardStacks();
+    this.emit('screen', this.isAltScreen);
   }
 
   setScrollingRegion(top, bottom) {
@@ -937,6 +1414,8 @@ class Terminal {
   }
 
   modeState(m) {
+    if (this.xterm && m === 2) return 4;
+    if (this.xterm && m === 12) return 3;
     if (m === 4) return this.mode & MODE.INSERT ? 1 : 2;
     if (m === 20) return this.mode & MODE.LINE_FEED_NEW_LINE ? 1 : 2;
     return 0;
@@ -963,6 +1442,23 @@ class Terminal {
       case 1049: return has(MODE.ALT_SCREEN);
       case 2004: return has(MODE.BRACKETED_PASTE);
       case 2026: return 2;
+      default: return this.xterm ? this.xtermModeState(m) : 0;
+    }
+  }
+
+  // DECRQM for the modes only xterm.js knows: 1/2 set/reset, 3/4 permanently set/reset.
+  xtermModeState(m) {
+    const has = bit => (this.xmode & bit ? 1 : 2);
+    switch (m) {
+      case 8: return 3;
+      case 9: return has(XMODE.X10_MOUSE);
+      case 45: return has(XMODE.REVERSE_WRAP);
+      case 66: return this.mode & MODE.APP_KEYPAD ? 1 : 2;
+      case 67: case 1015: return 4;
+      case 1016: return has(XMODE.SGR_PIXELS_MOUSE);
+      case 1048: return 1;
+      case 47: case 1047: return this.isAltScreen ? 1 : 2;
+      case 9001: return has(XMODE.WIN32_INPUT);
       default: return 0;
     }
   }
@@ -1039,6 +1535,14 @@ class Terminal {
       else if (p === 59) this.setTemplateUnderline(-1);
       else if (p >= 90 && p <= 97) cur.fg = p - 90 + 8;
       else if (p >= 100 && p <= 107) cur.bg = p - 100 + 8;
+      else if (this.xterm) {
+        if (p === 5) cur.fl |= BLINK;
+        else if (p === 25) cur.fl &= ~BLINK;
+        else if (p === 53) cur.fl |= OVERLINE;
+        else if (p === 55) cur.fl &= ~OVERLINE;
+        else if (p === 221) cur.fl &= ~BOLD;
+        else if (p === 222) cur.fl &= ~DIM;
+      }
     }
   }
 
@@ -1059,6 +1563,12 @@ class Terminal {
     this.emit('title', title);
   }
 
+  // The app has no icon names; tracking one changes nothing on screen.
+  setIconName(name) {
+    this.iconName = name;
+    this.emit('iconname', name);
+  }
+
   oscDispatch(params, terminator) {
     if (params.length === 0 || params[0].length === 0) return;
     const head = utf8(params[0]);
@@ -1069,6 +1579,16 @@ class Terminal {
         const parts = [];
         for (let i = 1; i < params.length; i++) { const s = str(i); if (s !== null) parts.push(s); }
         this.setTitle(parts.join(';').trim());
+        if (head === '0') this.setIconName(parts.join(';'));
+        return;
+      }
+      case '1': {
+        if (params.length >= 2) this.setIconName(params.slice(1).map(p => utf8(p)).join(';'));
+        return;
+      }
+      case '22': {
+        // Mouse pointer shape (a CSS cursor name); alacritty only passes it on as well.
+        if (params.length === 2) this.emit('pointershape', utf8(params[1]));
         return;
       }
       case '4': {

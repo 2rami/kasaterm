@@ -8,5 +8,8 @@
   "scripts": {
     "build": "node build.mjs",
     "test": "node build.mjs && node test/run.mjs"
+  },
+  "devDependencies": {
+    "@xterm/headless": "6.0.0"
   }
 }

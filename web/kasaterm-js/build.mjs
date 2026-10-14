@@ -9,7 +9,8 @@ const ORDER = ['width-table.js', 'width.js', 'grid.js', 'terminal.js', 'box-tabl
 const EXPORTS = ['Terminal', 'Grid', 'Row', 'charWidth', 'MODE', 'View', 'Renderer', 'themeFromTokens', 'DEFAULT_THEME',
   'DEFAULT_FG', 'DEFAULT_BG', 'COLOR_INDEXED', 'COLOR_RGB',
   'INVERSE', 'BOLD', 'ITALIC', 'UNDERLINE', 'WRAPLINE', 'WIDE_CHAR', 'WIDE_CHAR_SPACER', 'DIM', 'HIDDEN',
-  'STRIKEOUT', 'LEADING_WIDE_CHAR_SPACER', 'DOUBLE_UNDERLINE', 'UNDERCURL', 'DOTTED_UNDERLINE', 'DASHED_UNDERLINE'];
+  'STRIKEOUT', 'LEADING_WIDE_CHAR_SPACER', 'DOUBLE_UNDERLINE', 'UNDERCURL', 'DOTTED_UNDERLINE', 'DASHED_UNDERLINE',
+  'ALL_UNDERLINES', 'BLINK', 'OVERLINE', 'PROTECTED', 'XMODE'];
 
 const body = ORDER.map(f => `// ── ${f} ──\n` + readFileSync(join(root, 'src', f), 'utf8')).join('\n');
 const out = `/*! kasaterm.js — terminal emulator for the web, built from web/kasaterm-js (MIT) */

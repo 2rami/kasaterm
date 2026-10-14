@@ -17,6 +17,8 @@ const INVERSE = 1, BOLD = 2, ITALIC = 4, UNDERLINE = 8, WRAPLINE = 16, WIDE_CHAR
   WIDE_CHAR_SPACER = 64, DIM = 128, HIDDEN = 256, STRIKEOUT = 512, LEADING_WIDE_CHAR_SPACER = 1024,
   DOUBLE_UNDERLINE = 2048, UNDERCURL = 4096, DOTTED_UNDERLINE = 8192, DASHED_UNDERLINE = 16384;
 const ALL_UNDERLINES = UNDERLINE | DOUBLE_UNDERLINE | UNDERCURL | DOTTED_UNDERLINE | DASHED_UNDERLINE;
+// Only `profile: 'xterm'` sets these (alacritty has no such flags), well clear of its bits.
+const BLINK = 1 << 20, OVERLINE = 1 << 21, PROTECTED = 1 << 22;
 const NOT_EMPTY_FLAGS = INVERSE | ALL_UNDERLINES | STRIKEOUT | WRAPLINE | WIDE_CHAR_SPACER | LEADING_WIDE_CHAR_SPACER;
 
 const MAX_CACHE_SIZE = 1000;
@@ -275,6 +277,7 @@ class Grid {
     this.cursor = new Cursor();
     this.saved = new Cursor();
     this.displayOffset = 0;
+    this.scrolled = 0;           // lines pushed off the top so far — `scroll` events count them
   }
 
   get historySize() { return Math.max(0, this.raw.len - this.lines); }
@@ -321,6 +324,7 @@ class Grid {
     if (end - start <= n && start !== 0) { this.resetRegion(start, end, bg); return; }
     if (this.displayOffset !== 0) this.displayOffset = Math.min(this.displayOffset + n, this.maxHistory);
     if (start === 0) {
+      this.scrolled += n;
       this.increaseScrollLimit(n);
       this.raw.rotate(-n);
       for (let y = this.lines - 1; y >= end; y--) this.raw.swap(y, y - n);

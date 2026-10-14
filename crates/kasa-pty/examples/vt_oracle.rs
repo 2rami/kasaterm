@@ -277,6 +277,9 @@ fn main() {
                     None => {
                         let config = Config {
                             scrolling_history: history_lines_for_cols(cols),
+                            // The app leaves the kitty keyboard protocol off; kasaterm.js's
+                            // `profile: 'xterm'` turns it on and is checked against this.
+                            kitty_keyboard: std::env::var_os("KTJS_KITTY").is_some(),
                             ..Config::default()
                         };
                         term = Some(Term::new(config, &size, events.clone()));

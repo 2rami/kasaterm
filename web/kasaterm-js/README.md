@@ -36,7 +36,19 @@ const row = term.line(y);                    // y < 0 은 스크롤백(-term.his
 row.text(x); row.fg(x); row.bg(x); row.flags(x); row.extra(x);   // extra: {zw, ul, link}
 term.cursor;                                 // {line, col, wrap, …}
 term.mode;                                   // alacritty TermMode 비트(MODE.*)
+term.modes;                                  // xterm.js 꼴 요약(applicationCursorKeysMode·mouseTrackingMode·…)
+term.reset(); term.clear(); term.writeln(s, cb); term.write(bytes, cb);
+term.on('linefeed' | 'scroll' | 'cursormove' | 'iconname' | 'pointershape', …);
+// xterm.js 의 term.parser — 내장 처리 앞에서 새것부터 불리고, true 를 돌려주면 거기서 끝(동기만)
+term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, params => false);   // params: [1, 2, [3]] 꼴
+term.parser.registerOscHandler(1337, data => true);
+term.parser.registerDcsHandler({ final: 'q' }, (data, params) => true);         // 식셀 같은 그림 애드온 받침
+term.parser.registerApcHandler({ final: 'G' }, data => true);                   // kitty 그림
+term.parser.registerEscHandler({ final: 'c' }, () => true);
 ```
+
+옵션: `profile`(아래), `convertEol`(LF 를 CRLF 로), `tabStopWidth`, `cellPixels`({width, height} — 14t·16t 답),
+`colorScheme`('dark'·'light' — `CSI ? 996 n` 답, `setColorScheme()` 로 바꿈).
 
 `write` 는 **PTY read 한 번을 한 번에** 넣는 것이 좋다. 앱도 read 한 번마다 NFC 를 돌리므로 묶음 경계가 같아야 분해형
 한글이 같은 칸에 같은 모양으로 앉는다(`/term/ws` 는 read 한 번을 메시지 하나로 보낸다).
@@ -49,6 +61,8 @@ node build.mjs && node test/run.mjs                      # 녹화 말뭉치 + �
 KTJS_FUZZ=3000 node test/run.mjs                         # 퍼즈를 더
 node test/run.mjs fuzz:100001-103000                     # 거친 퍼즈(색 지우기·스크롤백 지우기·리셋·화면 전환)
 node test/minimize.mjs fuzz:<seed>                       # 실패한 퍼즈를 최소 재현으로 줄이기
+npm install && node test/xterm.mjs                       # xterm 프로필 — @xterm/headless 와 칸 단위로
+node test/api.mjs                                        # 파서 훅·reset·clear·modes·이벤트
 ```
 
 `vt_oracle` 은 kasa-pty 의 pane reader 와 똑같이 바이트를 alacritty 에 먹인다(read 경계에서 끊긴 UTF-8 보류, read 마다 NFC,
@@ -75,13 +89,32 @@ node test/minimize.mjs fuzz:<seed>                       # 실패한 퍼즈를 �
 ## 일부러 따르는 것 (앱과 같아야 해서)
 
 - 47·1047·1048 대체 화면 모드는 무시한다 — 앱이 무시하므로 여기서 켜면 거울만 다른 화면을 보인다. 실제 프로그램은
-  xterm-256color 의 smcup 인 1049 를 쓴다.
+  xterm-256color 의 smcup 인 1049 를 쓴다. (`profile: 'xterm'` 에서만 켜진다 — 아래.)
 - 줄 0 에서 DL(`CSI M`)·SU 로 밀려난 줄, 맨 위가 0 인 스크롤 영역에서 밀려난 줄은 스크롤백으로 간다.
 - `CSI 1 J` 는 커서가 1번 줄일 때 0번 줄을 안 지운다. 원점 모드의 CUU·CUD·CHA 는 영역 위쪽을 두 번 더한다.
 - 창을 넓힌 줄은 새 칸이 기본 배경이라, 그 줄을 기본 배경으로 다시 지워도 옛 칸의 배경색이 남는다(행 `occ` 최적화).
 - 대체 화면에서 폭이 바뀌면 kasa-pty 가 스크롤백 한도를 그 화면에 다시 걸어, 대체 화면에도 스크롤백이 쌓인다.
 - 동기 갱신에 시간 제한이 없다(앱도 `ESC[?2026l` 이 올 때까지 기다린다). 필요하면 `flushSync()`.
-- kitty 키보드 프로토콜·XTGETTCAP·DECRQSS·식셀은 없다(앱 설정과 같음).
+- kitty 키보드 프로토콜·DECRQSS 는 기본 프로필에서 꺼져 있다(앱 설정과 같음). XTGETTCAP·식셀 해석은 없다(식셀은 DCS 훅 위에).
+
+## xterm 프로필 (`new Terminal({ profile: 'xterm' })`)
+
+xterm.js 가 알고 앱(alacritty)은 무시하는 것을 켠다. **켜면 거울이 앱과 다른 화면을 보일 수 있다** — 앱이 그 시퀀스를
+지나치기 때문이다. `/term` 은 기본 프로필을 쓴다. alacritty 가 다루는 것(ED·EL·SGR 21·1049·DA1 등)은 이 프로필에서도
+alacritty 를 따르고, 나머지는 xterm.js(`@xterm/headless` 6.0, 없는 것은 main 브랜치)와 규격을 따른다.
+`test/xterm.mjs` 가 칸 단위로 맞추고, 기본 프로필로 돌리면 전부 실패하는 것까지 확인했다.
+
+- 화면: SL·SR(`CSI Ps SP @/A`), DECIC·DECDC(`CSI Ps ' }/~`), SD 의 `CSI Ps ^`, DECSCA 보호 + DECSED·DECSEL(`CSI ? J/K`),
+  DECSTR(`CSI ! p`), 대체 화면 47·1047·1048, 역 줄바꿈(45), LNM(`CSI 20 h` — LF 가 CR 도), UTF-8 로 온 C1 제어
+  (IND·NEL·HTS·CSI·OSC·DCS·SOS·PM·APC·ST), 나라별 문자 집합(`ESC ( A/4/C/5/R/Q/K/Y/E/6/Z/H/7/=`, G1~G3, `ESC - .`),
+  잠금 시프트(`ESC n o | } ~`), `ESC % @/G`, `CSI ? 2 h`(문자 집합 되돌림), SGR 5·25(깜빡임)·53·55(윗줄)·221·222.
+- 응답: XTVERSION(`CSI > q` → `kasaterm.js(판)`), DECRQSS(`m`·`r`·`"q`·`"p`·` q`), DECXCPR(`CSI ? 6 n`), 16t(칸 픽셀),
+  22/23t 의 제목·아이콘 이름 고르기, DECRQM(2·12·8·9·45·66·67·1015·1016·1048·47·1047·9001), 색 구성표(`CSI ? 996 n`, 2031 구독).
+- 모드: X10 마우스(9)·SGR 픽셀(1016)·66·win32 입력(9001)·kitty 키보드 플래그(`CSI = > < ? u`, alacritty 의 처리를 켠 것과 같게 —
+  `KTJS_KITTY=1` 로 띄운 `vt_oracle` 과 대조).
+- xterm.js 와 일부러 다른 것: 네덜란드 `[` 는 ĳ 한 글자(xterm.js 는 "ij" 를 넣고 i 만 그린다), DECSCL 은 DA1 이 말하는
+  VT220(62)으로, DECRQSS `m` 은 늘 `0m` 이 아니라 지금 꾸밈을, kitty 스택이 넘치면 가장 오래된 것을 버린다(alacritty 는
+  제목 스택에서 지우고, 그게 비어 있으면 멈춘다 — 앱은 kitty 를 꺼서 안 걸린다).
 
 ## 그리기·입력 (2단계)
 

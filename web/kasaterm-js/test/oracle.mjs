@@ -48,8 +48,8 @@ function frames(cast, upto = Infinity, tail = 'e') {
   return Buffer.concat(parts);
 }
 
-function runOracle(input) {
-  const r = spawnSync(oraclePath(), [], { input, maxBuffer: 1 << 30 });
+function runOracle(input, env) {
+  const r = spawnSync(oraclePath(), [], { input, maxBuffer: 1 << 30, env: env ? { ...process.env, ...env } : undefined });
   if (r.status !== 0) throw new Error(`vt_oracle failed: ${r.stderr}`);
   return r.stdout.toString('utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
 }
@@ -130,10 +130,10 @@ function diffRows(want, got, top) {
 }
 
 // Returns {checked, mismatch} — mismatch carries a readable diff of the first failing chunk.
-export function compareCast(cast, { scrollback = 100000 } = {}) {
+export function compareCast(cast, { scrollback = 100000, profile, env } = {}) {
   // The first line answers the opening resize that creates the terminal.
-  const ref = runOracle(frames(cast)).slice(1);
-  const term = new KasaTerm.Terminal({ cols: cast.header.cols, rows: cast.header.rows, scrollback });
+  const ref = runOracle(frames(cast), env).slice(1);
+  const term = new KasaTerm.Terminal({ cols: cast.header.cols, rows: cast.header.rows, scrollback, profile });
   const events = attach(term);
   const refEvents = [];
   let checked = 0;
@@ -146,7 +146,7 @@ export function compareCast(cast, { scrollback = 100000 } = {}) {
     const got = state(term);
     const { i: _i, events: _e, ...wantState } = want;
     if (Object.keys(wantState).some(k => !same(wantState[k], got[k]))) {
-      const dump = runOracle(frames(cast, i + 1, 'd'));
+      const dump = runOracle(frames(cast, i + 1, 'd'), env);
       const wantRows = dump[dump.length - 1].dump;
       const gotRows = []; for (let y = 0; y < term.rows; y++) gotRows.push(rowKey(term, y));
       const fields = Object.keys(wantState).filter(k => !same(wantState[k], got[k]) && k !== 'rows');
