@@ -1704,11 +1704,13 @@ class ShareListing {
     required this.name,
     required this.folders,
     required this.files,
+    this.sync,
   });
 
   final String name;
   final List<ShareFolder> folders;
   final List<ShareFile> files;
+  final ShareSync? sync;
 
   bool get isEmpty => folders.isEmpty && files.isEmpty;
 
@@ -1719,7 +1721,45 @@ class ShareListing {
         if (e is Map) ShareFolder.fromJson(e.cast<String, Object?>()),
     ],
     files: ShareFile.listOf(j['files']),
+    sync: j['sync'] is Map
+        ? ShareSync.fromJson((j['sync'] as Map).cast<String, Object?>())
+        : null,
   );
+}
+
+class ShareSync {
+  const ShareSync({
+    required this.updated,
+    required this.peers,
+    required this.failed,
+    required this.pausedDeletes,
+  });
+  final DateTime updated;
+  final int peers;
+  final int failed;
+  final int pausedDeletes;
+
+  String get summary {
+    if (pausedDeletes > 0) return '파일이 많이 사라져 삭제 동기화를 멈췄어요';
+    if (failed > 0) return '기기 $failed대 연결 확인 필요 · 받은 파일은 볼 수 있어요';
+    if (updated.millisecondsSinceEpoch == 0) return '기기 간 동기화를 확인하는 중…';
+    if (DateTime.now().difference(updated).inSeconds > 90) {
+      return '동기화 확인이 늦어지고 있어요 · 받은 파일 표시 중';
+    }
+    if (peers == 0) return '이 기기에 받은 파일 · 연결된 다른 기기 없음';
+    return '기기 $peers대에서 받기 확인 · 클라우드 보관은 아님';
+  }
+
+  static ShareSync fromJson(Map<String, Object?> json) {
+    final peers =
+        (json['peers'] as List?)?.whereType<Map>().toList() ?? const <Map>[];
+    return ShareSync(
+      updated: _msTime(json['updated_ms']),
+      peers: peers.length,
+      failed: peers.where((peer) => peer['ok'] != true).length,
+      pausedDeletes: (json['paused_deletes'] as num?)?.toInt() ?? 0,
+    );
+  }
 }
 
 class ShareFolder {

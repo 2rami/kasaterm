@@ -3267,6 +3267,7 @@ impl App {
         let tab = match tab.trim() {
             "sessions" => SideTab::Sessions,
             "mcp" => SideTab::Mcp,
+            "share" => SideTab::Share,
             // 옛 「원격」 탭은 Info 의 「다른 기계」 절이 됐다 — 이름은 그대로 받는다.
             "info" | "machines" => SideTab::Info,
             "git" => SideTab::Git,
@@ -3405,6 +3406,7 @@ impl App {
                 SideTab::Mcp => self.mcp_col.scroll = px,
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
+                SideTab::Share => self.share.scroll = px,
             }
         }
         self.chrome_dirty = true;
@@ -3429,6 +3431,7 @@ impl App {
             SideTab::Mcp => self.mcp_col.scroll,
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
+            SideTab::Share => self.share.scroll,
         };
         // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
         // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
@@ -3437,6 +3440,7 @@ impl App {
             SideTab::Mcp => self.mcp_col.row_rects.len(),
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
+            SideTab::Share => self.share.rows.len(),
         };
         let (vis_h, content_h) = self.git.col_list_extent;
         // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와
@@ -4449,6 +4453,7 @@ impl App {
             "claude" => SettingsCat::Claude,
             "accounts" => SettingsCat::Accounts,
             "machines" => SettingsCat::Machines,
+            "share" => SettingsCat::Share,
             "theme" => SettingsCat::Theme,
             // 옛 이름 그대로지만 이제 진짜 자기 칸이 있다(2026-08-26 분리) —
             // 이 env 로 「캐릭터 목록」을 보던 밖의 스크립트는 그대로 맞는 화면에 온다.

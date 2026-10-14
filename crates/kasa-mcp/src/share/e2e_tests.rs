@@ -131,6 +131,8 @@ async fn two_machines_over_http() {
     // 폰 목록 모양.
     let list: serde_json::Value = client.get(format!("{}/term/share/list", a.base)).send().await.unwrap().json().await.unwrap();
     assert_eq!(list["name"], "KASA-share");
+    assert!(list["sync"]["peers"].is_array());
+    assert!(list["sync"]["updated_ms"].is_u64());
     assert_eq!(list["folders"][0]["name"], "2026-09-28-시안");
     let first = &list["folders"][0]["files"][0];
     assert_eq!(first["kind"], "markdown");

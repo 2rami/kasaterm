@@ -2786,6 +2786,14 @@ impl App {
                 return;
             }
         }
+        if self.git.col_visible && self.info.tab == state::SideTab::Share
+            && self.cursor_px.1 > TITLE_HEIGHT && self.cursor_px.0 >= self.git_col_x()
+        {
+            self.share.scroll = (self.share.scroll - lines as f32 * 22.0).clamp(0.0, self.share.scroll_max);
+            self.chrome_dirty = true;
+            if let Some(window) = &self.window { window.request_redraw(); }
+            return;
+        }
         // Info 탭: 프로세스 목록 스크롤. clamp 는 렌더가 실제 행 수로 다시 하니
         // (draw_info_col) 여기선 하한만 잡고 넘긴다 — 목록 길이가 워커 스레드에서
         // 바뀌므로 입력 시점의 최대치는 이미 낡았을 수 있다.
@@ -3063,6 +3071,7 @@ impl App {
             crate::ImeFocus::AuxEditor(id) => self.aux_insert_id(id, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
             crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
+            crate::ImeFocus::ShareSearch => self.share_search_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
             crate::ImeFocus::PathSearch => self.statusbar_search_insert(&text),
             crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),

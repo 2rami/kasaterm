@@ -3217,6 +3217,8 @@ impl ApplicationHandler<UserEvent> for App {
         if main_window {
             self.note_human_touch(&event);
         }
+        if main_window && self.main_pointer_modal() { self.share.pending_search_commit = false; }
+        if main_window && !self.main_pointer_modal() && self.share_panel_event(&event) { return; }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -4950,6 +4952,12 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    if let Some((bx, by, bw, bh)) = self.share_title_rect() {
+                        if cx >= bx && cx < bx + bw && cy >= by && cy < by + bh {
+                            self.open_share_panel();
+                            return;
+                        }
+                    }
                     if let Some((bx, by, bw, bh)) = self.settings_title_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_settings_web(event_loop, None);
@@ -5505,6 +5513,9 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             window.request_redraw();
                             return;
+                        }
+                        if self.info.tab == state::SideTab::Share && self.share_click(cx, cy) {
+                            self.chrome_dirty = true; window.request_redraw(); return;
                         }
                         if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
                             self.chrome_dirty = true;

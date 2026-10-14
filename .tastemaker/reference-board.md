@@ -41,3 +41,16 @@ Direction contract: the first viewport identifies this device and other connecti
 Native evidence: isolated dark/light captures at 1280×900 and 640×720, an eleven-page settings tour, and real save/cancel button clicks against a fake roster. No real connection or account was changed. Actual Korean IME composition and native Windows execution remain outside these checks.
 
 Review: hierarchy 4, specificity 5, restraint 5, state clarity 4, evidence 4, structural fit 5. Uses existing SVG icons and native controls; no new web framework, palette, illustration, or personal taste profile. Visual acceptance remains pending user review.
+
+## Shared file browsing — 2026-10-14
+
+Design read: native cross-device file collection for daily use, Operate mode, existing KASA system; variance 3, motion 1, density 7, art direction 3. Public help pages were read; external signed-in product screens were not operated or captured.
+
+- [Drive for desktop](https://support.google.com/drive/answer/10838124?hl=en): paired application/Finder entry, search, recent sync activity and explicit status.
+- [Dropbox sync status](https://help.dropbox.com/sync/check-sync-status): distinguish connecting, syncing, paused and current rather than using one generic success claim.
+- [OneDrive files in Explorer](https://support.microsoft.com/en-us/sharepoint/sync/work-with-synced-files-in-file-explorer): keep familiar folder access alongside the application view.
+- Existing KASA native controls, Flutter `Look`, `SettingsGroup`, SVG icons and bundled Pretendard remain the implementation foundation. Component-drawer search found no applicable native file-browser component; no React registry or web mockup was introduced.
+
+Direction contract: recent files and search are the first viewport; folders and previews remain reachable without creating a desktop workspace. Moving or hiding a shortcut does not move data. Peer receive success is not global upload completion. Avoid unnamed folder-only entry points, unbounded thumbnail decoding and late preview responses replacing a newer selection.
+
+Evidence: isolated native 1280×900 dark and 640×720 light captures, real preview and wheel events; Flutter 320/390/430px light/dark layout checks and 390×844 real-font renders. Physical phone and Korean IME use are not implied. Review: show-tell 4, philosophy 4, hierarchy 4, specificity 5, restraint 5, structural fit 5. Exact visuals remain pending review; no personal profile promotion.

@@ -9,6 +9,7 @@ import '../twins_loading.dart';
 import '../chat_markdown.dart' show chatMarkdownStyle;
 import 'controls.dart';
 import 'notes_sheet.dart' show timeAgo;
+import 'share_browser.dart';
 
 /// KASA-share — 학생들이 만든 시안·스크린샷·문서가 `<날짜>-<주제>/` 폴더로 쌓이는 곳.
 /// 카사텀이 모든 기기에 같은 내용으로 맞춰 두니 폰은 주소의 기계 하나에서 읽는다.
@@ -34,6 +35,22 @@ class ShareScreen extends StatefulWidget {
 class _ShareScreenState extends State<ShareScreen> {
   ShareListing? _listing;
   String? _problem;
+  final _search = TextEditingController();
+  final _scroll = ScrollController();
+  bool _recent = true;
+  ShareFilter _filter = ShareFilter.all;
+
+  @override
+  void dispose() {
+    _search.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _change(VoidCallback update) {
+    setState(update);
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
 
   @override
   void initState() {
@@ -73,9 +90,7 @@ class _ShareScreenState extends State<ShareScreen> {
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           title: Text(
-            widget.folder == null
-                ? (l?.name ?? 'KASA-share')
-                : folder?.topic ?? widget.folder!,
+            widget.folder == null ? '공유 파일' : folder?.topic ?? widget.folder!,
           ),
         ),
         body: _body(context, l, folder),
@@ -92,7 +107,9 @@ class _ShareScreenState extends State<ShareScreen> {
         onRefresh: _load,
       );
     }
-    final problem = _problem == null ? null : ErrorBand(text: '새로 못 읽었어요 · $_problem', onRetry: _load);
+    final problem = _problem == null
+        ? null
+        : ErrorBand(text: '새로 못 읽었어요 · $_problem', onRetry: _load);
     if (widget.folder != null) {
       if (folder == null) {
         return _Message(
@@ -115,16 +132,66 @@ class _ShareScreenState extends State<ShareScreen> {
         onRefresh: _load,
       );
     }
+    final showFiles =
+        _recent || _search.text.trim().isNotEmpty || _filter != ShareFilter.all;
+    final files = matchingShareFiles(l, _search.text, _filter);
     return CustomScrollView(
+      controller: _scroll,
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       physics: twinsScroll,
       slivers: [
         twinsRefreshSliver(_load),
+        if (problem != null) SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+          sliver: SliverToBoxAdapter(child: problem),
+        ),
+        SliverToBoxAdapter(
+          child: ShareBrowserToolbar(
+            search: _search,
+            recent: _recent,
+            filter: _filter,
+            sync: l.sync,
+            onQuery: (_) => _change(() {}),
+            onRecent: (recent) => _change(() {
+              _recent = recent;
+              if (!recent) _filter = ShareFilter.all;
+            }),
+            onFilter: (filter) => _change(() {
+              _filter = filter;
+              _recent = true;
+            }),
+          ),
+        ),
+        if (showFiles)
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+            sliver: SliverList.builder(
+              itemCount: files.length,
+              itemBuilder: (context, index) => ShareFileRow(
+                key: ValueKey('share-file-${files[index].path}'),
+                server: widget.server,
+                file: files[index],
+                showPath: true,
+              ),
+            ),
+          ),
+        if (showFiles && files.isEmpty)
+          const SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              child: TwinsNotice(text: '맞는 파일이 없어요. 검색어와 파일 종류를 바꿔 주세요'),
+            ),
+          ),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap),
+          padding: const EdgeInsets.fromLTRB(
+            Look.pagePad,
+            0,
+            Look.pagePad,
+            Look.groupGap,
+          ),
           sliver: SliverList.list(
             children: [
-              ?problem,
-              if (l.folders.isNotEmpty)
+              if (!showFiles && l.folders.isNotEmpty)
                 SettingsGroup(
                   inset: _rowInset(Look.thumbLg),
                   children: [
@@ -144,11 +211,14 @@ class _ShareScreenState extends State<ShareScreen> {
                       ),
                   ],
                 ),
-              if (l.files.isNotEmpty)
+              if (!showFiles && l.files.isNotEmpty)
                 SettingsGroup(
                   title: l.folders.isNotEmpty ? '폴더 밖' : null,
                   inset: _rowInset(Look.thumb),
-                  children: [for (final f in l.files) ShareFileRow(server: widget.server, file: f)],
+                  children: [
+                    for (final f in l.files)
+                      ShareFileRow(server: widget.server, file: f),
+                  ],
                 ),
             ],
           ),
@@ -326,40 +396,54 @@ class _ImageTile extends StatelessWidget {
 
 /// 파일 한 줄 — 그림이면 작은 썸네일, 아니면 종류 아이콘. 밖에서 여는 것은 오른쪽에 표시.
 class ShareFileRow extends StatelessWidget {
-  const ShareFileRow({super.key, required this.server, required this.file});
+  const ShareFileRow({
+    super.key,
+    required this.server,
+    required this.file,
+    this.showPath = false,
+  });
 
   final Server server;
   final ShareFile file;
+  final bool showPath;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final outside = !_inApp(file.kind);
     return ListTile(
-          onTap: () => openShareFile(context, server, file),
-          leading: _Thumb(
-            server: server,
-            file: file.kind == ShareKind.image && !file.tooLarge ? file : null,
-            fallback: _kindIcon(file.kind),
-            size: Look.thumb,
-          ),
-          title: Text(file.name, maxLines: 2, overflow: TextOverflow.ellipsis),
-          subtitle: Text(
-            file.tooLarge
-                ? '${_meta(file)} · 32MB 가 넘어 폰에서 못 열어요'
-                : _meta(file),
-            style: TextStyle(
-              color: file.tooLarge ? scheme.error : scheme.onSurfaceVariant,
-            ),
-          ),
-          trailing: outside && !file.tooLarge
-              ? Icon(
-                  Icons.open_in_new_rounded,
-                  size: 18,
-                  color: scheme.onSurfaceVariant,
-                )
-              : null,
-        );
+      onTap: () => openShareFile(context, server, file),
+      leading: _Thumb(
+        server: server,
+        file: file.kind == ShareKind.image && !file.tooLarge ? file : null,
+        fallback: _kindIcon(file.kind),
+        size: Look.thumb,
+      ),
+      title: Text(
+        showPath ? file.path.split('/').last : file.name,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        file.tooLarge
+            ? '${_meta(file)} · 32MB 가 넘어 폰에서 못 열어요'
+            : showPath && file.path.contains('/')
+            ? '${file.path.substring(0, file.path.lastIndexOf('/'))}\n${_meta(file)}'
+            : _meta(file),
+        maxLines: showPath ? 2 : 3,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: file.tooLarge ? scheme.error : scheme.onSurfaceVariant,
+        ),
+      ),
+      trailing: outside && !file.tooLarge
+          ? Icon(
+              Icons.open_in_new_rounded,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            )
+          : null,
+    );
   }
 }
 

@@ -316,8 +316,7 @@ pub(crate) struct GitState {
     pub(crate) path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
 }
 
-/// 우측 칼럼의 활성 탭. 칼럼은 원래 git 전용이었고 Info·Sessions 가 나중에
-/// 붙었다 — 셋은 폭·스크롤·닫기 버튼을 공유하고 본문만 갈린다.
+/// 폭·닫기·확대를 공유해야 탭을 고를 때 PTY 크기가 흔들리지 않는다.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SideTab {
     #[default]
@@ -327,6 +326,7 @@ pub(crate) enum SideTab {
     Sessions,
     /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
     Mcp,
+    Share,
 }
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다

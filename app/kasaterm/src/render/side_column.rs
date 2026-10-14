@@ -21,6 +21,8 @@ pub(super) struct Panels<'a> {
     pub info: &'a mut state::InfoState,
     pub sessions: &'a mut state::SessionsColState,
     pub mcp: &'a mut state::McpColState,
+    pub share: &'a mut crate::share_panel::State,
+    pub preedit: &'a str,
     pub closed_panes: &'a [ClosedPane],
 }
 
@@ -30,8 +32,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
     // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
     let top = TITLE_HEIGHT;
     let bottom = (f.viewport.1 - f.status_h).max(top);
-    let Panels { git, info, sessions, mcp, closed_panes } = p;
+    let Panels { git, info, sessions, mcp, share, preedit, closed_panes } = p;
     match info.tab {
+        state::SideTab::Share => {
+            let body_top = head(g, info, git, f, top, bottom);
+            crate::share_panel::draw(g, share, f.cursor, preedit, f.x, f.w, body_top, bottom);
+        }
         state::SideTab::Git => {
             git.use_panel_snapshot(f.git_view);
             let y = head(g, info, git, f, top, bottom);

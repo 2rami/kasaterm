@@ -26,6 +26,7 @@
 - `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
+- `share_panel.rs` + `share_panel/{input,files,paint}.rs` — 공유 파일의 최근/폴더 탐색·검색·입력 소유권·읽기 전용 미리보기. 목록·이미지·바로가기 작업은 워커에서 읽고, 이전 선택의 늦은 응답은 세대로 거른다. 설정은 `native_settings/share.rs`, 공통 색인과 안전한 로컬 경로는 `kasa-mcp/share/catalog.rs`, 바로가기 위치는 `share/shortcut.rs`가 맡는다. 계약은 `docs/share-sync.md`.
 - `session/accounts/sync.rs` — 다른 기기의 Claude 계정 선택: 검증 신원 일치·중복 별명 판정, 최신 선택 직렬 전파와 기기별 적용 확인. 계약은 `docs/agent-account-selection.md`.
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
 - `info_focus.rs` — Info 열 맨 위 「지금 보는 칸」 카드. 사실은 `observe` 한 곳(칸 종류·폴더·모델·mod 사실·그 칸 포트)이고, 이 기기 칸은 감시 스레드가 mod 신호(`claude_mod::set_focus_listener`)·프로세스 지문·느린 주기로, 다른 기기 칸은 원본의 `/term/pane-info`(`kasa_mcp::pane_info`, 같은 `observe` 를 부른다) 롱폴로 받는다. 포트(lsof)는 뒤에서 읽어 mod 반영을 막지 않는다

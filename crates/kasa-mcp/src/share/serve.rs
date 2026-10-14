@@ -146,7 +146,7 @@ pub(crate) async fn list(req: axum::extract::Request) -> Response {
         return r;
     }
     let Some(engine) = pick(&req) else { return off() };
-    let body = engine.with_index(|idx| {
+    let mut body = engine.with_index(|idx| {
         let mut folders: std::collections::BTreeMap<String, (u64, Vec<serde_json::Value>)> = Default::default();
         let mut loose = Vec::new();
         for (_, e, _) in idx.live() {
@@ -183,6 +183,14 @@ pub(crate) async fn list(req: axum::extract::Request) -> Response {
             })
             .collect();
         json!({ "ok": true, "name": super::FOLDER, "folders": folders, "files": loose })
+    });
+    let status = engine.status();
+    body["sync"] = json!({
+        "updated_ms": status.updated_ms,
+        "bytes": status.bytes,
+        "paused_deletes": status.paused_deletes,
+        "local_only": status.too_big.len(),
+        "peers": status.peers.iter().map(|peer| json!({"label": peer.label, "ok": peer.ok})).collect::<Vec<_>>()
     });
     Json(body).into_response()
 }

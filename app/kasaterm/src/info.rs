@@ -2164,9 +2164,8 @@ impl App {
     }
 }
 
-/// 우측 칼럼 두 탭이 공유하는 머리 — 탭 이름 둘 + 확장/닫기 버튼. 활성 탭은
-/// 밑줄로 표시한다(배경 pill 은 칼럼이 좁을 때 글자를 먹는다). 반환값은 본문이
-/// 시작할 y.
+/// 좁은 칼럼에서도 탭이 닫기 버튼에 가려지지 않게 머리를 여러 줄로 쓴다.
+/// 배경 pill은 글자 폭을 먹으므로 활성 탭은 밑줄로 구분한다.
 ///
 /// `App` 메서드가 아니라 자유 함수인 건 빌림 때문이다 — 호출부는 이미
 /// `self.gpu.as_mut()` 로 gpu 필드를 빌린 상태라 `self.method(g)` 는 self 를
@@ -2223,6 +2222,7 @@ pub(crate) fn draw_side_tabs(
         (state::SideTab::Info, "Info"),
         (state::SideTab::Sessions, "세션"),
         (state::SideTab::Mcp, "Addon"),
+        (state::SideTab::Share, "공유"),
     ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);

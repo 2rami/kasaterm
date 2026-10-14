@@ -10,7 +10,9 @@
 
 #[cfg(test)]
 mod e2e_tests;
+pub mod catalog;
 pub mod path;
+pub mod shortcut;
 mod pull;
 pub(crate) mod serve;
 pub mod version;
@@ -87,6 +89,8 @@ pub struct PeerStatus {
 pub struct Status {
     pub root: String,
     pub desktop_link: Option<String>,
+    #[serde(default)]
+    pub shortcut_error: Option<String>,
     pub updated_ms: u64,
     pub files: usize,
     pub bytes: u64,
@@ -418,9 +422,11 @@ impl Engine {
 fn desktop_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         // OneDrive 가 바탕화면을 옮겼을 수 있어 알려진 폴더를 직접 묻는다.
         let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"])
+            .creation_flags(0x0800_0000)
+            .args(["-NoProfile", "-Command", "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; [Environment]::GetFolderPath('Desktop')"])
             .output()
             .ok()?;
         let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -429,35 +435,6 @@ fn desktop_dir() -> Option<PathBuf> {
         }
     }
     Some(kasa_socket::home_dir()?.join("Desktop"))
-}
-
-/// 바탕화면에 `KASA-share` 링크를 둔다. 같은 이름의 다른 것이 있으면 손대지 않는다.
-fn ensure_desktop_link(root: &Path) -> Option<PathBuf> {
-    let link = desktop_dir()?.join(FOLDER);
-    let ours = |p: &Path| {
-        std::fs::read_link(p).ok().and_then(|t| t.canonicalize().ok()) == root.canonicalize().ok()
-    };
-    match std::fs::symlink_metadata(&link) {
-        Ok(_) if ours(&link) => return Some(link),
-        Ok(_) => {
-            eprintln!("[share] {} 에 다른 것이 있어 링크를 만들지 않았습니다", link.display());
-            return None;
-        }
-        Err(_) => {}
-    }
-    #[cfg(unix)]
-    let made = std::os::unix::fs::symlink(root, &link).is_ok();
-    // 심볼릭 링크는 관리자·개발자 모드가 있어야 해서 정션으로 간다.
-    #[cfg(windows)]
-    let made = std::process::Command::new("cmd")
-        .arg("/C")
-        .arg("mklink")
-        .arg("/J")
-        .arg(&link)
-        .arg(root)
-        .output()
-        .is_ok_and(|o| o.status.success());
-    made.then_some(link)
 }
 
 /// 앱 본체에서만 돈다(`http.rs` 의 `run_scheduler`). 두 벌이 같은 폴더를 돌리면
@@ -478,14 +455,14 @@ pub async fn run() {
     if ENGINE.set(engine.clone()).is_err() {
         return;
     }
-    let link = if explicit {
-        None
-    } else {
-        let root = root.clone();
-        tokio::task::spawn_blocking(move || ensure_desktop_link(&root)).await.ok().flatten()
-    };
-    if let Ok(mut st) = engine.status.lock() {
-        st.desktop_link = link.map(|l| l.display().to_string());
+    if !explicit {
+        let engine = engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let result = engine.shortcut_preferences().and_then(|preferences| engine.set_shortcut(preferences.location));
+            if let Err(error) = result {
+                if let Ok(mut status) = engine.status.lock() { status.shortcut_error = Some(error.to_string()); }
+            }
+        }).await;
     }
     let client = match reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build() {
         Ok(c) => c,

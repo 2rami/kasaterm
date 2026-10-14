@@ -791,6 +791,7 @@ impl App {
             return;
         }
         match action {
+            SettingsAction::Share(action) => self.share_action(action),
             SettingsAction::PreferredAgent(provider) => {
                 if let Err(error) = agent_preferences::set_preferred_agent(provider) {
                     self.collab.toast = Some((error, Instant::now()));
