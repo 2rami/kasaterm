@@ -3113,26 +3113,6 @@ impl Backend for PtyBackend {
         kasa_mcp::tell_service::status(params)
     }
 
-    fn nacho_report(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        let mut params = params.clone();
-        if params["origin"] == kasa_socket::nacho_inbox::ORIGIN_BOARD {
-            // 사람이 띄운 칸엔 나쵸 표식이 없다 — 세션과 선생님의 마지막 지시는 그 칸의 대화 기록에서 채운다.
-            let surface = params["surface"].as_str().unwrap_or("").to_string();
-            let path = self.bound.lock().unwrap().get(&surface).cloned();
-            if let Some(path) = path {
-                if params["session_id"].as_str().unwrap_or("").is_empty() {
-                    params["session_id"] = serde_json::json!(transcript_session(&path));
-                }
-                if params["request"].as_str().unwrap_or("").is_empty() {
-                    if let Some(text) = last_request(&path) {
-                        params["request"] = serde_json::json!(text);
-                    }
-                }
-            }
-        }
-        kasa_mcp::nacho_service::submit(&params)
-    }
-
     fn relay_account(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         kasa_mcp::device_auth::handle(params)
     }
@@ -3266,7 +3246,6 @@ impl Backend for PtyBackend {
         // GUI 의 헤더 바·미니맵이 읽는 값과 같다. attention 잠금을 쥔 채 부르면 판정이
         // 그 표식을 못 본다(try_lock) — 여기서는 아무 잠금도 없다.
         self.hub.refresh();
-        let origin_tasks = kasa_socket::nacho_inbox::origin_tasks();
         // 부른 칸(자식 키 → 부모 키). 메모리 짝은 적을 때 파일에도 같이 적히니 파일 하나로 충분하다.
         let spawners: HashMap<String,String> = read_spawner_pairs(&spawner_file()).into_iter().collect();
         // 칸 폴더 — GUI 가 공표한 셸 cwd(lsof 없이 조회), 없으면 claude 상태줄이 알린 폴더.
@@ -3339,10 +3318,6 @@ impl Backend for PtyBackend {
                 row["done_at_ms"] = json!(report.at_ms);
             }
             drop(done);
-            // 표시용 출처(`nacho_inbox::origin_tasks`). 거울 줄엔 안 싣는다 — 정본은 원본 기계 줄이다.
-            if let Some(task) = session.as_deref().and_then(|sid| origin_tasks.get(sid)).filter(|_| !mirrored) {
-                row["origin_task_env"] = json!(task);
-            }
             if let Some(parent) = row["address"]["surface_key"].as_str().and_then(|key| spawners.get(key)).filter(|_| !mirrored) {
                 row["spawned_by"] = json!(parent);
             }
@@ -9220,58 +9195,5 @@ mod codex_repair_tests {
         ] {
             assert_eq!(tail(bad), None, "{bad}");
         }
-    }
-}
-
-/// 기록 파일 이름이 곧 세션 — claude 는 `<uuid>.jsonl`, codex 는 `rollout-<시각>-<uuid>.jsonl`.
-fn transcript_session(path: &std::path::Path) -> String {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    if stem.starts_with("rollout-") && stem.len() >= 36 && stem.is_char_boundary(stem.len() - 36) {
-        stem[stem.len() - 36..].to_string()
-    } else {
-        stem.to_string()
-    }
-}
-
-/// 그 칸에서 선생님이 마지막으로 친 말 전문 — 판의 last_prompt 는 100자로 잘려 나쵸 요구 카드와 못 잇는다.
-/// 꼬리 2MB 만 본다(codex 기록은 한 줄이 MB 단위라 그 너머의 말은 놓칠 수 있다).
-fn last_request(path: &std::path::Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    let start = file.metadata().ok()?.len().saturating_sub(2 << 20);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let body = if start > 0 { text.split_once('\n').map(|(_, rest)| rest).unwrap_or("") } else { &text[..] };
-    let mut conv = crate::chat_view::parse::Conversation::default();
-    conv.apply(body);
-    conv.items.iter().rev().find_map(|item| match item {
-        crate::chat_view::parse::Item::Bubble { user: true, from: None, queued: false, text, .. } if !text.trim().is_empty() => Some(text.clone()),
-        _ => None,
-    })
-}
-
-#[cfg(test)]
-mod board_report_tests {
-    use super::{last_request, transcript_session};
-
-    #[test]
-    fn session_and_last_request_come_from_the_transcript() {
-        let dir = std::env::temp_dir().join(format!("kasaterm-board-report-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let claude = dir.join("44b41676-8d39-49c8-b96d-34e52960d00f.jsonl");
-        std::fs::write(&claude, [
-            r#"{"type":"user","sessionId":"s","message":{"content":"미니도 최신으로 구워서 재시작해줘"}}"#,
-            r#"{"type":"assistant","sessionId":"s","message":{"content":[{"type":"text","text":"할게요"}]}}"#,
-            r#"{"type":"user","sessionId":"s","message":{"content":"<system-reminder>x</system-reminder>"}}"#,
-        ].join("\n")).unwrap();
-        assert_eq!(transcript_session(&claude), "44b41676-8d39-49c8-b96d-34e52960d00f");
-        assert_eq!(last_request(&claude).as_deref(), Some("미니도 최신으로 구워서 재시작해줘"));
-        let codex = dir.join("rollout-2026-10-08T17-59-40-01a11abd-5dd6-79e2-b9cf-fdffc66620cf.jsonl");
-        std::fs::write(&codex, r#"{"type":"event_msg","payload":{"type":"user_message","message":"슬랙 봐바"}}"#).unwrap();
-        assert_eq!(transcript_session(&codex), "01a11abd-5dd6-79e2-b9cf-fdffc66620cf");
-        assert_eq!(last_request(&codex).as_deref(), Some("슬랙 봐바"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -136,7 +136,7 @@ PATH 앞이라, 사람 셸에서 멀쩡하던 같은 명령이 다른 도구를 
 
 ### 누가 치나
 
-`run --live` 는 나쵸 도구만 친다. 창 표식(`KASATERM_PANE_ID`·`CLAUDECODE`·`CLAUDE_CODE_SESSION_ID`·`KASATERM_ORIGIN`·
+`run --live` 는 나쵸 도구만 친다. 창 표식(`KASATERM_PANE_ID`·`CLAUDECODE`·`CLAUDE_CODE_SESSION_ID`·
 `CODEX_SANDBOX`)이 있으면 거절하고, `KASATERM_RELEASE_INVOKER=nacho-tool` 이 없어도 거절한다. 나쵸 도구는 창 표식을 걷은
 env 로 띄운다. **사고 방지 표식이지 보안 경계가 아니다** — 경계는 주인 승인(정확한 범위·10분·한 번)이다.
 

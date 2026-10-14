@@ -44,7 +44,6 @@ pub mod agent_accounts;
 pub mod agent_chains;
 pub mod remote;
 pub mod remote_restore;
-pub mod nacho_service;
 mod nacho_relay;
 #[cfg(unix)]
 pub mod adopt;

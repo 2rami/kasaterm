@@ -67,14 +67,6 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../docs/automatic-preview-updates.md)). 폰 앱(`mobile/`)은 main 푸시 후 `mobile/tool/adhoc.sh`로 설치 링크 새 판을 올리고 TestFlight는 쓰지 않는다([절차](../../docs/ios-adhoc-install.md)).
 - 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. sleep을 반복하지 않고, 계속 지켜볼 일은 변경분·진행·실패·끊김만 받는다.
 
-## 오케스트레이터가 띄운 일
-
-env `KASATERM_ORIGIN`(브리프 첫 줄 `[origin=… task=…]`)이 있는 창만 해당한다. 상세는 [오케스트레이터 계약](../../docs/nacho-orchestrator.md).
-
-- 끝났을 때·못 풀고 막혔을 때(blocked)·재시작이 있어야 이어질 때(needs_restart)·머지·배포처럼 승인이 필요할 때(needs_approval) **즉시** `kasaterm-cli done <succeeded|blocked|needs_restart|needs_approval> "한 일" --changed "파일,파일" --tests "검사와 결과" --next "오케스트레이터가 할 것"` 으로 보고한다. 이 한 줄이 판 완료와 오케스트레이터 보고함에 함께 들어간다. 재시작·머지·배포는 직접 하지 않는다.
-- blocked·needs_restart 는 `--next` 를 채운다. 토큰·비밀이 들어가면 접수가 거부된다.
-- 상태가 바뀔 때 한 번씩만 보낸다. 같은 보고는 `duplicate` 로 한 번만 깨운다. 답이 없다고 다시 보내거나 tell 로 오케스트레이터를 찾지 않는다 — pane 이 아니다. 후속 지시는 tell 로 온다.
-
 ## 선생님께 알리기
 
 - 위험·취향·범위 선택은 질문 도구로 선생님께 직접 묻는다. 승인된 일은 이어서 한다.
@@ -83,5 +75,5 @@ env `KASATERM_ORIGIN`(브리프 첫 줄 `[origin=… task=…]`)이 있는 창�
 - 선생님이 볼 결과물은 `kasaterm-cli share new <주제>` 폴더(바탕화면 `KASA-share`, 모든 기기·폰에 옮겨짐)에 넣고 열어 준다.
 - 결론 뒤에 끝난 것 / 남은 것 / 선생님이 할 것을 쓴다. 기본 5줄·최대 10줄, 없는 칸은 「없음」으로 채운다.
 - 남은 것에는 막힘·미확인·이어받을 캐릭터를 적는다. 쉬운 기능 이름을 쓰고 기술 상세·근거는 기록과 커밋에 남긴다.
-- 메모리(~/내 드라이브/MEMORY)에는 핸드오프·진행 현황·날짜별 경과·커밋 나열을 쓰지 않는다. 무엇이 문제였고 어떻게 풀었나·하는 법·함정만 남긴다. 남은 일·선생님 차례는 done 보고로 나쵸 작업현황에 남긴다.
+- 메모리(~/내 드라이브/MEMORY)에는 핸드오프·진행 현황·날짜별 경과·커밋 나열을 쓰지 않는다. 무엇이 문제였고 어떻게 풀었나·하는 법·함정만 남긴다.
 - 인사·반복 요약·마무리 제안은 생략한다.

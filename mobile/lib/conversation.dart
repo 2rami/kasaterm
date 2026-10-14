@@ -17,7 +17,7 @@ class ChatBubble extends ChatItem {
     this.sending = false,
   });
 
-  /// user 턴 — 선생님 말이거나, [from] 이 있으면 사람 대신 다른 칸·카사텀·나쵸가 넣은 말.
+  /// user 턴 — 선생님 말이거나, [from] 이 있으면 사람 대신 다른 칸·카사텀이 넣은 말.
   final bool user;
 
   /// 사진이 붙으면 그 자리의 「(사진)」 표는 걷힌다 — 그래서 고칠 수 있다.
@@ -25,7 +25,7 @@ class ChatBubble extends ChatItem {
   final DateTime? at;
   final String? from;
 
-  /// [from] 이 넣은 말의 종류 — 쪽지·완료 보고·맡긴 일.
+  /// [from] 이 넣은 말의 종류 — 쪽지·완료 보고.
   final String? via;
 
   /// 작업 중에 넣어 둔 예약 — 아직 학생이 안 읽었다.
@@ -658,14 +658,6 @@ bool isInjection(String text) => _injection.hasMatch(text);
     return (name: done[2]!.trim(), via: '${done[1]} 보고', body: done[4]!.trim());
   }
   if (t.startsWith('[완료]') || t.startsWith('[실패]')) return null;
-  if (t.startsWith('[origin=nacho')) {
-    final nl = t.indexOf('\n');
-    final more = nl < 0 ? '' : t.substring(nl + 1).trim();
-    final first = nl < 0 ? t : t.substring(0, nl);
-    final close = first.indexOf(']');
-    final body = more.isNotEmpty ? more : (close < 0 ? first : first.substring(close + 1)).trim();
-    return (name: '나쵸', via: '맡긴 일', body: body);
-  }
   if (t.startsWith('[쪽지 확인 못 함]')) {
     return (name: '카사텀', via: '쪽지 확인 못 함', body: t.substring('[쪽지 확인 못 함]'.length).trim());
   }

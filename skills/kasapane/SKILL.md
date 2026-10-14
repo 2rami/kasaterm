@@ -83,7 +83,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `board --all` / `board --local` | **모든 기기**의 방·학생·상태·`address`(기기 id·surface·session·instance). tell 이 쓰는 주소의 정본 (§5) | `result.sources`·`result.panes` |
 | `activity --address '<JSON>' [N]` | 그 pane 의 최근 도구·결과. **주소 JSON 전체**를 `board --all` 에서 그대로 복사(surface_key 하나로는 안 됨) | `result.events` |
 | `board-watch --all --json [--since CURSOR]` | 변경분 스트림 — 별도 감시(Monitor)에 먹인다 | JSON 줄 |
-| `done <succeeded\|failed\|blocked\|needs_restart\|needs_approval> '<요약>' [--changed …] [--tests …] [--next …]` | 내 작업 보고 — 보드에 실리고, 오케스트레이터가 띄운 창이면 그 보고함에도 들어간다 | — |
+| `done <succeeded\|failed\|blocked\|needs_restart\|needs_approval> '<요약>'` | 내 작업 보고 — 보드에 실리고 나를 부른 창 입력으로 간다 | — |
 | `window-new --machine <기계>` | **그 기계에 새 방**을 만들고 여기 보기 창으로 연다(§5 원격 방) | `surface`·`window`·`summary` |
 | `split <방향> %N@<기계>` / `tab %N@<기계>` | 그 기계의 그 pane **옆**/**탭**에 셸 pane. 축은 저쪽이 칸 종횡비로 고른다(방향 인자는 힌트). `--cwd` 가능. 여기 보기 창엔 몇 초 안에 거울이 붙는다 | `surface`·`window` |
 | `machines` / `machines connect <기계> [--here]` | 명부 기계 목록(내가 있는 곳 *) / 그 기계에 **새 방**을 세워 셸(보기 창은 뒤에 앉아 보던 방을 안 뺏는다, `--run` 가능) · `--here` 면 이 칸 자리를 그 셸로 | plain text |

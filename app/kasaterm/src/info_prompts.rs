@@ -1,7 +1,7 @@
 //! Info 「내 프롬프트」 — 지금 보는 칸에서 사람이 직접 친 말만 모아 늘어놓고, 누르면 그 질문 자리로 옮긴다.
 //!
 //! 글은 그 칸에 묶인 대화 기록(claude transcript·codex rollout)을 `chat_view::parse` 와 같은 규칙으로 읽은 것이고,
-//! 쪽지·완료 보고·나쵸가 맡긴 일처럼 다른 쪽이 입력칸에 넣은 말은 `parse::relayed` 로 뺀다. 대화 보기는 첫
+//! 쪽지·완료 보고처럼 다른 쪽이 입력칸에 넣은 말은 `parse::relayed` 로 뺀다. 대화 보기는 첫
 //! 화면만 보면 되니 꼬리만 읽지만, 여기는 모아보기라 파일을 처음부터 읽는다 — 사람 턴만 JSON 으로 푼다.
 //!
 //! 기록에는 화면 자리가 없다. 자리는 칸이 이미 가진 정본에서 글로 맞춰 찾는다 — 풀스크린 claude 는 칸 안 mod 가
@@ -1161,7 +1161,6 @@ mod tests {
             r#"{"type":"user","sessionId":"s","timestamp":"2026-10-13T08:00:00Z","message":{"content":"직접 친 질문"}}"#,
             r#"{"type":"user","sessionId":"s","message":{"content":"⟦미도리⟧ 쪽지 본문"}}"#,
             r#"{"type":"user","sessionId":"s","message":{"content":"[완료] 시로코(%27) — 끝"}}"#,
-            r#"{"type":"user","sessionId":"s","message":{"content":"[origin=nacho task=w1] 안내\n맡긴 일"}}"#,
             r#"{"type":"user","sessionId":"s","isMeta":true,"message":{"content":"스킬 본문"}}"#,
             r#"{"type":"user","sessionId":"s","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"출력"}]}}"#,
             r#"{"type":"user","sessionId":"s","message":{"content":"<command-name>/model</command-name>"}}"#,
