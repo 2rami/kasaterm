@@ -81,13 +81,15 @@ impl App {
                 // 이 함수는 복원 확인창을 그릴 때마다 불린다. 디스크 rollout 확인은
                 // 실제 저장·복원 시 한 번만 하고, 여기서는 저장본 표식과 이미 결속된
                 // session_id만 센다.
-                let was_agent = saved_agent_marker(leaf).is_some();
-                let bound_sid = leaf
-                    .get("session_id")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|s| !s.is_empty());
-                if was_agent || bound_sid {
-                    *n += 1;
+                for leaf in super::local_restore::surfaces(leaf) {
+                    let was_agent = saved_agent_marker(leaf).is_some();
+                    let bound_sid = leaf
+                        .get("session_id")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    if was_agent || bound_sid {
+                        *n += 1;
+                    }
                 }
             } else if let Some(split) = node.get("split") {
                 if let Some(a) = split.get("a") {
@@ -118,8 +120,9 @@ impl App {
     /// (claude 수로 정하면 셸만 쓰던 창은 강제 종료 후 아무것도 못 되살린다).
     pub(crate) fn count_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
-            if node.get("leaf").is_some() {
-                if !crate::internal_room::is_saved_window(node) {
+            if let Some(leaf) = node.get("leaf") {
+                if !crate::internal_room::is_saved_window(node)
+                    && super::local_restore::surfaces(leaf).next().is_some() {
                     *n += 1;
                 }
             } else if let Some(split) = node.get("split") {
@@ -231,12 +234,14 @@ impl App {
                 if crate::internal_room::is_saved_window(n) {
                     return;
                 }
-                if let Some(c) = leaf
-                    .get("character")
-                    .and_then(|c| c.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    out.push(c.to_string());
+                for leaf in super::local_restore::surfaces(leaf) {
+                    if let Some(c) = leaf
+                        .get("character")
+                        .and_then(|c| c.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        out.push(c.to_string());
+                    }
                 }
                 return;
             }
@@ -291,7 +296,8 @@ impl App {
         // backup. The configured session directory also isolates test fixtures.
         let previous = crate::socket::session_file_path()
             .and_then(|path| path.parent().and_then(latest_restored_state));
-        let mut prepared = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let original = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let mut prepared = super::local_restore::state(&original);
         crate::server_restore::import_pending_servers(&mut prepared);
         let state = &prepared;
         self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
@@ -318,7 +324,7 @@ impl App {
                 .unwrap_or(0);
             let _ = std::fs::write(
                 dir.join(format!("session-restored-{ts}.json")),
-                state.to_string(),
+                original.to_string(),
             );
             let _ = kasa_socket::session_storage::prune_restored(&dir, 5);
         }
@@ -623,6 +629,8 @@ impl App {
     /// agent, queue the command that brings it back. Returns the new pane id, or
     /// None if the PTY failed to start (caller then collapses the split).
     pub(super) fn restore_leaf(&mut self, rec: &serde_json::Value, cols: u16, rows: u16) -> Option<String> {
+        let local = super::local_restore::record(rec)?;
+        let rec = &local;
         let id = self.restore_surface(rec, cols, rows, None)?;
         // pane 안에 겹쳐 둔 탭들(저장은 layout_to_json 의 `tabs`). leaf 와 **같은
         // 길**로 되살린다 — 이어갈 대화가 실재하는지, 캐릭터를 되살릴지, 권한
@@ -671,6 +679,8 @@ impl App {
         rows: u16,
         tab_of: Option<&str>,
     ) -> Option<String> {
+        // Restoring a view must not establish connections to another device or spawn a fallback shell.
+        if !super::local_restore::is_local(rec) { return None; }
         let saved = rec.get("pane_id").and_then(|v| v.as_str());
         // 저장된 번호를 되살릴 수 있는지는 alloc 과 **같은 기준**으로 본다 — `self.pty`
         // 만 보면 이미 복원된 미리보기 pane 의 번호를 빼앗는다.

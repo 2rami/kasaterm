@@ -19,6 +19,7 @@
   `boot.rs`(첫 칸 `start_pty`·옛 tmux·소켓 서버 `start_socket_pty`) · `screen_pump.rs`(`apply_screen_update`·`pump_pty_screens`) ·
   `agent_launch.rs`(칸에 학생 env 심기·학생/페르소나 바꾸기·`restart_pane_agent`) · `accounts.rs`(claude·codex 계정 전환과 재시작 대기) ·
   `save.rs`(`session_state_json`·`save_session_state`) · `restore.rs`(`restore_session_state`·복원 명령·복원 전 수 세기) ·
+  `local_restore.rs`(저장·옛 저장본 복원에서 다른 기기 미러 제외, 섞인 로컬 탭·방 번호 보존) ·
   `titles.rs`(대화 기록 꼬리 → 칸 제목·effort) · `rooms.rs`(방 만들기·고르기·순서·닫기·이름, 칸·탭 초점) ·
   `closed_panes.rs`(닫은 칸 기록·되살리기) · `file_tree.rs`(cwd·파일 트리·파일 열기) · `sidebar.rs`(방 카드 높이·스크롤) ·
   `remote_rooms.rs`(원격 셸·거울 칸·원격 방 보기 창) · `migrate.rs`(칸 이사·되돌리기)

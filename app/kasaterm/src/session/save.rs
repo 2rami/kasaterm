@@ -275,7 +275,7 @@ impl App {
             "pane_weather": self.weather_overrides_json(),
         });
         if let Some(progress) = &self.restore_progress { progress.preserve_snapshot(&mut state); }
-        Some(state)
+        Some(super::local_restore::state(&state))
     }
     /// Write the restore snapshot on exit.
     ///

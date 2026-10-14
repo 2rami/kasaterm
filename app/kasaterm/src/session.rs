@@ -10,6 +10,7 @@ mod agent_launch;
 mod boot;
 mod closed_panes;
 mod file_tree;
+mod local_restore;
 mod migrate;
 mod remote_rooms;
 mod restore;
