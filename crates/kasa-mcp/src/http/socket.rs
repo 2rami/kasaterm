@@ -1,4 +1,4 @@
-//! 웹 터미널 WebSocket(`/term/ws`·`/term/layout/ws`) — raw 바이트(자기 VT 파서를 든 xterm.js)와
+//! 웹 터미널 WebSocket(`/term/ws`·`/term/layout/ws`) — raw 바이트(자기 VT 파서를 든 kasaterm.js)와
 //! 셀 그리드(파서 없는 웹·폰) 두 갈래, 뷰어 크기 임대, 세션 교체 감지.
 //!
 //! 한 라우트에 두 모드가 있다:
@@ -621,7 +621,7 @@ async fn term_ws_run(
             match incoming {
                 Ok(Some(chunk)) => {
                     // PTY 격자가 바뀌었으면(divider·⤢·다른 미러) 바이트보다 먼저
-                    // 알린다 — 미러 xterm 이 낡은 격자로 새 바이트를 그리면 글자가
+                    // 알린다 — 미러 터미널이 낡은 격자로 새 바이트를 그리면 글자가
                     // 한 자씩 세로로 꺾이는 그 화면이 된다. 크기 변경은 반드시
                     // full snapshot 출력을 동반하므로(chunk) 여기서 보면 놓치지 않는다.
                     let now = sess_sz.size();

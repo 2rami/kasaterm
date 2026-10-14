@@ -83,9 +83,44 @@ node test/minimize.mjs fuzz:<seed>                       # 실패한 퍼즈를 �
 - 동기 갱신에 시간 제한이 없다(앱도 `ESC[?2026l` 이 올 때까지 기다린다). 필요하면 `flushSync()`.
 - kitty 키보드 프로토콜·XTGETTCAP·DECRQSS·식셀은 없다(앱 설정과 같음).
 
-## 다음 단계
+## 그리기·입력 (2단계)
 
-2. 그리기·입력 — 캔버스 렌더러, 키 → 바이트, 한글 IME(숨긴 textarea, `assets/term/grid.js` 의 교훈), 붙여넣기, 마우스·휠,
-   선택·복사, 칸 맞추기, 테마(`KasaTermChrome` 토큰).
-3. `/term` 갈아 끼우기(사람 확인 뒤), xterm.js 걷기.
-4. 속도 — xterm.js 와 처리량·프레임 시간 비교.
+```js
+const term = new KasaTerm.Terminal({ cols: 80, rows: 24, scrollback: 10000 });
+term.open(el, { fontSize: 13, fontFamily, lineHeight: 1.2, theme, optionAsMeta, onLink });
+term.on('input', bytes => ws.send(bytes));   // 사람이 친 것만(키·IME·붙여넣기·마우스 보고·포커스)
+term.fit();                                  // 담는 상자에 맞춰 cols·rows 를 정해 resize
+term.setTheme({ background, foreground, cursor, cursorAccent, selectionBackground, ansi: [16] });
+term.setTheme(KasaTerm.themeFromTokens(tokens));   // 카사텀 디자인 토큰(/design-tokens)
+term.view.setFont(size); term.view.cell;     // {width, height} CSS px
+term.view.scrollLines(n); term.view.selectionText(); term.focus();
+```
+
+- **캔버스 하나**에 바뀐 줄만 다시 그린다(줄마다 잘라 그려 넘친 글리프가 이웃에 자국을 안 남김). HiDPI 는 장치
+  픽셀로 맞춘다. 넓은 글자는 두 칸 가운데, 칸보다 넓은 대체 글리프는 눌러 맞춘다. 박스·블록 문자(U+2500–259F)는
+  글꼴 대신 도형으로 그려 줄 높이와 상관없이 이어진다. 밑줄 다섯 꼴·밑줄 색·취소선·흐리게·반전·숨김, 커서 꼴
+  셋(블록·밑줄·막대)과 깜박임, 초점을 잃으면 속 빈 블록. 동기 갱신 중엔 앱처럼 직전 화면이 남는다.
+- **입력**은 커서 자리의 숨긴 textarea 가 받고, 프로그램에 가는 것은 그 내용의 **변화**다(`assets/term/grid.js` 와 같은
+  방식) — 조합 이벤트를 주는 데스크톱 IME 는 끝날 때 한 번, 조합 이벤트 없이 자모를 바꿔 쓰는 폰 키보드는 지우고
+  다시 쓰기로 간다. 조합 중 글자는 커서 자리에 밑줄로 보인다.
+- **키**는 앱(`input.rs`)과 같다: Shift/Option+Enter → LF, Option+←/→ → 단어 이동(`ESC b/f`), Cmd+Backspace → `^U`,
+  Ctrl+Backspace → `^W`, Cmd+←/→ → 줄 처음/끝, 방향키는 DECCKM 을 따르고 수정키는 `CSI 1;m X`. Ctrl 조합은 물리 키로
+  정해 한글 자판에서도 Ctrl+C 가 된다. Option 을 Meta 로 쓸지는 `optionAsMeta`(맥 기본 끔).
+- **붙여넣기**는 줄바꿈을 CR 로 바꾸고 2004 가 켜져 있으면 괄호로 감싼다(붙여 넣은 글 속 괄호 표지는 걷는다).
+- **마우스**: 1000/1002/1003 + SGR(1006)·UTF-8(1005)·옛 인코딩. Shift 를 누르면 보고 대신 선택. **휠·스와이프**는 앱과
+  같은 규칙 — 마우스를 켠 프로그램엔 휠 보고, 대체 화면+1007 이면 방향키, 그 밖엔 스크롤백.
+- **선택·복사**: 끌기·두 번(단어)·세 번(접힌 줄까지 한 줄) 누르기, Cmd+C(맥)·Ctrl+Shift+C. 접힌 줄은 이어 붙이고
+  줄 끝 공백은 뗀다. **링크**: OSC 8 과 글 속 `http(s)://` 주소에 올리면 밑줄, Cmd/Ctrl+누르기로 연다.
+- 브라우저 시험: `node test-view/input.mjs`(Playwright 를 전역에 깔아 두면 헤드리스 크롬으로 키·IME 조합·폰식 조합·
+  붙여넣기·선택·휠·마우스 보고·포커스를 확인).
+
+## 웹 터미널에 실린 자리 (3단계)
+
+`/term?renderer=ansi`(기본 문자 보기)가 kasaterm.js 로 그린다. `node build.mjs` 가 `dist/` 와 함께
+`crates/kasa-mcp/assets/term/kasaterm.js` 를 쓰고, 앱이 그 파일을 `/term/kasaterm.js` 로 낸다(바이너리에 박힘).
+src 를 고쳤으면 빌드한 자산도 같이 커밋한다. `/term` 기본(주소에 renderer 가 없을 때)은 지금처럼 서버가 해석한
+격자를 그리는 `/term/grid` 다.
+
+## 남은 단계
+
+4. 속도 — xterm.js 와 처리량·프레임 시간 비교(큰 출력 흘리기, 긴 스크롤백). 모자라면 WebGL 렌더러.

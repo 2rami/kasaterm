@@ -180,7 +180,7 @@ pub struct PtySession {
     /// zsh/bash) never updates the process's real cwd. None until the injected
     /// shell integration emits its first prompt.
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
-    /// raw PTY 바이트를 그대로 받아 가는 구독자들 — 브라우저의 xterm.js 처럼
+    /// raw PTY 바이트를 그대로 받아 가는 구독자들 — 브라우저의 kasaterm.js 처럼
     /// **자기 VT 파서를 가진** 소비자를 위한 tee. 여기로 흘리는 건 우리가 파싱한
     /// 셀이 아니라 셸이 뱉은 바이트 그 자체라, 받는 쪽이 kasaterm 내부 구조에
     /// 전혀 묶이지 않는다. `blocks` 와 같은 이유로 Arc 공유 — HTTP 백엔드가

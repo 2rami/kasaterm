@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>kasaterm</title>
 <!-- 상대 경로 — `/term` 로도 유저 주소 `/u/<slug>/term` 로도 열린다(grid.html 머리말). -->
-<link rel="stylesheet" href="term/xterm.css">
 <style>
   /* kasaterm 이 실제로 쓰는 폰트(D2Coding Nerd Font)를 서브셋해 내려준다 —
      화면이 여기와 같아 보이려면 같은 폰트여야 하고, 폰 기본 폰트에는 Nerd Font
@@ -31,12 +30,6 @@
   }
   :root { --bar: 8px; }
   body.has-bar { --bar: 58px; }
-
-  /* xterm 기본 스크롤바는 밝은 톤이라 어두운 터미널 위에서 흰 띠로 튄다. */
-  .xterm-viewport::-webkit-scrollbar { width: 10px; }
-  .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-  .xterm-viewport::-webkit-scrollbar-thumb { background: #2c3543; border-radius: 5px; }
-  .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
 
   /* 누구 화면인지가 폰에서 제일 먼저 필요한 정보다. 우상단 칩은 터미널 첫 줄과
      겹쳐 뒤 글자가 비쳤다 — kasaterm pane 헤더처럼 **자기 자리를 가진 상단 바**로
@@ -197,7 +190,7 @@
   <button data-seq="\x1b[A" aria-label="위">↑</button>
   <button data-seq="\x1b[B" aria-label="아래">↓</button>
 </div>
-<script src="term/xterm.js"></script>
+<script src="term/kasaterm.js"></script>
 <script src="term/viewport.js"></script>
 <script src="term/chrome.js"></script>
 <script>
@@ -292,32 +285,37 @@
   const touch = matchMedia('(hover: none)').matches;
   if (touch) document.body.classList.add('has-bar');
 
-  const term = new Terminal({
+  // kasaterm.js — 앱과 같은 해석기(web/kasaterm-js)로 PTY 바이트를 그린다. 재접속하면
+  // 통째로 새로 만든다: 끊긴 연결의 반쯤 읽은 이스케이프·동기 갱신이 새 스냅샷에 섞이면 안 된다.
+  const BASE_FONT = 13;
+  const terminalRoot = document.getElementById('term');
+  const baseTheme = { background: '#12161c', foreground: '#c8d0d9', cursor: '#7aa2f7', selectionBackground: '#2c3543' };
+  let theme = baseTheme;
+  let fontSize = BASE_FONT;
+  let term = null;
+  const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
+  function makeTerm(cols, rows) {
+    term?.dispose();
+    term = new KasaTerm.Terminal({ cols: cols || 80, rows: rows || 24, scrollback: 10000 });
     // 웹폰트가 못 오면 맥에 설치된 같은 폰트가 받는다. Menlo 는 한글이 없어 맨 뒤.
-    fontFamily: '"KasaTerm", "D2Coding", ui-monospace, SFMono-Regular, Menlo, monospace',
-    fontSize: 13,
-    cursorBlink: true,
-    allowProposedApi: true,
-    theme: {
-      background: '#12161c', foreground: '#c8d0d9', cursor: '#7aa2f7',
-      selectionBackground: '#2c3543',
-    },
-  });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(document.getElementById('term'));
-  fit.fit();
+    term.open(terminalRoot, {
+      fontFamily: '"KasaTerm", "D2Coding", ui-monospace, SFMono-Regular, Menlo, "Apple SD Gothic Neo", monospace',
+      fontSize, theme,
+    });
+    // 프로그램의 질의(DA·CPR)에는 서버 쪽 터미널이 이미 답한다 — 사람이 친 것만 보낸다.
+    term.on('input', send);
+    return term;
+  }
+  makeTerm();
   const chrome = KasaTermChrome.create({ root: ROOT, pane: selfId,
-    onTheme: tokens => { term.options.theme = { ...term.options.theme, ...KasaTermChrome.xtermTheme(tokens) }; },
+    onTheme: tokens => { theme = { ...baseTheme, ...KasaTermChrome.terminalTheme(tokens) }; term.setTheme(theme); },
   });
 
-  const terminalRoot = document.getElementById('term');
-  const BASE_FONT = 13;
   let baseCell = null;
   let mirror = false, confirmed = null, orig = null, fitted = false, legacyTarget = null;
   function rememberBaseCell() {
-    const cell = term._core?._renderService?.dimensions?.css?.cell;
-    if (term.options.fontSize === BASE_FONT && cell?.width > 0 && cell?.height > 0) {
+    const cell = term.view?.cell;
+    if (fontSize === BASE_FONT && cell?.width > 0 && cell?.height > 0) {
       baseCell = { width: cell.width, height: cell.height };
     }
     return baseCell;
@@ -326,23 +324,25 @@
     const cell = baseCell || rememberBaseCell();
     if (!cell) return null;
     const area = KasaViewport.visibleArea(terminalRoot);
-    const scrollbar = term._core?.viewport?.scrollBarWidth || 0;
     return {
-      cols: Math.floor(Math.max(0, area.width - scrollbar) / cell.width),
+      cols: Math.floor(Math.max(0, area.width) / cell.width),
       rows: Math.floor(area.height / cell.height),
     };
+  }
+  function setFontSize(size) {
+    if (size === fontSize) return;
+    fontSize = size;
+    term.view.setFont(size);
   }
   function containConfirmed() {
     if (!confirmed || !baseCell) return;
     const area = KasaViewport.visibleArea(terminalRoot);
     if (!area.width || !area.height) return;
-    const scrollbar = term._core?.viewport?.scrollBarWidth || 0;
     const scale = Math.min(1,
-      Math.max(0, area.width - scrollbar) / (confirmed.cols * baseCell.width),
+      Math.max(0, area.width) / (confirmed.cols * baseCell.width),
       area.height / (confirmed.rows * baseCell.height));
-    // Change the font itself: CSS scaling would leave xterm mouse coordinates unscaled.
-    const size = Math.max(0.1, Math.floor(BASE_FONT * scale * 100) / 100);
-    if (size !== term.options.fontSize) term.options.fontSize = size;
+    // 폰트 자체를 줄인다: CSS 배율로 줄이면 마우스 좌표와 입력칸 자리가 어긋난다.
+    setFontSize(Math.max(0.1, Math.floor(BASE_FONT * scale * 100) / 100));
   }
   rememberBaseCell();
   const viewport = KasaViewport.create({
@@ -360,6 +360,7 @@
   let ws = null;
   let gone = false, backoff = 1000, retryTimer = null, reconnects = 0;
   const handlers = {};
+  const enc = new TextEncoder();
   const connect = () => {
     if (gone || document.visibilityState !== 'visible') return;
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
@@ -432,9 +433,6 @@
     }
     term.write(new Uint8Array(e.data));
   };
-  const enc = new TextEncoder();
-  const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
-  term.onData(send);
   fitBtn.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
     if (!ws || ws.readyState !== 1 || !viewport.state().ready || !mirror) return;
@@ -452,11 +450,8 @@
     }
   });
 
-  // 스와이프 스크롤은 xterm 내장 터치에 맡긴다(viewport.handleTouchStart/Move).
-  // 여기서 터치를 가로채 합성 WheelEvent 로 바꾸는 시도는 두 번 죽는다 —
-  // capture+stopPropagation 이 내장 터치를 먼저 끊고, untrusted 휠은 기본 동작
-  // (뷰포트 네이티브 스크롤)을 못 일으켜 아무것도 안 움직인다(2026-08-20 실측).
-  // 마우스 리포팅을 켠 TUI 에서 터치가 무시되는 것은 내장 경로의 의도된 동작이다.
+  // 스와이프는 kasaterm.js 가 받는다 — 마우스를 켠 프로그램에는 휠 보고로, 대체 화면에는
+  // 화살표로, 그 밖에는 스크롤백 굴리기로(앱의 휠과 같은 규칙).
 
   for (const b of bar.querySelectorAll('button[data-seq]')) {
     // 눌러도 터미널이 포커스를 잃지 않아야 소프트 키보드가 안 내려간다.
@@ -658,25 +653,24 @@
   };
   handlers.open = () => {
     // 재접속이면 곧 올 스냅샷 앞에 화면을 비운다 — 옛 화면 위에 겹쳐 그리면 줄이 섞인다.
-    if (reconnects > 0) term.reset();
+    fontSize = BASE_FONT;
+    if (reconnects > 0) makeTerm(term.cols, term.rows);
+    else term.view.setFont(BASE_FONT);
     reconnects++;
     backoff = 1000;
-    term.options.fontSize = BASE_FONT;
-    term._core?._charSizeService?.measure();
     rememberBaseCell();
     term.focus();
     setTimeout(syncSize, 0);
   };
   window.addEventListener('resize', syncSize);
 
-  // 웹폰트는 늦게 온다. 그 사이 xterm 은 폴백 폰트로 글자 폭을 재서 격자를 잡아
-  // 두므로, 폰트가 바뀐 뒤 다시 재지 않으면 글자가 칸에서 어긋난 채 남는다.
+  // 웹폰트는 늦게 온다. 그 사이 폴백 폰트로 잰 칸 폭이 남아 있으면 글자가 칸에서
+  // 어긋나므로, 폰트가 오면 다시 잰다.
   if (document.fonts?.load) {
-    document.fonts.load(`${term.options.fontSize}px KasaTerm`)
+    document.fonts.load(`${BASE_FONT}px KasaTerm`)
       .then(() => {
-        term.options.fontSize = BASE_FONT;
-        term._core?._charSizeService?.measure();
-        term.clearTextureAtlas?.();
+        baseCell = null;
+        term.view.remeasure();
         requestAnimationFrame(() => { rememberBaseCell(); syncSize(); });
       })
       .catch(() => {});

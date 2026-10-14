@@ -128,15 +128,6 @@ canvas { image-rendering: pixelated; }
   * { animation-duration: 0s !important; transition-duration: 0s !important; }
 }
 
-/* xterm: disable font ligatures (some browsers ligate "ff"/"fi" and break
-   xterm's per-char width measuring). See xtermjs/xterm.js#5156. */
-.xterm,
-.xterm-rows,
-.xterm-width-cache-measure-container {
-  font-variant-ligatures: none !important;
-  font-feature-settings: "liga" 0, "clig" 0, "calt" 0 !important;
-}
-
 /* 걷는 느낌 — 픽셀 스프라이트 수직 통통(워크프레임 없이 이동감, 시트 없을 때 폴백). */
 @keyframes schale-bob {
   0%, 100% { transform: translateY(0); }
