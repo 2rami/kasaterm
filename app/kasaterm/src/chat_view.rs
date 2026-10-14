@@ -1,21 +1,20 @@
-//! 학생 pane 을 대화로 보기 — 폰의 「터미널 | 대화」 전환(`mobile/lib/screens/terminal.dart`)의
-//! PC판. 격자 대신 그 pane 의 기록(jsonl)을 말풍선으로 펴고, 아래 입력칸에서 한 번에 보낸다.
-//! PTY 는 그대로 살아 있다 — 보기만 바꾸므로 ⋮ 에서 언제든 터미널로 돌아간다.
+//! 학생 칸을 대화로 보기(PC) — 터미널 칸과 같은 격자·같은 글꼴로, 대화는 그 칸의 기록(jsonl·rollout)을
+//! claude classic 화면 꼴(`classic.rs`)로 칸 폭에 다시 늘어놓고, 입력칸·상태줄·스피너·선택지 창은 진짜
+//! 화면 바닥을 그대로 옮겨 붙인다. 그래서 치는 것·한글 조합·`/` 명령·승인 답은 터미널과 똑같이 학생
+//! TUI 로 가고, 이 보기가 바꾸는 것은 위쪽 대화 줄뿐이다.
 //!
-//! 데이터는 화면이 아니라 기록에서 온다. 화면 글로 말풍선을 만들면 하네스 UI 가 바뀔
-//! 때마다 깨지고, 스크롤로 밀려난 말은 되살릴 수 없다. 화면에서 읽는 것은 지금 떠 있는
-//! 선택지(승인·질문)뿐이다 — 그건 기록에 답이 오기 전엔 화면에만 있다.
+//! 기록에서 그리는 까닭: 풀스크린 claude 는 지난 대화를 앱 안에만 두고 `--resume` 뒤엔 압축 경계 앞을
+//! 아예 안 보이며, 거울은 원본 칸 크기를 못 바꾼다. 기록은 처음부터 다 있고 어느 폭으로든 다시 접힌다.
+//! 바닥 영역을 못 찾는 화면(`/config` 같은 판)이나 화면 대부분을 차지하는 창은 그동안 진짜 터미널을 보인다.
 
 use super::*;
 
+pub(crate) mod classic;
+mod codex;
 pub(crate) mod history;
-pub(crate) mod live;
-mod paint;
-pub(crate) mod status;
 pub(crate) mod parse;
 
-pub(crate) use paint::{Hit, Slot};
-
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Mutex;
 
@@ -23,95 +22,103 @@ type Rect = (f32, f32, f32, f32);
 
 /// 기록을 읽는 간격. 폰과 같다 — 더 잦으면 긴 턴에서 다시 펴는 값만 늘어난다.
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(1000);
-/// 화면에서 선택지를 다시 읽는 간격.
-const MENU_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
-/// 고른 직후엔 화면이 아직 옛 메뉴를 그리고 있다 — 두 번 누르지 않게 잠깐 접는다.
-const MENU_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+/// 이보다 크게 화면을 덮는 창(편집 승인의 긴 diff 같은)은 진짜 터미널로 본다.
+const REGION_MAX: f32 = 0.6;
+/// 빈 입력칸에서 Esc 를 이 안에 두 번 치면 claude 는 되감기(Rewind) 창을 연다 — 둘째 것은 삼킨다.
+const ESC_TWICE: std::time::Duration = std::time::Duration::from_millis(800);
 
 /// 격리 검증용 자동 조작 한 걸음(`KASATERM_AUTOCHAT`).
 enum AutoStep {
-    Toggle,
+    /// 그 칸(없으면 초점 칸)의 대화 보기를 켜고 끈다.
+    Toggle(Option<String>),
     /// 셸 칸의 명령으로 보기 전환(`shell_view.rs`).
     Blocks,
-    Draft(String),
-    Send,
-    Pick(usize),
-    /// 화면 선택지 없이 선 승인 카드의 허락·거절.
-    Decide(bool),
     OpenAll,
-    Scroll(f32),
+    /// 맨 아래에서 이만큼 줄 위로.
+    Scroll(usize),
     /// 그 칸만 확대(⌘⇧+ 와 같은 길) — 배율을 이만큼 더한다.
     Zoom(f32),
     /// ⋮ 메뉴의 대화 보기 칸 위에 커서를 둔다(툴팁 확인).
     HoverMenu,
+    /// Info 「내 프롬프트」 n 번째로 옮긴다.
+    Jump(usize),
 }
 
 #[derive(Default)]
 pub(crate) struct ChatViews {
     /// 대화로 보는 pane(바깥 pane id). 없으면 터미널이다. pane 마다 따로 기억한다.
     panes: HashMap<String, ChatPane>,
-    /// 이번 프레임에 실제로 대화로 그린 pane 의 본문 자리. 입력·휠·클릭은 이것만 본다 —
-    /// 대화 모드여도 학생이 나가 셸만 남았으면 터미널을 그리고, 그때 키는 셸로 가야 한다.
-    drawn: HashMap<String, Rect>,
-    hits: Vec<(String, Hit, Rect)>,
-    /// `KASATERM_AUTOCHAT="6000:toggle;9000:draft=글;9500:send"` — 시각(앱 시작 기준 ms)과 걸음.
-    /// 키 입력을 흉내 낼 길이 없어 입력칸·선택지·펼치기를 직접 건드린다.
+    /// 이번 프레임에 실제로 대화로 그린 pane. 휠·누름·선택 복사는 이것만 본다 — 판이 떠 진짜 터미널을
+    /// 보인 프레임이면 비어 있어 손이 그대로 터미널로 간다.
+    drawn: RefCell<HashMap<String, Drawn>>,
+    /// `KASATERM_AUTOCHAT="6000:toggle;9000:scroll=40"` — 시각(앱 시작 기준 ms)과 걸음.
     auto: Option<Vec<(Instant, AutoStep)>>,
+}
+
+/// 한 프레임에 그린 대화 칸의 자리.
+pub(crate) struct Drawn {
+    /// 본문(격자) 자리 — 논리 px.
+    rect: Rect,
+    cell: (f32, f32),
+    /// 위에서부터 이만큼 줄이 대화, 그 아래가 진짜 화면에서 옮긴 바닥이다.
+    hist_rows: usize,
+    /// 보이는 대화 줄마다 누르면 펼치는 묶음 열쇠.
+    toggles: Vec<Option<usize>>,
+    /// 그린 격자 — 끌어 선택한 글을 복사할 때 읽는다.
+    rows: Vec<Vec<GridCell>>,
+}
+
+/// 렌더가 터미널 합성기에 넘길 이번 프레임의 화면.
+pub(crate) struct ChatFrame {
+    pub(crate) term: TerminalPane,
+    /// (보이는 줄, 얼굴) — 학생 얼굴을 얹을 자리.
+    pub(crate) faces: Vec<(usize, classic::Face)>,
+    pub(crate) face_slug: Option<&'static str>,
+    hist_rows: usize,
+    toggles: Vec<Option<usize>>,
 }
 
 pub(crate) struct ChatPane {
     feed: Arc<Mutex<Feed>>,
-    draft: String,
-    cursor: usize,
-    /// 맨 아래에서 위로 올라간 거리(px). 0 이면 새 말이 오면 따라 내려간다.
-    scroll: f32,
-    scroll_max: f32,
     open: HashSet<usize>,
-    layout: paint::Layout,
-    menu: Option<parse::PromptMenu>,
-    menu_read: Option<Instant>,
-    menu_hold: Option<Instant>,
+    /// 맨 아래에서 위로 올라간 줄 수. 0 이면 새 줄이 오면 따라 내려간다.
+    back: Cell<usize>,
+    /// 지난 프레임의 총 줄 수 — 올라가 있는 동안 기록이 늘면 보던 자리를 지킨다.
+    total: Cell<usize>,
+    cache: RefCell<classic::Cache>,
+    /// 다음 프레임에 이 칸이 맨 위에 서게 옮긴다(Info 「내 프롬프트」).
+    jump: Cell<Option<usize>>,
     polled: Option<Instant>,
-    /// 마지막으로 그린 기록 판 — 다르면 다음 프레임을 다시 그린다.
-    painted: u64,
-    /// 그 칸 mod 의 지금(일 상태·도는 도구·승인 요청).
-    live: Arc<Mutex<live::ModLive>>,
+    painted: Cell<u64>,
     live_tab: Option<String>,
-    live_read: Option<Instant>,
-    /// 마지막으로 그린 mod 판.
-    live_painted: Option<live::ModLive>,
-    /// 거울이면 원본 (주소, 칸). 기록과 mod 사실을 거기서 받는다.
+    /// 거울이면 원본 (주소, 칸). 기록을 거기서 받는다.
     remote: Option<(String, String)>,
-    watching: Option<(String, String)>,
-    /// mod 결정을 못 보낸 요청 — 그 요청은 화면 키로 고른다.
-    refused: Arc<Mutex<HashSet<String>>>,
-    /// 거울 입력이 원본에서 거절된 까닭. 다음 보내기가 지운다.
-    pub(crate) send_error: Arc<Mutex<Option<String>>>,
+    esc_at: Option<Instant>,
+    /// 진짜 화면에서 본 코덱스 사람 말 칸 바탕 — 그 줄이 화면 밖으로 밀려도 같은 색을 쓴다.
+    prompt_bg: RefCell<Option<kasa_bridge::screen::Color>>,
+    /// 진짜 화면에서 본 배너 줄 — 첫 말 전 새 세션엔 기록이 없고, 말이 쌓이면 화면 밖으로 밀린다.
+    banner: RefCell<Option<Vec<Vec<GridCell>>>>,
+    /// 트랙패드 휠의 한 줄이 안 된 나머지 px.
+    wheel_px: f32,
 }
 
 impl ChatPane {
     fn new() -> Self {
         Self {
             feed: Arc::new(Mutex::new(Feed::default())),
-            draft: String::new(),
-            cursor: 0,
-            scroll: 0.0,
-            scroll_max: 0.0,
             open: HashSet::new(),
-            layout: paint::Layout::default(),
-            menu: None,
-            menu_read: None,
-            menu_hold: None,
+            back: Cell::new(0),
+            total: Cell::new(0),
+            cache: RefCell::new(classic::Cache::default()),
+            jump: Cell::new(None),
             polled: None,
-            painted: 0,
-            live: Arc::new(Mutex::new(live::ModLive::default())),
+            painted: Cell::new(0),
             live_tab: None,
-            live_read: None,
-            live_painted: None,
             remote: None,
-            watching: None,
-            refused: Arc::default(),
-            send_error: Arc::default(),
+            esc_at: None,
+            prompt_bg: RefCell::new(None),
+            banner: RefCell::new(None),
+            wheel_px: 0.0,
         }
     }
 
@@ -120,44 +127,22 @@ impl ChatPane {
             return;
         }
         // 진행 중인 이전 읽기가 끝나도 새 탭의 통에는 쓸 수 없어야 한다.
-        self.live = Arc::default();
         self.feed = Arc::default();
-        self.refused = Arc::default();
-        self.send_error = Arc::default();
+        self.cache = RefCell::default();
+        self.banner = RefCell::default();
         self.live_tab = Some(tab.to_string());
         self.remote = remote.cloned();
-        self.watching = None;
-        self.live_read = None;
-        self.live_painted = None;
         self.polled = None;
-        self.painted = 0;
-        self.menu = None;
-        self.menu_read = None;
-        self.menu_hold = None;
-        self.layout = paint::Layout::default();
+        self.painted.set(0);
         self.open.clear();
-        self.scroll = 0.0;
-        self.scroll_max = 0.0;
+        self.back.set(0);
+        self.total.set(0);
+        self.jump.set(None);
     }
 
-    fn prepare_input(&mut self, tab: &str, remote: Option<&(String, String)>) -> bool {
-        if self.live_tab.as_deref() == Some(tab) && self.remote.as_ref() == remote {
-            return true;
-        }
-        self.use_source(tab, remote);
-        if let Ok(mut error) = self.send_error.lock() {
-            *error = Some("탭이 바뀌었어요. 내용을 확인한 뒤 다시 보내 주세요".into());
-        }
-        false
-    }
-
-    /// 그릴·고를 때 보는 mod 의 지금. 결정을 못 보낸 요청은 뺀다.
-    pub(crate) fn mod_live(&self) -> live::ModLive {
-        let mut l = self.live.lock().map(|l| l.clone()).unwrap_or_default();
-        if let Ok(refused) = self.refused.lock() {
-            l.permissions.retain(|p| !refused.contains(&p.id));
-        }
-        l
+    fn scroll_by(&mut self, lines: isize) {
+        let next = (self.back.get() as isize + lines).max(0) as usize;
+        self.back.set(next);
     }
 }
 
@@ -170,8 +155,6 @@ pub(crate) struct Feed {
     pub(crate) conv: parse::Conversation,
     /// 바뀔 때마다 오른다 — 화면이 이것만 보고 다시 편다.
     pub(crate) version: u64,
-    /// 대화를 처음부터 다시 받은 횟수. 오르면 펼친 칸 기억을 버린다(번호가 새로 매겨진다).
-    pub(crate) generation: u64,
     pub(crate) loaded: bool,
     /// 이 pane 에 묶인 기록이 아직 없다.
     pub(crate) missing: bool,
@@ -247,7 +230,6 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
                 if !same || chunk.reset {
                     f.conv = parse::Conversation::default();
                     f.path = Some(path);
-                    f.generation += 1;
                     changed = true;
                 }
                 f.source = chunk.source.clone();
@@ -256,10 +238,9 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
                     if f.conv.apply(&chunk.raw) {
                         f.offset = chunk.offset;
                     } else {
-                        // 세션이 바뀌었다 — 다음 바퀴가 새 파일의 꼬리부터 다시 받는다.
+                        // 세션이 바뀌었다 — 다음 바퀴가 새 파일을 처음부터 다시 받는다.
                         f.conv = parse::Conversation::default();
                         f.offset = 0;
-                        f.generation += 1;
                     }
                 } else {
                     f.offset = chunk.offset;
@@ -283,34 +264,122 @@ fn poll_feed(feed: Arc<Mutex<Feed>>, source: Option<Source>, proxy: EventLoopPro
     });
 }
 
-/// 입력칸 글을 PTY 로 보낼 바이트. 여러 줄이면 붙여넣기로 감싸야 줄바꿈이 제출로 안 읽힌다.
-/// 맨 끝의 CR 은 소켓 전달(`SocketBytes`)이 따로 늦춰 보내 Ink 가 Enter 로 읽는다.
-fn submit_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let body = if text.contains('\n') && bracketed {
-        format!("\x1b[200~{text}\x1b[201~")
-    } else {
-        text.replace("\r\n", "\r").replace('\n', "\r")
+// ── 진짜 화면의 바닥 ─────────────────────────────────────────────────────────
+
+fn row_text(row: &[GridCell]) -> String {
+    row.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect()
+}
+
+fn full_rule(row: &[GridCell]) -> bool {
+    let t = row_text(row);
+    let t = t.trim();
+    t.chars().count() >= 8 && t.chars().all(|c| matches!(c, '─' | '━'))
+}
+
+/// 진짜 화면에서 바닥에 붙여 옮길 줄의 시작 — 스피너·입력칸·상태줄, 입력칸 대신 선 선택지 창(승인·
+/// 질문). 둘 다 못 찾으면 None: 대화 보기가 못 그리는 판이니 진짜 터미널을 보인다.
+pub(crate) fn bottom_region(rows: &[Vec<GridCell>]) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    let top = match crate::screenread::prompt_box(rows) {
+        Some(crate::screenread::PromptBox::Bordered { top, .. }) => top,
+        Some(crate::screenread::PromptBox::Filled { rows }) => rows.start,
+        None => {
+            let lines: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
+            parse::parse_prompt_menu(&lines)?;
+            // 지금 고른 선택지 위로 가장 가까운 칸막이 가로줄이 창 머리다.
+            let current = lines.iter().rposition(|l| {
+                let t = l.trim_start().trim_start_matches(['│', '|']).trim_start();
+                t.starts_with(['❯', '›']) && t[t.chars().next().map_or(0, char::len_utf8)..].trim_start().starts_with(|c: char| c.is_ascii_digit())
+            })?;
+            (current.saturating_sub(40)..current).rev().find(|&r| full_rule(&rows[r]))?
+        }
     };
-    format!("{body}\r").into_bytes()
+    // 일하는 동안의 스피너 줄과 풀스크린의 「◉ effort」 줄은 입력칸 바로 위에 선다.
+    let mut top = top;
+    if let Some((spin, _)) = crate::screenread::find_claude_spinner(rows) {
+        if spin < top && top - spin <= 4 {
+            top = spin;
+        }
+    }
+    if top > 0 && row_text(&rows[top - 1]).trim_end().ends_with("/effort") {
+        top -= 1;
+    }
+    // 코덱스의 「• Working (5s • esc to interrupt)」 줄.
+    if let Some(r) = (top.saturating_sub(4)..top).find(|&r| row_text(&rows[r]).to_ascii_lowercase().contains("esc to interrupt")) {
+        top = r;
+    }
+    Some(top)
+}
+
+/// 바닥 줄 하나를 이 칸 폭으로 — 가로줄은 칸 끝까지 다시 긋고(끝의 세션 이름표는 오른쪽에 그대로),
+/// 오른쪽에 붙은 줄은 오른쪽에 붙인다. 나머지는 왼쪽에서 자르거나 늘인다.
+fn fit_row(row: &[GridCell], cols: usize) -> Vec<GridCell> {
+    let src = row.len();
+    let glyphs: Vec<usize> = (0..src).filter(|&i| !matches!(row[i].ch, ' ' | '\0')).collect();
+    let dashes = glyphs.iter().filter(|&&i| row[i].ch == '─').count();
+    if dashes >= 10 && row.first().is_some_and(|c| c.ch == '─') {
+        let dash = row[0].clone();
+        // 이름표 — 앞 가로줄 다음부터 마지막 `─` 아닌 글자까지.
+        let lead = glyphs.iter().take_while(|&&i| row[i].ch == '─').count();
+        let label: Vec<GridCell> = match (glyphs.get(lead), glyphs.iter().rposition(|&i| row[i].ch != '─')) {
+            (Some(&from), Some(last)) if last >= lead => row[from..=glyphs[last]].to_vec(),
+            _ => Vec::new(),
+        };
+        let tail = if label.is_empty() { 0 } else { label.len() + 3 };
+        let mut out: Vec<GridCell> = std::iter::repeat_n(dash.clone(), cols.saturating_sub(tail)).collect();
+        if !label.is_empty() {
+            out.push(GridCell::blank());
+            out.extend(label);
+            out.push(GridCell::blank());
+            out.push(dash);
+        }
+        out.truncate(cols);
+        out.resize(cols, GridCell::blank());
+        return out;
+    }
+    let lead = row.iter().take_while(|c| matches!(c.ch, ' ' | '\0')).count();
+    let mut out: Vec<GridCell> = if lead * 2 > src && lead < src && cols > src {
+        let mut v = vec![GridCell::blank(); cols - src];
+        v.extend_from_slice(row);
+        v
+    } else {
+        row.to_vec()
+    };
+    out.truncate(cols);
+    out.resize(cols, GridCell::blank());
+    out
+}
+
+/// 진짜 화면에 보이는 하네스 배너 — claude 로고 세 줄, 코덱스 `>_ OpenAI Codex` 와 폴더 두 줄.
+fn screen_banner(rows: &[Vec<GridCell>]) -> Option<Vec<Vec<GridCell>>> {
+    let at = rows.iter().position(|r| {
+        let t = row_text(r);
+        t.contains("▐▛███▛█") || t.contains(">_ OpenAI Codex")
+    })?;
+    let n = if row_text(&rows[at]).contains("▐▛███▛█") { 3 } else { 2 };
+    (at + n <= rows.len()).then(|| rows[at..at + n].to_vec())
+}
+
+/// 진짜 화면에 보이는 코덱스 사람 말 칸의 바탕 — 입력칸 밖에서 `›` 로 시작하고 바탕이 칸 끝까지 같은 줄.
+fn codex_prompt_bg(rows: &[Vec<GridCell>], input: std::ops::Range<usize>) -> Option<kasa_bridge::screen::Color> {
+    rows.iter().enumerate().filter(|(r, _)| !input.contains(r)).find_map(|(_, row)| {
+        let first = row.iter().find(|c| !matches!(c.ch, ' ' | '\0'))?;
+        (first.ch == '›').then(|| crate::screenread::band_bg(row)).flatten()
+    })
+}
+
+/// 아직 그 줄을 못 봤을 때 — 코덱스처럼 바탕에 흰색을 16% 섞는다(어두운 바탕 실측 38,44,52 → 72,77,84).
+fn codex_prompt_guess() -> kasa_bridge::screen::Color {
+    let bg = theme::pane_bg();
+    let light = (bg[0] as u32 + bg[1] as u32 + bg[2] as u32) > 384;
+    let (top, a) = if light { (0.0, 0.06) } else { (255.0, 0.157) };
+    let mix = |c: u8| (c as f32 + (top - c as f32) * a).round() as u8;
+    kasa_bridge::screen::Color::Rgb(mix(bg[0]), mix(bg[1]), mix(bg[2]))
 }
 
 impl App {
-    fn chat_view_input_target(&mut self, id: &str) -> Option<String> {
-        let tab = {
-            let ws = self.ws.lock().ok()?;
-            if !self.pane_can_chat(&ws, id) { return None; }
-            ws.active_tab_pid(id)
-        };
-        let remote = kasa_mcp::remote::remote_meta(&tab);
-        let pane = self.chat_view.panes.get_mut(id)?;
-        if !pane.prepare_input(&tab, remote.as_ref()) {
-            self.chrome_dirty = true;
-            if let Some(window) = &self.window { window.request_redraw(); }
-            return None;
-        }
-        Some(tab)
-    }
-
     /// 대화로 볼 수 있는 pane — 지금 학생(claude·codex)이 돌고 있는 터미널 탭. 셸은 숨긴다
     /// (폰의 `_canChat` 과 같은 규칙). 거울은 원본 기기의 판정을 따른다.
     pub(crate) fn pane_can_chat(&self, ws: &Workspace, id: &str) -> bool {
@@ -332,32 +401,27 @@ impl App {
         self.chat_view.panes.contains_key(id)
     }
 
-    /// 이번 프레임에 대화로 그려진 pane 인가 — 입력을 가로챌지의 판정.
+    /// 이번 프레임에 대화로 그려진 pane 인가 — 휠·선택을 가로챌지의 판정.
     pub(crate) fn chat_view_showing(&self, id: &str) -> bool {
-        self.chat_view.drawn.contains_key(id)
+        self.chat_view.drawn.borrow().contains_key(id)
     }
 
     pub(crate) fn toggle_chat_view(&mut self, id: &str) {
         if self.chat_view.panes.remove(id).is_some() {
-            self.chat_view.drawn.remove(id);
-            if matches!(&self.ime_focus, Some(crate::ImeFocus::Chat(p)) if p == id) {
-                self.handoff_ime_to_active_surface();
-            }
+            self.chat_view.drawn.borrow_mut().remove(id);
         } else {
             self.chat_view.panes.insert(id.to_string(), ChatPane::new());
-            self.selection = None;
-            self.drag_anchor = None;
-            self.mouse_forward_pane = None;
             self.focus_pane(id);
-            self.ime_retarget(crate::ImeFocus::Chat(id.to_string()));
         }
+        self.selection = None;
+        self.drag_anchor = None;
         self.chrome_dirty = true;
     }
 
-    /// 닫힌 pane 의 대화 상태를 버리고, 대화 pane 마다 기록과 화면 선택지를 읽는다.
-    /// 그릴 것이 바뀌었으면 이번 프레임을 다시 그리게 한다.
+    /// 닫힌 pane 의 대화 상태를 버리고, 대화 pane 마다 기록을 읽는다. 바뀌었으면 다시 그린다.
     pub(crate) fn pump_chat_views(&mut self) {
         if self.chat_view.panes.is_empty() {
+            self.chat_view.drawn.borrow_mut().clear();
             return;
         }
         let ids: Vec<String> = self.chat_view.panes.keys().cloned().collect();
@@ -369,434 +433,263 @@ impl App {
             };
             if !alive {
                 self.chat_view.panes.remove(&id);
-                self.chat_view.drawn.remove(&id);
+                self.chat_view.drawn.borrow_mut().remove(&id);
                 continue;
             }
-            let showing = self.chat_view.drawn.contains_key(&id);
             let remote = kasa_mcp::remote::remote_meta(&tab);
-            let path = self
-                .collab
-                .hub
-                .bound
-                .lock()
-                .ok()
-                .and_then(|b| b.get(&tab).cloned());
-            // 격리 검증 — 로그인 안 된 리그에서도 도구·코드·표가 섞인 대화를 그려 본다.
-            #[cfg(debug_assertions)]
-            let path = std::env::var_os("KASATERM_CHAT_FIXTURE").map(std::path::PathBuf::from).or(path);
+            let path = self.collab.hub.bound.lock().ok().and_then(|b| b.get(&tab).cloned());
+            // 격리 검증 — `%1:<jsonl>` 이면 그 칸(가짜 claude)에서만, 기록이 안 묶였을 때 긴 대화 사본을 읽기만 하며 편다.
+            let path = path.or_else(|| {
+                let spec = std::env::var("KASATERM_CHAT_FIXTURE").ok()?;
+                match spec.split_once(':').filter(|(pane, _)| pane.starts_with('%')) {
+                    Some((pane, file)) => (pane == id).then(|| std::path::PathBuf::from(file)),
+                    None => Some(std::path::PathBuf::from(spec)),
+                }
+            });
             let source = match &remote {
                 Some((base, rid)) => Some(Source::Remote(base.clone(), rid.clone())),
                 None => path.map(Source::File),
             };
-            if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                pane.use_source(&tab, remote.as_ref());
-            }
-            let menu_lines = {
-                let pane = &self.chat_view.panes[&id];
-                showing
-                    && pane.menu_read.is_none_or(|t| now.duration_since(t) >= MENU_EVERY)
-            }
-            .then(|| self.pty_for_pane(&id).map(|p| p.visible_text(60)))
-            .flatten();
             let proxy = self.proxy.clone();
             let Some(pane) = self.chat_view.panes.get_mut(&id) else { continue };
+            pane.use_source(&tab, remote.as_ref());
             if pane.polled.is_none_or(|t| now.duration_since(t) >= POLL_EVERY) {
                 pane.polled = Some(now);
-                poll_feed(Arc::clone(&pane.feed), source, proxy.clone());
+                poll_feed(Arc::clone(&pane.feed), source, proxy);
             }
-            match &remote {
-                Some(r) if pane.watching.as_ref() != Some(r) => {
-                    pane.watching = Some(r.clone());
-                    live::watch_remote(Arc::downgrade(&pane.live), r.0.clone(), r.1.clone(), proxy);
-                }
-                Some(_) => {}
-                None if pane.live_read.is_none_or(|t| now.duration_since(t) >= MENU_EVERY) => {
-                    pane.live_read = Some(now);
-                    let next = live::ModLive::from_json(&kasa_mcp::claude_mod::mirror_view(&tab));
-                    if let Ok(mut l) = pane.live.lock() {
-                        *l = next;
-                    }
-                }
-                None => {}
-            }
-            if pane.live.try_lock().is_ok_and(|l| pane.live_painted.as_ref() != Some(&*l)) {
-                self.chrome_dirty = true;
-            }
-            if let Some(text) = menu_lines {
-                pane.menu_read = Some(now);
-                let held = pane.menu_hold.is_some_and(|t| now < t);
-                let lines: Vec<String> = text.lines().map(str::to_string).collect();
-                let menu = if held { None } else { parse::parse_prompt_menu(&lines) };
-                if menu != pane.menu {
-                    pane.menu = menu;
-                    self.chrome_dirty = true;
-                }
-            }
-            let version = pane.feed.try_lock().map(|f| f.version).unwrap_or(pane.painted);
-            if version != pane.painted {
+            let version = pane.feed.try_lock().map(|f| f.version).unwrap_or(pane.painted.get());
+            if version != pane.painted.get() {
                 self.chrome_dirty = true;
             }
         }
     }
 
-    /// 렌더 루프가 모은 대화 칸을 그린다. 터미널 셀은 이 pane 에서 안 그렸다.
-    pub(crate) fn paint_chat_views(g: &mut gpu::GpuRenderer, views: &mut ChatViews, slots: &[Slot], cursor: (f32, f32)) {
-        views.drawn.clear();
-        views.hits.clear();
-        for slot in slots {
-            let Some(pane) = views.panes.get_mut(&slot.pane) else { continue };
-            // 탭 전환 이벤트의 즉시 그리기는 다음 펌프보다 먼저 올 수 있다.
-            pane.use_source(&slot.tab, slot.remote.as_ref());
-            views.drawn.insert(slot.pane.clone(), slot.rect);
-            let feed = Arc::clone(&pane.feed);
-            let z = slot.zoom;
-            g.begin_zoom(z);
-            let hits = match feed.try_lock() {
-                Ok(f) => {
-                    pane.painted = f.version;
-                    paint::paint(g, cursor, slot, pane, Some(&f))
-                }
-                Err(_) => paint::paint(g, cursor, slot, pane, None),
-            };
-            g.end_zoom(z);
-            views.hits.extend(hits.into_iter().map(|(h, r)| (slot.pane.clone(), h, (r.0 * z, r.1 * z, r.2 * z, r.3 * z))));
+    /// 대화로 보는 칸의 이번 프레임 화면 — 위는 기록에서 편 대화, 아래는 진짜 화면의 바닥. 판이 떠
+    /// 바닥을 못 찾으면 None(진짜 터미널을 그린다).
+    pub(crate) fn chat_frame(&self, ws: &Workspace, pane: &PaneState, id: &str, cols: usize, rows: usize) -> Option<ChatFrame> {
+        let chat = self.chat_view.panes.get(id)?;
+        if !self.pane_can_chat(ws, id) || cols < 8 || rows < 4 {
+            return None;
         }
+        let src = pane.term()?;
+        let top = bottom_region(&src.cells)?;
+        let region = src.cells.len().saturating_sub(top);
+        if region == 0 || region as f32 > rows as f32 * REGION_MAX {
+            return None;
+        }
+        let hist_rows = rows.saturating_sub(region).max(1);
+        let tab = ws.active_tab_pid(id);
+        let name = ws.pane_character.get(&tab).cloned();
+        let face_slug = name.as_deref().and_then(crate::screenread::student_face_slug);
+        if let Some(rows) = screen_banner(&src.cells[..top]) {
+            *chat.banner.borrow_mut() = Some(rows);
+        }
+        let look = classic::Look {
+            face: face_slug.is_some(),
+            student: name.as_deref().and_then(theme::character_accent_any),
+            banner: chat.banner.borrow().clone(),
+        };
+        let mut cache = chat.cache.borrow_mut();
+        if let Ok(f) = chat.feed.try_lock() {
+            cache.build(&f.conv, f.version, cols, &chat.open, &look);
+            chat.painted.set(f.version);
+        }
+        let total = cache.lines.len();
+        let max_back = total.saturating_sub(hist_rows);
+        let mut back = chat.back.get();
+        if back > 0 && total > chat.total.get() {
+            back += total - chat.total.get();
+        }
+        if let Some(line) = chat.jump.take().and_then(|item| cache.line_of(item)) {
+            back = total.saturating_sub(line + hist_rows);
+        }
+        let back = back.min(max_back);
+        chat.back.set(back);
+        chat.total.set(total);
+        let first = total.saturating_sub(hist_rows + back);
+        let shown = &cache.lines[first..(first + hist_rows).min(total)];
+        let mut cells: Vec<Vec<GridCell>> = Vec::with_capacity(rows);
+        let mut toggles = Vec::with_capacity(hist_rows);
+        let mut faces = Vec::new();
+        for (i, l) in shown.iter().enumerate() {
+            let mut row = l.cells.clone();
+            row.resize(cols, GridCell::blank());
+            cells.push(row);
+            toggles.push(l.toggle);
+            if let Some(face) = l.face.filter(|f| i + f.rows as usize <= hist_rows) {
+                faces.push((i, face));
+            }
+        }
+        while cells.len() < hist_rows {
+            cells.push(vec![GridCell::blank(); cols]);
+            toggles.push(None);
+        }
+        // 코덱스 사람 말 칸 바탕은 코덱스가 터미널 바탕에서 섞어 낸 값이다 — 진짜 화면에서 읽어 둔 것을 쓴다.
+        if let Some(crate::screenread::PromptBox::Filled { rows: input }) = crate::screenread::prompt_box(&src.cells) {
+            if let Some(seen) = codex_prompt_bg(&src.cells, input) {
+                *chat.prompt_bg.borrow_mut() = Some(seen);
+            }
+            let fill = chat.prompt_bg.borrow().clone().unwrap_or_else(codex_prompt_guess);
+            let mark = codex::PROMPT_FILL.color();
+            for c in cells.iter_mut().flatten().filter(|c| c.bg == mark) {
+                c.bg = fill.clone();
+            }
+        }
+        for r in top..src.cells.len() {
+            cells.push(fit_row(&src.cells[r], cols));
+        }
+        cells.truncate(rows);
+        let cursor_row = src.cursor_row as usize;
+        let cursor = (cursor_row >= top).then(|| ((hist_rows + cursor_row - top) as u16, (src.cursor_col as usize).min(cols - 1) as u16));
+        let term = TerminalPane {
+            rows: rows as u16,
+            cols: cols as u16,
+            cells,
+            cursor_row: cursor.map_or(0, |c| c.0),
+            cursor_col: cursor.map_or(0, |c| c.1),
+            cursor_visible: src.cursor_visible && cursor.is_some(),
+            alt_screen: src.alt_screen,
+            app_cursor: src.app_cursor,
+            bracketed_paste: src.bracketed_paste,
+            laid_out: true,
+            ..Default::default()
+        };
+        Some(ChatFrame { term, faces, face_slug, hist_rows, toggles })
     }
 
-    pub(crate) fn chat_view_pane_at(&self, x: f32, y: f32) -> Option<String> {
-        self.chat_view
-            .drawn
-            .iter()
-            .find(|(_, r)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3)
-            .map(|(id, _)| id.clone())
+    /// 렌더가 그린 대화 칸을 적는다 — 다음 입력이 이 자리를 본다.
+    pub(crate) fn note_chat_frame(&self, id: &str, frame: &ChatFrame, rect: Rect, cell: (f32, f32)) {
+        self.chat_view.drawn.borrow_mut().insert(
+            id.to_string(),
+            Drawn { rect, cell, hist_rows: frame.hist_rows, toggles: frame.toggles.clone(), rows: frame.term.cells.clone() },
+        );
     }
 
-    /// 대화 칸 안의 누름. 칸 안이면 전부 삼킨다 — 밑의 격자로 선택·마우스 보고가 새면 안 된다.
+    /// 이번 프레임 그리기 전에 지난 자리를 비운다 — 판이 떠 터미널로 간 칸이 남지 않게.
+    pub(crate) fn clear_chat_frames(&self) {
+        self.chat_view.drawn.borrow_mut().clear();
+    }
+
+    /// 대화 칸이 그린 격자 — 끌어 선택한 글을 복사할 때 터미널 격자 대신 읽는다.
+    pub(crate) fn chat_view_rows(&self, id: &str) -> Option<Vec<Vec<GridCell>>> {
+        self.chat_view.drawn.borrow().get(id).map(|d| d.rows.clone())
+    }
+
+    fn chat_view_at(&self, x: f32, y: f32) -> Option<(String, Option<usize>)> {
+        let drawn = self.chat_view.drawn.borrow();
+        drawn.iter().find_map(|(id, d)| {
+            let (rx, ry, rw, rh) = d.rect;
+            if x < rx || x >= rx + rw || y < ry || y >= ry + rh || d.cell.1 <= 0.0 {
+                return None;
+            }
+            let row = ((y - ry) / d.cell.1) as usize;
+            Some((id.clone(), (row < d.hist_rows).then_some(row)))
+        })
+    }
+
+    /// 대화 줄의 누름 — 접힌 묶음 줄이면 펼치고 접는다. 그 밖(선택 끌기·바닥 영역)은 터미널 손에 맡긴다.
     pub(crate) fn chat_view_press(&mut self, x: f32, y: f32) -> bool {
-        let Some(id) = self.chat_view_pane_at(x, y) else { return false };
+        let Some((id, Some(row))) = self.chat_view_at(x, y) else { return false };
+        let key = self.chat_view.drawn.borrow().get(&id).and_then(|d| d.toggles.get(row).copied().flatten());
+        let Some(key) = key else { return false };
         self.focus_pane(&id);
         self.selection = None;
         self.drag_anchor = None;
-        self.mouse_forward_pane = None;
-        self.ime_retarget(crate::ImeFocus::Chat(id.clone()));
-        let hit = self
-            .chat_view
-            .hits
-            .iter()
-            .find(|(p, _, r)| *p == id && x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3)
-            .map(|(_, h, _)| h.clone());
-        match hit {
-            Some(Hit::Fold(key)) | Some(Hit::Tool(key)) => {
-                if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                    if !pane.open.remove(&key) {
-                        pane.open.insert(key);
-                    }
-                    pane.layout.invalidate();
-                }
-            }
-            Some(Hit::Copy(item)) => {
-                let text = self.chat_view.panes.get(&id).and_then(|pane| {
-                    let f = pane.feed.lock().ok()?;
-                    match f.conv.items.get(item)? {
-                        parse::Item::Bubble { text, .. } => Some(text.clone()),
-                        _ => None,
-                    }
-                });
-                if let Some(text) = text {
-                    self.copy_to_clipboard(text, "복사했어요");
-                }
-            }
-            Some(Hit::Send) => self.chat_view_submit(&id),
-            Some(Hit::Stop) => self.chat_send_raw(&id, b"\x1b"),
-            Some(Hit::Terminal) => self.toggle_chat_view(&id),
-            Some(Hit::Bottom) => {
-                if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                    pane.scroll = 0.0;
-                }
-            }
-            Some(Hit::Pick(i)) => self.chat_view_pick(&id, i),
-            Some(Hit::Decide(allow)) => {
-                let live = self.chat_view.panes.get(&id).map(ChatPane::mod_live).unwrap_or_default();
-                if let Some(p) = live.permissions.first() {
-                    self.chat_view_decide(&id, &p.id, &live.session, allow);
-                }
-            }
-            Some(Hit::Dismiss) => {
-                self.chat_send_raw(&id, b"\x1b");
-                if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                    pane.menu = None;
-                    pane.menu_hold = Some(Instant::now() + MENU_HOLD);
-                }
-            }
-            Some(Hit::Composer) => {
-                if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                    pane.cursor = pane.draft.chars().count();
-                }
-            }
-            None => {}
-        }
-        self.chrome_dirty = true;
-        true
-    }
-
-    /// 화면 선택지의 한 칸을 고른다 — 지금 커서 자리에서 그만큼 ↑↓ 옮기고 Enter. 번호
-    /// 단축키는 AskUserQuestion 의 다중 선택에서 뜻이 달라 쓰지 않는다.
-    fn chat_view_pick(&mut self, id: &str, i: usize) {
-        if self.chat_view_input_target(id).is_none() { return; }
-        let Some(menu) = self.chat_view.panes.get(id).and_then(|p| p.menu.clone()) else { return };
-        if i >= menu.options.len() {
-            return;
-        }
-        // 승인 창의 「Yes」·「No」는 요청 id 로 답한다 — 화면 키는 그사이 다른 창이 뜨면 그것을 고른다.
-        let live = self.chat_view.panes.get(id).map(ChatPane::mod_live).unwrap_or_default();
-        if let Some((allow, p)) = live::decision_for(&menu, &live, i) {
-            self.chat_view_decide(id, &p.id, &live.session, allow);
-            return;
-        }
-        let delta = i as i64 - menu.cursor() as i64;
-        let arrow: &[u8] = if delta > 0 { b"\x1b[B" } else { b"\x1b[A" };
-        let mut bytes = arrow.repeat(delta.unsigned_abs() as usize);
-        bytes.push(b'\r');
-        self.chat_send_raw(id, &bytes);
-        if let Some(pane) = self.chat_view.panes.get_mut(id) {
-            pane.menu = None;
-            pane.menu_hold = Some(Instant::now() + MENU_HOLD);
-            pane.scroll = 0.0;
-        }
-    }
-
-    /// 승인 요청에 mod 결정으로 답한다(원격 승인 계약과 같은 요청 id). 거절이면 입력칸 글이 까닭이다.
-    /// 결정은 뒤에서 보낸다 — 거울이면 원본까지 네트워크를 탄다. 못 보내면 그 요청은 화면 키로 고르게 남긴다.
-    fn chat_view_decide(&mut self, id: &str, request: &str, session: &str, allow: bool) {
-        let Some(tab) = self.chat_view_input_target(id) else { return };
-        let proxy = self.proxy.clone();
-        let Some(pane) = self.chat_view.panes.get_mut(id) else { return };
-        let message = if allow {
-            String::new()
-        } else {
-            pane.cursor = 0;
-            std::mem::take(&mut pane.draft).trim().to_string()
-        };
-        pane.menu = None;
-        pane.menu_hold = Some(Instant::now() + MENU_HOLD);
-        pane.scroll = 0.0;
-        let remote = pane.remote.clone();
-        let surface = remote.as_ref().map_or(tab, |r| r.1.clone());
-        let refused = Arc::clone(&pane.refused);
-        let (request, session) = (request.to_string(), session.to_string());
-        std::thread::spawn(move || {
-            if let Err(e) = live::decide(remote.as_ref(), &surface, &session, &request, allow, &message) {
-                eprintln!("[chat-view] 승인 결정을 못 보냈어요 {request}: {e}");
-                if let Ok(mut r) = refused.lock() {
-                    r.insert(request);
-                }
-                let _ = proxy.send_event(UserEvent::Redraw);
-            }
-        });
-        self.chrome_dirty = true;
-    }
-
-    /// 키 그대로(Esc·화살표) — 붙여넣기로 감싸지 않는다. 바깥 pane id 를 지금 탭으로 바꿔 보낸다.
-    fn chat_send_raw(&mut self, id: &str, bytes: &[u8]) {
-        let Some(tab) = self.chat_view_input_target(id) else { return };
-        self.send_bytes_to_surface(Some(&tab), bytes);
-    }
-
-    fn chat_view_submit(&mut self, id: &str) {
-        let Some(tab) = self.chat_view_input_target(id) else { return };
-        if let Some(flushed) = self.hangul.flush() {
-            self.chat_view_insert(id, &flushed);
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        let Some(pane) = self.chat_view.panes.get_mut(id) else { return };
-        let text = pane.draft.trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        if let Ok(mut error) = pane.send_error.lock() { *error = None; }
-        pane.draft.clear();
-        pane.cursor = 0;
-        pane.scroll = 0.0;
-        // 보낸 직후 한 번 더 읽는다 — 내 말이 기다림 없이 말풍선으로 선다.
-        pane.polled = None;
-        // 거울은 원본이 넣는다 — 안전한 tell 로 입력칸이 빌 때 붙여넣고, 일하는 칸이면 진행 중인 턴 안으로 든다
-        // (`/term/chat-send`, docs/mirror-render.md).
-        if let Some((base, rid)) = pane.remote.clone() {
-            let failed = Arc::clone(&pane.send_error);
-            if let Ok(mut f) = failed.lock() {
-                *f = None;
-            }
-            let proxy = self.proxy.clone();
-            std::thread::spawn(move || {
-                let body = serde_json::json!({ "surface": rid, "text": text });
-                let error = match kasa_mcp::remote::remote_post_json(&base, "/term/chat-send", &body) {
-                    Ok(v) if v["ok"] == false => Some(v["error"].as_str().unwrap_or("거절").to_string()),
-                    Ok(_) => None,
-                    Err(e) => Some(e.to_string()),
-                };
-                if let Some(e) = error {
-                    eprintln!("[chat-view] 거울 입력을 못 보냈어요: {e}");
-                    if let Ok(mut f) = failed.lock() {
-                        *f = Some(e);
-                    }
-                    let _ = proxy.send_event(UserEvent::Redraw);
-                }
-            });
-            return;
-        }
-        let bracketed = {
-            let ws = self.ws.lock().unwrap();
-            ws.panes
-                .get(id)
-                .and_then(|p| p.tabs.get(p.active_tab))
-                .and_then(|t| t.term())
-                .is_some_and(|t| t.bracketed_paste)
-        };
-        let _ = self.proxy.send_event(UserEvent::SocketBytes(Some(tab), submit_bytes(&text, bracketed)));
-    }
-
-    pub(crate) fn chat_view_insert(&mut self, id: &str, text: &str) {
-        if let Some(pane) = self.chat_view.panes.get_mut(id) {
-            crate::lineedit::insert(&mut pane.draft, &mut pane.cursor, text);
-            self.chrome_dirty = true;
-        }
-    }
-
-    /// 대화 칸이 붙잡은 pane 의 키. 처리했으면 true — 입력칸에 쓰던 글이 셸로 새면 안 된다.
-    pub(crate) fn chat_view_key(&mut self, event: &KeyEvent) -> bool {
-        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
-        let Some(id) = self.target_pane().filter(|id| self.chat_view_showing(id)) else { return false };
-        if event.state != ElementState::Pressed || crate::input::is_modifier_key(event) {
-            return true;
-        }
-        self.last_input_at = Instant::now();
-        // 앱 단축키(새 탭·분할·방 이동)는 대화 보기에서도 산다 — 붙여넣기만 입력칸이 받는다.
-        if self.modifiers.super_key() || self.modifiers.control_key() {
-            if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV)) {
-                return self.chat_view_paste();
-            }
-            return false;
-        }
-        if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
-            if self.modifiers.shift_key() {
-                if let Some(flushed) = self.hangul.flush() {
-                    self.chat_view_insert(&id, &flushed);
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
-                self.chat_view_insert(&id, "\n");
-            } else {
-                self.chat_view_submit(&id);
-            }
-            return true;
-        }
-        self.ime_retarget(crate::ImeFocus::Chat(id.clone()));
-        #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
-            if let Some(c) = t.chars().next().filter(|_| t.chars().count() == 1) {
-                if (0x3130..=0x318F).contains(&(c as u32)) {
-                    if let Some(done) = self.hangul.feed(c) {
-                        self.chat_view_insert(&id, &done);
-                    }
-                    self.preedit = self.hangul.preedit().unwrap_or_default();
-                    self.in_preedit = !self.preedit.is_empty();
-                    self.chrome_dirty = true;
-                    return true;
-                }
-            }
-        }
-        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
-            self.preedit = self.hangul.preedit().unwrap_or_default();
-            self.in_preedit = !self.preedit.is_empty();
-            self.chrome_dirty = true;
-            return true;
-        }
-        if let Some(flushed) = self.hangul.flush() {
-            self.chat_view_insert(&id, &flushed);
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        let empty = self.chat_view.panes.get(&id).is_none_or(|p| p.draft.is_empty());
-        // 빈 칸의 Esc 는 터미널에서처럼 학생을 멈춘다. 쓰던 글이 있으면 글을 지키고 아무 일도 안 한다.
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if empty {
-                self.chat_send_raw(&id, b"\x1b");
-            }
-            return true;
-        }
         if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-            if matches!(event.logical_key, Key::Named(NamedKey::PageUp | NamedKey::PageDown)) {
-                let step = self.chat_view.drawn.get(&id).map_or(300.0, |r| r.3 * 0.8);
-                let up = matches!(event.logical_key, Key::Named(NamedKey::PageUp));
-                pane.scroll = (pane.scroll + if up { step } else { -step }).clamp(0.0, pane.scroll_max);
-            } else {
-                crate::lineedit::key(&mut pane.draft, &mut pane.cursor, &event.logical_key);
+            if !pane.open.remove(&key) {
+                pane.open.insert(key);
             }
         }
         self.chrome_dirty = true;
         true
     }
 
-    /// 플랫폼 IME(윈도·리눅스)의 조합·확정. 대화 입력칸이 주인일 때만 받는다.
-    pub(crate) fn chat_view_ime(&mut self, ime: &winit::event::Ime) -> bool {
-        use winit::event::Ime;
-        let Some(id) = self.target_pane().filter(|id| self.chat_view_showing(id)) else { return false };
-        match ime {
-            Ime::Preedit(text, _) => {
-                self.ime_focus = Some(crate::ImeFocus::Chat(id));
-                self.in_preedit = !text.is_empty();
-                self.preedit = text.clone();
-            }
-            Ime::Commit(text) => {
-                self.in_preedit = false;
-                self.preedit.clear();
-                self.chat_view_insert(&id, text);
-            }
-            Ime::Enabled | Ime::Disabled => return false,
-        }
-        self.chrome_dirty = true;
-        true
-    }
-
-    /// 붙여넣기 — 대화 칸이면 입력칸으로. 그림은 터미널 보기에서 붙인다.
-    pub(crate) fn chat_view_paste(&mut self) -> bool {
-        let Some(id) = self.target_pane().filter(|id| self.chat_view_showing(id)) else { return false };
-        if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            if let Some(flushed) = self.hangul.flush() {
-                self.chat_view_insert(&id, &flushed);
-            }
-            self.preedit.clear();
-            self.in_preedit = false;
-            self.chat_view_insert(&id, &text.replace("\r\n", "\n"));
-        }
-        true
-    }
-
-    /// 휠 — 커서 밑이 대화 칸이면 대화를 굴린다.
+    /// 휠 — 커서 밑이 대화 칸이면 대화 줄을 굴린다(학생 앱으로 넘기지 않는다).
     pub(crate) fn chat_view_wheel(&mut self, delta: MouseScrollDelta) -> bool {
         let (cx, cy) = self.cursor_px;
-        let Some(id) = self.chat_view_pane_at(cx, cy) else { return false };
-        let dy = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 54.0,
-            MouseScrollDelta::PixelDelta(p) => p.y as f32,
-        };
-        if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-            let next = (pane.scroll + dy).clamp(0.0, pane.scroll_max);
-            if next != pane.scroll {
-                pane.scroll = next;
-                self.chrome_dirty = true;
+        let Some((id, _)) = self.chat_view_at(cx, cy) else { return false };
+        let cell_h = self.chat_view.drawn.borrow().get(&id).map_or(self.cell.h, |d| d.cell.1).max(1.0);
+        let Some(pane) = self.chat_view.panes.get_mut(&id) else { return true };
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
+            MouseScrollDelta::PixelDelta(p) => {
+                pane.wheel_px += p.y as f32;
+                let n = (pane.wheel_px / cell_h).trunc();
+                pane.wheel_px -= n * cell_h;
+                n as isize
             }
+        };
+        if lines != 0 {
+            pane.scroll_by(lines);
+            self.selection = None;
+            self.chrome_dirty = true;
         }
         true
     }
 
-    /// 렌더 루프용 — 대화 입력칸이 조합기 주인이면 그 조합 글.
-    pub(crate) fn chat_view_preedit(&self, id: &str) -> String {
-        match &self.ime_focus {
-            Some(crate::ImeFocus::Chat(p)) if p == id => self.preedit.clone(),
-            _ => String::new(),
+    /// 대화 칸이 그려진 pane 의 키. 거의 다 학생 TUI 로 그대로 보낸다(false) — 이 보기가 먹는 것은
+    /// 대화 줄 넘기기(PgUp·PgDn)와 빈 입력칸의 두 번째 Esc 뿐이다.
+    pub(crate) fn chat_view_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(id) = self.target_pane().filter(|id| self.chat_view_showing(id)) else { return false };
+        if event.state != ElementState::Pressed || crate::input::is_modifier_key(event) {
+            return false;
         }
+        let page = self.chat_view.drawn.borrow().get(&id).map_or(10, |d| d.hist_rows.saturating_sub(2).max(1)) as isize;
+        let quiet = self.chat_input_empty(&id) && !self.pane_activity.get(&id).is_some_and(|a| a.state.is_busy());
+        let Some(pane) = self.chat_view.panes.get_mut(&id) else { return false };
+        match &event.logical_key {
+            Key::Named(NamedKey::PageUp) => pane.scroll_by(page),
+            Key::Named(NamedKey::PageDown) => pane.scroll_by(-page),
+            Key::Named(NamedKey::Escape) => {
+                let now = Instant::now();
+                let twice = pane.esc_at.is_some_and(|t| now.duration_since(t) < ESC_TWICE);
+                pane.esc_at = Some(now);
+                if !(twice && quiet) {
+                    return false;
+                }
+                pane.esc_at = None;
+            }
+            _ => {
+                // 치기 시작하면 터미널처럼 맨 아래로 돌아온다.
+                pane.back.set(0);
+                return false;
+            }
+        }
+        self.selection = None;
+        self.chrome_dirty = true;
+        true
+    }
+
+    /// 진짜 화면의 입력칸이 비었나 — 흐린 글(제안)만 있으면 빈 것이다.
+    fn chat_input_empty(&self, id: &str) -> bool {
+        let Ok(ws) = self.ws.lock() else { return false };
+        let Some(t) = ws.panes.get(id).and_then(|p| p.term()) else { return false };
+        let Some(pb) = crate::screenread::prompt_box(&t.cells) else { return false };
+        pb.rows().all(|r| {
+            t.cells[r]
+                .iter()
+                .skip_while(|c| matches!(c.ch, ' ' | '\0'))
+                .skip(1)
+                .all(|c| matches!(c.ch, ' ' | '\0' | '\u{a0}') || c.dim)
+        })
+    }
+
+    /// Info 「내 프롬프트」의 그 질문을 이 보기 맨 위에 세운다. `text` 는 목록 글, `nth` 는 같은 글 중 몇 번째.
+    pub(crate) fn chat_view_jump(&mut self, id: &str, text: &str, nth: usize) -> bool {
+        let Some(pane) = self.chat_view.panes.get(id) else { return false };
+        let item = pane.feed.lock().ok().and_then(|f| {
+            let own = crate::info_prompts::own_prompt_items(&f.conv.items);
+            own.into_iter().filter(|(_, p)| p.text == text).nth(nth).map(|(i, _)| i)
+        });
+        let Some(item) = item else { return false };
+        pane.jump.set(Some(item));
+        self.selection = None;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
     }
 }
 
@@ -812,16 +705,13 @@ impl App {
                     let at = start + std::time::Duration::from_millis(ms.trim().parse().ok()?);
                     let (name, arg) = step.split_once('=').unwrap_or((step, ""));
                     let step = match name.trim() {
-                        "toggle" => AutoStep::Toggle,
+                        "toggle" => AutoStep::Toggle(Some(arg.trim()).filter(|a| !a.is_empty()).map(str::to_string)),
                         "blocks" => AutoStep::Blocks,
-                        "draft" => AutoStep::Draft(arg.replace("\\n", "\n")),
-                        "send" => AutoStep::Send,
-                        "pick" => AutoStep::Pick(arg.trim().parse().ok()?),
-                        "decide" => AutoStep::Decide(arg.trim() == "allow"),
                         "open" => AutoStep::OpenAll,
                         "scroll" => AutoStep::Scroll(arg.trim().parse().ok()?),
                         "zoom" => AutoStep::Zoom(arg.trim().parse().ok()?),
                         "hovermenu" => AutoStep::HoverMenu,
+                        "jump" => AutoStep::Jump(arg.trim().parse().ok()?),
                         _ => return None,
                     };
                     Some((at, step))
@@ -843,38 +733,32 @@ impl App {
         let Some(id) = self.target_pane().filter(|id| self.chat_view_on(id)).or(chat).or_else(|| self.target_pane()) else { return };
         for step in due {
             match step {
-                AutoStep::Toggle => self.toggle_chat_view(&id),
+                AutoStep::Toggle(pane) => self.toggle_chat_view(pane.as_deref().unwrap_or(&id)),
                 AutoStep::Blocks => self.toggle_shell_view(&id),
-                AutoStep::Draft(text) => {
-                    if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                        pane.draft = text;
-                        pane.cursor = pane.draft.chars().count();
-                    }
-                }
-                AutoStep::Send => self.chat_view_submit(&id),
-                AutoStep::Pick(i) => self.chat_view_pick(&id, i),
-                AutoStep::Decide(allow) => {
-                    let live = self.chat_view.panes.get(&id).map(ChatPane::mod_live).unwrap_or_default();
-                    if let Some(p) = live.permissions.first() {
-                        self.chat_view_decide(&id, &p.id, &live.session, allow);
-                    }
-                }
                 AutoStep::OpenAll => {
                     if let Some(pane) = self.chat_view.panes.get_mut(&id) {
                         let n = pane.feed.lock().map(|f| f.conv.items.len()).unwrap_or(0);
                         pane.open.extend(0..n);
-                        pane.layout.invalidate();
                     }
                 }
-                AutoStep::Scroll(px) => {
-                    if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-                        pane.scroll = px;
+                AutoStep::Scroll(lines) => {
+                    if let Some(pane) = self.chat_view.panes.get(&id) {
+                        pane.back.set(lines);
                     }
                 }
                 AutoStep::Zoom(delta) => self.change_pane_font(delta),
                 AutoStep::HoverMenu => {
                     if let Some((_, r)) = self.handle_menu_hits.iter().find(|(a, _)| *a == ActionKind::ChatView) {
                         self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    }
+                }
+                AutoStep::Jump(n) => {
+                    let target = self.chat_view.panes.get(&id).and_then(|p| {
+                        let f = p.feed.lock().ok()?;
+                        crate::info_prompts::own_prompt_items(&f.conv.items).get(n).map(|(_, p)| p.text.clone())
+                    });
+                    if let Some(text) = target {
+                        self.chat_view_jump(&id, &text, 0);
                     }
                 }
             }
@@ -891,66 +775,76 @@ impl App {
 mod tests {
     use super::*;
 
-    #[test]
-    fn enter_before_the_next_pump_refuses_a_changed_target_without_taking_the_draft() {
-        let a = ("a".to_string(), "%1".to_string());
-        let b = ("b".to_string(), "%2".to_string());
-        for (old_tab, old_remote, tab, remote) in [
-            ("%10", Some(&a), "%11", Some(&b)),
-            ("%10", Some(&a), "%10", Some(&b)),
-            ("%10", Some(&a), "%11", None),
-            ("%10", None, "%11", Some(&b)),
-            ("%10", None, "%11", None),
-        ] {
-            let mut pane = ChatPane::new();
-            pane.use_source(old_tab, old_remote);
-            pane.draft = "보내지 않은 글".into();
-            pane.cursor = 4;
-            assert!(!pane.prepare_input(tab, remote));
-            assert_eq!(pane.draft, "보내지 않은 글");
-            assert_eq!(pane.cursor, 4);
-            assert!(pane.send_error.lock().unwrap().is_some());
-            assert_eq!(pane.remote.as_ref(), remote);
-            assert!(pane.prepare_input(tab, remote));
-        }
+    fn row(text: &str) -> Vec<GridCell> {
+        text.chars()
+            .map(|ch| {
+                let mut c = GridCell::blank();
+                c.ch = ch;
+                c
+            })
+            .collect()
+    }
+
+    fn screen(lines: &[&str], width: usize) -> Vec<Vec<GridCell>> {
+        lines
+            .iter()
+            .map(|l| {
+                let mut r = row(l);
+                r.resize(width, GridCell::blank());
+                r
+            })
+            .collect()
     }
 
     #[test]
-    fn changing_tabs_detaches_old_readers_and_keeps_the_unsent_draft() {
-        let mut pane = ChatPane::new();
-        let a = ("https://fixture-a.invalid".into(), "%1".into());
-        let b = ("https://fixture-b.invalid".into(), "%2".into());
-        pane.use_source("%10", Some(&a));
-        pane.draft = "아직 안 보낸 글".into();
-        let old = pane.live.clone();
-        let old_feed = pane.feed.clone();
-        let old_weak = Arc::downgrade(&old);
-        pane.use_source("%11", Some(&b));
-        *old.lock().unwrap() = live::ModLive { live: true, context_percent: Some(91.0), ..Default::default() };
-        old_feed.lock().unwrap().error = Some("late old response".into());
-        assert_eq!(pane.mod_live(), live::ModLive::default());
-        assert!(pane.feed.lock().unwrap().error.is_none());
-        assert_eq!(pane.draft, "아직 안 보낸 글");
-        drop(old);
-        assert!(old_weak.upgrade().is_none());
-        let same = pane.live.clone();
-        pane.use_source("%11", Some(&b));
-        assert!(Arc::ptr_eq(&same, &pane.live));
-        pane.use_source("%12", None);
-        assert!(!Arc::ptr_eq(&same, &pane.live));
-        assert!(pane.remote.is_none());
-        assert!(pane.watching.is_none());
-        pane.use_source("%10", Some(&a));
-        assert_eq!(pane.mod_live(), live::ModLive::default());
+    fn the_bottom_starts_at_the_spinner_above_the_input_box() {
+        let rule = "─".repeat(40);
+        let s = screen(&["⏺ 답", "", "✻ Cogitating… (3s · esc to interrupt)", "", &rule, "❯ ", &rule, "  상태줄"], 40);
+        assert_eq!(bottom_region(&s), Some(2));
+        let idle = screen(&["⏺ 답", "", "", &rule, "❯ ", &rule, "  상태줄"], 40);
+        assert_eq!(bottom_region(&idle), Some(3));
     }
 
     #[test]
-    fn a_retargeted_remote_with_the_same_local_number_gets_a_new_reader() {
-        let mut pane = ChatPane::new();
-        pane.use_source("%1", Some(&("a".into(), "%2".into())));
-        let old = Arc::downgrade(&pane.live);
-        pane.use_source("%1", Some(&("b".into(), "%2".into())));
-        assert!(old.upgrade().is_none());
+    fn a_question_window_in_place_of_the_input_box_is_the_bottom() {
+        let rule = "─".repeat(40);
+        let s = screen(&["⏺ 답", "", &rule, " ☐ 색", "좋아하는 색?", "❯ 1. 빨강", "  2. 파랑", "Enter to select · Esc to cancel"], 40);
+        assert_eq!(bottom_region(&s), Some(2));
+    }
+
+    #[test]
+    fn a_panel_without_input_or_menu_falls_back_to_the_terminal() {
+        let s = screen(&["   Settings  Status   Config", "   ❯ Auto-compact      true", "   Type to filter · Esc to clear"], 40);
+        assert_eq!(bottom_region(&s), None);
+    }
+
+    #[test]
+    fn rules_are_redrawn_across_the_wider_pane_keeping_the_session_label() {
+        let src = row(&format!("{} 작업 이름 ─", "─".repeat(20)));
+        let out = fit_row(&src, 50);
+        let text: String = out.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect();
+        assert_eq!(out.len(), 50);
+        assert!(text.trim_end().ends_with(" 작업 이름 ─"), "{text}");
+        assert!(text.starts_with(&"─".repeat(30)), "{text}");
+        let right = row(&format!("{}◉ xhigh", " ".repeat(20)));
+        let moved = fit_row(&right, 40);
+        assert_eq!(moved.iter().position(|c| c.ch == '◉'), Some(33));
+    }
+
+    #[test]
+    fn a_fresh_session_shows_the_banner_seen_on_screen() {
+        let rule = "─".repeat(40);
+        let rows = [" ▐▛███▛█   Claude Code v2.1.299", "▝▜██████▀  Opus 5.5 with xhigh effort", " ▝▝   ▝▝   /w"];
+        let s = screen(&[rows[0], rows[1], rows[2], "", "", &rule, "❯ ", &rule], 40);
+        let top = bottom_region(&s).unwrap();
+        let banner = screen_banner(&s[..top]).unwrap();
+        let mut cache = classic::Cache::default();
+        let look = classic::Look { face: false, student: None, banner: Some(banner) };
+        cache.build(&parse::Conversation::default(), 1, 40, &HashSet::new(), &look);
+        let got: Vec<String> = cache.lines.iter().map(|l| row_text(&l.cells).trim_end().to_string()).collect();
+        assert_eq!(got, [rows[0], rows[1], rows[2], ""]);
+        let codex = screen(&["", "  >_ OpenAI Codex (v0.162.1)", "     /w", ""], 40);
+        assert_eq!(screen_banner(&codex).map(|b| b.len()), Some(2));
     }
 
     #[test]
@@ -965,27 +859,5 @@ mod tests {
         let next = crate::socket::read_incremental(&path, first.offset).unwrap();
         assert_eq!(next.raw, "{\"c\":3}\n");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_photo_line_longer_than_the_tail_window_is_kept_whole() {
-        let dir = std::env::temp_dir().join(format!("kasaterm-chat-photo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.jsonl");
-        let photo = format!("{{\"photo\":\"{}\"}}\n", "A".repeat(700 * 1024));
-        std::fs::write(&path, format!("{{\"old\":1}}\n{photo}{{\"after\":2}}\n")).unwrap();
-        let first = crate::socket::read_incremental(&path, 0).unwrap();
-        assert!(first.reset);
-        assert!(first.raw.starts_with("{\"photo\":\""), "{:?}", &first.raw[..40]);
-        assert!(first.raw.ends_with("{\"after\":2}\n"));
-        assert!(!first.raw.contains("old"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn multiline_drafts_are_pasted_so_newlines_do_not_submit() {
-        assert_eq!(submit_bytes("안녕", true), "안녕\r".as_bytes());
-        assert_eq!(submit_bytes("a\nb", true), "\x1b[200~a\nb\x1b[201~\r".as_bytes());
-        assert_eq!(submit_bytes("a\nb", false), "a\rb\r".as_bytes());
     }
 }

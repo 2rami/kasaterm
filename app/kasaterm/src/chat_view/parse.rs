@@ -32,6 +32,18 @@ pub(crate) enum Item {
     Interrupted,
     /// 꺼내진 예약. 지우면 뒤 칸의 번호가 밀려 도구 결과가 엉뚱한 칸에 붙는다.
     Gone,
+    /// 턴 끝 한 줄 — 걸린 ms 와(코덱스면) 끝난 시각(유닉스 초).
+    Duration(u64, Option<u64>),
+    /// 압축 경계.
+    Compacted,
+}
+
+/// 기록에 실린 세션 머리 — classic 화면 맨 위 배너가 쓴다. 처음 본 값을 쥔다.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub(crate) struct Meta {
+    pub(crate) version: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) cwd: Option<String>,
 }
 
 #[derive(Default)]
@@ -42,6 +54,15 @@ pub(crate) struct Conversation {
     session: Option<String>,
     last_codex_say: Option<String>,
     last_codex_prompt: Option<String>,
+    /// 도구 칸 번호 → 그 호출의 입력 원문. classic 꼴은 `Bash(명령)`·`Wrote N lines`·diff 를 이것으로 편다.
+    pub(crate) tool_inputs: HashMap<usize, Value>,
+    /// 도구 칸 번호 → Edit 의 줄 번호 붙은 diff 덩이(`toolUseResult.structuredPatch`).
+    pub(crate) tool_patches: HashMap<usize, Value>,
+    /// 다른 칸·카사텀·나쵸가 넣은 말의 원문(`⟦이름⟧ …`) — classic 은 사람 말과 같은 꼴로 그대로 보인다.
+    pub(crate) relayed_raw: HashMap<usize, String>,
+    pub(crate) meta: Meta,
+    /// 코덱스 rollout 이다 — 그리는 쪽이 코덱스 화면 꼴을 고른다.
+    pub(crate) codex: bool,
 }
 
 impl Conversation {
@@ -61,18 +82,37 @@ impl Conversation {
             }
         }
         for e in &events {
+            self.note_meta(e);
             if let Some(sid) = e["sessionId"].as_str() {
                 if e["isSidechain"] != Value::Bool(true) {
                     self.session = Some(sid.to_string());
                 }
             }
             if e["payload"].is_object() {
+                self.codex = true;
                 self.codex(e);
             } else {
                 self.claude(e);
             }
         }
         true
+    }
+
+    fn note_meta(&mut self, e: &Value) {
+        let m = &mut self.meta;
+        let take = |slot: &mut Option<String>, v: &Value| {
+            if slot.is_none() {
+                *slot = v.as_str().filter(|s| !s.is_empty()).map(str::to_string);
+            }
+        };
+        take(&mut m.version, &e["version"]);
+        take(&mut m.cwd, &e["cwd"]);
+        take(&mut m.model, &e["message"]["model"]);
+        if e["payload"].is_object() {
+            take(&mut m.version, &e["payload"]["cli_version"]);
+            take(&mut m.cwd, &e["payload"]["cwd"]);
+            take(&mut m.model, &e["payload"]["model"]);
+        }
     }
 
     fn push(&mut self, item: Item) -> usize {
@@ -89,8 +129,20 @@ impl Conversation {
         let kind = ev["type"].as_str().unwrap_or("");
         match kind {
             "system" => {
-                if let Some(text) = system_text(ev) {
-                    self.push(Item::System(text));
+                match ev["subtype"].as_str() {
+                    Some("turn_duration") => {
+                        if let Some(ms) = ev["durationMs"].as_f64() {
+                            self.push(Item::Duration(ms.max(0.0) as u64, None));
+                        }
+                    }
+                    Some("compact_boundary") => {
+                        self.push(Item::Compacted);
+                    }
+                    _ => {
+                        if let Some(text) = system_text(ev) {
+                            self.push(Item::System(text));
+                        }
+                    }
                 }
                 return;
             }
@@ -102,7 +154,11 @@ impl Conversation {
                 let att = &ev["attachment"];
                 if att["type"] == "hook_success" {
                     if let Some(msg) = hook_message(&att["stdout"]) {
-                        self.push(Item::System(msg));
+                        let text = match att["hookName"].as_str().filter(|h| !h.is_empty()) {
+                            Some(hook) => format!("{hook} says: {msg}"),
+                            None => msg,
+                        };
+                        self.push(Item::System(text));
                     }
                 }
                 return;
@@ -153,7 +209,13 @@ impl Conversation {
                     }
                 }
                 "tool_use" => self.tool_use(block),
-                "tool_result" => self.tool_result(block),
+                "tool_result" => {
+                    self.tool_result(block);
+                    let patch = &ev["toolUseResult"]["structuredPatch"];
+                    if let (Some(&at), true) = (block["tool_use_id"].as_str().and_then(|id| self.by_tool.get(id)), patch.as_array().is_some_and(|p| !p.is_empty())) {
+                        self.tool_patches.insert(at, patch.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -188,7 +250,11 @@ impl Conversation {
             "Workflow" => Item::Launch(format!("워크플로 {}", workflow_name(input).unwrap_or_default()).trim().to_string()),
             _ => Item::Tool { name: name.into(), summary: tool_summary(name, input), result: None, error: false },
         };
+        let tool = matches!(item, Item::Tool { .. });
         let at = self.push(item);
+        if tool {
+            self.tool_inputs.insert(at, input.clone());
+        }
         if let Some(id) = b["id"].as_str() {
             self.by_tool.insert(id.into(), at);
         }
@@ -237,11 +303,15 @@ impl Conversation {
         if clean.is_empty() || is_injection(&clean) {
             return;
         }
-        let item = match relayed(&clean) {
-            Some((from, body)) => Item::Bubble { user: true, text: body, from: Some(from), queued: false, images: 0 },
-            None => Item::Bubble { user: true, text: clean, from: None, queued: false, images: 0 },
-        };
-        self.push(item);
+        match relayed(&clean) {
+            Some((from, body)) => {
+                let at = self.push(Item::Bubble { user: true, text: body, from: Some(from), queued: false, images: 0 });
+                self.relayed_raw.insert(at, clean);
+            }
+            None => {
+                self.push(Item::Bubble { user: true, text: clean, from: None, queued: false, images: 0 });
+            }
+        }
     }
 
     /// 작업 중 보낸 예약은 정식 user 턴이 아니라 큐 조작으로만 남는다. enqueue 를 대기
@@ -293,7 +363,24 @@ impl Conversation {
                 match item["type"].as_str().unwrap_or("") {
                     "UserMessage" => self.codex_say(true, &codex_text(&item["content"])),
                     "AgentMessage" => self.codex_say(false, &codex_text(&item["content"])),
+                    // 코덱스 TUI 가 「Ran …」·「Explored」로 그리는 명령 하나 — 명령·해석·출력·종료 코드가 다 실려 온다.
+                    "CommandExecution" => {
+                        let cmd = item["command"].as_array().and_then(|a| a.last()).and_then(Value::as_str).unwrap_or("").to_string();
+                        let done = item["status"] != "in_progress";
+                        let at = self.push(Item::Tool {
+                            name: "codex_command".into(),
+                            summary: cmd,
+                            result: done.then(|| item["aggregated_output"].as_str().unwrap_or("").to_string()),
+                            error: item["exit_code"].as_i64().is_some_and(|c| c != 0),
+                        });
+                        self.tool_inputs.insert(at, item.clone());
+                    }
                     _ => {}
+                }
+            }
+            ("event_msg", "task_complete") => {
+                if let Some(ms) = p["duration_ms"].as_u64() {
+                    self.push(Item::Duration(ms, p["completed_at"].as_u64()));
                 }
             }
             ("event_msg", "agent_reasoning") => {
@@ -316,6 +403,7 @@ impl Conversation {
                     return;
                 }
                 let at = self.push(Item::Tool { name: name.into(), summary: tool_summary(name, &input), result: None, error: false });
+                self.tool_inputs.insert(at, input.clone());
                 if let Some(id) = p["call_id"].as_str() {
                     self.by_tool.insert(id.into(), at);
                 }
@@ -612,15 +700,6 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
     }
 }
 
-/// `mcp__kasachrome__browser_click` → `browser_click`.
-pub(crate) fn tool_label(name: &str) -> &str {
-    if name.starts_with("mcp__") {
-        name.rsplit("__").next().unwrap_or(name)
-    } else {
-        name
-    }
-}
-
 fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
@@ -653,10 +732,6 @@ fn result_text(content: &Value) -> String {
 
 fn system_text(ev: &Value) -> Option<String> {
     match ev["subtype"].as_str()? {
-        "compact_boundary" => Some(match ev["compactMetadata"]["preTokens"].as_f64() {
-            Some(pre) => format!("대화를 압축했어요 · {}k 토큰", (pre / 1000.0).round() as i64),
-            None => "대화를 압축했어요".into(),
-        }),
         "api_error" => {
             let mut parts = vec!["API 오류".to_string()];
             if let Some(status) = ev["error"]["status"].as_i64() {
@@ -791,12 +866,6 @@ pub(crate) struct PromptMenu {
     /// 제목 위 창 안의 줄들, 화면 차례 그대로 — 도구 이름·설명·명령 원문(Claude `Bash command`,
     /// 코덱스 `Would you like to run…`·`$ 명령`, 질문 머리). 거울 카드가 TUI 와 같은 정보를 보이는 재료다.
     pub(crate) context: Vec<String>,
-}
-
-impl PromptMenu {
-    pub(crate) fn cursor(&self) -> usize {
-        self.options.iter().position(|o| o.current).unwrap_or(0)
-    }
 }
 
 /// `❯ 1. 예` 꼴 한 줄 — (고른 표식이 있나, 번호, 이름).
@@ -1096,7 +1165,6 @@ mod tests {
     #[test]
     fn image_marks_and_tags_are_cleaned() {
         assert_eq!(strip_meta("[Image #1] 이거 봐\n[Image: source: /a.png]"), "(사진) 이거 봐");
-        assert_eq!(tool_label("mcp__kasachrome__browser_click"), "browser_click");
         assert!(is_injection("## Context Usage\n..."));
         assert!(!is_injection("그냥 말"));
     }
@@ -1161,7 +1229,7 @@ mod tests {
         assert_eq!(menu.title, "Do you want to proceed?");
         assert_eq!(menu.options.len(), 3);
         assert_eq!(menu.options[1].label, "Yes, and don't ask again");
-        assert_eq!(menu.cursor(), 0);
+        assert!(menu.options[0].current);
         assert!(parse_prompt_menu(&screen(&["1. 첫째", "2. 둘째"])).is_none());
     }
 

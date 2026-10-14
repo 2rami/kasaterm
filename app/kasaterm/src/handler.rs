@@ -7147,10 +7147,6 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_ime(ime);
                     return;
                 }
-                if self.chat_view_ime(&ime) {
-                    window.request_redraw();
-                    return;
-                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard
@@ -7683,7 +7679,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let to_webview = crate::macos_open::send_paste_action();
                 #[cfg(not(target_os = "macos"))]
                 let to_webview = false;
-                if !to_webview && !self.chat_view_paste() {
+                if !to_webview {
                     self.input_buf.clear();
                     self.current_suggestion = None;
                     self.paste_clipboard();

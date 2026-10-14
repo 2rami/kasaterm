@@ -977,7 +977,7 @@ impl App {
         // every pane so in-pane WebViews and other overlays can be snapped
         // to their pane after the borrow scope ends.
         let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-        let mut chat_slots: Vec<crate::chat_view::Slot> = Vec::new();
+        self.clear_chat_frames();
         let mut shell_slots: Vec<crate::shell_view::Slot> = Vec::new();
         // pane 마다 화면을 어떻게 옮겨 그렸는지. 락 안에서는 `self` 가 불변이라
         // 여기 모아 두었다가 블록이 끝난 뒤 한 번에 옮긴다(body_rects 와 같은 이유).
@@ -1201,35 +1201,11 @@ impl App {
                     + header_shift_logical
                     + PANE_INNER_Y;
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-                // 대화로 보는 학생 pane — 격자와 그 위의 장식(학생 그림·배너)은 빼고
-                // 본문 자리에 말풍선을 그린다. 학생이 나가 셸만 남았으면 터미널 그대로다.
-                let chat_slot = (self.chat_view_on(&id) && self.pane_can_chat(&ws, &id)).then(|| {
-                    let tab = ws.active_tab_pid(&id);
-                    let state = self.pane_activity.get(&id).map(|a| &a.state);
-                    crate::chat_view::Slot {
-                        pane: id.clone(),
-                        tab: tab.clone(),
-                        remote: kasa_mcp::remote::remote_meta(&tab),
-                        rect: (0.0, 0.0, 0.0, 0.0),
-                        name: ws
-                            .pane_character
-                            .get(&tab)
-                            .cloned()
-                            .or_else(|| self.pty.get(tab.as_str()).and_then(|p| p.active_agent()).map(|k| k.as_str().to_string()))
-                            .unwrap_or_else(|| "학생".to_string()),
-                        working: state.is_some_and(|s| s.is_busy()),
-                        needs_you: state.is_some_and(|s| s.needs_you()),
-                        focused: active_id.as_deref() == Some(id.as_str()),
-                        mirror: kasa_mcp::remote::is_remote_pane(&tab),
-                        preedit: self.chat_view_preedit(&id),
-                        caret_on: self.cursor_blink_on(Instant::now()),
-                        bg: theme::pane_bg(),
-                        status: crate::chat_view::status::StatusLine::default(),
-                        zoom: self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1),
-                    }
-                });
+                // 대화로 보는 학생 pane — 위는 기록에서 편 classic 꼴 대화, 아래는 진짜 화면 바닥(chat_view.rs).
+                // 터미널과 같은 합성기를 지나 학생 얼굴·상태줄·입력칸 꾸밈이 그대로 얹힌다.
+                let chat_frame = self.chat_frame(&ws, pane, &id, cols_now, rows_now);
                 // 거울 셸 칸 — 원본이 낸 명령 묶음을 카드로. 원본 PTY 크기는 그대로다.
-                let shell_slot = chat_slot.is_none().then(|| {
+                let shell_slot = chat_frame.is_none().then(|| {
                     let tab = ws.active_tab_pid(&id);
                     let alt_now = pane.term().is_some_and(|t| t.alt_screen);
                     self.shell_view_ready(&id, &tab, alt_now).then(|| crate::shell_view::Slot {
@@ -1246,9 +1222,9 @@ impl App {
                         zoom: self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1),
                     })
                 }).flatten();
-                let body_view = chat_slot.is_some() || shell_slot.is_some();
+                let body_view = shell_slot.is_some();
                 let composition = self.compose_terminal_pane(
-                    &ws, pane, pane.term(), &id, ws.active_tab_pid(&id), cols_now, rows_now,
+                    &ws, pane, chat_frame.as_ref().map(|f| &f.term).or(pane.term()), &id, ws.active_tab_pid(&id), cols_now, rows_now,
                     body_left, body_top, pane_font_scale, true,
                 );
                 let composed = composition.rows;
@@ -1272,7 +1248,7 @@ impl App {
                 let tab_pid = composition.tab_pid;
                 // 칸 오른쪽 여백의 스크롤바(prompt_nav.rs). 대체 화면 claude 는 스크롤을 자기가 쥐어
                 // 터미널 스크롤백이 없으니 칸 안의 mod 가 잰 위치로 그린다.
-                if runs_claude && !independent_view && chat_slot.is_none() && pane.term().is_some_and(|t| t.alt_screen) {
+                if runs_claude && !independent_view && chat_frame.is_none() && pane.term().is_some_and(|t| t.alt_screen) {
                     if let Some(state) = crate::prompt_nav::live_state(&tab_pid) {
                         let ch = self.cell.h * pane_font_scale;
                         let right = body_left + cols_now as f32 * self.cell.w * pane_font_scale;
@@ -1292,6 +1268,15 @@ impl App {
                     waiting_slots.extend(composition.waiting_slots);
                     standing_slots.extend(composition.standing_slots);
                     profile_slots.extend(composition.profile_slots);
+                    // 대화 보기의 답 머리 — student-face mod 가 터미널에 그리는 얼굴과 같은 그림·같은 칸 수.
+                    if let Some(f) = &chat_frame {
+                        let (cw, ch) = (self.cell.w * pane_font_scale, self.cell.h * pane_font_scale);
+                        if let Some(slug) = f.face_slug {
+                            for (row, face) in &f.faces {
+                                profile_slots.push((slug, (body_left, body_top + *row as f32 * ch, face.cols as f32 * cw, face.rows as f32 * ch)));
+                            }
+                        }
+                    }
                     inline_slots.extend(composition.inline_slots);
                     schale_logo_slots.extend(composition.schale_logo_slots);
                     title_outline_slots.extend(composition.title_outline_slots);
@@ -1391,9 +1376,8 @@ impl App {
                     - self.statusbar_px(&id))
                 .max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
-                if let Some(mut slot) = chat_slot {
-                    slot.rect = (bx, by, bw, bh);
-                    chat_slots.push(slot);
+                if let Some(f) = &chat_frame {
+                    self.note_chat_frame(&id, f, (bx, by, bw, bh), (self.cell.w * pane_font_scale, self.cell.h * pane_font_scale));
                 }
                 if let Some(mut slot) = shell_slot {
                     slot.rect = (bx, by, bw, bh);
@@ -2508,21 +2492,6 @@ impl App {
                 })
                 .collect()
         };
-        if !chat_slots.is_empty() {
-            let reported = self.socket_backend.as_ref().map(|b| b.agent_cfg_snapshot()).unwrap_or_default();
-            let ws = self.ws.lock().unwrap();
-            for slot in &mut chat_slots {
-                let Some(identity) = pane_identities.get(&slot.pane) else { continue };
-                let tab = ws.active_tab_pid(&slot.pane);
-                let cells = ws.panes.get(&slot.pane).and_then(|p| p.term()).map(|t| t.cells.as_slice()).unwrap_or(&[]);
-                slot.status = crate::chat_view::status::StatusLine {
-                    machine: identity.machine.name.clone(),
-                    icon: identity.machine.icon().to_string(),
-                    session: (!identity.machine.remote).then(|| self.pane_claude_sid.get(&tab).cloned()).flatten(),
-                    facts: self.chat_status_facts(&tab, cells, reported.get(&tab)),
-                };
-            }
-        }
         // Resolve before borrowing the GPU; the titlebar uses the same active-tab
         // identity as terminal art, never a stale local session binding.
         let titlebar_character = {
@@ -2837,8 +2806,6 @@ impl App {
                 self.md_content_h.insert(id.clone(), content_h);
             }
             self.md_find_rects = find_btn_hits;
-            // 대화 보기 — 마크다운과 같은 자리(빈 셀 패스 뒤, pane 머리 앞)에 크롬으로 그린다.
-            Self::paint_chat_views(g, &mut self.chat_view, &chat_slots, sb_cursor);
             Self::paint_shell_views(g, &mut self.shell_view, &shell_slots, sb_cursor);
             // 호버 툴팁 — pane 을 다 그린 뒤에 얹는다. pane 안에서 그리면 툴팁이
             // 경계를 넘는 순간 다음 pane 이 위를 덮어 반쪽만 남는다.

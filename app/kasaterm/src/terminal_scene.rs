@@ -894,7 +894,7 @@ impl App {
         // The parser always follows the source's canonical screen. Only this
         // viewer's presentation is reflowed, at its own unchanged font size.
         // Remote visual exports (desktop_view=false) remain canonical.
-        let projection = term.filter(|_| desktop_view && kasa_mcp::remote::is_view_pane(&tab_pid))
+        let projection = term.filter(|t| desktop_view && !t.laid_out && kasa_mcp::remote::is_view_pane(&tab_pid))
             .map(|source| {
                 let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
                 if let Some(session) = self.pty.get(&tab_pid) {

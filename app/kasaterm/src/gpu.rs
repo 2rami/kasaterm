@@ -1085,10 +1085,6 @@ impl GpuRenderer {
         self.grid.font_size_px as f32 * self.grid.zoom / self.grid.scale
     }
 
-    pub(crate) fn measure_code_text(&mut self, text: &str, size: f32) -> f32 {
-        self.measure_run(text, size, false, false, true, true)
-    }
-
     fn md_runs(
         &mut self,
         spans: &[crate::MdSpan],

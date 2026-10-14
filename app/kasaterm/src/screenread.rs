@@ -581,31 +581,6 @@ impl StatusSpan {
     }
 }
 
-pub(crate) struct CodexStatusLine {
-    pub(crate) model: String,
-    pub(crate) effort: String,
-    pub(crate) context: Option<String>,
-}
-
-pub(crate) fn codex_status_line(rows: &[Vec<GridCell>]) -> Option<CodexStatusLine> {
-    parse_codex_status_line(rows).map(|(row, model, effort, _, _)| CodexStatusLine {
-        model, effort, context: codex_context_used(&row_text_only(&rows[row])),
-    })
-}
-
-fn codex_context_used(line: &str) -> Option<String> {
-    line.split(" · ").find_map(|part| {
-        let lower = part.to_ascii_lowercase();
-        let words: Vec<_> = lower.split_whitespace().collect();
-        if !words.contains(&"context") { return None; }
-        let used = words.contains(&"used");
-        let remaining = words.contains(&"left") || words.contains(&"remaining");
-        if used == remaining { return None; }
-        let pct = words.iter().find_map(|word| word.strip_suffix('%')?.parse::<u8>().ok())?;
-        (pct <= 100).then(|| format!("{}%", if used { pct } else { 100 - pct }))
-    })
-}
-
 type ParsedCodexStatus = (usize, String, String, Option<String>, Vec<String>);
 
 // 보기 모드에 따라 값이 달라지지 않게 원본 상태줄 판독을 공유한다.
@@ -854,25 +829,6 @@ pub(crate) fn restyle_codex_status_line(
 #[cfg(test)]
 mod codex_status_line_tests {
     use super::*;
-
-    #[test]
-    fn composer_context_converts_remaining_and_ignores_unidentified_percentages() {
-        for (source, expected) in [
-            ("Context 32% used", Some("32%")),
-            ("Context 68% left", Some("32%")),
-            ("68% context left", Some("32%")),
-            ("0% context used", Some("0%")),
-            ("100% context remaining", Some("0%")),
-            ("5h 32%", None),
-            ("context 32%", None),
-            ("context 101% used", None),
-        ] {
-            let rows = vec![row(&format!("GPT-6.1-Sol xhigh · {source}"), 100)];
-            let info = codex_status_line(&rows).unwrap();
-            assert_eq!(info.model, "GPT-6.1-Sol");
-            assert_eq!(info.context.as_deref(), expected, "{source}");
-        }
-    }
 
     fn row(text: &str, cols: usize) -> Vec<GridCell> {
         let mut row = vec![GridCell::blank(); cols];

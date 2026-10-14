@@ -154,6 +154,15 @@ impl Feed {
 /// 쪽은 안 달아서 여기서 한 번 더 `relayed` 로 거른다. 예약(아직 안 보낸 말)·꺼내진 예약·슬래시 명령은 질문이
 /// 아니다. 답은 claude 는 AskUserQuestion 결과로, codex 는 사람 턴 안의 `<send_user_message_question_reply>` 로 온다.
 pub(crate) fn own_prompts(items: &[parse::Item], stamps: &[Option<u64>]) -> Vec<Prompt> {
+    own_prompts_at(items, stamps).into_iter().map(|(_, p)| p).collect()
+}
+
+/// 같은 규칙으로 고른 말과 그 말이 선 칸 번호 — 대화 보기가 그 칸으로 옮긴다.
+pub(crate) fn own_prompt_items(items: &[parse::Item]) -> Vec<(usize, Prompt)> {
+    own_prompts_at(items, &[])
+}
+
+fn own_prompts_at(items: &[parse::Item], stamps: &[Option<u64>]) -> Vec<(usize, Prompt)> {
     let answers = |pairs: Vec<(String, String)>, at: Option<u64>| -> Vec<Prompt> {
         pairs
             .into_iter()
@@ -166,7 +175,7 @@ pub(crate) fn own_prompts(items: &[parse::Item], stamps: &[Option<u64>]) -> Vec<
         .enumerate()
         .flat_map(|(i, item)| {
             let at = stamps.get(i).copied().flatten();
-            match item {
+            let found = (|| -> Vec<Prompt> { match item {
                 parse::Item::Bubble { user: true, from: None, queued: false, text, images } => {
                     let text = text.trim();
                     if let Some(pairs) = codex_answers(text) {
@@ -184,7 +193,8 @@ pub(crate) fn own_prompts(items: &[parse::Item], stamps: &[Option<u64>]) -> Vec<
                 }
                 parse::Item::Answered { pairs: Some(pairs), .. } => answers(pairs.clone(), at),
                 _ => Vec::new(),
-            }
+            } })();
+            found.into_iter().map(move |p| (i, p))
         })
         .collect()
 }
@@ -589,7 +599,7 @@ fn clock(at: u64) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn local_tm(secs: u64) -> Option<libc::tm> {
+pub(crate) fn local_tm(secs: u64) -> Option<libc::tm> {
     let t = secs.min(libc::time_t::MAX as u64) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     (!unsafe { libc::localtime_r(&t, &mut tm) }.is_null()).then_some(tm)
@@ -906,8 +916,8 @@ impl crate::App {
         let prompts = feed.lock().map(|f| f.prompts.clone()).unwrap_or_default();
         let texts = typed_texts(&prompts);
         let shelf = self.prompt_shelf(&pane);
-        // 풀스크린 TUI 는 대화를 처음부터 쥐고 있어 어느 질문이든 휠로 닿는다.
-        let anywhere = matches!(shelf, Some(Shelf::Screen(_)));
+        // 풀스크린 TUI 는 대화를 처음부터 쥐고 있어 어느 질문이든 휠로 닿는다. 대화 보기도 기록을 다 편다.
+        let anywhere = matches!(shelf, Some(Shelf::Screen(_))) || self.chat_view_on(&pane);
         let (spots, current) = match &shelf {
             Some(shelf) => (place(&texts, &shelf.texts()), shelf.current()),
             None => (vec![None; texts.len()], None),
@@ -946,6 +956,18 @@ impl crate::App {
             return true;
         }
         let texts = PROMPTS.with(|p| p.borrow().feed.as_ref().and_then(|f| f.lock().ok().map(|f| typed_texts(&f.prompts)))).unwrap_or_default();
+        // 대화 보기 칸은 기록을 다 가졌다 — 그 보기에서 그 질문을 맨 위에 세운다.
+        if self.chat_view_on(&pane) {
+            if let Some(text) = texts.get(index) {
+                let nth = texts[..index].iter().filter(|t| *t == text).count();
+                if !self.chat_view_jump(&pane, text, nth) {
+                    self.set_toast("이 질문을 대화 보기에서 못 찾았어요".into());
+                }
+            }
+            PROMPTS.with(|p| p.borrow_mut().placed = None);
+            self.chrome_dirty = true;
+            return true;
+        }
         let shelf = self.prompt_shelf(&pane);
         let spot = shelf.as_ref().and_then(|s| place(&texts, &s.texts()).get(index).copied().flatten());
         match (shelf, spot) {

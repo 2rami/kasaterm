@@ -32,13 +32,14 @@
 
 | 칸 | 미러가 그리는 것 | 데이터 | 입력 |
 |---|---|---|---|
-| Claude·코덱스 | 대화형(말·도구 카드·승인) | 기록 파일(Claude `~/.claude/projects/*.jsonl`, 코덱스 rollout) — `chat_view/parse.rs` 와 `mobile/lib/conversation.dart` 의 한 규칙. 연결 mod 가 있으면 일 상태·도구 진행·승인 대기를 즉시 덧붙인다 | Claude 는 mod 길(`prompt.submit`), 없으면·코덱스는 입력칸이 빌 때 붙여넣기 |
+| Claude·코덱스 | PC: claude classic 꼴 대화 줄 + 원본 화면 바닥(스피너·입력칸·상태줄·선택지 창, `docs/design.md` 「PC 대화 보기」). 폰: 대화형(말·도구 카드·승인) | 기록 파일(Claude `~/.claude/projects/*.jsonl`, 코덱스 rollout) **처음부터** — `chat_view/parse.rs` 와 `mobile/lib/conversation.dart` 의 한 규칙. 폰은 연결 mod 로 일 상태·도구 진행·승인 대기를 즉시 덧붙인다 | PC: 키 그대로 원본 TUI(터미널과 같다). 폰: 입력칸이 빌 때 붙여넣기 |
 | 셸 | 「명령 + 결과」 묶음, 결과는 미러 폭에 맞춰 다시 접고 색은 유지 | 원본이 모으는 OSC 133 구간(명령 시작·끝·종료 코드)과 그 사이 출력 | 아래 입력칸 → 원본 PTY |
 | 그 밖의 전체 화면 프로그램 | 원본 격자를 미러 칸에 맞춰 줄여 보기만 | 원본 격자 | 없음(원본 기기에서) |
 
 ## 승인은 TUI 와 같은 꼴로
 
-대화형 미러에서 권한 요청은 TUI 의 승인 창과 같은 정보·같은 선택지로 그린다.
+PC 대화 보기는 원본의 승인·질문 창을 바닥에 그대로 옮겨 붙여 터미널과 똑같이 키로 답한다. 폰 대화형 미러에서 권한 요청은
+TUI 의 승인 창과 같은 정보·같은 선택지로 그린다.
 
 - 보여 줄 것: 도구 이름, 입력 원문(명령 전체·파일 경로·바뀔 내용 요약), TUI 가 내미는 선택지 그대로(예·이번 세션은 묻지 않기·아니오+까닭).
 - 데이터: 연결 mod 의 `tool.check`(승인 대기·도구·입력) — 원격 승인 계약(`docs/claude-mod-bridge.md`)과 같은 요청 id 를 쓴다. 코덱스는 rollout 의 승인 요청 줄.
@@ -95,17 +96,17 @@
   「좁은 칸은 줄여서라도 원본 전체 보이게」). 원본보다 넓고 낮은 칸은 다시 접는 편이 글자가 커서 그대로 다시 접는다.
   판정은 칸·원본 크기·탭이 바뀔 때만 다시 잰다 — 글마다 재면 글자 크기가 오락가락한다.
 - 기록: 거울은 원본의 `/transcript-raw` 를 받는다 — PC 는 `history=1` 로 처음부터, 대화 칸에 안 쓰이는 무게(그림·긴 도구
-  결과·메타)를 원본이 걷어서(`chat_view/history.rs`). 모르는 옛 원본은 꼬리 512KB 로 답한다. 지금은 원본의
-  `GET /term/mod-live?surface=%N[&seq=&wait_ms=]` 를 받는다 —
+  결과·메타)를 원본이 걷어서(`chat_view/history.rs`, 135MB 기록이 5MB). 모르는 옛 원본은 꼬리 512KB 로 답한다.
+  폰의 지금은 원본의 `GET /term/mod-live?surface=%N[&seq=&wait_ms=]` 를 받는다 —
   `{live, seq, session, turn_open, compacting, question, tools[{id,tool,label}], permissions[원격 승인 계약의 요청 그대로]}`.
   `seq` 를 주면 바뀔 때까지 쥔다. mod 없는 칸은 `live:false`. 도구 호출이 승인을 감싸므로 묻는 동안 같은 id 의 도구가
   `tools` 에도 있다.
-- 승인 카드: 화면의 TUI 창(`parse_prompt_menu`·`parsePromptMenu`)에서 창 안 줄(`context`: 도구·설명·명령 원문)·제목·선택지
+- 승인 카드(폰): 화면의 TUI 창(`parse_prompt_menu`·`parsePromptMenu`)에서 창 안 줄(`context`: 도구·설명·명령 원문)·제목·선택지
   문구·선택지 설명을 그대로 옮긴다. 승인 창 맨 앞 「Yes」와 맨 끝 「No」는 `POST /term/mod-decide`
   `{surface, session, id, decision, message}` 로 그 요청 id 에 답한다(거절이면 입력칸 글이 까닭). 나머지(다시 묻지 않기·
   accept edits·계획 승인·질문)와 코덱스는 화면 키(↑↓ + Enter). 화면을 아직 못 받은 폰은 mod 요청만으로 도구·원문 +
   허락·거절을 묻는다. 어디서 답하든 원본 창이 닫히고 원본이 요청을 닫으니 다른 거울 카드도 사라진다.
-- 입력: `POST /term/chat-send {surface, text}` — 안전한 tell(입력칸이 빌 때 붙여넣고 Enter, 승인·질문 창·초안·한글 조합은
+- 입력(폰): `POST /term/chat-send {surface, text}` — 안전한 tell(입력칸이 빌 때 붙여넣고 Enter, 승인·질문 창·초안·한글 조합은
   기다린다)로 넣고, 신원이 아직 안 선 칸이면 옛 `/send`. 일하는 칸이면 사람이 일하는 중에 친 말처럼 진행 중인 턴 안으로 든다.
   2026-10-07 전에는 mod 칸을 mod 의 `$.prompt.submit` 에 맡겨 일하는 내내 묶였고, 엔진이 그 말을
   「The kasaterm-bridge plugin sent a message: …」로 감싸 기록했다 — 그 기록이 남아 있어 두 파서가 사람이 쓴 말만 남긴다.

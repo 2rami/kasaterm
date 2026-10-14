@@ -1831,6 +1831,8 @@ struct TerminalPane {
     /// 이번 프레임에 뷰포트와 겹치는 인라인 이미지(OSC 1337)들 — PTY 쪽이 절대
     /// 줄 앵커를 화면 좌표로 환산해 보낸 그대로. 렌더는 이 좌표에 그리기만 한다.
     inline_images: Vec<kasa_bridge::screen::InlineImageView>,
+    /// 이미 이 칸 폭으로 늘어놓은 격자(대화 보기가 지은 화면) — 거울 다시 접기를 또 하지 않는다.
+    laid_out: bool,
 }
 
 /// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.
@@ -4514,9 +4516,6 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 설정 방의 폼 입력. 필드를 함께 실어야 조합 중 다른 칸을 눌렀을 때
     /// 마지막 음절이 새 칸이 아니라 떠나는 칸에 확정된다.
     Settings(SettingsInput),
-    /// 대화로 보는 학생 pane 의 입력칸(바깥 pane id). 터미널 surface 가 아니라서 조합
-    /// 글자가 터미널 커서에 겹쳐 그려지지 않는다.
-    Chat(String),
 }
 
 impl ImeFocus {

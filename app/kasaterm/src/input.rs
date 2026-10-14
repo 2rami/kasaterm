@@ -2176,6 +2176,10 @@ impl App {
     /// (2026-09-05 「복사가 이상하게 되고」). 선택 복사와 더블클릭 단어 판정이 같이 쓴다.
     pub(crate) fn active_view_rows(&self) -> Option<Vec<Vec<GridCell>>> {
         let ws = self.ws.lock().unwrap();
+        // 대화 보기 칸은 격자 대신 그 보기가 그린 화면에서 고른다.
+        if let Some(rows) = ws.active_pane.as_deref().and_then(|id| self.chat_view_rows(id)) {
+            return Some(rows);
+        }
         let base = ws.active().and_then(|p| p.term()).map(|t| t.cells.clone())?;
         Some(
             match ws
@@ -3068,7 +3072,6 @@ impl App {
             crate::ImeFocus::Settings(field) => {
                 self.native_settings_insert_into(field, &text)
             }
-            crate::ImeFocus::Chat(id) => self.chat_view_insert(&id, &text),
         }
     }
 
