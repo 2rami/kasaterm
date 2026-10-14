@@ -4344,19 +4344,16 @@ pub(crate) fn paint_setup_section(
 }
 
 fn plain_hint(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &str) {
-    let translated = crate::native_strings::text(message);
-    let mut line = String::new();
-    for ch in translated.chars() {
-        let candidate = format!("{line}{ch}");
-        if !line.is_empty() && g.measure_chrome_text(&candidate, 10.5, false) > w {
-            draw_text(g, x, *y + 6.0, &line, 10.5, theme::text_dim(), false);
-            *y += 18.0;
-            line.clear();
-        }
-        line.push(ch);
+    let lines = wrap_words(g, message, w, 10.5);
+    if lines.is_empty() {
+        *y += 26.0;
+        return;
     }
-    draw_text(g, x, *y + 6.0, &line, 10.5, theme::text_dim(), false);
-    *y += 26.0;
+    for line in lines {
+        draw_text(g, x, *y + 6.0, &line, 10.5, theme::text_dim(), false);
+        *y += 18.0;
+    }
+    *y += 8.0;
 }
 
 fn agent_statusline_preview(fields: [bool; 3]) -> String {
@@ -8022,6 +8019,12 @@ mod navigation_layout_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_text_keeps_words_together_when_they_fit_a_line() {
+        let lines = wrap_measured("Connection addresses stay unchanged", 14.0, |s| s.chars().count() as f32);
+        assert_eq!(lines, ["Connection", "addresses stay", "unchanged"]);
+    }
 
     #[test]
     fn settings_search_accepts_korean_aliases_and_multiple_terms() {

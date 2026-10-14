@@ -91,6 +91,16 @@ fn english_duration(value: &str) -> Option<String> {
 
 fn english(value: &str) -> Option<&'static str> {
     Some(match value {
+        "설정" => "Settings",
+        "계정" => "Accounts",
+        "코딩 에이전트" => "Coding agents",
+        "연결 기기" => "Connected devices",
+        "앱 하단바" => "App bottom bar",
+        "앱 일반" => "General",
+        "날씨" => "Weather",
+        "저장" => "Save",
+        "아직 안 닿음" => "Not connected yet",
+        "방금 끊김" => "Just disconnected",
         "연결 이름" => "Connection name",
         "테마 이름" => "Theme name",
         "목록에서 연결만 제거하며 기기의 앱·세션은 유지합니다" => "Only the connection is removed. The device's apps and sessions keep running.",
@@ -432,7 +442,7 @@ fn english(value: &str) -> Option<&'static str> {
         "대기" => "Idle",
         "걷기" => "Walk",
         "손 흔들기" => "Wave",
-        "완료" => "Complete",
+        "완료" => "Done",
         "프로필" => "Profile",
         "대기 GIF" => "Idle GIF",
         "기본으로" => "Reset",
@@ -564,6 +574,9 @@ mod tests {
         assert_eq!(text("설정 방"), "Settings room");
         assert_eq!(text("준비가 끝났어요"), "You're ready");
         assert_eq!(text("테마 이름"), "Theme name");
+        assert_eq!(text("설정"), "Settings");
+        assert_eq!(text("연결 기기"), "Connected devices");
+        assert_eq!(text("저장"), "Save");
         for status in [
             "설치 환경을 확인하고 있어요",
             "로그인됨",
