@@ -149,10 +149,24 @@ impl Questions {
                 }
                 ("event_msg", "turn_aborted") => self.asked.clear(),
                 ("event_msg", "task_complete") => self.asked.retain(|q| !q.blocking),
-                ("event_msg", "user_message") => self.answer_envelope(&content_text(&p["message"])),
-                ("response_item", "message") if p["role"] == "user" => self.answer_envelope(&content_text(&p["content"])),
+                ("event_msg", "user_message") => self.user_turn(&content_text(&p["message"])),
+                ("response_item", "message") if p["role"] == "user" => self.user_turn(&content_text(&p["content"])),
                 _ => {}
             }
+        }
+    }
+
+    // A person who types an ordinary message instead of answering the question card has moved
+    // on, and Codex stops showing the card — keeping the async question would leave the pane
+    // "waiting for an answer" forever (2026-10-15: a Codex pane sat orange over a question asked
+    // turns earlier, with no card left to open). Messages Codex injects itself (`<…>` blocks,
+    // the reply envelope included) are not that.
+    fn user_turn(&mut self, text: &str) {
+        let text = text.trim();
+        if text.starts_with('<') {
+            self.answer_envelope(text);
+        } else if !text.is_empty() {
+            self.asked.retain(|q| q.blocking);
         }
     }
 
@@ -243,6 +257,21 @@ mod tests {
         assert_eq!(questions.pending()[0].prompt, "어떤 셸인가요?");
         questions.update_tail(&reply("a", 1));
         assert!(questions.pending().is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_message_moves_past_open_async_questions() {
+        let typed = |text: &str| json!({"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":text}]}}).to_string();
+        let mut questions = Questions::default();
+        questions.update_tail(&[call("a", true), output("a", json!({"accepted":true}))].join("\n"));
+        questions.update_tail(r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"1"}}"#);
+        questions.update_tail(&typed("<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"));
+        assert_eq!(questions.pending().len(), 1, "an injected context block is not the person moving on");
+        questions.update_tail(&call("b", false));
+        questions.update_tail(&typed("다른 일 해 줘"));
+        assert_eq!(questions.pending().len(), 1, "only the async question is dropped");
+        assert!(questions.pending()[0].blocking);
     }
 
     #[test]
