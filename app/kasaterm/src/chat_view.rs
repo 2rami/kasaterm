@@ -8,6 +8,7 @@
 
 use super::*;
 
+pub(crate) mod history;
 pub(crate) mod live;
 mod paint;
 pub(crate) mod status;
@@ -194,8 +195,8 @@ impl Source {
 
     fn read(&self, offset: u64, held: &str) -> Result<Option<kasa_socket::backend::TranscriptChunk>, String> {
         match self {
-            Source::File(p) => crate::socket::read_incremental(p, offset).map(Some).map_err(|e| e.to_string()),
-            Source::Remote(base, rid) => live::remote_chunk(base, rid, offset, held).map_err(|e| e.to_string()),
+            Source::File(p) => history::read(p, offset).map(Some).map_err(|e| e.to_string()),
+            Source::Remote(base, rid) => history::remote(base, rid, offset, held).map_err(|e| e.to_string()),
         }
     }
 }

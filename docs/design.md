@@ -349,7 +349,9 @@
 - 거울 입력이 원본에서 거절되면 입력 상자 안내 자리에 「못 보냈어요 · 까닭」 11 `danger`.
 - 빈 화면: 제목 15 굵게 + 설명 13 `text_dim`(최대 380) + 「터미널로 보기」 26. 거울 pane 은 기록이 원본 기기에
   있다고 적는다.
-- 데이터: 그 pane 에 묶인 기록(jsonl·codex rollout)을 1초마다 덧붙은 만큼 읽고(첫 읽기는 꼬리 512KB),
+- 데이터: 그 pane 에 묶인 기록(jsonl·codex rollout)을 1초마다 덧붙은 만큼 읽는다. 첫 읽기는 꼬리가 아니라 **처음부터** —
+  대화 칸에 안 쓰이는 무게(그림 base64·`toolUseResult`·메타·첨부 줄)를 걷고 도구 결과·입력 2KB·생각 4KB 로 잘라
+  135MB 기록이 5MB, 0.25초다(`chat_view/history.rs`). 거울은 원본의 `/transcript-raw?history=1` 이 같은 함수로 답한다.
   300줄까지 편다. 화면에서 읽는 것은 지금 떠 있는 선택지뿐이다.
 - 격리 검증: `KASATERM_CHAT_FIXTURE=<jsonl>`(디버그 판만, 묶인 기록 대신 그 파일) ·
   `KASATERM_AUTOCHAT="11000:toggle;14000:draft=글;14500:send;16000:pick=0;20000:open;21000:scroll=9999;22000:hovermenu"`.

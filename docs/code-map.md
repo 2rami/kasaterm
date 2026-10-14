@@ -42,7 +42,7 @@
 - `settings/phone_login.rs` — 폰 Claude 재로그인의 요청별 상태·CLI 점유·확인·취소. 자격 반영은 `claude_auth/phone_credentials.rs`, 폰 화면은 `mobile/lib/screens/claude_accounts.dart`; 계약은 `docs/mobile-claude-login.md`.
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
 - `transcript` — Claude/Codex 기록(jsonl) → board 스냅샷 추출. 본체는 `crates/kasa-agents/src/transcript.rs`(main.rs 가 `use kasa_agents::transcript` 로 옛 경로 유지), `transcript/signals.rs`는 정상 종료·중단 구분과 Codex 질문 호출/접수/답변 추적
-- `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, `socket::read_incremental`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
+- `chat_view.rs` — 학생 pane 「대화로 보기」(⋮·Info 학생 줄). pane 마다의 보기 상태·기록 읽기(1초, 처음부터 무게를 걷어 — `chat_view/history.rs`, 거울은 원본 `/transcript-raw?history=1`)·입력칸 키/IME/붙여넣기·휠·클릭. 자식 `chat_view/parse.rs` 는 jsonl → 대화 칸(폰 `mobile/lib/conversation.dart` 와 같은 규칙, codex rollout 포함)과 화면 선택지 판독, `chat_view/paint.rs` 는 배치(기록이 바뀔 때만)·그리기. 렌더는 대화 pane 의 격자를 비우고 `paint_chat_views` 로 본문 자리에 그린다
 - `chat_view/status.rs` — 입력칸 아래 기기·모델·추론 강도·컨텍스트 정보와 좁은 폭의 단추 배치. 활성 탭의 보고만 읽고, 원격 칸은 원본 캐시만 쓴다. `ChatPane::use_source`는 탭·원본이 바뀌면 읽기 통을 바꿔 늦은 응답을 이전 통에만 남긴다
 - `chat_view/live.rs` — 대화 보기 위의 연결 mod 지금(일 상태·도는 도구·승인 요청). 이 기기 칸은 `claude_mod::mirror_view` 를
   바로, 거울은 원본 `/term/mod-live` 에 매달린다. 승인 창 「Yes」·「No」의 mod 결정(`/term/mod-decide`)도 여기

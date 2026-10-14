@@ -56,7 +56,7 @@ impl Source {
     fn read(&self, offset: u64, held: &str) -> Result<Option<(String, u64, bool, String)>, String> {
         match self {
             Source::File(p) => read_wanted(p, offset).map(|(raw, next, reset)| Some((raw, next, reset, String::new()))).map_err(|e| e.to_string()),
-            Source::Remote(base, rid) => crate::chat_view::live::remote_chunk(base, rid, offset, held)
+            Source::Remote(base, rid) => crate::chat_view::history::remote(base, rid, offset, held)
                 .map(|c| c.map(|c| (keep_wanted(&c.raw), c.offset, c.reset || offset == 0, c.source)))
                 .map_err(|e| e.to_string()),
         }

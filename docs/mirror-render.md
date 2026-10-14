@@ -94,7 +94,9 @@
   비었다). 원본보다 큰 칸은 키우고, 원본보다 좁은 칸(Info 를 열어 좁아진 칸)은 줄여서라도 원본을 다 보인다(10-13 지시
   「좁은 칸은 줄여서라도 원본 전체 보이게」). 원본보다 넓고 낮은 칸은 다시 접는 편이 글자가 커서 그대로 다시 접는다.
   판정은 칸·원본 크기·탭이 바뀔 때만 다시 잰다 — 글마다 재면 글자 크기가 오락가락한다.
-- 기록: 거울은 원본의 `/transcript-raw` 를, 지금은 원본의 `GET /term/mod-live?surface=%N[&seq=&wait_ms=]` 를 받는다 —
+- 기록: 거울은 원본의 `/transcript-raw` 를 받는다 — PC 는 `history=1` 로 처음부터, 대화 칸에 안 쓰이는 무게(그림·긴 도구
+  결과·메타)를 원본이 걷어서(`chat_view/history.rs`). 모르는 옛 원본은 꼬리 512KB 로 답한다. 지금은 원본의
+  `GET /term/mod-live?surface=%N[&seq=&wait_ms=]` 를 받는다 —
   `{live, seq, session, turn_open, compacting, question, tools[{id,tool,label}], permissions[원격 승인 계약의 요청 그대로]}`.
   `seq` 를 주면 바뀔 때까지 쥔다. mod 없는 칸은 `live:false`. 도구 호출이 승인을 감싸므로 묻는 동안 같은 id 의 도구가
   `tools` 에도 있다.

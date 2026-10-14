@@ -1632,6 +1632,13 @@ pub trait Backend: Send + Sync {
         Ok(TranscriptChunk::default())
     }
 
+    /// `transcript_raw` 와 같은 약속이되 처음 읽기가 꼬리가 아니라 기록 처음부터이고, 대화 칸에 안
+    /// 쓰이는 무게(그림·긴 도구 결과·메타)는 걷는다 — PC 대화 보기가 거울로도 앞 대화를 다 편다.
+    /// 기본은 `transcript_raw` 그대로.
+    fn transcript_history(&self, surface_id: &str, offset: u64) -> Result<TranscriptChunk> {
+        self.transcript_raw(surface_id, offset)
+    }
+
     /// Read a *past* (offline) Claude session's transcript jsonl as raw text,
     /// addressed by its session uuid + the cwd it ran in — no live pane needed.
     /// Where `transcript_raw` reads the jsonl bound to a running surface, this

@@ -182,31 +182,6 @@ pub(crate) fn decide(remote: Option<&(String, String)>, surface: &str, session: 
     }
 }
 
-/// 원본 기기의 `/transcript-raw` 한 조각. `source` 는 `offset` 이 가리키는 파일 — 원본 칸이 다른 파일로
-/// 옮겨 갔으면 새 파일 꼬리가 `reset` 으로 온다. 묶인 기록이 없으면 None.
-pub(crate) fn remote_chunk(
-    base: &str,
-    surface: &str,
-    offset: u64,
-    source: &str,
-) -> anyhow::Result<Option<kasa_socket::backend::TranscriptChunk>> {
-    let path = format!(
-        "/transcript-raw?surface={}&offset={offset}&source={}",
-        kasa_mcp::remote::urlencode(surface),
-        kasa_mcp::remote::urlencode(source),
-    );
-    let v = kasa_mcp::remote::remote_get_json(base, &path)?;
-    if v["ok"].as_bool() != Some(true) {
-        return Ok(None);
-    }
-    Ok(Some(kasa_socket::backend::TranscriptChunk {
-        raw: v["raw"].as_str().unwrap_or("").to_string(),
-        offset: v["offset"].as_u64().unwrap_or(offset),
-        reset: v["reset"].as_bool().unwrap_or(false),
-        source: v["source"].as_str().unwrap_or("").to_string(),
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -113,7 +113,9 @@ async fn transcript_raw_handler(
         .map(|ms| std::time::Duration::from_millis(ms.min(25_000)));
     let seen = wait.and_then(|_| crate::claude_mod::row_count(surface));
     let held = params.get("source").map(String::as_str).unwrap_or("");
-    let read = || read_for_source(backend.as_ref(), surface, offset, held);
+    // `history=1` — 꼬리 대신 기록 처음부터, 대화 칸에 안 쓰이는 무게는 걷어서(PC 대화 보기). 모르는 옛 원본은 꼬리로 답한다.
+    let history = params.get("history").is_some_and(|v| v == "1");
+    let read = || read_for_source(backend.as_ref(), surface, offset, held, history);
     let mut chunk = (!surface.is_empty()).then(read);
     if let (Some(wait), Some(mut seen)) = (wait, seen) {
         // 행 알림만 기다리면 행이 아닌 줄(작업 중에 보낸 말의 큐 기록·사진 첨부)이 다음 행까지
@@ -157,12 +159,14 @@ fn read_for_source(
     surface: &str,
     offset: u64,
     held: &str,
+    history: bool,
 ) -> anyhow::Result<kasa_socket::backend::TranscriptChunk> {
-    let chunk = backend.transcript_raw(surface, offset)?;
+    let read = |offset| if history { backend.transcript_history(surface, offset) } else { backend.transcript_raw(surface, offset) };
+    let chunk = read(offset)?;
     if held.is_empty() || chunk.source.is_empty() || chunk.source == held {
         return Ok(chunk);
     }
-    let mut fresh = if offset == 0 { chunk } else { backend.transcript_raw(surface, 0)? };
+    let mut fresh = if offset == 0 { chunk } else { read(0)? };
     fresh.reset = true;
     Ok(fresh)
 }
@@ -341,15 +345,15 @@ mod tests {
             }
         }
         let desk = Desk { len: 900 };
-        let moved = read_for_source(&desk, "%9", 400, "old-rollout.jsonl").unwrap();
+        let moved = read_for_source(&desk, "%9", 400, "old-rollout.jsonl", false).unwrap();
         assert_eq!((moved.raw.as_str(), moved.reset, moved.source.as_str()), ("tail\n", true, "new.jsonl"));
-        let same = read_for_source(&desk, "%9", 400, "new.jsonl").unwrap();
+        let same = read_for_source(&desk, "%9", 400, "new.jsonl", false).unwrap();
         assert_eq!((same.raw.as_str(), same.reset), ("middle\n", false));
         // 옛 폰은 source 를 안 보낸다 — 예전 그대로.
-        let unknown = read_for_source(&desk, "%9", 400, "").unwrap();
+        let unknown = read_for_source(&desk, "%9", 400, "", false).unwrap();
         assert_eq!((unknown.raw.as_str(), unknown.reset), ("middle\n", false));
         // 막 뜬 칸의 빈 새 파일이어도 옛 대화를 걷으라고 알린다.
-        let empty = read_for_source(&Desk { len: 0 }, "%9", 400, "old-rollout.jsonl").unwrap();
+        let empty = read_for_source(&Desk { len: 0 }, "%9", 400, "old-rollout.jsonl", false).unwrap();
         assert_eq!((empty.raw.as_str(), empty.reset), ("", true));
     }
 }
