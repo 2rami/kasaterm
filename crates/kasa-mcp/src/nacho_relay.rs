@@ -110,9 +110,6 @@ fn desktop_path(method: &str, path: &str, body: Option<&[u8]>) -> Result<String,
                     && (key != "wait" || value == "0"))
         }),
         ("POST", "messages") => query.is_empty() && body.is_some_and(|body| body.len() <= BODY_LIMIT),
-        ("GET", "tasks") => body.is_none() && matches!(query, "" | "scope=desk"),
-        ("GET", name) if name.starts_with("tasks/") => body.is_none() && query.is_empty()
-            && name.strip_prefix("tasks/").is_some_and(|id| !id.is_empty() && id.len() <= 200 && id.bytes().all(|b| b.is_ascii_alphanumeric())),
         _ => false,
     };
     if !allowed { return Err("invalid_request"); }
@@ -269,13 +266,13 @@ pub(crate) async fn send(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
-/// 나쵸 키가 없는 기기의 데스크톱이 작업 모드·권한 표를 **읽기만** 하는 고정 창구(`/nacho/read/<이름>`,
-/// docs/nacho-read-relay.md). 쓰는 길은 없다 — 키 없는 기기는 모드를 바꾸지 못한다.
+/// 나쵸 키가 없는 기기가 권한 표를 **읽기만** 하는 고정 창구(`/nacho/read/<이름>`,
+/// docs/nacho-read-relay.md). 쓰는 길은 없다.
 ///
-/// 진짜 경계는 여기다. 허용목록 둘, GET 만, 로컬 호출만(기기 사이 SSH 터널은 로컬로 온다), 폰 주소
+/// 진짜 경계는 여기다. 허용목록 하나, GET 만, 로컬 호출만(기기 사이 SSH 터널은 로컬로 온다), 폰 주소
 /// (`/u/<slug>`)로는 안 연다. 호출자 헤더·쿼리·몸통은 하나도 옮기지 않고 나쵸의 읽기 범위
 /// (`X-Kasa-Read: 1`, 나쵸 desk-api.md)로 새로 짓는다 — 나쵸의 read_only 거절은 그 뒤의 이중 방어다.
-pub(crate) const READ_PATHS: [&str; 2] = ["work-mode", "capabilities"];
+pub(crate) const READ_PATHS: [&str; 1] = ["capabilities"];
 
 pub(crate) fn read_headers(key: &str, machine: &str) -> HeaderMap {
     let mut h = HeaderMap::new();
@@ -290,19 +287,6 @@ pub(crate) fn read_headers(key: &str, machine: &str) -> HeaderMap {
     put("x-kasa-user", "relay-read");
     put("x-kasa-machine", machine);
     h
-}
-
-/// 읽기 범위 응답에서 사람 이름을 한 번 더 뺀다 — 나쵸도 빼지만 옛 판·실수에 기대지 않는다.
-fn minimize(name: &str, body: &[u8]) -> Vec<u8> {
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return body.to_vec();
-    };
-    if name == "work-mode" {
-        if let Some(m) = v.get_mut("work_mode").and_then(|m| m.as_object_mut()) {
-            m.remove("changed_by");
-        }
-    }
-    serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec())
 }
 
 pub(crate) async fn read_relay(method: &Method, name: &str, remote: bool, phone: bool) -> Response {
@@ -340,7 +324,7 @@ pub(crate) async fn read_relay_to(
     };
     let status = resp.status().as_u16();
     let body = match resp.bytes().await {
-        Ok(b) if b.len() <= BODY_LIMIT => minimize(name, &b),
+        Ok(b) if b.len() <= BODY_LIMIT => b.to_vec(),
         _ => return err(StatusCode::BAD_GATEWAY, "nacho_reply_unreadable"),
     };
     Response::builder()
@@ -363,9 +347,9 @@ mod tests {
     #[test]
     fn rest_stays_inside_the_app_window() {
         assert!(valid_rest("messages"));
-        assert!(valid_rest("tasks/w1a2b3c4/shot"));
+        assert!(valid_rest("approvals/ap1/consume"));
         assert!(valid_rest("files/12/0"));
-        for bad in ["", "../ask", "tasks/../../ask", "tasks/./x", "a//b", "a%2e%2e", "a b", "x?y"] {
+        for bad in ["", "../ask", "files/../../ask", "files/./x", "a//b", "a%2e%2e", "a b", "x?y"] {
             assert!(!valid_rest(bad), "{bad}");
         }
     }
@@ -452,22 +436,14 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty(), "거절한 요청은 나쵸에 닿지 않는다");
     }
 
-    /// 실제 나쵸에 읽기 범위로 GET 둘만 — 모드·승인·장부는 건드리지 않는다. `cargo test -p kasa-mcp live_read_relay -- --ignored`
+    /// 실제 나쵸에 읽기 범위로 권한 표만 — 승인·장부는 건드리지 않는다. `cargo test -p kasa-mcp live_read_relay -- --ignored`
     #[tokio::test]
     #[ignore]
-    async fn live_read_relay_reads_mode_and_capabilities_only() {
-        let r = read_relay(&Method::GET, "work-mode", false, false).await;
-        assert_eq!(r.status(), StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), BODY_LIMIT).await.unwrap()).unwrap();
-        assert!(matches!(v["work_mode"]["mode"].as_str(), Some("organize" | "coordinate")), "{v}");
-        assert!(v["work_mode"]["rev"].is_number());
-        assert!(v["work_mode"].get("changed_by").is_none());
-        eprintln!("[live] mode={} rev={}", v["work_mode"]["mode"], v["work_mode"]["rev"]);
+    async fn live_read_relay_reads_capabilities_only() {
         let r = read_relay(&Method::GET, "capabilities", false, false).await;
         assert_eq!(r.status(), StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), BODY_LIMIT).await.unwrap()).unwrap();
-        assert_eq!(v["policy"]["unlimited_mode"], false);
-        eprintln!("[live] tiers={}", v["policy"]["tiers"].as_array().map_or(0, |t| t.len()));
+        eprintln!("[live] approvals={}", v["approvals"]);
     }
 
     #[test]
@@ -482,7 +458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_relay_opens_two_fixed_gets_and_nothing_else() {
+    async fn read_relay_opens_one_fixed_get_and_nothing_else() {
         use axum::routing::any;
         let seen: Arc<Mutex<Vec<(String, String, HeaderMap)>>> = Arc::default();
         let log = seen.clone();
@@ -492,9 +468,7 @@ mod tests {
                 let log = log.clone();
                 async move {
                     log.lock().unwrap().push((m.to_string(), uri.to_string(), h));
-                    axum::Json(serde_json::json!({"ok": true, "work_mode": {
-                        "schema": "nacho-work-mode/1", "mode": "organize", "rev": 2,
-                        "changed_at_ms": 5, "changed_by": "app:%EC%A3%BC%EC%9D%B8"}}))
+                    axum::Json(serde_json::json!({"ok": true, "approvals": {}}))
                 }
             }),
         );
@@ -503,37 +477,29 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let t = || Ok(Target { url: format!("http://{addr}"), key: "k-real".into() });
 
-        let r = read_relay_to(t(), &Method::GET, "work-mode", false, false).await;
+        let r = read_relay_to(t(), &Method::GET, "capabilities", false, false).await;
         assert_eq!(r.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(r.into_body(), BODY_LIMIT).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["work_mode"]["mode"], "organize");
-        assert_eq!(v["work_mode"]["rev"], 2);
-        assert!(v["work_mode"].get("changed_by").is_none(), "사람 이름은 넘기지 않는다");
         let (method, uri, h) = seen.lock().unwrap().pop().unwrap();
-        assert_eq!((method.as_str(), uri.as_str()), ("GET", "/api/app/work-mode"));
+        assert_eq!((method.as_str(), uri.as_str()), ("GET", "/api/app/capabilities"));
         assert_eq!(h.get("x-kasa-read").unwrap(), "1");
         assert_eq!(h.get("x-kasa-owner").unwrap(), "0");
         assert_eq!(h.get("x-nacho-token").unwrap(), "k-real");
 
-        let r = read_relay_to(t(), &Method::GET, "capabilities", false, false).await;
-        assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(seen.lock().unwrap().pop().unwrap().1, "/api/app/capabilities");
-
         for (method, name, remote, phone, want) in [
-            (Method::POST, "work-mode", false, false, StatusCode::METHOD_NOT_ALLOWED),
+            (Method::POST, "capabilities", false, false, StatusCode::METHOD_NOT_ALLOWED),
+            (Method::GET, "work-mode", false, false, StatusCode::NOT_FOUND),
             (Method::GET, "tasks", false, false, StatusCode::NOT_FOUND),
             (Method::GET, "events", false, false, StatusCode::NOT_FOUND),
             (Method::GET, "messages", false, false, StatusCode::NOT_FOUND),
             (Method::GET, "approvals/ap_1", false, false, StatusCode::NOT_FOUND),
             (Method::GET, "../ask", false, false, StatusCode::NOT_FOUND),
-            (Method::GET, "work-mode", true, false, StatusCode::FORBIDDEN),
-            (Method::GET, "work-mode", false, true, StatusCode::FORBIDDEN),
+            (Method::GET, "capabilities", true, false, StatusCode::FORBIDDEN),
+            (Method::GET, "capabilities", false, true, StatusCode::FORBIDDEN),
         ] {
             let r = read_relay_to(t(), &method, name, remote, phone).await;
             assert_eq!(r.status(), want, "{method} {name} remote={remote} phone={phone}");
         }
-        let r = read_relay_to(Err("nacho_key_missing"), &Method::GET, "work-mode", false, false).await;
+        let r = read_relay_to(Err("nacho_key_missing"), &Method::GET, "capabilities", false, false).await;
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(seen.lock().unwrap().is_empty(), "거절한 요청은 나쵸에 닿지 않는다");
     }
@@ -541,9 +507,7 @@ mod tests {
     #[test]
     fn desktop_chat_route_is_narrow_and_longpoll_is_not_allowed() {
         assert_eq!(desktop_path("GET", "/api/app/events?after=4&limit=500&wait=0", None).unwrap(), "/relay/account/nacho/app/events?after=4&limit=500&wait=0");
-        assert!(desktop_path("GET", "/api/app/tasks?scope=desk", None).is_ok());
-        assert!(desktop_path("GET", "/api/app/tasks/a123", None).is_ok());
-        for path in ["/api/app/approvals/ap_1", "/api/app/../ask", "/api/app/events?wait=25", "/api/app/events?token=123", "/api/app/tasks/../ask", "/api/app/messages"] {
+        for path in ["/api/app/tasks?scope=desk", "/api/app/tasks/a123", "/api/app/approvals/ap_1", "/api/app/../ask", "/api/app/events?wait=25", "/api/app/events?token=123", "/api/app/tasks/../ask", "/api/app/messages"] {
             assert!(desktop_path("GET", path, None).is_err(), "{path}");
         }
         assert!(desktop_path("POST", "/api/app/events", Some(b"{}")).is_err());

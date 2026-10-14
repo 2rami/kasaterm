@@ -217,6 +217,34 @@ export const CASES = {
   },
 };
 
+// xterm.js's buffer API read back from both, line by line.
+function sameBuffer(kt, xt) {
+  const a = xt.buffer.active, b = kt.buffer.active, out = [];
+  for (const k of ['type', 'cursorX', 'cursorY', 'baseY', 'viewportY', 'length']) if (a[k] !== b[k]) out.push(`${k}: xterm ${a[k]} kasaterm.js ${b[k]}`);
+  for (let y = 0; y < a.length; y++) {
+    const la = a.getLine(y), lb = b.getLine(y);
+    if (la.translateToString(true) !== lb.translateToString(true)) out.push(`line ${y}: xterm ${JSON.stringify(la.translateToString(true))} kasaterm.js ${JSON.stringify(lb.translateToString(true))}`);
+    if (la.isWrapped !== lb.isWrapped) out.push(`line ${y} isWrapped: xterm ${la.isWrapped} kasaterm.js ${lb.isWrapped}`);
+    if (la.translateToString(false, 2, 7) !== lb.translateToString(false, 2, 7)) out.push(`line ${y} cols 2-7 differ`);
+    for (let x = 0; x < la.length; x++) {
+      const ca = la.getCell(x), cb = lb.getCell(x);
+      const key = c => [c.getWidth(), c.getFgColorMode(), c.getFgColor(), c.getBgColorMode(), c.getBgColor(), !!c.isBold(), !!c.isUnderline(),
+        c.isAttributeDefault(), c.getWidth() ? c.getChars() || ' ' : ''].join();
+      if (key(ca) !== key(cb)) { out.push(`line ${y} col ${x}: xterm ${key(ca)} kasaterm.js ${key(cb)}`); break; }
+    }
+    if (out.length > 5) break;
+  }
+  return out.join('\n  ');
+}
+
+export const BUFFER_CASES = {
+  'buffer-api': {
+    rows: 3, steps: ['one\r\n', `${CSI}1;31mtwo${CSI}0m ${CSI}38;5;200;48;2;1;2;3mx${CSI}m\r\n`, 'abcdefghijklm\r\n', '한글이다가나\r\n', `${CSI}4mu${CSI}24mend`],
+    check: sameBuffer,
+  },
+  'buffer-api-alt': { rows: 3, steps: ['main\r\nmore', `${CSI}?1049hALT${CSI}2;2H`], check: (kt, xt) => sameBuffer(kt, xt) || (xt.buffer.normal.getLine(0).translateToString(true) === kt.buffer.normal.getLine(0).translateToString(true) ? '' : 'normal buffer differs') },
+};
+
 // Kitty keyboard flags, against kasaterm's terminal with the protocol on.
 export const KITTY_CASES = {
   'kitty-flags': cast(20, 5, [`${CSI}>1u${CSI}?u${CSI}>3u${CSI}?u${CSI}=5;2u${CSI}?u${CSI}=1;3u${CSI}?u`, `${CSI}=31u${CSI}?u${CSI}=2;1u`,
@@ -231,6 +259,13 @@ for (const [name, c] of Object.entries(CASES)) {
   total++;
   let res;
   try { res = runCase(c); } catch (e) { res = '  threw: ' + (e.stack || e); }
+  if (res) { failed++; console.log(`FAIL ${name}\n${res}`); }
+}
+for (const [name, c] of Object.entries(BUFFER_CASES)) {
+  if (filter && !name.includes(filter)) continue;
+  total++;
+  let res;
+  try { res = runCase({ ...c, options: { profile: 'alacritty' } }); } catch (e) { res = '  threw: ' + (e.stack || e); }
   if (res) { failed++; console.log(`FAIL ${name}\n${res}`); }
 }
 for (const [name, c] of Object.entries(KITTY_CASES)) {

@@ -211,6 +211,19 @@ class Row {
   }
 }
 
+// Markers (xterm.js `registerMarker`) ride on row objects, so they follow every swap and
+// reflow; a row that leaves the grid takes its markers with it.
+function dropMarkers(row) {
+  if (row && row.m) for (const marker of row.m.slice()) marker.dispose();
+}
+
+function moveMarkers(from, to) {
+  if (!from.m) return;
+  for (const marker of from.m) marker.row = to;
+  to.m = (to.m || []).concat(from.m);
+  from.m = undefined;
+}
+
 function spacerCell() {
   const r = new Row(1);
   r.d[3] = LEADING_WIDE_CHAR_SPACER;
@@ -251,7 +264,9 @@ class Storage {
     this.visibleLines = next;
   }
 
+  // Drops the `n` oldest rows (the top of the scrollback).
   shrinkLines(n) {
+    for (let p = this.len - n; p < this.len; p++) dropMarkers(this.inner[(this.zero + p) % this.inner.length]);
     this.len -= n;
     if (this.inner.length > this.len + MAX_CACHE_SIZE) this.truncate();
   }
@@ -349,25 +364,35 @@ class Grid {
     }
   }
 
+  // Rows a scroll pushes out of its region are recycled as the blank ones it brings in.
+  recycle(y, bg) {
+    const row = this.raw.get(y);
+    dropMarkers(row);
+    row.reset(bg);
+  }
+
   scrollDown(start, end, n, bg) {
-    if (end - start <= n) { this.resetRegion(start, end, bg); return; }
+    if (end - start <= n) { for (let y = start; y < end; y++) this.recycle(y, bg); return; }
     if (this.maxHistory === 0) {
       for (let y = end; y < this.lines; y++) this.raw.swap(y, y - n);
       this.raw.rotateDown(n);
-      for (let y = 0; y < n; y++) this.raw.get(y).reset(bg);
+      for (let y = 0; y < n; y++) this.recycle(y, bg);
       for (let y = 0; y < start; y++) this.raw.swap(y, y + n);
     } else {
       for (let y = end - 1; y >= start + n; y--) this.raw.swap(y, y - n);
-      for (let y = start + n - 1; y >= start; y--) this.raw.get(y).reset(bg);
+      for (let y = start + n - 1; y >= start; y--) this.recycle(y, bg);
     }
   }
 
   // Grid::scroll_up. A region starting at the top line pushes its lines into scrollback even
   // when it has a bottom margin; the lines below the margin are swapped back into place.
   scrollUp(start, end, n, bg) {
-    if (end - start <= n && start !== 0) { this.resetRegion(start, end, bg); return; }
+    if (end - start <= n && start !== 0) { for (let y = start; y < end; y++) this.recycle(y, bg); return; }
     if (this.displayOffset !== 0) this.displayOffset = Math.min(this.displayOffset + n, this.maxHistory);
     if (start === 0) {
+      // Past the scrollback limit the oldest rows rotate out into the spare cache.
+      const trimmed = n - Math.min(n, this.maxHistory - this.historySize);
+      for (let k = 0; k < trimmed; k++) dropMarkers(this.raw.get(k - this.historySize));
       this.scrolled += n;
       this.increaseScrollLimit(n);
       this.raw.rotate(-n);
@@ -375,7 +400,7 @@ class Grid {
     } else {
       for (let y = start; y < end - n; y++) this.raw.swap(y, y + n);
     }
-    for (let y = end - n; y < end; y++) this.raw.get(y).reset(bg);
+    for (let y = end - n; y < end; y++) this.recycle(y, bg);
   }
 
   clearHistory() {
@@ -492,11 +517,12 @@ class Grid {
         }
         cursor.col = target[1];
         const lineDelta = cursor.line - target[0];
-        if (lineDelta !== 0 && row.isClear()) continue;
+        if (lineDelta !== 0 && row.isClear()) { moveMarkers(row, lastRow); continue; }
         cursorLineDelta += lineDelta;
       } else if (row.isClear()) {
         if (i < this.displayOffset) this.displayOffset = Math.max(0, this.displayOffset - 1);
         if (i < cursorBufferLine) cursor.line += 1;
+        moveMarkers(row, lastRow);
         continue;
       }
       if (lastRow.len > 0) { lastRow.touchAll(); lastRow.setFlag(lastRow.len - 1, WRAPLINE, true); }
@@ -511,7 +537,9 @@ class Grid {
       const cursorBufferLine = this.lines - cursor.line - 1;
       const available = Math.min(cursorBufferLine, reversed.length - this.lines);
       const overflow = Math.max(0, cursorLineDelta - available);
-      reversed.length = reversed.length + overflow - cursorLineDelta;
+      const keep = reversed.length + overflow - cursorLineDelta;
+      for (let k = keep; k < reversed.length; k++) dropMarkers(reversed[k]);
+      reversed.length = keep;
       cursor.line = Math.max(cursor.line - overflow, 0);
     }
     for (const row of reversed) if (row.len < columns) row.setLen(columns);
@@ -582,7 +610,10 @@ class Grid {
       }
     }
     newRaw.reverse();
-    if (newRaw.length > this.maxHistory + this.lines) newRaw.length = this.maxHistory + this.lines;
+    if (newRaw.length > this.maxHistory + this.lines) {
+      for (let k = this.maxHistory + this.lines; k < newRaw.length; k++) dropMarkers(newRaw[k]);
+      newRaw.length = this.maxHistory + this.lines;
+    }
     this.raw.replaceInner(newRaw);
     this.displayOffset = Math.min(this.displayOffset, this.historySize);
     if (!reflow) {
@@ -764,6 +795,9 @@ class Terminal {
     this.inactiveKeyboardStack = [];
     this.handlers = null;
     this.parser = this.parserApi();
+    this.addons = [];
+    this.markers = new Set();
+    this.options = this.liveOptions();
     this.heldUtf8 = new Uint8Array(0);
     this.resetParser();
     this.u8need = 0; this.u8cp = 0; this.u8lo = 0x80; this.u8hi = 0xbf;
@@ -812,9 +846,9 @@ class Terminal {
     while (i < bytes.length) {
       i += this.syncPending ? this.advanceSync(bytes.subarray(i)) : this.parse(bytes, i, true);
     }
-    if (this.grid.scrolled !== scrolled) this.emit('scroll', this.grid.scrolled - scrolled);
+    if (this.grid.scrolled !== scrolled && this.listeners.has('scroll')) this.emit('scroll', this.grid.scrolled - scrolled);
     const now = this.grid.cursor;
-    if (now !== cur || now.line !== line || now.col !== col) this.emit('cursormove');
+    if ((now !== cur || now.line !== line || now.col !== col) && this.listeners.has('cursormove')) this.emit('cursormove');
     this.emit('write');
     if (callback) callback();
   }
@@ -867,6 +901,69 @@ class Terminal {
 
   // Kitty keyboard progressive-enhancement flags in force (0 when the protocol is off).
   get keyboardFlags() { return (this.mode & KITTY_MODE) >>> KITTY_SHIFT; }
+
+  // ── xterm.js-style surroundings: addons, live options, viewport, buffer ──
+
+  loadAddon(addon) {
+    this.addons.push(addon);
+    addon.activate(this);
+  }
+
+  dispose() {
+    for (const addon of this.addons.splice(0)) addon.dispose();
+    this.emit('dispose');
+    this.listeners.clear();
+  }
+
+  // `term.options.x = y` takes effect from the next byte, as in xterm.js.
+  liveOptions() {
+    const term = this;
+    return {
+      get profile() { return term.xterm ? 'xterm' : 'alacritty'; },
+      set profile(v) { term.xterm = v === 'xterm'; },
+      get convertEol() { return term.convertEol; },
+      set convertEol(v) { term.convertEol = !!v; },
+      get tabStopWidth() { return term.tabStopWidth; },
+      set tabStopWidth(v) { term.tabStopWidth = v || 8; term.tabs = term.makeTabs(term.cols); },
+      get scrollback() { return term.scrollback; },
+      set scrollback(v) { term.scrollback = v; (term.isAltScreen ? term.inactive : term.grid).updateHistory(v); },
+      get cellPixels() { return term.cellPixels; },
+      set cellPixels(v) { term.cellPixels = v; },
+      get colorScheme() { return term.colorScheme; },
+      set colorScheme(v) { term.setColorScheme(v); },
+    };
+  }
+
+  // A marker on the cursor's line (plus `offset`) of the screen in use; undefined off the buffer.
+  registerMarker(offset = 0) {
+    const line = this.grid.cursor.line + offset;
+    if (line < -this.historySize || line >= this.rows) return undefined;
+    return new Marker(this, this.grid, line);
+  }
+
+  // The viewport moves over the scrollback; 'viewport' tells the view to redraw.
+  scrollLines(n) { this.scrollToOffset(this.grid.displayOffset - n); }
+  scrollPages(n) { this.scrollLines(n * (this.rows - 1)); }
+  scrollToTop() { this.scrollToOffset(this.historySize); }
+  scrollToBottom() { this.scrollToOffset(0); }
+  scrollToLine(line) { this.scrollToOffset(this.historySize - line); }
+
+  scrollToOffset(offset) {
+    const next = Math.max(0, Math.min(this.historySize, offset));
+    if (next === this.grid.displayOffset) return;
+    this.grid.displayOffset = next;
+    this.emit('viewport', next);
+  }
+
+  get buffer() {
+    const alt = this.isAltScreen;
+    return {
+      active: new BufferView(this.grid, alt ? 'alternate' : 'normal'),
+      normal: new BufferView(alt ? this.inactive : this.grid, 'normal'),
+      alternate: new BufferView(alt ? this.grid : this.inactive, 'alternate'),
+      onBufferChange: fn => this.on('screen', () => fn(this.buffer.active)),
+    };
+  }
 
   // The host's light/dark scheme: answers `CSI ? 996 n`, and is reported unasked while a program
   // keeps mode 2031 set (xterm profile).
@@ -1075,10 +1172,16 @@ class Terminal {
     const out = [];
     for (let i = 0; i < this.plen;) {
       const k = this.psub[i];
-      out.push(Array.from(this.pvals.subarray(i, i + k)));
+      if (k === 1) out.push([this.pvals[i]]);
+      else { const g = []; for (let j = i; j < i + k; j++) g.push(this.pvals[j]); out.push(g); }
       i += k;
     }
     return out;
+  }
+
+  interString() {
+    const v = this.inter;
+    return v.length === 0 ? '' : v.length === 1 ? String.fromCharCode(v[0]) : String.fromCharCode(v[0], v[1]);
   }
 
   isExecute(b) { return b <= 0x17 || b === 0x19 || (b >= 0x1c && b <= 0x1f); }
@@ -1203,7 +1306,7 @@ class Terminal {
     if (this.plen === MAX_PARAMS) this.ignoring = true; else this.paramPush(false);
     this.state = S_DCS_PASS;
     this.dcsLast = 0;
-    const key = this.inter.map(c => String.fromCharCode(c)).join('') + String.fromCharCode(final);
+    const key = this.interString() + String.fromCharCode(final);
     this.dcs = !this.ignoring && (this.hasHandler('dcs', key) || (this.xterm && key === '$q'))
       ? { key, params: this.groups(), buf: [], over: false } : null;
   }
@@ -1273,7 +1376,7 @@ class Terminal {
         this.linefeed();
         // The app ignores LNM; xterm.js treats it as its convertEol option.
         if (this.convertEol || (this.xterm && (this.mode & MODE.LINE_FEED_NEW_LINE))) this.carriageReturn();
-        this.emit('linefeed');
+        if (this.listeners.has('linefeed')) this.emit('linefeed');
         break;
       case 0x07: this.emit('bell'); break;
       case 0x0f: this.activeCharset = 0; break;
@@ -1521,13 +1624,14 @@ class Terminal {
     this.xmode = 0;
     this.keyboardStack = [];
     this.inactiveKeyboardStack = [];
+    for (const marker of [...this.markers]) marker.dispose();
   }
 
   // ── ESC ──
 
   escDispatch(b) {
     const inter = this.inter;
-    if (this.handlers && this.hooked('esc', inter.map(c => String.fromCharCode(c)).join('') + String.fromCharCode(b))) return;
+    if (this.handlers && this.hooked('esc', this.interString() + String.fromCharCode(b))) return;
     const nrcs = this.xterm && NRCS[String.fromCharCode(b)];
     if (b === 0x42 || b === 0x30 || nrcs) {
       if (inter.length !== 1) return;
@@ -1574,7 +1678,7 @@ class Terminal {
     if (this.plen === MAX_PARAMS) this.ignoring = true; else this.paramPush(false);
     this.state = S_GROUND;
     if (this.ignoring || this.inter.length > 2) return;
-    const groups = this.groups(), inter = this.inter.map(c => String.fromCharCode(c)).join('');
+    const groups = this.groups(), inter = this.interString();
     if (this.handlers && this.hooked('csi', inter + String.fromCharCode(b), paramsArray(groups))) return;
     this.csiDispatch(b, groups, inter);
   }
@@ -2273,6 +2377,156 @@ class Terminal {
   }
 
   get syncActive() { return this.syncPending; }
+}
+
+// ── buffer.js ──
+// xterm.js's read-only buffer API (`term.buffer.active.getLine(y).getCell(x)` …) over the grid,
+// for code written against xterm.js — addons, search, tests. Lines count from the top of the
+// scrollback, as there.
+//
+// A blank cell reads as ' ', where xterm.js tells a never-written cell ('') from a written
+// space; trimming in translateToString drops trailing spaces of either kind.
+
+let markerSerial = 0;
+
+// xterm.js `IMarker`: a line that keeps its identity while the screen scrolls and reflows, and is
+// disposed when that line leaves the buffer (trimmed, cleared, deleted, reset).
+class Marker {
+  constructor(term, grid, line) {
+    this.id = ++markerSerial;
+    this.term = term;
+    this.grid = grid;
+    this.row = grid.row(line);
+    this.at = line;
+    this.isDisposed = false;
+    this.disposeListeners = [];
+    (this.row.m || (this.row.m = [])).push(this);
+    term.markers.add(this);
+  }
+
+  // Line from the top of the scrollback, as xterm.js counts; -1 once disposed.
+  get line() {
+    if (this.isDisposed) return -1;
+    const g = this.grid, top = -g.historySize;
+    if (this.at < top || this.at >= g.lines || g.row(this.at) !== this.row) {
+      // Rows move by a few lines per scroll, so look outward from where it was last seen.
+      let found = null;
+      for (let d = 1; found === null && (this.at - d >= top || this.at + d < g.lines); d++) {
+        if (this.at + d < g.lines && this.at + d >= top && g.row(this.at + d) === this.row) found = this.at + d;
+        else if (this.at - d >= top && this.at - d < g.lines && g.row(this.at - d) === this.row) found = this.at - d;
+      }
+      if (found === null) { this.dispose(); return -1; }
+      this.at = found;
+    }
+    return this.at - top;
+  }
+
+  onDispose(fn) {
+    this.disposeListeners.push(fn);
+    return { dispose: () => { const i = this.disposeListeners.indexOf(fn); if (i >= 0) this.disposeListeners.splice(i, 1); } };
+  }
+
+  dispose() {
+    if (this.isDisposed) return;
+    this.isDisposed = true;
+    if (this.row.m) { this.row.m = this.row.m.filter(m => m !== this); if (!this.row.m.length) this.row.m = undefined; }
+    this.term.markers.delete(this);
+    for (const fn of this.disposeListeners.splice(0)) fn();
+  }
+}
+
+const CM_P16 = 0x1000000, CM_P256 = 0x2000000, CM_RGB = 0x3000000;
+
+class BufferView {
+  constructor(grid, type) { this.grid = grid; this.type = type; }
+
+  // xterm.js parks the cursor one past the last column while a wrap is pending.
+  get cursorX() { const c = this.grid.cursor; return c.wrap ? c.col + 1 : c.col; }
+  get cursorY() { return this.grid.cursor.line; }
+  get baseY() { return this.grid.historySize; }
+  get viewportY() { return this.grid.historySize - this.grid.displayOffset; }
+  get length() { return this.grid.historySize + this.grid.lines; }
+
+  getLine(y) {
+    if (y < 0 || y >= this.length) return undefined;
+    return new LineView(this.grid, y - this.grid.historySize);
+  }
+
+  getNullCell() { return new CellView(null, 0); }
+}
+
+class LineView {
+  constructor(grid, line) { this.grid = grid; this.line = line; this.row = grid.row(line); }
+
+  get isWrapped() {
+    if (this.line - 1 < -this.grid.historySize) return false;
+    const above = this.grid.row(this.line - 1);
+    return (above.flags(above.len - 1) & WRAPLINE) !== 0;
+  }
+
+  get length() { return this.row.len; }
+
+  getCell(x) { return x < 0 || x >= this.row.len ? undefined : new CellView(this.row, x); }
+
+  translateToString(trimRight = false, start = 0, end = this.row.len) {
+    let s = '';
+    for (let x = Math.max(0, start); x < Math.min(end, this.row.len); x++) {
+      if (this.row.flags(x) & WIDE_CHAR_SPACER) continue;
+      s += this.row.cp(x) === 9 ? ' ' : this.row.text(x);
+    }
+    return trimRight ? s.replace(/ +$/, '') : s;
+  }
+}
+
+function colorMode(c) {
+  if (c === DEFAULT_FG || c === DEFAULT_BG) return 0;
+  if (c >= COLOR_RGB) return CM_RGB;
+  if (c >= COLOR_INDEXED) return CM_P256;
+  return c < 16 ? CM_P16 : 0;
+}
+
+function colorValue(c) {
+  const mode = colorMode(c);
+  if (mode === 0) return -1;
+  return mode === CM_P16 ? c : c & (mode === CM_RGB ? 0xffffff : 0xff);
+}
+
+class CellView {
+  constructor(row, x) { this.row = row; this.x = x; }
+
+  flag(bit) { return this.row ? this.row.flags(this.x) & bit : 0; }
+
+  getWidth() { return this.flag(WIDE_CHAR) ? 2 : this.flag(WIDE_CHAR_SPACER) ? 0 : 1; }
+  getChars() {
+    if (!this.row || this.flag(WIDE_CHAR_SPACER)) return '';
+    return this.row.cp(this.x) === 9 ? ' ' : this.row.text(this.x);
+  }
+  getCode() { return this.row && !this.flag(WIDE_CHAR_SPACER) ? this.row.cp(this.x) : 0; }
+
+  getFgColorMode() { return this.row ? colorMode(this.row.fg(this.x)) : 0; }
+  getBgColorMode() { return this.row ? colorMode(this.row.bg(this.x)) : 0; }
+  getFgColor() { return this.row ? colorValue(this.row.fg(this.x)) : -1; }
+  getBgColor() { return this.row ? colorValue(this.row.bg(this.x)) : -1; }
+  isFgRGB() { return this.getFgColorMode() === CM_RGB; }
+  isBgRGB() { return this.getBgColorMode() === CM_RGB; }
+  isFgPalette() { const m = this.getFgColorMode(); return m === CM_P16 || m === CM_P256; }
+  isBgPalette() { const m = this.getBgColorMode(); return m === CM_P16 || m === CM_P256; }
+  isFgDefault() { return this.getFgColorMode() === 0; }
+  isBgDefault() { return this.getBgColorMode() === 0; }
+
+  isBold() { return this.flag(BOLD); }
+  isDim() { return this.flag(DIM); }
+  isItalic() { return this.flag(ITALIC); }
+  isUnderline() { return this.flag(ALL_UNDERLINES); }
+  isInverse() { return this.flag(INVERSE); }
+  isInvisible() { return this.flag(HIDDEN); }
+  isStrikethrough() { return this.flag(STRIKEOUT); }
+  isBlink() { return this.flag(BLINK); }
+  isOverline() { return this.flag(OVERLINE); }
+  isAttributeDefault() {
+    return this.flag(BOLD | DIM | ITALIC | ALL_UNDERLINES | INVERSE | HIDDEN | STRIKEOUT | BLINK | OVERLINE) === 0
+      && this.isFgDefault() && this.isBgDefault();
+  }
 }
 
 // ── box-table.js ──

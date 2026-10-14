@@ -167,6 +167,19 @@ class Row {
   }
 }
 
+// Markers (xterm.js `registerMarker`) ride on row objects, so they follow every swap and
+// reflow; a row that leaves the grid takes its markers with it.
+function dropMarkers(row) {
+  if (row && row.m) for (const marker of row.m.slice()) marker.dispose();
+}
+
+function moveMarkers(from, to) {
+  if (!from.m) return;
+  for (const marker of from.m) marker.row = to;
+  to.m = (to.m || []).concat(from.m);
+  from.m = undefined;
+}
+
 function spacerCell() {
   const r = new Row(1);
   r.d[3] = LEADING_WIDE_CHAR_SPACER;
@@ -207,7 +220,9 @@ class Storage {
     this.visibleLines = next;
   }
 
+  // Drops the `n` oldest rows (the top of the scrollback).
   shrinkLines(n) {
+    for (let p = this.len - n; p < this.len; p++) dropMarkers(this.inner[(this.zero + p) % this.inner.length]);
     this.len -= n;
     if (this.inner.length > this.len + MAX_CACHE_SIZE) this.truncate();
   }
@@ -305,25 +320,35 @@ class Grid {
     }
   }
 
+  // Rows a scroll pushes out of its region are recycled as the blank ones it brings in.
+  recycle(y, bg) {
+    const row = this.raw.get(y);
+    dropMarkers(row);
+    row.reset(bg);
+  }
+
   scrollDown(start, end, n, bg) {
-    if (end - start <= n) { this.resetRegion(start, end, bg); return; }
+    if (end - start <= n) { for (let y = start; y < end; y++) this.recycle(y, bg); return; }
     if (this.maxHistory === 0) {
       for (let y = end; y < this.lines; y++) this.raw.swap(y, y - n);
       this.raw.rotateDown(n);
-      for (let y = 0; y < n; y++) this.raw.get(y).reset(bg);
+      for (let y = 0; y < n; y++) this.recycle(y, bg);
       for (let y = 0; y < start; y++) this.raw.swap(y, y + n);
     } else {
       for (let y = end - 1; y >= start + n; y--) this.raw.swap(y, y - n);
-      for (let y = start + n - 1; y >= start; y--) this.raw.get(y).reset(bg);
+      for (let y = start + n - 1; y >= start; y--) this.recycle(y, bg);
     }
   }
 
   // Grid::scroll_up. A region starting at the top line pushes its lines into scrollback even
   // when it has a bottom margin; the lines below the margin are swapped back into place.
   scrollUp(start, end, n, bg) {
-    if (end - start <= n && start !== 0) { this.resetRegion(start, end, bg); return; }
+    if (end - start <= n && start !== 0) { for (let y = start; y < end; y++) this.recycle(y, bg); return; }
     if (this.displayOffset !== 0) this.displayOffset = Math.min(this.displayOffset + n, this.maxHistory);
     if (start === 0) {
+      // Past the scrollback limit the oldest rows rotate out into the spare cache.
+      const trimmed = n - Math.min(n, this.maxHistory - this.historySize);
+      for (let k = 0; k < trimmed; k++) dropMarkers(this.raw.get(k - this.historySize));
       this.scrolled += n;
       this.increaseScrollLimit(n);
       this.raw.rotate(-n);
@@ -331,7 +356,7 @@ class Grid {
     } else {
       for (let y = start; y < end - n; y++) this.raw.swap(y, y + n);
     }
-    for (let y = end - n; y < end; y++) this.raw.get(y).reset(bg);
+    for (let y = end - n; y < end; y++) this.recycle(y, bg);
   }
 
   clearHistory() {
@@ -448,11 +473,12 @@ class Grid {
         }
         cursor.col = target[1];
         const lineDelta = cursor.line - target[0];
-        if (lineDelta !== 0 && row.isClear()) continue;
+        if (lineDelta !== 0 && row.isClear()) { moveMarkers(row, lastRow); continue; }
         cursorLineDelta += lineDelta;
       } else if (row.isClear()) {
         if (i < this.displayOffset) this.displayOffset = Math.max(0, this.displayOffset - 1);
         if (i < cursorBufferLine) cursor.line += 1;
+        moveMarkers(row, lastRow);
         continue;
       }
       if (lastRow.len > 0) { lastRow.touchAll(); lastRow.setFlag(lastRow.len - 1, WRAPLINE, true); }
@@ -467,7 +493,9 @@ class Grid {
       const cursorBufferLine = this.lines - cursor.line - 1;
       const available = Math.min(cursorBufferLine, reversed.length - this.lines);
       const overflow = Math.max(0, cursorLineDelta - available);
-      reversed.length = reversed.length + overflow - cursorLineDelta;
+      const keep = reversed.length + overflow - cursorLineDelta;
+      for (let k = keep; k < reversed.length; k++) dropMarkers(reversed[k]);
+      reversed.length = keep;
       cursor.line = Math.max(cursor.line - overflow, 0);
     }
     for (const row of reversed) if (row.len < columns) row.setLen(columns);
@@ -538,7 +566,10 @@ class Grid {
       }
     }
     newRaw.reverse();
-    if (newRaw.length > this.maxHistory + this.lines) newRaw.length = this.maxHistory + this.lines;
+    if (newRaw.length > this.maxHistory + this.lines) {
+      for (let k = this.maxHistory + this.lines; k < newRaw.length; k++) dropMarkers(newRaw[k]);
+      newRaw.length = this.maxHistory + this.lines;
+    }
     this.raw.replaceInner(newRaw);
     this.displayOffset = Math.min(this.displayOffset, this.historySize);
     if (!reflow) {

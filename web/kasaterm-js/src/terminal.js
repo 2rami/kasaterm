@@ -162,6 +162,9 @@ class Terminal {
     this.inactiveKeyboardStack = [];
     this.handlers = null;
     this.parser = this.parserApi();
+    this.addons = [];
+    this.markers = new Set();
+    this.options = this.liveOptions();
     this.heldUtf8 = new Uint8Array(0);
     this.resetParser();
     this.u8need = 0; this.u8cp = 0; this.u8lo = 0x80; this.u8hi = 0xbf;
@@ -210,9 +213,9 @@ class Terminal {
     while (i < bytes.length) {
       i += this.syncPending ? this.advanceSync(bytes.subarray(i)) : this.parse(bytes, i, true);
     }
-    if (this.grid.scrolled !== scrolled) this.emit('scroll', this.grid.scrolled - scrolled);
+    if (this.grid.scrolled !== scrolled && this.listeners.has('scroll')) this.emit('scroll', this.grid.scrolled - scrolled);
     const now = this.grid.cursor;
-    if (now !== cur || now.line !== line || now.col !== col) this.emit('cursormove');
+    if ((now !== cur || now.line !== line || now.col !== col) && this.listeners.has('cursormove')) this.emit('cursormove');
     this.emit('write');
     if (callback) callback();
   }
@@ -265,6 +268,69 @@ class Terminal {
 
   // Kitty keyboard progressive-enhancement flags in force (0 when the protocol is off).
   get keyboardFlags() { return (this.mode & KITTY_MODE) >>> KITTY_SHIFT; }
+
+  // ── xterm.js-style surroundings: addons, live options, viewport, buffer ──
+
+  loadAddon(addon) {
+    this.addons.push(addon);
+    addon.activate(this);
+  }
+
+  dispose() {
+    for (const addon of this.addons.splice(0)) addon.dispose();
+    this.emit('dispose');
+    this.listeners.clear();
+  }
+
+  // `term.options.x = y` takes effect from the next byte, as in xterm.js.
+  liveOptions() {
+    const term = this;
+    return {
+      get profile() { return term.xterm ? 'xterm' : 'alacritty'; },
+      set profile(v) { term.xterm = v === 'xterm'; },
+      get convertEol() { return term.convertEol; },
+      set convertEol(v) { term.convertEol = !!v; },
+      get tabStopWidth() { return term.tabStopWidth; },
+      set tabStopWidth(v) { term.tabStopWidth = v || 8; term.tabs = term.makeTabs(term.cols); },
+      get scrollback() { return term.scrollback; },
+      set scrollback(v) { term.scrollback = v; (term.isAltScreen ? term.inactive : term.grid).updateHistory(v); },
+      get cellPixels() { return term.cellPixels; },
+      set cellPixels(v) { term.cellPixels = v; },
+      get colorScheme() { return term.colorScheme; },
+      set colorScheme(v) { term.setColorScheme(v); },
+    };
+  }
+
+  // A marker on the cursor's line (plus `offset`) of the screen in use; undefined off the buffer.
+  registerMarker(offset = 0) {
+    const line = this.grid.cursor.line + offset;
+    if (line < -this.historySize || line >= this.rows) return undefined;
+    return new Marker(this, this.grid, line);
+  }
+
+  // The viewport moves over the scrollback; 'viewport' tells the view to redraw.
+  scrollLines(n) { this.scrollToOffset(this.grid.displayOffset - n); }
+  scrollPages(n) { this.scrollLines(n * (this.rows - 1)); }
+  scrollToTop() { this.scrollToOffset(this.historySize); }
+  scrollToBottom() { this.scrollToOffset(0); }
+  scrollToLine(line) { this.scrollToOffset(this.historySize - line); }
+
+  scrollToOffset(offset) {
+    const next = Math.max(0, Math.min(this.historySize, offset));
+    if (next === this.grid.displayOffset) return;
+    this.grid.displayOffset = next;
+    this.emit('viewport', next);
+  }
+
+  get buffer() {
+    const alt = this.isAltScreen;
+    return {
+      active: new BufferView(this.grid, alt ? 'alternate' : 'normal'),
+      normal: new BufferView(alt ? this.inactive : this.grid, 'normal'),
+      alternate: new BufferView(alt ? this.grid : this.inactive, 'alternate'),
+      onBufferChange: fn => this.on('screen', () => fn(this.buffer.active)),
+    };
+  }
 
   // The host's light/dark scheme: answers `CSI ? 996 n`, and is reported unasked while a program
   // keeps mode 2031 set (xterm profile).
@@ -473,10 +539,16 @@ class Terminal {
     const out = [];
     for (let i = 0; i < this.plen;) {
       const k = this.psub[i];
-      out.push(Array.from(this.pvals.subarray(i, i + k)));
+      if (k === 1) out.push([this.pvals[i]]);
+      else { const g = []; for (let j = i; j < i + k; j++) g.push(this.pvals[j]); out.push(g); }
       i += k;
     }
     return out;
+  }
+
+  interString() {
+    const v = this.inter;
+    return v.length === 0 ? '' : v.length === 1 ? String.fromCharCode(v[0]) : String.fromCharCode(v[0], v[1]);
   }
 
   isExecute(b) { return b <= 0x17 || b === 0x19 || (b >= 0x1c && b <= 0x1f); }
@@ -601,7 +673,7 @@ class Terminal {
     if (this.plen === MAX_PARAMS) this.ignoring = true; else this.paramPush(false);
     this.state = S_DCS_PASS;
     this.dcsLast = 0;
-    const key = this.inter.map(c => String.fromCharCode(c)).join('') + String.fromCharCode(final);
+    const key = this.interString() + String.fromCharCode(final);
     this.dcs = !this.ignoring && (this.hasHandler('dcs', key) || (this.xterm && key === '$q'))
       ? { key, params: this.groups(), buf: [], over: false } : null;
   }
@@ -671,7 +743,7 @@ class Terminal {
         this.linefeed();
         // The app ignores LNM; xterm.js treats it as its convertEol option.
         if (this.convertEol || (this.xterm && (this.mode & MODE.LINE_FEED_NEW_LINE))) this.carriageReturn();
-        this.emit('linefeed');
+        if (this.listeners.has('linefeed')) this.emit('linefeed');
         break;
       case 0x07: this.emit('bell'); break;
       case 0x0f: this.activeCharset = 0; break;
@@ -919,13 +991,14 @@ class Terminal {
     this.xmode = 0;
     this.keyboardStack = [];
     this.inactiveKeyboardStack = [];
+    for (const marker of [...this.markers]) marker.dispose();
   }
 
   // ── ESC ──
 
   escDispatch(b) {
     const inter = this.inter;
-    if (this.handlers && this.hooked('esc', inter.map(c => String.fromCharCode(c)).join('') + String.fromCharCode(b))) return;
+    if (this.handlers && this.hooked('esc', this.interString() + String.fromCharCode(b))) return;
     const nrcs = this.xterm && NRCS[String.fromCharCode(b)];
     if (b === 0x42 || b === 0x30 || nrcs) {
       if (inter.length !== 1) return;
@@ -972,7 +1045,7 @@ class Terminal {
     if (this.plen === MAX_PARAMS) this.ignoring = true; else this.paramPush(false);
     this.state = S_GROUND;
     if (this.ignoring || this.inter.length > 2) return;
-    const groups = this.groups(), inter = this.inter.map(c => String.fromCharCode(c)).join('');
+    const groups = this.groups(), inter = this.interString();
     if (this.handlers && this.hooked('csi', inter + String.fromCharCode(b), paramsArray(groups))) return;
     this.csiDispatch(b, groups, inter);
   }
