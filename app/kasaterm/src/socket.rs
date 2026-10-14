@@ -4063,7 +4063,7 @@ impl Backend for PtyBackend {
             })
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| surface_id.to_string());
-        let mark = if outcome == "succeeded" { "완료" } else { "실패" };
+        let (mark, summary) = kasa_socket::cli::done_mark(outcome, summary);
         let line = if summary.is_empty() {
             format!("[{mark}] {who}({surface_id})")
         } else {

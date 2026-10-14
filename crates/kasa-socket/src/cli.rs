@@ -2131,6 +2131,20 @@ fn server_params(args: &[String]) -> Result<Value> {
     Ok(params)
 }
 
+/// 판(`surface.done`)이 실패로 받는 보고 종류와 요약 앞에 붙는 사연 — `done_mark` 가 이걸로 되읽는다.
+const DONE_NOTES: [(&str, &str); 3] = [("blocked", "막힘: "), ("needs_restart", "재시작 필요: "), ("needs_approval", "승인 필요: ")];
+
+/// 판 보고 한 줄의 머리표와 사연을 뗀 요약. 판은 성공·실패 둘뿐이라 승인을 구하는 보고도 실패로 오는데,
+/// 그대로 `[실패]` 로 찍으면 사람 차례인 일을 망친 일로 읽었다(2026-10-14).
+pub fn done_mark<'a>(outcome: &str, summary: &'a str) -> (&'static str, &'a str) {
+    if outcome == "succeeded" {
+        return ("완료", summary);
+    }
+    DONE_NOTES.iter()
+        .find_map(|(_, note)| summary.strip_prefix(note).map(|rest| (note.trim_end_matches(": "), rest)))
+        .unwrap_or(("실패", summary))
+}
+
 /// `done` 인자를 판 완료(`surface.done`)용과 오케스트레이터 보고용으로 가른다. 판은 성공·실패 둘만 받으므로
 /// 막힘·재시작·승인은 실패로 적되 요약 앞에 사연을 붙인다.
 fn split_done_args(args: &[String]) -> Result<(Vec<String>, Vec<String>)> {
@@ -2156,9 +2170,10 @@ fn split_done_args(args: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let (outcome, reported, note) = match status {
         "succeeded" | "success" | "ok" => ("succeeded", "done", ""),
         "failed" | "fail" => ("failed", "blocked", ""),
-        "blocked" => ("failed", "blocked", "막힘: "),
-        "needs_restart" => ("failed", "needs_restart", "재시작 필요: "),
-        "needs_approval" => ("failed", "needs_approval", "승인 필요: "),
+        kind @ ("blocked" | "needs_restart" | "needs_approval") => {
+            let note = DONE_NOTES.iter().find(|(k, _)| *k == kind).map_or("", |(_, note)| note);
+            ("failed", kind, note)
+        }
         "" => return Err(anyhow!("done needs <succeeded|failed|blocked|needs_restart|needs_approval> [한 줄 요약]")),
         other => return Err(anyhow!(
             "done 상태는 succeeded|failed|blocked|needs_restart|needs_approval 중 하나, 받은 것 \"{other}\""
@@ -4801,6 +4816,22 @@ mod tests {
         assert_eq!(&report[report.len() - 4..], &v(&["--status", "blocked", "--summary", "blocked"])[..]);
         assert!(super::split_done_args(&v(&["maybe"])).is_err());
         assert!(super::split_done_args(&v(&["--next"])).is_err());
+    }
+
+    #[test]
+    fn report_mark_reads_the_kind_back_from_the_board_summary() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mark = |a: &[&str]| {
+            let board = super::split_done_args(&v(a)).unwrap().0;
+            let (mark, rest) = super::done_mark(&board[0], board.get(1).map_or("", String::as_str));
+            (mark, rest.to_string())
+        };
+        assert_eq!(mark(&["succeeded", "다 했다"]), ("완료", "다 했다".into()));
+        assert_eq!(mark(&["needs_approval", "밀어도 될까요"]), ("승인 필요", "밀어도 될까요".into()));
+        assert_eq!(mark(&["needs_approval"]), ("승인 필요", "".into()));
+        assert_eq!(mark(&["blocked", "키 없음"]), ("막힘", "키 없음".into()));
+        assert_eq!(mark(&["needs_restart", "훅 고침"]), ("재시작 필요", "훅 고침".into()));
+        assert_eq!(mark(&["failed", "시험 3개 실패"]), ("실패", "시험 3개 실패".into()));
     }
 
     #[test]
