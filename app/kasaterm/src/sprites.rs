@@ -690,15 +690,34 @@ pub(crate) fn draw_student_face(
 /// 테마 캐릭터가 없는 학생 칸의 얼굴 자리 — 하네스 로고. 같은 하네스 칸이 여럿이면 같은 학생 여러 칸과
 /// 같은 규칙(`accent_variant` 순번)으로 색을 갈라 어느 칸인지 가린다(2026-10-09 「테마 없는 클로드·코덱스는
 /// 로고, 겹치면 색 다르게」). 학생 하네스가 아니면 아무것도 안 그리고 false.
+///
+/// 나쵸가 띄운 칸(`nacho_pane::badge`)은 그 창구 아이콘(슬랙·디코·앱)을 나쵸 색으로 — 창구를 모르면 하네스
+/// 로고에 나쵸 색만. 순번 색을 안 쓰는 건 그 색 갈래가 「같은 하네스 학생 여럿」을 가르는 말이라서다.
+/// `pane` 은 그 자리에 보이는 탭의 pid 여야 표지를 찾는다.
 pub(crate) fn draw_harness_logo(g: &mut gpu::GpuRenderer, harness: &str, pane: &str, x: f32, y: f32, size: f32) -> bool {
-    let icon = match harness {
-        "claude" => "claude",
-        "codex" => "codex",
-        "agy" => "antigravity",
-        _ => return false,
-    };
+    if let Some(icon) = nacho_icon(harness, pane) {
+        g.queue_icon(icon, x, y, size, theme::nacho());
+        return true;
+    }
+    let Some(icon) = harness_logo(harness) else { return false };
     g.queue_icon(icon, x, y, size, theme::accent_variant(theme::accent(), logo_ordinal(harness, pane)));
     true
+}
+
+fn harness_logo(harness: &str) -> Option<&'static str> {
+    match harness {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "agy" => Some("antigravity"),
+        _ => None,
+    }
+}
+
+/// 나쵸 칸이면 그 자리에 놓을 아이콘(나쵸 색으로 그린다) — 창구 아이콘, 창구를 모르면 하네스 로고.
+/// 칸 탭 띠와 얼굴 자리 로고가 같은 판정을 쓰게 한 곳에 둔다.
+pub(crate) fn nacho_icon(harness: &str, pane: &str) -> Option<&'static str> {
+    let logo = harness_logo(harness);
+    kasa_mcp::nacho_pane::badge(pane, logo.is_some()).map(|b| b.via.icon().or(logo).unwrap_or("terminal"))
 }
 
 /// 같은 하네스의 로고 칸 가운데 이 칸의 순번 — 칸 번호 순. 그리는 자리가 여럿(사이드바·대화 보기)이라
@@ -1481,5 +1500,20 @@ mod sidebar_blink_tests {
             teammate_sender_accent("모바일", Some("red")),
             [224, 88, 78, 255]
         );
+    }
+}
+
+#[cfg(test)]
+mod nacho_icon_tests {
+    use kasa_mcp::nacho_pane::Via;
+
+    /// 등록 안 된 이름은 `queue_icon` 이 조용히 넘어가 「표지를 붙였는데 안 보인다」가 된다.
+    #[test]
+    fn every_channel_icon_is_registered() {
+        for via in [Via::Slack, Via::Discord, Via::App, Via::Main] {
+            if let Some(name) = via.icon() {
+                assert!(crate::gpu::GpuRenderer::icon_svg(name).is_some(), "{name} 이 icon_svg 목록에 없다");
+            }
+        }
     }
 }

@@ -413,6 +413,9 @@ impl App {
             };
             (self.display_pane_char(&ws, id).unwrap_or_default(), kind)
         };
+        // 줄은 보이는 탭을 대표한다(`display_pane_char` 와 같은 탭) — 로고·나쵸 표지도 그 탭으로 찾는다.
+        let shown = self.ws.lock().unwrap().active_tab_pid(id);
+        let who = if self.tab_nacho_icon(&shown).is_some() { String::new() } else { who };
         let label = self.pane_row_label(id);
         let turn = row_turn(self.pane_needs_you(id), self.unread_panes.contains(id), self.pane_is_busy(id));
         // 학생 없는 pane 은 그 pane 이름(zsh·웹…)을 그대로 — 경로 앞 `~/` 를 도는 표시로 떼면 안 된다.
@@ -422,11 +425,11 @@ impl App {
             row_title(&label, kind)
         };
         let agent = if who.is_empty() {
-            self.pty.get(id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()).unwrap_or_default()
+            self.pty.get(&shown).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()).unwrap_or_default()
         } else {
             String::new()
         };
-        RowStudent { who, title, turn, agent, pane: id.to_string() }
+        RowStudent { who, title, turn, agent, pane: shown }
     }
 
     /// 목록 보기에 설 이 방 pane — 거울 줄을 빼고(원본 기기 줄과 같은 학생) 내 차례 → 하는 중 →

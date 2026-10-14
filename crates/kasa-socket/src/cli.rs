@@ -1984,6 +1984,7 @@ fn print_help() {
             "close %N… [--force]                       칸 닫기(미커밋 변경이 있으면 안 닫는다)",
             "rename-window [%N] <이름> | rename-window [%N] --color #rrggbb   %N 이면 그 칸 이름·색, 없으면 방 이름",
             "rename-window --room <칸> <이름>          그 칸이 든 방 이름",
+            "rename-window [%N] --nacho <slack|discord|app|main|none> [채널 이름]   나쵸가 띄운 칸 표지(창구 아이콘·나쵸 색)",
             "  다른 기기 칸: focus·close·move·rename-window 의 %N 자리에 %N@기계 · 이름@기계 · --address JSON",
             "attach <%N@기계|주소> [--on 기계] [--into 칸] [--focus]   다른 기기 칸을 거울 탭으로(--on 그 기계 화면에)",
         ]),
@@ -2276,6 +2277,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         }
         // rename-window [%N] <이름> | rename-window [%N] --color #rrggbb — %N 을 주면 그 칸의 이름(고정 —
         // claude 가 붙이는 제목이 못 덮는다)·색, 없으면 이 칸이 속한 방의 이름. 제목에 공백이 있으면 따옴표로.
+        // rename-window [%N|주소 JSON] --nacho <slack|discord|app|main|none> [채널 이름] — 나쵸가 띄운 칸의 표지
+        // (학생 칸과 가르는 창구 아이콘·나쵸 색). none 은 지우기.
         "rename-window" => {
             // `--room <칸> <이름>` — 그 칸이 든 방의 이름. 다른 기기 방은 이 꼴로만 고른다(이 칸이 그 방에 없다).
             if args.first().is_some_and(|a| a == "--room") {
@@ -2291,8 +2294,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 let address = view_address(Some(target))?;
                 return Ok(match (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
                     (Some("--color"), Some(color), None) => act(id, "color", json!({ "address": address, "color": color })),
+                    (Some("--nacho"), Some(via), place) if args.len() <= 4 => act(
+                        id,
+                        "nacho",
+                        json!({ "address": address, "via": via, "place": place.map(String::as_str).unwrap_or("") }),
+                    ),
                     (Some(title), None, None) if !title.starts_with("--") => act(id, "rename", json!({ "address": address, "title": title })),
-                    _ => return Err(anyhow!("rename-window <%N@기계|주소 JSON> <이름> | --color #rrggbb")),
+                    _ => return Err(anyhow!(
+                        "rename-window <%N@기계|주소 JSON> <이름> | --color #rrggbb | --nacho <창구> [채널]"
+                    )),
                 });
             }
             let pane_like = |s: &str| {
@@ -2301,7 +2311,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             };
             let pane = args.first().filter(|a| pane_like(a)).cloned();
             let rest = if pane.is_some() { &args[1..] } else { &args[..] };
-            if rest.first().is_some_and(|a| a == "--color") {
+            if rest.first().is_some_and(|a| a == "--nacho") {
+                let surface = pane.or_else(|| std::env::var("KASATERM_PANE_ID").ok()).ok_or_else(|| {
+                    anyhow!("rename-window --nacho needs %N or $KASATERM_PANE_ID")
+                })?;
+                let (Some(via), place, None) = (rest.get(1), rest.get(2), rest.get(3)) else {
+                    return Err(anyhow!("rename-window [%N] --nacho <slack|discord|app|main|none> [채널 이름]"));
+                };
+                ("surface.set_nacho", json!({ "surface_id": surface, "via": via, "place": place.map(String::as_str).unwrap_or("") }))
+            } else if rest.first().is_some_and(|a| a == "--color") {
                 let surface = pane.or_else(|| std::env::var("KASATERM_PANE_ID").ok()).ok_or_else(|| {
                     anyhow!("rename-window --color needs %N or $KASATERM_PANE_ID")
                 })?;
@@ -4553,6 +4571,15 @@ mod tests {
         let color = super::build_request("rename-window", &v(&["%5", "--color", "#ff0000"])).unwrap();
         assert_eq!((color.method.as_str(), color.params["color"].as_str()), ("surface.set_color", Some("#ff0000")));
         assert!(super::build_request("rename-window", &v(&["%5", "두", "토막"])).is_err(), "따옴표 빠진 제목은 거부");
+        let nacho = super::build_request("rename-window", &v(&["%5", "--nacho", "slack", "#dev-kasa"])).unwrap();
+        assert_eq!((nacho.method.as_str(), nacho.params["via"].as_str(), nacho.params["place"].as_str()),
+            ("surface.set_nacho", Some("slack"), Some("#dev-kasa")));
+        let clear = super::build_request("rename-window", &v(&["%5", "--nacho", "none"])).unwrap();
+        assert_eq!((clear.params["via"].as_str(), clear.params["place"].as_str()), (Some("none"), Some("")));
+        assert!(super::build_request("rename-window", &v(&["%5", "--nacho"])).is_err(), "창구가 없으면 거부");
+        let addr = r#"{"machine_id":"m1","surface_key":"k","surface_id":"%5"}"#;
+        let far = super::build_request("rename-window", &v(&[addr, "--nacho", "discord", "일반"])).unwrap();
+        assert_eq!((far.params["op"].as_str(), far.params["via"].as_str()), (Some("nacho"), Some("discord")));
         let server = super::build_request("tab:server", &v(&["--surface", "%2", "--clear"])).unwrap();
         assert_eq!(server.method, "surface.server");
     }

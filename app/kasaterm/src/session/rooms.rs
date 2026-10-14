@@ -518,6 +518,8 @@ impl App {
         }
         let n = self.windows.len();
         let mut out = Vec::with_capacity(n);
+        // 나쵸 방(이름 「나쵸」)의 칸과 탭 — 나쵸가 표지를 안 붙인 칸도 나쵸 색으로 서게(`nacho_pane::badge`).
+        let mut nacho_room = std::collections::HashSet::new();
         let ws = self.ws.lock().unwrap();
         for i in 0..n {
             if let Some(kind) = self.internal_room_kind_at(i) {
@@ -617,6 +619,14 @@ impl App {
                         .map(|c| c.folder.clone())
                 })
                 .unwrap_or_else(|| format!("win {}", i + 1));
+            if kasa_mcp::nacho_pane::is_room(&name) {
+                for id in &leaves {
+                    nacho_room.insert(id.clone());
+                    if let Some(p) = ws.panes.get(id) {
+                        nacho_room.extend(p.tabs.iter().filter_map(|t| t.pid.clone()));
+                    }
+                }
+            }
             let cwd = home
                 .as_ref()
                 .map(|p| Self::shorten_cwd(p))
@@ -629,6 +639,7 @@ impl App {
             out.push((name, cwd));
         }
         drop(ws);
+        kasa_mcp::nacho_pane::set_room_panes(nacho_room);
         self.window_labels = out;
         self.window_labels_at = Some(now);
         self.overlay_room_rename_label();

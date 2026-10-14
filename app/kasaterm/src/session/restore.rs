@@ -49,6 +49,7 @@ impl RestoredSurfaceKey {
         } else {
             kasa_mcp::surface_keys::ensure(id);
         }
+        kasa_mcp::nacho_pane::restore_from(record, id);
         Self { id: id.into(), committed: false }
     }
 }

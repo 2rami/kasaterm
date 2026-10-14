@@ -425,6 +425,25 @@ impl App {
             })
     }
 
+    /// 이 탭(pid)이 나쵸 칸이면 그 아이콘(`sprites::nacho_icon`). 탭 pid 로 물어야 한다 — 나쵸 칸은 나쵸 방
+    /// 바탕 셸 옆 탭이라 바깥 칸 id 로 물으면 셸이 답한다.
+    ///
+    /// 나쵸 칸은 판이 빈 학생 자리를 붙여 학생 얼굴로 서기도 한다. 그 얼굴은 나쵸 칸을 학생처럼 보이게 하는
+    /// 바로 그것이라, 줄·덱을 지을 때 이게 서면 학생 이름(얼굴 열쇠)을 비워 표지가 얼굴 자리를 갖게 한다.
+    pub(crate) fn tab_nacho_icon(&self, pid: &str) -> Option<&'static str> {
+        // 매 프레임 탭마다 불린다 — 나쵸와 무관한 탭은 하네스 판정(프로세스 표) 전에 빠진다.
+        if kasa_mcp::nacho_pane::get(pid).is_none() && !kasa_mcp::nacho_pane::in_room(pid) {
+            return None;
+        }
+        let harness = self.pty.get(pid).and_then(|s| s.active_agent()).map(|k| k.as_str()).unwrap_or("");
+        crate::sprites::nacho_icon(harness, pid)
+    }
+
+    /// 탭마다 나쵸 칸 아이콘 — `pane_tab_labels` 와 같은 차례.
+    pub(crate) fn pane_tab_badges(&self, pane: &PaneState) -> Vec<Option<&'static str>> {
+        pane.tabs.iter().map(|t| self.tab_nacho_icon(t.pid.as_deref()?)).collect()
+    }
+
     /// 메인 그리드 헤더 탭에 실을 제목들.
     pub(crate) fn pane_tab_labels(
         &self,
