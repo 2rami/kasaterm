@@ -173,7 +173,7 @@
 </head>
 <body>
 <div id="term"></div>
-<div class="term-mode-note">기본 문자 보기 <a id="native-view">앱 보기</a></div>
+<div class="term-mode-note">터미널 보기 <a id="native-view">앱 격자 보기</a></div>
 <div id="status" class="term-heading" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="세션 전환">
   <span class="term-avatar"><img id="avatar" alt=""><span id="ahole"></span></span>
   <span class="term-labels"><span id="who"></span><span id="whot"></span></span>
@@ -198,9 +198,11 @@
   // 주소 접두(`/u/<slug>` · `/u/<slug>/m/<기계>` · 없음)를 그대로 물려받는다 — fetch 도 WS 도
   // 같은 문으로 나가야 자격이 따라간다.
   const ROOT = location.pathname.replace(/\/term\/?$/, '');
-  const ansiRequested = location.search.slice(1).split('&').some(part => {
+  // 기본은 kasaterm.js(브라우저가 앱과 같은 해석기로 raw 바이트를 그림). 서버가 해석한 격자를
+  // 그리는 옛 기본은 `?renderer=grid` 로 남는다. 예전 링크의 `renderer=ansi` 는 기본과 같다.
+  const gridRequested = location.search.slice(1).split('&').some(part => {
     const [key, value] = part.split('=');
-    return key === 'renderer' && value === 'ansi';
+    return key === 'renderer' && value === 'grid';
   });
   // pane id 는 `%151` 처럼 생겼는데, URLSearchParams 는 그 `%15` 를 퍼센트 인코딩으로
   // 읽어 0x15 로 디코딩한다 — 남는 건 제어문자+`1` 이라 목록 매칭도 칩도 조용히 깨진다.
@@ -230,8 +232,8 @@
       }
     } catch {}
   }
-  // The default enters the composed grid before opening any socket or accepting input.
-  if (!ansiRequested) {
+  // The grid view is entered before opening any socket or accepting input.
+  if (gridRequested) {
     location.replace(`${ROOT}/term/grid${location.search}${location.hash}`);
     return;
   }

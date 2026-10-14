@@ -114,7 +114,7 @@ const badge = (p) => {
   return b;
 };
 // pane id 는 `%3` 꼴 — encodeURIComponent 로 `%253` 이 되어야 서버가 원문을 되찾는다.
-const link = (base, p) => `${base}/term/grid?pane=${encodeURIComponent(p.id)}`;
+const link = (base, p) => `${base}/term?pane=${encodeURIComponent(p.id)}`;
 
 function section(title, base, panes, labels, extra) {
   const sect = document.createElement('div'); sect.className = 'sect';

@@ -38,8 +38,9 @@ cargo build -p kasa-mcp --bin kasa-serve-web
 
 | 라우트 | 하는 일 |
 |---|---|
-| `GET /term` | pane 선택을 보존한 뒤 앱 본문 grid 보기로 이동 |
-| `GET /term?renderer=ansi` | 기본 문자 보기 — kasaterm.js(`web/kasaterm-js`, 앱과 같은 해석기)가 raw 바이트를 그린다 |
+| `GET /term` | **기본 터미널** — kasaterm.js(`web/kasaterm-js`, 앱과 같은 해석기)가 raw 바이트를 브라우저에서 해석해 그린다 |
+| `GET /term?renderer=grid` | pane 선택을 보존한 뒤 서버가 해석한 격자를 그리는 `/term/grid` 로 이동(학생 그림 장면 포함) |
+| `GET /term?renderer=ansi` | 옛 링크 — 기본과 같다 |
 | `GET /term/ws` | **웹 전용 셸을 새로 띄운다.** 연결이 끊기면 셸도 끝난다 |
 | `GET /term/ws?pane=%1` | 기존 kasaterm pane 을 **미러**한다 (아래 ⚠️) |
 | `GET /term/panes` | 살아 있는 pane 목록(미러 대상 고르기용) |
@@ -143,9 +144,9 @@ FontFaceSet의 로드된 얼굴과 실제 폰트 요청을 함께 확인한다. 
 motion에서는 멈춘다. 늦은 자산 응답에는 scene 세대 가드를 둔다. 같은 idle scene의 일시
 실패도 제한된 backoff로 회복하되, 계속 실패하면 visibility/online 복귀까지 재시도를 쉰다.
 
-`/term` 기본 전환은 WebSocket을 열기 전이므로 owned 셸을 중복 생성하지 않는다.
-서버가 알려준 셸 ID는 URL과 재접속에 유지한다. `renderer=ansi`에서는 원래 문자 로고가
-보이는 기본 터미널임을 표시하고, 같은 세션을 앱 보기로 여는 링크를 제공한다.
+`renderer=grid` 전환은 WebSocket을 열기 전이므로 owned 셸을 중복 생성하지 않는다.
+서버가 알려준 셸 ID는 URL과 재접속에 유지한다. 기본 터미널 보기는 위에 「터미널 보기」 표지와
+같은 세션을 앱 격자 보기로 여는 링크를 둔다. 경로 판정 시험은 `node scripts/test-webterm-routing.cjs`.
 
 실측: 격리 GUI의 실제 Claude 첫 응답을 고정 60×41에서 추적해 native 67회, raw 폴백
 0회를 확인했다. 이 구간에는 창 캡처와 `/term/shot`을 실행하지 않았다. 작업 중 창 캡처를
@@ -167,9 +168,9 @@ motion에서는 멈춘다. 늦은 자산 응답에는 scene 세대 가드를 둔
 
 | 주소 | 하는 일 |
 |---|---|
-| `/u/<slug>/` | **허브** — 이 기계·명부 기계의 pane 목록(대기 ● 먼저), 누르면 터미널 |
-| `/u/<slug>/term/grid?pane=%25N` | 그리드 터미널(폰 기본) |
-| `/u/<slug>/term`, `/u/<slug>/arona-ui/` | 문자 보기 · 아로나 — 전부 같은 접두 아래 |
+| `/u/<slug>/` | **허브** — 이 기계·명부 기계의 pane 목록(대기 ● 먼저), 누르면 `term?pane=` 터미널 |
+| `/u/<slug>/term?pane=%25N` | 터미널(kasaterm.js, 폰 기본) |
+| `/u/<slug>/term/grid?pane=%25N`, `/u/<slug>/arona-ui/` | 서버 격자 보기 · 아로나 — 전부 같은 접두 아래 |
 | `/u/<slug>/m/<기계>/…` | **다른 기계로 넘기는 문** — machines.json 의 그 기계 `/…` 로 프록시(HTTP·WS) |
 | `/hub`, `/m/<기계>/…` | 로컬(127.0.0.1)에서는 접두 없이도 같은 화면 |
 | `GET/POST/DELETE /mobile/users?name=` | 유저 목록·추가(`&rotate=1` 이면 새 주소)·삭제 — **주인 주소나 로컬에서만** |
@@ -264,7 +265,9 @@ slug 404 / 슬래시 없는 `/u/<slug>?pane=%250` → 307 로 쿼리 보존 / �
 ## 그리드 모드 `/term/grid` — xterm.js 를 안 거치는 길 (2026-08-25)
 
 **폰에서 한글을 치면 자모가 낱개로 나가던 것**(「이렇게」→ `ㅇㅣㄹㅓㅎㄱㅔ`)을 고치면서
-생긴 두 번째 경로다. 옛 `/term`(xterm.js)은 **그대로 두었다** — 회귀 위험 0.
+생긴 두 번째 경로다. 그때 옛 `/term`(xterm.js)은 그대로 두었다. 2026-10 에 `/term` 이 xterm.js 를 걷고
+자체 kasaterm.js 로 바뀌면서 기본으로 돌아왔다 — 입력은 아래와 같은 textarea 차이 방식이라 같은 폰에서도
+자모가 안 샌다. 이 격자 보기는 `?renderer=grid` 로 남았다.
 
 원인은 실측으로 확정했다. 그 폰 키보드는 `compositionstart` 를 **아예 안 쏘고**,
 `keyCode 0` 으로 자모를 보내면서 textarea 를 `deleteContentBackward` + `insertText` 로
@@ -324,7 +327,7 @@ http://127.0.0.1:<포트>/term/grid?pane=%250 # 미러(`%` 는 %25 로)
 ### 아직 안 붙은 것
 
 세션·pane 고르는 목록, ⤢ 강제 맞춤 단추, esc/tab 터치 바, 스크롤백, 마우스 리포팅,
-학생 프사. 전부 옛 `/term` 에는 있다.
+학생 프사. 전부 `/term` 에는 있다.
 
 ## 설계에서 건드리면 안 되는 것
 

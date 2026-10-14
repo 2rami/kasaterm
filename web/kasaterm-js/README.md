@@ -116,10 +116,11 @@ term.view.scrollLines(n); term.view.selectionText(); term.focus();
 
 ## 웹 터미널에 실린 자리 (3단계)
 
-`/term?renderer=ansi`(기본 문자 보기)가 kasaterm.js 로 그린다. `node build.mjs` 가 `dist/` 와 함께
+`/term` 의 기본 보기가 kasaterm.js 다(옛 링크의 `?renderer=ansi` 도 같다). 서버가 해석한 격자를 그리는 옛 보기는
+`/term?renderer=grid`(→ `/term/grid`)로 남았다. `node build.mjs` 가 `dist/` 와 함께
 `crates/kasa-mcp/assets/term/kasaterm.js` 를 쓰고, 앱이 그 파일을 `/term/kasaterm.js` 로 낸다(바이너리에 박힘).
-src 를 고쳤으면 빌드한 자산도 같이 커밋한다. `/term` 기본(주소에 renderer 가 없을 때)은 지금처럼 서버가 해석한
-격자를 그리는 `/term/grid` 다.
+src 를 고쳤으면 빌드한 자산도 같이 커밋한다. 페이지는 사람이 친 것(`term.on('input')`)만 서버로 보낸다 — 프로그램의
+질의에는 서버 쪽 kasa-pty 가 이미 답한다.
 
 ## 남은 단계
 
