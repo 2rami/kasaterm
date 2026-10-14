@@ -83,8 +83,8 @@ pub fn set_cell_pixels(w: u32, h: u32) {
     CELL_PX.store(((w as u64) << 32) | h as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 알려진 셀 픽셀 크기, 모르면 `None`.
-pub(crate) fn cell_pixels() -> Option<(u32, u32)> {
+/// 알려진 셀 픽셀 크기, 모르면 `None`. 웹 터미널도 이 값으로 그림 칸 수를 앱과 같게 잰다.
+pub fn cell_pixels() -> Option<(u32, u32)> {
     let v = CELL_PX.load(std::sync::atomic::Ordering::Relaxed);
     let (w, h) = ((v >> 32) as u32, v as u32);
     (w > 0 && h > 0).then_some((w, h))

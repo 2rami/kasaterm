@@ -188,8 +188,13 @@ term.view.scrollLines(n); term.view.selectionText(); term.focus();
   같은 규칙 — 마우스를 켠 프로그램엔 휠 보고, 대체 화면+1007 이면 방향키, 그 밖엔 스크롤백.
 - **선택·복사**: 끌기·두 번(단어)·세 번(접힌 줄까지 한 줄) 누르기, Cmd+C(맥)·Ctrl+Shift+C. 접힌 줄은 이어 붙이고
   줄 끝 공백은 뗀다. **링크**: OSC 8 과 글 속 `http(s)://` 주소에 올리면 밑줄, Cmd/Ctrl+누르기로 연다.
+- **칸 안 그림**: 해석 쪽의 `image`/`imagedelete` 이벤트를 텍스트 위 캔버스 한 장에 앱(kasa-gridview·inline.rs·kitty.rs)과
+  같은 규칙으로 그린다 — iTerm 은 칸 상자 가운데에 원본 크기까지만(원본 크기는 앱의 물리 픽셀 칸 `term.cellPixels` 기준이라
+  글자 대비 크기가 앱과 같다), 걸린 줄의 앞 64자가 바뀌면 버림. kitty 는 상자에 비율 맞춰 채움, 유니코드 자리표시(U+10EEEE)
+  칸은 전경색·밑줄색·결합 부호로 그림·놓기·행·열을 읽어 그 칸의 조각만. 식셀(xterm 프로필)은 픽셀 그대로. `/term` 은 서버
+  `size` 프레임의 `cell`(앱 칸 픽셀)을 `term.cellPixels` 에 넣는다. kitty `z<0`(글 아래)도 지금은 글 위에 그린다.
 - 브라우저 시험: `node test-view/input.mjs`(Playwright 를 전역에 깔아 두면 헤드리스 크롬으로 키·IME 조합·폰식 조합·
-  붙여넣기·선택·휠·마우스 보고·포커스를 확인).
+  붙여넣기·선택·휠·마우스 보고·포커스를 확인), `node test-view/images.mjs`(그림 네 갈래와 지우기 규칙).
 
 ## 웹 터미널에 실린 자리 (3단계)
 
