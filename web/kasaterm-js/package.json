@@ -1,0 +1,12 @@
+{
+  "name": "kasaterm-js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Terminal emulator for the web that interprets PTY bytes exactly like kasaterm",
+  "license": "MIT",
+  "main": "dist/kasaterm.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node test/run.mjs"
+  }
+}
