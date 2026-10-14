@@ -3,7 +3,7 @@
 // text, width flags, colours, attributes, underline colour and link, plus cursor, modes,
 // scrollback and the replies sent back to the program.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -19,6 +19,12 @@ export function oraclePath() {
     join(process.env.CARGO_TARGET_DIR || join(REPO, 'target'), 'release', 'examples', 'vt_oracle')];
   const found = candidates.find(p => p && existsSync(p));
   if (!found) throw new Error('vt_oracle not built: cargo build --release -p kasa-pty --example vt_oracle');
+  // A binary older than its source answers an older question: cases that need what was added
+  // since (KTJS_KITTY, say) fail for no reason in kasaterm.js.
+  const source = join(REPO, 'crates', 'kasa-pty', 'examples', 'vt_oracle.rs');
+  if (existsSync(source) && statSync(source).mtimeMs > statSync(found).mtimeMs) {
+    throw new Error(`${found} is older than vt_oracle.rs: cargo build --release -p kasa-pty --example vt_oracle`);
+  }
   return found;
 }
 
