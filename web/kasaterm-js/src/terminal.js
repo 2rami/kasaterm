@@ -400,7 +400,7 @@ class Terminal {
     const batch = cut === n ? all : all.subarray(0, cut);
     let ascii = true;
     for (let i = 0; i < batch.length; i++) if (batch[i] >= 0x80) { ascii = false; break; }
-    if (ascii) return batch;
+    if (ascii || !mayChangeUnderNfc(batch)) return batch;
     const text = strictUtf8(batch);
     return text === null ? batch : textEncoder.encode(text.normalize('NFC'));
   }

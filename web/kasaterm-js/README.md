@@ -163,6 +163,16 @@ term.view.scrollLines(n); term.view.selectionText(); term.focus();
 src 를 고쳤으면 빌드한 자산도 같이 커밋한다. 페이지는 사람이 친 것(`term.on('input')`)만 서버로 보낸다 — 프로그램의
 질의에는 서버 쪽 kasa-pty 가 이미 답한다.
 
-## 남은 단계
+## 속도 (4단계)
 
-4. 속도 — xterm.js 와 처리량·프레임 시간 비교(큰 출력 흘리기, 긴 스크롤백). 모자라면 WebGL 렌더러.
+`bench/` — `npm i` 로 비교 대상(xterm.js 6.0·WebGL 애드온·headless)을 받고, 옛 `/term` 의 xterm.js 5.5 는 git 기록에서 꺼낸다.
+
+- `node bench/headless.mjs` — 그리기 없이 파서 처리량. 같은 바이트(평문·색·한글·TUI 다시 그리기·실제 녹화)를 64KB read 로 넣는다.
+- `node bench/browser.mjs` — 헤드리스 크롬(실제 GPU)에서 그리기까지. 메시지 하나씩 흘려 총 시간·메인 스레드 시간·프레임
+  간격을 재고, 스크롤백을 한 걸음씩 굴린다. 예열 뒤 3회 중앙값.
+
+결론: **그리기는 병목이 아니라 WebGL 렌더러는 만들지 않는다.** 캔버스 2D 로 바뀐 줄만 그려 모든 흘리기에서 프레임 간격 p95 가
+9~10ms(120Hz)로 고르고, 스크롤백 한 걸음은 메인 스레드 1.8ms(xterm DOM 5.3ms, WebGL 0.8ms)다. 실제 세션 녹화와 색이 많은
+출력은 xterm.js 5.5/6.0 DOM 보다 빠르다. 처리량 차이는 해석기 쪽이라 거기서 줄인다 — NFC 는 바뀔 수 있는 글자(NFC_Quick_Check
+No/Maybe·결합 등급·한글 자모, `tools/gen-nfc-table.py`)가 있는 묶음에서만 돌린다(한글 49→65MB/s).
+

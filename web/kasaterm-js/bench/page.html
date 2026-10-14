@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="/xterm6.css">
+<style>@font-face{font-family:'KasaTerm';src:url('/font.woff2') format('woff2')}
+html,body{margin:0;background:#12161c}#t{position:absolute;left:0;top:0;width:1100px;height:720px}</style></head>
+<body><div id="t"></div>
+<script>
+// One terminal per page load: `?term=kasa|xterm55|xterm6|xterm6-webgl`.
+const kind = new URLSearchParams(location.search).get('term');
+const FONT = '"KasaTerm", "Apple SD Gothic Neo", monospace';
+function load(src) { return new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = no; document.head.append(s); }); }
+const frame = () => new Promise(r => requestAnimationFrame(() => r()));
+window.setup = async () => {
+  await document.fonts.load('13px KasaTerm');
+  const el = document.getElementById('t');
+  if (kind === 'kasa') {
+    await load('/kasaterm.js');
+    const t = new KasaTerm.Terminal({ cols: 120, rows: 40, scrollback: 10000 });
+    t.open(el, { fontFamily: FONT, fontSize: 13 });
+    window.term = { write: (d, cb) => { t.write(d); if (cb) cb(); }, scroll: n => t.view.scrollLines(n), raw: t };
+  } else {
+    if (kind === 'xterm55') {
+      const link = document.querySelector('link'); link.href = '/xterm55.css';
+      await load('/xterm55.js');
+    } else {
+      await load('/xterm6.js');
+      if (kind === 'xterm6-webgl') await load('/xterm6-webgl.js');
+    }
+    const t = new Terminal({ cols: 120, rows: 40, scrollback: 10000, fontFamily: FONT, fontSize: 13, allowProposedApi: true });
+    t.open(el);
+    if (kind === 'xterm6-webgl') t.loadAddon(new WebglAddon.WebglAddon());
+    window.term = { write: (d, cb) => t.write(d, cb), scroll: n => t.scrollLines(n), raw: t };
+  }
+  await frame(); await frame();
+};
+// Chunks arrive as separate tasks, the way WebSocket messages do. Resolves once everything is
+// parsed and two frames have been drawn after it.
+window.flood = async (url) => {
+  const buf = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const parts = [];
+  for (let i = 0; i < buf.length; i += 65536) parts.push(buf.subarray(i, i + 65536));
+  const gaps = [];
+  let last = performance.now(), running = true;
+  const tick = () => { const now = performance.now(); gaps.push(now - last); last = now; if (running) requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+  const start = performance.now();
+  await new Promise(done => {
+    const ch = new MessageChannel();
+    let i = 0;
+    ch.port1.onmessage = () => {
+      const last = i === parts.length - 1;
+      term.write(parts[i++], last ? done : undefined);
+      if (!last) ch.port2.postMessage(0);
+    };
+    ch.port2.postMessage(0);
+  });
+  await frame(); await frame();
+  const total = performance.now() - start;
+  running = false;
+  return { total, gaps };
+};
+// Wheel through scrollback a few lines at a time, one step per frame.
+window.scrollback = async (steps) => {
+  const gaps = [];
+  term.scroll(-100000); await frame();
+  let last = performance.now();
+  const start = performance.now();
+  for (let i = 0; i < steps; i++) {
+    term.scroll(3);
+    await frame();
+    const now = performance.now(); gaps.push(now - last); last = now;
+  }
+  return { total: performance.now() - start, gaps };
+};
+window.gpu = () => {
+  const gl = document.createElement('canvas').getContext('webgl2');
+  const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+  return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : (gl ? 'webgl2 (renderer hidden)' : 'none');
+};
+</script></body></html>
