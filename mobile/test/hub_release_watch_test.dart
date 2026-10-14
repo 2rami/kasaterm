@@ -92,22 +92,26 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     expect(server.asked, [null, '2610011500']);
 
-    // 돌아와도 새로 붙지 않는다 — 이미 매달린 줄이 그대로다.
+    final oldWatch = server.answers.last;
+    // 유예 안에서도 HTTP가 반쯤 닫힐 수 있어 새 줄로 갈아탄다.
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
-    expect(server.asked, hasLength(2));
+    expect(server.asked, hasLength(3));
+    oldWatch.complete(_build('2610011600'));
+    await tester.pump();
+    expect(server.asked, hasLength(3), reason: '늦은 옛 응답은 새 감시를 만들지 않는다');
 
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     await tester.pump(BackgroundGrace.cap);
     server.answers.last.complete(_build('2610011600'));
     await tester.pump(const Duration(minutes: 2));
-    expect(server.asked, hasLength(2));
+    expect(server.asked, hasLength(3));
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
-    expect(server.asked, hasLength(3));
+    expect(server.asked, hasLength(4));
     await tester.pumpWidget(const SizedBox());
   });
 

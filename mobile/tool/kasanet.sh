@@ -8,11 +8,12 @@ cd "$(dirname "$0")/.."
 root=$(cd .. && pwd)
 out=ios/KasaNet/KasaNet.xcframework
 targets=(aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios)
-rustup target add "${targets[@]}" >/dev/null 2>&1 || true
+rustup target add "${targets[@]}"
 export IPHONEOS_DEPLOYMENT_TARGET=15.0
 for t in "${targets[@]}"; do
+  # An old archive is not proof of this build: never turn a cargo failure into success.
   cargo build --manifest-path "$root/Cargo.toml" -p kasa-net-ffi --release --lib --target "$t" \
-    --target-dir "$root/target/ios" 2>&1 | grep -E "^(error|warning: unused)" || true
+    --target-dir "$root/target/ios"
   [ -f "$root/target/ios/$t/release/libkasa_net_ffi.a" ] || { echo "kasa-net-ffi($t) 굽기 실패" >&2; exit 1; }
 done
 sim="$root/target/ios/sim/libkasa_net_ffi.a"

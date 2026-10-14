@@ -232,11 +232,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
     super.dispose();
   }
 
-  /// 다른 앱에 다녀오는 동안은 소켓을 그대로 둔다 — 돌아오면 화면이 이미 지금이다.
+  /// 화면·초안은 남기고 연결만 새로 맺어, 유예 안에서 죽은 소켓도 기다리지 않는다.
   void _graceChanged() {
     if (BackgroundGrace.instance.live) {
       _session.resume();
       _startPaneRefresh();
+      unawaited(_refreshPane());
     } else {
       _session.pause();
       _stopPaneRefresh();
@@ -257,6 +258,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
       _bottomTick++;
     });
     try {
+      if ((_pendingAttachment || (_ctrl && field == _input)) && !_session.canSend) {
+        throw const ServerException('다시 연결 중이에요. 글과 사진은 그대로 두었어요.');
+      }
       if (text.isEmpty && _pendingAttachment) {
         _session.sendText('\r');
       } else if (_ctrl && text.length == 1 && field == _input) {
@@ -364,15 +368,17 @@ class _TerminalScreenState extends State<TerminalScreen> {
   /// 엔터 — 글자 바로 뒤에 붙여 보내면 Ink 가 엔터를 먹는다(서버 `send` 가 140ms 를
   /// 기다리는 이유와 같다). 마지막 글자에서 조금 떨어뜨려 보낸다. [enter] 가 LF 면 줄바꿈.
   Future<void> _liveSubmit([String enter = '\r']) async {
-    if (_sending || _attaching) return;
+    if (_sending || _attaching || !_session.canSend) return;
     _sendLive(_liveInput.flush(_input.value));
     setState(_dropLive);
     final gap = DateTime.now().difference(_lastLiveSend);
-    if (gap < TermSession.enterGap) {
-      await Future<void>.delayed(TermSession.enterGap - gap);
+    try {
+      await _session.sendTextAfter(enter, TermSession.enterGap - gap);
+    } on ServerException catch (e) {
+      if (mounted) _toast(e.message);
+      return;
     }
     if (!mounted || widget.server.isClosed) return;
-    _session.sendText(enter);
     if (enter == '\r') _pendingPhotos.clear();
     _toBottom();
     _inputFocus.requestFocus();
@@ -841,7 +847,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         _LiveBar(
           controller: _input,
           focusNode: _inputFocus,
-          enabled: s.state != TermState.gone && !_attaching,
+          enabled: s.canSend && !_attaching,
           autofocus: autofocus,
           onChanged: _onLiveChanged,
           onSubmit: _liveSubmit,
@@ -1035,6 +1041,7 @@ class _KeyBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = session;
     VoidCallback tap(void Function() send) => () {
+      if (!s.canSend) return;
       send();
       onKey();
     };

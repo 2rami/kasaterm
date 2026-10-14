@@ -91,6 +91,8 @@ class SwipeSession extends TermSession {
   @override
   void connect() {}
   @override
+  bool get canSend => !server.isClosed && state == TermState.connected;
+  @override
   void sendText(String text) {}
   @override
   void sendBytes(List<int> bytes) {}

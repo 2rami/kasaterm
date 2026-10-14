@@ -29,6 +29,10 @@ UI는 Pretendard 400/600(OFL)을 사용하고 터미널은 TermMono/TermHangul/T
 
 iOS 빌드 전에 `tool/kasanet.sh` 가 카사넷 정적 라이브러리(`ios/KasaNet/KasaNet.xcframework`, 커밋하지 않음)를 굽는다 —
 `sim.sh`·`phone.sh`·`adhoc.sh` 는 먼저 부른다. 손으로 `flutter build ios` 할 때도 먼저 부른다.
+`netdev 0.46.3`·`netwatch 0.19.3`의 iOS API 참조가 libc 0.2.190과 맞지 않아 루트 매니페스트에서
+libc를 0.2.189로 고정한다. 이 판에는 PC의 `proc_bsdshortinfo`도 있으므로 폰을 구운 뒤 lock을
+다시 바꿀 필요가 없다. 상류 호환 수정 뒤 고정을 풀되 iOS 3타깃과 PC를 함께 검사한다.
+Cargo 실패는 예전 `.a` 파일이 있어도 즉시 빌드 실패다(`python3 tool/test_kasanet_build.py`).
 
 폰·아이패드 배포는 설치 링크 `tool/adhoc.sh`([절차](../docs/ios-adhoc-install.md))다. `testflight.sh` 는 2026-10-01부터 쓰지 않는다.
 
@@ -51,6 +55,23 @@ Keychain 접근이 거부될 수 있어 로그인 저장소 검증용으로 쓰�
   그때 폴링은 도구 이름·컨텍스트 % 용으로 15초에 한 번만 한다. `status` 가 없는 옛 판은 5초 폴링,
   길 자체가 없으면(404) 폴링만 한다. 끊기면 2→30초로 물러서며 다시 붙는다.
 - 읽는 중에 또 부르면 겹쳐 쏘지 않고 끝난 뒤 한 번만 더 읽는다. 앱이 쉬면 멈추고 돌아오면 바로 다시 읽는다.
+
+## 백그라운드에서 돌아오기
+
+iOS 유예(최대 25초) 동안 받기를 이어가되, 복귀 때는 유예 만료 여부와 무관하게 HTTP 묶음과
+터미널 소켓을 새로 맺는다. 제어센터·인증창처럼 `inactive`만 거친 경우에는 끊지 않는다.
+기기 route·pane·대화/터미널 보기·초안·마지막 화면은 유지하고, 복귀 동작으로 입력이나 POST를 다시 보내지 않는다.
+기존 대화 보내기의 재시도는 같은 `message_id`로 중복을 막는 계약을 그대로 따른다.
+계정의 기본 기기 목록도 `/version`으로 기기 ID를 먼저 확인한 뒤 그 ID에서 읽는다. 행에 ID를
+붙여 계정 허브가 바뀌어도 열린 pane과 입력 대상이 바뀌지 않으며, ID를 모르면 목록 조회를 거부한다.
+복귀한 터미널은 낡은 직통 상태를 믿지 않고 같은 기기의 관문으로 먼저 붙으며, 이후 경로 변경이
+확인되면 직통으로 옮길 수 있다. 직통 악수 실패·첫 프레임 시간 초과도 관문으로 되돌아간다.
+새 프레임 전에는 키를 보내지 않으며, 사진 뒤 지연 Enter가 다른 연결로 넘어가지 않게 세대를 검사한다.
+로그아웃·실제로 종료된 pane은 복귀로 되살리지 않는다.
+
+`background_grace_test.dart`, `foreground_reconnect_test.dart`, `foreground_screen_test.dart`,
+`reconnect_test.dart`, `kasanet_test.dart`가 유예 안/밖 복귀·반쯤 열린 소켓·동일 대상·초안 보존·
+입력 비재전송을 가짜 서버로 검사한다. iOS가 백그라운드에서 통신을 계속 허용한다는 보장은 아니다.
 
 ## 사진 첨부와 화면 밝기
 

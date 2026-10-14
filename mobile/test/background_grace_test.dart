@@ -38,7 +38,7 @@ void main() {
     (_) {},
   );
 
-  testWidgets('잠깐 다녀오면 닫지 않는다 — 돌아와도 다시 붙을 일이 없다', (tester) async {
+  testWidgets('유예 중에는 유지하고 돌아오면 반쯤 열린 연결도 새로 잇게 알린다', (tester) async {
     grace.didChangeAppLifecycleState(AppLifecycleState.hidden);
     grace.didChangeAppLifecycleState(AppLifecycleState.paused);
     await tester.pump(const Duration(seconds: 10));
@@ -47,10 +47,12 @@ void main() {
     grace.didChangeAppLifecycleState(AppLifecycleState.resumed);
     await tester.pump();
     expect(grace.live, isTrue);
-    expect(changes, 0);
+    expect(changes, 1);
     expect(calls, ['begin', 'end']);
     await tester.pump(BackgroundGrace.cap);
     expect(grace.live, isTrue);
+    grace.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    expect(changes, 1, reason: '같은 복귀 통지를 두 번 받아도 다시 열지 않는다');
   });
 
   testWidgets('유예 안에 돌아와도 돌아온 순간을 알린다 — 묶어 둔 연결은 그 사이 끊겼을 수 있다', (tester) async {
@@ -101,6 +103,24 @@ void main() {
     await tester.pump();
     await expiredFromIos();
     expect(grace.live, isTrue);
-    expect(changes, 0);
+    expect(changes, 1);
+  });
+
+  testWidgets('짧거나 긴 외출 모두 HTTP 정리를 화면 재연결보다 먼저 한다', (tester) async {
+    final order = <String>[];
+    void changed() { if (grace.live) order.add('screen'); }
+    grace.onReturn = () => order.add('http');
+    grace.addListener(changed);
+    addTearDown(() {
+      grace.onReturn = null;
+      grace.removeListener(changed);
+    });
+    for (final away in [const Duration(seconds: 2), BackgroundGrace.cap]) {
+      grace.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      await tester.pump(away);
+      grace.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+    }
+    expect(order, ['http', 'screen', 'http', 'screen']);
   });
 }

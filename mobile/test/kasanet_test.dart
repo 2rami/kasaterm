@@ -123,7 +123,7 @@ void main() {
       session.protocols,
     );
 
-    await server.panesOrEmpty();
+    await server.panesOrEmpty(machine: '~mac1');
     final direct = wire.requests.lastWhere((r) => r.url.host == '127.0.0.1');
     expect(
       direct.headers.containsKey('authorization'),
@@ -187,9 +187,9 @@ void main() {
     await settle();
     wire.directDown = true;
     wire.requests.clear();
-    await server.panesOrEmpty();
+    await server.panesOrEmpty(machine: '~mac1');
     expect(wire.requests.map((r) => r.url.host), ['127.0.0.1', 'gw.example']);
-    expect(wire.requests.last.url.path, '/relay/account/term/panes');
+    expect(wire.requests.last.url.path, '/relay/account/m/~mac1/term/panes');
     expect(wire.requests.last.headers['authorization'], 'Bearer tok');
 
     wire.requests.clear();
@@ -297,12 +297,32 @@ void main() {
       hasLength(1),
     );
   });
+
+  test('복귀하면 이전 망에서 없던 기기의 긴 대기도 풀고 다시 배운다', () async {
+    final wire = Wire()..kasanet = false;
+    final native = FakeNative();
+    final server = Server.account(session, client: wire.client, kasanet: native);
+    addTearDown(server.close);
+    server.uri('term/panes', machine: '~mini');
+    await settle();
+    expect(native.opened, isEmpty);
+    wire.kasanet = true;
+    server.uri('term/panes', machine: '~mini');
+    await settle();
+    expect(native.opened, isEmpty, reason: '복귀 전에는 실패 뒤 대기');
+    KasanetRouter.resumed();
+    server.uri('term/panes', machine: '~mini');
+    await settle();
+    expect(native.opened, hasLength(1));
+    expect(server.wsUri('term/ws', query: {'pane': '%3'}, machine: '~mini', gateway: true).path,
+        '/relay/account/m/~mini/term/ws');
+  });
 }
 
 extension on Server {
-  Future<void> panesOrEmpty() async {
+  Future<void> panesOrEmpty({String? machine}) async {
     try {
-      await panes();
+      await panes(machine: machine);
     } catch (_) {}
   }
 }

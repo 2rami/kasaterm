@@ -70,8 +70,10 @@ class _HubScreenState extends State<HubScreen> {
   /// 지금 도는 지켜보기의 번호 — 뒤로 가면 올려 앞 것을 멈춘다.
   int _releaseRun = 0;
   Timer? _releaseNap;
+  Completer<void>? _releaseWake;
 
   Future<void> _watchReleases() async {
+    _stopWatchingReleases();
     final run = ++_releaseRun;
     String? seen;
     while (mounted && run == _releaseRun) {
@@ -84,6 +86,7 @@ class _HubScreenState extends State<HubScreen> {
       }
       if (w == null || !w.waits) {
         final nap = Completer<void>();
+        _releaseWake = nap;
         _releaseNap = Timer(HubScreen.releaseRetry, nap.complete);
         await nap.future;
       }
@@ -93,6 +96,10 @@ class _HubScreenState extends State<HubScreen> {
   void _stopWatchingReleases() {
     _releaseRun++;
     _releaseNap?.cancel();
+    _releaseNap = null;
+    final wake = _releaseWake;
+    _releaseWake = null;
+    if (wake != null && !wake.isCompleted) wake.complete();
   }
 
   void _offerRelease(AppRelease r) {

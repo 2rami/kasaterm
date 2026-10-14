@@ -652,8 +652,11 @@ class Server {
     String path, {
     required Map<String, String> query,
     String? machine,
+    bool gateway = false,
   }) {
-    final u = uri(path, query: query, machine: machine);
+    final u = gateway
+        ? _gatewayUri(path, query: query, machine: machine)
+        : uri(path, query: query, machine: machine);
     return u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws');
   }
 
@@ -942,6 +945,15 @@ class Server {
   }
 
   Future<List<Pane>> panes({String? machine}) async {
+    // The account hub can change while the phone is asleep. Resolve before reading
+    // panes and carry that stable route with every row, including the default machine.
+    if (account != null && machine == null) {
+      final id = await machineId();
+      if (id == null) {
+        throw const ServerException('기기 정보를 확인하는 중이에요. 잠시 뒤 다시 연결해요.');
+      }
+      machine = '~$id';
+    }
     final j = await _getJson('term/panes', machine: machine);
     return _panesFrom(j, machine: machine);
   }

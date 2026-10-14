@@ -101,5 +101,7 @@ void main() {
         throwsA(isA<SocketException>()),
       );
     });
+    // The probe may have started a handshake just before close; advance its bounded timeout in fake time.
+    await tester.pump(const Duration(seconds: 15));
   });
 }

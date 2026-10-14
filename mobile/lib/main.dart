@@ -378,7 +378,10 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     BackgroundGrace.instance
       ..attach()
-      ..onReturn = () => _connection.server?.freshConnections();
+      ..onReturn = () {
+        _connection.server?.freshConnections();
+        KasanetRouter.resumed();
+      };
     phoneThemeSync.bind(null);
     weather.bind(null);
     _connection.addListener(_changed);
@@ -428,7 +431,6 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       unawaited(PushBridge.instance.retryCleanup());
       unawaited(phoneThemeSync.refresh());
       unawaited(weather.refresh());
-      KasanetRouter.resumed();
       if (_connection.server == null) unawaited(_connection.retry());
     }
   }

@@ -34,7 +34,7 @@ WebSocketChannel connectTermSocket(
   List<String>? protocols,
   Duration? ping,
 }) {
-  if (protocols == null) return IOWebSocketChannel.connect(uri, pingInterval: ping);
+  // Own even unauthenticated/direct handshakes so a timeout also closes their pending IO.
   final origin = uri.replace(scheme: uri.scheme == 'wss' ? 'https' : 'http');
   final client = _HandshakeClient(origin);
   final channel = IOWebSocketChannel.connect(

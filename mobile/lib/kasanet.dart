@@ -62,6 +62,8 @@ class KasanetRouter extends ChangeNotifier {
   /// 앱이 깨어났다 — 망이 바뀌었을 수 있으니 경로를 다시 찾고 등록을 곧바로 새로 한다.
   static void resumed() {
     for (final r in List.of(_live)) {
+      // A missing desktop or failed registration before suspension is not evidence about the new network.
+      r._retryAfter.clear();
       r._native.networkChanged();
       r._renewAll();
     }
@@ -105,10 +107,14 @@ class KasanetRouter extends ChangeNotifier {
   /// 입구 주소의 기계 route — 관문으로 되돌려 보낼 때 쓴다. 기본 기계면 빈 문자열.
   String? machineOf(Uri u) {
     if (!owns(u)) return null;
+    String? fallback;
     for (final e in _desks.entries) {
-      if (e.value.port == u.port) return e.key;
+      if (e.value.port != u.port) continue;
+      // The default hub alias may point elsewhere by the time this request falls back.
+      if (e.key.startsWith('~')) return e.key;
+      fallback = e.key;
     }
-    return null;
+    return fallback;
   }
 
   /// 기계 route → (직통인가, 왕복 ms). 모르는 기계면 null — 설정 화면·개발 서버 화면의 「직통/관문」 표시.

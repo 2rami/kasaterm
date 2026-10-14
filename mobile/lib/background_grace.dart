@@ -7,8 +7,8 @@ import 'package:flutter/widgets.dart';
 ///
 /// 예전에는 앱이 뒤로 가는 순간 허브 폴링·롱폴·터미널 소켓을 전부 닫았다. 그래서 메시지 하나 보고 돌아와도
 /// 관문을 다시 건너 붙는 동안(소켓 0.3초 + 첫 화면 0.3초, 폰 망에서는 1초 남짓) 낡은 화면을 봤다.
-/// 이제는 iOS 가 뒤로 간 앱에 주는 시간(`beginBackgroundTask`, 보통 30초) 동안 그대로 두고, 그 안에
-/// 돌아오면 다시 붙을 일이 없다. 시간이 다 되면 예전처럼 닫고, 돌아오면 다시 붙는다.
+/// iOS 가 준 유예 동안은 그대로 두되, 돌아오면 연결만 새로 맺는다. 유예 안에서도 망이 바뀌거나
+/// 소켓이 반쯤 끊길 수 있어 `live`였다는 사실만으로 연결이 살아 있다고 판단하지 않는다.
 ///
 /// 화면들은 [live] 하나만 본다 — 참이면 붙어 있고, 거짓이 되면 닫고, 다시 참이 되면 다시 붙는다.
 class BackgroundGrace extends ChangeNotifier with WidgetsBindingObserver {
@@ -44,12 +44,13 @@ class BackgroundGrace extends ChangeNotifier with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.resumed:
-        if (_away) onReturn?.call();
+        final returning = _away || !_live;
         _away = false;
         _cap?.cancel();
         _cap = null;
         unawaited(_call('end'));
-        if (!_live) {
+        if (returning) {
+          onReturn?.call();
           _live = true;
           notifyListeners();
         }

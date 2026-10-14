@@ -21,6 +21,7 @@ class TermSession extends ChangeNotifier {
     this.pane, {
     this.holdIdle = defaultHoldIdle,
     this.ping = defaultPing,
+    this.connectWait = const Duration(seconds: 10),
   }) {
     server.addCloseListener(_serverClosed);
     server.routeChanges?.addListener(_routeChanged);
@@ -32,6 +33,7 @@ class TermSession extends ChangeNotifier {
   /// 반쯤 열린 소켓을 알아채는 박자 — 핑 뒤 이만큼 퐁이 없으면 끊긴 것으로 보고 다시 붙는다(최대 두 배 걸린다).
   static const defaultPing = Duration(seconds: 15);
   final Duration ping;
+  final Duration connectWait;
 
   final Server server;
   final Pane pane;
@@ -60,6 +62,8 @@ class TermSession extends ChangeNotifier {
   bool _direct = false;
   StreamSubscription<Object?>? _sub;
   Timer? _retry;
+  Timer? _opening;
+  bool _gateway = false;
 
   /// 폰 터미널 보기가 원본 격자를 쥘 크기. 원본 크기는 입력하는 쪽이 쥔다(docs/webterm-handoff.md
   /// 「원본 크기는 쓰는 쪽이 쥔다」) — 보기만 해서는 안 쥐고, 폰에서 키·답장을 보내면 그때 쥔다.
@@ -96,6 +100,8 @@ class TermSession extends ChangeNotifier {
     _retry = null;
     _closeChannel();
     if (_paused || _disposed || server.isClosed || state == TermState.gone) return;
+    state = state == TermState.connecting ? TermState.connecting : TermState.reconnecting;
+    note = null;
     final generation = _generation;
     if (tokens == null) {
       server.designTokens(machine: pane.machine).then((t) {
@@ -104,10 +110,14 @@ class TermSession extends ChangeNotifier {
         notifyListeners();
       });
     }
-    final uri = _wsUri();
+    final uri = _wsUri(gateway: _gateway);
     _direct = server.isDirect(uri.replace(scheme: 'http'));
     final ch = connectTermSocket(uri, protocols: server.wsProtocolsFor(uri), ping: ping);
     _channel = ch;
+    // A TCP/WebSocket handshake alone cannot prove that the desktop behind the gateway is sending frames.
+    _opening = Timer(connectWait, () {
+      if (generation == _generation) _lost();
+    });
     var opened = false;
     _sub = ch.stream.listen(
       (data) { if (generation == _generation) _onData(data); },
@@ -119,12 +129,14 @@ class TermSession extends ChangeNotifier {
       (_) { opened = true; },
       onError: (Object _) { if (generation == _generation) _lost(refused: uri); },
     );
+    notifyListeners();
   }
 
-  Uri _wsUri() => server.wsUri(
+  Uri _wsUri({bool gateway = false}) => server.wsUri(
     'term/ws',
     query: {'pane': pane.id, 'grid': '1'},
     machine: pane.machine,
+    gateway: gateway,
   );
 
   /// 직통이 섰거나 잃었다. 잃은 쪽은 입구가 소켓을 끊어 [_lost] 로 관문에 다시 붙는다 — 여기서는 관문에 붙어 있던
@@ -133,7 +145,7 @@ class TermSession extends ChangeNotifier {
     if (_channel == null || _paused || _disposed || state != TermState.connected) return;
     final now = server.isDirect(_wsUri().replace(scheme: 'http'));
     if (now == _direct) return;
-    _closeChannel();
+    _gateway = false;
     connect();
   }
 
@@ -149,6 +161,8 @@ class TermSession extends ChangeNotifier {
     final msg = m.cast<String, Object?>();
     switch (msg['t']) {
       case 'size':
+        _opening?.cancel();
+        _opening = null;
         grid.apply({'cols': msg['cols'], 'rows': msg['rows']});
         mirror = msg['mirror'] == true;
         state = TermState.connected;
@@ -184,6 +198,8 @@ class TermSession extends ChangeNotifier {
         }
         historyVersion++;
       case 'grid':
+        _opening?.cancel();
+        _opening = null;
         final wasAlt = grid.alt;
         grid.apply(msg);
         if (state != TermState.connected) state = TermState.connected;
@@ -209,17 +225,20 @@ class TermSession extends ChangeNotifier {
   void _lost({Uri? refused}) {
     if (_disposed || _paused || state == TermState.gone) return;
     if (_channel == null) return;
+    final fallback = _direct && !_gateway;
+    if (fallback) _gateway = true;
     _closeChannel();
     state = TermState.reconnecting;
-    notifyListeners();
-    _retry = Timer(Duration(seconds: _backoffSec), connect);
+    _retry = Timer(fallback ? Duration.zero : Duration(seconds: _backoffSec), connect);
     _backoffSec = math.min(_backoffSec * 2, 10);
-    if (refused != null) _explain(refused);
+    notifyListeners();
+    if (refused != null && !fallback) _explain(refused);
   }
 
   Future<void> _explain(Uri refused) async {
+    final generation = _generation;
     final why = await server.socketRefusal(refused);
-    if (_disposed || state != TermState.reconnecting || why == note) return;
+    if (_disposed || generation != _generation || state != TermState.reconnecting || why == note) return;
     note = why;
     notifyListeners();
   }
@@ -319,6 +338,7 @@ class TermSession extends ChangeNotifier {
   Future<void> reply(String text, {bool chat = false}) async {
     _touched();
     if (pane.isWebShell) {
+      if (!canSend) throw const ServerException('다시 연결되면 보내 주세요.');
       sendText('$text\r');
       return;
     }
@@ -332,14 +352,24 @@ class TermSession extends ChangeNotifier {
   /// 사진을 붙여 둔 입력상자에 글을 더해 보낸다. [reply] 의 서버 `send` 는 상자를 Ctrl+U 로
   /// 비우고 붙이므로 먼저 들어간 `[Image #1]` 까지 지워 사진이 안 간다(2026-10-02 대화 보기 제보).
   Future<void> replyAfterAttachment(String text) async {
-    if (state != TermState.connected) {
+    if (!canSend) {
       throw const ServerException('연결이 끊겨 보내지 못했어요. 다시 연결되면 보내 주세요.');
     }
     _touched();
     // 앞 공백 — 붙인 자리표 바로 뒤에 붙으면 `[Image #1]글` 로 한 덩이가 된다.
     sendText('\x1b[200~ ${text.replaceAll('\x1b', '')}\x1b[201~');
-    await Future<void>.delayed(enterGap);
-    sendText('\r');
+    await sendTextAfter('\r', enterGap);
+  }
+
+  // The delayed Enter belongs to the socket that received the preceding text, not its replacement.
+  Future<void> sendTextAfter(String text, Duration gap) async {
+    if (!canSend) throw const ServerException('다시 연결되면 보내 주세요.');
+    final generation = _generation;
+    if (gap > Duration.zero) await Future<void>.delayed(gap);
+    if (generation != _generation || !canSend) {
+      throw const ServerException('연결이 바뀌어 Enter를 보내지 않았어요. 입력 내용을 확인해 주세요.');
+    }
+    sendText(text);
   }
 
   /// 앱이 뒤로 가면 우리가 먼저 닫는다 — iOS 가 소켓을 죽인 채 두면 복귀 때
@@ -355,12 +385,15 @@ class TermSession extends ChangeNotifier {
   }
 
   void resume() {
-    if (!_paused) return;
+    if (_disposed || server.isClosed || state == TermState.gone) return;
     _paused = false;
     _backoffSec = 1;
-    if (state == TermState.gone) return;
+    _typing = false;
+    _idleTimer?.cancel();
+    // The native route can still say "direct" after iOS suspended it. Recover through the same
+    // machine's gateway first; a later route-change notification may move us back to direct.
+    _gateway = true;
     state = TermState.connecting;
-    notifyListeners();
     connect();
   }
 
@@ -380,6 +413,9 @@ class TermSession extends ChangeNotifier {
 
   void _closeChannel() {
     _generation++;
+    _opening?.cancel();
+    _opening = null;
+    _canHold = false;
     _held = null;
     _viewTimer?.cancel();
     _viewTimer = null;
