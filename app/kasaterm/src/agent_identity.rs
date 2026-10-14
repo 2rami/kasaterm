@@ -40,11 +40,17 @@ impl App {
     /// 이 pane 에 앉은 하네스 **아래에서** 뜬 실행(그 학생의 Bash 도구가 친 `claude --version` 같은 것)은
     /// 자리를 새로 받지 않고 앉은 학생을 빌린다. 받게 두면 그 짧은 실행이 끝날 때 자리째 걷혀, 계속 도는
     /// 원래 학생의 이름표가 비고 그 학생이 다음 pane 에 또 배정된다(2026-10-01 %14 아즈사).
+    ///
+    /// 칸 터미널 밖에서 뜬 실행도 같다. 학생이 tmux 로 띄운 표본 claude 는 칸의 환경을 물려받아 이 칸
+    /// 이름으로 묻지만, tmux 서버가 떨어져 나가 하네스의 자손이 아니다 — 조상으로는 못 거른다
+    /// (2026-10-14 %6 아로나: 표본 넷이 자리를 차례로 받았다 놓아 미니맵이 로고로 떨어졌다).
     fn nested_launch_identity(&self, pane: &str, pid: u32) -> anyhow::Result<Option<serde_json::Value>> {
         let Some(&harness) = self.pane_agent_launches.get(pane) else { return Ok(None) };
         if harness == pid { return Ok(None); }
         let name = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned().unwrap_or_default();
-        if name.is_empty() || !descends_from(&kasa_pty::fresh_process_table(), pid, harness) { return Ok(None); }
+        if name.is_empty() { return Ok(None); }
+        let elsewhere = self.pty.get(pane).and_then(|s| s.hosts_process(pid)) == Some(false);
+        if !elsewhere && !descends_from(&kasa_pty::fresh_process_table(), pid, harness) { return Ok(None); }
         let token = self.file_tree.instruction_launches.get(pane).cloned().unwrap_or_default();
         identity_json(kasa_mcp::character::roster_in_use().as_ref(), &name, &token).map(Some)
     }
@@ -184,7 +190,23 @@ impl App {
         child.wait().unwrap();
         self.release_finished_agent_identities();
         assert_eq!(self.ws.lock().unwrap().pane_character[&pane], seated, "the seated harness keeps its name");
-        eprintln!("[agent-identity] PASS: resumed name/persona agree; late mapping cannot relabel; explicit selection updates both; same-seat restart keeps the student; nested run keeps the seat");
+        // 칸 밖 터미널에서 떨어져 나가 뜬 실행(tmux 표본)도 빌릴 뿐이다 — 자손이 아니어도(%6 아로나).
+        if cfg!(target_os = "macos") {
+            let out = std::process::Command::new("/bin/sh").args(["-c", "/bin/sleep 30 >/dev/null 2>&1 & echo $!"]).output().unwrap();
+            let detached: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            assert!(!descends_from(&kasa_pty::fresh_process_table(), detached, std::process::id()), "the detached run left the harness tree");
+            let borrowed = self.prepare_agent_identity(&pane, &kasa_mcp::character::new_session_id(), "", detached).unwrap();
+            assert_eq!(borrowed["character"], seated.as_str(), "a run on another terminal borrows the seated student");
+            assert_eq!(self.pane_agent_launches[&pane], std::process::id(), "a run on another terminal does not take the seat");
+            let _ = std::process::Command::new("/bin/kill").arg(detached.to_string()).status();
+            let deadline = Instant::now() + std::time::Duration::from_secs(3);
+            while kasa_pty::fresh_process_table().iter().any(|(p, _, _)| *p == detached) && Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            self.release_finished_agent_identities();
+            assert_eq!(self.ws.lock().unwrap().pane_character[&pane], seated, "the seat survives the detached run");
+        }
+        eprintln!("[agent-identity] PASS: resumed name/persona agree; late mapping cannot relabel; explicit selection updates both; same-seat restart keeps the student; nested and detached runs keep the seat");
     }
 }
 

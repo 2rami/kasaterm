@@ -16,6 +16,11 @@ impl PtySession {
         self.tty_short.as_deref()
     }
 
+    /// pid 가 이 칸의 터미널에서 도는가. 칸 tty 를 모르거나(Windows·원격) 판정을 못 하면 `None`.
+    pub fn hosts_process(&self, pid: u32) -> Option<bool> {
+        crate::runs_on_tty(pid, self.tty()?)
+    }
+
     /// The pane's current OSC 0/2 title (set by the inner program), or None.
     /// Mirrors the header label's first-priority source so the dock chip can
     /// show the same name the header does.
@@ -673,5 +678,33 @@ mod process_table_tests {
         let a = process_table_shared();
         let b = process_table_shared();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "TTL 안인데 표가 새로 만들어졌다");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tty_tests {
+    use super::*;
+    use super::super::test_support::test_posix_shell;
+
+    /// 칸의 셸은 칸 tty 위에 있고, 칸 밖 프로세스(이 시험 자신)는 아니다 — tmux 처럼 다른
+    /// 터미널에서 뜬 하네스가 칸 학생 자리를 받지 못하게 하는 판정의 바탕이다.
+    #[test]
+    fn only_the_pane_shell_runs_on_the_pane_tty() {
+        let s = PtySession::start(PtyOptions {
+            shell: Some(test_posix_shell()),
+            cols: 80,
+            rows: 10,
+            pane_id: "%tty".into(),
+            ..Default::default()
+        })
+        .expect("셸이 떠야 한다");
+        let shell = s.shell_pid().expect("셸 pid");
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while s.hosts_process(shell) != Some(true) && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(s.hosts_process(shell), Some(true), "칸 셸이 칸 tty 위에 없다");
+        assert_eq!(s.hosts_process(std::process::id()), Some(false), "칸 밖 프로세스가 칸 tty 로 잡혔다");
+        assert_eq!(crate::runs_on_tty(shell, "ttys-kasaterm-none"), None);
     }
 }

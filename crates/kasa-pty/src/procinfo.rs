@@ -179,6 +179,32 @@ fn foreign(pid: u32) -> bool {
     got == size && info.pbsi_uid != unsafe { libc::getuid() }
 }
 
+/// pid 의 제어 터미널이 `tty`(칸의 짧은 이름, `ttys004`)인가. 판정을 못 하면 `None`.
+///
+/// 칸의 환경을 물려받은 채 다른 터미널(tmux 등)에서 뜬 하네스를 가른다 — 프로세스 조상으로는
+/// 못 가른다. tmux 서버는 launchd 아래로 떨어져 나가 그 아래 claude 가 칸 하네스의 자손이 아니다.
+pub fn runs_on_tty(pid: u32, tty: &str) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe {
+            libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+        };
+        if got != size {
+            return None;
+        }
+        let dev = std::fs::metadata(format!("/dev/{tty}")).ok()?.rdev();
+        Some(u64::from(info.e_tdev) == dev)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, tty);
+        None
+    }
+}
+
 /// 여러 환경 변수를 한 번에. 빈 값은 없는 것으로 친다.
 pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<String, String> {
     #[cfg(target_os = "macos")]
