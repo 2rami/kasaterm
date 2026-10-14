@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const ORDER = ['width-table.js', 'width.js', 'grid.js', 'terminal.js', 'box-table.js', 'render.js', 'view.js'];
+const ORDER = ['width-table.js', 'width.js', 'grid.js', 'terminal.js', 'buffer.js', 'box-table.js', 'render.js', 'view.js'];
 const EXPORTS = ['Terminal', 'Grid', 'Row', 'charWidth', 'MODE', 'View', 'Renderer', 'themeFromTokens', 'DEFAULT_THEME',
   'DEFAULT_FG', 'DEFAULT_BG', 'COLOR_INDEXED', 'COLOR_RGB',
   'INVERSE', 'BOLD', 'ITALIC', 'UNDERLINE', 'WRAPLINE', 'WIDE_CHAR', 'WIDE_CHAR_SPACER', 'DIM', 'HIDDEN',

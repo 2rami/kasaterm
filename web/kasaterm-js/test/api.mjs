@@ -148,6 +148,54 @@ test('the default profile ignores what only xterm.js does', () => {
   eq([text(t, 0), text(t, 1), replies], ['aba[ef', '    z', []], 'state');
 });
 
+test('loadAddon, dispose, live options, viewport scrolling', () => {
+  const t = new Terminal({ cols: 10, rows: 2 }), log = [];
+  t.loadAddon({ activate: term => log.push(term === t ? 'on' : 'other'), dispose: () => log.push('off') });
+  t.on('viewport', n => log.push('vp' + n));
+  t.write('1\r\n2\r\n3\r\n4\r\n5');
+  t.scrollLines(-2); t.scrollPages(-5); t.scrollToBottom(); t.scrollToLine(1); t.scrollToTop();
+  t.options.tabStopWidth = 3;
+  t.options.convertEol = true;
+  t.options.scrollback = 1;
+  t.write('\tx\ny');
+  eq([text(t, 0), text(t, 1), t.historySize], ['5  x', 'y', 1], 'options');
+  t.dispose();
+  eq(log, ['on', 'vp2', 'vp3', 'vp0', 'vp2', 'vp3', 'off'], 'log');
+});
+
+test('markers follow their line and go with it', () => {
+  const at = (t, m) => (m.line < 0 ? null : t.buffer.active.getLine(m.line).translateToString(true));
+  const t = new Terminal({ cols: 10, rows: 3, scrollback: 3 }), gone = [];
+  t.write('a\r\nb\r\nc');
+  const c = t.registerMarker(), b = t.registerMarker(-1);
+  c.onDispose(() => gone.push('c'));
+  t.write('\r\nd\r\ne');
+  eq([c.line, at(t, c), at(t, b)], [2, 'c', 'b'], 'after scrolling');
+  t.write('\r\nf\r\ng\r\nh');
+  eq([at(t, c), b.isDisposed, b.line], ['c', true, -1], 'trimmed off the top');
+  t.write(`${CSI}3J`);
+  eq([c.isDisposed, gone], [true, ['c']], 'scrollback cleared');
+  t.write(`${CSI}2;1H`);
+  const g = t.registerMarker(), h = t.registerMarker(1);
+  t.write(`${CSI}M`);
+  eq([g.isDisposed, at(t, h)], [true, 'h'], 'deleted line');
+  t.write(`${CSI}1;1H${CSI}L`);
+  eq(at(t, h), 'h', 'inserted line above');
+  t.reset();
+  eq([h.isDisposed, t.markers.size], [true, 0], 'reset');
+});
+
+test('markers through reflow', () => {
+  const t = new Terminal({ cols: 10, rows: 4 });
+  t.write('abcdefghijKLM\r\nnext');
+  const head = t.registerMarker(-2), tail = t.registerMarker(-1), next = t.registerMarker();
+  const at = m => t.buffer.active.getLine(m.line).translateToString(true);
+  t.resize(5, 4);
+  eq([at(head), at(next)], ['abcde', 'next'], 'narrower');
+  t.resize(20, 4);
+  eq([at(head), at(tail), tail.line === head.line, at(next)], ['abcdefghijKLM', 'abcdefghijKLM', true, 'next'], 'wider: the tail joins the head');
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); } catch (e) { failed++; console.log(`FAIL ${name}\n  ${e.message}`); }

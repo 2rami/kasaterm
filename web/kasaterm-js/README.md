@@ -45,6 +45,11 @@ term.parser.registerOscHandler(1337, data => true);
 term.parser.registerDcsHandler({ final: 'q' }, (data, params) => true);         // 식셀 같은 그림 애드온 받침
 term.parser.registerApcHandler({ final: 'G' }, data => true);                   // kitty 그림
 term.parser.registerEscHandler({ final: 'c' }, () => true);
+term.buffer.active.getLine(y).translateToString(true);  // xterm.js 의 읽기 API(normal·alternate·getCell·cursorX…)
+const m = term.registerMarker(0); m.line; m.onDispose(…); // 스크롤·되접기를 따라가고, 줄이 사라지면 dispose
+term.loadAddon({ activate(term) {}, dispose() {} }); term.dispose();
+term.options.convertEol = true;                         // profile·tabStopWidth·scrollback·cellPixels·colorScheme 도 실시간
+term.scrollLines(-3); term.scrollToBottom();            // 화면 위치 — 'viewport' 이벤트
 ```
 
 옵션: `profile`(아래), `convertEol`(LF 를 CRLF 로), `tabStopWidth`, `cellPixels`({width, height} — 14t·16t 답),
