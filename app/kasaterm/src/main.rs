@@ -3664,6 +3664,13 @@ impl Workspace {
         self.panes.contains_key(pty_id).then(|| pty_id.to_string())
     }
 
+    fn secondary_tab_slot(&self, pty_id: &str) -> Option<(String, usize)> {
+        let outer = self.outer_for_pty(pty_id).filter(|outer| outer != pty_id)?;
+        let idx = self.panes.get(&outer)?.tabs.iter()
+            .position(|tab| tab.pid.as_deref() == Some(pty_id))?;
+        Some((outer, idx))
+    }
+
     /// `outer_for_pty` 의 반대 — 바깥 pane 이 **지금 보여 주는 탭**의 pid.
     ///
     /// 학생 관련 상태(`pane_character`·`pane_claude_sid`·`pane_cwd_cache`…)는 전부

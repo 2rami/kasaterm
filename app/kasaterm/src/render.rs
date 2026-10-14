@@ -6334,8 +6334,8 @@ impl App {
                             .collect::<Vec<_>>().join(", ");
                         if *closing {
                             ("닫는 중이에요".to_string(), source)
-                        } else if error.is_some() {
-                            ("닫지 못했어요".to_string(), format!("{source} · {}", error.as_deref().unwrap_or_default()))
+                        } else if let Some(error) = error {
+                            ("닫지 못했어요".to_string(), error.clone())
                         } else {
                             ("닫기를 다시 시도할까요?".to_string(), source)
                         }

@@ -2025,7 +2025,7 @@ impl App {
             if !self.pty.contains_key(&id) && !self.leaf_lingers_anywhere(&id) {
                 continue;
             }
-            self.remove_pane(&id);
+            self.remove_finished_surface(&id);
         }
         // 자원이 사라진 자리를 매 턴 훑는다. 죽음 알림(`dead_panes`)이 오지 않은
         // 어긋남은 여기서만 잡히고, 그걸 놓치면 사용자가 손댈 수 없는 상태로 굳는다.
@@ -3149,6 +3149,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
             w.request_redraw();
         }
     }
+    // EOF and remote close notifications name a PTY, which may live in a tab rather
+    // than a layout leaf. Removing only the leaf leaves that tab and its PTY alive.
+    pub(crate) fn remove_finished_surface(&mut self, pid: &str) {
+        let tab_slot = self.ws.lock().unwrap().secondary_tab_slot(pid);
+        if let Some((outer, idx)) = tab_slot {
+            self.close_tab(&outer, idx);
+        } else {
+            self.remove_pane(pid);
+        }
+    }
+
     /// Close `pid`'s pane: remove it from the BSP tree and drop its PTY.
     /// Shared by Cmd+W and the header × button. When `pid` is the window's
     /// last pane we don't leave an empty window — we spawn a fresh shell in
@@ -3161,20 +3172,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // 보조 탭 pid(`surface.new_tab` 이 준 id)는 탭 닫기 경로로 — pane 경로는
         // 트리·stash 만 보므로 PTY 는 죽여도 바깥 pane 의 tabs 항목이 남아, 죽은
         // 셸을 문 유령 탭이 탭바에 계속 떠 있었다(dismiss 로 탭 학생을 걷을 때).
-        let tab_slot: Option<(String, usize)> = {
-            let ws = self.ws.lock().unwrap();
-            ws.pid_to_pane
-                .get(pid)
-                .filter(|outer| outer.as_str() != pid)
-                .and_then(|outer| {
-                    ws.panes.get(outer).and_then(|p| {
-                        p.tabs
-                            .iter()
-                            .position(|t| t.pid.as_deref() == Some(pid))
-                            .map(|idx| (outer.clone(), idx))
-                    })
-                })
-        };
+        let tab_slot = self.ws.lock().unwrap().secondary_tab_slot(pid);
         if let Some((outer, idx)) = tab_slot {
             self.close_tab(&outer, idx);
             self.chrome_dirty = true;

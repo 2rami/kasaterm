@@ -227,6 +227,24 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_mirror_is_removed_from_its_actual_tab_not_a_stale_container() {
+        let mut ws = Workspace::default();
+        ws.pane_mut("%1").tabs = vec![
+            PaneTab { pid: Some("%1".into()), ..Default::default() },
+            PaneTab::default(),
+            PaneTab { pid: Some("%2".into()), ..Default::default() },
+        ];
+        ws.pane_mut("%9");
+        ws.pid_to_pane.insert("%2".into(), "%9".into());
+        assert_eq!(ws.secondary_tab_slot("%2"), Some(("%1".into(), 2)));
+        assert_eq!(ws.secondary_tab_slot("%1"), None);
+        assert_eq!(ws.secondary_tab_slot("%9"), None);
+        assert_eq!(ws.secondary_tab_slot("%99"), None);
+        ws.pane_mut("%1").tabs.remove(2);
+        assert_eq!(ws.secondary_tab_slot("%2"), None);
+    }
+
+    #[test]
     fn a_reused_source_number_does_not_match_a_pending_close() {
         let old = MirrorTarget { local: "%2".into(), base: "http://127.0.0.1:1".into(),
             source: "%16".into(), label: "fixture".into(), source_key: Some("old-source".into()) };

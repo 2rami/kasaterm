@@ -122,7 +122,7 @@ impl App {
         }).collect();
         for local in closed {
             self.remote_keep.insert(local.clone());
-            self.remove_pane(&local);
+            self.remove_finished_surface(&local);
         }
         for machine in &machines {
             let Some(base) = machine.get("base").and_then(|v| v.as_str()) else { continue };
