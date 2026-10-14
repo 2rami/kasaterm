@@ -243,8 +243,9 @@ pub struct PtyBackend {
     /// `kasaterm-cli done` 으로 보고해도 서버가 **누구에게 전할지 몰랐다** — 보고는
     /// 쌓이는데 소환한 쪽은 모르는 상태였다(2026-08-15 지적).
     ///
-    /// pane 이 닫혀도 항목을 지우지 않는다. 죽은 주소로 보내는 건 무해하고(전송이
-    /// 조용히 실패한다), 닫힘을 여기까지 전파하면 그 경로가 또 하나 늘어난다.
+    /// 칸 번호가 아니라 surface 키 짝(아이 → 부모)으로 적는다. 번호는 닫힌 뒤 새 칸이 다시 받아서,
+    /// 번호로 적어 두면 같은 번호를 받은 남의 학생 보고가 옛 소환자에게 갔다(2026-10-14 유즈 %2 에
+    /// 유우카가 부른 %0·%10 의 완료). 키는 닫힐 때 걷히니 닫힌 칸 쪽 짝은 저절로 안 풀린다.
     spawned_by: Arc<Mutex<HashMap<String, String>>>,
     /// surface_id → why it's blocked (the `Notification` hook's message, may be
     /// ""). Set by `attention`, cleared by `notify` (turn done) or when the
@@ -482,10 +483,10 @@ impl PtyBackend {
     /// 소환 관계를 적는다 — 메모리와 함께 surface 키 짝으로 파일에도. 앱을 다시 켜면 번호가 바뀌고
     /// 메모리가 비어, 재시작 뒤 학생의 done 이 갈 곳을 잃었다(새 판 설치마다 재시작한다).
     pub(crate) fn remember_spawner(&self, child: &str, parent: &str) {
-        if let Ok(mut m) = self.spawned_by.lock() {
-            m.insert(child.to_string(), parent.to_string());
-        }
         let pair = (kasa_mcp::surface_keys::ensure(child), kasa_mcp::surface_keys::ensure(parent));
+        if let Ok(mut m) = self.spawned_by.lock() {
+            m.insert(pair.0.clone(), pair.1.clone());
+        }
         let path = spawner_file();
         let mut pairs = read_spawner_pairs(&path);
         remember_spawner_pair(&mut pairs, pair);
@@ -494,12 +495,8 @@ impl PtyBackend {
 
     /// 그 칸을 부른 칸의 지금 번호. 메모리에 없으면(재시작 뒤) 파일의 키 짝으로 찾는다.
     pub(crate) fn spawner_of(&self, child: &str) -> Option<String> {
-        if let Some(parent) = self.spawned_by.lock().ok().and_then(|m| m.get(child).cloned()) {
-            return Some(parent);
-        }
-        let key = kasa_mcp::surface_keys::get(child)?;
-        let parent_key = read_spawner_pairs(&spawner_file()).into_iter().rev().find(|(c, _)| *c == key)?.1;
-        kasa_mcp::surface_keys::find(&parent_key)
+        let memory = self.spawned_by.lock().ok()?.clone();
+        spawner_by_keys(&memory, || read_spawner_pairs(&spawner_file()), child)
     }
 
     /// 이 surface 에 결속된 기록 파일 — GUI 의 턴 판정(`refresh_turn_states`)이 보드와
@@ -516,6 +513,8 @@ impl PtyBackend {
     /// 다시 찾지 않으므로, 남겨 두면 다음 칸이 첫 결속을 받기 전까지 옛 대화가 그 칸의 것으로
     /// 보였다(10-13 폰 대화 보기에 어제 같은 번호 칸의 codex 대화).
     pub(crate) fn forget_transcript(&self, surface: &str) {
+        // 앞 주인의 done 보고도 — 남겨 두면 새 칸이 일하는 동안 보드에 옛 칸의 「완료」가 붙는다.
+        self.done_reports.lock().unwrap().remove(surface);
         if self.bound.lock().unwrap().remove(surface).is_none() {
             return;
         }
@@ -4188,6 +4187,26 @@ mod web_shell_close_tests {
         super::write_spawner_pairs(&path, &pairs);
         assert_eq!(super::read_spawner_pairs(&path), pairs, "파일로 되읽는다(재시작 뒤)");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 닫힌 칸 번호를 새 칸이 받으면 옛 소환 관계가 따라오지 않는다 — 아이 쪽이든 부모 쪽이든.
+    #[test]
+    fn a_reused_pane_number_does_not_inherit_the_old_spawner() {
+        use kasa_mcp::surface_keys;
+        let (child, parent) = ("%spawn-test-child", "%spawn-test-parent");
+        let mut memory = std::collections::HashMap::new();
+        memory.insert(surface_keys::ensure(child), surface_keys::ensure(parent));
+        let none = Vec::new;
+        assert_eq!(super::spawner_by_keys(&memory, none, child).as_deref(), Some(parent));
+        surface_keys::remove(child);
+        surface_keys::ensure(child);
+        assert_eq!(super::spawner_by_keys(&memory, none, child), None, "같은 번호의 새 학생은 옛 소환자에게 보고하지 않는다");
+        memory.insert(surface_keys::get(child).unwrap(), surface_keys::get(parent).unwrap());
+        surface_keys::remove(parent);
+        surface_keys::ensure(parent);
+        assert_eq!(super::spawner_by_keys(&memory, none, child), None, "소환자 번호를 새 칸이 받아도 그 칸으로 안 간다");
+        surface_keys::remove(child);
+        surface_keys::remove(parent);
     }
 
     use super::*;
@@ -9007,6 +9026,14 @@ fn read_spawner_pairs(path: &std::path::Path) -> Vec<(String, String)> {
     std::fs::read_to_string(path).ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// 아이 칸을 부른 칸의 지금 번호를 키 짝으로만 푼다 — 어느 쪽이든 닫혀 키가 걷혔으면 `None`.
+fn spawner_by_keys(memory: &HashMap<String, String>, file: impl FnOnce() -> Vec<(String, String)>, child: &str) -> Option<String> {
+    let key = kasa_mcp::surface_keys::get(child)?;
+    let parent_key = memory.get(&key).cloned()
+        .or_else(|| file().into_iter().rev().find(|(c, _)| *c == key).map(|(_, p)| p))?;
+    kasa_mcp::surface_keys::find(&parent_key)
 }
 
 /// 같은 자식은 새 부모로 덮고, 오래된 것부터 버려 `SPAWNER_PAIRS_MAX` 를 넘지 않는다.
