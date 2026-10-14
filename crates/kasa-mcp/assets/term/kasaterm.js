@@ -3577,15 +3577,17 @@ class Renderer {
       const sel = view.selectionSpan(line, cols);
       const cursorHere = y === cursorRow ? view.cursorState() : '';
       const hover = view.hoverSpan(line);
+      const below = view.images ? view.images.belowKey(y) : '';
       const prev = this.lines[y];
       if (prev && prev.row === row && prev.sel === sel && prev.cursor === cursorHere && prev.hover === hover
-        && sameCells(prev.d, row.d) && prev.x === extrasKey(row)) continue;
-      this.paintRow(y, row, sel, cursorHere ? cur : null, cursorHere, hover);
-      this.lines[y] = { row, d: row.d.slice(), x: extrasKey(row), sel, cursor: cursorHere, hover };
+        && prev.below === below && sameCells(prev.d, row.d) && prev.x === extrasKey(row)) continue;
+      this.paintRow(y, row, sel, cursorHere ? cur : null, cursorHere, hover, below ? view.images : null);
+      this.lines[y] = { row, d: row.d.slice(), x: extrasKey(row), sel, cursor: cursorHere, hover, below };
     }
   }
 
-  paintRow(y, row, sel, cur, cursorState, hover) {
+  // `images` paints kitty z<0 pictures between the default background and the cells, as the app.
+  paintRow(y, row, sel, cur, cursorState, hover, images) {
     const ctx = this.ctx, cols = this.term.cols, cw = this.cellW, top = y * this.cellH, h = this.cellH;
     const [selFrom, selTo] = sel ? sel.split(':').map(Number) : [-1, -1];
     // The band spans the whole backing store: its last device column is only partly covered by
@@ -3597,6 +3599,7 @@ class Renderer {
     ctx.clip();
     ctx.fillStyle = this.css(DEFAULT_BG, false);
     ctx.fillRect(0, top, full, h);
+    if (images) images.paintBelow(ctx, y);
 
     // Backgrounds, merged into runs.
     let runStart = 0, runColor = null;
@@ -3905,6 +3908,7 @@ class ImageLayer {
     this.placements = new Map();   // event id -> {e, sig}
     this.bitmaps = new Map();      // decode key -> {src, img: {bitmap, width, height} | null}
     this.drawn = false;
+    this.ops = [];
   }
 
   get empty() { return this.placements.size === 0; }
@@ -3985,12 +3989,14 @@ class ImageLayer {
     }
   }
 
-  paint() {
-    const term = this.term, ctx = this.ctx, r = this.view.renderer;
-    if (this.empty) {
-      if (this.drawn) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.drawn = false; }
-      return;
-    }
+  // This frame's pictures as draw operations in screen coordinates. kitty z<0 goes below the
+  // text — the app draws it after the pane background and before the cells, so it sits under
+  // cell backgrounds and glyphs — and is painted by the renderer inside each line; everything
+  // else goes on the canvas above. Runs before the text renderer each frame.
+  layout() {
+    const term = this.term, r = this.view.renderer;
+    this.ops = [];
+    if (this.empty) return;
     // iTerm pictures whose line was rewritten are gone (the app's row signature).
     for (const [id, p] of this.placements) {
       if (p.e.protocol !== 'iterm') continue;
@@ -4000,9 +4006,6 @@ class ImageLayer {
       if (p.sig === undefined) p.sig = sig;
       else if (p.sig !== sig) this.remove([id]);
     }
-    ctx.setTransform(r.dpr, 0, 0, r.dpr, 0, 0);
-    ctx.clearRect(0, 0, this.canvas.width / r.dpr, this.canvas.height / r.dpr);
-    this.drawn = true;
     const cw = r.cellW, ch = r.cellH, offset = term.grid.displayOffset, gridH = term.rows * ch;
     const list = [...this.placements.values()].map(p => p.e).sort((a, b) => (a.z || 0) - (b.z || 0));
     for (const e of list) {
@@ -4014,66 +4017,111 @@ class ImageLayer {
       const row = line - term.historySize + offset;
       const box = { x: e.col * cw, y: row * ch, w: e.cols * cw, h: e.rows * ch };
       if (box.y + box.h <= 0 || box.y >= gridH) continue;
-      if (e.protocol === 'iterm') this.drawFit(img, box, { x: box.x, y: 0, w: box.w, h: gridH }, false);
-      else if (e.protocol === 'kitty') this.drawFit(img, box, box, true);
-      else this.drawSixel(e, img, box, cw, ch);
+      if (e.protocol === 'iterm') this.ops.push({ e, img, box, clip: { x: box.x, y: 0, w: box.w, h: gridH }, grow: false, below: false });
+      else if (e.protocol === 'kitty') this.ops.push({ e, img, box, clip: box, grow: true, below: (e.z || 0) < 0 });
+      else this.ops.push({ e, img, box, sixel: true, below: false });
     }
-    this.paintPlaceholders(cw, ch, offset);
+    this.layoutPlaceholders(cw, ch, offset);
+  }
+
+  paint() {
+    const ctx = this.ctx, r = this.view.renderer;
+    const above = (this.ops || []).filter(op => !op.below);
+    if (!above.length) {
+      if (this.drawn) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.drawn = false; }
+      return;
+    }
+    ctx.setTransform(r.dpr, 0, 0, r.dpr, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width / r.dpr, this.canvas.height / r.dpr);
+    this.drawn = true;
+    for (const op of above) this.draw(ctx, op);
+  }
+
+  // Below-text pictures crossing screen row `y`, for the renderer to paint in that line's band.
+  belowAt(y) {
+    if (!this.ops) return null;
+    const ch = this.view.renderer.cellH, top = y * ch, bottom = top + ch;
+    let out = null;
+    for (const op of this.ops) {
+      if (!op.below) continue;
+      const y0 = Math.max(op.clip.y, op.box.y), y1 = Math.min(op.clip.y + op.clip.h, op.box.y + op.box.h);
+      if (y1 <= top || y0 >= bottom) continue;
+      (out || (out = [])).push(op);
+    }
+    return out;
+  }
+
+  // What the renderer compares to know a line must be repainted for its below-text pictures.
+  belowKey(y) {
+    const ops = this.belowAt(y);
+    if (!ops) return '';
+    return ops.map(op => `${op.e.id}:${op.box.x},${op.box.y},${op.box.w},${op.box.h}:${op.clip.x},${op.clip.y},${op.clip.w}`).join(';');
+  }
+
+  paintBelow(ctx, y) {
+    const ops = this.belowAt(y);
+    if (ops) for (const op of ops) this.draw(ctx, op);
+  }
+
+  draw(ctx, op) {
+    if (op.sixel) this.drawSixel(ctx, op.e, op.img, op.box);
+    else this.drawFit(ctx, op.img, op.box, op.clip, op.grow);
   }
 
   // Centred in the box; `grow` lets a small picture fill it, otherwise it stops at its own size.
   // The app caps at native size in physical pixels, so "its own size" is measured in the app's
   // cells (term.cellPixels, device pixels) and drawn in ours; without that, in device pixels.
-  drawFit(img, box, clip, grow) {
-    const ctx = this.ctx, r = this.view.renderer, cell = this.term.cellPixels;
+  drawFit(ctx, img, box, clip, grow) {
+    const r = this.view.renderer, cell = this.term.cellPixels;
     let scale = Math.min(box.w / img.width, box.h / img.height);
     if (!grow) scale = Math.min(scale, cell ? Math.min(r.cellW / cell.width, r.cellH / cell.height) : 1 / r.dpr);
     const w = img.width * scale, h = img.height * scale;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(clip.x, Math.max(clip.y, 0), clip.w, Math.min(clip.y + clip.h, this.term.rows * this.view.renderer.cellH) - Math.max(clip.y, 0));
+    const gridH = this.term.rows * r.cellH;
+    ctx.rect(clip.x, Math.max(clip.y, 0), clip.w, Math.min(clip.y + clip.h, gridH) - Math.max(clip.y, 0));
     ctx.clip();
     ctx.drawImage(img.bitmap, box.x + (box.w - w) / 2, box.y + (box.h - h) / 2, w, h);
     ctx.restore();
   }
 
-  drawSixel(e, img, box, cw, ch) {
-    const ctx = this.ctx, cell = this.term.cellPixels || { width: 8, height: 16 };
-    const sx = cw / cell.width, sy = ch / cell.height;
+  drawSixel(ctx, e, img, box) {
+    const r = this.view.renderer, cell = this.term.cellPixels || { width: 8, height: 16 };
+    const sx = r.cellW / cell.width, sy = r.cellH / cell.height;
     if (!e.transparent) {
-      ctx.fillStyle = this.view.renderer.css(e.background, false);
+      ctx.fillStyle = r.css(e.background, false);
       ctx.fillRect(box.x, box.y, img.width * sx, img.height * sy);
     }
     ctx.drawImage(img.bitmap, box.x, box.y, img.width * sx, img.height * sy);
   }
 
   // kitty Unicode placeholders: runs of U+10EEEE cells, each showing its tile of the box.
-  paintPlaceholders(cw, ch, offset) {
+  layoutPlaceholders(cw, ch, offset) {
     const term = this.term;
     const virtual = [...this.placements.values()].map(p => p.e).filter(e => e.virtual);
     if (!virtual.length) return;
-    const tiles = [];
     for (let vr = 0; vr < term.rows; vr++) {
       const row = term.line(vr - offset);
       let left = null, run = null;
-      const flush = () => { if (run) tiles.push(run); run = null; };
+      const flush = () => {
+        if (!run) return;
+        const candidates = virtual.filter(e => (e.imageId >>> 0) === (run.id >>> 0));
+        const e = candidates.find(v => v.placementId === run.pid) || candidates[0];
+        const img = e && run.col >= run.imgCol ? this.image(e) : null;
+        if (img) {
+          const box = { x: (run.col - run.imgCol) * cw, y: (vr - run.imgRow) * ch, w: e.cols * cw, h: e.rows * ch };
+          this.ops.push({ e, img, box, clip: { x: run.col * cw, y: vr * ch, w: run.len * cw, h: ch }, grow: true, below: (e.z || 0) < 0 });
+        }
+        run = null;
+      };
       for (let c = 0; c <= term.cols; c++) {
         const mark = c < term.cols && row.cp(c) === KITTY_PLACEHOLDER ? this.readMark(row, c, left) : null;
         left = mark;
         if (run && mark && run.id === mark.id && run.pid === mark.placement && run.imgRow === mark.row
           && run.imgCol + run.len === mark.col) { run.len++; continue; }
         flush();
-        if (mark) run = { id: mark.id, pid: mark.placement, imgRow: mark.row, imgCol: mark.col, col: c, row: vr, len: 1 };
+        if (mark) run = { id: mark.id, pid: mark.placement, imgRow: mark.row, imgCol: mark.col, col: c, len: 1 };
       }
-    }
-    for (const t of tiles) {
-      const candidates = virtual.filter(e => (e.imageId >>> 0) === (t.id >>> 0));
-      const e = candidates.find(v => v.placementId === t.pid) || candidates[0];
-      if (!e || t.col < t.imgCol) continue;
-      const img = this.image(e);
-      if (!img) continue;
-      const box = { x: (t.col - t.imgCol) * cw, y: (t.row - t.imgRow) * ch, w: e.cols * cw, h: e.rows * ch };
-      this.drawFit(img, box, { x: t.col * cw, y: t.row * ch, w: t.len * cw, h: ch }, true);
     }
   }
 
@@ -4279,6 +4327,7 @@ class View {
   }
 
   draw() {
+    this.images.layout();
     this.renderer.paint(this);
     this.images.resize(this.canvas.width, this.canvas.height);
     this.imageCanvas.style.width = this.canvas.style.width;

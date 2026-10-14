@@ -389,10 +389,11 @@ impl GpuRenderer {
         h: u32,
         path: &str,
         max_w: u32,
+        paint_below: impl FnOnce(&mut GridRenderer),
         paint: impl FnOnce(&mut GridRenderer),
     ) -> Result<(u32, u32), String> {
         self.grid.palette = crate::cells::palette();
-        self.grid.render_cells_offscreen(panes, w, h, path, max_w, paint)
+        self.grid.render_cells_offscreen(panes, w, h, path, max_w, paint_below, paint)
     }
 
 

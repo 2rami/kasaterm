@@ -691,9 +691,15 @@ impl App {
             default_fg,
             source,
         };
-        let rendered = g.render_cells_offscreen(&[slot], w, h, &path, max_w, |g| {
-            kasa_gridview::images::paint_once(g, &inline)
-        });
+        let rendered = g.render_cells_offscreen(
+            &[slot],
+            w,
+            h,
+            &path,
+            max_w,
+            |g| kasa_gridview::images::paint_once(g, &inline, true),
+            |g| kasa_gridview::images::paint_once(g, &inline, false),
+        );
         if !inline.is_empty() {
             g.drop_images_with_prefix(KEY_PREFIX);
         }
@@ -2596,6 +2602,7 @@ impl App {
                     && classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
                 g.rect(*x, *y, *w, *h, theme::pane_bg());
             }
+            paint_inline_images_below(g, &inline_slots);
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {

@@ -1281,6 +1281,7 @@ impl GridRenderer {
         h: u32,
         path: &str,
         max_w: u32,
+        paint_below: impl FnOnce(&mut Self),
         paint: impl FnOnce(&mut Self),
     ) -> Result<(u32, u32), String> {
         let w = w.max(1);
@@ -1292,6 +1293,8 @@ impl GridRenderer {
         let saved_iconq = std::mem::take(&mut self.icon_quads);
         let saved_runs = std::mem::take(&mut self.clip_runs);
         let saved_stack = std::mem::take(&mut self.clip_stack);
+        // 넣은 순서대로 그리므로 글자 아래 그림(kitty z<0)은 칸보다 먼저.
+        paint_below(self);
         self.draw_cells(panes);
         paint(self);
         let dims = [w as f32, h as f32];

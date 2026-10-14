@@ -1129,6 +1129,7 @@ impl App {
                         rect: (body_left, body_top + b.row as f32 * ich, w, h),
                         clip: (body_left, clip_y0, w, clip_y1 - clip_y0),
                         fit: InlineFit::Hug,
+                        below: false,
                     });
                 }
             }

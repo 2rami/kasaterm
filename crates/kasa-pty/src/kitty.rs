@@ -864,6 +864,7 @@ fn push_run(
         cols: p.cols,
         rows: p.rows,
         clip: Some(CellClip { row: vr, col: col as u16, cols: len as u16, rows: 1 }),
+        z: p.z,
     };
     if let Some(prev) = out[first..].iter_mut().rev().find(|v| {
         v.id == view.id
@@ -895,6 +896,7 @@ pub(crate) fn anchored_views(store: &KittyStore, top_abs: i64, rows: u16, out: &
             cols: p.cols,
             rows: p.rows,
             clip: Some(CellClip { row: row as i32, col: p.col, cols: p.cols, rows: p.rows }),
+            z: p.z,
         });
     }
 }

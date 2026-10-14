@@ -85,6 +85,13 @@ pub struct InlineImageView {
     /// 가린다. `None` 은 OSC 1337(원본 크기까지만, pane 이 자른다).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<CellClip>,
+    /// kitty 놓기의 z. 0 아래면 글자 아래(칸 기본 배경 위)에, 그 밖은 글자 위에 그린다. OSC 1337 은 0.
+    #[serde(default, skip_serializing_if = "is_zero_z")]
+    pub z: i32,
+}
+
+fn is_zero_z(z: &i32) -> bool {
+    *z == 0
 }
 
 /// 뷰포트 칸 사각형.

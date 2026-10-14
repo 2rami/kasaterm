@@ -171,15 +171,17 @@ class Renderer {
       const sel = view.selectionSpan(line, cols);
       const cursorHere = y === cursorRow ? view.cursorState() : '';
       const hover = view.hoverSpan(line);
+      const below = view.images ? view.images.belowKey(y) : '';
       const prev = this.lines[y];
       if (prev && prev.row === row && prev.sel === sel && prev.cursor === cursorHere && prev.hover === hover
-        && sameCells(prev.d, row.d) && prev.x === extrasKey(row)) continue;
-      this.paintRow(y, row, sel, cursorHere ? cur : null, cursorHere, hover);
-      this.lines[y] = { row, d: row.d.slice(), x: extrasKey(row), sel, cursor: cursorHere, hover };
+        && prev.below === below && sameCells(prev.d, row.d) && prev.x === extrasKey(row)) continue;
+      this.paintRow(y, row, sel, cursorHere ? cur : null, cursorHere, hover, below ? view.images : null);
+      this.lines[y] = { row, d: row.d.slice(), x: extrasKey(row), sel, cursor: cursorHere, hover, below };
     }
   }
 
-  paintRow(y, row, sel, cur, cursorState, hover) {
+  // `images` paints kitty z<0 pictures between the default background and the cells, as the app.
+  paintRow(y, row, sel, cur, cursorState, hover, images) {
     const ctx = this.ctx, cols = this.term.cols, cw = this.cellW, top = y * this.cellH, h = this.cellH;
     const [selFrom, selTo] = sel ? sel.split(':').map(Number) : [-1, -1];
     // The band spans the whole backing store: its last device column is only partly covered by
@@ -191,6 +193,7 @@ class Renderer {
     ctx.clip();
     ctx.fillStyle = this.css(DEFAULT_BG, false);
     ctx.fillRect(0, top, full, h);
+    if (images) images.paintBelow(ctx, y);
 
     // Backgrounds, merged into runs.
     let runStart = 0, runColor = null;

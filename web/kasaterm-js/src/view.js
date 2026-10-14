@@ -178,6 +178,7 @@ class View {
   }
 
   draw() {
+    this.images.layout();
     this.renderer.paint(this);
     this.images.resize(this.canvas.width, this.canvas.height);
     this.imageCanvas.style.width = this.canvas.style.width;

@@ -192,7 +192,8 @@ term.view.scrollLines(n); term.view.selectionText(); term.focus();
   같은 규칙으로 그린다 — iTerm 은 칸 상자 가운데에 원본 크기까지만(원본 크기는 앱의 물리 픽셀 칸 `term.cellPixels` 기준이라
   글자 대비 크기가 앱과 같다), 걸린 줄의 앞 64자가 바뀌면 버림. kitty 는 상자에 비율 맞춰 채움, 유니코드 자리표시(U+10EEEE)
   칸은 전경색·밑줄색·결합 부호로 그림·놓기·행·열을 읽어 그 칸의 조각만. 식셀(xterm 프로필)은 픽셀 그대로. `/term` 은 서버
-  `size` 프레임의 `cell`(앱 칸 픽셀)을 `term.cellPixels` 에 넣는다. kitty `z<0`(글 아래)도 지금은 글 위에 그린다.
+  `size` 프레임의 `cell`(앱 칸 픽셀)을 `term.cellPixels` 에 넣는다. kitty `z<0` 은 앱처럼 기본 배경 위·칸 배경과 글자 아래
+  (줄을 그릴 때 기본 배경 다음에 그 줄 몫을 그린다), 나머지는 글자 위 캔버스에 그린다.
 - 브라우저 시험: `node test-view/input.mjs`(Playwright 를 전역에 깔아 두면 헤드리스 크롬으로 키·IME 조합·폰식 조합·
   붙여넣기·선택·휠·마우스 보고·포커스를 확인), `node test-view/images.mjs`(그림 네 갈래와 지우기 규칙).
 

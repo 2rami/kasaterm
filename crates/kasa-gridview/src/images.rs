@@ -15,6 +15,8 @@ pub struct InlineSlot {
     /// 보이는 영역 — 이 밖은 잘린다.
     pub clip: (f32, f32, f32, f32),
     pub fit: InlineFit,
+    /// kitty `z<0`: 칸 글자보다 먼저(기본 배경 위·글자 아래) 그린다.
+    pub below: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -55,7 +57,7 @@ pub fn inline_slot(
         }
         None => ((rect.0, clip_y0, rect.2, clip_y1 - clip_y0), InlineFit::Native),
     };
-    InlineSlot { key, path: v.path.clone(), rect, clip, fit }
+    InlineSlot { key, path: v.path.clone(), rect, clip, fit, below: v.z < 0 }
 }
 
 /// 인라인 이미지(OSC 1337·kitty)를 올리고 그린다 — 파일에서 한 번 디코드해 텍스처로
@@ -79,7 +81,10 @@ pub struct InlineImages {
 }
 
 impl InlineImages {
-    pub fn paint(&mut self, g: &mut GridRenderer, slots: &[InlineSlot]) {
+    /// 그리기는 두 번에 나뉜다 — `below` 그림은 칸 글자 전, 나머지는 칸 글자 뒤(렌더러는 넣은
+    /// 순서대로 그린다). 캐시는 「이번 프레임 배치에 없는 키는 놓는다」라서 먼저 한 번 전체 배치로
+    /// 올리고(`prepare`) 층마다 그린다(`queue_layer`). 층마다 `prepare` 하면 다른 층 텍스처가 놓인다.
+    pub fn prepare(&mut self, g: &mut GridRenderer, slots: &[InlineSlot]) {
         let live: HashSet<&str> = slots.iter().map(|s| s.key.as_str()).collect();
         self.uploaded.retain(|k, _| {
             let keep = live.contains(k.as_str());
@@ -92,6 +97,11 @@ impl InlineImages {
             if !self.uploaded.contains_key(&slot.key) {
                 self.uploaded.insert(slot.key.clone(), upload(g, slot));
             }
+        }
+    }
+
+    pub fn queue_layer(&self, g: &mut GridRenderer, slots: &[InlineSlot], below: bool) {
+        for slot in slots.iter().filter(|s| s.below == below) {
             if let Some(Some(dims)) = self.uploaded.get(&slot.key).copied() {
                 queue(g, slot, dims);
             }
@@ -102,8 +112,8 @@ impl InlineImages {
 /// 화면 밖 캡처 한 번 몫 — 위 캐시를 안 거치고 올려 그린다. 캐시는 「이번 프레임에 없는
 /// 키는 놓는다」라서 여기서 건드리면 본 화면 텍스처가 지워진다. 올린 텍스처는 부른 쪽이
 /// 캡처 뒤 키 머리로 놓는다.
-pub fn paint_once(g: &mut GridRenderer, slots: &[InlineSlot]) {
-    for slot in slots {
+pub fn paint_once(g: &mut GridRenderer, slots: &[InlineSlot], below: bool) {
+    for slot in slots.iter().filter(|s| s.below == below) {
         if let Some(dims) = upload(g, slot) {
             queue(g, slot, dims);
         }
@@ -159,8 +169,11 @@ mod tests {
             cols: 4,
             rows: 2,
             clip: Some(CellClip { row: 0, col: 2, cols: 4, rows: 1 }),
+            z: 0,
         };
         let s = inline_slot(&face, "k".into(), (10.0, 20.0), (8.0, 16.0), 24, 0);
+        assert!(!s.below);
+        assert!(inline_slot(&InlineImageView { z: -1, ..face.clone() }, "b".into(), (10.0, 20.0), (8.0, 16.0), 24, 0).below);
         assert_eq!(s.rect, (26.0, 4.0, 32.0, 32.0));
         assert_eq!(s.clip, (26.0, 20.0, 32.0, 16.0));
         assert_eq!(s.fit, InlineFit::Contain);

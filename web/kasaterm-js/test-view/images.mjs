@@ -58,6 +58,20 @@ const r = await page.evaluate(async zlib => {
   term.write('\x1b_Ga=d,d=I,i=7\x1b\\');
   await settle();
   out.kittyAfterDelete = px(5, 5);
+  // kitty z<0: under the text, above the default background — the app draws it after the pane
+  // background and before the cells, so a coloured cell background covers it.
+  term.write('\x1b[16;1H');
+  term.write(`\x1b_Ga=T,f=100,c=10,r=3,i=10,z=-1,C=1;${b64}\x1b\\`);
+  term.write('\x1b[17;6H\x1b[44m \x1b[0m');
+  await settle();
+  const text = (col, row) => {
+    const cv = term.view.canvas, k = term.view.renderer.dpr;
+    const d = cv.getContext('2d').getImageData(Math.round((col + 0.5) * cw * k), Math.round((row + 0.5) * ch * k), 1, 1).data;
+    return d[1] > 200 && d[0] < 100 ? 'green' : d[0] > 200 && d[1] < 100 ? 'red' : d[2] > d[0] + 60 && d[2] > d[1] + 40 ? 'blue' : 'other';
+  };
+  out.belowOverlay = px(4, 16);
+  out.belowText = text(4, 16);
+  out.belowUnderBg = text(5, 16);
   return out;
 }, deflateSync(rgba).toString('base64'));
 check('iTerm picture drawn in its box', r.itermCentre === 'green');
@@ -68,6 +82,9 @@ check('nothing outside the placeholder cells', r.placeholderOutside === 'none');
 check('iTerm picture dropped when its line is rewritten', r.itermAfterRewrite === 'none');
 check('other pictures stay', r.kittyStays === 'green');
 check('kitty delete removes the placement', r.kittyAfterDelete === 'none');
+check('kitty z<0 is not drawn above the text', r.belowOverlay === 'none');
+check('kitty z<0 shows through blank cells', r.belowText === 'green' || r.belowText === 'red');
+check('a coloured cell background covers a z<0 picture', r.belowUnderBg === 'blue');
 if (failed) console.log(JSON.stringify(r));
 await browser.close();
 process.exit(failed ? 1 : 0);

@@ -598,6 +598,7 @@ pub(super) fn attach_inline_views_at_offset(
                     cols: im.cols,
                     rows: im.rows,
                     clip: None,
+                    z: 0,
                 }
             })
         })

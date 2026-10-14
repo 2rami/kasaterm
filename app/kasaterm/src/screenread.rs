@@ -2538,10 +2538,19 @@ pub(crate) fn find_image_refs(rows: &[Vec<GridCell>]) -> Vec<ImageRef> {
 /// contain-fit 은 박스 안 중앙 정렬이라, 준 박스가 그림보다 넓으면 글 흐름에서
 /// 그림만 한가운데로 떨어져 나온다. OSC 1337 경로는 PTY 가 셀 수를 재어 주므로
 /// 박스가 이미 맞아 이 손질이 필요 없다.
+static INLINE_UPLOADED: std::sync::OnceLock<std::sync::Mutex<kasa_gridview::images::InlineImages>> =
+    std::sync::OnceLock::new();
+
+/// 칸 글자 전에 부른다 — 이번 프레임 그림을 올리고 kitty `z<0` 그림(글자 아래)을 그린다.
+pub(crate) fn paint_inline_images_below(g: &mut kasa_gridview::GridRenderer, slots: &[kasa_gridview::images::InlineSlot]) {
+    let mut images = INLINE_UPLOADED.get_or_init(Default::default).lock().unwrap();
+    images.prepare(g, slots);
+    images.queue_layer(g, slots, true);
+}
+
+/// 칸 글자 뒤 — 나머지 그림(글자 위). 올리기는 `paint_inline_images_below` 가 이미 했다.
 pub(crate) fn paint_inline_images(g: &mut kasa_gridview::GridRenderer, slots: &[kasa_gridview::images::InlineSlot]) {
-    static UPLOADED: std::sync::OnceLock<std::sync::Mutex<kasa_gridview::images::InlineImages>> =
-        std::sync::OnceLock::new();
-    UPLOADED.get_or_init(Default::default).lock().unwrap().paint(g, slots);
+    INLINE_UPLOADED.get_or_init(Default::default).lock().unwrap().queue_layer(g, slots, false);
 }
 
 /// claude 2.1.228 이 세션명 자리(입력박스 상단 보더 우측 끝)에 그리는 ` ultracode `
