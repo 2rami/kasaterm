@@ -10,6 +10,7 @@ pub(crate) mod device_account;
 
 #[path = "native_appearance_preview.rs"]
 mod appearance_preview;
+pub(crate) mod devices;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
@@ -183,6 +184,10 @@ pub(crate) struct SettingsCache {
     themegen_provider: String,
     themegen_key_masked: String,
     themegen_refs: Arc<std::collections::HashSet<String>>,
+    machines: Arc<Vec<MachineRow>>,
+    device_names: Arc<Vec<crate::render::pane_identity::DeviceNameRow>>,
+    chrome_machine: String,
+    chrome_candidates: Vec<String>,
 }
 
 impl std::fmt::Debug for SettingsCache {
@@ -202,6 +207,7 @@ impl std::fmt::Debug for SettingsCache {
 
 impl SettingsCache {
     pub(crate) fn refresh(&mut self) {
+        self.refresh_devices();
         self.preferred_agent = crate::agent_preferences::preferred_agent().to_string();
         self.agent_permissions = ["claude", "codex"].map(|provider| crate::agent_preferences::permission(provider).to_string());
         self.agent_statusline = ["model", "usage", "cwd"].map(crate::agent_preferences::statusline_enabled);
@@ -347,6 +353,14 @@ impl SettingsCache {
         self.accounts = Arc::new(accounts);
         self.shared_accounts = Arc::new(shared.0);
         self.shared_error = shared.1;
+    }
+
+    pub(crate) fn refresh_devices(&mut self) {
+        if cfg!(test) { return; }
+        self.machines = Arc::new(machines_view());
+        self.device_names = Arc::new(crate::render::pane_identity::device_name_rows());
+        self.chrome_machine = kasa_mcp::machines::kasachrome_machine();
+        self.chrome_candidates = kasa_mcp::machines::kasachrome_candidates();
     }
 
     pub(crate) fn language(&self) -> &str {
@@ -602,6 +616,9 @@ pub(crate) enum DropdownId {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
+    ClearSearch,
+    FinishInput,
+    CancelInput,
     Category(SettingsCat),
     NavigationScroll(u32),
     Disclosure(&'static str),
@@ -768,6 +785,7 @@ pub(crate) struct Snapshot {
     pub(crate) cursor: (f32, f32),
     pub(crate) scroll: f32,
     pub(crate) navigation_scroll: f32,
+    pub(crate) query: String,
     pub(crate) caret_on: bool,
     pub(crate) input: Option<SettingsInput>,
     pub(crate) select_all: bool,
@@ -832,7 +850,11 @@ pub(crate) struct Snapshot {
     pub(crate) shared_error: Option<String>,
     pub(crate) account_usage_expanded: std::collections::HashSet<String>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
-    pub(crate) machine_edit: Option<(usize, bool, String)>,
+    pub(crate) machine_edit: Option<devices::Editor>,
+    pub(crate) machines: Arc<Vec<MachineRow>>,
+    pub(crate) device_names: Arc<Vec<crate::render::pane_identity::DeviceNameRow>>,
+    pub(crate) chrome_machine: String,
+    pub(crate) chrome_candidates: Vec<String>,
     pub(crate) device_name_edit: Option<(String, String)>,
     pub(crate) login_job: Option<crate::settings::LoginJob>,
     /// 로그인이 코드를 기다릴 때 그 칸에 든 값.
@@ -962,6 +984,7 @@ impl App {
         self.device_account.refresh();
         let shared = shared_choices(kasa_mcp::agent_accounts::cached().as_ref());
         self.settings_scene.set_account_cache(accounts, shared);
+        self.settings_scene.refresh_device_cache();
     }
 
     pub(crate) fn native_settings_tick(&mut self) {
@@ -1000,7 +1023,7 @@ impl App {
                 )
             })
             .unwrap_or_else(theme::cursor);
-        Some(Snapshot {
+        let mut snapshot = Snapshot {
             weather: self.weather.settings.clone(),
             weather_os: self.weather.os(),
             device_account: self.device_account.view(),
@@ -1016,6 +1039,7 @@ impl App {
             cursor: self.cursor_px,
             scroll: scene.scroll(),
             navigation_scroll: scene.navigation_scroll(),
+            query: scene.query.clone(),
             caret_on: self.last_blink_on,
             input: self.settings_input,
             select_all: scene.field_select_all(),
@@ -1079,6 +1103,10 @@ impl App {
             dropdown_scroll: scene.dropdown_scroll(),
             account_label_edit: self.account_label_edit.clone(),
             machine_edit: self.machine_edit.clone(),
+            machines: cache.machines.clone(),
+            device_names: cache.device_names.clone(),
+            chrome_machine: cache.chrome_machine.clone(),
+            chrome_candidates: cache.chrome_candidates.clone(),
             device_name_edit: self.device_name_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
             login_code: self.login_code_edit.clone(),
@@ -1130,7 +1158,11 @@ impl App {
             media: scene.media(),
             media_elapsed: scene.media_elapsed(),
             onboarding: crate::native_onboarding::snapshot(self, area),
-        })
+        };
+        if crate::verification_run() && std::env::var_os("KASATERM_TEST_SETTINGS_DEVICES").is_some() {
+            devices::fixture(&mut snapshot);
+        }
+        Some(snapshot)
     }
 
     pub(crate) fn finish_native_settings_paint(&mut self, output: PaintOutput) {
@@ -1184,6 +1216,13 @@ impl App {
             self.settings_scene.close_dropdown();
         }
         match target {
+            Some(Target::ClearSearch) => {
+                if self.settings_input == Some(SettingsInput::Search) { self.native_settings_cancel_field(); }
+                self.settings_scene.query.clear();
+                self.native_settings_focus(SettingsInput::Search);
+            }
+            Some(Target::FinishInput) => self.native_settings_blur(),
+            Some(Target::CancelInput) => self.native_settings_cancel_field(),
             Some(Target::Disclosure(id)) => {
                 self.native_settings_blur();
                 self.settings_scene.toggle_disclosure(id);
@@ -1316,6 +1355,7 @@ impl App {
         self.settings_input = Some(field);
         self.settings_scene.prepare_field_focus(field);
         match field {
+            SettingsInput::Search => self.settings_caret = self.settings_scene.query.chars().count(),
             SettingsInput::DeviceAccountName
             | SettingsInput::DeviceAccountPassword
             | SettingsInput::DeviceAccountNickname
@@ -1352,7 +1392,8 @@ impl App {
             }
             SettingsInput::CustomThemeLabel
             | SettingsInput::AccountLabel
-            | SettingsInput::MachineField
+            | SettingsInput::MachineLabel
+            | SettingsInput::MachineAddress
             | SettingsInput::DeviceName
             | SettingsInput::LoginCode => {
                 self.settings_caret = self
@@ -1401,6 +1442,7 @@ impl App {
 
     fn native_settings_field_value(&self, field: SettingsInput) -> (String, usize) {
         match field {
+            SettingsInput::Search => (self.settings_scene.query.clone(), self.settings_caret),
             SettingsInput::DeviceAccountName => (self.device_account.account.clone(), self.settings_caret),
             SettingsInput::DeviceAccountPassword => (device_account::mask(&self.device_account.password), self.settings_caret),
             SettingsInput::DeviceAccountNickname => (self.device_account.profile.nickname.clone(), self.settings_caret),
@@ -1430,10 +1472,10 @@ impl App {
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
-            SettingsInput::MachineField => (
+            SettingsInput::MachineLabel | SettingsInput::MachineAddress => (
                 self.machine_edit
                     .as_ref()
-                    .map(|(_, _, value)| value.clone())
+                    .map(|edit| edit.value(field == SettingsInput::MachineAddress).to_string())
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
@@ -1470,6 +1512,10 @@ impl App {
             self.settings_scene.mark_field_dirty();
         }
         match field {
+            SettingsInput::Search => {
+                crate::lineedit::insert(&mut self.settings_scene.query, &mut self.settings_caret, text);
+                self.settings_scene.scroll_navigation(-f32::MAX, 0.0);
+            }
             SettingsInput::DeviceAccountName
             | SettingsInput::DeviceAccountPassword
             | SettingsInput::DeviceAccountNickname
@@ -1517,9 +1563,9 @@ impl App {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
                 }
             }
-            SettingsInput::MachineField => {
-                if let Some((_, _, buffer)) = self.machine_edit.as_mut() {
-                    crate::lineedit::insert(buffer, &mut self.settings_caret, text);
+            SettingsInput::MachineLabel | SettingsInput::MachineAddress => {
+                if let Some(edit) = self.machine_edit.as_mut() {
+                    crate::lineedit::insert(edit.value_mut(field == SettingsInput::MachineAddress), &mut self.settings_caret, text);
                 }
             }
             SettingsInput::DeviceName => {
@@ -1589,9 +1635,6 @@ impl App {
             self.flush_account_label();
             self.refresh_native_settings_dynamic_cache();
         }
-        if self.settings_input == Some(SettingsInput::MachineField) {
-            self.flush_machine_field();
-        }
         if self.settings_input == Some(SettingsInput::DeviceName) {
             self.flush_device_name();
         }
@@ -1617,6 +1660,7 @@ impl App {
 
     fn native_settings_restore_backup(&mut self, backup: FieldBackup) {
         match backup.field {
+            SettingsInput::Search => self.settings_scene.query = backup.value,
             field @ (SettingsInput::DeviceAccountName
             | SettingsInput::DeviceAccountPassword
             | SettingsInput::DeviceAccountNickname
@@ -1646,9 +1690,9 @@ impl App {
                     *value = backup.value;
                 }
             }
-            SettingsInput::MachineField => {
-                if let Some((_, _, value)) = self.machine_edit.as_mut() {
-                    *value = backup.value;
+            SettingsInput::MachineLabel | SettingsInput::MachineAddress => {
+                if let Some(edit) = self.machine_edit.as_mut() {
+                    *edit.value_mut(backup.field == SettingsInput::MachineAddress) = backup.value;
                 }
             }
             SettingsInput::DeviceName => {
@@ -1707,7 +1751,7 @@ impl App {
             Some(SettingsInput::ThemeLabel) => self.theme_label_edit = None,
             Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
             Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
-            Some(SettingsInput::MachineField) => self.machine_edit = None,
+            Some(SettingsInput::Search) => self.settings_scene.query.clear(),
             Some(SettingsInput::DeviceName) => self.device_name_edit = None,
             // 코드는 지우지 않는다 — 붙여넣다 esc 를 눌러도 다시 치게 하지 않는다.
             Some(SettingsInput::LoginCode) => {}
@@ -1803,6 +1847,14 @@ impl App {
         if event.state != ElementState::Pressed {
             return true;
         }
+        let editor_mod = if cfg!(target_os = "macos") { self.modifiers.super_key() } else { self.modifiers.control_key() };
+        if editor_mod && !self.settings_scene.first_run()
+            && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("f")) {
+            self.native_settings_focus(SettingsInput::Search);
+            self.settings_scene.select_all_field();
+            self.chrome_dirty = true;
+            return true;
+        }
         let modified = self.host_mod() || self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key();
         if let Key::Named(key) = event.logical_key {
             if matches!(key, NamedKey::Tab | NamedKey::PageUp | NamedKey::PageDown | NamedKey::Enter | NamedKey::Space | NamedKey::Escape) {
@@ -1839,14 +1891,14 @@ impl App {
             if self.settings_scene.first_run() {
                 return self.native_onboarding_key(event);
             }
-            let nav = SettingsCat::nav();
+            let nav = matching_categories(&self.settings_scene.query);
+            if nav.is_empty() { return true; }
             let at = nav
                 .iter()
-                .position(|cat| *cat == self.settings_scene.category())
-                .unwrap_or(0);
+                .position(|cat| *cat == self.settings_scene.category());
             let next = match event.logical_key {
-                Key::Named(NamedKey::ArrowUp) => at.saturating_sub(1),
-                Key::Named(NamedKey::ArrowDown) => (at + 1).min(nav.len() - 1),
+                Key::Named(NamedKey::ArrowUp) => at.map_or(0, |at| at.saturating_sub(1)),
+                Key::Named(NamedKey::ArrowDown) => at.map_or(0, |at| (at + 1).min(nav.len() - 1)),
                 _ => return true,
             };
             self.settings_scene.set_category(nav[next]);
@@ -1855,7 +1907,7 @@ impl App {
         };
 
         self.ime_retarget(crate::ImeFocus::Settings(field));
-        let host = self.host_mod();
+        let host = editor_mod;
         if device_account::secret(field) && host
             && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyZ)) {
             return true;
@@ -1990,6 +2042,21 @@ impl App {
         }
 
         match event.logical_key {
+            Key::Named(NamedKey::Enter) if field == SettingsInput::Search => {
+                if let Some(cat) = matching_categories(&self.settings_scene.query).first().copied() {
+                    self.native_settings_blur();
+                    self.settings_scene.set_category(cat);
+                    self.refresh_native_settings_media_cache();
+                }
+                return true;
+            }
+            Key::Named(NamedKey::Enter) if matches!(field, SettingsInput::MachineLabel | SettingsInput::MachineAddress) => {
+                if !event.repeat {
+                    self.native_settings_blur();
+                    self.native_settings_apply(SettingsAction::SaveMachine);
+                }
+                return true;
+            }
             Key::Named(NamedKey::Enter) if device_account::owns(field) => {
                 if !event.repeat { self.device_account_enter(field); }
                 return true;
@@ -2000,7 +2067,6 @@ impl App {
             }
             Key::Named(NamedKey::Enter) => {
                 self.native_settings_blur();
-                self.set_toast("저장됐어요".to_string());
                 return true;
             }
             Key::Named(NamedKey::Backspace)
@@ -2027,6 +2093,7 @@ impl App {
         });
         if changed {
             self.settings_scene.mark_field_dirty();
+            if field == SettingsInput::Search { self.settings_scene.scroll_navigation(-f32::MAX, 0.0); }
             if matches!(
                 field,
                 SettingsInput::CwdPath
@@ -2411,6 +2478,7 @@ fn is_jamo(ch: char) -> bool {
 
 fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mut usize)> {
     match field {
+        SettingsInput::Search => Some((&mut app.settings_scene.query, &mut app.settings_caret)),
         SettingsInput::DeviceAccountName
         | SettingsInput::DeviceAccountPassword
         | SettingsInput::DeviceAccountNickname
@@ -2438,10 +2506,10 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
             .account_label_edit
             .as_mut()
             .map(|(_, _, buffer)| (buffer, &mut app.settings_caret)),
-        SettingsInput::MachineField => app
+        SettingsInput::MachineLabel | SettingsInput::MachineAddress => app
             .machine_edit
             .as_mut()
-            .map(|(_, _, buffer)| (buffer, &mut app.settings_caret)),
+            .map(|edit| (edit.value_mut(field == SettingsInput::MachineAddress), &mut app.settings_caret)),
         SettingsInput::DeviceName => app
             .device_name_edit
             .as_mut()
@@ -2473,14 +2541,52 @@ fn nav_groups_before(index: usize) -> usize {
     NAV_GROUPS.iter().filter(|(start, _)| *start <= index).count()
 }
 
+fn search_text(value: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    value.nfc().filter(|ch| !ch.is_whitespace()).flat_map(char::to_lowercase).collect()
+}
+
+fn matching_categories(query: &str) -> Vec<SettingsCat> {
+    if query.trim().is_empty() { return SettingsCat::nav().to_vec(); }
+    let mut result: Vec<_> = SettingsCat::nav().iter().copied().filter(|cat| category_matches(*cat, query)).collect();
+    let needle = search_text(query);
+    result.sort_by_key(|cat| {
+        let title = search_text(category_meta(*cat).0);
+        if title == needle || cat.web_key() == needle { 0 }
+        else if title.contains(&needle) || cat.web_key().starts_with(&needle) { 1 }
+        else { 2 }
+    });
+    result
+}
+
+fn category_matches(cat: SettingsCat, query: &str) -> bool {
+    let (title, _, detail) = category_meta(cat);
+    let aliases = match cat {
+        SettingsCat::General | SettingsCat::Shell => "시작 폴더 경로 셸 shell cwd 파일 열기 저장 편집 general directory editor autosave",
+        SettingsCat::Appearance => "테마 theme 색상 밝기 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
+        SettingsCat::Statusbar => "하단 상태줄 상태바 사용량 cpu 메모리 계정 표시 statusbar usage memory",
+        SettingsCat::Weather => "날씨 비 애니메이션 움직임 투명도 weather rain motion",
+        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth claude codex kasa 구글 github 1password 자동 전환 한도 사용량 account login password",
+        SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
+        SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
+        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 크롬 chrome 브라우저 device connection machine browser",
+        SettingsCat::Pet => "펫 바탕화면 캐릭터 알림 말풍선 움직임 pet desktop notification",
+        SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
+    };
+    let haystack = search_text(&format!("{title} {detail} {aliases}"));
+    query.split_whitespace().all(|word| haystack.contains(&search_text(word)))
+}
+
 fn navigation_layout(area: Rect, nav_width: f32, count: usize) -> NavigationLayout {
     let (x, y, _, height) = area;
     let close = (x + 12.0, y + (height - 46.0).max(0.0), nav_width - 24.0, 32.0_f32.min(height));
-    let top = (y + 56.0).min(close.1);
+    let top = (y + 84.0).min(close.1);
     let viewport = (x, top, nav_width, (close.1 - 8.0 - top).max(0.0));
     let groups_height = NAV_GROUPS.iter().filter(|(start, _)| *start < count).count() as f32 * NAV_GROUP_H;
     let groups = count as f32 * 36.0 + groups_height <= viewport.3;
-    let (row_height, row_step) = if groups { (32.0, 36.0) } else { (CTL_H, CTL_H + 4.0) };
+    let compact_step = if count as f32 * (CTL_H + 4.0) > viewport.3
+        && count as f32 * (CTL_H + 2.0) <= viewport.3 { CTL_H + 2.0 } else { CTL_H + 4.0 };
+    let (row_height, row_step) = if groups { (32.0, 36.0) } else { (CTL_H, compact_step) };
     NavigationLayout {
         viewport, close, groups, row_height, row_step,
         content_height: count as f32 * row_step + if groups { groups_height } else { 0.0 },
@@ -2504,7 +2610,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         return output;
     }
     let (ax, ay, aw, ah) = snapshot.area;
-    let nav_w = if aw < 760.0 { 154.0 } else { 200.0 };
+    let nav_w = if aw < 520.0 { 112.0 } else if aw < 760.0 { 154.0 } else { 200.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
@@ -2512,18 +2618,39 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자.
     g.rect(ax, ay, nav_w, ah, theme::panel_bg());
     draw_text(g, ax + 20.0, ay + 24.0, "설정", 13.0, theme::text_dim(), false);
-
-    let navigation = navigation_layout(snapshot.area, nav_w, SettingsCat::nav().len());
+    let search = (ax + 12.0, ay + 44.0, nav_w - 24.0, CTL_H);
+    let search_width = search.2 - if snapshot.query.is_empty() { 0.0 } else { CTL_H + 4.0 };
+    text_field(g, snapshot, &mut hits, &mut caret_rect, search.0, search.1, search_width, "",
+        &snapshot.query, SettingsInput::Search, snapshot.settings_caret, false);
+    if !snapshot.query.is_empty() {
+        mini_icon_button(g, snapshot, &mut hits, (search.0 + search.2 - CTL_H, search.1, CTL_H, CTL_H),
+            "x", Target::ClearSearch);
+    }
+    let nav = matching_categories(&snapshot.query);
+    let mut navigation = navigation_layout(snapshot.area, nav_w, nav.len());
+    if !snapshot.query.trim().is_empty() {
+        navigation.groups = false;
+        navigation.content_height = nav.len() as f32 * navigation.row_step;
+    }
     let navigation_max = (navigation.content_height - navigation.viewport.3).max(0.0);
     let navigation_scroll = snapshot.navigation_scroll.clamp(0.0, navigation_max);
     register(&mut hits, Target::NavigationScroll(navigation_max.ceil() as u32), navigation.viewport, HitCursor::Arrow);
     g.push_clip(navigation.viewport.0, navigation.viewport.1, navigation.viewport.2, navigation.viewport.3);
-    for (index, &cat) in SettingsCat::nav().iter().enumerate() {
+    for (index, &cat) in nav.iter().enumerate() {
         let rect = navigation_row(&navigation, index, navigation_scroll);
         if let Some((_, group)) = NAV_GROUPS.iter().find(|(start, _)| *start == index).filter(|_| navigation.groups) {
             draw_text(g, ax + 20.0, rect.1 - NAV_GROUP_H, group, 10.5, theme::text_mute(), false);
         }
-        let (label, icon, _) = category_meta(cat);
+        let (mut label, icon, _) = category_meta(cat);
+        if nav_w < 154.0 {
+            label = match cat {
+                SettingsCat::Statusbar => "하단바",
+                SettingsCat::Claude => "코딩",
+                SettingsCat::General => "일반",
+                SettingsCat::Machines => "기기",
+                _ => label,
+            };
+        }
         // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
         let selected = cat == snapshot.cat
             || (cat == SettingsCat::Students && snapshot.cat == SettingsCat::Theme);
@@ -2554,11 +2681,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 theme::text_mute()
             },
         );
+        let label = fit(g, label, (rect.2 - 40.0).max(0.0), 12.0, selected);
         draw_text(
             g,
             rect.0 + 32.0,
             rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
-            label,
+            &label,
             12.0,
             if selected {
                 theme::text()
@@ -2569,6 +2697,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         );
         register_clipped(g, &mut hits, Target::Category(cat), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
+    }
+    if nav.is_empty() {
+        let message = fit(g, "검색 결과 없음", (nav_w - 40.0).max(0.0), 11.0, false);
+        draw_text(g, ax + 20.0, navigation.viewport.1 + 8.0, &message, 11.0, theme::text_dim(), false);
     }
     g.pop_clip();
     paint_scroll_affordance(g, navigation.viewport.0, navigation.viewport.1,
@@ -2594,11 +2726,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         15.0,
         theme::text_dim(),
     );
+    let return_label = fit(g, if nav_w < 154.0 { "돌아가기" } else { "작업 방으로" }, (close.2 - 43.0).max(0.0), 12.0, false);
     draw_text(
         g,
         close.0 + 33.0,
         close.1 + 9.0,
-        "작업 방으로",
+        &return_label,
         12.0,
         theme::text_dim(),
         false,
@@ -2610,7 +2743,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     draw_text(g, content_x, ay + 26.0, title, 20.0, theme::text(), true);
 
     let body_top = ay + HEADER_H + 14.0;
-    let body_bottom = ay + ah - 12.0;
+    let input_footer = snapshot.input.is_some_and(|field| !matches!(field,
+        SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress | SettingsInput::LoginCode)
+        && !device_account::owns(field));
+    let body_bottom = ay + ah - 12.0 - if input_footer { ROW_H } else { 0.0 };
     let view_h = (body_bottom - body_top).max(0.0);
     g.push_clip(content_x, body_top, content_w, view_h);
     let mut y = body_top - snapshot.scroll;
@@ -2662,7 +2798,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        SettingsCat::Machines => paint_machines(
+        SettingsCat::Machines => devices::paint(
             g,
             snapshot,
             &mut hits,
@@ -2703,6 +2839,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     g.pop_clip();
     let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
+    if input_footer {
+        let by = ay + ah - ROW_H;
+        g.rect(content_x, by - 4.0, content_w, 1.0, theme::border());
+        let hint = fit(g, "편집 중 · Esc 취소", (content_w - 148.0).max(0.0), 10.5, false);
+        draw_text(g, content_x, by + 7.0, &hint, 10.5, theme::text_dim(), false);
+        button(g, snapshot, &mut hits, (content_x + content_w - 136.0, by, 64.0, CTL_H), "취소", Target::CancelInput, false);
+        button(g, snapshot, &mut hits, (content_x + content_w - 64.0, by, 64.0, CTL_H), "완료", Target::FinishInput, true);
+    }
     // 스크롤바는 **스크롤되는 영역**의 오른쪽에 붙어야 한다. 글자가 앉는
     // `content_*` 를 그대로 주면 그 좌우 여백만큼 안으로 들어와, 막대가 패널
     // 가장자리에서 58px 떨어진 허공에 뜬다(2026-09-05 지적 「스크롤바가 왜 저기
@@ -4386,9 +4530,10 @@ fn paint_accounts(
 }
 
 /// 명부 한 줄을 화면에 옮긴 것. 파일 형식(다른 필드가 여럿 딸린 json)을 그대로
-/// 들고 다니지 않는 것은, 화면이 만지는 것이 이름과 ssh 두 칸뿐이고 나머지는
+/// 들고 다니지 않는 것은, 화면이 만지는 것이 이름과 연결 주소뿐이고 나머지는
 /// **손대지 않고 되돌려 써야** 하기 때문이다 — 손으로 적은 옛 항목이 있다.
 pub(crate) struct MachineRow {
+    pub(crate) machine_id: Option<String>,
     pub(crate) label: String,
     pub(crate) ssh: String,
     pub(crate) status: String,
@@ -4405,6 +4550,7 @@ pub(crate) struct MachineRow {
 impl Clone for MachineRow {
     fn clone(&self) -> Self {
         Self {
+            machine_id: self.machine_id.clone(),
             label: self.label.clone(),
             ssh: self.ssh.clone(),
             status: self.status.clone(),
@@ -4446,13 +4592,13 @@ fn machine_status(
     }
 }
 
-/// 명부와 그 연결 상태를 합쳐 읽는다. 파일과 잠금을 매 프레임 건드리지 않게 잠깐
-/// 쥐고 있는다 — 이 화면은 크롬이라 pane 이 출력하는 동안에도 계속 돈다.
+// 페인트는 자주 반복되므로 명부 읽기는 설정 캐시를 갱신하는 느린 틱에만 둔다.
 fn machines_view() -> Vec<MachineRow> {
     if crate::verification_run()
         && std::env::var_os("KASATERM_TEST_MACHINE_MISMATCH").is_some()
     {
         return vec![MachineRow {
+            machine_id: None,
             label: "본진".to_string(),
             ssh: "nachoneko".to_string(),
             status: machine_status(true, false, Some("deadbeef"), None),
@@ -4462,18 +4608,6 @@ fn machines_view() -> Vec<MachineRow> {
             key: "id_ed25519".to_string(),
             guest: false,
         }];
-    }
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    type Cache = Mutex<Option<(Instant, Vec<MachineRow>)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(Cache::default);
-    if let Ok(g) = cache.lock() {
-        if let Some((at, rows)) = g.as_ref() {
-            if at.elapsed() < Duration::from_secs(2) {
-                return rows.clone();
-            }
-        }
     }
     let live = kasa_mcp::machines::snapshot();
     let mut rows: Vec<MachineRow> = kasa_mcp::machines::entries()
@@ -4522,7 +4656,10 @@ fn machines_view() -> Vec<MachineRow> {
                 .and_then(|k| std::path::Path::new(k).file_name())
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
-            MachineRow { label, ssh, status, online, build_match, sync_target, key, guest: false }
+            let machine_id = e.get("machine_id").and_then(|v| v.as_str())
+                .or_else(|| hit.and_then(|v| v.get("machine_id")).and_then(|v| v.as_str()))
+                .filter(|id| !id.is_empty()).map(str::to_string);
+            MachineRow { machine_id, label, ssh, status, online, build_match, sync_target, key, guest: false }
         })
         .collect();
     // 알려 온 기계 — 파일엔 없지만 `to` 에는 뜨므로 여기도 같이 선다. 이름이 파일
@@ -4534,6 +4671,7 @@ fn machines_view() -> Vec<MachineRow> {
         let build_match = m.get("build_match").and_then(|v| v.as_bool()).unwrap_or(true);
         let build = m.get("build").and_then(|v| v.as_str());
         rows.push(MachineRow {
+            machine_id: m.get("machine_id").and_then(|v| v.as_str()).map(str::to_string),
             label,
             ssh: "그쪽이 터널로 열어 둔 길 — 이 기기 목록엔 안 적혀요".to_string(),
             status: machine_status(online, build_match, build, ago),
@@ -4544,13 +4682,9 @@ fn machines_view() -> Vec<MachineRow> {
             guest: true,
         });
     }
-    if let Ok(mut g) = cache.lock() {
-        *g = Some((Instant::now(), rows.clone()));
-    }
     rows
 }
 
-/// 기계 칸. 계정 칸과 같은 모양이다 — 목록 머리에 추가 단추, 줄마다 고치기와
 // 펫은 별도 프로세스라 양쪽이 공유하는 설정을 읽어 우클릭 변경도 여기 반영한다.
 fn paint_pet(
     g: &mut gpu::GpuRenderer,
@@ -4870,390 +5004,6 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
         *y += 15.0;
     }
     *y += 11.0;
-}
-
-fn paint_machines(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    let rows = machines_view();
-    draw_text(
-        g,
-        x,
-        *y,
-        "터미널에서 `to <이름>` 으로 오갑니다 — `to` 만 치면 목록이 나옵니다",
-        10.5,
-        theme::text_dim(),
-        false,
-    );
-    *y += 12.0;
-    paint_device_names(g, s, hits, caret, x, y, w);
-    // 카사크롬(브라우저 도구)이 어느 기계의 크롬을 조작할지 — 이 기계가 기본이고,
-    // 명부에 ssh 나 chrome_port 가 있는 기계만 고를 수 있다(다리로 갈 길이 있어야 한다).
-    // 고른 기계가 안 닿으면 MCP 는 이 기계 크롬으로 물러난다(하단바 「모바일」 칩이 말한다).
-    section_title(g, x, *y, "카사크롬이 쓰는 크롬", "");
-    *y += 54.0;
-    {
-        let chosen = kasa_mcp::machines::kasachrome_machine();
-        let candidates = kasa_mcp::machines::kasachrome_candidates();
-        let names: Vec<String> = candidates.iter().map(|l| crate::render::pane_identity::device_name(l)).collect();
-        let mut cells: Vec<(&str, bool, SettingsAction)> = vec![(
-            "이 기기",
-            chosen.is_empty(),
-            SettingsAction::ChromeMachine(String::new()),
-        )];
-        for (label, name) in candidates.iter().zip(&names) {
-            cells.push((
-                name.as_str(),
-                chosen == *label,
-                SettingsAction::ChromeMachine(label.clone()),
-            ));
-        }
-        seg_row(g, s, hits, x, y, w, "크롬이 있는 기기", &cells);
-        *y += 6.0;
-        let note = if chosen.is_empty() {
-            "학생의 브라우저 도구가 이 맥의 크롬을 씁니다".to_string()
-        } else {
-            format!("학생의 브라우저 도구가 {} 의 크롬(로그인 그대로)을 쓰고, 안 닿으면 이 맥 크롬으로 물러납니다",
-                crate::render::pane_identity::device_name(&chosen))
-        };
-        for line in wrap_words(g, &note, w, 10.5) {
-            draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
-            *y += 15.0;
-        }
-        *y += 11.0;
-    }
-    #[cfg(target_os = "macos")]
-    paint_lid_away(g, s, hits, x, y, w);
-    section_title(g, x, *y, "기기 목록", "");
-    button(
-        g,
-        s,
-        hits,
-        (x + w - 92.0, *y + 22.0, 92.0, CTL_H),
-        "기기 추가",
-        Target::Setting(SettingsAction::AddMachine),
-        false,
-    );
-    // 단추 아래로 내려서 시작하고, 폭에 맞춰 접는다 — 한 줄로 두면 단추
-    // 밑을 지나 오른쪽 경계 너머까지 흘렀다(2026-09-07 지적 「박스 마감」).
-    *y += 54.0;
-    let guide = crate::native_strings::text(
-        "이름과 ssh 대상(user@host)만 적으면 됩니다 — 열쇠는 ~/.ssh 에서 찾아 짝짓고, 다른 망의 기기는 넷버드(VPN)로 먼저 이어 두세요",
-    );
-    for line in wrap_words(g, &guide, w, 10.5) {
-        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
-        *y += 16.0;
-    }
-    *y += 6.0;
-    if rows.is_empty() {
-        draw_text(
-            g,
-            x,
-            *y,
-            "아직 등록된 기기가 없어요 — 위 「기기 추가」로 하나 넣어 주세요",
-            11.0,
-            theme::text_mute(),
-            false,
-        );
-        *y += 24.0;
-    }
-    for (i, m) in rows.iter().enumerate() {
-        machine_row(g, s, hits, caret, x, y, w, i, m);
-    }
-    if rows.iter().any(|machine| machine.online && !machine.build_match) {
-        draw_text(
-            g,
-            x + 2.0,
-            *y,
-            "새 판 보내기: 이 맥에서 다시 굽고, 고른 기기의 앱만 교체해 되띄웁니다",
-            10.5,
-            theme::text_mute(),
-            false,
-        );
-        *y += 20.0;
-    }
-    *y += 8.0;
-}
-
-/// 기기 이름 — 계정(`device_names`)이 기기 id 에 붙이는 화면 이름. 명부 이름(`to` 로 부르는
-/// 이름)·기기색·아이콘은 그대로라, 바꿔도 길이 끊기지 않는다.
-fn paint_device_names(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    section_title(g, x, *y, "기기 이름", "");
-    *y += 54.0;
-    let note = crate::native_strings::text(
-        "여기서 바꾼 이름이 같은 KASA 계정의 PC·폰 화면에 함께 떠요 — `to` 로 부르는 명부 이름과 기기색은 그대로예요",
-    );
-    for line in wrap_words(g, &note, w, 10.5) {
-        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
-        *y += 15.0;
-    }
-    *y += 6.0;
-    let text_x = x + theme::ICON_SIZE + 12.0;
-    for row in crate::render::pane_identity::device_name_rows() {
-        let editing = s.device_name_edit.as_ref().filter(|(id, _)| *id == row.id);
-        g.queue_icon(
-            &crate::device_icons::icon(&row.label),
-            x,
-            *y + (ROW_H - theme::ICON_SIZE) / 2.0,
-            theme::ICON_SIZE,
-            theme::text(),
-        );
-        if let Some((_, value)) = editing {
-            text_field(
-                g,
-                s,
-                hits,
-                caret,
-                text_x,
-                *y + (ROW_H - CTL_H) / 2.0,
-                w - (text_x - x),
-                "",
-                value,
-                SettingsInput::DeviceName,
-                s.settings_caret,
-                false,
-            );
-            *y += ROW_H;
-            draw_text(
-                g,
-                text_x,
-                *y,
-                "Enter 저장 · Esc 취소 · 비우면 원래 이름으로 돌아가요",
-                10.5,
-                theme::text_dim(),
-                false,
-            );
-            *y += 18.0;
-        } else {
-            let pencil = (x + w - CTL_H, *y + (ROW_H - CTL_H) / 2.0, CTL_H, CTL_H);
-            let room = (pencil.0 - 8.0 - text_x).max(0.0);
-            let shown = row.name.as_deref().unwrap_or(&row.label);
-            let shown = fit(g, shown, room, 12.0, false);
-            draw_text(g, text_x, *y + 5.0, &shown, 12.0, theme::text(), false);
-            let mut detail = if row.name.is_some() {
-                format!("원래 이름 {}", row.label)
-            } else {
-                "이름을 안 붙였어요".to_string()
-            };
-            if row.local {
-                detail.push_str(" · 이 기기");
-            }
-            let detail = fit(g, &detail, room, 10.5, false);
-            draw_text(g, text_x, *y + 22.0, &detail, 10.5, theme::text_mute(), false);
-            // 줄 아무 데나 누르면 고친다 — 연필을 따로 찾지 않아도 된다.
-            register_clipped(
-                g,
-                hits,
-                Target::Setting(SettingsAction::FocusDeviceName(row.id.clone())),
-                (x, *y, pencil.0 - x - 4.0, ROW_H),
-                HitCursor::Pointer,
-            );
-            mini_icon_button(
-                g,
-                s,
-                hits,
-                pencil,
-                "pencil",
-                Target::Setting(SettingsAction::FocusDeviceName(row.id.clone())),
-            );
-            *y += ROW_H;
-        }
-        g.rect(x, *y - 1.0, w, 1.0, theme::with_alpha(theme::border(), 140));
-    }
-    *y += 22.0;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn machine_row(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-    idx: usize,
-    m: &MachineRow,
-) {
-    let editing = s.machine_edit.as_ref().filter(|(i, _, _)| *i == idx);
-    let syncable = m.online && !m.build_match && !m.guest && !m.sync_target.is_empty();
-    // 고치는 중엔 줄이 자란다 — 라벨(18)+입력칸(36)이 54px 줄을 넘쳐 상자 밖으로
-    // 삐져나왔다(2026-09-07 지적). 아래 안내 한 줄까지 담는다.
-    // 빌드가 다른 줄도 수리 버튼을 별도 행에 둔다. 이름·상태·수정·삭제와 한 줄에
-    // 몰면 가장 중요한 경고와 복구 버튼이 서로 잘린다.
-    let rect = (
-        x,
-        *y,
-        w,
-        if editing.is_some() {
-            96.0
-        } else if syncable {
-            90.0
-        } else {
-            54.0
-        },
-    );
-    stroke_round(
-        g,
-        rect,
-        theme::radius_md(),
-        if contains(rect, s.cursor) {
-            theme::text_dim()
-        } else {
-            theme::border()
-        },
-    );
-    g.queue_icon(
-        &crate::device_icons::icon(&m.label),
-        rect.0 + 12.0,
-        rect.1 + 18.0,
-        17.0,
-        if m.online {
-            theme::accent()
-        } else {
-            theme::text_mute()
-        },
-    );
-
-    let w_del = g.measure_chrome_text("삭제", 10.5, false) + 32.0;
-    let text_x = rect.0 + 40.0;
-    let field_w = ((rect.2 - w_del - 28.0 - (text_x - rect.0)) / 2.0 - 8.0).max(110.0);
-    match editing {
-        // 고치는 중에는 두 칸을 나란히 — 이름만 고치고 ssh 를 못 고치면 결국
-        // 파일을 열게 된다.
-        Some((_, ssh_field, value)) => {
-            text_field(
-                g,
-                s,
-                hits,
-                caret,
-                text_x,
-                rect.1 + 12.0,
-                field_w,
-                "이름",
-                if *ssh_field { &m.label } else { value },
-                SettingsInput::MachineField,
-                s.settings_caret,
-                false,
-            );
-            text_field(
-                g,
-                s,
-                hits,
-                caret,
-                text_x + field_w + 12.0,
-                rect.1 + 12.0,
-                field_w,
-                "ssh 대상 — user@host 또는 ~/.ssh/config 별칭",
-                if *ssh_field { value } else { &m.ssh },
-                SettingsInput::MachineField,
-                s.settings_caret,
-                false,
-            );
-            draw_text(
-                g,
-                text_x + 2.0,
-                rect.1 + 72.0,
-                "Enter 저장 · Esc 취소 · 열쇠 로그인만 받는 기기는 별칭에 열쇠를 짝지어 두세요",
-                10.5,
-                theme::text_dim(),
-                false,
-            );
-        }
-        None => {
-            let actions_w = w_del + 36.0;
-            let avail = rect.2 - actions_w - 12.0 - (text_x - rect.0);
-            let status_w = g.measure_chrome_text(&m.status, 10.5, false) + 22.0;
-            let name = fit(g, &m.label, (avail - status_w - 8.0).max(28.0), 12.0, true);
-            draw_text(g, text_x, rect.1 + 8.0, &name, 12.0, theme::text(), true);
-            let nw = g.measure_chrome_text(&name, 12.0, true);
-            pill(g, text_x + nw + 8.0, rect.1 + 7.0, &m.status, m.online);
-            let ssh = if m.ssh.is_empty() {
-                "ssh 대상이 비어 있어요".to_string()
-            } else if m.key.is_empty() {
-                fit(g, &m.ssh, avail, 10.5, false)
-            } else {
-                fit(g, &format!("{}  ·  열쇠 {}", m.ssh, m.key), avail, 10.5, false)
-            };
-            draw_text(
-                g,
-                text_x,
-                rect.1 + 29.0,
-                &ssh,
-                10.5,
-                if m.ssh.is_empty() {
-                    theme::danger()
-                } else {
-                    theme::text_mute()
-                },
-                false,
-            );
-            // 알려 온 기계는 고칠 칸도 지울 항목도 없다 — 저쪽이 알림을 끊으면 빠진다.
-            if m.guest {
-                *y += rect.3 + 6.0;
-                return;
-            }
-            // 줄 아무 데나 누르면 이름 칸부터 고친다 — 연필을 따로 찾지 않아도 된다.
-            register_clipped(
-                g,
-                hits,
-                Target::Setting(SettingsAction::FocusMachineField(idx, false)),
-                (rect.0, rect.1, rect.2 - actions_w - 8.0, rect.3),
-                HitCursor::Pointer,
-            );
-            let pencil_x = rect.0 + rect.2 - w_del - 36.0;
-            mini_icon_button(
-                g,
-                s,
-                hits,
-                (pencil_x, rect.1 + 14.0, 26.0, 26.0),
-                "pencil",
-                Target::Setting(SettingsAction::FocusMachineField(idx, true)),
-            );
-            if syncable {
-                mini_text_button(
-                    g,
-                    s,
-                    hits,
-                    text_x,
-                    rect.1 + 55.0,
-                    "rotate-cw",
-                    "새 판 보내기",
-                    Target::Setting(SettingsAction::SyncMachine(
-                        m.label.clone(),
-                        m.sync_target.clone(),
-                    )),
-                    true,
-                );
-            }
-            mini_text_button(
-                g,
-                s,
-                hits,
-                rect.0 + rect.2 - 8.0 - w_del,
-                rect.1 + 14.0,
-                "trash-2",
-                "삭제",
-                Target::Setting(SettingsAction::RemoveMachine(idx)),
-                true,
-            );
-        }
-    }
-    *y += rect.3 + 6.0;
 }
 
 fn paint_themes(
@@ -7691,6 +7441,34 @@ fn text_field_bounds(x: f32, y: f32, w: f32, has_label: bool, multiline: bool) -
     }
 }
 
+fn field_placeholder(field: SettingsInput) -> &'static str {
+    match field {
+        SettingsInput::Search => "검색…",
+        SettingsInput::MachineLabel => "예: 작업용 미니",
+        SettingsInput::MachineAddress => "SSH 별칭 또는 http(s) 주소…",
+        SettingsInput::DeviceName => "기본 기기 이름…",
+        SettingsInput::DeviceAccountName => "로그인 아이디…",
+        SettingsInput::DeviceAccountPassword | SettingsInput::DeviceAccountNewPassword => "비밀번호…",
+        SettingsInput::DeviceAccountNewPassword2 => "비밀번호 다시 입력…",
+        SettingsInput::DeviceAccountNickname => "표시할 이름…",
+        SettingsInput::DeviceAccountNewLogin => "새 로그인 아이디…",
+        SettingsInput::CwdPath => "프로젝트 폴더 경로…",
+        SettingsInput::FileOpenCmd => "편집기 실행 명령…",
+        SettingsInput::Shell => "셸 실행 파일 경로…",
+        SettingsInput::ClaudeExtra => "선택 사항…",
+        SettingsInput::StudentName => "캐릭터 이름…",
+        SettingsInput::StudentPersona => "말투와 특징…",
+        SettingsInput::FeedbackBody => "문제와 재현 방법…",
+        SettingsInput::StudentRaw => "JSON 또는 YAML…",
+        SettingsInput::ThemeGenKey => "새 API 키…",
+        SettingsInput::CustomThemeLabel => "팔레트 이름…",
+        SettingsInput::AccountLabel => "계정 표시 이름…",
+        SettingsInput::LoginCode => "브라우저의 인증 코드…",
+        SettingsInput::ThemeLabel => "테마 이름…",
+        SettingsInput::PaletteHex(_) => "#RRGGBB",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn text_field(
     g: &mut gpu::GpuRenderer,
@@ -7785,7 +7563,9 @@ fn text_field(
             .enumerate()
         {
             let ly = rect.1 + 10.0 + i as f32 * 18.0;
-            draw_text(g, rect.0 + 11.0, ly, line, 12.0, theme::text(), false);
+            g.draw_text(rect.0 + 11.0, ly, line, gpu::DrawOpts {
+                font_size:12.0, color:theme::text(), bold:false, italic:false,
+            });
             let end = start + line.chars().count();
             if caret >= *start && caret <= end {
                 let prefix: String = line.chars().take(caret - start).collect();
@@ -7800,27 +7580,18 @@ fn text_field(
         }
     } else {
         let (shown, visible_start) = if value.is_empty() {
-            ("입력하세요".to_string(), 0)
+            (fit(g, field_placeholder(field), (rect.2 - 22.0).max(0.0), 12.0, false), 0)
         } else if focused {
             single_line_window(g, value, caret, rect.2 - 22.0, 12.0)
         } else {
-            (fit(g, value, rect.2 - 22.0, 12.0, false), 0)
+            (crate::info::fit_text(g, value, rect.2 - 22.0, 12.0, false), 0)
         };
         push_multiline_layout(single_line_layout(field, rect, value, &shown, visible_start,
             |text| g.measure_chrome_text(text, 12.0, false)));
-        draw_text(
-            g,
-            rect.0 + 11.0,
-            rect.1 + 6.5,
-            &shown,
-            12.0,
-            if value.is_empty() {
-                theme::text_dim()
-            } else {
-                theme::text()
-            },
-            false,
-        );
+        g.draw_text(rect.0 + 11.0, rect.1 + 6.5, &shown, gpu::DrawOpts {
+            font_size: 12.0, color: if value.is_empty() { theme::text_dim() } else { theme::text() },
+            bold: false, italic: false,
+        });
         if focused {
             let prefix: String = value
                 .chars()
@@ -8251,6 +8022,31 @@ mod navigation_layout_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_search_accepts_korean_aliases_and_multiple_terms() {
+        assert!(category_matches(SettingsCat::Appearance, "폰트"));
+        assert!(category_matches(SettingsCat::Appearance, "기기 아이콘"));
+        assert!(category_matches(SettingsCat::Accounts, "CLAUDE 로그인"));
+        assert!(category_matches(SettingsCat::Machines, "ssh 주소"));
+        assert!(!category_matches(SettingsCat::Pet, "ssh 주소"));
+        assert!(!category_matches(SettingsCat::General, "존재하지않는설정"));
+        for cat in SettingsCat::nav() { assert!(category_matches(*cat, "  ")); }
+        assert_eq!(matching_categories("계정").first(), Some(&SettingsCat::Accounts));
+        assert_eq!(matching_categories("account").first(), Some(&SettingsCat::Accounts));
+        assert_eq!(matching_categories("연결기기").first(), Some(&SettingsCat::Machines));
+        assert_eq!(matching_categories("계정").first(), Some(&SettingsCat::Accounts));
+    }
+
+    #[test]
+    fn search_and_navigation_leave_room_for_the_fixed_return_button() {
+        for height in [200.0, 360.0, 560.0, 720.0, 1080.0] {
+            let layout = navigation_layout((0.0, 0.0, 520.0, height), 154.0, 10);
+            assert!(44.0 + CTL_H <= layout.viewport.1);
+            assert!(layout.viewport.1 + layout.viewport.3 <= layout.close.1);
+            assert!(layout.close.1 + layout.close.3 <= height);
+        }
+    }
 
     #[test]
     fn terminal_font_list_keeps_families_and_the_current_face() {

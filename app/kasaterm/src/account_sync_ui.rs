@@ -1,5 +1,10 @@
 use super::*;
 
+fn editing_synced_setting(input: Option<SettingsInput>, device_name_edit: bool) -> bool {
+    device_name_edit || input.is_some_and(|field| !matches!(field,
+        SettingsInput::Search | SettingsInput::MachineLabel | SettingsInput::MachineAddress))
+}
+
 impl App {
     pub(crate) fn register_account_sync(&self) {
         let proxy = self.proxy.clone();
@@ -11,7 +16,9 @@ impl App {
     }
 
     pub(crate) fn apply_account_sync(&mut self, request: kasa_mcp::account_sync::PendingApply) -> Result<(), String> {
-        if self.settings_input.is_some() || self.machine_edit.is_some() || self.device_name_edit.is_some() {
+        // Search is local-only; connection drafts compare their saved entry on commit.
+        // Leaving either open must not stall account synchronization indefinitely.
+        if editing_synced_setting(self.settings_input, self.device_name_edit.is_some()) {
             return Err("settings edit in progress".into());
         }
         let refresh = request.changes_runtime();
@@ -48,5 +55,21 @@ impl App {
         self.repaint_all();
         if let Some(window) = &self.window { window.request_redraw(); }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_search_and_connection_drafts_do_not_pause_account_sync() {
+        for input in [None, Some(SettingsInput::Search), Some(SettingsInput::MachineLabel), Some(SettingsInput::MachineAddress)] {
+            assert!(!editing_synced_setting(input, false));
+        }
+        assert!(editing_synced_setting(Some(SettingsInput::DeviceName), false));
+        assert!(editing_synced_setting(Some(SettingsInput::DeviceAccountPassword), false));
+        assert!(editing_synced_setting(Some(SettingsInput::CwdPath), false));
+        assert!(editing_synced_setting(None, true));
     }
 }

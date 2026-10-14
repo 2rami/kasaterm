@@ -4476,6 +4476,30 @@ impl App {
         // 확인할 수 있다. UI 래퍼(토스트·폴더 열기)는 건너뛰고 파일을 쓰는 부분만
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
+            "settings-search" if crate::verification_run() => {
+                self.settings_scene.query = "계정".into();
+                self.settings_input = Some(SettingsInput::Search);
+                self.settings_caret = 2;
+            }
+            "settings-machine-draft" | "settings-machine-invalid" if crate::verification_run() => {
+                self.settings_apply(SettingsAction::AddMachine);
+                if std::env::var("KASATERM_AUTOSETTINGS_ACTION").as_deref() == Ok("settings-machine-draft") {
+                    if let Some(edit) = self.machine_edit.as_mut() {
+                        edit.label = "새 시험 기기".into();
+                        edit.address = "http://127.0.0.1:11".into();
+                    }
+                } else {
+                    self.save_machine_edit();
+                }
+            }
+            "settings-machine-delete" if crate::verification_run() => {
+                self.settings_apply(SettingsAction::RemoveMachine(0));
+            }
+            "settings-input" if crate::verification_run() => {
+                self.set_cwd_mode = std::env::temp_dir().to_string_lossy().into_owned();
+                self.settings_input = Some(SettingsInput::CwdPath);
+                self.settings_caret = self.set_cwd_mode.chars().count();
+            }
             "" => {}
             // 다른 기기 계정 줄의 「로그인」과 같은 길. 열쇠는 KASATERM_AUTOSETTINGS_ADOPT
             // (`claude:<조직|이메일>` · `codex:<이메일>/<작업 공간>`). 목록은 부팅 때 받아 둔다.

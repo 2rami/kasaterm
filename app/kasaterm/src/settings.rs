@@ -298,28 +298,28 @@ impl App {
         self.chrome_dirty = true;
     }
 
-    /// 붙여넣은 OAuth 코드를 로그인 중인 CLI 로 보낸다. 엔터와 「확인」 버튼이 같은
-    /// 길을 탄다.
-    /// 고치던 기계 칸을 명부에 되쓴다. **다른 필드는 손대지 않는다** — 손으로 적은
-    /// 옛 항목(터널 설정이 딸린 것)이 있어서, 화면이 아는 두 칸만 갈아 끼우고
-    /// 나머지는 읽은 그대로 되돌려 쓴다.
-    pub(crate) fn flush_machine_field(&mut self) {
-        let Some((idx, ssh, value)) = self.machine_edit.take() else {
-            return;
-        };
-        let value = value.trim().to_string();
-        let mut list = kasa_mcp::machines::entries();
-        let Some(entry) = list.get_mut(idx).and_then(|e| e.as_object_mut()) else {
-            return;
-        };
-        let key = if ssh { "ssh" } else { "label" };
-        if entry.get(key).and_then(|v| v.as_str()).unwrap_or_default() == value {
-            return;
-        }
-        entry.insert(key.to_string(), serde_json::Value::String(value));
-        if ssh { entry.remove("account_sync_unresolved"); }
-        if kasa_mcp::machines::save_entries(&list).is_err() {
-            self.set_toast("명부를 저장하지 못했어요".to_string());
+    pub(crate) fn save_machine_edit(&mut self) {
+        let Some(edit) = self.machine_edit.as_ref() else { return };
+        let deleting = edit.deleting;
+        let result = edit.updated(&kasa_mcp::machines::entries()).and_then(|entries| {
+            kasa_mcp::machines::save_entries(&entries).map_err(|e| format!("저장하지 못했습니다: {e}"))
+        });
+        match result {
+            Ok(()) => {
+                self.machine_edit = None;
+                self.settings_input = None;
+                self.settings_scene.take_field_backup();
+                self.settings_scene.clear_field_selection();
+                self.ime_focus = None;
+                self.preedit.clear();
+                self.in_preedit = false;
+                self.settings_scene.refresh_cache();
+                self.refresh_native_settings_dynamic_cache();
+                self.set_toast(if deleting { "기기 연결을 목록에서 제거했습니다" } else { "기기 연결을 저장했습니다" }.into());
+            }
+            Err(error) => {
+                if let Some(edit) = self.machine_edit.as_mut() { edit.error = Some(error); }
+            }
         }
         self.chrome_dirty = true;
     }
@@ -1438,54 +1438,51 @@ impl App {
                 }
             }
             SettingsAction::AddMachine => {
-                let mut list = kasa_mcp::machines::entries();
-                let idx = list.len();
-                list.push(serde_json::json!({ "label": "", "ssh": "" }));
-                if kasa_mcp::machines::save_entries(&list).is_ok() {
-                    self.settings_caret = 0;
-                    self.machine_edit = Some((idx, false, String::new()));
-                    self.settings_input = Some(SettingsInput::MachineField);
-                } else {
-                    self.set_toast("명부를 저장하지 못했어요".to_string());
+                if let Some(edit) = self.machine_edit.as_mut() {
+                    edit.error = Some("열린 편집을 먼저 저장하거나 취소해 주세요".into());
+                    return;
                 }
+                self.machine_edit = Some(native_settings::devices::Editor::default());
+                self.settings_scene.scroll_by(-f32::MAX);
+                self.settings_caret = 0;
+                self.settings_input = Some(SettingsInput::MachineLabel);
+                self.chrome_dirty = true;
+            }
+            SettingsAction::SaveMachine => self.save_machine_edit(),
+            SettingsAction::CancelMachine => {
+                self.machine_edit = None;
+                self.settings_input = None;
+                self.settings_scene.take_field_backup();
+                self.ime_focus = None;
                 self.chrome_dirty = true;
             }
             SettingsAction::RemoveMachine(idx) => {
-                let mut list = kasa_mcp::machines::entries();
-                if idx < list.len() {
-                    list.remove(idx);
-                    if kasa_mcp::machines::save_entries(&list).is_err() {
-                        self.set_toast("명부를 저장하지 못했어요".to_string());
-                    }
+                if let Some(edit) = self.machine_edit.as_mut() {
+                    edit.error = Some("열린 편집을 먼저 저장하거나 취소해 주세요".into());
+                    return;
                 }
-                self.machine_edit = None;
+                if let Some(entry) = kasa_mcp::machines::entries().get(idx) {
+                    let mut edit = native_settings::devices::Editor::existing(idx, entry);
+                    edit.deleting = true;
+                    self.machine_edit = Some(edit);
+                    self.settings_scene.scroll_by(-f32::MAX);
+                }
                 self.settings_input = None;
                 self.chrome_dirty = true;
             }
             SettingsAction::FocusMachineField(idx, ssh) => {
-                // 고치기 전에 열려 있던 칸을 먼저 확정한다 — 안 그러면 옆 칸을
-                // 누르는 것만으로 방금 친 글자가 사라진다.
-                if self.machine_edit.is_some() {
-                    self.flush_machine_field();
+                if let Some(edit) = self.machine_edit.as_mut() {
+                    if edit.original.as_ref().map(|(index, _)| *index) != Some(idx) || edit.deleting {
+                        edit.error = Some("열린 편집을 먼저 저장하거나 취소해 주세요".into());
+                        return;
+                    }
+                } else if let Some(entry) = kasa_mcp::machines::entries().get(idx) {
+                    self.machine_edit = Some(native_settings::devices::Editor::existing(idx, entry));
                 }
-                let key = if ssh { "ssh" } else { "label" };
-                // ssh 칸은 옛 항목의 `host` 도 초기값으로 받는다 — 빈칸으로 열면
-                // 사람이 이미 적어 둔 주소를 다시 치게 된다.
-                let entries = kasa_mcp::machines::entries();
-                let entry = entries.get(idx);
-                let value = entry
-                    .and_then(|e| e.get(key))
-                    .and_then(|v| v.as_str())
-                    .filter(|v| !v.is_empty())
-                    .or_else(|| {
-                        ssh.then(|| entry.and_then(|e| e.get("host")).and_then(|v| v.as_str()))
-                            .flatten()
-                    })
-                    .unwrap_or_default()
-                    .to_string();
-                self.settings_caret = value.chars().count();
-                self.machine_edit = Some((idx, ssh, value));
-                self.settings_input = Some(SettingsInput::MachineField);
+                let Some(edit) = self.machine_edit.as_ref() else { return };
+                self.settings_caret = edit.value(ssh).chars().count();
+                self.settings_input = Some(if ssh { SettingsInput::MachineAddress } else { SettingsInput::MachineLabel });
+                self.settings_scene.scroll_by(-f32::MAX);
                 self.chrome_dirty = true;
             }
             SettingsAction::FocusDeviceName(id) => {

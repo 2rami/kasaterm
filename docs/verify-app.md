@@ -31,6 +31,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **`KASATERM_SESSION_FILE`·`KASATERM_SETTINGS_FILE` 은 선택이 아니다.** 안 걸면 검증용 앱이 사용자의 `~/.config/kasaterm/session.json` 을 읽고, **실행 중 5초마다 자기 상태로 덮어쓴다**. 설정 파일 쪽은 사용자가 손수 적은 계정 라벨을 하네스 값으로 덮은 전례가 있다. 실데이터가 있어야 화면이 성립하면 원본을 스크래치로 **복사**해 그걸 가리켜라 — 빈 파일을 가리키면 검증하려던 UI 자체가 안 뜬다.
 - **`KASATERM_AUTORESTORE=fresh`** — 저장된 세션을 복원하지 않고 빈 창으로 뜬다. 사용자 pane 의 claude 세션과 같은 id 를 다툴 경로가 사라지고, 캡처가 복원 모달만 찍는 일도 없어진다.
 - **`KASATERM_STUDENTS_DIR`** 로 그림 폴더를 격리한다 — 업로드·삭제를 검증하면서 사용자가 실제로 쓰는 `~/.config/kasaterm/students/` 를 건드리지 않는다.
+- **`KASATERM_PET_DIR=/tmp/<검증>/pet`** 도 설정 전체 검증에 준다. 펫 페이지는 이 폴더에서 설정·그림을 읽고, 없는 미리보기를 만들 수 있다.
 - **`KASATERM_WINDOW_FILE`** 도 빠뜨리지 마라. 안 걸면 검증용 앱이 자기 창 크기를 사용자의 `window.json` 에 적어 두고, 다음에 사람이 앱을 열 때 엉뚱한 크기로 뜬다(2026-08-31 실제로 덮었다 — 세션은 격리해 무사했는데 이 하나가 목록에 없었다).
 - **`KASATERM_DEVICE_FILE=/tmp/<네이름>/device.json`** — 관문 계정 로그인 파일. 안 걸면 리그가 사용자의 `device.json` 을 읽어
   설정 「계정」이 사용자 계정으로 로그인된 화면으로 뜬다(2026-10-02). 로그인 전 화면을 보려면 반드시 건다.

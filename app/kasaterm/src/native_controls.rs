@@ -44,7 +44,7 @@ fn contains(rect: Rect, cursor: (f32, f32)) -> bool {
 pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
     if rect.2 > 0.0 && rect.3 > 0.0 {
         g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(),
-            theme::border_w().max(2.0), theme::accent());
+            theme::border_w().max(2.0), theme::enforce_contrast_at(theme::accent(), theme::bg(), 3.0));
     }
 }
 
@@ -52,14 +52,18 @@ fn colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4]) {
     if !style.enabled {
         (theme::border(), theme::text_mute())
     } else if style.danger {
-        (theme::danger(), theme::danger())
+        (theme::danger(), button_ink(theme::danger(), theme::bg()))
     } else if style.primary || style.active {
-        (theme::accent(), theme::accent())
+        (theme::accent(), button_ink(theme::accent(), theme::bg()))
     } else if hover {
         (theme::text_dim(), theme::text())
     } else {
         (theme::border(), theme::text_dim())
     }
+}
+
+fn button_ink(color: [u8; 4], background: [u8; 4]) -> [u8; 4] {
+    theme::enforce_contrast_at(color, background, 4.5)
 }
 
 pub(crate) fn text_button(
@@ -136,6 +140,17 @@ pub(crate) fn icon_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_and_danger_labels_remain_readable_in_every_builtin_palette() {
+        for (_, _, palette) in theme::THEME_PRESETS {
+            for color in [palette.danger, [122, 162, 247, 255], [255, 240, 120, 255]] {
+                let ink = button_ink(color, palette.bg);
+                use kasa_gridview::palette::{contrast_of, luminance};
+                assert!(contrast_of(luminance(ink), luminance(palette.bg)) >= 4.49);
+            }
+        }
+    }
 
     #[test]
     fn visual_and_hit_bounds_share_the_same_centered_control() {

@@ -4648,7 +4648,6 @@ impl SettingsCat {
     /// 웹 설정(arona-ui)이 쓰는 카테고리 키. 딥링크를 URL 과 스크립트 양쪽으로
     /// 보내야 해서 이름이 한 곳에 있어야 한다 — 문자열을 부르는 자리마다 적으면
     /// 오타가 나도 **아무 일도 안 일어나** 원인을 못 찾는다(모르는 값은 무시된다).
-    #[cfg(test)]
     pub(crate) fn web_key(self) -> &'static str {
         match self {
             Self::General => "general",
@@ -4686,10 +4685,10 @@ pub(crate) struct StudentRawEdit {
     pub err: Option<String>,
 }
 
-/// The two free-text fields in the settings form. Tracks which one (if any)
-/// has keyboard focus so keystrokes route to its buffer.
+/// Separate IDs keep keyboard focus and undo buffers from crossing between inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
+    Search,
     DeviceAccountName,
     DeviceAccountPassword,
     /// 설정 「계정」 프로필 펼침의 닉네임.
@@ -4720,8 +4719,8 @@ pub(crate) enum SettingsInput {
     ThemeGenKey,
     /// 커스텀 팔레트 표시명. 대상 slug 는 `App.custom_theme_label_edit` 이 든다.
     CustomThemeLabel,
-    /// 기계 명부의 이름·ssh 칸. 어느 줄의 어느 칸인지는 `App.machine_edit` 이 든다.
-    MachineField,
+    MachineLabel,
+    MachineAddress,
     /// 계정이 기기에 붙이는 화면 이름. 어느 기기인지는 `App.device_name_edit` 이 id 로 든다.
     DeviceName,
     /// Agent 계정 별명. 제공자와 슬롯 id 는 `App.account_label_edit` 이 든다.
@@ -4863,11 +4862,10 @@ pub(crate) enum SettingsAction {
     RemoveClaudeAccount(String),
     /// 한도가 차면 다음 계정으로 알아서 넘어가는 스위치.
     ToggleAccountAutoswitch,
-    /// 기계 명부에 빈 줄을 하나 붙이고 그 이름 칸에 커서를 둔다.
     AddMachine,
-    /// 기계 명부에서 그 줄을 지운다.
     RemoveMachine(usize),
-    /// 그 줄의 칸을 고치기 시작한다 — `true` 면 ssh 칸.
+    SaveMachine,
+    CancelMachine,
     FocusMachineField(usize, bool),
     /// 그 기기(id)의 화면 이름을 고치기 시작한다.
     FocusDeviceName(String),
@@ -5932,8 +5930,7 @@ struct App {
     custom_theme_label_edit: Option<(String, String)>,
     /// `(제공자, 슬롯 id, 편집 버퍼)`.
     account_label_edit: Option<(AccountProvider, String, String)>,
-    /// 기계 명부에서 지금 고치는 칸 — (줄 번호, ssh 칸인가, 버퍼).
-    machine_edit: Option<(usize, bool, String)>,
+    machine_edit: Option<native_settings::devices::Editor>,
     /// 화면 이름을 고치는 기기 — (기기 id, 버퍼).
     device_name_edit: Option<(String, String)>,
     device_account: native_settings::device_account::State,

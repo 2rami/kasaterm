@@ -38,7 +38,8 @@
 - `gpu.rs` — `KASATERM_RENDERER=gpu` 경로. 자체 wgpu Surface + 셀 파이프라인(sugarloaf 경로와 상호배타)
 - `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 문서(마크다운) 창 + 별도창 공용 틀(`AuxWindows`, 이벤트 위임, documents.json)
 - `auxterm.rs` — 터미널 pane 을 별도 OS 창으로 뗀다(undock/dock). 창은 `pane_id` 만 들고 셀·PTY 는 App.ws/App.pty 에 그대로 — 그리기는 본창과 같은 `compose_terminal_pane`
-- `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
+- `settings.rs` — 설정 변경 적용·계정 로그인·연결 초안 저장. `native_settings.rs`가 검색·네이티브 폼·입력 상태를 그리고, `settings_room.rs`가 방 수명·검색어·스크롤·키보드 초점을 유지한다.
+- `native_settings/devices.rs` — 이 기기/다른 기기 목록과 연결 추가·수정·삭제 폼. 저장 전 초안, 입력 검증, 원래 항목 대조와 메타데이터 보존을 같은 모듈에서 검사한다.
 - `settings/phone_login.rs` — 폰 Claude 재로그인의 요청별 상태·CLI 점유·확인·취소. 자격 반영은 `claude_auth/phone_credentials.rs`, 폰 화면은 `mobile/lib/screens/claude_accounts.dart`; 계약은 `docs/mobile-claude-login.md`.
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
 - `transcript` — Claude/Codex 기록(jsonl) → board 스냅샷 추출. 본체는 `crates/kasa-agents/src/transcript.rs`(main.rs 가 `use kasa_agents::transcript` 로 옛 경로 유지), `transcript/signals.rs`는 정상 종료·중단 구분과 Codex 질문 호출/접수/답변 추적

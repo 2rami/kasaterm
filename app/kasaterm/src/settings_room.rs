@@ -30,6 +30,7 @@ pub(crate) struct SettingsScene {
     scroll: f32,
     scroll_max: f32,
     navigation_scroll: f32,
+    pub(crate) query: String,
     hits: Vec<crate::native_settings::Hit>,
     keyboard_focus: Option<crate::native_settings::Target>,
     keyboard_anchor: Option<crate::native_settings::Rect>,
@@ -68,6 +69,7 @@ impl Default for SettingsScene {
             scroll: 0.0,
             scroll_max: 0.0,
             navigation_scroll: 0.0,
+            query: String::new(),
             hits: Vec::new(),
             keyboard_focus: None,
             keyboard_anchor: None,
@@ -117,6 +119,7 @@ impl SettingsScene {
 
     pub(crate) fn enter(&mut self, category: Option<SettingsCat>, return_pane: Option<String>) {
         if let Some(category) = category {
+            self.query.clear();
             self.set_category(category);
         }
         if return_pane.as_deref().is_some_and(|id| id != SETTINGS_PANE_ID) {
@@ -173,6 +176,10 @@ impl SettingsScene {
         shared: (Vec<crate::native_settings::SharedChoice>, Option<String>),
     ) {
         self.cache.set_accounts(accounts, shared);
+    }
+
+    pub(crate) fn refresh_device_cache(&mut self) {
+        self.cache.refresh_devices();
     }
 
     pub(crate) fn account_usage_expanded(&self) -> &std::collections::HashSet<String> {
@@ -828,6 +835,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_settings_links_clear_a_filter_that_could_hide_the_destination() {
+        let mut scene = SettingsScene::default();
+        scene.query = "계정".into();
+        scene.set_category(SettingsCat::Accounts);
+        assert_eq!(scene.query, "계정");
+        scene.enter(Some(SettingsCat::Appearance), None);
+        assert!(scene.query.is_empty());
+        assert_eq!(scene.category(), SettingsCat::Appearance);
+    }
 
     #[test]
     fn detail_groups_start_closed_and_retain_state_across_categories() {

@@ -31,6 +31,7 @@ wgpu-hal.workspace = true
 winit.workspace = true
 raw-window-handle.workspace = true
 anyhow.workspace = true
+url = "2.5"
 serde.workspace = true
 # preserve_order: 남이 쓰는 설정 파일(`~/.claude.json`)을 고쳐 쓰기 때문이다. 기본
 # 맵은 키를 알파벳순으로 재정렬해, 한 줄만 바꿔도 4000줄짜리 파일이 통째로 흔들린다.
@@ -149,9 +150,6 @@ windows-sys = { workspace = true, features = [
 # unix 는 그 자리에 `/usr/bin/expect` 를 쓰는데 Windows 엔 없다. kasa-pty 가 쓰는
 # 것과 같은 크레이트·버전.
 portable-pty.workspace = true
-# lsp.rs 의 Windows 경로 ↔ file URI. rust-analyzer 가 쓰는 Url::from_file_path·to_file_path 와
-# 같은 규칙(드라이브 `file:///C:/…`·UNC 호스트)이어야 서버가 경로로 되돌린다. 그래프에 이미 있는 판.
-url = "2.5"
 
 # Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
 # taskbar / Start menu / .msi installer show the real icon, not the default.
