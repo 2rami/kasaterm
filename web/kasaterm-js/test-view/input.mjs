@@ -57,7 +57,7 @@ await page.evaluate(() => term.write('\x1b[?2004h')); await paste('x\ny'); check
 await page.evaluate(() => term.write('\x1b[2J\x1b[Hhello world 한글 끝\r\nsecond line'));
 await page.waitForTimeout(50);
 const cell = await page.evaluate(() => term.view.cell);
-const box = await page.locator('canvas').boundingBox();
+const box = await page.locator('canvas').first().boundingBox();
 const at = (col, row) => [box.x + (col + 0.5) * cell.width, box.y + (row + 0.5) * cell.height];
 await page.mouse.move(...at(6, 0)); await page.mouse.down(); await page.mouse.move(...at(5, 1), { steps: 4 }); await page.mouse.up();
 check('selection text', await page.evaluate(() => term.view.selectionText()), 'world 한글 끝\nsecond');

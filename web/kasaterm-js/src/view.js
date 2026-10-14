@@ -54,10 +54,14 @@ class View {
     this.scrolledUntil = 0;
     this.scrollbar.addEventListener('pointerenter', () => { this.scrollbarHover = true; this.schedule(); });
     this.scrollbar.addEventListener('pointerleave', () => { this.scrollbarHover = false; this.schedule(); });
-    this.root.append(this.canvas, this.textarea, this.preedit, this.scrollbar);
+    // Pictures sit on their own canvas above the text so text frames repaint only changed lines.
+    this.imageCanvas = doc.createElement('canvas');
+    Object.assign(this.imageCanvas.style, { position: 'absolute', left: '0', top: '0', zIndex: '1', pointerEvents: 'none' });
+    this.root.append(this.canvas, this.imageCanvas, this.textarea, this.preedit, this.scrollbar);
     parent.append(this.root);
 
     this.renderer = new Renderer(term, this.canvas, options);
+    this.images = new ImageLayer(this, this.imageCanvas);
     this.applyTheme();
     this.selection = null;
     this.hover = '';
@@ -73,6 +77,8 @@ class View {
 
     this.listen(term, 'write', () => this.schedule());
     this.listen(term, 'resize', () => { this.selection = null; this.renderer.resize(); this.schedule(); });
+    this.listen(term, 'image', e => this.images.add(e));
+    this.listen(term, 'imagedelete', ids => this.images.remove(ids));
     this.listen(term, 'screen', () => { this.selection = null; this.schedule(); });
     this.listen(term, 'colors', () => { this.renderer.rgb.clear(); this.renderer.invalidate(); this.schedule(); });
     this.listen(term, 'cursorstyle', () => this.schedule());
@@ -104,6 +110,7 @@ class View {
     cancelAnimationFrame(this.frame);
     clearInterval(this.blinkTimer);
     for (const d of this.disposers) d();
+    this.images.clear();
     this.root.remove();
   }
 
@@ -172,6 +179,10 @@ class View {
 
   draw() {
     this.renderer.paint(this);
+    this.images.resize(this.canvas.width, this.canvas.height);
+    this.imageCanvas.style.width = this.canvas.style.width;
+    this.imageCanvas.style.height = this.canvas.style.height;
+    this.images.paint();
     const cur = this.term.cursor, { width, height } = this.cell;
     const y = (cur.line + this.term.grid.displayOffset) * height;
     const pos = `translate(${cur.col * width}px, ${y}px)`;

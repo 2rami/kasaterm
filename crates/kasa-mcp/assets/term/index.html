@@ -294,11 +294,13 @@
   const baseTheme = { background: '#12161c', foreground: '#c8d0d9', cursor: '#7aa2f7', selectionBackground: '#2c3543' };
   let theme = baseTheme;
   let fontSize = BASE_FONT;
+  // 앱의 셀 픽셀 크기(서버 size 프레임) — 그림이 차지할 칸 수를 앱과 같게 잰다.
+  let cellPixels = null;
   let term = null;
   const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
   function makeTerm(cols, rows) {
     term?.dispose();
-    term = new KasaTerm.Terminal({ cols: cols || 80, rows: rows || 24, scrollback: 10000 });
+    term = new KasaTerm.Terminal({ cols: cols || 80, rows: rows || 24, scrollback: 10000, cellPixels });
     // 웹폰트가 못 오면 맥에 설치된 같은 폰트가 받는다. Menlo 는 한글이 없어 맨 뒤.
     term.open(terminalRoot, {
       fontFamily: '"KasaTerm", "D2Coding", ui-monospace, SFMono-Regular, Menlo, "Apple SD Gothic Neo", monospace',
@@ -420,6 +422,8 @@
         if (!orig) orig = { cols: m.cols, rows: m.rows };
         if (fitted && legacyTarget && (m.cols !== legacyTarget.cols || m.rows !== legacyTarget.rows)) fitted = false;
         confirmed = { cols: m.cols, rows: m.rows };
+        if (Array.isArray(m.cell)) cellPixels = { width: m.cell[0], height: m.cell[1] };
+        term.cellPixels = cellPixels;
         rememberBaseCell();
         term.resize(m.cols, m.rows);
         viewport.receive(m, socket);

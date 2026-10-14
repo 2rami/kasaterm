@@ -468,6 +468,8 @@ async fn term_ws_run(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
                 "surface_key": handshake_key,
+                // 앱의 셀 픽셀 크기 — 브라우저 해석기가 그림이 차지할 칸 수를 앱과 같게 잰다.
+                "cell": kasa_pty::cell_pixels().map(|(w, h)| [w, h]),
                 // `viewport_latest`: the last toucher wins, a person on this machine
                 // reclaims by touching the pane, and a viewer that lost is told so.
                 "capabilities": if native_scene {
@@ -882,6 +884,7 @@ async fn term_ws_run(
                                 "id": input_session_id,
                                 "surface_key": input_surface_key,
                                 "snapshot": true,
+                                "cell": kasa_pty::cell_pixels().map(|(w, h)| [w, h]),
                             })
                             .to_string();
                             let _ = btx_shell.send(Frame::Control(size)).await;
