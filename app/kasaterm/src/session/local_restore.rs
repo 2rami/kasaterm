@@ -220,6 +220,44 @@ pub(super) fn state(original: &Value) -> Value {
     result
 }
 
+pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
+    let filtered = state(original);
+    filtered
+        .get("stashed_panes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let rec = entry.get("rec")?.clone();
+            if rec.is_null() {
+                return None;
+            }
+            let text = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            Some(crate::ClosedPane {
+                rec,
+                pane_id: text("pane_id"),
+                character: text("character"),
+                folder: text("folder"),
+                neighbor: entry
+                    .get("neighbor")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                window: entry["window"].as_u64().unwrap_or(0) as usize,
+                alive: false,
+                stashed: entry["stashed"].as_bool().unwrap_or(true),
+                idle_since: None,
+                preview: None,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +378,20 @@ mod tests {
             .is_empty());
         let local = json!({"sessions":[{"windows":[{"leaf":local("%1")}],"active_window":0}]});
         assert_eq!(state(&local), local);
+    }
+
+    #[test]
+    fn closed_local_history_survives_without_a_restore_prompt_or_new_process() {
+        let input = json!({"sessions":[{"windows":[{"leaf":remote("%0")}]}],
+            "stashed_panes":[{"rec":remote("%1"),"pane_id":"%1"},
+                {"rec":local("%2"),"pane_id":"%2","window":0,"stashed":true}]});
+        assert_eq!(super::super::App::count_panes(&input), 0);
+        let history = history(&input);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].rec, local("%2"));
+        assert_eq!(history[0].pane_id, "%2");
+        assert!(!history[0].alive);
+        assert!(history[0].stashed);
     }
 
     #[test]

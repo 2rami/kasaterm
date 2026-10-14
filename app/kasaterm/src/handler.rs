@@ -3100,8 +3100,12 @@ impl ApplicationHandler<UserEvent> for App {
             .then(crate::socket::read_session_state)
             .flatten()
             .map(crate::restore_progress::with_file_time)
-            .filter(|s| !crate::server_restore::verification_restore_fixture() || App::count_claude_panes(s) == 0)
-            .filter(|s| App::count_panes(s) > 0);
+            .filter(|s| !crate::server_restore::verification_restore_fixture() || App::count_claude_panes(s) == 0);
+        // No local windows means no prompt, but closed local work still belongs in the revive list.
+        if let Some(state) = saved.as_ref().filter(|state| App::count_panes(state) == 0) {
+            self.restore_closed_history(state);
+        }
+        let saved = saved.filter(|state| App::count_panes(state) > 0);
         if let Some(s) = &saved {
             self.reserve_saved_characters(s);
         }

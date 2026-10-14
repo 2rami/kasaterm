@@ -64,6 +64,10 @@ impl Drop for RestoredSurfaceKey {
 }
 
 impl App {
+    pub(crate) fn restore_closed_history(&mut self, state: &serde_json::Value) {
+        self.closed_panes.extend(super::local_restore::history(state));
+    }
+
     /// Count leaves that were running claude across the whole saved state — the
     /// number the restore prompt shows. 총 pane 수는 `count_panes`.
     ///
@@ -452,39 +456,7 @@ impl App {
         // `alive: false` 로 들어간다 — 재시작으로 PTY 는 다 죽었으니 되살리기는
         // 레코드로 새로 띄우는 쪽이다. claude 였던 pane 은 `rec` 의 세션 id 를
         // `restore_leaf` 가 `--resume` 으로 이어 준다.
-        for c in state
-            .get("stashed_panes")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
-            let Some(rec) = c.get("rec").cloned().filter(|r| !r.is_null()) else {
-                continue;
-            };
-            let str_of = |k: &str| {
-                c.get(k)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            self.closed_panes.push(crate::ClosedPane {
-                rec,
-                pane_id: str_of("pane_id"),
-                character: str_of("character"),
-                folder: str_of("folder"),
-                neighbor: c
-                    .get("neighbor")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                // 방 번호는 저장 당시 것이다. 그 방이 이번에 안 살아났으면 되살리기가
-                // 활성 방으로 떨어뜨린다(`window` 를 쓰는 쪽의 기존 규칙).
-                window: c.get("window").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-                alive: false,
-                stashed: c.get("stashed").and_then(|v| v.as_bool()).unwrap_or(true),
-                idle_since: None,
-                preview: None,
-            });
-        }
+        self.restore_closed_history(state);
         // 재접속 자동 따라잡기 — 이 기계가 꺼져 있는 동안 원격(본진)에 쌓인
         // 미push 커밋·미저장 변경을, 거울이 다시 붙은 레포마다 이사와 같은
         // 관문으로 끌어와 로컬을 따라잡는다(2026-09-02 감사 ②). origin 에 이미
