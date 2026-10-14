@@ -3,7 +3,7 @@
 폰 앱(카사모바일)이 카사텀 허브를 거쳐 나쵸와 얘기하는 길과, 그 대화를 바탕화면 펫과 잇는 계약이다(2026-09-25).
 
 폰 앱(카사모바일)은 나쵸와 얘기하는 **주 창구**다. 디스코드·슬랙은 보조 창구로 남는다. 바탕화면 펫과
-카사모바일은 같은 나쵸의 두 화면이라 작업 공간이 하나다(대화 원장 하나·작업 장부 하나).
+카사모바일은 같은 나쵸의 두 화면이라 대화 원장이 하나다.
 
 ```
 폰 ── /u/<slug>/nacho/app/<rest> ──▶ 이 허브(kasa-mcp nacho_relay.rs) ── <url>/api/app/<rest> ──▶ 나쵸 askserve(:8792)
@@ -24,8 +24,7 @@
 |---|---|
 | `GET events?tail=N` · `GET events?after=<seq>&limit=&wait=<초>` | 대화 원장. 순번(seq)으로 이어 받는다. 응답의 `next_after`(실제로 돌려준 마지막 순번)까지만 전진하고 `has_more` 면 곧바로 다시 묻는다 — 원장 끝(`head_seq`)으로 건너뛰면 한 페이지를 넘게 밀린 줄이 빠진다. `tail` 은 처음 붙을 때 최근 N 줄만(`truncated_before`), 그 뒤는 빠짐 없이 이어진다. `last_seq` 는 옛 이름으로 `next_after` 와 같다 |
 | `POST messages {id, text, task?, rev?}` | 한 말. 같은 id·같은 내용은 처음 영수증, 내용이 다르면 409. `task` 가 있으면 그 일에 대한 방향 수정이고, 싣는 `rev` 가 지금 판과 다르면 409(`stale_rev`) |
-| `GET tasks` · `GET tasks/<id>` | 작업 장부 그대로 — 판단 필요·진행 중·끝남/실패, 프로젝트(학생 작업 폴더). 없는 검증·사진은 비어 온다 |
-| `GET tasks/<id>/shot` · `GET files/<seq>/<i>` | 나쵸가 실제로 찍은 결과 사진·답에 붙은 그림(원장에 적힌 경로만) |
+| `GET files/<seq>/<i>` | 답에 붙은 그림(원장에 적힌 경로만) |
 
 - 접수 상태: `accepted → queued(앞 턴을 기다림) → running → answered | failed | refused | interrupted | restart`.
   도는 턴은 끊지 않는다. 나쵸가 다시 뜨면 돌던 턴은 `interrupted` 로 닫고 몰래 다시 돌리지 않는다.
@@ -49,7 +48,7 @@
   우편함(`/api/pet/poll`)과 먼저 거는 말(`/api/pet-chatter`, 장부 대리인)뿐이다. 그래서 펫의 `alive` 는
   우편함 들름으로만 남는다.
 - 확인 버튼이 필요한 도구(머지·pane 입력·화면 조작)는 앱 턴에서 돌지 않는다 — 원장에 「기존 창구 확인
-  필요」가 남는다. 작업 단위 승인(`approval_needed`)도 앱에서 풀지 않는다.
+  필요」가 남는다.
 
 ## 후속: 앱 안 승인(Face ID) 설계 — 아직 구현하지 않음
 

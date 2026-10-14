@@ -132,7 +132,7 @@ async fn nacho_app_relay(
     crate::nacho_relay::relay(user, parts.method, &rest, parts.uri.query(), &parts.headers, bytes).await
 }
 
-/// 키 없는 기기 데스크톱의 모드·권한 표 읽기(`nacho_relay::read_relay`). 판정 재료는 여기서만 뽑는다 —
+/// 키 없는 기기의 권한 표 읽기(`nacho_relay::read_relay`). 판정 재료는 여기서만 뽑는다 —
 /// 원격(전달 헤더 포함)인가, 폰 주소로 왔나. 호출자 헤더·몸통은 넘기지 않는다.
 async fn nacho_read_relay(AxPath(name): AxPath<String>, req: axum::extract::Request) -> axum::response::Response {
     let remote = is_remote_peer(&req);
