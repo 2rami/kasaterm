@@ -137,13 +137,13 @@ scripts\windows\package.ps1 -SkipBuild -SkipUi
 
 ---
 
-## 7. 회귀 검사 (CI 와 같은 절차)
+## 7. 수동 회귀 검사
 
-`.github/workflows/windows.yml` 이 Rust·굽기 재료가 바뀌는 push·PR 마다 windows-latest 에서 아래를
-돌린다. 같은 스크립트를 Windows 기계에서 손으로 돌려도 된다(x64, 레포 루트에서).
+push·PR마다 도는 Windows 전용 CI는 사용하지 않는다. 필요할 때 Windows 기계에서 아래 검사를
+직접 실행한다(x64, 레포 루트에서). 배포 패키지를 만드는 `release.yml`의 Windows 빌드는 별개로 유지한다.
 
 ```powershell
-scripts\windows\verify.ps1                               # 경계·check·test·굽기·smoke·조립 전부
+scripts\windows\verify.ps1 -GenerateLockfile             # 경계·check·test·굽기·smoke·조립 전부
 scripts\windows\verify.ps1 -Stage boundaries,check       # 빠른 것만
 scripts\windows\smoke.ps1                                # 이미 구운 target\release 만 띄워 본다
 scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-portable.zip -Label portable -UserProfileOnly -NoRedirect
@@ -161,7 +161,7 @@ scripts\windows\smoke.ps1 -PortableZip dist\kasaterm-v<판>-windows-x86_64-porta
 - `verify.ps1 -Stage smoke` 는 앱 기본 셸과 Windows PowerShell 5.1·cmd·Git Bash 를 명시 경로로 한 번씩 띄워
   칸 셸이 정말 그 셸인지까지 본다. 없는 셸은 건너뛰지 않고 실패하니 빼려면 `-SmokeShells default,cmd` 처럼 적는다.
 - `-UserProfileOnly` 는 HOME 을 빼고(탐색기로 뜬 GUI 와 같다) `-NoRedirect` 는 표준 핸들 없이 띄워 앱이 stderr 를
-  격리 TEMP 의 `kasaterm-app.log` 로 돌리는 갈래를 본다. CI 의 portable smoke 가 둘 다 쓴다.
+  격리 TEMP 의 `kasaterm-app.log` 로 돌리는 갈래를 본다. 위 portable smoke 예제는 둘 다 쓴다.
 
 자동 smoke 가 **증명하지 않는 것** — 실기기에서 사람이 따로 본다.
 - 한글 IME 조합: smoke 의 입력은 `tell --raw` 로 PTY 에 바로 넣는 글자라 IME 조합 경로를 안 지난다.
