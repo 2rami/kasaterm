@@ -1280,7 +1280,14 @@ class Terminal {
         this.print(0xfffd);
       }
       if (b < 0x80) {
-        if (b >= 0x20) { this.print(b); continue; }
+        if (b >= 0x20) {
+          if (b === 0x7f) { this.print(b); continue; }
+          let j = i + 1;
+          while (j < n && bytes[j] >= 0x20 && bytes[j] < 0x7f) j++;
+          this.printAscii(bytes, i, j);
+          i = j - 1;
+          continue;
+        }
         if (b === 0x1b) { this.resetParser(); this.state = S_ESC; return i; }
         this.execute(b);
       } else if (b < 0xa0) {
@@ -1573,6 +1580,43 @@ class Terminal {
   print(cp) {
     this.precedingChar = cp;
     this.input(cp);
+  }
+
+  // A run of printable ASCII: the same cells input() would write, without its per-character
+  // dispatch. Anything unusual (insert mode, a non-ASCII charset, another width table, a wide
+  // cell being overwritten) takes the general path.
+  printAscii(bytes, from, to) {
+    const grid = this.grid, cur = grid.cursor;
+    if ((this.mode & MODE.INSERT) || cur.charsets[this.activeCharset] !== 0 || this.widthOf !== charWidth) {
+      for (let k = from; k < to; k++) this.print(bytes[k]);
+      return;
+    }
+    this.precedingChar = bytes[to - 1];
+    const cols = grid.cols;
+    let k = from;
+    while (k < to) {
+      if (cur.wrap) this.wrapline();
+      const row = grid.row(cur.line), d = row.d, fg = cur.fg, bg = cur.bg, fl = cur.fl, ext = cur.ext;
+      let col = cur.col;
+      for (;;) {
+        const o = col * 4;
+        if (d[o + 3] & (WIDE_CHAR | WIDE_CHAR_SPACER)) {
+          cur.col = col;
+          this.writeAtCursor(bytes[k]);
+        } else {
+          d[o] = bytes[k]; d[o + 1] = fg; d[o + 2] = bg; d[o + 3] = fl;
+          if (ext) row.setExtra(col, { zw: '', ul: ext.ul, link: ext.link });
+          else if (row.x) row.x[col] = undefined;
+        }
+        k++;
+        if (col + 1 >= cols) { cur.wrap = true; break; }
+        col++;
+        if (k === to) break;
+      }
+      // The run wrote up to col, or up to col-1 when it ended before the margin.
+      row.touchTo(cur.wrap ? col + 1 : col);
+      cur.col = col;
+    }
   }
 
   input(cp) {
