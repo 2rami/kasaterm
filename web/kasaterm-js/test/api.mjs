@@ -196,9 +196,60 @@ test('markers through reflow', () => {
   eq([at(head), at(tail), tail.line === head.line, at(next)], ['abcdefghijKLM', 'abcdefghijKLM', true, 'next'], 'wider: the tail joins the head');
 });
 
+test('a hook returning a promise pauses parsing until it settles', async () => {
+  const t = new Terminal({ cols: 10, rows: 2 }), done = [];
+  let settle;
+  t.parser.registerCsiHandler({ final: 'm' }, () => new Promise(r => { settle = r; }));
+  t.write(`A${CSI}31mB${CSI}0mC`, () => done.push(1));
+  t.write('D', () => done.push(2));
+  eq([text(t, 0), done], ['A', []], 'paused at the first SGR');
+  settle(false);
+  await new Promise(r => setTimeout(r, 0));
+  // Each later SGR asks the hook again, so settle every one.
+  while (text(t, 0) !== 'ABCD') { settle(false); await new Promise(r => setTimeout(r, 0)); }
+  eq([text(t, 0), t.line(0).fg(1), t.line(0).fg(2), done], ['ABCD', 1, 256, [1, 2]], 'built-in ran after false');
+});
+
+test('a promise settling true takes the sequence', async () => {
+  const t = new Terminal({ cols: 10, rows: 2 });
+  t.parser.registerCsiHandler({ final: 'm' }, () => Promise.resolve(true));
+  t.write(`${CSI}31mX`);
+  await new Promise(r => setTimeout(r, 0));
+  eq([text(t, 0), t.line(0).fg(0)], ['X', 256], 'SGR skipped');
+});
+
+test('a hook pausing inside a synchronized update', async () => {
+  const t = new Terminal({ cols: 10, rows: 2 });
+  t.parser.registerOscHandler(7, () => Promise.resolve(false));
+  t.write(`${CSI}?2026hab${OSC}7;file://h/x\x07cd${CSI}?2026l`);
+  await new Promise(r => setTimeout(r, 0));
+  eq([text(t, 0), t.syncPending], ['abcd', false], 'state');
+});
+
+test('asyncWrite applies writes later, in order, with callbacks', async () => {
+  const t = new Terminal({ cols: 10, rows: 2, asyncWrite: true }), done = [];
+  t.write('a', () => done.push('a'));
+  t.write('b', () => done.push('b'));
+  eq([text(t, 0), done], ['', []], 'not yet');
+  await new Promise(r => setTimeout(r, 5));
+  eq([text(t, 0), done], ['ab', ['a', 'b']], 'after');
+});
+
+test('unicode width providers', () => {
+  const t = new Terminal({ cols: 10, rows: 2 });
+  eq([t.unicode.activeVersion, t.unicode.versions], ['alacritty', ['alacritty']], 'default');
+  t.unicode.register({ version: 'narrow', wcwidth: () => 1 });
+  t.unicode.activeVersion = 'narrow';
+  t.write('한글x');
+  eq([t.cursor.col, text(t, 0)], [3, '한글x'], 'one column each');
+  let threw = false;
+  try { t.unicode.activeVersion = 'nope'; } catch { threw = true; }
+  eq([threw, t.unicode.activeVersion], [true, 'narrow'], 'unknown version');
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
-  try { fn(); } catch (e) { failed++; console.log(`FAIL ${name}\n  ${e.message}`); }
+  try { await fn(); } catch (e) { failed++; console.log(`FAIL ${name}\n  ${e.message}`); }
 }
 console.log(`${tests.length - failed}/${tests.length} API checks pass`);
 process.exit(failed ? 1 : 0);

@@ -402,7 +402,8 @@ class Grid {
     const added = target - this.lines;
     this.raw.growVisibleLines(target);
     this.lines = target;
-    const fromHistory = Math.min(this.historySize, added);
+    // A Windows PTY reprints the screen itself, so scrollback stays put (xterm.js `windowsPty`).
+    const fromHistory = this.noHistoryPull ? 0 : Math.min(this.historySize, added);
     if (fromHistory !== added) this.scrollUp(0, target, added - fromHistory, DEFAULT_BG);
     this.saved.line += fromHistory;
     this.cursor.line += fromHistory;

@@ -495,7 +495,8 @@ class Grid {
     const added = target - this.lines;
     this.raw.growVisibleLines(target);
     this.lines = target;
-    const fromHistory = Math.min(this.historySize, added);
+    // A Windows PTY reprints the screen itself, so scrollback stays put (xterm.js `windowsPty`).
+    const fromHistory = this.noHistoryPull ? 0 : Math.min(this.historySize, added);
     if (fromHistory !== added) this.scrollUp(0, target, added - fromHistory, DEFAULT_BG);
     this.saved.line += fromHistory;
     this.cursor.line += fromHistory;
@@ -701,7 +702,7 @@ const KITTY_MODE = 0x1f << KITTY_SHIFT;
 const KEYBOARD_STACK_MAX = 4096;
 
 // Modes only `profile: 'xterm'` knows; kept apart so `mode` stays alacritty's word.
-const XMODE = { REVERSE_WRAP: 1, X10_MOUSE: 2, SGR_PIXELS_MOUSE: 4, WIN32_INPUT: 8, COLOR_SCHEME_REPORTS: 16 };
+const XMODE = { REVERSE_WRAP: 1, X10_MOUSE: 2, SGR_PIXELS_MOUSE: 4, WIN32_INPUT: 8, COLOR_SCHEME_REPORTS: 16, SIXEL_DISPLAY: 32 };
 
 const VERSION = '0.1.0';
 
@@ -751,6 +752,9 @@ const TITLE_STACK_MAX = 4096;
 // Alacritty reports itself as version 0.26.0 in secondary DA.
 const DA2_REPLY = '\x1b[>0;2600;1c';
 const DA1_REPLY = '\x1b[?62;22c';
+// With sixel on (xterm profile), as xterm.js's image addon: sixel (4) and national charsets (9).
+const DA1_XTERM_REPLY = '\x1b[?62;4;9;22c';
+const STRING_LIMIT = 33554432;   // xterm.js image addon sixelSizeLimit; also caps DCS and APC
 
 const textDecoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
 const textEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
@@ -764,6 +768,19 @@ function strictUtf8(bytes) {
 }
 
 function hex2(n) { return n.toString(16).padStart(2, '0'); }
+
+// String payloads (OSC, DCS, APC) can run to megabytes — inline pictures — so they grow in place.
+class Bytes {
+  constructor() { this.buf = new Uint8Array(64); this.len = 0; }
+  push(b) {
+    if (this.len === this.buf.length) { const g = new Uint8Array(this.buf.length * 2); g.set(this.buf); this.buf = g; }
+    this.buf[this.len++] = b;
+  }
+  last() { return this.len ? this.buf[this.len - 1] : -1; }
+  pop() { if (this.len) this.len--; }
+  view() { return this.buf.subarray(0, this.len); }
+  clear() { this.len = 0; if (this.buf.length > 65536) this.buf = new Uint8Array(64); }
+}
 
 // Parameter groups in xterm.js's public form: `1;2:3` is [1, 2, [3]].
 function paramsArray(groups) {
@@ -846,6 +863,22 @@ class Terminal {
     this.parser = this.parserApi();
     this.addons = [];
     this.markers = new Set();
+    this.queue = [];             // writes waiting behind a paused parser or an async drain
+    this.carry = [];
+    this.paused = false;
+    this.pauseToken = 0;
+    this.asyncWrite = !!options.asyncWrite;
+    this.widthOf = charWidth;
+    this.unicodeVersion = 'alacritty';
+    this.unicode = this.unicodeApi();
+    this.windowsPty = null;
+    this.setWindowsPty(options.windowsPty);
+    this.oscRaw = new Bytes();
+    this.oscBounds = [];
+    this.kittyGraphics = new KittyGraphics();
+    this.inlineImages = [];      // iTerm and sixel pictures: {uid, key, marker, pixels}
+    this.imageSerial = 0;
+    this.sixelPalette = SIXEL_PALETTE_LIMIT;
     this.options = this.liveOptions();
     this.heldUtf8 = new Uint8Array(0);
     this.resetParser();
@@ -887,25 +920,80 @@ class Terminal {
   // Bytes from the PTY. Between `CSI ? 2026 h` and `CSI ? 2026 l` (synchronized output) they are
   // held and applied in one go, as kasaterm does — so a resize arriving mid-update reflows the
   // screen as it was before the update, and no half-drawn frame is ever visible.
+  //
+  // Normally a write is applied before it returns. It waits its turn instead while a parser hook
+  // is settling a promise, while another write is being applied (a handler wrote), or always
+  // with `asyncWrite` — then the queue drains in slices of about a frame, as xterm.js does.
   write(data, callback) {
-    const bytes = typeof data === 'string' ? textEncoder.encode(this.normalize ? data.normalize('NFC') : data)
+    if (this.paused || this.queue.length || this.writing || this.asyncWrite) {
+      this.queue.push({ data, callback, raw: false });
+      if (!this.paused && !this.writing) { if (this.asyncWrite) this.scheduleDrain(); else this.drain(); }
+      return;
+    }
+    this.apply(data, callback, false);
+  }
+
+  apply(data, callback, raw) {
+    this.writing = true;
+    const bytes = raw ? data : typeof data === 'string' ? textEncoder.encode(this.normalize ? data.normalize('NFC') : data)
       : this.normalize ? this.composeBatch(data) : data;
     const cur = this.grid.cursor, line = cur.line, col = cur.col, scrolled = this.grid.scrolled;
     let i = 0;
-    while (i < bytes.length) {
+    while (i < bytes.length && !this.paused) {
       i += this.syncPending ? this.advanceSync(bytes.subarray(i)) : this.parse(bytes, i, true);
     }
+    this.writing = false;
+    if (this.paused) {
+      // The rest, already composed, goes first when the hook settles; the callback waits for it.
+      this.queue.unshift(...this.carry.map(b => ({ data: b, callback: null, raw: true })), { data: bytes.subarray(i), callback, raw: true });
+      this.carry = [];
+      callback = null;
+    }
+    if (this.inlineImages.length + this.kittyGraphics.placements.length && this.historySize >= this.scrollback) this.dropImages();
     if (this.grid.scrolled !== scrolled && this.listeners.has('scroll')) this.emit('scroll', this.grid.scrolled - scrolled);
     const now = this.grid.cursor;
     if ((now !== cur || now.line !== line || now.col !== col) && this.listeners.has('cursormove')) this.emit('cursormove');
     this.emit('write');
     if (callback) callback();
+    if (this.queue.length && !this.paused && !this.draining && !this.asyncWrite) this.drain();
+  }
+
+  drain() {
+    if (this.draining) return;
+    this.draining = true;
+    const start = Date.now();
+    while (!this.paused && this.queue.length) {
+      const w = this.queue.shift();
+      this.apply(w.data, w.callback, w.raw);
+      if (this.asyncWrite && this.queue.length && Date.now() - start >= 12) { this.scheduleDrain(); break; }
+    }
+    this.draining = false;
+  }
+
+  scheduleDrain() {
+    if (this.drainTimer) return;
+    this.drainTimer = setTimeout(() => { this.drainTimer = null; this.drain(); }, 0);
+  }
+
+  // A hook returned a promise: stop parsing until it settles.
+  pause(promise) {
+    this.paused = true;
+    const token = ++this.pauseToken;
+    promise.then(() => {
+      if (token !== this.pauseToken) return;
+      this.paused = false;
+      this.drain();
+    });
   }
 
   writeln(data, callback) { this.write(data); this.write('\r\n', callback); }
 
   // Back to a freshly made terminal: RIS plus whatever the parser was in the middle of.
   reset() {
+    this.queue = [];
+    this.carry = [];
+    this.paused = false;
+    this.pauseToken++;
     this.state = S_GROUND;
     this.resetParser();
     this.u8need = 0; this.u8lo = 0x80; this.u8hi = 0xbf;
@@ -978,6 +1066,10 @@ class Terminal {
       set scrollback(v) { term.scrollback = v; (term.isAltScreen ? term.inactive : term.grid).updateHistory(v); },
       get cellPixels() { return term.cellPixels; },
       set cellPixels(v) { term.cellPixels = v; },
+      get windowsPty() { return term.windowsPty; },
+      set windowsPty(v) { term.setWindowsPty(v); },
+      get asyncWrite() { return term.asyncWrite; },
+      set asyncWrite(v) { term.asyncWrite = !!v; },
       get colorScheme() { return term.colorScheme; },
       set colorScheme(v) { term.setColorScheme(v); },
     };
@@ -1050,11 +1142,24 @@ class Terminal {
     };
   }
 
-  hooked(kind, key, ...args) {
+  // Hooks for one sequence, newest first, then `builtin` unless one returned true. A hook that
+  // returns a promise pauses parsing until it settles (as in xterm.js); the rest runs then.
+  runHooks(kind, key, args, builtin) {
     const list = this.handlers && this.handlers[kind].get(key);
-    if (!list) return false;
-    for (const fn of list) if (fn(...args) === true) return true;
-    return false;
+    if (!list || !list.length) { builtin(); return; }
+    const hooks = list.slice();
+    const from = i => {
+      for (; i < hooks.length; i++) {
+        const r = hooks[i](...args);
+        if (r === true) return;
+        if (r && typeof r.then === 'function') {
+          this.pause(Promise.resolve(r).then(ok => { if (ok !== true) from(i + 1); }, () => from(i + 1)));
+          return;
+        }
+      }
+      builtin();
+    };
+    from(0);
   }
 
   hasHandler(kind, key) {
@@ -1094,7 +1199,7 @@ class Terminal {
     let i = start;
     for (; i < bytes.length; i++) {
       if (this.state === S_GROUND) i = this.ground(bytes, i);
-      else this.step(bytes[i]);
+      else { this.step(bytes[i]); if (this.paused) { i++; break; } }
       if (stopAtSync && this.terminated) { i++; break; }
     }
     return i - start;
@@ -1129,7 +1234,15 @@ class Terminal {
   // keep holding the rest.
   stopSync(bsu) {
     const held = this.syncBuf.slice(0, this.syncLen);
-    this.parse(held.subarray(0, bsu === null ? held.length : bsu), 0, false);
+    const used = this.parse(held.subarray(0, bsu === null ? held.length : bsu), 0, false);
+    if (this.paused) {
+      // A hook paused inside the update: everything after it is parsed again on resuming,
+      // including any update that starts later.
+      this.carry.push(held.subarray(used));
+      this.syncPending = false;
+      this.syncLen = 0;
+      return;
+    }
     if (bsu !== null) {
       this.syncBuf.set(held.subarray(bsu), 0);
       this.syncLen = held.length - bsu;
@@ -1141,7 +1254,11 @@ class Terminal {
   }
 
   // Give up waiting for the end of a synchronized update (kasaterm itself never does).
-  flushSync() { if (this.syncPending) this.stopSync(null); }
+  flushSync() {
+    if (!this.syncPending) return;
+    this.stopSync(null);
+    if (this.carry.length) { this.queue.unshift(...this.carry.map(b => ({ data: b, callback: null, raw: true }))); this.carry = []; }
+  }
 
   // Ground state: decode UTF-8 straight to print/execute. Returns the index of the last byte
   // consumed so the caller's loop can continue after it.
@@ -1315,7 +1432,7 @@ class Terminal {
         return;
       case S_OSC:
         if (b === 0x07) { this.oscEnd(true); this.state = S_GROUND; }
-        else if (b === 0x9c && this.xterm && this.oscRaw[this.oscRaw.length - 1] === 0xc2) { this.oscRaw.pop(); this.oscEnd(false); this.state = S_GROUND; }
+        else if (b === 0x9c && this.xterm && this.oscRaw.last() === 0xc2) { this.oscRaw.pop(); this.oscEnd(false); this.state = S_GROUND; }
         else if (b === 0x18 || b === 0x1a) { this.oscEnd(false); this.execute(b); this.state = S_GROUND; }
         else if (b === 0x1b) { this.oscEnd(false); this.resetParser(); this.state = S_ESC; }
         else if (b === 0x3b) this.oscParam();
@@ -1356,62 +1473,64 @@ class Terminal {
     this.state = S_DCS_PASS;
     this.dcsLast = 0;
     const key = this.interString() + String.fromCharCode(final);
-    this.dcs = !this.ignoring && (this.hasHandler('dcs', key) || (this.xterm && key === '$q'))
-      ? { key, params: this.groups(), buf: [], over: false } : null;
+    const builtin = this.xterm && (key === '$q' || key === '+q' || key === 'q');
+    this.dcs = !this.ignoring && (builtin || this.hasHandler('dcs', key))
+      ? { key, params: this.groups(), buf: new Bytes(), over: false } : null;
   }
 
-  // DCS and APC payloads are only kept when someone will read them. xterm.js's cap.
+  // DCS and APC payloads are only kept when someone will read them.
   collectString(s, b) {
-    if (s.buf.length >= 10000000) s.over = true; else s.buf.push(b);
-  }
-
-  // A C1 ST arriving as UTF-8 (C2 9C) ends the string; its first byte is already collected.
-  c1Terminated(s) {
-    if (!s || s.buf[s.buf.length - 1] !== 0xc2) return false;
-    s.buf.pop();
-    return true;
+    if (s.buf.len >= STRING_LIMIT) s.over = true; else s.buf.push(b);
   }
 
   dcsEnd(c1) {
     const d = this.dcs;
     this.dcs = null;
     if (!d || d.over) return;
-    if (c1 && this.xterm) this.c1Terminated(d);
-    const data = utf8(Uint8Array.from(d.buf));
-    if (this.hooked('dcs', d.key, data, paramsArray(d.params))) return;
-    if (this.xterm && d.key === '$q') this.requestStatusString(data);
+    // A C1 ST arriving as UTF-8 (C2 9C) ends the string; its first byte is already collected.
+    if (c1 && this.xterm && d.buf.last() === 0xc2) d.buf.pop();
+    const bytes = d.buf.view();
+    this.runHooks('dcs', d.key, [utf8(bytes), paramsArray(d.params)], () => {
+      if (!this.xterm) return;
+      if (d.key === '$q') this.requestStatusString(utf8(bytes));
+      else if (d.key === '+q') for (const r of termcapReplies(utf8(bytes), this.cols, this.rows)) this.reply(r);
+      else if (d.key === 'q') this.sixel(bytes, d.params);
+    });
   }
 
+  // APC is kept whole: kitty graphics (`G`) are the app's, the rest may have a hook.
   stringStart(kind) {
     this.state = S_SOS;
     this.sosLast = 0;
-    this.apc = kind === 0x5f && this.handlers && this.handlers.apc.size ? { buf: [], over: false } : null;
+    this.apc = kind === 0x5f ? { buf: new Bytes(), over: false } : null;
   }
 
-  // APC: the first character names the handler (`G` for kitty graphics), the rest is data.
+  // The first character names the handler (`G` for kitty graphics), the rest is data.
   apcEnd() {
     const a = this.apc;
-    if (!a || a.over || a.buf.length === 0) return;
-    this.hooked('apc', String.fromCharCode(a.buf[0]), utf8(Uint8Array.from(a.buf.slice(1))));
+    if (!a || a.over || a.buf.len === 0) return;
+    const bytes = a.buf.view(), ident = String.fromCharCode(bytes[0]), body = utf8(bytes.subarray(1));
+    this.runHooks('apc', ident, [body], () => { if (ident === 'G') this.kitty(body); });
   }
 
-  oscStart() { this.oscRaw = []; this.oscBounds = []; this.state = S_OSC; }
+  // The buffer is cleared at the next OSC, not at this one's end: a paused hook's builtin still
+  // reads these bytes when it runs.
+  oscStart() { this.oscRaw.clear(); this.oscBounds = []; this.state = S_OSC; }
 
   oscParam() {
     if (this.oscBounds.length === MAX_OSC_PARAMS) return;
-    this.oscBounds.push(this.oscRaw.length);
+    this.oscBounds.push(this.oscRaw.len);
   }
 
   oscEnd(bell) {
     this.oscParam();
-    const raw = Uint8Array.from(this.oscRaw), params = [];
+    const raw = this.oscRaw.view(), params = [];
     let start = 0;
     for (const end of this.oscBounds) { params.push(raw.subarray(start, end)); start = end; }
-    this.oscRaw = [];
-    this.oscBounds = [];
-    if (this.handlers && params.length && this.hasHandler('osc', utf8(params[0]))
-      && this.hooked('osc', utf8(params[0]), params.slice(1).map(p => utf8(p)).join(';'))) return;
-    this.oscDispatch(params, bell ? '\x07' : '\x1b\\');
+    const terminator = bell ? '\x07' : '\x1b\\', builtin = () => this.oscDispatch(params, terminator);
+    const head = this.handlers && params.length ? utf8(params[0]) : null;
+    if (head === null || !this.hasHandler('osc', head)) { builtin(); return; }
+    this.runHooks('osc', head, [params.slice(1).map(p => utf8(p)).join(';')], builtin);
   }
 
   // ── C0 ──
@@ -1425,6 +1544,7 @@ class Terminal {
         this.linefeed();
         // The app ignores LNM; xterm.js treats it as its convertEol option.
         if (this.convertEol || (this.xterm && (this.mode & MODE.LINE_FEED_NEW_LINE))) this.carriageReturn();
+        if (this.windowsWrapping) this.guessWindowsWrap();
         if (this.listeners.has('linefeed')) this.emit('linefeed');
         break;
       case 0x07: this.emit('bell'); break;
@@ -1456,7 +1576,7 @@ class Terminal {
   }
 
   input(cp) {
-    const width = charWidth(cp);
+    const width = this.widthOf(cp);
     if (width < 0) return;
     const grid = this.grid, cur = grid.cursor;
     if (width === 0) {
@@ -1637,6 +1757,7 @@ class Terminal {
     this.swapKeyboardStacks();
     const g = this.grid; this.grid = this.inactive; this.inactive = g;
     this.mode ^= MODE.ALT_SCREEN;
+    this.dropImages();
     this.emit('screen', this.isAltScreen);
   }
 
@@ -1644,10 +1765,24 @@ class Terminal {
     cols = Math.max(2, cols | 0); rows = Math.max(1, rows | 0);
     if (cols === this.cols && rows === this.rows) return;
     const oldCols = this.cols;
-    const alt = this.isAltScreen;
-    this.grid.resize(!alt, rows, cols);
-    this.inactive.resize(alt, rows, cols);
+    const alt = this.isAltScreen, reflow = this.reflowAllowed();
+    this.grid.resize(!alt && reflow, rows, cols);
+    this.inactive.resize(alt && reflow, rows, cols);
+    // Without reflow a wider row keeps its continuation mark on the old last cell; the guessed
+    // Windows wraps are line properties in xterm.js, so they move to the new last cell.
+    if (this.windowsPty && !reflow && cols > oldCols) {
+      for (const g of [this.grid, this.inactive]) {
+        for (let y = -g.historySize; y < g.lines; y++) {
+          const row = g.row(y);
+          if (!(row.flags(oldCols - 1) & WRAPLINE)) continue;
+          row.setFlag(oldCols - 1, WRAPLINE, false);
+          row.touch(cols - 1);
+          row.setFlag(cols - 1, WRAPLINE, true);
+        }
+      }
+    }
     if (oldCols !== cols) {
+      this.dropImages();
       this.tabs = this.makeTabs(cols, this.tabs);
       // kasa-pty re-applies the scrollback cap to whichever screen is active, so a width change
       // during an alternate-screen program gives that screen scrollback too. Mirrored for parity.
@@ -1673,15 +1808,23 @@ class Terminal {
     this.xmode = 0;
     this.keyboardStack = [];
     this.inactiveKeyboardStack = [];
+    this.dropImages();
+    this.kittyGraphics = new KittyGraphics();
     for (const marker of [...this.markers]) marker.dispose();
   }
 
   // ── ESC ──
 
   escDispatch(b) {
+    if (!this.handlers) { this.escBuiltin(b); return; }
+    this.runHooks('esc', this.interString() + String.fromCharCode(b), [], () => this.escBuiltin(b));
+  }
+
+  escBuiltin(b) {
     const inter = this.inter;
-    if (this.handlers && this.hooked('esc', this.interString() + String.fromCharCode(b))) return;
-    const nrcs = this.xterm && NRCS[String.fromCharCode(b)];
+    // National sets share their finals with plain ESC sequences (ESC 7, E, H, =, Z…), so they
+    // only count after an intermediate.
+    const nrcs = this.xterm && inter.length === 1 && NRCS[String.fromCharCode(b)];
     if (b === 0x42 || b === 0x30 || nrcs) {
       if (inter.length !== 1) return;
       let index = G_INDEX[inter[0]];
@@ -1703,7 +1846,7 @@ class Terminal {
       case 0x45: this.linefeed(); this.carriageReturn(); break;
       case 0x48: this.tabs[this.grid.cursor.col] = 1; break;
       case 0x4d: this.reverseIndex(); break;
-      case 0x5a: this.reply(DA1_REPLY); break;
+      case 0x5a: this.reply(this.xterm ? DA1_XTERM_REPLY : DA1_REPLY); break;
       case 0x63: this.resetState(); break;
       case 0x37: this.grid.saved = this.grid.cursor.clone(); break;
       case 0x38: this.grid.cursor = this.grid.saved.clone(); break;
@@ -1728,8 +1871,8 @@ class Terminal {
     this.state = S_GROUND;
     if (this.ignoring || this.inter.length > 2) return;
     const groups = this.groups(), inter = this.interString();
-    if (this.handlers && this.hooked('csi', inter + String.fromCharCode(b), paramsArray(groups))) return;
-    this.csiDispatch(b, groups, inter);
+    if (!this.handlers) { this.csiDispatch(b, groups, inter); return; }
+    this.runHooks('csi', inter + String.fromCharCode(b), [paramsArray(groups)], () => this.csiDispatch(b, groups, inter));
   }
 
   csiDispatch(final, groups, inter) {
@@ -1758,7 +1901,12 @@ class Terminal {
         if (m === 0) this.tabs[cur.col] = 0; else if (m === 3) this.tabs.fill(0);
         break;
       }
-      case 'H': case 'f': { const y = next(1), x = next(1); this.goto(y - 1, x - 1); break; }
+      case 'H': case 'f': {
+        if (this.windowsWrapping && f === 'H') this.guessWindowsWrap();
+        const y = next(1), x = next(1);
+        this.goto(y - 1, x - 1);
+        break;
+      }
       case 'h': for (const g of groups) this.setMode(g[0], true); break;
       case '?h':
         for (const g of groups) {
@@ -1836,7 +1984,7 @@ class Terminal {
         if (this.xterm && this.xtermCsi(key, groups)) break;
         // DA asks with no parameter or 0; the `>` form is secondary DA.
         if (f === 'c' && next(0) === 0) {
-          if (inter === '') this.reply(DA1_REPLY);
+          if (inter === '') this.reply(this.xterm ? DA1_XTERM_REPLY : DA1_REPLY);
           else if (inter[0] === '>') this.reply(DA2_REPLY);
         }
     }
@@ -1875,8 +2023,28 @@ class Terminal {
       case '=u': this.setKeyboardMode(p(0, 0) & 0x1f, p(1, 1)); return true;
       case '>u': this.pushKeyboardMode(p(0, 0) & 0x1f); return true;
       case '<u': this.popKeyboardModes(p(0, 1)); return true;
+      case '?S': if (groups.length >= 2) this.graphicsAttributes(groups[0][0], groups[1][0], groups[2] ? groups[2][0] : 0, groups.length); return true;
     }
     return false;
+  }
+
+  // XTSMGRAPHICS (xterm profile): sixel colour registers (item 1) and the largest sixel picture
+  // (item 2); read (1), reset (2), set (3), read the maximum (4). Status 0 ok, 1 bad item, 2 bad action.
+  graphicsAttributes(item, action, value, count) {
+    const say = (status, ...v) => this.reply(`\x1b[?${item};${status}${v.map(x => ';' + x).join('')}S`);
+    if (item === 1) {
+      if (action === 1) say(0, this.sixelPalette);
+      else if (action === 2) { this.sixelPalette = SIXEL_PALETTE_LIMIT; say(0, this.sixelPalette); }
+      else if (action === 3 && count > 2 && value >= 1 && value <= SIXEL_PALETTE_LIMIT) { this.sixelPalette = value; say(0, value); }
+      else if (action === 4) say(0, SIXEL_PALETTE_LIMIT);
+      else say(2);
+    } else if (item === 2) {
+      const side = Math.floor(Math.sqrt(SIXEL_PIXEL_LIMIT)), cell = this.cellPixels || DEFAULT_CELL;
+      const w = this.cols * cell.width, h = this.rows * cell.height;
+      if (action === 1) { if (w * h < SIXEL_PIXEL_LIMIT) say(0, w, h); else say(0, side, side); }
+      else if (action === 4) say(0, side, side);
+      else say(2);
+    } else say(1);
   }
 
   // SL/SR (from column 0) and DECIC/DECDC (from the cursor) on every line of the scroll region:
@@ -1936,6 +2104,7 @@ class Terminal {
       for (let y = 0; y < this.rows; y++) this.selectiveErase(y, 0, cols);
     } else if (mode === 3) {
       this.grid.clearHistory();
+      this.dropImages();
     }
   }
 
@@ -1980,6 +2149,173 @@ class Terminal {
     this.keyboardStack = this.inactiveKeyboardStack;
     this.inactiveKeyboardStack = t;
     this.setKeyboardMode(this.keyboardStack.length ? this.keyboardStack[this.keyboardStack.length - 1] : 0, 1);
+  }
+
+  // ── inline pictures (images.js decodes; where they sit and where the cursor ends is here) ──
+
+  // A marker on a buffer line (counted from the top of the scrollback).
+  markLine(line) { return new Marker(this, this.grid, line - this.historySize); }
+
+  // kitty graphics, as the app's kitty.rs: replies go back to the program, a placement may move
+  // the cursor down and right like `ESC D`… `CSI G`.
+  kitty(body) {
+    const cur = this.grid.cursor;
+    const env = {
+      cols: this.cols, history: this.historySize, cell: this.cellPixels || DEFAULT_CELL,
+      mark: line => this.markLine(line), nextUid: () => ++this.imageSerial,
+    };
+    const out = this.kittyGraphics.handle(body, { line: this.historySize + cur.line, col: cur.col }, env);
+    if (out.removed.length) this.forgetPlacements(out.removed);
+    if (out.reply) this.reply(out.reply);
+    if (out.placed) {
+      const { placement: p, image: im } = out.placed;
+      this.emit('image', {
+        id: p.uid, protocol: 'kitty', marker: p.marker, col: p.col, cols: p.cols, rows: p.rows, z: p.z, virtual: p.virtual,
+        imageId: im.id, placementId: p.id, width: im.width, height: im.height, format: im.format, data: im.data.slice(),
+        compressed: im.compressed,
+      });
+      this.evictImages();
+    }
+    if (out.cursor) {
+      for (let k = 0; k < out.cursor[0]; k++) this.linefeed();
+      this.goto(this.grid.cursor.line, out.cursor[1]);
+    }
+  }
+
+  // OSC 1337 `File=…:base64` as the app lays it out: anchored at the cursor, which stays; the
+  // width in cells from `width=N` or 60% of the line (20 to 100), the height from the PNG's
+  // shape at a 2.1 cell aspect. The same name and size again is the same picture moved.
+  itermImage(body) {
+    const colon = body.indexOf(':');
+    if (colon < 0) return;
+    const bytes = base64Bytes(body.slice(colon + 1));
+    if (bytes.length < 16 || this.historySize >= this.scrollback) return;
+    let name = '', size = bytes.length, width = null;
+    // The app splits the part before ':' at ';' and '=' as it comes, so a `name` right after
+    // `File=` is not seen as one — kept, the moving-picture key depends on it.
+    for (const kv of body.slice(0, colon).split(';')) {
+      const eq = kv.indexOf('=');
+      if (eq < 0) continue;
+      const k = kv.slice(0, eq), v = kv.slice(eq + 1);
+      if (k === 'name') name = utf8(base64Bytes(v));
+      else if (k === 'size' && /^[0-9]+$/.test(v)) size = Number(v);
+      else if (k === 'width') width = /^[0-9]+$/.test(v) && Number(v) <= 0xffff ? Number(v) : null;
+    }
+    const cur = this.grid.cursor, gridCols = this.cols;
+    const cols = Math.max(1, Math.min(width ?? Math.max(20, Math.min(100, Math.floor(gridCols * 6 / 10))), Math.max(1, gridCols - cur.col)));
+    const png = pngSize(bytes);
+    const rows = Math.max(1, png && png.width > 0 ? Math.ceil(cols * png.height / png.width / 2.1) : 12);
+    const key = name + '\0' + size;
+    let rec = this.inlineImages.find(r => r.key === key);
+    if (rec) rec.marker.dispose();
+    else { rec = { uid: ++this.imageSerial, key, pixels: png ? png.width * png.height : 0 }; this.inlineImages.push(rec); }
+    rec.marker = this.markLine(this.historySize + cur.line);
+    this.emit('image', {
+      id: rec.uid, protocol: 'iterm', marker: rec.marker, col: cur.col, cols, rows, name, mime: imageMime(bytes),
+      width: png ? png.width : 0, height: png ? png.height : 0, data: bytes.slice(),
+    });
+    this.evictImages();
+  }
+
+  // Sixel (xterm profile), placed as xterm.js's image addon does: from the cursor, which moves
+  // down to the picture's last line and back to its column — or, with DECSDM (80), at the top
+  // left of the screen with the cursor left alone.
+  sixel(data, params) {
+    const pic = decodeSixel(data, this.sixelPalette);
+    if (!pic) return;
+    const cell = this.cellPixels || DEFAULT_CELL, cur = this.grid.cursor;
+    const scrolling = !(this.xmode & XMODE.SIXEL_DISPLAY);
+    const col = scrolling ? cur.col : 0, rows = Math.ceil(pic.height / cell.height);
+    const cols = Math.min(Math.ceil(pic.width / cell.width), this.cols - col);
+    const marker = this.markLine(this.historySize + (scrolling ? cur.line : 0));
+    if (scrolling) {
+      for (let k = 0; k < rows - 1; k++) this.linefeed();
+      cur.col = col;
+      cur.wrap = false;
+    }
+    const rec = { uid: ++this.imageSerial, key: null, marker, pixels: pic.width * pic.height };
+    this.inlineImages.push(rec);
+    this.emit('image', {
+      id: rec.uid, protocol: 'sixel', marker, col, cols, rows, width: pic.width, height: pic.height, format: 'rgba',
+      data: pic.pixels, transparent: (params[1] ? params[1][0] : 0) === 1, background: cur.bg,
+    });
+    this.evictImages();
+  }
+
+  forgetPlacements(placements) {
+    for (const p of placements) if (p.marker) p.marker.dispose();
+    this.emit('imagedelete', placements.map(p => p.uid));
+  }
+
+  // The app forgets anchored pictures when the lines they hang on renumber: a width change
+  // (reflow), a screen switch, a cleared or full scrollback.
+  dropImages() {
+    const gone = this.kittyGraphics.dropAnchored();
+    for (const r of this.inlineImages.splice(0)) { r.marker.dispose(); gone.push({ uid: r.uid, marker: null }); }
+    if (gone.length) this.forgetPlacements(gone);
+  }
+
+  // At most IMAGE_SLOTS pictures and IMAGE_PIXEL_BUDGET pixels between them; the oldest go
+  // first, the one just shown stays.
+  evictImages() {
+    const all = () => [
+      ...this.inlineImages.map(r => ({ uid: r.uid, pixels: r.pixels, kitty: false })),
+      ...this.kittyGraphics.images.map(im => ({ uid: im.uid, pixels: im.width * im.height, kitty: true })),
+    ].sort((a, b) => a.uid - b.uid);
+    for (let list = all(); list.length > 1; list = all()) {
+      const pixels = list.reduce((n, x) => n + x.pixels, 0);
+      if (list.length <= IMAGE_SLOTS && pixels <= IMAGE_PIXEL_BUDGET) break;
+      const oldest = list[0];
+      if (oldest.kitty) this.forgetPlacements(this.kittyGraphics.evict(oldest.uid));
+      else {
+        const i = this.inlineImages.findIndex(r => r.uid === oldest.uid), [r] = this.inlineImages.splice(i, 1);
+        r.marker.dispose();
+        this.emit('imagedelete', [r.uid]);
+      }
+    }
+  }
+
+  // ── Unicode widths and Windows PTYs (xterm.js `term.unicode`, `windowsPty`) ──
+
+  // Width providers beside the app's own table ('alacritty', the default). Another one changes
+  // where characters land, so the mirror would no longer match the app.
+  unicodeApi() {
+    const term = this, providers = new Map([['alacritty', { version: 'alacritty', wcwidth: cp => Math.max(0, charWidth(cp)) }]]);
+    return {
+      get versions() { return [...providers.keys()]; },
+      get activeVersion() { return term.unicodeVersion; },
+      set activeVersion(v) {
+        const provider = providers.get(v);
+        if (!provider) throw new Error(`unknown Unicode version "${v}"`);
+        term.unicodeVersion = v;
+        term.widthOf = v === 'alacritty' ? charWidth : cp => (cp === 0x7f ? -1 : provider.wcwidth(cp));
+      },
+      register(provider) { providers.set(provider.version, provider); },
+    };
+  }
+
+  // xterm.js's `windowsPty`: ConPTY before build 21376 (and winpty) reprints instead of
+  // wrapping, so reflow is off and a line is guessed to continue when the one above ends in a
+  // character; on any Windows PTY, growing the screen adds blank lines instead of pulling
+  // scrollback down.
+  setWindowsPty(v) {
+    this.windowsPty = v && (v.backend !== undefined || v.buildNumber !== undefined) ? { ...v } : null;
+    const w = this.windowsPty;
+    this.windowsWrapping = !!(w && w.backend !== undefined && w.buildNumber !== undefined && w.backend === 'conpty' && w.buildNumber < 21376);
+    for (const g of [this.grid, this.inactive]) g.noHistoryPull = !!w;
+  }
+
+  reflowAllowed() {
+    const w = this.windowsPty;
+    return !(w && w.buildNumber) || (w.backend === 'conpty' && w.buildNumber >= 21376);
+  }
+
+  guessWindowsWrap() {
+    const grid = this.grid, line = grid.cursor.line, last = grid.cols - 1;
+    if (line - 1 < -grid.historySize) return;
+    const above = grid.row(line - 1);
+    above.touch(last);
+    above.setFlag(last, WRAPLINE, above.cp(last) !== 32);
   }
 
   // DECRQSS (xterm profile). DECSCL answers the VT220 level DA1 claims.
@@ -2093,7 +2429,7 @@ class Terminal {
       if (this.isAltScreen) grid.resetRegion(0, this.rows, bg);
       else grid.clearViewport(bg);
     } else if (mode === 3) {
-      if (grid.historySize > 0) grid.clearHistory();
+      if (grid.historySize > 0) { grid.clearHistory(); this.dropImages(); }
     }
   }
 
@@ -2146,6 +2482,7 @@ class Terminal {
       case 47: case 1047: if (on !== this.isAltScreen) this.swapScreenPlain(on); break;
       case 2031: xflag(XMODE.COLOR_SCHEME_REPORTS); break;
       case 9001: xflag(XMODE.WIN32_INPUT); break;
+      case 80: xflag(XMODE.SIXEL_DISPLAY); break;
     }
   }
 
@@ -2158,6 +2495,7 @@ class Terminal {
     this.grid.cursor = cur;
     this.mode ^= MODE.ALT_SCREEN;
     this.swapKeyboardStacks();
+    this.dropImages();
     this.emit('screen', this.isAltScreen);
   }
 
@@ -2214,6 +2552,7 @@ class Terminal {
       case 1048: return 1;
       case 47: case 1047: return this.isAltScreen ? 1 : 2;
       case 9001: return has(XMODE.WIN32_INPUT);
+      case 80: return has(XMODE.SIXEL_DISPLAY);
       default: return 0;
     }
   }
@@ -2414,6 +2753,7 @@ class Terminal {
       case '111': this.colors[257] = null; this.emit('colors'); return;
       case '112': this.colors[258] = null; this.emit('colors'); return;
       case '133': this.emit('prompt', params.slice(1).map(p => utf8(p))); return;
+      case '1337': this.itermImage(params.slice(1).map(p => utf8(p)).join(';')); return;
     }
   }
 
@@ -2576,6 +2916,441 @@ class CellView {
     return this.flag(BOLD | DIM | ITALIC | ALL_UNDERLINES | INVERSE | HIDDEN | STRIKEOUT | BLINK | OVERLINE) === 0
       && this.isFgDefault() && this.isBgDefault();
   }
+}
+
+// ── images.js ──
+// Inline pictures as the parser sees them: sixel (DCS q), iTerm (OSC 1337 File=) and kitty
+// (APC G) arrive as commands; what comes out is the decoded picture and where it sits, as
+// 'image' / 'imagedelete' events for the view to draw. Where the cursor ends up is part of the
+// screen, so it is decided here — iTerm and kitty exactly as the app (kasa-pty's inline.rs and
+// kitty.rs), sixel as xterm.js's image addon (the app does not show sixel).
+//
+// Also XTGETTCAP's capability table, which answers from the same xterm-256color description
+// programs are given in TERM.
+
+const IMAGE_SLOTS = 64;                 // kasa-pty INLINE_IMAGE_SLOTS
+const IMAGE_PIXEL_BUDGET = 64000000;    // kasa-pty INLINE_IMAGE_PIXEL_BUDGET
+const KITTY_MAX_BYTES = 64 * 1024 * 1024;
+const KITTY_MAX_SIDE = 10000;
+const KITTY_MAX_BOX_CELLS = 1000;
+const SIXEL_PIXEL_LIMIT = 16777216;     // xterm.js image addon pixelLimit
+const SIXEL_PALETTE_LIMIT = 4096;
+const DEFAULT_CELL = { width: 8, height: 16 };
+
+// Lenient base64, as kasa-pty decodes inline pictures: anything outside the alphabet is skipped.
+const B64 = (() => {
+  const t = new Int8Array(256).fill(-1);
+  const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  for (let i = 0; i < 64; i++) t[a.charCodeAt(i)] = i;
+  return t;
+})();
+
+function base64Bytes(src) {
+  const out = new Uint8Array(Math.floor(src.length * 3 / 4) + 3);
+  let n = 0, acc = 0, bits = 0;
+  for (let i = 0; i < src.length; i++) {
+    const v = B64[typeof src === 'string' ? src.charCodeAt(i) & 0xff : src[i]];
+    if (v < 0) continue;
+    acc = ((acc << 6) | v) & 0xffffff;
+    bits += 6;
+    if (bits >= 8) { bits -= 8; out[n++] = (acc >> bits) & 0xff; }
+  }
+  return out.subarray(0, n);
+}
+
+function pngSize(b) {
+  if (b.length < 24 || b[0] !== 0x89 || b[1] !== 0x50 || b[2] !== 0x4e || b[3] !== 0x47) return null;
+  const u32 = o => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+  return { width: u32(16), height: u32(20) };
+}
+
+function imageMime(b) {
+  if (pngSize(b)) return 'image/png';
+  if (b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) return 'image/webp';
+  return 'application/octet-stream';
+}
+
+// ── sixel ──
+
+// The VT340's power-on palette, in percent.
+const VT340_PALETTE = [
+  [0, 0, 0], [20, 20, 80], [80, 13, 13], [20, 80, 20], [80, 20, 80], [20, 80, 80], [80, 80, 20], [53, 53, 53],
+  [26, 26, 26], [33, 33, 60], [60, 26, 26], [33, 60, 33], [60, 33, 60], [33, 60, 60], [60, 60, 33], [80, 80, 80],
+];
+
+const pct = v => Math.round(Math.min(100, v) * 255 / 100);
+const rgba = (r, g, b) => ((r & 0xff) | ((g & 0xff) << 8) | ((b & 0xff) << 16) | 0xff000000) >>> 0;
+
+// DEC HLS puts blue at 0°, red at 120° and green at 240°.
+function hlsColor(h, l, s) {
+  const hue = ((h + 240) % 360) / 360, lig = Math.min(100, l) / 100, sat = Math.min(100, s) / 100;
+  if (sat === 0) { const v = Math.round(lig * 255); return rgba(v, v, v); }
+  const q = lig < 0.5 ? lig * (1 + sat) : lig + sat - lig * sat, p = 2 * lig - q;
+  const ch = t => {
+    t = (t + 1) % 1;
+    const v = t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p;
+    return Math.round(v * 255);
+  };
+  return rgba(ch(hue + 1 / 3), ch(hue), ch(hue - 1 / 3));
+}
+
+// Sixel data (the bytes between `q` and ST) → { width, height, pixels: RGBA }, or null when it
+// draws nothing or is larger than the pixel limit. Unpainted pixels stay transparent; whether
+// the background shows through is the DCS's second parameter, passed on to the view.
+function decodeSixel(data, paletteLimit = SIXEL_PALETTE_LIMIT, pixelLimit = SIXEL_PIXEL_LIMIT) {
+  const palette = new Uint32Array(paletteLimit);
+  VT340_PALETTE.forEach(([r, g, b], i) => { if (i < paletteLimit) palette[i] = rgba(pct(r), pct(g), pct(b)); });
+  const rows = [];
+  let x = 0, band = 0, color = palette[0], declaredW = 0, declaredH = 0, maxX = -1, maxY = -1, over = false;
+  const numbers = (i) => {
+    const out = [];
+    let v = 0, has = false;
+    for (; i < data.length; i++) {
+      const c = data[i];
+      if (c >= 0x30 && c <= 0x39) { v = Math.min(v * 10 + c - 0x30, 0xffffff); has = true; } else if (c === 0x3b) { out.push(has ? v : 0); v = 0; has = false; } else break;
+    }
+    out.push(has ? v : 0);
+    return [out, i];
+  };
+  const paint = (bits, count) => {
+    if (bits) {
+      for (let k = 0; k < 6; k++) {
+        if (!(bits & (1 << k))) continue;
+        const y = band * 6 + k;
+        if ((x + count) * (y + 1) > pixelLimit) { over = true; return; }
+        let row = rows[y];
+        if (!row || row.length < x + count) {
+          const grown = new Uint32Array(Math.max(x + count, row ? row.length * 2 : 64));
+          if (row) grown.set(row);
+          row = rows[y] = grown;
+        }
+        row.fill(color, x, x + count);
+        if (y > maxY) maxY = y;
+      }
+      if (x + count - 1 > maxX) maxX = x + count - 1;
+    }
+    x += count;
+  };
+  for (let i = 0; i < data.length && !over;) {
+    const c = data[i];
+    if (c >= 0x3f && c <= 0x7e) { paint(c - 0x3f, 1); i++; continue; }
+    if (c === 0x21) {
+      const [[n], j] = numbers(i + 1);
+      i = j;
+      if (i < data.length && data[i] >= 0x3f && data[i] <= 0x7e) { paint(data[i] - 0x3f, Math.max(1, n)); i++; }
+      continue;
+    }
+    if (c === 0x23) {
+      const [p, j] = numbers(i + 1);
+      i = j;
+      const reg = p[0] % paletteLimit;
+      if (p.length >= 5) {
+        if (p[1] === 1) palette[reg] = hlsColor(p[2], p[3], p[4]);
+        else if (p[1] === 2) palette[reg] = rgba(pct(p[2]), pct(p[3]), pct(p[4]));
+      }
+      color = palette[reg];
+      continue;
+    }
+    if (c === 0x22) {
+      const [p, j] = numbers(i + 1);
+      i = j;
+      if (p.length >= 4) { declaredW = p[2]; declaredH = p[3]; }
+      continue;
+    }
+    if (c === 0x24) x = 0;
+    else if (c === 0x2d) { x = 0; band++; }
+    i++;
+  }
+  const width = Math.max(maxX + 1, declaredW), height = Math.max(maxY + 1, declaredH);
+  if (width <= 0 || height <= 0 || width * height > pixelLimit) return null;
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  const view = new Uint32Array(pixels.buffer);
+  for (let y = 0; y < height; y++) {
+    const row = rows[y];
+    if (row) view.set(row.length > width ? row.subarray(0, width) : row, y * width);
+  }
+  return { width, height, pixels };
+}
+
+// ── kitty graphics (kasa-pty kitty.rs) ──
+
+const KITTY_KEYS = { a: 'action', q: 'quiet', i: 'id', I: 'number', p: 'placement', f: 'format', t: 'medium', o: 'compressed',
+  s: 'width', v: 'height', S: 'size', O: 'offset', m: 'more', c: 'cols', r: 'rows', x: 'x', y: 'y', w: 'w', h: 'h',
+  C: 'noMove', U: 'virtual', d: 'delete', z: 'z', P: 'parent' };
+
+function kittyCommand(control) {
+  const cmd = { action: null, quiet: 0, id: 0, number: 0, placement: 0, format: 0, medium: null, compressed: false,
+    width: 0, height: 0, size: 0, offset: 0, more: false, cols: 0, rows: 0, x: 0, y: 0, w: 0, h: 0,
+    noMove: false, virtual: false, delete: null, z: 0, parent: 0 };
+  for (const kv of control.split(',')) {
+    const eq = kv.indexOf('=');
+    if (eq !== 1) continue;
+    const name = KITTY_KEYS[kv[0]], v = kv.slice(2);
+    if (!name) continue;
+    const num = /^[0-9]+$/.test(v) ? Math.min(Number(v), 0xffffffff) : 0;
+    if (name === 'action' || name === 'medium' || name === 'delete') cmd[name] = v ? v[0] : null;
+    else if (name === 'compressed') cmd.compressed = v[0] === 'z';
+    else if (name === 'more' || name === 'noMove' || name === 'virtual') cmd[name] = v[0] === '1';
+    else if (name === 'z') cmd.z = /^-?[0-9]+$/.test(v) ? Number(v) | 0 : 0;
+    else if (name === 'quiet') cmd.quiet = num & 0xff;
+    else cmd[name] = num;
+  }
+  return cmd;
+}
+
+function kittyReply(cmd, id, number, placement, msg) {
+  const ok = msg === 'OK';
+  if ((id === 0 && number === 0) || cmd.quiet >= 2 || (ok && cmd.quiet === 1)) return null;
+  let keys = id ? `i=${id}` : '';
+  if (number) keys += (keys ? ',' : '') + `I=${number}`;
+  if (placement) keys += `,p=${placement}`;
+  return `\x1b_G${keys};${msg}\x1b\\`;
+}
+
+// Cells a placement covers: both given, one given (the other from the picture's shape), or the
+// picture's pixels over the cell size.
+function kittyBox(cmd, width, height, cell) {
+  const sw = Math.max(1, cmd.w > 0 ? Math.min(cmd.w, width) : width), sh = Math.max(1, cmd.h > 0 ? Math.min(cmd.h, height) : height);
+  const cw = cell.width, ch = cell.height;
+  let cols, rows;
+  if (!cmd.cols && !cmd.rows) { cols = Math.ceil(sw / cw); rows = Math.ceil(sh / ch); }
+  else if (!cmd.rows) { cols = cmd.cols; rows = Math.ceil(cmd.cols * cw * sh / sw / ch); }
+  else if (!cmd.cols) { cols = Math.ceil(cmd.rows * ch * sw / sh / cw); rows = cmd.rows; }
+  else { cols = cmd.cols; rows = cmd.rows; }
+  const clamp = v => Math.max(1, Math.min(KITTY_MAX_BOX_CELLS, v));
+  return [clamp(cols), clamp(rows)];
+}
+
+// Pixel data in the browser: direct (base64) transmission only — files and shared memory are
+// on the app's machine. A zlib-compressed payload is handed on for the view to inflate.
+function kittyLoad(cmd, payload) {
+  if ((cmd.medium || 'd') !== 'd') return { error: 'EBADF:Failed to read image file' };
+  const data = base64Bytes(payload);
+  const format = cmd.format || 32;
+  if (format === 100) {
+    const size = cmd.compressed ? null : pngSize(data);
+    if (!size || !size.width || !size.height) return { error: 'EBADPNG:not a PNG image' };
+    if (size.width > KITTY_MAX_SIDE || size.height > KITTY_MAX_SIDE) return { error: 'EFBIG:image dimensions too large' };
+    return { image: { format: 'png', data, width: size.width, height: size.height, compressed: false } };
+  }
+  if (format === 24 || format === 32) {
+    const { width, height } = cmd;
+    if (!width || !height) return { error: 'EINVAL:s and v are required for raw pixel data' };
+    if (width > KITTY_MAX_SIDE || height > KITTY_MAX_SIDE) return { error: 'EFBIG:image dimensions too large' };
+    if (!cmd.compressed && data.length < width * height * (format / 8)) return { error: 'ENODATA:insufficient image data' };
+    return { image: { format: format === 32 ? 'rgba' : 'rgb', data, width, height, compressed: cmd.compressed } };
+  }
+  return { error: 'EINVAL:unknown image format' };
+}
+
+class KittyGraphics {
+  constructor() {
+    this.images = [];       // {id, number, uid, width, height, format, data, compressed}
+    this.placements = [];   // {uid, image, id, cols, rows, virtual, marker, col, z}; marker null if virtual
+    this.pending = null;
+    this.nextAutoId = 0;
+  }
+
+  image(id) { return this.images.find(im => im.id === id); }
+
+  newestNumbered(number) {
+    let best = null;
+    for (const im of this.images) if (im.number === number && (!best || im.uid > best.uid)) best = im;
+    return best ? best.id : null;
+  }
+
+  freshId() {
+    for (;;) {
+      this.nextAutoId = (this.nextAutoId + 1) >>> 0;
+      const id = (0x80000000 | this.nextAutoId) >>> 0;
+      if (!this.image(id)) return id;
+    }
+  }
+
+  // One APC body (after `G`). `at` is {line (buffer line), col}; returns {reply, cursor, placed,
+  // removed placements} — `cursor` is [lines down, column] for the caller to move by. `env`
+  // carries the grid's width and scrollback, the cell size, `mark(line)` for anchors and
+  // `nextUid()`.
+  handle(body, at, env) {
+    const semi = body.indexOf(';');
+    const control = semi < 0 ? body : body.slice(0, semi), payload = semi < 0 ? '' : body.slice(semi + 1);
+    let cmd = kittyCommand(control), data;
+    const out = { reply: null, cursor: null, placed: null, removed: [] };
+    if (cmd.action === 'd') return this.remove(cmd, at, env, out);
+    if (cmd.action !== null) this.pending = null;
+    if (this.pending) {
+      const p = this.pending;
+      this.pending = null;
+      if (p.data.length + payload.length > KITTY_MAX_BYTES * 4 / 3 + 4) {
+        out.reply = kittyReply(p.cmd, p.cmd.id, p.cmd.number, 0, 'EFBIG:image too large');
+        return out;
+      }
+      p.data += payload;
+      if (cmd.more) { this.pending = p; return out; }
+      if (cmd.quiet) p.cmd.quiet = cmd.quiet;
+      cmd = p.cmd; at = p.at; data = p.data;
+    } else {
+      const action = cmd.action || 't';
+      if (cmd.more && (action === 't' || action === 'T' || action === 'q') && (cmd.medium || 'd') === 'd') {
+        this.pending = { cmd, at, data: payload };
+        return out;
+      }
+      data = payload;
+    }
+    if (cmd.id && cmd.number) { out.reply = kittyReply(cmd, cmd.id, cmd.number, 0, 'EINVAL:i and I are mutually exclusive'); return out; }
+    const action = cmd.action || 't';
+    if (action === 'q') {
+      const loaded = kittyLoad(cmd, data);
+      out.reply = kittyReply(cmd, cmd.id, cmd.number, 0, loaded.error || 'OK');
+      return out;
+    }
+    if (action === 't' || action === 'T') {
+      const loaded = kittyLoad(cmd, data);
+      if (loaded.error) { out.reply = kittyReply(cmd, cmd.id, cmd.number, 0, loaded.error); return out; }
+      const id = cmd.id || this.freshId();
+      const image = { ...loaded.image, id, number: cmd.number, uid: env.nextUid() };
+      const i = this.images.findIndex(im => im.id === id);
+      if (i >= 0) this.images[i] = image; else this.images.push(image);
+      if (action === 'T') return this.put(cmd, id, at, env, out);
+      out.reply = kittyReply(cmd, id, cmd.number, 0, 'OK');
+      return out;
+    }
+    if (action === 'p') {
+      const id = cmd.id || this.newestNumbered(cmd.number);
+      if (id !== null && this.image(id)) return this.put(cmd, id, at, env, out);
+      out.reply = kittyReply(cmd, cmd.id, cmd.number, cmd.placement, 'ENOENT:image not found');
+      return out;
+    }
+    out.reply = kittyReply(cmd, cmd.id, cmd.number, 0, 'EINVAL:unsupported action');
+    return out;
+  }
+
+  put(cmd, id, at, env, out) {
+    if (cmd.parent) { out.reply = kittyReply(cmd, id, cmd.number, cmd.placement, 'EINVAL:relative placements are not supported'); return out; }
+    const im = this.image(id);
+    if (!im) { out.reply = kittyReply(cmd, id, cmd.number, cmd.placement, 'ENOENT:image not found'); return out; }
+    const [cols, rows] = kittyBox(cmd, im.width, im.height, env.cell);
+    const placement = { uid: env.nextUid(), image: id, id: cmd.placement, cols, rows, virtual: cmd.virtual,
+      marker: cmd.virtual ? null : env.mark(at.line), col: at.col, z: cmd.z };
+    const drop = p => { out.removed.push(p); return false; };
+    if (placement.virtual) {
+      this.placements = this.placements.filter(p => !(p.virtual && p.image === id && p.id === cmd.placement) || drop(p));
+    } else if (cmd.placement) {
+      this.placements = this.placements.filter(p => !(p.image === id && p.id === cmd.placement) || drop(p));
+    }
+    this.placements.push(placement);
+    out.placed = { placement, image: im };
+    out.reply = kittyReply(cmd, id, cmd.number, cmd.placement, 'OK');
+    if (!placement.virtual && !cmd.noMove) {
+      const right = at.col + cols;
+      out.cursor = right >= env.cols ? [rows, 0] : [rows - 1, right];
+    }
+    return out;
+  }
+
+  // `a=d`. Screen positions (1-based) become buffer lines; uppercase also frees pictures no
+  // placement uses any more.
+  remove(cmd, at, env, out) {
+    this.pending = null;
+    const what = cmd.delete || 'a', free = what !== what.toLowerCase();
+    const cellLine = y => env.history + Math.max(1, y) - 1, cellCol = x => Math.max(1, x) - 1;
+    const lineOf = p => p.marker.line;
+    const hits = (p, line, col) => !p.virtual && (line === null || (line >= lineOf(p) && line < lineOf(p) + p.rows))
+      && (col === null || (col >= p.col && col < p.col + p.cols));
+    const touched = [], dropImages = [];
+    const take = pred => {
+      this.placements = this.placements.filter(p => {
+        if (!pred(p)) return true;
+        touched.push(p.image);
+        out.removed.push(p);
+        return false;
+      });
+    };
+    switch (what.toLowerCase()) {
+      case 'a': take(p => !p.virtual); break;
+      case 'i': take(p => p.image === cmd.id && (!cmd.placement || p.id === cmd.placement)); if (free && !cmd.placement) dropImages.push(cmd.id); break;
+      case 'n': {
+        const id = this.newestNumbered(cmd.number);
+        if (id !== null) { take(p => p.image === id && (!cmd.placement || p.id === cmd.placement)); if (free && !cmd.placement) dropImages.push(id); }
+        break;
+      }
+      case 'c': if (at) take(p => hits(p, at.line, at.col)); break;
+      case 'p': take(p => hits(p, cellLine(cmd.y), cellCol(cmd.x))); break;
+      case 'q': take(p => hits(p, cellLine(cmd.y), cellCol(cmd.x)) && p.z === cmd.z); break;
+      case 'x': take(p => hits(p, null, cellCol(cmd.x))); break;
+      case 'y': take(p => hits(p, cellLine(cmd.y), null)); break;
+      case 'z': take(p => !p.virtual && p.z === cmd.z); break;
+      case 'r':
+        take(p => p.image >= cmd.x && p.image <= cmd.y);
+        if (free) for (const im of this.images) if (im.id >= cmd.x && im.id <= cmd.y) dropImages.push(im.id);
+        break;
+    }
+    if (free) {
+      for (const id of touched) if (!this.placements.some(p => p.image === id)) dropImages.push(id);
+      for (const id of dropImages) {
+        this.placements = this.placements.filter(p => p.image !== id || (out.removed.push(p), false));
+        this.images = this.images.filter(im => im.id !== id);
+      }
+    }
+    return out;
+  }
+
+  // Events that break every anchor (reflow, screen switch, scrollback cleared or at its cap).
+  dropAnchored() {
+    const gone = this.placements.filter(p => !p.virtual);
+    this.placements = this.placements.filter(p => p.virtual);
+    return gone;
+  }
+
+  // The oldest picture goes, with its placements (over the slot or pixel budget).
+  evict(uid) {
+    const im = this.images.find(i => i.uid === uid);
+    if (!im) return [];
+    this.images = this.images.filter(i => i !== im);
+    const gone = this.placements.filter(p => p.image === im.id);
+    this.placements = this.placements.filter(p => p.image !== im.id);
+    return gone;
+  }
+}
+
+// ── XTGETTCAP ──
+
+// What `TERM=xterm-256color` promises, plus the extensions programs ask terminals about.
+const TERMCAP = {
+  TN: 'xterm-256color', name: 'xterm-256color', Co: '256', colors: '256', RGB: '8/8/8', Tc: true,
+  setrgbf: '\x1b[38;2;%p1%d;%p2%d;%p3%dm', setrgbb: '\x1b[48;2;%p1%d;%p2%d;%p3%dm',
+  Smulx: '\x1b[4:%p1%dm', Setulc: '\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm',
+  Ss: '\x1b[%p1%d q', Se: '\x1b[2 q', Sync: '\x1b[?2026%?%p1%{1}%-%tl%eh%;',
+  BD: '\x1b[?2004l', BE: '\x1b[?2004h', PS: '\x1b[200~', PE: '\x1b[201~', fsl: '\x07', tsl: '\x1b]2;',
+  smcup: '\x1b[?1049h\x1b[22;0;0t', rmcup: '\x1b[?1049l\x1b[23;0;0t', kmous: '\x1b[<',
+  kbs: '\x7f', kcuu1: '\x1bOA', kcud1: '\x1bOB', kcuf1: '\x1bOC', kcub1: '\x1bOD', khome: '\x1bOH', kend: '\x1bOF',
+  kich1: '\x1b[2~', kdch1: '\x1b[3~', kpp: '\x1b[5~', knp: '\x1b[6~', kcbt: '\x1b[Z',
+  kf1: '\x1bOP', kf2: '\x1bOQ', kf3: '\x1bOR', kf4: '\x1bOS', kf5: '\x1b[15~', kf6: '\x1b[17~', kf7: '\x1b[18~',
+  kf8: '\x1b[19~', kf9: '\x1b[20~', kf10: '\x1b[21~', kf11: '\x1b[23~', kf12: '\x1b[24~',
+};
+
+const toHex = s => Array.from(textEncoder.encode(s), b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+function fromHex(h) {
+  if (!/^(?:[0-9a-fA-F]{2})+$/.test(h)) return null;
+  let s = '';
+  for (let i = 0; i < h.length; i += 2) s += String.fromCharCode(parseInt(h.slice(i, i + 2), 16));
+  return s;
+}
+
+// One reply per name, as xterm: `DCS 1 + r name=value ST`; the first unknown name ends the
+// answer with `DCS 0 + r ST`.
+function termcapReplies(request, cols, rows) {
+  const out = [];
+  for (const hex of request.split(';')) {
+    const name = fromHex(hex);
+    let value = name === null ? undefined : name === 'cols' ? String(cols) : name === 'lines' ? String(rows) : TERMCAP[name];
+    if (value === undefined) { out.push('\x1bP0+r\x1b\\'); break; }
+    out.push(value === true ? `\x1bP1+r${hex.toUpperCase()}\x1b\\` : `\x1bP1+r${hex.toUpperCase()}=${toHex(value)}\x1b\\`);
+  }
+  return out;
 }
 
 // ── box-table.js ──

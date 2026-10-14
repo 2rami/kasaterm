@@ -158,6 +158,12 @@ export const CASES = {
       `${CSI}?1047l!`, `${CSI}?47h`, 'again', `${CSI}?1049h${CSI}5;5H${CSI}?47lX`],
   },
   'reverse-wraparound': { steps: [`${CSI}?45habcdefghijKLM`, '\r\b\bX', `${CSI}3;1H\b\bY`, `${CSI}?45l${CSI}2;1H\b\bZ`] },
+  'plain-esc-beside-national-finals': {
+    steps: [fill6, `${CSI}2;3H${ESC}7${CSI}5;5H${ESC}8X${ESC}E${ESC}HY\r\t!`, `${ESC}=${ESC}(K${ESC}D${ESC}M${ESC}Z`],
+    // xterm.js ignores DECID (ESC Z); the app answers it as DA1, here the sixel-capable one.
+    replies: ['\x1b[?62;4;9;22c'],
+    check: (kt, xt) => sameModes(kt, xt),
+  },
   'line-feed-new-line': { steps: [`${CSI}20ha\nb\x0bc\x0cd${ESC}De${CSI}20l\nf`] },
   'c1-controls': {
     steps: [Buffer.from('ab\u0084c\u0085d\u0088\r\n\t!\u009b31mR\u009b0m\u009d2;t1\u0007\u0090$qm\u009c', 'utf8'), Buffer.from('\u009c\u0098sos\u009cS\u009e\u009cP\u009f\u009cA\u008dU', 'utf8')],
@@ -242,6 +248,20 @@ export const BUFFER_CASES = {
     rows: 3, steps: ['one\r\n', `${CSI}1;31mtwo${CSI}0m ${CSI}38;5;200;48;2;1;2;3mx${CSI}m\r\n`, 'abcdefghijklm\r\n', '한글이다가나\r\n', `${CSI}4mu${CSI}24mend`],
     check: sameBuffer,
   },
+  // Windows ConPTY before build 21376: a line is guessed to continue when the one above ends in
+  // a character (on LF and CUP), reflow is off, and a taller screen adds blank lines. Narrowing
+  // is left out: without reflow xterm.js keeps the cut cells hidden and shows them again when
+  // the screen widens, the app's grid drops them.
+  'windows-pty': {
+    rows: 4, options: { windowsPty: { backend: 'conpty', buildNumber: 19041 } }, xtermOptions: { windowsPty: { backend: 'conpty', buildNumber: 19041 } },
+    steps: ['abcdefghij\r\nklm\r\nnop\r\nqrstuvwxyz\r\n12345', `${CSI}2;1H`, [12, 4], [12, 6], 'Z'],
+    check: sameBuffer,
+  },
+  'windows-pty-new-conpty': {
+    rows: 4, options: { windowsPty: { backend: 'conpty', buildNumber: 22621 } }, xtermOptions: { windowsPty: { backend: 'conpty', buildNumber: 22621 } },
+    steps: ['abcdefghij\r\nklm\r\nnop\r\nqrstuvwxyz\r\n12345', [12, 6], 'Z'],
+    check: sameBuffer,
+  },
   'buffer-api-alt': { rows: 3, steps: ['main\r\nmore', `${CSI}?1049hALT${CSI}2;2H`], check: (kt, xt) => sameBuffer(kt, xt) || (xt.buffer.normal.getLine(0).translateToString(true) === kt.buffer.normal.getLine(0).translateToString(true) ? '' : 'normal buffer differs') },
 };
 
@@ -265,7 +285,7 @@ for (const [name, c] of Object.entries(BUFFER_CASES)) {
   if (filter && !name.includes(filter)) continue;
   total++;
   let res;
-  try { res = runCase({ ...c, options: { profile: 'alacritty' } }); } catch (e) { res = '  threw: ' + (e.stack || e); }
+  try { res = runCase({ ...c, options: { ...c.options, profile: 'alacritty' } }); } catch (e) { res = '  threw: ' + (e.stack || e); }
   if (res) { failed++; console.log(`FAIL ${name}\n${res}`); }
 }
 for (const [name, c] of Object.entries(KITTY_CASES)) {

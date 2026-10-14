@@ -50,10 +50,18 @@ const m = term.registerMarker(0); m.line; m.onDispose(…); // 스크롤·되접
 term.loadAddon({ activate(term) {}, dispose() {} }); term.dispose();
 term.options.convertEol = true;                         // profile·tabStopWidth·scrollback·cellPixels·colorScheme 도 실시간
 term.scrollLines(-3); term.scrollToBottom();            // 화면 위치 — 'viewport' 이벤트
+term.on('image', e => …); term.on('imagedelete', ids => …);   // 그림 — 아래 「그림」
+term.unicode.register({ version: 'x', wcwidth: cp => 1 }); term.unicode.activeVersion = 'x';
 ```
 
 옵션: `profile`(아래), `convertEol`(LF 를 CRLF 로), `tabStopWidth`, `cellPixels`({width, height} — 14t·16t 답),
-`colorScheme`('dark'·'light' — `CSI ? 996 n` 답, `setColorScheme()` 로 바꿈).
+`colorScheme`('dark'·'light' — `CSI ? 996 n` 답, `setColorScheme()` 로 바꿈), `asyncWrite`(쓰기를 대기열에 넣고 한 프레임쯤씩
+나눠 적용 — 기본은 곧바로), `windowsPty`({backend, buildNumber} — xterm.js 와 같게: ConPTY 21376 미만이면 되접기를 끄고 LF·CUP
+때 윗줄이 글자로 끝나면 이어진 줄로 짐작, Windows PTY 면 높이를 늘릴 때 스크롤백을 끌어내리지 않음. 되접기 없이 폭을 줄이면
+잘린 칸은 앱처럼 버린다 — xterm.js 는 숨겨 뒀다 다시 넓히면 보인다).
+
+파서 훅이 promise 를 돌려주면 xterm.js 처럼 해석을 멈췄다가 정해지면 잇는다(그 사이 들어온 쓰기는 순서대로 기다린다).
+폭 공급자(`term.unicode`)를 바꾸면 글자가 앉는 칸이 앱과 달라진다 — 기본 `'alacritty'` 가 앱의 표다.
 
 `write` 는 **PTY read 한 번을 한 번에** 넣는 것이 좋다. 앱도 read 한 번마다 NFC 를 돌리므로 묶음 경계가 같아야 분해형
 한글이 같은 칸에 같은 모양으로 앉는다(`/term/ws` 는 read 한 번을 메시지 하나로 보낸다).
@@ -68,6 +76,7 @@ node test/run.mjs fuzz:100001-103000                     # 거친 퍼즈(색 지
 node test/minimize.mjs fuzz:<seed>                       # 실패한 퍼즈를 최소 재현으로 줄이기
 npm install && node test/xterm.mjs                       # xterm 프로필 — @xterm/headless 와 칸 단위로
 node test/api.mjs                                        # 파서 훅·reset·clear·modes·이벤트
+node test/images.mjs                                     # 그림(kitty·iTerm 은 앱 규칙, 식셀)·XTGETTCAP·XTSMGRAPHICS
 ```
 
 `vt_oracle` 은 kasa-pty 의 pane reader 와 똑같이 바이트를 alacritty 에 먹인다(read 경계에서 끊긴 UTF-8 보류, read 마다 NFC,
@@ -103,7 +112,8 @@ node test/api.mjs                                        # 파서 훅·reset·cl
 - 창을 넓힌 줄은 새 칸이 기본 배경이라, 그 줄을 기본 배경으로 다시 지워도 옛 칸의 배경색이 남는다(행 `occ` 최적화).
 - 대체 화면에서 폭이 바뀌면 kasa-pty 가 스크롤백 한도를 그 화면에 다시 걸어, 대체 화면에도 스크롤백이 쌓인다.
 - 동기 갱신에 시간 제한이 없다(앱도 `ESC[?2026l` 이 올 때까지 기다린다). 필요하면 `flushSync()`.
-- kitty 키보드 프로토콜·DECRQSS 는 기본 프로필에서 꺼져 있다(앱 설정과 같음). XTGETTCAP·식셀 해석은 없다(식셀은 DCS 훅 위에).
+- kitty 키보드 프로토콜·DECRQSS·XTGETTCAP·식셀은 기본 프로필에서 꺼져 있다(앱이 안 받는다). iTerm·kitty 그림은 앱이 받으므로
+  기본 프로필에서도 해석한다(아래 「그림」).
 
 ## xterm 프로필 (`new Terminal({ profile: 'xterm' })`)
 
@@ -117,12 +127,38 @@ alacritty 를 따르고, 나머지는 xterm.js(`@xterm/headless` 6.0, 없는 것
   (IND·NEL·HTS·CSI·OSC·DCS·SOS·PM·APC·ST), 나라별 문자 집합(`ESC ( A/4/C/5/R/Q/K/Y/E/6/Z/H/7/=`, G1~G3, `ESC - .`),
   잠금 시프트(`ESC n o | } ~`), `ESC % @/G`, `CSI ? 2 h`(문자 집합 되돌림), SGR 5·25(깜빡임)·53·55(윗줄)·221·222.
 - 응답: XTVERSION(`CSI > q` → `kasaterm.js(판)`), DECRQSS(`m`·`r`·`"q`·`"p`·` q`), DECXCPR(`CSI ? 6 n`), 16t(칸 픽셀),
-  22/23t 의 제목·아이콘 이름 고르기, DECRQM(2·12·8·9·45·66·67·1015·1016·1048·47·1047·9001), 색 구성표(`CSI ? 996 n`, 2031 구독).
+  22/23t 의 제목·아이콘 이름 고르기, DECRQM(2·12·8·9·45·66·67·80·1015·1016·1048·47·1047·9001), 색 구성표(`CSI ? 996 n`, 2031 구독),
+  XTGETTCAP(`DCS + q` — xterm-256color 의 값과 RGB·Tc·Smulx·Setulc·Ss·Sync 같은 확장, 이름마다 답 하나, 모르는 이름에서
+  `DCS 0 + r ST` 로 끝), XTSMGRAPHICS(`CSI ? Pi ; Pa ; Pv S` — 식셀 색 등록 수·최대 크기), DA1 은 식셀(4)·나라별 문자 집합(9)을
+  더한 `ESC[?62;4;9;22c`(xterm.js 그림 애드온과 같음).
+- 식셀(`DCS P1 ; P2 ; P3 q … ST`)과 DECSDM(80) — 아래 「그림」.
 - 모드: X10 마우스(9)·SGR 픽셀(1016)·66·win32 입력(9001)·kitty 키보드 플래그(`CSI = > < ? u`, alacritty 의 처리를 켠 것과 같게 —
   `KTJS_KITTY=1` 로 띄운 `vt_oracle` 과 대조).
 - xterm.js 와 일부러 다른 것: 네덜란드 `[` 는 ĳ 한 글자(xterm.js 는 "ij" 를 넣고 i 만 그린다), DECSCL 은 DA1 이 말하는
   VT220(62)으로, DECRQSS `m` 은 늘 `0m` 이 아니라 지금 꾸밈을, kitty 스택이 넘치면 가장 오래된 것을 버린다(alacritty 는
   제목 스택에서 지우고, 그게 비어 있으면 멈춘다 — 앱은 kitty 를 꺼서 안 걸린다).
+
+## 그림
+
+해석 쪽은 그림 명령을 받아 풀고(`src/images.js`), 놓일 자리와 커서가 갈 곳을 정해 `image` 이벤트로 낸다. 그리기는 view 몫이다.
+`image` 하나: `{ id, protocol: 'iterm'|'kitty'|'sixel', marker, col, cols, rows, width, height, data, … }` — `marker.line` 이
+놓인 줄(스크롤백 꼭대기부터, 스크롤·되접기를 따라간다), `col`·`cols`·`rows` 가 칸 상자. 같은 `id` 가 다시 오면 옮긴 것이다.
+`imagedelete` 는 지울 `id` 목록. 칸 크기는 `cellPixels`(모르면 앱처럼 8×16)를 쓴다 — 거울에서는 **앱의** 칸 크기여야 앱과 같은
+줄 수가 나온다.
+
+- **iTerm**(`OSC 1337 ; File=… : base64`, 기본 프로필): 앱(inline.rs)과 같다. 커서 자리에 걸고 커서는 안 움직인다. 폭은 `width=N`
+  칸이나 줄의 60%(20~100칸), 높이는 PNG 비율을 칸 비율 2.1 로 나눈 것(PNG 가 아니면 12줄). 이름+크기가 같으면 같은 그림을 옮긴
+  것. 16바이트 미만·스크롤백이 한도에 닿은 뒤에는 받지 않는다. `data` 는 받은 파일 바이트, `mime` 은 머리로 짐작.
+- **kitty**(`APC G … ST`, 기본 프로필): 앱(kitty.rs)과 같다 — 조각 받기(m=1), a=t/T/p/q/d, f=24/32/100, o=z, i/I/p, c/r/x/y/w/h,
+  C=1, U=1(자리표시 칸 U+10EEEE 는 글자로 격자에 있다), z, 지우기 a=d 의 d=a/i/n/c/p/q/x/y/z/r(대문자는 데이터까지), 응답 문구,
+  놓은 뒤 커서 이동(오른쪽으로 폭, 아래로 높이−1, 끝을 넘으면 다음 줄 첫 칸). 브라우저라 못 하는 것: 파일·공유 메모리 전송
+  (t=f/t/s)은 앱 기계에 있어 `EBADF` 로 답하고, o=z 로 압축한 PNG 는 크기를 못 읽어 `EBADPNG`. 압축한 날 픽셀은 `compressed`
+  로 넘겨 view 가 푼다(`DecompressionStream('deflate')`).
+- **식셀**(xterm 프로필만 — 앱은 안 보인다): 직접 짠 해독기(VT340 기본 색, `#` RGB·HLS, `!` 되풀이, `"` 크기, `$`·`-`).
+  `data` 는 RGBA, `transparent` 는 P2=1(아니면 `background` 색을 깔아야 한다). 자리는 xterm.js 그림 애드온처럼 커서에서, 커서는
+  그림 마지막 줄의 같은 칸으로 — DECSDM(80) 이 켜져 있으면 화면 왼쪽 위에, 커서는 그대로.
+- 앱처럼 버리는 때: 폭이 바뀔 때(되접기), 화면 전환, 스크롤백을 지우거나 한도에 닿을 때 — 걸린 그림을 모두 `imagedelete`.
+  그림은 모두 합쳐 64장·6400만 화소까지, 넘으면 오래된 것부터.
 
 ## 그리기·입력 (2단계)
 
