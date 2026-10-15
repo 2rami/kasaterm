@@ -23,7 +23,7 @@
   `titles.rs`(대화 기록 꼬리 → 칸 제목·effort) · `rooms.rs`(방 만들기·고르기·순서·닫기·이름, 칸·탭 초점) ·
   `closed_panes.rs`(닫은 칸 기록·되살리기·직접 숨김/자동 보관 사유) · `verify.rs`(격리 복원 표시·첫 탭 닫기 회귀 리그) · `file_tree.rs`(cwd·파일 트리·파일 열기) · `sidebar.rs`(방 카드 높이·스크롤) ·
   `remote_rooms.rs`(원격 셸·거울 칸·원격 방 보기 창) · `migrate.rs`(칸 이사·되돌리기)
-- `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version
+- `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version. `chrome/sidebar.rs`의 `SidebarMetrics`가 폭별 목록·배치도·보관·별도창 높이를 로컬·원격·스크롤에 함께 제공한다.
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
 - `share_panel.rs` + `share_panel/{input,files,paint}.rs` — 공유 파일의 최근/폴더 탐색·검색·입력 소유권·읽기 전용 미리보기. 목록·이미지·바로가기 작업은 워커에서 읽고, 이전 선택의 늦은 응답은 세대로 거른다. 설정은 `native_settings/share.rs`, 공통 색인과 안전한 로컬 경로는 `kasa-mcp/share/catalog.rs`, 바로가기 위치는 `share/shortcut.rs`가 맡는다. 계약은 `docs/share-sync.md`.

@@ -168,11 +168,7 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         // 곧 읽는 속도다.
         // 카드가 아니라 **스트립** 폭으로 판정한다(카드는 좌우 inset 만큼
         // 좁다) — 문턱은 칼럼 폭 기준으로 잡혀 있다.
-        let sb_dens = Density::of(
-            *tw + SIDEBAR_TAB_INSET * 2.0,
-            SIDEBAR_DENSE_FULL,
-            SIDEBAR_DENSE_COMPACT,
-        );
+        let sb_dens = Density::sidebar(tab_strip_w);
         // 가장 좁을 때는 그 여백을 이름에 넘긴다. 점이 뜨는 것은 예외
         // 상황인데 그 자리를 늘 비워 두느라 「Desktop」이 「Desk…」가
         // 됐다 — 정렬이 흔들리는 것보다 이름을 못 읽는 쪽이 크다.
@@ -263,7 +259,17 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         } else {
             6.0
         };
-        let name_budget = (tab_right - right_pad - text_x).max(0.0);
+        let mut name_budget = (tab_right - right_pad - text_x).max(0.0);
+        if sb_dens.is_wide() && !collapsed {
+            if let Some(summary) = sb_summary.get(*i).filter(|s| !s.is_empty()) {
+                let summary_w = g.measure_chrome_text(summary, 10.5, false);
+                if name_budget - summary_w - 12.0 >= 100.0 {
+                    name_budget -= summary_w + 12.0;
+                    g.draw_text(tab_right - right_pad - summary_w, *ty + 13.0, summary,
+                        gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+                }
+            }
+        }
         // 아랫줄 오른쪽은 이제 펼치기 배지 몫이다. 여기 있던 pane 별
         // 상태 점은 뺐다 — 방 목록은 "어느 방으로 갈까"를 고르는 자리고,
         // pane 하나하나의 상태는 방을 펴면 그 줄이 이미 말한다. 둘 다
@@ -433,6 +439,7 @@ pub(super) fn paint_layouts(
     // 덱 위에 마우스가 있을 때 펼 명단. 루프 **밖에서** 그린다 — 안에서
     // 그리면 뒤에 오는 칸이 위에 얹혀 팝업이 잘린다.
     let mut deck_tip: Option<(f32, f32, Vec<TabPeek>)> = None;
+    let metrics = crate::chrome::SidebarMetrics::new(tab_strip_w);
     // 잘라 그린다 — 픽셀로 흐르니 카드가 칸 경계에 반쯤 걸친 상태가
     // 정상이다. 시저가 없으면 그 반쪽이 타이틀바와 트레이 위로 그대로
     // 삐져나온다(사이드바는 원래 클립을 안 세웠다).
@@ -519,7 +526,12 @@ pub(super) fn paint_layouts(
         // 상자는 바닥 띠 자리를 비우고 잡는다 — 걷기와 띠를 함께 그리기로
         // 한 이상(아래 진행 바 참고), 안 비우면 세로로 갈린 칸에서 발밑에
         // 띠가 파고든다(칸 31 · 얼굴 23 이면 2px).
-        let (fx, fy, face) = minimap_face_box(mx, my, mw, mh);
+        let (fx, fy, face) = metrics.face_box(*r);
+        if metrics.map_label(mw, mh) {
+            let title = clip_px(g, &info.student.title, 10.5, false, (mw - 12.0).max(0.0));
+            g.draw_text(mx + 6.0, my + mh - 28.0, &title,
+                gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+        }
         if info.error {
             let size = face.min(18.0);
             g.queue_icon(
@@ -553,7 +565,7 @@ pub(super) fn paint_layouts(
                 // 그 칸이 무엇인지 말해 둔다(웹=globe · 이미지 · md · 터미널).
                 // 테마 없이 claude·codex 가 돌면 그 로고(칸마다 다른 색).
                 let isz = face.min(16.0);
-                let (ix, iy) = (mx + (mw - isz) / 2.0, my + (mh - isz) / 2.0);
+                let (ix, iy) = (fx + (face - isz) / 2.0, fy + (face - isz) / 2.0);
                 if !crate::sprites::draw_harness_logo(g, &info.agent, &info.pane, ix, iy, isz) {
                     g.queue_icon(info.icon, ix, iy, isz, theme::text_dim());
                 }
@@ -710,7 +722,12 @@ pub(super) fn paint_layouts(
                 None => theme::with_alpha(theme::border(), 0xaa),
             },
         );
-        let (fx, fy, face) = minimap_face_box(mx, my, mw, mh);
+        let (fx, fy, face) = metrics.face_box(*r);
+        if metrics.map_label(mw, mh) {
+            let title = clip_px(g, &info.student.title, 10.5, false, (mw - 12.0).max(0.0));
+            g.draw_text(mx + 6.0, my + mh - 28.0, &title,
+                gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+        }
         if info.error {
             let size = face.min(18.0);
             g.queue_icon(
@@ -734,7 +751,7 @@ pub(super) fn paint_layouts(
                 && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs())
             {
                 let isz = face.min(16.0);
-                let (ix, iy) = (mx + (mw - isz) / 2.0, my + (mh - isz) / 2.0);
+                let (ix, iy) = (fx + (face - isz) / 2.0, fy + (face - isz) / 2.0);
                 if !crate::sprites::draw_harness_logo(g, &info.agent, &info.pane, ix, iy, isz) {
                     g.queue_icon(info.icon, ix, iy, isz, theme::text_dim());
                 }
@@ -766,11 +783,12 @@ pub(super) fn paint_rows(g: &mut gpu::GpuRenderer, s: &Strip, p: &Panes<'_>) {
         let (rx, ry, rw, rh) = *r;
         // 목록 보기의 두 줄 행 — 다른 기기 방과 같은 그림(`sidebar_pulse::paint_row`).
         // 아래 한 줄짜리 그림은 숨긴 pane 꼬리 줄만 쓴다.
-        if !info.stashed && rh >= crate::sidebar_pulse::LIST_ROW_H {
+        if !info.stashed || Density::sidebar(s.w).is_wide() {
             let hover = sb_cursor.0 >= rx && sb_cursor.0 <= rx + rw
                 && sb_cursor.1 >= ry && sb_cursor.1 <= ry + rh;
             crate::sidebar_pulse::paint_row(g, *r, &crate::sidebar_pulse::RowPaint {
                 student: &info.student,
+                detail: info.stashed.then_some(info.retention_label.unwrap_or("보관됨")),
                 icon: info.icon,
                 cur: is_cur,
                 hover,
@@ -1008,7 +1026,7 @@ pub(super) fn paint_edges(g: &mut gpu::GpuRenderer, s: &Strip, e: &Edges<'_>) {
     if plus_hover {
         hover_rect(g, px, py, pw, ph, theme::radius_md());
     }
-    let label = "기기 추가";
+    let label = if Density::sidebar(tab_strip_w).is_wide() { "기기 추가 · 다른 컴퓨터 연결" } else { "기기 추가" };
     let label_w = g.measure_chrome_text(label, 11.5, false);
     let show_label = pw >= label_w + theme::ICON_SIZE + 24.0;
     let total_w = theme::ICON_SIZE + if show_label { 8.0 + label_w } else { 0.0 };
@@ -1208,10 +1226,11 @@ pub(super) fn paint_row_menu(
             hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
         }
         let chosen = *a == SidebarMenuAction::Weather(weather_now);
+        let label = clip_px(g, label, 13.0, chosen, (r.2 - 24.0).max(0.0));
         g.draw_text(
             r.0 + 12.0,
             r.1 + (MIH - 13.0) / 2.0,
-            label,
+            &label,
             gpu::DrawOpts {
                 font_size: 13.0,
                 color: if chosen { theme::accent() } else { theme::text() },

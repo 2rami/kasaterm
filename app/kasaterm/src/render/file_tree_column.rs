@@ -266,7 +266,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
     // 파일 이름이 「…」 하나로 남았다 — 계층은 화살표와 아이콘으로도
     // 읽히니, 폭이 모자랄 때 가장 싸게 내줄 수 있는 것이 여기다.
     let step = match tree_dens {
-        Density::Full => 14.0_f32,
+        Density::Full | Density::Wide | Density::Spacious => 14.0_f32,
         Density::Compact => 10.0,
         Density::Icon => 7.0,
     };

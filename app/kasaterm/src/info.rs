@@ -2207,7 +2207,7 @@ pub(crate) fn draw_side_tabs(
     // 본문이 그만큼 내려간다(반환하는 y 가 본문 상단이라 호출부는 손댈 게 없다).
     let dens = Density::of(w, GIT_DENSE_FULL, GIT_DENSE_COMPACT);
     let gap = match dens {
-        Density::Full => 16.0,
+        Density::Full | Density::Wide | Density::Spacious => 16.0,
         Density::Compact => 10.0,
         Density::Icon => 8.0,
     };
