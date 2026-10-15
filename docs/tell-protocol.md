@@ -65,9 +65,18 @@ its turn ended, and the receiver's transcript showed it under a "The kasaterm-br
 A paste with Enter starts a turn in a resting pane and joins the running turn in a working one, the way a person's
 mid-turn message does. Older receivers may still report `waiting:busy`; the CLI keeps reading it.
 Working/thinking/building alone does not defer a message. Approval/question
-screens defer it until the selection UI is gone. An existing draft or IME
-composition is preserved; an independent message cannot be submitted through
-that occupied input without changing the user's text, so it remains queued.
+screens defer it until the selection UI is gone. A Claude draft does not hold the
+message: the receiver presses Claude's own stash key (`chat:stash`, Ctrl+S), waits up to
+3 s for the input box to look empty, pastes and submits, and Claude puts the draft back
+into the input right after that submit — in a resting pane and for a submit queued in a
+working one, collapsed pastes included (Claude Code 2.1.300). Keystrokes from the stash
+to the Enter are held and replayed after the restored draft. Claude keeps one stash, and
+stashing again replaces it, so a pane already showing `› stashed` above its input box
+waits as before; if the box does not empty in time or an approval appears, the receiver
+presses the key once more on the empty input to take the draft back and defers. Before
+this, a draft held every message until the person pressed Enter (2026-10-15). Codex has
+no stash, so a Codex draft or any IME composition is preserved and the message remains
+queued.
 The screen decides whether the input is empty. A keystroke that is not a separate
 Enter marks a draft that is trusted for 5 seconds only (the echo or an image
 attachment lands well inside that); after that the screen is authoritative. Mouse
@@ -85,24 +94,24 @@ notice and the waiting count tell the same story. Before this, a later message k
 another path (2026-10-06: a name tell said `waiting:busy`, an address tell sent two
 seconds later to the same pane still said `stored`, and its sender notice blamed an
 old receiver). The CLI prints the reason in Korean with
-the expiry time. The receiving pane shows `쪽지 N 대기 · <how to release>` on the
-bottom border of its input box while any of its messages has been deferred.
+the expiry time. The receiving pane draws nothing for a deferral; the receipt is the
+record. Its `쪽지 N 대기` label on the input box border was removed on 2026-10-15
+together with the Claude draft hold it mostly announced.
 
 Queue TTL defaults to 3600 s, the maximum. On 2026-10-01 a day of receipts had
 21 of 61 messages expire at the old 900 s; the cause was the Enter-only draft mark
 above, and the late deliveries were released at the moment someone pressed Enter.
 What remains is a person's real draft or an approval screen, which lasts as long
 as that person is away, and 9 of the 21 were completion reports whose meaning does
-not age. Waiting is visible in the receipt and on the receiving pane, so the longer
-queue does not hide anything.
+not age. Waiting is visible in the receipt, so the longer queue does not hide anything.
 
 `notify:{surface,label}` is accepted only on the local socket (the CLI adds the
 sender's `$KASATERM_PANE_ID`; never with `--api`). The sending app removes it before
 routing and watches the receipt every 20 s. It never puts anything into the sender
 pane as a prompt: those notices (`[쪽지 대기]` after 2 minutes queued, `[쪽지 못 감]`,
 `[쪽지 확인 못 함]`) were submitted turns, and on 2026-10-06 they woke senders several
-times an hour mid-work. Waiting and `uncertain` stay in the receipt (`tell --status`)
-and on the receiver's `쪽지 N 대기` label. Only `failed` (dropped) is shown, as a
+times an hour mid-work. Waiting and `uncertain` stay in the receipt (`tell --status`).
+Only `failed` (dropped) is shown, as a
 20 s toast in the sender pane through its connection mod (`/claude-mod/notices`,
 `docs/claude-mod-bridge.md`): `쪽지 못 감 → <receiver> — <why>. «<first line>»`.
 A toast leaves the transcript and the model untouched, so no turn starts. A status
@@ -113,7 +122,7 @@ A sender without the mod (codex, claude without it) gets no notice; the receipt 
 the record. `submitted` and `uncertain` end the watch silently.
 A guarded
 input revision detects intervening writes between paste and Enter. Input is never
-cleared; `--force` cannot bypass the checks. A delayed Enter also rechecks the
+cleared — a Claude draft is only stashed by Claude itself, above; `--force` cannot bypass the checks. A delayed Enter also rechecks the
 session, receiver process and prompt.
 
 Enter follows a paste only once the paste is seen inside the input box: the first or
@@ -177,7 +186,11 @@ the exact body. Reusing the same ID must not increase the submit count. `state.t
 selects states including `busy`, `approval`, `question`, `draft`,
 `draft-multiline`, `attachment`, `attachment-below`, `placeholder-draft`, and
 `quit-after-paste`. Busy must submit; approval/question/draft/attachment states
-must retain an accepted receipt and no injected bytes. Changing the fixture state
+must retain an accepted receipt and no injected bytes. `boxed-draft` draws the draft
+inside Claude's bordered box: the Claude fixture takes Ctrl+S as a stash, shows the empty
+box under `› stashed`, and restores the draft after the next Enter (`stash`·`restore`
+events), so a message must be submitted there with the draft back afterwards;
+`boxed-stash-held` already shows `› stashed` and must stay queued with no bytes. Changing the fixture state
 back to busy permits delivery. `quit-after-paste` exits after paste and must
 result in uncertain without automatic reinjection.
 Restarting a different fixture process in the seat must invalidate the old queue.

@@ -136,7 +136,7 @@ TUI 의 승인 창과 같은 정보·같은 선택지로 그린다.
   `{surface, session, id, decision, message}` 로 그 요청 id 에 답한다(거절이면 입력칸 글이 까닭). 나머지(다시 묻지 않기·
   accept edits·계획 승인·질문)와 코덱스는 화면 키(↑↓ + Enter). 화면을 아직 못 받은 폰은 mod 요청만으로 도구·원문 +
   허락·거절을 묻는다. 어디서 답하든 원본 창이 닫히고 원본이 요청을 닫으니 다른 거울 카드도 사라진다.
-- 입력(폰): `POST /term/chat-send {surface, text}` — 안전한 tell(입력칸이 빌 때 붙여넣고 Enter, 승인·질문 창·초안·한글 조합은
+- 입력(폰): `POST /term/chat-send {surface, text}` — 안전한 tell(입력칸이 빌 때 붙여넣고 Enter, claude 초안은 치웠다 되돌린다. 승인·질문 창·코덱스 초안·한글 조합은
   기다린다)로 넣고, 신원이 아직 안 선 칸이면 옛 `/send`. 일하는 칸이면 사람이 일하는 중에 친 말처럼 진행 중인 턴 안으로 든다.
   2026-10-07 전에는 mod 칸을 mod 의 `$.prompt.submit` 에 맡겨 일하는 내내 묶였고, 엔진이 그 말을
   「The kasaterm-bridge plugin sent a message: …」로 감싸 기록했다 — 그 기록이 남아 있어 두 파서가 사람이 쓴 말만 남긴다.

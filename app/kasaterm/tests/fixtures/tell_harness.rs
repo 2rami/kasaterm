@@ -10,6 +10,8 @@ use std::{
 
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
+/// Claude's draft stash key (`chat:stash`, Ctrl+S).
+const STASH: u8 = 0x13;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Harness {
@@ -65,6 +67,11 @@ fn escaped(text: &str) -> String {
 }
 
 fn input_box(out: &mut impl Write, harness: Harness, content: &str) {
+    noted_input_box(out, harness, "Thinking…", content);
+}
+
+/// `note` is the line above the box, where Claude shows `› stashed` while it holds a stash.
+fn noted_input_box(out: &mut impl Write, harness: Harness, note: &str, content: &str) {
     let columns = std::process::Command::new("/bin/stty")
         .arg("size")
         .stdin(std::process::Stdio::inherit())
@@ -84,7 +91,7 @@ fn input_box(out: &mut impl Write, harness: Harness, content: &str) {
     } else {
         "  gpt-5.5 medium · fixture · main · Ask for approval · Context 3% used"
     };
-    let _ = write!(out, "Thinking…\r\n");
+    let _ = write!(out, "{note}\r\n");
     if harness == Harness::Claude {
         let border = "─".repeat(columns.saturating_sub(1));
         let _ = write!(out, "{border}\r\n{content}\r\n{border}\r\n{footer}");
@@ -152,6 +159,15 @@ fn render(root: &Path, harness: Harness, state: &str, body: &str) {
         "busy-footer" => {
             input_box(&mut out, harness, &format!("{prompt} {visible}"));
         }
+        "boxed-draft" if body.is_empty() => {
+            input_box(&mut out, harness, &format!("{prompt} user draft"));
+        }
+        "boxed-stash-held" if body.is_empty() => {
+            noted_input_box(&mut out, harness, "  › stashed", &format!("{prompt} user draft"));
+        }
+        "stashed" => {
+            noted_input_box(&mut out, harness, "  › stashed", &format!("{prompt} {visible}"));
+        }
         "footer-draft" => {
             let footer = if harness == Harness::Claude {
                 "bypass permissions on (shift+tab to cycle)"
@@ -206,6 +222,7 @@ fn write_user(transcript: &mut File, harness: Harness, sid: &str, body: &str) {
 enum Input {
     Paste(Vec<u8>),
     Enter,
+    Stash,
     Other,
 }
 
@@ -226,10 +243,10 @@ fn next_input(buffer: &mut Vec<u8>) -> Option<Input> {
         Some(Input::Paste(body))
     } else {
         let byte = buffer.remove(0);
-        Some(if byte == b'\r' {
-            Input::Enter
-        } else {
-            Input::Other
+        Some(match byte {
+            b'\r' => Input::Enter,
+            STASH => Input::Stash,
+            _ => Input::Other,
         })
     }
 }
@@ -349,6 +366,9 @@ fn main() {
     let mut body = String::new();
     let mut submits = 0;
     let mut pastes = 0;
+    // Claude keeps one stashed draft and puts it back right after the next submit.
+    let mut stash: Option<String> = None;
+    let shown = |state: &str, stash: &Option<String>| if stash.is_some() { "stashed".to_string() } else { state.to_string() };
     'fixture: loop {
         if root.join("exit.txt").is_file() {
             break;
@@ -359,7 +379,7 @@ fn main() {
             .to_string();
         if desired != state {
             state = desired;
-            render(&root, harness, &state, &body);
+            render(&root, harness, &shown(&state, &stash), &body);
         }
         let bytes = match rx.recv_timeout(Duration::from_millis(30)) {
             Ok(bytes) => bytes,
@@ -393,7 +413,7 @@ fn main() {
                     if state == "quit-after-paste" {
                         break 'fixture;
                     }
-                    render(&root, harness, &state, &body);
+                    render(&root, harness, &shown(&state, &stash), &body);
                 }
                 Input::Enter => {
                     submits += 1;
@@ -412,9 +432,26 @@ fn main() {
                     );
                     write_user(&mut transcript, harness, &sid, &body);
                     body.clear();
+                    if let Some(draft) = stash.take() {
+                        writeln!(events, "{{\"kind\":\"restore\",\"draft\":{},\"at_ms\":{}}}", escaped(&draft), now_ms()).unwrap();
+                        events.sync_all().unwrap();
+                    }
                     render(&root, harness, &state, &body);
                 }
-                Input::Other => {}
+                Input::Stash if harness == Harness::Claude => {
+                    // Stashing over a held stash replaces it; an empty prompt takes it back.
+                    let kind = if stash.is_some() && body.is_empty() {
+                        stash = None;
+                        "unstash"
+                    } else {
+                        stash = Some(state.clone());
+                        "stash"
+                    };
+                    writeln!(events, "{{\"kind\":\"{kind}\",\"state\":{},\"at_ms\":{}}}", escaped(&state), now_ms()).unwrap();
+                    events.sync_all().unwrap();
+                    render(&root, harness, &shown(&state, &stash), &body);
+                }
+                Input::Stash | Input::Other => {}
             }
         }
     }
