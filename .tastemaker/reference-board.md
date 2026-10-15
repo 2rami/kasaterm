@@ -81,6 +81,8 @@ Design read: native recovery and history collection for daily terminal use, Oper
 
 Geometry and interaction contract: `docs/design.md`. Visual acceptance is pending; no personal taste profile promotion.
 
+Native validation: release app tests pass (1,571, zero failures, two existing ignores) after integrating the common UI. Isolated 1100×760 dark/light and 640×540/720 captures were inspected. At 125% UI scale the 640×540 restore capture measures 16 logical px of outer margin and a 480×400px dialog. Runtime checks cover filtering, selection without launch, reorder identity, view switching, confirmed discard/cancel, IME consumption, held activation keys and preserving an in-progress Hangul composition. Real user conversations were not resumed. Web style/motion scanners examined zero Rust files and are not used as native validation evidence.
+
 ## Custom colors and Info follow-up — 2026-10-15
 
 The user requested arbitrary color customization and shared folders inside Info. Native release captures cover the always-visible accent HEX/HSV editor, per-statusbar color editor and Info shared files at 390px and 1280px. The compact shared list now starts at 211px (previously 173px); the extra 38px is the Info page selector and the first file remains in the initial viewport. Editors stack at narrow widths without horizontal overflow.

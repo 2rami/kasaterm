@@ -3502,9 +3502,6 @@ struct CloseFreeze {
     /// 사이드바 방 목록: 얼어붙은 스크롤 위치(px). 방이 줄면 스크롤 한계가 작아져
     /// 목록이 아래로 당겨지는 것을 막는다.
     sidebar_scroll: Option<f32>,
-    /// 되살리기 패널: 얼어붙은 content 높이. 항목이 줄면 스크롤 상한이 같이 줄어
-    /// 목록 전체가 밀린다 — 그 상한을 붙잡아 둔다.
-    info_content: Option<f32>,
     /// 언제 얼었나. 위 주석의 시한이 여기서 재진다.
     since: Option<Instant>,
 }
@@ -3526,8 +3523,6 @@ const FREEZE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) enum CloseFreezeKind {
     /// 사이드바 방 목록. 값은 얼려 둘 스크롤 시작점.
     Sidebar(f32),
-    /// 되살리기 패널. 값은 얼려 둘 content 높이.
-    Info(f32),
     /// pane 헤더 탭 띠. `(pane id, [(x, w)])`.
     Tabs(String, Vec<(f32, f32)>),
 }

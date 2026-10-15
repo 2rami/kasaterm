@@ -166,7 +166,6 @@ pub(crate) fn draw_sessions_col(
     w: f32,
     top: f32,
     bottom: f32,
-    _frozen_content: Option<f32>,
 ) {
     sc.actions.clear();
     sc.closed_rects.clear();
