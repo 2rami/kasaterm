@@ -132,6 +132,11 @@ impl App {
     /// 이름표를 교정(respawn 없음 — persona 는 스폰 시 고정, label·마커만 갱신,
     /// --resume 둔갑 방지), 그것도 없으면 현재 배정을 저장해 다음 resume 이 재사용한다.
     pub(crate) fn apply_session_character(&mut self, pane: &str, sid: &str) {
+        // 나쵸 칸은 학생이 아니다 — 그 대화가 예전에 학생에게 묶였어도 이름을 다시 붙이지 않는다.
+        if self.is_nacho_pane(pane) {
+            if self.ws.lock().unwrap().pane_character.remove(pane).is_some() { self.chrome_dirty = true; }
+            return;
+        }
         // The model has already read these instructions. A late transcript or
         // parent lookup must not silently change only its face and name.
         let launched = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned();
