@@ -430,6 +430,23 @@ pub(crate) struct MachinesColMachine {
     /// 그 기계의 창 없는 웹 셸. 폰에는 보이는데 PC 에는 안 보여 22개가 쌓이도록
     /// 몰랐다(2026-09-28 지적) — 보고 닫을 수 있게 따로 싣는다.
     pub(crate) web_shells: Vec<WebShell>,
+    pub(crate) link: MachineLink,
+}
+
+/// 그 기기의 연결 기록(`machines::snapshot` 의 `link`). 끊긴 기기가 목록에서 사라지는 대신
+/// 왜 끊겼는지를 말하는 재료다.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub(crate) struct MachineLink {
+    pub(crate) reason: String,
+    /// 실패 원문 한 줄(ssh stderr·연결 오류). 「모름」일 때 사람이 볼 마지막 단서다.
+    pub(crate) detail: String,
+    pub(crate) last_ok_ms: Option<u64>,
+    /// 마지막으로 닿았을 때 열려 있던 방 수.
+    pub(crate) rooms: usize,
+    /// 명부에서 빠져 이유만 남은 기기.
+    pub(crate) gone: bool,
+    /// 바뀐 순간들, 새 것이 앞 — (epoch ms, 붙음인가, 이유).
+    pub(crate) events: Vec<(u64, bool, String)>,
 }
 
 /// 창 없는 웹 셸 한 줄. `job` 이 없으면 프롬프트에서 쉬는 빈 셸이다.

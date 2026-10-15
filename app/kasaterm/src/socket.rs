@@ -1901,18 +1901,16 @@ impl Backend for PtyBackend {
                 *mirrors.entry(key).or_default() += 1;
             }
         }
+        // 스냅샷을 돈다 — 명부에서 빠져 이유만 남은 기기도 CLI 에 선다.
         let snap = kasa_mcp::machines::snapshot();
-        let machines: Vec<serde_json::Value> = kasa_mcp::machines::machines()
-            .into_iter()
-            .map(|m| {
-                let hit = snap
-                    .iter()
-                    .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()));
-                let online = hit
-                    .and_then(|v| v.get("online").and_then(|o| o.as_bool()))
-                    .unwrap_or(false);
-                let panes: Vec<&serde_json::Value> = hit
-                    .and_then(|v| v.get("panes").and_then(|p| p.as_array()))
+        let machines: Vec<serde_json::Value> = snap
+            .iter()
+            .map(|row| {
+                let label = row.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                let online = row.get("online").and_then(|o| o.as_bool()).unwrap_or(false);
+                let panes: Vec<&serde_json::Value> = row
+                    .get("panes")
+                    .and_then(|p| p.as_array())
                     .map(|a| {
                         a.iter()
                             .filter(|p| {
@@ -1934,18 +1932,18 @@ impl Backend for PtyBackend {
                     })
                     .count();
                 serde_json::json!({
-                    "label": m.label,
-                    "ssh": m.ssh,
-                    "guest": m.guest,
+                    "label": label,
+                    "ssh": row.get("ssh").cloned(),
+                    "guest": row.get("guest").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "gone": row.get("gone").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "link": row.get("link").cloned(),
                     "online": online,
-                    "ago_secs": hit.and_then(|v| v.get("ago_secs").and_then(|a| a.as_u64())),
-                    "build": hit.and_then(|v| v.get("build").cloned()),
-                    "build_match": hit
-                        .and_then(|v| v.get("build_match").and_then(|b| b.as_bool()))
-                        .unwrap_or(true),
+                    "ago_secs": row.get("ago_secs").and_then(|a| a.as_u64()),
+                    "build": row.get("build").cloned(),
+                    "build_match": row.get("build_match").and_then(|b| b.as_bool()).unwrap_or(true),
                     "students": panes.len(),
                     "waiting": waiting,
-                    "mirrored": mirrors.get(&m.label).copied().unwrap_or(0),
+                    "mirrored": mirrors.get(label).copied().unwrap_or(0),
                 })
             })
             .collect();

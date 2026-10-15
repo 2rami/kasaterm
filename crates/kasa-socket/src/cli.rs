@@ -379,11 +379,16 @@ fn run() -> Result<Option<Response>> {
         // 기기마다 닿는 길 — 옛 앱이면 비어 있고 목록은 그대로 찍는다.
         let reach = roundtrip(&socket_path, &Request { id: json!("reach"), method: "collab.reach".into(), params: json!({}) })
             .ok().and_then(|r| reach_rows(&r).ok()).unwrap_or_default();
+        let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
         if args.iter().any(|a| a == "--json") {
-            println!("{}", json!({ "machines": reach }));
+            // `roster` 는 명부 기기마다의 연결 기록(끊긴 이유·바뀐 순간) — 옛 앱이면 빈 배열.
+            let roster = roundtrip(&socket_path, &Request { id: "machines".into(), method: "machine.list".into(),
+                params: json!({ "from": from }) }).ok().filter(|r| r.ok).and_then(|r| r.result)
+                .and_then(|r| r.get("machines").cloned()).unwrap_or_else(|| json!([]));
+            println!("{}", json!({ "machines": reach, "roster": roster }));
             return Ok(None);
         }
-        let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
+        let history = args.iter().any(|a| a == "--history");
         let resp = roundtrip(
             &socket_path,
             &Request {
@@ -419,12 +424,19 @@ fn run() -> Result<Option<Response>> {
             let label = m.get("label").and_then(|v| v.as_str()).unwrap_or("?");
             let online = m.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
             let n = |k: &str| m.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let link = m.get("link").filter(|l| l.is_object());
+            let reason = link.and_then(|l| l["reason"].as_str()).filter(|r| !r.is_empty());
             let state = if !online {
-                match m.get("ago_secs").and_then(|v| v.as_u64()) {
-                    None => "안 닿음 — 한 번도 못 닿았어요".to_string(),
-                    Some(s) if s < 60 => format!("안 닿음 — {s}초 전까지"),
-                    Some(s) if s < 3600 => format!("안 닿음 — {}분 전까지", s / 60),
-                    Some(s) => format!("안 닿음 — {}시간 전까지", s / 3600),
+                let when = match (link.and_then(|l| l["last_ok_ms"].as_u64()), m.get("ago_secs").and_then(|v| v.as_u64())) {
+                    (Some(ms), _) => crate::tell::clock_hm(ms).map(|hm| format!("{hm} 까지 닿음")).unwrap_or_default(),
+                    (None, None) => "한 번도 못 닿았어요".to_string(),
+                    (None, Some(s)) if s < 60 => format!("{s}초 전까지"),
+                    (None, Some(s)) if s < 3600 => format!("{}분 전까지", s / 60),
+                    (None, Some(s)) => format!("{}시간 전까지", s / 3600),
+                };
+                match reason {
+                    Some(reason) => format!("끊김 — {reason} · {when}"),
+                    None => format!("끊김 — {when}"),
                 }
             } else {
                 let mut s = if n("students") == 0 {
@@ -459,6 +471,24 @@ fn run() -> Result<Option<Response>> {
                 .map(|t| format!("   ssh {t}"))
                 .unwrap_or_default();
             println!("{mark} {label:<12} {state}{ssh}");
+            // 바뀐 순간 — 다음에 기기가 사라지면 이 줄로 원인을 바로 안다. 평소엔 최근 셋, `--history` 면 전부.
+            let events = link.and_then(|l| l["events"].as_array()).cloned().unwrap_or_default();
+            for event in events.iter().take(if history { usize::MAX } else { 3 }) {
+                let at = event["at_ms"].as_u64().and_then(crate::tell::clock_hm).unwrap_or_default();
+                let what = event["reason"].as_str().unwrap_or("");
+                let up = event["up"].as_bool() == Some(true);
+                println!("      {at} {}{what}", if up { "" } else { "끊김 · " });
+                if history {
+                    if let Some(detail) = event["detail"].as_str().filter(|d| !d.is_empty()) {
+                        println!("            {detail}");
+                    }
+                }
+            }
+            if !online && !history {
+                if let Some(detail) = link.and_then(|l| l["detail"].as_str()).filter(|d| !d.is_empty()) {
+                    println!("      원문: {detail}");
+                }
+            }
         }
         return Ok(None);
     }
@@ -1964,7 +1994,7 @@ fn print_help() {
             "share open <url>                          사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
         ]),
         ("기기·네트워크", &[
-            "machines [--names|--json]                 명부 기계 목록과 닿는 길(직통·서울 중계·끊김)",
+            "machines [--names|--json|--history]       명부 기계 목록과 닿는 길, 끊긴 이유와 붙음·끊김 기록",
             "identify --machine 기계                   그 기계에 닿나(0 닿음 · 1 끊김) — 판에 칸이 없어도",
             "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기에 새 방(보기 창은 뒤에) · --here 면 이 칸 자리를 그 기기 셸로",
             "machines move [%N] <기기|local>            claude·codex 세션을 다른 기기로 옮기기. 생략하면 내 칸, local 은 이쪽 거울을 데려오기",

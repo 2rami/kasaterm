@@ -701,16 +701,20 @@ fn paint_link_popover(
     win_w: f32,
 ) {
     let machines = kasa_mcp::machines::snapshot();
-    let rows: Vec<(String, bool, bool, Option<u64>)> = machines.iter().map(|m| (
+    let rows: Vec<(String, bool, bool, Option<u64>, state::MachineLink)> = machines.iter().map(|m| (
         m["label"].as_str().map(crate::render::pane_identity::device_name).unwrap_or_else(|| "기기".to_string()),
         m["online"].as_bool() == Some(true),
         m["online_via"].as_str() == Some("direct"),
         m["rtt_ms"].as_u64(),
+        crate::machinescol::machine_link(m),
     )).collect();
-    let relayed = rows.iter().any(|(_, online, direct, _)| *online && !*direct);
+    let relayed = rows.iter().any(|(_, online, direct, _, _)| *online && !*direct);
     let w = 300.0_f32.min((win_w - 16.0).max(200.0));
     let row_h = 24.0_f32;
-    let h = 92.0 + row_h * rows.len().max(1) as f32 + if relayed { 34.0 } else { 12.0 };
+    // 끊긴 기기는 이유 한 줄을 더 단다 — 「연결 안 됨」만으로는 기기가 꺼진 건지 길이 막힌 건지 모른다.
+    let reason_h = 14.0_f32;
+    let rows_h: f32 = rows.iter().map(|(_, online, ..)| if *online { row_h } else { row_h + reason_h }).sum();
+    let h = 92.0 + rows_h.max(row_h) + if relayed { 34.0 } else { 12.0 };
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -724,9 +728,11 @@ fn paint_link_popover(
     if rows.is_empty() {
         text(g, x + 16.0, ry + 4.0, "등록된 기기가 없어요", 11.0, theme::text_dim(), false);
     }
-    for (label, online, direct, rtt) in &rows {
+    for (label, online, direct, rtt, link) in &rows {
         let (dot, state_text, col) = match (online, direct, rtt) {
-            (false, _, _) => (theme::with_alpha(theme::text_dim(), 140), "연결 안 됨".to_string(), theme::text_mute()),
+            (false, _, _) => (theme::with_alpha(theme::text_dim(), 140),
+                format!("끊김 · {}", link.last_ok_ms.map(crate::machinescol::clock_label).unwrap_or_else(|| "닿은 적 없음".into())),
+                theme::text_mute()),
             (true, true, Some(ms)) if *ms >= 150 => (theme::attention(), format!("직통 · {ms}ms · 느림"), theme::attention()),
             (true, true, Some(ms)) => (theme::success(), format!("직통 · {ms}ms"), theme::text()),
             (true, true, None) => (theme::success(), "직통".into(), theme::text()),
@@ -739,6 +745,12 @@ fn paint_link_popover(
         let sw = g.measure_chrome_text(&state_text, 11.0, false);
         text(g, x + w - 16.0 - sw, ry + 5.0, &state_text, 11.0, col, false);
         ry += row_h;
+        if !online {
+            let reason = if link.reason.is_empty() { "이유 확인 중" } else { link.reason.as_str() };
+            let reason = crate::info::fit_text(g, reason, w - 48.0, 10.0, false);
+            text(g, x + 32.0, ry - 2.0, &reason, 10.0, theme::text_mute(), false);
+            ry += reason_h;
+        }
     }
     if relayed {
         text(g, x + 16.0, ry + 8.0, "중계 연결 · 자세한 상태는 기기 설정에서 확인",

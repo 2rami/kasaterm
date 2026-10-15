@@ -5719,6 +5719,13 @@ impl App {
                 Self::draw_hover_tip(g, "기기 추가", sb_plus.0, sb_plus.1,
                     win_px.0 / scale, sb_win_h);
             }
+            if !self.tabs_on_top && self.info.machine_menu.is_none() && self.info.navigation.room_menu.is_none()
+                && tab_strip_w > 0.0 && sb_cursor.0 < tab_strip_w
+            {
+                if let Some(tip) = crate::sidebar_navigation::hover_history(&self.info, sb_cursor) {
+                    Self::draw_hover_tip(g, &tip, sb_cursor.0, sb_cursor.1, win_px.0 / scale, sb_win_h);
+                }
+            }
             if self.info.machine_menu.is_some() {
                 info::draw_machine_menu(g, sb_cursor, &mut self.info, 0.0, tab_strip_w.max(240.0), TITLE_HEIGHT, sb_win_h - status_h);
             }
