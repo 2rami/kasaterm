@@ -7015,9 +7015,9 @@ fn toggle_row_hint(
     let hover = contains(rect, s.cursor);
     let toggle = (rect.0 + rect.2 - 32.0 - inset, rect.1 + (height - 18.0) / 2.0, 32.0, 18.0);
     let fill = if on { theme::accent() } else if hover { theme::surface_active() } else { theme::surface_hover() };
-    round_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, 9.0, fill);
-    stroke_round(g, toggle, 9.0, theme::with_alpha(theme::edge_on(fill), 100));
-    round_rect(g, toggle.0 + if on { 17.0 } else { 3.0 }, toggle.1 + 3.0, 12.0, 12.0, 6.0,
+    pill_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, fill);
+    stroke_round(g, toggle, 9.0 * theme::roundness(), theme::with_alpha(theme::edge_on(fill), 100));
+    circle_rect(g, toggle.0 + if on { 17.0 } else { 3.0 }, toggle.1 + 3.0, 12.0,
         if on { theme::foreground_on(fill) } else { theme::text_dim() });
     register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
     g.hover_pointer |= hover;
