@@ -12,8 +12,9 @@
 | 명부 파일을 못 읽음 | `machines.rs listed_entries` (`unwrap_or_default`) | `machines.json` 이 깨지거나 못 읽히면 명부의 기기가 한꺼번에 빠진다. 앱과 계정 동기화의 쓰기는 임시 파일+이름 바꾸기라 반쯤 쓴 파일을 읽는 일은 없다 — 손으로 고치다 깨뜨렸을 때 |
 | 계정 동기화 주소 못 풂 | `machines.rs parse` (`account_sync_unresolved`) | 다른 기기에서 받은 연결의 ssh 주소를 이 기기에서 못 풀면 그 행을 건너뛴다 — 명부엔 있는데 목록엔 없다 |
 | 계정 동기화 삭제 | `account_sync/local.rs merge_files` | 다른 기기에서 지운 연결(계정 소유·로컬 필드 없음)을 이 기기 명부에서도 지운다 |
-| 같은 기기 합치기 | `machines.rs canonical_roster` | 기기 id 가 같은 두 항목(명부 이름과 그쪽이 알린 이름)을 하나로 — 기기는 남고 별칭만 빠진다. 의도된 것 |
+| 같은 기기 합치기 | `machines.rs canonical_roster` | 기기 id 가 같은 두 항목(명부의 「나쵸네코」와 그 기기가 스스로 알린 「nachoneko」)을 하나로 — 기기는 남고 별칭만 빠진다. 의도된 것. 알린 이름은 `/version` 으로 id 를 배우기 전 첫 바퀴(5초 남짓)만 따로 선다. 연결 기록은 합쳐진 별칭을 「목록에서 빠짐」으로 적지 않는다(`drop_merged`) |
 | 끊긴 기기의 방 | `snapshot_machine` (`panes: []`) | 기기 머리는 남고 방 카드만 전부 빠졌다(「기기에 연결할 수 없음」 한 줄) |
+| 재시작 뒤 보기 방 | `session/local_restore.rs state` (2026-10-14~) | 보기 창은 저장에서 걸러져 재시작하면 보던 기기 방이 전부 닫혔다(2026-10-15 맥미니 보기 방 4 → 0). 이제 보던 방만 기억했다가 다시 연다 — [mirror-render.md](mirror-render.md) 「세션 복원과 기기 화면」 |
 | 하단바 기기 연결 | `machinescol::status_links` (`online` 만) | 끊긴 기기는 수에서 빠지고, 다 끊기면 칸이 통째로 사라졌다 |
 
 후보였으나 기기 묶음을 빼지 않는 것: 보기 방이 닫혀 묶음이 비는 것(「열린 pane 없음」으로 남는다), 카사넷 동료 표 만료(보드

@@ -445,6 +445,8 @@ pub(crate) struct MachineLink {
     pub(crate) rooms: usize,
     /// 명부에서 빠져 이유만 남은 기기.
     pub(crate) gone: bool,
+    /// 재시작 전에 보던 이 기기 방 중 다시 열기를 기다리는 수(`session/view_rooms.rs`).
+    pub(crate) views: usize,
     /// 바뀐 순간들, 새 것이 앞 — (epoch ms, 붙음인가, 이유).
     pub(crate) events: Vec<(u64, bool, String)>,
 }

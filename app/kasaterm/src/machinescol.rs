@@ -129,6 +129,7 @@ pub(crate) fn machine_link(row: &serde_json::Value) -> state::MachineLink {
         last_ok_ms: link["last_ok_ms"].as_u64(),
         rooms: link["rooms"].as_u64().unwrap_or(0) as usize,
         gone: row["gone"].as_bool() == Some(true),
+        views: 0,
         events: link["events"]
             .as_array()
             .into_iter()
@@ -165,6 +166,9 @@ pub(crate) fn offline_status(link: &state::MachineLink, ago_secs: Option<u64>) -
 /// 끊긴 기기 본문 둘째 줄 — 마지막으로 닿은 때와, 그때 있던 방은 다시 붙으면 돌아온다는 것.
 /// 기본 폭 240 에서 안 잘리게 짧게 쓴다.
 pub(crate) fn offline_note(link: &state::MachineLink) -> String {
+    if link.views > 0 {
+        return format!("보기 방 {}개는 붙으면 다시 열려요", link.views);
+    }
     let Some(ms) = link.last_ok_ms else { return "닿은 적 없음".into() };
     match link.rooms {
         n if n > 0 && !link.gone => format!("{}까지 · 방 {n}개는 붙으면 돌아와요", clock_label(ms)),
@@ -503,7 +507,8 @@ impl App {
     pub(crate) fn refresh_machines_col(&mut self) {
         // Source layout changes never add viewers automatically. Each device
         // keeps its own layout; existing mirrors reconnect independently.
-        if !self.machines_section_active() {
+        // 다시 열 보기 방이 남았으면 칸이 접혀 있어도 기기 목록을 읽는다 — 그 목록에서 방을 찾는다.
+        if !self.machines_section_active() && !self.has_pending_view_rooms() {
             return;
         }
         let generation = kasa_mcp::machines::generation();
@@ -638,7 +643,7 @@ impl App {
         // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다. host(화면공유 주소)는
         // 캐시에 없어 명부에서 라벨로 찾는다 — 한 번만 읽어 루프에 물린다.
         let registry = kasa_mcp::machines::machines();
-        let machines = kasa_mcp::machines::snapshot()
+        let mut machines: Vec<state::MachinesColMachine> = kasa_mcp::machines::snapshot()
             .into_iter()
             .filter_map(|m| {
                 let label = m.get("label")?.as_str()?.to_string();
@@ -759,6 +764,9 @@ impl App {
             .collect();
         self.info.machines_col.locals = locals;
         self.info.machines_col.local_web_shells = local_web_shells();
+        for machine in &mut machines {
+            machine.link.views = self.pending_view_count(&machine.label);
+        }
         self.info.machines_col.machines = machines;
     }
 

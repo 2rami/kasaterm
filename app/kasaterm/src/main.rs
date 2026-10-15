@@ -5755,6 +5755,8 @@ struct App {
     pane_last_seat: HashMap<String, (String, String)>,
     /// 거울 창 배치를 원본에 보낸 시각 — 그 직후의 당겨오기를 잠시 멈춘다.
     remote_view_push_at: Option<std::time::Instant>,
+    /// 재시작 전에 보던 다른 기기 방 — 그 기기가 답하면 다시 연다(`session/view_rooms.rs`).
+    pending_views: crate::session::view_rooms::PendingViews,
     /// 계정이 바뀐 뒤에도 **옛 계정으로 도는** pane → (떠난 계정 이름, 새 계정 이름).
     ///
     /// 계정은 프로세스 env 라 pane 이 뜰 때 박히고, 도는 프로세스는 못 바꾼다. 그래서
@@ -6380,6 +6382,7 @@ impl App {
             pane_claude_sid: HashMap::new(),
             pane_last_seat: HashMap::new(),
             remote_view_push_at: None,
+            pending_views: Default::default(),
             pane_account_stale: HashMap::new(),
             socket_backend: None,
             shared_backend: Default::default(),

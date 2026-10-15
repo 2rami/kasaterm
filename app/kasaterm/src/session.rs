@@ -2,7 +2,7 @@
 //! 기능별 몸통은 자식 모듈이다: 백엔드 기동(`boot`)·화면 펌프(`screen_pump`)·에이전트
 //! 기동(`agent_launch`)·계정 전환(`accounts`)·저장(`save`)·복원(`restore`)·제목(`titles`)·
 //! 방과 초점(`rooms`)·닫은 칸(`closed_panes`)·파일 트리(`file_tree`)·사이드바(`sidebar`)·
-//! 다른 기기 칸(`remote_rooms`)·이사(`migrate`). 모두 `impl App` 확장이다.
+//! 다른 기기 칸(`remote_rooms`)·재시작 뒤 보기 방 다시 열기(`view_rooms`)·이사(`migrate`). 모두 `impl App` 확장이다.
 use super::*;
 
 mod accounts;
@@ -21,6 +21,7 @@ mod screen_pump;
 mod sidebar;
 mod titles;
 mod verify;
+pub(crate) mod view_rooms;
 
 pub(crate) use self::closed_panes::RetainedBy;
 

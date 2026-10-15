@@ -313,6 +313,7 @@ impl App {
             .and_then(|path| path.parent().and_then(latest_restored_state));
         let original = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
         let mut prepared = super::local_restore::state(&original);
+        self.remember_view_rooms(&prepared);
         crate::server_restore::import_pending_servers(&mut prepared);
         let state = &prepared;
         self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
