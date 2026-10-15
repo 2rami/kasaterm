@@ -564,6 +564,18 @@ impl App {
         self.chat_view.drawn.borrow().get(id).map(|d| (d.cursor, d.rows.first().map_or(0, Vec::len)))
     }
 
+    /// 대화 칸에 그린 격자에서 그 픽셀의 (칸, 열, 행)과 보이는 격자 — 링크는 원본 글자판이 아니라 이것에서 찾는다.
+    pub(crate) fn chat_view_cell(&self, x: f32, y: f32) -> Option<(String, u16, u16, Vec<Vec<GridCell>>)> {
+        let drawn = self.chat_view.drawn.borrow();
+        drawn.iter().find_map(|(id, d)| {
+            let (rx, ry, rw, rh) = d.rect;
+            if x < rx || x >= rx + rw || y < ry || y >= ry + rh || d.cell.0 <= 0.0 || d.cell.1 <= 0.0 {
+                return None;
+            }
+            Some((id.clone(), ((x - rx) / d.cell.0) as u16, ((y - ry) / d.cell.1) as u16, d.rows.clone()))
+        })
+    }
+
     fn chat_view_at(&self, x: f32, y: f32) -> Option<(String, Option<usize>)> {
         let drawn = self.chat_view.drawn.borrow();
         drawn.iter().find_map(|(id, d)| {
