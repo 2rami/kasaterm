@@ -63,95 +63,104 @@ impl Drop for RestoredSurfaceKey {
     }
 }
 
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(crate) struct RestoreSummary {
+    pub(crate) panes: usize,
+    pub(crate) agents: usize,
+    pub(crate) shells: usize,
+    pub(crate) faces: Vec<String>,
+}
+
+fn summarize_restore_node(node: &serde_json::Value, summary: &mut RestoreSummary) {
+    if crate::internal_room::is_saved_window(node) { return; }
+    if let Some(leaf) = node.get("leaf") {
+        let mut surfaces = super::local_restore::surfaces(leaf).peekable();
+        summary.panes += usize::from(surfaces.peek().is_some());
+        for surface in surfaces {
+            // A character assignment alone also exists on old plain-shell records.
+            // Counts and faces must use the same local, resumable-agent evidence.
+            let agent = saved_agent_marker(surface).is_some()
+                || surface["session_id"].as_str().is_some_and(|s| !s.is_empty());
+            if !agent {
+                summary.shells += usize::from(surface.is_object() && surface.get("web_url").is_none());
+                continue;
+            }
+            summary.agents += 1;
+            if let Some(face) = surface["character"].as_str().filter(|s| !s.is_empty()) {
+                if !summary.faces.iter().any(|name| name == face) {
+                    summary.faces.push(face.to_owned());
+                }
+            }
+        }
+    } else if let Some(split) = node.get("split") {
+        for key in ["a", "b"] {
+            if let Some(child) = split.get(key) { summarize_restore_node(child, summary); }
+        }
+    }
+}
+
+#[cfg(test)]
+mod restore_summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn faces_and_counts_share_local_agent_evidence_including_tabs_and_undocked() {
+        let state = json!({"sessions":[{"windows":[
+            {"leaf":{"pane_id":"%1", "character":"remote-face", "was_agent":"claude",
+                "remote_label":"mini", "tabs":[
+                    {"pane_id":"%2", "character":"old-shell-face"},
+                    {"pane_id":"%3", "character":"local-tab", "was_agent":"codex"},
+                    {"pane_id":"%4", "character":"remote-tab", "session_id":"remote", "remote_view":true}]}},
+            {"leaf":{"character":"old-shell-face"}},
+            {"leaf":{"character":"local-tab", "session_id":"local-session"}}
+        ], "undocked":[{"leaf":{"character":"detached", "was_claude":true}}]}]});
+        let summary = App::restore_summary(&state);
+        assert_eq!(summary, RestoreSummary {
+            panes: 4, agents: 3, shells: 2,
+            faces: vec!["local-tab".into(), "detached".into()],
+        });
+        assert_eq!(summary.agents, App::count_claude_panes(&state));
+        assert_eq!(summary.panes, App::count_panes(&state));
+    }
+
+    #[test]
+    fn remote_only_and_history_do_not_offer_faces_to_restore() {
+        let state = json!({"sessions":[{"windows":[{"leaf":{
+            "character":"remote", "was_agent":"claude", "remote_base":"http://127.0.0.1:12345"
+        }}]}], "stashed_panes":[{"rec":{"character":"hidden", "was_agent":"claude"}}]});
+        assert_eq!(App::restore_summary(&state), RestoreSummary::default());
+        assert_eq!(App::restore_summary(&json!({})), RestoreSummary::default());
+    }
+}
+
 impl App {
     pub(crate) fn restore_closed_history(&mut self, state: &serde_json::Value) {
         self.closed_panes.extend(super::local_restore::history(state));
     }
 
-    /// Count leaves that were running claude across the whole saved state — the
-    /// number the restore prompt shows. 총 pane 수는 `count_panes`.
-    ///
-    /// 예전엔 `character` 가 붙어 있으면 claude pane 으로 셌다. 캐릭터는 claude
-    /// 여부와 무관하게 **spawn 때 모든 pane 에 배정**되므로(assign_character_env),
-    /// 순수 셸 3개짜리 창이 "claude 세션 3개"로 표시됐다. 감지 실패 보정은
-    /// session_id 로 한다 — 그건 claude 가 실제로 세션을 바인딩했을 때만 붙어,
-    /// 저장 시점에 claude 가 포그라운드가 아니어도 남는다.
-    pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
-        fn walk(node: &serde_json::Value, n: &mut usize) {
-            if let Some(leaf) = node.get("leaf") {
-                if crate::internal_room::is_saved_window(node) {
-                    return;
-                }
-                // 이 함수는 복원 확인창을 그릴 때마다 불린다. 디스크 rollout 확인은
-                // 실제 저장·복원 시 한 번만 하고, 여기서는 저장본 표식과 이미 결속된
-                // session_id만 센다.
-                for leaf in super::local_restore::surfaces(leaf) {
-                    let was_agent = saved_agent_marker(leaf).is_some();
-                    let bound_sid = leaf
-                        .get("session_id")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|s| !s.is_empty());
-                    if was_agent || bound_sid {
-                        *n += 1;
-                    }
-                }
-            } else if let Some(split) = node.get("split") {
-                if let Some(a) = split.get("a") {
-                    walk(a, n);
-                }
-                if let Some(b) = split.get("b") {
-                    walk(b, n);
-                }
-            }
-        }
-        let mut n = 0;
+    pub(crate) fn restore_summary(state: &serde_json::Value) -> RestoreSummary {
+        let mut summary = RestoreSummary::default();
         if let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) {
             for s in sessions {
-                if let Some(windows) = s.get("windows").and_then(|w| w.as_array()) {
-                    for w in windows {
-                        walk(w, &mut n);
+                for key in ["windows", "undocked"] {
+                    for node in s.get(key).and_then(|v| v.as_array()).into_iter().flatten() {
+                        summarize_restore_node(node, &mut summary);
                     }
-                }
-                for u in s.get("undocked").and_then(|u| u.as_array()).into_iter().flatten() {
-                    walk(u, &mut n);
                 }
             }
         }
-        n
+        summary
+    }
+
+    pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
+        Self::restore_summary(state).agents
     }
     /// 저장된 상태의 전체 pane(leaf) 수. claude 가 하나도 없는 순수 셸 작업 공간도
     /// 레이아웃·스크롤백은 복원할 값이 있으므로, 프롬프트를 띄울지는 이 수로 정한다
     /// (claude 수로 정하면 셸만 쓰던 창은 강제 종료 후 아무것도 못 되살린다).
     pub(crate) fn count_panes(state: &serde_json::Value) -> usize {
-        fn walk(node: &serde_json::Value, n: &mut usize) {
-            if let Some(leaf) = node.get("leaf") {
-                if !crate::internal_room::is_saved_window(node)
-                    && super::local_restore::surfaces(leaf).next().is_some() {
-                    *n += 1;
-                }
-            } else if let Some(split) = node.get("split") {
-                if let Some(a) = split.get("a") {
-                    walk(a, n);
-                }
-                if let Some(b) = split.get("b") {
-                    walk(b, n);
-                }
-            }
-        }
-        let mut n = 0;
-        if let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) {
-            for s in sessions {
-                if let Some(windows) = s.get("windows").and_then(|w| w.as_array()) {
-                    for w in windows {
-                        walk(w, &mut n);
-                    }
-                }
-                for u in s.get("undocked").and_then(|u| u.as_array()).into_iter().flatten() {
-                    walk(u, &mut n);
-                }
-            }
-        }
-        n
+        Self::restore_summary(state).panes
     }
     /// Rebuild the workspace saved by `save_session_state` (user chose 복원):
     /// recreate each window's split layout, spawn a pane per leaf seeded with
@@ -1574,9 +1583,12 @@ mod agy_restore_tests {
             .split_once("pub(crate) fn count_panes")
             .unwrap()
             .0;
-        assert!(count_body.contains("saved_agent_marker(leaf)"));
-        assert!(!count_body.contains("saved_agent(leaf)"));
-        assert!(!count_body.contains("codex_root_rollout_for_session"));
+        assert!(count_body.contains("Self::restore_summary(state).agents"));
+        let summary_body = source.split_once("fn summarize_restore_node").unwrap().1
+            .split_once("#[cfg(test)]").unwrap().0;
+        assert!(summary_body.contains("saved_agent_marker(surface)"));
+        assert!(!summary_body.contains("saved_agent(surface)"));
+        assert!(!summary_body.contains("codex_root_rollout_for_session"));
     }
 
     #[test]

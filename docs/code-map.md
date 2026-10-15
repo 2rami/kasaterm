@@ -21,7 +21,7 @@
   `save.rs`(`session_state_json`·`save_session_state`) · `restore.rs`(`restore_session_state`·복원 명령·복원 전 수 세기) ·
   `local_restore.rs`(저장·옛 저장본 복원에서 다른 기기 미러 제외, 섞인 로컬 탭·방 번호 보존) ·
   `titles.rs`(대화 기록 꼬리 → 칸 제목·effort) · `rooms.rs`(방 만들기·고르기·순서·닫기·이름, 칸·탭 초점) ·
-  `closed_panes.rs`(닫은 칸 기록·되살리기) · `file_tree.rs`(cwd·파일 트리·파일 열기) · `sidebar.rs`(방 카드 높이·스크롤) ·
+  `closed_panes.rs`(닫은 칸 기록·되살리기·직접 숨김/자동 보관 사유) · `verify.rs`(격리 복원 표시·첫 탭 닫기 회귀 리그) · `file_tree.rs`(cwd·파일 트리·파일 열기) · `sidebar.rs`(방 카드 높이·스크롤) ·
   `remote_rooms.rs`(원격 셸·거울 칸·원격 방 보기 창) · `migrate.rs`(칸 이사·되돌리기)
 - `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)

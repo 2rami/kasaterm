@@ -1,10 +1,25 @@
 //! 닫은 칸 — 다시 열 수 있게 기록을 남기고, 되살리고, 오래 쉰 기록을 걷는다.
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RetainedBy {
+    User,
+    Recovery,
+}
+
+impl crate::ClosedPane {
+    pub(crate) fn retention_label(&self) -> Option<&'static str> {
+        self.stashed.then_some(match self.retained_by {
+            Some(RetainedBy::User) => "직접 숨김",
+            Some(RetainedBy::Recovery) => "자동 보관",
+            // Old snapshots did not record intent; never attribute it to the user.
+            None => "보관됨",
+        })
+    }
+}
+
 impl App {
-    /// 닫히기 직전의 pane 을 되살릴 수 있게 적어 둔다. `remove_pane` 이 유일한
-    /// 호출자다 — ⌘W·헤더 ×·CLI 어느 경로로 닫아도 거길 지나므로 한 곳에서 잡힌다.
-    ///
     /// 레코드는 세션 저장이 쓰는 것과 **같은 형식**(`layout_to_json` 의 leaf 본문)이다.
     /// 그래서 되살리기가 `restore_leaf` 재사용이 되고, claude 였던 pane 은 `--resume`
     /// 까지 그 함수가 알아서 딸려 온다.
@@ -12,9 +27,7 @@ impl App {
     /// `alive` 는 이 pane 의 PTY 가 계속 도는지다 — 사용자가 닫은 것(`hide_pane`)은
     /// 참이라 되살리기가 재부착이 되고, 셸이 스스로 끝난 것(`reap_dead_panes`)은
     /// 거짓이라 레코드로 새로 띄운다.
-    /// `stashed` 는 사이드바 「숨기기」로 치운 것 — 두 정리 루프(개수 상한·idle reap)가
-    /// 건너뛴다. 닫기(⌘W)는 `false` 로 들어와 종전대로 정리 대상이다.
-    pub(crate) fn record_closed_pane(&mut self, pane: &str, alive: bool, stashed: bool) {
+    pub(crate) fn record_closed_pane(&mut self, pane: &str, alive: bool, stashed: bool, retained_by: Option<RetainedBy>) {
         if self.tmux.is_some() || !self.pty.contains_key(pane) {
             return;
         }
@@ -96,6 +109,7 @@ impl App {
             window,
             alive,
             stashed,
+            retained_by: if stashed { retained_by } else { None },
             idle_since: (alive && !stashed).then(Instant::now),
             preview: None,
         });
@@ -385,6 +399,7 @@ mod closed_pane_id_reuse_tests {
             window: 0,
             alive,
             stashed: false,
+            retained_by: None,
             idle_since: None,
             preview: None,
         }

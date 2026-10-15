@@ -129,7 +129,7 @@ mod tests {
         let at = Instant::now();
         let mut c = ClosedPane { rec: serde_json::json!({"session_id":"keep-me"}),
             pane_id:"%1".into(), character:String::new(), folder:String::new(), neighbor:None,
-            window:0, alive:true, stashed:false, idle_since:Some(at), preview:None };
+            window:0, alive:true, stashed:false, retained_by:None, idle_since:Some(at), preview:None };
         let grace = std::time::Duration::from_secs(10);
         assert!(!expired(&c, at + std::time::Duration::from_millis(9999), grace));
         assert!(expired(&c, at + grace, grace));

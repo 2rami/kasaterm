@@ -1866,16 +1866,10 @@ impl App {
             w.request_redraw();
         }
     }
-    /// Drop a non-primary tab: kill its PTY, remove the pid map entry, drop
-    /// the slot. The primary tab (index 0, pid == outer pane id) can't be
-    /// closed this way — callers fall through to `remove_pane` for that.
+    /// A cell may outlive its first PTY, so primary and secondary tabs share cleanup.
     pub(crate) fn close_tab(&mut self, outer: &str, idx: usize) {
-        // 마지막 탭이 나가면 `tabs` 가 비고, 그러면 `PaneState` 의 `Deref` 가
-        // 가리킬 곳을 잃어 **다음 프레임에 앱이 통째로 죽는다**(2026-08-22 실측:
-        // 탭 하나짜리 pane 의 알약을 휠 클릭 → 렌더 패닉). 위 독스가 「호출자가
-        // remove_pane 으로 간다」고 적어 두고도 **코드가 강제하지 않아서** 새
-        // 호출자가 생길 때마다 밟는 구조였다 — 가운데 클릭이 그 여섯 번째 길이다.
-        // 기본값이 안전해야 하므로 판정을 호출부에서 이 함수 안으로 옮긴다.
+        // An empty cell leaves PaneState's Deref without a target. Keep the
+        // last-tab check here so every close entry point preserves that invariant.
         //
         // ⚠️ 위임은 **PTY 를 문 primary 탭일 때만**이다. `remove_pane` 은
         // `record_closed_pane` 첫 줄(`pty.contains_key`)에서 PTY 없는 pane 을
@@ -1915,25 +1909,23 @@ impl App {
         if let Some(pid) = pid_opt.as_deref() {
             kasa_mcp::push_viewer_control(pid, r#"{"t":"source-closed"}"#);
             self.cancel_restore_surface(pid);
-            if pid != outer {
-                self.close_owned_remote_surface(pid);
-                kasa_mcp::remote::kill_remote(pid);
-                // Secondary tab — drop its session entry; reader thread sees
-                // the channel close and pushes EOF to `dead_panes`, but with
-                // the pid_to_pane entry gone the reap pass routes through
-                // remove_pane(pid) which is a no-op (pty already gone). Fine.
-                self.pty.remove(pid);
-                kasa_mcp::surface_keys::remove(pid);
-                // 탭도 학생을 담는다(서브에이전트 스폰) — pane 과 같은 마커 정리를
-                // 안 하면 닫힌 탭의 캐릭터 바인딩이 남아 board 가 유령을 센다.
-                let closed_cwd = self.pane_cwd_cache.get(pid).cloned();
-                Self::cleanup_collab_markers(pid, closed_cwd.as_deref());
-                let mut ws = self.ws.lock().unwrap();
-                ws.pid_to_pane.remove(pid);
-                ws.pane_character.remove(pid);
-                ws.pane_launch_character.remove(pid);
-                ws.pane_next_character.remove(pid);
+            // The primary tab can close while siblings keep its cell alive. Keeping
+            // its PTY only because pid == outer turns a deliberate close into an orphan.
+            self.close_owned_remote_surface(pid);
+            kasa_mcp::remote::kill_remote(pid);
+            if let Some(session) = self.pty.get(pid) {
+                let _ = session.set_input_closed(true, false);
+                session.terminate_local();
             }
+            self.pty.remove(pid);
+            kasa_mcp::surface_keys::remove(pid);
+            let closed_cwd = self.pane_cwd_cache.get(pid).cloned();
+            Self::cleanup_collab_markers(pid, closed_cwd.as_deref());
+            let mut ws = self.ws.lock().unwrap();
+            ws.pid_to_pane.remove(pid);
+            ws.pane_character.remove(pid);
+            ws.pane_launch_character.remove(pid);
+            ws.pane_next_character.remove(pid);
         }
         // Preview tab removal is immediate via the ws.panes mutation below;
         // with no daemon there's no broadcast to resurrect it.
@@ -1955,6 +1947,9 @@ impl App {
                 pane.dirty = true;
             }
         }
+        // A late EOF still names the removed primary PTY. Move its surviving cell
+        // before that event is drained so it cannot close the sibling tabs.
+        if pid_opt.as_deref() == Some(outer) { self.sweep_rekey_cells(); }
         self.handoff_ime_to_active_surface();
         // 이미지·마크다운 미리보기 탭은 닫아도 ⌘⇧T 로 되살릴 수 있게 경로를
         // 남긴다 — pane 닫기와 같은 스택이라 인포의 닫힘 줄에도 함께 뜬다
@@ -1982,6 +1977,7 @@ impl App {
                     window,
                     alive: false,
                     stashed: false,
+                    retained_by: None,
                     idle_since: None,
                     preview: Some((outer.to_string(), path)),
                 });
@@ -2039,7 +2035,8 @@ impl App {
         //
         // 실제로 걷은 턴에만 본다 — 스윕 때문에 매 턴 돌게 되면서, 부팅 직후처럼
         // pane 이 아직 없는 순간을 「마지막 pane 이 닫혔다」로 읽을 수 있다.
-        if reaped && self.tmux.is_none() && self.pty.is_empty() {
+        if reaped && self.tmux.is_none() && self.pty.is_empty()
+            && self.pty_layout.is_none() && self.windows.iter().all(Option::is_none) {
             event_loop.exit();
         }
     }
@@ -2247,7 +2244,7 @@ impl App {
                 GRACE.as_secs()
             );
             // 락 밖에서 — `record_closed_pane` 이 스스로 `ws` 를 잡는다.
-            self.record_closed_pane(&id, true, true);
+            self.record_closed_pane(&id, true, true, Some(crate::session::RetainedBy::Recovery));
             LOST_SINCE
                 .get_or_init(Default::default)
                 .lock()
@@ -2978,7 +2975,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.remove_pane(target);
             return;
         }
-        self.record_closed_pane(target, true, stashed);
+        self.record_closed_pane(target, true, stashed, stashed.then_some(crate::session::RetainedBy::User));
         if !stashed { self.close_grace_input(target, true); }
         self.notify_source_closed(target);
         self.cancel_restore_pane(target);
@@ -3078,7 +3075,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
         // 실수로 exit 한 학생도 되돌릴 수 있다. 다만 그건 프로세스가 이미 없으니
         // 되살리기가 재부착이 아니라 레코드로 새로 띄우는 쪽이다(`alive=false`).
-        self.record_closed_pane(target, false, false);
+        self.record_closed_pane(target, false, false, None);
         let was_active = self
             .ws
             .lock()
@@ -3152,10 +3149,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
     // EOF and remote close notifications name a PTY, which may live in a tab rather
     // than a layout leaf. Removing only the leaf leaves that tab and its PTY alive.
     pub(crate) fn remove_finished_surface(&mut self, pid: &str) {
-        let tab_slot = self.ws.lock().unwrap().secondary_tab_slot(pid);
+        let (tab_slot, replaced_cell) = {
+            let ws = self.ws.lock().unwrap();
+            let slot = finished_tab_slot(&ws, pid);
+            let replaced = !self.pty.contains_key(pid) && ws.panes.get(pid).is_some_and(|p| {
+                !p.tabs.is_empty() && p.tabs.iter().all(|t| t.pid.as_deref() != Some(pid))
+            });
+            (slot, replaced)
+        };
         if let Some((outer, idx)) = tab_slot {
             self.close_tab(&outer, idx);
-        } else {
+        } else if !replaced_cell {
             self.remove_pane(pid);
         }
     }
@@ -3895,6 +3899,14 @@ fn cell_rekey(ws: &Workspace, leaf: &str) -> Option<String> {
     (!ws.panes.contains_key(&first)).then_some(first)
 }
 
+fn finished_tab_slot(ws: &Workspace, pid: &str) -> Option<(String, usize)> {
+    let outer = ws.outer_for_pty(pid)?;
+    let pane = ws.panes.get(&outer)?;
+    if outer == pid && pane.tabs.len() <= 1 { return None; }
+    let idx = pane.tabs.iter().position(|tab| tab.pid.as_deref() == Some(pid))?;
+    Some((outer, idx))
+}
+
 /// 이 칸이 그릴 것을 하나라도 들고 있나. 탭이 하나도 없는 칸은 그리드가 있어도 빈 껍데기다 —
 /// 제 PTY 가 끝나 「빈 자리」로 남아 남의 학생을 탭으로 품던 칸은 그 탭들까지 끝나면 탭 0개로
 /// 남는데, 「그리드 있음·터미널 탭 없음」이라 웹·그림 칸처럼 산 것으로 읽혀 영영 안 걷혔다
@@ -4158,6 +4170,24 @@ mod drop_zone_tests {
 #[cfg(test)]
 mod orphan_leaf_tests {
     use super::{cell_rekey, leaf_is_orphan, pane_shows_anything, PaneState, PaneTab, Workspace};
+
+    #[test]
+    fn primary_eof_with_siblings_is_a_tab_close_not_a_cell_close() {
+        let tab = |id: &str| PaneTab { pid: Some(id.into()), ..Default::default() };
+        let mut ws = Workspace::default();
+        ws.panes.insert("%1".into(), PaneState { tabs: vec![tab("%1"), tab("%2")], ..Default::default() });
+        ws.rebuild_pid_map();
+        assert_eq!(super::finished_tab_slot(&ws, "%1"), Some(("%1".into(), 0)));
+        assert_eq!(super::finished_tab_slot(&ws, "%2"), Some(("%1".into(), 1)));
+        ws.panes.get_mut("%1").unwrap().tabs.remove(0);
+        ws.rebuild_pid_map();
+        assert_eq!(super::finished_tab_slot(&ws, "%1"), None, "late primary EOF owns no remaining tab");
+        assert_eq!(cell_rekey(&ws, "%1"), Some("%2".into()));
+        ws.panes.clear();
+        ws.panes.insert("%2".into(), PaneState { tabs: vec![tab("%2")], ..Default::default() });
+        ws.rebuild_pid_map();
+        assert_eq!(super::finished_tab_slot(&ws, "%2"), None, "last tab closes its cell");
+    }
 
     /// 제 셸 탭을 잃고 남의 탭만 품은 칸은 첫 탭 이름으로, 제 탭이 있거나 아직 pid 를 못 받은 칸은 그대로.
     #[test]

@@ -101,6 +101,7 @@ struct SidebarRowInfo {
     /// 사이드바에서 숨긴 pane — 화면엔 없지만 PTY 는 돈다. 흐리게 + 아이콘으로
     /// 그려 「없는 것」이 아니라 「치워 둔 것」임을 말한다.
     stashed: bool,
+    retention_label: Option<&'static str>,
     /// 학생 얼굴이 없을 때 칸이 무엇인지 말하는 아이콘 — 웹 pane 은 globe,
     /// 이미지는 image, md 는 file-text, 그 외 terminal. 이게 없으면 미니맵이
     /// 웹 pane 도 터미널이라고 거짓말한다.
@@ -2275,6 +2276,8 @@ impl App {
                         .closed_panes
                         .iter()
                         .any(|c| c.stashed && c.alive && c.pane_id == *id),
+                    retention_label: self.closed_panes.iter()
+                        .find(|c| c.alive && c.pane_id == *id).and_then(ClosedPane::retention_label),
                     icon,
                     tab_peeks,
                     // ⚠️ `pane_activity` 의 키는 **leaf id** 다(`refresh_pane_activity`
@@ -6497,45 +6500,12 @@ impl App {
                     win_h,
                     theme::with_alpha([0, 0, 0, 255], 0xB0),
                 );
-                let n = crate::App::count_claude_panes(&state);
-                let total = crate::App::count_panes(&state);
-                // 돌아올 학생들. 「pane 20개」는 숫자일 뿐이지만 얼굴은 누가 오는지를
-                // 말한다 — 이 카드가 크롬 대화상자처럼 보이던 이유가 그 자리가 비어
-                // 있어서였다(2026-08-27 지적: 「디자인이 구려」).
-                let faces: Vec<String> = {
-                    fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
-                        if let Some(leaf) = node.get("leaf") {
-                            if let Some(c) = leaf.get("character").and_then(|c| c.as_str()) {
-                                if !c.is_empty() && !out.iter().any(|x| x == c) {
-                                    out.push(c.to_string());
-                                }
-                            }
-                        } else if let Some(split) = node.get("split") {
-                            for k in ["a", "b"] {
-                                if let Some(x) = split.get(k) {
-                                    walk(x, out);
-                                }
-                            }
-                        }
-                    }
-                    let mut out = Vec::new();
-                    if let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) {
-                        for sess in sessions {
-                            if let Some(ws) = sess.get("windows").and_then(|w| w.as_array()) {
-                                for w in ws {
-                                    walk(w, &mut out);
-                                }
-                            }
-                        }
-                    }
-                    out
-                };
+                let summary = crate::App::restore_summary(&state);
+                let faces = &summary.faces;
                 const RESTORE_TITLE: &str = "이전 세션을 이어서 켤까요?";
-                let subtitle = if n > 0 {
-                    format!("{} · 창 {total}개 · 캐릭터 {n}명", crate::restore_progress::last_used_label(&state))
-                } else {
-                    format!("{} · 창 {total}개", crate::restore_progress::last_used_label(&state))
-                };
+                let mut subtitle = format!("{} · 칸 {}개", crate::restore_progress::last_used_label(&state), summary.panes);
+                if summary.agents > 0 { subtitle.push_str(&format!(" · 학생 {}명", summary.agents)); }
+                if summary.shells > 0 { subtitle.push_str(&format!(" · 셸 {}개", summary.shells)); }
                 let pad = 24.0_f32;
                 let bf = 13.0_f32;
                 let bpad = 18.0_f32;

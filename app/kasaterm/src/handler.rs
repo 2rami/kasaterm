@@ -499,6 +499,9 @@ impl ApplicationHandler<UserEvent> for App {
                             // 살아 있는 항목이 진짜 비용이다 — 셸·claude 를 그대로 물고 있다.
                             "alive": c.alive,
                             "window": c.window,
+                            "stashed": c.stashed,
+                            "retained_by": c.retained_by,
+                            "retention_label": c.retention_label(),
                         })
                     })
                     .collect();
@@ -7922,6 +7925,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
         self.run_pending_close_grace_probe();
+        self.run_pending_session_probe();
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
         self.run_button_focus_probe(event_loop);

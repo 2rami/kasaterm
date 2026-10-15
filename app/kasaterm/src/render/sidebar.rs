@@ -918,7 +918,8 @@ pub(super) fn paint_rows(g: &mut gpu::GpuRenderer, s: &Strip, p: &Panes<'_>) {
             name_x += cw + 5.0;
         }
         let budget = (rx + rw - 14.0 - elapsed_w - name_x).max(0.0);
-        let txt = clip_px(g, label, 11.0, false, budget);
+        let retained_label = info.retention_label.map(|reason| format!("{reason} · {label}"));
+        let txt = clip_px(g, retained_label.as_deref().unwrap_or(label), 11.0, false, budget);
         g.draw_text(
             name_x,
             ry + (rh - 11.0) / 2.0,

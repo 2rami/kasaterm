@@ -734,6 +734,8 @@ fn draw_closed_card(
     } else {
         (None, theme::text_mute(), "꺼짐 · 누르면 다시 띄운다")
     };
+    let retained_status = c.retention_label().map(|reason| format!("{reason} · {text}"));
+    let text = retained_status.as_deref().unwrap_or(text);
     let mut sx = gutter.text_x;
     if let Some(col) = dot {
         round_rect(g, sx, y + 44.5, 6.0, 6.0, 3.0, col);

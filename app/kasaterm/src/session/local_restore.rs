@@ -251,6 +251,7 @@ pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
                 window: entry["window"].as_u64().unwrap_or(0) as usize,
                 alive: false,
                 stashed: entry["stashed"].as_bool().unwrap_or(true),
+                retained_by: entry.get("retained_by").cloned().and_then(|v| serde_json::from_value(v).ok()),
                 idle_since: None,
                 preview: None,
             })
@@ -261,6 +262,28 @@ pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_reasons_round_trip_without_inventing_legacy_user_intent() {
+        let state = json!({"stashed_panes":[
+            {"rec":{},"pane_id":"%1","stashed":true,"retained_by":"user"},
+            {"rec":{},"pane_id":"%2","stashed":true,"retained_by":"recovery"},
+            {"rec":{},"pane_id":"%3","stashed":true},
+            {"rec":{},"pane_id":"%4","stashed":false},
+            {"rec":{},"pane_id":"%5","stashed":true,"retained_by":"future-value"}
+        ]});
+        let restored = history(&state);
+        let labels: Vec<_> = restored.iter().map(crate::ClosedPane::retention_label).collect();
+        assert_eq!(labels, [Some("직접 숨김"), Some("자동 보관"), Some("보관됨"), None, Some("보관됨")]);
+        for entry in &restored { assert!(!entry.alive); }
+        for entry in restored {
+            let again = history(&json!({"stashed_panes":[{
+                "rec":entry.rec, "stashed":entry.stashed, "retained_by":entry.retained_by
+            }]}));
+            assert_eq!(again[0].retained_by, entry.retained_by);
+            assert_eq!(again[0].stashed, entry.stashed);
+        }
+    }
 
     fn remote(id: &str) -> Value {
         json!({"pane_id":id,"remote_base":"http://127.0.0.1:18765","remote_pane":"%2",

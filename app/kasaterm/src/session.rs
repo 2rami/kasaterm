@@ -19,6 +19,9 @@ mod save;
 mod screen_pump;
 mod sidebar;
 mod titles;
+mod verify;
+
+pub(crate) use self::closed_panes::RetainedBy;
 
 pub(crate) use self::accounts::{
     account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice,

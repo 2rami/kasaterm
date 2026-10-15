@@ -264,6 +264,7 @@ impl App {
                     "neighbor": c.neighbor,
                     "window": window,
                     "stashed": c.stashed,
+                    "retained_by": c.retained_by,
                 })
             })
             .collect();

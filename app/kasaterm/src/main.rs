@@ -1708,13 +1708,10 @@ pub(crate) struct ClosedPane {
     /// PTY 가 아직 도는가. 참이면 되살리기는 트리에 leaf 를 다시 꽂는 것뿐이고
     /// (`pane_id` 가 그대로 유효하다), 거짓이면 `rec` 로 새로 띄운다.
     pub(crate) alive: bool,
-    /// 사이드바 「숨기기」로 치운 것인가. **참이면 두 정리 루프가 건너뛴다** —
-    /// 개수 상한(`CLOSED_PANE_KEEP`)도 idle reap(`CLOSED_PANE_IDLE_REAP`)도.
-    ///
-    /// 닫기와 갈라 두는 이유: 숨기기는 작업이 도는 중에 화면에서만 치우는 것이라
-    /// 돌아왔을 때 대화가 끊겨 있으면 쓸모가 없다(2026-08-11 지시). 대신 숨긴 만큼
-    /// 메모리를 계속 문다 — 그건 사용자가 고른 값이다.
+    /// Explicitly hidden and recovered orphan processes both bypass reaping:
+    /// losing a layout slot is not evidence that their work finished.
     pub(crate) stashed: bool,
+    pub(crate) retained_by: Option<session::RetainedBy>,
     /// Ordinary close began here. Activity never extends the undo grace.
     pub(crate) idle_since: Option<Instant>,
     /// 이미지·마크다운 미리보기 **탭**이었나 — `(붙어 있던 pane, 파일 경로)`.
