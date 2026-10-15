@@ -641,8 +641,9 @@ class Server {
       );
       if (home is! Map ||
           home['home'] is! String ||
-          (home['home'] as String).isEmpty)
+          (home['home'] as String).isEmpty) {
         throw const ServerException('원본 기기의 홈 폴더를 찾지 못했어요');
+      }
       path = '${home['home']}/${path.substring(2)}';
     }
     final http.Response response;
@@ -653,14 +654,18 @@ class Server {
     } catch (_) {
       throw const ServerException('원본 기기에서 파일을 받지 못했어요');
     }
-    if (response.statusCode == 413)
+    if (response.statusCode == 413) {
       throw const ServerException('32MB를 넘는 파일은 원본 기기에서 열어 주세요');
-    if (response.statusCode == 404)
+    }
+    if (response.statusCode == 404) {
       throw const ServerException('그 파일을 찾을 수 없어요');
-    if (response.statusCode != 200)
+    }
+    if (response.statusCode != 200) {
       throw ServerException('파일을 받지 못했어요', status: response.statusCode);
-    if (response.bodyBytes.length > 32 * 1024 * 1024)
+    }
+    if (response.bodyBytes.length > 32 * 1024 * 1024) {
       throw const ServerException('파일이 너무 커요');
+    }
     return response.bodyBytes;
   }
 
