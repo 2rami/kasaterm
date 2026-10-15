@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import '../claude_style.dart';
 import '../conversation.dart';
 import '../grid_canvas.dart';
+import '../file_link.dart';
 import '../grid_select.dart';
 import '../hardware_keys.dart';
 import '../live_input.dart';
@@ -896,6 +897,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     );
     final pane = _pane;
     return WrappedCanvas(
+      onOpenLink: (href) => showResultLink(context, widget.server, href, cwd: pane.cwd, machine: pane.machine),
       grid: s.grid,
       history: s.history,
       historyVersion: s.historyVersion,

@@ -8,6 +8,7 @@ import '../background_grace.dart';
 import '../contrast.dart';
 import '../grid.dart';
 import '../grid_canvas.dart';
+import '../file_link.dart';
 import '../look.dart';
 import '../server.dart';
 import '../shell_blocks.dart';
@@ -395,6 +396,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
         ),
         Expanded(
           child: GridCanvas(
+            onOpenLink: (href) => showResultLink(context, widget.server, href, cwd: widget.pane.cwd, machine: widget.pane.machine),
             grid: s.grid,
             version: s.grid.version,
             palette: palette,

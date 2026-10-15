@@ -13,7 +13,7 @@ The surfaces are a Rust/wgpu desktop app and Flutter mobile app. Extend their ex
 - Keep terminal content and controls readable in both light and dark themes. Mobile login label contrast is checked by `mobile/test/mobile_account_layout_test.dart`; this is not a claim that every legacy color pairing was audited.
 - Desktop device identity uses neutral icons and names, not device-specific fills or borders. The chat composer footer carries the device and reported runtime status next to the terminal toggle; details remain in `docs/design.md`. Character and attention colors retain their existing meaning.
 - Desktop settings remain a native, restrained Operate surface: distinguish this device from other devices, separate display names from connection names, keep connection changes as drafts until explicit save, and make search and editing feedback consistent across pages. Geometry and keyboard rules stay in `docs/design.md`; input and scrolling do not gain decorative motion.
-- Shared files retain the desktop-folder entry and gain native search/recent views in the existing desktop side panel and phone screen. Shortcut location is a per-device preference, never an implicit data migration. Describe peer receive checks and offline copies honestly; no cloud-backup guarantee or separate application is implied.
+- Results stay with the work: images render inline and files open from links. Desktop and phone have no shared-folder screen or mandatory shared-folder saving rule. Existing files and optional peer-transfer storage remain intact; no cloud-backup guarantee is implied.
 - Remove default franchise branding without destroying users' character bindings, custom themes or stored identifiers. Original art is available in `assets/original/`; native and web bundled-character migration remains separate work.
 - Mobile UI uses bundled Pretendard regular/semibold; terminal cells retain the existing monospace and Korean fallback contract. `KASA Mobile` is the display name, not a new bundle identifier.
 - Rain-wet glass is a future visual direction, not a shipped shader. Repeated input and scrolling must not acquire decorative motion.
@@ -37,6 +37,8 @@ Color contract: Frost Light text/background 12.39:1 and text/surface 13.99:1; Fr
 
 ## Custom colors and Info — 2026-10-15
 
+The shared-folder placement below is historical and superseded by “Inline results and file links”.
+
 Accent editing exposes an arbitrary RGB/HEX picker with optional preset shortcuts. Statusbar item colors use the same editor, including reverting to the inherited default. Preview, commit, cancellation and eyedropper callbacks carry an explicit color target. Shared folders live inside Info beside Runtime, with separate scroll/focus/hit maps; the independent Share tab and titlebar Share button are removed. These interaction requirements come from the user; exact screen styling remains subject to review.
 
 ## Selective restore — 2026-10-15
@@ -56,3 +58,7 @@ The user requested a full redesign of the design contract and controls, then req
 The user selected A / Cloud OS, then requested correction of oversized buttons and misaligned native layouts. This supersedes the pending-default language in the comparison section. Production controls now use text ink metrics, intrinsic action widths, shared paint/hit rectangles and wrapping groups. Dimensions and palette values are exclusively in `docs/design.md`; earlier token/contrast figures above are historical. Actual settings use separate navigation/content surfaces and a responsive live palette preview.
 
 Color selection starts with a continuous HSV plane, hue strip and large color preview. The user explicitly rejected requiring HEX knowledge. HEX is optional in a collapsed value section; an available eyedropper remains a visible action. The same interaction applies to accent, palette slots and statusbar colors. No blur pass or decorative animation is introduced. The chosen direction is accepted; final geometry remains subject to visual review.
+
+## Inline results and file links — 2026-10-15
+
+The user explicitly chose removal of shared-folder screens and mandatory saving conventions while retaining existing files, file links and transfer between devices. PC Info shows runtime information. Mobile conversations render validated image blocks from the producing device and offer file preview from links. Agents save results in the project or an appropriate output folder, return an inline image block or file link, and use a separate image tab only when explicitly requested. Earlier shared-folder studies and placement decisions are superseded.

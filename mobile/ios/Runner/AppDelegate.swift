@@ -2,6 +2,7 @@ import AuthenticationServices
 import Flutter
 import LocalAuthentication
 import UIKit
+import QuickLook
 import UserNotifications
 import os
 
@@ -11,6 +12,7 @@ import os
 /// 켜진 경우는 다트가 아직 없으므로 `pending` 에 두었다가 `pending` 호출 때 준다.
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private let filePreview = ResultFilePreview()
   private var channel: FlutterMethodChannel?
   private var a11yChannel: FlutterMethodChannel?
   private var pendingTap: [String: Any]?
@@ -47,6 +49,17 @@ import os
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let messenger = engineBridge.applicationRegistrar.messenger()
+    let files = FlutterMethodChannel(name: "kasaterm/file_preview", binaryMessenger: messenger)
+    files.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "preview", let self,
+            let args = call.arguments as? [String: Any],
+            let name = args["name"] as? String,
+            let bytes = args["bytes"] as? FlutterStandardTypedData else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      self.filePreview.open(name: name, data: bytes.data, result: result)
+    }
     // 「투명도 줄이기」는 플러터가 안 알려 준다 — 날씨가 이 값을 보고 꺼진다(docs/weather.md 접근성).
     let a11y = FlutterMethodChannel(name: "kasaterm/a11y", binaryMessenger: messenger)
     a11yChannel = a11y
@@ -502,5 +515,71 @@ enum ApprovalKey {
     #else
     DispatchQueue.global(qos: .userInitiated).async { signNow() }
     #endif
+  }
+}
+
+
+private final class ResultFilePreview: NSObject, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
+  private var file: URL?
+  private var directory: URL?
+  private weak var controller: QLPreviewController?
+
+  func open(name: String, data: Data, result: @escaping FlutterResult) {
+    guard data.count <= 32 * 1024 * 1024 else {
+      result(FlutterError(code: "file_size", message: "파일이 너무 커요", details: nil))
+      return
+    }
+    let leaf = URL(fileURLWithPath: name).lastPathComponent
+    let safeName = leaf.isEmpty || leaf == "." || leaf == ".." ? "file" : leaf
+    DispatchQueue.global(qos: .userInitiated).async {
+      let dir = FileManager.default.temporaryDirectory.appendingPathComponent("kasa-preview-" + UUID().uuidString, isDirectory: true)
+      let url = dir.appendingPathComponent(safeName)
+      do {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+      } catch {
+        try? FileManager.default.removeItem(at: dir)
+        DispatchQueue.main.async { result(FlutterError(code: "file_write", message: "파일을 준비하지 못했어요", details: nil)) }
+        return
+      }
+      DispatchQueue.main.async {
+        guard QLPreviewController.canPreview(url as NSURL) else {
+          try? FileManager.default.removeItem(at: dir)
+          result(FlutterError(code: "file_type", message: "미리보기를 지원하지 않는 파일이에요", details: nil))
+          return
+        }
+        let old = self.directory
+        self.file = url
+        self.directory = dir
+        if let current = self.controller {
+          current.reloadData()
+        } else {
+          let preview = QLPreviewController()
+          preview.dataSource = self
+          preview.delegate = self
+          guard var front = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow }) }).first?.rootViewController else {
+            try? FileManager.default.removeItem(at: dir)
+            self.file = nil
+            self.directory = nil
+            result(FlutterError(code: "file_window", message: "미리보기를 열지 못했어요", details: nil))
+            return
+          }
+          while let presented = front.presentedViewController { front = presented }
+          self.controller = preview
+          front.present(preview, animated: true)
+        }
+        if let old { try? FileManager.default.removeItem(at: old) }
+        result(nil)
+      }
+    }
+  }
+
+  func numberOfPreviewItems(in controller: QLPreviewController) -> Int { file == nil ? 0 : 1 }
+  func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem { file! as NSURL }
+  func previewControllerDidDismiss(_ controller: QLPreviewController) {
+    if let directory { try? FileManager.default.removeItem(at: directory) }
+    file = nil
+    directory = nil
+    self.controller = nil
   }
 }

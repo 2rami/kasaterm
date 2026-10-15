@@ -20,8 +20,6 @@ pub(super) struct Panels<'a> {
     pub info: &'a mut state::InfoState,
     pub sessions: &'a mut state::SessionsColState,
     pub mcp: &'a mut state::McpColState,
-    pub share: &'a mut crate::share_panel::State,
-    pub preedit: &'a str,
     pub closed_panes: &'a [ClosedPane],
 }
 
@@ -31,7 +29,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
     // 걸리는데 여기는 그 바깥이라, 자리를 미리 빼 두는 이 계산이 정본이다.
     let top = TITLE_HEIGHT;
     let bottom = (f.viewport.1 - f.status_h).max(top);
-    let Panels { git, info, sessions, mcp, share, preedit, closed_panes } = p;
+    let Panels { git, info, sessions, mcp, closed_panes } = p;
     match info.tab {
         state::SideTab::Git => {
             git.use_panel_snapshot(f.git_view);
@@ -40,13 +38,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
         }
         state::SideTab::Info => {
             let body_top = head(g, info, git, f, top, bottom);
-            let body_top = info_pages(g, info, f, body_top);
-            if info.shared_page() {
-                info.clear_info_targets();
-                crate::share_panel::draw(g, share, f.cursor, preedit, f.x, f.w, body_top, bottom);
-                return;
-            }
-            share.hits.clear();
             info::draw_info_col(g, f.cursor, info, f.x, f.w, body_top, bottom);
             // 「—」 의 까닭·잘린 값의 전문 — 표를 다 그린 뒤 커서 아래 것 하나만.
             let (cx, cy) = f.cursor;
@@ -78,20 +69,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
     }
 }
 
-fn info_pages(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, f: &Frame<'_>, top: f32) -> f32 {
-    info.page_rects.clear();
-    let items=[(state::InfoPage::Runtime,"실행 정보"),(state::InfoPage::SharedFiles,"공유 폴더")];
-    let h=crate::native_controls::CONTROL_HEIGHT;
-    let widths:Vec<_>=items.iter().map(|(_,label)|crate::native_controls::button_width(g,label,h,true)).collect();
-    let (rects,height)=crate::native_layout::flow(&widths,(f.x+14.0,top+6.0,(f.w-28.0).max(0.0),0.0),h,8.0,crate::native_layout::Align::Start);
-    for ((page,label),r) in items.into_iter().zip(rects) {
-        let rect=crate::native_controls::text_button(g,r,f.cursor,label,crate::native_controls::Style{active:info.page==page,..Default::default()});
-        info.page_rects.push((page,rect));
-    }
-    top+height+16.0
-
-}
-
 fn head(
     g: &mut gpu::GpuRenderer,
     info: &mut state::InfoState,
@@ -102,7 +79,6 @@ fn head(
 ) -> f32 {
     g.rect(f.x,top,f.w,bottom-top,theme::bg());
     crate::native_controls::panel(g,(f.x+4.0,top+4.0,(f.w-8.0).max(0.0),(bottom-top-8.0).max(0.0)),f.bg);
-    info.page_rects.clear();
     info::draw_side_tabs(g, f.cursor, info, git, f.x, f.w, top)
 }
 

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'inline_result_fonts.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -47,6 +49,7 @@ String _raw() {
 }
 
 void main() {
+  setUpAll(loadInlineResultFonts);
   testWidgets('대화 보기', (tester) async {
     tester.view.physicalSize = const Size(390 * 3, 844 * 3);
     tester.view.devicePixelRatio = 3;
@@ -90,9 +93,7 @@ void main() {
       MaterialApp(
         theme: buildTheme(Brightness.light),
         home: Scaffold(
-          appBar: AppBar(
-            title: const Text('아리스'),
-          ),
+          appBar: AppBar(title: const Text('아리스')),
           body: ConversationView(
             server: server,
             pane: pane,

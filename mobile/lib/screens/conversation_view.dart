@@ -6,8 +6,9 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../background_grace.dart';
 import '../chat_markdown.dart';
+import '../inline_result.dart';
 import '../conversation.dart';
-import '../links.dart';
+import '../file_link.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
@@ -644,6 +645,9 @@ class _ConversationViewState extends State<ConversationView> {
     final tail = me == null || sender(at + 1) != me;
     return switch (row) {
       ChatBubble b => _Bubble(
+        server: widget.server,
+        machine: widget.pane.machine,
+        cwd: widget.pane.cwd,
         bubble: b,
         name: b.from ?? widget.pane.displayName,
         face: b.from == null ? face : null,
@@ -710,6 +714,9 @@ class _ConversationViewState extends State<ConversationView> {
 
 class _Bubble extends StatelessWidget {
   const _Bubble({
+    required this.server,
+    this.machine,
+    required this.cwd,
     required this.bubble,
     required this.name,
     required this.face,
@@ -720,6 +727,9 @@ class _Bubble extends StatelessWidget {
     required this.md,
   });
 
+  final Server server;
+  final String? machine;
+  final String cwd;
   final ChatBubble bubble;
   final String name;
   final Widget? face;
@@ -748,13 +758,9 @@ class _Bubble extends StatelessWidget {
                   text,
                   style: TextStyle(fontSize: Look.body, height: 1.45, color: ink),
                 )
-              : MarkdownBody(
-                  data: text,
-                  styleSheet: md,
-                  softLineBreak: true,
-                  onTapLink: (_, href, _) {
-                    if (href != null) showLinkSheet(context, href);
-                  },
+              : InlineResultBody(
+                  server: server, machine: machine, text: text, style: md,
+                  onLink: (href) => showResultLink(context, server, href, cwd: cwd, machine: machine),
                 ),
       ],
     );

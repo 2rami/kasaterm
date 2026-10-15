@@ -3392,10 +3392,6 @@ impl App {
         let Some((tab, px)) = Self::autocolscroll_spec() else { return };
         // 탭도 매 틱 다시 세운다 — 칼럼을 여는 다른 경로가 탭을 갈아 끼울 수 있다.
         self.info.tab = tab;
-        let shared = std::env::var("KASATERM_AUTOCOLSCROLL").is_ok_and(|spec| spec.starts_with("share:"));
-        if tab == SideTab::Info {
-            self.select_info_page(if shared { state::InfoPage::SharedFiles } else { state::InfoPage::Runtime });
-        }
         // `KASATERM_AUTOCOLWHEEL=<노치>` — 스크롤을 **손으로 세우는 대신 칼럼 위에서
         // 휠을 굴린다.** 값을 대입하는 길은 스크롤 상한 계산을 통째로 건너뛰므로,
         // 「끝까지 스크롤이 닿나」는 이 길로만 물을 수 있다. 음수면 위로 굴린다.
@@ -3409,7 +3405,6 @@ impl App {
             match tab {
                 SideTab::Sessions => self.sessions_col.scroll = px,
                 SideTab::Mcp => self.mcp_col.scroll = px,
-                SideTab::Info if shared => self.share.scroll = px,
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
             }
@@ -3434,7 +3429,6 @@ impl App {
         let actual = match tab {
             SideTab::Sessions => self.sessions_col.scroll,
             SideTab::Mcp => self.mcp_col.scroll,
-            SideTab::Info if shared => self.share.scroll,
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
         };
@@ -3443,7 +3437,6 @@ impl App {
         let rows = match tab {
             SideTab::Sessions => self.sessions_col.view.len(),
             SideTab::Mcp => self.mcp_col.row_rects.len(),
-            SideTab::Info if shared => self.share.rows.len(),
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
         };
@@ -4458,7 +4451,6 @@ impl App {
             "claude" => SettingsCat::Claude,
             "accounts" => SettingsCat::Accounts,
             "machines" => SettingsCat::Machines,
-            "share" => SettingsCat::Share,
             "theme" => SettingsCat::Theme,
             // 옛 이름 그대로지만 이제 진짜 자기 칸이 있다(2026-08-26 분리) —
             // 이 env 로 「캐릭터 목록」을 보던 밖의 스크립트는 그대로 맞는 화면에 온다.

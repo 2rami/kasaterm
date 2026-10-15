@@ -16,7 +16,7 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 | `kasaterm-turn.sh` | UserPromptSubmit/Stop/PreCompact | 잠정 턴 경계·압축 알림. Stop 자체는 완료 알림의 근거가 아님 |
 | `kasaterm-stop-drain.sh` | 구형 Stop 설정 호환 | 턴 종료 경계만 전달. 새 설정에는 주입하지 않으며 완료 알림을 직접 보내지 않음 |
 | `kasaterm-notify-attention.sh` | Notification | 권한/입력 대기 alert |
-| `auto-imgopen.sh` | PostToolUse(SendUserFile) | 보낸 이미지를 image pane 으로 자동 표시 |
+| `auto-imgopen.sh` | PostToolUse(SendUserFile) | 보낸 이미지 이력만 기록, 자동 창·탭 열기 없음 |
 
 ## 협업 흐름
 

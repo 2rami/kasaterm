@@ -3238,8 +3238,6 @@ impl ApplicationHandler<UserEvent> for App {
         if main_window {
             self.note_human_touch(&event);
         }
-        if main_window && self.main_pointer_modal() { self.share.pending_search_commit = false; }
-        if main_window && !self.main_pointer_modal() && self.share_panel_event(&event) { return; }
         if main_window && !self.main_pointer_modal() && self.sessions_panel_event(&event) { return; }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
@@ -5541,16 +5539,6 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        if self.info.tab == state::SideTab::Info {
-                            if let Some(page) = self.info.page_rects.iter().find(|(_, rect)| inside(rect)).map(|(page, _)| *page) {
-                                self.select_info_page(page);
-                                window.request_redraw();
-                                return;
-                            }
-                        }
-                        if self.info.shared_page() && self.share_click(cx, cy) {
-                            self.chrome_dirty = true; window.request_redraw(); return;
-                        }
                         if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
                             self.chrome_dirty = true;
                             window.request_redraw();
@@ -7193,8 +7181,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if self.side_column_covers_workspace() && !self.git.commit_focused
-                    && self.mcp_col.add.is_none()
-                    && !(self.info.shared_page() && self.share.search_focus) {
+                    && self.mcp_col.add.is_none() {
                     self.discard_modal_ime(&ime);
                     return;
                 }

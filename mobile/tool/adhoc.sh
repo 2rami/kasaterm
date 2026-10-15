@@ -2,7 +2,7 @@
 # 등록된 기기에만 깔리는 Ad Hoc 판 — TestFlight 없이 폰·아이패드에 설치 링크로 넣는다.
 # 주소를 굽지 않는다(testflight.sh 와 같다). 서명은 testflight.sh 와 같은 API 키 자동 서명이다.
 #
-#   tool/adhoc.sh               아카이브 → Ad Hoc ipa → 관문에 올리고 설치 링크를 KASA-share 에 남긴다
+#   tool/adhoc.sh               아카이브 → Ad Hoc ipa → 관문에 올리고 설치 링크를 빌드 출력에 남긴다
 #   tool/adhoc.sh --show        위에 더해 링크를 사람이 보는 기기(폰이면 폰)로 띄운다
 #   tool/adhoc.sh --no-publish  ipa 까지만(build/ios/adhoc/)
 #   tool/adhoc.sh --publish     이미 만든 ipa 를 다시 올린다
@@ -133,20 +133,15 @@ echo "$url" > "$out/link"
 echo "올렸다 — $build"
 echo "설치 링크: $url"
 
-if command -v kasaterm-cli >/dev/null; then
-  dir=$(kasaterm-cli share new "iOS-설치-링크" 2>/dev/null || true)
-  if [ -n "$dir" ] && [ -d "$dir" ]; then
-    cat > "$dir/설치 링크.md" <<MD
+cat > "$out/install-link.md" <<MD
 # KASATERM $build
 
-등록된 폰·아이패드의 Safari 에서 열고 「설치」를 누른다.
+등록된 폰·아이패드의 Safari 에서 열고 설치한다.
 
 $url
-
-다음 판을 올리면 이 링크는 하나 뒤 판까지만 남고 그다음엔 사라진다.
 MD
-    echo "KASA-share: $dir"
-  fi
-  [ "$show" = 1 ] && kasaterm-cli share open "$url"
+if [ "$show" = 1 ] && command -v kasaterm-cli >/dev/null; then
+  kasaterm-cli share open "$url"
 fi
+
 exit 0

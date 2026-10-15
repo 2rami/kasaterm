@@ -508,7 +508,6 @@ impl App {
 
     #[cfg(not(target_os = "macos"))]
     fn sync_ime_cursor_area(&mut self, ov: &GpuOverlay) {
-        if self.git.col_visible && self.info.shared_page() && self.share.search_focus { return; }
         let Some(window) = self.window.as_ref() else {
             return;
         };
@@ -755,7 +754,6 @@ impl App {
         self.pump_info_prompts();
         self.pump_sessions_col();
         self.pump_mcp_col();
-        self.pump_share_panel();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -5340,8 +5338,6 @@ impl App {
                         info: &mut self.info,
                         sessions: &mut self.sessions_col,
                         mcp: &mut self.mcp_col,
-                        share: &mut self.share,
-                        preedit: if self.ime_focus == Some(ImeFocus::ShareSearch) { &self.preedit } else { "" },
                         closed_panes: &self.closed_panes,
                     },
                     &side_column::Frame {
@@ -6734,7 +6730,6 @@ impl App {
             }
         }
         self.weather_take_spots(weather_spots);
-        self.sync_share_ime_cursor();
         if let Some(output) = settings_paint {
             self.finish_native_settings_paint(output);
         }

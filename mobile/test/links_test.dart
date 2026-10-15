@@ -2,7 +2,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/grid.dart';
 import 'package:kasaterm_mobile/links.dart';
 
-List<Run> row(String text) => [Run(text, const DefaultColor(), const DefaultColor(), 0)];
+List<Run> row(String text) => [
+  Run(text, const DefaultColor(), const DefaultColor(), 0),
+];
 
 void main() {
   test('https 주소를 찾고 끝의 구두점은 뗀다', () {
@@ -13,9 +15,7 @@ void main() {
   });
 
   test('www. 는 https 를 붙이고, 닫는 괄호는 짝이 있을 때만 남긴다', () {
-    final hits = detectLinks([
-      row('www.a.com/x) 그리고 (https://b.com/y)'),
-    ], 80);
+    final hits = detectLinks([row('www.a.com/x) 그리고 (https://b.com/y)')], 80);
     expect(hits.map((h) => h.url), ['https://www.a.com/x', 'https://b.com/y']);
   });
 
@@ -37,5 +37,25 @@ void main() {
   test('두 칸 글자 뒤의 열 번호가 칸과 맞는다', () {
     final hits = detectLinks([row('한글 https://k.com')], 80);
     expect(hits.single.segments, [(0, 5, 18)]);
+  });
+  test('URL ends before Korean prose after its closing parenthesis', () {
+    final hits = detectLinks([
+      row('스마트 폴더 (https://support.apple.com/guide/a)처럼 찾으세요'),
+    ], 100);
+    expect(hits.single.url, 'https://support.apple.com/guide/a');
+    final nested = detectLinks([row('(https://example.com/Foo_(bar))처럼')], 100);
+    expect(nested.single.url, 'https://example.com/Foo_(bar)');
+  });
+
+  test('wide glyph padding is not part of a Korean URL', () {
+    final hits = detectLinks([row('https://example.com/한글')], 100);
+    expect(hits.single.url, 'https://example.com/한글');
+    expect(hits.single.segments.single.$3, 24);
+  });
+
+  test('a wide URL character at the wrap edge keeps both rows clickable', () {
+    final hits = detectLinks([row('https://a/한'), row('글/end')], 12);
+    expect(hits.single.url, 'https://a/한글/end');
+    expect(hits.single.segments, [(0, 0, 12), (1, 0, 6)]);
   });
 }

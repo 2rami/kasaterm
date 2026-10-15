@@ -15,15 +15,23 @@ class LinkHit {
   /// (행, 시작 열, 끝 열(exclusive)) — 접힌 주소는 여러 행에 걸친다.
   final List<(int, int, int)> segments;
 
-  bool covers(int row, int col) => segments.any(
-    (s) => s.$1 == row && col >= s.$2 && col < s.$3,
-  );
+  bool covers(int row, int col) =>
+      segments.any((s) => s.$1 == row && col >= s.$2 && col < s.$3);
 }
 
 bool _isUrlChar(int r) {
   if (r <= 0x20 || r == 0x7f) return false;
   return switch (String.fromCharCode(r)) {
-    '"' || "'" || '`' || '<' || '>' || '{' || '}' || '|' || '\\' || '^' => false,
+    '"' ||
+    "'" ||
+    '`' ||
+    '<' ||
+    '>' ||
+    '{' ||
+    '}' ||
+    '|' ||
+    '\\' ||
+    '^' => false,
     _ => true,
   };
 }
@@ -61,7 +69,13 @@ bool _joins(List<int> prev, List<int> next, int cols) {
   if (prev.isEmpty || next.isEmpty || cols <= 0) return false;
   // 폭을 꽉 채운 줄만 접힌 것이다 — 짧은 줄 끝의 주소는 거기서 끝난다.
   if (prev.length < cols) return false;
-  return _isUrlChar(prev.last) && _isUrlChar(next.first);
+  final last =
+      prev.length > 1 &&
+          prev.last == 0x20 &&
+          cellWidth(prev[prev.length - 2]) == 2
+      ? prev[prev.length - 2]
+      : prev.last;
+  return _isUrlChar(last) && _isUrlChar(next.first);
 }
 
 /// `lines[from..to)` 에서 URL 을 찾는다. 행 번호는 `lines` 기준 그대로.
@@ -73,7 +87,7 @@ List<LinkHit> detectLinks(
 }) {
   final end = to ?? lines.length;
   final chars = <int>[];
-  final pos = <(int, int)?>[];
+  final pos = <(int, int, int)?>[];
   List<int>? prev;
   for (var r = from; r < end; r++) {
     final cells = _cellsOf(lines[r]);
@@ -82,8 +96,9 @@ List<LinkHit> detectLinks(
       pos.add(null);
     }
     for (var c = 0; c < cells.length; c++) {
+      if (cells[c] == 0x20 && c > 0 && cellWidth(cells[c - 1]) == 2) continue;
       chars.add(cells[c]);
-      pos.add((r, c));
+      pos.add((r, c, cellWidth(cells[c])));
     }
     prev = cells;
   }
@@ -91,11 +106,11 @@ List<LinkHit> detectLinks(
   final out = <LinkHit>[];
   var i = 0;
   while (i < n) {
-    final head = chars[i];
+    final head = String.fromCharCode(chars[i]).toLowerCase().codeUnitAt(0);
     if (head == 0x68 || head == 0x66 || head == 0x77) {
       final tail = String.fromCharCodes(
         chars.sublist(i, i + 8 > n ? n : i + 8),
-      );
+      ).toLowerCase();
       final isWww = tail.startsWith('www.');
       final scheme =
           tail.startsWith('https://') ||
@@ -103,7 +118,17 @@ List<LinkHit> detectLinks(
           tail.startsWith('file://');
       if (scheme || isWww) {
         var j = i;
+        var parentheses = 0;
+        var brackets = 0;
         while (j < n && _isUrlChar(chars[j])) {
+          final ch = String.fromCharCode(chars[j]);
+          if ((ch == ')' && parentheses == 0) || (ch == ']' && brackets == 0)) {
+            break;
+          }
+          if (ch == '(') parentheses++;
+          if (ch == ')') parentheses--;
+          if (ch == '[') brackets++;
+          if (ch == ']') brackets--;
           j++;
         }
         final stop = _trimTrailing(chars, i, j);
@@ -115,9 +140,9 @@ List<LinkHit> detectLinks(
             if (p == null) continue;
             final last = segs.isEmpty ? null : segs.last;
             if (last != null && last.$1 == p.$1 && last.$3 == p.$2) {
-              segs[segs.length - 1] = (last.$1, last.$2, last.$3 + 1);
+              segs[segs.length - 1] = (last.$1, last.$2, p.$2 + p.$3);
             } else {
-              segs.add((p.$1, p.$2, p.$2 + 1));
+              segs.add((p.$1, p.$2, p.$2 + p.$3));
             }
           }
           out.add(LinkHit(url, segs));
@@ -144,56 +169,63 @@ LinkHit? linkAt(List<List<Run>> lines, int cols, int row, int col) {
 
 /// 눌린 주소 — 열거나 복사한다. 데스크톱은 클릭 즉시 열지만 폰은 손가락이 굵어 오누름이
 /// 잦고, 학생 화면의 주소는 옮겨 붙일 일도 많다.
-Future<void> showLinkSheet(BuildContext context, String url) =>
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheet) {
-        final theme = Theme.of(sheet);
-        final uri = Uri.tryParse(url);
-        final openable =
-            uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                child: SelectableText(
-                  url,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontFamily: 'TermMono',
-                  ),
-                ),
+Future<void> showLinkSheet(
+  BuildContext context,
+  String url, {
+  Future<void> Function()? onOpenFile,
+}) => showModalBottomSheet<void>(
+  context: context,
+  showDragHandle: true,
+  builder: (sheet) {
+    final theme = Theme.of(sheet);
+    final uri = Uri.tryParse(url);
+    final openable =
+        uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: SelectableText(
+              url,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontFamily: 'TermMono',
               ),
-              ListTile(
-                leading: const Icon(Icons.open_in_new),
-                title: const Text('브라우저로 열기'),
-                enabled: openable,
-                onTap: () {
-                  Navigator.of(sheet).pop();
-                  launchUrl(uri!, mode: LaunchMode.externalApplication);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.copy),
-                title: const Text('주소 복사'),
-                onTap: () async {
-                  await Clipboard.setData(ClipboardData(text: url));
-                  if (sheet.mounted) Navigator.of(sheet).pop();
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(const SnackBar(content: Text('주소를 복사했다')));
-                  }
-                },
-              ),
-              const SizedBox(height: 4),
-            ],
+            ),
           ),
-        );
-      },
+          ListTile(
+            leading: const Icon(Icons.open_in_new),
+            title: Text(onOpenFile == null ? '브라우저로 열기' : '파일 열기'),
+            enabled: openable || onOpenFile != null,
+            onTap: () async {
+              Navigator.of(sheet).pop();
+              if (onOpenFile != null) {
+                await onOpenFile();
+              } else {
+                await launchUrl(uri!, mode: LaunchMode.externalApplication);
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.copy),
+            title: const Text('주소 복사'),
+            onTap: () async {
+              await Clipboard.setData(ClipboardData(text: url));
+              if (sheet.mounted) Navigator.of(sheet).pop();
+              if (context.mounted) {
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(const SnackBar(content: Text('주소를 복사했다')));
+              }
+            },
+          ),
+          const SizedBox(height: 4),
+        ],
+      ),
     );
+  },
+);
 
 /// 길게 누른 줄 — 글자를 통째로 복사한다(주소가 아니어도).
 Future<void> copyLine(BuildContext context, List<Run> runs) async {

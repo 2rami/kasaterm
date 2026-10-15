@@ -26,7 +26,6 @@
 - `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version. `chrome/sidebar.rs`의 `SidebarMetrics`가 폭별 목록·배치도·보관·별도창 높이를 로컬·원격·스크롤에 함께 제공한다.
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
-- `share_panel.rs` + `share_panel/{input,files,paint}.rs` — 공유 파일의 최근/폴더 탐색·검색·입력 소유권·읽기 전용 미리보기. 목록·이미지·바로가기 작업은 워커에서 읽고, 이전 선택의 늦은 응답은 세대로 거른다. 설정은 `native_settings/share.rs`, 공통 색인과 안전한 로컬 경로는 `kasa-mcp/share/catalog.rs`, 바로가기 위치는 `share/shortcut.rs`가 맡는다. 계약은 `docs/share-sync.md`.
 - `session/accounts/sync.rs` — 다른 기기의 Claude 계정 선택: 검증 신원 일치·중복 별명 판정, 최신 선택 직렬 전파와 기기별 적용 확인. 계약은 `docs/agent-account-selection.md`.
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
 - `sesscol.rs` + `sesscol/{model,paint}.rs` — 오른쪽 「기록」의 대화/닫은 칸 보기, 범위·하네스 필터와 선택 상세. 수집은 워커에서 하고 범위가 바뀐 뒤의 늦은 결과를 거른다. 대화 선택은 실행하지 않으며 별도 이어가기 버튼이 기존 ResumeSession 경로를 부른다. 닫은 칸의 UI 신원은 재사용되는 pane 번호와 분리한다.
@@ -98,3 +97,7 @@
 - `links.rs` · `links/scan.rs` — 실제 터미널 셀 기준 URL·파일 경로 범위와 수정키 클릭, 로컬/원격 파일 열기. `links/probe.rs`는 격리 화면의 좌표 클릭을 검사한다. `inline_image.rs`는 GUI 초기화 전에 처리하는 Kitty 이미지 출력이며 `imgopen`의 기본 경로다.
 
 - `inline_result.rs` — CLI가 공통으로 출력하는 이미지 표시 블록·내용 해시 PNG 캐시·행별 클리핑. `inline_image.rs`의 도구 출력과 `terminal_scene.rs`의 실제 그리기를 연결하며 Claude/Codex 래퍼는 같은 표시 지침을 전달한다.
+
+- `mobile/lib/inline_result.dart` — 대화의 등록 이미지 블록 파싱·원본 기기별 인증 이미지 읽기. 저장소 경로와 ID 검사는 `kasa_socket::inline_results`, HTTP 창구는 `http/files.rs`가 공유한다.
+
+- `mobile/lib/file_link.dart` — 대화·터미널 링크의 원본 기기 경로 해석과 파일 열기. `Server.resultFileBytes`가 인증된 파일을 받고 `ios/Runner/AppDelegate.swift`의 Quick Look 다리가 임시 미리보기를 연다.

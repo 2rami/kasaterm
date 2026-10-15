@@ -49,7 +49,7 @@ abstract final class Look {
   static const settingRow = 56.0;
   static const tile = 32.0;
 
-  /// 목록 줄 썸네일 — 파일 40, 폴더 48(KASA-share).
+  /// 목록 줄 썸네일 — 파일 40, 폴더 48.
   static const thumb = 40.0;
   static const thumbLg = 48.0;
 

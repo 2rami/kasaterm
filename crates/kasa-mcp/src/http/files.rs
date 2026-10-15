@@ -74,6 +74,30 @@ async fn image_file_handler(
     }
 }
 
+async fn inline_result_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    if let Some(denied) = super::auth::guest_denied(&req) {
+        return denied;
+    }
+    let id = params.get("id").map(String::as_str).unwrap_or("");
+    if !kasa_socket::inline_results::valid_id(id) {
+        return (StatusCode::BAD_REQUEST, "invalid image id").into_response();
+    }
+    match kasa_socket::inline_results::read(id) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
+            ],
+            bytes,
+        ).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "image unavailable").into_response(),
+    }
+}
+
 /// `GET /sent-images?surface=<id>&n=N` — 그 방의 sent-images.jsonl 에서 이 pane 이
 /// SendUserFile 로 보낸 이미지 경로 최근 N 개(auto-imgopen 훅이 기록). BA GUI 대화창
 /// 인라인 이미지 소스. transcript 엔 경로가 안 남아(input:{}) 훅 기록이 유일.
@@ -326,6 +350,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let sent_images_backend = backend.clone();
     let paste_image_backend = backend.clone();
     axum::Router::new()
+        .route("/term/inline-result", get(inline_result_handler))
         .route(
             "/open-image",
             get(move |q: Query<std::collections::HashMap<String, String>>| {
@@ -386,4 +411,25 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
                 room_cd_handler(room_cd_backend.clone(), q)
             }),
         )
+}
+
+#[cfg(test)]
+mod inline_result_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inline_result_rejects_guests_and_invalid_ids() {
+        use axum::http::StatusCode;
+        let request = |owner: bool| {
+            let mut req = axum::extract::Request::new(axum::body::Body::empty());
+            req.extensions_mut().insert(MobileAuth(crate::mobile::MobileUser {
+                name: "fixture".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner,
+            }));
+            req
+        };
+        let params = || Query(std::collections::HashMap::from([("id".into(), "../../secret".into())]));
+        assert_eq!(inline_result_handler(params(), request(false)).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(inline_result_handler(params(), request(true)).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(inline_result_handler(Query(Default::default()), request(true)).await.status(), StatusCode::BAD_REQUEST);
+    }
 }

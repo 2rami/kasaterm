@@ -11,7 +11,6 @@ pub(crate) mod device_account;
 #[path = "native_appearance_preview.rs"]
 mod appearance_preview;
 pub(crate) mod devices;
-mod share;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
@@ -843,7 +842,6 @@ pub(crate) struct Snapshot {
     pub(crate) account_usage_expanded: std::collections::HashSet<String>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
     pub(crate) machine_edit: Option<devices::Editor>,
-    pub(crate) share: crate::share_panel::SettingsView,
     pub(crate) machines: Arc<Vec<MachineRow>>,
     pub(crate) device_names: Arc<Vec<crate::render::pane_identity::DeviceNameRow>>,
     pub(crate) chrome_machine: String,
@@ -1096,7 +1094,6 @@ impl App {
             dropdown_scroll: scene.dropdown_scroll(),
             account_label_edit: self.account_label_edit.clone(),
             machine_edit: self.machine_edit.clone(),
-            share: self.share.settings_view(),
             machines: cache.machines.clone(),
             device_names: cache.device_names.clone(),
             chrome_machine: cache.chrome_machine.clone(),
@@ -2592,7 +2589,6 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
         SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 크롬 chrome 브라우저 device connection machine browser",
-        SettingsCat::Share => "공유 파일 폴더 바탕화면 위치 바로가기 동기화 share drive desktop shortcut sync",
         SettingsCat::Pet => "펫 바탕화면 캐릭터 알림 말풍선 움직임 pet desktop notification",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
@@ -2855,7 +2851,6 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        SettingsCat::Share => share::paint(g, snapshot, &mut hits, content_x, &mut y, content_w),
         SettingsCat::Theme => paint_themes(
             g,
             snapshot,
@@ -6925,7 +6920,6 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "server",
             "다른 기기와의 연결과 카사크롬이 쓸 크롬을 정합니다",
         ),
-        SettingsCat::Share => ("공유", "folder", "공유 파일과 이 기기의 바로가기 위치를 정합니다"),
         SettingsCat::Theme => ("캐릭터 테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "테마를 섞어 사용할 캐릭터를 고릅니다"),
         SettingsCat::Feedback => (

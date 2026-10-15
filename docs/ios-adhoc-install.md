@@ -37,7 +37,7 @@ category == "release"'`(installd·appstored 줄과 시각을 맞춰 볼 수 있�
 ## 판 올리기
 
 ```sh
-mobile/tool/adhoc.sh          # 아카이브 → Ad Hoc ipa → 미니에서 재서명 → 링크 공개, KASA-share 에 링크
+mobile/tool/adhoc.sh          # 아카이브 → Ad Hoc ipa → 미니에서 재서명 → 링크 공개, build/ios/adhoc/install-link.md 에 링크
 mobile/tool/adhoc.sh --show   # 링크를 사람이 보는 기기로도 띄운다
 ```
 

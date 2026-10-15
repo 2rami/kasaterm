@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'inline_result_fonts.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -119,6 +121,7 @@ http.Response _answer(http.Request req) {
 }
 
 void main() {
+  setUpAll(loadInlineResultFonts);
   testWidgets('허브 미니맵', (tester) async {
     tester.view.physicalSize = const Size(390 * 3, 520 * 3);
     tester.view.devicePixelRatio = 3;

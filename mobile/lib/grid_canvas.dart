@@ -575,6 +575,7 @@ class GridCanvas extends StatefulWidget {
     required this.palette,
     this.fontSize = 13,
     this.contain = false,
+    this.onOpenLink,
   });
 
   final Grid grid;
@@ -584,6 +585,7 @@ class GridCanvas extends StatefulWidget {
 
   /// 격자 전체가 칸에 들어가게 줄여 그린다([FillViewer.contain]).
   final bool contain;
+  final ValueChanged<String>? onOpenLink;
 
   @override
   State<GridCanvas> createState() => _GridCanvasState();
@@ -627,6 +629,7 @@ class _GridCanvasState extends State<GridCanvas> {
       background: widget.palette.bg,
       contain: widget.contain,
       child: _LinkTaps(
+        onOpenLink: widget.onOpenLink,
         lines: grid.lines,
         cols: grid.cols,
         metrics: _metrics,
@@ -663,12 +666,14 @@ class WrappedCanvas extends StatefulWidget {
     this.onViewport,
     this.onWheel,
     this.fullScreen = false,
+    this.onOpenLink,
   });
 
   /// 대체 화면(Claude 전체 화면·vim)이다. 지난 줄이 없어 화면보다 짧으면 바닥 대신 위에 붙인다 —
   /// 폰은 보기만 해서는 원본 크기를 안 바꾸니 데스크톱 칸이 작으면(24×15) 그 줄 수뿐이고, 바닥에
   /// 앉히면 위쪽이 통째로 빈다. 터미널이 대체 화면을 그리는 자리(맨 위)와도 같다.
   final bool fullScreen;
+  final ValueChanged<String>? onOpenLink;
 
   /// 앱이 스스로 굴리는 화면(Claude 전체 화면 — 스크롤백 0)이면 세로 끌기를 지난 줄 넘김 대신
   /// 휠 줄로 넘긴다(양수 = 위, 지난 내용).
@@ -990,6 +995,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                     width: constraints.maxWidth,
                     height: boxH,
                     child: _LinkTaps(
+                      onOpenLink: widget.onOpenLink,
                       lines: view.lines,
                       cols: cols,
                       metrics: metrics,
@@ -1012,6 +1018,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                   // 붙잡아 둔 입력상자는 스크롤 속 같은 줄의 사본이다 — 고르기는 스크롤 쪽에서만.
                   child: SelectionContainer.disabled(
                     child: _LinkTaps(
+                      onOpenLink: widget.onOpenLink,
                       lines: tail.lines,
                       cols: cols,
                       metrics: metrics,
@@ -1049,12 +1056,14 @@ class _LinkTaps extends StatelessWidget {
     required this.metrics,
     required this.child,
     this.copyLines = false,
+    this.onOpenLink,
   });
 
   final List<List<Run>> lines;
   final int cols;
   final _CellMetrics metrics;
   final bool copyLines;
+  final ValueChanged<String>? onOpenLink;
   final Widget child;
 
   (int, int) _cell(Offset p) =>
@@ -1075,7 +1084,13 @@ class _LinkTaps extends StatelessWidget {
           ..onLink = _link
           ..onTapUp = (d) {
             final hit = _link(d.localPosition);
-            if (hit != null) showLinkSheet(context, hit.url);
+            if (hit != null) {
+              if (onOpenLink != null) {
+                onOpenLink!(hit.url);
+              } else {
+                showLinkSheet(context, hit.url);
+              }
+            }
           },
       ),
       if (copyLines)

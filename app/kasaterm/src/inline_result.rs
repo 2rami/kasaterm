@@ -5,22 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const INSTRUCTIONS: &str = "To show a result image inside this terminal, run `imgopen --block /absolute/path/to/image.png`, then include the returned fenced display block verbatim in your user-facing response. Do not omit, indent, wrap, summarize or escape its marker rows. Add a normal file link outside the block. Kasaterm draws the image in those reserved rows for both Claude Code and Codex; view_image/Read only lets the model inspect it. Do not open an image tab/window unless the user explicitly asks. Do not emit Kitty escapes from agent tool output.";
 
-fn root() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("KASATERM_INLINE_RESULT_DIR").filter(|s| !s.is_empty()) {
-        return Some(path.into());
-    }
-    if let Some(settings) = std::env::var_os("KASATERM_SETTINGS_FILE") {
-        return Some(PathBuf::from(settings).parent()?.join("inline-results"));
-    }
-    Some(kasa_socket::home_dir()?.join(".config/kasaterm/inline-results"))
-}
-
-fn valid_id(id: &str) -> bool {
-    id.len() == 16
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
+use kasa_socket::inline_results::{root, valid_id};
 
 pub(crate) fn register(image: &image::DynamicImage) -> anyhow::Result<String> {
     let root = root().ok_or_else(|| anyhow::anyhow!("이미지 저장 위치를 찾을 수 없습니다"))?;

@@ -32,7 +32,6 @@ mod input;
 mod limit_reset;
 mod layout;
 mod lineedit;
-mod share_panel;
 mod markdown;
 mod board_digest;
 mod transfer_endpoints;
@@ -4505,7 +4504,6 @@ pub(crate) enum ImeFocus {
     /// MCP 탭의 URL 서버 추가 칸(이름·주소 두 칸을 한 문맥으로 본다 — 조합 중에
     /// Tab 으로 칸을 옮기면 그 음절은 옮기기 전 칸에 확정되는 것이 맞다).
     McpAdd,
-    ShareSearch,
     /// 좌측 사이드바 방 이름 인라인 편집(윈도우 인덱스).
     RoomRename(usize),
     PathSearch,
@@ -4581,7 +4579,6 @@ pub(crate) enum SettingsCat {
     /// 원격 pane·거울도 같은 명부를 쓴다. 손으로 json 을 고치던 것을 화면으로
     /// 올렸다(2026-09-07 지시).
     Machines,
-    Share,
     /// 캐릭터 세트 — 로스터·색·그림·persona 를 한 벌로 고르는 곳. 예전엔
     /// `Students`(그림 override 안내 한 줄)였는데, 테마 팩이 생기면서 「누가
     /// 나오는가」를 통째로 정하는 자리가 됐다.
@@ -4604,7 +4601,7 @@ pub(crate) enum SettingsCat {
 impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
-    /// `Weather`·`Share`는 웹 설정에 대응하는 페이지가 없어 이 대조에서 제외한다.
+    /// `Weather`는 웹 설정에 대응하는 페이지가 없어 이 대조에서 제외한다.
     #[allow(dead_code)]
     pub(crate) const ALL: [SettingsCat; 11] = [
         Self::General,
@@ -4627,7 +4624,7 @@ impl SettingsCat {
     /// 찾는 사람이 캐릭터 칸부터 지나야 했다(2026-10-07). 묶음 머리는 `native_settings::NAV_GROUPS`.
     /// `Shell` 은 글꼴·커서가 「외형」으로 간 뒤 셸 하나만 남아 「앱 일반」에 합쳤다(2026-10-07 승인) —
     /// 값은 딥링크·웹 키로 남고, 열면 「앱 일반」이 선다(`SettingsScene::set_category`).
-    pub(crate) const NAV: [SettingsCat; 11] = [
+    pub(crate) const NAV: [SettingsCat; 10] = [
         Self::Appearance,
         Self::Statusbar,
         Self::Weather,
@@ -4636,7 +4633,6 @@ impl SettingsCat {
         Self::Students,
         Self::General,
         Self::Machines,
-        Self::Share,
         Self::Pet,
         Self::Feedback,
     ];
@@ -4662,7 +4658,6 @@ impl SettingsCat {
             Self::Claude => "claude",
             Self::Accounts => "accounts",
             Self::Machines => "machines",
-            Self::Share => "share",
             Self::Theme => "theme",
             Self::Students => "students",
             Self::Pet => "pet",
@@ -4757,7 +4752,6 @@ impl SettingsInput {
 /// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsAction {
-    Share(share_panel::Action),
     DeviceAccount(native_settings::device_account::Action),
     PreferredAgent(&'static str),
     AgentPermission(&'static str, &'static str),
@@ -5825,7 +5819,6 @@ struct App {
     /// 우측 칼럼의 MCP·Skill 탭 — 하네스별로 무엇이 붙어 있나. 위 둘과 칼럼
     /// 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
     mcp_col: state::McpColState,
-    share: share_panel::State,
     design_study: Option<design_study::State>,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
@@ -6428,7 +6421,6 @@ impl App {
                 scope_all: std::env::var("KASATERM_TEST_SESSIONS").is_ok_and(|v| v == "all"),
                 ..Default::default()
             },
-            share: share_panel::State::default(),
             design_study: design_study::State::from_env(),
             mcp_col: state::McpColState {
                 // 추가 칸은 열어야만 보이는데 헤드리스 캡처는 클릭을 못 한다.

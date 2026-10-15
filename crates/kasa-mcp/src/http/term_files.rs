@@ -97,7 +97,7 @@ fn term_tree_list(q: Query<std::collections::HashMap<String, String>>) -> impl I
     Json(serde_json::json!({ "ok": true, "path": path, "entries": entries }))
 }
 
-/// 파일 하나 — 다른 기기에서 열어 보기용. 4MB 까지만.
+/// 파일 링크를 원본 기기에서 읽는다. 폰 미리보기와 PC가 같은 32MB 한도를 쓴다.
 async fn term_file_get(
     q: Query<std::collections::HashMap<String, String>>,
     req: axum::extract::Request,
@@ -110,8 +110,8 @@ async fn term_file_get(
         return (axum::http::StatusCode::BAD_REQUEST, "`path`(절대경로) 가 필요해요").into_response();
     };
     match std::fs::metadata(&path) {
-        Ok(m) if m.is_file() && m.len() <= 4 * 1024 * 1024 => {}
-        Ok(m) if m.is_file() => return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "4MB 를 넘어요").into_response(),
+        Ok(m) if m.is_file() && m.len() <= 32 * 1024 * 1024 => {}
+        Ok(m) if m.is_file() => return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "32MB 를 넘어요").into_response(),
         _ => return (axum::http::StatusCode::NOT_FOUND, "그런 파일이 없어요").into_response(),
     }
     match std::fs::read(&path) {

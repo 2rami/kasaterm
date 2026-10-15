@@ -631,6 +631,39 @@ class Server {
     return query == null ? u : u.replace(queryParameters: query);
   }
 
+  Future<Uint8List> resultFileBytes(String path, {String? machine}) async {
+    if (path.startsWith('~/')) {
+      final home = await _getJson(
+        'term/path',
+        query: {'path': '/'},
+        machine: machine,
+        timeout: const Duration(seconds: 15),
+      );
+      if (home is! Map ||
+          home['home'] is! String ||
+          (home['home'] as String).isEmpty)
+        throw const ServerException('원본 기기의 홈 폴더를 찾지 못했어요');
+      path = '${home['home']}/${path.substring(2)}';
+    }
+    final http.Response response;
+    try {
+      response = await _client
+          .get(uri('term/file', query: {'path': path}, machine: machine))
+          .timeout(const Duration(seconds: 30));
+    } catch (_) {
+      throw const ServerException('원본 기기에서 파일을 받지 못했어요');
+    }
+    if (response.statusCode == 413)
+      throw const ServerException('32MB를 넘는 파일은 원본 기기에서 열어 주세요');
+    if (response.statusCode == 404)
+      throw const ServerException('그 파일을 찾을 수 없어요');
+    if (response.statusCode != 200)
+      throw ServerException('파일을 받지 못했어요', status: response.statusCode);
+    if (response.bodyBytes.length > 32 * 1024 * 1024)
+      throw const ServerException('파일이 너무 커요');
+    return response.bodyBytes;
+  }
+
   Future<Uint8List> imageBytes(Uri uri) async {
     if (!isDirect(uri) && (!sameOrigin(root, uri) || !uri.path.startsWith(root.path))) {
       throw const ServerException('이미지 주소를 확인하지 못했어요.');
@@ -1529,57 +1562,6 @@ class Server {
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
 
-  /// 결과물 폴더 KASA-share — 모든 기기에 같은 내용으로 맞춰지니 주소의 기계 하나만 묻는다.
-  Future<ShareListing> shareList() async {
-    final Object? j;
-    try {
-      j = await _getJson('term/share/list');
-    } on ServerException catch (e) {
-      throw _shareProblem(e.status) ?? e;
-    }
-    if (j is! Map || j['ok'] != true) {
-      throw ServerException(
-        (j is Map ? j['error'] as String? : null) ?? 'KASA-share 목록을 못 읽었어요',
-      );
-    }
-    return ShareListing.fromJson(j.cast<String, Object?>());
-  }
-
-  /// 경로형 주소 — html 안의 상대 경로 자원(css·그림)이 같은 폴더로 풀린다.
-  Uri shareFileUri(String path) => uri(
-    'term/share/f/${path.split('/').map(Uri.encodeComponent).join('/')}',
-  );
-
-  /// 앱 안에서 글로 보는 파일(마크다운·텍스트)의 본문.
-  Future<String> shareText(String path) async {
-    final http.Response res;
-    try {
-      res = await _client.get(shareFileUri(path));
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
-    if (res.statusCode != 200) {
-      throw _shareProblem(res.statusCode) ??
-          ServerException(
-            '${describe()} 응답 ${res.statusCode} (term/share/file)',
-            status: res.statusCode,
-          );
-    }
-    return utf8.decode(res.bodyBytes, allowMalformed: true);
-  }
-
-  /// 서버가 영어 한 마디로 거절하는 까닭을 사람 말로.
-  static ServerException? _shareProblem(int? status) => switch (status) {
-    403 => const ServerException(
-      '주인 주소로 붙어야 KASA-share 를 볼 수 있어요',
-      status: 403,
-    ),
-    404 => const ServerException('그 파일이 이제 없어요', status: 404),
-    413 => const ServerException('32MB 가 넘어 폰에서 못 열어요', status: 413),
-    503 => const ServerException('이 기기의 KASA-share 가 꺼져 있어요', status: 503),
-    _ => null,
-  };
-
   void close() {
     if (_closed) return;
     _closed = true;
@@ -1709,154 +1691,6 @@ class Note {
     url: j['url'] as String? ?? '',
   );
 }
-
-/// `term/share/list` 한 벌 — 날짜-주제 폴더(최신순)와 폴더 밖 낱장.
-class ShareListing {
-  const ShareListing({
-    required this.name,
-    required this.folders,
-    required this.files,
-    this.sync,
-  });
-
-  final String name;
-  final List<ShareFolder> folders;
-  final List<ShareFile> files;
-  final ShareSync? sync;
-
-  bool get isEmpty => folders.isEmpty && files.isEmpty;
-
-  static ShareListing fromJson(Map<String, Object?> j) => ShareListing(
-    name: j['name'] as String? ?? 'KASA-share',
-    folders: [
-      for (final e in (j['folders'] as List?) ?? const [])
-        if (e is Map) ShareFolder.fromJson(e.cast<String, Object?>()),
-    ],
-    files: ShareFile.listOf(j['files']),
-    sync: j['sync'] is Map
-        ? ShareSync.fromJson((j['sync'] as Map).cast<String, Object?>())
-        : null,
-  );
-}
-
-class ShareSync {
-  const ShareSync({
-    required this.updated,
-    required this.peers,
-    required this.failed,
-    required this.pausedDeletes,
-  });
-  final DateTime updated;
-  final int peers;
-  final int failed;
-  final int pausedDeletes;
-
-  String get summary {
-    if (pausedDeletes > 0) return '파일이 많이 사라져 삭제 동기화를 멈췄어요';
-    if (failed > 0) return '기기 $failed대 연결 확인 필요 · 받은 파일은 볼 수 있어요';
-    if (updated.millisecondsSinceEpoch == 0) return '기기 간 동기화를 확인하는 중…';
-    if (DateTime.now().difference(updated).inSeconds > 90) {
-      return '동기화 확인이 늦어지고 있어요 · 받은 파일 표시 중';
-    }
-    if (peers == 0) return '이 기기에 받은 파일 · 연결된 다른 기기 없음';
-    return '기기 $peers대에서 받기 확인 · 클라우드 보관은 아님';
-  }
-
-  static ShareSync fromJson(Map<String, Object?> json) {
-    final peers =
-        (json['peers'] as List?)?.whereType<Map>().toList() ?? const <Map>[];
-    return ShareSync(
-      updated: _msTime(json['updated_ms']),
-      peers: peers.length,
-      failed: peers.where((peer) => peer['ok'] != true).length,
-      pausedDeletes: (json['paused_deletes'] as num?)?.toInt() ?? 0,
-    );
-  }
-}
-
-class ShareFolder {
-  const ShareFolder({
-    required this.name,
-    required this.modified,
-    required this.files,
-  });
-
-  /// `2026-09-28-카사텀-쌍둥이-시안` — `kasaterm-cli share new` 가 짓는 모양.
-  final String name;
-  final DateTime modified;
-  final List<ShareFile> files;
-
-  static final _dated = RegExp(r'^(\d{4})-(\d{2})-(\d{2})-(.+)$');
-
-  /// 날짜를 떼어 낸 주제. 모양이 다르면 이름 그대로.
-  String get topic => _dated.firstMatch(name)?.group(4) ?? name;
-
-  /// `09-28` — 날짜 접두가 없으면 null.
-  String? get day {
-    final m = _dated.firstMatch(name);
-    return m == null ? null : '${m.group(2)}-${m.group(3)}';
-  }
-
-  ShareFile? get firstImage {
-    for (final f in files) {
-      if (f.kind == ShareKind.image) return f;
-    }
-    return null;
-  }
-
-  static ShareFolder fromJson(Map<String, Object?> j) => ShareFolder(
-    name: j['name'] as String? ?? '',
-    modified: _msTime(j['modified_ms']),
-    files: ShareFile.listOf(j['files']),
-  );
-}
-
-enum ShareKind { image, markdown, html, text, pdf, video, audio, other }
-
-class ShareFile {
-  const ShareFile({
-    required this.path,
-    required this.name,
-    required this.size,
-    required this.modified,
-    required this.kind,
-    required this.origin,
-  });
-
-  /// 서버가 한 번에 내주는 상한(serve.rs `WHOLE_MAX`) — 넘으면 413 이라 누르기 전에 막는다.
-  static const maxBytes = 32 << 20;
-
-  /// KASA-share 루트 기준 — `share/file?path=` 에 그대로 넣는다.
-  final String path;
-
-  /// 폴더 안 상대 이름. 하위 폴더면 `sub/x.png` 처럼 슬래시가 든다.
-  final String name;
-  final int size;
-  final DateTime modified;
-  final ShareKind kind;
-
-  /// 이 파일을 처음 올린 기기 이름.
-  final String origin;
-
-  bool get tooLarge => size > maxBytes;
-
-  static List<ShareFile> listOf(Object? raw) => [
-    for (final e in (raw as List?) ?? const [])
-      if (e is Map) ShareFile.fromJson(e.cast<String, Object?>()),
-  ];
-
-  static ShareFile fromJson(Map<String, Object?> j) => ShareFile(
-    path: j['path'] as String? ?? '',
-    name: j['name'] as String? ?? '',
-    size: (j['size'] as num?)?.toInt() ?? 0,
-    modified: _msTime(j['modified_ms']),
-    kind: ShareKind.values.asNameMap()[j['kind']] ?? ShareKind.other,
-    origin: j['origin'] as String? ?? '',
-  );
-}
-
-DateTime _msTime(Object? v) =>
-    DateTime.fromMillisecondsSinceEpoch((v as num?)?.toInt() ?? 0);
 
 /// 카사넷을 배우는 두 요청 — 늘 관문으로 간다(데스크톱은 관문을 거친 주인 폰 등록만 받는다).
 class _KasanetGateway implements KasanetGateway {

@@ -22,7 +22,6 @@ import 'controls.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
-import 'share_screen.dart';
 import 'terminal.dart';
 
 export '../machine_look.dart' show parseHexColor;
@@ -164,12 +163,6 @@ class _HubScreenState extends State<HubScreen> {
     onChanged: _model.refresh,
   );
 
-  void _openShare() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => ShareScreen(server: widget.server)),
-    );
-  }
-
   void _openSettings() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -208,17 +201,6 @@ class _HubScreenState extends State<HubScreen> {
             actions: [
               // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
               // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
-              IconButton(
-                tooltip: '공유 파일',
-                onPressed: _openShare,
-                icon: const Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.folder_outlined, size: 20),
-                    Text('공유', style: TextStyle(fontSize: 12, height: 1.2)),
-                  ],
-                ),
-              ),
               IconButton(
                 tooltip: '클립보드',
                 onPressed: () =>

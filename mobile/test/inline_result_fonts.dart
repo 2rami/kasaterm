@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-Future<void> loadShareFonts() async {
+Future<void> loadInlineResultFonts() async {
   TestWidgetsFlutterBinding.ensureInitialized();
   final text = FontLoader('Pretendard')
     ..addFont(rootBundle.load('assets/fonts/Pretendard-Regular.otf'))
