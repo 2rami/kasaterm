@@ -6,6 +6,7 @@ use super::*;
 pub(crate) enum RetainedBy {
     User,
     Recovery,
+    DeferredRestore,
 }
 
 impl crate::ClosedPane {
@@ -13,6 +14,7 @@ impl crate::ClosedPane {
         self.stashed.then_some(match self.retained_by {
             Some(RetainedBy::User) => "직접 숨김",
             Some(RetainedBy::Recovery) => "자동 보관",
+            Some(RetainedBy::DeferredRestore) => "복원 보류",
             // Old snapshots did not record intent; never attribute it to the user.
             None => "보관됨",
         })

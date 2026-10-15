@@ -154,13 +154,19 @@ impl App {
                     new_active = windows_json.len();
                 }
                 persisted_idx[j] = Some(windows_json.len());
-                windows_json.push(Self::layout_to_json(
+                let mut saved = Self::layout_to_json(
                     layout,
                     pty,
                     &ws_guard,
                     &self.pane_claude_sid,
                     &agent_cfg,
-                ));
+                );
+                if i == self.active_session {
+                    if let Some(label) = self.window_name_override.get(&j) {
+                        saved["restore_label"] = serde_json::json!(label);
+                    }
+                }
+                windows_json.push(saved);
             }
             if windows_json.is_empty() {
                 continue;
@@ -565,6 +571,10 @@ impl App {
                         pane_claude_sid,
                         agent_cfg,
                     );
+                    // Display-only titles must not become pinned titles when the pane resumes.
+                    if let Some(title) = first.and_then(|t| t.title.as_deref()).filter(|t| !t.is_empty()) {
+                        obj.insert("restore_title".into(), serde_json::json!(title));
+                    }
                     // 탭 — leaf 에는 첫 탭만 실렸다. 둘째 탭부터는 자기 PtySession 을
                     // 갖는데(PaneTab.pid) 그게 저장에 안 실려, 앱을 껐다 켜면 탭에서
                     // 돌던 학생이 통째로 사라졌다(2026-09-08 지시 「탭 안의 복원하는
@@ -609,6 +619,9 @@ impl App {
                                         pane_claude_sid,
                                         agent_cfg,
                                     );
+                                    if let Some(title) = t.title.as_deref().filter(|t| !t.is_empty()) {
+                                        o.insert("restore_title".into(), serde_json::json!(title));
+                                    }
                                     Some(trec)
                                 })
                                 .collect()

@@ -86,3 +86,5 @@
 - `agent_transitions.rs` — 실제 PTY·세션별 알림 관찰자와 상태 전이 순수 함수. 완료는 새 정상 종료 신호가 2초 유지된 경우만, 질문은 호출 ID별 한 번이다. 탭 선택이나 조용한 idle 전이는 완료가 아니다. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].
+
+- `restore_picker.rs` — 시작 복원창의 방·탭별 선택 목록, 크기에 맞춘 배치·스크롤·키보드. `session/restore_selection.rs`는 저장 정보의 표시 모델, `session/local_restore.rs`는 선택한 탭의 배치 재구성과 미선택 작업의 보류 기록을 맡는다.

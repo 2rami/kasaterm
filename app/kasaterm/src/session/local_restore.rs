@@ -43,6 +43,10 @@ pub(super) fn surfaces(record: &Value) -> impl Iterator<Item = &Value> {
 }
 
 pub(super) fn record(original: &Value) -> Option<Value> {
+    record_with(original, &mut |_| true)
+}
+
+fn record_with(original: &Value, keep: &mut impl FnMut(&Value) -> bool) -> Option<Value> {
     let all: Vec<_> = std::iter::once(original)
         .chain(
             original
@@ -56,7 +60,7 @@ pub(super) fn record(original: &Value) -> Option<Value> {
         .iter()
         .copied()
         .enumerate()
-        .filter(|(index, r)| (*index == 0 || r.is_object()) && is_local(r))
+        .filter(|(index, r)| (*index == 0 || r.is_object()) && is_local(r) && keep(r))
         .collect();
     let (first_index, first) = kept.first()?;
     if kept.len() == all.len() {
@@ -85,17 +89,20 @@ pub(super) fn record(original: &Value) -> Option<Value> {
     Some(result)
 }
 
-fn tree(node: &Value) -> Option<Value> {
+fn tree(node: &Value, keep: &mut impl FnMut(&Value) -> bool) -> Option<Value> {
+    if crate::internal_room::is_saved_window(node) {
+        return Some(node.clone());
+    }
     if let Some(leaf) = node.get("leaf") {
         let mut result = node.clone();
-        result["leaf"] = record(leaf)?;
+        result["leaf"] = record_with(leaf, keep)?;
         return Some(result);
     }
     let Some(split) = node.get("split") else {
         return Some(node.clone());
     };
-    let a = split.get("a").and_then(tree);
-    let b = split.get("b").and_then(tree);
+    let a = split.get("a").and_then(|node| tree(node, keep));
+    let b = split.get("b").and_then(|node| tree(node, keep));
     match (a, b) {
         (Some(a), Some(b)) => {
             let mut result = node.clone();
@@ -125,7 +132,7 @@ fn mapped(index: &Value, indices: &[Option<usize>]) -> usize {
         .unwrap_or(0)
 }
 
-fn session(value: &mut Value) -> Vec<Option<usize>> {
+fn session(value: &mut Value, keep: &mut impl FnMut(&Value) -> bool) -> Vec<Option<usize>> {
     let Some(object) = value.as_object_mut() else {
         return Vec::new();
     };
@@ -133,7 +140,7 @@ fn session(value: &mut Value) -> Vec<Option<usize>> {
     if let Some(windows) = object.get_mut("windows").and_then(Value::as_array_mut) {
         let mut kept = Vec::new();
         for window in std::mem::take(windows) {
-            if let Some(window) = tree(&window) {
+            if let Some(window) = tree(&window, keep) {
                 indices.push(Some(kept.len()));
                 kept.push(window);
             } else {
@@ -172,7 +179,7 @@ fn session(value: &mut Value) -> Vec<Option<usize>> {
         *undocked = std::mem::take(undocked)
             .into_iter()
             .filter_map(|entry| {
-                let mut entry = tree(&entry)?;
+                let mut entry = tree(&entry, keep)?;
                 if let Some(home) = entry.get_mut("home_window") {
                     *home = json!(mapped(home, &indices));
                 }
@@ -185,12 +192,12 @@ fn session(value: &mut Value) -> Vec<Option<usize>> {
 
 pub(super) fn state(original: &Value) -> Value {
     let mut result = original.clone();
-    let active = result["active_session"].as_u64().unwrap_or(0) as usize;
+    let active = super::restore_selection::active_index(&result);
     let mut active_indices = Vec::new();
     if let Some(sessions) = result.get_mut("sessions").and_then(Value::as_array_mut) {
-        let selected = active.min(sessions.len().saturating_sub(1));
+        let selected = active;
         for (index, saved) in sessions.iter_mut().enumerate() {
-            let indices = session(saved);
+            let indices = session(saved, &mut |_| true);
             if index == selected {
                 active_indices = indices;
             }
@@ -216,6 +223,72 @@ pub(super) fn state(original: &Value) -> Value {
                 Some(entry)
             })
             .collect();
+    }
+    result
+}
+
+pub(super) fn selected(original: &Value, chosen: &[usize]) -> Value {
+    let mut result = state(original);
+    if let Some(object) = result.as_object_mut() {
+        object.remove("restore_selection");
+    }
+    let active = super::restore_selection::active_index(&result);
+    let mut omitted = Vec::new();
+    let mut index = 0;
+    let mut keep = |rec: &Value| {
+        let selected = chosen.contains(&index);
+        index += 1;
+        if !selected {
+            let mut rec = rec.clone();
+            if let Some(object) = rec.as_object_mut() {
+                object.remove("tabs");
+                object.remove("active_tab");
+            }
+            omitted.push(rec);
+        }
+        selected
+    };
+    let indices = result
+        .get_mut("sessions")
+        .and_then(Value::as_array_mut)
+        .and_then(|sessions| sessions.get_mut(active))
+        .map(|saved| session(saved, &mut keep))
+        .unwrap_or_default();
+    let mut stashed = result
+        .get_mut("stashed_panes")
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
+        .unwrap_or_default();
+    for entry in &mut stashed {
+        if let Some(window) = entry.get_mut("window") {
+            *window = json!(mapped(window, &indices));
+        }
+    }
+    // Each unchecked tab keeps its own launch recipe, never a parent record containing selected tabs.
+    for rec in omitted {
+        let pane = rec.get("pane_id").cloned().unwrap_or(Value::Null);
+        let duplicate = stashed.iter().position(|entry| {
+            let old = &entry["rec"];
+            if let Some(key) = rec.get("surface_key").and_then(Value::as_str) {
+                old.get("surface_key").and_then(Value::as_str) == Some(key)
+            } else {
+                !pane.is_null()
+                    && old.get("pane_id") == Some(&pane)
+                    && old.get("session_id") == rec.get("session_id")
+            }
+        });
+        if let Some(index) = duplicate {
+            stashed.remove(index);
+        }
+        let agent = super::restore_selection::agent_kind(&rec).is_some();
+        stashed.push(json!({
+            "pane_id": pane, "character": if agent { rec["character"].as_str().unwrap_or("") } else { "" },
+            "folder": rec["cwd"].as_str().unwrap_or(""), "neighbor": null,
+            "window": 0, "stashed": true, "retained_by": "deferred_restore", "rec": rec,
+        }));
+    }
+    if !stashed.is_empty() {
+        result["stashed_panes"] = json!(stashed);
     }
     result
 }
@@ -251,7 +324,10 @@ pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
                 window: entry["window"].as_u64().unwrap_or(0) as usize,
                 alive: false,
                 stashed: entry["stashed"].as_bool().unwrap_or(true),
-                retained_by: entry.get("retained_by").cloned().and_then(|v| serde_json::from_value(v).ok()),
+                retained_by: entry
+                    .get("retained_by")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()),
                 idle_since: None,
                 preview: None,
             })
@@ -273,9 +349,23 @@ mod tests {
             {"rec":{},"pane_id":"%5","stashed":true,"retained_by":"future-value"}
         ]});
         let restored = history(&state);
-        let labels: Vec<_> = restored.iter().map(crate::ClosedPane::retention_label).collect();
-        assert_eq!(labels, [Some("직접 숨김"), Some("자동 보관"), Some("보관됨"), None, Some("보관됨")]);
-        for entry in &restored { assert!(!entry.alive); }
+        let labels: Vec<_> = restored
+            .iter()
+            .map(crate::ClosedPane::retention_label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("직접 숨김"),
+                Some("자동 보관"),
+                Some("보관됨"),
+                None,
+                Some("보관됨")
+            ]
+        );
+        for entry in &restored {
+            assert!(!entry.alive);
+        }
         for entry in restored {
             let again = history(&json!({"stashed_panes":[{
                 "rec":entry.rec, "stashed":entry.stashed, "retained_by":entry.retained_by

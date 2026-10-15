@@ -3126,6 +3126,7 @@ impl ApplicationHandler<UserEvent> for App {
             crate::onboarding::mark_opened();
         }
         if let Some(state) = saved {
+            self.restore_picker = crate::restore_picker::State::new(&state);
             self.restore_prompt = Some(state);
         }
         // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
@@ -3427,7 +3428,11 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.settings_room_active() {
+                if self.restore_prompt.is_some() {
+                    self.restore_picker.wheel(delta);
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                } else if self.settings_room_active() {
                     self.native_settings_wheel(delta);
                 } else {
                     self.handle_wheel(delta);
@@ -7280,20 +7285,12 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Restore prompt: Enter = 복원, Esc = 닫기(안 고름). Swallow all
-                // other keys so nothing reaches the fresh session behind the dim.
                 if self.restore_prompt.is_some() {
                     if matches!(event.state, ElementState::Pressed) {
-                        use winit::keyboard::{Key, NamedKey};
-                        match event.logical_key {
-                            Key::Named(NamedKey::Enter) => {
-                                self.restore_dialog_pick(RestoreBtn::Restore);
-                            }
-                            Key::Named(NamedKey::Escape) => {
-                                self.restore_dialog_pick(RestoreBtn::Dismiss);
-                            }
-                            _ => {}
+                        if let Some(action) = self.restore_picker.key(&event.logical_key) {
+                            self.restore_dialog_pick(action);
                         }
+                        self.chrome_dirty = true;
                         window.request_redraw();
                     }
                     return;
@@ -8377,33 +8374,7 @@ impl App {
             other => self.do_close(other),
         }
     }
-    /// Resolve the Chrome-style restore prompt: 복원 rebuilds the saved
-    /// workspace, 새로 시작 discards the saved state and keeps the fresh session
-    /// start_pty already spawned. Either way the prompt clears.
-    pub(crate) fn restore_dialog_pick(&mut self, btn: RestoreBtn) {
-        let Some(state) = self.restore_prompt.take() else {
-            return;
-        };
-        self.chrome_dirty = true;
-        match btn {
-            // 곧바로 재구성하지 않는다 — 「되살리는 중」을 한 프레임 그린 뒤에
-            // 시작해야 그 화면이 멈춘 채로 남는다(위 restore_applying 주석).
-            RestoreBtn::Restore => {
-                self.restore_applying = Some((
-                    state,
-                    std::time::Instant::now() + std::time::Duration::from_millis(90),
-                ));
-            }
-            // 복원을 안 하면 부팅 때 걸어 둔 학생 예약을 푼다 — 두면 새로 쪼개는
-            // pane 이 그 학생들을 영영 못 쓴다(예약의 근거는 `resumed` 의 주석).
-            RestoreBtn::Fresh => {
-                crate::socket::clear_session_state();
-                self.release_reserved_characters();
-            }
-            // 저장본을 지우지 않는다 — 닫기는 「안 고름」이지 「버림」이 아니다.
-            RestoreBtn::Dismiss => self.release_reserved_characters(),
-        }
-    }
+
 }
 
 /// Build a git-column snapshot from `git_status`, split into Staged Changes /

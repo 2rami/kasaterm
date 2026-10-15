@@ -4907,39 +4907,6 @@ pub fn read_session_state() -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Discard the saved restore state (user chose "새로 시작"). Best-effort — a
-/// missing file is already the desired end state.
-pub fn clear_session_state() {
-    if let Some(path) = session_file_path() {
-        // Keep conflicting legacy bytes as evidence without making "fresh"
-        // resurrect them through the legacy read fallback on the next launch.
-        if std::env::var_os("KASATERM_SESSION_FILE").is_none_or(|v| v.is_empty()) {
-            if let Some(root) = default_session_root() {
-                let inactive = if path == root.join("session.json") {
-                    root.join("sessions/session.json")
-                } else { root.join("session.json") };
-                if inactive.exists() {
-                    if SESSION_STORAGE.get().is_none_or(|storage| storage._owner.is_none()) {
-                        eprintln!("[session migration] another owner prevents clearing conflicting state");
-                        return;
-                    }
-                    let archive = root.join("sessions/legacy");
-                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos()).unwrap_or(0);
-                    let preserved = archive.join(format!("session-cleared-{stamp}.json"));
-                    if std::fs::create_dir_all(&archive).is_err()
-                        || std::fs::hard_link(&inactive, &preserved).is_err()
-                        || std::fs::remove_file(&inactive).is_err() {
-                        eprintln!("[session migration] cannot preserve legacy state before clearing");
-                        return;
-                    }
-                }
-            }
-        }
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 pub fn session_file_path() -> Option<std::path::PathBuf> {
     // Override lets a debug instance keep its restore state out of the daily
     // app's shared file (and lets users relocate it).

@@ -109,6 +109,7 @@ mod app_restart;
 #[cfg(unix)]
 mod app_update;
 mod restore_progress;
+mod restore_picker;
 mod mirror_close;
 mod close_grace;
 mod mirror_sync;
@@ -1516,18 +1517,15 @@ enum ConfirmBtn {
     Save,
 }
 
-/// The two buttons in the Chrome-style session-restore prompt shown at launch
-/// when a saved layout is found.
 #[derive(Clone, Copy, PartialEq)]
 enum RestoreBtn {
-    /// Rebuild the saved layout and resume each pane's claude session.
     Restore,
-    /// Discard the saved state and keep the fresh single-pane session.
     Fresh,
-    /// 카드만 접는다 — 저장본은 건드리지 않고 아무것도 복원하지 않는다. 닫기(×)와
-    /// Esc 가 이것. 「고르지 않고 빠져나갈 길」이 없어서 카드가 화면을 가둔 채로
-    /// 남았다(2026-08-27 지적).
     Dismiss,
+    Toggle(usize),
+    Group(usize),
+    All,
+    Clear,
 }
 
 /// A login shell (vs. a real foreground job like claude / vim / a build).
@@ -5512,6 +5510,7 @@ struct App {
     /// awaiting the user's 복원/새로 시작 decision. While `Some`, a modal is
     /// painted over the fresh session and swallows input.
     restore_prompt: Option<serde_json::Value>,
+    restore_picker: restore_picker::State,
     /// 복원을 누른 뒤 실제 재구성까지의 짧은 유예 — `(저장본, 시작할 시각)`.
     ///
     /// 재구성은 pane 마다 PTY 를 띄우느라 수 초간 GUI 스레드를 잡는다. 그동안
@@ -6317,6 +6316,7 @@ impl App {
             confirm_native: false,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
+            restore_picker: restore_picker::State::default(),
             restore_applying: None,
             restore_progress: None,
             restore_retry_rect: None,

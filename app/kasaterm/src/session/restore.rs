@@ -309,9 +309,13 @@ impl App {
         // backup. The configured session directory also isolates test fixtures.
         let previous = crate::socket::session_file_path()
             .and_then(|path| path.parent().and_then(latest_restored_state));
-        let original = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let selection = state.get("restore_selection").cloned();
+        let mut original = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        if let Some(object) = original.as_object_mut() { object.remove("restore_selection"); }
         let mut prepared = super::local_restore::state(&original);
         crate::server_restore::import_pending_servers(&mut prepared);
+        if let Some(selection) = selection { prepared["restore_selection"] = selection; }
+        let prepared = super::restore_selection::apply(&prepared);
         let state = &prepared;
         self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
         // codex 는 재시작마다 옛 pid 의 pane 홈 경로를 물고 있어 `resume` 이 죽는다 —
@@ -362,6 +366,7 @@ impl App {
         }
         self.pty_layout = None;
         self.windows.clear();
+        self.window_name_override.clear();
         self.settings_scene.leave();
         // ── 저장된 배정 먼저 잡아 두기 ────────────────────────────────────
         // 복원은 leaf 를 하나씩 되살리는데, 저장된 학생을 **그 차례가 와야** 잡는다.
@@ -385,6 +390,9 @@ impl App {
             }
             let tree = self.restore_window_layout(w, cols, rows);
             restored_indices[j] = Some(self.windows.len());
+            if let Some(label) = w.get("restore_label").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                self.window_name_override.insert(self.windows.len(), label.to_owned());
+            }
             if j == active_window {
                 restored_active = self.windows.len();
                 self.pty_layout = tree;

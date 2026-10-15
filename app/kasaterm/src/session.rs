@@ -14,6 +14,7 @@ mod local_restore;
 mod migrate;
 mod remote_rooms;
 mod restore;
+pub(crate) mod restore_selection;
 mod rooms;
 mod save;
 mod screen_pump;
