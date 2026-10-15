@@ -24,3 +24,13 @@ The surfaces are a Rust/wgpu desktop app and Flutter mobile app. Extend their ex
 The human work hub combines task progress and Nacho conversation in one native room. Schedules and the all-session target grid are excluded; agent observation remains an explicit tool. A wide viewport pairs task rows with chat; narrow viewports switch between the two without discarding drafts. Dimensions are in `docs/design.md`. This is a task/communication surface, not an organizational chart or calendar.
 
 Project evidence is in `decisions.log`. The exact font and English title are agent choices pending visual review; the request to remove franchise branding and keep glass effects as future direction is explicit user input. No cross-project personal profile was changed.
+
+## OS surface direction — 2026-10-15
+
+The user requested a desktop-wide redesign inspired by Nava OS, including responsive settings, shared files and color editing. This replaces the previous outline-only controls rule. `docs/design.md` remains the only token contract.
+
+Native wgpu controls use filled selection, quiet neutral surfaces, 10/16px rounded shapes and system UI typography when no UI font is selected. Frost Light/Dark are additional palettes; saved explicit theme and typography choices remain selectable. Compact settings move navigation above the content; shared-file previews move beside the list when space permits. HSV gradients are GPU-calculated rather than CPU swatch grids.
+
+Viewed reference: Nava OS Personalization, https://www.youtube.com/watch?v=E7nGN03tvKI, 00:06–00:52. The source is a concept video, not measured production performance. Frosted material is a visual reference; these native panels do not implement live backdrop blur. No React registry applies to this Rust renderer. Visual choices are pending user review. No cross-project profile promotion.
+
+Color contract: Frost Light text/background 12.39:1 and text/surface 13.99:1; Frost Dark 15.43:1 and 13.01:1. Default blue #5a8ce6 with black label 6.33:1. Subtle borders are decorative; selected controls also have filled state/check marks. Text on accents uses `foreground_on`, and secondary accent text and keyboard focus enforce contrast at the actual background. Shared rounded fills/strokes use one analytic GPU quad rather than row strips, including fractional UI scales.

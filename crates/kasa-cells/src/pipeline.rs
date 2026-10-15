@@ -29,6 +29,15 @@ pub struct CellInstance {
 
 impl CellInstance {
     pub const FLAG_COLOR: u32 = 1;
+    pub const FLAG_COLOR_PICKER: u32 = 32;
+    pub const FLAG_PICKER_HUE: u32 = 64;
+    pub const FLAG_ROUNDED_RECT: u32 = 32 | 128;
+
+    pub fn rounded_rect_flags(radius_px: f32, stroke_px: f32) -> u32 {
+        Self::FLAG_ROUNDED_RECT
+            | ((radius_px.max(0.0) * 2.0).round().min(1023.0) as u32) << 8
+            | ((stroke_px.max(0.0) * 4.0).round().min(255.0) as u32) << 18
+    }
     /// Bit 1 set = tint an SVG coverage mask (fg.rgb × texel.a) but skip the
     /// WezTerm text gamma/contrast curve. That curve sharpens font stems but
     /// hard-edges thin SVG strokes, which read as jagged pixels on hover.
@@ -457,5 +466,33 @@ mod tests {
         assert_eq!((f >> 28) & 0xf, 15);
         assert_eq!((CellInstance::edge_dash_flags(1.0, 999.0, 0.0, 0.0, 0.0) >> 12) & 0x3f, 63);
         assert_eq!((CellInstance::edge_orbit_flags(1.0, 1.0, 0.0, 0.0, 0.0) >> 24) & 0xf, 1, "주기 0 은 0.5초로");
+    }
+}
+
+#[cfg(test)]
+mod rounded_shape_tests {
+    use super::CellInstance;
+
+    #[test]
+    fn rounded_shapes_keep_their_mode_and_subpixel_stroke_at_all_ui_scales() {
+        for scale in [1.0, 1.25, 1.5, 2.0, 2.5, 3.0] {
+            for stroke in [0.0, 1.0, 2.0] {
+                let flags = CellInstance::rounded_rect_flags(10.0 * scale, stroke * scale);
+                assert_eq!(flags & 255, CellInstance::FLAG_ROUNDED_RECT);
+                assert_eq!(((flags >> 8) & 1023) as f32 * 0.5, 10.0 * scale);
+                assert_eq!(((flags >> 18) & 255) as f32 * 0.25, stroke * scale);
+                assert_eq!(flags & (CellInstance::FLAG_COLOR | CellInstance::FLAG_ICON |
+                    CellInstance::FLAG_EDGE_ORBIT | CellInstance::FLAG_EDGE_DASH | CellInstance::FLAG_BAND_FILL), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_shape_parameters_cannot_overflow_into_neighboring_fields() {
+        let flags = CellInstance::rounded_rect_flags(100000.0, 100000.0);
+        assert_eq!(flags & 255, CellInstance::FLAG_ROUNDED_RECT);
+        assert_eq!((flags >> 8) & 1023, 1023);
+        assert_eq!((flags >> 18) & 255, 255);
+        assert_eq!(CellInstance::rounded_rect_flags(-10.0, -1.0), CellInstance::FLAG_ROUNDED_RECT);
     }
 }

@@ -51,6 +51,28 @@ fn button(
     }
 }
 
+#[derive(Debug)]
+struct ContentLayout {
+    list: Rect,
+    preview: Option<Rect>,
+    footer: f32,
+}
+
+fn content_layout(x: f32, y: f32, width: f32, bottom: f32, selected: bool) -> ContentLayout {
+    let footer = (bottom - 72.0).max(y);
+    let height = (footer - y).max(0.0);
+    if selected && width >= 560.0 {
+        let preview_width = (width * 0.46).min(440.0);
+        let list_width = (width - preview_width - 16.0).max(0.0);
+        ContentLayout { list: (x, y, list_width, height),
+            preview: Some((x + list_width + 16.0, y, preview_width, height)), footer }
+    } else {
+        let preview_height = if selected { (height * 0.48).min(240.0) } else { 0.0 };
+        ContentLayout { list: (x, y, width, height - preview_height),
+            preview: selected.then_some((x, footer - preview_height, width, preview_height)), footer }
+    }
+}
+
 pub(crate) fn draw(
     g: &mut gpu::GpuRenderer,
     state: &mut State,
@@ -157,6 +179,7 @@ pub(crate) fn draw(
         Action::Folders,
         folders,
     );
+    if w < 190.0 { y += 34.0; }
     for (offset, icon, action) in [
         (0.0, "settings-2", Action::Settings),
         (32.0, "rotate-cw", Action::Refresh),
@@ -226,24 +249,20 @@ pub(crate) fn draw(
         );
         y += 24.0;
     }
-    let footer_y = (bottom - 72.0).max(y);
-    let preview_height = if state.selected.is_some() {
-        ((footer_y - y) * 0.5).clamp(0.0, 240.0)
-    } else {
-        0.0
-    };
-    let list_bottom = footer_y - preview_height;
-    let list_h = (list_bottom - y).max(0.0);
+    let layout = content_layout(left, y, w, bottom, state.selected.is_some());
+    let footer_y = layout.footer;
+    let list_h = layout.list.3;
+    let list_w = layout.list.2;
     state.scroll_max = (state.rows.len() as f32 * 40.0 - list_h).max(0.0);
     state.scroll = state.scroll.clamp(0.0, state.scroll_max);
-    state.scroll_track = (state.scroll_max > 0.0).then_some((x + width - 8.0, y, 8.0, list_h));
-    g.push_clip(left, y, w, list_h);
+    state.scroll_track = (state.scroll_max > 0.0).then_some((left + list_w - 5.0, y, 5.0, list_h));
+    g.push_clip(left, y, list_w, list_h);
     if let Some(problem) = state.problem.as_deref() {
         text(
             g,
             left,
             y + 12.0,
-            w,
+            list_w,
             problem,
             12.0,
             theme::text_dim(),
@@ -254,7 +273,7 @@ pub(crate) fn draw(
             g,
             left,
             y + 12.0,
-            w,
+            list_w,
             "공유 파일을 읽는 중…",
             12.0,
             theme::text_dim(),
@@ -266,24 +285,24 @@ pub(crate) fn draw(
         } else {
             "맞는 파일이 없어요. 검색어를 바꿔 주세요"
         };
-        text(g, left, y + 12.0, w, empty, 12.0, theme::text_dim(), false);
+        text(g, left, y + 12.0, list_w, empty, 12.0, theme::text_dim(), false);
     } else {
         let start = (state.scroll / 40.0).floor() as usize;
         let end = (start + (list_h / 40.0).ceil() as usize + 1).min(state.rows.len());
         for index in start..end {
             let row = &state.rows[index];
             let ry = y + index as f32 * 40.0 - state.scroll;
-            let rect = (left, ry, w, 40.0);
+            let rect = (left, ry, list_w, 40.0);
             let hovered = contains(rect, cursor);
             let selected = state.selected.as_deref() == Some(&row.path);
             if hovered || selected {
                 g.round_rect_fill(
                     left,
                     ry,
-                    w,
+                    list_w,
                     40.0,
                     theme::radius_sm(),
-                    theme::surface_hover(),
+                    if selected { theme::lerp(theme::surface(), theme::accent(), 0.14) } else { theme::surface_hover() },
                 );
             }
             let icon = if row.folder {
@@ -295,12 +314,15 @@ pub(crate) fn draw(
                     _ => "file-text",
                 }
             };
-            g.queue_icon(icon, left + 4.0, ry + 11.0, 16.0, theme::text_dim());
+            g.round_rect_fill(left + 4.0, ry + 5.0, 30.0, 30.0, theme::radius_sm(),
+                theme::lerp(theme::surface(), theme::accent(), 0.10));
+            g.queue_icon(icon, left + 11.0, ry + 12.0, 16.0,
+                theme::enforce_contrast_at(theme::accent(), theme::surface(), 4.5));
             text(
                 g,
-                left + 28.0,
+                left + 44.0,
                 ry + 4.0,
-                w - 34.0,
+                list_w - 50.0,
                 &row.title,
                 12.0,
                 theme::text(),
@@ -308,9 +330,9 @@ pub(crate) fn draw(
             );
             text(
                 g,
-                left + 28.0,
+                left + 44.0,
                 ry + 23.0,
-                w - 34.0,
+                list_w - 50.0,
                 &row.detail,
                 10.5,
                 theme::text_dim(),
@@ -341,9 +363,13 @@ pub(crate) fn draw(
     if let Some((x, y, w, h)) = state.thumb() {
         g.round_rect_fill(x, y, w, h, theme::radius_sm(), theme::text_mute());
     }
-    if preview_height > 0.0 {
-        let py = list_bottom + 8.0;
-        g.rect(left, list_bottom, w, 1.0, theme::border());
+    if let Some((preview_x, preview_y, preview_w, preview_h)) = layout.preview.filter(|rect| rect.3 > 0.0) {
+        let left = preview_x + 10.0;
+        let w = (preview_w - 20.0).max(0.0);
+        let py = preview_y + 10.0;
+        g.round_rect_fill(preview_x, preview_y, preview_w, preview_h, theme::radius_md(), theme::surface());
+        g.round_rect_stroke(preview_x, preview_y, preview_w, preview_h, theme::radius_md(), 1.0,
+            theme::with_alpha(theme::edge_on(theme::surface()), 90));
         text(
             g,
             left,
@@ -365,7 +391,7 @@ pub(crate) fn draw(
             state.hits.push((Action::ClosePreview, rect));
         }
         let body_y = py + 25.0;
-        let body_h = (footer_y - body_y - 8.0).max(0.0);
+        let body_h = (preview_y + preview_h - body_y - 10.0).max(0.0);
         g.push_clip(left, body_y, w, body_h);
         match state.preview.as_ref() {
             Some(Ok(Preview::Image {
@@ -381,10 +407,8 @@ pub(crate) fn draw(
                 g.queue_image("kasa-share:preview", left, body_y, w, body_h, 1.0, 0.0, 0.0);
             }
             Some(Ok(Preview::Text(body))) => {
-                for (index, line) in body
-                    .lines()
-                    .take((body_h / 18.0).ceil() as usize)
-                    .enumerate()
+                let lines = crate::native_settings::wrap_text(g, body, w, 10.5);
+                for (index, (line, _)) in lines.iter().take((body_h / 18.0).ceil() as usize).enumerate()
                 {
                     text(
                         g,
@@ -481,4 +505,31 @@ pub(crate) fn draw(
         false,
     );
     g.pop_clip();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nava_shared_preview_reflows_without_covering_files_or_footer() {
+        for width in [180.0, 280.0, 390.0, 559.0, 560.0, 900.0] {
+            for bottom in [220.0, 400.0, 780.0] {
+                for selected in [false, true] {
+                    let l = content_layout(14.0, 108.0, width, bottom, selected);
+                    assert!(l.list.2 >= 0.0 && l.list.3 >= 0.0);
+                    assert!(l.list.0 + l.list.2 <= 14.0 + width);
+                    assert!(l.list.1 + l.list.3 <= l.footer);
+                    assert_eq!(l.preview.is_some(), selected);
+                    if let Some(p) = l.preview {
+                        assert!(p.0 + p.2 <= 14.0 + width + 0.01 && p.1 + p.3 <= l.footer + 0.01);
+                        let overlap_x = (p.0 + p.2).min(l.list.0 + l.list.2) - p.0.max(l.list.0);
+                        let overlap_y = (p.1 + p.3).min(l.list.1 + l.list.3) - p.1.max(l.list.1);
+                        assert!(overlap_x <= 0.01 || overlap_y <= 0.01);
+                        assert_eq!(p.0 > l.list.0, width >= 560.0);
+                    }
+                }
+            }
+        }
+    }
 }

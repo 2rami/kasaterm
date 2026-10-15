@@ -1,7 +1,7 @@
 use super::*;
 
 const PREVIEW_H: f32 = 204.0;
-pub(super) const FEATURED_PALETTES: [&str; 4] = ["graphite", "ink", "paper", "mist"];
+pub(super) const FEATURED_PALETTES: [&str; 4] = ["frost-light", "frost-dark", "graphite", "paper"];
 
 fn palette_strip(x: f32, y: f32, w: f32) -> ([Rect; 4], f32) {
     let columns = if w >= 560.0 { 4 } else { 2 };
@@ -9,12 +9,12 @@ fn palette_strip(x: f32, y: f32, w: f32) -> ([Rect; 4], f32) {
     let rects = std::array::from_fn(|index| {
         (
             x + (index % columns) as f32 * (item_w + 8.0),
-            y + (index / columns) as f32 * 72.0,
+            y + (index / columns) as f32 * 104.0,
             item_w,
-            64.0,
+            96.0,
         )
     });
-    (rects, (4 / columns) as f32 * 72.0)
+    (rects, (4 / columns) as f32 * 104.0)
 }
 
 pub(super) fn paint_palette_strip(
@@ -33,60 +33,54 @@ pub(super) fn paint_palette_strip(
         };
         let colors = palette.surface_colors();
         let selected = s.theme == key;
-        let preview = (rect.0, rect.1, rect.2, 32.0);
-        g.rect(preview.0, preview.1, preview.2, preview.3, colors.pane);
-        g.rect(preview.0, preview.1, preview.2, 8.0, colors.titlebar());
-        let sidebar = (preview.2 * 0.22).floor();
-        g.rect(preview.0, preview.1 + 8.0, sidebar, 24.0, colors.sidebar);
-        g.rect(
-            preview.0 + preview.2 - sidebar,
-            preview.1 + 8.0,
-            sidebar,
-            24.0,
-            colors.side_panel(),
-        );
-        g.rect(preview.0, preview.1 + 8.0, preview.2, 1.0, palette.border);
-        for (line, portion) in [0.40, 0.26].into_iter().enumerate() {
-            g.rect(
-                preview.0 + sidebar + 8.0,
-                preview.1 + 15.0 + line as f32 * 7.0,
-                preview.2 * portion,
-                1.5,
-                palette.text_dim,
-            );
+        let hover = contains(rect, s.cursor);
+        let radius = theme::radius_md();
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, radius,
+            if selected { theme::lerp(theme::surface(), theme::accent(), 0.12) } else { theme::surface_hover() });
+        let preview = (rect.0 + 8.0, rect.1 + 8.0, (rect.2 - 16.0).max(0.0), 54.0);
+        round_rect(g, preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), colors.sidebar);
+        let win = (preview.0 + preview.2 * 0.17, preview.1 + 9.0, preview.2 * 0.69, 36.0);
+        round_rect(g, win.0, win.1, win.2, win.3, theme::radius_sm().min(6.0), colors.pane);
+        for (line, portion) in [0.64, 0.42, 0.51].into_iter().enumerate() {
+            g.rect(win.0 + 8.0, win.1 + 10.0 + line as f32 * 7.0, (win.2 - 16.0).max(0.0) * portion, 2.0, palette.text_dim);
         }
-        let hover = contains(preview, s.cursor);
-        stroke_round(
-            g,
-            preview,
-            theme::radius_sm(),
-            if selected {
-                theme::accent()
-            } else if hover {
-                theme::text_dim()
-            } else {
-                theme::border()
-            },
-        );
-        register_clipped(
-            g,
-            hits,
-            Target::Setting(SettingsAction::ThemeMode(key.into())),
-            preview,
-            HitCursor::Pointer,
-        );
+        let label = fit(g, label, (rect.2 - 32.0).max(0.0), 12.0, selected);
+        draw_text(g, rect.0 + 12.0, rect.1 + 74.0, &label, 12.0, theme::text(), selected);
+        if selected {
+            g.queue_icon("check", rect.0 + rect.2 - 24.0, rect.1 + 73.0, 14.0,
+                theme::enforce_contrast_at(theme::accent(), theme::surface(), 4.5));
+        }
+        if selected || hover {
+            stroke_round(g, rect, radius, if selected { theme::accent() } else { theme::edge_on(theme::surface_hover()) });
+        }
+        register_clipped(g, hits, Target::Setting(SettingsAction::ThemeMode(key.into())), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
-        button(
-            g,
-            s,
-            hits,
-            (rect.0, rect.1 + 38.0, rect.2, 26.0),
-            label,
-            Target::Setting(SettingsAction::ThemeMode(key.into())),
-            selected,
-        );
     }
     height
+}
+
+pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: f32, w: f32) -> f32 {
+    let columns = ((w + 8.0) / 64.0).floor().max(1.0) as usize;
+    let cell_w = ((w - (columns - 1) as f32 * 8.0) / columns as f32).min(76.0);
+    for (i, (name, color)) in theme::ACCENT_PRESETS.iter().enumerate() {
+        let rect = (x + (i % columns) as f32 * (cell_w + 8.0), y + (i / columns) as f32 * 64.0, cell_w, 58.0);
+        let hot = contains(rect, s.cursor);
+        let selected = s.accent == *name;
+        let cx = rect.0 + (cell_w - 36.0) * 0.5;
+        round_rect(g, cx, rect.1, 36.0, 36.0, 18.0, *color);
+        if selected {
+            g.queue_icon("check", cx + 10.0, rect.1 + 10.0, 16.0, theme::foreground_on(*color));
+        }
+        if selected || hot {
+            stroke_round(g, (cx - 3.0, rect.1 - 3.0, 42.0, 42.0), 21.0, theme::enforce_contrast_at(*color, theme::surface(), 3.0));
+        }
+        let label = preset_label(name);
+        let width = g.measure_chrome_text(label, 10.5, false);
+        draw_text(g, rect.0 + (cell_w - width) * 0.5, rect.1 + 44.0, label, 10.5, theme::text_dim(), false);
+        register_clipped(g, hits, Target::Setting(SettingsAction::Accent(name.to_string())), rect, HitCursor::Pointer);
+        g.hover_pointer |= hot;
+    }
+    theme::ACCENT_PRESETS.len().div_ceil(columns) as f32 * 64.0
 }
 
 fn regions(x: f32, y: f32, w: f32) -> [(usize, Rect); 5] {
@@ -249,7 +243,7 @@ mod tests {
     fn featured_palettes_use_four_columns_or_two_compact_rows() {
         for width in [280.0, 430.0, 560.0, 800.0] {
             let (rects, height) = palette_strip(20.0, 40.0, width);
-            assert_eq!(height, if width >= 560.0 { 72.0 } else { 144.0 });
+            assert_eq!(height, if width >= 560.0 { 104.0 } else { 208.0 });
             for (index, rect) in rects.iter().enumerate() {
                 assert!(rect.0 >= 20.0 && rect.0 + rect.2 <= 20.0 + width);
                 assert!(rect.1 >= 40.0 && rect.1 + rect.3 <= 40.0 + height);

@@ -2291,6 +2291,7 @@ impl App {
     }
 
     pub(crate) fn paste_clipboard(&self) {
+        if self.side_column_covers_workspace() { return; }
         let surface = self.target_surface();
         let mut cb = match arboard::Clipboard::new() {
             Ok(cb) => cb,
@@ -3397,6 +3398,18 @@ impl App {
 
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
+            return;
+        }
+        // A full-width panel must not type into the terminal or chat hidden underneath it.
+        if self.side_column_covers_workspace() {
+            if self.git.commit_focused {
+                self.git_commit_input(event);
+            } else if self.mcp_col.add.is_some() {
+                self.mcp_add_input(event);
+            } else if matches!(event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)) {
+                self.toggle_git_col();
+            }
+            if let Some(window) = &self.window { window.request_redraw(); }
             return;
         }
         // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
