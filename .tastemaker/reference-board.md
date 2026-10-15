@@ -100,3 +100,9 @@ Restore tests: 69; session tests: 135; history tests: 10; server-restore tests: 
 User feedback preferred the earlier cute dialog and explicitly chose direct selection by portrait. The default now occupies at most 560×324; the previous 900×700 default checklist is replaced by a small portrait strip and a task preview. Paging and bulk selection work in that surface; a smaller 620×620 detail list remains optional.
 
 Native release captures were reviewed at 1100×780, 390×780 and 280×200, with an additional 125% UI-scale capture. Automated pointer placement confirmed title/folder preview without changing selection. Portrait clicks and a detail/back round trip each restored exactly one selected shell, retained five deferred records and preserved the six-tab backup. Zero selection did not restore. Restore-related tests: 73 passed. The portrait fixture decorates only the display model; launch records remain synthetic shells and no real agent was resumed.
+
+## Whole-app direction studies — 2026-10-15
+
+The user requested all three directions before choosing a replacement for the old design contract. Native wgpu studies now compare Cloud OS (36px controls, floating navigation), Precision (28px controls, compact flat rows) and Playroom (40px controls, portrait rail and rounded surfaces). The same sample appearance, terminal/Info workspace and shared-file scenes were captured in all three at 1280×860; each appearance scene was also checked at 390×844.
+
+Four tests passed for geometry, core-text contrast, color/state behavior and native icon availability. Fifteen native release captures include style switching, custom accent application and shared-file selection; saved settings kept their original theme/accent. The studies use representative data and memory-only controls behind an isolated verification flag. The normal app default and final design direction remain pending the user’s choice.

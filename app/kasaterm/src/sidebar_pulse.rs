@@ -136,12 +136,13 @@ pub(crate) fn menu_label(hidden: bool) -> &'static str {
 /// 아이콘 밑에 선다. 둘이 안 들어가는 폭이면 `None`.
 fn switch_rects(width: f32) -> Option<(Rect, Rect)> {
     const GAP: f32 = 6.0;
-    let side = crate::native_controls::CONTROL_HEIGHT;
+    let side = if Density::sidebar(width).is_wide() { 88.0 } else { crate::native_controls::CONTROL_HEIGHT };
     if SIDEBAR_TAB_INSET + 2.0 * side + GAP > width {
         return None;
     }
-    let y = TITLE_HEIGHT + (PULSE_H - side) / 2.0;
-    Some(((SIDEBAR_TAB_INSET, y, side, side), (SIDEBAR_TAB_INSET + side + GAP, y, side, side)))
+    let height = crate::native_controls::CONTROL_HEIGHT;
+    let y = TITLE_HEIGHT + (PULSE_H - height) / 2.0;
+    Some(((SIDEBAR_TAB_INSET, y, side, height), (SIDEBAR_TAB_INSET + side + GAP, y, side, height)))
 }
 
 /// 사이드바 맨 위, 기기 머리줄 위의 「목록 | 배치도」 아이콘. 고른 것은 전체 기본(`sidebar_body`)이고,
@@ -157,8 +158,13 @@ pub(crate) fn draw_view_switch(
     pulse.switch = None;
     let (list_rect, map_rect) = switch_rects(width)?;
     let style = |active| crate::native_controls::Style { active, ..Default::default() };
-    let left = crate::native_controls::icon_button(g, list_rect, cursor, "list", style(list));
-    let right = crate::native_controls::icon_button(g, map_rect, cursor, "layout-grid", style(!list));
+    let (left, right) = if Density::sidebar(width).is_wide() {
+        (crate::native_controls::text_button(g, list_rect, cursor, "목록", style(list)),
+         crate::native_controls::text_button(g, map_rect, cursor, "배치도", style(!list)))
+    } else {
+        (crate::native_controls::icon_button(g, list_rect, cursor, "list", style(list)),
+         crate::native_controls::icon_button(g, map_rect, cursor, "layout-grid", style(!list)))
+    };
     pulse.switch = Some((left, right));
     let inside = |r: Rect| cursor.0 >= r.0 && cursor.0 < r.0 + r.2 && cursor.1 >= r.1 && cursor.1 < r.1 + r.3;
     [(left, "목록"), (right, "배치도")]
@@ -215,6 +221,7 @@ pub(crate) fn plain_title(title: &str) -> &str {
 /// 줄 하나를 그리는 데 필요한 것 — 이 기기 방과 다른 기기 방이 같은 그림을 쓴다.
 pub(crate) struct RowPaint<'a> {
     pub(crate) student: &'a RowStudent,
+    pub(crate) detail: Option<&'a str>,
     /// 얼굴이 없을 때 서는 아이콘.
     pub(crate) icon: &'static str,
     pub(crate) cur: bool,
@@ -232,6 +239,9 @@ pub(crate) struct RowPaint<'a> {
 pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     let (rx, ry, rw, rh) = rect;
     let s = p.student;
+    let density = Density::sidebar(rw + SIDEBAR_TAB_INSET * 2.0 + 16.0);
+    let single = matches!(density, Density::Icon | Density::Compact);
+    let face = if density == Density::Spacious { 26.0 } else { FACE };
     if p.cur {
         round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_active());
     } else if p.hover {
@@ -246,32 +256,42 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
         g.rect(rx, ry + 3.0, 2.0, rh - 6.0, color);
     }
     let phase = crate::sprites::anim_phase_secs();
-    let (fx, fy) = (rx + 8.0, ry + 5.0);
-    // 걷는 그림은 전신 + 여백이라 얼굴 칸 그대로면 작아 보인다 — 줄 높이 안에서 키운다.
-    let walked = p.busy && crate::sprites::draw_student_walk(g, &s.who, fx - 5.0, fy - 4.0, FACE + 10.0, phase);
+    let (fx, fy) = (rx + 8.0, if single { ry + (rh - face) / 2.0 } else { ry + 5.0 });
+    let walked = p.busy && crate::sprites::draw_student_walk(g, &s.who, fx - 5.0, fy - 4.0, face + 10.0, phase);
     if !walked
-        && !crate::sprites::draw_student_face_anim(g, &s.who, fx, fy, FACE, phase)
-        && !crate::sprites::draw_harness_logo(g, &s.agent, &s.pane, fx + 2.0, fy + 2.0, FACE - 4.0)
+        && !crate::sprites::draw_student_face_anim(g, &s.who, fx, fy, face, phase)
+        && !crate::sprites::draw_harness_logo(g, &s.agent, &s.pane, fx + 2.0, fy + 2.0, face - 4.0)
     {
         g.queue_icon(p.icon, fx + 4.0, fy + 4.0, 12.0, theme::text_dim());
     }
-    let tx = fx + FACE + 8.0;
+    let tx = fx + face + 8.0;
     let right = rx + rw - 8.0;
     let title = crate::info::fit_text(g, &s.title, (right - tx).max(0.0), 12.0, false);
     let ink = if p.muted { theme::text_mute() } else { theme::text() };
-    g.draw_text(tx, ry + 5.0, &title, gpu::DrawOpts { font_size: 12.0, color: ink, bold: false, italic: false });
-    // 둘째 줄은 배치도 칸 바닥과 같다 — compact 눈금과 경과 시간. 시간은 오른쪽 끝을 내주고 눈금이 그만큼
-    // 짧아진다. 「도는 중」은 띠가 아니라 줄 윤곽이 움직인다(배치도 칸과 같은 결).
-    let line_y = ry + 22.0;
-    let mut bar_w = right - tx;
-    if let Some((txt, color, bold)) = crate::render::elapsed_mark(p.busy_secs, p.busy || p.bg_active) {
-        let lw = g.measure_chrome_text(&txt, 10.5, bold);
-        g.draw_text(right - lw, line_y, &txt, gpu::DrawOpts { font_size: 10.5, color, bold, italic: false });
-        bar_w -= lw + 6.0;
-    }
-    if bar_w > 0.0 {
-        let bar_y = line_y + (LINE_H - crate::render::MINI_BAR_H) / 2.0;
-        crate::render::progress_bar(g, tx, bar_y, bar_w, p.compact_pct);
+    g.draw_text(tx, if single { ry + (rh - 12.0) / 2.0 } else { ry + 5.0 }, &title,
+        gpu::DrawOpts { font_size: 12.0, color: ink, bold: false, italic: false });
+    if !single {
+        let line_y = ry + if density == Density::Spacious && rh >= 56.0 { 29.0 } else { 22.0 };
+        let mut bar_w = (right - tx).max(0.0);
+        if let Some((txt, color, bold)) = crate::render::elapsed_mark(p.busy_secs, p.busy || p.bg_active) {
+            let lw = g.measure_chrome_text(&txt, 10.5, bold);
+            if lw <= bar_w {
+                g.draw_text(right - lw, line_y, &txt, gpu::DrawOpts { font_size: 10.5, color, bold, italic: false });
+                bar_w = (bar_w - lw - 6.0).max(0.0);
+            }
+        }
+        if density.is_wide() {
+            let state = if p.muted { "닫힌 칸" } else if s.turn == RowTurn::Yours { "확인 필요" }
+                else if p.bg_active { "백그라운드 작업" } else if p.busy { "작업 중" } else { "입력 대기" };
+            let detail = if s.agent.is_empty() { format!("{} · {state}", s.pane) }
+                else { format!("{} · {} · {state}", s.agent, s.pane) };
+            let detail = crate::info::fit_text(g, p.detail.unwrap_or(&detail), bar_w, 10.5, false);
+            g.draw_text(tx, line_y, &detail, gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+        }
+        if bar_w > 0.0 {
+            let bar_y = if density.is_wide() { ry + rh - 6.0 } else { line_y + (LINE_H - crate::render::MINI_BAR_H) / 2.0 };
+            crate::render::progress_bar(g, tx, bar_y, bar_w, p.compact_pct);
+        }
     }
     if band.is_none() {
         crate::render::activity_mark(g, rect, theme::radius_sm(), p.busy, p.bg_active, p.cur, 0.0);
@@ -279,7 +299,7 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
 }
 
 pub(crate) fn fixture_on() -> bool {
-    cfg!(debug_assertions) && crate::verification_run() && std::env::var_os("KASATERM_SIDEBAR_FIXTURE").is_some()
+    crate::verification_run() && std::env::var_os("KASATERM_SIDEBAR_FIXTURE").is_some()
 }
 
 /// 격리 검증 앱의 가짜 학생 — 진짜 claude 없이 줄 모양·순서·강조와 배치도 띠를 잰다. pane id 의

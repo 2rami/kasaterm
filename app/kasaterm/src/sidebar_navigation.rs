@@ -1,4 +1,5 @@
 use super::*;
+mod responsive_probe;
 
 type Rect = (f32, f32, f32, f32);
 
@@ -201,28 +202,18 @@ fn room_title(room: &str) -> (&str, &str) {
     room.split_once(" · ").unwrap_or((room, ""))
 }
 
-/// 방 카드 본문(배치도) 높이 — 본기기 `sidebar_card_metrics` 와 같은 식이라 두 기기의
-/// 카드가 같은 키로 선다.
-/// 카드 본문 높이 — 본기기 `sidebar_card_metrics` 와 같은 식. 목록이면 줄 수만큼.
-fn room_body_h(panes: usize, listed: bool) -> f32 {
-    if listed {
-        panes as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP
-    } else {
-        (36.0 + 13.0 * panes as f32).clamp(46.0, 150.0)
-    }
-}
-
 fn content_height(
     machine: &state::MachinesColMachine,
     collapsed: &std::collections::HashSet<String>,
     listed: &RoomViews,
+    width: f32,
 ) -> f32 {
     let groups = rooms(machine);
     let mut height = 0.0;
     for (room, list) in &groups {
         height += SIDEBAR_TAB_H;
         let key = room_key(&machine.label, list[0].window, room);
-        if !collapsed.contains(&key) { height += room_body_h(decks(list).len(), listed.listed(&key)); }
+        if !collapsed.contains(&key) { height += crate::chrome::SidebarMetrics::new(width).body_h(decks(list).len(), listed.listed(&key)); }
         height += SIDEBAR_TAB_GAP;
     }
     if groups.is_empty() { height = PANE_H; }
@@ -250,19 +241,19 @@ pub(crate) fn section_labels(info: &state::InfoState) -> Vec<String> {
 }
 
 /// 이 기기 카드 아래와 원격 절 사이에 서는 몫까지 — 이 기기의 창 밖 셸 줄이 거기 선다.
-pub(crate) fn remote_content_h(info: &state::InfoState) -> f32 {
+pub(crate) fn remote_content_h(info: &state::InfoState, width: f32) -> f32 {
     let nav = &info.navigation;
-    let local = web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""));
+    let local = web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""), width);
     local + info.machines_col.machines.iter().map(|machine| {
-        SECTION_H + content_height(machine, &nav.collapsed_rooms, &nav.list_rooms)
-            + web_block_h(&machine.web_shells, nav.web_open.contains(&machine.label))
+        SECTION_H + content_height(machine, &nav.collapsed_rooms, &nav.list_rooms, width)
+            + web_block_h(&machine.web_shells, nav.web_open.contains(&machine.label), width)
     }).sum::<f32>()
 }
 
 /// 「창 밖 셸」 줄 높이 — 요약 한 줄, 펴면 셸마다 목록 줄.
-fn web_block_h(shells: &[state::WebShell], open: bool) -> f32 {
+fn web_block_h(shells: &[state::WebShell], open: bool, width: f32) -> f32 {
     if shells.is_empty() { return 0.0; }
-    PANE_H + if open { shells.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD } else { 0.0 }
+    PANE_H + if open { shells.len() as f32 * crate::chrome::SidebarMetrics::new(width).retained_h() + SIDEBAR_ROW_PAD } else { 0.0 }
 }
 
 /// 목록 줄 이름 — 폴더 꼬리가 있으면 그것, 없으면 셸 id 앞 여덟 글자로 가른다. 「창 밖 셸」
@@ -295,7 +286,8 @@ fn draw_web_shells(
     let busy = shells.len() - idle;
     let row = (x, y, w, PANE_H);
     let button_label = "빈 셸 닫기";
-    let bw = g.measure_chrome_text(button_label, 10.5, false) + 16.0;
+    let compact = width < SIDEBAR_DENSE_FULL;
+    let bw = if compact { 26.0 } else { g.measure_chrome_text(button_label, 10.5, false) + 16.0 };
     let button = (x + w - bw - 4.0, y + ((PANE_H - 22.0) / 2.0).round(), bw, 22.0);
     let row_hover = clipped(row, view).is_some_and(|r| hit(cursor, r));
     if row_hover { panel_rect(g, row.0, row.1, row.2, row.3, theme::radius_md(), theme::surface_hover()); }
@@ -310,17 +302,20 @@ fn draw_web_shells(
         outline_rect(g, button.0, button.1, button.2, button.3, theme::radius_sm(),
             if hover { theme::text_dim() } else { theme::border() }, 1.0,
             if row_hover { theme::surface_hover() } else { theme::panel_bg() });
-        // 폭을 이 글자로 쟀으니 자르지 않는다 — `fit_text` 는 글자마다 재어 더해 통째 폭보다
-        // 조금 커서, 거기 맡기면 제 폭에 맞춘 단추 글자가 「닫…」으로 잘렸다.
-        g.draw_text(button.0 + 8.0, button.1 + 5.0, button_label, gpu::DrawOpts {
-            font_size: 10.5, color: if hover { theme::text() } else { theme::text_dim() }, bold: false, italic: false });
+        if compact {
+            g.queue_icon("x", button.0 + 6.0, button.1 + 4.0, 14.0, theme::text_dim());
+        } else {
+            g.draw_text(button.0 + 8.0, button.1 + 5.0, button_label, gpu::DrawOpts {
+                font_size: 10.5, color: if hover { theme::text() } else { theme::text_dim() }, bold: false, italic: false });
+        }
         if let Some(r) = clipped(button, view) { hits.push((Action::CloseIdleWebShells(label.to_string()), r)); }
     }
     if let Some(r) = clipped(row, view) { hits.push((Action::WebShells(label.to_string()), r)); }
     if !open { return PANE_H; }
+    let row_h = crate::chrome::SidebarMetrics::new(width).retained_h();
     for (k, shell) in shells.iter().enumerate() {
-        let line = (x + 8.0, y + PANE_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H, w - 16.0, SIDEBAR_ROW_H);
-        let close = (line.0 + line.2 - 18.0, line.1 + (SIDEBAR_ROW_H - 16.0) / 2.0, 16.0, 16.0);
+        let line = (x + 8.0, y + PANE_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * row_h, w - 16.0, row_h);
+        let close = (line.0 + line.2 - 18.0, line.1 + (row_h - 16.0) / 2.0, 16.0, 16.0);
         let x_hover = hit(cursor, close);
         let line_hover = !x_hover && clipped(line, view).is_some_and(|r| hit(cursor, r));
         if line_hover { hover_rect(g, line.0, line.1, line.2, line.3, theme::radius_sm()); }
@@ -341,6 +336,9 @@ fn draw_web_shells(
         }
         text(g, &web_shell_name(shell), line.0 + 16.0, line.1 + 4.0, (close.0 - 12.0 - sw - line.0 - 16.0).max(0.0),
             11.0, theme::text_dim(), false);
+        if Density::sidebar(width).is_wide() {
+            text(g, &shell.cwd, line.0 + 16.0, line.1 + 22.0, close.0 - line.0 - 22.0, 10.5, theme::text_mute(), false);
+        }
         if let Some(r) = clipped(close, view) {
             hits.push((Action::CloseWebShell { label: label.to_string(), id: shell.id.clone() }, r));
         }
@@ -348,7 +346,7 @@ fn draw_web_shells(
             hits.push((Action::OpenWebShell { label: label.to_string(), id: shell.id.clone(), cwd: shell.cwd.clone() }, r));
         }
     }
-    web_block_h(shells, true)
+    web_block_h(shells, true, width)
 }
 
 fn text(g: &mut gpu::GpuRenderer, value: &str, x: f32, y: f32, width: f32, size: f32, color: [u8; 4], bold: bool) {
@@ -412,13 +410,17 @@ fn draw_cell(
             round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
         }
     }
-    let (fx, fy, face) = crate::render::minimap_face_box(mx, my, mw, mh);
+    let metrics = crate::chrome::SidebarMetrics::new(view.2);
+    let (fx, fy, face) = metrics.face_box(cell);
+    if metrics.map_label(mw, mh) {
+        text(g, &crate::sidebar_pulse::row_title(&row.title, "터미널"), mx + 6.0, my + mh - 28.0, mw - 12.0, 10.5, theme::text_dim(), false);
+    }
     let phase = crate::sprites::anim_phase_secs();
     let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
     let walked = busy && crate::sprites::draw_student_walk(g, who, fx - 2.0, fy - 2.0, face + 4.0, phase);
     if !walked && !crate::sprites::draw_student_face_anim(g, who, fx, fy, face, phase) {
         let size = face.min(16.0);
-        g.queue_icon("terminal", mx + (mw - size) / 2.0, my + (mh - size) / 2.0, size, theme::text_dim());
+        g.queue_icon("terminal", fx + (face - size) / 2.0, fy + (face - size) / 2.0, size, theme::text_dim());
     }
     let has_bar = crate::render::minimap_has_bar(mw, mh);
     if signal.is_none() {
@@ -488,6 +490,7 @@ fn draw_list_row(
     g.hover_pointer |= hover && !head.closed;
     crate::sidebar_pulse::paint_row(g, row, &crate::sidebar_pulse::RowPaint {
         student,
+        detail: None,
         icon: "terminal",
         cur,
         hover,
@@ -539,8 +542,7 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
         let hov = hit(cursor, r);
         g.hover_pointer |= hov;
         if hov { hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm()); }
-        g.draw_text(r.0 + 12.0, r.1 + (MIH - 13.0) / 2.0, label,
-            gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+        text(g, label, r.0 + 12.0, r.1 + (MIH - 13.0) / 2.0, r.2 - 24.0, 13.0, theme::text(), false);
         nav.room_menu_rects.push((*action, r));
     }
 }
@@ -594,7 +596,7 @@ fn draw_rows(
         let collapsed = ctx.collapsed.contains(&key);
         let listed = ctx.listed.listed(&key);
         let stacks = decks(list);
-        let body_h = if collapsed { 0.0 } else { room_body_h(stacks.len(), listed) };
+        let body_h = if collapsed { 0.0 } else { crate::chrome::SidebarMetrics::new(width).body_h(stacks.len(), listed) };
         let h = SIDEBAR_TAB_H + body_h;
         let head = (tab_x, y, tab_w, SIDEBAR_TAB_H);
         let active = active_room == Some(index);
@@ -637,7 +639,15 @@ fn draw_rows(
             }).map(|(_, _, _, n)| *n);
             let kbd = number.filter(|n| *n < 9).map(|n| format!("⌘{}", n + 1));
             let kbd_w = kbd.as_ref().map_or(0.0, |k| g.measure_chrome_text(k, 11.0, false) + 6.0);
-            let name_budget = if compact { tab_right - 8.0 - text_x } else { close.0 - 6.0 - kbd_w - text_x }.max(0.0);
+            let mut name_budget = if compact { tab_right - 8.0 - text_x } else { close.0 - 6.0 - kbd_w - text_x }.max(0.0);
+            if Density::sidebar(width).is_wide() && !collapsed {
+                let summary_w = g.measure_chrome_text(&summary, 10.5, false);
+                if name_budget - summary_w - 12.0 >= 100.0 {
+                    let summary_x = text_x + name_budget - summary_w - 6.0;
+                    name_budget -= summary_w + 18.0;
+                    text(g, &summary, summary_x, y + 13.0, summary_w, 10.5, theme::text_dim(), false);
+                }
+            }
             if let Some(kbd) = kbd {
                 let (kx, ky, kw) = if compact { (text_x, y + 31.0, (badge.0 - 4.0 - text_x).max(0.0)) }
                     else { (close.0 - 6.0 - kbd_w, y + 13.0, kbd_w) };
@@ -680,8 +690,8 @@ fn draw_rows(
                 stacks.iter().map(|deck| (remote_student(machine, deck), deck)).collect();
             rows.sort_by_key(|(student, _)| student.turn);
             for (k, (student, deck)) in rows.iter().enumerate() {
-                let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::sidebar_pulse::LIST_ROW_H,
-                    tab_w - 16.0, crate::sidebar_pulse::LIST_ROW_H);
+                let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::chrome::SidebarMetrics::new(width).row_h(),
+                    tab_w - 16.0, crate::chrome::SidebarMetrics::new(width).row_h());
                 let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
                 draw_list_row(g, hits, machine, room, deck, student, cur, row, cursor, view);
             }
@@ -715,7 +725,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let label = if label.is_empty() { "이 기기" } else { label };
     let compact = width < 180.0;
     let head = (8.0, head_top + 4.0, width - 16.0, HEADER_H - 8.0);
-    let plus = (width - 36.0, head.1, 28.0, head.3);
+    let wide = Density::sidebar(width).is_wide();
+    let plus_w = if wide { 76.0 } else { 28.0 };
+    let plus = (width - 8.0 - plus_w, head.1, plus_w, head.3);
     let text_x = if compact { 12.0 } else { 38.0 };
     if !compact { g.queue_icon(&crate::device_icons::icon(label), 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
     let name = crate::render::pane_identity::local_device_name().filter(|n| !n.is_empty()).unwrap_or_else(|| label.to_string());
@@ -724,6 +736,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
     g.hover_pointer |= hit(cursor, plus);
     g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
+    if wide { text(g, "새 방", plus.0 + 27.0, plus.1 + 13.0, plus.2 - 31.0, 11.0, theme::text_dim(), false); }
     nav.hits.push((Action::NewLocalRoom, plus));
     g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
@@ -744,8 +757,8 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     y += draw_web_shells(g, hits, "", &info.machines_col.local_web_shells, web_open.contains(""),
         cursor, width, y, viewport);
     for machine in &info.machines_col.machines {
-        let body_h = content_height(machine, collapsed_rooms, list_rooms)
-            + web_block_h(&machine.web_shells, web_open.contains(&machine.label));
+        let body_h = content_height(machine, collapsed_rooms, list_rooms, width)
+            + web_block_h(&machine.web_shells, web_open.contains(&machine.label), width);
         g.rect(12.0, y, (width - 24.0).max(0.0), 1.0, theme::border());
         let head = (8.0, y + 2.0, width - 16.0, SECTION_H - 4.0);
         let menu = (width - 30.0, y + 7.0, 22.0, 22.0);
@@ -791,6 +804,7 @@ impl App {
     /// (「맥북」 픽스처는 Info 타이머가 돌아야 심긴다) · `KASATERM_MACHINES='[]'`.
     /// 결과는 `KASATERM_AUTONAV_DIR/navigation.log` 와 단계별 png.
     pub(crate) fn run_pending_sidebar_navigation_probe(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_pending_sidebar_responsive_probe(event_loop);
         use std::sync::{Mutex, OnceLock};
         if !crate::verification_run()
             || !std::env::var("KASATERM_AUTOINFO").is_ok_and(|v| v == "rooms")
@@ -1262,9 +1276,9 @@ mod tests {
     fn web_shell_block_height_and_names() {
         let shell = |id: &str, cwd: &str| state::WebShell { id: id.into(), cwd: cwd.into(), job: None };
         let shells = vec![shell("web-2e6442f1-aaaa", ""), shell("web-x", "/Users/kasa/Desktop/")];
-        assert_eq!(web_block_h(&[], true), 0.0, "셸이 없으면 줄도 없다");
-        assert_eq!(web_block_h(&shells, false), PANE_H);
-        assert_eq!(web_block_h(&shells, true), PANE_H + 2.0 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD);
+        assert_eq!(web_block_h(&[], true, SIDEBAR_W), 0.0, "셸이 없으면 줄도 없다");
+        assert_eq!(web_block_h(&shells, false, SIDEBAR_W), PANE_H);
+        assert_eq!(web_block_h(&shells, true, SIDEBAR_W), PANE_H + 2.0 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD);
         assert_eq!(web_shell_name(&shells[0]), "2e6442f1");
         assert_eq!(web_shell_name(&shells[1]), "Desktop");
     }
@@ -1293,23 +1307,35 @@ mod tests {
     }
 
     #[test]
+    fn remote_scroll_height_uses_the_current_sidebar_width() {
+        let m = machine();
+        let listed = RoomViews { default_list: true, ..Default::default() };
+        let n: usize = rooms(&m).iter().map(|(_, rows)| decks(rows).len()).sum();
+        let compact = content_height(&m, &Default::default(), &listed, 140.0);
+        let wide = content_height(&m, &Default::default(), &listed, 520.0);
+        assert_eq!(wide - compact, n as f32 * (56.0 - 28.0));
+        let collapsed = rooms(&m).iter().map(|(room, rows)| room_key(&m.label, rows[0].window, room)).collect();
+        assert_eq!(content_height(&m, &collapsed, &listed, 140.0), content_height(&m, &collapsed, &listed, 520.0));
+    }
+
+    #[test]
     fn list_body_is_a_row_per_deck_like_the_local_card() {
         let m = machine();
         let (room, list) = rooms(&m).into_iter().next().unwrap();
         let key = room_key(&m.label, list[0].window, &room);
         let listed: RoomViews = [key.clone()].into_iter().collect();
-        let map = content_height(&m, &Default::default(), &Default::default());
-        let as_list = content_height(&m, &Default::default(), &listed);
+        let map = content_height(&m, &Default::default(), &Default::default(), SIDEBAR_W);
+        let as_list = content_height(&m, &Default::default(), &listed, SIDEBAR_W);
         let n = decks(&list).len();
-        assert_eq!(as_list - map, room_body_h(n, true) - room_body_h(n, false));
-        assert_eq!(room_body_h(n, true), n as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP);
+        assert_eq!(as_list - map, crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(n, true) - crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(n, false));
+        assert_eq!(crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(n, true), n as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP);
         let every_key: RoomViews = rooms(&m).iter().map(|(room, list)| room_key(&m.label, list[0].window, room)).collect();
         let everywhere = RoomViews { default_list: true, ..Default::default() };
-        assert_eq!(content_height(&m, &Default::default(), &everywhere), content_height(&m, &Default::default(), &every_key),
+        assert_eq!(content_height(&m, &Default::default(), &everywhere, SIDEBAR_W), content_height(&m, &Default::default(), &every_key, SIDEBAR_W),
             "전체 기본이 목록이면 고른 적 없는 방도 목록");
         let mut one_map = RoomViews { default_list: true, ..Default::default() };
         one_map.chosen.insert(key.clone(), false);
-        assert!(content_height(&m, &Default::default(), &one_map) < content_height(&m, &Default::default(), &everywhere), "방마다 고른 배치도가 전체 기본을 이긴다");
+        assert!(content_height(&m, &Default::default(), &one_map, SIDEBAR_W) < content_height(&m, &Default::default(), &everywhere, SIDEBAR_W), "방마다 고른 배치도가 전체 기본을 이긴다");
     }
 
     #[test]
@@ -1324,9 +1350,9 @@ mod tests {
     fn remote_room_collapse_changes_scroll_height_without_losing_other_rooms() {
         let m = machine();
         let mut collapsed = std::collections::HashSet::new();
-        let full = content_height(&m, &collapsed, &Default::default());
+        let full = content_height(&m, &collapsed, &Default::default(), SIDEBAR_W);
         collapsed.insert(room_key("test", None, "A"));
-        assert_eq!(full - content_height(&m, &collapsed, &Default::default()), room_body_h(3, false));
+        assert_eq!(full - content_height(&m, &collapsed, &Default::default(), SIDEBAR_W), crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(3, false));
         assert_eq!(rows(&m).len(), 4);
         assert_eq!(rooms(&m).iter().map(|(r, l)| (r.as_str(), l.len())).collect::<Vec<_>>(), [("A", 3), ("B", 1)]);
     }
@@ -1345,8 +1371,8 @@ mod tests {
         assert_eq!(stacks.len(), 2);
         assert_eq!(stacks[0].iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(), ["%8"]);
         assert_eq!(stacks[1].iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(), ["%12", "%2"]);
-        assert_eq!(content_height(&m, &Default::default(), &Default::default()),
-            2.0 * (SIDEBAR_TAB_H + SIDEBAR_TAB_GAP) + room_body_h(2, false) + room_body_h(1, false) + PANE_H + 8.0);
+        assert_eq!(content_height(&m, &Default::default(), &Default::default(), SIDEBAR_W),
+            2.0 * (SIDEBAR_TAB_H + SIDEBAR_TAB_GAP) + crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(2, false) + crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(1, false) + PANE_H + 8.0);
     }
 
     #[test]
@@ -1386,8 +1412,8 @@ mod tests {
         assert_eq!(section_labels(&info), ["offline", "test"]);
         assert!(rooms(&info.machines_col.machines[0]).is_empty());
         let expected: f32 = info.machines_col.machines.iter()
-            .map(|m| SECTION_H + content_height(m, &Default::default(), &Default::default())).sum();
-        assert_eq!(remote_content_h(&info), expected);
+            .map(|m| SECTION_H + content_height(m, &Default::default(), &Default::default(), SIDEBAR_W)).sum();
+        assert_eq!(remote_content_h(&info, SIDEBAR_W), expected);
         info.machines_col.machines.reverse();
         assert_eq!(section_labels(&info), ["test", "offline"]);
         info.machines_col.machines[0].label = "renamed".into();
@@ -1414,11 +1440,11 @@ mod tests {
         assert_ne!(key, room_key(&m.label, None, "window:8"));
         assert_ne!(room_key("test", None, "same"), room_key("other", None, "same"));
         let collapsed = [key.clone()].into_iter().collect();
-        let full = content_height(&m, &Default::default(), &Default::default());
-        assert_eq!(full - content_height(&m, &collapsed, &Default::default()), room_body_h(2, false));
+        let full = content_height(&m, &Default::default(), &Default::default(), SIDEBAR_W);
+        assert_eq!(full - content_height(&m, &collapsed, &Default::default(), SIDEBAR_W), crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(2, false));
         let listed = [key].into_iter().collect();
-        assert_eq!(content_height(&m, &Default::default(), &listed) - full,
-            room_body_h(2, true) - room_body_h(2, false));
+        assert_eq!(content_height(&m, &Default::default(), &listed, SIDEBAR_W) - full,
+            crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(2, true) - crate::chrome::SidebarMetrics::new(SIDEBAR_W).body_h(2, false));
     }
 
     #[test]

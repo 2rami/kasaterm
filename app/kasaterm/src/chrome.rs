@@ -1,4 +1,6 @@
 //! 사이드바·git col·파일트리 토글·패널·줌/폰트·toast 등 chrome UI 메서드.
+mod sidebar;
+pub(crate) use sidebar::SidebarMetrics;
 use super::*;
 
 fn visible_notification_surface(ws: &Workspace) -> Option<String> {
@@ -150,6 +152,8 @@ mod git_panel_safety_tests {
 pub(crate) enum Density {
     /// 넓다 — 원래 설계대로 전부.
     Full,
+    Wide,
+    Spacious,
     /// 좁다 — 부차적인 것(경로·부제·여백)을 덜고 핵심만.
     Compact,
     /// 아주 좁다 — 글자를 포기하고 아이콘·기호로만.
@@ -167,6 +171,14 @@ impl Density {
         } else {
             Density::Icon
         }
+    }
+    pub(crate) fn sidebar(width: f32) -> Self {
+        if width >= 480.0 { Self::Spacious }
+        else if width >= 320.0 { Self::Wide }
+        else { Self::of(width, SIDEBAR_DENSE_FULL, SIDEBAR_DENSE_COMPACT) }
+    }
+    pub(crate) fn is_wide(self) -> bool {
+        matches!(self, Self::Wide | Self::Spacious)
     }
     pub(crate) fn is_icon(self) -> bool {
         matches!(self, Density::Icon)

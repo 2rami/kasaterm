@@ -2128,7 +2128,7 @@ impl App {
             .map(|i| self.expand_progress(i))
             .collect();
         let sb_summary: Vec<String> = (0..sb_labels.len()).map(|i| {
-            if self.collapsed_windows.contains(&i) { self.collapsed_room_summary(i) }
+            if self.collapsed_windows.contains(&i) || (Density::sidebar(tab_strip_w).is_wide() && self.internal_room_kind_at(i).is_none()) { self.collapsed_room_summary(i) }
             else { String::new() }
         }).collect();
         let sb_row_drop: Option<(String, crate::DropZone, String)> = self
@@ -2262,7 +2262,8 @@ impl App {
                 // 칸은 보이는 탭을 대표한다 — 나쵸 방은 바탕 셸 옆 탭마다 나쵸 칸이라 첫 탭 PTY 를 보면
                 // 셸이 잡혀 로고도 나쵸 표지도 안 선다.
                 let shown = self.ws.lock().unwrap().active_tab_pid(id);
-                let who = if self.tab_nacho_icon(&shown).is_some() { String::new() } else { who };
+                let who = if self.tab_nacho_icon(&shown).is_some() { String::new() }
+                    else if crate::sidebar_pulse::fixture_on() { student.who.clone() } else { who };
                 SidebarRowInfo {
                     student,
                     who,

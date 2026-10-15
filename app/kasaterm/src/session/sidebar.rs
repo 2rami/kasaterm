@@ -54,6 +54,10 @@ impl App {
         };
         // A hidden tab can need an answer while the front tab is idle. Count its cell once.
         summarize_cells(cells, |pid| {
+            if crate::sidebar_pulse::fixture_on() {
+                let turn = self.row_student(pid).turn;
+                return (turn == crate::sidebar_pulse::RowTurn::Working, turn == crate::sidebar_pulse::RowTurn::Yours);
+            }
             let mut working = self.pane_activity.get(pid)
                 .is_some_and(|view| view.state.is_busy() || view.bg_active);
             let mut waiting = self.pane_needs_you(pid) || self.unread_panes.contains(pid);
@@ -103,13 +107,10 @@ impl App {
         // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
         // 목록 보기면 본문은 학생 줄이 pane 수만큼 — 배치도 대신이다(2026-09-08 지시).
         // 목록 줄은 두 줄(40)이고 거울 줄을 뺀다 — 원본 기기 줄과 같은 학생이다.
-        let body_h = if self.room_body_is_list(i) {
-            self.sidebar_list_panes(i).len() as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP
-        } else {
-            (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
-        };
-        let strip_h = if undocked.is_empty() { 0.0 } else { UNDOCK_STRIP_H };
-        let full_h = body_h + strip_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+        let metrics = crate::chrome::SidebarMetrics::new(self.tab_strip_w());
+        let body_h = metrics.body_h(if self.room_body_is_list(i) { self.sidebar_list_panes(i).len() } else { leaves.len() }, self.room_body_is_list(i));
+        let strip_h = metrics.undocked(undocked.len()).3;
+        let full_h = body_h + strip_h + hidden.len() as f32 * metrics.retained_h() + SIDEBAR_ROW_PAD;
         (body_h, (full_h * t).round(), hidden, undocked)
     }
 
@@ -139,7 +140,7 @@ impl App {
     }
 
     pub(crate) fn sidebar_content_h(&self) -> f32 {
-        self.sidebar_local_content_h() + crate::sidebar_navigation::remote_content_h(&self.info)
+        self.sidebar_local_content_h() + crate::sidebar_navigation::remote_content_h(&self.info, self.tab_strip_w())
     }
 
     /// 아래 절까지 포함한 세로 구간 — 절 배치는 이 값으로 잰다.
@@ -241,6 +242,7 @@ impl App {
             // 가로 탭엔 아래로 펼 자리가 없다 — pane 목록도 배치도도 세로 전용.
             return (tabs, closes, plus, Vec::new(), Vec::new(), Vec::new());
         }
+        let metrics = crate::chrome::SidebarMetrics::new(self.tab_strip_w());
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.tab_strip_w() - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
         // 10px slot above the first tab hosts the overflow chevron-up.
@@ -321,7 +323,7 @@ impl App {
                 );
                 if self.room_body_is_list(i) {
                     // 목록 보기 — 배치도 자리에 학생 줄(내 차례 → 하는 중 → 쉬는 중). 숨긴 줄은 그 아래 이어진다.
-                    let row_h = crate::sidebar_pulse::LIST_ROW_H;
+                    let row_h = metrics.row_h();
                     for (k, id) in self.sidebar_list_panes(i).into_iter().enumerate() {
                         let ry = y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * row_h;
                         if ry + row_h > bottom {
@@ -357,18 +359,12 @@ impl App {
                     }
                 }
                 // 별도창 띠 — 배치도와 숨김 꼬리 사이. 칸은 방 폭을 pane 수로 나눈다.
-                let strip_h = if undocked.is_empty() { 0.0 } else { UNDOCK_STRIP_H };
+                let (columns, cell_w, row_h, strip_h) = metrics.undocked(undocked.len());
                 let sy = y + SIDEBAR_TAB_H + body_h;
-                if strip_h > 0.0 && sy + strip_h <= bottom {
-                    let cnt = undocked.len() as f32;
-                    let gap = 3.0;
-                    let cw = ((tab_w - 20.0 - gap * (cnt - 1.0)) / cnt).clamp(2.0, 40.0);
-                    for (k, id) in undocked.iter().enumerate() {
-                        undock.push((
-                            i,
-                            id.clone(),
-                            (tab_x + 10.0 + k as f32 * (cw + gap), sy + 2.0, cw, strip_h - 4.0),
-                        ));
+                for (k, id) in undocked.iter().enumerate() {
+                    let cy = sy + (k / columns) as f32 * row_h;
+                    if cy + row_h <= bottom {
+                        undock.push((i, id.clone(), (tab_x + 10.0 + (k % columns) as f32 * (cell_w + 3.0), cy + 2.0, cell_w, row_h - 4.0)));
                     }
                 }
                 // 배치도 아래 꼬리에는 숨긴 pane 만 줄로 남는다 — 숨긴 것은 트리에
@@ -379,14 +375,14 @@ impl App {
                         + body_h
                         + strip_h
                         + SIDEBAR_ROW_PAD / 2.0
-                        + k as f32 * SIDEBAR_ROW_H;
-                    if ry + SIDEBAR_ROW_H > bottom {
+                        + k as f32 * metrics.retained_h();
+                    if ry + metrics.retained_h() > bottom {
                         break;
                     }
                     rows.push((
                         i,
                         id.clone(),
-                        (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H),
+                        (tab_x + 8.0, ry, tab_w - 16.0, metrics.retained_h()),
                     ));
                 }
             }

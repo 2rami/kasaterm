@@ -138,3 +138,20 @@ APP=$!
   이어 붙는다(이어쓰기라 본판 기록은 안 깨진다). 리그 `AUTOQUIT` 으로 오래 남지 않게 한다.
 - 리그는 배경(Accessory) 앱이라 스스로 앞에 오지 않는다. 그래서 「앱이 앞에 있을 때 표준 창」 조건은 리그에서 건너뛴다 —
   표준 창이 뜨는 순간 리그가 앞으로 나와 키 창을 가져가니, 사람이 타자 중이면 끝난 뒤 돌려라.
+
+## 사이드바 폭 검증
+
+위 격리 부팅 환경을 모두 유지한 release 앱에 다음 옵션을 더한다. `KASATERM_WINDOW_SIZE` 검증 모드는 저장된 창 UI 폭을 읽지 않으므로, 폭 변경은 아래 하네스가 실제 경계 드래그 이벤트로 수행한다.
+
+```bash
+KASATERM_WINDOW_SIZE=1600,1000 \
+KASATERM_AUTOSPLIT=hhhhh KASATERM_AUTOSPLIT_MS=1000 \
+KASATERM_SIDEBAR_FIXTURE=1 \
+KASATERM_AUTOINFO=rooms KASATERM_AUTOINFO_MS=3500 \
+KASATERM_AUTOSIDEBAR_DIR=/tmp/<네이름>/sidebar-shots
+```
+
+- 목록·배치도 각각 140→240→360→520→140px로 끌고, 첫 칸을 실제 클릭한다. 6.5초부터 시작해 약 21초에 끝나므로 `KASATERM_AUTOQUIT_MS`는 30000 이상으로 준다.
+- 단계별 PNG와 JSON의 실제 폭·행/지도/별도창 사각형·스크롤 범위·`hits_within_width`·`clicked_expected_pane`을 확인한다. PNG는 위 규칙대로 줄여 한 장씩 본다.
+- `KASATERM_AUTOSIDEBAR_EXTRAS=1`이면 검증 앱의 마지막 칸 하나를 보관하고 둘을 별도창으로 떼어 같은 사이클을 반복한다. 실제 사용자 세션에는 적용하지 않는다.
+- 학생·원격 기기는 표시용 픽스처다. 실기기 연결 성공이나 원격 실행 성공의 증거로 쓰지 않는다.
