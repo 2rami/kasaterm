@@ -3,6 +3,8 @@ use crate::{gpu, theme, App, RestoreBtn};
 use serde_json::{json, Value};
 use winit::keyboard::{Key, NamedKey};
 
+mod welcome;
+
 type Rect = (f32, f32, f32, f32);
 const ROW_H: f32 = 76.0;
 const GROUP_H: f32 = 34.0;
@@ -16,15 +18,20 @@ pub(crate) struct State {
     scroll: f32,
     list_height: f32,
     group_height: f32,
+    expanded: bool,
+    reveal_next: bool,
+    welcome_slots: usize,
 }
 
 impl State {
     pub(crate) fn new(state: &Value) -> Self {
-        let plan = Plan::new(state);
+        let mut plan = Plan::new(state);
+        crate::testkit::restore_picker_portrait_fixture(&mut plan);
         Self {
             selected: vec![true; plan.rows.len()],
             plan,
             group_height: GROUP_H,
+            welcome_slots: 1,
             ..Self::default()
         }
     }
@@ -41,6 +48,9 @@ impl State {
             .clamp(0.0, (self.content_height() - self.list_height).max(0.0));
     }
     fn reveal(&mut self) {
+        if !self.expanded {
+            return;
+        }
         let Some(row) = self.plan.rows.get(self.focus) else {
             return;
         };
@@ -54,6 +64,9 @@ impl State {
         self.clamp_scroll();
     }
     pub(crate) fn wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        if !self.expanded {
+            return;
+        }
         use winit::event::MouseScrollDelta;
         self.scroll -= match delta {
             MouseScrollDelta::LineDelta(_, y) => y * 36.0,
@@ -63,7 +76,27 @@ impl State {
     }
     pub(crate) fn key(&mut self, key: &Key, shift: bool, repeat: bool) -> Option<RestoreBtn> {
         if matches!(key, Key::Named(NamedKey::Tab)) {
-            let mut choices = vec![RestoreBtn::All, RestoreBtn::Clear];
+            let mut choices = if self.expanded {
+                vec![RestoreBtn::Collapse, RestoreBtn::All, RestoreBtn::Clear]
+            } else {
+                vec![
+                    RestoreBtn::Expand,
+                    if self.count() == self.selected.len() {
+                        RestoreBtn::Clear
+                    } else {
+                        RestoreBtn::All
+                    },
+                ]
+            };
+            if !self.expanded {
+                let visible = welcome::range(self.selected.len(), self.focus, self.welcome_slots);
+                if visible.start > 0 {
+                    choices.push(RestoreBtn::Previous);
+                }
+                if visible.end < self.selected.len() {
+                    choices.push(RestoreBtn::Next);
+                }
+            }
             if self.count() > 0 {
                 choices.push(RestoreBtn::Restore);
             }
@@ -84,15 +117,23 @@ impl State {
             Key::Named(NamedKey::Enter) if !repeat => {
                 return Some(self.control_focus.unwrap_or(RestoreBtn::Restore))
             }
-            Key::Named(NamedKey::Escape) if !repeat => return Some(RestoreBtn::Dismiss),
+            Key::Named(NamedKey::Escape) if !repeat => {
+                return Some(if self.expanded {
+                    RestoreBtn::Collapse
+                } else {
+                    RestoreBtn::Dismiss
+                })
+            }
             Key::Named(NamedKey::Space) if !repeat => {
                 return Some(self.control_focus.unwrap_or(RestoreBtn::Toggle(self.focus)))
             }
             Key::Character(value) if value.as_str() == " " && !repeat => {
                 return Some(self.control_focus.unwrap_or(RestoreBtn::Toggle(self.focus)))
             }
-            Key::Named(NamedKey::ArrowUp) => self.focus = self.focus.saturating_sub(1),
-            Key::Named(NamedKey::ArrowDown) => {
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft) => {
+                self.focus = self.focus.saturating_sub(1)
+            }
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight) => {
                 self.focus = (self.focus + 1).min(self.selected.len().saturating_sub(1))
             }
             Key::Named(NamedKey::Home) => self.focus = 0,
@@ -114,6 +155,20 @@ impl State {
     }
     fn pick(&mut self, action: RestoreBtn) -> bool {
         match action {
+            RestoreBtn::Previous | RestoreBtn::Next => {
+                let visible = welcome::range(self.selected.len(), self.focus, self.welcome_slots);
+                self.focus = if action == RestoreBtn::Next {
+                    visible.end.min(self.selected.len().saturating_sub(1))
+                } else {
+                    visible.start.saturating_sub(self.welcome_slots.max(1))
+                };
+                self.control_focus = None;
+            }
+            RestoreBtn::Expand | RestoreBtn::Collapse => {
+                self.expanded = action == RestoreBtn::Expand;
+                self.control_focus = None;
+                self.reveal_next = self.expanded;
+            }
             RestoreBtn::Toggle(index) => {
                 if let Some(selected) = self.selected.get_mut(index) {
                     *selected = !*selected;
@@ -129,8 +184,16 @@ impl State {
                     self.control_focus = None;
                 }
             }
-            RestoreBtn::All => self.selected.fill(true),
-            RestoreBtn::Clear => self.selected.fill(false),
+            RestoreBtn::All | RestoreBtn::Clear => {
+                self.selected.fill(action == RestoreBtn::All);
+                if !self.expanded && self.control_focus == Some(action) {
+                    self.control_focus = Some(if action == RestoreBtn::All {
+                        RestoreBtn::Clear
+                    } else {
+                        RestoreBtn::All
+                    });
+                }
+            }
             _ => return false,
         }
         true
@@ -192,11 +255,11 @@ struct Layout {
 }
 
 fn layout(viewport: (f32, f32), content: f32) -> Layout {
-    let width = (viewport.0 - 32.0).clamp(0.0, 900.0);
+    let width = (viewport.0 - 32.0).clamp(0.0, 620.0);
     let available = (viewport.1 - 32.0).max(0.0);
     let compact = available < 448.0;
     let dense = available < 280.0;
-    let pad = if width < 600.0 { 16.0 } else { 24.0 };
+    let pad = if width < 420.0 { 16.0 } else { 24.0 };
     let header = if dense {
         62.0
     } else if compact {
@@ -215,7 +278,7 @@ fn layout(viewport: (f32, f32), content: f32) -> Layout {
     .min(available * 0.34);
     let detail = if available >= 528.0 { 88.0 } else { 0.0 };
     let height = (header + content + detail + footer)
-        .min(700.0)
+        .min(620.0)
         .min(available);
     let x = (viewport.0 - width) / 2.0;
     let y = (viewport.1 - height) / 2.0;
@@ -330,11 +393,28 @@ pub(crate) fn paint(
     viewport: (f32, f32),
     cursor: (f32, f32),
 ) -> Vec<(RestoreBtn, Rect)> {
+    if state.expanded {
+        paint_selection(g, state, viewport, cursor)
+    } else {
+        welcome::paint(g, state, viewport, cursor)
+    }
+}
+
+fn paint_selection(
+    g: &mut gpu::GpuRenderer,
+    state: &mut State,
+    viewport: (f32, f32),
+    cursor: (f32, f32),
+) -> Vec<(RestoreBtn, Rect)> {
     use crate::native_controls::{icon_button, text_button, Style};
     state.group_height = if viewport.1 < 312.0 { 0.0 } else { GROUP_H };
     let l = layout(viewport, state.content_height());
     state.list_height = l.list.3;
     state.clamp_scroll();
+    if state.reveal_next {
+        state.reveal();
+        state.reveal_next = false;
+    }
     let mut hits = Vec::new();
     let (x, y, w, h) = l.card;
     g.rect(
@@ -348,10 +428,25 @@ pub(crate) fn paint(
     g.round_rect_stroke(x, y, w, h, theme::radius_md(), 1.0, theme::border());
     g.push_clip(x, y, w, h);
     let tx = x + l.pad;
+    let back_y = y + if l.dense {
+        4.0
+    } else if l.compact {
+        10.0
+    } else {
+        18.0
+    };
+    let back = icon_button(
+        g,
+        (tx, back_y, 26.0, 28.0),
+        cursor,
+        "chevron-left",
+        Style::default(),
+    );
+    hits.push((RestoreBtn::Collapse, back));
     label(
         g,
         (
-            tx,
+            tx + 34.0,
             y + if l.dense {
                 8.0
             } else if l.compact {
@@ -359,17 +454,11 @@ pub(crate) fn paint(
             } else {
                 20.0
             },
-            w - l.pad * 2.0 - 40.0,
+            w - l.pad * 2.0 - 74.0,
             28.0,
         ),
-        "이어서 할 작업을 골라주세요",
-        if l.dense {
-            16.0
-        } else if w < 500.0 {
-            18.0
-        } else {
-            22.0
-        },
+        "작업 고르기",
+        if l.dense { 16.0 } else { 18.0 },
         true,
         theme::text(),
     );
@@ -669,6 +758,7 @@ mod tests {
     #[test]
     fn group_and_individual_choices_are_independent_with_keyboard_reveal() {
         let mut state = state();
+        state.pick(RestoreBtn::Expand);
         state.list_height = 110.0;
         assert_eq!(state.count(), 4);
         state.pick(RestoreBtn::Group(0));
@@ -724,8 +814,11 @@ mod tests {
     #[test]
     fn keyboard_controls_reverse_cycle_skip_disabled_restore_and_ignore_repeats() {
         let mut state = state();
+        state.pick(RestoreBtn::Expand);
         state.key(&Key::Named(NamedKey::Tab), true, false);
         assert!(state.control_focus == Some(RestoreBtn::Dismiss));
+        state.key(&Key::Named(NamedKey::Tab), false, false);
+        assert!(state.control_focus == Some(RestoreBtn::Collapse));
         state.key(&Key::Named(NamedKey::Tab), false, false);
         assert!(state.control_focus == Some(RestoreBtn::All));
         state.key(&Key::Named(NamedKey::Tab), false, false);
@@ -748,5 +841,49 @@ mod tests {
             state.key(&Key::Character(" ".into()), false, false),
             Some(RestoreBtn::Toggle(1))
         ));
+    }
+    #[test]
+    fn faces_toggle_directly_and_detail_round_trip_keeps_every_choice() {
+        let mut state = state();
+        assert!(!state.expanded);
+        state.welcome_slots = 2;
+        state.pick(RestoreBtn::Toggle(0));
+        state.pick(RestoreBtn::Next);
+        assert_eq!(state.focus, 2);
+        state.pick(RestoreBtn::Toggle(2));
+        assert_eq!(state.selection(), json!([1, 3]));
+        state.pick(RestoreBtn::Expand);
+        assert!(state.expanded && state.reveal_next);
+        let back = state
+            .key(&Key::Named(NamedKey::Escape), false, false)
+            .unwrap();
+        assert!(back == RestoreBtn::Collapse);
+        state.pick(back);
+        assert!(!state.expanded);
+        assert_eq!(state.selection(), json!([1, 3]));
+        state.pick(RestoreBtn::Previous);
+        assert_eq!(state.focus, 0);
+        assert!(
+            state.key(&Key::Named(NamedKey::Escape), false, false) == Some(RestoreBtn::Dismiss)
+        );
+    }
+    #[test]
+    fn welcome_bulk_toggle_keeps_keyboard_focus_on_its_new_label() {
+        let mut state = state();
+        state.key(&Key::Named(NamedKey::Tab), false, false);
+        state.key(&Key::Named(NamedKey::Tab), false, false);
+        assert!(state.control_focus == Some(RestoreBtn::Clear));
+        let action = state
+            .key(&Key::Named(NamedKey::Space), false, false)
+            .unwrap();
+        state.pick(action);
+        assert_eq!(state.count(), 0);
+        assert!(state.control_focus == Some(RestoreBtn::All));
+        let action = state
+            .key(&Key::Named(NamedKey::Enter), false, false)
+            .unwrap();
+        state.pick(action);
+        assert_eq!(state.count(), 4);
+        assert!(state.control_focus == Some(RestoreBtn::Clear));
     }
 }

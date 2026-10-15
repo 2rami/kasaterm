@@ -9480,3 +9480,18 @@ impl App {
         eprintln!("[autoundock] 기대: 별도창=0·PTY생존=true·트리복귀=true");
     }
 }
+
+
+pub(crate) fn restore_picker_portrait_fixture(plan: &mut crate::session::restore_selection::Plan) {
+    if !crate::server_restore::verification_restore_fixture()
+        || std::env::var("KASATERM_RESTORE_PICKER_FACES").as_deref() != Ok("1") {
+        return;
+    }
+    // Decorating only the display model prevents a portrait capture from resuming an agent.
+    for (i, (row, (name, _))) in plan.rows.iter_mut().zip(crate::theme::character_slugs()).enumerate() {
+        row.character = (*name).to_owned();
+        row.kind = if i % 2 == 0 { "Claude" } else { "Codex" }.into();
+        row.icon = if i % 2 == 0 { "claude" } else { "codex" };
+        row.identity = format!("{} · {} · 시연", row.kind, name);
+    }
+}

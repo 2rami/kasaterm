@@ -94,3 +94,9 @@ Runtime verification covers preview without writes, cancel restoring a named pre
 Native release captures were inspected at 1100×780, 390×780 and 280×200. The first work title starts at y=207 on the normal layout and y=87 in the shortest window. A fixed footer remains usable while the work list scrolls; very short windows omit group headers and the preservation note so a real work row remains readable.
 
 Restore tests: 69; session tests: 135; history tests: 10; server-restore tests: 11 (overlapping groups, not a summed total). Runtime fixtures proved one selected tab opens, five unchecked tabs persist as deferred, all six original tabs remain in the backup, fresh start keeps six deferred tabs, and zero selection cannot start restoration. Fixtures used isolated shell records; live user agents were not resumed.
+
+## Direct portrait selection — 2026-10-15
+
+User feedback preferred the earlier cute dialog and explicitly chose direct selection by portrait. The default now occupies at most 560×324; the previous 900×700 default checklist is replaced by a small portrait strip and a task preview. Paging and bulk selection work in that surface; a smaller 620×620 detail list remains optional.
+
+Native release captures were reviewed at 1100×780, 390×780 and 280×200, with an additional 125% UI-scale capture. Automated pointer placement confirmed title/folder preview without changing selection. Portrait clicks and a detail/back round trip each restored exactly one selected shell, retained five deferred records and preserved the six-tab backup. Zero selection did not restore. Restore-related tests: 73 passed. The portrait fixture decorates only the display model; launch records remain synthetic shells and no real agent was resumed.

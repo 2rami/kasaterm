@@ -42,3 +42,7 @@ Accent editing exposes an arbitrary RGB/HEX picker with optional preset shortcut
 ## Selective restore — 2026-10-15
 
 The startup restore dialog groups local tabs by room and identifies their titles, agent identities, folders and pane numbers. Checkboxes support individual rooms/tabs and all/none; fixed action buttons survive small window sizes. Unchecked work remains in closed-pane history with the explicit reason 복원 보류. Saved display titles do not become pinned titles. Token dimensions remain in `docs/design.md`; exact styling is pending review.
+
+## Portrait selection — 2026-10-15
+
+The user preferred the earlier cute, compact restore dialog and explicitly chose direct selection on portrait cards. The default is now a small portrait strip: clicking toggles work, hovering previews its identity and folder, and arrows page through every saved task. Bulk selection and restoration remain explicit footer actions. The detailed room/tab list is optional and retains the same selection. The prior large default checklist is superseded; exact artwork framing remains pending review.

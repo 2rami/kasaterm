@@ -89,4 +89,4 @@
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].
 
-- `restore_picker.rs` — 시작 복원창의 방·탭별 선택 목록, 크기에 맞춘 배치·스크롤·키보드. `session/restore_selection.rs`는 저장 정보의 표시 모델, `session/local_restore.rs`는 선택한 탭의 배치 재구성과 미선택 작업의 보류 기록을 맡는다.
+- `restore_picker.rs` — 복원 선택 상태·키보드와 방·탭 상세 목록. `restore_picker/welcome.rs`는 작은 얼굴 카드·페이지 이동·작업 미리보기를 그린다. `session/restore_selection.rs`는 저장 정보의 표시 모델, `session/local_restore.rs`는 선택한 탭의 배치 재구성과 미선택 작업의 보류 기록을 맡는다.

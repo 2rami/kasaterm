@@ -1526,6 +1526,10 @@ enum RestoreBtn {
     Group(usize),
     All,
     Clear,
+    Expand,
+    Collapse,
+    Previous,
+    Next,
 }
 
 /// A login shell (vs. a real foreground job like claude / vim / a build).
