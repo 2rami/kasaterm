@@ -182,6 +182,11 @@ impl App {
     /// 돌려준다. hover 밑줄/커서·클릭 모두 이걸 쓴다. 커서가 올라간 행에서 위아래로
     /// **이어진 행**(줄이 꺾인 주소)만 더 보므로 CursorMoved 마다 불러도 가볍다.
     pub(crate) fn link_hit(&self, px: f32, py: f32) -> Option<(String, Vec<LinkSpan>, String)> {
+        // 대화로 보는 칸(거울의 기본 보기)은 화면이 대화 보기가 지은 격자다. 원본 글자판을 보면 밑줄과
+        // 손가락 커서가 엉뚱한 자리에 서고 다른 주소가 열렸다(2026-10-15).
+        if let Some((pid, col, row, rows)) = self.chat_view_cell(px, py) {
+            return link_in(&pid, |r| rows.get(r), col, row);
+        }
         let (pid, col, row) = self.px_to_pane_cell(px, py)?;
         let ws = self.ws.lock().unwrap();
         let term = ws.panes.get(&pid)?.term()?;
@@ -190,50 +195,43 @@ impl App {
         // 원본을 그대로 보면 당긴 줄 수만큼 아래 줄에서 주소를 찾는다(복사와 같은
         // 뿌리, 2026-09-05).
         let shift = self.pane_view_shift.get(&pid);
-        let view = |r: usize| -> Option<&Vec<GridCell>> {
-            match shift {
-                Some(shift) => shift.row(r, &term.cells),
-                None => term.cells.get(r),
-            }
-        };
-        let row = row as usize;
-        // 이어진 행을 위아래로 모은다 — 상한은 화면 폭이 아주 좁아도 긴 주소가 드는 만큼.
-        let mut start = row;
-        while start > 0 && row - start < 16 {
-            match (view(start - 1), view(start)) {
-                (Some(p), Some(c)) if joins(p, c) => start -= 1,
-                _ => break,
-            }
-        }
-        let mut end = row;
-        while end - start < 32 {
-            match (view(end), view(end + 1)) {
-                (Some(c), Some(n)) if joins(c, n) => end += 1,
-                _ => break,
-            }
-        }
-        let rows: Vec<&[GridCell]> = (start..=end)
-            .filter_map(|r| view(r).map(Vec::as_slice))
-            .collect();
-        let rel = row - start;
-        detect_links_rows(&rows)
-            .into_iter()
-            .find(|(segs, _)| {
-                segs.iter()
-                    .any(|(r, s, e)| *r == rel && col >= *s && col < *e)
-            })
-            .map(|(segs, url)| {
-                let spans = segs
-                    .into_iter()
-                    .map(|(r, s, e)| LinkSpan {
-                        row: (start + r) as u16,
-                        col_start: s,
-                        col_end: e,
-                    })
-                    .collect();
-                (pid.clone(), spans, url)
-            })
+        link_in(&pid, |r| match shift {
+            Some(shift) => shift.row(r, &term.cells),
+            None => term.cells.get(r),
+        }, col, row)
     }
+}
+
+/// 화면 행 `view` 에서 (`col`, `row`) 칸에 걸린 주소. 이어진 행(꺾인 주소)을 위아래로 모아 본다 — 상한은
+/// 화면 폭이 아주 좁아도 긴 주소가 드는 만큼.
+fn link_in<'a>(pid: &str, view: impl Fn(usize) -> Option<&'a Vec<GridCell>>, col: u16, row: u16) -> Option<(String, Vec<LinkSpan>, String)> {
+    let row = row as usize;
+    let mut start = row;
+    while start > 0 && row - start < 16 {
+        match (view(start - 1), view(start)) {
+            (Some(p), Some(c)) if joins(p, c) => start -= 1,
+            _ => break,
+        }
+    }
+    let mut end = row;
+    while end - start < 32 {
+        match (view(end), view(end + 1)) {
+            (Some(c), Some(n)) if joins(c, n) => end += 1,
+            _ => break,
+        }
+    }
+    let rows: Vec<&[GridCell]> = (start..=end).filter_map(|r| view(r).map(Vec::as_slice)).collect();
+    let rel = row - start;
+    detect_links_rows(&rows)
+        .into_iter()
+        .find(|(segs, _)| segs.iter().any(|(r, s, e)| *r == rel && col >= *s && col < *e))
+        .map(|(segs, url)| {
+            let spans = segs
+                .into_iter()
+                .map(|(r, s, e)| LinkSpan { row: (start + r) as u16, col_start: s, col_end: e })
+                .collect();
+            (pid.to_string(), spans, url)
+        })
 }
 
 #[cfg(test)]
@@ -252,6 +250,16 @@ mod tests {
             }
         }
         cells
+    }
+
+    /// 대화 보기 격자처럼 원본과 다른 화면 행에서도 누른 그 칸의 주소를 그 행 자리로 돌려준다.
+    #[test]
+    fn a_link_is_found_in_whatever_rows_the_screen_shows() {
+        let rows = vec![row("⏺ 답"), row("  see https://a.b/c tail")];
+        let (pid, spans, url) = link_in("%8", |r| rows.get(r), 10, 1).expect("link");
+        assert_eq!((pid.as_str(), url.as_str()), ("%8", "https://a.b/c"));
+        assert_eq!((spans[0].row, spans[0].col_start, spans[0].col_end), (1, 6, 19));
+        assert!(link_in("%8", |r| rows.get(r), 1, 0).is_none());
     }
 
     #[test]

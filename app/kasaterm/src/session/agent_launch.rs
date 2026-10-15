@@ -142,6 +142,17 @@ impl App {
         let launched = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned();
         if let Some(name) = launched {
             if name.is_empty() { return; } // this run ended; do not relabel its shell
+            let bound = kasa_mcp::character::session_character(sid);
+            let keep_pane = bound.as_deref().is_some_and(|bound| pane_pick_wins(
+                pane_reassigned(pane), kasa_mcp::character::is_assignable_for(sid, bound)));
+            let name = match bound.filter(|bound| resume_takes_over(
+                self.pane_session_id.get(pane).map(String::as_str), sid, &name, bound, keep_pane)) {
+                Some(bound) => {
+                    self.ws.lock().unwrap().pane_launch_character.insert(pane.into(), bound.clone());
+                    bound
+                }
+                None => name,
+            };
             self.relabel_pane(pane, &name);
             if kasa_mcp::character::session_character(sid).is_none() {
                 let _ = kasa_mcp::character::bind_session_character(sid, &name);
@@ -861,6 +872,14 @@ pub(crate) fn pane_pick_wins(reassigned: bool, bound_assignable: bool) -> bool {
     reassigned || !bound_assignable
 }
 
+/// 띄운 실행이 그 안에서 다른 대화로 옮겼을 때(`/resume`) 이름표가 그 대화에 묶인 학생으로 넘어가는가.
+/// 옮긴 순간 SessionStart 훅이 그 학생 말투를 다시 넣어(`/persona`) 모델이 읽는 것도 그 학생이 된다.
+/// 같은 대화의 늦은 정보, 묶임 없는 새 대화(`/clear`·포크)는 띄울 때 학생을 지킨다. 2026-10-15 시로코로
+/// 뜬 칸에서 아즈사 대화를 이었더니 대화는 아즈사인데 이름표·판은 시로코로 남았다.
+pub(crate) fn resume_takes_over(launch_sid: Option<&str>, sid: &str, launched: &str, bound: &str, keep_pane: bool) -> bool {
+    launch_sid.is_some_and(|launch| launch != sid) && bound != launched && !keep_pane
+}
+
 pub(crate) fn write_persona_override(pane: &str, character: &str) {
     let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else {
         return;
@@ -999,5 +1018,15 @@ mod tests {
         assert!(!pane_pick_wins(false, true), "자동 배정 pane 이 남의 대화를 이으면 대화의 학생이 이긴다");
         assert!(pane_pick_wins(true, true), "사람이 재배정한 pane 은 pane 이 이긴다");
         assert!(pane_pick_wins(false, false), "바인딩된 학생이 명단에 없으면 pane 이 이긴다");
+    }
+
+    #[test]
+    fn resuming_another_conversation_inside_a_run_takes_its_student() {
+        use super::resume_takes_over;
+        assert!(resume_takes_over(Some("launch"), "resumed", "시로코", "아즈사", false), "/resume 한 대화의 학생");
+        assert!(!resume_takes_over(Some("launch"), "launch", "시로코", "아즈사", false), "같은 대화의 늦은 정보는 띄울 때 학생");
+        assert!(!resume_takes_over(Some("launch"), "resumed", "시로코", "시로코", false));
+        assert!(!resume_takes_over(Some("launch"), "resumed", "시로코", "아즈사", true), "사람이 고른 칸은 칸이 이긴다");
+        assert!(!resume_takes_over(None, "resumed", "시로코", "아즈사", false), "띄운 대화 번호를 모르면 건드리지 않는다");
     }
 }
