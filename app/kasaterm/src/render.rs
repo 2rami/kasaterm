@@ -508,7 +508,7 @@ impl App {
 
     #[cfg(not(target_os = "macos"))]
     fn sync_ime_cursor_area(&mut self, ov: &GpuOverlay) {
-        if self.git.col_visible && self.info.tab == state::SideTab::Share && self.share.search_focus { return; }
+        if self.git.col_visible && self.info.shared_page() && self.share.search_focus { return; }
         let Some(window) = self.window.as_ref() else {
             return;
         };
@@ -2430,7 +2430,6 @@ impl App {
         // 미리 읽는다(`g` 가 self.gpu 를 잡은 뒤엔 &self 메서드를 못 부른다).
         let git_col_toggle = self.git_col_toggle_rect();
         let settings_title = self.settings_title_rect();
-        let share_title = self.share_title_rect();
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
@@ -2944,10 +2943,7 @@ impl App {
                     fg,
                 );
             }
-            if let Some(rect) = share_title {
-                crate::native_controls::text_button(g, rect, sb_cursor, "공유",
-                    crate::native_controls::Style { active: git_col_w > 0.0 && self.info.tab == state::SideTab::Share, ..Default::default() });
-            }
+
             // lite 는 오른쪽 패널(git 컬럼)이 없다 — 토글도 안 그린다.
             if !self.lite {
                 let bw = 26.0_f32;
@@ -3214,7 +3210,7 @@ impl App {
                     12.0 + isz + 6.0 + g.measure_chrome_text(&cwd_str, chrome_font, false)
                 };
                 let win_w = win_px.0 / scale;
-                let right_lim = share_title.or(settings_title).or(git_col_toggle).map_or(win_w - 8.0, |(x, ..)| x - 12.0);
+                let right_lim = settings_title.or(git_col_toggle).map_or(win_w - 8.0, |(x, ..)| x - 12.0);
                 // 칩은 왼쪽 칼럼(파일트리) 위로 내려앉지 않는다 — 좁은 창에서 가운데가
                 // 마침 그 경계와 겹치면 파일 목록에 딱 붙어 튀어나온 것처럼 보였다
                 // (640px 실측: 경계도 236, 중앙 시작도 236).
@@ -4552,7 +4548,7 @@ impl App {
                 headers.iter().map(|h| h.id.clone()).collect();
             {
                 let (hmx, hmy) = self.cursor_px;
-                let accent = theme::accent_color(theme::accent_name());
+                let accent = theme::accent();
                 let anim_phase = anim_phase_secs();
                 let mut handle_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
                 let mut zones: Vec<(String, (f32, f32, f32, f32))> = Vec::new();

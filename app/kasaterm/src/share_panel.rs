@@ -348,9 +348,27 @@ fn contains(rect: Rect, point: (f32, f32)) -> bool {
 }
 
 impl App {
-    pub(crate) fn share_title_rect(&self) -> Option<Rect> {
-        self.settings_title_rect()
-            .map(|(x, y, _, h)| (x - 64.0, y, 60.0, h))
+    pub(crate) fn share_panel_active(&self) -> bool {
+        self.git.col_visible && self.info.shared_page() && !self.internal_room_active_any()
+    }
+
+    pub(crate) fn select_info_page(&mut self, page: state::InfoPage) {
+        if self.info.page == page { return; }
+        if self.share.search_focus {
+            if let Some(text) = self.hangul.flush() { self.share.insert(&text); }
+            self.share.pending_search_commit = self.in_preedit;
+        }
+        self.share.search_focus = false;
+        self.share.keyboard_focus = None;
+        self.share.scroll_drag = None;
+        self.share.hits.clear();
+        self.share.search_rect = None;
+        self.share.caret_rect = None;
+        self.info.clear_info_targets();
+        self.info.page = page;
+        if page == state::InfoPage::SharedFiles { self.share.last_refresh = None; }
+        else { self.info.last_refresh = None; self.info.frozen_since = None; }
+        self.chrome_dirty = true;
     }
 
     pub(crate) fn open_share_panel(&mut self) {
@@ -360,7 +378,8 @@ impl App {
         if self.settings_room_active() {
             self.return_from_settings_room();
         }
-        self.info.tab = state::SideTab::Share;
+        self.info.tab = state::SideTab::Info;
+        self.select_info_page(state::InfoPage::SharedFiles);
         // The global entry must expose new arrivals, not a previously filtered folder.
         self.share.home();
         if !self.git.col_visible {
@@ -422,7 +441,7 @@ impl App {
                 });
             }
         }
-        let visible = self.git.col_visible && self.info.tab == state::SideTab::Share;
+        let visible = self.share_panel_active();
         let settings =
             self.settings_room_active() && self.settings_scene.category() == SettingsCat::Share;
         if (!visible && !settings)

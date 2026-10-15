@@ -1792,7 +1792,7 @@ impl App {
         // 늦춘다(수집이 `ps` + `lsof` fork 라 상시 1.5초는 비싸고, 칩의 숫자는
         // 초 단위로 맞을 이유가 없다).
         // 맨 위 카드는 감시 스레드가 따로 채운다. 아래 「모든 방」 목록은 펼쳤을 때만 자주 모은다.
-        let info_open = self.info.tab == state::SideTab::Info && self.git.col_visible;
+        let info_open = self.info.runtime_page() && self.git.col_visible;
         let (target, hint) = self.info_focus_target();
         self.info.focus_alt = self.ws.lock().ok().and_then(|ws| ws.active().and_then(|p| p.term()).map(|t| t.alt_screen)).unwrap_or(false);
         self.info.focus.aim(target, hint, info_open);
@@ -2188,7 +2188,7 @@ pub(crate) fn draw_side_tabs(
     // 탭 줄의 단추 자리로 올라왔다 — 확대·닫기와 한 벌이다.
     let refresh_x = expand_x - bi - 8.0;
     info.refresh_rect = None;
-    if info.tab == state::SideTab::Info {
+    if info.runtime_page() {
         info.refresh_rect = Some(crate::native_controls::icon_button(
             g, (refresh_x, button_y, bi, bi), cursor, "rotate-cw", Default::default(),
         ));
@@ -2222,14 +2222,13 @@ pub(crate) fn draw_side_tabs(
         (state::SideTab::Info, "Info"),
         (state::SideTab::Sessions, "세션"),
         (state::SideTab::Mcp, "Addon"),
-        (state::SideTab::Share, "공유"),
     ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
         // 첫 줄만 우상단 버튼(확대·닫기) 앞에서 끊는다. 둘째 줄부터는 그 위가
         // 비어 있으니 칼럼 오른쪽 끝까지 쓴다.
         let limit = if row == 0 {
-            if info.tab == state::SideTab::Info { refresh_x - 8.0 } else { expand_x - 8.0 }
+            if info.runtime_page() { refresh_x - 8.0 } else { expand_x - 8.0 }
         } else {
             x + w - 10.0
         };

@@ -681,7 +681,7 @@ pub(crate) fn keyboard_hits(hits: &[Hit]) -> Vec<&Hit> {
             (hit.rect.1 + hit.rect.3) - (hit.layout_rect.1 + hit.layout_rect.3),
         ].into_iter().all(|difference| difference.abs() <= 0.5);
         if !matches!(hit.cursor, HitCursor::Pointer | HitCursor::Text)
-            || matches!(hit.target, Target::Setting(SettingsAction::PickerSV | SettingsAction::PickerHue))
+            || matches!(hit.target, Target::Setting(SettingsAction::PickerSV(_) | SettingsAction::PickerHue(_)))
             || hit.rect.2 <= 0.0 || hit.rect.3 <= 0.0 || !fully_visible { continue; }
         let center = (hit.rect.0 + hit.rect.2 / 2.0, hit.rect.1 + hit.rect.3 / 2.0);
         if !hits.iter().rev().find(|candidate| contains(candidate.rect, center))
@@ -1224,7 +1224,7 @@ impl App {
                 self.settings_scene.query.clear();
                 self.native_settings_focus(SettingsInput::Search);
             }
-            Some(Target::FinishInput) => self.native_settings_blur(),
+            Some(Target::FinishInput) => self.native_settings_finish_input(),
             Some(Target::CancelInput) => self.native_settings_cancel_field(),
             Some(Target::Disclosure(id)) => {
                 self.native_settings_blur();
@@ -1243,20 +1243,21 @@ impl App {
                 self.refresh_native_settings_media_cache();
             }
             Some(Target::Setting(action)) => {
-                if matches!(action, SettingsAction::PickerSV | SettingsAction::PickerHue) {
-                    if !matches!(
-                        self.settings_input,
-                        Some(SettingsInput::PaletteHex(_))
-                    ) {
-                        self.settings_apply(SettingsAction::FocusPaletteHex(0));
-                        self.native_settings_arm_backup(SettingsInput::PaletteHex(0));
-                    }
+                if let SettingsAction::PickerSV(field) | SettingsAction::PickerHue(field) = action {
+                    if self.settings_input != Some(field) { self.native_settings_focus(field); }
+                    self.native_settings_arm_backup(field);
                     if let Some(rect) = hit.map(|hit| hit.layout_rect) {
                         self.settings_scene.mark_field_dirty();
                         self.picker_preview(&action, rect, (x, y));
                         self.settings_scene.begin_picker_drag(action, rect);
                     }
                     self.chrome_dirty = true;
+                    return true;
+                }
+                if let SettingsAction::ColorEyedropper(field) = action {
+                    if self.settings_input != Some(field) { self.native_settings_focus(field); }
+                    self.native_settings_arm_backup(field);
+                    self.settings_apply(action);
                     return true;
                 }
                 self.native_settings_blur();
@@ -1308,7 +1309,7 @@ impl App {
         let ended = self.settings_scene.end_picker_drag();
         if ended {
             match self.settings_input {
-                Some(SettingsInput::PaletteHex(slot)) => self.apply_palette_edit(slot),
+                Some(field) if field.is_color() => self.apply_color_edit(field),
                 _ => {}
             }
         }
@@ -1345,6 +1346,7 @@ impl App {
             self.native_settings_blur();
             match field {
                 SettingsInput::PaletteHex(slot) => self.settings_apply(SettingsAction::FocusPaletteHex(slot)),
+                SettingsInput::AccentHex | SettingsInput::StatusbarHex(_) => self.focus_custom_color(field),
                 SettingsInput::CustomThemeLabel if self.custom_theme_label_edit.is_none() => {
                     if let Some(slug) = theme::active_custom_slug() {
                         self.settings_apply(SettingsAction::FocusCustomThemeLabel(slug));
@@ -1406,7 +1408,7 @@ impl App {
                     .count();
             }
             SettingsInput::ThemeLabel
-            | SettingsInput::PaletteHex(_) => {}
+            | SettingsInput::PaletteHex(_) | SettingsInput::AccentHex | SettingsInput::StatusbarHex(_) => {}
         }
         self.ime_focus = Some(crate::ImeFocus::Settings(field));
         self.preedit.clear();
@@ -1435,7 +1437,12 @@ impl App {
         if self.settings_scene.field_backup_matches(field) {
             return;
         }
-        let (value, caret) = self.native_settings_field_value(field);
+        let (mut value, caret) = self.native_settings_field_value(field);
+        match field {
+            SettingsInput::AccentHex => value = socket::read_settings().get("accent").and_then(|v| v.as_str()).unwrap_or("blue").to_string(),
+            SettingsInput::StatusbarHex(id) => value = self.set_statusbar.colors.get(id).cloned().unwrap_or_default(),
+            _ => {}
+        }
         self.settings_scene.arm_field_backup(FieldBackup {
             field,
             value,
@@ -1497,7 +1504,7 @@ impl App {
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
-            SettingsInput::PaletteHex(_) => {
+            SettingsInput::PaletteHex(_) | SettingsInput::AccentHex | SettingsInput::StatusbarHex(_) => {
                 (self.set_palette_edit.clone(), self.settings_caret)
             }
         }
@@ -1584,9 +1591,9 @@ impl App {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
                 }
             }
-            SettingsInput::PaletteHex(slot) => {
+            field @ (SettingsInput::PaletteHex(_) | SettingsInput::AccentHex | SettingsInput::StatusbarHex(_)) => {
                 crate::lineedit::insert(&mut self.set_palette_edit, &mut self.settings_caret, text);
-                self.apply_palette_edit(slot);
+                self.apply_color_edit(field);
             }
         }
         if matches!(
@@ -1607,14 +1614,25 @@ impl App {
         self.chrome_dirty = true;
     }
 
+    fn native_settings_finish_input(&mut self) {
+        if self.settings_input.is_some_and(SettingsInput::is_color)
+            && theme::parse_hex(&self.set_palette_edit).is_none() {
+            self.set_toast("색상은 #RRGGBB 형식으로 입력해 주세요".to_string());
+            return;
+        }
+        self.native_settings_blur();
+    }
+
     pub(crate) fn native_settings_blur(&mut self) {
+        self.native_settings_end_drag();
         if let Some(field) = self.settings_input {
             if let Some(text) = self.hangul.flush() {
                 self.native_settings_insert_into(field, &text);
             }
         }
         let (backup, dirty) = self.settings_scene.take_field_backup();
-        if !dirty {
+        if !dirty || (self.settings_input.is_some_and(SettingsInput::is_color)
+            && theme::parse_hex(&self.set_palette_edit).is_none()) {
             if let Some(backup) = backup {
                 self.native_settings_restore_backup(backup);
             }
@@ -1713,6 +1731,12 @@ impl App {
                 self.set_palette_edit = backup.value;
                 self.apply_palette_edit(slot);
             }
+            SettingsInput::AccentHex => {
+                self.settings_apply(SettingsAction::Accent(backup.value));
+            }
+            SettingsInput::StatusbarHex(id) => {
+                self.settings_apply(SettingsAction::SetStatusbarColor(id.to_string(), backup.value));
+            }
         }
         match backup.field {
             SettingsInput::StudentPersona => self.students_caret = backup.caret,
@@ -1738,6 +1762,7 @@ impl App {
     }
 
     fn native_settings_cancel_field(&mut self) {
+        self.settings_scene.end_picker_drag();
         let field = self.settings_input;
         let _ = self.hangul.flush();
         let (backup, _) = self.settings_scene.take_field_backup();
@@ -2069,7 +2094,7 @@ impl App {
                 return true;
             }
             Key::Named(NamedKey::Enter) => {
-                self.native_settings_blur();
+                self.native_settings_finish_input();
                 return true;
             }
             Key::Named(NamedKey::Backspace)
@@ -2107,7 +2132,7 @@ impl App {
                 self.settings_save();
             }
             match field {
-                SettingsInput::PaletteHex(slot) => self.apply_palette_edit(slot),
+                field if field.is_color() => self.apply_color_edit(field),
                 _ => {}
             }
         }
@@ -2521,7 +2546,7 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
             .theme_label_edit
             .as_mut()
             .map(|(_, buffer)| (buffer, &mut app.settings_caret)),
-        SettingsInput::PaletteHex(_) => {
+        SettingsInput::PaletteHex(_) | SettingsInput::AccentHex | SettingsInput::StatusbarHex(_) => {
             Some((&mut app.set_palette_edit, &mut app.settings_caret))
         }
     }
@@ -2806,6 +2831,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             g,
             snapshot,
             &mut hits,
+            &mut caret_rect,
             content_x,
             &mut y,
             content_w,
@@ -3246,6 +3272,11 @@ fn paint_appearance(
     }
     row_label(g, x, y, "강조색");
     *y += appearance_preview::paint_accents(g, s, hits, x, *y, w);
+    let color = theme::accent();
+    let accent_hex = theme::hex_str([color[0], color[1], color[2]]);
+    *y += paint_color_picker(g, s, hits, caret, x, *y, w, SettingsInput::AccentHex,
+        "강조색 HEX", if s.input == Some(SettingsInput::AccentHex) { &s.palette_edit } else { &accent_hex },
+        s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
     *y += 12.0;
     *y += appearance_preview::paint(g, s, hits, x, *y, w);
     paint_palette_editor(g, s, hits, caret, x, y, w);
@@ -3451,6 +3482,7 @@ fn paint_statusbar(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
@@ -3475,7 +3507,7 @@ fn paint_statusbar(
     );
     *y += 54.0;
     for (index, id) in s.statusbar_order.iter().enumerate() {
-        statusbar_widget_row(g, s, hits, x, y, w, id, index);
+        statusbar_widget_row(g, s, hits, caret, x, y, w, id, index);
     }
 
     *y += 12.0;
@@ -3683,6 +3715,7 @@ fn statusbar_widget_row(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
     x: f32,
     y: &mut f32,
     w: f32,
@@ -3754,40 +3787,23 @@ fn statusbar_widget_row(
         "arrow-down",
     );
 
-    draw_text(g, rect.0 + 12.0, rect.1 + 49.0, "색", 10.5, theme::text_mute(), false);
-    let selected = s.statusbar_colors.get(id).map(String::as_str).unwrap_or("");
-    let mut sx = rect.0 + 39.0;
-    let swatch_w = if rect.2 < 220.0 { 18.0 } else { 22.0 };
-    let swatch_gap = if rect.2 < 220.0 { 4.0 } else { 7.0 };
-    let swatches: Vec<(String, [u8; 4])> = std::iter::once((String::new(), theme::text_dim()))
-        .chain(theme::ACCENT_PRESETS.iter().map(|(_, color)| {
-            (
-                format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]),
-                *color,
-            )
-        }))
-        .collect();
-    for (value, color) in swatches {
-        let sr = (sx, rect.1 + 43.0, swatch_w, 18.0);
-        let on = selected.eq_ignore_ascii_case(&value);
-        round_rect(g, sr.0, sr.1, sr.2, sr.3, 5.0, color);
-        if on {
-            stroke_round(g, (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0), 7.0, theme::text());
-        }
-        register_clipped(
-            g,
-            hits,
-            Target::Setting(SettingsAction::SetStatusbarColor(id.to_string(), value)),
-            (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0),
-            HitCursor::Pointer,
-        );
-        g.hover_pointer |= contains(
-            (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0),
-            s.cursor,
-        );
-        sx += swatch_w + swatch_gap;
-    }
+    let Some(id) = crate::statusbar_config::WIDGETS.iter().copied().find(|key| *key == id) else { return; };
+    let field = SettingsInput::StatusbarHex(id);
+    let color = statusbar_item_color(s, id);
+    let value = s.statusbar_colors.get(id).cloned().unwrap_or_else(|| theme::hex_str([color[0], color[1], color[2]]));
+    circle_rect(g, x + 12.0, *y + 46.0, 16.0, color);
+    let color_w = (w - 134.0).clamp(50.0, 160.0);
+    let label = if s.statusbar_colors.contains_key(id) { value.clone() } else { format!("기본 · {value}") };
+    button(g, s, hits, (x + 38.0, *y + 40.0, color_w, CTL_H),
+        &label, Target::Setting(SettingsAction::FocusColor(field)), s.input == Some(field));
+    button(g, s, hits, (x + 46.0 + color_w, *y + 40.0, 76.0, CTL_H), "기본색",
+        Target::Setting(SettingsAction::SetStatusbarColor(id.to_string(), String::new())), false);
     *y += rect.3 + 7.0;
+    if s.input == Some(field) {
+        *y += paint_color_picker(g, s, hits, caret, x, *y, w, field,
+            statusbar_widget_label(id), &s.palette_edit,
+            s.eyedropper.then_some(SettingsAction::ColorEyedropper(field)));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3864,7 +3880,7 @@ fn paint_palette_editor(
         SettingsInput::PaletteHex(selected),
         &slot_label,
         &s.palette_edit,
-        s.eyedropper.then(|| SettingsAction::PaletteEyedropper(selected)),
+        s.eyedropper.then(|| SettingsAction::ColorEyedropper(SettingsInput::PaletteHex(selected))),
     );
 }
 
@@ -3935,7 +3951,9 @@ fn paint_color_picker(
     value: &str,
     eyedropper: Option<SettingsAction>,
 ) -> f32 {
-    let (hue, sat, val) = s.picker_hsv;
+    let (hue, sat, val) = if s.input == Some(field) { s.picker_hsv } else {
+        crate::settings::rgb_to_hsv(theme::parse_hex(value).unwrap_or([0, 0, 0]))
+    };
     let layout = color_picker_layout(x, y, w);
     let sv = layout.sv;
     g.color_picker(sv, hue, false);
@@ -3946,7 +3964,7 @@ fn paint_color_picker(
     register_clipped(
         g,
         hits,
-        Target::Setting(SettingsAction::PickerSV),
+        Target::Setting(SettingsAction::PickerSV(field)),
         sv,
         HitCursor::Pointer,
     );
@@ -3964,7 +3982,7 @@ fn paint_color_picker(
     register_clipped(
         g,
         hits,
-        Target::Setting(SettingsAction::PickerHue),
+        Target::Setting(SettingsAction::PickerHue(field)),
         hue_rect,
         HitCursor::Pointer,
     );
@@ -3994,6 +4012,11 @@ fn paint_color_picker(
             Target::Setting(action),
             false,
         );
+    }
+    if s.input == Some(field) && theme::parse_hex(value).is_none() {
+        let mut hint_y = y + layout.height;
+        plain_hint(g, x, &mut hint_y, w, "#RRGGBB 형식으로 입력해 주세요. 예: #3a7bd5");
+        return hint_y - y;
     }
     layout.height
 }
@@ -7468,7 +7491,7 @@ fn field_placeholder(field: SettingsInput) -> &'static str {
         SettingsInput::AccountLabel => "계정 표시 이름…",
         SettingsInput::LoginCode => "브라우저의 인증 코드…",
         SettingsInput::ThemeLabel => "테마 이름…",
-        SettingsInput::PaletteHex(_) => "#RRGGBB",
+        SettingsInput::PaletteHex(_) | SettingsInput::AccentHex | SettingsInput::StatusbarHex(_) => "#RRGGBB",
     }
 }
 
@@ -8292,7 +8315,7 @@ mod tests {
 
     #[test]
     fn clipped_picker_keeps_the_original_color_coordinates() {
-        let hit = Hit { target: Target::Setting(SettingsAction::PickerSV), rect: (10.0, 86.0, 100.0, 66.0),
+        let hit = Hit { target: Target::Setting(SettingsAction::PickerSV(SettingsInput::PaletteHex(0))), rect: (10.0, 86.0, 100.0, 66.0),
             layout_rect: (10.0, 20.0, 100.0, 132.0), cursor: HitCursor::Pointer };
         assert_eq!(crate::settings::picker_relative_position(hit.layout_rect, (60.0, 86.0)), (0.5, 0.5));
         assert_eq!(crate::settings::picker_relative_position(hit.layout_rect, (60.0, 152.0)), (0.5, 1.0));
@@ -8315,7 +8338,7 @@ mod tests {
             hit(Target::Close, (0.0, 0.0, 26.0, 26.0), HitCursor::Pointer),
             hit(Target::DropdownDismiss, (0.0, 0.0, 100.0, 100.0), HitCursor::Arrow),
             hit(Target::Setting(SettingsAction::UiFont("system".into())), (10.0, 30.0, 80.0, 26.0), HitCursor::Pointer),
-            hit(Target::Setting(SettingsAction::PickerSV), (0.0, 110.0, 100.0, 100.0), HitCursor::Pointer),
+            hit(Target::Setting(SettingsAction::PickerSV(SettingsInput::PaletteHex(0))), (0.0, 110.0, 100.0, 100.0), HitCursor::Pointer),
         ];
         let reachable = keyboard_hits(&hits);
         assert_eq!(reachable.len(), 1);
@@ -8513,7 +8536,7 @@ mod tests {
             ("system theme slots", "theme-system-${slot}", "ThemeSystemSlot"),
             ("custom palette rename", "rename-custom-theme", "FocusCustomThemeLabel"),
             ("palette wheel", "ColorWheel", "PickerSV"),
-            ("eyedropper", "palette-eyedropper", "PaletteEyedropper"),
+            ("eyedropper", "palette-eyedropper", "ColorEyedropper"),
             ("isolated reauth", "reauth-account-isolated", "LoginBrowser::Isolated"),
             ("account label", "account-label", "FocusAccountLabel"),
             ("theme roster", "theme-pick-all", "ThemePickAll"),
@@ -8659,6 +8682,68 @@ mod tests {
         assert!(!motion_preview_pump_needed(true, false, true));
         assert!(!motion_preview_pump_needed(false, true, true));
         assert!(motion_preview_pump_needed(true, true, true));
+    }
+}
+
+impl App {
+    pub(crate) fn probe_custom_colors(&mut self) {
+        if !crate::verification_run() { return; }
+        let settings_path = std::env::var_os("KASATERM_SETTINGS_FILE").map(std::path::PathBuf::from).unwrap();
+        let path = settings_path.canonicalize().unwrap();
+        assert!(path.starts_with("/tmp") || path.starts_with("/private/tmp"));
+        let original_theme = theme::theme_name();
+        self.settings_apply(SettingsAction::Accent("blue".into()));
+        self.native_settings_focus(SettingsInput::AccentHex);
+        self.settings_scene.mark_field_dirty();
+        self.picker_preview(&SettingsAction::PickerHue(SettingsInput::AccentHex), (0.0, 0.0, 300.0, 30.0), (72.0, 10.0));
+        assert_ne!(theme::accent(), theme::accent_color("blue"));
+        assert_eq!(socket::read_settings()["accent"], "blue");
+        self.settings_scene.begin_picker_drag(SettingsAction::PickerHue(SettingsInput::AccentHex), (0.0, 0.0, 300.0, 30.0));
+        self.native_settings_cancel_field();
+        assert!(self.settings_scene.picker_drag().is_none());
+        assert_eq!(theme::accent(), theme::accent_color("blue"));
+        assert_eq!(socket::read_settings()["accent"], "blue");
+        self.native_settings_focus(SettingsInput::AccentHex);
+        self.settings_scene.select_all_field();
+        self.native_settings_insert_into(SettingsInput::AccentHex, "#nothex");
+        self.native_settings_finish_input();
+        assert_eq!(self.settings_input, Some(SettingsInput::AccentHex));
+        assert_eq!(socket::read_settings()["accent"], "blue");
+        self.native_settings_cancel_field();
+        self.native_settings_focus(SettingsInput::AccentHex);
+        self.settings_scene.select_all_field();
+        self.native_settings_insert_into(SettingsInput::AccentHex, "#36B4A7");
+        self.native_settings_finish_input();
+        assert_eq!(socket::read_settings()["accent"], "#36b4a7");
+        assert_eq!(theme::theme_name(), original_theme);
+        theme::apply_from_settings_read_only();
+        assert_eq!(theme::accent(), [54, 180, 167, 255]);
+        assert_eq!(theme::accent_name(), "#36b4a7");
+        self.settings_apply(SettingsAction::SetStatusbarColor("claude".into(), String::new()));
+        self.native_settings_focus(SettingsInput::StatusbarHex("claude"));
+        self.settings_scene.mark_field_dirty();
+        self.preview_color_edit(SettingsInput::StatusbarHex("claude"), [161, 74, 227]);
+        assert_eq!(self.set_statusbar.colors["claude"], "#a14ae3");
+        assert!(socket::read_settings()["statusbar_colors"].get("claude").is_none());
+        self.native_settings_cancel_field();
+        assert!(!self.set_statusbar.colors.contains_key("claude"));
+        self.native_settings_focus(SettingsInput::StatusbarHex("claude"));
+        self.settings_scene.select_all_field();
+        self.native_settings_insert_into(SettingsInput::StatusbarHex("claude"), "#A14AE3");
+        self.native_settings_finish_input();
+        let restored = crate::statusbar_config::Prefs::from_settings(&socket::read_settings());
+        assert_eq!(restored.colors["claude"], "#a14ae3");
+        assert_eq!(theme::accent(), [54, 180, 167, 255]);
+        self.native_settings_focus(SettingsInput::StatusbarHex("claude"));
+        let old_buffer = self.set_palette_edit.clone();
+        self.picker_preview(&SettingsAction::PickerHue(SettingsInput::AccentHex), (0.0, 0.0, 300.0, 30.0), (10.0, 10.0));
+        assert_eq!(self.set_palette_edit, old_buffer);
+        assert_eq!(theme::accent(), [54, 180, 167, 255]);
+        self.native_settings_cancel_field();
+        self.settings_scene.set_category(SettingsCat::Appearance);
+        self.native_settings_focus(SettingsInput::AccentHex);
+        self.chrome_dirty = true;
+        eprintln!("[custom-color-probe] PASS preview/cancel/invalid/commit/reload/statusbar/independent-targets");
     }
 }
 

@@ -1219,7 +1219,7 @@ impl App {
     /// 기기 목록은 우측 탭과 독립적으로 갱신돼야 왼쪽에서 고른 기기가 굳지 않는다.
     pub(crate) fn machines_section_active(&self) -> bool {
         (self.sidebar_visible && !self.tabs_on_top)
-            || (self.git.col_visible && self.info.tab == state::SideTab::Info)
+            || (self.git.col_visible && self.info.runtime_page())
             || self.info.machine_menu.is_some()
     }
     /// Git-column width (0 when hidden).

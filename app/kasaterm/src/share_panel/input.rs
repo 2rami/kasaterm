@@ -3,7 +3,7 @@ use super::*;
 impl App {
     pub(crate) fn sync_share_ime_cursor(&mut self) {
         if !self.git.col_visible
-            || self.info.tab != state::SideTab::Share
+            || !self.info.shared_page()
             || !self.share.search_focus
             || self.internal_room_active_any()
         {
@@ -32,7 +32,7 @@ impl App {
 
     pub(crate) fn share_panel_event(&mut self, event: &WindowEvent) -> bool {
         let active = self.git.col_visible
-            && self.info.tab == state::SideTab::Share
+            && self.info.shared_page()
             && !self.internal_room_active_any();
         // A click can change focus before the platform delivers the old field's commit.
         if !(active && self.share.search_focus) {
@@ -50,7 +50,7 @@ impl App {
             }
         }
         if !self.git.col_visible
-            || self.info.tab != state::SideTab::Share
+            || !self.info.shared_page()
             || self.internal_room_active_any()
         {
             self.share.scroll_drag = None;

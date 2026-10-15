@@ -4269,7 +4269,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Info 탭 프로세스·포트 행 → 종료·복사 메뉴. 행 rect 는 Info 본문이
                 // 그릴 때만 갱신되므로 탭까지 확인한다(Git 탭에선 낡은 좌표).
                 if self.git.col_visible
-                    && self.info.tab == state::SideTab::Info
+                    && self.info.runtime_page()
                     && cy > TITLE_HEIGHT
                     && cx >= self.git_col_x()
                 {
@@ -4955,12 +4955,6 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    if let Some((bx, by, bw, bh)) = self.share_title_rect() {
-                        if cx >= bx && cx < bx + bw && cy >= by && cy < by + bh {
-                            self.open_share_panel();
-                            return;
-                        }
-                    }
                     if let Some((bx, by, bw, bh)) = self.settings_title_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_settings_web(event_loop, None);
@@ -5517,7 +5511,14 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        if self.info.tab == state::SideTab::Share && self.share_click(cx, cy) {
+                        if self.info.tab == state::SideTab::Info {
+                            if let Some(page) = self.info.page_rects.iter().find(|(_, rect)| inside(rect)).map(|(page, _)| *page) {
+                                self.select_info_page(page);
+                                window.request_redraw();
+                                return;
+                            }
+                        }
+                        if self.info.shared_page() && self.share_click(cx, cy) {
                             self.chrome_dirty = true; window.request_redraw(); return;
                         }
                         if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
@@ -5535,7 +5536,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // 아래 hit rect 들은 Info 본문이 그릴 때만 갱신되므로,
                         // Git 탭에서는 낡은 좌표가 남아 있다 — 탭을 확인하지
                         // 않으면 git 목록 클릭을 Info 행이 가로챈다.
-                        if self.info.tab == state::SideTab::Info {
+                        if self.info.runtime_page() {
                             if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                                 self.info.last_refresh = None;
                                 window.request_redraw();
@@ -7163,7 +7164,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.side_column_covers_workspace() && !self.git.commit_focused
                     && self.mcp_col.add.is_none()
-                    && !(self.info.tab == state::SideTab::Share && self.share.search_focus) {
+                    && !(self.info.shared_page() && self.share.search_focus) {
                     self.discard_modal_ime(&ime);
                     return;
                 }

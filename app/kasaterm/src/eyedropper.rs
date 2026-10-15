@@ -11,10 +11,10 @@ use std::sync::Mutex;
 
 /// 집힌 색과 그것을 넣을 팔레트 칸. 콜백은 GUI 스레드로 돌아오지만 그 안에서는
 /// `App` 을 만질 수 없어(클로저가 `&mut App` 을 못 든다) 여기 놓고 간다.
-static PICKED: Mutex<Option<(usize, [u8; 3])>> = Mutex::new(None);
+static PICKED: Mutex<Option<(crate::SettingsInput, [u8; 3])>> = Mutex::new(None);
 
 /// 집힌 색을 꺼낸다(있으면 비운다). GUI 틱이 매 프레임 부른다.
-pub(crate) fn take_picked() -> Option<(usize, [u8; 3])> {
+pub(crate) fn take_picked() -> Option<(crate::SettingsInput, [u8; 3])> {
     PICKED.lock().ok().and_then(|mut g| g.take())
 }
 
@@ -30,7 +30,7 @@ pub(crate) const fn supported() -> bool {
 /// **메인 스레드에서 불러야 한다** — AppKit 규칙이고, 설정 액션은 이미 GUI
 /// 스레드에서 처리되므로 그 경로로만 들어온다.
 #[cfg(target_os = "macos")]
-pub(crate) fn pick_screen_color(slot: usize) {
+pub(crate) fn pick_screen_color(slot: crate::SettingsInput) {
     use objc2_app_kit::{NSColor, NSColorSampler, NSColorSpace};
 
     let sampler = NSColorSampler::new();
@@ -62,4 +62,4 @@ pub(crate) fn pick_screen_color(slot: usize) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn pick_screen_color(_slot: usize) {}
+pub(crate) fn pick_screen_color(_slot: crate::SettingsInput) {}

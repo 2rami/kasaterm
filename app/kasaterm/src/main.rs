@@ -4738,7 +4738,16 @@ pub(crate) enum SettingsInput {
     /// 그 뒤(11..27)는 ANSI 0..16 — 이 enum 이 Copy 라 키 문자열 대신 번호로
     /// 싣는다. 버퍼는 `App.set_palette_edit` 하나를 같이 쓴다(한 번에 한 칸).
     PaletteHex(usize),
+    AccentHex,
+    StatusbarHex(&'static str),
 }
+
+impl SettingsInput {
+    pub(crate) fn is_color(self) -> bool {
+        matches!(self, Self::PaletteHex(_) | Self::AccentHex | Self::StatusbarHex(_))
+    }
+}
+
 
 /// Clickable targets painted into the settings screen, collected each frame for
 /// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
@@ -4795,14 +4804,15 @@ pub(crate) enum SettingsAction {
     FocusCustomThemeLabel(String),
     /// 팔레트 색 한 칸의 hex 필드에 포커스(인덱스 규약은 `SettingsInput::PaletteHex`).
     FocusPaletteHex(usize),
+    FocusColor(SettingsInput),
     /// 색 선택기의 채도×명도 사각형. 좌표는 액션에 못 싣는다(연속값) —
     /// settings_click 이 히트 rect 와 커서로 상대좌표를 직접 계산한다
     /// (2026-08-13 지시: hex 타이핑 말고 마우스로 고르게).
-    PickerSV,
+    PickerSV(SettingsInput),
     /// 색 선택기의 색상(Hue) 띠. 처리 방식은 PickerSV 와 같다.
-    PickerHue,
+    PickerHue(SettingsInput),
     /// 화면의 한 점에서 색을 집어 현재 팔레트 칸에 넣는다.
-    PaletteEyedropper(usize),
+    ColorEyedropper(SettingsInput),
     DeviceIcon(String, String),
     ImportDeviceIcon(String),
     Accent(String),

@@ -34,3 +34,7 @@ Native wgpu controls use filled selection, quiet neutral surfaces, 10/16px round
 Viewed reference: Nava OS Personalization, https://www.youtube.com/watch?v=E7nGN03tvKI, 00:06–00:52. The source is a concept video, not measured production performance. Frosted material is a visual reference; these native panels do not implement live backdrop blur. No React registry applies to this Rust renderer. Visual choices are pending user review. No cross-project profile promotion.
 
 Color contract: Frost Light text/background 12.39:1 and text/surface 13.99:1; Frost Dark 15.43:1 and 13.01:1. Default blue #5a8ce6 with black label 6.33:1. Subtle borders are decorative; selected controls also have filled state/check marks. Text on accents uses `foreground_on`, and secondary accent text and keyboard focus enforce contrast at the actual background. Shared rounded fills/strokes use one analytic GPU quad rather than row strips, including fractional UI scales.
+
+## Custom colors and Info — 2026-10-15
+
+Accent editing exposes an arbitrary RGB/HEX picker with optional preset shortcuts. Statusbar item colors use the same editor, including reverting to the inherited default. Preview, commit, cancellation and eyedropper callbacks carry an explicit color target. Shared folders live inside Info beside Runtime, with separate scroll/focus/hit maps; the independent Share tab and titlebar Share button are removed. These interaction requirements come from the user; exact screen styling remains subject to review.

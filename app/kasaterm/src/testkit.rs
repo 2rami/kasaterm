@@ -3267,7 +3267,7 @@ impl App {
         let tab = match tab.trim() {
             "sessions" => SideTab::Sessions,
             "mcp" => SideTab::Mcp,
-            "share" => SideTab::Share,
+            "share" => SideTab::Info,
             // 옛 「원격」 탭은 Info 의 「다른 기계」 절이 됐다 — 이름은 그대로 받는다.
             "info" | "machines" => SideTab::Info,
             "git" => SideTab::Git,
@@ -3299,6 +3299,7 @@ impl App {
             })
         });
         let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) && std::env::var_os("KASATERM_AUTOCOLSCROLL_ONCE").is_some() { return; }
         if Instant::now() < *due {
             return;
         }
@@ -3391,6 +3392,10 @@ impl App {
         let Some((tab, px)) = Self::autocolscroll_spec() else { return };
         // 탭도 매 틱 다시 세운다 — 칼럼을 여는 다른 경로가 탭을 갈아 끼울 수 있다.
         self.info.tab = tab;
+        let shared = std::env::var("KASATERM_AUTOCOLSCROLL").is_ok_and(|spec| spec.starts_with("share:"));
+        if tab == SideTab::Info {
+            self.select_info_page(if shared { state::InfoPage::SharedFiles } else { state::InfoPage::Runtime });
+        }
         // `KASATERM_AUTOCOLWHEEL=<노치>` — 스크롤을 **손으로 세우는 대신 칼럼 위에서
         // 휠을 굴린다.** 값을 대입하는 길은 스크롤 상한 계산을 통째로 건너뛰므로,
         // 「끝까지 스크롤이 닿나」는 이 길로만 물을 수 있다. 음수면 위로 굴린다.
@@ -3404,9 +3409,9 @@ impl App {
             match tab {
                 SideTab::Sessions => self.sessions_col.scroll = px,
                 SideTab::Mcp => self.mcp_col.scroll = px,
+                SideTab::Info if shared => self.share.scroll = px,
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
-                SideTab::Share => self.share.scroll = px,
             }
         }
         self.chrome_dirty = true;
@@ -3429,18 +3434,18 @@ impl App {
         let actual = match tab {
             SideTab::Sessions => self.sessions_col.scroll,
             SideTab::Mcp => self.mcp_col.scroll,
+            SideTab::Info if shared => self.share.scroll,
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
-            SideTab::Share => self.share.scroll,
         };
         // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
         // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
         let rows = match tab {
             SideTab::Sessions => self.sessions_col.view.len(),
             SideTab::Mcp => self.mcp_col.row_rects.len(),
+            SideTab::Info if shared => self.share.rows.len(),
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
-            SideTab::Share => self.share.rows.len(),
         };
         let (vis_h, content_h) = self.git.col_list_extent;
         // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와
@@ -4481,6 +4486,9 @@ impl App {
         // 확인할 수 있다. UI 래퍼(토스트·폴더 열기)는 건너뛰고 파일을 쓰는 부분만
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
+            "custom-color-probe" if crate::verification_run() => self.probe_custom_colors(),
+            "focus-custom-accent" if crate::verification_run() => self.settings_apply(SettingsAction::FocusColor(SettingsInput::AccentHex)),
+            "focus-statusbar-color" if crate::verification_run() => self.settings_apply(SettingsAction::FocusColor(SettingsInput::StatusbarHex("claude"))),
             "settings-search" if crate::verification_run() => {
                 self.settings_scene.query = "계정".into();
                 self.settings_input = Some(SettingsInput::Search);
@@ -4782,8 +4790,8 @@ impl App {
                     self.settings_apply(SettingsAction::StartCustomTheme);
                     self.settings_apply(SettingsAction::FocusPaletteHex(i));
                     let r = (0.0, 0.0, 300.0, 300.0);
-                    self.picker_pick(&SettingsAction::PickerHue, r, (100.0, 8.0));
-                    self.picker_pick(&SettingsAction::PickerSV, r, (225.0, 75.0));
+                    self.picker_pick(&SettingsAction::PickerHue(SettingsInput::PaletteHex(i)), r, (100.0, 8.0));
+                    self.picker_pick(&SettingsAction::PickerSV(SettingsInput::PaletteHex(i)), r, (225.0, 75.0));
                     eprintln!(
                         "[picker-probe] 칸 {i} hsv={:?} hex={}",
                         self.set_picker_hsv, self.set_palette_edit
