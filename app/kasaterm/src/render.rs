@@ -374,17 +374,24 @@ impl App {
                         None => (0, 0, false, 80, 1),
                     };
                     let shift = self.pane_view_shift.get(&id);
-                    let position = shift.map(|view| view.display_pos(raw_row as usize, raw_col as usize))
-                        .unwrap_or(Some((raw_row as usize, raw_col as usize)));
+                    // 대화로 보는 칸은 바닥을 그 칸 폭으로 다시 지어 원본 커서가 다른 칸에 선다(chat_view.rs).
+                    let chat = self.chat_view_cursor(&id);
+                    let position = match &chat {
+                        Some((at, _)) => *at,
+                        None => shift.map(|view| view.display_pos(raw_row as usize, raw_col as usize))
+                            .unwrap_or(Some((raw_row as usize, raw_col as usize))),
+                    };
                     let (cur_row, cur_col) = position.map(|(row, col)| (row as u16, col as u16))
                         .unwrap_or((0, 0));
-                    // 대화로 보는 pane 은 격자를 안 그린다 — 커서 블록만 허공에 뜨면 안 된다.
-                    let cur_vis = source_vis && position.is_some() && !self.chat_view_showing(&id)
-                        && !self.shell_view_showing(&id);
-                    let cols = shift.and_then(|view| view.projection.as_ref())
-                        .and_then(|projection| projection.rows.first())
-                        .map(|row| row.len().min(u16::MAX as usize) as u16)
-                        .unwrap_or(source_cols);
+                    // 명령 묶음 칸은 격자를 안 그린다 — 커서 블록만 허공에 뜨면 안 된다.
+                    let cur_vis = source_vis && position.is_some() && !self.shell_view_showing(&id);
+                    let cols = match chat {
+                        Some((_, width)) => width.min(u16::MAX as usize) as u16,
+                        None => shift.and_then(|view| view.projection.as_ref())
+                            .and_then(|projection| projection.rows.first())
+                            .map(|row| row.len().min(u16::MAX as usize) as u16)
+                            .unwrap_or(source_cols),
+                    };
                     let (base_row, base_col) = (cur_row, cur_col);
                     // Until the committed syllable's echo lands (cursor
                     // still where it was at commit time), draw the
@@ -7622,6 +7629,7 @@ impl App {
         // pane dirty bit; chrome events flag `self.chrome_dirty`;
         // cursor blink phase toggles count separately.
         // 대화 보기는 기록이 새로 오면 그려야 한다 — 격자가 그대로여도 게이트를 연다.
+        self.pump_mirror_views();
         self.pump_chat_views();
         self.pump_shell_views();
         let blink_changed = blink_on != self.last_blink_on;

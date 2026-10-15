@@ -9,6 +9,7 @@
 
 use super::*;
 
+mod bottom;
 pub(crate) mod classic;
 mod codex;
 pub(crate) mod history;
@@ -48,6 +49,8 @@ enum AutoStep {
 pub(crate) struct ChatViews {
     /// 대화로 보는 pane(바깥 pane id). 없으면 터미널이다. pane 마다 따로 기억한다.
     panes: HashMap<String, ChatPane>,
+    /// 사람이 터미널로 돌려 둔 칸 — 거울의 처음 얼굴(`mirror_render`)이 다시 열지 않는다.
+    pub(crate) declined: HashSet<String>,
     /// 이번 프레임에 실제로 대화로 그린 pane. 휠·누름·선택 복사는 이것만 본다 — 판이 떠 진짜 터미널을
     /// 보인 프레임이면 비어 있어 손이 그대로 터미널로 간다.
     drawn: RefCell<HashMap<String, Drawn>>,
@@ -66,6 +69,8 @@ pub(crate) struct Drawn {
     toggles: Vec<Option<usize>>,
     /// 그린 격자 — 끌어 선택한 글을 복사할 때 읽는다.
     rows: Vec<Vec<GridCell>>,
+    /// 원본 커서가 이 격자에서 선 칸 — 커서 블록·한글 조합 글자가 여기 선다.
+    cursor: Option<(usize, usize)>,
 }
 
 /// 렌더가 터미널 합성기에 넘길 이번 프레임의 화면.
@@ -288,12 +293,13 @@ pub(crate) fn bottom_region(rows: &[Vec<GridCell>]) -> Option<usize> {
         None => {
             let lines: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
             parse::parse_prompt_menu(&lines)?;
-            // 지금 고른 선택지 위로 가장 가까운 칸막이 가로줄이 창 머리다.
+            // 지금 고른 선택지 위로 가장 가까운 칸막이 가로줄이 창 머리다. 창이 화면보다 커서 머리가 밀려
+            // 올라갔으면(좁은 원본의 승인 창) 화면 맨 위부터가 창이다.
             let current = lines.iter().rposition(|l| {
                 let t = l.trim_start().trim_start_matches(['│', '|']).trim_start();
                 t.starts_with(['❯', '›']) && t[t.chars().next().map_or(0, char::len_utf8)..].trim_start().starts_with(|c: char| c.is_ascii_digit())
             })?;
-            (current.saturating_sub(40)..current).rev().find(|&r| full_rule(&rows[r]))?
+            (current.saturating_sub(40)..current).rev().find(|&r| full_rule(&rows[r])).unwrap_or(0)
         }
     };
     // 일하는 동안의 스피너 줄과 풀스크린의 「◉ effort」 줄은 입력칸 바로 위에 선다.
@@ -311,45 +317,6 @@ pub(crate) fn bottom_region(rows: &[Vec<GridCell>]) -> Option<usize> {
         top = r;
     }
     Some(top)
-}
-
-/// 바닥 줄 하나를 이 칸 폭으로 — 가로줄은 칸 끝까지 다시 긋고(끝의 세션 이름표는 오른쪽에 그대로),
-/// 오른쪽에 붙은 줄은 오른쪽에 붙인다. 나머지는 왼쪽에서 자르거나 늘인다.
-fn fit_row(row: &[GridCell], cols: usize) -> Vec<GridCell> {
-    let src = row.len();
-    let glyphs: Vec<usize> = (0..src).filter(|&i| !matches!(row[i].ch, ' ' | '\0')).collect();
-    let dashes = glyphs.iter().filter(|&&i| row[i].ch == '─').count();
-    if dashes >= 10 && row.first().is_some_and(|c| c.ch == '─') {
-        let dash = row[0].clone();
-        // 이름표 — 앞 가로줄 다음부터 마지막 `─` 아닌 글자까지.
-        let lead = glyphs.iter().take_while(|&&i| row[i].ch == '─').count();
-        let label: Vec<GridCell> = match (glyphs.get(lead), glyphs.iter().rposition(|&i| row[i].ch != '─')) {
-            (Some(&from), Some(last)) if last >= lead => row[from..=glyphs[last]].to_vec(),
-            _ => Vec::new(),
-        };
-        let tail = if label.is_empty() { 0 } else { label.len() + 3 };
-        let mut out: Vec<GridCell> = std::iter::repeat_n(dash.clone(), cols.saturating_sub(tail)).collect();
-        if !label.is_empty() {
-            out.push(GridCell::blank());
-            out.extend(label);
-            out.push(GridCell::blank());
-            out.push(dash);
-        }
-        out.truncate(cols);
-        out.resize(cols, GridCell::blank());
-        return out;
-    }
-    let lead = row.iter().take_while(|c| matches!(c.ch, ' ' | '\0')).count();
-    let mut out: Vec<GridCell> = if lead * 2 > src && lead < src && cols > src {
-        let mut v = vec![GridCell::blank(); cols - src];
-        v.extend_from_slice(row);
-        v
-    } else {
-        row.to_vec()
-    };
-    out.truncate(cols);
-    out.resize(cols, GridCell::blank());
-    out
 }
 
 /// 진짜 화면에 보이는 하네스 배너 — claude 로고 세 줄, 코덱스 `>_ OpenAI Codex` 와 폴더 두 줄.
@@ -409,13 +376,23 @@ impl App {
     pub(crate) fn toggle_chat_view(&mut self, id: &str) {
         if self.chat_view.panes.remove(id).is_some() {
             self.chat_view.drawn.borrow_mut().remove(id);
+            self.chat_view.declined.insert(id.to_string());
         } else {
+            self.chat_view.declined.remove(id);
             self.chat_view.panes.insert(id.to_string(), ChatPane::new());
             self.focus_pane(id);
         }
         self.selection = None;
         self.drag_anchor = None;
         self.chrome_dirty = true;
+    }
+
+    /// 초점은 그대로 두고 대화로 연다 — 거울의 처음 얼굴(`mirror_render`).
+    pub(crate) fn open_chat_view_quietly(&mut self, id: &str) {
+        if !self.chat_view.panes.contains_key(id) {
+            self.chat_view.panes.insert(id.to_string(), ChatPane::new());
+            self.chrome_dirty = true;
+        }
     }
 
     /// 닫힌 pane 의 대화 상태를 버리고, 대화 pane 마다 기록을 읽는다. 바뀌었으면 다시 그린다.
@@ -473,7 +450,10 @@ impl App {
         }
         let src = pane.term()?;
         let top = bottom_region(&src.cells)?;
-        let region = src.cells.len().saturating_sub(top);
+        // 거울은 원본 칸 폭이 이 칸과 다르다 — 바닥도 이 폭으로 다시 짓는다.
+        let src_cursor = (src.cursor_row as usize).checked_sub(top).map(|r| (r, src.cursor_col as usize));
+        let bottom = bottom::fit(&src.cells[top..], src.cols as usize, src_cursor, cols);
+        let region = bottom.rows.len();
         if region == 0 || region as f32 > rows as f32 * REGION_MAX {
             return None;
         }
@@ -535,12 +515,9 @@ impl App {
                 c.bg = fill.clone();
             }
         }
-        for r in top..src.cells.len() {
-            cells.push(fit_row(&src.cells[r], cols));
-        }
+        cells.extend(bottom.rows);
         cells.truncate(rows);
-        let cursor_row = src.cursor_row as usize;
-        let cursor = (cursor_row >= top).then(|| ((hist_rows + cursor_row - top) as u16, (src.cursor_col as usize).min(cols - 1) as u16));
+        let cursor = bottom.cursor.filter(|(r, _)| hist_rows + r < rows).map(|(r, c)| ((hist_rows + r) as u16, c as u16));
         let term = TerminalPane {
             rows: rows as u16,
             cols: cols as u16,
@@ -561,7 +538,14 @@ impl App {
     pub(crate) fn note_chat_frame(&self, id: &str, frame: &ChatFrame, rect: Rect, cell: (f32, f32)) {
         self.chat_view.drawn.borrow_mut().insert(
             id.to_string(),
-            Drawn { rect, cell, hist_rows: frame.hist_rows, toggles: frame.toggles.clone(), rows: frame.term.cells.clone() },
+            Drawn {
+                rect,
+                cell,
+                hist_rows: frame.hist_rows,
+                toggles: frame.toggles.clone(),
+                rows: frame.term.cells.clone(),
+                cursor: frame.term.cursor_visible.then_some((frame.term.cursor_row as usize, frame.term.cursor_col as usize)),
+            },
         );
     }
 
@@ -573,6 +557,11 @@ impl App {
     /// 대화 칸이 그린 격자 — 끌어 선택한 글을 복사할 때 터미널 격자 대신 읽는다.
     pub(crate) fn chat_view_rows(&self, id: &str) -> Option<Vec<Vec<GridCell>>> {
         self.chat_view.drawn.borrow().get(id).map(|d| d.rows.clone())
+    }
+
+    /// 대화 칸에 그린 (커서 칸, 격자 폭) — 원본 격자와 크기·자리가 달라 커서를 따로 옮겨 그린다.
+    pub(crate) fn chat_view_cursor(&self, id: &str) -> Option<(Option<(usize, usize)>, usize)> {
+        self.chat_view.drawn.borrow().get(id).map(|d| (d.cursor, d.rows.first().map_or(0, Vec::len)))
     }
 
     fn chat_view_at(&self, x: f32, y: f32) -> Option<(String, Option<usize>)> {
@@ -776,13 +765,18 @@ mod tests {
     use super::*;
 
     fn row(text: &str) -> Vec<GridCell> {
-        text.chars()
-            .map(|ch| {
-                let mut c = GridCell::blank();
-                c.ch = ch;
-                c
-            })
-            .collect()
+        let mut out = Vec::new();
+        for ch in text.chars() {
+            let mut c = GridCell::blank();
+            c.ch = ch;
+            out.push(c);
+            if unicode_width::UnicodeWidthChar::width(ch) == Some(2) {
+                let mut spacer = GridCell::blank();
+                spacer.ch = '\0';
+                out.push(spacer);
+            }
+        }
+        out
     }
 
     fn screen(lines: &[&str], width: usize) -> Vec<Vec<GridCell>> {
@@ -813,6 +807,12 @@ mod tests {
     }
 
     #[test]
+    fn a_window_taller_than_the_screen_starts_at_the_top() {
+        let s = screen(&[" │ mkdir -p", "╌".repeat(40).as_str(), " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "", " Esc to cancel"], 40);
+        assert_eq!(bottom_region(&s), Some(0));
+    }
+
+    #[test]
     fn a_panel_without_input_or_menu_falls_back_to_the_terminal() {
         let s = screen(&["   Settings  Status   Config", "   ❯ Auto-compact      true", "   Type to filter · Esc to clear"], 40);
         assert_eq!(bottom_region(&s), None);
@@ -820,15 +820,15 @@ mod tests {
 
     #[test]
     fn rules_are_redrawn_across_the_wider_pane_keeping_the_session_label() {
-        let src = row(&format!("{} 작업 이름 ─", "─".repeat(20)));
-        let out = fit_row(&src, 50);
-        let text: String = out.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect();
-        assert_eq!(out.len(), 50);
+        let label = format!("{} 작업 이름 ─", "─".repeat(20));
+        let right = format!("{}◉ xhigh", " ".repeat(25));
+        let src = screen(&[&label, &right], 32);
+        let fitted = bottom::fit(&src, 32, None, 50);
+        let text = row_text(&fitted.rows[0]);
+        assert_eq!(fitted.rows[0].len(), 50);
         assert!(text.trim_end().ends_with(" 작업 이름 ─"), "{text}");
-        assert!(text.starts_with(&"─".repeat(30)), "{text}");
-        let right = row(&format!("{}◉ xhigh", " ".repeat(20)));
-        let moved = fit_row(&right, 40);
-        assert_eq!(moved.iter().position(|c| c.ch == '◉'), Some(33));
+        assert!(text.starts_with(&"─".repeat(38)), "{text}");
+        assert_eq!(fitted.rows[1].iter().position(|c| c.ch == '◉'), Some(43));
     }
 
     #[test]

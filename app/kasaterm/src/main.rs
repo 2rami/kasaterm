@@ -5570,6 +5570,8 @@ struct App {
     /// 이번 이벤트 묶음에 사람 손(키·IME·왼클릭)이 닿았다 — `about_to_wait` 에서
     /// 초점 칸을 보고 원본 격자를 누가 가질지 정한다(`mirror_follow`).
     human_touch: Option<crate::mirror_follow::HumanTouch>,
+    /// 거울 칸의 처음 얼굴과 보는 동안의 원본 크기 — mirror_render.rs.
+    mirror_views: crate::mirror_render::MirrorViews,
     /// 새 칸 → 그 칸을 연 칸. 벤토로 다시 짤 때 한 칸이 연 형제들을 잇대어 세운다
     /// (`rebento_window`). 재시작하면 비지만 트리 순서가 이미 그 줄을 담고 있다.
     pane_opener: HashMap<String, String>,
@@ -6326,6 +6328,7 @@ impl App {
             last_tree_click: None,
             zoomed_pane: None,
             human_touch: None,
+            mirror_views: Default::default(),
             pane_opener: HashMap::new(),
             saved_window_frame: None,
             titlebar_drag_pending: None,
