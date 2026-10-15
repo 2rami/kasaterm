@@ -93,6 +93,7 @@ mod info_prompts;
 mod context_info;
 mod internal_room;
 mod links;
+mod inline_image;
 mod lsp;
 mod machinescol;
 #[cfg(target_os = "macos")]
@@ -5454,9 +5455,8 @@ struct App {
     window_name_override: HashMap<usize, String>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
-    /// A left-press that landed on a detected URL. Holds (url, press_px) so a
-    /// release that stayed put (a click, not a drag) opens it; a drag clears it.
-    link_armed: Option<(String, (f32, f32))>,
+    /// Keep the pane and target until release so a redraw or drag cannot open a different file.
+    link_armed: Option<(String, String, (f32, f32))>,
     /// In-flight pane-divider drag: the BSP tree path of the split being
     /// resized plus its axis. `Some` while the user holds the mouse on a
     /// seam; each motion event re-derives the ratio from the cursor.
@@ -6649,6 +6649,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // renamed bundle executable and `kasaterm --viewer` share the same code,
     // but only the terminal app may perform startup maintenance.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if inline_image::run(&args)? { return Ok(()); }
     let executable = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_name().map(std::ffi::OsStr::to_owned));

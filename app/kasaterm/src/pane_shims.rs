@@ -119,9 +119,7 @@ pub(crate) fn install_pane_shims(lite: bool) {
         }
     }
     if !lite {
-    // Drop `imgopen` / `mdopen` on the pane PATH so the user (or Claude) can
-    // open an image viewer / markdown editor in the current workspace with
-    // zero install — each just curls the host's MCP open-preview endpoint.
+    // 이미지 출력이 화면을 바꾸지 않도록 셸에서는 Kitty를, 명시적 탭 요청만 미리보기를 쓴다.
     install_preview_shims(&shim_dir);
     install_open_shim(&shim_dir);
     // Stage a `claude` wrapper that injects the collab hooks session-scoped
@@ -246,11 +244,6 @@ pub(crate) fn python3_program() -> Option<&'static str> {
     })
 }
 
-/// Write `imgopen` and `mdopen` into the shim dir (on the pane PATH). Each
-/// resolves its argument to an absolute path and curls the host's MCP
-/// open-preview endpoint, which opens a main-workspace tab. No dependency
-/// beyond `curl` (ships on macOS/Linux); the port comes from
-/// KASASPACE_MCP_PORT (default 8765), inherited from the host process.
 /// `rust-analyzer` 를 가로채 **서버 하나를 모든 pane 이 나눠 쓰게** 한다.
 ///
 /// pane 마다 claude 가 자기 rust-analyzer 를 띄운다 — 실측(2026-08-11) pane 7개에
@@ -379,7 +372,14 @@ curl -s --get --data-urlencode \"path=$abs\" \
     };
     for (name, endpoint) in [("imgopen", "open-image"), ("mdopen", "open-markdown")] {
         let path = shim_dir.join(name);
-        if let Err(e) = write_shim(&path, mk(name, endpoint)) {
+        let mut body = mk(name, endpoint);
+        if name == "imgopen" {
+            if let Ok(binary) = std::env::current_exe() {
+                let quoted = shell_quote_path(&binary.to_string_lossy());
+                body = body.replacen("f=$1\n", &format!("if [ \"$1\" = --tab ]; then shift; [ \"$#\" -eq 1 ] || {{ echo \"usage: imgopen --tab FILE\" >&2; exit 1; }}; else exec {quoted} --inline-image \"$@\"; fi\nf=$1\n"), 1);
+            }
+        }
+        if let Err(e) = write_shim(&path, body) {
             eprintln!("[shim] write {name} failed: {e}");
         }
     }

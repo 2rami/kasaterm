@@ -46,7 +46,7 @@ CLI 와 하는 일이 완전히 겹쳐 걷었다(문서 2026-09-22, 서버·자�
 | pane 분할·이름·색·send·focus | `kasaterm-cli` | 변수 캡처(`NEW=$(...)`), 파이프, jq 등 셸 도구 결합 자유 |
 | TeamCreate 직후 race 검증·좀비 청소·config.json 조작 | `kasaterm-cli` + jq | 조건 분기와 파일 편집까지 한 흐름 |
 | 빌드·dev server·테스트 풀 사이클 (tee+DONE+Monitor) | `kasaterm-cli` | 시퀀스가 길고 로그 파일 회수까지 결합 |
-| 이미지·마크다운 결과물을 메인 창에 띄우기 | `imgopen`/`mdopen` | 자동화 흐름의 마지막 한 컷 |
+| 이미지·문서 결과물 표시 | 하네스 이미지 첨부 / `mdopen` | 이미지는 본문 인라인; 셸에서는 `imgopen` |
 
 **원칙 한 줄**: *pane 을 건드리는 모든 길은 `kasaterm-cli` 다.*
 
@@ -121,7 +121,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 `board-watch [interval_s]`(변경된 pane 상태를 1줄/변경으로 스트림 → Claude Code Monitor에 먹임). §5. 학생 하나의 완료만 기다릴 때는 `board --wait <이름> --since <값>` 을 background 로 — 그 학생의 done 보고에서 끝나고 깨운다(옛 `wake-watch` 는 완료를 못 잡아 지웠다).
 
 **결과물 띄우기 헬퍼** (CLI 서브명령 아님 — 별도 실행파일. 상세 패턴 D):
-`imgopen <절대경로.png>`(이미지 → 새 pane, 맞춤↔원본) · `mdopen <절대경로.md>`(마크다운 → 노션풍 렌더 pane).
+`imgopen <절대경로.png>`(셸의 Kitty 인라인 이미지; 명시적 미리보기는 `--tab`) · `mdopen <절대경로.md>`(마크다운 → 노션풍 렌더 pane).
 
 ### 자주 쓰는 파싱 one-liner
 
@@ -178,93 +178,19 @@ kasaterm-cli rename-window "%2" --color "#a371f7"
 
 역할 색: 탐색=보라 `#a371f7`, 구현=파랑 `#58a6ff`, 검증=초록 `#3fb950`, 리드=노랑 `#d29922`.
 
-### 패턴 D — 결과 이미지·문서를 pane에 띄우기
+### 패턴 D — 결과 이미지와 문서
 
-작업 중 만든 **스샷·다이어그램·생성 이미지·마크다운**은 별도 OS 창이 아니라 kasaterm 창 안 pane으로 띄운다. 사용자가 같은 화면에서 본다.
+이미지는 하네스가 제공하는 이미지 첨부·표시 도구로 본문에 보여 준다. 카사텀은 Kitty 이미지를 지원하므로 결과 사진을 보여주기 위해 별도 창·탭을 자동으로 만들지 않는다. 도구 출력의 제어문자가 하네스에서 제거될 수 있으니 Bash에서 Kitty escape를 찍어 대신하려 하지 않는다.
 
-```bash
-imgopen /절대경로/result.png     # 이미지 → 새 pane (맞춤↔원본)
-mdopen  /절대경로/doc.md         # 마크다운 → 노션풍 렌더 pane
-```
+일반 셸에서는 `imgopen /절대경로/result.png`가 Kitty 인라인 이미지를 출력한다. 사용자가 큰 미리보기를 명시적으로 요청하면 `imgopen --tab /절대경로/result.png`로 연다. 문서는 `mdopen /절대경로/doc.md`를 사용할 수 있다.
 
-원칙:
-- **결과물 만들면 자동으로 띄운다.** "이거 봐주세요" 하고 경로만 알려주지 말 것.
-- 경로는 **절대경로**.
-- 헬퍼 없다(`command not found`)면 본체가 옛 버전이거나 kasaterm 셸 밖. 셸 밖에서 직접 띄울 땐:
-  ```bash
-  curl -s --get --data-urlencode "path=<절대경로>" \
-    "http://127.0.0.1:${KASASPACE_MCP_PORT:-8765}/open-image"
-  # 마크다운은 /open-markdown
-  ```
+- 결과는 공유 결과물 폴더에 두고 본문에 파일 링크를 함께 남긴다. 터미널의 경로·웹 주소는 macOS에서 Cmd+클릭, 다른 데스크톱에서는 Ctrl+클릭으로 연다.
+- 모델 자체 검증용 스크린샷은 이미지 읽기 도구로 확인하고 사용자 화면에 자동으로 열지 않는다.
+- 이미지 표시 기능이 없는 하네스에서는 파일 링크를 제공한다. 별도 탭을 자동 대체 수단으로 사용하지 않는다.
 
-#### 어디에 열리나
+### 패턴 E — SendUserFile 이미지 이력
 
-칸은 열고 닫을 때마다 방 전체가 크기가 같은 격자로 다시 짜이고, 이미지·문서·웹은 **칸을 만들지 않고 연 칸의 탭**으로 열린다. 그래서 띄우기 전에 칸을 정리할 필요가 없다. 띄운 것을 찾을 때는 번호 대신 이름으로:
-
-```bash
-kasaterm-cli where new.png        # 「방 · 행·열(칸) · 탭 n/N · 이미지 · 경로」 한 줄
-```
-
-- 이전 결과 탭을 닫을 때도 `where <파일 이름>` 으로 칸을 찾아 `kasaterm-cli close <칸>` — 사용자 작업 칸은 안 닫는다.
-- 검증용 임시 스샷은 imgopen 금지 — 모델 자체검증(헤드리스 캡처) 결과는 `Read("/tmp/...png")`로 본인이 확인만. 사용자 화면에 띄우는 건 사용자가 봐야 하는 진짜 결과물일 때만.
-
-### 패턴 E — `SendUserFile` 자동 imgopen Hook
-
-Claude Code의 `SendUserFile` 툴은 어느 터미널에서든 `[image] /path (size)` 텍스트 플레이스홀더만 출력하지(iTerm/kitty 인라인 escape를 emit 안 함), 실제 이미지를 인라인 렌더하지 않는다. kasaterm 안에서 작업할 땐 **PostToolUse hook**으로 SendUserFile 결과의 이미지 경로를 자동 `imgopen` 호출시켜 image pane으로 띄운다.
-
-**1) Hook 스크립트** — `~/.claude/hooks/auto-imgopen.sh`:
-```bash
-#!/bin/bash
-# PostToolUse hook for SendUserFile — image files은 자동으로 imgopen
-input=$(cat)
-echo "$input" | python3 -c "
-import sys, json, os, subprocess
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-paths = d.get('tool_input', {}).get('files', []) or []
-exts = ('.png','.jpg','.jpeg','.gif','.webp','.bmp','.tiff','.tif')
-for p in paths:
-    if not isinstance(p, str): continue
-    if not p.lower().endswith(exts): continue
-    p_abs = p if os.path.isabs(p) else os.path.join(os.getcwd(), p)
-    if not os.path.isfile(p_abs): continue
-    try:
-        subprocess.run(['imgopen', p_abs], timeout=5, check=False)
-    except Exception:
-        pass
-" >/dev/null 2>&1 || true
-exit 0
-```
-`chmod +x` 잊지 말 것.
-
-**2) `~/.claude/settings.json`의 `hooks.PostToolUse` 배열에 추가**:
-```json
-{
-  "matcher": "SendUserFile",
-  "hooks": [
-    { "type": "command", "command": "~/.claude/hooks/auto-imgopen.sh", "timeout": 10 }
-  ]
-}
-```
-기존 PostToolUse 엔트리는 **반드시 보존하고 새 엔트리를 append**(replace 금지). 다른 hook(예: dotfiles autopush)이 같이 묶여 있으니 배열 추가 방식.
-
-**검증**:
-```bash
-# 스키마 통과 확인 — 명령 문자열이 출력되면 OK
-jq -e '.hooks.PostToolUse[] | select(.matcher=="SendUserFile") | .hooks[].command' \
-  ~/.claude/settings.json
-
-# 파이프 테스트 — 가짜 페이로드로 imgopen이 실제 호출되는지
-echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
-  | ~/.claude/hooks/auto-imgopen.sh
-```
-
-**한계**:
-- kasaterm 셸 밖에서 Claude Code가 돌면 `imgopen`이 PATH에 없거나 `KASASPACE_MCP_PORT` env가 없어서 hook이 silently no-op.
-- hook watcher가 세션 시작 시점에 `.claude/` 디렉토리를 안 보고 있었으면 새 hook이 즉시 활성화 안 됨. `/hooks` 한 번 열거나 Claude Code 재시작.
-- SendUserFile 외의 다른 이미지 출력 경로(예: tool result에 image 첨부)는 hook이 못 잡음 — 그건 직접 `imgopen` 호출.
+`auto-imgopen.sh`는 이전 배포와 훅 이름 호환을 위해 이름을 유지한다. 이미지를 보낸 이력은 대화 보기용 `sent-images.jsonl`에 기록하지만 `imgopen`을 호출하지 않는다. 화면의 이미지 배치는 하네스가 담당한다. 전역 Claude 설정을 고치지 않고 앱이 세션별 훅 설정에 연결한다.
 
 ### 패턴 F — 학생 pane 스폰 (오케스트레이터: 이름·색·모델·effort 지정 claude)
 
@@ -633,11 +559,7 @@ top.save('/tmp/kasaterm-header.png')
 
 ### 사이클 결과를 사용자에게 보여주기
 
-검증 끝났으면 패턴 D로 결과 스크린샷을 메인 창 안에 띄운다 (사용자가 같은 화면에서 본다):
-```bash
-imgopen /tmp/kasaterm-shot.png
-```
-또는 셸 밖이면 위의 `/open-image` 엔드포인트.
+사용자에게 보여줄 실제 결과 스크린샷만 하네스 이미지 첨부 도구로 본문에 표시한다. 검증 중간 캡처는 모델이 읽어 확인하고 별도 창·탭을 열지 않는다. 파일 링크를 함께 제공한다.
 
 ---
 

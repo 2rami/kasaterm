@@ -773,7 +773,8 @@ impl App {
         // URL under the mouse right now (pane id + cell range). Hovering it
         // draws a blue underline; computed before the workspace lock below so
         // it doesn't re-enter it. None when the cursor isn't over a link.
-        let hovered_link = self.link_hit(self.cursor_px.0, self.cursor_px.1);
+        let hovered_link = crate::links::click_modifier(self.modifiers)
+            .then(|| self.link_hit(self.cursor_px.0, self.cursor_px.1)).flatten();
         let cell_w_px = self.cell.w * scale;
         let cell_h_px = self.cell.h * scale;
         // Snapshot per-pane cell grids while we hold the workspace

@@ -1,41 +1,11 @@
-//! 터미널 셀 본문에서 URL 을 감지한다. OSC 8 하이퍼링크는 vt 파서가
-//! 보존하지 않으므로, 보이는 행의 텍스트를 직접 스캔해 클릭 가능한
-//! 범위를 뽑아낸다. 한 셀 == 한 char(col) 매핑이라 col 인덱스가 그대로
-//! 스캔 위치다(와이드 글자의 '\0' spacer 는 공백으로 친다).
+//! URL·파일 경로의 실제 화면 셀을 함께 보존해야 줄바꿈·한글 뒤에서도 같은 대상을 연다.
 use super::*;
+mod probe;
+mod scan;
 
 /// 렌더 밑줄용 URL 범위. 실제 여는 주소(url)는 hover/click 이 그때그때 행을 다시
 /// 스캔해 얻으므로 여기엔 담지 않는다.
 pub(crate) use kasa_gridview::CellSpan as LinkSpan;
-
-/// URL 본문에 들어갈 수 있는 글자. 공백·제어문자와 셸/마크업이 경계로
-/// 쓰는 따옴표류·꺾쇠는 여기서 끊는다.
-fn is_url_char(c: char) -> bool {
-    !c.is_whitespace()
-        && !c.is_control()
-        && !matches!(c, '"' | '\'' | '`' | '<' | '>' | '{' | '}' | '|' | '\\' | '^')
-}
-
-/// 문장 끝에 붙은 URL 의 후행 구두점은 링크에서 뗀다. 닫는 괄호는
-/// URL 안에 짝이 있으면(예: 위키 경로) 살리고, 없으면 잘라낸다.
-fn trim_trailing(chars: &[char], start: usize, mut end: usize) -> usize {
-    while end > start {
-        let c = chars[end - 1];
-        let strip = match c {
-            '.' | ',' | ';' | ':' | '!' | '?' => true,
-            ')' => !chars[start..end].contains(&'('),
-            ']' => !chars[start..end].contains(&'['),
-            '}' => !chars[start..end].contains(&'{'),
-            _ => false,
-        };
-        if strip {
-            end -= 1;
-        } else {
-            break;
-        }
-    }
-    end
-}
 
 /// 한 행을 스캔해 (col_start, col_end, url) 목록을 돌려준다. 줄이 안 꺾인 짧은
 /// 주소용 — hover/click 은 `detect_links_rows` 로 이웃 행까지 잇는다.
@@ -46,82 +16,168 @@ pub(crate) fn detect_links_row(row: &[GridCell]) -> Vec<(u16, u16, String)> {
         .collect()
 }
 
-/// 앞 행이 다음 행으로 **이어지는가** — 좁은 창에서 긴 주소가 꺾인 자리.
-///
-/// 정본은 앞 행 마지막 칸의 소프트 랩 표식(`Cell::wrapped`, alacritty `WRAPLINE`)이다.
-/// 표식이 없는 글자판(옛 빌드의 거울·레거시 브리지·저장 스냅샷)을 위해 채움 휴리스틱을
-/// 함께 둔다: 앞 행이 **끝 칸까지** URL 글자로 차 있고 다음 행이 URL 글자로 시작하면
-/// 잇는다. 하드 개행은 거의 늘 끝에 빈 칸을 남기므로 오판은 「주소가 폭에 딱 맞게
-/// 끝나고 다음 줄이 곧장 글자로 시작」할 때뿐이다.
 fn joins(prev: &[GridCell], next: &[GridCell]) -> bool {
-    let (Some(last), Some(first)) = (prev.last(), next.first()) else {
-        return false;
-    };
-    if last.wrapped {
-        return true;
-    }
-    let url_glyph = |c: char| c != ' ' && c != '\0' && is_url_char(c);
-    url_glyph(last.ch) && url_glyph(first.ch)
+    scan::row_join(prev, next).is_some()
 }
 
-/// 이웃한 행들을 이어 붙여 스캔한다. 한 링크는 (세그먼트들, url) 이고, 세그먼트는
-/// `(rows 안의 행 인덱스, col_start, col_end)` — 여러 행에 걸친 주소는 행마다 하나씩
-/// 나온다(밑줄은 행 단위로 그리므로). 안 이어지는 행 사이엔 공백을 끼워 주소가 그
-/// 경계에서 끊기게 한다.
 pub(crate) fn detect_links_rows(rows: &[&[GridCell]]) -> Vec<(Vec<(usize, u16, u16)>, String)> {
-    let mut chars: Vec<char> = Vec::new();
-    let mut pos: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut chars = Vec::new();
+    let mut positions = Vec::new();
     for (r, row) in rows.iter().enumerate() {
-        for (c, cell) in row.iter().enumerate() {
-            chars.push(if cell.ch == '\0' { ' ' } else { cell.ch });
-            pos.push(Some((r, c)));
-        }
-        if rows.get(r + 1).is_some_and(|next| !joins(row, next)) {
-            chars.push(' ');
-            pos.push(None);
-        }
-    }
-    let n = chars.len();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < n {
-        // 스킴 후보 첫 글자에서만 부분 문자열을 만들어 O(n²) 를 피한다.
-        let starts = matches!(chars[i], 'h' | 'f' | 'w');
-        if starts {
-            let tail: String = chars[i..(i + 8).min(n)].iter().collect();
-            let is_www = tail.starts_with("www.");
-            let scheme = tail.starts_with("https://")
-                || tail.starts_with("http://")
-                || tail.starts_with("file://");
-            if scheme || is_www {
-                let mut j = i;
-                while j < n && is_url_char(chars[j]) {
-                    j += 1;
-                }
-                let end = trim_trailing(&chars, i, j);
-                // 스킴/www. 만으로는 링크로 치지 않는다(최소 도메인 몸통 요구).
-                if end > i + 8 || (is_www && end > i + 5) {
-                    let body: String = chars[i..end].iter().collect();
-                    let url = if is_www { format!("https://{body}") } else { body };
-                    let mut segs: Vec<(usize, u16, u16)> = Vec::new();
-                    for p in pos[i..end].iter().flatten() {
-                        match segs.last_mut() {
-                            Some((r, _, e)) if *r == p.0 && *e as usize == p.1 => *e += 1,
-                            _ => segs.push((p.0, p.1 as u16, p.1 as u16 + 1)),
-                        }
-                    }
-                    out.push((segs, url));
-                }
-                i = j.max(i + 1);
+        let start = if r > 0 {
+            scan::row_join(rows[r - 1], row).map_or(0, |(_, s)| s)
+        } else {
+            0
+        };
+        let join = rows.get(r + 1).and_then(|next| scan::row_join(row, next));
+        let end = join.map_or(row.len(), |(e, _)| e);
+        for c in start..end {
+            let cell = &row[c];
+            if cell.leading_wide_spacer {
                 continue;
             }
+            if matches!(cell.ch, ' ' | '\0')
+                && c > 0
+                && unicode_width::UnicodeWidthChar::width(row[c - 1].ch) == Some(2)
+            {
+                continue;
+            }
+            chars.push(if cell.hidden || cell.ch == '\0' {
+                ' '
+            } else {
+                cell.ch
+            });
+            let width = if unicode_width::UnicodeWidthChar::width(cell.ch) == Some(2)
+                && row
+                    .get(c + 1)
+                    .is_some_and(|cell| matches!(cell.ch, ' ' | '\0'))
+            {
+                2
+            } else {
+                1
+            };
+            positions.push(Some((r, c as u16, (c + width) as u16)));
         }
-        i += 1;
+        if join.is_none() {
+            chars.push(' ');
+            positions.push(None);
+        }
     }
-    out
+    scan::scan(&chars)
+        .into_iter()
+        .map(|(start, end, target)| {
+            let mut spans: Vec<(usize, u16, u16)> = Vec::new();
+            for &(row, start, end) in positions[start..end].iter().flatten() {
+                match spans.last_mut() {
+                    Some((r, _, e)) if *r == row && *e == start => *e = end,
+                    _ => spans.push((row, start, end)),
+                }
+            }
+            (spans, target)
+        })
+        .collect()
+}
+
+pub(crate) fn click_modifier(modifiers: winit::keyboard::ModifiersState) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.super_key()
+    } else {
+        modifiers.control_key()
+    }
+}
+
+fn resolve_path(
+    raw: &str,
+    cwd: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let raw = scan::strip_location(raw);
+    if raw.to_ascii_lowercase().starts_with("file://") {
+        return url::Url::parse(raw).ok()?.to_file_path().ok();
+    }
+    if let Some(tail) = raw.strip_prefix("~/") {
+        return Some(home?.join(tail));
+    }
+    let path = std::path::PathBuf::from(raw);
+    if path.is_absolute()
+        || (raw.as_bytes().get(1) == Some(&b':')
+            && matches!(raw.as_bytes().get(2), Some(b'/' | b'\\')))
+    {
+        Some(path)
+    } else {
+        Some(cwd?.join(path))
+    }
+}
+
+fn download_link_file(base: &str, path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let query = format!(
+        "/term/file?path={}",
+        kasa_mcp::remote::urlencode(&path.to_string_lossy())
+    );
+    let bytes = kasa_mcp::remote::remote_get_bytes(base, &query)?;
+    let name = path
+        .to_string_lossy()
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("download")
+        .to_owned();
+    // 원격 경로의 ..·드라이브·기기 이름을 로컬 저장 경로에 합치지 않는다.
+    let root = std::env::temp_dir().join(format!("kasaterm-link-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root)?;
+    let local = root.join(name);
+    std::fs::write(&local, bytes)?;
+    Ok(local)
 }
 
 impl App {
+    pub(crate) fn open_terminal_link(&mut self, pane: &str, target: &str) {
+        if self.record_terminal_link_probe(pane, target) {
+            return;
+        }
+        if let Ok(url) = url::Url::parse(target) {
+            if matches!(url.scheme(), "http" | "https") {
+                self.open_url_for_pane(url.as_str(), Some(pane));
+                return;
+            }
+            if url.scheme() == "mailto" {
+                crate::chrome::open_url_in_browser(url.as_str());
+                return;
+            }
+        }
+        let remote = kasa_mcp::remote::remote_info(pane).filter(|info| info.view);
+        let cwd = remote
+            .as_ref()
+            .and_then(|r| r.remote_cwd.as_deref())
+            .map(std::path::PathBuf::from)
+            .or_else(|| self.pane_view_cwd.get(pane).cloned())
+            .or_else(|| self.pane_current_cwd(pane));
+        let home = if remote.is_none() {
+            kasa_socket::home_dir()
+        } else {
+            None
+        };
+        let Some(path) = resolve_path(target, cwd.as_deref(), home.as_deref()) else {
+            self.set_toast("파일 경로를 이 작업의 폴더에서 찾을 수 없어요".to_string());
+            return;
+        };
+        if let Some(remote) = remote {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || match download_link_file(&remote.base, &path) {
+                Ok(local) => crate::proc::open_path_default(&local),
+                Err(error) => {
+                    let _ = proxy.send_event(UserEvent::SocketToast(format!(
+                        "파일을 열지 못했어요: {error}"
+                    )));
+                }
+            });
+        } else if path.exists() {
+            crate::proc::open_path_default(&path);
+        } else {
+            self.set_toast(format!("파일을 찾을 수 없어요: {}", path.display()));
+        }
+    }
+
     /// 픽셀 좌표 아래에 클릭 가능한 URL 이 있으면 그 pane·밑줄 셀범위들·주소를
     /// 돌려준다. hover 밑줄/커서·클릭 모두 이걸 쓴다. 커서가 올라간 행에서 위아래로
     /// **이어진 행**(줄이 꺾인 주소)만 더 보므로 CursorMoved 마다 불러도 가볍다.
@@ -156,15 +212,24 @@ impl App {
                 _ => break,
             }
         }
-        let rows: Vec<&[GridCell]> = (start..=end).filter_map(|r| view(r).map(Vec::as_slice)).collect();
+        let rows: Vec<&[GridCell]> = (start..=end)
+            .filter_map(|r| view(r).map(Vec::as_slice))
+            .collect();
         let rel = row - start;
         detect_links_rows(&rows)
             .into_iter()
-            .find(|(segs, _)| segs.iter().any(|(r, s, e)| *r == rel && col >= *s && col < *e))
+            .find(|(segs, _)| {
+                segs.iter()
+                    .any(|(r, s, e)| *r == rel && col >= *s && col < *e)
+            })
             .map(|(segs, url)| {
                 let spans = segs
                     .into_iter()
-                    .map(|(r, s, e)| LinkSpan { row: (start + r) as u16, col_start: s, col_end: e })
+                    .map(|(r, s, e)| LinkSpan {
+                        row: (start + r) as u16,
+                        col_start: s,
+                        col_end: e,
+                    })
                     .collect();
                 (pid.clone(), spans, url)
             })
@@ -176,7 +241,17 @@ mod tests {
     use super::*;
 
     fn row(s: &str) -> Vec<GridCell> {
-        s.chars().map(|ch| GridCell { ch, ..GridCell::blank() }).collect()
+        let mut cells = Vec::new();
+        for ch in s.chars() {
+            cells.push(GridCell {
+                ch,
+                ..GridCell::blank()
+            });
+            if unicode_width::UnicodeWidthChar::width(ch) == Some(2) {
+                cells.push(GridCell::blank());
+            }
+        }
+        cells
     }
 
     #[test]
@@ -215,5 +290,150 @@ mod tests {
     fn single_row_scan_still_trims_trailing_punctuation() {
         let links = detect_links_row(&row("go https://x.y/z."));
         assert_eq!(links, vec![(3, 16, "https://x.y/z".to_string())]);
+    }
+    #[test]
+    fn screenshot_url_stops_before_closing_parenthesis_and_korean_suffix() {
+        let a = row("Finder의 스마트 폴더 (https://support.apple.com/guide/");
+        let b = row("mac-help/organize-your-files-in-the-finder-mchle9f0a1b2/mac)처럼 저장 위치와");
+        let links = detect_links_rows(&[&a, &b]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].1, "https://support.apple.com/guide/mac-help/organize-your-files-in-the-finder-mchle9f0a1b2/mac");
+        assert_eq!(
+            links[0].0[1].2 as usize,
+            b.iter().position(|c| c.ch == ')').unwrap()
+        );
+    }
+
+    #[test]
+    fn styled_tui_margin_is_skipped_but_plain_paragraphs_stay_separate() {
+        let mut a = row("  (https://support.apple.com/guide/   ");
+        let mut b = row("  mac-help/example)처럼 다음 설명");
+        for cell in a.iter_mut().chain(b.iter_mut()) {
+            cell.underline = cell.ch != ' ';
+        }
+        let links = detect_links_rows(&[&a, &b]);
+        assert_eq!(
+            links[0].1,
+            "https://support.apple.com/guide/mac-help/example"
+        );
+        assert_eq!(links[0].0[1].1, 2);
+        for cell in a.iter_mut().chain(b.iter_mut()) {
+            cell.underline = false;
+        }
+        assert_eq!(
+            detect_links_rows(&[&a, &b])[0].1,
+            "https://support.apple.com/guide/"
+        );
+    }
+
+    #[test]
+    fn web_delimiters_and_common_address_formats() {
+        for (text, expected) in [
+            (
+                "(https://en.wikipedia.org/wiki/Foo_(bar))처럼",
+                "https://en.wikipedia.org/wiki/Foo_(bar)",
+            ),
+            (
+                "[https://example.com/a?x=1&y=2#part]입니다",
+                "https://example.com/a?x=1&y=2#part",
+            ),
+            ("URL:HTTPS://EXAMPLE.COM/a", "HTTPS://EXAMPLE.COM/a"),
+            ("www.example.com/a.", "https://www.example.com/a"),
+            (
+                "github.com/2rami/kasaterm",
+                "https://github.com/2rami/kasaterm",
+            ),
+            ("localhost:3000/a?x=1", "http://localhost:3000/a?x=1"),
+            ("http://[::1]:3000/a", "http://[::1]:3000/a"),
+            ("mailto:hello@example.com", "mailto:hello@example.com"),
+        ] {
+            assert_eq!(
+                detect_links_row(&row(text))
+                    .iter()
+                    .map(|l| l.2.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_paths_keep_spaces_unicode_and_location_suffixes() {
+        for (text, expected) in [
+            ("`/tmp/한글 폴더/시안 A.png`", "/tmp/한글 폴더/시안 A.png"),
+            ("[문서](</tmp/My Report.md>)", "/tmp/My Report.md"),
+            ("~/Desktop/result.png", "~/Desktop/result.png"),
+            ("src/main.rs:42:7", "src/main.rs:42:7"),
+            ("../notes/result.md", "../notes/result.md"),
+            ("screen.png", "screen.png"),
+            (
+                r#""C:\Users\Name\My File.png""#,
+                r"C:\Users\Name\My File.png",
+            ),
+            ("file:///tmp/a%20b.png", "file:///tmp/a%20b.png"),
+        ] {
+            assert_eq!(
+                detect_links_row(&row(text))
+                    .iter()
+                    .map(|l| l.2.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected],
+                "{text}"
+            );
+        }
+        use std::path::Path;
+        assert_eq!(
+            resolve_path("src/main.rs:42:7", Some(Path::new("/project")), None).unwrap(),
+            Path::new("/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve_path("~/한글 폴더/a.png", None, Some(Path::new("/home/user"))).unwrap(),
+            Path::new("/home/user/한글 폴더/a.png")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            resolve_path("file:///tmp/a%20b.png", None, None).unwrap(),
+            Path::new("/tmp/a b.png")
+        );
+        assert!(resolve_path("relative.md", None, None).is_none());
+    }
+
+    #[test]
+    fn wide_glyph_spacers_do_not_break_a_path_and_remain_clickable() {
+        for spacer in [' ', '\0'] {
+            let mut cells = Vec::new();
+            for ch in "`/tmp/한글 폴더/시안 A.png`".chars() {
+                cells.push(GridCell {
+                    ch,
+                    ..GridCell::blank()
+                });
+                if unicode_width::UnicodeWidthChar::width(ch) == Some(2) {
+                    cells.push(GridCell {
+                        ch: spacer,
+                        ..GridCell::blank()
+                    });
+                }
+            }
+            let links = detect_links_row(&cells);
+            assert_eq!(
+                links,
+                vec![(
+                    1,
+                    cells.len() as u16 - 1,
+                    "/tmp/한글 폴더/시안 A.png".to_string()
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn plain_text_and_hidden_text_are_not_links() {
+        assert!(detect_links_row(&row("일반 문장 / 1.2.3 hello world")).is_empty());
+        let mut cells = row("https://secret.example.com");
+        for cell in &mut cells {
+            cell.hidden = true;
+        }
+        assert!(detect_links_row(&cells).is_empty());
     }
 }

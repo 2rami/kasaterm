@@ -3411,7 +3411,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.chrome_dirty = true;
                     window.request_redraw();
                 }
+                let link_changed = crate::links::click_modifier(self.modifiers) != crate::links::click_modifier(new);
                 self.modifiers = new;
+                if link_changed {
+                    let over_link = crate::links::click_modifier(new) && self.link_hit(self.cursor_px.0, self.cursor_px.1).is_some();
+                    window.set_cursor(if over_link { CursorIcon::Pointer } else { CursorIcon::Default });
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                }
             }
             // 포커스/가림 복귀 시 즉시 다시 그린다. idle은 ControlFlow::Wait라
             // 이 이벤트가 redraw를 안 걸면 다음 blink 타이머(530ms)가 깨울
@@ -4196,7 +4203,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // hover underline (drawn in draw_cells from cursor_px).
                     // Only when nothing more specific already claimed the cursor.
                     let icon =
-                        if matches!(icon, CursorIcon::Default) && self.link_hit(cx, cy).is_some() {
+                        if matches!(icon, CursorIcon::Default) && crate::links::click_modifier(self.modifiers) && self.link_hit(cx, cy).is_some() {
                             CursorIcon::Pointer
                         } else {
                             icon
@@ -6529,9 +6536,9 @@ impl ApplicationHandler<UserEvent> for App {
                         // that stays put (a click, not a drag) opens it. We
                         // still move focus to the pane it landed in.
                         if let Some((pid, _, url)) =
-                            self.link_hit(self.cursor_px.0, self.cursor_px.1)
+                            crate::links::click_modifier(self.modifiers).then(|| self.link_hit(self.cursor_px.0, self.cursor_px.1)).flatten()
                         {
-                            self.link_armed = Some((url, self.cursor_px));
+                            self.link_armed = Some((pid.clone(), url, self.cursor_px));
                             self.focus_pane(&pid);
                             return;
                         }
@@ -6722,16 +6729,16 @@ impl ApplicationHandler<UserEvent> for App {
                         // A titlebar press that never moved past the drag
                         // threshold: just a click, drop the deferred move.
                         self.titlebar_drag_pending = None;
-                        // Armed URL: a click (cursor barely moved) opens it; a
-                        // drag past the threshold just disarms (text selection
-                        // never started since the press returned early).
-                        if let Some((url, (px, py))) = self.link_armed.take() {
+                        if let Some((pane, target, (px, py))) = self.link_armed.take() {
                             let (cx, cy) = self.cursor_px;
-                            if (cx - px).abs() < 4.0 && (cy - py).abs() < 4.0 {
-                                let _ = crate::proc::command("open").arg(&url).spawn();
-                                window.request_redraw();
-                                return;
+                            if crate::links::click_modifier(self.modifiers)
+                                && (cx - px).abs() < 4.0 && (cy - py).abs() < 4.0
+                                && self.link_hit(cx, cy).is_some_and(|(id, _, value)| id == pane && value == target)
+                            {
+                                self.open_terminal_link(&pane, &target);
                             }
+                            window.request_redraw();
+                            return;
                         }
                         // End a raw-editor selection drag; a plain click (no
                         // movement) leaves anchor == caret, which reads as
@@ -7963,6 +7970,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autohitaudit();
         self.run_button_focus_probe(event_loop);
         self.run_cloud_control_probe();
+        self.run_terminal_link_probe(event_loop);
         self.run_tui_mouse_probe(event_loop);
         self.refresh_hover_pointer();
         self.run_pending_autoghost();

@@ -1,15 +1,16 @@
 #!/bin/bash
-# PostToolUse hook for SendUserFile — if any sent file is an image, also pop it
-# into a kasaterm image pane so the user actually sees it (kasaterm doesn't
-# render inline image escapes that Claude Code might or might not emit).
+# Kitty 그림은 하네스가 본문에 배치하므로 별도 미리보기 탭을 만들지 않는다.
+# 대화 보기의 이미지 이력만 남긴다.
 input=$(cat)
 echo "$input" | python3 -c "
-import sys, json, os, subprocess, time
+import sys, json, os, time
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 paths = d.get('tool_input', {}).get('files', []) or []
+if isinstance(paths, str): paths = [paths]
+if not isinstance(paths, list): paths = []
 exts = ('.png','.jpg','.jpeg','.gif','.webp','.bmp','.tiff','.tif')
 # BA GUI 대화창 인라인용 기록처 — 이 방의 sent-images.jsonl(pane 별 필터).
 # 방 모드(KASATERM_ROOM)면 slug 에 __room_<r> 접미 — 서버 sent_images_handler 의
@@ -32,7 +33,7 @@ if room:
     slug = slug + '__room_' + room
 import tempfile
 tmp_root = tempfile.gettempdir() if os.name == 'nt' else '/tmp'
-collab = os.path.join(tmp_root, 'kasaterm-collab', slug)
+collab = os.path.join(os.environ.get('KASATERM_COLLAB_ROOT') or os.path.join(tmp_root, 'kasaterm-collab'), slug)
 for p in paths:
     if not isinstance(p, str): continue
     if not p.lower().endswith(exts): continue
@@ -43,11 +44,6 @@ for p in paths:
         os.makedirs(collab, exist_ok=True)
         with open(os.path.join(collab, 'sent-images.jsonl'), 'a') as f:
             f.write(json.dumps({'pane': pane, 'path': p_abs, 'ts': time.time()}) + '\n')
-    except Exception:
-        pass
-    # ② 터미널 이미지 pane(기존 — solo 모드, BA GUI 와 병행)
-    try:
-        subprocess.run(['imgopen', p_abs], timeout=5, check=False)
     except Exception:
         pass
 " >/dev/null 2>&1 || true
