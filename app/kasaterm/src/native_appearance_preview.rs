@@ -67,12 +67,12 @@ pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut V
         let hot = contains(rect, s.cursor);
         let selected = s.accent == *name;
         let cx = rect.0 + (cell_w - 36.0) * 0.5;
-        round_rect(g, cx, rect.1, 36.0, 36.0, 18.0, *color);
+        circle_rect(g, cx, rect.1, 36.0, *color);
         if selected {
             g.queue_icon("check", cx + 10.0, rect.1 + 10.0, 16.0, theme::foreground_on(*color));
         }
         if selected || hot {
-            stroke_round(g, (cx - 3.0, rect.1 - 3.0, 42.0, 42.0), 21.0, theme::enforce_contrast_at(*color, theme::surface(), 3.0));
+            stroke_round(g, (cx - 3.0, rect.1 - 3.0, 42.0, 42.0), 21.0 * theme::roundness(), theme::enforce_contrast_at(*color, theme::surface(), 3.0));
         }
         let label = preset_label(name);
         let width = g.measure_chrome_text(label, 10.5, false);
