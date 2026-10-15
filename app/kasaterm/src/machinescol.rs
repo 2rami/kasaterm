@@ -119,14 +119,73 @@ pub(crate) fn remote_room(p: &serde_json::Value) -> String {
     }
 }
 
-/// ago 초를 사람 말로 — 아로나 판(MachinesTab)의 agoLabel 과 같은 문구.
-pub(crate) fn ago_label(secs: Option<u64>) -> String {
-    match secs {
-        None => "한 번도 못 닿았어요".to_string(),
-        Some(s) if s < 60 => format!("{s}초 전까지 닿았어요"),
-        Some(s) if s < 3600 => format!("{}분 전까지 닿았어요", s / 60),
-        Some(s) => format!("{}시간 전까지 닿았어요", s / 3600),
+/// 스냅샷 행의 `link` — 없으면(아직 판정 전) 빈 기록.
+pub(crate) fn machine_link(row: &serde_json::Value) -> state::MachineLink {
+    let link = &row["link"];
+    let text = |v: &serde_json::Value| v.as_str().unwrap_or("").to_string();
+    state::MachineLink {
+        reason: text(&link["reason"]),
+        detail: text(&link["detail"]),
+        last_ok_ms: link["last_ok_ms"].as_u64(),
+        rooms: link["rooms"].as_u64().unwrap_or(0) as usize,
+        gone: row["gone"].as_bool() == Some(true),
+        events: link["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| Some((e["at_ms"].as_u64()?, e["up"].as_bool()?, text(&e["reason"]))))
+            .collect(),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// epoch ms → 사람이 읽는 때. 하루 안이면 「15:32」, 그 전이면 「2일 전 15:32」.
+pub(crate) fn clock_label(ms: u64) -> String {
+    let hm = kasa_socket::tell::clock_hm(ms).unwrap_or_default();
+    match now_ms().saturating_sub(ms) / (24 * 3600 * 1000) {
+        0 => hm,
+        days => format!("{days}일 전 {hm}"),
+    }
+}
+
+/// 끊긴 기기의 한 줄 — 「끊김 · 이유 · 15:32」. 닿은 적이 없으면 시각 대신 그렇게 말한다.
+pub(crate) fn offline_status(link: &state::MachineLink, ago_secs: Option<u64>) -> String {
+    let reason = if link.reason.is_empty() { "이유 확인 중" } else { link.reason.as_str() };
+    let when = match (link.last_ok_ms, ago_secs) {
+        (Some(ms), _) => clock_label(ms),
+        (None, Some(secs)) => clock_label(now_ms().saturating_sub(secs * 1000)),
+        (None, None) => "닿은 적 없음".into(),
+    };
+    format!("끊김 · {reason} · {when}")
+}
+
+/// 끊긴 기기 본문 둘째 줄 — 마지막으로 닿은 때와, 그때 있던 방은 다시 붙으면 돌아온다는 것.
+/// 기본 폭 240 에서 안 잘리게 짧게 쓴다.
+pub(crate) fn offline_note(link: &state::MachineLink) -> String {
+    let Some(ms) = link.last_ok_ms else { return "닿은 적 없음".into() };
+    match link.rooms {
+        n if n > 0 && !link.gone => format!("{}까지 · 방 {n}개는 붙으면 돌아와요", clock_label(ms)),
+        _ => format!("{}까지 닿음", clock_label(ms)),
+    }
+}
+
+/// 머리 줄에 올리면 뜨는 연결 기록 — 새 것이 위.
+pub(crate) fn link_history(name: &str, link: &state::MachineLink) -> String {
+    let mut out = format!("{name} 연결 기록");
+    if link.events.is_empty() {
+        out.push_str("\n아직 바뀐 적 없어요");
+    }
+    for (at, up, reason) in link.events.iter().take(8) {
+        let what = if *up { reason.clone() } else { format!("끊김 · {reason}") };
+        out.push_str(&format!("\n{} {what}", clock_label(*at)));
+    }
+    if !link.detail.is_empty() {
+        out.push_str(&format!("\n원문: {}", link.detail));
+    }
+    out
 }
 
 /// 화면공유를 연다 — 응답 못 하는 앱을 먼저 걷어내고.
@@ -323,17 +382,25 @@ fn hung_screen_share_pids() -> Vec<String> {
 /// 원격 거울 pane 의 **저쪽 사실** — (기계 라벨, 폴링 캐시의 그 pane 행). 이름·제목·
 /// 상태가 로컬엔 없어(프로세스가 저쪽에서 돈다) 여기서 온다. 링크가 없거나 캐시에
 /// 그 pane 이 없으면 None.
-/// 하단바에 세울 기기 연결 한 줄. 붙어 있는 기계만, 명부 순서 그대로.
+/// 하단바에 세울 기기 연결 한 줄. 명부 순서 그대로 — 끊긴 기기도 빼지 않고 센다.
 pub(crate) struct StatusLink {
     label: String,
+    online: bool,
     /// 직통(그 기계에 바로) 인가 — 아니면 공용 관문을 거치는 중계다.
     direct: bool,
     rtt_ms: Option<u64>,
 }
 
 impl StatusLink {
+    pub(crate) fn online(&self) -> bool {
+        self.online
+    }
+
     /// 좁을 때 — 이름 없이 경로와 숫자만.
     pub(crate) fn short(&self) -> String {
+        if !self.online {
+            return "끊김".into();
+        }
         match self.rtt_ms {
             Some(ms) => format!("{} {ms}ms", if self.direct { "직통" } else { "중계" }),
             None => if self.direct { "직통".into() } else { "중계".into() },
@@ -357,10 +424,12 @@ impl StatusLink {
     }
 }
 
-/// 하단바 한 칸에 들어갈 요약 — 기기 하나면 「직통 10ms」, 여럿이면 「직통 2·중계 1」.
-/// 이름은 팝오버가 말한다. 이름까지 쓰면 옆 위젯이 다 잘렸다(2026-09-17).
+/// 하단바 한 칸에 들어갈 요약 — 기기 하나면 「직통 10ms」, 여럿이면 「직통 2·중계 1」, 끊긴 기기가
+/// 있으면 「·끊김 1」. 이름은 팝오버가 말한다. 이름까지 쓰면 옆 위젯이 다 잘렸다(2026-09-17).
 pub(crate) fn status_links_summary(links: &[StatusLink]) -> String {
-    match links {
+    let up: Vec<&StatusLink> = links.iter().filter(|l| l.online).collect();
+    let down = links.len() - up.len();
+    let base = match up.as_slice() {
         [] => String::new(),
         [one] => one.short(),
         many => {
@@ -372,15 +441,20 @@ pub(crate) fn status_links_summary(links: &[StatusLink]) -> String {
                 (d, r) => format!("직통 {d}·중계 {r}"),
             }
         }
+    };
+    match (base.is_empty(), down) {
+        (_, 0) => base,
+        (true, n) => format!("끊김 {n}"),
+        (false, n) => format!("{base}·끊김 {n}"),
     }
 }
 
-/// 붙어 있는 다른 기기들의 연결 상태. 폴링 캐시라 읽기는 공짜다.
+/// 다른 기기들의 연결 상태 — 끊긴 기기와 명부에서 빠져 이유만 남은 기기까지. 폴링 캐시라 읽기는 공짜다.
 pub(crate) fn status_links() -> Vec<StatusLink> {
     kasa_mcp::machines::snapshot().iter()
-        .filter(|m| m["online"].as_bool() == Some(true))
         .map(|m| StatusLink {
             label: m["label"].as_str().unwrap_or("기기").to_string(),
+            online: m["online"].as_bool() == Some(true),
             direct: m["online_via"].as_str() == Some("direct"),
             rtt_ms: m["rtt_ms"].as_u64(),
         })
@@ -679,6 +753,7 @@ impl App {
                     remote,
                     closed,
                     web_shells,
+                    link: machine_link(&m),
                 })
             })
             .collect();

@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 mod display;
+mod link;
 pub use display::{DisplayIdentity, display_identity};
 
 const POLL_EVERY: Duration = Duration::from_secs(5);
@@ -470,9 +471,13 @@ pub fn save_entries(list: &[Value]) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let text = serde_json::to_string_pretty(&Value::Array(list.to_vec()))?;
+    let kept: HashSet<String> = parse(&Value::Array(list.to_vec())).into_iter().map(|m| m.label).collect();
+    let dropped: Vec<String> = listed_machines().into_iter().map(|m| m.label).filter(|l| !kept.contains(l)).collect();
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text)?;
-    std::fs::rename(tmp, path)
+    std::fs::rename(tmp, path)?;
+    link::forget(dropped);
+    Ok(())
 }
 
 // ── 자동 터널 ────────────────────────────────────────────────────────────
@@ -683,6 +688,18 @@ fn tunnel_death_reason(err: &std::path::Path) -> Option<String> {
         .filter(|l| !l.is_empty() && !l.starts_with("**"))
         .last()
         .map(|l| l.chars().take(160).collect())
+}
+
+/// 그 기기의 앞쪽 터널이 살아 있나, 죽었으면 ssh 가 남긴 사유. 연결 기록이 「ssh 길 끊김」과
+/// 「앱 꺼짐」을 가르는 근거다.
+fn tunnel_state(label: &str) -> (bool, Option<String>) {
+    let alive = tunnels()
+        .lock()
+        .ok()
+        .and_then(|mut t| t.get_mut(label).map(|tun| matches!(tun.child.try_wait(), Ok(None))))
+        .unwrap_or(false);
+    let reason = (!alive).then(|| tunnel_death_reason(&tunnel_err_path(&tunnel_port(label).to_string()))).flatten();
+    (alive, reason)
 }
 
 fn stop_watched(tun: &mut Tunnel) {
@@ -1017,21 +1034,32 @@ pub fn listed_machines() -> Vec<Machine> {
 /// 명부 파일(검증용 인스턴스는 env `KASATERM_MACHINES`)의 항목 그대로. 손님 항목·폴링으로 배운 id 가
 /// 섞이지 않는다 — 사람이 적은 것만 믿어야 하는 판정(재시작 승인 위임)이 이것을 읽는다.
 pub fn listed_entries() -> Vec<Value> {
+    read_listed().unwrap_or_default()
+}
+
+/// 명부를 못 읽은 까닭까지 — 파일이 깨지면 명부의 기기가 한꺼번에 목록에서 빠지는데, 그때 사람에게
+/// 「지워졌다」가 아니라 「못 읽었다」를 말해야 한다. 파일이 없는 것은 빈 명부다.
+fn read_listed() -> Result<Vec<Value>, String> {
     if let Ok(s) = std::env::var("KASATERM_MACHINES") {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
             if !parse(&v).is_empty() {
-                return v.as_array().cloned().unwrap_or_default();
+                return Ok(v.as_array().cloned().unwrap_or_default());
             }
         }
     }
     let Some(path) = machines_path() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Array(list)) => Ok(list),
+        Ok(_) => Err("배열이 아님".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn find(label: &str) -> Option<Machine> {
@@ -1196,7 +1224,7 @@ pub fn refresh_panes_now(base: &str) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let requested_at = Instant::now();
     let panes = runtime.block_on(async {
-        fetch_panes(&reqwest::Client::new(), &target.base).await
+        fetch_panes(&reqwest::Client::new(), &target.base).await.ok()
     });
     let list = raw_machines();
     let mut c = cache().lock().map_err(|_| anyhow::anyhow!("machine cache unavailable"))?;
@@ -1347,27 +1375,27 @@ pub fn cached_device_colors() -> Vec<(String, Value)> {
         .collect()
 }
 
-async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>> {
+async fn fetch_panes(client: &reqwest::Client, base: &str) -> Result<Vec<Value>, link::Failure> {
     let resp = client
         .get(format!("{base}/term/panes"))
         .timeout(FETCH_TIMEOUT)
         .send()
         .await
-        .ok()?;
+        .map_err(|e| link::Failure::from_error(&e))?;
     if !resp.status().is_success() {
-        return None;
+        return Err(link::Failure::Status(resp.status().as_u16()));
     }
-    let text = resp.text().await.ok()?;
+    let text = resp.text().await.map_err(|e| link::Failure::from_error(&e))?;
     let mut panes = serde_json::from_str::<Value>(&text)
-        .ok()?
-        .as_array()
-        .cloned()?;
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .ok_or_else(|| link::Failure::Body(text.chars().take(120).collect()))?;
     if !overlapping_rooms(&panes).is_empty() {
         if let Some(windows) = fetch_json(client, base, "/windows").await {
             repair_room_geometry(&mut panes, &windows);
         }
     }
-    Some(panes)
+    Ok(panes)
 }
 
 fn pane_rect(row: &Value) -> Option<[f64; 4]> {
@@ -1483,9 +1511,22 @@ pub async fn poll_loop() {
             let client = &client;
             async move {
                 // 요청은 카사넷 입구로 — 왕복(rtt_ms)도 그 순간 실제로 탄 길의 값이 된다.
-                let via = crate::kasanet::route_base(&m.base);
-                let asked = std::time::Instant::now();
-                let panes = fetch_panes(client, &via).await?;
+                let mut via = crate::kasanet::route_base(&m.base);
+                let mut asked = std::time::Instant::now();
+                let panes = match fetch_panes(client, &via).await {
+                    Ok(panes) => panes,
+                    // 직통은 저쪽 앱이 꺼져도 시간 초과로만 끝나 까닭을 못 가른다 — 원래 길로 한 번 더 물어
+                    // 그 답(터널 끊김·앱 꺼짐)을 이유로 삼고, 원래 길이 살아 있으면 끊김으로 치지 않는다.
+                    Err(failure) if via != m.base && failure.transport() => {
+                        via = m.base.clone();
+                        asked = std::time::Instant::now();
+                        match fetch_panes(client, &via).await {
+                            Ok(panes) => panes,
+                            Err(failure) => return Err((m, failure)),
+                        }
+                    }
+                    Err(failure) => return Err((m, failure)),
+                };
                 let rtt_ms = Some(asked.elapsed().as_millis() as u64);
                 let (sync, version, device_colors) = tokio::join!(
                     probe_sync(client, &via),
@@ -1506,12 +1547,19 @@ pub async fn poll_loop() {
                     build: version.build.or_else(|| guest_build(&m.label)),
                     machine_id: version.machine_id,
                 };
-                Some((m, seen))
+                Ok((m, seen))
             }
         }).collect();
         let mut announce = Vec::new();
+        let mut failures = HashMap::new();
         while let Some(done) = futures_util::StreamExt::next(&mut jobs).await {
-            let Some((m, seen)) = done else { continue };
+            let (m, seen) = match done {
+                Ok(done) => done,
+                Err((m, failure)) => {
+                    failures.insert(m.label.clone(), failure);
+                    continue;
+                }
+            };
             if let Ok(mut c) = cache().lock() {
                 if merge_seen(&mut c, &m.label, seen) {
                     display::publish(&list, &c);
@@ -1523,6 +1571,7 @@ pub async fn poll_loop() {
             }
         }
         drop(jobs);
+        link::settle(&list, &failures);
         futures_util::future::join_all(announce.iter().map(|base| announce_to(&client, base))).await;
         GENERATION.fetch_add(1, Ordering::Relaxed);
         sync_watchers(&client, &list, &mut watchers);
@@ -1701,8 +1750,14 @@ async fn first_session_character(bases: &[String], sid: &str, timeout: Duration)
 }
 
 /// GET /machines 응답 본체. 캐시만 읽으므로 기계가 죽어 있어도 즉시다.
+/// 명부에서 빠진 기기도 이유를 단 끊긴 행으로 끝에 붙는다 — 이 기기 화면(사이드바·Info·하단바·CLI)만.
+/// 관문 너머(`/machines`)엔 안 싣는다: 폰·다른 기기는 제 명부로 판단한다.
 pub fn snapshot() -> Vec<Value> {
-    snapshot_with_uplinks(&[])
+    let mut rows = snapshot_with_uplinks(&[]);
+    // 다시 들어온 기기는 다음 바퀴가 흔적을 걷기 전까지 두 줄로 설 수 있다 — 살아 있는 줄이 이긴다.
+    let live: HashSet<String> = rows.iter().filter_map(|r| r["label"].as_str().map(str::to_string)).collect();
+    rows.extend(link::ghosts().into_iter().filter(|g| g["label"].as_str().is_none_or(|l| !live.contains(l))));
+    rows
 }
 
 fn availability(age: Option<Duration>, uplink: bool) -> (bool, Option<&'static str>) {
@@ -1812,14 +1867,21 @@ pub(crate) fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -
     let list = machines();
     let c = cache().lock().ok();
     let local_build = build_id();
-    list
+    let mut rows: Vec<Value> = list
         .into_iter()
         .map(|m| {
             let hit = c.as_ref().and_then(|c| seen_for_machine(&m, c));
             let uplink = matching_uplink(&m, hit, uplinks);
             snapshot_machine(m, hit, uplink, &local_build)
         })
-        .collect()
+        .collect();
+    drop(c);
+    for row in &mut rows {
+        if let Some(view) = row["label"].as_str().and_then(link::view_of) {
+            row["link"] = view;
+        }
+    }
+    rows
 }
 
 #[cfg(test)]

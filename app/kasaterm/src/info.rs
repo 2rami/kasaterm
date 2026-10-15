@@ -1528,7 +1528,7 @@ mod tests {
         };
         let mut machine = state::MachinesColMachine {
             label: "원본 기기".into(), online: true, ago_secs: Some(0), outdated: false,
-            host: String::new(), kvm: None, closed: 0, web_shells: Vec::new(),
+            host: String::new(), kvm: None, closed: 0, web_shells: Vec::new(), link: Default::default(),
             remote: vec![row("", "%12"), row("", "%2")],
             mirrored: vec![row("%99", "%7")],
         };
@@ -4017,7 +4017,7 @@ pub(crate) fn draw_machine_menu(
     let mut items: Vec<(Option<B>, MenuRow)> = Vec::new();
     items.push((None, MenuRow::new(crate::render::pane_identity::device_name(&m.label)).bold().icon("server").muted()));
     if !m.online {
-        items.push((None, MenuRow::new(crate::machinescol::ago_label(m.ago_secs)).muted()));
+        items.push((None, MenuRow::new(crate::machinescol::offline_status(&m.link, m.ago_secs)).muted()));
     }
     if m.online && !m.remote.is_empty() {
         items.push((Some(B::Unfold { label: m.label.clone() }), MenuRow::new("방 펼치기").sep().icon("columns-2")));

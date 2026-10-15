@@ -671,7 +671,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         if status_prefs.visible("link") && !links.is_empty() {
             // 한 칸에 요약만 — 이름은 팝오버가 말한다.
             let text = if compact_tools { String::new() } else { crate::machinescol::status_links_summary(&links) };
-            let worst = links.iter().map(|l| l.tone()).min().unwrap_or(2);
+            // 점 색은 붙어 있는 길의 질 — 늘 꺼져 있는 기기 하나가 점을 늘 빨갛게 두지 않게. 다 끊겼을 때만 나쁨.
+            let worst = links.iter().filter(|l| l.online()).map(|l| l.tone()).min().unwrap_or(0);
             let open = matches!(bar.popover, Some((state::StatusbarPopover::Link, _)));
             let col = chip_ink(&status_prefs, "link", open);
             let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };

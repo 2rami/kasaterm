@@ -32,6 +32,8 @@ pub(crate) struct NavigationState {
     /// 보는 중인 원격 방에서 지금 포커스한 칸의 원격 pane id.
     pub(crate) viewing_cur: Option<String>,
     device_views: Vec<(String, Rect)>,
+    /// 기기 머리의 이름·상태 자리 — 올리면 그 기기의 연결 기록이 뜬다(`hover_history`).
+    heads: Vec<(String, Rect)>,
     pub(crate) collapsed_rooms: std::collections::HashSet<String>,
     /// 방마다 고른 본문 보기와 전체 기본 — 본기기 카드의 「목록으로 보기」와 같다.
     pub(crate) list_rooms: RoomViews,
@@ -358,7 +360,7 @@ fn status(machine: &state::MachinesColMachine) -> String {
     if machine.online {
         if machine.outdated { "연결됨 · 업데이트 필요".into() } else { "연결됨".into() }
     } else {
-        crate::machinescol::ago_label(machine.ago_secs)
+        crate::machinescol::offline_status(&machine.link, machine.ago_secs)
     }
 }
 
@@ -572,9 +574,16 @@ fn draw_rows(
     let tab_w = (width - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
     let mut y = view.1 - scroll;
     let groups = rooms(machine);
-    if groups.is_empty() {
-        let message = if machine.online { "열린 pane 없음" } else { "기기에 연결할 수 없음" };
-        text(g, message, 16.0, y + 12.0, width - 32.0, 11.0, theme::text_dim(), false);
+    if groups.is_empty() && machine.online {
+        text(g, "열린 pane 없음", 16.0, y + 12.0, width - 32.0, 11.0, theme::text_dim(), false);
+        y += PANE_H;
+    } else if groups.is_empty() {
+        // 끊긴 기기는 지우지 않고 이유를 둔다 — 머리 줄은 잘리니 여기서 이유를 온전히, 그 아래
+        // 마지막으로 닿은 때. 방은 다시 붙으면 폴링이 저절로 되돌린다.
+        let reason = if machine.link.reason.is_empty() { "이유 확인 중" } else { machine.link.reason.as_str() };
+        text(g, reason, 16.0, y + 8.0, width - 32.0, 11.0, theme::text_dim(), false);
+        text(g, &crate::machinescol::offline_note(&machine.link), 16.0, y + 25.0, width - 32.0, 10.0,
+            theme::text_mute(), false);
         y += PANE_H;
     }
     let active_room = groups.iter().position(|(_, list)| ctx.viewing.is_some_and(|(label, ids)| {
@@ -700,6 +709,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let nav = &mut info.navigation;
     nav.hits.clear();
     nav.device_views.clear();
+    nav.heads.clear();
     if width <= 0.0 { return; }
     let label = crate::info::local_machine_name();
     let label = if label.is_empty() { "이 기기" } else { label };
@@ -718,7 +728,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, shared_scroll, room_numbers, device_views, web_open, .. } = nav;
+        local_content_h, shared_scroll, room_numbers, device_views, heads, web_open, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
@@ -754,6 +764,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         g.queue_icon("ellipsis-horizontal", menu.0 + 4.0, menu.1 + 4.0, 14.0, theme::text_dim());
         if let Some(r) = clipped(menu, viewport) { hits.push((Action::Menu(machine.label.clone()), r)); }
         if let Some(r) = clipped(head, viewport) { hits.push((Action::Section(machine.label.clone()), r)); }
+        if let Some(r) = clipped((head.0, head.1, (plus.0 - head.0).max(0.0), head.3), viewport) {
+            heads.push((machine.label.clone(), r));
+        }
         let body = (viewport.0, y + SECTION_H, viewport.2, body_h);
         if let Some(visible) = clipped(body, viewport) {
             device_views.push((machine.label.clone(), visible));
@@ -762,6 +775,13 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         y += SECTION_H + body_h;
     }
     g.pop_clip();
+}
+
+/// 커서가 기기 머리의 이름·상태 위면 그 기기의 연결 기록 글.
+pub(crate) fn hover_history(info: &state::InfoState, cursor: (f32, f32)) -> Option<String> {
+    let (label, _) = info.navigation.heads.iter().find(|(_, r)| hit(cursor, *r))?;
+    let machine = info.machines_col.machines.iter().find(|m| &m.label == label)?;
+    Some(crate::machinescol::link_history(&crate::render::pane_identity::device_name(label), &machine.link))
 }
 
 impl App {
@@ -1232,7 +1252,7 @@ mod tests {
         };
         state::MachinesColMachine {
             label: "test".into(), online: true, ago_secs: None, outdated: false,
-            host: String::new(), kvm: None, closed: 2, web_shells: Vec::new(),
+            host: String::new(), kvm: None, closed: 2, web_shells: Vec::new(), link: Default::default(),
             remote: vec![row("", "%12", "A"), row("", "%2", "A"), row("", "%8", "B")],
             mirrored: vec![row("%99", "%7", "A")],
         }
