@@ -94,6 +94,7 @@ mod context_info;
 mod internal_room;
 mod links;
 mod inline_image;
+mod inline_result;
 mod lsp;
 mod machinescol;
 #[cfg(target_os = "macos")]

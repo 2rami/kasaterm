@@ -96,3 +96,5 @@
 - `native_controls.rs` · `native_layout.rs` — 글리프 실측 버튼·공통 필드·패널과 내용 너비/줄바꿈 배치. `gpu.rs`의 `ChromeTextMetrics`로 실제 글자 영역을 가운데에 맞추며, `native_controls/probe.rs`는 격리 실행에서 글꼴·배율별 GPU 결과와 버튼 경계를 검사한다.
 
 - `links.rs` · `links/scan.rs` — 실제 터미널 셀 기준 URL·파일 경로 범위와 수정키 클릭, 로컬/원격 파일 열기. `links/probe.rs`는 격리 화면의 좌표 클릭을 검사한다. `inline_image.rs`는 GUI 초기화 전에 처리하는 Kitty 이미지 출력이며 `imgopen`의 기본 경로다.
+
+- `inline_result.rs` — CLI가 공통으로 출력하는 이미지 표시 블록·내용 해시 PNG 캐시·행별 클리핑. `inline_image.rs`의 도구 출력과 `terminal_scene.rs`의 실제 그리기를 연결하며 Claude/Codex 래퍼는 같은 표시 지침을 전달한다.

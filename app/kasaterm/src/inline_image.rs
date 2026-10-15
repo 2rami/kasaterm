@@ -62,13 +62,13 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
     if args.first().is_none_or(|a| a != "--inline-image") {
         return Ok(false);
     }
+    let explicit_block = args.get(1).is_some_and(|a| a == "--block");
     anyhow::ensure!(
-        args.len() == 2,
-        "usage: imgopen FILE (or imgopen --tab FILE)"
+        args.len() == if explicit_block { 3 } else { 2 },
+        "usage: imgopen [--block | --tab] FILE"
     );
     let stdout = std::io::stdout();
-    anyhow::ensure!(stdout.is_terminal(), "이미지는 하네스의 이미지 첨부 도구로 보여 주세요. imgopen은 셸 터미널용이며, 별도 탭은 imgopen --tab FILE로 엽니다.");
-    let path = std::path::Path::new(&args[1]);
+    let path = std::path::Path::new(&args[if explicit_block { 2 } else { 1 }]);
     anyhow::ensure!(
         path.is_file(),
         "이미지 파일을 찾을 수 없습니다: {}",
@@ -79,6 +79,14 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
         w > 0 && h > 0 && u64::from(w) * u64::from(h) <= 64_000_000,
         "이미지가 너무 큽니다"
     );
+    if explicit_block || !stdout.is_terminal() {
+        let decoded = image::open(path)?;
+        let id = crate::inline_result::register(&decoded)?;
+        stdout
+            .lock()
+            .write_all(crate::inline_result::display_block(&id, w, h).as_bytes())?;
+        return Ok(true);
+    }
     let (width, height, cols, rows) = display_size(w, h, terminal_geometry());
     let decoded = image::open(path)?.thumbnail(width, height);
     let mut png = std::io::Cursor::new(Vec::new());

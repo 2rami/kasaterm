@@ -1105,6 +1105,12 @@ impl App {
                 ));
             }
         }
+        {
+            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+            inline_slots.extend(crate::inline_result::compose(
+                &mut composed, (body_left, body_top), (self.cell.w * fs, self.cell.h * fs), cols_now,
+            ));
+        }
         // 글 흐름 안 그림 — `[[img:<경로>:<행수>]]` 표식이 잡은 자리에 얹는다.
         // OSC 1337 을 못 쓰는 claude pane 을 위한 길이라(그쪽 함수 주석) 셸
         // pane 에도 그대로 열어 둔다: `echo '[[img:a.png:12]]'` 로도 뜬다.
