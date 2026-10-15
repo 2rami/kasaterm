@@ -12,17 +12,25 @@
 //! Metal layer 충돌로 이미 접힌 판정이다(커밋 7893e95).
 use super::*;
 use std::sync::atomic::Ordering::Relaxed;
+mod model;
+mod paint;
+pub(crate) use paint::draw_sessions_col;
 
-/// 한 행의 높이. 라벨·마지막 대화·메타 세 줄이 들어간다.
-const ROW_H: f32 = 58.0;
-/// 스코프 칩 줄의 높이(본문 위 고정).
-const HEAD_H: f32 = 30.0;
-/// 목록이 비었을 때 안내가 차지하는 높이.
-const EMPTY_H: f32 = 44.0;
-/// 묶음 머리(「되살리기」·「기록」) 한 줄.
-const GROUP_H: f32 = 24.0;
-/// 묶음과 묶음 사이 숨.
-const SEC_GAP: f32 = 8.0;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    Mode(bool),
+    Scope(bool),
+    Filter(Option<String>),
+    Refresh,
+    Select(String, String),
+    Resume(String, String),
+    ClosedSelect(String),
+    Reopen(String),
+    AskDiscard(String),
+    Discard(String),
+    CancelDiscard,
+}
+
 /// 재수집 간격. 기록은 대화가 끝나야 바뀌므로 Info 탭(1.5초)보다 훨씬 성기다 —
 /// 저장소 전체를 stat 하는 비용이라 자주 돌 이유가 없다.
 const REFRESH_MS: u64 = 8000;
@@ -33,6 +41,35 @@ impl App {
     pub(crate) fn pump_sessions_col(&mut self) {
         if self.info.tab != state::SideTab::Sessions || !self.git.col_visible {
             return;
+        }
+        if crate::verification_run()
+            && std::env::var("KASATERM_AUTOSESSION_PROBE").is_ok_and(|v| {
+                matches!(
+                    v.as_str(),
+                    "retained" | "history" | "history-empty" | "history-check"
+                )
+            })
+        {
+            return;
+        }
+        let cwd = (!self.sessions_col.scope_all)
+            .then(|| self.active_pane_cwd())
+            .flatten();
+        let scope_changed = self.sessions_col.loaded_scope != Some(self.sessions_col.scope_all)
+            || cwd != self.sessions_col.cwd;
+        if scope_changed {
+            self.sessions_col.generation.fetch_add(1, Relaxed);
+            self.sessions_col.cwd = cwd.clone();
+            self.sessions_col.loaded_scope = Some(self.sessions_col.scope_all);
+            self.sessions_col.view.clear();
+            if let Ok(mut snap) = self.sessions_col.snap.lock() {
+                snap.clear();
+            }
+            self.sessions_col.selected = None;
+            self.sessions_col.keyboard_focus = None;
+            self.sessions_col.actions.clear();
+            self.sessions_col.scroll = 0.0;
+            self.sessions_col.last_refresh = None;
         }
         // 워커가 새 목록을 올렸을 때만 렌더용 사본으로 옮긴다. Info 탭과 달리
         // 커서 동결을 두지 않는 건 이 목록이 8초에 한 번, 그것도 대화가 끝났을
@@ -47,21 +84,11 @@ impl App {
         if self.sessions_col.busy.load(Relaxed) {
             return;
         }
-        // 「이 방」범위는 활성 pane 의 cwd 를 기준으로 삼는다. pane 을 옮겨 cwd 가
-        // 달라지면 목록의 대상 자체가 바뀌므로 주기를 기다리지 않고 즉시 다시 모은다.
-        let cwd = (!self.sessions_col.scope_all)
-            .then(|| self.active_pane_cwd())
-            .flatten();
-        let cwd_changed = !self.sessions_col.scope_all && cwd != self.sessions_col.cwd;
-        if cwd_changed {
-            self.sessions_col.cwd = cwd.clone();
-            self.sessions_col.scroll = 0.0;
-        }
         let fresh = self
             .sessions_col
             .last_refresh
             .is_some_and(|t: Instant| t.elapsed() < std::time::Duration::from_millis(REFRESH_MS));
-        if fresh && !cwd_changed {
+        if fresh {
             return;
         }
         self.sessions_col.last_refresh = Some(Instant::now());
@@ -71,9 +98,12 @@ impl App {
         let rev = self.sessions_col.rev.clone();
         let proxy = self.proxy.clone();
         let scope_all = self.sessions_col.scope_all;
+        let generation = self.sessions_col.generation.clone();
+        let requested = generation.load(Relaxed);
         std::thread::spawn(move || {
             let mut next = match (scope_all, cwd.as_deref()) {
-                (true, _) | (false, None) => kasa_socket::sessions::recent_all_sessions(40),
+                (true, _) => kasa_socket::sessions::recent_all_sessions(40),
+                (false, None) => Vec::new(),
                 (false, Some(p)) => kasa_socket::sessions::recent_sessions_here(p, 40),
             };
             // 누가 맡았던 대화인가. 스폰이 이미 남기고 있는 세션→캐릭터 표를 그대로
@@ -115,13 +145,21 @@ impl App {
             let key = |v: &[kasa_socket::backend::RecentSession]| {
                 v.iter()
                     .map(|s| {
-                        (s.harness.clone(), s.id.clone(), s.mtime, s.student.clone(), s.label.clone())
+                        (
+                            s.harness.clone(),
+                            s.id.clone(),
+                            s.mtime,
+                            s.student.clone(),
+                            s.label.clone(),
+                            s.preview.clone(),
+                            s.cwd.clone(),
+                        )
                     })
                     .collect::<Vec<_>>()
             };
             let changed = match snap.lock() {
                 Ok(mut g) => {
-                    let differs = key(&g) != key(&next);
+                    let differs = generation.load(Relaxed) == requested && key(&g) != key(&next);
                     if differs {
                         *g = next;
                     }
@@ -132,81 +170,72 @@ impl App {
             busy.store(false, Relaxed);
             if changed {
                 rev.fetch_add(1, Relaxed);
-                let _ = proxy.send_event(UserEvent::Redraw);
             }
+            let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
 
     /// 활성 pane 의 cwd. 「이 방」범위가 어느 프로젝트를 뜻하는지의 기준이다.
     /// MCP 탭도 같은 기준을 쓴다 — claude 쪽 꺼짐이 폴더마다 다르다.
     pub(crate) fn active_pane_cwd(&self) -> Option<std::path::PathBuf> {
-        let active = self.ws.lock().ok().and_then(|w| w.active_pane.as_deref().map(|pane| w.active_tab_pid(pane)))?;
-        self.pane_view_cwd.get(&active).or_else(|| self.pane_cwd_cache.get(&active)).cloned()
+        let active = self
+            .ws
+            .lock()
+            .ok()
+            .and_then(|w| w.active_pane.as_deref().map(|pane| w.active_tab_pid(pane)))?;
+        self.pane_view_cwd
+            .get(&active)
+            .or_else(|| self.pane_cwd_cache.get(&active))
+            .cloned()
     }
 
-    /// 세션 기록 탭의 클릭. 처리했으면 `true` — 호출부가 거기서 멈춘다.
     pub(crate) fn sessions_col_click(&mut self, x: f32, y: f32) -> bool {
-        let inside = |r: &(f32, f32, f32, f32)| {
-            x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
-        };
-        if let Some(r) = self.sessions_col.refresh_rect {
-            if inside(&r) {
-                // 손으로 새로 고침 — 주기 게이트를 풀어 다음 pump 가 바로 돈다.
-                self.sessions_col.last_refresh = None;
-                return true;
-            }
+        let action = self
+            .sessions_col
+            .actions
+            .iter()
+            .find(|(_, r)| inside((x, y), r))
+            .map(|(a, _)| a.clone());
+        if let Some(action) = action {
+            self.sessions_col.keyboard_focus = None;
+            self.sessions_col_action(action);
+            return true;
         }
-        for (all, r) in self.sessions_col.scope_rects.clone() {
-            if inside(&r) {
+        false
+    }
+
+    fn sessions_col_action(&mut self, action: Action) {
+        use Action::*;
+        match action {
+            Mode(retained) => {
+                self.sessions_col.retained_mode = retained;
+                self.sessions_col.scroll = 0.0;
+                self.sessions_col.confirm_discard = None;
+            }
+            Scope(all) => {
                 if self.sessions_col.scope_all != all {
                     self.sessions_col.scope_all = all;
-                    self.sessions_col.scroll = 0.0;
                     self.sessions_col.last_refresh = None;
+                    self.pump_sessions_col();
                 }
-                return true;
             }
-        }
-        // ── 되살리기 ── (Info 탭에서 옮겨 온 것. 규칙은 그대로다.)
-        if self.sessions_col.closed_sec_rect.is_some_and(|r| inside(&r)) {
-            self.sessions_col.closed_collapsed = !self.sessions_col.closed_collapsed;
-            return true;
-        }
-        // × → 목록에서 지우고 프로세스도 끈다. 줄 자체보다 먼저 본다 — × 는 그 줄
-        // 위에 얹혀 있어, 순서가 반대면 끄려던 것이 되살아난다.
-        if let Some(idx) = self
-            .sessions_col
-            .closed_kill_rects
-            .iter()
-            .find(|(_, r)| inside(r))
-            .map(|(i, _)| *i)
-        {
-            // 지우기 **전에** 지금 높이를 잡아 둔다 — 항목이 빠지면 본문이 줄고
-            // 스크롤이 그만큼 끌려 올라와, 다음 × 가 손가락 밑에서 달아난다.
-            self.freeze_closing(CloseFreezeKind::Info(self.sessions_col.content_h));
-            self.discard_closed_pane_at(idx);
-            return true;
-        }
-        if let Some(idx) = self
-            .sessions_col
-            .closed_rects
-            .iter()
-            .find(|(_, r)| inside(r))
-            .map(|(i, _)| *i)
-        {
-            self.reopen_closed_pane_at(idx);
-            return true;
-        }
-        for (idx, r) in self.sessions_col.row_rects.clone() {
-            if inside(&r) {
-                if let Some(s) = self.sessions_col.view.get(idx) {
-                    // 이어가기는 소켓 백엔드가 쓰는 것과 같은 이벤트로 보낸다 —
-                    // pane 을 띄우고 프롬프트가 뜰 즈음 명령을 주입하는 절차가
-                    // handler.rs 한 곳에 있고, 그 절차를 여기서 베끼면 한쪽만
-                    // 고쳐지는 쌍이 된다.
-                    // 새 방에 연다(2026-09-08 지시 「세션탭에서 누르면 별도창으로」).
-                    // 지금 방의 활성 pane 을 쪼개면 보던 화면이 반으로 접히고, 이어
-                    // 온 대화는 원래 다른 일감이라 자기 방이 맞다. 방은 저장·복원되므로
-                    // 껐다 켜도 그대로 돌아온다.
+            Filter(filter) => {
+                self.sessions_col.filter = filter;
+                self.sessions_col.scroll = 0.0;
+                self.sessions_col.selected = None;
+            }
+            Refresh => self.sessions_col.last_refresh = None,
+            Select(harness, id) => {
+                let key = (harness, id);
+                self.sessions_col.selected =
+                    (self.sessions_col.selected.as_ref() != Some(&key)).then_some(key);
+            }
+            Resume(harness, id) => {
+                let key = (harness, id);
+                if self.sessions_col.selected.as_ref() != Some(&key) {
+                    return;
+                }
+                if let Some(s) = self.sessions_col.view.iter().find(|s| model::key(s) == key) {
                     let _ = self.proxy.send_event(UserEvent::ResumeSession {
                         id: s.id.clone(),
                         cwd: (!s.cwd.is_empty()).then(|| s.cwd.clone()),
@@ -215,14 +244,334 @@ impl App {
                         harness: s.harness.clone(),
                         reply: None,
                     });
+                    self.set_toast("새 방에서 대화를 여는 중…".into());
+                    self.sessions_col.selected = None;
+                }
+            }
+            ClosedSelect(key) => {
+                self.sessions_col.selected_closed =
+                    (self.sessions_col.selected_closed.as_ref() != Some(&key)).then_some(key);
+                self.sessions_col.confirm_discard = None;
+            }
+            Reopen(key) => {
+                if let Some(i) = model::closed_index(&self.closed_panes, &key) {
+                    self.reopen_closed_pane_at(i);
+                }
+                self.sessions_col.selected_closed = None;
+                self.sessions_col.confirm_discard = None;
+            }
+            AskDiscard(key) => self.sessions_col.confirm_discard = Some(key),
+            CancelDiscard => self.sessions_col.confirm_discard = None,
+            Discard(key) => {
+                if self.sessions_col.confirm_discard.as_ref() != Some(&key) {
+                    return;
+                }
+                if let Some(i) = model::closed_index(&self.closed_panes, &key) {
+                    self.discard_closed_pane_at(i);
+                }
+                self.sessions_col.selected_closed = None;
+                self.sessions_col.confirm_discard = None;
+            }
+        }
+        self.sessions_col.actions.clear();
+        self.chrome_dirty = true;
+    }
+
+    pub(crate) fn sessions_panel_event(&mut self, event: &WindowEvent) -> bool {
+        if !self.git.col_visible
+            || self.info.tab != state::SideTab::Sessions
+            || self.internal_room_active_any()
+        {
+            self.sessions_col.keyboard_focus = None;
+            self.sessions_col.scroll_drag = None;
+            return false;
+        }
+        let mut scrolling = false;
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if self
+                .sessions_col
+                .scroll_track
+                .is_some_and(|r| inside(self.cursor_px, &r)) =>
+            {
+                let (_, top, _, height) = self.sessions_col.scroll_track.unwrap();
+                if let Some((ty, th)) = model::scroll_thumb(
+                    top,
+                    height,
+                    self.sessions_col.content_h,
+                    self.sessions_col.scroll,
+                ) {
+                    self.sessions_col.scroll_drag =
+                        Some(if self.cursor_px.1 >= ty && self.cursor_px.1 <= ty + th {
+                            self.cursor_px.1 - ty
+                        } else {
+                            th / 2.0
+                        });
+                    self.sessions_drag_scroll(self.cursor_px.1);
+                }
+                scrolling = true;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                scrolling = self.sessions_col.scroll_drag.take().is_some();
+            }
+            WindowEvent::CursorMoved { position, .. }
+                if self.sessions_col.scroll_drag.is_some() =>
+            {
+                self.sessions_drag_scroll((position.y / self.effective_scale() as f64) as f32);
+                scrolling = true;
+            }
+            WindowEvent::Focused(false) => {
+                self.sessions_col.scroll_drag = None;
+                self.sessions_col.keyboard_focus = None;
+            }
+            _ => {}
+        }
+        if scrolling {
+            self.sessions_col.keyboard_focus = None;
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return true;
+        }
+        if matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            }
+        ) && self.cursor_px.0 < self.git_col_x()
+        {
+            self.sessions_col.keyboard_focus = None;
+        }
+        if self.sessions_col.keyboard_focus.is_some() {
+            if let WindowEvent::Ime(ime) = event {
+                self.discard_modal_ime(ime);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
                 return true;
             }
         }
-        false
+        let WindowEvent::KeyboardInput { event, .. } = event else {
+            return false;
+        };
+        self.sessions_panel_key(&event.logical_key, event.state.is_pressed(), event.repeat)
+    }
+
+    fn sessions_panel_key(
+        &mut self,
+        key: &winit::keyboard::Key,
+        pressed: bool,
+        repeat: bool,
+    ) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let active = self.sessions_col.keyboard_focus.is_some();
+        let entering =
+            matches!(key, Key::Named(NamedKey::Tab)) && self.cursor_px.0 >= self.git_col_x();
+        if !active && !entering {
+            return false;
+        }
+        if !active && (self.in_preedit || self.hangul.preedit().is_some()) {
+            return false;
+        }
+        if self.modifiers.super_key()
+            && matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("q"))
+        {
+            return false;
+        }
+        if !pressed {
+            return true;
+        }
+        match key {
+            Key::Named(NamedKey::Tab) => {
+                let actions = &self.sessions_col.actions;
+                if !actions.is_empty() {
+                    let index = actions
+                        .iter()
+                        .position(|(a, _)| Some(a) == self.sessions_col.keyboard_focus.as_ref());
+                    let next = match (index, self.modifiers.shift_key()) {
+                        (Some(i), true) => (i + actions.len() - 1) % actions.len(),
+                        (Some(i), false) => (i + 1) % actions.len(),
+                        (None, true) => actions.len() - 1,
+                        (None, false) => 0,
+                    };
+                    self.sessions_col.keyboard_focus = Some(actions[next].0.clone());
+                }
+            }
+            Key::Named(key @ (NamedKey::Enter | NamedKey::Space)) if !repeat => {
+                self.settings_scene.arm_activation_key(*key);
+                if let Some(action) = self.sessions_col.keyboard_focus.clone() {
+                    if self.sessions_col.actions.iter().any(|(a, _)| a == &action) {
+                        self.sessions_col_action(action);
+                    }
+                }
+            }
+            Key::Character(value) if value.as_str() == " " && !repeat => {
+                self.settings_scene.arm_activation_key(NamedKey::Space);
+                if let Some(action) = self.sessions_col.keyboard_focus.clone() {
+                    if self.sessions_col.actions.iter().any(|(a, _)| a == &action) {
+                        self.sessions_col_action(action);
+                    }
+                }
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.settings_scene.arm_activation_key(NamedKey::Escape);
+                self.sessions_col.keyboard_focus = None;
+                self.sessions_col.confirm_discard = None;
+            }
+            Key::Named(NamedKey::PageDown | NamedKey::PageUp) => {
+                let delta = self.sessions_col.body_rect.3
+                    * if matches!(key, Key::Named(NamedKey::PageUp)) {
+                        -0.8
+                    } else {
+                        0.8
+                    };
+                self.sessions_col.scroll = (self.sessions_col.scroll + delta).max(0.0);
+                self.sessions_col.keyboard_focus = Some(Action::Refresh);
+            }
+            _ => {}
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    fn sessions_drag_scroll(&mut self, y: f32) {
+        let sc = &mut self.sessions_col;
+        let (Some((_, top, _, height)), Some(grab)) = (sc.scroll_track, sc.scroll_drag) else {
+            return;
+        };
+        let Some((_, thumb_h)) = model::scroll_thumb(top, height, sc.content_h, sc.scroll) else {
+            return;
+        };
+        sc.scroll = if height > thumb_h {
+            ((y - top - grab) / (height - thumb_h)).clamp(0.0, 1.0) * (sc.content_h - height)
+        } else {
+            0.0
+        };
+        sc.actions.clear();
+    }
+
+    pub(crate) fn verify_session_history_controls(&mut self) {
+        if !crate::verification_run() {
+            return;
+        }
+        let panes = self.pty.len();
+        let room = self.active_window;
+        let click = |app: &mut App, wanted: Action| {
+            let (_, r) = app
+                .sessions_col
+                .actions
+                .iter()
+                .find(|(a, _)| a == &wanted)
+                .unwrap_or_else(|| panic!("missing history fixture action: {wanted:?}"))
+                .clone();
+            assert!(app.sessions_col_click(r.0 + r.2 / 2.0, r.1 + r.3 / 2.0));
+            app.render_frame();
+        };
+        click(self, Action::Filter(Some("claude".into())));
+        assert_eq!(self.sessions_col.filter.as_deref(), Some("claude"));
+        assert!(self
+            .sessions_col
+            .actions
+            .iter()
+            .all(|(a, _)| !matches!(a, Action::Select(h, _) if h != "claude")));
+        click(self, Action::Select("claude".into(), "fixture-1".into()));
+        assert_eq!(
+            self.sessions_col.selected,
+            Some(("claude".into(), "fixture-1".into()))
+        );
+        assert!(self.sessions_col.actions.iter().any(
+            |(a, _)| matches!(a, Action::Resume(h, id) if h == "claude" && id == "fixture-1")
+        ));
+        self.sessions_col.view.reverse();
+        self.render_frame();
+        assert_eq!(
+            self.sessions_col.selected,
+            Some(("claude".into(), "fixture-1".into()))
+        );
+        click(self, Action::Mode(true));
+        assert!(!self
+            .sessions_col
+            .actions
+            .iter()
+            .any(|(a, _)| matches!(a, Action::Resume(..))));
+        self.restore_closed_history(&serde_json::json!({"stashed_panes":[
+            {"pane_id":"%990","folder":"검증용 폴더","stashed":false,"rec":{"title":"검증용 종료된 셸"}}
+        ]}));
+        self.render_frame();
+        let closed_key = model::closed_key(self.closed_panes.last().unwrap());
+        let count = self.closed_panes.len();
+        click(self, Action::ClosedSelect(closed_key.clone()));
+        click(self, Action::AskDiscard(closed_key.clone()));
+        assert_eq!(self.closed_panes.len(), count, "asking to discard is not confirmation");
+        click(self, Action::CancelDiscard);
+        assert_eq!(self.closed_panes.len(), count);
+        click(self, Action::AskDiscard(closed_key.clone()));
+        click(self, Action::Discard(closed_key));
+        assert_eq!(self.closed_panes.len(), count - 1);
+        click(self, Action::Mode(false));
+        click(self, Action::Filter(None));
+        use winit::event::Ime;
+        use winit::keyboard::{Key, NamedKey};
+        self.sessions_col.keyboard_focus = Some(Action::Refresh);
+        assert!(
+            self.sessions_panel_event(&WindowEvent::Ime(Ime::Preedit("가".into(), Some((0, 3)))))
+        );
+        assert!(self.sessions_panel_event(&WindowEvent::Ime(Ime::Commit(
+            "패널의 입력은 터미널로 보내지 않음".into()
+        ))));
+        assert!(self.preedit.is_empty() && self.os_ime_surface.is_none());
+        assert!(self.sessions_panel_key(&Key::Named(NamedKey::PageDown), true, false));
+        assert!(self.sessions_panel_key(&Key::Named(NamedKey::PageDown), true, true));
+        assert!(self.sessions_col.keyboard_focus.is_some());
+        for key in [NamedKey::Enter, NamedKey::Space, NamedKey::Escape] {
+            self.sessions_col.keyboard_focus = Some(Action::Refresh);
+            self.sessions_panel_key(&Key::Named(key), true, false);
+            assert!(self.settings_scene.consume_activation_key(key, true, true));
+            assert!(self
+                .settings_scene
+                .consume_activation_key(key, false, false));
+        }
+        self.sessions_col.keyboard_focus = Some(Action::Refresh);
+        self.sessions_panel_key(&Key::Character(" ".into()), true, false);
+        assert!(self
+            .settings_scene
+            .consume_activation_key(NamedKey::Space, true, true));
+        assert!(self
+            .settings_scene
+            .consume_activation_key(NamedKey::Space, false, false));
+        self.sessions_col.keyboard_focus = None;
+        self.cursor_px.0 = self.git_col_x() + 30.0;
+        let _ = self.hangul.feed('ㄱ');
+        let _ = self.hangul.feed('ㅏ');
+        let composing = self.hangul.preedit();
+        assert!(composing.is_some());
+        assert!(!self.sessions_panel_key(&Key::Named(NamedKey::Tab), true, false));
+        assert_eq!(self.hangul.preedit(), composing);
+        self.discard_modal_ime(&Ime::Disabled);
+        self.sessions_col.keyboard_focus = None;
+        self.sessions_col.scroll = 0.0;
+        self.render_frame();
+        assert_eq!(
+            panes,
+            self.pty.len(),
+            "browsing history must not launch a session"
+        );
+        assert_eq!(room, self.active_window);
+        eprintln!("[session-probe] PASS history filter, selection, reorder, modes, confirmed discard, IME, held keys, Hangul and no launch while browsing");
     }
 }
-
 /// 하네스별 색. 테마 강조색에서 파생해 라이트/다크·강조색 변경을 따라간다 —
 /// 고정 RGB 로 박으면 테마를 바꿨을 때 이 세 줄만 남의 색이 된다.
 fn harness_color(harness: &str) -> [u8; 4] {
@@ -242,522 +591,8 @@ fn harness_icon(harness: &str) -> &'static str {
     }
 }
 
-/// `mtime`(unix 초) → "12분 전". 목록을 훑는 눈이 찾는 건 절대 시각이 아니라
-/// "얼마나 최근인가"다.
-fn ago(mtime: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let d = now.saturating_sub(mtime);
-    match d {
-        0..=59 => "방금".to_string(),
-        60..=3599 => format!("{}분 전", d / 60),
-        3600..=86399 => format!("{}시간 전", d / 3600),
-        _ => format!("{}일 전", d / 86400),
-    }
-}
-
-/// 경로의 마지막 한 칸(프로젝트 이름). 전체 경로는 칼럼 폭에서 어차피 잘려
-/// 앞부분만 남는데, 그 앞부분(`/Users/…`)은 어느 행이나 똑같아 아무것도 구분해
-/// 주지 않는다.
-fn tail(path: &str) -> &str {
-    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
-}
-
-/// 세션 기록 본문. `App` 메서드가 아니라 자유 함수인 건 `draw_info_col` 과 같은
-/// 빌림 문제 때문이다 — 호출부가 이미 `self.gpu.as_mut()` 를 쥐고 있어 `self` 를
-/// 통째로 다시 빌릴 수 없다.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_sessions_col(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    sc: &mut state::SessionsColState,
-    // 되살리기 대기 중인 pane(최근이 뒤). 되살릴 게 있을 때만 나타나는 섹션이다 —
-    // 되돌릴 수 있다는 걸 알리지 않으면 ⌘⇧T 는 아는 사람만 쓰는 기능이 된다.
-    closed: &[crate::ClosedPane],
-    x: f32,
-    w: f32,
-    top: f32,
-    bottom: f32,
-    // 되살리기 × 를 연달아 누르는 동안 붙잡아 둘 본문 높이. None = 평소.
-    frozen_content: Option<f32>,
-) {
-    let x0 = x + 14.0;
-    let right = x + w - 12.0;
-    // 행 왼쪽 거터에 학생 얼굴이 앉고 텍스트 세 줄은 그만큼 들여쓴다. 머리(칩
-    // 줄)와 빈 목록 안내는 거터가 없어 `x0` 을 그대로 쓴다.
-    // 좁은 칼럼에선 거터를 한 단 좁힌다 — 얼굴은 알아볼 만큼만 남기고 그 차이를
-    // 제목에 준다. 이 칼럼에서 6px 은 한글 반 글자다.
-    let narrow = w < GIT_DENSE_COMPACT;
-    let face_sz = if narrow { 19.0_f32 } else { 22.0 };
-    let icon_x = x + if narrow { 7.0 } else { 9.0 };
-    let text_x = icon_x + face_sz + 4.0;
-    let avail = (right - text_x).max(0.0);
-    sc.row_rects.clear();
-    sc.scope_rects.clear();
-    sc.refresh_rect = None;
-    sc.closed_rects.clear();
-    sc.closed_kill_rects.clear();
-    sc.closed_sec_rect = None;
-    let hit = |r: &(f32, f32, f32, f32)| {
-        cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
-    };
-
-    // ── 범위 칩 + 새로고침 (스크롤 밖 고정) ──
-    // 목록의 대상이 무엇인지는 늘 보여야 한다. 스크롤 안에 두면 기록이 몇 개만
-    // 쌓여도 "지금 보는 게 이 방인가 전부인가"가 화면 밖으로 밀린다.
-    let mut cx = x0;
-    let chip_y = top + 6.0;
-    for (all, label) in [(false, "이 방"), (true, "전체")] {
-        let tw = g.measure_chrome_text(label, 11.0, false);
-        let r = (cx, chip_y, tw + 16.0, 20.0);
-        let on = sc.scope_all == all;
-        let hov = hit(&r);
-        g.hover_pointer |= hov;
-        round_rect(
-            g,
-            r.0,
-            r.1,
-            r.2,
-            r.3,
-            theme::radius_sm(),
-            match (on, hov) {
-                (true, _) => theme::with_alpha(theme::accent(), 0x33),
-                (false, true) => theme::surface_hover(),
-                (false, false) => theme::surface(),
-            },
-        );
-        g.draw_text(
-            r.0 + 8.0,
-            r.1 + 4.0,
-            label,
-            gpu::DrawOpts {
-                font_size: 11.0,
-                color: if on { theme::text() } else { theme::text_mute() },
-                bold: on,
-                italic: false,
-            },
-        );
-        sc.scope_rects.push((all, r));
-        cx += r.2 + 6.0;
-    }
-    {
-        let r = (right - 18.0, chip_y + 1.0, 18.0, 18.0);
-        let hov = hit(&r);
-        g.hover_pointer |= hov;
-        g.queue_icon(
-            "rotate-cw",
-            r.0,
-            r.1,
-            15.0,
-            if hov { theme::text() } else { theme::text_mute() },
-        );
-        sc.refresh_rect = Some(r);
-    }
-
-    // ── 목록 ──
-    let body_top = top + HEAD_H;
-    let vis_h = (bottom - body_top).max(0.0);
-    sc.body_rect = (x, body_top, w, vis_h);
-    let rows = sc.view.len();
-    // 되살릴 게 없으면 묶음 머리조차 안 그린다 — 늘 비어 있는 묶음이 자리를
-    // 차지하면 알려주는 게 없다.
-    let closed_h = if closed.is_empty() {
-        0.0
-    } else if sc.closed_collapsed {
-        GROUP_H + SEC_GAP
-    } else {
-        GROUP_H + closed.len() as f32 * ROW_H + SEC_GAP
-    };
-    sc.content_h = closed_h + GROUP_H + if rows == 0 { EMPTY_H } else { rows as f32 * ROW_H };
-    // 스크롤은 그리기 **전에** clamp 한다 — 나중에 하면 목록이 줄어든 프레임에서
-    // 한 번 빈 공간이 보였다가 다음 프레임에 튄다. × 를 연달아 누르는 동안엔 상한을
-    // 안 줄인다 — 줄이면 스크롤이 끌려 올라와 다음 × 가 방금 누른 자리에 없다.
-    let max_scroll = (frozen_content.unwrap_or(sc.content_h) - vis_h).max(0.0);
-    sc.scroll = sc.scroll.clamp(0.0, max_scroll);
-
-    // 본문은 여기서부터 시저로 가둔다. 스크롤로 위에 반쯤 걸친 행은 예전엔 통째로
-    // 그려져 범위 칩을 덮었다 — 「화면 밖이면 건너뛴다」로는 **반쯤** 걸친 것을 막을
-    // 수가 없기 때문이다. 루프 **밖**에서 한 번만 세운다: 안에서 세우면 행마다
-    // 세그먼트가 둘씩 쌓여 draw call 이 행 수만큼 는다.
-    g.push_clip(x, body_top, w, vis_h);
-    let mut y = body_top - sc.scroll;
-
-    // 시저는 픽셀만 자르지 호버는 안 자른다 — 잘려 안 보이는 자리의 커서는 없는
-    // 것으로 친다.
-    let ccur = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
-        Some(_) => cursor,
-        None => (f32::MIN, f32::MIN),
-    };
-    let gutter = Gutter { icon_x, text_x, face_sz, narrow };
-
-    // ── 되살리기 ── 최근 닫은 것이 위. 카드를 누르면 그것만, ⌘⇧T 는 언제나 맨 위
-    // (=가장 최근) 것을 되살린다. Info 탭에서 옮겨 왔다(2026-09-08 지시 「인포탭에
-    // 너무 많으니까 되살리기는 세션 탭으로」) — 잇고 싶은 옛 대화와 되돌리고 싶은
-    // 닫은 pane 은 같은 물음이라 한 탭에 둔다. 카드는 기록 줄과 같은 옷(얼굴·세 줄)
-    // 이되 강조색 띠를 둘러 갈린다(같은 날 지시 「둘이 시각적으로 구분되게」).
-    if !closed.is_empty() {
-        let hr = draw_group_head(g, ccur, "되살리기", closed.len(), true, Some(sc.closed_collapsed), x, x0, w, right, y);
-        sc.closed_sec_rect = g.clip_hit(hr);
-        y += GROUP_H;
-        if !sc.closed_collapsed {
-            for (i, c) in closed.iter().enumerate().rev() {
-                if g.clip_visible(x, y, w, ROW_H) {
-                    let newest = i + 1 == closed.len();
-                    if let Some(br) = draw_closed_card(g, ccur, c, newest, &gutter, x, w, right, y) {
-                        if let Some(br) = g.clip_hit(br) {
-                            sc.closed_kill_rects.push((i, br));
-                        }
-                    }
-                }
-                if let Some(hr) = g.clip_hit((x, y, w, ROW_H)) {
-                    sc.closed_rects.push((i, hr));
-                }
-                y += ROW_H;
-            }
-        }
-        y += SEC_GAP;
-    }
-
-    // ── 기록 ── 머리는 늘 선다. 되살리기가 위에 있을 때 어디서부터가 지난 대화인지
-    // 눈이 갈라야 하고, 없을 때도 이 목록이 무엇인지 한 줄은 있어야 한다.
-    draw_group_head(g, ccur, "기록", rows, false, None, x, x0, w, right, y);
-    y += GROUP_H;
-
-    if rows == 0 {
-        g.draw_text(
-            x0,
-            y + 12.0,
-            if sc.scope_all { "기록이 없다" } else { "이 방에 기록이 없다" },
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: theme::text_mute(),
-                bold: false,
-                italic: false,
-            },
-        );
-        g.draw_text(
-            x0,
-            y + 34.0,
-            if sc.scope_all {
-                "+ 새 방에서 claude나 codex를 시작하면 기록이 생겨요"
-            } else {
-                "전체를 눌러 다른 방 기록도 확인하세요"
-            },
-            gpu::DrawOpts {
-                font_size: 10.5,
-                color: theme::text_dim(),
-                bold: false,
-                italic: false,
-            },
-        );
-        g.pop_clip();
-        return;
-    }
-
-    for (i, s) in sc.view.iter().enumerate() {
-        let row_bottom = y + ROW_H;
-        // 완전히 밖인 행만 건너뛴다(컬링). 반쯤 걸친 행은 그리고, 삐져나온 픽셀은
-        // 시저가 자른다 — 컬링은 클리핑이 아니다. 경계를 손으로 다시 쓰지 않고
-        // 클립에게 묻는 건, 그래야 클립을 옮겼을 때 컬링이 따라오기 때문이다.
-        if !g.clip_visible(x, y, w, ROW_H) {
-            y = row_bottom;
-            continue;
-        }
-        let r = (x, y, w, ROW_H);
-        // 시저는 픽셀만 자르지 클릭은 안 자른다. 잘려 안 보이는 부분이 눌리면
-        // 엉뚱한 세션이 열리므로, 눌리는 자리는 클립과의 교집합이어야 한다.
-        let Some(hitr) = g.clip_hit(r) else {
-            y = row_bottom;
-            continue;
-        };
-        let hov = hit(&hitr);
-        g.hover_pointer |= hov;
-        if hov {
-            g.rect(r.0, r.1, r.2, r.3, theme::surface_hover());
-        }
-        // 거터는 **누가 맡았던 대화인가**를 먼저 말한다(2026-08-15 지시 「세션탭에서도
-        // 학생프사 나오게」). 목록을 훑는 눈이 찾는 게 그거라서다 — 라벨은 무엇을
-        // 시켰는지만 말하고, 같은 일을 여럿이 나눠 한 날에는 그것만으로 안 갈린다.
-        //
-        // 하네스 로고는 없애지 않고 얼굴 오른쪽 아래에 겹친다(2026-08-11 지적으로
-        // 들어온 것이라 뺄 수 없다). 나란히 두면 거터가 두 배가 되고, 이 칼럼은
-        // 좁아서 그 폭이 곧 잘리는 라벨이다.
-        let face = !s.student.is_empty()
-            && sprites::draw_student_face(g, &s.student, icon_x, y + (ROW_H - face_sz) / 2.0, face_sz);
-        if face {
-            // 얼굴 위에 그대로 얹으면 그림과 로고가 섞여 둘 다 안 읽힌다 — 밑에
-            // 판을 깔아 로고만 남긴다.
-            // 얼굴 상자 **안쪽**에 붙인다 — 밖으로 내밀면 그만큼 라벨과의 사이가
-            // 좁아지고, 이 칼럼에서 2px 는 글자 한 칸이다.
-            let bs = if narrow { 11.0 } else { 13.0 };
-            let bx = icon_x + face_sz - bs;
-            let by = y + (ROW_H - face_sz) / 2.0 + face_sz - bs;
-            round_rect(g, bx, by, bs, bs, bs / 2.0, theme::panel_bg());
-            g.queue_icon(
-                harness_icon(&s.harness),
-                bx + 1.5,
-                by + 1.5,
-                bs - 3.0,
-                harness_color(&s.harness),
-            );
-        } else {
-            // 매핑이 없는 옛 세션. 짐작해 아무 얼굴이나 붙이면 남의 대화가 남의
-            // 얼굴로 보이므로 그 자리는 비우고, 하네스 로고만 원래 크기로 둔다.
-            g.queue_icon(
-                harness_icon(&s.harness),
-                icon_x + 3.0,
-                y + (ROW_H - 16.0) / 2.0,
-                16.0,
-                harness_color(&s.harness),
-            );
-        }
-
-        // 세 줄 다 `fit_text` 로 미리 자른다. `draw_text_clipped` 는 픽셀에서
-        // 끊어 마지막 글자가 반쪽으로 남는데, 목록은 어차피 훑는 화면이라
-        // 말줄임이 붙은 온전한 글자가 읽힌다.
-        let label = if s.label.is_empty() { s.id.as_str() } else { s.label.as_str() };
-        let label = info::fit_text(g, label, avail, 13.0, false);
-        g.draw_text(
-            text_x,
-            y + 8.0,
-            &label,
-            gpu::DrawOpts {
-                font_size: 13.0,
-                color: theme::text(),
-                bold: false,
-                italic: false,
-            },
-        );
-        if !s.preview.is_empty() {
-            let prev = info::fit_text(g, &s.preview, avail, 11.0, false);
-            g.draw_text(
-                text_x,
-                y + 25.0,
-                &prev,
-                gpu::DrawOpts {
-                    font_size: 11.0,
-                    color: theme::text_dim(),
-                    bold: false,
-                    italic: false,
-                },
-            );
-        }
-        // 메타는 한 줄로 합쳐 그린다 — 조각마다 그리면 폭이 좁을 때 어느 조각이
-        // 잘렸는지 알 수 없어 "claude · pro" 같은 꼬리가 남는다. 하네스 이름은
-        // 빠졌다: 왼쪽 로고가 같은 말을 하고, 좁은 칼럼에선 그 자리만큼 프로젝트
-        // 이름이 잘린다.
-        let meta = format!("{} · {}", ago(s.mtime), tail(&s.cwd));
-        let meta = info::fit_text(g, &meta, avail, 10.0, false);
-        g.draw_text(
-            text_x,
-            y + 41.0,
-            &meta,
-            gpu::DrawOpts {
-                font_size: 10.0,
-                color: theme::text_mute(),
-                bold: false,
-                italic: false,
-            },
-        );
-        sc.row_rects.push((i, hitr));
-        y = row_bottom;
-    }
-    g.pop_clip();
-}
-
-/// 행 왼쪽 거터의 치수 — 기록 줄과 되살리기 카드가 같은 값을 써야 얼굴이 한 줄로 선다.
-struct Gutter {
-    icon_x: f32,
-    text_x: f32,
-    face_sz: f32,
-    narrow: bool,
-}
-
 fn inside(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
-    cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
-}
-
-/// 묶음 머리 한 줄 — 왼쪽에 점·이름·개수, 접을 수 있으면 오른쪽에 화살표. `tinted` 는
-/// 되살리기 쪽(강조색 점과 옅은 띠), 아니면 흐린 점만 — 두 묶음이 같은 글씨로 나란히
-/// 서면 어디서 갈리는지 안 보인다.
-#[allow(clippy::too_many_arguments)]
-fn draw_group_head(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    label: &str,
-    count: usize,
-    tinted: bool,
-    collapsed: Option<bool>,
-    x: f32,
-    x0: f32,
-    w: f32,
-    right: f32,
-    y: f32,
-) -> (f32, f32, f32, f32) {
-    let r = (x, y, w, GROUP_H);
-    let hov = collapsed.is_some() && inside(cursor, &r);
-    g.hover_pointer |= hov;
-    if tinted {
-        g.rect(x, y, w, GROUP_H, theme::with_alpha(theme::accent(), 0x16));
-    }
-    if hov {
-        g.rect(x, y, w, GROUP_H, theme::surface_hover());
-    }
-    let dot = if tinted { theme::accent() } else { theme::text_dim() };
-    round_rect(g, x0, y + GROUP_H / 2.0 - 3.0, 6.0, 6.0, 3.0, dot);
-    let ink = if tinted { theme::text() } else { theme::text_mute() };
-    g.draw_text(
-        x0 + 12.0,
-        y + 5.0,
-        label,
-        gpu::DrawOpts { font_size: 11.0, color: ink, bold: true, italic: false },
-    );
-    let lw = g.measure_chrome_text(label, 11.0, true);
-    g.draw_text(
-        x0 + 12.0 + lw + 6.0,
-        y + 5.5,
-        &count.to_string(),
-        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
-    );
-    if let Some(c) = collapsed {
-        g.queue_icon(
-            if c { "chevron-right" } else { "chevron-down" },
-            right - 14.0,
-            y + (GROUP_H - 12.0) / 2.0,
-            12.0,
-            theme::text_mute(),
-        );
-    }
-    r
-}
-
-/// 되살리기 카드 — 기록 줄과 같은 세 줄(누구·어디·상태)에 강조색 띠. 셋째 줄이 이
-/// 카드만의 것이다: 프로세스가 아직 돌면 초록 점과 「돌아가는 중」(2026-09-08 지시
-/// 「되살리기에 있는 세션이 돌아가고있으면 그거 표시도」), 꺼졌으면 「꺼짐」. 커서가
-/// 올라가면 오른쪽 위에 × — 되살리기를 포기하고 프로세스까지 끄는 자리. 반환은 그
-/// × 의 rect(호버 때만). 맨 위(최신) 카드에는 ⌘⇧T 표시.
-#[allow(clippy::too_many_arguments)]
-fn draw_closed_card(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    c: &crate::ClosedPane,
-    newest: bool,
-    gutter: &Gutter,
-    x: f32,
-    w: f32,
-    right: f32,
-    y: f32,
-) -> Option<(f32, f32, f32, f32)> {
-    let row = (x, y, w, ROW_H);
-    let hov = inside(cursor, &row);
-    g.hover_pointer |= hov;
-    g.rect(x, y, w, ROW_H, theme::with_alpha(theme::accent(), 0x0E));
-    if hov {
-        g.rect(x, y, w, ROW_H, theme::surface_hover());
-    }
-    // 왼쪽 띠 — 기록 줄엔 없는 것. 목록을 훑는 눈이 「이건 되돌리는 카드」를 색으로 안다.
-    g.rect(x, y + 4.0, 3.0, ROW_H - 8.0, theme::with_alpha(theme::accent(), 0xB0));
-
-    let mut kill = None;
-    let mut right = right;
-    if hov {
-        let br = (right - 16.0, y + 5.0, 16.0, 16.0);
-        let bhov = inside(cursor, &br);
-        g.hover_pointer |= bhov;
-        if bhov {
-            round_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm(), theme::with_alpha(theme::danger(), 0x33));
-        }
-        g.queue_icon(
-            "x",
-            br.0 + 3.0,
-            br.1 + 3.0,
-            10.0,
-            if bhov { theme::danger() } else { theme::text_mute() },
-        );
-        kill = Some(br);
-        right = br.0 - 6.0;
-    }
-
-    // 거터 — 학생 얼굴, 없으면 터미널 글리프. 얼굴엔 기록 줄처럼 하네스 로고를 겹친다.
-    let harness = c.rec.get("was_agent").and_then(|v| v.as_str()).unwrap_or("");
-    let fy = y + (ROW_H - gutter.face_sz) / 2.0;
-    let face = !c.character.is_empty()
-        && sprites::draw_student_face(g, &c.character, gutter.icon_x, fy, gutter.face_sz);
-    if face {
-        if !harness.is_empty() {
-            let bs = if gutter.narrow { 11.0 } else { 13.0 };
-            let bx = gutter.icon_x + gutter.face_sz - bs;
-            let by = fy + gutter.face_sz - bs;
-            round_rect(g, bx, by, bs, bs, bs / 2.0, theme::panel_bg());
-            g.queue_icon(harness_icon(harness), bx + 1.5, by + 1.5, bs - 3.0, harness_color(harness));
-        }
-    } else {
-        g.queue_icon(
-            "terminal",
-            gutter.icon_x + 3.0,
-            y + (ROW_H - 16.0) / 2.0,
-            16.0,
-            theme::text_mute(),
-        );
-    }
-
-    let avail = (right - gutter.text_x).max(0.0);
-    let name = if c.character.is_empty() { c.pane_id.clone() } else { c.character.clone() };
-    let title = c.rec.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let label = if title.is_empty() { name } else { format!("{name} · {title}") };
-    let label = info::fit_text(g, &label, avail, 13.0, false);
-    g.draw_text(
-        gutter.text_x,
-        y + 8.0,
-        &label,
-        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
-    );
-    let mut place = c.folder.clone();
-    if !place.is_empty() {
-        place.push_str(" · ");
-    }
-    place.push_str(&c.pane_id);
-    let place = info::fit_text(g, &place, avail, 11.0, false);
-    g.draw_text(
-        gutter.text_x,
-        y + 25.0,
-        &place,
-        gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
-    );
-    // 셋째 줄 — 상태. 도는 것은 되돌리면 그 자리 그대로고, 꺼진 것은 대화 파일로 다시 띄운다.
-    let kbd = newest.then_some("\u{2318}\u{21E7}T");
-    let kbd_w = kbd.map_or(0.0, |k| g.measure_chrome_text(k, 10.0, false) + 8.0);
-    let (dot, ink, text) = if c.alive {
-        (Some(theme::success()), theme::success(), "돌아가는 중 · 누르면 되돌린다")
-    } else {
-        (None, theme::text_mute(), "꺼짐 · 누르면 다시 띄운다")
-    };
-    let retained_status = c.retention_label().map(|reason| format!("{reason} · {text}"));
-    let text = retained_status.as_deref().unwrap_or(text);
-    let mut sx = gutter.text_x;
-    if let Some(col) = dot {
-        round_rect(g, sx, y + 44.5, 6.0, 6.0, 3.0, col);
-        sx += 10.0;
-    }
-    let status = info::fit_text(g, text, (right - kbd_w - sx).max(0.0), 10.0, false);
-    g.draw_text(
-        sx,
-        y + 41.0,
-        &status,
-        gpu::DrawOpts { font_size: 10.0, color: ink, bold: false, italic: false },
-    );
-    if let Some(k) = kbd {
-        let kw = g.measure_chrome_text(k, 10.0, false);
-        g.draw_text(
-            right - kw,
-            y + 41.0,
-            k,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-        );
-    }
-    kill
+    cursor.0 >= r.0 && cursor.0 < r.0 + r.2 && cursor.1 >= r.1 && cursor.1 < r.1 + r.3
 }
 
 #[cfg(test)]
@@ -790,7 +625,9 @@ mod harness_icon_tests {
             let svg = GpuRenderer::icon_svg(name).expect("등록된 아이콘");
             let buf = GpuRenderer::rasterize_icon(svg, PX).expect("래스터");
             let alpha = |x: u32, y: u32| buf[((y * PX + x) * 4 + 3) as usize];
-            let inked = (0..PX * PX).filter(|i| buf[(*i as usize) * 4 + 3] > 8).count();
+            let inked = (0..PX * PX)
+                .filter(|i| buf[(*i as usize) * 4 + 3] > 8)
+                .count();
             let ratio = inked as f32 / (PX * PX) as f32;
             assert!(
                 (0.05..0.9).contains(&ratio),

@@ -3222,6 +3222,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if main_window && self.main_pointer_modal() { self.share.pending_search_commit = false; }
         if main_window && !self.main_pointer_modal() && self.share_panel_event(&event) { return; }
+        if main_window && !self.main_pointer_modal() && self.sessions_panel_event(&event) { return; }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -7285,8 +7286,27 @@ impl ApplicationHandler<UserEvent> for App {
                     if matches!(event.state, ElementState::Pressed) {
                         use winit::keyboard::{Key, NamedKey};
                         match event.logical_key {
-                            Key::Named(NamedKey::Enter) => {
-                                self.restore_dialog_pick(RestoreBtn::Restore);
+                            Key::Named(NamedKey::Tab) => {
+                                let choices = [RestoreBtn::Restore, RestoreBtn::Fresh, RestoreBtn::Dismiss];
+                                let current = self.restore_focus.and_then(|b| choices.iter().position(|c| *c == b));
+                                let next = match (current, self.modifiers.shift_key()) {
+                                    (Some(i), true) => (i + 2) % 3,
+                                    (Some(i), false) => (i + 1) % 3,
+                                    (None, true) => 2,
+                                    (None, false) => 0,
+                                };
+                                self.restore_focus = Some(choices[next]);
+                            }
+                            Key::Named(NamedKey::Enter) if !event.repeat => {
+                                self.restore_dialog_pick(self.restore_focus.unwrap_or(RestoreBtn::Restore));
+                            }
+                            Key::Named(NamedKey::Space) if !event.repeat && self.restore_focus.is_some() => {
+                                self.settings_scene.arm_activation_key(NamedKey::Space);
+                                self.restore_dialog_pick(self.restore_focus.unwrap());
+                            }
+                            Key::Character(ref value) if value.as_str() == " " && !event.repeat && self.restore_focus.is_some() => {
+                                self.settings_scene.arm_activation_key(NamedKey::Space);
+                                self.restore_dialog_pick(self.restore_focus.unwrap());
                             }
                             Key::Named(NamedKey::Escape) => {
                                 self.restore_dialog_pick(RestoreBtn::Dismiss);
@@ -8383,6 +8403,7 @@ impl App {
         let Some(state) = self.restore_prompt.take() else {
             return;
         };
+        self.restore_focus = None;
         self.chrome_dirty = true;
         match btn {
             // 곧바로 재구성하지 않는다 — 「되살리는 중」을 한 프레임 그린 뒤에

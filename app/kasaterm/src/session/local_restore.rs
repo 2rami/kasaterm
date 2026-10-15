@@ -240,6 +240,7 @@ pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
                     .to_owned()
             };
             Some(crate::ClosedPane {
+                ui_id: crate::ClosedPane::next_ui_id(),
                 rec,
                 pane_id: text("pane_id"),
                 character: text("character"),

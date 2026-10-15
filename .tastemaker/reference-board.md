@@ -68,3 +68,15 @@ Implementation review: native release captures inspected in light/dark, compact 
 Measured native layout at 390px and UI scale 1.0: settings content width 238→342px; first content row begins at 276px. At <680px, the side panel covers the workspace and keeps the hidden terminal's full grid width. Tab/Enter, clipped targets, focus and settings dismissal: 31 runtime checks passed. Release unit groups: native UI 89, shared files 7, theme 33, cell/grid renderer 23; compact side-panel boundary 1. Physical Korean IME, Windows rendering and live authenticated remote devices were not exercised.
 
 Final input regression group: 68 passed. Fractional UI scale 125% and the pixel silhouette were captured with the analytic rounded renderer; compact shared-panel close was exercised. Global terminal overlays (cursor, selection, preedit and suggestion) are omitted while a compact side panel covers the workspace.
+
+## Restore and conversation history — 2026-10-15
+
+Design read: native recovery and history collection for daily terminal use, Operate mode; variance 3, motion 1, density 6, art direction 4. Reuse the OS surface direction above rather than a new palette. Source inspection, not an external product-screen comparison.
+
+- Existing Flutter `Look` and desktop `native_controls` establish a coherent family of filled selections, stable surfaces and distinct primary actions. Native controls are reused directly; Flutter or React components are not imported.
+- Existing transcript metadata supplies the task title, excerpt, folder and file modification time. The excerpt is called a preview: not every harness reports the last utterance.
+- Component-drawer `dialog list` search returned no native component. The data-list pattern is implemented in the existing wgpu renderer with no dependency or asset changes.
+- First viewport: recognizable saved work, not a roster of IDs. Restore shows local task previews; history separates conversations from retained panes and selection from execution.
+- Avoid repeated avatar-only chips, destructive hover-only x controls, uncontrolled card growth and listing other-device sessions as local recovery. Keep scrolling and repeated selection immediate.
+
+Geometry and interaction contract: `docs/design.md`. Visual acceptance is pending; no personal taste profile promotion.

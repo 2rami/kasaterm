@@ -1691,6 +1691,8 @@ pub(crate) struct InlineWebHost {
 }
 
 pub(crate) struct ClosedPane {
+    // Pane numbers can be reused while an old row's confirmation is still on screen.
+    pub(crate) ui_id: u64,
     /// `restore_leaf` 가 먹는 레코드(`layout_to_json` 의 leaf 본문).
     pub(crate) rec: serde_json::Value,
     /// 닫힌 pane 의 원래 id — 인포 줄에 그대로 뜬다(`%3`).
@@ -5502,6 +5504,7 @@ struct App {
     /// awaiting the user's 복원/새로 시작 decision. While `Some`, a modal is
     /// painted over the fresh session and swallows input.
     restore_prompt: Option<serde_json::Value>,
+    restore_focus: Option<RestoreBtn>,
     /// 복원을 누른 뒤 실제 재구성까지의 짧은 유예 — `(저장본, 시작할 시각)`.
     ///
     /// 재구성은 pane 마다 PTY 를 띄우느라 수 초간 GUI 스레드를 잡는다. 그동안
@@ -6305,6 +6308,7 @@ impl App {
             confirm_native: false,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
+            restore_focus: None,
             restore_applying: None,
             restore_progress: None,
             restore_retry_rect: None,
