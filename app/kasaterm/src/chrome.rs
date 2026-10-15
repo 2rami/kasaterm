@@ -1125,10 +1125,6 @@ impl App {
         let still_there = if self.close_freeze.sidebar_scroll.is_some() {
             let w = self.tab_strip_w();
             w > 0.0 && cx < w && cy > TITLE_HEIGHT
-        } else if self.close_freeze.info_content.is_some() {
-            self.info
-                .panel_rect
-                .is_some_and(|(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
         } else if let Some((pane, _)) = self.close_freeze.tab_slots.as_ref() {
             // 탭 알약 사이 틈에서 녹지 않게 좌우로 조금 넓혀 본다. 그 pane 의 탭이
             // 하나도 안 남았으면 자연히 false 라 그때 녹는다.
@@ -1149,7 +1145,6 @@ impl App {
         self.close_freeze.thaw();
         match what {
             CloseFreezeKind::Sidebar(px) => self.close_freeze.sidebar_scroll = Some(px),
-            CloseFreezeKind::Info(content) => self.close_freeze.info_content = Some(content),
             CloseFreezeKind::Tabs(pane, slots) => self.close_freeze.tab_slots = Some((pane, slots)),
         }
         self.close_freeze.since = Some(Instant::now());

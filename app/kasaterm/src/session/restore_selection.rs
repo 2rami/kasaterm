@@ -4,6 +4,8 @@ use serde_json::Value;
 pub(crate) struct Row {
     pub title: String,
     pub kind: String,
+    pub character: String,
+    pub icon: &'static str,
     pub folder: String,
     pub identity: String,
     pub detail: String,
@@ -69,9 +71,10 @@ impl Plan {
                 }
                 let name = text(node, "restore_label").map(str::to_owned).or_else(|| {
                     plan.rows.get(start).and_then(|row| {
-                        std::path::Path::new(&row.folder)
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
+                        row.folder
+                            .rsplit(['/', '\\'])
+                            .find(|s| !s.is_empty())
+                            .map(str::to_owned)
                     })
                 });
                 plan.groups.push(Group {
@@ -92,6 +95,7 @@ impl Plan {
         if let Some(rec) = node.get("leaf") {
             for (tab, rec) in super::local_restore::surfaces(rec).enumerate() {
                 let agent = agent_kind(rec);
+                let item = super::restore_dialog::Item::from_record(rec, agent.is_some());
                 let kind = match agent {
                     Some("claude") => "Claude".into(),
                     Some("codex") => "Codex".into(),
@@ -106,9 +110,7 @@ impl Plan {
                     .or_else(|| rec.get("server").and_then(|s| text(s, "name")))
                     .map(str::to_owned)
                     .unwrap_or_else(|| {
-                        let project = std::path::Path::new(&folder)
-                            .file_name()
-                            .map(|s| s.to_string_lossy());
+                        let project = folder.rsplit(['/', '\\']).find(|s| !s.is_empty());
                         project
                             .map(|p| format!("{p} · {kind}"))
                             .unwrap_or_else(|| kind.clone())
@@ -135,6 +137,8 @@ impl Plan {
                 self.rows.push(Row {
                     title,
                     kind,
+                    character: item.character,
+                    icon: item.icon,
                     folder,
                     identity,
                     detail: details.join(" · "),
@@ -272,12 +276,28 @@ mod tests {
         original["stashed_panes"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"rec":{"pane_id":"%1","surface_key":"one"},"stashed":true}));
+            .push(json!({"rec":{"pane_id":"%1","surface_key":"one","session_id":"session-one"},"stashed":true}));
         let result = choose(original, &[4]);
         assert_eq!(Plan::new(&result).rows[0].title, "Design notes");
         assert!(result["sessions"][0]["windows"][0]["leaf"]
             .get("title")
             .is_none());
         assert_eq!(result["stashed_panes"].as_array().unwrap().len(), 6);
+    }
+    #[test]
+    fn reused_surface_with_another_conversation_keeps_both_histories() {
+        let mut original = snapshot();
+        original["stashed_panes"].as_array_mut().unwrap().push(json!({
+            "rec":{"pane_id":"%1","surface_key":"one","session_id":"older-conversation"},"stashed":true
+        }));
+        let result = choose(original, &[4]);
+        let stash = result["stashed_panes"].as_array().unwrap();
+        assert_eq!(stash.len(), 7);
+        assert!(stash
+            .iter()
+            .any(|e| e["rec"]["session_id"] == "older-conversation"));
+        assert!(stash
+            .iter()
+            .any(|e| e["rec"]["session_id"] == "session-one"));
     }
 }

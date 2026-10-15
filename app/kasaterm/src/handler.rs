@@ -3223,6 +3223,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if main_window && self.main_pointer_modal() { self.share.pending_search_commit = false; }
         if main_window && !self.main_pointer_modal() && self.share_panel_event(&event) { return; }
+        if main_window && !self.main_pointer_modal() && self.sessions_panel_event(&event) { return; }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -7287,7 +7288,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.restore_prompt.is_some() {
                     if matches!(event.state, ElementState::Pressed) {
-                        if let Some(action) = self.restore_picker.key(&event.logical_key) {
+                        if let Some(action) = self.restore_picker.key(&event.logical_key, self.modifiers.shift_key(), event.repeat) {
+                            if matches!(&event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space))
+                                || matches!(&event.logical_key, winit::keyboard::Key::Character(value) if value.as_str() == " ") {
+                                self.settings_scene.arm_activation_key(winit::keyboard::NamedKey::Space);
+                            }
                             self.restore_dialog_pick(action);
                         }
                         self.chrome_dirty = true;
@@ -7557,6 +7562,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_mirror_theme();
         self.poll_mirror_sync();
         self.keep_own_room();
+        self.reopen_view_rooms();
         self.publish_layout_feed();
         self.poll_layout_watch();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더

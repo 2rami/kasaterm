@@ -1689,6 +1689,8 @@ pub(crate) struct InlineWebHost {
 }
 
 pub(crate) struct ClosedPane {
+    // Pane numbers can be reused while an old row's confirmation is still on screen.
+    pub(crate) ui_id: u64,
     /// `restore_leaf` 가 먹는 레코드(`layout_to_json` 의 leaf 본문).
     pub(crate) rec: serde_json::Value,
     /// 닫힌 pane 의 원래 id — 인포 줄에 그대로 뜬다(`%3`).
@@ -3498,9 +3500,6 @@ struct CloseFreeze {
     /// 사이드바 방 목록: 얼어붙은 스크롤 위치(px). 방이 줄면 스크롤 한계가 작아져
     /// 목록이 아래로 당겨지는 것을 막는다.
     sidebar_scroll: Option<f32>,
-    /// 되살리기 패널: 얼어붙은 content 높이. 항목이 줄면 스크롤 상한이 같이 줄어
-    /// 목록 전체가 밀린다 — 그 상한을 붙잡아 둔다.
-    info_content: Option<f32>,
     /// 언제 얼었나. 위 주석의 시한이 여기서 재진다.
     since: Option<Instant>,
 }
@@ -3522,8 +3521,6 @@ const FREEZE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) enum CloseFreezeKind {
     /// 사이드바 방 목록. 값은 얼려 둘 스크롤 시작점.
     Sidebar(f32),
-    /// 되살리기 패널. 값은 얼려 둘 content 높이.
-    Info(f32),
     /// pane 헤더 탭 띠. `(pane id, [(x, w)])`.
     Tabs(String, Vec<(f32, f32)>),
 }
@@ -5756,6 +5753,8 @@ struct App {
     pane_last_seat: HashMap<String, (String, String)>,
     /// 거울 창 배치를 원본에 보낸 시각 — 그 직후의 당겨오기를 잠시 멈춘다.
     remote_view_push_at: Option<std::time::Instant>,
+    /// 재시작 전에 보던 다른 기기 방 — 그 기기가 답하면 다시 연다(`session/view_rooms.rs`).
+    pending_views: crate::session::view_rooms::PendingViews,
     /// 계정이 바뀐 뒤에도 **옛 계정으로 도는** pane → (떠난 계정 이름, 새 계정 이름).
     ///
     /// 계정은 프로세스 env 라 pane 이 뜰 때 박히고, 도는 프로세스는 못 바꾼다. 그래서
@@ -6381,6 +6380,7 @@ impl App {
             pane_claude_sid: HashMap::new(),
             pane_last_seat: HashMap::new(),
             remote_view_push_at: None,
+            pending_views: Default::default(),
             pane_account_stale: HashMap::new(),
             socket_backend: None,
             shared_backend: Default::default(),

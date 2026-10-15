@@ -2220,7 +2220,7 @@ pub(crate) fn draw_side_tabs(
     for (tab, label) in [
         (state::SideTab::Git, "Git"),
         (state::SideTab::Info, "Info"),
-        (state::SideTab::Sessions, "세션"),
+        (state::SideTab::Sessions, "기록"),
         (state::SideTab::Mcp, "Addon"),
     ] {
         let active = info.tab == tab;

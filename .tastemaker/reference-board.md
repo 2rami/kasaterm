@@ -69,6 +69,20 @@ Measured native layout at 390px and UI scale 1.0: settings content width 238→3
 
 Final input regression group: 68 passed. Fractional UI scale 125% and the pixel silhouette were captured with the analytic rounded renderer; compact shared-panel close was exercised. Global terminal overlays (cursor, selection, preedit and suggestion) are omitted while a compact side panel covers the workspace.
 
+## Restore and conversation history — 2026-10-15
+
+Design read: native recovery and history collection for daily terminal use, Operate mode; variance 3, motion 1, density 6, art direction 4. Reuse the OS surface direction above rather than a new palette. Source inspection, not an external product-screen comparison.
+
+- Existing Flutter `Look` and desktop `native_controls` establish a coherent family of filled selections, stable surfaces and distinct primary actions. Native controls are reused directly; Flutter or React components are not imported.
+- Existing transcript metadata supplies the task title, excerpt, folder and file modification time. The excerpt is called a preview: not every harness reports the last utterance.
+- Component-drawer `dialog list` search returned no native component. The data-list pattern is implemented in the existing wgpu renderer with no dependency or asset changes.
+- First viewport: recognizable saved work, not a roster of IDs. Restore shows local task previews; history separates conversations from retained panes and selection from execution.
+- Avoid repeated avatar-only chips, destructive hover-only x controls, uncontrolled card growth and listing other-device sessions as local recovery. Keep scrolling and repeated selection immediate.
+
+Geometry and interaction contract: `docs/design.md`. Visual acceptance is pending; no personal taste profile promotion.
+
+Native validation: release app tests pass (1,571, zero failures, two existing ignores) after integrating the common UI. Isolated 1100×760 dark/light and 640×540/720 captures were inspected. At 125% UI scale the 640×540 restore capture measures 16 logical px of outer margin and a 480×400px dialog. Runtime checks cover filtering, selection without launch, reorder identity, view switching, confirmed discard/cancel, IME consumption, held activation keys and preserving an in-progress Hangul composition. Real user conversations were not resumed. Web style/motion scanners examined zero Rust files and are not used as native validation evidence.
+
 ## Custom colors and Info follow-up — 2026-10-15
 
 The user requested arbitrary color customization and shared folders inside Info. Native release captures cover the always-visible accent HEX/HSV editor, per-statusbar color editor and Info shared files at 390px and 1280px. The compact shared list now starts at 211px (previously 173px); the extra 38px is the Info page selector and the first file remains in the initial viewport. Editors stack at narrow widths without horizontal overflow.

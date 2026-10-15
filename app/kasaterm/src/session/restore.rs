@@ -69,6 +69,7 @@ pub(crate) struct RestoreSummary {
     pub(crate) agents: usize,
     pub(crate) shells: usize,
     pub(crate) faces: Vec<String>,
+    pub(crate) items: Vec<super::restore_dialog::Item>,
 }
 
 fn summarize_restore_node(node: &serde_json::Value, summary: &mut RestoreSummary) {
@@ -81,6 +82,7 @@ fn summarize_restore_node(node: &serde_json::Value, summary: &mut RestoreSummary
             // Counts and faces must use the same local, resumable-agent evidence.
             let agent = saved_agent_marker(surface).is_some()
                 || surface["session_id"].as_str().is_some_and(|s| !s.is_empty());
+            if surface.is_object() { summary.items.push(super::restore_dialog::Item::from_record(surface, agent)); }
             if !agent {
                 summary.shells += usize::from(surface.is_object() && surface.get("web_url").is_none());
                 continue;
@@ -116,10 +118,10 @@ mod restore_summary_tests {
             {"leaf":{"character":"local-tab", "session_id":"local-session"}}
         ], "undocked":[{"leaf":{"character":"detached", "was_claude":true}}]}]});
         let summary = App::restore_summary(&state);
-        assert_eq!(summary, RestoreSummary {
-            panes: 4, agents: 3, shells: 2,
-            faces: vec!["local-tab".into(), "detached".into()],
-        });
+        assert_eq!((summary.panes, summary.agents, summary.shells), (4, 3, 2));
+        assert_eq!(summary.faces, ["local-tab", "detached"]);
+        assert_eq!(summary.items.len(), 5);
+        assert!(summary.items.iter().all(|item| !item.character.starts_with("remote")));
         assert_eq!(summary.agents, App::count_claude_panes(&state));
         assert_eq!(summary.panes, App::count_panes(&state));
     }
@@ -313,6 +315,7 @@ impl App {
         let mut original = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
         if let Some(object) = original.as_object_mut() { object.remove("restore_selection"); }
         let mut prepared = super::local_restore::state(&original);
+        self.remember_view_rooms(&prepared);
         crate::server_restore::import_pending_servers(&mut prepared);
         if let Some(selection) = selection { prepared["restore_selection"] = selection; }
         let prepared = super::restore_selection::apply(&prepared);

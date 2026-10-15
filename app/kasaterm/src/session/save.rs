@@ -280,6 +280,8 @@ impl App {
             "stashed_panes": closed_json,
             "last_used_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
             "pane_weather": self.weather_overrides_json(),
+            // 보기 창은 아래 거르기에서 빠진다 — 무엇을 보고 있었는지만 따로 남겨 재시작 뒤 다시 연다.
+            "view_rooms": self.view_rooms_json(),
         });
         if let Some(progress) = &self.restore_progress { progress.preserve_snapshot(&mut state); }
         Some(super::local_restore::state(&state))

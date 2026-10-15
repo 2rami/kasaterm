@@ -13,7 +13,6 @@ pub(super) struct Frame<'a> {
     pub git_view: &'a GitColView,
     pub repo_list: &'a [std::path::PathBuf],
     pub repo_choice: Option<&'a std::path::PathBuf>,
-    pub frozen_info: Option<f32>,
 }
 
 pub(super) struct Panels<'a> {
@@ -70,7 +69,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
                 f.w,
                 body_top,
                 bottom,
-                f.frozen_info,
             );
         }
         state::SideTab::Mcp => {

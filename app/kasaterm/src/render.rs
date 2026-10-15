@@ -1903,12 +1903,6 @@ impl App {
         // 목록 배치를 재기 **전에** 동결을 한 번 재검사한다 — 커서가 떠났거나 시한이
         // 지났으면 여기서 녹고, 그 프레임의 배치가 곧 재정렬이 된다.
         self.tick_close_freeze();
-        // 아래 `self.gpu.as_mut()` 블록 안에서는 `self` 를 다시 못 읽는다. 되살리기
-        // 패널에 넘길 동결값은 그래서 여기서 미리 뽑아 둔다.
-        let frozen_info = self
-            .close_freeze
-            .info_content
-            .filter(|_| self.close_freeze.live());
         let frozen_tabs = self
             .close_freeze
             .live()
@@ -5347,7 +5341,6 @@ impl App {
                         git_view: &git_view,
                         repo_list: &git_repo_list,
                         repo_choice: git_repo_choice.as_ref(),
-                        frozen_info,
                     },
                 );
             }
@@ -6501,10 +6494,6 @@ impl App {
                     None,
                 ); }
             }
-            // Chrome-style restore prompt: dim scrim + centered card offering to
-            // reopen the last session's panes. Queued after the confirm modal so
-            // it sits over everything at launch. [복원] rebuilds the workspace,
-            // [새로 시작] keeps the fresh session.
             if self.restore_prompt.is_some() {
                 restore_btn_hits = crate::restore_picker::paint(
                     g, &mut self.restore_picker, (win_px.0 / scale, win_px.1 / scale), self.cursor_px,

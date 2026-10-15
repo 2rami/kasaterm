@@ -271,6 +271,7 @@ pub(super) fn selected(original: &Value, chosen: &[usize]) -> Value {
             let old = &entry["rec"];
             if let Some(key) = rec.get("surface_key").and_then(Value::as_str) {
                 old.get("surface_key").and_then(Value::as_str) == Some(key)
+                    && old.get("session_id") == rec.get("session_id")
             } else {
                 !pane.is_null()
                     && old.get("pane_id") == Some(&pane)
@@ -313,6 +314,7 @@ pub(super) fn history(original: &Value) -> Vec<crate::ClosedPane> {
                     .to_owned()
             };
             Some(crate::ClosedPane {
+                ui_id: crate::ClosedPane::next_ui_id(),
                 rec,
                 pane_id: text("pane_id"),
                 character: text("character"),

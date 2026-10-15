@@ -272,7 +272,19 @@ pub(super) fn settle(list: &[Machine], failures: &HashMap<String, Failure>) {
         .filter_map(|e| entry_label(e).map(str::to_string))
         .collect();
     let Ok(mut table) = table().lock() else { return };
+    drop_merged(&mut table, list, &observed);
     apply(&mut table, &observed, failures, &routes, &unresolved_labels, boot().elapsed() >= STALE_AFTER);
+}
+
+/// 명부엔 그대로 있는데 화면 목록에서만 빠진 이름 — 같은 기기 id 로 다른 항목에 합쳐진 별칭이다
+/// (명부의 「나쵸네코」와 그 기기가 스스로 알린 「nachoneko」). 첫 바퀴엔 id 를 몰라 따로 섰다가
+/// 다음 바퀴에 합쳐지는데, 그걸 「목록에서 빠짐」으로 적으면 멀쩡한 기기의 유령이 선다.
+fn drop_merged(table: &mut Table, list: &[Machine], observed: &[Observed]) {
+    let shown: HashSet<&str> = observed.iter().map(|o| o.label.as_str()).collect();
+    for m in list.iter().filter(|m| !shown.contains(m.label.as_str())) {
+        table.listed.remove(&m.label);
+        table.links.remove(&m.label);
+    }
 }
 
 /// 잠금 밖에서 못 읽은 길 사정의 대신 — 명부만으로 아는 것.
@@ -506,6 +518,30 @@ mod tests {
         apply(&mut table, &[seen("미니", true, Some("m1")), back], &none, &HashMap::new(), &[], true);
         assert!(!table.links["손님"].gone);
         assert_eq!(table.links["손님"].events.back().unwrap().reason, "목록에 다시 들어옴 · 붙음");
+    }
+
+    #[test]
+    fn an_alias_merged_into_its_roster_entry_is_not_a_ghost() {
+        let mut table = Table::default();
+        let none = HashMap::new();
+        // 첫 바퀴: 그 기기가 알린 이름은 id 를 아직 몰라 따로 선다.
+        let mut alias = seen("nachoneko", true, None);
+        alias.guest = true;
+        apply(&mut table, &[seen("나쵸네코", true, Some("m1")), alias], &none, &HashMap::new(), &[], true);
+        // 다음 바퀴: 같은 id 로 밝혀져 목록에선 명부 이름 하나만 — 명부에는 둘 다 남아 있다.
+        let list = super::super::parse(&json!([
+            {"label": "나쵸네코", "base": "http://127.0.0.1:18795"},
+            {"label": "nachoneko", "base": "http://127.0.0.1:19011"},
+        ]));
+        let observed = [seen("나쵸네코", true, Some("m1"))];
+        drop_merged(&mut table, &list, &observed);
+        apply(&mut table, &observed, &none, &HashMap::new(), &[], true);
+        assert!(!table.links.contains_key("nachoneko"));
+        assert!(ghosts_of(&table).is_empty());
+    }
+
+    fn ghosts_of(table: &Table) -> Vec<&String> {
+        table.links.iter().filter(|(_, l)| l.gone).map(|(k, _)| k).collect()
     }
 
     #[test]

@@ -1,0 +1,15 @@
+[
+  {
+    "date": "2026-10-15",
+    "page": "native restore and conversation history",
+    "macrostructure": "App shell / recovery dialog and selectable history list",
+    "nav": "Existing native side tabs",
+    "hero": null,
+    "footer": "Explicit restore or resume action",
+    "knobs": "task-first previews; separate retained panes; selection before execution; immediate keyboard focus",
+    "brief": "Recognizable previous work using the existing KASA OS surface system",
+    "palette": "Existing theme roles; no new palette",
+    "critique": {"show_tell":4,"philosophy":5,"hierarchy":4,"specificity":5,"restraint":4,"variety":4},
+    "status": "pending-review"
+  }
+]

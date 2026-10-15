@@ -12,6 +12,7 @@ pub(crate) struct State {
     plan: Plan,
     selected: Vec<bool>,
     focus: usize,
+    control_focus: Option<RestoreBtn>,
     scroll: f32,
     list_height: f32,
 }
@@ -58,14 +59,39 @@ impl State {
         };
         self.clamp_scroll();
     }
-    pub(crate) fn key(&mut self, key: &Key) -> Option<RestoreBtn> {
+    pub(crate) fn key(&mut self, key: &Key, shift: bool, repeat: bool) -> Option<RestoreBtn> {
+        if matches!(key, Key::Named(NamedKey::Tab)) {
+            let mut choices = vec![RestoreBtn::All, RestoreBtn::Clear];
+            if self.count() > 0 {
+                choices.push(RestoreBtn::Restore);
+            }
+            choices.extend([RestoreBtn::Fresh, RestoreBtn::Dismiss]);
+            let current = self
+                .control_focus
+                .and_then(|action| choices.iter().position(|a| *a == action));
+            let index = match (current, shift) {
+                (Some(i), true) => (i + choices.len() - 1) % choices.len(),
+                (Some(i), false) => (i + 1) % choices.len(),
+                (None, true) => choices.len() - 1,
+                (None, false) => 0,
+            };
+            self.control_focus = Some(choices[index]);
+            return None;
+        }
         match key {
-            Key::Named(NamedKey::Enter) => return Some(RestoreBtn::Restore),
-            Key::Named(NamedKey::Escape) => return Some(RestoreBtn::Dismiss),
-            Key::Named(NamedKey::Space) => return Some(RestoreBtn::Toggle(self.focus)),
+            Key::Named(NamedKey::Enter) if !repeat => {
+                return Some(self.control_focus.unwrap_or(RestoreBtn::Restore))
+            }
+            Key::Named(NamedKey::Escape) if !repeat => return Some(RestoreBtn::Dismiss),
+            Key::Named(NamedKey::Space) if !repeat => {
+                return Some(self.control_focus.unwrap_or(RestoreBtn::Toggle(self.focus)))
+            }
+            Key::Character(value) if value.as_str() == " " && !repeat => {
+                return Some(self.control_focus.unwrap_or(RestoreBtn::Toggle(self.focus)))
+            }
             Key::Named(NamedKey::ArrowUp) => self.focus = self.focus.saturating_sub(1),
-            Key::Named(NamedKey::ArrowDown | NamedKey::Tab) => {
-                self.focus = (self.focus + 1).min(self.selected.len().saturating_sub(1));
+            Key::Named(NamedKey::ArrowDown) => {
+                self.focus = (self.focus + 1).min(self.selected.len().saturating_sub(1))
             }
             Key::Named(NamedKey::Home) => self.focus = 0,
             Key::Named(NamedKey::End) => self.focus = self.selected.len().saturating_sub(1),
@@ -80,6 +106,7 @@ impl State {
             }
             _ => return None,
         }
+        self.control_focus = None;
         self.reveal();
         None
     }
@@ -89,6 +116,7 @@ impl State {
                 if let Some(selected) = self.selected.get_mut(index) {
                     *selected = !*selected;
                     self.focus = index;
+                    self.control_focus = None;
                 }
             }
             RestoreBtn::Group(index) => {
@@ -96,6 +124,7 @@ impl State {
                     let all = self.selected[group.start..group.end].iter().all(|s| *s);
                     self.selected[group.start..group.end].fill(!all);
                     self.focus = group.start;
+                    self.control_focus = None;
                 }
             }
             RestoreBtn::All => self.selected.fill(true),
@@ -165,7 +194,7 @@ fn layout(viewport: (f32, f32), content: f32) -> Layout {
     let compact = available < 448.0;
     let pad = if width < 600.0 { 16.0 } else { 24.0 };
     let header = if compact { 88.0 } else { 124.0_f32 }.min(available * 0.42);
-    let footer = if compact { 60.0 } else { 84.0_f32 }.min(available * 0.28);
+    let footer = if compact { 60.0 } else { 84.0_f32 }.min(available * 0.34);
     let detail = if available >= 528.0 { 88.0 } else { 0.0 };
     let height = (header + content + detail + footer)
         .min(700.0)
@@ -221,13 +250,13 @@ fn check(g: &mut gpu::GpuRenderer, x: f32, y: f32, selected: bool, mixed: bool) 
     } else {
         theme::surface()
     };
-    g.round_rect_fill(x, y, 18.0, 18.0, 5.0, fill);
+    g.round_rect_fill(x, y, 18.0, 18.0, theme::radius_sm().min(5.0), fill);
     g.round_rect_stroke(
         x,
         y,
         18.0,
         18.0,
-        5.0,
+        theme::radius_sm().min(5.0),
         1.0,
         if selected || mixed {
             fill
@@ -301,7 +330,12 @@ pub(crate) fn paint(
     let tx = x + l.pad;
     label(
         g,
-        (tx, y + 20.0, w - l.pad * 2.0 - 40.0, 28.0),
+        (
+            tx,
+            y + if l.compact { 12.0 } else { 20.0 },
+            w - l.pad * 2.0 - 40.0,
+            28.0,
+        ),
         "이어서 할 작업을 골라주세요",
         if w < 500.0 { 18.0 } else { 22.0 },
         true,
@@ -309,7 +343,12 @@ pub(crate) fn paint(
     );
     let close = icon_button(
         g,
-        (x + w - l.pad - 28.0, y + 18.0, 28.0, 28.0),
+        (
+            x + w - l.pad - 28.0,
+            y + if l.compact { 10.0 } else { 18.0 },
+            28.0,
+            28.0,
+        ),
         cursor,
         "x",
         Style::default(),
@@ -408,7 +447,7 @@ pub(crate) fn paint(
                     theme::surface()
                 };
                 g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
-                if state.focus == i {
+                if state.focus == i && state.control_focus.is_none() {
                     g.round_rect_stroke(
                         rect.0,
                         rect.1,
@@ -420,8 +459,19 @@ pub(crate) fn paint(
                     );
                 }
                 check(g, rect.0 + 10.0, ry + 26.0, state.selected[i], false);
-                let left = rect.0 + 40.0;
-                let width = (rect.2 - 50.0).max(0.0);
+                if row.character.is_empty()
+                    || !crate::sprites::draw_student_face(
+                        g,
+                        &row.character,
+                        rect.0 + 40.0,
+                        ry + 23.0,
+                        26.0,
+                    )
+                {
+                    g.queue_icon(row.icon, rect.0 + 43.0, ry + 26.0, 20.0, theme::text_dim());
+                }
+                let left = rect.0 + 76.0;
+                let width = (rect.2 - 86.0).max(0.0);
                 label(
                     g,
                     (left, ry + 9.0, width, 18.0),
@@ -548,6 +598,11 @@ pub(crate) fn paint(
             theme::text_mute(),
         );
     }
+    for (action, rect) in &hits {
+        if state.control_focus == Some(*action) {
+            crate::native_controls::focus_ring(g, *rect);
+        }
+    }
     g.pop_clip();
     hits
 }
@@ -572,10 +627,12 @@ mod tests {
         assert_eq!(state.selection(), json!([3]));
         state.pick(RestoreBtn::Toggle(1));
         assert_eq!(state.selection(), json!([1, 3]));
-        state.key(&Key::Named(NamedKey::End));
+        state.key(&Key::Named(NamedKey::End), false, false);
         assert_eq!(state.focus, 3);
         assert!(state.scroll > 0.0);
-        let action = state.key(&Key::Named(NamedKey::Space)).unwrap();
+        let action = state
+            .key(&Key::Named(NamedKey::Space), false, false)
+            .unwrap();
         state.pick(action);
         assert_eq!(state.selection(), json!([1]));
         state.pick(RestoreBtn::All);
@@ -586,8 +643,8 @@ mod tests {
 
     #[test]
     fn responsive_geometry_keeps_list_and_actions_inside_the_card() {
-        for width in [320.0, 390.0, 640.0, 1024.0, 1920.0] {
-            for height in [240.0, 360.0, 480.0, 600.0, 900.0] {
+        for width in [280.0, 320.0, 390.0, 640.0, 1024.0, 1920.0] {
+            for height in [200.0, 240.0, 360.0, 480.0, 600.0, 900.0] {
                 for count in [1.0, 50.0] {
                     let l = layout((width, height), count * ROW_H + GROUP_H);
                     assert!(l.card.0 >= 0.0 && l.card.1 >= 0.0);
@@ -596,7 +653,8 @@ mod tests {
                     assert!(l.list.3 >= 0.0);
                     assert!(l.list.1 + l.list.3 <= l.footer.1);
                     assert!(l.footer.1 + l.footer.3 <= l.card.1 + l.card.3 + 0.01);
-                    assert!(l.list.2 >= 256.0);
+                    assert!(l.list.2 >= 216.0);
+                    assert!(l.footer.3 >= 54.0);
                 }
             }
         }
@@ -611,5 +669,33 @@ mod tests {
             Some((16.0, 180.0, 300.0, 20.0))
         );
         assert!(clipped((16.0, 210.0, 300.0, 76.0), (16.0, 100.0, 300.0, 100.0)).is_none());
+    }
+    #[test]
+    fn keyboard_controls_reverse_cycle_skip_disabled_restore_and_ignore_repeats() {
+        let mut state = state();
+        state.key(&Key::Named(NamedKey::Tab), true, false);
+        assert!(state.control_focus == Some(RestoreBtn::Dismiss));
+        state.key(&Key::Named(NamedKey::Tab), false, false);
+        assert!(state.control_focus == Some(RestoreBtn::All));
+        state.key(&Key::Named(NamedKey::Tab), false, false);
+        assert!(state.control_focus == Some(RestoreBtn::Clear));
+        let clear = state
+            .key(&Key::Named(NamedKey::Space), false, false)
+            .unwrap();
+        state.pick(clear);
+        state.key(&Key::Named(NamedKey::Tab), false, false);
+        assert!(state.control_focus == Some(RestoreBtn::Fresh));
+        assert!(state
+            .key(&Key::Named(NamedKey::Enter), false, true)
+            .is_none());
+        state.key(&Key::Named(NamedKey::ArrowDown), false, false);
+        assert!(state.control_focus.is_none());
+        assert!(state
+            .key(&Key::Named(NamedKey::Space), false, true)
+            .is_none());
+        assert!(matches!(
+            state.key(&Key::Character(" ".into()), false, false),
+            Some(RestoreBtn::Toggle(1))
+        ));
     }
 }

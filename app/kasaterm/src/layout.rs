@@ -1971,6 +1971,7 @@ impl App {
                     .to_string();
                 let window = self.window_of_pane(outer).unwrap_or(self.active_window);
                 self.push_closed_pane(crate::ClosedPane {
+                    ui_id: crate::ClosedPane::next_ui_id(),
                     rec: serde_json::Value::Null,
                     pane_id: name,
                     character: String::new(),

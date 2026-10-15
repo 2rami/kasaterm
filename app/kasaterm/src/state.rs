@@ -445,6 +445,8 @@ pub(crate) struct MachineLink {
     pub(crate) rooms: usize,
     /// 명부에서 빠져 이유만 남은 기기.
     pub(crate) gone: bool,
+    /// 재시작 전에 보던 이 기기 방 중 다시 열기를 기다리는 수(`session/view_rooms.rs`).
+    pub(crate) views: usize,
     /// 바뀐 순간들, 새 것이 앞 — (epoch ms, 붙음인가, 이유).
     pub(crate) events: Vec<(u64, bool, String)>,
 }
@@ -661,26 +663,23 @@ pub(crate) struct SessionsColState {
     /// 트리거한다(`scope_all` 일 땐 무의미하므로 비교에서 뺀다).
     pub(crate) cwd: Option<std::path::PathBuf>,
     pub(crate) scroll: f32,
-    /// 매 paint 재생성되는 hit target. 행은 `view` 인덱스로 되짚는다.
-    pub(crate) row_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    pub(crate) scope_rects: Vec<(bool, (f32, f32, f32, f32))>,
-    pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
     /// 직전 프레임의 본문 영역 — 스크롤 clamp 가 실제 그려진 높이를 알아야 한다.
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) content_h: f32,
-    /// 「되살리기」(닫아서 물러난 pane) — Info 탭에서 이리로 옮겼다(2026-09-08 지시
-    /// 「인포탭에 너무 많으니까 되살리기는 세션 탭으로」). 지난 대화를 잇는 자리와
-    /// 닫은 pane 을 되돌리는 자리는 같은 물음(「아까 그거」)이라 한 탭에 둔다.
-    pub(crate) closed_collapsed: bool,
-    /// 섹션 머리 rect — 누르면 접고 편다.
-    pub(crate) closed_sec_rect: Option<(f32, f32, f32, f32)>,
     /// 닫힌 pane 줄의 hit rect `(스택 인덱스, rect)` — 누르면 그 줄만 되살린다.
     /// 매 paint 재생성(다른 hit target 과 같은 규칙).
     pub(crate) closed_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    /// 그 줄의 × `(스택 인덱스, rect)` — 되살리기를 포기하고 **프로세스까지** 끈다.
-    /// 커서가 얹힌 줄에만 생기므로 `closed_rects` 보다 성기고, 겹치는 자리라 클릭
-    /// 판정을 먼저 받아야 한다.
-    pub(crate) closed_kill_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    pub(crate) retained_mode: bool,
+    pub(crate) filter: Option<String>,
+    pub(crate) selected: Option<(String, String)>,
+    pub(crate) selected_closed: Option<String>,
+    pub(crate) confirm_discard: Option<String>,
+    pub(crate) actions: Vec<(crate::sesscol::Action, (f32, f32, f32, f32))>,
+    pub(crate) keyboard_focus: Option<crate::sesscol::Action>,
+    pub(crate) generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) loaded_scope: Option<bool>,
+    pub(crate) scroll_track: Option<(f32, f32, f32, f32)>,
+    pub(crate) scroll_drag: Option<f32>,
 }
 
 impl Default for SessionsColState {
@@ -695,15 +694,20 @@ impl Default for SessionsColState {
             scope_all: false,
             cwd: None,
             scroll: 0.0,
-            row_rects: Vec::new(),
-            scope_rects: Vec::new(),
-            refresh_rect: None,
             body_rect: (0.0, 0.0, 0.0, 0.0),
             content_h: 0.0,
-            closed_collapsed: false,
-            closed_sec_rect: None,
             closed_rects: Vec::new(),
-            closed_kill_rects: Vec::new(),
+            retained_mode: false,
+            filter: None,
+            selected: None,
+            selected_closed: None,
+            confirm_discard: None,
+            actions: Vec::new(),
+            keyboard_focus: None,
+            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            loaded_scope: None,
+            scroll_track: None,
+            scroll_drag: None,
         }
     }
 }

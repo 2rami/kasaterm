@@ -10,6 +10,10 @@ pub(crate) enum RetainedBy {
 }
 
 impl crate::ClosedPane {
+    pub(crate) fn next_ui_id() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
     pub(crate) fn retention_label(&self) -> Option<&'static str> {
         self.stashed.then_some(match self.retained_by {
             Some(RetainedBy::User) => "직접 숨김",
@@ -103,6 +107,7 @@ impl App {
             .unwrap_or_default();
         let window = self.window_of_pane(pane).unwrap_or(self.active_window);
         self.push_closed_pane(crate::ClosedPane {
+            ui_id: crate::ClosedPane::next_ui_id(),
             rec,
             pane_id: pane.to_string(),
             character,
@@ -393,6 +398,7 @@ mod closed_pane_id_reuse_tests {
 
     fn rec(pane: &str, alive: bool, folder: &str) -> ClosedPane {
         ClosedPane {
+            ui_id: ClosedPane::next_ui_id(),
             rec: serde_json::Value::Null,
             pane_id: pane.to_string(),
             character: String::new(),
