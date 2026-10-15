@@ -92,6 +92,11 @@ fn boost_saturation(rgb: vec3<f32>, sat: f32) -> vec3<f32> {
     return clamp(mix(mono, rgb, sat), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn rounded_distance(point: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(point) - half + vec2<f32>(radius);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
@@ -153,6 +158,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas_tex, atlas_sampler, in.uv);
     // 미분은 균일 흐름에서만 부를 수 있어 갈래 밖에서 미리 잰다(테두리 갈래가 쓴다).
     let duv = fwidth(in.uv);
+    // Continuous HSV avoids hundreds of CPU-generated swatches and keeps the
+    // chosen color independent of terminal saturation and text coverage.
+    if ((in.flags & 32u) != 0u) {
+        if ((in.flags & 128u) != 0u) {
+            let half = 1.0 / max(duv, vec2<f32>(0.00001));
+            let radius = min(f32((in.flags >> 8u) & 1023u) * 0.5, min(half.x, half.y));
+            let point = in.uv * half;
+            let outer = clamp(0.5 - rounded_distance(point, half, radius), 0.0, 1.0);
+            let thickness = f32((in.flags >> 18u) & 255u) * 0.25;
+            var alpha = outer;
+            if (thickness > 0.0 && thickness < min(half.x, half.y)) {
+                let inner = clamp(0.5 - rounded_distance(point, half - vec2<f32>(thickness), max(radius - thickness, 0.0)), 0.0, 1.0);
+                alpha = max(outer - inner, 0.0);
+            }
+            return vec4<f32>(prepare_output(boost_saturation(in.fg.rgb, u.color_sat)), in.fg.a * alpha);
+        }
+        let hue_strip = (in.flags & 64u) != 0u;
+        let hue = select(in.fg.r, in.uv.x, hue_strip);
+        let saturation = select(in.uv.x, 1.0, hue_strip);
+        let value = select(1.0 - in.uv.y, 1.0, hue_strip);
+        let channels = abs(fract(vec3<f32>(hue) + vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+        let rgb = value * mix(vec3<f32>(1.0), clamp(channels - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)), saturation);
+        return vec4<f32>(prepare_output(rgb), 1.0);
+    }
     // 테두리(flags & 4 한 바퀴 · flags & 8 점선): 쿼드 전체가 둥근 사각 윤곽 하나다. uv 가 -1..1 이라
     // 1/fwidth(uv) 가 쿼드의 장치 px 반폭·반높이이고, 거기서 둥근 사각까지의 거리 d 와 윤곽 위 자리 s(왼쪽 위
     // 직선 시작에서 시계 방향 거리)를 잰다. 안팎 경계는 1px 로 부드럽게 끊는다. 모양은 상위 비트에 실려 온다

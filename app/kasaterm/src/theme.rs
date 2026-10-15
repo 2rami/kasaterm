@@ -491,7 +491,35 @@ impl Palette {
     }
 }
 
+const FROST_LIGHT: Palette = Palette {
+    surfaces: Some(PaletteSurfaces {
+        pane: [249, 249, 252, 255], header: [240, 238, 248, 255],
+        sidebar: [224, 226, 239, 255], titlebar: Some([234, 234, 244, 255]),
+        side_panel: Some([240, 241, 248, 255]),
+    }),
+    bg: [234, 234, 242, 255], fg: [37, 38, 58, 255],
+    surface: [248, 248, 252, 255], surface_hover: [226, 228, 241, 255],
+    surface_active: [212, 216, 236, 255], border: [150, 155, 179, 150],
+    text: [37, 38, 58, 255], text_dim: [80, 84, 108, 255], text_mute: [99, 103, 125, 255],
+    ..LIGHT
+};
+
+const FROST_DARK: Palette = Palette {
+    surfaces: Some(PaletteSurfaces {
+        pane: [24, 26, 43, 255], header: [34, 35, 58, 255],
+        sidebar: [30, 32, 53, 255], titlebar: Some([29, 30, 49, 255]),
+        side_panel: Some([32, 34, 55, 255]),
+    }),
+    bg: [23, 24, 43, 255], fg: [240, 240, 250, 255],
+    surface: [37, 38, 62, 255], surface_hover: [47, 49, 78, 255],
+    surface_active: [61, 64, 99, 255], border: [94, 99, 131, 150],
+    text: [240, 240, 250, 255], text_dim: [182, 184, 207, 255], text_mute: [150, 154, 182, 255],
+    ..DARK
+};
+
 pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
+    ("frost-light", "Frost Light", &FROST_LIGHT),
+    ("frost-dark", "Frost Dark", &FROST_DARK),
     ("dark", "Dark", &DARK),
     ("light", "Light", &LIGHT),
     ("graphite", "Graphite", &GRAPHITE),
@@ -1178,7 +1206,7 @@ fn apply_from_settings_inner(sync_claude_theme: bool) {
     });
     set_shape(&shape);
     set_min_contrast(s.get("min_contrast").and_then(|x| x.as_f64()).unwrap_or(2.5) as f32);
-    set_ui_font(s.get("ui_font").and_then(|x| x.as_str()).unwrap_or(""));
+    set_ui_font(s.get("ui_font").and_then(|x| x.as_str()).unwrap_or("system"));
 }
 
 // ── UI font ──────────────────────────────────────────────────────────────
@@ -1231,8 +1259,8 @@ macro_rules! f32_slot {
     };
 }
 
-f32_slot!(S_RADIUS_SM, radius_sm, 6.0);
-f32_slot!(S_RADIUS_MD, radius_md, 9.0);
+f32_slot!(S_RADIUS_SM, radius_sm, 10.0);
+f32_slot!(S_RADIUS_MD, radius_md, 16.0);
 f32_slot!(S_BORDER_W, border_w, 1.0);
 f32_slot!(S_SHADOW_OFFSET, shadow_offset, 0.0);
 f32_slot!(S_ROUNDNESS, roundness, 1.0);
@@ -1270,11 +1298,9 @@ pub fn pixel_chrome() -> bool {
 }
 static S_PIXEL_CHROME: AtomicU32 = AtomicU32::new(0);
 
-/// Today's look — the values that shipped as `RADIUS_SM` / `RADIUS_MD`, so a
-/// fresh config renders byte-identical to before the axis existed.
 const SHAPE_ROUNDED: Shape = Shape {
-    radius_sm: 6.0,
-    radius_md: 9.0,
+    radius_sm: 10.0,
+    radius_md: 16.0,
     border_w: 1.0,
     shadow_offset: 0.0,
     roundness: 1.0,
@@ -2434,7 +2460,7 @@ mod custom_theme_tests {
 
     #[test]
     fn new_neutral_palettes_keep_readable_text_on_every_default_surface() {
-        for palette in [&GRAPHITE, &INK, &PAPER, &MIST] {
+        for palette in [&FROST_LIGHT, &FROST_DARK, &GRAPHITE, &INK, &PAPER, &MIST] {
             let surfaces = palette.surface_colors();
             for fill in [palette.bg, palette.surface, surfaces.pane, surfaces.header, surfaces.sidebar,
                 surfaces.titlebar(), surfaces.side_panel()] {

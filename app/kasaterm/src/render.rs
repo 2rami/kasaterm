@@ -867,11 +867,13 @@ impl App {
         // must leave free on the right: the column plus one window padding, or
         // 0 when the column is hidden (so the pane keeps hugging the edge).
         let git_col_w = self.git_col_w();
+        let side_column_covers_workspace = self.side_column_covers_workspace();
         let git_col_x = (win_px.0 / scale - git_col_w).max(0.0);
         let git_col_bg = theme::side_panel_bg();
         let tree_col_bg = theme::panel_bg();
-        let git_reserve = if git_col_w > 0.0 {
-            git_col_w + WINDOW_PADDING
+        let reserved_column = self.effective_right_chrome_w();
+        let git_reserve = if reserved_column > 0.0 {
+            reserved_column + WINDOW_PADDING
         } else {
             0.0
         };
@@ -3792,33 +3794,6 @@ impl App {
             // 무엇이 놓이든 클릭이 계정 드롭다운에 먼저 먹힌다(2026-08-11 지적:
             // 세션 탭의 「전체」칩이 안 눌리고 계정 메뉴가 열렸다).
             self.account_chip_rect = None;
-            if git_col_w > 0.0 {
-                side_column::paint(
-                    g,
-                    side_column::Panels {
-                        git: &mut self.git,
-                        info: &mut self.info,
-                        sessions: &mut self.sessions_col,
-                        mcp: &mut self.mcp_col,
-                        share: &mut self.share,
-                        preedit: if self.ime_focus == Some(ImeFocus::ShareSearch) { &self.preedit } else { "" },
-                        closed_panes: &self.closed_panes,
-                    },
-                    &side_column::Frame {
-                        x: git_col_x,
-                        w: git_col_w,
-                        bg: git_col_bg,
-                        viewport: (win_px.0 / scale, win_px.1 / scale),
-                        status_h,
-                        cursor: self.cursor_px,
-                        time_secs,
-                        git_view: &git_view,
-                        repo_list: &git_repo_list,
-                        repo_choice: git_repo_choice.as_ref(),
-                        frozen_info,
-                    },
-                );
-            }
             // Per-pane header bar. The band is the unified BG (same as the
             // body) so there's no depth seam; a bottom hairline separates it
             // from the cell grid. The active tab is marked by a raised pill +
@@ -5342,10 +5317,40 @@ impl App {
                         .push((fid.clone(), (h_x - 4.0, bar_y, h_sz + 12.0, pane_footer_h)));
                 }
             }
+            // A compact side panel covers pane headers and footers as well as terminal cells.
+            if git_col_w > 0.0 {
+                side_column::paint(
+                    g,
+                    side_column::Panels {
+                        git: &mut self.git,
+                        info: &mut self.info,
+                        sessions: &mut self.sessions_col,
+                        mcp: &mut self.mcp_col,
+                        share: &mut self.share,
+                        preedit: if self.ime_focus == Some(ImeFocus::ShareSearch) { &self.preedit } else { "" },
+                        closed_panes: &self.closed_panes,
+                    },
+                    &side_column::Frame {
+                        x: git_col_x,
+                        w: git_col_w,
+                        bg: git_col_bg,
+                        viewport: (win_px.0 / scale, win_px.1 / scale),
+                        status_h,
+                        cursor: self.cursor_px,
+                        time_secs,
+                        git_view: &git_view,
+                        repo_list: &git_repo_list,
+                        repo_choice: git_repo_choice.as_ref(),
+                        frozen_info,
+                    },
+                );
+            }
             if let Some(snapshot) = settings_snapshot.as_ref() {
                 settings_paint = Some(crate::native_settings::paint(g, snapshot));
             }
-            kasa_gridview::overlay::paint(g, &overlay);
+            if !side_column_covers_workspace {
+                kasa_gridview::overlay::paint(g, &overlay);
+            }
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
             // chip that opened it and expanded UPWARD — the bar lives at the

@@ -564,128 +564,41 @@ impl GridRenderer {
         });
     }
 
-    /// Filled rounded rectangle (logical px) — circle-traced caps, same as
-    /// main.rs's `round_rect` but a method so the markdown renderer can round
-    /// code blocks / inline-code chips.
-    pub fn round_rect_fill(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
-        let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
-        // Straight middle band — no rounding needed between the two caps.
-        self.rect(x, y + r, w, (h - 2.0 * r).max(0.0), col);
-        if r <= 0.0 {
-            return;
-        }
-        // Trace the caps at DEVICE-pixel resolution with a fractional-alpha
-        // edge column so the corner reads smooth instead of stair-stepped.
-        // The old version stepped one LOGICAL px (= 2 device px on retina)
-        // with no anti-aliasing, which is the "hover 사각형 모서리 픽셀" the
-        // user saw. One logical row here = `inv` device px; each row gets a
-        // partial-coverage pixel on each side plus a solid middle span.
+    pub fn color_picker(&mut self, rect: (f32, f32, f32, f32), hue: f32, hue_strip: bool) {
+        let (x, y, w, h) = rect;
+        if w <= 0.0 || h <= 0.0 { return; }
         let s = self.scale;
-        let inv = 1.0 / s;
-        let steps = (r * s).ceil() as i32;
-        for k in 0..steps {
-            let yy = k as f32 * inv; // logical distance inward from the cap edge
-            let yc = yy + 0.5 * inv; // sample the row center for the circle test
-            let d = (r * r - (r - yc) * (r - yc)).max(0.0).sqrt();
-            let dx_dev = ((r - d) * s).max(0.0); // horizontal inset, device px
-            let dx_floor = dx_dev.floor();
-            let frac = dx_dev - dx_floor; // uncovered fraction of the boundary px
-            let edge_col = [col[0], col[1], col[2], (col[3] as f32 * (1.0 - frac)).round() as u8];
-            let lx = x + dx_floor * inv;
-            let rx = x + w - (dx_floor + 1.0) * inv;
-            let cx = x + (dx_floor + 1.0) * inv;
-            let cw = (w - 2.0 * (dx_floor + 1.0) * inv).max(0.0);
-            for ry in [y + yy, y + h - yy - inv] {
-                self.rect(lx, ry, inv, inv, edge_col);
-                self.rect(rx, ry, inv, inv, edge_col);
-                if cw > 0.0 {
-                    self.rect(cx, ry, cw, inv, col);
-                }
-            }
-        }
+        self.chrome.push(CellInstance {
+            cell_px: [x * s, y * s, w * s, h * s],
+            uv_min: [0.0, 0.0], uv_max: [1.0, 1.0],
+            fg_rgba: [hue.rem_euclid(360.0) / 360.0, 0.0, 0.0, 1.0],
+            flags: CellInstance::FLAG_COLOR_PICKER | if hue_strip { CellInstance::FLAG_PICKER_HUE } else { 0 },
+            ..Default::default()
+        });
     }
 
-    /// 둥근 사각형의 **테두리만** — `round_rect_fill` 과 같은 원호를 따라 `t` 두께로
-    /// 두른다. 채움은 둥글게 그려 놓고 테두리를 네모난 `rect` 넉 줄로 두르면
-    /// 모서리 밖으로 직각 선이 삐져나온다(2026-09-10 지적 「z-index 안 맞아서
-    /// 선 튀어나옴」 — 설정 화면의 카드·세그먼트·입력칸 전부가 그랬다).
-    ///
-    /// 캡 구간은 `round_rect_fill` 과 같은 행 단위로 돌되, 바깥 원(반지름 `r`)과
-    /// 안쪽 원(반지름 `r - t`) 사이만 칠한다. 바깥 경계 픽셀은 같은 부분 알파를
-    /// 받아 채움 위에 얹었을 때 계단이 안 보인다.
-    pub fn round_rect_stroke(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        r: f32,
-        t: f32,
-        col: [u8; 4],
-    ) {
-        let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
-        let t = t.max(0.0).min(w / 2.0).min(h / 2.0);
-        if t <= 0.0 {
-            return;
-        }
-        if r <= t {
-            self.rect(x, y, w, t, col);
-            self.rect(x, y + h - t, w, t, col);
-            self.rect(x, y + t, t, (h - 2.0 * t).max(0.0), col);
-            self.rect(x + w - t, y + t, t, (h - 2.0 * t).max(0.0), col);
-            return;
-        }
-        // 좌우 직선 변 — 캡 사이.
-        let band = (h - 2.0 * r).max(0.0);
-        self.rect(x, y + r, t, band, col);
-        self.rect(x + w - t, y + r, t, band, col);
-        let s = self.scale;
-        let inv = 1.0 / s;
-        let steps = (r * s).ceil() as i32;
-        let ri = r - t;
-        for k in 0..steps {
-            let yy = k as f32 * inv;
-            let yc = yy + 0.5 * inv;
-            let d_out = (r * r - (r - yc) * (r - yc)).max(0.0).sqrt();
-            let dx_out_dev = ((r - d_out) * s).max(0.0);
-            let dx_floor = dx_out_dev.floor();
-            let frac = dx_out_dev - dx_floor;
-            let edge_col = [col[0], col[1], col[2], (col[3] as f32 * (1.0 - frac)).round() as u8];
-            // 안쪽 원의 같은 행 — 아직 원이 시작되지 않은 위쪽 행(`yc < t`)은 통째로
-            // 윗변이다.
-            let inner_dx = if yc < t {
-                None
-            } else {
-                let dy = r - yc;
-                if dy.abs() >= ri {
-                    None
-                } else {
-                    Some(r - (ri * ri - dy * dy).sqrt())
-                }
-            };
-            let lx = x + dx_floor * inv;
-            let rx = x + w - (dx_floor + 1.0) * inv;
-            let solid_from = (dx_floor + 1.0) * inv;
-            for ry in [y + yy, y + h - yy - inv] {
-                self.rect(lx, ry, inv, inv, edge_col);
-                self.rect(rx, ry, inv, inv, edge_col);
-                match inner_dx {
-                    None => {
-                        let cw = (w - 2.0 * solid_from).max(0.0);
-                        if cw > 0.0 {
-                            self.rect(x + solid_from, ry, cw, inv, col);
-                        }
-                    }
-                    Some(dx_in) => {
-                        let span = (dx_in - solid_from).max(0.0);
-                        if span > 0.0 {
-                            self.rect(x + solid_from, ry, span, inv, col);
-                            self.rect(x + w - solid_from - span, ry, span, inv, col);
-                        }
-                    }
-                }
-            }
-        }
+    // One analytic shape avoids rounded-quad seams at fractional UI scales and
+    // keeps geometry cost independent of the corner radius and display scale.
+    pub fn round_rect_fill(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
+        self.rounded_shape((x, y, w, h), r, 0.0, col);
+    }
+
+    pub fn round_rect_stroke(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, t: f32, col: [u8; 4]) {
+        if t > 0.0 { self.rounded_shape((x, y, w, h), r, t, col); }
+    }
+
+    fn rounded_shape(&mut self, rect: (f32, f32, f32, f32), r: f32, t: f32, color: [u8; 4]) {
+        let (x, y, w, h) = rect;
+        if w <= 0.0 || h <= 0.0 { return; }
+        let scale = self.scale;
+        self.chrome.push(CellInstance {
+            cell_px: [x * scale, y * scale, w * scale, h * scale],
+            uv_min: [-1.0, -1.0], uv_max: [1.0, 1.0],
+            fg_rgba: srgb_rgba_to_linear(color),
+            flags: CellInstance::rounded_rect_flags(r.min(w / 2.0).min(h / 2.0) * scale,
+                t.min(w / 2.0).min(h / 2.0) * scale),
+            ..Default::default()
+        });
     }
 
     /// Draw the IME preedit (composing Hangul) the SAME way the cell

@@ -45,20 +45,25 @@ pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
     if rect.2 > 0.0 && rect.3 > 0.0 {
         g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(),
             theme::border_w().max(2.0), theme::enforce_contrast_at(theme::accent(), theme::bg(), 3.0));
+        if rect.2 > 8.0 && rect.3 > 8.0 {
+            g.round_rect_stroke(rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0,
+                (theme::radius_sm() - 2.0).max(0.0), 1.0, theme::foreground_on(theme::accent()));
+        }
     }
 }
 
-fn colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4]) {
+fn colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
     if !style.enabled {
-        (theme::border(), theme::text_mute())
+        (theme::surface(), theme::border(), theme::text_mute())
     } else if style.danger {
-        (theme::danger(), button_ink(theme::danger(), theme::bg()))
+        let fill = theme::lerp(theme::surface(), theme::danger(), if hover { 0.18 } else { 0.08 });
+        (fill, theme::with_alpha(theme::danger(), 150), button_ink(theme::danger(), fill))
     } else if style.primary || style.active {
-        (theme::accent(), button_ink(theme::accent(), theme::bg()))
-    } else if hover {
-        (theme::text_dim(), theme::text())
+        let fill = if hover { theme::lerp(theme::accent(), theme::text(), 0.10) } else { theme::accent() };
+        (fill, theme::with_alpha(theme::foreground_on(fill), 45), theme::foreground_on(fill))
     } else {
-        (theme::border(), theme::text_dim())
+        let fill = if hover { theme::surface_hover() } else { theme::surface() };
+        (fill, theme::with_alpha(theme::edge_on(fill), if hover { 170 } else { 100 }), button_ink(theme::text(), fill))
     }
 }
 
@@ -75,7 +80,8 @@ pub(crate) fn text_button(
 ) -> Rect {
     let rect = bounds(rect);
     let hover = style.enabled && contains(rect, cursor);
-    let (line, ink) = colors(style, hover);
+    let (fill, line, ink) = colors(style, hover);
+    g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
     g.round_rect_stroke(
         rect.0,
         rect.1,
@@ -113,8 +119,10 @@ pub(crate) fn icon_button(
 ) -> Rect {
     let rect = bounds(rect);
     let hover = style.enabled && contains(rect, cursor);
-    let (line, ink) = colors(style, hover);
+    let (fill, line, ink) = colors(style, hover);
+    let ink = if style.primary && !hover && !style.active { button_ink(theme::accent(), theme::bg()) } else { ink };
     if hover || style.active {
+        g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
         g.round_rect_stroke(
             rect.0,
             rect.1,

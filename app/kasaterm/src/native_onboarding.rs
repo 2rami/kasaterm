@@ -818,48 +818,51 @@ pub(crate) fn paint(
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
-    g.rect(ax, ay, rail_w, ah, theme::panel_bg());
-    text(
-        g,
-        ax + 20.0,
-        ay + 24.0,
-        "kasaterm",
-        13.0,
-        theme::text(),
-        true,
-    );
-    text(
-        g,
-        ax + 20.0,
-        ay + 58.0,
-        "처음 설정",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
-    for (index, (label, icon, _)) in QUICK_SECTIONS.iter().enumerate() {
-        let rect = (
-            ax + 12.0,
-            ay + 88.0 + index as f32 * 40.0,
-            rail_w - 24.0,
-            40.0,
+    // The summary rows below already provide every section action on a narrow window.
+    if rail_w > 0.0 {
+        g.rect(ax, ay, rail_w, ah, theme::panel_bg());
+        text(
+            g,
+            ax + 20.0,
+            ay + 24.0,
+            "kasaterm",
+            13.0,
+            theme::text(),
+            true,
         );
-        let on = snapshot.state.expanded == Some(index as u8);
-        let color = if on {
-            theme::accent()
-        } else {
-            theme::text_dim()
-        };
-        g.queue_icon(icon, rect.0 + 8.0, rect.1 + 12.0, 16.0, color);
-        text(g, rect.0 + 32.0, rect.1 + 13.0, label, 12.0, color, on);
-        if snapshot.state.loaded {
-            hit(
-                &mut hits,
-                Target::Onboarding(Action::ToggleSection(index as u8)),
-                rect,
-                HitCursor::Pointer,
+        text(
+            g,
+            ax + 20.0,
+            ay + 58.0,
+            "처음 설정",
+            11.0,
+            theme::text_dim(),
+            false,
+        );
+        for (index, (label, icon, _)) in QUICK_SECTIONS.iter().enumerate() {
+            let rect = (
+                ax + 12.0,
+                ay + 88.0 + index as f32 * 40.0,
+                rail_w - 24.0,
+                40.0,
             );
-            g.hover_pointer |= inside(rect, snapshot.cursor);
+            let on = snapshot.state.expanded == Some(index as u8);
+            let color = if on {
+                theme::accent()
+            } else {
+                theme::text_dim()
+            };
+            g.queue_icon(icon, rect.0 + 8.0, rect.1 + 12.0, 16.0, color);
+            text(g, rect.0 + 32.0, rect.1 + 13.0, label, 12.0, color, on);
+            if snapshot.state.loaded {
+                hit(
+                    &mut hits,
+                    Target::Onboarding(Action::ToggleSection(index as u8)),
+                    rect,
+                    HitCursor::Pointer,
+                );
+                g.hover_pointer |= inside(rect, snapshot.cursor);
+            }
         }
     }
     text(g, mx, ay + 24.0, "빠른 설정", 20.0, theme::text(), true);
@@ -1100,7 +1103,7 @@ const QUICK_SECTIONS: [(&str, &str, &str); 4] = [
 ];
 
 fn quick_columns(ax: f32, width: f32) -> (f32, f32, f32) {
-    let rail = if width < 760.0 { 154.0 } else { 190.0 };
+    let rail = if width < 600.0 { 0.0 } else if width < 760.0 { 154.0 } else { 190.0 };
     let pad = if width < 760.0 { 20.0 } else { 28.0 };
     let available = (width - rail - pad * 2.0).max(1.0);
     let content = available.min(800.0);
@@ -2231,7 +2234,7 @@ mod tests {
 
     #[test]
     fn quick_setup_column_stays_inside_window_and_centers_at_wide_sizes() {
-        for width in [520.0, 640.0, 760.0, 1280.0, 2560.0] {
+        for width in [320.0, 390.0, 520.0, 640.0, 760.0, 1280.0, 2560.0] {
             let (rail, x, content) = quick_columns(0.0, width);
             assert!(x >= rail + 20.0);
             assert!(content <= 800.0 && content > 0.0);

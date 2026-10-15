@@ -7158,6 +7158,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_ime(ime);
                     return;
                 }
+                if self.side_column_covers_workspace() && !self.git.commit_focused
+                    && self.mcp_col.add.is_none()
+                    && !(self.info.tab == state::SideTab::Share && self.share.search_focus) {
+                    self.discard_modal_ime(&ime);
+                    return;
+                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard

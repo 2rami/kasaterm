@@ -1030,6 +1030,9 @@ impl App {
         if win_w <= 1.0 {
             return (tab, tree, git);
         }
+        if side_column_overlay(win_w, git > 0.0) {
+            return (0.0, 0.0, win_w);
+        }
         let keep = GRID_KEEP_COLS * self.cell.w + 2.0 * WINDOW_PADDING;
         let mut over = tab + tree + git - (win_w - keep);
         if over <= 0.0 {
@@ -1203,7 +1206,15 @@ impl App {
     /// on the left. Folded into `window_cells` so the cell grid reflows and no
     /// pane ever overlaps the column.
     pub(crate) fn effective_right_chrome_w(&self) -> f32 {
-        self.git_col_w()
+        if self.side_column_covers_workspace() {
+            0.0
+        } else {
+            self.git_col_w()
+        }
+    }
+    pub(crate) fn side_column_covers_workspace(&self) -> bool {
+        !self.internal_room_active_any() && self.window.as_ref().is_some_and(|win|
+            side_column_overlay(win.inner_size().width as f32 / self.effective_scale(), self.git.col_visible))
     }
     /// 기기 목록은 우측 탭과 독립적으로 갱신돼야 왼쪽에서 고른 기기가 굳지 않는다.
     pub(crate) fn machines_section_active(&self) -> bool {
@@ -5297,5 +5308,25 @@ mod notify_path_tests {
     fn banner_only_where_os_notify_is_unavailable() {
         assert_eq!(notify_path(false, false), NotifyPath::Banner);
         assert_eq!(notify_path(false, true), NotifyPath::Banner);
+    }
+}
+
+fn side_column_overlay(window_width: f32, open: bool) -> bool {
+    open && window_width > 1.0 && window_width < 680.0
+}
+
+#[cfg(test)]
+mod responsive_panel_tests {
+    use super::side_column_overlay;
+
+    #[test]
+    fn narrow_side_panels_remain_accessible_without_resizing_the_hidden_terminal_to_one_column() {
+        for width in [320.0, 390.0, 520.0, 679.0] {
+            assert!(side_column_overlay(width, true));
+            assert!(!side_column_overlay(width, false));
+        }
+        for width in [0.0, 1.0, 680.0, 1280.0] {
+            assert!(!side_column_overlay(width, true));
+        }
     }
 }
