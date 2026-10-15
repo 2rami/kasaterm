@@ -3,7 +3,7 @@
 //! 칸 폭에 맞춰 쌓기뿐이다. 명령은 rollout 의 `CommandExecution`(명령·해석·출력·종료 코드)으로 편다 —
 //! 코덱스 TUI 가 「Ran …」·「Explored」를 그리는 재료와 같다.
 
-use super::classic::{banner_text, blanks, cells, line, plain, screen_banner, shorten_path, sig_of, text_width, wrap, Block, Col, Line, Look, Shelf, Span, St};
+use super::classic::{banner_text, blanks, cells, column_widths, line, plain, screen_banner, shorten_path, sig_of, text_width, wrap, Block, Col, Line, Look, Shelf, Span, St, TABLE_MIN_COL};
 use super::parse::{Conversation, Item, Row};
 use crate::{GridCell, MdBlock, MdSpan};
 use serde_json::Value;
@@ -105,6 +105,7 @@ fn markdown(text: &str, width: usize, cwd: Option<&str>) -> Vec<Vec<GridCell>> {
 }
 
 /// 코덱스 표 — 세로줄 없이 칸 사이 두 칸, 머리 밑 `━`, 줄 사이 `─`(흐리게). 칸 폭은 글 폭 + 앞뒤 한 칸.
+/// 칸 폭보다 넓으면 classic 과 같이 칸마다 글을 접는다 — 예전엔 오른쪽 칸이 잘려 나갔다.
 fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSpan>>], cwd: Option<&str>) -> Vec<Vec<GridCell>> {
     let mut all: Vec<&[Vec<MdSpan>]> = Vec::new();
     if !head.is_empty() {
@@ -115,13 +116,17 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
     if ncol == 0 {
         return Vec::new();
     }
-    let span_w = |spans: &[MdSpan]| text_width(&md_spans(spans, St::default(), cwd).iter().map(|(t, _)| t.as_str()).collect::<String>());
-    let mut widths = vec![1usize; ncol];
+    let shown = |spans: &[MdSpan]| md_spans(spans, St::default(), cwd).iter().map(|(t, _)| t.replace('\n', " ")).collect::<String>();
+    let mut ideal = vec![1usize; ncol];
+    let mut least = vec![TABLE_MIN_COL; ncol];
     for r in &all {
         for (i, c) in r.iter().enumerate() {
-            widths[i] = widths[i].max(span_w(c));
+            let text = shown(c);
+            ideal[i] = ideal[i].max(text_width(&text));
+            least[i] = least[i].max(text.split_whitespace().map(text_width).max().unwrap_or(0));
         }
     }
+    let widths = column_widths(&ideal, &least, width.saturating_sub(indent + 4 * ncol - 2));
     let rule = |ch: &str| {
         let mut row = blanks(indent, St::default());
         for (i, w) in widths.iter().enumerate() {
@@ -133,21 +138,40 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
         pad(&mut row, width);
         row
     };
-    let data = |r: &[Vec<MdSpan>], base: St| {
-        let mut row = blanks(indent, St::default());
-        for i in 0..ncol {
-            if i > 0 {
-                row.extend(blanks(2, St::default()));
-            }
-            let spans = r.get(i).map(Vec::as_slice).unwrap_or(&[]);
-            row.push(GridCell::blank());
-            for (t, st) in md_spans(spans, base, cwd) {
-                row.extend(cells(&t.replace('\n', " "), st));
-            }
-            row.extend(blanks(widths[i] + 1 - span_w(spans), St::default()));
-        }
-        pad(&mut row, width);
-        row
+    let data = |r: &[Vec<MdSpan>], base: St| -> Vec<Vec<GridCell>> {
+        let cols: Vec<Vec<Vec<GridCell>>> = (0..ncol)
+            .map(|i| {
+                let spans = r.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                let text: Vec<Span> = md_spans(spans, base, cwd).into_iter().map(|(t, st)| (t.replace('\n', " "), st)).collect();
+                wrap(widths[i], Vec::new(), 0, &text, None)
+                    .into_iter()
+                    .map(|mut line| {
+                        line.truncate(widths[i]);
+                        line.resize(widths[i], GridCell::blank());
+                        line
+                    })
+                    .collect()
+            })
+            .collect();
+        let height = cols.iter().map(Vec::len).max().unwrap_or(1);
+        (0..height)
+            .map(|y| {
+                let mut row = blanks(indent, St::default());
+                for (i, lines) in cols.iter().enumerate() {
+                    if i > 0 {
+                        row.extend(blanks(2, St::default()));
+                    }
+                    row.push(GridCell::blank());
+                    match lines.get(y) {
+                        Some(line) => row.extend(line.iter().cloned()),
+                        None => row.extend(blanks(widths[i], St::default())),
+                    }
+                    row.push(GridCell::blank());
+                }
+                pad(&mut row, width);
+                row
+            })
+            .collect()
     };
     let mut out = Vec::new();
     for (n, r) in all.iter().enumerate() {
@@ -155,7 +179,7 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
         if n > 0 {
             out.push(rule(if n == 1 && !head.is_empty() { "━" } else { "─" }));
         }
-        out.push(data(r, if header { St::fg(HEAD) } else { St::default() }));
+        out.extend(data(r, if header { St::fg(HEAD) } else { St::default() }));
     }
     out
 }

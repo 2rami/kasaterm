@@ -405,7 +405,9 @@ pub(super) fn cell_text(spans: &[MdSpan]) -> String {
     spans.iter().map(|s| s.text.as_str()).collect::<String>().replace('\n', " ")
 }
 
-/// classic 표 — 줄마다 가름선이 서는 상자. 칸 폭보다 넓으면 그대로 잘린다(claude 도 넘치면 깨진다).
+/// classic 표 — 줄마다 가름선이 서는 상자. 칸 폭보다 넓으면 Claude Code 처럼 칸마다 글을 접는다. 예전엔
+/// 오른쪽을 그대로 잘라, 미니 유우카 칸 거울에서 셋째 칸이 통째로 사라지고 글이 중간에 끊겼다(2026-10-15).
+/// 칸 나누기·머리글 가운데·짧은 칸 세로 가운데는 2.1.300 을 90칸에서 잰 꼴이다.
 fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSpan>>], align: &[MdAlign], ink: &Ink) -> Vec<Vec<GridCell>> {
     let mut all: Vec<&[Vec<MdSpan>]> = Vec::new();
     if !head.is_empty() {
@@ -416,12 +418,17 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
     if ncol == 0 {
         return Vec::new();
     }
-    let mut widths = vec![1usize; ncol];
+    let mut ideal = vec![1usize; ncol];
+    let mut least = vec![TABLE_MIN_COL; ncol];
     for r in &all {
         for (i, c) in r.iter().enumerate() {
-            widths[i] = widths[i].max(text_width(&cell_text(c)));
+            let text = cell_text(c);
+            ideal[i] = ideal[i].max(text_width(&text));
+            least[i] = least[i].max(text.split_whitespace().map(text_width).max().unwrap_or(0));
         }
     }
+    let room = width.saturating_sub(indent + 3 * ncol + 1 + TABLE_MARGIN);
+    let widths = column_widths(&ideal, &least, room);
     let rule = |l: &str, m: &str, r: &str| -> Vec<GridCell> {
         let mut s = String::from(l);
         for (i, w) in widths.iter().enumerate() {
@@ -432,39 +439,97 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
         row.extend(cells(&s, St::default()));
         row
     };
-    let data = |r: &[Vec<MdSpan>]| -> Vec<GridCell> {
-        let mut row = blanks(indent, St::default());
-        row.extend(cells("│", St::default()));
-        for i in 0..ncol {
-            let spans = r.get(i).cloned().unwrap_or_default();
-            let text = cell_text(&spans);
-            let gap = widths[i].saturating_sub(text_width(&text));
-            let (l, rr) = match align.get(i) {
-                Some(MdAlign::Right) => (gap, 0),
-                Some(MdAlign::Center) => (gap / 2, gap - gap / 2),
-                _ => (0, gap),
-            };
-            row.extend(blanks(1 + l, St::default()));
-            for (t, st) in md_spans(&spans, St::default(), ink) {
-                row.extend(cells(&t.replace('\n', " "), st));
-            }
-            row.extend(blanks(rr + 1, St::default()));
-            row.extend(cells("│", St::default()));
-        }
-        row
+    let data = |r: &[Vec<MdSpan>], head: bool| -> Vec<Vec<GridCell>> {
+        let cols: Vec<Vec<Vec<GridCell>>> = (0..ncol)
+            .map(|i| {
+                let spans = r.get(i).cloned().unwrap_or_default();
+                let text: Vec<Span> = md_spans(&spans, St::default(), ink).into_iter().map(|(t, st)| (t.replace('\n', " "), st)).collect();
+                let side = if head { MdAlign::Center } else { align.get(i).copied().unwrap_or(MdAlign::Left) };
+                wrap(widths[i], Vec::new(), 0, &text, None).into_iter().map(|line| placed(line, widths[i], side)).collect()
+            })
+            .collect();
+        let height = cols.iter().map(Vec::len).max().unwrap_or(1);
+        (0..height)
+            .map(|y| {
+                let mut row = blanks(indent, St::default());
+                row.extend(cells("│", St::default()));
+                for (i, lines) in cols.iter().enumerate() {
+                    let top = (height - lines.len()) / 2;
+                    row.extend(blanks(1, St::default()));
+                    match y.checked_sub(top).and_then(|k| lines.get(k)) {
+                        Some(line) => row.extend(line.iter().cloned()),
+                        None => row.extend(blanks(widths[i], St::default())),
+                    }
+                    row.extend(blanks(1, St::default()));
+                    row.extend(cells("│", St::default()));
+                }
+                row
+            })
+            .collect()
     };
     let mut out = vec![rule("┌", "┬", "┐")];
     for (n, r) in all.iter().enumerate() {
         if n > 0 {
             out.push(rule("├", "┼", "┤"));
         }
-        out.push(data(r));
+        out.extend(data(r, n == 0 && !head.is_empty()));
     }
     out.push(rule("└", "┴", "┘"));
     for row in &mut out {
         row.truncate(width);
         row.resize(width, GridCell::blank());
     }
+    out
+}
+
+/// 접는 표의 칸 하나가 받는 가장 좁은 폭 — `#` 같은 한 글자 칸도 세 칸은 받는다.
+pub(super) const TABLE_MIN_COL: usize = 3;
+/// 접는 표가 오른쪽에 남기는 칸.
+const TABLE_MARGIN: usize = 3;
+
+/// 칸마다 폭. 다 들어가면 글 폭 그대로, 아니면 가장 긴 낱말 폭을 먼저 주고 남는 자리를 더 원하는 만큼 나눈다.
+pub(super) fn column_widths(ideal: &[usize], least: &[usize], room: usize) -> Vec<usize> {
+    if ideal.iter().sum::<usize>() <= room {
+        return ideal.to_vec();
+    }
+    let floor: usize = least.iter().sum();
+    if floor >= room {
+        return least.to_vec();
+    }
+    let spare = room - floor;
+    let want: Vec<usize> = ideal.iter().zip(least).map(|(i, l)| i.saturating_sub(*l)).collect();
+    let total = want.iter().sum::<usize>().max(1);
+    let mut widths: Vec<usize> = least.iter().zip(&want).map(|(l, w)| l + spare * w / total).collect();
+    let mut order: Vec<usize> = (0..widths.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(spare * want[i] % total));
+    let mut left = room.saturating_sub(widths.iter().sum());
+    for i in order.into_iter().cycle().take(widths.len() * 2) {
+        if left == 0 {
+            break;
+        }
+        if widths[i] < ideal[i] {
+            widths[i] += 1;
+            left -= 1;
+        }
+    }
+    widths
+}
+
+/// 접힌 한 줄을 칸 폭 `w` 에 맞춰 놓는다.
+fn placed(mut line: Vec<GridCell>, w: usize, side: MdAlign) -> Vec<GridCell> {
+    while line.last().is_some_and(|c| c.ch == ' ') {
+        line.pop();
+    }
+    line.truncate(w);
+    let gap = w - line.len();
+    let (l, r) = match side {
+        MdAlign::Right => (gap, 0),
+        MdAlign::Center => (gap / 2, gap - gap / 2),
+        MdAlign::Left => (0, gap),
+    };
+    let mut out = blanks(l, St::default());
+    out.extend(line);
+    out.extend(blanks(r, St::default()));
     out
 }
 
@@ -1274,6 +1339,27 @@ mod tests {
             assert!(crate::screenread::band_bg(&l.cells).is_some());
             assert_eq!(l.cells.len(), 30);
         }
+    }
+
+
+    /// 칸보다 넓은 표는 칸마다 접힌다 — 오른쪽 칸이 잘려 나가지 않고, 머리글은 가운데, 짧은 칸은 세로 가운데.
+    #[test]
+    fn a_table_wider_than_the_pane_wraps_inside_its_cells() {
+        let md = "| 과제 | 스웜 | 나쵸 |\n|---|---|---|\n| 홈 탭 | 성공 2걸음, 30초 (첫 시도는 안전장치에 걸려 멈춤) | 성공 4걸음 |";
+        let got: Vec<String> = markdown(md, 40, 2, &Ink::now())
+            .iter()
+            .map(|r| r.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect::<String>().trim_end().to_string())
+            .collect();
+        assert_eq!(got, vec![
+            "  ┌──────┬─────────────────┬────────┐",
+            "  │ 과제 │      스웜       │  나쵸  │",
+            "  ├──────┼─────────────────┼────────┤",
+            "  │      │ 성공 2걸음,     │        │",
+            "  │ 홈   │ 30초 (첫 시도는 │ 성공   │",
+            "  │ 탭   │ 안전장치에 걸려 │ 4걸음  │",
+            "  │      │ 멈춤)           │        │",
+            "  └──────┴─────────────────┴────────┘",
+        ]);
     }
 
     #[test]
