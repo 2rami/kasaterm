@@ -98,6 +98,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.rename" => surface_rename(backend, id, &req.params),
         "window.rename" => window_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
+        "surface.set_nacho" => surface_set_nacho(backend, id, &req.params),
         "surface.repersona" => surface_repersona(backend, id, &req.params),
         "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
@@ -341,6 +342,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.rename",
                 "window.rename",
                 "surface.set_color",
+                "surface.set_nacho",
                 "surface.repersona",
                 "surface.resize_divider",
                 "surface.set_ratio",
@@ -886,6 +888,21 @@ fn surface_set_color(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         None => return param_err(id, "surface.set_color requires `color` as #rrggbb"),
     };
     match backend.set_color(surface_id, color) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 나쵸가 띄운 칸의 표지(어느 창구·채널에서 온 일인가). `via` 가 `none`·빈 값이면 지운다.
+/// 창구 이름 검사는 등록부를 쥔 백엔드가 한다 — 모르는 창구는 거기서 거절된다.
+fn surface_set_nacho(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.set_nacho requires `surface_id` (string)"),
+    };
+    let via = params.get("via").and_then(|v| v.as_str()).unwrap_or("");
+    let place = params.get("place").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.set_nacho(surface_id, via, place) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

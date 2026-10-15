@@ -44,6 +44,10 @@ fn run_local(backend: &dyn Backend, op: &str, address: Option<&Value>, params: &
         "focus" => ("surface.focus", json!({"surface_id": pane()?})),
         "rename" => ("surface.rename", json!({"surface_id": pane()?, "title": text("title")?})),
         "color" => ("surface.set_color", json!({"surface_id": pane()?, "color": text("color")?})),
+        "nacho" => (
+            "surface.set_nacho",
+            json!({"surface_id": pane()?, "via": text("via")?, "place": params["place"].as_str().unwrap_or("")}),
+        ),
         "rename_room" => ("window.rename", json!({"surface_id": pane()?, "title": text("title")?})),
         "move" => {
             let target = params.get("target").filter(|t| t.is_object()).context("move requires target address")?;

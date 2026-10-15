@@ -4189,6 +4189,8 @@ enum UserEvent {
     /// pane header. Used by the rename override.
     SocketRenameWindow(String, String),
     SocketColor(String, [u8; 4]),
+    /// `surface.set_nacho` — 표지는 소켓 쪽에서 이미 등록부에 섰고, 칸 탭·사이드바를 다시 그리게만 깨운다.
+    SocketNacho(String),
     /// `POST /session-resume` from arona-ui — open a pane and queue the resume
     /// command once its shell prompt is up. `newroom` opens a fresh window;
     /// otherwise it splits the active one. `cwd` (when set) is the session's

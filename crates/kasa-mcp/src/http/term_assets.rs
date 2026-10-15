@@ -69,16 +69,27 @@ async fn term_chrome_css() -> impl IntoResponse {
 }
 
 async fn term_icon(AxPath(name): AxPath<String>) -> axum::response::Response {
-    let icon = match name.as_str() {
+    match icon_source(&name) {
+        Some(icon) => ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], icon).into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn icon_source(name: &str) -> Option<&'static str> {
+    Some(match name {
         "claude.svg" => include_str!("../../../../app/kasaterm/assets/icons/claude.svg"),
         "codex.svg" => include_str!("../../../../app/kasaterm/assets/icons/codex.svg"),
         "terminal.svg" => include_str!("../../../../app/kasaterm/assets/icons/terminal.svg"),
         "server.svg" => include_str!("../../../../app/kasaterm/assets/icons/server.svg"),
         "laptop.svg" => include_str!("../../../../app/kasaterm/assets/icons/laptop.svg"),
-        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
-    };
-    ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], icon).into_response()
+        // 나쵸 칸 표지(`nacho_pane::Via::icon`) — 목록 줄 `nacho.icon` 이 이 이름을 준다.
+        "slack.svg" => include_str!("../../../../app/kasaterm/assets/icons/slack.svg"),
+        "discord.svg" => include_str!("../../../../app/kasaterm/assets/icons/discord.svg"),
+        "smartphone.svg" => include_str!("../../../../app/kasaterm/assets/icons/smartphone.svg"),
+        _ => return None,
+    })
 }
+
 
 pub(super) async fn term_visual_builtin(AxPath(name): AxPath<String>) -> axum::response::Response {
     match crate::visual::builtin_asset(&name) {
@@ -226,4 +237,18 @@ pub(super) fn routes() -> axum::Router {
         .route("/term/grid.css", get(term_grid_css))
         .route("/term/font.woff2", get(term_asset_font))
         .route("/term/avatar/{slug}", get(term_avatar))
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use crate::nacho_pane::Via;
+
+    #[test]
+    fn web_serves_every_nacho_channel_icon() {
+        for via in [Via::Slack, Via::Discord, Via::App, Via::Main] {
+            if let Some(name) = via.icon() {
+                assert!(super::icon_source(&format!("{name}.svg")).is_some(), "/term/icon/{name}.svg 가 없다");
+            }
+        }
+    }
 }

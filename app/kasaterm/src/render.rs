@@ -833,6 +833,8 @@ impl App {
             web_loading: bool,
             /// In-pane tab labels (empty = single-tab; header shows `label`).
             tabs: Vec<String>,
+            /// 탭마다 나쵸 표지 아이콘(`pane_tab_badges`) — `tabs` 와 같은 차례.
+            tab_badges: Vec<Option<&'static str>>,
             /// Active tab index into `tabs`.
             active_tab: usize,
             /// Overflow windowing: first tab drawn (pane.tab_first snapshot).
@@ -1623,6 +1625,7 @@ impl App {
                         web_url: pane.web().map(|w| w.url.clone()),
                         web_loading,
                         tabs: self.pane_tab_labels(&ws, &id, pane),
+                        tab_badges: self.pane_tab_badges(pane),
                         active_tab: pane.active_tab,
                         tab_first: pane.tab_first,
                         tab_last_active: pane.tab_last_active,
@@ -2230,7 +2233,9 @@ impl App {
                                             .unwrap_or_default()
                                         });
                                     TabPeek {
-                                        who: pid.and_then(|q| self.display_tab_char(&ws, q)),
+                                        who: pid
+                                            .filter(|q| self.tab_nacho_icon(q).is_none())
+                                            .and_then(|q| self.display_tab_char(&ws, q)),
                                         label,
                                         active: i == at,
                                     }
@@ -2253,11 +2258,15 @@ impl App {
                     .map(|t| t.elapsed().as_secs())
                     .or(fixture_secs);
                 let student = self.row_student(id);
+                // 칸은 보이는 탭을 대표한다 — 나쵸 방은 바탕 셸 옆 탭마다 나쵸 칸이라 첫 탭 PTY 를 보면
+                // 셸이 잡혀 로고도 나쵸 표지도 안 선다.
+                let shown = self.ws.lock().unwrap().active_tab_pid(id);
+                let who = if self.tab_nacho_icon(&shown).is_some() { String::new() } else { who };
                 SidebarRowInfo {
                     student,
                     who,
-                    agent: self.pty.get(id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()).unwrap_or_default(),
-                    pane: id.clone(),
+                    agent: self.pty.get(&shown).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()).unwrap_or_default(),
+                    pane: shown,
                     label,
                     color: self.pane_state_color(id),
                     is_cur,
@@ -4074,6 +4083,7 @@ impl App {
                     g,
                     &TabStrip {
                         tabs: &h.tabs,
+                        badges: &h.tab_badges,
                         label: &h.label,
                         x: h.x,
                         y: h.y,
@@ -8399,6 +8409,9 @@ mod elapsed_tests {
 /// pane 안 탭 띠 한 벌.
 pub(crate) struct TabStrip<'a> {
     pub tabs: &'a [String],
+    /// 탭마다 나쵸 칸 아이콘 — 있으면 이름 앞에 나쵸 색으로 서고 이름도 나쵸 색이다. `tabs` 와 같은
+    /// 차례이며 `tabs` 가 비어 `label` 한 장으로 그릴 때는 안 쓴다.
+    pub badges: &'a [Option<&'static str>],
     /// `tabs` 가 비었을 때 쓸 단일 탭 제목.
     pub label: &'a str,
     pub x: f32,
@@ -8524,7 +8537,9 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // Per-pane accent (set via `surface.set_color`) recolors the
         // tab-name text only; None = default chrome text. Brightness
         // (active/hover) still rides on the alpha.
-        let label_fg = c.color.unwrap_or_else(theme::text);
+        let badge = if c.tabs.is_empty() { None } else { c.badges.get(i).copied().flatten() };
+        let badge_w = if badge.is_some() { c.icon_size + 5.0 } else { 0.0 };
+        let label_fg = c.color.unwrap_or_else(if badge.is_some() { theme::nacho } else { theme::text });
         let t_fg = if bright {
             theme::with_alpha(label_fg, combine(0xFF))
         } else {
@@ -8541,8 +8556,8 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // "new shell"; doubling that icon on every tab was noise.
         let x_reserve = if reserve_x { close_w + 8.0 } else { 0.0 };
         let budget = match slot(vi) {
-            Some((_, sw)) => (sw - 12.0 - x_reserve).max(0.0),
-            None => (per_tab - x_reserve - 14.0).max(0.0),
+            Some((_, sw)) => (sw - 12.0 - x_reserve - badge_w).max(0.0),
+            None => (per_tab - x_reserve - 14.0 - badge_w).max(0.0),
         };
         // 자를 땐 **뒤**를 자른다. 여기 오는 라벨은 전부 앞이 정체다 —
         // 학생 이름(`미도리 · 작업명`), 폴더명 한 조각, 프로세스명. 앞을
@@ -8564,7 +8579,7 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         }
         // Pill geometry: label + reserved × slot (terminal icon
         // removed — +button covers "new shell" duty).
-        let content_w = lw + x_reserve;
+        let content_w = badge_w + lw + x_reserve;
         // First tab sits flush with the pane's left edge so the
         // active tab's accent strip joins the pane divider with
         // no visible gap — only while nothing is windowed off
@@ -8597,8 +8612,11 @@ pub(crate) fn draw_pane_tabs(g: &mut gpu::GpuRenderer, c: &TabStrip) -> TabStrip
         // differentiate it. Structural lines drawn post-loop.
         let stroke = 1.0_f32;
         let _ = stroke;
+        if let Some(icon) = badge {
+            g.queue_icon(icon, tx, icon_y, c.icon_size, t_fg);
+        }
         let cx = g.draw_text(
-            tx,
+            tx + badge_w,
             text_y,
             &label,
             gpu::DrawOpts {

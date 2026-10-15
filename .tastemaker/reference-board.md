@@ -88,3 +88,9 @@ Native validation: release app tests pass (1,571, zero failures, two existing ig
 The user requested arbitrary color customization and shared folders inside Info. Native release captures cover the always-visible accent HEX/HSV editor, per-statusbar color editor and Info shared files at 390px and 1280px. The compact shared list now starts at 211px (previously 173px); the extra 38px is the Info page selector and the first file remains in the initial viewport. Editors stack at narrow widths without horizontal overflow.
 
 Runtime verification covers preview without writes, cancel restoring a named preset or inherited statusbar color, rejection of invalid HEX, exact custom RGB after reloading settings, and independent color targets. The OS eyedropper callback uses the same typed targets; actual screen sampling and physical IME were not automated. No cross-project profile was changed.
+
+## Selective restore verification — 2026-10-15
+
+Native release captures were inspected at 1100×780, 390×780 and 280×200. The first work title starts at y=207 on the normal layout and y=87 in the shortest window. A fixed footer remains usable while the work list scrolls; very short windows omit group headers and the preservation note so a real work row remains readable.
+
+Restore tests: 69; session tests: 135; history tests: 10; server-restore tests: 11 (overlapping groups, not a summed total). Runtime fixtures proved one selected tab opens, five unchecked tabs persist as deferred, all six original tabs remain in the backup, fresh start keeps six deferred tabs, and zero selection cannot start restoration. Fixtures used isolated shell records; live user agents were not resumed.

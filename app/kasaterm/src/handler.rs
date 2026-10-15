@@ -1864,12 +1864,21 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketRename(id, title) => {
-                if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
-                    let at = p.active_tab.min(p.tabs.len() - 1);
-                    // Pin so the inner program's OSC 0/2 titles stop overriding
-                    // the name the user just set (matches surface.rename intent).
-                    p.tabs[at].title = Some(title.clone());
-                    p.tabs[at].title_pinned = true;
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    // 뒤 탭은 `panes` 의 열쇠가 아니라 `pid_to_pane` 으로만 닿는다 — 바깥 칸으로만 찾으면 뒤 탭 이름이
+                    // 조용히 버려졌다(나쵸 방은 칸마다 바탕 셸 옆 탭이라 「요청자 · 요약」이 늘 `claude` 로 떴다).
+                    // 바깥 칸 id 로 부르면 예전처럼 보이는 탭이다.
+                    let tab_of = ws.pid_to_pane.get(id).cloned();
+                    if let Some(p) = ws.panes.get_mut(tab_of.as_deref().unwrap_or(id)) {
+                        let at = tab_of
+                            .and_then(|_| p.tabs.iter().position(|t| t.pid.as_deref() == Some(id.as_str())))
+                            .unwrap_or_else(|| p.active_tab.min(p.tabs.len() - 1));
+                        // Pin so the inner program's OSC 0/2 titles stop overriding
+                        // the name the user just set (matches surface.rename intent).
+                        p.tabs[at].title = Some(title.clone());
+                        p.tabs[at].title_pinned = true;
+                    }
                 }
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -1899,6 +1908,19 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
                     p.color = Some(*color);
                 }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketNacho(id) => {
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    let outer = ws.pid_to_pane.get(id).cloned().unwrap_or_else(|| id.clone());
+                    if let Some(p) = ws.panes.get_mut(&outer) {
+                        p.dirty = true;
+                    }
+                }
+                kasa_mcp::changes::bump();
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;

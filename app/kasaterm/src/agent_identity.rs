@@ -36,7 +36,22 @@ fn identity_json(roster: Option<&serde_json::Value>, name: &str, launch_token: &
         "model": model, "backend": backend, "launch_token": launch_token}))
 }
 
+/// 나쵸 칸이 받는 이름. 나쵸는 학생이 아니라 말투를 싣지 않는다.
+fn nacho_identity(launch_token: &str) -> serde_json::Value {
+    serde_json::json!({"character": "나쵸", "persona": "", "slug": "nacho", "model": "", "backend": "",
+        "launch_token": launch_token})
+}
+
 impl App {
+    /// 나쵸가 표지를 붙였거나 「나쵸」 방에 든 칸. 방 판정은 방 이름 표를 바로 읽는다 — 나쵸가 방금 쪼갠 칸은
+    /// 그리기 때 갈아 끼우는 방 칸 모음(`nacho_pane::in_room`)에 아직 없을 수 있다.
+    pub(crate) fn is_nacho_pane(&self, pane: &str) -> bool {
+        kasa_mcp::nacho_pane::get(pane).is_some()
+            || kasa_mcp::nacho_pane::in_room(pane)
+            || self.window_of_pane(pane).and_then(|i| self.window_labels.get(i))
+                .is_some_and(|(name, _)| kasa_mcp::nacho_pane::is_room(name))
+    }
+
     /// 이 pane 에 앉은 하네스 **아래에서** 뜬 실행(그 학생의 Bash 도구가 친 `claude --version` 같은 것)은
     /// 자리를 새로 받지 않고 앉은 학생을 빌린다. 받게 두면 그 짧은 실행이 끝날 때 자리째 걷혀, 계속 도는
     /// 원래 학생의 이름표가 비고 그 학생이 다음 pane 에 또 배정된다(2026-10-01 %14 아즈사).
@@ -59,6 +74,14 @@ impl App {
         anyhow::ensure!(!kasa_mcp::remote::is_remote_pane(pane), "cannot launch an identity on a mirror");
         anyhow::ensure!(self.ws.lock().unwrap().outer_for_pty(pane).is_some(), "pane is no longer open");
         anyhow::ensure!(pid > 0, "missing harness process identity");
+        // 나쵸 칸에 학생 자리를 주면 Claude Code 이름 칸과 판에 코유키·아로나 같은 학생이 떴다(2026-10-15).
+        // 자리·대화 묶음은 안 남기고 이어 열기에 쓸 대화 번호만 둔다.
+        if self.is_nacho_pane(pane) {
+            self.pane_claude_sid.remove(pane);
+            if sid.is_empty() { self.pane_session_id.remove(pane); } else { self.pane_session_id.insert(pane.into(), sid.into()); }
+            if self.ws.lock().unwrap().pane_character.remove(pane).is_some() { self.chrome_dirty = true; }
+            return Ok(nacho_identity(&kasa_mcp::character::new_session_id()));
+        }
         if let Some(identity) = self.nested_launch_identity(pane, pid)? { return Ok(identity); }
         let pending = self.ws.lock().unwrap().pane_next_character.get(pane).cloned();
         let requested = (!requested.is_empty()).then_some(requested).or(pending.as_deref());
@@ -206,7 +229,18 @@ impl App {
             self.release_finished_agent_identities();
             assert_eq!(self.ws.lock().unwrap().pane_character[&pane], seated, "the seat survives the detached run");
         }
-        eprintln!("[agent-identity] PASS: resumed name/persona agree; late mapping cannot relabel; explicit selection updates both; same-seat restart keeps the student; nested and detached runs keep the seat");
+        // 나쵸 칸은 학생 자리를 받지 않는다 — 이름은 「나쵸」, 말투 없음, 판 이름표는 비고, 자리는 그대로.
+        let seat = self.pane_agent_launches.get(&pane).copied();
+        kasa_mcp::nacho_pane::set(&pane, Some(kasa_mcp::nacho_pane::Badge::main()));
+        let nacho = self.prepare_agent_identity(&pane, &kasa_mcp::character::new_session_id(), "", std::process::id()).unwrap();
+        assert_eq!(nacho["character"], "나쵸");
+        assert_eq!(nacho["persona"], "");
+        assert!(!self.ws.lock().unwrap().pane_character.contains_key(&pane), "a nacho pane carries no student");
+        assert_eq!(self.pane_agent_launches.get(&pane).copied(), seat, "a nacho launch takes no seat");
+        self.apply_session_character(&pane, &sid);
+        assert!(!self.ws.lock().unwrap().pane_character.contains_key(&pane), "a student-bound conversation does not relabel a nacho pane");
+        kasa_mcp::nacho_pane::set(&pane, None);
+        eprintln!("[agent-identity] PASS: resumed name/persona agree; late mapping cannot relabel; explicit selection updates both; same-seat restart keeps the student; nested and detached runs keep the seat; nacho panes take no student");
     }
 }
 

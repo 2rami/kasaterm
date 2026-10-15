@@ -15,6 +15,7 @@ pub(crate) struct State {
     control_focus: Option<RestoreBtn>,
     scroll: f32,
     list_height: f32,
+    group_height: f32,
 }
 
 impl State {
@@ -23,6 +24,7 @@ impl State {
         Self {
             selected: vec![true; plan.rows.len()],
             plan,
+            group_height: GROUP_H,
             ..Self::default()
         }
     }
@@ -31,7 +33,7 @@ impl State {
         self.selected.iter().filter(|v| **v).count()
     }
     fn content_height(&self) -> f32 {
-        self.plan.rows.len() as f32 * ROW_H + self.plan.groups.len() as f32 * GROUP_H
+        self.plan.rows.len() as f32 * ROW_H + self.plan.groups.len() as f32 * self.group_height
     }
     fn clamp_scroll(&mut self) {
         self.scroll = self
@@ -42,7 +44,7 @@ impl State {
         let Some(row) = self.plan.rows.get(self.focus) else {
             return;
         };
-        let top = self.focus as f32 * ROW_H + (row.group + 1) as f32 * GROUP_H;
+        let top = self.focus as f32 * ROW_H + (row.group + 1) as f32 * self.group_height;
         if top < self.scroll {
             self.scroll = top;
         }
@@ -186,15 +188,31 @@ struct Layout {
     footer: Rect,
     pad: f32,
     compact: bool,
+    dense: bool,
 }
 
 fn layout(viewport: (f32, f32), content: f32) -> Layout {
     let width = (viewport.0 - 32.0).clamp(0.0, 900.0);
     let available = (viewport.1 - 32.0).max(0.0);
     let compact = available < 448.0;
+    let dense = available < 280.0;
     let pad = if width < 600.0 { 16.0 } else { 24.0 };
-    let header = if compact { 88.0 } else { 124.0_f32 }.min(available * 0.42);
-    let footer = if compact { 60.0 } else { 84.0_f32 }.min(available * 0.34);
+    let header = if dense {
+        62.0
+    } else if compact {
+        88.0
+    } else {
+        124.0_f32
+    }
+    .min(available * 0.42);
+    let footer = if dense {
+        36.0
+    } else if compact {
+        60.0
+    } else {
+        84.0_f32
+    }
+    .min(available * 0.34);
     let detail = if available >= 528.0 { 88.0 } else { 0.0 };
     let height = (header + content + detail + footer)
         .min(700.0)
@@ -219,6 +237,7 @@ fn layout(viewport: (f32, f32), content: f32) -> Layout {
         ),
         pad,
         compact,
+        dense,
     }
 }
 
@@ -312,6 +331,7 @@ pub(crate) fn paint(
     cursor: (f32, f32),
 ) -> Vec<(RestoreBtn, Rect)> {
     use crate::native_controls::{icon_button, text_button, Style};
+    state.group_height = if viewport.1 < 312.0 { 0.0 } else { GROUP_H };
     let l = layout(viewport, state.content_height());
     state.list_height = l.list.3;
     state.clamp_scroll();
@@ -332,12 +352,24 @@ pub(crate) fn paint(
         g,
         (
             tx,
-            y + if l.compact { 12.0 } else { 20.0 },
+            y + if l.dense {
+                8.0
+            } else if l.compact {
+                12.0
+            } else {
+                20.0
+            },
             w - l.pad * 2.0 - 40.0,
             28.0,
         ),
         "이어서 할 작업을 골라주세요",
-        if w < 500.0 { 18.0 } else { 22.0 },
+        if l.dense {
+            16.0
+        } else if w < 500.0 {
+            18.0
+        } else {
+            22.0
+        },
         true,
         theme::text(),
     );
@@ -345,7 +377,13 @@ pub(crate) fn paint(
         g,
         (
             x + w - l.pad - 28.0,
-            y + if l.compact { 10.0 } else { 18.0 },
+            y + if l.dense {
+                4.0
+            } else if l.compact {
+                10.0
+            } else {
+                18.0
+            },
             28.0,
             28.0,
         ),
@@ -364,12 +402,16 @@ pub(crate) fn paint(
             theme::text_dim(),
         );
     }
-    let tools_y = l.list.1 - 38.0;
+    let tools_y = l.list.1 - if l.dense { 30.0 } else { 38.0 };
     let count_width = (l.list.2 - 174.0).max(0.0);
     label(
         g,
         (tx, tools_y + 7.0, count_width, 18.0),
-        &format!("{} / {}개 선택", state.count(), state.selected.len()),
+        &if count_width < 110.0 {
+            format!("{}/{}", state.count(), state.selected.len())
+        } else {
+            format!("{} / {}개 선택", state.count(), state.selected.len())
+        },
         13.0,
         true,
         theme::text(),
@@ -394,7 +436,7 @@ pub(crate) fn paint(
             .iter()
             .filter(|s| **s)
             .count();
-        let header = (l.list.0, ry, l.list.2 - 8.0, GROUP_H);
+        let header = (l.list.0, ry, l.list.2 - 8.0, state.group_height);
         if let Some(hit) = clipped(header, l.list) {
             let hover = inside(hit, cursor);
             if hover {
@@ -433,7 +475,7 @@ pub(crate) fn paint(
             g.hover_pointer |= hover;
             hits.push((RestoreBtn::Group(gi), hit));
         }
-        ry += GROUP_H;
+        ry += state.group_height;
         for i in group.start..group.end {
             let row = &state.plan.rows[i];
             let rect = (l.list.0, ry, l.list.2 - 8.0, ROW_H - 4.0);
@@ -480,7 +522,11 @@ pub(crate) fn paint(
                     true,
                     theme::text(),
                 );
-                let meta = format!("{} · 탭 {}", row.identity, row.tab + 1);
+                let meta = if l.dense {
+                    format!("방 {} · {}", row.group + 1, row.identity)
+                } else {
+                    format!("{} · 탭 {}", row.identity, row.tab + 1)
+                };
                 label(
                     g,
                     (left, ry + 30.0, width, 16.0),
@@ -554,15 +600,17 @@ pub(crate) fn paint(
         }
     }
     let fy = l.footer.1 + if l.compact { 4.0 } else { 10.0 };
-    label(
-        g,
-        (l.footer.0, fy, l.footer.2, 16.0),
-        "고르지 않은 작업은 ‘복원 보류’로 보관해요",
-        11.5,
-        false,
-        theme::text_dim(),
-    );
-    let button_y = fy + 24.0;
+    if !l.dense {
+        label(
+            g,
+            (l.footer.0, fy, l.footer.2, 16.0),
+            "고르지 않은 작업은 ‘복원 보류’로 보관해요",
+            11.5,
+            false,
+            theme::text_dim(),
+        );
+    }
+    let button_y = fy + if l.dense { 0.0 } else { 24.0 };
     let restore_w = 134.0_f32.min(l.footer.2 * 0.5);
     let fresh_w = 90.0_f32.min((l.footer.2 - restore_w - 8.0).max(0.0));
     let restore_x = l.footer.0 + l.footer.2 - restore_w;
@@ -654,7 +702,10 @@ mod tests {
                     assert!(l.list.1 + l.list.3 <= l.footer.1);
                     assert!(l.footer.1 + l.footer.3 <= l.card.1 + l.card.3 + 0.01);
                     assert!(l.list.2 >= 216.0);
-                    assert!(l.footer.3 >= 54.0);
+                    assert!(l.footer.3 >= if l.dense { 32.0 } else { 54.0 });
+                    if l.dense {
+                        assert!(l.list.3 >= 70.0);
+                    }
                 }
             }
         }

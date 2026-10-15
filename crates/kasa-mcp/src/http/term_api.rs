@@ -246,6 +246,11 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             }
             let b = raw.filter(|p| p.harness.is_some() && remote.is_none());
             let web = id.starts_with("web-").then(|| kasa_pty::lookup_session(&id)).flatten();
+            // 기록이 아직 없는 막 띄운 학생은 board 에 줄이 없다 — 셸 밑 프로세스로 본다. 거울이 첫 말 전부터
+            // 이 칸을 대화형으로 연다.
+            let harness = b
+                .and_then(|p| p.harness.clone())
+                .or_else(|| kasa_pty::lookup_session(&id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string()));
             serde_json::json!({
                 "id": id,
                 "surface_key": crate::surface_keys::get(&id),
@@ -284,11 +289,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // pc 처럼」). session = `/rename` 으로 붙인 세션 이름(codex 는 없다),
                 // harness = claude/codex, context_pct·branch = 상태줄의 그것.
                 "session": b.and_then(pane_session_name),
-                // 기록이 아직 없는 막 띄운 학생은 board 에 줄이 없다 — 셸 밑 프로세스로 본다. 거울이 첫 말 전부터
-                // 이 칸을 대화형으로 연다.
-                "harness": b
-                    .and_then(|p| p.harness.clone())
-                    .or_else(|| kasa_pty::lookup_session(&id).and_then(|s| s.active_agent()).map(|k| k.as_str().to_string())),
+                // 나쵸 봇이 띄운 칸이면 `{via, place, icon}` — 폰·웹 목록이 학생 칸과 갈라 그린다(icon 이 null 이면
+                // 창구 없는 나쵸 칸이라 하네스 로고에 나쵸 색만). 거울 줄은 위에서 저쪽 줄을 통째로 가져와 따라온다.
+                "nacho": crate::nacho_pane::badge(&id, harness.is_some()).map(|n| n.to_json()),
+                "harness": harness,
                 "context_pct": b.map(|p| p.context_pct).filter(|v| *v > 0),
                 "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),
                 // 모델 표시명(「Fable 5.1 1M」)은 board 가 이미 사람 말로 다듬어 둔 것 —
