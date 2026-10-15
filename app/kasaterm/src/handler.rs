@@ -3209,6 +3209,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        if main_window && self.design_study_event(&event) { return; }
         if main_window && !self.lite && self.account_menu_event(event_loop, &event) {
             return;
         }

@@ -44,6 +44,7 @@ mod device_icons;
 mod feedback_delivery;
 mod account_sync_ui;
 mod native_controls;
+mod design_study;
 mod native_strings;
 mod notify_banner;
 mod onboarding;
@@ -5827,6 +5828,7 @@ struct App {
     /// 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
     mcp_col: state::McpColState,
     share: share_panel::State,
+    design_study: Option<design_study::State>,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
@@ -6430,6 +6432,7 @@ impl App {
                 ..Default::default()
             },
             share: share_panel::State::default(),
+            design_study: design_study::State::from_env(),
             mcp_col: state::McpColState {
                 // 추가 칸은 열어야만 보이는데 헤드리스 캡처는 클릭을 못 한다.
                 add: std::env::var("KASATERM_TEST_MCP")

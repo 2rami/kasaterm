@@ -727,6 +727,7 @@ impl App {
     }
 
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
+        if self.paint_design_study(scale, time_secs) { return; }
         // 두 하단바 높이는 설정값이라 프레임 내내 여러 번 읽힌다. 여기서 한 번
         // 뽑아 두는 건 값이 도중에 바뀔 일이 없어서이기도 하지만, 아래쪽 대부분이
         // `self.gpu` 를 빌린 안쪽이라 거기서 `&self` 메서드를 다시 못 부르기 때문이다.

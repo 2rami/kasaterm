@@ -46,3 +46,7 @@ The startup restore dialog groups local tabs by room and identifies their titles
 ## Portrait selection — 2026-10-15
 
 The user preferred the earlier cute, compact restore dialog and explicitly chose direct selection on portrait cards. The default is now a small portrait strip: clicking toggles work, hovering previews its identity and folder, and arrows page through every saved task. Bulk selection and restoration remain explicit footer actions. The detailed room/tab list is optional and retains the same selection. The prior large default checklist is superseded; exact artwork framing remains pending review.
+
+## Whole-system comparison — 2026-10-15
+
+The user requested a full redesign of the design contract and controls, then requested all three proposed directions to choose from. Existing 26px control caps and flat-row restrictions are not constraints on these studies. Cloud OS uses 36px controls and floating navigation, Precision uses 28px controls and dense flat rows, and Playroom uses 40px controls with a portrait rail. The studies are native wgpu scenes in an isolated verification mode; the normal app default remains pending the user’s choice.
