@@ -326,7 +326,6 @@ pub(crate) enum SideTab {
     Sessions,
     /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
     Mcp,
-    Share,
 }
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다
@@ -761,6 +760,14 @@ pub(crate) enum InfoMenuAction {
     CopyCmd,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InfoPage {
+    #[default]
+    Runtime,
+    SharedFiles,
+}
+
+
 /// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `snap` 은 워커 스레드가
 /// 채우는 스냅샷이고 `busy`/`last_refresh` 가 그 워커를 스로틀한다(수집이 `ps` +
 /// `lsof` fork 라 렌더 스레드에서 돌릴 수 없다 — info.rs 참고). `shell_pid` 는
@@ -780,6 +787,8 @@ pub(crate) struct InfoState {
     pub(crate) selected_session_id: String,
     pub(crate) selected_harness: String,
     pub(crate) tab: SideTab,
+    pub(crate) page: InfoPage,
+    pub(crate) page_rects: Vec<(InfoPage, (f32, f32, f32, f32))>,
     pub(crate) navigation: crate::sidebar_navigation::NavigationState,
     /// 이사 탭 본문 상태. App 필드가 아니라 여기 있는 건 병렬 작업 규칙 때문이다
     /// (struct App 정의는 충돌 핫스팟 — 탭 상태는 탭 선택과 같은 집에 있어도
@@ -882,6 +891,8 @@ impl Default for InfoState {
             selected_session_id: String::new(),
             selected_harness: String::new(),
             tab: SideTab::Git,
+            page: InfoPage::default(),
+            page_rects: Vec::new(),
             navigation: crate::sidebar_navigation::NavigationState::default(),
             machines_col: MachinesColState::default(),
             snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
@@ -1222,5 +1233,58 @@ impl Default for CollabState {
             hub,
             unread: 0,
         }
+    }
+}
+
+impl InfoState {
+    pub(crate) fn runtime_page(&self) -> bool {
+        self.tab == SideTab::Info && self.page == InfoPage::Runtime
+    }
+
+    pub(crate) fn shared_page(&self) -> bool {
+        self.tab == SideTab::Info && self.page == InfoPage::SharedFiles
+    }
+
+    pub(crate) fn clear_info_targets(&mut self) {
+        self.focus_rects.clear();
+        self.group_rects.clear();
+        self.tip_rects.clear();
+        self.proc_rects.clear();
+        self.kill_rects.clear();
+        self.sec_rects.clear();
+        self.dir_btn_rects.clear();
+        self.ctx_menu_rects.clear();
+        self.pane_menu_rects.clear();
+        self.machine_rects.clear();
+        self.machine_pane_rects.clear();
+        self.ctx_menu = None;
+        self.pane_menu = None;
+        self.machine_menu = None;
+        self.refresh_rect = None;
+        self.panel_rect = None;
+    }
+}
+
+#[cfg(test)]
+mod info_page_tests {
+    use super::*;
+
+    #[test]
+    fn shared_files_belong_to_info_and_never_activate_runtime_targets() {
+        let mut info = InfoState::default();
+        info.page = InfoPage::SharedFiles;
+        assert!(!info.shared_page());
+        info.tab = SideTab::Info;
+        assert!(info.shared_page());
+        assert!(!info.runtime_page());
+        let rect = (1.0, 2.0, 26.0, 26.0);
+        info.kill_rects.push((1, rect));
+        info.dir_btn_rects.push((InfoDirBtn::CopyPath, rect));
+        info.refresh_rect = Some(rect);
+        info.clear_info_targets();
+        assert!(info.kill_rects.is_empty() && info.dir_btn_rects.is_empty() && info.refresh_rect.is_none());
+        info.page = InfoPage::Runtime;
+        assert!(info.runtime_page());
+        assert!(!info.shared_page());
     }
 }

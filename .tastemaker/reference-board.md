@@ -80,3 +80,9 @@ Design read: native recovery and history collection for daily terminal use, Oper
 - Avoid repeated avatar-only chips, destructive hover-only x controls, uncontrolled card growth and listing other-device sessions as local recovery. Keep scrolling and repeated selection immediate.
 
 Geometry and interaction contract: `docs/design.md`. Visual acceptance is pending; no personal taste profile promotion.
+
+## Custom colors and Info follow-up — 2026-10-15
+
+The user requested arbitrary color customization and shared folders inside Info. Native release captures cover the always-visible accent HEX/HSV editor, per-statusbar color editor and Info shared files at 390px and 1280px. The compact shared list now starts at 211px (previously 173px); the extra 38px is the Info page selector and the first file remains in the initial viewport. Editors stack at narrow widths without horizontal overflow.
+
+Runtime verification covers preview without writes, cancel restoring a named preset or inherited statusbar color, rejection of invalid HEX, exact custom RGB after reloading settings, and independent color targets. The OS eyedropper callback uses the same typed targets; actual screen sampling and physical IME were not automated. No cross-project profile was changed.

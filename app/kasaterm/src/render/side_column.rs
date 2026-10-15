@@ -34,10 +34,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
     let bottom = (f.viewport.1 - f.status_h).max(top);
     let Panels { git, info, sessions, mcp, share, preedit, closed_panes } = p;
     match info.tab {
-        state::SideTab::Share => {
-            let body_top = head(g, info, git, f, top, bottom);
-            crate::share_panel::draw(g, share, f.cursor, preedit, f.x, f.w, body_top, bottom);
-        }
         state::SideTab::Git => {
             git.use_panel_snapshot(f.git_view);
             let y = head(g, info, git, f, top, bottom);
@@ -45,6 +41,13 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
         }
         state::SideTab::Info => {
             let body_top = head(g, info, git, f, top, bottom);
+            let body_top = info_pages(g, info, f, body_top);
+            if info.shared_page() {
+                info.clear_info_targets();
+                crate::share_panel::draw(g, share, f.cursor, preedit, f.x, f.w, body_top, bottom);
+                return;
+            }
+            share.hits.clear();
             info::draw_info_col(g, f.cursor, info, f.x, f.w, body_top, bottom);
             // 「—」 의 까닭·잘린 값의 전문 — 표를 다 그린 뒤 커서 아래 것 하나만.
             let (cx, cy) = f.cursor;
@@ -77,6 +80,19 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
     }
 }
 
+fn info_pages(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, f: &Frame<'_>, top: f32) -> f32 {
+    info.page_rects.clear();
+    let width = ((f.w - 36.0) / 2.0).clamp(0.0, 140.0);
+    for (i, (page, label)) in [(state::InfoPage::Runtime, "실행 정보"),
+        (state::InfoPage::SharedFiles, "공유 폴더")].into_iter().enumerate() {
+        let rect = crate::native_controls::text_button(g,
+            (f.x + 14.0 + i as f32 * (width + 8.0), top + 4.0, width, 26.0), f.cursor, label,
+            crate::native_controls::Style { active: info.page == page, ..Default::default() });
+        info.page_rects.push((page, rect));
+    }
+    top + 38.0
+}
+
 fn head(
     g: &mut gpu::GpuRenderer,
     info: &mut state::InfoState,
@@ -87,6 +103,7 @@ fn head(
 ) -> f32 {
     g.rect(f.x, top, f.w, bottom - top, f.bg);
     g.rect(f.x, top, 1.0, bottom - top, theme::border());
+    info.page_rects.clear();
     info::draw_side_tabs(g, f.cursor, info, git, f.x, f.w, top)
 }
 

@@ -400,7 +400,7 @@ impl App {
         theme::sidebar_bg().hash(&mut hash);
         theme::character_appearance().hash(&mut hash);
         theme::text().hash(&mut hash);
-        theme::accent_name().hash(&mut hash);
+        theme::accent().hash(&mut hash);
         // The full display gate may refresh argv with ps; idle invalidation only
         // needs the cached binding and agent state, not another process query.
         ws.pane_character.get(id).hash(&mut hash);
@@ -1546,7 +1546,7 @@ impl App {
                 overlay_claude_session_label(
                     &mut composed,
                     &name,
-                    prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
+                    prompt_accent.unwrap_or_else(|| theme::accent()),
                 );
             }
         }
@@ -2045,7 +2045,7 @@ impl App {
             overlay_tell_waiting_label(
                 &mut composed,
                 &crate::tell_delivery::waiting_label(*count, *hold),
-                prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
+                prompt_accent.unwrap_or_else(|| theme::accent()),
             );
         }
         // codex 자리의 세션 이름 배지. claude 는 CLI 가 /rename 뒤 스스로 위보더
@@ -2066,7 +2066,7 @@ impl App {
                 overlay_codex_session_label(
                     &mut composed,
                     &name,
-                    prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
+                    prompt_accent.unwrap_or_else(|| theme::accent()),
                 );
             }
         }
@@ -2077,7 +2077,7 @@ impl App {
         // 섞은 톤, `❯` 는 accent 원색. 픽커/목록 화면은 선택 강조가
         // (`❯`+배경) 오탐되므로 통째로 건너뛴다.
         if !(agents_view || resume_picker || ask_picker) {
-            let accent = prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name()));
+            let accent = prompt_accent.unwrap_or_else(|| theme::accent());
             let base = theme::pane_bg();
             let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
             let amount = if light { 0.10 } else { 0.18 };

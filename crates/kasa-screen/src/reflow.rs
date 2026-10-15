@@ -513,6 +513,11 @@ pub fn list_item(row: &Row) -> bool {
     info_of(&trimmed(row)).marked()
 }
 
+/// 이 줄을 접을 때 이어지는 조각을 맞출 칸 — 글머리 뒤 글이 시작하는 자리, 없으면 앞 빈칸 수.
+pub fn hanging_indent_of(row: &Row) -> usize {
+    hanging_indent(&trimmed(row))
+}
+
 /// 다시 접은 격자.
 pub struct Reflowed {
     pub rows: Vec<Row>,

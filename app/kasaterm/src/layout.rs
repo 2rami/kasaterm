@@ -396,9 +396,10 @@ impl App {
         // A mirror now lays out text at its own columns/rows. Never make its
         // font smaller merely because the source window is larger — except a
         // shell mirror inside a full-screen program, which cannot be re-wrapped
-        // and is only shown shrunk to fit (docs/mirror-render.md).
+        // and is only shown shrunk until the source grid follows this pane
+        // (docs/mirror-render.md).
         let needs_fit = if kasa_mcp::remote::is_view_pane(active_pid) {
-            self.mirror_kind(active_pid) == crate::mirror_render::MirrorKind::Shell
+            self.mirror_kind(active_pid) != crate::mirror_render::MirrorKind::Chat
                 && pane.term().is_some_and(|t| t.alt_screen)
         } else {
             self.pty.get(active_pid).is_some_and(|session| session.has_viewer_size_control())
@@ -432,10 +433,11 @@ impl App {
         )
     }
 
-    /// 풀스크린(alt-screen) Claude·코덱스 거울을 다시 접지 않고 원본 격자 그대로 칸에 맞춘 배율.
-    /// 풀스크린 앱은 지난 줄을 앱 안에만 두어, 다시 접은 화면이 칸보다 짧으면 위를 채울 줄이 없다
-    /// (docs/mirror-render.md). 그때 원본보다 큰 칸은 키우고, 원본보다 좁은 칸은 줄여서라도 원본을 다
-    /// 보인다. 넓고 낮은 칸은 다시 접는 편이 글자가 커서 그대로 둔다. 다시 접은 화면이 칸을 채우면 None.
+    /// 터미널로 보는 풀스크린(alt-screen) Claude·코덱스 거울을 다시 접지 않고 원본 격자 그대로 칸에 맞춘
+    /// 배율. 풀스크린 앱은 지난 줄을 앱 안에만 두어, 다시 접은 화면이 칸보다 짧으면 위를 채울 줄이 없다
+    /// (docs/mirror-render.md). 원본보다 좁은 칸은 줄여서라도 원본을 다 보인다 — 키우지는 않는다: 원본이
+    /// 작으면 보통 글자로 다시 접고, 보는 동안 원본 격자가 이 칸 크기를 따라온다(`mirror_follow.rs`).
+    /// 넓고 낮은 칸은 다시 접는 편이 글자가 커서 그대로 둔다. 다시 접은 화면이 칸을 채우면 None.
     pub(crate) fn mirror_source_fit(&self, ws: &Workspace, id: &str) -> Option<f32> {
         let pane = ws.panes.get(id)?;
         let pid = ws.active_tab_pid(id);
@@ -450,7 +452,7 @@ impl App {
         let source = (term.cols.max(1), term.cells.len().max(1));
         let fit = (usable.0 / (source.0 as f32 * cw)).min(usable.1 / (source.1 as f32 * ch)) * 0.999;
         let view = ((usable.0 / (cw * manual)).floor() as u16, (usable.1 / (ch * manual)).floor() as u16);
-        if !fit.is_finite() || (fit <= manual && view.0 >= source.0) {
+        if !fit.is_finite() || fit >= manual || view.0 >= source.0 {
             return None;
         }
         let key = [view.0, view.1, source.0, source.1 as u16];

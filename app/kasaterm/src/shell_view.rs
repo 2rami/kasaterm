@@ -4,8 +4,9 @@
 //! 가고(탭 완성·기록·Ctrl-C 가 그대로 산다), 맨 아래 입력 줄은 원본 격자의 커서 줄을
 //! 이 폭으로 접어 보인다.
 //!
-//! 셸 통합 표지가 없거나(bash·ssh 너머) 전체 화면 프로그램이 도는 동안은 카드를 접고
-//! 원본 격자를 칸에 맞춰 줄여 보기만 한다(`layout.rs pane_display_scale`).
+//! 거울 셸 칸은 처음부터 이 보기다(`mirror_render`). 셸 통합 표지가 없거나(bash·ssh 너머) 전체 화면
+//! 프로그램이 도는 동안은 카드를 접고 원본 격자를 보이며(크면 줄인다, `layout.rs pane_display_scale`),
+//! 보는 동안 원본 크기를 이 칸으로 잡는다(`mirror_follow.rs`).
 //!
 //! 이 기기 셸 칸도 ⋮ 「명령으로 보기」로 같은 카드가 된다(워프처럼). 데이터는 같은 창구를
 //! 제 HTTP 로 읽는다. 학생(claude·codex)이 뜨면 터미널로 돌아가고, 나가면 다시 카드다.
@@ -37,6 +38,8 @@ pub(crate) struct ShellViews {
     old_sources: HashSet<String>,
     /// 명령으로 보기를 켠 셸 칸(바깥 pane id) — 이 기기 칸과 거울 칸 둘 다. 안 켠 칸은 터미널이다.
     chosen: HashSet<String>,
+    /// 사람이 터미널로 돌려 둔 칸 — 거울의 처음 얼굴(`mirror_render`)이 다시 켜지 않는다.
+    pub(crate) declined: HashSet<String>,
 }
 
 pub(crate) struct ShellPane {
@@ -311,12 +314,24 @@ impl App {
         })
     }
 
+    /// 초점은 그대로 두고 명령으로 본다 — 거울의 처음 얼굴(`mirror_render`).
+    pub(crate) fn open_shell_view_quietly(&mut self, id: &str) {
+        if self.shell_view.chosen.insert(id.to_string()) {
+            self.chrome_dirty = true;
+        }
+    }
+
+    /// 원본이 셸 통합 표지를 안 낸다고 답했다 — 명령 묶음으로 못 그리는 셸.
+    pub(crate) fn shell_view_lacks_integration(&self, id: &str) -> bool {
+        self.shell_view.panes.get(id).is_some_and(|p| p.feed.try_lock().is_ok_and(|f| f.loaded && !f.integration && !f.gone))
+    }
+
     pub(crate) fn shell_view_showing(&self, id: &str) -> bool {
         self.shell_view.drawn.contains_key(id)
     }
 
     /// 명령으로 볼 수 있는 셸 칸 — 터미널 탭이고 학생이 안 돈다. 거울은 원본이 셸이라고
-    /// 답한 칸만(거울도 처음엔 터미널이다). lite 는 HTTP 창구가 없어 못 읽는다.
+    /// 답한 칸만. lite 는 HTTP 창구가 없어 못 읽는다.
     pub(crate) fn pane_can_blocks(&self, ws: &Workspace, id: &str) -> bool {
         let Some(pane) = ws.panes.get(id) else { return false };
         if self.lite || !pane.tabs.get(pane.active_tab).is_some_and(|t| t.term().is_some()) {
@@ -334,7 +349,10 @@ impl App {
     }
 
     pub(crate) fn toggle_shell_view(&mut self, id: &str) {
-        if !self.shell_view.chosen.remove(id) {
+        if self.shell_view.chosen.remove(id) {
+            self.shell_view.declined.insert(id.to_string());
+        } else {
+            self.shell_view.declined.remove(id);
             self.shell_view.chosen.insert(id.to_string());
             self.selection = None;
             self.drag_anchor = None;

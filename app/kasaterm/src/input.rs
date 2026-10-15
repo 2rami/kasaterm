@@ -2787,7 +2787,7 @@ impl App {
                 return;
             }
         }
-        if self.git.col_visible && self.info.tab == state::SideTab::Share
+        if self.git.col_visible && self.info.shared_page()
             && self.cursor_px.1 > TITLE_HEIGHT && self.cursor_px.0 >= self.git_col_x()
         {
             self.share.scroll = (self.share.scroll - lines as f32 * 22.0).clamp(0.0, self.share.scroll_max);
@@ -2799,7 +2799,7 @@ impl App {
         // (draw_info_col) 여기선 하한만 잡고 넘긴다 — 목록 길이가 워커 스레드에서
         // 바뀌므로 입력 시점의 최대치는 이미 낡았을 수 있다.
         if self.git.col_visible
-            && self.info.tab == state::SideTab::Info
+            && self.info.runtime_page()
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.git_col_x()
         {

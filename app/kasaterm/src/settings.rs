@@ -1150,15 +1150,17 @@ impl App {
             }
             // 피커 면은 settings_click 이 좌표와 함께 가로챈다(picker_pick) —
             // 좌표 없는 이 경로로 오면 고를 값이 없다.
-            SettingsAction::PickerSV | SettingsAction::PickerHue => {}
-            SettingsAction::PaletteEyedropper(slot) => {
+            SettingsAction::PickerSV(_) | SettingsAction::PickerHue(_) => {}
+            SettingsAction::ColorEyedropper(slot) => {
                 if crate::eyedropper::supported() {
                     crate::eyedropper::pick_screen_color(slot);
                 } else {
                     self.set_toast("이 운영체제에선 화면 집기를 아직 못 써요".to_string());
                 }
             }
+            SettingsAction::FocusColor(field) => self.focus_custom_color(field),
             SettingsAction::Accent(name) => {
+                let Some(name) = theme::normalized_accent(&name) else { return; };
                 theme::set_accent(&name);
                 socket::write_setting("accent", serde_json::Value::String(name));
                 self.repaint_all();
@@ -2076,7 +2078,7 @@ impl App {
                         "이 운영체제에선 화면 집기를 아직 못 써요".to_string(),
                     ));
                 }
-                crate::eyedropper::pick_screen_color(i);
+                crate::eyedropper::pick_screen_color(SettingsInput::PaletteHex(i));
                 Ok(true)
             }
             // 색 패널을 여는 동안 오는 미리보기. 화면만 갈고 파일은 안 건드리므로
@@ -2100,13 +2102,9 @@ impl App {
                 Ok(true)
             }
             "accent" => {
-                let name = theme::ACCENT_PRESETS
-                    .iter()
-                    .find(|(n, _)| *n == id)
-                    .map(|(n, _)| *n)
-                    .ok_or_else(|| unknown(id))?;
-                self.settings_apply(SettingsAction::Accent(name.to_string()));
-                Ok(theme::accent_name() == name)
+                let value = theme::normalized_accent(id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::Accent(value.clone()));
+                Ok(theme::accent() == theme::accent_color(&value))
             }
             "shape" => {
                 let key = theme::SHAPE_PRESETS
@@ -3048,20 +3046,22 @@ impl App {
         r: (f32, f32, f32, f32),
         p: (f32, f32),
     ) {
-        let Some(SettingsInput::PaletteHex(slot)) = self.settings_input else {
-            return;
+        let field = match action {
+            SettingsAction::PickerSV(field) | SettingsAction::PickerHue(field) if field.is_color() => *field,
+            _ => return,
         };
+        if self.settings_input != Some(field) { return; }
         let (rx, ry) = picker_relative_position(r, p);
         let (h, s, v) = self.set_picker_hsv;
         self.set_picker_hsv = match action {
             // 360.0 은 0.0 과 같은 색이지만 마커가 왼쪽 끝으로 감겨 보인다.
-            SettingsAction::PickerHue => ((rx * 360.0).min(359.9), s, v),
+            SettingsAction::PickerHue(_) => ((rx * 360.0).min(359.9), s, v),
             _ => (h, rx, 1.0 - ry),
         };
         let (h, s, v) = self.set_picker_hsv;
         self.set_palette_edit = theme::hex_str(hsv_to_rgb(h, s, v));
         self.settings_caret = self.set_palette_edit.chars().count();
-        self.apply_palette_edit(slot);
+        self.apply_color_edit(field);
         self.chrome_dirty = true;
     }
 
@@ -3073,20 +3073,22 @@ impl App {
         r: (f32, f32, f32, f32),
         p: (f32, f32),
     ) {
-        let Some(SettingsInput::PaletteHex(slot)) = self.settings_input else {
-            return;
+        let field = match action {
+            SettingsAction::PickerSV(field) | SettingsAction::PickerHue(field) if field.is_color() => *field,
+            _ => return,
         };
+        if self.settings_input != Some(field) { return; }
         let (rx, ry) = picker_relative_position(r, p);
         let (h, s, v) = self.set_picker_hsv;
         self.set_picker_hsv = match action {
-            SettingsAction::PickerHue => ((rx * 360.0).min(359.9), s, v),
+            SettingsAction::PickerHue(_) => ((rx * 360.0).min(359.9), s, v),
             _ => (h, rx, 1.0 - ry),
         };
         let (h, s, v) = self.set_picker_hsv;
         let rgb = hsv_to_rgb(h, s, v);
         self.set_palette_edit = theme::hex_str(rgb);
         self.settings_caret = self.set_palette_edit.chars().count();
-        self.preview_palette_edit(slot, rgb);
+        self.preview_color_edit(field, rgb);
         self.chrome_dirty = true;
     }
 
@@ -3192,11 +3194,51 @@ impl App {
     /// 스포이드가 집어 둔 색이 있으면 그 칸에 굳힌다. GUI 틱이 부른다 — 시스템
     /// 콜백은 `App` 을 못 들고 오므로 색만 통에 놓고 가고, 꺼내는 건 여기다.
     pub(crate) fn pump_eyedropper(&mut self) {
-        let Some((slot, rgb)) = crate::eyedropper::take_picked() else {
-            return;
-        };
+        let Some((field, rgb)) = crate::eyedropper::take_picked() else { return; };
+        if !field.is_color() { return; }
+        let previous = self.set_palette_edit.clone();
+        let previous_hsv = self.set_picker_hsv;
         self.set_palette_edit = theme::hex_str(rgb);
-        self.apply_palette_edit(slot);
+        if self.settings_input == Some(field) { self.settings_scene.mark_field_dirty(); }
+        self.apply_color_edit(field);
+        if self.settings_input != Some(field) {
+            self.set_palette_edit = previous;
+            self.set_picker_hsv = previous_hsv;
+        }
+    }
+
+    pub(crate) fn focus_custom_color(&mut self, field: SettingsInput) {
+        let color = match field {
+            SettingsInput::AccentHex => theme::accent(),
+            SettingsInput::StatusbarHex(id) => self.set_statusbar.color(id, theme::text_dim()),
+            _ => return,
+        };
+        self.set_palette_edit = theme::hex_str([color[0], color[1], color[2]]);
+        self.set_picker_hsv = rgb_to_hsv([color[0], color[1], color[2]]);
+        self.settings_caret = self.set_palette_edit.chars().count();
+        self.settings_input = Some(field);
+    }
+
+    pub(crate) fn apply_color_edit(&mut self, field: SettingsInput) {
+        let Some(rgb) = theme::parse_hex(&self.set_palette_edit) else { return; };
+        self.sync_picker_hsv(rgb);
+        let hex = theme::hex_str(rgb);
+        match field {
+            SettingsInput::PaletteHex(slot) => self.apply_palette_edit(slot),
+            SettingsInput::AccentHex => self.settings_apply(SettingsAction::Accent(hex)),
+            SettingsInput::StatusbarHex(id) => self.settings_apply(SettingsAction::SetStatusbarColor(id.to_string(), hex)),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn preview_color_edit(&mut self, field: SettingsInput, rgb: [u8; 3]) {
+        match field {
+            SettingsInput::PaletteHex(slot) => self.preview_palette_edit(slot, rgb),
+            SettingsInput::AccentHex => theme::preview_accent(rgb),
+            SettingsInput::StatusbarHex(id) => self.set_statusbar.set_color(id, &theme::hex_str(rgb)),
+            _ => return,
+        }
+        self.repaint_all();
     }
 
     /// persona 편집 버퍼를 characters.json 에 저장(선택 캐릭터가 있고 실제로
@@ -3731,7 +3773,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     ]
 }
 
-fn rgb_to_hsv(c: [u8; 3]) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_hsv(c: [u8; 3]) -> (f32, f32, f32) {
     let (r, g, b) = (
         c[0] as f32 / 255.0,
         c[1] as f32 / 255.0,

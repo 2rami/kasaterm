@@ -869,7 +869,7 @@ impl crate::App {
     /// render 매 틱 — Info 가 열려 있을 때만 지금 보는 칸의 기록을 따라 읽고 화면 자리와 맞춘다.
     pub(crate) fn pump_info_prompts(&mut self) {
         self.pump_screen_seek();
-        let open = self.info.tab == crate::state::SideTab::Info && self.git.col_visible;
+        let open = self.info.runtime_page() && self.git.col_visible;
         let seen = if open { self.ws.lock().ok().and_then(|ws| focused(&ws)) } else { None };
         let source = seen.as_ref().and_then(|(_, pid)| match kasa_mcp::remote::remote_meta(pid) {
             Some((base, rid)) => Some(Source::Remote(base, rid)),

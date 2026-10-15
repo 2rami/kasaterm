@@ -641,22 +641,32 @@ pub const ACCENT_PRESETS: &[(&str, [u8; 4])] = &[
     ("pink", [228, 100, 160, 255]),
 ];
 
-pub fn accent_color(name: &str) -> [u8; 4] {
-    ACCENT_PRESETS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, c)| *c)
-        .unwrap_or(ACCENT_PRESETS[0].1)
+pub(crate) fn normalized_accent(value: &str) -> Option<String> {
+    let value = value.trim();
+    if let Some((name, _)) = ACCENT_PRESETS.iter().find(|(name, _)| *name == value) {
+        Some((*name).to_string())
+    } else {
+        parse_hex(value).map(hex_str)
+    }
 }
 
-/// Current accent's preset name (for the settings screen's selected state).
-pub fn accent_name() -> &'static str {
-    let cur = accent();
-    ACCENT_PRESETS
-        .iter()
-        .find(|(_, c)| *c == cur)
-        .map(|(n, _)| *n)
-        .unwrap_or("blue")
+pub fn accent_color(value: &str) -> [u8; 4] {
+    if let Some(rgb) = parse_hex(value) { return [rgb[0], rgb[1], rgb[2], 255]; }
+    ACCENT_PRESETS.iter().find(|(name, _)| *name == value)
+        .map(|(_, color)| *color).unwrap_or(ACCENT_PRESETS[0].1)
+}
+
+pub fn accent_name() -> String {
+    let color = accent();
+    ACCENT_PRESETS.iter().find(|(_, c)| *c == color)
+        .map(|(name, _)| (*name).to_string())
+        .unwrap_or_else(|| hex_str([color[0], color[1], color[2]]))
+}
+
+pub(crate) fn preview_accent(rgb: [u8; 3]) {
+    let value = pack([rgb[0], rgb[1], rgb[2], 255]);
+    S_ACCENT.store(value, Ordering::Relaxed);
+    S_CURSOR.store(value, Ordering::Relaxed);
 }
 
 /// Active theme key ("dark", "catppuccin-mocha", "custom:<slug>"…) for the
@@ -2663,6 +2673,39 @@ mod activity_edge_tests {
                 assert!(duty > 0.0 && duty < 1.0, "틈이 있어야 실선(초점)과 갈린다");
                 assert!(alpha(activity_edge(Activity::Background, focused, small)) <= alpha(activity_edge(Activity::Working, focused, small)));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod custom_accent_tests {
+    use super::*;
+
+    #[test]
+    fn custom_accent_accepts_full_rgb_range_without_nearest_preset_quantization() {
+        for (input, expected, rgb) in [
+            ("#36B4a7", "#36b4a7", [54, 180, 167, 255]),
+            ("123abc", "#123abc", [18, 58, 188, 255]),
+            ("#000000", "#000000", [0, 0, 0, 255]),
+            ("#ffffff", "#ffffff", [255, 255, 255, 255]),
+        ] {
+            let value = normalized_accent(input).unwrap();
+            assert_eq!(value, expected);
+            assert_eq!(accent_color(&value), rgb);
+            let saved = serde_json::json!({"accent":value});
+            let loaded: serde_json::Value = serde_json::from_str(&saved.to_string()).unwrap();
+            assert_eq!(accent_color(loaded["accent"].as_str().unwrap()), rgb);
+        }
+        for (name, rgb) in ACCENT_PRESETS {
+            assert_eq!(normalized_accent(name).as_deref(), Some(*name));
+            assert_eq!(accent_color(name), *rgb);
+        }
+    }
+
+    #[test]
+    fn invalid_custom_accent_is_rejected_before_it_can_replace_the_saved_color() {
+        for input in ["", "#12", "#gg4455", "#12345678", "rgb(1,2,3)", "없는색"] {
+            assert!(normalized_accent(input).is_none(), "{input}");
         }
     }
 }
