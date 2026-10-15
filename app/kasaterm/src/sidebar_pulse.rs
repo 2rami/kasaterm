@@ -9,8 +9,8 @@
 use super::*;
 use kasa_socket::backend::Backend;
 
-/// 맨 위 전환 줄(옛 현황 줄 자리) — 높이 30, 안쪽 26.
-pub(crate) const PULSE_H: f32 = 30.0;
+// 공통 버튼이 커져도 제목줄·기기 머리줄과 클릭 영역이 겹치지 않게 한다.
+pub(crate) const PULSE_H: f32 = crate::native_controls::CONTROL_HEIGHT + 4.0;
 /// 두 줄 목록 행. 얼굴 20 · 첫 줄 세션 이름 12 · 둘째 줄 진행 띠와 경과 시간 10.5(줄높이 14).
 pub(crate) const LIST_ROW_H: f32 = 40.0;
 /// 방 이름 아래 첫 줄까지의 틈. 행 사이는 0.
@@ -599,9 +599,17 @@ mod tests {
     #[test]
     fn switch_icons_sit_in_the_switch_row_on_the_card_line() {
         let (list, map) = switch_rects(240.0).unwrap();
-        assert_eq!((list.0, list.2, list.3), (SIDEBAR_TAB_INSET, 26.0, 26.0));
+        let size = crate::native_controls::CONTROL_HEIGHT;
+        assert_eq!((list.0, list.2, list.3), (SIDEBAR_TAB_INSET, size, size));
         assert_eq!(map.0, list.0 + list.2 + 6.0, "사이 6");
         assert!(list.1 >= TITLE_HEIGHT && list.1 + list.3 <= TITLE_HEIGHT + PULSE_H, "전환 줄 안");
+        for width in [140.0, 240.0, 320.0, 480.0, 720.0] {
+            let (left, right) = switch_rects(width).unwrap();
+            for rect in [left, right] {
+                assert!(rect.1 >= TITLE_HEIGHT && rect.1 + rect.3 <= TITLE_HEIGHT + PULSE_H);
+                assert!(rect.0 >= 0.0 && rect.0 + rect.2 <= width);
+            }
+        }
         assert!(crate::gpu::GpuRenderer::icon_svg("list").is_some() && crate::gpu::GpuRenderer::icon_svg("layout-grid").is_some());
         assert!(switch_rects(60.0).is_none(), "둘이 안 들어가면 안 그린다 — 반쪽 단추를 누르게 두지 않는다");
     }

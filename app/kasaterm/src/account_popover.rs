@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     fn resend_row_is_below_reset_and_management_controls_at_narrow_flyout_widths() {
         assert_eq!(account_retry_height(false), 0.0);
-        assert_eq!(account_retry_height(true), 30.0);
+        assert_eq!(account_retry_height(true), crate::native_controls::CONTROL_HEIGHT + 4.0);
         for width in [284.0, 380.0, 384.0] {
             let base_height = 28.0 + 16.0 + 30.0;
             let total_height = base_height + account_retry_height(true);
