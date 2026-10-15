@@ -700,12 +700,16 @@ fn paint_selection(
         );
     }
     let button_y = fy + if l.dense { 0.0 } else { 24.0 };
-    let restore_w = 134.0_f32.min(l.footer.2 * 0.5);
-    let fresh_w = 90.0_f32.min((l.footer.2 - restore_w - 8.0).max(0.0));
+    let restore_h = if l.dense { 26.0 } else { 32.0 };
+    let restore_label = format!("{}개 복원하기", state.count());
+    let restore_w = crate::native_controls::button_width(g, &restore_label, restore_h, true)
+        .min(l.footer.2 * 0.5);
+    let fresh_w = crate::native_controls::button_width(g, "새로 시작", restore_h, false)
+        .min((l.footer.2 - restore_w - 8.0).max(0.0));
     let restore_x = l.footer.0 + l.footer.2 - restore_w;
     let fresh = text_button(
         g,
-        (restore_x - 8.0 - fresh_w, button_y, fresh_w, 28.0),
+        (restore_x - 8.0 - fresh_w, button_y, fresh_w, restore_h),
         cursor,
         "새로 시작",
         Style::default(),
@@ -713,7 +717,7 @@ fn paint_selection(
     hits.push((RestoreBtn::Fresh, fresh));
     let restore = text_button(
         g,
-        (restore_x, button_y, restore_w, 28.0),
+        (restore_x, button_y, restore_w, restore_h),
         cursor,
         &format!("{}개 복원하기", state.count()),
         Style {

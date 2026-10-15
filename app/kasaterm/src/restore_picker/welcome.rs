@@ -320,37 +320,36 @@ pub(super) fn paint(
         );
     }
     let by = l.footer.1 + if l.dense { 4.0 } else { 40.0 };
-    let usable = (l.footer.2 - 16.0).max(0.0);
-    let primary_w = (usable * 0.42).min(134.0);
-    let choose_w = (usable * 0.32).min(100.0);
-    let fresh_w = (usable - primary_w - choose_w).min(94.0);
-    let primary_x = l.footer.0 + l.footer.2 - primary_w;
+    let height = if l.dense { 26.0 } else { 32.0 };
     let all = state.count() == state.selected.len();
-    let toggle_label = if choose_w < 76.0 {
-        if all {
-            "해제"
-        } else {
-            "전체"
-        }
-    } else if all {
+    let mut fresh_label = "새로 시작";
+    let mut toggle_label = if all {
         "전체 해제"
     } else {
         "전체 선택"
     };
-    let restore_label = if primary_w < 100.0 {
-        format!("{}개 열기", state.count())
-    } else {
-        format!("{}개 이어가기", state.count())
-    };
+    let mut restore_label = format!("{}개 이어가기", state.count());
+    let total = crate::native_controls::button_width(g, fresh_label, height, false)
+        + crate::native_controls::button_width(g, toggle_label, height, false)
+        + crate::native_controls::button_width(g, &restore_label, height, true)
+        + 16.0;
+    if total > l.footer.2 {
+        fresh_label = "새로";
+        toggle_label = if all { "해제" } else { "전체" };
+        restore_label = format!("{}개 열기", state.count());
+    }
+    let primary_w = crate::native_controls::button_width(g, &restore_label, height, true)
+        .min(l.footer.2 * 0.46);
+    let choose_w = crate::native_controls::button_width(g, toggle_label, height, false)
+        .min((l.footer.2 - primary_w - 16.0) * 0.5);
+    let fresh_w = crate::native_controls::button_width(g, fresh_label, height, false)
+        .min((l.footer.2 - primary_w - choose_w - 16.0).max(0.0));
+    let primary_x = l.footer.0 + l.footer.2 - primary_w;
     for (action, label, rect, primary, enabled) in [
         (
             RestoreBtn::Fresh,
-            if fresh_w < 76.0 {
-                "새로"
-            } else {
-                "새로 시작"
-            },
-            (l.footer.0, by, fresh_w, 28.0),
+            fresh_label,
+            (l.footer.0, by, fresh_w, height),
             false,
             true,
         ),
@@ -361,14 +360,14 @@ pub(super) fn paint(
                 RestoreBtn::All
             },
             toggle_label,
-            (primary_x - 8.0 - choose_w, by, choose_w, 28.0),
+            (primary_x - 8.0 - choose_w, by, choose_w, height),
             false,
             true,
         ),
         (
             RestoreBtn::Restore,
             restore_label.as_str(),
-            (primary_x, by, primary_w, 28.0),
+            (primary_x, by, primary_w, height),
             true,
             state.count() > 0,
         ),

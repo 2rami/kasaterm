@@ -61,7 +61,7 @@ fn button(
     primary: bool,
     danger: bool,
 ) -> Rect {
-    let rect = controls::text_button(
+    let rect = controls::content_button(
         g,
         rect,
         cursor,
@@ -76,21 +76,8 @@ fn button(
     rect
 }
 
-pub(super) fn flow(widths: &[f32], available: f32) -> (Vec<Rect>, f32) {
-    let mut x = 0.0;
-    let mut y = 0.0;
-    let available = available.max(0.0);
-    let mut rects = Vec::new();
-    for width in widths {
-        let width = width.min(available);
-        if x > 0.0 && x + width > available {
-            x = 0.0;
-            y += 34.0;
-        }
-        rects.push((x, y, width, controls::CONTROL_HEIGHT));
-        x += width + 8.0;
-    }
-    (rects, y + controls::CONTROL_HEIGHT)
+pub(super) fn flow(widths:&[f32],available:f32)->(Vec<Rect>,f32) {
+    crate::native_layout::flow(widths,(0.0,0.0,available,0.0),controls::CONTROL_HEIGHT,8.0,crate::native_layout::Align::Start)
 }
 
 fn choices(
@@ -104,7 +91,7 @@ fn choices(
 ) -> f32 {
     let widths: Vec<_> = items
         .iter()
-        .map(|(s, _, _)| g.measure_chrome_text(s, 12.0, true) + 20.0)
+        .map(|(s, _, active)| controls::button_width(g,s,controls::CONTROL_HEIGHT,*active))
         .collect();
     let (rects, height) = flow(&widths, w);
     for ((label, action, primary), r) in items.into_iter().zip(rects) {

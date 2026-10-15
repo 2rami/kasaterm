@@ -215,6 +215,19 @@ pub struct ChromeBuffer {
     pub instances: Vec<CellInstance>,
 }
 
+#[derive(Clone,Copy,Debug)]
+pub(crate) struct ChromeTextMetrics {
+    pub advance:f32,pub left:f32,pub top:f32,pub right:f32,pub bottom:f32,
+}
+impl ChromeTextMetrics {
+    pub(crate) fn width(self)->f32 { self.advance.max(self.right)-self.left.min(0.0) }
+    pub(crate) fn centered_origin(self,r:(f32,f32,f32,f32),scale:f32)->(f32,f32){
+        let x=r.0+(r.2-(self.right-self.left))/2.0-self.left;
+        let y=r.1+(r.3-(self.bottom-self.top))/2.0-self.top;
+        ((x*scale).round()/scale,(y*scale).round()/scale)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DrawOpts {
     pub font_size: f32,
@@ -591,6 +604,33 @@ impl GpuRenderer {
             1 => self.md_shaper.advance(' ', size_px),
             _ => self.grid.shaper.cell_advance(size_px),
         }
+    }
+
+    pub(crate) fn chrome_text_metrics(&mut self, text: &str, font_size: f32, bold: bool) -> ChromeTextMetrics {
+        let scale=self.grid.scale;
+        let (font,size_px)=self.chrome_face(font_size,bold);
+        let baseline=size_px as f32 * if font==3 {0.92} else {0.78};
+        let mut pen=0.0;let mut bounds:Option<(f32,f32,f32,f32)>=None;
+        for ch in text.chars() {
+            if ch==' ' {pen+=self.chrome_space_advance(size_px as f32,font);continue;}
+            let key=GlyphKey{ch,bold,italic:false,size_px,font};
+            if let Some(entry)=self.chrome_glyph(key) {
+                let left=pen+entry.bearing_x as f32;let top=baseline-entry.bearing_y as f32;
+                let right=left+entry.px_w as f32;let bottom=top+entry.px_h as f32;
+                if entry.px_w>0 && entry.px_h>0 {
+                    bounds=Some(match bounds {Some((l,t,r,b))=>(l.min(left),t.min(top),r.max(right),b.max(bottom)),None=>(left,top,right,bottom)});
+                }
+                pen+=Self::pen_step(ch,entry.px_w as f32,entry.advance,size_px as f32);
+            }
+        }
+        let (left,top,right,bottom)=bounds.unwrap_or((0.0,0.0,pen,font_size*scale));
+        ChromeTextMetrics{advance:pen/scale,left:left/scale,top:top/scale,right:right/scale,bottom:bottom/scale}
+    }
+
+    pub(crate) fn centered_chrome_text(&mut self, rect:(f32,f32,f32,f32), text:&str, opts:DrawOpts) {
+        let m=self.chrome_text_metrics(text,opts.font_size,opts.bold);
+        let (x,y)=m.centered_origin(rect,self.grid.scale);
+        self.draw_text(x,y,text,opts);
     }
 
     pub fn measure_chrome_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {

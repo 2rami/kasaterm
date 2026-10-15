@@ -2179,7 +2179,6 @@ pub(crate) fn draw_side_tabs(
     w: f32,
     top: f32,
 ) -> f32 {
-    let y = top + 10.0;
     let bi = crate::native_controls::CONTROL_HEIGHT;
     let close_x = x + w - 12.0 - bi;
     let expand_x = close_x - bi - 8.0;
@@ -2200,69 +2199,18 @@ pub(crate) fn draw_side_tabs(
         g, (close_x, button_y, bi, bi), cursor, "x", Default::default(),
     ));
     info.tab_rects.clear();
-    // 탭 여섯은 넓을 때만 한 줄에 들어간다(라벨 합 ~143 + 사이 여백 80 + 우상단 버튼
-    // 자리 45). 칼럼이 좁아지면 이 줄이 버튼 밑으로 파고들어 뒤쪽 탭이 잘렸는데,
-    // 탭은 「어느 화면인가」를 고르는 유일한 손잡이라 하나라도 사라지면 그 화면에
-    // 갈 길이 없어진다. 그래서 폭이 모자라면 **줄을 바꿔 흘린다** — 여섯을 다 남기고
-    // 본문이 그만큼 내려간다(반환하는 y 가 본문 상단이라 호출부는 손댈 게 없다).
-    let dens = Density::of(w, GIT_DENSE_FULL, GIT_DENSE_COMPACT);
-    let gap = match dens {
-        Density::Full | Density::Wide | Density::Spacious => 16.0,
-        Density::Compact => 10.0,
-        Density::Icon => 8.0,
-    };
-    let pad_l = if dens.is_icon() { 10.0 } else { 14.0 };
-    let line_h = 30.0_f32;
-    let left = x + pad_l;
-    let mut tx = left;
-    let mut ty = y;
-    let mut row = 0usize;
-    for (tab, label) in [
-        (state::SideTab::Git, "Git"),
-        (state::SideTab::Info, "Info"),
-        (state::SideTab::Sessions, "기록"),
-        (state::SideTab::Mcp, "Addon"),
-    ] {
-        let active = info.tab == tab;
-        let tw = g.measure_chrome_text(label, 12.0, active);
-        // 첫 줄만 우상단 버튼(확대·닫기) 앞에서 끊는다. 둘째 줄부터는 그 위가
-        // 비어 있으니 칼럼 오른쪽 끝까지 쓴다.
-        let limit = if row == 0 {
-            if info.runtime_page() { refresh_x - 8.0 } else { expand_x - 8.0 }
-        } else {
-            x + w - 10.0
-        };
-        if tx > left && tx + tw > limit {
-            row += 1;
-            ty += line_h;
-            tx = left;
-        }
-        let hot = (tx - 4.0, ty - 4.0, tw + 8.0, line_h);
-        let hovered = cursor.0 >= hot.0
-            && cursor.0 <= hot.0 + hot.2
-            && cursor.1 >= hot.1
-            && cursor.1 <= hot.1 + hot.3;
-        g.hover_pointer |= hovered;
-        let col = if active {
-            theme::text()
-        } else if hovered {
-            theme::text_dim()
-        } else {
-            theme::text_mute()
-        };
-        g.draw_text(
-            tx,
-            ty,
-            label,
-            gpu::DrawOpts { font_size: 12.0, color: col, bold: active, italic: false },
-        );
-        if active {
-            g.rect(tx, ty + 17.0, tw, 1.5, theme::accent());
-        }
-        info.tab_rects.push((tab, hot));
-        tx += tw + gap;
+    let left=x+14.0;let line_h=38.0;let mut tx=left;let mut ty=top+4.0;let mut row=0;
+    let controls_left=if info.runtime_page(){refresh_x}else{expand_x};
+    for (tab,label) in [(state::SideTab::Git,"Git"),(state::SideTab::Info,"Info"),(state::SideTab::Sessions,"기록"),(state::SideTab::Mcp,"Addon")] {
+        let active=info.tab==tab;
+        let bw=crate::native_controls::button_width(g,label,bi,true);
+        let limit=if row==0 {controls_left-8.0}else{x+w-14.0};
+        if (row==0 || tx>left) && tx+bw>limit {row+=1;ty+=line_h;tx=left;}
+        let r=crate::native_controls::text_button(g,(tx,ty,bw.min((x+w-14.0-tx).max(0.0)),bi),cursor,label,crate::native_controls::Style{active,..Default::default()});
+        info.tab_rects.push((tab,r));tx+=bw+6.0;
     }
-    ty + 27.0
+    (ty+bi+10.0).max(button_y+bi+10.0)
+
 }
 
 pub(crate) const ROW_H: f32 = 22.0;

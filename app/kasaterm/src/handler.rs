@@ -7962,6 +7962,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
         self.run_button_focus_probe(event_loop);
+        self.run_cloud_control_probe();
         self.run_tui_mouse_probe(event_loop);
         self.refresh_hover_pointer();
         self.run_pending_autoghost();

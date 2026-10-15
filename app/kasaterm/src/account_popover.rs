@@ -1590,7 +1590,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                 let width = (g.measure_chrome_text(label, 12.0, false)
                     + 2.0 * crate::native_controls::CONTROL_PADDING_X)
                     .min((sw - 2.0 * pad_x).max(0.0));
-                let rect = crate::native_controls::text_button(g,
+                let rect = crate::native_controls::content_button(g,
                     (sx + pad_x, sry + base_row_h, width, crate::native_controls::CONTROL_HEIGHT),
                     if body_hover { frame.cursor } else { (f32::NEG_INFINITY, f32::NEG_INFINITY) },
                     label, Default::default());

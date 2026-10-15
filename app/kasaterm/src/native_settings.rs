@@ -23,30 +23,21 @@ fn ime_window_rect(rect: Rect, ui_zoom: f32) -> Rect {
     (rect.0 * ui_zoom, rect.1 * ui_zoom, rect.2 * ui_zoom, rect.3 * ui_zoom)
 }
 
-/// 페이지 이름이 앉는 머리 칸. 이름은 `ay + 26` 에 20pt 로 그려지고 본문은 이
-/// 칸 아래 14px 에서 시작하므로, 이 값이 곧 **이름과 첫 묶음 제목 사이의 공백**을
-/// 정한다. 64 일 때 그 사이가 63px 로 벌어져 묶음 제목–첫 행 간격(25px)의 2.5배가
-/// 됐다 — 이름만 위에 떠 보인다(2026-09-22 실측). 44 면 43px 로, 이름이 묶음보다
-/// 큰 단위라는 것은 남기면서 떨어져 보이지는 않는다. 아래로는 본문이 스크롤해
-/// 지나가므로 이름 밑에 14px 는 남긴다.
-const HEADER_H: f32 = 44.0;
-/// 플랫 행 한 줄 높이(목업 `.row` min-height 40).
-const ROW_H: f32 = 40.0;
-/// 조작 부품 높이(목업 `.ctl` 26).
-pub(crate) const CTL_H: f32 = 26.0;
+const HEADER_H: f32 = 60.0;
+const ROW_H: f32 = 48.0;
+pub(crate) const CTL_H: f32 = crate::native_controls::CONTROL_HEIGHT;
 const CONTENT_MAX_W: f32 = 800.0;
+const NAV_GAP: f32 = 16.0;
 
-/// 읽기 열의 가로 자리 — `(x, 폭)`.
-///
-/// 열은 `CONTENT_MAX_W` 에서 자라기를 멈추므로, 창이 그보다 넓어지면 남는 폭이
-/// **전부 오른쪽에 쌓인다**. 2560 창에서 본문 오른쪽이 1026px(창 폭의 40%) 비어
-/// 글이 왼쪽 벽에 붙어 보였다(2026-09-22 실측). 남는 만큼을 좌우로 나눠 세운다.
-/// 좁은 창은 열이 남는 폭을 다 쓰므로 나눌 것이 없어 예전 배치 그대로다.
-fn content_column(ax: f32, aw: f32, nav_w: f32) -> (f32, f32) {
-    let gutter = if nav_w == 0.0 { 12.0 } else if aw < 760.0 { 20.0 } else { 28.0 };
-    let avail = (aw - nav_w - gutter * 2.0).max(0.0);
-    let w = avail.min(CONTENT_MAX_W);
-    (ax + nav_w + gutter + ((avail - w) * 0.5).floor(), w)
+fn content_column(ax:f32,aw:f32,nav_w:f32)->(f32,f32) {
+    content_column_with_max(ax,aw,nav_w,CONTENT_MAX_W)
+}
+fn content_column_with_max(ax:f32,aw:f32,nav_w:f32,max:f32)->(f32,f32) {
+    let gap=if nav_w>0.0 {NAV_GAP} else {0.0};
+    let gutter=if nav_w==0.0 {16.0} else {24.0};
+    let available=(aw-nav_w-gap-2.0*gutter).max(0.0);
+    let width=available.min(max);
+    (ax+nav_w+gap+gutter+((available-width)*0.5).floor(),width)
 }
 const SPRITE_DROP_MAX_BYTES: u64 = 4 << 20;
 const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
@@ -1227,7 +1218,9 @@ impl App {
             Some(Target::FinishInput) => self.native_settings_finish_input(),
             Some(Target::CancelInput) => self.native_settings_cancel_field(),
             Some(Target::Disclosure(id)) => {
-                self.native_settings_blur();
+                if !matches!(id, "color-values-accent" | "color-values-palette" | "color-values-statusbar") {
+                    self.native_settings_blur();
+                }
                 self.settings_scene.toggle_disclosure(id);
             }
             Some(Target::Dropdown(id)) => {
@@ -2612,7 +2605,7 @@ fn navigation_layout(area: Rect, nav_width: f32, count: usize) -> NavigationLayo
     if nav_width == 0.0 {
         let columns = if width < 340.0 { 3 } else { 4 };
         let content_height = count.div_ceil(columns) as f32 * 36.0;
-        let viewport = (x + 12.0, y + 76.0, (width - 24.0).max(0.0),
+        let viewport = (x + 12.0, y + 82.0, (width - 24.0).max(0.0),
             content_height.min((height * 0.28).min(144.0).max(0.0)));
         return NavigationLayout {
             columns, viewport, close: (x + width - 112.0, y + 8.0, 100.0, 32.0),
@@ -2624,9 +2617,9 @@ fn navigation_layout(area: Rect, nav_width: f32, count: usize) -> NavigationLayo
     let viewport = (x, top, nav_width, (close.1 - 8.0 - top).max(0.0));
     let groups_height = NAV_GROUPS.iter().filter(|(start, _)| *start < count).count() as f32 * NAV_GROUP_H;
     let groups = count as f32 * 36.0 + groups_height <= viewport.3;
-    let compact_step = if count as f32 * (CTL_H + 4.0) > viewport.3
-        && count as f32 * (CTL_H + 2.0) <= viewport.3 { CTL_H + 2.0 } else { CTL_H + 4.0 };
-    let (row_height, row_step) = if groups { (32.0, 36.0) } else { (CTL_H, compact_step) };
+    let compact_h=crate::native_controls::COMPACT_HEIGHT;
+    let compact_step=if count as f32*(compact_h+4.0)>viewport.3 && count as f32*(compact_h+2.0)<=viewport.3 {compact_h+2.0}else{compact_h+4.0};
+    let (row_height,row_step)=if groups || count as f32*36.0<=viewport.3 {(32.0,36.0)}else{(compact_h,compact_step)};
     NavigationLayout {
         columns: 1, viewport, close, groups, row_height, row_step,
         content_height: count as f32 * row_step + if groups { groups_height } else { 0.0 },
@@ -2658,18 +2651,17 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let (outer_x, outer_y, outer_w, outer_h) = snapshot.area;
     let (ax, ay, aw, ah) = (outer_x + 12.0, outer_y + 12.0,
         (outer_w - 24.0).max(0.0), (outer_h - 24.0).max(0.0));
-    let nav_w = if aw < 600.0 { 0.0 } else if aw < 760.0 { 154.0 } else { 200.0 };
+    let nav_w = if aw < 600.0 { 0.0 } else if aw < 760.0 { 154.0 } else { 208.0 };
     let compact = nav_w == 0.0;
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
     g.rect(outer_x, outer_y, outer_w, outer_h, theme::bg());
-    round_rect(g, ax, ay + 2.0, aw, ah, theme::radius_md(), theme::with_alpha(theme::text(), 12));
-    round_rect(g, ax, ay, aw, ah, theme::radius_md(), theme::surface());
-    stroke_round(g, (ax, ay, aw, ah), theme::radius_md(), theme::with_alpha(theme::edge_on(theme::surface()), 90));
     if !compact {
-        round_rect(g, ax, ay, nav_w, ah, theme::radius_md(), theme::panel_bg());
-        g.rect(ax + nav_w - theme::radius_md(), ay, theme::radius_md(), ah, theme::panel_bg());
+        crate::native_controls::panel(g,(ax,ay,nav_w,ah),theme::panel_bg());
+        crate::native_controls::panel(g,(ax+nav_w+NAV_GAP,ay,(aw-nav_w-NAV_GAP).max(0.0),ah),theme::surface());
+    } else {
+        crate::native_controls::panel(g,(ax,ay,aw,ah),theme::surface());
     }
     draw_text(g, ax + 20.0, ay + 18.0, "설정", 13.0, theme::text(), true);
     let search = (ax + 12.0, ay + 44.0, if compact { aw - 24.0 } else { nav_w - 24.0 }, CTL_H);
@@ -2792,10 +2784,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
     register(&mut hits, Target::Close, close, HitCursor::Pointer);
 
-    let (content_x, content_w) = content_column(ax, aw, nav_w);
+    let (content_x, content_w) = if snapshot.cat==SettingsCat::Appearance { content_column_with_max(ax,aw,nav_w,1100.0) } else { content_column(ax,aw,nav_w) };
     let (title, _, _blurb) = category_meta(snapshot.cat);
     let title_y = if compact { navigation.viewport.1 + navigation.viewport.3 + 12.0 } else { ay + 24.0 };
-    draw_text(g, content_x, title_y, title, 20.0, theme::text(), true);
+    draw_text(g, content_x, title_y, title, 24.0, theme::text(), true);
 
     let body_top = if compact { title_y + 32.0 } else { ay + HEADER_H + 14.0 };
     let input_footer = snapshot.input.is_some_and(|field| !matches!(field,
@@ -2899,17 +2891,20 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     if input_footer {
         let by = ay + ah - ROW_H;
         g.rect(content_x, by - 4.0, content_w, 1.0, theme::border());
-        let hint = fit(g, "편집 중 · Esc 취소", (content_w - 148.0).max(0.0), 10.5, false);
-        draw_text(g, content_x, by + 7.0, &hint, 10.5, theme::text_dim(), false);
-        button(g, snapshot, &mut hits, (content_x + content_w - 136.0, by, 64.0, CTL_H), "취소", Target::CancelInput, false);
-        button(g, snapshot, &mut hits, (content_x + content_w - 64.0, by, 64.0, CTL_H), "완료", Target::FinishInput, true);
+        let actions=[("취소",Target::CancelInput,false),("완료",Target::FinishInput,true)];
+        let reserved=actions.iter().map(|(label,_,primary)|crate::native_controls::button_width(g,&crate::native_strings::text(label),CTL_H,*primary)).sum::<f32>()+24.0;
+        let hint=fit(g,"편집 중 · Esc 취소",(content_w-reserved).max(0.0),11.0,false);
+        let m=g.chrome_text_metrics(&hint,11.0,false);let(_,hint_y)=m.centered_origin((content_x,by,content_w,CTL_H),g.scale());
+        draw_text(g,content_x,hint_y,&hint,11.0,theme::text_dim(),false);
+        button_row(g,snapshot,&mut hits,(content_x,by,content_w,0.0),&actions,crate::native_layout::Align::End);
+
     }
     // 스크롤바는 **스크롤되는 영역**의 오른쪽에 붙어야 한다. 글자가 앉는
     // `content_*` 를 그대로 주면 그 좌우 여백만큼 안으로 들어와, 막대가 패널
     // 가장자리에서 58px 떨어진 허공에 뜬다(2026-09-05 지적 「스크롤바가 왜 저기
     // 있어 영역설정이 잘못된듯」 · 실측 패널끝 1100 · 막대 1042). 뷰포트는 좌측
     // nav 오른쪽부터 패널 끝까지다.
-    let scroll_x = ax + nav_w;
+    let scroll_x = ax + nav_w + if compact {0.0} else {NAV_GAP};
     let scroll_w = (ax + aw - scroll_x).max(0.0);
     paint_scroll_affordance(
         g,
@@ -3228,6 +3223,24 @@ fn paint_appearance(
     y: &mut f32,
     w: f32,
 ) {
+    if w>=780.0 {
+        let preview_w=(w*0.40).min(390.0);
+        let form_w=w-preview_w-24.0;
+        let preview_x=x+form_w+24.0;
+        let mut preview_y=*y+8.0;
+        draw_text(g,preview_x,preview_y,"작업 화면 미리보기",14.0,theme::text(),true);
+        preview_y+=30.0;
+        let preview_h=appearance_preview::paint(g,s,hits,preview_x,preview_y,preview_w);
+        preview_y+=preview_h+12.0;
+        paint_palette_editor(g,s,hits,caret,preview_x,&mut preview_y,preview_w);
+        paint_appearance_controls(g,s,hits,caret,x,y,form_w,false);
+        *y=(*y).max(preview_y);
+    } else {
+        paint_appearance_controls(g,s,hits,caret,x,y,w,true);
+    }
+}
+
+fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<Hit>,caret:&mut Option<Rect>,x:f32,y:&mut f32,w:f32,inline_preview:bool) {
     // 시스템 따라가기는 팔레트 하나가 아니라 고르는 방식이라 맨 위 토글로 둔다 — 「다른 팔레트」
     // 칩 사이에 「System · Light」로 묻혀 있어 그런 모드가 있는 줄 몰랐다(2026-10-07).
     let follow = s.theme == "system";
@@ -3275,19 +3288,16 @@ fn paint_appearance(
     let color = theme::accent();
     let accent_hex = theme::hex_str([color[0], color[1], color[2]]);
     *y += paint_color_picker(g, s, hits, caret, x, *y, w, SettingsInput::AccentHex,
-        "강조색 HEX", if s.input == Some(SettingsInput::AccentHex) { &s.palette_edit } else { &accent_hex },
+        "강조색", if s.input == Some(SettingsInput::AccentHex) { &s.palette_edit } else { &accent_hex },
         s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
     *y += 12.0;
-    *y += appearance_preview::paint(g, s, hits, x, *y, w);
-    paint_palette_editor(g, s, hits, caret, x, y, w);
-    button(g, s, hits, (x, *y, w.min(132.0), CTL_H), "현재 색으로 복제",
-        Target::Setting(SettingsAction::StartCustomTheme), false);
-    if !s.custom_active.is_empty() {
-        let reset_x = if w < 216.0 { *y += CTL_H + 8.0; x } else { x + 140.0 };
-        button(g, s, hits, (reset_x, *y, w.min(76.0), CTL_H), "색 초기화",
-            Target::Setting(SettingsAction::ResetCustomTheme), false);
+    if inline_preview {
+        *y += appearance_preview::paint(g, s, hits, x, *y, w);
+        paint_palette_editor(g, s, hits, caret, x, y, w);
     }
-    *y += CTL_H + 12.0;
+    let mut actions=vec![("현재 색으로 복제",Target::Setting(SettingsAction::StartCustomTheme),false)];
+    if !s.custom_active.is_empty(){actions.push(("색 초기화",Target::Setting(SettingsAction::ResetCustomTheme),false));}
+    *y+=button_row(g,s,hits,(x,*y,w,0.0),&actions,crate::native_layout::Align::Start)+12.0;
     if disclosure(g, s, hits, x, y, w, "palette-advanced", "세부 색 · 기본색과 ANSI") {
         paint_palette_slots(g, s, hits, x, y, w);
     }
@@ -3790,10 +3800,9 @@ fn statusbar_widget_row(
     let Some(id) = crate::statusbar_config::WIDGETS.iter().copied().find(|key| *key == id) else { return; };
     let field = SettingsInput::StatusbarHex(id);
     let color = statusbar_item_color(s, id);
-    let value = s.statusbar_colors.get(id).cloned().unwrap_or_else(|| theme::hex_str([color[0], color[1], color[2]]));
     circle_rect(g, x + 12.0, *y + 46.0, 16.0, color);
     let color_w = (w - 134.0).clamp(50.0, 160.0);
-    let label = if s.statusbar_colors.contains_key(id) { value.clone() } else { format!("기본 · {value}") };
+    let label = if s.statusbar_colors.contains_key(id) { "색 고르기" } else { "기본색 사용 중" };
     button(g, s, hits, (x + 38.0, *y + 40.0, color_w, CTL_H),
         &label, Target::Setting(SettingsAction::FocusColor(field)), s.input == Some(field));
     button(g, s, hits, (x + 46.0 + color_w, *y + 40.0, 76.0, CTL_H), "기본색",
@@ -3892,7 +3901,7 @@ fn paint_palette_slots(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hi
     for (index, hex) in s.palette_hex.iter().take(theme::SURFACE_PALETTE_START).enumerate() {
         let rect = (
             x + (index % cols) as f32 * (slot_w + 8.0),
-            *y + (index / cols) as f32 * 34.0, slot_w, CTL_H,
+            *y + (index / cols) as f32 * (CTL_H + 8.0), slot_w, CTL_H,
         );
         let color = theme::parse_hex(hex).map(|rgb| [rgb[0], rgb[1], rgb[2], 255]).unwrap_or(theme::bg());
         let swatch = (rect.0 + 5.0, rect.1 + 5.0, 16.0, 16.0);
@@ -3917,26 +3926,33 @@ fn paint_palette_slots(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hi
         );
     }
     let rows = s.palette_hex.len().min(theme::SURFACE_PALETTE_START).div_ceil(cols);
-    *y += rows as f32 * 34.0 + 8.0;
+    *y += rows as f32 * (CTL_H + 8.0) + 8.0;
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ColorPickerLayout { sv: Rect, hue: Rect, field: Rect, eyedropper: Rect, height: f32 }
+struct ColorPickerLayout { sv: Rect, hue: Rect, preview: Rect, eyedropper: Rect, height: f32 }
 
 fn color_picker_layout(x: f32, y: f32, w: f32) -> ColorPickerLayout {
     let stacked = w < 440.0;
-    let wheel_w = if stacked { w } else { (w * 0.6).min(280.0) };
-    let sv = (x, y, wheel_w, 96.0);
-    let hue = (x, y + 104.0, wheel_w, 18.0);
-    let field = if stacked { (x, y + 134.0, w, 46.0) }
-        else { (x + wheel_w + 16.0, y, w - wheel_w - 16.0, 46.0) };
-    let eyedropper = (field.0, field.1 + 52.0, field.2.min(126.0), CTL_H);
-    ColorPickerLayout { sv, hue, field, eyedropper, height: if stacked { 224.0 } else { 134.0 } }
+    let wheel_w = if stacked { w } else { (w * 0.6).min(320.0) };
+    let sv = (x, y, wheel_w, 144.0);
+    let hue = (x, y + 156.0, wheel_w, 18.0);
+    let preview = if stacked { (x, y + 190.0, 56.0, 48.0) }
+        else { (x + wheel_w + 16.0, y, w - wheel_w - 16.0, 96.0) };
+    let eyedropper = if stacked { (x + 68.0, preview.1 + 16.0, w - 68.0, CTL_H) }
+        else { (preview.0, preview.1 + preview.3 + 12.0, preview.2, CTL_H) };
+    ColorPickerLayout { sv, hue, preview, eyedropper, height: if stacked { 250.0 } else { 186.0 } }
 }
 
-/// 색 선택기 한 벌 — 채도×명도 면·색상 띠·HEX 칸·스포이드. 팔레트 칸과 기기색이
-/// **같은 것**을 쓴다: 고르는 손놀림이 자리마다 다르면 한쪽에서 익힌 것이 다른
-/// 쪽에서 안 통한다. 쓴 높이를 돌려준다.
+fn color_values_disclosure(field: SettingsInput) -> &'static str {
+    match field {
+        SettingsInput::AccentHex => "color-values-accent",
+        SettingsInput::StatusbarHex(_) => "color-values-statusbar",
+        _ => "color-values-palette",
+    }
+}
+
+// 같은 색 편집기를 써야 강조색·영역색·상태줄에서 익힌 손놀림과 취소가 유지된다.
 #[allow(clippy::too_many_arguments)]
 fn paint_color_picker(
     g: &mut gpu::GpuRenderer,
@@ -3986,39 +4002,32 @@ fn paint_color_picker(
         hue_rect,
         HitCursor::Pointer,
     );
-    let label = fit(g, slot_label, layout.field.2, 12.0, false);
-    draw_text(g, layout.field.0, layout.field.1, &label, 12.0, theme::text(), false);
-    text_field(
-        g,
-        s,
-        hits,
-        caret,
-        layout.field.0,
-        layout.field.1 + 20.0,
-        layout.field.2,
-        "",
-        value,
-        field,
-        s.settings_caret,
-        false,
-    );
+    let rgb = hsv_rgb(hue, sat, val);
+    let color = [rgb[0], rgb[1], rgb[2], 255];
+    let preview = layout.preview;
+    round_rect(g, preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), color);
+    g.round_rect_stroke(preview.0, preview.1, preview.2, preview.3, theme::radius_sm(), 1.0, theme::border());
+    if preview.2 > 100.0 {
+        let label = fit(g, slot_label, preview.2 - 16.0, 12.0, true);
+        g.centered_chrome_text(preview, &label, gpu::DrawOpts {
+            font_size: 12.0, color: theme::foreground_on(color), bold: true, italic: false,
+        });
+    } else {
+        draw_text(g, layout.eyedropper.0, preview.1 - 3.0, "선택한 색", 11.0, theme::text_dim(), false);
+    }
     if let Some(action) = eyedropper {
-        button(
-            g,
-            s,
-            hits,
-            layout.eyedropper,
-            "화면에서 색 집기",
-            Target::Setting(action),
-            false,
-        );
+        button(g, s, hits, layout.eyedropper, "화면에서 색 집기", Target::Setting(action), false);
     }
-    if s.input == Some(field) && theme::parse_hex(value).is_none() {
-        let mut hint_y = y + layout.height;
-        plain_hint(g, x, &mut hint_y, w, "#RRGGBB 형식으로 입력해 주세요. 예: #3a7bd5");
-        return hint_y - y;
+    let mut bottom = y + layout.height;
+    if disclosure(g, s, hits, x, &mut bottom, w, color_values_disclosure(field), "색상 값 직접 입력") {
+        text_field(g, s, hits, caret, x, bottom, w.min(260.0), "HEX", value, field, s.settings_caret, false);
+        bottom += 20.0 + CTL_H + 8.0;
+        if s.input == Some(field) && theme::parse_hex(value).is_none() {
+            plain_hint(g, x, &mut bottom, w, "#RRGGBB 형식으로 입력해 주세요. 예: #3a7bd5");
+        }
     }
-    layout.height
+    bottom - y
+
 }
 
 fn paint_device_icons(
@@ -6936,18 +6945,20 @@ fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, _desc: &
 
 /// 플랫 행 하나: 왼쪽 이름(+보조글), 아래 얇은 선. 조작은 부르는 쪽이 오른쪽에 얹는다.
 /// 돌려주는 값은 행 사각형.
-fn flat_row(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, label: &str, hint: &str, text_w: f32) -> Rect {
-    let rect = (x, y, w, ROW_H);
-    let inset = crate::native_controls::CONTROL_PADDING_X;
-    let label = fit(g, label, (text_w - inset).max(0.0), 12.0, false);
-    let hint = fit(g, hint, (text_w - inset).max(0.0), 10.5, false);
+fn flat_row(g:&mut gpu::GpuRenderer,x:f32,y:f32,w:f32,label:&str,hint:&str,text_w:f32)->Rect {
+    let rect=(x,y,w,ROW_H);
+    let inset=crate::native_controls::CONTROL_PADDING_X;
+    let label=fit(g,label,(text_w-inset).max(0.0),13.0,false);
     if hint.is_empty() {
-        draw_text(g, x + inset, y + 13.0, &label, 12.0, theme::text(), false);
+        let m=g.chrome_text_metrics(&label,13.0,false);
+        let (_,ty)=m.centered_origin((x,y,text_w,ROW_H),g.scale());
+        draw_text(g,x+inset,ty,&label,13.0,theme::text(),false);
     } else {
-        draw_text(g, x + inset, y + 7.0, &label, 12.0, theme::text(), false);
-        draw_text(g, x + inset, y + 24.0, &hint, 10.5, theme::text_dim(), false);
+        let hint=fit(g,hint,(text_w-inset).max(0.0),11.0,false);
+        draw_text(g,x+inset,y+9.0,&label,13.0,theme::text(),false);
+        draw_text(g,x+inset,y+28.0,&hint,11.0,theme::text_dim(),false);
     }
-    g.rect(x + inset, y + ROW_H - 1.0, (w - inset * 2.0).max(0.0), 1.0, theme::with_alpha(theme::border(), 70));
+    g.rect(x+inset,y+ROW_H-1.0,(w-inset*2.0).max(0.0),1.0,theme::with_alpha(theme::border(),45));
     rect
 }
 
@@ -6962,18 +6973,18 @@ fn seg_row(
     label: &str,
     cells: &[(&str, bool, SettingsAction)],
 ) {
-    let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 12.0, false)
+    let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 13.0, false)
         + crate::native_controls::CONTROL_PADDING_X + 1.0;
     let controls_w = cells.iter().map(|(label, active, _)|
-        g.measure_chrome_text(&crate::native_strings::text(label), 12.0, *active) + 20.0).sum::<f32>() + 4.0;
-    let stacked = label_w + controls_w + 12.0 > w;
+        g.measure_chrome_text(&crate::native_strings::text(label), 13.0, *active) + 20.0).sum::<f32>() + 4.0;
+    let stacked = label_w + controls_w + 13.0 > w;
     if stacked {
         row_label(g, x, y, label);
         segmented(g, s, hits, x, *y, w, cells);
         *y += CTL_H + 10.0;
     } else {
         flat_row(g, x, *y, w, label, "", label_w);
-        let control_x = x + label_w + 12.0;
+        let control_x = x + label_w + 13.0;
         segmented(g, s, hits, control_x, *y + (ROW_H - CTL_H) / 2.0, x + w - control_x, cells);
         *y += ROW_H;
     }
@@ -6985,7 +6996,7 @@ fn seg_row(
 /// 칩·카드 묶음 위의 이름. 바로 위 행의 밑줄에 글자가 붙지 않게 10 을 띄운다.
 fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
     *y += 10.0;
-    draw_text(g, x + 2.0, *y, label, 12.0, theme::text_dim(), false);
+    draw_text(g, x + crate::native_controls::CONTROL_PADDING_X, *y, label, 13.0, theme::text_dim(), false);
     *y += 20.0;
 }
 
@@ -7020,31 +7031,22 @@ fn toggle_row_hint(
     on: bool,
     action: SettingsAction,
 ) {
-    let inset = crate::native_controls::CONTROL_PADDING_X;
-    let text_w = (w - 44.0 - inset * 2.0).max(1.0);
-    let label_lines = wrap_text(g, &crate::native_strings::text(label), text_w, 12.0);
-    let hint_lines = if hint.is_empty() { Vec::new() }
-        else { wrap_text(g, &crate::native_strings::text(hint), text_w, 10.5) };
-    let height = (14.0 + (label_lines.len() + hint_lines.len()) as f32 * 18.0).max(ROW_H);
-    let rect = (x, *y, w, height);
-    for (i, (line, _)) in label_lines.iter().enumerate() {
-        draw_text(g, x + inset, *y + 8.0 + i as f32 * 18.0, line, 12.0, theme::text(), false);
-    }
-    for (i, (line, _)) in hint_lines.iter().enumerate() {
-        draw_text(g, x + inset, *y + 8.0 + (i + label_lines.len()) as f32 * 18.0,
-            line, 10.5, theme::text_dim(), false);
-    }
-    g.rect(x + inset, *y + height - 1.0, (w - inset * 2.0).max(0.0), 1.0, theme::with_alpha(theme::border(), 70));
-    let hover = contains(rect, s.cursor);
-    let toggle = (rect.0 + rect.2 - 32.0 - inset, rect.1 + (height - 18.0) / 2.0, 32.0, 18.0);
-    let fill = if on { theme::accent() } else if hover { theme::surface_active() } else { theme::surface_hover() };
-    pill_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, fill);
-    stroke_round(g, toggle, 9.0 * theme::roundness(), theme::with_alpha(theme::edge_on(fill), 100));
-    circle_rect(g, toggle.0 + if on { 17.0 } else { 3.0 }, toggle.1 + 3.0, 12.0,
-        if on { theme::foreground_on(fill) } else { theme::text_dim() });
-    register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
-    g.hover_pointer |= hover;
-    *y += height;
+    let inset=crate::native_controls::CONTROL_PADDING_X;
+    let text_w=(w-44.0-inset*2.0).max(1.0);
+    let labels=wrap_text(g,&crate::native_strings::text(label),text_w,13.0);
+    let hints=if hint.is_empty(){Vec::new()}else{wrap_text(g,&crate::native_strings::text(hint),text_w,11.0)};
+    let text_h=labels.len() as f32*20.0+hints.len() as f32*18.0;
+    let height=(text_h+20.0).max(ROW_H);
+    let rect=(x,*y,w,height);let ty=*y+(height-text_h)/2.0;
+    for(i,(line,_))in labels.iter().enumerate(){draw_text(g,x+inset,ty+i as f32*20.0,line,13.0,theme::text(),false);}
+    for(i,(line,_))in hints.iter().enumerate(){draw_text(g,x+inset,ty+labels.len() as f32*20.0+i as f32*18.0,line,11.0,theme::text_dim(),false);}
+    g.rect(x+inset,*y+height-1.0,(w-inset*2.0).max(0.0),1.0,theme::with_alpha(theme::border(),45));
+    let hover=contains(rect,s.cursor);let toggle=(x+w-inset-40.0,*y+(height-22.0)/2.0,40.0,22.0);
+    let fill=if on{theme::accent()}else if hover{theme::surface_active()}else{theme::surface_hover()};
+    pill_rect(g,toggle.0,toggle.1,toggle.2,toggle.3,fill);
+    stroke_round(g,toggle,11.0*theme::roundness(),theme::with_alpha(theme::edge_on(fill),100));
+    circle_rect(g,toggle.0+if on{21.0}else{3.0},toggle.1+3.0,16.0,theme::control_knob(fill));
+    register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;*y+=height;
 }
 
 fn segmented(
@@ -7067,7 +7069,7 @@ fn segmented(
     let pad = 10.0;
     let widths: Vec<f32> = cells
         .iter()
-        .map(|(label, selected, _)| g.measure_chrome_text(label, 12.0, *selected) + pad * 2.0)
+        .map(|(label, selected, _)| g.measure_chrome_text(label, 13.0, *selected) + pad * 2.0)
         .collect();
     let total = widths.iter().sum::<f32>() + inset * 2.0;
     let outer = (x + w - total.min(w), y, total.min(w), h);
@@ -7082,23 +7084,10 @@ fn segmented(
         if *selected {
             round_rect(g, rect.0, rect.1, rect.2, rect.3, seg_inner_radius(), theme::accent());
         }
-        let shown = fit(g, label, cw - 8.0, 12.0, *selected);
-        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 12.0, *selected)) / 2.0;
-        draw_text(
-            g,
-            tx,
-            rect.1 + 3.5,
-            &shown,
-            12.0,
-            if *selected {
-                theme::foreground_on(theme::accent())
-            } else if hover {
-                theme::text()
-            } else {
-                theme::text_dim()
-            },
-            *selected,
-        );
+        let shown = fit(g, label, cw - 8.0, 13.0, *selected);
+        g.centered_chrome_text(rect,&shown,gpu::DrawOpts {
+            font_size:13.0,color:if *selected { theme::foreground_on(theme::accent()) } else if hover { theme::text() } else { theme::text_dim() },bold:*selected,italic:false,
+        });
         register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
     }
@@ -7244,7 +7233,6 @@ fn terminal_font_families<'a>(fonts: &'a [String], current: Option<&str>) -> Vec
 }
 
 const DROPDOWN_FIELD_W: f32 = 260.0;
-const DROPDOWN_FIELD_H: f32 = CTL_H;
 const DROPDOWN_ITEM_H: f32 = 28.0;
 const DROPDOWN_VISIBLE_ITEMS: f32 = 8.0;
 
@@ -7262,39 +7250,27 @@ fn dropdown_row(
     value: &str,
     id: DropdownId,
 ) {
-    let fw = DROPDOWN_FIELD_W.min(w * 0.55);
-    flat_row(g, x, *y, w, label, "", w - fw - 12.0);
-    let rect = (x + w - fw, *y + (ROW_H - DROPDOWN_FIELD_H) / 2.0, fw, DROPDOWN_FIELD_H);
+    let fw=DROPDOWN_FIELD_W.min(w*0.55).max(120.0).min(w);
+    let label_width=g.measure_chrome_text(&crate::native_strings::text(label),13.0,false)+crate::native_controls::CONTROL_PADDING_X;
+    let stacked=label_width+fw+12.0>w;
+    let mut row_h=ROW_H;
+    let rect=if stacked {
+        let lines=wrap_text(g,&crate::native_strings::text(label),w,13.0);
+        for(i,(line,_))in lines.iter().enumerate(){draw_text(g,x,*y+6.0+i as f32*20.0,line,13.0,theme::text(),false);}
+        let offset=lines.len() as f32*20.0+12.0;row_h=offset+CTL_H+12.0;
+        (x,*y+offset,w,CTL_H)
+    }else{
+        flat_row(g,x,*y,w,label,"",w-fw-12.0);
+        (x+w-fw,*y+(ROW_H-CTL_H)/2.0,fw,CTL_H)
+    };
     let open = s.dropdown == Some(id);
     let hover = contains(rect, s.cursor);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        ctrl_radius(),
-        if open || hover {
-            theme::surface_hover()
-        } else {
-            theme::surface()
-        },
-    );
-    stroke_round(
-        g,
-        rect,
-        ctrl_radius(),
-        if open { theme::accent() } else { theme::border() },
-    );
-    let shown = fit(g, value, rect.2 - 40.0, 12.0, false);
-    draw_text(g, rect.0 + 10.0, rect.1 + 6.5, &shown, 12.0, theme::text(), false);
-    g.queue_icon(
-        if open { "chevron-up" } else { "chevron-down" },
-        rect.0 + rect.2 - 22.0,
-        rect.1 + 6.5,
-        13.0,
-        theme::text_dim(),
-    );
+    crate::native_controls::field(g,rect,open);
+    let shown=fit(g,value,(rect.2-42.0).max(0.0),13.0,false);
+    let m=g.chrome_text_metrics(&shown,13.0,false);
+    let (_,ty)=m.centered_origin(rect,g.scale());
+    draw_text(g,rect.0+12.0,ty,&shown,13.0,theme::text(),false);
+    g.queue_icon(if open {"chevron-up"}else{"chevron-down"},rect.0+rect.2-25.0,rect.1+(rect.3-14.0)/2.0,14.0,theme::text_dim());
     register_clipped(g, hits, Target::Dropdown(id), rect, HitCursor::Pointer);
     g.hover_pointer |= hover;
     if open {
@@ -7303,7 +7279,7 @@ fn dropdown_row(
             mark_dropdown_anchor(id, rect);
         }
     }
-    *y += ROW_H;
+    *y += row_h;
 }
 
 /// 펼친 목록. 본문 클립 바깥에서, 모든 것 위에 그린다. 바깥 전체에 「닫기」 판정을
@@ -7427,35 +7403,18 @@ fn stepper_row(
     minus: SettingsAction,
     plus: SettingsAction,
 ) {
-    // 목업(플랫): −·값·+ 가 채움 없는 테두리 하나 안에, 높이 26.
-    flat_row(g, x, *y, w, label, "", w - 116.0);
-    let right = x + w;
-    let bw = 26.0;
-    let vw = 52.0;
-    let boxr = (right - (bw * 2.0 + vw), *y + (ROW_H - CTL_H) / 2.0, bw * 2.0 + vw, CTL_H);
-    let mr = (boxr.0, boxr.1, bw, boxr.3);
-    let pr = (boxr.0 + bw + vw, boxr.1, bw, boxr.3);
-    for (cell, sign, action) in [(mr, "−", minus), (pr, "+", plus)] {
-        let hover = contains(cell, s.cursor);
-        let tx = cell.0 + (cell.2 - g.measure_chrome_text(sign, 13.0, false)) / 2.0;
-        draw_text(
-            g,
-            tx,
-            cell.1 + 5.5,
-            sign,
-            13.0,
-            if hover { theme::text() } else { theme::text_dim() },
-            false,
-        );
-        register_clipped(g, hits, Target::Setting(action), cell, HitCursor::Pointer);
-        g.hover_pointer |= hover;
+    let bw=CTL_H;let vw=48.0;let control_w=bw*2.0+vw;
+    flat_row(g,x,*y,w,label,"",(w-control_w-12.0).max(0.0));
+    let boxr=(x+w-control_w,*y+(ROW_H-CTL_H)/2.0,control_w,CTL_H);
+    crate::native_controls::field(g,boxr,false);
+    for (rect,sign,action) in [((boxr.0,boxr.1,bw,CTL_H),"−",minus),((boxr.0+bw+vw,boxr.1,bw,CTL_H),"+",plus)] {
+        let hover=contains(rect,s.cursor);
+        if hover {round_rect(g,rect.0,rect.1,rect.2,rect.3,ctrl_radius(),theme::surface_hover());}
+        g.centered_chrome_text(rect,sign,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
+        register_clipped(g,hits,Target::Setting(action),rect,HitCursor::Pointer);g.hover_pointer|=hover;
     }
-    g.rect(mr.0 + bw, boxr.1 + 1.0, 1.0, boxr.3 - 2.0, theme::border());
-    g.rect(pr.0, boxr.1 + 1.0, 1.0, boxr.3 - 2.0, theme::border());
-    stroke_round(g, boxr, ctrl_radius(), theme::border());
-    let vx = boxr.0 + bw + (vw - g.measure_chrome_text(value, 12.0, false)) / 2.0;
-    draw_text(g, vx, boxr.1 + 6.5, value, 12.0, theme::text(), false);
-    *y += ROW_H;
+    g.centered_chrome_text((boxr.0+bw,boxr.1,vw,CTL_H),value,gpu::DrawOpts{font_size:13.0,color:theme::text(),bold:false,italic:false});
+    *y+=ROW_H;
 }
 
 fn text_field_bounds(x: f32, y: f32, w: f32, has_label: bool, multiline: bool) -> Rect {
@@ -7520,32 +7479,9 @@ fn text_field(
         flat_row(g, x, y, w, label, "", w - rect.2 - 12.0);
     }
     let focused = s.input == Some(field);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        ctrl_radius(),
-        if focused {
-            theme::surface_hover()
-        } else {
-            theme::surface()
-        },
-    );
-    if focused {
-        stroke_round(g, rect, ctrl_radius(), theme::accent());
-        if s.select_all {
-            g.rect(
-                rect.0 + 3.0,
-                rect.1 + 3.0,
-                rect.2 - 6.0,
-                rect.3 - 6.0,
-                theme::with_alpha(theme::accent(), 42),
-            );
-        }
-    } else {
-        stroke_round(g, rect, ctrl_radius(), theme::border());
+    crate::native_controls::field(g,rect,focused);
+    if focused && s.select_all {
+        g.rect(rect.0+3.0,rect.1+3.0,rect.2-6.0,rect.3-6.0,theme::with_alpha(theme::accent(),42));
     }
     register_clipped(g, hits, Target::Focus(field), rect, HitCursor::Text);
     g.push_clip(rect.0 + 10.0, rect.1 + 5.0, rect.2 - 20.0, rect.3 - 10.0);
@@ -7602,20 +7538,22 @@ fn text_field(
             }
         }
         if focused {
-            draw_preedit_and_caret(g, s, caret_xy, 17.0, caret_out);
+            draw_preedit_and_caret(g, s, caret_xy, 17.0, 12.0, caret_out);
         }
     } else {
         let (shown, visible_start) = if value.is_empty() {
-            (fit(g, field_placeholder(field), (rect.2 - 22.0).max(0.0), 12.0, false), 0)
+            (fit(g, field_placeholder(field), (rect.2 - 22.0).max(0.0), 13.0, false), 0)
         } else if focused {
-            single_line_window(g, value, caret, rect.2 - 22.0, 12.0)
+            single_line_window(g, value, caret, rect.2 - 22.0, 13.0)
         } else {
-            (crate::info::fit_text(g, value, rect.2 - 22.0, 12.0, false), 0)
+            (crate::info::fit_text(g, value, rect.2 - 22.0, 13.0, false), 0)
         };
         push_multiline_layout(single_line_layout(field, rect, value, &shown, visible_start,
-            |text| g.measure_chrome_text(text, 12.0, false)));
-        g.draw_text(rect.0 + 11.0, rect.1 + 6.5, &shown, gpu::DrawOpts {
-            font_size: 12.0, color: if value.is_empty() { theme::text_dim() } else { theme::text() },
+            |text| g.measure_chrome_text(text, 13.0, false)));
+        let m=g.chrome_text_metrics(&shown,13.0,false);
+        let (_,text_y)=m.centered_origin(rect,g.scale());
+        g.draw_text(rect.0 + 11.0, text_y, &shown, gpu::DrawOpts {
+            font_size: 13.0, color: if value.is_empty() { theme::text_dim() } else { theme::text() },
             bold: false, italic: false,
         });
         if focused {
@@ -7624,8 +7562,8 @@ fn text_field(
                 .skip(visible_start)
                 .take(caret.saturating_sub(visible_start).min(value.chars().count()))
                 .collect();
-            let cx = rect.0 + 11.0 + g.measure_chrome_text(&prefix, 12.0, false);
-            draw_preedit_and_caret(g, s, (cx, rect.1 + 5.0), 16.0, caret_out);
+            let cx = rect.0 + 11.0 + g.measure_chrome_text(&prefix, 13.0, false);
+            draw_preedit_and_caret(g, s, (cx, text_y), 18.0, 13.0, caret_out);
         }
     }
     g.pop_clip();
@@ -7664,11 +7602,12 @@ fn draw_preedit_and_caret(
     s: &Snapshot,
     pos: (f32, f32),
     h: f32,
+    font: f32,
     caret_out: &mut Option<Rect>,
 ) {
     if !s.preedit.is_empty() {
-        draw_text(g, pos.0, pos.1, &s.preedit, 12.0, theme::text(), false);
-        let width = g.measure_chrome_text(&s.preedit, 12.0, false).max(7.0);
+        draw_text(g, pos.0, pos.1, &s.preedit, font, theme::text(), false);
+        let width = g.measure_chrome_text(&s.preedit, font, false).max(7.0);
         g.rect(pos.0, pos.1 + h - 2.0, width, 1.0, theme::accent());
     } else if s.caret_on {
         g.rect(pos.0, pos.1, 1.5, h, theme::cursor());
@@ -7779,6 +7718,13 @@ fn choice_card_with_radius(
     g.hover_pointer |= hover;
 }
 
+fn button_row(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<Hit>,area:Rect,items:&[(&str,Target,bool)],align:crate::native_layout::Align)->f32 {
+    let widths:Vec<_>=items.iter().map(|(label,_,primary)|crate::native_controls::button_width(g,&crate::native_strings::text(label),CTL_H,*primary)).collect();
+    let(rects,height)=crate::native_layout::flow(&widths,area,CTL_H,8.0,align);
+    for ((label,target,primary),r) in items.iter().zip(rects){button(g,s,hits,r,label,target.clone(),*primary);}
+    height
+}
+
 fn button(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -7789,7 +7735,7 @@ fn button(
     primary: bool,
 ) {
     let label = crate::native_strings::text(label);
-    let rect = crate::native_controls::text_button(g, rect, s.cursor, &label,
+    let rect = crate::native_controls::content_button(g, rect, s.cursor, &label,
         crate::native_controls::Style { primary, ..Default::default() });
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
 }
@@ -8097,7 +8043,7 @@ mod tests {
     fn compact_color_picker_stays_inside_narrow_and_wide_columns() {
         for width in [240.0, 280.0, 360.0, 439.0, 440.0, 560.0, 800.0] {
             let layout = color_picker_layout(20.0, 40.0, width);
-            let rects = [layout.sv, layout.hue, layout.field, layout.eyedropper];
+            let rects = [layout.sv, layout.hue, layout.preview, layout.eyedropper];
             for (index, rect) in rects.iter().enumerate() {
                 assert!(rect.0 >= 20.0 && rect.1 >= 40.0 && rect.2 > 0.0 && rect.3 > 0.0);
                 assert!(rect.0 + rect.2 <= 20.0 + width + 0.01);
@@ -8108,7 +8054,7 @@ mod tests {
                     assert!(overlap_w <= 0.0 || overlap_h <= 0.0);
                 }
             }
-            assert_eq!(layout.height, if width < 440.0 { 224.0 } else { 134.0 });
+            assert!(layout.height >= layout.eyedropper.1 + layout.eyedropper.3 - 40.0);
         }
     }
 
@@ -8139,7 +8085,7 @@ mod tests {
         let nav = 200.0;
         let (x, w) = content_column(0.0, 2360.0, nav);
         assert_eq!(w, CONTENT_MAX_W, "열은 상한에서 자라기를 멈춘다");
-        let left = x - nav;
+        let left = x - nav - NAV_GAP;
         let right = 2360.0 - (x + w);
         assert!(
             (left - right).abs() <= 1.0,
@@ -8149,11 +8095,11 @@ mod tests {
 
     /// 열이 남는 폭을 다 쓰는 좁은 창은 나눌 것이 없다 — 예전 배치 그대로 gutter 하나.
     #[test]
-    fn content_column_keeps_the_old_gutter_when_there_is_no_surplus() {
+    fn content_column_keeps_the_panel_gap_and_gutter_when_there_is_no_surplus() {
         let nav = 200.0;
-        for (aw, gutter) in [(700.0, 20.0), (1000.0, 28.0)] {
+        for (aw, gutter) in [(700.0, 24.0), (1000.0, 24.0)] {
             let (x, w) = content_column(0.0, aw, nav);
-            assert_eq!(x, nav + gutter, "aw={aw} 에서 열이 밀렸다");
+            assert_eq!(x, nav + NAV_GAP + gutter, "aw={aw} 에서 열이 밀렸다");
             assert!(w < CONTENT_MAX_W, "aw={aw} 는 상한에 닿지 않는 폭이어야 한다");
         }
     }
@@ -8305,8 +8251,8 @@ mod tests {
     #[test]
     fn custom_name_field_hit_does_not_extend_over_its_label_or_lower_gap() {
         let rect = text_field_bounds(0.0, 0.0, 604.0, true, false);
-        assert_eq!(rect.1, 7.0);
-        assert_eq!(rect.3, 26.0);
+        assert_eq!(rect.1 + rect.3 / 2.0, ROW_H / 2.0);
+        assert_eq!(rect.3, CTL_H);
         assert!(contains(rect, (400.0, 12.0)));
         assert!(contains(rect, (400.0, 28.0)));
         assert!(!contains(rect, (40.0, 20.0)));

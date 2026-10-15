@@ -451,7 +451,7 @@ fn paint_editor(
     } else {
         "저장"
     });
-    let rect = crate::native_controls::text_button(
+    let rect = crate::native_controls::content_button(
         g,
         (x + w - 92.0, *y, 92.0, CTL_H),
         s.cursor,

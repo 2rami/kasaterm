@@ -92,3 +92,5 @@
 - `restore_picker.rs` — 복원 선택 상태·키보드와 방·탭 상세 목록. `restore_picker/welcome.rs`는 작은 얼굴 카드·페이지 이동·작업 미리보기를 그린다. `session/restore_selection.rs`는 저장 정보의 표시 모델, `session/local_restore.rs`는 선택한 탭의 배치 재구성과 미선택 작업의 보류 기록을 맡는다.
 
 - `design_study.rs` · `design_study/style.rs` — 전면 개편 A/B/C 네이티브 비교 시안. 격리 검증 환경에서만 진입하며, 페이지·색·선택 값은 메모리에만 두고 실제 설정이나 세션에 반영하지 않는다.
+
+- `native_controls.rs` · `native_layout.rs` — 글리프 실측 버튼·공통 필드·패널과 내용 너비/줄바꿈 배치. `gpu.rs`의 `ChromeTextMetrics`로 실제 글자 영역을 가운데에 맞추며, `native_controls/probe.rs`는 격리 실행에서 글꼴·배율별 GPU 결과와 버튼 경계를 검사한다.

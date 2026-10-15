@@ -426,7 +426,7 @@ fn right_buttons(
 ) -> f32 {
     let mut bx = right;
     for (label, target, primary) in buttons.iter().rev() {
-        let bw = g.measure_chrome_text(label, 12.0, *primary) + 32.0;
+        let bw = crate::native_controls::button_width(g,&crate::native_strings::text(label),CTL_H,*primary);
         bx -= bw;
         button(g, s, hits, (bx, y, bw, CTL_H), label, target.clone(), *primary);
         bx -= 8.0;
@@ -446,7 +446,7 @@ fn flow_buttons(
 ) {
     let mut bx = x;
     for (label, target, primary) in buttons {
-        let bw = (g.measure_chrome_text(label, 12.0, *primary) + 32.0).min(w);
+        let bw = (crate::native_controls::button_width(g,&crate::native_strings::text(label),CTL_H,*primary)).min(w);
         if bx > x && bx + bw > x + w {
             bx = x;
             *y += ROW_H;
@@ -496,7 +496,7 @@ pub(super) fn paint_profile(
     let name = name_of(&v.data, status);
     face(g, v, x, *y + 8.0, 40.0, &name);
     let open = v.form == Some(Form::Profile);
-    let label_w = g.measure_chrome_text("프로필 바꾸기", 12.0, false) + 32.0;
+    let label_w = crate::native_controls::button_width(g,"프로필 바꾸기",CTL_H,false);
     let text_w = w - 52.0 - if open || v.busy { 0.0 } else { label_w + 12.0 };
     let shown = fit(g, &name, text_w, 13.0, true);
     draw_text(g, x + 52.0, *y + 10.0, &shown, 13.0, theme::text(), true);
@@ -588,7 +588,7 @@ fn provider_row(
         right_buttons(g, s, hits, x + w, cy, &[(label, Target::Setting(SettingsAction::DeviceAccount(Action::OAuth(provider))), primary)])
     } else {
         let rect = (x + w - label_w, cy, label_w, CTL_H);
-        crate::native_controls::text_button(g, rect, s.cursor, label,
+        crate::native_controls::content_button(g, rect, s.cursor, label,
             crate::native_controls::Style { enabled: false, ..Default::default() });
         rect.0
     };

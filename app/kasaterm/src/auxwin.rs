@@ -765,7 +765,7 @@ impl AuxWindow {
     ) -> bool {
         let failed = kind == HeaderButton::Save
             && self.status.as_deref().is_some_and(|status| status.contains("실패"));
-        let rect = crate::native_controls::text_button(&mut self.gpu, rect, self.cursor_px, label,
+        let rect = crate::native_controls::content_button(&mut self.gpu, rect, self.cursor_px, label,
             crate::native_controls::Style { primary, active, enabled, danger: failed });
         if enabled {
             self.header_hits.push((kind, rect));

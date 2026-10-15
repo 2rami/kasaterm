@@ -50,3 +50,9 @@ The user preferred the earlier cute, compact restore dialog and explicitly chose
 ## Whole-system comparison — 2026-10-15
 
 The user requested a full redesign of the design contract and controls, then requested all three proposed directions to choose from. Existing 26px control caps and flat-row restrictions are not constraints on these studies. Cloud OS uses 36px controls and floating navigation, Precision uses 28px controls and dense flat rows, and Playroom uses 40px controls with a portrait rail. The studies are native wgpu scenes in an isolated verification mode; the normal app default remains pending the user’s choice.
+
+## Accepted A and visual color editing — 2026-10-15
+
+The user selected A / Cloud OS, then requested correction of oversized buttons and misaligned native layouts. This supersedes the pending-default language in the comparison section. Production controls now use text ink metrics, intrinsic action widths, shared paint/hit rectangles and wrapping groups. Dimensions and palette values are exclusively in `docs/design.md`; earlier token/contrast figures above are historical. Actual settings use separate navigation/content surfaces and a responsive live palette preview.
+
+Color selection starts with a continuous HSV plane, hue strip and large color preview. The user explicitly rejected requiring HEX knowledge. HEX is optional in a collapsed value section; an available eyedropper remains a visible action. The same interaction applies to accent, palette slots and statusbar colors. No blur pass or decorative animation is introduced. The chosen direction is accepted; final geometry remains subject to visual review.

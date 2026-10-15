@@ -80,15 +80,16 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
 
 fn info_pages(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, f: &Frame<'_>, top: f32) -> f32 {
     info.page_rects.clear();
-    let width = ((f.w - 36.0) / 2.0).clamp(0.0, 140.0);
-    for (i, (page, label)) in [(state::InfoPage::Runtime, "실행 정보"),
-        (state::InfoPage::SharedFiles, "공유 폴더")].into_iter().enumerate() {
-        let rect = crate::native_controls::text_button(g,
-            (f.x + 14.0 + i as f32 * (width + 8.0), top + 4.0, width, 26.0), f.cursor, label,
-            crate::native_controls::Style { active: info.page == page, ..Default::default() });
-        info.page_rects.push((page, rect));
+    let items=[(state::InfoPage::Runtime,"실행 정보"),(state::InfoPage::SharedFiles,"공유 폴더")];
+    let h=crate::native_controls::CONTROL_HEIGHT;
+    let widths:Vec<_>=items.iter().map(|(_,label)|crate::native_controls::button_width(g,label,h,true)).collect();
+    let (rects,height)=crate::native_layout::flow(&widths,(f.x+14.0,top+6.0,(f.w-28.0).max(0.0),0.0),h,8.0,crate::native_layout::Align::Start);
+    for ((page,label),r) in items.into_iter().zip(rects) {
+        let rect=crate::native_controls::text_button(g,r,f.cursor,label,crate::native_controls::Style{active:info.page==page,..Default::default()});
+        info.page_rects.push((page,rect));
     }
-    top + 38.0
+    top+height+16.0
+
 }
 
 fn head(
@@ -99,8 +100,8 @@ fn head(
     top: f32,
     bottom: f32,
 ) -> f32 {
-    g.rect(f.x, top, f.w, bottom - top, f.bg);
-    g.rect(f.x, top, 1.0, bottom - top, theme::border());
+    g.rect(f.x,top,f.w,bottom-top,theme::bg());
+    crate::native_controls::panel(g,(f.x+4.0,top+4.0,(f.w-8.0).max(0.0),(bottom-top-8.0).max(0.0)),f.bg);
     info.page_rects.clear();
     info::draw_side_tabs(g, f.cursor, info, git, f.x, f.w, top)
 }

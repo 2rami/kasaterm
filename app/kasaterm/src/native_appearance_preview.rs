@@ -1,6 +1,6 @@
 use super::*;
 
-const PREVIEW_H: f32 = 204.0;
+const PREVIEW_H: f32 = 224.0;
 pub(super) const FEATURED_PALETTES: [&str; 4] = ["frost-light", "frost-dark", "graphite", "paper"];
 
 fn palette_strip(x: f32, y: f32, w: f32) -> ([Rect; 4], f32) {
@@ -83,26 +83,17 @@ pub(super) fn paint_accents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut V
     theme::ACCENT_PRESETS.len().div_ceil(columns) as f32 * 64.0
 }
 
-fn regions(x: f32, y: f32, w: f32) -> [(usize, Rect); 5] {
-    let header = crate::native_controls::CONTROL_HEIGHT;
-    let sidebar = (w * 0.22).floor();
-    let panel = (w * 0.24).floor();
-    let center = w - sidebar - panel;
-    [
-        (30, (x, y, w, header)),
-        (29, (x, y + header, sidebar, PREVIEW_H - header)),
-        (28, (x + sidebar, y + header, center, header)),
-        (
-            27,
-            (
-                x + sidebar,
-                y + header * 2.0,
-                center,
-                PREVIEW_H - header * 2.0,
-            ),
-        ),
-        (31, (x + w - panel, y + header, panel, PREVIEW_H - header)),
-    ]
+fn regions(x:f32,y:f32,w:f32)->[(usize,Rect);5] {
+    let inset=6.0;let gap=5.0;let header=32.0;
+    let inside=(w-inset*2.0).max(0.0);
+    let side=(inside*0.22).floor();let panel=(inside*0.24).floor();let center=inside-side-panel-gap*2.0;
+    let top=y+inset+header+gap;let body_h=PREVIEW_H-inset*2.0-header-gap;
+    let middle=x+inset+side+gap;
+    [(30,(x+inset,y+inset,inside,header)),
+     (29,(x+inset,top,side,body_h)),
+     (28,(middle,top,center,28.0)),
+     (27,(middle,top+33.0,center,body_h-33.0)),
+     (31,(middle+center+gap,top,panel,body_h))]
 }
 
 fn text(g: &mut gpu::GpuRenderer, rect: Rect, value: &str, ink: [u8; 4], bold: bool) {
@@ -123,6 +114,7 @@ pub(super) fn paint(
         _ => None,
     };
     let areas = regions(x, y, w);
+    crate::native_controls::panel(g,(x,y,w,PREVIEW_H),theme::bg());
     for (slot, rect) in areas {
         let fill = match slot {
             27 => theme::pane_bg(),
@@ -131,7 +123,7 @@ pub(super) fn paint(
             30 => theme::titlebar_bg(),
             _ => theme::side_panel_bg(),
         };
-        g.rect(rect.0, rect.1, rect.2, rect.3, fill);
+        g.round_rect_fill(rect.0,rect.1,rect.2,rect.3,theme::radius_sm().min(8.0),fill);
         register_clipped(
             g,
             hits,
@@ -205,34 +197,23 @@ pub(super) fn paint(
             line == 0,
         );
     }
-    stroke_rect(g, (x, y, w, PREVIEW_H), theme::border());
-    g.rect(left.0 + left.2, left.1, 1.0, left.3, theme::border());
-    g.rect(right.0, right.1, 1.0, right.3, theme::border());
+
     let options = [
         (0, "창 바탕"),
         (1, "터미널 글자"),
         (6, "화면 글자"),
         (5, "구분선"),
     ];
-    let columns = if w >= 440.0 { 4 } else { 2 };
-    let button_w = (w - (columns - 1) as f32 * 8.0) / columns as f32;
-    for (index, (slot, label)) in options.into_iter().enumerate() {
-        button(
-            g,
-            s,
-            hits,
-            (
-                x + (index % columns) as f32 * (button_w + 8.0),
-                y + PREVIEW_H + 12.0 + (index / columns) as f32 * 34.0,
-                button_w,
-                26.0,
-            ),
-            label,
-            Target::Setting(SettingsAction::FocusPaletteHex(slot)),
-            selected == Some(slot),
-        );
+    let h=crate::native_controls::CONTROL_HEIGHT;
+    let labels:Vec<_>=options.iter().map(|(_,label)|crate::native_strings::text(label)).collect();
+    let widths:Vec<_>=labels.iter().map(|label|crate::native_controls::button_width(g,label,h,true)).collect();
+    let (rects,height)=crate::native_layout::flow(&widths,(x,y+PREVIEW_H+12.0,w,0.0),h,8.0,crate::native_layout::Align::Start);
+    for (((slot,_),label),r) in options.into_iter().zip(labels).zip(rects) {
+        let r=crate::native_controls::text_button(g,r,s.cursor,&label,crate::native_controls::Style{active:selected==Some(slot),..Default::default()});
+        register_clipped(g,hits,Target::Setting(SettingsAction::FocusPaletteHex(slot)),r,HitCursor::Pointer);
     }
-    PREVIEW_H + 12.0 + (4 / columns) as f32 * 34.0
+    PREVIEW_H+12.0+height
+
 }
 
 #[cfg(test)]

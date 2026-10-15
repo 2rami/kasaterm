@@ -741,10 +741,11 @@ fn provider_buttons(
     w: f32,
     v: &View,
 ) -> bool {
-    let width = ((w - 8.0) / 2.0).max(0.0);
-    for (index, provider) in [Provider::Google, Provider::Github].into_iter().enumerate() {
-        let label = format!("{} 로그인", provider_name(provider));
-        let rect = (x + index as f32 * (width + 8.0), *y, width, CTL_H);
+    let providers=[Provider::Google,Provider::Github];
+    let labels:Vec<_>=providers.iter().map(|p|format!("{} 로그인",provider_name(*p))).collect();
+    let widths:Vec<_>=labels.iter().map(|label|crate::native_controls::button_width(g,label,CTL_H,true)).collect();
+    let (rects,height)=crate::native_layout::flow(&widths,(x,*y,w,0.0),CTL_H,8.0,crate::native_layout::Align::Start);
+    for ((provider,label),rect) in providers.into_iter().zip(labels).zip(rects) {
         if provider_enabled(&v.providers, provider) {
             button(
                 g,
@@ -756,19 +757,20 @@ fn provider_buttons(
                 true,
             );
         } else {
-            crate::native_controls::text_button(
+            crate::native_controls::content_button(
                 g,
                 rect,
                 s.cursor,
                 &label,
                 crate::native_controls::Style {
                     enabled: false,
+                    primary: true,
                     ..Default::default()
                 },
             );
         }
     }
-    *y += ROW_H;
+    *y += height + 12.0;
     let ready = provider_buttons_ready(v);
     if !ready {
         let hint = match v.providers["state"].as_str() {

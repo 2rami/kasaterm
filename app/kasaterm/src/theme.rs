@@ -506,27 +506,27 @@ impl Palette {
 
 const FROST_LIGHT: Palette = Palette {
     surfaces: Some(PaletteSurfaces {
-        pane: [249, 249, 252, 255], header: [240, 238, 248, 255],
-        sidebar: [224, 226, 239, 255], titlebar: Some([234, 234, 244, 255]),
-        side_panel: Some([240, 241, 248, 255]),
+        pane: [247,249,253,255], header: [241,245,251,255],
+        sidebar: [250,252,255,255], titlebar: Some([234,240,248,255]),
+        side_panel: Some([255,255,255,255]),
     }),
-    bg: [234, 234, 242, 255], fg: [37, 38, 58, 255],
-    surface: [248, 248, 252, 255], surface_hover: [226, 228, 241, 255],
-    surface_active: [212, 216, 236, 255], border: [150, 155, 179, 150],
-    text: [37, 38, 58, 255], text_dim: [80, 84, 108, 255], text_mute: [99, 103, 125, 255],
+    bg: [234,240,248,255], fg: [36,52,77,255],
+    surface: [255,255,255,255], surface_hover: [241,245,251,255],
+    surface_active: [220,232,248,255], border: [191,204,221,180],
+    text: [36,52,77,255], text_dim: [82,101,127,255], text_mute: [95,112,135,255],
     ..LIGHT
 };
 
 const FROST_DARK: Palette = Palette {
     surfaces: Some(PaletteSurfaces {
-        pane: [24, 26, 43, 255], header: [34, 35, 58, 255],
-        sidebar: [30, 32, 53, 255], titlebar: Some([29, 30, 49, 255]),
-        side_panel: Some([32, 34, 55, 255]),
+        pane: [19,27,40,255], header: [27,38,56,255],
+        sidebar: [25,36,52,255], titlebar: Some([24,33,49,255]),
+        side_panel: Some([34,46,66,255]),
     }),
-    bg: [23, 24, 43, 255], fg: [240, 240, 250, 255],
-    surface: [37, 38, 62, 255], surface_hover: [47, 49, 78, 255],
-    surface_active: [61, 64, 99, 255], border: [94, 99, 131, 150],
-    text: [240, 240, 250, 255], text_dim: [182, 184, 207, 255], text_mute: [150, 154, 182, 255],
+    bg: [24,33,49,255], fg: [238,244,255,255],
+    surface: [34,46,66,255], surface_hover: [43,58,81,255],
+    surface_active: [58,78,107,255], border: [70,89,118,180],
+    text: [238,244,255,255], text_dim: [165,184,210,255], text_mute: [145,165,193,255],
     ..DARK
 };
 
@@ -647,7 +647,7 @@ pub(crate) fn window_theme() -> winit::window::Theme {
 
 /// Accent presets offered in the settings screen; first is the default blue.
 pub const ACCENT_PRESETS: &[(&str, [u8; 4])] = &[
-    ("blue", [90, 140, 230, 255]),
+    ("blue", [47, 111, 212, 255]),
     ("green", [63, 170, 90, 255]),
     ("orange", [228, 140, 60, 255]),
     ("purple", [168, 118, 228, 255]),
@@ -1282,8 +1282,8 @@ macro_rules! f32_slot {
     };
 }
 
-f32_slot!(S_RADIUS_SM, radius_sm, 10.0);
-f32_slot!(S_RADIUS_MD, radius_md, 16.0);
+f32_slot!(S_RADIUS_SM, radius_sm, 12.0);
+f32_slot!(S_RADIUS_MD, radius_md, 20.0);
 f32_slot!(S_BORDER_W, border_w, 1.0);
 f32_slot!(S_SHADOW_OFFSET, shadow_offset, 0.0);
 f32_slot!(S_ROUNDNESS, roundness, 1.0);
@@ -1322,8 +1322,8 @@ pub fn pixel_chrome() -> bool {
 static S_PIXEL_CHROME: AtomicU32 = AtomicU32::new(0);
 
 const SHAPE_ROUNDED: Shape = Shape {
-    radius_sm: 10.0,
-    radius_md: 16.0,
+    radius_sm: 12.0,
+    radius_md: 20.0,
     border_w: 1.0,
     shadow_offset: 0.0,
     roundness: 1.0,
@@ -1628,6 +1628,14 @@ pub fn edge_on(fill: [u8; 4]) -> [u8; 4] {
 /// 고정 색이 아니라 `bg`↔`surface_hover` 중간인 건 방향 때문이다 — 대비로 가는
 /// 방향이 테마마다 반대다(어두운 테마는 밝게, 밝은 테마는 어둡게). 팔레트가 이미
 /// 그 방향을 알고 있으니 절반만 따라가면 여덟 테마에서 전부 맞는다.
+pub(crate) fn panel_shadow()->[u8;4] {
+    [0,0,0,if is_light(bg()) {18}else{44}]
+}
+
+pub(crate) fn control_knob(track:[u8;4])->[u8;4] {
+    enforce_contrast_at([255,255,255,255],track,3.0)
+}
+
 pub fn panel_bg() -> [u8; 4] {
     sidebar_bg()
 }

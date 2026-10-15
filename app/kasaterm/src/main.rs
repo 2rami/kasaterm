@@ -44,6 +44,7 @@ mod device_icons;
 mod feedback_delivery;
 mod account_sync_ui;
 mod native_controls;
+mod native_layout;
 mod design_study;
 mod native_strings;
 mod notify_banner;

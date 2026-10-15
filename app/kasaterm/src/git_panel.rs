@@ -737,20 +737,13 @@ fn icon_label_button(
     } else {
         theme::text()
     };
-    g.queue_icon(icon, rect.0 + 10.0, rect.1 + 6.0, 14.0, ink);
+    g.queue_icon(icon, rect.0 + 10.0, rect.1 + (rect.3 - 14.0)/2.0, 14.0, ink);
     let reserve = if trailing.is_some() { 28.0 } else { 10.0 };
-    label(
-        g,
-        rect.0 + 32.0,
-        rect.1 + 6.0,
-        text,
-        rect.2 - 32.0 - reserve,
-        12.0,
-        ink,
-        false,
-    );
+    let shown=crate::info::fit_text(g,text,(rect.2-32.0-reserve).max(0.0),12.0,false);
+    let m=g.chrome_text_metrics(&shown,12.0,false);let (_,ty)=m.centered_origin(rect,g.scale());
+    g.draw_text(rect.0+32.0,ty,&shown,gpu::DrawOpts{font_size:12.0,color:ink,bold:false,italic:false});
     if let Some(icon) = trailing {
-        g.queue_icon(icon, rect.0 + rect.2 - 24.0, rect.1 + 6.0, 14.0, ink);
+        g.queue_icon(icon, rect.0 + rect.2 - 24.0, rect.1 + (rect.3 - 14.0)/2.0, 14.0, ink);
     }
     rect
 }

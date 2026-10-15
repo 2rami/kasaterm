@@ -106,3 +106,7 @@ Native release captures were reviewed at 1100×780, 390×780 and 280×200, with 
 The user requested all three directions before choosing a replacement for the old design contract. Native wgpu studies now compare Cloud OS (36px controls, floating navigation), Precision (28px controls, compact flat rows) and Playroom (40px controls, portrait rail and rounded surfaces). The same sample appearance, terminal/Info workspace and shared-file scenes were captured in all three at 1280×860; each appearance scene was also checked at 390×844.
 
 Four tests passed for geometry, core-text contrast, color/state behavior and native icon availability. Fifteen native release captures include style switching, custom accent application and shared-file selection; saved settings kept their original theme/accent. The studies use representative data and memory-only controls behind an isolated verification flag. The normal app default and final design direction remain pending the user’s choice.
+
+## Accepted direction
+
+A / Cloud OS was selected. Native application verification now covers actual settings, shared files and common controls. The follow-up requires measured text alignment and natural button widths; graphical color selection takes precedence over HEX entry. Comparison scenes remain historical reference, not verification of production UI.

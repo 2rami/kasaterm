@@ -224,10 +224,10 @@ pub(crate) fn paint_notice(
         let ch = native_controls::CONTROL_HEIGHT;
         let ox = x + w - PAD_R - chips_w;
         let primary = native_controls::Style { primary: true, ..Default::default() };
-        hits.approve = Some(native_controls::text_button(g, (ox, cy, ok_w, ch), cursor, ok, primary));
+        hits.approve = Some(native_controls::content_button_aligned(g, (ox, cy, ok_w, ch), cursor, ok, primary,crate::native_layout::Align::Center));
         let nx = ox + ok_w + CHIP_GAP;
         let deny = native_controls::Style { danger: notice.decline_is_danger, ..Default::default() };
-        hits.deny = Some(native_controls::text_button(g, (nx, cy, no_w, ch), cursor, no, deny));
+        hits.deny = Some(native_controls::content_button_aligned(g, (nx, cy, no_w, ch), cursor, no, deny,crate::native_layout::Align::Center));
     }
     hits
 }

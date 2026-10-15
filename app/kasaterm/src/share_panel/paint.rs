@@ -1,4 +1,5 @@
 use super::*;
+const FILE_ROW_H:f32=48.0;
 
 fn text(
     g: &mut gpu::GpuRenderer,
@@ -33,7 +34,7 @@ fn button(
     action: Action,
     active: bool,
 ) {
-    let rect = native_controls::text_button(
+    let rect = native_controls::content_button(
         g,
         rect,
         cursor,
@@ -59,7 +60,7 @@ struct ContentLayout {
 }
 
 fn content_layout(x: f32, y: f32, width: f32, bottom: f32, selected: bool) -> ContentLayout {
-    let footer = (bottom - 72.0).max(y);
+    let footer = (bottom - if width<220.0 {120.0}else{88.0}).max(y);
     let height = (footer - y).max(0.0);
     if selected && width >= 560.0 {
         let preview_width = (width * 0.46).min(440.0);
@@ -90,16 +91,9 @@ pub(crate) fn draw(
     let w = (width - 28.0).max(1.0);
     let mut y = top + 8.0;
     g.push_clip(x, top, width, (bottom - top).max(0.0));
-    let search = (left, y, w, 26.0);
-    g.round_rect_fill(
-        search.0,
-        search.1,
-        search.2,
-        search.3,
-        theme::radius_sm(),
-        theme::surface_hover(),
-    );
-    g.queue_icon("search", left + 7.0, y + 6.0, 14.0, theme::text_dim());
+    let search = (left, y, w, native_controls::CONTROL_HEIGHT);
+    native_controls::field(g,search,state.search_focus);
+    g.queue_icon("search",left+9.0,y+(search.3-14.0)/2.0,14.0,theme::text_dim());
     let label = if state.query.is_empty() && preedit.is_empty() {
         "이름·종류·기기 검색…".to_owned()
     } else {
@@ -118,10 +112,12 @@ pub(crate) fn draw(
             theme::with_alpha(theme::accent(), 60),
         );
     }
+    let metrics=g.chrome_text_metrics(&label,12.0,false);
+    let (_,text_y)=metrics.centered_origin(search,g.scale());
     text(
         g,
-        left + 27.0,
-        y + 6.0,
+        left + 29.0,
+        text_y,
         w - 57.0,
         &label,
         12.0,
@@ -136,10 +132,11 @@ pub(crate) fn draw(
         native_controls::focus_ring(g, search);
         let (before, _) = lineedit::split(&state.query, state.caret);
         let caret =
-            (left + 27.0 + g.measure_chrome_text(&format!("{before}{preedit}"), 12.0, false))
+            (left + 29.0 + g.measure_chrome_text(&format!("{before}{preedit}"), 12.0, false))
                 .min(left + w - 30.0);
-        g.rect(caret, y + 5.0, 1.0, 16.0, theme::text());
-        state.caret_rect = Some((caret, y + 5.0, 1.0, 16.0));
+        let caret_y = y + (search.3 - 16.0) / 2.0;
+        g.rect(caret, caret_y, 1.0, 16.0, theme::text());
+        state.caret_rect = Some((caret, caret_y, 1.0, 16.0));
     }
     state.search_rect = g.clip_hit(search);
     if let Some(rect) = state.search_rect {
@@ -148,7 +145,7 @@ pub(crate) fn draw(
     if !state.query.is_empty() {
         let rect = native_controls::icon_button(
             g,
-            (left + w - 26.0, y, 26.0, 26.0),
+            (left + w - 29.0, y + 3.0, 26.0, 26.0),
             cursor,
             "x",
             Default::default(),
@@ -157,10 +154,11 @@ pub(crate) fn draw(
             state.hits.push((Action::ClearSearch, rect));
         }
     }
-    y += 34.0;
+    y += search.3 + 8.0;
     let recent = state.view == View::Recent;
     let folders = state.view == View::Folders;
-    let mode_w = ((w - 70.0) * 0.5).clamp(44.0, 64.0);
+    let mode_space=if w<190.0 {w}else{w-72.0};
+    let mode_w=native_controls::button_width(g,"최근",native_controls::COMPACT_HEIGHT,true).min((mode_space-8.0).max(0.0)/2.0);
     button(
         g,
         state,
@@ -174,7 +172,7 @@ pub(crate) fn draw(
         g,
         state,
         cursor,
-        (left + mode_w + 6.0, y, mode_w, 26.0),
+        (left + mode_w + 8.0, y, mode_w, 26.0),
         "폴더",
         Action::Folders,
         folders,
@@ -253,7 +251,7 @@ pub(crate) fn draw(
     let footer_y = layout.footer;
     let list_h = layout.list.3;
     let list_w = layout.list.2;
-    state.scroll_max = (state.rows.len() as f32 * 40.0 - list_h).max(0.0);
+    state.scroll_max = (state.rows.len() as f32 * FILE_ROW_H - list_h).max(0.0);
     state.scroll = state.scroll.clamp(0.0, state.scroll_max);
     state.scroll_track = (state.scroll_max > 0.0).then_some((left + list_w - 5.0, y, 5.0, list_h));
     g.push_clip(left, y, list_w, list_h);
@@ -287,12 +285,12 @@ pub(crate) fn draw(
         };
         text(g, left, y + 12.0, list_w, empty, 12.0, theme::text_dim(), false);
     } else {
-        let start = (state.scroll / 40.0).floor() as usize;
-        let end = (start + (list_h / 40.0).ceil() as usize + 1).min(state.rows.len());
+        let start = (state.scroll / FILE_ROW_H).floor() as usize;
+        let end = (start + (list_h / FILE_ROW_H).ceil() as usize + 1).min(state.rows.len());
         for index in start..end {
             let row = &state.rows[index];
-            let ry = y + index as f32 * 40.0 - state.scroll;
-            let rect = (left, ry, list_w, 40.0);
+            let ry = y + index as f32 * FILE_ROW_H - state.scroll;
+            let rect = (left, ry, list_w, FILE_ROW_H);
             let hovered = contains(rect, cursor);
             let selected = state.selected.as_deref() == Some(&row.path);
             if hovered || selected {
@@ -300,7 +298,7 @@ pub(crate) fn draw(
                     left,
                     ry,
                     list_w,
-                    40.0,
+                    FILE_ROW_H,
                     theme::radius_sm(),
                     if selected { theme::lerp(theme::surface(), theme::accent(), 0.14) } else { theme::surface_hover() },
                 );
@@ -314,14 +312,14 @@ pub(crate) fn draw(
                     _ => "file-text",
                 }
             };
-            g.round_rect_fill(left + 4.0, ry + 5.0, 30.0, 30.0, theme::radius_sm(),
+            g.round_rect_fill(left + 4.0, ry + 9.0, 30.0, 30.0, theme::radius_sm(),
                 theme::lerp(theme::surface(), theme::accent(), 0.10));
-            g.queue_icon(icon, left + 11.0, ry + 12.0, 16.0,
+            g.queue_icon(icon, left + 11.0, ry + 16.0, 16.0,
                 theme::enforce_contrast_at(theme::accent(), theme::surface(), 4.5));
             text(
                 g,
                 left + 44.0,
-                ry + 4.0,
+                ry + 8.0,
                 list_w - 50.0,
                 &row.title,
                 12.0,
@@ -331,7 +329,7 @@ pub(crate) fn draw(
             text(
                 g,
                 left + 44.0,
-                ry + 23.0,
+                ry + 28.0,
                 list_w - 50.0,
                 &row.detail,
                 10.5,
@@ -481,29 +479,11 @@ pub(crate) fn draw(
         theme::text_dim(),
         false,
     );
-    button(
-        g,
-        state,
-        cursor,
-        (left, footer_y + 32.0, (w - 8.0) * 0.6, 26.0),
-        "폴더에서 보기",
-        Action::Reveal,
-        false,
-    );
-    button(
-        g,
-        state,
-        cursor,
-        (
-            left + (w - 8.0) * 0.6 + 8.0,
-            footer_y + 32.0,
-            (w - 8.0) * 0.4,
-            26.0,
-        ),
-        "경로 복사",
-        Action::CopyPath,
-        false,
-    );
+    let actions=[("폴더에서 보기",Action::Reveal),("경로 복사",Action::CopyPath)];
+    let h=native_controls::CONTROL_HEIGHT;
+    let widths:Vec<_>=actions.iter().map(|(label,_)|native_controls::button_width(g,label,h,false)).collect();
+    let (rects,_)=crate::native_layout::flow(&widths,(left,footer_y+32.0,w,0.0),h,8.0,crate::native_layout::Align::Start);
+    for ((label,action),r) in actions.into_iter().zip(rects){button(g,state,cursor,r,label,action,false);}
     g.pop_clip();
 }
 
