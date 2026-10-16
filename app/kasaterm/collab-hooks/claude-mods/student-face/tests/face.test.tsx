@@ -38,7 +38,7 @@ async function reply($: Engine, surface: 'terminal' | 'desktop' | 'mobile', prop
   return $.ui.mount({ plugin: 'student-face', surface, component: 'AssistantMessage', requestId: opts.id ?? `m${turns}`, props, viewport: { columns: 100, rows: 30, isFullscreen: true } })
 }
 
-test("a student's pane puts the face beside the first reply of a turn, without the name", async ($, on) => {
+test("a student's pane puts the face above the reply, without consuming its width", async ($, on) => {
   const asked = host(on, { name: '유우카', face: FACE })
   await $.session.start(START)
   expect(asked).toEqual(['http://127.0.0.1:4321/claude-mod/face?name=%EC%9C%A0%EC%9A%B0%EC%B9%B4'])
@@ -46,6 +46,7 @@ test("a student's pane puts the face beside the first reply of a turn, without t
   const [image] = await ui.findAll({ type: 'Image' })
   expect(image?.props).toMatchObject({ source: { file: FACE.file, format: 'png', generation: 7 }, columns: 4, rows: 2 })
   expect((await ui.findAll({ type: 'Text' })).some(t => t.text === '유우카')).toBe(false)
+  expect((await ui.findAll({ type: 'Box' }))[0]?.props).toMatchObject({ flexDirection: 'column' })
   await ui.unmount()
 })
 
@@ -111,17 +112,18 @@ test('when the app cannot be reached the face it already knew stays', async ($, 
   await ui.unmount()
 })
 
-test('the turn opens with the big face; a later reply block in the same turn gets the small one; the first keeps the big one on redraw', async ($, on) => {
+test('redrawing an old answer before a new reply cannot consume its face header', async ($, on) => {
   host(on, { name: '유우카', face: FACE })
   await $.session.start(START)
-  const first = await reply($, 'terminal', REPLY, { id: 'a' })
+  await $.turn.start({ text: 'new question', turnId: 'new-turn' })
+  const first = await reply($, 'terminal', REPLY, { newTurn: false, id: 'older-answer' })
   expect((await first.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 4, rows: 2 })
   await first.unmount()
   const later = await reply($, 'terminal', { text: '도구 뒤 글', isFirstOfReply: true }, { newTurn: false, id: 'b' })
-  expect((await later.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 2, rows: 1 })
+  expect((await later.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 4, rows: 2 })
   expect((await later.findAll({ type: 'Markdown' }))[0]?.props.text).toBe('도구 뒤 글')
   await later.unmount()
-  const again = await reply($, 'terminal', REPLY, { newTurn: false, id: 'a' })
+  const again = await reply($, 'terminal', REPLY, { newTurn: false, id: 'older-answer' })
   expect((await again.findAll({ type: 'Image' }))[0]?.props).toMatchObject({ columns: 4, rows: 2 })
   await again.unmount()
 })
@@ -148,7 +150,7 @@ test('the turn line is in the student colour with the face as its mark', async (
   await ui.unmount()
 })
 
-test('the face takes the bullet\'s place: the first block is drawn as markdown beside it, without the engine\'s row', async ($, on) => {
+test('the face takes the bullet\'s place: the first block is drawn as markdown below it, without the engine\'s row', async ($, on) => {
   host(on, { name: '유우카', face: FACE })
   await $.session.start(START)
   const ui = await reply($, 'terminal', { text: '**고쳤어요** 이제 돼요', isFirstOfReply: true })

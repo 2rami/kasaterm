@@ -112,6 +112,7 @@ async fn cmd_handler(
         "surface.focus",
         "window.new",
         "window.close",
+        "window.close_checked",
         "window.rename",
         "window.reorder",
         "window.switch",

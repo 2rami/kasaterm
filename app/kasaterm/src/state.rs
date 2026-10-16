@@ -518,14 +518,6 @@ pub(crate) enum MachinesColBtn {
         host: String,
         kvm: Option<String>,
     },
-    /// 그 기계의 pane 닫기 — 거기서 사람이 닫은 것과 같다(되살리기 대열에 남는다).
-    /// `pane` 이 있으면 이쪽 거울도 함께 닫는다(원격이 사라진 거울은 멈춘 화면이다).
-    Close {
-        label: String,
-        remote_id: String,
-        name: String,
-        pane: String,
-    },
     /// 방 펼치기 — 그 기계 학생 pane 전부를 이 창의 거울로(원격 방마다 새 창).
     Unfold {
         label: String,

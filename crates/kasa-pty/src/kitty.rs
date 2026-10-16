@@ -177,6 +177,7 @@ pub(crate) struct KittyImage {
     pub(crate) uid: u64,
     pub(crate) path: PathBuf,
     pub(crate) pixels: u64,
+    pub(crate) bytes: usize,
     width: u32,
     height: u32,
 }
@@ -220,6 +221,7 @@ pub(crate) struct Env {
     /// 파일·공유 메모리를 읽어도 되나. 원격 거울의 파서는 남의 기기 경로를 받으므로
     /// 끈다 — 그 경로는 이 기기에서 뜻이 없고, `t=t` 는 지우기까지 한다.
     pub(crate) local_media: bool,
+    pub(crate) export: bool,
     pub(crate) grid_cols: u16,
     /// 화면 첫 줄의 내용 절대 줄(= 히스토리 줄 수). 지우기의 `x`·`y` 를 앵커와 견준다.
     pub(crate) hist: i64,
@@ -228,6 +230,7 @@ pub(crate) struct Env {
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Outcome {
     pub(crate) reply: Option<Vec<u8>>,
+    pub(crate) wire: Option<Vec<u8>>,
     /// 커서 자리 놓기 뒤 커서를 내릴 줄 수와 놓을 열(kitty: 오른쪽으로 상자 폭,
     /// 아래로 높이-1, 오른쪽 끝을 넘으면 다음 줄 첫 칸).
     pub(crate) cursor: Option<(u16, u16)>,
@@ -296,7 +299,12 @@ impl KittyStore {
         // 이어 받는 조각은 `m`(과 `q`)만 싣는다. 동작 키가 있으면 받던 것을 버린
         // 새 명령이고, 지우기는 받던 것을 버린 뒤 지운다.
         match cmd.action {
-            Some(b'd') => return self.delete(&cmd, at, env),
+            Some(b'd') => {
+                let wire = env.export.then(|| self.delete_wire(&cmd));
+                let mut out = self.delete(&cmd, at, env);
+                out.wire = wire;
+                return out;
+            },
             Some(_) => self.pending = None,
             None => {}
         }
@@ -351,6 +359,7 @@ impl KittyStore {
                     uid,
                     path,
                     pixels: loaded.width as u64 * loaded.height as u64,
+                    bytes: loaded.png.len(),
                     width: loaded.width,
                     height: loaded.height,
                 };
@@ -362,20 +371,86 @@ impl KittyStore {
                 } else {
                     self.images.push(image);
                 }
-                if cmd.action() == b'T' {
-                    return self.put(&cmd, id, at, env);
+                let mut out = if cmd.action() == b'T' {
+                    self.put(&cmd, id, at, env)
+                } else {
+                    reply(&cmd, id, cmd.number, 0, "OK")
+                };
+                if env.export {
+                    let placement = (cmd.action() == b'T' && cmd.parent == 0 && (cmd.virtual_ || at.is_some()))
+                        .then(|| self.placements.iter().rev().find(|p| p.image == id && p.id == cmd.placement))
+                        .flatten();
+                    out.wire = Some(image_wire(id, &loaded.png, placement.map(|p| (p, cmd.no_move))));
                 }
-                reply(&cmd, id, cmd.number, 0, "OK")
+                out
             }
             b'p' => {
                 let id = if cmd.id != 0 { Some(cmd.id) } else { self.newest_numbered(cmd.number) };
                 match id.filter(|id| self.image(*id).is_some()) {
-                    Some(id) => self.put(&cmd, id, at, env),
+                    Some(id) => {
+                        let mut out = self.put(&cmd, id, at, env);
+                        if env.export {
+                            out.wire = self.placements.iter().rev()
+                                .find(|p| p.image == id && p.id == cmd.placement)
+                                .map(|p| placement_wire(p, cmd.no_move));
+                        }
+                        out
+                    },
                     None => reply(&cmd, cmd.id, cmd.number, cmd.placement, "ENOENT:image not found"),
                 }
             }
             _ => reply(&cmd, cmd.id, cmd.number, 0, "EINVAL:unsupported action"),
         }
+    }
+
+    fn delete_wire(&self, cmd: &Command) -> Vec<u8> {
+        let mut what = cmd.delete.unwrap_or(b'a');
+        let mut id = cmd.id;
+        if what.eq_ignore_ascii_case(&b'n') {
+            let Some(found) = self.newest_numbered(cmd.number) else { return Vec::new() };
+            id = found;
+            what = if what.is_ascii_uppercase() { b'I' } else { b'i' };
+        }
+        format!("\x1b_Ga=d,d={},i={id},p={},x={},y={},z={},q=2;\x1b\\",
+            what as char, cmd.placement, cmd.x, cmd.y, cmd.z).into_bytes()
+    }
+
+    pub(crate) fn snapshot_images(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut images: Vec<_> = self.images.iter().collect();
+        images.sort_by_key(|image| image.uid);
+        for image in images {
+            if let Ok(bytes) = std::fs::read(&image.path) {
+                if bytes.len() <= MAX_IMAGE_BYTES {
+                    out.extend(image_wire(image.id, &bytes, None));
+                }
+            }
+        }
+        for placement in self.placements.iter().filter(|p| p.virtual_) {
+            out.extend(placement_wire(placement, true));
+        }
+        out
+    }
+
+    pub(crate) fn anchored_screen_wire(&self, history: i64, rows: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        for placement in self.placements.iter().filter(|p| !p.virtual_) {
+            let row = placement.abs_line - history;
+            if row < 0 || row >= rows as i64 { continue; }
+            out.extend(format!("\x1b[{};{}H", row + 1, placement.col as u32 + 1).as_bytes());
+            out.extend(placement_wire(placement, true));
+        }
+        out
+    }
+
+    pub(crate) fn anchored_row_wire(&self, abs_line: i64) -> Vec<u8> {
+        let mut out = Vec::new();
+        for placement in self.placements.iter().filter(|p| !p.virtual_ && p.abs_line == abs_line) {
+            out.extend(format!("\x1b[{}G", placement.col as u32 + 1).as_bytes());
+            out.extend(placement_wire(placement, true));
+            out.extend_from_slice(b"\r");
+        }
+        out
     }
 
     fn put(&mut self, cmd: &Command, id: u32, at: Option<At>, env: &Env) -> Outcome {
@@ -553,7 +628,7 @@ fn reply(cmd: &Command, id: u32, number: u32, placement: u32, msg: &str) -> Outc
     if placement != 0 {
         keys.push_str(&format!(",p={placement}"));
     }
-    Outcome { reply: Some(format!("\x1b_G{keys};{msg}\x1b\\").into_bytes()), cursor: None }
+    Outcome { reply: Some(format!("\x1b_G{keys};{msg}\x1b\\").into_bytes()), ..Default::default() }
 }
 
 struct Loaded {
@@ -589,6 +664,7 @@ fn load(cmd: &Command, payload: &[u8], env: &Env) -> Result<Loaded, String> {
 }
 
 fn decode(cmd: &Command, data: Vec<u8>) -> Result<Loaded, String> {
+    if data.len() > MAX_IMAGE_BYTES { return Err("EFBIG:image too large".into()); }
     let format = if cmd.format == 0 { 32 } else { cmd.format };
     match format {
         100 => {
@@ -633,6 +709,39 @@ fn decode(cmd: &Command, data: Vec<u8>) -> Result<Loaded, String> {
         }
         _ => Err("EINVAL:unknown image format".into()),
     }
+}
+
+fn placement_wire(p: &Placement, no_move: bool) -> Vec<u8> {
+    format!("\x1b_Ga=p,i={},p={},c={},r={},U={},C={},z={},q=2;\x1b\\",
+        p.image, p.id, p.cols, p.rows, u8::from(p.virtual_), u8::from(no_move), p.z).into_bytes()
+}
+
+fn image_wire(id: u32, png: &[u8], placement: Option<(&Placement, bool)>) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(png.len().div_ceil(3) * 4 + 128);
+    for (index, bytes) in png.chunks(3072).enumerate() {
+        let more = (index + 1) * 3072 < png.len();
+        if index == 0 {
+            let action = if placement.is_some() { 'T' } else { 't' };
+            out.extend(format!("\x1b_Ga={action},t=d,f=100,i={id},q=2,m={}", u8::from(more)).as_bytes());
+            if let Some((p, no_move)) = placement {
+                out.extend(format!(",p={},c={},r={},U={},C={},z={}", p.id, p.cols, p.rows,
+                    u8::from(p.virtual_), u8::from(no_move), p.z).as_bytes());
+            }
+            out.push(b';');
+        } else {
+            out.extend(format!("\x1b_Gq=2,m={};", u8::from(more)).as_bytes());
+        }
+        for chunk in bytes.chunks(3) {
+            let bits = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+                | *chunk.get(2).unwrap_or(&0) as u32;
+            for i in 0..4 {
+                out.push(if i <= chunk.len() { ALPHABET[(bits >> (18 - 6 * i) & 63) as usize] } else { b'=' });
+            }
+        }
+        out.extend_from_slice(b"\x1b\\");
+    }
+    out
 }
 
 fn write_png(bytes: &[u8]) -> Option<PathBuf> {
@@ -934,7 +1043,7 @@ pub(crate) mod tests {
     }
 
     fn env() -> Env {
-        Env { local_media: true, grid_cols: 80, hist: 0 }
+        Env { local_media: true, export: false, grid_cols: 80, hist: 0 }
     }
 
     fn run(store: &mut KittyStore, apc: &str) -> Outcome {

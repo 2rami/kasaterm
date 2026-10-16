@@ -8,12 +8,6 @@ const REFRESH_MS = 30000
 // 모듈 변수는 다시 실릴 때 처음으로 돌아간다 — session.start 가 다시 묻는다.
 const known = { face: null as Face | null, at: 0 }
 
-// 얼굴은 턴마다 한 번 — 그 턴의 첫 답 블록에만. 엔진의 isFirstOfReply 는 도구 줄 뒤 글마다 참이라
-// 그대로 쓰면 한 턴에 얼굴이 몇 번씩 끼었다(2026-10-06 「위치가 이상해」). 블록은 메시지 id(requestId)로
-// 기억해 스크롤로 다시 그려져도 같은 자리에 남는다.
-const turn = { waiting: false, firsts: new Set<string>() }
-const FIRSTS_MAX = 500
-
 // 엔진이 고른 영어 낱말(Sauteing…) 대신 학생이 무엇을 하는지 한국어로.
 const DOING: Record<string, string> = {
   requesting: '정리하는 중',
@@ -74,31 +68,21 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    turn.waiting = true
     if (Date.now() - known.at > REFRESH_MS) void ask($)
     return next(e)
   })
 
-  // 말하는 자리에 얼굴만 — 턴의 첫 답 왼쪽에 아바타처럼. 이름은 칸 머리·상태가 이미 말해 빼었다(2026-10-06).
-  // 엔진의 답 블록은 첫 줄에 ● 를 달아 얼굴 옆에 점이 하나 더 섰다 — 그 블록은 글을 Markdown 으로 직접 그려
-  // 점 자리를 얼굴이 맡는다. 엔진이 숨기는 부분(<context>)은 e.props.text 에 이미 없다.
+  // Markdown 표는 터미널 폭으로 배치한다. 얼굴을 옆에 놓으면 그 폭만큼 표가
+  // 넘쳐 테두리가 다음 줄로 감기므로, 얼굴과 본문을 별도 행에 둔다.
+  // 렌더 순서는 대화 순서가 아니다 — 옛 답이 다시 그려져도 같은 크기를 유지한다.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const face = known.face
     if (!face?.file || e.surface !== 'terminal' || !e.props.isFirstOfReply) return next(e)
-    if (turn.waiting) {
-      turn.waiting = false
-      turn.firsts.add(e.requestId)
-      if (turn.firsts.size > FIRSTS_MAX) turn.firsts.delete(turn.firsts.values().next().value as string)
-    }
-    // 턴의 첫 답은 큰 얼굴, 도구 뒤 같은 턴에 이어지는 답의 ● 는 한 줄짜리 작은 얼굴로.
-    const big = turn.firsts.has(e.requestId)
     const { Box, Image, Markdown } = $.ui.resolve(e)
     return (
-      <Box flexDirection="row" gap={1}>
-        <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={big ? 4 : 2} rows={big ? 2 : 1} alt=" " />
-        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-          <Markdown text={e.props.text} />
-        </Box>
+      <Box flexDirection="column">
+        <Image key="student-face" source={{ file: face.file, format: 'png', generation: face.generation }} columns={4} rows={2} alt=" " />
+        <Markdown text={e.props.text} />
       </Box>
     )
   })

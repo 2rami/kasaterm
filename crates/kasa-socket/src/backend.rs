@@ -1257,6 +1257,9 @@ pub trait Backend: Send + Sync {
     fn close_window(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("close_window not supported")
     }
+    fn close_window_checked(&self, _idx: usize, _addresses: Vec<serde_json::Value>) -> Result<()> {
+        anyhow::bail!("checked room close requires an updated source app")
+    }
     /// Restore a saved (on-disk, not-yet-live) session at index `idx` in the
     /// saved-session list — spawns its panes lazily and switches to it.
     /// Default unsupported.

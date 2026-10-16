@@ -204,6 +204,7 @@ pub struct PtySession {
     /// 세운다. 안 세우고 넘기면 커널이 다음 출력 청크를 **이쪽** read 에 줘 버려,
     /// 넘긴 뒤의 화면이 두 소비자에게 갈라진다.
     reader_stop: Arc<std::sync::atomic::AtomicBool>,
+    output_closed: Arc<std::sync::atomic::AtomicBool>,
     /// true 면 Drop 이 child 를 죽이지 않는다 — 핸드오프로 소유권이 나간 세션.
     kill_disarmed: std::sync::atomic::AtomicBool,
     /// Closed panes reject all user/control input while awaiting disposal.

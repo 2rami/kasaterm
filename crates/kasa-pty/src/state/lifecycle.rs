@@ -150,10 +150,12 @@ impl Wiring {
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_beats: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
         let reader_thread = spawn_reader_thread(
             l.reader,
             Arc::clone(&reader_stop),
+            Arc::clone(&output_closed),
             l.poll_fd,
             tx.clone(),
             opts.cols,
@@ -199,6 +201,7 @@ impl Wiring {
             inline_imgs,
             scheme_reports,
             reader_stop,
+            output_closed,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),

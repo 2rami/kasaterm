@@ -47,6 +47,8 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
   tmux 표본 넷이 칸 자리를 차례로 받았다 놓아 그 칸 학생 이름표가 비고 미니맵이 로고로 떨어졌다. 칸 tty 를 따지는 판정은
   macOS 만이다. 예:
   `env -i HOME="$HOME" USER="$USER" PATH=… TERM=xterm-256color KASATERM_SOCKET_PATH=/tmp/<네이름>/none.sock tmux -L <소켓> -f /dev/null new-session -d '<명령>'`
+- 격리한 두 앱 사이의 실제 보드 주소·조건부 닫기를 검증할 때만 보는 쪽에 `KASATERM_TEST_BOARD_REMOTE=1`을 더한다. `KASATERM_MACHINES`는 직접 띄운 원본 리그의 루프백 주소만 명시하며, 본판 명부나 기기를 쓰지 않는다. 기본 격리 실행은 원격 보드 수집을 계속 끈다.
+- 실제 Claude CLI의 `--restricted`·`--settings`는 대화형 `/config` 저장 위치를 격리하지 않는다. 별도 설정 프로필을 검증한 경우에만 옵션을 변경하고, 기본 인증 프로필을 쓰는 출력 시험에서는 설정 선택창을 보기만 한다.
 - **화면을 판정할 때 `kasaterm-cli capture <pane>` 을 믿지 마라 — 원본 글자판이다.** 지금 보이는 방의 칸이면 창 프레임을 잘라 주지만, 안 보이는 방의 칸이면 `capture_pane_offscreen` 이라 `t.cells` 를 그대로 찍어(응답에 `"offscreen":true`), 렌더러가 화면을 만들며 하는 일(스크롤백 당김·입력창 붙잡기 같은 재구성)이 **안 보인다**. 칸 안 그림(kitty·OSC 1337)은 거기도 그린다 — 예전엔 빠져서 학생 얼굴 자리가 빈칸으로 찍혀 「그 칸만 그림이 안 나온다」로 오판했다(2026-10-06). 렌더 변경을 눈으로 확인하려면 `kasaterm-cli capture --window <path>`(창 프레임) 이나 `KASATERM_AUTOCAPTURE_MS`/`_PATH` 를 써라. 2026-09-03 에 이걸 몰라 "코드가 안 돈다"고 한동안 오판했다(계측을 심어 보니 값은 맞게 돌고 있었다).
 - **리그 창이 다른 창에 가려져 있으면 `peek`·`capture` 가 몇 초 전 화면을 준다.** 격자는 프레임이 돌 때 PTY 에서 옮겨지는데, 가려진 창은
   다음 입력이 올 때까지 프레임을 거의 안 돈다(2026-10-02: Claude Code 는 클릭에 18ms 만에 다시 그렸는데 1.5초 뒤 `peek` 은 옛 화면이었다).

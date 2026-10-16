@@ -837,43 +837,6 @@ impl App {
             std::thread::spawn(move || open_screen_share(&host, anchor));
             return true;
         }
-        if let state::MachinesColBtn::Close { label, remote_id, name, pane } = &btn {
-            if !pane.is_empty() && kasa_mcp::remote::is_view_pane(pane) {
-                self.confirm_or_close_pane(pane);
-                return true;
-            }
-            // 그 기계 pane 닫기 — 거기서 사람이 × 를 누른 것과 같다(되살리기 대열에
-            // 남는다, kill 아님). 거울 행은 remote_id 를 안 실으니 링크에서 꺼낸다.
-            let rid = if remote_id.is_empty() {
-                kasa_mcp::remote::remote_info(pane).map(|i| i.remote_id).unwrap_or_default()
-            } else {
-                remote_id.clone()
-            };
-            let Some(m) = kasa_mcp::machines::find(label) else {
-                self.set_toast(format!("기계 {label} 를 명부에서 못 찾았다"));
-                return true;
-            };
-            if rid.is_empty() {
-                self.set_toast(format!("{name} — 그 기계의 pane 번호를 몰라 못 닫는다"));
-                return true;
-            }
-            // 이쪽 거울은 바로 걷는다 — 원격이 사라진 거울은 멈춘 화면이라 남길 이유가
-            // 없고, 원격 요청은 왕복이 있어 스레드로(이 자리에서 기다리면 프레임이 선다).
-            if !pane.is_empty() {
-                self.close_pane(pane);
-            }
-            self.set_toast(format!("{} 의 {name} 닫는 중", crate::render::pane_identity::device_name(&label)));
-            let (base, rid_s, name_s) = (m.base.clone(), rid, name.clone());
-            std::thread::spawn(move || {
-                if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &rid_s, None, false) {
-                    eprintln!("[machines] {name_s}({rid_s}) 원격 닫기 실패: {e:#}");
-                }
-            });
-            // 폴링 캐시가 따라잡기 전이라 목록엔 한 박자 남는다 — 다음 새로고침에 걷힌다.
-            self.info.machines_col.last_refresh = None;
-            self.chrome_dirty = true;
-            return true;
-        }
         if self.info.machines_col.busy.is_some() {
             return true; // 한 번에 하나 — 이사 중 클릭은 삼킨다.
         }
@@ -947,7 +910,6 @@ impl App {
             }
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
             state::MachinesColBtn::Screen { .. }
-            | state::MachinesColBtn::Close { .. }
             | state::MachinesColBtn::Unfold { .. }
             | state::MachinesColBtn::Mirror { .. }
             | state::MachinesColBtn::Fetch { .. } => {
@@ -971,7 +933,6 @@ impl App {
         #[cfg(unix)]
         let outcome = match btn {
             state::MachinesColBtn::Screen { .. }
-            | state::MachinesColBtn::Close { .. }
             | state::MachinesColBtn::Unfold { .. }
             | state::MachinesColBtn::Mirror { .. }
             | state::MachinesColBtn::Fetch { .. } => {

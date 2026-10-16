@@ -81,6 +81,14 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "session.switch" => switch_by_idx(id, &req.params, |i| backend.switch_session(i)),
         "window.switch" => switch_by_idx(id, &req.params, |i| backend.switch_window(i)),
         "window.close" => switch_by_idx(id, &req.params, |i| backend.close_window(i)),
+        "window.close_checked" => switch_by_idx(id, &req.params, |i| {
+            let addresses: Vec<Value> = serde_json::from_value(req.params["addresses"].clone())?;
+            anyhow::ensure!(!addresses.is_empty() && addresses.iter().all(|address| {
+                ["machine_id", "surface_id", "surface_key", "instance_id"].iter().all(|field|
+                    address[field].as_str().is_some_and(|value| !value.is_empty()))
+            }), "complete pane addresses required");
+            backend.close_window_checked(i, addresses)
+        }),
         "window.reorder" => {
             let from = req.params.get("from").and_then(|v| v.as_u64());
             let to = req.params.get("to").and_then(|v| v.as_u64());
@@ -1530,6 +1538,7 @@ mod tests {
     /// expose in its first Backend impl.
     #[derive(Default)]
     struct FakeBackend {
+        closed_windows: Mutex<Vec<(usize, Vec<Value>)>>,
         sent_text: Mutex<Vec<(Option<String>, String)>>,
         sent_keys: Mutex<Vec<(Option<String>, String)>>,
         resized: Mutex<Vec<(Vec<u8>, f32)>>,
@@ -1546,6 +1555,10 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
+        fn close_window_checked(&self, idx: usize, keys: Vec<Value>) -> anyhow::Result<()> {
+            self.closed_windows.lock().unwrap().push((idx, keys));
+            Ok(())
+        }
         fn active_cwd(&self) -> Option<std::path::PathBuf> {
             self.cwd.clone()
         }
@@ -1628,6 +1641,22 @@ mod tests {
             method: method.into(),
             params,
         }
+    }
+
+    #[test]
+    fn checked_window_close_rejects_missing_identity_without_calling_backend() {
+        let backend = FakeBackend::default();
+        for params in [json!({"idx": 2}), json!({"idx": 2,"addresses": []}),
+            json!({"idx": 2,"addresses": [{"surface_key":"key"}]}), json!({"idx": 2,"addresses": [3]})] {
+            assert!(!dispatch(&backend, req("window.close_checked", params)).ok);
+        }
+        assert!(backend.closed_windows.lock().unwrap().is_empty());
+        let address = json!({"machine_id":"source", "surface_id":"%4", "surface_key":"original",
+            "session_id":"conversation", "instance_id":"process"});
+        assert!(dispatch(&backend, req("window.close_checked", json!({
+            "idx": 2, "addresses": [address],
+        }))).ok);
+        assert_eq!(*backend.closed_windows.lock().unwrap(), vec![(2, vec![address])]);
     }
 
     #[test]

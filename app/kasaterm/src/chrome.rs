@@ -3574,7 +3574,7 @@ impl App {
             action,
         });
     }
-    fn raise_confirm(&mut self, dlg: ConfirmClose) {
+    pub(crate) fn raise_confirm(&mut self, dlg: ConfirmClose) {
         // 도는 작업 확인은 OS 시트로(「경고창 OS 기본으로」). 저장 안 한 문서·거울
         // 닫기는 버튼이 셋이거나 상태가 바뀌어 앱 안 카드가 맡는다.
         #[cfg(target_os = "macos")]
@@ -3628,7 +3628,7 @@ impl App {
             }
             PendingClose::Pane { pane } => vec![pane.clone()],
             // 다른 기기의 방 — 여기 문서가 아니라 그쪽 것이다.
-            PendingClose::RemoteRoom { .. } => Vec::new(),
+            PendingClose::RemoteRoom { .. } | PendingClose::RemotePane { .. } => Vec::new(),
             PendingClose::AuxEditor(id) => {
                 return self
                     .aux_doc(*id)
@@ -3887,8 +3887,9 @@ impl App {
                     eprintln!("[window] close failed: {e:#}");
                 }
             }
-            PendingClose::RemoteRoom { label, window, room } => {
-                self.close_remote_room(&label, window, &room);
+            PendingClose::RemoteRoom { .. } | PendingClose::RemotePane { .. } => {
+                kasa_mcp::machines::poke();
+                self.info.machines_col.last_refresh = None;
             }
             PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             PendingClose::Window => {}

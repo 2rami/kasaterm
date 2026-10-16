@@ -170,7 +170,8 @@ impl InlineImgs {
             let count = self.imgs.len() + self.kitty.images.len();
             let pixels: u64 = self.imgs.iter().map(|i| i.pixels).sum::<u64>()
                 + self.kitty.images.iter().map(|i| i.pixels).sum::<u64>();
-            if count <= 1 || (count <= INLINE_IMAGE_SLOTS && pixels <= INLINE_IMAGE_PIXEL_BUDGET) {
+            let encoded_bytes: usize = self.kitty.images.iter().map(|i| i.bytes).sum();
+            if count <= 1 || (count <= INLINE_IMAGE_SLOTS && pixels <= INLINE_IMAGE_PIXEL_BUDGET && encoded_bytes <= 64 * 1024 * 1024) {
                 return;
             }
             let iterm = self.imgs.first().map(|i| i.id);
@@ -291,6 +292,7 @@ pub(super) fn advance_scanning_inline(
     st: &mut InlineScan,
     imgs: &Mutex<InlineImgs>,
     responder: &PtyEventForwarder,
+    mut wire: Option<&mut Vec<u8>>,
 ) {
     const ITERM: &[u8] = b"\x1b]1337;File=";
     const KITTY: &[u8] = b"\x1b_G";
@@ -327,8 +329,18 @@ pub(super) fn advance_scanning_inline(
                 Some((e, term_len)) => {
                     st.buf.extend_from_slice(&data[..e]);
                     match kind {
-                        Capture::Iterm => record_inline_image(term, st, imgs),
-                        Capture::Kitty => record_kitty(processor, term, st, imgs, responder),
+                        Capture::Iterm => {
+                            record_inline_image(term, st, imgs);
+                            if let Some(out) = wire.as_mut() {
+                                out.extend_from_slice(ITERM);
+                                out.extend_from_slice(&st.buf);
+                                out.extend_from_slice(b"\x1b\\");
+                            }
+                        },
+                        Capture::Kitty => {
+                            let exported = record_kitty(processor, term, st, imgs, responder, wire.is_some());
+                            if let Some(out) = wire.as_mut() { out.extend(exported); }
+                        },
                     }
                     st.buf.clear();
                     st.capturing = None;
@@ -363,6 +375,7 @@ pub(super) fn advance_scanning_inline(
             match next {
                 Some((m, kind, len)) => {
                     processor.advance(term, &data[..m]);
+                    if let Some(out) = wire.as_mut() { out.extend_from_slice(&data[..m]); }
                     // 동기 출력(DECSET 2026) 안이면 방금 먹인 바이트가 파서
                     // 버퍼에만 쌓여 커서가 옛 자리(입력줄)에 있다 — recall 은
                     // 프레임 전체를 2026 으로 감싼다(2026-08-13 실측 137쌍).
@@ -388,6 +401,7 @@ pub(super) fn advance_scanning_inline(
                         0
                     };
                     processor.advance(term, &data[..data.len() - keep]);
+                    if let Some(out) = wire.as_mut() { out.extend_from_slice(&data[..data.len() - keep]); }
                     st.carry = data[data.len() - keep..].to_vec();
                     return;
                 }
@@ -404,22 +418,30 @@ fn record_kitty(
     st: &mut InlineScan,
     imgs: &Mutex<InlineImgs>,
     responder: &PtyEventForwarder,
-) {
+    export: bool,
+) -> Vec<u8> {
     let at = st
         .anchor
         .take()
         .map(|(abs_line, col)| crate::kitty::At { abs_line, col });
     let env = crate::kitty::Env {
         local_media: responder.respond,
+        export: export && responder.respond,
         grid_cols: term.grid().columns() as u16,
         hist: term.grid().history_size() as i64,
     };
     let out = {
         let mut lock = imgs.lock().unwrap();
+        sync_inline_coordinates(term, &mut lock);
         let InlineImgs { kitty, next_id, .. } = &mut *lock;
         let out = kitty.handle(&st.buf, at, &env, next_id);
         lock.evict_over_budget();
         out
+    };
+    let wire = if !export { Vec::new() } else if env.export {
+        out.wire.unwrap_or_default()
+    } else {
+        [b"\x1b_G".as_slice(), &st.buf, b"\x1b\\"].concat()
     };
     if let Some(reply) = out.reply {
         responder.write_to_pty(&reply);
@@ -429,6 +451,7 @@ fn record_kitty(
         seq.extend_from_slice(format!("\x1b[{}G", col as u32 + 1).as_bytes());
         processor.advance(term, &seq);
     }
+    wire
 }
 
 /// 완성된 OSC 1337 본문(`params:base64`)을 temp 파일로 떨구고 앵커에 건다.
@@ -509,24 +532,7 @@ fn record_inline_image(
     lock.evict_over_budget();
 }
 
-/// 스냅샷에 인라인 이미지의 이번 프레임 뷰포트 배치를 싣는다. 앵커가 무너지는
-/// 사건은 여기서 감지해 통째로 버린다.
-pub(super) fn attach_inline_views(
-    update: &mut ScreenUpdate,
-    term: &Term<PtyEventForwarder>,
-    imgs: &Mutex<InlineImgs>,
-) {
-    attach_inline_views_at_offset(update, term, imgs, term.grid().display_offset());
-}
-
-pub(super) fn attach_inline_views_at_offset(
-    update: &mut ScreenUpdate,
-    term: &Term<PtyEventForwarder>,
-    imgs: &Mutex<InlineImgs>,
-    display_offset: usize,
-) {
-    let mut lock = imgs.lock().unwrap();
-    update.inline_images.clear();
+fn sync_inline_coordinates(term: &Term<PtyEventForwarder>, lock: &mut InlineImgs) {
     let grid = term.grid();
     let cols = grid.columns() as u16;
     let rows = grid.screen_lines() as u16;
@@ -556,6 +562,41 @@ pub(super) fn attach_inline_views_at_offset(
     lock.last_rows = rows;
     lock.last_hist = hist;
     lock.last_alt = alt;
+}
+
+pub(super) fn kitty_snapshot_images(imgs: &Mutex<InlineImgs>) -> Vec<u8> {
+    imgs.lock().unwrap().kitty.snapshot_images()
+}
+
+pub(super) fn kitty_anchored_screen(imgs: &Mutex<InlineImgs>, history: i64, rows: u16) -> Vec<u8> {
+    imgs.lock().unwrap().kitty.anchored_screen_wire(history, rows)
+}
+
+pub(super) fn kitty_anchored_row(imgs: &Mutex<InlineImgs>, abs_line: i64) -> Vec<u8> {
+    imgs.lock().unwrap().kitty.anchored_row_wire(abs_line)
+}
+
+/// 스냅샷에 인라인 이미지의 이번 프레임 뷰포트 배치를 싣는다. 앵커가 무너지는
+/// 사건은 여기서 감지해 통째로 버린다.
+pub(super) fn attach_inline_views(
+    update: &mut ScreenUpdate,
+    term: &Term<PtyEventForwarder>,
+    imgs: &Mutex<InlineImgs>,
+) {
+    attach_inline_views_at_offset(update, term, imgs, term.grid().display_offset());
+}
+
+pub(super) fn attach_inline_views_at_offset(
+    update: &mut ScreenUpdate,
+    term: &Term<PtyEventForwarder>,
+    imgs: &Mutex<InlineImgs>,
+    display_offset: usize,
+) {
+    let mut lock = imgs.lock().unwrap();
+    update.inline_images.clear();
+    sync_inline_coordinates(term, &mut lock);
+    let hist = term.grid().history_size() as i64;
+    let rows = term.grid().screen_lines() as u16;
     let top_abs = hist - display_offset as i64;
     if !lock.kitty.is_empty() {
         crate::kitty::anchored_views(&lock.kitty, top_abs, rows, &mut update.inline_images);
@@ -908,7 +949,17 @@ mod kitty_graphics_tests {
 
     impl Rig {
         fn feed(&mut self, bytes: &[u8]) {
-            advance_scanning_inline(&mut self.proc, &mut self.term, bytes, &mut self.scan, &self.imgs, &self.responder);
+            advance_scanning_inline(&mut self.proc, &mut self.term, bytes, &mut self.scan, &self.imgs, &self.responder, None);
+        }
+        fn feed_export(&mut self, bytes: &[u8]) -> Vec<u8> {
+            let mut wire = Vec::new();
+            advance_scanning_inline(&mut self.proc, &mut self.term, bytes, &mut self.scan,
+                &self.imgs, &self.responder, Some(&mut wire));
+            wire
+        }
+        fn wire_snapshot(&self) -> Vec<u8> {
+            super::super::screen::snapshot_bytes_with_images(&self.term, &self.imgs,
+                "wire-test", &Arc::new(Mutex::new(None))).0
         }
         fn views_at(&self, offset: usize) -> Vec<InlineImageView> {
             let mut u = ScreenUpdate::default();
@@ -943,6 +994,96 @@ mod kitty_graphics_tests {
 
     fn transmit_virtual(r: &mut Rig, id: u32, cols: u32, rows: u32) {
         r.feed(format!("\x1b_Ga=T,U=1,q=2,f=100,i={id},c={cols},r={rows};{}\x1b\\", b64(&png(8, 8))).as_bytes());
+    }
+
+    fn owned_png() -> std::path::PathBuf {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("kasa-wire-tty-graphics-protocol-{}-{n}.png", std::process::id()));
+        std::fs::write(&path, png(8, 8)).unwrap();
+        path
+    }
+
+    fn same_pictures(source: &Rig, mirror: &Rig, offset: usize) {
+        let a = source.views_at(offset);
+        let b = mirror.views_at(offset);
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), b.len(), "source={a:?} mirror={b:?}");
+        for (a, b) in a.iter().zip(&b) {
+            assert_eq!((a.row, a.col, a.cols, a.rows, a.clip, a.z),
+                (b.row, b.col, b.cols, b.rows, b.clip, b.z));
+            assert_eq!(std::fs::read(&a.path).unwrap(), std::fs::read(&b.path).unwrap());
+        }
+    }
+
+    #[test]
+    fn file_graphics_export_crosses_read_boundaries_without_remote_file_access() {
+        let mut source = rig(40, 8, true);
+        let mut mirror = rig(40, 8, false);
+        let path = owned_png();
+        let apc = format!("\x1b_Ga=T,t=t,f=100,U=1,i=7,p=9,c=4,r=2,q=2;{}\x1b\\",
+            b64(path.to_str().unwrap().as_bytes()));
+        let mut wire = Vec::new();
+        for part in apc.as_bytes().chunks(7) { wire.extend(source.feed_export(part)); }
+        assert!(!path.exists(), "only the source consumes the temporary file");
+        assert!(!String::from_utf8_lossy(&wire).contains("t=t"));
+        assert!(!String::from_utf8_lossy(&wire).contains(&b64(path.to_str().unwrap().as_bytes())));
+        wire.extend(source.feed_export(placeholders("38;5;7;58;5;9", 4, 2, (2, 3)).as_bytes()));
+        for part in wire.chunks(11) { mirror.feed(part); }
+        same_pictures(&source, &mirror, 0);
+        assert!(mirror.out().is_empty());
+    }
+
+    #[test]
+    fn late_and_reconnected_snapshot_restore_placeholders_and_anchored_graphics() {
+        let mut source = rig(40, 8, true);
+        source.feed(b"\x1b[?1049h");
+        let path = owned_png();
+        source.feed(format!("\x1b_Ga=T,t=f,f=100,U=1,i=7,p=9,c=4,r=2,q=2;{}\x1b\\",
+            b64(path.to_str().unwrap().as_bytes())).as_bytes());
+        source.feed(placeholders("38;5;7;58;5;9", 4, 2, (2, 3)).as_bytes());
+        source.feed(format!("\x1b[5;8H\x1b_Ga=T,f=100,i=8,p=2,c=3,r=2,C=1,z=-1,q=2;{}\x1b\\",
+            b64(&png(8, 8))).as_bytes());
+        source.feed(format!("\x1b[4;10H\x1b_Ga=T,f=100,i=9,p=3,c=3,r=2,C=1,z=-1,q=2;{}\x1b\\",
+            b64(&png(8, 8))).as_bytes());
+        std::fs::remove_file(path).unwrap();
+        let expected_cursor = source.term.grid().cursor.point;
+        for _ in 0..2 {
+            let mut mirror = rig(40, 8, false);
+            for part in source.wire_snapshot().chunks(29) { mirror.feed(part); }
+            same_pictures(&source, &mirror, 0);
+            assert_eq!(mirror.term.grid().cursor.point, expected_cursor);
+        }
+    }
+
+    #[test]
+    fn graphics_export_keeps_cursor_placement_replacement_and_delete() {
+        let mut source = rig(40, 8, true);
+        let mut mirror = rig(40, 8, false);
+        let path = owned_png();
+        let initial = format!("\x1b[?2026h\x1b[3;4H\x1b_Ga=T,t=f,f=100,i=18,p=2,c=3,r=2,q=2;{}\x1b\\after\x1b[?2026l",
+            b64(path.to_str().unwrap().as_bytes()));
+        mirror.feed(&source.feed_export(initial.as_bytes()));
+        std::fs::remove_file(path).unwrap();
+        same_pictures(&source, &mirror, 0);
+        assert_eq!(source.term.grid().cursor.point, mirror.term.grid().cursor.point);
+        mirror.feed(&source.feed_export(b"\x1b[5;10H\x1b_Ga=p,i=18,p=2,c=4,r=1,C=1,q=2;\x1b\\"));
+        same_pictures(&source, &mirror, 0);
+        mirror.feed(&source.feed_export(b"\x1b_Ga=d,d=I,i=18,q=2;\x1b\\"));
+        assert!(source.views().is_empty());
+        assert!(mirror.views().is_empty());
+    }
+
+    #[test]
+    fn snapshot_preserves_graphics_in_primary_scrollback() {
+        let mut source = rig(40, 4, true);
+        transmit_virtual(&mut source, 7, 4, 2);
+        source.feed(placeholders("38;5;7", 4, 2, (1, 3)).as_bytes());
+        source.feed(b"\x1b[4;1H\r\nline1\r\nline2\r\nline3");
+        let mut mirror = rig(40, 4, false);
+        mirror.feed(&source.wire_snapshot());
+        source.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
+        mirror.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
+        same_pictures(&source, &mirror, 3);
     }
 
     /// 질의를 보낸 쪽은 뒤따른 DA1 이 먼저 오면 「지원 안 함」으로 읽는다.
@@ -1081,7 +1222,7 @@ mod kitty_graphics_tests {
             });
         }
         imgs.next_id = INLINE_IMAGE_SLOTS as u64;
-        let env = crate::kitty::Env { local_media: true, grid_cols: 80, hist: 0 };
+        let env = crate::kitty::Env { local_media: true, export: false, grid_cols: 80, hist: 0 };
         for i in 1..=2 {
             let body = format!("a=t,f=100,i={i},q=2;{}", b64(&png(2, 2)));
             let InlineImgs { kitty, next_id, .. } = &mut imgs;

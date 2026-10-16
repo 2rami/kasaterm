@@ -1462,6 +1462,7 @@ enum PendingClose {
     Session(usize),
     /// 다른 기기의 방(사이드바 절의 카드 ×·메뉴). 그쪽 `window.close` 로 보낸다.
     RemoteRoom { label: String, window: Option<u64>, room: String },
+    RemotePane { label: String, pane: String },
     /// Close one detached document window. The WindowId stays stable while
     /// Vec indices move when another auxiliary window closes.
     AuxEditor(WindowId),
@@ -4126,6 +4127,7 @@ enum UserEvent {
     /// 이유를 부른 쪽(폰의 「방 닫기」)이 그대로 보여 줘야 해서다.
     SocketCloseWindow(
         usize,
+        Option<Vec<serde_json::Value>>,
         std::sync::mpsc::Sender<std::result::Result<(), String>>,
     ),
     /// `POST /settings/character` 위임 — 웹뷰 설정이 고친 성격·이름을 굳힌다.

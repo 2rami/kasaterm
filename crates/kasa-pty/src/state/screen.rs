@@ -3,7 +3,7 @@
 
 use super::*;
 use super::grid::{
-    build_update, history_ansi, live_snapshot, raw_screen_ansi, read_live_tail, read_row_at_abs,
+    build_update, history_ansi_with_images, live_snapshot, raw_screen_ansi_with_images, read_live_tail, read_row_at_abs,
     read_rows_above, read_rows_above_live, scan_prompt_anchors, snapshot,
 };
 use super::inline::{attach_inline_views, attach_inline_views_at_offset};
@@ -33,6 +33,10 @@ pub struct ViewerSnapshot {
 }
 
 impl PtySession {
+    pub fn output_closed(&self) -> bool {
+        self.output_closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// 지금 대체 화면(vim·less·htop)인가. 스냅샷을 만들지 않고 모드만 본다.
     pub fn alt_screen(&self) -> bool {
         self.term.lock().unwrap().mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
@@ -344,19 +348,33 @@ impl PtySession {
     }
 
     fn sized_snapshot_locked(&self, t: &Term<PtyEventForwarder>) -> (Vec<u8>, (u16, u16)) {
-        // resize_effective reshapes the parser before publishing self.size.
-        // The parser is canonical while holding its lock.
-        let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
-        let hist = history_ansi(t, cols, rows);
-        // A subscriber starts at the live screen, independently of where the
-        // source GUI is reading. Its damage belongs to that GUI, not this tap.
-        let snap = live_snapshot(t, cols, rows, &self.pane_id, &self.title_handle);
-        // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
-        // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
-        let mut bytes = if snap.alt_screen { Vec::new() } else { hist };
-        bytes.extend_from_slice(&raw_screen_ansi(&snap));
-        (bytes, (cols, rows))
+        snapshot_bytes_with_images(t, &self.inline_imgs, &self.pane_id, &self.title_handle)
     }
+}
+
+pub(super) fn snapshot_bytes_with_images(
+    t: &Term<PtyEventForwarder>, images: &Mutex<InlineImgs>, pane_id: &str,
+    title: &Arc<Mutex<Option<String>>>,
+) -> (Vec<u8>, (u16, u16)) {
+    // resize_effective reshapes the parser before publishing self.size.
+    // The parser is canonical while holding its lock.
+    let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
+    let hist = history_ansi_with_images(t, cols, rows, Some(images));
+    // A subscriber starts at the live screen, independently of where the
+    // source GUI is reading. Its damage belongs to that GUI, not this tap.
+    let snap = live_snapshot(t, cols, rows, pane_id, title);
+    // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
+    // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
+    let mut bytes = b"\x1b_Ga=d,d=R,x=0,y=4294967295,q=2;\x1b\\".to_vec();
+    bytes.extend(super::inline::kitty_snapshot_images(images));
+    if !snap.alt_screen { bytes.extend(hist); }
+    bytes.extend(raw_screen_ansi_with_images(t, &snap));
+    let placements = super::inline::kitty_anchored_screen(images, t.grid().history_size() as i64, rows);
+    if !placements.is_empty() {
+        bytes.extend(placements);
+        bytes.extend(format!("\x1b[{};{}H", snap.cursor_row + 1, snap.cursor_col + 1).as_bytes());
+    }
+    (bytes, (cols, rows))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -412,6 +430,29 @@ mod snapshot_tap_tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("{needle} 이 10초 안에 화면에 안 나타났다");
+    }
+
+    #[test]
+    fn a_full_raw_tap_disconnects_without_closing_the_source() {
+        let (session, events, _, _) = ext_session(40, 8);
+        let tap = session.tap_bytes();
+        for _ in 0..70 {
+            events.send(ExtEvent::Bytes(b"x".to_vec())).unwrap();
+            session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        while tap.try_recv().is_ok() {}
+        assert!(matches!(tap.try_recv(), Err(crossbeam_channel::TryRecvError::Disconnected)));
+        assert!(!session.output_closed());
+        let recovered = session.tap_bytes();
+        events.send(ExtEvent::Bytes(b"RECOVERED".to_vec())).unwrap();
+        assert!(wait_text(&session, "RECOVERED"));
+        assert_eq!(recovered.recv_timeout(Duration::from_secs(2)).unwrap(), b"RECOVERED");
+        events.send(ExtEvent::Eof).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while !session.output_closed() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(session.output_closed());
     }
 
     #[test]

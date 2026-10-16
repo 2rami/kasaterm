@@ -78,6 +78,7 @@ fn chunk_is_only_particles(buf: &[u8]) -> bool {
 pub(super) fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     reader_stop: Arc<std::sync::atomic::AtomicBool>,
+    output_closed: Arc<std::sync::atomic::AtomicBool>,
     poll_fd: Option<i32>,
     tx: Sender<ScreenUpdate>,
     cols: u16,
@@ -128,6 +129,7 @@ pub(super) fn spawn_reader_thread(
         let mut img_buf: Vec<u8> = Vec::new();
         let mut img_capturing = false;
         let mut inline_scan = InlineScan::default();
+        let mut raw_resnapshot_pending = false;
         // OSC 777 desktop-notification capture state (payload can span reads).
         let mut notify_buf: Vec<u8> = Vec::new();
         let mut notify_capturing = false;
@@ -188,6 +190,7 @@ pub(super) fn spawn_reader_thread(
             let _ = poll_fd;
             let n = match reader.read(&mut buf) {
                 Ok(0) => {
+                    output_closed.store(true, std::sync::atomic::Ordering::Release);
                     eprintln!("[pty-backend] EOF on PTY reader — shell exited");
                     // Tell the host pump the pane died. The PtySession also
                     // holds a Sender (for scroll/resize), so dropping our
@@ -243,6 +246,8 @@ pub(super) fn spawn_reader_thread(
                     n
                 }
                 Err(e) => {
+                    output_closed.store(true, std::sync::atomic::Ordering::Release);
+                    byte_taps.lock().unwrap().clear();
                     eprintln!("[pty-backend] read error: {e}");
                     let _ = tx.send(ScreenUpdate {
                         pane_id: pane_id.clone(),
@@ -367,34 +372,17 @@ pub(super) fn spawn_reader_thread(
             let update = {
                 let mut t = term.lock().unwrap();
                 let follow_live_tail = t.grid().display_offset() == 0;
-                // 외부 구독자(브라우저 kasaterm.js 등)에게 raw 바이트를 그대로 흘린다.
-                // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
-                //
-                // ⚠️ term 락을 **든 채로** 뿌려야 한다. 밖에서 뿌리면 뿌리기와
-                // 파싱 사이에 락이 풀린 틈이 생기고, 하필 그 틈에 붙은 미러는 이
-                // 청크를 tap 으로도(구독 전이라) 스냅샷으로도(파싱 전이라) 못 받아
-                // 그만큼 화면이 어긋난다. `tap_bytes_with_snapshot` 의 원자성이
-                // 이 순서에 기대고 있다.
-                //
-                // ⚠️ 여기서 블로킹하면 아래 스냅샷 try_send 와 똑같은 병에 걸린다 —
-                // reader 가 멎으면 셸이 backpressure 를 먹어 터미널 전체가 느려진다.
-                // 그래서 try_send 이고, **밀린 구독자는 버리는 게 아니라 끊는다**:
-                // VT 스트림은 연속이라 중간 청크를 흘리면 받는 쪽 화면이 복구 불능
-                // 으로 깨진다. 조용히 깨뜨리느니 연결을 닫아 재연결시키는 편이 낫다.
-                // 구독자가 없으면 lock 만 잡았다 놓으므로 평소 비용은 사실상 0.
-                {
-                    let mut taps = byte_taps.lock().unwrap();
-                    if !taps.is_empty() {
-                        taps.retain(|sub| sub.try_send(buf[..n].to_vec()).is_ok());
-                    }
-                }
-                if inline_scan.busy()
+                // Snapshot subscription and this export share the term lock, so
+                // canonical image data cannot race ahead of its text cells.
+                let export = !raw_resnapshot_pending && !byte_taps.lock().unwrap().is_empty();
+                let mut wire = export.then(Vec::new);
+                let scanned = inline_scan.busy()
                     || (inline_cell_flow()
                         && memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some())
                     || memchr::memmem::find(processed_bytes, b"\x1b_G").is_some()
                     || processed_bytes.ends_with(b"\x1b")
-                    || processed_bytes.ends_with(b"\x1b_")
-                {
+                    || processed_bytes.ends_with(b"\x1b_");
+                if scanned {
                     advance_scanning_inline(
                         &mut processor,
                         &mut t,
@@ -402,6 +390,7 @@ pub(super) fn spawn_reader_thread(
                         &mut inline_scan,
                         &inline_imgs,
                         &responder,
+                        wire.as_mut(),
                     );
                 } else if let Some(at) = find_subslice(processed_bytes, b"\x1b]133;C") {
                     // 명령의 첫 출력이 C 와 한 묶음으로 오면, 묶음을 다 먹인 뒤엔 명령 줄이
@@ -411,6 +400,23 @@ pub(super) fn spawn_reader_thread(
                     processor.advance(&mut *t, &processed_bytes[at..]);
                 } else {
                     processor.advance(&mut *t, processed_bytes);
+                }
+                if let Some(mut bytes) = wire {
+                    if !scanned { bytes.extend_from_slice(processed_bytes); }
+                    let mut taps = byte_taps.lock().unwrap();
+                    // File-backed images can expand past the bounded raw queue.
+                    // Reattach gets the same parsed image in the chunked snapshot.
+                    if bytes.len() > 65536 {
+                        raw_resnapshot_pending = true;
+                    } else if !bytes.is_empty() {
+                        taps.retain(|sub| sub.try_send(bytes.clone()).is_ok());
+                    }
+                }
+                if raw_resnapshot_pending && processor.sync_bytes_count() == 0 {
+                    // Reconnecting inside synchronized output would snapshot the
+                    // old grid but subscribe after the already-buffered prefix.
+                    byte_taps.lock().unwrap().clear();
+                    raw_resnapshot_pending = false;
                 }
                 // alacritty buffers DECSET 2026 synchronized output internally:
                 // while its sync buffer is non-empty the Term grid still holds

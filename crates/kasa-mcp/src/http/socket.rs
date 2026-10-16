@@ -195,6 +195,7 @@ impl VisualDelivery {
 /// (파서 없이 그리는 클라)를 한 채널로 흘리려고 묶었다.
 enum Frame {
     Bytes(Vec<u8>),
+    TapEnded,
     Grid(Box<kasa_screen::screen::ScreenUpdate>),
     /// 거울 클라가 제 폭(`view`)을 바꿨다 — 새 프레임이 없어도 원본을 그 폭으로 다시
     /// 접어 통째로 보낸다.
@@ -279,6 +280,25 @@ enum Tap {
         kasa_pty::ScreenReceiver<kasa_screen::screen::ScreenUpdate>,
         Box<kasa_screen::screen::ScreenUpdate>,
     ),
+}
+
+fn raw_tap_end_message(session: &kasa_pty::PtySession) -> Message {
+    if session.output_closed() {
+        Message::Text(serde_json::json!({"t":"gone"}).to_string().into())
+    } else { Message::Close(None) }
+}
+
+async fn send_raw_chunks(
+    socket: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    bytes: Vec<u8>,
+) -> Result<(), axum::Error> {
+    use futures_util::SinkExt;
+    // Image snapshots can exceed a WebSocket message limit; the terminal
+    // parser already accepts arbitrary read boundaries, including inside APC.
+    for chunk in bytes.chunks(65536) {
+        socket.send(Message::Binary(chunk.to_vec().into())).await?;
+    }
+    Ok(())
 }
 
 struct ViewerViewport {
@@ -424,6 +444,10 @@ async fn term_ws_run(
         }).to_string().into())).await;
         return;
     }
+    if sess.output_closed() {
+        let _ = socket.send(Message::Text(serde_json::json!({"t":"gone"}).to_string().into())).await;
+        return;
+    }
     let viewport = ViewerViewport::new(sess.clone());
     let viewport_token = viewport.token;
     let mut visual_subscription = (want_grid && crate::visual::producer_available())
@@ -502,13 +526,16 @@ async fn term_ws_run(
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
     match tap {
         Tap::Bytes(rx, screen, _) => {
-            let _ = ws_tx.send(Message::Binary(screen.into())).await;
+            let _ = send_raw_chunks(&mut ws_tx, screen).await;
             std::thread::spawn(move || {
                 while let Ok(chunk) = rx.recv() {
                     if btx.blocking_send(Frame::Bytes(chunk)).is_err() {
-                        break;
+                        return;
                     }
                 }
+                // Other control senders outlive this tap, so dropping btx does
+                // not make brx.recv return None.
+                let _ = btx.blocking_send(Frame::TapEnded);
             });
         }
         Tap::Grid(rx, snap) => {
@@ -677,7 +704,8 @@ async fn term_ws_run(
                         break;
                     }
                     let sent = match chunk {
-                        Frame::Bytes(b) => ws_tx.send(Message::Binary(b.into())).await,
+                        Frame::TapEnded => return ws_tx.send(raw_tap_end_message(&sess_sz)).await.is_ok(),
+                        Frame::Bytes(b) => send_raw_chunks(&mut ws_tx, b).await,
                         // 그리드는 텍스트 프레임 — 입력(바이너리)과 섞이지 않는다.
                         Frame::Grid(u) => {
                             let (offset, hist) = sess_sz.view_state();
@@ -755,15 +783,9 @@ async fn term_ws_run(
                     }
                 }
                 Ok(None) => {
-                    // tap 이 끝났다 = PTY 종료(reader 가 바이트 tap 송신자를 놓았다)
-                    // 또는 세션 폐기. 어느 쪽이든 「gone」을 먼저 보낸다 — 거울이
-                    // 재접속으로 알아내는 왕복을 없애고, 낡은 서버처럼 죽은 세션에
-                    // 다시 붙는 길을 막는다.
-                    let _ = ws_tx
-                        .send(Message::Text(
-                            serde_json::json!({"t": "gone"}).to_string().into(),
-                        ))
-                        .await;
+                    // Backpressure drops a tap while the source keeps running;
+                    // EOF alone may tell mirrors to remove the session.
+                    let _ = ws_tx.send(raw_tap_end_message(&sess_sz)).await;
                     break;
                 }
                 Err(_) => {
@@ -1047,6 +1069,101 @@ mod tests {
             },
         ).unwrap());
         (session, events, input)
+    }
+
+    #[tokio::test]
+    async fn raw_tap_backpressure_reconnects_but_source_eof_is_gone() {
+        let (source, events, _) = replacement_source("raw-tap-close-reason", 40);
+        assert!(matches!(super::raw_tap_end_message(&source), super::Message::Close(_)));
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !source.output_closed() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let super::Message::Text(body) = super::raw_tap_end_message(&source) else { panic!("EOF must stop reconnecting") };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["t"], "gone");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oversized_file_graphics_closes_raw_tap_then_reconnects_with_pixels() {
+        use base64::Engine;
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let id = format!("large-graphics-{}", uuid::Uuid::new_v4());
+        let mut png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNomLAAAANEAbF61zYUAAAAAElFTkSuQmCC").unwrap();
+        let mut text = b"tEXtaudit\0".to_vec();
+        text.extend(std::iter::repeat_n(b'x', 60000));
+        let crc = text.iter().fold(!0u32, |mut crc, byte| {
+            crc ^= *byte as u32;
+            for _ in 0..8 { crc = (crc >> 1) ^ (0xedb88320 & (0u32.wrapping_sub(crc & 1))); }
+            crc
+        }) ^ !0u32;
+        let mut ancillary = ((text.len() - 4) as u32).to_be_bytes().to_vec();
+        ancillary.extend(text);
+        ancillary.extend(crc.to_be_bytes());
+        png.splice(png.len() - 12..png.len() - 12, ancillary);
+        let path = std::env::temp_dir().join(format!("{id}.png"));
+        std::fs::write(&path, &png).unwrap();
+        let source = std::sync::Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: Some("/bin/sh".into()), cols: 40, rows: 6, pane_id: id.clone(), ..Default::default()
+        }).unwrap());
+        kasa_pty::register_session(&id, &source);
+        source.send_bytes(b"printf 'READY\\n'\n").unwrap();
+        wait_replacement_text(&source, "READY").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("ws://{address}/term/ws?pane={id}&own=0");
+        let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while let Some(Ok(message)) = client.next().await {
+                if matches!(message, Message::Binary(_)) { return; }
+            }
+            panic!("initial snapshot missing");
+        }).await.unwrap();
+        let file = base64::engine::general_purpose::STANDARD.encode(path.to_str().unwrap());
+        let command = format!("printf '\\033[2;3H\\033_Ga=T,t=f,f=100,i=71,p=1,c=4,r=2,C=1,q=2;%s\\033\\\\' '{file}'; printf 'PIXELS_READY'\n");
+        source.send_bytes(command.as_bytes()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(Ok(message)) = client.next().await {
+                match message {
+                    Message::Close(_) => return,
+                    Message::Text(text) => assert_ne!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["t"], "gone"),
+                    _ => {},
+                }
+            }
+            panic!("oversized image did not request a reconnect");
+        }).await.unwrap();
+        assert!(!source.output_closed());
+        let _ = client.close(None).await;
+        std::fs::remove_file(&path).unwrap();
+        let (mirror, mirror_events, _) = replacement_source("large-graphics-replay", 40);
+        let (mut reconnected, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(Ok(message)) = reconnected.next().await {
+                if let Message::Binary(bytes) = message {
+                    assert!(bytes.len() <= 65536);
+                    mirror_events.send(kasa_pty::ExtEvent::Bytes(bytes.to_vec())).unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    if !mirror.live_screen().inline_images.is_empty() { return; }
+                }
+            }
+            panic!("reconnected snapshot omitted graphics");
+        }).await.unwrap();
+        let images = mirror.live_screen().inline_images;
+        assert_eq!(images.len(), 1);
+        assert_eq!(std::fs::read(&images[0].path).unwrap(), png);
+        source.send_bytes(b"exit\n").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(Ok(message)) = reconnected.next().await {
+                if let Message::Text(text) = message {
+                    if serde_json::from_str::<serde_json::Value>(&text).unwrap()["t"] == "gone" { return; }
+                }
+            }
+            panic!("actual EOF did not end the mirror");
+        }).await.unwrap();
+        server.abort();
     }
 
     async fn wait_replacement_text(session: &kasa_pty::PtySession, text: &str) {

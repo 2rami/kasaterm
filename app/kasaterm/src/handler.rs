@@ -1431,8 +1431,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketCloseWindow(idx, reply) => {
-                let r = self.close_window(*idx).map_err(|e| format!("{e:#}"));
+            UserEvent::SocketCloseWindow(idx, expected, reply) => {
+                let r = if expected.as_ref().is_some_and(|addresses| !crate::mirror_close::same_room_addresses(
+                    &self.room_close_addresses(*idx), addresses,
+                )) {
+                    Err("방의 세션이 바뀌었어요. 닫을 방을 다시 확인해 주세요".to_string())
+                } else {
+                    self.close_window(*idx).map_err(|e| format!("{e:#}"))
+                };
                 let _ = reply.send(r);
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -7274,16 +7280,11 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_scene.arm_activation_key(key);
                     }
                 }
-                // Confirm-close modal: Enter = 기본 버튼(저장 안 한 게 있으면
-                // 저장, 아니면 닫기), Esc = 취소. Swallow all other keys so
-                // nothing reaches the PTY behind the dim.
+                // Modal keys must never reach the terminal underneath.
                 if self.confirm_close.is_some() {
                     if matches!(event.state, ElementState::Pressed) {
                         use winit::keyboard::{Key, NamedKey};
-                        let go = match &self.confirm_close {
-                            Some(d) if matches!(d.why, CloseWhy::Dirty(_)) => ConfirmBtn::Save,
-                            _ => ConfirmBtn::Close,
-                        };
+                        let go = crate::mirror_close::default_button(&self.confirm_close.as_ref().unwrap().why);
                         match event.logical_key {
                             Key::Named(NamedKey::Enter) => {
                                 self.confirm_dialog_pick(go, event_loop);
@@ -8374,6 +8375,7 @@ impl App {
                 PendingClose::RemoteRoom { label, window, room } => {
                     self.confirm_or_close_remote_room(&label, window, &room);
                 }
+                PendingClose::RemotePane { label, pane } => self.confirm_or_close_remote_cell(&label, &pane),
                 PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             }
             return;

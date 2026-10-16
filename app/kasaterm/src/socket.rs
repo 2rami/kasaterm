@@ -2322,12 +2322,20 @@ impl Backend for PtyBackend {
         // 방(창) 닫기 — 폰 허브의 「방 닫기」가 `/cmd` 로 부른다(2026-09-07). 결과를
         // 기다리는 이유는 close_surface 와 달리 거절이 있어서다(마지막 사용자 방).
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = self.proxy.send_event(UserEvent::SocketCloseWindow(idx, tx));
+        let _ = self.proxy.send_event(UserEvent::SocketCloseWindow(idx, None, tx));
         match rx.recv_timeout(std::time::Duration::from_secs(20)) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(why)) => anyhow::bail!("{why}"),
             Err(_) => anyhow::bail!("방 닫기 응답 없음(20초) — GUI 스레드가 막혀 있다"),
         }
+    }
+
+    fn close_window_checked(&self, idx: usize, addresses: Vec<serde_json::Value>) -> Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketCloseWindow(idx, Some(addresses), tx));
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| anyhow::anyhow!("방 닫기 응답 없음(20초)"))?
+            .map_err(anyhow::Error::msg)
     }
 
     fn close_surface(&self, surface_id: &str) -> Result<()> {

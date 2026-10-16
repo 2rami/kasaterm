@@ -418,7 +418,10 @@ impl App {
             self.windows[idx].take()
         };
         if let Some(layout) = layout {
-            for pane_id in layout.leaves() { self.cancel_restore_pane(pane_id); }
+            for pane_id in layout.leaves() {
+                self.notify_source_closed(pane_id);
+                self.cancel_restore_pane(pane_id);
+            }
             let mut ws = self.ws.lock().unwrap();
             for pane_id in layout.leaves() {
                 self.pty.remove(pane_id);

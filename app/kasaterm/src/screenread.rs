@@ -556,6 +556,12 @@ impl StatusSpan {
 
 type ParsedCodexStatus = (usize, String, String, Option<String>, Vec<String>);
 
+fn codex_context_percent(part: &str) -> Option<&str> {
+    let pct = part.strip_prefix("Context ")?.strip_suffix(" used")?;
+    let number = pct.strip_suffix('%')?;
+    (!number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())).then_some(pct)
+}
+
 // 보기 모드에 따라 값이 달라지지 않게 원본 상태줄 판독을 공유한다.
 fn parse_codex_status_line(rows: &[Vec<GridCell>]) -> Option<ParsedCodexStatus> {
     const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -587,20 +593,13 @@ fn parse_codex_status_line(rows: &[Vec<GridCell>]) -> Option<ParsedCodexStatus> 
             if model.is_empty() || !known_model {
                 return None;
             }
-            let context = parts.iter().find_map(|part| {
-                part.split_whitespace().find_map(|word| {
-                    let pct = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '%');
-                    let number = pct.strip_suffix('%')?;
-                    (!number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
-                        .then(|| pct.to_string())
-                })
-            });
+            let context = parts.iter().find_map(|part| codex_context_percent(part).map(str::to_string));
             let middle: Vec<String> = parts
                 .iter()
                 .copied()
                 .skip(1)
                 .filter(|part| {
-                    !part.contains('%')
+                    codex_context_percent(part).is_none()
                         && !matches!(*part, "never" | "on-request" | "untrusted" | "on-failure")
                 })
                 .map(str::to_string)
@@ -626,18 +625,21 @@ pub(crate) fn restyle_codex_status_line(
         return false;
     };
 
-    // 새 기본 순서는 branch → project다. 실행 중인 옛 세션은 반대 순서일 수 있으므로
-    // 호출자가 cwd/Git에서 준 값이 언제나 우선하고, 둘 다 없을 때만 상태줄에 폴백한다.
     let branch = branch.filter(|s| !s.is_empty());
     let project = project.filter(|s| !s.is_empty());
-    let (branch, project) = if branch.is_none() && project.is_none() {
-        (
-            middle.first().map(String::as_str),
-            middle.get(1).map(String::as_str),
-        )
-    } else {
-        (branch, project)
-    };
+    // Codex can append modes without a separator and add new status fields.
+    // Its original row already fits the terminal; guessing those fields are
+    // project/branch names would erase them, especially in narrow mirrors.
+    if middle.iter().any(|part| {
+        !branch.is_some_and(|branch| part == branch)
+            && !project.is_some_and(|project| {
+                part == project
+                    || ((part.starts_with('/') || part.starts_with("~/") || part.contains(":\\"))
+                        && part.rsplit(['/', '\\']).next() == Some(project))
+            })
+    }) {
+        return false;
+    }
 
     let pretty_model = || {
         let lower = raw_model.to_ascii_lowercase();
@@ -871,7 +873,7 @@ mod codex_status_line_tests {
     #[test]
     fn narrow_codex_status_line_keeps_model_and_effort_without_clipping() {
         let mut rows = vec![row(
-            "gpt-5.6-sol xhigh · main · kasaterm · Context 91% used",
+            "gpt-5.6-sol xhigh · main",
             30,
         )];
         assert!(restyle_codex_status_line(
@@ -917,6 +919,64 @@ mod codex_status_line_tests {
         let mut rows = vec![row(original, 60)];
         assert!(!restyle_codex_status_line(&mut rows, None, None));
         assert_eq!(text(&rows[0]), original);
+    }
+
+    #[test]
+    fn codex_plan_mode_survives_narrow_status_rows() {
+        for cols in [40, 60, 90] {
+            let original = "GPT-6.1-Sol medium · /tmp/… Plan mode";
+            let mut rows = vec![row(original, cols)];
+            let before = rows.clone();
+            assert!(!restyle_codex_status_line(&mut rows, Some("work"), None));
+            assert_eq!(rows, before);
+            assert!(text(&rows[0]).ends_with("Plan mode"));
+        }
+    }
+
+    #[test]
+    fn additional_codex_status_fields_are_never_guessed_or_dropped() {
+        for extra in ["Plan mode", "Future mode", "Budget 42% left", "Context 3% used Plan mode"] {
+            let original = format!("gpt-6.1-sol low · work · {extra}");
+            for metadata in [Some("work"), None] {
+                let mut rows = vec![row(&original, 90)];
+                let before = rows.clone();
+                assert!(!restyle_codex_status_line(&mut rows, metadata, None));
+                assert_eq!(rows, before, "lost additional status: {extra}");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_plan_mode_survives_model_icons_and_session_label_overlays() {
+        for cols in [40, 60] {
+            let mut rows: Vec<_> = ["", "› ready", ""].into_iter().map(|content| {
+                let mut cells = row(content, cols);
+                for cell in &mut cells { cell.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77); }
+                cells
+            }).collect();
+            rows.push(row("GPT-6.1-Sol medium · /tmp/… Plan mode", cols));
+            rows.push(row("  enter/esc latest · ? shortcuts", cols));
+            let status_and_footer = rows[3..].to_vec();
+            assert!(!restyle_codex_status_line(&mut rows, Some("work"), None));
+            assert!(collapse_statusline_face(&mut rows).is_none());
+            assert!(take_status_model_icon_slot(&mut rows, 0.0, 0.0, 8.0, 16.0).is_none());
+            overlay_codex_session_label(&mut rows, "Fixture", [100, 150, 255, 255]);
+            assert!(text(&rows[0]).contains("Fixture"));
+            assert_eq!(rows[3..], status_and_footer);
+        }
+    }
+
+    #[test]
+    fn status_restyle_preserves_shortcut_footer_and_known_directory() {
+        let footer = row("  enter/esc latest · ? shortcuts", 80);
+        let mut rows = vec![row("gpt-6.1-sol low · /tmp/work · Context 8% used", 80), footer.clone()];
+        assert!(restyle_codex_status_line(&mut rows, Some("work"), None));
+        assert!(text(&rows[0]).contains(" work"));
+        assert!(text(&rows[0]).contains("8%"));
+        assert_eq!(rows[1], footer);
+        let mut shortcuts = vec![footer.clone()];
+        assert!(!restyle_codex_status_line(&mut shortcuts, None, None));
+        assert_eq!(shortcuts[0], footer);
     }
 }
 

@@ -6848,8 +6848,23 @@ impl App {
                 if Instant::now() >= *due + std::time::Duration::from_millis(ms)
                     && !VIEW_CLOSED.swap(true, Ordering::Relaxed)
                 {
-                    self.confirm_or_close_pane(id);
-                    eprintln!("[mirror-view-test] close={id} pending={}", self.confirm_close.is_some());
+                    let kind = std::env::var("KASATERM_TEST_MIRROR_CLOSE_KIND").unwrap_or_default();
+                    if kind.starts_with("remote-") {
+                        self.sidebar_visible = true;
+                        self.tabs_on_top = false;
+                        self.refresh_machines_col();
+                    }
+                    match kind.as_str() {
+                        "tab" => self.confirm_or_close_tab(id, 0),
+                        "session" => self.confirm_or_close_session(self.active_window),
+                        "remote-room" => self.confirm_or_close_remote_room(label, Some(0), "fixture room"),
+                        "remote-pane" => self.confirm_or_close_remote_cell(label, pane),
+                        _ => self.confirm_or_close_pane(id),
+                    }
+                    let waiting = self.confirm_close.as_ref().is_some_and(|dialog| matches!(
+                        dialog.why, CloseWhy::Mirror { closing: false, error: None, .. }
+                    ));
+                    eprintln!("[mirror-view-test] close={id} kind={kind} awaiting_confirmation={waiting}");
                 }
             }
             return;

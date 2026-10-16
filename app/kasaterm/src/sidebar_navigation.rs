@@ -1465,7 +1465,7 @@ mod tests {
 impl App {
     /// 그 기기의 그 방에 앉은 줄들 — 카드가 묶는 규칙(`rooms`)과 같다: 방 번호가 있으면
     /// 번호로, 없으면 이름으로.
-    fn remote_room_panes(&self, label: &str, window: Option<u64>, room: &str) -> Vec<&state::MachinesColRow> {
+    pub(crate) fn remote_room_panes(&self, label: &str, window: Option<u64>, room: &str) -> Vec<&state::MachinesColRow> {
         self.info.machines_col.machines.iter().find(|m| m.label == label)
             .map(|m| m.remote.iter().chain(m.mirrored.iter())
                 .filter(|r| !r.closed && match (window, r.window) {
@@ -1495,7 +1495,7 @@ impl App {
             },
             Some(RoomMenuAction::Close) => self.confirm_or_close_remote_room(&menu.label, menu.window, &menu.room),
             Some(RoomMenuAction::ClosePane) => {
-                if let Some(pane) = menu.pane { self.close_remote_cell(&menu.label, &pane); }
+                if let Some(pane) = menu.pane { self.confirm_or_close_remote_cell(&menu.label, &pane); }
             }
             Some(RoomMenuAction::SplitBeside) => {
                 if let Some(pane) = menu.pane { self.spawn_beside_remote_cell(&menu.label, &pane, false); }
@@ -1508,41 +1508,18 @@ impl App {
         }
     }
 
-    /// 다른 기기의 방 닫기 — 본기기 방과 같은 문: 누가 도는 중이면 확인 모달, 아니면 바로.
     pub(crate) fn confirm_or_close_remote_room(&mut self, label: &str, window: Option<u64>, room: &str) {
-        let busy = self.remote_room_panes(label, window, room).into_iter()
-            .find(|r| matches!(r.status.as_str(), "working" | "compacting"))
-            .map(|r| if r.name.is_empty() { "claude".to_string() } else { r.name.clone() });
         let action = PendingClose::RemoteRoom { label: label.to_string(), window, room: room.to_string() };
-        match busy {
-            Some(proc) => self.open_confirm_close(proc, action),
-            None => self.do_close(action),
+        if !self.guard_mirror_close(&action) {
+            self.set_toast("닫을 원본 세션 정보를 아직 받지 못했어요".to_string());
         }
     }
 
-    /// 그 기계에 `window.close` 를 보낸다(방 번호가 없는 옛 판은 pane 하나씩). 답은 폴링
-    /// 대신 `poke` 로 바로 받는다 — 카드가 5초 뒤에 사라지면 안 닫힌 줄 안다.
-    pub(crate) fn close_remote_room(&mut self, label: &str, window: Option<u64>, room: &str) {
-        let Some(m) = kasa_mcp::machines::find(label) else {
-            self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
-            return;
-        };
-        let mut ids: Vec<String> = self.remote_room_panes(label, window, room).into_iter().map(|r| r.remote_id.clone()).collect();
-        ids.sort();
-        ids.dedup();
-        if window.is_none() && ids.is_empty() { return; }
-        self.set_toast(format!("{} 의 방 닫는 중…", crate::render::pane_identity::device_name(label)));
-        let base = m.base.clone();
-        std::thread::spawn(move || {
-            let result = match window {
-                Some(idx) => kasa_mcp::remote::remote_cmd(&base, "window.close", serde_json::json!({ "idx": idx })).map(|_| ()),
-                None => ids.iter().try_for_each(|id| kasa_mcp::remote::close_remote_pane(&base, id, None, true)),
-            };
-            if let Err(e) = result {
-                eprintln!("[remote] room close failed: {e:#}");
-            }
-            kasa_mcp::machines::poke();
-        });
+    pub(crate) fn confirm_or_close_remote_cell(&mut self, label: &str, pane: &str) {
+        let action = PendingClose::RemotePane { label: label.to_string(), pane: pane.to_string() };
+        if !self.guard_mirror_close(&action) {
+            self.set_toast("닫을 원본 세션 정보를 아직 받지 못했어요".to_string());
+        }
     }
 
     /// 편집칸의 이름을 그 기계의 `window.rename` 으로 보낸다 — 그쪽은 pane 으로 방을 짚으므로
@@ -1561,22 +1538,6 @@ impl App {
             let params = serde_json::json!({ "surface_id": pane, "title": name });
             if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "window.rename", params) {
                 eprintln!("[remote] room rename failed: {e:#}");
-            }
-            kasa_mcp::machines::poke();
-        });
-    }
-
-    /// 그 기기의 칸 하나를 닫는다 — 사람이 그 기계에서 pane 을 닫은 것과 같다(되살리기 대열에 남는다).
-    pub(crate) fn close_remote_cell(&mut self, label: &str, pane: &str) {
-        let Some(m) = kasa_mcp::machines::find(label) else {
-            self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
-            return;
-        };
-        let (base, pane) = (m.base.clone(), pane.to_string());
-        self.set_toast(format!("{} 의 pane 닫는 중…", crate::render::pane_identity::device_name(label)));
-        std::thread::spawn(move || {
-            if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &pane, None, false) {
-                eprintln!("[remote] pane close failed: {e:#}");
             }
             kasa_mcp::machines::poke();
         });

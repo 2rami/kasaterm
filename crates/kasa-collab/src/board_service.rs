@@ -222,7 +222,8 @@ pub fn register(backend: Arc<dyn Backend>, port: u16) -> Result<CollectorGuard> 
             machine_id: machine,
             label,
             journal_path: journal_path(port),
-            remote_enabled: !isolated(),
+            remote_enabled: !isolated() || (std::env::var_os("KASATERM_TEST_BOARD_REMOTE").is_some()
+                && std::env::var_os("KASATERM_MACHINES").is_some()),
             source_override,
             machines: None,
         },

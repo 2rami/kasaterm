@@ -3191,6 +3191,8 @@ impl App {
                 } else {
                     pad + gl + 7.0 + tw + bw + mw + pad
                 };
+                let win_w = win_px.0 / scale;
+                let right_lim = settings_title.or(git_col_toggle).map_or(win_w - 8.0, |(x, ..)| x - 12.0);
                 // 경로는 파일트리 칼럼 오른쪽에 붙은 표시라, 그 칼럼이 좁아지면 함께
                 // 줄어야 한다. 안 줄이면 640px 창에서 132px 칼럼 옆의 경로가 250px
                 // 자리까지 뻗어, 가운데 서야 할 이름 칩을 오른쪽으로 밀어냈다.
@@ -3198,14 +3200,17 @@ impl App {
                 // 있어서다 — 자리가 없으면 중복부터 버린다.
                 let cwd_str = {
                     let text_x0 = px0 + 12.0 + isz + 6.0;
+                    // 파일트리가 접혀도 오른쪽 버튼의 자리는 필요하다. 경로가
+                    // 창 폭을 무시하면 이름 칩을 숨긴 뒤에도 설정 아이콘을 덮는다.
+                    let window_cap = (right_lim - text_x0).max(0.0);
                     let cap = if tree_col_w <= 0.0 {
-                        f32::MAX
+                        window_cap
                     } else if Density::of(tree_col_w, FILE_TREE_DENSE_FULL, FILE_TREE_DENSE_COMPACT)
                         .is_icon()
                     {
                         0.0
                     } else {
-                        (tree_col_x + tree_col_w - 8.0 - text_x0).max(0.0)
+                        (tree_col_x + tree_col_w - 8.0 - text_x0).max(0.0).min(window_cap)
                     };
                     crate::info::fit_text_tail(g, &cwd_str, cap, chrome_font, false)
                 };
@@ -3214,8 +3219,6 @@ impl App {
                 } else {
                     12.0 + isz + 6.0 + g.measure_chrome_text(&cwd_str, chrome_font, false)
                 };
-                let win_w = win_px.0 / scale;
-                let right_lim = settings_title.or(git_col_toggle).map_or(win_w - 8.0, |(x, ..)| x - 12.0);
                 // 칩은 왼쪽 칼럼(파일트리) 위로 내려앉지 않는다 — 좁은 창에서 가운데가
                 // 마침 그 경계와 겹치면 파일 목록에 딱 붙어 튀어나온 것처럼 보였다
                 // (640px 실측: 경계도 236, 중앙 시작도 236).
@@ -6318,6 +6321,7 @@ impl App {
                 );
                 let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
                 let mirror = matches!(dlg.why, crate::CloseWhy::Mirror { .. });
+                let retry = matches!(dlg.why, crate::CloseWhy::Mirror { error: Some(_), .. });
                 let mirror_closing = matches!(dlg.why, crate::CloseWhy::Mirror { closing: true, .. });
                 // pane 통째 닫기(⋮ ×)를 「탭」이라 부르면 무엇이 사라지는지가
                 // 어긋난다 — 그건 그 pane 의 탭을 전부 걷는다. 와일드카드를 안 쓰는
@@ -6327,6 +6331,7 @@ impl App {
                     crate::PendingClose::Window => "앱을",
                     crate::PendingClose::Session(_) => "이 세션을",
                     crate::PendingClose::RemoteRoom { .. } => "그 기기의 방을",
+                    crate::PendingClose::RemotePane { .. } => "그 기기의 세션을",
                     crate::PendingClose::Pane { .. } => "이 pane 을",
                     crate::PendingClose::Tab { .. } => "이 탭을",
                     crate::PendingClose::AuxEditor(_) => "이 문서 창을",
@@ -6341,7 +6346,7 @@ impl App {
                         } else if let Some(error) = error {
                             ("닫지 못했어요".to_string(), error.clone())
                         } else {
-                            ("닫기를 다시 시도할까요?".to_string(), source)
+                            ("원본 세션도 닫을까요?".to_string(), source)
                         }
                     }
                     crate::CloseWhy::Busy(proc) => {
@@ -6378,7 +6383,8 @@ impl App {
                 let title_w = g.measure_chrome_text(title, 15.0, true);
                 let sub_w = g.measure_chrome_text(subtitle, 13.0, false);
                 let card_w = (title_w.max(sub_w) + pad * 2.0)
-                    .clamp(if dirty || mirror { 420.0 } else { 360.0 }, (win_w - 48.0).max(420.0));
+                    .max(if dirty || mirror { 420.0 } else { 360.0 })
+                    .min((win_w - 48.0).max(1.0));
                 let subtitle = info::fit_text(g, subtitle, card_w - pad * 2.0, 13.0, false);
                 let card_h = 168.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
@@ -6414,59 +6420,33 @@ impl App {
                         italic: false,
                     },
                 );
-                let (mx, my) = self.cursor_px;
-                let bf = 13.0_f32;
-                let bpad = 18.0_f32;
-                let btn_h = 34.0_f32;
+                let btn_h = crate::native_controls::CONTROL_HEIGHT;
                 let btn_y = cy0 + card_h - 20.0 - btn_h;
-                // 오른쪽부터 왼쪽으로 쌓는다 — 기본 동작이 오른쪽 끝에 오는 배치.
                 let mut right = cx0 + card_w - pad;
-                // 채움색이 곧 뜻이다: accent = 기본 동작, danger = 되돌릴 수
-                // 없는 쪽, 무채색 = 그 외. 저장은 파괴적이지 않으니 빨강을 안 쓴다.
                 let mut button = |g: &mut gpu::GpuRenderer,
                                   hits: &mut Vec<(crate::ConfirmBtn, (f32, f32, f32, f32))>,
                                   label: &str,
                                   btn: crate::ConfirmBtn,
                                   tone: Option<[u8; 4]>| {
-                    let w = g.measure_chrome_text(label, bf, tone.is_some()) + bpad * 2.0;
+                    let style = crate::native_controls::Style {
+                        primary: btn == crate::ConfirmBtn::Save,
+                        danger: btn == crate::ConfirmBtn::Close && tone.is_some(),
+                        ..Default::default()
+                    };
+                    let w = crate::native_controls::button_width(g, label, btn_h, style.primary);
                     let x = right - w;
                     right = x - 10.0;
-                    let hot = mx >= x && mx <= x + w && my >= btn_y && my <= btn_y + btn_h;
-                    g.hover_pointer |= hot;
-                    let (fill, fg, bold) = match tone {
-                        Some(c) => (
-                            theme::with_alpha(c, if hot { 0xFF } else { 0xDD }),
-                            [0xFF, 0xFF, 0xFF, 0xFF],
-                            true,
-                        ),
-                        None => (
-                            theme::raised_on(theme::surface_active(), hot),
-                            theme::text(),
-                            false,
-                        ),
-                    };
-                    // 무채색 쪽은 테두리로 선다 — 주액션과 갈리는 축이 색 하나가
-                    // 아니라 형태여야 흑백에서도 어느 쪽이 기본인지 읽힌다.
-                    if tone.is_some() {
-                        panel_rect(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
-                    } else {
-                        panel_rect_outlined(g, x, btn_y, w, btn_h, theme::radius_sm(), fill);
-                    }
-                    g.draw_text(
-                        x + bpad,
-                        btn_y + (btn_h - bf) / 2.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: bf,
-                            color: fg,
-                            bold,
-                            italic: false,
-                        },
+                    let rect = crate::native_controls::text_button(
+                        g, (x, btn_y, w, btn_h), self.cursor_px, label, style,
                     );
-                    hits.push((btn, (x, btn_y, w, btn_h)));
+                    if mirror && btn == crate::ConfirmBtn::Cancel {
+                        crate::native_controls::focus_ring(g, rect);
+                    }
+                    hits.push((btn, rect));
                 };
                 if mirror && !mirror_closing {
-                    button(g, &mut confirm_btn_hits, "다시 시도", crate::ConfirmBtn::Close, Some(theme::danger()));
+                    let label = if retry { "다시 시도" } else { "원본 세션 닫기" };
+                    button(g, &mut confirm_btn_hits, label, crate::ConfirmBtn::Close, Some(theme::danger()));
                 } else if dirty {
                     // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이
                     // 걸리게. 편집분을 버리는 "저장 안 함" 은 그 왼쪽에 빨강으로.

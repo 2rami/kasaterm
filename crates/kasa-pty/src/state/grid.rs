@@ -174,7 +174,15 @@ fn exported_history_rows(history: usize, cols: u16) -> usize {
     history.min(10_000).min(1_000_000 / usize::from(cols.max(1)))
 }
 
+#[cfg(test)]
 pub(super) fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8> {
+    history_ansi_with_images(term, cols, rows, None)
+}
+
+pub(super) fn history_ansi_with_images(
+    term: &Term<PtyEventForwarder>, cols: u16, rows: u16,
+    images: Option<&Mutex<super::inline::InlineImgs>>,
+) -> Vec<u8> {
     let hist = exported_history_rows(term.grid().history_size(), cols);
     if hist == 0 {
         return Vec::new();
@@ -183,16 +191,17 @@ pub(super) fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16)
     let grid_cols = grid.columns().min(cols as usize);
     let mut out = String::new();
     for line in -(hist as i32)..0 {
-        let mut row: Row = Vec::with_capacity(grid_cols);
-        for c in 0..grid_cols {
-            let point = Point::new(
-                alacritty_terminal::index::Line(line),
-                alacritty_terminal::index::Column(c),
-            );
-            row.push(convert_cell(&grid[point]));
+        let source: Vec<_> = (0..grid_cols).map(|col| &grid[Point::new(
+            alacritty_terminal::index::Line(line), alacritty_terminal::index::Column(col),
+        )]).collect();
+        let row: Row = source.iter().map(|cell| transport_cell(cell)).collect();
+        if let Some(images) = images {
+            out.push_str(&String::from_utf8_lossy(&super::inline::kitty_anchored_row(
+                images, grid.history_size() as i64 + line as i64,
+            )));
         }
         if let Some(body) = kasa_screen::screen::row_ansi(&row) {
-            out.push_str(&body);
+            out.push_str(&restore_placeholders(&body, &source));
         }
         if row.last().is_some_and(|cell| cell.wrapped) {
             // Full-width row_ansi + HT commits the source's actual soft wrap.
@@ -222,6 +231,54 @@ pub(super) fn raw_screen_ansi(frame: &ScreenUpdate) -> Vec<u8> {
         cells.last()?.leading_wide_spacer.then_some(*row)
     }).collect();
     frame.to_ansi_with_wide_spacers(&leading_wide_rows)
+}
+
+fn transport_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
+    let mut converted = convert_cell(cell);
+    if cell.c == crate::kitty::PLACEHOLDER { converted.ch = cell.c; }
+    converted
+}
+
+fn restore_placeholders(body: &str, cells: &[&alacritty_terminal::term::cell::Cell]) -> String {
+    let mut placeholders = cells.iter().filter(|cell| cell.c == crate::kitty::PLACEHOLDER);
+    let mut parts = body.split(crate::kitty::PLACEHOLDER);
+    let mut out = parts.next().unwrap_or_default().to_string();
+    for part in parts {
+        if let Some(cell) = placeholders.next() {
+            // A palette SGR such as 37m becomes Named(White), losing the
+            // numeric image id that Kitty encodes in an indexed foreground.
+            match cell.fg {
+                VtColor::Indexed(index) => out.push_str(&format!("\x1b[38;5;{index}m")),
+                VtColor::Spec(rgb) => out.push_str(&format!("\x1b[38;2;{};{};{}m", rgb.r, rgb.g, rgb.b)),
+                _ => {},
+            }
+            match cell.underline_color() {
+                Some(VtColor::Indexed(index)) => out.push_str(&format!("\x1b[58;5;{index}m")),
+                Some(VtColor::Spec(rgb)) => out.push_str(&format!("\x1b[58;2;{};{};{}m", rgb.r, rgb.g, rgb.b)),
+                _ => out.push_str("\x1b[59m"),
+            }
+            out.push(crate::kitty::PLACEHOLDER);
+            for ch in cell.zerowidth().unwrap_or(&[]) { out.push(*ch); }
+            out.push_str("\x1b[59m");
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+pub(super) fn raw_screen_ansi_with_images(term: &Term<PtyEventForwarder>, frame: &ScreenUpdate) -> Vec<u8> {
+    let mut transported = frame.clone();
+    let mut source = Vec::new();
+    for (row, cells) in &mut transported.dirty {
+        for (col, cell) in cells.iter_mut().enumerate() {
+            let original = &term.grid()[Point::new(
+                alacritty_terminal::index::Line(*row as i32), alacritty_terminal::index::Column(col),
+            )];
+            *cell = transport_cell(original);
+            source.push(original);
+        }
+    }
+    restore_placeholders(&String::from_utf8_lossy(&raw_screen_ansi(&transported)), &source).into_bytes()
 }
 
 pub(super) fn snapshot(

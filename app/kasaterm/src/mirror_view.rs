@@ -44,15 +44,11 @@ fn finish_line(line: &mut ProjectedLine, cols: usize, fill: &GridCell, soft_wrap
 /// Only unlabelled horizontal rules are elastic. Tables, code, labelled borders
 /// and ordinary hard line breaks are not inferred to be paragraphs.
 fn rule_cell(row: &[GridCell]) -> Option<&GridCell> {
-    let mut glyphs = row.iter().filter(|c| !matches!(c.ch, ' ' | '\0'));
-    let first = glyphs.next()?;
+    let first = row.first()?;
     if !matches!(first.ch, '─' | '━' | '═' | '╌' | '╍' | '┄' | '┅' | '┈' | '┉' | '-' | '=') { return None; }
-    let mut count = 1;
-    for cell in glyphs {
-        if cell.ch != first.ch { return None; }
-        count += 1;
-    }
-    (count >= 3).then_some(first)
+    // Table separators use spaces to keep column boundaries. Only a rule
+    // covering every source cell is safe to stretch across the viewer.
+    (row.len() >= 3 && row.iter().all(|cell| cell.ch == first.ch)).then_some(first)
 }
 
 /// A known input border or completion divider contains a label. Resize only
@@ -225,7 +221,7 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
                 continue;
             }
         }
-        if let Some(rule) = rule_cell(&source[row_index]) {
+        if let Some(rule) = rule_cell(&source[row_index]).filter(|_| !fenced) {
             let mut cells = vec![rule.clone(); cols];
             for cell in &mut cells { cell.wrapped = false; }
             output.push(ProjectedLine {
@@ -915,6 +911,66 @@ mod tests {
             for (col, pos) in view.source_map[5].iter().enumerate() {
                 if let Some((row, source_col)) = pos { assert_eq!(view.rows[5][col].ch, source[*row][*source_col].ch); }
             }
+        }
+    }
+
+    #[test]
+    fn codex_table_preserves_column_starts_and_separator_gaps() {
+        let body = [
+            "   ID    이름    상태",
+            "  ━━━━━  ━━━━━━  ━━━━━━",
+            "   T01   기본    완료",
+            "  ─────  ──────  ──────",
+            "   T02   링크    대기",
+        ];
+        let source = codex_screen(&body, 60);
+        for cols in [40, 60, 90] {
+            let view = project(&source, (6, 3), cols, 12, Some(5), None);
+            assert_eq!(view.body_lines.len(), body.len());
+            for (index, row) in view.body_lines.iter().enumerate() {
+                let rendered: String = row.cells.iter().filter(|cell| cell.ch != '\0')
+                    .map(|cell| cell.ch).collect();
+                assert_eq!(rendered.trim_end(), body[index], "row {index}, viewer width {cols}");
+            }
+            for index in [1, 3] {
+                let row = &view.body_lines[index];
+                for col in [0, 1, 7, 8, 15, 16] {
+                    assert_eq!(row.cells[col].ch, ' ', "separator gap {index}:{col}");
+                }
+                for col in [2, 9, 17] {
+                    assert_eq!(row.cells[col].ch, source[index][col].ch);
+                    assert_eq!(row.source_map[col], Some((index, col)));
+                }
+            }
+            for index in [0, 2, 4] {
+                for col in [3, 9, 17] {
+                    assert_eq!(view.body_lines[index].cells[col].ch, source[index][col].ch);
+                    assert_eq!(view.body_lines[index].source_map[col], Some((index, col)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indented_short_and_fenced_rules_keep_their_original_width() {
+        for body in [
+            vec!["    ────────────", "  ━━━━━━", "--------"],
+            vec!["```text", "────────────────────", "```"],
+        ] {
+            let source = codex_screen(&body, 20);
+            let view = project(&source, (body.len() + 1, 3), 40, 12, Some(body.len()), None);
+            let output: Vec<_> = view.body_lines.iter().map(|row| text(&[row.cells.clone()])[0].clone()).collect();
+            assert_eq!(output, body);
+        }
+    }
+
+    #[test]
+    fn unfenced_full_width_rule_still_fits_the_viewer() {
+        let source = vec![line("────────────")];
+        for cols in [8, 20] {
+            let view = project(&source, (0, 0), cols, 2, None, None);
+            assert_eq!(text(&view.rows)[0], "─".repeat(cols));
+            assert_eq!(view.body_lines.len(), 1);
         }
     }
 
