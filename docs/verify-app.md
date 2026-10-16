@@ -38,7 +38,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **`KASATERM_MACHINES='[]'`** — 사용자 명부(`machines.json`)를 안 읽게 한다. 안 걸면 리그가 명부의 기기마다 ssh 터널을 열고,
   저쪽에서 이쪽으로 오는 되돌아오는 길(`-R`)을 **사용자 앱과 같은 원격 포트**로 열어 다툰다(2026-09-29 실측: 한 기기는 거부됐지만
   다른 기기는 리그 쪽이 열렸다). 기기 칸(직통·빌드 다름)은 그래서 리그로 못 보고, 실기기에서 확인한다.
-- **`KASATERM_COLLAB_ROOT`** 로 `session_characters.json`(세션↔학생 바인딩)·bind 마커·`agent-roster/` 를 가른다. 안 걸면 본판 폴더를 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않지만, 같은 cwd 의 같은 pane 번호(`%2`)가 본판 세션에 결합해 글리프가 남의 것을 보는 일이 생긴다.
+- **`KASATERM_COLLAB_ROOT`** 로 네이티브 앱의 `session_characters.json`(세션↔학생 바인딩)·bind 마커·`agent-roster/` 조회를 가른다. 안 걸면 본판 폴더를 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않지만, 같은 cwd 의 같은 pane 번호(`%2`)가 본판 세션에 결합해 글리프가 남의 것을 보는 일이 생긴다. **수동 학생 선택 파일과 원본 셸 훅의 쓰기까지 격리하는 설정은 아니다** — 아래 「학생·대화 픽스처」를 따른다.
 - ⚠️ **`KASATERM_SOCKET_PATH` 를 띄울 때도 주고, `kasaterm-cli` 를 부를 때도 줘라.** CLI 는 `$KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock` 순으로 붙고 **포트는 안 본다** — 리그를 다른 포트로 띄웠어도 CLI 에 이 변수를 안 주면 그 명령이 **사용자 앱으로 간다**(2026-09-03 실측: `split right` 이 사용자 창에 pane 을 만들었고, `send` 가 도는 학생의 입력창에 글자를 밀어넣었다). 앱 부팅 줄과 CLI 호출 양쪽에 같은 경로를 걸어라:
   `export KASATERM_SOCKET_PATH=/tmp/<네이름>/rig.sock` 를 먼저 하고 그 셸에서 둘 다 부르는 것이 가장 안전하다.
 - **칸 안에서 claude·codex 를 따로 띄워 화면을 재 볼 때(격리 tmux 등)는 `env -i` 로 칸 환경을 걷어라.** 물려받은
@@ -90,6 +90,34 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
 4. **자동 입력** — `KASATERM_AUTOSEND="claude" KASATERM_AUTOSEND_MS=6000`. send_bytes 직접 주입이라 **IME 조합 경로는 재현 못 함** — 한글 조합 버그는 사용자가 직접 타이핑해야 함 (`KASATERM_IME_DEBUG=1` 로 키 코드포인트 로깅).
 5. **체감(스크롤·입력 지연)은 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지.
 6. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션.
+
+## 학생·대화 픽스처
+
+**리그에서 학생 얼굴을 붙이려고 `/repersona`·`kasaterm-cli repersona`·학생 이름 런처를 호출하지 마라.**
+2026-10-16 검증에서 `/repersona?sid=<검증 UUID>`가 본판 `~/.config/kasaterm/manual_characters.json`에
+검증 UUID를 추가했다. `character.rs::manual_pick_path`는 HOME 아래 경로를 직접 쓰며
+`KASATERM_COLLAB_ROOT`·`KASATERM_STUDENTS_DIR`·`KASATERM_SETTINGS_FILE`을 읽지 않는다.
+세션·소켓·협업 루트가 전부 격리됐어도 이 쓰기는 본판으로 간다. `sid`만 빼도 안전하지 않다 —
+GUI의 `repersona_pane`이 그 칸의 기존 sid를 수동 선택으로 기록한다. 학생 이름 런처도 내부에서 `/repersona`를 부른다.
+
+가짜 하네스의 이름·그림·대화 상태는 다음 경로로 맞춘다. 실제 사용자 UUID나 프로세스는 빌리지 않는다.
+
+1. 위 격리 부팅 환경을 유지하고 그림은 리그의 `KASATERM_STUDENTS_DIR`에 복사한다. 가짜 하네스를 **리그 칸 안에서** 실행하고
+   그 자식의 실제 PID와 새 검증 UUID를 기록한다.
+2. 그 리그 소켓에 짝인 `.mcp_port`에서 읽은 포트로 `POST /agent-identity`를 보낸다.
+   쿼리는 `surface=<리그 칸>`, `sid=<새 검증 UUID>`, `character=<픽스처 학생>`, `pid=<가짜 하네스 PID>`다.
+   **`resumed=1`은 넣지 않는다.** 다른 기기에서 이어 열 학생을 찾는 분기는 수동 선택 표식을 기록할 수 있다.
+   새 대화 경로의 `prepare_agent_identity`는 수동 선택 표식을 쓰지 않고, 세션 바인딩을 격리 협업 루트에 쓴다.
+   새 루트의 바인딩 위치는 `<KASATERM_COLLAB_ROOT>/sessions/session_characters.json`이다.
+3. 화면 외에 보드·미러의 대화 신원도 필요하면 같은 UUID의 합성 transcript를 리그 폴더에 만들고,
+   **같은 리그 소켓·협업 루트·칸 id를 준 CLI**로 `kasaterm-cli bind-transcript <합성 transcript 경로>`를 직접 부른다.
+   Codex 파일명은 `rollout-<시각>-<검증 UUID>.jsonl` 형식이다. `/repersona`로 보완하지 않는다.
+4. 응답 이름과 `/term/panes`의 신원을 확인하고, 검증 전후 본판 `manual_characters.json`이 바뀌지 않았는지 확인한다.
+   이름이 안 보이면 원본의 바인딩·하네스 판정을 먼저 조사한다. 미러에 따로 학생을 재배정하지 않는다.
+
+일반 `claude`·`codex` 래퍼의 정체성 요청도 `/agent-identity`를 쓰지만, 이것이 실행되는 모든 훅의 격리를 보증하지는 않는다.
+특히 저장소 원본 `collab-hooks/kasaterm-bind-transcript.sh`는 HOME의 `agent-roster/`와 `/tmp`의 bind 마커에 직접 쓴다.
+위 가짜 하네스 픽스처에는 그 셸 훅 전체를 실행하지 말고 3번의 CLI 바인딩만 쓴다.
 
 ## KasaLite(터미널 고정판) 리그
 
