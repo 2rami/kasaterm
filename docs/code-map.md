@@ -49,11 +49,13 @@
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 - 엔진·협업 크레이트(카사라이트·`kasa tui` 가 git rev 로 함께 쓴다, 설계 `docs/terminal-engine.md`):
-  `kasa-screen`(셀·행·ScreenUpdate·ANSI·리플로우·칸 배치 — kasa-bridge 가 재수출) ·
+  `kasa-screen`(셀·행·ScreenUpdate·ANSI·리플로우·칸 배치·웹 grid 프레임 `wire` — kasa-bridge 가 재수출) ·
   `kasa-collab`(보드 수집기 `board_service`·tell 장부 `tell_service`·칸 열쇠 `surface_keys`·나쵸 칸 표지 `nacho_pane`·기계 id `identity`·GUI 없는
   호스트용 tell 전달 `delivery`·claude 훅 설치 `hooks`. 기기 명부·관문·원격 칸은 호스트가 `env::CollabEnv` 로 꽂는다 —
   본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) ·
   `kasa-socket::cli`(`kasaterm-cli` 본체 — 바이너리와 `kasa tui` 멀티콜이 부른다)
+- `kasa-host` — 창 없는 카사텀(설계·소켓 계약 `docs/kasa-host.md`). `lib.rs`(세션 표·메서드) · `server.rs`(유닉스 소켓) ·
+  `keys.rs`(키 이름 → 바이트)
 - `kasa-pty/src/state.rs` — `PtySession` 의 필드 한 곳, 책임별 `impl` 은 `state/` 자식: `lifecycle`(띄우기·입양·닫기) ·
   `reader`(읽기 스레드) · `vt`(파서·답장) · `grid`(격자 → 행·ANSI) · `screen`(읽기·구독) · `viewport`(크기의 주인) ·
   `input`(쓰기 관문) · `blocks`(OSC 133) · `inline`(OSC 1337·kitty) · `process`·`agents`(프로세스·에이전트 감지) ·

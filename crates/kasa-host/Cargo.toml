@@ -1,0 +1,14 @@
+[package]
+name = "kasa-host"
+description = "Windowless kasaterm: holds kasa-pty sessions for another program (nacho) and serves them over a Unix socket — spawn, type, keys, grid frames, text, resize, close."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# 클립보드(os-clipboard)는 끈 채 받는다 — 창이 없는 호스트라 OSC 52 를 받을 사람이 없다.
+kasa-pty.workspace = true
+kasa-screen.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

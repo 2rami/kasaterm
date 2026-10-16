@@ -11,6 +11,7 @@ license.workspace = true
 unicode-width.workspace = true
 anyhow.workspace = true
 serde.workspace = true
+# 웹·앱이 VT 파서 없이 그리는 grid 프레임(`wire`) — 본판 웹 터미널과 kasa-host 가 같이 쓴다.
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
