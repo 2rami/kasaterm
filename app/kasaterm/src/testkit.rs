@@ -6833,7 +6833,24 @@ impl App {
             Some((Instant::now() + std::time::Duration::from_secs(2), label, pane))
         }) {
             if Instant::now() >= *due && !VIEW_OPENED.swap(true, Ordering::Relaxed) {
-                match self.mirror_remote_pane(label, pane, "", "") {
+                let outcome = if std::env::var("KASATERM_TEST_MIRROR_ROOM").as_deref() == Ok("1") {
+                    self.refresh_machines_col();
+                    let window = self.info.machines_col.machines.iter().find(|m| &m.label == label)
+                        .and_then(|m| m.remote.iter().chain(&m.mirrored).find(|r| &r.remote_id == pane))
+                        .and_then(|r| r.window);
+                    let Some(window) = window else {
+                        VIEW_OPENED.store(false, Ordering::Relaxed);
+                        return;
+                    };
+                    self.open_remote_room(label, Some(window), "fixture room", Some(pane)).and_then(|()| {
+                        self.window_leaves(self.active_window).into_iter().find(|id| {
+                            kasa_mcp::remote::remote_info(id).is_some_and(|info| &info.remote_id == pane)
+                        }).ok_or_else(|| anyhow::anyhow!("room mirror did not contain {pane}"))
+                    })
+                } else {
+                    self.mirror_remote_pane(label, pane, "", "")
+                };
+                match outcome {
                     Ok(id) => {
                         eprintln!("[mirror-view-test] source={pane} viewer={id} read_only={}",
                             kasa_mcp::remote::is_view_pane(&id));
@@ -8003,6 +8020,7 @@ impl App {
     pub(crate) fn run_pending_autoforeignsplit(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
+        if !crate::verification_run() { return; }
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
         static FIRED: AtomicBool = AtomicBool::new(false);
         let due = DUE.get_or_init(|| {
@@ -8030,19 +8048,38 @@ impl App {
         };
         let before = self.window_leaves(win).len();
         let prev = self.ws.lock().unwrap().active_pane.clone();
-        self.ws.lock().unwrap().active_pane = Some(target.clone());
-        let outcome = self.split_pane_auto(None);
+        let active_window = self.active_window;
+        let active_layout = self.ws.lock().unwrap().layout.clone();
+        let active_panes = self.ws.lock().unwrap().active_window_panes.clone();
+        let zoom = self.zoomed_pane.clone();
+        let epoch = kasa_mcp::changes::current();
+        let fleet = std::env::var("KASATERM_AUTOFOREIGNSPLIT").as_deref() == Ok("fleet");
+        let outcome = if fleet {
+            self.split_fleet(2, Some(&target), 0.5)
+        } else {
+            self.ws.lock().unwrap().active_pane = Some(target.clone());
+            self.split_pane_auto(None).map(|id| vec![id])
+        };
         // 소켓 split 은 기본 no-focus 라 부른 뒤 되돌린다(handler.rs SocketSplit).
-        if let Some(prev) = prev {
-            self.ws.lock().unwrap().active_pane = Some(prev);
-        }
+        self.ws.lock().unwrap().active_pane = prev.clone();
         let after = self.window_leaves(win).len();
         match outcome {
-            Ok(new_id) => eprintln!(
-                "[autoforeignsplit] {}: window {win}(활성={}) {target} → {new_id}, leaf {before}→{after}",
-                if after == before + 1 { "PASS" } else { "FAIL(트리에 안 꽂힘)" },
-                win == self.active_window
-            ),
+            Ok(made) => {
+                let (cols, rows) = self.window_cells();
+                let expected = self.windows[win].as_ref().unwrap().to_tmux_layout(cols, rows);
+                let ws = self.ws.lock().unwrap();
+                let published = made.iter().all(|id| ws.pane_window.get(id) == Some(&win));
+                let geometry = ws.window_layouts.get(&win) == Some(&expected);
+                let focus = self.active_window == active_window && ws.active_pane == prev
+                    && ws.layout == active_layout && ws.active_window_panes == active_panes
+                    && self.zoomed_pane == zoom;
+                let changed = kasa_mcp::changes::current() > epoch;
+                let passed = !made.is_empty() && after > before && published && geometry && focus && changed;
+                eprintln!(
+                    "[autoforeignsplit] {}: fleet={fleet} window={win} {target} → {made:?}, leaf {before}→{after}, published={published} geometry={geometry} focus={focus} changed={changed}",
+                    if passed { "PASS" } else { "FAIL" },
+                );
+            }
             Err(e) => eprintln!("[autoforeignsplit] FAIL — split 거부: {e:#}"),
         }
     }

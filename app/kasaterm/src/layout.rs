@@ -1187,16 +1187,14 @@ impl App {
                 }
             }
         }
-        // 줌은 트리 밖 렌더 상태다 — 재배치하면 줌 대상이 화면과 어긋나므로 푼다.
-        // 안 풀면 학생을 셋 띄웠는데 화면엔 옛 pane 하나만 크게 남는다.
-        if self.zoomed_pane.is_some() {
-            self.zoomed_pane = None;
-        }
         if owner != self.active_window {
             // 안 보이는 방이라 포커스도 메인 그리드도 안 건드린다. 그 방 PTY 치수는
             // 그 창을 앞으로 가져올 때 다시 맞춰진다.
+            self.publish_pty_layout();
             return Ok(made);
         }
+        // 다른 방 배치는 지금 보고 있는 칸의 줌을 풀면 안 된다.
+        self.zoomed_pane = None;
         self.resize_backend(win_cols, win_rows);
         self.publish_pty_layout();
         if let Some(w) = &self.window {
@@ -1608,6 +1606,7 @@ impl App {
             // 안 보이는 방을 쪼갠 것이라 포커스도 메인 그리드도 건드리지 않는다.
             // 그 방의 PTY 치수는 그 창을 앞으로 가져올 때(`aux_room_resize_pty`
             // ·window 전환) 어차피 다시 맞춰진다.
+            self.publish_pty_layout();
             return Ok(new_id);
         }
         self.ws.lock().unwrap().active_pane = Some(new_id.clone());

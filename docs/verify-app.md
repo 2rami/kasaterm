@@ -119,6 +119,17 @@ GUI의 `repersona_pane`이 그 칸의 기존 sid를 수동 선택으로 기록�
 특히 저장소 원본 `collab-hooks/kasaterm-bind-transcript.sh`는 HOME의 `agent-roster/`와 `/tmp`의 bind 마커에 직접 쓴다.
 위 가짜 하네스 픽스처에는 그 셸 훅 전체를 실행하지 말고 3번의 CLI 바인딩만 쓴다.
 
+## 배경 방 배치 동기화 리그
+
+배경 방 분할은 위 격리 부팅에 `KASATERM_AUTOWINDOWS=1 KASATERM_AUTOWINDOWS_MS=1000
+KASATERM_AUTOFOREIGNSPLIT_MS=4000`을 더해 검사한다. `KASATERM_AUTOFOREIGNSPLIT=fleet`은 두 칸 일괄 배치다.
+`[autoforeignsplit] PASS`는 트리뿐 아니라 공개 pane 소속·방 배치·변경 알림과 기존 방 초점·줌 보존을 확인한다.
+원본 방을 전환하기 전에 `/term/panes`·`/windows`와 실제 미러 목록도 대조한다. 방을 한 번 열면 publication 누락이 가려진다.
+미러 리그는 `KASATERM_MACHINES`에 직접 띄운 원본의 루프백 주소만 넣고,
+`KASATERM_TEST_MIRROR_LABEL=<원본 이름> KASATERM_TEST_MIRROR_PANE=<배경 방 칸> KASATERM_TEST_MIRROR_ROOM=1`로
+방 전체를 연다. 기기 목록 수집을 위해 사이드바를 켜 둔다(`sidebar_visible=false`로 부팅했다면
+`KASATERM_AUTOTOGGLE_SIDEBAR_MS=500`). `KASATERM_TEST_MIRROR_ROOM`을 빼면 기존 단일 칸 미러 검증이다.
+
 ## KasaLite(터미널 고정판) 리그
 
 `scripts/build-lite-app.sh` 가 굽는 `dist/KasaLite.app` 은 같은 바이너리를 `kasaterm-lite` 로 이름만 바꾼 것이다. 부팅에서
