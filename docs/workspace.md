@@ -25,6 +25,7 @@
 | 협업 | 3 | `kasa-agents` | 하네스 지식: Claude Code·Codex 대화 기록 읽기 | 금지 | feature 뒤만 |
 | 협업 | 4 | `kasa-collab` | 보드 수집기·tell 장부·칸 열쇠·기계 id. 다른 기계와의 HTTP 는 feature `net` | 금지 | feature 뒤만 |
 | 호스트 | 5 | `kasa-mcp` | 이 기기 HTTP 호스트(보드·웹 칸·원격 방·모바일)·관문 `kasa-relay`·`kasa-device`·`kasa-serve-web`. 이름은 MCP 서버였던 시절의 것 | 금지 | 허용 |
+| 호스트 | 5 | `kasa-host` | 창 없는 카사텀 — 다른 프로그램(나쵸)의 셸 세션을 `kasa-pty` 로 붙들고 유닉스 소켓으로 내준다. 산출물이라 받는 쪽이 없다 | 금지 | 금지 |
 | 앱 | 6 | `kasa-pet-config` | 본판과 펫이 함께 읽는 펫 설정. 앱만 받는다 | 금지 | 허용 |
 | 앱 | 7 | `kasaterm`·`kasapet` | 본판 GUI·바탕화면 펫 실행 파일. 산출물이라 받는 쪽이 없다 | 허용 | 허용 |
 | 실험 | — | `spikes/*` | 렌더러·IME 시험판. 제품이 아니다 | — | — |
@@ -45,6 +46,8 @@ kasaterm ─┬─ kasa-mcp ─┬─ kasa-collab ─┬─ kasa-socket
           ├─ kasa-pty · kasa-socket · kasa-ime · kasa-cells · kasa-pet-config
 kasapet ── kasa-pet-config
 kasa-net-ffi ── kasa-net
+kasa-host ─┬─ kasa-pty ── kasa-screen
+           └─ kasa-screen
 spikes/* ── kasa-bridge
 ```
 

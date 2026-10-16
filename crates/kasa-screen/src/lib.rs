@@ -5,6 +5,7 @@
 pub mod layout;
 pub mod reflow;
 pub mod screen;
+pub mod wire;
 
 pub use layout::{parse_layout, Layout};
 pub use screen::{Cell, Color, Row, ScreenUpdate};
