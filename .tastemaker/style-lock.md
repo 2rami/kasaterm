@@ -62,3 +62,7 @@ Color selection starts with a continuous HSV plane, hue strip and large color pr
 ## Inline results and file links — 2026-10-15
 
 The user explicitly chose removal of shared-folder screens and mandatory saving conventions while retaining existing files, file links and transfer between devices. PC Info shows runtime information. Mobile conversations render validated image blocks from the producing device and offer file preview from links. Agents save results in the project or an appropriate output folder, return an inline image block or file link, and use a separate image tab only when explicitly requested. Earlier shared-folder studies and placement decisions are superseded.
+
+## PC mirror terminal default — 2026-10-16
+
+The user explicitly chose the original terminal as the default for every PC mirror. Conversation reconstruction and shell command cards remain manual per-pane choices. Phone defaults are independent. This supersedes automatic conversation/shell reconstruction for desktop mirrors; geometry follows `docs/mirror-render.md`.

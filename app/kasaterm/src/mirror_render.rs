@@ -1,15 +1,13 @@
 //! 거울 칸이 무엇이고 무엇으로 보이나 — 한 곳의 판정. 정본 규칙은 `docs/mirror-render.md`.
 //!
-//! 거울은 원본 크기가 어떻든 보는 칸에 맞게 보인다. Claude·코덱스는 대화(`chat_view`), 셸 통합이 있는 셸은
-//! 명령 묶음(`shell_view`)이 처음 얼굴이다 — 둘 다 원본 PTY 를 안 건드리고 기록·구간을 이 칸 폭으로 다시
-//! 짓는다. 사람이 ⋮ 에서 터미널로 돌린 칸은 칸마다 기억해 다시 열지 않는다. 기록으로 다시 그릴 수 없는
-//! 칸(전체 화면 앱·셸 통합 없는 셸)만 보거나 만지는 동안 원본 격자를 이 칸 크기로 잡는다(`mirror_follow.rs`).
+//! PC 거울은 원본 TUI 격자로 시작한다. 대화·명령 묶음은 사람이 골랐을 때만 다시 짓는다.
+//! 원본 격자를 보는 칸은 뷰어 크기로 원본 PTY 를 잡고, 안 보거나 재구성 보기를 켜면 놓는다.
 use super::*;
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MirrorKind {
-    /// Claude·코덱스 — 기록(+연결 mod)으로 대화형(`chat_view`).
+    /// Claude·코덱스 — 대화 보기를 선택할 수 있다.
     Chat,
     /// 셸 — OSC 133 명령 묶음(`shell_view`). 셸 통합이 없거나 전체 화면 프로그램에 들어간 동안은
     /// 원본 격자를 보이고, 그동안 원본 크기를 이 칸으로 잡는다.
@@ -25,6 +23,14 @@ const CHECK_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 pub(crate) struct MirrorViews {
     checked: Option<Instant>,
     hold: crate::mirror_follow::ViewHold,
+}
+
+fn needs_source(kind: MirrorKind, chat: bool, blocks: bool, known: bool) -> bool {
+    match kind {
+        MirrorKind::Chat => !chat,
+        MirrorKind::Shell => !blocks,
+        MirrorKind::Grid => known,
+    }
 }
 
 impl App {
@@ -43,16 +49,15 @@ impl App {
     /// 이 거울을 다시 그릴 수 없나 — 그럴 때만 보는 동안 원본 격자를 이 칸 크기로 잡는다.
     pub(crate) fn mirror_needs_source(&self, ws: &Workspace, id: &str, tab: &str) -> bool {
         let alt = ws.panes.get(id).and_then(|p| p.term()).is_some_and(|t| t.alt_screen);
-        match self.mirror_kind(tab) {
-            // 대화는 기록으로 짓는다 — 사람이 터미널로 돌린 풀스크린 학생만 남는다.
-            MirrorKind::Chat => alt && self.chat_view.declined.contains(id),
-            MirrorKind::Shell => alt || self.shell_view_lacks_integration(id),
-            // 명령 묶음을 모르는 옛 원본의 셸. 판정을 아직 모르는 칸은 기다린다.
-            MirrorKind::Grid => kasa_mcp::remote::cached_agent_running(tab).is_some(),
-        }
+        needs_source(
+            self.mirror_kind(tab),
+            self.chat_view_on(id),
+            self.shell_view_on(id) && !alt && !self.shell_view_lacks_integration(id),
+            kasa_mcp::remote::cached_agent_running(tab).is_some(),
+        )
     }
 
-    /// 보이는 거울 칸을 처음 얼굴로 열고, 다시 그릴 수 없는 칸은 보는 동안 원본 크기를 잡는다.
+    /// 원본 TUI를 보는 거울만 뷰어 크기를 빌려야 원본 앱이 그 폭으로 다시 그린다.
     pub(crate) fn pump_mirror_views(&mut self) {
         let now = Instant::now();
         if self.mirror_views.checked.is_some_and(|t| now.duration_since(t) < CHECK_EVERY) {
@@ -60,28 +65,6 @@ impl App {
         }
         self.mirror_views.checked = Some(now);
         let visible = self.visible_pane_ids();
-        let mut chats = Vec::new();
-        let mut shells = Vec::new();
-        {
-            let ws = self.ws.lock().unwrap();
-            for id in visible.iter().filter(|id| ws.panes.contains_key(*id)) {
-                match self.mirror_kind(&ws.active_tab_pid(id)) {
-                    MirrorKind::Chat if !self.chat_view_on(id) && !self.chat_view.declined.contains(id) && self.pane_can_chat(&ws, id) => {
-                        chats.push(id.clone())
-                    }
-                    MirrorKind::Shell if !self.shell_view_on(id) && !self.shell_view.declined.contains(id) && self.pane_can_blocks(&ws, id) => {
-                        shells.push(id.clone())
-                    }
-                    _ => {}
-                }
-            }
-        }
-        for id in chats {
-            self.open_chat_view_quietly(&id);
-        }
-        for id in shells {
-            self.open_shell_view_quietly(&id);
-        }
         let (seen, want) = {
             let ws = self.ws.lock().unwrap();
             let mut seen = HashSet::new();
@@ -100,5 +83,21 @@ impl App {
         };
         let focused = self.target_surface();
         self.mirror_views.hold.step(&seen, &want, focused.as_deref(), now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_mirrors_take_source_size_until_a_reconstructed_view_is_chosen() {
+        for kind in [MirrorKind::Chat, MirrorKind::Shell, MirrorKind::Grid] {
+            assert!(needs_source(kind, false, false, true));
+        }
+        assert!(!needs_source(MirrorKind::Chat, true, false, true));
+        assert!(!needs_source(MirrorKind::Shell, false, true, true));
+        assert!(needs_source(MirrorKind::Shell, true, false, true));
+        assert!(!needs_source(MirrorKind::Grid, false, false, false));
     }
 }
