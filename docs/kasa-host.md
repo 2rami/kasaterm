@@ -24,9 +24,9 @@ kasa-host --socket ~/.config/nacho/host.sock
 | `spawn` | `name?` `cwd?` `env?{}` `cols?`(120) `rows?`(40) `shell?`(기본 `$SHELL` 로그인 셸) `cmd?` | `{id, name, pid}` |
 | `list` | — | `[{id, name, pid, cols, rows, title, cwd, agent, created_ms}]`(띄운 순) |
 | `write` | `id` `data` | `{}` — 바이트 그대로 |
-| `paste` | `id` `text` `submit?` | `{}` — 앱이 붙여넣기 감싸기(2004)를 켰을 때만 감싸고, `submit` 이면 150ms 뒤 Enter |
+| `paste` | `id` `text` `submit?` `expected_revision?` | `{}` — 앱이 붙여넣기 감싸기(2004)를 켰을 때만 감싸고, `submit` 이면 150ms 뒤 Enter. 사이에 들어온 사람 키는 Enter 뒤에 전달 |
 | `key` | `id` `name` | `{}` — `enter`·`tab`·`shift+tab`·`escape`·`backspace`·`delete`·`space`·방향·`home`·`end`·`pageup`·`pagedown`·`ctrl+<글자>`·한 글자 |
-| `screen` | `id` `since?` `wait?`(초, 25 상한) | `{hash, frame, title, alive}` — `frame` 은 본판 웹 터미널과 같은 grid 프레임(`kasa_screen::wire`). `since` 가 지금 해시면 바뀔 때까지 기다린다 |
+| `screen` | `id` `since?` `wait?`(초, 25 상한) | `{hash, frame, title, alive, input_revision, input_busy}` — `frame` 은 본판 웹 터미널과 같은 grid 프레임(`kasa_screen::wire`). `since` 가 지금 해시면 바뀔 때까지 기다린다 |
 | `text` | `id` `lines?`(40) | `{text}` — 보이는 마지막 줄들, 줄 끝 공백 걷음 |
 | `resize` | `id` `cols` `rows` | `{}` |
 | `rename` | `id` `name` | `{}` |
@@ -35,6 +35,7 @@ kasa-host --socket ~/.config/nacho/host.sock
 - `spawn` 의 `cmd` 는 프로세스로 바로 띄우지 않고 띄운 셸에 쳐 넣는다. 셸 함수·별칭이 풀리고, 명령이 끝나도 셸이 남아 같은 칸에서 다시 켤 수 있다.
 - 세션 env 에 `KASA_HOST_SESSION=<id>` 가 붙는다. 칸 안의 훅·도구가 자기 세션을 안다.
 - 셸이 끝나면(EOF) 세션은 목록에서 빠진다. 없는 `id` 는 오류다.
+- 자동 전달은 `screen` 의 입력창이 비었고 `input_busy=false` 인지 확인한 뒤 같은 `input_revision` 을 `paste.expected_revision` 으로 보낸다. 중간 입력·닫힘은 거절한다. 응답 실패 뒤 자동 재시도는 금지한다 — 쓰기가 일부 진행됐을 수 있다.
 
 ## 남은 단계
 

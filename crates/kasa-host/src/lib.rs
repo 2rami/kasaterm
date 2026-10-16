@@ -30,6 +30,7 @@ pub struct Session {
     /// 화면이 바뀔 때마다 하나 오른다. 롱폴은 이 값이 바뀌기를 기다린다.
     rev: Mutex<u64>,
     changed: Condvar,
+    paste_lock: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -112,6 +113,7 @@ impl Host {
             }
             "close" => {
                 let s = self.get(p)?;
+                s.pty.set_input_closed(true, false)?;
                 self.sessions.lock().unwrap().remove(&s.id);
                 s.pty.terminate_local();
                 Ok(json!({}))
@@ -148,6 +150,7 @@ impl Host {
             pty,
             rev: Mutex::new(0),
             changed: Condvar::new(),
+            paste_lock: Mutex::new(()),
         });
         self.sessions.lock().unwrap().insert(id.clone(), session.clone());
 
@@ -207,17 +210,31 @@ impl Host {
     fn paste(&self, p: &Value) -> Result<Value> {
         let s = self.get(p)?;
         let text = str_param(p, "text").context("text 가 없다")?;
+        let _paste = s.paste_lock.lock().unwrap();
+        let expected = p.get("expected_revision").map(|v| v.as_u64().context("expected_revision 은 정수여야 한다")).transpose()?;
+        if expected.is_some() && !s.pty.input_quiet_for(Duration::from_millis(300)) {
+            bail!("input is still settling");
+        }
         let bytes = if s.pty.live_screen().bracketed_paste {
             format!("\x1b[200~{text}\x1b[201~")
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        s.pty.send_bytes(bytes.as_bytes())?;
-        if p.get("submit").and_then(Value::as_bool).unwrap_or(false) {
-            std::thread::sleep(SUBMIT_GAP);
-            s.pty.send_bytes(b"\r")?;
-        }
-        Ok(json!({}))
+        // 사람의 키가 붙여넣기와 Enter 사이에 섞여 함께 제출되지 않도록 붙든다.
+        s.pty.hold_input(Duration::from_secs(5));
+        let revision = expected.unwrap_or_else(|| s.pty.input_revision());
+        let delivered: Result<Value> = (|| {
+            let revision = s.pty.send_bytes_guarded(bytes.as_bytes(), Some(revision))?;
+            if p.get("submit").and_then(Value::as_bool).unwrap_or(false) {
+                std::thread::sleep(SUBMIT_GAP);
+                s.pty.send_bytes_guarded(b"\r", Some(revision))?;
+            }
+            Ok(json!({}))
+        })();
+        let released = s.pty.release_input();
+        let result = delivered?;
+        released?;
+        Ok(result)
     }
 
     /// 화면 한 장(카사텀 웹 터미널과 같은 grid 프레임)과 그 해시. `since` 가 지금 해시와 같으면
@@ -229,12 +246,16 @@ impl Host {
         let deadline = Instant::now() + Duration::from_secs_f64(wait);
         loop {
             let seen = *s.rev.lock().unwrap();
+            // 스냅샷 중 들어온 키도 비교 후 쓰기에서 거절하려면 화면보다 먼저 읽어야 한다.
+            let input_revision = s.pty.input_revision();
+            let input_busy = !s.pty.input_quiet_for(Duration::from_millis(300));
             let frame = kasa_screen::wire::encode(&s.pty.live_screen());
             let hash = hash_of(&frame.to_string());
             let now = Instant::now();
             if hash != since || now >= deadline || !self.sessions.lock().unwrap().contains_key(&s.id) {
                 let alive = self.sessions.lock().unwrap().contains_key(&s.id);
-                return Ok(json!({"hash": hash, "frame": frame, "title": s.pty.osc_title(), "alive": alive}));
+                return Ok(json!({"hash": hash, "frame": frame, "title": s.pty.osc_title(), "alive": alive,
+                    "input_revision": input_revision, "input_busy": input_busy}));
             }
             let guard = s.rev.lock().unwrap();
             if *guard == seen {

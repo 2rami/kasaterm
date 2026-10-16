@@ -157,3 +157,43 @@ fn 살아_있는_호스트_자리는_못_뺏는다() {
     let mut c = Client::new(&path);
     assert_eq!(c.raw("nope", json!({}))["ok"], false);
 }
+
+#[test]
+fn 화면_뒤_입력이_바뀌면_자동_붙여넣기를_거절한다() {
+    let mut c = Client::new(&start());
+    let id = c.spawn_sh(json!({}));
+    let frame = c.call("screen", json!({"id": id}));
+    c.call("write", json!({"id": id, "data": "draft"}));
+    std::thread::sleep(Duration::from_millis(350));
+    let reply = c.raw("paste", json!({"id": id, "text": "automatic", "submit": true,
+        "expected_revision": frame["input_revision"]}));
+    assert_eq!(reply["ok"], false);
+    let text = c.call("text", json!({"id": id}));
+    assert!(!text["text"].as_str().unwrap().contains("automatic"));
+    c.call("close", json!({"id": id}));
+}
+
+#[test]
+fn 붙여넣기_중_사람_초안은_자동으로_제출되지_않는다() {
+    let path = start();
+    let mut c = Client::new(&path);
+    let id = c.spawn_sh(json!({"cmd": "stty -echo; PS1=''; echo READY"}));
+    c.wait_text(&id, "\nREADY");
+    let (other_path, other_id) = (path.clone(), id.clone());
+    let sender = std::thread::spawn(move || {
+        Client::new(&other_path).call("paste", json!({"id": other_id, "text": "echo AUTO", "submit": true}));
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let f = c.call("screen", json!({"id": id}));
+        if f["input_revision"].as_u64().unwrap() >= 2 { break; }
+        assert!(Instant::now() < deadline);
+    }
+    c.call("write", json!({"id": id, "data": "echo HUMAN"}));
+    sender.join().unwrap();
+    let text = c.wait_text(&id, "\nAUTO");
+    assert!(!text.contains("\nHUMAN"));
+    c.call("key", json!({"id": id, "name": "enter"}));
+    c.wait_text(&id, "\nHUMAN");
+    c.call("close", json!({"id": id}));
+}
