@@ -37,5 +37,6 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 - **관측과 작업 수명 구분** — 기기 연결 끊김·오래된 관측을 작업 종료로 읽지 않는다. 상세 활동은 지정한 대상에서 제한된 분량만 읽는다.
 - **추적과 전달 구분** — 변경 기록은 제한된 메타데이터만 보관한다. 메시지는 최신 수신자 신원과 입력 상태를 검증하며, 같은 ID의 재시도는 기존 접수 기록을 반환한다.
 - **개인 설정 무오염** — hook 은 `--settings` 세션 스코프로만 주입. `~/.claude` 에 아무것도 설치하지 않는다.
+- **칸 훅은 칸의 하네스 것** — 칸의 claude 가 Bash 로 돌린 `claude -p` 도 칸 env(`KASATERM_PANE_ID`)를 물려받는다. 래퍼는 `-p`·`--print` 에 이 hook 들을 안 붙이고, 앱은 칸 셸까지 하네스가 둘 이상 낀 프로세스의 `bind-transcript` 를 거절한다. 받아 주면 칸의 대화가 그 자식 세션으로 바뀌어 tell 이 「bound conversation differs」로 막히고 재시작 복원이 자식 세션을 연다.
 - **`conflict-guard` 는 transcript 직접판정** — `~/.claude/projects/<cwd>/*.jsonl` 직접 읽어 PreToolUse 동기 차단. 백엔드 무관하게 살아있는 안전망.
 - **잡기는 git 과 보드로 푼다** — 편집을 허락할 때 `claims.json` 에 세션을 적고, 그 파일이 git 에서 더럽고 · 잡은 뒤 커밋이 없고 · 잡은 세션이 `board --local` 에 살아 있을 때만 막는다. 셋 중 하나라도 못 가르면 연다.

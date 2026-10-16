@@ -765,7 +765,7 @@ impl PtyBackend {
                                 .insert(id, (agent_pid, std::time::Instant::now()));
                             continue;
                         }
-                        if self.bind_transcript(&id, &path.to_string_lossy()).is_ok() {
+                        if self.bind_pane_transcript(&id, &path.to_string_lossy()).is_ok() {
                             self.codex_bound_pids
                                 .lock()
                                 .unwrap()
@@ -777,7 +777,7 @@ impl PtyBackend {
                     if let Some(path) = discover_transcript(&id, shell_pid) {
                         // insert만 하면 board는 보여도 GUI의 pane_claude_sid는 비어
                         // session.json에 UUID가 안 실린다. 두 상태는 이 관문에서 함께 묶는다.
-                        let _ = self.bind_transcript(&id, &path.to_string_lossy());
+                        let _ = self.bind_pane_transcript(&id, &path.to_string_lossy());
                     }
                 }
                 _ => {}
@@ -831,7 +831,7 @@ impl PtyBackend {
         };
         let cur = self.bound.lock().unwrap().get(pane).cloned();
         if cur.as_ref() != Some(&path) {
-            let _ = self.bind_transcript(pane, &path.to_string_lossy());
+            let _ = self.bind_pane_transcript(pane, &path.to_string_lossy());
         }
     }
 
@@ -912,7 +912,7 @@ impl PtyBackend {
             };
             let cur = self.bound.lock().unwrap().get(&id).cloned();
             if cur.as_ref() != Some(&path) {
-                let _ = self.bind_transcript(&id, &path.to_string_lossy());
+                let _ = self.bind_pane_transcript(&id, &path.to_string_lossy());
             } else {
                 // 바인딩이 그대로여도 view_cwd 는 재공표 — 뷰 판정이 3s 폴이라
                 // 첫 판정 전에 statusline report 가 오버라이드를 pane cwd 로 덮는
@@ -946,6 +946,42 @@ impl PtyBackend {
             crate::SettingsActionArgs { id: None, label: None },
             tx,
         ));
+    }
+
+    /// 칸 묶음 본체. 앱이 스스로 찾은 기록(디스크 발견·뷰 칸)은 그때 소켓에 붙은 요청자와
+    /// 무관하니 `bind_transcript` 의 관문을 거치지 않고 여기로 온다.
+    fn bind_pane_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
+        // Record the pane's transcript path; `collab_board`/`transcript_tail`
+        // read it on demand. Re-binding (claude --resume swaps the jsonl)
+        // replaces the entry rather than stacking.
+        {
+            let mut bound = self.bound.lock().unwrap();
+            if bound.get(surface_id).is_none_or(|old|old != std::path::Path::new(path)) {
+                let mut epochs = self.tell_binding_epochs.lock().unwrap();
+                *epochs.entry(surface_id.into()).or_default() += 1;
+            }
+            bound.insert(surface_id.to_string(),PathBuf::from(path));
+        }
+        // 같은 pane id가 다른 rollout을 가리키기 시작하면, 앞 세션의 model/한도는
+        // 공개하면 안 된다. 새 로그에서 첫 유효 turn을 읽을 때 다시 채운다.
+        self.codex_rollouts.lock().unwrap().remove(surface_id);
+        self.publish_transcript_cwd(surface_id, std::path::Path::new(path));
+        // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
+        // 매핑을 조회/저장한다(사용자 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
+        // 소유라 proxy 로 넘긴다(SocketBytes 관례).
+        //
+        // codex 는 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다 — 그대로 쓰면
+        // `rollout-2026-…-019f…` 가 세션 id 로 박혀 캐릭터 조회도 재시작 이어가기도 전부
+        // 빗나간다. 파일명이 rollout 꼴이면 거기서 uuid 를 떼어 쓴다.
+        let p = std::path::Path::new(path);
+        let sid = codex_sid_from_rollout(p)
+            .or_else(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
+        if let Some(sid) = sid {
+            let _ = self
+                .proxy
+                .send_event(UserEvent::SocketSessionBound(surface_id.to_string(), sid));
+        }
+        Ok(())
     }
 }
 
@@ -2785,37 +2821,19 @@ impl Backend for PtyBackend {
     }
 
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
-        // Record the pane's transcript path; `collab_board`/`transcript_tail`
-        // read it on demand. Re-binding (claude --resume swaps the jsonl)
-        // replaces the entry rather than stacking.
-        {
-            let mut bound = self.bound.lock().unwrap();
-            if bound.get(surface_id).is_none_or(|old|old != std::path::Path::new(path)) {
-                let mut epochs = self.tell_binding_epochs.lock().unwrap();
-                *epochs.entry(surface_id.into()).or_default() += 1;
-            }
-            bound.insert(surface_id.to_string(),PathBuf::from(path));
+        // 칸의 claude 가 Bash 로 돌린 `claude -p` 도 칸 env 를 물려받아 SessionStart 에서 여기로
+        // 온다. 받아 주면 칸의 대화가 그 자식 세션으로 바뀌어, tell 은 살아 있는 프로세스와
+        // 다르다며 거절하고 재시작 복원은 자식 세션을 연다(2026-10-16 kasaframe 판정 칸).
+        if let (Some(peer), Some(shell)) = (
+            kasa_socket::server::peer_pid(),
+            kasa_pty::lookup_session(surface_id).and_then(|s| s.shell_pid()),
+        ) {
+            anyhow::ensure!(
+                !kasa_pty::agent_nested_in_pane(&kasa_pty::fresh_process_table(), shell, peer),
+                "a harness started inside the pane cannot rebind its conversation"
+            );
         }
-        // 같은 pane id가 다른 rollout을 가리키기 시작하면, 앞 세션의 model/한도는
-        // 공개하면 안 된다. 새 로그에서 첫 유효 turn을 읽을 때 다시 채운다.
-        self.codex_rollouts.lock().unwrap().remove(surface_id);
-        self.publish_transcript_cwd(surface_id, std::path::Path::new(path));
-        // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
-        // 매핑을 조회/저장한다(사용자 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
-        // 소유라 proxy 로 넘긴다(SocketBytes 관례).
-        //
-        // codex 는 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다 — 그대로 쓰면
-        // `rollout-2026-…-019f…` 가 세션 id 로 박혀 캐릭터 조회도 재시작 이어가기도 전부
-        // 빗나간다. 파일명이 rollout 꼴이면 거기서 uuid 를 떼어 쓴다.
-        let p = std::path::Path::new(path);
-        let sid = codex_sid_from_rollout(p)
-            .or_else(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
-        if let Some(sid) = sid {
-            let _ = self
-                .proxy
-                .send_event(UserEvent::SocketSessionBound(surface_id.to_string(), sid));
-        }
-        Ok(())
+        self.bind_pane_transcript(surface_id, path)
     }
 
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {

@@ -666,12 +666,13 @@ SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 USER_SETTINGS=0\n\
 for a in \"$@\"; do [ \"$a\" = \"--settings\" ] && USER_SETTINGS=1 && break; done\n\
 PERSONA_OK=1\n\
+HEADLESS=\"\"\n\
 BGSUF=\"\"\n\
 # attach/agents 는 서브커맨드, -p/--print 는 헤드리스 일회성 — persona·session-id 얹으면 깨진다(사용자: 이어받기\n\
 # 안 붙던 원인 · Bash 도구의 claude -p 가 pane session-id 강탈→board 가 그 pane 을 학생으로 둔갑·⑂bg 오발화).\n\
 # --bg 는 session-id 를 자기가 관리(명시 지정은 무시+경고 실측)하지만 persona 는 새 세션이라 붙이고,\n\
 # --agent-* 트리플은 데몬 스폰까지 전달된다(07-16 실측) — 이름 접미사만 랜덤 BGSUF(비-hex, bridge 매칭 회피).\n\
-case \" $* \" in *\" attach \"*|*\" agents \"*|*\" -p \"*|*\" --print \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\"; BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;; *\" --session-id \"*|*\" --resume \"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
+case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" -p \"*|*\" --print \"*) SID=\"\"; PERSONA_OK=\"\"; HEADLESS=1 ;; *\" --bg \"*|*\" --background \"*) SID=\"\"; BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;; *\" --session-id \"*|*\" --resume \"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
 # stop/logs 도 세션 지정 서브커맨드 — session-id/persona/트리플을 얹으면 claude 가 서브커맨드를\n\
 # 프롬프트 positional 로 소비해 유령 세션 부팅/\"already in use\"(실측 07-16). $1 정확 일치는\n\
 # zshrc claude() 알리아스(--dangerously-skip-permissions prepend)에 깨진다(실측) — 첫 non-flag\n\
@@ -712,7 +713,9 @@ fi\n\
 # 폴더 신뢰 화면(「Is this a project you trust?」) 선해결 — 무인으로 띄운 학생이 거기서\n\
 # 멈춘다. codex shim 의 config.toml 신뢰와 같은 자리다. 서브커맨드·-p 엔 그 화면이 없다.\n\
 [ -n \"$PERSONA_OK\" ] && kasaterm-cli claude-trust \"$PWD\" >/dev/null 2>&1\n\
-if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
+# -p 일회성 실행에는 칸 훅을 안 붙인다. 칸의 claude 가 Bash 로 돌린 판정도 칸 env 를 물려받아,\n\
+# 훅이 붙으면 칸의 대화 묶음·턴·조향 대기를 그 자식이 가져간다(2026-10-16 kasaframe 판정 칸).\n\
+if [ \"$USER_SETTINGS\" = 1 ] || [ -n \"$HEADLESS\" ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",

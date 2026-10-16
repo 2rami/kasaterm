@@ -23,7 +23,7 @@ pub use kitty::{cell_pixels, set_cell_pixels};
 pub use layout::{bento, bento_shape, fleet, fleet_capacity, Bento, Divider, PtyLayout, SplitDir};
 pub use procinfo::{process_cmdline, process_env_var, process_env_vars, runs_on_tty};
 pub use state::{
-    agent_for_shell, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session,
+    agent_for_shell, agent_nested_in_pane, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session,
     release_session, ExtEvent, ExternalIo,
     process_table, process_table_shared, fresh_process_table,
     register_session, set_host_colors, AgentKind, AgentSpec, CommandBlock, PromptAnchor, PtyOptions,

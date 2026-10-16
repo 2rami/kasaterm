@@ -198,6 +198,33 @@ pub fn agent_pid_for_shell(
     agent_pid_by_argv(table, eff)
 }
 
+/// `pid` 에서 칸 셸까지 올라가는 길에 하네스가 둘 이상 있는가 — 칸의 claude 가 Bash 로
+/// 돌린 `claude -p` 판정처럼, 칸 하네스가 띄운 하네스다. 그 자식은 칸 env 를 물려받아
+/// 칸의 훅을 그대로 부르므로, 칸 몫의 기록을 덮기 전에 이것으로 가린다. 셸까지 못
+/// 올라가면(데몬 포크·다른 칸) 가리지 않는다.
+pub fn agent_nested_in_pane(table: &[(u32, u32, String)], shell_pid: u32, pid: u32) -> bool {
+    let rows: std::collections::HashMap<u32, (u32, &str)> =
+        table.iter().map(|(p, pp, name)| (*p, (*pp, name.as_str()))).collect();
+    let mut agents = 0;
+    let mut at = pid;
+    for _ in 0..64 {
+        if at == shell_pid {
+            return agents >= 2;
+        }
+        let Some(&(parent, name)) = rows.get(&at) else {
+            return false;
+        };
+        if AgentKind::from_comm(name).is_some() {
+            agents += 1;
+        }
+        if parent <= 1 {
+            return false;
+        }
+        at = parent;
+    }
+    false
+}
+
 /// 이름으로 못 잡은 pane 을 **명령줄로** 한 번 더 본다 — comm 이 `node`·`Python`
 /// 인 하네스들(gemini·cursor·hermes·amp)이 여기서만 잡힌다.
 ///
@@ -651,6 +678,32 @@ mod agent_kind_tests {
             (402, 401, "/opt/homebrew/bin/codex".into()),
         ];
         assert_eq!(agent_in_table(&t, 400), Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn 칸_하네스가_띄운_하네스만_중첩이다() {
+        let t = vec![
+            (10, 1, "zsh".into()),
+            (11, 10, "/Users/kasa/.local/bin/claude".into()),
+            (20, 11, "bash".into()),
+            (21, 20, "kasaterm-cli".into()),
+            (30, 11, "zsh".into()),
+            (31, 30, "claude".into()),
+            (32, 31, "bash".into()),
+            (33, 32, "kasaterm-cli".into()),
+            (40, 1, "claude".into()),
+            (41, 40, "kasaterm-cli".into()),
+            (50, 10, "node".into()),
+            (51, 50, "codex".into()),
+            (52, 51, "zsh".into()),
+            (53, 52, "claude".into()),
+            (54, 53, "kasaterm-cli".into()),
+        ];
+        assert!(!agent_nested_in_pane(&t, 10, 21), "칸 claude 자신의 훅");
+        assert!(agent_nested_in_pane(&t, 10, 33), "칸 claude 의 Bash 가 돌린 claude -p");
+        assert!(!agent_nested_in_pane(&t, 10, 41), "칸 셸 밖(데몬 포크)");
+        assert!(agent_nested_in_pane(&t, 10, 54), "codex 칸이 돌린 claude");
+        assert!(!agent_nested_in_pane(&t, 10, 999), "표에 없는 pid");
     }
 }
 
