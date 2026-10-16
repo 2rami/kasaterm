@@ -408,6 +408,117 @@ mod tests {
     }
 
     #[test]
+    fn file_link_excludes_korean_sentence_suffix_from_target_and_hit_area() {
+        let prefix = "파일은 ";
+        let path = "~/Desktop/asr-compare/index.html";
+        let cells = row(&format!("{prefix}{path}이야. 바로 열어봐"));
+        let start = row(prefix).len() as u16;
+        let end = start + path.len() as u16;
+        assert_eq!(
+            detect_links_row(&cells),
+            vec![(start, end, path.to_owned())]
+        );
+        let rows = [cells];
+        assert_eq!(
+            link_in("%test", |r| rows.get(r), end - 1, 0).unwrap().2,
+            path
+        );
+        for col in end..end + 4 {
+            assert!(link_in("%test", |r| rows.get(r), col, 0).is_none());
+        }
+        assert_eq!(
+            resolve_path(path, None, Some(std::path::Path::new("/home/user"))).unwrap(),
+            std::path::Path::new("/home/user/Desktop/asr-compare/index.html")
+        );
+    }
+
+    #[test]
+    fn file_suffixes_follow_extensions_and_source_locations() {
+        for (text, expected) in [
+            ("/tmp/결과.html입니다.", "/tmp/결과.html"),
+            ("./보고서.pdf를", "./보고서.pdf"),
+            ("../이미지/최종.PNG이에요", "../이미지/최종.PNG"),
+            ("사진.png는", "사진.png"),
+            ("보고서.docx라고", "보고서.docx"),
+            ("src/main.rs:42에서", "src/main.rs:42"),
+            ("src/main.rs:42:7이고요.", "src/main.rs:42:7"),
+            ("file:///tmp/결과.html이야.", "file:///tmp/결과.html"),
+            ("file:///tmp/a%20b.png를", "file:///tmp/a%20b.png"),
+            (r"C:\Users\Name\결과.html입니다", r"C:\Users\Name\결과.html"),
+        ] {
+            assert_eq!(
+                detect_links_row(&row(text)),
+                vec![(0, row(expected).len() as u16, expected.to_owned())],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_names_and_ambiguous_unicode_paths_are_not_shortened() {
+        for (text, expected) in [
+            ("`~/Desktop/index.html이야`", "~/Desktop/index.html이야"),
+            ("\"/tmp/시안 A.png는\"", "/tmp/시안 A.png는"),
+            ("'/tmp/시안 A.png는'", "/tmp/시안 A.png는"),
+            ("[결과](</tmp/시안 A.png는>)", "/tmp/시안 A.png는"),
+            ("“/tmp/시안 A.png는”", "/tmp/시안 A.png는"),
+            ("‘/tmp/시안 A.png는’", "/tmp/시안 A.png는"),
+            ("`file:///tmp/결과.html이야`", "file:///tmp/결과.html이야"),
+            ("/tmp/이야.png", "/tmp/이야.png"),
+            ("/tmp/자료.html이야.png", "/tmp/자료.html이야.png"),
+            ("/tmp/자료.html이야/보고서", "/tmp/자료.html이야/보고서"),
+            ("/tmp/결과.html한글", "/tmp/결과.html한글"),
+            ("/tmp/파일.자료", "/tmp/파일.자료"),
+            ("https://example.com/이야", "https://example.com/이야"),
+            ("https://example.com/결과.html이야", "https://example.com/결과.html이야"),
+            ("https://example.com/?q=결과.html이야", "https://example.com/?q=결과.html이야"),
+            ("https://example.com/#결과.html이야", "https://example.com/#결과.html이야"),
+            ("file:///tmp/a?q=결과.html이야", "file:///tmp/a?q=결과.html이야"),
+            ("file:///tmp/a#결과.html이야", "file:///tmp/a#결과.html이야"),
+        ] {
+            assert_eq!(
+                detect_links_row(&row(text))
+                    .iter()
+                    .map(|(_, _, target)| target.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_korean_file_suffix_is_outside_every_clickable_span() {
+        let mut first = row("파일 ~/Desktop/한글/");
+        first.last_mut().unwrap().wrapped = true;
+        let mut second = row("결과.html이");
+        second.last_mut().unwrap().wrapped = true;
+        let third = row("야. 다음 설명");
+        let path = "~/Desktop/한글/결과.html";
+        let expected = vec![
+            (0, row("파일 ").len() as u16, first.len() as u16),
+            (1, 0, row("결과.html").len() as u16),
+        ];
+        assert_eq!(
+            detect_links_rows(&[&first, &second, &third]),
+            vec![(expected.clone(), path.to_owned())]
+        );
+        let rows = [first, second, third];
+        for (r, cells) in rows.iter().enumerate() {
+            for col in 0..cells.len() as u16 {
+                let expected_hit = expected.iter().any(|(row, start, end)| {
+                    *row == r && (*start..*end).contains(&col)
+                });
+                let hit = link_in("%test", |r| rows.get(r), col, r as u16);
+                assert_eq!(hit.is_some(), expected_hit, "row={r}, col={col}");
+                if let Some((_, _, target)) = hit {
+                    assert_eq!(target, path);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn wide_glyph_spacers_do_not_break_a_path_and_remain_clickable() {
         for spacer in [' ', '\0'] {
             let mut cells = Vec::new();

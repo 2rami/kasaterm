@@ -135,6 +135,19 @@ impl App {
             self.modifiers = ModifiersState::empty();
             press(self, ElementState::Released);
         }
+        if let Ok(raw) = std::env::var("KASATERM_LINK_MISS_POINTS") {
+            if let Ok(points) = serde_json::from_str::<Vec<(f32, f32)>>(&raw) {
+                for (x, y) in points {
+                    move_to(self, x, y);
+                    checks.push(("suffix is outside link", self.link_hit(x, y).is_none()));
+                    self.modifiers = modifier;
+                    press(self, ElementState::Pressed);
+                    checks.push(("suffix press does not arm link", self.link_armed.is_none()));
+                    press(self, ElementState::Released);
+                    checks.push(("suffix release keeps link unarmed", self.link_armed.is_none()));
+                }
+            }
+        }
         self.modifiers = original;
         let failures = checks.iter().filter(|(_, ok)| !*ok).count();
         if let Some(root) = std::env::var_os("TMPDIR") {

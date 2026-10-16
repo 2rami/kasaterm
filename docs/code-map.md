@@ -105,4 +105,5 @@
 - `mobile/lib/file_link.dart` — 대화·터미널 링크의 원본 기기 경로 해석과 파일 열기. `Server.resultFileBytes`가 인증된 파일을 받고 `ios/Runner/AppDelegate.swift`의 Quick Look 다리가 임시 미리보기를 연다.
 
 - `inline_result/remote.rs` — PC 미러 결과 이미지의 원본 기기 읽기·해시/치수 검증·로컬 캐시와 재시도. 렌더는 읽기를 예약하고 PNG가 준비되면 다시 그린다.
+- `image_preview.rs` — 실제 인라인 그림 영역의 클릭·드래그 구분과 창별 미리보기. 워커 디코드·복사·저장, 클리핑된 히트 영역, 앵커 줌·팬·키보드 포커스를 공유하며 본창과 별도 터미널 창이 같은 상태를 사용한다.
 - `native_settings/login_probe.rs` — 격리 화면에서 가짜 로그인 상태와 테스트용 클립보드 값으로 메뉴·버튼 붙여넣기를 검사한다. 실제 인증 코드나 시스템 클립보드를 읽지 않는다.

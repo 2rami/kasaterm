@@ -2245,6 +2245,13 @@ impl App {
     }
 
     pub(crate) fn copy_selection(&self) {
+        if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() {
+            let text = self.selection.and_then(|selection| self.active_view_rows().map(|rows| extract_selection(&rows, selection))).unwrap_or_default();
+            if let Some(path) = std::env::var_os("KASATERM_TEST_IMAGE_SELECTION_COPY_PATH") {
+                let _ = std::fs::write(path, text);
+            }
+            return;
+        }
         if self.copy_md_render_selection() {
             return;
         }
@@ -2291,6 +2298,11 @@ impl App {
     }
 
     pub(crate) fn paste_from_menu(&mut self) {
+        if self.image_preview.focused() { return; }
+        if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() {
+            self.paste_clipboard();
+            return;
+        }
         if self.native_settings_paste_clipboard() { return; }
         #[cfg(target_os = "macos")]
         let to_webview = crate::macos_open::send_paste_action();
@@ -2304,6 +2316,11 @@ impl App {
     }
 
     pub(crate) fn paste_clipboard(&mut self) {
+        if self.image_preview.focused() { return; }
+        if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() {
+            self.send_bytes(b"image-preview-fixture-paste");
+            return;
+        }
         if self.native_settings_paste_clipboard() { return; }
         if self.side_column_covers_workspace() { return; }
         let surface = self.target_surface();

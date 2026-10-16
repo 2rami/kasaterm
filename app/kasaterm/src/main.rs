@@ -28,6 +28,7 @@ mod gpu;
 mod handler;
 mod homeaccounts;
 mod input;
+mod image_preview;
 // claude 한도 초기화권 — 잔량 읽기와 쓰는 페이지 열기.
 mod limit_reset;
 mod layout;
@@ -5109,6 +5110,7 @@ struct App {
     hover: Option<HoverState>,
     /// 마우스가 `[Image #N]` 글자 위에 멎어 있을 때의 썸네일 툴팁.
     image_tip: Option<ImageTip>,
+    image_preview: image_preview::State,
     /// 커서가 마지막으로 있던 (pane, 열, 행). 툴팁 후보가 바뀌었는지는 그리드를
     /// 봐야 아는데 그건 렌더만 안다 — 셀이 바뀐 프레임에만 다시 그려, 픽셀마다
     /// chrome 을 재구성하는 일을 막는다.
@@ -6188,6 +6190,7 @@ impl App {
             lsp: None,
             hover: None,
             image_tip: None,
+            image_preview: Default::default(),
             image_hover_cell: None,
             lsp_goto: None,
             tmux: None,

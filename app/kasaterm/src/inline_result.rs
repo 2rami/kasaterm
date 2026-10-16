@@ -187,6 +187,7 @@ fn compose_with(
                 clip: (x, clip_y, width, clip_h),
                 fit: InlineFit::Contain,
                 below: false,
+                previewable: true,
             });
             for stripe in &stripes[i..end] {
                 // 코드 블록의 명시 배경이 그림을 덮지 않도록 예약된 빈 영역도 비운다.

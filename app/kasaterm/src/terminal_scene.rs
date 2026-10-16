@@ -1138,6 +1138,7 @@ impl App {
                         clip: (body_left, clip_y0, w, clip_y1 - clip_y0),
                         fit: InlineFit::Hug,
                         below: false,
+                        previewable: true,
                     });
                 }
             }

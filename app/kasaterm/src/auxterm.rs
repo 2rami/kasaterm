@@ -45,6 +45,7 @@ pub(crate) struct AuxTerminal {
     /// 바뀌거나 방이 닫히면 session.rs 의 remap 이 함께 옮긴다.
     pub(crate) home_window: usize,
     gpu: gpu::GpuRenderer,
+    inline_images: kasa_gridview::images::InlineImages,
     dirty: bool,
     cursor_px: (f32, f32),
     focused: bool,
@@ -393,6 +394,7 @@ impl App {
             pane_id: pane_id.clone(),
             home_window,
             gpu,
+            inline_images: Default::default(),
             dirty: true,
             cursor_px: (0.0, 0.0),
             focused: wants_focus,
@@ -659,6 +661,7 @@ impl App {
         }
         // ── 본문 ──
         let mut animated = false;
+        self.image_preview.collect(t.window.id(), 0, &t.gpu, &[]);
         match composition {
             Some(c) => {
                 // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
@@ -671,7 +674,11 @@ impl App {
                     default_fg: crate::cells::default_fg(),
                     source: None,
                 };
+                t.inline_images.prepare(&mut t.gpu, &c.inline_slots);
+                t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, true);
                 t.gpu.draw_cells(&[slot]);
+                t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, false);
+                self.image_preview.collect(t.window.id(), 0, &t.gpu, &c.inline_slots);
                 crate::screenread::paint_status_model_icons(&mut t.gpu, &c.status_model_icons);
                 // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키.
                 let overlays = crate::screenread::StudentOverlays {
@@ -734,6 +741,7 @@ impl App {
         }
         // 창 외곽선 — 셀 위에 얹어야 가장자리 글자에 안 먹힌다.
         draw_aux_border(t, w, h, accent, focused);
+        self.image_preview.paint(t.window.id(), &mut t.gpu, (w, h), t.cursor_px);
         let _ = t.gpu.render(&[], scale, 0.0, true);
         t.dirty = false;
         // 스윕바·애니 셀은 다음 프레임을 스스로 불러야 한다 — PTY 출력이 없으면
@@ -765,6 +773,27 @@ impl App {
         event: WindowEvent,
         _event_loop: &ActiveEventLoop,
     ) {
+        if let Some(t) = self.aux.terminals.get_mut(idx) {
+            if let WindowEvent::CursorMoved { position, .. } = &event {
+                t.cursor_px = (position.x as f32 / t.gpu.scale(), position.y as f32 / t.gpu.scale());
+            }
+            match self.image_preview.event(t.window.id(), t.cursor_px, self.modifiers, &event, &self.proxy, true) {
+                crate::image_preview::Response::Consumed => {
+                    t.window.set_cursor(self.image_preview.cursor(t.window.id(), t.cursor_px));
+                    t.preedit.clear();
+                    t.redraw(); return;
+                }
+                crate::image_preview::Response::Replay(press, origin) => {
+                    let cursor = t.cursor_px;
+                    t.cursor_px = origin;
+                    self.image_preview.replay = true;
+                    self.aux_terminal_event(idx, press, _event_loop);
+                    self.image_preview.replay = false;
+                    if let Some(t) = self.aux.terminals.get_mut(idx) { t.cursor_px = cursor; }
+                }
+                crate::image_preview::Response::Pass => {}
+            }
+        }
         match event {
             WindowEvent::CloseRequested => self.dock_pane_terminal(idx),
             WindowEvent::Resized(size) => {
@@ -1467,5 +1496,22 @@ impl App {
             }
             alive
         });
+    }
+}
+
+impl App {
+    pub(crate) fn image_preview_probe_size(&self, owner: WindowId) -> (f32, f32) {
+        if let Some(window) = self.window.as_ref().filter(|w| w.id() == owner) {
+            let size = window.inner_size();
+            return (size.width as f32 / self.effective_scale(), size.height as f32 / self.effective_scale());
+        }
+        self.aux.terminals.iter().find(|t| t.window.id() == owner).map_or((0.0, 0.0), |t| t.logical_size())
+    }
+    pub(crate) fn aux_preview_probe_capture(&mut self, owner: WindowId, path: String) {
+        if let Some(index) = self.aux.terminals.iter().position(|t| t.window.id() == owner) {
+            self.aux.terminals[index].gpu.capture_next = Some(path);
+            self.aux.terminals[index].dirty = true;
+            self.aux_terminal_render(index, true);
+        }
     }
 }

@@ -1,7 +1,11 @@
 use super::*;
 
 fn boundary(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '(' | '[' | '<' | '"' | '\'' | '`' | '=' | ':' | '：')
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '(' | '[' | '<' | '"' | '\'' | '`' | '“' | '‘' | '=' | ':' | '：'
+        )
 }
 
 fn bare_host(chars: &[char]) -> bool {
@@ -63,41 +67,45 @@ fn file_prefix(chars: &[char]) -> bool {
             && matches!(chars.get(2), Some('/' | '\\')))
 }
 
+fn known_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "md" | "txt"
+            | "pdf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "svg"
+            | "mp4"
+            | "mov"
+            | "mp3"
+            | "wav"
+            | "rs"
+            | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "json"
+            | "yaml"
+            | "toml"
+            | "html"
+            | "css"
+            | "zip"
+            | "csv"
+            | "xlsx"
+            | "docx"
+    )
+}
+
 fn relative_file(value: &str) -> bool {
     let path = strip_location(value);
     !path.contains("://")
         && (path.contains('/')
-            || path.rsplit_once('.').is_some_and(|(_, ext)| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "md" | "txt"
-                        | "pdf"
-                        | "png"
-                        | "jpg"
-                        | "jpeg"
-                        | "webp"
-                        | "gif"
-                        | "svg"
-                        | "mp4"
-                        | "mov"
-                        | "mp3"
-                        | "wav"
-                        | "rs"
-                        | "py"
-                        | "js"
-                        | "ts"
-                        | "tsx"
-                        | "json"
-                        | "yaml"
-                        | "toml"
-                        | "html"
-                        | "css"
-                        | "zip"
-                        | "csv"
-                        | "xlsx"
-                        | "docx"
-                )
-            }))
+            || path
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| known_extension(ext)))
         && path.rsplit('/').next().is_some_and(|name| {
             name.rsplit_once('.').is_some_and(|(stem, ext)| {
                 !stem.is_empty() && !ext.is_empty() && ext.chars().all(char::is_alphanumeric)
@@ -119,9 +127,111 @@ pub(super) fn strip_location(value: &str) -> &str {
     &value[..end]
 }
 
+fn korean_file_suffix(value: &str) -> Option<usize> {
+    let end = value
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !('\u{ac00}'..='\u{d7a3}').contains(ch))
+        .map(|(i, ch)| i + ch.len_utf8())?;
+    if !matches!(
+        &value[end..],
+        "은" | "는"
+            | "이"
+            | "가"
+            | "을"
+            | "를"
+            | "의"
+            | "에"
+            | "에서"
+            | "에는"
+            | "에서는"
+            | "에도"
+            | "에만"
+            | "에서만"
+            | "와"
+            | "과"
+            | "로"
+            | "으로"
+            | "로는"
+            | "으로는"
+            | "로도"
+            | "으로도"
+            | "부터"
+            | "까지"
+            | "부터는"
+            | "까지는"
+            | "도"
+            | "만"
+            | "처럼"
+            | "보다"
+            | "랑"
+            | "이랑"
+            | "하고"
+            | "라고"
+            | "이라고"
+            | "라는"
+            | "이라는"
+            | "이며"
+            | "이고"
+            | "이고요"
+            | "이나"
+            | "이든"
+            | "인데"
+            | "인가"
+            | "인지"
+            | "이야"
+            | "야"
+            | "이에요"
+            | "예요"
+            | "입니다"
+            | "입니다만"
+            | "이다"
+            | "이네요"
+            | "이군요"
+            | "이거든요"
+            | "이잖아요"
+            | "이라서"
+            | "이므로"
+            | "이니까"
+            | "이면서"
+            | "이라면"
+            | "이더라"
+            | "이었어요"
+            | "였어요"
+            | "였다"
+            | "이었다"
+            | "이래요"
+            | "이랍니다"
+    ) {
+        return None;
+    }
+    let path = strip_location(&value[..end]);
+    let name = path.rsplit(['/', '\\']).next()?;
+    let (stem, extension) = name.rsplit_once('.')?;
+    // 한글 파일명·URL 경로도 유효하므로 확장자 뒤의 정확한 문장 어미만 분리한다.
+    (!stem.is_empty() && known_extension(extension)).then_some(end)
+}
+
+fn closing_delimiter(open: char) -> Option<char> {
+    match open {
+        '"' | '\'' | '`' => Some(open),
+        '<' => Some('>'),
+        '“' => Some('”'),
+        '‘' => Some('’'),
+        _ => None,
+    }
+}
+
+fn explicitly_delimited(chars: &[char], start: usize, end: usize) -> bool {
+    start
+        .checked_sub(1)
+        .and_then(|i| closing_delimiter(chars[i]))
+        .is_some_and(|close| chars.get(end) == Some(&close))
+}
+
 fn token_end(chars: &[char], start: usize, web: bool) -> usize {
     let enclosing = start.checked_sub(1).map(|i| chars[i]);
-    let spaces = !web && matches!(enclosing, Some('"' | '\'' | '`' | '<' | '('));
+    let spaces = !web && enclosing.is_some_and(|ch| closing_delimiter(ch).is_some() || ch == '(');
     let mut parentheses = 0;
     let mut brackets = 0;
     let mut end = start;
@@ -159,6 +269,9 @@ fn token_end(chars: &[char], start: usize, web: bool) -> usize {
         }
         end += 1;
     }
+    if explicitly_delimited(chars, start, end) {
+        return end;
+    }
     while end > start
         && (chars[end - 1].is_whitespace()
             || matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?'))
@@ -178,12 +291,21 @@ pub(super) fn scan(chars: &[char]) -> Vec<(usize, usize, String)> {
         }
         let web = web_prefix(&chars[i..]);
         let file = file_prefix(&chars[i..]);
-        let end = token_end(chars, i, web);
+        let mut end = token_end(chars, i, web);
         if end <= i {
             i += 1;
             continue;
         }
-        let value: String = chars[i..end].iter().collect();
+        let mut value: String = chars[i..end].iter().collect();
+        if (!web
+            || (value.to_ascii_lowercase().starts_with("file://") && !value.contains(['?', '#'])))
+            && !explicitly_delimited(chars, i, end)
+        {
+            if let Some(byte_end) = korean_file_suffix(&value) {
+                end = i + value[..byte_end].chars().count();
+                value.truncate(byte_end);
+            }
+        }
         let target = if web {
             let lower = value.to_ascii_lowercase();
             let url = if lower.starts_with("www.") || bare_host(&chars[i..end]) {

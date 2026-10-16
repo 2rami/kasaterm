@@ -919,6 +919,21 @@ impl GridRenderer {
             .collect()
     }
 
+    pub fn drawn_image_clipped_rects(&self, key: &str) -> Vec<(f32, f32, f32, f32)> {
+        let s = self.scale.max(f32::EPSILON);
+        self.image_quads.iter().chain(self.icon_quads.iter())
+            .filter(|(k, ..)| k == key)
+            .filter_map(|(_, c, _, clip)| {
+                let [x, y, w, h] = c.cell_px;
+                let [cx, cy, cw, ch] = clip.unwrap_or([0, 0, self.config.width, self.config.height]);
+                let x0 = x.max(cx as f32);
+                let y0 = y.max(cy as f32);
+                let x1 = (x + w).min((cx + cw) as f32);
+                let y1 = (y + h).min((cy + ch) as f32);
+                (x1 > x0 && y1 > y0).then_some((x0 / s, y0 / s, (x1 - x0) / s, (y1 - y0) / s))
+            }).collect()
+    }
+
     /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed
     /// by pane id. No-op if already present. `rgba` must be `w * h * 4` bytes.
     pub fn upload_image(&mut self, id: &str, rgba: &[u8], w: u32, h: u32) {

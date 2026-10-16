@@ -17,6 +17,7 @@ pub struct InlineSlot {
     pub fit: InlineFit,
     /// kitty `z<0`: 칸 글자보다 먼저(기본 배경 위·글자 아래) 그린다.
     pub below: bool,
+    pub previewable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,7 +58,7 @@ pub fn inline_slot(
         }
         None => ((rect.0, clip_y0, rect.2, clip_y1 - clip_y0), InlineFit::Native),
     };
-    InlineSlot { key, path: v.path.clone(), rect, clip, fit, below: v.z < 0 }
+    InlineSlot { key, path: v.path.clone(), rect, clip, fit, below: v.z < 0, previewable: v.cols > 4 || v.rows > 2 }
 }
 
 /// 인라인 이미지(OSC 1337·kitty)를 올리고 그린다 — 파일에서 한 번 디코드해 텍스처로

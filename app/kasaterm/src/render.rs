@@ -765,6 +765,7 @@ impl App {
         };
         // Snapshot for the launch banner before the &mut self.gpu borrow
         // below (which rules out re-borrowing &self inside that block).
+        let preview_window_id = window.id();
         let win_size = window.inner_size();
         let win_px = (win_size.width as f32, win_size.height as f32);
         let version_alpha = self.version_alpha();
@@ -2630,6 +2631,7 @@ impl App {
             }
             paint_inline_images(g, &inline_slots);
             crate::inline_result::verify_frame(g, &inline_slots);
+            self.image_preview.collect(preview_window_id, self.active_window, g, &inline_slots);
             // 학생 도트 — Clawd 배너 자리. idle 4프레임을 캐릭터당 1회 일괄
             // 업로드해 모든 pane이 공유하고, 매 프레임 시간 기반으로 현재
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
@@ -6705,6 +6707,7 @@ impl App {
                 g.weather = None;
             }
             g.weather_frame = weather_frame;
+            self.image_preview.paint(preview_window_id, g, (win_px.0 / scale, win_px.1 / scale), self.cursor_px);
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }

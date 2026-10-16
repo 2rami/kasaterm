@@ -297,6 +297,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if matches!(&event, UserEvent::Redraw) {
+            if self.image_preview.pending_result() { self.chrome_dirty = true; }
             crate::turn_probe::lag_received();
             self.drain_drag_transfers();
             self.aux_request_redraws();
@@ -3209,6 +3210,50 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        if main_window {
+            let allow_image = !self.main_pointer_modal() && !self.settings_room_active()
+                && self.handle_menu.is_none() && self.statusbar.popover.is_none() && !self.account_menu
+                && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
+                && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
+                && self.info.machine_menu.is_none() && !self.shell_menu_open;
+            let image_was_open = self.image_preview.owns(id);
+            match self.image_preview.event(id, self.cursor_px, self.modifiers, &event, &self.proxy, allow_image) {
+                crate::image_preview::Response::Consumed => {
+                    if !image_was_open && self.image_preview.owns(id) {
+                        if let Some((pane, _, _)) = self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1) {
+                            let (surface, switched) = {
+                                let ws = self.ws.lock().unwrap();
+                                (ws.active_tab_pid(&pane), ws.active_pane.as_deref() != Some(pane.as_str()))
+                            };
+                            self.focus_surface(&surface);
+                            if switched {
+                                self.selection = None;
+                                self.drag_anchor = None;
+                                self.mouse_forward_pane = None;
+                            }
+                        }
+                    }
+                    if self.image_preview.owns(id) {
+                        self.discard_modal_ime(&winit::event::Ime::Disabled);
+                    }
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window {
+                        window.set_cursor(self.image_preview.cursor(id, self.cursor_px));
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                crate::image_preview::Response::Replay(press, origin) => {
+                    let cursor = self.cursor_px;
+                    self.cursor_px = origin;
+                    self.image_preview.replay = true;
+                    self.window_event(event_loop, id, press);
+                    self.image_preview.replay = false;
+                    self.cursor_px = cursor;
+                }
+                crate::image_preview::Response::Pass => {}
+            }
+        }
         if main_window && self.design_study_event(&event) { return; }
         if main_window && !self.lite && self.account_menu_event(event_loop, &event) {
             return;
@@ -4232,6 +4277,9 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    let icon = if matches!(icon, CursorIcon::Default) && self.image_preview.hit(id, self.cursor_px) {
+                        CursorIcon::ZoomIn
+                    } else { icon };
                     // 터미널 글자 위 I-beam(설정 `mouse_cursor`). 반드시 이 사슬의 끝이어야
                     // 한다 — 앞쪽 분기에서 세운 I-beam 을 여기 `set_cursor` 가 화살표로
                     // 되덮어, 설정을 켜도 안 먹었다(「커서는 안 돼」).
@@ -7701,6 +7749,14 @@ impl ApplicationHandler<UserEvent> for App {
         // Drain menu clicks from muda's global channel. The "Git 패널" item
         // toggles the in-window git column (open/close).
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            if self.image_preview.focused() {
+                if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                    self.image_preview.copy(&self.proxy);
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                }
+                continue;
+            }
             if self.aux_document_menu_action(ev.id.as_ref(), event_loop) {
                 continue;
             }
@@ -7713,7 +7769,8 @@ impl ApplicationHandler<UserEvent> for App {
             } else if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 // Cmd+C: webview 우선 copy: 위임 → 안 먹으면 터미널 선택영역 복사.
                 #[cfg(target_os = "macos")]
-                let to_webview = crate::macos_open::send_copy_action();
+                let to_webview = !(crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some())
+                    && crate::macos_open::send_copy_action();
                 #[cfg(not(target_os = "macos"))]
                 let to_webview = false;
                 if !to_webview && self.selection.is_some() {
@@ -7908,6 +7965,7 @@ impl ApplicationHandler<UserEvent> for App {
         // trigger came from a keystroke or a JSON-RPC call.
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
+        self.image_preview_probe(event_loop);
         self.run_pending_autosplits();
         self.run_pending_autowindows();
         self.run_pending_autodrag();

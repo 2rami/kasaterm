@@ -86,6 +86,7 @@ pub(crate) fn mark_seen(text: &str) {
 }
 
 pub(crate) fn isolated_probe() -> bool {
+    if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() { return true; }
     cfg!(debug_assertions)
         && (std::env::var("KASATERM_CLIPBOARD_PROBE").as_deref() == Ok("1")
             || (crate::verification_run()
