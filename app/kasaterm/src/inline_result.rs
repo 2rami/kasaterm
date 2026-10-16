@@ -1,3 +1,5 @@
+mod remote;
+
 use crate::GridCell;
 use kasa_gridview::images::{InlineFit, InlineSlot};
 use sha2::{Digest, Sha256};
@@ -92,12 +94,20 @@ fn stripe(row: usize, cells: &[GridCell]) -> Option<Stripe> {
     })
 }
 
+type Dimensions = std::collections::HashMap<PathBuf, Option<(u32, u32)>>;
+
+fn dimensions_cache() -> &'static std::sync::Mutex<Dimensions> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Dimensions>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 fn asset_path(id: &str) -> Option<(PathBuf, u32, u32)> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<(u32, u32)>>>> = OnceLock::new();
-    let path = root()?.join(format!("{id}.png"));
-    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    asset_path_in(&root()?, id)
+}
+
+fn asset_path_in(root: &Path, id: &str) -> Option<(PathBuf, u32, u32)> {
+    let path = root.join(format!("{id}.png"));
+    let mut cache = dimensions_cache().lock().ok()?;
     if cache.len() > 512 {
         cache.clear();
     }
@@ -119,8 +129,18 @@ pub(crate) fn compose(
     origin: (f32, f32),
     cell: (f32, f32),
     cols: usize,
+    source: Option<&str>,
+    proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>,
 ) -> Vec<InlineSlot> {
-    compose_with(rows, origin, cell, cols, asset_path)
+    compose_with(rows, origin, cell, cols, |id| {
+        let asset = asset_path(id);
+        if asset.is_none() {
+            if let Some(base) = source {
+                remote::request(base, id, proxy.clone());
+            }
+        }
+        asset
+    })
 }
 
 fn compose_with(

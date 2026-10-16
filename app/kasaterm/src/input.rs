@@ -2290,7 +2290,21 @@ impl App {
         }
     }
 
-    pub(crate) fn paste_clipboard(&self) {
+    pub(crate) fn paste_from_menu(&mut self) {
+        if self.native_settings_paste_clipboard() { return; }
+        #[cfg(target_os = "macos")]
+        let to_webview = crate::macos_open::send_paste_action();
+        #[cfg(not(target_os = "macos"))]
+        let to_webview = false;
+        if !to_webview {
+            self.input_buf.clear();
+            self.current_suggestion = None;
+            self.paste_clipboard();
+        }
+    }
+
+    pub(crate) fn paste_clipboard(&mut self) {
+        if self.native_settings_paste_clipboard() { return; }
         if self.side_column_covers_workspace() { return; }
         let surface = self.target_surface();
         let mut cb = match arboard::Clipboard::new() {

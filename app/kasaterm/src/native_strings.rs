@@ -149,6 +149,7 @@ fn english(value: &str) -> Option<&'static str> {
         "팔레트 이름…" => "Palette name…",
         "계정 표시 이름…" => "Account label…",
         "브라우저의 인증 코드…" => "Authorization code from the browser…",
+        "브라우저에 코드가 나오면 아래에 붙여넣고 확인하세요." => "If the browser shows a code, paste it below and confirm.",
         "테마 이름…" => "Theme name…",
         "연결 이름을 입력해 주세요" => "Enter a connection name",
         "연결 이름은 줄바꿈 없이 64자까지 입력해 주세요" => "Use a connection name of up to 64 characters without line breaks",

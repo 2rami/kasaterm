@@ -1723,6 +1723,10 @@ pub fn remote_post_json(base: &str, path: &str, body: &serde_json::Value) -> Res
 
 /// 그 기계의 파일 하나를 통째로 받는다(4MB 상한은 저쪽이 건다).
 pub fn remote_get_bytes(base: &str, path_and_query: &str) -> Result<Vec<u8>> {
+    remote_get_bytes_bounded(base, path_and_query, 32 * 1024 * 1024)
+}
+
+pub fn remote_get_bytes_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<Vec<u8>> {
     let token = connection_auth_token(base);
     let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1739,12 +1743,18 @@ pub fn remote_get_bytes(base: &str, path_and_query: &str) -> Result<Vec<u8>> {
         if let Some(t) = token.as_deref() {
             req = req.header("x-kasa-token", t);
         }
-        let r = req.send().await.context("원격 파일 요청")?;
+        let mut r = req.send().await.context("원격 파일 요청")?;
         let status = r.status();
         if !status.is_success() {
             anyhow::bail!("HTTP {status}: {}", r.text().await.unwrap_or_default());
         }
-        Ok(r.bytes().await.context("원격 파일 본문")?.to_vec())
+        anyhow::ensure!(r.content_length().is_none_or(|n| n <= max_bytes as u64), "원격 파일 크기 초과");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = r.chunk().await.context("원격 파일 본문")? {
+            anyhow::ensure!(bytes.len().saturating_add(chunk.len()) <= max_bytes, "원격 파일 크기 초과");
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     })
 }
 

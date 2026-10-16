@@ -4,6 +4,7 @@
 //! 캐시와 `App`의 메모리 값만 스냅샷으로 받아, 렌더 중 I/O와 재차용을 함께 막는다.
 
 use super::*;
+mod login_probe;
 
 #[path = "native_device_account.rs"]
 pub(crate) mod device_account;
@@ -619,6 +620,7 @@ pub(crate) enum Target {
     DropdownDismiss,
     Setting(SettingsAction),
     Focus(SettingsInput),
+    Paste(SettingsInput),
     AccountUsage(String),
     Close,
     Onboarding(crate::native_onboarding::Action),
@@ -1257,6 +1259,10 @@ impl App {
                     self.settings_scene.prepare_field_focus(field);
                 }
             }
+            Some(Target::Paste(field)) => {
+                self.native_settings_focus(field);
+                self.native_settings_paste_clipboard();
+            }
             Some(Target::Focus(field)) => {
                 self.native_settings_focus(field);
                 self.native_settings_place_caret(field, (x, y));
@@ -1855,6 +1861,25 @@ impl App {
         }
     }
 
+    pub(crate) fn native_settings_paste_clipboard(&mut self) -> bool {
+        if !self.settings_room_active() { return false; }
+        let Some(field) = self.settings_input.filter(|f| self.settings_scene.field_is_current(*f)) else { return true };
+        let pasted = if crate::verification_run() && std::env::var_os("KASATERM_LOGIN_PASTE_PROBE").is_some() {
+            Ok(login_probe::CODE.to_string())
+        } else {
+            arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+        };
+        match pasted {
+            Ok(text) => {
+                self.native_settings_insert_into(field, &pasted_field_text(field, &text));
+                self.chrome_dirty = true;
+                if let Some(window) = &self.window { window.request_redraw(); }
+            }
+            Err(_) => self.set_toast("클립보드에 붙여넣을 글이 없어요".to_string()),
+        }
+        true
+    }
+
     pub(crate) fn native_settings_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
@@ -1967,15 +1992,7 @@ impl App {
             return true;
         }
         if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV)) {
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                if let Ok(mut text) = clipboard.get_text() {
-                    if !is_multiline(field) {
-                        text = text.replace(['\n', '\r'], " ");
-                    }
-                    self.native_settings_insert_into(field, &text);
-                }
-            }
-            return true;
+            return self.native_settings_paste_clipboard();
         }
         if host {
             return true;
@@ -2492,6 +2509,16 @@ fn move_multiline_caret(layout: &MultilineLayout, caret: usize, down: bool) -> u
 
 fn is_jamo(ch: char) -> bool {
     (0x3130..=0x318f).contains(&(ch as u32))
+}
+
+fn pasted_field_text(field: SettingsInput, text: &str) -> String {
+    if field == SettingsInput::LoginCode {
+        text.trim().replace(['\n', '\r'], "")
+    } else if is_multiline(field) {
+        text.to_string()
+    } else {
+        text.replace(['\n', '\r'], " ")
+    }
 }
 
 fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mut usize)> {
@@ -6152,52 +6179,27 @@ fn account_group(
     }
 
     if needs_code {
-        // 브라우저가 승인해도 CLI 로 돌아오는 길이 없다 — 화면에 뜬 코드를 여기
-        // 붙여넣어야 로그인이 끝난다. 이 칸이 없던 동안 로그인은 전부 실패했다.
         *y += 4.0;
-        draw_text(
-            g,
-            x,
-            *y,
-            "브라우저에서 「승인」을 누르면 끝나요 — 코드가 보이면 복사만 하셔도 됩니다",
-            11.0,
-            theme::attention(),
-            false,
-        );
-        *y += 20.0;
-        text_field(
-            g,
-            s,
-            hits,
-            caret,
-            x,
-            *y,
-            (w - 178.0).max(140.0),
-            "",
-            &s.login_code,
-            SettingsInput::LoginCode,
-            s.settings_caret,
-            false,
-        );
-        button(
-            g,
-            s,
-            hits,
-            (x + w - 172.0, *y, 76.0, 31.0),
-            "확인",
-            Target::Setting(SettingsAction::SubmitLoginCode),
-            true,
-        );
-        button(
-            g,
-            s,
-            hits,
-            (x + w - 92.0, *y, 92.0, 31.0),
-            "로그인 취소",
-            Target::Setting(SettingsAction::CancelLogin),
-            false,
-        );
-        *y += 42.0;
+        for line in wrap_words(g, "브라우저에 코드가 나오면 아래에 붙여넣고 확인하세요.", w, 11.0) {
+            draw_text(g, x, *y, &line, 11.0, theme::attention(), false);
+            *y += 18.0;
+        }
+        *y += 6.0;
+        text_field(g, s, hits, caret, x, *y, w, "", &s.login_code,
+            SettingsInput::LoginCode, s.settings_caret, false);
+        let height = crate::native_controls::CONTROL_HEIGHT;
+        *y += height + 8.0;
+        let actions = [
+            ("붙여넣기", Target::Paste(SettingsInput::LoginCode), false),
+            ("확인", Target::Setting(SettingsAction::SubmitLoginCode), true),
+            ("로그인 취소", Target::Setting(SettingsAction::CancelLogin), false),
+        ];
+        let widths: Vec<_> = actions.iter().map(|(label, _, _)| crate::native_controls::button_width(g, label, height, true)).collect();
+        let (rects, used) = crate::native_layout::flow(&widths, (x, *y, w, 0.0), height, 8.0, crate::native_layout::Align::Start);
+        for ((label, target, primary), rect) in actions.into_iter().zip(rects) {
+            button(g, s, hits, rect, label, target, primary);
+        }
+        *y += used + 10.0;
     } else if running {
         *y += 4.0;
         draw_text(g, x, *y + 9.0, "로그인 진행 중", 11.5, theme::text_dim(), false);
@@ -8721,5 +8723,17 @@ mod nava_layout_tests {
             let (x, w) = content_column(20.0, width, nav);
             assert!(x >= 20.0 + nav && x + w <= 20.0 + width && w >= 0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod paste_field_tests {
+    use super::*;
+
+    #[test]
+    fn pasted_codes_drop_copy_line_endings_without_inserting_spaces() {
+        assert_eq!(pasted_field_text(SettingsInput::LoginCode, "  test-code\r\n#test-state\n"), "test-code#test-state");
+        assert_eq!(pasted_field_text(SettingsInput::MachineLabel, "first\nsecond"), "first second");
+        assert_eq!(pasted_field_text(SettingsInput::FeedbackBody, "first\nsecond"), "first\nsecond");
     }
 }

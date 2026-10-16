@@ -6246,7 +6246,7 @@ fn import_theme_into(
         let Some(p) = e.enclosed_name() else {
             return Err(std::io::Error::other(format!(
                 "경로가 뿌리를 벗어나요 — {}",
-                e.name()
+                e.name().unwrap_or_else(|_| "읽을 수 없는 파일 이름".into())
             )));
         };
         if zip_noise(&p) {

@@ -7708,17 +7708,7 @@ impl ApplicationHandler<UserEvent> for App {
             } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_session_panel(event_loop);
             } else if self.paste_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                // Cmd+V: key 창 first responder(아로나 webview)에 paste: 위임 →
-                // 안 먹으면(터미널 창) 직접 클립보드 붙여넣기.
-                #[cfg(target_os = "macos")]
-                let to_webview = crate::macos_open::send_paste_action();
-                #[cfg(not(target_os = "macos"))]
-                let to_webview = false;
-                if !to_webview {
-                    self.input_buf.clear();
-                    self.current_suggestion = None;
-                    self.paste_clipboard();
-                }
+                self.paste_from_menu();
             } else if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 // Cmd+C: webview 우선 copy: 위임 → 안 먹으면 터미널 선택영역 복사.
                 #[cfg(target_os = "macos")]
@@ -7949,6 +7939,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_session_probe();
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
+        self.run_native_login_paste_probe();
         self.run_button_focus_probe(event_loop);
         self.run_cloud_control_probe();
         self.run_terminal_link_probe(event_loop);

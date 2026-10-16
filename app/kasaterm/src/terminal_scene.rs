@@ -1107,8 +1107,10 @@ impl App {
         }
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+            let source = kasa_mcp::remote::remote_meta(&tab_pid);
             inline_slots.extend(crate::inline_result::compose(
                 &mut composed, (body_left, body_top), (self.cell.w * fs, self.cell.h * fs), cols_now,
+                source.as_ref().map(|(base, _)| base.as_str()), &self.proxy,
             ));
         }
         // 글 흐름 안 그림 — `[[img:<경로>:<행수>]]` 표식이 잡은 자리에 얹는다.
