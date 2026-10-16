@@ -5,6 +5,9 @@
 use super::*;
 use crate::sprites::*;
 
+mod foreground;
+pub(crate) use foreground::TuiForeground;
+
 // ── Clawd 시작 배너 → 학생 도트 교체 헬퍼 ──────────────────────────────
 // Claude Code 웰컴 박스의 Clawd 아트(블록문자 3행)를 감지해, 그 자리에
 // 이 pane에 배정된 학생의 idle 도트(arona-ui walk 스프라이트 frame-00)를
@@ -373,6 +376,11 @@ fn uniform_prompt_fill(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
 
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
+        // 오른쪽 알림 판의 가로선은 왼쪽의 과거 ❯ 행을 둘러싼 입력칸이 아니다.
+        let Some(start) = r.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else { return false };
+        if start > 1 || !matches!(r[start].ch, '─' | '╭' | '╰') {
+            return false;
+        }
         let (mut dash, mut glyph, mut lead, mut first, mut last) = (0usize, 0usize, 0usize, None, ' ');
         for c in r {
             if c.ch == '\0' || c.ch == ' ' {
@@ -1186,13 +1194,6 @@ pub(crate) fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String
 /// 본문 좌측선을 밀지 않는다. 셀이 세로 2:1 이라 2칸×1행이 곧 정사각 bust.
 pub(crate) const TELL_FACE_COLS: usize = 2;
 
-/// tell 마커 행을 발신 학생색으로 — 그 행 전체를 accent fg 로 칠해 SendMessage
-/// 인라인과 시각을 맞춘다. 프사가 있는 캐릭터는 첫 줄 본문을 마커 시작 col 로
-/// 당겨(= claude 의 `❯ ` 폭 2 = wrap 들여쓰기) 접힌 줄과 좌측선을 맞추고, 비워진
-/// `❯` 자리 2칸에 아바타를 얹는다(호출측 이미지 패스) — 옛 배치는 첫 줄만 프사
-/// 폭만큼 밀려 계단이 졌다(사용자 2026-07-27). 위 행 헤더로 올리는 안은 claude 가
-/// user 턴 앞에 빈 줄을 두지 않아 윗줄 글자를 덮어 기각(실측). slug 없는
-/// 캐릭터만 `이름 ›` 인라인 폴백. 반환은 프사 rect 의 x 기준 col — 없으면 None.
 /// `@ <발신 라벨>❯` 헤더의 라벨을 학생 이름으로 — `@ 이름❯` 만 남기고 뒤는 지운다.
 /// 색은 tint_row 가 뒤에서 입히므로 여기선 글자만 놓는다.
 pub(crate) fn restyle_peer_native_header(
@@ -1203,8 +1204,8 @@ pub(crate) fn restyle_peer_native_header(
     accent: [u8; 4],
 ) {
     use unicode_width::UnicodeWidthChar;
-    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let style = row[c0].clone();
+    let fg = message_ink(accent, &style.bg);
     let text = format!("@ {name}❯");
     // 헤더 행은 `❯` 뒤가 전부 빈칸이다(탐지기가 보장) — 원 라벨이 이름보다 짧으면
     // (`@ 12889❯` 등 pid 라벨) 필요한 만큼 오른쪽으로 늘려 쓴다. 라벨 폭에 가두면
@@ -1268,6 +1269,7 @@ pub(crate) fn student_face_slug(name: &str) -> Option<&'static str> {
     theme::character_slug_any(name).filter(|s| face_ready(s))
 }
 
+/// 본문 좌표는 링크·선택 영역과 공유하므로 마커 자리만 이름으로 바꾼다.
 pub(crate) fn restyle_tell_line(
     row: &mut [GridCell],
     marker_start: usize,
@@ -1276,54 +1278,23 @@ pub(crate) fn restyle_tell_line(
     accent: [u8; 4],
 ) -> Option<usize> {
     use unicode_width::UnicodeWidthChar;
-    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let end = marker_end.min(row.len());
-    if student_face_slug(name).is_some() {
-        // 마커 뒤 본문을 마커 시작 col 로 당긴다(claude 의 `❯ ` 폭 = 2 = wrap
-        // 들여쓰기라 첫 줄과 연속 줄이 같은 col 에 선다).
-        let body_start = row[end..]
-            .iter()
-            .position(|c| c.ch != ' ' && c.ch != '\0')
-            .map(|i| end + i)
-            .unwrap_or(end);
-        let shift = body_start.saturating_sub(marker_start);
-        if shift > 0 {
-            row[marker_start..].rotate_left(shift);
-            let n = row.len();
-            for c in row[n - shift..].iter_mut() {
-                *c = GridCell::blank();
-            }
-        }
-        // 비운 앞칸은 본문 셀의 배경(claude 가 깐 user 턴 하이라이트)을 물려받는다
-        // — blank 로 두면 첫 줄만 배경이 늦게 시작해 wrap 연속 행과 계단이 진다.
-        let pad = {
-            let mut c = row[marker_start.min(row.len() - 1)].clone();
-            c.ch = ' ';
-            c
-        };
-        for c in row[..marker_start].iter_mut() {
-            *c = pad.clone();
-        }
-        tint_row(row, accent);
-        // 프사는 `❯` 가 있던 왼쪽 여백에 본문과 같은 행으로 — 위 행은 claude 가
-        // 이전 블록(`✻ Worked for 5s` 등)으로 채워 두는 게 보통이라 헤더로 올리면
-        // 그 글자를 덮는다(실측 2026-07-27). 여백이 프사 폭에 못 미치면(마커가
-        // 행 머리) 프사를 포기하고 색만 입힌다.
-        return (marker_start >= TELL_FACE_COLS).then_some(0);
+    if marker_start >= end {
+        return None;
     }
-    let lead = row[..end]
-        .iter()
-        .position(|c| c.ch != ' ' && c.ch != '\0')
-        .unwrap_or(0);
-    for c in row[..end].iter_mut() {
-        *c = GridCell::blank();
+    let face = (marker_start >= TELL_FACE_COLS && student_face_slug(name).is_some())
+        .then_some(0);
+    // 링크·선택·마우스 전달은 원본 셀 좌표를 쓰므로 본문을 당기면 클릭 대상과
+    // 글자가 갈라진다. 같은 행에 겹친 TUI 팝오버도 그 이동에 휩쓸린다.
+    let start = marker_start;
+    let style = row[start].clone();
+    let fg = message_ink(accent, &style.bg);
+    for c in row[if face.is_some() { 0 } else { start }..end].iter_mut() {
+        c.ch = ' ';
+        c.hidden = false;
+        c.leading_wide_spacer = false;
     }
     let label = format!("{name} ›");
-    // 라벨을 본문 쪽(end)에 붙인다. 지우는 마커 `⟦이름⟧ ` 폭은 이름 길이에 따라
-    // 가변인데 라벨은 고정폭이라, 왼쪽 정렬하면 남는 칸이 그대로 `›`—본문 사이
-    // 갭으로 보였다(사용자 2026-07-27: 이름이 길수록 더 벌어짐).
-    let label_w: usize = label.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
-    let start = end.saturating_sub(label_w + 1).max(lead);
     let mut w = start;
     for ch in label.chars() {
         let cw = ch.width().unwrap_or(1).max(1);
@@ -1332,13 +1303,14 @@ pub(crate) fn restyle_tell_line(
         }
         // bold — 본문도 같은 학생색이라 이름이 색만으로는 안 튄다(2026-08-12
         // 지시 「이름은 bold로」). 네이티브 헤더·접힌 경로 헤더와 동일.
-        let mut cell = GridCell::blank();
+        let mut cell = style.clone();
         cell.ch = ch;
         cell.fg = fg.clone();
         cell.bold = true;
         row[w] = cell;
         if cw == 2 && w + 1 < end {
-            let mut sp = GridCell::blank();
+            let mut sp = style.clone();
+            sp.ch = ' ';
             sp.fg = fg.clone();
             sp.bold = true;
             row[w + 1] = sp;
@@ -1347,17 +1319,88 @@ pub(crate) fn restyle_tell_line(
     }
     // 본문(마커 뒤)도 학생색으로.
     tint_row(&mut row[end..], accent);
-    None
+    face
 }
 
-/// 행의 비공백 글자 fg 를 accent 로 — tell 마커 행과 그 wrap 연속 행이 공유.
-pub(crate) fn tint_row(row: &mut [GridCell], accent: [u8; 4]) {
-    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
-    for c in row.iter_mut() {
-        if c.ch != ' ' && c.ch != '\0' {
-            c.fg = fg.clone();
+pub(crate) fn restyle_tell_messages(
+    rows: &mut [Vec<GridCell>],
+    foreground: &TuiForeground,
+) -> Vec<(usize, usize, &'static str)> {
+    let mut faces = Vec::new();
+    let mut r = 0;
+    while r < rows.len() {
+        let cols = foreground.prefix_end(r, rows[r].len());
+        let Some((start, end, name)) = tell_marker_line(&rows[r][..cols]) else {
+            r += 1;
+            continue;
+        };
+        let Some(accent) = theme::character_accent_any(&name) else {
+            r += 1;
+            continue;
+        };
+        let band = band_bg(&rows[r][..cols]);
+        if band.is_some() {
+            restyle_message_background(&mut rows[r][..cols], accent);
+        }
+        if let (Some(col), Some(slug)) = (
+            restyle_tell_line(&mut rows[r][..cols], start, end, &name, accent),
+            student_face_slug(&name),
+        ) {
+            faces.push((r, col, slug));
+        }
+        r += 1;
+        while r < rows.len() {
+            let cols = foreground.prefix_end(r, rows[r].len());
+            let row = &mut rows[r][..cols];
+            if !tell_wrap_continuation(row)
+                || band.as_ref().is_some_and(|band| band_bg(row).as_ref() != Some(band))
+            {
+                break;
+            }
+            if band.is_some() {
+                restyle_message_background(row, accent);
+            }
+            tint_row(row, accent);
+            r += 1;
         }
     }
+    faces
+}
+
+fn restyle_message_background(row: &mut [GridCell], accent: [u8; 4]) {
+    let base = theme::pane_bg();
+    let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
+    let fill = tint_toward([base[0], base[1], base[2]], accent, if light { 0.10 } else { 0.18 });
+    let end = row.iter().rposition(|c| !matches!(c.ch, ' ' | '\0')).map_or(0, |last| last + 2);
+    for (col, cell) in row.iter_mut().enumerate() {
+        cell.bg = if col < end { fill.clone() } else { kasa_bridge::screen::Color::Default };
+    }
+}
+
+/// ANSI 의미색과 링크는 남겨 두어 메시지 안 경고·경로가 발신자 색에 묻히지 않는다.
+pub(crate) fn tint_row(row: &mut [GridCell], accent: [u8; 4]) {
+    use kasa_bridge::screen::Color;
+    let mut ink = None;
+    for c in row.iter_mut() {
+        // 링크·오류·선택·숨김 표식의 뜻은 발신자 색보다 먼저 보존한다.
+        let neutral = match c.fg {
+            Color::Default | Color::Idx(0 | 7 | 8 | 15 | 232..=255) => true,
+            Color::Rgb(r, g, b) => r.max(g).max(b) - r.min(g).min(b) <= 16,
+            _ => false,
+        };
+        if !matches!(c.ch, ' ' | '\0') && neutral && !c.inverse && !c.hidden && !c.underline {
+            if ink.as_ref().is_none_or(|(bg, _)| *bg != c.bg) {
+                ink = Some((c.bg.clone(), message_ink(accent, &c.bg)));
+            }
+            c.fg = ink.as_ref().unwrap().1.clone();
+        }
+    }
+}
+
+fn message_ink(accent: [u8; 4], background: &kasa_bridge::screen::Color) -> kasa_bridge::screen::Color {
+    let bg = crate::cells::palette().color_to_rgba(background, theme::pane_bg());
+    let fg = theme::enforce_contrast_at(accent, bg, 4.5);
+    kasa_bridge::screen::Color::Rgb(fg[0], fg[1], fg[2])
 }
 
 /// 학생 완료 보고 줄 감지 — `[완료] 미도리(%4) — …` / `[실패] …`. socket.rs
@@ -1403,7 +1446,9 @@ pub(crate) fn tell_wrap_continuation(row: &[GridCell]) -> bool {
     match row.iter().position(|c| c.ch != ' ' && c.ch != '\0') {
         Some(n) if n >= 2 => !matches!(
             row[n].ch,
-            '⏺' | '✻' | '⎿' | '│' | '⎢' | '❯' | '─' | '═' | '╌' | '⏵' | '·'
+            '⏺' | '✻' | '⎿' | '│' | '⎢' | '❯' | '›' | '>' | '─' | '═' | '╌' | '⏵' | '·'
+                | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+                | '┃' | '║' | '╔' | '╗' | '╚' | '╝' | '|' | '`'
         ),
         _ => false,
     }
@@ -2155,13 +2200,8 @@ fn expand_teammate_message_with_face(
     accent: [u8; 4],
     has_face: bool,
 ) -> Option<usize> {
-    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let Some(body) = body else {
-        for c in rows[r].iter_mut() {
-            if c.ch != ' ' && c.ch != '\0' {
-                c.fg = fg.clone();
-            }
-        }
+        tint_row(&mut rows[r], accent);
         return None;
     };
     let cols = rows[r].len();
@@ -2169,6 +2209,7 @@ fn expand_teammate_message_with_face(
         return None;
     }
     let style = rows[r][start].clone();
+    let fg = message_ink(accent, &style.bg);
     let blank_run = rows[r + 1..].iter().take_while(|w| row_is_blank(w)).count();
     let usable = if r + 1 + blank_run >= rows.len() {
         blank_run
@@ -5648,33 +5689,121 @@ mod teammate_msg_tests {
         assert!(!text.contains('⟦') && !text.contains('⟧'), "마커가 화면에 남았다: {text:?}");
     }
 
-    // 프사 캐릭터: 아바타는 본문 위 행으로 올라가고(반환 col 이 그 x 기준) 본문은
-    // 마커 자리(= `❯ ` 뒤 col 2)로 당겨져 wrap 연속 행과 좌측이 맞는다. `❯` 자리엔
-    // 인용 마커 `›` 만 남고 이름 텍스트는 프사가 대신한다.
     #[test]
-    fn restyle_tell_lifts_face_and_aligns_body() {
+    fn restyle_tell_keeps_body_at_original_columns() {
         let mut row = row_from("❯ ⟦미도리⟧ 본문", 80);
         let (marker_start, marker_end, name) = tell_marker_line(&row).unwrap();
+        let original_body = row[marker_end..].to_vec();
         let face_col =
             restyle_tell_line(&mut row, marker_start, marker_end, &name, [107, 207, 127, 255]);
         assert_eq!(face_col, Some(0), "프사 x = ❯ 가 있던 왼쪽 여백");
         assert_eq!(row[0].ch, ' ', "여백은 프사 자리로 비운다");
-        assert_eq!(row[2].ch, '본', "본문은 col 2 = wrap 연속 행과 동일");
-        assert!(!row_text(&row).contains("미도리"), "이름은 프사가 대신");
+        assert_eq!(row[marker_end..].iter().map(|c| c.ch).collect::<Vec<_>>(),
+            original_body.iter().map(|c| c.ch).collect::<Vec<_>>());
+        assert_eq!(row[marker_end + 1].fg, kasa_bridge::screen::Color::Rgb(107, 207, 127));
     }
 
-    // 실제 화면은 한글이 2셀이라 마커 `⟦이름⟧ ` 폭이 이름 길이에 따라 가변이다 —
-    // 본문 시작 col 이 그 폭에 휘둘리면 wrap 연속 행과 계단이 진다(사용자 2026-07-27).
     #[test]
-    fn tell_body_col_independent_of_name_width() {
+    fn tell_name_and_face_stay_inside_original_marker() {
         // wide 셀 재현: 한글 뒤에 스페이서 한 칸(composed 경로와 동일).
         let mut row = row_from("❯ ⟦호 시 노 ⟧ 본문", 80);
         let (marker_start, marker_end, name) = tell_marker_line(&row).expect("마커 인식");
         assert_eq!(name, "호시노");
+        let original_body = row[marker_end..].iter().map(|c| c.ch).collect::<Vec<_>>();
         let face_col = restyle_tell_line(&mut row, marker_start, marker_end, &name, [107, 207, 127, 255])
             .expect("프사");
         assert_eq!(face_col, 0, "이름이 길어도 프사는 왼쪽 여백 고정");
-        assert_eq!(row[2].ch, '본', "{}", row_text(&row));
+        assert_eq!(row[marker_end..].iter().map(|c| c.ch).collect::<Vec<_>>(), original_body);
+    }
+
+    #[test]
+    fn tell_body_retains_ansi_links_and_selection_attributes() {
+        use kasa_bridge::screen::Color;
+        let mut row = row_from("plain link error inverse hidden", 50);
+        row[6].fg = Color::Idx(4);
+        row[7].underline = true;
+        row[11].fg = Color::Rgb(240, 80, 80);
+        row[17].inverse = true;
+        row[25].hidden = true;
+        let original = row.clone();
+        tint_row(&mut row, [140, 200, 120, 255]);
+        assert_eq!(row[0].fg, Color::Rgb(140, 200, 120));
+        for index in [6, 7, 11, 17, 25] {
+            assert_eq!(row[index], original[index], "semantic cell {index}");
+        }
+    }
+
+    #[test]
+    fn sender_text_meets_body_contrast_on_dark_light_and_custom_fills() {
+        use kasa_bridge::screen::Color;
+        use kasa_gridview::palette::{contrast_of, luminance};
+        for bg in [[37, 44, 53, 255], [245, 242, 235, 255], [81, 45, 73, 255]] {
+            for accent in [[147, 112, 219, 255], [240, 132, 168, 255], [244, 222, 109, 255]] {
+                let Color::Rgb(r, g, b) = message_ink(accent, &Color::Rgb(bg[0], bg[1], bg[2])) else {
+                    panic!("sender text needs an explicit viewer color");
+                };
+                assert!(contrast_of(luminance([r, g, b, 255]), luminance(bg)) >= 4.49);
+            }
+        }
+    }
+
+    #[test]
+    fn tell_and_popup_share_rows_without_sharing_cells() {
+        use kasa_bridge::screen::Color;
+        let mut rows = vec![
+            row_from("                    ╭──────────────────╮", 60),
+            row_from("❯ ⟦유우카⟧ hello", 60),
+            row_from("  wrapped body", 60),
+            row_from("                    ╰──────────────────╯", 60),
+            row_from("  › Plan mode", 60),
+            row_from("  untouched", 60),
+        ];
+        for (r, text) in ["kasaterm-bridge", "message"].iter().enumerate() {
+            rows[r + 1][20..40].clone_from_slice(&row_from(&format!("│ {text:<17}│"), 20));
+        }
+        for row in &mut rows[..4] {
+            for cell in &mut row[20..40] {
+                cell.fg = Color::Rgb(140, 160, 210);
+                cell.bg = Color::Rgb(35, 40, 48);
+            }
+        }
+        let original = rows.clone();
+        let foreground = TuiForeground::capture(&rows);
+        assert_eq!(foreground.prefix_end(1, 60), 20);
+        let faces = restyle_tell_messages(&mut rows, &foreground);
+        foreground.restore(&mut rows);
+        assert_eq!(faces, vec![(1, 0, "yuuka")]);
+        for r in 0..4 {
+            assert_eq!(rows[r][20..40], original[r][20..40]);
+        }
+        assert_ne!(rows[1][9].fg, original[1][9].fg);
+        assert_ne!(rows[2][2].fg, original[2][2].fg);
+        assert_eq!(rows[4], original[4]);
+        assert_eq!(rows[5], original[5]);
+        for r in 1..3 {
+            assert_eq!(rows[r][9..20].iter().map(|c| c.ch).collect::<Vec<_>>(),
+                original[r][9..20].iter().map(|c| c.ch).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn tell_background_tracks_sender_and_stops_at_original_band_boundary() {
+        use kasa_bridge::screen::Color;
+        let mut rows = vec![
+            row_from("❯ ⟦미도리⟧ first", 60),
+            row_from("  second", 60),
+            row_from("  unrelated output", 60),
+        ];
+        for row in &mut rows[..2] {
+            for cell in row { cell.bg = Color::Rgb(60, 60, 60); }
+        }
+        let original = rows.clone();
+        restyle_tell_messages(&mut rows, &TuiForeground::default());
+        assert_ne!(rows[0][0].bg, original[0][0].bg);
+        assert_eq!(rows[0][59].bg, Color::Default);
+        assert_eq!(rows[1][59].bg, Color::Default);
+        assert_eq!(rows[0][0].bg, rows[1][0].bg);
+        assert_eq!(rows[2], original[2]);
     }
 
     // wrap 연속 행: 2칸 **이상** 들여쓰기 본문은 연속, TUI 구조 글리프(⎿·⏺)·
@@ -5691,6 +5820,9 @@ mod teammate_msg_tests {
         assert!(!tell_wrap_continuation(&row_from("⏺ 확인", 80)));
         assert!(!tell_wrap_continuation(&row_from("", 80)));
         assert!(!tell_wrap_continuation(&row_from(" 들여쓰기 1", 80)));
+        for text in ["  ╭───╮", "  ┌───┐", "  ║ row ║", "  | key | value |", "  ```rs", "  › Plan mode", "  > approve"] {
+            assert!(!tell_wrap_continuation(&row_from(text, 80)), "{text}");
+        }
     }
 
     // 내가 친 프롬프트의 배경 띠: `❯` 앞머리 + 행 전폭 균일 배경만 띠다.
@@ -5848,7 +5980,7 @@ mod teammate_msg_tests {
         assert!(!row_is_blank(&rows[1]));
         assert_eq!(
             rows[1].iter().find(|c| c.ch != ' ').unwrap().fg,
-            kasa_bridge::screen::Color::Rgb(255, 0, 0)
+            message_ink([255, 0, 0, 255], &kasa_bridge::screen::Color::Default)
         );
         // usable = blank_run(3) - 1 → 마지막 blank 는 구분용으로 남는다.
         assert!(row_is_blank(&rows[3]), "구분 blank 유지");
@@ -5998,6 +6130,22 @@ mod prompt_box_tests {
             prompt_box(&rows),
             Some(PromptBox::Bordered { ref rows, top: 1, bottom: 3 }) if *rows == (2..3)
         ));
+    }
+
+    #[test]
+    fn right_popup_borders_do_not_enclose_historical_prompt_on_left() {
+        let mut rows = vec![
+            row_from("                    ╭────────────────────╮"),
+            row_from("❯ previous message  │ alert              │"),
+            row_from("                    ╰────────────────────╯"),
+        ];
+        assert!(prompt_box(&rows).is_none());
+        rows.extend([
+            row_from(&"─".repeat(42)),
+            row_from("❯ real prompt"),
+            row_from(&"─".repeat(42)),
+        ]);
+        assert!(matches!(prompt_box(&rows), Some(PromptBox::Bordered { top: 3, bottom: 5, .. })));
     }
 
     // ultracode accent(미배정 pane 의 숨쉬기) — 학생 accent 와 **확실히 구분**돼야

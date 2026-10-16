@@ -891,6 +891,7 @@ impl App {
         font_scale: f32,
         desktop_view: bool,
     ) -> TerminalComposition {
+        let source_foreground = term.map(|source| TuiForeground::capture(&source.cells)).unwrap_or_default();
         // The parser always follows the source's canonical screen. Only this
         // viewer's presentation is reflowed, at its own unchanged font size.
         // Remote visual exports (desktop_view=false) remain canonical.
@@ -980,6 +981,10 @@ impl App {
             Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
             None => Vec::new(),
         };
+        let foreground = projection.as_ref().map_or_else(
+            || TuiForeground::capture(&composed),
+            |view| source_foreground.project(&composed, &view.source_map),
+        );
         // 학생 도트·배너·스피너 같은 claude 화면 해석은 **claude 가 실제로
         // 도는 pane** 에서만 한다. 화면 모양만 보고 판정하면 남의 TUI 를
         // claude 로 오인한다 — helix 의 LSP 진행 스피너가 브라유라, 파일을
@@ -1769,7 +1774,7 @@ impl App {
                     let mut r = 0;
                     while r < composed.len() {
                         if tell_wrap_continuation(&composed[r]) {
-                            tint_row(&mut composed[r], accent);
+                            foreground.tint_row(r, &mut composed[r], accent);
                             r += 1;
                         } else if msg_paragraph_gap(&composed, r) {
                             r += 1;
@@ -1780,7 +1785,8 @@ impl App {
                 }
             }
             for r in 0..composed.len() {
-                let Some((c0, _count, sender)) = teammate_collapsed_line(&composed[r]) else {
+                let cols = foreground.prefix_end(r, composed[r].len());
+                let Some((c0, _count, sender)) = teammate_collapsed_line(&composed[r][..cols]) else {
                     continue;
                 };
                 let msg = msg_path
@@ -1838,9 +1844,15 @@ impl App {
                 // 원문 회색 잔해가 남는다(2026-08-31 스샷). 본문을 다시 그릴
                 // 수 있으면 꼬리를 지워 전개 공간으로 넘기고(blank_run 이
                 // 흡수한다), 본문이 없으면 색이라도 잇는다.
+                if cols < composed[r].len() {
+                    foreground.tint_row(r, &mut composed[r], accent);
+                    continue;
+                }
                 let tail = collapsed_wrap_tail(&composed, r);
                 for t in 0..tail {
-                    let row = &mut composed[r + 1 + t];
+                    let index = r + 1 + t;
+                    let cols = foreground.prefix_end(index, composed[index].len());
+                    let row = &mut composed[index][..cols];
                     if msg.is_some() {
                         for c in row.iter_mut() {
                             c.ch = ' ';
@@ -1879,7 +1891,8 @@ impl App {
             // 화면 라벨이 transcript 태그의 from_label 과 일치할 때만
             // 남의 메시지로 인정한다 — 사용자가 직접 친 `@ …❯` 보호.
             for r in 0..composed.len() {
-                let Some((c0, qcol, label)) = peer_native_header_line(&composed[r]) else {
+                let cols = foreground.prefix_end(r, composed[r].len());
+                let Some((c0, qcol, label)) = peer_native_header_line(&composed[r][..cols]) else {
                     continue;
                 };
                 let msg = msg_path
@@ -1926,15 +1939,15 @@ impl App {
                 // 그대로 쓰면 로마자 꼬리표가 남는다). 못 찾으면 원문 유지(색만).
                 if let Some(slug) = slug {
                     let display = theme::slug_character_any(slug).unwrap_or(&sender);
-                    restyle_peer_native_header(&mut composed[r], c0, qcol, display, accent);
+                    restyle_peer_native_header(&mut composed[r][..cols], c0, qcol, display, accent);
                 }
-                tint_row(&mut composed[r], accent);
+                foreground.tint_row(r, &mut composed[r], accent);
                 let mut rr = r + 1;
                 let mut face_row: Option<usize> = None;
                 while rr < composed.len() {
                     if tell_wrap_continuation(&composed[rr]) {
                         face_row.get_or_insert(rr);
-                        tint_row(&mut composed[rr], accent);
+                        foreground.tint_row(rr, &mut composed[rr], accent);
                         rr += 1;
                     } else if msg_paragraph_gap(&composed, rr) {
                         rr += 1;
@@ -1962,45 +1975,17 @@ impl App {
                 }
             }
         }
-        // 크로스-방 tell(⟦캐릭터⟧ 본문)을 발신 학생 테마색으로 — 팀 경계를
-        // 넘는 tell 은 네이티브 teammate 가 아니라 raw user 입력이라 사용자 발신
-        // 처럼 보인다. 마커가 유효 캐릭터면 그 행과 wrap 연속 행을 발신자
-        // accent 로 칠하고, 마커 자리에 발신 학생 프사(bust)를 얹는다 —
-        // profile_slots(statusline·resume 피커와 같은 이미지 패스)로 소비.
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             let scw = self.cell.w * fs;
             let sch = self.cell.h * fs;
-            let mut r = 0;
-            while r < composed.len() {
-                if let Some((marker_start, marker_end, name)) = tell_marker_line(&composed[r]) {
-                    if let Some(accent) = theme::character_accent_any(&name) {
-                        let face_col = restyle_tell_line(
-                            &mut composed[r],
-                            marker_start,
-                            marker_end,
-                            &name,
-                            accent,
-                        );
-                        if let (Some(c0), Some(slug)) = (face_col, student_face_slug(&name)) {
-                            // 프사는 본문 왼쪽 여백(`❯` 자리, 2칸)에 같은
-                            // 행으로 — 셀은 세로 2:1 이라 2칸×1행이 정사각.
-                            // 본문은 첫 줄부터 wrap 연속 행과 같은 col.
-                            let face_w = TELL_FACE_COLS as f32 * scw;
-                            let face_h = sch;
-                            let x = body_left + c0 as f32 * scw;
-                            let y = body_top + r as f32 * sch;
-                            profile_slots.push((slug, (x, y, face_w, face_h)));
-                        }
-                        r += 1;
-                        while r < composed.len() && tell_wrap_continuation(&composed[r]) {
-                            tint_row(&mut composed[r], accent);
-                            r += 1;
-                        }
-                        continue;
-                    }
-                }
-                r += 1;
+            for (r, col, slug) in restyle_tell_messages(&mut composed, &foreground) {
+                profile_slots.push((slug, (
+                    body_left + col as f32 * scw,
+                    body_top + r as f32 * sch,
+                    TELL_FACE_COLS as f32 * scw,
+                    sch,
+                )));
             }
         }
         // 학생 완료 보고 줄(`[완료] 미도리(%4) — …`, socket.rs pane_done
@@ -2015,15 +2000,16 @@ impl App {
             let mut r = 0;
             while r < composed.len() {
                 let accent =
-                    done_report_line(&composed[r]).and_then(|n| theme::character_accent_any(&n));
+                    done_report_line(&composed[r][..foreground.prefix_end(r, composed[r].len())])
+                        .and_then(|n| theme::character_accent_any(&n));
                 let Some(accent) = accent else {
                     r += 1;
                     continue;
                 };
-                tint_row(&mut composed[r], accent);
+                foreground.tint_row(r, &mut composed[r], accent);
                 r += 1;
                 while r < composed.len() && tell_wrap_continuation(&composed[r]) {
-                    tint_row(&mut composed[r], accent);
+                    foreground.tint_row(r, &mut composed[r], accent);
                     r += 1;
                 }
             }
@@ -2099,6 +2085,25 @@ impl App {
                 }
             }
         }
+        // 원본 TUI 팝오버가 본문 후처리와 학생 그림에 덮이면 승인·알림 글자가 훼손된다.
+        let cell = (self.cell.w * font_scale, self.cell.h * font_scale);
+        let mut visible = |rect| {
+            if foreground.overlaps(rect, (body_left, body_top), cell) {
+                foreground.restore_art(&mut composed, rect, (body_left, body_top), cell);
+                false
+            } else {
+                true
+            }
+        };
+        banner_slots.retain(|(_, rect, _)| visible(*rect));
+        spinner_slots.retain(|(_, rect)| visible(*rect));
+        waiting_slots.retain(|(_, rect)| !foreground.overlaps(*rect, (body_left, body_top), cell));
+        standing_slots.retain(|(_, _, rect)| !foreground.overlaps(*rect, (body_left, body_top), cell));
+        profile_slots.retain(|(_, rect)| visible(*rect));
+        schale_logo_slots.retain(|rect| visible(*rect));
+        status_model_icons.retain(|slot| visible(slot.image_rect()));
+        title_outline_slots.retain(|&(x, y, w, h, _)| !foreground.overlaps((x, y, w, h), (body_left, body_top), cell));
+        foreground.restore(&mut composed);
         TerminalComposition {
             animated_cells,
             rows: composed,
