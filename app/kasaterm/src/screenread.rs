@@ -196,6 +196,7 @@ pub(crate) fn overlay_codex_session_label(
     if name.is_empty() || line >= rows.len() {
         return;
     }
+    let Some(fill) = uniform_prompt_fill(&rows[line]) else { return };
     let w = rows[line].len();
     // 이름이 길다고 줄을 통째로 먹으면 배지가 아니라 문장이 된다 — 폭의 절반까지.
     let budget = w / 2;
@@ -223,6 +224,9 @@ pub(crate) fn overlay_codex_session_label(
     for cell in rows[line][start.saturating_sub(1)..end].iter_mut() {
         if is_particle(cell.ch) {
             cell.ch = ' ';
+            // Once the particle is replaced by text, its private background
+            // would break the next prompt scan and leave holes in the badge.
+            cell.bg = fill.clone();
         }
     }
     paint_label(rows, line, start, end, &shown, accent);
@@ -350,6 +354,23 @@ pub(crate) fn is_blank_glyph(ch: char) -> bool {
     matches!(ch, ' ' | '\0') || is_particle(ch)
 }
 
+// Astra particles can carry their own background. Detection and recoloring
+// must agree on the underlying fill rather than sampling an animated cell.
+fn uniform_prompt_fill(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
+    let mut fill = None;
+    let mut glyphs = 0usize;
+    for cell in row.iter().filter(|c| c.ch != '\0' && !is_particle(c.ch)) {
+        if matches!(cell.bg, kasa_bridge::screen::Color::Default)
+            || fill.is_some_and(|color| color != cell.bg)
+        {
+            return None;
+        }
+        fill = Some(cell.bg.clone());
+        glyphs += 1;
+    }
+    (glyphs >= 8).then_some(fill?)
+}
+
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
         let (mut dash, mut glyph, mut lead, mut first, mut last) = (0usize, 0usize, 0usize, None, ' ');
@@ -391,29 +412,14 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     }
     // codex — 칠해진 입력행. 행 전체가 같은 non-Default bg 를 쓰는 것이 시그니처고,
     // 마커(`›`)를 함께 요구해 배경만 남은 여백 행과 구별한다.
-    let uniform_fill = |r: &[GridCell]| -> Option<kasa_bridge::screen::Color> {
-        let mut fill: Option<kasa_bridge::screen::Color> = None;
-        let mut glyphs = 0usize;
-        for c in r.iter().filter(|c| c.ch != '\0' && !is_particle(c.ch)) {
-            if matches!(c.bg, kasa_bridge::screen::Color::Default) {
-                return None;
-            }
-            if fill.is_some_and(|f| f != c.bg) {
-                return None;
-            }
-            fill = Some(c.bg.clone());
-            glyphs += 1;
-        }
-        (glyphs >= 8).then_some(fill?)
-    };
     let f = rows
         .iter()
-        .rposition(|r| marker_row(r) && uniform_fill(r).is_some())?;
-    let fill = uniform_fill(&rows[f])?;
+        .rposition(|r| marker_row(r) && uniform_prompt_fill(r).is_some())?;
+    let fill = uniform_prompt_fill(&rows[f])?;
     // 입력창은 **여러 줄이다** — 마커 행 위아래로 같은 채움색 여백 행이 붙고,
     // 여러 줄을 입력하면 그만큼 자란다(실측 0.146.0: 여백-입력-여백 3줄). 마커
     // 행만 칠하면 가운데 한 줄만 색이 바뀌어 상자가 아니라 밑줄로 보인다(사용자).
-    let same = |r: &[GridCell]| uniform_fill(r).is_some_and(|c| c == fill);
+    let same = |r: &[GridCell]| uniform_prompt_fill(r).is_some_and(|c| c == fill);
     let mut start = f;
     while start > 0 && same(&rows[start - 1]) {
         start -= 1;
@@ -985,7 +991,7 @@ mod codex_status_line_tests {
 pub(crate) fn localize_codex_prompt_background(rows: &mut [Vec<GridCell>], background: [u8; 4]) {
     use kasa_bridge::screen::Color;
     let Some(PromptBox::Filled { rows: prompt }) = prompt_box(rows) else { return };
-    let Some(source) = rows[prompt.start].first().map(|cell| cell.bg.clone()) else { return };
+    let Some(source) = uniform_prompt_fill(&rows[prompt.start]) else { return };
     let Color::Rgb(r, g, b) = source else { return };
     if r.max(g).max(b) - r.min(g).min(b) > 24 {
         return;
@@ -1041,7 +1047,7 @@ pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     for r in bx.rows() {
         if let Some(c) = rows[r]
             .iter_mut()
-            .find(|c| c.ch != ' ' && c.ch != '\0')
+            .find(|c| !is_blank_glyph(c.ch))
             .filter(|c| matches!(c.ch, '❯' | '›' | '>'))
         {
             c.fg = fg.clone();
@@ -3770,20 +3776,16 @@ pub(crate) fn connection_trouble_in(line: &str) -> Option<&'static str> {
 /// non-blank 30행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
 /// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
 pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
-    let last = rows
-        .iter()
-        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
     // todo 트리가 뜨면 스피너 행이 statusline(=last)에서 멀어진다: todo ~7행 +
     // 입력박스(테두리·❯·테두리) ~4행이 사이에 껴 10행 창 밖으로 밀려나 walk
     // 도트가 사라졌다(사용자). 앞머리 글리프(별/점/점자 col<8) + '…'/"esc to
     // interrupt" 라는 강한 시그니처라 30행으로 넓혀도 본문 오탐은 사실상 없다.
-    let start = (last + 1).saturating_sub(30);
     // 스피너 애니메이션은 별(U+2720~274F)·점자(U+2800~28FF)·가운뎃점(·) 등
     // 여러 글리프를 순환한다. 특정 글리프만 잡으면 점 프레임에서 감지가 끊겨
     // 학생 도트가 프레임마다 깜빡인다 → `rows_show_working` 과 같은 문맥 기준
     // (별+…/점자/"esc to interrupt")으로 working 행을 찾고, 그 행 첫 글리프
     // (=스피너 자리) col 을 돌려준다. 스피너가 어떤 프레임이든 위치가 고정된다.
-    for r in (start..=last).rev() {
+    for r in spinner_candidate_rows(rows).rev() {
         if let Some(c) = spinner_row_col(&rows[r]).or_else(|| spinner_tip_rescue(rows, r)) {
             if spinner_is_live(rows, r) {
                 return Some((r, c));
@@ -3791,6 +3793,25 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
         }
     }
     None
+}
+
+fn spinner_candidate_rows(rows: &[Vec<GridCell>]) -> impl DoubleEndedIterator<Item = usize> + '_ {
+    let end = rows.iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
+        .map_or(0, |last| last + 1);
+    let filled = match prompt_box(rows) {
+        Some(PromptBox::Filled { rows }) => Some(rows),
+        _ => None,
+    };
+    (end.saturating_sub(30)..end).filter(move |&r| {
+        let Some(filled) = &filled else { return true };
+        if filled.contains(&r) { return false; }
+        if r < filled.end || !rows[r].iter().any(|c| is_particle(c.ch)) { return true; }
+        // Historical filled prompts can precede live progress. Exclude only
+        // a recognized status row, never everything below that old prompt.
+        let plain = rows[r].iter().filter(|c| !is_particle(c.ch)).cloned().collect();
+        parse_codex_status_line(&[plain]).is_none()
+    })
 }
 
 /// claude code 스피너의 **앞머리 글리프**인가.
@@ -3874,11 +3895,7 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
 /// Enter 직후는 판정의 제출 브리지(`agent_state::SUBMIT_BRIDGE`)가 덮고, 나머지는 ~3초 뒤 경과시간 괄호가
 /// 붙는 순간 본판정이 잡는다. 이 모드의 조기 부착만 포기하는 것이고 감지는 산다.
 pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usize, char)> {
-    let last = rows
-        .iter()
-        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
-    let start = (last + 1).saturating_sub(30);
-    for r in (start..=last).rev() {
+    for r in spinner_candidate_rows(rows).rev() {
         let row = &rows[r];
         let Some(first) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
             continue;
@@ -3917,11 +3934,7 @@ pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, 
 /// ⚠️ 박동 게이트 없이 부르지 마라 — 줄임표로 끝나는 평범한 본문 마지막 줄도
 /// 잡는 스캔이다. 게이트가 「생성 중」을 보증할 때만 그 최하단 행이 스피너다.
 pub(crate) fn lenient_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
-    let last = rows
-        .iter()
-        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
-    let start = (last + 1).saturating_sub(30);
-    for r in (start..=last).rev() {
+    for r in spinner_candidate_rows(rows).rev() {
         let row = &rows[r];
         let Some(first) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
             continue;
@@ -6095,6 +6108,139 @@ mod prompt_box_tests {
         let original = plain.clone();
         localize_codex_prompt_background(&mut plain, [26, 29, 35, 255]);
         assert_eq!(plain, original);
+    }
+
+    #[test]
+    fn codex_astra_first_cell_does_not_select_prompt_background() {
+        use kasa_bridge::screen::Color;
+        for source in [Color::Rgb(63, 69, 77), Color::Rgb(240, 240, 240)] {
+            for target in [[26, 29, 35, 255], [240, 241, 243, 255], [0, 0, 0, 255]] {
+                for particle_bg in [Color::Default, Color::Rgb(12, 12, 12), Color::Rgb(80, 20, 140)] {
+                    let filled = |text: &str| {
+                        let mut row = row_from(text);
+                        row.resize(60, GridCell::blank());
+                        for cell in &mut row { cell.bg = source.clone(); }
+                        row
+                    };
+                    let mut rows = vec![
+                        filled("  previous input"),
+                        row_from("  response"),
+                        filled(" "),
+                        filled("  › next request"),
+                        filled(" "),
+                    ];
+                    rows[1][0].bg = particle_bg.clone();
+                    rows[2][0].ch = '⠁';
+                    rows[2][0].bg = particle_bg;
+                    let untouched = rows[1].clone();
+                    assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { rows }) if rows == (2..5)));
+                    localize_codex_prompt_background(&mut rows, target);
+                    for i in [0, 2, 3, 4] {
+                        assert!(rows[i].iter().filter(|c| !is_particle(c.ch))
+                            .all(|c| c.bg == Color::Rgb(target[0], target[1], target[2])), "row {i}");
+                    }
+                    assert_eq!(rows[1], untouched);
+                    assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { rows }) if rows == (2..5)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_astra_sparse_particles_do_not_turn_input_or_footer_into_work() {
+        use kasa_bridge::screen::Color;
+        let filled = |text: &str| {
+            let mut row = row_from(text);
+            row.resize(80, GridCell::blank());
+            for cell in &mut row { cell.bg = Color::Rgb(63, 69, 77); }
+            row
+        };
+        for prompt in ["  › Ask Codex to do anything", "  › ", "  › Compacting… (3s)"] {
+            for particle_row in [2, 4] {
+                let mut rows = vec![
+                    row_from(""),
+                    filled(" "),
+                    filled(prompt),
+                    filled(" "),
+                    row_from("  gpt-6-astra xhigh · main · Context 0% used"),
+                ];
+                for particles in [1, 2] {
+                    rows[particle_row][0].ch = '⠁';
+                    if particles == 2 { rows[particle_row][1].ch = '⡀'; }
+                    assert_eq!(find_claude_spinner(&rows), None, "row={particle_row}, particles={particles}");
+                    assert!(!crate::input::rows_show_working(&rows));
+                    for working in ["⠋ Computing… (3s · ↓ 1.2k tokens)", "• Working (3s • esc to interrupt)", "✻ Thinking… (3s)"] {
+                        rows[0] = row_from(working);
+                        assert_eq!(find_claude_spinner(&rows), Some((0, 0)));
+                    }
+                    rows[0] = row_from("");
+                    assert_eq!(unconfirmed_spinner_row(&rows), None);
+                    assert_eq!(lenient_spinner_row(&rows), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_astra_composed_prompt_is_stable_across_particle_phases() {
+        use kasa_bridge::screen::Color;
+        let accent = [242, 123, 155, 255];
+        let background = [34, 37, 44, 255];
+        for particle_bg in [None, Some(Color::Default), Some(Color::Rgb(12, 12, 12)), Some(Color::Rgb(80, 20, 140))] {
+            for phase in 0..32 {
+                let mut rows = vec![vec![GridCell::blank(); 80]; 8];
+                for cell in rows[4..7].iter_mut().flatten() { cell.bg = Color::Rgb(63, 69, 77); }
+                let marker = if phase % 2 == 0 { 0 } else { 2 };
+                for (cell, ch) in rows[5][marker..].iter_mut().zip("› Ask Codex to do anything".chars()) { cell.ch = ch; }
+                for (cell, ch) in rows[7].iter_mut().zip("gpt-6-astra xhigh · main · Context 0% used".chars()) { cell.ch = ch; }
+                for r in 1..7 {
+                    for p in 0..6 {
+                        let col = (phase * 13 + r * 5 + p * 17) % 80;
+                        if rows[r][col].ch != ' ' { continue; }
+                        rows[r][col].ch = char::from_u32(0x2801 + ((phase + r + p) % 255) as u32).unwrap();
+                        if r >= 4 {
+                            if let Some(bg) = &particle_bg { rows[r][col].bg = bg.clone(); }
+                        }
+                    }
+                }
+                for (r, c) in [(4, 0), (4, 75), (5, if marker == 0 { 79 } else { 0 })] {
+                    rows[r][c].ch = '⠁';
+                    if let Some(bg) = &particle_bg { rows[r][c].bg = bg.clone(); }
+                }
+                assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { rows }) if rows == (4..7)));
+                assert_eq!(find_filled_standing_anchor(&rows, 80), Some((3, 75.0)));
+                assert!(!crate::input::rows_show_working(&rows));
+                localize_codex_prompt_background(&mut rows, background);
+                style_prompt_box(&mut rows, accent);
+                overlay_codex_session_label(&mut rows, "Fixture", accent);
+                assert_eq!(rows[5][marker].fg, Color::Rgb(accent[0], accent[1], accent[2]));
+                assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { rows }) if rows == (4..7)), "phase={phase}, particle_bg={particle_bg:?}");
+                assert_eq!(find_filled_standing_anchor(&rows, 80), Some((3, 75.0)));
+                assert!(rows[4].iter().map(|c| c.ch).collect::<String>().contains("Fixture"));
+                assert!(rows[4..7].iter().flatten().filter(|c| !is_particle(c.ch))
+                    .all(|c| c.bg == tint_toward([34, 37, 44], accent, PROMPT_TINT)));
+                assert!(!crate::input::rows_show_working(&rows));
+            }
+        }
+    }
+
+    #[test]
+    fn historical_filled_prompts_do_not_hide_later_progress_or_approval() {
+        use kasa_bridge::screen::Color;
+        for marker in ['❯', '›'] {
+            let mut prompt = row_from(&format!("{marker} previous question"));
+            for cell in &mut prompt { cell.bg = Color::Rgb(63, 69, 77); }
+            for working in ["✻ Thinking… (3s)", "⠋ Loading", "• Working (3s • esc to interrupt)"] {
+                let rows = vec![prompt.clone(), row_from("  answer"), row_from(working)];
+                assert_eq!(find_claude_spinner(&rows), Some((2, 0)));
+            }
+            let rows = vec![prompt.clone(), row_from("  answer"), row_from("✻ Thinking…")];
+            assert_eq!(unconfirmed_spinner_row(&rows), Some((2, 0, '✻')));
+            assert_eq!(lenient_spinner_row(&rows), Some((2, 0)));
+            let rows = vec![prompt, row_from("Do you want to proceed?"), row_from("❯ 1. Yes"), row_from("  2. No")];
+            assert_eq!(find_claude_spinner(&rows), None);
+            assert!(crate::input::rows_show_approval_prompt(&rows).is_some());
+        }
     }
 
     /// codex 학생은 입력행 **바로 위**에 선다. claude 처럼 statusline 자리표시자
