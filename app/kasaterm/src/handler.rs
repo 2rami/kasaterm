@@ -1913,19 +1913,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketNacho(id) => {
-                {
-                    let mut ws = self.ws.lock().unwrap();
-                    let outer = ws.pid_to_pane.get(id).cloned().unwrap_or_else(|| id.clone());
-                    if let Some(p) = ws.panes.get_mut(&outer) {
-                        p.dirty = true;
-                    }
-                }
-                kasa_mcp::changes::bump();
-                self.chrome_dirty = true;
-                self.render_frame();
-                return;
-            }
             UserEvent::Notify {
                 surface_id,
                 title,

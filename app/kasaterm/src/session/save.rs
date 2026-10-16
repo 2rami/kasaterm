@@ -30,7 +30,6 @@ mod collapse_tests {
 
 pub(super) fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
     obj.insert("surface_key".into(), serde_json::json!(kasa_mcp::surface_keys::ensure(surface)));
-    kasa_mcp::nacho_pane::save_into(obj, surface);
     if let Some(key) = kasa_mcp::remote::remote_surface_key(surface) {
         obj.insert("remote_surface_key".into(), serde_json::json!(key));
     }

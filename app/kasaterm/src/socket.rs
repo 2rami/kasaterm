@@ -1644,17 +1644,6 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn set_nacho(&self, surface_id: &str, via: &str, place: &str) -> Result<()> {
-        // 없는 칸에 세우면 열쇠만 새로 생겨 그 번호를 물려받을 다음 칸과 무관하게 떠돈다.
-        if kasa_pty::lookup_session(surface_id).is_none() {
-            anyhow::bail!("no such surface {surface_id}");
-        }
-        let badge = kasa_mcp::nacho_pane::parse(via, place).map_err(|e| anyhow::anyhow!(e))?;
-        kasa_mcp::nacho_pane::set(surface_id, badge);
-        let _ = self.proxy.send_event(UserEvent::SocketNacho(surface_id.to_string()));
-        Ok(())
-    }
-
     fn report_cwd(
         &self,
         surface_id: &str,

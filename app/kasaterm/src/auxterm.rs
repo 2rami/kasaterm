@@ -633,8 +633,6 @@ impl App {
                 .map(|(i, _)| *i);
             let ctx = crate::render::TabStrip {
                 tabs: &labels,
-                // 꺼낸 창은 탭 이름만 — 나쵸 표지는 본창 탭 띠와 사이드바가 말한다.
-                badges: &[],
                 label: &pane_id,
                 x: 0.0,
                 y: AUX_HEADER_H,

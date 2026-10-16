@@ -289,9 +289,6 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // pc 처럼」). session = `/rename` 으로 붙인 세션 이름(codex 는 없다),
                 // harness = claude/codex, context_pct·branch = 상태줄의 그것.
                 "session": b.and_then(pane_session_name),
-                // 나쵸 봇이 띄운 칸이면 `{via, place, icon}` — 폰·웹 목록이 학생 칸과 갈라 그린다(icon 이 null 이면
-                // 창구 없는 나쵸 칸이라 하네스 로고에 나쵸 색만). 거울 줄은 위에서 저쪽 줄을 통째로 가져와 따라온다.
-                "nacho": crate::nacho_pane::badge(&id, harness.is_some()).map(|n| n.to_json()),
                 "harness": harness,
                 "context_pct": b.map(|p| p.context_pct).filter(|v| *v > 0),
                 "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),

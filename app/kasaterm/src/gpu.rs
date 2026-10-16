@@ -3466,9 +3466,6 @@ impl GpuRenderer {
             "sionic" => include_str!("../assets/icons/sionic.svg"),
             "mail" => include_str!("../assets/icons/mail.svg"),
             "antigravity" => include_str!("../assets/icons/antigravity.svg"),
-            // 나쵸가 띄운 칸의 창구 표지(`nacho_pane::Via::icon`).
-            "slack" => include_str!("../assets/icons/slack.svg"),
-            "discord" => include_str!("../assets/icons/discord.svg"),
             // 마크다운 콜아웃(`> [!NOTE]` …) 표지. 이모지 대신 SVG 를 쓰는 이유는
             // 이모지가 폰트에 따라 흑백 글리프로 떨어지기 때문 — 실제로 `⚠️` 가
             // 밋밋한 `▲` 로 나온다.

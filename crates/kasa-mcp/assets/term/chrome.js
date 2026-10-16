@@ -40,34 +40,18 @@
       options.onTheme?.(value);
     }
 
-    // 나쵸 봇이 띄운 칸의 색 — 데스크톱 `theme::nacho` 와 같은 값(나쵸 앱 테마의 하늘색 눈, 밝은 판은 글자색).
-    function nachoColor() {
-      const bg = /^#([0-9a-f]{6})$/i.exec(tokens?.palette?.bg || '');
-      const n = bg ? parseInt(bg[1], 16) : 0;
-      const light = 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) > 128;
-      return light ? '#0F7591' : '#38C0E0';
-    }
-    const nachoVia = { slack: '슬랙', discord: '디코', app: '앱' };
-
     function updatePane(pane) {
       if (!pane) return;
       lastPane = pane;
       const harness = (pane.harness || '').toLowerCase();
-      const nacho = pane.nacho || null;
-      const harnessIcon = nacho?.icon || (harness.includes('codex') ? 'codex' : harness.includes('claude') ? 'claude' : 'terminal');
-      if (fallback) {
-        fallback.style.setProperty('--harness-icon', icon(harnessIcon));
-        fallback.style.color = nacho ? nachoColor() : '';
-      }
-      const nachoName = nacho ? ['나쵸', nachoVia[nacho.via]].filter(Boolean).join(' · ') : '';
-      const name = nachoName || pane.name || (harness.includes('codex') ? 'Codex' : harness.includes('claude') ? 'Claude Code' : '터미널');
+      const harnessIcon = harness.includes('codex') ? 'codex' : harness.includes('claude') ? 'claude' : 'terminal';
+      if (fallback) fallback.style.setProperty('--harness-icon', icon(harnessIcon));
+      const name = pane.name || (harness.includes('codex') ? 'Codex' : harness.includes('claude') ? 'Claude Code' : '터미널');
       if (el('who')) el('who').textContent = name;
-      const title = pane.title || pane.peer_name || '터미널 세션';
-      if (el('whot')) el('whot').textContent = nacho?.place ? `${nacho.place} · ${title}` : title;
-      const color = nacho ? nachoColor() : pane.color || tokens?.character_accents?.[pane.name];
+      if (el('whot')) el('whot').textContent = pane.title || pane.peer_name || '터미널 세션';
+      const color = pane.color || tokens?.character_accents?.[pane.name];
       if (el('who')) el('who').style.color = validColor(color) ? color : '';
-      // 나쵸 칸은 판이 붙인 학생 얼굴이 있어도 창구 아이콘이 선다 — 얼굴이 나쵸 칸을 학생처럼 보이게 한다.
-      if (avatar && pane.slug && !nacho) {
+      if (avatar && pane.slug) {
         const source = `${root}/term/avatar/${encodeURIComponent(pane.slug)}.png`;
         if (failedAvatars.has(source)) {
           avatar.style.display = 'none';

@@ -80,19 +80,6 @@ pub fn attention() -> [u8; 4] {
     [250, 140, 42, 255]
 }
 
-/// 나쵸 봇이 띄운 칸의 색(창구 아이콘·탭 이름) — 학생 칸과 한눈에 갈리게 하는 표지다.
-/// 값은 나쵸 앱 테마(`nacho-neko …/nacho/app/Theme.kt` `Palette`)에서 가져왔다: 어두운 판은 하늘색 눈
-/// `accent` #38C0E0, 밝은 판은 그 앱이 글자에 쓰는 `primary` #0F7591 — #38C0E0 은 흰 바탕에서
-/// 2:1 이라 그림 하한(3:1)도 못 넘는다. `attention` 처럼 고정값인 이유도 같다: 테마 취향이 아니라
-/// 「나쵸 일」이라는 신호라 창마다 같은 색이어야 한다.
-pub fn nacho() -> [u8; 4] {
-    if current_is_light() {
-        [15, 117, 145, 255]
-    } else {
-        [56, 192, 224, 255]
-    }
-}
-
 /// Terminal ANSI 0-15, runtime-swappable alongside the UI tokens so a theme
 /// switch recolors the terminal body too (256-cube / grayscale stay computed).
 /// Seeded with the dark default (Ghostty Tomorrow Night Bright) so pre-settings

@@ -878,11 +878,6 @@ pub trait Backend: Send + Sync {
     fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {
         anyhow::bail!("set_color unsupported by this backend")
     }
-    /// 나쵸 칸 표지(`kasa_collab::nacho_pane`) — `via` 는 slack·discord·app·main, `none`·빈 값은 지우기.
-    /// Default: unsupported.
-    fn set_nacho(&self, _surface_id: &str, _via: &str, _place: &str) -> Result<()> {
-        anyhow::bail!("set_nacho unsupported by this backend")
-    }
     /// statusLine 이 매 렌더 보고하는 "현재 보는 경로" + 컨텍스트 창/사용 토큰.
     /// claude 가 셸 위에서 cd 해도 lsof(최상위 셸 cwd)로는 안 보여, 상태줄이
     /// 직접 push 한다. board 의 `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로").

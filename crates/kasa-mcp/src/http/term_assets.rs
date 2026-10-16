@@ -82,10 +82,6 @@ fn icon_source(name: &str) -> Option<&'static str> {
         "terminal.svg" => include_str!("../../../../app/kasaterm/assets/icons/terminal.svg"),
         "server.svg" => include_str!("../../../../app/kasaterm/assets/icons/server.svg"),
         "laptop.svg" => include_str!("../../../../app/kasaterm/assets/icons/laptop.svg"),
-        // 나쵸 칸 표지(`nacho_pane::Via::icon`) — 목록 줄 `nacho.icon` 이 이 이름을 준다.
-        "slack.svg" => include_str!("../../../../app/kasaterm/assets/icons/slack.svg"),
-        "discord.svg" => include_str!("../../../../app/kasaterm/assets/icons/discord.svg"),
-        "smartphone.svg" => include_str!("../../../../app/kasaterm/assets/icons/smartphone.svg"),
         _ => return None,
     })
 }
@@ -237,18 +233,4 @@ pub(super) fn routes() -> axum::Router {
         .route("/term/grid.css", get(term_grid_css))
         .route("/term/font.woff2", get(term_asset_font))
         .route("/term/avatar/{slug}", get(term_avatar))
-}
-
-#[cfg(test)]
-mod icon_tests {
-    use crate::nacho_pane::Via;
-
-    #[test]
-    fn web_serves_every_nacho_channel_icon() {
-        for via in [Via::Slack, Via::Discord, Via::App, Via::Main] {
-            if let Some(name) = via.icon() {
-                assert!(super::icon_source(&format!("{name}.svg")).is_some(), "/term/icon/{name}.svg 가 없다");
-            }
-        }
-    }
 }
