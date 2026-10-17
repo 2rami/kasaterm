@@ -101,6 +101,14 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "session.resume" => session_resume(backend, id, &req.params),
         "session.recent" => session_recent(backend, id, &req.params),
         "surface.close" => surface_close(backend, id, &req.params),
+        "surface.close_checked" => match backend.close_checked(&req.params) {
+            Ok(value) => Response::success(id, value),
+            Err(error) => backend_err(id, error),
+        },
+        "surface.reopen_checked" => match backend.reopen_checked(&req.params) {
+            Ok(value) => Response::success(id, value),
+            Err(error) => backend_err(id, error),
+        },
         "surface.dock" => surface_dock(backend, id, &req.params),
         "surface.undock" => surface_undock(backend, id, &req.params),
         "surface.rename" => surface_rename(backend, id, &req.params),

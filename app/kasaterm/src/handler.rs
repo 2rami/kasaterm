@@ -774,8 +774,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.migrate_finish(pane, res.clone());
                 return;
             }
-            UserEvent::MirrorCloseDone { action, targets, result } => {
-                self.finish_mirror_close(action.clone(), targets.clone(), result.clone());
+            UserEvent::MirrorCloseDone { action, targets, scope, result } => {
+                self.finish_mirror_close(action.clone(), targets.clone(), scope.clone(), result.clone());
+                return;
+            }
+            UserEvent::MirrorReopenDone { record, result } => {
+                self.finish_mirror_reopen(record.clone(), result.clone());
                 return;
             }
             UserEvent::RemoteShellReady(ready) => {
@@ -1432,6 +1436,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketCloseChecked(reopen, request, reply) => {
+                let result = if *reopen { self.reopen_source_checked(request) }
+                    else { self.close_source_checked(request) };
+                let _ = reply.send(result.map_err(|e| format!("{e:#}")));
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketCloseWindow(idx, expected, reply) => {
                 let r = if expected.as_ref().is_some_and(|addresses| !crate::mirror_close::same_room_addresses(
                     &self.room_close_addresses(*idx), addresses,
@@ -1790,7 +1802,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.open_url_for_pane(url, target.as_deref());
                 return;
             }
-            UserEvent::NativeConfirm(ok) => {
+            UserEvent::NativeConfirm(request, ok) => {
+                if *request != self.confirm_native_id { return; }
                 self.confirm_native = false;
                 self.confirm_dialog_pick(
                     if *ok { ConfirmBtn::Close } else { ConfirmBtn::Cancel },

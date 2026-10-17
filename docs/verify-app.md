@@ -130,6 +130,12 @@ KASATERM_AUTOFOREIGNSPLIT_MS=4000`을 더해 검사한다. `KASATERM_AUTOFOREIGN
 방 전체를 연다. 기기 목록 수집을 위해 사이드바를 켜 둔다(`sidebar_visible=false`로 부팅했다면
 `KASATERM_AUTOTOGGLE_SIDEBAR_MS=500`). `KASATERM_TEST_MIRROR_ROOM`을 빼면 기존 단일 칸 미러 검증이다.
 
+미러 닫기는 위 리그에 `KASATERM_TEST_MIRROR_CLOSE_MS=4500`, `KASATERM_TEST_MIRROR_CLOSE_KIND=tab|pane|session|remote-room|remote-pane`을 더한다.
+macOS 시트는 `KASATERM_UPDATE_RIG_SHOTS=<기존 폴더>`로 자기 앱의 시트만 캡처한다. `KASATERM_UPDATE_RIG_PRESS_MS=1800`은 기본 단추(취소),
+`KASATERM_UPDATE_RIG_BUTTON=닫기`를 더하면 그 제목의 실제 NSButton을 누른다(격리 실행에서만). `KASATERM_TEST_MD_SCRIPT`의 `reopen:`은 되살리기 경로를 실행한다.
+GPU 확인 카드는 `KASATERM_TEST_CLOSE_FALLBACK=1`로 별도 검사한다. 원본 첫 탭·다중 탭 칸·방 전체, 취소·원본 완료 응답·신원 변경 거절,
+혼합 로컬/미러 칸과 대기 중 새 탭 추가, 유예 시간 전후 되살리기를 모두 확인한다. 본판 세션으로 닫기·되살리기를 시험하지 않는다.
+
 ## KasaLite(터미널 고정판) 리그
 
 `scripts/build-lite-app.sh` 가 굽는 `dist/KasaLite.app` 은 같은 바이너리를 `kasaterm-lite` 로 이름만 바꾼 것이다. 부팅에서

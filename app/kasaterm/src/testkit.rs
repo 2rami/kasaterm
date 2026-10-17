@@ -4897,6 +4897,8 @@ impl App {
     /// 만들 수 없어서다(비공개 필드) — 키 경로 자체는 유닛 테스트가 맡는다.
     /// autosettings 처럼 함수-로컬 static 이라 `struct App` 은 안 건드린다.
     pub(crate) fn run_pending_automdscript(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        if crate::verification_run() { crate::macos_sparkle::rig_watch_windows(); }
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::OnceLock;
         static PLAN: OnceLock<Option<(Instant, u64, Vec<String>)>> = OnceLock::new();
@@ -4995,6 +4997,11 @@ impl App {
                 };
                 self.confirm_dialog_pick(btn, event_loop);
                 eprintln!("[mdscript] pick={v} modal_left={}", self.confirm_close.is_some());
+                self.wake_after_mdstep();
+                return;
+            }
+            Some(("reopen", _)) => {
+                self.reopen_closed_pane();
                 self.wake_after_mdstep();
                 return;
             }
@@ -6871,12 +6878,18 @@ impl App {
                         self.tabs_on_top = false;
                         self.refresh_machines_col();
                     }
+                    let (outer, tab) = {
+                        let ws = self.ws.lock().unwrap();
+                        let outer = ws.outer_for_pty(id).unwrap_or_else(|| id.clone());
+                        let tab = ws.panes.get(&outer).and_then(|p| p.tabs.iter().position(|t| t.pid.as_ref() == Some(id))).unwrap_or(0);
+                        (outer, tab)
+                    };
                     match kind.as_str() {
-                        "tab" => self.confirm_or_close_tab(id, 0),
+                        "tab" => self.confirm_or_close_tab(&outer, tab),
                         "session" => self.confirm_or_close_session(self.active_window),
                         "remote-room" => self.confirm_or_close_remote_room(label, Some(0), "fixture room"),
                         "remote-pane" => self.confirm_or_close_remote_cell(label, pane),
-                        _ => self.confirm_or_close_pane(id),
+                        _ => self.confirm_or_close_pane(&outer),
                     }
                     let waiting = self.confirm_close.as_ref().is_some_and(|dialog| matches!(
                         dialog.why, CloseWhy::Mirror { closing: false, error: None, .. }

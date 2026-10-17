@@ -162,20 +162,6 @@ pub(crate) fn send_copy_action() -> bool {
     send_app_edit_action(objc2::sel!(copy:))
 }
 
-/// 닫기 확인을 OS 시트로 띄운다. 응답은 `UserEvent::NativeConfirm` 으로 돌아온다.
-/// 못 띄우면(창 핸들 없음 등) false — 호출자가 앱 안 모달로 대신한다.
-#[cfg(target_os = "macos")]
-pub(crate) fn confirm_close_sheet(
-    window: &winit::window::Window,
-    title: &str,
-    info: &str,
-    proxy: EventLoopProxy<crate::UserEvent>,
-) -> bool {
-    confirm_sheet(window, title, info, ("닫기", "취소"), false, move |ok| {
-        let _ = proxy.send_event(crate::UserEvent::NativeConfirm(ok));
-    })
-}
-
 /// 두 갈래 확인을 OS 시트로 띄운다. `runModal` 이 아니라 completion 블록이라 winit 루프가 서지
 /// 않는다 — 전에 `runModal` 로 띄웠을 땐 시트가 떠 있는 동안 화면 갱신·출력 펌프가 멈췄다.
 /// `answer` 는 주 스레드에서 첫 단추면 `true` 로 한 번 불린다. 못 띄우면 false.
@@ -236,7 +222,9 @@ pub(crate) fn confirm_sheet(
         });
         // 다른 창(업데이트 진행 창 같은)에 가려진 채 시트가 서면 사람이 못 본다.
         let nil: *mut AnyObject = std::ptr::null_mut();
-        let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
+        if std::env::var_os("KASATERM_NO_FOCUS").is_none() {
+            let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
+        }
         let _: () = msg_send![alert, beginSheetModalForWindow: ns_window, completionHandler: &*handler];
     }
     true

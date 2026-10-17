@@ -2968,13 +2968,20 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .as_ref()
             .is_some_and(|t| t.leaves().iter().any(|l| *l == target));
         if !in_active {
-            // 다른 윈도우·백그라운드 세션의 pane 은 숨김 대상이 아니다(그쪽 트리를
-            // 여기서 조작하면 유령 leaf 가 남는다) — 기존 경로로 보낸다.
-            //
-            // ⚠️ 그 경로는 **죽인다.** 사이드바는 모든 방의 pane 을 보여주므로, 거기서
-            // 부를 때는 부르는 쪽이 먼저 `switch_window` 로 그 방을 활성으로 만들어야
-            // 한다. 안 그러면 「숨겼는데 학생이 사라졌다」가 된다.
-            self.remove_pane(target);
+            let Some(window) = self.window_of_pane(target) else { return };
+            self.record_closed_pane(target, true, stashed, stashed.then_some(crate::session::RetainedBy::User));
+            if !stashed { self.close_grace_input(target, true); }
+            self.notify_source_closed(target);
+            self.cancel_restore_pane(target);
+            if let Some(tree) = self.windows.get_mut(window).and_then(Option::as_mut) {
+                if tree.leaves().len() > 1 { tree.remove_leaf(target); }
+                else { self.windows[window] = None; }
+            }
+            self.pane_opener.remove(target);
+            self.rebento_window(window, &[], None);
+            self.publish_pty_layout();
+            self.session_touched = true;
+            self.chrome_dirty = true;
             return;
         }
         self.record_closed_pane(target, true, stashed, stashed.then_some(crate::session::RetainedBy::User));
@@ -3195,8 +3202,14 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .as_ref()
             .is_some_and(|t| t.leaves().iter().any(|l| *l == pid));
         if !in_active {
-            self.cancel_restore_pane(pid);
-            self.remove_pane(pid);
+            if let Some(window) = self.window_of_pane(pid) {
+                let last = self.windows.get(window).and_then(Option::as_ref).is_some_and(|tree| tree.leaves().len() == 1);
+                if last && self.split_beside(pid, kasa_pty::SplitDir::Horizontal, false).is_err() { return; }
+                self.hide_pane(pid);
+            } else {
+                self.cancel_restore_pane(pid);
+                self.remove_pane(pid);
+            }
             return;
         }
         let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());

@@ -2294,7 +2294,7 @@ impl App {
                     self.switch_window(wi);
                 }
                 if wi == self.active_window {
-                    self.close_pane(pane);
+                    self.confirm_or_close_pane(pane);
                 }
             }
             SidebarMenuAction::Dock => {
@@ -3439,24 +3439,21 @@ impl App {
                 None => (1, Some(pane.to_string())),
             }
         };
-        let mirror_action = if tabs_len > 1 {
-            PendingClose::Tab { pane: pane.to_string(), idx }
-        } else {
-            PendingClose::Pane { pane: pane.to_string() }
-        };
+        let mirror_action = PendingClose::Tab { pane: pane.to_string(), idx };
         let mirrored = !self.mirror_close_targets(&mirror_action).is_empty();
-        let action = if tabs_len > 1 {
+        let action = if tabs_len > 1 || mirrored {
             PendingClose::Tab {
                 pane: pane.to_string(),
                 idx,
             }
         } else {
-            let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
-            if leaves <= 1 && !mirrored {
+            let owner = self.window_of_pane(pane);
+            let leaves = owner.map_or(0, |window| self.window_leaves(window).len());
+            if leaves <= 1 && !mirrored && self.aux_terminal_index(pane).is_none() {
                 // 이 방의 마지막 pane. 방이 여럿이면 **방을 닫는 것**으로 잇는다 —
                 // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(사용자).
                 // 방이 하나뿐이면 그건 앱 종료라 OS 닫기 버튼에 맡기고 no-op.
-                let idx = self.active_window;
+                let Some(idx) = owner else { return };
                 if self.user_room_count() <= 1 {
                     return;
                 }
@@ -3556,24 +3553,24 @@ impl App {
         });
     }
     pub(crate) fn raise_confirm(&mut self, dlg: ConfirmClose) {
-        // 도는 작업 확인은 OS 시트로(「경고창 OS 기본으로」). 저장 안 한 문서·거울
-        // 닫기는 버튼이 셋이거나 상태가 바뀌어 앱 안 카드가 맡는다.
+        self.confirm_native_id = self.confirm_native_id.wrapping_add(1);
         #[cfg(target_os = "macos")]
-        let native = match (&dlg.why, self.window.as_ref()) {
-            (CloseWhy::Busy(proc), Some(window)) => {
-                let what = match &dlg.action {
-                    PendingClose::Window => "앱을 종료할까요?",
-                    PendingClose::Session(_) => "이 방을 닫을까요?",
-                    _ => "이 창을 닫을까요?",
-                };
-                crate::macos_open::confirm_close_sheet(
-                    window,
-                    what,
-                    &format!("{proc} 이(가) 아직 실행 중이에요. 닫으면 끊겨요."),
-                    self.proxy.clone(),
-                )
-            }
-            _ => false,
+        let native = {
+            let owner = match &dlg.action {
+                PendingClose::Tab { pane, .. } | PendingClose::Pane { pane } => self.aux_terminal_index(pane),
+                _ => None,
+            };
+            let window = owner.map(|i| self.aux.terminals[i].window.as_ref()).or(self.window.as_deref());
+            let compatible = !matches!(dlg.why, CloseWhy::Dirty(_) | CloseWhy::Mirror { closing: true, .. });
+            let fallback = crate::verification_run() && std::env::var_os("KASATERM_TEST_CLOSE_FALLBACK").is_some();
+            if let Some(window) = window.filter(|_| compatible && !fallback) {
+                let (title, detail) = crate::mirror_close::confirmation_text(&dlg);
+                let proxy = self.proxy.clone();
+                let request = self.confirm_native_id;
+                crate::macos_open::confirm_sheet(window, &title, &detail,
+                    (if matches!(dlg.why, CloseWhy::Mirror { error: Some(_), .. }) { "다시 시도" } else { "닫기" }, "취소"),
+                    true, move |ok| { let _ = proxy.send_event(UserEvent::NativeConfirm(request, ok)); })
+            } else { false }
         };
         #[cfg(not(target_os = "macos"))]
         let native = false;

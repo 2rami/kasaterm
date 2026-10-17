@@ -104,7 +104,7 @@ fn rig_feed(value: Option<&str>) -> Option<String> {
 /// 리그 전용 — Sparkle 창은 AppKit 이라 앱 캡처(wgpu 프레임)에 안 잡히고, 화면 녹화 권한 없이는 밖에서 찍을
 /// 길도 없다. 제 창은 권한 없이 창 서버에서 뜰 수 있어(시트 포함) `KASATERM_UPDATE_RIG_SHOTS` 면 달라질
 /// 때마다 PNG 로 남기고, `KASATERM_UPDATE_RIG_PRESS_MS` 면 그만큼 그대로인 창의 기본 단추(Return)를 누른다.
-fn rig_watch_windows() {
+pub(crate) fn rig_watch_windows() {
     use std::hash::{Hash, Hasher};
     type CreateImage = unsafe extern "C" fn(objc2_foundation::NSRect, u32, u32, u32) -> *mut AnyObject;
     struct Seen { digest: u64, since: Instant, pressed: bool }
@@ -166,7 +166,10 @@ fn rig_watch_windows() {
             let Some(after) = press else { continue };
             let entry = seen.1.get_mut(&number).expect("방금 본 창");
             if entry.pressed || now.duration_since(entry.since) < after { continue; }
-            let cell: *mut AnyObject = msg_send![window, defaultButtonCell];
+            let cell: *mut AnyObject = if crate::verification_run() {
+                std::env::var("KASATERM_UPDATE_RIG_BUTTON").ok()
+                    .map(|title| rig_button(content, &title)).unwrap_or_else(|| msg_send![window, defaultButtonCell])
+            } else { msg_send![window, defaultButtonCell] };
             if cell.is_null() { continue; }
             entry.pressed = true;
             let nil: *mut AnyObject = std::ptr::null_mut();
@@ -174,6 +177,24 @@ fn rig_watch_windows() {
             eprintln!("[update-rig] w{number} 기본 단추 누름");
         }
     });
+}
+
+unsafe fn rig_button(view: *mut AnyObject, title: &str) -> *mut AnyObject {
+    if let Some(button) = AnyClass::get(c"NSButton") {
+        let matches: Bool = unsafe { msg_send![view, isKindOfClass: button] };
+        if matches.as_bool() {
+            let label: *mut NSString = unsafe { msg_send![view, title] };
+            if !label.is_null() && unsafe { &*label }.to_string() == title { return view; }
+        }
+    }
+    let children: *mut AnyObject = unsafe { msg_send![view, subviews] };
+    let count: usize = unsafe { msg_send![children, count] };
+    for i in 0..count {
+        let child: *mut AnyObject = unsafe { msg_send![children, objectAtIndex: i] };
+        let found = unsafe { rig_button(child, title) };
+        if !found.is_null() { return found; }
+    }
+    std::ptr::null_mut()
 }
 
 fn writable_install_parent(exe: &Path) -> bool {

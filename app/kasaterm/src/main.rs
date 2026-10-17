@@ -1697,6 +1697,7 @@ pub(crate) struct InlineWebHost {
     pub(crate) restore_sidebar: bool,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct ClosedPane {
     // Pane numbers can be reused while an old row's confirmation is still on screen.
     pub(crate) ui_id: u64,
@@ -2090,6 +2091,7 @@ impl Default for PaneContent {
 /// for image / markdown tabs that have no shell behind them.
 #[derive(Default)]
 struct PaneTab {
+    close_identity: mirror_close::TabIdentity,
     content: PaneContent,
     server: Option<server_restore::RegisteredServer>,
     /// OSC 0/2 title — `printf '\e]0;hello\a'` from this tab's shell, or a
@@ -3783,7 +3785,12 @@ enum UserEvent {
     MirrorCloseDone {
         action: PendingClose,
         targets: Vec<mirror_close::MirrorTarget>,
-        result: Result<(), String>,
+        scope: mirror_close::LocalScope,
+        result: Result<serde_json::Value, String>,
+    },
+    MirrorReopenDone {
+        record: ClosedPane,
+        result: Result<serde_json::Value, String>,
     },
     /// bg-agents 폴러가 `sessionId→parentSessionId` 맵을 갱신했다 — 포크/백그라운드
     /// 세션의 부모 학생 상속을 재적용하라는 신호. 폴러는 3초 주기라 세션 바인딩
@@ -4051,7 +4058,7 @@ enum UserEvent {
     /// 기본 브라우저로 연다(맥북에서 미니 학생의 페이지를 보는 길).
     RemoteOpenUrl(String, String),
     /// OS 닫기 확인 시트의 답 — true 면 「닫기」.
-    NativeConfirm(bool),
+    NativeConfirm(u64, bool),
     /// 웹뷰 안에서 친 앱 단축키(Cmd+D 분할 등). 자식 창이 key 인 동안 winit
     /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
     /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
@@ -4124,6 +4131,8 @@ enum UserEvent {
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
+    SocketCloseChecked(bool, serde_json::Value,
+        std::sync::mpsc::Sender<Result<serde_json::Value, String>>),
     /// `window.close` 위임 → `close_window`. 답을 돌려보낸다 — 마지막 방은 못 닫는
     /// 이유를 부른 쪽(폰의 「방 닫기」)이 그대로 보여 줘야 해서다.
     SocketCloseWindow(
@@ -5505,6 +5514,8 @@ struct App {
     confirm_close: Option<ConfirmClose>,
     /// `confirm_close` 를 OS 시트가 대신 보여 주는 중 — 앱 안 카드는 안 그린다.
     confirm_native: bool,
+    confirm_native_id: u64,
+    mirror_close_scope: Option<mirror_close::LocalScope>,
     /// Confirm-modal button hit rects, refreshed each frame: `(btn, rect)`.
     confirm_btn_rects: Vec<(ConfirmBtn, (f32, f32, f32, f32))>,
     /// Chrome-style restore prompt shown at launch: the saved session state
@@ -6315,6 +6326,8 @@ impl App {
             text_cursor_shown: false,
             confirm_close: None,
             confirm_native: false,
+            confirm_native_id: 0,
+            mirror_close_scope: None,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
             restore_picker: restore_picker::State::default(),

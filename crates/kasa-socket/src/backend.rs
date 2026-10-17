@@ -793,6 +793,13 @@ pub trait Backend: Send + Sync {
     fn close_surface(&self, _surface_id: &str) -> Result<()> {
         anyhow::bail!("close_surface unsupported by this backend")
     }
+    /// Confirmed actions must be revalidated where the layout mutation runs.
+    fn close_checked(&self, _request: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("surface.close_checked unsupported by this backend")
+    }
+    fn reopen_checked(&self, _request: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("surface.reopen_checked unsupported by this backend")
+    }
     /// Fold a surface into its session's dock — the layout leaf is removed but
     /// the PTY stays alive (kill-free). Default: unsupported.
     fn dock_surface(&self, _surface_id: &str) -> Result<()> {

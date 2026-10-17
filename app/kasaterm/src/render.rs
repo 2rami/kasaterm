@@ -6317,58 +6317,7 @@ impl App {
                 let mirror = matches!(dlg.why, crate::CloseWhy::Mirror { .. });
                 let retry = matches!(dlg.why, crate::CloseWhy::Mirror { error: Some(_), .. });
                 let mirror_closing = matches!(dlg.why, crate::CloseWhy::Mirror { closing: true, .. });
-                // pane 통째 닫기(⋮ ×)를 「탭」이라 부르면 무엇이 사라지는지가
-                // 어긋난다 — 그건 그 pane 의 탭을 전부 걷는다. 와일드카드를 안 쓰는
-                // 이유는 `ActionKind` 디스패치와 같다: variant 가 늘었을 때 문구가
-                // 조용히 엉뚱한 쪽으로 접히지 않고 컴파일에서 걸리게.
-                let what = match dlg.action {
-                    crate::PendingClose::Window => "앱을",
-                    crate::PendingClose::Session(_) => "이 세션을",
-                    crate::PendingClose::RemoteRoom { .. } => "그 기기의 방을",
-                    crate::PendingClose::RemotePane { .. } => "그 기기의 세션을",
-                    crate::PendingClose::Pane { .. } => "이 pane 을",
-                    crate::PendingClose::Tab { .. } => "이 탭을",
-                    crate::PendingClose::AuxEditor(_) => "이 문서 창을",
-                };
-                let (title, subtitle) = match &dlg.why {
-                    crate::CloseWhy::Mirror { targets, closing, error } => {
-                        let source = targets.iter().take(3)
-                            .map(|t| format!("{} {}", if t.label.is_empty() { "원본 기기" } else { &t.label }, t.source))
-                            .collect::<Vec<_>>().join(", ");
-                        if *closing {
-                            ("닫는 중이에요".to_string(), source)
-                        } else if let Some(error) = error {
-                            ("닫지 못했어요".to_string(), error.clone())
-                        } else {
-                            ("원본 세션도 닫을까요?".to_string(), source)
-                        }
-                    }
-                    crate::CloseWhy::Busy(proc) => {
-                        (format!("{proc} 실행 중이에요"), format!("{what} 닫을까요?"))
-                    }
-                    // 파일 이름을 보여줘야 뭘 잃는지 안다. 셋을 넘으면 카드가
-                    // 감당 못 하니 나머지는 개수로 접는다.
-                    crate::CloseWhy::Dirty(docs) => {
-                        let head: Vec<&str> =
-                            docs.iter().take(3).map(|(_, n)| n.as_str()).collect();
-                        let rest = docs.len().saturating_sub(head.len());
-                        let names = if rest > 0 {
-                            format!("{} 외 {rest}개", head.join(", "))
-                        } else {
-                            head.join(", ")
-                        };
-                        (
-                            "저장하지 않은 변경이 있어요".to_string(),
-                            format!("{names} — {what} 닫을까요?"),
-                        )
-                    }
-                    // 왜 하나가 아니라 방이 닫히는지부터 말한다 — Cmd+W 는 「하나
-                    // 닫기」로 익힌 키라, 이유 없이 방 확인이 뜨면 오작동처럼 읽힌다.
-                    crate::CloseWhy::LastPane => (
-                        "이 방의 마지막 pane 이에요".to_string(),
-                        format!("{what} 닫을까요?"),
-                    ),
-                };
+                let (title, subtitle) = crate::mirror_close::confirmation_text(&dlg);
                 let title = &title;
                 let subtitle = subtitle.as_str();
                 // 부제에 파일 이름이 들어와 길이가 변하니 카드도 재서 정한다 —
@@ -6433,13 +6382,13 @@ impl App {
                     let rect = crate::native_controls::text_button(
                         g, (x, btn_y, w, btn_h), self.cursor_px, label, style,
                     );
-                    if mirror && btn == crate::ConfirmBtn::Cancel {
+                    if !dirty && btn == crate::ConfirmBtn::Cancel {
                         crate::native_controls::focus_ring(g, rect);
                     }
                     hits.push((btn, rect));
                 };
                 if mirror && !mirror_closing {
-                    let label = if retry { "다시 시도" } else { "원본 세션 닫기" };
+                    let label = if retry { "다시 시도" } else { "닫기" };
                     button(g, &mut confirm_btn_hits, label, crate::ConfirmBtn::Close, Some(theme::danger()));
                 } else if dirty {
                     // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이

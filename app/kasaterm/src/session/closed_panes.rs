@@ -37,8 +37,16 @@ impl App {
         if self.tmux.is_some() || !self.pty.contains_key(pane) {
             return;
         }
+        // The source owns undo for a mirrored close; a local VT snapshot cannot restore it.
+        if kasa_mcp::remote::is_view_pane(pane) || self.confirm_close.as_ref().is_some_and(|dialog| {
+            matches!(&dialog.why, CloseWhy::Mirror { targets, closing: true, .. }
+                if targets.iter().any(|target| target.local == pane))
+        }) { return; }
         // 되돌릴 자리를 가리킬 닻 — 같은 트리의 이웃 leaf(뒤쪽 우선, 없으면 앞).
-        let neighbor = self.pty_layout.as_ref().and_then(|t| {
+        let owner = self.window_of_pane(pane).unwrap_or(self.active_window);
+        let layout = if owner == self.active_window { self.pty_layout.as_ref() }
+            else { self.windows.get(owner).and_then(Option::as_ref) };
+        let neighbor = layout.and_then(|t| {
             let leaves = t.leaves();
             let i = leaves.iter().position(|l| *l == pane)?;
             leaves
@@ -164,7 +172,11 @@ impl App {
     /// 무한정 쌓인다.
     /// 상한은 **정리 대상만** 센다. 숨긴 것(`stashed`)은 세지도 놓지도 않는다 —
     /// 숨겨 둔 학생 여럿 때문에 방금 닫은 pane 이 밀려 죽으면 안 된다.
-    pub(crate) fn push_closed_pane(&mut self, c: crate::ClosedPane) {
+    pub(crate) fn push_closed_pane(&mut self, mut c: crate::ClosedPane) {
+        if let Some(record) = c.rec.as_object_mut() {
+            record.entry("close_record_key").or_insert_with(||
+                serde_json::json!(kasa_mcp::character::new_session_id()));
+        }
         self.closed_panes.push(c);
         while self.closed_panes.iter().filter(|c| !c.stashed).count() > crate::CLOSED_PANE_KEEP {
             let Some(i) = self.closed_panes.iter().position(|c| !c.stashed) else {
@@ -222,6 +234,10 @@ impl App {
     /// 닫힌 방이 아직 있으면 그 방으로 돌아가 원래 이웃 옆에 되살린다. 이웃이 그 사이
     /// 사라졌으면 활성 pane 옆으로 — 자리를 못 찾았다고 되살리기를 포기하진 않는다.
     pub(super) fn reopen_pane_record(&mut self, c: crate::ClosedPane) {
+        if c.rec.get("remote_restore").is_some() {
+            self.reopen_mirror_record(c);
+            return;
+        }
         // 밖에 나가 있는 방으로는 보내지 않는다 — `switch_window` 가 그 창을 앞으로
         // 보낼 뿐 메인은 그대로라, 되살린 pane 이 보이지 않는 방에 들어가 버린다.
         if c.window < self.windows.len() && c.window != self.active_window {
@@ -275,12 +291,14 @@ impl App {
             let (cols, rows) = self.window_cells();
             let Some(id) = self.restore_leaf(&c.rec, cols, rows) else {
                 eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
+                self.closed_panes.push(c);
+                self.set_toast("되살리지 못했어요. 닫힘 기록은 보관했어요".into());
                 return;
             };
             id
         };
         let anchor = c
-            .neighbor
+            .neighbor.clone()
             .filter(|n| {
                 self.pty.contains_key(n)
                     && self
@@ -296,6 +314,7 @@ impl App {
             )
             .is_err()
         }) {
+            self.closed_panes.push(c);
             return;
         }
         let grafted = match (anchor, self.pty_layout.as_mut()) {

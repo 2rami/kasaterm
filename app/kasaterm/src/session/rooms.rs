@@ -422,10 +422,8 @@ impl App {
                 self.notify_source_closed(pane_id);
                 self.cancel_restore_pane(pane_id);
             }
-            let mut ws = self.ws.lock().unwrap();
             for pane_id in layout.leaves() {
-                self.pty.remove(pane_id);
-                ws.panes.remove(pane_id);
+                self.drop_pane_resources(pane_id);
             }
         }
         if idx == self.active_window {

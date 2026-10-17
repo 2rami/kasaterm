@@ -1,22 +1,61 @@
 //! A mirror must remain visible until its source accepts the same close action.
 use super::*;
+mod source;
+mod reopen;
+mod scope;
+pub(crate) use scope::{LocalScope, TabIdentity};
+
+pub(crate) fn confirmation_text(dialog: &ConfirmClose) -> (String, String) {
+    let what = match dialog.action {
+        PendingClose::Window => "앱을 종료할까요?",
+        PendingClose::Session(_) | PendingClose::RemoteRoom { .. } => "이 방을 닫을까요?",
+        PendingClose::Tab { .. } => "이 탭을 닫을까요?",
+        PendingClose::Pane { .. } | PendingClose::RemotePane { .. } => "이 칸을 닫을까요?",
+        PendingClose::AuxEditor(_) => "이 문서 창을 닫을까요?",
+    };
+    match &dialog.why {
+        CloseWhy::Busy(process) => (what.into(), format!("{process} 이(가) 실행 중이에요. 닫으면 작업이 중단돼요.")),
+        CloseWhy::LastPane => (what.into(), "마지막 칸을 닫으면 이 방도 닫혀요.".into()),
+        CloseWhy::Mirror { targets, closing, error } => {
+            let names = targets.iter().take(3).map(|target| {
+                let name = kasa_mcp::machines::cached_pane(&target.label, &target.source)
+                    .and_then(|row| row["name"].as_str().map(str::to_owned)).unwrap_or_else(|| target.source.clone());
+                format!("{} · {name}", target.label)
+            }).collect::<Vec<_>>().join(", ");
+            if *closing { ("닫는 중이에요".into(), names) }
+            else if let Some(error) = error { ("닫지 못했어요".into(), error.clone()) }
+            else { (what.into(), format!("원본 기기에서도 닫혀요 — {names}")) }
+        }
+        CloseWhy::Dirty(docs) => {
+            let names = docs.iter().take(3).map(|(_, name)| name.as_str()).collect::<Vec<_>>().join(", ");
+            ("저장하지 않은 변경이 있어요".into(), format!("{names} — {what}"))
+        }
+    }
+}
 
 pub(crate) fn default_button(why: &CloseWhy) -> ConfirmBtn {
     match why {
         CloseWhy::Mirror { .. } => ConfirmBtn::Cancel,
         CloseWhy::Dirty(_) => ConfirmBtn::Save,
-        _ => ConfirmBtn::Close,
+        _ => ConfirmBtn::Cancel,
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MirrorTarget {
     pub local: String,
     pub base: String,
     pub source: String,
     pub label: String,
+    local_key: Option<String>,
+    local_pty: Option<usize>,
     source_key: Option<String>,
     address: Option<serde_json::Value>,
+    window: Option<u64>,
+    outer: String,
+    pane_members: Vec<String>,
+    room_members: Vec<String>,
+    room_scope: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +84,13 @@ fn completion_effect(result: Result<(), String>, unchanged: bool) -> CloseEffect
     }
 }
 
+fn reply_completion(result: &Result<serde_json::Value, String>) -> Result<(), String> {
+    match result {
+        Ok(reply) => reply["error"].as_str().map(|e| Err(e.to_string())).unwrap_or(Ok(())),
+        Err(error) => Err(error.clone()),
+    }
+}
+
 fn same_members(actual: &[String], expected: &[String]) -> bool {
     let a: std::collections::BTreeSet<_> = actual.iter().collect();
     let b: std::collections::BTreeSet<_> = expected.iter().collect();
@@ -65,42 +111,84 @@ fn source_address(board: &serde_json::Value, source: &str, key: Option<&str>) ->
     matches.next().is_none().then_some(address)
 }
 
-fn request_source_close(action: &PendingClose, targets: &[MirrorTarget]) -> Result<(), String> {
-    if let PendingClose::RemoteRoom { window, .. } = action {
-        let idx = window.ok_or_else(|| "원본 앱을 업데이트한 뒤 방을 닫아 주세요".to_string())?;
-        let first = targets.first().ok_or_else(|| "닫을 세션이 없어요".to_string())?;
-        let addresses: Option<Vec<_>> = targets.iter().map(|target| target.address.clone()).collect();
-        let addresses = addresses.ok_or_else(|| "원본 세션 정보를 아직 받지 못했어요".to_string())?;
-        return kasa_mcp::remote::remote_cmd(&first.base, "window.close_checked",
-            serde_json::json!({"idx": idx, "addresses": addresses}))
-            .map(|_| ()).map_err(|error| {
-                let message = format!("{error:#}");
-                if message.contains("window.close_checked") {
-                    "원본 기기도 업데이트한 뒤 방을 닫아 주세요".to_string()
-                } else { format!("{}: {message}", first.label) }
-            });
+fn close_request(action: &PendingClose, targets: &[&MirrorTarget]) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let first = targets.first().ok_or_else(|| "닫을 세션이 없어요".to_string())?;
+    let addresses: Option<Vec<_>> = targets.iter().map(|t| t.address.clone()).collect();
+    let addresses = addresses.ok_or_else(|| "원본 세션 정보를 아직 받지 못했어요".to_string())?;
+    let ids: Vec<_> = targets.iter().map(|t| t.source.clone()).collect();
+    let room = targets.iter().all(|t| t.room_scope && t.window == first.window)
+        && same_members(&ids, &first.room_members);
+    if matches!(action, PendingClose::RemoteRoom { .. }) && !room {
+        return Err("원본 방 정보를 아직 받지 못했어요. 다시 확인해 주세요".into());
     }
-    let mut closed = std::collections::HashSet::new();
-    targets.iter().try_for_each(|target| {
-        if !closed.insert((&target.base, &target.source)) { return Ok(()); }
-        let address = target.address.as_ref()
-            .ok_or_else(|| "원본 세션 정보를 아직 받지 못했어요. 다시 확인해 주세요".to_string())?;
-        let reply = kasa_mcp::remote::remote_post_json(&target.base, "/collab/act",
-            &serde_json::json!({"op": "close", "address": address, "local_only": true, "force": true}))
-            .map_err(|error| format!("{} {}: {error:#}", target.label, target.source))?;
-        if reply["ok"] != true || reply["closed"] != true {
-            return Err(reply["error"].as_str().unwrap_or("원본이 닫기를 완료하지 못했어요").to_string());
+    let pane = !matches!(action, PendingClose::Tab { .. })
+        && targets.iter().all(|t| t.outer == first.outer)
+        && same_members(&ids, &first.pane_members);
+    let kind = if room { "room" } else if pane { "pane" } else if ids.len() == 1 { "tab" } else { "tabs" };
+    Ok(json!({"kind": kind, "window": first.window, "addresses": addresses}))
+}
+
+fn request_source_close(action: &PendingClose, targets: &[MirrorTarget]) -> Result<serde_json::Value, String> {
+    let mut groups: std::collections::BTreeMap<&str, Vec<&MirrorTarget>> = Default::default();
+    for target in targets {
+        let group = groups.entry(&target.base).or_default();
+        if !group.iter().any(|old| old.source == target.source && old.address == target.address) { group.push(target); }
+    }
+    let requests = groups.into_iter().map(|(base, group)| {
+        close_request(action, &group).map(|request| (base, group[0], request))
+    }).collect::<Result<Vec<_>, _>>()?;
+    let mut records = Vec::new();
+    for (base, first, request) in requests {
+        match kasa_mcp::remote::remote_cmd(base, "surface.close_checked", request) {
+            Ok(reply) => {
+                if let Some(rows) = reply["result"]["records"].as_array() {
+                    for row in rows {
+                        records.push(serde_json::json!({"base": base, "label": first.label, "receipt": row}));
+                    }
+                }
+                if reply["result"]["closed"] != true {
+                    return Ok(serde_json::json!({"records": records,
+                        "error": reply["result"]["error"].as_str().unwrap_or("원본이 닫기를 완료하지 못했어요")}));
+                }
+            }
+            result => {
+                let error = result.err().map(|error| format!("{error:#}"))
+                    .unwrap_or_else(|| "원본이 닫기를 완료하지 못했어요".into());
+                let error = if error.contains("surface.close_checked") {
+                    "원본 기기도 업데이트한 뒤 닫아 주세요".to_string()
+                } else { format!("{}: {error}", first.label) };
+                return Ok(serde_json::json!({"records": records, "error": error}));
+            }
         }
-        Ok(())
-    })
+    }
+    Ok(serde_json::json!({"records": records}))
+}
+
+fn target_metadata(target: &mut MirrorTarget) {
+    let snapshot = kasa_mcp::machines::snapshot();
+    let Some(rows) = snapshot.iter().find(|m| m["label"] == target.label)
+        .and_then(|m| m["panes"].as_array()) else { return };
+    let Some(row) = rows.iter().find(|r| r["id"] == target.source) else { return };
+    target.window = row["window"].as_u64();
+    target.outer = row["tab_of"].as_str().unwrap_or(&target.source).to_string();
+    for row in rows.iter().filter(|r| !crate::machinescol::remote_pane_closed(r) && r["mirror_of"].is_null()) {
+        let Some(id) = row["id"].as_str() else { continue };
+        if id == target.outer || row["tab_of"] == target.outer { target.pane_members.push(id.to_string()); }
+        if target.window.is_some() && row["window"].as_u64() == target.window { target.room_members.push(id.to_string()); }
+    }
+    target.pane_members.sort();
+    target.room_members.sort();
 }
 
 fn close_surface_ids(ws: &Workspace, action: &PendingClose) -> Vec<String> {
     let mut ids = match action {
         // A document tab has no PTY; falling back to its container closes a different tab.
-        PendingClose::Tab { pane, idx } => ws.panes.get(pane)
-            .and_then(|p| p.tabs.get(*idx))
-            .and_then(|tab| tab.pid.clone()).into_iter().collect(),
+        PendingClose::Tab { pane, idx } => match ws.panes.get(pane) {
+            Some(p) => p.tabs.get(*idx).and_then(|tab| tab.pid.clone()).into_iter().collect(),
+            None if *idx == 0 => vec![pane.clone()],
+            None => Vec::new(),
+        },
         PendingClose::Pane { pane } => {
             let mut ids = vec![pane.clone()];
             if let Some(p) = ws.panes.get(pane) {
@@ -154,14 +242,24 @@ impl App {
         };
         if let Some((label, mut ids)) = remote {
             let Some(machine) = kasa_mcp::machines::find(label) else { return vec![]; };
+            if let PendingClose::RemotePane { pane, .. } = action {
+                if let Some(rows) = kasa_mcp::machines::snapshot().iter()
+                    .find(|m| m["label"] == *label).and_then(|m| m["panes"].as_array()) {
+                    ids.extend(rows.iter().filter(|r| r["tab_of"] == *pane && !crate::machinescol::remote_pane_closed(r))
+                        .filter_map(|r| r["id"].as_str().map(str::to_string)));
+                }
+            }
             ids.sort();
             ids.dedup();
             return ids.into_iter().map(|source| {
                 let source_key = kasa_mcp::machines::cached_pane(label, &source)
                     .and_then(|row| row["surface_key"].as_str().map(str::to_owned));
                 let address = source_address(&board, &source, source_key.as_deref());
-                MirrorTarget { local: String::new(), base: machine.base.clone(), source,
-                    label: label.clone(), source_key, address }
+                let mut target = MirrorTarget { base: machine.base.clone(), source,
+                    label: label.clone(), source_key, address,
+                    room_scope: matches!(action, PendingClose::RemoteRoom { .. }), ..Default::default() };
+                target_metadata(&mut target);
+                target
             }).collect();
         }
         let ws = self.ws.lock().unwrap();
@@ -177,19 +275,27 @@ impl App {
         } else {
             close_surface_ids(&ws, action)
         };
+        drop(ws);
+        let room_scope = matches!(action, PendingClose::Session(idx) if self.remote_view_of_window(*idx).is_some());
         ids.into_iter().filter_map(|local| {
             let info = kasa_mcp::remote::remote_info(&local)?;
             let source_key = kasa_mcp::remote::remote_surface_key(&local);
             let address = source_address(&board, &info.remote_id, source_key.as_deref());
-            info.view.then_some(MirrorTarget {
+            let mut target = MirrorTarget {
+                local_key: Some(kasa_mcp::surface_keys::ensure(&local)),
+                local_pty: self.pty.get(&local).map(|pty| Arc::as_ptr(pty) as usize),
                 source_key, address, local, base: info.base, source: info.remote_id, label: info.label,
-            })
+                room_scope, ..Default::default()
+            };
+            target_metadata(&mut target);
+            info.view.then_some(target)
         }).collect()
     }
 
     pub(crate) fn guard_mirror_close(&mut self, action: &PendingClose) -> bool {
         let targets = self.mirror_close_targets(action);
         if targets.is_empty() { return false; }
+        self.mirror_close_scope = Some(self.local_close_scope(action, &targets));
         self.raise_confirm(ConfirmClose {
             why: CloseWhy::Mirror { targets, closing: false, error: None },
             action: action.clone(),
@@ -200,7 +306,10 @@ impl App {
     pub(crate) fn choose_mirror_close(
         &mut self, action: PendingClose, targets: Vec<MirrorTarget>, button: ConfirmBtn,
     ) {
-        match choice_effect(button, self.mirror_close_targets(&action) == targets) {
+        let scope = self.local_close_scope(&action, &targets);
+        let unchanged = self.mirror_close_targets(&action) == targets
+            && self.mirror_close_scope.as_ref() == Some(&scope);
+        match choice_effect(button, unchanged) {
             CloseEffect::Source => {}
             CloseEffect::Stale => {
                 self.set_toast("거울이 바뀌었어. 닫을 창을 다시 골라줘".into());
@@ -217,15 +326,17 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let result = request_source_close(&action, &targets);
-            let _ = proxy.send_event(UserEvent::MirrorCloseDone { action, targets, result });
+            let _ = proxy.send_event(UserEvent::MirrorCloseDone { action, targets, scope, result });
         });
     }
 
     pub(crate) fn finish_mirror_close(
-        &mut self, action: PendingClose, targets: Vec<MirrorTarget>, result: Result<(), String>,
+        &mut self, action: PendingClose, targets: Vec<MirrorTarget>, scope: LocalScope, result: Result<serde_json::Value, String>,
     ) {
-        self.confirm_close = None;
-        match completion_effect(result, self.mirror_close_targets(&action) == targets) {
+        let completion = reply_completion(&result);
+        let effect = completion_effect(completion, true);
+        if let Ok(reply) = &result { self.remember_mirror_close(&targets, reply); }
+        match effect {
             CloseEffect::Error(error) => {
                 self.confirm_close = Some(ConfirmClose {
                     why: CloseWhy::Mirror { targets, closing: false, error: Some(error) },
@@ -233,10 +344,20 @@ impl App {
                 });
             }
             CloseEffect::Local => {
-                self.remote_keep.extend(targets.iter().filter(|t| !t.local.is_empty()).map(|t| t.local.clone()));
-                self.do_close_locally(action);
+                for target in targets.iter().filter(|_| scope.matches_workspace(self)).cloned().collect::<Vec<_>>() {
+                    if !target.local.is_empty() && target.local_key.is_some()
+                        && self.pty.get(&target.local).map(|pty| Arc::as_ptr(pty) as usize) == target.local_pty
+                        && kasa_mcp::surface_keys::get(&target.local) == target.local_key
+                        && kasa_mcp::remote::remote_info(&target.local).is_none_or(|info|
+                            info.view && info.base == target.base && info.remote_id == target.source
+                            && kasa_mcp::remote::remote_surface_key(&target.local) == target.source_key) {
+                        self.remove_finished_surface(&target.local);
+                    }
+                }
+                if let Err(error) = self.finish_local_close_scope(&action, &scope) { self.set_toast(error.to_string()); }
+                self.confirm_close = None;
             }
-            _ => self.set_toast("원본은 닫혔어. 바뀐 거울 목록은 그대로 뒀어".into()),
+            _ => { self.confirm_close = None; }
         }
         kasa_mcp::machines::poke();
         self.info.machines_col.last_refresh = None;
@@ -249,6 +370,25 @@ impl App {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn tab_pane_and_complete_room_have_distinct_close_scopes() {
+        let a = MirrorTarget { source: "%0".into(), outer: "%0".into(), window: Some(2), room_scope: true,
+            pane_members: vec!["%0".into(), "%1".into()], room_members: vec!["%0".into(), "%1".into()],
+            address: Some(serde_json::json!({"surface_id":"%0"})), ..Default::default() };
+        let b = MirrorTarget { source: "%1".into(), address: Some(serde_json::json!({"surface_id":"%1"})), ..a.clone() };
+        let tab = PendingClose::Tab { pane: "%local".into(), idx: 0 };
+        assert_eq!(close_request(&tab, &[&a]).unwrap()["kind"], "tab");
+        let pane = PendingClose::Pane { pane: "%local".into() };
+        let mut plain_a = a.clone(); plain_a.room_scope = false;
+        let mut plain_b = b.clone(); plain_b.room_scope = false;
+        assert_eq!(close_request(&pane, &[&plain_a]).unwrap()["kind"], "tab", "a single mirrored tab never closes its siblings");
+        assert_eq!(close_request(&pane, &[&plain_a, &plain_b]).unwrap()["kind"], "pane");
+        assert_eq!(close_request(&PendingClose::Session(8), &[&a, &b]).unwrap()["kind"], "room");
+        assert_eq!(close_request(&PendingClose::Session(8), &[&plain_a, &plain_b]).unwrap()["kind"], "pane", "a mixed local room never closes a source room");
+        let remote = PendingClose::RemoteRoom { label: "source".into(), window: Some(2), room: "room".into() };
+        assert!(close_request(&remote, &[&a]).is_err(), "a partial room list cannot degrade to closing individual panes");
+    }
 
     #[test]
     fn a_pending_room_close_rejects_reused_indices_and_changed_members() {
@@ -291,7 +431,7 @@ mod tests {
             assert!(default_button(&why) == ConfirmBtn::Cancel);
         }
         assert!(default_button(&CloseWhy::Dirty(vec![])) == ConfirmBtn::Save);
-        assert!(default_button(&CloseWhy::Busy("local task".into())) == ConfirmBtn::Close);
+        assert!(default_button(&CloseWhy::Busy("local task".into())) == ConfirmBtn::Cancel);
     }
 
     #[test]
@@ -315,21 +455,22 @@ mod tests {
             let mut request = [0u8; 4096];
             let count = socket.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..count]);
-            assert!(request.starts_with("POST /collab/act HTTP/1.1\r\n"));
+            assert!(request.starts_with("POST /cmd HTTP/1.1\r\n"));
+            assert!(request.contains("surface.close_checked"));
             assert!(!request.contains("kill=1"));
             seen.send(()).unwrap();
             approval.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-            let body = if ok { r#"{"ok":true,"closed":true}"# } else { r#"{"ok":false,"error":"source unavailable"}"# };
+            let body = if ok { r#"{"ok":true,"result":{"closed":true,"records":[]}}"# } else { r#"{"ok":false,"error":"source unavailable"}"# };
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             1
         });
-        let target = MirrorTarget { local: "%2".into(), base, source: "%16".into(), label: "fake source".into(), source_key: None, address: Some(serde_json::json!({"surface_id":"%16","surface_key":"fixture-key"})) };
+        let target = MirrorTarget { local: "%2".into(), base, source: "%16".into(), label: "fake source".into(), source_key: None, address: Some(serde_json::json!({"surface_id":"%16","surface_key":"fixture-key"})), ..Default::default() };
         assert_eq!(choice_effect(ConfirmBtn::Close, true), CloseEffect::Source);
         let worker = std::thread::spawn(move || request_source_close(&PendingClose::Pane { pane: "%2".into() }, &[target.clone(), target]));
         received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(!worker.is_finished(), "local close cannot be approved before the source replies");
         approve.send(()).unwrap();
-        let effect = completion_effect(worker.join().unwrap(), true);
+        let effect = completion_effect(reply_completion(&worker.join().unwrap()), true);
         (effect, server.join().unwrap())
     }
 
@@ -392,7 +533,7 @@ mod tests {
     #[test]
     fn a_reused_source_number_does_not_match_a_pending_close() {
         let old = MirrorTarget { local: "%2".into(), base: "http://127.0.0.1:1".into(),
-            source: "%16".into(), label: "fixture".into(), source_key: Some("old-source".into()), address: None };
+            source: "%16".into(), label: "fixture".into(), source_key: Some("old-source".into()), address: None, ..Default::default() };
         let new = MirrorTarget { source_key: Some("new-source".into()), ..old.clone() };
         assert_eq!(choice_effect(ConfirmBtn::Close, old == new), CloseEffect::Stale);
         assert_eq!(completion_effect(Ok(()), old == new), CloseEffect::Stale);

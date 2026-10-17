@@ -2327,6 +2327,24 @@ impl Backend for PtyBackend {
             .map_err(anyhow::Error::msg)
     }
 
+    fn close_checked(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketCloseChecked(false, request.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("GUI event loop closed"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| anyhow::anyhow!("닫기 응답을 아직 받지 못했어요"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn reopen_checked(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketCloseChecked(true, request.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("GUI event loop closed"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| anyhow::anyhow!("되살리기 응답을 아직 받지 못했어요"))?
+            .map_err(anyhow::Error::msg)
+    }
+
     fn close_surface(&self, surface_id: &str) -> Result<()> {
         let web_existed = is_web_shell(surface_id)
             && (kasa_pty::lookup_session(surface_id).is_some() || kasa_pty::kept_sessions().iter().any(|id| id == surface_id));

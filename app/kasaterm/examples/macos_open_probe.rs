@@ -7,7 +7,6 @@ mod macos_open;
 #[derive(Debug)]
 enum UserEvent {
     OpenMarkdownWindow(String),
-    NativeConfirm(bool),
     Timeout,
 }
 
@@ -42,7 +41,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 UserEvent::Timeout => event_loop.exit(),
-                UserEvent::NativeConfirm(confirmed) => unreachable!("unexpected confirmation: {confirmed}"),
             }
         }
 

@@ -872,7 +872,7 @@ impl App {
         let plus = t.tabs_out.plus_rect.filter(in_rect).is_some();
 
         if let Some(i) = close {
-            self.close_tab(&pane_id, i);
+            self.confirm_or_close_tab(&pane_id, i);
         } else if let Some(i) = switch {
             let mut ws = self.ws.lock().unwrap();
             if let Some(p) = ws.panes.get_mut(&pane_id) {

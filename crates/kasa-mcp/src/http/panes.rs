@@ -3,6 +3,49 @@
 use super::*;
 use super::migrate::TRANSCRIPT_UPLOAD_LIMIT;
 
+#[cfg(test)]
+mod close_authority_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Desk(AtomicUsize);
+    impl Backend for Desk {
+        fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn close_checked(&self, _: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+            self.0.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!({"closed":true}))
+        }
+        fn reopen_checked(&self, request: &serde_json::Value) -> anyhow::Result<serde_json::Value> { self.close_checked(request) }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_commands_require_owner_not_guest_and_allow_authenticated_machine_transport() {
+        let desk = Arc::new(Desk::default());
+        for method in ["surface.close_checked", "surface.reopen_checked"] {
+            for owner in [Some(false), Some(true), None] {
+                let auth = owner.map(|owner| axum::extract::Extension(MobileAuth(crate::mobile::MobileUser {
+                    name: "fixture".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner,
+                })));
+                let before = desk.0.load(Ordering::SeqCst);
+                let response = cmd_handler(desk.clone(), auth, Json(serde_json::json!({"method":method,"params":{}}))).await.into_response();
+                if owner == Some(false) {
+                    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+                    assert_eq!(desk.0.load(Ordering::SeqCst), before);
+                } else {
+                    assert_eq!(response.status(), axum::http::StatusCode::OK);
+                    assert_eq!(desk.0.load(Ordering::SeqCst), before + 1);
+                }
+            }
+        }
+    }
+}
+
 /// `POST /focus?surface=<id>` — pane 포커스(arona-ui 카드 클릭 → 해당 pane).
 /// 쿼리 파라미터인 이유는 session-switch 와 같다(null-origin webview 의 CORS
 /// preflight 회피). surface id 의 '%' 는 %25 인코딩(encodeURIComponent) 권장
@@ -98,11 +141,17 @@ async fn spawn_shell_handler(
 /// 기존 창구를 그대로 쓰게 둔다.
 async fn cmd_handler(
     backend: Arc<dyn Backend>,
+    auth: Option<axum::extract::Extension<MobileAuth>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if auth.as_ref().is_some_and(|a| !a.0.0.owner) && req["method"] != "window.list" {
+        return (axum::http::StatusCode::FORBIDDEN, "owner only").into_response();
+    }
     const ALLOWED: &[&str] = &[
         "surface.split",
         "surface.close",
+        "surface.close_checked",
+        "surface.reopen_checked",
         "surface.swap",
         "surface.move",
         // 거울 창에서 분할선을 끌거나 자리를 옮기면 그대로 저쪽에 보낸다(2026-09-17).
@@ -131,7 +180,7 @@ async fn cmd_handler(
             serde_json::json!({ "ok": false, "error": format!("응답 직렬화 실패: {e}") })
         })
     };
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body)).into_response()
 }
 
 /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(PTY respawn,
@@ -583,8 +632,8 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         )
         .route(
             "/cmd",
-            post(move |body: Json<serde_json::Value>| {
-                cmd_handler(cmd_backend.clone(), body)
+            post(move |auth: Option<axum::extract::Extension<MobileAuth>>, body: Json<serde_json::Value>| {
+                cmd_handler(cmd_backend.clone(), auth, body)
             }),
         )
         .route(
