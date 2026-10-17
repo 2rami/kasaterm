@@ -1338,9 +1338,16 @@ pub(crate) fn restyle_tell_messages(
             r += 1;
             continue;
         };
-        let band = band_bg(&rows[r][..cols]);
-        if band.is_some() {
-            restyle_message_background(&mut rows[r][..cols], accent);
+        let band = band_edges(&rows[r][..cols]);
+        let fill = message_fill(accent);
+        if let Some(band) = &band {
+            if let Some(above) = r.checked_sub(1) {
+                let cols = foreground.prefix_end(above, rows[above].len());
+                if band_pad_row(&rows[above][..cols], band) {
+                    recolor_band(&mut rows[above][..cols], band, &fill);
+                }
+            }
+            recolor_band(&mut rows[r][..cols], band, &fill);
         }
         if let (Some(col), Some(slug)) = (
             restyle_tell_line(&mut rows[r][..cols], start, end, &name, accent),
@@ -1353,28 +1360,52 @@ pub(crate) fn restyle_tell_messages(
             let cols = foreground.prefix_end(r, rows[r].len());
             let row = &mut rows[r][..cols];
             if !tell_wrap_continuation(row)
-                || band.as_ref().is_some_and(|band| band_bg(row).as_ref() != Some(band))
+                || band.as_ref().is_some_and(|band| band_edges(row).as_ref() != Some(band))
             {
                 break;
             }
-            if band.is_some() {
-                restyle_message_background(row, accent);
+            if let Some(band) = &band {
+                recolor_band(row, band, &fill);
             }
             tint_row(row, accent);
             r += 1;
+        }
+        // codex 는 내 말 띠 위아래에 빈 띠 줄을 한 줄씩 둔다. 글줄만 바꾸면 띠가 두 색으로 갈린다.
+        if let Some(band) = &band {
+            if r < rows.len() {
+                let cols = foreground.prefix_end(r, rows[r].len());
+                if band_pad_row(&rows[r][..cols], band) {
+                    recolor_band(&mut rows[r][..cols], band, &fill);
+                    r += 1;
+                }
+            }
         }
     }
     faces
 }
 
-fn restyle_message_background(row: &mut [GridCell], accent: [u8; 4]) {
+fn message_fill(accent: [u8; 4]) -> kasa_bridge::screen::Color {
     let base = theme::pane_bg();
     let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
-    let fill = tint_toward([base[0], base[1], base[2]], accent, if light { 0.10 } else { 0.18 });
-    let end = row.iter().rposition(|c| !matches!(c.ch, ' ' | '\0')).map_or(0, |last| last + 2);
-    for (col, cell) in row.iter_mut().enumerate() {
-        cell.bg = if col < end { fill.clone() } else { kasa_bridge::screen::Color::Default };
+    tint_toward([base[0], base[1], base[2]], accent, if light { 0.10 } else { 0.18 })
+}
+
+/// 원본 띠의 모양(줄 끝·여백까지)은 두고 색만 바꾼다. 글 끝에서 띠를 끊으면 줄마다 끝이 들쭉날쭉해지고,
+/// 띠색이 아닌 셀(ANSI 배경)과 역상 선택은 원본의 뜻이라 그대로 둔다.
+fn recolor_band(row: &mut [GridCell], band: &kasa_bridge::screen::Color, fill: &kasa_bridge::screen::Color) {
+    for cell in row.iter_mut().filter(|c| c.bg == *band && !c.inverse) {
+        cell.bg = fill.clone();
     }
+}
+
+/// 띠 줄의 색 — 양 끝 셀로 본다. 본문 안 ANSI 배경 한 칸이 전폭 판정을 깨면 그 줄에서 쪽지가 끊겨 아래가 원본색으로 남는다.
+fn band_edges(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
+    let (first, last) = (row.first()?, row.last()?);
+    (!matches!(first.bg, kasa_bridge::screen::Color::Default) && first.bg == last.bg).then(|| first.bg.clone())
+}
+
+fn band_pad_row(row: &[GridCell], band: &kasa_bridge::screen::Color) -> bool {
+    msg_blank_row(row) && band_bg(row).as_ref() == Some(band)
 }
 
 /// ANSI 의미색과 링크는 남겨 두어 메시지 안 경고·경로가 발신자 색에 묻히지 않는다.
@@ -5799,11 +5830,57 @@ mod teammate_msg_tests {
         }
         let original = rows.clone();
         restyle_tell_messages(&mut rows, &TuiForeground::default());
-        assert_ne!(rows[0][0].bg, original[0][0].bg);
-        assert_eq!(rows[0][59].bg, Color::Default);
-        assert_eq!(rows[1][59].bg, Color::Default);
-        assert_eq!(rows[0][0].bg, rows[1][0].bg);
+        let fill = rows[0][0].bg.clone();
+        assert_ne!(fill, original[0][0].bg);
+        for r in 0..2 {
+            assert!(rows[r].iter().all(|c| c.bg == fill), "{r}행 띠가 줄 끝까지 한 색이 아니다");
+        }
         assert_eq!(rows[2], original[2]);
+    }
+
+    /// codex 실측(2026-10-17 스샷): 내 말 띠는 위아래 빈 띠 줄을 하나씩 두고 칸 전폭이다. 글줄만 바꾸고
+    /// 글 끝에서 끊던 동안 빈 줄은 원본 띠색, 글줄은 발신자색, 줄 끝은 기본 바탕으로 세 갈래였다.
+    #[test]
+    fn tell_band_keeps_its_codex_pads_tails_and_foreign_cells() {
+        use kasa_bridge::screen::Color;
+        let band = Color::Rgb(72, 77, 84);
+        let banded = |s: &str| {
+            let mut row = row_from(s, 60);
+            for cell in &mut row { cell.bg = band.clone(); }
+            row
+        };
+        let mut rows = vec![
+            row_from("• previous answer", 60),
+            row_from("", 60),
+            banded(""),
+            banded("› ⟦미도리⟧ first line of a long note"),
+            banded("  second line"),
+            banded(""),
+            row_from("", 60),
+            banded(""),
+            row_from("• next", 60),
+        ];
+        rows[4][6].bg = Color::Idx(1);
+        rows[4][8].inverse = true;
+        let original = rows.clone();
+        restyle_tell_messages(&mut rows, &TuiForeground::default());
+        let fill = rows[3][0].bg.clone();
+        assert_ne!(fill, band);
+        for r in 2..6 {
+            for (col, cell) in rows[r].iter().enumerate() {
+                if r == 4 && (col == 6 || col == 8) { continue; }
+                assert_eq!(cell.bg, fill, "{r}행 {col}열");
+            }
+        }
+        assert_eq!(rows[4][6].bg, Color::Idx(1), "띠색이 아닌 ANSI 배경은 원본");
+        assert_eq!((rows[4][8].bg.clone(), rows[4][8].inverse), (band.clone(), true), "역상 선택은 원본");
+        for r in [0, 1, 6, 7, 8] {
+            assert_eq!(rows[r], original[r], "{r}행은 쪽지 밖");
+        }
+        for r in 3..5 {
+            assert_eq!(rows[r][9..].iter().map(|c| c.ch).collect::<Vec<_>>(),
+                original[r][9..].iter().map(|c| c.ch).collect::<Vec<_>>(), "본문 열은 그대로");
+        }
     }
 
     // wrap 연속 행: 2칸 **이상** 들여쓰기 본문은 연속, TUI 구조 글리프(⎿·⏺)·
