@@ -3466,7 +3466,8 @@ for p in glob.glob(os.path.join(d, '*.json')):
 
     pub(crate) fn drop_pane_on_sidebar(&mut self, pane: &str, cursor: (f32, f32)) -> bool {
         let target = self.sidebar_pane_drop_target(cursor.0, cursor.1);
-        if target.is_none() && self.navigation_machine_at(cursor).is_none() { return false; }
+        let machine = if target.is_none() { self.navigation_machine_at(cursor) } else { None };
+        if target.is_none() && machine.is_none() { return false; }
         // Hover previews are local-only and must not survive a remote drop or failed preflight.
         if let Some(original) = self.drag_orig_layout.take() {
             self.pty_layout = Some(original);
@@ -3482,8 +3483,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
                     self.move_pane(pane, &target, zone);
                 }
             }
-        } else {
-            self.set_toast("이사할 방이나 칸 위에 놓아 주세요. 연결 상태도 확인해 주세요".into());
+        } else if let Some(label) = machine {
+            let source = self.drag_endpoint(pane);
+            self.route_drag_to_machine(source, &label);
         }
         self.chrome_dirty = true;
         true

@@ -732,7 +732,10 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     if !compact { g.queue_icon(&crate::device_icons::icon(label), 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
     let name = crate::render::pane_identity::local_device_name().filter(|n| !n.is_empty()).unwrap_or_else(|| label.to_string());
     text(g, &name, text_x, head.1 + 4.0, plus.0 - text_x - 4.0, 12.0, theme::text(), true);
-    text(g, "이 기기", text_x, head.1 + 22.0, plus.0 - text_x - 4.0, 10.0, theme::text_dim(), false);
+    // 이사가 도는 동안은 둘째 줄이 그 단계를 말한다 — 놓은 순간부터 엔진이 끝낼 때까지.
+    let (sub, sub_color) = crate::drag_transfer::arriving("")
+        .map_or(("이 기기".to_string(), theme::text_dim()), |stage| (stage, theme::accent()));
+    text(g, &sub, text_x, head.1 + 22.0, plus.0 - text_x - 4.0, 10.0, sub_color, false);
     if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
     g.hover_pointer |= hit(cursor, plus);
     g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
@@ -767,7 +770,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         let text_right = plus.0 - 4.0;
         if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 14.0, y + 11.0, 14.0, theme::text_dim()); }
         text(g, &crate::render::pane_identity::device_name(&machine.label), text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
-        text(g, &status(machine), text_x, y + 20.0, text_right - text_x, 9.5, theme::text_dim(), false);
+        let (line, line_color) = crate::drag_transfer::arriving(&machine.label)
+            .map_or_else(|| (status(machine), theme::text_dim()), |stage| (stage, theme::accent()));
+        text(g, &line, text_x, y + 20.0, text_right - text_x, 9.5, line_color, false);
         g.hover_pointer |= clipped(menu, viewport).is_some_and(|r| hit(cursor, r))
             || machine.online && clipped(plus, viewport).is_some_and(|r| hit(cursor, r));
         if machine.online {
@@ -1610,10 +1615,17 @@ impl App {
             self.set_toast("출발 기기의 연결을 확인할 수 없어요".into());
             return;
         };
+        let source = crate::drag_transfer::DragEndpoint::RemotePane {
+            label: cell.label.clone(), base: machine.base, pane: cell.pane.clone(),
+        };
         let target = self.sidebar_pane_drop_target(cursor.0, cursor.1)
             .or_else(|| self.drop_target_at(cursor.0, cursor.1).map(|(pane, zone)| (self.drag_endpoint(&pane), zone)));
         let Some((destination, mut zone)) = target else {
-            self.set_toast("이사할 방이나 칸 위에 놓아 주세요".into());
+            match self.navigation_machine_at(cursor) {
+                Some(label) => { self.route_drag_to_machine(source, &label); }
+                None => self.set_toast("이사할 방이나 칸, 기기 머리 위에 놓아 주세요".into()),
+            }
+            self.info.machines_col.last_refresh = None;
             return;
         };
         let same_room_cell = self.info.navigation.hits.iter().any(|(action, rect)| match action {
@@ -1627,9 +1639,7 @@ impl App {
             _ => false,
         });
         if same_room_cell { zone = DropZone::Center; }
-        self.route_drag_move(crate::drag_transfer::DragEndpoint::RemotePane {
-            label: cell.label.clone(), base: machine.base, pane: cell.pane.clone(),
-        }, destination, zone);
+        self.route_drag_move(source, destination, zone);
         self.info.machines_col.last_refresh = None;
     }
     /// 원격 방 이름 편집칸의 글(캐럿 포함) — 본기기 `overlay_room_rename_label` 과 같은 식.
