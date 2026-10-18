@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
@@ -20,14 +22,31 @@ MarkdownStyleSheet chatMarkdownStyle(
     color: base.color,
     backgroundColor: codeBg,
   );
+  final cell = base.copyWith(fontSize: size - 2, height: 1.4);
+  const cellPad = EdgeInsets.symmetric(
+    horizontal: Look.tableCellPadX,
+    vertical: Look.tableCellPadY,
+  );
   return MarkdownStyleSheet.fromTheme(theme).copyWith(
     p: base,
     // 굵기는 400·600 두 가지 — 마크다운 굵게도 600.
     strong: base.copyWith(fontWeight: FontWeight.w600),
     listBullet: base,
-    tableBody: base.copyWith(fontSize: size - 2),
-    tableHead: base.copyWith(fontSize: size - 2, fontWeight: FontWeight.w600),
+    tableBody: cell,
+    tableHead: cell.copyWith(fontWeight: FontWeight.w600),
     tableHeadAlign: TextAlign.left,
+    tableColumnWidth: const _CappedIntrinsicWidth(Look.tableCellMax),
+    tableScrollbarThumbVisibility: true,
+    // 가로 스크롤 막대가 마지막 줄을 덮지 않을 자리.
+    tablePadding: const EdgeInsets.only(bottom: Look.tableCellPadY),
+    tableBorder: TableBorder(
+      horizontalInside: BorderSide(color: scheme.outline, width: Look.border),
+      borderRadius: Look.smallCorners,
+    ),
+    tableCellsPadding: cellPad,
+    tableHeadCellsPadding: cellPad,
+    tableHeadCellsDecoration: BoxDecoration(color: codeBg),
+    tableVerticalAlignment: TableCellVerticalAlignment.top,
     h1: base.copyWith(fontSize: size + 3, fontWeight: FontWeight.w600),
     h2: base.copyWith(fontSize: size + 1, fontWeight: FontWeight.w600),
     h3: base.copyWith(fontSize: size, fontWeight: FontWeight.w600),
@@ -46,4 +65,20 @@ MarkdownStyleSheet chatMarkdownStyle(
       decoration: TextDecoration.underline,
     ),
   );
+}
+
+/// 표 칸 폭 — 말풍선 폭을 칸 수로 나누면 폰에서 한 칸이 두세 글자로 꺾였다. 글 길이만큼 세우되 긴 칸은
+/// [cap] 에서 꺾고, 그래도 넘치면 표만 옆으로 민다. 패키지는 [IntrinsicColumnWidth] 일 때만 가로 스크롤로 감싼다.
+class _CappedIntrinsicWidth extends IntrinsicColumnWidth {
+  const _CappedIntrinsicWidth(this.cap);
+
+  final double cap;
+
+  @override
+  double minIntrinsicWidth(Iterable<RenderBox> cells, double containerWidth) =>
+      math.min(super.minIntrinsicWidth(cells, containerWidth), cap);
+
+  @override
+  double maxIntrinsicWidth(Iterable<RenderBox> cells, double containerWidth) =>
+      math.min(super.maxIntrinsicWidth(cells, containerWidth), cap);
 }

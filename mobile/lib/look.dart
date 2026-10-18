@@ -119,6 +119,11 @@ abstract final class Look {
 
   /// 말풍선 맞은편에 남기는 폭 — 내 말과 상대 말이 한 줄에 겹쳐 보이지 않게.
   static const bubbleFar = 48.0;
+
+  /// 말풍선 속 표(design.md 「대화 보기」 표). 칸은 글 길이만큼 서고 이 폭에서 꺾인다.
+  static const tableCellMax = 200.0;
+  static const tableCellPadX = 8.0;
+  static const tableCellPadY = 6.0;
   static const dialogRadius = 28.0;
   static const sheetRadius = 28.0;
   static const modalButtonRadius = 12.0;
