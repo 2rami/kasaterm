@@ -136,6 +136,14 @@ macOS 시트는 `KASATERM_UPDATE_RIG_SHOTS=<기존 폴더>`로 자기 앱의 시
 GPU 확인 카드는 `KASATERM_TEST_CLOSE_FALLBACK=1`로 별도 검사한다. 원본 첫 탭·다중 탭 칸·방 전체, 취소·원본 완료 응답·신원 변경 거절,
 혼합 로컬/미러 칸과 대기 중 새 탭 추가, 유예 시간 전후 되살리기를 모두 확인한다. 본판 세션으로 닫기·되살리기를 시험하지 않는다.
 
+## 기기 간 드래그 이사 리그
+
+위 격리 환경의 앱 둘을 루프백 기기로 연결하고 `KASATERM_SHELL=/bin/zsh`로 시작한다. 가짜 Claude·Codex는 위 학생 픽스처 규약을 지키고, `surface.turn`의 `end`와 실제 입력창(Claude 보더·❯, Codex 명시 배경·›, bracketed paste·입력 커서)을 출력한다. SID 바인딩만 먼저 알리고 입력창은 늦게 그리는 경우도 만든다. 이 지연 중에는 `/transfer/launch`·이사 결과가 성공하면 안 된다.
+
+`/transfer/spawn`이 돌려준 `SessionIdentity`와 `input_revision`으로 `/transfer/launch`를 부른다. 빈 셸, 예약 후 초안 입력, 세대 교체, CLI 시작 직후 종료, 늦은 입력창을 확인한다. 전체 이사는 종료 시 마지막 JSONL 행을 flush하는 픽스처로 검사한다. 출발·도착 SID·방, 파일 마지막 행, 이사하지 않은 형제 탭의 동일성과 생존을 대조한다. 첫 탭·보조 탭 각각 이동과 도착 재개 중 출발 칸 닫기를 포함한다. 실제 CLI 재개 시간과 가짜 하네스 시간은 별도로 기록한다.
+
+대화 운반이 홈의 정본 경로를 요구하면 **이번 리그에서 만든 새 UUID 파일만** 만들고 정리한다. 사용자 세션을 복사해 이사시키거나 같은 UUID로 띄우지 않는다. 실제 Claude 측정은 `--safe-mode --restricted --strict-mcp-config --tools ""`로 훅·도구를 끈 새 대화로 하며, 별도 리그 소켓으로 바인딩한다. 원본 셸 훅·학생 이름 런처는 실행하지 않는다.
+
 ## KasaLite(터미널 고정판) 리그
 
 `scripts/build-lite-app.sh` 가 굽는 `dist/KasaLite.app` 은 같은 바이너리를 `kasaterm-lite` 로 이름만 바꾼 것이다. 부팅에서

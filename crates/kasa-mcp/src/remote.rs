@@ -1180,6 +1180,11 @@ pub fn transfer_close(base: &str, identity: &kasa_socket::transfer::SessionIdent
     Ok(())
 }
 
+pub fn transfer_launch(base: &str, request: &kasa_socket::transfer::LaunchRequest) -> Result<kasa_socket::transfer::SessionRow> {
+    let value = transfer_request(base, "launch", Some(serde_json::to_value(request)?), 40)?;
+    Ok(serde_json::from_value(value.get("session").cloned().unwrap_or_default())?)
+}
+
 pub fn transfer_migrate(base: &str, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
     let value = transfer_request(base, "migrate", Some(serde_json::to_value(request)?), 250)?;
     value.get("remote_id").and_then(serde_json::Value::as_str).map(str::to_string)

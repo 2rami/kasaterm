@@ -1445,6 +1445,7 @@ enum ImageBtn {
 /// `to` 가 끝난 뒤 걷을 자리와 열 방. `at` 이 지나면 `tick_migrate_handoff` 가 처리한다.
 struct MigrateHandoff {
     pid: String,
+    session: std::sync::Weak<kasa_pty::PtySession>,
     label: String,
     base: String,
     remote_id: String,
@@ -3894,6 +3895,7 @@ enum UserEvent {
         kasa_socket::transfer::SessionIdentity,
         std::sync::mpsc::Sender<std::result::Result<(), String>>,
     ),
+    TransferLaunch(kasa_socket::transfer::LaunchRequest, transfer_endpoints::Reply<kasa_socket::transfer::SessionRow>, Instant),
     /// `machine.unfold` — 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로
     /// **펼친다**(방마다 새 창). (라벨, 회신=요약 문장).
     SocketUnfold(
@@ -5150,6 +5152,8 @@ struct App {
     /// (`run_pending_migrations`)이 보고 실행한다. 턴 중 SIGTERM 이 하던 일을
     /// 자르는 것을 막는 관문(2026-08-31 「이사하고 작업이 끊겨」).
     migrate_queue: Vec<crate::session::PendingMigration>,
+    migrate_frozen: Option<(String, std::sync::Weak<kasa_pty::PtySession>, u64)>,
+    transfer_launches: Vec<transfer_endpoints::PendingLaunch>,
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
@@ -6208,6 +6212,8 @@ impl App {
             pending_restores: Vec::new(),
             pending_unjiggle: Vec::new(),
             migrate_queue: Vec::new(),
+            migrate_frozen: None,
+            transfer_launches: Vec::new(),
             autoquit_at: None,
             pending_capture: Vec::new(),
             pending_capture_reply: Vec::new(),

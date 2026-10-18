@@ -31,6 +31,12 @@ pub(super) fn ensure_transfer_agent(expected: Option<u32>, current: Option<u32>)
 }
 
 impl App {
+    pub(crate) fn migration_working(&self, pid: &str) -> bool {
+        // A background tab has its own turn; the cell's selected sibling cannot authorize stopping it.
+        self.collab.hub.refresh();
+        self.collab.hub.is_working(pid)
+    }
+
     /// `to` 의 뒤처리. 명령이 저쪽에 닿을 시간이 지나면 원래 자리를 걷고(저쪽 pane 은 남긴다)
     /// 그 기기 방을 보기 창으로 연다 — 거울을 원래 방에 남기면 기기 절과 중복이고, 번호가
     /// 재사용되면 남으로 둔갑했다(2026-09-17).
@@ -43,10 +49,13 @@ impl App {
             return;
         }
         let Some(h) = self.migrate_handoff.take() else { return };
-        if self.pty.contains_key(&h.pid) {
-            self.remote_keep.insert(h.pid.clone());
-            self.remove_pane(&h.pid);
-        }
+        if !self.transfer_surface_open(&h.pid)
+            || !self.pty.get(&h.pid).is_some_and(|session| h.session.ptr_eq(&Arc::downgrade(session)))
+            || !kasa_mcp::remote::remote_info(&h.pid).is_some_and(|info| info.base == h.base && info.remote_id == h.remote_id)
+        { return; }
+        self.remote_keep.insert(h.pid.clone());
+        self.remove_finished_surface(&h.pid);
+        self.remote_keep.remove(&h.pid);
         if let Err(e) = self.seat_remote_view_window(&h.label, &h.base, &h.remote_id, false, None) {
             self.set_toast(format!("{} 의 방을 보기 창으로 못 열었어요 — {e:#}", h.label));
         }
@@ -331,10 +340,7 @@ impl App {
         // 「끊겨도 지금 당장」으로 통과. 학생이 스스로 신청하는 셀프 이사는 그 CLI
         // 호출 자체가 턴 중이라 언제나 이 길로 온다 — 즉답 받고 제 턴을 마치면 간다.
         if !fresh && !force {
-            let working = {
-                let ws = self.ws.lock().unwrap();
-                self.pane_agent_working(&ws, pid)
-            };
+            let working = self.migration_working(pid);
             if working {
                 self.migrate_queue.push(PendingMigration {
                     pane: pid.to_string(),
@@ -427,7 +433,7 @@ impl App {
         // repersona 가 sid 를 실어 같은 못박기를 한다(2026-08-31 시로코→케이 실측).
         if let (Some(s), Some(ch)) = (&sid, &character) {
             let _ = kasa_mcp::character::bind_session_character(s, ch);
-            kasa_mcp::character::mark_manual_pick(s);
+            if !crate::verification_run() { kasa_mcp::character::mark_manual_pick(s); }
         }
         let label = kasa_mcp::machines::label_for_base(base).unwrap_or_else(|| base.to_string());
         let plan = MigratePlan {
@@ -459,6 +465,10 @@ impl App {
             reply,
         ));
         self.chrome_dirty = true;
+        if plan.transfer.is_some() {
+            sess.set_input_closed(true, false)?;
+            self.migrate_frozen = Some((pid.to_string(), Arc::downgrade(&sess), sess.input_revision()));
+        }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || migrate_worker(plan, proxy));
         Ok(format!("이사 시작 — {pid} → {label}, 진행은 Info 「다른 기계」에서"))
@@ -512,12 +522,22 @@ impl App {
         pid: &str,
         outcome: std::result::Result<Box<MigrateReady>, String>,
     ) {
-        let reserved = outcome.as_ref().ok().and_then(|ready| ready.transfer_reserved.clone())
+        let launched = outcome.as_ref().ok().is_some_and(|ready| ready.launched);
+        let reserved = outcome.as_ref().ok().filter(|ready| !ready.launched).and_then(|ready| ready.transfer_reserved.clone())
             .zip(outcome.as_ref().ok().map(|ready| ready.base.clone()));
         let mut result = match outcome {
             Err(why) => Err(why),
             Ok(r) => self.migrate_seat(pid, *r).map_err(|e| format!("{e:#}")),
         };
+        if self.migrate_frozen.as_ref().is_some_and(|(pane, _, _)| pane == pid) {
+            if let Some((_, frozen, revision)) = self.migrate_frozen.take() {
+                if let Some(session) = self.pty.get(pid).filter(|current| frozen.ptr_eq(&Arc::downgrade(current))
+                    && current.input_revision() == revision && self.transfer_surface_open(pid)) {
+                    let _ = session.set_input_closed(false, false);
+                }
+            }
+        }
+        if launched { result = result.map_err(|why| format!("{why}\n도착 기기에서는 대화가 재개됐어요. 출발 창은 그대로 두었어요")); }
         if result.is_err() {
             if let Some((identity, base)) = reserved {
                 let proxy = self.proxy.clone();
@@ -588,6 +608,12 @@ impl App {
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("이사 도중 pane {pid} 이 사라졌다");
         };
+        if let Some(source) = &r.source_identity {
+            anyhow::ensure!(self.transfer_surface_open(pid) && crate::transfer_endpoints::token_for(pid, &sess) == source.token
+                && self.migrate_frozen.as_ref().is_some_and(|(id, frozen, revision)| id == pid
+                    && frozen.ptr_eq(&Arc::downgrade(&sess)) && *revision == sess.input_revision()),
+                "이사 중 출발 칸의 세션이 바뀌었어요");
+        }
         // Keep the current shell responsive until the remote handshake succeeds.
         // 맨 셸 폴백은 캐릭터가 통째로 새 배정으로 굴러간다 — 조용히 지나가면
         // 「이사했더니 딴 학생이 됐다」로만 보이므로 크게 말한다.
@@ -599,8 +625,7 @@ impl App {
         }
         // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지(promote 패턴).
         let (c, rows) = sess.size();
-        let remote = kasa_mcp::remote::connect(
-            kasa_mcp::remote::RemoteSpec {
+        let spec = kasa_mcp::remote::RemoteSpec {
                 base: r.base.clone(),
                 pane: r.remote_pane.clone(),
                 // 이어받기(pane 지정)면 cwd 는 무시된다 — 그 셸은 이미 떠 있고,
@@ -615,11 +640,9 @@ impl App {
                     origin_cwd: Some(r.cwd.clone()),
                     owned: false,
                 },
-            },
-            pid,
-            c,
-            rows,
-        )?;
+            };
+        let remote = if r.launched { kasa_mcp::remote::open_view(spec, pid)? }
+            else { kasa_mcp::remote::connect(spec, pid, c, rows)? };
         sess.stop_reader();
         // Register before starting the pump: its generation guard rejects
         // queued snapshots while the registry still points at the old shell.
@@ -661,20 +684,21 @@ impl App {
         } else {
             cmd
         };
-        self.pending_restores.push((
+        if !r.launched { self.pending_restores.push((
             remote.session.clone(),
             cmd,
             // 갓 소환된 pane 은 셸이 뜨는 데 한 박자 더 걸린다.
             std::time::Instant::now() + std::time::Duration::from_millis(2200),
-        ));
+        )); }
         // 원래 자리는 명령이 닿은 뒤 걷는다 — 그때까지는 이 링크가 명령을 나른다. 저쪽에
         // 방 pane 이 안 생긴(헤드리스 `web-` 셸) 경우는 이 링크가 유일한 손잡이라 남긴다.
         self.migrate_handoff = r.remote_pane.is_some().then(|| crate::MigrateHandoff {
             pid: pid.to_string(),
+            session: Arc::downgrade(&remote.session),
             label: kasa_mcp::machines::label_for_base(&r.base).unwrap_or_default(),
             base: r.base.clone(),
             remote_id: remote.remote_id.clone(),
-            at: std::time::Instant::now() + std::time::Duration::from_millis(3500),
+            at: std::time::Instant::now() + std::time::Duration::from_millis(if r.launched { 0 } else { 3500 }),
         });
         let (wc, wr) = self.window_cells();
         self.resize_backend(wc, wr);
@@ -731,10 +755,7 @@ impl App {
         // 순방향과 같은 관문 — 원격 학생이 턴 중이면 agent-stop 이 그 턴을 자른다.
         // 미러 그리드가 원격 화면 그대로라 같은 스피너 판정이 통한다.
         if !force {
-            let working = {
-                let ws = self.ws.lock().unwrap();
-                self.pane_agent_working(&ws, pid)
-            };
+            let working = self.migration_working(pid);
             if working {
                 self.migrate_queue.retain(|q| q.pane != pid);
                 self.migrate_queue.push(PendingMigration {
@@ -949,10 +970,9 @@ impl App {
             let now = std::time::Instant::now();
             let mut fire: Option<PendingMigration> = None;
             {
-                let ws = self.ws.lock().unwrap();
                 let mut i = 0;
                 while i < self.migrate_queue.len() {
-                    let working = self.pane_agent_working(&ws, &self.migrate_queue[i].pane);
+                    let working = self.migration_working(&self.migrate_queue[i].pane);
                     let q = &mut self.migrate_queue[i];
                     if working {
                         q.idle_since = None;
@@ -1146,6 +1166,8 @@ pub(super) struct MigratePlan {
 /// 워커가 끝내고 GUI 에 돌려주는 것 — ⑦(자리 갈아끼우기·켜기)에 필요한 만큼만.
 #[derive(Clone, Debug)]
 pub(crate) struct MigrateReady {
+    pub(crate) launched: bool,
+    pub(crate) source_identity: Option<kasa_socket::transfer::SessionIdentity>,
     pub(crate) base: String,
     pub(crate) remote_cwd: String,
     /// 출발한 로컬 경로 — 역이사가 돌아올 자리.
@@ -1172,6 +1194,7 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
         let _ = proxy.send_event(UserEvent::MigrateStage(p.pid.clone(), i, st, note));
     };
     let mut reserved: Option<kasa_socket::transfer::SessionRow> = None;
+    let mut launched = false;
     let mut source_stopped = false;
     let validate = || -> Result<()> {
         if let Some(request) = &p.transfer {
@@ -1215,7 +1238,24 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
             // 긴 복사·도착 방 생성 사이 출발 세션이 바뀌거나 일을 재개할 수 있다.
             validate()?;
         }
+        let fast_launch = if let Some(target) = reserved.as_ref().filter(|_| p.sid.is_some()) {
+            let mut snapshot = kasa_mcp::remote::transfer_snapshot(&p.base)?;
+            if snapshot.launch_supported {
+                let deadline = Instant::now() + std::time::Duration::from_secs(8);
+                loop {
+                    let row = snapshot.sessions.iter().find(|row| row.identity == target.identity)
+                        .ok_or_else(|| anyhow::anyhow!("준비한 도착 셸이 바뀌었어요. 출발 세션은 유지했어요"))?;
+                    anyhow::ensure!(row.input_revision == target.input_revision, "도착 셸에 새 입력이 있어요. 출발 세션은 유지했어요");
+                    if row.launch_ready && row.shell_closeable { break; }
+                    anyhow::ensure!(Instant::now() < deadline, "도착 셸이 준비되지 않았어요. 출발 세션은 유지했어요");
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    snapshot = kasa_mcp::remote::transfer_snapshot(&p.base)?;
+                }
+                true
+            } else { false }
+        } else { false };
         if p.transfer.is_some() {
+            validate()?;
             let table = kasa_pty::fresh_process_table();
             let shell = kasa_pty::lookup_session(&p.pid).and_then(|session| session.shell_pid());
             let current = shell.and_then(|shell| kasa_pty::agent_pid_for_shell(&table, shell)).map(|(_, pid)| pid);
@@ -1304,9 +1344,9 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
         // 실패하고, 그때는 옛 경로(맨 셸 스폰)로 물러선다 — 반쪽이라도 대화는 잇는다.
         let remote_pane = if let Some(row) = &reserved {
             stage(3, S::Done, "선택한 방에 새 자리 준비됨".to_string());
-            if let Some(character) = &p.character {
+            if !fast_launch { if let Some(character) = &p.character {
                 kasa_mcp::remote::repersona(&p.base, &row.identity.pane_id, character, p.sid.as_deref(), None)?;
-            }
+            } }
             Some(row.identity.pane_id.clone())
         } else { match &p.character {
             None => {
@@ -1337,7 +1377,23 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
                 }
             }
         }};
+        if fast_launch {
+            let target = reserved.as_ref().ok_or_else(|| anyhow::anyhow!("도착 자리가 없어요"))?;
+            stage(4, S::Running, "도착 기기에서 대화 재개를 확인하고 있어요".into());
+            let ready = kasa_mcp::remote::transfer_launch(&p.base, &kasa_socket::transfer::LaunchRequest {
+                target: target.identity.clone(), session_id: p.sid.clone().unwrap(),
+                harness: if p.is_codex { "codex" } else { "claude" }.into(),
+                model: p.model.clone(), effort: p.effort.clone(), bypass: p.bypass,
+                input_revision: target.input_revision,
+            })?;
+            anyhow::ensure!(ready.identity.token == target.identity.token && ready.identity.session_id == p.sid,
+                "도착 대화의 신원이 바뀌었어요");
+            launched = true;
+            let _ = kasa_mcp::machines::refresh_panes_now(&p.base);
+        }
         Ok(MigrateReady {
+            launched,
+            source_identity: p.transfer.as_ref().map(|request| request.session.clone()),
             base: p.base.clone(),
             remote_cwd,
             cwd: p.cwd.clone(),
@@ -1357,7 +1413,7 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
             "{error:#}\n대화는 출발 기기에 남아 있어요. 그 기기에서 세션을 다시 켜야 해요"
         ));
     }
-    if outcome.is_err() {
+    if outcome.is_err() && !launched {
         if let Some(row) = reserved.take() {
             if let Err(error) = kasa_mcp::remote::transfer_close(&p.base, &row.identity) {
                 eprintln!("[transfer] reserved shell cleanup failed {} {}: {error:#}", p.base, row.identity.pane_id);
@@ -1370,7 +1426,7 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
         p.pid.clone(),
         outcome.map(Box::new).map_err(|e| format!("{e:#}")),
     ));
-    if sent.is_err() {
+    if sent.is_err() && !launched {
         if let Some(row) = reserved {
             let _ = kasa_mcp::remote::transfer_close(&p.base, &row.identity);
         }

@@ -96,6 +96,21 @@ async fn transfer_close_handler(backend: Arc<dyn Backend>, Json(identity): Json<
     })
 }
 
+async fn transfer_launch_handler(
+    backend: Arc<dyn Backend>, auth: Option<axum::extract::Extension<MobileAuth>>,
+    Json(request): Json<kasa_socket::transfer::LaunchRequest>,
+) -> axum::response::Response {
+    if auth.as_ref().is_some_and(|auth| !auth.0.0.owner) {
+        return (axum::http::StatusCode::FORBIDDEN, "owner only").into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || backend.transfer_launch(&request)).await;
+    Json(match result {
+        Ok(Ok(session)) => serde_json::json!({"ok":true,"session":session}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    }).into_response()
+}
+
 async fn transfer_migrate_handler(backend: Arc<dyn Backend>, Json(request): Json<kasa_socket::transfer::MigrateRequest>) -> Json<serde_json::Value> {
     let result = tokio::task::spawn_blocking(move || backend.transfer_migrate(&request)).await;
     Json(match result {
@@ -609,6 +624,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let migrate_backend = backend.clone();
     let transfer_snapshot_backend = backend.clone();
     let transfer_spawn_backend = backend.clone();
+    let transfer_launch_backend = backend.clone();
     let transfer_close_backend = backend.clone();
     let transfer_migrate_backend = backend.clone();
     axum::Router::new()
@@ -643,12 +659,51 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         )
         .route("/transfer/snapshot", get(move || transfer_snapshot_handler(transfer_snapshot_backend.clone())))
         .route("/transfer/spawn", post(move |body: Json<kasa_socket::transfer::SpawnRequest>| transfer_spawn_handler(transfer_spawn_backend.clone(), body)))
+        .route("/transfer/launch", post(move |auth: Option<axum::extract::Extension<MobileAuth>>, body: Json<kasa_socket::transfer::LaunchRequest>|
+            transfer_launch_handler(transfer_launch_backend.clone(), auth, body)))
         .route("/transfer/close", post(move |body: Json<kasa_socket::transfer::SessionIdentity>| transfer_close_handler(transfer_close_backend.clone(), body)))
         .route("/transfer/migrate", post(move |body: Json<kasa_socket::transfer::MigrateRequest>| transfer_migrate_handler(transfer_migrate_backend.clone(), body)))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Desk(AtomicUsize);
+    impl Backend for Desk {
+        fn list_workspaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> anyhow::Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> anyhow::Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> anyhow::Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn send_text(&self, _: Option<&str>, _: &str) -> anyhow::Result<()> { anyhow::bail!("unexpected") }
+        fn transfer_launch(&self, _: &kasa_socket::transfer::LaunchRequest) -> anyhow::Result<kasa_socket::transfer::SessionRow> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Default::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_launch_rejects_guests_before_touching_the_terminal() {
+        let desk = Arc::new(Desk::default());
+        for owner in [Some(false), Some(true), None] {
+            let auth = owner.map(|owner| axum::extract::Extension(MobileAuth(crate::mobile::MobileUser {
+                name: "fixture".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner,
+            })));
+            let request = kasa_socket::transfer::LaunchRequest {
+                target: Default::default(), session_id: "fixture".into(), harness: "claude".into(),
+                model: String::new(), effort: String::new(), bypass: false, input_revision: 0,
+            };
+            let before = desk.0.load(Ordering::SeqCst);
+            let response = transfer_launch_handler(desk.clone(), auth, Json(request)).await;
+            assert_eq!(response.status(), if owner == Some(false) { axum::http::StatusCode::FORBIDDEN } else { axum::http::StatusCode::OK });
+            assert_eq!(desk.0.load(Ordering::SeqCst), before + usize::from(owner != Some(false)));
+        }
+    }
+
     #[test]
     fn valid_session_id_rejects_path_material() {
         assert!(super::valid_session_id("deffe742-3b0d-40de-a135-ff8d7a207995"));

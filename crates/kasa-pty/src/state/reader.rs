@@ -10,6 +10,50 @@ use super::inline::{
 use super::screen::publish_screen_update;
 use super::vt::history_lines_for_cols;
 
+#[derive(Default)]
+struct PromptMark {
+    matched: usize,
+    pending: bool,
+}
+
+impl PromptMark {
+    fn feed(&mut self, bytes: &[u8]) {
+        const MARK: &[u8] = b"\x1b]133;B";
+        for &byte in bytes {
+            if self.matched == MARK.len() {
+                self.pending |= matches!(byte, 0x07 | 0x1b | b';');
+                self.matched = 0;
+            }
+            if byte == MARK[self.matched] { self.matched += 1; }
+            else { self.matched = usize::from(byte == MARK[0]); }
+        }
+    }
+
+    fn take(&mut self) -> bool { std::mem::take(&mut self.pending) }
+}
+
+#[cfg(test)]
+mod prompt_mark_tests {
+    use super::PromptMark;
+
+    #[test]
+    fn shell_readiness_survives_every_byte_boundary_and_sync_suppression() {
+        for marker in [b"\x1b]133;B\x07".as_slice(), b"\x1b]133;B\x1b\\", b"\x1b]133;B;k=i\x07"] {
+            for at in 0..=marker.len() {
+                let mut state = PromptMark::default();
+                state.feed(&marker[..at]);
+                state.feed(&marker[at..]);
+                state.feed(b"\x1b[?2026l");
+                assert!(state.take(), "boundary {at}");
+                assert!(!state.take());
+            }
+        }
+        let mut state = PromptMark::default();
+        state.feed(b"\x1b]133;Bad\x07");
+        assert!(!state.take());
+    }
+}
+
 /// 이 출력 청크가 **반짝임만 다시 그린 프레임**인가 — 박동(`output_beats`)에서 뺄지 가른다.
 ///
 /// codex 의 Astra 효과(gpt-6-astra)는 **노는 동안에도** 입력창 둘레에 점자 「별」을
@@ -144,6 +188,7 @@ pub(super) fn spawn_reader_thread(
         let mut blk_seq: u64 = 0;
         let mut blk_start: Option<Instant> = None;
         let mut blk_prompt: Option<(u16, u16)> = None;
+        let mut prompt_mark = PromptMark::default();
         // read 경계에서 잘린 다중 바이트 글자 — 다음 배치 앞에 붙여 한글이 깨지지 않게.
         let mut blk_utf8: Vec<u8> = Vec::new();
         // 이번 묶음의 C 직전에 읽어 둔 명령 줄(있으면 격자를 다시 읽지 않는다).
@@ -320,6 +365,7 @@ pub(super) fn spawn_reader_thread(
             };
             let processed_bytes: &[u8] =
                 nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
+            prompt_mark.feed(processed_bytes);
             // Sniff for iTerm OSC 1337 inline images. The scan walks the
             // byte slice, so we cheaply prefix-check first — most reads have
             // no `\x1b]1337` and we skip the walk entirely. Critical for TUI
@@ -442,13 +488,9 @@ pub(super) fn spawn_reader_thread(
                     );
                     attach_inline_views(&mut snap, &t, &inline_imgs);
                     // OSC 133 `B` = prompt end / command-input start. Our
-                    // VT parser (alacritty 0.26 / vte 0.15) drops OSC 133
-                    // as unhandled, so we sniff the raw batch for it and
-                    // tag the snapshot with the current cursor — that's
-                    // where the editable command line begins. The shell's
-                    // precmd hook (injected via the ZDOTDIR shim .zshrc)
-                    // is what emits it. Terminator-agnostic (BEL or ST).
-                    if find_subslice(processed_bytes, b"\x1b]133;B").is_some() {
+                    // VT drops OSC 133, so retain the mark across split reads and
+                    // synchronized output until the matching grid can be published.
+                    if prompt_mark.take() {
                         snap.prompt_end = Some((snap.cursor_row, snap.cursor_col));
                         // Same mark drives the command-block command extraction:
                         // the cursor here is where the typed command begins.

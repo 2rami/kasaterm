@@ -1,9 +1,11 @@
 use super::*;
+mod launch;
+pub(crate) use launch::PendingLaunch;
 use std::collections::HashSet;
 use kasa_socket::transfer::{MachineSnapshot, RoomInfo, RoomTarget, SessionIdentity, SessionRow, SpawnRequest};
 use std::sync::{OnceLock, Weak};
 
-type Reply<T> = std::sync::mpsc::Sender<std::result::Result<T, String>>;
+pub(crate) type Reply<T> = std::sync::mpsc::Sender<std::result::Result<T, String>>;
 
 struct Binding {
     session: Weak<kasa_pty::PtySession>,
@@ -34,7 +36,7 @@ pub(crate) fn machine_context() -> Result<&'static (String, String)> {
     Ok(VALUE.get().unwrap())
 }
 
-fn token_for(id: &str, session: &Arc<kasa_pty::PtySession>) -> String {
+pub(crate) fn token_for(id: &str, session: &Arc<kasa_pty::PtySession>) -> String {
     let mut map = bindings().lock().unwrap();
     let entry = map.entry(id.to_string()).or_insert_with(|| Binding {
         session: Arc::downgrade(session), token: uuid::Uuid::new_v4().to_string(),
@@ -55,6 +57,11 @@ pub(crate) fn idle_shell(pid: Option<u32>, table: &[(u32, u32, String)]) -> bool
     is_shell
         && !table.iter().any(|(_, parent, _)| *parent == pid)
         && kasa_pty::agent_for_shell(table, pid).is_none()
+}
+
+pub(crate) fn prepared_launch_supported() -> bool {
+    cfg!(unix) && resolve_default_shell().or_else(|| std::env::var("SHELL").ok())
+        .and_then(|shell| std::path::Path::new(&shell).file_name().map(|name| name == "zsh")) == Some(true)
 }
 
 pub(crate) fn enrich_snapshot(snapshot: &mut MachineSnapshot) {
@@ -158,12 +165,16 @@ impl App {
 
     pub(crate) fn transfer_snapshot_gui(&self, machine: &(String, String)) -> MachineSnapshot {
         let rooms = self.transfer_rooms();
+        // A new PTY starts with an unknown-draft flag; revision zero proves no input or IME reservation has occurred.
+        let ready: HashSet<String> = self.pty.iter().filter(|(id, session)| !session.input_closed() && (session.input_revision() == 0 || !session.input_draft_present())
+            && self.shell_prompt_grid(id).is_some_and(|line| line.trim().is_empty())).map(|(id, _)| id.clone()).collect();
         let ws = self.ws.lock().unwrap();
         let sessions = self.pty.iter().filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id)).map(|(id, session)| {
             let outer = ws.outer_for_pty(id).unwrap_or_else(|| id.clone());
             let room = rooms.iter().find(|(_, idx, _)| self.window_leaves(*idx).contains(&outer));
             let activity = self.pane_activity.get(id);
             SessionRow {
+                surface_key: kasa_mcp::surface_keys::ensure(id),
                 identity: SessionIdentity { machine_id: machine.0.clone(), pane_id: id.clone(),
                     session_id: self.pane_claude_sid.get(id).cloned(), instance: instance().into(), token: token_for(id, session) },
                 local_panes: vec![id.clone()],
@@ -174,13 +185,19 @@ impl App {
                 room_id: room.map(|(r, _, _)| r.id.clone()),
                 shell_closeable: !(outer == *id && ws.panes.get(&outer).is_some_and(|p| p.tabs.len() > 1)),
                 unavailable_reason: None,
+                input_revision: session.input_revision(),
+                launch_ready: ready.contains(id),
+                conversation_ready: Some(self.pane_claude_sid.contains_key(id)
+                    && session.active_agent().is_some_and(|agent| crate::tell_delivery::resumed_input_ready(session, agent))),
             }
         }).collect();
         MachineSnapshot { machine_id: machine.0.clone(), label: machine.1.clone(), instance: instance().into(),
-            rooms: rooms.into_iter().map(|(room, _, _)| room).collect(), sessions, room_transfer_supported: cfg!(unix) && self.tmux.is_none() }
+            rooms: rooms.into_iter().map(|(room, _, _)| room).collect(), sessions,
+            room_transfer_supported: cfg!(unix) && self.tmux.is_none(), launch_supported: prepared_launch_supported() && self.tmux.is_none() }
     }
 
     pub(crate) fn validate_transfer_identity(&self, identity: &SessionIdentity) -> Result<()> {
+        anyhow::ensure!(self.transfer_surface_open(&identity.pane_id), "선택한 세션이 닫혔어요");
         if identity.machine_id != machine_context()?.0 || identity.instance != instance() || identity.token.is_empty() {
             anyhow::bail!("앱이 바뀌었어요. 목록을 새로 읽어 주세요");
         }
@@ -199,6 +216,11 @@ impl App {
         }
         self.ensure_user_mutation_target(&identity.pane_id, crate::settings_room::SettingsMutation::Split)?;
         Ok(())
+    }
+
+    pub(crate) fn transfer_surface_open(&self, id: &str) -> bool {
+        let outer = self.ws.lock().unwrap().outer_for_pty(id).unwrap_or_else(|| id.to_string());
+        self.window_of_pane(&outer).is_some() || self.aux_terminal_index(&outer).is_some()
     }
 
     pub(crate) fn prepare_transfer_spawn(&mut self, request: &SpawnRequest) -> Result<SpawnPlan> {
@@ -271,6 +293,7 @@ impl App {
     pub(crate) fn close_transfer_shell(&mut self, identity: &SessionIdentity) -> Result<()> {
         self.validate_transfer_identity(identity)?;
         let session = self.pty.get(&identity.pane_id).unwrap();
+        anyhow::ensure!(session.input_revision() == 0 || !session.input_draft_present(), "입력 중인 셸은 정리하지 않아요");
         // 실행 직전 다시 검사한다. 선택 이후 시작한 빌드·서버·에이전트도 보호한다.
         if !idle_shell(session.shell_pid(), &kasa_pty::fresh_process_table()) {
             anyhow::bail!("작업이 있거나 상태를 확인할 수 없는 셸은 닫지 않아요");

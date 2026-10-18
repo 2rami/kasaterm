@@ -23,6 +23,9 @@ pub(super) fn coalesce_screen_updates(
     if (next.cols, next.rows) != (previous.cols, previous.rows) {
         return next;
     }
+    if (untagged_snapshot || same_generation) && next.prompt_end.is_none() {
+        next.prompt_end = previous.prompt_end;
+    }
     let mut rows: std::collections::HashMap<u16, Row> = previous.dirty.into_iter().collect();
     rows.extend(next.dirty);
     next.dirty = rows.into_iter().collect();
@@ -368,6 +371,17 @@ fn replacement_snapshot_requires_registration_before_pump() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn coalescing_keeps_shell_readiness_only_in_the_same_grid_and_generation() {
+        let marked = || kasa_bridge::screen::ScreenUpdate {
+            prompt_end: Some((1, 4)), ..readiness_frame(true, 7, 20, 0)
+        };
+        assert_eq!(super::coalesce_screen_updates(marked(), readiness_frame(true, 7, 20, 1)).prompt_end, Some((1, 4)));
+        assert_eq!(super::coalesce_screen_updates(marked(), readiness_frame(false, 0, 20, 1)).prompt_end, Some((1, 4)));
+        assert_eq!(super::coalesce_screen_updates(marked(), readiness_frame(true, 8, 20, 1)).prompt_end, None);
+        assert_eq!(super::coalesce_screen_updates(marked(), readiness_frame(true, 7, 30, 1)).prompt_end, None);
+    }
 
     fn readiness_frame(live_output: bool, output_generation: u64, cols: u16, row: u16)
         -> kasa_bridge::screen::ScreenUpdate

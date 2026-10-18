@@ -371,11 +371,16 @@ fn prompt_empty(cells: &[Vec<GridCell>], cursor_row: usize, harness: kasa_pty::A
 }
 
 fn prompt_empty_at(cells: &[Vec<GridCell>], cursor_row: usize, cursor_col: usize, harness: kasa_pty::AgentKind) -> bool {
+    prompt_empty_with_particles(cells, cursor_row, cursor_col, harness, false)
+}
+
+fn prompt_empty_with_particles(cells: &[Vec<GridCell>], cursor_row: usize, cursor_col: usize, harness: kasa_pty::AgentKind, particles: bool) -> bool {
     use crate::screenread::PromptBox;
     use kasa_bridge::screen::Color;
     let Some(row) = cells.get(cursor_row) else { return false };
     let prompt = match harness { kasa_pty::AgentKind::Claude => '❯', kasa_pty::AgentKind::Codex => '›', _ => return false };
-    let blank = |cell: &GridCell|cell.ch == '\0' || cell.ch.is_whitespace();
+    let blank = |cell: &GridCell|cell.ch == '\0' || cell.ch.is_whitespace()
+        || (particles && harness == kasa_pty::AgentKind::Codex && crate::screenread::is_particle(cell.ch));
     let Some(marker) = row.iter().position(|cell|!blank(cell)) else { return false };
     if row[marker].ch != prompt { return false; }
     let region = crate::screenread::prompt_box(cells).and_then(|area| {
@@ -415,6 +420,24 @@ fn prompt_empty_at(cells: &[Vec<GridCell>], cursor_row: usize, cursor_col: usize
             || lower.contains("image #") || text.contains('\u{fffc}') { return false; }
     }
     true
+}
+
+pub(crate) fn resumed_input_ready(pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind) -> bool {
+    let (cells, screen) = live_cells(pty);
+    screen.bracketed_paste && resumed_prompt_ready(&cells, screen.cursor_row as usize, screen.cursor_col as usize, harness)
+}
+
+fn resumed_prompt_ready(cells: &[Vec<GridCell>], row: usize, col: usize, harness: kasa_pty::AgentKind) -> bool {
+    use crate::screenread::{self, PromptBox};
+    let Some(area) = screenread::prompt_box(cells) else { return false };
+    matches!((&area, harness), (PromptBox::Bordered {..}, kasa_pty::AgentKind::Claude)
+        | (PromptBox::Filled {..}, kasa_pty::AgentKind::Codex))
+        && area.rows().contains(&row)
+        && crate::input::rows_show_approval_prompt(cells).is_none()
+        && !screenread::screen_is_resume_picker(cells)
+        && !screenread::screen_is_agents_list(cells)
+        && !screenread::screen_is_ask_picker(cells)
+        && prompt_empty_with_particles(cells, row, col, harness, true)
 }
 
 impl App {
@@ -688,6 +711,26 @@ mod tests {
             // Text-only slices lack a real box edge and cannot prove footer ownership.
             assert!(!prompt_empty_at(&[row(prompt),row(footer)],0,2,harness));
         }
+    }
+
+    #[test]
+    fn resumed_conversation_requires_the_live_input_box_and_tolerates_astra_particles() {
+        use kasa_pty::AgentKind::{Claude, Codex};
+        for (harness, marker) in [(Claude, "❯"), (Codex, "›")] {
+            let rows = input_box(harness, &[marker.into()], "status");
+            assert!(resumed_prompt_ready(&rows, 2, 2, harness));
+            assert!(!resumed_prompt_ready(&rows, 0, 2, harness));
+            assert!(!resumed_prompt_ready(&[row(marker)], 0, 2, harness));
+            let draft = input_box(harness, &[format!("{marker} draft")], "status");
+            assert!(!resumed_prompt_ready(&draft, 2, 7, harness));
+            let approval = input_box(harness, &[format!("{marker} 1. Yes"), "  2. No".into()], "status");
+            assert!(!resumed_prompt_ready(&approval, 2, 2, harness));
+        }
+        let mut astra = input_box(Codex, &["›   ⠁  ⢀".into()], "status");
+        astra[1][5].ch = '⠄';
+        astra[3][10].ch = '⠁';
+        assert!(resumed_prompt_ready(&astra, 2, 2, Codex));
+        assert!(!prompt_empty_at(&astra, 2, 2, Codex), "tell draft protection remains conservative");
     }
 
     #[test]

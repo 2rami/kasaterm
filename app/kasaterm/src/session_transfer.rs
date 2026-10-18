@@ -7,8 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn resolve(backend: &Arc<dyn Backend>, machine_id: &str) -> Result<Option<kasa_mcp::machines::Machine>> {
-    let local = backend.transfer_snapshot()?;
+fn resolve(local: &MachineSnapshot, machine_id: &str) -> Result<Option<kasa_mcp::machines::Machine>> {
     if local.machine_id == machine_id { return Ok(None); }
     kasa_mcp::machines::find_route(&format!("~{machine_id}")).map(Some)
         .ok_or_else(|| anyhow!("기계 연결 정체가 바뀌었어요. 목록을 다시 확인해 주세요"))
@@ -50,13 +49,24 @@ pub(crate) fn execute_with_progress(
         let result = (|| -> Result<TransferResult> {
             if !request.confirmed { anyhow::bail!("이사 확인이 필요해요"); }
             if source.machine_id == request.destination_machine { anyhow::bail!("현재 기기와 같아요. 기존 방 이동을 이용해 주세요"); }
-            let origin = resolve(backend, &source.machine_id)?;
-            let destination = resolve(backend, &request.destination_machine)?;
-            let origin_snapshot = snapshot_at(backend, origin.as_ref())?;
+            let local = backend.transfer_snapshot()?;
+            let origin = resolve(&local, &source.machine_id)?;
+            let destination = resolve(&local, &request.destination_machine)?;
+            let (origin_snapshot, dest_snapshot) = std::thread::scope(|scope| {
+                let origin = scope.spawn(|| match &origin {
+                    Some(machine) => kasa_mcp::remote::transfer_snapshot(&machine.base),
+                    None => Ok(local.clone()),
+                });
+                let destination = match &destination {
+                    Some(machine) => kasa_mcp::remote::transfer_snapshot(&machine.base),
+                    None => Ok(local.clone()),
+                };
+                (origin.join().unwrap_or_else(|_| Err(anyhow!("출발 상태 조회가 끝나지 않았어요"))), destination)
+            });
+            let (origin_snapshot, dest_snapshot) = (origin_snapshot?, dest_snapshot?);
             let row = current_row(&origin_snapshot, &source)?;
-            let dest_snapshot = snapshot_at(backend, destination.as_ref())?;
-            let previous_destinations: HashSet<String> = dest_snapshot.sessions.iter()
-                .map(|row| row.identity.canonical_key()).collect();
+            let previous_destinations: HashSet<SessionIdentity> = dest_snapshot.sessions.iter()
+                .map(|row| row.identity.clone()).collect();
             if !origin_snapshot.room_transfer_supported || !dest_snapshot.room_transfer_supported {
                 anyhow::bail!("출발·도착 기계 모두 도착 방 선택을 지원하는 새 판이 필요해요");
             }
@@ -85,7 +95,8 @@ pub(crate) fn execute_with_progress(
                 let dest = snapshot_at(backend, destination.as_ref())?;
                 let found = dest.sessions.iter().find(|candidate| {
                     candidate.identity.machine_id == request.destination_machine
-                        && !previous_destinations.contains(&candidate.identity.canonical_key())
+                        && (source.session_id.is_none() || candidate.conversation_ready.unwrap_or(true))
+                        && !previous_destinations.contains(&candidate.identity)
                         && remote_id.as_ref().map_or_else(
                             || source.session_id.as_ref().is_some_and(|sid| candidate.identity.session_id.as_ref() == Some(sid)),
                             |id| &candidate.identity.pane_id == id,
@@ -101,7 +112,7 @@ pub(crate) fn execute_with_progress(
                 if Instant::now() >= deadline {
                     return Ok(report(&source, TransferStatus::Unknown, "완료를 아직 확인하지 못했어요. 대기나 실패를 성공으로 처리하지 않았어요", None));
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(50));
             }
         })().unwrap_or_else(|error| report(&source, if submitted { TransferStatus::Unknown } else { TransferStatus::Failed }, format!("{error:#}"), None));
         progress(result.clone());

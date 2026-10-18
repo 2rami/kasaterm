@@ -1486,7 +1486,7 @@ mod tests {
         let bot = t.split_htov_at(&[]).expect("분리");
         assert_eq!(bot, vec![1]);
         let merged = t.merge_vtoh_at(&[], 0.02).expect("정렬 → 재병합");
-        assert_eq!(merged, vec![], "관통 Horizontal split = 루트");
+        assert!(merged.is_empty(), "관통 Horizontal split = 루트");
         match &t {
             PtyLayout::Split { dir: SplitDir::Horizontal, ratio, .. } => {
                 assert!((ratio - 0.5).abs() < 1e-6, "관통 세로선 비율(0.5) 복원")

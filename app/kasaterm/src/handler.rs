@@ -801,7 +801,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ValidateTransfer(identity, reply) => {
                 let result = self.validate_transfer_identity(identity).and_then(|_| {
-                    if { let ws = self.ws.lock().unwrap(); self.pane_agent_working(&ws, &identity.pane_id) } {
+                    if self.migration_working(&identity.pane_id) {
                         anyhow::bail!("세션이 다시 작업을 시작했어요. 이번 이사는 중단했어요");
                     }
                     Ok(())
@@ -1112,6 +1112,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::TransferSnapshot(machine, sender) => {
                 transfer_endpoints::reply(sender, Ok(self.transfer_snapshot_gui(machine)));
+                return;
+            }
+            UserEvent::TransferLaunch(request, sender, deadline) => {
+                self.prepare_transfer_launch(request.clone(), sender.clone(), *deadline);
                 return;
             }
             UserEvent::TransferPrepareSpawn(request, sender) => {
@@ -6854,9 +6858,26 @@ impl ApplicationHandler<UserEvent> for App {
                             // (2026-09-14 지시).
                             if td.active {
                                 if self.sidebar_pane_drop_target(self.cursor_px.0, self.cursor_px.1).is_none()
-                                    && self.navigation_machine_at(self.cursor_px).is_some()
+                                    && (self.navigation_machine_at(self.cursor_px).is_some() || self.navigation_home_at(self.cursor_px))
                                 {
-                                    self.drop_pane_on_sidebar(&td.pane, self.cursor_px);
+                                    if let Some(orig) = self.drag_orig_layout.take() {
+                                        self.pty_layout = Some(orig);
+                                        let (cols, rows) = self.window_cells();
+                                        self.resize_backend(cols, rows);
+                                    }
+                                    self.drag_live_applied = None;
+                                    let tab_pid = self.ws.lock().unwrap().panes.get(&td.pane)
+                                        .and_then(|pane| pane.tabs.get(td.from)).and_then(|tab| tab.pid.clone());
+                                    if let Some(pid) = tab_pid {
+                                        let source = self.drag_endpoint_for_pid(&pid);
+                                        if self.navigation_home_at(self.cursor_px) {
+                                            self.route_drag_home(source);
+                                        } else if let Some(label) = self.navigation_machine_at(self.cursor_px) {
+                                            self.route_drag_to_machine(source, &label);
+                                        }
+                                    } else {
+                                        self.set_toast("이 탭은 기기 간 이사를 지원하지 않아요".into());
+                                    }
                                     window.request_redraw();
                                     return;
                                 }
@@ -7890,6 +7911,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_registered_servers();
         self.tick_restore_progress();
         self.tick_migrate_handoff();
+        self.tick_transfer_launches();
         self.run_restore_probe();
         self.run_mirror_focus_probe(event_loop);
         self.run_character_assignment_probe();
@@ -8286,6 +8308,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
                 .chain(self.migrate_handoff.as_ref().map(|h| h.at))
+                .chain(self.transfer_launch_tick())
                 .chain(lid_away_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))

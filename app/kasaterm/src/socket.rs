@@ -1271,6 +1271,13 @@ impl Backend for PtyBackend {
         rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)
     }
 
+    fn transfer_launch(&self, request: &kasa_socket::transfer::LaunchRequest) -> Result<kasa_socket::transfer::SessionRow> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferLaunch(request.clone(), tx, std::time::Instant::now() + std::time::Duration::from_secs(30)))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(35))?.map_err(anyhow::Error::msg)
+    }
+
     /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).
     fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
         self.proxy

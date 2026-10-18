@@ -839,6 +839,9 @@ pub trait Backend: Send + Sync {
     fn transfer_spawn(&self, _request: &crate::transfer::SpawnRequest) -> Result<crate::transfer::SessionRow> {
         anyhow::bail!("room transfer unsupported by this backend")
     }
+    fn transfer_launch(&self, _request: &crate::transfer::LaunchRequest) -> Result<crate::transfer::SessionRow> {
+        anyhow::bail!("transfer launch unsupported by this backend")
+    }
     fn transfer_close(&self, _identity: &crate::transfer::SessionIdentity) -> Result<()> {
         anyhow::bail!("room transfer unsupported by this backend")
     }

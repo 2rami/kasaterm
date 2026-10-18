@@ -18,6 +18,8 @@ impl SessionIdentity {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionRow {
     pub identity: SessionIdentity,
+    #[serde(default)]
+    pub surface_key: String,
     pub local_panes: Vec<String>,
     pub name: String,
     pub title: String,
@@ -27,6 +29,12 @@ pub struct SessionRow {
     pub room_id: Option<String>,
     pub shell_closeable: bool,
     pub unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub input_revision: u64,
+    #[serde(default)]
+    pub launch_ready: bool,
+    #[serde(default)]
+    pub conversation_ready: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +51,8 @@ pub struct MachineSnapshot {
     pub rooms: Vec<RoomInfo>,
     pub sessions: Vec<SessionRow>,
     pub room_transfer_supported: bool,
+    #[serde(default)]
+    pub launch_supported: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -96,6 +106,17 @@ pub struct MigrateRequest {
     pub session: SessionIdentity,
     pub destination_machine: String,
     pub room: RoomTarget,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LaunchRequest {
+    pub target: SessionIdentity,
+    pub session_id: String,
+    pub harness: String,
+    pub model: String,
+    pub effort: String,
+    pub bypass: bool,
+    pub input_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
