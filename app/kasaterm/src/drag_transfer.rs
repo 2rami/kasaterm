@@ -106,7 +106,19 @@ struct Seen {
     harness: Option<String>,
     status: String,
     supported: bool,
+    /// 그 기기가 실어 준 칸 열쇠. 칸 번호가 다시 쓰여도 열쇠는 새로 난다. 옛 판은 없다.
+    surface_key: Option<String>,
     at: Instant,
+}
+
+/// 옛 판 구조체에도 컴파일되게 직렬화한 값에서 읽는다.
+fn row_surface_key(row: &SessionRow) -> Option<String> {
+    serde_json::to_value(row)
+        .ok()?
+        .get("surface_key")?
+        .as_str()
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
 }
 
 impl Seen {
@@ -123,6 +135,7 @@ impl Seen {
             harness: row.harness.clone(),
             status: row.status.clone(),
             supported: snapshot.room_transfer_supported,
+            surface_key: row_surface_key(row),
             at,
         }
     }
@@ -264,8 +277,35 @@ fn request_from_pins(source: &Seen, arrival: &Arrival) -> anyhow::Result<Transfe
 /// 끌기 시작 때 고정한 출발 신원. 원격은 아직 관측이 없으면 누른 순간 보낸 조회를 기다린다.
 enum Pin {
     Ready(Seen),
-    Awaiting,
+    /// 누를 때 화면에 보이던 칸 열쇠. 늦게 받은 신원은 이 열쇠의 칸일 때만 받는다.
+    Awaiting { screen: String },
     Failed(String),
+}
+
+const SCREEN_UNKNOWN: &str =
+    "끌기 시작한 칸을 목록에서 확인하지 못했어요. 목록을 새로 고친 뒤 다시 끌어 주세요";
+const SCREEN_CHANGED: &str =
+    "끌기 시작한 뒤 그 자리에 다른 칸이 들어섰어요. 목록을 새로 고친 뒤 다시 끌어 주세요";
+const NEEDS_UPDATE: &str = "그 기기를 새 판으로 올려야 끌어서 이사할 수 있어요";
+
+fn confirm_screen(seen: &Seen, screen: &str) -> Pin {
+    match seen.surface_key.as_deref() {
+        Some(key) if key == screen => Pin::Ready(seen.clone()),
+        Some(_) => Pin::Failed(SCREEN_CHANGED.into()),
+        None => Pin::Failed(NEEDS_UPDATE.into()),
+    }
+}
+
+/// 화면이 아는 열쇠가 하나로 모일 때만 그 칸이다. 거울과 목록이 서로 다르면 고르지 않는다.
+fn single_screen_key(keys: impl Iterator<Item = String>) -> Option<String> {
+    let keys: HashSet<String> = keys
+        .filter(|key| !key.is_empty() && !key.starts_with("legacy:"))
+        .collect();
+    if keys.len() == 1 {
+        keys.into_iter().next()
+    } else {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -348,16 +388,20 @@ fn observe(
         Err(error) => Some(format!("출발 세션을 확인하지 못했어요: {error:#}")),
     };
     for (pinned, pin) in pins.values_mut() {
-        if pinned.origin_key() != key || !matches!(pin, Pin::Awaiting) {
+        let Pin::Awaiting { screen } = pin else {
+            continue;
+        };
+        if pinned.origin_key() != key {
             continue;
         }
-        *pin = match (&failure, observed.get(&pinned.seat())) {
+        let settled = match (&failure, observed.get(&pinned.seat())) {
             (Some(reason), _) => Pin::Failed(reason.clone()),
-            (None, Some(seen)) => Pin::Ready(seen.clone()),
+            (None, Some(seen)) => confirm_screen(seen, screen),
             (None, None) => Pin::Failed(
                 "끌기 시작한 창의 세션을 확인하지 못했어요. 상태를 확인하고 다시 끌어 주세요".into(),
             ),
         };
+        *pin = settled;
     }
 }
 
@@ -365,13 +409,13 @@ fn wait_pin(generation: u64) -> anyhow::Result<Seen> {
     let state = mailbox().lock().unwrap();
     let (mut state, _) = pin_landed()
         .wait_timeout_while(state, PIN_WAIT, |state| {
-            matches!(state.pins.get(&generation), Some((_, Pin::Awaiting)))
+            matches!(state.pins.get(&generation), Some((_, Pin::Awaiting { .. })))
         })
         .unwrap();
     match state.pins.remove(&generation) {
         Some((_, Pin::Ready(seen))) => Ok(seen),
         Some((_, Pin::Failed(reason))) => anyhow::bail!(reason),
-        Some((_, Pin::Awaiting)) => {
+        Some((_, Pin::Awaiting { .. })) => {
             anyhow::bail!("끌기 시작한 창의 세션을 제때 확인하지 못했어요. 다시 끌어 주세요")
         }
         None => anyhow::bail!("끌기 정보가 사라졌어요. 다시 끌어 주세요"),
@@ -490,6 +534,28 @@ impl App {
         Ok(seen)
     }
 
+    /// 누를 때 화면에 보이던 그 칸의 열쇠 — 거울 연결이 확인한 것과 기기 목록에 실린 것.
+    fn screen_key(&self, label: &str, base: &str, pane: &str) -> Option<String> {
+        let mirrored = self.pty.keys().filter_map(|id| {
+            let info = kasa_mcp::remote::remote_info(id)?;
+            (info.remote_id == pane && kasa_mcp::machines::same_machine_bases(&info.base, base))
+                .then(|| kasa_mcp::remote::remote_surface_key(id))
+                .flatten()
+        });
+        let listed = kasa_mcp::machines::cached_pane(label, pane)
+            .and_then(|row| row.get("surface_key")?.as_str().map(str::to_string));
+        single_screen_key(mirrored.chain(listed))
+    }
+
+    fn local_host(&self) -> anyhow::Result<Host> {
+        let machine = crate::transfer_endpoints::machine_context()?.clone();
+        let snapshot = self.transfer_snapshot_gui(&machine);
+        Ok(Host {
+            machine_id: snapshot.machine_id,
+            supported: snapshot.room_transfer_supported,
+        })
+    }
+
     fn insert_pin(&self, endpoint: DragEndpoint, pin: Pin, current: bool) -> u64 {
         let mut state = mailbox().lock().unwrap();
         if current {
@@ -512,17 +578,21 @@ impl App {
                 Ok(seen) => Pin::Ready(seen),
                 Err(error) => Pin::Failed(format!("{error:#}")),
             },
-            // 관측은 누르기 전 것이다. 그 뒤 바뀌었으면 엔진의 신원 대조가 거절한다.
-            DragEndpoint::RemotePane { .. } => mailbox()
-                .lock()
-                .unwrap()
-                .observed
-                .get(&endpoint.seat())
-                .cloned()
-                .map_or(Pin::Awaiting, Pin::Ready),
+            DragEndpoint::RemotePane { label, base, pane } => match self.screen_key(label, base, pane) {
+                None => {
+                    kasa_mcp::machines::poke();
+                    Pin::Failed(SCREEN_UNKNOWN.into())
+                }
+                // 관측이 화면의 칸이면 그 신원을 쓴다. 그 뒤 세션이 바뀌었으면 엔진의 신원 대조가 거절한다.
+                Some(screen) => match mailbox().lock().unwrap().observed.get(&endpoint.seat()).cloned() {
+                    Some(seen) if seen.surface_key.as_deref() == Some(screen.as_str()) => Pin::Ready(seen),
+                    Some(seen) if seen.surface_key.is_none() => Pin::Failed(NEEDS_UPDATE.into()),
+                    _ => Pin::Awaiting { screen },
+                },
+            },
         };
         let ready = matches!(pin, Pin::Ready(_));
-        let awaiting = matches!(pin, Pin::Awaiting);
+        let awaiting = matches!(pin, Pin::Awaiting { .. });
         self.insert_pin(endpoint.clone(), pin, true);
         if awaiting {
             self.refresh_origin(endpoint, true);
@@ -647,6 +717,24 @@ impl App {
             |host| Destination::Fixed(Arrival::new_room(&host)),
         );
         self.queue_drag_transfer(source, ticket, arrival, label.into());
+        true
+    }
+
+    /// 다른 기기 칸을 이 기기 머리에 놓으면 이 기기에 새 방을 세워 데려온다.
+    pub(crate) fn route_drag_home(&mut self, source: DragEndpoint) -> bool {
+        let ticket = self.claim_pin(&source);
+        if matches!(source, DragEndpoint::LocalPane(_)) {
+            drop_pin(ticket);
+            return false;
+        }
+        let Some(ticket) = ticket.or_else(|| self.pin_now(&source)) else {
+            return true;
+        };
+        let arrival = match self.local_host() {
+            Ok(host) => Destination::Fixed(Arrival::new_room(&host)),
+            Err(error) => Destination::Broken(format!("{error:#}")),
+        };
+        self.queue_drag_transfer(source, ticket, arrival, String::new());
         true
     }
 
@@ -1070,30 +1158,66 @@ mod tests {
         assert!(request_from_pins(&seen(&source, "%1"), &Arrival::new_room(&same)).is_err());
     }
 
+    fn awaiting(screen: &str) -> Pin {
+        Pin::Awaiting { screen: screen.into() }
+    }
+
+    /// 칸 열쇠를 실은 기기의 조회. 이 열쇠가 구조체에 생기기 전 판에서는 직렬화에서 빠진다.
+    fn keyed(machine: &str, key: &str) -> (MachineSnapshot, bool) {
+        let mut value = serde_json::to_value(snapshot(machine, "room:source")).unwrap();
+        value["sessions"][0]["surface_key"] = serde_json::json!(key);
+        let snapshot: MachineSnapshot = serde_json::from_value(value).unwrap();
+        let carried = row_surface_key(&snapshot.sessions[0]).is_some();
+        (snapshot, carried)
+    }
+
+    #[test]
+    fn a_late_identity_is_accepted_only_for_the_surface_seen_at_press() {
+        let mut late = seen(&snapshot("source", "room:source"), "%1");
+        late.surface_key = Some("seen-at-press".into());
+        assert!(matches!(confirm_screen(&late, "seen-at-press"), Pin::Ready(_)));
+        assert!(matches!(confirm_screen(&late, "other"), Pin::Failed(reason) if reason == SCREEN_CHANGED));
+        late.surface_key = None;
+        assert!(matches!(confirm_screen(&late, "seen-at-press"), Pin::Failed(reason) if reason == NEEDS_UPDATE));
+
+        let keys = |list: &[&str]| single_screen_key(list.iter().map(|key| key.to_string()));
+        assert_eq!(keys(&["a", "a", "", "legacy:%3"]), Some("a".into()));
+        assert_eq!(keys(&["a", "b"]), None);
+        assert_eq!(keys(&["", "legacy:%3"]), None);
+        assert_eq!(keys(&[]), None);
+    }
+
     #[test]
     fn a_drag_waiting_for_its_start_identity_takes_only_that_hosts_answer() {
         let mut state = Mailbox::default();
-        state.pins.insert(1, (remote("%1"), Pin::Awaiting));
-        state.pins.insert(2, (DragEndpoint::LocalPane("%1".into()), Pin::Awaiting));
+        state.pins.insert(1, (remote("%1"), awaiting("key-a")));
+        state.pins.insert(2, (DragEndpoint::LocalPane("%1".into()), awaiting("key-a")));
+        state.pins.insert(3, (remote("%1"), awaiting("key-b")));
         let started = Instant::now();
-        observe(&mut state, &remote(""), Ok(snapshot("source", "room:source")), started);
-        let Some((_, Pin::Ready(pinned))) = state.pins.get(&1) else { panic!("remote pin unresolved") };
-        assert_eq!(pinned.identity.token, "token");
-        assert_eq!(pinned.at, started);
-        assert!(matches!(state.pins.get(&2), Some((_, Pin::Awaiting))));
+        let (answer, carried) = keyed("source", "key-a");
+        observe(&mut state, &remote(""), Ok(answer), started);
+        if carried {
+            let Some((_, Pin::Ready(pinned))) = state.pins.get(&1) else { panic!("remote pin unresolved") };
+            assert_eq!(pinned.identity.token, "token");
+            assert_eq!(pinned.at, started);
+            assert!(matches!(state.pins.get(&3), Some((_, Pin::Failed(reason))) if reason == SCREEN_CHANGED));
+        } else {
+            assert!(matches!(state.pins.get(&1), Some((_, Pin::Failed(reason))) if reason == NEEDS_UPDATE));
+        }
+        assert!(matches!(state.pins.get(&2), Some((_, Pin::Awaiting { .. }))));
         assert_eq!(state.hosts[&remote("").origin_key()].machine_id, "source");
 
-        state.pins.insert(3, (remote("%9"), Pin::Awaiting));
-        state.pins.insert(4, (remote("%1"), Pin::Awaiting));
-        let mut busy = snapshot("source", "room:source");
+        state.pins.insert(4, (remote("%9"), awaiting("key-a")));
+        state.pins.insert(5, (remote("%1"), awaiting("key-a")));
+        let (mut busy, _) = keyed("source", "key-a");
         busy.sessions[0].unavailable_reason = Some("목록을 읽는 동안 세션이 바뀌었어요".into());
         observe(&mut state, &remote(""), Ok(busy), Instant::now());
-        assert!(matches!(state.pins.get(&3), Some((_, Pin::Failed(_)))));
         assert!(matches!(state.pins.get(&4), Some((_, Pin::Failed(_)))));
+        assert!(matches!(state.pins.get(&5), Some((_, Pin::Failed(_)))));
         assert!(!state.observed.contains_key(&remote("%1").seat()));
 
-        state.pins.insert(5, (remote("%1"), Pin::Awaiting));
+        state.pins.insert(6, (remote("%1"), awaiting("key-a")));
         observe(&mut state, &remote(""), Err(anyhow::anyhow!("timeout")), Instant::now());
-        assert!(matches!(state.pins.get(&5), Some((_, Pin::Failed(reason))) if reason.contains("timeout")));
+        assert!(matches!(state.pins.get(&6), Some((_, Pin::Failed(reason))) if reason.contains("timeout")));
     }
 }

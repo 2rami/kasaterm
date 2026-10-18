@@ -33,6 +33,8 @@ pub(crate) struct NavigationState {
     /// 보는 중인 원격 방에서 지금 포커스한 칸의 원격 pane id.
     pub(crate) viewing_cur: Option<String>,
     device_views: Vec<(String, Rect)>,
+    /// 이 기기 머리줄 — 다른 기기 칸을 여기 놓으면 이 기기 새 방으로 데려온다.
+    home: Option<Rect>,
     /// 기기 머리의 이름·상태 자리 — 올리면 그 기기의 연결 기록이 뜬다(`hover_history`).
     heads: Vec<(String, Rect)>,
     pub(crate) collapsed_rooms: std::collections::HashSet<String>,
@@ -720,11 +722,13 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     nav.hits.clear();
     nav.device_views.clear();
     nav.heads.clear();
+    nav.home = None;
     if width <= 0.0 { return; }
     let label = crate::info::local_machine_name();
     let label = if label.is_empty() { "이 기기" } else { label };
     let compact = width < 180.0;
     let head = (8.0, head_top + 4.0, width - 16.0, HEADER_H - 8.0);
+    nav.home = Some(head);
     let wide = Density::sidebar(width).is_wide();
     let plus_w = if wide { 76.0 } else { 28.0 };
     let plus = (width - 8.0 - plus_w, head.1, plus_w, head.3);
@@ -1583,6 +1587,11 @@ impl App {
             .or_else(|| nav.device_views.iter().find(|(_, view)| hit(cursor, *view)).map(|(label, _)| label.clone()))
     }
 
+    pub(crate) fn navigation_home_at(&self, cursor: (f32, f32)) -> bool {
+        !self.tabs_on_top && self.tab_strip_w() > 0.0
+            && self.info.navigation.home.is_some_and(|r| hit(cursor, r))
+    }
+
     pub(crate) fn navigation_drop_target(&self, cursor: (f32, f32)) -> Option<(crate::drag_transfer::DragEndpoint, DropZone)> {
         let nav = &self.info.navigation;
         // Minimap cells take precedence over their enclosing room card.
@@ -1621,9 +1630,12 @@ impl App {
         let target = self.sidebar_pane_drop_target(cursor.0, cursor.1)
             .or_else(|| self.drop_target_at(cursor.0, cursor.1).map(|(pane, zone)| (self.drag_endpoint(&pane), zone)));
         let Some((destination, mut zone)) = target else {
-            match self.navigation_machine_at(cursor) {
-                Some(label) => { self.route_drag_to_machine(source, &label); }
-                None => self.set_toast("이사할 방이나 칸, 기기 머리 위에 놓아 주세요".into()),
+            if self.navigation_home_at(cursor) {
+                self.route_drag_home(source);
+            } else if let Some(label) = self.navigation_machine_at(cursor) {
+                self.route_drag_to_machine(source, &label);
+            } else {
+                self.set_toast("이사할 방이나 칸, 기기 머리 위에 놓아 주세요".into());
             }
             self.info.machines_col.last_refresh = None;
             return;

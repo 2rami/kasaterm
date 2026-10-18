@@ -3467,7 +3467,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
     pub(crate) fn drop_pane_on_sidebar(&mut self, pane: &str, cursor: (f32, f32)) -> bool {
         let target = self.sidebar_pane_drop_target(cursor.0, cursor.1);
         let machine = if target.is_none() { self.navigation_machine_at(cursor) } else { None };
-        if target.is_none() && machine.is_none() { return false; }
+        let home = target.is_none() && machine.is_none() && self.navigation_home_at(cursor)
+            && matches!(self.drag_endpoint(pane), crate::drag_transfer::DragEndpoint::RemotePane { .. });
+        if target.is_none() && machine.is_none() && !home { return false; }
         // Hover previews are local-only and must not survive a remote drop or failed preflight.
         if let Some(original) = self.drag_orig_layout.take() {
             self.pty_layout = Some(original);
@@ -3486,6 +3488,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
         } else if let Some(label) = machine {
             let source = self.drag_endpoint(pane);
             self.route_drag_to_machine(source, &label);
+        } else {
+            let source = self.drag_endpoint(pane);
+            self.route_drag_home(source);
         }
         self.chrome_dirty = true;
         true
