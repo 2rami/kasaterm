@@ -22,6 +22,7 @@
 | 프로토콜 | 2 | `kasa-socket` | 줄 단위 JSON-RPC·서버·전송(유닉스 소켓·named pipe)·`kasaterm-cli`·앱 업데이트 계약 | 금지 | 금지 |
 | 전송 | 2 | `kasa-net` | 카사넷 — 기기끼리 iroh QUIC 직통 길 | 금지 | 허용 |
 | 전송 | 3 | `kasa-net-ffi` | 카사넷 C ABI(폰 앱 정적 라이브러리). 산출물이라 받는 쪽이 없다 | 금지 | 허용 |
+| 도구 | 3 | `kasa-files` | 셸 칸 옆 파일 트리 TUI(ratatui). 소켓으로 짝 셸의 폴더를 따라가고 옮긴다. 산출물이라 받는 쪽이 없다 | 금지 | 금지 |
 | 협업 | 3 | `kasa-agents` | 하네스 지식: Claude Code·Codex 대화 기록 읽기 | 금지 | feature 뒤만 |
 | 협업 | 4 | `kasa-collab` | 보드 수집기·tell 장부·칸 열쇠·기계 id. 다른 기계와의 HTTP 는 feature `net` | 금지 | feature 뒤만 |
 | 호스트 | 5 | `kasa-mcp` | 이 기기 HTTP 호스트(보드·웹 칸·원격 방·모바일)·관문 `kasa-relay`·`kasa-device`·`kasa-serve-web`. 이름은 MCP 서버였던 시절의 것 | 금지 | 허용 |
@@ -46,6 +47,7 @@ kasaterm ─┬─ kasa-mcp ─┬─ kasa-collab ─┬─ kasa-socket
           ├─ kasa-pty · kasa-socket · kasa-ime · kasa-cells · kasa-pet-config
 kasapet ── kasa-pet-config
 kasa-net-ffi ── kasa-net
+kasa-files ── kasa-socket
 kasa-host ─┬─ kasa-pty ── kasa-screen
            └─ kasa-screen
 spikes/* ── kasa-bridge

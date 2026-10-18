@@ -16,6 +16,7 @@ members = [
     "crates/kasa-gridview",
     "crates/kasa-collab",
     "crates/kasa-agents",
+    "crates/kasa-files",
     "crates/kasa-net",
     "crates/kasa-net-ffi",
     # 실험(spikes/)은 제품이 아니다. 아무도 의존하지 않고, 루트에서 `-p` 없이 부르는
@@ -42,6 +43,7 @@ default-members = [
     "crates/kasa-gridview",
     "crates/kasa-collab",
     "crates/kasa-agents",
+    "crates/kasa-files",
     "crates/kasa-net",
     "crates/kasa-net-ffi",
 ]
