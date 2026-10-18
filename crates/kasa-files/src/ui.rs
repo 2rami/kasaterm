@@ -102,11 +102,16 @@ fn tree_lines(app: &mut App, area: Rect) -> Vec<Line<'static>> {
             if let Some(mark) = mark {
                 spans.push(Span::styled(format!(" {mark}"), mark_style(mark)));
             }
-            let line = Line::from(spans);
+            // 고른 줄은 한 색 띠로 뒤집는다 — 칸마다 색을 둔 채 뒤집으면 색 덩어리로 갈린다.
             if i == app.tree.selected {
-                line.patch_style(Style::new().add_modifier(Modifier::REVERSED))
+                Line::from(
+                    spans
+                        .into_iter()
+                        .map(|span| Span::styled(span.content, Style::new().add_modifier(Modifier::REVERSED)))
+                        .collect::<Vec<_>>(),
+                )
             } else {
-                line
+                Line::from(spans)
             }
         })
         .collect()
