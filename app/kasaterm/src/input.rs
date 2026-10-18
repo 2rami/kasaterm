@@ -2484,9 +2484,6 @@ impl App {
             let n = self.windows.len();
             let vis = self.win_tab_vis.max(1);
             let (cx, cy) = self.cursor_px;
-            let in_status_menu = self.statusbar.menu_rect.is_some_and(|(mx, my, mw, mh)| {
-                cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh
-            });
             let over_strip = if self.tabs_on_top {
                 cy < TITLE_HEIGHT
             } else {
@@ -2500,7 +2497,7 @@ impl App {
             // 세는 단위가 달라 여기서 갈래를 나눈다. 카드 높이를 재는 계산은 방마다
             // 트리를 훑으므로 커서가 띠 위일 때만 한다 — 딴 데서 굴린 것까지 매번
             // 재면 그냥 버리는 일이 된다.
-            let live = over_strip && !in_status_menu;
+            let live = over_strip;
             let max_first = if live && self.tabs_on_top { n.saturating_sub(vis) } else { 0 };
             let sb_max_px = if live && !self.tabs_on_top {
                 let win_h = self
@@ -2663,14 +2660,9 @@ impl App {
         // 마크다운·편집기 pane 도 파일트리와 같은 이유로 wheel_step **앞에서** 잡는다.
         // 정수 셀로 양자화하면 트랙패드 픽셀 델타가 한 행 높이씩 튀고, 관성 꼬리는
         // 1셀 임계를 못 넘어 통째로 버려진다 — 문서 뷰는 셀 격자에 맞출 이유가 없다.
-        // 크롬 오버레이(상태바 드롭다운·사이드 열)가 커서 아래 있으면 그쪽이 먼저
-        // 먹어야 하므로 그 두 경우만 비켜 준다(target 이 활성 pane 으로 폴백하므로
-        // 커서가 pane 밖에 있어도 여기 걸린다).
+        // 사이드 열이 커서 아래 있으면 그쪽이 먼저 먹어야 하므로 비켜 준다(target 이
+        // 활성 pane 으로 폴백하므로 커서가 pane 밖에 있어도 여기 걸린다).
         let (cx, cy) = self.cursor_px;
-        let over_menu = self
-            .statusbar
-            .menu_rect
-            .is_some_and(|(mx, my, mw, mh)| cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh);
         let over_side_col = self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x();
         // Decide which pane handles this wheel: the pane the pointer is
         // hovering over. Falls back to the active pane if the pointer
@@ -2691,7 +2683,7 @@ impl App {
                 .and_then(|p| p.markdown())
                 .map_or((false, false), |m| (true, m.raw_mode))
         };
-        if is_md && !over_menu && !over_side_col {
+        if is_md && !over_side_col {
             // Raw editor: a horizontal wheel/trackpad component pans long code
             // lines under the fixed gutter. Clamp to the longest line so it
             // can't scroll into empty space past the end of the text.
@@ -2801,23 +2793,6 @@ impl App {
                 return;
             }
         };
-        // Open status-bar dropdown overlays everything, so the wheel scrolls
-        // its list first when the pointer is inside it (a cwd with many subdirs
-        // overflows the capped viewport). Whole-row steps to match the render.
-        if let Some((mx, my, mw, mh)) = self.statusbar.menu_rect {
-            let (cx, cy) = self.cursor_px;
-            if cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh {
-                let item_h = 24.0_f32;
-                // lines>0 = wheel up = toward the top = less scroll.
-                self.statusbar.menu_scroll =
-                    (self.statusbar.menu_scroll - lines as f32 * item_h).max(0.0);
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-                return;
-            }
-        }
         // Info 탭: 프로세스 목록 스크롤. clamp 는 렌더가 실제 행 수로 다시 하니
         // (draw_info_col) 여기선 하한만 잡고 넘긴다 — 목록 길이가 워커 스레드에서
         // 바뀌므로 입력 시점의 최대치는 이미 낡았을 수 있다.
@@ -3096,7 +3071,6 @@ impl App {
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
             crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
-            crate::ImeFocus::PathSearch => self.statusbar_search_insert(&text),
             crate::ImeFocus::TreeSearch => self.file_tree_search_insert(&text),
             crate::ImeFocus::TreeNew => self.ft_edit_insert(&text),
             crate::ImeFocus::WebAddr => self.web_addr_insert(&text),
@@ -3179,77 +3153,6 @@ impl App {
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
             }
-            _ => {}
-        }
-        self.chrome_dirty = true;
-    }
-    /// 커서 자리에 글자를 넣는다 — 조합이 끝난 한글도, 포커스가 떠나며 확정된
-    /// 음절(`ime_retarget`)도 여기로 온다.
-    pub(crate) fn statusbar_search_insert(&mut self, text: &str) {
-        crate::lineedit::insert(
-            &mut self.statusbar.menu_search,
-            &mut self.statusbar.menu_search_cursor,
-            text,
-        );
-        self.statusbar.menu_scroll = 0.0;
-    }
-    /// Type-to-search for the open path dropdown, with the shared Hangul
-    /// composer so Korean filters compose. 조작은 `lineedit` 한 벌 — 검색칸도
-    /// 가운데를 고칠 수 있어야 한다. Esc 는 드롭다운을 닫고 Enter 는 첫 후보를
-    /// 연다(그 둘만 이 칸의 몫). 목록이 실제로 달라졌을 때만 스크롤을 되감는다 —
-    /// 커서만 옮겼는데 스크롤이 튀면 보던 자리를 잃는다.
-    pub(crate) fn statusbar_menu_search_key(&mut self, event: &KeyEvent) {
-        if is_modifier_key(event) {
-            return;
-        }
-        self.ime_retarget(crate::ImeFocus::PathSearch);
-        use winit::keyboard::{Key, NamedKey};
-        #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
-            if t.chars().count() == 1 {
-                if let Some(c) = t.chars().next() {
-                    if (0x3130..=0x318F).contains(&(c as u32)) {
-                        if let Some(commit) = self.hangul.feed(c) {
-                            self.statusbar_search_insert(&commit);
-                        }
-                        self.preedit = self.hangul.preedit().unwrap_or_default();
-                        self.in_preedit = !self.preedit.is_empty();
-                        self.chrome_dirty = true;
-                        return;
-                    }
-                }
-            }
-        }
-        // 조합 중이던 자모를 지우는 백스페이스가 먼저다 — 완성 글자를 지우기 전에
-        // 조합기 안의 것부터 물린다.
-        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
-            self.preedit = self.hangul.preedit().unwrap_or_default();
-            self.in_preedit = !self.preedit.is_empty();
-            self.chrome_dirty = true;
-            return;
-        }
-        if let Some(flushed) = self.hangul.flush() {
-            self.statusbar_search_insert(&flushed);
-        }
-        self.preedit.clear();
-        self.in_preedit = false;
-        let act = crate::lineedit::key(
-            &mut self.statusbar.menu_search,
-            &mut self.statusbar.menu_search_cursor,
-            &event.logical_key,
-        );
-        match act {
-            crate::lineedit::LineEditAction::Submit => {
-                self.statusbar_menu_activate_first();
-                self.chrome_dirty = true;
-                return;
-            }
-            crate::lineedit::LineEditAction::Cancel => {
-                self.statusbar.menu = None;
-            }
-            // 걸러지는 목록이 바뀐 키에만 맨 위로. 커서 이동에 되돌리면 ←→ 마다
-            // 스크롤이 튄다.
-            crate::lineedit::LineEditAction::Edited => self.statusbar.menu_scroll = 0.0,
             _ => {}
         }
         self.chrome_dirty = true;
@@ -3485,22 +3388,6 @@ impl App {
             }
             return;
         }
-        // Open path dropdown is a modal search: keystrokes filter it, not the
-        // PTY. (Branch menu has no search — its lists are short — so it falls
-        // through.)
-        if self
-            .statusbar
-            .menu
-            .as_ref()
-            .map(|(_, k)| matches!(k, StatusbarMenu::Path))
-            .unwrap_or(false)
-        {
-            self.statusbar_menu_search_key(event);
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-            return;
-        }
         // Cmd+Delete (= Cmd+Backspace) on a selected tree row → trash it.
         // Gated on no text input having focus so it never eats shell editing
         // keys; the selection clears when a terminal pane is clicked.
@@ -3663,7 +3550,6 @@ impl App {
                         Some(
                             (pane_h
                                 - pane.header_px()
-                                - self.statusbar_px(id)
                                 - PANE_INNER_Y * 2.0)
                                 .max(self.cell.h),
                         )

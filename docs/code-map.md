@@ -26,6 +26,7 @@
   `remote_rooms.rs`(원격 셸·거울 칸·원격 방 보기 창) · `migrate.rs`(칸 이사·되돌리기)
 - `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version. `chrome/sidebar.rs`의 `SidebarMetrics`가 폭별 목록·배치도·보관·별도창 높이를 로컬·원격·스크롤에 함께 제공한다.
 - `mirror_close.rs` — 원본과 같은 닫기 확인·원격 완료 응답. `mirror_close/source.rs`는 원본 GUI의 신원·구성 재검사와 닫기·복원, `scope.rs`는 응답을 기다리는 동안 바뀐 로컬 탭 보호, `reopen.rs`는 원본 닫힘 기록으로 미러 되살리기.
+- `file_pane.rs` — ⋮ 「파일 트리」로 셸 칸 옆에 `kasa-files` 칸을 열고, 그 칸이 부르는 `surface.cwd`(소켓 스레드에서 셸 폴더)·`surface.cd`(놀고 있는 셸만 이동)를 맡는다. TUI 본체는 `crates/kasa-files`.
 - `drag_transfer.rs` — 끌기 시작의 칸 신원·화면 열쇠 고정과 도착 방·기기 머리 경로, 즉시 진행 표시. `session_transfer.rs`는 기기·세션 재검사와 도착 방·대화 준비 확인을 맡는다.
 - `transfer_endpoints.rs` — 기기 간 스냅숏·방 선택·빈 셸 예약과 정체 검사. `transfer_endpoints/launch.rs`는 예약한 셸의 입력 세대·프롬프트를 대조해 한 번만 재개 명령을 보내고, 같은 대화의 실제 입력창을 기다린다. 입력창 판정은 `tell_delivery.rs`의 공통 판독을 사용한다.
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)

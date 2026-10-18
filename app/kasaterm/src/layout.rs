@@ -429,7 +429,7 @@ impl App {
         let ch = self.cell.h.max(1.0);
         (
             (bounds.0 as f32 * cw - 2.0 * PANE_INNER_X).max(cw),
-            (bounds.1 as f32 * ch - pane.header_px() - self.statusbar_px(id) - 2.0 * PANE_INNER_Y).max(ch),
+            (bounds.1 as f32 * ch - pane.header_px() - 2.0 * PANE_INNER_Y).max(ch),
         )
     }
 
@@ -761,13 +761,9 @@ impl App {
             let box_h_px = h as f32 * ch;
             let scaled_cw = cw * fs;
             let scaled_ch = ch * fs;
-            // The status bar lives below the grid, so a pane that shows it
-            // loses the same footer band off its usable height — otherwise the
-            // shell paints its last rows behind the bar.
-            let footer_px = self.statusbar_px(&id);
             let header_px = self.pane_header_px(&id);
             let usable_w = (box_w_px - 2.0 * PANE_INNER_X).max(scaled_cw);
-            let usable_h = (box_h_px - header_px - footer_px - 2.0 * PANE_INNER_Y).max(scaled_ch);
+            let usable_h = (box_h_px - header_px - 2.0 * PANE_INNER_Y).max(scaled_ch);
             let pcols = (usable_w / scaled_cw).floor().max(1.0) as u16;
             let prows = (usable_h / scaled_ch).floor().max(1.0) as u16;
             leaf_cells.insert(id, (pcols, prows));
@@ -1632,15 +1628,15 @@ impl App {
 
     /// 방 `window` 에 칸 `extra` 개를 더했을 때의 벤토 모양.
     ///
-    /// 하한(80칸×16줄)은 **셸이 받는 격자**로 잰다. 칸 상자에서 상태줄·헤더 띠·안쪽 여백이
+    /// 하한(80칸×16줄)은 **셸이 받는 격자**로 잰다. 칸 상자에서 헤더 띠·안쪽 여백이
     /// 빠지므로(`resize_backend`), 상자 기준으로 재면 19줄 상자가 15줄 셸이 된다(실측).
     fn bento_shape_for(&self, window: usize, extra: usize) -> kasa_pty::Bento {
         let leaves = self.window_leaves(window);
         let (cw, ch) = (self.cell.w.max(1.0), self.cell.h.max(1.0));
         let band_px = leaves
             .iter()
-            .map(|id| self.statusbar_px(id) + self.pane_header_px(id))
-            .fold(if self.set_footer_default { self.pane_footer_h() } else { 0.0 }, f32::max);
+            .map(|id| self.pane_header_px(id))
+            .fold(0.0, f32::max);
         let pad_cols = (2.0 * PANE_INNER_X / cw).ceil() as u16;
         let pad_rows = ((band_px + 2.0 * PANE_INNER_Y) / ch).ceil() as u16;
         let (cols, rows) = self.window_cells();
@@ -2138,11 +2134,6 @@ impl App {
         }
         if let Some(opener) = self.pane_opener.remove(old) {
             self.pane_opener.insert(new.to_string(), opener);
-        }
-        for set in [&mut self.statusbar.hidden, &mut self.statusbar.shown] {
-            if set.remove(old) {
-                set.insert(new.to_string());
-            }
         }
         eprintln!("[layout] 칸 {old} 은 제 셸이 없어 보여 주는 탭 {new} 의 이름으로 바꿨다");
         self.publish_pty_layout();

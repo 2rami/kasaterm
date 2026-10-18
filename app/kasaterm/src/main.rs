@@ -671,17 +671,6 @@ const PANE_HEADER_HEIGHT: f32 = 34.0;
 /// 설정 「칸 머리」 — 켜면 모든 칸이 머리 띠(제목·단추·더블클릭 확대)를 갖고, 끄면 hover ⋮ 만
 /// 쓴다. `PaneState::has_header` 가 App 을 못 보므로 전역에 둔다.
 static PANE_HEADER_BAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Per-pane status bar height (logical px) — the strip below a pane's cell grid
-/// holding the cwd / git-branch / diff chips. Mirrors the header band: when a
-/// pane shows its bar, the PTY's usable rows shrink by the equivalent cell
-/// count so the grid still fits above it. Toggled per pane (see
-/// `statusbar_hidden`); a hidden pane reserves nothing.
-///
-/// 헤더(34)보다 낮은 건 의도다 — 헤더는 탭을 이고 있고 하단바는 칩만 얹는다.
-/// 다만 예전 24 는 18px 칩에 여백이 3px 밖에 안 남아 띠가 칩에 눌려 보였다.
-/// **기본값**이다 — 실제 높이는 설정에서 바뀌므로 `App::pane_footer_h()` 를 써라.
-/// 이 상수를 직접 참조하면 설정을 내려도 안 따라가는 자리가 하나 생긴다.
-const PANE_FOOTER_HEIGHT_DEFAULT: f32 = 30.0;
 /// 창 맨 아래 상태줄 높이(logical px) — 계정 한도가 **항상** 보이는 자리.
 ///
 /// 조건 없이 늘 예약한다. 한도는 「볼 일이 생겼을 때 찾아보는 값」이
@@ -1557,9 +1546,6 @@ fn is_shell_name(name: &str) -> bool {
 enum ActionKind {
     SplitV,
     SplitH,
-    /// Toggle this pane's bottom status bar (cwd / branch / diff). Lives next to
-    /// the split buttons; collapsing the bar gives the cell grid its rows back.
-    ToggleStatusbar,
     /// Markdown panes only: the "Rendered | Raw" header segmented toggle.
     /// `MdRender` shows the laid-out doc; `MdRaw` opens the wgpu source editor.
     /// View changes never write the file; `MdSave` is the only save action.
@@ -4523,7 +4509,6 @@ pub(crate) enum ImeFocus {
     McpAdd,
     /// 좌측 사이드바 방 이름 인라인 편집(윈도우 인덱스).
     RoomRename(usize),
-    PathSearch,
     TreeSearch,
     TreeNew,
     /// 웹 pane 헤더 주소창(한 번에 하나만 열리므로 pane id 는 `App.web_addr` 가
@@ -4799,7 +4784,6 @@ pub(crate) enum SettingsAction {
     /// 펫으로 띄울 캐릭터 폴더 이름(`~/.config/kasaterm/pet/<이름>`).
     PetCharacter(String),
     PetPreference(kasa_pet_config::PreferenceChange),
-    ToggleFooter,
     /// Editor autosave quiet period in ms; 0 = off.
     AutosaveDelay(u64),
     ShellPreset(String),
@@ -4909,8 +4893,6 @@ pub(crate) enum SettingsAction {
     /// 단위로 고를 값이 아니어서다 — 안에 얹힌 게이지·칩 크기가 정해져 있어,
     /// 쓸 수 있는 폭이 사실상 세 칸이다.
     StatusBarH(u32),
-    /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
-    PaneFooterH(u32),
     ToggleStatusbarItem(String),
     MoveStatusbarItem(String, i8),
     /// 빈 색은 해당 위젯의 테마 기본색으로 복귀한다.
@@ -4988,15 +4970,6 @@ pub(crate) enum SettingsAction {
     SelectMotionFrame(String, usize),
     /// 사용자 모션 한 벌을 걷고 번들 그림으로 되돌린다.
     ResetMotion(String),
-}
-
-/// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
-/// directories (click → cd that pane); `Branch` lists local branches (click →
-/// checkout in that pane's repo).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StatusbarMenu {
-    Path,
-    Branch,
 }
 
 /// Recompose conjoining Hangul jamo (NFD) back into precomposed syllables
@@ -5883,7 +5856,6 @@ struct App {
     set_file_open_app: String,
     set_file_open_cmd: String,
     set_file_tree_default: bool,
-    set_footer_default: bool,
     /// Editor autosave quiet period. `None` = off, which is the default and
     /// what VS Code ships — writing a user's file without being asked is a
     /// surprise, so it stays opt-in. Cmd+S keeps its `✓ 저장됨` toast either way.
@@ -5893,7 +5865,6 @@ struct App {
     /// 쓰는 사람이 설정에서 올린다 — 둘이 같은 델타로 와 자동 구분이 안 된다.
     set_wheel_pixel_gain: f32,
     set_status_h: f32,
-    set_pane_footer_h: f32,
     /// Per-pane claude wrapper injection (the shim reads these): persona on/off,
     /// model/effort overrides, and free-form extra args. Invariants
     /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
@@ -6489,12 +6460,10 @@ impl App {
             set_file_open_app: socket::read_file_open_app(),
             set_file_open_cmd: socket::read_file_open_cmd(),
             set_file_tree_default: socket::read_file_tree_default(),
-            set_footer_default: socket::read_footer_default(),
             set_autosave: socket::read_editor_autosave(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
             set_wheel_pixel_gain: socket::read_wheel_pixel_gain(),
             set_status_h: socket::read_status_h(),
-            set_pane_footer_h: socket::read_pane_footer_h(),
             set_claude_persona: socket::read_claude_persona(),
             set_shim_inject: socket::read_shim_inject(),
             set_palette_edit: String::new(),

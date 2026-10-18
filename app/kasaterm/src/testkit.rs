@@ -1108,47 +1108,6 @@ impl App {
         self.render_frame();
     }
 
-    /// Headless 경로 검색칸 repro: `KASATERM_AUTOPATHSEARCH_MS` 뒤에 활성 pane 의 경로
-    /// 드롭다운을 열고, 검색어를 친 뒤 커서를 앞으로 옮겨 한 글자를 더 넣는다.
-    ///
-    /// 이 칸엔 원래 캐럿이 없었다 — 끝에만 붙는 칸이었기 때문이다. 그래서 여기서는
-    /// 커서가 가운데 있을 때 **캐럿이 그 자리에 서는지**를 캡처로 본다.
-    pub(crate) fn run_pending_autopathsearch(&mut self) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::OnceLock;
-        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
-        static FIRED: AtomicBool = AtomicBool::new(false);
-        let due = DUE.get_or_init(|| {
-            std::env::var("KASATERM_AUTOPATHSEARCH_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
-        });
-        let Some(due) = due else { return };
-        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
-            return;
-        }
-        FIRED.store(true, Ordering::Relaxed);
-        let Some(id) = self.ws.lock().unwrap().active_pane.clone() else {
-            eprintln!("[autopathsearch] 활성 pane 이 없다");
-            return;
-        };
-        // 드롭다운은 footer 의 경로 칩에 앵커링된다 — 바를 안 켜면 칩 rect 가 없어
-        // 메뉴가 통째로 안 그려진다(첫 시도에서 빈 화면만 찍혔다).
-        self.set_footer_default = true;
-        self.render_frame();
-        self.open_statusbar_menu(&id, crate::StatusbarMenu::Path);
-        self.statusbar_search_insert("sc");
-        // 커서를 맨 앞으로 몰고 한 글자 — 끝에만 붙던 시절엔 "sc" 뒤에 붙었다.
-        self.statusbar.menu_search_cursor = 0;
-        self.statusbar_search_insert("A");
-        eprintln!(
-            "[autopathsearch] 검색어={:?} 커서={} (기대: \"Asc\" / 1, 캐럿은 A 뒤)",
-            self.statusbar.menu_search, self.statusbar.menu_search_cursor
-        );
-        self.render_frame();
-    }
-
     /// Headless 닫기→되살리기 repro: `KASATERM_AUTOCLOSEREOPEN_MS` 뒤에 pane 을 쪼갠 뒤
     /// 하나를 닫고, 되살리기 스택에 남았는지 찍고, 다시 되살린다.
     ///

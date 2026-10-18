@@ -37,7 +37,6 @@ fn handle_menu_tip(action: ActionKind, view: (bool, bool)) -> &'static str {
         ActionKind::SplitH => "좌우로 나누기",
         ActionKind::SplitV => "위아래로 나누기",
         ActionKind::ToggleHeader => "상단바",
-        ActionKind::ToggleStatusbar => "하단바",
         ActionKind::FileTree => "파일 트리",
         ActionKind::ToggleZoom => "크게 보기",
         ActionKind::RefreshRenderer => "화면 새로고침",
@@ -728,11 +727,10 @@ impl App {
 
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
         if self.paint_design_study(scale, time_secs) { return; }
-        // 두 하단바 높이는 설정값이라 프레임 내내 여러 번 읽힌다. 여기서 한 번
+        // 하단바 높이는 설정값이라 프레임 내내 여러 번 읽힌다. 여기서 한 번
         // 뽑아 두는 건 값이 도중에 바뀔 일이 없어서이기도 하지만, 아래쪽 대부분이
         // `self.gpu` 를 빌린 안쪽이라 거기서 `&self` 메서드를 다시 못 부르기 때문이다.
         let status_h = self.status_h();
-        let pane_footer_h = self.pane_footer_h();
         // Glyph-atlas repack, if one is pending. This is the only safe point
         // for it: from here on the frame emits quads whose UVs index the
         // current packing, so a repack mid-frame would show them whatever
@@ -1138,12 +1136,11 @@ impl App {
                     let scaled_cw = cw * fs;
                     let scaled_ch = ch * fs;
                     let header_px_now = pane.header_px();
-                    let footer_px_now = self.statusbar_px(id.as_str());
                     let local_w = if w_cells == 0 { grid_cols } else { w_cells };
                     let local_h = if h_cells == 0 { grid_rows } else { h_cells };
                     let usable_w = (local_w as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
                     let usable_h =
-                        (local_h as f32 * ch - header_px_now - footer_px_now - 2.0 * PANE_INNER_Y)
+                        (local_h as f32 * ch - header_px_now - 2.0 * PANE_INNER_Y)
                             .max(scaled_ch);
                     let layout_cols = (usable_w / scaled_cw).floor() as usize;
                     let layout_rows = (usable_h / scaled_ch).floor() as usize;
@@ -1385,15 +1382,10 @@ impl App {
                 } else {
                     PANE_INNER_Y
                 };
-                // 상태바 띠를 빼야 한다. PTY 그리드는 `resize_backend` 가 푸터만큼
-                // 행을 줄여 바 위에서 멈추는데, 편집기·이미지처럼 PTY 없는 pane 은
-                // 이 박스가 곧 본문 클립이라 여기서 빼지 않으면 마지막 줄이 바
-                // 아래로 새어 창 끝까지 그려졌다(실측).
                 let bh = (full_h
                     - header_shift_logical
                     - PANE_INNER_Y
-                    - bottom_inset
-                    - self.statusbar_px(&id))
+                    - bottom_inset)
                 .max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(f) = &chat_frame {
@@ -1465,10 +1457,9 @@ impl App {
                 let box_x = WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w;
                 let box_y = TITLE_HEIGHT + y_cells as f32 * self.cell.h;
                 // A lone unsplit pane arrives as a (0,0,0,0) placeholder (see the
-                // clip note above), which would leave the box 0×0 and starve the
-                // footer (`fbox_h < pane_footer_h()` → skipped). Treat a 0 span
-                // as "fills the grid" so the box — and its status bar — spans the
-                // whole pane area just like a real right/bottom-edge leaf.
+                // clip note above), which would leave the box 0×0. Treat a 0 span
+                // as "fills the grid" so the box spans the whole pane area just
+                // like a real right/bottom-edge leaf.
                 let box_w = {
                     let base = w_cells as f32 * self.cell.w;
                     if w_cells == 0 || x_cells + w_cells >= grid_cols {
@@ -1680,26 +1671,6 @@ impl App {
             ids.into_iter()
                 .find_map(|id| backend.codex_rollout_snapshot(&id))
         });
-        // pane 하단바는 바깥 pane id로 그리지만 rollout은 현재 탭 pid에 묶인다.
-        // GPU 대여 전 한 번 접어 두면 footer 루프에서 socket/워크스페이스를 다시
-        // 잠글 필요가 없고, 탭을 바꾼 순간에도 현재 보이는 Codex 값만 쓴다.
-        let codex_footer_status: std::collections::HashMap<String, String> = self
-            .socket_backend
-            .as_ref()
-            .and_then(|backend| {
-                self.ws.lock().ok().map(|ws| {
-                    footer_slots
-                        .iter()
-                        .filter_map(|(outer, ..)| {
-                            backend
-                                .codex_rollout_snapshot(&ws.active_tab_pid(outer))
-                                .and_then(|snapshot| codex_header_summary(&snapshot))
-                                .map(|status| (outer.clone(), status))
-                        })
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
         // Top-right toast. Pre-read here so the render block below never
         // re-borrows self while g is held.
         let collab_toast_alpha = self.collab_toast_alpha();
@@ -4166,24 +4137,15 @@ impl App {
                     // lite 는 헤더에 버튼을 두지 않는다 — 분할은 단축키·⋮·CLI 로.
                     vec![]
                 } else {
-                    // The status-bar toggle reads "filled" (panel-bottom) when the
-                    // bar is shown and "dashed" when it's collapsed, so the icon
-                    // itself signals the current state. Visibility = global
-                    // default flipped by the shown/hidden exception sets (mirrors
-                    // `statusbar_visible`, inlined here under the gpu borrow).
-                    let fvis = self.statusbar.shown.contains(&h.id)
-                        || (!self.statusbar.hidden.contains(&h.id) && self.set_footer_default);
-                    let sb_icon = if fvis {
-                        "panel-bottom"
-                    } else {
-                        "panel-bottom-dashed"
-                    };
-                    vec![
-                        ("external-link", None, Some(ActionKind::Undock)),
-                        (sb_icon, None, Some(ActionKind::ToggleStatusbar)),
+                    let mut set = vec![("external-link", None, Some(ActionKind::Undock))];
+                    if crate::pane_shims::locate_kasa_files().is_some() {
+                        set.push(("folder-tree", None, Some(ActionKind::FileTree)));
+                    }
+                    set.extend([
                         ("columns-2", None, Some(ActionKind::SplitV)),
                         ("rows-2", None, Some(ActionKind::SplitH)),
-                    ]
+                    ]);
+                    set
                 };
                 let mut bx = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0));
                 for (ic, kind, action) in action_set {
@@ -4717,18 +4679,8 @@ impl App {
                     }
                     // ⋮ 메뉴 열림 → 이 pane ⋮ 아래 버튼3개(좌우분할·상하분할·닫기).
                     if self.handle_menu.as_deref() == Some(fid.as_str()) {
-                        // 상태바(footer) 토글 아이콘은 현재 표시 상태를 그대로
-                        // 드러낸다 — 보이면 panel-bottom, 접혀 있으면 dashed.
-                        let fvis = self.statusbar.shown.contains(fid.as_str())
-                            || (!self.statusbar.hidden.contains(fid.as_str())
-                                && self.set_footer_default);
-                        let sb_icon = if fvis {
-                            "panel-bottom"
-                        } else {
-                            "panel-bottom-dashed"
-                        };
-                        // 상단바(헤더 띠)도 같은 방식 — 지금 보이는 상태를 아이콘이
-                        // 그대로 드러낸다. hdr_vis 는 has_header() 와 같은 답이어야
+                        // 상단바(헤더 띠) 아이콘은 지금 보이는 상태를 그대로
+                        // 드러낸다. hdr_vis 는 has_header() 와 같은 답이어야
                         // 하므로 pane 에 직접 물어본다(override 포함).
                         // 별도창은 터미널 탭에만 — 그림·문서·웹 탭은 창이 못 그린다.
                         let (hdr_vis, term_tab) = {
@@ -4768,13 +4720,12 @@ impl App {
                             ("rows-2", ActionKind::SplitV),
                             ("folder-tree", ActionKind::FileTree),
                             (hdr_icon, ActionKind::ToggleHeader),
-                            (sb_icon, ActionKind::ToggleStatusbar),
                             ("maximize", ActionKind::ToggleZoom),
                             ("rotate-cw", ActionKind::RefreshRenderer),
                             ("external-link", ActionKind::Undock),
                             ("x", ActionKind::Close),
                         ];
-                        // lite 의 ⋮ 는 새 탭·쪼개기·최대화·닫기뿐 — 헤더·하단바 토글은
+                        // lite 의 ⋮ 는 새 탭·쪼개기·최대화·닫기뿐 — 헤더 토글·파일 트리는
                         // 걷어낸 크롬이고, 별도창·렌더러 새로고침은 본판의 일이다.
                         let lite = self.lite;
                         let items: Vec<(&str, ActionKind)> = items
@@ -4787,7 +4738,6 @@ impl App {
                                     || !matches!(
                                         a,
                                         ActionKind::ToggleHeader
-                                            | ActionKind::ToggleStatusbar
                                             | ActionKind::FileTree
                                             | ActionKind::RefreshRenderer
                                             | ActionKind::Undock
@@ -4872,464 +4822,6 @@ impl App {
                 self.pane_top_zones = zones;
                 self.handle_menu_hits = menu_hits;
             }
-            // Per-pane status bar at the foot of each pane box: cwd + branch
-            // chips (click → cd / checkout dropdowns) on the left, ± diff on
-            // the right. The gpu borrow rules out &self method calls in here,
-            // so visibility / cwd / badge all read the fields directly.
-            self.statusbar.path_rects.clear();
-            self.statusbar.branch_rects.clear();
-            self.statusbar.toggle_rects.clear();
-            self.statusbar.diff_rects.clear();
-            let (sb_mx, sb_my) = self.cursor_px;
-            for (fid, fx, fy, fw, fbox_h) in &footer_slots {
-                // `statusbar_visible` 과 같은 판정 — lite 는 pane 하단바도 없다.
-                let fvis = !self.lite
-                    && (self.statusbar.shown.contains(fid)
-                        || (!self.statusbar.hidden.contains(fid) && self.set_footer_default));
-                if !fvis || *fbox_h < pane_footer_h + 4.0 {
-                    continue;
-                }
-                let bar_y = fy + fbox_h - pane_footer_h;
-                // 테두리를 footer 배경이 덮지 않게 좌우·하단을 그 두께만큼 안쪽으로
-                // 그린다 — 안 그러면 나중에 그려지는 footer bg 가 보더의 하단·좌우 끝을
-                // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(사용자). 두께는
-                // 실제로 그린 쪽이 남긴 값을 쓴다(줌은 2.0, 분할 active 는 1.5).
-                let bt = border_inset.get(fid.as_str()).copied().unwrap_or(0.0);
-                g.rect(
-                    fx + bt,
-                    bar_y,
-                    fw - 2.0 * bt,
-                    pane_footer_h - bt,
-                    theme::bg(),
-                );
-                g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
-                // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
-                // 글자·아이콘이었다 — 같은 화면의 사이드바(13~14)와 나란히 놓이니
-                // 하단바만 축소된 것처럼 읽혔다(사용자). 본문 단과 같은 단으로 올린다.
-                let pill_h = 22.0_f32;
-                let pill_y = bar_y + (pane_footer_h - pill_h) / 2.0;
-                let icon_sz = 14.0_f32;
-                let pad_x = 9.0_f32;
-                let icon_gap = 6.0_f32;
-                let chip_gap = 7.0_f32;
-                let font = 13.0_f32;
-                let txt_y = pill_y + (pill_h - font) / 2.0;
-                let footer_hover = sb_my >= bar_y
-                    && sb_my <= bar_y + pane_footer_h
-                    && sb_mx >= *fx
-                    && sb_mx <= fx + fw;
-                let mut cx = fx + 8.0;
-                let cwd = self.pane_cwd_cache.get(fid).cloned();
-                // Home-relative cwd (~/…), matching the screenshot's breadcrumb.
-                let disp = cwd
-                    .as_ref()
-                    .map(|p| nfc_hangul(&crate::session::tilde_home(&p.to_string_lossy())))
-                    .unwrap_or_else(|| "—".to_string());
-                let badge = cwd
-                    .as_ref()
-                    .and_then(|p| self.window_git.lock().ok().and_then(|m| m.get(p).cloned()));
-                // ── 폭 예산 ───────────────────────────────────────────────
-                // 칩 셋은 지금까지 pane 폭을 아무도 안 재고 왼쪽부터 이어 그렸다.
-                // 좁은 pane 에서는 그대로 옆 칼럼 위로 뻗는다(640px 실측: 282px
-                // 자리에 398px 어치). 그리기 전에 예산을 잡고 모자라면 줄인다.
-                //
-                // 줄이는 차례는 **cwd 가 먼저**다. 그 경로는 파일트리 루트와 타이틀
-                // 칩에도 있는 중복이고, 브랜치와 변경 수는 이 띠에만 있다. 경로를
-                // 꼬리만 남겨도 모자라면 그때 변경 수를 파일 수 하나로 줄이고,
-                // 그 다음에야 칩을 접는다.
-                let pill_w = |tw: f32| pad_x + icon_sz + icon_gap + tw + pad_x;
-                // hover 때 오른쪽 끝에 나오는 접기 손잡이 자리는 늘 비워 둔다 —
-                // 그때만 빼면 손잡이가 뜨는 순간 칩이 흔들린다.
-                let avail = (fw - 16.0 - 21.0).max(0.0);
-                // ── 기계 칩 ── 이 pane 의 몸이 어느 기계에 있는지. 맨 앞에 두고
-                // 좁아져도 **마지막까지 남긴다**: 헤더 띠는 pane 이 하나뿐인 창에서
-                // 아예 없고 좁으면 배지를 생략하므로, 그런 화면에서 「이 pane 이 어느
-                // 기계인가」에 답하는 자리가 여기밖에 없다(2026-09-02 감사 ⑤).
-                // 나머지 칩이 말하는 것(경로·브랜치·변경 수)은 파일트리와 Git 탭에도
-                // 있는 중복이지만, 기계는 이 띠가 접히면 화면에서 통째로 사라진다.
-                let machine = pane_identities.get(fid)
-                    .map(|identity| {
-                        // 칩 하나만 남는 폭까지 좁아져도 이름 앞머리는 읽히게 자른다.
-                        let room = (avail - pad_x * 2.0 - icon_sz - icon_gap).max(0.0);
-                        (crate::info::fit_text(g, &identity.machine.name, room, font, false), &identity.machine)
-                    })
-                    .filter(|(l, _)| !l.is_empty());
-                let machine_w = machine
-                    .as_ref()
-                    .map(|(l, _)| pill_w(g.measure_chrome_text(l, font, false)))
-                    .unwrap_or(0.0);
-                // 기계 몫을 뗀 나머지로 아래 칩들이 다툰다 — 여기서 먼저 빼 두면
-                // 접는 차례(변경 수 → 브랜치 → 경로)가 그대로 기계 칩을 비껴간다.
-                let avail = (avail
-                    - if machine_w > 0.0 {
-                        machine_w + chip_gap
-                    } else {
-                        0.0
-                    })
-                .max(0.0);
-                let branch_w = badge
-                    .as_ref()
-                    .map(|b| pill_w(g.measure_chrome_text(&b.branch, font, false)))
-                    .unwrap_or(0.0);
-                let diff_parts = badge
-                    .as_ref()
-                    .filter(|b| b.files > 0 || b.insertions > 0 || b.deletions > 0)
-                    .map(|b| {
-                        let files_s = b.files.to_string();
-                        let plus_s = format!("+{}", b.insertions);
-                        let minus_s = format!("−{}", b.deletions);
-                        let full = g.measure_chrome_text(&files_s, font, false)
-                            + g.measure_chrome_text(" · ", font, false)
-                            + g.measure_chrome_text(&plus_s, font, false)
-                            + g.measure_chrome_text(" ", font, false)
-                            + g.measure_chrome_text(&minus_s, font, false);
-                        let short = g.measure_chrome_text(&files_s, font, false);
-                        (files_s, plus_s, minus_s, pill_w(full), pill_w(short))
-                    });
-                // 아이콘과 여백만 남은 경로 칩은 아무 말도 못 한다 — 글자 한 자는
-                // 들어갈 폭을 바닥으로 잡고, 거기 못 미치면 뒤 칩을 줄인다.
-                let min_cwd = pill_w(g.measure_chrome_text("…w", font, false));
-                let mut show_branch = branch_w > 0.0;
-                let mut diff_mode = if diff_parts.is_some() { 2u8 } else { 0 };
-                let tail_w = |show_branch: bool, diff_mode: u8| {
-                    (if show_branch {
-                        branch_w + chip_gap
-                    } else {
-                        0.0
-                    }) + match (diff_mode, &diff_parts) {
-                        (2, Some((.., full, _))) => full + chip_gap,
-                        (1, Some((.., short))) => short + chip_gap,
-                        _ => 0.0,
-                    }
-                };
-                while avail - tail_w(show_branch, diff_mode) < min_cwd {
-                    if diff_mode > 0 {
-                        diff_mode -= 1;
-                    } else if show_branch {
-                        show_branch = false;
-                    } else {
-                        break;
-                    }
-                }
-                let cwd_room = (avail - tail_w(show_branch, diff_mode)).max(0.0);
-                let disp = crate::info::fit_text_tail(
-                    g,
-                    &disp,
-                    (cwd_room - pad_x - icon_sz - icon_gap - pad_x).max(0.0),
-                    font,
-                    false,
-                );
-                if let Some((label, machine)) = &machine {
-                    let pw = machine_w;
-                    let bg = machine.background(theme::bg());
-                    let fg = machine.foreground(bg);
-                    round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), bg);
-                    g.queue_icon(
-                        machine.icon(), cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0,
-                        icon_sz, fg,
-                    );
-                    g.draw_text(
-                        cx + pad_x + icon_sz + icon_gap, txt_y, label,
-                        gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: false },
-                    );
-                    cx += pw + chip_gap;
-                }
-                // cwd pill — folder icon + path.
-                if !disp.is_empty() {
-                    let tw = g.measure_chrome_text(&disp, font, false);
-                    let pw = pill_w(tw);
-                    let hov = sb_mx >= cx
-                        && sb_mx <= cx + pw
-                        && sb_my >= pill_y
-                        && sb_my <= pill_y + pill_h;
-                    round_rect(
-                        g,
-                        cx,
-                        pill_y,
-                        pw,
-                        pill_h,
-                        theme::radius_sm(),
-                        theme::border(),
-                    );
-                    round_rect(
-                        g,
-                        cx + 1.0,
-                        pill_y + 1.0,
-                        pw - 2.0,
-                        pill_h - 2.0,
-                        theme::radius_sm() - 1.0,
-                        if hov {
-                            theme::surface_active()
-                        } else {
-                            theme::surface_hover()
-                        },
-                    );
-                    g.queue_icon(
-                        "folder",
-                        cx + pad_x,
-                        pill_y + (pill_h - icon_sz) / 2.0,
-                        icon_sz,
-                        theme::text_dim(),
-                    );
-                    g.draw_text(
-                        cx + pad_x + icon_sz + icon_gap,
-                        txt_y,
-                        &disp,
-                        gpu::DrawOpts {
-                            font_size: font,
-                            color: theme::text(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                    self.statusbar
-                        .path_rects
-                        .push((fid.clone(), (cx, pill_y, pw, pill_h)));
-                    cx += pw + chip_gap;
-                }
-                if let Some(badge) = badge {
-                    // branch pill — git-branch icon + branch name.
-                    if show_branch {
-                        let pw = branch_w;
-                        let hov = sb_mx >= cx
-                            && sb_mx <= cx + pw
-                            && sb_my >= pill_y
-                            && sb_my <= pill_y + pill_h;
-                        round_rect(
-                            g,
-                            cx,
-                            pill_y,
-                            pw,
-                            pill_h,
-                            theme::radius_sm(),
-                            theme::border(),
-                        );
-                        round_rect(
-                            g,
-                            cx + 1.0,
-                            pill_y + 1.0,
-                            pw - 2.0,
-                            pill_h - 2.0,
-                            theme::radius_sm() - 1.0,
-                            if hov {
-                                theme::surface_active()
-                            } else {
-                                theme::surface_hover()
-                            },
-                        );
-                        g.queue_icon(
-                            "git-branch",
-                            cx + pad_x,
-                            pill_y + (pill_h - icon_sz) / 2.0,
-                            icon_sz,
-                            theme::text_dim(),
-                        );
-                        g.draw_text(
-                            cx + pad_x + icon_sz + icon_gap,
-                            txt_y,
-                            &badge.branch,
-                            gpu::DrawOpts {
-                                font_size: font,
-                                color: theme::text(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        self.statusbar
-                            .branch_rects
-                            .push((fid.clone(), (cx, pill_y, pw, pill_h)));
-                        cx += pw + chip_gap;
-                    }
-                    // diff pill — file icon + "N · +ins −del" (green / red).
-                    // 좁으면 파일 수만 남긴다 — 「몇 개 바뀌었나」가 「몇 줄인가」보다
-                    // 먼저 알아야 할 쪽이고, 줄 수는 Git 탭 머리에 그대로 있다.
-                    if let (Some((files_s, plus_s, minus_s, full_w, short_w)), true) =
-                        (diff_parts.as_ref(), diff_mode > 0)
-                    {
-                        let pw = if diff_mode == 2 { *full_w } else { *short_w };
-                        let hov = sb_mx >= cx
-                            && sb_mx <= cx + pw
-                            && sb_my >= pill_y
-                            && sb_my <= pill_y + pill_h;
-                        round_rect(
-                            g,
-                            cx,
-                            pill_y,
-                            pw,
-                            pill_h,
-                            theme::radius_sm(),
-                            theme::border(),
-                        );
-                        round_rect(
-                            g,
-                            cx + 1.0,
-                            pill_y + 1.0,
-                            pw - 2.0,
-                            pill_h - 2.0,
-                            theme::radius_sm() - 1.0,
-                            if hov {
-                                theme::surface_active()
-                            } else {
-                                theme::surface_hover()
-                            },
-                        );
-                        g.queue_icon(
-                            "file-text",
-                            cx + pad_x,
-                            pill_y + (pill_h - icon_sz) / 2.0,
-                            icon_sz,
-                            theme::text_dim(),
-                        );
-                        let mut tx = cx + pad_x + icon_sz + icon_gap;
-                        tx = g.draw_text(
-                            tx,
-                            txt_y,
-                            files_s,
-                            gpu::DrawOpts {
-                                font_size: font,
-                                color: theme::text(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        if diff_mode == 2 {
-                            tx = g.draw_text(
-                                tx,
-                                txt_y,
-                                " · ",
-                                gpu::DrawOpts {
-                                    font_size: font,
-                                    color: theme::text_mute(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            tx = g.draw_text(
-                                tx,
-                                txt_y,
-                                plus_s,
-                                gpu::DrawOpts {
-                                    font_size: font,
-                                    color: theme::success(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            tx = g.draw_text(
-                                tx,
-                                txt_y,
-                                " ",
-                                gpu::DrawOpts {
-                                    font_size: font,
-                                    color: theme::text_mute(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            g.draw_text(
-                                tx,
-                                txt_y,
-                                minus_s,
-                                gpu::DrawOpts {
-                                    font_size: font,
-                                    color: theme::danger(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                        }
-                        let _ = tx;
-                        self.statusbar
-                            .diff_rects
-                            .push((fid.clone(), (cx, pill_y, pw, pill_h)));
-                        cx += pw + chip_gap;
-                    }
-                }
-                // Codex의 native statusline에는 협업 mode가 없을 수 있다. 현재 pane의
-                // rollout이 보고한 effort·mode만 앱 footer에 보태고, 경로/Git 칩이 이미
-                // 폭을 썼으면 접는다 — 옆 pane 위로 넘기는 것보다 없는 편이 정직하다.
-                if let Some(status) = codex_footer_status.get(fid) {
-                    let right = fx + fw - 8.0 - 21.0;
-                    let label = crate::info::fit_text(
-                        g,
-                        status,
-                        (right - cx - pad_x * 2.0).min(150.0).max(0.0),
-                        font,
-                        false,
-                    );
-                    if !label.is_empty() {
-                        let pw = pad_x * 2.0 + g.measure_chrome_text(&label, font, false);
-                        if cx + pw <= right {
-                            round_rect(
-                                g,
-                                cx,
-                                pill_y,
-                                pw,
-                                pill_h,
-                                theme::radius_sm(),
-                                theme::border(),
-                            );
-                            round_rect(
-                                g,
-                                cx + 1.0,
-                                pill_y + 1.0,
-                                pw - 2.0,
-                                pill_h - 2.0,
-                                theme::radius_sm() - 1.0,
-                                theme::surface_hover(),
-                            );
-                            g.draw_text(
-                                cx + pad_x,
-                                txt_y,
-                                &label,
-                                gpu::DrawOpts {
-                                    font_size: font,
-                                    color: theme::text_dim(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            cx += pw + chip_gap;
-                        }
-                    }
-                }
-                let _ = cx;
-                // Collapse handle — surfaced only on footer hover so the resting
-                // bar matches the screenshot (chips only). Right edge.
-                if footer_hover {
-                    let h_sz = 13.0;
-                    let h_x = fx + fw - h_sz - 8.0;
-                    let h_y = bar_y + (pane_footer_h - h_sz) / 2.0;
-                    let h_hover = sb_mx >= h_x - 4.0
-                        && sb_mx <= h_x + h_sz + 4.0
-                        && sb_my >= bar_y
-                        && sb_my <= bar_y + pane_footer_h;
-                    if h_hover {
-                        hover_rect(
-                            g,
-                            h_x - 4.0,
-                            h_y - 2.0,
-                            h_sz + 8.0,
-                            h_sz + 4.0,
-                            theme::radius_sm(),
-                        );
-                    }
-                    g.queue_icon(
-                        "chevrons-down-up",
-                        h_x,
-                        h_y,
-                        h_sz,
-                        if h_hover {
-                            theme::text()
-                        } else {
-                            theme::text_mute()
-                        },
-                    );
-                    self.statusbar
-                        .toggle_rects
-                        .push((fid.clone(), (h_x - 4.0, bar_y, h_sz + 12.0, pane_footer_h)));
-                }
-            }
             // A compact side panel covers pane headers and footers as well as terminal cells.
             if git_col_w > 0.0 {
                 side_column::paint(
@@ -5360,289 +4852,6 @@ impl App {
             }
             if !side_column_covers_workspace {
                 kasa_gridview::overlay::paint(g, &overlay);
-            }
-            // Status-bar dropdown (directory picker / branch switcher), drawn
-            // last so it overlays the cell grid + every bar. Anchored to the
-            // chip that opened it and expanded UPWARD — the bar lives at the
-            // pane's bottom, so a downward menu would fall off the edge.
-            self.statusbar.menu_dir_rects.clear();
-            self.statusbar.menu_branch_rects.clear();
-            if let Some((menu_pid, kind)) = self.statusbar.menu.clone() {
-                let anchor = match kind {
-                    StatusbarMenu::Path => self
-                        .statusbar
-                        .path_rects
-                        .iter()
-                        .find(|(p, _)| *p == menu_pid)
-                        .map(|(_, r)| *r),
-                    StatusbarMenu::Branch => self
-                        .statusbar
-                        .branch_rects
-                        .iter()
-                        .find(|(p, _)| *p == menu_pid)
-                        .map(|(_, r)| *r),
-                };
-                if let Some((ax, ay, _aw, _ah)) = anchor {
-                    // Item labels (and the value each row carries on click).
-                    // Dir names normalized NFC so macOS-decomposed Hangul reads
-                    // as composed syllables, not scattered jamo.
-                    let is_path = matches!(kind, StatusbarMenu::Path);
-                    let labels: Vec<String> = match kind {
-                        StatusbarMenu::Path => self
-                            .statusbar
-                            .menu_dirs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, p)| {
-                                if i == 0 {
-                                    ".. (상위 폴더)".to_string()
-                                } else {
-                                    nfc_hangul(
-                                        p.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
-                                    )
-                                }
-                            })
-                            .collect(),
-                        StatusbarMenu::Branch => self.statusbar.menu_branches.clone(),
-                    };
-                    // Live-search filter (path picker only). Inlined as field
-                    // reads — the gpu borrow (`g`) rules out &self method calls.
-                    let q = self.statusbar.menu_search.to_lowercase();
-                    let fidx: Vec<usize> = if is_path {
-                        self.statusbar
-                            .menu_dirs
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, p)| {
-                                q.is_empty()
-                                    || *i == 0
-                                    || p.file_name()
-                                        .and_then(|s| s.to_str())
-                                        .map(|s| nfc_hangul(s).to_lowercase().contains(&q))
-                                        .unwrap_or(false)
-                            })
-                            .map(|(i, _)| i)
-                            .collect()
-                    } else {
-                        (0..labels.len()).collect()
-                    };
-                    let item_h = if is_path { 28.0 } else { 24.0 };
-                    // Search field band at the top of the path picker.
-                    let search_h = if is_path { 34.0 } else { 0.0 };
-                    let max_rows = 12usize;
-                    let total = fidx.len();
-                    let view_rows = total.min(max_rows);
-                    let menu_w = if is_path { 300.0_f32 } else { 240.0_f32 };
-                    let menu_h = search_h + item_h * view_rows.max(1) as f32 + 8.0;
-                    let menu_x = ax.min((win_px.0 / scale) - menu_w - 8.0).max(4.0);
-                    let menu_y = (ay - menu_h - 2.0).max(TITLE_HEIGHT + 2.0);
-                    // Whole-row scroll: 이 메뉴는 클립을 안 세우므로 반쪽 행이
-                    // 둥근 모서리 밖으로 삐져나간다. 휠 오프셋을 행 단위로 스냅해
-                    // 정수 행씩 넘긴다. 시저를 세워도 되지만 둥근 모서리는 시저의
-                    // 직사각형으로 못 흉내 낸다 — 모서리에서 각지게 잘린다.
-                    let overflow = total.saturating_sub(view_rows);
-                    let scroll = self
-                        .statusbar
-                        .menu_scroll
-                        .clamp(0.0, overflow as f32 * item_h);
-                    self.statusbar.menu_scroll = scroll;
-                    let first = ((scroll / item_h).round() as usize).min(overflow);
-                    self.statusbar.menu_rect = Some((menu_x, menu_y, menu_w, menu_h));
-                    panel_rect_outlined(
-                        g,
-                        menu_x,
-                        menu_y,
-                        menu_w,
-                        menu_h,
-                        theme::radius_md(),
-                        theme::surface(),
-                    );
-                    let rows_top = menu_y + 4.0 + search_h;
-                    // Inset search field + live query (or dim placeholder). Typing
-                    // anywhere while the picker is open feeds this (forward_key).
-                    if is_path {
-                        let fy = menu_y + 6.0;
-                        let fh = search_h - 8.0;
-                        round_rect(
-                            g,
-                            menu_x + 8.0,
-                            fy,
-                            menu_w - 16.0,
-                            fh,
-                            theme::radius_sm(),
-                            theme::bg(),
-                        );
-                        g.queue_icon(
-                            "folder-tree",
-                            menu_x + 16.0,
-                            fy + (fh - 14.0) / 2.0,
-                            14.0,
-                            theme::text_dim(),
-                        );
-                        let (mut head, tail) = crate::lineedit::split(
-                            &self.statusbar.menu_search,
-                            self.statusbar.menu_search_cursor,
-                        );
-                        if self.in_preedit {
-                            head.push_str(&self.preedit);
-                        }
-                        let caret_w = g.measure_chrome_text(&head, 13.0, false);
-                        let shown = format!("{head}{tail}");
-                        let (txt, col) = if shown.is_empty() {
-                            ("디렉터리 검색…".to_string(), theme::text_mute())
-                        } else {
-                            (shown, theme::text())
-                        };
-                        g.draw_text(
-                            menu_x + 38.0,
-                            fy + (fh - 13.0) / 2.0,
-                            &txt,
-                            gpu::DrawOpts {
-                                font_size: 13.0,
-                                color: col,
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        // 이 칸엔 캐럿이 없었다 — 끝에만 붙는 칸이라 커서가 어딘지
-                        // 물을 일이 없었기 때문이다. 이제 가운데를 고칠 수 있으니
-                        // 자리를 보여 줘야 한다.
-                        if commit_caret_on {
-                            g.rect(
-                                menu_x + 38.0 + caret_w,
-                                fy + (fh - 14.0) / 2.0,
-                                1.5,
-                                14.0,
-                                theme::text(),
-                            );
-                        }
-                    }
-                    if total == 0 {
-                        g.draw_text(
-                            menu_x + 16.0,
-                            rows_top + 4.0,
-                            "(없음)",
-                            gpu::DrawOpts {
-                                font_size: 12.0,
-                                color: theme::text_mute(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                    }
-                    let current_branch = matches!(kind, StatusbarMenu::Branch)
-                        .then(|| {
-                            self.pane_cwd_cache.get(&menu_pid).and_then(|p| {
-                                self.window_git
-                                    .lock()
-                                    .ok()
-                                    .and_then(|m| m.get(p).map(|b| b.branch.clone()))
-                            })
-                        })
-                        .flatten();
-                    let font = if is_path { 13.0 } else { 12.0 };
-                    for vis in 0..view_rows {
-                        let Some(&i) = fidx.get(first + vis) else {
-                            break;
-                        };
-                        let Some(label) = labels.get(i) else { break };
-                        let iy = rows_top + vis as f32 * item_h;
-                        let row = (menu_x, iy, menu_w, item_h);
-                        let hover = sb_mx >= row.0
-                            && sb_mx <= row.0 + row.2
-                            && sb_my >= row.1
-                            && sb_my <= row.1 + row.3;
-                        // Hovered row = bright accent fill (cursor's selected-item
-                        // cue); its glyphs flip to dark for contrast.
-                        if hover {
-                            round_rect(
-                                g,
-                                row.0 + 2.0,
-                                row.1,
-                                row.2 - 4.0,
-                                row.3,
-                                theme::radius_sm(),
-                                theme::accent(),
-                            );
-                        }
-                        let is_current = current_branch.as_deref() == Some(label.as_str());
-                        let mut text_x = menu_x + 12.0;
-                        // Path picker: leading ↑ / folder / file icon per row.
-                        if is_path {
-                            let is_parent = i == 0;
-                            let is_dir = is_parent
-                                || self
-                                    .statusbar
-                                    .menu_dirs
-                                    .get(i)
-                                    .map(|p| p.is_dir())
-                                    .unwrap_or(false);
-                            let glyph = if is_parent {
-                                "arrow-up"
-                            } else if is_dir {
-                                "folder"
-                            } else {
-                                "file"
-                            };
-                            let icon_c = if hover {
-                                theme::bg()
-                            } else {
-                                theme::text_dim()
-                            };
-                            g.queue_icon(glyph, text_x, iy + (item_h - 15.0) / 2.0, 15.0, icon_c);
-                            text_x += 15.0 + 9.0;
-                        }
-                        let color = if hover {
-                            theme::bg()
-                        } else if is_current {
-                            theme::accent()
-                        } else {
-                            theme::text()
-                        };
-                        g.draw_text(
-                            text_x,
-                            iy + (item_h - font) / 2.0,
-                            label,
-                            gpu::DrawOpts {
-                                font_size: font,
-                                color,
-                                bold: is_current,
-                                italic: false,
-                            },
-                        );
-                        match kind {
-                            StatusbarMenu::Path => self
-                                .statusbar
-                                .menu_dir_rects
-                                .push((self.statusbar.menu_dirs[i].clone(), row)),
-                            StatusbarMenu::Branch => {
-                                self.statusbar.menu_branch_rects.push((label.clone(), row))
-                            }
-                        }
-                    }
-                    // Scrollbar — thin thumb on the right edge so overflow is
-                    // visible; only when the list exceeds the viewport.
-                    if overflow > 0 {
-                        let track_x = menu_x + menu_w - 4.0;
-                        let track_y = rows_top;
-                        let track_h = view_rows as f32 * item_h;
-                        let thumb_h = (track_h * view_rows as f32 / total as f32).max(18.0);
-                        let thumb_y =
-                            track_y + (track_h - thumb_h) * (first as f32 / overflow as f32);
-                        pill_rect(
-                            g,
-                            track_x,
-                            thumb_y,
-                            3.0,
-                            thumb_h,
-                            theme::with_alpha(theme::text(), 0x55),
-                        );
-                    }
-                } else {
-                    self.statusbar.menu_rect = None;
-                }
-            } else {
-                self.statusbar.menu_rect = None;
             }
             // 오른쪽 위 알림. 승인 알림은 답할 때까지 서 있고, 나머지는 잠깐 섰다가 흐려진다.
             self.collab.toast_rect = None;

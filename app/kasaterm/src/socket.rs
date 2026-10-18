@@ -5558,15 +5558,6 @@ pub fn read_file_tree_default() -> bool {
         .unwrap_or(false)
 }
 
-/// 새 pane 의 하단 상태바(cwd/branch/diff)를 기본으로 보일지. 키 없으면 true —
-/// footer 는 원래 기본 표시였으니 기존 사용자 동작을 유지한다.
-pub fn read_footer_default() -> bool {
-    read_settings()
-        .get("pane_footer_default")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(true)
-}
-
 /// Editor autosave quiet period in ms (`editor_autosave_ms`). 0 / missing =
 /// off. Clamped to 200ms..60s: below that every keystroke is a disk write,
 /// above it the setting stops being autosave in any useful sense.
@@ -6717,14 +6708,12 @@ pub fn read_wheel_pixel_gain() -> f32 {
         .unwrap_or(0.3)
 }
 
-/// 두 하단 띠 높이의 상·하한(logical px). **설정 화면의 스테퍼도 이걸 쓴다** —
-/// 값을 여기 한 군데 두는 이유는, 거르는 쪽(아래 두 함수)과 올리는 쪽(스테퍼·HTTP
+/// 창 하단 상태줄 높이의 상·하한(logical px). **설정 화면의 스테퍼도 이걸 쓴다** —
+/// 값을 여기 한 군데 두는 이유는, 거르는 쪽(아래 함수)과 올리는 쪽(스테퍼·HTTP
 /// 검증)이 각자 숫자를 들고 있으면 한쪽만 고쳐졌을 때 **저장은 되는데 다음 실행에
 /// 사라지는** 값이 생기기 때문이다.
 pub const STATUS_H_MIN: f32 = 18.0;
 pub const STATUS_H_MAX: f32 = 40.0;
-pub const PANE_FOOTER_H_MIN: f32 = 22.0;
-pub const PANE_FOOTER_H_MAX: f32 = 44.0;
 
 /// 창 맨 아래 상태줄 높이(logical px). 상·하한은 안전장치 — 그 밖으로 나가면 안에
 /// 얹힌 게이지·칩(18px)이 띠에 눌리거나 띠만 덩그러니 남는다.
@@ -6737,16 +6726,7 @@ pub fn read_status_h() -> f32 {
         .unwrap_or(crate::STATUS_HEIGHT_DEFAULT)
 }
 
-/// pane 하단바(경로·브랜치·diff 칩) 높이(logical px). 창 상태줄보다 높은 게 기본인
-/// 것은 여기 얹히는 칩이 더 크기 때문이다.
-pub fn read_pane_footer_h() -> f32 {
-    read_settings()
-        .get("pane_footer_h")
-        .and_then(|x| x.as_f64())
-        .map(|x| x as f32)
-        .filter(|x| (PANE_FOOTER_H_MIN..=PANE_FOOTER_H_MAX).contains(x))
-        .unwrap_or(crate::PANE_FOOTER_HEIGHT_DEFAULT)
-}
+
 
 /// 한도가 차서 떠나온 계정의 "이때 전까진 돌아가지 마라" 표. id → epoch 초
 /// (기본 로그인은 `""` 키). 계정 dir 과 같은 이유로 설정 파일 옆에 둔다 —

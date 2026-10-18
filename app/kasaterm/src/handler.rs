@@ -6041,7 +6041,6 @@ impl ApplicationHandler<UserEvent> for App {
                                     let _ = self
                                         .split_active_pane_focused(kasa_pty::SplitDir::Horizontal);
                                 }
-                                ActionKind::ToggleStatusbar => self.toggle_statusbar(&menu_pid),
                                 ActionKind::FileTree => self.open_file_pane(&menu_pid),
                                 ActionKind::ToggleHeader => self.toggle_pane_header(&menu_pid),
                                 ActionKind::ToggleZoom => self.toggle_pane_zoom(&menu_pid),
@@ -6129,9 +6128,6 @@ impl ApplicationHandler<UserEvent> for App {
                                     eprintln!("[split-h] {e}");
                                 }
                             }
-                            ActionKind::ToggleStatusbar => {
-                                self.toggle_statusbar(&pid);
-                            }
                             ActionKind::FileTree => self.open_file_pane(&pid),
                             ActionKind::MdRender => {
                                 self.md_flush_preedit();
@@ -6197,55 +6193,10 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    // Per-pane status bar (footer). Open dropdown items overlay
-                    // everything, so resolve them first; then the collapse
-                    // handle, then the cwd / branch chips. All return so a click
-                    // in the footer band never falls through to the cell grid.
+                    // 창 하단 상태줄 칩. 모두 return 해서 띠 안 클릭이 셀 격자로 새지 않는다.
                     let sb_hit = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    if let Some((pid, kind)) = self.statusbar.menu.clone() {
-                        match kind {
-                            StatusbarMenu::Path => {
-                                if let Some(path) = self
-                                    .statusbar
-                                    .menu_dir_rects
-                                    .iter()
-                                    .find(|(_, r)| sb_hit(r))
-                                    .map(|(d, _)| d.clone())
-                                {
-                                    // Folder → cd the pane; file → open it in a
-                                    // preview pane (the picker doubles as a file
-                                    // opener now that it lists files too).
-                                    if path.is_dir() {
-                                        self.statusbar_cd(&pid, &path);
-                                    } else {
-                                        self.statusbar.menu = None;
-                                        self.open_file(path, None, false);
-                                    }
-                                    window.request_redraw();
-                                    return;
-                                }
-                            }
-                            StatusbarMenu::Branch => {
-                                if let Some(b) = self
-                                    .statusbar
-                                    .menu_branch_rects
-                                    .iter()
-                                    .find(|(_, r)| sb_hit(r))
-                                    .map(|(b, _)| b.clone())
-                                {
-                                    self.statusbar_checkout(&pid, b);
-                                    window.request_redraw();
-                                    return;
-                                }
-                            }
-                        }
-                        // Click outside the open menu dismisses it (swallowed).
-                        self.statusbar.menu = None;
-                        window.request_redraw();
-                        return;
-                    }
                     // 바깥주소(터널) 칩 — 전역이라 pane id 가 없다. 결과는 낙관
                     // 반영하고(끄기 TERM 은 소멸이 한 박자 늦어 즉시 pgrep 하면
                     // 아직 살아 보인다) 5초 뒤 폴이 확정한다.
@@ -6306,50 +6257,6 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                    }
-                    if let Some(pid) = self
-                        .statusbar
-                        .toggle_rects
-                        .iter()
-                        .find(|(_, r)| sb_hit(r))
-                        .map(|(p, _)| p.clone())
-                    {
-                        self.toggle_statusbar(&pid);
-                        window.request_redraw();
-                        return;
-                    }
-                    if let Some(pid) = self
-                        .statusbar
-                        .path_rects
-                        .iter()
-                        .find(|(_, r)| sb_hit(r))
-                        .map(|(p, _)| p.clone())
-                    {
-                        self.open_statusbar_menu(&pid, StatusbarMenu::Path);
-                        window.request_redraw();
-                        return;
-                    }
-                    if let Some(pid) = self
-                        .statusbar
-                        .branch_rects
-                        .iter()
-                        .find(|(_, r)| sb_hit(r))
-                        .map(|(p, _)| p.clone())
-                    {
-                        self.open_statusbar_menu(&pid, StatusbarMenu::Branch);
-                        window.request_redraw();
-                        return;
-                    }
-                    if let Some(pid) = self
-                        .statusbar
-                        .diff_rects
-                        .iter()
-                        .find(|(_, r)| sb_hit(r))
-                        .map(|(p, _)| p.clone())
-                    {
-                        self.open_git_panel_for(&pid);
-                        window.request_redraw();
-                        return;
                     }
                     // Image-pane action buttons (zoom-out/in, rotate, reset).
                     // Checked before the tab/plus path so the image-only
@@ -8020,7 +7927,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autointernalreorder();
         self.run_pending_autoroomrename();
         self.run_pending_autoftrename();
-        self.run_pending_autopathsearch();
         self.run_pending_autoclosereopen();
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();

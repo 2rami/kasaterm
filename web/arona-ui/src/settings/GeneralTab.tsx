@@ -32,7 +32,6 @@ const PRIMARY_MOD = navigator.userAgent.includes('Mac') ? 'Cmd' : 'Ctrl';
 /// 범위 밖 값을 보내도 서버가 거절한다. 두 숫자가 어긋나면 눌러도 안 먹는 버튼이
 /// 생길 뿐이라 그때는 여기를 서버에 맞춘다.
 const STATUS_BAR_H: [number, number] = [18, 40];
-const PANE_FOOTER_H: [number, number] = [22, 44];
 
 export function GeneralTab({
   data,
@@ -104,16 +103,7 @@ export function GeneralTab({
         />
       </Row>
 
-      <Row label={t.general.statusBar} desc={[t.general.statusBarHint]}>
-        <Toggle
-          label={t.general.statusBar}
-          on={data.footer_default}
-          disabled={busy}
-          onToggle={() => void run('toggle-footer')}
-        />
-      </Row>
-
-      {/* 두 하단바 높이. 낮게·보통·높게 세 칸이었는데 그걸로는 「지금보다 딱 2px
+      {/* 하단바 높이. 낮게·보통·높게 세 칸이었는데 그걸로는 「지금보다 딱 2px
           만」이 안 된다 — 띠 두께는 옆에 얹힌 글자·칩과의 균형이라 맞는 값이
           사람마다 다르다(2026-08-15 지시 「더 세밀히」). 델타가 아니라 **바뀐 뒤의
           px 를 통째로** 보내는 이유는 서버 액션이 절대값을 받기 때문이다. */}
@@ -125,18 +115,6 @@ export function GeneralTab({
           atMax={data.status_bar_h >= STATUS_BAR_H[1]}
           onStep={(d) =>
             void run('status-bar-h', { id: String(Math.round(data.status_bar_h) + d) })
-          }
-        />
-      </Row>
-
-      <Row label={t.general.paneBarH} desc={[t.general.paneBarHHint]}>
-        <Stepper
-          text={`${Math.round(data.pane_footer_h)}px`}
-          disabled={busy}
-          atMin={data.pane_footer_h <= PANE_FOOTER_H[0]}
-          atMax={data.pane_footer_h >= PANE_FOOTER_H[1]}
-          onStep={(d) =>
-            void run('pane-footer-h', { id: String(Math.round(data.pane_footer_h) + d) })
           }
         />
       </Row>

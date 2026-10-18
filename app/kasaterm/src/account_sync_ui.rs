@@ -30,10 +30,8 @@ impl App {
         let persona = self.set_claude_persona;
         self.set_claude_persona = socket::read_claude_persona();
         self.set_file_tree_default = socket::read_file_tree_default();
-        self.set_footer_default = socket::read_footer_default();
         self.set_usage_compact = socket::read_usage_compact();
         self.set_status_h = socket::read_status_h();
-        self.set_pane_footer_h = socket::read_pane_footer_h();
         self.set_statusbar = statusbar_config::Prefs::from_settings(&settings);
         self.weather.settings = crate::weather::WeatherState::load(settings.get("weather"));
         self.weather_settings_changed();

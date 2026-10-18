@@ -10,34 +10,9 @@
 use super::*;
 use std::collections::HashMap;
 
-/// Per-pane status bar (cwd/branch/diff chips at each pane's foot) plus the
-/// open dropdown's state. Visibility = the global `set_footer_default` default,
-/// flipped per pane by two exception sets: `hidden` (ids explicitly collapsed
-/// while the default is on) and `shown` (ids explicitly opened while the default
-/// is off). Toggling the global default clears both so panes re-unify. The
-/// `*_rects` are per-frame hit targets rebuilt each paint; `menu*` back the open
-/// path/branch dropdown.
+/// 창 하단 상태줄의 칩·팝오버 상태. 칸마다 있던 하단바는 걷었다 — 그 자리는 ⋮ 「파일 트리」 칸이다.
 #[derive(Default)]
 pub(crate) struct StatusbarState {
-    pub(crate) hidden: std::collections::HashSet<String>,
-    pub(crate) shown: std::collections::HashSet<String>,
-    pub(crate) path_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) branch_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) toggle_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) diff_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) menu: Option<(String, StatusbarMenu)>,
-    pub(crate) menu_dir_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
-    pub(crate) menu_branch_rects: Vec<(String, (f32, f32, f32, f32))>,
-    pub(crate) menu_dirs: Vec<std::path::PathBuf>,
-    pub(crate) menu_branches: Vec<String>,
-    pub(crate) menu_scroll: f32,
-    pub(crate) menu_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) menu_search: String,
-    /// `menu_search` 안 커서(문자 단위). 검색칸도 가운데를 고칠 수 있어야 한다 —
-    /// 끝에서만 지워지면 오타 하나에 뒤를 다 날려야 했다. 드롭다운을 닫을 때
-    /// 따로 되돌리지 않는다: 버퍼가 비면 `lineedit` 이 다음 조작에서 0 으로
-    /// 클램프하므로 남은 값이 화면에 나올 일이 없다.
-    pub(crate) menu_search_cursor: usize,
     /// 바깥주소(터널) 칩 — **창** 우하단 고정(2026-08-15 지시). pane 소속이
     /// 아니지만 발판 chips 와 같은 프레임에 그려지고 같은 손이 클릭을 가르므로
     /// 여기 얹는다. `tunnel_on` 은 마지막 폴 결과(None=아직 모름), `tunnel_checked`

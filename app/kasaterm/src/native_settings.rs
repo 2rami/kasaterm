@@ -653,7 +653,6 @@ pub(crate) fn same_keyboard_target(a: &Target, b: &Target) -> bool {
 pub(crate) fn same_stepper_target(a: &Target, b: &Target) -> bool {
     match (a, b) {
         (Target::Setting(SettingsAction::StatusBarH(_)), Target::Setting(SettingsAction::StatusBarH(_)))
-        | (Target::Setting(SettingsAction::PaneFooterH(_)), Target::Setting(SettingsAction::PaneFooterH(_)))
         | (Target::Setting(SettingsAction::AccountAutoswitchPct(_)), Target::Setting(SettingsAction::AccountAutoswitchPct(_))) => true,
         (Target::Setting(SettingsAction::PetPreference(a)), Target::Setting(SettingsAction::PetPreference(b))) => {
             std::mem::discriminant(a) == std::mem::discriminant(b)
@@ -790,7 +789,6 @@ pub(crate) struct Snapshot {
     pub(crate) file_open_app: String,
     pub(crate) file_open_cmd: String,
     pub(crate) file_tree_default: bool,
-    pub(crate) footer_default: bool,
     pub(crate) autosave_ms: u64,
     pub(crate) shell: String,
     pub(crate) theme: String,
@@ -818,7 +816,6 @@ pub(crate) struct Snapshot {
     pub(crate) ui_zoom: f32,
     pub(crate) wheel_gain: f32,
     pub(crate) status_h: f32,
-    pub(crate) footer_h: f32,
     pub(crate) tabs_on_top: bool,
     pub(crate) pane_header_bar: bool,
     pub(crate) cursor_shape: cursor::CursorShape,
@@ -1046,7 +1043,6 @@ impl App {
             file_open_app: self.set_file_open_app.clone(),
             file_open_cmd: self.set_file_open_cmd.clone(),
             file_tree_default: self.set_file_tree_default,
-            footer_default: self.set_footer_default,
             autosave_ms: self.set_autosave.map_or(0, |d| d.as_millis() as u64),
             shell: self.set_shell.clone(),
             theme: theme::theme_name(),
@@ -1069,7 +1065,6 @@ impl App {
             ui_zoom: self.ui_zoom,
             wheel_gain: self.set_wheel_pixel_gain,
             status_h: self.set_status_h,
-            footer_h: self.set_pane_footer_h,
             tabs_on_top: self.tabs_on_top,
             pane_header_bar: crate::PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed),
             cursor_shape: self.cursor_shape,
@@ -3483,29 +3478,6 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
         &format!("{:.0}px", s.status_h),
         SettingsAction::StatusBarH((s.status_h - 2.0).max(socket::STATUS_H_MIN) as u32),
         SettingsAction::StatusBarH((s.status_h + 2.0).min(socket::STATUS_H_MAX) as u32),
-    );
-    toggle_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "칸 하단바 기본으로 켜기",
-        s.footer_default,
-        SettingsAction::ToggleFooter,
-    );
-    stepper_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "칸 하단바 높이",
-        &format!("{:.0}px", s.footer_h),
-        SettingsAction::PaneFooterH((s.footer_h - 2.0).max(socket::PANE_FOOTER_H_MIN) as u32),
-        SettingsAction::PaneFooterH((s.footer_h + 2.0).min(socket::PANE_FOOTER_H_MAX) as u32),
     );
     paint_cursor(g, s, hits, x, y, w);
 }
@@ -8294,7 +8266,7 @@ mod tests {
                 layout_rect: (10.0, 10.0, 80.0, 26.0), cursor: HitCursor::Pointer },
             Hit { target: Target::Setting(SettingsAction::ToggleCharacterAppearance), rect: (10.0, 50.0, 80.0, 26.0),
                 layout_rect: (10.0, 50.0, 80.0, 26.0), cursor: HitCursor::Pointer },
-            Hit { target: Target::Setting(SettingsAction::ToggleFooter), rect: (100.0, 50.0, 1.0, 26.0),
+            Hit { target: Target::Setting(SettingsAction::ToggleStatusbarSeparators), rect: (100.0, 50.0, 1.0, 26.0),
                 layout_rect: (100.0, 50.0, 80.0, 26.0), cursor: HitCursor::Pointer },
         ];
         let reachable = keyboard_hits(&hits);

@@ -103,10 +103,6 @@ impl App {
             serde_json::Value::Bool(self.set_file_tree_default),
         );
         socket::write_setting(
-            "pane_footer_default",
-            serde_json::Value::Bool(self.set_footer_default),
-        );
-        socket::write_setting(
             "editor_autosave_ms",
             serde_json::Value::from(self.set_autosave.map_or(0, |d| d.as_millis() as u64)),
         );
@@ -164,10 +160,6 @@ impl App {
             serde_json::Value::from(self.set_wheel_pixel_gain),
         );
         socket::write_setting("status_bar_h", serde_json::Value::from(self.set_status_h));
-        socket::write_setting(
-            "pane_footer_h",
-            serde_json::Value::from(self.set_pane_footer_h),
-        );
         socket::write_setting("statusbar_order", self.set_statusbar.json_order());
         socket::write_setting("statusbar_hidden", self.set_statusbar.json_hidden());
         socket::write_setting("statusbar_colors", self.set_statusbar.json_colors());
@@ -1000,17 +992,6 @@ impl App {
                     self.set_toast(crate::native_strings::text("펫 설정을 저장하지 못했습니다. 다시 눌러 주세요").into_owned());
                 }
             }
-            SettingsAction::ToggleFooter => {
-                self.set_footer_default = !self.set_footer_default;
-                self.settings_save();
-                // 전역 기본을 뒤집으면 per-pane 예외(⋮로 끄거나 켠 pane)는 리셋해
-                // 모든 pane 이 새 기본으로 통일된다. footer 표시 여부는 셀 그리드
-                // 높이(statusbar_px)에 들어가므로 PTY 도 reshape.
-                self.statusbar.hidden.clear();
-                self.statusbar.shown.clear();
-                let (cols, rows) = self.window_cells();
-                self.resize_backend(cols, rows);
-            }
             SettingsAction::AutosaveDelay(ms) => {
                 self.set_autosave = (ms > 0).then(|| std::time::Duration::from_millis(ms));
                 self.settings_save();
@@ -1331,16 +1312,6 @@ impl App {
                 let want = (px as f32).clamp(socket::STATUS_H_MIN, socket::STATUS_H_MAX);
                 if (want - self.set_status_h).abs() > 0.01 {
                     self.set_status_h = want;
-                    self.settings_save();
-                    let (cols, rows) = self.window_cells();
-                    self.resize_backend(cols, rows);
-                    self.chrome_dirty = true;
-                }
-            }
-            SettingsAction::PaneFooterH(px) => {
-                let want = (px as f32).clamp(socket::PANE_FOOTER_H_MIN, socket::PANE_FOOTER_H_MAX);
-                if (want - self.set_pane_footer_h).abs() > 0.01 {
-                    self.set_pane_footer_h = want;
                     self.settings_save();
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
@@ -1861,10 +1832,6 @@ impl App {
                 self.settings_apply(SettingsAction::ToggleFileTree);
                 Ok(saved_bool("file_tree_default") == Some(self.set_file_tree_default))
             }
-            "toggle-footer" => {
-                self.settings_apply(SettingsAction::ToggleFooter);
-                Ok(saved_bool("pane_footer_default") == Some(self.set_footer_default))
-            }
             "autosave-delay" => {
                 let ms: u64 = id.parse().map_err(|_| unknown(id))?;
                 if !matches!(ms, 0 | 1000 | 3000 | 10000) {
@@ -1911,15 +1878,6 @@ impl App {
                 }
                 self.settings_apply(SettingsAction::StatusBarH(px));
                 Ok(self.set_status_h.round() as u32 == px)
-            }
-            "pane-footer-h" => {
-                let px: u32 = id.parse().map_err(|_| unknown(id))?;
-                let f = px as f32;
-                if !(socket::PANE_FOOTER_H_MIN..=socket::PANE_FOOTER_H_MAX).contains(&f) {
-                    return Err(unknown(id));
-                }
-                self.settings_apply(SettingsAction::PaneFooterH(px));
-                Ok(self.set_pane_footer_h.round() as u32 == px)
             }
             "wheel-gain" => {
                 let x100: u32 = id.parse().map_err(|_| unknown(id))?;
@@ -2782,7 +2740,6 @@ impl App {
                     }))
                     .collect::<Vec<_>>(),
                 "file_tree_default": self.set_file_tree_default,
-                "footer_default": self.set_footer_default,
                 "autosave_ms": self.set_autosave.map_or(0, |d| d.as_millis() as u64),
                 "tabs_on_top": self.tabs_on_top,
                 "pane_header": if PANE_HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed) { "bar" } else { "handle" },
@@ -2791,7 +2748,6 @@ impl App {
                 "mouse_cursor": self.mouse_cursor,
                 "wheel_gain_x100": (self.set_wheel_pixel_gain * 100.0).round() as u32,
                 "status_bar_h": self.set_status_h.round() as u32,
-                "pane_footer_h": self.set_pane_footer_h.round() as u32,
             },
             "appearance": {
                 "theme": theme::theme_name(),

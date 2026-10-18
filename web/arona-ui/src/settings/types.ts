@@ -86,16 +86,14 @@ export type GeneralValues = {
   /// 설치된 것만 온다 — 목록에 없는 앱을 쓰는 사람의 탈출구가 빈 문자열이다.
   apps: { name: string; short: string }[];
   file_tree_default: boolean;
-  footer_default: boolean;
   autosave_ms: number;
   tabs_on_top: boolean;
   cursor_shape: string;
   cursor_thickness: number;
   mouse_cursor: string;
   wheel_gain_x100: number;
-  /// 창 맨 아래 상태줄 · pane 하단바 높이(logical px). 자유값이 아니라 프리셋이다.
+  /// 창 맨 아래 상태줄 높이(logical px).
   status_bar_h: number;
-  pane_footer_h: number;
 };
 
 export type AppearanceValues = {

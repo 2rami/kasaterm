@@ -1242,31 +1242,6 @@ impl App {
             win.inner_size().width as f32 / scale - w
         })
     }
-    /// Whether `id`'s per-pane status bar is shown. The global default
-    /// (`set_footer_default`) decides it unless this pane sits in an exception
-    /// set: `shown` forces it on, `hidden` forces it off.
-    pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
-        if self.lite || self.pane_is_internal(id) {
-            return false;
-        }
-        if self.statusbar.shown.contains(id) {
-            true
-        } else if self.statusbar.hidden.contains(id) {
-            false
-        } else {
-            self.set_footer_default
-        }
-    }
-    /// Logical-px footer band `id` reserves for its status bar — `self.pane_footer_h()`
-    /// when shown, 0 when collapsed. Mirrors the header band in `resize_backend`
-    /// and the render clip so the PTY grid stops exactly above the bar.
-    pub(crate) fn statusbar_px(&self, id: &str) -> f32 {
-        if self.statusbar_visible(id) {
-            self.pane_footer_h()
-        } else {
-            0.0
-        }
-    }
     /// 헤더 띠 높이(logical px) — image/md pane만 30, 그 외 0. resize_backend
     /// 처럼 ws 미잠금 지점에서 id로 조회한다(PaneState::header_px 위임).
     pub(crate) fn pane_header_px(&self, id: &str) -> f32 {
@@ -1323,38 +1298,6 @@ impl App {
         }
         self.save_ui_state();
     }
-    /// Show/hide pane `id`'s status bar. Collapsing returns the footer rows to
-    /// the cell grid, so the PTY is reshaped; an open dropdown on that bar is
-    /// dismissed. `resize_backend` reads `statusbar_px` per leaf, so the toggle
-    /// is all the state it needs.
-    pub(crate) fn toggle_statusbar(&mut self, id: &str) {
-        if self.pane_is_internal(id) {
-            return;
-        }
-        // Record this pane as an exception to the global default — drop any
-        // stale membership first, then file it under the set opposite to its
-        // new state (off → hidden, on → shown).
-        let was_visible = self.statusbar_visible(id);
-        self.statusbar.hidden.remove(id);
-        self.statusbar.shown.remove(id);
-        if was_visible {
-            self.statusbar.hidden.insert(id.to_string());
-            if self
-                .statusbar
-                .menu
-                .as_ref()
-                .map(|(p, _)| p == id)
-                .unwrap_or(false)
-            {
-                self.statusbar.menu = None;
-            }
-        } else {
-            self.statusbar.shown.insert(id.to_string());
-        }
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.chrome_dirty = true;
-    }
     /// 설정 「칸 머리」를 바꾼다. 머리 띠가 셀 그리드에서 한 줄을 먹으므로 PTY 크기를
     /// 다시 잰다(`toggle_pane_header` 와 같은 이유). 바뀌었으면 true.
     pub(crate) fn set_pane_header_bar(&mut self, bar: bool) -> bool {
@@ -1393,160 +1336,6 @@ impl App {
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
-    }
-    /// Open (or toggle) a status-bar dropdown for pane `id`. The list is
-    /// snapshotted now — `read_dir` / `git_branches` block, so they can't run on
-    /// the render path. A second click on the same chip closes the menu.
-    pub(crate) fn open_statusbar_menu(&mut self, id: &str, kind: StatusbarMenu) {
-        if self.statusbar.menu.as_ref() == Some(&(id.to_string(), kind)) {
-            self.statusbar.menu = None;
-            self.chrome_dirty = true;
-            return;
-        }
-        let cwd = self.pane_cwd_cache.get(id).cloned();
-        self.statusbar.menu_dirs.clear();
-        self.statusbar.menu_branches.clear();
-        self.statusbar.menu_scroll = 0.0;
-        self.statusbar.menu_search.clear();
-        match kind {
-            StatusbarMenu::Path => {
-                if let Some(cwd) = cwd.as_ref() {
-                    // `..` first, then child entries (folders before files, each
-                    // alpha-sorted) — a quick-nav picker, so files show too, not
-                    // just directories. Dotfiles (and `.git`) stay hidden here.
-                    if let Some(parent) = cwd.parent() {
-                        self.statusbar.menu_dirs.push(parent.to_path_buf());
-                    }
-                    if let Ok(rd) = std::fs::read_dir(cwd) {
-                        let mut entries: Vec<(bool, std::path::PathBuf)> = rd
-                            .filter_map(|e| e.ok())
-                            .filter(|e| {
-                                e.file_name()
-                                    .to_str()
-                                    .map(|s| !s.starts_with('.'))
-                                    .unwrap_or(false)
-                            })
-                            .map(|e| {
-                                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                                (is_dir, e.path())
-                            })
-                            .collect();
-                        entries.sort_by(|a, b| {
-                            b.0.cmp(&a.0).then_with(|| {
-                                a.1.file_name()
-                                    .map(|s| s.to_ascii_lowercase())
-                                    .cmp(&b.1.file_name().map(|s| s.to_ascii_lowercase()))
-                            })
-                        });
-                        self.statusbar
-                            .menu_dirs
-                            .extend(entries.into_iter().map(|(_, p)| p));
-                    }
-                }
-            }
-            StatusbarMenu::Branch => {
-                if let Some(cwd) = cwd.as_ref() {
-                    self.statusbar.menu_branches = kasa_mcp::git::git_branches(cwd);
-                }
-            }
-        }
-        self.statusbar.menu = Some((id.to_string(), kind));
-        self.chrome_dirty = true;
-    }
-    /// Indices into `statusbar_menu_dirs` that survive the live search query
-    /// (case-insensitive substring on the entry name; the `..` parent row at
-    /// index 0 always shows). Drives both the dropdown render and Enter-to-open.
-    pub(crate) fn statusbar_menu_filtered(&self) -> Vec<usize> {
-        let q = self.statusbar.menu_search.to_lowercase();
-        self.statusbar
-            .menu_dirs
-            .iter()
-            .enumerate()
-            .filter(|(i, p)| {
-                if q.is_empty() || *i == 0 {
-                    return true;
-                }
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|s| nfc_hangul(s).to_lowercase().contains(&q))
-                    .unwrap_or(false)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-    /// Enter on the path dropdown: open the first real match (folder → cd, file
-    /// → preview pane). With an active query the `..` parent is skipped so Enter
-    /// commits to a searched entry, not the parent.
-    pub(crate) fn statusbar_menu_activate_first(&mut self) {
-        let Some((pid, _)) = self.statusbar.menu.clone() else {
-            return;
-        };
-        let idxs = self.statusbar_menu_filtered();
-        let target = if self.statusbar.menu_search.is_empty() {
-            idxs.first().copied()
-        } else {
-            idxs.iter()
-                .find(|&&i| i != 0)
-                .or_else(|| idxs.first())
-                .copied()
-        };
-        if let Some(path) = target.and_then(|i| self.statusbar.menu_dirs.get(i).cloned()) {
-            if path.is_dir() {
-                self.statusbar_cd(&pid, &path);
-            } else {
-                self.statusbar.menu = None;
-                self.open_file(path, None, false);
-            }
-        }
-    }
-    /// `cd` pane `id`'s shell into `dir` (status-bar path picker). Sent straight
-    /// to that pane's PTY — single-quoted so spaces survive — and the dropdown
-    /// closes. The cwd sniffer repaints the bar once the shell reports the move.
-    pub(crate) fn statusbar_cd(&mut self, id: &str, dir: &std::path::Path) {
-        self.statusbar.menu = None;
-        // 현재 추적 중인 cwd의 부모로 가는 경우엔 셸 상대경로 `cd ..` 를 쓴다.
-        // (PowerShell 등에서 kasaterm이 잡은 절대경로가 부정확해도 한 칸 위로는 항상 정확.)
-        let is_parent = self.pane_cwd_cache.get(id).and_then(|c| c.parent()) == Some(dir);
-        let cmd = if is_parent {
-            "cd ..\r".to_string()
-        } else {
-            let q = dir.to_string_lossy().replace('\'', "'\\''");
-            format!("cd '{q}'\r")
-        };
-        if let Some(pty) = self.pty.get(id) {
-            let _ = pty.send_bytes(cmd.as_bytes());
-        }
-        self.chrome_dirty = true;
-    }
-    /// Check out `branch` in pane `id`'s repo (status-bar branch switcher). Runs
-    /// inline so the result can become a toast: a dirty tree makes git refuse
-    /// (the silent failure that read as "branch switch doesn't work"), so we
-    /// surface its message instead of dropping it. We don't stash/force — same
-    /// no-surprises stance as the git column.
-    pub(crate) fn statusbar_checkout(&mut self, id: &str, branch: String) {
-        self.statusbar.menu = None;
-        self.chrome_dirty = true;
-        let Some(cwd) = self.pane_cwd_cache.get(id).cloned() else {
-            return;
-        };
-        let res = kasa_mcp::git::git_checkout(&cwd, &branch);
-        let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-        let msg = if ok {
-            format!("{branch} 브랜치로 전환")
-        } else {
-            let out = res.get("output").and_then(|v| v.as_str()).unwrap_or("");
-            if out.contains("would be overwritten") {
-                "변경사항 때문에 전환 불가 — 커밋하거나 stash 먼저".to_string()
-            } else if out.is_empty() {
-                "브랜치 전환 실패".to_string()
-            } else {
-                format!("전환 실패: {}", out.lines().next().unwrap_or(""))
-            }
-        };
-        self.collab.toast = Some((msg, std::time::Instant::now()));
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
     }
     /// Surface a transient top-right toast (reuses the collab toast slot).
     pub(crate) fn set_toast(&mut self, msg: String) {
@@ -1686,11 +1475,6 @@ impl App {
         self.set_status_h
     }
 
-    /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
-    pub(crate) fn pane_footer_h(&self) -> f32 {
-        self.set_pane_footer_h
-    }
-
     pub(crate) fn open_localhost(&self, port: u16) {
         self.open_url(&format!("http://localhost:{port}"));
     }
@@ -1801,42 +1585,13 @@ impl App {
             None
         }
     }
-    /// Open the git column for pane `id`'s repo (status-bar diff chip click).
-    /// Focuses that pane so the column follows it (auto-track), then opens the
-    /// column if it's hidden. A second click on an already-open column for the
-    /// same pane closes it (toggle).
-    pub(crate) fn open_git_panel_for(&mut self, id: &str) {
-        let already = self.git.col_visible
-            && self
-                .ws
-                .lock()
-                .ok()
-                .and_then(|w| w.active_pane.clone())
-                .as_deref()
-                == Some(id);
-        if already {
-            self.toggle_git_col();
-            return;
-        }
-        self.focus_pane(id);
-        self.git.col_pinned_cwd = None;
-        if self.git.col_visible {
-            self.publish_git_col_cwd();
-            self.chrome_dirty = true;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        } else {
-            self.toggle_git_col();
-        }
-    }
     /// Feed every pane's cwd into the badge poller (`git_poll_cwds`) so each
-    /// pane's status bar shows its own repo's branch/diff, not just the active
+    /// pane's badge carries its own repo's branch/diff, not just the active
     /// one. The poller dedups + rate-limits, so a flat overwrite each frame is
-    /// fine. Skipped entirely when no pane shows a bar (nothing to refresh).
+    /// fine.
     pub(crate) fn publish_pane_git_cwds(&self) {
-        // Always feed every pane's cwd. Besides the native status bars, the BA
-        // GUI — now opened in an external browser tab — consumes per-pane badges
+        // Always feed every pane's cwd. The BA GUI — now opened in an external
+        // browser tab — consumes per-pane badges
         // through `/layout`, and the GUI can't tell whether that tab is open. The
         // poller dedups by cwd and only wakes on a change, so an idle feed is one
         // cheap git call per distinct repo per interval (no repaint).
