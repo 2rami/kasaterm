@@ -3900,6 +3900,11 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 대화 보기 선택 끌기 — 끝이 따라오고, 본문 밖이면 매 프레임 대화가 굴러 따라간다.
+                if self.chat_view_drag() {
+                    window.request_redraw();
+                    return;
+                }
                 // 렌더 뷰 선택 드래그: 끝점만 따라온다(앵커는 누른 자리에 고정).
                 if self.md_render_sel.as_ref().is_some_and(|s| s.dragging) {
                     let scroll = self
@@ -6715,6 +6720,11 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 대화 보기 끌기 끝 — 안 움직인 누름은 클릭이라 선택을 지우고, 입력칸이면 커서를 옮긴다.
+                        if self.chat_view_release() {
+                            window.request_redraw();
+                            return;
+                        }
                         // 렌더 뷰 선택 드래그 종료. 거의 안 움직였으면 그건 선택이
                         // 아니라 클릭이다 — 선택을 지우고 그때서야 링크를 연다.
                         if self.md_render_sel.as_ref().is_some_and(|s| s.dragging) {
@@ -7980,6 +7990,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoclicks(event_loop);
+        #[cfg(target_os = "macos")]
+        self.run_pending_autokeys();
         self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoweather();

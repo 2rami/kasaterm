@@ -5,6 +5,16 @@ use super::*;
 /// 프레임을 펌프한다 — 자세한 사정은 `run_pending_automdscript` 참고.
 static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// AppKit NSEvent 수정키 깃발 — 리그가 사람 손처럼 쥔 수정키를 실어 보낸다.
+#[cfg(target_os = "macos")]
+const NS_SHIFT: u64 = 1 << 17;
+#[cfg(target_os = "macos")]
+const NS_CONTROL: u64 = 1 << 18;
+#[cfg(target_os = "macos")]
+const NS_OPTION: u64 = 1 << 19;
+#[cfg(target_os = "macos")]
+const NS_COMMAND: u64 = 1 << 20;
+
 /// `autoboxlabel` 이 심는 가짜 transcript 자리. `/tmp/...` 로 골라 프로젝트 슬러그가
 /// 사용자 실제 폴더와 안 겹치게 한다 — 그 폴더를 잘못 건드린 사고를 한 번 냈다.
 const BOXLABEL_CWD: &str = "/tmp/kasaterm-boxlabel";
@@ -3826,8 +3836,8 @@ impl App {
         use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
         static PLAN: OnceLock<Option<(Instant, u64, Vec<String>)>> = OnceLock::new();
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        // 뗄 시각과, AppKit 길로 눌렀으면 그 자리(뗌도 같은 길로 보낸다).
-        static RELEASE: Mutex<Option<(Instant, Option<(f32, f32)>)>> = Mutex::new(None);
+        // 뗄 시각과, AppKit 길로 눌렀으면 그 자리와 수정키(뗌도 같은 길로 보낸다).
+        static RELEASE: Mutex<Option<(Instant, Option<(f32, f32, u64)>)>> = Mutex::new(None);
         let Some((due, gap, points)) = PLAN.get_or_init(|| {
             let spec = std::env::var("KASATERM_AUTOCLICKS").ok()?;
             let points = spec.split(';').map(str::to_string).collect();
@@ -3847,7 +3857,7 @@ impl App {
                 *RELEASE.lock().unwrap() = None;
                 match native {
                     #[cfg(target_os = "macos")]
-                    Some((x, y)) => self.native_mouse(&[(2, x, y)]),
+                    Some((x, y, flags)) => self.native_mouse(&[(2, x, y)], flags),
                     _ => press(self, ElementState::Released),
                 }
             }
@@ -3860,15 +3870,48 @@ impl App {
         }
         NEXT.store(i + 1, Ordering::Relaxed);
         #[cfg(target_os = "macos")]
-        if let Some(text) = point.strip_prefix("native:") {
-            let Some((x, y)) = self.autoclick_text_px(text) else {
-                eprintln!("[autoclicks] {i}: {text:?} 못 찾음");
+        {
+            // `opt:`·`shift:` 은 그 수정키를 쥔 채 누른다(AppKit 깃발 — winit 이 누름에서 수정키를 갱신한다).
+            let held = [("native:", 0u64), ("opt:", NS_OPTION), ("shift:", NS_SHIFT)]
+                .into_iter()
+                .find_map(|(tag, flags)| point.strip_prefix(tag).map(|text| (text, flags)));
+            if let Some((text, flags)) = held {
+                let Some((x, y)) = self.autoclick_text_px(text) else {
+                    eprintln!("[autoclicks] {i}: {text:?} 못 찾음");
+                    return;
+                };
+                self.native_mouse(&[(5, x - 12.0, y), (5, x - 6.0, y), (5, x, y), (1, x, y)], flags);
+                *RELEASE.lock().unwrap() = Some((Instant::now() + std::time::Duration::from_millis(90), Some((x, y, flags))));
+                eprintln!("[autoclicks] {i}: native {text:?} ({x:.0},{y:.0}) flags={flags:#x}");
                 return;
-            };
-            self.native_mouse(&[(5, x - 12.0, y), (5, x - 6.0, y), (5, x, y), (1, x, y)]);
-            *RELEASE.lock().unwrap() = Some((Instant::now() + std::time::Duration::from_millis(90), Some((x, y))));
-            eprintln!("[autoclicks] {i}: native {text:?} ({x:.0},{y:.0})");
-            return;
+            }
+            // `drag:<글>><글>` — 앞 글에서 눌러 뒷 글까지 끌고 뗀다. 뒷 글이 `top`·`bottom` 이면 그 칸 본문
+            // 위·아래 밖으로 끌어 잠시 쥔다(가장자리 너머로 끌어 굴리기).
+            if let Some((from, to)) = point.strip_prefix("drag:").and_then(|d| d.split_once('>')) {
+                let Some(a) = self.autoclick_text_px(from) else {
+                    eprintln!("[autoclicks] {i}: drag {from:?} 못 찾음");
+                    return;
+                };
+                let edge = match to {
+                    "top" => self.chat_view_edge_px(a, true),
+                    "bottom" => self.chat_view_edge_px(a, false),
+                    _ => None,
+                };
+                let Some(b) = edge.or_else(|| self.autoclick_text_px(to)) else {
+                    eprintln!("[autoclicks] {i}: drag {to:?} 못 찾음");
+                    return;
+                };
+                let mut events = vec![(5, a.0, a.1), (1, a.0, a.1)];
+                events.extend((1..=8).map(|k| {
+                    let t = k as f32 / 8.0;
+                    (6, a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+                }));
+                self.native_mouse(&events, 0);
+                let hold = if edge.is_some() { 900 } else { 90 };
+                *RELEASE.lock().unwrap() = Some((Instant::now() + std::time::Duration::from_millis(hold), Some((b.0, b.1, 0))));
+                eprintln!("[autoclicks] {i}: drag {from:?} ({:.0},{:.0}) → {to:?} ({:.0},{:.0})", a.0, a.1, b.0, b.1);
+                return;
+            }
         }
         if let Some(text) = point.strip_prefix("text:") {
             let Some((x, y)) = self.autoclick_text_px(text) else {
@@ -3896,11 +3939,11 @@ impl App {
         self.chrome_dirty = true;
         eprintln!("[autoclicks] {i}: ({x:.0},{y:.0}) scale={:.2}", self.effective_scale());
     }
-    /// AppKit 이 사람 손에서 받는 것과 같은 NSEvent(종류 5 이동·1 누름·2 뗌, 논리 좌표)를 winit 뷰에
+    /// AppKit 이 사람 손에서 받는 것과 같은 NSEvent(종류 5 이동·1 누름·2 뗌·6 끌기, 논리 좌표)를 winit 뷰에
     /// 차례로 넘긴다. `window_event` 를 직접 부르는 `text:` 와 달리 winit 이 누름·뗌마다 먼저 내는
     /// CursorMoved 와 수정키 갱신까지 탄다. 창 서버(활성화)는 안 거쳐 사람 화면의 초점을 안 뺏는다.
     #[cfg(target_os = "macos")]
-    fn native_mouse(&self, events: &[(u64, f32, f32)]) {
+    fn native_mouse(&self, events: &[(u64, f32, f32)], flags: u64) {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
         use objc2_foundation::{NSPoint, NSRect};
@@ -3919,18 +3962,154 @@ impl App {
             for &(kind, x, y) in events {
                 let at = NSPoint::new(x as f64 * points, frame.size.height - y as f64 * points);
                 let event: *mut AnyObject = msg_send![class, mouseEventWithType: kind, location: at,
-                    modifierFlags: 0u64, timestamp: 0.0f64, windowNumber: number,
+                    modifierFlags: flags, timestamp: 0.0f64, windowNumber: number,
                     context: std::ptr::null_mut::<AnyObject>(), eventNumber: 0isize, clickCount: 1isize, pressure: 1.0f32];
                 match kind {
                     1 => { let _: () = msg_send![view, mouseDown: event]; }
                     2 => { let _: () = msg_send![view, mouseUp: event]; }
+                    6 => { let _: () = msg_send![view, mouseDragged: event]; }
                     _ => { let _: () = msg_send![view, mouseMoved: event]; }
                 }
             }
         }
     }
+    /// `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"` — 앱 시작 기준 ms 에 AppKit 키
+    /// NSEvent 를 winit 뷰에 넘긴다. winit 이 그 깃발로 수정키를 갱신하고 `forward_key` 까지 사람 손과 같은
+    /// 길을 탄다(소켓 `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다). 창 서버를 안 거쳐 초점은 안 뺏는다.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn run_pending_autokeys(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        static PLAN: OnceLock<Vec<(Instant, String)>> = OnceLock::new();
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let plan = PLAN.get_or_init(|| {
+            let start = Instant::now();
+            std::env::var("KASATERM_AUTOKEYS")
+                .unwrap_or_default()
+                .split(';')
+                .filter_map(|step| {
+                    let (ms, key) = step.split_once(':')?;
+                    Some((start + std::time::Duration::from_millis(ms.trim().parse().ok()?), key.to_string()))
+                })
+                .collect()
+        });
+        while let Some((at, key)) = plan.get(NEXT.load(Ordering::Relaxed)) {
+            if Instant::now() < *at {
+                return;
+            }
+            NEXT.fetch_add(1, Ordering::Relaxed);
+            match key.strip_prefix("text:") {
+                Some(text) => text.chars().for_each(|ch| self.native_key(0, ch)),
+                None => {
+                    let mut flags = 0;
+                    let mut name = key.as_str();
+                    while let Some((m, rest)) = name.split_once('+') {
+                        flags |= match m {
+                            "shift" => NS_SHIFT,
+                            "ctrl" => NS_CONTROL,
+                            "alt" | "opt" => NS_OPTION,
+                            "cmd" => NS_COMMAND,
+                            _ => 0,
+                        };
+                        name = rest;
+                    }
+                    let ch = match name {
+                        "left" => '\u{f702}',
+                        "right" => '\u{f703}',
+                        "up" => '\u{f700}',
+                        "down" => '\u{f701}',
+                        "home" => '\u{f729}',
+                        "end" => '\u{f72b}',
+                        "backspace" => '\u{7f}',
+                        "enter" => '\r',
+                        "esc" => '\u{1b}',
+                        "space" => ' ',
+                        _ => name.chars().next().unwrap_or(' '),
+                    };
+                    self.native_key(flags, ch);
+                }
+            }
+            eprintln!("[autokeys] {key}");
+        }
+    }
+
+    /// 키 하나를 눌렀다 뗀다. 물리 키(맥 가상 키 번호)가 있어야 `KeyCode` 로 보는 단축키(⌘C 등)가 듣는다.
+    #[cfg(target_os = "macos")]
+    fn native_key(&self, flags: u64, ch: char) {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_foundation::{NSPoint, NSString};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        const LETTERS: &str = "asdfhgzxcv\u{0}bqweryt";
+        let code: u16 = match ch {
+            '\u{f702}' => 123,
+            '\u{f703}' => 124,
+            '\u{f701}' => 125,
+            '\u{f700}' => 126,
+            '\u{f729}' => 115,
+            '\u{f72b}' => 119,
+            '\u{7f}' => 51,
+            '\r' => 36,
+            '\u{1b}' => 53,
+            ' ' => 49,
+            c => match LETTERS.chars().position(|l| l == c.to_ascii_lowercase()) {
+                Some(at) => at as u16,
+                None => match c.to_ascii_lowercase() {
+                    'o' => 31,
+                    'u' => 32,
+                    'i' => 34,
+                    'p' => 35,
+                    'l' => 37,
+                    'j' => 38,
+                    'k' => 40,
+                    'n' => 45,
+                    'm' => 46,
+                    _ => 0,
+                },
+            },
+        };
+        let Some(window) = self.window.as_ref() else { return };
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let view = h.ns_view.as_ptr() as *mut AnyObject;
+        let text = NSString::from_str(&ch.to_string());
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            let Some(class) = AnyClass::get(c"NSEvent") else { return };
+            if ns_window.is_null() {
+                return;
+            }
+            let number: isize = msg_send![ns_window, windowNumber];
+            for kind in [10u64, 11] {
+                let event: *mut AnyObject = msg_send![class, keyEventWithType: kind, location: NSPoint::new(0.0, 0.0),
+                    modifierFlags: flags, timestamp: 0.0f64, windowNumber: number,
+                    context: std::ptr::null_mut::<AnyObject>(), characters: &*text, charactersIgnoringModifiers: &*text,
+                    isARepeat: false, keyCode: code];
+                if kind == 10 {
+                    let _: () = msg_send![view, keyDown: event];
+                } else {
+                    let _: () = msg_send![view, keyUp: event];
+                }
+            }
+            // 수정키를 뗀 것도 알린다 — 안 그러면 winit 이 ⌥ 를 쥔 채로 알아 칸 번호 덧그림이 남는다.
+            if flags != 0 {
+                let event: *mut AnyObject = msg_send![class, keyEventWithType: 12u64, location: NSPoint::new(0.0, 0.0),
+                    modifierFlags: 0u64, timestamp: 0.0f64, windowNumber: number,
+                    context: std::ptr::null_mut::<AnyObject>(), characters: &*NSString::from_str(""), charactersIgnoringModifiers: &*NSString::from_str(""),
+                    isARepeat: false, keyCode: 58u16];
+                if !event.is_null() {
+                    let _: () = msg_send![view, flagsChanged: event];
+                }
+            }
+        }
+    }
+
     /// pane 격자(활성 pane 먼저)에서 `text` 가 처음 나오는 칸의 px. 넓은 글자 뒤 칸은 글자가 아니라 건너뛴다.
+    /// 대화로 보는 칸은 원본 격자가 아니라 그 보기가 그린 격자에서 찾는다.
     fn autoclick_text_px(&self, text: &str) -> Option<(f32, f32)> {
+        if let Some(px) = self.chat_view_text_px(text) {
+            return Some(px);
+        }
         let want: Vec<char> = text.chars().collect();
         let (pane, col, row) = {
             let ws = self.ws.lock().ok()?;

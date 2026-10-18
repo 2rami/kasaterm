@@ -2255,13 +2255,23 @@ impl App {
         if self.copy_md_render_selection() {
             return;
         }
-        let Some(sel) = self.selection else {
-            return;
+        let text = if self.chat_view_has_selection() {
+            let text = self.chat_view_selection_text().unwrap_or_default();
+            // 리그는 사람 클립보드 대신 파일에 쓴다.
+            if let Some(path) = crate::verification_run().then(|| std::env::var_os("KASATERM_TEST_CHAT_COPY_PATH")).flatten() {
+                let _ = std::fs::write(path, &text);
+                return;
+            }
+            text
+        } else {
+            let Some(sel) = self.selection else {
+                return;
+            };
+            let Some(rows) = self.active_view_rows() else {
+                return;
+            };
+            extract_selection(&rows, sel)
         };
-        let Some(rows) = self.active_view_rows() else {
-            return;
-        };
-        let text = extract_selection(&rows, sel);
         if text.is_empty() {
             return;
         }
@@ -3747,7 +3757,7 @@ impl App {
                     if event.repeat {
                         return;
                     }
-                    if code == KeyCode::KeyC && self.selection.is_some() {
+                    if code == KeyCode::KeyC && (self.selection.is_some() || self.chat_view_has_selection()) {
                         self.copy_selection();
                         return;
                     }
@@ -3755,6 +3765,13 @@ impl App {
                     // 선택」이 없으니 macOS 관례가 기대하는 대상은 화면 텍스트다
                     // — 이어지는 Cmd+C 가 위의 copy_selection 으로 떨어진다.
                     if code == KeyCode::KeyA && !self.modifiers.shift_key() {
+                        // 대화 보기 칸은 화면이 아니라 쌓인 대화 전부다.
+                        if self.chat_view_select_all() {
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         let extent = self
                             .ws
                             .lock()

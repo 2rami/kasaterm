@@ -485,7 +485,11 @@ impl App {
             preedit_row,
             preedit_col,
             font_scale: pane_font_scale,
-            selection: self.selection,
+            // 대화로 보는 칸은 문서 선택을 이 화면 칸으로 옮겨 칠한다(굴려도 고른 글이 따라간다).
+            selection: match self.target_pane().filter(|id| self.chat_view_showing(id)) {
+                Some(id) => self.chat_view_selection(&id),
+                None => self.selection,
+            },
             suggestion: if active_surface.as_deref().is_some_and(|id| self.chat_view_showing(id) || self.shell_view_showing(id))
                 || self.target_pane().is_some_and(|id| self.chat_view_showing(&id) || self.shell_view_showing(&id))
             {

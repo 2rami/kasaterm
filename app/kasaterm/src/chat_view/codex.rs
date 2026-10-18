@@ -3,7 +3,7 @@
 //! 칸 폭에 맞춰 쌓기뿐이다. 명령은 rollout 의 `CommandExecution`(명령·해석·출력·종료 코드)으로 편다 —
 //! 코덱스 TUI 가 「Ran …」·「Explored」를 그리는 재료와 같다.
 
-use super::classic::{banner_text, blanks, cells, column_widths, line, plain, screen_banner, shorten_path, sig_of, text_width, wrap, Block, Col, Line, Look, Shelf, Span, St, TABLE_MIN_COL};
+use super::classic::{banner_text, blanks, cells, column_widths, line, plain, plain_cells, screen_banner, shorten_path, sig_of, text_width, wrap, Block, Col, Line, Look, Shelf, Span, St, TABLE_MIN_COL};
 use super::parse::{Conversation, Item, Row};
 use crate::{GridCell, MdBlock, MdSpan};
 use serde_json::Value;
@@ -56,6 +56,7 @@ fn markdown(text: &str, width: usize, cwd: Option<&str>) -> Vec<Vec<GridCell>> {
     let mut out: Vec<Vec<GridCell>> = Vec::new();
     let mut prev_list = false;
     let indent = 2;
+    let lead_pad = |n: usize| super::classic::indent(n, St::default());
     for block in &blocks {
         let list = matches!(block, MdBlock::ListItem { .. });
         if !out.is_empty() && !(list && prev_list) {
@@ -63,37 +64,37 @@ fn markdown(text: &str, width: usize, cwd: Option<&str>) -> Vec<Vec<GridCell>> {
         }
         prev_list = list;
         match block {
-            MdBlock::Heading { spans, .. } => out.extend(wrap(width, blanks(indent, St::default()), indent, &md_spans(spans, St::default().bold(), cwd), None)),
-            MdBlock::Para { spans } => out.extend(wrap(width, blanks(indent, St::default()), indent, &md_spans(spans, St::default(), cwd), None)),
+            MdBlock::Heading { spans, .. } => out.extend(wrap(width, lead_pad(indent), indent, &md_spans(spans, St::default().bold(), cwd), None)),
+            MdBlock::Para { spans } => out.extend(wrap(width, lead_pad(indent), indent, &md_spans(spans, St::default(), cwd), None)),
             MdBlock::ListItem { depth, marker, spans, .. } => {
                 let mark = if marker == "•" || marker == "-" { "•".to_string() } else { marker.clone() };
                 let lead = indent + *depth as usize * 2;
-                let mut first = blanks(lead, St::default());
+                let mut first = lead_pad(lead);
                 first.extend(cells(&format!("{mark} "), St::default()));
                 out.extend(wrap(width, first, lead + text_width(&mark) + 1, &md_spans(spans, St::default(), cwd), None));
             }
             MdBlock::Code { code, .. } => {
                 for raw in code.trim_end_matches('\n').split('\n') {
-                    out.extend(wrap(width, blanks(indent + 2, St::default()), indent + 2, &plain(raw.replace('\t', "    "), St::default()), None));
+                    out.extend(wrap(width, lead_pad(indent + 2), indent + 2, &plain(raw.replace('\t', "    "), St::default()), None));
                 }
             }
             MdBlock::Quote { spans } | MdBlock::Callout { spans, .. } => {
-                let mut first = blanks(indent, St::default());
+                let mut first = lead_pad(indent);
                 first.extend(cells("> ", dim()));
                 out.extend(wrap(width, first, indent + 2, &md_spans(spans, dim(), cwd), None));
             }
             MdBlock::Rule => {
-                let mut row = blanks(indent, St::default());
+                let mut row = lead_pad(indent);
                 row.extend(cells(&"─".repeat(width.saturating_sub(indent).min(80)), dim()));
                 pad(&mut row, width);
                 out.push(row);
             }
             MdBlock::Meta { rows } => {
                 for (k, v) in rows {
-                    out.extend(wrap(width, blanks(indent, St::default()), indent, &plain(format!("{k}: {v}"), St::default()), None));
+                    out.extend(wrap(width, lead_pad(indent), indent, &plain(format!("{k}: {v}"), St::default()), None));
                 }
             }
-            MdBlock::Image { alt, .. } => out.extend(wrap(width, blanks(indent, St::default()), indent, &plain(format!("[image {alt}]"), dim()), None)),
+            MdBlock::Image { alt, .. } => out.extend(wrap(width, lead_pad(indent), indent, &plain(format!("[image {alt}]"), dim()), None)),
             MdBlock::Table { head, rows, .. } => out.extend(table(width, indent, head, rows, cwd)),
         }
     }
@@ -148,7 +149,8 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
                     .map(|mut line| {
                         line.truncate(widths[i]);
                         line.resize(widths[i], GridCell::blank());
-                        line
+                        // 칸 안 접기 표식은 표 칸 몫이 아니다 — 복사한 표의 칸 줄이 흐트러지지 않게 걷는다.
+                        plain_cells(line)
                     })
                     .collect()
             })

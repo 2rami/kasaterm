@@ -139,6 +139,8 @@ pub(super) fn plain(text: impl Into<String>, st: St) -> Vec<Span> {
 struct Pen {
     width: usize,
     lines: Vec<Vec<GridCell>>,
+    /// 줄마다 칸 폭에서 꺾였나(`'\n'` 이 아니다)와, 꺾으며 줄 끝 빈칸 하나를 먹었나.
+    soft: Vec<(bool, bool)>,
     cur: Vec<GridCell>,
     col: usize,
     /// 지금 줄의 글이 시작하는 칸 — 머리(첫 줄)나 들여쓰기(다음 줄) 바로 뒤.
@@ -150,7 +152,7 @@ struct Pen {
 impl Pen {
     fn new(width: usize, first: Vec<GridCell>, cont: Vec<GridCell>, fill: Option<Col>) -> Self {
         let col = first.len();
-        Self { width: width.max(4), lines: Vec::new(), cur: first, col, start: col, cont, fill }
+        Self { width: width.max(4), lines: Vec::new(), soft: Vec::new(), cur: first, col, start: col, cont, fill }
     }
 
     fn put(&mut self, ch: char, st: &St) {
@@ -159,7 +161,7 @@ impl Pen {
             return;
         }
         if self.col + w > self.width {
-            self.newline();
+            self.fold(false);
         }
         self.cur.push(st.cell(ch));
         if w == 2 {
@@ -171,8 +173,18 @@ impl Pen {
     }
 
     fn newline(&mut self) {
+        self.next_line((false, false));
+    }
+
+    /// 칸 폭 때문에 꺾는다 — 복사할 때 다음 줄과 이어 붙는다.
+    fn fold(&mut self, ate_space: bool) {
+        self.next_line((true, ate_space));
+    }
+
+    fn next_line(&mut self, soft: (bool, bool)) {
         let done = std::mem::replace(&mut self.cur, self.cont.clone());
         self.lines.push(done);
+        self.soft.push(soft);
         self.col = self.cont.len();
         self.start = self.col;
     }
@@ -207,13 +219,13 @@ impl Pen {
             let body: usize = w.iter().filter(|(c, _)| *c != ' ').map(|(c, _)| c.width().unwrap_or(0)).sum();
             let room = self.width.saturating_sub(self.col);
             if body > room && self.col > self.start && body <= self.width.saturating_sub(self.cont.len()) {
-                self.newline();
+                self.fold(false);
             }
             for (ch, st) in w {
                 if ch == ' ' {
                     // 줄 끝에 걸린 빈칸은 줄바꿈이 되고, 접힌 줄 머리의 빈칸은 버린다.
                     if self.col + 1 > self.width {
-                        self.newline();
+                        self.fold(true);
                         continue;
                     }
                     if self.col == self.start && !self.lines.is_empty() {
@@ -225,22 +237,44 @@ impl Pen {
         }
     }
 
+    /// 꺾은 줄은 끝 칸에 `wrapped`, 남은 채움 칸에 `leading_wide_spacer`(글 아닌 자리)를 둔다 — 고른 글을
+    /// 복사하면 꺾인 자리에서 줄이 안 갈라지고 채움·들여쓰기 빈칸이 안 낀다(`extract_rows`, `mirror_view` 와 같은 표식).
     fn finish(mut self) -> Vec<Vec<GridCell>> {
         self.lines.push(std::mem::take(&mut self.cur));
+        self.soft.push((false, false));
         let width = self.width;
         let fill = self.fill;
+        let mut carry_space = false;
         self.lines
             .into_iter()
-            .map(|mut row| {
+            .zip(self.soft)
+            .map(|(mut row, (soft, ate_space))| {
+                // 꺾으며 먹은 빈칸이 줄 끝에 둘 자리가 없었으면 다음 줄 들여쓰기 끝 칸이 그 빈칸이다.
+                if std::mem::take(&mut carry_space) {
+                    if let Some(at) = row.iter().rposition(|c| c.leading_wide_spacer) {
+                        row[at].leading_wide_spacer = false;
+                    }
+                }
                 // 접힌 줄 끝의 빈칸도 셀로 남지 않게 다듬는다 — 띠 색은 아래에서 다시 깐다.
                 while row.len() > width {
                     row.pop();
                 }
+                let text_end = row.len();
                 let mut pad = GridCell::blank();
                 if let Some(bg) = fill {
                     pad.bg = bg.color();
                 }
+                pad.leading_wide_spacer = soft;
                 row.resize(width, pad);
+                if soft {
+                    match row.get_mut(text_end) {
+                        Some(cell) if ate_space => cell.leading_wide_spacer = false,
+                        _ => carry_space = ate_space,
+                    }
+                    if let Some(last) = row.last_mut() {
+                        last.wrapped = true;
+                    }
+                }
                 row
             })
             .collect()
@@ -266,6 +300,13 @@ pub(super) fn blanks(n: usize, st: St) -> Vec<GridCell> {
     vec![st.cell(' '); n]
 }
 
+/// 글머리 앞 들여쓰기·얼굴 자리 — 화면 자리만 차지하고 복사에는 안 들어간다.
+pub(super) fn indent(n: usize, st: St) -> Vec<GridCell> {
+    let mut cell = st.cell(' ');
+    cell.leading_wide_spacer = true;
+    vec![cell; n]
+}
+
 pub(super) fn text_width(s: &str) -> usize {
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
@@ -273,8 +314,8 @@ pub(super) fn text_width(s: &str) -> usize {
 /// `first` 줄 머리 + 나머지는 `indent` 칸 들여 접는다.
 pub(super) fn wrap(width: usize, first: Vec<GridCell>, indent: usize, spans: &[Span], fill: Option<Col>) -> Vec<Vec<GridCell>> {
     let cont = match fill {
-        Some(bg) => blanks(indent, St::default().on(bg)),
-        None => blanks(indent, St::default()),
+        Some(bg) => self::indent(indent, St::default().on(bg)),
+        None => self::indent(indent, St::default()),
     };
     let mut pen = Pen::new(width, first, cont, fill);
     pen.flow(spans);
@@ -337,7 +378,7 @@ fn markdown(text: &str, width: usize, indent: usize, ink: &Ink) -> Vec<Vec<GridC
     let body = St::default();
     let mut out: Vec<Vec<GridCell>> = Vec::new();
     let mut prev_list = false;
-    let pad = |n: usize| blanks(n, St::default());
+    let pad = |n: usize| self::indent(n, St::default());
     for block in &blocks {
         let list = matches!(block, MdBlock::ListItem { .. });
         if !out.is_empty() && !(list && prev_list) {
@@ -435,7 +476,7 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
             s.push_str(&"─".repeat(w + 2));
             s.push_str(if i + 1 == ncol { r } else { m });
         }
-        let mut row = blanks(indent, St::default());
+        let mut row = self::indent(indent, St::default());
         row.extend(cells(&s, St::default()));
         row
     };
@@ -445,13 +486,14 @@ fn table(width: usize, indent: usize, head: &[Vec<MdSpan>], rows: &[Vec<Vec<MdSp
                 let spans = r.get(i).cloned().unwrap_or_default();
                 let text: Vec<Span> = md_spans(&spans, St::default(), ink).into_iter().map(|(t, st)| (t.replace('\n', " "), st)).collect();
                 let side = if head { MdAlign::Center } else { align.get(i).copied().unwrap_or(MdAlign::Left) };
-                wrap(widths[i], Vec::new(), 0, &text, None).into_iter().map(|line| placed(line, widths[i], side)).collect()
+                // 칸 안 접기는 표 칸 폭 몫이다 — 복사한 표의 칸 줄이 흐트러지지 않게 꺾임 표식을 걷는다.
+                wrap(widths[i], Vec::new(), 0, &text, None).into_iter().map(|line| placed(plain_cells(line), widths[i], side)).collect()
             })
             .collect();
         let height = cols.iter().map(Vec::len).max().unwrap_or(1);
         (0..height)
             .map(|y| {
-                let mut row = blanks(indent, St::default());
+                let mut row = self::indent(indent, St::default());
                 row.extend(cells("│", St::default()));
                 for (i, lines) in cols.iter().enumerate() {
                     let top = (height - lines.len()) / 2;
@@ -516,6 +558,14 @@ pub(super) fn column_widths(ideal: &[usize], least: &[usize], room: usize) -> Ve
 }
 
 /// 접힌 한 줄을 칸 폭 `w` 에 맞춰 놓는다.
+pub(super) fn plain_cells(mut line: Vec<GridCell>) -> Vec<GridCell> {
+    for cell in &mut line {
+        cell.wrapped = false;
+        cell.leading_wide_spacer = false;
+    }
+    line
+}
+
 fn placed(mut line: Vec<GridCell>, w: usize, side: MdAlign) -> Vec<GridCell> {
     while line.last().is_some_and(|c| c.ch == ' ') {
         line.pop();
@@ -1263,6 +1313,25 @@ mod tests {
         let mut c = Conversation::default();
         assert!(c.apply(&lines.join("\n")));
         c
+    }
+
+    #[test]
+    fn copying_a_folded_answer_gives_back_the_text_not_the_screen_rows() {
+        let md = "파일 칸은 셸 칸 오른쪽에 붙는 터미널 프로그램이라 거울에서도 같은 화면이 뜬다.\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n| 키 | 일 |\n|---|---|\n| j | 아래 |";
+        let rows = markdown(md, 24, 3, &Ink::now());
+        let refs: Vec<&[GridCell]> = rows.iter().map(Vec::as_slice).collect();
+        let all = crate::extract_rows(&refs, (0, 0), (23, refs.len() - 1));
+        let mut parts = all.split("\n\n");
+        assert_eq!(
+            parts.next(),
+            Some("파일 칸은 셸 칸 오른쪽에 붙는 터미널 프로그램이라 거울에서도 같은 화면이 뜬다."),
+            "칸 폭에서 꺾인 문단은 빈칸 하나로 잇고 들여쓰기는 안 넣는다"
+        );
+        assert_eq!(parts.next(), Some("fn main() {\n    println!(\"hi\");\n}"), "코드 칸 들여쓰기는 남는다");
+        let table = parts.next().unwrap_or_default();
+        assert!(table.starts_with('┌') && table.contains("│ j  │ 아래 │"), "표는 테두리째, 칸 줄은 그대로: {table:?}");
+        // 화면에 그리는 칸은 그대로다 — 들여쓰기 3칸 뒤에서 글이 시작한다.
+        assert_eq!(rows[1].iter().take(3).filter(|c| c.ch == ' ').count(), 3);
     }
 
     fn build(c: &Conversation, width: usize, face: bool) -> Vec<String> {

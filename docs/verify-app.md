@@ -80,6 +80,12 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
    (`KASATERM_AUTOCLICKS="text:학생 현황 ];text:메모 ]"`). `native:<글>` 은 같은 자리를 macOS 에서 **AppKit NSEvent 로 winit 뷰에**
    넘긴다 — winit 이 누름·뗌마다 먼저 내는 CursorMoved(그래서 뗌 앞에 같은 칸 끌기 `32` 가 붙는다)와 수정키 갱신까지 사람 손과
    같고, 창 서버를 안 거쳐 사람 화면의 초점은 안 뺏는다. `x,y`·`text:` 는 `window_event` 를 직접 불러 그 단계를 건너뛴다.
+   `opt:<글>`·`shift:<글>` 은 그 수정키를 쥔 `native:`, `drag:<글>><글>` 은 앞 글에서 눌러 뒷 글까지 끌고 뗀다(뒷 글이
+   `top`·`bottom` 이면 대화 칸 본문 밖으로 끌어 0.9초 쥔다). 대화로 보는 칸은 원본 격자가 아니라 그 보기가 그린 격자에서 찾는다.
+   **키**는 `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"`(앱 시작 기준 ms, `shift`·`ctrl`·`alt`·`cmd` +
+   `left`·`right`·`up`·`down`·`home`·`end`·`backspace`·`enter`·`esc`·글자) — 같은 AppKit 길로 `forward_key` 까지 탄다.
+   `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다. ⚠️ 한가한 리그는 프레임을 드물게 돌아 예약 시각이 몇 초씩 밀리고 뒤
+   걸음끼리 한 틱에 몰린다 — 옆에서 `kasaterm-cli peek` 을 0.25초마다 불러 깨워 두고, 걸음 사이를 넉넉히(수 초) 띄워라.
    ⚠️ `text:`·`native:` 의 px 는 클릭 판정 함수(`px_to_pane_cell`)로 거꾸로 구한 것이라 **그린 자리와 판정 자리가 어긋나는 버그는
    원리상 못 잡는다** — 그건 캡처에서 글자 위치를 재서 `x,y` 로 눌러 확인한다. 그리고 **사람이 누르는 배치를 그대로 세워라**:
    좁은 리그에선 Claude Code 옆 창이 아래에 붙어 단추가 pane 위쪽에 안 오니, pane 위 34px 를 헤더로 잡아먹던 판정(2026-10-06)이

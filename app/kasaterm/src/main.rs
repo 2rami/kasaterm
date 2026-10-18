@@ -1284,18 +1284,23 @@ impl PaneViewShift {
 
 fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
     let (start, end) = normalise(sel);
+    let rows: Vec<&[GridCell]> = rows.iter().map(Vec::as_slice).collect();
+    extract_rows(&rows, (start.0 as usize, start.1 as usize), (end.0 as usize, end.1 as usize))
+}
+
+/// `rows` 의 (열, 줄) `start`..=`end` 글. 대화 보기는 화면 밖까지 쌓인 줄을 넘기므로 줄 번호가 u16 을 넘을 수 있다.
+pub(crate) fn extract_rows(rows: &[&[GridCell]], start: (usize, usize), end: (usize, usize)) -> String {
     let mut out = String::new();
     for (r, row) in rows.iter().enumerate() {
-        let r = r as u16;
         if r < start.1 || r > end.1 {
             continue;
         }
         let (mut cs, ce) = if start.1 == end.1 {
-            (start.0 as usize, end.0 as usize)
+            (start.0, end.0)
         } else if r == start.1 {
-            (start.0 as usize, row.len().saturating_sub(1))
+            (start.0, row.len().saturating_sub(1))
         } else if r == end.1 {
-            (0, end.0 as usize)
+            (0, end.0)
         } else {
             (0, row.len().saturating_sub(1))
         };
@@ -1307,7 +1312,7 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
             cs += 1;
         }
         append_cells_text(row.iter().take(ce + 1).skip(cs), &mut out);
-        let continues = r < end.1 && (r as usize + 1) < rows.len()
+        let continues = r < end.1 && r + 1 < rows.len()
             && row.last().is_some_and(|cell| cell.wrapped);
         if !continues {
             // Viewer reflow is not a user-authored newline. Preserve real

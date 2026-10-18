@@ -14,6 +14,7 @@ pub(crate) mod classic;
 mod codex;
 pub(crate) mod history;
 pub(crate) mod parse;
+mod select;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -65,10 +66,14 @@ pub(crate) struct Drawn {
     hist_rows: usize,
     /// 보이는 대화 줄마다 누르면 펼치는 묶음 열쇠.
     toggles: Vec<Option<usize>>,
-    /// 그린 격자 — 끌어 선택한 글을 복사할 때 읽는다.
+    /// 그린 격자 — 바닥 줄 글을 고를 때·링크를 찾을 때 읽는다.
     rows: Vec<Vec<GridCell>>,
     /// 원본 커서가 이 격자에서 선 칸 — 커서 블록·한글 조합 글자가 여기 선다.
     cursor: Option<(usize, usize)>,
+    /// 원본 커서 자리(보이든 말든) — 입력칸을 누르면 여기서부터 화살표를 센다.
+    caret: Option<(usize, usize)>,
+    /// 이 화면이 보인 대화 줄 범위 — 문서 선택을 화면 칸으로 옮긴다.
+    view: select::View,
 }
 
 /// 렌더가 터미널 합성기에 넘길 이번 프레임의 화면.
@@ -79,6 +84,8 @@ pub(crate) struct ChatFrame {
     pub(crate) face_slug: Option<&'static str>,
     hist_rows: usize,
     toggles: Vec<Option<usize>>,
+    caret: Option<(usize, usize)>,
+    view: select::View,
 }
 
 pub(crate) struct ChatPane {
@@ -103,6 +110,12 @@ pub(crate) struct ChatPane {
     banner: RefCell<Option<Vec<Vec<GridCell>>>>,
     /// 트랙패드 휠의 한 줄이 안 된 나머지 px.
     wheel_px: f32,
+    /// 고른 글 — 문서 좌표라 굴려도 남는다(`select.rs`).
+    sel: Option<select::ChatSel>,
+    /// 입력칸 누름이 커서를 옮기는 중 — ↑/↓ 뒤 그 줄에 서면 ←/→ 로 마무리한다.
+    caret_goal: Option<select::CaretGoal>,
+    /// 본문 밖으로 끌 때 마지막으로 굴린 때.
+    drag_tick: Option<Instant>,
 }
 
 impl ChatPane {
@@ -122,6 +135,9 @@ impl ChatPane {
             prompt_bg: RefCell::new(None),
             banner: RefCell::new(None),
             wheel_px: 0.0,
+            sel: None,
+            caret_goal: None,
+            drag_tick: None,
         }
     }
 
@@ -141,6 +157,8 @@ impl ChatPane {
         self.back.set(0);
         self.total.set(0);
         self.jump.set(None);
+        self.sel = None;
+        self.caret_goal = None;
     }
 
     fn scroll_by(&mut self, lines: isize) {
@@ -426,7 +444,18 @@ impl App {
             if version != pane.painted.get() {
                 self.chrome_dirty = true;
             }
+            // 고를 때 폭이 바뀌었으면 줄을 다시 펴 줄 번호가 달라졌다.
+            let cols = self.chat_view.drawn.borrow().get(&id).map(|d| d.view.cols);
+            if let Some(pane) = self.chat_view.panes.get_mut(&id) {
+                if pane.sel.as_ref().zip(cols).is_some_and(|(s, cols)| s.cols != cols) {
+                    pane.sel = None;
+                }
+            }
+            if self.chat_view.panes.get(&id).is_some_and(|p| p.caret_goal.is_some()) {
+                self.pump_chat_caret(&id);
+            }
         }
+        self.pump_chat_drag_scroll();
     }
 
     /// 대화로 보는 칸의 이번 프레임 화면 — 위는 기록에서 편 대화, 아래는 진짜 화면의 바닥. 판이 떠
@@ -506,6 +535,7 @@ impl App {
         cells.extend(bottom.rows);
         cells.truncate(rows);
         let cursor = bottom.cursor.filter(|(r, _)| hist_rows + r < rows).map(|(r, c)| ((hist_rows + r) as u16, c as u16));
+        let view = select::View { first, hist: hist_rows, total, bottom: rows.saturating_sub(hist_rows), cols };
         let term = TerminalPane {
             rows: rows as u16,
             cols: cols as u16,
@@ -519,7 +549,8 @@ impl App {
             laid_out: true,
             ..Default::default()
         };
-        Some(ChatFrame { term, faces, face_slug, hist_rows, toggles })
+        let caret = cursor.map(|(r, c)| (r as usize, c as usize));
+        Some(ChatFrame { term, faces, face_slug, hist_rows, toggles, caret, view })
     }
 
     /// 렌더가 그린 대화 칸을 적는다 — 다음 입력이 이 자리를 본다.
@@ -533,6 +564,8 @@ impl App {
                 toggles: frame.toggles.clone(),
                 rows: frame.term.cells.clone(),
                 cursor: frame.term.cursor_visible.then_some((frame.term.cursor_row as usize, frame.term.cursor_col as usize)),
+                caret: frame.caret,
+                view: frame.view,
             },
         );
     }
@@ -576,21 +609,41 @@ impl App {
         })
     }
 
-    /// 대화 줄의 누름 — 접힌 묶음 줄이면 펼치고 접는다. 그 밖(선택 끌기·바닥 영역)은 터미널 손에 맡긴다.
-    pub(crate) fn chat_view_press(&mut self, x: f32, y: f32) -> bool {
-        let Some((id, Some(row))) = self.chat_view_at(x, y) else { return false };
-        let key = self.chat_view.drawn.borrow().get(&id).and_then(|d| d.toggles.get(row).copied().flatten());
-        let Some(key) = key else { return false };
-        self.focus_pane(&id);
-        self.selection = None;
-        self.drag_anchor = None;
-        if let Some(pane) = self.chat_view.panes.get_mut(&id) {
-            if !pane.open.remove(&key) {
-                pane.open.insert(key);
+    /// 그 픽셀이 대화로 그린 칸 안이면 (칸, 행, 열).
+    fn chat_view_hit(&self, x: f32, y: f32) -> Option<(String, usize, usize)> {
+        let drawn = self.chat_view.drawn.borrow();
+        drawn.iter().find_map(|(id, d)| {
+            let (rx, ry, rw, rh) = d.rect;
+            if x < rx || x >= rx + rw || y < ry || y >= ry + rh || d.cell.0 <= 0.0 || d.cell.1 <= 0.0 {
+                return None;
             }
-        }
-        self.chrome_dirty = true;
-        true
+            let row = (((y - ry) / d.cell.1) as usize).min(d.rows.len().saturating_sub(1));
+            let col = (((x - rx) / d.cell.0) as usize).min(d.view.cols.saturating_sub(1));
+            Some((id.clone(), row, col))
+        })
+    }
+
+    /// 리그 — 대화로 그린 격자에서 `text` 가 처음 나오는 칸 가운데 px(넓은 글자 뒤 칸은 건너 센다).
+    pub(crate) fn chat_view_text_px(&self, text: &str) -> Option<(f32, f32)> {
+        let want: Vec<char> = text.chars().collect();
+        let drawn = self.chat_view.drawn.borrow();
+        drawn.values().find_map(|d| {
+            d.rows.iter().enumerate().find_map(|(r, row)| {
+                let line: Vec<(usize, char)> = row.iter().enumerate().filter(|(_, c)| c.ch != '\0').map(|(i, c)| (i, c.ch)).collect();
+                let at = line.windows(want.len()).position(|w| w.iter().map(|(_, ch)| *ch).eq(want.iter().copied()))?;
+                let col = line[at].0;
+                Some((d.rect.0 + (col as f32 + 0.5) * d.cell.0, d.rect.1 + (r as f32 + 0.5) * d.cell.1))
+            })
+        })
+    }
+
+    /// 리그 — `from` 이 든 대화 칸 본문 위(`top`)·아래 밖 px. 끌어 굴리기를 재현한다.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn chat_view_edge_px(&self, from: (f32, f32), top: bool) -> Option<(f32, f32)> {
+        let drawn = self.chat_view.drawn.borrow();
+        let d = drawn.values().find(|d| from.0 >= d.rect.0 && from.0 < d.rect.0 + d.rect.2 && from.1 >= d.rect.1 && from.1 < d.rect.1 + d.rect.3)?;
+        let y = if top { d.rect.1 - d.cell.1 * 3.0 } else { d.rect.1 + d.view.hist as f32 * d.cell.1 + d.cell.1 * 3.0 };
+        Some((from.0, y))
     }
 
     /// 휠 — 커서 밑이 대화 칸이면 대화 줄을 굴린다(학생 앱으로 넘기지 않는다).
@@ -610,19 +663,35 @@ impl App {
         };
         if lines != 0 {
             pane.scroll_by(lines);
-            self.selection = None;
             self.chrome_dirty = true;
         }
         true
     }
 
     /// 대화 칸이 그려진 pane 의 키. 거의 다 학생 TUI 로 그대로 보낸다(false) — 이 보기가 먹는 것은
-    /// 대화 줄 넘기기(PgUp·PgDn)와 빈 입력칸의 두 번째 Esc 뿐이다.
+    /// 대화 줄 넘기기(PgUp·PgDn·⌥↑↓), 고른 글 늘이기(⇧ 화살표, 고른 글이 있을 때만)와 빈 입력칸의 두 번째 Esc 뿐이다.
     pub(crate) fn chat_view_key(&mut self, event: &KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
         let Some(id) = self.target_pane().filter(|id| self.chat_view_showing(id)) else { return false };
         if event.state != ElementState::Pressed || crate::input::is_modifier_key(event) {
             return false;
+        }
+        let (shift, alt) = (self.modifiers.shift_key(), self.modifiers.alt_key());
+        let plain = !self.modifiers.super_key() && !self.modifiers.control_key();
+        if let (true, Key::Named(arrow @ (NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::ArrowLeft | NamedKey::ArrowRight))) =
+            (plain, &event.logical_key)
+        {
+            let step = match arrow {
+                NamedKey::ArrowUp | NamedKey::ArrowDown => select::Step::Line(*arrow == NamedKey::ArrowDown),
+                _ if alt => select::Step::Word(*arrow == NamedKey::ArrowRight),
+                _ => select::Step::Char(*arrow == NamedKey::ArrowRight),
+            };
+            if shift && self.chat_view_extend(&id, step) {
+                return true;
+            }
+            if alt && !shift && matches!(arrow, NamedKey::ArrowUp | NamedKey::ArrowDown) {
+                return self.chat_view_jump_turn(&id, *arrow == NamedKey::ArrowDown);
+            }
         }
         let page = self.chat_view.drawn.borrow().get(&id).map_or(10, |d| d.hist_rows.saturating_sub(2).max(1)) as isize;
         let quiet = self.chat_input_empty(&id) && !self.pane_activity.get(&id).is_some_and(|a| a.state.is_busy());
