@@ -106,10 +106,10 @@ fi
 # 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
+  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet -p kasa-files --bins
   BINDIR="$TARGET_DIR/release"
 else
-  cargo build --locked -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
+  cargo build --locked -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet -p kasa-files --bins
   BINDIR="$TARGET_DIR/debug"
 fi
 
@@ -119,6 +119,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
+# ⋮ 「파일 트리」 칸 — install_pane_shims 가 칸 PATH 에 올린다.
+cp "$BINDIR/kasa-files" "$APP/Contents/MacOS/kasa-files"
 # 무중단 승격(promote)의 로컬 상주 데몬 — ensure_local_ptyd 가 현재 exe 옆에서 찾는다.
 cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
 # 1Password 실행기(docs/op-faceid-approval.md) — 토큰을 표준 입력으로만 받는 Go 프로그램. 앱이 그 프로세스의 서명을
@@ -570,6 +572,7 @@ if [[ -d "$FW" ]]; then
 fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 sign_part "$APP/Contents/MacOS/kasaterm-cli"
+sign_part "$APP/Contents/MacOS/kasa-files"
 sign_part "$APP/Contents/MacOS/kasa-serve-web"
 [[ -f "$APP/Contents/MacOS/kasa-op" ]] && sign_part "$APP/Contents/MacOS/kasa-op"
 # 펫은 Resources 안의 Mach-O 라 app 서명이 봉인만 하고 서명은 안 한다(링커 ad-hoc 그대로) — 공증은 그것도 거절한다.

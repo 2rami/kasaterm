@@ -62,6 +62,7 @@ mod spawn_env;
 mod server_restore;
 mod session_transfer;
 mod drag_transfer;
+mod file_pane;
 mod settings;
 mod agent_preferences;
 mod account_brand;
@@ -1578,6 +1579,8 @@ enum ActionKind {
     /// ⋮ 메뉴의 상단바(pane 헤더) 토글. 하단 상태바 토글과 대칭 — 헤더는 지금까지
     /// 탭 여러 개·이미지·md 일 때만 자동으로 떴고 사용자가 켤 방법이 없었다.
     ToggleHeader,
+    /// ⋮ 「파일 트리」 — 그 칸 옆에 셸을 따라가는 파일 칸(`kasa-files`)을 연다.
+    FileTree,
     /// ⋮ 메뉴의 최대화 — 헤더/탭 더블클릭과 같은 tmux 식 줌. 제스처를 모르거나
     /// 더블클릭이 안 잡히는 경우를 위한 보이는 경로.
     ToggleZoom,
@@ -4049,6 +4052,8 @@ enum UserEvent {
     /// 탭으로(크롬 탭, 멀티뷰 빈-pane 회피), 없으면 active pane split 으로 폴백.
     /// 데몬 제거 때 빠졌던 open_preview 의 로컬 재구현. `open_file` 이 확장자로 분기.
     SocketOpenPreview(String, Option<String>),
+    /// `surface.open_preview kind=file` — 파일 칸에서 사람이 고른 파일을 짝 셸 칸의 탭으로 연다.
+    SocketOpenFileTab(String, Option<String>),
     /// `surface.open_preview kind=web` — URL 을 요청 pane 옆 웹 pane 으로.
     /// (url, 요청자 pid). 파일 미리보기와 달리 winit 창 생성이 필요해
     /// `ActiveEventLoop` 가 있는 user_event 에서 처리한다.
@@ -5148,6 +5153,8 @@ struct App {
     /// 지글 원복 큐 — NudgePaneResize 가 1행 줄인 pane 을 (원 cols, 원 rows)로 되돌릴
     /// 시각. pending_restores 와 같은 drain 사이클에서 시간 도달분만 발사.
     pending_unjiggle: Vec<(String, u16, u16, std::time::Instant)>,
+    /// 셸 탭 pid → 짝 파일 칸 pid. 저장하지 않는다 — 재시작 뒤엔 ⋮ 로 다시 연다.
+    file_panes: HashMap<String, String>,
     /// 이사 예약 — 턴 중인 학생의 이사를 여기 앉혀 두면, 턴이 끝난 것을 틱
     /// (`run_pending_migrations`)이 보고 실행한다. 턴 중 SIGTERM 이 하던 일을
     /// 자르는 것을 막는 관문(2026-08-31 「이사하고 작업이 끊겨」).
@@ -6210,6 +6217,7 @@ impl App {
             pty: HashMap::new(),
             pty_layout: None,
             pending_restores: Vec::new(),
+            file_panes: HashMap::new(),
             pending_unjiggle: Vec::new(),
             migrate_queue: Vec::new(),
             migrate_frozen: None,

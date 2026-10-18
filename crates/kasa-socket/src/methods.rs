@@ -116,6 +116,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.set_color" => surface_set_color(backend, id, &req.params),
         "surface.repersona" => surface_repersona(backend, id, &req.params),
         "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
+        "surface.cwd" => surface_cwd(backend, id, &req.params),
+        "surface.cd" => surface_cd(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
         "surface.new_tab" => match backend.new_tab(
@@ -349,6 +351,8 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.peek",
                 "surface.open_preview",
                 "surface.open_url",
+                "surface.cwd",
+                "surface.cd",
                 "web.drive",
                 "surface.capture",
                 "surface.dock",
@@ -407,7 +411,7 @@ fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Res
         None => {
             return param_err(
                 id,
-                "surface.open_preview requires `kind` (image|markdown|web)",
+                "surface.open_preview requires `kind` (image|markdown|web|file)",
             )
         }
     };
@@ -417,6 +421,29 @@ fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Res
     };
     let target = params.get("target").and_then(|v| v.as_str());
     match backend.open_preview(kind, path, target) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(surface) = params.get("surface").and_then(|v| v.as_str()) else {
+        return param_err(id, "surface.cwd requires `surface` (string)");
+    };
+    match backend.surface_cwd(surface) {
+        Ok(cwd) => Response::success(id, json!({"cwd": cwd})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_cd(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let (Some(surface), Some(path)) = (
+        params.get("surface").and_then(|v| v.as_str()),
+        params.get("path").and_then(|v| v.as_str()),
+    ) else {
+        return param_err(id, "surface.cd requires `surface` and `path` (string)");
+    };
+    match backend.surface_cd(surface, path) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

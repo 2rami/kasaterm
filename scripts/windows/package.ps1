@@ -149,11 +149,13 @@ if (-not $SkipBuild) {
     Write-Host "-- build release binaries"
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasaterm")
     Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasa-socket", "--bin", "kasaterm-cli")
+    Invoke-External -FilePath "cargo.exe" -ArgumentList @("build", "--release", "-p", "kasa-files", "--bin", "kasa-files")
 }
 
 $appExe = Join-Path $releaseRoot "kasaterm.exe"
 $cliExe = Join-Path $releaseRoot "kasaterm-cli.exe"
-foreach ($artifact in @($appExe, $cliExe)) {
+$filesExe = Join-Path $releaseRoot "kasa-files.exe"
+foreach ($artifact in @($appExe, $cliExe, $filesExe)) {
     if (-not (Test-Path -LiteralPath $artifact)) {
         throw "build artifact is missing: $artifact"
     }
@@ -255,7 +257,7 @@ Invoke-External -FilePath $lightExe -ArgumentList @(
 )
 
 $portableStage = Reset-Directory -Path (Join-Path $workRoot "portable\kasaterm") -AllowedRoot $targetRoot
-Copy-Item -LiteralPath $appExe, $cliExe, (Join-Path $releaseRoot "WinSparkle.dll") -Destination $portableStage -Force
+Copy-Item -LiteralPath $appExe, $cliExe, $filesExe, (Join-Path $releaseRoot "WinSparkle.dll") -Destination $portableStage -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\kasaterm\wix\License.rtf") -Destination $portableStage -Force
 $portableFonts = Join-Path $portableStage "fonts"
 New-Item -ItemType Directory -Path $portableFonts -Force | Out-Null
@@ -279,7 +281,7 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
     "-nologo", "-x", $verifyFiles, "-o", $verifyWxs, $msiPath
 )
 $requiredFiles = @(
-    "kasaterm.exe", "kasaterm-cli.exe", "WinSparkle.dll", "index.html",
+    "kasaterm.exe", "kasaterm-cli.exe", "kasa-files.exe", "WinSparkle.dll", "index.html",
     "characters.json", "kasacollab.py",
     "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt"
 )

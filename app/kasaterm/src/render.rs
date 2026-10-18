@@ -38,6 +38,7 @@ fn handle_menu_tip(action: ActionKind, view: (bool, bool)) -> &'static str {
         ActionKind::SplitV => "위아래로 나누기",
         ActionKind::ToggleHeader => "상단바",
         ActionKind::ToggleStatusbar => "하단바",
+        ActionKind::FileTree => "파일 트리",
         ActionKind::ToggleZoom => "크게 보기",
         ActionKind::RefreshRenderer => "화면 새로고침",
         ActionKind::Undock => "별도 창으로",
@@ -4765,6 +4766,7 @@ impl App {
                             // 곧 결과 배치다 — SplitDir 이름과는 반대 매핑.
                             ("columns-2", ActionKind::SplitH),
                             ("rows-2", ActionKind::SplitV),
+                            ("folder-tree", ActionKind::FileTree),
                             (hdr_icon, ActionKind::ToggleHeader),
                             (sb_icon, ActionKind::ToggleStatusbar),
                             ("maximize", ActionKind::ToggleZoom),
@@ -4777,7 +4779,8 @@ impl App {
                         let lite = self.lite;
                         let items: Vec<(&str, ActionKind)> = items
                             .into_iter()
-                            .filter(|(_, a)| term_tab || *a != ActionKind::Undock)
+                            .filter(|(_, a)| term_tab || !matches!(a, ActionKind::Undock | ActionKind::FileTree))
+                            .filter(|(_, a)| *a != ActionKind::FileTree || crate::pane_shims::locate_kasa_files().is_some())
                             .filter(|(_, a)| (can_chat && !lite) || *a != ActionKind::ChatView)
                             .filter(|(_, a)| {
                                 !lite
@@ -4785,6 +4788,7 @@ impl App {
                                         a,
                                         ActionKind::ToggleHeader
                                             | ActionKind::ToggleStatusbar
+                                            | ActionKind::FileTree
                                             | ActionKind::RefreshRenderer
                                             | ActionKind::Undock
                                     )

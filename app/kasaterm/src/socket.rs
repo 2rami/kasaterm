@@ -2461,6 +2461,10 @@ impl Backend for PtyBackend {
             ));
             return Ok(());
         }
+        if kind == "file" {
+            let _ = self.proxy.send_event(UserEvent::SocketOpenFileTab(path.to_string(), target.map(str::to_string)));
+            return Ok(());
+        }
         // imgopen/mdopen 셰임·SendUserFile 훅 → 미리보기를 요청 pane 의 보조 탭으로
         // (크롬 탭처럼). `target` = 요청자의 $KASATERM_PANE_ID(=pid) — GUI 가
         // outer_for_pty 로 그 pane 을 찾아 거기 탭으로 붙인다. 별도 split 으로 띄우면
@@ -2472,6 +2476,14 @@ impl Backend for PtyBackend {
             target.map(|s| s.to_string()),
         ));
         Ok(())
+    }
+
+    fn surface_cwd(&self, surface: &str) -> Result<String> {
+        crate::file_pane::surface_cwd(surface)
+    }
+
+    fn surface_cd(&self, surface: &str, path: &str) -> Result<()> {
+        crate::file_pane::surface_cd(surface, path)
     }
 
     /// 웹 pane 조종 — 웹뷰가 GUI 스레드 소유(!Send)라 위임하고 reply 채널로

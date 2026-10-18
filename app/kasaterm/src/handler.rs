@@ -1802,6 +1802,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketOpenFileTab(path, target) => {
+                self.open_file_from_pane(std::path::PathBuf::from(path), target.clone());
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketOpenUrl(url, target) => {
                 self.open_url_for_pane(url, target.as_deref());
                 return;
@@ -6036,6 +6042,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         .split_active_pane_focused(kasa_pty::SplitDir::Horizontal);
                                 }
                                 ActionKind::ToggleStatusbar => self.toggle_statusbar(&menu_pid),
+                                ActionKind::FileTree => self.open_file_pane(&menu_pid),
                                 ActionKind::ToggleHeader => self.toggle_pane_header(&menu_pid),
                                 ActionKind::ToggleZoom => self.toggle_pane_zoom(&menu_pid),
                                 ActionKind::NewTab => {
@@ -6125,6 +6132,7 @@ impl ApplicationHandler<UserEvent> for App {
                             ActionKind::ToggleStatusbar => {
                                 self.toggle_statusbar(&pid);
                             }
+                            ActionKind::FileTree => self.open_file_pane(&pid),
                             ActionKind::MdRender => {
                                 self.md_flush_preedit();
                                 self.set_md_mode(&pid, false);

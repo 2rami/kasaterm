@@ -44,7 +44,7 @@ fn call(socket: &Path, method: &str, params: Value) -> Result<Value> {
 }
 
 /// 따라갈 셸 칸이 있을 때만 잇는다. 없으면 그 자리에서 혼자 돈다.
-pub fn spawn(follow: Option<String>, own: Option<String>) -> Option<(Sender<Ask>, Receiver<Answer>)> {
+pub fn spawn(follow: Option<String>) -> Option<(Sender<Ask>, Receiver<Answer>)> {
     let socket = socket_path()?;
     let follow = follow?;
     let (ask, asks) = std::sync::mpsc::channel::<Ask>();
@@ -60,13 +60,10 @@ pub fn spawn(follow: Option<String>, own: Option<String>) -> Option<(Sender<Ask>
                 Ask::Cd(path) => Answer::Cd(
                     call(&socket, "surface.cd", json!({ "surface": follow, "path": path })).map(|_| ()),
                 ),
+                // 짝 셸 칸의 탭으로 연다 — 좁은 파일 칸에 붙으면 읽을 자리가 없다.
                 Ask::Open(path) => Answer::Open(
-                    call(
-                        &socket,
-                        "surface.open_preview",
-                        json!({ "kind": "file", "path": path, "target": own.as_deref().unwrap_or(&follow) }),
-                    )
-                    .map(|_| ()),
+                    call(&socket, "surface.open_preview", json!({ "kind": "file", "path": path, "target": follow }))
+                        .map(|_| ()),
                 ),
             };
             if tell.send(answer).is_err() {

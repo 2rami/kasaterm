@@ -74,6 +74,9 @@ impl App {
             if !row.open {
                 self.tree.set_open(&row.path, true);
             }
+            if self.shell_cwd() == Some(row.path.as_path()) {
+                return;
+            }
             if !self.ask(link::Ask::Cd(row.path.clone())) {
                 self.note("따라갈 셸이 없어 펼치기만 했어요");
             }
@@ -243,7 +246,6 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
     let start = start.canonicalize().unwrap_or(start);
     let (git_ask, git_answers) = git::spawn();
-    let own = std::env::var("KASATERM_PANE_ID").ok();
     let mut app = App {
         tree: tree::Tree::new(tree::root_for(&start)),
         git: None,
@@ -256,7 +258,7 @@ fn main() -> anyhow::Result<()> {
         offset: 0,
         note_drawn: false,
         shell_cwd: Some(start.clone()),
-        link: link::spawn(follow, own),
+        link: link::spawn(follow),
         git_ask,
         git_answers,
         last_click: None,
