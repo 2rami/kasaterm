@@ -5828,11 +5828,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 return;
                             }
                         }
-                        // Panel header: close / expand.
-                        if self.git.col_close_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.toggle_git_col();
-                            return;
-                        }
                         if self
                             .git
                             .col_expand_rect

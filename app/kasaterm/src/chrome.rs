@@ -119,13 +119,12 @@ mod git_panel_safety_tests {
             col_stage_rects: vec![(true, "file".into(), rect)],
             col_discard_rects: vec![("file".into(), false, rect)],
             col_commit_rects: vec![("commit".into(), rect)],
-            col_close_rect: Some(rect), col_expand_rect: Some(rect),
+            col_expand_rect: Some(rect),
             ..Default::default()
         };
         git.clear_panel_hit_targets();
         assert!(git.commit_btn_rect.is_none() && git.commit_caret_rect.is_none());
         assert!(git.col_stage_rects.is_empty() && git.col_discard_rects.is_empty() && git.col_commit_rects.is_empty());
-        assert_eq!(git.col_close_rect, Some(rect));
         assert_eq!(git.col_expand_rect, Some(rect));
     }
 
@@ -1254,28 +1253,24 @@ impl App {
             .and_then(|w| w.panes.get(id).map(|p| p.header_px()))
             .unwrap_or(0.0)
     }
-    /// Git-column-toggle button rect, parked at the right end of the title
-    /// strip (mirrors the file-tree toggle on the left). Needs the window
-    /// width, so it returns `None` before the first paint.
+    /// Both the drawing and input use the panel's actual width, including responsive folding.
     pub(crate) fn git_col_toggle_rect(&self) -> Option<(f32, f32, f32, f32)> {
         // lite 는 타이틀바 오른쪽 버튼(패널·설정 기어)이 없다 — settings_title_rect 도 여길 탄다.
         if self.lite {
             return None;
         }
-        let w = 26.0;
-        let h = 22.0;
         let win_w = self.window.as_ref().map(|win| {
             let scale = self.effective_scale();
             win.inner_size().width as f32 / scale
         })?;
         #[cfg(not(windows))]
-        let x = win_w - w - 8.0;
+        let reserved = 8.0;
         // Windows paints min/max/close at the right edge; keep this toggle left
         // of that cluster so render (render.rs) and this hit-test agree.
         #[cfg(windows)]
-        let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w;
-        let y = (TITLE_HEIGHT - h) / 2.0;
-        Some((x, y, w, h))
+        let reserved = win_w - Self::win_control_rects(win_w)[0].0 + 2.0;
+        let panel_w = if self.side_column_covers_workspace() { 0.0 } else { self.git_col_w() };
+        Some(sidebar_button_rect(win_w, panel_w, reserved, true))
     }
 
     pub(crate) fn settings_title_rect(&self) -> Option<(f32, f32, f32, f32)> {
@@ -2331,24 +2326,14 @@ impl App {
     /// 판 위에 있어야 무엇을 닫는지가 자리로 설명된다. 사이드바를 좁게 끌면
     /// 신호등을 침범하니 거기서 멈춘다.
     pub(crate) fn sidebar_toggle_rect(&self) -> (f32, f32, f32, f32) {
-        let w = 26.0;
-        let h = 22.0;
         #[cfg(not(windows))]
         let home = TRAFFIC_LIGHT_WIDTH + 6.0;
         // Windows is frameless with no traffic-light cluster to clear — start
         // the toggles at the left edge instead of reserving the macOS width.
         #[cfg(windows)]
         let home = 10.0;
-        let y = (TITLE_HEIGHT - h) / 2.0;
-        if self.tabs_on_top || !self.sidebar_visible {
-            return (home, y, w, h);
-        }
-        (
-            (self.tab_strip_w() - SIDEBAR_TAB_INSET - w).max(home),
-            y,
-            w,
-            h,
-        )
+        let panel_w = if self.tabs_on_top || !self.sidebar_visible { 0.0 } else { self.tab_strip_w() };
+        sidebar_button_rect(0.0, panel_w, home, false)
     }
     /// 파일트리 토글 rect. 사이드바 토글을 따라다닌다 — 접혀 있으면 그 오른쪽,
     /// 펴져 있으면 사이드바 밖(본문 쪽 첫 자리)이다. 토글이 판 안으로 들어간
@@ -2358,8 +2343,9 @@ impl App {
         if self.tabs_on_top {
             return (sx, sy, sw, sh);
         }
-        if self.sidebar_visible {
-            return (self.tab_strip_w() + 10.0, sy, sw, sh);
+        let strip_w = self.tab_strip_w();
+        if strip_w > 0.0 {
+            return (strip_w + 10.0, sy, sw, sh);
         }
         (sx + sw + 2.0, sy, sw, sh)
     }
@@ -4685,13 +4671,35 @@ mod notify_path_tests {
     }
 }
 
+fn sidebar_button_rect(window_width: f32, panel_width: f32, reserved: f32, right: bool) -> (f32, f32, f32, f32) {
+    let w = 26.0;
+    let h = 22.0;
+    let inset = (panel_width - SIDEBAR_TAB_INSET - w).max(reserved);
+    let x = if right { window_width - inset - w } else { inset };
+    (x, (TITLE_HEIGHT - h) / 2.0, w, h)
+}
+
 fn side_column_overlay(window_width: f32, open: bool) -> bool {
     open && window_width > 1.0 && window_width < 680.0
 }
 
 #[cfg(test)]
 mod responsive_panel_tests {
-    use super::side_column_overlay;
+    use super::{side_column_overlay, sidebar_button_rect};
+
+    #[test]
+    fn sidebar_buttons_mirror_the_inner_edges_and_respect_window_controls() {
+        for width in [240.0, 420.0, 620.0] {
+            let left = sidebar_button_rect(1200.0, width, 84.0, false);
+            let right = sidebar_button_rect(1200.0, width, 8.0, true);
+            assert_eq!(left.0 + left.2 + right.0, 1200.0);
+            assert_eq!((left.1, left.2, left.3), (right.1, right.2, right.3));
+            assert_eq!(right.0, 1200.0 - width + 8.0);
+        }
+        assert_eq!(sidebar_button_rect(520.0, 0.0, 8.0, true).0, 486.0);
+        assert_eq!(sidebar_button_rect(520.0, 0.0, 92.0, true).0, 402.0);
+        assert_eq!(sidebar_button_rect(520.0, 48.0, 92.0, true).0, 402.0);
+    }
 
     #[test]
     fn narrow_side_panels_remain_accessible_without_resizing_the_hidden_terminal_to_one_column() {

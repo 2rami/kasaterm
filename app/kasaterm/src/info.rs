@@ -2180,11 +2180,10 @@ pub(crate) fn draw_side_tabs(
     top: f32,
 ) -> f32 {
     let bi = crate::native_controls::CONTROL_HEIGHT;
-    let close_x = x + w - 12.0 - bi;
-    let expand_x = close_x - bi - 8.0;
+    let expand_x = x + w - 12.0 - bi;
     let button_y = top + 4.0;
     // 다시 읽기는 Info 본문의 머리줄이 들고 있었는데, 그 줄(요약 숫자)이 걷히면서
-    // 탭 줄의 단추 자리로 올라왔다 — 확대·닫기와 한 벌이다.
+    // 탭 줄의 단추 자리로 올라왔다 — 확대와 한 벌이다.
     let refresh_x = expand_x - bi - 8.0;
     info.refresh_rect = None;
     if info.runtime_page() {
@@ -2194,9 +2193,6 @@ pub(crate) fn draw_side_tabs(
     }
     git.col_expand_rect = Some(crate::native_controls::icon_button(
         g, (expand_x, button_y, bi, bi), cursor, "maximize", Default::default(),
-    ));
-    git.col_close_rect = Some(crate::native_controls::icon_button(
-        g, (close_x, button_y, bi, bi), cursor, "x", Default::default(),
     ));
     info.tab_rects.clear();
     let left=x+14.0;let line_h=38.0;let mut tx=left;let mut ty=top+4.0;let mut row=0;

@@ -251,7 +251,6 @@ pub(crate) struct GitState {
     /// 폴러에게 건네는 「커밋 몇 개까지 가져와라」. 렌더가 구역 높이에서 계산해
     /// 쓰고 폴러 스레드가 읽는다. 0 은 「아직 안 정해짐」이라 폴러가 기본값을 쓴다.
     pub(crate) col_commit_want: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    pub(crate) col_close_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) col_expand_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) commit_btn_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) commit_caret_rect: Option<(f32, f32, f32, f32)>,

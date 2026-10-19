@@ -16,6 +16,16 @@ mod side_column;
 mod sidebar;
 mod status_bar;
 
+fn draw_sidebar_toggle(g: &mut gpu::GpuRenderer, cursor: (f32, f32), rect: (f32, f32, f32, f32), icon: &str, active: bool) {
+    let (x, y, w, h) = rect;
+    let hover = cursor.0 >= x && cursor.0 <= x + w && cursor.1 >= y && cursor.1 <= y + h;
+    if hover { hover_rect(g, x, y, w, h, theme::radius_sm()); }
+    g.hover_pointer |= hover;
+    let color = if hover || active { theme::text() } else { theme::text_dim() };
+    let size = theme::ICON_SIZE;
+    g.queue_icon(icon, x + (w - size) / 2.0, y + (h - size) / 2.0, size, color);
+}
+
 #[derive(Clone, Copy)]
 struct AccountSettings<'a> {
     claude: &'a String,
@@ -2841,34 +2851,8 @@ impl App {
             self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
             crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
                 sb_head_top, (0.0, sb_view.0, tab_strip_w, sb_full_h));
-            // 사이드바 토글. 자리는 `sidebar_toggle_rect` 가 정한다 — 접혔으면
-            // 신호등 오른쪽, 폈으면 사이드바 오른쪽 위. 글리프는 그대로다(왼쪽
-            // 칼럼이 찬 판 모양). 탭이 위로 가면 토글할 세로 스트립이 없다.
             if !self.lite && !self.tabs_on_top {
-                let (bx, by, bw, bh) = sidebar_toggle;
-                let hover = sb_cursor.0 >= bx
-                    && sb_cursor.0 <= bx + bw
-                    && sb_cursor.1 >= by
-                    && sb_cursor.1 <= by + bh;
-                if hover {
-                    hover_rect(g, bx, by, bw, bh, theme::radius_sm());
-                }
-                // Brighter when the sidebar is open (state indicator) or on
-                // hover; the panel-left SVG shape stays constant.
-                let active = tab_strip_w > 0.0;
-                let fg = if hover || active {
-                    theme::text()
-                } else {
-                    theme::text_dim()
-                };
-                let isz = theme::ICON_SIZE;
-                g.queue_icon(
-                    "panel-left",
-                    bx + (bw - isz) / 2.0,
-                    by + (bh - isz) / 2.0,
-                    isz,
-                    fg,
-                );
+                draw_sidebar_toggle(g, sb_cursor, sidebar_toggle, "panel-left", tab_strip_w > 0.0);
             }
             // File-tree toggle, just right of the sidebar toggle. Same chip
             // treatment; lit when the tree column is shown.
@@ -2896,12 +2880,6 @@ impl App {
                     fg,
                 );
             }
-            // Git-column toggle, parked at the right end of the title strip
-            // (the column lives on the right). This used to be drawn inline from
-            // rounded rects to avoid adding an asset; that predates the shape
-            // axis, and a hand-drawn 3px radius can't follow a pixel silhouette
-            // the way the icon set does. It's `panel-right` now — the mirror of
-            // the sidebar toggle's `panel-left`, which is what it always meant.
             if let Some((bx, by, bw, bh)) = settings_title {
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
@@ -2925,38 +2903,8 @@ impl App {
                 );
             }
 
-            // lite 는 오른쪽 패널(git 컬럼)이 없다 — 토글도 안 그린다.
-            if !self.lite {
-                let bw = 26.0_f32;
-                let bh = 22.0_f32;
-                #[cfg(not(windows))]
-                let bx = win_px.0 / scale - bw - 8.0;
-                // Windows paints its own min/max/close at the right edge; shove
-                // the git-column toggle left of that cluster so they don't stack.
-                #[cfg(windows)]
-                let bx = Self::win_control_rects(win_px.0 / scale)[0].0 - 2.0 - bw;
-                let by = (TITLE_HEIGHT - bh) / 2.0;
-                let hover = sb_cursor.0 >= bx
-                    && sb_cursor.0 <= bx + bw
-                    && sb_cursor.1 >= by
-                    && sb_cursor.1 <= by + bh;
-                if hover {
-                    hover_rect(g, bx, by, bw, bh, theme::radius_sm());
-                }
-                let active = git_col_w > 0.0;
-                let fg = if hover || active {
-                    theme::text()
-                } else {
-                    theme::text_dim()
-                };
-                let gs = 15.0_f32;
-                g.queue_icon(
-                    "panel-right",
-                    bx + (bw - gs) / 2.0,
-                    by + (bh - gs) / 2.0,
-                    gs,
-                    fg,
-                );
+            if let Some(rect) = git_col_toggle {
+                draw_sidebar_toggle(g, sb_cursor, rect, "panel-right", git_col_w > 0.0);
             }
             // Windows frameless window controls (min / max / close) at the
             // strip's right edge. Native decorations are off on Windows, so we
