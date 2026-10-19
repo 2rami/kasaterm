@@ -590,7 +590,7 @@ impl App {
             else {
                 // 줌 중이면 가려진 pane 은 rect 가 아예 없다. 「없는 pane」과 구분해
                 // 답해야 부른 쪽이 줌을 풀 생각을 한다.
-                let zoomed = self.zoomed_pane.is_some();
+                let zoomed = self.live_zoom().is_some();
                 // 활성 배치에 없어도 격자가 살아 있으면(다른 방의 pane) 화면 밖
                 // 렌더로 **진짜 그림**을 찍는다 — termshot 폴백으로 밀리던 자리
                 // (2026-09-02 나쵸 알림 사진 건). 줌은 기존 안내가 더 정확하다.
@@ -1033,8 +1033,8 @@ impl App {
             // hiding the rest. Skips when the zoomed pane isn't in this window's
             // map (closed / moved out) so no phantom paints.
             let zoom_leaves: Option<Vec<(String, u16, u16, u16, u16)>> =
-                match self.zoomed_pane.as_deref() {
-                    Some(z) if ws.panes.contains_key(z) => {
+                match self.live_zoom().filter(|z| ws.panes.contains_key(*z)) {
+                    Some(z) => {
                         // 사방을 들여 「떠 있는 카드」로 — inset 규칙은
                         // effective_leaf_rects(PTY resize·히트테스트)와 같은
                         // 함수를 써야 그린 칸과 PTY 가 어긋나지 않는다.
@@ -1811,7 +1811,7 @@ impl App {
         // boundary instead of a 4-side border around every pane (which
         // doubled up into a thick seam between abutting panes). Coords match
         // divider_at_px so drag hit-testing lines up with the drawn line.
-        let pane_seams: Vec<(f32, f32, f32, f32)> = if self.zoomed_pane.is_some() {
+        let pane_seams: Vec<(f32, f32, f32, f32)> = if self.live_zoom().is_some() {
             // Zoom 최대화 시 형제 pane이 숨겨지므로 분할선도 생략한다 — 안 그러면
             // 가려진 split 경계선이 최대화 화면 위에 1px 선으로 남는다(C 버그).
             Vec::new()
@@ -2556,6 +2556,7 @@ impl App {
             weather_guard,
         );
         let mut weather_spots = Vec::new();
+        let live_zoom_now = self.live_zoom().map(str::to_string);
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -4433,7 +4434,7 @@ impl App {
             // 줌 pane 은 claude 여부·split 여부와 무관하게 테두리를 두른다 — 줌의
             // 유일한 시각 단서라서(하단 dock 칩 하나로는 안 읽힌다). g(=&mut
             // self.gpu) 를 잡기 전에 스냅샷.
-            let zoomed_now = self.zoomed_pane.clone();
+            let zoomed_now = live_zoom_now.clone();
             // 헤더를 실제로 그린 pane 집합 — compact 바가 헤더에 뜨므로 footer 쪽 바는
             // 이 pane 들을 건너뛴다. `ws.panes.has_header()` 가 아니라 방금 그린 `headers`
             // (pty_layout 기반)에서 뽑아야 ws.panes↔pty_layout 데싱크로 한 pane 에 헤더(위)·

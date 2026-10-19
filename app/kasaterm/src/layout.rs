@@ -852,7 +852,7 @@ impl App {
         // 줌 중엔 경계선을 아예 안 그린다(render 의 pane_seams 가 빈 벡터). 그런데도
         // 여기서 잡으면 아무것도 없는 자리에서 커서가 리사이즈로 바뀌고, 드래그가
         // 보이지 않는 분할비를 움직인다 — 보이지 않는 것은 클릭도 먹지 않아야 한다.
-        if self.zoomed_pane.is_some() {
+        if self.live_zoom().is_some() {
             return None;
         }
         if tree.leaves().len() <= 1 {
@@ -1606,6 +1606,8 @@ impl App {
             return Ok(new_id);
         }
         self.ws.lock().unwrap().active_pane = Some(new_id.clone());
+        // tmux 처럼 쪼개면 확대를 푼다 — 안 그러면 초점이 안 보이는 새 칸으로 가 친 글자가 사라져 보인다.
+        self.zoomed_pane = None;
         self.resize_backend(win_cols, win_rows);
         self.publish_pty_layout();
         if let Some(w) = &self.window {
@@ -1797,14 +1799,13 @@ impl App {
     /// Returns `None` when the layout is in single-pane fallback or the id
     /// isn't a leaf.
     pub(crate) fn pane_cells(&self, outer: &str) -> Option<(u16, u16)> {
+        // 확대 중이면 그 칸의 새 탭도 확대된 넓이로 태어나야 한다.
         let (cols, rows) = self.window_cells();
-        let tree = self.pty_layout.as_ref()?;
-        for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
-            if id == outer {
-                return Some((w.max(1), h.max(1)));
-            }
-        }
-        None
+        self.pty_layout.as_ref()?;
+        self.effective_leaf_rects(cols, rows)
+            .into_iter()
+            .find(|(id, ..)| id == outer)
+            .map(|(_, _, _, w, h)| (w.max(1), h.max(1)))
     }
     /// Leaf rects for render / hit-test / resize, honoring a tmux-style zoom.
     /// When a pane is zoomed it fills the whole work area and the others are
@@ -1817,13 +1818,9 @@ impl App {
         cols: u16,
         rows: u16,
     ) -> Vec<(String, u16, u16, u16, u16)> {
-        if let Some(z) = self.zoomed_pane.as_ref() {
-            if let Some(tree) = self.pty_layout.as_ref() {
-                if tree.leaves().iter().any(|l| *l == z.as_str()) {
-                    let (ix, iy) = self.zoom_inset_cells(cols, rows);
-                    return vec![(z.clone(), ix, iy, cols - ix * 2, rows - iy * 2)];
-                }
-            }
+        if let Some(z) = self.live_zoom() {
+            let (ix, iy) = self.zoom_inset_cells(cols, rows);
+            return vec![(z.to_string(), ix, iy, cols - ix * 2, rows - iy * 2)];
         }
         self.pty_layout
             .as_ref()
@@ -1847,15 +1844,39 @@ impl App {
     /// pane; toggling again (or the pane already being zoomed) restores the
     /// split. Reflows the backend so the PTY matches its new extent.
     pub(crate) fn toggle_pane_zoom(&mut self, pane: &str) {
-        if self.zoomed_pane.as_deref() == Some(pane) {
-            self.zoomed_pane = None;
-        } else {
-            self.zoomed_pane = Some(pane.to_string());
+        if self.live_zoom() == Some(pane) {
+            self.set_zoom(None);
+            return;
         }
+        // 다른 방의 칸(Info 「확대」)이면 그 방부터 연다 — 안 보이는 방의 칸을 가리키면 화면은 그대로다.
+        if self.window_of_pane(pane).is_some_and(|w| w != self.active_window) {
+            self.focus_pane(pane);
+        }
+        self.set_zoom(Some(pane.to_string()));
+    }
+
+    /// 지금 화면을 채운 확대 칸 — 활성 방 트리에 살아 있는 leaf 일 때만. 닫혔거나 다른 방으로 간 칸을
+    /// 가리키는 낡은 값은 없는 셈 친다. 그리기·누름·PTY 크기가 모두 이 판정을 써야 서로 어긋나지 않는다.
+    pub(crate) fn live_zoom(&self) -> Option<&str> {
+        let z = self.zoomed_pane.as_deref()?;
+        self.pty_layout.as_ref()?.leaves().iter().any(|l| *l == z).then_some(z)
+    }
+
+    /// 칸이 닫히거나 방을 떠난 뒤 — 확대 칸이 이 방에 없으면 푼다. 같은 번호로 되살린 칸이
+    /// 저절로 다시 확대되지 않게.
+    pub(crate) fn prune_zoom(&mut self) {
+        if self.zoomed_pane.is_some() && self.live_zoom().is_none() {
+            self.zoomed_pane = None;
+        }
+    }
+
+    /// 확대를 그 칸으로 옮기거나(Some) 푼다(None). PTY 를 새 넓이에 맞춘다.
+    pub(crate) fn set_zoom(&mut self, pane: Option<String>) {
+        self.zoomed_pane = pane;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
-        if self.zoomed_pane.is_some() {
-            let surface = self.ws.lock().unwrap().active_tab_pid(pane);
+        if let Some(z) = self.zoomed_pane.clone() {
+            let surface = self.ws.lock().unwrap().active_tab_pid(&z);
             self.touch_surface_size(&surface);
         }
         self.chrome_dirty = true;
@@ -3024,6 +3045,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.handoff_ime_to_active_surface();
         }
         self.chrome_dirty = true;
+        self.prune_zoom();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -3143,6 +3165,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.handoff_ime_to_active_surface();
         }
         self.chrome_dirty = true;
+        self.prune_zoom();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -3364,7 +3387,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let rects = self.effective_leaf_rects(cols, rows);
         // A zoomed pane is a single rect but still has a header (to un-zoom),
         // so only bail on a lone pane when nothing is zoomed.
-        if rects.len() <= 1 && self.zoomed_pane.is_none() {
+        if rects.len() <= 1 && self.live_zoom().is_none() {
             return None;
         }
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
@@ -3875,6 +3898,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.ws.lock().unwrap().active_pane = Some(moving.to_string());
         }
         if empty_source { self.remap_removed_window_metadata(src_idx); }
+        self.prune_zoom();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();

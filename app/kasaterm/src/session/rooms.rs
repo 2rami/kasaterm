@@ -65,6 +65,8 @@ impl App {
         self.windows[self.active_window] = self.pty_layout.take();
         self.windows.push(None);
         self.active_window = self.windows.len() - 1;
+        // 방을 옮기는 것이라 switch_window 처럼 확대를 푼다.
+        self.zoomed_pane = None;
         self.win_tab_reveal(self.active_window);
         // spawn_session_pane sets pty_layout to a fresh single-pane tree,
         // inserts the PTY into the shared map, and points ws.active_pane at it.
@@ -372,6 +374,9 @@ impl App {
         let Some(wi) = self.window_of_pane(&outer) else {
             return false;
         };
+        // 확대해 보던 중이면 옮겨 간 칸을 확대한다 — 미니맵·⌘[ ]·알림으로 고른 칸이 가려진 채
+        // 초점만 받으면 친 글자가 안 보이는 칸으로 간다. 방을 건너도 확대 보기는 이어진다.
+        let zoomed = self.live_zoom().is_some();
         if wi != self.active_window {
             self.switch_window(wi);
         }
@@ -381,6 +386,9 @@ impl App {
         };
         if !applied {
             return false;
+        }
+        if zoomed && self.zoomed_pane.as_deref() != Some(outer.as_str()) {
+            self.set_zoom(Some(outer.clone()));
         }
         self.handoff_ime_to_active_surface();
         self.chrome_dirty = true;
@@ -460,6 +468,7 @@ impl App {
         // 그쪽으로 튀어, ×를 한자리에서 연달아 누를 수가 없었다(2026-08-27 지시:
         // "크롬처럼 한곳에서 마우스누르다가 떼면 재정렬되고"). 새 방·방 전환은
         // 그 방이 보여야 하는 동작이라 `win_tab_reveal` 을 그대로 둔다.
+        self.prune_zoom();
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
