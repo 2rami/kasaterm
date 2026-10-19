@@ -482,9 +482,7 @@ impl App {
             return;
         };
         if provider == AccountProvider::Claude && kasa_mcp::agent_chains::held(&acct.key) {
-            remember_account_identity(&id, &acct.email, &acct.org);
-            kasa_mcp::agent_chains::adopt(&id, &acct.key);
-            kasa_mcp::agent_accounts::poke();
+            adopt_held_into(&id, &acct.key, &acct.email, &acct.org);
             self.set_toast(format!("관문에서 「{name}」 로그인을 받아 와요 — 로그인 없이 곧 쓸 수 있어요"));
             return;
         }
@@ -501,6 +499,27 @@ impl App {
             AccountProvider::Claude => format!("브라우저에서 {} 로 승인하세요{team}", acct.email),
             AccountProvider::Codex => "코드가 뜨면 그 주소에 입력하세요 — 폰에서 해도 돼요".to_string(),
         });
+    }
+
+    /// 다른 기기를 따라갈 계정이 이 기기에 없을 때 — 관문이 그 사슬을 멀쩡히 쥐고 있으면 「다른 기기에 있는 계정」
+    /// 받기와 같은 길로 새 슬롯(앞서 받다 만 같은 이름의 빈 슬롯이면 그 자리)에 받는다. 브라우저 로그인은 하지 않는다.
+    /// 목록의 이메일·조직은 이름일 뿐이라, 고르는 쪽이 받은 토큰의 UUID 를 확인한 뒤에 쓴다.
+    pub(crate) fn adopt_held_claude_chain(&mut self, key: &str) -> Option<String> {
+        if hidden_login_running() || !kasa_mcp::agent_chains::held(key) {
+            return None;
+        }
+        let acct = kasa_mcp::agent_accounts::cached()?.shared.into_iter().find(|a| a.key == key)?;
+        let unused = self
+            .set_claude_accounts
+            .iter()
+            .find(|a| !acct.label.is_empty() && a.label == acct.label && remembered_identity(&a.id).0.is_empty())
+            .map(|a| a.id.clone());
+        let id = match unused {
+            Some(id) => id,
+            None => self.new_account_slot(AccountProvider::Claude, &acct.label)?.0,
+        };
+        adopt_held_into(&id, key, &acct.email, &acct.org);
+        Some(id)
     }
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일
@@ -2191,6 +2210,10 @@ impl App {
                 let want = id.trim();
                 let (slot, expected) = self.peer_account_sync_slot(want, &arg)
                     .map_err(|error| reject(error.code(), error.message().into()))?;
+                // A delayed v1 request must not undo a newer ordered choice behind the relay's back.
+                if !self.peer_choice_applies(&expected) {
+                    return Err(reject("account_sync_ordered", "이 기기는 관문의 계정 선택 순서로 맞춰요".into()));
+                }
                 let same = slot == self.set_claude_account;
                 self.account_switch_from_peer = true;
                 let result = self.apply_claude_account_switch_checked(&slot, Some(&expected));
@@ -5099,6 +5122,10 @@ pub(crate) fn account_sync_identity(id: &str) -> Option<crate::session::AccountI
     identity
 }
 
+pub(crate) fn account_sync_allowed() -> bool {
+    account_sync_probe_allowed()
+}
+
 fn account_sync_probe_allowed() -> bool {
     !cfg!(test) && !crate::version::isolated_environment(|key| std::env::var_os(key).is_some())
         && !["KASATERM_DEVICE_FILE", "KASATERM_MACHINES_FILE", "KASATERM_WINDOW_SIZE", "KASATERM_WINDOW_POS"]
@@ -5252,6 +5279,13 @@ fn codex_account_display_from_identity(
         Some(email) => format!("{label} · {email}"),
         None => label.to_string(),
     }
+}
+
+fn adopt_held_into(id: &str, key: &str, email: &str, org: &str) {
+    remember_account_identity(id, email, org);
+    kasa_mcp::agent_chains::adopt(id, key);
+    kasa_mcp::agent_accounts::poke();
+    request_account_sync_identity(id);
 }
 
 /// 슬롯 이메일을 `settings.json` 에 남긴다 — **statusline 이 읽을 유일한 경로**다.

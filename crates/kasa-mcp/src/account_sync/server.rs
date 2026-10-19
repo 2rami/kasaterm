@@ -57,6 +57,17 @@ impl Store {
         if current.revision != patch.expected_revision { return Err(Error::Conflict(current)); }
         let previous = current.clone();
         for (key, value) in &patch.settings {
+            if key == super::choice::KEY {
+                // The revision CAS above lets a rebased patch through; the choice also has to have seen what it replaces.
+                match super::choice::commit(previous.settings.get(key), value, previous.revision) {
+                    super::choice::Commit::Stamp(value) | super::choice::Commit::Unchanged(value) => {
+                        current.settings.insert(key.clone(), value);
+                    }
+                    super::choice::Commit::Stale => return Err(Error::Conflict(previous)),
+                    super::choice::Commit::Invalid => return Err(Error::Invalid("invalid_account_choice".into())),
+                }
+                continue;
+            }
             if value.is_null() { current.settings.remove(key); } else { current.settings.insert(key.clone(), value.clone()); }
         }
         for (key, value) in &patch.machines {

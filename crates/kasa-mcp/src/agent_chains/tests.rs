@@ -13,6 +13,8 @@ pub(crate) fn seen_calls(calls: &Seen, what: &str) -> Vec<String> {
 pub(crate) const PERSON: &str = "00000000-0000-4000-8000-000000000001";
 pub(crate) const PERSONAL_ORG: &str = "00000000-0000-4000-8000-000000000011";
 pub(crate) const TEAM_ORG: &str = "00000000-0000-4000-8000-000000000022";
+pub(crate) const GMAIL: &str = "00000000-0000-4000-8000-000000000004";
+pub(crate) const GMAIL_ORG: &str = "00000000-0000-4000-8000-000000000044";
 pub(crate) const TWIN: &str = "00000000-0000-4000-8000-000000000003";
 pub(crate) const TWIN_ORG: &str = "00000000-0000-4000-8000-000000000033";
 
@@ -34,6 +36,10 @@ pub(crate) async fn anthropic() -> (String, Seen) {
                 if bearer.starts_with("access-team") {
                     return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"fixture@example.invalid","uuid":PERSON},
                         "organization":{"name":"Fixture Team","organization_type":"claude_team","uuid":TEAM_ORG}})));
+                }
+                if bearer.starts_with("access-gmail") {
+                    return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"other@example.invalid","uuid":GMAIL},
+                        "organization":{"name":"other@example.invalid's Organization","organization_type":"claude_max","uuid":GMAIL_ORG}})));
                 }
                 // Same email and organization name as `access-personal`, a different provider account.
                 if bearer.starts_with("access-twin") {

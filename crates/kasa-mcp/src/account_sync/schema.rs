@@ -9,7 +9,7 @@ const MAX_MACHINES: usize = 128;
 /// Keys a client must ask for by name (header `KEYS_HEADER`, comma separated). Every
 /// validator here rejects a whole snapshot that holds a key it does not know, so a key
 /// added later is hidden from clients that did not name it, and those keep syncing.
-pub const OPT_IN_KEYS: &[&str] = &["weather", "character_picks", "device_names"];
+pub const OPT_IN_KEYS: &[&str] = &["weather", "character_picks", "device_names", super::choice::KEY];
 pub const KEYS_HEADER: &str = "x-kasa-sync-keys";
 
 pub fn opt_in_header() -> String {
@@ -160,6 +160,7 @@ pub fn valid_setting(key: &str, v: &Value) -> bool {
         "weather" => weather(v),
         "character_picks" => character_picks(v),
         "device_names" => device_names(v),
+        super::choice::KEY => super::choice::valid(v),
         _ => false,
     }
 }
@@ -248,7 +249,7 @@ pub fn known_setting(key: &str) -> bool {
         | "file_tree_default" | "pane_footer_default" | "usage_compact" | "sidebar_pulse"
         | "statusbar_hidden" | "statusbar_order" | "statusbar_separators" | "statusbar_colors"
         | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather" | "character_picks"
-        | "device_names")
+        | "device_names" | super::choice::KEY)
 }
 
 pub fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {

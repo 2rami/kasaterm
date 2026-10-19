@@ -63,6 +63,16 @@ impl AccountIdentity {
         )
     }
 
+    /// 관문 공통 설정의 선택 값. 이메일·조직이 빠진 값은 다른 기기에 이름을 보일 수 없어 받지 않는다.
+    pub(crate) fn from_choice(value: &Value) -> Option<Self> {
+        let text = |key: &str| value.get(key).and_then(Value::as_str);
+        Self::new(text("account_uuid")?, text("organization_uuid")?, text("email")?, text("org")?)
+    }
+
+    pub(super) fn email_org(&self) -> (&str, &str) {
+        (&self.email, &self.org)
+    }
+
     pub(crate) fn uuids(&self) -> (&str, &str) {
         (&self.account_uuid, &self.organization_uuid)
     }
@@ -173,6 +183,8 @@ enum Outcome {
     UpdateNeeded,
     LoginNeeded,
     Unconfirmed,
+    /// 받은 기기가 관문의 순서 있는 선택으로 맞춘다 — 이 요청은 깨우기 힌트로만 썼다.
+    Ordered,
 }
 
 impl Outcome {
@@ -189,13 +201,19 @@ impl Outcome {
             Self::UpdateNeeded => "카사텀 업데이트 필요",
             Self::LoginNeeded => "선택 계정 로그인 확인 필요",
             Self::Unconfirmed => "응답 확인 실패",
+            Self::Ordered => "관문 정본 확인 대기",
         }
     }
 }
 
 impl Outcome {
     fn failed(self) -> bool {
-        !matches!(self, Self::Applied | Self::Pending)
+        !matches!(self, Self::Applied | Self::Pending | Self::Ordered)
+    }
+
+    /// 받은 기기가 힌트만 받고 관문 순서로 맞추는 중이면 아직 끝나지 않았다 — 완료로 세지 않는다.
+    fn waiting(self) -> bool {
+        matches!(self, Self::Pending | Self::Ordered)
     }
 }
 
@@ -219,6 +237,7 @@ fn outcome(reply: Result<Value, ()>, expected: &str) -> Outcome {
         Some("account_sync_storage_failed") => Outcome::StorageFailed,
         Some("action_unknown" | "account_sync_update_needed") => Outcome::UpdateNeeded,
         Some("account_switch_failed") => Outcome::LoginNeeded,
+        Some("account_sync_ordered") => Outcome::Ordered,
         _ => Outcome::Unconfirmed,
     }
 }
@@ -254,7 +273,7 @@ impl AccountSyncReport {
         let pending = self
             .peers
             .iter()
-            .filter(|(_, result)| *result == Outcome::Pending)
+            .filter(|(_, result)| result.waiting())
             .count();
         let summary = if failed > 0 {
             format!("다른 기기 {failed}대 동기화 확인 필요")
@@ -267,7 +286,7 @@ impl AccountSyncReport {
         peers.sort_by_key(|(_, result)| {
             if result.failed() {
                 0
-            } else if *result == Outcome::Pending {
+            } else if result.waiting() {
                 1
             } else {
                 2
@@ -312,11 +331,27 @@ fn last_report() -> &'static Mutex<Option<AccountSyncReport>> {
 }
 
 pub(crate) fn account_sync_notice(selected: &str) -> Option<SyncNotice> {
-    let report = last_report().lock().ok()?.clone()?;
-    let serial = queue().lock().ok()?.serial;
-    report
-        .visible_for(selected, serial, kasa_mcp::device_auth::change_epoch())
-        .then(|| report.notice())
+    let report = last_report().lock().ok().and_then(|report| report.clone());
+    let serial = queue().lock().ok().map(|queue| queue.serial);
+    let report = report
+        .filter(|report| serial.is_some_and(|serial| report.visible_for(selected, serial, kasa_mcp::device_auth::change_epoch())))
+        .map(|report| report.notice());
+    current_first(super::choice::notice(), report)
+}
+
+/// 지금 따라가는 정본의 상태(로그인 필요·받기 실패 등)가 지난 P2P 전송 결과보다 먼저다 — 옛 「완료」가 막힘을 가리면
+/// 사람이 연동이 끊긴 줄 모른다.
+fn current_first(choice: Option<SyncNotice>, report: Option<SyncNotice>) -> Option<SyncNotice> {
+    choice.or(report)
+}
+
+/// 다른 기기에서 새 정본이 왔다. 그 계정이 아닌 슬롯을 보낸 지난 P2P 결과는 더 보이지 않는다.
+pub(super) fn drop_report_unless(keep: impl Fn(&str) -> bool) {
+    if let Ok(mut report) = last_report().lock() {
+        if report.as_ref().is_some_and(|report| !keep(&report.slot)) {
+            *report = None;
+        }
+    }
 }
 
 pub(crate) fn seed_account_sync_notice_for_verify(selected: &str) -> bool {
@@ -826,6 +861,25 @@ mod tests {
         assert!(!report.visible_for("other", 4, 2));
         assert!(!report.visible_for("one", 5, 2));
         assert!(!report.visible_for("one", 4, 3));
+    }
+
+    #[test]
+    fn a_hint_taken_by_an_ordered_peer_is_not_counted_as_done_and_the_current_follow_wins() {
+        let report = AccountSyncReport {
+            serial: 1,
+            device_epoch: 0,
+            slot: "one".into(),
+            label: "Chosen".into(),
+            peers: vec![("Mini".into(), Outcome::Ordered), ("Desktop".into(), Outcome::Ordered)],
+        };
+        let notice = report.notice();
+        assert!(notice.pending && !notice.failed);
+        assert_eq!(notice.summary, "다른 기기 2대 반영 중");
+        assert!(!notice.summary.contains("완료") && notice.details.contains("관문 정본 확인 대기"));
+        let blocked = SyncNotice { summary: "다른 기기 계정 로그인 필요".into(), details: String::new(), failed: true, pending: false };
+        let done = AccountSyncReport { peers: vec![("Mini".into(), Outcome::Applied)], ..report }.notice();
+        assert_eq!(current_first(Some(blocked.clone()), Some(done.clone())), Some(blocked), "an old success hid the current block");
+        assert_eq!(current_first(None, Some(done.clone())), Some(done));
     }
 
     #[test]

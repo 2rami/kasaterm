@@ -9,6 +9,8 @@ impl App {
     pub(crate) fn register_account_sync(&self) {
         let proxy = self.proxy.clone();
         kasa_mcp::account_sync::set_apply_hook(Arc::new(move |request| {
+            // Off the GUI thread: the keychain read behind the workbench proof is a child process.
+            crate::session::observe_workbench_identity();
             let (tx, rx) = std::sync::mpsc::channel();
             proxy.send_event(UserEvent::AccountSyncApply(request, tx)).map_err(|_| "app closed".to_string())?;
             rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| "app sync apply timed out".to_string())?

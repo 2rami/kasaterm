@@ -1562,6 +1562,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::AccountSyncApply(request, reply) => {
                 let _ = reply.send(self.apply_account_sync(request.clone()));
+                // After the reply: following another device may restart panes, which must not hold the sync thread.
+                self.converge_claude_choice();
                 return;
             }
             UserEvent::SocketSettingsAction(action, args, reply) => {
@@ -1978,8 +1980,10 @@ impl ApplicationHandler<UserEvent> for App {
                 to,
                 pct,
                 label,
+                generation,
             } => {
-                if !socket::read_account_autoswitch()
+                if *generation != crate::session::selection_generation()
+                    || !socket::read_account_autoswitch()
                     || *from != self.set_claude_account
                     || *from != socket::read_claude_account()
                     || *pct < socket::read_account_autoswitch_pct()
@@ -2582,6 +2586,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
                     }
                     let active_id = socket::read_claude_account();
+                    let generation = crate::session::selection_generation();
                     if active_id != badge_account {
                         if let (Ok(mut active), Ok(mut all)) = (usage_cache.lock(), usage_all.lock()) {
                             clear_switched_usage_badges(&mut active, &mut all);
@@ -2842,7 +2847,8 @@ impl ApplicationHandler<UserEvent> for App {
                     //
                     // **stale 값으로는 안 옮긴다**: upstream 이 막혀 재사용된 숫자로
                     // 계정을 떠나면 멀쩡한 자리를 옛 기록 때문에 버리는 셈이다.
-                    let rested = last_switch.is_none_or(|t| t.elapsed().as_secs() >= 300);
+                    let rested = last_switch.is_none_or(|t| t.elapsed().as_secs() >= 300)
+                        && !crate::session::followed_recently();
                     let fresh = fetched.as_ref().is_some_and(|(_, stale, _)| !*stale);
                     // 소진된 슬롯을 **전환과 무관하게** 쿨다운에 적는다.
                     //
@@ -2941,6 +2947,7 @@ impl ApplicationHandler<UserEvent> for App {
                                             to,
                                             pct: p.pct,
                                             label: p.label.clone(),
+                                            generation,
                                         };
                                         if usage_proxy.send_event(ev).is_err() {
                                             break;

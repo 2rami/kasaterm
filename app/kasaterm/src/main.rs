@@ -4269,6 +4269,8 @@ enum UserEvent {
         to: String,
         pct: f32,
         label: String,
+        /// 판단을 시작할 때의 계정 선택 세대 — 그 사이 계정이 바뀌었으면 이 판단은 낡았다.
+        generation: u64,
     },
     ClaudeQuotaWarning(quota_alerts::QuotaAlert),
     /// 관문 사슬로 도는 Claude 로그인이 곧 끊기거나 끊겼다(`kasa_mcp::agent_chains`). (제목, 본문)

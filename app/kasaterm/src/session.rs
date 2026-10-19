@@ -27,6 +27,7 @@ pub(crate) mod view_rooms;
 pub(crate) use self::closed_panes::RetainedBy;
 
 pub(crate) use self::accounts::{
+    followed_recently, observe_workbench_identity, selection_generation,
     account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice,
     account_switch_confirm_text, account_switch_toast, AccountSwitchBtn, AccountSwitchImpact,
     AccountSwitchProvider, PendingAccountSwitch,

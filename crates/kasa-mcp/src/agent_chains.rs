@@ -1060,6 +1060,11 @@ fn seen() -> &'static std::sync::Mutex<Vec<(String, String)>> {
     SEEN.get_or_init(Default::default)
 }
 
+/// 그 계정 사슬의 마지막 관측 상태 — `ok`·`reconnect_required`, 관문에 없으면 None.
+pub fn chain_state(key: &str) -> Option<String> {
+    seen().lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, state)| state.clone())
+}
+
 /// 관문이 그 계정 사슬을 멀쩡히 쥐고 있나(마지막 관측).
 pub fn held(key: &str) -> bool {
     seen().lock().is_ok_and(|s| s.iter().any(|(k, state)| k == key && state == "ok"))
@@ -1147,7 +1152,7 @@ impl<'a> Gateway<'a> {
     }
 
     /// 그 접근 토큰의 주인 UUID. 막 만료·폐기된 토큰이면 모른다(None) — 그때는 덮지 않는다.
-    async fn prove(&self, token: &str) -> Option<Who> {
+    pub(crate) async fn prove(&self, token: &str) -> Option<Who> {
         let fp = fingerprint(token);
         if let Some(known) = self.proofs.lock().ok().and_then(|p| p.get(&fp).cloned()) {
             return known;

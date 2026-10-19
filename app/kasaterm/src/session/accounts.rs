@@ -2,7 +2,9 @@
 //! 조용해진 칸부터 다시 띄운다. 웹(폰) 확인 카드도 같은 대기표를 쓴다.
 use super::*;
 
+mod choice;
 mod sync;
+pub(crate) use choice::{followed_recently, observe_workbench_identity, selection_generation};
 pub(crate) use sync::{account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice};
 
 impl App {
@@ -468,6 +470,7 @@ impl App {
                 .insert(f.id, (boot_label, to_label.clone()));
         }
         self.set_claude_account = to.to_string();
+        choice::bump_generation();
         // A peer or a newer local choice supersedes unsent work from the old choice.
         sync::cancel();
         // shim 재굽기가 재시작보다 **먼저**여야 새로 뜨는 claude 가 새 계정을 탄다.
@@ -489,6 +492,7 @@ impl App {
             let label = self.set_claude_accounts.iter().find(|a| a.id == to)
                 .map(|a| a.label.clone()).filter(|l| !l.is_empty())
                 .unwrap_or_else(|| to_label.clone());
+            self.record_claude_choice(to, applied_identity.as_ref());
             sync::start(to.to_string(), applied_identity, label, self.proxy.clone());
         }
         Ok((

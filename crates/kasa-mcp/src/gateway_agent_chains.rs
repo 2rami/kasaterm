@@ -127,3 +127,7 @@ async fn seal(State(gate): State<Gate>, req: axum::extract::Request) -> axum::re
 #[cfg(test)]
 #[path = "gateway_agent_chains/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gateway_agent_chains/recovery_rig.rs"]
+mod recovery_rig;
