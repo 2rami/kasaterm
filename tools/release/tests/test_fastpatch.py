@@ -1836,7 +1836,7 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn("SIGN_ARGS+=(--options runtime --timestamp)", self.bake)
         self.assertIn('sign_part "$APP/Contents/MacOS/kasa-files"', self.bake)
         self.assertNotIn("kasapet", self.bake, "펫은 카사텀 번들에서 뗐다(2026-10-19)")
-        self.assertIn('sign_part "$APP/Contents/MacOS/kasa-op"', self.bake)
+        self.assertNotIn("kasa-op", self.bake, "1Password 실행기는 키체인으로 바꾸며 뺐다(2026-10-19)")
         self.assertIn("--entitlements \"$ROOT/scripts/kasaterm.entitlements\"", self.bake)
         ent = plistlib.loads((REPO / "scripts/kasaterm.entitlements").read_bytes())
         self.assertEqual(ent, {"com.apple.security.device.audio-input": True, "com.apple.security.automation.apple-events": True})

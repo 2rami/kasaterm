@@ -123,18 +123,6 @@ cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 cp "$BINDIR/kasa-files" "$APP/Contents/MacOS/kasa-files"
 # 무중단 승격(promote)의 로컬 상주 데몬 — ensure_local_ptyd 가 현재 exe 옆에서 찾는다.
 cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
-# 1Password 실행기(docs/op-faceid-approval.md) — 토큰을 표준 입력으로만 받는 Go 프로그램. 앱이 그 프로세스의 서명을
-# pid 로 확인한 뒤에야 토큰을 넘긴다. Go 가 없는 기계에서 구우면 빠지고, 앱 설정이 「이 판에 실행기가 없어요」라고 말한다.
-GO_BIN="$(command -v go || true)"
-for candidate in /usr/local/go/bin/go /opt/homebrew/bin/go; do
-  [[ -z "$GO_BIN" && -x "$candidate" ]] && GO_BIN="$candidate"
-done
-if [[ -n "$GO_BIN" ]]; then
-  (cd tools/kasa-op && CGO_ENABLED=0 GOFLAGS=-mod=readonly "$GO_BIN" build -trimpath -ldflags="-s -w" \
-    -o "$PWD/../../$APP/Contents/MacOS/kasa-op" .) || { echo "error: kasa-op build failed" >&2; exit 1; }
-else
-  echo "[build-app] go 없음 — 1Password 실행기(kasa-op) 없이 굽는다" >&2
-fi
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
@@ -566,7 +554,6 @@ fi
 sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-files"
 sign_part "$APP/Contents/MacOS/kasa-serve-web"
-[[ -f "$APP/Contents/MacOS/kasa-op" ]] && sign_part "$APP/Contents/MacOS/kasa-op"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 [[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")

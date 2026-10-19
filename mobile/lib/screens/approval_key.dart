@@ -11,9 +11,9 @@ import '../server.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
 
-/// 1Password 연결 — 학생의 1Password 비밀 요청을 이 폰이 Face ID 로 한 번씩 허락하게 한다(docs/op-faceid-approval.md).
+/// 비밀 승인 — 학생이 맥 키체인의 비밀을 쓸 때 이 폰이 Face ID 로 한 번씩 허락하게 한다(docs/secret-faceid-approval.md).
 /// 「Face ID 로 연결」 한 번이 Secure Enclave 열쇠를 만들고(없을 때만) Face ID 로 서명해 본 뒤 공개키를 관문에 맡기고,
-/// 계정의 맥마다 자동 믿기를 지금 돌리게 한다. 맥에 토큰이 아직 없으면 그 맥에서 할 일을 줄에 적는다.
+/// 계정의 맥마다 자동 믿기를 지금 돌리게 한다. 아직 1Password 판인 맥은 업데이트하라고 줄에 적는다.
 class ApprovalKeyScreen extends StatefulWidget {
   const ApprovalKeyScreen({super.key, required this.api, this.server, this.signer = const SecureEnclaveSigner()});
 
@@ -129,7 +129,7 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
           _registered = false;
         });
       }
-      if (!await widget.signer.confirm('1Password 승인 폰으로 연결')) return;
+      if (!await widget.signer.confirm('비밀 승인 폰으로 연결')) return;
       await _with((api) => api.registerApprovalKey(public));
       if (mounted) setState(() => _registered = true);
       await _check();
@@ -148,7 +148,7 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
       builder: (context) => ModalLook(
         child: AlertDialog(
           title: const Text('연결 끊기'),
-          content: const Text('이 폰은 더는 1Password 요청을 허락하지 못해요. 열쇠가 관문 목록에서 빠지며 맥에서도 함께 막혀요.'),
+          content: const Text('이 폰은 더는 비밀 요청을 허락하지 못해요. 열쇠가 관문 목록에서 빠지며 맥에서도 함께 막혀요.'),
           actions: [
             TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('취소')),
             FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('끊기')),
@@ -181,14 +181,14 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
     if (link == null) return '이 맥의 KASA 를 새 판으로 업데이트해 주세요';
     final print = _fingerprint;
     final mine = print != null && link.trusted.contains(print);
-    if (!link.token) {
-      return mine ? '이 폰을 믿어요 · 1Password 연결이 남았어요' : '맥 설정 → 계정 → 1Password 에서 「1Password 연결」을 한 번 눌러 주세요';
+    if (!link.keychain) {
+      return mine && link.token ? '연결됨 · 옛 판(1Password) — 새 판으로 올리면 키체인을 써요' : '이 맥의 KASA 를 새 판으로 업데이트해 주세요 · 키체인 판부터 써요';
     }
-    if (mine) return '연결됨 · 금고 「${link.vault}」';
-    if (print == null) return '1Password 연결됨 · 이 폰은 아직이에요';
+    if (mine) return '연결됨 · 이 맥 키체인';
+    if (print == null) return '이 폰은 아직이에요';
     return link.trusted.isEmpty
         ? '이 폰을 아직 믿지 않았어요 — 새로고침해 주세요'
-        : '다른 폰을 믿고 있어요 · 맥 설정 → 계정 → 1Password 에서 이 폰을 「믿기」';
+        : '다른 폰을 믿고 있어요 · 맥 설정 → 계정 → 비밀 승인에서 이 폰을 「믿기」';
   }
 
   @override
@@ -200,7 +200,7 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
     final trusting = _trusting;
     // 맥 목록이 없으면(승인 화면에서 바로 옴) 맡긴 것까지만 안다 — 맥은 다음 요청 직전에 이 열쇠를 믿는다.
     final blind = widget.server == null && _registered;
-    final ready = blind || trusting.any((l) => l.token);
+    final ready = blind || trusting.any((l) => l.ready);
     final linked = blind || trusting.isNotEmpty;
     final macs = _macs;
     return TwinBackdrop(
@@ -208,7 +208,7 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
         backgroundColor: Colors.transparent,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
-          title: const Text('1Password'),
+          title: const Text('비밀 승인'),
           actions: [
             if (widget.server != null)
               IconButton(
@@ -249,10 +249,10 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
                       const SizedBox(height: Look.groupTitleGap),
                       Text(
                         ready
-                            ? '학생이 맥에서 1Password 비밀을 쓰려 하면 이 폰에 요청이 와요. 내용을 보고 Face ID 로 허락하면 그 한 번만 풀려요.'
+                            ? '학생이 맥 키체인의 비밀을 쓰려 하면 이 폰에 요청이 와요. 내용을 보고 Face ID 로 허락하면 그 한 번만 꺼내요.'
                             : linked
-                                ? '이 폰은 이어졌어요. 맥 설정 → 계정 → 1Password 에서 「1Password 연결」을 누르면 1Password 창이 떠요. 허락하면 끝나요.'
-                                : '학생이 맥에서 1Password 비밀을 쓸 때 이 폰 Face ID 로 한 번씩 허락해요. 한 번 누르면 맥까지 이어져요.',
+                                ? '이 폰은 이어졌어요. 맥의 KASA 를 키체인 판으로 업데이트하면 끝나요.'
+                                : '학생이 맥 키체인의 비밀을 쓸 때 이 폰 Face ID 로 한 번씩 허락해요. 한 번 누르면 맥까지 이어져요.',
                         style: dim,
                       ),
                       if (!linked) ...[
@@ -283,7 +283,7 @@ class _ApprovalKeyScreenState extends State<ApprovalKeyScreen> {
                       icon: Icons.laptop_mac_rounded,
                       title: mac.machine.label,
                       subtitle: _say(mac),
-                      trailing: print != null && mac.link?.token == true && (mac.link?.trusted.contains(print) ?? false)
+                      trailing: print != null && mac.link?.ready == true && (mac.link?.trusted.contains(print) ?? false)
                           ? Icon(Icons.check_circle_rounded, color: scheme.primary, size: Look.iconSize)
                           : null,
                     ),

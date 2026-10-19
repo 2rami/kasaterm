@@ -31,7 +31,7 @@ pub fn fields(tool: &str, input: &Value) -> (Vec<Field>, bool) {
         "NotebookEdit" => &[("notebook_path", "노트북"), ("cell_id", "칸"), ("edit_mode", "방식"), ("new_source", "새 내용")],
         "WebFetch" => &[("url", "주소"), ("prompt", "물음")],
         "Read" => &[("file_path", "파일")],
-        "1Password" => &[("refs", "참조"), ("command", "명령")],
+        "키체인" | "1Password" => &[("refs", "참조"), ("command", "명령")],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -273,7 +273,7 @@ fn mask_pem(text: &str) -> String {
 }
 
 /// 승인 요청의 지문 — 보인 것과 결정한 것이 같은지 견준다. 관문·데스크톱·폰이 같은 값을 내야 한다.
-/// 비밀 요청(docs/op-faceid-approval.md) 서명 대상 머리 — 이 키의 서명이 다른 용도의 글로 쓰이지 않게.
+/// 비밀 요청(docs/secret-faceid-approval.md) 서명 대상 머리 — 이 키의 서명이 다른 용도의 글로 쓰이지 않게.
 pub const SECRET_PREFIX: &[u8] = b"kasaterm-secret/1\n";
 
 /// Secure Enclave 공개키(X9.63 비압축 P-256, 65바이트)의 id — 공개키 SHA-256 앞 32자.

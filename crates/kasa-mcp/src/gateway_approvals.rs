@@ -7,7 +7,7 @@
 //! - 결정에는 그 화면이 본 글의 지문이 따라온다. 다르면 받지 않는다(보인 것과 다른 것을 허락하지 않게).
 //! - 요청은 메모리에만 둔다(2분짜리다). 남는 것은 감사 줄뿐 — 누가·언제·어느 기기에서 무엇을.
 //! - 계정 폰이 맡긴 푸시 토큰으로 관문이 직접 알린다. 다른 곳에서 닫히면 같은 알림을 조용히 갈아 끼운다.
-//! - 비밀 요청(`kind:"secret"`, docs/op-faceid-approval.md)은 폰만 허락하고, 그 폰이 맡긴 Secure Enclave
+//! - 비밀 요청(`kind:"secret"`, docs/secret-faceid-approval.md)은 폰만 허락하고, 그 폰이 맡긴 Secure Enclave
 //!   키로 데스크톱이 만든 도전값에 서명해야 받는다. 요청한 맥이 같은 검사를 한 번 더 한다.
 
 use super::*;
@@ -80,7 +80,7 @@ pub(super) struct Device {
 struct Approval {
     id: String,
     account: String,
-    /// `tool`(학생 권한 요청) 또는 `secret`(1Password 비밀 읽기 — 폰 서명이 있어야 허락).
+    /// `tool`(학생 권한 요청) 또는 `secret`(키체인 비밀 읽기 — 폰 서명이 있어야 허락).
     kind: &'static str,
     /// 비밀 요청의 도전값 원문. 폰은 이 글자 그대로에 서명하고 요청한 맥은 올린 것과 같은지 본다.
     challenge: Option<String>,
@@ -158,6 +158,8 @@ pub(super) struct Challenge {
     command: String,
     refs: Vec<String>,
     exp: u64,
+    /// 화면·알림에 보일 출처 이름 — 키체인, 또는 옛 맥이 보낸 1Password.
+    source: &'static str,
 }
 
 pub(super) fn parse_challenge(text: &str, account: &str, device: &str, now: u64) -> Result<Challenge, Refuse> {
@@ -168,8 +170,13 @@ pub(super) fn parse_challenge(text: &str, account: &str, device: &str, now: u64)
     let s = |k: &str| v[k].as_str().map(str::to_string);
     let nonce = s("nonce").unwrap_or_default();
     let refs: Vec<String> = v["refs"].as_array().into_iter().flatten().filter_map(|r| r.as_str().map(str::to_string)).collect();
+    // 키체인(2026-10-19~)과, 아직 그 판으로 안 올린 맥이 보내는 1Password 둘 다 받는다. 참조 꼴은 종류와 짝이다.
+    let (source, prefix) = match v["kind"].as_str() {
+        Some("keychain.read") => ("키체인", "keychain://"),
+        Some("op.read") => ("1Password", "op://"),
+        _ => return Err(Refuse::ChallengeInvalid),
+    };
     let ok = v["v"] == 1
-        && v["kind"] == "op.read"
         && nonce.len() == 32
         && nonce.bytes().all(|b| b.is_ascii_hexdigit())
         && s("account").as_deref() == Some(account)
@@ -177,7 +184,7 @@ pub(super) fn parse_challenge(text: &str, account: &str, device: &str, now: u64)
         && !refs.is_empty()
         && refs.len() <= MAX_REFS
         && v["refs"].as_array().is_some_and(|a| a.len() == refs.len())
-        && refs.iter().all(|r| r.starts_with("op://") && short(r, 256));
+        && refs.iter().all(|r| r.starts_with(prefix) && r.len() > prefix.len() && short(r, 256));
     if !ok {
         return Err(Refuse::ChallengeInvalid);
     }
@@ -193,6 +200,7 @@ pub(super) fn parse_challenge(text: &str, account: &str, device: &str, now: u64)
         command: s("command").filter(|t| t.len() <= 2048).ok_or(Refuse::ChallengeInvalid)?,
         refs,
         exp,
+        source,
     })
 }
 
@@ -444,7 +452,7 @@ impl Store {
             ask.student = c.student;
             ask.pane = c.pane;
             ask.cwd = c.cwd;
-            ask.tool = "1Password".into();
+            ask.tool = c.source.into();
             ask.input = json!({"refs": c.refs.join("\n"), "command": c.command});
             ask.truncated = false;
             kind = "secret";
@@ -782,7 +790,7 @@ fn push_new(v: &Value) -> Value {
     let tool = v["tool"].as_str().unwrap_or("");
     let first = v["fields"][0]["text"].as_str().unwrap_or("");
     let line: String = first.lines().next().unwrap_or("").chars().take(160).collect();
-    let title = if v["kind"] == "secret" { format!("{student} · 1Password 승인 요청") } else { format!("{student} · 승인 요청") };
+    let title = if v["kind"] == "secret" { format!("{student} · {tool} 승인 요청") } else { format!("{student} · 승인 요청") };
     json!({
         "aps": {
             "alert": {"title": title, "subtitle": format!("{machine} · {tool}"), "body": line},
@@ -1237,6 +1245,15 @@ mod tests {
     }
 
     fn challenge(device: &str, now: u64, nonce: &str) -> String {
+        json!({"v": 1, "kind": "keychain.read", "nonce": nonce, "account": "geno", "device": device,
+            "student": "유우카", "pane": "%3", "cwd": "/repo",
+            "command": "kasaterm-cli secret read keychain://db.example#deploy",
+            "refs": ["keychain://db.example#deploy"], "exp": now + 60_000})
+        .to_string()
+    }
+
+    /// 아직 키체인 판으로 안 올린 맥이 보내는 1Password 도전값.
+    fn legacy_challenge(device: &str, now: u64, nonce: &str) -> String {
         json!({"v": 1, "kind": "op.read", "nonce": nonce, "account": "geno", "device": device,
             "student": "유우카", "pane": "%3", "cwd": "/repo",
             "command": "kasaterm-cli op read op://kasaterm-agents/db/password",
@@ -1373,17 +1390,22 @@ mod tests {
         let v = s.create("geno", &desk("book"), secret_ask(c.clone()), 1_000).unwrap();
         assert_eq!(v["kind"], "secret");
         assert_eq!(v["challenge"], c);
-        assert_eq!(v["tool"], "1Password");
+        assert_eq!(v["tool"], "키체인");
         assert_eq!(v["student"], "유우카");
         assert_eq!(v["expires"], 61_000, "도전값 만료가 더 이르면 그것이 만료다");
-        assert_eq!(v["fields"][0]["text"], "op://kasaterm-agents/db/password");
+        assert_eq!(v["fields"][0]["text"], "keychain://db.example#deploy");
+        let old = s.create("geno", &desk("book"), secret_ask(legacy_challenge("book", 1_000, &NONCE.replace('a', "b"))), 1_000).unwrap();
+        assert_eq!(old["tool"], "1Password", "옛 맥의 요청도 받는다");
+        // 종류와 참조 꼴이 엇갈리면 받지 않는다.
+        let mixed = c.replace("keychain://db.example#deploy\"]", "op://kasaterm-agents/db/password\"]");
+        assert_eq!(s.create("geno", &desk("book"), secret_ask(mixed), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         // 다른 기기·다른 계정을 말하는 도전값, 모양이 틀린 도전값은 받지 않는다.
         let other = challenge("mini", 1_000, NONCE);
         assert_eq!(s.create("geno", &desk("book"), secret_ask(other), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         assert_eq!(s.create("else", &desk("book"), secret_ask(c.clone()), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         let stale = challenge("book", 1_000, NONCE);
         assert_eq!(s.create("geno", &desk("book"), secret_ask(stale), 70_000).unwrap_err(), Refuse::ChallengeInvalid);
-        let bad = c.replace("op://kasaterm-agents/db/password\"]", "https://x\"]");
+        let bad = c.replace("keychain://db.example#deploy\"]", "https://x\"]");
         assert_eq!(s.create("geno", &desk("book"), secret_ask(bad), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
         assert_eq!(s.create("geno", &desk("book"), secret_ask(c.replace(NONCE, "short")), 1_000).unwrap_err(), Refuse::ChallengeInvalid);
     }
@@ -1413,7 +1435,7 @@ mod tests {
         // 다른 폰은 자기 키가 없다 — p1 의 서명을 실어 와도 안 된다.
         assert_eq!(decide(&phone("p2"), Some((&kid, &good))).unwrap_err().0, Refuse::KeyUnknown);
         // 변조: 도전값 한 글자만 바꿔 서명한 것.
-        let tampered = phone_key.sign(&c.replace("password", "passwore"));
+        let tampered = phone_key.sign(&c.replace("deploy", "deplox"));
         assert_eq!(decide(&phone("p1"), Some((&kid, &tampered))).unwrap_err().0, Refuse::BadSignature);
         let stranger = Signer::new().sign(&c);
         assert_eq!(decide(&phone("p1"), Some((&kid, &stranger))).unwrap_err().0, Refuse::BadSignature);

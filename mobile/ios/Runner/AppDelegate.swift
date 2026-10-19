@@ -152,7 +152,7 @@ import os
         result(FlutterError(code: "web_auth", message: "start failed", details: nil))
       }
     }
-    // 1Password 비밀 요청 승인 열쇠(docs/op-faceid-approval.md). 다트는 공개키와 서명만 받는다.
+    // 키체인 비밀 요청 승인 열쇠(docs/secret-faceid-approval.md). 다트는 공개키와 서명만 받는다.
     let secureKey = FlutterMethodChannel(name: "kasaterm/secure_key", binaryMessenger: messenger)
     secureKey.setMethodCallHandler { call, result in
       let args = call.arguments as? [String: Any] ?? [:]

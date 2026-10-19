@@ -64,7 +64,7 @@ class Approval {
   final String? byKind;
   final String? reason;
 
-  /// `tool`(학생 권한 요청) 또는 `secret`(1Password 비밀 읽기 — docs/op-faceid-approval.md).
+  /// `tool`(학생 권한 요청) 또는 `secret`(맥 키체인 비밀 읽기 — docs/secret-faceid-approval.md).
   final String kind;
 
   /// 비밀 요청의 도전값 원문. 화면은 이 글에서 편 것만 보이고, Face ID 서명도 이 글 그대로에 한다.
@@ -78,6 +78,9 @@ class Approval {
   bool get isSecret => kind == 'secret';
 
   /// Face ID 창에 뜨는 한 줄.
+  /// 비밀 요청 제목 — 관문이 붙인 출처(키체인, 옛 맥이면 1Password).
+  String get secretTitle => '${tool.isEmpty ? '비밀' : tool} 승인 요청';
+
   String get signReason {
     final who = student.isEmpty ? '학생' : student;
     final first = refs.isEmpty ? '' : refs.first;
@@ -156,9 +159,14 @@ class _SecretAsk {
     if (text == null || text.length > 4096) return null;
     try {
       final v = jsonDecode(text);
-      if (v is! Map || v['v'] != 1 || v['kind'] != 'op.read') return null;
+      if (v is! Map || v['v'] != 1) return null;
+      // 키체인(2026-10-19~)과, 아직 그 판으로 안 올린 맥이 보내는 1Password 둘 다. 참조 꼴은 종류와 짝이다.
+      final prefix = switch (v['kind']) { 'keychain.read' => 'keychain://', 'op.read' => 'op://', _ => null };
+      if (prefix == null) return null;
       final refs = v['refs'];
-      if (refs is! List || refs.isEmpty || refs.any((r) => r is! String || !r.startsWith('op://'))) return null;
+      if (refs is! List || refs.isEmpty || refs.any((r) => r is! String || r.length <= prefix.length || !r.startsWith(prefix))) {
+        return null;
+      }
       String s(String k) => v[k] is String ? v[k] as String : '';
       return _SecretAsk(s('student'), s('pane'), s('cwd'), s('command'), refs.cast<String>());
     } on FormatException {
@@ -304,7 +312,7 @@ class ApprovalCenter extends ChangeNotifier {
       }
       final public = await signer.publicKey();
       if (public == null) {
-        throw const AccountException('이 폰이 아직 1Password 에 연결되지 않았어요. 설정 → 계정 → 1Password 에서 「Face ID 로 연결」을 눌러 주세요.', code: 'no_key');
+        throw const AccountException('이 폰이 아직 비밀 승인에 연결되지 않았어요. 설정 → 계정 → 비밀 승인에서 「Face ID 로 연결」을 눌러 주세요.', code: 'no_key');
       }
       try {
         sig = await signer.sign(a.challenge!, a.signReason);

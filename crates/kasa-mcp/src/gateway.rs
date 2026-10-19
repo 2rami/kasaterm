@@ -2590,7 +2590,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 1Password 비밀 요청(docs/op-faceid-approval.md)을 창구 그대로 — 폰 키 맡기기·데스크톱 요청·서명 허락,
+    /// 키체인 비밀 요청(docs/secret-faceid-approval.md)을 창구 그대로 — 폰 키 맡기기·데스크톱 요청·서명 허락,
     /// 그리고 폐기된 폰은 키 목록에서 빠지고 결정도 못 한다.
     #[tokio::test]
     async fn secret_approval_over_http_needs_a_live_phone_key() {
@@ -2620,9 +2620,9 @@ mod tests {
 
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let open = |nonce: &str| serde_json::json!({"kind": "secret", "challenge": serde_json::json!({
-            "v": 1, "kind": "op.read", "nonce": nonce, "account": "geno", "device": desk["device_id"],
-            "student": "유우카", "pane": "%3", "cwd": "/repo", "command": "kasaterm-cli op read op://v/i/f",
-            "refs": ["op://v/i/f"], "exp": now + 60_000}).to_string()});
+            "v": 1, "kind": "keychain.read", "nonce": nonce, "account": "geno", "device": desk["device_id"],
+            "student": "유우카", "pane": "%3", "cwd": "/repo", "command": "kasaterm-cli secret read keychain://svc#me",
+            "refs": ["keychain://svc#me"], "exp": now + 60_000}).to_string()});
         let (status, created) = post(addr, "/relay/approvals", Some(desk_token), open("0123456789abcdef0123456789abcdef")).await;
         assert_eq!(status, 200, "{created}");
         let a = &created["approval"];

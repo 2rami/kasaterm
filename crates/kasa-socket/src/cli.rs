@@ -161,9 +161,10 @@ fn run() -> Result<Option<Response>> {
     if cmd == "share" {
         return run_share(&args);
     }
-    // `op` — 1Password 비밀을 폰 Face ID 승인 한 번으로(docs/op-faceid-approval.md). 값은 이 프로세스에만 온다.
-    if cmd == "op" {
-        return run_op(&args);
+    // `secret` — 이 맥 키체인의 비밀을 폰 Face ID 승인 한 번으로(docs/secret-faceid-approval.md). 값은 이 프로세스에만
+    // 온다. `op` 는 1Password 로 읽던 때의 이름이라 같은 뜻으로 받는다 — 학생이 손에 익은 명령을 쳐도 길을 잃지 않게.
+    if cmd == "secret" || cmd == "op" {
+        return run_secret(&args);
     }
     // `app-restart` — 등록된 기기의 카사텀 앱 재시작 계획·상태. 실행은 사람 승인 흐름이 생기기 전까지 거부한다.
     #[cfg(feature = "app-update")]
@@ -2006,10 +2007,10 @@ fn print_help() {
             "pr create --repo 주인/레포 --head 브랜치 [--base main] --title 제목 [--body 본문|-] [--draft]   PR 요청(사람이 앱에서 승인)",
             "pr connections                            연결·승인 대기 목록  (--connection <id> 로 연결 고르기)",
         ]),
-        ("1Password (폰 Face ID 한 번으로 그 요청만)", &[
-            "op run -e 이름=op://금고/항목/필드 [-e …] -- <명령…>   값은 그 명령의 환경으로만, 출력에 나오면 가림",
-            "op read op://금고/항목/필드               값을 표준출력으로(끝 줄바꿈 없음) — x=$(…) 로 담아 쓴다",
-            "op status                                 토큰·금고·믿는 폰 열쇠(값 없음)",
+        ("키체인 비밀 (폰 Face ID 한 번으로 그 요청만)", &[
+            "secret run -e 이름=<서비스>[#계정] [-e …] -- <명령…>   이 맥 키체인의 값을 그 명령의 환경으로만, 출력에 나오면 가림",
+            "secret read <서비스>[#계정]               값을 표준출력으로(끝 줄바꿈 없음) — x=$(…) 로 담아 쓴다",
+            "secret status                             믿는 폰 열쇠(값 없음)",
         ]),
         ("앱", &[
             "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
@@ -3372,17 +3373,29 @@ fn render_restart_plan(plan: &crate::app_restart::Plan) -> String {
     out
 }
 
-const OP_USAGE: &str = "op read <op://금고/항목/필드> | op run -e 이름=<op://…> [-e …] -- <명령…> | op status";
+const SECRET_USAGE: &str = "secret read <서비스>[#계정] | secret run -e 이름=<서비스>[#계정] [-e …] -- <명령…> | secret status";
+
+/// 사람이 친 참조를 앱이 받는 꼴(`keychain://서비스[#계정]`)로. 서비스 이름만 쳐도 된다.
+fn keychain_ref(text: &str) -> Result<String> {
+    if text.starts_with("op://") {
+        return Err(anyhow!("1Password 는 걷었어요 — 이 맥 키체인의 항목을 `서비스#계정` 으로 적어 주세요"));
+    }
+    let bare = text.strip_prefix("keychain://").unwrap_or(text);
+    if bare.is_empty() || bare.starts_with('#') || bare.ends_with('#') {
+        return Err(anyhow!("키체인 항목을 `서비스` 나 `서비스#계정` 으로 적어 주세요: {text}"));
+    }
+    Ok(format!("keychain://{bare}"))
+}
 
 /// 앱에 비밀 읽기를 맡기고 폰 허락을 기다린다. 값은 참조 순서대로.
-fn op_values(refs: &[String]) -> Result<Vec<String>> {
+fn secret_values(refs: &[String]) -> Result<Vec<String>> {
     let socket_path = resolve_socket_path()?;
-    eprintln!("kasaterm: 폰에서 Face ID 로 허락하면 읽어요(2분 안) — {}", refs.join(", "));
-    let req = Request { id: json!("op"), method: "op.secret".into(), params: json!({ "op": "read", "refs": refs }) };
+    eprintln!("kasaterm: 폰에서 Face ID 로 허락하면 이 맥 키체인에서 읽어요(2분 안) — {}", refs.join(", "));
+    let req = Request { id: json!("secret"), method: "op.secret".into(), params: json!({ "op": "read", "refs": refs }) };
     let resp = roundtrip(&socket_path, &req)?;
     if !resp.ok {
         let message = resp.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
-        return Err(anyhow!("{}", op_reason(&message)));
+        return Err(anyhow!("{}", secret_reason(&message)));
     }
     let values: Vec<String> = resp.result.as_ref().and_then(|r| r["values"].as_array()).into_iter().flatten()
         .filter_map(|v| v.as_str().map(str::to_string)).collect();
@@ -3392,46 +3405,45 @@ fn op_values(refs: &[String]) -> Result<Vec<String>> {
     Ok(values)
 }
 
-fn op_reason(code: &str) -> String {
+fn secret_reason(code: &str) -> String {
     let head = code.split(':').next().unwrap_or(code).trim();
     let say = match head {
-        "op_token_missing" => "이 맥에 1Password 토큰이 없어요 — 사람이 설정 → 계정 → 1Password 에서 넣어야 해요",
         "no_trusted_key" => "이 맥이 믿는 폰 Face ID 열쇠가 없어요 — 폰 설정에서 열쇠를 만들고 맥 설정에서 믿기를 눌러야 해요",
-        "vault_not_allowed" => "허용된 금고 밖의 참조예요",
-        "bad_ref" => "참조 모양이 틀렸어요(op://금고/항목/필드)",
+        "bad_ref" => "참조 모양이 틀렸어요(서비스 또는 서비스#계정)",
+        "not_found" => "이 맥 키체인에 그 항목이 없어요",
+        "keychain_denied" => "맥의 키체인 접근 허용 창에서 거절됐어요",
+        "not_text" => "그 키체인 값이 글자가 아니에요",
         "denied" => "폰에서 거절했어요",
         "expired" => "2분 안에 허락이 오지 않았어요",
         "cancelled" => "요청이 취소됐어요",
         "not_in_pane" | "requester_unknown" => "kasaterm 칸 안에서만 쓸 수 있어요",
         "signed_out" | "isolated_run" => "이 기기가 KASA 계정에 로그인돼 있지 않아요",
-        "helper_missing" => "이 앱 판에 1Password 실행기(kasa-op)가 없어요",
-        "helper_unverified" => "1Password 실행기의 서명을 확인하지 못했어요",
         "update_required" => "관문이 이 기능을 아직 몰라요",
         _ => "",
     };
     if say.is_empty() { code.to_string() } else { format!("{say} ({head})") }
 }
 
-fn run_op(args: &[String]) -> Result<Option<Response>> {
+fn run_secret(args: &[String]) -> Result<Option<Response>> {
     match args.first().map(String::as_str) {
         Some("status") => {
             let socket_path = resolve_socket_path()?;
-            let req = Request { id: json!("op"), method: "op.secret".into(), params: json!({ "op": "status" }) };
+            let req = Request { id: json!("secret"), method: "op.secret".into(), params: json!({ "op": "status" }) };
             let resp = roundtrip(&socket_path, &req)?;
             let v = resp.result.unwrap_or_default();
-            println!("토큰: {}", if v["token"] == true { format!("있음 · 금고 {}", v["vault"].as_str().unwrap_or("")) } else { "없음".into() });
             let keys: Vec<String> = v["trusted"].as_array().into_iter().flatten()
                 .map(|k| format!("{} {}", k["label"].as_str().unwrap_or(""), k["fingerprint"].as_str().unwrap_or(""))).collect();
+            println!("값이 나오는 곳: 이 맥 키체인");
             println!("믿는 폰 열쇠: {}", if keys.is_empty() { "없음".into() } else { keys.join(", ") });
-            println!("실행기: {}", if v["helper"] == true { "있음" } else { "없음" });
             Ok(None)
         }
         Some("read") => {
-            let reference = args.iter().skip(1).find(|a| !a.starts_with('-')).ok_or_else(|| anyhow!("{OP_USAGE}"))?;
+            let reference = args.iter().skip(1).find(|a| !a.starts_with('-')).ok_or_else(|| anyhow!("{SECRET_USAGE}"))?;
+            let reference = keychain_ref(reference)?;
             if std::io::IsTerminal::is_terminal(&std::io::stdout()) && !args.iter().any(|a| a == "--reveal") {
-                return Err(anyhow!("값이 화면에 그대로 찍혀요 — `x=$(kasaterm-cli op read …)` 로 담거나 `op run -e` 를 쓰세요(정말 보려면 --reveal)"));
+                return Err(anyhow!("값이 화면에 그대로 찍혀요 — `x=$(kasaterm-cli secret read …)` 로 담거나 `secret run -e` 를 쓰세요(정말 보려면 --reveal)"));
             }
-            let value = op_values(std::slice::from_ref(reference))?.remove(0);
+            let value = secret_values(std::slice::from_ref(&reference))?.remove(0);
             let mut out = std::io::stdout();
             out.write_all(value.as_bytes())?;
             out.flush()?;
@@ -3444,32 +3456,32 @@ fn run_op(args: &[String]) -> Result<Option<Response>> {
             while i < args.len() && args[i] != "--" {
                 let pair = match args[i].as_str() {
                     "-e" | "--env" => { i += 1; args.get(i).cloned().unwrap_or_default() }
-                    other => other.strip_prefix("--env=").map(str::to_string).ok_or_else(|| anyhow!("{OP_USAGE}"))?,
+                    other => other.strip_prefix("--env=").map(str::to_string).ok_or_else(|| anyhow!("{SECRET_USAGE}"))?,
                 };
-                let (name, reference) = pair.split_once('=').ok_or_else(|| anyhow!("-e 이름=op://… 모양이어야 해요"))?;
+                let (name, reference) = pair.split_once('=').ok_or_else(|| anyhow!("-e 이름=서비스[#계정] 모양이어야 해요"))?;
                 let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                     && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                if !valid || !reference.starts_with("op://") {
-                    return Err(anyhow!("-e 이름=op://… 모양이어야 해요: {pair}"));
+                if !valid {
+                    return Err(anyhow!("-e 이름=서비스[#계정] 모양이어야 해요: {pair}"));
                 }
                 names.push(name.to_string());
-                refs.push(reference.to_string());
+                refs.push(keychain_ref(reference)?);
                 i += 1;
             }
-            let command = args.get(i + 1..).filter(|c| !c.is_empty()).ok_or_else(|| anyhow!("{OP_USAGE}"))?;
+            let command = args.get(i + 1..).filter(|c| !c.is_empty()).ok_or_else(|| anyhow!("{SECRET_USAGE}"))?;
             if refs.is_empty() {
-                return Err(anyhow!("{OP_USAGE}"));
+                return Err(anyhow!("{SECRET_USAGE}"));
             }
-            let values = op_values(&refs)?;
-            let code = op_run_child(command, &names, &values)?;
+            let values = secret_values(&refs)?;
+            let code = secret_run_child(command, &names, &values)?;
             std::process::exit(code);
         }
-        _ => Err(anyhow!("{OP_USAGE}")),
+        _ => Err(anyhow!("{SECRET_USAGE}")),
     }
 }
 
 /// 값을 환경으로만 넘겨 명령을 돌리고, 그 출력에 값이 나오면 가린다(op run 과 같은 생각).
-fn op_run_child(command: &[String], names: &[String], values: &[String]) -> Result<i32> {
+fn secret_run_child(command: &[String], names: &[String], values: &[String]) -> Result<i32> {
     let mut child = std::process::Command::new(&command[0])
         .args(&command[1..])
         .envs(names.iter().zip(values))
@@ -4341,6 +4353,17 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keychain_refs_take_a_bare_service_and_refuse_1password() {
+        assert_eq!(keychain_ref("github.com").unwrap(), "keychain://github.com");
+        assert_eq!(keychain_ref("db#deploy").unwrap(), "keychain://db#deploy");
+        assert_eq!(keychain_ref("keychain://db#deploy").unwrap(), "keychain://db#deploy");
+        for bad in ["", "#me", "db#", "keychain://"] {
+            assert!(keychain_ref(bad).is_err(), "{bad}");
+        }
+        assert!(keychain_ref("op://vault/item/field").unwrap_err().to_string().contains("1Password"));
+    }
+
     #[test]
     fn summon_retries_only_while_the_student_is_booting() {
         for booting in [

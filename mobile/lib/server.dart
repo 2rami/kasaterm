@@ -296,18 +296,24 @@ class WindowLayout {
   }
 }
 
-/// 맥 한 대의 1Password 연결 — 토큰이 있나, 어느 금고인가, 믿는 폰 열쇠의 지문. 토큰 값은 없다.
+/// 맥 한 대의 비밀 승인 연결 — 믿는 폰 열쇠의 지문. 키체인 판 맥은 `source: keychain` 이고 맥에서 할 일이 없다.
+/// 옛 맥(1Password)은 토큰·금고를 준다 — 그 맥은 키체인 판으로 올려야 쓸 수 있다.
 class OpLink {
-  const OpLink({required this.token, required this.vault, required this.trusted});
+  const OpLink({required this.token, required this.vault, required this.trusted, this.keychain = false});
 
   final bool token;
   final String vault;
   final List<String> trusted;
+  final bool keychain;
+
+  /// 학생 요청을 이 폰이 허락할 수 있는 맥인가 — 키체인 판이거나, 토큰을 넣은 옛 판.
+  bool get ready => keychain || token;
 
   static OpLink? parse(Object? body) {
     final op = body is Map ? body['op'] : null;
     if (op is! Map) return null;
     return OpLink(
+      keychain: op['source'] == 'keychain',
       token: op['token'] == true,
       vault: op['vault'] is String ? op['vault'] as String : '',
       trusted: [
@@ -834,8 +840,8 @@ class Server {
     }
   }
 
-  /// 그 맥의 1Password 연결 — 부르면 맥이 폰 열쇠 자동 믿기 규칙을 지금 돌리고 상태를 준다
-  /// (docs/op-faceid-approval.md). 옛 판은 이 동작을 몰라 null.
+  /// 그 맥의 비밀 승인 연결 — 부르면 맥이 폰 열쇠 자동 믿기 규칙을 지금 돌리고 상태를 준다
+  /// (docs/secret-faceid-approval.md). 옛 판은 이 동작을 몰라 null.
   Future<OpLink?> opLink({String? machine}) async {
     final http.Response res;
     try {

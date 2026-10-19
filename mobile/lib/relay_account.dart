@@ -353,7 +353,7 @@ String approvalError(String? code, int status) => switch (code) {
   'not_found' => '이미 처리됐거나 사라진 요청이에요.',
   'signature_required' => '이 요청은 Face ID 서명이 있어야 허락돼요.',
   'bad_signature' => '서명이 요청과 맞지 않아요. 다시 열어 확인해 주세요.',
-  'key_unknown' => '관문이 이 폰의 승인 열쇠를 몰라요. 설정 → 계정 → 1Password 에서 「다시 연결」을 눌러 주세요.',
+  'key_unknown' => '관문이 이 폰의 승인 열쇠를 몰라요. 설정 → 계정 → 비밀 승인에서 「다시 연결」을 눌러 주세요.',
   'phone_only' => '이 요청은 폰에서만 허락할 수 있어요.',
   'challenge_invalid' => '요청 모양이 맞지 않아요.',
   _ => status == 404 ? '관문이 원격 승인을 아직 몰라요. 관문 업데이트가 필요해요.' : accountError(status),

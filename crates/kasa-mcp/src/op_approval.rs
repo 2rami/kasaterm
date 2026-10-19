@@ -1,15 +1,14 @@
-//! 1Password 비밀 읽기 — 폰 Face ID 한 번으로(docs/op-faceid-approval.md). 맥 앱 프로세스 쪽.
+//! 키체인 비밀 읽기 — 폰 Face ID 한 번으로(docs/secret-faceid-approval.md). 맥 앱 프로세스 쪽.
 //!
-//! 학생 칸의 `kasaterm-cli op read|run` → 소켓 → [`read`] → 관문 비밀 요청 → 폰이 Secure Enclave 키로 도전값에
-//! 서명 → 여기서 도전값·믿은 키·관문의 살아 있는 키·서명·nonce·만료를 다시 본 뒤에만 실행기(`kasa-op`)에 토큰을
-//! 파이프로 넘겨 값을 받는다. 값은 소켓으로 요청한 프로세스에만 간다.
+//! 학생 칸의 `kasaterm-cli secret read|run` → 소켓 → [`read`] → 관문 비밀 요청 → 폰이 Secure Enclave 키로 도전값에
+//! 서명 → 여기서 도전값·믿은 키·관문의 살아 있는 키·서명·nonce·만료를 다시 본 뒤에만 이 맥의 키체인에서 값을 꺼낸다.
+//! 값은 소켓으로 요청한 프로세스에만 간다. 처음 꺼내는 항목은 macOS 가 이 맥에 접근 허용 창을 띄운다.
 //!
-//! 토큰 넣기·지우기는 앱 화면 코드만 부른다 — 소켓에는 [`read`]·[`status`]·[`sync`] 뿐이다. [`sync`] 가 믿는 폰
-//! 열쇠는 [`auto_pick`] 의 규칙을 따른 것뿐이라, 폰이 「연결」을 누른 뒤 맥이 1분 주기를 기다리지 않게 하는 문이다.
-//! 토큰은 로그인 키체인(접근: 이 앱)에만 있고 대화·로그·감사 줄 어디에도 안 적는다.
+//! 이름의 `op` 는 1Password 로 읽던 때(2026-10-06~19)의 것이다 — 폰이 믿은 열쇠가 그때 이름의 키체인 항목에 있어
+//! 서비스 이름(`kasaterm.1password`)은 그대로 둔다. 바꾸면 연결해 둔 폰을 다시 믿어야 한다.
 
 use std::collections::HashMap;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -24,23 +23,13 @@ use crate::approval_text::{key_fingerprint, key_id, mask, signature_ok};
 use crate::device_auth::approvals as gateway;
 
 const SERVICE: &str = "kasaterm.1password";
-const SETTINGS: &str = "service-account";
 const TRUSTED: &str = "trusted-keys";
 /// 사람이 맥에서 거둔 열쇠 id — 자동 믿기가 다시 집어 들지 않게.
 const REFUSED: &str = "refused-keys";
 /// 관문 원격 승인과 같은 2분.
 const TTL_MS: u64 = 120_000;
 const MAX_REFS: usize = 16;
-const HELPER_TIMEOUT: Duration = Duration::from_secs(40);
 const AUDIT_ROTATE: u64 = 2 * 1024 * 1024;
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Settings {
-    token: String,
-    vault_id: String,
-    vault_name: String,
-    added: u64,
-}
 
 /// 사람이 맥 화면에서 믿은 폰 열쇠.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,14 +82,6 @@ fn store_set(account: &str, value: &str) -> anyhow::Result<()> {
     keychain::set(account, value)
 }
 
-fn store_delete(account: &str) -> anyhow::Result<()> {
-    if let Some(dir) = isolated_dir()? {
-        let _ = std::fs::remove_file(dir.join(account));
-        return Ok(());
-    }
-    keychain::delete(account)
-}
-
 #[cfg(target_os = "macos")]
 mod keychain {
     use security_framework::passwords;
@@ -120,13 +101,31 @@ mod keychain {
             .map_err(|error| anyhow::anyhow!("keychain: {}", error.code()))
     }
 
-    pub fn delete(account: &str) -> anyhow::Result<()> {
-        match passwords::delete_generic_password(super::SERVICE, account) {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == NOT_FOUND => Ok(()),
-            Err(error) => anyhow::bail!("keychain: {}", error.code()),
+    /// 학생이 고른 항목의 값. 일반 암호를 먼저, 없으면 같은 이름의 인터넷 암호(서버)를 본다. 계정을 비우면 그 서비스의
+    /// 아무 항목이나 잡힌다. 이 앱이 만들지 않은 항목은 macOS 가 이 맥에 접근 허용 창을 띄우고 답이 올 때까지 기다린다.
+    pub fn value(service: &str, account: Option<&str>) -> anyhow::Result<Vec<u8>> {
+        use security_framework::os::macos::passwords::{
+            find_generic_password, find_internet_password, SecAuthenticationType, SecProtocolType,
+        };
+        let account = account.unwrap_or("");
+        let refused = |code: i32| match code {
+            USER_CANCELED | AUTH_FAILED => anyhow::anyhow!("keychain_denied"),
+            code => anyhow::anyhow!("keychain: {code}"),
+        };
+        match find_generic_password(None, service, account) {
+            Ok((password, _)) => return Ok(password.to_vec()),
+            Err(error) if error.code() != NOT_FOUND => return Err(refused(error.code())),
+            Err(_) => {}
+        }
+        match find_internet_password(None, service, None, account, "", None, SecProtocolType::Any, SecAuthenticationType::Any) {
+            Ok((password, _)) => Ok(password.to_vec()),
+            Err(error) if error.code() == NOT_FOUND => anyhow::bail!("not_found"),
+            Err(error) => Err(refused(error.code())),
         }
     }
+
+    const USER_CANCELED: i32 = -128;
+    const AUTH_FAILED: i32 = -25293;
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -137,13 +136,9 @@ mod keychain {
     pub fn set(_: &str, _: &str) -> anyhow::Result<()> {
         anyhow::bail!("unsupported")
     }
-    pub fn delete(_: &str) -> anyhow::Result<()> {
+    pub fn value(_: &str, _: Option<&str>) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("unsupported")
     }
-}
-
-fn settings() -> anyhow::Result<Option<Settings>> {
-    Ok(store_get(SETTINGS)?.and_then(|text| serde_json::from_str(&text).ok()))
 }
 
 pub fn trusted() -> anyhow::Result<Vec<Trusted>> {
@@ -196,28 +191,48 @@ fn audit(line: Value) {
 
 // ── 참조·도전값 ───────────────────────────────────────────────────────────────
 
-/// `op://<금고>/<항목>/[<섹션>/]<필드>[?attribute=…]` 의 금고.
-fn vault_of(reference: &str) -> Option<&str> {
-    let rest = reference.strip_prefix("op://")?;
-    let (vault, tail) = rest.split_once('/')?;
-    let segments = tail.split('?').next()?.split('/').count();
-    (!vault.is_empty() && (2..=3).contains(&segments) && !tail.split('/').any(str::is_empty)).then_some(vault)
+/// 참조 꼴 — `keychain://<서비스>` 또는 `keychain://<서비스>#<계정>`. 서비스 이름에 `#` 이 들어갈 수 있어 계정은
+/// 마지막 `#` 뒤다.
+pub const REF_PREFIX: &str = "keychain://";
+
+pub fn parse_ref(reference: &str) -> Option<(&str, Option<&str>)> {
+    let rest = reference.strip_prefix(REF_PREFIX)?;
+    let (service, account) = match rest.rsplit_once('#') {
+        Some((service, account)) => (service, Some(account)),
+        None => (rest, None),
+    };
+    (!service.is_empty() && account.is_none_or(|a| !a.is_empty())).then_some((service, account))
 }
 
-fn check_refs(refs: &[String], s: &Settings) -> anyhow::Result<()> {
+fn check_refs(refs: &[String]) -> anyhow::Result<()> {
     if refs.is_empty() || refs.len() > MAX_REFS {
         bail!("bad_ref");
     }
     for reference in refs {
-        if reference.len() > 256 || reference.chars().any(char::is_control) {
+        if reference.len() > 256 || reference.chars().any(char::is_control) || parse_ref(reference).is_none() {
             bail!("bad_ref");
-        }
-        let vault = vault_of(reference).ok_or_else(|| anyhow!("bad_ref"))?;
-        if vault != s.vault_id && !vault.eq_ignore_ascii_case(&s.vault_name) {
-            bail!("vault_not_allowed");
         }
     }
     Ok(())
+}
+
+/// 허락이 난 뒤에 값을 꺼낸다. 격리 실행은 리그 폴더의 `keychain.json`(`{"서비스#계정" 또는 "서비스": 값}`)만 본다.
+fn resolve(refs: &[String]) -> anyhow::Result<Vec<String>> {
+    let fake: Option<Value> = isolated_dir()?
+        .map(|dir| std::fs::read(dir.join("keychain.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default());
+    refs.iter()
+        .map(|reference| {
+            let (service, account) = parse_ref(reference).ok_or_else(|| anyhow!("bad_ref"))?;
+            let bytes = match &fake {
+                Some(map) => {
+                    let key = account.map_or_else(|| service.to_string(), |a| format!("{service}#{a}"));
+                    map[&key].as_str().map(|v| v.as_bytes().to_vec()).ok_or_else(|| anyhow!("not_found"))?
+                }
+                None => keychain::value(service, account)?,
+            };
+            String::from_utf8(bytes).map_err(|_| anyhow!("not_text"))
+        })
+        .collect()
 }
 
 fn clip(text: &str, max_chars: usize) -> String {
@@ -238,7 +253,7 @@ fn clip_bytes(text: &str, max: usize) -> String {
 fn challenge(account: &str, device: &str, nonce: &str, exp: u64, origin: &Origin, cwd: &str, command: &str, refs: &[String]) -> String {
     json!({
         "v": 1,
-        "kind": "op.read",
+        "kind": "keychain.read",
         "nonce": nonce,
         "account": account,
         "device": device,
@@ -326,113 +341,11 @@ fn check(sent: &Sent, view: &Value, trusted: &[Trusted], live: &[Value], ledger:
     Ok(t.label.clone())
 }
 
-// ── 실행기 ────────────────────────────────────────────────────────────────────
-
-/// 실행기 자리와, 서명을 볼지. 검증 리그가 `KASATERM_OP_HELPER` 로 가짜 실행기를 줄 때만 서명을 안 본다.
-fn helper_path() -> anyhow::Result<(PathBuf, bool)> {
-    if isolated_dir()?.is_some() {
-        if let Some(path) = std::env::var_os("KASATERM_OP_HELPER") {
-            return Ok((PathBuf::from(path), false));
-        }
-    }
-    let exe = std::env::current_exe()?;
-    let path = exe.with_file_name("kasa-op");
-    anyhow::ensure!(path.is_file(), "helper_missing");
-    Ok((path, true))
-}
-
-/// 이 앱의 서명 팀 — 실행기는 같은 팀이 `kasa-op` 이름으로 서명한 것이어야 토큰을 받는다.
-#[cfg(target_os = "macos")]
-fn own_team() -> Option<String> {
-    static TEAM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    TEAM.get_or_init(|| {
-        let exe = std::env::current_exe().ok()?;
-        let out = std::process::Command::new("/usr/bin/codesign").arg("-dv").arg(&exe).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stderr);
-        let team = text.lines().find_map(|l| l.strip_prefix("TeamIdentifier="))?.trim().to_string();
-        (team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(team)
-    })
-    .clone()
-}
-
-/// 띄운 실행기 프로세스(아직 거두지 않은 우리 자식이라 pid 가 바뀌지 않는다)의 코드 서명을 본다.
-#[cfg(target_os = "macos")]
-fn verify_helper(pid: u32) -> anyhow::Result<()> {
-    verify_helper_team(pid, &own_team().ok_or_else(|| anyhow!("helper_unverified"))?)
-}
-
-#[cfg(target_os = "macos")]
-fn verify_helper_team(pid: u32, team: &str) -> anyhow::Result<()> {
-    use security_framework::os::macos::code_signing::{Flags, GuestAttributes, SecCode, SecRequirement};
-    let requirement: SecRequirement =
-        format!("identifier \"kasa-op\" and anchor apple generic and certificate leaf[subject.OU] = \"{team}\"")
-            .parse()
-            .map_err(|_| anyhow!("helper_unverified"))?;
-    let mut attrs = GuestAttributes::new();
-    attrs.set_pid(pid as libc::pid_t);
-    let code = SecCode::copy_guest_with_attribues(None, &attrs, Flags::NONE).map_err(|_| anyhow!("helper_unverified"))?;
-    code.check_validity(Flags::NONE, &requirement).map_err(|_| anyhow!("helper_unverified"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn verify_helper(_pid: u32) -> anyhow::Result<()> {
-    bail!("unsupported")
-}
-
-/// 실행기에 한 번 묻는다. 토큰은 서명 확인 뒤 표준 입력으로만 — 환경·인자에 없다.
-fn run_helper(op: &str, token: &str, refs: &[String]) -> anyhow::Result<Value> {
-    let (path, verify) = helper_path()?;
-    let mut child = std::process::Command::new(&path)
-        .env_clear()
-        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|_| anyhow!("helper_missing"))?;
-    if verify {
-        if let Err(error) = verify_helper(child.id()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-    }
-    let input = json!({"op": op, "token": token, "refs": refs}).to_string();
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
-    }
-    drop(input);
-    let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("helper_failed"))?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = (&mut stdout).take(4 * 1024 * 1024).read_to_end(&mut out);
-        let _ = tx.send(out);
-    });
-    let out = match rx.recv_timeout(HELPER_TIMEOUT) {
-        Ok(out) => out,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("helper_timeout");
-        }
-    };
-    let _ = child.wait();
-    let reply: Value = serde_json::from_slice(&out).map_err(|_| anyhow!("helper_failed"))?;
-    if reply["ok"] != true {
-        let reason = reply["error"].as_str().unwrap_or("unknown");
-        bail!("resolve_failed: {}", clip(reason, 300));
-    }
-    Ok(reply)
-}
-
 // ── 소켓 쪽 ───────────────────────────────────────────────────────────────────
 
 /// 학생 칸의 요청 하나. 폰에서 사람이 Face ID 로 허락하면 참조 순서대로 값을 돌려준다.
 pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyhow::Result<Vec<String>> {
-    let s = settings()?.ok_or_else(|| anyhow!("op_token_missing"))?;
-    check_refs(refs, &s)?;
+    check_refs(refs)?;
     let mut trusted = trusted()?;
     if trusted.is_empty() {
         // 폰이 막 「연결」했으면 화면의 1분 주기 전이라도 여기서 믿는다.
@@ -497,14 +410,8 @@ pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyho
         bail!("{reason}");
     }
     let started = Instant::now();
-    match run_helper("resolve", &s.token, refs) {
-        Ok(reply) => {
-            let values: Vec<String> =
-                reply["values"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
-            if values.len() != refs.len() {
-                finish("failed", json!({"reason": "helper_failed", "by": by}));
-                bail!("helper_failed");
-            }
+    match resolve(refs) {
+        Ok(values) => {
             finish("resolved", json!({"by": by, "ms": started.elapsed().as_millis() as u64}));
             Ok(values)
         }
@@ -516,51 +423,20 @@ pub fn read(refs: &[String], command: &str, cwd: &str, origin: &Origin) -> anyho
     }
 }
 
-/// 토큰 유무·허용 금고·믿는 열쇠 — 값과 토큰은 없다. 소켓에도 열려 있다.
+/// 믿는 폰 열쇠 — 값은 없다. 소켓에도 열려 있다. `token` 은 옛 폰 앱이 「준비됨」으로 읽는 칸이라 늘 참으로 둔다
+/// (키체인은 따로 넣을 것이 없다).
 pub fn status() -> Value {
-    let s = settings();
-    let helper = helper_path().is_ok();
-    match s {
-        Ok(s) => json!({
-            "token": s.is_some(),
-            "vault": s.as_ref().map(|s| s.vault_name.clone()),
-            "trusted": trusted().unwrap_or_default().iter().map(|t| json!({"label": t.label, "fingerprint": key_fingerprint(&t.id)})).collect::<Vec<_>>(),
-            "helper": helper,
+    match trusted() {
+        Ok(list) => json!({
+            "source": "keychain",
+            "token": true,
+            "trusted": list.iter().map(|t| json!({"label": t.label, "fingerprint": key_fingerprint(&t.id)})).collect::<Vec<_>>(),
         }),
-        Err(error) => json!({"token": false, "error": error.to_string(), "helper": helper}),
+        Err(error) => json!({"source": "keychain", "token": false, "error": error.to_string()}),
     }
 }
 
 // ── 앱 화면 쪽(소켓에 없다) ───────────────────────────────────────────────────
-
-/// 사람이 앱 화면의 암호 칸에 넣은 토큰. 실행기로 그 토큰이 보는 금고를 물어, 금고가 **하나**일 때만 받는다.
-pub fn set_token(token: &str) -> anyhow::Result<String> {
-    let token = token.trim();
-    anyhow::ensure!(token.starts_with("ops_") && token.len() < 8192 && !token.chars().any(char::is_whitespace), "token_invalid");
-    let reply = run_helper("vaults", token, &[])?;
-    let vaults = reply["vaults"].as_array().cloned().unwrap_or_default();
-    if vaults.len() != 1 {
-        bail!("vault_count:{}", vaults.len());
-    }
-    let name = vaults[0]["name"].as_str().unwrap_or_default().to_string();
-    let s = Settings {
-        token: token.to_string(),
-        vault_id: vaults[0]["id"].as_str().unwrap_or_default().to_string(),
-        vault_name: name.clone(),
-        added: now_ms(),
-    };
-    store_set(SETTINGS, &serde_json::to_string(&s)?)?;
-    CHANGED.store(true, Ordering::Relaxed);
-    audit(json!({"event": "token_set", "vault": name}));
-    Ok(name)
-}
-
-pub fn clear_token() -> anyhow::Result<()> {
-    store_delete(SETTINGS)?;
-    CHANGED.store(true, Ordering::Relaxed);
-    audit(json!({"event": "token_cleared"}));
-    Ok(())
-}
 
 fn same_key(k: &Value, t: &Trusted) -> bool {
     k["id"] == t.id.as_str() && k["device"] == t.device.as_str()
@@ -570,13 +446,6 @@ fn with_fingerprint(mut k: Value) -> Value {
     let id = k["id"].as_str().unwrap_or_default().to_string();
     k["fingerprint"] = json!(key_fingerprint(&id));
     k
-}
-
-/// 관문에 맡겨졌지만 이 맥이 아직 안 믿은 폰 열쇠 — 화면이 지문과 함께 「믿기」를 묻는다.
-pub fn untrusted_keys() -> anyhow::Result<Vec<Value>> {
-    let trusted = trusted()?;
-    let live = gateway::keys_blocking()?;
-    Ok(live.into_iter().filter(|k| !trusted.iter().any(|t| same_key(k, t))).map(with_fingerprint).collect())
 }
 
 /// 사람 확인 없이 믿을 폰 열쇠(2026-10-13 결정 — 연결은 폰 Face ID 한 번으로 끝난다).
@@ -693,8 +562,8 @@ mod tests {
     }
 
     fn sent(nonce: &str) -> Sent {
-        let refs = vec!["op://kasaterm-agents/db/password".to_string()];
-        let text = challenge("geno", "book", nonce, 100_000, &origin(), "/repo", "kasaterm-cli op read op://kasaterm-agents/db/password", &refs);
+        let refs = vec!["keychain://db.example#deploy".to_string()];
+        let text = challenge("geno", "book", nonce, 100_000, &origin(), "/repo", "kasaterm-cli secret read keychain://db.example#deploy", &refs);
         Sent { id: "apv_1".into(), challenge: text, nonce: nonce.into(), exp: 100_000 }
     }
 
@@ -724,7 +593,7 @@ mod tests {
 
         // 관문이 도전값을 바꿔치기(변조).
         let mut swapped = allowed(&s, &phone, &good);
-        swapped["challenge"] = json!(s.challenge.replace("db/password", "db/other"));
+        swapped["challenge"] = json!(s.challenge.replace("db.example#deploy", "db.example#other"));
         assert_eq!(run(&swapped, &[phone.trusted()], &[phone.live()], 1_000), Err("challenge_changed"));
         // 사람이 이 맥에서 믿지 않은 키(관문이 끼워 넣은 키).
         let stranger = Phone::new();
@@ -755,53 +624,30 @@ mod tests {
     }
 
     #[test]
-    fn only_refs_in_the_one_allowed_vault_are_asked() {
-        let s = Settings { token: String::new(), vault_id: "abcd1234".into(), vault_name: "kasaterm-agents".into(), added: 0 };
-        let ok = |r: &[&str]| check_refs(&r.iter().map(|x| x.to_string()).collect::<Vec<_>>(), &s).map_err(|e| e.to_string());
-        assert!(ok(&["op://kasaterm-agents/db/password"]).is_ok());
-        assert!(ok(&["op://Kasaterm-Agents/db/section/password", "op://abcd1234/api/credential?attribute=otp"]).is_ok());
-        assert_eq!(ok(&["op://Private/bank/password"]).unwrap_err(), "vault_not_allowed");
-        assert_eq!(ok(&["op://kasaterm-agents/db"]).unwrap_err(), "bad_ref");
-        assert_eq!(ok(&["https://kasaterm-agents/db/password"]).unwrap_err(), "bad_ref");
-        assert_eq!(ok(&["op://kasaterm-agents//password"]).unwrap_err(), "bad_ref");
+    fn keychain_refs_name_a_service_and_maybe_an_account() {
+        assert_eq!(parse_ref("keychain://github.com"), Some(("github.com", None)));
+        assert_eq!(parse_ref("keychain://db#me@x.com"), Some(("db", Some("me@x.com"))));
+        assert_eq!(parse_ref("keychain://a#b#c"), Some(("a#b", Some("c"))), "계정은 마지막 # 뒤");
+        for bad in ["keychain://", "keychain://#me", "keychain://svc#", "op://vault/item/field", "github.com"] {
+            assert!(parse_ref(bad).is_none(), "{bad}");
+        }
+        let ok = |r: &[&str]| check_refs(&r.iter().map(|x| x.to_string()).collect::<Vec<_>>()).map_err(|e| e.to_string());
+        assert!(ok(&["keychain://db#deploy", "keychain://api"]).is_ok());
         assert_eq!(ok(&[]).unwrap_err(), "bad_ref");
+        assert_eq!(ok(&["op://kasaterm-agents/db/password"]).unwrap_err(), "bad_ref", "1Password 참조는 더 안 받는다");
+        assert_eq!(ok(&["keychain://a\nb"]).unwrap_err(), "bad_ref");
     }
 
     #[test]
     fn the_challenge_masks_other_secrets_in_the_command_but_keeps_the_refs() {
-        let refs = vec!["op://kasaterm-agents/db/password".to_string()];
+        let refs = vec!["keychain://db.example#deploy".to_string()];
         let text = challenge("geno", "book", "n", 9, &origin(), "/repo",
-            "kasaterm-cli op run -e DB=op://kasaterm-agents/db/password -- curl -H 'Authorization: Bearer sk-live-abcdefghijklmnop'", &refs);
+            "kasaterm-cli secret run -e DB=keychain://db.example#deploy -- curl -H 'Authorization: Bearer sk-live-abcdefghijklmnop'", &refs);
         let v: Value = serde_json::from_str(&text).unwrap();
         assert!(!v["command"].as_str().unwrap().contains("sk-live"), "{}", v["command"]);
-        assert_eq!(v["refs"][0], "op://kasaterm-agents/db/password");
+        assert_eq!(v["refs"][0], "keychain://db.example#deploy");
+        assert_eq!(v["kind"], "keychain.read");
         assert_eq!(v["student"], "유우카");
-        assert_eq!(v["kind"], "op.read");
-    }
-
-    /// 손으로 돌리는 시험 — 서명 신원이 있는 기계에서 `KASA_OP_SIGTEST_DIR` 에 서명별 kasa-op 사본을 두고
-    /// `cargo test -p kasa-mcp op_approval::tests::helper_signature -- --ignored` (docs/op-faceid-approval.md).
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore]
-    fn helper_signature_must_be_our_team_and_name() {
-        let dir = PathBuf::from(std::env::var("KASA_OP_SIGTEST_DIR").expect("KASA_OP_SIGTEST_DIR"));
-        let team = std::env::var("KASA_OP_SIGTEST_TEAM").expect("KASA_OP_SIGTEST_TEAM");
-        let check = |name: &str| {
-            let mut child = std::process::Command::new(dir.join(name))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let verdict = verify_helper_team(child.id(), &team).is_ok();
-            let _ = child.kill();
-            let _ = child.wait();
-            verdict
-        };
-        assert!(check("ours/kasa-op"), "우리 팀이 kasa-op 이름으로 서명한 실행기를 거절했다");
-        assert!(!check("adhoc/kasa-op"), "서명 없는(ad-hoc) 실행기를 받았다");
-        assert!(!check("renamed/kasa-op"), "다른 이름으로 서명한 실행기를 받았다");
-        assert!(!check("other-team/kasa-op"), "다른 팀이 서명한 실행기를 받았다");
     }
 
     #[test]
@@ -820,6 +666,18 @@ mod tests {
         assert_eq!(auto_pick(&[first.trusted()], &[second_live.clone()], &[]), vec![second_live.clone()]);
         // 사람이 맥에서 거둔 열쇠는 다시 집지 않는다.
         assert!(auto_pick(&[], &[first.live()], &[first.id()]).is_empty());
+    }
+
+    /// 손으로 돌리는 시험 — `security add-generic-password -A -s kasaterm.probe -a probe -w probe-value` 로 넣은 항목을 읽는다
+    /// (`-A` 라 허용 창이 안 뜬다). `cargo test -p kasa-mcp real_keychain -- --ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn a_real_keychain_item_is_read_by_service_and_account() {
+        assert_eq!(keychain::value("kasaterm.probe", Some("probe")).unwrap(), b"probe-value");
+        assert_eq!(keychain::value("kasaterm.probe", None).unwrap(), b"probe-value");
+        assert_eq!(keychain::value("kasaterm.probe", Some("nobody")).unwrap_err().to_string(), "not_found");
+        assert_eq!(keychain::value("kasaterm.no-such-service", None).unwrap_err().to_string(), "not_found");
     }
 
     #[test]

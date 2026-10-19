@@ -90,7 +90,7 @@ class _ApprovalScreenState extends State<ApprovalScreen> {
         backgroundColor: Colors.transparent,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
-          title: Text(a?.isSecret == true ? '1Password 승인 요청' : '승인 요청'),
+          title: Text(a?.isSecret == true ? a!.secretTitle : '승인 요청'),
           leading: IconButton(
             tooltip: '닫기',
             icon: const Icon(Icons.close_rounded),
@@ -213,7 +213,7 @@ class _Body extends StatelessWidget {
                 _Band(
                   key: const Key('approval-secret-note'),
                   text: a.secretValid
-                      ? '허락하면 이 참조를 이번 한 번만 읽어요. 값은 이 폰과 관문을 지나지 않고 요청한 프로세스에만 가요.'
+                      ? '허락하면 이 항목을 맥에서 이번 한 번만 꺼내요. 값은 이 폰과 관문을 지나지 않고 요청한 프로세스에만 가요.'
                       : '요청 모양이 맞지 않아 허락할 수 없어요.',
                   color: a.secretValid ? scheme.primary : scheme.error,
                 ),
@@ -221,13 +221,13 @@ class _Body extends StatelessWidget {
                   const SizedBox(height: Look.rowGap * 2),
                   _Band(
                     key: const Key('approval-no-key'),
-                    text: '이 폰이 아직 1Password 에 연결되지 않았어요. 「Face ID 로 연결」을 한 번 누르면 맥까지 이어져 허락할 수 있어요.',
+                    text: '이 폰이 아직 비밀 승인에 연결되지 않았어요. 「Face ID 로 연결」을 한 번 누르면 맥까지 이어져 허락할 수 있어요.',
                     color: scheme.error,
                   ),
                   const SizedBox(height: Look.rowGap * 2),
                   _Button(
                     key: const Key('approval-make-key'),
-                    label: '1Password 연결',
+                    label: 'Face ID 로 연결',
                     fill: scheme.primary.withValues(alpha: 0.14),
                     ink: scheme.primary,
                     onPressed: make,
@@ -453,7 +453,7 @@ class ApprovalBanner extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${a.student.isEmpty ? '학생' : a.student} · ${a.isSecret ? '1Password 승인 요청' : '승인 요청'}',
+                                '${a.student.isEmpty ? '학생' : a.student} · ${a.isSecret ? a.secretTitle : '승인 요청'}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(fontSize: Look.body, fontWeight: FontWeight.w600),

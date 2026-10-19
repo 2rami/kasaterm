@@ -171,7 +171,7 @@ impl App {
         let mut fresh = Vec::new();
         for a in &st.items {
             let Some(id) = a["id"].as_str() else { continue };
-            // 1Password 비밀 요청은 폰 Face ID 서명으로만 허락된다 — 맥 시트의 [허락]은 관문이 받지 않는다.
+            // 키체인 비밀 요청은 폰 Face ID 서명으로만 허락된다 — 맥 시트의 [허락]은 관문이 받지 않는다.
             if a["state"] != "pending" || st.me.as_deref() == a["device"].as_str() || a["kind"] == "secret" {
                 continue;
             }

@@ -2609,7 +2609,7 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Appearance => "테마 theme 색상 밝기 다크 폰트 font 글꼴 커서 배율 크기 기기 아이콘 appearance color cursor scale",
         SettingsCat::Statusbar => "하단 상태줄 상태바 사용량 cpu 메모리 계정 표시 statusbar usage memory",
         SettingsCat::Weather => "날씨 비 애니메이션 움직임 투명도 weather rain motion",
-        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth claude codex kasa 구글 github 1password 자동 전환 한도 사용량 account login password",
+        SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth claude codex kasa 구글 github 키체인 비밀 승인 keychain secret 자동 전환 한도 사용량 account login password",
         SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
         SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 크롬 chrome 브라우저 device connection machine browser",

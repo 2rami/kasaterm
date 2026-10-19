@@ -209,7 +209,6 @@ impl State {
             kasa_mcp::device_auth::cancel_oauth();
         }
         self.work.hide();
-        self.op.hide();
         self.profile.hide();
     }
 

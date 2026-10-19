@@ -79,7 +79,7 @@ pub async fn create(student: &str, pane: &str, cwd: &str, tool: &str, input: &Va
     Ok(call(&cred, reqwest::Method::POST, "", Some(body), None).await?["approval"].clone())
 }
 
-/// 비밀 요청 하나를 올린다(docs/op-faceid-approval.md). 칸·학생·명령·참조는 도전값 안에만 있다.
+/// 비밀 요청 하나를 올린다(docs/secret-faceid-approval.md). 칸·학생·명령·참조는 도전값 안에만 있다.
 pub async fn create_secret(challenge: &str) -> anyhow::Result<Value> {
     let cred = credential()?;
     let body = json!({"kind": "secret", "challenge": challenge});

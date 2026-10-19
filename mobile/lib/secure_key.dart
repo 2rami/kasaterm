@@ -17,7 +17,7 @@ String approvalFingerprint(String id) {
 }
 
 /// 승인 열쇠 — 개인 키는 폰(Secure Enclave) 밖으로 안 나가고 Face ID 가 풀어야 서명한다
-/// (docs/op-faceid-approval.md). 시험은 가짜를 꽂는다.
+/// (docs/secret-faceid-approval.md). 시험은 가짜를 꽂는다.
 abstract class ApprovalSigner {
   /// 있는 열쇠의 공개키(base64 X9.63). 없으면 null.
   Future<String?> publicKey();

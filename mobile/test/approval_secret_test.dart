@@ -16,17 +16,17 @@ import 'relay_account_test.dart' show session;
 /// 관문·맥 시험(`approval_text::key_id`)과 같은 벡터 — 공개키 0x04,1..64.
 const vectorPublic = 'BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=';
 
-String challenge({String nonce = '00112233445566778899aabbccddeeff'}) => jsonEncode({
+String challenge({String nonce = '00112233445566778899aabbccddeeff', bool legacy = false}) => jsonEncode({
   'v': 1,
-  'kind': 'op.read',
+  'kind': legacy ? 'op.read' : 'keychain.read',
   'nonce': nonce,
   'account': 'geno',
   'device': 'dev_book',
   'student': '유우카',
   'pane': '%3',
   'cwd': '/Users/kasa/repo',
-  'command': 'kasaterm-cli op run -e DB=op://kasaterm-agents/db/password -- psql',
-  'refs': ['op://kasaterm-agents/db/password'],
+  'command': legacy ? 'kasaterm-cli op run -e DB=op://kasaterm-agents/db/password -- psql' : 'kasaterm-cli secret run -e DB=keychain://db.example#deploy -- psql',
+  'refs': [legacy ? 'op://kasaterm-agents/db/password' : 'keychain://db.example#deploy'],
   'exp': 120000,
 });
 
@@ -40,9 +40,9 @@ Map<String, Object?> secretPending({String? text}) => {
   'student': '다른 이름',
   'pane': '%9',
   'cwd': '/elsewhere',
-  'tool': '1Password',
+  'tool': '키체인',
   'fields': [
-    {'name': 'refs', 'label': '참조', 'text': 'op://somewhere/else/x'},
+    {'name': 'refs', 'label': '참조', 'text': 'keychain://somewhere#else'},
   ],
   'truncated': false,
   'created': 0,
@@ -89,11 +89,17 @@ void main() {
     expect(a.student, '유우카');
     expect(a.pane, '%3');
     expect(a.cwd, '/Users/kasa/repo');
-    expect(a.refs, ['op://kasaterm-agents/db/password']);
-    expect(a.fields.first.text, 'op://kasaterm-agents/db/password');
-    expect(a.fields.last.text, contains('op run'));
+    expect(a.refs, ['keychain://db.example#deploy']);
+    expect(a.fields.first.text, 'keychain://db.example#deploy');
+    expect(a.fields.last.text, contains('secret run'));
     final broken = Approval.fromJson(secretPending(text: '{"v":2}'))!;
     expect(broken.secretValid, isFalse);
+    // 아직 키체인 판으로 안 올린 맥의 1Password 요청도 읽는다. 종류와 참조 꼴이 엇갈리면 허락할 수 없다.
+    final legacy = Approval.fromJson(secretPending(text: challenge(legacy: true)))!;
+    expect(legacy.secretValid, isTrue);
+    expect(legacy.refs, ['op://kasaterm-agents/db/password']);
+    final mixed = challenge().replaceFirst('keychain://db.example#deploy"]', 'op://kasaterm-agents/db/password"]');
+    expect(Approval.fromJson(secretPending(text: mixed))!.secretValid, isFalse);
   });
 
   ApprovalCenter centerWith(http.Client client, FakeSigner signer) {
@@ -158,10 +164,10 @@ void main() {
     final center = centerWith(client, FakeSigner());
     await tester.pumpWidget(MaterialApp(theme: buildTheme(Brightness.light), home: ApprovalScreen(center: center, id: 'apv_0123456789abcdef0123456789abcdef')));
     await tester.pump();
-    expect(find.text('1Password 승인 요청'), findsOneWidget);
+    expect(find.text('키체인 승인 요청'), findsOneWidget);
     expect(find.text('Face ID 로 허락'), findsOneWidget);
     expect(find.byKey(const Key('approval-secret-note')), findsOneWidget);
-    expect(find.text('op://kasaterm-agents/db/password'), findsOneWidget);
+    expect(find.text('keychain://db.example#deploy'), findsOneWidget);
 
     center.debugSeed([Approval.fromJson(secretPending(text: 'not json'))!]);
     await tester.pump();

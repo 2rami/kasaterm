@@ -19,8 +19,10 @@ const mine = '0ED3-A6AB-957F';
 
 /// 관문 열쇠 창구와 맥 한 대(`mini`)를 흉내 낸다. 맥은 열쇠가 맡겨진 뒤 `op-link` 를 받으면 그 폰을 믿는다.
 class Rig {
-  Rig({this.token = true});
+  Rig({this.keychain = true, this.token = false});
 
+  /// 키체인 판 맥이면 참, 아니면 1Password 로 읽던 옛 판(토큰 여부는 [token]).
+  final bool keychain;
   final bool token;
   final registered = <String>[];
   final links = <String>[];
@@ -43,7 +45,12 @@ class Rig {
           return http.Response(
             jsonEncode({
               'ok': true,
-              'op': {'token': token, 'vault': token ? 'KASA 학생' : null, 'trusted': [if (registered.isNotEmpty) {'label': '폰', 'fingerprint': mine}]},
+              'op': {
+                if (keychain) 'source': 'keychain',
+                'token': keychain || token,
+                if (!keychain) 'vault': token ? 'KASA 학생' : null,
+                'trusted': [if (registered.isNotEmpty) {'label': '폰', 'fingerprint': mine}],
+              },
             }),
             200,
             headers: utf8Json,
@@ -68,36 +75,46 @@ void main() {
     await tester.pumpWidget(host(rig, signer));
     await tester.pumpAndSettle();
     expect(find.text('Face ID 로 연결'), findsOneWidget);
-    expect(find.text('1Password 연결됨 · 이 폰은 아직이에요'), findsOneWidget);
+    expect(find.text('이 폰은 아직이에요'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('op-link')));
     await tester.pumpAndSettle();
     expect(rig.registered, hasLength(1));
     expect(find.text('연결됐어요'), findsOneWidget);
-    expect(find.text('연결됨 · 금고 「KASA 학생」'), findsOneWidget);
+    expect(find.text('연결됨 · 이 맥 키체인'), findsOneWidget);
     expect(find.text('Face ID 로 연결'), findsNothing);
   });
 
-  testWidgets('Face ID 를 취소하면 아무것도 맡기지 않고, 토큰 없는 맥은 할 일을 적는다', (tester) async {
-    final rig = Rig(token: false);
+  testWidgets('Face ID 를 취소하면 아무것도 맡기지 않고, 토큰 없는 옛 판 맥은 업데이트하라고 적는다', (tester) async {
+    final rig = Rig(keychain: false);
     final signer = FakeSigner(public: null, answer: null);
     await tester.pumpWidget(host(rig, signer));
     await tester.pumpAndSettle();
-    expect(find.textContaining('「1Password 연결」을 한 번 눌러 주세요'), findsOneWidget);
+    expect(find.textContaining('새 판으로 업데이트해 주세요'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('op-link')));
     await tester.pumpAndSettle();
     expect(rig.registered, isEmpty);
     expect(find.text('Face ID 로 연결'), findsOneWidget);
 
-    // Face ID 를 마치면 폰은 이어지지만 맥 토큰이 없으니 「연결됐어요」가 아니다.
+    // Face ID 를 마치면 폰은 이어지지만 그 맥이 아직 쓸 수 없으니 「연결됐어요」가 아니다.
     signer.answer = 'MEUCIQ==';
     await tester.tap(find.byKey(const Key('op-link')));
     await tester.pumpAndSettle();
     expect(rig.registered, hasLength(1));
     expect(find.text('맥에서 한 번만 더'), findsOneWidget);
     expect(find.text('연결됐어요'), findsNothing);
-    expect(find.text('이 폰을 믿어요 · 1Password 연결이 남았어요'), findsOneWidget);
+    expect(find.textContaining('새 판으로 업데이트해 주세요'), findsOneWidget);
+  });
+
+  testWidgets('토큰을 넣어 둔 옛 판 맥도 허락할 수 있는 맥으로 센다', (tester) async {
+    final rig = Rig(keychain: false, token: true);
+    await tester.pumpWidget(host(rig, FakeSigner(public: null)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('op-link')));
+    await tester.pumpAndSettle();
+    expect(find.text('연결됐어요'), findsOneWidget);
+    expect(find.textContaining('옛 판(1Password)'), findsOneWidget);
   });
 
   testWidgets('맥 목록 없이(승인 화면에서) 들어와도 맡기고 나면 연결로 보인다', (tester) async {
@@ -121,5 +138,9 @@ void main() {
     expect(OpLink.parse({'ok': false, 'error': 'unknown action'}), isNull);
     final link = OpLink.parse({'ok': true, 'op': {'token': true, 'vault': 'KASA 학생', 'trusted': [{'fingerprint': mine}]}})!;
     expect(link.trusted, [mine]);
+    expect(link.keychain, isFalse);
+    final now = OpLink.parse({'ok': true, 'op': {'source': 'keychain', 'token': true, 'trusted': []}})!;
+    expect(now.keychain, isTrue);
+    expect(now.ready, isTrue);
   });
 }

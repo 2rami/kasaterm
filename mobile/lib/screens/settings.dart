@@ -489,8 +489,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         key: const Key('approval-key'),
         tone: tone,
         icon: Icons.fingerprint_rounded,
-        title: '1Password',
-        subtitle: '학생의 1Password 요청을 Face ID 로 허락',
+        title: '비밀 승인',
+        subtitle: '학생이 맥 키체인 비밀을 쓸 때 Face ID 로 허락',
         chevron: true,
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute<void>(
