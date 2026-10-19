@@ -7,12 +7,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub(crate) const WIDGETS: [&str; 9] = [
+pub(crate) const WIDGETS: [&str; 8] = [
     "claude",
     "codex",
     "ports",
     "schedules",
-    "pet",
     "clipboard",
     "resources",
     "devices",
@@ -244,7 +243,7 @@ fn valid_usage_field(field: &str) -> bool {
 pub(crate) fn group(id: &str) -> u8 {
     match id {
         "claude" | "codex" => 0,
-        "ports" | "schedules" | "pet" | "clipboard" => 1,
+        "ports" | "schedules" | "clipboard" => 1,
         _ => 2,
     }
 }

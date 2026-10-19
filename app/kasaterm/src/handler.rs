@@ -6261,13 +6261,6 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    if let Some(r) = self.statusbar.pet_rect {
-                        if sb_hit(&r) {
-                            self.settings_apply(SettingsAction::TogglePet);
-                            window.request_redraw();
-                            return;
-                        }
-                    }
                     // Image-pane action buttons (zoom-out/in, rotate, reset).
                     // Checked before the tab/plus path so the image-only
                     // chrome cluster is never swallowed by tab hit-tests.
@@ -7872,13 +7865,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
-        // 바탕화면 펫에게 지금 판을 넘긴다. 펫이 꺼져 있으면 즉시 나간다.
-        self.pet_publish_board();
-        self.tick_pet_downloads();
+        // 상태 피드를 읽는 앱(따로 뗀 바탕화면 펫)에게 지금 판을 넘긴다. 읽는 쪽이 없으면 즉시 나간다.
+        self.publish_status_feed();
         self.poll_device_icon_import();
-        if let Some(error) = crate::chrome::take_pet_failure() {
-            self.set_toast(error);
-        }
         // 이사 예약 — 턴 중이라 미뤄 둔 이사를, 스피너가 꺼진 것을 보고 실행한다.
         // 큐가 비어 있으면 즉시 나가므로 매 턴 불러도 공짜다.
         self.run_pending_migrations();
@@ -8242,7 +8231,6 @@ impl ApplicationHandler<UserEvent> for App {
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
                 .chain(self.migrate_handoff.as_ref().map(|h| h.at))
                 .chain(self.transfer_launch_tick())
-                .chain(self.statusbar.pet_refresh)
                 .chain(lid_away_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))

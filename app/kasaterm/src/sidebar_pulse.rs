@@ -102,7 +102,7 @@ fn overlay_json(digest: &PulseDigest, face: impl Fn(&WaitingStudent) -> Option<S
 /// 바뀐 때, 그리고 20초마다 쓴다 — 펫은 mtime 이 1분 넘게 멈추면 카사텀이 꺼진 것으로 보고 판을
 /// 내린다(옛 숫자를 떠 있게 두면 「사람 차례 0」을 믿고 자리를 비운다). 반쯤 쓴 파일을 읽지 않게
 /// 옆에 쓰고 옮긴다.
-fn write_pet_overlay(dir: &std::path::Path, digest: &PulseDigest) {
+fn write_status_overlay(dir: &std::path::Path, digest: &PulseDigest) {
     const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(20);
     static LAST: Mutex<(String, Option<Instant>)> = Mutex::new((String::new(), None));
     let faces = dir.join("faces");
@@ -361,7 +361,7 @@ impl App {
             return;
         }
         // 사이드바를 접어도 읽는다 — 현황판은 카사텀이 가려진 동안 보는 자리다.
-        if crate::chrome::pet_pid().is_none() {
+        if !crate::chrome::status_feed_read() {
             return;
         }
         let Some(backend) = self.socket_backend.clone() else {
@@ -376,8 +376,8 @@ impl App {
                 .collab_snapshot(&serde_json::json!({"scope": "all"}))
                 .map_err(|e| e.to_string())
                 .and_then(crate::board_digest::pulse_digest);
-            if let (Ok(digest), Some(dir)) = (result.as_ref(), crate::chrome::pet_model_dir()) {
-                write_pet_overlay(&dir, digest);
+            if let (Ok(digest), Some(dir)) = (result.as_ref(), crate::chrome::status_feed_dir()) {
+                write_status_overlay(&dir, digest);
             }
             *mailbox.lock().unwrap() = Some(result.map(|_| ()));
             let _ = proxy.send_event(UserEvent::Redraw);

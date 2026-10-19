@@ -29,16 +29,15 @@ bash scripts/build-app.sh      # dist/kasaterm.app 을 새로 굽는다
 (`kasaterm-remote`)이 있고, 그 `bake` 동사가 맥북 레포의 `scripts/remote-bake.sh` 를 돌린다(2026-09-17).
 
 ```bash
-scripts/macbook-bake.sh status    # 맥북 판: HEAD·미커밋·dist/설치본 시각·펫·서비스
-scripts/macbook-bake.sh pet       # pull → 펫만 갈아 끼우고 다시 띄움 — 즉시 반영
+scripts/macbook-bake.sh status    # 맥북 판: HEAD·미커밋·dist/설치본 시각·서비스
 scripts/macbook-bake.sh journal   # pull → request-journal(펫의 뇌) 재시작 — 즉시 반영
 scripts/macbook-bake.sh app       # pull → build-app.sh (다른 pane 이 Rust 를 만지면 거부한다, --force 로 강행)
 ```
 
 - **먼저 push 해라.** 맥북은 `git pull --ff-only origin main` 으로 받으므로 안 올린 커밋은 안 구워진다.
 - **앱 껐다 켜기(자기설치)는 네가 하지 않는다** — 거노나 나쵸가 한다. `app` 을 구웠으면 「구웠다, 껐다 켜면 반영」까지만 보고한다.
-- 셋 중 어느 것이 필요한지는 고친 자리로 정한다: 펫 그림·말풍선·메뉴 → `pet`, 펫의 뇌·나쵸 말투·집컴 전원(`tools/request_journal`) → `journal`, 앱 본체 → `app`.
-- 맥북에 있을 때의 펫 전용 길은 `scripts/pet-reload.sh` 다(앱 굽기·앱 재시작 없이 펫만).
+- 어느 것이 필요한지는 고친 자리로 정한다: 펫의 뇌·나쵸 말투·집컴 전원(`tools/request_journal`) → `journal`, 앱 본체 → `app`.
+- 바탕화면 펫은 카사텀에서 떼어 냈다(2026-10-19) — 굽기·띄우기는 `~/Desktop/momewomo/kasapet/scripts/run.sh`.
 
 그 다음은 **거노가 앱을 껐다 켜면 끝난다.** 종료 시 `arm_self_install`(main.rs)이 도우미를 남겨, 프로세스가 완전히 사라진 뒤 `dist` 를 설치본 자리에 복사한다. 그래서 다음에 켜는 것이 새 바이너리다. 다시 띄워 주지는 않는다 — 끄려고 끈 것일 수도 있어서다. 결과는 `$TMPDIR/kasaterm-selfinstall.log`.
 

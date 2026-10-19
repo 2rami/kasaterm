@@ -5,7 +5,6 @@
 
 use super::*;
 mod login_probe;
-mod pet_models;
 
 #[path = "native_device_account.rs"]
 pub(crate) mod device_account;
@@ -640,13 +639,6 @@ pub(crate) fn same_keyboard_target(a: &Target, b: &Target) -> bool {
         (Target::Setting(SettingsAction::AgentStatusline(a, _)), Target::Setting(SettingsAction::AgentStatusline(b, _))) => a == b,
         (Target::Setting(SettingsAction::AgentStatuslineCustom(_)), Target::Setting(SettingsAction::AgentStatuslineCustom(_))) => true,
         (Target::Setting(SettingsAction::CharacterPick(at, an, _)), Target::Setting(SettingsAction::CharacterPick(bt, bn, _))) => at == bt && an == bn,
-        (Target::Setting(SettingsAction::PetPreference(a)), Target::Setting(SettingsAction::PetPreference(b))) => {
-            use kasa_pet_config::PreferenceChange as P;
-            matches!((a, b), (P::FollowCursor(_), P::FollowCursor(_)) | (P::Animations(_), P::Animations(_))
-                | (P::Bubbles(_), P::Bubbles(_)) | (P::ActivityReactions(_), P::ActivityReactions(_))
-                | (P::AlwaysOnTop(_), P::AlwaysOnTop(_)) | (P::LockPosition(_), P::LockPosition(_))
-                | (P::Chatter(_), P::Chatter(_))) || a == b
-        }
         _ => a == b,
     }
 }
@@ -655,9 +647,6 @@ pub(crate) fn same_stepper_target(a: &Target, b: &Target) -> bool {
     match (a, b) {
         (Target::Setting(SettingsAction::StatusBarH(_)), Target::Setting(SettingsAction::StatusBarH(_)))
         | (Target::Setting(SettingsAction::AccountAutoswitchPct(_)), Target::Setting(SettingsAction::AccountAutoswitchPct(_))) => true,
-        (Target::Setting(SettingsAction::PetPreference(a)), Target::Setting(SettingsAction::PetPreference(b))) => {
-            std::mem::discriminant(a) == std::mem::discriminant(b)
-        }
         _ => false,
     }
 }
@@ -2624,7 +2613,6 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
         SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 크롬 chrome 브라우저 device connection machine browser",
-        SettingsCat::Pet => "Live2D 펫 곽향 다운로드 바탕화면 캐릭터 알림 말풍선 움직임 pet desktop notification",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
     let haystack = search_text(&format!("{title} {detail} {aliases}"));
@@ -2904,7 +2892,6 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        SettingsCat::Pet => paint_pet(g, snapshot, &mut hits, content_x, &mut y, content_w),
         SettingsCat::Weather => paint_weather(g, snapshot, &mut hits, content_x, &mut y, content_w),
         SettingsCat::Feedback => paint_feedback(
             g,
@@ -3596,7 +3583,6 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "claude" => "Claude 사용량",
         "codex" => "Codex 사용량",
         "ports" => "열린 포트",
-        "pet" => "Live2D 펫",
         "clipboard" => "클립보드",
         "resources" => "기기 상태",
         "tunnel" => "모바일 연결",
@@ -3632,7 +3618,6 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
     match id {
         "ports" => ":3000 · :5173",
         "schedules" => "예약 2",
-        "pet" => "Live2D 펫",
         "clipboard" => "클립보드",
         "resources" => "CPU 18% · RAM 42%",
         "tunnel" => "모바일 연결됨",
@@ -4716,96 +4701,6 @@ fn machines_view() -> Vec<MachineRow> {
     rows
 }
 
-// 펫은 별도 프로세스라 양쪽이 공유하는 설정을 읽어 우클릭 변경도 여기 반영한다.
-fn paint_pet(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    let on = crate::chrome::pet_pid().is_some() || crate::chrome::pet_start_pending();
-    use kasa_pet_config::PreferenceChange as Change;
-    let prefs = crate::chrome::pet_preferences();
-    let scale = crate::chrome::pet_scale_percent(&prefs);
-
-    // 설명은 줄 안의 힌트로 — 줄 밑에 따로 그리면 구분선을 뚫고 지나갔다.
-    toggle_row_hint(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "바탕화면에 띄우기",
-        "kasaterm을 내려도 바탕화면에 남습니다",
-        on,
-        SettingsAction::TogglePet,
-    );
-    section_title(g, x, *y, "캐릭터", "");
-    *y += 54.0;
-    crate::chrome::ensure_pet_previews();
-    pet_models::paint(g, s, hits, x, y, w);
-
-    pet_section(g, x, y, "모습");
-    pet_value_row(g, s, hits, x, y, w, "펫 크기", &format!("{scale}%"),
-        Change::ScalePercent(Some(scale.saturating_sub(10).max(40))),
-        Change::ScalePercent(Some((scale + 10).min(300))));
-    pet_value_row(g, s, hits, x, y, w, "말풍선 글자 크기", &format!("{}pt", prefs.text_pt),
-        Change::TextPt(prefs.text_pt.saturating_sub(1).max(8)),
-        Change::TextPt((prefs.text_pt + 1).min(40)));
-    pet_value_row(g, s, hits, x, y, w, "말풍선 너비", &format!("{}px", prefs.bubble_width),
-        Change::BubbleWidth(prefs.bubble_width.saturating_sub(40).max(240)),
-        Change::BubbleWidth((prefs.bubble_width + 40).min(800)));
-    toggle_row(g, s, hits, x, y, w, "항상 위에 표시", prefs.always_on_top,
-        SettingsAction::PetPreference(Change::AlwaysOnTop(!prefs.always_on_top)));
-
-    pet_section(g, x, y, "움직임");
-    for (label, on, change) in [
-        ("마우스 시선 따라가기", prefs.follow_cursor, Change::FollowCursor(!prefs.follow_cursor)),
-        ("자동 움직임", prefs.animations, Change::Animations(!prefs.animations)),
-        ("위치 고정", prefs.lock_position, Change::LockPosition(!prefs.lock_position)),
-    ] {
-        toggle_row(g, s, hits, x, y, w, label, on, SettingsAction::PetPreference(change));
-    }
-    let sleep = if prefs.sleep_minutes == 0 {
-        crate::native_strings::text("안 함").into_owned()
-    } else {
-        format!("{}{}", prefs.sleep_minutes, crate::native_strings::text("분"))
-    };
-    pet_value_row(g, s, hits, x, y, w, "자동 휴식", &sleep,
-        Change::SleepMinutes(prefs.sleep_minutes.saturating_sub(1)),
-        Change::SleepMinutes((prefs.sleep_minutes + 1).min(60)));
-
-    pet_section(g, x, y, "알림");
-    toggle_row(g, s, hits, x, y, w, "말풍선 표시", prefs.bubbles,
-        SettingsAction::PetPreference(Change::Bubbles(!prefs.bubbles)));
-    toggle_row(g, s, hits, x, y, w, "작업 상태에 반응", prefs.activity_reactions,
-        SettingsAction::PetPreference(Change::ActivityReactions(!prefs.activity_reactions)));
-    pet_value_row(g, s, hits, x, y, w, "말풍선 표시 시간",
-        &format!("{}{}", prefs.say_seconds, crate::native_strings::text("초")),
-        Change::SaySeconds(prefs.say_seconds.saturating_sub(1).max(3)),
-        Change::SaySeconds((prefs.say_seconds + 1).min(60)));
-    toggle_row(g, s, hits, x, y, w, "먼저 말 걸기", prefs.chatter,
-        SettingsAction::PetPreference(Change::Chatter(!prefs.chatter)));
-    if prefs.chatter {
-        pet_value_row(g, s, hits, x, y, w, "말 거는 간격",
-            &format!("{}{}", prefs.chatter_seconds, crate::native_strings::text("초")),
-            Change::ChatterSeconds(prefs.chatter_seconds.saturating_sub(5).max(5)),
-            Change::ChatterSeconds((prefs.chatter_seconds + 5).min(120)));
-    }
-
-    pet_section(g, x, y, "펫 조작");
-    for text in [
-        "클릭으로 쓰다듬기 · 끌어서 자리 옮기기",
-        "휠로 크기 조절 · 말풍선을 누르면 그 창으로",
-        "우클릭으로 행동 선택과 기능 켜고 끄기",
-    ] {
-        plain_hint(g, x, y, w, text);
-    }
-}
-
 /// 날씨 — docs/weather.md 표의 모든 항목. 켜고 끄는 줄이 맨 위, 나머지는 켜기 전에도
 /// 미리 골라 둘 수 있게 늘 선다.
 fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
@@ -4882,31 +4777,6 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     *y += 54.0;
     toggle_row_hint(g, s, hits, x, y, w, "OS 설정 무시", "켜면 macOS 「동작 줄이기」「투명도 줄이기」를 따르지 않습니다",
         ws.ignore_os, act(Change::IgnoreOs(!ws.ignore_os)));
-}
-
-fn pet_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str) {
-    *y += 12.0;
-    section_title(g, x, *y, title, "");
-    *y += 54.0;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pet_value_row(
-    g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
-    x: f32, y: &mut f32, w: f32, label: &str, value: &str,
-    minus: kasa_pet_config::PreferenceChange, plus: kasa_pet_config::PreferenceChange,
-) {
-    let translated = crate::native_strings::text(label);
-    let label = if g.measure_chrome_text(&translated, 12.5, false) + 120.0 > w {
-        let shown = fit(g, label, w, 12.5, false);
-        draw_text(g, x + 2.0, *y + 8.0, &shown, 12.5, theme::text(), false);
-        *y += 28.0;
-        ""
-    } else {
-        label
-    };
-    stepper_row(g, s, hits, x, y, w, label, value,
-        SettingsAction::PetPreference(minus), SettingsAction::PetPreference(plus));
 }
 
 /// 덮으면 이사 — 학생이 일하는 중에 덮으면 고른 기기로 옮기고 잔다. 잠자기를 막는 허락(sudo)은
@@ -6730,11 +6600,6 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "sparkles",
             "창과 단추에 비를 내립니다. 끄면 그리는 비용이 없습니다",
         ),
-        SettingsCat::Pet => (
-            "Live2D 펫",
-            "sparkles",
-            "바탕화면에 서서 학생들 상황을 알려 주는 캐릭터입니다",
-        ),
         SettingsCat::Claude => (
             "코딩 에이전트",
             "claude",
@@ -7838,7 +7703,6 @@ mod tests {
         assert!(category_matches(SettingsCat::Appearance, "기기 아이콘"));
         assert!(category_matches(SettingsCat::Accounts, "CLAUDE 로그인"));
         assert!(category_matches(SettingsCat::Machines, "ssh 주소"));
-        assert!(!category_matches(SettingsCat::Pet, "ssh 주소"));
         assert!(!category_matches(SettingsCat::General, "존재하지않는설정"));
         for cat in SettingsCat::nav() { assert!(category_matches(*cat, "  ")); }
         assert_eq!(matching_categories("계정").first(), Some(&SettingsCat::Accounts));

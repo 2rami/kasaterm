@@ -25,7 +25,7 @@ class BuildManifestTests(unittest.TestCase):
         self.command("add", ".")
         self.command("commit", "-qm", "initial")
         self.bundle = self.project / "dist/kasaterm.app"
-        for relative in ("Contents/MacOS/kasaterm", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-serve-web", "Contents/Resources/kasapet"):
+        for relative in ("Contents/MacOS/kasaterm", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-serve-web"):
             path = self.bundle / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(relative.encode())

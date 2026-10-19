@@ -4604,9 +4604,6 @@ pub(crate) enum SettingsCat {
     /// 고칠까」는 다른 일인데 한 화면에 쌓여 있어, 캐릭터를 고치러 온 사람이
     /// 테마 격자를 지나 한참 내려가야 했다.
     Students,
-    /// 바탕화면 펫 — 창 밖에 서 있는 Live2D 캐릭터. 앱과 프로세스가 달라 kasaterm 을
-    /// 내려도 남으므로, 켜고 끄는 자리와 「누가 나올까」를 여기 둔다(2026-09-07 지시).
-    Pet,
     /// 날씨(리퀴드 비) — 창·판·단추에 비를 내린다. 기본 끔, 모든 항목을 사람이 고른다(docs/weather.md).
     Weather,
     /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
@@ -4619,7 +4616,7 @@ impl SettingsCat {
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
     /// `Weather`는 웹 설정에 대응하는 페이지가 없어 이 대조에서 제외한다.
     #[allow(dead_code)]
-    pub(crate) const ALL: [SettingsCat; 11] = [
+    pub(crate) const ALL: [SettingsCat; 10] = [
         Self::General,
         Self::Appearance,
         Self::Statusbar,
@@ -4629,7 +4626,6 @@ impl SettingsCat {
         Self::Machines,
         Self::Theme,
         Self::Students,
-        Self::Pet,
         Self::Feedback,
     ];
 
@@ -4640,7 +4636,7 @@ impl SettingsCat {
     /// 찾는 사람이 캐릭터 칸부터 지나야 했다(2026-10-07). 묶음 머리는 `native_settings::NAV_GROUPS`.
     /// `Shell` 은 글꼴·커서가 「외형」으로 간 뒤 셸 하나만 남아 「앱 일반」에 합쳤다(2026-10-07 승인) —
     /// 값은 딥링크·웹 키로 남고, 열면 「앱 일반」이 선다(`SettingsScene::set_category`).
-    pub(crate) const NAV: [SettingsCat; 10] = [
+    pub(crate) const NAV: [SettingsCat; 9] = [
         Self::Appearance,
         Self::Statusbar,
         Self::Weather,
@@ -4649,7 +4645,6 @@ impl SettingsCat {
         Self::Students,
         Self::General,
         Self::Machines,
-        Self::Pet,
         Self::Feedback,
     ];
 
@@ -4676,7 +4671,6 @@ impl SettingsCat {
             Self::Machines => "machines",
             Self::Theme => "theme",
             Self::Students => "students",
-            Self::Pet => "pet",
             Self::Weather => "weather",
             Self::Feedback => "feedback",
         }
@@ -4791,16 +4785,8 @@ pub(crate) enum SettingsAction {
     /// 최소 대비 프리셋 이름 (`theme::CONTRAST_PRESETS`).
     MinContrast(&'static str),
     ToggleFileTree,
-    /// 바탕화면 펫을 켜고 끈다.
-    TogglePet,
     /// 날씨 페이지의 한 번 누름.
     Weather(crate::weather::model::Change),
-    /// 펫으로 띄울 캐릭터 폴더 이름(`~/.config/kasaterm/pet/<이름>`).
-    PetCharacter(String),
-    PetDownload(String),
-    PetSource(String),
-    PetImport(String, bool),
-    PetPreference(kasa_pet_config::PreferenceChange),
     /// Editor autosave quiet period in ms; 0 = off.
     AutosaveDelay(u64),
     ShellPreset(String),

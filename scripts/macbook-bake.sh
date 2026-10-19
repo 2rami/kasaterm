@@ -3,7 +3,6 @@
 #
 #   scripts/macbook-bake.sh status          # 맥북 판 보기
 #   scripts/macbook-bake.sh app [--force]   # pull → 앱 전체 굽기(반영은 거노가 앱을 껐다 켜야)
-#   scripts/macbook-bake.sh pet             # pull → 펫만 갈아 끼우고 다시 띄움(즉시)
 #   scripts/macbook-bake.sh journal         # pull → 펫의 뇌 재시작
 #
 # 관문(nacho-tunnel-guard)은 argv[0] 이 맥북의 `~/.local/bin/kasaterm-remote` **절대 경로**일 때만

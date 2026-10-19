@@ -3,8 +3,6 @@ resolver = "2"
 # 크레이트 층과 의존 방향은 docs/workspace.md, 검사는 scripts/check-workspace.py.
 members = [
     "app/kasaterm",
-    "app/kasapet",
-    "crates/kasa-pet-config",
     "crates/kasa-socket",
     "crates/kasa-mcp",
     "crates/kasa-cells",
@@ -30,8 +28,6 @@ members = [
 ]
 default-members = [
     "app/kasaterm",
-    "app/kasapet",
-    "crates/kasa-pet-config",
     "crates/kasa-socket",
     "crates/kasa-mcp",
     "crates/kasa-cells",
@@ -72,7 +68,6 @@ kasa-gridview = { path = "crates/kasa-gridview" }
 kasa-ime = { path = "crates/kasa-ime" }
 kasa-mcp = { path = "crates/kasa-mcp" }
 kasa-net = { path = "crates/kasa-net" }
-kasa-pet-config = { path = "crates/kasa-pet-config" }
 kasa-pty = { path = "crates/kasa-pty", default-features = false }
 kasa-screen = { path = "crates/kasa-screen" }
 kasa-socket = { path = "crates/kasa-socket", default-features = false }

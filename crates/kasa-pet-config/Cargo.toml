@@ -1,7 +1,0 @@
-[package]
-name = "kasa-pet-config"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-serde_json.workspace = true

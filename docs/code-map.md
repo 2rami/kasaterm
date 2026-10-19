@@ -33,7 +33,6 @@
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
 - `render/status_bar/accounts.rs` — 제공된 사용량 창만 폭에 맞춰 표시하는 계정 칩. `statusbar/devices.rs`는 기기 연결·버전·업데이트 판, `statusbar/usage.rs`는 실행별 사용량 상세를 그린다.
 - `process_usage.rs` — PID·시작 시각과 PTY 세대로 실행 신원을 고정하고 개별 종료한다. 숨긴 다중 셸의 복원 기록을 나누고, 문서가 함께 숨겨졌으면 먼저 열어 개별 종료하게 한다. `screen_pump`의 EOF도 같은 PTY 세대일 때만 칸을 걷는다.
-- `settings/pet_models.rs` — Live2D 모델 목록 캐시·파일 선택·다운로드 다시 그리기. `native_settings/pet_models.rs`는 설치·받기·원작자 ZIP 들이기 화면이며, 모델 설치·기본값은 `chrome`과 `kasa-pet-config`가 맡는다.
 - `session/accounts/sync.rs` — 다른 기기의 Claude 계정 선택: 검증 신원 일치·중복 별명 판정, 최신 선택 직렬 전파와 기기별 적용 확인. 계약은 `docs/agent-account-selection.md`.
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
 - `sesscol.rs` + `sesscol/{model,paint}.rs` — 오른쪽 「기록」의 대화/닫은 칸 보기, 범위·하네스 필터와 선택 상세. 수집은 워커에서 하고 범위가 바뀐 뒤의 늦은 결과를 거른다. 대화 선택은 실행하지 않으며 별도 이어가기 버튼이 기존 ResumeSession 경로를 부른다. 닫은 칸의 UI 신원은 재사용되는 pane 번호와 분리한다.
@@ -76,7 +75,7 @@
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
 - `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤 빈 입력창을 확인해 붙여넣고 Enter(mod 칸도 같다 — 일하는 칸은 진행 중인 턴에 들어간다). 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
-- `board_digest.rs` — 모든 기기 보드 스냅샷(`collab.snapshot`)의 요약: 사람 차례·하는 중·끝 수와 사람을 기다리는 학생. 사이드바 학생 줄·펫 현황판이 쓴다. 보드 판은 걷었다(나쵸 대화·작업은 나쵸 독립 앱)
+- `board_digest.rs` — 모든 기기 보드 스냅샷(`collab.snapshot`)의 요약: 사람 차례·하는 중·끝 수와 사람을 기다리는 학생. 사이드바 학생 줄·상태 피드(`overlay.json`)가 쓴다. 보드 판은 걷었다(나쵸 대화·작업은 나쵸 독립 앱)
 - `sidebar_pulse.rs` — 사이드바 맨 위 「목록 | 배치도」 전환과 학생 줄 사정(모든 기기 보드의 사람 차례·작업·끝). 수는 `board_digest.rs`(원격 거울 줄 제외)를 백그라운드로 3초마다 읽고 펫 현황판에도 적는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
 - `native_device_account.rs` — 설정 「계정」의 KASA 계정(로그인·Google·GitHub 연결·선택). 자식 `native_account_profile.rs` 는 얼굴 줄(프사·닉네임)·「로그인 방법」·아이디·비밀번호 바꾸기, `native_work_permissions.rs` 는 일 권한. 관문 쪽은 `kasa_mcp` 의 `gateway_profile.rs`(`/relay/profile`)·`device_profile.rs`(이 기기 호출) — `docs/account-oauth.md` 「Profile」

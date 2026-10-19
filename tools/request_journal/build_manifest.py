@@ -151,7 +151,7 @@ def finish(snapshot_path, bundle, output, *, signature_verifier=verify_signature
     if signature.get("verified") is not True:
         raise ValueError("Bundle changed after signing; no ready manifest was published")
     component_paths = {"app": "Contents/MacOS/kasaterm", "cli": "Contents/MacOS/kasaterm-cli",
-                       "web_service": "Contents/MacOS/kasa-serve-web", "pet": "Contents/Resources/kasapet"}
+                       "web_service": "Contents/MacOS/kasa-serve-web"}
     if any(path not in hashes["files"] for path in component_paths.values()):
         raise ValueError("Required bundle component is missing")
     after = source_snapshot(before["source_root"])

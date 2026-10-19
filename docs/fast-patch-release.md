@@ -262,7 +262,7 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 
 | 누가 | 무엇을 | 무엇으로 막나 |
 |---|---|---|
-| 미니 build | 버전 커밋으로 `KASATERM_SIGN_HARDENED=1 KASATERM_SIGN_ID=<지문> KASATERM_SIGN_KEYCHAIN=codesign.keychain-db` 굽기 — 번들 안 모든 Mach-O(Sparkle 안쪽부터·`kasaterm-cli`·`kasa-serve-web`·`kasapet`·본체)를 `--options runtime --timestamp` 로, 본체에는 `scripts/kasaterm.entitlements`(마이크·Apple Events) | 한 조각이라도 서명 실패면 굽기 실패(평소 굽기는 예전처럼 삼킨다). Mach-O 전수 검사·get-task-allow 금지·판 번호·굽기 증명서 |
+| 미니 build | 버전 커밋으로 `KASATERM_SIGN_HARDENED=1 KASATERM_SIGN_ID=<지문> KASATERM_SIGN_KEYCHAIN=codesign.keychain-db` 굽기 — 번들 안 모든 Mach-O(Sparkle 안쪽부터·`kasaterm-cli`·`kasa-files`·`kasa-serve-web`·`kasa-op`·본체)를 `--options runtime --timestamp` 로, 본체에는 `scripts/kasaterm.entitlements`(마이크·Apple Events) | 한 조각이라도 서명 실패면 굽기 실패(평소 굽기는 예전처럼 삼킨다). Mach-O 전수 검사·get-task-allow 금지·판 번호·굽기 증명서 |
 | 미니 tag(승인 뒤) | `xcrun notarytool submit --keychain-profile AC_NOTARY --keychain … --wait` → `stapler staple` → 재확인 → 그 버전 커밋으로 태그 push | 공증이 안 되면 태그를 안 세운다 |
 | 미니 release | 공증한 dmg 를 릴리스에 올림(덮지 않음) | 다른 dmg 가 있으면 멈춤 |
 | CI build-dmg | 굽지 않고 60분까지 그 dmg 를 기다렸다 받아 릴리스 기록 해시 대조 → `spctl`(Notarized Developer ID)·`stapler validate`·앱 `codesign --verify --deep --strict`·`TeamIdentifier=$MAC_TEAM`·Developer ID·runtime·앱 공증·Info.plist 판 = 태그 | 하나라도 어긋나면 job 실패 → appcast 안 나감 |

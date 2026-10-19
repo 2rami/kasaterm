@@ -54,7 +54,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             bar.res_rect,
             bar.clip_rect,
             bar.schedule_rect,
-            bar.pet_rect,
         ]
         .into_iter()
         .flatten()
@@ -124,7 +123,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
     bar.res_rect = None;
     bar.port_rect = None;
     bar.schedule_rect = None;
-    bar.pet_rect = None;
     bar.clip_rect = None;
     // 다른 기기와 어떻게·얼마나 가깝게 붙어 있나. 직통(그 기계에 바로)과
     // 중계(공용 관문 경유)는 체감이 딴판이라, 숫자와 함께 한눈에 보여야 한다.
@@ -461,7 +459,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         // 본다 — 값이 아직 없는 칩은 이제 자리를 안 먹으므로 설정만 보면 빈
         // 자리 옆에 선만 남는다.
         let has_device = rx < device_right;
-        let has_work = ["ports", "pet", "clipboard"]
+        let has_work = ["ports", "clipboard"]
             .iter()
             .any(|id| status_prefs.visible(id));
         if status_prefs.separators && has_device && has_work {
@@ -575,55 +573,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         }
             }};
         }
-        macro_rules! draw_pet_widget {
-            () => {{
-        bar.pet_rect = None;
-        if status_prefs.visible("pet") {
-            let shown = crate::chrome::pet_shown_cached();
-            let on = shown.is_some();
-            // 누가 나와 있는지도 적는다 — 아홉 중 하나라 아이콘만으로는
-            // 지금 누가 서 있는지 알 길이 없다(2026-09-07 지시).
-            let name = shown.unwrap_or_default();
-            let name = if compact_tools { String::new() } else { crate::info::fit_text(g, &name, (slot_w - chip - 24.0).max(0.0), fs, false) };
-            let icon = tool_icon;
-            let gap = if compact_tools { 0.0 } else { 4.0_f32 };
-            let lw = if name.is_empty() {
-                0.0
-            } else {
-                gap + g.measure_chrome_text(&name, fs, false)
-            };
-            let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
-            let seg = icon + lw + dot;
-            rx -= seg + chip;
-            let col = chip_ink(&status_prefs, "pet", false);
-            g.queue_icon("sparkles", rx, sy + (status_h - icon) / 2.0, icon, col);
-            if !name.is_empty() {
-                g.draw_text(
-                    rx + icon + gap,
-                    ty,
-                    &name,
-                    gpu::DrawOpts {
-                        font_size: fs,
-                        color: col,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-            }
-            if !compact_tools {
-                status_dot(g, rx + icon + lw, sy, status_h,
-                    if on { ChipState::Ok } else { ChipState::Off });
-            }
-            let pr = (rx - chip / 2.0, sy, seg + chip, status_h);
-            {
-                let (hx, hy) = f.cursor;
-                g.hover_pointer |=
-                    hx >= pr.0 && hx <= pr.0 + pr.2 && hy >= pr.1 && hy <= pr.1 + pr.3;
-            }
-            bar.pet_rect = Some(pr);
-        }
-            }};
-        }
         // 포트 — 열려 있는 워크스페이스 포트 **개수**다. 예전엔 이 앱의
         // `:8765` 만 적었는데, 그건 이미 알고 있는 값이라 자리를 쓰면서
         // 아무것도 안 알렸다. 개수는 "지금 뭔가 떠 있나" 에 답하고, 눌러
@@ -675,7 +624,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             .iter()
             .rev()
             .filter(|id| {
-                matches!(id.as_str(), "ports" | "schedules" | "pet" | "clipboard")
+                matches!(id.as_str(), "ports" | "schedules" | "clipboard")
             })
             .filter(|id| status_prefs.visible(id))
         {
@@ -690,13 +639,11 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             match id.as_str() {
                 "ports" => draw_ports_widget!(),
                 "schedules" => draw_schedules_widget!(),
-                "pet" => draw_pet_widget!(),
                 "clipboard" => draw_clipboard_widget!(),
                 _ => {}
             }
             bar.port_rect = bar.port_rect.and_then(|r| if id == "ports" { g.clip_hit(r) } else { Some(r) });
             bar.schedule_rect = bar.schedule_rect.and_then(|r| if id == "schedules" { g.clip_hit(r) } else { Some(r) });
-            bar.pet_rect = bar.pet_rect.and_then(|r| if id == "pet" { g.clip_hit(r) } else { Some(r) });
             bar.clip_rect = bar.clip_rect.and_then(|r| if id == "clipboard" { g.clip_hit(r) } else { Some(r) });
             g.pop_clip();
             rx = statusbar_next_right(slot_right, rx, slot_w);

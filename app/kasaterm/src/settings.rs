@@ -5,7 +5,6 @@ use super::*;
 use crate::render::pane_identity;
 
 pub(crate) mod phone_login;
-pub(crate) mod pet_models;
 
 type Rect = (f32, f32, f32, f32);
 
@@ -977,30 +976,6 @@ impl App {
                 }
                 kasa_mcp::account_sync::poke();
                 self.weather_settings_changed();
-            }
-            SettingsAction::TogglePet => {
-                self.set_toast(crate::chrome::toggle_pet()
-                    .map(|state| state.message().to_string()).unwrap_or_else(|error| error));
-            }
-            SettingsAction::PetDownload(name) => {
-                self.set_toast(crate::chrome::download_pet_model(&name).map(|_| "Live2D 모델을 받고 있어요".to_string()).unwrap_or_else(|error| error));
-                pet_models::invalidate();
-            }
-            SettingsAction::PetSource(name) => {
-                if let Some(url) = crate::chrome::pet_model_source_page(&name) { open_default_browser(url); }
-            }
-            SettingsAction::PetImport(name, folder) => { self.import_pet_model(name, folder); }
-            SettingsAction::PetCharacter(name) => {
-                pet_models::invalidate();
-                self.set_toast(match crate::chrome::set_pet_character(&name) {
-                    Ok(()) => format!("Live2D 펫: {name}"),
-                    Err(error) => error,
-                });
-            }
-            SettingsAction::PetPreference(change) => {
-                if crate::chrome::set_pet_preference(change).is_err() {
-                    self.set_toast(crate::native_strings::text("펫 설정을 저장하지 못했습니다. 다시 눌러 주세요").into_owned());
-                }
             }
             SettingsAction::AutosaveDelay(ms) => {
                 self.set_autosave = (ms > 0).then(|| std::time::Duration::from_millis(ms));

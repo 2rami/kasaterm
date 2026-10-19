@@ -40,7 +40,6 @@ pub(crate) struct StatusbarState {
     /// 자원을 많이 쓰는 순으로 상위 몇 개 — (pid, CPU%, RSS KB, 프로세스 이름).
     /// `res` 와 **같은 표본**이라 둘의 수치가 어긋나지 않는다.
     pub(crate) usage_top: Vec<(u32, f32, u64, String)>,
-    pub(crate) pet_refresh: Option<std::time::Instant>,
     /// 표본에 든 프로세스 수 전체 — `usage_top` 은 상위 몇 개뿐이라, 팝오버의
     /// 「그 외 N개」 줄이 이 값으로 나머지를 센다.
     pub(crate) usage_rows: usize,
@@ -77,8 +76,6 @@ pub(crate) struct StatusbarState {
     pub(crate) clip_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) clip_expanded: Option<u64>,
     pub(crate) clip_menu: Option<(u64, f32, f32)>,
-    /// 펫 칩 — 바탕화면 캐릭터를 켜고 끈다.
-    pub(crate) pet_rect: Option<(f32, f32, f32, f32)>,
     /// 도구 칩이 직전 프레임에 실제로 쓴 폭. 오른쪽 칩은 왼쪽 칩들 몫을 남기고
     /// 나머지를 쓰는데, 그 몫을 칸 전체로 잡으면 숫자 하나짜리 칩 때문에 가운데가
     /// 빈 채로 판 번호·기기 이름이 잘린다.

@@ -106,10 +106,10 @@ fi
 # 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet -p kasa-files --bins
+  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasa-files --bins
   BINDIR="$TARGET_DIR/release"
 else
-  cargo build --locked -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet -p kasa-files --bins
+  cargo build --locked -p kasaterm -p kasa-socket -p kasa-mcp -p kasa-files --bins
   BINDIR="$TARGET_DIR/debug"
 fi
 
@@ -135,14 +135,6 @@ if [[ -n "$GO_BIN" ]]; then
 else
   echo "[build-app] go 없음 — 1Password 실행기(kasa-op) 없이 굽는다" >&2
 fi
-# 바탕화면 펫 — 본체와 별개 프로세스라 kasaterm 이 꺼져도 남는다(toggle_pet 이 여기서 찾는다).
-cp "$BINDIR/kasapet" "$APP/Contents/Resources/kasapet"
-# 모델은 번들에 안 담는다 — Live2D 공식 캐릭터는 재배포가 금지다. 처음 켤 때 이 스크립트가
-# 쓰는 사람 기계로 권리자에게서 직접 받아 온다.
-cp scripts/fetch-pet-model.sh "$APP/Contents/Resources/fetch-pet-model.sh"
-# 펫 말풍선 글씨 — 넥슨이 무료로 배포하는 메이플스토리체(kasapet 이 자기 옆에서 찾는다).
-cp "assets/fonts/Maplestory Bold.ttf" "$APP/Contents/Resources/"
-cp assets/fonts/LICENSE-Maplestory.txt "$APP/Contents/Resources/"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
@@ -575,8 +567,6 @@ sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-files"
 sign_part "$APP/Contents/MacOS/kasa-serve-web"
 [[ -f "$APP/Contents/MacOS/kasa-op" ]] && sign_part "$APP/Contents/MacOS/kasa-op"
-# 펫은 Resources 안의 Mach-O 라 app 서명이 봉인만 하고 서명은 안 한다(링커 ad-hoc 그대로) — 공증은 그것도 거절한다.
-[[ "$HARDENED" == "1" ]] && sign_part "$APP/Contents/Resources/kasapet"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 [[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")

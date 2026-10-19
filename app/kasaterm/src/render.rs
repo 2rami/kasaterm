@@ -6850,7 +6850,7 @@ fn link_state(worst_tone: u8) -> ChipState {
 fn statusbar_tool_weight(id: &str) -> f32 {
     match id {
         "tunnel" => 2.0,
-        "resources" | "devices" | "ports" | "schedules" | "pet" | "clipboard" => 1.0,
+        "resources" | "devices" | "ports" | "schedules" | "clipboard" => 1.0,
         _ => 0.0,
     }
 }

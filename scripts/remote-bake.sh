@@ -11,7 +11,6 @@
 #   pull     git pull --ff-only 만
 #   mini     구운 dist 를 미니에 파일만 부친다(갈아 끼우기·되띄우기는 미니에서)
 #   app      pull → build-app.sh (앱 전체; 반영은 사람이 앱을 껐다 켜야 한다)
-#   pet      pull → pet-reload.sh (펫만, 즉시 반영)
 #   journal  pull → request-journal 서비스 재시작(펫의 뇌·나쵸 말투·집컴 전원)
 #   applog   앱 stderr 로그의 판·상태·패닉 줄(고정 패턴, 인자 없음)
 #   log      최근 기록(이 스크립트·펫 띄우기·펫의 뇌) 꼬리 — 실패 원인을 터널 너머에서 본다
@@ -44,8 +43,8 @@ for a in "$@"; do
     *) echo "[remote-bake] 모르는 옵션: $a" >&2; exit 2 ;;
   esac
 done
-case "$VERB" in status|pull|app|pet|journal|log|applog|mini) ;; *)
-  echo "[remote-bake] 동사는 status·pull·app·pet·journal·log·applog·mini 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
+case "$VERB" in status|pull|app|journal|log|applog|mini) ;; *)
+  echo "[remote-bake] 동사는 status·pull·app·journal·log·applog·mini 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
 esac
 
 say() { printf '[remote-bake] %s\n' "$*"; }
@@ -67,7 +66,6 @@ status() {
   [[ -n "$dirty" ]] && say "미커밋:"$'\n'"$dirty" || say "미커밋 없음"
   say "dist 번들   $(mtime dist/kasaterm.app/Contents/MacOS/kasaterm)"
   say "설치본      $(mtime "$HOME/Applications/kasaterm.app/Contents/MacOS/kasaterm")"
-  say "설치본 펫   $(mtime "$HOME/Applications/kasaterm.app/Contents/Resources/kasapet")"
   say "화면 배치(window.json ui) $(python3 -c 'import json;print(json.load(open("'"$HOME"'/.config/kasaterm/window.json")).get("ui","없음"))' 2>/dev/null || echo '읽기 실패')"
   local pid=""; [[ -f "$HOME/.config/kasaterm/pet.pid" ]] && pid="$(tr -dc 0-9 < "$HOME/.config/kasaterm/pet.pid")"
   if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then say "펫 도는 중(pid $pid)"; else say "펫 꺼짐"; fi
@@ -123,7 +121,7 @@ applog() {
 
 logs() {
   local tmp; tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)"
-  for f in "$LOG" "${tmp}kasapet-reload.log" "$HOME/.config/kasaterm/request-journal/service.log"; do
+  for f in "$LOG" "$HOME/.config/kasaterm/request-journal/service.log"; do
     say "── $f"
     [[ -f "$f" ]] && tail -n 15 "$f" | cut -c1-200 || say "(없음)"
   done
@@ -143,10 +141,7 @@ run() {
       else
         bash scripts/build-app.sh ${FORCE[@]+"${FORCE[@]}"} || return 1
       fi
-      say "구움. 반영은 앱을 껐다 켜야 한다(자기설치). 펫까지 바꿨으면 그 뒤 펫도 껐다 켠다" ;;
-    pet)
-      pull || return 1
-      bash scripts/pet-reload.sh ;;
+      say "구움. 반영은 앱을 껐다 켜야 한다(자기설치)" ;;
     journal)
       pull || return 1
       launchctl kickstart -k "gui/$(id -u)/com.kasaterm.request-journal" || return 1
@@ -160,10 +155,6 @@ run() {
       [[ -d dist/kasaterm.app ]] || { say "dist/kasaterm.app 이 없다 — 먼저 app"; return 1; }
       say "미니($host)로 부치는 중… $(date -r dist/kasaterm.app/Contents/MacOS/kasaterm '+%m-%d %H:%M')"
       rsync -a --delete -e ssh dist/kasaterm.app/ "$host:kasaterm-dist/kasaterm.app/" || return 1
-      if [[ -d "$HOME/.config/kasaterm/pet" ]]; then
-        ssh "$host" mkdir -p .config/kasaterm/pet
-        rsync -a -e ssh --exclude board.json --exclude state.json "$HOME/.config/kasaterm/pet/" "$host:.config/kasaterm/pet/" || true
-      fi
       say "부쳤다 — 미니에서 ~/kasaterm-dist/install.sh 로 갈아 끼운다" ;;
   esac
 }

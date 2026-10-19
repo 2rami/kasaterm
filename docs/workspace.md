@@ -27,8 +27,7 @@
 | 협업 | 4 | `kasa-collab` | 보드 수집기·tell 장부·칸 열쇠·기계 id. 다른 기계와의 HTTP 는 feature `net` | 금지 | feature 뒤만 |
 | 호스트 | 5 | `kasa-mcp` | 이 기기 HTTP 호스트(보드·웹 칸·원격 방·모바일)·관문 `kasa-relay`·`kasa-device`·`kasa-serve-web`. 이름은 MCP 서버였던 시절의 것 | 금지 | 허용 |
 | 호스트 | 5 | `kasa-host` | 창 없는 카사텀 — 다른 프로그램(나쵸)의 셸 세션을 `kasa-pty` 로 붙들고 유닉스 소켓으로 내준다. 산출물이라 받는 쪽이 없다 | 금지 | 금지 |
-| 앱 | 6 | `kasa-pet-config` | 본판과 펫이 함께 읽는 펫 설정과 캐릭터 목록(`models`: 기본 곽향·받을 곳·지금 띄울 캐릭터). 앱만 받는다 | 금지 | 허용 |
-| 앱 | 7 | `kasaterm`·`kasapet` | 본판 GUI·바탕화면 펫 실행 파일. 산출물이라 받는 쪽이 없다 | 허용 | 허용 |
+| 앱 | 7 | `kasaterm` | 본판 GUI 실행 파일. 산출물이라 받는 쪽이 없다(바탕화면 펫 `kasapet` 은 2026-10-19 레포 밖으로 뗐다) | 허용 | 허용 |
 | 실험 | — | `spikes/*` | 렌더러·IME 시험판. 제품이 아니다 | — | — |
 
 지금 내부 의존(일반·빌드):
@@ -44,8 +43,7 @@ kasaterm ─┬─ kasa-mcp ─┬─ kasa-collab ─┬─ kasa-socket
           ├─ kasa-gridview ─┬─ kasa-cells
           │                 └─ kasa-screen
           ├─ kasa-bridge ── kasa-screen
-          ├─ kasa-pty · kasa-socket · kasa-ime · kasa-cells · kasa-pet-config
-kasapet ── kasa-pet-config
+          ├─ kasa-pty · kasa-socket · kasa-ime · kasa-cells
 kasa-net-ffi ── kasa-net
 kasa-files ── kasa-socket
 kasa-host ─┬─ kasa-pty ── kasa-screen
@@ -75,7 +73,7 @@ spikes/* ── kasa-bridge
 |---|---|
 | 경계 역전 | 순위가 같거나 높은 크레이트에 기대기(일반·빌드·개발 의존 모두) |
 | 층 미정 | `LAYERS` 에 없는 제품 크레이트, 워크스페이스에 없는 표 항목 |
-| 산출물 | `kasaterm`·`kasapet`·`kasa-net-ffi` 를 받는 크레이트 |
+| 산출물 | `kasaterm`·`kasa-net-ffi` 를 받는 크레이트 |
 | 실험 | 실험 크레이트에 기대기, 실험이 `default-members` 에 들기, 제품이 `default-members` 에서 빠지기 |
 | 옛 tmux 백엔드 | 본판 밖 제품 크레이트가 `kasa-bridge` 에 새로 기대기 |
 | 다른 이름 | 내부 크레이트를 `package =` 로 다른 이름에 받기(경로가 감춰진다) |
