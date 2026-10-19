@@ -17,7 +17,7 @@ pub(crate) mod parse;
 mod scrollbar;
 mod select;
 
-pub(crate) use scrollbar::paint_scrollbars;
+pub(crate) use scrollbar::{paint_scrollbars, BAR_COLS};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;

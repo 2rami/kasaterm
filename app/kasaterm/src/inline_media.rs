@@ -123,6 +123,14 @@ pub(crate) fn compose(
     }
     slots
 }
+pub(crate) fn fit_content(slots: &mut [InlineSlot], right: f32) {
+    for slot in slots {
+        // 대화 줄 바깥의 스크롤바는 그리는 폭과 클릭 폭 모두에서 비워 둔다.
+        slot.rect.2 = slot.rect.2.min((right - slot.rect.0).max(0.0));
+        slot.clip.2 = slot.clip.2.min((right - slot.clip.0).max(0.0));
+    }
+}
+
 pub(crate) fn intersection(a: Rect, b: Rect) -> Rect {
     let x = a.0.max(b.0);
     let y = a.1.max(b.1);
@@ -270,6 +278,31 @@ mod tests {
             0.0
         );
     }
+    #[test]
+    fn narrow_chat_artwork_and_click_bounds_end_before_the_scrollbar() {
+        let mut slots = vec![InlineSlot {
+            key: "media:fixture".into(),
+            path: String::new(),
+            rect: (16.0, 20.0, 304.0, 240.0),
+            clip: (16.0, 40.0, 304.0, 180.0),
+            fit: InlineFit::Contain,
+            below: false,
+            previewable: false,
+        }];
+        let mut image = slots[0].clone();
+        image.key = "result:fixture".into();
+        image.previewable = true;
+        slots.push(image);
+        let bar_left = (40 - crate::chat_view::BAR_COLS) as f32 * 8.0;
+        fit_content(&mut slots, bar_left);
+        assert!(slots
+            .iter()
+            .all(|s| s.rect.0 + s.rect.2 == bar_left && s.clip.0 + s.clip.2 == bar_left));
+        let hit = intersection(slots[0].rect, slots[0].clip);
+        assert_eq!(hit.0 + hit.2, bar_left);
+        assert_eq!((hit.1, hit.3), (40.0, 180.0));
+    }
+
     #[test]
     fn media_markers_do_not_replace_commands_or_image_blocks() {
         let cells = |text: &str| {

@@ -7,7 +7,7 @@
 use super::*;
 
 /// 대화 줄을 접을 때 비우는 칸 수 — 그 자리가 막대다.
-pub(super) const BAR_COLS: usize = 1;
+pub(crate) const BAR_COLS: usize = 1;
 
 const BAR_W: f32 = 3.5;
 const BAR_W_ACTIVE: f32 = 5.0;

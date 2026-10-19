@@ -1253,7 +1253,7 @@ impl App {
                     })
                 }).flatten();
                 let body_view = shell_slot.is_some();
-                let composition = self.compose_terminal_pane(
+                let mut composition = self.compose_terminal_pane(
                     &ws, pane, chat_frame.as_ref().map(|f| &f.term).or(pane.term()), &id, ws.active_tab_pid(&id), cols_now, rows_now,
                     body_left, body_top, pane_font_scale, true,
                 );
@@ -1288,6 +1288,10 @@ impl App {
                     // 대화 보기의 답 머리 — student-face mod 가 터미널에 그리는 얼굴과 같은 그림·같은 칸 수.
                     if let Some(f) = &chat_frame {
                         let (cw, ch) = (self.cell.w * pane_font_scale, self.cell.h * pane_font_scale);
+                        crate::inline_media::fit_content(
+                            &mut composition.inline_slots,
+                            body_left + cols_now.saturating_sub(crate::chat_view::BAR_COLS) as f32 * cw,
+                        );
                         if let Some(slug) = f.face_slug {
                             for (row, face) in &f.faces {
                                 profile_slots.push((slug, (body_left, body_top + *row as f32 * ch, face.cols as f32 * cw, face.rows as f32 * ch)));
