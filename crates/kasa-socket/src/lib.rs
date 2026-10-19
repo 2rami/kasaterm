@@ -24,6 +24,7 @@
 /// `kasaterm-cli` 본체. 바이너리와 `kasa tui`(멀티콜)가 같이 부른다.
 pub mod cli;
 pub mod inline_results;
+pub mod inline_media;
 pub mod backend;
 pub mod board;
 pub mod claude_trust;

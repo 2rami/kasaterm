@@ -8,7 +8,7 @@
 //! 공통 레이어(`auth::origin_guard_mw` → `auth::mobile_prefix_mw`)를 두른다 — 새 라우트도 그 레이어를 저절로 탄다.
 //! `auth`(토큰·Origin·폰 주소) · `socket`(`/term/ws`) · `term_assets`·`term_api`·`term_files`(웹 터미널) ·
 //! `migrate`(이사) · `claude_account`(계정 슬롯·사용량) · `sessions`·`pane_read`·`panes`(세션·칸) ·
-//! `collab`(보드·보내기·tell) · `schedule`·`tasks`(스케줄·디스패처·팀 작업) · `files` · `git_api` ·
+//! `collab`(보드·보내기·tell) · `schedule`·`tasks`(스케줄·디스패처·팀 작업) · `files` · `inline_media`(대화 소리·영상 원본) · `git_api` ·
 //! `settings` · `arona_ui` · `host` · `phone` · `machine_proxy`(`/m/<기계>/…`).
 
 use std::sync::Arc;
@@ -41,6 +41,7 @@ mod collab;
 mod schedule;
 mod tasks;
 mod files;
+mod inline_media;
 mod git_api;
 mod settings;
 mod arona_ui;

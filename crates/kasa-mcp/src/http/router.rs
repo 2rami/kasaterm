@@ -173,6 +173,7 @@ pub fn spawn_http_server_opts(
                     .merge(machine_proxy::routes())
                     .merge(arona_ui::routes(&backend))
                     .merge(files::routes(&backend))
+                    .merge(inline_media::routes())
                     .merge(claude_account::routes())
                     .merge(schedule::routes(&backend))
                     .merge(tasks::routes(&backend))
