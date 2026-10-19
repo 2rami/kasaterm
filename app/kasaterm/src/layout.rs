@@ -2429,7 +2429,7 @@ impl App {
     /// `outer` 칸의 `idx` 번째 탭을 들어내 그 탭 하나만 든 새 칸으로 세운다. 트리에는 아직 안 넣는다 —
     /// 어디에 붙일지는 부르는 쪽이 정한다. 돌려주는 것은 새 칸 번호. 탭을 다 들어내 빈 소스는 트리에서 걷는다
     /// (PtySession 은 살아 있다 — 지금 새 칸으로 다시 붙일 바로 그 셸이다).
-    fn lift_tab_into_own_pane(&mut self, outer: &str, idx: usize) -> Option<String> {
+    pub(crate) fn lift_tab_into_own_pane(&mut self, outer: &str, idx: usize) -> Option<String> {
         let (moved, src_empty) = {
             let mut ws = self.ws.lock().unwrap();
             let src = ws.panes.get_mut(outer)?;

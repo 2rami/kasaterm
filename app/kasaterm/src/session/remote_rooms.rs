@@ -372,6 +372,23 @@ impl App {
         use std::sync::{Mutex, OnceLock};
         static MOVED_SINCE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
         let leaves = self.window_leaves(window);
+        // 원본에서 칸이 된 거울 탭은 여기서도 칸으로 편다. 접는 길만 있어 원본에서 탭을 칸으로 펼쳐도
+        // 보기 창은 탭으로 남았다(2026-10-19 맥미니 마리 방 — 미니맵은 다섯 칸인데 열면 한 칸에 탭 다섯).
+        let per_leaf: Vec<(String, Vec<Option<String>>)> = {
+            let ws = self.ws.lock().unwrap();
+            leaves.iter().filter_map(|leaf| {
+                let tabs = &ws.panes.get(leaf)?.tabs;
+                let rids = tabs.iter().map(|t| {
+                    kasa_mcp::remote::remote_info(t.pid.as_deref().unwrap_or(leaf)).map(|i| i.remote_id)
+                }).collect();
+                Some((leaf.clone(), rids))
+            }).collect()
+        };
+        if let Some((leaf, idx, rid)) = view_tab_to_unfold(&per_leaf, panes) {
+            eprintln!("[view] {label} {rid} 는 원본에선 칸 — 탭을 칸으로 편다");
+            self.unfold_view_tab(window, &leaf, idx);
+            return true;
+        }
         if leaves.len() < 2 {
             return false;
         }
@@ -503,6 +520,34 @@ impl App {
 
     /// leaf `src` 를 같은 창의 `dst` 탭으로 접는다 — 활성 창이면 `merge_pane_into_tabs`,
     /// 안 보이는 창이면 그 창의 트리에서 직접(그 함수는 활성 트리만 만진다).
+    /// 보기 창 `window` 의 `leaf` 칸에서 `idx` 번째 거울 탭을 들어내 옆 칸으로 세운다. 자리는 바로 뒤
+    /// 배치 투영이 원본대로 잡는다. 배치를 맞추는 일이라 사람의 초점은 옮기지 않는다.
+    fn unfold_view_tab(&mut self, window: usize, leaf: &str, idx: usize) {
+        let focus = self.ws.lock().unwrap().active_pane.clone();
+        let Some(new_outer) = self.lift_tab_into_own_pane(leaf, idx) else { return };
+        self.ws.lock().unwrap().active_pane = focus;
+        let tree = if window == self.active_window {
+            self.pty_layout.as_mut()
+        } else {
+            self.windows.get_mut(window).and_then(Option::as_mut)
+        };
+        if let Some(tree) = tree {
+            tree.insert_beside(leaf, kasa_pty::SplitDir::Horizontal, false, new_outer);
+        }
+        crate::mirror_layout::forget_applied_views();
+        self.apply_remote_view_trees();
+        if window == self.active_window {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+    }
+
     pub(super) fn fold_leaf_into_tabs(&mut self, window: usize, src: &str, dst: &str) {
         {
             // 거울 leaf 의 첫 탭은 pid 가 비어 있다(leaf 번호가 곧 PTY) — 탭으로 옮기면 그
@@ -1481,5 +1526,52 @@ pub(super) fn queue_remote_divider(base: String, params: serde_json::Value) {
     });
     if let Ok(tx) = tx.lock() {
         let _ = tx.send((base, params));
+    }
+}
+
+/// 보기 창에서 칸으로 펼 거울 탭 — `(칸, 탭 번호, 원본 pane)`. 칸마다 탭의 원본 pane 번호(모르면 `None`)를
+/// 받는다. 첫 탭은 그 칸 자신이라 두고, 둘째부터 원본에서 탭이 아닌(`tab_of: null`) 같은 방의 칸이면 편다.
+fn view_tab_to_unfold(per_leaf: &[(String, Vec<Option<String>>)], panes: &[serde_json::Value]) -> Option<(String, usize, String)> {
+    let row_of = |rid: &str| panes.iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(rid));
+    let room = |row: &serde_json::Value| row.get("window").and_then(|v| v.as_u64());
+    for (leaf, rids) in per_leaf {
+        let Some(lead) = rids.first().and_then(Option::as_deref).and_then(row_of).and_then(room) else { continue };
+        for (idx, rid) in rids.iter().enumerate().skip(1) {
+            let Some(rid) = rid else { continue };
+            let Some(row) = row_of(rid) else { continue };
+            // 탭이 아니면 원본이 `tab_of: null` 을 적는다 — 키가 없는 옛 판 원본은 탭인지 몰라 두지 않고 둔다.
+            let own_cell = row.get("tab_of").is_some_and(|v| v.as_str().is_none_or(str::is_empty));
+            if own_cell && room(row) == Some(lead) && !crate::machinescol::remote_pane_closed(row) {
+                return Some((leaf.clone(), idx, rid.clone()));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod unfold_tests {
+    use super::view_tab_to_unfold;
+    use serde_json::json;
+
+    #[test]
+    fn a_mirror_tab_that_became_its_own_cell_at_the_source_unfolds() {
+        let panes = vec![
+            json!({"id": "%1", "window": 0, "tab_of": null}),
+            json!({"id": "%0", "window": 0, "tab_of": null}),
+            json!({"id": "%4", "window": 0, "tab_of": "%1"}),
+            json!({"id": "%9", "window": 1, "tab_of": null}),
+            json!({"id": "%5", "window": 0}),
+        ];
+        let leaf = |tabs: &[&str]| ("%2".to_string(), tabs.iter().map(|t| Some(t.to_string())).collect::<Vec<_>>());
+        // 원본에서 %0 은 제 칸이다 — 보기 창에서 %1 의 탭이면 편다.
+        assert_eq!(view_tab_to_unfold(&[leaf(&["%1", "%0"])], &panes), Some(("%2".into(), 1, "%0".into())));
+        // 원본에서도 탭이면 그대로, 다른 방으로 간 pane 은 이 길이 아니다(걷기는 따로).
+        assert_eq!(view_tab_to_unfold(&[leaf(&["%1", "%4"])], &panes), None);
+        assert_eq!(view_tab_to_unfold(&[leaf(&["%1", "%9"])], &panes), None);
+        assert_eq!(view_tab_to_unfold(&[leaf(&["%1", "%5"])], &panes), None, "tab_of 를 안 적는 옛 판 원본");
+        // 첫 탭(칸 자신)은 펴지 않는다. 원본을 모르는 탭도.
+        assert_eq!(view_tab_to_unfold(&[leaf(&["%1"])], &panes), None);
+        assert_eq!(view_tab_to_unfold(&[("%2".into(), vec![Some("%1".into()), None])], &panes), None);
     }
 }
