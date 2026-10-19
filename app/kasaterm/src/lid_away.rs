@@ -59,7 +59,7 @@ fn step(phase: Phase, s: Sense) -> (Phase, Option<Act>) {
     match phase {
         Phase::Idle => {
             // 덮인 채 잠깐 깬 것(Power Nap)에 다시 걸면 가방 속에서 상한만큼 깨어 있게 된다.
-            if s.allowed && s.working && !s.departed {
+            if s.allowed && (s.working || s.migrating) && !s.departed {
                 (Phase::Armed { quiet_since: None }, Some(Act::Arm))
             } else {
                 (Phase::Idle, None)
@@ -76,7 +76,7 @@ fn step(phase: Phase, s: Sense) -> (Phase, Option<Act>) {
             if !s.allowed {
                 return (Phase::Idle, Some(Act::Disarm));
             }
-            if s.working {
+            if s.working || s.migrating {
                 return (Phase::Armed { quiet_since: None }, None);
             }
             let since = quiet_since.unwrap_or(s.now);
@@ -301,11 +301,8 @@ impl App {
             return;
         }
         let working = self.lid_away_working_panes();
-        let migrating = self.migrate_running_any()
-            || STATE.with(|s| {
-                let st = s.borrow();
-                self.migrate_queue.iter().any(|q| st.targets.contains(&q.pane))
-            });
+        let migrating = self.migrate_running_any() || !self.migrate_queue.is_empty()
+            || self.migrate_handoff.is_some();
         let departed = probe::lid_closed() && !probe::external_display();
         let safe = STATE.with(|s| {
             let mut st = s.borrow_mut();
@@ -646,12 +643,31 @@ mod tests {
     }
 
     #[test]
-    fn arms_only_when_a_student_works_and_sudo_allows() {
+    fn arms_only_when_work_or_migration_needs_it_and_sudo_allows() {
         let t = Instant::now();
         assert_eq!(step(Phase::Idle, sense(t)), (Phase::Idle, None));
         let working = Sense { working: true, ..sense(t) };
         assert_eq!(step(Phase::Idle, working), (Phase::Armed { quiet_since: None }, Some(Act::Arm)));
         assert_eq!(step(Phase::Idle, Sense { allowed: false, ..working }), (Phase::Idle, None));
+    }
+
+    #[test]
+    fn a_self_requested_move_keeps_sleep_blocked_between_turns() {
+        let t = Instant::now();
+        let moving = Sense { migrating: true, ..sense(t) };
+        let (armed, act) = step(Phase::Idle, moving);
+        assert_eq!(act, Some(Act::Arm));
+        let (armed, act) = step(armed, Sense { now: t + QUIET_GRACE * 2, ..moving });
+        assert_eq!(act, None);
+        assert_eq!(armed, Phase::Armed { quiet_since: None });
+        let closed = Sense { departed: true, now: t + QUIET_GRACE * 3, ..moving };
+        let (away, act) = step(armed, closed);
+        assert_eq!(act, Some(Act::Depart));
+        assert_eq!(step(away, Sense { now: closed.now + SETTLE * 2, ..closed }).1, Some(Act::Depart));
+        assert!(matches!(step(away, Sense { now: closed.now + SETTLE * 2, ..closed }).0,
+            Phase::Away { settled_since: None, .. }));
+        assert_eq!(step(Phase::Idle, Sense { allowed: false, ..moving }), (Phase::Idle, None));
+        assert_eq!(step(Phase::Idle, closed), (Phase::Idle, None));
     }
 
     #[test]

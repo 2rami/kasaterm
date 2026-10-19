@@ -757,7 +757,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // 예약·검사 실패는 여기서 답한다. 「바쁨」 잠금도 여기서 풀어야 한다 —
                 // GUI 클릭이 아닌 이 경로(CLI·셀프·아로나)에서 안 지우면 원격 메뉴가
                 // 통째로 잠긴 채 남아 「거울」 클릭까지 삼킨다(2026-09-03 실측).
-                self.info.machines_col.busy = None;
+                if !self.migrate_running_any() {
+                    self.info.machines_col.busy = None;
+                }
                 let _ = reply.send(outcome);
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -799,9 +801,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(result);
                 return;
             }
-            UserEvent::ValidateTransfer(identity, reply) => {
+            UserEvent::ValidateTransfer(identity, force, reply) => {
                 let result = self.validate_transfer_identity(identity).and_then(|_| {
-                    if self.migration_working(&identity.pane_id) {
+                    if !force && self.migration_working(&identity.pane_id) {
                         anyhow::bail!("세션이 다시 작업을 시작했어요. 이번 이사는 중단했어요");
                     }
                     Ok(())
@@ -8234,6 +8236,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
                 .chain(self.migrate_handoff.as_ref().map(|h| h.at))
+                .chain(self.migration_tick_deadline())
                 .chain(self.transfer_launch_tick())
                 .chain(lid_away_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))

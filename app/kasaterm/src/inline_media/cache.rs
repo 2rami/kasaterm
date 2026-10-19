@@ -333,6 +333,11 @@ mod tests {
                     }
                 }
                 let text = String::from_utf8(request).unwrap();
+                // The desktop Info scanner can probe any loopback port while this fixture is serving chunks.
+                if text.starts_with("GET / HTTP/") {
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
                 let len = (served.len() - expected).min(4 * 1024 * 1024);
                 assert!(
                     text.contains(&format!("offset={expected}&len={len}")),
@@ -350,6 +355,11 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("inline-media-download-{}", uuid::Uuid::new_v4()));
         let job = Download::default();
+        let mut probe = std::net::TcpStream::connect(reference.source.as_ref().unwrap().trim_start_matches("http://")).unwrap();
+        probe.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut answer = String::new();
+        probe.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 404"));
         let path = download_file(&reference, &metadata, &job, &root, || {}).unwrap();
         worker.join().unwrap();
         assert_eq!(job.done.load(Ordering::Relaxed), metadata.size);

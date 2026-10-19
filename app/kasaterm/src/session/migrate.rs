@@ -30,6 +30,28 @@ pub(super) fn ensure_transfer_agent(expected: Option<u32>, current: Option<u32>)
     Ok(())
 }
 
+fn default_migration_request(
+    snapshot: &kasa_socket::transfer::MachineSnapshot,
+    pane: &str,
+    destination_machine: String,
+) -> Result<kasa_socket::transfer::MigrateRequest> {
+    use kasa_socket::transfer::{MigrateRequest, RoomTarget};
+    let row = snapshot.sessions.iter().find(|row| row.identity.pane_id == pane)
+        .ok_or_else(|| anyhow::anyhow!("이사할 세션이 사라졌어요"))?;
+    anyhow::ensure!(row.identity.session_id.is_some(), "대화 번호를 아직 확인하지 못했어요");
+    let room = row.room_id.as_ref().and_then(|id| snapshot.rooms.iter().find(|room| &room.id == id))
+        .ok_or_else(|| anyhow::anyhow!("출발 방을 확인하지 못했어요"))?;
+    Ok(MigrateRequest { session: row.identity.clone(), destination_machine,
+        room: RoomTarget::New(room.title.clone()) })
+}
+
+fn ensure_prepared_destination(snapshot: &kasa_socket::transfer::MachineSnapshot, expected: &str) -> Result<()> {
+    anyhow::ensure!(snapshot.machine_id == expected, "도착 기기의 신원이 바뀌었어요. 출발 세션을 유지했어요");
+    anyhow::ensure!(snapshot.room_transfer_supported && snapshot.launch_supported,
+        "도착 기기는 대화 재개 확인을 지원하는 새 판과 zsh 셸이 필요해요. 출발 세션을 유지했어요");
+    Ok(())
+}
+
 impl App {
     pub(crate) fn migration_working(&self, pid: &str) -> bool {
         // A background tab has its own turn; the cell's selected sibling cannot authorize stopping it.
@@ -298,16 +320,14 @@ impl App {
         force: bool,
         run: Option<&str>,
         reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
-        transfer: Option<kasa_socket::transfer::MigrateRequest>,
+        mut transfer: Option<kasa_socket::transfer::MigrateRequest>,
     ) -> Result<String> {
         self.ensure_user_mutation_target(
             pid,
             crate::settings_room::SettingsMutation::Migrate,
         )?;
         ensure_migration_slot(&self.migrate_queue, pid)?;
-        if self.migrate_running_any() {
-            anyhow::bail!("이사가 이미 도는 중이다 — 끝나면 다시");
-        }
+        anyhow::ensure!(!self.migrate_running(pid), "이 세션의 이사가 이미 진행 중이에요. 먼저 도착 상태를 확인해 주세요");
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
@@ -333,26 +353,40 @@ impl App {
         }
         let is_codex = matches!(&agent, Some((kasa_pty::AgentKind::Codex, _)));
         let fresh = agent.is_none();
+        anyhow::ensure!(!fresh || !self.migrate_running_any(), "앞선 이사가 끝난 뒤 새 셸을 옮겨 주세요");
+        if !fresh && transfer.is_none() {
+            let destination = kasa_mcp::machines::machines().into_iter()
+                .find(|machine| kasa_mcp::machines::same_machine_bases(&machine.base, base))
+                .and_then(|machine| machine.machine_id)
+                .ok_or_else(|| anyhow::anyhow!("도착 기기의 신원을 아직 확인하지 못했어요. 연결 상태를 확인해 주세요"))?;
+            let snapshot = self.transfer_snapshot_gui(crate::transfer_endpoints::machine_context()?);
+            transfer = Some(default_migration_request(&snapshot, pid, destination)?);
+        }
+        if let Some(request) = &transfer {
+            self.validate_transfer_identity(&request.session)?;
+        }
         // 턴 중 이사는 하던 일을 자른다 — SIGTERM 이 진행 중 턴을 버리고, 옮겨간
         // 학생은 하다 만 채로 앉는다(2026-08-31 지적 「이사하고 작업이 끊겨」).
         // 일하는 학생은 죽이지 않고 예약한다: 턴이 끝나면(스피너가 꺼지고 잠시
         // 이어지면) 틱(run_pending_migrations)이 이 함수를 다시 부른다. force 는
         // 「끊겨도 지금 당장」으로 통과. 학생이 스스로 신청하는 셀프 이사는 그 CLI
         // 호출 자체가 턴 중이라 언제나 이 길로 온다 — 즉답 받고 제 턴을 마치면 간다.
-        if !fresh && !force {
-            let working = self.migration_working(pid);
-            if working {
+        {
+            let working = !fresh && !force && self.migration_working(pid);
+            if working || self.migrate_running_any() {
                 self.migrate_queue.push(PendingMigration {
                     pane: pid.to_string(),
                     base: base.to_string(),
                     cwd: remote_cwd.map(str::to_string),
                     force,
                     run: run.map(str::to_string),
-                    idle_since: None,
+                    idle_since: (!working).then(|| Instant::now() - std::time::Duration::from_secs(3)),
                     transfer: transfer.clone(),
                 });
-                self.set_toast(format!("{pid} 는 지금 일하는 중 — 턴이 끝나면 이사간다"));
-                return Ok(format!("예약됨 — {pid} 가 하던 턴을 마치면 이사간다"));
+                let reason = if working { "현재 턴이 끝나면" } else { "앞선 이사가 끝나면" };
+                let message = format!("예약됨 — {pid} {reason} 이사해요. 아직 도착한 상태가 아니에요");
+                self.set_toast(message.clone());
+                return Ok(message);
             }
         }
         let sid = if fresh {
@@ -490,6 +524,12 @@ impl App {
             .progress
             .as_ref()
             .is_some_and(|p| p.finished.is_none())
+    }
+
+    pub(crate) fn migration_tick_deadline(&self) -> Option<Instant> {
+        // A self-request finishes its turn without generating another window event.
+        (!self.migrate_queue.is_empty() && !self.migrate_running_any())
+            .then(|| Instant::now() + std::time::Duration::from_millis(250))
     }
 
     /// 워커의 단계 보고를 체크리스트에 적는다(`UserEvent::MigrateStage`).
@@ -972,7 +1012,7 @@ impl App {
             {
                 let mut i = 0;
                 while i < self.migrate_queue.len() {
-                    let working = self.migration_working(&self.migrate_queue[i].pane);
+                    let working = !self.migrate_queue[i].force && self.migration_working(&self.migrate_queue[i].pane);
                     let q = &mut self.migrate_queue[i];
                     if working {
                         q.idle_since = None;
@@ -1013,17 +1053,17 @@ impl App {
                     return;
                 }
             }
-            let res = if let Some(request) = &q.transfer {
-                self.start_transfer_migration(request, None)
-            } else if q.base == "local" {
+            let res = if q.base == "local" {
                 self.migrate_pane_back(&q.pane, q.cwd.as_deref(), q.force)
             } else {
-                self.migrate_pane(
+                self.migrate_pane_with_destination(
                     &q.pane,
                     &q.base,
                     q.cwd.as_deref(),
                     q.force,
                     q.run.as_deref(),
+                    None,
+                    q.transfer,
                 )
             };
             // 보내기는 워커로 넘어간다 — busy·토스트는 migrate_finish 몫. 데려오기와
@@ -1115,6 +1155,39 @@ mod transfer_concurrency_tests {
     use super::*;
 
     #[test]
+    fn self_migration_pins_conversation_and_source_room() {
+        use kasa_socket::transfer::*;
+        let identity = SessionIdentity { machine_id: "book".into(), pane_id: "%4".into(),
+            session_id: Some("conversation".into()), instance: "instance".into(), token: "surface".into() };
+        let mut snapshot = MachineSnapshot { rooms: vec![RoomInfo { id: "room".into(), title: "작업".into() }],
+            sessions: vec![SessionRow { identity: identity.clone(), room_id: Some("room".into()), ..Default::default() }],
+            ..Default::default() };
+        let request = default_migration_request(&snapshot, "%4", "mini".into()).unwrap();
+        assert_eq!(request.session, identity);
+        assert_eq!(request.destination_machine, "mini");
+        assert_eq!(request.room, RoomTarget::New("작업".into()));
+        snapshot.sessions[0].identity.session_id = None;
+        assert!(default_migration_request(&snapshot, "%4", "mini".into()).is_err());
+        snapshot.sessions[0].identity = identity;
+        snapshot.rooms.clear();
+        assert!(default_migration_request(&snapshot, "%4", "mini".into()).is_err());
+    }
+
+    #[test]
+    fn an_old_or_replaced_destination_is_rejected_before_source_stop() {
+        use kasa_socket::transfer::MachineSnapshot;
+        let mut destination = MachineSnapshot { machine_id: "mini".into(), room_transfer_supported: true,
+            launch_supported: true, ..Default::default() };
+        assert!(ensure_prepared_destination(&destination, "mini").is_ok());
+        assert!(ensure_prepared_destination(&destination, "other").is_err());
+        destination.launch_supported = false;
+        assert!(ensure_prepared_destination(&destination, "mini").is_err());
+        destination.launch_supported = true;
+        destination.room_transfer_supported = false;
+        assert!(ensure_prepared_destination(&destination, "mini").is_err());
+    }
+
+    #[test]
     fn another_request_cannot_replace_the_first_queued_destination() {
         let request = kasa_socket::transfer::MigrateRequest {
             session: kasa_socket::transfer::SessionIdentity { pane_id: "%4".into(), ..Default::default() },
@@ -1199,7 +1272,7 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
     let validate = || -> Result<()> {
         if let Some(request) = &p.transfer {
             let (tx, rx) = std::sync::mpsc::channel();
-            proxy.send_event(UserEvent::ValidateTransfer(request.session.clone(), tx))
+            proxy.send_event(UserEvent::ValidateTransfer(request.session.clone(), p.force, tx))
                 .map_err(|_| anyhow::anyhow!("출발 창이 닫혔어요"))?;
             rx.recv_timeout(std::time::Duration::from_secs(10))
                 .map_err(|_| anyhow::anyhow!("출발 세션 상태를 확인하지 못했어요"))?
@@ -1214,8 +1287,14 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
         // resume 명령이 홈에서 뜬다(대화 파일은 그 경로 이름으로 올라가 있으니 안 잇긴다).
         let mut remote_cwd = p.remote_cwd.clone();
         stage(0, S::Running, String::new());
+        if let Some(request) = &p.transfer {
+            let destination = kasa_mcp::remote::transfer_snapshot(&p.base)?;
+            ensure_prepared_destination(&destination, &request.destination_machine)?;
+        }
         match kasa_mcp::remote::remote_path_probe(&p.base, &remote_cwd, None) {
             Ok(Some((true, _))) => stage(0, S::Done, "있음".to_string()),
+            Ok(Some((false, _))) if p.transfer.is_some() => anyhow::bail!(
+                "도착 기기에 작업 폴더 {} 가 없어요. 작업 파일을 먼저 준비해 주세요. 출발 세션은 유지했어요", remote_cwd),
             Ok(Some((false, home))) if !home.is_empty() => {
                 remote_cwd = home;
                 stage(0, S::Done, "없음 — 홈에서 잇는다".to_string());
@@ -1225,6 +1304,7 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
                 p.label,
                 p.remote_cwd
             ),
+            Ok(None) if p.transfer.is_some() => anyhow::bail!("도착 작업 폴더를 확인할 수 없어요. 출발 세션은 유지했어요"),
             Ok(None) => stage(0, S::Done, "옛 판 — 있다고 치고".to_string()),
             Err(e) => anyhow::bail!("{} 쪽 폴더 확인: {e:#}", p.label),
         }

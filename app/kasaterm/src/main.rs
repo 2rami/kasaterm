@@ -3898,6 +3898,7 @@ enum UserEvent {
     ),
     ValidateTransfer(
         kasa_socket::transfer::SessionIdentity,
+        bool,
         std::sync::mpsc::Sender<std::result::Result<(), String>>,
     ),
     TransferLaunch(kasa_socket::transfer::LaunchRequest, transfer_endpoints::Reply<kasa_socket::transfer::SessionRow>, Instant),
