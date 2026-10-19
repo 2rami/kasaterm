@@ -63,6 +63,10 @@ impl AccountIdentity {
         )
     }
 
+    pub(crate) fn uuids(&self) -> (&str, &str) {
+        (&self.account_uuid, &self.organization_uuid)
+    }
+
     pub(crate) fn matches_verified(&self, identity: kasa_mcp::VerifiedClaudeIdentity) -> bool {
         Self::from_verified(identity).is_some_and(|identity| &identity == self)
     }

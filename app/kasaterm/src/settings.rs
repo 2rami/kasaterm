@@ -4915,9 +4915,17 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         // 그때의 「활성 행이 빈손」은 키체인 동명 껍데기 항목 탓이었고(http.rs
         // `read_claude_credentials` 가 계정 칸까지 맞춰 해결), 일시 실패는 표에 남은
         // 마지막 진짜 신원으로 그린다 — 틀린 이메일보다 옛 진짜 값이 낫다.
+        // 작업대 조회는 화면에만 쓴다. 슬롯 신원 표(statusline·관문 목록·받기 후보가 읽는다)에는 그 슬롯 자기
+        // 금고의 답, 또는 소유 표식이 같은 UUID 로 적어 둔 작업대의 답만 남긴다 — 바깥 `/login` 이 바꾼 작업대의
+        // 신원이 그 슬롯 이름으로 굳으면 다른 기기와 받기 루프가 그 계정을 이 슬롯으로 안다.
+        let mut owned = dir.is_some();
         let probe = match slot_identity_full(dir.as_deref()) {
             SlotIdentity::Known { email, org, sync_identity } => {
-                if dir.is_some() { remember_account_sync_identity(&key, sync_identity); }
+                if dir.is_some() {
+                    remember_account_sync_identity(&key, sync_identity);
+                } else {
+                    owned = sync_identity.as_ref().is_some_and(|identity| crate::claude_auth::workbench_stamped_as(&key, identity));
+                }
                 Some(AuthProbe { logged_in: true, verified: true, email, org })
             }
             SlotIdentity::NoToken => {
@@ -4959,7 +4967,7 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
                 old.verified = false;
                 old
             }));
-            if let Some(p) = v.as_ref().filter(|p| !p.email.is_empty()) {
+            if let Some(p) = v.as_ref().filter(|p| owned && !p.email.is_empty()) {
                 remember_account_identity(&key, &p.email, &p.org);
             }
             m.insert(key, (Instant::now(), v));

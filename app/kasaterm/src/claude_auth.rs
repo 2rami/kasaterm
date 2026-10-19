@@ -698,6 +698,24 @@ fn live_access_token_at(blob: &[u8], now_ms: u128) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
+/// 작업대 소유 표식이 그 슬롯을 바로 그 UUID 로 적어 두었나. 활성 행의 표시 조회는 작업대를 보는데, 바깥
+/// `/login` 이 작업대를 바꿨으면 그 신원은 슬롯의 것이 아니다 — 표식과 맞을 때만 슬롯 신원 표에 남긴다.
+pub(crate) fn workbench_stamped_as(account: &str, identity: &crate::session::AccountIdentity) -> bool {
+    let Some(active) = active_dir() else { return false };
+    stamped_as_in(&active, account, identity)
+}
+
+fn stamped_as_in(active: &Path, account: &str, identity: &crate::session::AccountIdentity) -> bool {
+    // 슬롯과 UUID 는 한 번 읽은 같은 스냅숏에서 대조한다 — 두 번 읽으면 전환 사이에 A 의 슬롯과 B 의 UUID 가 섞인다.
+    let Some(stamp) = std::fs::read_to_string(stamp_path_in(active)).ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()) else { return false };
+    let (account_uuid, organization_uuid) = identity.uuids();
+    !account.is_empty()
+        && stamp.get("account").and_then(|v| v.as_str()) == Some(account)
+        && serde_json::from_value::<IdentityKey>(stamp.get("identity").cloned().unwrap_or_default())
+            .is_ok_and(|stamped| stamped.account_uuid == account_uuid && stamped.organization_uuid == organization_uuid)
+}
+
 pub(crate) fn verified_workbench_identity() -> Option<kasa_mcp::VerifiedClaudeIdentity> {
     if !account_sync_credentials_allowed() {
         return None;
@@ -1142,6 +1160,30 @@ mod tests {
 
     fn proof(account: &str) -> IdentityKey {
         IdentityKey { account_uuid: account.into(), organization_uuid: "test-org".into() }
+    }
+
+    #[test]
+    fn only_a_stamp_naming_the_same_slot_and_uuids_lets_the_workbench_name_a_slot() {
+        let s = Slots::new("stamped-as");
+        let (stamp, _) = s.bench();
+        let identity = |account: &str| crate::session::AccountIdentity::from_verified(kasa_mcp::VerifiedClaudeIdentity {
+            account_uuid: account.into(),
+            organization_uuid: "00000000-0000-4000-8000-0000000000f0".into(),
+            email: "person@example.test".into(),
+            org: "Shown name".into(),
+        }).unwrap();
+        let sionic = identity("00000000-0000-4000-8000-0000000000a1");
+        let gmail = identity("00000000-0000-4000-8000-0000000000a2");
+        assert!(!stamped_as_in(&stamp, "acct-6", &sionic), "no stamp");
+        write_stamp_in(&stamp, "acct-6", "digest");
+        assert!(!stamped_as_in(&stamp, "acct-6", &sionic), "a stamp without UUIDs proves nothing");
+        let key = IdentityKey { account_uuid: "00000000-0000-4000-8000-0000000000a1".into(),
+            organization_uuid: "00000000-0000-4000-8000-0000000000f0".into() };
+        write_stamp_with_identity_in(&stamp, "acct-6", "digest", Some(&key));
+        assert!(stamped_as_in(&stamp, "acct-6", &sionic));
+        assert!(!stamped_as_in(&stamp, "acct-6", &gmail), "an outside login under the same slot");
+        assert!(!stamped_as_in(&stamp, "acct-1", &sionic), "another slot");
+        assert!(!stamped_as_in(&stamp, "", &sionic));
     }
 
     #[test]

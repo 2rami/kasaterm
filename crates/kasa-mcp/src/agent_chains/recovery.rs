@@ -1198,6 +1198,7 @@ mod tests {
             id: "current".into(),
             store: None,
             table_key: Some(KEY.into()),
+            bench: false, stamped: None,
         }];
         let stale = BTreeMap::from([("deleted".into(), KEY.into())]);
         assert!(matches!(probe_slots(&ticket, &expected, &slots, &stale, &stores), Probe::Stop));
@@ -1206,7 +1207,7 @@ mod tests {
     #[test]
     fn slot_selection_changing_during_the_keychain_read_refuses_the_grant() {
         let (_ledger, ticket, expected) = ready("old-token", "new-token");
-        let slot = Slot { id: "managed".into(), store: Some("fixture-store".into()), table_key: None };
+        let slot = Slot { id: "managed".into(), store: Some("fixture-store".into()), table_key: None, bench: false, stamped: None };
         let map = BTreeMap::from([(slot.id.clone(), KEY.into())]);
         let stores = SwitchingStores {
             doc: serde_json::json!({"claudeAiOauth":{"accessToken":"new-token","expiresAt":expected.expires_at}}),
@@ -1218,21 +1219,21 @@ mod tests {
     #[test]
     fn completed_grants_require_the_bound_slot_in_the_latest_settings_and_map() {
         let (_ledger, ticket, _) = ready("old-token", "new-token");
-        let slot = Slot { id: "managed".into(), store: Some("fixture-store".into()), table_key: None };
+        let slot = Slot { id: "managed".into(), store: Some("fixture-store".into()), table_key: None, bench: false, stamped: None };
         let map = BTreeMap::from([(slot.id.clone(), KEY.into())]);
         let stores = MemoryStores(Mutex::new(std::collections::HashMap::new()));
         let binding = SlotBinding { id: slot.id.clone(), store: slot.store.clone() };
         assert!(binding_current(&ticket, &binding, &[slot], &map, &stores));
         assert!(!binding_current(&ticket, &binding, &[], &map, &stores));
         let stale = BTreeMap::from([("deleted".into(), KEY.into())]);
-        let selected = Slot { id: "current".into(), store: None, table_key: Some(KEY.into()) };
+        let selected = Slot { id: "current".into(), store: None, table_key: Some(KEY.into()), bench: false, stamped: None };
         assert!(!binding_current(&ticket, &binding, &[selected], &stale, &stores));
     }
 
     #[test]
     fn completed_leader_result_is_refused_after_the_bound_store_changes() {
         let (_ledger, ticket, expected) = ready("old-token", "new-token");
-        let slot = Slot { id: "managed".into(), store: Some("fixture-store".into()), table_key: None };
+        let slot = Slot { id: "managed".into(), store: Some("fixture-store".into()), table_key: None, bench: false, stamped: None };
         let slots = vec![slot];
         let map = BTreeMap::from([("managed".into(), KEY.into())]);
         let stores = MemoryStores(Mutex::new(std::collections::HashMap::from([(

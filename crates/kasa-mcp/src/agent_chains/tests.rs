@@ -10,7 +10,14 @@ pub(crate) fn seen_calls(calls: &Seen, what: &str) -> Vec<String> {
     calls.lock().unwrap().iter().filter(|(p, _)| p == what).map(|(_, b)| b.clone()).collect()
 }
 
-/// Profile: `access-personal*` is a personal organization, `access-team*` a team; anything else 401.
+pub(crate) const PERSON: &str = "00000000-0000-4000-8000-000000000001";
+pub(crate) const PERSONAL_ORG: &str = "00000000-0000-4000-8000-000000000011";
+pub(crate) const TEAM_ORG: &str = "00000000-0000-4000-8000-000000000022";
+pub(crate) const TWIN: &str = "00000000-0000-4000-8000-000000000003";
+pub(crate) const TWIN_ORG: &str = "00000000-0000-4000-8000-000000000033";
+
+/// Profile: `access-personal*` is a personal organization, `access-team*` a team, `access-twin*` another
+/// account with the same names as the personal one; anything else 401.
 /// Token: `refresh-dead` is refused with invalid_grant, `refresh-busy` gets 429, others rotate.
 pub(crate) async fn anthropic() -> (String, Seen) {
     let calls: Seen = Arc::default();
@@ -21,12 +28,17 @@ pub(crate) async fn anthropic() -> (String, Seen) {
                 let bearer = headers["authorization"].to_str().unwrap().trim_start_matches("Bearer ").to_string();
                 calls.lock().unwrap().push(("profile".into(), bearer.clone()));
                 if bearer.starts_with("access-personal") {
-                    return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"Fixture@Example.invalid"},
-                        "organization":{"name":"fixture@example.invalid's Organization","organization_type":"claude_max"}})));
+                    return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"Fixture@Example.invalid","uuid":PERSON},
+                        "organization":{"name":"fixture@example.invalid's Organization","organization_type":"claude_max","uuid":PERSONAL_ORG}})));
                 }
                 if bearer.starts_with("access-team") {
-                    return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"fixture@example.invalid"},
-                        "organization":{"name":"Fixture Team","organization_type":"claude_team"}})));
+                    return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"fixture@example.invalid","uuid":PERSON},
+                        "organization":{"name":"Fixture Team","organization_type":"claude_team","uuid":TEAM_ORG}})));
+                }
+                // Same email and organization name as `access-personal`, a different provider account.
+                if bearer.starts_with("access-twin") {
+                    return (axum::http::StatusCode::OK, axum::Json(json!({"account":{"email":"fixture@example.invalid","uuid":TWIN},
+                        "organization":{"name":"fixture@example.invalid's Organization","organization_type":"claude_max","uuid":TWIN_ORG}})));
                 }
                 (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error":"invalid_token"})))
             }),
@@ -336,7 +348,7 @@ fn a_store_commit_requires_the_complete_original_document() {
     assert!(!matches_document(Read::Unknown, None));
     assert!(!matches_document(Read::Absent, Some(&old)));
     assert!(matches_document(Read::Absent, None));
-    assert!(!Local.compare_and_write(&Slot {id:"fixture".into(),store:None,table_key:None}, None, &old));
+    assert!(!Local.compare_and_write(&Slot {id:"fixture".into(),store:None,table_key:None, bench: false, stamped: None}, None, &old));
 }
 
 impl Stores for Docs {
@@ -359,7 +371,7 @@ fn a_device_warns_when_gateway_tokens_run_out_even_with_the_gateway_down() {
         ("team".to_string(), slot_doc("t", None, 5 * HOUR as i64)),
     ])));
     let slots: Vec<Slot> = ["a", "b", "own", "fresh", "team", "unmapped"].iter()
-        .map(|id| Slot { id: id.to_string(), store: None, table_key: None }).collect();
+        .map(|id| Slot { id: id.to_string(), store: None, table_key: None, bench: false, stamped: None }).collect();
     let map: BTreeMap<String, String> = [("a", "claude:x@y"), ("b", "claude:x@y"), ("own", "claude:x@y"),
         ("fresh", "claude:z@y"), ("team", "claude:team")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let down = device_alerts(&slots, &map, &docs, None, now);
@@ -376,6 +388,7 @@ fn stale_slot_mappings_and_current_identity_do_not_manage_a_deleted_account() {
         id: "current".into(),
         store: None,
         table_key: Some("claude:fixture@example.invalid".into()),
+        bench: false, stamped: None,
     }];
     let stale = BTreeMap::from([("deleted".into(), "claude:fixture@example.invalid".into())]);
     assert!(managed_keys(&slots, &stale, &BTreeMap::new()).is_empty());
@@ -412,4 +425,30 @@ fn bounded_child_output_times_out_kills_and_reaps_the_child() {
     let alive = unsafe { libc::kill(pid as i32, 0) };
     assert_eq!(alive, -1, "timed-out child was not reaped");
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
+
+#[tokio::test]
+async fn chains_carry_provider_uuids_and_older_chains_gain_them_on_the_next_refresh() {
+    let (service, _, _) = service().await;
+    let sealed = service.seal("one", "d", offer("access-personal-1", "refresh-1", 7 * HOUR)).await.unwrap();
+    assert_eq!((sealed["account_uuid"].as_str(), sealed["organization_uuid"].as_str()), (Some(PERSON), Some(PERSONAL_ORG)));
+    let listed = service.list("one").await.unwrap();
+    assert_eq!(listed["chains"][0]["account_uuid"], PERSON);
+
+    let twin = service.seal("one", "d", offer("access-twin-1", "refresh-twin", 7 * HOUR)).await;
+    assert_eq!(twin.err(), Some(Error::Conflict), "a held chain of another provider account was handed out");
+
+    // A chain sealed before this field existed: the gateway learns its owner from the rotated token.
+    let mut book = service.load("one").unwrap();
+    book.values_mut().for_each(|c| {
+        c.account_uuid.clear();
+        c.organization_uuid.clear();
+        c.sealed_at = 0;
+        c.expires_at = now_ms() + HOUR;
+    });
+    service.save("one", &book).unwrap();
+    assert!(service.list("one").await.unwrap()["chains"][0].get("account_uuid").is_none());
+    assert_eq!(service.refresh_due().await.0, 1);
+    let chain = &service.load("one").unwrap()["claude:fixture@example.invalid"];
+    assert_eq!((chain.account_uuid.as_str(), chain.organization_uuid.as_str()), (PERSON, PERSONAL_ORG));
 }

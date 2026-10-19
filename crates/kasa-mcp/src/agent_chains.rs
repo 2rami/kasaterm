@@ -97,6 +97,12 @@ struct Chain {
     /// 캐시로 그것을 더 보낸다 — 기기가 그 401 을 이 사슬의 것으로 알아보게 알려 준다. 끊기면 비운다.
     #[serde(default)]
     lineage: Vec<Spent>,
+    /// 관문이 공급자 프로필에서 확인한 계정·조직 UUID. 팀 열쇠는 조직명이라 열쇠가 같아도 사람이 다를 수 있다 —
+    /// 기기는 이것으로 받을 토큰의 주인을 가른다. 이 기능 전에 맡긴 사슬은 다음 갱신 때 채운다.
+    #[serde(default)]
+    account_uuid: String,
+    #[serde(default)]
+    organization_uuid: String,
 }
 
 /// 사슬이 앞서 낸 접근 토큰 하나 — 지문과 그 토큰의 원래 만료만, 토큰 값은 없다.
@@ -107,6 +113,32 @@ pub struct Spent {
     /// 같은 계정이 다시 봉인된 뒤 옛 지문이 새 사슬에 붙지 않게 한다.
     #[serde(default)]
     pub generation: String,
+}
+
+/// 공급자의 계정·조직 UUID 쌍 — 토큰의 주인을 가르는 유일한 근거. 이메일·조직명·사슬 열쇠는 이름일 뿐이다.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Who {
+    pub account_uuid: String,
+    pub organization_uuid: String,
+}
+
+impl Who {
+    pub(crate) fn new(account: &str, organization: &str) -> Option<Self> {
+        let parse = |raw: &str| {
+            let id = uuid::Uuid::parse_str(raw).ok()?;
+            (raw.len() == 36 && !id.is_nil()).then(|| id.to_string())
+        };
+        Some(Self { account_uuid: parse(account)?, organization_uuid: parse(organization)? })
+    }
+
+    fn from_profile(profile: &Value) -> Option<Self> {
+        let get = |path: &str| profile.pointer(path).and_then(Value::as_str).unwrap_or_default();
+        Self::new(get("/account/uuid"), get("/organization/uuid"))
+    }
+
+    fn of_held(chain: &Held) -> Option<Self> {
+        Self::new(&chain.account_uuid, &chain.organization_uuid)
+    }
 }
 
 fn new_generation() -> String {
@@ -141,6 +173,10 @@ impl Chain {
         } else {
             format!("{org}({})", self.email)
         }
+    }
+
+    fn who(&self) -> Option<Who> {
+        Who::new(&self.account_uuid, &self.organization_uuid)
     }
 
     fn due(&self, now: u64) -> bool {
@@ -205,6 +241,11 @@ pub struct Held {
     /// 이 세대의 이전 접근 토큰(`Chain::lineage`).
     #[serde(default)]
     pub lineage: Vec<Spent>,
+    /// 관문이 공급자에서 확인한 UUID(`Chain::account_uuid`). 옛 관문은 안 보낸다 — 기기가 직접 확인한다.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_uuid: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub organization_uuid: String,
 }
 
 /// 관문이 사람에게 알릴 일 — 그 관문 계정의 폰으로 간다(`gateway_agent_chains.rs`).
@@ -224,6 +265,8 @@ pub enum Error {
     Provider,
     Storage,
     Full,
+    /// 같은 열쇠의 사슬이 다른 공급자 계정이다 — 팀 열쇠(조직명)가 겹친 경우. 어느 쪽도 바꾸지 않는다.
+    Conflict,
 }
 
 impl Error {
@@ -234,6 +277,7 @@ impl Error {
             Self::Provider => "provider_unavailable",
             Self::Storage => "storage_unavailable",
             Self::Full => "too_many_chains",
+            Self::Conflict => "identity_conflict",
         }
     }
 
@@ -244,7 +288,7 @@ impl Error {
             Self::Rejected => 422,
             Self::Provider => 502,
             Self::Storage => 503,
-            Self::Full => 409,
+            Self::Full | Self::Conflict => 409,
         }
     }
 }
@@ -353,8 +397,8 @@ impl Service {
         }
     }
 
-    /// 그 접근 토큰의 주인(이메일, 조직명). 기기가 적어 보낸 신원은 믿지 않는다.
-    async fn identity(&self, access_token: &str) -> Result<(String, String), Error> {
+    /// 그 접근 토큰의 주인(이메일, 조직명, 계정·조직 UUID). 기기가 적어 보낸 신원은 믿지 않는다.
+    async fn identity(&self, access_token: &str) -> Result<(String, String, Option<Who>), Error> {
         let response = self
             .http
             .get(&self.endpoints.profile)
@@ -379,7 +423,7 @@ impl Service {
             .and_then(Value::as_str)
             .filter(|org| org.len() <= 200 && !org.chars().any(char::is_control))
             .unwrap_or_default();
-        Ok((email.to_string(), org.to_string()))
+        Ok((email.to_string(), org.to_string(), Who::from_profile(&profile)))
     }
 
     /// 기기가 사슬을 맡긴다. 같은 계정의 멀쩡한 사슬이 이미 있으면 그것을 지키고 그 접근 토큰을
@@ -395,13 +439,20 @@ impl Service {
         {
             return Err(Error::Invalid);
         }
-        let (email, org) = self.identity(&offer.access_token).await?;
+        let (email, org, who) = self.identity(&offer.access_token).await?;
         let key = crate::agent_accounts::account_key("claude", &email, &org, "");
         let _guard = self.books.lock().await;
         let mut book = self.load(account)?;
         if let Some(existing) = book.get(&key).filter(|c| !c.broken && c.expires_at > now + 10 * 60 * 1000) {
+            if existing.who().zip(who.as_ref()).is_some_and(|(held, offered)| &held != offered) {
+                self.record(account, device, "seal", &key, "identity_conflict");
+                return Err(Error::Conflict);
+            }
             self.record(account, device, "seal", &key, "held");
-            return Ok(json!({"ok":true,"key":key,"held":true,"access":existing.access()}));
+            let held = existing.who();
+            return Ok(json!({"ok":true,"key":key,"held":true,"access":existing.access(),
+                "account_uuid":held.as_ref().map(|w| w.account_uuid.as_str()),
+                "organization_uuid":held.as_ref().map(|w| w.organization_uuid.as_str())}));
         }
         if !book.contains_key(&key) && book.len() >= MAX_CHAINS {
             return Err(Error::Full);
@@ -423,12 +474,16 @@ impl Service {
             warned: false,
             generation: new_generation(),
             lineage: Vec::new(),
+            account_uuid: who.as_ref().map(|w| w.account_uuid.clone()).unwrap_or_default(),
+            organization_uuid: who.as_ref().map(|w| w.organization_uuid.clone()).unwrap_or_default(),
         };
         let access = chain.access();
         book.insert(key.clone(), chain);
         self.save(account, &book)?;
         self.record(account, device, "seal", &key, "sealed");
-        Ok(json!({"ok":true,"key":key,"held":false,"access":access}))
+        Ok(json!({"ok":true,"key":key,"held":false,"access":access,
+            "account_uuid":who.as_ref().map(|w| w.account_uuid.as_str()),
+            "organization_uuid":who.as_ref().map(|w| w.organization_uuid.as_str())}))
     }
 
     /// 이 관문 계정이 맡긴 사슬들과 그 접근 토큰.
@@ -467,6 +522,8 @@ impl Service {
                         .cloned()
                         .collect()
                 },
+                account_uuid: chain.account_uuid.clone(),
+                organization_uuid: chain.organization_uuid.clone(),
             })
             .collect();
         Ok(json!({"ok":true,"chains":chains}))
@@ -594,6 +651,17 @@ impl Service {
         next.updated = now;
         next.retry_at = 0;
         next.warned = false;
+        if next.who().is_none() {
+            // 기능 전에 맡긴 사슬: 갓 받은 토큰으로 주인을 확인한다. 열쇠가 어긋나면 비워 두어 기기가 직접 확인하게 한다.
+            if let Ok((email, org, Some(who))) = self.identity(&next.access_token).await {
+                if crate::agent_accounts::account_key("claude", &email, &org, "")
+                    == crate::agent_accounts::account_key("claude", &next.email, &next.org, "")
+                {
+                    next.account_uuid = who.account_uuid;
+                    next.organization_uuid = who.organization_uuid;
+                }
+            }
+        }
         Ok(next)
     }
 }
@@ -842,10 +910,17 @@ fn write_store(store: Option<&Path>, doc: &Value) -> bool {
 }
 
 /// 이 기기의 Claude 슬롯 하나 — 실제 저장소와, 적어 둔 신원으로 만든 계정 열쇠.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub id: String,
     pub store: Option<PathBuf>,
     pub table_key: Option<String>,
+    /// 고른 슬롯이 작업대(기본 자리)에 실려 있다. 작업대는 바깥 `/login` 이 언제든 다른 계정으로 바꿀 수 있어
+    /// 슬롯의 계정을 알려 주지 못한다 — 여기서 본 토큰으로는 슬롯 매핑을 배우거나 바꾸지 않는다.
+    pub bench: bool,
+    /// 작업대 소유 표식이 이 슬롯 이름으로 적어 둔 UUID — 앱이 금고를 작업대에 실을 때 그 토큰으로 확인한 값이다.
+    /// 막 로그인해 곧바로 고른 슬롯은 아직 매핑이 없으니 이것으로 작업대의 주인을 증명한다.
+    pub stamped: Option<Who>,
 }
 
 /// 슬롯 저장소를 읽고 쓰는 자리. 앱은 키체인(맥)·자격증명 파일이고, 시험은 메모리다 — 시험이
@@ -869,7 +944,7 @@ impl Stores for Local {
     fn same(&self, slot: &Slot) -> bool {
         load_settings().is_some_and(|(path, settings)| {
             local_slots(path.parent(), &settings).iter().any(|current|
-                current.id == slot.id && current.store == slot.store && current.table_key == slot.table_key)
+                current == slot)
         })
     }
 }
@@ -907,6 +982,15 @@ fn local_slots(base: Option<&Path>, settings: &Value) -> Vec<Slot> {
     let remembered = |map: &str, id: &str| {
         settings.get(map).and_then(|m| m.get(id)).and_then(Value::as_str).unwrap_or_default().to_string()
     };
+    let stamp = base
+        .and_then(|base| std::fs::read_to_string(base.join("claude-accounts/_active/workbench-stamp.json")).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_default();
+    let stamped = |id: &str| {
+        (!id.is_empty() && stamp["account"].as_str() == Some(id))
+            .then(|| Who::new(stamp["identity"]["account_uuid"].as_str()?, stamp["identity"]["organization_uuid"].as_str()?))
+            .flatten()
+    };
     let mut ids: Vec<String> = crate::agent_accounts::slots(settings, "claude_accounts").into_iter().map(|(id, _)| id).collect();
     if settings.get("claude_account").and_then(Value::as_str).unwrap_or_default().is_empty() {
         ids.insert(0, String::new());
@@ -918,7 +1002,9 @@ fn local_slots(base: Option<&Path>, settings: &Value) -> Vec<Slot> {
                 .contains('@')
                 .then(|| crate::agent_accounts::account_key("claude", &email, &remembered("claude_account_orgs", &id), ""));
             let store = crate::agent_accounts::claude_store(base, settings, &id);
-            Slot { id, store, table_key }
+            let bench = !id.is_empty() && store.is_none();
+            let stamped = if bench { stamped(&id) } else { None };
+            Slot { id, store, table_key, bench, stamped }
         })
         .collect()
 }
@@ -927,18 +1013,44 @@ fn map_path() -> Option<PathBuf> {
     Some(crate::agent_accounts::settings_path()?.with_file_name("agent-chains.json"))
 }
 
-/// 슬롯 id → 관문 사슬 열쇠. 맡기거나 받아 온 자리를 적는다. 토큰은 없다.
-fn load_map() -> BTreeMap<String, String> {
+/// 슬롯에 마지막으로 실은 토큰의 지문과 그 주인 UUID. 토큰은 없다. 관문이 사슬을 갈면 옛 토큰은 곧바로 죽어
+/// 프로필로 다시 확인할 수 없다 — 우리가 실은 그 바이트가 그대로면 이 기록이 주인을 증명한다.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Owner {
+    pub key: String,
+    pub fingerprint: String,
+    #[serde(flatten)]
+    pub who: Who,
+}
+
+#[derive(Default)]
+pub(crate) struct Learned {
+    pub keys: BTreeMap<String, String>,
+    pub owners: BTreeMap<String, Owner>,
+}
+
+fn load_file() -> Value {
     map_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|v| serde_json::from_value(v["slots"].clone()).ok())
-        .unwrap_or_default()
+        .unwrap_or_else(|| json!({}))
 }
 
-fn save_map(map: &BTreeMap<String, String>) {
+/// 슬롯 id → 관문 사슬 열쇠. 맡기거나 받아 온 자리를 적는다. 토큰은 없다.
+fn load_map() -> BTreeMap<String, String> {
+    serde_json::from_value(load_file()["slots"].clone()).unwrap_or_default()
+}
+
+fn load_owners() -> BTreeMap<String, Owner> {
+    let file = load_file();
+    let Some(owners) = file.get("owners").and_then(Value::as_object) else { return BTreeMap::new() };
+    // 한 줄이 깨졌다고 나머지 증명을 버리지 않는다.
+    owners.iter().filter_map(|(id, v)| Some((id.clone(), serde_json::from_value(v.clone()).ok()?))).collect()
+}
+
+fn save_map(map: &BTreeMap<String, String>, owners: &BTreeMap<String, Owner>) {
     if let Some(path) = map_path() {
-        let _ = crate::relay_auth::write_private(&path, &json!({"slots": map}).to_string());
+        let _ = crate::relay_auth::write_private(&path, &json!({"slots": map, "owners": owners}).to_string());
     }
 }
 
@@ -956,8 +1068,10 @@ pub fn held(key: &str) -> bool {
 /// 그 슬롯을 관문 사슬로 채우게 한다 — 「다른 기기에 있는 계정」을 이 기기에 붙일 때.
 pub fn adopt(slot: &str, key: &str) {
     let mut map = load_map();
+    let mut owners = load_owners();
     map.insert(slot.to_string(), key.to_string());
-    save_map(&map);
+    owners.remove(slot);
+    save_map(&map, &owners);
     poke();
 }
 
@@ -985,6 +1099,15 @@ fn rest(period: Duration) {
     }
 }
 
+#[derive(Clone)]
+struct Sealed {
+    key: String,
+    access: Access,
+    /// 관문에 이미 같은 계정 사슬이 있어 우리 것을 받지 않았다 — 내준 토큰은 그 사슬의 것이다.
+    held: bool,
+    who: Option<Who>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SyncError {
     Unauthorized,
@@ -996,6 +1119,9 @@ pub(crate) struct Gateway<'a> {
     base: String,
     token: &'a str,
     http: reqwest::Client,
+    profile: String,
+    /// 이번 주기에 확인한 토큰 지문 → 주인. 같은 토큰을 한 주기에 두 번 묻지 않는다.
+    proofs: std::sync::Mutex<HashMap<String, Option<Who>>>,
 }
 
 impl<'a> Gateway<'a> {
@@ -1005,7 +1131,67 @@ impl<'a> Gateway<'a> {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
-        Self { base: base.trim_end_matches('/').to_string(), token, http }
+        Self {
+            base: base.trim_end_matches('/').to_string(),
+            token,
+            http,
+            profile: Endpoints::default().profile,
+            proofs: Default::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_profile(mut self, profile: &str) -> Self {
+        self.profile = profile.to_string();
+        self
+    }
+
+    /// 그 접근 토큰의 주인 UUID. 막 만료·폐기된 토큰이면 모른다(None) — 그때는 덮지 않는다.
+    async fn prove(&self, token: &str) -> Option<Who> {
+        let fp = fingerprint(token);
+        if let Some(known) = self.proofs.lock().ok().and_then(|p| p.get(&fp).cloned()) {
+            return known;
+        }
+        #[cfg(not(test))]
+        if let Some(cached) = crate::verified_claude_identity_for_token(token) {
+            return Who::new(&cached.account_uuid, &cached.organization_uuid);
+        }
+        let found = async {
+            let response = self.http.get(&self.profile).bearer_auth(token)
+                .header("anthropic-beta", "oauth-2025-04-20").send().await.ok()?;
+            if response.status().as_u16() != 200 {
+                return None;
+            }
+            Who::from_profile(&bounded(response).await.ok()?)
+        }.await;
+        if let Ok(mut proofs) = self.proofs.lock() {
+            proofs.insert(fp, found.clone());
+        }
+        found
+    }
+
+    /// 관문이 내준 사슬 토큰의 주인 — 관문이 공급자에서 확인한 UUID, 옛 관문이면 그 (갓 받은) 토큰으로 직접.
+    async fn chain_who(&self, chain: &Held) -> Option<Who> {
+        match Who::of_held(chain) {
+            Some(who) => Some(who),
+            None => self.prove(&chain.access.as_ref()?.access_token).await,
+        }
+    }
+
+    /// 저장소에 지금 든 토큰의 주인. 우리가 실은 바이트 그대로면 소유 기록, 관문 사슬의 현재·이전 토큰이면 그 사슬,
+    /// 아니면 프로필. 아무것도 증명하지 못하면 None — 부르는 쪽은 덮지 않는다.
+    async fn current_who(&self, token: &str, owner: Option<&Owner>, chain: &Held) -> Option<Who> {
+        let fp = fingerprint(token);
+        if let Some(owner) = owner.filter(|o| o.fingerprint == fp) {
+            return Some(owner.who.clone());
+        }
+        let issued = chain.access.as_ref().is_some_and(|a| a.access_token == token)
+            || (!chain.generation.is_empty()
+                && chain.lineage.iter().any(|spent| spent.fingerprint == fp && spent.generation == chain.generation));
+        if issued {
+            return self.chain_who(chain).await;
+        }
+        self.prove(token).await
     }
 
     async fn call(&self, request: reqwest::RequestBuilder) -> Result<Value, SyncError> {
@@ -1023,11 +1209,17 @@ impl<'a> Gateway<'a> {
         Ok(value)
     }
 
-    async fn seal(&self, offer: &Offer) -> Result<(String, Access), SyncError> {
+    async fn seal(&self, offer: &Offer) -> Result<Sealed, SyncError> {
         let value = self.call(self.http.post(format!("{}/relay/agent-chains/seal", self.base)).json(offer)).await?;
         let key = value["key"].as_str().ok_or(SyncError::Failed)?.to_string();
         let access = serde_json::from_value(value["access"].clone()).map_err(|_| SyncError::Failed)?;
-        Ok((key, access))
+        let text = |field: &str| value[field].as_str().unwrap_or_default();
+        Ok(Sealed {
+            key,
+            access,
+            held: value["held"] == true,
+            who: Who::new(text("account_uuid"), text("organization_uuid")),
+        })
     }
 
     async fn list(&self) -> Result<Vec<Held>, SyncError> {
@@ -1036,38 +1228,63 @@ impl<'a> Gateway<'a> {
     }
 }
 
-/// 한 주기: 갱신 토큰이 있는 슬롯은 맡기고, 관문이 쥔 계정의 슬롯은 접근 토큰을 받아 채운다.
-/// 이번에 새로 안 슬롯 → 사슬 열쇠와, 관문이 보여 준 사슬 목록을 돌려준다.
+/// 한 주기: 갱신 토큰이 있는 슬롯은 맡기고, 관문이 쥔 계정의 슬롯은 접근 토큰을 받아 채운다. 어느 쪽이든 저장소를
+/// 바꾸기 전에 지금 든 토큰과 실을 토큰의 주인 UUID 가 같음을 증명해야 한다 — 증명이 없으면 덮지 않는다.
+/// 이번에 새로 안 슬롯 → 사슬 열쇠·소유 기록과, 관문이 보여 준 사슬 목록을 돌려준다.
 pub(crate) async fn sync_once(
     gateway: &Gateway<'_>,
     slots: &[Slot],
     map: &BTreeMap<String, String>,
+    owners: &BTreeMap<String, Owner>,
     stores: &dyn Stores,
     authorized: &(dyn Fn() -> bool + Sync),
     ledger: &recovery::Ledger,
-) -> Result<(BTreeMap<String, String>, Vec<Held>), SyncError> {
-    let mut learned = BTreeMap::new();
+) -> Result<(Learned, Vec<Held>), SyncError> {
+    let mut learned = Learned::default();
     // 네트워크가 막혀도 삭제된 실제 슬롯이 이전 성공 때의 복구 권한을 계속 갖지 않게 먼저 줄인다.
-    ledger.manage(managed_keys(slots, map, &learned));
+    ledger.manage(managed_keys(slots, map, &learned.keys));
     let now = now_ms();
     // 같은 사슬이 두 자리에 있으면 한 번만 맡긴다(갱신 토큰 → 결과).
-    let mut offered: HashMap<String, (String, Access)> = HashMap::new();
+    let mut offered: HashMap<String, Sealed> = HashMap::new();
     for slot in slots {
         let Read::Present(doc) = stores.read(slot) else { continue };
         let Some(offer) = offer_of(&doc, now) else { continue };
-        let result = match offered.get(&offer.refresh_token) {
+        // 작업대의 로그인은 그 슬롯의 것이라고 증명될 때만 맡긴다. 바깥 `/login` 의 다른 계정을 넘기고 갱신 토큰을
+        // 지우면 그 로그인은 이 기기에서 슬롯 없이 사라진다 — 그대로 두면 계정 화면이 따로 들이게 안내한다.
+        let recorded = map.get(&slot.id).and(owners.get(&slot.id)).map(|owner| &owner.who);
+        if slot.bench && recorded.is_none() && slot.stamped.is_none() {
+            continue;
+        }
+        let own = gateway.prove(&offer.access_token).await;
+        if slot.bench && (own.is_none() || (own.as_ref() != recorded && own != slot.stamped)) {
+            continue;
+        }
+        let sealed = match offered.get(&offer.refresh_token) {
             Some(done) => done.clone(),
             None => match gateway.seal(&offer).await {
                 Ok(done) => {
                     offered.insert(offer.refresh_token.clone(), done.clone());
                     done
                 }
-                // 이 사슬 하나의 문제(토큰 거부·관문 일시 실패)면 다음 슬롯으로 — 로그인은 그대로 둔다.
+                // 이 사슬 하나의 문제(토큰 거부·관문 일시 실패·같은 열쇠의 다른 계정)면 다음 슬롯으로 — 로그인은 그대로 둔다.
                 Err(SyncError::Failed) => continue,
                 Err(error) => return Err(error),
             },
         };
-        let (key, access) = result;
+        // 관문이 받지 않고 자기 사슬을 내줬으면 그 주인이 우리 로그인과 같을 때만 갈아 끼운다. 다르거나 모르면
+        // 우리 갱신 토큰을 그대로 둔다 — 관문은 그것을 받지 않았으니 두 곳이 같은 사슬을 돌리지 않는다.
+        let who = if sealed.held {
+            let held = match sealed.who.clone() {
+                Some(who) => Some(who),
+                None => gateway.prove(&sealed.access.access_token).await,
+            };
+            if held.is_none() || held != own {
+                continue;
+            }
+            held
+        } else {
+            sealed.who.clone().or(own)
+        };
         if !authorized() || !stores.same(slot) {
             continue;
         }
@@ -1076,33 +1293,61 @@ pub(crate) async fn sync_once(
         if text(&current, "refreshToken") != Some(offer.refresh_token.as_str()) {
             continue;
         }
-        if stores.compare_and_write(slot, Some(&current), &with_access(Some(&current), &access)) {
+        if stores.compare_and_write(slot, Some(&current), &with_access(Some(&current), &sealed.access)) {
             eprintln!("[agent-chains] {} 슬롯 사슬을 관문에 맡겼어요", display(&slot.id));
-            learned.insert(slot.id.clone(), key);
+            learned.keys.insert(slot.id.clone(), sealed.key.clone());
+            if let Some(who) = who {
+                let fingerprint = fingerprint(&sealed.access.access_token);
+                learned.owners.insert(slot.id.clone(), Owner { key: sealed.key.clone(), fingerprint, who });
+            }
         }
     }
     let chains = gateway.list().await?;
     if let Ok(mut s) = seen().lock() {
         *s = chains.iter().map(|c| (c.key.clone(), c.state.clone())).collect();
     }
-    ledger.manage(managed_keys(slots, map, &learned));
+    ledger.manage(managed_keys(slots, map, &learned.keys));
     ledger.observe(&chains);
     for slot in slots {
-        let mapped = learned.get(&slot.id).or(map.get(&slot.id)).cloned();
-        let Some(key) = mapped.clone().or(slot.table_key.clone()) else { continue };
-        let Some(access) = chains.iter().find(|c| c.key == key && c.state == "ok").and_then(|c| c.access.as_ref()) else {
-            continue;
+        let mapped = learned.keys.get(&slot.id).or(map.get(&slot.id)).cloned();
+        // 적어 둔 표시 신원은 후보를 찾는 힌트일 뿐이다 — 아래에서 지금 든 토큰의 주인으로 증명돼야 쓴다. 작업대에는 안 쓴다.
+        let key = match (&mapped, &slot.table_key) {
+            (Some(key), _) => key.clone(),
+            (None, Some(key)) if !slot.bench => key.clone(),
+            _ => continue,
         };
+        let Some(chain) = chains.iter().find(|c| c.key == key && c.state == "ok") else { continue };
+        let Some(access) = chain.access.as_ref() else { continue };
         let before = match stores.read(slot) {
             Read::Present(doc) => Some(doc),
             Read::Absent => None,
             Read::Unknown => continue,
         };
-        // 적어 둔 신원만으로 빈 자리를 새로 만들지는 않는다 — 항목이 없는 슬롯은 사람이 고른 것만.
-        if before.is_none() && mapped.is_none() {
+        let owner = learned.owners.get(&slot.id).or(owners.get(&slot.id)).cloned();
+        let token = before.as_ref().and_then(|d| text(d, "accessToken")).map(str::to_string);
+        if !wants_fill(before.as_ref(), access, now) {
+            // 받을 것이 없어도 사슬 토큰을 그대로 들고 있으면 그 주인을 적어 둔다 — 관문이 사슬을 갈면 옛 토큰은
+            // 곧바로 죽어 프로필로 못 묻는다. 이 기록이 그때 덮을 근거가 된다(이 기능 전 기기가 처음 돌 때도).
+            if owner.is_none() && mapped.is_some() && token.as_deref() == Some(access.access_token.as_str()) {
+                if let Some(who) = gateway.chain_who(chain).await.filter(|_| authorized() && stores.same(slot)) {
+                    learned.owners.insert(slot.id.clone(), Owner { key, fingerprint: fingerprint(&access.access_token), who });
+                }
+            }
             continue;
         }
-        if !wants_fill(before.as_ref(), access, now) || !authorized() || !stores.same(slot) {
+        if !authorized() || !stores.same(slot) {
+            continue;
+        }
+        let Some(incoming) = gateway.chain_who(chain).await else { continue };
+        let proven = match &token {
+            Some(token) => gateway.current_who(token, owner.as_ref(), chain).await.as_ref() == Some(&incoming),
+            // 빈 자리·껍데기는 잃을 자격이 없다. 그래도 사람이 고르거나 맡긴 매핑이 있어야 채운다.
+            None => mapped.is_some(),
+        };
+        // 열쇠(팀은 조직명)가 같아도 슬롯에 적힌 주인과 UUID 가 다르면 다른 사람이다.
+        let pinned = owner.as_ref().map(|owner| &owner.who).or(slot.stamped.as_ref());
+        if !proven || pinned.is_some_and(|who| who != &incoming) {
+            eprintln!("[agent-chains] {} 슬롯은 주인을 증명하지 못해 관문 토큰을 싣지 않았어요", display(&slot.id));
             continue;
         }
         let current = match stores.read(slot) {
@@ -1110,16 +1355,17 @@ pub(crate) async fn sync_once(
             Read::Absent => None,
             Read::Unknown => continue,
         };
-        if current.as_ref().and_then(|d| text(d, "accessToken")) != before.as_ref().and_then(|d| text(d, "accessToken"))
+        if current.as_ref().and_then(|d| text(d, "accessToken")) != token.as_deref()
             || !wants_fill(current.as_ref(), access, now)
         {
             continue;
         }
         if stores.compare_and_write(slot, current.as_ref(), &with_access(current.as_ref(), access)) {
             eprintln!("[agent-chains] {} 슬롯에 관문 접근 토큰을 실었어요", display(&slot.id));
-            if mapped.as_ref() != Some(&key) {
-                learned.insert(slot.id.clone(), key);
+            if mapped.as_ref() != Some(&key) && !slot.bench {
+                learned.keys.insert(slot.id.clone(), key.clone());
             }
+            learned.owners.insert(slot.id.clone(), Owner { key, fingerprint: fingerprint(&access.access_token), who: incoming });
         }
     }
     Ok((learned, chains))
@@ -1219,20 +1465,51 @@ async fn sync_local(gateway: &Gateway<'_>, stamp: &crate::device_auth::Stamp) ->
     };
     let slots = local_slots(path.parent(), &settings);
     let mut map = load_map();
+    let owners = load_owners();
     let authorized = || crate::device_auth::stamp_is_current(stamp);
-    let (outcome, chains) = match sync_once(gateway, &slots, &map, &GuardedLocal(stamp), &authorized, recovery::ledger()).await {
-        Ok((learned, chains)) => {
-            if !learned.is_empty() {
-                map = load_map();
-                map.extend(learned);
-                save_map(&map);
+    let (outcome, chains) =
+        match sync_once(gateway, &slots, &map, &owners, &GuardedLocal(stamp), &authorized, recovery::ledger()).await {
+            Ok((learned, chains)) => {
+                if !learned.keys.is_empty() || !learned.owners.is_empty() {
+                    // 관문 응답을 기다리는 사이 로그아웃·슬롯 삭제·재로그인·계정 전환이 있었을 수 있다. 같은 기기 로그인
+                    // 세대 잠금 안에서 지금 설정의 슬롯이 이 주기에 본 그대로인지, 소유 기록이 가리키는 토큰이 아직 그
+                    // 자리에 있는지 다시 보고 맞는 것만 적는다.
+                    let saved = crate::device_auth::with_current(stamp, || {
+                        let (path, settings) = load_settings().ok_or("settings unavailable")?;
+                        let now = local_slots(path.parent(), &settings);
+                        let learned = still_current(learned, &slots, &now, &Local);
+                        let mut map = load_map();
+                        let mut owners = load_owners();
+                        map.extend(learned.keys);
+                        owners.extend(learned.owners);
+                        owners.retain(|id, _| now.iter().any(|slot| &slot.id == id));
+                        save_map(&map, &owners);
+                        Ok(map)
+                    });
+                    map = saved.unwrap_or_else(|_| load_map());
+                }
+                (Ok(()), Some(chains))
             }
-            (Ok(()), Some(chains))
-        }
-        Err(error) => (Err(error), None),
-    };
+            Err(error) => (Err(error), None),
+        };
     raise(device_alerts(&slots, &map, &Local, chains.as_deref(), now_ms()));
     outcome
+}
+
+/// 한 주기에 배운 것 중 저장할 때도 맞는 것만 — 슬롯이 이 주기에 본 그대로(같은 저장소·작업대 여부·표식)이고,
+/// 소유 기록이 가리키는 토큰이 아직 그 자리에 있을 것. 지연된 응답이 삭제·재로그인된 슬롯에 옛 주인을 적지 않게.
+pub(crate) fn still_current(learned: Learned, seen: &[Slot], now: &[Slot], stores: &dyn Stores) -> Learned {
+    let unchanged = |id: &String| seen.iter().find(|slot| &slot.id == id).is_some_and(|slot| now.contains(slot));
+    let holds = |id: &String, owner: &Owner| {
+        now.iter().find(|slot| &slot.id == id).is_some_and(|slot| match stores.read(slot) {
+            Read::Present(doc) => text(&doc, "accessToken").map(fingerprint).as_deref() == Some(owner.fingerprint.as_str()),
+            _ => false,
+        })
+    };
+    Learned {
+        keys: learned.keys.into_iter().filter(|(id, _)| unchanged(id)).collect(),
+        owners: learned.owners.into_iter().filter(|(id, owner)| unchanged(id) && holds(id, owner)).collect(),
+    }
 }
 
 /// 관문 로그인이 없을 때도 관문 토큰으로 도는 슬롯은 끊기기 전에 알린다.
