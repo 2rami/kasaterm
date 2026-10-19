@@ -285,10 +285,13 @@ pub(crate) fn pick_split_axis(px_w: f32, px_h: f32, cols: u16, rows: u16) -> kas
 /// (12로 뒀다가 표준 80×24 pane 이 12줄 두 장으로 갈렸다).
 pub(crate) const MIN_PANE_COLS: u16 = 80;
 pub(crate) const MIN_PANE_ROWS: u16 = 16;
-/// 벤토 격자의 칸 폭 하한 — 이보다 좁아질 때만 새 칸을 탭으로 보낸다. 80 이면 보통 창에서 다섯째 칸이
-/// 탭으로 밀려났고(2026-09-29 「5번째 탭으로 말고 너무 작아지면만」), 60 도 격리 앱 기본 창에서 다섯째를
-/// 탭으로 보냈다. 줄은 `MIN_PANE_ROWS` 그대로 — 입력박스 5줄 때문에 그 밑은 대화가 안 보인다.
+/// 벤토 격자가 고르는 모양의 칸 폭 하한 — 줄 수를 고를 때 이만큼은 남기려 한다. 줄은 `MIN_PANE_ROWS`
+/// 그대로 — 입력박스 5줄 때문에 그 밑은 대화가 안 보인다.
 pub(crate) const BENTO_MIN_COLS: u16 = 40;
+/// 새 칸을 탭으로 보내는 하한 — kasa-pty 가 지키는 물리 하한과 같다. 그 위로는 좁아져도 칸으로 연다
+/// (2026-10-19 「스플릿으로 열게하자」 — 40칸 밑이면 탭으로 보내 맥미니 다섯 칸 방에서 학생이 다 탭에 숨었다).
+const BENTO_FLOOR_COLS: u16 = 20;
+const BENTO_FLOOR_ROWS: u16 = 6;
 
 /// 벤토에 부을 칸 순서 — 화면에서 읽은 순서(`read`)에서 `added` 를 빼 `opener` 뒤에 다시
 /// 끼운다. `opener` 가 먼저 연 칸들이 바로 뒤에 잇대어 있으면 그 끝에 끼워 부른 순서를 지킨다.
@@ -1062,7 +1065,7 @@ impl App {
     ///
     /// 창에 이미 다른 pane 이 있으면 그 자리는 건드리지 않는다(`replace_leaf`).
     ///
-    /// 반환값은 **실제로 앉힌** pane id 들이다. 벤토 방은 하한(80칸·16줄)을 넘는 인원을
+    /// 반환값은 **실제로 앉힌** pane id 들이다. 벤토 방은 물리 하한(20칸·6줄)을 넘는 인원을
     /// 부른 pane 의 탭으로 앉혀 전원을 돌려준다. 보기 창은 `fleet_capacity` 로 잘라 요청보다
     /// 적을 수 있고, 부른 쪽이 그 차이를 사람에게 알려야 한다 — 조용히 적게 만들면
     /// 「5명 불렀는데 3명」이 또 사고가 된다.
@@ -1126,13 +1129,13 @@ impl App {
                 host_rect.0, host_rect.1
             );
         }
-        // 벤토 방은 하한을 지키며 칸으로 앉힐 수만큼만 칸으로, 나머지는 호스트의 탭으로 —
+        // 벤토 방은 물리 하한을 지키며 칸으로 앉힐 수만큼만 칸으로, 나머지는 호스트의 탭으로 —
         // 혼자인 칸의 첫 분할은 늘 칸이다(`bento_full`).
         let owned = self.bento_owns(owner);
         let want = if owned {
             let n = self.window_leaves(owner).len();
             (1..=count)
-                .take_while(|&k| n + k <= 2 || self.bento_shape_for(owner, k).fits)
+                .take_while(|&k| n + k <= 2 || self.bento_room_for(owner, k))
                 .count()
         } else {
             count.min(room.max(1))
@@ -1633,6 +1636,15 @@ impl App {
     /// 하한(80칸×16줄)은 **셸이 받는 격자**로 잰다. 칸 상자에서 헤더 띠·안쪽 여백이
     /// 빠지므로(`resize_backend`), 상자 기준으로 재면 19줄 상자가 15줄 셸이 된다(실측).
     fn bento_shape_for(&self, window: usize, extra: usize) -> kasa_pty::Bento {
+        self.bento_shape_with(window, extra, BENTO_MIN_COLS, MIN_PANE_ROWS)
+    }
+
+    /// 칸 `extra` 개를 더해도 물리 하한(`BENTO_FLOOR_*`)은 지키는가 — 못 지킬 때만 새 칸이 탭으로 간다.
+    fn bento_room_for(&self, window: usize, extra: usize) -> bool {
+        self.bento_shape_with(window, extra, BENTO_FLOOR_COLS, BENTO_FLOOR_ROWS).fits
+    }
+
+    fn bento_shape_with(&self, window: usize, extra: usize, min_cols: u16, min_rows: u16) -> kasa_pty::Bento {
         let leaves = self.window_leaves(window);
         let (cw, ch) = (self.cell.w.max(1.0), self.cell.h.max(1.0));
         let band_px = leaves
@@ -1648,8 +1660,8 @@ impl App {
             rows as f32 * ch,
             cols,
             rows,
-            BENTO_MIN_COLS + pad_cols,
-            MIN_PANE_ROWS + pad_rows,
+            min_cols + pad_cols,
+            min_rows + pad_rows,
         )
     }
 
@@ -1659,7 +1671,7 @@ impl App {
         self.tmux.is_none() && self.remote_view_of_window(window).is_none()
     }
 
-    /// 칸 하나를 더하면 하한(80칸×16줄)을 못 지키는 방 — 새 칸은 탭으로 간다.
+    /// 칸 하나를 더하면 물리 하한(20칸×6줄)도 못 지키는 방 — 새 칸은 탭으로 간다.
     ///
     /// 혼자인 칸의 분할은 늘 칸으로 연다. 마지막 칸을 닫을 때 옆에 새 셸을 세우고 원래 칸을
     /// 숨기는 `close_pane` 이 그 분할에 기대고, 좁은 칸도 사람이 쪼개면 쪼개져야 한다
@@ -1667,7 +1679,7 @@ impl App {
     fn bento_full(&self, window: usize) -> bool {
         self.bento_owns(window)
             && self.window_leaves(window).len() >= 2
-            && !self.bento_shape_for(window, 1).fits
+            && !self.bento_room_for(window, 1)
     }
 
     /// 방 하나를 크기가 같은 격자로 다시 짠다 — 칸이 열리거나 닫힐 때만 부른다. 사람이
