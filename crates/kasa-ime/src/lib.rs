@@ -78,6 +78,30 @@ fn decompose_jong(j: usize) -> Option<(usize, usize)> {
     })
 }
 
+/// The seven 두벌식 이중모음 as (head, tail, composed) jung indices.
+/// Each is typed as head key then tail key, so backspace returns to the
+/// head rather than dropping the whole vowel ("되" → "도", not "ㄷ").
+const JUNG_PAIRS: [(usize, usize, usize); 7] = [
+    (8, 0, 9),    // ㅗ + ㅏ → ㅘ
+    (8, 1, 10),   // ㅗ + ㅐ → ㅙ
+    (8, 20, 11),  // ㅗ + ㅣ → ㅚ
+    (13, 4, 14),  // ㅜ + ㅓ → ㅝ
+    (13, 5, 15),  // ㅜ + ㅔ → ㅞ
+    (13, 20, 16), // ㅜ + ㅣ → ㅟ
+    (18, 20, 19), // ㅡ + ㅣ → ㅢ
+];
+
+fn compose_jung(head: usize, tail: usize) -> Option<usize> {
+    JUNG_PAIRS
+        .iter()
+        .find(|p| (p.0, p.1) == (head, tail))
+        .map(|p| p.2)
+}
+
+fn decompose_jung(j: usize) -> Option<usize> {
+    JUNG_PAIRS.iter().find(|p| p.2 == j).map(|p| p.0)
+}
+
 fn syllable(cho: usize, jung: usize, jong: usize) -> char {
     let code = 0xAC00 + (cho * 21 + jung) * 28 + jong;
     char::from_u32(code as u32).unwrap()
@@ -169,21 +193,23 @@ impl Composer {
         self.buf.flush()
     }
 
-    /// Backspace — chip one jamo off the current syllable. If empty,
-    /// returns false so caller can forward the backspace to the terminal.
+    /// Backspace — undo the last key of the current syllable. A
+    /// compound vowel or cluster jongseong falls back to its first key
+    /// ("뷁" → "뷀" → "붸" → "부"); single-key jamo (ㅐ ㅔ ㄲ ㅆ …) go
+    /// whole. If empty, returns false so caller can forward the
+    /// backspace to the terminal.
     pub fn backspace(&mut self) -> bool {
-        if self.buf.jong.is_some() {
-            self.buf.jong = None;
-            true
-        } else if self.buf.jung.is_some() {
-            self.buf.jung = None;
-            true
-        } else if self.buf.cho.is_some() {
-            self.buf.cho = None;
-            true
+        let buf = &mut self.buf;
+        if let Some(jong) = buf.jong {
+            buf.jong = decompose_jong(jong).map(|(kept, _)| kept);
+        } else if let Some(jung) = buf.jung {
+            buf.jung = decompose_jung(jung);
+        } else if buf.cho.is_some() {
+            buf.cho = None;
         } else {
-            false
+            return false;
         }
+        true
     }
 
     /// Feed one jamo. Returns Some(committed) if a syllable was finalized.
@@ -230,25 +256,9 @@ impl Composer {
                 Some(prev)
             }
             (Some(_), Some(j), None) => {
-                // LV + V — try the standard Korean compound-vowel
-                // mappings before falling back to "commit prev, start
-                // standalone vowel". The seven 이중모음 are encoded
-                // here as (head jung index, tail jung index) →
-                // composed jung index:
-                //   ㅗ+ㅏ=ㅘ  ㅗ+ㅐ=ㅙ  ㅗ+ㅣ=ㅚ
-                //   ㅜ+ㅓ=ㅝ  ㅜ+ㅔ=ㅞ  ㅜ+ㅣ=ㅟ
-                //   ㅡ+ㅣ=ㅢ
-                let composed = match (j, v) {
-                    (8, 0) => Some(9),
-                    (8, 1) => Some(10),
-                    (8, 20) => Some(11),
-                    (13, 4) => Some(14),
-                    (13, 5) => Some(15),
-                    (13, 20) => Some(16),
-                    (18, 20) => Some(19),
-                    _ => None,
-                };
-                if let Some(jv) = composed {
+                // LV + V — try the compound vowels before falling back
+                // to "commit prev, start standalone vowel".
+                if let Some(jv) = compose_jung(j, v) {
                     self.buf.jung = Some(jv);
                     return None;
                 }
@@ -388,37 +398,151 @@ mod tests {
         assert_eq!(c.flush().as_deref(), Some("뭐"));
     }
 
+    fn type_keys(c: &mut Composer, keys: &str) -> String {
+        let mut out = String::new();
+        for ch in keys.chars() {
+            if let Some(s) = c.feed(dubeolsik(ch).unwrap()) {
+                out.push_str(&s);
+            }
+        }
+        out
+    }
+
+    /// Presses backspace until the composer gives up, recording the
+    /// preedit after each press.
+    fn unwind(c: &mut Composer) -> Vec<String> {
+        let mut steps = Vec::new();
+        while c.backspace() {
+            steps.push(c.preedit().unwrap_or_default());
+        }
+        steps
+    }
+
+    const SEVEN_COMPOUND_VOWELS: [(&str, &str, &str); 7] = [
+        ("dhk", "와", "오"),
+        ("dho", "왜", "오"),
+        ("dhl", "외", "오"),
+        ("dnj", "워", "우"),
+        ("dnp", "웨", "우"),
+        ("dnl", "위", "우"),
+        ("dml", "의", "으"),
+    ];
+
     #[test]
     fn all_seven_compound_vowels() {
-        // Each pair should compose into a single syllable, not split.
-        // Verified by the preedit after feeding (cho, head, tail).
-        let cases = [
-            ("ah", "와"),   // ㅇ ㅗ ㅏ → 와 (ㅘ)
-            ("ahO", "왜"),  // ㅇ ㅗ ㅐ → 왜 (ㅙ)
-            ("ahl", "외"),  // ㅇ ㅗ ㅣ → 외 (ㅚ)
-            ("anj", "워"),  // ㅇ ㅜ ㅓ → 워 (ㅝ)
-            ("anp", "웨"),  // ㅇ ㅜ ㅔ → 웨 (ㅞ)
-            ("anl", "위"),  // ㅇ ㅜ ㅣ → 위 (ㅟ)
-            ("ml", "의"),   // ㅇ ㅡ ㅣ → 의 (ㅢ)
-        ];
-        for (keys, expected) in cases {
+        for (keys, syllable, _) in SEVEN_COMPOUND_VOWELS {
             let mut c = Composer::new();
-            for ch in keys.chars() {
-                c.feed(dubeolsik(ch).unwrap());
-            }
-            // First key 'a' starts a syllable with ㅇ cho; subsequent
-            // jung/jong fill in. Some test cases use 2-letter inputs
-            // (ml = ㅡㅣ standalone vowels) — those rely on the
-            // composer auto-prepending ㅇ when no cho is set, which
-            // happens for the standalone-vowel cases.
-            let _ = expected;
-            // For non-cho-prefixed cases the expected string represents
-            // the syllable after a ㅇ filler. We compare via flush:
-            assert!(
-                c.preedit().as_deref().is_some(),
-                "preedit should be non-empty after {keys:?}"
-            );
+            assert_eq!(type_keys(&mut c, keys), "", "{keys:?} committed early");
+            assert_eq!(c.preedit().as_deref(), Some(syllable), "{keys:?}");
+            assert_eq!(c.flush().as_deref(), Some(syllable), "{keys:?}");
         }
+    }
+
+    #[test]
+    fn backspace_peels_compound_vowel_to_its_first_key() {
+        for (keys, syllable, head) in SEVEN_COMPOUND_VOWELS {
+            let mut c = Composer::new();
+            type_keys(&mut c, keys);
+            assert_eq!(c.preedit().as_deref(), Some(syllable));
+            assert_eq!(unwind(&mut c), [head, "ㅇ", ""], "{keys:?}");
+        }
+    }
+
+    #[test]
+    fn backspace_on_되_returns_to_도() {
+        let mut c = Composer::new();
+        type_keys(&mut c, "ehl");
+        assert_eq!(c.preedit().as_deref(), Some("되"));
+        assert!(c.backspace());
+        assert_eq!(c.preedit().as_deref(), Some("도"));
+        // The restored head vowel keeps composing like freshly typed.
+        assert_eq!(type_keys(&mut c, "k"), "");
+        assert_eq!(c.preedit().as_deref(), Some("돠"));
+        assert!(c.backspace());
+        assert_eq!(type_keys(&mut c, "s"), "");
+        assert_eq!(c.flush().as_deref(), Some("돈"));
+    }
+
+    #[test]
+    fn backspace_peels_cluster_jongseong_to_its_first_key() {
+        let cases = [
+            ("rkrt", "갃", "각"),
+            ("dksw", "앉", "안"),
+            ("dksg", "않", "안"),
+            ("akfr", "맑", "말"),
+            ("tkfa", "삶", "살"),
+            ("dufq", "엷", "열"),
+            ("dhft", "옰", "올"),
+            ("gkfx", "핥", "할"),
+            ("dmfv", "읊", "을"),
+            ("dlfg", "잃", "일"),
+            ("rkqt", "값", "갑"),
+        ];
+        for (keys, syllable, head) in cases {
+            let mut c = Composer::new();
+            type_keys(&mut c, keys);
+            assert_eq!(c.preedit().as_deref(), Some(syllable), "{keys:?}");
+            let steps = unwind(&mut c);
+            assert_eq!(steps[0], head, "{keys:?}");
+            assert_eq!(steps.len(), 4, "{keys:?} took {steps:?}");
+        }
+    }
+
+    #[test]
+    fn backspace_unwinds_뷁_one_key_per_press() {
+        let mut c = Composer::new();
+        type_keys(&mut c, "qnpfr");
+        assert_eq!(unwind(&mut c), ["뷀", "붸", "부", "ㅂ", ""]);
+        assert!(c.preedit().is_none());
+    }
+
+    #[test]
+    fn backspace_after_peel_resumes_cluster_and_syllable_split() {
+        let mut c = Composer::new();
+        type_keys(&mut c, "akfr");
+        assert!(c.backspace());
+        assert_eq!(type_keys(&mut c, "q"), "");
+        assert_eq!(c.preedit().as_deref(), Some("맓"));
+        assert!(c.backspace());
+        assert_eq!(c.preedit().as_deref(), Some("말"));
+        assert_eq!(type_keys(&mut c, "k"), "마");
+        assert_eq!(c.preedit().as_deref(), Some("라"));
+    }
+
+    #[test]
+    fn backspace_does_not_split_single_key_jamo() {
+        // ㅐ ㅔ ㅒ ㅖ and the Shift doubles are one key each.
+        let cases = [
+            ("ro", "개", "ㄱ"),
+            ("rp", "게", "ㄱ"),
+            ("rO", "걔", "ㄱ"),
+            ("rP", "계", "ㄱ"),
+            ("Rk", "까", "ㄲ"),
+            ("Ek", "따", "ㄸ"),
+            ("Qk", "빠", "ㅃ"),
+            ("Wk", "짜", "ㅉ"),
+            ("rkT", "갔", "가"),
+            ("rkR", "갂", "가"),
+        ];
+        for (keys, syllable, after) in cases {
+            let mut c = Composer::new();
+            type_keys(&mut c, keys);
+            assert_eq!(c.preedit().as_deref(), Some(syllable), "{keys:?}");
+            assert!(c.backspace());
+            assert_eq!(c.preedit().as_deref(), Some(after), "{keys:?}");
+        }
+        let mut c = Composer::new();
+        type_keys(&mut c, "R");
+        assert_eq!(unwind(&mut c), [""]);
+    }
+
+    #[test]
+    fn backspace_never_reaches_committed_syllable() {
+        // 맑 + ㅏ commits 말; backspace only edits the new 가.
+        let mut c = Composer::new();
+        assert_eq!(type_keys(&mut c, "akfrk"), "말");
+        assert_eq!(unwind(&mut c), ["ㄱ", ""]);
+        assert!(!c.backspace());
     }
 
     #[test]
