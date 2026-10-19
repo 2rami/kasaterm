@@ -4626,16 +4626,28 @@ pub(crate) fn pet_model_source_page(name: &str) -> Option<&'static str> {
     kasa_pet_config::models::character(name)?.page
 }
 
-/// 사람이 받아 온 zip(또는 풀어 둔 폴더)으로 설치한다. 그 자리를 이 기기의 `sources.json` 에
-/// 적어 두므로, 지워진 뒤 다시 받을 때도 같은 파일을 쓴다.
+/// 사람이 받아 온 zip(또는 풀어 둔 모델 폴더)으로 설치한다. 받기와 같은 길(임시 폴더에 풀고
+/// model3.json 을 확인한 뒤 옮기기, 있는 파일 안 덮기, 고르지 않기)이다. 목록에 없는 이름이면
+/// 사람이 넣는 캐릭터로 선다. 받을 곳이 따로 있는 캐릭터(곽향)는 그 자리를 이 기기의
+/// `sources.json` 에 적어, 지워진 뒤 다시 받을 때 같은 파일을 쓴다.
 pub(crate) fn install_pet_model_from(name: &str, path: &std::path::Path) -> Result<(), String> {
+    use kasa_pet_config::models;
     let dir = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
+    if !models::valid_name(name) {
+        return Err("캐릭터 이름에 쓸 수 없는 글자가 있어요".into());
+    }
     if !path.exists() {
         return Err("고른 파일을 찾지 못했어요".into());
     }
-    kasa_pet_config::models::set_local_source(&dir, name, &path.to_string_lossy())
-        .map_err(|_| "받을 곳을 저장하지 못했어요. 폴더 권한을 확인해 주세요".to_string())?;
-    download_pet_model(name)
+    if models::is_installed(&dir, name) {
+        return Err("이미 설치된 캐릭터예요".into());
+    }
+    let source = path.to_string_lossy().into_owned();
+    if models::character(name).is_some_and(|c| c.source == models::Source::Local) {
+        models::set_local_source(&dir, name, &source)
+            .map_err(|_| "받을 곳을 저장하지 못했어요. 폴더 권한을 확인해 주세요".to_string())?;
+    }
+    fetch_pet_model(name, false, Some(source))
 }
 
 pub(crate) fn pet_download_active() -> bool {
@@ -4649,18 +4661,20 @@ pub(crate) fn pet_start_pending() -> bool {
 
 /// 캐릭터 하나를 뒤에서 받는다. 받아도 고르지는 않는다 — 고르는 것은 사람 몫이다.
 pub(crate) fn download_pet_model(name: &str) -> Result<(), String> {
-    fetch_pet_model(name, false)
+    fetch_pet_model(name, false, None)
 }
 
-fn fetch_pet_model(name: &str, start: bool) -> Result<(), String> {
+/// `source` 가 없으면 목록의 받을 곳(Live2D 원본이나 이 기기 `sources.json`)에서 받는다.
+fn fetch_pet_model(name: &str, start: bool, source: Option<String>) -> Result<(), String> {
     use kasa_pet_config::models;
     let dir = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
     if models::is_installed(&dir, name) {
         return Ok(());
     }
-    if !models::can_download(&dir, name) {
+    if source.is_none() && !models::can_download(&dir, name) {
         return Err(pet_model_source_hint(name).unwrap_or("받을 곳이 없는 캐릭터예요").into());
     }
+    let source = source.or_else(|| models::local_source(&dir, name));
     let script = pet_fetch_script()
         .ok_or("캐릭터를 받는 파일이 없어요. 카사텀 앱을 다시 설치해 주세요")?;
     {
@@ -4671,7 +4685,7 @@ fn fetch_pet_model(name: &str, start: bool) -> Result<(), String> {
         }
         jobs.insert(name.to_string(), PetJob::Running { done: 0, total: 0, start });
     }
-    let command = pet_fetch_command(&script, &dir, name, models::local_source(&dir, name).as_deref());
+    let command = pet_fetch_command(&script, &dir, name, source.as_deref());
     let name = name.to_string();
     std::thread::spawn(move || {
         let result = run_pet_fetch(command, &dir, &name, |done, total| {
@@ -4826,6 +4840,18 @@ mod pet_fetch_tests {
     }
 
     #[test]
+    fn a_given_source_wins_even_for_a_live2d_name() {
+        let s = Scratch::new();
+        let src = s.0.join("내 모델");
+        model_folder(&src);
+        let bin = fake_curl(&s, true);
+        run_pet_fetch(
+            with_path(pet_fetch_command(&script(), &s.pet(), "Mao", Some(src.to_str().unwrap())), &bin),
+            &s.pet(), "Mao", |_, _| {}).unwrap();
+        assert!(s.pet().join("Mao/huohuo.model3.json").is_file());
+    }
+
+    #[test]
     fn a_folder_already_there_keeps_its_own_files() {
         let s = Scratch::new();
         std::fs::create_dir_all(s.pet().join("huohuo")).unwrap();
@@ -4966,7 +4992,7 @@ fn toggle_pet_now() -> Result<PetToggle, String> {
     // 띄울 모델이 없으면 고른 것이 없거나 사라진 것이라 기본 캐릭터 차례다. 다른 캐릭터로
     // 대신하지 않고 그것을 받은 뒤 띄운다.
     let Some(model) = pet_model_path() else {
-        fetch_pet_model(kasa_pet_config::models::DEFAULT, true)?;
+        fetch_pet_model(kasa_pet_config::models::DEFAULT, true, None)?;
         return Ok(PetToggle::Downloading);
     };
     let mut cmd = std::process::Command::new(&bin);

@@ -65,6 +65,15 @@ pub fn model3_in(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.to_string_lossy().ends_with(".model3.json"))
 }
 
+/// 펫 설정 폴더 바로 밑의 폴더 이름으로 쓸 수 있나. 경로를 넘나드는 이름은 받는 쪽이 엉뚱한
+/// 자리에 풀게 된다.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', '\0', ':'])
+}
+
 pub fn is_installed(dir: &Path, name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && model3_in(&dir.join(name)).is_some()
 }
@@ -303,6 +312,14 @@ mod tests {
         let before = fs::read(f.join("huohuo.model3.json")).unwrap();
         apply_overlay(&d.0, DEFAULT).unwrap();
         assert_eq!(fs::read(f.join("huohuo.model3.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn names_that_would_leave_the_pet_folder_are_refused() {
+        for bad in ["", ".", "..", "../x", "a/b", "a\\b", ".downloading-x", "a:b"] {
+            assert!(!valid_name(bad), "{bad:?}");
+        }
+        assert!(valid_name("곽향 2") && valid_name("Mao"));
     }
 
     #[test]

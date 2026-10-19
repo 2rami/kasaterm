@@ -13,6 +13,7 @@
 # KASATERM_PET_SOURCE 로 넘겨야 받는다. 앱은 펫 설정 폴더의 sources.json 에서 그 값을 읽어 넘긴다.
 #
 #   fetch-pet-model.sh [받을 폴더] [캐릭터…]     캐릭터를 안 적으면 huohuo
+#   KASATERM_PET_SOURCE 가 있으면 어느 캐릭터든 그 자리(zip 주소·zip 파일·폴더)에서 들인다.
 #
 # 받는 중엔 `.downloading-<이름>.*` 임시 폴더에 받고, 다 받은 뒤에 옮긴다 — 반쯤 받은 폴더가
 # 설치된 캐릭터로 보이면 안 된다. 이미 있는 폴더의 파일은 덮지 않는다. `current`(사람이 고른
@@ -122,10 +123,14 @@ for name in "${CHARS[@]}"; do
   set +e
   (
     set -e
-    case "$SAMPLES" in
-      *" $name "*) fetch_sample "$name" ;;
-      *) fetch_local "$name" ;;
-    esac
+    # 받을 자리를 넘겼으면 그것이 먼저다 — 사람이 고른 파일로 들이는 길이다.
+    if [ -n "${KASATERM_PET_SOURCE:-}" ]; then fetch_local "$name"
+    else
+      case "$SAMPLES" in
+        *" $name "*) fetch_sample "$name" ;;
+        *) fetch_local "$name" ;;
+      esac
+    fi
   )
   status=$?
   set -e
