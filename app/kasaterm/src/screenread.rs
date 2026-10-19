@@ -374,8 +374,22 @@ fn uniform_prompt_fill(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
     (glyphs >= 8).then_some(fill?)
 }
 
+/// 세션명이 칸보다 길 때 claude 가 그리는 입력칸 윗줄 — 앞 대시 없이 이름으로 시작해 `… ─` 로 끝난다
+/// (` 회의전사프로그램 만들다가 … 다른목소리쓸수있는… ─`). 대시가 과반이어야 테두리로 보던 판정이 이 줄을
+/// 놓쳐 입력칸 장식·세션명 테두리가 통째로 빠졌다(2026-10-20 2번 방 아로나).
+pub(crate) fn overflowed_title_rule(r: &[GridCell]) -> bool {
+    let glyphs: Vec<char> = r.iter().map(|c| c.ch).filter(|c| !matches!(c, ' ' | '\0')).collect();
+    let start = r.iter().position(|c| !matches!(c.ch, ' ' | '\0'));
+    matches!(glyphs.as_slice(), [first, .., '…', '─'] if !('\u{2500}'..='\u{257F}').contains(first) && *first != '❯' && *first != '›')
+        && start.is_some_and(|s| s <= 1)
+        && glyphs.len() >= 8
+}
+
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
+        if overflowed_title_rule(r) {
+            return true;
+        }
         // 오른쪽 알림 판의 가로선은 왼쪽의 과거 ❯ 행을 둘러싼 입력칸이 아니다.
         let Some(start) = r.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else { return false };
         if start > 1 || !matches!(r[start].ch, '─' | '╭' | '╰') {
@@ -2743,7 +2757,7 @@ pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, 
         let row = &rows[r];
         if codex_worked_rule(row) { continue; }
         let dashes = row.iter().filter(|c| c.ch == '─').count();
-        if dashes < row.len() / 2 {
+        if dashes < row.len() / 2 && !overflowed_title_rule(row) {
             continue;
         }
         // 이름 섬이 없는 순수 '─' rule(입력박스 바닥 테두리 등)은 건너뛴다 — `?` 로 함수를
@@ -5563,6 +5577,30 @@ mod teammate_msg_tests {
         assert!(find_titled_rule(&[top]).is_none(), "둥근 상단 테두리 무시");
         assert!(find_titled_rule(&[bottom]).is_none(), "둥근 하단 테두리 무시");
         assert!(find_titled_rule(&[plain]).is_none(), "순수 rule 무시");
+    }
+
+    #[test]
+    fn an_overlong_session_name_still_marks_the_input_box() {
+        let name = "회의전사프로그램 만들다가 옴니랑 stt tts파이프라인 비교하면서 옴니에 다른목소리쓸수있는…";
+        let title = row_from(&format!(" {name} ─"), 92);
+        let rows = vec![
+            row_from("  ⎿  Session renamed to: 회의전사프로그램", 92),
+            title.clone(),
+            row_from("❯", 92),
+            row_from(&"─".repeat(91), 92),
+            row_from("  Opus 5.5 1M ┃ feat/meet-transcribe", 92),
+        ];
+        assert!(overflowed_title_rule(&title));
+        assert!(
+            matches!(prompt_box(&rows), Some(PromptBox::Bordered { top: 1, bottom: 3, .. })),
+            "긴 세션명 줄도 입력칸 윗줄이다"
+        );
+        let (r, c0, c1) = find_titled_rule(&rows).expect("긴 세션명에도 테두리");
+        assert_eq!(r, 1);
+        assert!(c0 <= 1 && c1 < 91, "이름 구간 — 끝 대시는 뺀다");
+        // 말줄임으로 끝나는 보통 문장·입력 줄은 테두리가 아니다.
+        assert!(!overflowed_title_rule(&row_from("❯ 이건 그냥 입력… ─", 92)));
+        assert!(!overflowed_title_rule(&row_from("        들여 쓴 글… ─", 92)));
     }
 
     #[test]
