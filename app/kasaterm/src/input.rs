@@ -6,8 +6,6 @@ enum CommitModalKey {
     Quit,
     Close,
     Commit,
-    Copy,
-    Paste,
     Edit,
     Consume,
 }
@@ -33,18 +31,10 @@ fn commit_modal_key_plan(
             _ => {}
         }
     }
-    let clipboard = !modifiers.alt_key()
-        && if macos { modifiers.super_key() && !modifiers.control_key() }
-        else { modifiers.control_key() && !modifiers.super_key() };
-    if clipboard && !repeat {
-        match physical {
-            Some(KeyCode::KeyC) => return CommitModalKey::Copy,
-            Some(KeyCode::KeyV) => return CommitModalKey::Paste,
-            _ => {}
-        }
-    }
+    // 편집 조합(⌘A·⌘C·⌘V·⌘←·⌥⌫·⌃A …)은 칸 편집기로, 나머지 앱 조합은 삼킨다.
     if host || modifiers.control_key() || modifiers.super_key() {
-        return CommitModalKey::Consume;
+        let edit = crate::lineedit::handles(key, physical, crate::lineedit::Mods::on(modifiers, macos));
+        return if edit && !(repeat && physical == Some(KeyCode::KeyV)) { CommitModalKey::Edit } else { CommitModalKey::Consume };
     }
     if matches!(key, Key::Named(NamedKey::Enter)) {
         return if repeat || modifiers.alt_key() { CommitModalKey::Consume } else { CommitModalKey::Commit };
@@ -84,15 +74,22 @@ mod commit_modal_key_tests {
     #[test]
     fn clipboard_and_edit_keys_never_need_the_background_input_path() {
         for (macos, modifiers) in [(true, ModifiersState::SUPER), (false, ModifiersState::CONTROL)] {
-            assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, false, modifiers, macos, macos), CommitModalKey::Paste);
-            assert_eq!(commit_modal_key_plan(&Key::Character("c".into()), Some(KeyCode::KeyC), true, false, modifiers, macos, macos), CommitModalKey::Copy);
+            assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, false, modifiers, macos, macos), CommitModalKey::Edit);
+            assert_eq!(commit_modal_key_plan(&Key::Character("c".into()), Some(KeyCode::KeyC), true, false, modifiers, macos, macos), CommitModalKey::Edit);
+            assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::ArrowLeft), Some(KeyCode::ArrowLeft), true, false, modifiers, macos, macos), CommitModalKey::Edit);
             assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, true, modifiers, macos, macos), CommitModalKey::Consume);
         }
+        assert_eq!(commit_modal_key_plan(&Key::Character("a".into()), Some(KeyCode::KeyA), true, false, ModifiersState::CONTROL, false, true), CommitModalKey::Edit, "⌃A 줄 처음");
         assert_eq!(commit_modal_key_plan(&Key::Character("x".into()), Some(KeyCode::KeyX), true, false, ModifiersState::empty(), false, true), CommitModalKey::Edit);
         assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::Backspace), None, true, true, ModifiersState::empty(), false, true), CommitModalKey::Edit);
         assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::Enter), None, false, false, ModifiersState::empty(), false, true), CommitModalKey::Consume);
     }
 }
+
+/// 입력칸 편집기 열쇠(`lineedit`) — 선택·되돌리기 기록이 칸마다 따로 산다.
+pub(crate) const GIT_COMMIT_FIELD: &str = "git-commit";
+pub(crate) const TREE_SEARCH_FIELD: &str = "tree-search";
+pub(crate) const TREE_NAME_FIELD: &str = "tree-name";
 
 fn account_menu_contains(rect: Option<(f32, f32, f32, f32)>, point: (f32, f32)) -> bool {
     rect.is_some_and(|(x, y, w, h)| {
@@ -243,18 +240,6 @@ impl App {
                             self.settings_scene.arm_activation_key(NamedKey::Escape);
                         }
                         self.close_commit_modal();
-                    }
-                    CommitModalKey::Copy => {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(self.git.commit_msg.clone());
-                        }
-                    }
-                    CommitModalKey::Paste => {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            if let Ok(text) = clipboard.get_text() {
-                                self.git_commit_insert(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
-                            }
-                        }
                     }
                     _ => {}
                 }
@@ -3052,7 +3037,7 @@ impl App {
     /// Insert text at the commit-message cursor (committed Hangul or a typed
     /// char). Char-indexed; advances the cursor by the inserted char count.
     pub(crate) fn git_commit_insert(&mut self, text: &str) {
-        crate::lineedit::insert(&mut self.git.commit_msg, &mut self.git.commit_cursor, text);
+        crate::lineedit::insert_in(crate::lineedit::line(GIT_COMMIT_FIELD), &mut self.git.commit_msg, &mut self.git.commit_cursor, text);
     }
     /// 조합기의 주인을 `next` 로 옮긴다. 주인이 실제로 바뀔 때만 일한다.
     ///
@@ -3116,7 +3101,7 @@ impl App {
         }
         self.ime_retarget(crate::ImeFocus::GitCommit);
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !crate::lineedit::Mods::of(self.modifiers).chord()) {
             if t.chars().count() == 1 {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
@@ -3149,10 +3134,12 @@ impl App {
     /// 실행하고 Esc 는 포커스를 뗀다(그 둘만 이 칸의 몫). 한글 조합은 이 함수 앞의
     /// `git_commit_input` 이 이미 흘려보냈다.
     pub(crate) fn git_commit_key(&mut self, event: &KeyEvent) {
-        let act = crate::lineedit::key(
+        let act = crate::lineedit::edit_event(
+            crate::lineedit::line(GIT_COMMIT_FIELD),
             &mut self.git.commit_msg,
             &mut self.git.commit_cursor,
-            &event.logical_key,
+            event,
+            crate::lineedit::Mods::of(self.modifiers),
         );
         match act {
             crate::lineedit::LineEditAction::Submit => {
@@ -3171,7 +3158,8 @@ impl App {
     }
     /// 트리 검색칸의 커서 자리에 글자를 넣고 걸린 노드를 다시 모은다.
     pub(crate) fn file_tree_search_insert(&mut self, text: &str) {
-        crate::lineedit::insert(
+        crate::lineedit::insert_in(
+            crate::lineedit::line(TREE_SEARCH_FIELD),
             &mut self.file_tree.search_query,
             &mut self.file_tree.search_cursor,
             text,
@@ -3190,7 +3178,7 @@ impl App {
         self.ime_retarget(crate::ImeFocus::TreeSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !crate::lineedit::Mods::of(self.modifiers).chord()) {
             if t.chars().count() == 1 {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
@@ -3216,13 +3204,16 @@ impl App {
         }
         self.preedit.clear();
         self.in_preedit = false;
-        let act = crate::lineedit::key(
+        let act = crate::lineedit::edit_event(
+            crate::lineedit::line(TREE_SEARCH_FIELD),
             &mut self.file_tree.search_query,
             &mut self.file_tree.search_cursor,
-            &event.logical_key,
+            event,
+            crate::lineedit::Mods::of(self.modifiers),
         );
         let cancelled = act == crate::lineedit::LineEditAction::Cancel;
         if cancelled {
+            crate::lineedit::forget(TREE_SEARCH_FIELD);
             self.file_tree.search_active = false;
             self.file_tree.search_query.clear();
             self.file_tree.search_cursor = 0;
@@ -3247,7 +3238,7 @@ impl App {
         self.ime_retarget(crate::ImeFocus::TreeNew);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !crate::lineedit::Mods::of(self.modifiers).chord()) {
             if t.chars().count() == 1 {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
@@ -3273,10 +3264,14 @@ impl App {
         }
         self.preedit.clear();
         self.in_preedit = false;
+        let mods = crate::lineedit::Mods::of(self.modifiers);
         let act = match self.ft_edit() {
-            Some((buf, cursor)) => crate::lineedit::key(buf, cursor, &event.logical_key),
+            Some((buf, cursor)) => crate::lineedit::edit_event(crate::lineedit::line(TREE_NAME_FIELD), buf, cursor, event, mods),
             None => crate::lineedit::LineEditAction::Ignored,
         };
+        if matches!(act, crate::lineedit::LineEditAction::Submit | crate::lineedit::LineEditAction::Cancel) {
+            crate::lineedit::forget(TREE_NAME_FIELD);
+        }
         match act {
             crate::lineedit::LineEditAction::Submit => {
                 if self.file_tree.rename.is_some() {
@@ -3310,7 +3305,7 @@ impl App {
     /// 음절(`ime_retarget`)도 여기로 온다.
     pub(crate) fn ft_edit_insert(&mut self, text: &str) {
         if let Some((buf, cursor)) = self.ft_edit() {
-            crate::lineedit::insert(buf, cursor, text);
+            crate::lineedit::insert_in(crate::lineedit::line(TREE_NAME_FIELD), buf, cursor, text);
         }
     }
     /// 지금 pane 이 스크롤백을 보고 있으면 살아 있는 끝으로 되돌린다.

@@ -284,7 +284,7 @@ fn is_word_char(c: char) -> bool {
 
 /// Column of the previous word boundary (Opt+Left): skip trailing whitespace,
 /// then consume one run of same-class chars.
-fn prev_word_col(chars: &[char], col: usize) -> usize {
+pub(crate) fn prev_word_col(chars: &[char], col: usize) -> usize {
     let mut i = col.min(chars.len());
     while i > 0 && chars[i - 1].is_whitespace() {
         i -= 1;
@@ -300,7 +300,7 @@ fn prev_word_col(chars: &[char], col: usize) -> usize {
 }
 
 /// Column of the next word boundary (Opt+Right): mirror of `prev_word_col`.
-fn next_word_col(chars: &[char], col: usize) -> usize {
+pub(crate) fn next_word_col(chars: &[char], col: usize) -> usize {
     let n = chars.len();
     let mut i = col.min(n);
     while i < n && chars[i].is_whitespace() {

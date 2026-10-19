@@ -116,6 +116,11 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
         } else {
             (shown, theme::text())
         };
+        if let Some(range) = crate::lineedit::selection(crate::input::TREE_SEARCH_FIELD, tree.search_cursor, tree.search_query.chars().count())
+            .filter(|_| active && f.preedit.is_none_or(str::is_empty))
+        {
+            crate::lineedit::paint_band(g, &tree.search_query, range, row_x + 30.0, sbx_y + (search_box_h - 13.0) / 2.0, 13.0, false, row_x + search_w);
+        }
         g.draw_text(
             row_x + 30.0,
             sbx_y + (search_box_h - 13.0) / 2.0,
@@ -212,6 +217,11 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
         } else {
             (shown, theme::text())
         };
+        if let Some(range) = crate::lineedit::selection(crate::input::TREE_NAME_FIELD, tree.edit_cursor, buf.chars().count())
+            .filter(|_| f.preedit.is_none_or(str::is_empty))
+        {
+            crate::lineedit::paint_band(g, &buf, range, row_x + 44.0, iy + (item_h - 13.0) / 2.0, 13.0, false, row_x + row_w);
+        }
         g.draw_text(
             row_x + 44.0,
             iy + (item_h - 13.0) / 2.0,
@@ -572,6 +582,11 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
             } else {
                 (shown, theme::text())
             };
+            if let Some(range) = crate::lineedit::selection(crate::input::TREE_NAME_FIELD, tree.edit_cursor, name.chars().count())
+                .filter(|_| f.preedit.is_none_or(str::is_empty))
+            {
+                crate::lineedit::paint_band(g, &name, range, text_x, y + (item_h - font) / 2.0, font, false, row_x + row_w);
+            }
             g.draw_text(
                 text_x,
                 y + (item_h - font) / 2.0,

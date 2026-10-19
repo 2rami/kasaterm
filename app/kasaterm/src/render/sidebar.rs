@@ -290,6 +290,11 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         } else {
             *ty + ((SIDEBAR_TAB_H - 17.0) / 2.0).round()
         };
+        // 이름을 고치는 중이면 라벨에 고른 범위 표식이 실려 온다 — 걷고 그 아래 바탕을 깐다.
+        let (name, picked) = crate::lineedit::unmark(&name);
+        if let Some(range) = picked {
+            crate::lineedit::paint_band(g, &name, range, text_x, name_y, 13.5, is_active, text_x + name_budget);
+        }
         // Clip before drawing — `draw_text` also borrows `g`.
         let name_txt = clip_px(g, &name, 13.5, is_active, name_budget);
         g.draw_text(

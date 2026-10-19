@@ -44,6 +44,7 @@
 - `nl_command.rs` — 셸 입력줄의 `# 자연어 요청` + 맨 Enter 를 명령 한 줄로 바꿔 **넣기만** 한다(실행은 사람이 Enter). 셸 프롬프트 판정은 OSC 133 `B` 마크 + 마지막 명령 블록이 닫힘(`C` 뒤 `D` 전이면 claude·vim 같은 그 명령이 키를 받는 중이라 안 가로챈다). 모델은 OpenGateway(`themegen::og_key`·`curl_post`), settings `nl_command`·`nl_command_model`. 시험 `KASATERM_AUTONLCMD`
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`·호버 전달 `forward_hover`·손가락 커서 판정 `refresh_hover_pointer`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
+- `lineedit.rs` — 입력칸(방 이름·git 커밋·트리 검색·웹 주소·MCP·설정 칸) 공용 편집기: macOS 표준 키·선택·클립보드·되돌리기, 고른 바탕 `paint_band`. 선택·기록은 초점 칸 하나만 여기 둔다
 - `testkit.rs` — `schedule_auto*`·`arm_auto*`·`run_pending_auto*` (env 자동테스트 하네스)
 - `gpu.rs` — `KASATERM_RENDERER=gpu` 경로. 자체 wgpu Surface + 셀 파이프라인(sugarloaf 경로와 상호배타)
 - `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 문서(마크다운) 창 + 별도창 공용 틀(`AuxWindows`, 이벤트 위임, documents.json)

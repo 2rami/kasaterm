@@ -86,7 +86,8 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
    머리 없는 칸을 통째로 끈다(`drag:handle:%1>@700,600`).
    **키**는 `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"`(앱 시작 기준 ms, `shift`·`ctrl`·`alt`·`cmd` +
    `left`·`right`·`up`·`down`·`home`·`end`·`backspace`·`enter`·`esc`·글자) — 같은 AppKit 길로 `forward_key` 까지 탄다.
-   `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다. ⚠️ 한가한 리그는 프레임을 드물게 돌아 예약 시각이 몇 초씩 밀리고 뒤
+   `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다. 입력칸 ⌘C·⌘V 는 검증 실행에서 사람 클립보드 대신
+   `KASATERM_TEST_COPY_PATH` 파일에 쓰고 `KASATERM_TEST_PASTE_TEXT` 를 붙인다(`lineedit::SystemClip`). ⚠️ 한가한 리그는 프레임을 드물게 돌아 예약 시각이 몇 초씩 밀리고 뒤
    걸음끼리 한 틱에 몰린다 — 옆에서 `kasaterm-cli peek` 을 0.25초마다 불러 깨워 두고, 걸음 사이를 넉넉히(수 초) 띄워라.
    ⚠️ `text:`·`native:` 의 px 는 클릭 판정 함수(`px_to_pane_cell`)로 거꾸로 구한 것이라 **그린 자리와 판정 자리가 어긋나는 버그는
    원리상 못 잡는다** — 그건 캡처에서 글자 위치를 재서 `x,y` 로 눌러 확인한다. 그리고 **사람이 누르는 배치를 그대로 세워라**:

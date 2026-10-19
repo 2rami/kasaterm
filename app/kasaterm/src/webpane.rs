@@ -298,6 +298,10 @@ pub(crate) fn detach_child(parent: &winit::window::Window, child: &winit::window
     let _ = (parent, child);
 }
 
+
+/// 입력칸 편집기 열쇠(`lineedit`).
+pub(crate) const WEB_ADDR_FIELD: &str = "web-addr";
+pub(crate) const WEB_FIND_FIELD: &str = "web-find";
 impl App {
     /// 부모 창보다 webview를 먼저 내린다. 직접 child인 플랫폼은 부모가 먼저 drop되면
     /// 네이티브 핸들을 늦게 해제하며 use-after-free가 될 수 있다.
@@ -1461,6 +1465,7 @@ impl App {
         if self.pane_header_px(pane_id) <= 0.0 {
             self.toggle_pane_header(pane_id);
         }
+        crate::lineedit::forget(WEB_ADDR_FIELD);
         self.web_addr = Some(crate::WebAddrEdit {
             pane: pane_id.to_string(),
             text: String::new(),
@@ -1477,7 +1482,7 @@ impl App {
     /// 조합이 끝난 글자를 커서 자리에(`ime_retarget` 플러시도 여기로).
     pub(crate) fn web_addr_insert(&mut self, text: &str) {
         if let Some(e) = self.web_addr.as_mut() {
-            crate::lineedit::insert(&mut e.text, &mut e.cursor, text);
+            crate::lineedit::insert_in(crate::lineedit::line(WEB_ADDR_FIELD), &mut e.text, &mut e.cursor, text);
             self.chrome_dirty = true;
         }
     }
@@ -1570,6 +1575,7 @@ impl App {
         if self.pane_header_px(pane_id) <= 0.0 {
             self.toggle_pane_header(pane_id);
         }
+        crate::lineedit::forget(WEB_FIND_FIELD);
         self.web_find = Some(crate::WebAddrEdit {
             pane: pane_id.to_string(),
             text: String::new(),
@@ -1584,7 +1590,7 @@ impl App {
 
     pub(crate) fn web_find_insert(&mut self, text: &str) {
         if let Some(e) = self.web_find.as_mut() {
-            crate::lineedit::insert(&mut e.text, &mut e.cursor, text);
+            crate::lineedit::insert_in(crate::lineedit::line(WEB_FIND_FIELD), &mut e.text, &mut e.cursor, text);
             self.chrome_dirty = true;
         }
         self.web_find_live();
@@ -1654,7 +1660,7 @@ impl App {
 
     /// 찾기 칸의 키 입력 — 주소창(web_addr_key)과 같은 얼개.
     pub(crate) fn web_find_key(&mut self, event: &winit::event::KeyEvent) -> bool {
-        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+        use winit::keyboard::{Key, NamedKey};
         if self.web_find.is_none() {
             return false;
         }
@@ -1669,18 +1675,7 @@ impl App {
         if crate::input::is_modifier_key(event) {
             return true;
         }
-        if self.modifiers.super_key() || self.modifiers.control_key() {
-            if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV))
-            {
-                if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                    let text = text.trim().to_string();
-                    if !text.is_empty() {
-                        self.web_find_insert(&text);
-                    }
-                }
-            }
-            return true;
-        }
+        let mods = crate::lineedit::Mods::of(self.modifiers);
         // Enter 는 lineedit 의 Submit(칸 닫기)이 아니라 「다음 일치」다 — 여기서
         // 먼저 가른다. Shift+Enter 는 이전 일치(브라우저 관례).
         if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
@@ -1694,7 +1689,7 @@ impl App {
         }
         self.ime_retarget(crate::ImeFocus::WebFind);
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !mods.chord()) {
             if let Some(c) = t.chars().next().filter(|_| t.chars().count() == 1) {
                 if (0x3130..=0x318F).contains(&(c as u32)) {
                     if let Some(done) = self.hangul.feed(c) {
@@ -1720,7 +1715,7 @@ impl App {
         self.preedit.clear();
         self.in_preedit = false;
         let act = match self.web_find.as_mut() {
-            Some(e) => crate::lineedit::key(&mut e.text, &mut e.cursor, &event.logical_key),
+            Some(e) => crate::lineedit::edit_event(crate::lineedit::line(WEB_FIND_FIELD), &mut e.text, &mut e.cursor, event, mods),
             None => crate::lineedit::LineEditAction::Ignored,
         };
         match act {
@@ -1757,7 +1752,7 @@ impl App {
     /// true — 편집 중 타이핑이 셸·웹뷰로 새면 안 된다. 한글은 room rename 과
     /// 같은 자체 조합 경로(한글 도메인이 실재한다).
     pub(crate) fn web_addr_key(&mut self, event: &winit::event::KeyEvent) -> bool {
-        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+        use winit::keyboard::{Key, NamedKey};
         if self.web_addr.is_none() {
             return false;
         }
@@ -1775,26 +1770,12 @@ impl App {
         if crate::input::is_modifier_key(event) {
             return true;
         }
-        // 주소는 대개 붙여넣는다 — host+V 만 버퍼 삽입으로 통과시키고 나머지
-        // Cmd/Ctrl 조합은 삼킨다(흘리면 편집 중인데 셸이 그 키를 먹는다).
-        if self.modifiers.super_key() || self.modifiers.control_key() {
-            if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV))
-            {
-                if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                    let text = text.trim().to_string();
-                    if !text.is_empty() {
-                        self.web_addr_insert(&text);
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                    }
-                }
-            }
-            return true;
-        }
+        // ⌘·⌃ 조합(⌘V·⌘A·⌘← …)은 편집기 몫이고, 편집기가 모르는 조합도 삼킨다 —
+        // 흘리면 편집 중인데 셸이 그 키를 먹는다.
+        let mods = crate::lineedit::Mods::of(self.modifiers);
         self.ime_retarget(crate::ImeFocus::WebAddr);
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !mods.chord()) {
             if let Some(c) = t.chars().next().filter(|_| t.chars().count() == 1) {
                 if (0x3130..=0x318F).contains(&(c as u32)) {
                     if let Some(done) = self.hangul.feed(c) {
@@ -1820,7 +1801,7 @@ impl App {
         self.preedit.clear();
         self.in_preedit = false;
         let act = match self.web_addr.as_mut() {
-            Some(e) => crate::lineedit::key(&mut e.text, &mut e.cursor, &event.logical_key),
+            Some(e) => crate::lineedit::edit_event(crate::lineedit::line(WEB_ADDR_FIELD), &mut e.text, &mut e.cursor, event, mods),
             None => crate::lineedit::LineEditAction::Ignored,
         };
         match act {

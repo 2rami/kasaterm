@@ -659,8 +659,11 @@ fn draw_rows(
             let folder_budget = (tab_right - 8.0 - (badge_w + 14.0) - text_x).max(0.0);
             let name_y = if folder.is_empty() && !compact { y + ((SIDEBAR_TAB_H - 17.0) / 2.0).round() } else { y + 11.0 };
             // 이름을 고치는 중이면 본기기처럼 버퍼(캐럿 포함)가 이름 자리에 선다.
-            let renaming = ctx.rename.filter(|(k, _)| *k == key).map(|(_, t)| t.as_str());
-            text(g, renaming.unwrap_or(name), text_x, name_y, name_budget, 13.5,
+            let renaming = ctx.rename.filter(|(k, _)| *k == key).map(|(_, t)| crate::lineedit::unmark(t));
+            if let Some((shown, Some(range))) = &renaming {
+                crate::lineedit::paint_band(g, shown, *range, text_x, name_y, 13.5, active, text_x + name_budget);
+            }
+            text(g, renaming.as_ref().map_or(name, |(shown, _)| shown.as_str()), text_x, name_y, name_budget, 13.5,
                 if active || renaming.is_some() { theme::text() } else { theme::text_dim() }, active);
             if !compact {
                 let x_hover = hit(cursor, close);
@@ -1663,7 +1666,6 @@ impl App {
             Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
             _ => "",
         };
-        let (before, after) = crate::lineedit::split(buf, self.room_rename.cursor);
-        Some((key.clone(), format!("{before}{composing}\u{258c}{after}")))
+        Some((key.clone(), crate::lineedit::caret_label(crate::chrome::ROOM_FIELD, buf, self.room_rename.cursor, composing)))
     }
 }

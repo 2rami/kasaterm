@@ -1506,6 +1506,10 @@ impl state::McpColState {
     }
 }
 
+
+/// 입력칸 편집기 열쇠(`lineedit`) — 이름·주소 두 칸이 따로 고른다.
+pub(crate) const MCP_NAME_FIELD: &str = "mcp-name";
+pub(crate) const MCP_URL_FIELD: &str = "mcp-url";
 impl App {
     fn mcp_context_ready(&mut self) -> bool {
         let cwd = self.active_pane_cwd();
@@ -1584,12 +1588,12 @@ impl App {
         let Some(f) = self.mcp_col.add.as_mut() else {
             return;
         };
-        let (s, c) = if f.on_url {
-            (&mut f.url, &mut f.url_cursor)
+        let (s, c, id) = if f.on_url {
+            (&mut f.url, &mut f.url_cursor, MCP_URL_FIELD)
         } else {
-            (&mut f.name, &mut f.name_cursor)
+            (&mut f.name, &mut f.name_cursor, MCP_NAME_FIELD)
         };
-        crate::lineedit::insert(s, c, text);
+        crate::lineedit::insert_in(crate::lineedit::line(id), s, c, text);
         f.err = None;
         self.chrome_dirty = true;
     }
@@ -1604,7 +1608,7 @@ impl App {
         }
         self.ime_retarget(crate::ImeFocus::McpAdd);
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !crate::lineedit::Mods::of(self.modifiers).chord()) {
             if t.chars().count() == 1 {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
@@ -1643,15 +1647,16 @@ impl App {
             }
             return;
         }
+        let mods = crate::lineedit::Mods::of(self.modifiers);
         let Some(f) = self.mcp_col.add.as_mut() else {
             return;
         };
-        let (s, c) = if f.on_url {
-            (&mut f.url, &mut f.url_cursor)
+        let (s, c, id) = if f.on_url {
+            (&mut f.url, &mut f.url_cursor, MCP_URL_FIELD)
         } else {
-            (&mut f.name, &mut f.name_cursor)
+            (&mut f.name, &mut f.name_cursor, MCP_NAME_FIELD)
         };
-        match crate::lineedit::key(s, c, &event.logical_key) {
+        match crate::lineedit::edit_event(crate::lineedit::line(id), s, c, event, mods) {
             crate::lineedit::LineEditAction::Submit => self.mcp_add_submit(),
             crate::lineedit::LineEditAction::Cancel => {
                 self.mcp_col.add = None;
@@ -2029,7 +2034,8 @@ pub(crate) fn draw_mcp_col(
                      label: &str,
                      val: &str,
                      focused: bool,
-                     ph: &str|
+                     ph: &str,
+                     (id, cursor): (&str, usize)|
          -> (f32, f32, f32, f32) {
             let r = (x0, yy, right - x0, 22.0);
             round_rect(
@@ -2058,8 +2064,18 @@ pub(crate) fn draw_mcp_col(
             );
             let lw = g.measure_chrome_text(label, 10.0, false);
             let show = if val.is_empty() { ph } else { val };
+            let tx = r.0 + 12.0 + lw;
+            if let Some(range) = crate::lineedit::selection(id, cursor, val.chars().count()).filter(|_| focused) {
+                crate::lineedit::paint_band(g, val, range, tx, yy + 4.0, 11.0, false, r.0 + r.2 - 4.0);
+            }
+            // 가운데를 고칠 수 있으니 캐럿은 커서 자리에 선다.
+            if focused {
+                let head: String = val.chars().take(cursor).collect();
+                let at = tx + g.measure_chrome_text(&head, 11.0, false);
+                g.rect(at, yy + 4.0, 1.5, 13.0, theme::text());
+            }
             g.draw_text(
-                r.0 + 12.0 + lw,
+                tx,
                 yy + 4.0,
                 show,
                 gpu::DrawOpts {
@@ -2075,7 +2091,7 @@ pub(crate) fn draw_mcp_col(
             );
             r
         };
-        f.name_rect = Some(field(g, fy + 24.0, "이름", &f.name, !f.on_url, "my-server"));
+        f.name_rect = Some(field(g, fy + 24.0, "이름", &f.name, !f.on_url, "my-server", (MCP_NAME_FIELD, f.name_cursor)));
         f.url_rect = Some(field(
             g,
             fy + 50.0,
@@ -2083,6 +2099,7 @@ pub(crate) fn draw_mcp_col(
             &f.url,
             f.on_url,
             "https://example.com/mcp",
+            (MCP_URL_FIELD, f.url_cursor),
         ));
         if let Some(e) = &f.err {
             g.draw_text(

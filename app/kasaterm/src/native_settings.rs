@@ -1335,6 +1335,7 @@ impl App {
 
     fn native_settings_focus(&mut self, field: SettingsInput) {
         if self.settings_input != Some(field) {
+            crate::lineedit::forget(&settings_field_id(field));
             self.native_settings_blur();
             match field {
                 SettingsInput::PaletteHex(slot) => self.settings_apply(SettingsAction::FocusPaletteHex(slot)),
@@ -1503,12 +1504,14 @@ impl App {
     }
 
     pub(crate) fn native_settings_insert_into(&mut self, field: SettingsInput, text: &str) {
-        let replacing = self.settings_scene.take_field_select_all();
+        let mut replacing = self.settings_scene.take_field_select_all();
         if replacing {
             if let Some((buffer, caret)) = field_buffer(self, field) {
                 buffer.clear();
                 *caret = 0;
             }
+        } else if let Some((buffer, caret)) = field_buffer(self, field) {
+            replacing = crate::lineedit::delete_selection(&settings_field_id(field), buffer, caret);
         }
         if !text.is_empty() || replacing {
             self.settings_scene.mark_field_dirty();
@@ -1947,11 +1950,17 @@ impl App {
 
         self.ime_retarget(crate::ImeFocus::Settings(field));
         let host = editor_mod;
+        let mods = crate::lineedit::Mods::of(self.modifiers);
+        let id = settings_field_id(field);
+        let code = match event.physical_key { PhysicalKey::Code(code) => Some(code), PhysicalKey::Unidentified(_) => None };
+        // 편집 조합(⌘←→·⌘⌫·⌥←→·⌥⌫·⇧ 고르기·⌃A/E/K …)은 아래 편집기로 간다.
+        let to_editor = (mods.chord() || mods.word || mods.shift) && crate::lineedit::handles(&event.logical_key, code, mods);
         if device_account::secret(field) && host
             && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyZ)) {
             return true;
         }
         if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyA)) {
+            crate::lineedit::forget(&id);
             self.settings_scene.select_all_field();
             if let Some((buffer, caret)) = field_buffer(self, field) {
                 *caret = buffer.chars().count();
@@ -1959,21 +1968,10 @@ impl App {
             self.chrome_dirty = true;
             return true;
         }
-        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC)) {
-            if self.settings_scene.field_select_all() {
-                let value = self.native_settings_field_value(field).0;
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let _ = clipboard.set_text(value);
-                }
-            }
-            return true;
-        }
-        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyX)) {
-            if self.settings_scene.field_select_all() {
-                let value = self.native_settings_field_value(field).0;
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let _ = clipboard.set_text(value);
-                }
+        // 칸에 들어설 때 고른 「전체」는 이 칸 몫으로 통째 복사·잘라내기.
+        if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC | KeyCode::KeyX)) && self.settings_scene.field_select_all() {
+            crate::lineedit::copy_text(&self.native_settings_field_value(field).0);
+            if matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyX)) {
                 self.native_settings_insert_into(field, "");
             }
             return true;
@@ -1990,7 +1988,7 @@ impl App {
         if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV)) {
             return self.native_settings_paste_clipboard();
         }
-        if host {
+        if (host || mods.emacs) && !to_editor {
             return true;
         }
 
@@ -2007,7 +2005,7 @@ impl App {
                     None
                 }
             });
-            if let Some(ch) = typed.filter(|ch| is_jamo(*ch)) {
+            if let Some(ch) = typed.filter(|ch| is_jamo(*ch) && !to_editor) {
                 if let Some(text) = self.hangul.feed(ch) {
                     self.native_settings_insert_into(field, &text);
                 }
@@ -2017,6 +2015,7 @@ impl App {
                 return true;
             }
             if matches!(event.logical_key, Key::Named(NamedKey::Backspace))
+                && !to_editor
                 && self.hangul.backspace()
             {
                 self.preedit = self.hangul.preedit().unwrap_or_default();
@@ -2051,6 +2050,12 @@ impl App {
             )
         {
             self.settings_scene.clear_field_selection();
+            // ⇧ 로 고르기 시작하면 칸에 들어설 때 고른 「전체」에서 줄여 나간다.
+            if mods.shift {
+                if let Some((buffer, caret)) = field_buffer(self, field) {
+                    crate::lineedit::select_all(&id, buffer, caret);
+                }
+            }
         }
 
         if is_multiline(field)
@@ -2073,6 +2078,7 @@ impl App {
         }
 
         match event.logical_key {
+            _ if to_editor => {}
             Key::Named(NamedKey::Enter) if field == SettingsInput::Search => {
                 if let Some(cat) = matching_categories(&self.settings_scene.query).first().copied() {
                     self.native_settings_blur();
@@ -2118,8 +2124,9 @@ impl App {
             }
             _ => return true,
         }
+        let editing = crate::lineedit::Field { id: &id, multiline: is_multiline(field) };
         let changed = field_buffer(self, field).is_some_and(|(buffer, caret)| {
-            crate::lineedit::key(buffer, caret, &event.logical_key)
+            crate::lineedit::edit_event(editing, buffer, caret, event, mods)
                 == crate::lineedit::LineEditAction::Edited
         });
         if changed {
@@ -2368,6 +2375,11 @@ fn drop_size_ok(path: &std::path::Path, limit: u64) -> Result<u64, String> {
         return Err(format!("그림이 너무 커요 — 최대 {}MB", limit >> 20));
     }
     Ok(metadata.len())
+}
+
+/// 설정 칸의 편집기 열쇠(`lineedit`) — 칸마다 선택·되돌리기 기록이 따로 산다.
+fn settings_field_id(field: SettingsInput) -> String {
+    format!("settings:{field:?}")
 }
 
 fn is_multiline(field: SettingsInput) -> bool {
@@ -7291,6 +7303,9 @@ fn text_field(
         flat_row(g, x, y, w, label, "", w - rect.2 - 12.0);
     }
     let focused = s.input == Some(field);
+    // 고른 범위 — 조합 중이면 그 글자가 캐럿 자리를 밀어 범위가 어긋나므로 안 그린다.
+    let picked = crate::lineedit::selection(&settings_field_id(field), caret, value.chars().count())
+        .filter(|_| focused && s.preedit.is_empty() && !s.select_all);
     crate::native_controls::field(g,rect,focused);
     if focused && s.select_all {
         g.rect(rect.0+3.0,rect.1+3.0,rect.2-6.0,rect.3-6.0,theme::with_alpha(theme::accent(),42));
@@ -7337,6 +7352,12 @@ fn text_field(
             .enumerate()
         {
             let ly = rect.1 + 10.0 + i as f32 * 18.0;
+            if let Some((a, b)) = picked {
+                let (from, to) = (a.max(*start), b.min(start + line.chars().count()));
+                if from < to {
+                    crate::lineedit::paint_band(g, line, (from - start, to - start), rect.0 + 11.0, ly, 12.0, false, rect.0 + rect.2 - 10.0);
+                }
+            }
             g.draw_text(rect.0 + 11.0, ly, line, gpu::DrawOpts {
                 font_size:12.0, color:theme::text(), bold:false, italic:false,
             });
@@ -7364,6 +7385,13 @@ fn text_field(
             |text| g.measure_chrome_text(text, 13.0, false)));
         let m=g.chrome_text_metrics(&shown,13.0,false);
         let (_,text_y)=m.centered_origin(rect,g.scale());
+        if let Some((a, b)) = picked.filter(|_| !value.is_empty()) {
+            let shown_len = shown.chars().count();
+            let (from, to) = (a.max(visible_start), b.min(visible_start + shown_len));
+            if from < to {
+                crate::lineedit::paint_band(g, &shown, (from - visible_start, to - visible_start), rect.0 + 11.0, text_y, 13.0, false, rect.0 + rect.2 - 10.0);
+            }
+        }
         g.draw_text(rect.0 + 11.0, text_y, &shown, gpu::DrawOpts {
             font_size: 13.0, color: if value.is_empty() { theme::text_dim() } else { theme::text() },
             bold: false, italic: false,

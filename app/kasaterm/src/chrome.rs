@@ -353,6 +353,9 @@ mod quick_instruction_tests {
     }
 }
 
+/// 방 이름 칸의 편집기 열쇠 — 본기기·다른 기기 방이 한 칸을 같이 쓴다(한 번에 하나만 연다).
+pub(crate) const ROOM_FIELD: &str = "room-rename";
+
 impl App {
     /// pane 의 표시용 학생 — "터미널은 파싱만"(사용자): claude sessionId 바인딩이 정본,
     /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
@@ -1387,9 +1390,11 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    // 이름을 싣고 여는 유일한 칸이라 커서를 여기서 끝에 찍는다 —
-                    // 0 으로 두면 고치려던 확장자 앞이 아니라 이름 맨 앞에 선다.
-                    self.file_tree.edit_cursor = name.chars().count();
+                    // Finder 처럼 확장자 앞까지 고른 채 연다 — 바로 치면 이름만 바뀌고 확장자는 남는다.
+                    // 점으로 시작하는 이름(.gitignore)은 통째가 이름이다.
+                    let stem = name.rfind('.').filter(|at| *at > 0).map_or(name.len(), |at| at);
+                    self.file_tree.edit_cursor = name[..stem].chars().count();
+                    crate::lineedit::select_from(crate::input::TREE_NAME_FIELD, 0);
                     self.file_tree.rename = Some((p, name));
                     self.file_tree.new = None;
                     self.file_tree.search_active = false;
@@ -1985,7 +1990,8 @@ impl App {
             .cloned()
             .or_else(|| self.window_labels.get(idx).map(|(n, _)| n.clone()))
             .unwrap_or_default();
-        self.room_rename.cursor = cur.chars().count();
+        // Finder 처럼 이름 전체를 고른 채 연다 — 바로 치면 바꿔 쓰고, ←→ 로 풀어 고친다.
+        crate::lineedit::select_all(ROOM_FIELD, &cur, &mut self.room_rename.cursor);
         self.room_rename.editing = Some((idx, cur));
         self.room_rename.last_click = None;
         let _ = self.hangul.flush();
@@ -2382,7 +2388,7 @@ impl App {
     /// 다른 기기 방의 이름을 고치기 시작한다 — 같은 편집칸·같은 키 처리를 쓰고, 끝날 때
     /// 그 기계의 `window.rename` 으로 보낸다.
     pub(crate) fn begin_remote_room_rename(&mut self, label: &str, window: u64, key: &str, current: &str) {
-        self.room_rename.cursor = current.chars().count();
+        crate::lineedit::select_all(ROOM_FIELD, current, &mut self.room_rename.cursor);
         self.room_rename.editing = Some((usize::MAX, current.to_string()));
         self.room_rename.remote = Some((label.to_string(), window, key.to_string()));
         self.room_rename.last_click = None;
@@ -2396,6 +2402,7 @@ impl App {
         let Some((idx, mut buf)) = self.room_rename.editing.take() else {
             return;
         };
+        crate::lineedit::forget(ROOM_FIELD);
         // 조합 중이던 마지막 글자도 이름의 일부다 — 안 흘리면 "가나다" 를 치고
         // Enter 를 눌렀을 때 "가나" 만 남는다.
         if let Some(tail) = self.hangul.flush() {
@@ -2420,6 +2427,7 @@ impl App {
 
     /// 편집을 버린다(Esc).
     pub(crate) fn cancel_room_rename(&mut self) {
+        crate::lineedit::forget(ROOM_FIELD);
         self.room_rename.remote = None;
         if self.room_rename.editing.take().is_some() {
             let _ = self.hangul.flush();
@@ -2443,7 +2451,7 @@ impl App {
     pub(crate) fn room_rename_insert(&mut self, text: &str) {
         let cursor = &mut self.room_rename.cursor;
         if let Some((_, buf)) = self.room_rename.editing.as_mut() {
-            crate::lineedit::insert(buf, cursor, text);
+            crate::lineedit::insert_in(crate::lineedit::line(ROOM_FIELD), buf, cursor, text);
             self.chrome_dirty = true;
         }
     }
@@ -2463,14 +2471,10 @@ impl App {
         if crate::input::is_modifier_key(event) {
             return true;
         }
-        // Cmd/Ctrl 조합은 삼키되 버퍼엔 안 넣는다. 앞단에서 안 잡힌 조합(Cmd+C 등)이
-        // 여기 오면 글자만 박히고, 흘려보내면 편집 중인데 셸이 그 키를 먹는다.
-        if self.modifiers.super_key() || self.modifiers.control_key() {
-            return true;
-        }
+        let mods = crate::lineedit::Mods::of(self.modifiers);
         self.ime_retarget(crate::ImeFocus::RoomRename(idx));
         #[cfg(target_os = "macos")]
-        if let Some(t) = &event.text {
+        if let Some(t) = event.text.as_ref().filter(|_| !mods.chord()) {
             if let Some(c) = t.chars().next().filter(|_| t.chars().count() == 1) {
                 if (0x3130..=0x318F).contains(&(c as u32)) {
                     if let Some(done) = self.hangul.feed(c) {
@@ -2496,9 +2500,11 @@ impl App {
         }
         self.preedit.clear();
         self.in_preedit = false;
+        // ⌘·⌃ 조합도 편집기에 먼저 준다(⌘A·⌘C·⌘V·⌘←·⌃A …). 편집기가 모르는 조합은 그래도
+        // 삼킨다 — 흘려보내면 편집 중인데 셸이 그 키를 먹는다.
         let cursor = &mut self.room_rename.cursor;
         let act = match self.room_rename.editing.as_mut() {
-            Some((_, buf)) => crate::lineedit::key(buf, cursor, &event.logical_key),
+            Some((_, buf)) => crate::lineedit::edit_event(crate::lineedit::line(ROOM_FIELD), buf, cursor, event, mods),
             None => crate::lineedit::LineEditAction::Ignored,
         };
         match act {

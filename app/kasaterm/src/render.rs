@@ -4234,6 +4234,11 @@ impl App {
                         }
                         let caret_x = px + g.measure_chrome_text(&head, afont, false);
                         let shown = format!("{head}{tail}");
+                        if let Some(range) = crate::lineedit::selection(crate::webpane::WEB_FIND_FIELD, cursor, text.chars().count())
+                            .filter(|_| !self.in_preedit)
+                        {
+                            crate::lineedit::paint_band(g, &text, range, px, ty, afont, false, clip_r);
+                        }
                         g.draw_text_clipped(
                             px,
                             ty,
@@ -4265,6 +4270,11 @@ impl App {
                         }
                         let caret_x = tx + g.measure_chrome_text(&head, afont, false);
                         let shown = format!("{head}{tail}");
+                        if let Some(range) = crate::lineedit::selection(crate::webpane::WEB_ADDR_FIELD, cursor, text.chars().count())
+                            .filter(|_| !self.in_preedit)
+                        {
+                            crate::lineedit::paint_band(g, &text, range, tx, ty, afont, false, clip_r);
+                        }
                         if shown.is_empty() {
                             g.draw_text_clipped(
                                 tx,
@@ -5374,6 +5384,11 @@ impl App {
                     .min(self.git.commit_msg.chars().count());
                 let before: String = self.git.commit_msg.chars().take(cur).collect();
                 let after: String = self.git.commit_msg.chars().skip(cur).collect();
+                if let Some(range) = crate::lineedit::selection(crate::input::GIT_COMMIT_FIELD, cur, self.git.commit_msg.chars().count())
+                    .filter(|_| self.git.commit_focused && preedit.is_empty())
+                {
+                    crate::lineedit::paint_band(g, &self.git.commit_msg, range, itx, ity, 13.0, false, cx + cw);
+                }
                 let mut px = g.draw_text(
                     itx,
                     ity,
