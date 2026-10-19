@@ -2655,7 +2655,8 @@ static INLINE_UPLOADED: std::sync::OnceLock<std::sync::Mutex<kasa_gridview::imag
 /// 칸 글자 전에 부른다 — 이번 프레임 그림을 올리고 kitty `z<0` 그림(글자 아래)을 그린다.
 pub(crate) fn paint_inline_images_below(g: &mut kasa_gridview::GridRenderer, slots: &[kasa_gridview::images::InlineSlot]) {
     let mut images = INLINE_UPLOADED.get_or_init(Default::default).lock().unwrap();
-    images.prepare(g, slots);
+    let images_only: Vec<_> = slots.iter().filter(|s| !s.key.starts_with("media:")).cloned().collect();
+    images.prepare(g, &images_only);
     images.queue_layer(g, slots, true);
 }
 

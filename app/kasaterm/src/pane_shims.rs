@@ -378,6 +378,10 @@ curl -s --get --data-urlencode \"path=$abs\" \
 || {{ echo \"{cmd}: failed to reach kasaterm\" >&2; exit 1; }}\n"
         )
     };
+    if let Ok(binary) = std::env::current_exe() {
+        let quoted = shell_quote_path(&binary.to_string_lossy());
+        let _ = write_shim(&shim_dir.join("mediaopen"), format!("#!/bin/sh\nexec {quoted} --inline-media \"$@\"\n"));
+    }
     for (name, endpoint) in [("imgopen", "open-image"), ("mdopen", "open-markdown")] {
         let path = shim_dir.join(name);
         let mut body = mk(name, endpoint);

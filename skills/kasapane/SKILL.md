@@ -46,7 +46,7 @@ CLI 와 하는 일이 완전히 겹쳐 걷었다(문서 2026-09-22, 서버·자�
 | pane 분할·이름·색·send·focus | `kasaterm-cli` | 변수 캡처(`NEW=$(...)`), 파이프, jq 등 셸 도구 결합 자유 |
 | TeamCreate 직후 race 검증·좀비 청소·config.json 조작 | `kasaterm-cli` + jq | 조건 분기와 파일 편집까지 한 흐름 |
 | 빌드·dev server·테스트 풀 사이클 (tee+DONE+Monitor) | `kasaterm-cli` | 시퀀스가 길고 로그 파일 회수까지 결합 |
-| 이미지·문서 결과물 표시 | `imgopen --block` / 파일 링크 | Claude·Codex 답변 본문에 표시 블록 포함 |
+| 이미지·음성·영상 결과물 표시 | `imgopen --block` / `mediaopen --block` / 파일 링크 | Claude·Codex 답변 본문에 표시 블록 포함 |
 
 **원칙 한 줄**: *pane 을 건드리는 모든 길은 `kasaterm-cli` 다.*
 
@@ -178,9 +178,11 @@ kasaterm-cli rename-window "%2" --color "#a371f7"
 
 역할 색: 탐색=보라 `#a371f7`, 구현=파랑 `#58a6ff`, 검증=초록 `#3fb950`, 리드=노랑 `#d29922`.
 
-### 패턴 D — 결과 이미지와 문서
+### 패턴 D — 결과 이미지·음성·영상과 문서
 
 Claude Code와 Codex에서 이미지를 사용자에게 보여줄 때는 `imgopen --block /절대경로/result.png`를 실행하고, 반환된 fenced 표시 블록을 답변에 **그대로** 포함한다. 카사텀이 각 표식 행을 등록된 그림의 해당 부분으로 그린다. 줄을 생략·요약하거나 중첩 목록에 넣지 않는다. 모델용 `Read`·`view_image`는 이미지를 보는 도구이며 사용자에게 표시했다는 증거가 아니다.
+
+음성·영상은 `mediaopen --block /절대경로/result.mp4` 또는 음성 파일 경로를 실행하고, 반환된 fenced `[[km:…]]` 블록을 답변에 그대로 넣는다. 파일명·길이·재생 버튼이 본문에 표시되며 사용자가 눌렀을 때 앱 안에서 재생한다. 공유폴더에 복사하거나 플레이어·탭을 자동으로 열지 않는다. 원격 기기의 결과도 같은 표시 블록과 파일 링크를 쓴다. 블록 행은 직접 만들거나 수정하지 않는다.
 
 일반 셸 TTY에서는 `imgopen /절대경로/result.png`가 Kitty 인라인 이미지를 출력한다. 도구의 파이프 출력에서는 같은 명령도 표시 블록을 반환하지만 에이전트는 명시적인 `--block`을 쓴다. 사용자가 큰 미리보기를 요청할 때만 `imgopen --tab`을 쓴다. 문서는 `mdopen /절대경로/doc.md`로 열 수 있다.
 

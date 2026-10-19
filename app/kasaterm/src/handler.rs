@@ -297,7 +297,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if matches!(&event, UserEvent::Redraw) {
-            if self.image_preview.pending_result() { self.chrome_dirty = true; }
+            if crate::inline_media::cache::changed() || self.image_preview.pending_result() || self.media_preview.tick(&self.proxy) || self.media_preview.active() { self.chrome_dirty = true; }
             crate::turn_probe::lag_received();
             self.drain_drag_transfers();
             self.aux_request_redraws();
@@ -3238,22 +3238,30 @@ impl ApplicationHandler<UserEvent> for App {
                 && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
                 && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
                 && self.info.machine_menu.is_none() && !self.shell_menu_open;
+            let media_was_open = self.media_preview.owns(id);
+            match self.media_preview.event(id, self.cursor_px, self.modifiers, &event, &self.proxy, allow_image && !self.image_preview.owns(id)) {
+                crate::image_preview::Response::Consumed => {
+                    if !media_was_open && self.media_preview.owns(id) { self.focus_preview_surface(self.cursor_px); }
+                    if self.media_preview.owns(id) { self.discard_modal_ime(&winit::event::Ime::Disabled); }
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window {
+                        window.set_cursor(self.media_preview.cursor(id, self.cursor_px));
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                crate::image_preview::Response::Replay(press, origin) => {
+                    let cursor = self.cursor_px; self.cursor_px = origin;
+                    self.media_preview.replay = true; self.window_event(event_loop, id, press);
+                    self.media_preview.replay = false; self.cursor_px = cursor;
+                }
+                crate::image_preview::Response::Pass => {}
+            }
             let image_was_open = self.image_preview.owns(id);
             match self.image_preview.event(id, self.cursor_px, self.modifiers, &event, &self.proxy, allow_image) {
                 crate::image_preview::Response::Consumed => {
                     if !image_was_open && self.image_preview.owns(id) {
-                        if let Some((pane, _, _)) = self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1) {
-                            let (surface, switched) = {
-                                let ws = self.ws.lock().unwrap();
-                                (ws.active_tab_pid(&pane), ws.active_pane.as_deref() != Some(pane.as_str()))
-                            };
-                            self.focus_surface(&surface);
-                            if switched {
-                                self.selection = None;
-                                self.drag_anchor = None;
-                                self.mouse_forward_pane = None;
-                            }
-                        }
+                        self.focus_preview_surface(self.cursor_px);
                     }
                     if self.image_preview.owns(id) {
                         self.discard_modal_ime(&winit::event::Ime::Disabled);
@@ -4299,6 +4307,7 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    let icon = if matches!(icon, CursorIcon::Default) && self.media_preview.hit(id, self.cursor_px) { CursorIcon::Pointer } else { icon };
                     let icon = if matches!(icon, CursorIcon::Default) && self.image_preview.hit(id, self.cursor_px) {
                         CursorIcon::ZoomIn
                     } else { icon };
@@ -7681,6 +7690,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Drain menu clicks from muda's global channel. The "Git 패널" item
         // toggles the in-window git column (open/close).
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            if self.media_preview.focused() { continue; }
             if self.image_preview.focused() {
                 if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                     self.image_preview.copy(&self.proxy);
@@ -7895,6 +7905,11 @@ impl ApplicationHandler<UserEvent> for App {
         // trigger came from a keystroke or a JSON-RPC call.
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
+        if self.media_preview.tick(&self.proxy) {
+            self.chrome_dirty = true;
+            if let Some(window) = &self.window { window.request_redraw(); }
+            self.aux_request_redraws();
+        }
         self.image_preview_probe(event_loop);
         self.run_pending_autosplits();
         self.run_pending_autowindows();
@@ -8163,6 +8178,7 @@ impl ApplicationHandler<UserEvent> for App {
             || (self.sidebar_visible && !self.tabs_on_top && self.has_expanded_rooms())
             // 설정 상세의 모션 미리보기는 보일 때만 30fps 펌프를 탄다.
             || self.settings_media_animating()
+            || self.media_preview.active()
             // 비가 오는 동안(꺼져 있으면 여기서 끝난다 — 끈 사람은 깨우지 않는다).
             || (self.weather.settings.enabled && self.weather_animating())
         {
@@ -8241,7 +8257,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.aux_request_redraws();
                 return;
             }
-            if self.settings_media_animating() {
+            if self.settings_media_animating() || self.media_preview.active() {
                 self.chrome_dirty = true;
             }
             if let Some(w) = &self.window {

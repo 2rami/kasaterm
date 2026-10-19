@@ -96,6 +96,9 @@ mod context_info;
 mod internal_room;
 mod links;
 mod inline_image;
+mod inline_media;
+mod media_preview;
+mod media_player;
 mod inline_result;
 mod lsp;
 mod machinescol;
@@ -5103,6 +5106,7 @@ struct App {
     /// 마우스가 `[Image #N]` 글자 위에 멎어 있을 때의 썸네일 툴팁.
     image_tip: Option<ImageTip>,
     image_preview: image_preview::State,
+    media_preview: media_preview::State,
     /// 커서가 마지막으로 있던 (pane, 열, 행). 툴팁 후보가 바뀌었는지는 그리드를
     /// 봐야 아는데 그건 렌더만 안다 — 셀이 바뀐 프레임에만 다시 그려, 픽셀마다
     /// chrome 을 재구성하는 일을 막는다.
@@ -6187,6 +6191,7 @@ impl App {
             hover: None,
             image_tip: None,
             image_preview: Default::default(),
+            media_preview: Default::default(),
             image_hover_cell: None,
             lsp_goto: None,
             tmux: None,
@@ -6642,6 +6647,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // but only the terminal app may perform startup maintenance.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if inline_image::run(&args)? { return Ok(()); }
+    if inline_media::run(&args)? { return Ok(()); }
     let executable = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_name().map(std::ffi::OsStr::to_owned));

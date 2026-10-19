@@ -2295,7 +2295,7 @@ impl App {
     }
 
     pub(crate) fn paste_from_menu(&mut self) {
-        if self.image_preview.focused() { return; }
+        if self.image_preview.focused() || self.media_preview.focused() { return; }
         if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() {
             self.paste_clipboard();
             return;
@@ -2313,7 +2313,7 @@ impl App {
     }
 
     pub(crate) fn paste_clipboard(&mut self) {
-        if self.image_preview.focused() { return; }
+        if self.image_preview.focused() || self.media_preview.focused() { return; }
         if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() {
             self.send_bytes(b"image-preview-fixture-paste");
             return;

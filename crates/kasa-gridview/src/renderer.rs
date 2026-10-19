@@ -992,6 +992,24 @@ impl GridRenderer {
         );
     }
 
+    pub fn update_image(&mut self, id: &str, rgba: &[u8], w: u32, h: u32) {
+        if w == 0 || h == 0 || u64::from(w) * u64::from(h) * 4 != rgba.len() as u64 { return; }
+        if self.images.get(id).is_some_and(|entry| entry.w != w || entry.h != h) {
+            self.drop_image(id);
+        }
+        let Some(entry) = self.images.get(id) else {
+            self.upload_image(id, rgba, w, h);
+            return;
+        };
+        // 재생 프레임마다 텍스처를 할당하면 디코더보다 GPU 자원 교체가 더 비싸진다.
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &entry._texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
     /// Free a pane's image texture when the pane closes.
     pub fn drop_image(&mut self, id: &str) {
         self.images.remove(id);

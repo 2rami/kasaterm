@@ -5,7 +5,7 @@ use kasa_gridview::images::{InlineFit, InlineSlot};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub(crate) const INSTRUCTIONS: &str = "To show a result image inside this terminal, run `imgopen --block /absolute/path/to/image.png`, then include the returned fenced display block verbatim in your user-facing response. Do not omit, indent, wrap, summarize or escape its marker rows. Add a normal file link outside the block. Kasaterm draws the image in those reserved rows for both Claude Code and Codex; view_image/Read only lets the model inspect it. Do not open an image tab/window unless the user explicitly asks. Do not emit Kitty escapes from agent tool output.";
+pub(crate) const INSTRUCTIONS: &str = "To show a result image inside this terminal, run `imgopen --block /absolute/path/to/image.png`, then include the returned fenced display block verbatim in your user-facing response. Do not omit, indent, wrap, summarize or escape its marker rows. Add a normal file link outside the block. Kasaterm draws the image in those reserved rows for both Claude Code and Codex; view_image/Read only lets the model inspect it. Do not open an image tab/window unless the user explicitly asks. Do not emit Kitty escapes from agent tool output. For audio or video, run `mediaopen --block /absolute/path/to/file.mp4` (or an audio file) and include the returned fenced media block verbatim plus a normal file link outside it. The inline card opens playback only when clicked. Keep outputs in the project/output folder; do not require a shared folder or open a player/tab automatically.";
 
 use kasa_socket::inline_results::{root, valid_id};
 
@@ -48,18 +48,22 @@ pub(crate) fn display_block(id: &str, width: u32, height: u32) -> String {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Stripe {
-    row: usize,
-    col: usize,
-    id: String,
-    index: usize,
-    total: usize,
+pub(crate) struct Stripe {
+    pub row: usize,
+    pub col: usize,
+    pub id: String,
+    pub index: usize,
+    pub total: usize,
 }
 
 fn stripe(row: usize, cells: &[GridCell]) -> Option<Stripe> {
+    stripe_for(row, cells, "[[ki:")
+}
+
+pub(crate) fn stripe_for(row: usize, cells: &[GridCell], prefix: &str) -> Option<Stripe> {
     let start = cells
         .windows(5)
-        .position(|w| w.iter().map(|c| c.ch).eq("[[ki:".chars()))?;
+        .position(|w| w.iter().map(|c| c.ch).eq(prefix.chars()))?;
     // 설명이나 명령 속의 표식을 그림으로 바꾸면 실제 본문을 덮는다.
     let gutter = |c: &GridCell| matches!(c.ch, ' ' | '\0' | '│' | '┃' | '⏺' | '•' | '●' | '›');
     if !cells[..start].iter().all(gutter) {

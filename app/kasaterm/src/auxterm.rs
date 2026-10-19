@@ -660,6 +660,7 @@ impl App {
         // ── 본문 ──
         let mut animated = false;
         self.image_preview.collect(t.window.id(), 0, &t.gpu, &[]);
+        self.media_preview.collect(t.window.id(), 0, &[]);
         match composition {
             Some(c) => {
                 // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
@@ -672,11 +673,14 @@ impl App {
                     default_fg: crate::cells::default_fg(),
                     source: None,
                 };
-                t.inline_images.prepare(&mut t.gpu, &c.inline_slots);
+                let images_only: Vec<_> = c.inline_slots.iter().filter(|s| !s.key.starts_with("media:")).cloned().collect();
+                t.inline_images.prepare(&mut t.gpu, &images_only);
                 t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, true);
                 t.gpu.draw_cells(&[slot]);
                 t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, false);
                 self.image_preview.collect(t.window.id(), 0, &t.gpu, &c.inline_slots);
+                crate::inline_media::paint(&mut t.gpu, &c.inline_slots, t.cursor_px);
+                self.media_preview.collect(t.window.id(), 0, &c.inline_slots);
                 crate::screenread::paint_status_model_icons(&mut t.gpu, &c.status_model_icons);
                 // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키.
                 let overlays = crate::screenread::StudentOverlays {
@@ -740,6 +744,7 @@ impl App {
         // 창 외곽선 — 셀 위에 얹어야 가장자리 글자에 안 먹힌다.
         draw_aux_border(t, w, h, accent, focused);
         self.image_preview.paint(t.window.id(), &mut t.gpu, (w, h), t.cursor_px);
+        self.media_preview.paint(t.window.id(), &mut t.gpu, (w, h), t.cursor_px);
         let _ = t.gpu.render(&[], scale, 0.0, true);
         t.dirty = false;
         // 스윕바·애니 셀은 다음 프레임을 스스로 불러야 한다 — PTY 출력이 없으면
@@ -775,6 +780,21 @@ impl App {
             if let WindowEvent::CursorMoved { position, .. } = &event {
                 t.cursor_px = (position.x as f32 / t.gpu.scale(), position.y as f32 / t.gpu.scale());
             }
+            match self.media_preview.event(t.window.id(), t.cursor_px, self.modifiers, &event, &self.proxy, !self.image_preview.owns(t.window.id())) {
+                crate::image_preview::Response::Consumed => {
+                    t.window.set_cursor(self.media_preview.cursor(t.window.id(), t.cursor_px));
+                    t.preedit.clear(); t.redraw(); return;
+                }
+                crate::image_preview::Response::Replay(press, origin) => {
+                    let cursor = t.cursor_px; t.cursor_px = origin;
+                    self.media_preview.replay = true; self.aux_terminal_event(idx, press, _event_loop);
+                    self.media_preview.replay = false;
+                    if let Some(t) = self.aux.terminals.get_mut(idx) { t.cursor_px = cursor; }
+                }
+                crate::image_preview::Response::Pass => {}
+            }
+        }
+        if let Some(t) = self.aux.terminals.get_mut(idx) {
             match self.image_preview.event(t.window.id(), t.cursor_px, self.modifiers, &event, &self.proxy, true) {
                 crate::image_preview::Response::Consumed => {
                     t.window.set_cursor(self.image_preview.cursor(t.window.id(), t.cursor_px));
@@ -1435,6 +1455,7 @@ impl App {
         let Some(t) = self.aux.terminals.get(idx) else { return };
         let pane_id = t.pane_id.clone();
         let home = t.home_window;
+        self.media_preview.close_owner(self.aux.terminals[idx].window.id());
         self.aux.terminals.remove(idx);
         // 셸이 이미 종료돼 세션이 사라졌으면 되돌릴 게 없다.
         if !self.pty.contains_key(&pane_id) {
@@ -1490,6 +1511,7 @@ impl App {
         self.aux.terminals.retain(|t| {
             let alive = self.pty.contains_key(&t.pane_id) || ws.panes.contains_key(&t.pane_id);
             if !alive {
+                self.media_preview.close_owner(t.window.id());
                 eprintln!("[auxterm] {} 사라짐 — 별도창 닫음", t.pane_id);
             }
             alive

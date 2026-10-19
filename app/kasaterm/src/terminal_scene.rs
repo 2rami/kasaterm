@@ -1113,6 +1113,10 @@ impl App {
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             let source = kasa_mcp::remote::remote_meta(&tab_pid);
+            inline_slots.extend(crate::inline_media::compose(
+                &mut composed, (body_left, body_top), (self.cell.w * fs, self.cell.h * fs), cols_now,
+                source.as_ref().map(|(base, _)| base.as_str()), &self.proxy,
+            ));
             inline_slots.extend(crate::inline_result::compose(
                 &mut composed, (body_left, body_top), (self.cell.w * fs, self.cell.h * fs), cols_now,
                 source.as_ref().map(|(base, _)| base.as_str()), &self.proxy,
