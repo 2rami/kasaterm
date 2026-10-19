@@ -2,11 +2,12 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use objc2::rc::{autoreleasepool, Retained, Weak};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Bool};
 use objc2::{msg_send, AnyThread, MainThreadMarker};
 use objc2_av_foundation::{
     AVAsset, AVAssetImageGenerator, AVAssetTrack, AVAsynchronousKeyValueLoading, AVKeyValueStatus,
@@ -38,6 +39,8 @@ const FRAME_MAX_EDGE: f64 = 1920.0;
 const SEEK_TIMESCALE: i32 = 600;
 /// 깨진 파일·느린 볼륨에서 검사 스레드가 영영 붙잡히지 않게.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// 끝 지점처럼 새 프레임이 끝내 안 나오는 위치 찾기가 렌더 루프를 영영 붙잡지 않게.
+const SEEK_GIVE_UP: Duration = Duration::from_secs(5);
 
 extern "C" {
     fn mach_absolute_time() -> u64;
@@ -49,7 +52,20 @@ pub struct Player {
     output: Retained<AVPlayerItemVideoOutput>,
     /// 항목이 준비된 뒤 한 번 정한다. 그 전엔 프레임을 내지 않는다.
     orientation: Option<Orientation>,
+    has_video: Option<bool>,
     serial: u64,
+    /// 열기도 0초로 가는 위치 찾기로 친다 — 첫 프레임이 나올 때까지 `seeking`.
+    pending: Option<PendingSeek>,
+    seek_generation: u64,
+    /// 완료 콜백이 끝난 위치 찾기의 세대를 올린다. 콜백 큐가 문서로 정해져 있지 않아 원자값으로 둔다.
+    seek_done: Arc<AtomicU64>,
+}
+
+/// 멈춘 채 위치를 옮기면 새 프레임은 완료 콜백 뒤에야 나오고, 그 전엔 옛 위치의 프레임이 한 장
+/// 더 나올 수 있다. 그 사이 렌더 루프가 쉬면 막대만 옮겨 가고 그림은 옛 것에 멈춘다.
+struct PendingSeek {
+    generation: u64,
+    issued: Instant,
 }
 
 impl Player {
@@ -71,7 +87,14 @@ impl Player {
                 item,
                 output,
                 orientation: None,
+                has_video: None,
                 serial: 0,
+                pending: Some(PendingSeek {
+                    generation: 0,
+                    issued: Instant::now(),
+                }),
+                seek_generation: 0,
+                seek_done: Arc::new(AtomicU64::new(0)),
             })
         }
     }
@@ -126,12 +149,17 @@ impl Player {
             let playing = error.is_none() && control != AVPlayerTimeControlStatus::Paused;
             let buffering =
                 playing && control == AVPlayerTimeControlStatus::WaitingToPlayAtSpecifiedRate;
+            let has_video = self.has_video.or_else(|| {
+                (item_status == AVPlayerItemStatus::ReadyToPlay)
+                    .then(|| self.video_track().is_some())
+            });
             Playback {
                 position: duration.map_or(position, |d| position.min(d)),
                 duration,
                 playing,
                 buffering,
                 ended: error.is_none() && playback_ended(position, duration, playing),
+                seeking: error.is_none() && self.seeking(has_video),
                 error,
             }
         }
@@ -139,6 +167,8 @@ impl Player {
 
     pub fn take_frame(&mut self) -> Option<Frame> {
         let orientation = self.ready_orientation()?;
+        // 완료를 프레임보다 먼저 읽는다 — 완료 뒤에 꺼낸 프레임이어야 새 위치의 것이다.
+        let settled = self.pending.as_ref().is_none_or(|p| self.settled(p));
         unsafe {
             let item_time = self
                 .output
@@ -152,6 +182,9 @@ impl Player {
                 .output
                 .copyPixelBufferForItemTime_itemTimeForDisplay(item_time, std::ptr::null_mut())?;
             let (width, height, rgba) = read_bgra(&buffer, orientation)?;
+            if settled {
+                self.pending = None;
+            }
             self.serial += 1;
             Some(Frame {
                 width,
@@ -170,11 +203,51 @@ impl Player {
     }
 
     fn seek_exact(&mut self, seconds: f64) {
+        self.seek_generation += 1;
+        let generation = self.seek_generation;
+        self.pending = Some(PendingSeek {
+            generation,
+            issued: Instant::now(),
+        });
+        let done = Arc::clone(&self.seek_done);
+        // 앞선 요청은 `finished = NO` 로 먼저 불린다. 세대가 낮아 지금 기다리는 것에 영향이 없다.
+        let completion = block2::RcBlock::new(move |_finished: Bool| {
+            done.fetch_max(generation, Ordering::AcqRel);
+        });
         unsafe {
             let time = CMTime::with_seconds(seconds, SEEK_TIMESCALE);
             self.player
-                .seekToTime_toleranceBefore_toleranceAfter(time, kCMTimeZero, kCMTimeZero);
+                .seekToTime_toleranceBefore_toleranceAfter_completionHandler(
+                    time,
+                    kCMTimeZero,
+                    kCMTimeZero,
+                    &completion,
+                );
         }
+    }
+
+    fn settled(&self, pending: &PendingSeek) -> bool {
+        self.seek_done.load(Ordering::Acquire) >= pending.generation
+    }
+
+    /// 비디오면 완료 뒤 첫 프레임을 꺼낼 때(`take_frame`)까지, 소리만이면 완료 콜백까지.
+    fn seeking(&self, has_video: Option<bool>) -> bool {
+        let Some(pending) = &self.pending else {
+            return false;
+        };
+        if pending.issued.elapsed() > SEEK_GIVE_UP {
+            return false;
+        }
+        !(self.settled(pending) && has_video == Some(false))
+    }
+
+    unsafe fn video_track(&self) -> Option<Retained<AVAssetTrack>> {
+        let video = AVMediaTypeVideo?;
+        self.item
+            .tracks()
+            .iter()
+            .filter_map(|track| track.assetTrack())
+            .find(|track| *track.mediaType() == *video)
     }
 
     /// 항목이 준비되면 비디오 트랙의 표시 회전을 읽고, 원본이 크면 줄여 받는 출력으로 바꾼다.
@@ -187,17 +260,8 @@ impl Player {
             if self.item.status() != AVPlayerItemStatus::ReadyToPlay {
                 return None;
             }
-            let video = AVMediaTypeVideo?;
-            let mut found = None;
-            for track in self.item.tracks().iter() {
-                let Some(asset_track) = track.assetTrack() else {
-                    continue;
-                };
-                if *asset_track.mediaType() == *video {
-                    found = Some(asset_track);
-                    break;
-                }
-            }
+            let found = self.video_track();
+            self.has_video = Some(found.is_some());
             let orientation = match found {
                 Some(track) => {
                     let o = track_orientation(&track);

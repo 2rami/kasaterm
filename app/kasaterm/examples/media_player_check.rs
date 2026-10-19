@@ -4,12 +4,14 @@
 //!   cargo run -p kasaterm --example media_player_check
 //!   cargo test -p kasaterm --example media_player_check   # 순수 함수 단위 시험
 //!   cargo run -p kasaterm --example media_player_check -- probe FILE...   # 형식 지원 확인
+//!   cargo run -p kasaterm --example media_player_check -- seek-latency FILE...   # 멈춘 뒤 +5s 이동 → 새 프레임까지
 //!
 //! 픽스처는 모두 무음이고 음량도 0 으로 둔다. 다시 만들 때(ffmpeg 9):
 //!   colors_av.mp4      64x48, 0–1s 빨강·1–2s 초록·2–3s 파랑 + 무음 AAC
 //!   quadrants.mp4      64x32, 왼위 빨강·오위 초록·왼아래 파랑·오아래 흰색
 //!   quadrants_rot90.mp4  위 파일에 `-display_rotation:v:0 90 -c copy`
 //!   silence.m4a        3s 무음 AAC
+//!   long_gop.mp4       160x90 24fps, 0–4s 빨강·4–8s 파랑(시간 잡음), 키프레임은 0초 하나(`-g 1000 -bf 0`) + 무음 AAC
 
 #[cfg(target_os = "macos")]
 #[path = "../src/media_player.rs"]
@@ -39,6 +41,14 @@ fn main() {
         }
         return;
     }
+    if args.first().map(String::as_str) == Some("seek-latency") {
+        for file in &args[1..] {
+            if let Err(e) = mac::seek_latency(std::path::Path::new(file)) {
+                println!("{file}: error {e}");
+            }
+        }
+        return;
+    }
     let checks: &[(&str, Check)] = &[
         ("probe", mac::probe_files),
         (
@@ -53,6 +63,11 @@ fn main() {
             "pause holds, seek lands on the right frame",
             mac::pause_and_seek,
         ),
+        (
+            "paused seek stays seeking until the new frame",
+            mac::paused_seek_until_frame,
+        ),
+        ("audio seek settles without frames", mac::audio_seek_settles),
         ("end then replay from start", mac::end_and_replay),
         ("audio-only clock", mac::audio_only_clock),
         ("orientation matches AVFoundation poster", mac::orientation),
@@ -349,6 +364,99 @@ mod mac {
         })
     }
 
+    /// 앱처럼 `playing || buffering || seeking` 일 때만 프레임을 꺼내는 렌더 루프를 흉내 낸다.
+    /// 고정 유예 없이도 멈춘 채 이동한 자리의 새 프레임까지 루프가 이어져야 한다.
+    fn drive(p: &mut Player, limit: f64) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs_f64(limit);
+        while Instant::now() < deadline {
+            let s = p.state();
+            if !(s.playing || s.buffering || s.seeking) {
+                break;
+            }
+            frames.extend(p.take_frame());
+            pump(0.004);
+        }
+        frames
+    }
+
+    pub fn paused_seek_until_frame() -> Result<(), String> {
+        let mut p = open("long_gop.mp4")?;
+        ensure(p.state().seeking, || {
+            "fresh player not waiting for its first frame".into()
+        })?;
+        let first = drive(&mut p, 5.0);
+        ensure(!p.state().seeking, || "still seeking after open".into())?;
+        let first = first
+            .last()
+            .ok_or("render loop stopped before the first frame")?;
+        ensure(center(first) == Hue::Red, || {
+            format!("first frame {:?}", pixel(first, 80, 45))
+        })?;
+
+        p.play();
+        wait(3.0, || (p.state().position > 0.7).then_some(())).ok_or("never played")?;
+        p.pause();
+        pump(0.1);
+        while p.take_frame().is_some() {}
+        ensure(!p.state().seeking, || "seeking before any seek".into())?;
+
+        // 앱의 고정 유예(1초)보다 오래 프레임을 안 꺼내도 이동은 끝나지 않은 것으로 남아야 한다.
+        p.seek(5.0);
+        ensure(p.state().seeking, || "seek did not raise seeking".into())?;
+        pump(1.5);
+        let s = p.state();
+        ensure(s.seeking && (s.position - 5.0).abs() < 0.05, || {
+            format!("after 1.5s without frames {s:?}")
+        })?;
+        let frames = drive(&mut p, 5.0);
+        let s = p.state();
+        ensure(!s.seeking && !s.playing, || format!("loop ended in {s:?}"))?;
+        let last = frames
+            .last()
+            .ok_or("render loop stopped before the new frame")?;
+        ensure(center(last) == Hue::Blue, || {
+            format!(
+                "last frame before the loop stopped is {:?}",
+                pixel(last, 80, 45)
+            )
+        })?;
+
+        // 막 이동한 뒤 바로 꺼내기 시작해도(옛 프레임이 먼저 올 수 있다) 새 프레임에서야 내려온다.
+        p.seek(1.0);
+        let frames = drive(&mut p, 5.0);
+        let last = frames.last().ok_or("no frame after seeking back")?;
+        ensure(center(last) == Hue::Red && !p.state().seeking, || {
+            format!(
+                "seek back ended on {:?} {:?}",
+                pixel(last, 80, 45),
+                p.state()
+            )
+        })?;
+
+        // 끝으로 보내도 루프가 영영 돌지는 않는다.
+        p.seek(99.0);
+        drive(&mut p, 7.0);
+        let s = p.state();
+        ensure(!s.seeking && s.ended, || format!("seek to end left {s:?}"))
+    }
+
+    pub fn audio_seek_settles() -> Result<(), String> {
+        let mut p = open("silence.m4a")?;
+        wait_ready(&p)?;
+        wait(2.0, || (!p.state().seeking).then_some(())).ok_or("audio open stuck seeking")?;
+        p.seek(1.5);
+        ensure(p.state().seeking, || {
+            "audio seek did not raise seeking".into()
+        })?;
+        wait(2.0, || (!p.state().seeking).then_some(())).ok_or("audio seek never settled")?;
+        let s = p.state();
+        ensure((s.position - 1.5).abs() < 0.05, || {
+            format!("audio seek {s:?}")
+        })?;
+        ensure(p.take_frame().is_none(), || "audio produced a frame".into())
+    }
+
     pub fn end_and_replay() -> Result<(), String> {
         let mut p = open("colors_av.mp4")?;
         wait_ready(&p)?;
@@ -454,6 +562,42 @@ mod mac {
             Ok(watch)
         })?;
         wait(3.0, || watch.released().then_some(())).ok_or("AVPlayer still alive after drop")?;
+        Ok(())
+    }
+
+    /// 0.7초 재생 → 멈춤 → +5초 이동 뒤 위치·새 프레임이 언제 오는지 잰다.
+    pub fn seek_latency(path: &std::path::Path) -> Result<(), String> {
+        let mut p = Player::open(path)?;
+        p.set_volume(0.0);
+        wait_ready(&p)?;
+        p.play();
+        wait(3.0, || (p.state().position > 0.7).then_some(()));
+        p.pause();
+        pump(0.1);
+        while p.take_frame().is_some() {}
+        let from = p.state().position;
+        let target = from + 5.0;
+        let started = Instant::now();
+        p.seek(target);
+        let mut moved = None;
+        let mut frame = None;
+        while started.elapsed() < Duration::from_secs(5) && frame.is_none() {
+            let s = p.state();
+            if moved.is_none() && (s.position - target).abs() < 0.05 {
+                moved = Some(started.elapsed());
+            }
+            if let Some(f) = p.take_frame() {
+                frame = Some((started.elapsed(), f.serial));
+            }
+            pump(0.002);
+        }
+        println!(
+            "{}: paused {from:.3} -> {target:.3}  position after {:?}  frame after {:?}  state {:?}",
+            path.display(),
+            moved,
+            frame,
+            p.state()
+        );
         Ok(())
     }
 

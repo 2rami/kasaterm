@@ -58,6 +58,10 @@ pub struct Playback {
     pub playing: bool,
     pub buffering: bool,
     pub ended: bool,
+    /// 위치 찾기(열기 직후 첫 프레임 포함)가 끝나 새 위치의 프레임이 나올 때까지 true.
+    /// 멈춘 상태에서도 이동안은 렌더 루프를 돌려 `take_frame` 을 계속 불러야 그림이 따라온다.
+    /// 소리만 있는 파일은 위치 찾기 완료까지, 새 프레임이 안 나오면 5초 뒤 false 로 내려온다.
+    pub seeking: bool,
     pub error: Option<String>,
 }
 
