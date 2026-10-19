@@ -112,7 +112,7 @@ kasa-mcp = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "NSData", "NSGeometry", "objc2-core-services"] }
+objc2-foundation = { workspace = true, features = ["NSUserDefaults", "NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "NSArray", "NSData", "NSGeometry", "NSValue", "objc2-core-services"] }
 # Native desktop notifications (UNUserNotificationCenter) so the alert carries
 # kasaterm's own .app icon; block2 builds the authorization completion handler.
 # UNNotificationAttachment 는 알림 오른쪽 썸네일 — pane 마다 그 학생 프사를 붙인다.
@@ -125,6 +125,13 @@ objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", 
 # 버전은 wry 0.55 가 쓰는 것과 같아야 타입이 이어진다(WryWebView → WKWebView deref).
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
 block2 = "0.6"
+# 인라인 오디오·비디오 재생(media_player.rs). AVPlayer 가 오디오 장치 시계로 진행하고
+# AVPlayerItemVideoOutput 이 그 시계에 맞는 프레임을 내준다 — 직접 디코딩·동기화를 짜지 않는다.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVAsynchronousKeyValueLoading", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVPlayerItemTrack"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFString"] }
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
 libc.workspace = true
 
