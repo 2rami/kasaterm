@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show max;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -44,6 +45,44 @@ InlineMedia _info(String id) =>
 Future<void> settleDispose(WidgetTester tester) => tester.runAsync(
   () => Future<void>.delayed(const Duration(milliseconds: 20)),
 );
+
+/// mobile-layout 관문 — 첫 카드는 첫 화면 위 300 안, 가로로 넘치는 상자 없음, 누름 44.
+void expectPhoneLayout(WidgetTester tester, double width) {
+  Rect card(String title) => tester.getRect(
+    find.ancestor(of: find.text(title), matching: find.byType(InkWell)).first,
+  );
+  final video = card('demo clip.mp4'), audio = card('tone.m4a');
+  expect(video.top, lessThanOrEqualTo(300), reason: '첫 미디어 카드 시작');
+  var right = 0.0;
+  for (final r in tester.allRenderObjects.whereType<RenderBox>()) {
+    if (!r.attached || !r.hasSize) continue;
+    right = max(right, r.localToGlobal(Offset(r.size.width, 0)).dx);
+  }
+  expect(right, lessThanOrEqualTo(width), reason: '가로 넘침');
+  for (final r in [video, audio]) {
+    expect(r.left, greaterThanOrEqualTo(0));
+    expect(r.height, greaterThanOrEqualTo(Look.tap));
+  }
+  final dot = tester.getSize(
+    find
+        .ancestor(
+          of: find.descendant(
+            of: find.byType(InlineMediaCard).last,
+            matching: find.byIcon(Icons.play_arrow_rounded),
+          ),
+          matching: find.byType(SizedBox),
+        )
+        .first,
+  );
+  expect(dot, const Size(Look.tap, Look.tap), reason: '소리 재생 원');
+  if (const bool.fromEnvironment('KASA_LAYOUT_REPORT')) {
+    debugPrint(
+      'layout $width: 첫 카드 y ${video.top.round()} · 영상 카드 ${video.width.round()}x${video.height.round()} · '
+      '소리 카드 ${audio.width.round()}x${audio.height.round()} · 재생 원 ${dot.width.round()}x${dot.height.round()} · '
+      '가장 오른쪽 ${right.round()} (넘침 ${max(0, right - width).round()})',
+    );
+  }
+}
 
 void main() {
   group('블록 읽기', () {
@@ -336,8 +375,9 @@ void main() {
       List<Uri>? calls,
       Uri? root,
       ValueNotifier<String>? live,
+      double width = 390,
     }) async {
-      tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+      tester.view.physicalSize = Size(width * 3, 844 * 3);
       tester.view.devicePixelRatio = 3;
       addTearDown(tester.view.reset);
       final server = Server(
@@ -361,7 +401,7 @@ void main() {
                   alignment: Alignment.centerLeft,
                   child: SpeechBubble(
                     mine: false,
-                    maxWidth: 390 - Look.pagePad * 2 - Look.bubbleFar,
+                    maxWidth: width - Look.pagePad * 2 - Look.bubbleFar,
                     child: ValueListenableBuilder<String>(
                       valueListenable: live ?? ValueNotifier(text),
                       builder: (context, text, _) => InlineResultBody(
@@ -420,6 +460,7 @@ void main() {
         expect(r.right, lessThanOrEqualTo(390));
         expect(r.height, greaterThanOrEqualTo(Look.tap));
       }
+      expectPhoneLayout(tester, 390);
       final box = tester.getRect(find.byType(AspectRatio).first);
       expect(box.height, lessThanOrEqualTo(Look.mediaMaxH));
       expect(box.width / box.height, closeTo(320 / 180, 0.02));
@@ -428,6 +469,18 @@ void main() {
         matchesGoldenFile('goldens/inline_media_cards.png'),
       );
     });
+
+    for (final width in [320.0, 430.0]) {
+      testWidgets('폭 $width 에서도 카드는 넘치지 않고 누름 44 를 지킨다', (tester) async {
+        await pumpChat(
+          tester,
+          '만들었어요.\n\n${mediaBlock(_video, 12)}\n소리도요.\n\n${mediaBlock(_audio, 4)}',
+          width: width,
+        );
+        expect(tester.takeException(), isNull);
+        expectPhoneLayout(tester, width);
+      });
+    }
 
     testWidgets('누르면 받는 동안 진행·취소가 서고, 다 받으면 앱 안에서 연다', (tester) async {
       final gate = <Completer<void>>[];

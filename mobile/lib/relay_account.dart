@@ -458,7 +458,7 @@ class OriginClient extends http.BaseClient {
     } catch (_) {
       final back = fallback?.call(request.url);
       if (back == null || request is! http.Request || request.method != 'GET') rethrow;
-      return _gateway(http.Request('GET', back)..headers.addAll(request.headers));
+      return _gateway(_resend(request, back));
     }
   }
 
@@ -469,8 +469,20 @@ class OriginClient extends http.BaseClient {
       rethrow;
     } on http.ClientException {
       if (_closed || request is! http.Request || request.method != 'GET') rethrow;
-      return _send(http.Request('GET', request.url)..headers.addAll(request.headers), false);
+      return _send(_resend(request, request.url), false);
     }
+  }
+
+  /// 같은 GET 을 다른 길·새 연결로 한 번 더. 부른 쪽의 끊기 신호(취소·시간 상한)를 옮겨 싣는다 — 빠뜨리면
+  /// 첫 길이 실패해 넘어간 요청은 취소해도 끝까지 받는다.
+  static http.Request _resend(http.Request request, Uri url) {
+    final trigger = request is http.Abortable
+        ? (request as http.Abortable).abortTrigger
+        : null;
+    return (trigger == null
+        ? http.Request('GET', url)
+        : http.AbortableRequest('GET', url, abortTrigger: trigger))
+      ..headers.addAll(request.headers);
   }
 
   /// 묶어 둔 연결을 버리고 다음 요청부터 새로 맺는다 — 앱이 뒤에 있다 돌아왔을 때. 날아가던 요청은 끊기고

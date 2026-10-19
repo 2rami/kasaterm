@@ -22,13 +22,34 @@ class _NativeHttp extends HttpOverrides {}
 
 void main() {
   test('계정 화면 소켓 악수 주소는 기본 포트 관문에서도 같은 출처다', () {
-    final ws = Uri.parse('wss://gateway.invalid/relay/account/m/~mini/term/ws?pane=%253&grid=1');
+    final ws = Uri.parse(
+      'wss://gateway.invalid/relay/account/m/~mini/term/ws?pane=%253&grid=1',
+    );
     // dart:io WebSocket.connect 가 openUrl 에 넘기는 모양 그대로.
-    final handshake = Uri(scheme: 'https', userInfo: ws.userInfo, host: ws.host, port: ws.port,
-        path: ws.path, query: ws.query, fragment: ws.fragment);
+    final handshake = Uri(
+      scheme: 'https',
+      userInfo: ws.userInfo,
+      host: ws.host,
+      port: ws.port,
+      path: ws.path,
+      query: ws.query,
+      fragment: ws.fragment,
+    );
     expect(sameOrigin(ws.replace(scheme: 'https'), handshake), isTrue);
-    expect(sameOrigin(Uri.parse('https://gateway.invalid/'), Uri.parse('https://gateway.invalid:8443/')), isFalse);
-    expect(sameOrigin(Uri.parse('https://gateway.invalid/'), Uri.parse('http://gateway.invalid/')), isFalse);
+    expect(
+      sameOrigin(
+        Uri.parse('https://gateway.invalid/'),
+        Uri.parse('https://gateway.invalid:8443/'),
+      ),
+      isFalse,
+    );
+    expect(
+      sameOrigin(
+        Uri.parse('https://gateway.invalid/'),
+        Uri.parse('http://gateway.invalid/'),
+      ),
+      isFalse,
+    );
   });
 
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -124,8 +145,18 @@ void main() {
             'ok': true,
             'machines': [
               {'label': '나쵸네코', 'route': '~mini', 'online': true, 'panes': []},
-              {'label': '건호의 MacBook Pro', 'route': '건호의 MacBook Pro', 'online': false, 'panes': []},
-              {'label': '거노 데스크탑', 'route': '거노 데스크탑', 'online': false, 'panes': []},
+              {
+                'label': '건호의 MacBook Pro',
+                'route': '건호의 MacBook Pro',
+                'online': false,
+                'panes': [],
+              },
+              {
+                'label': '거노 데스크탑',
+                'route': '거노 데스크탑',
+                'online': false,
+                'panes': [],
+              },
             ],
           },
           '/relay/account-machines' => {
@@ -133,26 +164,39 @@ void main() {
             'hub': 'home',
             'machines': [
               {'id': 'home', 'machine': '모묘모의 MacBook Pro', 'aliases': []},
-              {'id': 'work', 'machine': '맥북', 'aliases': ['맥북', '건호의 MacBook Pro']},
+              {
+                'id': 'work',
+                'machine': '맥북',
+                'aliases': ['맥북', '건호의 MacBook Pro'],
+              },
               {'id': 'spare', 'machine': '새 맥', 'aliases': []},
             ],
           },
           _ => null,
         };
-        return http.Response.bytes(utf8.encode(jsonEncode(body)), body == null ? 404 : 200);
+        return http.Response.bytes(
+          utf8.encode(jsonEncode(body)),
+          body == null ? 404 : 200,
+        );
       }),
     );
     final list = await s.machines();
-    expect([for (final m in list) (m.label, m.route, m.online)], [
-      ('나쵸네코', '~mini', true),
-      ('건호의 MacBook Pro', '~work', true),
-      ('거노 데스크탑', '거노 데스크탑', false),
-      ('새 맥', '~spare', true),
-    ]);
+    expect(
+      [for (final m in list) (m.label, m.route, m.online)],
+      [
+        ('나쵸네코', '~mini', true),
+        ('건호의 MacBook Pro', '~work', true),
+        ('거노 데스크탑', '거노 데스크탑', false),
+        ('새 맥', '~spare', true),
+      ],
+    );
     s.close();
 
     // 옛 관문(창구 없음)이면 기준 기기의 명부 그대로.
-    expect(withAccountMachines(list.take(1).toList(), null).single.route, '~mini');
+    expect(
+      withAccountMachines(list.take(1).toList(), null).single.route,
+      '~mini',
+    );
   });
 
   test('관문의 Ad Hoc 판은 기기 토큰으로만 묻고 설치 주소는 itms-services 만 받는다', () async {
@@ -168,7 +212,8 @@ void main() {
             'release': {
               'version': '1.0.0',
               'build': '2610011039',
-              'install': 'itms-services://?action=download-manifest&url=https%3A%2F%2Fgateway.invalid%2Fm',
+              'install':
+                  'itms-services://?action=download-manifest&url=https%3A%2F%2Fgateway.invalid%2Fm',
             },
           }),
           200,
@@ -176,7 +221,10 @@ void main() {
       }),
     );
     final r = await s.latestRelease();
-    expect(seen.single.toString(), 'https://gateway.invalid/relay/install/latest');
+    expect(
+      seen.single.toString(),
+      'https://gateway.invalid/relay/install/latest',
+    );
     expect(r?.build, '2610011039');
     // 시험 판은 KASA_BUILD 가 없다 — 개발 설치처럼 새 판을 알리지 않는다.
     expect(r?.newer, isFalse);
@@ -184,17 +232,25 @@ void main() {
 
     final odd = Server.account(
       session(),
-      client: MockClient((_) async => http.Response(
-        '{"ok":true,"release":{"version":"1","build":"2","install":"https://other.invalid/x"}}',
-        200,
-      )),
+      client: MockClient(
+        (_) async => http.Response(
+          '{"ok":true,"release":{"version":"1","build":"2","install":"https://other.invalid/x"}}',
+          200,
+        ),
+      ),
     );
     expect(await odd.latestRelease(), isNull);
     odd.close();
-    final denied = Server.account(session(), client: MockClient((_) async => http.Response('{}', 403)));
+    final denied = Server.account(
+      session(),
+      client: MockClient((_) async => http.Response('{}', 403)),
+    );
     expect(await denied.latestRelease(), isNull);
     denied.close();
-    expect(await Server(Uri.parse('https://gateway.invalid/u/x/')).latestRelease(), isNull);
+    expect(
+      await Server(Uri.parse('https://gateway.invalid/u/x/')).latestRelease(),
+      isNull,
+    );
   });
 
   test('새 판 지켜보기는 가진 빌드를 들고 관문에 붙들어 달라고 하고, 붙들어 주는 관문인지 읽는다', () async {
@@ -206,14 +262,22 @@ void main() {
         return http.Response('{"ok":true,"release":null,"waits":true}', 200);
       }),
     );
-    final w = await s.watchRelease(have: '2610011039', hold: const Duration(seconds: 40));
-    expect(seen.single.toString(), 'https://gateway.invalid/relay/install/latest?have=2610011039&wait=40');
+    final w = await s.watchRelease(
+      have: '2610011039',
+      hold: const Duration(seconds: 40),
+    );
+    expect(
+      seen.single.toString(),
+      'https://gateway.invalid/relay/install/latest?have=2610011039&wait=40',
+    );
     expect((w?.release, w?.waits), (null, true));
     s.close();
 
     final old = Server.account(
       session(),
-      client: MockClient((_) async => http.Response('{"ok":true,"release":null}', 200)),
+      client: MockClient(
+        (_) async => http.Response('{"ok":true,"release":null}', 200),
+      ),
     );
     expect((await old.watchRelease(have: ''))?.waits, isFalse);
     old.close();
@@ -394,4 +458,76 @@ void main() {
       await origin.close(force: true);
     }, _NativeHttp()),
   );
+
+  group('끊기 신호는 다시 보내는 길에도 따라간다', () {
+    final origin = Uri.parse('https://example.test');
+    final gateway = Uri.parse(
+      'https://example.test/m/~a/term/inline-media/file?id=1111111111111111',
+    );
+
+    test('직통이 실패해 관문으로 넘어간 요청도 취소하면 끊긴다', () async {
+      final inner = _Flaky(failFirst: 1);
+      final direct = Uri.parse(
+        'http://10.0.0.5:4040/term/inline-media/file?id=1111111111111111',
+      );
+      final client = OriginClient(
+        origin,
+        client: inner,
+        direct: (u) => u.host == '10.0.0.5',
+        fallback: (_) => gateway,
+      );
+      final stop = Completer<void>();
+      final sent = client.send(
+        http.AbortableRequest('GET', direct, abortTrigger: stop.future),
+      );
+      await pumpEventQueue();
+      expect(inner.sent, [direct, gateway]);
+      stop.complete();
+      await expectLater(
+        sent.timeout(const Duration(seconds: 2)),
+        throwsA(isA<http.RequestAbortedException>()),
+      );
+      expect(inner.aborted, 1);
+    });
+
+    test('관문 재시도 중에 취소하면 끊긴다', () async {
+      final inner = _Flaky(failFirst: 1);
+      final client = OriginClient(origin, client: inner);
+      final stop = Completer<void>();
+      final sent = client.send(
+        http.AbortableRequest('GET', gateway, abortTrigger: stop.future),
+      );
+      await pumpEventQueue();
+      expect(inner.sent, [gateway, gateway]);
+      stop.complete();
+      await expectLater(
+        sent.timeout(const Duration(seconds: 2)),
+        throwsA(isA<http.RequestAbortedException>()),
+      );
+      expect(inner.aborted, 1);
+    });
+  });
+}
+
+/// 처음 [failFirst] 번은 망 오류, 그 뒤로는 끊기 신호가 올 때까지 답하지 않는 연결. 신호를 잃은 요청은 영영 매달린다.
+class _Flaky extends http.BaseClient {
+  _Flaky({required this.failFirst});
+  final int failFirst;
+  final sent = <Uri>[];
+  int aborted = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    sent.add(request.url);
+    if (sent.length <= failFirst) {
+      throw http.ClientException('network down', request.url);
+    }
+    if (request case http.Abortable(:final abortTrigger?)) {
+      await abortTrigger;
+      aborted++;
+      throw http.RequestAbortedException(request.url);
+    }
+    await Completer<void>().future;
+    throw StateError('unreachable');
+  }
 }
