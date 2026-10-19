@@ -445,6 +445,11 @@ mod tests {
             ("file:///tmp/결과.html이야.", "file:///tmp/결과.html"),
             ("file:///tmp/a%20b.png를", "file:///tmp/a%20b.png"),
             (r"C:\Users\Name\결과.html입니다", r"C:\Users\Name\결과.html"),
+            ("/tmp/huohuo-rec/record.mjs입니다.", "/tmp/huohuo-rec/record.mjs"),
+            ("/tmp/build/run.sh를", "/tmp/build/run.sh"),
+            ("/var/log/app.log이에요", "/var/log/app.log"),
+            ("~/notes/plan.drawio입니다", "~/notes/plan.drawio"),
+            ("record.mjs입니다", "record.mjs"),
         ] {
             assert_eq!(
                 detect_links_row(&row(text)),

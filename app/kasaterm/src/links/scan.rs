@@ -85,10 +85,16 @@ fn known_extension(ext: &str) -> bool {
             | "rs"
             | "py"
             | "js"
+            | "mjs"
+            | "cjs"
+            | "jsx"
             | "ts"
             | "tsx"
+            | "sh"
+            | "log"
             | "json"
             | "yaml"
+            | "yml"
             | "toml"
             | "html"
             | "css"
@@ -208,8 +214,15 @@ fn korean_file_suffix(value: &str) -> Option<usize> {
     let path = strip_location(&value[..end]);
     let name = path.rsplit(['/', '\\']).next()?;
     let (stem, extension) = name.rsplit_once('.')?;
-    // 한글 파일명·URL 경로도 유효하므로 확장자 뒤의 정확한 문장 어미만 분리한다.
-    (!stem.is_empty() && known_extension(extension)).then_some(end)
+    // 한글 파일명·URL 경로도 유효하므로 확장자 뒤의 정확한 문장 어미만 분리한다. 확장자 목록은 짧은 이름을 파일로
+    // 볼지 가르는 데 쓰고, 여기서는 ASCII 확장자면 된다 — 목록에 없던 `.mjs` 뒤의 「입니다」가 밑줄에 들어갔다.
+    (!stem.is_empty() && ascii_extension(extension)).then_some(end)
+}
+
+fn ascii_extension(ext: &str) -> bool {
+    (1..=10).contains(&ext.len())
+        && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        && ext.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 fn closing_delimiter(open: char) -> Option<char> {
