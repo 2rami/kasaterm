@@ -1,4 +1,5 @@
 use super::*;
+mod accounts;
 
 /// 상태줄이 이 프레임에 읽는 값. `g` 가 `self.gpu` 를 잡은 안쪽에서 부르므로
 /// `&self` 로 구해야 하는 것은 부르는 쪽이 미리 풀어 넘긴다.
@@ -21,19 +22,13 @@ pub(super) struct Chips<'a> {
 
 pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
     let Chips { bar, account_rect, version_rect } = chips;
-    let (status_h, claude_observations) = (f.status_h, f.claude_observations);
+    let status_h = f.status_h;
     let (win_w, win_h) = f.viewport;
     let sy = win_h - status_h;
     g.rect(0.0, sy, win_w, status_h, theme::panel_bg());
     g.rect(0.0, sy, win_w, 1.0, theme::border());
 
     let status_prefs = f.prefs;
-    let badge = claude_observations.get(f.accounts.claude).and_then(|(badge, _)| badge.clone());
-    let acct_name = claude_account_label(
-        f.accounts.claude,
-        f.accounts.claude_list,
-    );
-
     let fs = 11.0_f32;
     let ty = sy + (status_h - fs) / 2.0 - 1.0;
     let mut x = 12.0_f32;
@@ -78,552 +73,22 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         }
     }
     let seg_x0 = x;
-    let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel", "link"]
-        .iter().filter(|id| status_prefs.visible(id))
-        .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
-    let compact_tools = (win_w * 0.68 - 24.0) / (widget_count as f32) < 28.0;
-    let account_right = if status_prefs.visible("claude") || status_prefs.visible("codex") {
-        if compact_tools { seg_x0 + 16.0 } else { (win_w * 0.32).max(seg_x0).min(win_w - 12.0) }
-    } else { seg_x0 };
-    g.push_clip(seg_x0 - 6.0, sy, (account_right - seg_x0 + 6.0).max(0.0), status_h);
-    let mut account_drawn = false;
-    macro_rules! draw_claude_status {
-        () => {{
-    if status_prefs.visible("claude") && !compact_tools {
-        account_drawn = true;
-    // 클로드 로고 — 이 숫자가 「클로드 한도」라는 것을 그림이 먼저
-    // 말한다(2026-08-16 「클로드사용량 로고도 넣어주고」). 계정 이름은
-    // 좁아지면 빠지는 값이라 로고가 유일한 정체 표식이 되는 폭이 있다.
-    if win_w >= 500.0 {
-        g.queue_icon(
-            "claude",
-            x,
-            sy + (status_h - 12.0) / 2.0,
-            12.0,
-            status_prefs.color("claude", theme::text_dim()),
-        );
-        x += 17.0;
-    }
-    if let Some(brand) = crate::account_brand::Brand::for_account(AccountProvider::Claude, f.accounts.claude) {
-        let width = brand.width(12.0);
-        if account_right - x >= width + 6.0 {
-            brand.paint(g, x, sy + (status_h - 12.0) / 2.0, 12.0);
-            x += width + 6.0;
-        }
+    let widget_count = status_prefs.order.iter().filter(|id| status_prefs.visible(id))
+        .map(|id| statusbar_tool_weight(id) as usize).sum::<usize>().max(1);
+    let badges = accounts::badges(f);
+    let account_width = accounts::budget(win_w, widget_count, badges.len());
+    let account_right = seg_x0 + account_width;
+    let compact_tools = (win_w - account_right - 24.0) / (widget_count as f32) < 28.0;
+    let used = accounts::paint(g, f, &badges, (seg_x0, sy, account_width, status_h));
+    x = seg_x0 + used;
+    let acct_r = (seg_x0 - 6.0, sy, used + 12.0, status_h);
+    *account_rect = (used > 0.0).then_some(acct_r);
+    if used > 0.0 {
+        g.hover_pointer |= f.cursor.0 >= acct_r.0 && f.cursor.0 <= acct_r.0 + acct_r.2 && f.cursor.1 >= sy;
+        if let Some(k) = crate::chrome::account_flash_k(f.account_flash) { paint_account_flash(g, acct_r, k); }
+        if status_prefs.separators { g.rect(x + 8.0, sy + 6.0, 1.0, (status_h - 12.0).max(1.0), theme::border()); }
     }
 
-    let account_state = claude_observations.get(f.accounts.claude).map_or("unselected", |(_, state)| *state);
-    if account_state != "ready" {
-        let note = match account_state {
-            "unselected" => "계정 선택 필요",
-            "logged_out" => "로그인 필요",
-            "failed" => "확인 못 함",
-            _ => "확인 중…",
-        };
-        let label = if account_state == "unselected" {
-            note.to_string()
-        } else {
-            format!("{acct_name} · {note}")
-        };
-        let state = match account_state {
-            "logged_out" => Some(ChipState::Bad),
-            "unselected" | "failed" => Some(ChipState::Warn),
-            _ => None,
-        };
-        let dot = if state.is_some() { STATUS_DOT_GAP + STATUS_DOT } else { 0.0 };
-        let label = crate::info::fit_text(g, &label, (account_right - x - dot).max(0.0), fs, false);
-        g.draw_text(x, ty, &label, gpu::DrawOpts {
-            font_size: fs, color: status_prefs.color("claude", theme::text_dim()),
-            bold: false, italic: false,
-        });
-        x += g.measure_chrome_text(&label, fs, false);
-        if let Some(state) = state {
-            x += status_dot(g, x, sy, status_h, state);
-        }
-        x += 10.0;
-    } else {
-
-    // 게이지 — Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
-    // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
-    // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
-    // 한도 — **5시간이 먼저고 주간이 그 옆**이다(2026-08-15 지시
-    // 「5시간 한도 먼저 보여주고 7일 한도는 눌렀을 때만」).
-    //
-    // 「눌렀을 때만」을 곧이곧대로 주간을 **숨기는** 것으로 읽으면 2026-08-05
-    // 사고가 되돌아온다: 그때 5시간이 0%, 주간이 95% 였는데 하단바가 0% 를
-    // 띄워 「3계정 다 소진이야? info엔 다 0퍼로뜨는데」가 됐다. 그래서 둘을
-    // 나란히 두고, 폭이 모자랄 때만 급한 쪽을 남긴다 — 요청도 지켜지고
-    // 그 사고도 안 돌아온다(사용자 확정: 「둘 다 나란히」).
-    //
-    // 게이지는 Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
-    // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
-    // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
-    // Orca 하단바와 **같은 규격**이다(`h-[5px] w-7 rounded-full` — 앱
-    // 번들에서 실측, 2026-09-06 「Orca랑 똑같이 해보라니까」). 전에는
-    // 40x6 각진 막대였는데, 그 차이가 이 줄에서 제일 먼저 눈에 띈다.
-    const GW: f32 = 28.0;
-    const GH: f32 = 5.0;
-    let gy = sy + (status_h - GH) / 2.0;
-    let pct_col = |p: f32| {
-        if p >= 90.0 {
-            theme::danger()
-        } else if p >= 70.0 {
-            theme::syn_number()
-        } else {
-            theme::text()
-        }
-    };
-    // **떠나온 계정의 숫자를 이어 그리지 않는다.** 계정을 바꾸면 이름은
-    // 그 자리에서 바뀌는데 새 사용량은 1.1~2.0초(평균 1.6초) 뒤에 온다
-    // (토키 실측 2026-08-15). 그 사이 「새 계정 이름 + 옛 계정 %」가
-    // 그려지는데, 한도를 보고 계정을 고르는 기능이라 이 조합은 그냥
-    // 거짓말이다. 배지가 어느 계정에서 나온 값인지 들고 다니므로
-    // (`account_dir`) 활성 슬롯과 대조해 다르면 읽는 중으로 둔다.
-    // 폴러가 조회한 자리와 **같은 규칙**으로 계산해야 한다 — 활성 계정은
-    // 작업대라, 여기서 금고 경로를 쓰면 매번 「읽는 중」으로 보인다.
-    // ⚠️`runtime_dir_for` 를 그대로 부르면 안 된다 — 활성 계정을 물으면
-    // 자격증명을 읽느라 `security` 를 자식 프로세스로 띄우고(14ms),
-    // 이 자리는 상태줄이라 **프레임마다** 돈다. pane 여럿이 동시에
-    // 출력해 프레임이 쉼 없이 뜨는 동안 메인 스레드의 88%가 그
-    // 대기였다(2026-08-18 실측). 캐시판은 답이 같고 전환 때 무효화된다.
-    let active_dir = crate::claude_auth::runtime_dir_for_cached(
-        f.accounts.claude,
-        f.accounts.claude,
-    )
-    .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-    let switching = badge.as_ref().is_some_and(|b| b.account_dir != active_dir);
-
-    // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
-    // 좁을 때 후자로 떨어지는 것이 요점 — 자리가 하나뿐이면 급한 쪽을
-    // 보여야 한다. `None` 은 「읽는 중」 — 자리는 잡되 숫자는 안 말한다.
-    // **평소엔 5시간 창 하나만**(사용자 2026-09-05 「평소에는 5시간 세션만
-    // 보여주고 눌러야 보이게」). 창을 셋 다 세우면 줄 절반이 숫자가 되고,
-    // 그중 지금 판단에 쓰는 것은 대개 5시간 하나다. 나머지는 이 세그먼트를
-    // 누르면 열리는 계정 드롭다운에 이미 전부 있다.
-    //
-    // 다만 **접힌 창이 위험하면 그것도 세운다.** 접기만 하면 주간 95% 를
-    // 놓치는데, 그건 예전에 실제로 당한 사고다(2026-08-05: 화면이
-    // five_hour 만 봐서 weekly 95% 를 「0%」로 표시). 위험한 창을 숨기는
-    // 것은 자리를 아끼는 게 아니라 틀린 답을 주는 것이다.
-    let wins = selected_status_usage_windows(
-        badge.as_ref(),
-        &status_prefs,
-        "claude",
-        switching,
-    );
-    if wins.is_empty() && status_prefs.wants_usage("claude") {
-        // 값이 없으면 `—`. 0% 로 그리면 「여유 있음」이라는 거짓말이 되고,
-        // 그게 옮길지 말지를 정확히 반대로 만든다(드롭다운과 같은 규칙).
-        g.draw_text(
-            x,
-            ty,
-            "—",
-            gpu::DrawOpts {
-                font_size: fs,
-                color: theme::text_dim(),
-                bold: false,
-                italic: false,
-            },
-        );
-        x += g.measure_chrome_text("—", fs, true) + 10.0;
-    }
-    let stale = badge.as_ref().is_some_and(|b| b.stale);
-    for (i, (label, pct)) in wins.iter().enumerate() {
-        if i > 0 {
-            x += 12.0;
-        }
-        // 창 이름은 둘을 나란히 둘 때 **반드시** 있어야 한다 — 없으면
-        // 12% 와 95% 중 어느 쪽이 5시간인지 알 길이 없다. 하나만 그릴
-        // 때는 좁은 창이라 접는다(그때는 급한 쪽이라는 것만 알면 된다).
-        if wins.len() > 1 || win_w >= 900.0 {
-            g.draw_text(
-                x,
-                ty,
-                label,
-                gpu::DrawOpts {
-                    font_size: fs,
-                    color: theme::text_dim(),
-                    bold: false,
-                    italic: false,
-                },
-            );
-            x += g.measure_chrome_text(label, fs, true) + 5.0;
-        }
-        if win_w >= 500.0 {
-            // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15%
-            // 짜리 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서
-            // 그냥 얼룩이 된다(첫 캡처에서 실제로 그랬다).
-            round_rect(
-                g,
-                x,
-                gy,
-                GW,
-                GH,
-                GH / 2.0,
-                theme::with_alpha(theme::text_dim(), 90),
-            );
-            // 읽는 중이면 **트랙만**. 빈 트랙은 0% 처럼 보일 수 있지만
-            // 옆의 숫자가 `…` 라 「모른다」로 읽힌다 — 채움을 그리면
-            // 그 순간 옛 숫자가 되살아난다.
-            if let Some(p) = pct {
-                let fw = (GW * (p / 100.0).clamp(0.0, 1.0)).max(GH);
-                round_rect(
-                    g,
-                    x,
-                    gy,
-                    fw,
-                    GH,
-                    GH / 2.0,
-                    theme::with_alpha(
-                        status_prefs.color("claude", theme::text()),
-                        210,
-                    ),
-                );
-            }
-            x += GW + 6.0;
-        }
-        let (s, col) = match pct {
-            Some(p) if stale => (format!("~{p:.0}%"), pct_col(*p)),
-            Some(p) => (format!("{p:.0}%"), pct_col(*p)),
-            None => ("…".to_string(), theme::text_dim()),
-        };
-        g.draw_text(
-            x,
-            ty,
-            &s,
-            gpu::DrawOpts {
-                font_size: fs,
-                color: col,
-                bold: false,
-                italic: false,
-            },
-        );
-        x += g.measure_chrome_text(&s, fs, true);
-    }
-    // 언제 풀리는지는 5시간 창에 대해서만, 그것도 아주 넓을 때만. 퍼센트가
-    // 같아도 12분 뒤면 기다리면 되고 3시간 뒤면 지금 옮겨야 한다 — 다만
-    // 두 창을 나란히 두고 나면 자리가 없어서, 좁아지면 팝오버로 물러난다.
-    // 전환 중엔 이것도 빼야 한다 — 초기화 시각은 떠나온 계정 것이라
-    // 게이지만 가리고 여기를 남기면 거짓말이 옆칸으로 옮겨갈 뿐이다.
-    if let (Some(b), true) = (badge.as_ref(), win_w >= 1100.0 && !switching) {
-        if let Some(l) = crate::resets_in_label(b.resets_at) {
-            let s = format!("· {l}");
-            g.draw_text(
-                x + 8.0,
-                ty,
-                &s,
-                gpu::DrawOpts {
-                    font_size: fs,
-                    color: theme::text_dim(),
-                    bold: false,
-                    italic: false,
-                },
-            );
-            x += 8.0 + g.measure_chrome_text(&s, fs, true);
-        }
-    }
-    x += 10.0;
-
-    // 계정 이름은 가장 먼저 버린다 — 한도 숫자가 이 줄의 존재 이유고,
-    // 이름은 드롭다운을 열면 어차피 맨 위에 있다.
-    //
-    // 라벨을 안 지은 슬롯은 이름이 이메일로 폴백되는데, 그걸 통째로 적으면
-    // 한 줄의 절반을 주소가 먹는다. **@ 앞만** 남긴다 — 계정을 가리는 데는
-    // 그걸로 충분하고(오늘 넷이 같은 계정인 걸 못 알아본 게 문제였지 주소
-    // 뒷부분을 몰라서가 아니다), 전체는 드롭다운에 그대로 있다.
-    //
-    // 다만 **겹치면 안 줄인다.** 슬롯 둘이 같은 아이디에 다른 도메인이면
-    // (`sampleuser@maila` · `sampleuser@mailb`) 화면에서 통째로 같은 글자가
-    // 되어, 지금 어느 계정인지 이 자리로는 알 수가 없다(토키 실측
-    // 2026-08-15). 겹칠 때만 도메인 앞머리를 붙여 가른다 — 안 겹치면
-    // 예전대로 짧게.
-    // 슬롯 표시명 전체. 이름을 줄일 때 겹침을 판정하는 근거이자,
-    // 아래 나머지 계정 줄이 그대로 쓰는 목록이다.
-    let all_names: Vec<String> =
-            f.accounts.claude_list.iter().enumerate().map(|(i, a)| {
-                crate::settings::account_display(
-                    &a.id,
-                    &a.label,
-                    &format!("계정 {}", i + 1),
-                )
-            })
-            .collect();
-    if win_w >= 720.0
-        && (status_prefs.has_usage_field("claude", "account")
-            || status_prefs.has_usage_field("claude", "email"))
-    {
-        // 별명과 이메일을 **둘 다** 적는다(2026-09-07 지시). 별명만으로는
-        // 「지메일」이 어느 주소인지 확인이 안 되고(계정 넷 중 둘이 같은
-        // 아이디를 쓴다), 이메일만 남기면 사람이 붙인 이름이 사라져 어느
-        // 슬롯인지 목록과 대조가 안 된다.
-        let nick = statusbar_account_short(&acct_name, &all_names);
-        let email = status_prefs
-            .has_usage_field("claude", "email")
-            .then(|| crate::settings::auth_probe(f.accounts.claude))
-            .flatten()
-            .map(|p| p.email)
-            // 별명이 없는 슬롯은 이름 자리에 이미 이메일(또는 그 @ 앞)이
-            // 들어가 있다 — 그때 이메일을 또 붙이면 같은 글자가 두 번 선다.
-            .filter(|e| {
-                !e.is_empty()
-                    && !nick.contains(e.as_str())
-                    && !e.starts_with(&format!("{nick}@"))
-            });
-        let short = match (
-            status_prefs.has_usage_field("claude", "account"),
-            email,
-        ) {
-            (true, Some(e)) => format!("{nick} {e}"),
-            (true, None) => nick,
-            (false, Some(e)) => e,
-            (false, None) => String::new(),
-        };
-        let short = crate::info::fit_text(g, &short, (account_right - x).max(0.0), fs, false);
-        let short = short.as_str();
-        if !short.is_empty() {
-            g.draw_text(
-                x,
-                ty,
-                short,
-                gpu::DrawOpts {
-                    font_size: fs,
-                    color: status_prefs.color("claude", theme::text_dim()),
-                    bold: false,
-                    italic: false,
-                },
-            );
-            x += g.measure_chrome_text(short, fs, true);
-        }
-    }
-    }
-    }
-        }};
-    }
-
-    // 나머지 계정은 **여기 안 세운다.** 눌러서 여는 목록에 이름·이메일·
-    // 한도가 다 있고, 이 줄에 늘어놓으면 정작 이 줄의 존재 이유인 활성
-    // 계정의 막대가 이름밭에 묻힌다(2026-09-07 「하단바 다른계정 누르면
-    // 보이니까 이메일만 나오게하라니까 현재계정하나랑」).
-
-
-    // 코덱스는 **사용량 조회에 성공했을 때만** 세우면 안 된다. 인증이
-    // 풀렸거나 막 계정을 바꾼 순간이 오히려 계정 이름을 봐야 할 때인데,
-    // 옛 조건은 그때 세그먼트 전체를 감췄다(2026-09-07 「왜 안 나오지」).
-    // 등록했거나 로그인한 사람에게는 현재 계정과 상태를 늘 남긴다.
-    macro_rules! draw_codex_status {
-        () => {{
-    if status_prefs.visible("codex") && !compact_tools {
-        let codex_id = f.accounts.codex.as_str();
-        let codex_logged_in = crate::settings::codex_logged_in(codex_id);
-        let codex_configured =
-            !codex_id.is_empty() || !f.accounts.codex_list.is_empty();
-        let codex_snapshot = crate::codexlimits::snapshot_for(codex_id);
-        let codex_limits = codex_windows_for(codex_id);
-        let codex_stale = codex_snapshot.as_ref().is_some_and(|limits| limits.stale);
-        if codex_statusbar_visible(win_w, codex_logged_in, codex_configured) {
-            account_drawn = true;
-            if x > seg_x0 {
-                x += 16.0;
-            }
-            let icon = theme::ICON_SIZE - 3.0;
-            g.queue_icon(
-                AccountProvider::Codex.icon(),
-                x,
-                ty + (fs - icon) / 2.0,
-                icon,
-                status_prefs.color("codex", theme::text_dim()),
-            );
-            x += icon + 6.0;
-            if let Some(brand) = crate::account_brand::Brand::for_account(AccountProvider::Codex, codex_id) {
-                let width = brand.width(12.0);
-                if account_right - x >= width + 6.0 {
-                    brand.paint(g, x, sy + (status_h - 12.0) / 2.0, 12.0);
-                    x += width + 6.0;
-                }
-            }
-
-            let all_names: Vec<String> = std::iter::once(codex_account_name(
-                "",
-                f.accounts.codex_list,
-            ))
-            .chain(
-                f.accounts.codex_list
-                    .iter()
-                    .map(|account| {
-                        codex_account_name(&account.id, f.accounts.codex_list)
-                    }),
-            )
-            .collect();
-            let full_name = codex_account_label(codex_id, f.accounts.codex_list);
-            let short_name = statusbar_account_short(&full_name, &all_names);
-            let show_account = status_prefs.has_usage_field("codex", "account");
-            let show_email = status_prefs.has_usage_field("codex", "email");
-            let email = show_email
-                .then(|| crate::settings::codex_identity(codex_id))
-                .flatten()
-                .filter(|value| !short_name.contains(value));
-            let identity = match (show_account, email) {
-                (true, Some(email)) => format!("{short_name} {email}"),
-                (true, None) => short_name,
-                (false, Some(email)) => email,
-                (false, None) => String::new(),
-            };
-            let name_w = g.measure_chrome_text(&identity, fs, false);
-
-            let raw_wins = codex_limits.clone().unwrap_or_default();
-            let wins = selected_codex_windows(&raw_wins, &status_prefs);
-            let missing = codex_limits
-                .as_ref()
-                .map(|raw| missing_codex_windows(raw, &status_prefs))
-                .unwrap_or_default();
-
-            if !codex_logged_in
-                || (status_prefs.wants_usage("codex") && codex_limits.is_none())
-            {
-                let status = if codex_logged_in { "—" } else { "로그인 필요" };
-                g.draw_text(
-                    x,
-                    ty,
-                    status,
-                    gpu::DrawOpts {
-                        font_size: fs,
-                        color: status_prefs.color("codex", theme::text_dim()),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                x += g.measure_chrome_text(status, fs, false);
-                if !codex_logged_in {
-                    x += status_dot(g, x, sy, status_h, ChipState::Bad);
-                }
-                x += 8.0;
-            } else if status_prefs.wants_usage("codex") {
-                for label in missing {
-                    let text = format!("{label} 미제공");
-                    g.draw_text(
-                        x,
-                        ty,
-                        &text,
-                        gpu::DrawOpts {
-                            font_size: fs,
-                            color: theme::text_mute(),
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                    x += g.measure_chrome_text(&text, fs, false) + 10.0;
-                }
-                // 오른쪽 상태 칩과 계정 이름 자리를 먼저 남긴다. 폭이
-                // 모자라면 draw_window_gauges가 긴 창부터 자연스럽게 접는다.
-                let gauge_x = x;
-                let right = (win_w - 280.0 - name_w).max(gauge_x);
-                x = draw_window_gauges(
-                    g,
-                    gauge_x,
-                    ty,
-                    right,
-                    fs,
-                    &wins,
-                    codex_stale,
-                );
-                if x == gauge_x && !wins.is_empty() {
-                    let pct = wins[0].1;
-                    let text = format!("{}{pct:.0}%", if codex_stale { "~" } else { "" });
-                    g.draw_text(
-                        x,
-                        ty,
-                        &text,
-                        gpu::DrawOpts {
-                            font_size: fs,
-                            color: usage_pct_color(pct),
-                            bold: true,
-                            italic: false,
-                        },
-                    );
-                    x += g.measure_chrome_text(&text, fs, true) + 8.0;
-                }
-            }
-
-            if !identity.is_empty() {
-                g.draw_text(
-                    x,
-                    ty,
-                    &identity,
-                    gpu::DrawOpts {
-                        font_size: fs,
-                        color: status_prefs.color("codex", theme::text_dim()),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                x += name_w;
-            }
-        }
-    }
-        }};
-    }
-
-    // 두 제공자의 렌더러는 같지 않지만, 호출 순서는 개인 설정을 따른다.
-    // 매크로로 감싼 것은 `g`와 `self`의 빌림을 두 클로저가 동시에 붙들지
-    // 않게 하면서 기존 그리기를 그대로 보존하기 위해서다.
-    for id in status_prefs
-        .order
-        .iter()
-        .filter(|id| matches!(id.as_str(), "claude" | "codex"))
-    {
-        match id.as_str() {
-            "claude" => draw_claude_status!(),
-            "codex" => draw_codex_status!(),
-            _ => {}
-        }
-    }
-
-    if compact_tools && (status_prefs.visible("claude") || status_prefs.visible("codex")) {
-        g.queue_icon("users", seg_x0, sy + (status_h - 12.0) / 2.0, 12.0, theme::text_dim());
-        account_drawn = true;
-        x = seg_x0 + 12.0;
-    }
-    // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 판 번호든
-    // 누르면 열린다. 자세한 것은 전부 그 안에 있다.
-    x = x.min(account_right - 6.0);
-    let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(0.0), status_h);
-    // 세그먼트가 곧 계정 스위처 손잡이다 — 손모양이 없으면 눌러 볼
-    // 생각조차 안 든다(사용자 2026-08-12). 채움은 주지 않는다: 세그먼트
-    // 폭은 텍스트를 다 그린 뒤에야 확정되고, 이 렌더는 나중에 그린 것이
-    // 위로 오므로 여기서 사각형을 깔면 방금 쓴 글자를 덮는다.
-    {
-        let (hx, hy) = f.cursor;
-        g.hover_pointer |= hx >= acct_r.0
-            && hx <= acct_r.0 + acct_r.2
-            && hy >= acct_r.1
-            && hy <= acct_r.1 + acct_r.3;
-    }
-    *account_rect = account_drawn.then_some(acct_r);
-    // 계정이 바뀐 직후 잠깐 반짝인다 — 우상단 토스트만으로는 정작 이
-    // 칩이 그대로라 「바뀐 줄 모르겠다」가 된다(사용자 2026-08-25).
-    // 칩을 그리는 이 자리에서 함께 그려야 층이 안 어긋난다.
-    if account_drawn {
-        if let Some(k) = crate::chrome::account_flash_k(f.account_flash) {
-            paint_account_flash(g, acct_r, k);
-        }
-    }
-    if account_drawn
-        && ["ports", "pet", "clipboard", "resources", "tunnel", "version"]
-            .iter()
-            .any(|id| status_prefs.visible(id))
-    {
-        if status_prefs.separators {
-            g.rect(
-                x + 9.0,
-                sy + 6.0,
-                1.0,
-                (status_h - 12.0).max(6.0),
-                theme::with_alpha(theme::border(), 140),
-            );
-        }
-    }
-
-    g.pop_clip();
     // 양끝 그룹이 같은 폭을 서로 예약하지 않도록 각 도구의 공간을 먼저 나눈다.
     let tool_left = account_right + 12.0;
     let fair_w = ((win_w - 12.0 - tool_left) / widget_count as f32).max(1.0);
@@ -668,13 +133,19 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         let links = crate::machinescol::status_links();
         let icon = tool_icon;
         let gap = if compact_tools { 0.0 } else { 3.0_f32 };
-        if status_prefs.visible("link") && !links.is_empty() {
+        if status_prefs.visible("devices") {
             // 한 칸에 요약만 — 이름은 팝오버가 말한다.
-            let text = if compact_tools { String::new() } else { crate::machinescol::status_links_summary(&links) };
+            let waiting = crate::install_pending() || matches!(crate::version::state(), crate::version::Check::Newer(_));
+            let offline = links.iter().filter(|link| !link.online()).count();
+            let mismatch = !crate::statusbar_config::mismatched_machines().is_empty();
+            let text = if compact_tools { String::new() } else if waiting { "업데이트".into() }
+                else if offline > 0 { format!("기기 {offline}대 끊김") }
+                else if mismatch { "기기 · 업데이트".into() }
+                else if links.is_empty() { "기기".into() } else { format!("기기 {}대", links.len()) };
             // 점 색은 붙어 있는 길의 질 — 늘 꺼져 있는 기기 하나가 점을 늘 빨갛게 두지 않게. 다 끊겼을 때만 나쁨.
             let worst = links.iter().filter(|l| l.online()).map(|l| l.tone()).min().unwrap_or(0);
             let open = matches!(bar.popover, Some((state::StatusbarPopover::Link, _)));
-            let col = chip_ink(&status_prefs, "link", open);
+            let col = chip_ink(&status_prefs, "devices", open);
             let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
             let text = crate::info::fit_text(g, &text, (slot_w - 24.0 - dot).max(0.0), fs, false);
             let w = g.measure_chrome_text(&text, fs, false);
@@ -683,89 +154,12 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             g.draw_text(rx + icon + gap, ty, &text,
                 gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false });
             if !compact_tools {
-                status_dot(g, rx + icon + gap + w, sy, status_h, link_state(worst));
+                status_dot(g, rx + icon + gap + w, sy, status_h, if waiting { ChipState::Todo } else if offline > 0 || mismatch { ChipState::Warn } else if links.is_empty() { ChipState::Off } else { link_state(worst) });
             }
             let r = (rx - chip / 2.0, sy, w + icon + gap + dot + chip, status_h);
             let (hx, hy) = f.cursor;
             g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
             bar.link_rect = Some(r);
-        }
-        }};
-    }
-    macro_rules! draw_version_widget {
-        () => {{
-        // 판 번호 — 이 줄의 **맨 오른쪽**(2026-09-06 지시: 「하단바
-        // 버전표시를 맨 오른쪽으로 하자」). 09-05 에 계정 세그먼트
-        // 꼬리에서 이 그룹으로 옮겼는데, 그때는 그룹 맨 왼쪽이라 왼쪽
-        // 이웃(포트·클립보드)이 늘고 줄 때마다 판 번호도 따라 움직였다.
-        // 그룹은 끝에서부터 자라므로 **가장 먼저 그리는 것**이 가장
-        // 오른쪽이고, 그 자리만이 이웃과 무관하게 고정이다.
-        //
-        // 새로 구운 것이 설치를 기다리면 화살표가 붙는다 — 「껐다 켜면
-        // 반영됩니다」를 사람이 말로 전하던 자리다. 판정은 종료 때 실제로
-        // 설치를 움직이는 것과 **같은 함수**를 쓴다(갈리면 표시는 떴는데
-        // 안 바뀌거나 그 반대가 된다).
-        if status_prefs.visible("version") && compact_tools {
-            rx -= tool_icon + chip;
-            g.queue_icon("info", rx, sy + (status_h - tool_icon) / 2.0, tool_icon, theme::text_dim());
-            *version_rect = Some((rx - chip / 2.0, sy, tool_icon + chip, status_h));
-        } else if status_prefs.visible("version") && win_w >= 720.0 {
-            let mismatched = crate::statusbar_config::mismatched_machines();
-            let waiting = crate::install_pending()
-                || matches!(crate::version::state(), crate::version::Check::Newer(_));
-            // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
-            // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다.
-            let mark = if crate::version::is_local_build() { "+" } else { "" };
-            let mut s_ver = if waiting {
-                format!("v{}{mark} ↑", crate::version::CURRENT)
-            } else {
-                format!("v{}{mark}", crate::version::CURRENT)
-            };
-            if let Some(machine) = mismatched.first() {
-                if mismatched.len() == 1 {
-                    s_ver.push_str(&format!(" · {machine} 빌드 다름"));
-                } else {
-                    s_ver.push_str(&format!(" · 기기 {}대 빌드 다름", mismatched.len()));
-                }
-            }
-            let state = if !mismatched.is_empty() {
-                Some(ChipState::Bad)
-            } else if waiting {
-                Some(ChipState::Todo)
-            } else {
-                None
-            };
-            let dot = if state.is_some() { STATUS_DOT_GAP + STATUS_DOT } else { 0.0 };
-            let s_ver = crate::info::fit_text(g, &s_ver, (slot_w - 21.0 - dot).max(0.0), fs, false);
-            let w = g.measure_chrome_text(&s_ver, fs, true);
-            rx -= w + dot + chip;
-            let open = matches!(bar.popover, Some((state::StatusbarPopover::Build, _)));
-            g.draw_text(
-                rx,
-                ty,
-                &s_ver,
-                gpu::DrawOpts {
-                    font_size: fs,
-                    color: chip_ink(&status_prefs, "version", open),
-                    bold: false,
-                    italic: false,
-                },
-            );
-            if let Some(state) = state {
-                status_dot(g, rx + w, sy, status_h, state);
-            }
-            // 눌러서 여는 곳은 그대로 계정 드롭다운이다 — 몇 커밋 앞인지는
-            // 거기 있고, 자리를 옮겼다고 그 동선까지 잃으면 판 번호는
-            // 읽을 수만 있고 캐물을 수 없는 글자가 된다.
-            let vr = (rx - chip / 2.0, sy, w + dot + chip, status_h);
-            {
-                let (hx, hy) = f.cursor;
-                g.hover_pointer |=
-                    hx >= vr.0 && hx <= vr.0 + vr.2 && hy >= vr.1 && hy <= vr.1 + vr.3;
-            }
-            *version_rect = Some(vr);
-        } else {
-            *version_rect = None;
         }
         }};
     }
@@ -1034,7 +428,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             .order
             .iter()
             .rev()
-            .filter(|id| matches!(id.as_str(), "resources" | "link" | "tunnel" | "version"))
+            .filter(|id| matches!(id.as_str(), "resources" | "devices" | "tunnel"))
             .filter(|id| status_prefs.visible(id))
         {
             let slot_right = rx;
@@ -1051,9 +445,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             g.push_clip(slot_right - allocated, sy, allocated, status_h);
             match id.as_str() {
                 "resources" => draw_resources_widget!(),
-                "link" => draw_link_widget!(),
+                "devices" => draw_link_widget!(),
                 "tunnel" => draw_tunnel_widget!(),
-                "version" => draw_version_widget!(),
                 _ => {}
             }
             *version_rect = version_rect.and_then(|r| if id == "version" { g.clip_hit(r) } else { Some(r) });

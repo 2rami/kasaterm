@@ -417,6 +417,90 @@ impl App {
         false
     }
 
+    /// 이 앱이 보낸 자리 이동을 원본이 다른 방에서 확인했으면 보기 창의 거울 칸도 바로 옮긴다.
+    /// 그러지 않으면 출발 보기 창이 두 원본 방에 걸쳐 배치 적용을 거절하고, 5초 보호가 걷은 뒤
+    /// 구성원 동기가 다시 앉힐 때까지 칸이 옛 방에 남는다. 열쇠가 다르거나 탭이 섞인 칸은 손대지
+    /// 않고 그 느린 길에 맡긴다.
+    pub(crate) fn land_confirmed_remote_move(&mut self, landed: &crate::drag_transfer::Landed) {
+        let Some((from, moving)) = self.view_mirror_leaf(&landed.base, &landed.source, Some(&landed.source_key)) else { return };
+        let target = self.view_mirror_leaf(&landed.base, &landed.target, landed.target_key.as_deref())
+            .filter(|(window, _)| *window != from);
+        let edge = match landed.zone {
+            DropZone::Left => Some((kasa_pty::SplitDir::Horizontal, true)),
+            DropZone::Right => Some((kasa_pty::SplitDir::Horizontal, false)),
+            DropZone::Up => Some((kasa_pty::SplitDir::Vertical, true)),
+            DropZone::Down => Some((kasa_pty::SplitDir::Vertical, false)),
+            DropZone::Center => None,
+        };
+        match (target, edge) {
+            (Some((_, anchor)), None) => {
+                self.swap_panes(&moving, &anchor);
+            }
+            (Some((window, anchor)), Some((dir, before))) => {
+                self.move_pane_cross_window(&moving, &anchor, dir, before, window);
+            }
+            // 도착 방을 이 앱이 비추고 있지 않다 — 출발 보기 창에서만 걷는다. 마지막 칸이면 창이
+            // 통째로 닫히니 그대로 둔다(그 방은 원본에 아직 있다).
+            (None, _) if self.window_leaves(from).len() > 1 => {
+                eprintln!("[view] {} {} 는 원본에서 다른 방으로 옮겨졌다 — 이 보기 창에서 걷는다", landed.base, landed.source);
+                self.remote_keep.insert(moving.clone());
+                self.remove_pane(&moving);
+            }
+            (None, _) => return,
+        }
+        crate::mirror_layout::forget_applied_views();
+        self.apply_remote_view_trees();
+    }
+
+    /// 같은 보기 창 안에서 옮긴 거울 칸의 미리보기를 거둔다 — 원본이 이동을 못 했거나 결과를 모른다.
+    /// 그 창이 아직 미리보기 그대로일 때만 옛 트리로 돌리고, 정본 배치를 다시 투영한다.
+    pub(crate) fn roll_back_seat_preview(&mut self, window: usize, original: kasa_pty::PtyLayout, preview: &kasa_pty::PtyLayout) {
+        let active = window == self.active_window;
+        let tree = if active { self.pty_layout.as_mut() } else { self.windows.get_mut(window).and_then(Option::as_mut) };
+        if let Some(tree) = tree.filter(|tree| *tree == preview) {
+            *tree = original;
+            if active {
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+            }
+            self.publish_pty_layout();
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        crate::mirror_layout::forget_applied_views();
+        self.apply_remote_view_trees();
+    }
+
+    /// 그 원격 칸을 비추는 보기 창 leaf. 열쇠가 같고, 탭 하나만 든 거울 leaf 가 정확히 하나일 때만 —
+    /// 번호는 원본이 재시작하면 다시 쓰이고, 탭이 섞인 leaf 를 옮기면 안 옮긴 형제 탭까지 끌려간다.
+    fn view_mirror_leaf(&self, base: &str, remote_id: &str, key: Option<&str>) -> Option<(usize, String)> {
+        let key = key?;
+        let mut found = None;
+        for window in 0..self.windows.len() {
+            if self.remote_view_of_window(window).is_none() {
+                continue;
+            }
+            for leaf in self.window_leaves(window) {
+                let single = self.ws.lock().unwrap().panes.get(&leaf).is_some_and(|p| p.tabs.len() == 1);
+                let pty = self.leaf_pty_id(&leaf);
+                let matches = single
+                    && kasa_mcp::remote::remote_info(&pty).is_some_and(|info| {
+                        info.view && info.remote_id == remote_id && kasa_mcp::machines::same_machine_bases(&info.base, base)
+                    })
+                    && kasa_mcp::remote::remote_surface_key(&pty).as_deref() == Some(key);
+                if matches {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some((window, leaf));
+                }
+            }
+        }
+        found
+    }
+
     /// leaf `src` 를 같은 창의 `dst` 탭으로 접는다 — 활성 창이면 `merge_pane_into_tabs`,
     /// 안 보이는 창이면 그 창의 트리에서 직접(그 함수는 활성 트리만 만진다).
     pub(super) fn fold_leaf_into_tabs(&mut self, window: usize, src: &str, dst: &str) {

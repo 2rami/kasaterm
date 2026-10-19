@@ -40,9 +40,13 @@ pub(crate) struct StatusbarState {
     /// 자원을 많이 쓰는 순으로 상위 몇 개 — (pid, CPU%, RSS KB, 프로세스 이름).
     /// `res` 와 **같은 표본**이라 둘의 수치가 어긋나지 않는다.
     pub(crate) usage_top: Vec<(u32, f32, u64, String)>,
+    pub(crate) pet_refresh: Option<std::time::Instant>,
     /// 표본에 든 프로세스 수 전체 — `usage_top` 은 상위 몇 개뿐이라, 팝오버의
     /// 「그 외 N개」 줄이 이 값으로 나머지를 센다.
     pub(crate) usage_rows: usize,
+    pub(crate) usage_processes: Vec<crate::process_usage::Process>,
+    pub(crate) usage_inspected: Option<crate::process_usage::Identity>,
+    pub(crate) usage_process_armed: Option<(crate::process_usage::Identity, std::time::Instant)>,
     /// 이 앱 **밖**의 앱들. 경고 구간에서만 팝오버에 펴고, 각 줄에 끄기 버튼이
     /// 붙는다. 평소에 늘 보여 줄 값은 아니다 — 답을 물었을 때만 답하면 된다.
     pub(crate) usage_outside: Vec<crate::input::AppUsage>,
@@ -116,10 +120,6 @@ pub(crate) struct StatusbarState {
     /// 2026-08-29 지시 「메모리랑 cpugpu분리해야하나 지금 보기도 조금 힘드네」.
     /// 고른 잣대 하나로 전 구역을 정렬하고 그 값만 적는다.
     pub(crate) usage_tab: UsageTab,
-    /// 「끌까요?」로 바뀌어 대기 중인 바깥 앱과 그 시각. 한 번 더 눌러야 신호가
-    /// 나간다 — 여기 뜨는 건 사람이 쓰던 앱(브라우저·편집기)이라, 포트 팝오버의
-    /// dev 서버와 달리 잘못 누르면 열어 둔 것을 잃는다. 몇 초 뒤 저절로 풀린다.
-    pub(crate) usage_kill_armed: Option<(u32, std::time::Instant)>,
 }
 
 /// 사용량 팝오버의 잣대. 「무엇이 잡아먹나」의 답이 둘이라 한 화면에 겹쳐
@@ -159,9 +159,11 @@ pub(crate) enum StatusbarHit {
     OpenPort(u16),
     /// 호버 시 나오는 ×. 포트는 그 자체로 못 닫으니 쥔 프로세스를 죽인다.
     KillPort(u32),
-    /// 바깥 앱 줄의 ×. 대표(앱 본체)에 종료 신호를 보내면 Helper 자식도 함께
-    /// 정리된다. 첫 클릭은 그 줄을 「끌까요?」로 바꾸기만 한다.
-    KillApp(u32),
+    /// 목록을 다시 정렬해도 확인했던 실행만 종료하도록 시작 시각까지 고정한다.
+    InspectProcess(crate::process_usage::Identity),
+    StopProcess(crate::process_usage::Identity),
+    OpenUsageShell(crate::process_usage::Identity),
+    UsageBack,
     /// 머리의 합계 숫자 = 탭 손잡이. 따로 탭 줄을 두지 않는 것은 그 숫자가
     /// 이미 「지금 이 잣대로 얼마」를 말하고 있어서다 — 같은 값을 두 번 적는
     /// 대신 그 자리를 누르게 한다.
@@ -188,9 +190,6 @@ pub(crate) enum StatusbarHit {
     /// 맥에서도 같은 페이지가 열린다(폰에 보내기 전에 눈으로 확인하는 손).
     OpenAppUrl,
     CopyAppUrl,
-    /// 새 판 팝오버 — 이 맥에서 굽기(build-app.sh) / 그 기계로 보내기(sync-mini.sh) /
-    /// 기계 설정 열기. 스크립트는 새 탭에서 돌아 과정이 보인다.
-    BuildBake,
     CheckUpdates,
     BuildSend(String, String),
     OpenMachines,

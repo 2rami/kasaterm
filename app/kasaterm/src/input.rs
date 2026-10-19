@@ -1327,6 +1327,8 @@ impl App {
             self.statusbar.usage_rows = u.rows;
             self.statusbar.usage_outside = u.outside;
             self.statusbar.usage_self = (u.self_cpu, u.self_hot);
+            self.statusbar.usage_processes = u.processes;
+            self.decorate_usage_processes();
         }
         self.statusbar.mem = sample.mem;
         // 계속 코어를 태우는 앱은 메모리와 **다른 축**이라 따로 말한다. 팬이
@@ -4724,15 +4726,16 @@ fn take_status_sample(kicked: Instant, track: &mut CpuTrack) -> StatusSample {
 #[derive(Default)]
 pub(crate) struct CpuTrack {
     /// 대표 pid → (그 앱의 누적 CPU 시간 ms, 잰 시각).
-    last: std::collections::HashMap<u32, (u64, Instant)>,
+    last: std::collections::HashMap<(u32, u64), (u64, Instant)>,
     /// 대표 pid → 임계를 넘긴 채 이어진 폴 수.
-    streak: std::collections::HashMap<u32, u16>,
+    streak: std::collections::HashMap<(u32, u64), u16>,
 }
 
 impl CpuTrack {
     /// 한 「앱」의 누적 CPU 시간을 받아 구간 사용률과 이어진 폴 수를 낸다.
     /// 바깥 앱과 이 앱 자신이 같은 잣대를 쓰도록 한 곳에 모은다.
-    fn tick(&mut self, root: u32, cpu_time: u64, now: Instant) -> (f32, u16) {
+    fn tick(&mut self, pid: u32, started: u64, cpu_time: u64, now: Instant) -> (f32, u16) {
+        let root = (pid, started);
         // 첫 표본에는 견줄 데가 없어 0 이다. 5초 뒤 두 번째 폴부터 값이 선다.
         let cpu = match self.last.get(&root) {
             Some((prev_ms, prev_at)) => {
@@ -4788,7 +4791,7 @@ fn hog_polls() -> u16 {
 /// 그만큼 없다」가 된다(같은 날 지적). 커널이 그 몫을 뺀 값을 따로 갖고 있으니
 /// 프로세스마다 그걸 묻는다 — 시스템 콜 하나라 `ps` 한 번보다 훨씬 싸다.
 #[cfg(target_os = "macos")]
-fn phys_footprint(pid: u32) -> Option<u64> {
+fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
     // SAFETY: 읽기 전용 조회다. 우리가 잡은 버퍼를 넘기고, 커널이 성공을
     // 돌려줬을 때만 그 안을 읽는다. flavor 와 구조체 판이 짝을 이룬다(V2).
     unsafe {
@@ -4799,13 +4802,16 @@ fn phys_footprint(pid: u32) -> Option<u64> {
             std::ptr::addr_of_mut!(info).cast(),
         );
         // 남의 프로세스는 권한이 없어 실패한다. 그때는 부르는 쪽이 RSS 로 돌아간다.
-        (rc == 0).then_some(info.ri_phys_footprint)
+        (rc == 0).then_some((info.ri_phys_footprint, info.ri_proc_start_abstime))
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn phys_footprint(_pid: u32) -> Option<u64> {
-    None
+fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = stat.rsplit_once(')')?.1;
+    let started = tail.split_whitespace().nth(19)?.parse().ok()?;
+    Some((0, started))
 }
 
 /// 칩·토스트에 넣을 만큼 짧은 앱 이름.
@@ -4852,6 +4858,7 @@ pub(crate) struct UsageSample {
     /// 이 목록이다(2026-08-27 지시: 「위험! 종료할까요?(뭔지)」). 계속 코어를
     /// 태우는 앱이 있으면 그쪽이 먼저 온다 — 팬이 도는 이유가 그것이라서다.
     pub(crate) outside: Vec<AppUsage>,
+    pub(crate) processes: Vec<crate::process_usage::Process>,
 }
 
 fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
@@ -4893,12 +4900,12 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
     // 상위 몇 개까지 담을지. 실측(2026-08-27, 이 기계 트리 231개 8.4G)에서 상위
     // 8개는 39%, 20개는 80%, 30개는 88% 였다 — 30 부터는 한 개당 20MB 아래로
     // 떨어져 더 담아도 답이 안 바뀐다. 화면에는 팝오버가 스크롤로 보여 준다.
-    top.truncate(30);
+
     // 트리 전체를 한 「앱」으로 놓고 바깥과 같은 잣대로 잰다. 대표 pid 는 우리
     // 자신이라 바깥 목록의 키와 겹치지 않는다(우리는 거기서 빠져 있다).
     let self_time: u64 =
         rows.iter().filter(|r| tree.contains(&r.pid)).map(|r| r.cpu_time).sum();
-    let (self_cpu, self_hot) = track.tick(me, self_time, Instant::now());
+    let (self_cpu, self_hot) = track.tick(me, rows.iter().find(|row| row.pid == me).map_or(0, |row| row.started), self_time, Instant::now());
     // Windows 는 순간 사용률(맥 `ps` 의 pcpu)을 안 줘서 행 합계가 늘 0 이다. 그
     // 자리에 구간 사용률을 넣는다 — 트리 전체를 한 앱으로 놓고 잰 값이라 하단바가
     // 말하려는 「지금 우리가 얼마나 쓰는가」와 뜻이 같고, 오히려 생애 평균에 가까운
@@ -4909,6 +4916,7 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
         rss: rss_kb * 1024,
         rows: total_rows,
         outside: outside_apps(&rows, &tree, track),
+        processes: usage_processes(&rows, ps_pid),
         top,
         self_cpu,
         self_hot,
@@ -4950,11 +4958,37 @@ fn process_rows() -> Option<(Vec<Row>, u32)> {
             let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
             // 커널이 아는 실제 값으로 갈아 끼운다. 못 읽으면(남의 프로세스)
             // `ps` 의 RSS 를 그대로 둔다 — 부풀려진 값이라도 없는 것보다 낫다.
-            let rss = phys_footprint(pid).map_or(rss, |b| b / 1024);
-            Some(Row { uid, pid, ppid, cpu, rss, cpu_time, name })
+            let (footprint, started) = process_memory_birth(pid).unwrap_or_default();
+            let rss = if footprint > 0 { footprint / 1024 } else { rss };
+            Some(Row { uid, pid, ppid, cpu, rss, cpu_time, name, started, exe: comm })
         })
         .collect();
     Some((rows, ps_pid))
+}
+
+fn usage_processes(rows: &[Row], exclude: u32) -> Vec<crate::process_usage::Process> {
+    let parent: std::collections::HashMap<u32, u32> = rows.iter().map(|row| (row.pid, row.ppid)).collect();
+    rows.iter().filter(|row| row.uid == current_uid() && row.pid != exclude).map(|row| {
+        let mut root = row.pid;
+        for _ in 0..64 {
+            match parent.get(&root) { Some(&pid) if pid > 1 && pid != root => root = pid, _ => break }
+        }
+        let shell = matches!(row.name.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "pwsh" | "powershell");
+        crate::process_usage::Process {
+            id: crate::process_usage::Identity { pid: row.pid, started: row.started, uid: row.uid, exe: row.exe.clone() },
+            ppid: row.ppid, root, name: row.name.clone(), cpu: row.cpu, rss: row.rss * 1024,
+            cwd: shell.then(|| crate::socket::pid_cwd(row.pid)).flatten().map(|path| path.to_string_lossy().into_owned()), owner: None,
+        }
+    }).collect()
+}
+
+pub(crate) fn fresh_usage_processes() -> Option<Vec<crate::process_usage::Process>> {
+    let (rows, exclude) = process_rows()?;
+    Some(usage_processes(&rows, exclude))
+}
+
+pub(crate) fn usage_process_birth(pid: u32) -> Option<u64> {
+    process_memory_birth(pid).map(|(_, started)| started)
 }
 
 /// Windows 판 — `ps` 처럼 한 번에 다 주는 창구가 없어, Toolhelp 스냅샷
@@ -5013,6 +5047,8 @@ fn process_rows() -> Option<(Vec<Row>, u32)> {
                 cpu: 0.0,
                 rss: pmc.WorkingSetSize as u64 / 1024,
                 cpu_time: if got_time { ms(kernel) + ms(user) } else { 0 },
+                started: if got_time { ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64 } else { 0 },
+                exe: name.clone(),
                 // `pwsh.exe` 가 아니라 `pwsh` 로 적는다 — 같은 목록을 맥과 나란히 읽는다.
                 name: name.strip_suffix(".exe").unwrap_or(&name).to_string(),
             })
@@ -5031,6 +5067,8 @@ struct Row {
     /// 누적 CPU 시간(ms).
     cpu_time: u64,
     name: String,
+    started: u64,
+    exe: String,
 }
 
 /// 나를 실행한 사용자의 uid. `libc` 는 Cargo.toml 에서 macOS 전용 의존성이라
@@ -5041,7 +5079,7 @@ struct Row {
 /// 실사용 경로는 `sample_process_tree_usage` 인데 그쪽이 `ps` 를 spawn 하지
 /// 못해 먼저 `None` 을 내므로 여기까지 오지 않는다. 테스트는 `Row.uid` 도 이
 /// 함수로 채워 필터와 같은 값을 쓰므로 어느 플랫폼에서든 그대로 선다.
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     #[cfg(unix)]
     {
         unsafe { libc::getuid() }
@@ -5097,15 +5135,15 @@ fn outside_apps(
         // 대표가 표본에 없으면(권한·경합) 이름도 없고 끌 수도 없다.
         .filter_map(|(root, (rss, procs, cpu_time))| {
             let name = (*name_of.get(root)?).to_string();
-            let (cpu, hot) = track.tick(*root, *cpu_time, now);
+            let (cpu, hot) = track.tick(*root, rows.iter().find(|row| row.pid == *root).map_or(0, |row| row.started), *cpu_time, now);
             Some(AppUsage { pid: *root, rss: rss * 1024, name, procs: *procs, cpu, hot })
         })
         .collect();
     // 사라진 앱은 여기서 잊는다 — 안 지우면 pid 가 재사용될 때 엉뚱한 앱의
     // 이력을 물려받는다. 우리 자신(트리)은 `apps` 에 없으므로 함께 남긴다.
     let me = std::process::id();
-    track.last.retain(|k, _| *k == me || apps.contains_key(k));
-    track.streak.retain(|k, _| *k == me || apps.contains_key(k));
+    track.last.retain(|(pid, _), _| *pid == me || apps.contains_key(pid));
+    track.streak.retain(|(pid, _), _| *pid == me || apps.contains_key(pid));
     // **두 잣대로 각각 뽑아 합친다.** 하나로 정렬해 자르면 다른 잣대의 범인이
     // 통째로 사라진다 — CPU 만 태우고 메모리는 거의 안 쓰는 것이 있고(스핀 루프가
     // 그렇다), 그게 정확히 팬을 돌리는 부류다. 실측 2026-08-28 에 코어를 통째로
@@ -5800,13 +5838,13 @@ mod zoom_key_tests {
         let mut t = CpuTrack::default();
         let t0 = std::time::Instant::now();
         // 첫 표본은 견줄 데가 없다.
-        assert_eq!(t.tick(1, 1_000, t0).0, 0.0);
+        assert_eq!(t.tick(1, 0, 1_000, t0).0, 0.0);
         // 5초 사이에 CPU 시간이 5초 늘었으면 코어 하나를 통째로 쓴 것이다.
-        let (cpu, hot) = t.tick(1, 6_000, t0 + Duration::from_secs(5));
+        let (cpu, hot) = t.tick(1, 0, 6_000, t0 + Duration::from_secs(5));
         assert!((cpu - 100.0).abs() < 0.1, "cpu={cpu}");
         assert_eq!(hot, 1);
         // 멈추면 사용률이 0 이 되고 카운터도 물러난다.
-        let (cpu, hot) = t.tick(1, 6_000, t0 + Duration::from_secs(10));
+        let (cpu, hot) = t.tick(1, 0, 6_000, t0 + Duration::from_secs(10));
         assert_eq!(cpu, 0.0);
         assert_eq!(hot, 0);
     }
@@ -5825,6 +5863,8 @@ mod zoom_key_tests {
             cpu: 0.0,
             rss,
             cpu_time,
+            started: 1,
+            exe: name.into(),
             name: name.to_string(),
         };
         // 메모리만 큰 것 여섯 + CPU 만 태우는 작은 것 하나. 한 잣대로 다섯을

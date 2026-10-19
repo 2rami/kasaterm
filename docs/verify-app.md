@@ -82,6 +82,8 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
    같고, 창 서버를 안 거쳐 사람 화면의 초점은 안 뺏는다. `x,y`·`text:` 는 `window_event` 를 직접 불러 그 단계를 건너뛴다.
    `opt:<글>`·`shift:<글>` 은 그 수정키를 쥔 `native:`, `drag:<글>><글>` 은 앞 글에서 눌러 뒷 글까지 끌고 뗀다(뒷 글이
    `top`·`bottom` 이면 대화 칸 본문 밖으로 끌어 0.9초 쥔다). 대화로 보는 칸은 원본 격자가 아니라 그 보기가 그린 격자에서 찾는다.
+   글 대신 `@x,y`(논리 좌표)를 쓰면 그 자리에서 잡거나 놓는다(사이드바 방 카드에 놓기). `handle:%N` 은 그 칸의 ⋮ 손잡이라
+   머리 없는 칸을 통째로 끈다(`drag:handle:%1>@700,600`).
    **키**는 `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"`(앱 시작 기준 ms, `shift`·`ctrl`·`alt`·`cmd` +
    `left`·`right`·`up`·`down`·`home`·`end`·`backspace`·`enter`·`esc`·글자) — 같은 AppKit 길로 `forward_key` 까지 탄다.
    `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다. ⚠️ 한가한 리그는 프레임을 드물게 돌아 예약 시각이 몇 초씩 밀리고 뒤
@@ -126,6 +128,12 @@ GUI의 `repersona_pane`이 그 칸의 기존 sid를 수동 선택으로 기록�
 위 가짜 하네스 픽스처에는 그 셸 훅 전체를 실행하지 말고 3번의 CLI 바인딩만 쓴다.
 
 ## 배경 방 배치 동기화 리그
+
+사용량의 개별 셸 종료는 격리 부팅에 `KASATERM_AUTOUSAGE_LIFECYCLE=1`을 더한다. 실제 셸을 새로 만들어
+숨긴 기본 탭·보조 탭 각각의 종료와 복원, 문서를 함께 보관한 칸의 「열기」, 마지막 탭의 명시 종료를 확인한다.
+`[usage-lifecycle] PASS case=0..3` 네 줄이 모두 필요하다. 세션 Arc를 붙든 채 실행이 끝나는지와 옛 EOF가
+되살린 셸을 지우지 않는지도 대조한다. 사용량 상세 화면은 `KASATERM_AUTOPOPOVER=usage-cpu-owned`로
+이 리그 소유 셸만 펼칠 수 있다. `devices`는 합쳐진 기기·업데이트 판을 연다.
 
 배경 방 분할은 위 격리 부팅에 `KASATERM_AUTOWINDOWS=1 KASATERM_AUTOWINDOWS_MS=1000
 KASATERM_AUTOFOREIGNSPLIT_MS=4000`을 더해 검사한다. `KASATERM_AUTOFOREIGNSPLIT=fleet`은 두 칸 일괄 배치다.

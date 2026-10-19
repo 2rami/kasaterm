@@ -287,6 +287,8 @@ fn english(value: &str) -> Option<&'static str> {
         "Codex 사용량" => "Codex usage",
         "열린 포트" => "Open ports",
         "펫 상태" => "Pet status",
+        "Live2D 펫" => "Live2D Pet",
+        "기기 · 업데이트" => "Devices & updates",
         "펫" => "Pet",
         "바탕화면에 서서 학생들 상황을 알려 주는 캐릭터입니다" => "A desktop companion that reacts to your agents",
         "바탕화면에 띄우기" => "Show desktop pet",

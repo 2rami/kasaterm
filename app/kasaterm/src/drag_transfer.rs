@@ -324,6 +324,50 @@ struct Mailbox {
     moves_changed: bool,
     messages: Vec<String>,
     refreshed_moves: Vec<Instant>,
+    /// 같은 보기 창 안에서 옮긴 거울 칸의 미리보기 — 원본이 답할 때까지 그대로 둔다.
+    previews: HashMap<DragEndpoint, HeldPreview>,
+    /// 끝난 원격 자리 이동. GUI 가 미리보기를 거두거나 거울 칸을 옮겨 앉힌다.
+    outcomes: Vec<Outcome>,
+}
+
+struct HeldPreview {
+    window: usize,
+    original: kasa_pty::PtyLayout,
+    preview: kasa_pty::PtyLayout,
+}
+
+struct Outcome {
+    source: DragEndpoint,
+    ok: bool,
+    landed: Option<Landed>,
+}
+
+/// 원본 스냅샷으로 다른 방에 도착한 것까지 확인한 이동. 열쇠는 누를 때 고정한 surface_key 다 —
+/// 번호만 맞추면 그 사이 재사용된 칸을 옮긴다.
+#[derive(Clone, Debug)]
+pub(crate) struct Landed {
+    pub(crate) base: String,
+    pub(crate) source: String,
+    pub(crate) source_key: String,
+    pub(crate) target: String,
+    pub(crate) target_key: Option<String>,
+    pub(crate) zone: DropZone,
+}
+
+/// 같은 보기 창 안 가장자리 이동의 미리보기를 원본 답까지 맡긴다. 이동이 출발하지 않았으면
+/// false — 부른 쪽이 바로 되돌린다.
+pub(crate) fn hold_seat_preview(
+    source: &DragEndpoint,
+    window: usize,
+    original: kasa_pty::PtyLayout,
+    preview: kasa_pty::PtyLayout,
+) -> bool {
+    let mut state = mailbox().lock().unwrap();
+    let started = state.pending.contains(source) || state.outcomes.iter().any(|o| &o.source == source);
+    if started {
+        state.previews.insert(source.clone(), HeldPreview { window, original, preview });
+    }
+    started
 }
 
 fn confirmed_move_is_latest(pending: Option<Instant>, refreshed: &[Instant]) -> bool {
@@ -339,6 +383,44 @@ fn verify_drag_identity(
         anyhow::bail!("끌기를 시작한 뒤 세션이 바뀌었어요. 새 상태를 확인하고 다시 끌어 주세요");
     }
     Ok(())
+}
+
+/// 그 칸이 든 방의 다른 칸들. 방 번호가 없으면 None.
+fn roommates(snapshot: &MachineSnapshot, pane: &str) -> Option<std::collections::BTreeSet<String>> {
+    let room = endpoint_row(snapshot, pane).ok()?.room_id.clone()?;
+    Some(snapshot.sessions.iter()
+        .filter(|row| row.identity.machine_id == snapshot.machine_id && row.room_id.as_deref() == Some(room.as_str()))
+        .map(|row| row.identity.pane_id.clone())
+        .filter(|id| id != pane)
+        .collect())
+}
+
+/// 다른 방 자리 이동이 원본에 앉았나. 방 번호는 그 방 첫 칸에서 나와 첫 칸이 바뀌면 같이 바뀌므로
+/// 번호를 견주지 않고 구성으로 본다 — 가장자리면 두 칸이 한 방에, 가운데(맞바꾸기)면 서로의 옛
+/// 방 식구와. 둘 다 외톨이 방이면 맞바꿔도 스냅샷이 같아 None.
+fn seat_move_landed(
+    zone: DropZone,
+    before: &MachineSnapshot,
+    now: &MachineSnapshot,
+    source: &str,
+    target: &str,
+) -> Option<bool> {
+    if zone != DropZone::Center {
+        let room = |pane| endpoint_row(now, pane).ok().and_then(|row| row.room_id.clone());
+        return Some(room(source).is_some() && room(source) == room(target));
+    }
+    let (source_before, target_before) = (roommates(before, source)?, roommates(before, target)?);
+    if source_before.is_empty() && target_before.is_empty() {
+        return None;
+    }
+    Some(roommates(now, source)? == target_before && roommates(now, target)? == source_before)
+}
+
+/// 원본 배치 채널에서 그 PTY 가 앉은 방(원본 창 번호).
+fn feed_room_of(rooms: &[kasa_mcp::layout_feed::Room], pty: &str) -> Option<usize> {
+    rooms.iter()
+        .find(|room| room.tree.leaves().contains(&pty) || room.members.values().any(|ids| ids.iter().any(|id| id == pty)))
+        .map(|room| room.window)
 }
 
 fn mailbox() -> &'static Mutex<Mailbox> {
@@ -808,6 +890,7 @@ impl App {
         self.remote_view_push_at = Some(move_started);
         std::thread::spawn(move || {
             let mut submitted = false;
+            let mut landed = None;
             let result = (|| -> anyhow::Result<bool> {
                 let expected = wait_pin(ticket)?;
                 let origin = source.snapshot(&backend)?;
@@ -837,6 +920,10 @@ impl App {
                     &target_row.identity.pane_id,
                     zone,
                 );
+                // 외톨이 두 칸 맞바꾸기는 스냅샷으로 못 가려 원본 배치 채널의 창 번호로 본다 — 보내기 전 자리.
+                let feed_before = kasa_mcp::layout_watch::settled(base).and_then(|(_, rooms)| {
+                    Some((feed_room_of(&rooms, source.pane())?, feed_room_of(&rooms, destination.pane())?))
+                });
                 submitted = true;
                 kasa_mcp::remote::remote_cmd(base, method, params)?;
                 if cross_room {
@@ -844,7 +931,23 @@ impl App {
                     loop {
                         let current = source.snapshot(&backend)?;
                         verify_drag_identity(&current, source.pane(), &expected.identity)?;
-                        if endpoint_row(&current, source.pane())?.room_id == target_room {
+                        let settled = seat_move_landed(zone, &origin, &current, source.pane(), destination.pane())
+                            .or_else(|| {
+                                let (from, to) = feed_before?;
+                                let (_, rooms) = kasa_mcp::layout_watch::settled(base)?;
+                                Some((feed_room_of(&rooms, source.pane()), feed_room_of(&rooms, destination.pane()))
+                                    == (Some(to), Some(from)))
+                            });
+                        if settled == Some(true) {
+                            landed = expected.surface_key.clone().map(|source_key| Landed {
+                                base: base.clone(),
+                                source: source.pane().to_string(),
+                                source_key,
+                                target: destination.pane().to_string(),
+                                target_key: target_seen.as_ref().and_then(|seen| seen.surface_key.clone())
+                                    .or_else(|| row_surface_key(target_row)),
+                                zone,
+                            });
                             return Ok(true);
                         }
                         if Instant::now() >= deadline {
@@ -855,7 +958,8 @@ impl App {
                 }
                 Ok(false)
             })();
-            let unknown = submitted && result.is_err();
+            let ok = result.is_ok();
+            let unknown = submitted && !ok;
             let refreshed = result.is_ok()
                 && match &source {
                     DragEndpoint::RemotePane { base, .. } => {
@@ -873,6 +977,7 @@ impl App {
             if refreshed {
                 state.refreshed_moves.push(move_started);
             }
+            state.outcomes.push(Outcome { source: source.clone(), ok, landed });
             state.messages.push(message);
             state.moves.retain(|(at, _, _)| *at != ticket);
             state.moves_changed = true;
@@ -945,14 +1050,30 @@ impl App {
     }
 
     pub(crate) fn drain_drag_transfers(&mut self) {
-        let (messages, refreshed_moves, moved) = {
+        let (messages, refreshed_moves, moved, outcomes) = {
             let mut state = mailbox().lock().unwrap();
+            let outcomes: Vec<(Outcome, Option<HeldPreview>)> = std::mem::take(&mut state.outcomes)
+                .into_iter()
+                .map(|outcome| {
+                    let preview = state.previews.remove(&outcome.source);
+                    (outcome, preview)
+                })
+                .collect();
             (
                 std::mem::take(&mut state.messages),
                 std::mem::take(&mut state.refreshed_moves),
                 std::mem::take(&mut state.moves_changed),
+                outcomes,
             )
         };
+        for (outcome, preview) in outcomes {
+            if let Some(held) = preview.filter(|_| !outcome.ok) {
+                self.roll_back_seat_preview(held.window, held.original, &held.preview);
+            }
+            if let Some(landed) = outcome.landed {
+                self.land_confirmed_remote_move(&landed);
+            }
+        }
         // Only a post-command read for the latest move can release the rollback guard.
         if confirmed_move_is_latest(self.remote_view_push_at, &refreshed_moves) {
             self.remote_view_push_at = None;
@@ -1025,6 +1146,52 @@ mod tests {
             base: "http://host".into(),
             pane: pane.into(),
         }
+    }
+
+    /// `(칸, 방)` 들로 한 기계 스냅샷. 방 번호는 원본처럼 그 방 첫 칸에서 따온다.
+    fn seated(rooms: &[&[&str]]) -> MachineSnapshot {
+        let mut snap = snapshot("m", "unused");
+        snap.rooms.clear();
+        snap.sessions = rooms.iter().flat_map(|panes| {
+            let room = format!("room:{}", panes[0]);
+            panes.iter().map(move |pane| SessionRow {
+                identity: SessionIdentity { machine_id: "m".into(), pane_id: (*pane).into(), token: format!("t{pane}"),
+                    instance: "i".into(), ..Default::default() },
+                status: "idle".into(),
+                room_id: Some(room.clone()),
+                ..Default::default()
+            })
+        }).collect();
+        snap
+    }
+
+    #[test]
+    fn cross_room_moves_are_judged_by_who_shares_a_room_not_by_room_numbers() {
+        let before = seated(&[&["%0", "%1"], &["%2", "%3"]]);
+        // %0 을 %2 앞(왼쪽)에 — 도착 방의 첫 칸이 바뀌어 방 번호가 room:%0 이 된다.
+        let moved = seated(&[&["%1"], &["%0", "%2", "%3"]]);
+        assert_eq!(seat_move_landed(DropZone::Left, &before, &moved, "%0", "%2"), Some(true));
+        assert_eq!(seat_move_landed(DropZone::Left, &before, &before, "%0", "%2"), Some(false));
+        // 첫 칸끼리 맞바꾸면 두 방 번호가 서로 바뀐다 — 번호로 보면 「안 옮겨졌다」로 읽혔다.
+        let swapped = seated(&[&["%2", "%1"], &["%0", "%3"]]);
+        assert_eq!(seat_move_landed(DropZone::Center, &before, &swapped, "%0", "%2"), Some(true));
+        assert_eq!(seat_move_landed(DropZone::Center, &before, &before, "%0", "%2"), Some(false));
+        let lonely = seated(&[&["%0"], &["%2"]]);
+        let lonely_swapped = seated(&[&["%2"], &["%0"]]);
+        assert_eq!(seat_move_landed(DropZone::Center, &lonely, &lonely_swapped, "%0", "%2"), None, "스냅샷으론 못 가린다");
+    }
+
+    #[test]
+    fn feed_room_finds_tabs_too() {
+        let room = |window, leaf: &str, tabs: &[&str]| kasa_mcp::layout_feed::Room {
+            window,
+            tree: kasa_pty::PtyLayout::single(leaf),
+            members: [(leaf.to_string(), tabs.iter().map(|t| t.to_string()).collect())].into_iter().collect(),
+        };
+        let rooms = [room(0, "%0", &["%0", "%5"]), room(3, "%2", &[])];
+        assert_eq!(feed_room_of(&rooms, "%5"), Some(0));
+        assert_eq!(feed_room_of(&rooms, "%2"), Some(3));
+        assert_eq!(feed_room_of(&rooms, "%9"), None);
     }
 
     #[test]

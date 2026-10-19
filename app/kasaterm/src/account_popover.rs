@@ -298,26 +298,11 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
             },
         }
     };
-    // 코덱스가 5h·7d 를 안 준 경우의 안내 줄. 빈칸은 「여유」로 읽히므로 적는다.
-    let codex_missing = || -> Option<String> {
-        let limits = codex_current_limits?;
-        let has = |wanted: &str| {
-            limits
-                .windows
-                .iter()
-                .any(|(m, _, _)| codex_rate_window_label(Some(*m)) == wanted)
-        };
-        let missing: Vec<&str> = ["5h", "7d"].into_iter().filter(|w| !has(w)).collect();
-        (!missing.is_empty()).then(|| format!("{} 미제공", missing.join("·")))
-    };
     let provider_h = |p: AccountProvider| -> f32 {
         if compact {
             return blk_top + ph_h + blk_bot;
         }
-        let mut lines = rows_of(p).len();
-        if p == AccountProvider::Codex && codex_missing().is_some() {
-            lines += 1;
-        }
+        let lines = rows_of(p).len();
         blk_top + ph_h + win_h_row * lines.max(1) as f32 + blk_bot
     };
     let rule = 5.0_f32;
@@ -405,12 +390,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                             1
                         } else {
                             codex_windows_for(id)
-                                .map(|wins| {
-                                    let missing = ["5h", "7d"].iter().any(|wanted| {
-                                        !wins.iter().any(|(label, _)| label == wanted)
-                                    });
-                                    wins.len().div_ceil(2) + usize::from(missing)
-                                })
+                                .map(|wins| wins.len().div_ceil(2))
                                 .unwrap_or(1)
                         }
                     }
@@ -714,25 +694,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                                 codex_rate_window_label(Some(*minutes))
                             )
                         });
-                        match (codex_missing(), usage) {
-                            (None, Some(u)) => (
-                                u,
-                                pressure.map_or(theme::text_mute(), |(_, pct, _)| {
-                                    pct_col(*pct)
-                                }),
-                                true,
-                            ),
-                            (Some(m), Some(u)) => (
-                                format!("{m} · {u}"),
-                                pressure.map_or(theme::text_mute(), |(_, pct, _)| {
-                                    pct_col(*pct)
-                                }),
-                                true,
-                            ),
-                            (_, None) => {
-                                ("한도 미제공".to_string(), theme::text_mute(), false)
-                            }
-                        }
+                        (usage.unwrap_or_default(), pressure.map_or(theme::text_mute(), |(_, pct, _)| pct_col(*pct)), true)
                     }
                     None if codex_signed_in => {
                         ("한도 확인 중…".to_string(), theme::text_mute(), false)
@@ -784,24 +746,18 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                 }
                 AccountProvider::Codex => codex_current_limits.is_some_and(|l| l.stale),
             };
-            if let (AccountProvider::Codex, Some(t)) = (p, codex_missing()) {
-                draw_usage_note(g, ix, wy, win_h_row, f - 2.0, &t, theme::text_mute());
-                wy += win_h_row;
-            }
             if rows.is_empty() {
                 let (t, col) = match p {
                     AccountProvider::Claude => ("기록 없음", theme::text_mute()),
                     AccountProvider::Codex if codex_current_limits.is_some() => {
-                        ("한도 미제공", theme::text_mute())
+                        ("", theme::text_mute())
                     }
                     AccountProvider::Codex if codex_signed_in => {
                         ("한도 확인 중…", theme::text_mute())
                     }
                     AccountProvider::Codex => ("로그인 안 됨", theme::danger()),
                 };
-                if !(p == AccountProvider::Codex && codex_missing().is_some()) {
-                    draw_usage_note(g, ix, wy, win_h_row, f - 2.0, t, col);
-                }
+                draw_usage_note(g, ix, wy, win_h_row, f - 2.0, t, col);
             }
             for row in &rows {
                 draw_usage_win_row(
@@ -1411,29 +1367,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                                     },
                                 );
                             }
-                            let missing: Vec<&str> = ["5h", "7d"]
-                                .into_iter()
-                                .filter(|wanted| {
-                                    !wins.iter().any(|(label, _)| label == wanted)
-                                })
-                                .collect();
-                            let mut line = 0usize;
-                            if !missing.is_empty() {
-                                let t = format!("{} 미제공", missing.join("·"));
-                                g.draw_text(
-                                    sx + pad_x,
-                                    sry + 28.0,
-                                    &t,
-                                    gpu::DrawOpts {
-                                        font_size: tf,
-                                        color: theme::text_mute(),
-                                        bold: false,
-                                        italic: false,
-                                    },
-                                );
-                                line += 1;
-                            }
-                            for chunk in wins.chunks(2) {
+                            for (line, chunk) in wins.chunks(2).enumerate() {
                                 draw_window_gauges(
                                     g,
                                     sx + pad_x,
@@ -1443,7 +1377,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                                     chunk,
                                     limits.stale,
                                 );
-                                line += 1;
                             }
                         }
                         (Some(limits), false) => {
@@ -1451,12 +1384,6 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                                 .windows
                                 .iter()
                                 .max_by(|a, b| a.1.total_cmp(&b.1));
-                            let missing: Vec<&str> = ["5h", "7d"]
-                                .into_iter()
-                                .filter(|wanted| {
-                                    !wins.iter().any(|(label, _)| label == wanted)
-                                })
-                                .collect();
                             let usage = pressure.map(|(minutes, pct, _)| {
                                 format!(
                                     "{}{pct:.0}% 씀 · {}",
@@ -1464,13 +1391,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                                     codex_rate_window_label(Some(*minutes))
                                 )
                             });
-                            let t = match (missing.is_empty(), usage) {
-                                (true, Some(usage)) => usage,
-                                (false, Some(usage)) => {
-                                    format!("{} 미제공 · {usage}", missing.join("·"))
-                                }
-                                (_, None) => "한도 미제공".to_string(),
-                            };
+                            let t = usage.unwrap_or_default();
                             let t = crate::info::fit_text(
                                 g,
                                 &t,

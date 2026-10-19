@@ -6777,28 +6777,8 @@ fn selected_codex_windows(
         .collect()
 }
 
-fn missing_codex_windows(
-    windows: &[(String, f32)],
-    prefs: &crate::statusbar_config::Prefs,
-) -> Vec<&'static str> {
-    [("session", "5h"), ("weekly", "7d"), ("model", "모델별")]
-        .into_iter()
-        .filter(|(field, label)| {
-            let present = if *field == "model" {
-                windows
-                    .iter()
-                    .any(|(value, _)| value != "5h" && value != "7d")
-            } else {
-                windows.iter().any(|(value, _)| value == label)
-            };
-            prefs.has_usage_field("codex", field) && !present
-        })
-        .map(|(_, label)| label)
-        .collect()
-}
-
 fn codex_statusbar_visible(win_w: f32, logged_in: bool, configured: bool) -> bool {
-    win_w >= 720.0 && (logged_in || configured)
+    win_w >= 36.0 && (logged_in || configured)
 }
 
 /// 하단바 도구 칩 하나를 그린 뒤 다음 칩이 설 오른쪽 끝. 칸(`allocated`)은 칩이 옆
@@ -6855,7 +6835,7 @@ fn link_state(worst_tone: u8) -> ChipState {
 fn statusbar_tool_weight(id: &str) -> f32 {
     match id {
         "tunnel" => 2.0,
-        "resources" | "link" | "version" | "ports" | "schedules" | "pet" | "clipboard" => 1.0,
+        "resources" | "devices" | "ports" | "schedules" | "pet" | "clipboard" => 1.0,
         _ => 0.0,
     }
 }
@@ -6962,7 +6942,8 @@ mod tests {
     fn codex_statusbar_does_not_depend_on_usage_success() {
         assert!(codex_statusbar_visible(720.0, true, false));
         assert!(codex_statusbar_visible(720.0, false, true));
-        assert!(!codex_statusbar_visible(719.0, true, true));
+        assert!(codex_statusbar_visible(360.0, true, true));
+        assert!(!codex_statusbar_visible(24.0, true, true));
         assert!(!codex_statusbar_visible(1200.0, false, false));
     }
 
@@ -7442,7 +7423,7 @@ pub(crate) fn draw_usage_win_row(
     }
 }
 
-/// 창 줄 자리에 놓는 한 줄 안내(「기록 없음」·「5h 미제공」). 줄 높이를 창 줄과 같게
+/// 창 줄 자리에 놓는 한 줄 안내(「기록 없음」·「한도 확인 중」). 줄 높이를 창 줄과 같게
 /// 맞춰 블록 높이 계산이 한 가지로 남는다.
 pub(crate) fn draw_usage_note(
     g: &mut gpu::GpuRenderer,

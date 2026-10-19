@@ -2006,9 +2006,12 @@ impl App {
     /// runs without competing with the per-session reader threads.
     /// If removing all panes empties the tree, exit the event loop.
     pub(crate) fn reap_dead_panes(&mut self, event_loop: &ActiveEventLoop) {
-        let ids: Vec<String> = std::mem::take(&mut *self.dead_panes.lock().unwrap());
-        let reaped = !ids.is_empty();
-        for id in ids {
+        let deaths = std::mem::take(&mut *self.dead_panes.lock().unwrap());
+        let mut reaped = false;
+        for death in deaths {
+            let id = death.id;
+            if self.pty.get(&id).is_some_and(|session| !death.session.ptr_eq(&Arc::downgrade(session))) { continue; }
+            if !self.pty.contains_key(&id) && !self.grid_needs_pty(&self.ws.lock().unwrap(), &id) { continue; }
             // PTY 를 놓는 것과 트리에서 leaf 를 걷는 것은 경로가 갈려 있다 —
             // `swap_character` 는 PTY 를 **먼저** 놓고 같은 pane id 로 새로 띄우는데,
             // 그 spawn 이 실패하면 PTY 없이 leaf 만 남는다. 옛 PTY 의 EOF 는 그
@@ -2020,6 +2023,7 @@ impl App {
                 continue;
             }
             self.remove_finished_surface(&id);
+            reaped = true;
         }
         // 자원이 사라진 자리를 매 턴 훑는다. 죽음 알림(`dead_panes`)이 오지 않은
         // 어긋남은 여기서만 잡히고, 그걸 놓치면 사용자가 손댈 수 없는 상태로 굳는다.
@@ -2113,7 +2117,7 @@ impl App {
         }
     }
 
-    fn rekey_cell(&mut self, old: &str, new: &str) {
+    pub(crate) fn rekey_cell(&mut self, old: &str, new: &str) {
         {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.panes.remove(old) else { return };
@@ -3514,6 +3518,43 @@ for p in glob.glob(os.path.join(d, '*.json')):
         true
     }
 
+    /// 두 칸의 자리를 바꾼다. 다른 방이면 두 트리에서 서로 이름을 바꾼다 — `swap_leaves` 는 한
+    /// 트리 안에서만 바꿔서, 다른 기기 거울이 다른 방 칸 가운데에 놓은 것이 조용히 버려졌다.
+    pub(crate) fn swap_panes(&mut self, a: &str, b: &str) -> bool {
+        let (Some(wa), Some(wb)) = (self.window_of_pane(a), self.window_of_pane(b)) else { return false };
+        if wa == wb {
+            return self.edit_layout_of_pane(a, |tree| tree.swap_leaves(a, b));
+        }
+        let tree_of = |s: &Self, w: usize| if w == s.active_window { s.pty_layout.clone() }
+            else { s.windows.get(w).cloned().flatten() };
+        let (Some(ta), Some(tb)) = (tree_of(self, wa), tree_of(self, wb)) else { return false };
+        let Some((ta, tb)) = swapped_across_rooms(&ta, &tb, a, b) else { return false };
+        for (w, tree) in [(wa, ta), (wb, tb)] {
+            if w == self.active_window { self.pty_layout = Some(tree); } else { self.windows[w] = Some(tree); }
+        }
+        let leaves = self.window_leaves(self.active_window);
+        if self.zoomed_pane.as_ref().is_some_and(|z| !leaves.contains(z)) {
+            self.zoomed_pane = None;
+        }
+        {
+            let mut ws = self.ws.lock().unwrap();
+            // 보던 칸이 다른 방으로 갔으면 그 자리에 들어온 칸을 고른다.
+            let seat = match ws.active_pane.as_deref() { Some(p) if p == a => Some(b), Some(p) if p == b => Some(a), _ => None };
+            if let Some(seat) = seat.filter(|seat| leaves.iter().any(|l| l == seat)) {
+                ws.active_pane = Some(seat.to_string());
+            }
+        }
+        if wa == self.active_window || wb == self.active_window {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+        }
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window { w.request_redraw(); }
+        true
+    }
+
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
         // 원본 기기가 다른 칸을 로컬 트리에 섞으면 다음 거울 동기화가 이동을 되돌린다.
         if self.route_drag_move(self.drag_endpoint(moving), self.drag_endpoint(target), zone) {
@@ -3747,12 +3788,41 @@ for p in glob.glob(os.path.join(d, '*.json')):
             if matches!(source, crate::drag_transfer::DragEndpoint::RemotePane { .. })
                 || matches!(destination, crate::drag_transfer::DragEndpoint::RemotePane { .. })
             {
-                if let Some(original) = self.drag_orig_layout.take() {
-                    self.pty_layout = Some(original);
-                    let (cols, rows) = self.window_cells();
-                    self.resize_backend(cols, rows);
+                // 같은 보기 창 안 거울끼리면 미리보기를 그대로 두고 원본 답을 기다린다 — 되돌렸다가
+                // 왕복 뒤 다시 옮기면 놓은 칸이 한 번 제자리로 튄다. 원본이 못 옮기면 그때 거둔다.
+                let same_view = match (&source, &destination) {
+                    (
+                        crate::drag_transfer::DragEndpoint::RemotePane { base: a, .. },
+                        crate::drag_transfer::DragEndpoint::RemotePane { base: b, .. },
+                    ) => a == b && self.remote_view_of_window(self.active_window).is_some(),
+                    _ => false,
+                };
+                let original = self.drag_orig_layout.take();
+                let preview = self.pty_layout.clone();
+                let revert = |s: &mut Self, original: Option<kasa_pty::PtyLayout>| {
+                    if let Some(original) = original {
+                        s.pty_layout = Some(original);
+                        let (cols, rows) = s.window_cells();
+                        s.resize_backend(cols, rows);
+                    }
+                };
+                if !same_view {
+                    revert(self, original.clone());
                 }
-                self.route_drag_move(source, destination, zone);
+                self.route_drag_move(source.clone(), destination, zone);
+                if same_view {
+                    let held = match (original.clone(), preview) {
+                        (Some(original), Some(preview)) => crate::drag_transfer::hold_seat_preview(
+                            &source, self.active_window, original, preview,
+                        ),
+                        _ => false,
+                    };
+                    if held {
+                        self.publish_pty_layout();
+                    } else {
+                        revert(self, original);
+                    }
+                }
                 self.chrome_dirty = true;
                 return true;
             }
@@ -3768,7 +3838,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// the BSP trees are rewired. If the active window held `moving` as its sole
     /// pane it empties out, so we fold that slot away and follow the pane into
     /// its new window.
-    fn move_pane_cross_window(
+    pub(crate) fn move_pane_cross_window(
         &mut self,
         moving: &str,
         target: &str,
@@ -3830,6 +3900,17 @@ fn relocated_window_layouts(
     Some((source, destination))
 }
 
+/// 서로 다른 방 트리의 두 leaf 를 맞바꾼 두 트리. 하나라도 그 트리의 leaf 가 아니면 None —
+/// 반만 바꾸면 한 칸이 두 방에 서거나 사라진다.
+fn swapped_across_rooms(
+    ta: &kasa_pty::PtyLayout, tb: &kasa_pty::PtyLayout, a: &str, b: &str,
+) -> Option<(kasa_pty::PtyLayout, kasa_pty::PtyLayout)> {
+    if a == b || ta.leaves().contains(&b) || tb.leaves().contains(&a) { return None; }
+    let (mut ta, mut tb) = (ta.clone(), tb.clone());
+    (ta.replace_leaf(a, kasa_pty::PtyLayout::single(b)) && tb.replace_leaf(b, kasa_pty::PtyLayout::single(a)))
+        .then_some((ta, tb))
+}
+
 /// `(pane, 왼쪽, 위, 폭, 띠 높이)` 중 `(x, y)` 가 띠 안에 든 pane. 띠가 0 인 pane(헤더 없는
 /// 터미널)은 위 가장자리를 눌러도 헤더가 아니다.
 fn header_band_hit(bands: impl IntoIterator<Item = (String, f32, f32, f32, f32)>, x: f32, y: f32) -> Option<String> {
@@ -3859,6 +3940,20 @@ mod header_band_tests {
 #[cfg(test)]
 mod cross_room_move_tests {
     use super::*;
+
+    #[test]
+    fn swapping_across_rooms_trades_seats_and_keeps_both_shapes() {
+        let split = |a: &str, b: &str| kasa_pty::PtyLayout::Split {
+            dir: kasa_pty::SplitDir::Horizontal, ratio: 0.3,
+            a: Box::new(kasa_pty::PtyLayout::single(a)), b: Box::new(kasa_pty::PtyLayout::single(b)),
+        };
+        let (one, two) = (split("%1", "%2"), split("%3", "%4"));
+        let (one, two) = swapped_across_rooms(&one, &two, "%2", "%3").unwrap();
+        assert_eq!((one.leaves(), two.leaves()), (vec!["%1", "%3"], vec!["%2", "%4"]));
+        assert!(one.same_shape(&split("%1", "%3")));
+        assert!(swapped_across_rooms(&one, &two, "%9", "%2").is_none(), "없는 칸이면 어느 쪽도 안 바꾼다");
+        assert!(swapped_across_rooms(&one, &one, "%1", "%3").is_none(), "같은 방은 swap_leaves 몫");
+    }
 
     #[test]
     fn inactive_source_can_move_without_mutating_an_unrelated_active_tree() {

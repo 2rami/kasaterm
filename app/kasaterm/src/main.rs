@@ -28,6 +28,7 @@ mod gpu;
 mod handler;
 mod homeaccounts;
 mod input;
+mod process_usage;
 mod image_preview;
 // claude 한도 초기화권 — 잔량 읽기와 쓰는 페이지 열기.
 mod limit_reset;
@@ -1691,6 +1692,13 @@ pub(crate) struct InlineWebHost {
     pub(crate) visible: bool,
     pub(crate) restore_sidebar: bool,
 }
+
+struct DeadPane {
+    id: String,
+    session: std::sync::Weak<kasa_pty::PtySession>,
+}
+impl PartialEq<str> for DeadPane { fn eq(&self, other: &str) -> bool { self.id == other } }
+impl PartialEq<String> for DeadPane { fn eq(&self, other: &String) -> bool { self.id == *other } }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClosedPane {
@@ -3899,6 +3907,7 @@ enum UserEvent {
     /// 재접속 자동 따라잡기(복원 뒤 백그라운드 스레드)의 결과 한 줄 — GUI 스레드로
     /// 건너와 토스트가 된다. 스레드에서 `set_toast` 를 직접 못 부르는 자리의 통로.
     RepoCatchup(String),
+    UsageStopped(String),
     /// `/term/panes` cwd 폴백 — pane 별 셸 cwd 를 GUI 스레드에서 읽어 회신.
     /// (`App.pty` 의 셸 pid 가 GUI 소유라 소켓 스레드가 직접 못 읽는다.)
     SocketPaneCwds(std::sync::mpsc::Sender<Vec<(String, String)>>),
@@ -4788,6 +4797,9 @@ pub(crate) enum SettingsAction {
     Weather(crate::weather::model::Change),
     /// 펫으로 띄울 캐릭터 폴더 이름(`~/.config/kasaterm/pet/<이름>`).
     PetCharacter(String),
+    PetDownload(String),
+    PetSource(String),
+    PetImport(String, bool),
     PetPreference(kasa_pet_config::PreferenceChange),
     /// Editor autosave quiet period in ms; 0 = off.
     AutosaveDelay(u64),
@@ -5208,7 +5220,7 @@ struct App {
     /// or PTY closed). Drained on the main thread in `about_to_wait`
     /// so the tree mutation runs without holding the workspace lock
     /// across a session drop.
-    dead_panes: Arc<Mutex<Vec<String>>>,
+    dead_panes: Arc<Mutex<Vec<DeadPane>>>,
     /// Set when running as a GUI attached to a daemon (KASATERM_DAEMON=1):
     /// PTY input / resize / scroll route to the daemon over this client
     /// instead of a local PtySession. None in the default in-process mode.

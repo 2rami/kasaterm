@@ -206,7 +206,7 @@ impl App {
                     if pane_replaced(&update.pane_id, &sess_weak) {
                         return;
                     }
-                    dead.lock().unwrap().push(update.pane_id.clone());
+                    dead.lock().unwrap().push(crate::DeadPane { id: update.pane_id.clone(), session: sess_weak.clone() });
                     let _ = proxy.send_event(UserEvent::Redraw);
                     return;
                 }
@@ -263,7 +263,7 @@ impl App {
                             if pane_replaced(&next.pane_id, &sess_weak) {
                                 return;
                             }
-                            dead.lock().unwrap().push(next.pane_id.clone());
+                            dead.lock().unwrap().push(crate::DeadPane { id: next.pane_id.clone(), session: sess_weak.clone() });
                             break;
                         }
                         Err(_) => break,
@@ -316,7 +316,7 @@ impl App {
             if pane_replaced(&pane_id, &sess_weak) {
                 return;
             }
-            dead.lock().unwrap().push(pane_id);
+            dead.lock().unwrap().push(crate::DeadPane { id: pane_id, session: sess_weak });
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }

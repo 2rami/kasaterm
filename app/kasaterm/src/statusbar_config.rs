@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub(crate) const WIDGETS: [&str; 10] = [
+pub(crate) const WIDGETS: [&str; 9] = [
     "claude",
     "codex",
     "ports",
@@ -15,9 +15,8 @@ pub(crate) const WIDGETS: [&str; 10] = [
     "pet",
     "clipboard",
     "resources",
-    "link",
+    "devices",
     "tunnel",
-    "version",
 ];
 pub(crate) const USAGE_FIELDS: [&str; 5] = ["account", "email", "session", "weekly", "model"];
 const PROVIDERS: [&str; 2] = ["claude", "codex"];
@@ -68,6 +67,9 @@ impl Prefs {
                 .filter(|id| valid_widget(id))
                 .map(str::to_string)
                 .collect();
+            if hidden.iter().any(|v| v.as_str() == Some("link")) && hidden.iter().any(|v| v.as_str() == Some("version")) {
+                out.hidden.insert("devices".into());
+            }
         }
         if let Some(colors) = settings.get("statusbar_colors").and_then(|v| v.as_object()) {
             out.colors = colors
@@ -78,6 +80,12 @@ impl Prefs {
                         .then(|| (id.clone(), color.to_ascii_lowercase()))
                 })
                 .collect();
+            if !out.colors.contains_key("devices") {
+                if let Some(color) = colors.get("link").or_else(|| colors.get("version")).and_then(|v| v.as_str())
+                    .filter(|color| crate::theme::parse_hex(color).is_some()) {
+                    out.colors.insert("devices".into(), color.to_ascii_lowercase());
+                }
+            }
         }
         if let Some(fields) = settings
             .get("statusbar_usage_fields")
@@ -203,6 +211,7 @@ fn normalized_order<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for id in values {
+        let id = if matches!(id, "link" | "version") { "devices" } else { id };
         if valid_widget(id) && seen.insert(id.to_string()) {
             out.push(id.to_string());
         }
@@ -211,7 +220,7 @@ fn normalized_order<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
         if seen.insert(id.to_string()) {
             // 새로 생긴 「기기 연결」은 모바일 연결 옆이 제자리 — 저장된 순서 끝에 붙이면
             // 버전 뒤로 밀려 연결 둘이 갈라진다.
-            if id == "link" {
+            if id == "devices" {
                 if let Some(at) = out.iter().position(|x| x == "tunnel") {
                     out.insert(at, id.to_string());
                     continue;
@@ -236,7 +245,6 @@ pub(crate) fn group(id: &str) -> u8 {
     match id {
         "claude" | "codex" => 0,
         "ports" | "schedules" | "pet" | "clipboard" => 1,
-        "link" => 2,
         _ => 2,
     }
 }
@@ -258,6 +266,7 @@ pub(crate) fn mismatched_machines() -> Vec<String> {
         .into_iter()
         .filter(|machine| {
             machine.get("online").and_then(|v| v.as_bool()) == Some(true)
+                && machine.get("build").and_then(|v| v.as_str()).is_some_and(|value| !value.is_empty())
                 && machine.get("build_match").and_then(|v| v.as_bool()) == Some(false)
         })
         .filter_map(|machine| {
@@ -276,6 +285,21 @@ pub(crate) fn mismatched_machines() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_version_and_link_preferences_become_one_reversible_device_item() {
+        let mut p = Prefs::from_settings(&serde_json::json!({
+            "statusbar_order": ["version", "link", "resources"],
+            "statusbar_hidden": ["version"], "statusbar_colors": {"link":"#123456"}
+        }));
+        assert_eq!(p.order.iter().filter(|id| *id == "devices").count(), 1);
+        assert!(p.visible("devices"));
+        assert_eq!(p.colors["devices"], "#123456");
+        p.toggle_item("devices");
+        let saved = serde_json::json!({"statusbar_order":p.json_order(), "statusbar_hidden":p.json_hidden()});
+        assert!(!Prefs::from_settings(&saved).visible("devices"));
+        assert!(!Prefs::from_settings(&serde_json::json!({"statusbar_hidden":["link","version"]})).visible("devices"));
+    }
 
     #[test]
     fn defaults_keep_the_quiet_account_bar() {

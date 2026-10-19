@@ -63,6 +63,12 @@ thread_local! {
     static APPLIED: std::cell::RefCell<HashMap<usize, u64>> = Default::default();
 }
 
+/// 다음 맞추기가 받은 배치를 지문과 상관없이 다시 앉히게 한다 — 이쪽에서 칸을 옮기거나 미리보기를
+/// 거둔 뒤에는 같은 배치라도 정본으로 다시 맞춰야 한다.
+pub(crate) fn forget_applied_views() {
+    APPLIED.with(|a| a.borrow_mut().clear());
+}
+
 impl App {
     /// 원본 쪽: 방마다 트리를 채널에 싣는다. 바뀐 것만 나가니 매 루프 부른다 — 분할선 끌기처럼
     /// `publish_pty_layout` 을 안 거치는 변경도 여기서 잡힌다.

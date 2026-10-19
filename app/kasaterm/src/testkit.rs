@@ -1,5 +1,6 @@
 //! 자동 테스트 하네스 — env 기반 auto-split/window/toggle/drag/tabs + schedule 타이머.
 use super::*;
+mod usage;
 
 /// md 스크립트에 아직 실행할 단계가 남았는지. `about_to_wait` 이 이걸 보고
 /// 프레임을 펌프한다 — 자세한 사정은 `run_pending_automdscript` 참고.
@@ -3886,9 +3887,18 @@ impl App {
                 return;
             }
             // `drag:<글>><글>` — 앞 글에서 눌러 뒷 글까지 끌고 뗀다. 뒷 글이 `top`·`bottom` 이면 그 칸 본문
-            // 위·아래 밖으로 끌어 잠시 쥔다(가장자리 너머로 끌어 굴리기).
+            // 위·아래 밖으로 끌어 잠시 쥔다(가장자리 너머로 끌어 굴리기). `@x,y`(논리 좌표)는 글 대신 그 자리 —
+            // 사이드바 방 카드에 놓을 때. `handle:%N` 은 그 칸의 ⋮ 손잡이(머리 없는 칸을 끄는 자리).
             if let Some((from, to)) = point.strip_prefix("drag:").and_then(|d| d.split_once('>')) {
-                let Some(a) = self.autoclick_text_px(from) else {
+                let handles = self.pane_handle_rects.clone();
+                let at = move |spot: &str| {
+                    if let Some(pane) = spot.strip_prefix("handle:") {
+                        return handles.iter().find(|(id, _)| id == pane).map(|(_, r)| (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0));
+                    }
+                    spot.strip_prefix('@')?.split_once(',')
+                        .and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
+                };
+                let Some(a) = at(from).or_else(|| self.autoclick_text_px(from)) else {
                     eprintln!("[autoclicks] {i}: drag {from:?} 못 찾음");
                     return;
                 };
@@ -3897,7 +3907,7 @@ impl App {
                     "bottom" => self.chat_view_edge_px(a, false),
                     _ => None,
                 };
-                let Some(b) = edge.or_else(|| self.autoclick_text_px(to)) else {
+                let Some(b) = edge.or_else(|| at(to)).or_else(|| self.autoclick_text_px(to)) else {
                     eprintln!("[autoclicks] {i}: drag {to:?} 못 찾음");
                     return;
                 };
@@ -4064,6 +4074,16 @@ impl App {
                     'k' => 40,
                     'n' => 45,
                     'm' => 46,
+                    '1' => 18,
+                    '2' => 19,
+                    '3' => 20,
+                    '4' => 21,
+                    '5' => 23,
+                    '6' => 22,
+                    '7' => 26,
+                    '8' => 28,
+                    '9' => 25,
+                    '0' => 29,
                     _ => 0,
                 },
             },
@@ -9394,8 +9414,8 @@ impl App {
                 w if w.starts_with("clip") => {
                     (crate::state::StatusbarPopover::Clipboard, self.statusbar.clip_rect)
                 }
-                w if w.starts_with("build") => {
-                    (crate::state::StatusbarPopover::Build, self.status_version_rect)
+                w if w.starts_with("build") || w.starts_with("devices") => {
+                    (crate::state::StatusbarPopover::Link, self.statusbar.link_rect)
                 }
                 _ => (crate::state::StatusbarPopover::Ports, self.statusbar.port_rect),
             };
@@ -9433,10 +9453,19 @@ impl App {
                     if want.contains("-armed") {
                         match self.statusbar.usage_outside.first() {
                             Some(a) => {
-                                self.statusbar.usage_kill_armed = Some((a.pid, Instant::now()));
+                                if let Some(row) = self.statusbar.usage_processes.iter().find(|row| row.id.pid == a.pid) {
+                                    self.statusbar.usage_inspected = Some(row.id.clone());
+                                    self.statusbar.usage_process_armed = Some((row.id.clone(), Instant::now()));
+                                }
                                 eprintln!("[autoportpop] 끄기 겨눔 pid={}", a.pid);
                             }
                             None => eprintln!("[autoportpop] FAIL — 바깥 앱 표본이 비었다"),
+                        }
+                    }
+                    if want.contains("-owned") {
+                        if let Some(row) = self.statusbar.usage_processes.iter().find(|row| row.owner.as_ref().is_some_and(|owner| owner.shell == row.id.pid)) {
+                            self.statusbar.usage_inspected = Some(row.id.clone());
+                            eprintln!("[autoportpop] owned pid={}", row.id.pid);
                         }
                     }
                     // 바깥 앱 판정은 화면에 몇 줄로만 남아서, 안 떴을 때 「값이
@@ -9463,8 +9492,7 @@ impl App {
             }
             return;
         }
-        if want.starts_with("usage") {
-            // 누를 것이 없는 팝오버라 여기서 끝난다(스크롤은 열 때 함께 했다).
+        if want.starts_with("usage") || want.starts_with("devices") || want.starts_with("build") {
             return;
         }
         if want.starts_with("chrome") {

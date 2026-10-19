@@ -6,6 +6,8 @@
 //! 둘 다 본체와 떨어져 있으니 코드도 떼어 둔다.
 
 use crate::gpu;
+mod devices;
+mod usage;
 use crate::state;
 use crate::theme;
 use crate::{hover_rect, panel_rect_outlined, round_rect};
@@ -53,11 +55,11 @@ pub(crate) fn paint_popover(
             paint_schedules_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
-        state::StatusbarPopover::Link => paint_link_popover(g, sb, anchor, win_w),
+        state::StatusbarPopover::Link | state::StatusbarPopover::Build => devices::paint(g, sb, cursor, anchor, (win_w, win_h)),
         state::StatusbarPopover::Chrome => paint_chrome_popover(g, sb, cursor, anchor, win_w, win_h),
-        state::StatusbarPopover::Build => paint_build_popover(g, sb, cursor, anchor, win_w),
         state::StatusbarPopover::Usage => {
-            paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h)
+            if sb.usage_inspected.is_some() { usage::paint(g, sb, cursor, anchor, (win_w, win_h)); }
+            else { paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h); }
         }
         state::StatusbarPopover::Clipboard => {
             paint_clipboard_popover(g, sb, cursor, anchor, win_w, win_h)
@@ -228,7 +230,7 @@ fn paint_usage_popover(
             Some((rest_n, (tc - lc).max(0.0), tr.saturating_sub(lr)))
         })
         .flatten();
-    let w = 300.0_f32.min(win_w - 16.0);
+    let w = 420.0_f32.min((win_w - 16.0).max(1.0));
     let rows = list.len().max(1);
     let body = PAD + rows as f32 * UROW;
     // 화면 절반을 넘기지 않는다(포트 팝오버와 같은 규칙) — 팝오버가 창을 덮으면
@@ -271,11 +273,6 @@ fn paint_usage_popover(
     } else {
         Vec::new()
     };
-    // 「끌까요?」 대기는 몇 초 뒤 저절로 풀린다. 눌러 놓고 잊은 줄이 빨갛게 남아
-    // 있으면, 한참 뒤 무심코 그 자리를 눌렀을 때 앱이 닫힌다.
-    if sb.usage_kill_armed.is_some_and(|(_, t)| t.elapsed().as_secs() >= 5) {
-        sb.usage_kill_armed = None;
-    }
     const OUT_HEAD: f32 = 15.0;
     let out_h =
         if outside.is_empty() { 0.0 } else { PAD + OUT_HEAD + outside.len() as f32 * UROW };
@@ -441,95 +438,18 @@ fn paint_usage_popover(
         );
         let mut oy = top + OUT_HEAD;
         for a in &outside {
-            let (pid, name, n) = (&a.pid, &a.name, &a.procs);
-            let r = (x + 1.0, oy, w - 2.0, UROW);
-            let hov = hit(cursor, &r);
-            let armed = sb.usage_kill_armed.is_some_and(|(p, _)| p == *pid);
-            if hov || armed {
-                round_rect(
-                    g,
-                    r.0,
-                    r.1,
-                    r.2,
-                    r.3,
-                    theme::radius_sm(),
-                    theme::with_alpha(
-                        if armed { theme::danger() } else { theme::text() },
-                        if armed { 0x2a } else { 0x14 },
-                    ),
-                );
-            }
-            // 고른 잣대의 값 **하나만**. 둘을 겹쳐 쌓았더니 오른쪽이 숫자 두
-            // 기둥이 되어, 정작 무엇으로 줄이 세워졌는지가 안 읽혔다.
-            let gb = a.rss as f32 / (1024.0 * 1024.0 * 1024.0);
-            let val = if cpu_tab {
-                format!("{:.0}%", a.cpu)
-            } else if gb >= 1.0 {
-                format!("{gb:.1}G")
-            } else {
-                format!("{:.0}M", gb * 1024.0)
-            };
+            let r = (x + 6.0, oy, w - 12.0, UROW);
+            if hit(cursor, &r) { round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover()); }
+            let val = if cpu_tab { format!("{:.0}%", a.cpu) } else { format!("{:.0}M", a.rss as f64 / 1048576.0) };
             let vw = g.measure_chrome_text(&val, 12.0, true);
-            // 겨눈 줄에서만 오른쪽 한 칸을 ×에 내준다 — 값은 늘 보여야 하는
-            // 것이라 자리를 뺏기는 대신 왼쪽으로 물러난다.
-            let tail = if hov || armed { 24.0 } else { 0.0 };
-            let right = x + w - 12.0 - tail;
-            g.draw_text(
-                right - vw,
-                oy + 8.0,
-                &val,
-                gpu::DrawOpts {
-                    font_size: 12.0,
-                    color: if cpu_tab && a.is_hog() { theme::danger() } else { theme::text() },
-                    bold: true,
-                    italic: false,
-                },
-            );
-            let label = if armed {
-                "한 번 더 누르면 종료".to_string()
-            } else if *n > 1 {
-                // 프로세스 수를 밝히는 것은 이 줄이 **합**이라는 표시다. Chrome
-                // 12G 는 Helper 마흔 개를 접은 값이고, 그걸 모르면 활성 모니터의
-                // 프로세스 목록과 대조했을 때 어디에도 없는 숫자로 보인다.
-                format!("{name} · {n}개")
-            } else {
-                name.clone()
-            };
-            let avail = (right - vw - 10.0 - (x + 12.0)).max(0.0);
-            let lt = crate::info::fit_text(g, &label, avail, 11.0, false);
-            g.draw_text(
-                x + 12.0,
-                oy + 9.0,
-                &lt,
-                gpu::DrawOpts {
-                    font_size: 11.0,
-                    color: if armed { theme::danger() } else { theme::text() },
-                    bold: false,
-                    italic: false,
-                },
-            );
-            if hov || armed {
-                let br = (x + w - 12.0 - 18.0, oy + (UROW - 18.0) / 2.0, 18.0, 18.0);
-                let bhov = hit(cursor, &br);
-                if bhov {
-                    round_rect(
-                        g,
-                        br.0,
-                        br.1,
-                        br.2,
-                        br.3,
-                        theme::radius_sm(),
-                        theme::with_alpha(theme::danger(), 0x33),
-                    );
-                }
-                g.queue_icon(
-                    "x",
-                    br.0 + 4.0,
-                    br.1 + 4.0,
-                    10.0,
-                    if bhov || armed { theme::danger() } else { theme::text_mute() },
-                );
-                sb.popover_hits.push((state::StatusbarHit::KillApp(*pid), br));
+            let right = x + w - 34.0;
+            g.draw_text(right - vw, oy + 8.0, &val, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
+            let label = crate::info::fit_text(g, &format!("{} · 실행 {}개", a.name, a.procs), (right - vw - x - 22.0).max(0.0), 11.0, false);
+            g.draw_text(x + 12.0, oy + 9.0, &label, gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false });
+            g.queue_icon("chevron-right", x + w - 24.0, oy + 9.0, 12.0, theme::text_dim());
+            if let Some(process) = sb.usage_processes.iter().find(|row| row.id.pid == a.pid) {
+                if let Some(rect) = g.clip_hit(r) { sb.popover_hits.push((state::StatusbarHit::InspectProcess(process.id.clone()), rect)); }
+                g.hover_pointer |= hit(cursor, &r);
             }
             oy += UROW;
         }
@@ -616,6 +536,12 @@ fn paint_usage_popover(
                 },
             );
         }
+        if let Some(process) = sb.usage_processes.iter().find(|row| row.id.pid == *pid) {
+            if let Some(rect) = g.clip_hit((x + 6.0, ry, w - 12.0, UROW)) {
+                g.hover_pointer |= hit(cursor, &rect);
+                sb.popover_hits.push((state::StatusbarHit::InspectProcess(process.id.clone()), rect));
+            }
+        }
         ry += UROW;
     }
     g.pop_clip();
@@ -694,74 +620,6 @@ fn fit_addr(g: &mut gpu::GpuRenderer, host: &str, path: &str, avail: f32) -> Str
 /// 합쳤다 — 둘 다 「이 맥 밖의 기기와 어떻게 이어져 있나」라서, 다리 상태는 여기 한 줄.
 /// 기기 연결 — 명부의 기기마다 한 줄: 이름 · 직통/중계 · 왕복. 중계로 붙어 있으면 왜
 /// 느린지 여기서 바로 보인다(2026-09-17 지시 「직통인지 중계인지도 보이게, 속도도」).
-fn paint_link_popover(
-    g: &mut gpu::GpuRenderer,
-    sb: &mut state::StatusbarState,
-    anchor: (f32, f32, f32, f32),
-    win_w: f32,
-) {
-    let machines = kasa_mcp::machines::snapshot();
-    let rows: Vec<(String, bool, bool, Option<u64>, state::MachineLink)> = machines.iter().map(|m| (
-        m["label"].as_str().map(crate::render::pane_identity::device_name).unwrap_or_else(|| "기기".to_string()),
-        m["online"].as_bool() == Some(true),
-        m["online_via"].as_str() == Some("direct"),
-        m["rtt_ms"].as_u64(),
-        crate::machinescol::machine_link(m),
-    )).collect();
-    let relayed = rows.iter().any(|(_, online, direct, _, _)| *online && !*direct);
-    let w = 300.0_f32.min((win_w - 16.0).max(200.0));
-    let row_h = 24.0_f32;
-    // 끊긴 기기는 이유 한 줄을 더 단다 — 「연결 안 됨」만으로는 기기가 꺼진 건지 길이 막힌 건지 모른다.
-    let reason_h = 14.0_f32;
-    let rows_h: f32 = rows.iter().map(|(_, online, ..)| if *online { row_h } else { row_h + reason_h }).sum();
-    let h = 92.0 + rows_h.max(row_h) + if relayed { 34.0 } else { 12.0 };
-    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
-    let y = (anchor.1 - h - 6.0).max(8.0);
-    sb.popover_rect = Some((x, y, w, h));
-    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
-    g.queue_icon("monitor", x + 16.0, y + 15.0, 18.0, theme::accent());
-    let text = |g: &mut gpu::GpuRenderer, xx, yy, value: &str, size, color, bold| {
-        g.draw_text(xx, yy, value, gpu::DrawOpts { font_size: size, color, bold, italic: false });
-    };
-    text(g, x + 42.0, y + 15.0, "기기 연결", 13.0, theme::text(), true);
-    let mut ry = y + 48.0;
-    if rows.is_empty() {
-        text(g, x + 16.0, ry + 4.0, "등록된 기기가 없어요", 11.0, theme::text_dim(), false);
-    }
-    for (label, online, direct, rtt, link) in &rows {
-        let (dot, state_text, col) = match (online, direct, rtt) {
-            (false, _, _) => (theme::with_alpha(theme::text_dim(), 140),
-                format!("끊김 · {}", link.last_ok_ms.map(crate::machinescol::clock_label).unwrap_or_else(|| "닿은 적 없음".into())),
-                theme::text_mute()),
-            (true, true, Some(ms)) if *ms >= 150 => (theme::attention(), format!("직통 · {ms}ms · 느림"), theme::attention()),
-            (true, true, Some(ms)) => (theme::success(), format!("직통 · {ms}ms"), theme::text()),
-            (true, true, None) => (theme::success(), "직통".into(), theme::text()),
-            (true, false, Some(ms)) => (theme::attention(), format!("중계 · {ms}ms"), theme::attention()),
-            (true, false, None) => (theme::attention(), "중계".into(), theme::attention()),
-        };
-        round_rect(g, x + 18.0, ry + 8.0, 6.0, 6.0, 3.0, dot);
-        let label = crate::info::fit_text(g, label, 110.0, 12.0, true);
-        text(g, x + 32.0, ry + 4.0, &label, 12.0, theme::text(), true);
-        let sw = g.measure_chrome_text(&state_text, 11.0, false);
-        text(g, x + w - 16.0 - sw, ry + 5.0, &state_text, 11.0, col, false);
-        ry += row_h;
-        if !online {
-            let reason = if link.reason.is_empty() { "이유 확인 중" } else { link.reason.as_str() };
-            let reason = crate::info::fit_text(g, reason, w - 48.0, 10.0, false);
-            text(g, x + 32.0, ry - 2.0, &reason, 10.0, theme::text_mute(), false);
-            ry += reason_h;
-        }
-    }
-    if relayed {
-        text(g, x + 16.0, ry + 8.0, "중계 연결 · 자세한 상태는 기기 설정에서 확인",
-            10.0, theme::text_dim(), false);
-    }
-    let action = (x + 12.0, y + h - 38.0, w - 24.0, 26.0);
-    panel_rect_outlined(g, action.0, action.1, action.2, action.3, theme::radius_sm(), theme::surface());
-    text(g, action.0 + 12.0, action.1 + 6.0, "기기 설정 · 로그인", 11.0, theme::accent(), false);
-    sb.popover_hits.push((state::StatusbarHit::OpenMachines, action));
-}
-
 fn paint_tunnel_popover(
     g: &mut gpu::GpuRenderer,
     sb: &mut state::StatusbarState,
@@ -973,78 +831,6 @@ fn paint_mobile_qr(g: &mut gpu::GpuRenderer, address: &str, rect: (f32, f32, f32
 }
 
 /// 새 판 팝오버 — 굽기 · 다른 기계로 보내기 · 기계 설정. 판 번호를 누르면 뜬다.
-fn paint_build_popover(
-    g: &mut gpu::GpuRenderer,
-    sb: &mut state::StatusbarState,
-    cursor: (f32, f32),
-    anchor: (f32, f32, f32, f32),
-    win_w: f32,
-) {
-    const HEAD_H: f32 = 48.0;
-    const ROW: f32 = 30.0;
-    let mismatched = crate::statusbar_config::mismatched_machines();
-    let entries = kasa_mcp::machines::entries();
-    let rows: Vec<(String, state::StatusbarHit)> = std::iter::once((
-        "이 기기 업데이트 확인".to_string(),
-        state::StatusbarHit::CheckUpdates,
-    ))
-    .chain(repo_root().join("scripts/build-app.sh").is_file().then(|| (
-        "소스에서 직접 빌드".to_string(), state::StatusbarHit::BuildBake,
-    )))
-    .chain(mismatched.iter().map(|m| {
-        match build_send_target(m, &entries) {
-            Some(target) => (format!("{m} 업데이트 설치"), state::StatusbarHit::BuildSend(m.clone(), target)),
-            None => (format!("{m} 연결 설정 확인"), state::StatusbarHit::OpenMachines),
-        }
-    }))
-    .chain(std::iter::once(("기계 설정 열기".to_string(), state::StatusbarHit::OpenMachines)))
-    .collect();
-    let w = 300.0_f32.min(win_w - 16.0);
-    let h = HEAD_H + ROW * rows.len() as f32 + 8.0;
-    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
-    let y = (anchor.1 - h - 6.0).max(8.0);
-    sb.popover_rect = Some((x, y, w, h));
-    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
-    g.draw_text(
-        x + 12.0,
-        y + 10.0,
-        "업데이트",
-        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
-    );
-    // 미니는 굽지 못한다(cargo·node 없음) — 맥북이 구운 것을 부친다. 굽든 부치든
-    // 새 탭에서 스크립트가 돌고, 이쪽 앱은 껐다 켜야 갈아입는다.
-    let sub = if mismatched.is_empty() {
-        format!("현재 v{} · 새 버전 확인과 기기별 설치", env!("CARGO_PKG_VERSION"))
-    } else {
-        format!("{} 판이 다르다 · 보내면 그쪽 앱이 잠깐 껐다 켜진다", mismatched.join("·"))
-    };
-    let sub = crate::info::fit_text(g, &sub, (w - 24.0).max(0.0), 10.0, false);
-    g.draw_text(
-        x + 12.0,
-        y + 28.0,
-        &sub,
-        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-    );
-    let mut oy = y + HEAD_H;
-    for (label, hit_kind) in rows {
-        let r = (x + 6.0, oy, w - 12.0, ROW);
-        let label = crate::info::fit_text(g, &label, (r.2 - 16.0).max(0.0), 11.0, false);
-        let hov = hit(cursor, &r);
-        g.hover_pointer |= hov;
-        if hov {
-            round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
-        }
-        g.draw_text(
-            r.0 + 8.0,
-            oy + 8.0,
-            &label,
-            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
-        );
-        sb.popover_hits.push((hit_kind, r));
-        oy += ROW;
-    }
-}
-
 fn build_send_target(label: &str, entries: &[serde_json::Value]) -> Option<String> {
     let mut matching = entries.iter()
         .filter(|entry| entry.get("label").and_then(|v| v.as_str()) == Some(label));
@@ -1087,21 +873,7 @@ mod build_send_tests {
     }
 }
 
-/// 스크립트를 돌릴 레포 — 구운 쪽이 번들에 남긴 표(`Resources/build-root`)가 먼저고,
-/// 없으면(개발 실행) 컴파일 시점 경로. `install_pending_paths` 와 같은 규칙.
-fn repo_root() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent()?.parent().map(|c| c.join("Resources/build-root")))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-}
 
-/// QR 모듈(한 변 n, 행 우선 n×n). 주소가 같으면 다시 안 만든다 — 팝오버는 열려 있는
-/// 동안 매 프레임 그리고, 부호화는 프레임 예산에 넣을 일이 아니다.
 fn qr_modules(text: &str) -> Option<(usize, Vec<bool>)> {
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<Option<(String, usize, Vec<bool>)>>> = OnceLock::new();
@@ -1623,7 +1395,7 @@ impl crate::App {
             .find(|(h, r)| {
                 matches!(
                     h,
-                    state::StatusbarHit::KillPort(_) | state::StatusbarHit::KillApp(_)
+                    state::StatusbarHit::KillPort(_) | state::StatusbarHit::StopProcess(_)
                 ) && inside(r)
             })
             .or_else(|| self.statusbar.popover_hits.iter().find(|(_, r)| inside(r)))
@@ -1633,33 +1405,26 @@ impl crate::App {
                 self.kill_process(pid, false);
                 return true;
             }
-            Some(state::StatusbarHit::KillApp(pid)) => {
-                // 첫 클릭은 겨누기만 한다. 포트 팝오버의 ×는 자기가 띄운 dev
-                // 서버라 잘못 눌러도 다시 띄우면 그만이지만, 여기 뜨는 건 사람이
-                // 쓰던 앱(브라우저·편집기)이라 열어 둔 것을 잃는다.
-                match self.statusbar.usage_kill_armed {
-                    Some((p, _)) if p == pid => {
-                        self.statusbar.usage_kill_armed = None;
-                        let name = self
-                            .statusbar
-                            .usage_outside
-                            .iter()
-                            .find(|a| a.pid == pid)
-                            .map(|a| a.name.clone());
-                        // SIGTERM 이다 — 앱이 저장 여부를 물을 틈이 있다.
-                        self.kill_process(pid, false);
-                        if let Some(n) = name {
-                            // `kill_process` 의 「종료 신호 4821」을 덮는다. 이
-                            // 목록에서 사람이 고른 것은 pid 가 아니라 앱이다.
-                            self.set_toast(format!("{n} 종료 신호"));
-                        }
-                    }
-                    _ => {
-                        self.statusbar.usage_kill_armed =
-                            Some((pid, std::time::Instant::now()));
-                        self.chrome_dirty = true;
-                    }
-                }
+            Some(state::StatusbarHit::InspectProcess(identity)) => {
+                self.statusbar.usage_inspected = Some(identity);
+                self.statusbar.usage_process_armed = None;
+                self.statusbar.popover_scroll = 0.0;
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::UsageBack) => {
+                self.statusbar.usage_inspected = None;
+                self.statusbar.usage_process_armed = None;
+                self.statusbar.popover_scroll = 0.0;
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::OpenUsageShell(identity)) => {
+                self.open_usage_shell(&identity);
+                return true;
+            }
+            Some(state::StatusbarHit::StopProcess(identity)) => {
+                self.stop_usage_process(&identity);
                 return true;
             }
             Some(state::StatusbarHit::UsageTab(t)) => {
@@ -1670,7 +1435,7 @@ impl crate::App {
                     self.statusbar.popover_scroll = 0.0;
                 }
                 self.statusbar.usage_tab = t;
-                self.statusbar.usage_kill_armed = None;
+                self.statusbar.usage_process_armed = None;
                 self.chrome_dirty = true;
                 return true;
             }
@@ -1762,11 +1527,6 @@ impl crate::App {
                 }
                 return true;
             }
-            Some(state::StatusbarHit::BuildBake) => {
-                self.statusbar.popover = None;
-                self.run_script_in_new_tab("scripts/build-app.sh", "새 탭에서 굽는 중 — 끝나면 앱을 껐다 켜면 된다");
-                return true;
-            }
             Some(state::StatusbarHit::CheckUpdates) => {
                 self.statusbar.popover = None;
                 self.check_for_updates_now();
@@ -1821,23 +1581,6 @@ impl crate::App {
     /// 8px 간격으로 붙어 있어 둘이 동시에 열리면 서로를 덮는다.
     /// 레포 스크립트를 활성 pane 의 새 탭에서 돌린다 — 과정이 화면에 보이고, 실패도
     /// 거기 남는다. 셸이 뜨기 전에 보낸 글자도 PTY 가 쥐고 있다가 셸이 읽는다.
-    fn run_script_in_new_tab(&mut self, script: &str, toast: &str) {
-        let Some(outer) = self.ws.lock().unwrap().active_pane.clone() else {
-            self.set_toast("활성 pane 이 없다".to_string());
-            return;
-        };
-        let root = repo_root();
-        match self.spawn_new_tab(&outer, true) {
-            Ok(pid) => {
-                let cmd = format!("cd '{}' && bash {script}\n", root.display());
-                self.send_bytes_to_surface(Some(&pid), cmd.as_bytes());
-                self.set_toast(toast.to_string());
-            }
-            Err(e) => self.set_toast(format!("탭을 못 열었다: {e:#}")),
-        }
-        self.chrome_dirty = true;
-    }
-
     pub(crate) fn toggle_statusbar_popover(
         &mut self,
         kind: state::StatusbarPopover,
@@ -1861,6 +1604,8 @@ impl crate::App {
         // 더 눌러야 한다. 지금 급한 잣대로 열어 준다 — 경고가 없을 때만 마지막에
         // 보던 탭이 남는다.
         if !same && kind == state::StatusbarPopover::Usage {
+            self.statusbar.usage_inspected = None;
+            self.statusbar.usage_process_armed = None;
             let mem_bad =
                 self.statusbar.mem.is_some_and(|m| m.advice() != crate::sysmem::Advice::Ok);
             let cpu_bad = self.statusbar.usage_outside.iter().any(|a| a.is_hog())

@@ -830,6 +830,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::UsageStopped(message) => {
+                self.force_usage_refresh();
+                self.set_toast(message.clone());
+                return;
+            }
             UserEvent::RepoCatchup(msg) => {
                 self.set_toast(msg.clone());
                 self.chrome_dirty = true;
@@ -935,7 +940,7 @@ impl ApplicationHandler<UserEvent> for App {
             // `edit_layout_of_pane` 이 resize 로 SIGWINCH 를 보낸다.
             UserEvent::SocketSwap(a, b) => {
                 let (a, b) = (a.clone(), b.clone());
-                if self.edit_layout_of_pane(&a, |tree| tree.swap_leaves(&a, &b)) {
+                if self.swap_panes(&a, &b) {
                     self.render_frame();
                 }
                 return;
@@ -7869,6 +7874,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_pane_activity();
         // 바탕화면 펫에게 지금 판을 넘긴다. 펫이 꺼져 있으면 즉시 나간다.
         self.pet_publish_board();
+        self.tick_pet_downloads();
         self.poll_device_icon_import();
         if let Some(error) = crate::chrome::take_pet_failure() {
             self.set_toast(error);
@@ -7941,6 +7947,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
         self.run_pending_close_grace_probe();
+        self.run_usage_lifecycle_probe(event_loop);
         self.run_pending_session_probe();
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
@@ -8235,6 +8242,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
                 .chain(self.migrate_handoff.as_ref().map(|h| h.at))
                 .chain(self.transfer_launch_tick())
+                .chain(self.statusbar.pet_refresh)
                 .chain(lid_away_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))

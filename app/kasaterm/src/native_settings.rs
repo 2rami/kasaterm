@@ -5,6 +5,7 @@
 
 use super::*;
 mod login_probe;
+mod pet_models;
 
 #[path = "native_device_account.rs"]
 pub(crate) mod device_account;
@@ -2611,7 +2612,7 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
         SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 크롬 chrome 브라우저 device connection machine browser",
-        SettingsCat::Pet => "펫 바탕화면 캐릭터 알림 말풍선 움직임 pet desktop notification",
+        SettingsCat::Pet => "Live2D 펫 곽향 다운로드 바탕화면 캐릭터 알림 말풍선 움직임 pet desktop notification",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
     let haystack = search_text(&format!("{title} {detail} {aliases}"));
@@ -3583,12 +3584,11 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "claude" => "Claude 사용량",
         "codex" => "Codex 사용량",
         "ports" => "열린 포트",
-        "pet" => "펫 상태",
+        "pet" => "Live2D 펫",
         "clipboard" => "클립보드",
         "resources" => "기기 상태",
         "tunnel" => "모바일 연결",
-        "link" => "기기 연결",
-        "version" => "앱 버전",
+        "devices" => "기기 · 업데이트",
         "schedules" => "예약",
         _ => "알 수 없는 항목",
     }
@@ -3607,10 +3607,10 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
                 ("codex", "account") => "개인",
                 (_, "email") => "me@example.com",
                 ("claude", "session") => "5h 42%",
-                ("codex", "session") => "5h 미제공",
+                ("codex", "session") => continue,
                 (_, "weekly") => "7d 68%",
                 ("claude", "model") => "Fable 24%",
-                ("codex", "model") => "모델별 미제공",
+                ("codex", "model") => continue,
                 _ => continue,
             };
             parts.push(crate::native_strings::text(value).into_owned());
@@ -3620,12 +3620,11 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
     match id {
         "ports" => ":3000 · :5173",
         "schedules" => "예약 2",
-        "pet" => "펫 2명",
+        "pet" => "Live2D 펫",
         "clipboard" => "클립보드",
         "resources" => "CPU 18% · RAM 42%",
         "tunnel" => "모바일 연결됨",
-        "link" => "나쵸네코 직통 10ms",
-        "version" => "v0.2.0",
+        "devices" => "기기 2대",
         _ => "",
     }
     .to_string()
@@ -4714,9 +4713,7 @@ fn paint_pet(
     y: &mut f32,
     w: f32,
 ) {
-    let on = crate::chrome::pet_pid().is_some();
-    let chars = crate::chrome::pet_characters();
-    let current = crate::chrome::pet_current_character();
+    let on = crate::chrome::pet_pid().is_some() || crate::chrome::pet_start_pending();
     use kasa_pet_config::PreferenceChange as Change;
     let prefs = crate::chrome::pet_preferences();
     let scale = crate::chrome::pet_scale_percent(&prefs);
@@ -4736,23 +4733,8 @@ fn paint_pet(
     );
     section_title(g, x, *y, "캐릭터", "");
     *y += 54.0;
-    if chars.is_empty() {
-        draw_text(
-            g,
-            x,
-            *y,
-            "받아 둔 캐릭터가 없습니다 — 펫을 처음 켜면 받아 옵니다",
-            11.5,
-            theme::text_dim(),
-            false,
-        );
-        *y += 28.0;
-    } else {
-        // 그림이 없는 캐릭터가 있으면 그리는 김에 만들어 둔다 — 펫을 잠깐 띄웠다
-        // 끄는 일이라 화면에 한 번 스친다. 다 있으면 아무 일도 안 한다.
-        crate::chrome::ensure_pet_previews();
-        pet_cards(g, s, hits, x, y, w, &chars, current.as_deref());
-    }
+    crate::chrome::ensure_pet_previews();
+    pet_models::paint(g, s, hits, x, y, w);
 
     pet_section(g, x, y, "모습");
     pet_value_row(g, s, hits, x, y, w, "펫 크기", &format!("{scale}%"),
@@ -4913,69 +4895,6 @@ fn pet_value_row(
     };
     stepper_row(g, s, hits, x, y, w, label, value,
         SettingsAction::PetPreference(minus), SettingsAction::PetPreference(plus));
-}
-
-/// 캐릭터 카드 — 그림과 이름. 이름만 늘어놓으면 「Ren 이 누구였더라」가 되는데,
-/// 이건 눈으로 고르는 값이다.
-fn pet_cards(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-    names: &[String],
-    current: Option<&str>,
-) {
-    const CARD_W: f32 = 92.0;
-    const CARD_H: f32 = 132.0;
-    let gap = 8.0;
-    let per_row = (((w + gap) / (CARD_W + gap)).floor() as usize).max(1);
-    for (i, name) in names.iter().enumerate() {
-        let (col, row) = (i % per_row, i / per_row);
-        let rect = (
-            x + col as f32 * (CARD_W + gap),
-            *y + row as f32 * (CARD_H + gap),
-            CARD_W,
-            CARD_H,
-        );
-        let selected = Some(name.as_str()) == current;
-        choice_card(
-            g,
-            s,
-            hits,
-            rect,
-            selected,
-            Target::Setting(SettingsAction::PetCharacter(name.clone())),
-        );
-        // 그림은 카드보다 조금 작게 — 테두리에 딱 붙으면 골라진 표시가 안 보인다.
-        if let Some(path) = crate::chrome::pet_preview_path(name) {
-            let key = format!("pet:{name}");
-            if !g.has_image(&key) {
-                if let Some((rgba, iw, ih)) =
-                    crate::sprites::user_asset_rgba_in(path.parent().unwrap_or(&path), "preview.png")
-                {
-                    g.upload_image(&key, &rgba, iw, ih);
-                }
-            }
-            if g.has_image(&key) {
-                g.queue_image_above(&key, rect.0 + 8.0, rect.1 + 6.0, CARD_W - 16.0, CARD_H - 34.0);
-            }
-        }
-        let shown = fit(g, name, CARD_W - 12.0, 11.0, selected);
-        let tw = g.measure_chrome_text(&shown, 11.0, selected);
-        draw_text(
-            g,
-            rect.0 + (CARD_W - tw) / 2.0,
-            rect.1 + CARD_H - 22.0,
-            &shown,
-            11.0,
-            if selected { theme::text() } else { theme::text_dim() },
-            selected,
-        );
-    }
-    let rows = names.len().div_ceil(per_row) as f32;
-    *y += rows * (CARD_H + gap) + 8.0;
 }
 
 /// 덮으면 이사 — 학생이 일하는 중에 덮으면 고른 기기로 옮기고 잔다. 잠자기를 막는 허락(sudo)은
@@ -6555,7 +6474,7 @@ fn account_row(
 #[derive(Clone)]
 struct AccountUsageLine {
     label: String,
-    pct: Option<f32>,
+    pct: f32,
     resets_at: Option<u64>,
 }
 
@@ -6570,40 +6489,12 @@ fn account_usage_lines(row: &AccountChoice) -> Vec<AccountUsageLine> {
             });
         }
     }
-    let pick = |kind: &str| {
-        source.iter().find(|window| match kind {
-            "5h" => window.label == "5h",
-            "7d" => window.label == "7d",
-            _ => false,
+    let mut out: Vec<AccountUsageLine> = ["5h", "7d"].iter().filter_map(|kind| {
+        source.iter().find(|window| window.label == *kind).map(|window| AccountUsageLine {
+            label: if *kind == "5h" { "5시간" } else { "7일" }.into(), pct: window.pct, resets_at: window.resets_at,
         })
-    };
-    let mut out = vec![
-        pick("5h").map_or(
-            AccountUsageLine {
-                label: "5시간".to_string(),
-                pct: None,
-                resets_at: None,
-            },
-            |window| AccountUsageLine {
-                label: "5시간".to_string(),
-                pct: Some(window.pct),
-                resets_at: window.resets_at,
-            },
-        ),
-        pick("7d").map_or(
-            AccountUsageLine {
-                label: "7일".to_string(),
-                pct: None,
-                resets_at: None,
-            },
-            |window| AccountUsageLine {
-                label: "7일".to_string(),
-                pct: Some(window.pct),
-                resets_at: window.resets_at,
-            },
-        ),
-    ];
-    let mut models: Vec<AccountUsageLine> = source
+    }).collect();
+    let models: Vec<AccountUsageLine> = source
         .iter()
         .filter(|window| window.label != "5h" && window.label != "7d")
         .map(|window| AccountUsageLine {
@@ -6618,24 +6509,17 @@ fn account_usage_lines(row: &AccountChoice) -> Vec<AccountUsageLine> {
                         .map(|model| format!("{model} · 5시간"))
                 })
                 .unwrap_or_else(|| window.label.clone()),
-            pct: Some(window.pct),
+            pct: window.pct,
             resets_at: window.resets_at,
         })
         .collect();
-    if models.is_empty() {
-        models.push(AccountUsageLine {
-            label: "모델별 한도".to_string(),
-            pct: None,
-            resets_at: None,
-        });
-    }
     out.extend(models);
     out
 }
 
 fn account_usage_state_text(state: AccountUsageState) -> &'static str {
     match state {
-        AccountUsageState::Ready => "한도 미제공",
+        AccountUsageState::Ready => "",
         AccountUsageState::Loading => "한도 조회 중…",
         AccountUsageState::Failed => "한도를 읽지 못했어요",
         AccountUsageState::LoggedOut => "로그인 후 사용량을 볼 수 있어요",
@@ -6681,58 +6565,18 @@ fn draw_account_usage_line(
     w: f32,
     stale: bool,
 ) {
-    let pct_text = line.pct.map(|pct| {
-        format!("{}{pct:.0}%", if stale { "~" } else { "" })
-    });
-    let pct_w = pct_text
-        .as_ref()
-        .map(|text| g.measure_chrome_text(text, 11.0, true))
-        .unwrap_or_else(|| g.measure_chrome_text("미제공", 10.5, false));
-    let label = fit(g, &line.label, (w - pct_w - 14.0).max(30.0), 11.5, true);
+    let text = format!("{}{:.0}%", if stale { "~" } else { "" }, line.pct);
+    let pct_w = g.measure_chrome_text(&text, 11.0, true);
+    let label = fit(g, &line.label, (w - pct_w - 14.0).max(0.0), 11.5, true);
     draw_text(g, x, y, &label, 11.5, theme::text(), true);
-    match (line.pct, pct_text) {
-        (Some(pct), Some(text)) => {
-            draw_text(
-                g,
-                x + w - pct_w,
-                y,
-                &text,
-                11.0,
-                account_usage_pct_color(pct),
-                true,
-            );
-            let bar_y = y + 21.0;
-            round_rect(g, x, bar_y, w, 5.0, 2.5, theme::surface_active());
-            round_rect(
-                g,
-                x,
-                bar_y,
-                (w * (pct / 100.0).clamp(0.0, 1.0)).max(5.0),
-                5.0,
-                2.5,
-                account_usage_pct_color(pct),
-            );
-            let reset = line
-                .resets_at
-                .and_then(|at| crate::resets_in_label(Some(at)))
-                .map(|value| format!("{value} 뒤 초기화"))
-                .unwrap_or_else(|| "초기화 정보 미제공".to_string());
-            let reset = if stale { format!("최근 값 · {reset}") } else { reset };
-            let reset = fit(g, &reset, w, 10.0, false);
-            draw_text(g, x, y + 34.0, &reset, 10.0, theme::text_mute(), false);
-        }
-        _ => {
-            draw_text(
-                g,
-                x + w - pct_w,
-                y,
-                "미제공",
-                10.5,
-                theme::text_mute(),
-                false,
-            );
-        }
-    }
+    draw_text(g, x + w - pct_w, y, &text, 11.0, account_usage_pct_color(line.pct), true);
+    round_rect(g, x, y + 21.0, w, 5.0, 2.5, theme::surface_active());
+    round_rect(g, x, y + 21.0, w * (line.pct / 100.0).clamp(0.0, 1.0), 5.0, 2.5, account_usage_pct_color(line.pct));
+    let reset = line.resets_at.and_then(|at| crate::resets_in_label(Some(at)))
+        .map(|value| format!("{value} 뒤 초기화")).unwrap_or_default();
+    let reset = if stale { format!("최근 값 · {reset}").trim_end_matches(" · ").to_string() } else { reset };
+    let reset = fit(g, &reset, w, 10.0, false);
+    draw_text(g, x, y + 34.0, &reset, 10.0, theme::text_mute(), false);
 }
 
 fn cursor_shape_label(shape: cursor::CursorShape) -> &'static str {
@@ -6875,7 +6719,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "창과 단추에 비를 내립니다. 끄면 그리는 비용이 없습니다",
         ),
         SettingsCat::Pet => (
-            "펫",
+            "Live2D 펫",
             "sparkles",
             "바탕화면에 서서 학생들 상황을 알려 주는 캐릭터입니다",
         ),
