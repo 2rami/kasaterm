@@ -1506,10 +1506,12 @@ pub(crate) fn still_current(learned: Learned, seen: &[Slot], now: &[Slot], store
             _ => false,
         })
     };
-    Learned {
-        keys: learned.keys.into_iter().filter(|(id, _)| unchanged(id)).collect(),
-        owners: learned.owners.into_iter().filter(|(id, owner)| unchanged(id) && holds(id, owner)).collect(),
-    }
+    let owners: BTreeMap<_, _> = learned.owners.into_iter()
+        .filter(|(id, owner)| unchanged(id) && holds(id, owner)).collect();
+    // A mapping learned before a relogin is stale even if the slot path and label did not change.
+    let keys = learned.keys.into_iter()
+        .filter(|(id, key)| owners.get(id).is_some_and(|owner| &owner.key == key)).collect();
+    Learned { keys, owners }
 }
 
 /// 관문 로그인이 없을 때도 관문 토큰으로 도는 슬롯은 끊기기 전에 알린다.

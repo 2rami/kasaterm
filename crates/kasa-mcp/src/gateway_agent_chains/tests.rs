@@ -522,16 +522,23 @@ async fn late_answers_record_nothing_for_a_signed_out_deleted_or_relogged_slot()
     // The device signed out while the list was in flight: the owner of the held token is not learned.
     let (learned, _) = sync_once(&device, &seen, &map, &BTreeMap::new(), &store, &|| false, &ledger).await.unwrap();
     assert!(learned.owners.is_empty());
+    let store = Memory::with(&[("acct-1", logged_in("access-personal-local", "refresh-local"))]);
     let (learned, _) = sync_once(&device, &seen, &map, &BTreeMap::new(), &store, &|| true, &ledger).await.unwrap();
+    assert_eq!(learned.keys.get("acct-1").map(String::as_str), Some(PERSONAL));
     assert_eq!(learned.owners["acct-1"].fingerprint, crate::agent_chains::fingerprint("access-personal-g"));
 
     let again = |learned: &crate::agent_chains::Learned| crate::agent_chains::Learned { keys: learned.keys.clone(), owners: learned.owners.clone() };
     let kept = crate::agent_chains::still_current(again(&learned), &seen, &seen, &store);
     assert_eq!(kept.owners.len(), 1);
+    assert_eq!(kept.keys.len(), 1);
     // Deleted, moved to another store, or relogged before the save: nothing is written for it.
-    assert!(crate::agent_chains::still_current(again(&learned), &seen, &[], &store).owners.is_empty());
+    let empty = |value: crate::agent_chains::Learned| {
+        assert!(value.owners.is_empty());
+        assert!(value.keys.is_empty());
+    };
+    empty(crate::agent_chains::still_current(again(&learned), &seen, &[], &store));
     let moved = [Slot { store: Some("elsewhere".into()), ..slot("acct-1", Some(PERSONAL)) }];
-    assert!(crate::agent_chains::still_current(again(&learned), &seen, &moved, &store).owners.is_empty());
+    empty(crate::agent_chains::still_current(again(&learned), &seen, &moved, &store));
     let relogged = Memory::with(&[("acct-1", logged_in("access-personal-relogin", "refresh-relogin"))]);
-    assert!(crate::agent_chains::still_current(again(&learned), &seen, &seen, &relogged).owners.is_empty());
+    empty(crate::agent_chains::still_current(again(&learned), &seen, &seen, &relogged));
 }
