@@ -399,11 +399,12 @@ fn draw_cell(
     } else if hover {
         theme::surface_hover()
     } else {
-        theme::with_alpha(theme::border(), 0x66)
+        // 칸은 기기색을 문다 — 이 기기 배치도의 다른 기기 칸과 같은 규칙.
+        crate::render::pane_identity::minimap_border(theme::panel_bg(), Some(&machine.label), theme::with_alpha(theme::border(), 0x66))
     });
     if mw > 5.0 && mh > 5.0 {
         round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5,
-            theme::panel_bg());
+            crate::render::pane_identity::minimap_background(theme::panel_bg(), Some(&machine.label)));
     }
     if let Some((col, period)) = signal {
         if mw > 5.0 && mh > 5.0 {

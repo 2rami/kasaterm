@@ -134,6 +134,9 @@ struct SidebarRowInfo {
     /// 원격 pane 이면 그 기계 이름. 페인트 루프는 self 를 못 읽으므로(2887 주석)
     /// 여기서 프레임당 1회 떠 둔다.
     machine: Option<String>,
+    /// 배치도 칸을 물들일 기기 열쇠(`MachineIdentity::label`). 다른 기기에서 온 칸만 든다 —
+    /// 기기색은 배치도에서만 쓰고 칸 바탕은 늘 테마색이다.
+    device: Option<String>,
 }
 
 /// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
@@ -2159,6 +2162,7 @@ impl App {
                     crate::info::cached_local_machine_name(),
                 );
                 let machine = identity.remote.then(|| identity.name.clone());
+                let device = identity.remote.then(|| identity.label.clone());
                 let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
@@ -2270,6 +2274,7 @@ impl App {
                     compact_pct: act.and_then(|a| a.compact_pct),
                     busy_secs,
                     machine,
+                    device,
                 }
             }
         };

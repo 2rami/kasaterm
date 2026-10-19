@@ -494,7 +494,12 @@ pub(super) fn paint_layouts(
             } else if hov {
                 theme::surface_hover()
             } else {
-                theme::with_alpha(theme::border(), 0x66)
+                // 다른 기기 칸은 테두리가 기기색을 문다 — 기기색이 서는 곳은 배치도뿐이다.
+                pane_identity::minimap_border(
+                    theme::panel_bg(),
+                    info.device.as_deref(),
+                    theme::with_alpha(theme::border(), 0x66),
+                )
             },
         );
         // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
@@ -508,7 +513,8 @@ pub(super) fn paint_layouts(
                 mw - 3.0,
                 mh - 3.0,
                 1.5,
-                theme::panel_bg(),
+                // 고른 칸도 채움은 기기색 그대로다 — 테두리(accent)가 「여기」를, 색이 「어느 기기」를 말한다.
+                pane_identity::minimap_background(theme::panel_bg(), info.device.as_deref()),
             );
         }
         // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
@@ -698,11 +704,11 @@ pub(super) fn paint_layouts(
             mw,
             mh,
             2.0,
-            if hov {
+            pane_identity::minimap_background(if hov {
                 theme::surface_hover()
             } else {
                 theme::with_alpha(theme::surface(), 0x80)
-            },
+            }, info.device.as_deref()),
         );
         if let Some((col, period)) = signal {
             if mw > 5.0 && mh > 5.0 {
