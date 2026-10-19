@@ -39,10 +39,21 @@ fn default_migration_request(
     let row = snapshot.sessions.iter().find(|row| row.identity.pane_id == pane)
         .ok_or_else(|| anyhow::anyhow!("이사할 세션이 사라졌어요"))?;
     anyhow::ensure!(row.identity.session_id.is_some(), "대화 번호를 아직 확인하지 못했어요");
-    let room = row.room_id.as_ref().and_then(|id| snapshot.rooms.iter().find(|room| &room.id == id))
-        .ok_or_else(|| anyhow::anyhow!("출발 방을 확인하지 못했어요"))?;
+    let title = match &row.room_id {
+        Some(id) => snapshot.rooms.iter().find(|room| &room.id == id)
+            .ok_or_else(|| anyhow::anyhow!("출발 방을 확인하지 못했어요"))?.title.clone(),
+        // Undocked terminals remain valid sources without a leaf in the main window's room trees.
+        None => if row.title.trim().is_empty() { "이사 온 방".into() } else { row.title.clone() },
+    };
     Ok(MigrateRequest { session: row.identity.clone(), destination_machine,
-        room: RoomTarget::New(room.title.clone()) })
+        room: RoomTarget::New(title) })
+}
+
+fn release_migration_input(expected: &std::sync::Weak<kasa_pty::PtySession>, current: &Arc<kasa_pty::PtySession>) {
+    // An image paste can reserve a new draft revision while the migration still owns this input lock.
+    if expected.ptr_eq(&Arc::downgrade(current)) {
+        let _ = current.set_input_closed(false, false);
+    }
 }
 
 fn ensure_prepared_destination(snapshot: &kasa_socket::transfer::MachineSnapshot, expected: &str) -> Result<()> {
@@ -570,10 +581,9 @@ impl App {
             Ok(r) => self.migrate_seat(pid, *r).map_err(|e| format!("{e:#}")),
         };
         if self.migrate_frozen.as_ref().is_some_and(|(pane, _, _)| pane == pid) {
-            if let Some((_, frozen, revision)) = self.migrate_frozen.take() {
-                if let Some(session) = self.pty.get(pid).filter(|current| frozen.ptr_eq(&Arc::downgrade(current))
-                    && current.input_revision() == revision && self.transfer_surface_open(pid)) {
-                    let _ = session.set_input_closed(false, false);
+            if let Some((_, frozen, _)) = self.migrate_frozen.take() {
+                if let Some(session) = self.pty.get(pid).filter(|_| self.transfer_surface_open(pid)) {
+                    release_migration_input(&frozen, session);
                 }
             }
         }
@@ -1171,6 +1181,33 @@ mod transfer_concurrency_tests {
         snapshot.sessions[0].identity = identity;
         snapshot.rooms.clear();
         assert!(default_migration_request(&snapshot, "%4", "mini".into()).is_err());
+        snapshot.sessions[0].room_id = None;
+        snapshot.sessions[0].title = "별도 작업".into();
+        assert_eq!(default_migration_request(&snapshot, "%4", "mini".into()).unwrap().room,
+            RoomTarget::New("별도 작업".into()));
+    }
+
+    #[test]
+    fn failed_migration_releases_its_input_even_after_a_draft_reservation() {
+        let session = || {
+            let (tx, events) = crossbeam_channel::unbounded();
+            let pty = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions::default(),
+                kasa_pty::ExternalIo { events, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}) }).unwrap();
+            (Arc::new(pty), tx)
+        };
+        let (source, _events) = session();
+        source.set_input_closed(true, false).unwrap();
+        let revision = source.input_revision();
+        let frozen = Arc::downgrade(&source);
+        source.reserve_input_draft();
+        assert!(source.input_revision() > revision);
+        release_migration_input(&frozen, &source);
+        assert!(!source.input_closed());
+        assert!(source.input_draft_present());
+        let (replacement, _replacement_events) = session();
+        replacement.set_input_closed(true, false).unwrap();
+        release_migration_input(&frozen, &replacement);
+        assert!(replacement.input_closed());
     }
 
     #[test]
