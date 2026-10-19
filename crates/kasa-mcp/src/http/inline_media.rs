@@ -35,13 +35,12 @@ fn failure(e: &std::io::Error) -> axum::response::Response {
     }
 }
 
-fn checked_id(params: &HashMap<String, String>) -> Result<String, axum::response::Response> {
-    let id = params.get("id").map(String::as_str).unwrap_or("");
-    if registry::valid_id(id) {
-        Ok(id.to_string())
-    } else {
-        Err((StatusCode::BAD_REQUEST, "invalid media id").into_response())
-    }
+fn checked_id(params: &HashMap<String, String>) -> Option<String> {
+    params.get("id").filter(|id| registry::valid_id(id)).cloned()
+}
+
+fn bad_id() -> axum::response::Response {
+    (StatusCode::BAD_REQUEST, "invalid media id").into_response()
 }
 
 async fn blocking<T: Send + 'static>(
@@ -62,9 +61,8 @@ async fn metadata_handler(
     if let Some(denied) = guest_denied(&req) {
         return denied;
     }
-    let id = match checked_id(&params) {
-        Ok(id) => id,
-        Err(resp) => return resp,
+    let Some(id) = checked_id(&params) else {
+        return bad_id();
     };
     match blocking(move || stores().metadata(&id)).await {
         Ok(media) => ([(header::CACHE_CONTROL, IMMUTABLE)], Json(media)).into_response(),
@@ -80,9 +78,8 @@ async fn poster_handler(
     if let Some(denied) = guest_denied(&req) {
         return denied;
     }
-    let id = match checked_id(&params) {
-        Ok(id) => id,
-        Err(resp) => return resp,
+    let Some(id) = checked_id(&params) else {
+        return bad_id();
     };
     match blocking(move || stores().read_poster(&id)).await {
         Ok(bytes) => (
@@ -102,9 +99,8 @@ async fn file_handler(
     if let Some(denied) = guest_denied(&req) {
         return denied;
     }
-    let id = match checked_id(&params) {
-        Ok(id) => id,
-        Err(resp) => return resp,
+    let Some(id) = checked_id(&params) else {
+        return bad_id();
     };
     let offset = params.get("offset").and_then(|v| v.parse::<u64>().ok());
     let len = params.get("len").and_then(|v| v.parse::<usize>().ok());
