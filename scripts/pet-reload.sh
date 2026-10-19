@@ -67,11 +67,12 @@ if [[ -n "${KASATERM_PET_DIR:-}" ]]; then MODELDIR="$KASATERM_PET_DIR"; PIDFILE=
 else MODELDIR="$HOME/.config/kasaterm/pet"; PIDFILE="$HOME/.config/kasaterm/pet.pid"; fi
 MODEL="${KASATERM_PET_MODEL:-}"
 if [[ -z "$MODEL" ]]; then
+  # 고른 캐릭터 → 기본 캐릭터(huohuo). 다른 캐릭터로 대신 띄우지 않는다(앱과 같은 규칙).
   NAME="$(cat "$MODELDIR/current" 2>/dev/null || true)"
   MODEL="$(ls "$MODELDIR/${NAME:-x}"/*.model3.json 2>/dev/null | head -1 || true)"
-  [[ -n "$MODEL" ]] || MODEL="$(ls "$MODELDIR"/*/*.model3.json 2>/dev/null | head -1 || true)"
+  [[ -n "$MODEL" ]] || MODEL="$(ls "$MODELDIR"/huohuo/*.model3.json 2>/dev/null | head -1 || true)"
 fi
-[[ -n "$MODEL" ]] || { echo "[pet] 띄울 모델이 없다 — scripts/fetch-pet-model.sh 로 받아 둬라" >&2; exit 1; }
+[[ -n "$MODEL" ]] || { echo "[pet] 띄울 모델이 없다 — scripts/fetch-pet-model.sh 로 받아 둬라(huohuo 는 KASATERM_PET_SOURCE 필요)" >&2; exit 1; }
 
 if [[ -f "$PIDFILE" ]]; then
   PID="$(tr -dc 0-9 < "$PIDFILE" || true)"
@@ -115,7 +116,7 @@ print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id
 fi
 # 클로드 pane 에서 불러도 그 표식을 펫에 물리지 않는다.
 env -u CLAUDE_CODE_CHILD_SESSION -u TEAMMATE_MODE -u SESSION_ID \
-  nohup "$INSTALLED/Contents/Resources/kasapet" "$MODEL" >"$LOG" 2>&1 &
+  KASAPET_DIR="$MODELDIR" nohup "$INSTALLED/Contents/Resources/kasapet" "$MODEL" >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 disown
 sleep 1

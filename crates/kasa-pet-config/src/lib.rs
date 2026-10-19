@@ -1,3 +1,5 @@
+pub mod models;
+
 use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},

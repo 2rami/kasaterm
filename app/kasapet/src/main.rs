@@ -1629,8 +1629,11 @@ fn main() {
     eprintln!("모션 로드: {}", if motion.is_some() { "성공" } else { "실패" });
     // 캐릭터 폴더(`<pet>/<이름>/<이름>.model3.json`)에서 왔으면 그 위가 펫 자리다.
     // env 로 모델을 직접 준 검증 실행은 그 구조가 아니므로 자리 저장을 안 한다.
+    // kasaterm 은 그 자리를 KASAPET_DIR 로 알려 준다 — 기본 캐릭터만 받은 기기엔 고른 기록
+    // (`current`)이 없어서 그것만으로는 펫 자리를 못 가린다.
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let pet_dir = dir.parent().filter(|p| p.join("current").exists()).map(|p| p.to_path_buf());
+    let pet_dir = std::env::var_os("KASAPET_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from)
+        .or_else(|| dir.parent().filter(|p| p.join("current").exists()).map(|p| p.to_path_buf()));
     let (mut x, mut y, mut scale) = (60.0_f64, 80.0_f64, 1.0_f32);
     if let Some(t) = pet_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("state.json")).ok()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {

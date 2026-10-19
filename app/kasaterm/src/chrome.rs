@@ -4229,20 +4229,7 @@ fn notify_osascript(title: &str, body: &str) {
 
 /// 받아 둔 캐릭터 이름들(폴더 이름). 설정 화면의 목록이 이걸 그린다.
 pub(crate) fn pet_characters() -> Vec<String> {
-    let Some(d) = pet_model_dir() else {
-        return Vec::new();
-    };
-    let mut v: Vec<String> = std::fs::read_dir(&d)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| model3_in(p).is_some())
-                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
-    v.sort();
-    v
+    pet_model_dir().map(|d| kasa_pet_config::models::installed(&d)).unwrap_or_default()
 }
 
 /// 바깥에서 들어온 한 줄을 꺼낸다(먼저 온 것부터, 꺼내면 지운다).
@@ -4384,7 +4371,7 @@ pub(crate) fn ensure_pet_previews() {
     }
     std::thread::spawn(move || {
         for name in todo {
-            let Some(model) = model3_in(&dir.join(&name)) else {
+            let Some(model) = kasa_pet_config::models::model3_in(&dir.join(&name)) else {
                 continue;
             };
             let out = dir.join(&name).join("preview.png");
@@ -4399,20 +4386,18 @@ pub(crate) fn ensure_pet_previews() {
     });
 }
 
-/// 지금 고른 캐릭터. 아직 안 골랐으면 첫 칸이 뜨므로 그것을 답한다 — 화면에 아무것도
-/// 안 골라진 채로 두면 「어느 게 나오는 건지」를 알 길이 없다.
+/// 지금 고른 캐릭터. 아직 안 골랐으면 기본 캐릭터(곽향)를 답한다 — 받기 전이어도 그렇다.
+/// 다른 캐릭터로 대신 띄우지 않고 그것을 받게 하므로, 화면도 그 칸이 골라져 보여야 한다.
 pub(crate) fn pet_current_character() -> Option<String> {
-    let d = pet_model_dir()?;
-    let named = std::fs::read_to_string(d.join("current"))
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|n| !n.is_empty() && d.join(n).is_dir());
-    named.or_else(|| pet_characters().into_iter().next())
+    pet_model_dir().map(|d| kasa_pet_config::models::current(&d))
 }
 
 /// 캐릭터를 고른다. 켜져 있으면 껐다 켜야 바뀐다 — 펫은 뜰 때 모델을 읽는다.
 pub(crate) fn set_pet_character(name: &str) -> Result<(), String> {
     let d = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
+    if !kasa_pet_config::models::is_installed(&d, name) {
+        return Err("아직 받지 않은 캐릭터예요. 먼저 받아 주세요".into());
+    }
     std::fs::write(d.join("current"), name)
         .map_err(|_| "펫 캐릭터를 저장하지 못했어요. 다시 선택해 주세요")?;
     forget_pet_shown();
@@ -4545,91 +4530,404 @@ pub(crate) fn take_pet_failure() -> Option<String> {
     pet_failure().lock().ok()?.take()
 }
 
-fn pet_download_command(
+fn set_pet_failure(message: String) {
+    if let Ok(mut failure) = pet_failure().lock() {
+        *failure = Some(message);
+    }
+}
+
+/// 설정 화면의 캐릭터 칸 하나.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PetModel {
+    pub(crate) name: String,
+    pub(crate) label: String,
+    pub(crate) selected: bool,
+    pub(crate) default: bool,
+    /// 받기 단추를 그려도 되나. 받을 곳이 없는 캐릭터는 대신 `pet_model_source_hint` 를 그린다.
+    pub(crate) can_download: bool,
+    pub(crate) state: PetModelState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PetModelState {
+    Installed,
+    Missing,
+    /// 비율만 쓴다 — 단위가 캐릭터마다 다르다(파일 수·바이트). total 0 은 전체를 모를 때다.
+    Downloading { done: u64, total: u64 },
+    Failed(String),
+}
+
+#[derive(Clone, Debug)]
+enum PetJob {
+    /// start: 다 받으면 펫을 띄운다(받은 캐릭터 없이 펫을 켰을 때).
+    Running { done: u64, total: u64, start: bool },
+    Failed(String),
+}
+
+fn pet_jobs() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<String, PetJob>> {
+    static JOBS: std::sync::Mutex<std::collections::BTreeMap<String, PetJob>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    JOBS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+const PET_SOURCE_HINT: &str = "곽향 모델은 원작자가 2차 배포를 금지해 앱에 들어 있지 않아요. \
+원작자 BOOTH 페이지에서 무료로 받은 zip 을 골라 주시면 설치해요";
+
+/// 받을 수 있는 캐릭터(곽향 → Live2D 여덟)와 사람이 직접 넣은 캐릭터. 받기·진행·실패를 함께 답한다.
+pub(crate) fn pet_models() -> Vec<PetModel> {
+    use kasa_pet_config::models;
+    let Some(dir) = pet_model_dir() else {
+        return Vec::new();
+    };
+    let current = models::current(&dir);
+    let jobs = pet_jobs().clone();
+    let extra = models::installed(&dir).into_iter().filter(|n| models::character(n).is_none());
+    models::CATALOG
+        .iter()
+        .map(|c| (c.name.to_string(), c.label.to_string()))
+        .chain(extra.map(|n| (n.clone(), n)))
+        .map(|(name, label)| {
+            let state = if models::is_installed(&dir, &name) {
+                PetModelState::Installed
+            } else {
+                match jobs.get(&name) {
+                    Some(PetJob::Running { done, total, .. }) => {
+                        PetModelState::Downloading { done: *done, total: *total }
+                    }
+                    Some(PetJob::Failed(error)) => PetModelState::Failed(error.clone()),
+                    None => PetModelState::Missing,
+                }
+            };
+            let can_download = matches!(state, PetModelState::Missing | PetModelState::Failed(_))
+                && models::can_download(&dir, &name);
+            PetModel {
+                selected: name == current,
+                default: name == models::DEFAULT,
+                can_download,
+                state,
+                name,
+                label,
+            }
+        })
+        .collect()
+}
+
+/// 받을 곳이 이 기기에 없는 캐릭터의 안내. 이미 있거나 받을 수 있으면 None.
+pub(crate) fn pet_model_source_hint(name: &str) -> Option<&'static str> {
+    use kasa_pet_config::models;
+    let dir = pet_model_dir()?;
+    let local = models::character(name)?.source == models::Source::Local;
+    (local && !models::is_installed(&dir, name) && !models::can_download(&dir, name))
+        .then_some(PET_SOURCE_HINT)
+}
+
+/// 권리자의 배포 페이지. 받을 곳이 없는 캐릭터의 안내에 링크로 건다.
+pub(crate) fn pet_model_source_page(name: &str) -> Option<&'static str> {
+    kasa_pet_config::models::character(name)?.page
+}
+
+/// 사람이 받아 온 zip(또는 풀어 둔 폴더)으로 설치한다. 그 자리를 이 기기의 `sources.json` 에
+/// 적어 두므로, 지워진 뒤 다시 받을 때도 같은 파일을 쓴다.
+pub(crate) fn install_pet_model_from(name: &str, path: &std::path::Path) -> Result<(), String> {
+    let dir = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
+    if !path.exists() {
+        return Err("고른 파일을 찾지 못했어요".into());
+    }
+    kasa_pet_config::models::set_local_source(&dir, name, &path.to_string_lossy())
+        .map_err(|_| "받을 곳을 저장하지 못했어요. 폴더 권한을 확인해 주세요".to_string())?;
+    download_pet_model(name)
+}
+
+pub(crate) fn pet_download_active() -> bool {
+    pet_jobs().values().any(|job| matches!(job, PetJob::Running { .. }))
+}
+
+/// 켜기를 눌렀는데 아직 받는 중이라, 다 받으면 뜰 펫이 있나. 켜짐 표시는 `pet_pid` 와 함께 본다.
+pub(crate) fn pet_start_pending() -> bool {
+    pet_jobs().values().any(|job| matches!(job, PetJob::Running { start: true, .. }))
+}
+
+/// 캐릭터 하나를 뒤에서 받는다. 받아도 고르지는 않는다 — 고르는 것은 사람 몫이다.
+pub(crate) fn download_pet_model(name: &str) -> Result<(), String> {
+    fetch_pet_model(name, false)
+}
+
+fn fetch_pet_model(name: &str, start: bool) -> Result<(), String> {
+    use kasa_pet_config::models;
+    let dir = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
+    if models::is_installed(&dir, name) {
+        return Ok(());
+    }
+    if !models::can_download(&dir, name) {
+        return Err(pet_model_source_hint(name).unwrap_or("받을 곳이 없는 캐릭터예요").into());
+    }
+    let script = pet_fetch_script()
+        .ok_or("캐릭터를 받는 파일이 없어요. 카사텀 앱을 다시 설치해 주세요")?;
+    {
+        let mut jobs = pet_jobs();
+        if let Some(PetJob::Running { start: pending, .. }) = jobs.get_mut(name) {
+            *pending |= start;
+            return Ok(());
+        }
+        jobs.insert(name.to_string(), PetJob::Running { done: 0, total: 0, start });
+    }
+    let command = pet_fetch_command(&script, &dir, name, models::local_source(&dir, name).as_deref());
+    let name = name.to_string();
+    std::thread::spawn(move || {
+        let result = run_pet_fetch(command, &dir, &name, |done, total| {
+            if let Some(PetJob::Running { done: d, total: t, .. }) = pet_jobs().get_mut(&name) {
+                (*d, *t) = (done, total);
+            }
+        });
+        let start = matches!(pet_jobs().get(&name), Some(PetJob::Running { start: true, .. }));
+        match result {
+            Ok(()) => {
+                pet_jobs().remove(&name);
+                if start && pet_pid().is_none() {
+                    if let Err(error) = toggle_pet() {
+                        set_pet_failure(error);
+                    }
+                }
+            }
+            Err(error) => {
+                pet_jobs().insert(name, PetJob::Failed(error.clone()));
+                if start {
+                    set_pet_failure(error);
+                }
+            }
+        }
+        forget_pet_shown();
+    });
+    Ok(())
+}
+
+fn pet_fetch_command(
     script: &std::path::Path,
     dir: &std::path::Path,
-    bin: &std::path::Path,
+    name: &str,
+    source: Option<&str>,
 ) -> std::process::Command {
-    // 모델은 캐릭터별 하위 폴더에 저장된다. 경로는 셸 코드에 끼우지 않고 인자로 넘긴다.
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c").arg(r#"
-bash "$1" "$2" >&2 || exit $?
-current=$(cat "$2/current" 2>/dev/null)
-if [ -n "$current" ]; then
-    for model in "$2/$current/"*.model3.json; do
-        [ ! -f "$model" ] || exec "$3" "$model"
-    done
-fi
-for model in "$2"/*/*.model3.json "$2"/*.model3.json; do
-    [ ! -f "$model" ] || exec "$3" "$model"
-done
-exit 1
-"#).arg("kasaterm-pet").arg(script).arg(dir).arg(bin);
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(script)
+        .arg(dir)
+        .arg(name)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped());
+    match source {
+        Some(source) => cmd.env("KASATERM_PET_SOURCE", source),
+        None => cmd.env_remove("KASATERM_PET_SOURCE"),
+    };
     cmd
 }
 
-#[cfg(all(test, unix))]
-mod pet_start_tests {
-    use super::pet_download_command;
-    use std::path::PathBuf;
+/// 받기 스크립트의 `@progress` 줄을 넘긴다. 스크립트가 성공이라 해도 모델 파일이 안 서 있으면 실패다.
+fn run_pet_fetch(
+    mut command: std::process::Command,
+    dir: &std::path::Path,
+    name: &str,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), String> {
+    use std::io::BufRead;
+    let mut child = command
+        .spawn()
+        .map_err(|_| "캐릭터를 받는 도구를 시작하지 못했어요".to_string())?;
+    if let Some(out) = child.stdout.take() {
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            let mut n = line
+                .strip_prefix("@progress ")
+                .into_iter()
+                .flat_map(str::split_whitespace)
+                .map(str::parse::<u64>);
+            if let (Some(Ok(done)), Some(Ok(total))) = (n.next(), n.next()) {
+                progress(done, total);
+            }
+        }
+    }
+    let code = child.wait().ok().and_then(|status| status.code());
+    if code == Some(0) && kasa_pet_config::models::is_installed(dir, name) {
+        // 덧붙임을 못 얹어도 모델은 뜬다 — 상태 모션만 빠진다.
+        let _ = kasa_pet_config::models::apply_overlay(dir, name);
+        return Ok(());
+    }
+    Err(if code == Some(3) {
+        PET_SOURCE_HINT
+    } else {
+        "캐릭터를 받지 못했어요. 네트워크나 받을 곳을 확인하고 다시 받아 주세요"
+    }
+    .into())
+}
 
-    struct Fixture(PathBuf);
-    impl Fixture {
+#[cfg(all(test, unix))]
+mod pet_fetch_tests {
+    use super::{pet_fetch_command, run_pet_fetch, PET_SOURCE_HINT};
+    use std::path::{Path, PathBuf};
+
+    struct Scratch(PathBuf);
+    impl Scratch {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!("kasaterm-pet-start-{}-{} 'quoted'",
+            let path = std::env::temp_dir().join(format!("kasaterm-pet-fetch-{}-{} 'quoted'",
                 std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-            std::fs::create_dir(&path).unwrap();
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(path.join("pet")).unwrap();
             Self(path)
         }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
-    }
-
-    #[test]
-    fn first_download_starts_selected_nested_model_with_quoted_paths() {
-        let dir = Fixture::new();
-        let script = dir.0.join("fetch model.sh");
-        std::fs::write(&script, r#"
-mkdir -p "$1/Mao" "$1/Ren"
-touch "$1/Mao/Mao.model3.json" "$1/Ren/Ren.model3.json"
-printf Ren > "$1/current"
-"#).unwrap();
-        let output = pet_download_command(&script, &dir.0, std::path::Path::new("/bin/echo"))
-            .output().unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(),
-            dir.0.join("Ren/Ren.model3.json").to_str().unwrap());
-    }
-
-    #[test]
-    fn failed_download_does_not_start_pet() {
-        let dir = Fixture::new();
-        let script = dir.0.join("fetch.sh");
-        std::fs::write(&script, "exit 23\n").unwrap();
-        let output = pet_download_command(&script, &dir.0, std::path::Path::new("/bin/echo"))
-            .output().unwrap();
-        assert_eq!(output.status.code(), Some(23));
-        assert!(output.stdout.is_empty());
-    }
-
-    #[test]
-    fn missing_selection_uses_available_nested_or_legacy_model() {
-        for nested in [true, false] {
-            let dir = Fixture::new();
-            let script = dir.0.join("fetch.sh");
-            std::fs::write(&script, "exit 0\n").unwrap();
-            std::fs::write(dir.0.join("current"), "missing").unwrap();
-            let model_dir = if nested { dir.0.join("Mao") } else { dir.0.clone() };
-            std::fs::create_dir_all(&model_dir).unwrap();
-            let model = model_dir.join("Mao.model3.json");
-            std::fs::write(&model, "{}").unwrap();
-            let output = pet_download_command(&script, &dir.0, std::path::Path::new("/bin/echo"))
-                .output().unwrap();
-            assert!(output.status.success());
-            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), model.to_str().unwrap());
+        fn pet(&self) -> PathBuf {
+            self.0.join("pet")
         }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn script() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fetch-pet-model.sh")
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".downloading-"))
+            .collect()
+    }
+
+    /// 원본처럼 상태 모션 묶음이 없는 model3.json.
+    fn model_folder(at: &Path) {
+        std::fs::create_dir_all(at.join("huohuo.8192")).unwrap();
+        std::fs::write(at.join("huohuo.model3.json"), r#"{"Version":3,"FileReferences":{"Moc":"huohuo.moc3"}}"#).unwrap();
+        std::fs::write(at.join("haoqi.motion3.json"), "{}").unwrap();
+        std::fs::write(at.join("huohuo.8192/texture_00.png"), "png").unwrap();
+        std::fs::write(at.join("character.json"), "theirs").unwrap();
+    }
+
+    #[test]
+    fn restricted_model_comes_only_from_this_machines_source_and_selects_nothing() {
+        let s = Scratch::new();
+        let err = run_pet_fetch(pet_fetch_command(&script(), &s.pet(), "huohuo", None), &s.pet(), "huohuo", |_, _| {});
+        assert_eq!(err, Err(PET_SOURCE_HINT.to_string()));
+        assert!(!s.pet().join("huohuo").exists());
+
+        let src = s.0.join("받은 곳");
+        model_folder(&src);
+        let ok = run_pet_fetch(
+            pet_fetch_command(&script(), &s.pet(), "huohuo", Some(src.to_str().unwrap())),
+            &s.pet(), "huohuo", |_, _| {});
+        assert_eq!(ok, Ok(()));
+        assert!(s.pet().join("huohuo/huohuo.8192/texture_00.png").is_file());
+        assert!(src.join("huohuo.model3.json").is_file(), "받은 곳의 원본은 그대로 둔다");
+        assert!(!s.pet().join("current").exists(), "받기가 고른 캐릭터를 대신 적으면 안 된다");
+        assert!(leftovers(&s.pet()).is_empty());
+        let model = std::fs::read_to_string(s.pet().join("huohuo/huohuo.model3.json")).unwrap();
+        assert!(model.contains("\"Think\"") && model.contains("haoqi.motion3.json"), "펫 상태 모션 덧붙임: {model}");
+        assert!(s.pet().join("huohuo/soul_ghost.exp3.json").is_file());
+        assert!(!src.join("soul_ghost.exp3.json").exists(), "덧붙임은 설치본에만");
+    }
+
+    #[test]
+    fn a_folder_already_there_keeps_its_own_files() {
+        let s = Scratch::new();
+        std::fs::create_dir_all(s.pet().join("huohuo")).unwrap();
+        std::fs::write(s.pet().join("huohuo/character.json"), "mine").unwrap();
+        let src = s.0.join("src");
+        model_folder(&src);
+        run_pet_fetch(
+            pet_fetch_command(&script(), &s.pet(), "huohuo", Some(src.to_str().unwrap())),
+            &s.pet(), "huohuo", |_, _| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(s.pet().join("huohuo/character.json")).unwrap(), "mine");
+        assert!(s.pet().join("huohuo/huohuo.model3.json").is_file());
+    }
+
+    #[test]
+    fn zip_source_unpacks_a_nested_model_folder() {
+        if !Path::new("/usr/bin/zip").exists() {
+            return;
+        }
+        let s = Scratch::new();
+        model_folder(&s.0.join("pack/huohuo"));
+        let zip = s.0.join("huohuo.zip");
+        assert!(std::process::Command::new("/usr/bin/zip").arg("-qr").arg(&zip).arg("huohuo")
+            .current_dir(s.0.join("pack")).status().unwrap().success());
+        let url = format!("file://{}", zip.to_str().unwrap().replace(' ', "%20").replace('\'', "%27"));
+        let mut seen = Vec::new();
+        run_pet_fetch(pet_fetch_command(&script(), &s.pet(), "huohuo", Some(&url)),
+            &s.pet(), "huohuo", |d, t| seen.push((d, t))).unwrap();
+        assert!(s.pet().join("huohuo/huohuo.8192/texture_00.png").is_file());
+        assert!(seen.last().is_some_and(|&(d, t)| t > 0 && d <= t), "{seen:?}");
+        assert!(leftovers(&s.pet()).is_empty());
+        // 사람이 받아 온 zip 을 고른 경우 — 주소가 아니라 파일 경로다.
+        std::fs::remove_dir_all(s.pet().join("huohuo")).unwrap();
+        run_pet_fetch(pet_fetch_command(&script(), &s.pet(), "huohuo", zip.to_str()),
+            &s.pet(), "huohuo", |_, _| {}).unwrap();
+        assert!(s.pet().join("huohuo/huohuo.8192/texture_00.png").is_file());
+    }
+
+    /// Live2D 캐릭터 길은 네트워크 대신 가짜 curl 로 — 목록 API 와 파일 하나씩 받기를 흉내 낸다.
+    fn fake_curl(s: &Scratch, fail_raw: bool) -> PathBuf {
+        let bin = s.0.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let tree = r#"{
+  "tree": [
+    {
+      "path": "Samples/Resources/Ren/Ren.model3.json",
+      "type": "blob"
+    },
+    {
+      "path": "Samples/Resources/Ren/motions/idle.motion3.json",
+      "type": "blob"
+    },
+    {
+      "path": "Samples/Resources/Rice/Rice.model3.json",
+      "type": "blob"
+    }
+  ]
+}"#;
+        std::fs::write(s.0.join("tree.json"), tree).unwrap();
+        let curl = bin.join("curl");
+        std::fs::write(&curl, format!(r#"#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac
+  shift
+done
+case "$url" in
+  *api.github.com*) cat "{tree}" ;;
+  *) [ {fail} = 0 ] || exit 22; printf '{{}}' > "$out" ;;
+esac
+"#, tree = s.0.join("tree.json").display(), fail = fail_raw as u8)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    fn with_path(mut cmd: std::process::Command, bin: &Path) -> std::process::Command {
+        cmd.env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
+        cmd
+    }
+
+    #[test]
+    fn live2d_character_reports_file_progress_and_lands_whole() {
+        let s = Scratch::new();
+        let bin = fake_curl(&s, false);
+        let mut seen = Vec::new();
+        run_pet_fetch(with_path(pet_fetch_command(&script(), &s.pet(), "Ren", None), &bin),
+            &s.pet(), "Ren", |d, t| seen.push((d, t))).unwrap();
+        assert_eq!(seen, vec![(0, 2), (1, 2), (2, 2)]);
+        assert!(s.pet().join("Ren/motions/idle.motion3.json").is_file());
+        assert!(!s.pet().join("Rice").exists());
+        assert!(leftovers(&s.pet()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_file_leaves_no_half_character_behind() {
+        let s = Scratch::new();
+        let bin = fake_curl(&s, true);
+        let err = run_pet_fetch(with_path(pet_fetch_command(&script(), &s.pet(), "Ren", None), &bin),
+            &s.pet(), "Ren", |_, _| {});
+        assert!(err.is_err());
+        assert!(!s.pet().join("Ren").exists());
+        assert!(leftovers(&s.pet()).is_empty());
     }
 }
 
@@ -4647,26 +4945,35 @@ fn toggle_pet_now() -> Result<PetToggle, String> {
         }
         return Ok(PetToggle::Stopped);
     }
+    // 받는 중에 다시 누르면 다 받은 뒤 띄우기만 거둔다. 받기는 마저 한다.
+    {
+        let mut jobs = pet_jobs();
+        let mut pending = false;
+        for job in jobs.values_mut() {
+            if let PetJob::Running { start, .. } = job {
+                pending |= std::mem::replace(start, false);
+            }
+        }
+        if pending {
+            return Ok(PetToggle::Stopped);
+        }
+    }
     let bin = pet_binary().ok_or(if cfg!(target_os = "macos") {
         "펫 실행 파일이 없어요. 카사텀 앱을 다시 설치해 주세요"
     } else {
         "바탕화면 펫은 현재 macOS에서 사용할 수 있어요"
     })?;
-    // 모델이 아직 없으면 받아 온 뒤 이어서 띄운다. `exec` 이라 pid 가 그대로 펫이 되어
-    // 끄기(SIGTERM)가 평소와 같은 길로 통한다.
-    let (mut cmd, state) = match pet_model_path() {
-        Some(model) => {
-            let mut c = std::process::Command::new(&bin);
-            c.arg(model);
-            (c, PetToggle::Starting)
-        }
-        None => {
-            let script = pet_fetch_script()
-                .ok_or("캐릭터를 받는 파일이 없어요. 카사텀 앱을 다시 설치해 주세요")?;
-            let dir = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
-            (pet_download_command(&script, &dir, &bin), PetToggle::Downloading)
-        }
+    // 띄울 모델이 없으면 고른 것이 없거나 사라진 것이라 기본 캐릭터 차례다. 다른 캐릭터로
+    // 대신하지 않고 그것을 받은 뒤 띄운다.
+    let Some(model) = pet_model_path() else {
+        fetch_pet_model(kasa_pet_config::models::DEFAULT, true)?;
+        return Ok(PetToggle::Downloading);
     };
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg(model);
+    if let Some(dir) = pet_model_dir() {
+        cmd.env("KASAPET_DIR", dir);
+    }
     let pid_path = pet_pid_path().ok_or("펫 실행 상태를 저장할 폴더를 찾지 못했어요")?;
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)
@@ -4688,59 +4995,25 @@ fn toggle_pet_now() -> Result<PetToggle, String> {
         }
         let _ = std::fs::remove_file(pid_path);
         if status.map(|s| !s.success() && s.code().is_some()).unwrap_or(true) {
-            let message = if state == PetToggle::Downloading {
-                "펫 캐릭터 받기 또는 시작에 실패했어요. 네트워크를 확인하고 다시 켜 주세요"
-            } else {
-                "펫이 시작되지 않았거나 종료됐어요. 설정에서 캐릭터를 확인하고 다시 켜 주세요"
-            };
-            if let Ok(mut failure) = pet_failure().lock() {
-                *failure = Some(message.into());
-            }
+            set_pet_failure(
+                "펫이 시작되지 않았거나 종료됐어요. 설정에서 캐릭터를 확인하고 다시 켜 주세요".into(),
+            );
         }
     });
-    Ok(state)
+    Ok(PetToggle::Starting)
 }
 
-/// 펫이 쓸 모델. 캐릭터마다 폴더가 하나이고, `current` 파일이 지금 띄울 이름을 쥔다.
+/// 펫이 쓸 모델. 캐릭터마다 폴더가 하나이고, `current` 파일이 사람이 고른 이름을 쥔다.
 ///
 /// 레포에는 모델을 담지 않는다 — Live2D 공식 캐릭터는 Free Material License Agreement
-/// 4.1.1 이 재배포를 금지한다. 그래서 쓰는 사람이 자기 기계로 권리자에게서 직접 받고,
-/// 받은 것이 여기 놓인다(`scripts/fetch-pet-model.sh`).
+/// 4.1.1 이 재배포를 금지하고, 기본 캐릭터 곽향은 모델 약관이 2차 배포를 금지한다. 그래서
+/// 쓰는 사람이 자기 기계로 받고, 받은 것이 여기 놓인다(`scripts/fetch-pet-model.sh`).
 fn pet_model_path() -> Option<String> {
     if let Ok(p) = std::env::var("KASATERM_PET_MODEL") {
         return Some(p);
     }
     let dir = pet_model_dir()?;
-    // 골라 둔 캐릭터가 먼저다. 그것이 없어졌으면(사람이 폴더를 지웠으면) 아무거나 하나 —
-    // 「고른 것이 사라졌다」고 안 뜨는 것보다 뭐라도 뜨는 편이 낫다.
-    let chosen = std::fs::read_to_string(dir.join("current")).ok();
-    let named = chosen
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .and_then(|n| model3_in(&dir.join(n)));
-    named
-        .or_else(|| {
-            let mut subs: Vec<_> = std::fs::read_dir(&dir)
-                .ok()?
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect();
-            subs.sort();
-            subs.iter().find_map(|d| model3_in(d))
-        })
-        // 캐릭터 폴더를 나누기 전에 받아 둔 것 — 모델이 설정 폴더 바로 밑에 있다.
-        .or_else(|| model3_in(&dir))
-}
-
-fn model3_in(dir: &std::path::Path) -> Option<String> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.to_string_lossy().ends_with(".model3.json"))
-        .map(|p| p.to_string_lossy().into_owned())
+    kasa_pet_config::models::model_path(&dir).map(|p| p.to_string_lossy().into_owned())
 }
 
 pub(crate) fn pet_model_dir() -> Option<std::path::PathBuf> {

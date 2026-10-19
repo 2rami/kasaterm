@@ -1,0 +1,77 @@
+{
+  "Motions": {
+    "Idle": [
+      {
+        "File": "Scene1.motion3.json"
+      }
+    ],
+    "Think": [
+      {
+        "File": "haoqi.motion3.json"
+      }
+    ],
+    "Busy": [
+      {
+        "File": "zhentou.motion3.json"
+      }
+    ],
+    "Talk": [
+      {
+        "File": "qizi.motion3.json"
+      }
+    ],
+    "Error": [
+      {
+        "File": "linghun.motion3.json"
+      }
+    ],
+    "Touch": [
+      {
+        "File": "yaotou.motion3.json"
+      }
+    ],
+    "Sleep": [
+      {
+        "File": "keshui.motion3.json"
+      }
+    ]
+  },
+  "Expressions": [
+    {
+      "Name": "angry",
+      "File": "angry.exp3.json"
+    },
+    {
+      "Name": "baozhen",
+      "File": "baozhen.exp3.json"
+    },
+    {
+      "Name": "cry",
+      "File": "cry.exp3.json"
+    },
+    {
+      "Name": "qizi1",
+      "File": "qizi1.exp3.json"
+    },
+    {
+      "Name": "qizi2",
+      "File": "qizi2.exp3.json"
+    },
+    {
+      "Name": "white_eyes",
+      "File": "white eyes.exp3.json"
+    },
+    {
+      "Name": "flag_hide",
+      "File": "flag_hide.exp3.json"
+    },
+    {
+      "Name": "soul_ghost",
+      "File": "soul_ghost.exp3.json"
+    },
+    {
+      "Name": "blush",
+      "File": "blush.exp3.json"
+    }
+  ]
+}
