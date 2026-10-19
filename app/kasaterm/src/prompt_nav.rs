@@ -1,10 +1,11 @@
-//! 풀스크린 claude 칸의 스크롤바·프롬프트 눈금과 프롬프트 이동. claude 가 대체 화면에서 스크롤을 쥐고
+//! 풀스크린 claude 칸의 프롬프트 이동(Info 「내 프롬프트」 누름). claude 가 대체 화면에서 스크롤을 쥐고
 //! 있어 터미널 스크롤백도 줄 번호도 없다. 그래서 칸마다 claude 안에 실은 mod
 //! (`collab-hooks/claude-mods/prompt-nav`)가 눈이 되고 손이 된다. classic 렌더러는 받지 않는다 —
-//! claude·codex 모두 풀스크린 TUI 로 돈다.
+//! claude·codex 모두 풀스크린 TUI 로 돈다. 칸 오른쪽 스크롤바·프롬프트 눈금은 2026-10-19 걷었다 — 끌 때마다
+//! 아래 두 번 누르기를 거쳐 느리고 튀었다. 스크롤바가 필요하면 직접 그리는 대화 보기(`chat_view.rs`)에 둔다.
 //!
 //! - **눈**: mod 가 대화 줄의 차례·높이·화면 맨 윗줄을 재서 `<dir>/<pane>.json` 에 쓴다
-//!   (`total`·`top`·`current`·`prompts`). 여기서는 그것을 읽어 칸 오른쪽 여백에 그린다.
+//!   (`total`·`top`·`current`·`prompts`). Info 「내 프롬프트」가 그것으로 지금 턴과 갈 자리를 안다.
 //! - **손**: 대화 줄 스크롤은 claude 안에서 **사람이 누른 입력**의 응답일 때만 허락되고, 그
 //!   누름 처리에서 파일을 읽으며 기다리면 그 자격을 잃는다. 그래서 두 번 누른다 — 요청 파일을
 //!   쓰고 장전 화음(`ctrl+x b`)을 보내면 mod 가 읽어 쥐고 `armed` 로 알린다. 그것을 보면 앞
@@ -32,14 +33,6 @@ const DONE_TIMEOUT: Duration = Duration::from_millis(900);
 /// mod 는 보고를 200ms 묶어 쓴다. 그 뒤라야 착지한 자리를 믿을 수 있다.
 const SETTLE: Duration = Duration::from_millis(320);
 const READ_EVERY: Duration = Duration::from_millis(90);
-
-/// `docs/design.md` 「풀스크린 claude 스크롤바·프롬프트 눈금」.
-pub(crate) const BAR_W: f32 = 3.5;
-pub(crate) const BAR_W_ACTIVE: f32 = 5.0;
-pub(crate) const THUMB_MIN_H: f32 = 24.0;
-pub(crate) const TICK_W: f32 = 6.0;
-pub(crate) const TICK_H: f32 = 2.0;
-pub(crate) const TICK_HIT: f32 = 4.0;
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -86,14 +79,12 @@ impl NavState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum NavOp {
     Prompt(usize),
-    Row(i64),
 }
 
 impl NavOp {
     fn json(self, seq: u64, at: u128) -> String {
         let op = match self {
             NavOp::Prompt(i) => format!(r#""op":"prompt","index":{i}"#),
-            NavOp::Row(r) => format!(r#""op":"row","row":{r}"#),
         };
         format!(r#"{{"seq":{seq},"at":{at},{op}}}"#)
     }
@@ -114,33 +105,12 @@ struct Pending {
     retried: bool,
 }
 
-/// 지난 프레임에 그린 막대 하나 — 누름·끌기가 이 자리로 판정한다.
-#[derive(Clone, Debug)]
-pub(crate) struct NavHit {
-    pub pane: String,
-    pub pid: String,
-    pub track: (f32, f32, f32, f32),
-    pub thumb: (f32, f32),
-    pub ticks: Vec<(f32, usize)>,
-    pub total: i64,
-    pub visible: i64,
-}
-
-struct Drag {
-    pane: String,
-    pid: String,
-    grab: f32,
-}
-
 struct Nav {
     cache: HashMap<String, Cached>,
     /// pane(백엔드 pid)마다 한 번에 하나. 끄는 동안 쌓인 것은 마지막 것만 `queued` 에 둔다.
     pending: HashMap<String, Pending>,
     queued: HashMap<String, NavOp>,
     seq: u64,
-    hits: Vec<NavHit>,
-    hover: Option<String>,
-    drag: Option<Drag>,
 }
 
 thread_local! {
@@ -150,9 +120,6 @@ thread_local! {
         queued: HashMap::new(),
         // mod 는 이미 한 번호 이하를 버린다. 앱을 다시 켜도 거꾸로 가지 않게 시각에서 시작한다.
         seq: now_ms() as u64,
-        hits: Vec::new(),
-        hover: None,
-        drag: None,
     });
 }
 
@@ -190,77 +157,6 @@ fn read_state(pid: &str, force: bool) -> Option<NavState> {
 /// 이 칸(백엔드 pid)에 살아 있는 mod 가 있나 — 있으면 그 상태.
 pub(crate) fn live_state(pid: &str) -> Option<NavState> {
     read_state(pid, false).filter(NavState::usable)
-}
-
-pub(crate) fn set_hits(hits: Vec<NavHit>) {
-    NAV.with(|n| n.borrow_mut().hits = hits);
-}
-
-pub(crate) fn hover_pane() -> Option<String> {
-    NAV.with(|n| {
-        let n = n.borrow();
-        n.drag.as_ref().map(|d| d.pane.clone()).or_else(|| n.hover.clone())
-    })
-}
-
-/// 대화 영역 높이(px) 안에서 막대·눈금이 놓일 자리. 줄 수는 전부 mod 의 행 단위다.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct BarGeometry {
-    pub thumb: (f32, f32),
-    pub ticks: Vec<(f32, usize)>,
-}
-
-pub(crate) fn geometry(state: &NavState, track_y: f32, track_h: f32, visible: i64) -> Option<BarGeometry> {
-    let total = state.total.max(1) as f32;
-    let top = state.top? as f32;
-    if state.total <= visible || track_h <= THUMB_MIN_H {
-        return None;
-    }
-    let scale = track_h / total;
-    let mut h = (visible as f32 * scale).max(THUMB_MIN_H).min(track_h);
-    let mut y = track_y + top * scale;
-    // 최소 높이로 키운 만큼은 위아래로 나눠 덮고, 홈 밖으로 나가지 않게 민다.
-    let grown = h - visible as f32 * scale;
-    if grown > 0.0 {
-        y -= grown / 2.0;
-    }
-    y = y.clamp(track_y, track_y + track_h - h);
-    h = h.min(track_h);
-    let ticks = state
-        .prompts
-        .iter()
-        .enumerate()
-        .map(|(i, (row, _))| (track_y + (*row as f32 * scale).clamp(0.0, track_h - TICK_H), i))
-        .collect();
-    Some(BarGeometry { thumb: (y, h), ticks })
-}
-
-/// 막대 위 y 를 mod 의 행으로 — 끌 때는 잡은 자리만큼 빼서 손잡이 윗변이 그 행에 선다.
-pub(crate) fn row_at(hit: &NavHit, y: f32) -> i64 {
-    let (_, ty, _, th) = hit.track;
-    let frac = ((y - ty) / th.max(1.0)).clamp(0.0, 1.0);
-    (frac * hit.total as f32).round() as i64
-}
-
-pub(crate) fn tick_at(hit: &NavHit, y: f32) -> Option<usize> {
-    hit.ticks
-        .iter()
-        .filter(|(ty, _)| (y - (ty + TICK_H / 2.0)).abs() <= TICK_HIT)
-        .min_by(|a, b| (y - a.0).abs().total_cmp(&(y - b.0).abs()))
-        .map(|(_, i)| *i)
-}
-
-fn hit_at(x: f32, y: f32) -> Option<NavHit> {
-    NAV.with(|n| {
-        n.borrow()
-            .hits
-            .iter()
-            .find(|h| {
-                let (tx, ty, tw, th) = h.track;
-                x >= tx && x <= tx + tw && y >= ty && y <= ty + th
-            })
-            .cloned()
-    })
 }
 
 impl crate::App {
@@ -305,8 +201,8 @@ impl crate::App {
         true
     }
 
-    /// about_to_wait 매 틱 — 장전을 확인하면 쏘고, 도착을 보고 한 번 바로 세우고, 막대가
-    /// 그려진 칸의 상태가 바뀌었으면 다시 그린다(사람이 claude 안에서 휠로 굴린 경우).
+    /// about_to_wait 매 틱 — 장전을 확인하면 쏘고, 도착을 보고 한 번 바로 세우고, 읽어 둔 칸의 상태가
+    /// 바뀌었으면 다시 그린다(사람이 claude 안에서 휠로 굴리면 Info 의 지금 턴이 따라간다).
     pub(crate) fn pump_prompt_nav(&mut self) {
         let pending: Vec<(String, u64, NavOp, Instant, Option<Instant>, bool)> = NAV.with(|n| {
             n.borrow().pending.values().map(|p| (p.pid.clone(), p.seq, p.op, p.sent, p.fired, p.retried)).collect()
@@ -360,10 +256,7 @@ impl crate::App {
                 }
             }
         }
-        // 그려진 막대의 칸은 mod 가 새로 쓴 것을 보면 다시 그린다.
-        let shown: Vec<String> = NAV.with(|n| {
-            n.borrow().hits.iter().map(|h| h.pid.clone()).collect()
-        });
+        let shown: Vec<String> = NAV.with(|n| n.borrow().cache.keys().cloned().collect());
         let mut changed = false;
         for pid in shown {
             let before = NAV.with(|n| n.borrow().cache.get(&pid).and_then(|c| c.mtime));
@@ -378,63 +271,6 @@ impl crate::App {
         }
     }
 
-    /// 막대 누름: 눈금이면 그 프롬프트로, 손잡이면 끌기 시작, 홈이면 그 자리가 가운데 오게.
-    pub(crate) fn prompt_nav_press(&mut self, x: f32, y: f32) -> bool {
-        let Some(hit) = hit_at(x, y) else { return false };
-        if let Some(i) = tick_at(&hit, y) {
-            self.prompt_nav_request(&hit.pane, NavOp::Prompt(i));
-            return true;
-        }
-        let (ty, th) = hit.thumb;
-        let grab = if y >= ty && y <= ty + th {
-            y - ty
-        } else {
-            let row = row_at(&hit, y) - hit.visible / 2;
-            self.prompt_nav_request(&hit.pane, NavOp::Row(row.max(0)));
-            th / 2.0
-        };
-        let drag = Drag { pane: hit.pane.clone(), pid: hit.pid.clone(), grab };
-        NAV.with(|n| n.borrow_mut().drag = Some(drag));
-        self.chrome_dirty = true;
-        true
-    }
-
-    pub(crate) fn prompt_nav_drag_move(&mut self) -> bool {
-        let Some((pane, pid, grab)) =
-            NAV.with(|n| n.borrow().drag.as_ref().map(|d| (d.pane.clone(), d.pid.clone(), d.grab)))
-        else {
-            return false;
-        };
-        let hit = NAV.with(|n| n.borrow().hits.iter().find(|h| h.pid == pid).cloned());
-        if let Some(hit) = hit {
-            let row = row_at(&hit, self.cursor_px.1 - grab);
-            self.prompt_nav_request(&pane, NavOp::Row(row));
-        }
-        true
-    }
-
-    pub(crate) fn prompt_nav_release(&mut self) -> bool {
-        let had = NAV.with(|n| n.borrow_mut().drag.take().is_some());
-        if had {
-            self.chrome_dirty = true;
-        }
-        had
-    }
-
-    /// 막대 위에 있나. 있으면 다른 손가락 커서·TUI 호버 전달을 건너뛴다.
-    pub(crate) fn prompt_nav_hover(&mut self, x: f32, y: f32) -> bool {
-        let over = hit_at(x, y).map(|h| h.pane);
-        let changed = NAV.with(|n| {
-            let mut n = n.borrow_mut();
-            let changed = n.hover != over;
-            n.hover = over.clone();
-            changed
-        });
-        if changed {
-            self.chrome_dirty = true;
-        }
-        over.is_some()
-    }
 }
 
 thread_local! {
@@ -443,30 +279,18 @@ thread_local! {
 }
 
 impl crate::App {
-    /// `KASATERM_AUTONAV="6000:tick=3;8000:cap=a;9000:track=0.2;11000:drag=0.2>0.8;13000:key=prev"`
-    /// (+ `KASATERM_AUTONAV_CAP_DIR`). 누를 자리는 **이번 프레임에 실제로 그린 막대**에서 읽는다 —
-    /// 좌표를 손으로 적으면 막대가 안 떠도 「눌렀다」고 적힌다.
+    /// `KASATERM_AUTONAV="6000:prompt=3;8000:cap=a;9000:state;13000:key=prev"`(+ `KASATERM_AUTONAV_CAP_DIR`).
+    /// 걸음은 초점 칸에 간다 — `prompt=` 는 Info 누름과 같은 요청, `key=` 는 사람의 Option+↑↓ 와 같은 키.
     pub(crate) fn arm_autonav(&mut self) {
         let Ok(plan) = std::env::var("KASATERM_AUTONAV") else { return };
         let start = Instant::now();
-        let mut steps = Vec::new();
-        for part in plan.split(';') {
-            let Some((ms, step)) = part.split_once(':') else { continue };
-            let Ok(ms) = ms.trim().parse::<u64>() else { continue };
-            if let Some(span) = step.strip_prefix("drag=") {
-                // 끌기는 잡기 → 여덟 걸음 → 놓기로 펼친다. 걸음 사이가 있어야 끄는 중의 화면이 보인다.
-                let Some((a, b)) = span.split_once('>') else { continue };
-                let (Ok(a), Ok(b)) = (a.parse::<f32>(), b.parse::<f32>()) else { continue };
-                steps.push((start + Duration::from_millis(ms), format!("grab={a}")));
-                for i in 1..=8 {
-                    let f = a + (b - a) * i as f32 / 8.0;
-                    steps.push((start + Duration::from_millis(ms + i * 150), format!("move={f}")));
-                }
-                steps.push((start + Duration::from_millis(ms + 9 * 150), "release".into()));
-            } else {
-                steps.push((start + Duration::from_millis(ms), step.trim().to_string()));
-            }
-        }
+        let steps: Vec<(Instant, String)> = plan
+            .split(';')
+            .filter_map(|part| {
+                let (ms, step) = part.split_once(':')?;
+                Some((start + Duration::from_millis(ms.trim().parse().ok()?), step.trim().to_string()))
+            })
+            .collect();
         eprintln!("[autonav] {} steps", steps.len());
         AUTO.with(|a| *a.borrow_mut() = steps);
     }
@@ -480,20 +304,17 @@ impl crate::App {
             ready.into_iter().map(|(_, s)| s).collect()
         });
         for step in due {
-            let hit = NAV.with(|n| n.borrow().hits.first().cloned());
+            let pid = self.target_surface();
             let (kind, arg) = step.split_once('=').unwrap_or((step.as_str(), ""));
-            let frac = arg.parse::<f32>().unwrap_or(0.5);
-            let at = |hit: &NavHit, f: f32| (hit.track.0 + hit.track.2 / 2.0, hit.track.1 + hit.track.3 * f);
-            match (kind, hit) {
-                ("cap", _) => {
+            match kind {
+                "cap" => {
                     if let (Ok(dir), Some(gpu)) = (std::env::var("KASATERM_AUTONAV_CAP_DIR"), self.gpu.as_mut()) {
                         gpu.capture_next = Some(format!("{dir}/{arg}.png"));
                     }
                     self.chrome_dirty = true;
                 }
-                ("state", _) => {
-                    let hit = NAV.with(|n| n.borrow().hits.first().cloned());
-                    if let Some(s) = hit.and_then(|h| read_state(&h.pid, true)) {
+                "state" => {
+                    if let Some(s) = pid.as_deref().and_then(|p| read_state(p, true)) {
                         eprintln!(
                             "[autonav] state top={:?} total={} current={} prompts={} {:?}",
                             s.top,
@@ -504,42 +325,18 @@ impl crate::App {
                         );
                     }
                 }
+                "prompt" => {
+                    let ok = pid.as_deref().filter(|p| live_state(p).is_some()).is_some_and(|p| {
+                        self.prompt_nav_start(p, NavOp::Prompt(arg.parse().unwrap_or(0)), false)
+                    });
+                    eprintln!("[autonav] prompt {arg} sent={ok}");
+                }
                 // 사람의 Option+↑↓ 와 같은 길 — 키가 claude 로 가고 칸 안 mod 의 보이지 않는 단추가 받는다.
-                ("key", _) => {
+                "key" => {
                     let bytes: &[u8] = if arg == "next" { b"\x1b[1;3B" } else { b"\x1b[1;3A" };
                     self.send_bytes(bytes);
                 }
-                ("tick", Some(hit)) => {
-                    let i = arg.parse::<usize>().unwrap_or(0);
-                    if let Some((y, _)) = hit.ticks.iter().find(|(_, t)| *t == i) {
-                        let (x, y) = (hit.track.0 + hit.track.2 / 2.0, y + TICK_H / 2.0);
-                        let ok = self.prompt_nav_press(x, y);
-                        self.prompt_nav_release();
-                        eprintln!("[autonav] tick {i} at ({x:.0},{y:.0}) handled={ok}");
-                    }
-                }
-                ("track", Some(hit)) => {
-                    let (x, y) = at(&hit, frac);
-                    let ok = self.prompt_nav_press(x, y);
-                    self.prompt_nav_release();
-                    eprintln!("[autonav] track {frac} at ({x:.0},{y:.0}) handled={ok}");
-                }
-                ("grab", Some(hit)) => {
-                    let (x, _) = at(&hit, frac);
-                    let y = hit.thumb.0 + hit.thumb.1 / 2.0;
-                    self.cursor_px = (x, y);
-                    let ok = self.prompt_nav_press(x, y);
-                    eprintln!("[autonav] grab at ({x:.0},{y:.0}) handled={ok}");
-                }
-                ("move", Some(hit)) => {
-                    self.cursor_px = at(&hit, frac);
-                    self.prompt_nav_drag_move();
-                }
-                ("release", _) => {
-                    self.prompt_nav_release();
-                }
-                (other, None) => eprintln!("[autonav] {other}: 막대가 이번 프레임에 없다"),
-                (other, _) => eprintln!("[autonav] 모르는 걸음 {other}"),
+                other => eprintln!("[autonav] 모르는 걸음 {other}"),
             }
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -548,52 +345,9 @@ impl crate::App {
     }
 }
 
-/// 한 칸의 막대를 그린다. 쉴 때는 여백 안의 가는 손잡이와 눈금만, 올리거나 끄는 중엔
-/// 굵어지고 홈이 깔린다.
-pub(crate) fn paint(
-    g: &mut crate::gpu::GpuRenderer,
-    x: f32,
-    geo: &BarGeometry,
-    track: (f32, f32),
-    current: i64,
-    active: bool,
-) {
-    use crate::theme;
-    let w = if active { BAR_W_ACTIVE } else { BAR_W };
-    let (ty, th) = track;
-    if active {
-        g.rect(x - w / 2.0, ty, w, th, theme::with_alpha(theme::text(), 0x14));
-    }
-    let (y, h) = geo.thumb;
-    crate::pill_rect(
-        g,
-        x - w / 2.0,
-        y,
-        w,
-        h,
-        theme::with_alpha(theme::text(), if active { 0x99 } else { 0x66 }),
-    );
-    for (ty, i) in &geo.ticks {
-        let on = *i as i64 == current;
-        let color = if on { theme::accent() } else { theme::with_alpha(theme::accent(), 0x80) };
-        g.rect(x - TICK_W / 2.0, *ty, TICK_W, TICK_H, color);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn state(total: i64, top: i64, prompts: &[i64]) -> NavState {
-        NavState {
-            session: "s".into(),
-            fullscreen: true,
-            total,
-            top: Some(top),
-            prompts: prompts.iter().map(|r| (*r, String::new())).collect(),
-            ..Default::default()
-        }
-    }
 
     #[test]
     fn reads_what_the_mod_writes() {
@@ -610,48 +364,5 @@ mod tests {
     #[test]
     fn requests_carry_seq_and_op() {
         assert_eq!(NavOp::Prompt(3).json(9, 100), r#"{"seq":9,"at":100,"op":"prompt","index":3}"#);
-        assert_eq!(NavOp::Row(42).json(1, 2), r#"{"seq":1,"at":2,"op":"row","row":42}"#);
-    }
-
-    #[test]
-    fn thumb_and_ticks_are_proportional_to_rows() {
-        let geo = geometry(&state(400, 100, &[0, 100, 300]), 10.0, 400.0, 40).unwrap();
-        assert_eq!(geo.thumb, (110.0, 40.0));
-        assert_eq!(geo.ticks, vec![(10.0, 0), (110.0, 1), (310.0, 2)]);
-    }
-
-    #[test]
-    fn a_short_thumb_grows_around_its_spot_and_stays_in_the_track() {
-        let geo = geometry(&state(4000, 0, &[]), 0.0, 400.0, 40).unwrap();
-        assert_eq!(geo.thumb, (0.0, THUMB_MIN_H));
-        let geo = geometry(&state(4000, 3960, &[]), 0.0, 400.0, 40).unwrap();
-        assert_eq!(geo.thumb.0 + geo.thumb.1, 400.0);
-    }
-
-    #[test]
-    fn no_bar_when_everything_fits_or_the_top_is_unknown() {
-        assert!(geometry(&state(30, 0, &[]), 0.0, 400.0, 40).is_none());
-        let mut s = state(400, 0, &[]);
-        s.top = None;
-        assert!(geometry(&s, 0.0, 400.0, 40).is_none());
-    }
-
-    #[test]
-    fn a_press_maps_back_to_rows_and_ticks() {
-        let geo = geometry(&state(400, 100, &[0, 100, 300]), 0.0, 400.0, 40).unwrap();
-        let hit = NavHit {
-            pane: "%1".into(),
-            pid: "%1".into(),
-            track: (0.0, 0.0, 9.0, 400.0),
-            thumb: geo.thumb,
-            ticks: geo.ticks,
-            total: 400,
-            visible: 40,
-        };
-        assert_eq!(row_at(&hit, 200.0), 200);
-        assert_eq!(row_at(&hit, -50.0), 0);
-        assert_eq!(tick_at(&hit, 301.0), Some(2));
-        assert_eq!(tick_at(&hit, 103.5), Some(1));
-        assert_eq!(tick_at(&hit, 200.0), None);
     }
 }

@@ -3568,11 +3568,6 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.native_settings_drag_move(self.cursor_px.0, self.cursor_px.1) {
                     return;
                 }
-                if self.prompt_nav_drag_move() || self.prompt_nav_hover(self.cursor_px.0, self.cursor_px.1) {
-                    window.set_cursor(CursorIcon::Default);
-                    window.request_redraw();
-                    return;
-                }
                 if self.native_settings_contains(self.cursor_px.0, self.cursor_px.1) {
                     let cursor = self.native_settings_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
@@ -4535,10 +4530,6 @@ impl ApplicationHandler<UserEvent> for App {
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
                 if matches!(state, ElementState::Released) {
-                    if self.prompt_nav_release() {
-                        window.request_redraw();
-                        return;
-                    }
                     if self.native_settings_end_drag() {
                         window.request_redraw();
                         return;
@@ -4871,11 +4862,6 @@ impl ApplicationHandler<UserEvent> for App {
                     // 사이드바 맨 위 「목록 | 배치도」 — 방 본문의 전체 기본을 바꾼다.
                     if self.sidebar_switch_click((cx, cy)) {
                         self.session_touched = session_touched_before_event;
-                        window.request_redraw();
-                        return;
-                    }
-                    // 풀스크린 claude 칸 오른쪽 여백의 스크롤바·프롬프트 눈금(prompt_nav.rs).
-                    if self.prompt_nav_press(cx, cy) {
                         window.request_redraw();
                         return;
                     }

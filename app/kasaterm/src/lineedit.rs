@@ -17,7 +17,7 @@
 //! 키보드 초점은 한 번에 한 칸뿐이라 그 칸의 것만 있으면 되고, 칸마다 구조체에 필드를
 //! 늘리면 칸이 늘 때마다 같은 배선을 또 해야 한다. 다른 칸 열쇠로 부르면 버린다.
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 /// 키 하나를 넣은 결과.
@@ -128,29 +128,32 @@ struct State {
 
 const UNDO_KEEP: usize = 100;
 
-static FOCUS: Mutex<Option<(String, State)>> = Mutex::new(None);
+thread_local! {
+    /// 키 입력은 GUI 스레드에서만 온다. 스레드마다 두면 병렬 시험이 서로의 초점 칸을 덮지 않는다.
+    static FOCUS: RefCell<Option<(String, State)>> = const { RefCell::new(None) };
+}
 
 fn with_state<R>(id: &str, f: impl FnOnce(&mut State) -> R) -> R {
-    let mut focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
-    if focus.as_ref().map(|(at, _)| at.as_str()) != Some(id) {
-        *focus = Some((id.to_string(), State::default()));
-    }
-    f(&mut focus.as_mut().expect("just set").1)
+    FOCUS.with_borrow_mut(|focus| {
+        if focus.as_ref().map(|(at, _)| at.as_str()) != Some(id) {
+            *focus = Some((id.to_string(), State::default()));
+        }
+        f(&mut focus.as_mut().expect("just set").1)
+    })
 }
 
 /// 칸이 닫히거나 마우스로 커서를 옮겼을 때 — 남은 선택이 다음에 연 같은 칸에 묻어나지 않게.
 pub(crate) fn forget(id: &str) {
-    let mut focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
-    if focus.as_ref().is_some_and(|(at, _)| at == id) {
-        *focus = None;
-    }
+    FOCUS.with_borrow_mut(|focus| {
+        if focus.as_ref().is_some_and(|(at, _)| at == id) {
+            *focus = None;
+        }
+    });
 }
 
 /// 그 칸의 선택(문자 범위, 시작 < 끝). 그리기가 바탕을 깐다.
 pub(crate) fn selection(id: &str, cursor: usize, len: usize) -> Option<(usize, usize)> {
-    let focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
-    let (at, state) = focus.as_ref()?;
-    let anchor = state.anchor.filter(|_| at == id)?;
+    let anchor = FOCUS.with_borrow(|focus| focus.as_ref().and_then(|(at, state)| state.anchor.filter(|_| at == id)))?;
     let (cursor, anchor) = (cursor.min(len), anchor.min(len));
     (anchor != cursor).then(|| (anchor.min(cursor), anchor.max(cursor)))
 }
