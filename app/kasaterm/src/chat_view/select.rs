@@ -337,6 +337,9 @@ impl App {
     /// 대화 칸 본문 누름 — 접힌 줄이면 펼치고, 아니면 선택을 잡는다(⇧ 면 있던 선택의 끝만 옮긴다).
     /// 그 칸 밖이면 false.
     pub(crate) fn chat_view_press(&mut self, x: f32, y: f32) -> bool {
+        if self.chat_bar_press(x, y) {
+            return true;
+        }
         let Some((id, row, col)) = self.chat_view_hit(x, y) else { return false };
         // ⌘클릭은 링크 열기 몫이다(`links::click_modifier`).
         if crate::links::click_modifier(self.modifiers) && self.link_hit(x, y).is_some() {
@@ -395,6 +398,9 @@ impl App {
     /// 누른 채 끌기 — 끝을 커서 칸으로. 대화 줄에서 잡았으면 대화 안에, 바닥에서 잡았으면 바닥 안에 머문다.
     /// 끌고 있지 않으면 false.
     pub(crate) fn chat_view_drag(&mut self) -> bool {
+        if self.chat_bar_drag() {
+            return true;
+        }
         let Some(id) = self.chat_view.panes.iter().find(|(_, p)| p.sel.as_ref().is_some_and(|s| s.dragging)).map(|(id, _)| id.clone())
         else {
             return false;
@@ -422,6 +428,9 @@ impl App {
     /// 손을 뗐다. 안 움직인 한 번 누름은 선택이 아니라 클릭 — 지우고, 입력칸 위였으면 커서를 그리로 옮긴다.
     /// 대화 칸 끌기가 아니었으면 false.
     pub(crate) fn chat_view_release(&mut self) -> bool {
+        if self.chat_bar_release() {
+            return true;
+        }
         let Some(id) = self.chat_view.panes.iter().find(|(_, p)| p.sel.as_ref().is_some_and(|s| s.dragging)).map(|(id, _)| id.clone())
         else {
             return false;

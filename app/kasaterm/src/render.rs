@@ -2615,6 +2615,7 @@ impl App {
                 profile: std::mem::take(&mut profile_slots),
             };
             paint_student_overlays(g, &student_slots, anim_ms);
+            crate::chat_view::paint_scrollbars(g, &self.chat_view);
             if g.has_image("schale:classroom") {
                 for (bx, by, bw, bh) in &classroom_slots {
                     g.queue_image_cover("schale:classroom", *bx, *by, *bw, *bh);

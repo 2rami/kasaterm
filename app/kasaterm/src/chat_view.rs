@@ -14,7 +14,10 @@ pub(crate) mod classic;
 mod codex;
 pub(crate) mod history;
 pub(crate) mod parse;
+mod scrollbar;
 mod select;
+
+pub(crate) use scrollbar::paint_scrollbars;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -44,6 +47,8 @@ enum AutoStep {
     HoverMenu,
     /// Info 「내 프롬프트」 n 번째로 옮긴다.
     Jump(usize),
+    /// 스크롤바 홈의 그 비율 자리를 눌러 다른 비율까지 끈다.
+    Bar(f32, f32),
 }
 
 #[derive(Default)]
@@ -55,6 +60,10 @@ pub(crate) struct ChatViews {
     drawn: RefCell<HashMap<String, Drawn>>,
     /// `KASATERM_AUTOCHAT="6000:toggle;9000:scroll=40"` — 시각(앱 시작 기준 ms)과 걸음.
     auto: Option<Vec<(Instant, AutoStep)>>,
+    /// 스크롤바 손잡이를 끄는 칸과, 손잡이 가운데에서 잡은 자리까지의 거리(px).
+    bar_drag: Option<(String, f32)>,
+    /// 커서가 올라간 스크롤바의 칸 — 굵게 그린다.
+    bar_hover: Option<String>,
 }
 
 /// 한 프레임에 그린 대화 칸의 자리.
@@ -488,7 +497,8 @@ impl App {
         };
         let mut cache = chat.cache.borrow_mut();
         if let Ok(f) = chat.feed.try_lock() {
-            cache.build(&f.conv, f.version, cols, &chat.open, &look);
+            // 마지막 칸은 스크롤바 자리라 대화 줄은 그만큼 좁게 접는다.
+            cache.build(&f.conv, f.version, cols - scrollbar::BAR_COLS, &chat.open, &look);
             chat.painted.set(f.version);
         }
         let total = cache.lines.len();
@@ -770,6 +780,10 @@ impl App {
                         "zoom" => AutoStep::Zoom(arg.trim().parse().ok()?),
                         "hovermenu" => AutoStep::HoverMenu,
                         "jump" => AutoStep::Jump(arg.trim().parse().ok()?),
+                        "bar" => {
+                            let (a, b) = arg.split_once('>')?;
+                            AutoStep::Bar(a.trim().parse().ok()?, b.trim().parse().ok()?)
+                        }
                         _ => return None,
                     };
                     Some((at, step))
@@ -819,6 +833,7 @@ impl App {
                         self.chat_view_jump(&id, &text, 0);
                     }
                 }
+                AutoStep::Bar(from, to) => self.chat_bar_auto(from, to),
             }
             eprintln!("[autochat] step on {id}");
         }
