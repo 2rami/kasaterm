@@ -34,18 +34,35 @@ fn now_secs() -> u64 {
 
 /// 작업대에 지금 든 로그인의 증명된 신원과 그 관측 시각. 키체인 읽기는 자식 프로세스라 동기화 스레드(적용 훅)가
 /// 재 두고, GUI 스레드의 수렴은 이 값만 본다.
-static BENCH: Mutex<Option<(std::time::Instant, Option<AccountIdentity>)>> = Mutex::new(None);
+struct BenchObservation {
+    at: std::time::Instant,
+    generation: u64,
+    epoch: u64,
+    identity: Option<AccountIdentity>,
+}
+
+impl BenchObservation {
+    fn current(&self, generation: u64, epoch: u64) -> bool {
+        self.at.elapsed() < BENCH_FRESH && self.generation == generation && self.epoch == epoch
+    }
+}
+
+static BENCH: Mutex<Option<BenchObservation>> = Mutex::new(None);
 const BENCH_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) fn observe_workbench_identity() {
+    let generation = selection_generation();
+    let epoch = kasa_mcp::device_auth::change_epoch();
     let found = crate::claude_auth::verified_workbench_identity().and_then(AccountIdentity::from_verified);
     if let Ok(mut bench) = BENCH.lock() {
-        *bench = Some((std::time::Instant::now(), found));
+        *bench = Some(BenchObservation { at: std::time::Instant::now(), generation, epoch, identity: found });
     }
 }
 
 fn observed_bench() -> Option<AccountIdentity> {
-    BENCH.lock().ok()?.as_ref().filter(|(at, _)| at.elapsed() < BENCH_FRESH).and_then(|(_, found)| found.clone())
+    BENCH.lock().ok()?.as_ref()
+        .filter(|observed| observed.current(selection_generation(), kasa_mcp::device_auth::change_epoch()))
+        .and_then(|observed| observed.identity.clone())
 }
 
 pub(crate) fn followed_recently() -> bool {
@@ -83,6 +100,7 @@ enum Step {
 
 #[derive(Default)]
 struct State {
+    scope: Option<(String, u64)>,
     pending: Option<Pending>,
     attempt: Option<(u64, Step)>,
     notice: Option<SyncNotice>,
@@ -90,8 +108,24 @@ struct State {
     seen_rev: Option<u64>,
 }
 
+impl State {
+    fn align_scope(&mut self, account: Option<&str>, epoch: u64) {
+        let scope = account.map(|account| (account.to_owned(), epoch));
+        if self.scope != scope {
+            // Revisions are account-local; a stopped attempt from another login can have the same number.
+            *self = Self { scope, ..Self::default() };
+        }
+    }
+
+    fn observe_revision(&mut self, rev: u64) -> (bool, bool) {
+        let fresh = self.seen_rev.replace(rev) != Some(rev);
+        let supersedes = fresh && self.pending.as_ref().is_none_or(|pending| rev > pending.seen);
+        (fresh, supersedes)
+    }
+}
+
 fn state() -> &'static Mutex<State> {
-    static STATE: Mutex<State> = Mutex::new(State { pending: None, attempt: None, notice: None, seen_rev: None });
+    static STATE: Mutex<State> = Mutex::new(State { scope: None, pending: None, attempt: None, notice: None, seen_rev: None });
     &STATE
 }
 
@@ -102,7 +136,9 @@ fn set_step(rev: u64, step: Step) {
 }
 
 pub(super) fn notice() -> Option<SyncNotice> {
-    state().lock().ok()?.notice.clone()
+    let state = state().lock().ok()?;
+    state.scope.as_ref().filter(|(_, epoch)| *epoch == kasa_mcp::device_auth::change_epoch())?;
+    state.notice.clone()
 }
 
 fn show(summary: &str, details: String, failed: bool) {
@@ -169,7 +205,9 @@ pub(super) enum PeerRequest {
 
 /// 다른 기기가 보낸 `claude-account-sync-v1`. 이 기기에 순서 있는 선택(답 받은 것이든 낼 것이든)이 있으면 그와
 /// 같은 신원일 때만 적용하고, 아니면 동기화를 깨우는 힌트로만 쓴다. 선택이 없을 때(옛 관문)만 옛 동작이다.
-pub(super) fn peer_request(local: Option<&Value>, requested: &AccountIdentity) -> PeerRequest {
+pub(super) fn peer_request(local: Option<&Value>, requested: &AccountIdentity, waiting_for_proof: bool) -> PeerRequest {
+    // A new local choice does not reach the shared key until its identity proof arrives.
+    if waiting_for_proof { return PeerRequest::Hint; }
     match local.filter(|value| choice::valid(value)) {
         None => PeerRequest::Apply,
         Some(value) if AccountIdentity::from_choice(value).as_ref() == Some(requested) => PeerRequest::Apply,
@@ -187,8 +225,11 @@ impl App {
     /// `claude-account-sync-v1` 을 그대로 적용해도 되나. 아니면 동기화를 깨우고 관문 순서로 맞춘다.
     pub(crate) fn peer_choice_applies(&self, requested: &AccountIdentity) -> bool {
         let settings = crate::socket::read_settings();
-        let local = kasa_mcp::account_sync::current_account().and_then(|account| choice::owned(&settings, &account).cloned());
-        let applies = peer_request(local.as_ref(), requested) == PeerRequest::Apply;
+        let account = kasa_mcp::account_sync::current_account();
+        let local = account.as_ref().and_then(|account| choice::owned(&settings, account));
+        let waiting = state().lock().map_or(true, |state| state.pending.as_ref().is_some_and(|pending|
+            pending.current(&self.set_claude_account, account.as_deref(), kasa_mcp::device_auth::change_epoch(), selection_generation())));
+        let applies = peer_request(local, requested, waiting) == PeerRequest::Apply;
         if !applies {
             kasa_mcp::account_sync::poke();
         }
@@ -201,6 +242,7 @@ impl App {
         let Some(account) = kasa_mcp::account_sync::current_account() else { return };
         let seen = kasa_mcp::account_sync::seen_revision(&paths);
         let Ok(mut state) = state().lock() else { return };
+        state.align_scope(Some(&account), kasa_mcp::device_auth::change_epoch());
         state.notice = None;
         state.attempt = None;
         state.pending = None;
@@ -226,8 +268,22 @@ impl App {
     pub(crate) fn converge_claude_choice(&mut self) {
         let Some(paths) = paths() else { return };
         let account = kasa_mcp::account_sync::current_account();
-        self.publish_pending_choice(&paths, account.as_deref());
+        if let Ok(mut state) = state().lock() {
+            state.align_scope(account.as_deref(), kasa_mcp::device_auth::change_epoch());
+        }
         let Some(account) = account else { return };
+        let settings = crate::socket::read_settings();
+        if let Some(value) = choice::owned(&settings, &account) {
+            if let (Some(rev), Some(want)) = (choice::rev(value), AccountIdentity::from_choice(value)) {
+                let (fresh, supersedes) = state().lock().map_or((false, false), |mut state| state.observe_revision(rev));
+                // Invalidate old usage decisions even when following needs a new slot or an identity proof first.
+                if supersedes { bump_generation(); }
+                if fresh {
+                    super::sync::drop_report_unless(|slot| crate::settings::account_sync_identity(slot).as_ref() == Some(&want));
+                }
+            }
+        }
+        self.publish_pending_choice(&paths, Some(&account));
         let settings = crate::socket::read_settings();
         let Some(value) = choice::owned(&settings, &account) else { return };
         let Some(rev) = choice::rev(value) else { return };
@@ -235,10 +291,6 @@ impl App {
             return;
         }
         let Some(want) = AccountIdentity::from_choice(value) else { return };
-        let fresh = state().lock().is_ok_and(|mut state| state.seen_rev.replace(rev) != Some(rev));
-        if fresh {
-            super::sync::drop_report_unless(|slot| crate::settings::account_sync_identity(slot).as_ref() == Some(&want));
-        }
         let step = state().lock().ok().and_then(|state| state.attempt.clone()).filter(|(at, _)| *at == rev).map(|(_, step)| step);
         // 받아 둔 슬롯이 있으면 그 상태가 먼저다 — 다른 슬롯의 신원 대기가 받은 계정 불일치·실패 안내를 덮지 않게.
         if let Some(Step::Adopting(slot)) = &step {
@@ -454,15 +506,54 @@ mod tests {
     fn a_late_v1_request_cannot_bypass_the_ordered_choice() {
         let sionic = who(SIONIC, "person@example.test");
         let gmail = who(GMAIL, "person@example.test");
-        assert_eq!(peer_request(None, &sionic), PeerRequest::Apply, "an older relay keeps the legacy path");
-        let canonical = choice::new_intent(GMAIL, ORG, "person@example.test", "Shown name", 12, None, &[]).map(|mut v| {
+        assert_eq!(peer_request(None, &sionic, false), PeerRequest::Apply, "an older relay keeps the legacy path");
+        let canonical = choice::new_intent(GMAIL, ORG, "person@example.test", "Shown name", 12, &[]).map(|mut v| {
             v["rev"] = 13.into();
             v
         }).unwrap();
-        assert_eq!(peer_request(Some(&canonical), &sionic), PeerRequest::Hint, "a delayed request undid the newer choice");
-        assert_eq!(peer_request(Some(&canonical), &gmail), PeerRequest::Apply);
-        let mine = choice::new_intent(SIONIC, ORG, "person@example.test", "Shown name", 13, Some(&canonical), &[]).unwrap();
-        assert_eq!(peer_request(Some(&mine), &gmail), PeerRequest::Hint, "a request overrode this device's own unanswered choice");
+        assert_eq!(peer_request(Some(&canonical), &sionic, false), PeerRequest::Hint, "a delayed request undid the newer choice");
+        assert_eq!(peer_request(Some(&canonical), &gmail, false), PeerRequest::Apply);
+        assert_eq!(peer_request(Some(&canonical), &gmail, true), PeerRequest::Hint,
+            "the old canonical choice cancelled a new local selection waiting for proof");
+        assert_eq!(peer_request(None, &gmail, true), PeerRequest::Hint);
+        let mine = choice::new_intent(SIONIC, ORG, "person@example.test", "Shown name", 13, &[]).unwrap();
+        assert_eq!(peer_request(Some(&mine), &gmail, false), PeerRequest::Hint, "a request overrode this device's own unanswered choice");
+    }
+
+    #[test]
+    fn workbench_observation_cannot_prove_a_later_selection_or_login() {
+        let observed = BenchObservation { at: std::time::Instant::now(), generation: 4, epoch: 6,
+            identity: Some(who(GMAIL, "old@example.test")) };
+        assert!(observed.current(4, 6));
+        assert!(!observed.current(5, 6), "a queued observation preceded the new selection");
+        assert!(!observed.current(4, 7), "the KASA login changed while the observation was queued");
+    }
+
+    #[test]
+    fn a_new_canonical_choice_invalidates_old_usage_before_following_finishes() {
+        let pending = Pending { slot: "acct-5".into(), seen: 10, generation: 7, account: "x".into(), epoch: 3 };
+        let mut state = State { pending: Some(pending), ..State::default() };
+        assert_eq!(state.observe_revision(10), (true, false), "the old canonical value preceded the manual choice");
+        assert_eq!(state.observe_revision(10), (false, false));
+        assert_eq!(state.observe_revision(11), (true, true), "a later remote choice must invalidate old decisions before adoption finishes");
+        assert_eq!(state.observe_revision(11), (false, false));
+    }
+
+    #[test]
+    fn another_kasa_login_does_not_inherit_a_stopped_attempt_at_the_same_revision() {
+        let mut state = State { scope: Some(("x".into(), 3)), seen_rev: Some(12),
+            attempt: Some((12, Step::Stopped("account_sync_workbench_changed"))),
+            pending: Some(Pending { slot: "acct-5".into(), seen: 12, generation: 7, account: "x".into(), epoch: 3 }),
+            notice: Some(SyncNotice { summary: "old".into(), details: "old".into(), failed: true, pending: false }) };
+        state.align_scope(Some("x"), 3);
+        assert!(state.pending.is_some() && state.attempt.is_some());
+        state.align_scope(Some("y"), 3);
+        assert!(state.pending.is_none() && state.attempt.is_none() && state.notice.is_none() && state.seen_rev.is_none());
+        state.attempt = Some((12, Step::Shown));
+        state.align_scope(Some("y"), 4);
+        assert!(state.attempt.is_none());
+        state.align_scope(None, 5);
+        assert!(state.scope.is_none());
     }
 
     #[test]

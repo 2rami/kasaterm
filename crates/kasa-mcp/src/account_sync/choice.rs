@@ -76,16 +76,13 @@ pub fn same_identity(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Builds a new intent. `seen` is the snapshot revision this device last observed, `current` the local value
-/// right now and `sent` this device's sent-but-unanswered intents, so a choice made while any of those is in
-/// flight still replaces it once it lands.
+/// `seen` was captured when the choice was made. A later identity proof must not promote it over a newer choice.
 pub fn new_intent(
     account_uuid: &str,
     organization_uuid: &str,
     email: &str,
     org: &str,
     seen: u64,
-    current: Option<&Value>,
     sent: &[String],
 ) -> Option<Value> {
     let mut o = Map::new();
@@ -95,18 +92,11 @@ pub fn new_intent(
     if !email.is_empty() { o.insert("email".into(), Value::String(email.into())); }
     if !org.is_empty() { o.insert("org".into(), Value::String(org.into())); }
     o.insert("intent".into(), Value::String(uuid::Uuid::new_v4().to_string()));
-    let mut base = seen;
-    if let Some(current) = current.filter(|v| valid(v)) {
-        match rev(current) {
-            Some(rev) => base = base.max(rev),
-            None => base = base.max(self::base(current)),
-        }
-    }
     let chain: Vec<Value> = sent.iter().take(CHAIN).map(|id| Value::String(id.clone())).collect();
     if !chain.is_empty() {
         o.insert("after".into(), Value::Array(chain));
     }
-    o.insert("base".into(), Value::from(base));
+    o.insert("base".into(), Value::from(seen));
     let value = Value::Object(o);
     valid(&value).then_some(value)
 }
@@ -223,14 +213,14 @@ mod tests {
     const ORG: &str = "00000000-0000-4000-8000-0000000000f0";
 
     fn stamped(account: &str, seen: u64, rev: u64) -> Value {
-        let mut v = new_intent(account, ORG, "person@example.test", "Org", seen, None, &[]).unwrap();
+        let mut v = new_intent(account, ORG, "person@example.test", "Org", seen, &[]).unwrap();
         v["rev"] = json!(rev);
         v
     }
 
     #[test]
     fn values_carry_no_slot_label_or_secret_and_only_uuids_identify() {
-        let v = new_intent(A, ORG, " person@example.test ", "Org", 3, None, &[]).unwrap();
+        let v = new_intent(A, ORG, " person@example.test ", "Org", 3, &[]).unwrap();
         assert_eq!(v["base"], 3);
         assert!(v.get("rev").is_none() && pending(&v));
         for key in ["slot", "label", "token", "accessToken"] {
@@ -251,10 +241,10 @@ mod tests {
     #[test]
     fn an_intent_that_missed_a_later_choice_is_refused_and_the_remote_wins() {
         let remote = stamped(B, 10, 11);
-        let offline = new_intent(A, ORG, "", "", 10, None, &[]).unwrap();
+        let offline = new_intent(A, ORG, "", "", 10, &[]).unwrap();
         assert_eq!(plan(Some(&offline), Some(&remote)), Plan::Adopt(Some(remote.clone())));
         assert_eq!(commit(Some(&remote), &offline, 11), Commit::Stale);
-        let informed = new_intent(A, ORG, "", "", 11, None, &[]).unwrap();
+        let informed = new_intent(A, ORG, "", "", 11, &[]).unwrap();
         assert!(matches!(plan(Some(&informed), Some(&remote)), Plan::Publish(_)));
         let Commit::Stamp(done) = commit(Some(&remote), &informed, 11) else { panic!() };
         assert_eq!(done["rev"], 12);
@@ -263,7 +253,7 @@ mod tests {
     #[test]
     fn remote_a_b_a_still_replaces_a_refused_local_intent() {
         let a_again = stamped(A, 12, 13);
-        let stale = new_intent(B, ORG, "", "", 10, None, &[]).unwrap();
+        let stale = new_intent(B, ORG, "", "", 10, &[]).unwrap();
         assert_eq!(plan(Some(&stale), Some(&a_again)), Plan::Adopt(Some(a_again.clone())));
         let old_synced = stamped(A, 10, 11);
         assert_eq!(plan(Some(&old_synced), Some(&a_again)), Plan::Adopt(Some(a_again)));
@@ -276,28 +266,28 @@ mod tests {
     #[test]
     fn a_new_choice_chains_to_its_own_sent_intent_but_not_to_someone_elses() {
         let mut local = json!({});
-        let first = new_intent(A, ORG, "", "", 10, None, &[]).unwrap();
+        let first = new_intent(A, ORG, "", "", 10, &[]).unwrap();
         mark_sent(&mut local, intent(&first).unwrap());
-        let second = new_intent(B, ORG, "", "", 10, Some(&first), &sent(&local)).unwrap();
+        let second = new_intent(B, ORG, "", "", 10, &sent(&local)).unwrap();
         assert_eq!(second["after"], json!([first["intent"]]));
         let Commit::Stamp(first_done) = commit(None, &first, 10) else { panic!() };
         assert!(matches!(plan(Some(&second), Some(&first_done)), Plan::Publish(_)));
         assert!(matches!(commit(Some(&first_done), &second, 11), Commit::Stamp(_)));
         let foreign = stamped(A, 10, 11);
         assert_eq!(commit(Some(&foreign), &second, 11), Commit::Stale);
-        let again = new_intent(A, ORG, "", "", 10, Some(&first), &sent(&local)).unwrap();
+        let again = new_intent(A, ORG, "", "", 10, &sent(&local)).unwrap();
         assert_ne!(again["intent"], first["intent"], "re-choosing the same account is a new intent");
     }
 
     #[test]
     fn any_number_of_choices_after_a_send_keep_the_last_once_the_send_lands() {
         let mut local = json!({});
-        let first = new_intent(A, ORG, "", "", 10, None, &[]).unwrap();
+        let first = new_intent(A, ORG, "", "", 10, &[]).unwrap();
         mark_sent(&mut local, intent(&first).unwrap());
         let mut last = first.clone();
         for n in 0..20 {
             let account = if n % 2 == 0 { B } else { A };
-            last = new_intent(account, ORG, "", "", 10, Some(&last), &sent(&local)).unwrap();
+            last = new_intent(account, ORG, "", "", 10, &sent(&local)).unwrap();
         }
         assert_eq!(last["after"], json!([first["intent"]]), "unsent clicks grew the chain or cut the send in flight");
         let Commit::Stamp(first_done) = commit(None, &first, 10) else { panic!() };
@@ -307,13 +297,13 @@ mod tests {
 
         // Many unanswered passes: the newest sends stay and the send in flight is always first.
         for _ in 0..CHAIN + 3 {
-            let next = new_intent(B, ORG, "", "", 10, Some(&last), &sent(&local)).unwrap();
+            let next = new_intent(B, ORG, "", "", 10, &sent(&local)).unwrap();
             mark_sent(&mut local, intent(&next).unwrap());
             last = next;
         }
         assert_eq!(sent(&local).first(), Some(&choice_id(&last)));
         assert_eq!(sent(&local).len(), CHAIN);
-        let after_flight = new_intent(A, ORG, "", "", 10, Some(&last), &sent(&local)).unwrap();
+        let after_flight = new_intent(A, ORG, "", "", 10, &sent(&local)).unwrap();
         let Commit::Stamp(flight_done) = commit(None, &last, 10) else { panic!() };
         assert!(matches!(commit(Some(&flight_done), &after_flight, 11), Commit::Stamp(_)));
         prune_sent(&mut local, Some(&flight_done));
@@ -322,17 +312,17 @@ mod tests {
 
     #[test]
     fn a_retried_or_late_answer_consumes_only_its_own_intent() {
-        let mine = new_intent(A, ORG, "", "", 4, None, &[]).unwrap();
+        let mine = new_intent(A, ORG, "", "", 4, &[]).unwrap();
         let Commit::Stamp(done) = commit(None, &mine, 4) else { panic!() };
         assert_eq!(commit(Some(&done), &mine, 5), Commit::Unchanged(done.clone()));
         assert_eq!(plan(Some(&mine), Some(&done)), Plan::Adopt(Some(done.clone())));
-        let newer_same_account = new_intent(A, ORG, "", "", 4, Some(&mine), &[choice_id(&mine)]).unwrap();
+        let newer_same_account = new_intent(A, ORG, "", "", 4, &[choice_id(&mine)]).unwrap();
         assert!(matches!(plan(Some(&newer_same_account), Some(&done)), Plan::Publish(_)));
     }
 
     #[test]
     fn revisions_the_relay_never_had_are_refused() {
-        let ahead = new_intent(A, ORG, "", "", 500, None, &[]).unwrap();
+        let ahead = new_intent(A, ORG, "", "", 500, &[]).unwrap();
         assert_eq!(commit(None, &ahead, 20), Commit::Invalid);
     }
 }

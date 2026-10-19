@@ -279,9 +279,15 @@ pub fn current_account() -> Option<String> {
 /// The snapshot revision this device last observed for the signed-in account — what a new choice has seen.
 pub fn seen_revision(paths: &Paths) -> u64 {
     let Some(account) = current_account() else { return 0 };
-    local::load_bindings(&paths.binding).ok()
+    let Ok(_guard) = local::lock_files() else { return 0 };
+    let remote = local::load_bindings(&paths.binding).ok()
         .and_then(|bindings| bindings.accounts.get(&account).map(|binding| binding.remote.revision))
-        .unwrap_or(0)
+        .unwrap_or(0);
+    // The GUI can have applied an answer before the sync thread saves its binding.
+    let settings = local::read_json(&paths.settings, json!({})).ok();
+    let chosen = settings.as_ref().and_then(|settings| choice::owned(settings, &account))
+        .map_or(0, |value| choice::rev(value).unwrap_or_else(|| choice::base(value)));
+    remote.max(chosen)
 }
 
 /// Records a person's (or the usage poller's) choice as a new intent in the local settings and wakes the sync.
@@ -301,10 +307,9 @@ pub fn choose_for(paths: &Paths, owner: &str, seen: u64, account_uuid: &str, org
 
 pub(crate) fn choose_as(paths: &Paths, owner: &str, seen: u64, account_uuid: &str, organization_uuid: &str, email: &str, org: &str) -> Result<Value, String> {
     local::edit_json(&paths.settings, json!({}), |settings| {
-        let current = choice::owned(settings, owner).cloned();
         let owned = settings.get(choice::OWNER_KEY).and_then(Value::as_str) == Some(owner);
         let sent = if owned { choice::sent(settings) } else { Vec::new() };
-        let intent = choice::new_intent(account_uuid, organization_uuid, email, org, seen, current.as_ref(), &sent)
+        let intent = choice::new_intent(account_uuid, organization_uuid, email, org, seen, &sent)
             .ok_or("account choice invalid")?;
         let object = settings.as_object_mut().ok_or("settings is not an object")?;
         if !owned { object.remove(choice::SENT_KEY); }
@@ -613,6 +618,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delayed_identity_proof_keeps_its_original_revision_after_a_new_remote_choice() {
+        let (credential, state, server) = fixture().await;
+        let me = owner(&credential);
+        let (root, a, b) = rig("late-proof");
+        let client = reqwest::Client::new();
+        let allow = || Ok(());
+        let apply = |request| apply_files(&request);
+        let sync = |paths| synchronize(&client, &credential, Stamp::fixture(), paths, &allow, &apply);
+        sync(a.clone()).await.unwrap();
+        sync(b.clone()).await.unwrap();
+        let chosen_at = seen(&b);
+        choose_at(&a, &me, TEAM);
+        sync(a.clone()).await.unwrap();
+        sync(b.clone()).await.unwrap();
+        let canonical = remote_choice(&state);
+        assert!(canonical.as_ref().and_then(choice::rev).unwrap() > chosen_at);
+        // The application waited for proof while a newer canonical value arrived in its settings.
+        let delayed = choose_as(&b, &me, chosen_at, PERSONAL, ORG, "person@example.test", "Shown name").unwrap();
+        assert_eq!(choice::base(&delayed), chosen_at);
+        sync(b.clone()).await.unwrap();
+        assert_eq!(remote_choice(&state), canonical);
+        assert_eq!(local_choice(&b), canonical);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_conflict_between_get_and_patch_rebases_settings_but_not_a_stale_choice() {
         let (credential, state, server) = fixture().await;
         let me = owner(&credential);
@@ -627,7 +659,7 @@ mod tests {
         local::edit_json(&b.settings, json!({}), |v| { v["font_size"] = json!(20); Ok(()) }).unwrap();
         choose_at(&b, &me, GMAIL);
         // Another device's choice commits between B's GET and B's PATCH.
-        let rival = choice::new_intent(PERSONAL, ORG, "", "", base, None, &[]).unwrap();
+        let rival = choice::new_intent(PERSONAL, ORG, "", "", base, &[]).unwrap();
         *state.rival.lock().unwrap() = Some(rival.clone());
         state.conflict.store(true, Ordering::Release);
         sync(b.clone()).await.unwrap();
@@ -666,7 +698,7 @@ mod tests {
         sync(b.clone()).await.unwrap();
         assert_eq!(local_choice(&b), back, "B kept its refused choice after the relay came back to the same account");
         // A value carrying a wall-clock order (even a far-future one) is not a choice at all and is never sent.
-        let mut clocked = choice::new_intent(GMAIL, ORG, "", "", seen(&b), local_choice(&b).as_ref(), &[]).unwrap();
+        let mut clocked = choice::new_intent(GMAIL, ORG, "", "", seen(&b), &[]).unwrap();
         clocked["at"] = json!(u64::MAX);
         local::edit_json(&b.settings, json!({}), |v| { v[choice::KEY] = clocked; Ok(()) }).unwrap();
         sync(b.clone()).await.unwrap();
@@ -700,7 +732,7 @@ mod tests {
         assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&newer).map(str::to_string));
         let canonical = remote_choice(&state);
         // An automatic decision made from an older view (base before the newer choice, not chained) is refused.
-        let old_auto = choice::new_intent(GMAIL, ORG, "", "", choice::base(&first), None, &[]).unwrap();
+        let old_auto = choice::new_intent(GMAIL, ORG, "", "", choice::base(&first), &[]).unwrap();
         local::edit_json(&a.settings, json!({}), |v| { v[choice::KEY] = old_auto; Ok(()) }).unwrap();
         synchronize(&client, &credential, Stamp::fixture(), a.clone(), &allow, &plain).await.unwrap();
         assert_eq!(remote_choice(&state), canonical);
