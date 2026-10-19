@@ -692,6 +692,90 @@ class Server {
     }
   }
 
+  /// 대화에 박힌 소리·영상(`[[km:…]]`)의 정보 JSON. 블록을 낸 기기에만 묻는다 — 다른 기기의 같은 id 는
+  /// 남의 것이다.
+  Future<Object?> inlineMediaInfo(String id, {String? machine}) async {
+    final res = await _inlineMedia(
+      uri('term/inline-media', query: {'id': id}, machine: machine),
+      const Duration(seconds: 15),
+    );
+    try {
+      return jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      throw const ServerException('미디어 정보를 읽지 못했어요');
+    }
+  }
+
+  Future<Uint8List> inlineMediaPoster(String id, {String? machine}) async =>
+      (await _inlineMedia(
+        uri('term/inline-media/poster', query: {'id': id}, machine: machine),
+        const Duration(seconds: 15),
+      )).bodyBytes;
+
+  /// 파일의 [offset] 부터 [length] 바이트. 한 번에 다 받지 않고 조각으로 — 큰 영상을 메모리에 통째로
+  /// 올리지 않는다. [abort] 가 끝나면 받던 요청을 끊는다(카드의 「취소」).
+  Future<Uint8List> inlineMediaChunk(
+    String id, {
+    required int offset,
+    required int length,
+    String? machine,
+    Future<void>? abort,
+  }) async {
+    final res = await _inlineMedia(
+      uri(
+        'term/inline-media/file',
+        query: {'id': id, 'offset': '$offset', 'len': '$length'},
+        machine: machine,
+      ),
+      const Duration(seconds: 60),
+      abort: abort,
+    );
+    if (res.bodyBytes.length != length) {
+      throw const ServerException('받은 조각의 크기가 맞지 않아요');
+    }
+    return res.bodyBytes;
+  }
+
+  Future<http.Response> _inlineMedia(
+    Uri u,
+    Duration timeout, {
+    Future<void>? abort,
+  }) async {
+    if (!isDirect(u) &&
+        (!sameOrigin(root, u) || !u.path.startsWith(root.path))) {
+      throw const ServerException('미디어 주소를 확인하지 못했어요');
+    }
+    // 계정 연결은 본문까지 send 안에서 다 읽는다 — 시간 상한도 취소와 같은 끊기로 걸어야 요청이 실제로 멈춘다.
+    final stop = Completer<void>();
+    var timedOut = false;
+    abort?.whenComplete(() {
+      if (!stop.isCompleted) stop.complete();
+    });
+    final timer = Timer(timeout, () {
+      timedOut = true;
+      if (!stop.isCompleted) stop.complete();
+    });
+    final http.Response res;
+    try {
+      final req = http.AbortableRequest('GET', u, abortTrigger: stop.future);
+      res = await http.Response.fromStream(await _client.send(req));
+    } on http.RequestAbortedException {
+      if (timedOut) throw const ServerException('원본 기기가 답하지 않아요');
+      rethrow;
+    } catch (_) {
+      throw const ServerException('원본 기기에 닿지 못했어요');
+    } finally {
+      timer.cancel();
+    }
+    return switch (res.statusCode) {
+      200 => res,
+      404 => throw const ServerException('원본 기기에 이 미디어가 없어요', status: 404),
+      403 => throw const ServerException('이 미디어를 볼 권한이 없어요', status: 403),
+      400 => throw const ServerException('미디어 요청이 잘못됐어요', status: 400),
+      final s => throw ServerException('미디어를 받지 못했어요 (HTTP $s)', status: s),
+    };
+  }
+
   Uri wsUri(
     String path, {
     required Map<String, String> query,

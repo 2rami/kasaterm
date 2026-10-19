@@ -24,6 +24,9 @@ dependencies:
   markdown: ^7.3.1
   # 카사넷 입구(ios/KasaNet 정적 라이브러리)를 부른다.
   ffi: ^2.1.3
+  # 대화 속 소리·영상을 앱 안에서 튼다(iOS 는 AVPlayer). 받은 파일은 앱 캐시 폴더에 둔다.
+  video_player: ^2.11.1
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
@@ -31,6 +34,11 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   # 시험에서 앱 안 Safari 열기를 가로챈다(url_launcher 가 부르는 판).
   url_launcher_platform_interface: ^2.3.2
+  # 시험에서 AVPlayer 대신 가짜 플레이어를 끼운다.
+  video_player_platform_interface: ^6.9.0
+  # 시뮬레이터에서 진짜 AVPlayer 로 받기·재생·찾기·닫기를 확인한다(integration_test/).
+  integration_test:
+    sdk: flutter
 
 flutter:
   uses-material-design: true

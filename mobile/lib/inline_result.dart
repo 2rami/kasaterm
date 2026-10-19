@@ -3,36 +3,44 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
+import 'inline_media.dart';
 import 'server.dart';
 
 class InlineResultPart {
-  const InlineResultPart.text(this.text) : id = null;
-  const InlineResultPart.image(this.id) : text = null;
+  const InlineResultPart.text(this.text) : id = null, media = false, rows = 0;
+  const InlineResultPart.image(this.id) : text = null, media = false, rows = 0;
+  const InlineResultPart.media(this.id, this.rows) : text = null, media = true;
   final String? text;
   final String? id;
+
+  /// `[[km:…]]` 소리·영상 블록. 줄 수는 PC 터미널이 잡은 높이일 뿐이고 종류는 정보가 정한다.
+  final bool media;
+  final int rows;
 }
 
 List<InlineResultPart> inlineResultParts(String text) {
   final blocks = RegExp(
-    r'^```(?:text)?[ \t]*\r?\n((?:[ \t]*\[\[ki:[0-9a-f]{16}:\d{2}/\d{2}\]\][ \t]*\r?\n)+)```[ \t]*(?:\r?\n|$)',
+    r'^```(?:text)?[ \t]*\r?\n((?:[ \t]*\[\[k[im]:[0-9a-f]{16}:\d{2}/\d{2}\]\][ \t]*\r?\n)+)```[ \t]*(?:\r?\n|$)',
     multiLine: true,
   );
-  final marker = RegExp(r'^\[\[ki:([0-9a-f]{16}):(\d{2})/(\d{2})\]\]$');
+  final marker = RegExp(r'^\[\[(k[im]):([0-9a-f]{16}):(\d{2})/(\d{2})\]\]$');
   final parts = <InlineResultPart>[];
   var cursor = 0;
   for (final block in blocks.allMatches(text)) {
     final lines = block.group(1)!.trim().split('\n');
     final first = marker.firstMatch(lines.first.trim())!;
-    final total = int.parse(first.group(3)!);
-    final id = first.group(1)!;
+    final tag = first.group(1)!;
+    final id = first.group(2)!;
+    final total = int.parse(first.group(4)!);
     if (total < 1 || total > 24 || lines.length != total) continue;
     var valid = true;
     for (var i = 0; i < lines.length; i++) {
       final row = marker.firstMatch(lines[i].trim());
       if (row == null ||
-          row.group(1) != id ||
-          int.parse(row.group(2)!) != i ||
-          int.parse(row.group(3)!) != total) {
+          row.group(1) != tag ||
+          row.group(2) != id ||
+          int.parse(row.group(3)!) != i ||
+          int.parse(row.group(4)!) != total) {
         valid = false;
         break;
       }
@@ -41,7 +49,11 @@ List<InlineResultPart> inlineResultParts(String text) {
     if (cursor < block.start) {
       parts.add(InlineResultPart.text(text.substring(cursor, block.start)));
     }
-    parts.add(InlineResultPart.image(id));
+    parts.add(
+      tag == 'km'
+          ? InlineResultPart.media(id, total)
+          : InlineResultPart.image(id),
+    );
     cursor = block.end;
   }
   if (cursor < text.length) {
@@ -71,7 +83,17 @@ class InlineResultBody extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       for (final part in inlineResultParts(text))
-        if (part.id case final String id)
+        if (part.media)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: InlineMediaCard(
+              server: server,
+              id: part.id!,
+              rows: part.rows,
+              machine: machine,
+            ),
+          )
+        else if (part.id case final String id)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: InlineResultImage(server: server, id: id, machine: machine),

@@ -452,6 +452,9 @@ class OriginClient extends http.BaseClient {
       return await _send(request, true);
     } on AccountException {
       rethrow;
+    } on http.RequestAbortedException {
+      // 부른 쪽이 끊은 요청 — 관문으로 다시 보내면 취소가 취소되지 않는다.
+      rethrow;
     } catch (_) {
       final back = fallback?.call(request.url);
       if (back == null || request is! http.Request || request.method != 'GET') rethrow;
@@ -462,6 +465,8 @@ class OriginClient extends http.BaseClient {
   Future<http.StreamedResponse> _gateway(http.BaseRequest request) async {
     try {
       return await _send(request, false);
+    } on http.RequestAbortedException {
+      rethrow;
     } on http.ClientException {
       if (_closed || request is! http.Request || request.method != 'GET') rethrow;
       return _send(http.Request('GET', request.url)..headers.addAll(request.headers), false);

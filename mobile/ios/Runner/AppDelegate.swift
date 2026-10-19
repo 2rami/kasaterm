@@ -51,6 +51,13 @@ import os
     let messenger = engineBridge.applicationRegistrar.messenger()
     let files = FlutterMethodChannel(name: "kasaterm/file_preview", binaryMessenger: messenger)
     files.setMethodCallHandler { [weak self] call, result in
+      // 대화 미디어 카드가 앱 안 플레이어로 못 튼 파일 — 이미 받아 둔 캐시 파일을 복사 없이 연다.
+      if call.method == "previewPath", let self,
+         let args = call.arguments as? [String: Any],
+         let path = args["path"] as? String {
+        self.filePreview.open(cached: URL(fileURLWithPath: path), result: result)
+        return
+      }
       guard call.method == "preview", let self,
             let args = call.arguments as? [String: Any],
             let name = args["name"] as? String,
@@ -572,6 +579,40 @@ private final class ResultFilePreview: NSObject, QLPreviewControllerDataSource, 
         result(nil)
       }
     }
+  }
+
+  /// 앱 캐시 폴더 안의 파일만 연다. 이 파일은 캐시가 주인이라 닫아도 지우지 않는다(directory 를 비운다).
+  func open(cached url: URL, result: @escaping FlutterResult) {
+    let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].resolvingSymlinksInPath().standardizedFileURL
+    let file = url.resolvingSymlinksInPath().standardizedFileURL
+    guard file.path.hasPrefix(caches.path + "/"), FileManager.default.fileExists(atPath: file.path) else {
+      result(FlutterError(code: "file_path", message: "미리보기를 열지 못했어요", details: nil))
+      return
+    }
+    guard QLPreviewController.canPreview(file as NSURL) else {
+      result(FlutterError(code: "file_type", message: "미리보기를 지원하지 않는 파일이에요", details: nil))
+      return
+    }
+    let old = directory
+    self.file = file
+    directory = nil
+    if let current = controller {
+      current.reloadData()
+    } else {
+      let preview = QLPreviewController()
+      preview.dataSource = self
+      preview.delegate = self
+      guard var front = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow }) }).first?.rootViewController else {
+        self.file = nil
+        result(FlutterError(code: "file_window", message: "미리보기를 열지 못했어요", details: nil))
+        return
+      }
+      while let presented = front.presentedViewController { front = presented }
+      controller = preview
+      front.present(preview, animated: true)
+    }
+    if let old { try? FileManager.default.removeItem(at: old) }
+    result(nil)
   }
 
   func numberOfPreviewItems(in controller: QLPreviewController) -> Int { file == nil ? 0 : 1 }

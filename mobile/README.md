@@ -104,6 +104,8 @@ lib/
   kasanet_native*.dart 앱에 링크된 kasa-net-ffi(ios/KasaNet) 바인딩. 웹·시험은 없음(늘 관문)
   net_tcp*.dart        데스크톱 개발 서버를 폰 localhost 로 끌어오는 다리(/net/tcp 웹소켓)
   conversation.dart    학생 대화 모델 — transcript-raw(claude)·rollout(codex) 줄 → 말풍선·도구 묶음 · 화면의 선택 메뉴 읽기
+  inline_result.dart   대화 속 결과 블록 — `[[ki:…]]` 이미지, `[[km:…]]` 소리·영상(inline_media.dart 카드)
+  inline_media*.dart   누르면 4MiB 조각으로 받아 전체 sha256 대조 → 앱 캐시(내용 해시 이름) → 앱 안 플레이어(screens/media_player.dart)
   screens/             connect · hub(첫 화면) · share_screen · terminal(「터미널|대화」 전환) · conversation_view · settings · dev_server(앱 안 Safari·크롬 커스텀 탭)
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
@@ -116,6 +118,15 @@ flutter pub get
 flutter analyze
 NO_PROXY='127.0.0.1,localhost' flutter test            # 유닛 + 골든
 KASA_ROOT=http://127.0.0.1:8765/ NO_PROXY='127.0.0.1,localhost' flutter test test/live/
+```
+
+대화 속 소리·영상은 시뮬레이터의 진짜 AVPlayer 로 한 번 더 본다 — 맥에서 가짜 등록소를 띄우고 그 주소를 준다
+(사용자 세션·카사텀에 닿지 않는다. 화면은 `KASA_SHOT_DIR` 에 남는다):
+
+```bash
+dart run tool/inline_media_fixture_server.dart 28791 &
+flutter drive -d <시뮬레이터> --driver test_driver/integration_test.dart \
+  --target integration_test/inline_media_test.dart --dart-define=KASA_MEDIA_FIXTURE=http://127.0.0.1:28791/
 ```
 
 `flutter test` 는 `flutter_tester` 와 로컬 소켓으로 붙는데, 셸에 프록시 변수가 있으면 그 연결이
