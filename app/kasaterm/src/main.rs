@@ -6708,6 +6708,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             prune_finished_tasks();
             prune_empty_inboxes();
         }
+        // 격리 실행은 설정 파일 옆 캐시라 그대로 돈다 — 리그가 `KASATERM_INLINE_KEEP_DAYS` 로 잴 수 있게.
+        if !launch.lite {
+            bootstrap::spawn_inline_prune();
+        }
     } else {
         // Palette reads are required by the shared document renderer; unlike
         // onboarding/shims this path does not write or start a service.

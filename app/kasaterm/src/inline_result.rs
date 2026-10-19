@@ -26,7 +26,9 @@ fn register_in(root: &Path, image: &image::DynamicImage) -> anyhow::Result<Strin
     let id = format!("{:x}", Sha256::digest(&bytes))[..16].to_string();
     std::fs::create_dir_all(root)?;
     let path = root.join(format!("{id}.png"));
-    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+        kasa_socket::inline_results::touch(&path);
+    } else {
         let temp = root.join(format!("{}.part", uuid::Uuid::new_v4()));
         std::fs::write(&temp, bytes)?;
         if let Err(error) = std::fs::rename(&temp, &path) {

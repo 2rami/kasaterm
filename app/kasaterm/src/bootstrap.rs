@@ -392,6 +392,24 @@ pub(crate) const TASK_OPEN_KEEP_DAYS: u64 = 14;
 ///
 /// 되돌릴 수 없는 삭제라 판정을 좁게 잡는다: 파일이 파싱되고 status 를 읽을 수 있을
 /// 때만 손댄다(깨진 파일·모르는 형식은 그대로 둔다).
+/// 인라인 결과물 캐시(그림·음성·영상)를 만든 날부터 30일 두고 걷는다 — 켤 때 한 번, 그 뒤 여섯 시간마다.
+/// 이 기기가 그 카드의 서버라 지나면 아직 안 받은 기기는 못 연다(docs/inline-media.md 「보관」).
+/// `KASATERM_INLINE_KEEP_DAYS` 로 기간을 바꾼다(검증 리그).
+pub(crate) fn spawn_inline_prune() {
+    let keep = std::env::var("KASATERM_INLINE_KEEP_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(kasa_socket::inline_media::KEEP, |d| std::time::Duration::from_secs(d * 24 * 60 * 60));
+    let _ = std::thread::Builder::new().name("inline-prune".into()).spawn(move || loop {
+        let media = kasa_socket::inline_media::store().prune(keep);
+        let pictures = kasa_socket::inline_results::root().map_or(0, |r| kasa_socket::inline_results::prune(&r, keep));
+        if media + pictures > 0 {
+            eprintln!("[inline-prune] 만든 지 {}일 지난 결과물 파일 {}개를 걷었다", keep.as_secs() / 86_400, media + pictures);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+    });
+}
+
 pub(crate) fn prune_finished_tasks() {
     // Windows GUI 프로세스엔 HOME 이 없다 — claude 저장소는 USERPROFILE 밑이다.
     let Some(home) = kasa_socket::home_dir() else {

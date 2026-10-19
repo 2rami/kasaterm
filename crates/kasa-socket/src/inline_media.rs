@@ -28,6 +28,9 @@ const MAX_NAME_CHARS: usize = 200;
 const MAX_META_BYTES: u64 = 64 * 1024;
 const COPY_BUF: usize = 1 << 20;
 const STALE_TMP: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// 등록 카드를 두는 기간 — 만든 날부터(2026-10-20 결정). 이 기기가 그 카드의 서버라, 지나면 아직 안 받은
+/// 다른 기기는 그 카드를 못 연다. 이미 받은 폰·PC 는 제 사본으로 계속 본다.
+pub const KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Probe {
@@ -411,7 +414,11 @@ impl Store {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 match self.record(&record.media.id) {
-                    Ok(existing) if existing == *record => Ok(()),
+                    // 다시 만든 카드 — 보관 기간을 오늘부터 다시 센다.
+                    Ok(existing) if existing == *record => {
+                        touch(&path);
+                        Ok(())
+                    }
                     Ok(_) => Err(io::Error::other("media id collision")),
                     // 깨진 기록은 같은 내용으로 다시 세운다 — 원본은 방금 해시로 확인했다.
                     Err(_) => {
@@ -422,6 +429,63 @@ impl Store {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// 만든 지 `keep` 가 지난 카드를 걷는다. 카드 기록의 수정 시각이 만든 때다 — 같은 카드를 다시 등록하면
+    /// 새로 고친다(`publish_record`). 원본·포스터는 여러 카드가 함께 쓰므로 남은 카드가 하나도 안 가리키고 하루
+    /// 넘게 손 안 탄 것만 지운다 — 막 공개해 아직 기록이 없는 등록 중 파일을 지우지 않게. 받은 사본(`remote/`)은
+    /// 받은 지 `keep` 가 지나면, 받다 만 조각은 하루 뒤에 걷는다. 돌려주는 것은 지운 파일 수.
+    pub fn prune(&self, keep: std::time::Duration) -> usize {
+        let older = |path: &Path, age: std::time::Duration| {
+            std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()).and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok()).is_some_and(|a| a > age)
+        };
+        let files = |dir: PathBuf| -> Vec<PathBuf> {
+            std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect()
+        };
+        let mut removed = 0;
+        let mut drop = |path: &Path| {
+            if std::fs::remove_file(path).is_ok() {
+                removed += 1;
+            }
+        };
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for path in files(self.root.join("meta")) {
+            if older(&path, keep) {
+                drop(&path);
+                continue;
+            }
+            let record = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Record>(&b).ok());
+            if let Some(r) = record {
+                used.insert(format!("blobs/{}.{}", r.media.sha256, r.ext));
+                if let Some(poster) = r.poster_sha256 {
+                    used.insert(format!("posters/{poster}.png"));
+                }
+            }
+        }
+        for dir in ["blobs", "posters"] {
+            for path in files(self.root.join(dir)) {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if !used.contains(&format!("{dir}/{name}")) && older(&path, STALE_TMP) {
+                    drop(&path);
+                }
+            }
+        }
+        for path in files(self.root.join("tmp")) {
+            if older(&path, STALE_TMP) {
+                drop(&path);
+            }
+        }
+        for base in files(self.root.join("remote")) {
+            for path in files(base.clone()) {
+                let part = path.extension().is_some_and(|e| e == "part");
+                if older(&path, if part { STALE_TMP } else { keep }) {
+                    drop(&path);
+                }
+            }
+            let _ = std::fs::remove_dir(&base);
+        }
+        removed
     }
 
     fn prepare_dirs(&self) -> io::Result<()> {
@@ -565,12 +629,21 @@ fn publish(tmp: &Path, dest: &Path, size: u64) -> io::Result<()> {
     match link_new(tmp, dest) {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             if open_regular(dest).is_ok_and(|(_, m)| m.len() == size) {
+                // 정리가 「아무도 안 가리키는 하루 지난 원본」으로 보고 지우지 않게 손 탄 시각을 새로 한다.
+                touch(dest);
                 return Ok(());
             }
             std::fs::remove_file(dest)?;
             link_new(tmp, dest)
         }
         other => other,
+    }
+}
+
+/// 수정 시각만 지금으로. 봉인(0o400)한 파일도 주인은 시각을 고칠 수 있다.
+fn touch(path: &Path) {
+    if let Ok(file) = File::open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
     }
 }
 
@@ -670,6 +743,66 @@ mod tests {
 
     fn video_probe() -> Probe {
         Probe { duration_ms: Some(1500), width: Some(640), height: Some(360), poster: Some(png(320, 180)) }
+    }
+
+    fn age(path: &Path, days: u64) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 60 * 60);
+        File::open(path).unwrap().set_modified(then).unwrap();
+    }
+
+    #[test]
+    fn cards_older_than_the_keep_go_and_shared_files_stay_while_referenced() {
+        let dir = temp_root("prune");
+        let store = Store::at(dir.join("store"));
+        let bytes = mp4_bytes(4096, 7);
+        let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
+        std::fs::write(&a, &bytes).unwrap();
+        std::fs::write(&b, &bytes).unwrap();
+        // 같은 원본을 이름만 달리 두 카드가 쓴다.
+        let old = store.register(&a, video_probe()).unwrap();
+        let fresh = store.register(&b, video_probe()).unwrap();
+        assert_ne!(old.id, fresh.id);
+        let blob = store.media_path(&old.id).unwrap();
+        age(&store.meta_path(&old.id), 31);
+        age(&blob, 31);
+        assert_eq!(store.prune(KEEP), 1, "만든 지 31일 된 카드 기록만");
+        assert!(store.metadata(&old.id).is_err());
+        assert!(store.metadata(&fresh.id).is_ok(), "남은 카드가 가리키는 원본은 남는다");
+        age(&store.meta_path(&fresh.id), 31);
+        let poster = store.poster_path(&fresh.id).unwrap();
+        age(&poster, 31);
+        assert_eq!(store.prune(KEEP), 3, "카드·원본·포스터");
+        assert!(!blob.exists() && !poster.exists());
+    }
+
+    #[test]
+    fn registering_the_same_card_again_restarts_its_keep() {
+        let dir = temp_root("retouch");
+        let store = Store::at(dir.join("store"));
+        let src = dir.join("c.mp4");
+        std::fs::write(&src, mp4_bytes(2048, 9)).unwrap();
+        let media = store.register(&src, video_probe()).unwrap();
+        age(&store.meta_path(&media.id), 40);
+        age(&store.media_path(&media.id).unwrap(), 40);
+        assert_eq!(store.register(&src, video_probe()).unwrap().id, media.id);
+        assert_eq!(store.prune(KEEP), 0, "다시 만든 카드는 오늘부터 센다");
+        assert!(store.metadata(&media.id).is_ok());
+    }
+
+    #[test]
+    fn received_copies_go_after_the_keep_and_stale_parts_after_a_day() {
+        let dir = temp_root("remote");
+        let store = Store::at(dir.join("store"));
+        let base = dir.join("store/remote/abc");
+        std::fs::create_dir_all(&base).unwrap();
+        let (got, part, recent) = (base.join("x.mp4"), base.join("y.mp4.part"), base.join("z.mp4"));
+        for f in [&got, &part, &recent] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        age(&got, 31);
+        age(&part, 2);
+        assert_eq!(store.prune(KEEP), 2);
+        assert!(recent.exists());
     }
 
     #[test]
