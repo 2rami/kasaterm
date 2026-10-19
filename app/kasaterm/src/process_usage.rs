@@ -89,11 +89,12 @@ fn terminate(expected: &Process) -> Result<(), String> {
 
 fn backfill_history(live: &mut serde_json::Value, saved: &serde_json::Value, last: &std::collections::HashMap<String, (String, String)>) {
     fn one(live: &mut serde_json::Value, saved: &serde_json::Value, last: &std::collections::HashMap<String, (String, String)>) {
+        let mut inferred = None;
         if live["session_id"].as_str().is_none_or(str::is_empty) {
             if let Some((name, sid)) = live["pane_id"].as_str().and_then(|pid| last.get(pid)).filter(|(_, sid)| !sid.is_empty()) {
                 live["session_id"] = serde_json::json!(sid);
                 live["character"] = serde_json::json!(name);
-                live["was_agent"] = serde_json::json!(if crate::socket::codex_root_rollout_for_session(sid).is_some() { "codex" } else { "claude" });
+                inferred = Some(sid.as_str());
             }
         }
         let old = std::iter::once(saved).chain(saved["tabs"].as_array().into_iter().flatten()).find(|old| {
@@ -107,6 +108,9 @@ fn backfill_history(live: &mut serde_json::Value, saved: &serde_json::Value, las
                     }
                 }
             }
+        }
+        if let Some(sid) = inferred.filter(|_| live["was_agent"].as_str().is_none_or(str::is_empty)) {
+            live["was_agent"] = serde_json::json!(if crate::socket::codex_root_rollout_for_session(sid).is_some() { "codex" } else { "claude" });
         }
     }
     one(live, saved, last);
@@ -296,6 +300,20 @@ mod tests {
     use super::*;
     fn row(pid: u32, ppid: u32, root: u32, started: u64) -> Process {
         Process { id: Identity { pid, started, uid: 50, exe: "zsh".into() }, ppid, root, name: "zsh".into(), cpu: 0.0, rss: 0, cwd: None, owner: None }
+    }
+    #[test]
+    fn saved_harness_survives_a_missing_transcript_without_replacing_a_new_session() {
+        let saved = serde_json::json!({"pane_id":"%1", "surface_key":"same", "session_id":"absent-codex-fixture", "was_agent":"codex", "model":"saved-model"});
+        let last = std::collections::HashMap::from([("%1".into(), ("".into(), "absent-codex-fixture".into()))]);
+        let mut live = serde_json::json!({"pane_id":"%1", "surface_key":"same"});
+        backfill_history(&mut live, &saved, &last);
+        assert_eq!(live["was_agent"], "codex");
+        assert_eq!(live["model"], "saved-model");
+        let mut fresh = serde_json::json!({"pane_id":"%1", "surface_key":"same", "session_id":"new-session", "was_agent":"claude"});
+        backfill_history(&mut fresh, &saved, &last);
+        assert_eq!(fresh["session_id"], "new-session");
+        assert_eq!(fresh["was_agent"], "claude");
+        assert!(fresh["model"].is_null());
     }
     #[test]
     fn a_hidden_cell_splits_into_disjoint_launch_recipes() {
