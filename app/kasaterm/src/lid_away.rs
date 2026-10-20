@@ -393,10 +393,6 @@ impl App {
     }
 
     fn lid_away_depart(&mut self, machine: &kasa_mcp::machines::Machine, working: &[String]) {
-        // 이사는 한 번에 하나라 도는 동안엔 예약조차 안 받는다 — 다음 틱에 다시 건다.
-        if self.migrate_running_any() {
-            return;
-        }
         let fresh: Vec<String> = STATE.with(|s| {
             let st = s.borrow();
             working
@@ -430,10 +426,6 @@ impl App {
                     }
                 }
             });
-            // 쉬던 칸이면 예약이 아니라 바로 떠났다 — 그 이사가 끝나야 다음을 건다.
-            if self.migrate_running_any() {
-                return;
-            }
         }
     }
 
