@@ -77,8 +77,8 @@ fn head(
     top: f32,
     bottom: f32,
 ) -> f32 {
-    g.rect(f.x,top,f.w,bottom-top,theme::bg());
-    crate::native_controls::panel(g,(f.x+4.0,top+4.0,(f.w-8.0).max(0.0),(bottom-top-8.0).max(0.0)),f.bg);
+    g.rect(f.x, top, f.w, bottom-top, f.bg);
+    g.rect(f.x, top, 1.0, bottom-top, theme::border());
     info::draw_side_tabs(g, f.cursor, info, git, f.x, f.w, top)
 }
 

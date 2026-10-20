@@ -77,8 +77,7 @@ impl MachineIdentity {
     }
 }
 
-/// 기기 기본색. 데스크톱 그리기에서는 배치도 칸에만 쓴다 — 본문·머리·패널 바탕은 기기와 무관한
-/// 테마색이다(2026-10-19 「창 배경은 안 바뀌고 미니맵에서만 구분」).
+/// 같은 기기 묶음의 머리와 방들을 한 색으로 이어 준다.
 pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
     ("blue", [76, 134, 228, 255]),
     ("violet", [158, 104, 230, 255]),
@@ -87,15 +86,8 @@ pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
     ("amber", [208, 154, 34, 255]),
 ];
 
-/// 배치도 칸이 기기색을 섞는 비율. 채움은 은은하게 두고 **테두리**가 기기색을 더 진하게 문다 —
-/// 20px 남짓한 칸은 채움만으로는 옆 칸과 갈라 보이지 않고, 진하게 채우면 얼굴이 묻힌다.
-const MINIMAP_TINT: f32 = 0.22;
-const MINIMAP_BORDER_TINT: f32 = 0.55;
-/// 기기 칸 채움이 이 기기 칸에서 떨어져야 하는 거리(RGB). 바탕과 색조가 비슷한 기기색은
-/// 22% 로 섞으면 이 기기 칸과 같아 보여(2026-10-01 실측: 이 기기 #374046, 맥미니 #38454b)
-/// 이 거리가 날 때까지 더 섞는다.
-const MINIMAP_MIN_GAP: f32 = 32.0;
-const MINIMAP_TINT_MAX: f32 = 0.6;
+const DEVICE_SECTION_TINT: f32 = 0.10;
+const DEVICE_SECTION_BORDER_TINT: f32 = 0.65;
 
 /// 그 기기의 색. 같은 기계를 기기마다 다른 이름으로 불러도 기기 id 로 같은 색이 된다.
 fn machine_tint(label: &str) -> [u8; 4] {
@@ -110,36 +102,12 @@ fn machine_tint(label: &str) -> [u8; 4] {
     .unwrap_or_else(|| hashed_device_color(&key))
 }
 
-/// 배치도 칸 채움. 다른 기기 칸만 물들인다.
-pub(crate) fn minimap_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
-    machine.map_or(base, |label| minimap_fill(base, machine_tint(label)))
+pub(crate) fn device_section_background(base: [u8; 4], machine: &str) -> [u8; 4] {
+    theme::lerp(base, machine_tint(machine), DEVICE_SECTION_TINT)
 }
 
-/// 이 기기 칸이 보이는 색 — 반투명 테두리색(`border` 0x66)이 판 바탕에 얹힌 것.
-fn minimap_local_cell(base: [u8; 4]) -> [u8; 4] {
-    theme::lerp(base, theme::border(), 0x66 as f32 / 255.0)
-}
-
-fn rgb_gap(a: [u8; 4], b: [u8; 4]) -> f32 {
-    (0..3).map(|i| (a[i] as f32 - b[i] as f32).powi(2)).sum::<f32>().sqrt()
-}
-
-/// 기기색을 22% 부터 섞되, 이 기기 칸과 `MINIMAP_MIN_GAP` 만큼 떨어질 때까지 더 섞는다.
-fn minimap_fill(base: [u8; 4], tint: [u8; 4]) -> [u8; 4] {
-    let local = minimap_local_cell(base);
-    let mut t = MINIMAP_TINT;
-    loop {
-        let fill = theme::lerp(base, tint, t);
-        if t >= MINIMAP_TINT_MAX || rgb_gap(fill, local) >= MINIMAP_MIN_GAP {
-            return fill;
-        }
-        t = (t + 0.02).min(MINIMAP_TINT_MAX);
-    }
-}
-
-/// 배치도 칸 테두리 — 채움보다 진하게 기기색을 문다. 기기가 없으면 `fallback`.
-pub(crate) fn minimap_border(base: [u8; 4], machine: Option<&str>, fallback: [u8; 4]) -> [u8; 4] {
-    machine.map_or(fallback, |label| theme::lerp(base, machine_tint(label), MINIMAP_BORDER_TINT))
+pub(crate) fn device_section_border(base: [u8; 4], machine: &str) -> [u8; 4] {
+    theme::lerp(base, machine_tint(machine), DEVICE_SECTION_BORDER_TINT)
 }
 
 /// 설정 화면 한 줄 — 기기 하나와 지금 색·기본 색.
@@ -823,48 +791,26 @@ mod tests {
     use super::{
         assign_defaults, device_aliases, hashed_device_color, named, normalize_device,
         parse_color_input, read_device_names, read_overrides, terminal_identity_pid, MachineIdentity,
-        DEVICE_COLOR_PRESETS, MINIMAP_BORDER_TINT,
+        DEVICE_COLOR_PRESETS, DEVICE_SECTION_BORDER_TINT,
     };
     use std::collections::HashMap;
 
     fn distance(a: [u8; 4], b: [u8; 4]) -> f32 {
-        super::rgb_gap(a, b)
+        (0..3).map(|i| (a[i] as f32 - b[i] as f32).powi(2)).sum::<f32>().sqrt()
     }
 
+    /// 넓은 기기 묶음도 밝은 테마와 어두운 테마에서 서로 구분되어야 한다.
     #[test]
-    fn only_other_device_cells_take_a_device_color_in_the_map() {
-        for base in [[25, 27, 34, 255], [45, 47, 54, 255], [240, 240, 246, 255]] {
-            assert_eq!(super::minimap_background(base, None), base);
-            assert_ne!(super::minimap_background(base, Some("맥미니")), base);
-            let fallback = [1, 2, 3, 4];
-            assert_eq!(super::minimap_border(base, None, fallback), fallback);
-        }
-    }
-
-    /// 기본 팔레트의 어느 두 색도 배치도 테두리 비율로 섞인 뒤에 서로 갈라 보여야 한다.
-    #[test]
-    fn default_device_colors_stay_apart_in_map_borders() {
+    fn default_device_colors_stay_apart_in_section_borders() {
         for base in [[25, 27, 34, 255], [240, 240, 246, 255]] {
             for (i, (_, a)) in DEVICE_COLOR_PRESETS.iter().enumerate() {
                 for (_, b) in &DEVICE_COLOR_PRESETS[i + 1..] {
-                    let (x, y) = (crate::theme::lerp(base, *a, MINIMAP_BORDER_TINT), crate::theme::lerp(base, *b, MINIMAP_BORDER_TINT));
+                    let (x, y) = (crate::theme::lerp(base, *a, DEVICE_SECTION_BORDER_TINT), crate::theme::lerp(base, *b, DEVICE_SECTION_BORDER_TINT));
                     assert!(distance(x, y) >= 24.0, "{a:?} vs {b:?} on {base:?}");
                 }
             }
         }
     }
-
-    /// 기기색이 바탕과 색조가 비슷해도 기기 칸은 이 기기 칸과 갈려 보여야 한다.
-    #[test]
-    fn device_cell_stands_apart_from_local_cell_even_with_a_muted_tint() {
-        for base in [[0x30, 0x31, 0x3b, 255], [25, 27, 34, 255], [240, 240, 246, 255]] {
-            for tint in [[0x54, 0x8a, 0x84, 255], [0xf0, 0xdb, 0xae, 255], DEVICE_COLOR_PRESETS[2].1] {
-                let fill = super::minimap_fill(base, tint);
-                assert!(distance(fill, super::minimap_local_cell(base)) >= 24.0, "{tint:?} on {base:?} → {fill:?}");
-            }
-        }
-    }
-
 
     /// 명부의 기기들은 서로 다른 기본색을 받고, 같은 영구 id 는 이름이 달라도
     /// (저쪽에선 「이 기기」 이름, 이쪽에선 명부 이름) 같은 색을 받는다.

@@ -399,12 +399,11 @@ fn draw_cell(
     } else if hover {
         theme::surface_hover()
     } else {
-        // 칸은 기기색을 문다 — 이 기기 배치도의 다른 기기 칸과 같은 규칙.
-        crate::render::pane_identity::minimap_border(theme::panel_bg(), Some(&machine.label), theme::with_alpha(theme::border(), 0x66))
+        theme::with_alpha(theme::border(), 0x66)
     });
     if mw > 5.0 && mh > 5.0 {
         round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5,
-            crate::render::pane_identity::minimap_background(theme::panel_bg(), Some(&machine.label)));
+            theme::panel_bg());
     }
     if let Some((col, period)) = signal {
         if mw > 5.0 && mh > 5.0 {
@@ -720,6 +719,16 @@ fn draw_rows(
     g.pop_clip();
 }
 
+fn draw_device_section(g: &mut gpu::GpuRenderer, label: &str, area: Rect) {
+    let rect = (area.0 + 4.0, area.1 + 2.0, (area.2 - 8.0).max(0.0), (area.3 - 4.0).max(0.0));
+    if rect.2 <= 0.0 || rect.3 <= 0.0 { return; }
+    let base = theme::panel_bg();
+    round_rect(g, rect.0, rect.1, rect.2, rect.3, 12.0,
+        crate::render::pane_identity::device_section_background(base, label));
+    g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, 12.0, 1.0,
+        crate::render::pane_identity::device_section_border(base, label));
+}
+
 /// `head_top` 은 이 기기 머리줄의 윗변 — 그 위에 현황 줄(`sidebar_pulse`)이 설 수 있다.
 pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, head_top: f32, viewport: Rect) {
     let nav = &mut info.navigation;
@@ -730,6 +739,11 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     if width <= 0.0 { return; }
     let label = crate::info::local_machine_name();
     let label = if label.is_empty() { "이 기기" } else { label };
+    let local_web_h = web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""), width);
+    let local_bottom = (viewport.1 + nav.local_content_h - nav.shared_scroll + local_web_h).max(viewport.1);
+    g.push_clip(0.0, head_top, width, (viewport.1 + viewport.3 - head_top).max(0.0));
+    draw_device_section(g, label, (0.0, head_top, width, local_bottom - head_top));
+    g.pop_clip();
     let compact = width < 180.0;
     let head = (8.0, head_top + 4.0, width - 16.0, HEADER_H - 8.0);
     nav.home = Some(head);
@@ -770,7 +784,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     for machine in &info.machines_col.machines {
         let body_h = content_height(machine, collapsed_rooms, list_rooms, width)
             + web_block_h(&machine.web_shells, web_open.contains(&machine.label), width);
-        g.rect(12.0, y, (width - 24.0).max(0.0), 1.0, theme::border());
+        draw_device_section(g, &machine.label, (0.0, y, width, SECTION_H + body_h));
         let head = (8.0, y + 2.0, width - 16.0, SECTION_H - 4.0);
         let menu = (width - 30.0, y + 7.0, 22.0, 22.0);
         let plus = (width - 54.0, y + 7.0, 22.0, 22.0);
