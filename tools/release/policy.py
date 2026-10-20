@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import stat
 import tempfile
@@ -48,8 +47,9 @@ def digest(value):
 def identity():
     # An inherited pane variable must not impersonate the controller machine.
     try:
+        import pwd  # 유닉스 전용 — 맨 위에 두면 Windows 에서 enqueue 까지 못 부른다
         return (Path(pwd.getpwuid(os.getuid()).pw_dir) / ".config/kasaterm/machine-id").read_text().strip()
-    except (OSError, KeyError):
+    except (ImportError, OSError, KeyError):
         return ""
 
 

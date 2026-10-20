@@ -2,7 +2,6 @@
 
 import argparse
 import contextlib
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -30,6 +29,9 @@ class Locked(Refused):
 
 @contextlib.contextmanager
 def locked(state_dir):
+    # controller 는 맥에서만 돈다. 맨 위에서 부르면 Windows 에서 enqueue 까지 못 쓴다.
+    import fcntl
+
     root = policy.private_dir(state_dir)
     fd = os.open(root / "publisher.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
