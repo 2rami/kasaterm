@@ -2441,11 +2441,14 @@ pub(crate) enum ExecutionLine<'a> {
     Schedule(&'a kasa_mcp::ScheduleItem),
     /// 카드 아래 「내 프롬프트」 묶음 통째(`info_prompts`). 줄마다 누름 자리를 새로 매기므로 안 보여도 부른다.
     Prompts,
+    /// 그 아래 「결과물」 묶음(`info_outputs`) — 이 칸 대화가 낸 그림·음성·영상.
+    Outputs,
 }
 impl ExecutionLine<'_> {
     fn height(&self) -> f32 {
         match self {
             Self::Prompts => crate::info_prompts::height(),
+            Self::Outputs => crate::info_outputs::height(),
             Self::Section(_) | Self::Fold { .. } => DEV_H,
             Self::Group(..) | Self::Schedule(_) | Self::Head { .. } => GROUP_H,
             Self::Now(_) => NOW_H,
@@ -2708,6 +2711,7 @@ pub(crate) fn draw_info_col(
     let value_w = (w - 26.0 - kv_name_w(w - 26.0)).max(0.0);
     let mut lines = crate::info_focus::card_lines(&info.focus_view, info.focus_alt);
     lines.push(ExecutionLine::Prompts);
+    lines.push(ExecutionLine::Outputs);
     let rooms_open = info.pane_expanded.contains(ROOMS_FOLD);
     lines.push(ExecutionLine::Fold { title: format!("모든 방 · 칸 {}개", snap.panes.iter().filter(|g| !g.closed).count()), key: ROOMS_FOLD.into() });
     if rooms_open {
@@ -2738,9 +2742,14 @@ pub(crate) fn draw_info_col(
             y += row_h;
             continue;
         }
+        if matches!(line, ExecutionLine::Outputs) {
+            crate::info_outputs::draw(g, cursor, &mut info.tip_rects, x, w, y, top, bottom);
+            y += row_h;
+            continue;
+        }
         if y + row_h > top && y < bottom {
             match line {
-                ExecutionLine::Prompts => {}
+                ExecutionLine::Prompts | ExecutionLine::Outputs => {}
                 ExecutionLine::Section(title) => draw_room_head(g, title, x0, right, y + 3.0),
                 ExecutionLine::Head { title, note } => {
                     let nw = if note.is_empty() { 0.0 } else { g.measure_chrome_text(note, 10.0, false).min((right - x0) * 0.5) };

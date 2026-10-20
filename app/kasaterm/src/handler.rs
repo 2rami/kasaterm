@@ -5762,7 +5762,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
-                            if self.info_prompt_press(cx, cy) {
+                            if self.info_prompt_press(cx, cy) || self.info_output_press(cx, cy) {
                                 window.request_redraw();
                                 return;
                             }

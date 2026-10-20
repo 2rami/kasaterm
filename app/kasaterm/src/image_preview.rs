@@ -175,6 +175,10 @@ impl State {
             .collect();
         self.hits.insert(owner, (context, hits));
     }
+    /// 본문 밖에서 고른 결과 그림(Info 「결과물」)을 같은 미리보기로 연다.
+    pub(crate) fn open_path(&mut self, owner: WindowId, path: String, proxy: &EventLoopProxy<UserEvent>) {
+        self.open(owner, path, proxy);
+    }
     fn open(&mut self, owner: WindowId, path: String, proxy: &EventLoopProxy<UserEvent>) {
         self.next_generation += 1;
         let result = Arc::new(Mutex::new(None));

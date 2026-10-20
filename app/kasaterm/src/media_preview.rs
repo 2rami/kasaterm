@@ -146,6 +146,10 @@ impl State {
             CursorIcon::Default
         }
     }
+    /// 본문 밖에서 고른 음성·영상(Info 「결과물」)을 같은 미리보기로 연다 — 받기·재생·닫기 길이 카드 누름과 같다.
+    pub(crate) fn open_reference(&mut self, id: WindowId, reference: Reference, proxy: &EventLoopProxy<UserEvent>) {
+        self.open(id, reference, proxy);
+    }
     fn open(&mut self, id: WindowId, reference: Reference, proxy: &EventLoopProxy<UserEvent>) {
         cache::request(&reference, proxy, true);
         self.generation += 1;

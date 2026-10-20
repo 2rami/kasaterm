@@ -107,6 +107,16 @@ fn dimensions_cache() -> &'static std::sync::Mutex<Dimensions> {
     CACHE.get_or_init(Default::default)
 }
 
+/// 이 기기에 있는 결과 그림 파일(받아 둔 거울 그림 포함). 없거나 정리됐으면 None.
+pub(crate) fn local_png(id: &str) -> Option<PathBuf> {
+    asset_path(id).map(|(path, ..)| path)
+}
+
+/// 거울 칸의 그림을 원본 기기에서 받아 둔다 — 다 받으면 다시 그린다.
+pub(crate) fn fetch_from(base: &str, id: &str, proxy: winit::event_loop::EventLoopProxy<crate::UserEvent>) {
+    remote::request(base, id, proxy);
+}
+
 fn asset_path(id: &str) -> Option<(PathBuf, u32, u32)> {
     asset_path_in(&root()?, id)
 }
