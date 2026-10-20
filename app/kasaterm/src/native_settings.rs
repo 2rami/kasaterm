@@ -2675,13 +2675,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
-    g.rect(outer_x, outer_y, outer_w, outer_h, theme::bg());
+    let (nav_fill, body_fill) = (theme::settings_nav(), theme::settings_body());
+    g.rect(outer_x, outer_y, outer_w, outer_h, theme::settings_canvas());
     if !compact {
-        crate::native_controls::panel(g,(ax,ay,nav_w,ah),theme::panel_bg());
-        crate::native_controls::panel(g,(ax+nav_w+NAV_GAP,ay,(aw-nav_w-NAV_GAP).max(0.0),ah),theme::surface());
+        crate::native_controls::panel(g,(ax,ay,nav_w,ah),nav_fill);
+        crate::native_controls::panel(g,(ax+nav_w+NAV_GAP,ay,(aw-nav_w-NAV_GAP).max(0.0),ah),body_fill);
     } else {
-        crate::native_controls::panel(g,(ax,ay,aw,ah),theme::surface());
+        crate::native_controls::panel(g,(ax,ay,aw,ah),body_fill);
     }
+    let nav_layer = theme::settings_layer(if compact { body_fill } else { nav_fill });
     draw_text(g, ax + 20.0, ay + 18.0, "설정", 13.0, theme::text(), true);
     let search = (ax + 12.0, ay + 44.0, if compact { aw - 24.0 } else { nav_w - 24.0 }, CTL_H);
     let search_width = search.2 - if snapshot.query.is_empty() { 0.0 } else { CTL_H + 4.0 };
@@ -2802,6 +2804,8 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         false,
     );
     register(&mut hits, Target::Close, close, HitCursor::Pointer);
+    drop(nav_layer);
+    let _body_layer = theme::settings_layer(body_fill);
 
     let (content_x, content_w) = if snapshot.cat==SettingsCat::Appearance { content_column_with_max(ax,aw,nav_w,1100.0) } else { content_column(ax,aw,nav_w) };
     let (title, _, _blurb) = category_meta(snapshot.cat);
@@ -3247,7 +3251,7 @@ fn paint_appearance(
         let mut preview_y=*y+8.0;
         draw_text(g,preview_x,preview_y,"작업 화면 미리보기",14.0,theme::text(),true);
         preview_y+=30.0;
-        let preview_h=appearance_preview::paint(g,s,hits,preview_x,preview_y,preview_w);
+        let preview_h=paint_app_preview(g,s,hits,preview_x,preview_y,preview_w);
         preview_y+=preview_h+12.0;
         paint_palette_editor(g,s,hits,caret,preview_x,&mut preview_y,preview_w);
         paint_appearance_controls(g,s,hits,caret,x,y,form_w,false);
@@ -3255,6 +3259,12 @@ fn paint_appearance(
     } else {
         paint_appearance_controls(g,s,hits,caret,x,y,w,true);
     }
+}
+
+// 미리보기는 설정 판이 아니라 작업 화면을 비춘다 — 틀의 창 바탕까지 저장 팔레트 그대로 읽는다.
+fn paint_app_preview(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<Hit>,x:f32,y:f32,w:f32)->f32 {
+    let _app=theme::without_settings_layer();
+    appearance_preview::paint(g,s,hits,x,y,w)
 }
 
 fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<Hit>,caret:&mut Option<Rect>,x:f32,y:&mut f32,w:f32,inline_preview:bool) {
@@ -3309,7 +3319,7 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
         s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
     *y += 12.0;
     if inline_preview {
-        *y += appearance_preview::paint(g, s, hits, x, *y, w);
+        *y += paint_app_preview(g, s, hits, x, *y, w);
         paint_palette_editor(g, s, hits, caret, x, y, w);
     }
     let mut actions=vec![("현재 색으로 복제",Target::Setting(SettingsAction::StartCustomTheme),false)];

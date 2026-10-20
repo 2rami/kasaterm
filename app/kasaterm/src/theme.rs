@@ -30,21 +30,34 @@ macro_rules! color_slot {
     };
 }
 
+/// 설정 판 가드(`settings_layer`)가 이 스레드에 서 있으면 그 판 기준 값을 읽는 슬롯.
+macro_rules! layered_slot {
+    ($slot:ident, $get:ident, $field:ident, $default:expr) => {
+        static $slot: AtomicU32 = AtomicU32::new(pack($default));
+        #[inline]
+        pub fn $get() -> [u8; 4] {
+            SETTINGS_LAYER
+                .with(|layer| layer.get())
+                .map_or_else(|| unpack($slot.load(Ordering::Relaxed)), |layer| layer.$field)
+        }
+    };
+}
+
 // Terminal body / window background — the single base color shared by the title
 // strip, sidebar, and pane-header band so chrome and terminal read as one
 // surface. Interactive states (hover/active) layer *lighter* than bg so they
 // read as raised. Border = muted hairline. Accent = selection ring / cursor /
 // links. SYN_* = markdown code-block syntax (One Dark-ish).
-color_slot!(S_BG, bg, [37, 44, 53, 255]);
+layered_slot!(S_BG, bg, bg, [37, 44, 53, 255]);
 color_slot!(S_PANE_BG, pane_bg, [37, 44, 53, 255]);
 color_slot!(S_HEADER_BG, header_bg, [37, 44, 53, 255]);
 color_slot!(S_SIDEBAR_BG, sidebar_bg, [42, 50, 60, 255]);
 color_slot!(S_TITLEBAR_BG, titlebar_bg, [37, 44, 53, 255]);
 color_slot!(S_SIDE_PANEL_BG, side_panel_bg, [42, 50, 60, 255]);
 color_slot!(S_FG, fg, [255, 255, 255, 255]);
-color_slot!(S_SURFACE, surface, [26, 29, 35, 255]);
-color_slot!(S_SURFACE_HOVER, surface_hover, [48, 56, 67, 255]);
-color_slot!(S_SURFACE_ACTIVE, surface_active, [60, 70, 84, 255]);
+layered_slot!(S_SURFACE, surface, surface, [26, 29, 35, 255]);
+layered_slot!(S_SURFACE_HOVER, surface_hover, surface_hover, [48, 56, 67, 255]);
+layered_slot!(S_SURFACE_ACTIVE, surface_active, surface_active, [60, 70, 84, 255]);
 color_slot!(S_BORDER, border, [80, 92, 110, 110]);
 color_slot!(S_ACCENT, accent, [90, 140, 230, 255]);
 color_slot!(S_CURSOR, cursor, [90, 140, 230, 255]);
@@ -54,7 +67,7 @@ static S_TEXT_DIM: AtomicU32 = AtomicU32::new(pack([160, 166, 176, 255]));
 pub fn text_dim() -> [u8; 4] {
     enforce_contrast_at(unpack(S_TEXT_DIM.load(Ordering::Relaxed)), bg(), 4.5)
 }
-color_slot!(S_TEXT_MUTE, text_mute, [120, 126, 138, 255]);
+layered_slot!(S_TEXT_MUTE, text_mute, text_mute, [120, 126, 138, 255]);
 color_slot!(S_SUCCESS, success, [63, 185, 80, 255]);
 color_slot!(S_DANGER, danger, [224, 88, 78, 255]);
 color_slot!(S_SYN_KEYWORD, syn_keyword, [198, 120, 221, 255]);
@@ -1643,6 +1656,82 @@ pub fn raised_on(base: [u8; 4], hover: bool) -> [u8; 4] {
     [step(0), step(1), step(2), 255]
 }
 
+/// 설정 화면의 외곽·메뉴·본문 판. 본문을 `surface` 로 칠하던 때는 그 값이 `bg` 보다 어두운
+/// 팔레트에서 본문이 외곽보다 가라앉았다(Dark 실측 본문 L*10.7 < 외곽 17.7, 2026-10-21) —
+/// 팔레트마다 `surface` 의 방향이 달라 저장 팔레트 대신 `bg`·`text` 에서 유도하고, 명도는 어느
+/// 테마든 외곽 < 메뉴 < 본문이다. 밝은 테마는 `text` 쪽이 어두운 쪽이라 본문만 흰색으로 띄운다.
+fn settings_plates(bg: [u8; 4], ink: [u8; 4]) -> [[u8; 4]; 3] {
+    if is_light(bg) {
+        [lerp(bg, ink, 0.06), lerp(bg, ink, 0.025), lerp(bg, [255, 255, 255, 255], 0.75)]
+    } else {
+        [bg, lerp(bg, ink, 0.04), lerp(bg, ink, 0.08)]
+    }
+}
+
+fn current_settings_plates() -> [[u8; 4]; 3] {
+    settings_plates(unpack(S_BG.load(Ordering::Relaxed)), text())
+}
+
+pub(crate) fn settings_canvas() -> [u8; 4] {
+    current_settings_plates()[0]
+}
+
+pub(crate) fn settings_nav() -> [u8; 4] {
+    current_settings_plates()[1]
+}
+
+pub(crate) fn settings_body() -> [u8; 4] {
+    current_settings_plates()[2]
+}
+
+#[derive(Clone, Copy)]
+struct SettingsLayerColors {
+    bg: [u8; 4],
+    surface: [u8; 4],
+    surface_hover: [u8; 4],
+    surface_active: [u8; 4],
+    text_mute: [u8; 4],
+}
+
+thread_local! {
+    static SETTINGS_LAYER: std::cell::Cell<Option<SettingsLayerColors>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn settings_layer_colors(base: [u8; 4], ink: [u8; 4], mute: [u8; 4]) -> SettingsLayerColors {
+    let (rest, hover, active) =
+        if is_light(base) { (0.04, 0.07, 0.12) } else { (0.07, 0.12, 0.18) };
+    SettingsLayerColors {
+        bg: base,
+        surface: lerp(base, ink, rest),
+        surface_hover: lerp(base, ink, hover),
+        surface_active: lerp(base, ink, active),
+        text_mute: enforce_contrast_at(mute, base, 4.5),
+    }
+}
+
+/// 설정 판 하나를 그리는 동안의 색 문맥. 살아 있는 동안 이 스레드의 `bg`·`surface` 계열·
+/// `text_mute` 가 `base` 판 기준으로 읽힌다. 공용 버튼·입력칸은 `surface`→`bg` 사이를 칠하는데
+/// 설정 본문은 `bg` 가 아니라서, 부품마다 바탕을 넘기는 대신 판이 자기 `bg` 를 선언한다.
+/// 다른 스레드(HTTP 디자인 토큰)와 저장 팔레트는 그대로고, 놓으면 앞 문맥으로 돌아간다.
+#[must_use]
+pub(crate) struct SettingsLayer(Option<SettingsLayerColors>);
+
+impl Drop for SettingsLayer {
+    fn drop(&mut self) {
+        SETTINGS_LAYER.with(|layer| layer.set(self.0));
+    }
+}
+
+pub(crate) fn settings_layer(base: [u8; 4]) -> SettingsLayer {
+    let colors = settings_layer_colors(base, text(), unpack(S_TEXT_MUTE.load(Ordering::Relaxed)));
+    SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(Some(colors))))
+}
+
+pub(crate) fn without_settings_layer() -> SettingsLayer {
+    SettingsLayer(SETTINGS_LAYER.with(|layer| layer.replace(None)))
+}
+
 /// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). 정본은 로스터
 /// (`characters.json` 의 `header_color`, build.rs 가 굽는다) — 수동 12명 목록으로
 /// 남아 있던 동안 신규 67명이 전부 무색(테두리·글로우·sm테마 폴백)이었다
@@ -2715,5 +2804,50 @@ mod custom_accent_tests {
         for input in ["", "#12", "#gg4455", "#12345678", "rgb(1,2,3)", "없는색"] {
             assert!(normalized_accent(input).is_none(), "{input}");
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_surface_tests {
+    use super::*;
+    use kasa_gridview::palette::{contrast_of, luminance};
+
+    fn ratio(a: [u8; 4], b: [u8; 4]) -> f32 {
+        contrast_of(luminance(a), luminance(b))
+    }
+
+    #[test]
+    fn settings_plates_rise_and_keep_text_readable_in_every_builtin_palette() {
+        for (key, _, palette) in THEME_PRESETS {
+            let [canvas, nav, body] = settings_plates(palette.bg, palette.text);
+            assert!(luminance(canvas) < luminance(nav) && luminance(nav) < luminance(body), "{key}");
+            let layer = settings_layer_colors(body, palette.text, palette.text_mute);
+            assert!(ratio(palette.text, body) >= 4.5, "{key}");
+            assert!(ratio(enforce_contrast_at(palette.text_dim, body, 4.5), body) >= 4.49, "{key}");
+            assert!(ratio(layer.text_mute, body) >= 4.49, "{key}");
+            for fill in [layer.surface, layer.surface_hover, layer.surface_active] {
+                assert_ne!(fill, body, "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_settings_layers_restore_the_previous_context() {
+        let current = || SETTINGS_LAYER.with(|layer| layer.get()).map(|layer| layer.bg);
+        assert_eq!(current(), None);
+        {
+            let _outer = settings_layer([40, 40, 40, 255]);
+            {
+                let _inner = settings_layer([240, 240, 240, 255]);
+                assert_eq!(bg(), [240, 240, 240, 255]);
+            }
+            assert_eq!(current(), Some([40, 40, 40, 255]));
+            {
+                let _app = without_settings_layer();
+                assert_eq!(current(), None);
+            }
+            assert_eq!(current(), Some([40, 40, 40, 255]));
+        }
+        assert_eq!(current(), None);
     }
 }
