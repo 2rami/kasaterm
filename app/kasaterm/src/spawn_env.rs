@@ -66,17 +66,9 @@ pub(crate) fn resolve_default_shell() -> Option<String> {
     }
     #[cfg(windows)]
     {
-        // PowerShell 7 (pwsh) preferred, then the OS-bundled Windows
-        // PowerShell (always present), then Git Bash. The settings-screen /
-        // env overrides above still win, so this is only the out-of-box pick.
-        let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
-        if std::path::Path::new(pwsh7).is_file() {
-            return Some(pwsh7.to_string());
-        }
-        if let Some(bash) = git_bash_path() {
-            return Some(bash);
-        }
-        return Some("powershell.exe".to_string());
+        // 명령 프롬프트는 모든 Windows 에 있고 프로필 스크립트가 없어 가장 빨리 뜬다. 설정 화면·env 가
+        // 위에서 이기므로 이건 처음 깔았을 때의 고름일 뿐이다.
+        return Some("cmd.exe".to_string());
     }
     #[allow(unreachable_code)]
     None
@@ -133,6 +125,9 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
     let mut out: Vec<(&'static str, &'static str, String)> = Vec::new();
     #[cfg(windows)]
     {
+        // cmd 엔 브랜드 마크가 없다. 색을 박은 SVG 를 두면 밝은/어두운 테마 중
+        // 한쪽에서 반드시 묻히므로, 테마색을 따라가는 기본 글리프로 둔다.
+        out.push(("Command Prompt", "terminal", "cmd.exe".to_string()));
         let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
         if std::path::Path::new(pwsh7).is_file() {
             out.push(("PowerShell 7", "sh/pwsh", pwsh7.to_string()));
@@ -143,9 +138,6 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
             "sh/winps",
             "powershell.exe".to_string(),
         ));
-        // cmd 엔 브랜드 마크가 없다. 색을 박은 SVG 를 두면 밝은/어두운 테마 중
-        // 한쪽에서 반드시 묻히므로, 테마색을 따라가는 기본 글리프로 둔다.
-        out.push(("Command Prompt", "terminal", "cmd.exe".to_string()));
         if let Some(bash) = git_bash_path() {
             out.push(("Git Bash", "sh/gitbash", bash));
         }

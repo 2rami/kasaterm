@@ -17,7 +17,7 @@
 
 ## 2. 셸 (권장: Git for Windows)
 
-kasaterm 기본 셸 선택 순서: PowerShell 7 → Git Bash → Windows PowerShell.
+kasaterm 기본 셸: 명령 프롬프트(cmd). 설정에 적힌 셸 경로가 이 기기에 없으면 이 기본으로 물러난다.
 사이드바 "+" 버튼으로 설치된 셸(PowerShell/CMD/Git Bash/WSL) 중 골라 열 수 있고,
 설정 화면에서 기본 셸 지정 가능.
 
