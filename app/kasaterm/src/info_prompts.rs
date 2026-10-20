@@ -590,7 +590,7 @@ fn tip_text(p: &Prompt, reachable: bool) -> String {
 
 /// 친 날짜·시각 `10.12 22:46`(해가 다르면 앞에 해). 지역 시각은 OS 에 맡기고 못 구하면 나이로 물러난다.
 fn clock(at: u64) -> String {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if let (Some(t), Some(now)) = (local_tm(at), local_tm(now_secs())) {
         let day = format!("{:02}.{:02} {:02}:{:02}", t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
         return if t.tm_year == now.tm_year { day } else { format!("{}.{day}", t.tm_year + 1900) };
@@ -603,6 +603,13 @@ pub(crate) fn local_tm(secs: u64) -> Option<libc::tm> {
     let t = secs.min(libc::time_t::MAX as u64) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     (!unsafe { libc::localtime_r(&t, &mut tm) }.is_null()).then_some(tm)
+}
+
+#[cfg(windows)]
+pub(crate) fn local_tm(secs: u64) -> Option<libc::tm> {
+    let t = secs.min(libc::time_t::MAX as u64) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    (unsafe { libc::localtime_s(&mut tm, &t) } == 0).then_some(tm)
 }
 
 fn now_secs() -> u64 {

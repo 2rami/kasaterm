@@ -156,6 +156,8 @@ windows-sys = { workspace = true, features = [
 # unix 는 그 자리에 `/usr/bin/expect` 를 쓰는데 Windows 엔 없다. kasa-pty 가 쓰는
 # 것과 같은 크레이트·버전.
 portable-pty.workspace = true
+# 프롬프트 줄·코덱스 「Worked for」의 현지 시각(info_prompts.rs localtime_s). 맥과 같은 libc::tm 을 돌려준다.
+libc.workspace = true
 
 # Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
 # taskbar / Start menu / .msi installer show the real icon, not the default.
