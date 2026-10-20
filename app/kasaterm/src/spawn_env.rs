@@ -54,7 +54,9 @@ pub(crate) fn resolve_default_shell() -> Option<String> {
     // User's explicit choice in the settings screen wins over `$SHELL` so it
     // overrides the inherited login shell, but stays below the env launch
     // override above.
-    if let Some(s) = socket::read_default_shell() {
+    // 다른 기기에서 넘어온 설정(맥의 `/bin/zsh` 를 Windows 가 읽는 식)은 경로가 없어 칸이 빈 채로
+    // 뜬다. 경로로 적힌 셸이 이 기기에 없으면 기본 셸로 물러난다. `pwsh.exe` 같은 이름은 PATH 에 맡긴다.
+    if let Some(s) = socket::read_default_shell().filter(|s| shell_exists(s)) {
         return Some(s);
     }
     if let Ok(s) = std::env::var("SHELL") {
@@ -78,6 +80,15 @@ pub(crate) fn resolve_default_shell() -> Option<String> {
     }
     #[allow(unreachable_code)]
     None
+}
+
+fn shell_exists(shell: &str) -> bool {
+    let is_path = shell.contains('/') || shell.contains('\\');
+    let ok = !is_path || std::path::Path::new(shell).is_file();
+    if !ok {
+        eprintln!("[shell] 설정된 셸 {shell:?} 이 이 기기에 없어 기본 셸로 띄운다");
+    }
+    ok
 }
 
 /// First installed Git Bash, if any. Git for Windows ships a Unix-like
