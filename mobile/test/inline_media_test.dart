@@ -431,6 +431,23 @@ void main() {
       );
     });
 
+    test('살아 있나는 제 주소로 묻는다 — 거둬진 듣기 소켓은 창구가 몰라도 죽었다고 답한다', () async {
+      final asked = <Uri>[];
+      final b = await open(
+        MockClient((req) async {
+          asked.add(req.url);
+          return _reply(req);
+        }),
+        _video,
+      );
+      expect(await b.alive(), isTrue);
+      await b.debugReclaim();
+      expect(await b.alive(), isFalse);
+      await b.close();
+      expect(await b.alive(), isFalse);
+      expect(asked, isEmpty, reason: '묻기는 원본에 닿지 않는다');
+    });
+
     test('닫으면 받던 요청을 모두 끊고 연결도 닫는다', () async {
       final gate = _Gate(media);
       final b = await open(gate, _video);
@@ -833,6 +850,272 @@ void main() {
       expect(find.text('tone.m4a'), findsOneWidget);
     });
 
+    group('앱이 뒤로 갔다 오면', () {
+      Future<void> roundTrip(
+        WidgetTester tester, {
+        void Function()? meanwhile,
+      }) async {
+        for (final s in [
+          AppLifecycleState.inactive,
+          AppLifecycleState.hidden,
+          AppLifecycleState.paused,
+        ]) {
+          tester.binding.handleAppLifecycleStateChanged(s);
+        }
+        await tester.pump();
+        meanwhile?.call();
+        for (final s in [
+          AppLifecycleState.hidden,
+          AppLifecycleState.inactive,
+          AppLifecycleState.resumed,
+        ]) {
+          tester.binding.handleAppLifecycleStateChanged(s);
+        }
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+
+      /// 새 플레이어를 연 뒤의 호출 — 옛 플레이어 해제는 뺀다.
+      List<String> afterReopen() {
+        final open = 'open http://127.0.0.1:9/$_video/media.mp4';
+        final i = platform.calls.lastIndexOf(open);
+        expect(
+          platform.calls.where((c) => c == open),
+          hasLength(2),
+          reason: '같은 원본으로 한 번 더 연다',
+        );
+        return platform.calls
+            .sublist(i + 1)
+            .where((c) => c != 'dispose')
+            .toList();
+      }
+
+      Future<void> openVideo(WidgetTester tester) async {
+        await pumpChat(tester, mediaBlock(_video, 12));
+        await tester.tap(find.text('demo clip.mp4'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byTooltip('일시정지'), findsOneWidget);
+      }
+
+      Future<void> closePlayer(WidgetTester tester) async {
+        await tester.tap(find.byTooltip('닫기'));
+        await tester.pumpAndSettle();
+        await settleDispose(tester);
+        expect(platform.live, 0);
+        expect(links.every((l) => l.closed), isTrue);
+      }
+
+      testWidgets('창구가 살아 있으면 손대지 않는다 — video_player 가 스스로 잇는다', (
+        tester,
+      ) async {
+        await openVideo(tester);
+        platform.calls.clear();
+        await roundTrip(tester);
+        expect(opened, hasLength(1));
+        expect(platform.calls, ['pause', 'play']);
+        expect(find.byTooltip('일시정지'), findsOneWidget);
+        await closePlayer(tester);
+        await roundTrip(tester);
+        expect(opened, hasLength(1), reason: '닫은 플레이어는 복귀를 듣지 않는다');
+      });
+
+      testWidgets('거둬졌으면 같은 원본으로 새 창구·플레이어를 세워 그 자리에서 이어 튼다', (tester) async {
+        await openVideo(tester);
+        platform.moveTo(const Duration(milliseconds: 1500));
+        await tester.pump(const Duration(milliseconds: 600));
+        await roundTrip(tester, meanwhile: () => links.single.dead = true);
+        expect(opened, hasLength(2));
+        expect(
+          opened.map((o) => (o.$1, o.$2, o.$3, o.$4)).toSet(),
+          hasLength(1),
+        );
+        expect(afterReopen(), ['pause', 'seek 1500', 'play']);
+        expect(find.byTooltip('일시정지'), findsOneWidget);
+        await settleDispose(tester);
+        expect(links.first.closed, isTrue, reason: '거둬진 창구는 닫는다');
+        expect(platform.live, 1, reason: '옛 플레이어는 버린다');
+        await closePlayer(tester);
+      });
+
+      testWidgets('옛 플레이어가 그사이 오류로 자리를 잃어도 떠날 때의 자리에서 잇는다', (tester) async {
+        await openVideo(tester);
+        platform.moveTo(const Duration(milliseconds: 1500));
+        await tester.pump(const Duration(milliseconds: 600));
+        await roundTrip(
+          tester,
+          meanwhile: () {
+            links.single.dead = true;
+            platform.fail();
+          },
+        );
+        expect(afterReopen(), ['pause', 'seek 1500', 'play']);
+        expect(find.byTooltip('일시정지'), findsOneWidget);
+        await closePlayer(tester);
+      });
+
+      testWidgets('멈춰 둔 것은 멈춘 채 그 자리에 다시 세운다', (tester) async {
+        await openVideo(tester);
+        await tester.tap(find.byTooltip('일시정지'));
+        await tester.pump();
+        final slider = tester.getRect(find.byType(Slider));
+        await tester.tapAt(Offset(slider.center.dx, slider.center.dy));
+        await tester.pump();
+        final ms = int.parse(platform.calls.last.split(' ').last);
+        await roundTrip(tester, meanwhile: () => links.single.dead = true);
+        expect(afterReopen(), ['pause', 'seek $ms']);
+        expect(find.byTooltip('재생'), findsOneWidget);
+        await closePlayer(tester);
+      });
+
+      testWidgets('다시 세워 찾아가는 동안 시계는 그 자리, 화면은 받는 중, 누름은 막힌다', (tester) async {
+        await openVideo(tester);
+        await tester.tap(find.byTooltip('일시정지'));
+        await tester.pump();
+        final slider = tester.getRect(find.byType(Slider));
+        await tester.tapAt(Offset(slider.center.dx, slider.center.dy));
+        await tester.pump();
+        final ms = int.parse(platform.calls.last.split(' ').last);
+        final label = clockLabel(Duration(milliseconds: ms));
+        final seek = platform.seekGate = Completer<void>();
+        await roundTrip(tester, meanwhile: () => links.single.dead = true);
+        expect(platform.calls.last, 'seek $ms', reason: '찾아가는 중');
+        expect(
+          find.text(label),
+          findsOneWidget,
+          reason: 'video_player 는 아직 0 이다',
+        );
+        final spinner = find.descendant(
+          of: find.byType(MediaPlayerScreen),
+          matching: find.byType(CircularProgressIndicator),
+        );
+        expect(spinner, findsOneWidget);
+        final button = find.ancestor(
+          of: find.byTooltip('재생'),
+          matching: find.byType(IconButton),
+        );
+        expect(tester.widget<IconButton>(button).onPressed, isNull);
+        seek.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(find.text(label), findsOneWidget);
+        expect(spinner, findsNothing);
+        expect(tester.widget<IconButton>(button).onPressed, isNotNull);
+        expect(platform.calls.last, isNot('play'), reason: '멈춰 둔 것');
+        await closePlayer(tester);
+      });
+
+      void leave(WidgetTester tester) {
+        for (final s in [
+          AppLifecycleState.inactive,
+          AppLifecycleState.hidden,
+          AppLifecycleState.paused,
+        ]) {
+          tester.binding.handleAppLifecycleStateChanged(s);
+        }
+      }
+
+      void back(WidgetTester tester) {
+        for (final s in [
+          AppLifecycleState.hidden,
+          AppLifecycleState.inactive,
+          AppLifecycleState.resumed,
+        ]) {
+          tester.binding.handleAppLifecycleStateChanged(s);
+        }
+      }
+
+      for (final reclaimed in [false, true]) {
+        testWidgets(
+          '여는 사이 뒤로 가면 숨어서 틀지 않고 돌아와서 튼다${reclaimed ? ' — 그사이 거둬졌으면 새로 세워서' : ''}',
+          (tester) async {
+            await pumpChat(tester, mediaBlock(_video, 12));
+            final wait = hold = Completer<void>();
+            await tester.tap(find.text('demo clip.mp4'));
+            await tester.pump();
+            leave(tester);
+            await tester.pump();
+            wait.complete();
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 400));
+            expect(
+              platform.calls,
+              contains('open http://127.0.0.1:9/$_video/media.mp4'),
+            );
+            expect(
+              platform.calls,
+              isNot(contains('play')),
+              reason: '뒤에서 몰래 틀지 않는다',
+            );
+            if (reclaimed) links.single.dead = true;
+            back(tester);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 400));
+            expect(platform.calls.last, 'play');
+            expect(opened, hasLength(reclaimed ? 2 : 1));
+            if (reclaimed) expect(afterReopen(), ['pause', 'play']);
+            expect(find.byTooltip('일시정지'), findsOneWidget);
+            await closePlayer(tester);
+          },
+        );
+      }
+
+      testWidgets('살아 있나 묻는 사이 다시 뒤로 가면 미뤘다가 다음 복귀에 그 뜻·자리로 잇는다', (
+        tester,
+      ) async {
+        await openVideo(tester);
+        platform.moveTo(const Duration(milliseconds: 1500));
+        await tester.pump(const Duration(milliseconds: 600));
+        final link = links.single;
+        final asking = link.aliveGate = Completer<void>();
+        leave(tester);
+        await tester.pump();
+        link.dead = true;
+        back(tester);
+        await tester.pump();
+        leave(tester);
+        await tester.pump();
+        asking.complete();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(opened, hasLength(1), reason: '뒤에 있는 동안 새로 세우지 않는다');
+        link.aliveGate = null;
+        back(tester);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(afterReopen(), ['pause', 'seek 1500', 'play']);
+        await closePlayer(tester);
+      });
+
+      testWidgets('틀다가 원본이 끊겨 오류가 나도 다시 시도는 마지막 자리에서 잇는다', (tester) async {
+        await openVideo(tester);
+        platform.moveTo(const Duration(milliseconds: 1500));
+        await tester.pump(const Duration(milliseconds: 600));
+        platform.fail();
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('다시 시도'), findsOneWidget);
+        await tester.tap(find.text('다시 시도'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(afterReopen(), ['pause', 'seek 1500', 'play']);
+        expect(find.byTooltip('일시정지'), findsOneWidget);
+        await closePlayer(tester);
+      });
+
+      testWidgets('끝난 것은 끝에 두고 다시 틀지 않는다', (tester) async {
+        await openVideo(tester);
+        platform.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(find.byTooltip('처음부터'), findsOneWidget);
+        await roundTrip(tester, meanwhile: () => links.single.dead = true);
+        expect(afterReopen(), ['pause', 'seek 3000']);
+        expect(find.byTooltip('처음부터'), findsOneWidget);
+        await closePlayer(tester);
+      });
+    });
+
     testWidgets('연 플레이어는 누른 순간의 원본에 고정된다 — 밑의 카드가 B 로 바뀌어도 A 를 재생한다', (
       tester,
     ) async {
@@ -1023,8 +1306,20 @@ class _FakeLink implements MediaLink {
   final String ext;
   bool closed = false;
 
+  /// iOS 가 루프백 소켓을 거둬 간 것처럼.
+  bool dead = false;
+
   @override
   final String? error;
+
+  /// 살아 있나 묻기를 붙잡아 둔다 — 묻는 사이의 생애 변화를 본다.
+  Completer<void>? aliveGate;
+
+  @override
+  Future<bool> alive() async {
+    await aliveGate?.future;
+    return !dead && !closed;
+  }
 
   @override
   Uri get uri => Uri.parse('http://127.0.0.1:9/$id/media.$ext');

@@ -8,6 +8,10 @@
 //   flutter drive -d <시뮬레이터> --driver test_driver/integration_test.dart \
 //     --target integration_test/inline_media_test.dart \
 //     --dart-define=KASA_MEDIA_FIXTURE=http://127.0.0.1:8791/ --dart-define=KASA_MEDIA_LONG=true
+//
+// 배경→복귀를 진짜로 보려면 --dart-define=KASA_MEDIA_BACKGROUND=true 를 더하고, 맥 쪽에서 출력의
+// 「MEDIA … BACKGROUND <표>」 줄마다 `xcrun simctl launch <시뮬레이터> com.apple.Preferences` 로 앱을 뒤로 보냈다가
+// 몇 초 뒤 `xcrun simctl launch <시뮬레이터> com.debimarlene.kasaterm` 으로 되돌린다.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -27,6 +31,7 @@ import 'package:video_player/video_player.dart';
 
 const _root = String.fromEnvironment('KASA_MEDIA_FIXTURE');
 const _long = bool.fromEnvironment('KASA_MEDIA_LONG');
+const _background = bool.fromEnvironment('KASA_MEDIA_BACKGROUND');
 
 String _block(String id, int rows) =>
     '```text\n${List.generate(rows, (i) => '[[km:$id:${i.toString().padLeft(2, '0')}/${rows.toString().padLeft(2, '0')}]]').join('\n')}\n```\n';
@@ -67,6 +72,39 @@ void main() {
         as VideoPlayerController;
   }
 
+  /// 카드 정보는 제각기 늦게 온다 — 필요한 카드가 모두 선 뒤에 누른다.
+  Future<void> cards(WidgetTester tester, List<String> titles) => until(
+    tester,
+    () => titles.every((t) => find.text(t).evaluate().isNotEmpty),
+    '카드 정보 ${titles.join('·')}',
+  );
+
+  /// 새 플레이어가 준비를 끝냈나 — 초기화만이 아니라 찾아가기까지 끝나 받는 중 표시가 걷히고 재생 단추가 풀렸다.
+  bool settled(WidgetTester tester) {
+    final c = player(tester);
+    if (c == null || !c.value.isInitialized) return false;
+    final spinning = find
+        .descendant(
+          of: find.byType(MediaPlayerScreen),
+          matching: find.byType(CircularProgressIndicator),
+        )
+        .evaluate()
+        .isNotEmpty;
+    final button = find
+        .descendant(
+          of: find.byType(MediaPlayerScreen),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is IconButton &&
+                w.onPressed != null &&
+                const ['재생', '일시정지', '처음부터'].contains(w.tooltip),
+          ),
+        )
+        .evaluate()
+        .isNotEmpty;
+    return button && (!spinning || c.value.isPlaying);
+  }
+
   Future<void> shot(WidgetTester tester, String name) async {
     await tester.pump();
     await binding.takeScreenshot(name);
@@ -75,8 +113,8 @@ void main() {
   void log(String line) =>
       debugPrint('MEDIA ${DateTime.now().millisecondsSinceEpoch} $line');
 
-  testWidgets('대화 미디어 카드 — 창구로 곧바로 재생·멈춤·찾기·끝·닫기·끊김', (tester) async {
-    expect(_root, isNotEmpty, reason: 'KASA_MEDIA_FIXTURE 를 주세요');
+  /// 창구를 열 때마다 모은다 — 받은 양·살아 있나를 시험이 본다.
+  List<MediaBridge> captureBridges() {
     final bridges = <MediaBridge>[];
     InlineMediaHub.debugReset(
       InlineMediaHub(
@@ -100,32 +138,35 @@ void main() {
             },
       ),
     );
+    return bridges;
+  }
+
+  Future<void> origin({required bool down}) async {
+    await http.get(Uri.parse(_root).resolve('/__origin?down=${down ? 1 : 0}'));
+  }
+
+  Future<bool> refused(Uri u) async {
+    try {
+      (await Socket.connect(u.host, u.port)).destroy();
+      return false;
+    } on SocketException {
+      return true;
+    }
+  }
+
+  Future<void> close(WidgetTester tester) async {
+    await tester.tap(find.byTooltip('닫기'));
+    await until(
+      tester,
+      () => find.byType(MediaPlayerScreen).evaluate().isEmpty,
+      '닫기',
+    );
+  }
+
+  Future<void> pumpChat(WidgetTester tester, String text) async {
+    expect(_root, isNotEmpty, reason: 'KASA_MEDIA_FIXTURE 를 주세요');
     final server = Server(Uri.parse(_root));
     addTearDown(server.close);
-    Future<void> origin({required bool down}) async {
-      await http.get(
-        Uri.parse(_root).resolve('/__origin?down=${down ? 1 : 0}'),
-      );
-    }
-
-    Future<bool> refused(Uri u) async {
-      try {
-        (await Socket.connect(u.host, u.port)).destroy();
-        return false;
-      } on SocketException {
-        return true;
-      }
-    }
-
-    Future<void> close(WidgetTester tester) async {
-      await tester.tap(find.byTooltip('닫기'));
-      await until(
-        tester,
-        () => find.byType(MediaPlayerScreen).evaluate().isEmpty,
-        '닫기',
-      );
-    }
-
     final theme = buildTheme(Brightness.light);
     await tester.pumpWidget(
       MaterialApp(
@@ -143,11 +184,7 @@ void main() {
                     maxWidth: 402 - Look.pagePad * 2 - Look.bubbleFar,
                     child: InlineResultBody(
                       server: server,
-                      text:
-                          '영상을 만들었어요.\n\n${_block('1111111111111111', 12)}\n'
-                          '소리도요.\n\n${_block('2222222222222222', 4)}\n'
-                          '세로 영상.\n\n${_block('3333333333333333', 12)}\n'
-                          '${_long ? '긴 영상.\n\n${_block('6666666666666666', 12)}' : ''}',
+                      text: text,
                       style: MarkdownStyleSheet.fromTheme(theme),
                       onLink: (_) {},
                     ),
@@ -159,11 +196,23 @@ void main() {
         ),
       ),
     );
-    await until(
+  }
+
+  testWidgets('대화 미디어 카드 — 창구로 곧바로 재생·멈춤·찾기·끝·닫기·끊김', (tester) async {
+    final bridges = captureBridges();
+    await pumpChat(
       tester,
-      () => find.text('tone.m4a').evaluate().isNotEmpty,
-      '카드 정보',
+      '영상을 만들었어요.\n\n${_block('1111111111111111', 12)}\n'
+      '소리도요.\n\n${_block('2222222222222222', 4)}\n'
+      '세로 영상.\n\n${_block('3333333333333333', 12)}\n'
+      '${_long ? '긴 영상.\n\n${_block('6666666666666666', 12)}' : ''}',
     );
+    await cards(tester, [
+      'demo clip.mp4',
+      'tone.m4a',
+      'portrait.mov',
+      if (_long) 'long.mp4',
+    ]);
     await idle(tester, const Duration(milliseconds: 300));
     expect(tester.takeException(), isNull);
     await shot(tester, '01-cards');
@@ -337,4 +386,214 @@ void main() {
     }
     expect(tester.takeException(), isNull);
   });
+  // 배경→복귀. KASA_MEDIA_BACKGROUND=true 면 「BACKGROUND <표>」 줄을 본 맥 쪽이 simctl 로 앱을 진짜 뒤로 보냈다
+  // 되돌린다. 아니면 생애 상태만 흉내 낸다. 거둠은 paused 를 받은 순간 창구의 듣기 소켓·연결을 끊어 흉내 낸다.
+  Future<void> roundTrip(
+    WidgetTester tester,
+    String tag, {
+    MediaBridge? reclaim,
+    void Function()? onPaused,
+  }) async {
+    final seen = <AppLifecycleState>[];
+    final watch = _LifecycleWatch((s) {
+      seen.add(s);
+      if (s != AppLifecycleState.paused) return;
+      onPaused?.call();
+      reclaim?.debugReclaim();
+    });
+    WidgetsBinding.instance.addObserver(watch);
+    try {
+      if (_background) {
+        log('BACKGROUND $tag');
+      } else {
+        for (final s in [
+          AppLifecycleState.inactive,
+          AppLifecycleState.hidden,
+          AppLifecycleState.paused,
+        ]) {
+          binding.handleAppLifecycleStateChanged(s);
+        }
+        // 멈춘 동안 프레임이 서지 않아 pump 로 기다리지 않는다.
+        await Future<void>.delayed(const Duration(seconds: 1));
+        for (final s in [
+          AppLifecycleState.hidden,
+          AppLifecycleState.inactive,
+          AppLifecycleState.resumed,
+        ]) {
+          binding.handleAppLifecycleStateChanged(s);
+        }
+      }
+      await until(
+        tester,
+        () =>
+            seen.contains(AppLifecycleState.paused) &&
+            seen.last == AppLifecycleState.resumed,
+        '배경 왕복 $tag',
+        limit: const Duration(seconds: 90),
+      );
+      log('RESUMED $tag ${seen.map((s) => s.name).join(',')}');
+    } finally {
+      WidgetsBinding.instance.removeObserver(watch);
+    }
+  }
+
+  testWidgets('앱이 뒤로 갔다 오면 — 거둬진 창구를 같은 원본·자리로 다시 세운다', (tester) async {
+    expect(_long, isTrue, reason: '긴 영상(KASA_MEDIA_LONG)이 필요해요');
+    final bridges = captureBridges();
+    await pumpChat(
+      tester,
+      '긴 영상.\n\n${_block('6666666666666666', 12)}\n'
+      '짧은 영상.\n\n${_block('1111111111111111', 12)}',
+    );
+    await cards(tester, ['long.mp4', 'demo clip.mp4']);
+
+    // 틀던 것: 거둬졌으면 새 창구로 그 자리에서 이어 튼다.
+    await tester.tap(find.text('long.mp4'));
+    await until(
+      tester,
+      () =>
+          (player(tester)?.value.isPlaying ?? false) &&
+          player(tester)!.value.position > const Duration(seconds: 2),
+      '긴 영상 재생',
+    );
+    final first = bridges.single;
+    final old = player(tester)!;
+    var awayAt = Duration.zero;
+    await roundTrip(
+      tester,
+      'playing',
+      reclaim: first,
+      onPaused: () => awayAt = old.value.position,
+    );
+    // 새 플레이어가 서자마자 시계는 떠난 자리를 보인다 — video_player 는 찾기가 끝날 때까지 0 이다.
+    await until(
+      tester,
+      () =>
+          bridges.length == 2 &&
+          player(tester) != null &&
+          !identical(player(tester), old),
+      '새 창구',
+    );
+    final shown = DateTime.now();
+    expect(
+      find.text(clockLabel(awayAt)),
+      findsOneWidget,
+      reason: '준비 중에도 그 자리',
+    );
+    // 새 플레이어는 찾아간 뒤에 튼다 — 처음 틀린 순간의 자리가 이어 받은 자리다.
+    await until(
+      tester,
+      () => player(tester)?.value.isPlaying ?? false,
+      '새 창구로 이어 재생',
+    );
+    final resumedAt = player(tester)!.value.position;
+    log(
+      'playing: away ${awayAt.inMilliseconds}ms → new player starts ${resumedAt.inMilliseconds}ms (ready ${DateTime.now().difference(shown).inMilliseconds}ms)',
+    );
+    expect(await first.alive(), isFalse);
+    expect(await refused(first.uri), isTrue);
+    expect(await bridges.last.alive(), isTrue);
+    expect(bridges.last.uri.port, isNot(first.uri.port));
+    expect(awayAt, greaterThan(const Duration(seconds: 2)));
+    expect(
+      (resumedAt - awayAt).inMilliseconds.abs(),
+      lessThan(700),
+      reason: '처음이 아니라 그 자리에서',
+    );
+    await idle(tester, const Duration(milliseconds: 1000));
+    expect(
+      player(tester)!.value.position,
+      greaterThan(resumedAt),
+      reason: '흘러간다',
+    );
+    await shot(tester, '10-bg-resumed-playing');
+
+    // 멈춰 둔 것: 거둬졌으면 새로 세우되 멈춘 채.
+    await tester.tap(find.byTooltip('일시정지'));
+    await idle(tester, const Duration(milliseconds: 400));
+    final pausedAt = player(tester)!.value.position;
+    await roundTrip(tester, 'paused', reclaim: bridges.last);
+    await until(
+      tester,
+      () => bridges.length == 3 && player(tester) != null,
+      '새 창구',
+    );
+    final pausedShown = DateTime.now();
+    expect(
+      find.text(clockLabel(pausedAt)),
+      findsOneWidget,
+      reason: '준비 중에도 그 자리',
+    );
+    await until(tester, () => settled(tester), '새 창구로 멈춘 채 준비');
+    final readyMs = DateTime.now().difference(pausedShown).inMilliseconds;
+    await idle(tester, const Duration(milliseconds: 800));
+    final p = player(tester)!.value;
+    log(
+      'paused: before ${pausedAt.inMilliseconds}ms → after ${p.position.inMilliseconds}ms playing ${p.isPlaying} (ready ${readyMs}ms)',
+    );
+    expect(p.isPlaying, isFalse);
+    expect(
+      (p.position - pausedAt).inMilliseconds.abs(),
+      lessThan(600),
+      reason: '멈춘 자리 그대로',
+    );
+    expect(find.byTooltip('재생'), findsOneWidget);
+    expect(
+      find.text(clockLabel(p.position)),
+      findsOneWidget,
+      reason: '시계도 그 자리',
+    );
+    await shot(tester, '11-bg-resumed-paused');
+
+    // 거두지 않았으면 손대지 않는다.
+    final kept = player(tester);
+    await roundTrip(tester, 'alive');
+    await idle(tester, const Duration(milliseconds: 800));
+    expect(bridges, hasLength(3), reason: '살아 있는 창구는 그대로');
+    expect(identical(player(tester), kept), isTrue);
+    expect(player(tester)!.value.isPlaying, isFalse);
+    await close(tester);
+
+    // 끝난 것: 거둬졌어도 끝에 두고 다시 틀지 않는다.
+    await tester.tap(find.text('demo clip.mp4'));
+    await until(
+      tester,
+      () => player(tester)?.value.isPlaying ?? false,
+      '짧은 영상 재생',
+    );
+    await until(
+      tester,
+      () => find.byTooltip('처음부터').evaluate().isNotEmpty,
+      '끝까지',
+      limit: const Duration(seconds: 6),
+    );
+    final ended = bridges.length;
+    await roundTrip(tester, 'ended', reclaim: bridges.last);
+    await until(
+      tester,
+      () => bridges.length == ended + 1 && settled(tester),
+      '새 창구로 끝에 준비',
+    );
+    await idle(tester, const Duration(milliseconds: 800));
+    final e = player(tester)!.value;
+    log(
+      'ended: after ${e.position.inMilliseconds}ms of ${e.duration.inMilliseconds}ms playing ${e.isPlaying}',
+    );
+    expect(e.isPlaying, isFalse, reason: '끝난 것은 다시 틀지 않는다');
+    expect(find.byTooltip('처음부터'), findsOneWidget);
+    await shot(tester, '12-bg-resumed-ended');
+    await close(tester);
+    for (final b in bridges) {
+      expect(await b.alive(), isFalse);
+    }
+    expect(tester.takeException(), isNull);
+  });
+}
+
+class _LifecycleWatch with WidgetsBindingObserver {
+  _LifecycleWatch(this.on);
+  final void Function(AppLifecycleState) on;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) => on(state);
 }

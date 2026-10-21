@@ -193,6 +193,9 @@ abstract interface class MediaLink {
   /// 원본에서 조각을 받다 난 까닭. 재생이 실패하면 형식 탓 대신 이것을 보인다.
   String? get error;
 
+  /// 아직 받을 수 있나. 앱이 뒤로 간 사이 iOS 가 루프백 듣기 소켓을 거둬 갈 수 있어 복귀 때 묻는다.
+  Future<bool> alive();
+
   /// 받던 요청·연결을 모두 끊는다.
   Future<void> close();
 }
@@ -205,6 +208,8 @@ class _FileLink implements MediaLink {
   Uri get uri => Uri.file(path!);
   @override
   String? get error => null;
+  @override
+  Future<bool> alive() async => true;
   @override
   Future<void> close() async {}
 }

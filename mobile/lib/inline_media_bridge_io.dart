@@ -99,6 +99,42 @@ class MediaBridge implements MediaLink {
   @override
   final Uri uri;
 
+  /// 제 주소에 HEAD 를 보내 본다 — 거둬진 듣기 소켓은 창구가 스스로 알 길이 없다. HttpClient 대신 맨 소켓이라
+  /// 시험 바인딩의 HttpClient 막기에도 걸리지 않는다.
+  @override
+  Future<bool> alive() async {
+    if (_closed) return false;
+    Socket? s;
+    try {
+      s = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        uri.port,
+        timeout: const Duration(seconds: 2),
+      );
+      s.add(
+        ascii.encode(
+          'HEAD ${uri.path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n',
+        ),
+      );
+      final head = await s.first.timeout(const Duration(seconds: 2));
+      return ascii.decode(head.take(12).toList(), allowInvalid: true) ==
+          'HTTP/1.1 200';
+    } catch (_) {
+      return false;
+    } finally {
+      s?.destroy();
+    }
+  }
+
+  /// iOS 가 듣기 소켓과 연결을 거둔 것처럼 — 창구는 제가 닫힌 줄 모른다.
+  @visibleForTesting
+  Future<void> debugReclaim() async {
+    for (final s in _sockets.toList()) {
+      s.destroy();
+    }
+    await _http.close(force: true);
+  }
+
   @override
   Future<void> close() async {
     if (_closed) return;

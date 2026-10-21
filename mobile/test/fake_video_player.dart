@@ -57,15 +57,33 @@ class FakeVideoPlayer extends VideoPlayerPlatform {
   @override
   Future<void> pause(int playerId) async => calls.add('pause');
 
+  /// 흘려 받는 원본처럼 찾기가 오래 걸리게 — 풀 때까지 찾기가 끝나지 않는다.
+  Completer<void>? seekGate;
+
   @override
   Future<void> seekTo(int playerId, Duration position) async {
     calls.add('seek ${position.inMilliseconds}');
+    await seekGate?.future;
     _positions[playerId] = position;
   }
 
   @override
   Future<Duration> getPosition(int playerId) async =>
       _positions[playerId] ?? Duration.zero;
+
+  /// 재생이 [at] 까지 흘러간 것처럼 — 컨트롤러는 다음 위치 묻기(0.5초마다)에서 받는다.
+  void moveTo(Duration at) {
+    for (final id in _events.keys) {
+      _positions[id] = at;
+    }
+  }
+
+  /// 연결이 끊겨 AVPlayer 가 오류를 낸 것처럼.
+  void fail() {
+    for (final e in _events.values) {
+      e.addError(PlatformException(code: 'VideoError', message: 'lost'));
+    }
+  }
 
   /// 재생이 끝까지 간 것처럼.
   void complete() {
