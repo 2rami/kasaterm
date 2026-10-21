@@ -20,7 +20,7 @@ impl State {
         }).collect::<Vec<_>>()).unwrap_or_default();
         let preview=self.preview.as_ref().filter(|p|p.owner==owner).map(|p|{
             let state=p.player.as_ref().map(|player|{let s=player.state();serde_json::json!({"position":s.position,"duration":s.duration,"playing":s.playing,"buffering":s.buffering,"seeking":s.seeking,"ended":s.ended,"error":s.error})});
-            serde_json::json!({"state":state,"error":p.error,"downloading":p.download.is_some(),"muted":p.muted,"frames":p.frame_serial,
+            serde_json::json!({"state":state,"error":p.error,"received":p.stream.as_ref().map(Stream::received_bytes),"stream_error":p.stream.as_ref().and_then(Stream::error),"size":p.asset.as_ref().map(|a|a.media.size),"muted":p.muted,"frames":p.frame_serial,
                 "seek":p.seek,"drawn":g.drawn_image_clipped_rects(&format!("media-preview:{}",p.generation)),
                 "actions":p.actions.iter().map(|(a,r)|serde_json::json!({"action":format!("{a:?}"),"rect":r})).collect::<Vec<_>>()})
         });

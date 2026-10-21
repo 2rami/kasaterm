@@ -5,6 +5,8 @@
 //! 옮기고 트랙의 표시 회전만 적용한다. GPU 갱신·카드 UI 는 부르는 쪽이 맡는다.
 //!
 //! `Player` 는 메인 스레드에서만 만들고 쓴다(AVPlayer 가 메인 스레드 전용이라 타입이 `!Send`).
+//! 원격 원본은 `open_url` 로 루프백 Range 서버(`kasa_mcp::media_stream`)를 읽는다 — AVFoundation 이
+//! 필요한 구간만 요청하므로 파일 전체를 받기 전에 재생·탐색이 된다.
 //! `probe` 는 파일을 읽느라 막힐 수 있으니 GUI 스레드가 아닌 곳에서 부른다.
 
 use std::path::Path;
@@ -24,6 +26,9 @@ mod imp {
 
     impl Player {
         pub fn open(_path: &Path) -> Result<Self, String> {
+            Err(UNSUPPORTED.to_string())
+        }
+        pub fn open_url(_url: &str) -> Result<Self, String> {
             Err(UNSUPPORTED.to_string())
         }
         pub fn play(&mut self) {}
@@ -56,6 +61,7 @@ pub struct Playback {
     pub position: f64,
     pub duration: Option<f64>,
     pub playing: bool,
+    /// 열린 뒤 아직 재생 준비가 안 됐거나, 재생 중 다음 데이터를 기다리는 중.
     pub buffering: bool,
     pub ended: bool,
     /// 위치 찾기(열기 직후 첫 프레임 포함)가 끝나 새 위치의 프레임이 나올 때까지 true.
@@ -95,8 +101,17 @@ pub struct Player {
 
 impl Player {
     /// 열기는 막히지 않는다. 읽기 실패·지원하지 않는 형식은 `state().error` 로 나중에 드러난다.
+    // 앱 카드는 스트림(`open_url`)으로 열지만, 재생기 실기 검사와 로컬 파일 재생 길로 남긴다.
+    #[allow(dead_code)]
     pub fn open(path: &Path) -> Result<Self, String> {
         imp::Player::open(path).map(|inner| Self { inner })
+    }
+
+    /// `http://127.0.0.1:<port>/…` 만 받는다 — 앱이 띄운 루프백 스트림 밖으로 AVFoundation 이
+    /// 나가지 않게. 열기는 막히지 않고 연결·형식 실패는 `state().error` 로 드러난다.
+    pub fn open_url(url: &str) -> Result<Self, String> {
+        loopback_url(url)?;
+        imp::Player::open_url(url).map(|inner| Self { inner })
     }
 
     /// 끝까지 재생한 뒤 부르면 처음부터 다시 튼다.
@@ -138,6 +153,26 @@ impl Player {
 /// 길이·표시 크기·포스터를 읽는다. 파일을 읽으며 막히므로 GUI 스레드에서 부르지 않는다.
 pub fn probe(path: &Path) -> Result<Probe, String> {
     imp::probe(path)
+}
+
+fn loopback_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("http://127.0.0.1:")
+        .ok_or("media stream must be a loopback http URL")?;
+    let (port, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let port_ok = !port.is_empty()
+        && port.len() <= 5
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|p| p > 0);
+    let path_ok = path.starts_with('/')
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'#' | b'\\'));
+    if port_ok && path_ok {
+        Ok(())
+    } else {
+        Err("media stream URL is malformed".into())
+    }
 }
 
 /// 멈췄고 끝에 닿았으면 끝난 것이다. AVPlayer 는 끝에서 스스로 멈추고(`Pause`) 위치를 길이에 둔다.
@@ -329,6 +364,26 @@ mod tests {
             .bgra_to_rgba(&[0; 8], 4, 2, 1)
             .is_none());
         assert!(Orientation::IDENTITY.bgra_to_rgba(&[], 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn only_loopback_stream_urls_open() {
+        assert!(loopback_url("http://127.0.0.1:53211/m/9f3c?x=1").is_ok());
+        for bad in [
+            "https://127.0.0.1:53211/m",
+            "http://localhost:53211/m",
+            "http://127.0.0.1.evil:80/m",
+            "http://127.0.0.1@evil.example:80/m",
+            "http://127.0.0.1:0/m",
+            "http://127.0.0.1:70000/m",
+            "http://127.0.0.1:53211",
+            "http://127.0.0.1:/m",
+            "http://127.0.0.1:53211/m#frag",
+            "http://127.0.0.1:53211/m x",
+            "file:///tmp/a.mp4",
+        ] {
+            assert!(loopback_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use objc2::rc::{autoreleasepool, Retained, Weak};
+use objc2::encode::{Encode, Encoding};
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{msg_send, AnyThread, MainThreadMarker};
 use objc2_av_foundation::{
@@ -27,7 +29,7 @@ use objc2_core_video::{
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
     CVPixelBufferUnlockBaseAddress,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL, NSValue};
 
 use super::{
     playback_ended, Frame, Orientation, Playback, Probe, POSTER_MAX_BYTES, POSTER_MAX_EDGE,
@@ -39,8 +41,15 @@ const FRAME_MAX_EDGE: f64 = 1920.0;
 const SEEK_TIMESCALE: i32 = 600;
 /// 깨진 파일·느린 볼륨에서 검사 스레드가 영영 붙잡히지 않게.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-/// 끝 지점처럼 새 프레임이 끝내 안 나오는 위치 찾기가 렌더 루프를 영영 붙잡지 않게.
+/// 끝 지점처럼 새 프레임이 끝내 안 나오는 위치 찾기가 렌더 루프를 영영 붙잡지 않게. 스트림은
+/// 위치 찾기 자체가 받기를 기다리므로 요청 시각이 아니라 완료를 본 때부터 센다.
 const SEEK_GIVE_UP: Duration = Duration::from_secs(5);
+/// 재생을 기다리는 중 지금 위치 앞으로 이만큼 받혀 있으면 바로 튼다(`start_when_buffered`).
+const START_AHEAD: f64 = 3.0;
+/// 소리만 있는 항목은 받힌 구간을 알 수 없어(`start_when_buffered`) 이만큼 기다린 뒤 튼다.
+const AUDIO_START_WAIT: Duration = Duration::from_secs(1);
+/// 정확한 위치 찾기라 새 위치의 프레임은 목표보다 한 프레임 안쪽 앞이다. 24fps 두 장 남짓.
+const LANDED_SLACK: f64 = 0.1;
 
 extern "C" {
     fn mach_absolute_time() -> u64;
@@ -54,48 +63,69 @@ pub struct Player {
     orientation: Option<Orientation>,
     has_video: Option<bool>,
     serial: u64,
-    /// 열기도 0초로 가는 위치 찾기로 친다 — 첫 프레임이 나올 때까지 `seeking`.
+    /// 열기도 0초로 가는 위치 찾기로 친다 — 준비된 뒤 첫 프레임이 나올 때까지 `seeking`.
     pending: Option<PendingSeek>,
     seek_generation: u64,
     /// 완료 콜백이 끝난 위치 찾기의 세대를 올린다. 콜백 큐가 문서로 정해져 있지 않아 원자값으로 둔다.
     seek_done: Arc<AtomicU64>,
+    /// 재생을 요청했는데 AVPlayer 가 받기를 기다리기 시작한 때.
+    waiting_since: Option<Instant>,
 }
 
 /// 멈춘 채 위치를 옮기면 새 프레임은 완료 콜백 뒤에야 나오고, 그 전엔 옛 위치의 프레임이 한 장
 /// 더 나올 수 있다. 그 사이 렌더 루프가 쉬면 막대만 옮겨 가고 그림은 옛 것에 멈춘다.
 struct PendingSeek {
     generation: u64,
-    issued: Instant,
+    target: f64,
+    settled_at: Cell<Option<Instant>>,
+}
+
+impl PendingSeek {
+    fn new(generation: u64, target: f64) -> Self {
+        Self {
+            generation,
+            target,
+            settled_at: Cell::new(None),
+        }
+    }
 }
 
 impl Player {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let mtm = MainThreadMarker::new()
-            .ok_or_else(|| "media player must be opened on the main thread".to_string())?;
+        let mtm = main_thread()?;
         let path = local_file(path)?;
         let url = file_url(&path)?;
+        Ok(Self::with_url(&url, mtm))
+    }
+
+    pub fn open_url(url: &str) -> Result<Self, String> {
+        let mtm = main_thread()?;
+        let url = NSURL::URLWithString(&NSString::from_str(url))
+            .ok_or_else(|| "media stream URL is malformed".to_string())?;
+        Ok(Self::with_url(&url, mtm))
+    }
+
+    fn with_url(url: &NSURL, mtm: MainThreadMarker) -> Self {
         unsafe {
-            let asset = AVURLAsset::URLAssetWithURL_options(&url, None);
+            let asset = AVURLAsset::URLAssetWithURL_options(url, None);
             let item = AVPlayerItem::playerItemWithAsset(&asset, mtm);
             let output = video_output(None);
             item.addOutput(&output);
             let player = AVPlayer::playerWithPlayerItem(Some(&item), mtm);
             player.setActionAtItemEnd(AVPlayerActionAtItemEnd::Pause);
             player.pause();
-            Ok(Self {
+            Self {
                 player,
                 item,
                 output,
                 orientation: None,
                 has_video: None,
                 serial: 0,
-                pending: Some(PendingSeek {
-                    generation: 0,
-                    issued: Instant::now(),
-                }),
+                pending: Some(PendingSeek::new(0, 0.0)),
                 seek_generation: 0,
                 seek_done: Arc::new(AtomicU64::new(0)),
-            })
+                waiting_since: None,
+            }
         }
     }
 
@@ -147,8 +177,10 @@ impl Player {
             let duration = numeric_seconds(self.item.duration()).filter(|d| *d > 0.0);
             let control = self.player.timeControlStatus();
             let playing = error.is_none() && control != AVPlayerTimeControlStatus::Paused;
-            let buffering =
-                playing && control == AVPlayerTimeControlStatus::WaitingToPlayAtSpecifiedRate;
+            let buffering = error.is_none()
+                && (item_status == AVPlayerItemStatus::Unknown
+                    || playing
+                        && control == AVPlayerTimeControlStatus::WaitingToPlayAtSpecifiedRate);
             let has_video = self.has_video.or_else(|| {
                 (item_status == AVPlayerItemStatus::ReadyToPlay)
                     .then(|| self.video_track().is_some())
@@ -166,8 +198,10 @@ impl Player {
     }
 
     pub fn take_frame(&mut self) -> Option<Frame> {
+        self.start_when_buffered();
         let orientation = self.ready_orientation()?;
-        // 완료를 프레임보다 먼저 읽는다 — 완료 뒤에 꺼낸 프레임이어야 새 위치의 것이다.
+        // 완료를 프레임보다 먼저 읽는다 — 완료 뒤에 꺼낸 프레임이어야 새 위치의 것이다. 앱에선 새
+        // 위치의 프레임이 완료 콜백보다 먼저 오기도 해서, 표시 시각이 목표에 닿은 프레임도 끝으로 친다.
         let settled = self.pending.as_ref().is_none_or(|p| self.settled(p));
         unsafe {
             let item_time = self
@@ -178,11 +212,15 @@ impl Player {
             {
                 return None;
             }
+            let mut shown = item_time;
             let buffer = self
                 .output
-                .copyPixelBufferForItemTime_itemTimeForDisplay(item_time, std::ptr::null_mut())?;
+                .copyPixelBufferForItemTime_itemTimeForDisplay(item_time, &mut shown)?;
             let (width, height, rgba) = read_bgra(&buffer, orientation)?;
-            if settled {
+            let landed = self.pending.as_ref().is_some_and(|p| {
+                numeric_seconds(shown).is_some_and(|t| (t - p.target).abs() <= LANDED_SLACK)
+            });
+            if settled || landed {
                 self.pending = None;
             }
             self.serial += 1;
@@ -192,6 +230,35 @@ impl Player {
                 rgba,
                 serial: self.serial,
             })
+        }
+    }
+
+    /// 끊김 최소화 대기는 점진 받기에서 지나치게 오래 간다 — 음성만 있으면 비트레이트의 20배로
+    /// 보내도 파일을 끝까지 받은 뒤에야 풀렸고, 그동안 받힌 구간도 0초로만 알렸다(느린 루프백 원본
+    /// 실측). 영상은 앞쪽이 충분히 받히면, 음성은 잠깐 기다린 뒤 직접 시작시킨다. 대기 설정은 그대로
+    /// 두므로 나중에 받기가 밀리면 AVPlayer 가 다시 기다린다 — 대기를 아예 끄면 한 번 끊긴 뒤 멈춘
+    /// 채로 남는다.
+    fn start_when_buffered(&mut self) {
+        unsafe {
+            if self.player.timeControlStatus()
+                != AVPlayerTimeControlStatus::WaitingToPlayAtSpecifiedRate
+                || self.item.status() != AVPlayerItemStatus::ReadyToPlay
+            {
+                self.waiting_since = None;
+                return;
+            }
+            let since = *self.waiting_since.get_or_insert_with(Instant::now);
+            let Some(now) = numeric_seconds(self.item.currentTime()) else {
+                return;
+            };
+            let end = numeric_seconds(self.item.duration()).unwrap_or(f64::INFINITY);
+            let loaded = buffered_until(&self.item.loadedTimeRanges(), now);
+            let audio_waited =
+                self.has_video == Some(false) && since.elapsed() >= AUDIO_START_WAIT;
+            if loaded >= (now + START_AHEAD).min(end - 0.05) || audio_waited {
+                self.player.playImmediatelyAtRate(1.0);
+                self.waiting_since = None;
+            }
         }
     }
 
@@ -205,10 +272,7 @@ impl Player {
     fn seek_exact(&mut self, seconds: f64) {
         self.seek_generation += 1;
         let generation = self.seek_generation;
-        self.pending = Some(PendingSeek {
-            generation,
-            issued: Instant::now(),
-        });
+        self.pending = Some(PendingSeek::new(generation, seconds));
         let done = Arc::clone(&self.seek_done);
         // 앞선 요청은 `finished = NO` 로 먼저 불린다. 세대가 낮아 지금 기다리는 것에 영향이 없다.
         let completion = block2::RcBlock::new(move |_finished: Bool| {
@@ -226,8 +290,17 @@ impl Player {
         }
     }
 
+    /// 열기는 항목이 준비될 때, 위치 찾기는 완료 콜백이 올 때 끝난다.
     fn settled(&self, pending: &PendingSeek) -> bool {
-        self.seek_done.load(Ordering::Acquire) >= pending.generation
+        let done = if pending.generation == 0 {
+            unsafe { self.item.status() == AVPlayerItemStatus::ReadyToPlay }
+        } else {
+            self.seek_done.load(Ordering::Acquire) >= pending.generation
+        };
+        if done && pending.settled_at.get().is_none() {
+            pending.settled_at.set(Some(Instant::now()));
+        }
+        done
     }
 
     /// 비디오면 완료 뒤 첫 프레임을 꺼낼 때(`take_frame`)까지, 소리만이면 완료 콜백까지.
@@ -235,10 +308,14 @@ impl Player {
         let Some(pending) = &self.pending else {
             return false;
         };
-        if pending.issued.elapsed() > SEEK_GIVE_UP {
-            return false;
+        if !self.settled(pending) {
+            return true;
         }
-        !(self.settled(pending) && has_video == Some(false))
+        has_video != Some(false)
+            && pending
+                .settled_at
+                .get()
+                .is_none_or(|at| at.elapsed() <= SEEK_GIVE_UP)
     }
 
     unsafe fn video_track(&self) -> Option<Retained<AVAssetTrack>> {
@@ -487,6 +564,30 @@ unsafe fn read_bgra(
     Some((w, h, rgba))
 }
 
+/// `CMTimeRange`. objc2-core-media 의 같은 타입은 Cargo 기능을 따로 켜야 해서 배치만 맞춰 둔다.
+#[repr(C)]
+struct TimeRange {
+    start: CMTime,
+    duration: CMTime,
+}
+
+unsafe impl Encode for TimeRange {
+    const ENCODING: Encoding = Encoding::Struct("?", &[CMTime::ENCODING, CMTime::ENCODING]);
+}
+
+/// `at` 을 품은 받힌 구간이 어디까지 이어지는지. 없으면 `at` 그대로.
+fn buffered_until(ranges: &NSArray<NSValue>, at: f64) -> f64 {
+    ranges
+        .iter()
+        .filter_map(|value| {
+            let range: TimeRange = unsafe { msg_send![&*value, CMTimeRangeValue] };
+            let start = numeric_seconds(range.start)?;
+            let end = start + numeric_seconds(range.duration)?;
+            (start <= at + 0.05 && end > at).then_some(end)
+        })
+        .fold(at, f64::max)
+}
+
 fn numeric_seconds(time: CMTime) -> Option<f64> {
     let numeric = time.flags.contains(CMTimeFlags::Valid)
         && !time.flags.intersects(
@@ -504,6 +605,10 @@ fn error_text(error: Option<Retained<NSError>>, fallback: &str) -> String {
         .map(|e| e.localizedDescription().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn main_thread() -> Result<MainThreadMarker, String> {
+    MainThreadMarker::new().ok_or_else(|| "media player must be opened on the main thread".to_string())
 }
 
 fn local_file(path: &Path) -> Result<PathBuf, String> {

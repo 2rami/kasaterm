@@ -2,7 +2,7 @@ use super::*;
 use crate::image_preview::Response;
 use crate::inline_media::{self, cache, Rect, Reference};
 use kasa_gridview::images::InlineSlot;
-use std::sync::atomic::Ordering;
+use kasa_mcp::media_stream::Stream;
 use winit::keyboard::PhysicalKey;
 
 mod probe;
@@ -33,8 +33,9 @@ struct Preview {
     reference: Reference,
     generation: u64,
     asset: Option<Arc<cache::Asset>>,
-    download: Option<Arc<cache::Download>>,
+    /// 재생기가 먼저 떨어지도록 스트림보다 위에 둔다. 스트림이 떨어지면 원본 읽기·연결이 취소된다.
     player: Option<crate::media_player::Player>,
+    stream: Option<Stream>,
     error: Option<String>,
     actions: Vec<(Action, Rect)>,
     seek: Rect,
@@ -42,13 +43,6 @@ struct Preview {
     muted: bool,
     focus: usize,
     frame_serial: u64,
-}
-impl Drop for Preview {
-    fn drop(&mut self) {
-        if let Some(job) = &self.download {
-            job.cancelled.store(true, Ordering::Relaxed);
-        }
-    }
 }
 #[derive(Default)]
 pub(crate) struct State {
@@ -160,8 +154,8 @@ impl State {
             reference,
             generation: self.generation,
             asset: None,
-            download: None,
             player: None,
+            stream: None,
             error: None,
             actions: Vec::new(),
             seek: (0.0, 0.0, 0.0, 0.0),
@@ -175,49 +169,43 @@ impl State {
         let Some(p) = self.preview.as_mut() else {
             return false;
         };
-        let mut changed = false;
-        if p.asset.is_none() && p.error.is_none() {
-            match cache::get(&p.reference) {
-                Ok(Some(asset)) => {
-                    p.download = Some(cache::download(
-                        p.reference.clone(),
-                        asset.clone(),
-                        proxy.clone(),
-                    ));
-                    p.asset = Some(asset);
-                    changed = true;
+        if p.asset.is_some() || p.error.is_some() {
+            return false;
+        }
+        match cache::get(&p.reference) {
+            Ok(Some(asset)) => {
+                let opened = Stream::open(p.reference.source.as_deref(), &asset.media)
+                    .map_err(|e| e.to_string())
+                    .and_then(|stream| {
+                        crate::media_player::Player::open_url(stream.url())
+                            .map(|player| (stream, player))
+                    });
+                match opened {
+                    Ok((stream, mut player)) => {
+                        if crate::verification_run() {
+                            player.set_volume(0.0);
+                            p.muted = true;
+                        }
+                        if self.focused == Some(p.owner) {
+                            player.play();
+                        }
+                        p.player = Some(player);
+                        p.stream = Some(stream);
+                    }
+                    Err(error) => p.error = Some(error),
                 }
-                Err(error) => {
-                    p.error = Some(error);
-                    changed = true;
-                }
-                Ok(None) => {
-                    cache::request(&p.reference, proxy, false);
-                }
+                p.asset = Some(asset);
+                true
+            }
+            Err(error) => {
+                p.error = Some(error);
+                true
+            }
+            Ok(None) => {
+                cache::request(&p.reference, proxy, false);
+                false
             }
         }
-        let result = p
-            .download
-            .as_ref()
-            .and_then(|job| job.result.lock().unwrap().take());
-        if let Some(result) = result {
-            p.download = None;
-            changed = true;
-            match result.and_then(|path| crate::media_player::Player::open(&path)) {
-                Ok(mut player) => {
-                    if crate::verification_run() {
-                        player.set_volume(0.0);
-                        p.muted = true;
-                    }
-                    if self.focused == Some(p.owner) {
-                        player.play();
-                    }
-                    p.player = Some(player);
-                }
-                Err(error) => p.error = Some(error),
-            }
-        }
-        changed
     }
     fn action(&mut self, action: Action, proxy: &EventLoopProxy<UserEvent>) {
         if action == Action::Close {
@@ -487,6 +475,14 @@ impl State {
         y += 40.0;
         let mut bx = x;
         let s = p.player.as_ref().map(|player| player.state());
+        // 스트림 오류는 일시 끊김이면 다음 조각에서 걷힌다 — 굳히지 않고, 재생기가 실패하면 그 까닭으로·
+        // 기다리는 중이면 덧붙여 보인다.
+        let stream_error = p.stream.as_ref().and_then(Stream::error);
+        let failure = p.error.clone().or_else(|| {
+            s.as_ref()
+                .and_then(|s| s.error.clone())
+                .map(|e| stream_error.clone().unwrap_or(e))
+        });
         for (action, label) in [
             (
                 Action::Toggle,
@@ -506,12 +502,9 @@ impl State {
                     "음소거"
                 },
             ),
-            (Action::Retry, "다시 받기"),
+            (Action::Retry, "다시 시도"),
         ] {
-            if action == Action::Retry
-                && p.error.is_none()
-                && s.as_ref().and_then(|s| s.error.as_ref()).is_none()
-            {
+            if action == Action::Retry && failure.is_none() && stream_error.is_none() {
                 continue;
             }
             let width = if action == Action::Toggle {
@@ -550,12 +543,8 @@ impl State {
             bx += width + 8.0;
         }
         y += 40.0;
-        let status = if let Some(error) = p
-            .error
-            .as_ref()
-            .or_else(|| s.as_ref().and_then(|s| s.error.as_ref()))
-        {
-            error.clone()
+        let status = if let Some(error) = failure {
+            error
         } else if let Some(s) = &s {
             format!(
                 "{} / {}{}",
@@ -563,19 +552,12 @@ impl State {
                 s.duration
                     .map(inline_media::time)
                     .unwrap_or_else(|| "—".into()),
-                if s.buffering {
-                    " · 준비 중…"
-                } else if s.ended {
-                    " · 재생 완료"
-                } else {
-                    ""
+                match (&stream_error, s.buffering, s.ended) {
+                    (Some(e), true, _) => format!(" · {e}"),
+                    (None, true, _) => " · 준비 중…".into(),
+                    (_, false, true) => " · 재생 완료".into(),
+                    _ => String::new(),
                 }
-            )
-        } else if let Some(job) = &p.download {
-            format!(
-                "미디어 받는 중 · {} / {} MiB",
-                job.done.load(Ordering::Relaxed) / 1024 / 1024,
-                job.total.load(Ordering::Relaxed).div_ceil(1024 * 1024)
             )
         } else {
             "미디어를 불러오는 중…".into()

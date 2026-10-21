@@ -1,13 +1,10 @@
 use super::Reference;
 use crate::UserEvent;
 use kasa_socket::inline_media::Media;
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
@@ -153,141 +150,10 @@ fn load(reference: &Reference) -> anyhow::Result<Asset> {
     };
     Ok(Asset { media, poster })
 }
-#[derive(Default)]
-pub(crate) struct Download {
-    pub cancelled: AtomicBool,
-    pub done: AtomicU64,
-    pub total: AtomicU64,
-    pub result: Mutex<Option<Result<PathBuf, String>>>,
-}
-pub(crate) fn download(
-    reference: Reference,
-    asset: Arc<Asset>,
-    proxy: EventLoopProxy<UserEvent>,
-) -> Arc<Download> {
-    let job = Arc::new(Download::default());
-    job.total.store(asset.media.size, Ordering::Relaxed);
-    let worker = job.clone();
-    std::thread::spawn(move || {
-        let result = download_file(
-            &reference,
-            &asset.media,
-            &worker,
-            &kasa_socket::inline_media::root(),
-            || {
-                let _ = proxy.send_event(UserEvent::Redraw);
-            },
-        )
-        .map_err(|e| e.to_string());
-        *worker.result.lock().unwrap() = Some(result);
-        let _ = proxy.send_event(UserEvent::Redraw);
-    });
-    job
-}
-fn hash_file(path: &Path, job: &Download) -> anyhow::Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        anyhow::ensure!(!job.cancelled.load(Ordering::Relaxed), "받기를 취소했어요");
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-fn download_file(
-    reference: &Reference,
-    media: &Media,
-    job: &Download,
-    cache_root: &Path,
-    notify: impl Fn(),
-) -> anyhow::Result<PathBuf> {
-    if reference.source.is_none() {
-        let path = kasa_socket::inline_media::media_path(&reference.id)?;
-        anyhow::ensure!(
-            std::fs::symlink_metadata(&path)?.file_type().is_file(),
-            "미디어 파일이 바뀌었어요"
-        );
-        anyhow::ensure!(
-            hash_file(&path, job)? == media.sha256,
-            "미디어 파일 내용이 바뀌었어요"
-        );
-        return Ok(path);
-    }
-    let base = reference.source.as_deref().unwrap();
-    let root = cache_root
-        .join("remote")
-        .join(format!("{:x}", Sha256::digest(base.as_bytes())));
-    std::fs::create_dir_all(&root)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let extension = Path::new(&media.name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .filter(|s| s.len() <= 8 && s.bytes().all(|c| c.is_ascii_alphanumeric()))
-        .unwrap_or("media");
-    let target = root.join(format!("{}.{}", media.sha256, extension));
-    if std::fs::symlink_metadata(&target)
-        .is_ok_and(|m| m.file_type().is_file() && m.len() == media.size)
-        && hash_file(&target, job)? == media.sha256
-    {
-        return Ok(target);
-    }
-    let temp = root.join(format!("{}.part", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
-        let mut offset = 0;
-        let mut hash = Sha256::new();
-        while offset < media.size {
-            anyhow::ensure!(!job.cancelled.load(Ordering::Relaxed), "받기를 취소했어요");
-            let len = (media.size - offset).min(4 * 1024 * 1024) as usize;
-            let bytes = kasa_mcp::remote::remote_get_bytes_bounded(
-                base,
-                &format!(
-                    "/term/inline-media/file?id={}&offset={offset}&len={len}",
-                    reference.id
-                ),
-                len,
-            )?;
-            anyhow::ensure!(bytes.len() == len, "파일 받기가 중간에 끊겼어요");
-            file.write_all(&bytes)?;
-            hash.update(&bytes);
-            offset += len as u64;
-            job.done.store(offset, Ordering::Relaxed);
-            notify();
-        }
-        anyhow::ensure!(
-            format!("{:x}", hash.finalize()) == media.sha256,
-            "파일 내용이 바뀌었어요. 다시 받아 주세요"
-        );
-        anyhow::ensure!(!job.cancelled.load(Ordering::Relaxed), "받기를 취소했어요");
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temp, &target)?;
-        Ok(target)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     fn media(bytes: &[u8]) -> Media {
         Media {
             version: 1,
@@ -302,75 +168,6 @@ mod tests {
             height: Some(16),
             poster: false,
         }
-    }
-    #[test]
-    fn large_download_is_chunked_verified_cached_and_cancellable() {
-        let bytes = Arc::new(
-            (0..(33 * 1024 * 1024 + 123))
-                .map(|i| (i % 251) as u8)
-                .collect::<Vec<_>>(),
-        );
-        let metadata = media(&bytes);
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let reference = Reference {
-            id: metadata.id.clone(),
-            source: Some(base),
-        };
-        let served = bytes.clone();
-        let worker = std::thread::spawn(move || {
-            let mut expected = 0;
-            while expected < served.len() {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut b = [0; 1024];
-                    let n = stream.read(&mut b).unwrap();
-                    assert!(n > 0);
-                    request.extend_from_slice(&b[..n]);
-                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let text = String::from_utf8(request).unwrap();
-                // The desktop Info scanner can probe any loopback port while this fixture is serving chunks.
-                if text.starts_with("GET / HTTP/") {
-                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                    continue;
-                }
-                let len = (served.len() - expected).min(4 * 1024 * 1024);
-                assert!(
-                    text.contains(&format!("offset={expected}&len={len}")),
-                    "{text}"
-                );
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
-                )
-                .unwrap();
-                stream.write_all(&served[expected..expected + len]).unwrap();
-                expected += len;
-            }
-        });
-        let root =
-            std::env::temp_dir().join(format!("inline-media-download-{}", uuid::Uuid::new_v4()));
-        let job = Download::default();
-        let mut probe = std::net::TcpStream::connect(reference.source.as_ref().unwrap().trim_start_matches("http://")).unwrap();
-        probe.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
-        let mut answer = String::new();
-        probe.read_to_string(&mut answer).unwrap();
-        assert!(answer.starts_with("HTTP/1.1 404"));
-        let path = download_file(&reference, &metadata, &job, &root, || {}).unwrap();
-        worker.join().unwrap();
-        assert_eq!(job.done.load(Ordering::Relaxed), metadata.size);
-        assert_eq!(hash_file(&path, &job).unwrap(), metadata.sha256);
-        assert_eq!(
-            download_file(&reference, &metadata, &job, &root, || {}).unwrap(),
-            path
-        );
-        job.cancelled.store(true, Ordering::Relaxed);
-        assert!(download_file(&reference, &metadata, &job, &root, || {}).is_err());
-        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn metadata_cannot_choose_a_path_or_unbounded_allocation() {
