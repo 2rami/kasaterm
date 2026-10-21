@@ -3251,7 +3251,7 @@ fn paint_appearance(
         let mut preview_y=*y+8.0;
         draw_text(g,preview_x,preview_y,"작업 화면 미리보기",14.0,theme::text(),true);
         preview_y+=30.0;
-        let preview_h=paint_app_preview(g,s,hits,preview_x,preview_y,preview_w);
+        let preview_h=appearance_preview::paint(g,s,hits,preview_x,preview_y,preview_w);
         preview_y+=preview_h+12.0;
         paint_palette_editor(g,s,hits,caret,preview_x,&mut preview_y,preview_w);
         paint_appearance_controls(g,s,hits,caret,x,y,form_w,false);
@@ -3259,12 +3259,6 @@ fn paint_appearance(
     } else {
         paint_appearance_controls(g,s,hits,caret,x,y,w,true);
     }
-}
-
-// 미리보기는 설정 판이 아니라 작업 화면을 비춘다 — 틀의 창 바탕까지 저장 팔레트 그대로 읽는다.
-fn paint_app_preview(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<Hit>,x:f32,y:f32,w:f32)->f32 {
-    let _app=theme::without_settings_layer();
-    appearance_preview::paint(g,s,hits,x,y,w)
 }
 
 fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<Hit>,caret:&mut Option<Rect>,x:f32,y:&mut f32,w:f32,inline_preview:bool) {
@@ -3319,7 +3313,7 @@ fn paint_appearance_controls(g:&mut gpu::GpuRenderer,s:&Snapshot,hits:&mut Vec<H
         s.eyedropper.then_some(SettingsAction::ColorEyedropper(SettingsInput::AccentHex)));
     *y += 12.0;
     if inline_preview {
-        *y += paint_app_preview(g, s, hits, x, *y, w);
+        *y += appearance_preview::paint(g, s, hits, x, *y, w);
         paint_palette_editor(g, s, hits, caret, x, y, w);
     }
     let mut actions=vec![("현재 색으로 복제",Target::Setting(SettingsAction::StartCustomTheme),false)];

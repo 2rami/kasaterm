@@ -89,11 +89,11 @@ fn regions(x:f32,y:f32,w:f32)->[(usize,Rect);5] {
     let side=(inside*0.22).floor();let panel=(inside*0.24).floor();let center=inside-side-panel-gap*2.0;
     let top=y+inset+header+gap;let body_h=PREVIEW_H-inset*2.0-header-gap;
     let middle=x+inset+side+gap;
-    [(30,(x+inset,y+inset,inside,header)),
-     (29,(x+inset,top,side,body_h)),
+    [(30,(middle,y+inset,center,header)),
+     (29,(x+inset,y+inset,side,PREVIEW_H-inset*2.0)),
      (28,(middle,top,center,28.0)),
      (27,(middle,top+33.0,center,body_h-33.0)),
-     (31,(middle+center+gap,top,panel,body_h))]
+     (31,(middle+center+gap,y+inset,panel,PREVIEW_H-inset*2.0))]
 }
 
 fn text(g: &mut gpu::GpuRenderer, rect: Rect, value: &str, ink: [u8; 4], bold: bool) {
@@ -114,6 +114,8 @@ pub(super) fn paint(
         _ => None,
     };
     let areas = regions(x, y, w);
+    // Only the miniature workspace uses the application's palette; its editor buttons belong to the settings panel.
+    let app_layer = theme::without_settings_layer();
     crate::native_controls::panel(g,(x,y,w,PREVIEW_H),theme::bg());
     for (slot, rect) in areas {
         let fill = match slot {
@@ -198,6 +200,7 @@ pub(super) fn paint(
         );
     }
 
+    drop(app_layer);
     let options = [
         (0, "창 바탕"),
         (1, "터미널 글자"),
@@ -257,6 +260,12 @@ mod tests {
     fn each_surface_has_an_independent_editor_target() {
         let areas = regions(20.0, 40.0, 600.0);
         assert_eq!(areas.map(|(slot, _)| slot), [30, 29, 28, 27, 31]);
+        for index in [1, 4] {
+            let (slot, rect) = areas[index];
+            let top_point = (rect.0 + rect.2 / 2.0, areas[0].1.1 + 12.0);
+            let matches: Vec<_> = areas.iter().filter(|(_, area)| contains(*area, top_point)).map(|(slot, _)| *slot).collect();
+            assert_eq!(matches, [slot], "sidebar headers edit their own surface color");
+        }
         for (slot, rect) in areas {
             let center = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
             let matches: Vec<_> = areas.iter().filter(|(_, area)| contains(*area, center)).map(|(slot, _)| *slot).collect();
