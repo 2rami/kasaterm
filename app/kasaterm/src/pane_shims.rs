@@ -653,10 +653,11 @@ pub(crate) fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std
 mod tests {
     use super::*;
 
+    /// 실행에는 짧은 시작 안내만 한 번 — 전역 지시와 말투는 그대로 두고, 주제별 원문은 `guide` 로 남긴다.
     #[test]
-    fn media_delivery_instructions_reach_claude_and_codex_without_a_persona() {
+    fn claude_and_codex_get_the_short_start_guide_once_beside_global_and_persona() {
         let sh = test_posix_shell().expect("셰임을 돌릴 POSIX sh");
-        let dir = std::env::temp_dir().join(format!("kt-media-instructions-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kt-guide-start-{}", uuid::Uuid::new_v4()));
         let src = dir.join("global");
         let ch = dir.join("pane");
         std::fs::create_dir_all(&src).unwrap();
@@ -664,35 +665,47 @@ mod tests {
         std::fs::write(src.join("AGENTS.md"), "GLOBAL_GUIDE").unwrap();
         install_claude_hook_shim(&dir);
         install_codex_shim(&dir);
-        let guide = crate::inline_result::INSTRUCTIONS;
+        let guide = kasa_socket::guidance::START.trim();
+        let not_injected = |text: &str| {
+            for topic in kasa_socket::guidance::TOPICS {
+                assert!(!text.contains(topic.text.trim()), "{} 원문이 실행 지침에 실렸다", topic.name);
+            }
+        };
 
         let claude = std::fs::read_to_string(dir.join("claude")).unwrap();
-        let start = claude.find("if [ -n \"$PERSONA_OK\" ]; then\nKASA_IMAGE_PROMPT=").unwrap();
+        let start = claude.find("if [ -n \"$PERSONA_OK\" ]; then\nKASA_GUIDE_START=").unwrap();
         let fragment = &claude[start..];
         let fragment = &fragment[..fragment.find("\nfi\n").unwrap() + 4];
-        let out = std::process::Command::new(&sh)
-            .args(["-c", &format!("set -- resume\n{fragment}\nprintf '%s\\0' \"$@\"")])
-            .env("PERSONA_OK", "1").env("KASATERM_PERSONA", "")
-            .output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let args = String::from_utf8(out.stdout).unwrap();
-        let args: Vec<_> = args.split('\0').collect();
-        assert_eq!(args[0], "--append-system-prompt");
-        assert!(args[1].contains(guide));
-        assert_eq!(args[2], "resume");
+        for persona in ["", "PERSONA_LINE"] {
+            let out = std::process::Command::new(&sh)
+                .args(["-c", &format!("set -- resume\n{fragment}\nprintf '%s\\0' \"$@\"")])
+                .env("PERSONA_OK", "1").env("KASATERM_PERSONA", persona)
+                .output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let args = String::from_utf8(out.stdout).unwrap();
+            let args: Vec<_> = args.split('\0').collect();
+            assert_eq!(args[0], "--append-system-prompt");
+            assert!(args[1].starts_with(persona), "말투가 앞에 그대로: {}", args[1]);
+            assert_eq!(args[1].matches(guide).count(), 1);
+            not_injected(args[1]);
+            assert_eq!(args[2], "resume");
+            assert_eq!(args.iter().filter(|a| **a == "--append-system-prompt").count(), 1);
+        }
 
         let codex = std::fs::read_to_string(dir.join("codex")).unwrap();
         let start = codex.find("INSTRUCTIONS=$(mktemp").unwrap();
         let end = codex[start..].find("export CODEX_HOME=").unwrap() + start;
         let fragment = &codex[start..end];
-        for _ in 0..2 {
+        for persona in ["", "PERSONA_LINE", "PERSONA_LINE"] {
             let out = std::process::Command::new(&sh)
                 .args(["-c", fragment]).env("SRC", &src).env("CH", &ch)
-                .env("KASATERM_PERSONA", "").output().unwrap();
+                .env("KASATERM_PERSONA", persona).output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
             let delivered = std::fs::read_to_string(ch.join("AGENTS.md")).unwrap();
             assert!(delivered.starts_with("GLOBAL_GUIDE"));
-            assert_eq!(delivered.matches(guide.trim()).count(), 1);
+            assert_eq!(delivered.matches("PERSONA_LINE").count(), usize::from(!persona.is_empty()), "다시 띄워도 말투는 한 벌");
+            assert_eq!(delivered.matches(guide).count(), 1, "다시 띄워도 시작 안내는 한 벌");
+            not_injected(&delivered);
         }
         assert_eq!(std::fs::read_to_string(src.join("AGENTS.md")).unwrap(), "GLOBAL_GUIDE");
         std::fs::remove_dir_all(dir).unwrap();

@@ -23,6 +23,8 @@
 
 /// `kasaterm-cli` 본체. 바이너리와 `kasa tui`(멀티콜)가 같이 부른다.
 pub mod cli;
+/// 실행마다 싣는 짧은 시작 안내와 `kasaterm-cli guide` 주제별 원문.
+pub mod guidance;
 pub mod inline_results;
 pub mod inline_media;
 pub mod inline_outputs;

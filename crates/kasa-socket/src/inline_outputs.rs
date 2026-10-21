@@ -5,9 +5,6 @@
 
 use std::collections::HashSet;
 
-/// 실행 지침과 새 작업 브리프가 다른 표시 규약을 전달하지 않도록 같은 원문을 쓴다.
-pub const DELIVERY_INSTRUCTIONS: &str = include_str!("inline_outputs/instructions.md");
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Image,

@@ -5,8 +5,6 @@ use kasa_gridview::images::{InlineFit, InlineSlot};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub(crate) use kasa_socket::inline_outputs::DELIVERY_INSTRUCTIONS as INSTRUCTIONS;
-
 use kasa_socket::inline_results::{root, valid_id};
 
 pub(crate) fn register(image: &image::DynamicImage) -> anyhow::Result<String> {

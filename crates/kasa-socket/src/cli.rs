@@ -9,6 +9,7 @@
 //!   kasaterm-cli split  <left|right|up|down> [--focus]
 //!   kasaterm-cli tell   <name|%N> <text>        # safe delivery to an agent
 //!   kasaterm-cli tell --raw [%N] <text>         # write to a pane without the tell guard
+//!   kasaterm-cli guide [topic]                  # one bundled guide topic, no socket
 //!   kasaterm-cli help                           # the full grouped list
 //!
 //! Socket path resolution mirrors what the host exports:
@@ -95,6 +96,17 @@ fn run() -> Result<Option<Response>> {
     if let Some(target) = parse_api_target(&mut args)? { let _ = API_TARGET.set(target); }
     if let Some(help) = session_move::help_for(&args) {
         eprintln!("{help}");
+        return Ok(None);
+    }
+    // 지침은 바이너리에 실린 글이라 앱·소켓·`--api` 대상을 거치지 않는다 — 앱이 꺼진 기기에서도 읽힌다.
+    let guide_args = match args.as_slice() {
+        [cmd, rest @ ..] if cmd == "guide" => Some(rest),
+        [help, cmd, rest @ ..] if help == "help" && cmd == "guide" => Some(rest),
+        _ => None,
+    };
+    if let Some(rest) = guide_args {
+        let text = guide_text(rest)?;
+        let _ = writeln!(std::io::stdout().lock(), "{}", text.trim_end());
         return Ok(None);
     }
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
@@ -860,19 +872,31 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
     }
 }
 
+/// `guide [주제]` — 실린 지침에서 주제 하나만 고른다. 남는 인자는 오타일 수 있어 버리지 않고 멈춘다.
+fn guide_text(args: &[String]) -> Result<String> {
+    match args {
+        [] => Ok(crate::guidance::index()),
+        [flag] if matches!(flag.as_str(), "-h" | "--help" | "help") => Ok(crate::guidance::index()),
+        [name] => crate::guidance::topic(name)
+            .map(|t| t.text.to_string())
+            .ok_or_else(|| anyhow!("모르는 지침 주제: {name}\n\n{}", crate::guidance::index().trim_end())),
+        [_, extra @ ..] => Err(anyhow!("guide 는 주제 하나만 받아요 — 남는 인자: {}", extra.join(" "))),
+    }
+}
+
 /// 새 일을 건네는 브리프(summon·`tell --title`) 끝에 붙이는 한 줄 — 완료 보고가 없으면 `wait` 가
 /// 끝나지 않고 부른 창도 모른다. 학생 프롬프트에 협업 규약을 덧붙이던 것을 걷은 뒤(2026-10-07)로는
 /// 학생이 done 을 아는 길이 이것뿐이라, 일을 건넬 때마다 싣는다.
 const BRIEF_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed, 막히거나 승인이 필요하면 blocked·needs_approval)으로 한 번 보고해 주세요.";
 
-/// 기존 대화에 새 일을 맡길 때도 결과물이 경로만으로 보고되지 않게 전달 규약을 싣는다.
+/// 기존 대화는 실행 지침 없이 떴을 수 있어 새 일에 시작 안내를 함께 싣는다. 긴 규약은 받은 쪽이 `guide` 로 그때 읽는다.
 fn with_done_hint(brief: &str) -> String {
     let body = brief.trim();
-    let media = crate::inline_outputs::DELIVERY_INSTRUCTIONS.trim();
+    let start = crate::guidance::START.trim();
     let mut out = body.to_string();
-    if !body.contains(media) {
+    if !body.contains(start) {
         out.push_str("\n\n");
-        out.push_str(media);
+        out.push_str(start);
     }
     if !body.contains("kasaterm-cli done") {
         out.push_str("\n\n");
@@ -2032,6 +2056,9 @@ fn print_help() {
         ]),
     ];
     eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 학생 이름.\n");
+    let topics: Vec<&str> = crate::guidance::TOPICS.iter().map(|t| t.name).collect();
+    eprintln!("지침 — 필요할 때 주제 하나만(앱 없이 읽는다)");
+    eprintln!("  guide [{}]   무인자면 주제 목록\n", topics.join("|"));
     for (title, lines) in groups.iter() {
         eprintln!("{title}");
         for line in lines.iter() {
@@ -4643,15 +4670,42 @@ mod tests {
         assert_eq!(ok.params["title"], "보드 걷기");
         let body = ok.params["body"].as_str().unwrap();
         assert!(body.contains("본문 한 줄\n\n") && body.ends_with(super::BRIEF_DONE_HINT), "새 일에는 done 안내가 붙는다: {body}");
-        assert!(body.contains(crate::inline_outputs::DELIVERY_INSTRUCTIONS.trim()), "새 일을 받은 기존 대화에도 미디어 전달 규칙이 들어간다");
+        let start = crate::guidance::START.trim();
+        assert_eq!(body.matches(start).count(), 1, "새 일을 받은 기존 대화에도 시작 안내가 한 번 들어간다");
+        for topic in crate::guidance::TOPICS {
+            assert!(!body.contains(topic.text.trim()), "{} 원문은 브리프에 안 싣는다", topic.name);
+        }
         assert_eq!(super::with_done_hint(body), body, "재전달해도 지침은 한 벌이다");
         let reply = super::build_request("tell", &v(&["%1", "답장", "한 줄"])).unwrap();
-        assert!(reply.params["body"].as_str().unwrap().ends_with("답장 한 줄"), "제목 없는 답장엔 안 붙는다");
+        let reply = reply.params["body"].as_str().unwrap();
+        assert!(reply.ends_with("답장 한 줄") && !reply.contains(start) && !reply.contains("kasaterm-cli done"), "제목 없는 답장엔 안 붙는다: {reply}");
         let told = super::build_request("tell", &v(&["%1", "--title", "일", "끝나면 kasaterm-cli done 으로"])).unwrap();
         assert_eq!(told.params["body"].as_str().unwrap().matches("kasaterm-cli done").count(), 1, "이미 말한 브리프엔 겹쳐 붙이지 않는다");
         let dashed = super::build_request("tell", &v(&["%1", "--", "--로 시작하는 본문"])).unwrap();
         assert!(dashed.params["body"].as_str().unwrap().ends_with("--로 시작하는 본문"));
         assert!(super::build_request("tell", &v(&["%1", "옵션 --title 이야기"])).is_ok(), "한 덩어리 본문 속 낱말은 옵션이 아니다");
+    }
+
+    #[test]
+    fn guide_reads_one_bundled_topic_and_refuses_stray_input() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let index = crate::guidance::index();
+        for args in [v(&[]), v(&["--help"]), v(&["-h"]), v(&["help"])] {
+            assert_eq!(super::guide_text(&args).unwrap(), index, "{args:?}");
+        }
+        for topic in crate::guidance::TOPICS {
+            assert!(index.contains(topic.name), "목록에 {} 가 있다", topic.name);
+            let text = super::guide_text(&v(&[topic.name])).unwrap();
+            assert_eq!(text, topic.text);
+            assert!(!text.trim().is_empty() && text.trim() != crate::guidance::START.trim(), "{} 는 시작 안내와 다른 글", topic.name);
+            for other in crate::guidance::TOPICS.iter().filter(|o| o.name != topic.name) {
+                assert_ne!(text.trim(), other.text.trim(), "{} 와 {} 는 따로 읽힌다", topic.name, other.name);
+            }
+        }
+        let err = super::guide_text(&v(&["colab"])).unwrap_err().to_string();
+        assert!(err.contains("모르는 지침 주제: colab") && err.contains("collab"), "{err}");
+        let err = super::guide_text(&v(&["collab", "media"])).unwrap_err().to_string();
+        assert!(err.contains("남는 인자: media"), "{err}");
     }
 
     #[test]

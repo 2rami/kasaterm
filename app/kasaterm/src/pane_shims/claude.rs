@@ -415,9 +415,10 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // 「말투」 토글로 이 줄을 빼지 않는다 — 꺼지면 신원 쪽이 `KASATERM_PERSONA` 를 규약만으로 내려 준다.
     // 여기서 한 번 더 막으면 말투를 끈 채 부팅한 앱의 claude 만 보드·전달·done 규약 없이 떴다
     // (2026-10-02 codex pane 과 견주다 확인 — codex 는 같은 값을 AGENTS.md 로 받아 규약이 실렸다).
+    // 전체 규약 대신 짧은 시작 안내만 싣는다 — 나머지는 claude 가 `kasaterm-cli guide <주제>` 로 그때 읽는다.
     let persona_line = format!(
-        "if [ -n \"$PERSONA_OK\" ]; then\nKASA_IMAGE_PROMPT={}\nset -- --append-system-prompt \"${{KASATERM_PERSONA}}\n${{KASA_IMAGE_PROMPT}}\" \"$@\"\nfi\n",
-        shell_quote_path(crate::inline_result::INSTRUCTIONS),
+        "if [ -n \"$PERSONA_OK\" ]; then\nKASA_GUIDE_START={}\nset -- --append-system-prompt \"${{KASATERM_PERSONA}}\n${{KASA_GUIDE_START}}\" \"$@\"\nfi\n",
+        shell_quote_path(kasa_socket::guidance::START),
     );
     // 학생별 실행 통로(`KASATERM_BACKEND`) — kimi·glm 처럼 claude 를 감싸 게이트웨이로
     // 보내는 런처다. 이 줄이 persona 블록의 **맨 앞**인 것이 설계의 핵심이다: 런처는
