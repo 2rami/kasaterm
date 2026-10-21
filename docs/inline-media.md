@@ -52,3 +52,5 @@ PC·폰의 네이티브 플레이어는 그 기기의 `127.0.0.1` 임의 포트�
 `docs/verify-app.md`의 격리 앱 환경에 미디어 캐시 경로도 따로 지정한다. 무음 오디오·색이 바뀌는 짧은 영상·회전 영상으로 카드, 재생 진행, 일시정지, 탐색, 종료, 방향을 검사한다. 원격은 느린 원본을 둬 전체 전송 전 첫 재생·첫 프레임을 확인하고, 끝부분 탐색 때 요청 범위가 바뀌는지 기록한다. 32MiB를 넘는 파일, 후미 메타데이터·긴 GOP, 멈춘 채 탐색, 같은 크기의 원본 변조, 연결 끊김, 닫은 뒤 요청 중단, 새 전체 파일 캐시가 생기지 않는 것, 게스트·무인증 거절을 포함한다. 사용자 세션이나 운영 앱을 재시작하지 않는다.
 
 네이티브 재생기는 `cargo run -p kasaterm --example media_player_check`의 `stream:` 검사로 느린 Range 원본·후미 메타데이터·음성·탐색·중단 후 회복을 확인한다. `stream-trace`와 `stream-buffer`는 실제 요청 구간과 받은 양을 기록한다. 폰은 `dart run tool/inline_media_fixture_server.dart 8791 150 long.mp4`와 `flutter drive`의 `--dart-define=KASA_MEDIA_LONG=true`로 느린 원본을 사용한다.
+
+폰 복귀 검증은 `--dart-define=KASA_MEDIA_BACKGROUND=true`를 더하고 `integration_test/inline_media_test.dart` 머리말대로 `simctl`로 앱을 실제 배경에 보냈다 돌아온다. 듣기 소켓 거둠을 주입한 뒤 준비 표시가 걷히는 시점의 위치·재생 상태를 검사한다. 이 검증은 실제 기기에서 iOS가 소켓을 거두는 조건까지 재현한 것은 아니다.
