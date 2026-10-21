@@ -1,6 +1,6 @@
 //! 거울 칸이 무엇이고 무엇으로 보이나 — 한 곳의 판정. 정본 규칙은 `docs/mirror-render.md`.
 //!
-//! PC 거울은 원본 TUI 격자로 시작한다. 대화·명령 묶음은 사람이 골랐을 때만 다시 짓는다.
+//! PC 거울은 원본 TUI 격자로 시작한다. 대화 보기는 사람이 골랐을 때만 다시 짓는다(셸은 늘 원본 격자).
 //! 원본 격자를 보는 칸은 뷰어 크기로 원본 PTY 를 잡고, 안 보거나 재구성 보기를 켜면 놓는다.
 use super::*;
 use std::collections::HashSet;
@@ -9,10 +9,7 @@ use std::collections::HashSet;
 pub(crate) enum MirrorKind {
     /// Claude·코덱스 — 대화 보기를 선택할 수 있다.
     Chat,
-    /// 셸 — OSC 133 명령 묶음(`shell_view`). 셸 통합이 없거나 전체 화면 프로그램에 들어간 동안은
-    /// 원본 격자를 보이고, 그동안 원본 크기를 이 칸으로 잡는다.
-    Shell,
-    /// 원본 격자 그대로(명령 묶음을 모르는 옛 원본·판정 모름).
+    /// 원본 격자 그대로 — 셸·전체 화면 프로그램·판정 모름.
     Grid,
 }
 
@@ -25,10 +22,9 @@ pub(crate) struct MirrorViews {
     hold: crate::mirror_follow::ViewHold,
 }
 
-fn needs_source(kind: MirrorKind, chat: bool, blocks: bool, known: bool) -> bool {
+fn needs_source(kind: MirrorKind, chat: bool, known: bool) -> bool {
     match kind {
         MirrorKind::Chat => !chat,
-        MirrorKind::Shell => !blocks,
         MirrorKind::Grid => known,
     }
 }
@@ -41,20 +37,13 @@ impl App {
         }
         match kasa_mcp::remote::cached_agent_running(surface) {
             Some(true) => MirrorKind::Chat,
-            Some(false) if !self.shell_view.unsupported(surface) => MirrorKind::Shell,
             _ => MirrorKind::Grid,
         }
     }
 
     /// 이 거울을 다시 그릴 수 없나 — 그럴 때만 보는 동안 원본 격자를 이 칸 크기로 잡는다.
-    pub(crate) fn mirror_needs_source(&self, ws: &Workspace, id: &str, tab: &str) -> bool {
-        let alt = ws.panes.get(id).and_then(|p| p.term()).is_some_and(|t| t.alt_screen);
-        needs_source(
-            self.mirror_kind(tab),
-            self.chat_view_on(id),
-            self.shell_view_on(id) && !alt && !self.shell_view_lacks_integration(id),
-            kasa_mcp::remote::cached_agent_running(tab).is_some(),
-        )
+    pub(crate) fn mirror_needs_source(&self, id: &str, tab: &str) -> bool {
+        needs_source(self.mirror_kind(tab), self.chat_view_on(id), kasa_mcp::remote::cached_agent_running(tab).is_some())
     }
 
     /// 원본 TUI를 보는 거울만 뷰어 크기를 빌려야 원본 앱이 그 폭으로 다시 그린다.
@@ -74,7 +63,7 @@ impl App {
                 if !kasa_mcp::remote::is_view_pane(&tab) {
                     continue;
                 }
-                if self.mirror_needs_source(&ws, id, &tab) {
+                if self.mirror_needs_source(id, &tab) {
                     want.insert(tab.clone());
                 }
                 seen.insert(tab);
@@ -92,12 +81,11 @@ mod tests {
 
     #[test]
     fn terminal_mirrors_take_source_size_until_a_reconstructed_view_is_chosen() {
-        for kind in [MirrorKind::Chat, MirrorKind::Shell, MirrorKind::Grid] {
-            assert!(needs_source(kind, false, false, true));
+        for kind in [MirrorKind::Chat, MirrorKind::Grid] {
+            assert!(needs_source(kind, false, true));
         }
-        assert!(!needs_source(MirrorKind::Chat, true, false, true));
-        assert!(!needs_source(MirrorKind::Shell, false, true, true));
-        assert!(needs_source(MirrorKind::Shell, true, false, true));
-        assert!(!needs_source(MirrorKind::Grid, false, false, false));
+        assert!(!needs_source(MirrorKind::Chat, true, true));
+        assert!(needs_source(MirrorKind::Grid, true, true), "셸 거울은 대화 보기를 켜도 원본 격자다");
+        assert!(!needs_source(MirrorKind::Grid, false, false));
     }
 }

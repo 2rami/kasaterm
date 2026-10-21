@@ -88,7 +88,7 @@ impl App {
             // 대화·명령 묶음은 원본 크기 없이 다시 짓는다 — docs/mirror-render.md. 입력마다 불리는 자리라
             // 판정은 ws 를 기다리지 않는다(쥐고 부른 자리면 판정을 모르는 거울처럼 다룬다).
             let needs = match self.ws.try_lock() {
-                Ok(ws) => ws.panes.keys().find(|id| ws.active_tab_pid(id) == surface).is_some_and(|id| self.mirror_needs_source(&ws, id, surface)),
+                Ok(ws) => ws.panes.keys().find(|id| ws.active_tab_pid(id) == surface).is_some_and(|id| self.mirror_needs_source(id, surface)),
                 Err(_) => false,
             };
             if needs || self.mirror_kind(surface) == crate::mirror_render::MirrorKind::Grid {

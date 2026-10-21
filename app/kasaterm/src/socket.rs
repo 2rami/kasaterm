@@ -2474,6 +2474,10 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn surface_cd(&self, surface: &str, path: &str) -> Result<()> {
+        crate::shell_cd::surface_cd(surface, path)
+    }
+
     /// 웹 pane 조종 — 웹뷰가 GUI 스레드 소유(!Send)라 위임하고 reply 채널로
     /// 결과를 기다린다(`spawn_student` 패턴). 10초 상한: eval 은 페이지 JS 가
     /// 안 돌아오면(무한루프·탭 죽음) 영영 안 오는데, 소켓 스레드를 그보다 오래

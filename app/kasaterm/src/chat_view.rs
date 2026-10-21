@@ -36,8 +36,6 @@ const ESC_TWICE: std::time::Duration = std::time::Duration::from_millis(800);
 enum AutoStep {
     /// 그 칸(없으면 초점 칸)의 대화 보기를 켜고 끈다.
     Toggle(Option<String>),
-    /// 셸 칸의 명령으로 보기 전환(`shell_view.rs`).
-    Blocks,
     OpenAll,
     /// 맨 아래에서 이만큼 줄 위로.
     Scroll(usize),
@@ -396,6 +394,21 @@ impl App {
     /// 이번 프레임에 대화로 그려진 pane 인가 — 휠·선택을 가로챌지의 판정.
     pub(crate) fn chat_view_showing(&self, id: &str) -> bool {
         self.chat_view.drawn.borrow().contains_key(id)
+    }
+
+    /// ⋮ 의 보기 전환이 이 칸에서 되나 — 되면 지금 대화로 보는 중인지. 학생 칸만 대화로 본다(셸 칸은 늘 터미널).
+    pub(crate) fn pane_view_toggle(&self, ws: &Workspace, id: &str) -> Option<bool> {
+        self.pane_can_chat(ws, id).then(|| self.chat_view_on(id))
+    }
+
+    pub(crate) fn toggle_pane_view(&mut self, id: &str) {
+        let can = {
+            let ws = self.ws.lock().unwrap();
+            self.pane_can_chat(&ws, id)
+        };
+        if can {
+            self.toggle_chat_view(id);
+        }
     }
 
     pub(crate) fn toggle_chat_view(&mut self, id: &str) {
@@ -774,7 +787,6 @@ impl App {
                     let (name, arg) = step.split_once('=').unwrap_or((step, ""));
                     let step = match name.trim() {
                         "toggle" => AutoStep::Toggle(Some(arg.trim()).filter(|a| !a.is_empty()).map(str::to_string)),
-                        "blocks" => AutoStep::Blocks,
                         "open" => AutoStep::OpenAll,
                         "scroll" => AutoStep::Scroll(arg.trim().parse().ok()?),
                         "zoom" => AutoStep::Zoom(arg.trim().parse().ok()?),
@@ -806,7 +818,6 @@ impl App {
         for step in due {
             match step {
                 AutoStep::Toggle(pane) => self.toggle_chat_view(pane.as_deref().unwrap_or(&id)),
-                AutoStep::Blocks => self.toggle_shell_view(&id),
                 AutoStep::OpenAll => {
                     if let Some(pane) = self.chat_view.panes.get_mut(&id) {
                         let n = pane.feed.lock().map(|f| f.conv.items.len()).unwrap_or(0);

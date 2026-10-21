@@ -82,7 +82,8 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
    같고, 창 서버를 안 거쳐 사람 화면의 초점은 안 뺏는다. `x,y`·`text:` 는 `window_event` 를 직접 불러 그 단계를 건너뛴다.
    `opt:<글>`·`shift:<글>` 은 그 수정키를 쥔 `native:`, `drag:<글>><글>` 은 앞 글에서 눌러 뒷 글까지 끌고 뗀다(뒷 글이
    `top`·`bottom` 이면 대화 칸 본문 밖으로 끌어 0.9초 쥔다). 대화로 보는 칸은 원본 격자가 아니라 그 보기가 그린 격자에서 찾는다.
-   글 대신 `@x,y`(논리 좌표)를 쓰면 그 자리에서 잡거나 놓는다(사이드바 방 카드에 놓기). `handle:%N` 은 그 칸의 ⋮ 손잡이라
+   글 대신 `@x,y`(논리 좌표)를 쓰면 그 자리에서 잡거나 놓는다(사이드바 방 카드에 놓기). `native:@x,y` 도 같아서, 올려야 생기는
+   단추(파일트리 폴더 줄의 「셸을 이 폴더로」)를 사람 손처럼 옮겨 누른다. `handle:%N` 은 그 칸의 ⋮ 손잡이라
    머리 없는 칸을 통째로 끈다(`drag:handle:%1>@700,600`).
    **키**는 `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"`(앱 시작 기준 ms, `shift`·`ctrl`·`alt`·`cmd` +
    `left`·`right`·`up`·`down`·`home`·`end`·`backspace`·`enter`·`esc`·글자) — 같은 AppKit 길로 `forward_key` 까지 탄다.

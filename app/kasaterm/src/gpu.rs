@@ -1115,22 +1115,6 @@ impl GpuRenderer {
         self.rect(x, y - size * 0.1, w.max(1.0), size * 1.22, col);
     }
 
-    /// 대화 보기의 코드 글자 — 마크다운 렌더와 같은 고정폭 얼굴(한글만 고딕). 줄 바꿈은
-    /// 부르는 쪽이 이미 했다.
-    pub(crate) fn draw_code_text(&mut self, x: f32, y: f32, text: &str, size: f32, color: [u8; 4]) {
-        self.md_draw_word(text, x, y, size, color, false, false, 0, true);
-    }
-
-    /// `draw_code_text` 가 차지할 폭 — 고정폭 글꼴이라 `measure_chrome_text` 로 재면 좁게 나온다.
-    pub(crate) fn measure_code_text(&mut self, text: &str, size: f32) -> f32 {
-        self.measure_run(text, size, false, false, true, true)
-    }
-
-    /// 터미널 격자 글꼴 크기(논리 px) — `cell_w`·`cell_h` 와 짝이다.
-    pub(crate) fn term_font_size(&self) -> f32 {
-        self.grid.font_size_px as f32 * self.grid.zoom / self.grid.scale
-    }
-
     fn md_runs(
         &mut self,
         spans: &[crate::MdSpan],

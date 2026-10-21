@@ -119,11 +119,12 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('빈 셸은 시작 칩을 누르면 바로 친다', (tester) async {
-    final (ran, _) = await _pumpChips(tester, const []);
+  testWidgets('빈 셸의 시작 칩은 입력칸에 채우기만 한다', (tester) async {
+    final (ran, drafted) = await _pumpChips(tester, const []);
     expect(find.text('git status'), findsNothing, reason: '저장소 밖이면 git 칩이 없다');
     await tester.tap(find.text('claude'));
-    expect(ran, ['claude']);
+    expect(drafted, ['claude']);
+    expect(ran, isEmpty, reason: 'Enter 는 사람이 친다');
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -137,7 +138,7 @@ void main() {
     expect(parentDir('/'), isNull);
   });
 
-  testWidgets('빈 셸 트리 — 폴더는 cd, 화살표는 펼치기, git 표시', (tester) async {
+  testWidgets('폴더 줄을 누르면 트리 시트 — 폴더는 cd, 화살표는 펼치기, git 표시', (tester) async {
     final asked = <String>[];
     final server = Server(
       Uri.parse('http://127.0.0.1:1/'),
@@ -176,17 +177,21 @@ void main() {
             session: session,
             onTerminal: () {},
             onCommand: (c) async => ran.add(c),
+            onDraft: (_) {},
           ),
         ),
       ),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
+    expect(asked, isEmpty, reason: '트리는 열 때만 받는다');
+    expect(find.text('claude'), findsOneWidget, reason: '시작 칩은 입력칸 위 추천 줄에 있다');
+    await tester.tap(find.byIcon(Icons.keyboard_arrow_up));
+    await tester.pumpAndSettle();
     expect(asked, ['/w git=1']);
     expect(find.text('a.md'), findsOneWidget);
     expect(find.text('M'), findsOneWidget);
     expect(find.text('•'), findsOneWidget);
-    expect(find.text('claude'), findsOneWidget, reason: '시작 칩은 트리 위에 남는다');
     await tester.tap(find.byIcon(Icons.chevron_right).first);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));

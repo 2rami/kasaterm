@@ -114,6 +114,28 @@ fn term_tree_list(q: &std::collections::HashMap<String, String>) -> serde_json::
     serde_json::json!({ "ok": true, "path": path, "entries": entries })
 }
 
+/// `POST /term/cd {pane, path}` — 다른 기기의 파일트리가 이 기기 셸을 그 폴더로 옮겨 달라고 한다.
+/// 셸이 노는지는 여기서만 안다(프로세스 표) — 도는 프로그램이 있으면 까닭을 답하고 안 친다.
+async fn term_cd_post(backend: Arc<dyn Backend>, req: axum::extract::Request) -> axum::response::Response {
+    if let Some(denied) = guest_denied(&req) {
+        return denied;
+    }
+    let fail = |m: &str| Json(serde_json::json!({ "ok": false, "error": m })).into_response();
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else {
+        return fail("본문을 못 읽어요");
+    };
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let (Some(pane), Some(path)) = (v.get("pane").and_then(|p| p.as_str()), v.get("path").and_then(|p| p.as_str())) else {
+        return fail("`pane` 과 `path` 가 필요해요");
+    };
+    let (pane, path) = (pane.to_string(), path.to_string());
+    match tokio::task::spawn_blocking(move || backend.surface_cd(&pane, &path)).await {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Err(e)) => fail(&e.to_string()),
+        Err(_) => fail("셸을 옮기지 못했어요"),
+    }
+}
+
 /// 파일 링크를 원본 기기에서 읽는다. 폰 미리보기와 PC가 같은 32MB 한도를 쓴다.
 async fn term_file_get(
     q: Query<std::collections::HashMap<String, String>>,
@@ -327,7 +349,9 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let gitcol_backend = backend.clone();
     let gitcol_wait_backend = backend.clone();
     let clip_backend = backend.clone();
+    let cd_backend = backend.clone();
     axum::Router::new()
+        .route("/term/cd", post(move |req| term_cd_post(cd_backend.clone(), req)))
         .route("/term/changes", get(term_changes_handler))
         .route("/term/gitop", post(term_gitop_post))
         .route(

@@ -14,8 +14,13 @@ pub(super) struct Frame<'a> {
     pub quick: &'a [(String, Option<std::path::PathBuf>, &'static str)],
     pub active_file: Option<&'a std::path::Path>,
     pub cwd: Option<&'a std::path::Path>,
+    /// 지금 칸 셸의 윗 폴더 — 있으면 트리 위에 「..」 줄을 고정한다(셸 칸일 때만).
+    pub up: Option<&'a std::path::Path>,
     pub git_badges: &'a std::sync::Mutex<HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge>>,
 }
+
+/// 폴더 줄 끝 「셸을 이 폴더로」 단추 한 변.
+const CD_BTN: f32 = 20.0;
 
 pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f: &Frame<'_>) {
     let (tree_col_x, tree_col_w, tree_col_bg) = (f.x, f.w, f.bg);
@@ -263,6 +268,26 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
         19.0 + quick.len() as f32 * item_h + 11.0
     };
     tree_top += quick_h;
+    // 「..」 — 셸을 윗 폴더로(뒤로 가기). 뿌리는 저장소 최상위에 묶여 있어 트리만으로는 위로 못 간다.
+    tree.up_rect = None;
+    if let Some(up) = f.up {
+        let r = (row_x, tree_top, row_w, item_h);
+        let on = f.cursor.0 >= r.0 && f.cursor.0 < r.0 + r.2 && f.cursor.1 >= r.1 && f.cursor.1 < r.1 + r.3;
+        if on {
+            hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
+        }
+        let ink = if on { theme::text() } else { theme::text_dim() };
+        g.queue_icon("arrow-up", row_x + 18.0, tree_top + (item_h - 16.0) / 2.0, 16.0, ink);
+        let tx = row_x + 42.0;
+        g.draw_text(tx, tree_top + (item_h - 13.0) / 2.0, "..", gpu::DrawOpts { font_size: 13.0, color: ink, bold: false, italic: false });
+        let name = up.file_name().map_or_else(|| up.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+        let nx = tx + g.measure_chrome_text("..", 13.0, false) + 8.0;
+        let name = crate::info::fit_text(g, &name, (row_x + row_w - 4.0 - nx).max(0.0), 11.5, false);
+        g.draw_text(nx, tree_top + (item_h - 11.5) / 2.0, &name, gpu::DrawOpts { font_size: 11.5, color: theme::text_mute(), bold: false, italic: false });
+        g.hover_pointer |= on;
+        tree.up_rect = Some((up.to_path_buf(), r));
+        tree_top += item_h;
+    }
     let start_y = tree_top;
     // 본문 geometry 를 스크롤 처리에 넘겨주기 위해 저장: start_y 는 검색박스
     // + 빠른파일 섹션(항목 수만큼 동적) 아래 첫 행 y, visible_h 는 상태줄을
@@ -281,6 +306,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
         Density::Icon => 7.0,
     };
     let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
+    let mut cd_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
     // `file_tree_nodes` already holds the right set: a query swaps it
     // for whole-tree search hits (file_tree_search_collect), empty
     // restores the expanded tree. So just render it as-is.
@@ -543,7 +569,10 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
         // straight into the terminal grid.
         // 배지 자리를 먼저 떼어 둔다 — 안 그러면 긴 이름이 배지 밑을
         // 파고들어 글자와 마커가 겹친다.
-        let badge_w = if git_mark.is_some() { 13.0 } else { 0.0 };
+        // 폴더에 올리면 줄 끝 배지 자리에 「셸을 이 폴더로」 단추 — 지금 칸 셸이 그리로 cd 한다(놀고 있을 때만).
+        let cd_btn = (node.is_dir && hovered && tree.rename.is_none())
+            .then(|| (row_x + row_w - 2.0 - CD_BTN, y + (item_h - CD_BTN) / 2.0, CD_BTN, CD_BTN));
+        let badge_w = if cd_btn.is_some() { CD_BTN + 2.0 } else if git_mark.is_some() { 13.0 } else { 0.0 };
         let avail = (row_x + row_w - text_x - 4.0 - badge_w).max(0.0);
         let label = if g.measure_chrome_text(&node.name, font, false) <= avail {
             node.name.clone()
@@ -620,11 +649,23 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
                     italic: node.ignored,
                 },
             );
+            if let Some(b) = cd_btn {
+                let on = f.cursor.0 >= b.0 && f.cursor.0 < b.0 + b.2 && f.cursor.1 >= b.1 && f.cursor.1 < b.1 + b.3;
+                if on {
+                    hover_rect(g, b.0, b.1, b.2, b.3, theme::radius_sm());
+                }
+                let isz = 14.0_f32;
+                g.queue_icon("terminal", b.0 + (b.2 - isz) / 2.0, b.1 + (b.3 - isz) / 2.0, isz, if on { theme::text() } else { theme::text_dim() });
+                g.hover_pointer |= on;
+                if let Some(hr) = g.clip_hit(b) {
+                    cd_rects.push((node.path.clone(), hr));
+                }
+            }
             // 행 오른쪽 끝 상태 배지. 파일은 글자(M/A/U)로 무엇이
             // 바뀌었는지까지 말하고, 폴더는 점 하나 — 폴더의 글자는
             // 자손 여럿을 하나로 뭉친 것이라 "M" 이라 쓰면 그 폴더가
             // 수정됐다는 오해를 준다. 점은 "안에 뭔가 있다"만 말한다.
-            if let Some(m) = git_mark {
+            if let Some(m) = git_mark.filter(|_| cd_btn.is_none()) {
                 let c = mark_color(m);
                 if node.is_dir {
                     let d = 6.0_f32;
@@ -664,6 +705,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
     }
     g.pop_clip();
     tree.rects = rects;
+    tree.cd_rects = cd_rects;
 
     // Overflow affordances: a soft fade at whichever edge still has
     // hidden rows, plus a hover-only scrollbar thumb. The viewport
@@ -754,6 +796,10 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, tree: &mut state::FileTreeState, f
         // 앱 이름은 받침 판정이 안 서고, "Finder에서 보기"와도
         // 어울린다.
         let mut items: Vec<(crate::FtMenuAction, String, bool, bool)> = Vec::new();
+        let one_dir = sel_n == 1 && tree.selected.as_deref().is_some_and(|p| tree.nodes.iter().any(|n| n.is_dir && n.path == p));
+        if one_dir {
+            items.push((crate::FtMenuAction::CdHere, "셸을 이 폴더로".to_string(), false, false));
+        }
         for (i, (name, _)) in crate::proc::open_with_apps().iter().enumerate() {
             items.push((
                 crate::FtMenuAction::OpenWith(i),

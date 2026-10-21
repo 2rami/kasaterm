@@ -109,7 +109,7 @@ mod sidebar_pulse;
 mod mirror_theme;
 mod mirror_view;
 mod mirror_render;
-mod shell_view;
+mod shell_cd;
 mod mirror_follow;
 mod mirror_focus_probe;
 mod character_assignment;
@@ -4476,6 +4476,8 @@ enum FtMenuAction {
     OpenWith(usize),
     /// OS 기본 연결 프로그램으로 열기.
     OpenDefault,
+    /// 지금 칸 셸을 고른 폴더로 옮긴다(놀고 있을 때만). 폴더 하나를 골랐을 때만 뜬다.
+    CdHere,
 }
 
 /// 사이드바 pane 행 우클릭 메뉴 항목.
@@ -6151,8 +6153,6 @@ struct App {
     web_find: Option<WebAddrEdit>,
     /// pane 마다 기억하는 대화 보기 — chat_view.rs.
     chat_view: crate::chat_view::ChatViews,
-    /// 거울 셸 칸의 명령 묶음 보기(`shell_view.rs`).
-    shell_view: crate::shell_view::ShellViews,
     /// 세션 복원이 앉힌 웹 pane 의 자식 창 대기열 `(host_id, url)` — 복원
     /// 경로엔 ActiveEventLoop 가 없어 창을 못 만든다. about_to_wait 가 다음
     /// 턴에 걷어 spawn_web_host 로 실물을 만든다.
@@ -6598,7 +6598,6 @@ impl App {
             web_addr: None,
             web_find: None,
             chat_view: Default::default(),
-            shell_view: Default::default(),
             pending_web_hosts: Vec::new(),
             themegen: Default::default(),
             mirror_sync: Default::default(),

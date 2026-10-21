@@ -3877,7 +3877,12 @@ impl App {
                 .into_iter()
                 .find_map(|(tag, flags)| point.strip_prefix(tag).map(|text| (text, flags)));
             if let Some((text, flags)) = held {
-                let Some((x, y)) = self.autoclick_text_px(text) else {
+                // `@x,y`(논리 좌표)는 격자 글 대신 그 자리 — 사이드바·파일트리처럼 칸 밖에 그린 것.
+                let spot = text
+                    .strip_prefix('@')
+                    .and_then(|s| s.split_once(','))
+                    .and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)));
+                let Some((x, y)) = spot.or_else(|| self.autoclick_text_px(text)) else {
                     eprintln!("[autoclicks] {i}: {text:?} 못 찾음");
                     return;
                 };

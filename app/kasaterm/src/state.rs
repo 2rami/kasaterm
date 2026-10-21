@@ -831,9 +831,9 @@ pub(crate) struct InfoState {
     /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
     pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
     pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
-    /// 메뉴를 연 pane 의 보기 전환 `Some((셸 칸인가, 켜졌나))` — 학생은 대화, 셸은 명령 묶음.
-    /// 전환할 것이 없으면 None. 그리는 쪽이 App 을 못 보므로 여는 자리에서 적어 둔다.
-    pub(crate) pane_menu_chat: Option<(bool, bool)>,
+    /// 메뉴를 연 pane 의 대화 보기 전환 `Some(켜졌나)` — 학생 칸만. 셸 칸이면 None.
+    /// 그리는 쪽이 App 을 못 보므로 여는 자리에서 적어 둔다.
+    pub(crate) pane_menu_chat: Option<bool>,
     /// Device heading hit rect: click collapses, right-click opens its menu.
     pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) machine_collapsed: std::collections::HashSet<String>,
@@ -964,6 +964,10 @@ pub(crate) struct FileTreeState {
     pub(crate) hover: Option<std::path::PathBuf>,
     pub(crate) scroll: f32,
     pub(crate) rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    /// 트리 위 「..」 줄 — (셸을 옮길 윗 폴더, 자리). 셸 칸이 아니면 None. 매 paint 재생성.
+    pub(crate) up_rect: Option<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    /// 올린 폴더 줄의 「셸을 이 폴더로」 단추 — 줄 누름보다 먼저 본다. 매 paint 재생성.
+    pub(crate) cd_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
     /// "빠른 파일" 고정 섹션(트리 최상단)의 행 hit rect: (파일 경로, 논리 rect).
     /// 개인/프로젝트 CLAUDE.md·프로젝트 MEMORY.md 로의 원클릭. 스크롤과 무관하게
     /// 고정 위치라 별도 벡터로 둔다(스크롤하는 `rects` 와 분리). 매 paint 재생성.

@@ -1360,6 +1360,11 @@ impl App {
         use crate::FtMenuAction as A;
         let target = self.file_tree.selected.clone();
         match action {
+            A::CdHere => {
+                if let Some(dir) = target {
+                    self.cd_active_shell(&dir);
+                }
+            }
             A::NewFile | A::NewFolder => {
                 // Folder → inside it; file → its parent; nothing → tree root.
                 let parent = target.as_ref().and_then(|p| {

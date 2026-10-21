@@ -423,7 +423,7 @@ class DismissKeyboard extends StatelessWidget {
 /// 워프의 입력칸 위 맥락 — 지금 폴더와 브랜치. 프롬프트 대신 여기서 어디인지 말한다.
 /// 셸의 명령 쪽과 학생의 대화 쪽이 같은 줄을 쓴다.
 class PlaceLine extends StatelessWidget {
-  const PlaceLine({super.key, required this.cwd, this.branch, required this.style});
+  const PlaceLine({super.key, required this.cwd, this.branch, required this.style, this.onTap});
 
   final String cwd;
   final String? branch;
@@ -431,8 +431,32 @@ class PlaceLine extends StatelessWidget {
   /// 글자색까지 — 셸은 판 글자색 40% 흐림, 대화는 테마의 흐린 글자.
   final TextStyle style;
 
+  /// 있으면 줄 전체가 단추다(셸: 파일 트리 시트) — 높이 [Look.tap], 끝에 펼침 화살표.
+  final VoidCallback? onTap;
+
   @override
-  Widget build(BuildContext context) => Padding(
+  Widget build(BuildContext context) {
+    final line = _line();
+    final tap = onTap;
+    if (tap == null) return line;
+    return InkWell(
+      onTap: tap,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: Look.tap),
+        child: Row(
+          children: [
+            Expanded(child: line),
+            Padding(
+              padding: const EdgeInsets.only(right: Look.pagePad),
+              child: Icon(Icons.keyboard_arrow_up, size: 16, color: style.color),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _line() => Padding(
     padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.pagePad, 6),
     child: Row(
       children: [
