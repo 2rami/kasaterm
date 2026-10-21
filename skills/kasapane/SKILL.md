@@ -11,7 +11,7 @@ description: 카사텀의 학생 협업, 칸 조작, 긴 잡, 미디어 결과�
 |---|---|---|
 | 학생에게 일을 맡기거나 보고·쪽지 전달 | `kasaterm-cli guide collab` | [협업](collab.md) |
 | 칸·방 조회, 만들기, 이름·배치·닫기 | `kasaterm-cli guide panes` | [칸 조작](references/panes.md) |
-| 빌드·검사·서버 등 긴 잡 실행 | `kasaterm-cli guide jobs` | [긴 잡](references/jobs.md) |
+| 오래 실행되는 빌드·시험·서버 | `kasaterm-cli guide jobs` | [긴 잡](references/jobs.md) |
 | 완성한 이미지·음성·영상 전달 | `kasaterm-cli guide media` | [결과물](references/media.md) |
 | 다른 기기로 세션 옮기기 | `kasaterm-cli guide transfer` | [이사](references/transfer.md) |
 | 카사텀 자체의 코드·화면 수정 | `kasaterm-cli guide develop` | [개발](references/develop.md) |

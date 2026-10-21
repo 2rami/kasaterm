@@ -1,42 +1,30 @@
-# kasaterm 협업 hook (정본)
+# 카사텀 협업 훅
 
-pane 간 협업(누가 뭘 하는지·충돌차단·분담·메시지)을 굴리는 Claude Code hook들의 **정본 소스**. 배포·등록이 따로 없다 — kasaterm 이 pane 을 스폰할 때 PATH 맨 앞에 `claude` 래퍼를 얹고(`install_claude_hook_shim`, main.rs), 래퍼가 `--settings <shim>/claude-hooks-settings.json` 으로 이 디렉터리의 hook 들을 **세션 스코프**로 주입한다. `~/.claude/settings.json`·`~/.claude/hooks` 는 건드리지 않는다(munder --settings 패턴). pane 밖 claude 는 무영향.
+훅 구현·등록·상태 연동을 고칠 때 읽는다. 사용 절차는 `kasaterm-cli guide collab`로 필요한 때 조회한다.
 
-hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` → `.app` 번들 `Contents/Resources/collab-hooks`(build-app.sh 가 복사) → 레포 소스(cargo run). 레포에서 고치면 dev 는 즉시, .app 은 재빌드 시 반영.
+PC 앱은 `pane_shims/claude.rs`에서 세션 전용 `--settings`를 만든다. 전역 Claude 설정은 변경하지 않는다.
+훅 경로는 앱 번들의 Resources(Windows는 exe 옆) → 개발 실행의 `KASATERM_COLLAB_HOOKS_DIR` → 저장소 소스 순이다. 설치본은 함께 배포한 훅을 사용한다.
+GUI 없는 호스트는 `crates/kasa-collab/src/hooks.rs`에서 별도로 구성하므로 적용 범위를 구분한다.
 
-협업 인프라는 `app/kasaterm/src/socket.rs`, `crates/kasa-socket`, `crates/kasa-mcp`에 있다. 로컬 자료 수집과 기기별 관측을 공통 snapshot·changes·inspect 계약으로 제공하며, CLI·HTTP·네이티브 화면이 같은 계약을 사용한다.
-
-## 주입되는 hook (claude-hooks-settings.json — main.rs hookSettings 가 생성)
-
-| 파일 | 이벤트 | 역할 |
-|---|---|---|
-| `kasaterm-bind-transcript.sh` | SessionStart/PreToolUse | claude transcript 경로 등록(**board 데이터 소스**) + agent-roster 영속 기록(재시작 후 `claude --resume` 복원용) |
-| `kasaterm-conflict-guard.py` | PreToolUse(Edit/Write/MultiEdit) | 같은 파일 동시편집 차단 + 커밋 전까지 고친 학생이 잡기(`claims.json`, `release`·`list`) + 최신 board 주소로 담당 조율 안내 |
-| `kasaterm-subagent-guard.py` | PreToolUse(Agent) | pane 안의 범용 서브에이전트를 막고 `kasaterm-cli summon` 으로 학생을 세우게 안내(Explore·Plan·안내형은 통과, description 에 `[subagent]` 면 통과) |
-| `kasaterm-turn.sh` | UserPromptSubmit/Stop/PreCompact | 잠정 턴 경계·압축 알림. Stop 자체는 완료 알림의 근거가 아님 |
-| `kasaterm-stop-drain.sh` | 구형 Stop 설정 호환 | 턴 종료 경계만 전달. 새 설정에는 주입하지 않으며 완료 알림을 직접 보내지 않음 |
-| `kasaterm-notify-attention.sh` | Notification | 권한/입력 대기 alert |
-| `auto-imgopen.sh` | PostToolUse(SendUserFile) | 보낸 이미지 이력만 기록, 자동 창·탭 열기 없음 |
-
-## 협업 흐름
-
-사용자가 정한 범위에서 [협업 지침](../../../skills/kasapane/collab.md)을 따른다. 학생 프롬프트에는 정체성(말투)만 실리고 지침은 kasapane 스킬로 필요할 때 읽는다(2026-10-07). 완료 보고 안내는 summon·`tell --title` 이 브리프 끝에 붙인다. `board --all`로 최신 주소를 확인하고, 필요한 대상만 `activity --address`로 읽고, `tell 이름@기계 "본문"`(또는 `tell --address`)으로 전달한다 — 다른 기기의 학생도 같은 한 줄이다. 변경 추적은 `board-watch --all --json`, 전송 확인은 `tell-status`, 본인 완료 보고는 `done`을 사용한다.
-
-세부 형식과 지원 범위는 [조회 계약](../../../docs/board-collaboration.md)과 [전달 계약](../../../docs/tell-protocol.md)에 있다. 접수·입력 전달은 모델이 읽었다는 보장이 아니며, 새 API 미지원 시 구형 전송으로 우회하지 않는다.
-
-- 재시작 복구(후속 미구현): bind-transcript 가 `~/.config/kasaterm/agent-roster/<slug>.json` 에 pane↔session 을 영속 기록 → `claude --resume <uuid>` 로 세션 복원에 쓸 예정.
-
-## 보관 hook (미주입 — 필요 시 hookSettings 에 추가)
-
-| 파일 | 용도 |
+| 훅 | PC 등록 시점·역할 |
 |---|---|
-| `kasaterm-collab-hint.sh` | 수동 등록 환경을 위한 SessionStart 안내. 협업 규약은 kasapane 스킬 `collab.md` |
+| `kasaterm-bind-transcript.sh` | SessionStart: 대화·학생 신원 연동 |
+| `kasaterm-conflict-guard.py` | Edit/Write/MultiEdit 전: 동시 편집과 미커밋 파일 소유 보호 |
+| `kasaterm-subagent-guard.py` | Agent/Task 전: 학생 칸 위임 안내, 읽기 전용 탐색·명시 요청 예외 |
+| `kasaterm-build-expiry-guard.py` | Bash 전: 설치된 앱을 멈추게 하는 빌드 만료 차단 |
+| `kasaterm-closed-pane-guard.py` | 도구 호출·프롬프트 제출 전: 닫힌 칸 작업 거부 |
+| `kasaterm-agent-status.sh` | 도구 전후·Stop: 진행 상태 기록 |
+| `kasaterm-turn.sh` | 프롬프트·Stop·PreCompact: 턴·압축 경계 기록 |
+| `kasaterm-notify-attention.sh` | Notification: 승인·질문·입력 대기 알림 |
+| `auto-imgopen.sh` | SendUserFile 뒤: 이미지 전송 이력만 기록 |
+| `kasaterm-steer-hook.sh` | 도구 뒤: 남아 있는 steer 메시지 소비 |
+| `kasaterm-peer-name.py` | ListAgents 뒤·프롬프트 제출: 학생 이름 대응 |
+| `ultracode-mark.py` | 프롬프트 제출: 해당 턴의 표시 상태 |
 
-## 설계 불변식
+시작 지침에는 선택한 말투와 짧은 주제 안내만 들어간다. 전체 협업 규약을 매번 붙이지 않는다. 새 작업 브리프는 시작 안내와 done 한 줄을 덧붙인다.
+`kasaterm-collab-hint.sh`는 수동 등록된 구형 환경을 위해 짧은 안내만 유지하며 기본 등록에는 없다. `kasaterm-stop-drain.sh`도 구형 Stop 호환용이다.
 
-- **관측과 작업 수명 구분** — 기기 연결 끊김·오래된 관측을 작업 종료로 읽지 않는다. 상세 활동은 지정한 대상에서 제한된 분량만 읽는다.
-- **추적과 전달 구분** — 변경 기록은 제한된 메타데이터만 보관한다. 메시지는 최신 수신자 신원과 입력 상태를 검증하며, 같은 ID의 재시도는 기존 접수 기록을 반환한다.
-- **개인 설정 무오염** — hook 은 `--settings` 세션 스코프로만 주입. `~/.claude` 에 아무것도 설치하지 않는다.
-- **칸 훅은 칸의 하네스 것** — 칸의 claude 가 Bash 로 돌린 `claude -p` 도 칸 env(`KASATERM_PANE_ID`)를 물려받는다. 래퍼는 `-p`·`--print` 에 이 hook 들을 안 붙이고, 앱은 칸 셸까지 하네스가 둘 이상 낀 프로세스의 `bind-transcript` 를 거절한다. 받아 주면 칸의 대화가 그 자식 세션으로 바뀌어 tell 이 「bound conversation differs」로 막히고 재시작 복원이 자식 세션을 연다.
-- **`conflict-guard` 는 transcript 직접판정** — `~/.claude/projects/<cwd>/*.jsonl` 직접 읽어 PreToolUse 동기 차단. 백엔드 무관하게 살아있는 안전망.
-- **잡기는 git 과 보드로 푼다** — 편집을 허락할 때 `claims.json` 에 세션을 적고, 그 파일이 git 에서 더럽고 · 잡은 뒤 커밋이 없고 · 잡은 세션이 `board --local` 에 살아 있을 때만 막는다. 셋 중 하나라도 못 가르면 연다.
+- 관측과 작업 수명을 구분한다. 끊김·idle·잠정 Stop을 완료 증거로 쓰지 않는다.
+- 대화·학생 신원은 해당 칸의 실제 하네스에 결속한다. 그 안에서 실행한 `claude -p`가 칸의 대화를 바꾸지 않게 한다.
+- 파일 잡기는 커밋·되돌리기·세션 종료로 풀며, 넘길 때 가드의 `release`를 사용한다.
+- 전송의 신원·입력 상태·영수증 규칙은 `docs/tell-protocol.md`, 조회는 `docs/board-collaboration.md`가 정본이다.

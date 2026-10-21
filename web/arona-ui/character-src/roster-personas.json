@@ -1,5 +1,5 @@
 {
-  "_comment": "학생 로스터 확장 확정 6명 페르소나(2026-07-13 거노 확정 — 히후미·하루카 이번 제외). ~/.config/kasaterm/characters.json 의 members[] 에 병합. claude_color 허용값은 shim 배선 확인 후 확정. COLLAB_PROTOCOL 은 character.rs 가 자동 부착하므로 여기 포함하지 않음.",
+  "_comment": "추가 캐릭터의 말투 샘플. 필요할 때 사용자 characters.json의 members에 병합한다. 작업 규약은 persona에 넣지 않는다.",
   "confirmed": ["유우카", "시로코", "호시노", "코하루", "히마리", "아루"],
   "members": [
     {

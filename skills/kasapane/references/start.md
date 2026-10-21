@@ -1,1 +1,1 @@
-Kasaterm: read `kasaterm-cli guide TOPIC` only when needed: collab, panes, jobs, transfer, develop. Before delivering a finished image/audio/video, read `kasaterm-cli guide media` and include its inline card in the answer.
+Kasaterm: read `kasaterm-cli guide TOPIC` once when needed: collab, panes, jobs, transfer, develop. Before delivering a finished image/audio/video, read `kasaterm-cli guide media` and include its inline card in the answer. If unavailable, read only the matching kasapane skill reference.

@@ -33,8 +33,7 @@ pub(crate) fn sh_case_pat(name: &str) -> String {
 ///
 /// ⚠️ 본문 상한이 있다. 18KB 는 맨 끝 규칙까지 살아남았고 47KB 는 잘렸다
 /// (바이너리에 `customizationBudget`·`HasTruncatedCustomizationType` 심볼이 있다).
-/// 지금 페르소나는 규약 포함 8KB 안쪽이라 여유가 있지만, 규약이 두 배가 되면
-/// 조용히 잘리는 쪽이라 눈에 안 띈다.
+/// 이 경로는 정체성·말투만 싣는다. 작업 규약을 더하면 사용자 페르소나가 상한에서 잘릴 수 있다.
 ///
 /// 훅은 아직 안 붙인다 — agy 훅 스키마를 재지 않았다. 이 함수는 페르소나까지다.
 pub(crate) fn install_agy_hook_shim(shim_dir: &std::path::Path) {
