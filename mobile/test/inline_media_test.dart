@@ -253,7 +253,7 @@ void main() {
       return b;
     }
 
-    test('구간 꼴을 읽는다 — 하나만, 파일 안만', () {
+    test('구간 꼴을 읽는다 — 파일 밖 단일 구간만 416, 못 읽는 꼴은 무시', () {
       expect(byteRange('bytes=0-1', 100), (0, 1));
       expect(byteRange('bytes=10-', 100), (10, 99));
       expect(byteRange('bytes=90-500', 100), (90, 99));
@@ -261,16 +261,17 @@ void main() {
       expect(byteRange('bytes=-300', 100), (0, 99));
       expect(byteRange('BYTES=2-3', 100), (2, 3), reason: '단위는 대소문자를 안 가린다');
       expect(byteRange('Bytes=-1', 100), (99, 99));
-      for (final bad in [
-        'bytes=100-',
+      for (final outside in ['bytes=100-', 'bytes=-0']) {
+        expect(byteRange(outside, 100), unsatisfiable, reason: outside);
+      }
+      for (final ignored in [
         'bytes=5-1',
-        'bytes=-0',
         'bytes=0-1,4-5',
         'items=0-1',
         'bytes=a-b',
         'bytes=99999999999999999999-',
       ]) {
-        expect(byteRange(bad, 100), isNull, reason: bad);
+        expect(byteRange(ignored, 100), isNull, reason: ignored);
       }
     });
 
@@ -323,40 +324,48 @@ void main() {
       expect(b.received, size);
     });
 
-    test('잘못된 구간·주소·Origin·방식은 원본에 묻지 않고 거절하고, HEAD 는 Range 를 무시한다', () async {
-      final asked = <Uri>[];
-      final b = await open(
-        MockClient((req) async {
-          asked.add(req.url);
-          return _reply(req);
-        }),
-        _audio,
-      );
-      final size = _fixtures[_audio]!.bytes.length;
-      for (final bad in ['bytes=$size-', 'bytes=5-1', 'bytes=0-1,4-5', 'x']) {
-        final r = await _get(b.uri, range: bad);
-        expect(r.status, 416, reason: bad);
-        expect(r.headers['content-range'], 'bytes */$size');
-      }
-      expect((await _get(b.uri.replace(path: '/0/media.m4a'))).status, 404);
-      expect(
-        (await _get(b.uri, headers: {'origin': 'https://evil.test'})).status,
-        403,
-      );
-      expect((await _get(b.uri, method: 'POST')).status, 405);
-      for (final range in [null, 'bytes=0-1', 'bytes=$size-']) {
-        final head = await _get(b.uri, method: 'HEAD', range: range);
-        expect(head.status, 200, reason: 'HEAD 는 Range 를 무시한다 ($range)');
-        expect(head.headers['content-length'], '$size');
-        expect(head.headers['content-type'], 'audio/mp4');
-        expect(head.headers['content-range'], isNull);
-        expect(head.body, isEmpty);
-      }
-      expect(asked, isEmpty);
-      final upper = await _get(b.uri, range: 'BYTES=0-1');
-      expect(upper.status, 206);
-      expect(upper.body, _fixtures[_audio]!.bytes.sublist(0, 2));
-    });
+    test(
+      '파일 밖 구간·주소·Origin·방식은 원본에 묻지 않고 거절하고, HEAD·못 읽는 Range 는 무시한다',
+      () async {
+        final asked = <Uri>[];
+        final b = await open(
+          MockClient((req) async {
+            asked.add(req.url);
+            return _reply(req);
+          }),
+          _audio,
+        );
+        final size = _fixtures[_audio]!.bytes.length;
+        final outside = await _get(b.uri, range: 'bytes=$size-');
+        expect(outside.status, 416);
+        expect(outside.headers['content-range'], 'bytes */$size');
+        expect((await _get(b.uri.replace(path: '/0/media.m4a'))).status, 404);
+        expect(
+          (await _get(b.uri, headers: {'origin': 'https://evil.test'})).status,
+          403,
+        );
+        expect((await _get(b.uri, method: 'POST')).status, 405);
+        for (final range in [null, 'bytes=0-1', 'bytes=$size-']) {
+          final head = await _get(b.uri, method: 'HEAD', range: range);
+          expect(head.status, 200, reason: 'HEAD 는 Range 를 무시한다 ($range)');
+          expect(head.headers['content-length'], '$size');
+          expect(head.headers['content-type'], 'audio/mp4');
+          expect(head.headers['content-range'], isNull);
+          expect(head.body, isEmpty);
+        }
+        expect(asked, isEmpty);
+        final upper = await _get(b.uri, range: 'BYTES=0-1');
+        expect(upper.status, 206);
+        expect(upper.body, _fixtures[_audio]!.bytes.sublist(0, 2));
+        // RFC 9110 §14.2 — 못 읽는 Range 는 없던 것처럼 전체를 준다.
+        for (final ignored in ['bytes=5-1', 'bytes=0-1,4-5', 'x']) {
+          final r = await _get(b.uri, range: ignored);
+          expect(r.status, 200, reason: ignored);
+          expect(r.body, _fixtures[_audio]!.bytes, reason: ignored);
+          expect(r.headers['content-range'], isNull, reason: ignored);
+        }
+      },
+    );
 
     test('원본이 거절하거나 끊기면 상태로 돌려주고 까닭을 남긴다', () async {
       var status = 404;
