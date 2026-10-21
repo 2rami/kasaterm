@@ -1193,6 +1193,9 @@ const SCROLLBACK_SAVE_MAX: usize = 500;
 /// 자동 스냅샷 주기. 강제 종료 시 잃는 최대치가 이 값이다. 짧을수록 안전하지만
 /// pane 마다 500줄을 직렬화하므로, 체감되지 않으면서 손실이 충분히 작은 값으로.
 pub(crate) const SESSION_AUTOSAVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
+/// 루프 턴마다 하던 정리(스윕·배치 알림·학생 자격)의 주기. 루프는 칸 출력마다 돌아 창이 많으면
+/// 초당 천 번을 넘는다 — 사람 눈에 안 보이는 일은 이 박자면 충분하다.
+pub(crate) const HOUSEKEEP_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Capture a pane's scrollback (history + current screen) as trimmed text
 /// lines for session restore, newest-biased: keeps the last SCROLLBACK_SAVE_MAX

@@ -459,6 +459,8 @@ struct State {
     polled: Option<Instant>,
     placed: Option<Instant>,
     version: u64,
+    /// 맞출 때 본 `prompt_nav::generation` — mod 가 화면 자리를 새로 알리면 기다리지 않고 다시 맞춘다.
+    nav: u64,
     status: Status,
     /// 새 것이 위.
     lines: Vec<Line>,
@@ -913,9 +915,10 @@ impl crate::App {
             Ok(f) => (f.version, f.loaded, f.error.clone()),
             Err(_) => return,
         };
+        let nav = crate::prompt_nav::generation();
         let stale = PROMPTS.with(|p| {
             let p = p.borrow();
-            p.version != version || p.placed.is_none_or(|t| now.duration_since(t) >= PLACE_EVERY)
+            p.version != version || p.nav != nav || p.placed.is_none_or(|t| now.duration_since(t) >= PLACE_EVERY)
         });
         if !stale {
             return;
@@ -939,6 +942,7 @@ impl crate::App {
             let mut p = p.borrow_mut();
             p.placed = Some(now);
             p.version = version;
+            p.nav = nav;
             if p.lines != lines || p.status != status {
                 p.lines = lines;
                 p.status = status;

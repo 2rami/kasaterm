@@ -93,6 +93,8 @@ impl NavOp {
 struct Cached {
     read_at: Instant,
     mtime: Option<SystemTime>,
+    /// 마지막으로 본 파일 시각 그대로 — `mtime` 은 못 읽은 판을 다시 읽으려고 비워 둘 때가 있다.
+    seen: Option<SystemTime>,
     state: Option<NavState>,
 }
 
@@ -111,6 +113,9 @@ struct Nav {
     pending: HashMap<String, Pending>,
     queued: HashMap<String, NavOp>,
     seq: u64,
+    scanned: Option<Instant>,
+    /// 읽어 둔 칸의 파일이 바뀔 때마다 오른다 — Info 가 다음 그림에서 바로 다시 맞춘다.
+    generation: u64,
 }
 
 thread_local! {
@@ -120,7 +125,13 @@ thread_local! {
         queued: HashMap::new(),
         // mod 는 이미 한 번호 이하를 버린다. 앱을 다시 켜도 거꾸로 가지 않게 시각에서 시작한다.
         seq: now_ms() as u64,
+        scanned: None,
+        generation: 0,
     });
+}
+
+pub(crate) fn generation() -> u64 {
+    NAV.with(|n| n.borrow().generation)
 }
 
 fn now_ms() -> u128 {
@@ -136,8 +147,8 @@ fn read_state(pid: &str, force: bool) -> Option<NavState> {
                 return c.state.clone();
             }
         }
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        let same = n.cache.get(pid).is_some_and(|c| c.mtime == mtime && mtime.is_some());
+        let seen = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let same = n.cache.get(pid).is_some_and(|c| c.mtime == seen && seen.is_some());
         let state = if same {
             n.cache.get(pid).and_then(|c| c.state.clone())
         } else {
@@ -148,10 +159,44 @@ fn read_state(pid: &str, force: bool) -> Option<NavState> {
                 None => None,
             }
         };
-        let mtime = if state.is_some() || mtime.is_none() { mtime } else { None };
-        n.cache.insert(pid.to_string(), Cached { read_at: Instant::now(), mtime, state: state.clone() });
+        let mtime = if state.is_some() || seen.is_none() { seen } else { None };
+        n.cache.insert(pid.to_string(), Cached { read_at: Instant::now(), mtime, seen, state: state.clone() });
         state
     })
+}
+
+/// 읽어 둔 칸의 상태 파일이 바뀌었나. 이 길은 칸 출력마다 도는 루프 턴에 있다 — 칸마다 stat 하던 것이
+/// 창 30개 앱에서 메인 스레드의 30%였다(2026-10-21). 그래서 읽기 주기로 묶는다. 바뀐 칸은 그 자리에서
+/// 다시 읽어 둔다 — 안 그러면 Info 가 안 보는 칸이 계속 「바뀜」으로 남아, 할 일이 없어도 주사율로 다시 그렸다.
+fn scan_changes() -> bool {
+    let due = NAV.with(|n| {
+        let mut n = n.borrow_mut();
+        let due = n.scanned.is_none_or(|at| at.elapsed() >= READ_EVERY);
+        if due {
+            n.scanned = Some(Instant::now());
+        }
+        due
+    });
+    if !due {
+        return false;
+    }
+    let mut changed = false;
+    let shown: Vec<String> = NAV.with(|n| n.borrow().cache.keys().cloned().collect());
+    for pid in shown {
+        let before = NAV.with(|n| n.borrow().cache.get(&pid).map(|c| c.seen));
+        let after = state_path(&pid).and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        if before == Some(after) {
+            continue;
+        }
+        if after.is_none() {
+            NAV.with(|n| n.borrow_mut().cache.remove(&pid));
+        } else {
+            read_state(&pid, true);
+        }
+        NAV.with(|n| n.borrow_mut().generation += 1);
+        changed = true;
+    }
+    changed
 }
 
 /// 이 칸(백엔드 pid)에 살아 있는 mod 가 있나 — 있으면 그 상태.
@@ -256,13 +301,7 @@ impl crate::App {
                 }
             }
         }
-        let shown: Vec<String> = NAV.with(|n| n.borrow().cache.keys().cloned().collect());
-        let mut changed = false;
-        for pid in shown {
-            let before = NAV.with(|n| n.borrow().cache.get(&pid).and_then(|c| c.mtime));
-            let after = state_path(&pid).and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-            changed |= before != after;
-        }
+        let changed = scan_changes();
         if busy || changed {
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
@@ -359,6 +398,34 @@ mod tests {
         assert!(s.usable());
         let main_screen: NavState = serde_json::from_str(r#"{"session":"abc","fullscreen":false,"total":10}"#).unwrap();
         assert!(!main_screen.usable(), "대체 화면이 아닌 claude 엔 막대를 안 그린다");
+    }
+
+    /// 한 번 바뀐 파일은 한 번만 「바뀜」이다 — Info 가 안 보는 칸이라도 다음 훑기에서 또 세면 루프가 쉬지 않는다.
+    #[test]
+    fn a_change_is_reported_once() {
+        let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+        set_dir(std::env::temp_dir().join(format!("kasaterm-nav-test-{}-{stamp}", std::process::id())));
+        let dir = DIR.get().unwrap().clone();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = format!("%scan-{stamp}");
+        let file = state_path(&pid).unwrap();
+        let rescan = || {
+            NAV.with(|n| n.borrow_mut().scanned = None);
+            scan_changes()
+        };
+        assert!(read_state(&pid, true).is_none());
+        assert!(!rescan(), "파일이 없던 그대로면 바뀐 게 아니다");
+        let gen = generation();
+        std::fs::write(&file, r#"{"session":"s","fullscreen":true,"total":3}"#).unwrap();
+        assert!(rescan());
+        assert_eq!(generation(), gen + 1);
+        assert_eq!(NAV.with(|n| n.borrow().cache.get(&pid).and_then(|c| c.state.clone()).map(|s| s.total)), Some(3), "바뀐 칸은 그 자리에서 다시 읽는다");
+        assert!(!rescan(), "읽어 둔 뒤로는 그대로다");
+        assert!(!scan_changes(), "주기 안에서는 훑지 않는다");
+        std::fs::remove_file(&file).unwrap();
+        assert!(rescan());
+        assert!(NAV.with(|n| !n.borrow().cache.contains_key(&pid)), "사라진 칸은 잊는다");
+        assert!(!rescan());
     }
 
     #[test]

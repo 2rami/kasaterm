@@ -7562,7 +7562,16 @@ impl ApplicationHandler<UserEvent> for App {
         self.poll_mirror_sync();
         self.keep_own_room();
         self.reopen_view_rooms();
-        self.publish_layout_feed();
+        // 방마다 트리를 복사해 지난 것과 견주는 일이다 — 칸 출력마다 할 일은 아니다.
+        {
+            thread_local! {
+                static PUBLISHED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+            }
+            if PUBLISHED.get().is_none_or(|at| at.elapsed() >= crate::HOUSEKEEP_EVERY) {
+                PUBLISHED.set(Some(Instant::now()));
+                self.publish_layout_feed();
+            }
+        }
         self.poll_layout_watch();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시

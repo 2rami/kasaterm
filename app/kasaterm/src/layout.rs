@@ -2058,12 +2058,20 @@ impl App {
             self.remove_finished_surface(&id);
             reaped = true;
         }
-        // 자원이 사라진 자리를 매 턴 훑는다. 죽음 알림(`dead_panes`)이 오지 않은
+        // 자원이 사라진 자리를 훑는다. 죽음 알림(`dead_panes`)이 오지 않은
         // 어긋남은 여기서만 잡히고, 그걸 놓치면 사용자가 손댈 수 없는 상태로 굳는다.
-        self.sweep_orphan_leaves();
-        self.sweep_rekey_cells();
-        self.sweep_lost_panes();
-        self.sweep_empty_rooms();
+        // 이 턴은 칸 출력마다 돌아 창이 많으면 초당 천 번을 넘는다 — 걷은 것이 없으면 주기로 묶는다.
+        thread_local! {
+            static SWEPT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+        }
+        let due = reaped || SWEPT.get().is_none_or(|at| at.elapsed() >= crate::HOUSEKEEP_EVERY);
+        if due {
+            SWEPT.set(Some(std::time::Instant::now()));
+            self.sweep_orphan_leaves();
+            self.sweep_rekey_cells();
+            self.sweep_lost_panes();
+            self.sweep_empty_rooms();
+        }
         // Last pane closed (e.g. user typed `exit` in the only shell): shut the
         // window so kasaterm exits cleanly the way users expect from a regular
         // terminal.

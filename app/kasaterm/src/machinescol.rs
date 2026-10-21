@@ -387,6 +387,7 @@ fn hung_screen_share_pids() -> Vec<String> {
 /// 상태가 로컬엔 없어(프로세스가 저쪽에서 돈다) 여기서 온다. 링크가 없거나 캐시에
 /// 그 pane 이 없으면 None.
 /// 하단바에 세울 기기 연결 한 줄. 명부 순서 그대로 — 끊긴 기기도 빼지 않고 센다.
+#[derive(Clone)]
 pub(crate) struct StatusLink {
     label: String,
     online: bool,
@@ -453,16 +454,28 @@ pub(crate) fn status_links_summary(links: &[StatusLink]) -> String {
     }
 }
 
-/// 다른 기기들의 연결 상태 — 끊긴 기기와 명부에서 빠져 이유만 남은 기기까지. 폴링 캐시라 읽기는 공짜다.
+/// 다른 기기들의 연결 상태 — 끊긴 기기와 명부에서 빠져 이유만 남은 기기까지.
+///
+/// 하단바가 그림마다 부른다. 명부 스냅샷은 기기마다 칸 목록까지 JSON 으로 다시 짓는 일이라 공짜가 아니다
+/// (창이 많은 앱에서 그리기 시간의 한 몫이었다, 2026-10-21) — 폴링 박자보다 잦을 까닭이 없어 잠깐 들고 있는다.
 pub(crate) fn status_links() -> Vec<StatusLink> {
-    kasa_mcp::machines::snapshot().iter()
+    const KEEP: std::time::Duration = std::time::Duration::from_millis(500);
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(std::time::Instant, Vec<StatusLink>)>> = const { std::cell::RefCell::new(None) };
+    }
+    if let Some(links) = LAST.with(|l| l.borrow().as_ref().filter(|(at, _)| at.elapsed() < KEEP).map(|(_, v)| v.clone())) {
+        return links;
+    }
+    let links: Vec<StatusLink> = kasa_mcp::machines::snapshot().iter()
         .map(|m| StatusLink {
             label: m["label"].as_str().unwrap_or("기기").to_string(),
             online: m["online"].as_bool() == Some(true),
             direct: m["online_via"].as_str() == Some("direct"),
             rtt_ms: m["rtt_ms"].as_u64(),
         })
-        .collect()
+        .collect();
+    LAST.with(|l| *l.borrow_mut() = Some((std::time::Instant::now(), links.clone())));
+    links
 }
 
 pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)> {

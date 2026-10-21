@@ -849,17 +849,24 @@ impl App {
         // 판정은 **OSC 제목** 이 먼저다. claude 는 뜨자마자 「✳ Claude Code」를
         // 보내는데, 프로세스 이름 쪽은 셸의 직계 자식을 500ms 캐시로 훑는 경로라
         // 헤드리스 실측에서 claude 가 떠 있는데도 계속 `zsh` 를 돌려줬다.
-        let seen: Vec<String> = self
-            .pty
-            .iter()
-            .filter(|(_, p)| {
-                p.osc_title()
-                    .is_some_and(|t| t.contains("Claude") || t.contains("Codex"))
-                    || p.active_agent().is_some()
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        self.pane_claude_seen.extend(seen);
+        // 훑기는 칸마다 락과 프로세스 조회라 주기로 묶고, 잊기는 id 재사용 때문에 매 턴 한다.
+        thread_local! {
+            static SCANNED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+        }
+        if SCANNED.get().is_none_or(|at| at.elapsed() >= crate::HOUSEKEEP_EVERY) {
+            SCANNED.set(Some(std::time::Instant::now()));
+            let seen: Vec<String> = self
+                .pty
+                .iter()
+                .filter(|(_, p)| {
+                    p.osc_title()
+                        .is_some_and(|t| t.contains("Claude") || t.contains("Codex"))
+                        || p.active_agent().is_some()
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            self.pane_claude_seen.extend(seen);
+        }
         self.pane_claude_seen.retain(|id| self.pty.contains_key(id));
     }
 
