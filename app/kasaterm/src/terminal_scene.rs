@@ -3,6 +3,8 @@ pub(crate) use kasa_gridview::images::{inline_slot, InlineFit, InlineSlot};
 use super::*;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
+#[path = "terminal_scene/preedit.rs"]
+mod preedit;
 
 /// Use the resolved local OR remote harness identity. A mirror has no local
 /// foreground agent process, so checking its PTY again drops student styling.
@@ -581,6 +583,7 @@ impl App {
 
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
+    pub(crate) preedit_cursor: Option<preedit::Placement>,
     pub(crate) animated_cells: bool,
     pub(crate) rows: Vec<Vec<GridCell>>,
     pub(crate) banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))>,
@@ -981,10 +984,36 @@ impl App {
             Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
             None => Vec::new(),
         };
-        let foreground = projection.as_ref().map_or_else(
-            || TuiForeground::capture(&composed),
-            |view| source_foreground.project(&composed, &view.source_map),
-        );
+        let preedit_cursor = term.filter(|t| desktop_view && t.cursor_visible
+            && ws.active_pane.as_ref() == Some(id)).and_then(|t| {
+            let owner = self.os_ime_surface.as_deref().or_else(||
+                self.ime_focus.as_ref().and_then(crate::ImeFocus::terminal_surface));
+            let composing = if owner == Some(tab_pid.as_str()) { self.preedit.as_str() } else { "" };
+            let display = match (&self.commit_overlay, pane.term()) {
+                (Some((text, before, owner)), Some(raw)) if owner == &tab_pid
+                    && *before == (raw.cursor_row, raw.cursor_col) => format!("{text}{composing}"),
+                _ => composing.to_owned(),
+            };
+            let accent = ws.pane_character.get(&tab_pid).and_then(|name|
+                theme::character_accent_n(name, theme::character_ordinal(&ws.pane_character, &tab_pid)))
+                .unwrap_or_else(theme::cursor);
+            preedit::insert(&mut composed, (t.cursor_row as usize, t.cursor_col as usize),
+                &display, theme::cursor_on_pane(accent))
+        });
+        let foreground = if let Some(placed) = &preedit_cursor {
+            let source_map = placed.source_map.iter().map(|row| row.iter().map(|at| {
+                at.and_then(|(r, c)| match &projection {
+                    Some(view) => view.source_map.get(r)?.get(c).copied().flatten(),
+                    None => Some((r, c)),
+                })
+            }).collect()).collect::<Vec<_>>();
+            source_foreground.project(&composed, &source_map)
+        } else {
+            projection.as_ref().map_or_else(
+                || TuiForeground::capture(&composed),
+                |view| source_foreground.project(&composed, &view.source_map),
+            )
+        };
         // 학생 도트·배너·스피너 같은 claude 화면 해석은 **claude 가 실제로
         // 도는 pane** 에서만 한다. 화면 모양만 보고 판정하면 남의 TUI 를
         // claude 로 오인한다 — helix 의 LSP 진행 스피너가 브라유라, 파일을
@@ -2109,6 +2138,7 @@ impl App {
         title_outline_slots.retain(|&(x, y, w, h, _)| !foreground.overlaps((x, y, w, h), (body_left, body_top), cell));
         foreground.restore(&mut composed);
         TerminalComposition {
+            preedit_cursor,
             animated_cells,
             rows: composed,
             banner_slots,

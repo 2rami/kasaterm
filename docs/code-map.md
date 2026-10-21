@@ -10,6 +10,7 @@
 - `spawn_env.rs` — 칸이 뜰 자리: 시작 cwd(`resolve_spawn_cwd`)·기본 셸·훅용 셸(`hook_shell_program`)·고를 수 있는 셸, 이 인스턴스의 소켓 경로(`resolve_kasaterm_socket_path`)와 HTTP 포트(`mcp_panel_port`)
 
 - `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지.
+- `terminal_scene/preedit.rs` — 터미널 입력칸의 조합 글자 삽입·줄 접기. 화면 사본과 원본 셀 대응표를 함께 바꿔 뒤 문장·팝업을 보존하고 조합 밑줄 범위를 반환한다.
   `render_frame_gpu` 는 그리는 **차례**를 보여 주고, 화면 구역별 패스는 자식 모듈이 그린다: `render/sidebar.rs`(방 카드·배치도/별도창 띠·pane 줄·목록 가장자리·줄 우클릭 메뉴) · `render/file_tree_column.rs`(파일트리 칼럼) · `render/side_column.rs`(오른쪽 Git·Info·세션·MCP 칼럼) · `render/status_bar.rs`(하단 상태줄) · `account_popover.rs`(계정 드롭다운 배치와 그리기). 자식 패스는 `g` 와 이 프레임에 읽는 작은 `Frame`, 고쳐 쓸 상태 `&mut` 만 받는다 — `g` 가 `self.gpu` 를 잡은 안쪽이라 `&self` 메서드로 구할 값은 부르는 쪽이 미리 풀어 넘긴다. 클립·히트렉트·그리는 순서는 옮기기 전과 같다
 - `screenread.rs` — claude/codex **화면 그리드 판독·재작성** 자유함수: 스피너(`find_claude_spinner`)·입력박스(`prompt_box`)·배너/픽커/앵커 감지, 팀메시지(tell/SendMessage) 색칠·프사 배치·상태줄 mod 가 막 지은 줄 덧칠(`paint_status_line`)
   `screenread/foreground.rs`는 원본 TUI의 닫힌 테두리 판을 보존하고, 본문 후처리 범위·학생 장식의 실제 사각형 차폐를 공통으로 판정한다.

@@ -1010,6 +1010,7 @@ impl App {
         // 날씨: 초점 창과 그 입력줄(논리 px) — 물방울을 올리지 않는 자리. 같은 이유로 밖에 모은다.
         let mut weather_focus: Option<String> = None;
         let mut weather_guard: Option<[f32; 4]> = None;
+        let mut preedit_cursor = None;
         let (slots, headers, footer_slots, agents_view_panes, mirror_claude_panes): (
             Vec<PaneSlot>,
             Vec<HeaderInfo>,
@@ -1232,6 +1233,9 @@ impl App {
                     &ws, pane, chat_frame.as_ref().map(|f| &f.term).or(pane.term()), &id, ws.active_tab_pid(&id), cols_now, rows_now,
                     body_left, body_top, pane_font_scale, true,
                 );
+                if composition.preedit_cursor.is_some() {
+                    preedit_cursor = composition.preedit_cursor.take();
+                }
                 let composed = composition.rows;
                 if self.weather.settings.enabled && active_id.as_deref() == Some(id.as_str()) {
                     weather_focus = Some(id.clone());
@@ -1667,8 +1671,19 @@ impl App {
         // Recompute the inline suggestion against the freshly-applied
         // grid before snapshotting it into the overlay.
         self.update_suggestion();
-        let overlay = self.gpu_overlay_snapshot();
+        let mut overlay = self.gpu_overlay_snapshot();
+        if let Some(placed) = &preedit_cursor {
+            let (row, col) = placed.cursor;
+            overlay.preedit_row = row as u16;
+            overlay.preedit_col = col as u16;
+        }
         self.sync_ime_cursor_area(&overlay);
+        if preedit_cursor.is_some() {
+            // The display grid already inserted the composition and its suffix.
+            overlay.preedit.clear();
+            overlay.cursor_visible = false;
+            overlay.suggestion.clear();
+        }
         let chrome_font = 14.0_f32;
         // Markdown Render/Raw toggle lives in the pane action buttons
         // (drawn in the header loop), not a separate pill.
@@ -4751,6 +4766,15 @@ impl App {
             }
             if !side_column_covers_workspace {
                 kasa_gridview::overlay::paint(g, &overlay);
+                if let Some(placed) = &preedit_cursor {
+                    let cw = overlay.cell_w * overlay.font_scale;
+                    let ch = overlay.cell_h * overlay.font_scale;
+                    for &(row, start, end) in &placed.spans {
+                        g.rect(overlay.pad_x + start as f32 * cw,
+                            overlay.pad_y + (row + 1) as f32 * ch - 2.0,
+                            (end - start) as f32 * cw, 2.0, overlay.cursor_color);
+                    }
+                }
             }
             // 오른쪽 위 알림. 승인 알림은 답할 때까지 서 있고, 나머지는 잠깐 섰다가 흐려진다.
             self.collab.toast_rect = None;
