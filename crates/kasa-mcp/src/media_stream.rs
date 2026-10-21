@@ -773,11 +773,38 @@ mod tests {
             got += resp.chunk().await.unwrap().unwrap().len();
         }
         drop(resp);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let asked: usize = origin.hits()[3..].iter().map(|(_, l, _)| *l).sum();
-        assert!(asked <= 5 * PIECE, "읽은 만큼만 물어야 한다: {asked}");
-        assert_eq!(stream.received_bytes(), 2 + PIECE as u64 + 10 + asked as u64);
+        let settled = settle(&origin).await;
+        let tail: Vec<_> = origin.hits()[3..].iter().map(|(o, l, _)| (*o, *l)).collect();
+        let expected: Vec<_> = (0..tail.len()).map(|i| ((i * PIECE) as u64, PIECE)).collect();
+        assert_eq!(tail, expected, "앞에서부터 이어지는 조각만 묻는다");
+        let asked = (tail.len() * PIECE) as u64;
+        assert!(asked <= 5 * PIECE as u64, "읽은 만큼만 물어야 한다: {asked}");
+        // 끊는 순간 받던 조각은 원본에 물었어도 끝까지 받지 못해 합에 들지 않을 수 있다 — 같다고 보지 않는다.
+        let earlier = 2 + PIECE as u64 + 10;
+        let received = stream.received_bytes() - earlier;
+        assert!(
+            received >= got as u64 && received <= asked,
+            "읽은 것은 받았고 물은 것보다 더 받지 않는다: 읽음 {got} 받음 {received} 물음 {asked}"
+        );
         assert!(stream.error().is_none());
+
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(origin.hits().len(), settled, "끊긴 뒤·닫은 뒤 더 묻지 않는다");
+    }
+
+    /// 원본 요청 수가 300ms 동안 그대로일 때까지 기다려 그 수를 준다.
+    async fn settle(origin: &Origin) -> usize {
+        let mut seen = origin.hits().len();
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let now = origin.hits().len();
+            if now == seen {
+                return now;
+            }
+            seen = now;
+        }
+        panic!("원본 요청이 멎지 않는다: {seen}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
