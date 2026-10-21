@@ -865,10 +865,20 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
 /// 학생이 done 을 아는 길이 이것뿐이라, 일을 건넬 때마다 싣는다.
 const BRIEF_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed, 막히거나 승인이 필요하면 blocked·needs_approval)으로 한 번 보고해 주세요.";
 
-/// 브리프가 이미 done 을 말하면(나쵸 브리프처럼) 그대로 둔다 — 두 벌이면 어느 쪽 형식인지 헷갈린다.
+/// 기존 대화에 새 일을 맡길 때도 결과물이 경로만으로 보고되지 않게 전달 규약을 싣는다.
 fn with_done_hint(brief: &str) -> String {
     let body = brief.trim();
-    if body.contains("kasaterm-cli done") { body.to_string() } else { format!("{body}\n\n{BRIEF_DONE_HINT}") }
+    let media = crate::inline_outputs::DELIVERY_INSTRUCTIONS.trim();
+    let mut out = body.to_string();
+    if !body.contains(media) {
+        out.push_str("\n\n");
+        out.push_str(media);
+    }
+    if !body.contains("kasaterm-cli done") {
+        out.push_str("\n\n");
+        out.push_str(BRIEF_DONE_HINT);
+    }
+    out
 }
 /// 부팅한 claude 가 보드에 설 때까지 기다리는 상한.
 const SUMMON_BOOT_SECS: u64 = 90;
@@ -4633,6 +4643,8 @@ mod tests {
         assert_eq!(ok.params["title"], "보드 걷기");
         let body = ok.params["body"].as_str().unwrap();
         assert!(body.contains("본문 한 줄\n\n") && body.ends_with(super::BRIEF_DONE_HINT), "새 일에는 done 안내가 붙는다: {body}");
+        assert!(body.contains(crate::inline_outputs::DELIVERY_INSTRUCTIONS.trim()), "새 일을 받은 기존 대화에도 미디어 전달 규칙이 들어간다");
+        assert_eq!(super::with_done_hint(body), body, "재전달해도 지침은 한 벌이다");
         let reply = super::build_request("tell", &v(&["%1", "답장", "한 줄"])).unwrap();
         assert!(reply.params["body"].as_str().unwrap().ends_with("답장 한 줄"), "제목 없는 답장엔 안 붙는다");
         let told = super::build_request("tell", &v(&["%1", "--title", "일", "끝나면 kasaterm-cli done 으로"])).unwrap();

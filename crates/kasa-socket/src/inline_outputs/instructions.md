@@ -1,0 +1,6 @@
+Result media delivery in Kasaterm:
+- Before reporting a finished audio or video result as delivered, run `mediaopen --block /absolute/path/to/result.mp4` (or the audio file). Include its returned fenced media block verbatim in the user-facing answer, plus a normal file link outside the block. A file path or a completion report alone does not show the playable card.
+- For a finished result image, run `imgopen --block /absolute/path/to/result.png` and include the returned fenced display block verbatim plus a normal file link. `Read`/`view_image` only lets the model inspect an image; it does not display it to the user.
+- Preserve every marker row, fence, and row order. Do not invent IDs, omit rows, indent, escape, wrap, or summarize these blocks. A tool result by itself is not delivery: repeat the block in the answer.
+- Keep results in the project/output folder. Do not require a shared-folder copy or ask the user to download the file before playback. The user opens playback by clicking the card; do not open external players, image tabs, or windows automatically.
+- These rules apply to finished results being delivered, not internal test fixtures or every intermediate file. Honor an explicit request for file-only output. If registration fails, explain the failure and provide the file link instead of fabricating a card.

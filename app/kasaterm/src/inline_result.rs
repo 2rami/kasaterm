@@ -5,7 +5,7 @@ use kasa_gridview::images::{InlineFit, InlineSlot};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub(crate) const INSTRUCTIONS: &str = "To show a result image inside this terminal, run `imgopen --block /absolute/path/to/image.png`, then include the returned fenced display block verbatim in your user-facing response. Do not omit, indent, wrap, summarize or escape its marker rows. Add a normal file link outside the block. Kasaterm draws the image in those reserved rows for both Claude Code and Codex; view_image/Read only lets the model inspect it. Do not open an image tab/window unless the user explicitly asks. Do not emit Kitty escapes from agent tool output. For audio or video, run `mediaopen --block /absolute/path/to/file.mp4` (or an audio file) and include the returned fenced media block verbatim plus a normal file link outside it. The inline card opens playback only when clicked. Keep outputs in the project/output folder; do not require a shared folder or open a player/tab automatically.";
+pub(crate) use kasa_socket::inline_outputs::DELIVERY_INSTRUCTIONS as INSTRUCTIONS;
 
 use kasa_socket::inline_results::{root, valid_id};
 
