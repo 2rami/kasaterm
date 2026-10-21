@@ -21,7 +21,7 @@ goes after `--`. Receivers reject a body that starts with `--title`, `--stdin`, 
 accepts a name (`tell 이름 …`, `tell 이름@기계 …`, `tell %N@기계 …`): the CLI resolves it
 against `board --all` (machine labels compare with any whitespace equal — macOS names use U+00A0) and refuses
 ambiguous matches by listing the candidates. It records
-each sent ID's address locally so `tell-status ID` works without `--address`.
+each sent ID's address locally so `tell --status ID` works without `--address`.
 It prints the ID before dispatch so a disconnected caller can inspect/retry that
 same ID. An old server produces an unsupported-method error; there is no fallback.
 

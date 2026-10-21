@@ -160,7 +160,7 @@ last observed room. Machine-level events have no `pane_id` or room fields.
 
 HTTP-only hosts need no Unix socket. Use the explicit global option
 `kasaterm-cli --api http://127.0.0.1:8765 board --all`, with the same prefix for
-`board-watch`, `rooms`, `activity --address`, `peek`, `capture`, `where`, `transcript`, `tell`, `tell-status`
+`board-watch`, `rooms`, `activity --address`, `peek`, `capture`, `where`, `transcript`, `tell`, `tell --status`
 and the address forms of `tell --raw/--key`, `focus`, `move`, `rename-window`, `window-new --on` and `attach`. The CLI maps only
 the new collaboration RPCs to their guarded HTTP endpoints, using system curl
 with redirects disabled and bounded responses. `--api-token-file FILE`, before
