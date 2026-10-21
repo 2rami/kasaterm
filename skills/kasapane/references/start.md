@@ -1,0 +1,1 @@
+Kasaterm: read `kasaterm-cli guide TOPIC` only when needed: collab, panes, jobs, transfer, develop. Before delivering a finished image/audio/video, read `kasaterm-cli guide media` and include its inline card in the answer.

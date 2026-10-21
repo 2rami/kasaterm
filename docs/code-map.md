@@ -1,6 +1,6 @@
 # 코드 맵 — main.rs 와 기능 모듈들
 
-프로젝트 지침(`CLAUDE.md`)의 「코드 맵」이 여기를 가리킨다. Rust 를 만지기 전에 읽어라.
+프로젝트 개발 안내가 여기를 가리킨다. Rust 를 수정할 때 해당 영역을 찾아 읽는다.
 크레이트 사이 층과 의존 방향은 [`workspace.md`](workspace.md)(검사 `scripts/check-workspace.py`).
 
 `main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 그리기·문서 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main`(부팅 순서 조립) + tests 만. 부팅 자유함수는 아래 세 모듈에 있고 main.rs 가 옛 경로(`crate::verification_run` 등)로 재수출한다. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
@@ -106,7 +106,7 @@
 
 - `links.rs` · `links/scan.rs` — 실제 터미널 셀 기준 URL·파일 경로 범위와 수정키 클릭, 로컬/원격 파일 열기. `links/probe.rs`는 격리 화면의 좌표 클릭을 검사한다. `inline_image.rs`는 GUI 초기화 전에 처리하는 Kitty 이미지 출력이며 `imgopen`의 기본 경로다.
 
-- `inline_result.rs` — CLI가 공통으로 출력하는 이미지 표시 블록·내용 해시 PNG 캐시·행별 클리핑. `inline_image.rs`의 도구 출력과 `terminal_scene.rs`의 실제 그리기를 연결하며 Claude/Codex 래퍼는 같은 표시 지침을 전달한다.
+- `inline_result.rs` — CLI가 공통으로 출력하는 이미지 표시 블록·내용 해시 PNG 캐시·행별 클리핑. `inline_image.rs`의 도구 출력과 `terminal_scene.rs`의 실제 그리기를 연결하며 Claude/Codex 래퍼는 필요한 지침을 찾는 짧은 안내를 전달한다.
 
 - `mobile/lib/inline_result.dart` — 대화의 등록 이미지 블록 파싱·원본 기기별 인증 이미지 읽기. 저장소 경로와 ID 검사는 `kasa_socket::inline_results`, HTTP 창구는 `http/files.rs`가 공유한다.
 
@@ -118,4 +118,4 @@
 
 - `inline_media.rs`·`inline_media/cache.rs` — 음성·영상 표시 블록, 원본 기기별 메타데이터·썸네일 캐시와 스트리밍 재생 참조. `media_preview.rs`는 네이티브 카드 클릭·재생 조작, `media_player.rs`는 플랫폼 디코더·음성 시계·영상 프레임을 맡는다. 로컬 등록과 HTTP 읽기는 `kasa_socket::inline_media`·`kasa_mcp::http`에 있고, 재생용 루프백 Range 창구는 `kasa_mcp::media_stream`이다. 계약은 [inline-media.md](inline-media.md).
 - `mobile/lib/inline_media.dart`·`inline_media_bridge_io.dart`·`screens/media_player.dart` — 폰의 결과 카드·루프백 Range 전송·네이티브 재생. 원본 인증 경로로 필요한 512KiB 조각만 읽고 닫힌 소비자의 요청을 취소한다.
-- `crates/kasa-socket/src/inline_outputs/instructions.md` — 완성한 미디어의 카드 전달 규칙. 앱의 Claude·Codex 실행 지침과 CLI의 새 작업 브리프가 같은 원문을 쓴다.
+- `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 짧은 시작 안내. `skills/kasapane`의 주제별 원문을 내장하고 요청한 주제 하나만 출력한다. Claude·Codex 실행과 새 작업 브리프는 `references/start.md`만 싣고, 미디어 전달 때 `guide media`로 상세 규칙을 읽는다.
