@@ -1121,6 +1121,11 @@ impl GpuRenderer {
         self.md_draw_word(text, x, y, size, color, false, false, 0, true);
     }
 
+    /// `draw_code_text` 가 차지할 폭 — 고정폭 글꼴이라 `measure_chrome_text` 로 재면 좁게 나온다.
+    pub(crate) fn measure_code_text(&mut self, text: &str, size: f32) -> f32 {
+        self.measure_run(text, size, false, false, true, true)
+    }
+
     /// 터미널 격자 글꼴 크기(논리 px) — `cell_w`·`cell_h` 와 짝이다.
     pub(crate) fn term_font_size(&self) -> f32 {
         self.grid.font_size_px as f32 * self.grid.zoom / self.grid.scale

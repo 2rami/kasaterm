@@ -118,14 +118,6 @@ pub(crate) fn install_pane_shims(lite: bool) {
             eprintln!("[shim] stage kasaterm-cli {cmux_src:?} -> {cmux_target:?} failed: {e}");
         }
     }
-    // 파일 칸도 이름으로 부른다 — 거울에서 열면 원본 기기의 칸이 그 기기 것을 찾는다.
-    if let Some(src) = locate_kasa_files() {
-        let target = shim_dir.join(src.file_name().unwrap_or_default());
-        let _ = std::fs::remove_file(&target);
-        if let Err(e) = stage_shim(&src, &target) {
-            eprintln!("[shim] stage kasa-files {src:?} -> {target:?} failed: {e}");
-        }
-    }
     if !lite {
     // 이미지 출력이 화면을 바꾸지 않도록 셸에서는 Kitty를, 명시적 탭 요청만 미리보기를 쓴다.
     install_preview_shims(&shim_dir);
@@ -620,17 +612,6 @@ pub(crate) fn locate_cmux_compat_binary() -> Option<std::path::PathBuf> {
         }
     }
     None
-}
-
-/// 앱 옆의 `kasa-files`. 없는 판(옛 굽기)에서는 ⋮ 「파일 트리」를 감춘다.
-pub(crate) fn locate_kasa_files() -> Option<std::path::PathBuf> {
-    static FOUND: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-            ["kasa-files.exe", "kasa-files"].into_iter().map(|name| dir.join(name)).find(|path| path.is_file())
-        })
-        .clone()
 }
 
 /// Place the shim binary at `target` so child shells can find it.

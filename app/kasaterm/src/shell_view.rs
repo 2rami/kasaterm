@@ -14,6 +14,7 @@
 use super::*;
 
 mod paint;
+mod tree;
 
 pub(crate) use paint::{Hit, Slot};
 
@@ -54,6 +55,9 @@ pub(crate) struct ShellPane {
     open_gen: u64,
     layout: paint::Layout,
     painted: u64,
+    /// 친 명령이 없을 때 시작 칩 밑에 펴는 셸 폴더.
+    tree: tree::Tree,
+    tree_painted: u64,
 }
 
 impl Drop for ShellPane {
@@ -402,20 +406,35 @@ impl App {
                     open_gen: 0,
                     layout: paint::Layout::default(),
                     painted: 0,
+                    tree: tree::Tree::default(),
+                    tree_painted: 0,
                 };
                 spawn_feed(tab.clone(), Arc::clone(&pane.feed), Arc::clone(&pane.stop), self.proxy.clone());
                 self.shell_view.panes.insert(id.clone(), pane);
             }
-            let pane = &self.shell_view.panes[&id];
-            let (version, old) = pane
+            let fallback = match kasa_mcp::remote::remote_info(&tab) {
+                Some(info) => info.remote_cwd,
+                None => self.pane_current_cwd(&tab).map(|p| p.to_string_lossy().into_owned()),
+            };
+            let Some(pane) = self.shell_view.panes.get_mut(&id) else { continue };
+            let (version, old, root) = pane
                 .feed
                 .try_lock()
-                .map(|f| (f.version, f.old_source))
-                .unwrap_or((pane.painted, false));
-            if old && self.shell_view.old_sources.insert(tab) {
+                .map(|f| {
+                    let root = (f.loaded && tree::fresh(&f)).then(|| f.cwd.clone().or(fallback)).flatten();
+                    (f.version, f.old_source, Some(root))
+                })
+                .unwrap_or((pane.painted, false, None));
+            if let Some(root) = root {
+                pane.tree.set_root(root);
+            }
+            if let Some((base, _)) = pane.tree.root.is_some().then(|| source_of(&tab)).flatten() {
+                pane.tree.request(&base, &self.proxy);
+            }
+            if version != pane.painted || pane.tree.version() != pane.tree_painted {
                 self.chrome_dirty = true;
             }
-            if version != pane.painted {
+            if old && self.shell_view.old_sources.insert(tab) {
                 self.chrome_dirty = true;
             }
         }
@@ -462,6 +481,7 @@ impl App {
                 continue;
             };
             pane.painted = f.version;
+            pane.tree_painted = pane.tree.version();
             let z = slot.zoom;
             g.begin_zoom(z);
             let hits = paint::paint(g, cursor, slot, pane, &f);
@@ -530,6 +550,12 @@ impl App {
                 }
             }
             Some(Hit::Dir(path)) => self.shell_view_type(&id, &format!("cd -- {}", shell_quote(&path)), true),
+            Some(Hit::Expand(path)) => {
+                if let Some(pane) = self.shell_view.panes.get_mut(&id) {
+                    pane.tree.toggle(&path);
+                }
+            }
+            Some(Hit::Open(path)) => self.open_tree_file(&id, &path),
             Some(Hit::Run(cmd)) => self.shell_view_type(&id, &cmd, true),
             Some(Hit::Rerun(block)) | Some(Hit::Edit(block)) => {
                 let cmd = self.shell_view.panes.get(&id).and_then(|pane| {
@@ -576,9 +602,15 @@ impl App {
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
         if let Some(pane) = self.shell_view.panes.get_mut(&id) {
-            let next = (pane.scroll + dy).clamp(0.0, pane.scroll_max);
-            if next != pane.scroll {
-                pane.scroll = next;
+            // 트리는 위에서부터 흐른다 — 카드(맨 아래에서 올라간 거리)와 방향이 반대다.
+            let (scroll, max, dy) = if pane.tree.shown {
+                (&mut pane.tree.scroll, pane.tree.scroll_max, -dy)
+            } else {
+                (&mut pane.scroll, pane.scroll_max, dy)
+            };
+            let next = (*scroll + dy).clamp(0.0, max);
+            if next != *scroll {
+                *scroll = next;
                 self.chrome_dirty = true;
             }
         }

@@ -86,6 +86,14 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
   bool _away = false;
   String? _error;
 
+  /// 빈 셸 트리 — 편 뿌리(셸 폴더), 폴더마다 받은 목록·못 받은 까닭·받은 때, 펼친 폴더, 받는 중.
+  String? _treeRoot;
+  final _treeDirs = <String, List<TreeEntry>>{};
+  final _treeErrors = <String, String>{};
+  final _treeAt = <String, DateTime>{};
+  final _treeOpen = <String>{};
+  final _treeAsking = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -207,6 +215,55 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
 
   void _goTo(String path) => _run('cd -- ${shellQuote(path)}');
 
+  /// 뿌리와 펼친 폴더 가운데 없거나 5초 넘게 묵은 목록을 받는다. 셸이 다른 폴더로 갔으면 펼침을 접는다.
+  void _wantTree(String root) {
+    if (root != _treeRoot) {
+      _treeRoot = root;
+      _treeOpen.clear();
+      for (final m in [_treeDirs, _treeErrors, _treeAt]) {
+        m.removeWhere((dir, _) => !dir.startsWith(root));
+      }
+    }
+    final now = DateTime.now();
+    for (final dir in [root, ..._treeOpen.where((d) => d.startsWith(root))]) {
+      final at = _treeAt[dir];
+      if (at != null && now.difference(at) < const Duration(seconds: 5)) continue;
+      if (!_treeAsking.add(dir)) continue;
+      widget.server.shellTree(dir, machine: widget.pane.machine).then(
+        (entries) {
+          _treeDirs[dir] = entries;
+          _treeErrors.remove(dir);
+        },
+        onError: (Object e) {
+          _treeErrors[dir] = e is ServerException ? e.message : '폴더 목록을 못 받았어요';
+        },
+      ).whenComplete(() {
+        _treeAsking.remove(dir);
+        _treeAt[dir] = DateTime.now();
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  void _toggleDir(String dir) {
+    setState(() => _treeOpen.contains(dir) ? _treeOpen.remove(dir) : _treeOpen.add(dir));
+    final root = _treeRoot;
+    if (root != null) _wantTree(root);
+  }
+
+  /// 펼친 대로 줄을 편다 — (깊이, 경로, 줄) 이고, 줄이 null 이면 [path] 자리에 안내 글.
+  List<(int, String, TreeEntry?)> _treeRows(String dir, int depth) {
+    final entries = _treeDirs[dir];
+    if (entries == null) return [(depth, _treeErrors[dir] ?? '목록을 받는 중…', null)];
+    if (entries.isEmpty) return [(depth, '빈 폴더예요', null)];
+    return [
+      for (final e in entries) ...[
+        (depth, joinDir(dir, e.name), e),
+        if (e.dir && _treeOpen.contains(joinDir(dir, e.name))) ..._treeRows(joinDir(dir, e.name), depth + 1),
+      ],
+    ];
+  }
+
   /// 명령을 바로 친다. 도는 명령이 있으면 그 프로그램의 입력이 되니 안 보낸다.
   void _run(String command) {
     final send = widget.onCommand;
@@ -288,7 +345,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
             );
       final draft = widget.onDraft;
       // 추천 칩 — 누르면 입력칸에 채우고(고쳐서 보낸다), 길게 누르면 바로 친다. 자판으로 치기 번거로운 폰 몫.
-      final chips = draft == null || _feed.blocks.isEmpty
+      final chips = draft == null || _feed.fresh
           ? null
           : SizedBox(
               height: Look.tap,
@@ -316,7 +373,7 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(child: DismissKeyboard(child: _list(palette))),
+            Expanded(child: DismissKeyboard(child: _list(palette, cwd))),
             ?place,
             ?chips,
           ],
@@ -325,9 +382,11 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
     },
   );
 
-  Widget _list(TerminalPalette palette) => Stack(
+  Widget _list(TerminalPalette palette, String? cwd) => Stack(
           children: [
-            if (_feed.blocks.isEmpty)
+            if (_feed.fresh && cwd != null)
+              _freshTree(palette, cwd)
+            else if (_feed.fresh)
               Center(
                 child: TwinsNotice(
                   text: '아직 친 명령이 없어요\n아래에서 치거나 하나 골라 시작해요',
@@ -375,6 +434,60 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
           ],
         );
 
+  /// 친 명령이 없는 셸 — 위에 시작 칩, 그 아래 셸 폴더 트리(워프처럼 입력칸이 시작점이고 칩·트리는 지름길).
+  /// 폴더 줄은 그 셸이 `cd`, 화살표는 그 자리에서 펼치기, 파일은 원본에서 받아 미리보기.
+  Widget _freshTree(TerminalPalette palette, String root) {
+    _wantTree(root);
+    final up = parentDir(root);
+    final rows = _treeRows(root, 0);
+    final send = widget.onCommand;
+    return ListView(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: const EdgeInsets.fromLTRB(Look.pagePad, 12, Look.pagePad, 12),
+      children: [
+        if (send != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final c in ['ls', if (_feed.branch != null) 'git status', 'claude'])
+                  _Chip(label: c, palette: palette, onTap: () => _run(c)),
+              ],
+            ),
+          ),
+        if (up != null)
+          _TreeRow(
+            depth: 0,
+            name: '..',
+            icon: Icons.arrow_upward,
+            palette: palette,
+            onTap: send == null ? null : () => _goTo(up),
+          ),
+        for (final (depth, path, entry) in rows)
+          if (entry == null)
+            _TreeRow(depth: depth, name: path, palette: palette, note: true)
+          else
+            _TreeRow(
+              depth: depth,
+              name: entry.name,
+              icon: entry.dir
+                  ? (entry.repo ? Icons.account_tree_outlined : Icons.folder_outlined)
+                  : Icons.insert_drive_file_outlined,
+              open: entry.dir ? _treeOpen.contains(path) : null,
+              mark: entry.ignored ? null : entry.git,
+              dim: entry.ignored,
+              palette: palette,
+              onExpand: entry.dir ? () => _toggleDir(path) : null,
+              onTap: entry.dir
+                  ? (send == null ? null : () => _goTo(path))
+                  : () => previewResultFile(context, widget.server, path, machine: widget.pane.machine),
+            ),
+      ],
+    );
+  }
+
   /// 셸 통합 없음·전체 화면 프로그램 — 원본 격자를 폭에 맞춰 줄여 보기만 한다.
   Widget _shrunkGrid(BuildContext context, TermSession s, TerminalPalette palette) {
     final theme = Theme.of(context);
@@ -404,6 +517,91 @@ class _ShellBlocksViewState extends State<ShellBlocksView> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// 빈 셸 트리 한 줄 — 높이 [Look.tap]. 폴더면 앞에 펼침 화살표, 끝에 git 표시 한 글자.
+class _TreeRow extends StatelessWidget {
+  const _TreeRow({
+    required this.depth,
+    required this.name,
+    required this.palette,
+    this.icon,
+    this.open,
+    this.mark,
+    this.dim = false,
+    this.note = false,
+    this.onTap,
+    this.onExpand,
+  });
+
+  final int depth;
+  final String name;
+  final TerminalPalette palette;
+  final IconData? icon;
+
+  /// 폴더면 펼쳤나, 파일·윗 폴더 줄이면 null.
+  final bool? open;
+  final String? mark;
+  final bool dim;
+
+  /// 받는 중·빈 폴더 같은 안내 글.
+  final bool note;
+  final VoidCallback? onTap;
+  final VoidCallback? onExpand;
+
+  Color _markColor(String m) => switch (m) {
+    'M' => palette.resolve(const IndexColor(3), foreground: true),
+    'A' || 'U' => palette.resolve(const IndexColor(2), foreground: true),
+    'D' => palette.resolve(const IndexColor(1), foreground: true),
+    _ => mixToward(palette.fg, palette.bg, 0.4),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final mute = mixToward(palette.fg, palette.bg, 0.5);
+    final ink = note || dim ? mute : (open != null ? palette.fg : mixToward(palette.fg, palette.bg, 0.2));
+    final m = mark;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(Look.radiusSm),
+      child: SizedBox(
+        height: Look.tap,
+        child: Row(
+          children: [
+            SizedBox(width: depth * 16.0),
+            SizedBox(
+              width: 28,
+              height: Look.tap,
+              child: open == null
+                  ? null
+                  : InkResponse(
+                      onTap: onExpand,
+                      radius: 18,
+                      child: Icon(open! ? Icons.expand_more : Icons.chevron_right, size: 18, color: mute),
+                    ),
+            ),
+            if (icon != null) ...[
+              Icon(icon, size: 18, color: ink),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: _mono.copyWith(color: m == null ? ink : _markColor(m)),
+              ),
+            ),
+            if (m != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 8, right: 4),
+                child: Text(m, style: _mono.copyWith(color: _markColor(m))),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

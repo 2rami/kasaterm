@@ -1157,7 +1157,7 @@ LOCAL_WORKFLOW = ("env:\n  MAC_ARTIFACT: local\n  MAC_TEAM: ABCDE12345\n"
                   "# Verify locally signed DMG · source=Notarized Developer ID · xcrun stapler validate · VERIFIED_SHA\n"
                   "          KASATERM_SIGN_ID: kasaterm-ci\n")
 MACHO_FILES = ("Contents/MacOS/kasaterm", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-serve-web",
-               "Contents/MacOS/kasa-files", "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle")
+               "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle")
 DEVID_SHA = "A1" * 20
 SIG_DEVID = ("Identifier=x\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1\n"
              "Authority=Developer ID Application: Test Org (ABCDE12345)\nAuthority=Developer ID Certification Authority\n"
@@ -1466,7 +1466,7 @@ class LocalSigningBuildTests(LocalFixture):
 
     def test_an_unsigned_piece_a_dirty_bake_or_a_debuggable_bundle_stops_the_build(self):
         for name, setup, word in (
-            ("adhoc piece", lambda: setattr(self, "build_adhoc", ("Contents/MacOS/kasa-files",)), "kasa-files: Developer ID 가 아님"),
+            ("adhoc piece", lambda: setattr(self, "build_adhoc", ("Contents/MacOS/kasa-serve-web",)), "kasa-serve-web: Developer ID 가 아님"),
             ("dirty", lambda: setattr(self, "build_dirty", True), "깨끗한 판이 아니다"),
             ("debuggable", lambda: setattr(self, "debuggable", True), "get-task-allow"),
         ):
@@ -1834,7 +1834,7 @@ class LocalSigningRepoTests(unittest.TestCase):
         for rel in macsign.HARDENED_SIGNED:
             self.assertIn(rel.split("/")[-1], self.bake)
         self.assertIn("SIGN_ARGS+=(--options runtime --timestamp)", self.bake)
-        self.assertIn('sign_part "$APP/Contents/MacOS/kasa-files"', self.bake)
+        self.assertNotIn("kasa-files", self.bake, "파일 칸 TUI 는 셸 명령 보기의 빈 화면 트리로 옮기며 뺐다(2026-10-21)")
         self.assertNotIn("kasapet", self.bake, "펫은 카사텀 번들에서 뗐다(2026-10-19)")
         self.assertNotIn("kasa-op", self.bake, "1Password 실행기는 키체인으로 바꾸며 뺐다(2026-10-19)")
         self.assertIn("--entitlements \"$ROOT/scripts/kasaterm.entitlements\"", self.bake)

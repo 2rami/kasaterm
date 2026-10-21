@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod marks;
+
 /// 배치가 `since` 뒤로 바뀔 때까지 매달려 있다가 번호를 돌려준다(롱폴). 관문 우회는
 /// 답 머리를 20초까지만 기다리므로 그 안에서 끊는다.
 /// 다른 기기의 깃 패널 재료 — 그 기계가 자기 레포를 읽어 그대로 준다(2026-09-17).
@@ -63,6 +65,7 @@ async fn term_gitop_post(body: axum::body::Bytes) -> impl IntoResponse {
 }
 
 /// 폴더 한 층 — 다른 기기의 파일트리가 이걸로 그린다. `.git` 은 빼고, 폴더 먼저.
+/// `git=1` 이면 줄마다 git 표시(`git`)와 무시 여부(`ignored`)를 단다 — git 을 도니 일꾼 스레드에서.
 async fn term_tree_get(
     q: Query<std::collections::HashMap<String, String>>,
     req: axum::extract::Request,
@@ -70,16 +73,19 @@ async fn term_tree_get(
     if let Some(denied) = guest_denied(&req) {
         return denied;
     }
-    term_tree_list(q).into_response()
+    let listed = tokio::task::spawn_blocking(move || term_tree_list(&q.0)).await;
+    Json(listed.unwrap_or_else(|_| serde_json::json!({ "ok": false, "error": "폴더를 못 읽어요" }))).into_response()
 }
 
-fn term_tree_list(q: Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+fn term_tree_list(q: &std::collections::HashMap<String, String>) -> serde_json::Value {
     let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
-        return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
+        return serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" });
     };
     let Ok(rd) = std::fs::read_dir(&path) else {
-        return Json(serde_json::json!({ "ok": false, "error": "폴더를 못 읽어요" }));
+        return serde_json::json!({ "ok": false, "error": "폴더를 못 읽어요" });
     };
+    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
+    let marks = (q.get("git").map(String::as_str) == Some("1")).then(|| marks::read(&real)).flatten();
     let mut entries: Vec<(bool, String, bool)> = rd
         .flatten()
         .filter_map(|e| {
@@ -92,9 +98,20 @@ fn term_tree_list(q: Query<std::collections::HashMap<String, String>>) -> impl I
         .collect();
     entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
     let entries: Vec<serde_json::Value> = entries.into_iter()
-        .map(|(is_dir, name, is_repo)| serde_json::json!({ "name": name, "is_dir": is_dir, "is_repo": is_repo }))
+        .map(|(is_dir, name, is_repo)| {
+            let mut entry = serde_json::json!({ "name": name, "is_dir": is_dir, "is_repo": is_repo });
+            if let Some(marks) = &marks {
+                let at = real.join(&name);
+                if marks.ignored(&at) {
+                    entry["ignored"] = true.into();
+                } else if let Some(sign) = marks.mark(&at) {
+                    entry["git"] = sign.to_string().into();
+                }
+            }
+            entry
+        })
         .collect();
-    Json(serde_json::json!({ "ok": true, "path": path, "entries": entries }))
+    serde_json::json!({ "ok": true, "path": path, "entries": entries })
 }
 
 /// 파일 링크를 원본 기기에서 읽는다. 폰 미리보기와 PC가 같은 32MB 한도를 쓴다.
@@ -361,4 +378,51 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
             }),
         )
         .route("/term/notes/{name}", get(term_notes_image))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_listing_marks_changes_untracked_and_ignored_only_when_asked() {
+        let dir = std::env::temp_dir().join(format!("kasa-tree-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "1").unwrap();
+        std::fs::write(dir.join("README.md"), "r").unwrap();
+        std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C").arg(&dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("src/a.rs"), "2").unwrap();
+        std::fs::write(dir.join("new.txt"), "n").unwrap();
+
+        let ask = |git: bool| {
+            let mut q = std::collections::HashMap::from([("path".to_string(), dir.to_string_lossy().into_owned())]);
+            if git {
+                q.insert("git".into(), "1".into());
+            }
+            term_tree_list(&q)
+        };
+        let listed = ask(true);
+        let entry = |name: &str| listed["entries"].as_array().unwrap().iter().find(|e| e["name"] == name).cloned().unwrap();
+        assert_eq!(entry("src")["git"], "•");
+        assert_eq!(entry("new.txt")["git"], "?");
+        assert_eq!(entry("target")["ignored"], true);
+        assert!(entry("README.md").get("git").is_none());
+        let plain = ask(false);
+        assert!(plain["entries"].as_array().unwrap().iter().all(|e| e.get("git").is_none() && e.get("ignored").is_none()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

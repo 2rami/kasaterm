@@ -1291,14 +1291,6 @@ pub trait Backend: Send + Sync {
     fn open_preview(&self, _kind: &str, _path: &str, _target: Option<&str>) -> Result<()> {
         anyhow::bail!("open_preview not supported")
     }
-    /// 그 칸 셸의 지금 폴더. 파일 칸이 짝 셸을 자주 묻으므로 GUI 를 거치지 않고 답해야 한다.
-    fn surface_cwd(&self, _surface: &str) -> Result<String> {
-        anyhow::bail!("surface.cwd not supported")
-    }
-    /// 그 칸 셸을 `path` 로 옮긴다. 셸이 놀고 있을 때만 — 아니면 거절한다.
-    fn surface_cd(&self, _surface: &str, _path: &str) -> Result<()> {
-        anyhow::bail!("surface.cd not supported")
-    }
     /// URL 을 **사람이 보는 브라우저**로 — 그 pane 을 거울로 보는 기계가 있으면
     /// 거기로 되돌리고, 없으면 이 기계의 기본 브라우저. `target` 은 요청 pane
     /// (`$KASATERM_PANE_ID`). 웹 pane(`open_preview kind=web`)과 달리 화면 안에

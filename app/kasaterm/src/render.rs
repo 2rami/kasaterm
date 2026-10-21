@@ -47,7 +47,6 @@ fn handle_menu_tip(action: ActionKind, view: (bool, bool)) -> &'static str {
         ActionKind::SplitH => "좌우로 나누기",
         ActionKind::SplitV => "위아래로 나누기",
         ActionKind::ToggleHeader => "상단바",
-        ActionKind::FileTree => "파일 트리",
         ActionKind::ToggleZoom => "크게 보기",
         ActionKind::RefreshRenderer => "화면 새로고침",
         ActionKind::Undock => "별도 창으로",
@@ -4064,9 +4063,6 @@ impl App {
                     vec![]
                 } else {
                     let mut set = vec![("external-link", None, Some(ActionKind::Undock))];
-                    if crate::pane_shims::locate_kasa_files().is_some() {
-                        set.push(("folder-tree", None, Some(ActionKind::FileTree)));
-                    }
                     set.extend([
                         ("columns-2", None, Some(ActionKind::SplitV)),
                         ("rows-2", None, Some(ActionKind::SplitH)),
@@ -4654,27 +4650,24 @@ impl App {
                             // 곧 결과 배치다 — SplitDir 이름과는 반대 매핑.
                             ("columns-2", ActionKind::SplitH),
                             ("rows-2", ActionKind::SplitV),
-                            ("folder-tree", ActionKind::FileTree),
                             (hdr_icon, ActionKind::ToggleHeader),
                             ("maximize", ActionKind::ToggleZoom),
                             ("rotate-cw", ActionKind::RefreshRenderer),
                             ("external-link", ActionKind::Undock),
                             ("x", ActionKind::Close),
                         ];
-                        // lite 의 ⋮ 는 새 탭·쪼개기·최대화·닫기뿐 — 헤더 토글·파일 트리는
+                        // lite 의 ⋮ 는 새 탭·쪼개기·최대화·닫기뿐 — 헤더 토글은
                         // 걷어낸 크롬이고, 별도창·렌더러 새로고침은 본판의 일이다.
                         let lite = self.lite;
                         let items: Vec<(&str, ActionKind)> = items
                             .into_iter()
-                            .filter(|(_, a)| term_tab || !matches!(a, ActionKind::Undock | ActionKind::FileTree))
-                            .filter(|(_, a)| *a != ActionKind::FileTree || crate::pane_shims::locate_kasa_files().is_some())
+                            .filter(|(_, a)| term_tab || *a != ActionKind::Undock)
                             .filter(|(_, a)| (can_chat && !lite) || *a != ActionKind::ChatView)
                             .filter(|(_, a)| {
                                 !lite
                                     || !matches!(
                                         a,
                                         ActionKind::ToggleHeader
-                                            | ActionKind::FileTree
                                             | ActionKind::RefreshRenderer
                                             | ActionKind::Undock
                                     )

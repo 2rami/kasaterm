@@ -128,6 +128,13 @@ class ShellFeed {
 
   bool get running => blocks.any((b) => b.running);
 
+  /// 친 명령이 없는 셸 — `cd` 만 쳤어도 그렇다. 트리에서 폴더를 눌러 옮겨 다니는 동안 트리가 안 사라지게
+  /// (PC `shell_view/tree.rs fresh` 와 같다).
+  bool get fresh => blocks.every((b) {
+    final cmd = b.cmd.trim();
+    return !b.running && (cmd == 'cd' || cmd.startsWith('cd ')) && b.exit == 0 && b.plain.trim().isEmpty;
+  });
+
   /// 다 끝난 블록 중 가장 큰 id — 그 아래 끝난 블록은 다시 안 받는다.
   int get have => blocks
       .where((b) => !b.running)
@@ -181,3 +188,37 @@ String tookLabel(int ms) {
   if (s < 3600) return '${s ~/ 60}분 ${s % 60}초';
   return '${s ~/ 3600}시간 ${s % 3600 ~/ 60}분';
 }
+
+/// 빈 셸 트리의 한 줄 — 원본 기기 `/term/tree?git=1` 목록 한 칸. [git] 은 M·A·D·R·U·?·• 중 하나.
+class TreeEntry {
+  const TreeEntry(this.name, {this.dir = false, this.repo = false, this.git, this.ignored = false});
+
+  final String name;
+  final bool dir;
+  final bool repo;
+  final String? git;
+  final bool ignored;
+
+  static List<TreeEntry> parseAll(Object? entries) => [
+    if (entries is List)
+      for (final e in entries)
+        if (e is Map && e['name'] is String)
+          TreeEntry(
+            e['name'] as String,
+            dir: e['is_dir'] == true,
+            repo: e['is_repo'] == true,
+            git: e['git'] is String && (e['git'] as String).isNotEmpty ? e['git'] as String : null,
+            ignored: e['ignored'] == true,
+          ),
+  ];
+}
+
+/// 윗 폴더. 뿌리(`/`)면 null.
+String? parentDir(String dir) {
+  final trimmed = dir.endsWith('/') && dir.length > 1 ? dir.substring(0, dir.length - 1) : dir;
+  final cut = trimmed.lastIndexOf('/');
+  if (trimmed == '/' || cut < 0) return null;
+  return cut == 0 ? '/' : trimmed.substring(0, cut);
+}
+
+String joinDir(String dir, String name) => dir.endsWith('/') ? '$dir$name' : '$dir/$name';

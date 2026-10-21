@@ -127,6 +127,78 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  test('cd 만 친 셸은 아직 빈 셸이다', () {
+    final f = ShellFeed()..merge(_answer(2, 1, [_block(1, "cd -- '/w/app'", exit: 0)]));
+    expect(f.fresh, isTrue);
+    f.merge(_answer(3, 1, [_block(2, 'ls', exit: 0, lines: [[{'t': 'a'}]])]));
+    expect(f.fresh, isFalse);
+    expect(parentDir('/w/app'), '/w');
+    expect(parentDir('/w'), '/');
+    expect(parentDir('/'), isNull);
+  });
+
+  testWidgets('빈 셸 트리 — 폴더는 cd, 화살표는 펼치기, git 표시', (tester) async {
+    final asked = <String>[];
+    final server = Server(
+      Uri.parse('http://127.0.0.1:1/'),
+      client: MockClient((req) async {
+        final Object body;
+        if (req.url.path.endsWith('term/tree')) {
+          final path = req.url.queryParameters['path']!;
+          asked.add('$path git=${req.url.queryParameters['git']}');
+          body = path == '/w'
+              ? {
+                  'ok': true,
+                  'entries': [
+                    {'name': 'app', 'is_dir': true, 'git': '•'},
+                    {'name': 'target', 'is_dir': true, 'ignored': true},
+                    {'name': 'a.md', 'is_dir': false, 'git': 'M'},
+                  ],
+                }
+              : {'ok': true, 'entries': [{'name': 'main.rs', 'is_dir': false}]};
+        } else {
+          body = {..._answer(3, 1, const []), 'cwd': '/w'};
+        }
+        return http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json; charset=utf-8'});
+      }),
+    );
+    const pane = Pane(id: '%0', name: '', title: '', status: 'idle', window: 0, cwd: '/w');
+    final session = TermSession(server, pane)..state = TermState.connected;
+    addTearDown(session.dispose);
+    final ran = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildTheme(Brightness.dark),
+        home: Scaffold(
+          body: ShellBlocksView(
+            server: server,
+            pane: pane,
+            session: session,
+            onTerminal: () {},
+            onCommand: (c) async => ran.add(c),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(asked, ['/w git=1']);
+    expect(find.text('a.md'), findsOneWidget);
+    expect(find.text('M'), findsOneWidget);
+    expect(find.text('•'), findsOneWidget);
+    expect(find.text('claude'), findsOneWidget, reason: '시작 칩은 트리 위에 남는다');
+    await tester.tap(find.byIcon(Icons.chevron_right).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(asked.last, '/w/app git=1');
+    expect(find.text('main.rs'), findsOneWidget);
+    expect(ran, isEmpty, reason: '화살표는 펼치기만 한다');
+    await tester.tap(find.text('app'));
+    await tester.tap(find.text('..'));
+    expect(ran, ["cd -- '/w/app'", "cd -- '/'"]);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('셸 명령 묶음 보기', (tester) async {
     await loadFonts();
     tester.view.physicalSize = const Size(390 * 3, 844 * 3);

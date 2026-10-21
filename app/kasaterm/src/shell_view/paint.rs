@@ -6,6 +6,7 @@
 
 use kasa_bridge::screen::Color;
 
+use super::tree::{self, Row};
 use super::{Block, Feed, ShellPane};
 use crate::{cells, gpu, native_controls, theme, GridCell};
 
@@ -41,6 +42,10 @@ pub(crate) enum Hit {
     Edit(u64),
     /// 빈 화면의 시작 칩 — 그 명령을 바로 친다.
     Run(String),
+    /// 빈 화면 트리의 폴더 화살표 — 그 자리에서 펼치기·접기. 값은 절대 경로.
+    Expand(String),
+    /// 빈 화면 트리의 파일 — 그 칸의 탭으로 연다.
+    Open(String),
 }
 
 const PAD_X: f32 = 10.0;
@@ -66,6 +71,14 @@ const CONTEXT_H: f32 = 20.0;
 const CHIP_H: f32 = 26.0;
 const CHIP_PAD: f32 = 12.0;
 const CHIP_GAP: f32 = 8.0;
+/// 빈 화면 트리 — 칩 아래 띄움·줄 높이·한 층 들여쓰기·화살표·아이콘.
+const TREE_GAP: f32 = 12.0;
+const TREE_ROW_H: f32 = 24.0;
+const TREE_INDENT: f32 = 16.0;
+const TREE_CHEVRON: f32 = 12.0;
+const TREE_ICON: f32 = 14.0;
+/// 넓은 칸에서도 트리는 이 폭까지만 — 줄 끝 git 표시가 이름에서 멀어지지 않게.
+const TREE_MAX_W: f32 = 480.0;
 
 /// (글자색, 바탕색, 꾸밈, 고리 번호) — 고리 번호는 `Layout::links` 의 1 기반 자리, 0 이면 고리 아님.
 type Style = (Color, Color, u8, u16);
@@ -378,9 +391,14 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         return hits;
     }
     layout(pane, feed, cols);
-    let empty = pane.layout.cards.is_empty() && !running;
-    let total: f32 = pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
-        + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32;
+    // `cd` 만 친 셸도 빈 화면이다 — 그 카드는 접어 두고 트리가 새 폴더를 편다.
+    let empty = tree::fresh(feed);
+    let total: f32 = if empty {
+        0.0
+    } else {
+        pane.layout.cards.iter().map(|c| card_px(c, line_h)).sum::<f32>()
+            + CARD_GAP * pane.layout.cards.len().saturating_sub(1) as f32
+    };
     // 터미널처럼 위에서부터 쌓고 입력 칸은 마지막 묶음 바로 아래에 세운다 — 칸이 차면 바닥에 붙는다.
     // 아래에 붙여 쌓으면 명령이 적은 넓은 칸의 위쪽이 통째로 빈다(폰은 대화 앱처럼 아래에 붙인다).
     let gap = if input_h > 0.0 { 6.0 } else { PAD_TOP };
@@ -418,13 +436,17 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     // ── 묶음 목록(아래부터 그린다) ─────────────────────────────────────────
     let list_bottom = input_y - gap;
     let list_h = (list_bottom - list_top).max(0.0);
-    // 친 명령이 없으면 입력 칸 아래에 시작 칩 몇 개만 — 워프처럼 입력 칸이 시작점이고, 칩은 지름길이다.
+    // 친 명령이 없으면 입력 칸 아래에 시작 칩과 셸 폴더 트리 — 워프처럼 입력 칸이 시작점이고, 칩·트리는 지름길이다.
+    pane.tree.shown = empty;
     if empty {
         let starts: Vec<&str> = ["ls"].into_iter().chain(feed.branch.as_ref().map(|_| "git status")).chain(["claude"]).collect();
         let mut cx = text_x;
         let cy = if input_h > 0.0 { input_y + input_h + 10.0 } else { list_top };
+        let tree_top = cy + CHIP_H + TREE_GAP;
+        let tree_right = (card_x + card_w - CARD_PAD).min(text_x + TREE_MAX_W);
+        paint_tree(g, cursor, slot, pane, &mut hits, (x, tree_top, w, (y + h - PAD_TOP - tree_top).max(0.0)), (text_x, tree_right));
         for cmd in starts {
-            let r = (cx, cy, g.measure_chrome_text(cmd, 11.5, false) + CHIP_PAD * 2.0, CHIP_H);
+            let r = (cx, cy, g.measure_code_text(cmd, 11.5) + CHIP_PAD * 2.0, CHIP_H);
             let hover = inside(cursor, r);
             g.round_rect_fill(r.0, r.1, r.2, r.3, CHIP_H / 2.0, if hover { theme::lerp(slot.bg, theme::text(), 0.08) } else { slot.bg });
             g.round_rect_stroke(r.0, r.1, r.2, r.3, CHIP_H / 2.0, 1.0, theme::with_alpha(theme::border(), 200));
@@ -439,8 +461,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     let mut bottom = list_bottom + pane.scroll;
     g.push_clip(x, list_top - PAD_TOP, w, list_h + PAD_TOP);
     let styles = std::mem::take(&mut pane.layout.styles);
-    let count = pane.layout.cards.len();
-    for (i, card) in pane.layout.cards.iter().enumerate().rev() {
+    let count = if empty { 0 } else { pane.layout.cards.len() };
+    for (i, card) in pane.layout.cards.iter().enumerate().rev().filter(|_| !empty) {
         let ch_px = card_px(card, line_h);
         let top = bottom - ch_px;
         bottom = top - CARD_GAP;
@@ -474,7 +496,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
         let cmd = if b.cmd.is_empty() { "(명령 줄을 못 읽었어요)" } else { b.cmd.as_str() };
         let shown = crate::info::fit_text(g, cmd, cmd_w, 12.0, false);
         // 명령 줄을 누르면 입력 줄로 — 올리면 밑줄로 누를 수 있음을 알린다.
-        let cmd_r = (cmd_x, top, g.measure_chrome_text(&shown, 12.0, false).min(cmd_w), HEAD_H);
+        let cmd_r = (cmd_x, top, g.measure_code_text(&shown, 12.0).min(cmd_w), HEAD_H);
         let cmd_on = !b.cmd.is_empty() && inside(cursor, cmd_r);
         g.draw_code_text(cmd_x, top + (HEAD_H - 12.0) / 2.0, &shown, 12.0, if b.cmd.is_empty() { theme::text_mute() } else { theme::text() });
         if cmd_on {
@@ -531,6 +553,106 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, cursor: (f32, f32), slot: &Slot, p
     }
     g.pop_clip();
     hits
+}
+
+/// 빈 화면 트리 — 윗 폴더 줄, 그 아래 펼친 대로. 폴더 이름은 `cd`, 화살표는 펼치기, 파일은 탭으로 열기.
+fn paint_tree(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    slot: &Slot,
+    pane: &mut ShellPane,
+    hits: &mut Vec<(Hit, Rect)>,
+    area: Rect,
+    (left, right): (f32, f32),
+) {
+    let (x, top, w, h) = area;
+    let rows = pane.tree.rows();
+    if rows.is_empty() || h < TREE_ROW_H {
+        pane.tree.scroll_max = 0.0;
+        return;
+    }
+    pane.tree.scroll_max = (rows.len() as f32 * TREE_ROW_H - h).max(0.0);
+    pane.tree.scroll = pane.tree.scroll.min(pane.tree.scroll_max);
+    let hover_fill = theme::lerp(slot.bg, theme::text(), 0.08);
+    let mark_color = |m: char| match m {
+        'M' => theme::syn_type(),
+        'A' | 'U' => theme::success(),
+        'D' => theme::danger(),
+        _ => theme::text_dim(),
+    };
+    g.push_clip(x, top, w, h);
+    for (i, row) in rows.iter().enumerate() {
+        let ry = top + i as f32 * TREE_ROW_H - pane.tree.scroll;
+        if ry + TREE_ROW_H < top || ry > top + h {
+            continue;
+        }
+        let visible = ry >= top - 1.0 && ry + TREE_ROW_H <= top + h + 1.0;
+        let mid = ry + TREE_ROW_H / 2.0;
+        let depth = match row {
+            Row::Up(_) => 0,
+            Row::Item { depth, .. } | Row::Note { depth, .. } => *depth,
+        };
+        let base = left + depth as f32 * TREE_INDENT;
+        let icon_x = base + TREE_CHEVRON + 4.0;
+        let name_x = icon_x + TREE_ICON + 6.0;
+        let row_r = (left - 4.0, ry, right - left + 8.0, TREE_ROW_H);
+        match row {
+            Row::Note { text, .. } => label(g, name_x, mid - 5.5, text, 11.0, theme::text_mute()),
+            Row::Up(parent) => {
+                let hover = visible && inside(cursor, row_r);
+                if hover {
+                    g.round_rect_fill(row_r.0, row_r.1, row_r.2, row_r.3, theme::radius_sm(), hover_fill);
+                    g.hover_pointer = true;
+                }
+                g.queue_icon("arrow-up", icon_x, mid - TREE_ICON / 2.0, TREE_ICON, if hover { theme::text() } else { theme::text_dim() });
+                g.draw_code_text(name_x, mid - 6.0, "..", 12.0, if hover { theme::text() } else { theme::text_dim() });
+                if visible {
+                    hits.push((Hit::Dir(parent.clone()), row_r));
+                }
+            }
+            Row::Item { path, entry, .. } => {
+                let open = entry.dir && pane.tree.open.contains(path);
+                let chevron_r = (base - 2.0, ry, TREE_CHEVRON + 4.0, TREE_ROW_H);
+                let on_chevron = visible && entry.dir && inside(cursor, chevron_r);
+                let hover = visible && inside(cursor, row_r);
+                if hover {
+                    g.round_rect_fill(row_r.0, row_r.1, row_r.2, row_r.3, theme::radius_sm(), hover_fill);
+                    g.hover_pointer = true;
+                }
+                let ink = |lit: bool, base: [u8; 4]| if entry.ignored { theme::text_mute() } else if lit { theme::text() } else { base };
+                if entry.dir {
+                    let chev = if open { "chevron-down" } else { "chevron-right" };
+                    g.queue_icon(chev, base, mid - TREE_CHEVRON / 2.0, TREE_CHEVRON, ink(on_chevron, theme::text_mute()));
+                    let icon = if entry.repo { "git-branch" } else if open { "folder-open" } else { "folder" };
+                    g.queue_icon(icon, icon_x, mid - TREE_ICON / 2.0, TREE_ICON, ink(hover, theme::text_dim()));
+                } else if let Some(ft) = crate::file_icon(&entry.name) {
+                    g.queue_icon_colored(ft, icon_x, mid - TREE_ICON / 2.0, TREE_ICON, if entry.ignored { 0.35 } else if hover { 1.0 } else { 0.85 });
+                } else {
+                    g.queue_icon("file", icon_x, mid - TREE_ICON / 2.0, TREE_ICON, ink(hover, theme::text_dim()));
+                }
+                let mark = entry.git.filter(|_| !entry.ignored);
+                let mark_w = if mark.is_some() { 14.0 } else { 0.0 };
+                let fg = match mark {
+                    Some(m) => mark_color(m),
+                    None => ink(hover, if entry.dir { theme::text() } else { theme::text_dim() }),
+                };
+                let name = crate::info::fit_text(g, &entry.name, (right - name_x - mark_w).max(0.0), 12.0, false);
+                label(g, name_x, mid - 6.0, &name, 12.0, fg);
+                if let Some(m) = mark {
+                    g.draw_code_text(right - 8.0, mid - 5.5, &m.to_string(), 11.0, mark_color(m));
+                }
+                if visible {
+                    if entry.dir {
+                        hits.push((Hit::Expand(path.clone()), chevron_r));
+                        hits.push((Hit::Dir(path.clone()), row_r));
+                    } else {
+                        hits.push((Hit::Open(path.clone()), row_r));
+                    }
+                }
+            }
+        }
+    }
+    g.pop_clip();
 }
 
 fn fold_row(g: &mut gpu::GpuRenderer, cursor: (f32, f32), hits: &mut Vec<(Hit, Rect)>, id: u64, text: &str, at: (f32, f32, f32), hover_fill: [u8; 4]) -> f32 {

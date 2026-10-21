@@ -144,15 +144,6 @@
                                 Source='$(var.CargoTargetBinDir)\kasaterm-cli.exe'
                                 KeyPath='yes'/>
                         </Component>
-                        <!-- ⋮ 「파일 트리」 칸. pane_shims 가 exe 옆에서 찾아 칸 PATH 에 올린다. -->
-                        <Component Id='binaryFiles' Guid='*'>
-                            <File
-                                Id='kasafiles'
-                                Name='kasa-files.exe'
-                                DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\kasa-files.exe'
-                                KeyPath='yes'/>
-                        </Component>
                         <Directory Id='ViewerFonts' Name='fonts'>
                             <Component Id='ViewerNotoSansKr' Guid='*'>
                                 <File Id='ViewerNotoSansKrVariable'
@@ -225,7 +216,6 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
             <ComponentRef Id='binary2'/>
-            <ComponentRef Id='binaryFiles'/>
             <ComponentRef Id='ViewerNotoSansKr'/>
             <ComponentRef Id='ViewerNotoSansKrLicense'/>
             <ComponentGroupRef Id='AronaUiGroup'/>

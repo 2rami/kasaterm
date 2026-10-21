@@ -12,6 +12,7 @@ import 'kasanet.dart';
 import 'kasanet_native.dart';
 import 'machine_look.dart';
 import 'relay_account.dart';
+import 'shell_blocks.dart' show TreeEntry;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
 class ServerException implements Exception {
@@ -1320,6 +1321,21 @@ class Server {
     );
     if (body is! Map || body['ok'] != true) return null;
     return body.cast<String, Object?>();
+  }
+
+  /// 원본 기기 폴더 한 층과 줄마다 git 표시 — 빈 셸 명령 보기의 트리(`/term/tree?git=1`).
+  Future<List<TreeEntry>> shellTree(String path, {String? machine}) async {
+    final body = await _getJson(
+      'term/tree',
+      query: {'path': path, 'git': '1'},
+      machine: machine,
+      timeout: const Duration(seconds: 15),
+    );
+    if (body is! Map) throw const ServerException('폴더 목록을 못 받았어요');
+    if (body['ok'] != true) {
+      throw ServerException(body['error'] is String ? body['error'] as String : '폴더 목록을 못 받았어요');
+    }
+    return TreeEntry.parseAll(body['entries']);
   }
 
   /// [source] 는 [offset] 이 가리키는 파일(지난 답의 `source`) — 그 칸이 다른 파일로 옮겨 갔으면 서버가 새 파일

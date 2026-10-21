@@ -25,7 +25,7 @@ DEVID = "Developer ID Application: "
 # release.yml 이 로컬 판을 실제로 검증하는지 — 이 표식이 빠지면 CI 가 검증 없이 appcast 를 낼 수 있어 계획이 막는다.
 WORKFLOW_MARKERS = ("Verify locally signed DMG", "source=Notarized Developer ID", "stapler validate", "VERIFIED_SHA")
 # build-app.sh 의 KASATERM_SIGN_HARDENED=1 이 하나씩 서명하는 자리(안쪽부터). 이 밖의 Mach-O 는 공증에서 거절된다.
-HARDENED_SIGNED = ("Contents/Frameworks/Sparkle.framework", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-files", "Contents/MacOS/kasa-serve-web",
+HARDENED_SIGNED = ("Contents/Frameworks/Sparkle.framework", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-serve-web",
                    "Contents/MacOS/kasaterm")
 _MACHO = {b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 _RUNTIME = 0x10000

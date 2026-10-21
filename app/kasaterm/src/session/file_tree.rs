@@ -666,7 +666,7 @@ impl App {
     }
 
     /// 다른 기기의 파일을 받아 임시 자리에 둔다 — 열기는 그 사본으로(읽기 전용).
-    pub(super) fn fetch_remote_file(label: &str, base: &str, path: &std::path::Path) -> Result<std::path::PathBuf> {
+    pub(crate) fn fetch_remote_file(label: &str, base: &str, path: &std::path::Path) -> Result<std::path::PathBuf> {
         let query = format!("/term/file?path={}", kasa_mcp::remote::urlencode(&path.to_string_lossy()));
         let bytes = kasa_mcp::remote::remote_get_bytes(base, &query)?;
         let rel = path.strip_prefix("/").unwrap_or(path);

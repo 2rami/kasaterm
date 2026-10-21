@@ -32,7 +32,6 @@ LAYERS = {
     "kasa-net": ("transport", 2),
     "kasa-net-ffi": ("transport", 3),
     "kasa-agents": ("collab", 3),
-    "kasa-files": ("tool", 3),
     "kasa-collab": ("collab", 4),
     "kasa-mcp": ("host", 5),
     "kasa-host": ("host", 5),
@@ -42,7 +41,7 @@ SPIKE_DIR = "spikes/"
 HOST_RANK = LAYERS["kasa-mcp"][1]
 
 # 받는 쪽이 없어야 하는 산출물(실행 파일·폰 정적 라이브러리).
-LEAVES = {"kasaterm", "kasa-net-ffi", "kasa-host", "kasa-files"}
+LEAVES = {"kasaterm", "kasa-net-ffi", "kasa-host"}
 
 # 옛 tmux 백엔드. 화면 낱말은 kasa-screen 에서 받는다 — 새로 기대는 크레이트를 만들지 않는다.
 LEGACY_DEPENDENTS = {"kasa-bridge": {"kasaterm"}}

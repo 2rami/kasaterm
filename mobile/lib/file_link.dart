@@ -46,37 +46,40 @@ Future<void> showResultLink(
     href,
     onOpenFile: path == null
         ? null
-        : () async {
-            final messenger = ScaffoldMessenger.of(context);
-            messenger.showSnackBar(
-              const SnackBar(content: Text('파일을 가져오는 중이에요')),
-            );
-            try {
-              final bytes = await server.resultFileBytes(
-                path,
-                machine: machine,
-              );
-              if (!context.mounted) return;
-              final name = path.split('/').last;
-              await const MethodChannel(
-                'kasaterm/file_preview',
-              ).invokeMethod<void>('preview', {'name': name, 'bytes': bytes});
-            } catch (error) {
-              if (context.mounted) {
-                messenger.hideCurrentSnackBar();
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      error is ServerException
-                          ? error.message
-                          : '이 파일의 미리보기를 열지 못했어요',
-                    ),
-                  ),
-                );
-              }
-              return;
-            }
-            if (context.mounted) messenger.hideCurrentSnackBar();
-          },
+        : () => previewResultFile(context, server, path, machine: machine),
   );
+}
+
+/// 원본 기기의 파일을 받아 폰 미리보기로 연다 — 링크 시트의 「파일 열기」와 빈 셸 트리의 파일.
+Future<void> previewResultFile(
+  BuildContext context,
+  Server server,
+  String path, {
+  String? machine,
+}) async {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.showSnackBar(
+    const SnackBar(content: Text('파일을 가져오는 중이에요')),
+  );
+  try {
+    final bytes = await server.resultFileBytes(path, machine: machine);
+    if (!context.mounted) return;
+    final name = path.split('/').last;
+    await const MethodChannel(
+      'kasaterm/file_preview',
+    ).invokeMethod<void>('preview', {'name': name, 'bytes': bytes});
+  } catch (error) {
+    if (context.mounted) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            error is ServerException ? error.message : '이 파일의 미리보기를 열지 못했어요',
+          ),
+        ),
+      );
+    }
+    return;
+  }
+  if (context.mounted) messenger.hideCurrentSnackBar();
 }
