@@ -48,8 +48,8 @@ pub(crate) struct NavigationState {
     /// 배치도 칸을 잡아 끄는 중 — 놓은 자리의 칸과 자리를 바꾼다(그쪽 `surface.move`).
     pub(crate) cell_drag: Option<CellDrag>,
     room_menu_rects: Vec<(RoomMenuAction, Rect)>,
-    /// 이름을 고치는 중인 원격 방 — (카드 키, 캐럿 포함 글). 렌더가 프레임마다 채운다.
-    pub(crate) rename: Option<(String, String)>,
+    /// 이름을 고치는 원격 방의 카드 키와 편집 화면. 라벨에 커서 글자를 섞지 않는다.
+    pub(crate) rename: Option<(String, crate::lineedit::SingleLine)>,
     hits: Vec<(Action, Rect)>,
 }
 
@@ -559,7 +559,7 @@ struct RowsCtx<'a> {
     drag: Option<&'a str>,
     viewing: Option<&'a (String, Vec<String>)>,
     viewing_cur: Option<&'a str>,
-    rename: Option<&'a (String, String)>,
+    rename: Option<&'a (String, crate::lineedit::SingleLine)>,
     web_open: &'a std::collections::HashSet<String>,
 }
 
@@ -657,13 +657,12 @@ fn draw_rows(
             }
             let folder_budget = (tab_right - 8.0 - (badge_w + 14.0) - text_x).max(0.0);
             let name_y = if folder.is_empty() && !compact { y + ((SIDEBAR_TAB_H - 17.0) / 2.0).round() } else { y + 11.0 };
-            // 이름을 고치는 중이면 본기기처럼 버퍼(캐럿 포함)가 이름 자리에 선다.
-            let renaming = ctx.rename.filter(|(k, _)| *k == key).map(|(_, t)| crate::lineedit::unmark(t));
-            if let Some((shown, Some(range))) = &renaming {
-                crate::lineedit::paint_band(g, shown, *range, text_x, name_y, 13.5, active, text_x + name_budget);
+            if let Some((_, field)) = ctx.rename.filter(|(k, _)| *k == key) {
+                field.paint(g, (text_x - 4.0, name_y - 4.0, name_budget + 4.0, 23.5), 13.5, active, Some(view));
+            } else {
+                text(g, name, text_x, name_y, name_budget, 13.5,
+                    if active { theme::text() } else { theme::text_dim() }, active);
             }
-            text(g, renaming.as_ref().map_or(name, |(shown, _)| shown.as_str()), text_x, name_y, name_budget, 13.5,
-                if active || renaming.is_some() { theme::text() } else { theme::text_dim() }, active);
             if !compact {
                 let x_hover = hit(cursor, close);
                 if x_hover { hover_rect(g, close.0, close.1, close.2, close.3, theme::radius_sm()); }
@@ -723,8 +722,6 @@ fn draw_device_section(g: &mut gpu::GpuRenderer, label: &str, area: Rect) {
     let rect = (area.0 + 4.0, area.1 + 2.0, (area.2 - 8.0).max(0.0), (area.3 - 4.0).max(0.0));
     if rect.2 <= 0.0 || rect.3 <= 0.0 { return; }
     let base = theme::panel_bg();
-    round_rect(g, rect.0, rect.1, rect.2, rect.3, 12.0,
-        crate::render::pane_identity::device_section_background(base, label));
     g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, 12.0, 1.0,
         crate::render::pane_identity::device_section_border(base, label));
 }
@@ -1672,14 +1669,8 @@ impl App {
         self.route_drag_move(source, destination, zone);
         self.info.machines_col.last_refresh = None;
     }
-    /// 원격 방 이름 편집칸의 글(캐럿 포함) — 본기기 `overlay_room_rename_label` 과 같은 식.
-    pub(crate) fn remote_rename_overlay(&self) -> Option<(String, String)> {
+    pub(crate) fn remote_rename_overlay(&self) -> Option<(String, crate::lineedit::SingleLine)> {
         let (_, _, key) = self.room_rename.remote.as_ref()?;
-        let (idx, buf) = self.room_rename.editing.as_ref()?;
-        let composing = match self.ime_focus {
-            Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
-            _ => "",
-        };
-        Some((key.clone(), crate::lineedit::caret_label(crate::chrome::ROOM_FIELD, buf, self.room_rename.cursor, composing)))
+        Some((key.clone(), self.room_rename_view()?))
     }
 }

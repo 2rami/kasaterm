@@ -86,7 +86,6 @@ pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
     ("amber", [208, 154, 34, 255]),
 ];
 
-const DEVICE_SECTION_TINT: f32 = 0.10;
 const DEVICE_SECTION_BORDER_TINT: f32 = 0.65;
 
 /// 그 기기의 색. 같은 기계를 기기마다 다른 이름으로 불러도 기기 id 로 같은 색이 된다.
@@ -100,10 +99,6 @@ fn machine_tint(label: &str) -> [u8; 4] {
     })
     .flatten()
     .unwrap_or_else(|| hashed_device_color(&key))
-}
-
-pub(crate) fn device_section_background(base: [u8; 4], machine: &str) -> [u8; 4] {
-    theme::lerp(base, machine_tint(machine), DEVICE_SECTION_TINT)
 }
 
 pub(crate) fn device_section_border(base: [u8; 4], machine: &str) -> [u8; 4] {

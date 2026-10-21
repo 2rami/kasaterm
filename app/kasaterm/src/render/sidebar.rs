@@ -14,6 +14,7 @@ pub(super) struct Strip {
 /// `tabs` 를 뺀 나머지는 방 인덱스로 늘어놓은 것이다.
 #[derive(Clone, Copy)]
 pub(super) struct Rooms<'a> {
+    pub rename: Option<(usize, &'a crate::lineedit::SingleLine)>,
     pub tabs: &'a [(usize, Rect)],
     pub labels: &'a [(String, String)],
     pub active: usize,
@@ -73,6 +74,7 @@ pub(super) struct RowMenu<'a> {
 pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
     let Strip { w: tab_strip_w, view: sb_view, cursor: sb_cursor } = *s;
     let Rooms {
+        rename,
         tabs: sb_tabs,
         labels: sb_labels,
         active: sb_active,
@@ -290,24 +292,24 @@ pub(super) fn paint_rooms(g: &mut gpu::GpuRenderer, s: &Strip, r: &Rooms<'_>) {
         } else {
             *ty + ((SIDEBAR_TAB_H - 17.0) / 2.0).round()
         };
-        // 이름을 고치는 중이면 라벨에 고른 범위 표식이 실려 온다 — 걷고 그 아래 바탕을 깐다.
-        let (name, picked) = crate::lineedit::unmark(&name);
-        if let Some(range) = picked {
-            crate::lineedit::paint_band(g, &name, range, text_x, name_y, 13.5, is_active, text_x + name_budget);
+        if let Some((_, field)) = rename.filter(|(index, _)| *index == *i) {
+            field.paint(g, (text_x - 4.0, name_y - 4.0, name_budget + 4.0, 23.5), 13.5, is_active,
+                Some((0.0, sb_view.0, tab_strip_w, sb_view.1)));
+        } else {
+            // Clip before drawing — `draw_text` also borrows `g`.
+            let name_txt = clip_px(g, &name, 13.5, is_active, name_budget);
+            g.draw_text(
+                text_x,
+                name_y,
+                &name_txt,
+                gpu::DrawOpts {
+                    font_size: 13.5,
+                    color: name_fg,
+                    bold: is_active,
+                    italic: false,
+                },
+            );
         }
-        // Clip before drawing — `draw_text` also borrows `g`.
-        let name_txt = clip_px(g, &name, 13.5, is_active, name_budget);
-        g.draw_text(
-            text_x,
-            name_y,
-            &name_txt,
-            gpu::DrawOpts {
-                font_size: 13.5,
-                color: name_fg,
-                bold: is_active,
-                italic: false,
-            },
-        );
         if let Some(k) = kbd {
             g.draw_text(
                 tab_right - 8.0 - kbd_w,

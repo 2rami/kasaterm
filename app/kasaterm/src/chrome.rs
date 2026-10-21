@@ -1988,6 +1988,10 @@ impl App {
     /// 방 이름 편집을 연다 — 카드를 느리게 두 번 누르는 것과 메뉴 「이름 바꾸기」가
     /// 같은 길을 타야 한쪽만 고쳐지는 쌍이 안 된다.
     pub(crate) fn begin_room_rename(&mut self, idx: usize) {
+        self.commit_room_rename();
+        self.ime_retarget(crate::ImeFocus::RoomRename(idx));
+        self.room_rename.remote = None;
+        crate::lineedit::forget(ROOM_FIELD);
         // 손으로 붙인 이름이 없으면 **지금 화면에 보이는 라벨**로 시작한다. 빈칸으로
         // 열면 cwd 에서 파생된 이름이 눈앞에서 사라져, 고치려던 사람이 이름을 통째로
         // 다시 쳐야 한다(Finder 는 현 이름을 채워 준다).
@@ -2001,7 +2005,6 @@ impl App {
         crate::lineedit::select_all(ROOM_FIELD, &cur, &mut self.room_rename.cursor);
         self.room_rename.editing = Some((idx, cur));
         self.room_rename.last_click = None;
-        let _ = self.hangul.flush();
         self.mark_room_label_dirty();
     }
 
@@ -2386,26 +2389,27 @@ impl App {
     /// 다른 기기 방의 이름을 고치기 시작한다 — 같은 편집칸·같은 키 처리를 쓰고, 끝날 때
     /// 그 기계의 `window.rename` 으로 보낸다.
     pub(crate) fn begin_remote_room_rename(&mut self, label: &str, window: u64, key: &str, current: &str) {
+        self.commit_room_rename();
+        self.ime_retarget(crate::ImeFocus::RoomRename(usize::MAX));
+        crate::lineedit::forget(ROOM_FIELD);
         crate::lineedit::select_all(ROOM_FIELD, current, &mut self.room_rename.cursor);
         self.room_rename.editing = Some((usize::MAX, current.to_string()));
         self.room_rename.remote = Some((label.to_string(), window, key.to_string()));
         self.room_rename.last_click = None;
-        let _ = self.hangul.flush();
         self.mark_room_label_dirty();
     }
 
     /// 편집 중이면 버퍼를 방 이름으로 확정한다. **빈 문자열이면 override 를 지워**
     /// 기본 라벨(캐릭터 이름)로 되돌린다 — 빈 이름을 저장하면 방이 무명이 된다.
     pub(crate) fn commit_room_rename(&mut self) {
-        let Some((idx, mut buf)) = self.room_rename.editing.take() else {
+        if self.room_rename.editing.is_none() { return; }
+        if let Some(tail) = self.hangul.flush() {
+            self.room_rename_insert(&tail);
+        }
+        let Some((idx, buf)) = self.room_rename.editing.take() else {
             return;
         };
         crate::lineedit::forget(ROOM_FIELD);
-        // 조합 중이던 마지막 글자도 이름의 일부다 — 안 흘리면 "가나다" 를 치고
-        // Enter 를 눌렀을 때 "가나" 만 남는다.
-        if let Some(tail) = self.hangul.flush() {
-            buf.push_str(&tail);
-        }
         self.end_room_rename_ime();
         let name = buf.trim().to_string();
         if let Some((label, window, _)) = self.room_rename.remote.take() {
@@ -2519,10 +2523,45 @@ impl App {
     /// 라벨은 캐시 밖에서 버퍼로 덮으므로 재계산 자체는 안 돌지만, 편집을 끝낸 뒤
     /// 원래 이름으로 돌아가려면 캐시를 한 번 비워야 한다.
     pub(crate) fn mark_room_label_dirty(&mut self) {
+        self.last_input_at = std::time::Instant::now();
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    pub(crate) fn room_rename_view(&self) -> Option<crate::lineedit::SingleLine> {
+        let (idx, text) = self.room_rename.editing.as_ref()?;
+        let preedit = match self.ime_focus {
+            Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.clone(),
+            _ => String::new(),
+        };
+        Some(crate::lineedit::SingleLine {
+            id: ROOM_FIELD, text: text.clone(), cursor: self.room_rename.cursor,
+            preedit, caret_on: self.cursor_blink_on(std::time::Instant::now()),
+        })
+    }
+
+    pub(crate) fn room_rename_pointer_press(&mut self, point: (f32, f32)) -> bool {
+        if self.room_rename.editing.is_none() { return false; }
+        if !crate::lineedit::pointer_hit(ROOM_FIELD, point) {
+            self.commit_room_rename();
+            return false;
+        }
+        if let Some(text) = self.hangul.flush() { self.room_rename_insert(&text); }
+        self.preedit.clear();
+        self.in_preedit = false;
+        let len = self.room_rename.editing.as_ref().map_or(0, |(_, s)| s.chars().count());
+        crate::lineedit::pointer_press(ROOM_FIELD, &mut self.room_rename.cursor, len, point, self.modifiers.shift_key());
+        self.mark_room_label_dirty();
+        true
+    }
+
+    pub(crate) fn room_rename_pointer_drag(&mut self, x: f32) -> bool {
+        let Some((_, text)) = self.room_rename.editing.as_ref() else { return false };
+        if !crate::lineedit::pointer_drag(ROOM_FIELD, &mut self.room_rename.cursor, text.chars().count(), x) { return false; }
+        self.mark_room_label_dirty();
+        true
     }
 
     pub(crate) fn toggle_sidebar(&mut self) {

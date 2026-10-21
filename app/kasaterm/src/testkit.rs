@@ -1053,7 +1053,7 @@ impl App {
         let mid = self.window_labels.first().map(|(n, _)| n.clone()).unwrap_or_default();
         eprintln!("[autoroomrename] 맨 앞에 넣은 뒤 라벨={mid:?} 커서={}", self.room_rename.cursor);
         eprintln!(
-            "[autoroomrename] 기대: 편집진입 버퍼 = 원래 라벨 / 'X▌' / 맨 앞 삽입은 'A▌' 뒤에 원래 이름"
+            "[autoroomrename] 기대: 편집진입 버퍼 = 원래 라벨 / 선택 대체 뒤 'X' / 맨 앞 삽입 뒤 'AX' (캐럿은 별도 그리기)"
         );
         self.render_frame();
     }
@@ -3872,6 +3872,12 @@ impl App {
         NEXT.store(i + 1, Ordering::Relaxed);
         #[cfg(target_os = "macos")]
         {
+            if let Some((x, y)) = point.strip_prefix("right:@").and_then(|p| p.split_once(','))
+                .and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
+            {
+                self.native_mouse(&[(5, x, y), (3, x, y), (4, x, y)], 0);
+                return;
+            }
             // `opt:`·`shift:` 은 그 수정키를 쥔 채 누른다(AppKit 깃발 — winit 이 누름에서 수정키를 갱신한다).
             let held = [("native:", 0u64), ("opt:", NS_OPTION), ("shift:", NS_SHIFT)]
                 .into_iter()
@@ -3982,6 +3988,8 @@ impl App {
                 match kind {
                     1 => { let _: () = msg_send![view, mouseDown: event]; }
                     2 => { let _: () = msg_send![view, mouseUp: event]; }
+                    3 => { let _: () = msg_send![view, rightMouseDown: event]; }
+                    4 => { let _: () = msg_send![view, rightMouseUp: event]; }
                     6 => { let _: () = msg_send![view, mouseDragged: event]; }
                     _ => { let _: () = msg_send![view, mouseMoved: event]; }
                 }

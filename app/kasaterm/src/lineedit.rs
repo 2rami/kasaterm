@@ -20,6 +20,9 @@
 use std::cell::RefCell;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
+mod pointer;
+pub(crate) use pointer::{clear_geometry, pointer_drag, pointer_hit, pointer_press, pointer_release, SingleLine};
+
 /// 키 하나를 넣은 결과.
 ///
 /// `Edited` 와 `Moved` 를 가르는 이유: 버퍼가 실제로 바뀌었을 때만 해야 하는 일이 있다
@@ -142,8 +145,9 @@ fn with_state<R>(id: &str, f: impl FnOnce(&mut State) -> R) -> R {
     })
 }
 
-/// 칸이 닫히거나 마우스로 커서를 옮겼을 때 — 남은 선택이 다음에 연 같은 칸에 묻어나지 않게.
+/// 칸이 닫힐 때 남은 선택과 기록이 다음 편집에 묻어나지 않게 한다.
 pub(crate) fn forget(id: &str) {
+    pointer::forget(id);
     FOCUS.with_borrow_mut(|focus| {
         if focus.as_ref().is_some_and(|(at, _)| at == id) {
             *focus = None;
@@ -206,48 +210,6 @@ pub(crate) fn paint_band(
     if x1 > x0 {
         g.rect(x0, y - 2.0, x1 - x0, size + 4.0, crate::theme::with_alpha(crate::theme::accent(), BAND_ALPHA));
     }
-}
-
-/// 라벨 자리에 그대로 그리는 칸(방 이름)이 고른 범위를 글에 실어 보내는 표식. 글 안에서만
-/// 오가므로 사람이 쓰지 않는 사용자 영역 글자를 쓴다.
-const MARK_OPEN: char = '\u{E000}';
-const MARK_CLOSE: char = '\u{E001}';
-
-/// 커서 자리에 조합 중인 글자와 캐럿(▌)을 넣고, 고른 데가 있으면 표식으로 감싼 라벨 글.
-pub(crate) fn caret_label(id: &str, text: &str, cursor: usize, composing: &str) -> String {
-    let len = text.chars().count();
-    let cursor = cursor.min(len);
-    let (before, after) = split(text, cursor);
-    match selection(id, cursor, len) {
-        Some((start, end)) if end == cursor => {
-            let (head, picked) = split(&before, start);
-            format!("{head}{MARK_OPEN}{picked}{MARK_CLOSE}{composing}\u{258c}{after}")
-        }
-        Some((_, end)) => {
-            let (picked, tail) = split(&after, end - cursor);
-            format!("{before}{composing}\u{258c}{MARK_OPEN}{picked}{MARK_CLOSE}{tail}")
-        }
-        None => format!("{before}{composing}\u{258c}{after}"),
-    }
-}
-
-/// [`caret_label`] 의 표식을 걷은 글과 고른 문자 범위.
-pub(crate) fn unmark(label: &str) -> (String, Option<(usize, usize)>) {
-    if !label.contains(MARK_OPEN) {
-        return (label.to_string(), None);
-    }
-    let (mut clean, mut start, mut end, mut n) = (String::new(), None, None, 0);
-    for ch in label.chars() {
-        match ch {
-            MARK_OPEN => start = Some(n),
-            MARK_CLOSE => end = Some(n),
-            _ => {
-                clean.push(ch);
-                n += 1;
-            }
-        }
-    }
-    (clean, start.zip(end))
 }
 
 /// 커서 자리에 글자를 넣고 커서를 그만큼 민다. 선택은 모르는 낮은 층 — 칸이 고른 것을
@@ -785,21 +747,6 @@ mod tests {
         p.named(NamedKey::ArrowLeft, CMD);
         p.named(NamedKey::Backspace, CMD);
         assert_eq!(p.text, "첫 줄\n둘째 줄", "줄 처음에서 ⌘⌫ 는 지울 게 없다");
-    }
-
-    #[test]
-    fn caret_label_marks_the_picked_side_of_the_caret() {
-        let (t, mut c) = ("방 이름".to_string(), 4);
-        select_all("test:label", &t, &mut c);
-        let label = caret_label("test:label", &t, c, "");
-        assert_eq!(unmark(&label), ("방 이름\u{258c}".to_string(), Some((0, 4))));
-        let mut c = 0;
-        with_state("test:label", |s| s.anchor = Some(2));
-        let label = caret_label("test:label", &t, c, "ㄱ");
-        assert_eq!(unmark(&label), ("ㄱ\u{258c}방 이름".to_string(), Some((2, 4))), "캐럿 뒤를 고르면 캐럿 다음부터");
-        c = 4;
-        forget("test:label");
-        assert_eq!(unmark(&caret_label("test:label", &t, c, "")), ("방 이름\u{258c}".to_string(), None));
     }
 
     #[test]

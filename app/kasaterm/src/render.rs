@@ -2533,6 +2533,9 @@ impl App {
         let mut settings_paint = None;
         // 원격 방 이름 편집칸 — GPU 를 빌리기 전에 읽어 둔다.
         self.info.navigation.rename = self.remote_rename_overlay();
+        let room_rename_view = self.room_rename_view();
+        let room_rename_index = self.room_rename.editing.as_ref().map(|(i, _)| *i);
+        if room_rename_view.is_some() { crate::lineedit::clear_geometry(crate::chrome::ROOM_FIELD); }
         let claude_observations: ClaudeObservations = self.set_claude_accounts.iter()
             .map(|account| (account.id.clone(), (self.claude_account_usage(&account.id), self.claude_account_status(&account.id))))
             .collect();
@@ -3403,21 +3406,25 @@ impl App {
                     let text_x = icon_x + isz + 6.0;
                     let avail = (*tx + *tw - text_x - if show_close { 24.0 } else { 8.0 }).max(0.0);
                     let budget = (avail / 7.8).floor().max(2.0) as usize;
-                    g.draw_text(
-                        text_x,
-                        *ty + (*th - 12.5) / 2.0,
-                        &clip_display_width(&name, budget),
-                        gpu::DrawOpts {
-                            font_size: 12.5,
-                            color: if is_active {
-                                theme::text()
-                            } else {
-                                theme::text_dim()
+                    if let Some(field) = room_rename_view.as_ref().filter(|_| room_rename_index == Some(*i)) {
+                        field.paint(g, (text_x - 4.0, *ty + (*th - 23.0) / 2.0, avail + 4.0, 23.0), 12.5, is_active, None);
+                    } else {
+                        g.draw_text(
+                            text_x,
+                            *ty + (*th - 12.5) / 2.0,
+                            &clip_display_width(&name, budget),
+                            gpu::DrawOpts {
+                                font_size: 12.5,
+                                color: if is_active {
+                                    theme::text()
+                                } else {
+                                    theme::text_dim()
+                                },
+                                bold: is_active,
+                                italic: false,
                             },
-                            bold: is_active,
-                            italic: false,
-                        },
-                    );
+                        );
+                    }
                     if show_close {
                         if let Some((_, (cx, cy, cw, ch))) =
                             sb_closes.iter().find(|(ci, _)| ci == i)
@@ -3502,6 +3509,7 @@ impl App {
                     g,
                     &strip,
                     &sidebar::Rooms {
+                        rename: room_rename_index.zip(room_rename_view.as_ref()),
                         tabs: &sb_tabs,
                         labels: &sb_labels,
                         active: sb_active,

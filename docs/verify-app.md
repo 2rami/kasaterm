@@ -85,6 +85,7 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
    글 대신 `@x,y`(논리 좌표)를 쓰면 그 자리에서 잡거나 놓는다(사이드바 방 카드에 놓기). `native:@x,y` 도 같아서, 올려야 생기는
    단추(파일트리 폴더 줄의 「셸을 이 폴더로」)를 사람 손처럼 옮겨 누른다. `handle:%N` 은 그 칸의 ⋮ 손잡이라
    머리 없는 칸을 통째로 끈다(`drag:handle:%1>@700,600`).
+   `right:@x,y`는 같은 AppKit 경로로 우클릭 메뉴를 연다. 방 이름 변경 등 메뉴 진입은 실제 창 캡처에서 잰 좌표로 검사한다.
    **키**는 `KASATERM_AUTOKEYS="9000:text:hello;9500:alt+left;10000:cmd+c"`(앱 시작 기준 ms, `shift`·`ctrl`·`alt`·`cmd` +
    `left`·`right`·`up`·`down`·`home`·`end`·`backspace`·`enter`·`esc`·글자) — 같은 AppKit 길로 `forward_key` 까지 탄다.
    `tell --raw` 는 PTY 에 바로 써서 키 처리를 못 본다. 입력칸 ⌘C·⌘V 는 검증 실행에서 사람 클립보드 대신

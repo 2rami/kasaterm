@@ -653,9 +653,6 @@ impl App {
         }
     }
 
-    /// 편집 중인 방의 라벨을 버퍼(+조합 중인 글자+캐럿)로 덮는다. 별도 입력칸을
-    /// 띄우지 않고 라벨 자리를 그대로 쓰는 Finder 식 편집이다.
-    ///
     /// **재계산 안이 아니라 밖에서 덮는 게 핵심이다.** 위 캐시는 1초짜리고 cwd 를
     /// `lsof` 로 캐느라 비싸서 매 키마다 깰 수가 없는데, 합성을 그 안에 두면 타이핑이
     /// 1초씩 뭉쳐 나온다(사용자: "이름 바꾸는 게 버벅여").
@@ -663,15 +660,8 @@ impl App {
         let Some((idx, buf)) = self.room_rename.editing.as_ref() else {
             return;
         };
-        let composing = match self.ime_focus {
-            Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
-            _ => "",
-        };
-        // 캐럿은 커서 자리다 — 늘 끝에 붙이면 가운데를 고치는 동안 커서가 어디 있는지
-        // 화면이 거짓말을 한다. 조합 중인 글자는 커서 바로 앞에 온다.
-        let text = crate::lineedit::caret_label(crate::chrome::ROOM_FIELD, buf, self.room_rename.cursor, composing);
         if let Some(slot) = self.window_labels.get_mut(*idx) {
-            slot.0 = text;
+            slot.0 = buf.clone();
         }
     }
     /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it

@@ -3332,6 +3332,10 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        // A sidebar name field still owns its keys when a narrow Info panel covers the terminal.
+        if self.room_rename_key(event) {
+            return;
+        }
         // A full-width panel must not type into the terminal or chat hidden underneath it.
         if self.side_column_covers_workspace() {
             if self.git.commit_focused {
@@ -3342,11 +3346,6 @@ impl App {
                 self.toggle_git_col();
             }
             if let Some(window) = &self.window { window.request_redraw(); }
-            return;
-        }
-        // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
-        // pane 의 셸로 새 나간다(이름을 고치다 셸에 명령이 찍힌다).
-        if self.room_rename_key(event) {
             return;
         }
         // 웹 pane 주소창 편집도 같은 규칙 — 주소를 치다 셸에 새면 안 된다.

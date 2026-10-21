@@ -3494,6 +3494,9 @@ impl ApplicationHandler<UserEvent> for App {
             // 때까지 화면이 stale — "다른 앱 보다가 돌아오면 0.5초 늦음"의 원인.
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
+                if !focused && self.room_rename.editing.is_some() {
+                    crate::lineedit::pointer_release(crate::chrome::ROOM_FIELD);
+                }
                 if focused {
                     // 앱으로 돌아온 사람은 지금 방을 본다 — 그 방 칸들의 깜빡임을 멈춘다.
                     self.quiet_room_blinks(self.active_window);
@@ -3544,6 +3547,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { .. } => {
                 let main_modal = self.main_pointer_modal();
+                if !main_modal && self.room_rename_pointer_drag(self.cursor_px.0) {
+                    window.set_cursor(CursorIcon::Text);
+                    window.request_redraw();
+                    return;
+                }
                 if main_modal {
                     let (cx, cy) = self.cursor_px;
                     let inside = |r: &(f32, f32, f32, f32)| {
@@ -4286,6 +4294,9 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    let icon = if self.room_rename.editing.is_some()
+                        && crate::lineedit::pointer_hit(crate::chrome::ROOM_FIELD, (cx, cy))
+                    { CursorIcon::Text } else { icon };
                     // 그 밖의 모든 누를 수 있는 표면 — 버튼·탭·메뉴 항목·목록 행.
                     // 히트렉트를 다시 훑지 않고 직전 프레임이 세운 플래그를 읽는다.
                     // 들림을 그린 자리가 곧 손가락이 뜨는 자리라, 새 버튼을 만들어도
@@ -4541,7 +4552,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // (cursor left the row) released over a pane types that path
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
+                if matches!(state, ElementState::Pressed) && !self.main_pointer_modal()
+                    && self.sidebar_menu.is_none() && self.info.navigation.room_menu.is_none()
+                    && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
+                    && self.info.machine_menu.is_none() && self.file_tree.ctx_menu.is_none()
+                    && self.room_rename_pointer_press(self.cursor_px)
+                {
+                    window.request_redraw();
+                    return;
+                }
                 if matches!(state, ElementState::Released) {
+                    if self.room_rename.editing.is_some()
+                        && crate::lineedit::pointer_release(crate::chrome::ROOM_FIELD)
+                    {
+                        window.request_redraw();
+                        return;
+                    }
                     if self.native_settings_end_drag() {
                         window.request_redraw();
                         return;

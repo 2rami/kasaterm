@@ -45,6 +45,7 @@
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`·호버 전달 `forward_hover`·손가락 커서 판정 `refresh_hover_pointer`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
 - `lineedit.rs` — 입력칸(방 이름·git 커밋·트리 검색·웹 주소·MCP·설정 칸) 공용 편집기: macOS 표준 키·선택·클립보드·되돌리기, 고른 바탕 `paint_band`. 선택·기록은 초점 칸 하나만 여기 둔다
+- `lineedit/pointer.rs` — 방 이름의 공통 입력 화면·실측 글자 위치·마우스 선택·가로 스크롤. 커서를 글자에 섞지 않고 그리며, 클릭은 되돌리기 기록을 유지한다.
 - `testkit.rs` — `schedule_auto*`·`arm_auto*`·`run_pending_auto*` (env 자동테스트 하네스)
 - `gpu.rs` — `KASATERM_RENDERER=gpu` 경로. 자체 wgpu Surface + 셀 파이프라인(sugarloaf 경로와 상호배타)
 - `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 문서(마크다운) 창 + 별도창 공용 틀(`AuxWindows`, 이벤트 위임, documents.json)
