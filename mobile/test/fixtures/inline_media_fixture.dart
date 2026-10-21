@@ -18,7 +18,6 @@ class MediaFixture {
     this.durationMs,
     this.width,
     this.height,
-    this.claimedSha,
   });
   final String id;
   final String kind;
@@ -30,9 +29,6 @@ class MediaFixture {
   final int? width;
   final int? height;
 
-  /// 일부러 틀린 해시를 알려 대조 실패를 본다.
-  final String? claimedSha;
-
   Map<String, Object?> get info => {
     'version': 1,
     'id': id,
@@ -40,7 +36,7 @@ class MediaFixture {
     'name': name,
     'mime': mime,
     'size': bytes.length,
-    'sha256': claimedSha ?? sha256.convert(bytes).toString(),
+    'sha256': sha256.convert(bytes).toString(),
     'duration_ms': durationMs,
     'width': width,
     'height': height,
@@ -130,17 +126,6 @@ Map<String, MediaFixture> loadMediaFixtures(String dir) {
         durationMs: 3000,
         width: 180,
         height: 320,
-      ),
-      MediaFixture(
-        id: '4444444444444444',
-        kind: 'video',
-        name: 'tampered.mp4',
-        mime: 'video/mp4',
-        bytes: clip,
-        durationMs: 3000,
-        width: 320,
-        height: 180,
-        claimedSha: '0' * 64,
       ),
     ])
       m.id: m,

@@ -126,7 +126,7 @@ abstract final class Look {
   static const tableCellPadY = 6.0;
 
   /// 말풍선 속 소리·영상 카드(`inline_media.dart`). 영상 포스터 높이 상한은 결과 이미지와 같은 360, 비율은
-  /// 세로 9:16 ~ 가로 2.4:1 로 자른다. 포스터 가운데 재생 원, 카드 안 여백, 받는 중 막대 두께.
+  /// 세로 9:16 ~ 가로 2.4:1 로 자른다. 포스터 가운데 재생 원, 카드 안 여백.
   static const mediaMaxH = 360.0;
   static const mediaMinAspect = 9 / 16;
   static const mediaMaxAspect = 2.4;
@@ -134,7 +134,6 @@ abstract final class Look {
   static const mediaPlayIcon = 32.0;
   static const mediaDotIcon = 26.0;
   static const mediaPad = 8.0;
-  static const mediaBar = 4.0;
   static const mediaPendingVideo = 160.0;
 
   /// 카드 바탕 — 말풍선 위에 `text` 6% 를 얹는다. 말풍선 색이 테마마다 달라 덮는 옅기로 가른다

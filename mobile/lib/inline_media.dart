@@ -1,11 +1,9 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show min;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
 import 'inline_media_store.dart';
@@ -13,8 +11,8 @@ import 'look.dart';
 import 'screens/media_player.dart';
 import 'server.dart';
 
-/// 클라이언트가 한 번에 받는 조각. 서버 상한은 8MiB 지만 관문 너머 한 요청이 오래 걸리면 진행이 멎어 보인다.
-const inlineMediaChunk = 4 * 1024 * 1024;
+/// 재생 중 원본 기기에 한 번에 묻는 구간. 크면 첫 화면·탐색이 늦고, 작으면 관문 왕복이 늘어 끊긴다.
+const inlineMediaChunk = 512 * 1024;
 const inlineMediaMaxSize = 1024 * 1024 * 1024;
 
 enum InlineMediaKind { audio, video }
@@ -133,6 +131,21 @@ class InlineMedia {
     };
   }
 
+  /// 루프백 창구가 싣는 Content-Type. http 로 읽는 AVPlayer 는 이것으로 컨테이너를 고르니 등록소 mime 이
+  /// 엉뚱해도 확장자로 맞춘다.
+  String get streamMime => switch (extension) {
+    'mov' => 'video/quicktime',
+    'm4v' => 'video/x-m4v',
+    'mp3' => 'audio/mpeg',
+    'm4a' || 'm4b' => 'audio/mp4',
+    'aac' => 'audio/aac',
+    'wav' => 'audio/wav',
+    'aif' || 'aiff' => 'audio/aiff',
+    'caf' => 'audio/x-caf',
+    'flac' => 'audio/flac',
+    _ => 'video/mp4',
+  };
+
   /// 카드 둘째 줄 — 「3:21 · 4.2MB」.
   String get caption => [
     if (durationMs case final ms?) clockLabel(Duration(milliseconds: ms)),
@@ -161,157 +174,62 @@ String inlineMediaKey(Server server, String? machine, String id) => sha256
     .toString()
     .substring(0, 32);
 
-/// 받은 파일을 두는 곳(`inline_media_store_io.dart`).
+/// 다 받아 대조까지 끝난 파일과 카드 정보를 두는 곳(`inline_media_store_io.dart`). 새 파일은 더 받아 두지 않고
+/// 전 판이 받아 둔 완성본만 다시 쓴다.
 abstract interface class MediaStore {
   /// 다 받아 대조까지 끝난 파일 경로, 없으면 null.
   Future<String?> finished(InlineMedia m);
-
-  /// 받는 중인 조각 — 전에 받다 만 것이 있으면 그 뒤부터 잇는다.
-  Future<MediaPart> part(InlineMedia m);
   Future<void> remember(String key, InlineMedia m, Uint8List? poster);
   Future<(InlineMedia, Uint8List?)?> recall(String key, String id);
 }
 
-abstract interface class MediaPart {
-  int get length;
-  Future<void> add(Uint8List bytes);
+/// 플레이어가 여는 곳 — 이 폰에 있는 완성 파일이거나, 원본 기기에서 필요한 구간만 받아 넘기는 루프백 창구.
+abstract interface class MediaLink {
+  Uri get uri;
 
-  /// 크기·sha256 을 정보와 대조해 맞으면 완성 파일로 옮기고 그 경로. 틀리면 조각을 지우고 던진다.
-  Future<String> finish();
+  /// 이 폰의 파일 경로 — 미리보기(Quick Look)로 넘길 수 있다. 창구면 null.
+  String? get path;
 
-  /// 지운다(사람이 취소).
-  Future<void> discard();
+  /// 원본에서 조각을 받다 난 까닭. 재생이 실패하면 형식 탓 대신 이것을 보인다.
+  String? get error;
 
-  /// 남겨 둔다(실패 — 「다시 시도」가 이어 받는다).
+  /// 받던 요청·연결을 모두 끊는다.
   Future<void> close();
 }
 
-class MediaIntegrityException implements Exception {
-  const MediaIntegrityException();
+class _FileLink implements MediaLink {
+  _FileLink(String this.path);
+  @override
+  final String? path;
+  @override
+  Uri get uri => Uri.file(path!);
+  @override
+  String? get error => null;
+  @override
+  Future<void> close() async {}
 }
 
-enum MediaPhase { idle, downloading, ready, failed }
+typedef VideoPlayerFactory = VideoPlayerController Function(Uri uri);
 
-typedef VideoPlayerFactory = VideoPlayerController Function(String path);
+typedef MediaBridgeOpener =
+    Future<MediaLink> Function({
+      required Server server,
+      required String id,
+      required String? machine,
+      required InlineMedia media,
+      required int chunk,
+    });
 
-/// 한 파일 받기. 같은 내용(sha256)은 카드가 몇 개든 하나만 돈다 — 카드가 스크롤로 사라졌다 돌아와도 진행을 잇는다.
-class MediaFetch extends ChangeNotifier {
-  MediaFetch(this.media);
-  final InlineMedia media;
-  MediaPhase phase = MediaPhase.idle;
-  int received = 0;
-  String? error;
-  String? path;
-  Completer<void>? _abort;
-  Future<String?>? _running;
-
-  bool get busy => phase == MediaPhase.downloading;
-  double get progress => media.size == 0 ? 0 : received / media.size;
-
-  /// 받아서 경로를 준다. 취소·실패면 null(까닭은 [error]).
-  Future<String?> run({
-    required Server server,
-    required String id,
-    required String? machine,
-    required MediaStore store,
-    int chunk = inlineMediaChunk,
-  }) => _running ??= _run(
-    server,
-    id,
-    machine,
-    store,
-    chunk,
-  ).whenComplete(() => _running = null);
-
-  void cancel() {
-    final abort = _abort;
-    if (abort != null && !abort.isCompleted) abort.complete();
-  }
-
-  void _set(MediaPhase p, {String? error}) {
-    phase = p;
-    this.error = error;
-    notifyListeners();
-  }
-
-  Future<String?> _run(
-    Server server,
-    String id,
-    String? machine,
-    MediaStore store,
-    int chunk,
-  ) async {
-    final done = await store.finished(media);
-    if (done != null) {
-      path = done;
-      received = media.size;
-      _set(MediaPhase.ready);
-      return done;
-    }
-    final abort = _abort = Completer<void>();
-    _set(MediaPhase.downloading);
-    MediaPart? part;
-    try {
-      part = await store.part(media);
-      received = part.length;
-      notifyListeners();
-      while (part.length < media.size) {
-        if (abort.isCompleted) throw const _Canceled();
-        final bytes = await server.inlineMediaChunk(
-          id,
-          offset: part.length,
-          length: min(chunk, media.size - part.length),
-          machine: machine,
-          abort: abort.future,
-        );
-        if (abort.isCompleted) throw const _Canceled();
-        await part.add(bytes);
-        received = part.length;
-        notifyListeners();
-      }
-      final p = await part.finish();
-      part = null;
-      path = p;
-      _set(MediaPhase.ready);
-      return p;
-    } on _Canceled {
-      await part?.discard();
-    } on http.RequestAbortedException {
-      await part?.discard();
-    } on MediaIntegrityException {
-      part = null;
-      received = 0;
-      _set(MediaPhase.failed, error: '받은 파일이 원본과 달라요');
-      return null;
-    } on ServerException catch (e) {
-      await part?.close();
-      _set(MediaPhase.failed, error: e.message);
-      return null;
-    } catch (_) {
-      await part?.close();
-      _set(MediaPhase.failed, error: '미디어를 받지 못했어요');
-      return null;
-    } finally {
-      _abort = null;
-    }
-    received = 0;
-    _set(MediaPhase.idle);
-    return null;
-  }
-}
-
-class _Canceled implements Exception {
-  const _Canceled();
-}
-
-/// 앱 전체에서 하나 — 저장소와 받는 중인 것들. 시험은 [debugReset] 으로 갈아 끼운다.
+/// 앱 전체에서 하나 — 저장소·플레이어·창구를 여는 길. 시험은 [debugReset] 으로 갈아 끼운다.
 class InlineMediaHub {
   InlineMediaHub({
     Future<MediaStore?> Function()? store,
     this.chunk = inlineMediaChunk,
     VideoPlayerFactory? player,
+    MediaBridgeOpener? bridge,
   }) : _openStore = store ?? openMediaStore,
-       player = player ?? mediaController;
+       player = player ?? mediaController,
+       _bridge = bridge ?? openMediaBridge;
 
   static InlineMediaHub instance = InlineMediaHub();
 
@@ -325,12 +243,25 @@ class InlineMediaHub {
   );
   final int chunk;
   final VideoPlayerFactory player;
-  final _fetches = <String, MediaFetch>{};
+  final MediaBridgeOpener _bridge;
 
-  MediaFetch fetch(InlineMedia m) =>
-      _fetches.putIfAbsent(m.sha256, () => MediaFetch(m));
-
-  MediaFetch? running(InlineMedia m) => _fetches[m.sha256];
+  /// 받아 둔 완성본이 있으면 그 파일, 없으면 이 연결·기기·id·정보에 고정한 창구.
+  Future<MediaLink> open({
+    required Server server,
+    required String id,
+    required String? machine,
+    required InlineMedia media,
+  }) async {
+    final done = await (await store)?.finished(media);
+    if (done != null) return _FileLink(done);
+    return _bridge(
+      server: server,
+      id: id,
+      machine: machine,
+      media: media,
+      chunk: chunk,
+    );
+  }
 }
 
 class _Loaded {
@@ -339,8 +270,8 @@ class _Loaded {
   final Uint8List? poster;
 }
 
-/// 말풍선 속 소리·영상 카드. 블록이 보여도 아무것도 받지 않는다 — 정보·포스터만 받고, 누르면 그때 파일을 받아
-/// 앱 안 플레이어로 연다.
+/// 말풍선 속 소리·영상 카드. 블록이 보여도 정보·포스터만 받는다 — 누르면 곧바로 앱 안 플레이어를 열고, 플레이어가
+/// 재생에 필요한 구간만 원본 기기에서 받는다.
 class InlineMediaCard extends StatefulWidget {
   const InlineMediaCard({
     super.key,
@@ -360,16 +291,10 @@ class InlineMediaCard extends StatefulWidget {
 
 class _InlineMediaCardState extends State<InlineMediaCard> {
   late Future<_Loaded> _info = _load();
-  MediaFetch? _fetch;
-
-  /// 카드가 가리키는 대상(연결·id·기기)이 바뀔 때마다 오른다. 기다리던 정보·받기가 끝났을 때 이 값이 다르면
-  /// 옛 카드의 답이라 버린다 — 새 기기의 카드에 옛 진행을 붙이거나 옛 미디어를 열지 않는다.
-  int _gen = 0;
 
   InlineMediaHub get _hub => InlineMediaHub.instance;
 
   Future<_Loaded> _load() async {
-    final gen = _gen;
     final server = widget.server, id = widget.id, machine = widget.machine;
     final store = await _hub.store;
     final key = inlineMediaKey(server, machine, id);
@@ -383,7 +308,6 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
       // 원본 기기가 꺼졌거나 지웠어도 전에 본 카드면 기억한 정보로 선다 — 받아 둔 파일은 그대로 재생된다.
       final old = await store?.recall(key, id);
       if (old == null) rethrow;
-      _attach(gen, old.$1);
       return _Loaded(old.$1, old.$2);
     }
     Uint8List? poster;
@@ -397,20 +321,7 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
     try {
       await store?.remember(key, media, poster);
     } catch (_) {}
-    _attach(gen, media);
     return _Loaded(media, poster);
-  }
-
-  void _attach(int gen, InlineMedia m) {
-    if (gen != _gen || !mounted) return;
-    final fetch = _hub.running(m);
-    if (fetch == null || identical(fetch, _fetch)) return;
-    _fetch?.removeListener(_changed);
-    _fetch = fetch..addListener(_changed);
-  }
-
-  void _changed() {
-    if (mounted) setState(() {});
   }
 
   @override
@@ -419,51 +330,27 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
     if (oldWidget.server != widget.server ||
         oldWidget.id != widget.id ||
         oldWidget.machine != widget.machine) {
-      _gen++;
-      _fetch?.removeListener(_changed);
-      _fetch = null;
       _info = _load();
     }
   }
 
-  @override
-  void dispose() {
-    _fetch?.removeListener(_changed);
-    super.dispose();
-  }
-
-  Future<void> _open(InlineMedia media) async {
-    final gen = _gen;
-    final server = widget.server, id = widget.id, machine = widget.machine;
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    final store = await _hub.store;
-    if (gen != _gen || !mounted) return;
-    if (store == null) {
-      messenger?.showSnackBar(
+  void _open(InlineMedia media) {
+    if (!mediaPlayable) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('이 화면에서는 재생할 수 없어요. 앱에서 열어 주세요')),
       );
       return;
     }
-    final fetch = _hub.fetch(media);
-    _attach(gen, media);
-    final path = await fetch.run(
-      server: server,
-      id: id,
-      machine: machine,
-      store: store,
-      chunk: _hub.chunk,
+    // 누른 순간의 연결·기기·id 를 붙잡아 넘긴다 — 열린 뒤 카드가 다른 미디어로 바뀌어도 플레이어는 이것만 묻는다.
+    final hub = _hub, server = widget.server, id = widget.id;
+    final machine = widget.machine;
+    Navigator.of(context).push(
+      MediaPlayerScreen.route(
+        media: media,
+        open: () =>
+            hub.open(server: server, id: id, machine: machine, media: media),
+      ),
     );
-    // 받는 동안 다른 화면으로 갔거나 카드가 다른 미디어로 바뀌었으면 띄우지 않는다 — 받은 파일은 캐시에
-    // 남아 다음 누름에 바로 열린다.
-    if (path == null ||
-        gen != _gen ||
-        !mounted ||
-        !(ModalRoute.of(context)?.isCurrent ?? true)) {
-      return;
-    }
-    await Navigator.of(
-      context,
-    ).push(MediaPlayerScreen.route(media: media, path: path));
   }
 
   @override
@@ -483,110 +370,48 @@ class _InlineMediaCardState extends State<InlineMediaCard> {
       }
       final loaded = snap.data!;
       final media = loaded.media;
-      final fetch = _fetch;
-      final onTap = fetch?.busy ?? false ? null : () => _open(media);
       return media.isVideo
           ? _VideoCard(
               media: media,
               poster: loaded.poster,
-              fetch: fetch,
-              onTap: onTap,
+              onTap: () => _open(media),
             )
-          : _AudioCard(media: media, fetch: fetch, onTap: onTap);
+          : _AudioCard(media: media, onTap: () => _open(media));
     },
   );
 }
 
-/// 받는 중·실패·평소의 아래 줄 — 소리 카드의 둘째 줄, 영상 카드의 포스터 아래.
-class _FetchLine extends StatelessWidget {
-  const _FetchLine({required this.media, required this.fetch});
+/// 카드의 둘째 줄 — 「3:21 · 4.2MB」.
+class _Caption extends StatelessWidget {
+  const _Caption({required this.media});
   final InlineMedia media;
-  final MediaFetch? fetch;
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final sub = TextStyle(
+  Widget build(BuildContext context) => Text(
+    media.caption,
+    style: TextStyle(
       fontSize: Look.sub,
       height: 1.3,
-      color: scheme.onSurfaceVariant,
-    );
-    final f = fetch;
-    if (f != null && f.busy) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(Look.mediaBar),
-            child: LinearProgressIndicator(
-              value: f.received == 0 ? null : f.progress,
-              minHeight: Look.mediaBar,
-              backgroundColor: scheme.onSurface.withValues(alpha: 0.12),
-            ),
-          ),
-          const SizedBox(height: Look.rowGap * 2),
-          Text(
-            '받는 중 ${sizeLabel(f.received)} / ${sizeLabel(media.size)}',
-            style: sub.copyWith(
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-      );
-    }
-    if (f != null && f.phase == MediaPhase.failed) {
-      return Text(
-        '${f.error ?? '받지 못했어요'} · 눌러서 다시',
-        style: sub.copyWith(color: scheme.error),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-      );
-    }
-    return Text(
-      media.caption,
-      style: sub,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-    );
-  }
-}
-
-class _CancelButton extends StatelessWidget {
-  const _CancelButton({required this.fetch});
-  final MediaFetch fetch;
-
-  @override
-  Widget build(BuildContext context) => IconButton(
-    onPressed: fetch.cancel,
-    tooltip: '받기 취소',
-    constraints: const BoxConstraints.tightFor(
-      width: Look.tap,
-      height: Look.tap,
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
     ),
-    iconSize: Look.iconSize,
-    icon: const Icon(Icons.close),
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
   );
 }
 
 class _AudioCard extends StatelessWidget {
-  const _AudioCard({required this.media, required this.fetch, this.onTap});
+  const _AudioCard({required this.media, required this.onTap});
   final InlineMedia media;
-  final MediaFetch? fetch;
-  final VoidCallback? onTap;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final f = fetch;
-    final busy = f?.busy ?? false;
     return Semantics(
       button: true,
       label: '소리 ${media.title}, ${media.caption}',
-      excludeSemantics: !busy,
+      excludeSemantics: true,
       child: Material(
         color: scheme.onSurface.withValues(alpha: Look.mediaTint),
         borderRadius: Look.corners,
@@ -601,7 +426,7 @@ class _AudioCard extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: Look.mediaPad),
               child: Row(
                 children: [
-                  _PlayDot(fetch: f),
+                  const _PlayDot(),
                   const SizedBox(width: Look.fieldGap),
                   Expanded(
                     child: Padding(
@@ -624,12 +449,11 @@ class _AudioCard extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(height: Look.rowGap),
-                          _FetchLine(media: media, fetch: f),
+                          _Caption(media: media),
                         ],
                       ),
                     ),
                   ),
-                  if (busy) _CancelButton(fetch: f!),
                 ],
               ),
             ),
@@ -640,19 +464,13 @@ class _AudioCard extends StatelessWidget {
   }
 }
 
-/// 소리 카드 왼쪽의 채운 원 — 받는 중이면 내려받기 표, 받다 실패했으면 다시.
+/// 소리 카드 왼쪽의 채운 재생 원.
 class _PlayDot extends StatelessWidget {
-  const _PlayDot({required this.fetch});
-  final MediaFetch? fetch;
+  const _PlayDot();
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final icon = switch (fetch?.phase) {
-      MediaPhase.downloading => Icons.downloading,
-      MediaPhase.failed => Icons.refresh,
-      _ => Icons.play_arrow_rounded,
-    };
     return SizedBox.square(
       dimension: Look.tap,
       child: DecoratedBox(
@@ -660,7 +478,11 @@ class _PlayDot extends StatelessWidget {
           color: scheme.primary,
           shape: BoxShape.circle,
         ),
-        child: Icon(icon, size: Look.mediaDotIcon, color: scheme.onPrimary),
+        child: Icon(
+          Icons.play_arrow_rounded,
+          size: Look.mediaDotIcon,
+          color: scheme.onPrimary,
+        ),
       ),
     );
   }
@@ -670,20 +492,16 @@ class _VideoCard extends StatelessWidget {
   const _VideoCard({
     required this.media,
     required this.poster,
-    required this.fetch,
-    this.onTap,
+    required this.onTap,
   });
   final InlineMedia media;
   final Uint8List? poster;
-  final MediaFetch? fetch;
-  final VoidCallback? onTap;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final f = fetch;
-    final busy = f?.busy ?? false;
     final w = media.width, h = media.height;
     final aspect = (w != null && h != null ? w / h : 16 / 9).clamp(
       Look.mediaMinAspect,
@@ -698,7 +516,7 @@ class _VideoCard extends StatelessWidget {
         return Semantics(
           button: true,
           label: '영상 ${media.title}, ${media.caption}',
-          excludeSemantics: !busy,
+          excludeSemantics: true,
           child: SizedBox(
             width: width,
             child: Material(
@@ -736,25 +554,11 @@ class _VideoCard extends StatelessWidget {
                                   color: Colors.black.withValues(alpha: 0.55),
                                   shape: BoxShape.circle,
                                 ),
-                                child: busy
-                                    ? Padding(
-                                        padding: const EdgeInsets.all(14),
-                                        child: CircularProgressIndicator(
-                                          value: f!.received == 0
-                                              ? null
-                                              : f.progress,
-                                          strokeWidth: 3,
-                                          color: Colors.white,
-                                          backgroundColor: Colors.white24,
-                                        ),
-                                      )
-                                    : Icon(
-                                        f?.phase == MediaPhase.failed
-                                            ? Icons.refresh
-                                            : Icons.play_arrow_rounded,
-                                        size: Look.mediaPlayIcon,
-                                        color: Colors.white,
-                                      ),
+                                child: const Icon(
+                                  Icons.play_arrow_rounded,
+                                  size: Look.mediaPlayIcon,
+                                  color: Colors.white,
+                                ),
                               ),
                             ),
                           ),
@@ -791,15 +595,12 @@ class _VideoCard extends StatelessWidget {
                                       ),
                                     ),
                                     const SizedBox(height: Look.rowGap),
-                                    _FetchLine(media: media, fetch: f),
+                                    _Caption(media: media),
                                   ],
                                 ),
                               ),
                             ),
-                            if (busy)
-                              _CancelButton(fetch: f!)
-                            else
-                              const SizedBox(width: Look.fieldGap),
+                            const SizedBox(width: Look.fieldGap),
                           ],
                         ),
                       ),
