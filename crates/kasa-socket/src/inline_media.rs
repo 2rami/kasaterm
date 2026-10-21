@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub const VERSION: u32 = 1;
 pub const MAX_FILE_BYTES: u64 = 1 << 30;
@@ -136,6 +138,18 @@ fn format_for_ext(ext: &str) -> Option<&'static Format> {
     FORMATS.iter().find(|f| f.exts.contains(&ext))
 }
 
+/// 카드 정보가 받는 형식표 안에 있으면 그 형식의 MIME·대표 확장자. 다른 기기가 보낸 정보의 글자를
+/// 그대로 응답 머리나 주소에 싣지 않으려고 표의 고정 문자열을 돌려준다.
+pub fn stream_format(media: &Media) -> Option<(&'static str, &'static str)> {
+    let plausible = media.version == VERSION
+        && valid_id(&media.id)
+        && valid_sha(&media.sha256)
+        && media.size > 0
+        && media.size <= MAX_FILE_BYTES;
+    let format = FORMATS.iter().find(|f| f.mime == media.mime && f.kind == media.kind)?;
+    plausible.then_some((format.mime, format.exts[0]))
+}
+
 fn invalid_input(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.to_string())
 }
@@ -230,8 +244,20 @@ impl Store {
         Ok(path)
     }
 
-    /// `offset` 은 파일 안이어야 하고, 끝을 넘는 `len` 은 남은 만큼만 준다.
+    /// `offset` 은 파일 안이어야 하고, 끝을 넘는 `len` 은 남은 만큼만 준다. 내주는 바이트는 원본이 등록
+    /// 해시와 같다고 확인된 파일에서만 나온다 — 확인은 파일 정체가 바뀔 때까지 한 번이다([`verify_blob`]).
     pub fn read_chunk(&self, id: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.read_verified(id, offset, len, &mut || {}).map(|(bytes, _)| bytes)
+    }
+
+    /// 돌려주는 둘째 값은 이번에 전체 해시를 새로 계산했는지.
+    fn read_verified(
+        &self,
+        id: &str,
+        offset: u64,
+        len: usize,
+        mid_read: &mut dyn FnMut(),
+    ) -> io::Result<(Vec<u8>, bool)> {
         if len == 0 || len > MAX_CHUNK {
             return Err(invalid_input("chunk length out of range"));
         }
@@ -241,14 +267,22 @@ impl Store {
             return Err(invalid_input("offset out of range"));
         }
         let n = (size - offset).min(len as u64) as usize;
-        let (mut file, meta) = open_regular(&self.blob_path(&record.media.sha256, &record.ext))?;
+        let path = self.blob_path(&record.media.sha256, &record.ext);
+        let (mut file, meta) = open_regular(&path)?;
         if meta.len() != size {
             return Err(invalid_data("media cache entry changed"));
         }
+        let seen = Identity::of(&meta);
+        let hashed = verify_blob(&path, &mut file, seen, &record.media.sha256)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; n];
         file.read_exact(&mut bytes)?;
-        Ok(bytes)
+        mid_read();
+        // 확인한 뒤 같은 자리에 덮어쓰면 정체(ctime)가 바뀐다 — 그 사이에 읽은 바이트는 내주지 않는다.
+        if Identity::of(&file.metadata()?) != seen {
+            return Err(invalid_data("media cache entry changed while reading"));
+        }
+        Ok((bytes, hashed))
     }
 
     pub fn read_poster(&self, id: &str) -> io::Result<Vec<u8>> {
@@ -621,6 +655,94 @@ fn open_regular(path: &Path) -> io::Result<(File, std::fs::Metadata)> {
         return Err(invalid_data("media cache entry is not a regular file"));
     }
     Ok((file, meta))
+}
+
+/// 원본 파일의 정체. 같은 길이로 덮어써도 ctime 은 사람이 되돌릴 수 없어 바뀐다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    changed: (i64, i64),
+}
+
+impl Identity {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                size: meta.len(),
+                modified: meta.modified().ok(),
+                changed: (meta.ctime(), meta.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let created = meta.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+            Self {
+                dev: 0,
+                ino: 0,
+                size: meta.len(),
+                modified: meta.modified().ok(),
+                changed: created.map_or((0, 0), |d| (d.as_secs() as i64, d.subsec_nanos() as i64)),
+            }
+        }
+    }
+}
+
+/// 원본 경로마다 마지막으로 해시가 맞았던 정체. 구간을 읽을 때마다 1GiB 를 다시 해시하지 않으려고
+/// 프로세스 전체가 함께 쓴다 — HTTP 는 요청마다 저장소를 새로 만든다.
+fn verified_blobs() -> &'static Mutex<HashMap<PathBuf, VerifiedSlot>> {
+    static VALUE: OnceLock<Mutex<HashMap<PathBuf, VerifiedSlot>>> = OnceLock::new();
+    VALUE.get_or_init(Default::default)
+}
+
+type VerifiedSlot = Arc<Mutex<Option<Identity>>>;
+
+const MAX_VERIFIED: usize = 256;
+
+/// 열린 원본이 등록 해시와 같은지. 정체가 확인 때와 같으면 바로 통과하고, 아니면 끝까지 한 번 읽어
+/// 해시한다. 같은 원본을 동시에 여러 요청이 물어도 해시는 하나만 돈다. 돌려주는 값은 새로 해시했는지.
+fn verify_blob(path: &Path, file: &mut File, seen: Identity, sha: &str) -> io::Result<bool> {
+    let slot = {
+        let mut map = verified_blobs().lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_VERIFIED && !map.contains_key(path) {
+            map.retain(|_, slot| Arc::strong_count(slot) > 1);
+        }
+        map.entry(path.to_path_buf()).or_default().clone()
+    };
+    let mut ok = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if *ok == Some(seen) {
+        return Ok(false);
+    }
+    *ok = None;
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; COPY_BUF];
+    let mut total = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > seen.size {
+            return Err(invalid_data("media cache entry changed while reading"));
+        }
+        hasher.update(&buf[..n]);
+    }
+    if total != seen.size || Identity::of(&file.metadata()?) != seen {
+        return Err(invalid_data("media cache entry changed while reading"));
+    }
+    if hex(&hasher.finalize()) != sha {
+        return Err(invalid_data("media cache entry corrupted"));
+    }
+    *ok = Some(seen);
+    Ok(true)
 }
 
 /// 덮어쓰지 않는 공개. 같은 내용 주소에 이미 멀쩡한 파일이 있으면 그대로 쓴다.
@@ -1021,6 +1143,133 @@ mod tests {
             assert!(store.read_chunk(&media.id, 0, 1).is_err());
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 봉인(0o400)한 원본을 같은 자리·같은 길이로 다시 쓰고 수정 시각까지 되돌린다 — 크기·mtime 만 보는
+    /// 확인으로는 못 잡는 변조다.
+    #[cfg(unix)]
+    fn overwrite_in_place(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let before = std::fs::metadata(path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut f = OpenOptions::new().write(true).open(path).unwrap();
+        f.write_all(bytes).unwrap();
+        f.set_modified(before.modified().unwrap()).unwrap();
+        drop(f);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!((after.ino(), after.len(), after.modified().unwrap()), (before.ino(), before.len(), before.modified().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn served_bytes_come_from_a_blob_verified_once_against_its_sha() {
+        let dir = temp_root("verify");
+        let store = Store::at(dir.join("store"));
+        let src = dir.join("v.mp4");
+        let bytes = mp4_bytes(2 * COPY_BUF + 99, 11);
+        std::fs::write(&src, &bytes).unwrap();
+        let media = store.register(&src, Probe::default()).unwrap();
+        let blob = store.media_path(&media.id).unwrap();
+
+        let (first, hashed) = store.read_verified(&media.id, 0, 16, &mut || {}).unwrap();
+        assert_eq!((first.as_slice(), hashed), (&bytes[..16], true));
+        let (later, hashed) = store.read_verified(&media.id, COPY_BUF as u64, 16, &mut || {}).unwrap();
+        assert_eq!((later.as_slice(), hashed), (&bytes[COPY_BUF..COPY_BUF + 16], false), "정체가 같으면 다시 해시하지 않는다");
+
+        // 읽을 구간 밖 한 바이트만 바꿔도 그 원본의 어떤 구간도 내주지 않는다.
+        let mut forged = bytes.clone();
+        forged[COPY_BUF + 5000] ^= 0xFF;
+        overwrite_in_place(&blob, &forged);
+        let err = store.read_chunk(&media.id, 0, 16).unwrap_err();
+        assert_eq!((err.kind(), err.to_string().as_str()), (io::ErrorKind::InvalidData, "media cache entry corrupted"));
+        assert!(store.read_chunk(&media.id, 0, 16).is_err(), "틀린 확인을 기억해 다음 읽기에 통과시키지 않는다");
+
+        overwrite_in_place(&blob, &bytes);
+        let (back, hashed) = store.read_verified(&media.id, 0, 16, &mut || {}).unwrap();
+        assert_eq!((back.as_slice(), hashed), (&bytes[..16], true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blob_swapped_for_another_file_is_hashed_again() {
+        let dir = temp_root("swap");
+        let store = Store::at(dir.join("store"));
+        let src = dir.join("s.m4a");
+        let bytes = mp4_bytes(COPY_BUF + 7, 12);
+        std::fs::write(&src, &bytes).unwrap();
+        let media = store.register(&src, Probe::default()).unwrap();
+        let blob = store.media_path(&media.id).unwrap();
+        assert!(store.read_verified(&media.id, 0, 8, &mut || {}).unwrap().1);
+
+        let swap = |content: &[u8]| {
+            let then = std::fs::metadata(&blob).unwrap().modified().unwrap();
+            let other = dir.join("other.part");
+            std::fs::write(&other, content).unwrap();
+            File::open(&other).unwrap().set_modified(then).unwrap();
+            std::fs::rename(&other, &blob).unwrap();
+        };
+        let mut forged = bytes.clone();
+        forged[100] ^= 1;
+        swap(&forged);
+        assert_eq!(store.read_chunk(&media.id, 500, 8).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        swap(&bytes);
+        assert_eq!(store.read_verified(&media.id, 500, 8, &mut || {}).unwrap(), (bytes[500..508].to_vec(), true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blob_rewritten_while_a_chunk_is_read_is_refused() {
+        let dir = temp_root("midread");
+        let store = Store::at(dir.join("store"));
+        let src = dir.join("m.wav");
+        let mut bytes = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        bytes.extend_from_slice(&[3; 8000]);
+        std::fs::write(&src, &bytes).unwrap();
+        let media = store.register(&src, Probe::default()).unwrap();
+        let blob = store.media_path(&media.id).unwrap();
+        store.read_chunk(&media.id, 0, 1).unwrap();
+
+        let err = store
+            .read_verified(&media.id, 0, 64, &mut || overwrite_in_place(&blob, &bytes))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "media cache entry changed while reading");
+        // 같은 내용으로 다시 쓴 것뿐이면 한 번 더 해시해 보고 다시 내준다.
+        assert_eq!(store.read_verified(&media.id, 0, 4, &mut || {}).unwrap(), (b"RIFF".to_vec(), true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stream_format_takes_only_the_table_and_a_plausible_card() {
+        let media = Media {
+            version: VERSION,
+            id: "0123456789abcdef".into(),
+            kind: "video".into(),
+            name: "a.mov".into(),
+            mime: "video/quicktime".into(),
+            size: 10,
+            sha256: "0".repeat(64),
+            duration_ms: None,
+            width: None,
+            height: None,
+            poster: false,
+        };
+        assert_eq!(stream_format(&media), Some(("video/quicktime", "mov")));
+        let broken = [
+            Media { mime: "text/html".into(), ..media.clone() },
+            Media { kind: "audio".into(), ..media.clone() },
+            Media { size: 0, ..media.clone() },
+            Media { size: MAX_FILE_BYTES + 1, ..media.clone() },
+            Media { sha256: "../x".into(), ..media.clone() },
+            Media { id: "../meta/x".into(), ..media.clone() },
+            Media { version: VERSION + 1, ..media.clone() },
+        ];
+        for m in &broken {
+            assert_eq!(stream_format(m), None, "{m:?}");
+        }
     }
 
     #[test]

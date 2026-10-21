@@ -51,6 +51,7 @@ pub mod netfwd;
 pub mod layout_feed;
 pub mod layout_watch;
 pub mod machines;
+pub mod media_stream;
 pub mod mobile;
 pub mod notes;
 pub mod push;
