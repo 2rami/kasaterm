@@ -231,7 +231,11 @@ fn digits(s: &str) -> Option<u64> {
 }
 
 fn parse_range(value: Option<&str>, size: u64) -> Want {
-    let Some(spec) = value.and_then(|v| v.trim().strip_prefix("bytes=")) else {
+    // 단위 이름은 대소문자를 가리지 않는다(RFC 9110 §14.1).
+    let Some(spec) = value
+        .map(str::trim)
+        .and_then(|v| v.get(..6).filter(|unit| unit.eq_ignore_ascii_case("bytes=")).map(|_| &v[6..]))
+    else {
         return Want::Whole;
     };
     if spec.contains(',') {
@@ -281,7 +285,10 @@ async fn serve(State(shared): State<Arc<Shared>>, req: axum::extract::Request) -
         return resp;
     }
     let size = shared.size;
-    let range = parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    // Range 는 GET 에만 정의돼 있다(RFC 9110 §14.2) — HEAD 는 Range 가 실려 와도 전체로 답한다.
+    let range = (parts.method == Method::GET)
+        .then(|| parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok()))
+        .flatten();
     let (status, start, end) = match parse_range(range, size) {
         Want::Whole => (StatusCode::OK, 0, size - 1),
         Want::Part(start, end) => (StatusCode::PARTIAL_CONTENT, start, end),
@@ -575,6 +582,11 @@ mod tests {
         assert_eq!((h["accept-ranges"].to_str().unwrap(), h["content-type"].to_str().unwrap()), ("bytes", "video/mp4"));
         assert_eq!(h["cache-control"], "no-store");
         assert!(head.bytes().await.unwrap().is_empty());
+        let ranged = http().head(&url).header("range", "bytes=0-1").send().await.unwrap();
+        assert_eq!(ranged.status().as_u16(), 200, "HEAD 는 Range 를 무시한다");
+        assert_eq!(ranged.headers()["content-length"], size.to_string().as_str());
+        assert!(!ranged.headers().contains_key("content-range"));
+        assert!(ranged.bytes().await.unwrap().is_empty());
         assert_eq!(stream.received_bytes(), 0, "HEAD 는 원본을 읽지 않는다");
 
         let (status, h, body) = get(&url, Some("bytes=0-1")).await;
@@ -590,6 +602,9 @@ mod tests {
         assert_eq!((status, body.as_slice()), (StatusCode::PARTIAL_CONTENT, &bytes[bytes.len() - 10..]));
         let (status, _, body) = get(&url, Some("bytes=100-199")).await;
         assert_eq!((status, body.as_slice()), (StatusCode::PARTIAL_CONTENT, &bytes[100..200]));
+        let (status, h, body) = get(&url, Some("BYTES=100-101")).await;
+        assert_eq!((status, body.as_slice()), (StatusCode::PARTIAL_CONTENT, &bytes[100..102]));
+        assert_eq!(h["content-range"], format!("bytes 100-101/{size}").as_str());
         let (status, _, body) = get(&url, None).await;
         assert_eq!((status, body == bytes), (StatusCode::OK, true));
         for ignored in ["bytes=9-3", "bytes=0-1,4-5", "items=0-1", "bytes=+1-2", "bytes=x-"] {
@@ -916,5 +931,9 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=18446744073709551616-"), 10), Want::Whole);
         assert_eq!(parse_range(Some("bytes=5-4"), 10), Want::Whole);
         assert_eq!(parse_range(Some("bytes=-"), 10), Want::Whole);
+        assert_eq!(parse_range(Some("BYTES=2-3"), 10), Want::Part(2, 3));
+        assert_eq!(parse_range(Some("Bytes=-2"), 10), Want::Part(8, 9));
+        assert_eq!(parse_range(Some("bytes"), 10), Want::Whole);
+        assert_eq!(parse_range(Some("바이트=1-2"), 10), Want::Whole);
     }
 }

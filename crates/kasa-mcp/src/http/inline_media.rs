@@ -3,7 +3,8 @@
 //!
 //! - `GET /term/inline-media?id=` — 카드 정보 JSON
 //! - `GET /term/inline-media/poster?id=` — 영상 첫 장면 PNG
-//! - `GET /term/inline-media/file?id=&offset=&len=` — 원본 조각. 받는 쪽이 모아 정보의 sha256 으로 확인한다
+//! - `GET /term/inline-media/file?id=&offset=&len=` — 원본 조각. 등록 sha256 과 같다고 확인된 사본에서만 내준다
+//!   (`Store::read_chunk`) — 받는 쪽이 파일 전체를 모으지 않고 구간만 재생해도 원본 내용을 믿을 수 있게
 
 use super::*;
 use axum::extract::State;
@@ -329,6 +330,47 @@ mod tests {
         std::fs::remove_file(&blob).unwrap();
         let (status, _, body) = call(&app, &format!("/term/inline-media?id={id}"), Caller::Owner).await;
         assert_eq!((status, body.as_slice()), (StatusCode::NOT_FOUND, &b"media unavailable"[..]));
+    }
+
+    /// 원본 사본을 같은 길이로 바꿔 쓰거나 다른 파일로 바꿔 끼우면 크기·기록은 그대로라도 조각을 내주지 않는다.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn originals_rewritten_or_swapped_with_the_same_length_are_not_served() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fixture::new("forged");
+        let src = fx.dir.join("clip.mp4");
+        let mut bytes = b"\0\0\0\x18ftypisom\0\0\0\0isomavc1".to_vec();
+        bytes.extend((0..70_000u32).map(|i| (i * 7 % 251) as u8));
+        std::fs::write(&src, &bytes).unwrap();
+        let media = fx.store.register(&src, Probe::default()).unwrap();
+        let app = fx.app();
+        let uri = format!("/term/inline-media/file?id={}&offset=0&len=16", media.id);
+        let (status, _, chunk) = call(&app, &uri, Caller::Owner).await;
+        assert_eq!((status, chunk.as_slice()), (StatusCode::OK, &bytes[..16]));
+
+        let blob = fx.store.media_path(&media.id).unwrap();
+        let then = std::fs::metadata(&blob).unwrap().modified().unwrap();
+        let mut forged = bytes.clone();
+        forged[60_000] ^= 0x80;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut f = std::fs::OpenOptions::new().write(true).open(&blob).unwrap();
+        f.write_all(&forged).unwrap();
+        f.set_modified(then).unwrap();
+        drop(f);
+        let (status, _, body) = call(&app, &uri, Caller::Owner).await;
+        assert_eq!((status, body.as_slice()), (StatusCode::NOT_FOUND, &b"media unavailable"[..]));
+
+        let swap = fx.dir.join("swap.part");
+        std::fs::write(&swap, &forged).unwrap();
+        std::fs::File::open(&swap).unwrap().set_modified(then).unwrap();
+        std::fs::rename(&swap, &blob).unwrap();
+        assert_eq!(call(&app, &uri, Caller::Owner).await.0, StatusCode::NOT_FOUND);
+
+        std::fs::write(&swap, &bytes).unwrap();
+        std::fs::rename(&swap, &blob).unwrap();
+        assert_eq!(call(&app, &uri, Caller::Owner).await.0, StatusCode::OK, "같은 내용으로 돌아오면 다시 확인하고 내준다");
     }
 
     #[tokio::test]
