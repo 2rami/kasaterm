@@ -17,20 +17,18 @@ pub(crate) fn detect_links_row(row: &[GridCell]) -> Vec<(u16, u16, String)> {
 }
 
 fn joins(prev: &[GridCell], next: &[GridCell]) -> bool {
-    scan::row_join(prev, next).is_some()
+    scan::row_join(prev, next).or_else(|| scan::web_row_join(prev, next)).is_some()
 }
 
 pub(crate) fn detect_links_rows(rows: &[&[GridCell]]) -> Vec<(Vec<(usize, u16, u16)>, String)> {
     let mut chars = Vec::new();
     let mut positions = Vec::new();
+    let mut start = 0;
     for (r, row) in rows.iter().enumerate() {
-        let start = if r > 0 {
-            scan::row_join(rows[r - 1], row).map_or(0, |(_, s)| s)
-        } else {
-            0
-        };
-        let join = rows.get(r + 1).and_then(|next| scan::row_join(row, next));
-        let end = join.map_or(row.len(), |(e, _)| e);
+        let next = rows.get(r + 1);
+        let trusted = next.and_then(|next| scan::row_join(row, next));
+        let candidate = trusted.or_else(|| next.and_then(|next| scan::web_row_join(row, next)));
+        let end = candidate.map_or(row.len(), |(e, _)| e);
         for c in start..end {
             let cell = &row[c];
             if cell.leading_wide_spacer {
@@ -58,6 +56,10 @@ pub(crate) fn detect_links_rows(rows: &[&[GridCell]]) -> Vec<(Vec<(usize, u16, u
             };
             positions.push(Some((r, c as u16, (c + width) as u16)));
         }
+        // TUI가 색과 밑줄을 지운 행은 앞에서 시작한 HTTP 주소가 있을 때만 잇는다.
+        // 경로 조각끼리 모양이 같다는 이유로 서로 다른 파일·문장을 합치면 안 된다.
+        let join = trusted.or_else(|| candidate.filter(|_| scan::ends_in_web_link(&chars)));
+        start = join.map_or(0, |(_, start)| start);
         if join.is_none() {
             chars.push(' ');
             positions.push(None);
@@ -363,6 +365,71 @@ mod tests {
                 vec![expected],
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn hard_wrapped_web_link_survives_tui_style_reset_and_margins() {
+        let url = "https://tympanus.net/codrops/2026/02/18/joffrey-spitzer-portfolio-a-minimalist-astro-gsap-build-with-reveals-flip-transitions-and-subtle-motion/";
+        for width in 54..=150 {
+            let mut rows = vec![row("  Joffrey Spitzer 제작기 — ")];
+            for ch in url.chars() {
+                if rows.last().unwrap().len() == width - 2 {
+                    rows.last_mut().unwrap().resize(width, GridCell::blank());
+                    rows.push(row("  "));
+                }
+                let mut cell = GridCell::blank();
+                cell.ch = ch;
+                cell.underline = rows.len() == 1;
+                rows.last_mut().unwrap().push(cell);
+            }
+            for cells in &mut rows {
+                cells.resize(width, GridCell::blank());
+            }
+            rows.push(row("  메뉴 글자가 커지면서 페이지 제목이 돼요."));
+            let links = detect_links_rows(&rows.iter().map(Vec::as_slice).collect::<Vec<_>>());
+            assert_eq!(links.len(), 1, "width={width}");
+            assert_eq!(links[0].1, url, "width={width}");
+            for &(r, s, e) in &links[0].0 {
+                for col in s..e {
+                    assert_eq!(link_in("%test", |r| rows.get(r), col, r as u16).unwrap().2, url);
+                }
+            }
+            assert!(link_in("%test", |r| rows.get(r), 2, (rows.len() - 1) as u16).is_none());
+        }
+    }
+
+    #[test]
+    fn padded_links_do_not_swallow_new_urls_or_prose() {
+        for next in [
+            "  ordinary explanation follows",
+            "  메뉴 글자가 커지면서 페이지 제목이 돼요.",
+            "  https://another.example/next-page",
+            "  - next-item in a list",
+            "  /tmp/another-file.txt",
+        ] {
+            let mut rows = [row("  https://example.com/long-path/  "), row(next)];
+            let width = rows[0].len();
+            rows[1].resize(width, GridCell::blank());
+            let links = detect_links_rows(&rows.iter().map(Vec::as_slice).collect::<Vec<_>>());
+            assert_eq!(links[0].1, "https://example.com/long-path/", "{next}");
+            assert_eq!(links[0].0.len(), 1, "{next}");
+            if next.contains("https://") {
+                for cell in rows.iter_mut().flatten() {
+                    cell.underline = cell.ch != ' ';
+                }
+                let links = detect_links_rows(&rows.iter().map(Vec::as_slice).collect::<Vec<_>>());
+                assert_eq!(links[0].1, "https://example.com/long-path/");
+                assert_eq!(links.len(), 2);
+            }
+        }
+        for path in ["/tmp/local-file.txt", "src/relative-file.rs", "~/local-file.txt"] {
+            let mut rows = [row(&format!("  {path}  ")), row("  other-path/segment")];
+            let width = rows[0].len();
+            rows[1].resize(width, GridCell::blank());
+            let links = detect_links_rows(&rows.iter().map(Vec::as_slice).collect::<Vec<_>>());
+            assert_eq!(links[0].1, path);
+            assert_eq!(links[0].0.len(), 1);
         }
     }
 

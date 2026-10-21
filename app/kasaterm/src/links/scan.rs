@@ -357,11 +357,76 @@ fn visible(cell: &GridCell) -> bool {
     cell.ch != ' ' && cell.ch != '\0' && !cell.hidden
 }
 
+pub(super) fn web_row_join(prev: &[GridCell], next: &[GridCell]) -> Option<(usize, usize)> {
+    let end = prev.iter().rposition(visible)? + 1;
+    let start = next.iter().position(visible)?;
+    if prev.len() != next.len() || prev.len() - end > 4 || start > 4 {
+        return None;
+    }
+    let after: Vec<char> = next[start..]
+        .iter()
+        .map(|c| if c.hidden { ' ' } else { c.ch })
+        .collect();
+    if web_prefix(&after) {
+        return None;
+    }
+    let stop = token_end(&after, 0, true);
+    let fragment = &after[..stop];
+    if fragment.is_empty()
+        || (file_prefix(fragment) && relative_file(&fragment.iter().collect::<String>()))
+        || !fragment.iter().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '-' | '.'
+                        | '_'
+                        | '~'
+                        | '/'
+                        | ':'
+                        | '?'
+                        | '#'
+                        | '@'
+                        | '%'
+                        | '='
+                        | '&'
+                        | '+'
+                        | '('
+                        | ')'
+                )
+        })
+    {
+        return None;
+    }
+    let alone = after[stop..].iter().all(|c| {
+        c.is_whitespace() || matches!(c, '\0' | ')' | ']' | '>' | '.' | ',' | ';' | '!' | '?')
+    });
+    let path = fragment.iter().any(char::is_ascii_alphanumeric)
+        && fragment
+            .iter()
+            .any(|c| matches!(c, '/' | '-' | '_' | '%' | '=' | '&' | '?' | '#'));
+    (alone || path).then_some((end, start))
+}
+
+pub(super) fn ends_in_web_link(chars: &[char]) -> bool {
+    scan(chars).last().is_some_and(|(_, end, target)| {
+        (target
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+            || target
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://")))
+            && chars[*end..].iter().all(|c| matches!(c, '.' | ':' | '?'))
+    })
+}
+
 pub(super) fn row_join(prev: &[GridCell], next: &[GridCell]) -> Option<(usize, usize)> {
     let end = prev.iter().rposition(visible)? + 1;
     let start = next.iter().position(visible)?;
     if prev.last().is_some_and(|cell| cell.wrapped) {
         return Some((prev.len(), 0));
+    }
+    if web_prefix(&next[start..].iter().map(|cell| cell.ch).collect::<Vec<_>>()) {
+        return None;
     }
     let trailing = prev.len() - end;
     let last = prev[end - 1].ch;
