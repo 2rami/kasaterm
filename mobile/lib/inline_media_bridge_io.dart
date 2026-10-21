@@ -179,28 +179,30 @@ class MediaBridge implements MediaLink {
     }
 
     if (_closed || req.uri.path != uri.path) return refuse(404);
+    // 머리는 목록으로 본다 — `headers.value` 는 같은 머리가 두 줄이면 던져서 응답을 닫지 못한 채 끝난다.
     // 웹 페이지가 루프백을 두드리면 Origin 이 실린다 — AVPlayer 는 싣지 않는다.
-    if (req.headers.value('origin') != null) return refuse(403);
+    if (req.headers['origin'] != null) return refuse(403);
     if (req.method != 'GET' && req.method != 'HEAD') {
       return refuse(405, {'allow': 'GET, HEAD'});
     }
     final size = media.size;
     // Range 는 GET 에만 뜻이 있다(RFC 9110 §14.2) — HEAD 는 실려 와도 전체 길이로 답한다.
-    final asked = req.method == 'GET'
-        ? req.headers.value(HttpHeaders.rangeHeader)
+    final ranges = req.method == 'GET'
+        ? req.headers[HttpHeaders.rangeHeader]
         : null;
-    final want = asked == null ? (0, size - 1) : byteRange(asked, size);
-    if (want == null) {
+    if (ranges != null && ranges.length != 1) return refuse(400);
+    final want = ranges == null ? null : byteRange(ranges.single, size);
+    if (want == unsatisfiable) {
       return refuse(416, {'content-range': 'bytes */$size'});
     }
-    final (start, end) = want;
+    final (start, end) = want ?? (0, size - 1);
     final head = {
       'content-type': media.streamMime,
       'content-length': '${end - start + 1}',
       'accept-ranges': 'bytes',
-      if (asked != null) 'content-range': 'bytes $start-$end/$size',
+      if (want != null) 'content-range': 'bytes $start-$end/$size',
     };
-    final ok = asked == null ? 200 : 206;
+    final ok = want == null ? 200 : 206;
     if (req.method == 'HEAD') {
       res.statusCode = ok;
       res.contentLength = end - start + 1;
@@ -305,27 +307,45 @@ List<int> _statusLine(int status, Map<String, String> headers) {
   return ascii.encode(b.toString());
 }
 
-/// `Range: bytes=…` 하나를 [start, end] 로. 여러 구간·어긋난 꼴·파일 밖이면 null(416). 단위 이름은 대소문자를
-/// 가리지 않는다(RFC 9110 §14.1).
+/// 파일 안에 한 바이트도 없는 단일 구간 — 416 으로 답한다.
+@visibleForTesting
+const unsatisfiable = (-1, -1);
+
+/// `Range: bytes=…` 하나를 [start, end] 로. 파일 밖의 단일 구간이면 [unsatisfiable]. 모르는 단위·여러 구간·어긋난
+/// 꼴·넘치는 숫자는 null — 머리를 무시하고 전체로 답한다(RFC 9110 §14.2, PC `kasa_mcp::media_stream` 과 같은 규칙).
+/// 단위 이름은 대소문자를 가리지 않는다(§14.1).
 @visibleForTesting
 (int, int)? byteRange(String header, int size) {
-  final m = RegExp(
-    r'^bytes=(\d*)-(\d*)$',
-    caseSensitive: false,
-  ).firstMatch(header.trim());
-  if (m == null) return null;
-  final from = m[1]!, to = m[2]!;
-  if (from.isEmpty) {
-    final n = int.tryParse(to);
-    if (n == null || n == 0) return null;
-    return (max(0, size - n), size - 1);
+  final value = header.trim();
+  if (value.length < 6 || value.substring(0, 6).toLowerCase() != 'bytes=') {
+    return null;
   }
-  final s = int.tryParse(from);
-  if (s == null || s >= size) return null;
-  if (to.isEmpty) return (s, size - 1);
-  final e = int.tryParse(to);
-  if (e == null || e < s) return null;
-  return (s, min(e, size - 1));
+  final spec = value.substring(6);
+  final dash = spec.indexOf('-');
+  if (spec.contains(',') || dash < 0) return null;
+  final from = spec.substring(0, dash).trim(),
+      to = spec.substring(dash + 1).trim();
+  int? digits(String s) =>
+      RegExp(r'^[0-9]+$').hasMatch(s) ? int.tryParse(s) : null;
+  final last = size - 1;
+  if (from.isEmpty) {
+    return switch (digits(to)) {
+      0 => unsatisfiable,
+      final n? => (max(0, size - n), last),
+      null => null,
+    };
+  }
+  final start = digits(from);
+  if (start == null) return null;
+  final int end;
+  if (to.isEmpty) {
+    end = last;
+  } else {
+    final e = digits(to);
+    if (e == null || e < start) return null;
+    end = min(e, last);
+  }
+  return start > last ? unsatisfiable : (start, end);
 }
 
 class _Block {
