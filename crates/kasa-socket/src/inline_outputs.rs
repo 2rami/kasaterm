@@ -35,21 +35,21 @@ pub fn scan(text: &str, seen: &mut HashSet<String>, out: &mut Vec<Output>) {
     while let Some(at) = rest.find("[[k") {
         let tail = &rest[at..];
         rest = &rest[at + 3..];
-        // `[[ki:` + 16자 id + `:00/` + 두 자리 + `]]` = 29자.
-        let Some(marker) = tail.get(..29) else { break };
-        let b = marker.as_bytes();
+        // `[[ki:` + 16자 id + `:00/` + 두 자리 + `]]` = 29바이트. 바이트로 본다 — `[[k` 뒤에 한글이 오면 글자 경계가
+        // 29 안쪽 아무 데나 걸려 문자열로 자르면 패닉이 났다.
+        let Some(b) = tail.as_bytes().get(..29) else { break };
         let kind_byte = b[3];
-        if !matches!(kind_byte, b'i' | b'm') || b[4] != b':' || &marker[21..25] != ":00/" || &marker[27..] != "]]" {
+        if !matches!(kind_byte, b'i' | b'm') || b[4] != b':' || &b[21..25] != b":00/" || &b[27..] != b"]]" {
             continue;
         }
-        let id = &marker[5..21];
-        let total = &marker[25..27];
-        if !id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) || !total.bytes().all(|c| c.is_ascii_digit()) {
+        let (id, total) = (&b[5..21], &b[25..27]);
+        if !id.iter().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) || !total.iter().all(u8::is_ascii_digit) {
             continue;
         }
+        let id = std::str::from_utf8(id).unwrap_or_default();
         let kind = match (kind_byte, total) {
             (b'i', _) => Kind::Image,
-            (_, "04") => Kind::Audio,
+            (_, b"04") => Kind::Audio,
             _ => Kind::Video,
         };
         if seen.insert(format!("{}:{id}", kind_byte as char)) {
@@ -61,6 +61,14 @@ pub fn scan(text: &str, seen: &mut HashSet<String>, out: &mut Vec<Output>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_letters_right_after_the_bracket_do_not_panic() {
+        let text = "[[k한글이 바로 뒤에 오는 글 [[ki:가나다라마바사아자차카타파하:00/08]] 끝 [[ki:0123456789abcdef:00/08]]";
+        let (mut seen, mut out) = (HashSet::new(), Vec::new());
+        scan(text, &mut seen, &mut out);
+        assert_eq!(out, vec![Output { kind: Kind::Image, id: "0123456789abcdef".into() }]);
+    }
 
     #[test]
     fn finds_each_output_once_in_order_from_the_first_row() {
