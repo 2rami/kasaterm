@@ -203,6 +203,8 @@ claude plugin marketplace add 2rami/kasaterm
 claude plugin install kasapane@kasaterm
 ```
 
+플러그인 배포 범위는 `skills/kasapane`뿐이며 앱 소스·빌드 산출물은 캐시에 복사하지 않는다.
+
 설치 후 `/kasapane`으로 호출한다. 짧은 주제 목록에서 해당 문서 하나만 읽는다. 스킬 설치 없이도 `kasaterm-cli guide media`처럼 필요한 안내를 조회할 수 있다. `guide`는 앱 연결 없이 어느 디렉터리에서도 동작하며, 무인자는 주제 목록만 출력한다.
 
 Claude·Codex 실행과 새 작업 브리프에는 짧은 주제 안내만 넣는다. 전체 규약을 매번 붙이지 않고, 이미 읽은 안내는 작업 조건이나 파일이 바뀔 때만 다시 확인한다.

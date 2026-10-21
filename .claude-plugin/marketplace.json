@@ -11,7 +11,7 @@
   "plugins": [
     {
       "name": "kasapane",
-      "source": "./",
+      "source": "./skills/kasapane",
       "description": "카사텀 조작·협업·결과물·개발 안내를 필요할 때 주제별로 읽는 스킬"
     }
   ]

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "kasapane",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "카사텀 조작·협업·결과물·개발 안내를 필요할 때 주제별로 읽는 스킬",
   "author": {
     "name": "2rami",
@@ -16,5 +16,8 @@
     "pane",
     "collaboration",
     "terminal"
+  ],
+  "skills": [
+    "."
   ]
 }
