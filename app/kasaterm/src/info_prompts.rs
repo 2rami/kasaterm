@@ -24,7 +24,7 @@ use crate::{gpu, theme, UserEvent};
 const POLL_EVERY: Duration = Duration::from_millis(1000);
 /// 화면 정본과 다시 맞추는 주기 — 스크롤하면 「지금 보는 질문」이 바뀐다.
 const PLACE_EVERY: Duration = Duration::from_millis(250);
-/// 말풍선에 싣는 전문 상한. 붙여넣은 로그 전체를 띄우면 창을 덮는다.
+/// 올리면 뜨는 카드에 싣는 전문 상한. 붙여넣은 로그 전체를 띄우면 창을 덮는다.
 const TIP_CHARS: usize = 600;
 /// 맞추기 표(질문 × 화면 줄) 상한 — 넘으면 뒤에서부터 차례대로만 맞춘다.
 const PLACE_TABLE_MAX: usize = 4_000_000;
@@ -433,7 +433,9 @@ pub(crate) struct Line {
     /// 묻는 말에 고른 답 줄 — 앞에 「답」 표지를 단다.
     pub(crate) answer: bool,
     pub(crate) head: String,
-    pub(crate) tip: String,
+    /// 올리면 뜨는 카드의 본문(`TIP_CHARS` 까지) — 조작 안내는 섞지 않는다. 답 줄이면 `asked` 가 그 질문이다.
+    pub(crate) full: String,
+    pub(crate) asked: Option<String>,
     pub(crate) at: Option<u64>,
     pub(crate) reachable: bool,
     pub(crate) current: bool,
@@ -468,6 +470,8 @@ struct State {
     hits: Vec<(String, usize, Rect)>,
     /// (체크 열쇠, 체크칸 자리).
     boxes: Vec<(String, Rect)>,
+    /// 커서가 올라간 줄(`lines` 번호)과 그 자리 — 칼럼을 다 그린 뒤 그 줄의 카드를 띄운다(`draw_card`).
+    hover: Option<(usize, Rect)>,
 }
 
 thread_local! {
@@ -550,7 +554,8 @@ fn lines_for(prompts: &[Prompt], spots: &[Option<usize>], current: Option<usize>
                 key: check_key(p),
                 answer: p.asked.is_some(),
                 head: first_line(&p.text),
-                tip: tip_text(p, reachable),
+                full: clip(&p.text),
+                asked: p.asked.as_deref().map(clip),
                 at: p.at,
                 reachable,
                 current: p.asked.is_none() && current.is_some() && spot == current,
@@ -570,24 +575,12 @@ fn first_line(text: &str) -> String {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect()
 }
 
-fn tip_text(p: &Prompt, reachable: bool) -> String {
-    let clip = |s: &str| {
-        let mut out: String = s.trim().chars().take(TIP_CHARS).collect();
-        if out.len() < s.trim().len() {
-            out.push('…');
-        }
-        out
-    };
-    let mut tip = match &p.asked {
-        Some(q) => format!("질문 · {}\n답 · {}", clip(q), clip(&p.text)),
-        None => clip(&p.text),
-    };
-    tip.push_str(match (reachable, p.asked.is_some()) {
-        (true, false) => "\n누르면 이 질문 자리로 가요",
-        (true, true) => "\n누르면 이 질문을 받은 자리로 가요",
-        (false, _) => "\n화면 기록에 없어 옮길 수 없어요",
-    });
-    tip
+fn clip(s: &str) -> String {
+    let mut out: String = s.trim().chars().take(TIP_CHARS).collect();
+    if out.len() < s.trim().len() {
+        out.push('…');
+    }
+    out
 }
 
 /// 친 날짜·시각 `10.12 22:46`(해가 다르면 앞에 해). 지역 시각은 OS 에 맡기고 못 구하면 나이로 물러난다.
@@ -880,9 +873,9 @@ impl crate::App {
         self.pump_screen_seek();
         let open = self.info.runtime_page() && self.git.col_visible;
         let seen = if open { self.ws.lock().ok().and_then(|ws| focused(&ws)) } else { None };
-        let source = seen.as_ref().and_then(|(_, pid)| match kasa_mcp::remote::remote_meta(pid) {
+        let source = seen.as_ref().and_then(|(pane, pid)| match kasa_mcp::remote::remote_meta(pid) {
             Some((base, rid)) => Some(Source::Remote(base, rid)),
-            None => self.collab.hub.bound.lock().ok()?.get(pid).cloned().map(Source::File),
+            None => self.collab.hub.bound.lock().ok()?.get(pid).cloned().or_else(|| crate::info_outputs::fixture(pane)).map(Source::File),
         });
         let key = source.as_ref().map(Source::key);
         let now = Instant::now();
@@ -1026,6 +1019,7 @@ pub(crate) fn draw(
     PROMPTS.with(|p| {
         let mut p = p.borrow_mut();
         p.hits.clear();
+        p.hover = None;
         if p.status == Status::None {
             return;
         }
@@ -1057,7 +1051,8 @@ pub(crate) fn draw(
         let pane = p.seen.as_ref().map(|(pane, _)| pane.clone()).unwrap_or_default();
         let mut hits = Vec::new();
         let mut boxes = Vec::new();
-        for line in &p.lines {
+        let mut hover = None;
+        for (i, line) in p.lines.iter().enumerate() {
             if y + ROW_H > top && y < bottom {
                 let rect = (x, y, w, ROW_H);
                 let check_rect = (x, y, x0 + BOX_ADVANCE - x, ROW_H);
@@ -1102,14 +1097,14 @@ pub(crate) fn draw(
                     let head_w = g.measure_chrome_text(&head, 11.0, false);
                     g.rect(tx + mark_w, y + STRIKE_Y, head_w, 1.0, theme::text_mute());
                 }
-                // 말풍선은 먼저 담긴 자리가 이긴다 — 체크칸 설명을 줄 전문보다 앞에 둔다.
                 if let Some(r) = g.clip_hit(check_rect) {
-                    let tip = if done { "누르면 체크를 풀어요" } else { "누르면 끝낸 것으로 체크해요" };
-                    tips.push((tip.to_string(), r));
+                    tips.push((if done { "체크 풀기" } else { "끝낸 것으로 체크" }.to_string(), r));
                     boxes.push((line.key.clone(), r));
                 }
                 if let Some(r) = g.clip_hit(rect) {
-                    tips.push((line.tip.clone(), r));
+                    if !on_box && crate::info::hit(cursor, &r) {
+                        hover = Some((i, r));
+                    }
                     if line.reachable {
                         hits.push((pane.clone(), line.index, r));
                     }
@@ -1119,7 +1114,88 @@ pub(crate) fn draw(
         }
         p.hits = hits;
         p.boxes = boxes;
+        p.hover = hover;
     });
+}
+
+/// 올린 줄의 카드 — 본문만 싣는다. 목록 위에 띄우면 이웃 줄을 가리고 전문이 목록 글과 섞여 읽혀서, 칼럼 왼쪽
+/// (칸 본문 위)에 그 줄 높이로 띄운다. 왼쪽 자리가 모자라면 줄 아래(거기도 모자라면 위)로. 옮길 수 없는 줄만
+/// 가는 선 아래 흐린 한 줄로 까닭을 단다 — 누르면 옮긴다는 것은 줄의 올림 바탕·손가락이 말한다.
+pub(crate) fn draw_card(g: &mut gpu::GpuRenderer, col_x: f32, win: (f32, f32)) -> bool {
+    const PAD: f32 = 10.0;
+    const SIZE: f32 = 12.0;
+    const LH: f32 = 18.0;
+    const MAX_W: f32 = 380.0;
+    const MAX_LINES: usize = 14;
+    const ASKED_LINES: usize = 4;
+    const NOTE: &str = "화면 기록에 없어 옮길 수 없어요";
+    let Some((line, row)) = PROMPTS.with(|p| {
+        let p = p.borrow();
+        p.hover.and_then(|(i, r)| Some((p.lines.get(i)?.clone(), r)))
+    }) else {
+        return false;
+    };
+    let w = MAX_W.min(win.0 - 8.0);
+    let label_w = if line.asked.is_some() { g.measure_chrome_text("질문", 10.0, false) + 8.0 } else { 0.0 };
+    let text_w = w - PAD * 2.0 - label_w;
+    if text_w < 40.0 {
+        return false;
+    }
+    let wrap = |g: &mut gpu::GpuRenderer, text: &str, budget: usize| -> Vec<String> {
+        let mut rows = crate::info::wrap_measured_text(text, text_w, |s| g.measure_chrome_text(s, SIZE, false));
+        if rows.len() > budget {
+            rows.truncate(budget);
+            if let Some(last) = rows.last_mut() {
+                *last = crate::info::fit_text(g, &format!("{last}…"), text_w, SIZE, false);
+            }
+        }
+        rows
+    };
+    let mut blocks: Vec<(Option<&str>, Vec<String>, [u8; 4])> = Vec::new();
+    if let Some(q) = &line.asked {
+        blocks.push((Some("질문"), wrap(g, q, ASKED_LINES), theme::text_dim()));
+    }
+    let used: usize = blocks.iter().map(|b| b.1.len()).sum();
+    blocks.push((line.asked.as_ref().map(|_| ANSWER_MARK), wrap(g, &line.full, MAX_LINES - used), theme::text()));
+    let note = (!line.reachable).then_some(NOTE);
+    let note_w = note.map_or(0.0, |n| g.measure_chrome_text(n, 10.0, false) - label_w);
+    let widest = blocks.iter().flat_map(|b| b.1.iter()).map(|r| g.measure_chrome_text(r, SIZE, false)).fold(note_w, f32::max);
+    let cw = (widest + label_w + PAD * 2.0).clamp(120.0, w);
+    let rows: usize = blocks.iter().map(|b| b.1.len()).sum();
+    let gaps = blocks.len().saturating_sub(1) as f32 * 4.0;
+    let ch = PAD * 2.0 + rows as f32 * LH + gaps + if note.is_some() { 22.0 } else { 0.0 };
+    let (cx, cy) = if col_x - 8.0 - cw >= 4.0 {
+        (col_x - 8.0 - cw, row.1.min(win.1 - ch - 4.0).max(4.0))
+    } else {
+        let x = (row.0 + 8.0).min(win.0 - cw - 4.0).max(4.0);
+        let below = row.1 + row.3 + 4.0;
+        (x, if below + ch <= win.1 - 4.0 { below } else { (row.1 - 4.0 - ch).max(4.0) })
+    };
+    g.rect(cx, cy, cw, ch, theme::surface());
+    let edge = theme::border();
+    g.rect(cx, cy, cw, 1.0, edge);
+    g.rect(cx, cy + ch - 1.0, cw, 1.0, edge);
+    g.rect(cx, cy, 1.0, ch, edge);
+    g.rect(cx + cw - 1.0, cy, 1.0, ch, edge);
+    g.push_clip(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0);
+    let mut ty = cy + PAD;
+    for (label, rows, color) in &blocks {
+        if let Some(label) = label {
+            g.draw_text(cx + PAD, ty + 3.0, label, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
+        }
+        for r in rows {
+            g.draw_text(cx + PAD + label_w, ty + 1.0, r, gpu::DrawOpts { font_size: SIZE, color: *color, bold: false, italic: false });
+            ty += LH;
+        }
+        ty += 4.0;
+    }
+    if let Some(note) = note {
+        let ty = ty - 4.0;
+        g.rect(cx + PAD, ty + 6.0, cw - PAD * 2.0, 1.0, edge);
+        g.draw_text(cx + PAD, ty + 10.0, note, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
+    }
+    g.pop_clip();
+    true
 }
 
 #[cfg(test)]
@@ -1239,7 +1315,11 @@ mod tests {
         let got: Vec<(&str, usize, bool, bool, bool)> =
             lines.iter().map(|l| (l.head.as_str(), l.index, l.answer, l.reachable, l.current)).collect();
         assert_eq!(got, [("둘째 질문", 1, false, false, false), ("파랑", 0, true, true, false), ("첫 질문", 0, false, true, true)]);
-        assert!(lines[1].tip.starts_with("질문 · 색은?\n답 · 파랑"));
+        assert_eq!((lines[1].asked.as_deref(), lines[1].full.as_str()), (Some("색은?"), "파랑"));
+        assert!(
+            lines.iter().all(|l| !l.full.contains("누르면") && !l.asked.as_deref().unwrap_or("").contains("누르면")),
+            "카드 본문에는 조작 안내를 섞지 않는다"
+        );
     }
 
     #[test]

@@ -3839,6 +3839,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Info 위아래 영역 경계 드래그(`info_split`) — 아래로 끌수록 프롬프트 쪽이 커진다.
+                if let Some(moved) = self.info_split_drag(self.cursor_px.1) {
+                    if moved {
+                        window.set_cursor(CursorIcon::RowResize);
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // Divider drag in progress: ghostty parity — visually
                 // update on every cursor move (so the seam tracks the
                 // cursor pixel-by-pixel), AND fire `resize_backend` on
@@ -4220,7 +4228,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_commits_grip = self.git.col_commits_grip.is_some_and(|gr| {
                         cx >= gr.0 && cx <= gr.0 + gr.2 && cy >= gr.1 && cy <= gr.1 + gr.3
                     });
-                    let icon = if on_commits_grip {
+                    let icon = if on_commits_grip || self.on_info_split(cx, cy) {
                         CursorIcon::RowResize
                     } else if on_sidebar_edge || on_tree_edge || on_git_edge {
                         CursorIcon::ColResize
@@ -5152,6 +5160,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // 커밋을 더 가져온다. 칼럼 클릭 경로보다 앞이어야 한다: 그 아래가
                     // 바로 커밋 행이라, 뒤에 두면 손잡이를 눌러도 첫 행이 먼저 먹는다.
                     if self.commits_grip_press(cx, cy) {
+                        return;
+                    }
+                    // Info 위아래 영역 경계 — 바로 위아래가 프롬프트·결과물 줄이라 칼럼 클릭보다 앞이다.
+                    if self.info_split_press(cx, cy) {
+                        window.set_cursor(CursorIcon::RowResize);
                         return;
                     }
                     // Left window-tab sidebar. Caught first — it owns the whole
@@ -7084,6 +7097,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // 「최근 커밋」 구역 높이 드래그 끝 (놓는 김에 새 개수로 한 번
                         // 바로 읽어 온다 — 원하는 개수는 렌더가 드래그 중에 써 뒀다).
                         if self.commits_grip_release() {
+                            window.set_cursor(CursorIcon::Default);
+                            window.request_redraw();
+                            return;
+                        }
+                        if self.info_split_release() {
                             window.set_cursor(CursorIcon::Default);
                             window.request_redraw();
                             return;

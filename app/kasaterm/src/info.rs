@@ -2581,7 +2581,7 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
 
 /// 어절 단위 줄바꿈 — 한글 문장이 「남아 있 / 는」 처럼 어절 가운데서 끊기지 않게 공백에서 가른다.
 /// 한 어절이 한 줄보다 길면(공백 없는 경로·URL) 그 어절만 글자 단위로 자른다 — 글자는 하나도 안 잃는다.
-fn wrap_measured_text(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+pub(crate) fn wrap_measured_text(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
     if !width.is_finite() || width <= 0.0 { return Vec::new(); }
     let mut result = Vec::new();
     for paragraph in text.split('\n') {
@@ -2730,12 +2730,38 @@ pub(crate) fn draw_info_col(
         line => vec![line],
     }).collect();
     let height: f32 = lines.iter().map(ExecutionLine::height).sum();
-    info.content_h = height + 12.0;
-    info.scroll = info.scroll.clamp(0.0, (info.content_h - (bottom - top).max(0.0)).max(0.0));
+    // 「내 프롬프트」 까지가 위 영역, 그 뒤가 아래 영역(`info_split`). 프롬프트 묶음이 없는 칸은 나누지 않는다.
+    let cut = lines.iter().position(|line| matches!(line, ExecutionLine::Prompts)).map_or(lines.len(), |i| i + 1);
+    let upper_h: f32 = lines[..cut].iter().map(ExecutionLine::height).sum();
+    let lower_h = height - upper_h + 12.0;
+    let split = info.split.layout(crate::info_prompts::height() > 0.0, (bottom - top).max(0.0), upper_h, lower_h);
+    let (col_top, col_bottom, col_cursor) = (top, bottom, cursor);
+    let upper_bottom = split.map_or(bottom, |h| top + h);
+    let lower_top = upper_bottom + crate::info_split::GRIP_H;
+    info.content_h = if split.is_some() { upper_h } else { height + 12.0 };
+    info.scroll = info.scroll.clamp(0.0, (info.content_h - (upper_bottom - top).max(0.0)).max(0.0));
+    info.split.lower_scroll = info.split.lower_scroll.clamp(0.0, (lower_h - (bottom - lower_top)).max(0.0));
+    // 영역마다 제 안의 커서만 본다 — 경계에 걸친 줄이 다른 영역 위에서 올림·손가락을 띄우지 않게.
+    let dragging = info.split.dragging();
+    let inside = |a: f32, b: f32| if !dragging && col_cursor.1 >= a && col_cursor.1 < b { col_cursor } else { (-1.0e6, -1.0e6) };
+    let (mut top, mut bottom, mut cursor) = if split.is_some() { (top, upper_bottom, inside(top, upper_bottom)) } else { (top, bottom, cursor) };
     let mut y = top - info.scroll;
     let x0 = x + 14.0; let right = x + w - 12.0;
     g.push_clip(x, top, w.max(0.0), (bottom - top).max(0.0));
-    for line in &lines {
+    for (index, line) in lines.iter().enumerate() {
+        if index == cut && split.is_some() {
+            g.pop_clip();
+            let grip = (x, upper_bottom, w, crate::info_split::GRIP_H);
+            let hot = info.split.dragging() || info.split.movable() && hit(col_cursor, &grip);
+            let thick = if hot { 2.0 } else { 1.0 };
+            // 반 픽셀에 걸치면 두 줄로 번져 거의 안 보인다 — 선은 정수 픽셀에 세운다.
+            let line_y = (upper_bottom + crate::info_split::GRIP_H / 2.0).round() - (thick / 2.0f32).floor();
+            g.rect(x, line_y, w, thick, if hot { theme::accent() } else { theme::border() });
+            info.split.set_frame(grip, (x, lower_top, w, (col_bottom - lower_top).max(0.0)));
+            (top, bottom, cursor) = (lower_top, col_bottom, inside(lower_top, col_bottom));
+            y = top - info.split.lower_scroll;
+            g.push_clip(x, top, w.max(0.0), (bottom - top).max(0.0));
+        }
         let row_h = line.height();
         if matches!(line, ExecutionLine::Prompts) {
             crate::info_prompts::draw(g, cursor, &mut info.tip_rects, x, w, y, top, bottom);
@@ -2912,8 +2938,8 @@ pub(crate) fn draw_info_col(
         y += row_h;
     }
     g.pop_clip();
-    draw_pane_menu(g, cursor, info, x, w, top, bottom);
-    draw_execution_menu(g, cursor, info, x, w, top, bottom);
+    draw_pane_menu(g, col_cursor, info, x, w, col_top, col_bottom);
+    draw_execution_menu(g, col_cursor, info, x, w, col_top, col_bottom);
     info.view = snap;
 }
 

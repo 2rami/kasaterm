@@ -832,6 +832,8 @@ pub(crate) struct InfoState {
     /// 이 값으로 붙잡아 둔다 — 항목이 빠지면 높이가 줄고 그만큼 목록이 위로 딸려
     /// 올라와, 다음 × 가 손가락 밑에서 달아난다.
     pub(crate) content_h: f32,
+    /// 「카드·내 프롬프트」 와 「결과물·모든 방」 사이 경계 — 높이 비율·끌기·아래 영역 스크롤.
+    pub(crate) split: crate::info_split::Split,
     /// 접어둔 **방**(`win:N`). 방은 펴진 게 기본이라 여기 담긴 것만 접힌다.
     pub(crate) group_collapsed: std::collections::HashSet<String>,
     /// 펴 둔 **학생 그룹**(surface id). 학생은 접힌 게 기본이라 여기 담긴 것만
@@ -904,6 +906,7 @@ impl Default for InfoState {
             panel_rect: None,
             frozen_since: None,
             content_h: 0.0,
+            split: Default::default(),
             key: String::new(),
             scroll: 0.0,
             root: None,

@@ -46,6 +46,8 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
                     .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                 {
                     App::draw_hover_tip(g, tip, r.0, r.1 + r.3, f.viewport.0, f.viewport.1);
+                } else {
+                    crate::info_prompts::draw_card(g, f.x, f.viewport);
                 }
             }
         }

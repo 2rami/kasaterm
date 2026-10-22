@@ -2790,17 +2790,18 @@ impl App {
                 return;
             }
         };
-        // Info 탭: 프로세스 목록 스크롤. clamp 는 렌더가 실제 행 수로 다시 하니
-        // (draw_info_col) 여기선 하한만 잡고 넘긴다 — 목록 길이가 워커 스레드에서
-        // 바뀌므로 입력 시점의 최대치는 이미 낡았을 수 있다.
+        // Info 탭: 커서 아래 영역(위 카드·프롬프트, 아래 결과물·방 — `info_split`) 스크롤. clamp 는
+        // 렌더가 실제 행 수로 다시 하니(draw_info_col) 여기선 하한만 잡고 넘긴다 — 목록 길이가 워커
+        // 스레드에서 바뀌므로 입력 시점의 최대치는 이미 낡았을 수 있다.
         if self.git.col_visible
             && self.info.runtime_page()
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.git_col_x()
         {
-            let next = (self.info.scroll - lines as f32 * 22.0).max(0.0);
-            if (next - self.info.scroll).abs() > 0.01 {
-                self.info.scroll = next;
+            let scroll = self.info.wheel_scroll(self.cursor_px.1);
+            let next = (*scroll - lines as f32 * 22.0).max(0.0);
+            if (next - *scroll).abs() > 0.01 {
+                *scroll = next;
                 self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();

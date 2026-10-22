@@ -140,7 +140,7 @@ fn focused(ws: &crate::Workspace) -> Option<(String, String)> {
 }
 
 /// 격리 검증 — 기록이 안 묶인 칸이면 대화 보기와 같은 `KASATERM_CHAT_FIXTURE=[%N:]<jsonl>` 사본을 읽는다.
-fn fixture(pane: &str) -> Option<PathBuf> {
+pub(crate) fn fixture(pane: &str) -> Option<PathBuf> {
     if !crate::verification_run() {
         return None;
     }
