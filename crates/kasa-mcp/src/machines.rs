@@ -1688,7 +1688,7 @@ fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> 
     row["state_fresh"] = Value::Bool(fresh);
     if !fresh {
         row["status"] = Value::String("unknown".into());
-        for field in ["kind", "attention_kind", "waiting_for", "idle_secs", "busy_secs", "compact_pct"] {
+        for field in ["kind", "attention_kind", "waiting_for", "idle_secs", "busy_secs", "compact_pct", "response_end"] {
             row[field] = Value::Null;
         }
     }
@@ -1815,8 +1815,14 @@ fn snapshot_machine(
     uplink: Option<&crate::uplink::GatewayMachine>,
     local_build: &str,
 ) -> Value {
+    use std::hash::{Hash, Hasher};
     let age = hit.map(|seen| seen.at.elapsed());
     let direct_online = age.is_some_and(|value| value < STALE_AFTER);
+    let sample_id = hit.filter(|_| direct_online).map(|seen| {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        seen.at.hash(&mut hash);
+        format!("{:016x}", hash.finish())
+    });
     let (online, via) = availability(age, uplink.is_some());
     // 업링크 생존은 그 기계에 닿는다는 증거지만 판 번호까지 말해 주진 않는다.
     // 직통이 stale이면 예전에 읽은 build를 현재 값처럼 되살리지 않는다.
@@ -1848,6 +1854,7 @@ fn snapshot_machine(
         "path": (!path.is_empty()).then_some(path),
         "path_rtt_ms": path_rtt,
         "ago_secs": age.map(|value| value.as_secs()),
+        "sample_id": sample_id,
         "sync_capable": hit.map(|seen| seen.sync).unwrap_or(true),
         // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은
         // false 로 두어 경고가 서게 한다. 오프라인이면 물을 게 없어 true.
@@ -2016,7 +2023,8 @@ mod tests {
             at: Instant::now() - age,
             requested_at: Instant::now() - age,
             panes: vec![serde_json::json!({"id":"%8", "name":"test character",
-                "status":"waiting", "kind":"permission", "waiting_for":"approve"})],
+                "status":"waiting", "kind":"permission", "waiting_for":"approve",
+                "response_end":{"surface_id":"%8","source":"s","completion":"01","idle":true,"error":false,"background":false}})],
             sync: true, build: None, machine_id: Some("same-device".into()),
             rtt_ms: None, device_colors: None,
         };
@@ -2029,6 +2037,7 @@ mod tests {
         assert_eq!(stale["status"], "unknown");
         assert_eq!(stale["state_fresh"], false);
         assert!(stale["kind"].is_null() && stale["waiting_for"].is_null());
+        assert!(stale["response_end"].is_null(), "끊긴 기기의 옛 종료를 새 완료 재료로 쓰지 않는다");
         c.insert("new-route".into(), seen(Duration::ZERO));
         let recovered = cached_pane_from(&c, "mini", "%8", true).unwrap();
         assert_eq!(recovered["state_fresh"], true);

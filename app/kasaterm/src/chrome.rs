@@ -7,6 +7,30 @@ fn visible_notification_surface(ws: &Workspace) -> Option<String> {
     ws.active_pane.as_ref().map(|outer| ws.active_tab_pid(outer))
 }
 
+/// 거울이 생기거나 방을 보러 오는 것은 폴링과 무관하다 — 원격 끝남 표시를 이 간격으로 다시 짓는다.
+const REMOTE_MARKS_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// 원격 목록의 한 행을 응답 완료 관찰 자리로. 그 기기의 거울 행(남을 비추는 창)·닫힌 칸·창 밖 셸은
+/// 원본 칸이 아니라 빠진다. 열쇠는 기기 경로와 surface_key(없는 구판은 %id)다.
+fn remote_seat(route: &str, label: &str, row: &serde_json::Value) -> Option<crate::state::RemoteSeat> {
+    let text = |k: &str| row.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    let id = text("id").filter(|id| id.starts_with('%'))?;
+    if text("mirror_of").is_some() || row.get("closed").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    let surface_key = text("surface_key").filter(|k| !k.starts_with("legacy:"));
+    let session = row["response_end"]["session_id"].as_str().unwrap_or_default();
+    let source = row["response_end"]["source"].as_str().unwrap_or_default();
+    Some(crate::state::RemoteSeat {
+        key: format!("{route}\u{1f}{}\u{1f}{session}\u{1f}{source}", surface_key.as_deref().unwrap_or(&id)),
+        label: label.to_string(),
+        remote_id: id,
+        surface_key,
+        name: text("name").unwrap_or_default(),
+        detail: text("doing").or_else(|| text("title")).unwrap_or_default(),
+    })
+}
+
 #[cfg(test)]
 mod notification_surface_tests {
     use super::*;
@@ -739,6 +763,177 @@ impl App {
             Transition::CompactStart | Transition::CompactEnd => {}
         }
         self.chrome_dirty = true;
+    }
+
+    /// 다른 기기 칸의 응답 완료 — 원격 관찰자 하나가 열린 거울과 원격 목록을 함께 본다. 원격 사실은
+    /// 폴링 캐시라 새 세대에서만 판정하고, 2초 유지 만기에는 새로 읽어 확인한다.
+    pub(crate) fn pump_remote_completions(&mut self) {
+        let now = std::time::Instant::now();
+        let generation = kasa_mcp::machines::generation();
+        if !self.info.machines_col.remote_done.fresh(generation) {
+            if self.info.machines_col.remote_done.wants_sample(now) {
+                kasa_mcp::machines::poke();
+            }
+            if self.info.machines_col.marks_at.is_none_or(|at| now.duration_since(at) >= REMOTE_MARKS_EVERY) {
+                self.sync_remote_done_marks();
+            }
+            return;
+        }
+        let snapshot = kasa_mcp::machines::snapshot();
+        let mut online_routes = std::collections::HashSet::new();
+        let mut seats = Vec::new();
+        let mut rows = Vec::new();
+        for machine in &snapshot {
+            let Some(label) = machine.get("label").and_then(|v| v.as_str()) else { continue };
+            let route = machine.get("route").and_then(|v| v.as_str()).unwrap_or(label);
+            let Some(sample) = machine.get("sample_id").and_then(|v| v.as_str()) else { continue };
+            let Some(panes) = machine.get("panes").and_then(|v| v.as_array()).filter(|_| {
+                machine.get("online").and_then(|v| v.as_bool()) == Some(true)
+            }) else { continue };
+            online_routes.insert(route.to_string());
+            for row in panes {
+                if let Some(seat) = remote_seat(route, label, row) {
+                    rows.push((seat.key.clone(), sample.to_owned(), row));
+                    seats.push(seat);
+                }
+            }
+        }
+        let events = self.info.machines_col.remote_done.update(generation, rows, now);
+        let changed: Vec<_> = self.info.machines_col.remote_seats.iter().filter(|old| seats.iter().any(|new|
+            old.label == new.label && old.remote_id == new.remote_id && old.key != new.key)).cloned().collect();
+        for old in &changed {
+            for local in self.remote_mirrors(old) {
+                self.unread_panes.remove(&local);
+                self.turn_done_panes.remove(&local);
+                self.notify_flash.remove(&local);
+            }
+        }
+        let col = &mut self.info.machines_col;
+        // 닫힌 칸의 표시는 걷고, 끊긴 기기의 것은 다시 붙을 때까지 둔다.
+        let alive = |key: &String| seats.iter().any(|s| &s.key == key)
+            || !online_routes.contains(key.split('\u{1f}').next().unwrap_or_default());
+        col.remote_unread.retain(alive);
+        col.remote_quiet.retain(alive);
+        col.remote_seats = seats;
+        for (key, done) in events {
+            self.apply_remote_turn_done(&key, done);
+        }
+        self.sync_remote_done_marks();
+    }
+
+    pub(crate) fn remote_completion_deadline(&self) -> Option<std::time::Instant> {
+        self.info.machines_col.remote_done.deadline()
+    }
+
+    /// 원격 칸 하나의 응답 완료를 원본의 `TurnDone` 과 같은 모양으로 옮긴다. 그 칸을 비추는 거울이 있으면
+    /// 거울 칸이 원본처럼 반짝이고 읽지 않음이 되며, 없으면 원격 목록의 읽지 않음으로 남는다.
+    fn apply_remote_turn_done(&mut self, key: &str, done: u64) {
+        if self.lite || self.booted_at.elapsed() < Self::BOOT_QUIET {
+            return;
+        }
+        let Some(seat) = self.info.machines_col.remote_seats.iter().find(|s| s.key == key).cloned() else { return };
+        if std::env::var_os("KASATERM_STATE_LOG").is_some() {
+            eprintln!("[state] remote {key} TurnDone {done:016x}");
+        }
+        let now = std::time::Instant::now();
+        let mirrors = self.remote_mirrors(&seat);
+        let mut looking = false;
+        for id in &mirrors {
+            self.notify_flash.insert(id.clone(), now);
+            self.wake_blink(id);
+            self.turn_done_panes.insert(id.clone());
+            if let Some(wi) = self.window_of_pane(id).filter(|wi| *wi != self.active_window) {
+                self.window_alert.insert(wi);
+            }
+            if self.window_focused && self.notification_surface_is_visible(id) {
+                looking = true;
+            } else {
+                self.unread_panes.insert(id.clone());
+            }
+        }
+        let col = &mut self.info.machines_col;
+        col.remote_quiet.remove(key);
+        if mirrors.is_empty() {
+            col.remote_unread.insert(key.to_string());
+        }
+        self.chrome_dirty = true;
+        if looking {
+            return;
+        }
+        let who = if seat.name.is_empty() { "pane" } else { seat.name.as_str() };
+        let body = [seat.label.as_str(), seat.detail.trim()].into_iter()
+            .filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        notify_desktop(
+            &format!("{who} · 응답 완료"),
+            &body,
+            (!seat.name.is_empty()).then_some(seat.name.as_str()),
+            Some(&format!("done:{key}:{done:016x}")),
+            mirrors.first().map(|id| (id.as_str(), None)),
+        );
+    }
+
+    /// 그 원격 칸을 지금 비추는 이 기기 칸들 — 방에 앉은 것만. 번호가 재사용됐으면 surface_key 로 거른다.
+    fn remote_mirrors(&self, seat: &crate::state::RemoteSeat) -> Vec<String> {
+        self.pty.keys().filter(|local| {
+            let Some(info) = kasa_mcp::remote::remote_info(local) else { return false };
+            let label = kasa_mcp::machines::label_for_base(&info.base)
+                .unwrap_or_else(|| if info.label.is_empty() { info.base.clone() } else { info.label.clone() });
+            label == seat.label && info.remote_id == seat.remote_id && self.window_of_pane(local).is_some()
+                && kasa_mcp::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"))
+                    .is_none_or(|mine| seat.surface_key.as_deref().is_none_or(|theirs| theirs == mine))
+        }).cloned().collect()
+    }
+
+    /// 원격 방을 보러 왔다 — 그 칸들의 깜빡임을 멈춘다. 끝난 표시는 거울 칸이 보일 때 원본처럼 걷힌다.
+    pub(crate) fn quiet_remote_room(&mut self, label: &str, remote_ids: &[String]) {
+        let col = &mut self.info.machines_col;
+        let keys: Vec<String> = col.remote_seats.iter()
+            .filter(|s| s.label == label && remote_ids.contains(&s.remote_id))
+            .map(|s| s.key.clone())
+            .collect();
+        col.remote_quiet.extend(keys);
+        self.sync_remote_done_marks();
+    }
+
+    /// 거울이 생긴 칸의 원격 읽지 않음을 그 거울 칸으로 넘기고, 사이드바가 그릴 표시를 다시 짓는다.
+    fn sync_remote_done_marks(&mut self) {
+        self.info.machines_col.marks_at = Some(std::time::Instant::now());
+        let seats = std::mem::take(&mut self.info.machines_col.remote_seats);
+        let mut marks = std::collections::HashMap::new();
+        for seat in &seats {
+            let mirrors = self.remote_mirrors(seat);
+            let col = &mut self.info.machines_col;
+            if !mirrors.is_empty() && col.remote_unread.remove(&seat.key) {
+                let quiet = col.remote_quiet.contains(&seat.key);
+                for id in &mirrors {
+                    if quiet {
+                        self.blink_quiet.insert(id.clone());
+                    }
+                    if !(self.window_focused && self.notification_surface_is_visible(id)) {
+                        self.unread_panes.insert(id.clone());
+                    }
+                }
+            }
+            let col = &self.info.machines_col;
+            let remote = col.remote_unread.contains(&seat.key).then(|| col.remote_quiet.contains(&seat.key));
+            let mirrored = mirrors.iter().filter(|id| self.unread_panes.contains(*id))
+                .map(|id| self.blink_quiet.contains(id)
+                    || self.ws.lock().ok().and_then(|ws| ws.outer_for_pty(id)).is_some_and(|o| self.blink_quiet.contains(&o)))
+                .reduce(|a, b| a && b);
+            let quiet = match (remote, mirrored) {
+                (Some(a), Some(b)) => Some(a && b),
+                (a, b) => a.or(b),
+            };
+            if let Some(quiet) = quiet {
+                marks.insert((seat.label.clone(), seat.remote_id.clone()), quiet);
+            }
+        }
+        let col = &mut self.info.machines_col;
+        col.remote_seats = seats;
+        if col.done_marks != marks {
+            col.done_marks = marks;
+            self.chrome_dirty = true;
+        }
     }
 
     /// 스스로 다시 시도하는 오류를 이만큼 기다린 뒤에도 그대로면 알린다. 하네스의 재시도는

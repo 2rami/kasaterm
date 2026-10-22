@@ -323,6 +323,36 @@ pub(crate) struct MachinesColState {
     /// 도는(또는 막 끝난) 이사의 체크리스트 — Info 「다른 기계」의 그 기계 줄 밑에
     /// 선다. 끝나고 잠시 뒤 걷힌다(그리는 쪽이 판정).
     pub(crate) progress: Option<MigrateProgress>,
+    /// 다른 기기 칸의 응답 완료 관찰자 — 열린 거울과 원격 목록이 함께 쓴다(`chrome::pump_remote_completions`).
+    pub(crate) remote_done: crate::agent_transitions::RemoteObserver,
+    /// 마지막 표본의 원격 칸들. 열쇠는 기기 경로와 surface_key 다.
+    pub(crate) remote_seats: Vec<RemoteSeat>,
+    /// 거울 없이 끝난 원격 칸 — 거울이 생기면 그 칸의 읽지 않음으로 옮겨 간다.
+    pub(crate) remote_unread: std::collections::HashSet<String>,
+    /// 방을 보러 와 깜빡임을 멈춘 원격 칸.
+    pub(crate) remote_quiet: std::collections::HashSet<String>,
+    /// 그릴 표시 — (기기 라벨, 원격 %id) → 깜빡임 멈춤. 거울의 읽지 않음까지 합친 값이다.
+    pub(crate) done_marks: std::collections::HashMap<(String, String), bool>,
+    pub(crate) marks_at: Option<std::time::Instant>,
+}
+
+/// 원격 칸 한 자리의 신원 — 번호(`%N`)는 재사용되므로 surface_key 로 가른다.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteSeat {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) remote_id: String,
+    pub(crate) surface_key: Option<String>,
+    pub(crate) name: String,
+    /// 알림 본문 재료 — 그 칸이 하던 일, 없으면 세션 제목.
+    pub(crate) detail: String,
+}
+
+impl MachinesColState {
+    /// 원격 칸이 끝났는데 아직 안 봤는가. 값은 깜빡임을 멈췄는가.
+    pub(crate) fn done_mark(&self, label: &str, remote_id: &str) -> Option<bool> {
+        self.done_marks.get(&(label.to_string(), remote_id.to_string())).copied()
+    }
 }
 
 /// 이사 단계 이름 — 워커의 보고 번호와 짝(session.rs `migrate_worker`, 마지막은 GUI).

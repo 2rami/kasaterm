@@ -1170,6 +1170,15 @@ impl Backend for PtyBackend {
             .collect()
     }
 
+    fn response_ends(&self) -> Vec<kasa_socket::backend::ResponseEnd> {
+        self.hub.refresh();
+        kasa_pty::live_sessions()
+            .into_iter()
+            .filter(|id| !kasa_mcp::remote::is_remote_pane(id))
+            .filter_map(|id| self.hub.resolved(&id).and_then(|r| crate::agent_state::response_end(&id, &r)))
+            .collect()
+    }
+
     fn pane_cwds(&self) -> Vec<(String, String)> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketPaneCwds(tx));

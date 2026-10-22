@@ -96,7 +96,7 @@
 - `lid_away.rs` — 덮으면 이사(맥 전용): 학생이 일하는 동안 `pmset disablesleep` 로 잠자기를 막고, 덮이면 일하는 학생을 예약 이사(`migrate_pane`)한 뒤 재운다. 정책은 순수 함수 `step`, 덮개·외부 모니터·전원·열 판독은 `probe`, 설치물·명령은 `kasa_socket::lid_away` — `docs/lid-away.md`
 - `frame_pace.rs` — 몰려오는 그리기(PTY 출력 끝·`RedrawRequested`, `render_frame_paced`)를 화면 주사율 이상은 한 장으로 합친다. 미룬 그림은 `frame-pace` 스레드가 주기 끝에 `UserEvent::Redraw` 로 깨워 반드시 그린다. 사람 동작 직후·캡처·하네스는 `render_frame` 을 그대로 불러 미루지 않는다
 - `turn_probe.rs` — 이벤트 루프 한 바퀴의 메인 스레드 시간. 1초 넘는 바퀴는 늘 `[stall]`, `KASATERM_PROFILE` 이면 클릭 바퀴·50ms 넘는 바퀴도, `KASATERM_LAG_PROBE` 면 이벤트가 처리되기까지 줄 선 시간을 `[lag]` 로 찍는다
-- `agent_transitions.rs` — 실제 PTY·세션별 알림 관찰자와 상태 전이 순수 함수. 완료는 새 정상 종료 신호가 2초 유지된 경우만, 질문은 호출 ID별 한 번이다. 탭 선택이나 조용한 idle 전이는 완료가 아니다. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
+- `agent_transitions.rs` — 실제 PTY·세션별 알림 관찰자와 상태 전이 순수 함수. 완료는 새 정상 종료 신호가 2초 유지된 경우만, 질문은 호출 ID별 한 번이다. 탭 선택이나 조용한 idle 전이는 완료가 아니다. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다. 다른 기기 칸은 `RemoteObserver` 가 원본의 `response_end`(`kasa_socket::backend::ResponseEnd`, `/term/panes`)를 새 machines 세대에서만 같은 규칙으로 보고, `chrome.rs pump_remote_completions` 가 거울 칸이나 원격 목록 읽지 않음(`MachinesColState.done_marks` → `sidebar_navigation`)으로 옮긴다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].
 

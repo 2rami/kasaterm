@@ -163,6 +163,28 @@ impl Default for SessionsInfo {
     }
 }
 
+/// 한 칸의 응답 종료 증거 — 다른 기기가 이 칸의 「응답 완료」를 원본과 같은 규칙으로 판정하는 재료.
+/// 상태 낱말(`idle`)만으로는 조용해진 것과 응답을 마친 것을 못 가르므로, 원본 판정이 확인한 정상
+/// 종료 열쇠와 그 열쇠가 속한 세션 신원을 함께 싣는다. 값은 모두 같은 판정 스냅샷에서 나온다.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseEnd {
+    pub surface_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 판정 출처(기록 파일·연결 mod 실행)의 불투명 해시. 바뀌면 다른 세션이다.
+    pub source: String,
+    /// 마지막 정상 종료의 열쇠(16진). 없으면 아직 확인한 종료가 없다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<String>,
+    /// 지금 쉬는 중인가(쉼·방치 대기). 일하는 중·압축·사람 차례·오류면 false.
+    pub idle: bool,
+    pub error: bool,
+    pub background: bool,
+    /// 답을 기다리는 질문의 호출 ID.
+    #[serde(default)]
+    pub questions: Vec<String>,
+}
+
 /// One pane's self-reported activity, published to a shared board so
 /// sibling panes can coordinate without a human relaying between them:
 /// avoid editing the same file, wait out a neighbour's build, or notice
@@ -1153,6 +1175,11 @@ pub trait Backend: Send + Sync {
     /// 상태는 transcript 기반이라 compact 를 「working」으로만 알아, 폰이 그 사이를
     /// 「작업 중」으로 뭉갰다. 기본은 빈 목록.
     fn compacting_panes(&self) -> Vec<(String, Option<u8>)> {
+        Vec::new()
+    }
+    /// 이 기기 칸들의 응답 종료 증거(`/term/panes` 의 `response_end`). 판정을 못 하는 백엔드는
+    /// 빈 목록 — 받는 쪽은 증거가 없는 칸의 쉼을 완료로 치지 않는다.
+    fn response_ends(&self) -> Vec<ResponseEnd> {
         Vec::new()
     }
     /// 앱 재시작 계획용 사실(`app_restart::Facts`). `machine` 이 비었거나 이 기기면 스스로 재고,

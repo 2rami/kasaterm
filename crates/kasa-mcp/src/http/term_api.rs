@@ -195,6 +195,12 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
         .into_iter()
         .map(|(p, m, e)| (p, (m, e)))
         .collect();
+    // 응답 종료 증거 — 다른 기기는 이것이 있어야 이 칸의 「응답 완료」를 원본과 같은 규칙으로 판정한다.
+    let response_ends: std::collections::HashMap<String, kasa_socket::backend::ResponseEnd> = backend
+        .response_ends()
+        .into_iter()
+        .map(|end| (end.surface_id.clone(), end))
+        .collect();
     // 학생색(header_color) — 이름을 그 학생의 색으로 칠한다(사이드바의 학생 테마).
     // 캐릭터 매칭 규칙이 서버(find_character)에 이미 있으니 클라에 JSON 파싱을
     // 중복시키지 않고 여기서 hex 로 얹는다.
@@ -322,6 +328,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     .and_then(crate::character::header_color_any),
                 "model": agent_cfg.get(&id).map(|(m, _)| m.clone()).filter(|s| !s.is_empty()),
                 "effort": agent_cfg.get(&id).map(|(_, e)| e.clone()).filter(|s| !s.is_empty()),
+                "response_end": response_ends.get(&id),
             })
         })
         .collect();

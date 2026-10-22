@@ -7,7 +7,7 @@ pub(crate) fn collapsed_summary(busy: usize, attention: usize) -> String {
     format!("작업 {busy} · 확인 {attention}")
 }
 
-fn remote_collapsed_summary(online: bool, rows: &[&state::MachinesColRow]) -> String {
+fn remote_collapsed_summary(online: bool, rows: &[&state::MachinesColRow], done: &DoneMarks, label: &str) -> String {
     if !online {
         return "연결 끊김".into();
     }
@@ -15,8 +15,18 @@ fn remote_collapsed_summary(online: bool, rows: &[&state::MachinesColRow]) -> St
     collapsed_summary(
         stacks.iter().filter(|deck| deck.iter().any(|r| !r.closed
             && matches!(r.status.as_str(), "working" | "compacting"))).count(),
-        stacks.iter().filter(|deck| deck.iter().any(|r| r.needs_you())).count(),
+        stacks.iter().filter(|deck| deck.iter().any(|r| r.needs_you()) || deck_done(done, label, deck).is_some()).count(),
     )
+}
+
+/// (기기 라벨, 원격 %id) → 깜빡임을 멈췄는가. 끝났는데 아직 안 본 원격 칸만 담긴다(`chrome::sync_remote_done_marks`).
+type DoneMarks = std::collections::HashMap<(String, String), bool>;
+
+/// 칸(바깥 pane 과 그 탭들) 중 못 본 끝남이 있나 — 값은 전부 깜빡임을 멈췄는가. 닫힌 칸은 묻지 않는다.
+fn deck_done(done: &DoneMarks, label: &str, deck: &[&state::MachinesColRow]) -> Option<bool> {
+    deck.iter().filter(|r| !r.closed)
+        .filter_map(|r| done.get(&(label.to_string(), r.remote_id.clone())).copied())
+        .reduce(|a, b| a && b)
 }
 pub(crate) const HEADER_H: f32 = 48.0;
 const PANE_H: f32 = 44.0;
@@ -378,6 +388,7 @@ fn draw_cell(
     cursor: (f32, f32),
     view: Rect,
     drag: Option<&str>,
+    done: Option<bool>,
 ) {
     let row = deck[0];
     let (mx, my, mw, mh) = cell;
@@ -389,7 +400,13 @@ fn draw_cell(
     g.hover_pointer |= hover && !row.closed;
     let busy = deck_busy(deck);
     let waiting = machine.online && deck.iter().any(|r| r.needs_you());
-    let signal = waiting.then(|| (theme::attention(), 0.9));
+    // 본기기 배치도 칸과 같은 갈래 — 기다림이 이기고, 못 본 끝남은 느린 숨이다. 방을 보러 와 멈췄으면 서 있는다.
+    let quiet = !waiting && done == Some(true);
+    let signal = if waiting {
+        Some((theme::attention(), 0.9))
+    } else {
+        done.map(|_| (theme::accent(), 1.6))
+    };
     round_rect(g, mx, my, mw, mh, 2.0, if drop_here {
         theme::accent()
     } else if let Some((c, _)) = signal {
@@ -408,7 +425,7 @@ fn draw_cell(
     if let Some((col, period)) = signal {
         if mw > 5.0 && mh > 5.0 {
             let mut c = col;
-            c[3] = (30.0 + 120.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), period)) as u8;
+            c[3] = if quiet { 90 } else { (30.0 + 120.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), period)) as u8 };
             round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
         }
     }
@@ -456,13 +473,14 @@ fn draw_cell(
 }
 
 /// 다른 기기 학생 한 줄의 글 — 이 기기 줄(`App::row_student`)과 같은 규칙: 얼굴 열쇠와 세션 이름.
-fn remote_student(machine: &state::MachinesColMachine, deck: &[&state::MachinesColRow]) -> crate::sidebar_pulse::RowStudent {
+fn remote_student(machine: &state::MachinesColMachine, deck: &[&state::MachinesColRow], done: &DoneMarks) -> crate::sidebar_pulse::RowStudent {
     let head = deck.iter().find(|r| !r.name.is_empty()).copied().unwrap_or(deck[0]);
     let waiting = machine.online && deck.iter().any(|r| r.needs_you());
+    let unread = machine.online && deck_done(done, &machine.label, deck).is_some();
     crate::sidebar_pulse::RowStudent {
         who: head.name.clone(),
         title: crate::sidebar_pulse::row_title(&head.title, "터미널"),
-        turn: crate::sidebar_pulse::row_turn(waiting, false, deck_busy(deck)),
+        turn: crate::sidebar_pulse::row_turn(waiting, unread, deck_busy(deck)),
         agent: String::new(),
         pane: format!("{}{}", machine.label, head.remote_id),
     }
@@ -561,6 +579,7 @@ struct RowsCtx<'a> {
     viewing_cur: Option<&'a str>,
     rename: Option<&'a (String, crate::lineedit::SingleLine)>,
     web_open: &'a std::collections::HashSet<String>,
+    done: &'a DoneMarks,
 }
 
 fn draw_rows(
@@ -615,16 +634,21 @@ fn draw_rows(
                 let ly = (y + h + SIDEBAR_TAB_GAP / 2.0).round();
                 g.rect(tab_x + 10.0, ly, tab_w - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
             }
-            // 접힌 방의 기다림은 머리의 숨쉬는 점이 말한다 — 펴진 방은 칸이 말하므로 조용히.
+            // 접힌 방의 기다림·못 본 끝남은 머리의 점이 말한다 — 펴진 방은 칸이 말하므로 조용히.
             let waits = machine.online && list.iter().any(|r| r.needs_you());
+            let done = machine.online.then(|| deck_done(ctx.done, &machine.label, list)).flatten();
             if collapsed && waits {
                 crate::sprites::blink_dot(g, tab_x + 12.0, y + 13.0, 9.0, theme::attention(), 0.9);
+            } else if collapsed && done == Some(true) {
+                circle_rect(g, tab_x + 12.0, y + 13.0, 9.0, theme::accent());
+            } else if collapsed && done.is_some() {
+                crate::sprites::blink_dot(g, tab_x + 12.0, y + 13.0, 9.0, theme::accent(), 1.6);
             }
             // 펼침 배지 — 본기기 `window_expand_rect` 와 같은 pill(칸 수 포함).
             let badge_w = if stacks.len() >= 10 { 44.0 } else { 37.0 };
             let badge = (tab_x + tab_w - 8.0 - badge_w, y + 26.0, badge_w, 20.0);
             let (name, folder) = room_title(room);
-            let summary = remote_collapsed_summary(machine.online, list);
+            let summary = remote_collapsed_summary(machine.online, list, ctx.done, &machine.label);
             let folder = if collapsed { summary.as_str() } else { folder };
             let compact = tab_w < 180.0;
             let text_x = tab_x + if compact { 8.0 } else { 26.0 };
@@ -691,7 +715,7 @@ fn draw_rows(
         if !collapsed && listed {
             // 목록 보기 — 배치도 자리에 학생 줄(본기기 목록 줄과 같은 기하·같은 순서).
             let mut rows: Vec<(crate::sidebar_pulse::RowStudent, &Vec<&state::MachinesColRow>)> =
-                stacks.iter().map(|deck| (remote_student(machine, deck), deck)).collect();
+                stacks.iter().map(|deck| (remote_student(machine, deck, ctx.done), deck)).collect();
             rows.sort_by_key(|(student, _)| student.turn);
             for (k, (student, deck)) in rows.iter().enumerate() {
                 let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::chrome::SidebarMetrics::new(width).row_h(),
@@ -704,7 +728,8 @@ fn draw_rows(
             let heads: Vec<&state::MachinesColRow> = stacks.iter().map(|d| d[0]).collect();
             for (deck, cell) in stacks.iter().zip(cell_rects(&heads, ma)) {
                 let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
-                draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view, ctx.drag);
+                let done = machine.online.then(|| deck_done(ctx.done, &machine.label, deck)).flatten();
+                draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view, ctx.drag, done);
             }
         }
         y += h + SIDEBAR_TAB_GAP;
@@ -773,6 +798,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         viewing_cur: viewing_cur.as_deref(),
         rename: rename.as_ref(),
         web_open,
+        done: &info.machines_col.done_marks,
     };
     let mut y = viewport.1 + *local_content_h - *shared_scroll;
     g.push_clip(viewport.0, viewport.1, viewport.2, viewport.3);
@@ -1103,8 +1129,9 @@ impl App {
                     });
                 }
                 None => {
-                    if let Err(e) = self.open_remote_room(&label, window, &room, None) {
-                        self.set_toast(format!("방 열기 실패 — {e:#}"));
+                    match self.open_remote_room(&label, window, &room, None) {
+                        Ok(_) => self.visit_remote_room(&label, window, &room),
+                        Err(e) => self.set_toast(format!("방 열기 실패 — {e:#}")),
                     }
                     self.info.machines_col.last_refresh = None;
                 }
@@ -1144,6 +1171,12 @@ impl App {
         }
         self.chrome_dirty = true;
         true
+    }
+
+    /// 다른 기기 방을 보러 왔다 — 본기기 방으로 옮겨 올 때처럼 그 방 칸들의 깜빡임을 멈춘다.
+    fn visit_remote_room(&mut self, label: &str, window: Option<u64>, room: &str) {
+        let ids: Vec<String> = self.remote_room_panes(label, window, room).into_iter().map(|r| r.remote_id.clone()).collect();
+        self.quiet_remote_room(label, &ids);
     }
 
     /// 창 밖 셸을 닫는다 — 이 기기면 붙들기를 놓고 셸이 끝나는지 보고, 다른 기기면 그쪽
@@ -1201,8 +1234,9 @@ impl App {
     pub(crate) fn sidebar_navigation_release(&mut self, cursor: (f32, f32)) -> bool {
         if let Some(cell) = self.info.navigation.cell_drag.take() {
             if !cell.active {
-                if let Err(e) = self.open_remote_room(&cell.label, cell.window, &cell.room, Some(&cell.pane)) {
-                    self.set_toast(format!("방 열기 실패 — {e:#}"));
+                match self.open_remote_room(&cell.label, cell.window, &cell.room, Some(&cell.pane)) {
+                    Ok(_) => self.visit_remote_room(&cell.label, cell.window, &cell.room),
+                    Err(e) => self.set_toast(format!("방 열기 실패 — {e:#}")),
                 }
                 self.info.machines_col.last_refresh = None;
             } else {
@@ -1274,12 +1308,12 @@ mod tests {
         m.mirrored[0].status = "waiting".into();
         m.mirrored[0].attention_kind = Some("question".into());
         let list = rows(&m);
-        assert_eq!(remote_collapsed_summary(true, &list), "작업 1 · 확인 1");
-        assert_eq!(remote_collapsed_summary(false, &list), "연결 끊김");
+        assert_eq!(remote_collapsed_summary(true, &list, &DoneMarks::new(), "test"), "작업 1 · 확인 1");
+        assert_eq!(remote_collapsed_summary(false, &list, &DoneMarks::new(), "test"), "연결 끊김");
         m.mirrored[0].attention_kind = Some("idle".into());
         m.remote[0].closed = true;
         m.remote[1].closed = true;
-        assert_eq!(remote_collapsed_summary(true, &rows(&m)), "작업 0 · 확인 0");
+        assert_eq!(remote_collapsed_summary(true, &rows(&m), &DoneMarks::new(), "test"), "작업 0 · 확인 0");
     }
 
     fn machine() -> state::MachinesColMachine {

@@ -737,6 +737,34 @@ impl StateHub {
     }
 }
 
+/// 이 칸의 판정을 다른 기기가 볼 응답 종료 증거로 옮긴다. 출처를 모르는 칸은 세션 신원이 없어 싣지 않는다.
+pub(crate) fn response_end(id: &str, r: &Resolved) -> Option<kasa_socket::backend::ResponseEnd> {
+    let source = r.source.as_deref()?;
+    let session_id = source.strip_prefix("claude-mod:")
+        .and_then(|rest| rest.rsplit_once(':').map(|(sid, _)| sid.to_string()))
+        .or_else(|| {
+            let path = std::path::Path::new(source);
+            crate::socket::codex_sid_from_rollout(path)
+                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        })
+        .filter(|sid| !sid.is_empty());
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hash);
+    Some(kasa_socket::backend::ResponseEnd {
+        surface_id: id.to_string(),
+        session_id,
+        source: format!("{:016x}", hash.finish()),
+        completion: r.completion.map(|key| format!("{key:016x}")),
+        idle: matches!(r.state, AgentState::Idle | AgentState::Waiting { kind: WaitKind::Idle, .. }),
+        error: r.has_error,
+        background: r.bg_active,
+        questions: r.questions.iter().map(|q| q.id.clone()).collect(),
+    })
+}
+
+/// 거울 칸은 여기서 종료 증거를 만들지 않는다. 원본이 실어 보낸 `response_end` 는 원격 관찰자
+/// (`agent_transitions::RemoteObserver`) 하나가 새로 읽은 표본으로만 보아, 열린 거울과 원격 목록이
+/// 같은 응답을 두 번 알리지 않는다.
 fn completion_evidence(e: &Evidence) -> Option<u64> {
     if e.remote.is_some() || e.harness.is_none() { return None; }
     if let Some(m) = &e.module {
