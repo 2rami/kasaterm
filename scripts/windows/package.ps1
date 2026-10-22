@@ -261,7 +261,8 @@ $portableFonts = Join-Path $portableStage "fonts"
 New-Item -ItemType Directory -Path $portableFonts -Force | Out-Null
 Copy-Item -LiteralPath @(
     (Join-Path $repoRoot "app\kasaterm\assets\fonts\NotoSansKR-Variable.ttf"),
-    (Join-Path $repoRoot "app\kasaterm\assets\fonts\OFL-NotoSansKR.txt")
+    (Join-Path $repoRoot "app\kasaterm\assets\fonts\OFL-NotoSansKR.txt"),
+    (Join-Path $repoRoot "crates\kasa-gridview\assets\fonts\OFL-D2Coding.txt")
 ) -Destination $portableFonts -Force
 Copy-Item -LiteralPath $uiDist -Destination (Join-Path $portableStage "arona-ui") -Recurse -Force
 Copy-Item -LiteralPath $collabStage -Destination (Join-Path $portableStage "collab-hooks") -Recurse -Force
@@ -281,7 +282,7 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
 $requiredFiles = @(
     "kasaterm.exe", "kasaterm-cli.exe", "WinSparkle.dll", "index.html",
     "characters.json", "kasacollab.py",
-    "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt"
+    "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt", "OFL-D2Coding.txt"
 )
 Assert-MsiManifest -Manifest $verifyWxs -Names $requiredFiles
 Assert-PackageFiles -Root $portableStage -Names $requiredFiles

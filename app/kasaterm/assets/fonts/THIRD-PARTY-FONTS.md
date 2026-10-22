@@ -1,6 +1,6 @@
 # Bundled fonts
 
-The app bundles two fonts via `include_bytes!` (`src/gpu.rs`) so that
+The app and shared terminal renderer embed fonts so that Korean text and
 Nerd-style icons render without requiring a system-font install. They are
 redistributed here under their own licenses, which are independent of
 the app's license.
@@ -13,6 +13,13 @@ the app's license.
 - **Copyright:** © Microsoft Corporation
 - Nerd Font glyph patches: https://github.com/ryanoasis/nerd-fonts
 
+## D2Coding 1.4.0
+
+The shared terminal renderer embeds unmodified Regular and Bold fonts from NAVER.
+Source, checksums and the SIL Open Font License are in
+[kasa-gridview/assets/fonts](../../../../crates/kasa-gridview/assets/fonts/README.md).
+The desktop packages also include `OFL-D2Coding.txt` as a readable license file.
+
 ## SymbolsNerdFontMono-Regular.ttf
 
 - **Family:** Symbols Nerd Font Mono
@@ -22,5 +29,5 @@ the app's license.
 
 ---
 
-Both font licenses (OFL 1.1, MIT) permit redistribution. The OFL text
-ships alongside the font in [OFL-CascadiaCode.txt](OFL-CascadiaCode.txt), as the license requires.
+The applicable font licenses (OFL 1.1, MIT) permit redistribution. The OFL texts
+ship alongside their fonts; Cascadia's is [OFL-CascadiaCode.txt](OFL-CascadiaCode.txt).

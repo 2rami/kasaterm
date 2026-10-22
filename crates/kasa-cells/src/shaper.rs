@@ -1,11 +1,4 @@
-//! swash-driven glyph rasterizer. Loads one font from raw bytes,
-//! returns alpha bitmaps the atlas can paste into its R8 texture.
-//!
-//! Phase 1 keeps the surface intentionally small — one font, no
-//! fallback chain, no shaping for clusters (CJK / emoji / Nerd icons
-//! arrive in later phases). The atlas is the side that caches; this
-//! module is stateless per glyph so the atlas can decide which keys
-//! to keep around.
+//! Glyph metrics and rasterization share the fallback decision so text and icons stay in their cells.
 
 use anyhow::{Context, Result};
 use swash::scale::image::Content;
@@ -16,12 +9,13 @@ use swash::FontRef;
 /// Backing storage for one font face. `Mapped` is the common case — the
 /// font file is mmap'd, so only the table/glyph pages swash actually touches
 /// become resident (a 180MB color-emoji font costs ~0 RSS until an emoji is
-/// drawn). `Owned` covers the primary font handed in as bytes and the small
-/// `include_bytes!` Nerd-icon face. Replacing `std::fs::read` (whole file →
+/// drawn). `Owned` covers the primary font handed in as bytes; `Static`
+/// shares embedded fonts without a heap copy per shaper. Replacing `std::fs::read` (whole file →
 /// heap) with mmap is what keeps the fallback chain off the resident set.
 enum FontData {
     Mapped(memmap2::Mmap),
     Owned(Vec<u8>),
+    Static(&'static [u8]),
 }
 
 impl FontData {
@@ -29,6 +23,7 @@ impl FontData {
         match self {
             FontData::Mapped(m) => &m[..],
             FontData::Owned(v) => v,
+            FontData::Static(v) => v,
         }
     }
     fn is_empty(&self) -> bool {
@@ -60,6 +55,8 @@ pub struct Shaper {
     /// sugarloaf: D2Coding → JetBrainsMono → Apple SD → Apple
     /// Color Emoji on macOS.
     faces: Vec<(FontData, u32)>,
+    // Text fonts may use private-use codepoints for old glyphs that collide with Nerd icons.
+    text_faces: std::collections::HashSet<usize>,
     /// Optional bold-weight variant for each slot in `faces`. Parallel
     /// indexing — `bold_faces[i]` mirrors `faces[i]` when present (an empty
     /// face means "no bold installed for this slot"). Filled via
@@ -199,6 +196,7 @@ impl Shaper {
             .context("font bytes not a TTF/OTF/TTC entry")?;
         Ok(Self {
             faces: vec![(FontData::Owned(font_data), font_index)],
+            text_faces: Default::default(),
             bold_faces: Vec::new(),
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
@@ -242,6 +240,7 @@ impl Shaper {
         let data = map_font(path, index).with_context(|| format!("read font {path}"))?;
         Ok(Self {
             faces: vec![(data, index)],
+            text_faces: Default::default(),
             bold_faces: Vec::new(),
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
@@ -291,9 +290,33 @@ impl Shaper {
     /// of what's installed on the user's system.
     pub fn add_fallback_bytes(&mut self, bytes: &'static [u8], index: u32) {
         if FontRef::from_index(bytes, index as usize).is_some() {
-            self.faces.push((FontData::Owned(bytes.to_vec()), index));
+            self.faces.push((FontData::Static(bytes), index));
             self.cell_adv.clear();
         }
+    }
+
+    /// Private-use glyphs stay with the icon fonts; the embedded text faces share their bytes across panes.
+    pub fn add_text_fallback_bytes(
+        &mut self,
+        bytes: &'static [u8],
+        index: u32,
+        bold: Option<(&'static [u8], u32)>,
+    ) {
+        let slot = self.faces.len();
+        self.add_fallback_bytes(bytes, index);
+        if self.faces.len() == slot { return; }
+        self.text_faces.insert(slot);
+        if let Some((bytes, index)) = bold.filter(|(b, i)| FontRef::from_index(b, *i as usize).is_some()) {
+            while self.bold_faces.len() <= slot {
+                self.bold_faces.push((FontData::empty(), 0));
+            }
+            self.bold_faces[slot] = (FontData::Static(bytes), index);
+        }
+    }
+
+    fn accepts(&self, slot: usize, ch: char) -> bool {
+        !self.text_faces.contains(&slot)
+            || !matches!(ch as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
     }
 
     fn face(&self, idx: usize) -> FontRef<'_> {
@@ -307,6 +330,7 @@ impl Shaper {
     #[allow(dead_code)]
     fn resolve(&self, ch: char) -> Option<(usize, u16)> {
         for i in 0..self.faces.len() {
+            if !self.accepts(i, ch) { continue; }
             let f = self.face(i);
             let gid = f.charmap().map(ch as u32);
             if gid != 0 {
@@ -343,6 +367,7 @@ impl Shaper {
     /// fallback chain to the first face that maps the codepoint.
     pub fn advance(&self, ch: char, size_px: f32) -> f32 {
         for i in 0..self.faces.len() {
+            if !self.accepts(i, ch) { continue; }
             let f = self.face(i);
             let gid = f.charmap().map(ch as u32);
             if gid != 0 {
@@ -527,6 +552,7 @@ impl Shaper {
         let candidates: Vec<(usize, u16, f32, FaceKind)> = {
             let mut v = Vec::new();
             for i in 0..self.faces.len() {
+                if !self.accepts(i, ch) { continue; }
                 let (kind, bytes, fi) = pick_face(i);
                 if let Some(f) = FontRef::from_index(bytes, fi as usize) {
                     let gid = f.charmap().map(ch as u32);

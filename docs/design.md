@@ -943,6 +943,9 @@ Graphite·Ink·Paper·Mist)에서 본문이 외곽·메뉴보다 가라앉았다
 - 본문 12 · 보조글 10.5 · 묶음 제목 11 · 페이지 이름 20 · 카드 이름 14 · 알약 9.5 (pt, 논리)
 - 넘치는 글자는 `fit(g, text, 가용폭, 크기, 굵게)` 로 자른다. 직접 자르지 마라.
 - UI 글꼴은 `theme::ui_font()`. 미지정 시 시스템 고딕을 사용한다. 터미널 글꼴과 다른 축이다.
+- PC 터미널의 기본 영문은 JetBrains Mono, 한글 폴백은 앱에 포함한 D2Coding 1.4.0 Regular/Bold다.
+  설치 JetBrains 폴백 다음에 번들 D2Coding을 두고, 구판 D2Coding Nerd Font보다 먼저 읽는다.
+  D2Coding의 사설영역(PUA)은 Nerd 아이콘과 충돌하므로 이 폴백에서 제외한다. UI·대화 본문의 기본 글꼴과 사용자가 명시한 주 글꼴은 유지한다.
 
 ## 7. 고칠 때 지킬 것
 

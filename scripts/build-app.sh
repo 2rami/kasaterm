@@ -122,6 +122,8 @@ cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 # 무중단 승격(promote)의 로컬 상주 데몬 — ensure_local_ptyd 가 현재 exe 옆에서 찾는다.
 cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+mkdir -p "$APP/Contents/Resources/licenses"
+cp crates/kasa-gridview/assets/fonts/OFL-D2Coding.txt "$APP/Contents/Resources/licenses/OFL-D2Coding.txt"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
 cp -R app/kasaterm/collab-hooks "$APP/Contents/Resources/collab-hooks"

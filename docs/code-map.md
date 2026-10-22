@@ -1,6 +1,9 @@
 # 코드 맵 — main.rs 와 기능 모듈들
 
 프로젝트 개발 안내가 여기를 가리킨다. Rust 를 수정할 때 해당 영역을 찾아 읽는다.
+
+터미널 글꼴 선택은 `crates/kasa-gridview/src/fonts.rs`, 번들 D2Coding 버전·출처는 `crates/kasa-gridview/assets/fonts/README.md`다.
+`kasa-cells/src/shaper.rs`가 글꼴별 사설영역 제외와 Regular/Bold 짝을 동일한 측정·그리기 경로에서 적용한다.
 크레이트 사이 층과 의존 방향은 [`workspace.md`](workspace.md)(검사 `scripts/check-workspace.py`).
 
 `main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 그리기·문서 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main`(부팅 순서 조립) + tests 만. 부팅 자유함수는 아래 세 모듈에 있고 main.rs 가 옛 경로(`crate::verification_run` 등)로 재수출한다. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):

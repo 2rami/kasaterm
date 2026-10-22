@@ -2,6 +2,9 @@
 
 use kasa_cells::Shaper;
 
+const D2_REGULAR: &[u8] = include_bytes!("../assets/fonts/D2Coding-Regular.ttf");
+const D2_BOLD: &[u8] = include_bytes!("../assets/fonts/D2Coding-Bold.ttf");
+
 #[cfg(target_os = "macos")]
 fn home_var() -> Result<String, std::env::VarError> {
     match std::env::var("HOME") {
@@ -56,12 +59,19 @@ pub fn sibling_bold_font_path(regular: &str) -> Option<(String, u32)> {
 
 /// 폴백 체인을 한 벌 붙인다(설치 폰트 + 번들 폰트). 세 shaper(그리드·마크다운·
 /// 마크다운 볼드)가 같은 체인을 쓰므로 한 곳에 모아 어긋나지 않게 한다.
-/// 번들 폰트는 체인 끝에 둔다 — 사용자가 설치한 Nerd Font 가 먼저 이기되,
-/// primary 의 빈 아웃라인 구멍은 여기까지 흘러와 반드시 글리프를 얻는다.
+/// 한글 버전은 앱과 함께 갱신하되, 기존 JetBrains 기호와 Nerd 사설영역은 유지한다.
 pub fn attach_fallback_chain(shaper: &mut Shaper, bundled: &[&'static [u8]]) {
-    for (path, idx) in fallback_font_paths() {
-        let bold = sibling_bold_font_path(&path);
-        shaper.add_fallback_with_bold(&path, idx, bold);
+    let paths = fallback_font_paths();
+    let latin = |p: &str| p.ends_with("JetBrainsMonoNerdFontMono-Regular.ttf");
+    let append = |shaper: &mut Shaper, path: &str, idx: u32| {
+        shaper.add_fallback_with_bold(path, idx, sibling_bold_font_path(path));
+    };
+    for (path, idx) in paths.iter().filter(|(p, _)| latin(p)) {
+        append(shaper, path, *idx);
+    }
+    shaper.add_text_fallback_bytes(D2_REGULAR, 0, Some((D2_BOLD, 0)));
+    for (path, idx) in paths.iter().filter(|(p, _)| !latin(p)) {
+        append(shaper, path, *idx);
     }
     for bytes in bundled {
         shaper.add_fallback_bytes(bytes, 0);
@@ -283,5 +293,65 @@ pub fn default_font_path() -> String {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         return "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn primary() -> Option<String> {
+        let path = default_font_path();
+        std::path::Path::new(&path).is_file().then_some(path)
+    }
+
+    fn ink(g: &kasa_cells::Rasterized) -> u64 {
+        g.data.iter().map(|&a| u64::from(a)).sum()
+    }
+
+    #[test]
+    fn bundled_hangul_has_designed_bold_without_an_installed_korean_font() {
+        let Some(path) = primary() else { return };
+        let mut shaper = Shaper::from_path(&path, 0).unwrap();
+        if shaper.rasterize('한', 24.0).is_some() { return; }
+        shaper.add_text_fallback_bytes(D2_REGULAR, 0, Some((D2_BOLD, 0)));
+        for px in [20.0, 24.0, 28.0, 32.0] {
+            let cell = shaper.cell_advance(px);
+            for ch in ['한', '글', '되', '뷁', '가', '힣', 'ㄱ', '醫'] {
+                let regular = shaper.rasterize(ch, px).unwrap();
+                let bold = shaper.rasterize_styled(ch, px, true, false).unwrap();
+                assert!(ink(&regular) > 0 && ink(&bold) > ink(&regular), "{ch} {px}px bold");
+                assert!(bold.width as f32 <= (cell * 2.0).ceil() + 2.0, "{ch} {px}px width");
+            }
+        }
+    }
+
+    #[test]
+    fn a_text_font_does_not_supply_legacy_private_use_glyphs_as_icons() {
+        let Some(path) = primary() else { return };
+        let mut before = Shaper::from_path(&path, 0).unwrap();
+        let mut after = Shaper::from_path(&path, 0).unwrap();
+        let mut unfiltered = Shaper::from_path(&path, 0).unwrap();
+        unfiltered.add_fallback_bytes(D2_REGULAR, 0);
+        after.add_text_fallback_bytes(D2_REGULAR, 0, Some((D2_BOLD, 0)));
+        let mut tested_private = 0;
+        let mut collisions = 0;
+        for ch in ('\u{E000}'..='\u{F8FF}').chain(['\u{F0001}', 'A', '0']) {
+            if before.rasterize(ch, 24.0).is_none() {
+                assert!(after.rasterize(ch, 24.0).is_none(), "U+{:04X} became a text-font icon", ch as u32);
+                collisions += usize::from(unfiltered.rasterize(ch, 24.0).is_some());
+                tested_private += 1;
+            } else if matches!(ch, '\u{E0A0}' | '\u{F120}' | 'A' | '0') {
+                for bold in [false, true] {
+                    let a = before.rasterize_styled(ch, 24.0, bold, false).unwrap();
+                    let b = after.rasterize_styled(ch, 24.0, bold, false).unwrap();
+                    assert_eq!((a.width, a.height, a.bearing_x, a.bearing_y, a.data),
+                        (b.width, b.height, b.bearing_x, b.bearing_y, b.data));
+                    assert_eq!(before.advance(ch, 24.0), after.advance(ch, 24.0));
+                }
+            }
+        }
+        assert!(tested_private > 0);
+        assert!(collisions > 0, "the unfiltered font must reproduce the icon collision");
     }
 }

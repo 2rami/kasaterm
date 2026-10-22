@@ -145,6 +145,10 @@
                                 KeyPath='yes'/>
                         </Component>
                         <Directory Id='ViewerFonts' Name='fonts'>
+                            <Component Id='D2CodingLicense' Guid='*'>
+                                <File Id='D2CodingOfl' Name='OFL-D2Coding.txt' DiskId='1'
+                                    Source='crates\kasa-gridview\assets\fonts\OFL-D2Coding.txt' KeyPath='yes'/>
+                            </Component>
                             <Component Id='ViewerNotoSansKr' Guid='*'>
                                 <File Id='ViewerNotoSansKrVariable'
                                     Name='NotoSansKR-Variable.ttf'
@@ -218,6 +222,7 @@
             <ComponentRef Id='binary2'/>
             <ComponentRef Id='ViewerNotoSansKr'/>
             <ComponentRef Id='ViewerNotoSansKrLicense'/>
+            <ComponentRef Id='D2CodingLicense'/>
             <ComponentGroupRef Id='AronaUiGroup'/>
             <ComponentGroupRef Id='CollabHooksGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
