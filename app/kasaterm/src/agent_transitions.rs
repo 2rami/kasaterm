@@ -216,7 +216,7 @@ impl RemoteObserver {
         due
     }
 
-    /// `rows` 는 (원격 칸 열쇠, 행). 새 정상 종료가 2초 유지된 칸과 그 종료 열쇠만 돌려준다.
+    /// 다른 기기의 새 표본이 이 칸의 종료를 대신 확인하지 않게 표본 열쇠도 함께 받는다.
     pub(crate) fn update<'a>(
         &mut self,
         generation: u64,
@@ -224,7 +224,6 @@ impl RemoteObserver {
         now: Instant,
     ) -> Vec<(String, u64)> {
         self.generation = Some(generation);
-        self.wake = None;
         let mut samples = HashMap::new();
         let mut fresh = HashSet::new();
         let panes: HashMap<String, Resolved> = rows.into_iter().map(|(key, sample, row)| {
@@ -233,7 +232,9 @@ impl RemoteObserver {
             (key, remote_fact(row, now))
         }).collect();
         self.samples = samples;
-        self.inner.update_selected_at(&panes, now, |key| fresh.contains(key)).into_iter()
+        let events = self.inner.update_selected_at(&panes, now, |key| fresh.contains(key));
+        if self.inner.settled_deadline().is_none_or(|at| at > now) { self.wake = None; }
+        events.into_iter()
             .flat_map(|(key, events)| events.into_iter().filter_map(move |event| match event {
                 Transition::TurnDone { key: done } => Some((key.clone(), done)),
                 _ => None,

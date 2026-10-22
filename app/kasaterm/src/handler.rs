@@ -3497,6 +3497,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if !focused && self.room_rename.editing.is_some() {
                     crate::lineedit::pointer_release(crate::chrome::ROOM_FIELD);
                 }
+                if !focused { self.info_split_release(); }
                 if focused {
                     // 앱으로 돌아온 사람은 지금 방을 본다 — 그 방 칸들의 깜빡임을 멈춘다.
                     self.quiet_room_blinks(self.active_window);
@@ -8128,6 +8129,7 @@ impl ApplicationHandler<UserEvent> for App {
             if !self.window_alert.is_empty() {
                 why.push("window_alert");
             }
+            if self.remote_completion_animating() { why.push("remote_completion"); }
             if self.pane_activity.iter().any(|(id, a)| a.state.needs_you() && !self.blink_quiet.contains(id)) {
                 why.push("needs_you");
             }
@@ -8213,6 +8215,7 @@ impl ApplicationHandler<UserEvent> for App {
             // 못 본 알림이 있는 방 탭은 숨쉰다 — 그 호흡이 이어지려면 프레임이
             // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
+            || self.remote_completion_animating()
             // 손을 기다리는 pane 의 핑크 깜빡임(사이드바 줄 + pane 테두리)도 같은 이유로.
             // 사람이 그 방을 보러 와 멈춘 칸은 서 있으니 펌프하지 않는다.
             || self

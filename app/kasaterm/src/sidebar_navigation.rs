@@ -503,6 +503,7 @@ fn draw_list_row(
     row: Rect,
     cursor: (f32, f32),
     view: Rect,
+    done: Option<bool>,
 ) {
     let head = deck.iter().find(|r| !r.name.is_empty()).copied().unwrap_or(deck[0]);
     let Some(visible) = clipped(row, view) else { return };
@@ -516,6 +517,9 @@ fn draw_list_row(
         hover,
         // 다른 기기 배치도 칸(`draw_cell`)과 같은 값 — 도는 중이면 쓸림 띠, compact %·시간은 저쪽이 안 넘긴다.
         busy: deck_busy(deck),
+        waiting: machine.online && deck.iter().any(|r| r.needs_you()),
+        unread: done.is_some(),
+        quiet: done == Some(true),
         compact_pct: None,
         bg_active: false,
         busy_secs: None,
@@ -721,7 +725,8 @@ fn draw_rows(
                 let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::chrome::SidebarMetrics::new(width).row_h(),
                     tab_w - 16.0, crate::chrome::SidebarMetrics::new(width).row_h());
                 let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
-                draw_list_row(g, hits, machine, room, deck, student, cur, row, cursor, view);
+                let done = machine.online.then(|| deck_done(ctx.done, &machine.label, deck)).flatten();
+                draw_list_row(g, hits, machine, room, deck, student, cur, row, cursor, view, done);
             }
         } else if !collapsed {
             let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);

@@ -228,6 +228,9 @@ pub(crate) struct RowPaint<'a> {
     pub(crate) hover: bool,
     /// 도는 중 — 학생이 걷고 띠가 쓸린다.
     pub(crate) busy: bool,
+    pub(crate) waiting: bool,
+    pub(crate) unread: bool,
+    pub(crate) quiet: bool,
     /// 아래 셋은 배치도 칸 바닥 띠와 같은 값이다(`render::progress_bar`·`elapsed_mark`).
     pub(crate) compact_pct: Option<u8>,
     pub(crate) bg_active: bool,
@@ -247,12 +250,12 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
     } else if p.hover {
         round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover());
     }
-    let band = if s.turn == RowTurn::Yours && !p.muted {
-        Some(theme::attention())
-    } else {
-        None
-    };
-    if let Some(color) = band {
+    let band = if p.muted { None } else if p.waiting { Some((theme::attention(), 0.9)) }
+        else if p.unread { Some((theme::accent(), 1.6)) } else { None };
+    if let Some((mut color, period)) = band {
+        if !p.quiet {
+            color[3] = (90.0 + 165.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), period)) as u8;
+        }
         g.rect(rx, ry + 3.0, 2.0, rh - 6.0, color);
     }
     let phase = crate::sprites::anim_phase_secs();

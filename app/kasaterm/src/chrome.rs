@@ -11,7 +11,7 @@ fn visible_notification_surface(ws: &Workspace) -> Option<String> {
 const REMOTE_MARKS_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// 원격 목록의 한 행을 응답 완료 관찰 자리로. 그 기기의 거울 행(남을 비추는 창)·닫힌 칸·창 밖 셸은
-/// 원본 칸이 아니라 빠진다. 열쇠는 기기 경로와 surface_key(없는 구판은 %id)다.
+/// 원본 칸이 아니라 빠진다. 기기·칸·세션 신원이 바뀌면 이전 알림과 분리한다.
 fn remote_seat(route: &str, label: &str, row: &serde_json::Value) -> Option<crate::state::RemoteSeat> {
     let text = |k: &str| row.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
     let id = text("id").filter(|id| id.starts_with('%'))?;
@@ -780,12 +780,14 @@ impl App {
             return;
         }
         let snapshot = kasa_mcp::machines::snapshot();
+        let mut known_routes = std::collections::HashSet::new();
         let mut online_routes = std::collections::HashSet::new();
         let mut seats = Vec::new();
         let mut rows = Vec::new();
         for machine in &snapshot {
             let Some(label) = machine.get("label").and_then(|v| v.as_str()) else { continue };
             let route = machine.get("route").and_then(|v| v.as_str()).unwrap_or(label);
+            known_routes.insert(route.to_string());
             let Some(sample) = machine.get("sample_id").and_then(|v| v.as_str()) else { continue };
             let Some(panes) = machine.get("panes").and_then(|v| v.as_array()).filter(|_| {
                 machine.get("online").and_then(|v| v.as_bool()) == Some(true)
@@ -809,9 +811,12 @@ impl App {
             }
         }
         let col = &mut self.info.machines_col;
-        // 닫힌 칸의 표시는 걷고, 끊긴 기기의 것은 다시 붙을 때까지 둔다.
-        let alive = |key: &String| seats.iter().any(|s| &s.key == key)
-            || !online_routes.contains(key.split('\u{1f}').next().unwrap_or_default());
+        // 끊긴 동안에도 옛 신원을 보존해야 재접속 때 바뀐 세션의 표시를 걷을 수 있다.
+        seats.extend(col.remote_seats.iter().filter(|old| {
+            let route = old.key.split('\u{1f}').next().unwrap_or_default();
+            known_routes.contains(route) && !online_routes.contains(route)
+        }).cloned());
+        let alive = |key: &String| seats.iter().any(|s| &s.key == key);
         col.remote_unread.retain(alive);
         col.remote_quiet.retain(alive);
         col.remote_seats = seats;
@@ -823,6 +828,12 @@ impl App {
 
     pub(crate) fn remote_completion_deadline(&self) -> Option<std::time::Instant> {
         self.info.machines_col.remote_done.deadline()
+    }
+
+    pub(crate) fn remote_completion_animating(&self) -> bool {
+        self.sidebar_visible && !self.tabs_on_top
+            && self.info.machines_col.done_marks.iter().any(|((label, _), quiet)| !quiet
+                && self.info.machines_col.machines.iter().any(|m| m.online && &m.label == label))
     }
 
     /// 원격 칸 하나의 응답 완료를 원본의 `TurnDone` 과 같은 모양으로 옮긴다. 그 칸을 비추는 거울이 있으면
@@ -853,8 +864,10 @@ impl App {
         }
         let col = &mut self.info.machines_col;
         col.remote_quiet.remove(key);
-        if mirrors.is_empty() {
+        if !looking {
             col.remote_unread.insert(key.to_string());
+        } else {
+            col.remote_unread.remove(key);
         }
         self.chrome_dirty = true;
         if looking {
@@ -895,23 +908,28 @@ impl App {
         self.sync_remote_done_marks();
     }
 
-    /// 거울이 생긴 칸의 원격 읽지 않음을 그 거울 칸으로 넘기고, 사이드바가 그릴 표시를 다시 짓는다.
+    /// 미확인은 원본 신원에 남겨야 읽기 전에 거울을 닫아도 사라지지 않는다.
     fn sync_remote_done_marks(&mut self) {
         self.info.machines_col.marks_at = Some(std::time::Instant::now());
         let seats = std::mem::take(&mut self.info.machines_col.remote_seats);
         let mut marks = std::collections::HashMap::new();
         for seat in &seats {
             let mirrors = self.remote_mirrors(seat);
+            let looking = self.window_focused && mirrors.iter().any(|id| self.notification_surface_is_visible(id));
             let col = &mut self.info.machines_col;
-            if !mirrors.is_empty() && col.remote_unread.remove(&seat.key) {
+            if looking {
+                col.remote_unread.remove(&seat.key);
+                col.remote_quiet.remove(&seat.key);
+                for id in &mirrors { self.unread_panes.remove(id); }
+                continue;
+            }
+            if col.remote_unread.contains(&seat.key) {
                 let quiet = col.remote_quiet.contains(&seat.key);
                 for id in &mirrors {
                     if quiet {
                         self.blink_quiet.insert(id.clone());
                     }
-                    if !(self.window_focused && self.notification_surface_is_visible(id)) {
-                        self.unread_panes.insert(id.clone());
-                    }
+                    self.unread_panes.insert(id.clone());
                 }
             }
             let col = &self.info.machines_col;
@@ -920,10 +938,7 @@ impl App {
                 .map(|id| self.blink_quiet.contains(id)
                     || self.ws.lock().ok().and_then(|ws| ws.outer_for_pty(id)).is_some_and(|o| self.blink_quiet.contains(&o)))
                 .reduce(|a, b| a && b);
-            let quiet = match (remote, mirrored) {
-                (Some(a), Some(b)) => Some(a && b),
-                (a, b) => a.or(b),
-            };
+            let quiet = remote.map(|quiet| quiet || mirrored == Some(true));
             if let Some(quiet) = quiet {
                 marks.insert((seat.label.clone(), seat.remote_id.clone()), quiet);
             }

@@ -1136,6 +1136,10 @@ pub(crate) fn draw_card(g: &mut gpu::GpuRenderer, col_x: f32, win: (f32, f32)) -
         return false;
     };
     let w = MAX_W.min(win.0 - 8.0);
+    let extra_h = PAD * 2.0 + if line.reachable { 0.0 } else { 22.0 }
+        + if line.asked.is_some() { 4.0 } else { 0.0 };
+    let max_lines = (((win.1 - 8.0 - extra_h) / LH).floor().max(0.0) as usize).min(MAX_LINES);
+    if max_lines == 0 { return false; }
     let label_w = if line.asked.is_some() { g.measure_chrome_text("질문", 10.0, false) + 8.0 } else { 0.0 };
     let text_w = w - PAD * 2.0 - label_w;
     if text_w < 40.0 {
@@ -1152,15 +1156,15 @@ pub(crate) fn draw_card(g: &mut gpu::GpuRenderer, col_x: f32, win: (f32, f32)) -
         rows
     };
     let mut blocks: Vec<(Option<&str>, Vec<String>, [u8; 4])> = Vec::new();
-    if let Some(q) = &line.asked {
-        blocks.push((Some("질문"), wrap(g, q, ASKED_LINES), theme::text_dim()));
+    if let Some(q) = line.asked.as_ref().filter(|_| max_lines >= 2) {
+        blocks.push((Some("질문"), wrap(g, q, ASKED_LINES.min(max_lines / 2)), theme::text_dim()));
     }
     let used: usize = blocks.iter().map(|b| b.1.len()).sum();
-    blocks.push((line.asked.as_ref().map(|_| ANSWER_MARK), wrap(g, &line.full, MAX_LINES - used), theme::text()));
+    blocks.push((line.asked.as_ref().map(|_| ANSWER_MARK), wrap(g, &line.full, max_lines - used), theme::text()));
     let note = (!line.reachable).then_some(NOTE);
     let note_w = note.map_or(0.0, |n| g.measure_chrome_text(n, 10.0, false) - label_w);
     let widest = blocks.iter().flat_map(|b| b.1.iter()).map(|r| g.measure_chrome_text(r, SIZE, false)).fold(note_w, f32::max);
-    let cw = (widest + label_w + PAD * 2.0).clamp(120.0, w);
+    let cw = (widest + label_w + PAD * 2.0).clamp(120.0f32.min(w), w);
     let rows: usize = blocks.iter().map(|b| b.1.len()).sum();
     let gaps = blocks.len().saturating_sub(1) as f32 * 4.0;
     let ch = PAD * 2.0 + rows as f32 * LH + gaps + if note.is_some() { 22.0 } else { 0.0 };

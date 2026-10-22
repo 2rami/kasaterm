@@ -41,7 +41,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, p: Panels<'_>, f: &Frame<'_>) {
             info::draw_info_col(g, f.cursor, info, f.x, f.w, body_top, bottom);
             // 「—」 의 까닭·잘린 값의 전문 — 표를 다 그린 뒤 커서 아래 것 하나만.
             let (cx, cy) = f.cursor;
-            if info.ctx_menu.is_none() {
+            if info.ctx_menu.is_none() && info.pane_menu.is_none() {
                 if let Some((tip, r)) = info.tip_rects.iter()
                     .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                 {

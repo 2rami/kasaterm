@@ -81,6 +81,7 @@ impl Split {
                 self.room = avail - GRIP_H;
             }
             None => {
+                self.drag = None;
                 self.grip = None;
                 self.lower = None;
                 self.lower_scroll = 0.0;
@@ -121,7 +122,7 @@ impl crate::state::InfoState {
 
 impl crate::App {
     fn info_split_live(&self) -> bool {
-        self.git.col_visible && self.info.runtime_page() && self.info.ctx_menu.is_none()
+        self.git.col_visible && self.info.runtime_page() && self.info.ctx_menu.is_none() && self.info.pane_menu.is_none()
     }
 
     /// 커서가 경계 위인가 — 끌 수 있다는 커서를 띄운다.
@@ -140,6 +141,10 @@ impl crate::App {
 
     /// 끄는 중이면 `Some(경계가 움직였나)`.
     pub(crate) fn info_split_drag(&mut self, cy: f32) -> Option<bool> {
+        if !self.info_split_live() {
+            self.info_split_release();
+            return None;
+        }
         let split = &mut self.info.split;
         let (start_y, start_h, _) = split.drag?;
         let (lo, hi) = split.range;
@@ -206,5 +211,15 @@ mod tests {
         *info.wheel_scroll(400.0) = 44.0;
         *info.wheel_scroll(100.0) = 22.0;
         assert_eq!((info.split.lower_scroll, info.scroll), (44.0, 22.0));
+    }
+
+    #[test]
+    fn losing_the_split_cancels_the_pointer_capture() {
+        let mut split = Split { loaded: true, ..Default::default() };
+        split.layout(true, 600.0, 900.0, 900.0);
+        split.drag = Some((300.0, 300.0, true));
+        split.layout(true, 160.0, 900.0, 900.0);
+        assert!(!split.dragging());
+        assert!(split.grip.is_none());
     }
 }
