@@ -2591,8 +2591,7 @@ impl App {
             paint_inline_images(g, &inline_slots);
             crate::inline_result::verify_frame(g, &inline_slots);
             self.image_preview.collect(preview_window_id, self.active_window, g, &inline_slots);
-            crate::inline_media::paint(g, &inline_slots, self.cursor_px);
-            self.media_preview.collect(preview_window_id, self.active_window, &inline_slots);
+            self.media_preview.paint_cards(preview_window_id, self.active_window, g, &inline_slots, self.cursor_px);
             // 학생 도트 — Clawd 배너 자리. idle 4프레임을 캐릭터당 1회 일괄
             // 업로드해 모든 pane이 공유하고, 매 프레임 시간 기반으로 현재
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).

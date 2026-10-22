@@ -242,8 +242,7 @@ fn open_external(url: &str) -> std::result::Result<(), String> {
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// 다운로드 목적지 — `~/Downloads/<URL 마지막 조각>`. 같은 이름이 있으면
-/// ` (1)` 식으로 비킨다(브라우저 관례). 조각이 비면 `download`.
+/// 다운로드 목적지 — `~/Downloads/<URL 마지막 조각>`. 조각이 비면 `download`.
 fn download_dest(url: &str) -> std::path::PathBuf {
     let name = url
         .split(['?', '#'])
@@ -254,9 +253,21 @@ fn download_dest(url: &str) -> std::path::PathBuf {
         .filter(|s| !s.is_empty())
         .unwrap_or("download")
         .to_string();
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| std::path::PathBuf::from(h).join("Downloads"))
+    download_path(&name)
+}
+
+/// `~/Downloads/<name>`. 같은 이름이 있으면 ` (1)` 식으로 비킨다(브라우저 관례). 검증 실행은
+/// `KASATERM_TEST_DOWNLOAD_DIR` 에 받아 사람의 다운로드 폴더를 건드리지 않는다.
+pub(crate) fn download_path(name: &str) -> std::path::PathBuf {
+    let name = name.to_string();
+    let dir = std::env::var_os("KASATERM_TEST_DOWNLOAD_DIR")
+        .filter(|_| crate::verification_run())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| std::path::PathBuf::from(h).join("Downloads"))
+        })
         .filter(|d| d.is_dir())
         .unwrap_or_else(std::env::temp_dir);
     let cand = dir.join(&name);

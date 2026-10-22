@@ -176,14 +176,59 @@ pub(crate) fn text(g: &mut gpu::GpuRenderer, r: Rect, text: &str, dim: bool) {
         r.0 + r.2,
     );
 }
-pub(crate) fn paint(g: &mut gpu::GpuRenderer, slots: &[InlineSlot], cursor: (f32, f32)) {
-    let live: std::collections::HashSet<_> = slots
+/// 카드 안에서 도는 재생 하나의 지금 모습 — 재생기는 `media_preview` 가 쥐고, 여기는 그리기만 한다.
+pub(crate) struct Live<'a> {
+    pub reference: &'a Reference,
+    /// 영상 프레임 텍스처. 첫 프레임 전이면 포스터를 그대로 둔다.
+    pub frame: Option<&'a str>,
+    pub playing: bool,
+    pub position: f64,
+    pub duration: Option<f64>,
+    pub muted: bool,
+    /// 준비 중·버퍼링·실패를 시각 뒤에 덧붙인다.
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Control {
+    Toggle,
+    Seek,
+    Mute,
+    Expand,
+    Save,
+}
+
+/// 그린 카드 하나 — 누름 판정이 그린 자리를 그대로 쓴다. 자리는 모두 보이는 부분으로 잘랐다.
+pub(crate) struct Card {
+    pub reference: Reference,
+    pub rect: Rect,
+    pub controls: Vec<(Control, Rect)>,
+    /// 탐색 막대 전체 폭 — 끌 때 위치를 비율로 바꾼다.
+    pub track: Rect,
+}
+
+const BUTTON: f32 = 32.0;
+/// 오른쪽 단추 사이 간격과, 이름 줄이 남겨 둘 최소 폭.
+const GAP: f32 = 8.0;
+const TEXT_MIN: f32 = 72.0;
+
+/// 카드 아래 줄: 재생 단추 · 이름과 시각 · (재생 중이면 소리) · 크게 보기 · 저장. 재생 중이면 그 위에 탐색 막대.
+/// 영상은 위 칸에 포스터, 재생이 시작되면 그 자리에 프레임을 그린다.
+pub(crate) fn paint(
+    g: &mut gpu::GpuRenderer,
+    slots: &[InlineSlot],
+    cursor: (f32, f32),
+    live: Option<&Live>,
+    saving: &dyn Fn(&Reference) -> bool,
+) -> Vec<Card> {
+    let live_keys: std::collections::HashSet<_> = slots
         .iter()
         .filter(|s| s.key.starts_with("media:"))
         .map(|s| s.key.clone())
         .collect();
     g.images
-        .retain(|key, _| !key.starts_with("media:") || live.contains(key));
+        .retain(|key, _| !key.starts_with("media:") || live_keys.contains(key));
+    let mut cards = Vec::new();
     for slot in slots {
         let Some(reference) = Reference::from_slot(slot) else {
             continue;
@@ -193,67 +238,104 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, slots: &[InlineSlot], cursor: (f32
         if clip.2 <= 0.0 || clip.3 <= 0.0 {
             continue;
         }
+        let live = live.filter(|l| *l.reference == reference);
         g.push_clip(clip.0, clip.1, clip.2, clip.3);
         crate::native_controls::panel(g, (x, y, w, h), theme::surface());
         let asset = cache::get(&reference);
-        let (name, detail) = match &asset {
-            Ok(Some(asset)) => {
-                if let Some(p) = &asset.poster {
-                    if !g.has_image(&slot.key) {
-                        g.upload_image(&slot.key, &p.rgba, p.width, p.height);
-                    }
-                    if h > 100.0 {
-                        g.queue_image_contain(
-                            &slot.key,
-                            x + 8.0,
-                            y + 8.0,
-                            (w - 16.0).max(0.0),
-                            (h - 64.0).max(0.0),
-                        );
+        let line_y = (y + h - 52.0).max(y + 8.0);
+        if h > 100.0 {
+            let area = (x + 8.0, y + 8.0, (w - 16.0).max(0.0), (line_y - 14.0 - y - 8.0).max(0.0));
+            let frame = live.and_then(|l| l.frame).filter(|k| g.has_image(k));
+            match (frame, &asset) {
+                (Some(key), _) => g.queue_image_contain(key, area.0, area.1, area.2, area.3),
+                (None, Ok(Some(asset))) => {
+                    if let Some(p) = &asset.poster {
+                        if !g.has_image(&slot.key) {
+                            g.upload_image(&slot.key, &p.rgba, p.width, p.height);
+                        }
+                        g.queue_image_contain(&slot.key, area.0, area.1, area.2, area.3);
                     }
                 }
-                (
-                    asset.media.name.clone(),
-                    format!(
-                        "{}{} · 눌러 재생",
-                        if asset.media.kind == "video" {
-                            "영상"
-                        } else {
-                            "음성"
-                        },
+                _ => {}
+            }
+        }
+        let ready = matches!(asset, Ok(Some(_)));
+        let mut controls = Vec::new();
+        let toggle = crate::native_controls::icon_button(
+            g,
+            (x + 12.0, line_y + 4.0, BUTTON, BUTTON),
+            cursor,
+            if live.is_some_and(|l| l.playing) { "pause" } else { "play" },
+            Default::default(),
+        );
+        controls.push((Control::Toggle, toggle));
+        // 오른쪽부터 저장 · 크게 보기 · 소리. 좁으면 이름 줄을 남기고 왼쪽 것부터 뺀다.
+        let mut right = x + w - 12.0;
+        let wanted: Vec<(Control, &str, bool)> = [
+            (Control::Save, "download", ready && !saving(&reference)),
+            (Control::Expand, "maximize", true),
+        ]
+        .into_iter()
+        .chain(live.map(|l| (Control::Mute, if l.muted { "volume-x" } else { "volume-2" }, true)))
+        .collect();
+        for (control, icon, enabled) in wanted {
+            if right - BUTTON - GAP < x + 52.0 + TEXT_MIN {
+                break;
+            }
+            let style = crate::native_controls::Style { enabled, ..Default::default() };
+            let r = crate::native_controls::icon_button(g, (right - BUTTON, line_y + 4.0, BUTTON, BUTTON), cursor, icon, style);
+            if enabled {
+                controls.push((control, r));
+            }
+            right -= BUTTON + GAP;
+        }
+        let text_w = (right - x - 52.0).max(0.0);
+        let (name, detail) = match &asset {
+            Ok(Some(asset)) => {
+                let detail = match live {
+                    Some(l) => format!(
+                        "{} / {}{}",
+                        time(l.position),
+                        l.duration.map(time).unwrap_or_else(|| "—".into()),
+                        l.note.as_deref().map(|n| format!(" · {n}")).unwrap_or_default()
+                    ),
+                    None => format!(
+                        "{}{}{}",
+                        if asset.media.kind == "video" { "영상" } else { "음성" },
                         asset
                             .media
                             .duration_ms
                             .map(|ms| format!(" · {}", time(ms as f64 / 1000.0)))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        if saving(&reference) { " · 저장하는 중…" } else { "" }
                     ),
-                )
+                };
+                (asset.media.name.clone(), detail)
             }
-            Ok(None) => ("미디어 불러오는 중…".into(), "".into()),
+            Ok(None) => ("미디어 불러오는 중…".into(), String::new()),
             Err(_) => ("미디어를 불러오지 못했어요".into(), "눌러 다시 받기".into()),
         };
-        let line_y = (y + h - 52.0).max(y + 8.0);
-        crate::native_controls::icon_button(
-            g,
-            (x + 12.0, line_y + 4.0, 32.0, 32.0),
-            cursor,
-            "play",
-            Default::default(),
-        );
-        text(
-            g,
-            (x + 52.0, line_y, (w - 64.0).max(0.0), 20.0),
-            &name,
-            false,
-        );
-        text(
-            g,
-            (x + 52.0, line_y + 22.0, (w - 64.0).max(0.0), 20.0),
-            &detail,
-            true,
-        );
+        text(g, (x + 52.0, line_y, text_w, 20.0), &name, false);
+        text(g, (x + 52.0, line_y + 22.0, text_w, 20.0), &detail, true);
+        let mut track = (0.0, 0.0, 0.0, 0.0);
+        if let Some(l) = live {
+            if let Some(d) = l.duration.filter(|d| *d > 0.0) {
+                let bar_y = (line_y - 6.0).max(y + 4.0);
+                track = (x + 12.0, bar_y, (w - 24.0).max(0.0), 3.0);
+                g.rect(track.0, track.1, track.2, track.3, theme::border());
+                g.rect(track.0, track.1, track.2 * (l.position / d).clamp(0.0, 1.0) as f32, track.3, theme::accent());
+                controls.push((Control::Seek, (track.0, bar_y - 6.0, track.2, 15.0)));
+            }
+        }
         g.pop_clip();
+        cards.push(Card {
+            reference,
+            rect: clip,
+            controls: controls.into_iter().map(|(c, r)| (c, intersection(r, clip))).filter(|(_, r)| r.2 > 0.0 && r.3 > 0.0).collect(),
+            track,
+        });
     }
+    cards
 }
 #[cfg(test)]
 mod tests {

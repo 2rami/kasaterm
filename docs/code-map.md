@@ -119,6 +119,6 @@
 - `image_preview.rs` — 실제 인라인 그림 영역의 클릭·드래그 구분과 창별 미리보기. 워커 디코드·복사·저장, 클리핑된 히트 영역, 앵커 줌·팬·키보드 포커스를 공유하며 본창과 별도 터미널 창이 같은 상태를 사용한다.
 - `native_settings/login_probe.rs` — 격리 화면에서 가짜 로그인 상태와 테스트용 클립보드 값으로 메뉴·버튼 붙여넣기를 검사한다. 실제 인증 코드나 시스템 클립보드를 읽지 않는다.
 
-- `inline_media.rs`·`inline_media/cache.rs` — 음성·영상 표시 블록, 원본 기기별 메타데이터·썸네일 캐시와 스트리밍 재생 참조. `media_preview.rs`는 네이티브 카드 클릭·재생 조작, `media_player.rs`는 플랫폼 디코더·음성 시계·영상 프레임을 맡는다. 로컬 등록과 HTTP 읽기는 `kasa_socket::inline_media`·`kasa_mcp::http`에 있고, 재생용 루프백 Range 창구는 `kasa_mcp::media_stream`이다. 계약은 [inline-media.md](inline-media.md).
+- `inline_media.rs`·`inline_media/cache.rs` — 음성·영상 표시 블록, 원본 기기별 메타데이터·썸네일 캐시와 스트리밍 재생 참조. `media_preview.rs`는 카드 안 재생(한 번에 하나)·크게 보기로 이어 틀기·저장과 큰 미리보기의 재생 조작, `media_player.rs`는 플랫폼 디코더·음성 시계·영상 프레임을 맡는다. 로컬 등록과 HTTP 읽기는 `kasa_socket::inline_media`·`kasa_mcp::http`에 있고, 재생용 루프백 Range 창구는 `kasa_mcp::media_stream`이다. 계약은 [inline-media.md](inline-media.md).
 - `mobile/lib/inline_media.dart`·`inline_media_bridge_io.dart`·`screens/media_player.dart` — 폰의 결과 카드·루프백 Range 전송·네이티브 재생. 원본 인증 경로로 필요한 512KiB 조각만 읽고 닫힌 소비자의 요청을 취소한다.
 - `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 짧은 시작 안내. `skills/kasapane`의 주제별 원문을 내장하고 요청한 주제 하나만 출력한다. Claude·Codex 실행과 새 작업 브리프는 `references/start.md`만 싣고, 미디어 전달 때 `guide media`로 상세 규칙을 읽는다.

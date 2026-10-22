@@ -87,7 +87,60 @@ impl Refusal {
 impl Stream {
     /// `source` 가 `None` 이면 이 기기 등록소, `Some(base)` 면 그 기기에 이미 맺은 연결의 인증으로 묻는다.
     pub fn open(source: Option<&str>, media: &Media) -> anyhow::Result<Stream> {
-        let source = match source {
+        Self::start(Self::source(source)?, media)
+    }
+
+    /// 원본 파일 전체를 `dest` 에 받는다 — 사람이 카드의 「저장」을 눌렀을 때만. 재생 창구와 같은 조각 읽기와
+    /// sha256 확인을 지나므로 다른 기기 카드도 그 기기의 인증으로 받고, 내용이 틀리면 파일을 남기지 않는다.
+    /// 받는 동안 막히므로 GUI 스레드에서 부르지 않는다.
+    pub fn save(source: Option<&str>, media: &Media, dest: &std::path::Path) -> anyhow::Result<()> {
+        Self::save_from(Self::source(source)?, media, dest)
+    }
+
+    fn save_from(source: Source, media: &Media, dest: &std::path::Path) -> anyhow::Result<()> {
+        use std::io::Write;
+        let rt = runtime()?;
+        if matches!(source, Source::Remote { .. }) {
+            client()?;
+        }
+        let shared = Shared {
+            source,
+            id: media.id.clone(),
+            sha256: media.sha256.clone(),
+            size: media.size,
+            mime: "",
+            path: String::new(),
+            host: String::new(),
+            closed: watch::channel(false).0,
+            received: AtomicU64::new(0),
+            error: Mutex::new(None),
+            check: Mutex::new(Check::default()),
+        };
+        let mut part = dest.as_os_str().to_owned();
+        part.push(".part");
+        let part = std::path::PathBuf::from(part);
+        let written = rt.block_on(async {
+            let mut file = std::fs::File::create(&part)?;
+            let mut offset = 0;
+            while offset < shared.size {
+                let bytes = shared.fetch(offset, piece(offset, shared.size - 1)).await.map_err(|r| anyhow::anyhow!(r.message))?;
+                file.write_all(&bytes)?;
+                offset += bytes.len() as u64;
+            }
+            file.sync_all()?;
+            anyhow::Ok(())
+        });
+        match written {
+            Ok(()) => std::fs::rename(&part, dest).context("받은 파일을 옮기지 못했어요"),
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                Err(e)
+            }
+        }
+    }
+
+    fn source(source: Option<&str>) -> anyhow::Result<Source> {
+        Ok(match source {
             None => Source::Local(registry::store()),
             Some(raw) => {
                 let url = reqwest::Url::parse(raw).context("원본 기기 주소가 올바르지 않아요")?;
@@ -98,8 +151,7 @@ impl Stream {
                     auth: Arc::new(move || crate::remote::connection_auth_token(&lookup)),
                 }
             }
-        };
-        Self::start(source, media)
+        })
     }
 
     pub fn url(&self) -> &str {
@@ -483,6 +535,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn saving_copies_every_piece_and_leaves_nothing_when_the_content_differs() {
+        let dir = Dir::new("save");
+        let (store, media, bytes) = registered(&dir, PIECE * 2 + 1234);
+        let dest = dir.0.join("받은 clip.mp4");
+        Stream::save_from(Source::Local(store.clone()), &media, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+        let wrong = Media { sha256: "0".repeat(64), ..media };
+        let dest = dir.0.join("wrong.mp4");
+        assert!(Stream::save_from(Source::Local(store), &wrong, &dest).is_err());
+        assert!(!dest.exists() && !dir.0.join("wrong.mp4.part").exists(), "틀린 내용은 반쯤 받은 파일도 안 남긴다");
     }
 
     fn mp4_bytes(len: usize, seed: u32) -> Vec<u8> {

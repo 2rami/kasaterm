@@ -679,8 +679,7 @@ impl App {
                 t.gpu.draw_cells(&[slot]);
                 t.inline_images.queue_layer(&mut t.gpu, &c.inline_slots, false);
                 self.image_preview.collect(t.window.id(), 0, &t.gpu, &c.inline_slots);
-                crate::inline_media::paint(&mut t.gpu, &c.inline_slots, t.cursor_px);
-                self.media_preview.collect(t.window.id(), 0, &c.inline_slots);
+                self.media_preview.paint_cards(t.window.id(), 0, &mut t.gpu, &c.inline_slots, t.cursor_px);
                 crate::screenread::paint_status_model_icons(&mut t.gpu, &c.status_model_icons);
                 // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키.
                 let overlays = crate::screenread::StudentOverlays {
