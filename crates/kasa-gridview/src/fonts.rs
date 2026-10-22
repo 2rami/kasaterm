@@ -301,8 +301,12 @@ mod tests {
     use super::*;
 
     fn primary() -> Option<String> {
-        let path = default_font_path();
-        std::path::Path::new(&path).is_file().then_some(path)
+        // The primary must lack Korean so an installed D2 default cannot hide a broken fallback.
+        [default_font_path(), "/System/Library/Fonts/Menlo.ttc".into(),
+            r"C:\Windows\Fonts\consola.ttf".into(),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into()]
+            .into_iter().find(|path| Shaper::from_path(path, 0)
+                .is_ok_and(|mut shaper| shaper.rasterize('한', 24.0).is_none()))
     }
 
     fn ink(g: &kasa_cells::Rasterized) -> u64 {
@@ -313,7 +317,6 @@ mod tests {
     fn bundled_hangul_has_designed_bold_without_an_installed_korean_font() {
         let Some(path) = primary() else { return };
         let mut shaper = Shaper::from_path(&path, 0).unwrap();
-        if shaper.rasterize('한', 24.0).is_some() { return; }
         shaper.add_text_fallback_bytes(D2_REGULAR, 0, Some((D2_BOLD, 0)));
         for px in [20.0, 24.0, 28.0, 32.0] {
             let cell = shaper.cell_advance(px);
