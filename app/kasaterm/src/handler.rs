@@ -22,7 +22,7 @@ impl PointerSample {
     }
 }
 
-/// 덮으면 이사가 깨어 있는 동안 — 덮이면 화면 이벤트가 없어 루프가 `Wait` 에 잠든다.
+/// 덮어도 마저 하기가 깨어 있는 동안 — 덮이면 화면 이벤트가 없어 루프가 `Wait` 에 잠든다.
 fn lid_away_deadline() -> Option<Instant> {
     #[cfg(target_os = "macos")]
     return crate::lid_away::wake_deadline();

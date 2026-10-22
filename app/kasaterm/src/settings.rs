@@ -846,8 +846,8 @@ impl App {
             SettingsAction::UiLanguage(language) => {
                 socket::write_setting("language", serde_json::json!(language));
             }
-            SettingsAction::LidAwayMachine(machine) => {
-                socket::write_setting("lid_away_machine", serde_json::json!(machine));
+            SettingsAction::LidAway(on) => {
+                socket::write_setting("lid_away", serde_json::json!(on));
                 #[cfg(target_os = "macos")]
                 crate::lid_away::forget_config();
             }

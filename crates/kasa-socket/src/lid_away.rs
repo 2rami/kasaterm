@@ -1,4 +1,4 @@
-//! 덮으면 이사 — 학생이 일하는 동안 맥북 잠자기를 막아 두고, 덮이면 학생을 다른 기기로 옮긴 뒤
+//! 덮어도 마저 하기 — 학생이 일하는 동안 맥북 잠자기를 막아 두고, 덮이면 하던 일을 마친 뒤
 //! 재운다. 정책은 앱(`kasaterm::lid_away`)이, 설치는 `kasaterm-cli lid-away` 가 하고, 둘이 같은
 //! 경로·명령을 여기서 쓴다.
 //!
@@ -72,7 +72,7 @@ pub fn sudoers_rule(user: &str) -> Result<String> {
 pub fn watchdog_script() -> String {
     format!(
         r#"#!/bin/sh
-# kasaterm 덮으면 이사 감시. 앱이 잠자기를 막아 둔 채 죽거나 멈추면(박동이 {stale}초 넘게 멎으면) 푼다.
+# kasaterm 덮어도 마저 하기 감시. 앱이 잠자기를 막아 둔 채 죽거나 멈추면(박동이 {stale}초 넘게 멎으면) 푼다.
 hb="$HOME/.config/kasaterm/lid-away.armed"
 [ -f "$hb" ] || exit 0
 age=$(( $(date +%s) - $(stat -f %m "$hb" 2>/dev/null || echo 0) ))

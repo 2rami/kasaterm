@@ -4779,8 +4779,8 @@ pub(crate) enum SettingsAction {
     UiLanguage(&'static str),
     /// 「카사크롬이 쓰는 크롬」 — 명부의 기계 라벨, 빈 문자열=이 기계.
     ChromeMachine(String),
-    /// 「덮으면 이사」 — 옮길 기기 라벨, 빈 문자열=끄기.
-    LidAwayMachine(String),
+    /// 「덮어도 마저 하기」 켬·끔.
+    LidAway(bool),
     /// 덮인 뒤 깨어 있을 최대 분.
     LidAwayMinutes(u64),
     /// 사람에게 보여 줄 페이지를 폰(쪽지+알림)으로. 크롬 선택은 건드리지 않는다.

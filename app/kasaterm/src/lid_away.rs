@@ -1,23 +1,20 @@
-//! 덮으면 이사 — 학생이 일하는 동안 잠자기를 막아 두고(`Armed`), 덮이면 일하는 학생을 고른 기기로
-//! 예약 이사시킨 뒤(`Away`) 다 옮겨지거나 상한이 차면 재운다. 다시 열면 남은 예약을 거둔다.
-//! 설치물·pmset 명령은 `kasa_socket::lid_away`, 이사 자체는 `session/migrate.rs` 의 예약 경로다.
+//! 덮어도 마저 하기 — 학생이 일하는 동안 잠자기를 막아 두고(`Armed`), 덮이면 깨어 있는 채 하던 일이 끝나기를
+//! 기다렸다가(`Away`) 일이 1분 넘게 멎거나 상한이 차면 재운다. 다시 열면 막음만 이어 간다.
+//! 설치물·pmset 명령은 `kasa_socket::lid_away` 다.
 //!
-//! 쉬는 학생은 옮기지 않는다 — 이어서 할 일이 없고, 다시 열었을 때 칸이 통째로 다른 기기 거울로
-//! 바뀌어 있으면 손해가 더 크다. 외부 모니터를 꽂고 덮은 채 쓰는 자리는 떠난 것이 아니다.
+//! 덮였다고 학생을 다른 기기로 옮기지 않는다 — 다시 열었을 때 칸이 다른 기기 거울로 바뀌어 있고 미커밋
+//! 변경은 맥북에 남아, 그 자리에서 마저 끝내고 자는 편을 골랐다(2026-10-22). 사람이 직접 신청한 이사는
+//! 하던 일로 세어 끝날 때까지 깨어 있는다. 외부 모니터를 꽂고 덮은 채 쓰는 자리는 떠난 것이 아니다.
 use super::*;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_secs(1);
-/// 턴 사이 잠깐 쉬는 동안 막음을 풀었다 다시 거는 일을 줄인다.
+/// 일이 이만큼 멎어야 끝난 것으로 본다 — 턴 사이 잠깐 쉬거나 다른 학생의 쪽지를 기다리는 사이에 막음을
+/// 풀었다 걸거나, 덮인 채 하던 일 가운데서 재우지 않게.
 const QUIET_GRACE: Duration = Duration::from_secs(60);
-/// 이사가 끝나도 바로 재우지 않는다 — 저쪽 셸에 `--resume` 을 넣는 마지막 바이트가 건너가야 한다.
-const SETTLE: Duration = Duration::from_secs(15);
-/// 상한이 찬 뒤에도 도는 이사는 마저 끝내게 기다리되, 워커가 매달려도 이 이상은 안 깨어 있는다.
-const HARD_EXTRA: Duration = Duration::from_secs(5 * 60);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 const BATTERY_FLOOR: u8 = 20;
 pub(crate) const DEFAULT_MINUTES: u64 = 30;
@@ -27,17 +24,17 @@ pub(crate) const MINUTE_CHOICES: [u64; 3] = [10, 30, 60];
 enum Phase {
     Idle,
     Armed { quiet_since: Option<Instant> },
-    Away { since: Instant, stopping: bool, settled_since: Option<Instant> },
+    Away { since: Instant, quiet_since: Option<Instant> },
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Sense {
     /// 켜져 있고, sudo 가 허락하고, 전원·열이 괜찮다.
     allowed: bool,
-    working: bool,
+    /// 이 기기 칸에서 학생이 일하거나, 사람이 신청한 이사가 예약·실행 중이다.
+    busy: bool,
     /// 덮였고 외부 모니터도 없다.
     departed: bool,
-    migrating: bool,
     cap: Duration,
     now: Instant,
 }
@@ -46,20 +43,16 @@ struct Sense {
 enum Act {
     Arm,
     Disarm,
-    /// 일하는 학생 중 아직 안 맡은 칸을 예약 이사에 건다.
-    Depart,
-    /// 다시 열렸다 — 아직 안 떠난 예약을 거둔다.
-    Recall,
-    /// 상한·전원·열 — 새 예약을 멈추고 안 떠난 예약을 거둔다. 도는 이사는 마저 끝낸다.
-    Halt,
     Sleep,
 }
 
 fn step(phase: Phase, s: Sense) -> (Phase, Option<Act>) {
+    let quiet = |since: Option<Instant>| if s.busy { None } else { Some(since.unwrap_or(s.now)) };
+    let rested = |since: Option<Instant>| since.is_some_and(|t| s.now.duration_since(t) >= QUIET_GRACE);
     match phase {
         Phase::Idle => {
             // 덮인 채 잠깐 깬 것(Power Nap)에 다시 걸면 가방 속에서 상한만큼 깨어 있게 된다.
-            if s.allowed && (s.working || s.migrating) && !s.departed {
+            if s.allowed && s.busy && !s.departed {
                 (Phase::Armed { quiet_since: None }, Some(Act::Arm))
             } else {
                 (Phase::Idle, None)
@@ -68,7 +61,7 @@ fn step(phase: Phase, s: Sense) -> (Phase, Option<Act>) {
         Phase::Armed { quiet_since } => {
             if s.departed {
                 return if s.allowed {
-                    (Phase::Away { since: s.now, stopping: false, settled_since: None }, Some(Act::Depart))
+                    (Phase::Away { since: s.now, quiet_since: quiet(quiet_since) }, None)
                 } else {
                     (Phase::Idle, Some(Act::Sleep))
                 };
@@ -76,38 +69,22 @@ fn step(phase: Phase, s: Sense) -> (Phase, Option<Act>) {
             if !s.allowed {
                 return (Phase::Idle, Some(Act::Disarm));
             }
-            if s.working || s.migrating {
-                return (Phase::Armed { quiet_since: None }, None);
-            }
-            let since = quiet_since.unwrap_or(s.now);
-            if s.now.duration_since(since) >= QUIET_GRACE {
+            let quiet_since = quiet(quiet_since);
+            if rested(quiet_since) {
                 (Phase::Idle, Some(Act::Disarm))
             } else {
-                (Phase::Armed { quiet_since: Some(since) }, None)
+                (Phase::Armed { quiet_since }, None)
             }
         }
-        Phase::Away { since, stopping, settled_since } => {
+        Phase::Away { since, quiet_since } => {
+            let quiet_since = quiet(quiet_since);
             if !s.departed {
-                return (Phase::Armed { quiet_since: None }, Some(Act::Recall));
+                return (Phase::Armed { quiet_since }, None);
             }
-            let away_for = s.now.duration_since(since);
-            if !stopping && (away_for >= s.cap || !s.allowed) {
-                return (Phase::Away { since, stopping: true, settled_since: None }, Some(Act::Halt));
-            }
-            if stopping && away_for >= s.cap + HARD_EXTRA {
-                return (Phase::Idle, Some(Act::Sleep));
-            }
-            // 멈춘 뒤에는 일하는 학생을 더 기다리지 않는다 — 그게 상한의 뜻이다.
-            let busy = s.migrating || (!stopping && s.working);
-            let next_act = (!stopping).then_some(Act::Depart);
-            if busy {
-                return (Phase::Away { since, stopping, settled_since: None }, next_act);
-            }
-            let settled = settled_since.unwrap_or(s.now);
-            if s.now.duration_since(settled) >= SETTLE {
+            if !s.allowed || s.now.duration_since(since) >= s.cap || rested(quiet_since) {
                 (Phase::Idle, Some(Act::Sleep))
             } else {
-                (Phase::Away { since, stopping, settled_since: Some(settled) }, next_act)
+                (Phase::Away { since, quiet_since }, None)
             }
         }
     }
@@ -117,14 +94,13 @@ fn phase_name(p: Phase) -> &'static str {
     match p {
         Phase::Idle => "Idle",
         Phase::Armed { .. } => "Armed",
-        Phase::Away { stopping: false, .. } => "Away",
-        Phase::Away { stopping: true, .. } => "Away(멈춤)",
+        Phase::Away { .. } => "Away",
     }
 }
 
 #[derive(Clone)]
 struct Config {
-    machine: String,
+    on: bool,
     cap: Duration,
 }
 
@@ -133,8 +109,6 @@ struct State {
     booted: bool,
     last_tick: Option<Instant>,
     beat_at: Option<Instant>,
-    targets: HashSet<String>,
-    skipped: HashSet<String>,
     arm_retry_at: Option<Instant>,
     config: Option<(Instant, Config)>,
     safe: Option<(Instant, bool)>,
@@ -148,8 +122,6 @@ thread_local! {
             booted: false,
             last_tick: None,
             beat_at: None,
-            targets: HashSet::new(),
-            skipped: HashSet::new(),
             arm_retry_at: None,
             config: None,
             safe: None,
@@ -159,10 +131,16 @@ thread_local! {
 }
 
 fn read_config() -> Config {
-    let settings = socket::read_settings();
-    let machine = settings["lid_away_machine"].as_str().unwrap_or_default().trim().to_string();
+    config_from(&socket::read_settings())
+}
+
+fn config_from(settings: &serde_json::Value) -> Config {
+    // 덮으면 이사이던 때는 옮길 기기를 고른 것이 켬이었다 — 그 사람은 켠 채로 이어 간다.
+    let on = settings["lid_away"]
+        .as_bool()
+        .unwrap_or_else(|| settings["lid_away_machine"].as_str().is_some_and(|m| !m.trim().is_empty()));
     let minutes = settings["lid_away_minutes"].as_u64().filter(|m| *m > 0).unwrap_or(DEFAULT_MINUTES);
-    Config { machine, cap: Duration::from_secs(minutes * 60) }
+    Config { on, cap: Duration::from_secs(minutes * 60) }
 }
 
 fn config(st: &mut State, now: Instant) -> Config {
@@ -181,8 +159,8 @@ pub(crate) fn forget_config() {
     STATE.with(|s| s.borrow_mut().config = None);
 }
 
-pub(crate) fn chosen_machine() -> String {
-    read_config().machine
+pub(crate) fn enabled() -> bool {
+    read_config().on
 }
 
 pub(crate) fn cap_minutes() -> u64 {
@@ -222,7 +200,7 @@ pub(crate) fn status_line() -> Option<&'static str> {
     STATE.with(|s| match s.borrow().phase {
         Phase::Idle => None,
         Phase::Armed { .. } => Some("학생이 일하는 중이라 잠자기를 막아 두었어요"),
-        Phase::Away { .. } => Some("덮인 채 학생을 옮기는 중이에요"),
+        Phase::Away { .. } => Some("덮인 채 학생이 하던 일을 마치는 중이에요"),
     })
 }
 
@@ -294,10 +272,7 @@ impl App {
             let mut st = s.borrow_mut();
             (st.phase, config(&mut st, now))
         });
-        let machine = (!cfg.machine.is_empty())
-            .then(|| kasa_mcp::machines::find(&cfg.machine))
-            .flatten();
-        if machine.is_none() && phase == Phase::Idle {
+        if !cfg.on && phase == Phase::Idle {
             return;
         }
         let working = self.lid_away_working_panes();
@@ -317,24 +292,23 @@ impl App {
         });
         let arm_blocked = STATE.with(|s| s.borrow().arm_retry_at.is_some_and(|t| now < t));
         let sense = Sense {
-            allowed: machine.is_some() && sudo_ready() == Some(true) && safe && !arm_blocked,
-            working: !working.is_empty(),
+            allowed: cfg.on && sudo_ready() == Some(true) && safe && !arm_blocked,
+            busy: !working.is_empty() || migrating,
             departed,
-            migrating,
             cap: cfg.cap,
             now,
         };
         let (next, act) = step(phase, sense);
         STATE.with(|s| s.borrow_mut().phase = next);
-        if let Some(a) = act.filter(|a| *a != Act::Depart || phase_name(phase) != phase_name(next)) {
-            eprintln!("[lid-away] {a:?} → {} (일하는 칸 {})", phase_name(next), working.len());
+        if act.is_some() || phase_name(phase) != phase_name(next) {
+            eprintln!("[lid-away] {act:?} {} → {} (일하는 칸 {}, 이사 {migrating})", phase_name(phase), phase_name(next), working.len());
         }
         match act {
             None => {}
             Some(Act::Arm) => {
                 if let Err(e) = kasa_socket::lid_away::set_sleep_disabled(true) {
                     eprintln!("[lid-away] 잠자기를 못 막았다: {e:#}");
-                    self.set_toast(format!("덮으면 이사: 잠자기를 못 막았어요 — {e:#}"));
+                    self.set_toast(format!("덮어도 마저 하기: 잠자기를 못 막았어요 — {e:#}"));
                     STATE.with(|s| {
                         let mut st = s.borrow_mut();
                         st.phase = Phase::Idle;
@@ -354,19 +328,6 @@ impl App {
                 }
             }
             Some(Act::Disarm) => self.lid_away_release(false),
-            Some(Act::Depart) => {
-                if let Some(m) = &machine {
-                    self.lid_away_depart(m, &working);
-                }
-            }
-            Some(Act::Recall) | Some(Act::Halt) => {
-                STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    let targets = std::mem::take(&mut st.targets);
-                    self.migrate_queue.retain(|q| !targets.contains(&q.pane));
-                    st.skipped.clear();
-                });
-            }
             Some(Act::Sleep) => self.lid_away_release(true),
         }
         STATE.with(|s| {
@@ -392,52 +353,13 @@ impl App {
         panes
     }
 
-    fn lid_away_depart(&mut self, machine: &kasa_mcp::machines::Machine, working: &[String]) {
-        let fresh: Vec<String> = STATE.with(|s| {
-            let st = s.borrow();
-            working
-                .iter()
-                .filter(|p| !st.targets.contains(*p) && !st.skipped.contains(*p))
-                .cloned()
-                .collect()
-        });
-        for pane in fresh {
-            let outcome = (|| -> anyhow::Result<String> {
-                let local = self
-                    .pty
-                    .get(&pane)
-                    .and_then(|s| s.shell_pid())
-                    .and_then(socket::pid_cwd)
-                    .ok_or_else(|| anyhow::anyhow!("작업 폴더를 못 읽었다"))?;
-                let remote = kasa_mcp::machines::map_local_to_remote(machine, &local.to_string_lossy())
-                    .ok_or_else(|| anyhow::anyhow!("{} 를 {} 경로로 못 옮긴다 — machines.json roots", local.display(), machine.label))?;
-                self.migrate_pane(&pane, &machine.base, Some(&remote), false, None)
-            })();
-            STATE.with(|s| {
-                let mut st = s.borrow_mut();
-                match &outcome {
-                    Ok(msg) => {
-                        eprintln!("[lid-away] {pane} → {}: {msg}", machine.label);
-                        st.targets.insert(pane.clone());
-                    }
-                    Err(e) => {
-                        eprintln!("[lid-away] {pane} 는 남는다: {e:#}");
-                        st.skipped.insert(pane.clone());
-                    }
-                }
-            });
-        }
-    }
-
     fn lid_away_release(&mut self, sleep: bool) {
         if let Err(e) = release() {
             eprintln!("[lid-away] 잠자기 막음을 못 풀었다: {e:#}");
-            self.set_toast(format!("덮으면 이사: 잠자기 막음을 못 풀었어요 — 터미널에서 sudo pmset -a disablesleep 0 ({e:#})"));
+            self.set_toast(format!("덮어도 마저 하기: 잠자기 막음을 못 풀었어요 — 터미널에서 sudo pmset -a disablesleep 0 ({e:#})"));
         }
         STATE.with(|s| {
             let mut st = s.borrow_mut();
-            st.targets.clear();
-            st.skipped.clear();
             st.beat_at = None;
             hold_app_nap_off(&mut st, false);
         });
@@ -450,7 +372,7 @@ impl App {
 }
 
 /// 덮이면 창이 안 보여 App Nap 이 타이머를 몇 분씩 미룬다 — 그러면 박동이 끊겨 감시가 막음을 풀고,
-/// 예약 이사도 제때 안 뜬다. 깨어 있는 동안만 활동을 쥔다(유휴 잠자기 허락은 pmset 이 따로 쥔다).
+/// 일이 끝나도 제때 못 재운다. 깨어 있는 동안만 활동을 쥔다(유휴 잠자기 허락은 pmset 이 따로 쥔다).
 fn hold_app_nap_off(st: &mut State, on: bool) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
@@ -624,47 +546,21 @@ mod tests {
     use super::*;
 
     fn sense(now: Instant) -> Sense {
-        Sense {
-            allowed: true,
-            working: false,
-            departed: false,
-            migrating: false,
-            cap: Duration::from_secs(30 * 60),
-            now,
-        }
+        Sense { allowed: true, busy: false, departed: false, cap: Duration::from_secs(30 * 60), now }
     }
 
     #[test]
-    fn arms_only_when_work_or_migration_needs_it_and_sudo_allows() {
+    fn arms_only_when_work_needs_it_and_sudo_allows() {
         let t = Instant::now();
         assert_eq!(step(Phase::Idle, sense(t)), (Phase::Idle, None));
-        let working = Sense { working: true, ..sense(t) };
-        assert_eq!(step(Phase::Idle, working), (Phase::Armed { quiet_since: None }, Some(Act::Arm)));
-        assert_eq!(step(Phase::Idle, Sense { allowed: false, ..working }), (Phase::Idle, None));
-    }
-
-    #[test]
-    fn a_self_requested_move_keeps_sleep_blocked_between_turns() {
-        let t = Instant::now();
-        let moving = Sense { migrating: true, ..sense(t) };
-        let (armed, act) = step(Phase::Idle, moving);
-        assert_eq!(act, Some(Act::Arm));
-        let (armed, act) = step(armed, Sense { now: t + QUIET_GRACE * 2, ..moving });
-        assert_eq!(act, None);
-        assert_eq!(armed, Phase::Armed { quiet_since: None });
-        let closed = Sense { departed: true, now: t + QUIET_GRACE * 3, ..moving };
-        let (away, act) = step(armed, closed);
-        assert_eq!(act, Some(Act::Depart));
-        assert_eq!(step(away, Sense { now: closed.now + SETTLE * 2, ..closed }).1, Some(Act::Depart));
-        assert!(matches!(step(away, Sense { now: closed.now + SETTLE * 2, ..closed }).0,
-            Phase::Away { settled_since: None, .. }));
-        assert_eq!(step(Phase::Idle, Sense { allowed: false, ..moving }), (Phase::Idle, None));
-        assert_eq!(step(Phase::Idle, closed), (Phase::Idle, None));
+        let busy = Sense { busy: true, ..sense(t) };
+        assert_eq!(step(Phase::Idle, busy), (Phase::Armed { quiet_since: None }, Some(Act::Arm)));
+        assert_eq!(step(Phase::Idle, Sense { allowed: false, ..busy }), (Phase::Idle, None));
     }
 
     #[test]
     fn a_dark_wake_with_the_lid_closed_does_not_arm_again() {
-        let s = Sense { working: true, departed: true, ..sense(Instant::now()) };
+        let s = Sense { busy: true, departed: true, ..sense(Instant::now()) };
         assert_eq!(step(Phase::Idle, s), (Phase::Idle, None));
     }
 
@@ -675,58 +571,70 @@ mod tests {
         assert_eq!(act, None);
         let (p, act) = step(p, sense(t + QUIET_GRACE - Duration::from_secs(1)));
         assert_eq!(act, None);
-        let (p, _) = step(p, Sense { working: true, ..sense(t + QUIET_GRACE) });
+        let (p, _) = step(p, Sense { busy: true, ..sense(t + QUIET_GRACE) });
         assert_eq!(p, Phase::Armed { quiet_since: None });
         let (p, _) = step(p, sense(t + QUIET_GRACE * 2));
         assert_eq!(step(p, sense(t + QUIET_GRACE * 3 + Duration::from_secs(1))), (Phase::Idle, Some(Act::Disarm)));
     }
 
     #[test]
-    fn closing_the_lid_reserves_moves_and_sleeps_once_they_land() {
+    fn closing_the_lid_waits_for_the_work_to_finish_then_sleeps() {
         let t = Instant::now();
-        let closed = |now, working, migrating| Sense { departed: true, working, migrating, ..sense(now) };
-        let (p, act) = step(Phase::Armed { quiet_since: None }, closed(t, true, false));
-        assert_eq!(act, Some(Act::Depart));
-        let (p, act) = step(p, closed(t + Duration::from_secs(60), true, true));
-        assert_eq!(act, Some(Act::Depart));
-        let (p, act) = step(p, closed(t + Duration::from_secs(120), false, false));
-        assert_eq!(act, Some(Act::Depart));
-        assert!(matches!(p, Phase::Away { settled_since: Some(_), .. }));
-        assert_eq!(step(p, closed(t + Duration::from_secs(120) + SETTLE, false, false)), (Phase::Idle, Some(Act::Sleep)));
+        let closed = |d: u64, busy| Sense { departed: true, busy, ..sense(t + Duration::from_secs(d)) };
+        let (p, act) = step(Phase::Armed { quiet_since: None }, closed(0, true));
+        assert_eq!((p, act), (Phase::Away { since: t, quiet_since: None }, None), "덮여도 옮기지 않고 깨어 있는다");
+        let (p, act) = step(p, closed(600, true));
+        assert_eq!(act, None, "일하는 동안은 계속 깨어 있다");
+        let (p, act) = step(p, closed(700, false));
+        assert_eq!(act, None, "턴이 막 끝났으면 다음 쪽지를 잠깐 기다린다");
+        let (p, act) = step(p, closed(730, true));
+        assert_eq!((p, act), (Phase::Away { since: t, quiet_since: None }, None), "그 사이 다시 일하면 처음부터 기다린다");
+        let (p, _) = step(p, closed(800, false));
+        assert_eq!(step(p, closed(800 + QUIET_GRACE.as_secs(), false)), (Phase::Idle, Some(Act::Sleep)));
     }
 
     #[test]
-    fn opening_the_lid_takes_back_the_reservations() {
+    fn work_that_already_ended_before_the_lid_closed_sleeps_after_the_rest_of_the_pause() {
         let t = Instant::now();
-        let away = Phase::Away { since: t, stopping: false, settled_since: None };
-        assert_eq!(step(away, Sense { working: true, ..sense(t) }), (Phase::Armed { quiet_since: None }, Some(Act::Recall)));
-    }
-
-    #[test]
-    fn the_cap_stops_waiting_for_work_but_lets_a_move_finish() {
-        let t = Instant::now();
-        let away = Phase::Away { since: t, stopping: false, settled_since: None };
-        let at = |d: Duration, working, migrating| Sense { departed: true, working, migrating, ..sense(t + d) };
-        let cap = Duration::from_secs(30 * 60);
-        let (p, act) = step(away, at(cap, true, true));
-        assert_eq!(act, Some(Act::Halt));
-        let (p, act) = step(p, at(cap + Duration::from_secs(10), true, true));
+        let (p, _) = step(Phase::Armed { quiet_since: None }, sense(t));
+        let (p, act) = step(p, Sense { departed: true, ..sense(t + Duration::from_secs(50)) });
         assert_eq!(act, None);
-        // 이사가 끝나면 아직 일하는 학생이 있어도 잔다.
-        let (p, _) = step(p, at(cap + Duration::from_secs(20), true, false));
-        assert_eq!(step(p, at(cap + Duration::from_secs(20) + SETTLE, true, false)), (Phase::Idle, Some(Act::Sleep)));
-        // 워커가 매달려도 상한 너머로는 안 버틴다.
-        let stuck = Phase::Away { since: t, stopping: true, settled_since: None };
-        assert_eq!(step(stuck, at(cap + HARD_EXTRA, true, true)), (Phase::Idle, Some(Act::Sleep)));
+        assert_eq!(step(p, Sense { departed: true, ..sense(t + QUIET_GRACE) }), (Phase::Idle, Some(Act::Sleep)));
+    }
+
+    #[test]
+    fn opening_the_lid_keeps_the_block_and_stops_counting_toward_sleep() {
+        let t = Instant::now();
+        let away = Phase::Away { since: t, quiet_since: None };
+        assert_eq!(step(away, Sense { busy: true, ..sense(t) }), (Phase::Armed { quiet_since: None }, None));
+    }
+
+    #[test]
+    fn the_cap_sleeps_even_while_students_still_work() {
+        let t = Instant::now();
+        let away = Phase::Away { since: t, quiet_since: None };
+        let at = |d: Duration| Sense { departed: true, busy: true, ..sense(t + d) };
+        let cap = Duration::from_secs(30 * 60);
+        assert_eq!(step(away, at(cap - Duration::from_secs(1))).1, None);
+        assert_eq!(step(away, at(cap)), (Phase::Idle, Some(Act::Sleep)));
     }
 
     #[test]
     fn low_battery_or_heat_at_the_lid_goes_straight_to_sleep() {
         let t = Instant::now();
-        let s = Sense { allowed: false, departed: true, working: true, ..sense(t) };
+        let s = Sense { allowed: false, departed: true, busy: true, ..sense(t) };
         assert_eq!(step(Phase::Armed { quiet_since: None }, s), (Phase::Idle, Some(Act::Sleep)));
-        let away = Phase::Away { since: t, stopping: false, settled_since: None };
-        assert_eq!(step(away, s).1, Some(Act::Halt));
+        assert_eq!(step(Phase::Away { since: t, quiet_since: None }, s), (Phase::Idle, Some(Act::Sleep)));
+    }
+
+    #[test]
+    fn a_machine_chosen_for_the_old_move_keeps_the_feature_on() {
+        let on = |v: serde_json::Value| config_from(&v).on;
+        assert!(on(serde_json::json!({ "lid_away_machine": "나쵸네코" })));
+        assert!(!on(serde_json::json!({ "lid_away_machine": "" })));
+        assert!(!on(serde_json::json!({})));
+        assert!(!on(serde_json::json!({ "lid_away": false, "lid_away_machine": "나쵸네코" })), "새 값이 이긴다");
+        assert_eq!(config_from(&serde_json::json!({ "lid_away": true })).cap, Duration::from_secs(DEFAULT_MINUTES * 60));
     }
 
     #[test]

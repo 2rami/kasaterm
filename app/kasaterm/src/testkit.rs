@@ -4639,7 +4639,7 @@ impl App {
         self.open_settings_window(event_loop, Some(cat), student);
         // 접힌 묶음을 펼친 화면 — `KASATERM_AUTOSETTINGS_DISCLOSE=appearance,terminal`.
         for id in std::env::var("KASATERM_AUTOSETTINGS_DISCLOSE").unwrap_or_default().split(',') {
-            if let Some(id) = ["appearance", "terminal", "palette-advanced", "other-palettes"].into_iter().find(|known| *known == id) {
+            if let Some(id) = ["appearance", "terminal", "palette-advanced", "other-palettes", "device-tools"].into_iter().find(|known| *known == id) {
                 self.settings_scene.toggle_disclosure(id);
             }
         }
