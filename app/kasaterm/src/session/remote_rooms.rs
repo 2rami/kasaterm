@@ -2,6 +2,28 @@
 //! 원본에 맞추고, 기기를 펼친다.
 use super::*;
 
+fn moved_view_member(
+    timers: &mut std::collections::HashMap<String, Instant>,
+    label: &str,
+    mirror: &str,
+    remote: &str,
+    in_home: bool,
+    now: Instant,
+) -> bool {
+    // 정상인 다른 보기 창의 같은 원본 칸이 이 거울의 이동 유예를 지우면 옛 칸이 영원히 남는다.
+    let key = format!("{label}/{mirror}/{remote}");
+    if in_home {
+        timers.remove(&key);
+        return false;
+    }
+    let since = *timers.entry(key.clone()).or_insert(now);
+    if now.saturating_duration_since(since) < std::time::Duration::from_secs(5) {
+        return false;
+    }
+    timers.remove(&key);
+    true
+}
+
 pub(super) fn self_view_machine() -> Result<kasa_mcp::machines::Machine> {
     let port = std::env::var("KASASPACE_MCP_PORT")
         .map_err(|_| anyhow::anyhow!("이 기기 HTTP 창구가 안 떠 있어요"))?;
@@ -410,21 +432,19 @@ impl App {
         for leaf in &leaves {
             let Some(rid) = source_of(self, leaf) else { continue };
             let Some(row) = row_of(&rid) else { continue };
-            let key = format!("{label}/{rid}");
             let in_home = row.get("window").and_then(|v| v.as_u64()) == Some(home);
+            let mirror = kasa_mcp::surface_keys::get(leaf).unwrap_or_else(|| leaf.clone());
+            let moved = moved_view_member(
+                &mut MOVED_SINCE.get_or_init(Default::default).lock().unwrap(),
+                label, &mirror, &rid, in_home, Instant::now(),
+            );
             if !in_home {
-                let since = *MOVED_SINCE.get_or_init(Default::default).lock().unwrap()
-                    .entry(key.clone()).or_insert_with(Instant::now);
-                if since.elapsed() < std::time::Duration::from_secs(5) {
-                    continue;
-                }
-                MOVED_SINCE.get_or_init(Default::default).lock().unwrap().remove(&key);
+                if !moved { continue; }
                 eprintln!("[view] {label} {rid} 는 원본에서 다른 방으로 갔다 — 이 보기 창에서 걷는다");
                 self.remote_keep.insert(leaf.clone());
                 self.remove_pane(leaf);
                 return true;
             }
-            MOVED_SINCE.get_or_init(Default::default).lock().unwrap().remove(&key);
             let Some(outer_rid) = row.get("tab_of").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else { continue };
             let Some(outer) = outer_of.get(outer_rid).cloned().filter(|o| o != leaf) else { continue };
             eprintln!("[view] {label} {rid} 는 원본에선 {outer_rid} 의 탭 — 옆 칸을 탭으로 접는다");
@@ -1573,5 +1593,50 @@ mod unfold_tests {
         // 첫 탭(칸 자신)은 펴지 않는다. 원본을 모르는 탭도.
         assert_eq!(view_tab_to_unfold(&[leaf(&["%1"])], &panes), None);
         assert_eq!(view_tab_to_unfold(&[("%2".into(), vec![Some("%1".into()), None])], &panes), None);
+    }
+}
+
+#[cfg(test)]
+mod membership_tests {
+    use super::moved_view_member;
+    use std::{collections::HashMap, time::{Duration, Instant}};
+
+    #[test]
+    fn a_correct_second_view_does_not_reset_the_old_views_grace() {
+        for correct_first in [false, true] {
+            let mut timers = HashMap::new();
+            let start = Instant::now();
+            for second in 0..=5 {
+                let now = start + Duration::from_secs(second);
+                if correct_first {
+                    assert!(!moved_view_member(&mut timers, "mini", "correct-mirror", "%3", true, now));
+                }
+                assert_eq!(moved_view_member(&mut timers, "mini", "old-mirror", "%3", false, now), second == 5);
+                if !correct_first {
+                    assert!(!moved_view_member(&mut timers, "mini", "correct-mirror", "%3", true, now));
+                }
+            }
+            assert!(timers.is_empty());
+        }
+    }
+
+    #[test]
+    fn returning_to_the_same_view_resets_its_grace() {
+        let mut timers = HashMap::new();
+        let start = Instant::now();
+        for (second, home, moved) in [(0, false, false), (4, true, false), (5, false, false), (9, false, false), (10, false, true)] {
+            assert_eq!(moved_view_member(&mut timers, "mini", "mirror", "%3", home, start + Duration::from_secs(second)), moved);
+        }
+        assert!(timers.is_empty());
+    }
+
+    #[test]
+    fn recreated_mirror_does_not_inherit_an_older_seats_timer() {
+        let mut timers = HashMap::new();
+        let start = Instant::now();
+        assert!(!moved_view_member(&mut timers, "mini", "old-key", "%3", false, start));
+        let later = start + Duration::from_secs(5);
+        assert!(!moved_view_member(&mut timers, "mini", "new-key", "%3", false, later));
+        assert!(moved_view_member(&mut timers, "mini", "old-key", "%3", false, later));
     }
 }

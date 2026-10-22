@@ -7031,6 +7031,16 @@ impl App {
                         eprintln!("[mirror-view-test] source={pane} viewer={id} read_only={}",
                             kasa_mcp::remote::is_view_pane(&id));
                         let _ = VIEW_ID.set(id);
+                        if let Ok(extra) = std::env::var("KASATERM_TEST_MIRROR_EXTRA_PANE") {
+                            let window = kasa_mcp::machines::cached_pane(label, &extra)
+                                .and_then(|r| r.get("window").and_then(|v| v.as_u64()));
+                            if let Some(window) = window {
+                                let result = self.open_remote_room(label, Some(window), "second fixture room", Some(&extra));
+                                eprintln!("[mirror-view-test] extra={extra} result={result:?}");
+                            } else {
+                                eprintln!("[mirror-view-test] FAIL extra source not cached: {extra}");
+                            }
+                        }
                     }
                     Err(error) => eprintln!("[mirror-view-test] FAIL {error:#}"),
                 }
