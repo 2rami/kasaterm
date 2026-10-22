@@ -30,6 +30,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 mod session_move;
+mod summon_place;
+use summon_place::SummonSpot;
 
 struct ApiTarget { base: String, token_file: Option<std::path::PathBuf> }
 static API_TARGET: std::sync::OnceLock<ApiTarget> = std::sync::OnceLock::new();
@@ -929,7 +931,7 @@ fn tell_target_booting(why: &str) -> bool {
 fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     let (mut cwd, mut name, mut boot) = (None::<String>, None::<String>, "claude".to_string());
     let (mut tab, mut stdin, mut json_out) = (false, false, false);
-    let (mut machine, mut beside) = (None::<String>, None::<String>);
+    let (mut machine, mut beside, mut new_room) = (None::<String>, None::<String>, None::<String>);
     let mut words: Vec<String> = Vec::new();
     let value = |i: usize| args.get(i + 1).cloned().ok_or_else(|| anyhow!("{} 뒤에 값이 필요해요", args[i]));
     let mut i = 0;
@@ -940,6 +942,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             "--name" => { name = Some(value(i)?); i += 2; }
             "--machine" => { machine = Some(value(i)?); i += 2; }
             "--beside" => { beside = Some(value(i)?); i += 2; }
+            "--new-room" => { new_room = Some(value(i)?.trim().to_string()); i += 2; }
             "--json" => { json_out = true; i += 1; }
             "--tab" => { tab = true; i += 1; }
             "--stdin" => { stdin = true; i += 1; }
@@ -959,14 +962,18 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     if brief.trim().is_empty() {
         return Err(anyhow!("summon 은 브리프가 필요해요 — kasaterm-cli summon --cwd <레포> \"할 일\""));
     }
-    if machine.is_some() || beside.is_some() {
-        let spot = RemoteSpot { machine, beside, cwd, tab };
-        return run_summon_remote(socket_path, spot, name, &boot, &brief, json_out);
+    if machine.is_some() || beside.is_some() || new_room.is_some() {
+        if machine.is_none() && beside.is_none() && cwd.is_none() {
+            cwd = Some(std::env::current_dir()?.to_string_lossy().into_owned());
+        }
+        let spot = SummonSpot { machine, beside, new_room, cwd, tab };
+        return run_summon_placed(socket_path, spot, name, &boot, &brief, json_out);
     }
     let cwd = match cwd { Some(dir) => std::path::PathBuf::from(dir), None => std::env::current_dir()? };
     let cwd = cwd.canonicalize().with_context(|| format!("{} 폴더가 없어요", cwd.display()))?;
 
-    let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
+    let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("부른 칸이 없어요 — --beside <보드 주소> 또는 --new-room '작업방 이름'으로 자리를 골라 주세요"))?;
     let since = epoch_ms();
     let (method, params) = if tab {
         ("surface.new_tab", json!({ "outer": from, "focus": false }))
@@ -1029,7 +1036,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
         let character = row_text(&row, "character");
         let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
         println!("{who} 소환 · 지시는 첫 입력으로 넣음");
-        println!("{}", if from.is_some() { format!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}") } else { format!("기다리려면: {wait}") });
+        println!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}");
         return Ok(());
     }
 
@@ -1047,7 +1054,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
             let address = row.get("address").cloned().unwrap_or(Value::Null);
             let mut params = json!({ "message_id": message_id, "address": address, "body": body });
             if let Some(title) = &title { params["title"] = json!(title); }
-            if let Some(pane) = &from { params["notify"] = json!({ "surface": pane, "label": surface }); }
+            params["notify"] = json!({ "surface": from, "label": surface });
             let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(), params })?;
             if told.ok {
                 break (row, message_id, address, told);
@@ -1068,53 +1075,28 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     let character = row_text(&row, "character");
     let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
     println!("{who} 소환 · 지시 {state} · 영수증 {message_id}");
-    if from.is_some() {
-        println!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}");
-    } else {
-        println!("기다리려면: {wait}");
-    }
+    println!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}");
     Ok(())
 }
 
-/// 다른 기기에 세울 자리 — 기기(보드 id)·옆에 둘 칸 주소·그 기기의 작업 폴더·탭 여부.
-struct RemoteSpot {
-    machine: Option<String>,
-    beside: Option<String>,
-    cwd: Option<String>,
-    tab: bool,
-}
-
-/// `summon --machine <기계> [--beside <칸>] [--tab] [--cwd <그 기기 폴더>]` — 그 기기 카사텀이 자기 방(지정이
-/// 없으면 보던 방)에 칸을 세우고 claude 를 띄운 뒤 브리프를 tell 로 건넨다. 칸 세우기·부팅 줄은 `collab.act`,
-/// 브리프는 기기 너머 tell 이라 ssh 가 없다. 결과는 그 칸의 보드 주소다. 부른 칸이 다른 기기라 done 은 이 창으로
-/// 안 온다 — `board --wait 이름@기계` 로 받는다.
-fn run_summon_remote(socket_path: &str, spot: RemoteSpot, name: Option<String>, boot: &str, brief: &str, json_out: bool) -> Result<()> {
+// 사람이 보고 있는 방은 이 작업의 방이라는 증거가 아니므로, 소환 위치를 먼저 확정한다.
+fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, boot: &str, brief: &str, json_out: bool) -> Result<()> {
     let since = epoch_ms();
-    let mut params = json!({ "tab": spot.tab });
-    if let Some(anchor) = &spot.beside {
-        if !anchor.starts_with('{') {
-            return Err(anyhow!("--beside 는 %N@기계·이름@기계·주소 JSON 으로 주세요"));
-        }
-        let anchor = view_address(Some(anchor))?;
-        if spot.machine.as_deref().is_some_and(|m| m != row_text(&anchor, "machine_id")) {
-            return Err(anyhow!("--beside 칸이 --machine 기계에 없어요"));
-        }
-        params["address"] = anchor;
-    } else {
-        params["machine_id"] = json!(spot.machine.clone().unwrap_or_default());
-    }
-    if let Some(dir) = &spot.cwd {
-        if !dir.starts_with('/') {
-            return Err(anyhow!("--cwd 는 그 기기의 절대 경로로 주세요: {dir}"));
-        }
-        params["cwd"] = json!(dir);
-    }
+    let params = spot.params()?;
     let made = roundtrip(socket_path, &act(json!("summon"), "spawn", params))?;
     if !made.ok {
         return Err(anyhow!("칸을 못 세웠어요: {}", made.error.map(|e| e.message).unwrap_or_default()));
     }
     let placed = made.result.as_ref().and_then(|r| r.get("address")).filter(|a| a.is_object()).cloned()
         .ok_or_else(|| anyhow!("새 칸 주소를 못 받았어요"))?;
+    if let Some(room) = &spot.new_room {
+        let renamed = roundtrip(socket_path, &act(json!("summon"), "rename_room", json!({ "address": placed, "title": room })))
+            .with_context(|| format!("새 방 이름의 반영 여부를 확인하지 못했어요. 학생 실행 전 빈 칸 주소 {placed}를 확인하세요"))?;
+        if !renamed.ok {
+            return Err(anyhow!("새 방 이름을 붙이지 못해 학생 실행을 멈췄어요. 빈 칸 주소 {placed}: {}",
+                renamed.error.map(|e| e.message).unwrap_or_default()));
+        }
+    }
     let (machine, key, surface) = (row_text(&placed, "machine_id").to_string(), row_text(&placed, "surface_key").to_string(),
         row_text(&placed, "surface_id").to_string());
     if let Some(title) = &name {
@@ -2003,7 +1985,8 @@ fn print_help() {
             "tell --status ID                          전달 영수증 조회",
             "tell --raw [%N|%N@기계|--address JSON] <글> · tell --key [같은 대상] <enter|tab|escape|up|ctrl+x|alt+b|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
             "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
-            "summon --machine 기계 [--beside 칸] [--tab] [--cwd 그 기기 폴더] [--json] …   다른 기기 방에 학생(답: 그 칸 주소)",
+            "summon [--machine 기계] --beside 칸 [--tab] [--cwd 폴더] [--json] …   지정한 작업방에 학생(답: 그 칸 주소)",
+            "summon [--machine 기계] --new-room '작업방 이름' [--cwd 폴더] …   새 작업방의 첫 학생(--name 은 학생의 작업명)",
             "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약]   내 일 보고 — 판에 실리고 부른 창 입력으로 간다",
             "sessions [N]                              최근 claude·codex 세션 목록",
         ]),
