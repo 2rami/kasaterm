@@ -211,9 +211,10 @@ fn codex_answers(text: &str) -> Option<Vec<(String, String)>> {
     )
 }
 
+/// 그리는 쪽(GUI 스레드)은 통을 기다리지 않는다 — 일꾼이 긴 기록을 푸는 동안 쥐고 있으면 이번 바퀴를 건너뛴다.
 fn poll(feed: Arc<Mutex<Feed>>, source: Source, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
     {
-        let Ok(mut f) = feed.lock() else { return };
+        let Ok(mut f) = feed.try_lock() else { return };
         if f.busy {
             return;
         }
@@ -916,7 +917,7 @@ impl crate::App {
         if !stale {
             return;
         }
-        let prompts = feed.lock().map(|f| f.prompts.clone()).unwrap_or_default();
+        let Ok(prompts) = feed.try_lock().map(|f| f.prompts.clone()) else { return };
         let texts = typed_texts(&prompts);
         let shelf = self.prompt_shelf(&pane);
         // 풀스크린 TUI 는 대화를 처음부터 쥐고 있어 어느 질문이든 휠로 닿는다. 대화 보기도 기록을 다 편다.

@@ -70,35 +70,42 @@ fn read_file(path: &PathBuf, offset: u64, feed: &mut Feed) -> std::io::Result<()
     Ok(())
 }
 
+/// 그리는 쪽(GUI 스레드)은 통을 기다리지 않는다 — 일꾼이 쥐고 있으면 이번 바퀴를 건너뛴다.
 fn poll(feed: Arc<Mutex<Feed>>, source: Source, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
     {
-        let Ok(mut f) = feed.lock() else { return };
+        let Ok(mut f) = feed.try_lock() else { return };
         if f.busy {
             return;
         }
         f.busy = true;
     }
     std::thread::spawn(move || {
+        // 원본 기기 요청은 통을 놓고 기다린다 — 느린 기기에 걸린 최대 10초 동안 통을 쥐면 그리는 쪽까지 묶여 앱
+        // 전체가 멈췄다(2026-10-22). 자리(`offset`·`held`)는 `busy` 가 일꾼을 하나로 막아 그사이 안 바뀐다.
+        let fetched = match &source {
+            Source::File(_) => None,
+            Source::Remote(base, rid) => {
+                let Some((offset, held)) = feed.lock().ok().map(|f| (f.offset, f.held.clone())) else { return };
+                Some((crate::chat_view::history::remote(base, rid, offset, &held), held))
+            }
+        };
         let Ok(mut f) = feed.lock() else { return };
         let before = f.items.len();
-        match &source {
-            Source::File(path) => {
+        match (&source, fetched) {
+            (Source::File(path), _) => {
                 let offset = f.offset;
                 let _ = read_file(path, offset, &mut f);
             }
-            Source::Remote(base, rid) => {
-                let (offset, held) = (f.offset, f.held.clone());
-                // 원본 기기 요청이 길어도 다른 줄은 기다리지 않는다 — 통을 잠근 채 받는다(이 칸만의 통이다).
-                if let Ok(Some(chunk)) = crate::chat_view::history::remote(base, rid, offset, &held) {
-                    if chunk.reset || chunk.source != held {
-                        *f = Feed { version: f.version, busy: true, ..Feed::default() };
-                    }
-                    let Feed { seen, items, .. } = &mut *f;
-                    kasa_socket::inline_outputs::scan(&chunk.raw, seen, items);
-                    f.offset = chunk.offset;
-                    f.held = chunk.source;
+            (Source::Remote(..), Some((Ok(Some(chunk)), held))) => {
+                if chunk.reset || chunk.source != held {
+                    *f = Feed { version: f.version, busy: true, ..Feed::default() };
                 }
+                let Feed { seen, items, .. } = &mut *f;
+                kasa_socket::inline_outputs::scan(&chunk.raw, seen, items);
+                f.offset = chunk.offset;
+                f.held = chunk.source;
             }
+            _ => {}
         }
         f.busy = false;
         let changed = !f.loaded || f.items.len() != before;
