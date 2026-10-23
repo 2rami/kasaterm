@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+mod browser;
 mod session_move;
 mod summon_place;
 use summon_place::SummonSpot;
@@ -58,6 +59,9 @@ fn parse_api_target(args: &mut Vec<String>) -> Result<Option<ApiTarget>> {
 }
 
 pub fn main() {
+    if browser::invoked_as_opener() {
+        std::process::exit(browser::run());
+    }
     match run() {
         Ok(Some(resp)) => {
             // 사람이 터미널에서 직접 쳤으면(`to 맥미니` 같은 셰임) JSON 덩어리 대신

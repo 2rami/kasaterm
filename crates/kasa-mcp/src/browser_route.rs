@@ -249,13 +249,25 @@ fn inherited_forward(line: &str) -> bool {
     matches!(line.split_whitespace().next(), Some("localforward" | "remoteforward" | "dynamicforward"))
 }
 
+/// 쓸 ssh. Windows 는 내장 OpenSSH 를 콕 집는다 — PATH 앞에 Git 의 MSYS ssh 가 오면 그쪽이 잡히는데, 그건
+/// 명부의 Windows 경로 키(`-i C:\…`)와 `%USERPROFILE%\.ssh` 설정을 내장판과 다르게 읽는다.
+fn ssh_program() -> std::ffi::OsString {
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        let inbox = std::path::Path::new(&root).join(r"System32\OpenSSH\ssh.exe");
+        if inbox.is_file() {
+            return inbox.into_os_string();
+        }
+    }
+    "ssh".into()
+}
+
 /// -L adds to forwards in ssh_config. ClearAllForwardings would also remove our
 /// own -L, so reject inherited forwards rather than launching unrelated sockets
 /// or replacing the user's SSH configuration. -G does not connect to the host.
-#[cfg(unix)]
 fn check_inherited_forwards(target: &str) -> std::io::Result<()> {
     use std::io::BufRead;
-    let mut child = crate::no_window_command("ssh")
+    let mut child = crate::no_window_command(ssh_program())
         .args(["-G", "-T", "-o", "PermitLocalCommand=no", target])
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
     let stdout = child.stdout.take().unwrap();
@@ -285,7 +297,45 @@ fn check_inherited_forwards(target: &str) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn launch_ssh(port: u16, local: &LocalUrl, target: &Target) -> std::io::Result<Child> {
+    check_inherited_forwards(&target.ssh)?;
+    let child = crate::no_window_command(ssh_program())
+        .args(ssh_arguments(port, local, target))
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    end_with_app(&child);
+    Ok(child)
+}
+
+/// 유닉스 감독자(sh)가 앱이 죽으면 ssh 를 거두듯 — 앱만 쥔 작업 개체(끝날 때 안을 끝냄)에 넣는다. 앱이 꺼지거나
+/// 죽어 그 핸들이 닫히면 OS 가 ssh 를 끝내, 포트를 문 고아 ssh 가 남지 않는다.
+#[cfg(windows)]
+fn end_with_app(child: &Child) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    static JOB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return 0;
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        job as usize
+    });
+    job != 0 && unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) } != 0
+}
+
+#[cfg(not(any(unix, windows)))]
 fn launch_ssh(_: u16, _: &LocalUrl, _: &Target) -> std::io::Result<Child> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "SSH forwarding supervisor is unavailable"))
 }
@@ -330,6 +380,30 @@ pub(crate) async fn resolve_handler(Json(request): Json<ResolveRequest>) -> impl
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// Windows 는 내장 OpenSSH 로 전달하고, 그 ssh 는 앱과 함께 끝나는 작업 개체에 든다. 닿지 않는 기기면
+    /// 오래 기다리지 않고 거절을 알린다(접속 시간 한도 안).
+    #[cfg(windows)]
+    #[test]
+    fn windows_forwards_through_inbox_openssh_tied_to_the_app() {
+        let ssh = ssh_program();
+        assert!(std::path::Path::new(&ssh).ends_with(r"OpenSSH\ssh.exe"), "{ssh:?}");
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(end_with_app(&child));
+        let _ = child.kill();
+        let _ = child.wait();
+        let local = parse_local_url("http://localhost:9").unwrap();
+        let target = Target { identity: "nowhere".into(), ssh: "kasa-no-such-host.invalid".into(), key: None };
+        let started = Instant::now();
+        let refused = ForwardPool::default().resolve(&local, target, launch_ssh);
+        assert!(refused.is_err());
+        assert!(started.elapsed() < Duration::from_secs(12), "{:?}", started.elapsed());
+    }
+
     #[test]
     fn only_loopback_web_urls_are_forwardable() {
         for url in ["http://localhost:3000", "https://127.0.0.1", "http://127.0.0.2:3000", "ws://[::1]:8080/ws", "wss://localhost./ws"] {

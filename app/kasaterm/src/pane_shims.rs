@@ -434,6 +434,10 @@ port=${{KASASPACE_MCP_PORT:-8765}}\n\
 /// 못 닿으면 종전대로 `/usr/bin/open` 이라 잃는 것이 없다. macOS 전용 — 다른 OS 는
 /// `open` 이 이 뜻이 아니다.
 pub(crate) fn install_open_shim(shim_dir: &std::path::Path) {
+    if cfg!(windows) {
+        install_browser_shim(shim_dir);
+        return;
+    }
     if !cfg!(target_os = "macos") {
         return;
     }
@@ -467,6 +471,26 @@ exec /usr/bin/open "$@"
     if let Err(e) = write_shim(&shim_dir.join("open"), body) {
         eprintln!("[shim] write open failed: {e}");
     }
+}
+
+/// Windows 칸의 URL 열기 — 거기엔 `open` 이 없고 CLI 들은 ShellExecute(`url.dll`)로 바로 연다. Claude Code·gh·
+/// Python 은 `BROWSER` 가 있으면 그 프로그램에 URL 을 넘기므로, kasaterm-cli 를 `kasaterm-open.exe` 이름으로 두고
+/// 칸 env 의 `BROWSER` 를 거기 건다(멀티콜, `kasa_socket::cli` 의 browser). 사람이 원래 걸어 둔 BROWSER 는
+/// 앱에 못 닿을 때 쓰도록 `KASATERM_NATIVE_BROWSER` 로 넘긴다. 칸은 앱 env 를 물려받는다.
+fn install_browser_shim(shim_dir: &std::path::Path) {
+    let Some(cli) = locate_cmux_compat_binary() else {
+        return;
+    };
+    let opener = shim_dir.join("kasaterm-open.exe");
+    let _ = std::fs::remove_file(&opener);
+    if let Err(e) = stage_shim(&cli, &opener) {
+        eprintln!("[shim] stage kasaterm-open failed: {e}");
+        return;
+    }
+    if let Some(native) = std::env::var_os("BROWSER").filter(|b| !b.to_string_lossy().contains("kasaterm-open")) {
+        std::env::set_var("KASATERM_NATIVE_BROWSER", native);
+    }
+    std::env::set_var("BROWSER", &opener);
 }
 
 /// 캡처 프록시로 claude API 라우팅 — pane 별 깨끗한 대화 캡처(ccglass 방식). claude 가
