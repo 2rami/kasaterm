@@ -9,15 +9,22 @@ kasaterm 의 `%N` 그대로다 — Claude 는 받은 id 를 되돌려 줄 뿐이
 명령 표면은 Claude Code 2.1.283 의 TmuxBackend(외부 세션 경로)를 바이너리에서 읽은 것이다.
 모르는 명령은 실패로 돌려 Claude 쪽 오류로 보이게 한다 — 조용히 0 을 주면 팀원이 빈 pane 에 묶인다.
 """
-import fcntl
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
+WINDOWS = os.name == "nt"
 WINDOW = "swarm-view"
 # 값을 받는 tmux 플래그. 나머지 한 글자 플래그는 켜기/끄기다.
 VALUED = set("tFnsclTxye")
@@ -52,8 +59,47 @@ def parse(args):
 def cli_path():
     # 셰임 디렉터리의 CLI 를 먼저 — 검증용 앱과 본판이 섞여 있어도 이 pane 의 앱으로 간다.
     shim = os.environ.get("KASATERM_TMUX_SHIM_DIR", "")
-    path = os.path.join(shim, "kasaterm-cli")
-    return path if shim and os.access(path, os.X_OK) else "kasaterm-cli"
+    name = "kasaterm-cli.exe" if WINDOWS else "kasaterm-cli"
+    path = os.path.join(shim, name)
+    return path if shim and os.access(path, os.X_OK) else name
+
+
+def lock_exclusive(f):
+    if fcntl:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        return
+    # msvcrt 는 10초 기다리다 실패를 던진다 — 풀릴 때까지 다시 건다. 파일을 닫으면(끝나면) 풀린다.
+    while True:
+        try:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            continue
+
+
+def alive(pid):
+    if WINDOWS:
+        # Windows 의 os.kill(pid, 0) 은 그 프로세스를 끝낸다(TerminateProcess) — 손잡이를 열어 끝났는지만 본다.
+        import ctypes
+        kernel = ctypes.windll.kernel32
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.GetLastError() == 5  # 남의 권한이면 살아 있는 것
+        code = ctypes.c_ulong()
+        ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel.CloseHandle(handle)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
 
 
 def cli(*args):
@@ -83,7 +129,7 @@ class Swarm:
         self.base = os.path.join(self.dir, socket_name)
         self.path = self.base + ".json"
         self.lock = open(self.base + ".lock", "w")
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        lock_exclusive(self.lock)
         try:
             with open(self.path) as f:
                 self.panes = json.load(f).get("panes", [])
@@ -110,19 +156,13 @@ class Swarm:
                 shell = int(f.read().strip())
         except (OSError, ValueError):
             return time.time() - p.get("created", 0) < SPAWN_GRACE
-        try:
-            os.kill(shell, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            pass
-        return True
+        return alive(shell)
 
     def live(self):
-        res, _ = cli("list", "surfaces")
+        res, _ = cli("where", "--json")
         if res is None:
             return list(self.panes)
-        now = {s.get("id") for s in res.get("surfaces", [])}
+        now = {t.get("surface") for r in res.get("rooms", []) for c in r.get("cells", []) for t in c.get("tabs", [])}
         keep = [p for p in self.panes if self.mine(p, now)]
         for p in self.panes:
             if p not in keep:
@@ -179,11 +219,18 @@ def respawn(swarm, pane, command):
     명령을 입력창에 직접 치지 않는다 — Claude 가 붙이는 `env …` 에 API 키가 실려 올 수 있고,
     쳐 넣으면 셸 기록과 화면에 남는다. 스스로 지워지는 파일로 넘긴다."""
     fd, path = tempfile.mkstemp(prefix="teammate-", suffix=".sh", dir=swarm.dir)
-    with os.fdopen(fd, "w") as f:
-        f.write(f'rm -f -- "$0"\necho "$PPID" > {shlex.quote(swarm.shell_file(pane))}\n{command}\n')
-    # 정상 종료면 셸도 닫아 pane 이 걷히게 하고, 실패면 오류를 볼 수 있게 셸을 남긴다(tmux 의
-    # remain-on-exit failed 와 같은 뜻).
-    _, err = cli("send", "--surface", pane, f" sh {shlex.quote(path)} && exit\n")
+    # Windows 칸 셸(cmd 등)이 띄운 Git Bash sh 의 $PPID 는 1 이다 — 그 sh 자신의 Windows pid 를 적는다.
+    owner = "cat /proc/$$/winpid" if WINDOWS else 'echo "$PPID"'
+    with os.fdopen(fd, "w", newline="\n") as f:
+        f.write(f'rm -f -- "$0"\n{owner} > {shlex.quote(swarm.shell_file(pane))}\n{command}\n')
+    if WINDOWS:
+        # 칸 셸이 cmd·PowerShell 이어도 그 문법으로 바꿔 친다(launch). 칸은 팀원이 끝나도 남고 리더의 kill-pane 이 걷는다.
+        sh = shutil.which("sh") or "sh"
+        _, err = cli("launch", pane, f"{shlex.quote(sh)} {shlex.quote(path)}")
+    else:
+        # 정상 종료면 셸도 닫아 pane 이 걷히게 하고, 실패면 오류를 볼 수 있게 셸을 남긴다(tmux 의
+        # remain-on-exit failed 와 같은 뜻).
+        _, err = cli("tell", "--raw", pane, f" sh {shlex.quote(path)} && exit\n")
     if err:
         os.unlink(path)
         return fail(f"{pane} 에 팀원 명령을 못 보냈다: {err}")
@@ -255,7 +302,7 @@ def run(argv):
     if cmd == "select-pane":
         title = flags.get("T")
         if title and swarm.owns(target):
-            cli("rename", target, title)
+            cli("rename-window", target, title)
         return 0
 
     if cmd == "kill-pane":

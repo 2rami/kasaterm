@@ -2059,6 +2059,7 @@ fn print_help() {
             "split <left|right|up|down> [%N] [--focus] [--count N]   칸 나누기 — 방 전체가 같은 크기 격자로 다시 짜인다",
             "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
             "tab [%N] [--focus]                        그 칸에 새 탭",
+            "launch %N [--cwd 폴더] '<명령>'           빈 셸 칸에서 명령 실행 — 그 칸 셸(cmd·PowerShell·zsh) 문법으로 바꿔 친다",
             "tab --server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   서버 실행·복원 등록(비밀값 금지)",
             "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기)",
             "window-new --on 기계 [--cwd 폴더]         그 기계 자신의 새 방(거울 아님, 답: 빈 칸 주소)",
@@ -2510,6 +2511,25 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("window.new", json!({}))
         }
         "tab:server" => ("surface.server", server_params(args)?),
+        // `launch %N [--cwd 폴더] '<명령>'` — 빈 셸 칸에서 명령(POSIX 셸 꼴)을 그 칸 셸 문법으로 띄운다(surface.launch).
+        // 부르는 쪽은 그 칸이 cmd 인지 zsh 인지 몰라도 된다.
+        "launch" => {
+            let surface = args.iter().find(|a| a.starts_with('%')).cloned()
+                .ok_or_else(|| anyhow!("launch %N [--cwd 폴더] '<명령>'"))?;
+            let cwd = flag_value(args, "--cwd");
+            let mut skip = false;
+            let command = args.iter().filter(|a| {
+                let keep = !skip && !a.starts_with('%') && *a != "--cwd";
+                skip = *a == "--cwd";
+                keep
+            }).cloned().collect::<Vec<_>>().join(" ");
+            if command.trim().is_empty() {
+                return Err(anyhow!("launch %N [--cwd 폴더] '<명령>'"));
+            }
+            let mut params = json!({ "surface_id": surface, "command": command });
+            if let Some(dir) = cwd { params["cwd"] = json!(dir); }
+            ("surface.launch", params)
+        }
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
         // 같은 세션에 다시 붙는다.

@@ -329,17 +329,25 @@ exec "$MUX" client --server-path "$REAL" "$@"
 /// `tmux -L claude-swarm-<pid>` 로 전용 서버를 띄워 팀원을 거기 숨기고, 사람은 그 서버에 따로
 /// attach 해야 보였다(2026-09-28). 그 소켓 호출만 `kasaterm-tmux-swarm.py` 로 보내고 나머지는
 /// 진짜 tmux 로 넘긴다. `$TMUX` 는 여전히 안 건다 — 그게 truecolor 를 깨서 6월에 위장을 걷었다.
+/// Windows 의 Claude Code 도 teammateMode=tmux 면 `tmux -V` 가 되는지만 보고 같은 길을 탄다(2.1.309 실물). 거기선
+/// `python3` 이 MS Store 스텁이기 쉬워 실제로 도는 이름을 `-X utf8`(한글 제목·경로)로 부르고, cmd 로 찾는 쪽을 위해
+/// `.cmd` 짝을 둔다.
 pub(crate) fn install_tmux_swarm_shim(shim_dir: &std::path::Path) {
-    if cfg!(windows) {
-        return;
-    }
     let Some(hooks) = locate_collab_hooks_dir() else {
         return;
     };
-    let body = tmux_swarm_shim(&hooks.join("kasaterm-tmux-swarm.py"));
+    let mut body = tmux_swarm_shim(&hooks.join("kasaterm-tmux-swarm.py"));
+    if cfg!(windows) {
+        let Some(python) = python3_program() else {
+            return;
+        };
+        body = body.replace("exec python3 ", &format!("exec {python} -X utf8 ")).replace("command -v python3", &format!("command -v {python}"));
+    }
     if let Err(e) = write_shim(&shim_dir.join("tmux"), body) {
         eprintln!("[shim] write tmux failed: {e}");
+        return;
     }
+    write_cmd_launcher(shim_dir, "tmux");
 }
 
 pub(crate) fn tmux_swarm_shim(script: &std::path::Path) -> String {
