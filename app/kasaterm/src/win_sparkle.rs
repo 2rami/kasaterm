@@ -253,7 +253,7 @@ mod ffi {
                 ($name:literal, $ty:ty) => {{
                     let n = utf8z($name);
                     match GetProcAddress(lib, n.as_ptr()) {
-                        Some(p) => std::mem::transmute::<_, $ty>(p),
+                        Some(p) => std::mem::transmute::<unsafe extern "system" fn() -> isize, $ty>(p),
                         None => return,
                     }
                 }};
