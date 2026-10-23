@@ -7770,7 +7770,25 @@ fn codex_open_rollouts(pid: u32) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-#[cfg(not(unix))]
+/// Windows 엔 `lsof` 가 없어 핸들 표로 연 파일을 읽는다(`kasa_pty::open_files`). npm 판 codex 는 node 런처 밑에서
+/// 진짜 codex.exe 가 rollout 을 쥐므로 그 자손까지 본다.
+#[cfg(windows)]
+fn codex_open_rollouts(pid: u32) -> Vec<std::path::PathBuf> {
+    let table = kasa_pty::process_table_shared();
+    let mut pids = vec![pid];
+    let mut at = 0;
+    while at < pids.len() && pids.len() < 16 {
+        let parent = pids[at];
+        pids.extend(table.iter().filter(|(_, pp, _)| *pp == parent).map(|(p, _, _)| *p));
+        at += 1;
+    }
+    kasa_pty::open_files(&pids)
+        .into_iter()
+        .filter(|path| codex_sid_from_rollout(path).is_some())
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn codex_open_rollouts(_pid: u32) -> Vec<std::path::PathBuf> {
     Vec::new()
 }
@@ -8293,6 +8311,40 @@ mod codex_session_lookup_tests {
         assert_eq!(scan_codex_sessions(&root, ""), None);
         assert_eq!(scan_codex_sessions(&root, "../x"), None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Windows 는 lsof 대신 핸들 표로 연 rollout 을 찾는다 — 런처(cmd) 밑 자손이 쥔 파일도 그 칸의 것이다.
+    #[cfg(windows)]
+    #[test]
+    fn a_launcher_child_holding_a_rollout_is_found_without_lsof() {
+        let root = temp_root("codex-open-win");
+        let sid = "01900000-0000-7000-8000-0000000000aa";
+        let path = rollout(&root, sid, sid, serde_json::json!("cli"));
+        let hold = format!(
+            "$f = [IO.File]::Open('{}', 'Open', 'Read', 'ReadWrite'); Start-Sleep 30",
+            path.display()
+        );
+        let mut launcher = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "powershell.exe", "-NoProfile", "-Command", &hold])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let found = loop {
+            let found = codex_open_rollouts(launcher.id());
+            if !found.is_empty() || std::time::Instant::now() > deadline {
+                break found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        };
+        let table = kasa_pty::fresh_process_table();
+        for (pid, _, _) in table.iter().filter(|(_, parent, _)| *parent == launcher.id()) {
+            let _ = kasa_pty::terminate_pid(*pid);
+        }
+        let _ = launcher.kill();
+        let _ = launcher.wait();
+        assert_eq!(found.iter().filter_map(|p| codex_sid_from_rollout(p)).collect::<Vec<_>>(), [sid]);
+        assert_eq!(codex_root_sid_from_open_rollouts(&found).as_deref(), Some(sid));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

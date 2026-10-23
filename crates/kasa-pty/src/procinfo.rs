@@ -291,6 +291,115 @@ pub fn terminate_pid(pid: u32) -> std::io::Result<()> {
     }
 }
 
+/// `pids` 가 지금 열어 둔 디스크 파일들 — `lsof -p` 의 Windows 판. 시스템 핸들 표를 한 번 떠서 그 pid 들의
+/// 핸들만 이쪽으로 복제해 경로를 묻는다. 파이프·콘솔 핸들은 이름을 묻다 멎을 수 있어 디스크 파일만 묻는다.
+/// 같은 사용자 프로세스만 열린다(PROCESS_DUP_HANDLE).
+#[cfg(windows)]
+pub fn open_files(pids: &[u32]) -> Vec<std::path::PathBuf> {
+    use std::ffi::c_void;
+    use windows_sys::Wdk::System::SystemInformation::NtQuerySystemInformation;
+    use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileType, GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, FILE_TYPE_DISK,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE};
+    const SYSTEM_EXTENDED_HANDLE_INFORMATION: i32 = 64;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+    // SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX — windows-sys 에 없어 공개 배치대로 적는다.
+    #[repr(C)]
+    struct Entry {
+        object: *mut c_void,
+        pid: usize,
+        handle: usize,
+        access: u32,
+        trace: u16,
+        type_index: u16,
+        attributes: u32,
+        reserved: u32,
+    }
+    let mut out = Vec::new();
+    let processes: Vec<(u32, HANDLE)> = pids
+        .iter()
+        .filter_map(|&pid| {
+            let handle = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
+            (!handle.is_null()).then_some((pid, handle))
+        })
+        .collect();
+    if processes.is_empty() {
+        return out;
+    }
+    // 머리(개수·예약 두 칸) 뒤에 항목이 이어진다. u64 로 잡아 머리·항목을 정렬된 채 읽는다.
+    let mut buf: Vec<u64> = vec![0; 1 << 19];
+    let filled = loop {
+        let mut need = 0u32;
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SYSTEM_EXTENDED_HANDLE_INFORMATION,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut need,
+            )
+        };
+        if status == STATUS_INFO_LENGTH_MISMATCH && buf.len() < (64 << 20) {
+            buf = vec![0; (need as usize / 8 + 4096).max(buf.len() * 2)];
+            continue;
+        }
+        break status >= 0;
+    };
+    if filled {
+        let count = (buf[0] as usize).min((buf.len() - 2) * 8 / std::mem::size_of::<Entry>());
+        let entries = unsafe { std::slice::from_raw_parts(buf.as_ptr().add(2).cast::<Entry>(), count) };
+        for entry in entries {
+            let Some(&(_, process)) = processes.iter().find(|(pid, _)| *pid as usize == entry.pid) else {
+                continue;
+            };
+            unsafe {
+                let mut dup: HANDLE = std::ptr::null_mut();
+                if DuplicateHandle(process, entry.handle as HANDLE, GetCurrentProcess(), &mut dup, 0, 0, DUPLICATE_SAME_ACCESS) == 0 {
+                    continue;
+                }
+                if GetFileType(dup) == FILE_TYPE_DISK {
+                    let mut name = [0u16; 1024];
+                    let n = GetFinalPathNameByHandleW(dup, name.as_mut_ptr(), name.len() as u32, FILE_NAME_NORMALIZED) as usize;
+                    if n > 0 && n < name.len() {
+                        let path = String::from_utf16_lossy(&name[..n]);
+                        let path = match path.strip_prefix(r"\\?\UNC\") {
+                            Some(rest) => format!(r"\\{rest}"),
+                            None => path.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(path),
+                        };
+                        out.push(std::path::PathBuf::from(path));
+                    }
+                }
+                CloseHandle(dup);
+            }
+        }
+    }
+    for (_, handle) in processes {
+        unsafe { CloseHandle(handle) };
+    }
+    out
+}
+
+#[cfg(all(test, windows))]
+mod open_file_tests {
+    /// 이 시험 프로세스가 연 파일이 제 핸들 목록에 경로째로 나온다 — 한글·공백 이름도.
+    #[test]
+    fn a_process_lists_the_files_it_holds_open() {
+        let dir = std::env::temp_dir().join(format!("kasa-open-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout 기록.jsonl");
+        let held = std::fs::File::create(&path).unwrap();
+        let open = super::open_files(&[std::process::id()]);
+        let want = std::fs::canonicalize(&path).unwrap();
+        let want = want.to_string_lossy();
+        let want = want.strip_prefix(r"\\?\").unwrap_or(&want).to_lowercase();
+        assert!(open.iter().any(|p| p.to_string_lossy().to_lowercase() == want), "{want} not in {open:?}");
+        drop(held);
+        assert!(super::open_files(&[u32::MAX]).is_empty(), "열 수 없는 pid 는 빈 목록");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

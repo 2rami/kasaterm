@@ -50,6 +50,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_System_Kernel",
     "Wdk_System_Threading",
+    # open_files — 프로세스가 열어 둔 파일(lsof 대신): 시스템 핸들 표와 핸들의 경로.
+    "Wdk_System_SystemInformation",
+    "Win32_Storage_FileSystem",
 ] }
 
 [lints]

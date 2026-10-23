@@ -22,6 +22,8 @@ pub use host::{set_host_policy, ClipboardSink, HostPolicy};
 pub use kitty::{cell_pixels, set_cell_pixels};
 pub use layout::{bento, bento_shape, fleet, fleet_capacity, Bento, Divider, PtyLayout, SplitDir};
 pub use procinfo::{pid_alive, process_cmdline, process_env_var, process_env_vars, runs_on_tty, terminate_pid, wait_exit};
+#[cfg(windows)]
+pub use procinfo::open_files;
 pub use state::{
     agent_for_shell, agent_nested_in_pane, agent_pid_for_pane, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session,
     release_session, ExtEvent, ExternalIo,
