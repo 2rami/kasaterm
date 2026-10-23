@@ -135,8 +135,8 @@ mod imp {
         CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -325,8 +325,12 @@ mod imp {
             })
         }
 
+        /// 붙은 클라이언트 프로세스의 pid — 커널이 준 값이라 요청 본문보다 믿을 만하다(칸 안 `claude -p` 가드·
+        /// 비밀 요청이 칸을 이것으로 찾는다). 서버 쪽에서 받은 연결에만 뜻이 있다.
         pub fn peer_pid(&self) -> Option<u32> {
-            None
+            let mut pid = 0u32;
+            let ok = unsafe { GetNamedPipeClientProcessId(self.handle.raw(), &mut pid) };
+            (ok != 0 && pid != 0).then_some(pid)
         }
 
         pub fn try_clone(&self) -> Result<Self> {
@@ -428,6 +432,31 @@ mod imp {
 }
 
 pub use imp::{Incoming, LocalListener, LocalStream};
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// 받은 연결의 상대 pid 는 붙은 프로세스다 — 같은 시험 프로세스가 양쪽이라 제 pid 여야 한다.
+    #[test]
+    fn an_accepted_pipe_knows_its_client_pid() {
+        let path = std::path::PathBuf::from(format!("kasa-peer-{}.sock", std::process::id()));
+        let listener = LocalListener::bind(&path).unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = LocalStream::connect(&path).unwrap();
+            stream.write_all(b"x").unwrap();
+            let mut back = [0u8; 1];
+            stream.read_exact(&mut back).unwrap();
+        });
+        let mut accepted = listener.incoming().next().unwrap().unwrap();
+        assert_eq!(accepted.peer_pid(), Some(std::process::id()));
+        let mut got = [0u8; 1];
+        accepted.read_exact(&mut got).unwrap();
+        accepted.write_all(&got).unwrap();
+        client.join().unwrap();
+    }
+}
 
 pub fn resolved_path(p: &Path) -> std::path::PathBuf {
     imp::resolve_path(p)
