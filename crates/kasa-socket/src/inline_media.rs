@@ -764,7 +764,7 @@ fn publish(tmp: &Path, dest: &Path, size: u64) -> io::Result<()> {
 
 /// 수정 시각만 지금으로. 봉인(0o400)한 파일도 주인은 시각을 고칠 수 있다.
 fn touch(path: &Path) {
-    if let Ok(file) = File::open(path) {
+    if let Ok(file) = crate::inline_results::open_for_times(path) {
         let _ = file.set_modified(std::time::SystemTime::now());
     }
 }
@@ -869,7 +869,7 @@ mod tests {
 
     fn age(path: &Path, days: u64) {
         let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 60 * 60);
-        File::open(path).unwrap().set_modified(then).unwrap();
+        crate::inline_results::open_for_times(path).unwrap().set_modified(then).unwrap();
     }
 
     #[test]
@@ -1208,7 +1208,7 @@ mod tests {
             let then = std::fs::metadata(&blob).unwrap().modified().unwrap();
             let other = dir.join("other.part");
             std::fs::write(&other, content).unwrap();
-            File::open(&other).unwrap().set_modified(then).unwrap();
+            crate::inline_results::open_for_times(&other).unwrap().set_modified(then).unwrap();
             std::fs::rename(&other, &blob).unwrap();
         };
         let mut forged = bytes.clone();

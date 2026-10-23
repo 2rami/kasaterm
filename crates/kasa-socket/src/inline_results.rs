@@ -69,9 +69,22 @@ pub fn prune(root: &Path, keep: std::time::Duration) -> usize {
 
 /// 이미 있는 그림을 다시 등록했다 — 보관 기간을 오늘부터 다시 센다.
 pub fn touch(path: &Path) {
-    if let Ok(file) = std::fs::File::open(path) {
+    if let Ok(file) = open_for_times(path) {
         let _ = file.set_modified(std::time::SystemTime::now());
     }
+}
+
+/// 수정 시각만 고칠 수 있게 연다. Windows 는 읽기로 연 파일엔 시각을 못 쓴다(SetFileTime 이 속성 쓰기 권한을
+/// 요구한다) — 그래서 같은 결과를 다시 등록해도 보관 기간이 안 늘었다. 읽기 전용으로 봉인한 파일도 속성은 고친다.
+pub fn open_for_times(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        std::fs::OpenOptions::new().access_mode(FILE_WRITE_ATTRIBUTES).open(path)
+    }
+    #[cfg(not(windows))]
+    std::fs::File::open(path)
 }
 
 #[cfg(test)]
@@ -94,11 +107,11 @@ mod tests {
             std::fs::write(f, b"x").unwrap();
         }
         for (f, d) in [(&old, 31), (&part, 2), (&other, 99)] {
-            std::fs::File::open(f).unwrap().set_modified(ago(d)).unwrap();
+            open_for_times(f).unwrap().set_modified(ago(d)).unwrap();
         }
         assert_eq!(prune(&root, keep), 2);
         assert!(fresh.exists() && other.exists(), "모르는 파일은 건드리지 않는다");
-        std::fs::File::open(&fresh).unwrap().set_modified(ago(40)).unwrap();
+        open_for_times(&fresh).unwrap().set_modified(ago(40)).unwrap();
         touch(&fresh);
         assert_eq!(prune(&root, keep), 0, "다시 만든 그림은 오늘부터");
     }

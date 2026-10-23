@@ -79,12 +79,18 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
         w > 0 && h > 0 && u64::from(w) * u64::from(h) <= 64_000_000,
         "이미지가 너무 큽니다"
     );
-    if explicit_block || !stdout.is_terminal() {
+    // Windows 칸 출력은 ConPTY 를 지난다 — kitty 그림(APC)은 걸러지고, OSC 1337 은 지나가도 글보다 먼저·나중에
+    // 와서 엉뚱한 줄에 앉는다(2026-10-23 실측). 글 줄로 지나가는 표시 줄만 내면 앱이 그 줄을 그림으로 그린다.
+    let console = cfg!(windows) && stdout.is_terminal();
+    if explicit_block || !stdout.is_terminal() || console {
         let decoded = image::open(path)?;
         let id = crate::inline_result::register(&decoded)?;
-        stdout
-            .lock()
-            .write_all(crate::inline_result::display_block(&id, w, h).as_bytes())?;
+        let block = crate::inline_result::display_block(&id, w, h);
+        let shown = match console && !explicit_block {
+            true => block.lines().filter(|l| l.starts_with("[[ki:")).map(|l| format!("{l}\r\n")).collect(),
+            false => block,
+        };
+        stdout.lock().write_all(shown.as_bytes())?;
         return Ok(true);
     }
     let (width, height, cols, rows) = display_size(w, h, terminal_geometry());

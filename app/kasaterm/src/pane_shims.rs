@@ -367,12 +367,23 @@ exec "$REAL" "$@"
     .replace("__SCRIPT__", &shell_quote_path(&script.to_string_lossy()))
 }
 
-pub(crate) fn install_preview_shims(shim_dir: &std::path::Path) {
-    // Windows shells can't run /bin/sh scripts and the pane PATH there isn't
-    // a POSIX shell; skip rather than drop broken files.
+/// curl `--data-urlencode` 에 넘길 `name` 값과 그 앞에 붙일 것. Git Bash 의 curl(mingw)은 명령줄 인자를
+/// 콘솔 코드페이지(cp949)로 읽어서 한글 경로·학생 이름이 깨진 바이트로 인코딩된다(2026-10-23 실측: `한글` 이
+/// `%c7%d1%b1%db`). 표준입력(`name@-`)으로 주면 받은 UTF-8 바이트 그대로다. 맥은 예전 그대로 인자로 준다.
+/// `value_sh` 는 셸 단어(`"$abs"`), `inline` 은 큰따옴표 인자 안에 그대로 넣을 꼴(`$abs`)이다.
+fn curl_utf8_value(name: &str, value_sh: &str, inline: &str) -> (String, String) {
     if cfg!(windows) {
-        return;
+        (format!("printf '%s' {value_sh} | "), format!("{name}@-"))
+    } else {
+        (String::new(), format!("{name}={inline}"))
     }
+}
+
+pub(crate) fn install_preview_shims(shim_dir: &std::path::Path) {
+    // Windows 는 Git Bash 의 sh 가 이 셰임을 돌린다(Claude Code 의 Bash 도구도 Git Bash 다). cmd·PowerShell
+    // (codex 의 셸 도구 포함)은 `.cmd` 짝으로 닿는다. 앱이 받는 경로는 Windows 꼴이어야 해서 `cygpath -w`.
+    let native_path = if cfg!(windows) { "abs=$(cygpath -w \"$abs\")\n" } else { "" };
+    let (feed, path_arg) = curl_utf8_value("path", "\"$abs\"", "$abs");
     // `--get --data-urlencode` lets curl build the query string with the
     // path properly percent-encoded (spaces, unicode, etc.) — no hand-rolled
     // URL escaping in sh.
@@ -384,29 +395,35 @@ if [ \"$#\" -lt 1 ]; then echo \"usage: {cmd} FILE\" >&2; exit 1; fi\n\
 f=$1\n\
 if command -v realpath >/dev/null 2>&1; then abs=$(realpath \"$f\"); \
 else case \"$f\" in /*) abs=\"$f\";; *) abs=\"$PWD/$f\";; esac; fi\n\
+{native_path}\
 port=${{KASASPACE_MCP_PORT:-8765}}\n\
-curl -s --get --data-urlencode \"path=$abs\" \
+{feed}curl -s --get --data-urlencode \"{path_arg}\" \
 --data-urlencode \"pane=${{KASATERM_PANE_ID:-}}\" \
 \"http://127.0.0.1:$port/{endpoint}\" >/dev/null \
 || {{ echo \"{cmd}: failed to reach kasaterm\" >&2; exit 1; }}\n"
         )
     };
-    if let Ok(binary) = std::env::current_exe() {
-        let quoted = shell_quote_path(&binary.to_string_lossy());
+    // Git Bash 는 `C:/…` 꼴 실행 경로를 그대로 exec 한다.
+    let app = std::env::current_exe()
+        .ok()
+        .map(|binary| shell_quote_path(&binary.to_string_lossy().replace('\\', "/")));
+    if let Some(quoted) = &app {
         let _ = write_shim(&shim_dir.join("mediaopen"), format!("#!/bin/sh\nexec {quoted} --inline-media \"$@\"\n"));
+        write_cmd_launcher(shim_dir, "mediaopen");
     }
     for (name, endpoint) in [("imgopen", "open-image"), ("mdopen", "open-markdown")] {
         let path = shim_dir.join(name);
         let mut body = mk(name, endpoint);
         if name == "imgopen" {
-            if let Ok(binary) = std::env::current_exe() {
-                let quoted = shell_quote_path(&binary.to_string_lossy());
+            if let Some(quoted) = &app {
                 body = body.replacen("f=$1\n", &format!("if [ \"$1\" = --tab ]; then shift; [ \"$#\" -eq 1 ] || {{ echo \"usage: imgopen --tab FILE\" >&2; exit 1; }}; else exec {quoted} --inline-image \"$@\"; fi\nf=$1\n"), 1);
             }
         }
         if let Err(e) = write_shim(&path, body) {
             eprintln!("[shim] write {name} failed: {e}");
+            continue;
         }
+        write_cmd_launcher(shim_dir, name);
     }
 }
 
@@ -566,6 +583,7 @@ pub(crate) fn install_student_shims(shim_dir: &std::path::Path) {
         // 학생이 이미 정해져 있으므로 값을 직접 실을 수 있다.
         let model = kasa_mcp::character::model_for(&chars, &name).unwrap_or_default();
         let backend = kasa_mcp::character::backend_for(&chars, &name).unwrap_or_default();
+        let (feed, character_arg) = curl_utf8_value("character", &format!("'{}'", sq(&name)), &sq(&name));
         let script = format!(
             "#!/bin/sh\n\
 # kasaterm 학생 런처 — 이 pane 을 '{name}' 로 재배정하고 하네스 실행.\n\
@@ -575,8 +593,8 @@ if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
   printf '%s' '{name_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.character\"\n\
   printf '%s' '{model_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.model\"\n\
   printf '%s' '{backend_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.backend\"\n\
-  curl -s --get --data-urlencode \"surface=$KASATERM_PANE_ID\" \\\n\
-    --data-urlencode \"character={name_sq}\" \\\n\
+  {feed}curl -s --get --data-urlencode \"surface=$KASATERM_PANE_ID\" \\\n\
+    --data-urlencode \"{character_arg}\" \\\n\
     \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/repersona\" >/dev/null 2>&1\n\
 fi\n\
 # An explicit provider must win over the saved launcher default.\n\
@@ -853,6 +871,14 @@ mod tests {
             assert_eq!(stderr.contains("Python 3 이 필요한데"), explains, "rc={rc}: {stderr}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 한글 값은 Windows 에선 표준입력으로 curl 에 준다 — 맥 셰임 글자는 예전 그대로다.
+    #[test]
+    fn curl_values_reach_the_app_as_utf8() {
+        let got = curl_utf8_value("path", "\"$abs\"", "$abs");
+        let want = if cfg!(windows) { ("printf '%s' \"$abs\" | ", "path@-") } else { ("", "path=$abs") };
+        assert_eq!((got.0.as_str(), got.1.as_str()), want);
     }
 
     /// `.cmd` 짝은 셰임 이름을 본문에 안 적고 ASCII 로만 남는다 — cmd 가 배치 본문을 콘솔 코드페이지로
