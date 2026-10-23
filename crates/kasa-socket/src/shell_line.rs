@@ -115,26 +115,37 @@ fn windows_bare(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '\\' | '+'))
 }
 
-/// 명령 단어들을 cmd·PowerShell 줄로. 칸의 `claude`·`codex`·학생 이름은 `.cmd` 셰임이라 인자는 결국
-/// cmd 가 읽는다 — PowerShell 은 감쌀 인자가 있으면 멈춤 기호 `--%` 뒤에 cmd 꼴 그대로 넘긴다. 그러지
-/// 않으면 PowerShell 5.1 은 공백 없는 `a&b` 를 따옴표 없이 넘겨 cmd 가 `&` 에서 명령을 끊는다.
-fn windows_command(shell: ShellKind, words: &[String]) -> String {
+/// PowerShell 이 `.cmd` 에 넘긴 인자를 cmd 가 `%*` 로 한 번 더 읽을 때 명령을 끊거나 펼치는 글자.
+fn cmd_meta(text: &str) -> bool {
+    text.chars().any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '%'))
+}
+
+/// 명령 단어들을 cmd·PowerShell 줄로. 칸의 `claude`·`codex`·학생 이름은 `.cmd` 셰임이라 인자는 결국 cmd 가
+/// 다시 읽는다. PowerShell 은 작은따옴표로 감싸 넘기는데, 5.1 은 공백 없는 인자를 따옴표 없이 넘겨 `a&b` 면
+/// cmd 가 `&` 에서 끊는다 — 그런 인자는 거절한다(부팅 인자엔 드물고, 첫 입력은 파일로 간다). 멈춤 기호 `--%`
+/// 는 못 쓴다: PowerShell 칸의 `claude` 는 셰임을 부르는 함수라(PWSH_CWD_SHIM) `--%` 를 그냥 인자로 받는다.
+fn windows_command(shell: ShellKind, words: &[String]) -> Result<String> {
     let (program, args) = words.split_first().expect("빈 명령은 부르는 쪽이 거른다");
-    let program = match (windows_bare(program), shell) {
-        (true, _) => program.clone(),
-        // 감싼 첫 단어는 PowerShell 이 문자열 값으로 읽고 실행하지 않는다.
-        (false, ShellKind::PowerShell) => format!("& {}", powershell_quote(program)),
-        (false, _) => cmd_quote(program),
+    let quote = |word: &String| match (windows_bare(word), shell) {
+        (true, _) => word.clone(),
+        (false, ShellKind::PowerShell) => powershell_quote(word),
+        (false, _) => cmd_quote(word),
     };
-    let mut line = program;
-    if shell == ShellKind::PowerShell && !args.iter().all(|a| windows_bare(a)) {
-        line.push_str(" --%");
+    if shell == ShellKind::PowerShell {
+        if let Some(bad) = args.iter().find(|a| cmd_meta(a)) {
+            bail!("PowerShell 칸엔 & | < > ^ % 가 든 인자를 넘길 수 없어요: {bad}");
+        }
     }
+    let mut line = match (windows_bare(program), shell) {
+        // 감싼 첫 단어는 PowerShell 이 문자열 값으로 읽고 실행하지 않는다.
+        (false, ShellKind::PowerShell) => format!("& {}", quote(program)),
+        _ => quote(program),
+    };
     for arg in args {
         line.push(' ');
-        line.push_str(&if windows_bare(arg) { arg.clone() } else { cmd_quote(arg) });
+        line.push_str(&quote(arg));
     }
-    line
+    Ok(line)
 }
 
 /// POSIX 셸 단어로 나눈다(`claude --model 'opus[1m]'` → 세 단어). 따옴표가 안 닫혔으면 None.
@@ -247,7 +258,7 @@ pub fn launch_line(
             if cwd.is_some_and(windows_unsafe) {
                 bail!("{} 칸엔 큰따옴표·줄바꿈이 든 폴더로 옮길 수 없어요", shell.name());
             }
-            let run = windows_command(shell, &words);
+            let run = windows_command(shell, &words)?;
             match cwd {
                 Some(dir) => shell.cd_then(&plain_path(dir), &run),
                 None => run,
@@ -316,7 +327,8 @@ mod tests {
         let cmd = launch_line(ShellKind::Cmd, Some(r"\\?\C:\Users\x\wt\win-update"), "claude", None, None).unwrap();
         assert_eq!(cmd, "cd /d \"C:\\Users\\x\\wt\\win-update\" && claude\r");
         let ps = launch_line(ShellKind::PowerShell, Some(r"C:\it's"), "claude --model 'opus[1m]'", None, None).unwrap();
-        assert_eq!(ps, "Set-Location -LiteralPath 'C:\\it''s' -ErrorAction Stop; claude --% --model \"opus[1m]\"\r");
+        assert_eq!(ps, "Set-Location -LiteralPath 'C:\\it''s' -ErrorAction Stop; claude --model 'opus[1m]'\r");
+        assert!(launch_line(ShellKind::PowerShell, None, "claude 'a&b'", None, None).is_err(), "cmd 가 다시 읽으면 끊긴다");
         assert_eq!(launch_line(ShellKind::PowerShell, None, "호시노 codex", None, None).unwrap(), "호시노 codex\r");
         let first = launch_line(ShellKind::Cmd, None, "'my tool' x", None, None).unwrap();
         assert_eq!(first, "\"my tool\" x\r");
@@ -334,7 +346,8 @@ mod tests {
     }
 
     /// 실제 cmd·PowerShell 에 줄을 먹여, 공백·한글·`%`·작은따옴표가 든 폴더로 옮겨 인자를 글자 그대로
-    /// 받는지 본다. 폴더가 없으면 명령을 돌리지 않는다.
+    /// 받는지 본다. 폴더가 없으면 명령을 돌리지 않는다. PowerShell 칸의 `claude` 처럼 셰임 `.cmd` 를 부르는
+    /// 함수로 풀리는 이름도 같은 인자를 받아야 한다(PWSH_CWD_SHIM).
     #[cfg(windows)]
     #[test]
     fn windows_boot_lines_run_in_real_shells() {
@@ -350,23 +363,26 @@ mod tests {
         std::fs::write(&probe, "Set-Content -Encoding utf8 -LiteralPath (Join-Path $PWD 'got.txt') -Value ($args -join '|')\r\n").unwrap();
         std::fs::write(bin.join("kprobe.cmd"), "@powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0probe.ps1\" %*\r\n").unwrap();
         let path = format!("{};{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-        let command = "kprobe --model 'opus[1m]' 'a&b|c' '50%PATH%' 호시노 'x y'";
-        let want = "--model|opus[1m]|a&b|c|50%PATH%|호시노|x y";
         let mut shells = vec![(ShellKind::Cmd, "cmd.exe".to_string()), (ShellKind::PowerShell, "powershell.exe".to_string())];
         match std::process::Command::new("where.exe").arg("pwsh").output().ok().filter(|o| o.status.success()) {
             Some(found) => shells.push((ShellKind::PowerShell, String::from_utf8_lossy(&found.stdout).lines().next().unwrap_or("pwsh").trim().to_string())),
             None => eprintln!("pwsh 가 없어 Windows PowerShell 로만 본다"),
         }
+        let shim = "function kwrap { & (Join-Path $env:KPROBE_BIN 'kprobe.cmd') @args }; ";
         for (kind, program) in shells {
             let program = program.as_str();
+            let (command, want) = match kind {
+                ShellKind::Cmd => ("kprobe --model 'opus[1m]' 'a&b|c' '50%PATH%' 호시노 'x y'", "--model|opus[1m]|a&b|c|50%PATH%|호시노|x y"),
+                _ => ("kwrap --model 'opus[1m]' 호시노 'x y' \"it's\"", "--model|opus[1m]|호시노|x y|it's"),
+            };
             let _ = std::fs::remove_file(target.join("got.txt"));
             let line = launch_line(kind, Some(&target.to_string_lossy()), command, None, None).unwrap();
             let line = line.trim_end_matches('\r');
             let mut run = std::process::Command::new(program);
-            run.current_dir(&base).env("PATH", &path);
+            run.current_dir(&base).env("PATH", &path).env("KPROBE_BIN", &bin);
             match kind {
                 ShellKind::Cmd => run.raw_arg(format!("/d /s /c \"{line}\"")),
-                _ => run.args(["-NoProfile", "-NonInteractive", "-Command", line]),
+                _ => run.args(["-NoProfile", "-NonInteractive", "-Command", &format!("{shim}{line}")]),
             };
             let out = run.output().unwrap();
             let got = std::fs::read_to_string(target.join("got.txt"))
