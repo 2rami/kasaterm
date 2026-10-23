@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{App, ApplicationHandler, Instant};
 
 impl App {
     pub(super) fn record_terminal_link_probe(&self, pane: &str, target: &str) -> bool {

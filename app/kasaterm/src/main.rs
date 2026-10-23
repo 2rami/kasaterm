@@ -413,7 +413,7 @@ fn git_paint_dropdowns(
     path_hdr: Option<(f32, f32, f32, f32)>,
     path_open: bool,
     repos: &[std::path::PathBuf],
-    pinned: &Option<std::path::PathBuf>,
+    pinned: Option<&std::path::Path>,
     path_rects: &mut Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
     nested: &[std::path::PathBuf],
     chosen: Option<&std::path::Path>,
@@ -483,7 +483,7 @@ fn git_paint_dropdowns(
             }
             for r in repos {
                 let name = r.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-                let sel = pinned.as_ref() == Some(r);
+                let sel = pinned == Some(r.as_path());
                 row(g, iy, name, sel);
                 path_rects.push((Some(r.clone()), (px, iy, pw, item_h)));
                 iy += item_h;

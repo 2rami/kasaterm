@@ -3,7 +3,7 @@
 //! composed 그리드를 읽거나 고쳐 쓸 뿐 App 상태를 안 만지는 것들이다.
 //! 외부 호출 경로는 render.rs 의 glob 재수출로 종전 `render::…` 그대로다.
 use super::*;
-use crate::sprites::*;
+use crate::sprites::{sprite_key_prefix, student_profile_rgba, student_sprite_frames};
 
 mod foreground;
 pub(crate) use foreground::TuiForeground;
@@ -4560,6 +4560,7 @@ mod picker_tag_tests {
 #[cfg(test)]
 mod clawd_banner_tests {
     use super::*;
+    use crate::sprites::student_sprite_png;
 
     /// 실제 그리드 모양으로 만든다 — **넓은 글자 뒤에 빈칸 한 개**가 붙는다.
     /// kasa-pty 의 `convert_cell` 이 그렇게 넘기므로, 흉내내지 않으면 한글이 든

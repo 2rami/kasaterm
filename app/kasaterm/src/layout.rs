@@ -2803,8 +2803,8 @@ for p in glob.glob(os.path.join(d, '*.json')):
     }
 
     /// `remove_stashed_leaf` 의 읽기 전용 짝 — 이 슬롯이 그 leaf 를 담고 있는지.
-    fn stashed_leaf_exists(slot: &Option<kasa_pty::PtyLayout>, target: &str) -> bool {
-        slot.as_ref()
+    fn stashed_leaf_exists(slot: Option<&kasa_pty::PtyLayout>, target: &str) -> bool {
+        slot
             .map(|t| t.leaves().iter().any(|l| *l == target))
             .unwrap_or(false)
     }
@@ -2814,21 +2814,21 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 윈도우로 전환해 둔 pane 은 stash 슬롯에 있고, 백그라운드 세션은 자기 트리를
     /// 따로 쥔다. 실제로 빈 칸이 남은 자리가 활성 창이 아니라 **다른 윈도우**였다.
     pub(crate) fn leaf_lingers_anywhere(&self, target: &str) -> bool {
-        if Self::stashed_leaf_exists(&self.pty_layout, target) {
+        if Self::stashed_leaf_exists(self.pty_layout.as_ref(), target) {
             return true;
         }
         if self
             .windows
             .iter()
-            .any(|w| Self::stashed_leaf_exists(w, target))
+            .any(|w| Self::stashed_leaf_exists(w.as_ref(), target))
         {
             return true;
         }
         self.sessions.iter().flatten().any(|s| {
-            Self::stashed_leaf_exists(&s.pty_layout, target)
+            Self::stashed_leaf_exists(s.pty_layout.as_ref(), target)
                 || s.windows
                     .iter()
-                    .any(|w| Self::stashed_leaf_exists(w, target))
+                    .any(|w| Self::stashed_leaf_exists(w.as_ref(), target))
         })
     }
 
@@ -4303,18 +4303,18 @@ mod drop_zone_tests {
             }),
         });
         // 중첩 깊이와 무관하게 찾는다 — 실제로 빈 칸이 남았던 자리가 깊이 2였다.
-        assert!(App::stashed_leaf_exists(&slot, "%3"));
-        assert!(!App::stashed_leaf_exists(&slot, "%9"));
+        assert!(App::stashed_leaf_exists(slot.as_ref(), "%3"));
+        assert!(!App::stashed_leaf_exists(slot.as_ref(), "%9"));
         // 찾았다면 반드시 걷어낼 수 있어야 한다. 어긋나면 reap 이 매 틱 같은 id 를
         // 유령으로 판정하고도 못 지운다.
         assert!(App::remove_stashed_leaf(&mut slot, "%3"));
-        assert!(!App::stashed_leaf_exists(&slot, "%3"));
-        assert!(App::stashed_leaf_exists(&slot, "%2"));
+        assert!(!App::stashed_leaf_exists(slot.as_ref(), "%3"));
+        assert!(App::stashed_leaf_exists(slot.as_ref(), "%2"));
         // 마지막 leaf 까지 걷으면 슬롯째 비고, 빈 슬롯·없는 대상 조회도 안전하다.
         assert!(App::remove_stashed_leaf(&mut slot, "%1"));
         assert!(App::remove_stashed_leaf(&mut slot, "%2"));
         assert!(slot.is_none());
-        assert!(!App::stashed_leaf_exists(&slot, "%1"));
+        assert!(!App::stashed_leaf_exists(slot.as_ref(), "%1"));
         assert!(!App::remove_stashed_leaf(&mut slot, "%1"));
     }
 }

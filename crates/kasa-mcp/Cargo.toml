@@ -87,3 +87,6 @@ security-framework = "3"
 
 [dev-dependencies]
 kasa-collab = { workspace = true, features = ["net", "test-support"] }
+
+[lints]
+workspace = true

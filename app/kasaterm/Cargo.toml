@@ -163,3 +163,6 @@ libc.workspace = true
 # taskbar / Start menu / .msi installer show the real icon, not the default.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[lints]
+workspace = true

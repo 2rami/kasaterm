@@ -760,7 +760,7 @@ fn paint_git(
         git.path_hdr_rect,
         git.path_menu_open,
         f.repo_list,
-        &git.col_pinned_cwd,
+        git.col_pinned_cwd.as_deref(),
         &mut git.path_menu_rects,
         if git_view.remote.is_none() { &git_view.repos } else { &[] },
         git_view.repos.iter().find(|r| Some(*r) == f.repo_choice).map(|r| r.as_path()),

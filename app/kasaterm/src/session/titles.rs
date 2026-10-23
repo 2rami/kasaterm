@@ -130,7 +130,7 @@ impl App {
             let Some(name) = found else { continue };
             let known = entry.title.clone();
             drop(seen);
-            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name, &known) {
+            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name, known.as_deref()) {
                 session_titles()
                     .lock()
                     .unwrap()
@@ -152,7 +152,7 @@ impl App {
         &mut self,
         pane_id: &str,
         name: String,
-        known: &Option<String>,
+        known: Option<&str>,
     ) -> Option<String> {
         {
             let mut ws = self.ws.lock().unwrap();
@@ -160,7 +160,7 @@ impl App {
             if pane.title.as_deref() == Some(name.as_str()) {
                 return Some(name);
             }
-            if pane.title_pinned && pane.title != *known {
+            if pane.title_pinned && pane.title.as_deref() != known {
                 return None;
             }
             pane.title = Some(name.clone());
@@ -217,7 +217,7 @@ impl App {
             let Some(name) = names.get(&sid) else {
                 continue;
             };
-            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name.clone(), &known) {
+            if let Some(adopted) = self.adopt_scanned_title(&pane_id, name.clone(), known.as_deref()) {
                 session_titles()
                     .lock()
                     .unwrap()

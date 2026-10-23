@@ -49,6 +49,18 @@ edition = "2021"
 version = "0.2.153"
 license = "MIT"
 
+# Rust 규칙(docs/rust-style.md)을 `cargo clippy` 로 지킨다. 각 제품 크레이트는
+# `[lints] workspace = true` 로 받는다. style·complexity·perf 묶음은 아직 정리하지 않아
+# 끄고, 버그를 잡는 correctness·suspicious 묶음은 기본값 그대로 둔다.
+[workspace.lints.clippy]
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }
+wildcard_imports = "warn"
+ref_option = "warn"
+ptr_arg = "warn"
+borrowed_box = "warn"
+
 # 제품 크레이트 둘 이상이 함께 쓰는 판은 여기 한 곳에 둔다. 크레이트는
 # `workspace = true` 로 받고 자기 몫 features·optional 만 더한다.
 #

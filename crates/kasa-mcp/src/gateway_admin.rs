@@ -191,15 +191,15 @@ impl Meter {
             usage.last_active = now_secs();
         }
         if inner.1.elapsed() >= USAGE_SAVE_EVERY {
-            Self::write(&self.path, &mut inner);
+            Self::write(self.path.as_deref(), &mut inner);
         }
     }
 
     pub(super) fn save(&self) {
-        Self::write(&self.path, &mut self.inner.lock().unwrap());
+        Self::write(self.path.as_deref(), &mut self.inner.lock().unwrap());
     }
 
-    fn write(path: &Option<PathBuf>, inner: &mut (HashMap<String, Usage>, Instant)) {
+    fn write(path: Option<&std::path::Path>, inner: &mut (HashMap<String, Usage>, Instant)) {
         inner.1 = Instant::now();
         let Some(path) = path else { return };
         let written = serde_json::to_string(&inner.0)

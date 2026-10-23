@@ -51,3 +51,6 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Kernel",
     "Wdk_System_Threading",
 ] }
+
+[lints]
+workspace = true

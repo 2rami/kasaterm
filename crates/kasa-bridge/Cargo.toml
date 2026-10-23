@@ -9,3 +9,6 @@ kasa-screen.workspace = true
 vt100.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
+
+[lints]
+workspace = true

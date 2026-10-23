@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{App, Arc, ClosedPane, Instant, Result, UserEvent};
 use std::sync::Weak;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

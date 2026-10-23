@@ -569,8 +569,8 @@ mod tests {
         state.store.get("alice").unwrap().settings.get(choice::KEY).cloned()
     }
 
-    fn intent_of(value: &Option<Value>) -> Option<String> {
-        value.as_ref().and_then(|v| choice::intent(v)).map(str::to_string)
+    fn intent_of(value: Option<&Value>) -> Option<String> {
+        value.and_then(|v| choice::intent(v)).map(str::to_string)
     }
 
     fn rig(tag: &str) -> (std::path::PathBuf, Paths, Paths) {
@@ -606,9 +606,9 @@ mod tests {
         assert_eq!(canonical.as_ref().and_then(choice::rev), Some(11));
         // Reconnect: the old intent is refused, never reaches the relay, and B follows the canonical choice.
         sync(b.clone()).await.unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), intent_of(&canonical));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), intent_of(canonical.as_ref()));
         assert_eq!(local_choice(&b), canonical);
-        assert_ne!(intent_of(&local_choice(&b)), intent_of(&Some(offline)));
+        assert_ne!(intent_of(local_choice(&b).as_ref()), intent_of(Some(&offline)));
         // Reboot: a fresh pass over the same files neither revives nor re-sends the dropped intent.
         sync(b.clone()).await.unwrap();
         assert_eq!(local_choice(&b), canonical);
@@ -666,10 +666,10 @@ mod tests {
         let remote = state.store.get("alice").unwrap();
         assert_eq!(remote.settings["font_size"], 20, "the ordinary setting was not rebased");
         assert_eq!(remote.settings["shape"], "rounded");
-        assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&rival).map(str::to_string));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), choice::intent(&rival).map(str::to_string));
         assert_eq!(local_choice(&b), remote_choice(&state), "the stale choice survived the rebase");
         sync(b.clone()).await.unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&rival).map(str::to_string));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), choice::intent(&rival).map(str::to_string));
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -702,7 +702,7 @@ mod tests {
         clocked["at"] = json!(u64::MAX);
         local::edit_json(&b.settings, json!({}), |v| { v[choice::KEY] = clocked; Ok(()) }).unwrap();
         sync(b.clone()).await.unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), intent_of(&back));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), intent_of(back.as_ref()));
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -725,11 +725,11 @@ mod tests {
         };
         synchronize(&client, &credential, Stamp::fixture(), a.clone(), &allow, &manual).await.unwrap();
         let newer = newer.into_inner().unwrap().unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&first).map(str::to_string));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), choice::intent(&first).map(str::to_string));
         assert_eq!(local_choice(&a).as_ref(), Some(&newer), "the late answer erased the newer choice");
         assert_eq!(newer["after"], json!([first["intent"]]));
         synchronize(&client, &credential, Stamp::fixture(), a.clone(), &allow, &plain).await.unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&newer).map(str::to_string));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), choice::intent(&newer).map(str::to_string));
         let canonical = remote_choice(&state);
         // An automatic decision made from an older view (base before the newer choice, not chained) is refused.
         let old_auto = choice::new_intent(GMAIL, ORG, "", "", choice::base(&first), &[]).unwrap();
@@ -789,8 +789,8 @@ mod tests {
         let last = last.into_inner().unwrap().unwrap();
         assert_eq!(local_choice(&a).as_ref(), Some(&last));
         synchronize(&client, &credential, Stamp::fixture(), a.clone(), &allow, &plain).await.unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&last).map(str::to_string), "the last choice was dropped");
-        assert_eq!(intent_of(&local_choice(&a)), choice::intent(&last).map(str::to_string));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), choice::intent(&last).map(str::to_string), "the last choice was dropped");
+        assert_eq!(intent_of(local_choice(&a).as_ref()), choice::intent(&last).map(str::to_string));
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -815,7 +815,7 @@ mod tests {
         let me = owner(&credential);
         let mine = choose_at(&a, &me, PERSONAL);
         synchronize(&client, &credential, Stamp::fixture(), a.clone(), &allow, &plain).await.unwrap();
-        assert_eq!(intent_of(&remote_choice(&state)), choice::intent(&mine).map(str::to_string));
+        assert_eq!(intent_of(remote_choice(&state).as_ref()), choice::intent(&mine).map(str::to_string));
         let settings = local::read_json(&a.settings, json!({})).unwrap();
         assert_eq!(settings[choice::OWNER_KEY], me);
         assert!(choice::owned(&settings, &other).is_none());

@@ -49,3 +49,6 @@ windows-sys = { workspace = true, features = [
 # 적으면 한 쪽에서만 맞는 값이 박힌다 — 이미 의존성 트리에 있던 것이라 무거워지지 않는다.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[lints]
+workspace = true

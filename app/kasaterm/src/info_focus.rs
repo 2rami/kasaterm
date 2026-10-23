@@ -63,7 +63,7 @@ pub(crate) struct Seen {
 }
 
 impl Seen {
-    fn blank(target: &Option<Target>) -> Self {
+    fn blank(target: Option<&Target>) -> Self {
         match target {
             Some(Target::Remote { label, base, .. }) => Seen { remote: Some(label.clone()), host: remote_host(base), ..Seen::default() },
             _ => Seen::default(),
@@ -136,7 +136,7 @@ impl FocusShared {
                 false
             } else {
                 current.0 += 1;
-                *self.seen.lock().unwrap() = Seen::blank(&target);
+                *self.seen.lock().unwrap() = Seen::blank(target.as_ref());
                 current.1 = target;
                 self.rev.fetch_add(1, Relaxed);
                 true
@@ -218,7 +218,7 @@ fn watch(shared: Arc<FocusShared>, rx: mpsc::Receiver<Msg>, backend: Arc<socket:
         if let Some(Msg::Answer(answered, result)) = &msg {
             if *answered == generation && asking == Some(generation) {
                 asking = None;
-                let (mut seen, back) = remote_answer(result, &target, &mut since);
+                let (mut seen, back) = remote_answer(result, target.as_ref(), &mut since);
                 // 잠깐 끊긴 것이면 지난 카드를 까닭과 함께 둔다 — 비웠다 다시 채우면 카드가 깜빡인다.
                 if seen.card.is_none() {
                     let last = shared.seen.lock().unwrap().clone();
@@ -266,7 +266,7 @@ fn watch(shared: Arc<FocusShared>, rx: mpsc::Receiver<Msg>, backend: Arc<socket:
                     continue;
                 }
                 let Some(key) = surface_key.clone() else {
-                    let seen = Seen { issue: Some("원본 기기 앱이 옛 판이라 이 칸의 정보를 못 받아요".into()), ..Seen::blank(&Some(target.clone())) };
+                    let seen = Seen { issue: Some("원본 기기 앱이 옛 판이라 이 칸의 정보를 못 받아요".into()), ..Seen::blank(Some(&target)) };
                     rest_until = Instant::now() + Duration::from_secs(30);
                     if shared.store(generation, seen) && !redraw() {
                         return;
@@ -300,7 +300,7 @@ fn ticking(shared: &FocusShared) -> bool {
     shared.seen.lock().unwrap().card.as_ref().and_then(|c| c.facts.as_ref()).is_some_and(|f| !f.tools.is_empty() || !f.background.is_empty() || f.ask.is_some())
 }
 
-fn remote_answer(result: &Result<serde_json::Value, String>, target: &Option<Target>, since: &mut Option<String>) -> (Seen, Duration) {
+fn remote_answer(result: &Result<serde_json::Value, String>, target: Option<&Target>, since: &mut Option<String>) -> (Seen, Duration) {
     let failed = |issue: &str, back: u64| (Seen { issue: Some(issue.into()), ..Seen::blank(target) }, Duration::from_secs(back));
     match result {
         Ok(answer) if answer.get("ok").and_then(serde_json::Value::as_bool) == Some(true) => {
@@ -771,13 +771,13 @@ mod tests {
         });
         let mut since = None;
         let answer = serde_json::json!({"schema": kasa_mcp::pane_info::SCHEMA, "ok": true, "seq": "4.ab", "card": {"pane": "%3", "shell": "zsh", "ports": [{"port": 3000, "name": "node", "site": ""}]}});
-        let (seen, back) = remote_answer(&Ok(answer), &target, &mut since);
+        let (seen, back) = remote_answer(&Ok(answer), target.as_ref(), &mut since);
         assert_eq!(since.as_deref(), Some("4.ab"));
         assert_eq!(back, Duration::ZERO);
         let lines = card_lines(&seen, false);
         assert!(head(&lines).1.ends_with("· %3"));
         assert!(lines.iter().any(|l| matches!(l, info::ExecutionLine::Link { hit: Some(FocusHit::Port { port: 3000, host: Some(host) }), .. } if host == "100.64.0.7")));
-        let (seen, back) = remote_answer(&Err("HTTP 404".into()), &target, &mut since);
+        let (seen, back) = remote_answer(&Err("HTTP 404".into()), target.as_ref(), &mut since);
         assert!(since.is_none() && back >= Duration::from_secs(60));
         assert!(matches!(&card_lines(&seen, false)[1], info::ExecutionLine::Text(text, true) if text.contains("옛 판")));
     }

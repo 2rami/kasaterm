@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{gpu, theme, App};
 
 impl App {
     pub(crate) fn run_cloud_control_probe(&mut self) {

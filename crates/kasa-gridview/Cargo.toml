@@ -21,3 +21,6 @@ image.workspace = true
 # 그 자리를 막지 않게 한다(본판은 다른 의존이 켜 줘서 드러나지 않았다).
 objc2 = { workspace = true, features = ["relax-void-encoding"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry"] }
+
+[lints]
+workspace = true

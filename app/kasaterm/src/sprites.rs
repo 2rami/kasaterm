@@ -2,7 +2,9 @@
 //! 번들/사용자 override 프레임 로딩, idle GIF 캐시, 얼굴·걷기 드로잉 헬퍼.
 //! 외부 호출 경로는 render.rs 의 glob 재수출로 종전 `render::…` 그대로다.
 use super::*;
-use crate::screenread::*;
+use crate::screenread::{
+    STUDENT_IDLE_FRAMES, STUDENT_WALK_ANIMATING, STUDENT_WALK_FRAMES, STUDENT_WALK_FRAME_MS,
+};
 
 /// 사용자 override 학생 애셋의 최대 변 길이. 렌더가 슬롯에 contain-fit 하므로
 /// 정확한 규격 강제는 불필요 — 사용자가 넣은 초고해상도 원본이 VRAM 을 잡아먹는
@@ -1441,6 +1443,7 @@ mod student_asset_tests {
 #[cfg(test)]
 mod sidebar_blink_tests {
     use super::*;
+    use crate::screenread::{teammate_sender_accent, teammate_sender_slug};
 
     // 걷기 스프라이트가 전 학생에게 있는지는 `student_asset_tests` 의
     // `bundled_sprite_frames_decode_for_every_student_and_motion` 이 이미, 더 깐깐하게

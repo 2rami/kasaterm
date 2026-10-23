@@ -738,14 +738,14 @@ mod external_session_tests {
         let mut small = [0u8; 5];
         assert_eq!(reader.read(&mut small).unwrap(), 5);
         assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 0);
-        reader.read(&mut small).unwrap();
+        assert_eq!(reader.read(&mut small).unwrap(), 5);
         assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 1);
         tx.send(ExtEvent::Generation(2)).unwrap();
         tx.send(ExtEvent::Bytes(b"secondframe".to_vec())).unwrap();
-        reader.read(&mut small).unwrap();
+        assert_eq!(reader.read(&mut small).unwrap(), 5);
         assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 1, "stale frame must not claim new connection readiness");
-        reader.read(&mut small).unwrap();
-        reader.read(&mut small).unwrap();
+        assert_eq!(reader.read(&mut small).unwrap(), 5);
+        assert_eq!(reader.read(&mut small).unwrap(), 1);
         assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 

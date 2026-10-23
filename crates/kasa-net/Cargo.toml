@@ -21,3 +21,6 @@ iroh-relay = { version = "1.3", features = ["test-utils", "server"] }
 [[bin]]
 name = "kasa-net-probe"
 path = "src/bin/kasa-net-probe.rs"
+
+[lints]
+workspace = true

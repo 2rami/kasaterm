@@ -12,3 +12,6 @@ kasa-screen.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true
