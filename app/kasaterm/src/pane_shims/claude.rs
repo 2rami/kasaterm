@@ -680,7 +680,13 @@ SUB=\"\"; for a in \"$@\"; do case \"$a\" in -*) ;; *) SUB=\"$a\"; break ;; esac
 # 붙이면 `claude mcp list` 가 통째로 `unknown option` 으로 죽는다(2026-08-03 실사고). 첫 non-flag\n\
 # 인자가 **정확히** 이 이름일 때만이라 프롬프트(`claude \"mcp 어떻게 써\"`)는 안 걸린다.\n\
 # claude 가 새 서브커맨드를 내면 여기 추가할 것.\n\
-case \"$SUB\" in stop|logs|mcp|config|configuration|doctor|update|upgrade|install|installation|plugin|plugins|project|auth|gateway|setup-token|auto-mode|ultrareview|migrate-installer) SID=\"\"; PERSONA_OK=\"\" ;; esac\n\
+case \"$SUB\" in mcp|config|configuration|doctor|update|upgrade|install|installation|plugin|plugins|project|auth|gateway|setup-token|auto-mode|ultrareview|migrate-installer) SID=\"\"; PERSONA_OK=\"\" ;; esac\n\
+# 배경 세션을 다루는 서브커맨드는 claude 가 **맨 앞 인자일 때만** 알아본다 — 맨 끝 exec 가\n\
+# --settings 를 앞에 얹으면 그 낱말이 프롬프트가 되어 엉뚱한 새 대화가 뜬다(2026-10-23 Windows 실측:\n\
+# `claude attach <id>` 가 「attach」를 받은 새 세션으로 샜다). agents·mcp·doctor 는 앞 플래그를 견딘다.\n\
+# 훅은 붙으려는 배경 세션이 스폰 때 이미 받았다.\n\
+BARE=\"\"\n\
+case \"$SUB\" in attach|stop|logs|rm|respawn) SID=\"\"; PERSONA_OK=\"\"; BARE=1 ;; esac\n\
 # 학생 명령(`시로코`)의 pane 별 정체성 override — env 는 셸 spawn 시 고정이라 재배정은\n\
 # 파일로 온다. 있으면 persona/character 를 덮는다(빈 파일 = persona 없는 학생 = 미적용).\n\
 OVP=\"$SELF_DIR/repersona-${{KASATERM_PANE_ID}}.persona\"\n\
@@ -713,7 +719,7 @@ fi\n\
 [ -n \"$PERSONA_OK\" ] && kasaterm-cli claude-trust \"$PWD\" >/dev/null 2>&1\n\
 # -p 일회성 실행에는 칸 훅을 안 붙인다. 칸의 claude 가 Bash 로 돌린 판정도 칸 env 를 물려받아,\n\
 # 훅이 붙으면 칸의 대화 묶음·턴·조향 대기를 그 자식이 가져간다(2026-10-16 kasaframe 판정 칸).\n\
-if [ \"$USER_SETTINGS\" = 1 ] || [ -n \"$HEADLESS\" ] || [ ! -f \"$SETTINGS\" ]; then\n\
+if [ \"$USER_SETTINGS\" = 1 ] || [ -n \"$HEADLESS\" ] || [ -n \"$BARE\" ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
@@ -1082,6 +1088,46 @@ mod tests {
         // claude 에 닿지 않는 갈래라 이 검사의 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
         let exec_at = body.find("exec \"$REAL\"").unwrap();
         assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 배경 세션 서브커맨드는 claude 가 맨 앞 인자일 때만 알아본다 — 앞에 무엇이 얹히면 그 낱말이
+    /// 프롬프트가 되어 새 대화가 뜬다. 문자열 검사로는 갈래 순서를 못 믿어 진짜 셸로 셰임을 돌리고
+    /// 가짜 claude 가 받은 인자를 본다. doctor 는 --settings 갈래에 닿는지 보는 대조군이다.
+    #[test]
+    fn background_subcommands_reach_claude_as_the_first_argument() {
+        let Some(sh) = test_posix_shell() else { return };
+        let dir = std::env::temp_dir().join(format!("kt-shim-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (shim, fake) = (dir.join("shim"), dir.join("fake"));
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        install_claude_hook_shim(&shim);
+        if !shim.join("claude-hooks-settings.json").is_file() {
+            // collab-hooks 미해석 환경이면 --settings 갈래 자체가 없다.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        write_shim(&fake.join("claude"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(fake.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
+        // Git Bash 의 sh 에는 슬래시 경로로 건넨다 — 셰임이 $0 으로 제 폴더를 잰다.
+        let script = shim.join("claude").to_string_lossy().replace('\\', "/");
+        let run = |args: &[&str]| -> Vec<String> {
+            let out = std::process::Command::new(&sh).arg(&script).args(args).env("PATH", &path).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect()
+        };
+        for sub in ["attach", "stop", "logs", "rm", "respawn"] {
+            assert_eq!(run(&[sub, "ec4441cd"]), [sub, "ec4441cd"], "{sub} 앞에 무언가 얹혔다");
+        }
+        assert_eq!(
+            run(&["doctor"]).first().map(String::as_str),
+            Some("--settings"),
+            "대조군이 --settings 갈래에 안 닿았다 — 시험이 헛돈다"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

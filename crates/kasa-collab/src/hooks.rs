@@ -88,6 +88,8 @@ pub fn write_claude_wrapper(dir: &Path, settings: &Path) -> Result<()> {
          P=$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF \"$SELF_DIR\" | paste -sd: -)\n\
          REAL=$(PATH=\"$P\" command -v claude)\n\
          [ -z \"$REAL\" ] && {{ echo 'claude 를 찾지 못했다' >&2; exit 127; }}\n\
+         # 배경 세션 서브커맨드는 맨 앞 인자일 때만 먹는다 — 앞에 --settings 를 얹으면 프롬프트로 샌다.\n\
+         case \"$1\" in attach|stop|logs|rm|respawn) exec \"$REAL\" \"$@\" ;; esac\n\
          exec \"$REAL\" --settings '{settings}' \"$@\"\n",
         dir = dir.display(),
         settings = settings.display(),
