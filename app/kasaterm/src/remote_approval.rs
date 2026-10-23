@@ -443,7 +443,12 @@ pub(crate) fn press_sheet(alert: usize, index: usize) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub(crate) fn press_sheet(alert: usize, index: usize) {
+    crate::win_sheet::press(alert, index);
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn press_sheet(_alert: usize, _index: usize) {}
 
 /// 검증 실행이 시트 창을 PNG 로 — 화면 기록 권한 없이 그 창의 뷰를 비트맵으로 그린다.
@@ -479,7 +484,12 @@ fn shot_sheet(alert: usize, path: &str) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn shot_sheet(alert: usize, path: &str) {
+    crate::win_sheet::shot(alert, path);
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn shot_sheet(_alert: usize, _path: &str) {}
 
 /// 다른 곳에서 닫힌 요청의 시트를 거둔다(결정 없음으로 끝난다).
@@ -500,7 +510,32 @@ fn close_sheet(alert: usize) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// 맥 시트와 같은 글·단추 — 원문은 고정폭 읽기 전용 칸에서 스크롤하고, Enter 는 거절, 잘린 요청은 허락이 꺼진다.
+#[cfg(windows)]
+fn open_sheet(
+    window: &winit::window::Window,
+    title: &str,
+    info: &str,
+    body: &str,
+    allow_enabled: bool,
+    answer: impl Fn(Option<bool>) + 'static,
+) -> Option<usize> {
+    let spec = crate::win_sheet::Spec {
+        title,
+        info,
+        body: Some(body),
+        buttons: ["허락", "거절"],
+        primary_enabled: allow_enabled,
+    };
+    crate::win_sheet::open(window, &spec, move |choice| answer(choice.map(|i| i == 0)))
+}
+
+#[cfg(windows)]
+fn close_sheet(alert: usize) {
+    crate::win_sheet::close(alert);
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn open_sheet(
     _window: &winit::window::Window,
     _title: &str,
@@ -512,7 +547,7 @@ fn open_sheet(
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn close_sheet(_alert: usize) {}
 
 #[cfg(test)]

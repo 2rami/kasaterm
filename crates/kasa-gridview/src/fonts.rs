@@ -5,6 +5,11 @@ use kasa_cells::Shaper;
 const D2_REGULAR: &[u8] = include_bytes!("../assets/fonts/D2Coding-Regular.ttf");
 const D2_BOLD: &[u8] = include_bytes!("../assets/fonts/D2Coding-Bold.ttf");
 
+/// 격자 밖에서도 같은 고정폭 글꼴을 쓰는 자리(Windows 승인 시트의 원문 칸)에 넘긴다 — 4MB 를 두 번 싣지 않게.
+pub fn d2coding_regular() -> &'static [u8] {
+    D2_REGULAR
+}
+
 #[cfg(target_os = "macos")]
 fn home_var() -> Result<String, std::env::VarError> {
     match std::env::var("HOME") {

@@ -33,6 +33,7 @@
 - `drag_transfer.rs` — 끌기 시작의 칸 신원·화면 열쇠 고정과 도착 방·기기 머리 경로, 즉시 진행 표시. `session_transfer.rs`는 기기·세션 재검사와 도착 방·대화 준비 확인을 맡는다.
 - `transfer_endpoints.rs` — 기기 간 스냅숏·방 선택·빈 셸 예약과 정체 검사. `transfer_endpoints/launch.rs`는 예약한 셸의 입력 세대·프롬프트를 대조해 한 번만 재개 명령을 보내고, 같은 대화의 실제 입력창을 기다린다. 입력창 판정은 `tell_delivery.rs`의 공통 판독을 사용한다.
 - `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
+- `win_notify.rs` — Windows 알림센터 토스트(HKCU AUMID 등록·COM 활성화기 → `UserEvent::NotifyFocus`)와 작업표시줄 배지(`set_taskbar_badge`). `chrome::notify_desktop` 이 토스트에 먼저 넘기고 못 내면 배너로
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
 - `render/status_bar/accounts.rs` — 제공된 사용량 창만 폭에 맞춰 표시하는 계정 칩. `statusbar/devices.rs`는 기기 연결·버전·업데이트 판, `statusbar/usage.rs`는 실행별 사용량 상세를 그린다.
 - `process_usage.rs` — PID·시작 시각과 PTY 세대로 실행 신원을 고정하고 개별 종료한다. 숨긴 다중 셸의 복원 기록을 나누고, 문서가 함께 숨겨졌으면 먼저 열어 개별 종료하게 한다. `screen_pump`의 EOF도 같은 PTY 세대일 때만 칸을 걷는다.
@@ -91,6 +92,7 @@
 - `native_device_account.rs` — 설정 「계정」의 KASA 계정(로그인·Google·GitHub 연결·선택). 자식 `native_account_profile.rs` 는 얼굴 줄(프사·닉네임)·「로그인 방법」·아이디·비밀번호 바꾸기, `native_work_permissions.rs` 는 일 권한. 관문 쪽은 `kasa_mcp` 의 `gateway_profile.rs`(`/relay/profile`)·`device_profile.rs`(이 기기 호출) — `docs/account-oauth.md` 「Profile」
 - `remote_approval.rs` — 원격 승인의 데스크톱 화면: 같은 계정 **다른 기기** 학생의 권한 요청을 관문 긴 폴링으로 받아 오른쪽 위 결정 알림([보기][나중에], `collab.toast_action` 센티널)과 원문 시트([허락][거절], Return=거절)로 묻고 관문에 보낸다. 이 기기 요청은 `kasa_mcp::approval_bridge` 가 브로커(`claude_mod`)↔관문을 잇는다 — `docs/remote-approval.md`
 - `native_op_approval.rs` — 설정 「계정」의 비밀 승인(학생이 맥 키체인 항목을 폰 Face ID 로 꺼냄): 폰 열쇠 자동 믿기(`op_approval::auto_pick`) 뒤 남은 열쇠만 지문 시트(Return=취소)·거두기, 새 열쇠·믿게 된 폰 알림. 폰이 부르는 `op-link`(socket.rs 설정 동작)는 자동 믿기를 지금 돌린다. 학생 요청 길은 소켓 `op.secret`(socket.rs, 칸은 소켓 상대 pid 로) — `docs/secret-faceid-approval.md`
+- `win_sheet.rs` — Windows 결정 시트(맥 `NSAlert` 시트 자리): 본창에 붙은 소유 창, 고정폭 원문 칸·[주 동작][기본 동작], Enter=기본·Esc=결정 없음. `remote_approval`·`native_op_approval` 의 `cfg(windows)` 시트가 부른다 — 값은 `docs/design.md` 「결정 시트」
 - `update_notice.rs` — 새 판 알림: 업데이터(맥 preview Sparkle 확인·WinSparkle)가 찾은 판을 오른쪽 위 결정 알림으로 세우고, [업데이트]면 끊길 일을 한 번 묻고 설치를 맡긴다, [닫기]면 그 판을 기기 설정에 적는다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`

@@ -165,17 +165,22 @@ windows-sys = { workspace = true, features = [
 # 파일·폴더 고르기 창(win_dialog.rs) — 셸의 IFileOpenDialog·IFileSaveDialog. 데스크톱 기능은
 # 그 창을 사람 화면 밖(숨은 데스크톱)에서 띄워 보는 시험이 쓴다. GDI·HiDpi·LibraryLoader·
 # KeyboardAndMouse 는 스포이드(eyedropper/win.rs)의 덮개·확대경 창과 화면 픽셀 읽기.
-# 알림센터 토스트(WinRT)·클릭을 받는 COM 활성화기·작업표시줄 배지(win_notify.rs).
+# 알림센터 토스트(WinRT)·클릭을 받는 COM 활성화기·작업표시줄 배지(win_notify.rs),
+# 결정 시트 창(win_sheet.rs).
 windows = { workspace = true, features = [
     "Data_Xml_Dom",
     "UI_Notifications",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
+    "Win32_Storage_Xps",
+    "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_StationsAndDesktops",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Notifications",

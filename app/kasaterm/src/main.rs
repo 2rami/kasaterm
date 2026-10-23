@@ -154,6 +154,9 @@ mod macos_sparkle;
 // Windows 알림센터 토스트(클릭 → 그 pane)·작업표시줄 배지 — macos_notify·Dock 배지 자리.
 #[cfg(windows)]
 mod win_notify;
+// 원격 승인·폰 열쇠 믿기의 결정 시트 — macOS NSAlert 시트 자리.
+#[cfg(windows)]
+mod win_sheet;
 // Windows 자동 업데이트 — WinSparkle.dll 런타임 로드(macos_sparkle 대칭).
 // 모듈 자체는 전 플랫폼 컴파일: 토스트 센티널·버전 파서(+테스트)·no-op 스텁은
 // 공용이고 FFI/체커 스레드만 cfg(windows) 게이트 — mac 에서도 헬퍼 테스트가 돈다.
