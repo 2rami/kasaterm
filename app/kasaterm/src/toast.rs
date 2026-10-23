@@ -153,10 +153,13 @@ pub(crate) fn paint_notice(
     let limit = theme::notice_line_limit(tone);
     let keep_tail = theme::notice_keeps_tail(tone);
 
-    let chip_w = |g: &mut gpu::GpuRenderer, label: &str| {
-        g.measure_chrome_text(label, 12.0, true) + native_controls::CONTROL_PADDING_X * 2.0
-    };
-    let chips = notice.actions.map(|(ok, no)| (chip_w(g, ok), chip_w(g, no)));
+    // 자리는 단추가 실제로 그릴 너비로 잰다 — 12pt 로 재고 13pt 로 그리면 Windows 맑은 고딕에서 「보기」가
+    // 「…」로 줄었다(2026-10-23).
+    // 굵기는 아래 그리는 쪽과 같다 — 주 동작 칩만 굵다.
+    let chips = notice.actions.map(|(ok, no)| {
+        let h = native_controls::CONTROL_HEIGHT;
+        (native_controls::button_width(g, ok, h, true), native_controls::button_width(g, no, h, false))
+    });
     let chips_w = chips.map(|(a, b)| a + CHIP_GAP + b).unwrap_or(0.0);
     let room = text_room(win_w, chips_w);
 
