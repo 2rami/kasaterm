@@ -175,7 +175,9 @@ GPU 확인 카드는 `KASATERM_TEST_CLOSE_FALLBACK=1`로 별도 검사한다. �
 
 `/transfer/spawn`이 돌려준 `SessionIdentity`와 `input_revision`으로 `/transfer/launch`를 부른다. 빈 셸, 예약 후 초안 입력, 세대 교체, CLI 시작 직후 종료, 늦은 입력창을 확인한다. 전체 이사는 종료 시 마지막 JSONL 행을 flush하는 픽스처로 검사한다. 출발·도착 SID·방, 파일 마지막 행, 이사하지 않은 형제 탭의 동일성과 생존을 대조한다. 첫 탭·보조 탭 각각 이동과 도착 재개 중 출발 칸 닫기를 포함한다. 실제 CLI 재개 시간과 가짜 하네스 시간은 별도로 기록한다.
 
-Windows 끼리(같은 PC 두 리그)는 `KASATERM_MACHINE_ID` 를 리그마다 다르게 주고, 출발 리그 명부(`KASATERM_MACHINES`)에 도착 리그의 루프백 주소와 `roots` 를 적는다. 도착 폴더는 이미 신뢰한 폴더의 하위로 고른다(새 폴더면 claude 가 신뢰 확인 창에서 멈춘다). 리그 셰임 폴더(`<리그 TEMP>\kasaterm-shim-<pid>\claude.cmd`)를 `--setting-sources project --strict-mcp-config --tools ""` 로 진짜 claude 를 부르는 래퍼로 덮으면 원본 훅·사용자 플러그인 없이 재개 줄이 그 래퍼를 탄다. 셰임 훅이 하던 신원 알리기·기록 묶기는 위 픽스처 2·3번(`/agent-identity`, `bind-transcript`)으로 대신한다. 훅이 없으면 상태가 「모름」이라 턴 관문이 안 풀리니 `--force` 로 돌리고, 곱게 끄기(`/exit`)는 `/term/agent-stop` 으로 따로 잰다.
+Windows 끼리(같은 PC 두 리그)는 `KASATERM_MACHINE_ID` 를 리그마다 다르게 주고, 출발 리그 명부(`KASATERM_MACHINES`)에 도착 리그의 루프백 주소와 `roots` 를 적는다. 도착 폴더는 이미 신뢰한 폴더의 하위로 고른다(새 폴더면 claude 가 신뢰 확인 창에서 멈춘다). 리그 셰임 폴더(`<리그 TEMP>\kasaterm-shim-<pid>\claude.cmd`)를 `--setting-sources project --strict-mcp-config --tools ""` 로 진짜 claude 를 부르는 래퍼로 덮으면 원본 훅·사용자 플러그인 없이 재개 줄이 그 래퍼를 탄다. 셰임 훅이 하던 신원 알리기·기록 묶기는 위 픽스처 2·3번(`/agent-identity`, `bind-transcript`)으로 대신한다. 훅이 없어도 끝난 턴의 기록을 묶으면 상태는 「쉼」이 된다(2026-10-23 꼬리 창 수정 뒤).
+
+훅까지 재야 하면 래퍼에 `--settings <리그 셰임>\claude-hooks-settings.json` 을 더한다(사용자 설정은 여전히 `--setting-sources project` 로 뺀다). 이때 훅은 리그 밖에도 쓴다: agent-roster 는 홈(`~/.config/kasaterm/agent-roster/<cwd 이름>.json`)에, 묶기 표식은 Git sh 의 `/tmp`(리그 TEMP 가 아니라 **사용자 TEMP**)에 칸 번호 이름(`kasaterm-bound-_0`)으로 남아 같은 번호의 사용자 칸 표식을 덮는다. cwd 는 사용자 칸이 안 쓰는 리그 전용 폴더(신뢰한 폴더 하위, 예: worktree 의 `targetigcwd`)로 하고, 끝나면 그 roster 파일과 내 대화 경로가 든 표식만 지운다.
 
 대화 운반이 홈의 정본 경로를 요구하면 **이번 리그에서 만든 새 UUID 파일만** 만들고 정리한다. 사용자 세션을 복사해 이사시키거나 같은 UUID로 띄우지 않는다. 실제 Claude 측정은 `--safe-mode --restricted --strict-mcp-config --tools ""`로 훅·도구를 끈 새 대화로 하며, 별도 리그 소켓으로 바인딩한다. 원본 셸 훅·학생 이름 런처는 실행하지 않는다.
 
