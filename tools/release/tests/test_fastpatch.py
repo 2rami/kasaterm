@@ -1156,7 +1156,7 @@ class RealRepoTests(unittest.TestCase):
 LOCAL_WORKFLOW = ("env:\n  MAC_ARTIFACT: local\n  MAC_TEAM: ABCDE12345\n"
                   "# Verify locally signed DMG · source=Notarized Developer ID · xcrun stapler validate · VERIFIED_SHA\n"
                   "          KASATERM_SIGN_ID: kasaterm-ci\n")
-MACHO_FILES = ("Contents/MacOS/kasaterm", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-serve-web",
+MACHO_FILES = ("Contents/MacOS/kasaterm", "Contents/MacOS/kasaterm-cli",
                "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle")
 DEVID_SHA = "A1" * 20
 SIG_DEVID = ("Identifier=x\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1\n"
@@ -1466,7 +1466,7 @@ class LocalSigningBuildTests(LocalFixture):
 
     def test_an_unsigned_piece_a_dirty_bake_or_a_debuggable_bundle_stops_the_build(self):
         for name, setup, word in (
-            ("adhoc piece", lambda: setattr(self, "build_adhoc", ("Contents/MacOS/kasa-serve-web",)), "kasa-serve-web: Developer ID 가 아님"),
+            ("adhoc piece", lambda: setattr(self, "build_adhoc", ("Contents/MacOS/kasaterm-cli",)), "kasaterm-cli: Developer ID 가 아님"),
             ("dirty", lambda: setattr(self, "build_dirty", True), "깨끗한 판이 아니다"),
             ("debuggable", lambda: setattr(self, "debuggable", True), "get-task-allow"),
         ):

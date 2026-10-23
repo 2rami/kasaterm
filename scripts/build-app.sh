@@ -119,7 +119,6 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
-cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 mkdir -p "$APP/Contents/Resources/licenses"
 cp crates/kasa-gridview/assets/fonts/OFL-D2Coding.txt "$APP/Contents/Resources/licenses/OFL-D2Coding.txt"
@@ -551,7 +550,6 @@ if [[ -d "$FW" ]]; then
 fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 sign_part "$APP/Contents/MacOS/kasaterm-cli"
-sign_part "$APP/Contents/MacOS/kasa-serve-web"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 [[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")
