@@ -208,6 +208,9 @@ windows-core.workspace = true
 portable-pty.workspace = true
 # 프롬프트 줄·코덱스 「Worked for」의 현지 시각(info_prompts.rs localtime_s). 맥과 같은 libc::tm 을 돌려준다.
 libc.workspace = true
+# 웹 칸 스크린샷(webpane.rs web_shot)이 WebView2 의 CapturePreview 를 부른다. wry 가 쓰는 판과 같아야
+# `WebViewExtWindows::controller()` 의 타입이 이어진다.
+webview2-com = "0.38"
 
 # Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
 # taskbar / Start menu / .msi installer show the real icon, not the default.

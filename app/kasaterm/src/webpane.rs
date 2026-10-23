@@ -242,6 +242,46 @@ fn open_external(url: &str) -> std::result::Result<(), String> {
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// 웹뷰 캡처가 담긴 메모리 스트림을 `path` 에 쓴다. 다 쓴 뒤 바꿔 넣어(맥 쪽 `atomically` 와 같다) 실패해도
+/// 반쯤 쓴 PNG 가 남지 않는다.
+#[cfg(windows)]
+fn save_stream(
+    stream: &windows::Win32::System::Com::IStream,
+    path: &std::path::Path,
+) -> std::result::Result<String, String> {
+    use windows::Win32::System::Com::STREAM_SEEK_SET;
+    let unreadable = |e: windows::core::Error| format!("스냅샷 읽기 실패: {}", e.message());
+    let mut png = Vec::new();
+    let mut chunk = vec![0u8; 64 << 10];
+    unsafe {
+        stream.Seek(0, STREAM_SEEK_SET, None).map_err(unreadable)?;
+        loop {
+            let mut read = 0u32;
+            stream
+                .Read(chunk.as_mut_ptr().cast(), chunk.len() as u32, Some(&mut read))
+                .ok()
+                .map_err(unreadable)?;
+            if read == 0 {
+                break;
+            }
+            png.extend_from_slice(&chunk[..read as usize]);
+        }
+    }
+    if png.is_empty() {
+        return Err("스냅샷이 비었다".to_string());
+    }
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = std::path::PathBuf::from(part);
+    std::fs::write(&part, &png)
+        .and_then(|()| std::fs::rename(&part, path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&part);
+            format!("{}: 파일 쓰기 실패 ({e})", path.display())
+        })?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// 다운로드 목적지 — `~/Downloads/<URL 마지막 조각>`. 조각이 비면 `download`.
 fn download_dest(url: &str) -> std::path::PathBuf {
     let name = url
@@ -1107,14 +1147,57 @@ impl App {
         unsafe { wk.takeSnapshotWithConfiguration_completionHandler(None, &done) };
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Windows 는 WebView2 자체 미리보기 캡처(`CapturePreview`)다 — 화면을 긁지 않아 가려진 창도 찍히고,
+    /// 웹뷰 콘텐츠만 찍힌다. 완료 콜백은 웹뷰를 만든 메인 스레드에서 온다.
+    #[cfg(windows)]
+    fn web_shot(
+        &self,
+        host_id: u64,
+        path: &str,
+        reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ) {
+        use webview2_com::CapturePreviewCompletedHandler;
+        use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+        use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+        use wry::WebViewExtWindows;
+        if !std::path::Path::new(path).is_absolute() {
+            let _ = reply.send(Err(format!("{path}: 절대 경로여야 한다")));
+            return;
+        }
+        let Some(host) = self.web_hosts.get(&host_id) else {
+            let _ = reply.send(Err("웹 pane 창이 이미 닫혔다".to_string()));
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let done = reply.clone();
+        let started = (|| -> windows::core::Result<()> {
+            let webview = unsafe { host.webview.controller().CoreWebView2()? };
+            let stream = unsafe { CreateStreamOnHGlobal(Default::default(), true)? };
+            let png = stream.clone();
+            let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+                let out = result
+                    .map_err(|e| format!("스냅샷 실패: {}", e.message()))
+                    .and_then(|()| save_stream(&png, &path));
+                let _ = done.send(out);
+                Ok(())
+            }));
+            unsafe {
+                webview.CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler)
+            }
+        })();
+        if let Err(e) = started {
+            let _ = reply.send(Err(format!("스냅샷 실패: {}", e.message())));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     fn web_shot(
         &self,
         _host_id: u64,
         _path: &str,
         reply: std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ) {
-        let _ = reply.send(Err("web-shot 은 아직 macOS 전용이다".to_string()));
+        let _ = reply.send(Err("web-shot 은 아직 macOS·Windows 전용이다".to_string()));
     }
 
     /// 웹 자식 창의 winit 이벤트를 삼킨다(소비했으면 true). 패널 창들과 같은
