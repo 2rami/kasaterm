@@ -4803,17 +4803,22 @@ fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
 
 /// Windows 판 — 메모리는 표본(`process_rows`)과 같은 작업 집합, 시작 시각은 생성 FILETIME 이다.
 /// 시작 시각이 이 프로세스의 신원이라(같은 PID 가 다시 쓰여도 갈린다) 끄기 전에 이것으로 대조한다.
+///
+/// 끝난 프로세스는 없는 것이다. Windows 는 누가 핸들을 쥐고 있으면(칸 세션이 자식 핸들을 쥔다)
+/// 끝난 뒤에도 프로세스 객체가 남아 열리고 시작 시각도 읽힌다 — 종료 코드로 가른다.
 #[cfg(windows)]
 fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     // SAFETY: 연 핸들은 이 함수 안에서 닫고, 조회가 성공했을 때만 값을 쓴다.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
             return None;
         }
-        let out = windows_process_facts(handle).map(|facts| (facts.working_set, facts.created));
+        let mut code = 0u32;
+        let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        let out = running.then(|| windows_process_facts(handle)).flatten().map(|facts| (facts.working_set, facts.created));
         CloseHandle(handle);
         out
     }
