@@ -1807,14 +1807,18 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn("if: needs.resolve.outputs.platforms == 'both'", msi)
         self.assertIn("needs.build-dmg.result == 'success'", app)
         self.assertIn("(needs.resolve.outputs.platforms == 'macos' && needs.build-msi.result == 'skipped')", app)
-        both_start = app.index('if [[ "$PLATFORMS" == "both" ]]; then')
+        # Windows 피드는 both(안정판)와 windows(preview Windows 덤)일 때만, mac 피드는 windows 덤이 아닐 때만 짓는다.
+        both_start = app.index('if [[ "$PLATFORMS" != "macos" ]]; then')
         both = app[both_start:app.index('echo "directory=', both_start)]
         self.assertIn("appcast-win.xml", both)
+        mac_start = app.index('if [[ "$PLATFORMS" != "windows" ]]; then')
+        self.assertIn("generate_appcast", app[mac_start:both_start])
         publish = app[app.index("- name: Publish verified appcasts"):]
         self.assertIn('python3 -m tools.release.feed_publish "${FEED_ARGS[@]}" --attempts 5', publish)
         self.assertIn('--commit "$RELEASE_COMMIT"', publish)
         self.assertIn('--dmg-sha256 "$DMG_SHA"', publish)
-        self.assertIn('if [[ "$PLATFORMS" == "both" ]]; then\n            FEED_ARGS+=(--windows', publish)
+        self.assertIn('if [[ "$PLATFORMS" != "windows" ]]; then\n            FEED_ARGS+=(--mac', publish)
+        self.assertIn('if [[ "$PLATFORMS" != "macos" ]]; then\n            FEED_ARGS+=(--windows', publish)
         self.assertNotIn("git pull --rebase", app)
         self.assertNotIn("git pull --ff-only", app)
         self.assertLess(app.index("- name: Generate signed appcasts"), app.index("- name: Publish verified appcasts"))
@@ -2165,8 +2169,11 @@ class ChannelFeedTests(unittest.TestCase):
             candidate.write_text(feed_xml("0.2.1", {**item, "url": item["url"].replace("0.2.2", "0.2.1")}))
             with self.assertRaisesRegex(Refused, "이전 판"):
                 common.stage_appcasts(repo, "v0.2.1", "preview", candidate)
-            with self.assertRaisesRegex(Refused, "Windows"):
-                common.stage_appcasts(repo, "v0.2.1", "preview", candidate, windows)
+            # preview 의 Windows 는 자기 피드에만 — 안정판 Windows 피드는 그대로다.
+            candidate.write_text(feed_xml("0.2.2", item))
+            msi = repo / "candidate-win.xml"
+            msi.write_text(feed_xml("0.2.2", {**item, "url": item["url"].replace(".dmg", "-windows-x86_64.msi")}))
+            self.assertEqual(common.stage_appcasts(repo, "v0.2.2", "preview", candidate, msi), ["docs/appcast-win-preview.xml"])
             self.assertEqual((stable.read_bytes(), windows.read_bytes()), (b"stable unchanged", b"Windows unchanged"))
 
     def test_invalid_second_feed_cannot_partially_stage_the_first(self):
