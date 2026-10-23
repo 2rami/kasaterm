@@ -5075,7 +5075,31 @@ fn sole_session_owner(root: &std::path::Path) -> Option<std::fs::File> {
     Some(lock)
 }
 
-#[cfg(not(unix))]
+/// Windows 판: 잠금은 LockFileEx(`File::try_lock`, 프로세스가 죽으면 OS 가 푼다 — flock 과 같다). 소켓은 named
+/// pipe 라 파일로 안 남아 파이프 이름공간을 훑는다. 소유를 못 정하면 정리 스레드가 아예 안 돌아 세션↔학생 기록이
+/// 쌓이기만 했다.
+#[cfg(windows)]
+fn sole_session_owner(root: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(root).ok()?;
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .open(root.join("session-storage.lock")).ok()?;
+    lock.try_lock().ok()?;
+    let processes = kasa_pty::fresh_process_table();
+    if !kasa_socket::session_storage::sole_app_process(std::process::id(), &processes) {
+        return None;
+    }
+    for entry in std::fs::read_dir(r"\\.\pipe\").ok()? {
+        let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+        let app = matches!(name.as_str(), "cmux.sock" | "daemon.sock")
+            || (name.starts_with("kasaterm-") && name.ends_with(".sock"));
+        if app && kasa_socket::transport::LocalStream::connect(std::path::Path::new(&name)).is_ok() {
+            return None;
+        }
+    }
+    Some(lock)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sole_session_owner(_root: &std::path::Path) -> Option<std::fs::File> {
     None
 }
