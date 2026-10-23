@@ -46,7 +46,7 @@ default-members = [
 # 그 줄을 정규식으로 읽고 고친다(scripts/build-app.sh·tag-release.sh, tools/release).
 [workspace.package]
 edition = "2021"
-version = "0.2.162"
+version = "0.2.163"
 license = "MIT"
 
 # Rust 규칙(docs/rust-style.md)을 `cargo clippy` 로 지킨다. 각 제품 크레이트는
