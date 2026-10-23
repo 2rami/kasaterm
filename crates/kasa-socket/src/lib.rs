@@ -37,6 +37,8 @@ pub mod protocol;
 pub mod server;
 pub mod sessions;
 pub mod session_storage;
+/// 칸에 쳐 넣는 명령 줄을 그 칸 셸(POSIX·fish·PowerShell·cmd) 문법으로.
+pub mod shell_line;
 pub mod transport;
 pub mod transfer;
 pub mod tell;

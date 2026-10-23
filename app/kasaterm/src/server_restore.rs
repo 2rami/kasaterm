@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
+// 서버 명령을 받을 셸의 문법. 저장 형식엔 없다 — 보낼 때 그 칸 셸 프로세스 이름에서 고른다.
+use kasa_socket::shell_line::{powershell_quote, ShellKind};
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServerSpec {
@@ -48,7 +51,7 @@ impl ServerSpec {
     fn shell_input(&self, shell: ShellKind) -> String {
         let command = &self.command;
         match shell {
-            ShellKind::Posix => {
+            ShellKind::Posix | ShellKind::Fish => {
                 let cwd = self.cwd.replace('\'', "'\\''");
                 format!("(cd '{cwd}' && {command})\r")
             }
@@ -86,48 +89,6 @@ fn cmd_helper_script(cwd: &str, command: &str) -> String {
          $p = [System.Diagnostics.Process]::Start($s); $p.WaitForExit(); exit $p.ExitCode \
          }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
     )
-}
-
-/// 서버 명령을 받을 셸의 문법. 저장 형식엔 없다 — 보낼 때 그 칸 셸 프로세스 이름에서 고른다.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShellKind {
-    Posix,
-    PowerShell,
-    Cmd,
-}
-
-impl ShellKind {
-    fn from_process_name(name: &str) -> Option<Self> {
-        let name = name.trim_start_matches('-').to_ascii_lowercase();
-        match name.strip_suffix(".exe").unwrap_or(&name) {
-            "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" => Some(Self::Posix),
-            "pwsh" | "powershell" => Some(Self::PowerShell),
-            "cmd" => Some(Self::Cmd),
-            _ => None,
-        }
-    }
-
-    /// 칸 입력줄에 남은 글자를 먼저 지우는 키. Ctrl+U 는 readline 의 줄 지우기라 POSIX 셸에만 보낸다.
-    fn clear_line(self) -> &'static str {
-        match self {
-            Self::Posix => "\x15",
-            Self::PowerShell | Self::Cmd => "",
-        }
-    }
-}
-
-/// PowerShell 작은따옴표 문자열. 그 안에서 특별한 건 작은따옴표뿐인데, PowerShell 은 굽은 작은따옴표
-/// (U+2018~U+201B)도 같은 따옴표로 읽어서 둘 다 겹쳐 쓴다.
-fn powershell_quote(text: &str) -> String {
-    let mut out = String::from("'");
-    for c in text.chars() {
-        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
-            out.push(c);
-        }
-        out.push(c);
-    }
-    out.push('\'');
-    out
 }
 
 fn contains_literal_secret(command: &str) -> bool {
@@ -704,9 +665,6 @@ mod tests {
             ps,
             "if (Push-Location -LiteralPath 'C:\\srv\\한글 it''s ‘‘x’’' -PassThru) { try { npm run dev # 주석\r} finally { Pop-Location } }\r"
         );
-        assert_eq!(ShellKind::Posix.clear_line(), "\x15");
-        assert_eq!(ShellKind::PowerShell.clear_line(), "");
-        assert_eq!(ShellKind::Cmd.clear_line(), "");
     }
 
     /// cmd 줄은 절대경로 도우미 + base64 뿐이고, 풀어 보면 cwd·명령이 PowerShell 문자열 값으로만 들어 있다.
@@ -728,22 +686,6 @@ mod tests {
         assert!(script.contains("[Environment]::SystemDirectory"), "cmd 도 절대경로로");
     }
 
-    #[test]
-    fn shell_kind_comes_from_the_shell_process_name() {
-        for (name, kind) in [
-            ("-zsh", Some(ShellKind::Posix)),
-            ("bash", Some(ShellKind::Posix)),
-            ("pwsh.exe", Some(ShellKind::PowerShell)),
-            ("PowerShell.exe", Some(ShellKind::PowerShell)),
-            ("cmd.exe", Some(ShellKind::Cmd)),
-            ("CMD.EXE", Some(ShellKind::Cmd)),
-            ("node.exe", None),
-            ("claude", None),
-        ] {
-            assert_eq!(ShellKind::from_process_name(name), kind, "{name}");
-        }
-    }
-
     /// 만든 줄을 그 셸에 실제로 먹이고 `after` 를 이어, 줄이 끝난 뒤 셸이 어디 서 있는지 파일로 남긴다.
     /// 경로 문자열 대신 파일로 보는 건 짧은 이름(RUNNER~1)·콘솔 코드 페이지에 비교가 흔들리지 않게다.
     fn run_line(shell: ShellKind, program: &str, line: &str, start: &std::path::Path) -> std::process::Output {
@@ -752,7 +694,7 @@ mod tests {
         let mut command = std::process::Command::new(program);
         command.current_dir(start);
         match shell {
-            ShellKind::Posix => {
+            ShellKind::Posix | ShellKind::Fish => {
                 command.arg("-c").arg(format!("{line}; echo x > after.txt"));
             }
             ShellKind::PowerShell => {
