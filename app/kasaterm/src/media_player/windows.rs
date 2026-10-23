@@ -526,21 +526,23 @@ impl Worker {
                     !ready || self.engine.HasVideo().as_bool(),
                 )
             };
+            // 소리만 있는 파일은 깨우지 않아도 시계가 간다(실측) — 일꾼이 할 일이 없다.
+            if !has_video {
+                return;
+            }
             let marks = self.events.marks();
             let seeking = unsafe { self.engine.IsSeeking().as_bool() };
             if let Some(pts) = self.new_frame_time() {
-                if has_video {
-                    if let Some((width, height, rgba)) = self.transfer(&mut target) {
-                        *self.events.latest.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(Captured {
-                                pts,
-                                marks,
-                                seeking,
-                                width,
-                                height,
-                                rgba,
-                            });
-                    }
+                if let Some((width, height, rgba)) = self.transfer(&mut target) {
+                    *self.events.latest.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Captured {
+                            pts,
+                            marks,
+                            seeking,
+                            width,
+                            height,
+                            rgba,
+                        });
                 }
             }
             std::thread::sleep(if busy { TICK_BUSY } else { TICK_IDLE });
