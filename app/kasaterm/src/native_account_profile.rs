@@ -267,33 +267,38 @@ fn upload_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn pick_photo() -> Result<Option<Vec<u8>>, String> {
-    #[cfg(target_os = "macos")]
-    let output = crate::proc::command("osascript")
-        .args([
-            "-e",
-            r#"try
+    #[cfg(windows)]
+    let path = crate::win_dialog::pick_file("프사로 쓸 사진 선택", &[("Image", "*.png;*.jpg;*.jpeg;*.webp")], None)
+        .map_err(|_| "picker_failed")?
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    #[cfg(not(windows))]
+    let path = {
+        #[cfg(target_os = "macos")]
+        let output = crate::proc::command("osascript")
+            .args([
+                "-e",
+                r#"try
 POSIX path of (choose file of type {"png", "jpg", "jpeg", "webp"} with prompt "프사로 쓸 사진 선택")
 on error number -128
 return ""
 end try"#,
-        ])
-        .output();
-    #[cfg(windows)]
-    let output = crate::proc::command("powershell.exe").args(["-NoProfile", "-STA", "-Command",
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $picker = New-Object System.Windows.Forms.OpenFileDialog; $picker.Filter = 'Image (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp'; if ($picker.ShowDialog() -eq 'OK') { [Console]::Write($picker.FileName) }"]).output();
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let output = crate::proc::command("zenity")
-        .args(["--file-selection", "--title=프사로 쓸 사진 선택", "--file-filter=Image | *.png *.jpg *.jpeg *.webp"])
-        .output();
-    let output = output.map_err(|_| "picker_failed")?;
-    #[cfg(not(any(target_os = "macos", windows)))]
-    if output.status.code() == Some(1) {
-        return Ok(None);
-    }
-    if !output.status.success() {
-        return Err("picker_failed".into());
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            ])
+            .output();
+        #[cfg(not(target_os = "macos"))]
+        let output = crate::proc::command("zenity")
+            .args(["--file-selection", "--title=프사로 쓸 사진 선택", "--file-filter=Image | *.png *.jpg *.jpeg *.webp"])
+            .output();
+        let output = output.map_err(|_| "picker_failed")?;
+        #[cfg(not(target_os = "macos"))]
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err("picker_failed".into());
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
     if path.is_empty() {
         return Ok(None);
     }

@@ -156,6 +156,8 @@ mod macos_sparkle;
 // 모듈 자체는 전 플랫폼 컴파일: 토스트 센티널·버전 파서(+테스트)·no-op 스텁은
 // 공용이고 FFI/체커 스레드만 cfg(windows) 게이트 — mac 에서도 헬퍼 테스트가 돈다.
 mod win_sparkle;
+#[cfg(windows)]
+mod win_dialog;
 
 use anyhow::Result;
 use kasa_bridge::layout::{parse_layout, Layout};

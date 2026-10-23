@@ -152,6 +152,18 @@ windows-sys = { workspace = true, features = [
     # bridge 테스트의 가짜 attach 클라이언트가 콘솔을 raw 로 내린다(SetConsoleMode).
     "Win32_System_Console",
 ] }
+# 파일·폴더 고르기 창(win_dialog.rs) — 셸의 IFileOpenDialog·IFileSaveDialog. 데스크톱 기능은
+# 그 창을 사람 화면 밖(숨은 데스크톱)에서 띄워 보는 시험이 쓴다.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_StationsAndDesktops",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
 # bg SendMessage 브리지(bridge.rs)가 `claude attach` 를 ConPTY 로 몰고 간다 —
 # unix 는 그 자리에 `/usr/bin/expect` 를 쓰는데 Windows 엔 없다. kasa-pty 가 쓰는
 # 것과 같은 크레이트·버전.

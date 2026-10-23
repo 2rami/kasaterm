@@ -766,30 +766,33 @@ fn choose_save(name: &str) -> Result<Option<PathBuf>, String> {
     if crate::verification_run() {
         return Ok(std::env::var_os("KASATERM_TEST_IMAGE_SAVE_PATH").map(PathBuf::from));
     }
-    #[cfg(target_os = "macos")]
-    let result = crate::proc::command("/usr/bin/osascript").args(["-e", &format!("try\nPOSIX path of (choose file name with prompt \"이미지 저장\" default name \"{name}\")\non error number -128\nreturn \"\"\nend try")]).output();
-    #[cfg(target_os = "windows")]
-    let result = crate::proc::command("powershell").args(["-NoProfile", "-STA", "-Command", &format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.SaveFileDialog; $d.FileName = '{name}'; $d.OverwritePrompt = $true; if ($d.ShowDialog() -eq 'OK') {{ [Console]::Write($d.FileName) }}")]).output();
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let result = crate::proc::command("zenity")
-        .args([
-            "--file-selection",
-            "--save",
-            "--confirm-overwrite",
-            "--filename",
-            name,
-        ])
-        .output();
-    let output = result.map_err(|e| format!("저장 창을 열지 못했어요: {e}"))?;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    if output.status.code() == Some(1) {
-        return Ok(None);
+    #[cfg(windows)]
+    return crate::win_dialog::save_file("이미지 저장", name, None);
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let result = crate::proc::command("/usr/bin/osascript").args(["-e", &format!("try\nPOSIX path of (choose file name with prompt \"이미지 저장\" default name \"{name}\")\non error number -128\nreturn \"\"\nend try")]).output();
+        #[cfg(not(target_os = "macos"))]
+        let result = crate::proc::command("zenity")
+            .args([
+                "--file-selection",
+                "--save",
+                "--confirm-overwrite",
+                "--filename",
+                name,
+            ])
+            .output();
+        let output = result.map_err(|e| format!("저장 창을 열지 못했어요: {e}"))?;
+        #[cfg(not(target_os = "macos"))]
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err("저장 창을 완료하지 못했어요".into());
+        }
+        let path = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+        Ok((!path.trim().is_empty()).then(|| Path::new(path.trim()).to_path_buf()))
     }
-    if !output.status.success() {
-        return Err("저장 창을 완료하지 못했어요".into());
-    }
-    let path = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
-    Ok((!path.trim().is_empty()).then(|| Path::new(path.trim()).to_path_buf()))
 }
 
 #[cfg(test)]

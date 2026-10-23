@@ -184,37 +184,42 @@ pub(crate) fn set_preset(label: &str, preset: &str) -> Result<(), String> {
 }
 
 fn pick_svg() -> Result<Option<String>, String> {
-    #[cfg(target_os = "macos")]
-    let output = crate::proc::command("osascript")
-        .args([
-            "-e",
-            r#"try
+    #[cfg(windows)]
+    let path = crate::win_dialog::pick_file("기기 아이콘 SVG 선택", &[("SVG", "*.svg")], None)
+        .map_err(|_| "파일 선택 창을 열지 못했어요")?
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    #[cfg(not(windows))]
+    let path = {
+        #[cfg(target_os = "macos")]
+        let output = crate::proc::command("osascript")
+            .args([
+                "-e",
+                r#"try
 POSIX path of (choose file of type {"svg"} with prompt "기기 아이콘 SVG 선택")
 on error number -128
 return ""
 end try"#,
-        ])
-        .output();
-    #[cfg(windows)]
-    let output = crate::proc::command("powershell.exe").args(["-NoProfile", "-STA", "-Command",
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $picker = New-Object System.Windows.Forms.OpenFileDialog; $picker.Filter = 'SVG (*.svg)|*.svg'; if ($picker.ShowDialog() -eq 'OK') { [Console]::Write($picker.FileName) }"]).output();
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let output = crate::proc::command("zenity")
-        .args([
-            "--file-selection",
-            "--title=기기 아이콘 SVG 선택",
-            "--file-filter=SVG | *.svg",
-        ])
-        .output();
-    let output = output.map_err(|_| "파일 선택 창을 열지 못했어요")?;
-    #[cfg(not(any(target_os = "macos", windows)))]
-    if output.status.code() == Some(1) {
-        return Ok(None);
-    }
-    if !output.status.success() {
-        return Err("파일 선택 창을 열지 못했어요".into());
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            ])
+            .output();
+        #[cfg(not(target_os = "macos"))]
+        let output = crate::proc::command("zenity")
+            .args([
+                "--file-selection",
+                "--title=기기 아이콘 SVG 선택",
+                "--file-filter=SVG | *.svg",
+            ])
+            .output();
+        let output = output.map_err(|_| "파일 선택 창을 열지 못했어요")?;
+        #[cfg(not(target_os = "macos"))]
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err("파일 선택 창을 열지 못했어요".into());
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
     if path.is_empty() {
         return Ok(None);
     }
