@@ -13,6 +13,7 @@ fn bare_host(chars: &[char]) -> bool {
         .iter()
         .take_while(|c| !c.is_whitespace() && !matches!(c, '/' | ':' | '?' | '#' | ')' | ']'))
         .collect();
+    let host = &host[..korean_suffix_start(&host).unwrap_or(host.len())];
     let Some((name, tld)) = host.rsplit_once('.') else {
         return false;
     };
@@ -133,7 +134,7 @@ pub(super) fn strip_location(value: &str) -> &str {
     &value[..end]
 }
 
-fn korean_file_suffix(value: &str) -> Option<usize> {
+fn korean_suffix_start(value: &str) -> Option<usize> {
     let end = value
         .char_indices()
         .rev()
@@ -211,12 +212,46 @@ fn korean_file_suffix(value: &str) -> Option<usize> {
     ) {
         return None;
     }
+    Some(end)
+}
+
+fn korean_file_suffix(value: &str) -> Option<usize> {
+    let end = korean_suffix_start(value)?;
     let path = strip_location(&value[..end]);
     let name = path.rsplit(['/', '\\']).next()?;
     let (stem, extension) = name.rsplit_once('.')?;
     // 한글 파일명·URL 경로도 유효하므로 확장자 뒤의 정확한 문장 어미만 분리한다. 확장자 목록은 짧은 이름을 파일로
     // 볼지 가르는 데 쓰고, 여기서는 ASCII 확장자면 된다 — 목록에 없던 `.mjs` 뒤의 「입니다」가 밑줄에 들어갔다.
     (!stem.is_empty() && ascii_extension(extension)).then_some(end)
+}
+
+fn korean_web_suffix(value: &str) -> Option<usize> {
+    let end = korean_suffix_start(value)?;
+    let head = &value[..end];
+    let lower = head.to_ascii_lowercase();
+    let authority = if lower.starts_with("https://") {
+        &head[8..]
+    } else if lower.starts_with("http://") {
+        &head[7..]
+    } else {
+        head
+    };
+    // 경로·질의의 한글은 주소 자체일 수 있지만, 숫자 포트 뒤 한글은 포트가 될 수 없다.
+    if authority.contains(['/', '\\', '?', '#', '@']) {
+        return None;
+    }
+    let numeric_port = authority.rsplit_once(':').is_some_and(|(_, port)| {
+        !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+    });
+    (numeric_port || authority.eq_ignore_ascii_case("localhost")
+        || bare_host(&authority.chars().collect::<Vec<_>>())).then_some(end)
+}
+
+pub(super) struct Link {
+    pub start: usize,
+    pub end: usize,
+    pub target: String,
+    pub suffix_end: usize,
 }
 
 fn ascii_extension(ext: &str) -> bool {
@@ -294,7 +329,7 @@ fn token_end(chars: &[char], start: usize, web: bool) -> usize {
     end
 }
 
-pub(super) fn scan(chars: &[char]) -> Vec<(usize, usize, String)> {
+pub(super) fn scan(chars: &[char]) -> Vec<Link> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
@@ -310,6 +345,14 @@ pub(super) fn scan(chars: &[char]) -> Vec<(usize, usize, String)> {
             continue;
         }
         let mut value: String = chars[i..end].iter().collect();
+        let mut suffix_end = None;
+        if web && !explicitly_delimited(chars, i, end) {
+            if let Some(byte_end) = korean_web_suffix(&value) {
+                suffix_end = Some(end);
+                end = i + value[..byte_end].chars().count();
+                value.truncate(byte_end);
+            }
+        }
         if (!web
             || (value.to_ascii_lowercase().starts_with("file://") && !value.contains(['?', '#'])))
             && !explicitly_delimited(chars, i, end)
@@ -344,7 +387,10 @@ pub(super) fn scan(chars: &[char]) -> Vec<(usize, usize, String)> {
             None
         };
         if let Some(target) = target {
-            out.push((i, end, target));
+            out.push(Link { start: i, end, target, suffix_end: suffix_end.unwrap_or(end) });
+            i = end;
+        } else if web {
+            // 잘못된 URL의 `//host`를 로컬 파일 경로로 다시 해석하면 다른 대상을 연다.
             i = end;
         } else {
             i += 1;
@@ -408,14 +454,14 @@ pub(super) fn web_row_join(prev: &[GridCell], next: &[GridCell]) -> Option<(usiz
 }
 
 pub(super) fn ends_in_web_link(chars: &[char]) -> bool {
-    scan(chars).last().is_some_and(|(_, end, target)| {
-        (target
+    scan(chars).last().is_some_and(|link| {
+        (link.target
             .get(..8)
             .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
-            || target
+            || link.target
                 .get(..7)
                 .is_some_and(|s| s.eq_ignore_ascii_case("http://")))
-            && chars[*end..].iter().all(|c| matches!(c, '.' | ':' | '?'))
+            && chars[link.end..].iter().all(|c| matches!(c, '.' | ':' | '?'))
     })
 }
 

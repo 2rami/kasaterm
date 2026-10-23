@@ -2137,6 +2137,7 @@ impl App {
         status_model_icons.retain(|slot| visible(slot.image_rect()));
         title_outline_slots.retain(|&(x, y, w, h, _)| !foreground.overlaps((x, y, w, h), (body_left, body_top), cell));
         foreground.restore(&mut composed);
+        crate::links::restyle_web_suffixes(&mut composed);
         TerminalComposition {
             preedit_cursor,
             animated_cells,

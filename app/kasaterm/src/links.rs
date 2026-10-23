@@ -20,7 +20,9 @@ fn joins(prev: &[GridCell], next: &[GridCell]) -> bool {
     scan::row_join(prev, next).or_else(|| scan::web_row_join(prev, next)).is_some()
 }
 
-pub(crate) fn detect_links_rows(rows: &[&[GridCell]]) -> Vec<(Vec<(usize, u16, u16)>, String)> {
+type CellPosition = (usize, u16, u16);
+
+fn indexed_rows(rows: &[&[GridCell]]) -> (Vec<char>, Vec<Option<CellPosition>>) {
     let mut chars = Vec::new();
     let mut positions = Vec::new();
     let mut start = 0;
@@ -65,19 +67,51 @@ pub(crate) fn detect_links_rows(rows: &[&[GridCell]]) -> Vec<(Vec<(usize, u16, u
             positions.push(None);
         }
     }
+    (chars, positions)
+}
+
+pub(crate) fn detect_links_rows(rows: &[&[GridCell]]) -> Vec<(Vec<(usize, u16, u16)>, String)> {
+    let (chars, positions) = indexed_rows(rows);
     scan::scan(&chars)
         .into_iter()
-        .map(|(start, end, target)| {
+        .map(|link| {
             let mut spans: Vec<(usize, u16, u16)> = Vec::new();
-            for &(row, start, end) in positions[start..end].iter().flatten() {
+            for &(row, start, end) in positions[link.start..link.end].iter().flatten() {
                 match spans.last_mut() {
                     Some((r, _, e)) if *r == row && *e == start => *e = end,
                     _ => spans.push((row, start, end)),
                 }
             }
-            (spans, target)
+            (spans, link.target)
         })
         .collect()
+}
+
+pub(crate) fn restyle_web_suffixes(rows: &mut [Vec<GridCell>]) {
+    if !rows.iter().flatten().any(|c| c.underline && ('\u{ac00}'..='\u{d7a3}').contains(&c.ch)) {
+        return;
+    }
+    let (chars, positions) = indexed_rows(&rows.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    for link in scan::scan(&chars).into_iter().filter(|l| l.suffix_end > l.end) {
+        let Some((r, _, end)) = positions[link.end - 1] else { continue };
+        let style = rows[r][end as usize - 1].clone();
+        if !style.underline || style.inverse || style.hidden {
+            continue;
+        }
+        let text_fg = positions.get(link.suffix_end).copied().flatten()
+            .map(|(r, c, _)| &rows[r][c as usize])
+            .filter(|c| !c.underline && !c.inverse && !c.hidden && c.bg == style.bg)
+            .map_or(GridCell::blank().fg, |c| c.fg.clone());
+        // 하네스가 조사까지 링크색을 입혔어도 문자·배경·선택 좌표는 그대로 둔다.
+        for &(r, start, end) in positions[link.end..link.suffix_end].iter().flatten() {
+            for cell in &mut rows[r][start as usize..end as usize] {
+                if cell.underline && !cell.inverse && !cell.hidden && cell.fg == style.fg && cell.bg == style.bg {
+                    cell.underline = false;
+                    cell.fg = text_fg.clone();
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn click_modifier(modifiers: winit::keyboard::ModifiersState) -> bool {
@@ -365,6 +399,102 @@ mod tests {
                 vec![expected],
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn web_authority_excludes_korean_sentence_suffix() {
+        for (text, expected) in [
+            ("http://localhost:8795를", "http://localhost:8795"),
+            ("http://localhost:8795입니다.", "http://localhost:8795"),
+            ("localhost:8795에서", "http://localhost:8795"),
+            ("127.0.0.1:8795로", "http://127.0.0.1:8795"),
+            ("http://192.168.0.2:8795는", "http://192.168.0.2:8795"),
+            ("http://[::1]:8795를", "http://[::1]:8795"),
+            ("https://example.com:443에서", "https://example.com:443"),
+            ("https://example.com을", "https://example.com"),
+            ("www.example.com에서", "https://www.example.com"),
+            ("www.example.com:8795를", "https://www.example.com:8795"),
+            ("example.com:8795에서", "https://example.com:8795"),
+            ("github.com을", "https://github.com"),
+        ] {
+            let cells = row(&format!("열기 {text} 다음"));
+            let links = detect_links_row(&cells);
+            assert_eq!(links.len(), 1, "{text}: {links:?}");
+            assert_eq!(links[0].2, expected, "{text}");
+            let rows = [cells];
+            assert!(link_in("%test", |r| rows.get(r), links[0].1 - 1, 0).is_some());
+            assert!(link_in("%test", |r| rows.get(r), links[0].1, 0).is_none());
+            assert!(link_in("%test", |r| rows.get(r), links[0].1 + 1, 0).is_none());
+        }
+    }
+
+    #[test]
+    fn web_suffix_preserves_explicit_and_unicode_addresses() {
+        for target in [
+            "http://localhost:8795/를", "https://example.com/결과.html이야",
+            "https://example.com/?q=를", "https://example.com/#를",
+            "https://예제.한국", "https://example.com한글", "https://example.com%EB%A5%BC",
+        ] {
+            let found = detect_links_row(&row(target));
+            assert_eq!(found.iter().map(|l| l.2.as_str()).collect::<Vec<_>>(), vec![target]);
+        }
+        for text in ["`https://example.com를`", "<https://example.com를>"] {
+            assert_eq!(detect_links_row(&row(text))[0].2, "https://example.com를");
+        }
+        for text in ["http://localhost:8795abc", "http://localhost:99999를", "`http://localhost:8795를`"] {
+            assert!(detect_links_row(&row(text)).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn wrapped_web_suffix_keeps_hit_and_style_boundaries() {
+        use kasa_bridge::screen::Color;
+        let mut first = row("http://localhost:8795이");
+        first.last_mut().unwrap().wrapped = true;
+        let second = row("에요 다음");
+        let mut rows = [first, second];
+        for cell in rows.iter_mut().flatten().take(27) {
+            cell.fg = Color::Rgb(40, 90, 220);
+            cell.underline = true;
+        }
+        let before = rows.clone();
+        restyle_web_suffixes(&mut rows);
+        assert_eq!(detect_links_rows(&rows.iter().map(Vec::as_slice).collect::<Vec<_>>()),
+            vec![(vec![(0, 0, 21)], "http://localhost:8795".to_owned())]);
+        for (r, cells) in rows.iter().enumerate() {
+            for (c, cell) in cells.iter().enumerate() {
+                assert_eq!(cell.ch, before[r][c].ch);
+                assert_eq!(cell.bg, before[r][c].bg);
+                if (r == 0 && c >= 21) || (r == 1 && c < 4) {
+                    assert!(!cell.underline, "{r}:{c}");
+                    assert_eq!(cell.fg, GridCell::blank().fg);
+                    assert!(link_in("%test", |r| rows.get(r), c as u16, r as u16).is_none());
+                } else if r == 0 {
+                    assert!(cell.underline);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn web_suffix_style_preserves_foreign_background_and_inverse() {
+        use kasa_bridge::screen::Color;
+        for protected in [0, 1, 2] {
+            let mut cells = row("http://localhost:8795를 다음");
+            for cell in &mut cells[..23] {
+                cell.fg = Color::Rgb(40, 90, 220);
+                cell.underline = true;
+            }
+            match protected {
+                0 => cells[21].inverse = true,
+                1 => cells[21].bg = Color::Rgb(150, 0, 0),
+                _ => cells[21].fg = Color::Rgb(150, 0, 0),
+            }
+            let before = cells[21].clone();
+            let mut rows = [cells];
+            restyle_web_suffixes(&mut rows);
+            assert_eq!(rows[0][21], before);
         }
     }
 
