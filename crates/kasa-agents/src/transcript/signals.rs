@@ -124,19 +124,26 @@ impl Questions {
                     let name = p["name"].as_str().unwrap_or("").rsplit('.').next().unwrap_or("");
                     if !matches!(name, "request_user_input" | "request_user_input_async") { continue; }
                     let Some(id) = p["call_id"].as_str().filter(|id| !id.is_empty()) else { continue };
-                    if self.asked.iter().any(|q| q.id == id) { continue; }
                     let args = p["arguments"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok())
                         .unwrap_or_else(|| p["arguments"].clone());
-                    let Some(questions) = args["questions"].as_array() else { continue };
-                    if questions.is_empty() || questions.len() > 64 { continue; }
-                    let prompts = questions.iter().map(|q| {
-                        q["question"].as_str().or_else(|| q["title"].as_str()).unwrap_or("답을 기다려요")
-                            .chars().take(240).collect()
-                    }).collect();
-                    if self.asked.len() == 64 { self.asked.remove(0); }
-                    let blocking = name == "request_user_input";
-                    self.asked.push(Asked { id: id.into(), prompts, answered: BTreeSet::new(), blocking, accepted: blocking });
+                    self.ask(id, &args["questions"], name == "request_user_input");
                 }
+                // Claude reports its question card to the Notification hook as permission_prompt,
+                // so without this a pane outside the mod path read a question as an approval wait.
+                ("assistant", _) if v["isSidechain"] != true => {
+                    let Some(parts) = v["message"]["content"].as_array() else { continue };
+                    for part in parts.iter().filter(|p| p["type"] == "tool_use" && p["name"] == "AskUserQuestion") {
+                        let Some(id) = part["id"].as_str().filter(|id| !id.is_empty()) else { continue };
+                        self.ask(id, &part["input"]["questions"], true);
+                    }
+                }
+                ("user", _) if v["isMeta"] != true => match &v["message"]["content"] {
+                    Value::Array(parts) if parts.iter().any(|p| p["type"] == "tool_result") => {
+                        self.asked.retain(|q| !parts.iter().any(|p| p["tool_use_id"] == q.id.as_str()));
+                    }
+                    // The card closes once the person types instead of answering it.
+                    _ => self.asked.clear(),
+                },
                 ("response_item", "function_call_output") => {
                     let Some(index) = self.asked.iter().position(|q| p["call_id"] == q.id) else { continue };
                     let result = p["output"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -154,6 +161,18 @@ impl Questions {
                 _ => {}
             }
         }
+    }
+
+    fn ask(&mut self, id: &str, questions: &Value, blocking: bool) {
+        if self.asked.iter().any(|q| q.id == id) { return; }
+        let Some(questions) = questions.as_array() else { return };
+        if questions.is_empty() || questions.len() > 64 { return; }
+        let prompts = questions.iter().map(|q| {
+            q["question"].as_str().or_else(|| q["title"].as_str()).unwrap_or("답을 기다려요")
+                .chars().take(240).collect()
+        }).collect();
+        if self.asked.len() == 64 { self.asked.remove(0); }
+        self.asked.push(Asked { id: id.into(), prompts, answered: BTreeSet::new(), blocking, accepted: blocking });
     }
 
     // A person who types an ordinary message instead of answering the question card has moved
@@ -272,6 +291,35 @@ mod tests {
         questions.update_tail(&typed("다른 일 해 줘"));
         assert_eq!(questions.pending().len(), 1, "only the async question is dropped");
         assert!(questions.pending()[0].blocking);
+    }
+
+    #[test]
+    fn a_claude_question_card_waits_until_its_own_answer_or_the_person_moves_on() {
+        let ask = |id: &str| json!({"type":"assistant","message":{"stop_reason":"tool_use","content":[
+            {"type":"text","text":"정할 게 있어요."},
+            {"type":"tool_use","id":id,"name":"AskUserQuestion","input":{"questions":[{"question":"설치 권한 창을 어떻게 할까요?","header":"설치 권한"}]}}]}}).to_string();
+        let result = |id: &str| json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":id,"content":"Your questions have been answered"}]}}).to_string();
+        let mut questions = Questions::default();
+        questions.update_tail(&ask("toolu_a"));
+        assert_eq!(questions.pending()[0].prompt, "설치 권한 창을 어떻게 할까요?");
+        assert!(questions.pending()[0].blocking);
+        questions.update_tail(&[ask("toolu_a"), result("toolu_other")].join("\n"));
+        assert_eq!(questions.pending().len(), 1, "another tool's result is not the answer");
+        let answered = [ask("toolu_a"), result("toolu_a")].join("\n");
+        for _ in 0..2 { questions.update_tail(&answered); assert!(questions.pending().is_empty()); }
+
+        questions.update_tail(&ask("toolu_b"));
+        questions.update_tail(r#"{"type":"user","isMeta":true,"message":{"content":"<system-reminder>x</system-reminder>"}}"#);
+        assert_eq!(questions.pending().len(), 1);
+        questions.update_tail(r#"{"type":"user","message":{"content":"[Request interrupted by user for tool use]"}}"#);
+        assert!(questions.pending().is_empty());
+
+        let mut side = Questions::default();
+        let mut row: Value = serde_json::from_str(&ask("toolu_c")).unwrap();
+        row["isSidechain"] = true.into();
+        side.update_tail(&row.to_string());
+        assert!(side.pending().is_empty(), "a subagent's question is not this pane's card");
     }
 
     #[test]
