@@ -271,6 +271,9 @@ pub struct PtyBackend {
     /// UUID가 없어 실제 열린 파일을 봐야 한다. pid 교체는 즉시 재결속하고, 같은 TUI
     /// 안에서 thread를 바꾸는 경우도 있어 같은 pid도 10초마다 다시 확인한다.
     codex_bound_pids: Arc<Mutex<HashMap<String, (u32, std::time::Instant)>>>,
+    /// 이어진 세션이 없다고 확인한 기록의 (길이, mtime). 2초 발견 주기마다 모든 칸의 꼬리를
+    /// 다시 읽지 않도록, 모습이 바뀐 기록만 다시 본다.
+    continued_checked: Mutex<HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>>,
     /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
@@ -614,6 +617,7 @@ impl PtyBackend {
             hook_activity,
             last_discover: Arc::new(Mutex::new(None)),
             codex_bound_pids: Arc::new(Mutex::new(HashMap::new())),
+            continued_checked: Mutex::new(HashMap::new()),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             reported_ctx: Arc::new(Mutex::new(HashMap::new())),
@@ -713,6 +717,7 @@ impl PtyBackend {
             }
             *last = Some(std::time::Instant::now());
         }
+        self.follow_continued_sessions(live);
         // bound 경로가 사라졌으면(세션 종료·`--resume`/fork 로 jsonl stem 교체) 그
         // stale bind 는 死 경로를 가리켜 transcript 가 영영 안 뜬다 — 한 번 bound 된
         // pane 은 재discover 대상에서 빠지기 때문. 파일이 없으면 unbound 로 취급해
@@ -787,6 +792,33 @@ impl PtyBackend {
             .lock()
             .unwrap()
             .retain(|pane, _| live_codex.contains(pane));
+    }
+
+    /// 세션을 백그라운드로 넘긴 칸을 이어진 기록으로 다시 묶는다. 칸의 claude 프로세스는 그대로라
+    /// 셸 pid 발견도 bind 훅도 새 기록을 묶지 못했다(실측: 넘긴 뒤 한 시간 반 동안 옛 기록에 묶임).
+    /// 옛 기록은 더 자라지 않으니 답한 질문의 대기 표식이 턴 끝까지 안 풀려, 화면 스피너가 끊길
+    /// 때마다 승인 알림이 다시 떴다.
+    fn follow_continued_sessions(&self, live: &HashSet<String>) {
+        let bound: Vec<(String, PathBuf)> = {
+            let bound = self.bound.lock().unwrap();
+            live.iter().filter_map(|id| Some((id.clone(), bound.get(id)?.clone()))).collect()
+        };
+        self.continued_checked.lock().unwrap().retain(|path, _| bound.iter().any(|(_, p)| p == path));
+        for (id, path) in bound {
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let shape = (meta.len(), meta.modified().ok());
+            if self.continued_checked.lock().unwrap().get(&path) == Some(&shape) {
+                continue;
+            }
+            match continued_transcript(&path) {
+                Some(next) => {
+                    let _ = self.bind_pane_transcript(&id, &next.to_string_lossy());
+                }
+                None => {
+                    self.continued_checked.lock().unwrap().insert(path, shape);
+                }
+            }
+        }
     }
 
     /// bind 된 transcript 의 tail 에서 그 세션의 cwd 를 뽑아 GUI 파일트리 오버라이드로
@@ -4477,6 +4509,26 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool
     let mut buf = Vec::new();
     let _ = f.take(max_bytes).read_to_end(&mut buf);
     (String::from_utf8_lossy(&buf).into_owned(), idle)
+}
+
+/// 이 기록이 다른 세션으로 이어졌으면 그 기록. claude 는 세션을 백그라운드로 넘기면 데몬이
+/// `--fork-session` 으로 새 세션 id 에 이어 쓰고, 옛 기록 끝에는 `continued-in` 한 줄만 남긴다
+/// (2.1.306 실측). 그 뒤에 대화 줄이 다시 붙었으면 이 기록에서 계속된 것이다.
+fn continued_transcript(path: &std::path::Path) -> Option<PathBuf> {
+    let (tail, _) = read_tail(path, 16 * 1024);
+    for line in tail.lines().rev() {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match row["type"].as_str() {
+            Some("continued-in") => {
+                let sid = row["continuedInSessionId"].as_str().filter(|sid| is_uuid(sid))?;
+                let next = path.with_file_name(format!("{sid}.jsonl"));
+                return next.exists().then_some(next);
+            }
+            Some("user" | "assistant") => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// 파일 **머리** `max_bytes`. `read_tail` 의 짝이다 — 알고 싶은 값이 파일 앞에만
@@ -8409,6 +8461,35 @@ mod mod_face_tests {
 #[cfg(test)]
 mod agents_view_tests {
     use super::*;
+
+    #[test]
+    fn a_backgrounded_session_is_followed_to_the_transcript_that_continues_it() {
+        let dir = std::env::temp_dir().join(format!("kt-continued-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let next_sid = "ec4441cd-2e13-4fdc-85b4-ac1ecb482881";
+        let old = dir.join("bfa8ce34-c96a-46e0-9ec4-e206a9a2fc66.jsonl");
+        let next = dir.join(format!("{next_sid}.jsonl"));
+        let rows = [
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#.to_string(),
+            r#"{"type":"system","subtype":"informational","content":"Backgrounding after the current tool finishes…"}"#.into(),
+            r#"{"type":"last-prompt","lastPrompt":"다해줘"}"#.into(),
+            format!(r#"{{"type":"continued-in","continuedInSessionId":"{next_sid}"}}"#),
+        ];
+        std::fs::write(&old, rows.join("\n") + "\n").unwrap();
+        assert_eq!(continued_transcript(&old), None, "the continuation has not been written yet");
+        std::fs::write(&next, "{}\n").unwrap();
+        assert_eq!(continued_transcript(&old), Some(next.clone()));
+        assert_eq!(continued_transcript(&next), None);
+
+        let resumed = rows.join("\n") + "\n" + r#"{"type":"user","message":{"content":"계속"}}"# + "\n";
+        std::fs::write(&old, resumed).unwrap();
+        assert_eq!(continued_transcript(&old), None, "a conversation row after the marker keeps this transcript");
+
+        std::fs::write(&old, r#"{"type":"continued-in","continuedInSessionId":"../../x"}"#).unwrap();
+        assert_eq!(continued_transcript(&old), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn session_found_after_the_repo_folder_was_renamed() {
