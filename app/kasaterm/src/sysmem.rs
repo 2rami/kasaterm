@@ -91,6 +91,12 @@ const WATCH_PCT: f32 = if cfg!(windows) { 10.0 } else { 30.0 };
 const RESTART_PCT: f32 = if cfg!(windows) { 20.0 } else { 40.0 };
 /// wired 를 화면에 적는 이름. Windows 는 작업 관리자가 쓰는 이름을 따른다.
 pub(crate) const WIRED_LABEL: &str = if cfg!(windows) { "비페이징" } else { "wired" };
+/// 스왑을 적는 이름 — Windows 에서 같은 자리는 페이지 파일이다.
+const SWAP_LABEL: &str = if cfg!(windows) { "페이지 파일" } else { "스왑" };
+/// Windows 커밋 판정(%). 95% 면 한도에 붙어 할당이 실패하기 시작하는 구간이라 비우기를 권하고,
+/// 90% 는 큰 빌드 몇 개에도 닿는 구간이라 주의까지만 말한다.
+const COMMIT_CRITICAL_PCT: f32 = 95.0;
+const COMMIT_WARN_PCT: f32 = 90.0;
 /// 스왑 보조 임계. 커널 압박이 아직 normal 이어도 이만큼 나갔으면 이미
 /// 디스크를 물고 도는 중이다. 높게 잡은 것은 오탐 방지다 — macOS 는 여유가
 /// 있어도 스왑을 조금씩 쓴다.
@@ -152,13 +158,25 @@ impl MemSample {
         let wired = || format!("{WIRED_LABEL} {:.0}% · {:.1}G", self.wired_pct(), gb(self.wired));
         // 판정과 **같은 순서**로 본다. 어긋나면 「재시작 권장」 옆에 압박 얘기가
         // 붙어, 왜 재시작이 답인지가 도로 흐려진다.
+        // Windows 는 커밋이 먼저 차는 일이 잦고, 그때 「압박」이라고만 하면 물리 메모리가 넉넉해
+        // 보이는 화면과 어긋나 무엇이 찼는지 모른다 — 찬 쪽이 커밋이면 그 숫자를 적는다.
+        // 내려 적는다 — 94.6% 를 「95%」로 올려 적으면 95% 판정(비우기)과 화면 숫자가 어긋난다.
+        let commit = |at: f32| (self.commit_pct() >= at).then(|| format!("커밋 {}%", self.commit_pct().floor()));
         match self.advice() {
             Advice::Restart => wired(),
-            _ if self.pressure >= 4 => "메모리 압박 심각".to_string(),
-            _ if self.swap_used >= swap_limit() => format!("스왑 {:.1}G", gb(self.swap_used)),
-            _ if self.pressure >= 2 => "메모리 압박 경고".to_string(),
+            _ if self.pressure >= 4 => commit(COMMIT_CRITICAL_PCT).unwrap_or_else(|| "메모리 압박 심각".to_string()),
+            _ if self.swap_used >= swap_limit() => format!("{SWAP_LABEL} {:.1}G", gb(self.swap_used)),
+            _ if self.pressure >= 2 => commit(COMMIT_WARN_PCT).unwrap_or_else(|| "메모리 압박 경고".to_string()),
             _ => wired(),
         }
+    }
+
+    /// 커밋 / 한도(%). 재지 않는 OS(macOS)는 0.
+    pub(crate) fn commit_pct(&self) -> f32 {
+        if self.commit_limit == 0 {
+            return 0.0;
+        }
+        self.commit as f32 / self.commit_limit as f32 * 100.0
     }
 
     /// 팝오버용 이유 — 옆 칼럼이 이미 `wired 14%` 와 `5.0G / 36G` 를 적으므로,
@@ -176,8 +194,7 @@ impl MemSample {
     pub(crate) fn detail(&self) -> String {
         let gb = |b: u64| b as f32 / (1024.0 * 1024.0 * 1024.0);
         if self.commit_limit > 0 {
-            let pct = self.commit as f32 / self.commit_limit as f32 * 100.0;
-            format!("커밋 {pct:.0}% · 페이지 파일 {:.1}G", gb(self.swap_used))
+            format!("커밋 {}% · {SWAP_LABEL} {:.1}G", self.commit_pct().floor(), gb(self.swap_used))
         } else {
             format!("압축 {:.1}G · 스왑 {:.1}G", gb(self.compressed), gb(self.swap_used))
         }
@@ -294,9 +311,9 @@ pub(crate) fn sample() -> Option<MemSample> {
         let low = handle != 0 && QueryMemoryResourceNotification(handle as HANDLE, &mut low) != 0 && low != 0;
         let commit_pct = info.CommitTotal as f64 / info.CommitLimit.max(1) as f64 * 100.0;
         let used_pct = (info.PhysicalTotal - info.PhysicalAvailable) as f64 / info.PhysicalTotal as f64 * 100.0;
-        let pressure = if low || commit_pct >= 95.0 {
+        let pressure = if low || commit_pct >= COMMIT_CRITICAL_PCT as f64 {
             4
-        } else if used_pct >= 90.0 || commit_pct >= 90.0 {
+        } else if used_pct >= 90.0 || commit_pct >= COMMIT_WARN_PCT as f64 {
             2
         } else {
             1
@@ -422,7 +439,7 @@ mod tests {
         assert_eq!(s(at(RESTART_PCT + 1.6), 1, 0.0).extra_reason(), None);
         // 압박·스왑은 옆 칼럼에 안 나오니 밝혀야 한다.
         assert_eq!(s(4.4, 2, 0.0).extra_reason().as_deref(), Some("메모리 압박 경고"));
-        assert!(s(4.4, 1, 9.0).extra_reason().is_some_and(|r| r.starts_with("스왑")));
+        assert!(s(4.4, 1, 9.0).extra_reason().is_some_and(|r| r.starts_with(SWAP_LABEL)));
     }
 
     /// Windows 표본도 불변식으로 잡는다 — `PERFORMANCE_INFORMATION` 은 페이지 단위라
@@ -441,6 +458,25 @@ mod tests {
         assert!(m.commit > 0 && m.commit <= m.commit_limit);
         assert!(matches!(m.pressure, 1 | 2 | 4), "pressure={}", m.pressure);
         assert!(m.detail().starts_with("커밋 "), "{}", m.detail());
+    }
+
+    /// 커밋이 차서 걸린 판정은 그 숫자로 말한다 — 물리 메모리가 남아 보이는 화면에서
+    /// 「압박」만 적으면 무엇을 비워야 하는지 모른다.
+    #[test]
+    fn 커밋이_원인이면_커밋을_말한다() {
+        let mut m = s(at(WATCH_PCT - 1.0), 4, 0.0);
+        (m.commit, m.commit_limit) = (96, 100);
+        assert_eq!(m.advice(), Advice::FreeUp);
+        assert_eq!(m.reason(), "커밋 96%");
+        m.pressure = 2;
+        (m.commit, m.commit_limit) = (9_469, 10_000);
+        assert_eq!(m.reason(), "커밋 94%", "판정 문턱(95)에 못 미친 값을 올려 적지 않는다");
+        (m.commit, m.commit_limit) = (91, 100);
+        assert_eq!(m.reason(), "커밋 91%");
+        // 커밋이 낮은데 걸린 압박(물리 부족 알림 등)은 예전 말 그대로다.
+        m.commit = 40;
+        assert_eq!(m.reason(), "메모리 압박 경고");
+        assert!(m.detail().starts_with("커밋 40% · "));
     }
 
     #[test]
