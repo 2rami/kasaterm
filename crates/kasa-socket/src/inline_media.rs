@@ -272,14 +272,14 @@ impl Store {
         if meta.len() != size {
             return Err(invalid_data("media cache entry changed"));
         }
-        let seen = Identity::of(&meta);
+        let seen = Identity::of(&file, &meta);
         let hashed = verify_blob(&path, &mut file, seen, &record.media.sha256)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; n];
         file.read_exact(&mut bytes)?;
         mid_read();
         // 확인한 뒤 같은 자리에 덮어쓰면 정체(ctime)가 바뀐다 — 그 사이에 읽은 바이트는 내주지 않는다.
-        if Identity::of(&file.metadata()?) != seen {
+        if Identity::of(&file, &file.metadata()?) != seen {
             return Err(invalid_data("media cache entry changed while reading"));
         }
         Ok((bytes, hashed))
@@ -668,10 +668,13 @@ struct Identity {
 }
 
 impl Identity {
-    fn of(meta: &std::fs::Metadata) -> Self {
+    /// `meta` 는 `file` 의 것이어야 한다. Windows 의 장치·파일 번호·변경 시각은 표준 라이브러리 메타데이터에
+    /// 아직(안정판) 없어 열린 손잡이에 직접 묻는다.
+    fn of(file: &File, meta: &std::fs::Metadata) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let _ = file;
             Self {
                 dev: meta.dev(),
                 ino: meta.ino(),
@@ -680,8 +683,20 @@ impl Identity {
                 changed: (meta.ctime(), meta.ctime_nsec()),
             }
         }
+        #[cfg(windows)]
+        if let Some((dev, ino, changed)) = handle_identity(file) {
+            return Self {
+                dev,
+                ino,
+                size: meta.len(),
+                modified: meta.modified().ok(),
+                changed: (changed, 0),
+            };
+        }
         #[cfg(not(unix))]
         {
+            #[cfg(not(windows))]
+            let _ = file;
             let created = meta.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
             Self {
                 dev: 0,
@@ -692,6 +707,34 @@ impl Identity {
             }
         }
     }
+}
+
+/// 볼륨 일련번호·파일 번호와 변경 시각(ChangeTime). 변경 시각은 내용을 쓰거나 시각을 고치는 것 자체로 바뀌어 —
+/// 유닉스 ctime 처럼 — 같은 길이로 덮어쓰고 수정 시각을 되돌린 원본도 다른 정체가 된다. 파일 번호는 갈아 끼운
+/// 파일(이름 바꾸기로 덮기)을 가른다.
+#[cfg(windows)]
+fn handle_identity(file: &File) -> Option<(u64, u64, i64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO,
+    };
+    let handle = file.as_raw_handle();
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandle(handle, &mut info) != 0
+            && GetFileInformationByHandleEx(
+                handle,
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            ) != 0
+    };
+    ok.then(|| {
+        let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        (u64::from(info.dwVolumeSerialNumber), index, basic.ChangeTime)
+    })
 }
 
 /// 원본 경로마다 마지막으로 해시가 맞았던 정체. 구간을 읽을 때마다 1GiB 를 다시 해시하지 않으려고
@@ -735,7 +778,7 @@ fn verify_blob(path: &Path, file: &mut File, seen: Identity, sha: &str) -> io::R
         }
         hasher.update(&buf[..n]);
     }
-    if total != seen.size || Identity::of(&file.metadata()?) != seen {
+    if total != seen.size || Identity::of(file, &file.metadata()?) != seen {
         return Err(invalid_data("media cache entry changed while reading"));
     }
     if hex(&hasher.finalize()) != sha {
@@ -1146,23 +1189,29 @@ mod tests {
     }
 
     /// 봉인(0o400)한 원본을 같은 자리·같은 길이로 다시 쓰고 수정 시각까지 되돌린다 — 크기·mtime 만 보는
-    /// 확인으로는 못 잡는 변조다.
-    #[cfg(unix)]
+    /// 확인으로는 못 잡는 변조다. Windows 는 봉인이 없어 권한은 그대로 둔다.
     fn overwrite_in_place(path: &Path, bytes: &[u8]) {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let before = std::fs::metadata(path).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let mut f = OpenOptions::new().write(true).open(path).unwrap();
         f.write_all(bytes).unwrap();
         f.set_modified(before.modified().unwrap()).unwrap();
         drop(f);
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).unwrap();
         let after = std::fs::metadata(path).unwrap();
-        assert_eq!((after.ino(), after.len(), after.modified().unwrap()), (before.ino(), before.len(), before.modified().unwrap()));
+        assert_eq!((after.len(), after.modified().unwrap()), (before.len(), before.modified().unwrap()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            assert_eq!(std::fs::metadata(path).unwrap().ino(), before.ino());
+        }
     }
 
-    #[cfg(unix)]
     #[test]
     fn served_bytes_come_from_a_blob_verified_once_against_its_sha() {
         let dir = temp_root("verify");
@@ -1192,7 +1241,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_blob_swapped_for_another_file_is_hashed_again() {
         let dir = temp_root("swap");
@@ -1220,7 +1268,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_blob_rewritten_while_a_chunk_is_read_is_refused() {
         let dir = temp_root("midread");

@@ -698,11 +698,9 @@ mod tests {
         assert!(stream.error().is_none());
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn local_source_rewritten_with_the_same_length_is_refused() {
         use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
         let dir = Dir::new("forged");
         let (store, media, bytes) = registered(&dir, PIECE + 5);
         let stream = Stream::start(Source::Local(store.clone()), &media).unwrap();
@@ -711,7 +709,12 @@ mod tests {
         let blob = store.media_path(&media.id).unwrap();
         let then = std::fs::metadata(&blob).unwrap().modified().unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // 봉인(0o400)을 풀어야 쓸 수 있다. Windows 는 봉인이 없다.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let mut forged = bytes.clone();
         forged[PIECE] ^= 0x55;
         let mut f = std::fs::OpenOptions::new().write(true).open(&blob).unwrap();
