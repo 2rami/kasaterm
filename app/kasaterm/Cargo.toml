@@ -155,6 +155,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Registry",
     # 메모리 압박(sysmem.rs): 커널의 「물리 메모리 부족」 알림 객체.
     "Win32_System_Memory",
+    # 사용량 위젯의 끄기: 맥 uid 자리에 프로세스 토큰의 사용자 SID 를 쓴다(input.rs windows_owner).
+    "Win32_Security",
     # sysmem 시험이 GlobalMemoryStatusEx 로 표본을 대조한다.
     "Win32_System_SystemInformation",
 ] }

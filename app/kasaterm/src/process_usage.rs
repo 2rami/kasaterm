@@ -58,7 +58,7 @@ fn protected(pid: u32, rows: &[Process], me: u32) -> bool {
 }
 
 pub(crate) fn stoppable(row: &Process, rows: &[Process]) -> bool {
-    cfg!(unix) && row.id.started != 0 && row.id.uid == crate::input::current_uid()
+    cfg!(any(unix, windows)) && row.id.started != 0 && row.id.uid == crate::input::current_uid()
         && !protected(row.id.pid, rows, std::process::id())
         && !row.owner.as_ref().is_some_and(|owner| owner.shell == row.id.pid && owner.needs_open)
 }
@@ -83,8 +83,43 @@ fn terminate(expected: &Process) -> Result<(), String> {
         if result != 0 { return Err(format!("종료 요청 실패: {}", std::io::Error::last_os_error())); }
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        terminate_windows(expected)
+    }
+    #[cfg(not(any(unix, windows)))]
     Err("이 환경에서는 실행 창에서 종료해 주세요".into())
+}
+
+/// Windows 에는 SIGTERM 이 없다. 콘솔 프로그램에 보낼 수 있는 Ctrl+C 는 그 콘솔의 모든
+/// 프로세스(칸의 셸·학생까지)에 한꺼번에 가서 「고른 실행만」을 지킬 수 없다 — 그래서 고른
+/// 하나만 `TerminateProcess` 로 끝낸다. 시작 시각을 **끌 핸들로 다시** 대조한다: 위의 대조와
+/// 이 핸들을 여는 사이에 그 PID 가 끝나고 다른 프로세스에 다시 쓰이면 엉뚱한 것을 끈다.
+#[cfg(windows)]
+fn terminate_windows(expected: &Process) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+    // SAFETY: 연 핸들은 여기서 닫고, 조회가 성공했을 때만 값을 읽는다.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, expected.id.pid);
+        if handle.is_null() {
+            return Err(format!("종료 요청 실패: {}", std::io::Error::last_os_error()));
+        }
+        let (mut created, mut exited, mut kernel, mut user): (FILETIME, FILETIME, FILETIME, FILETIME) = std::mem::zeroed();
+        let same = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0
+            && (((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64) == expected.id.started;
+        let result = if !same {
+            Err("선택한 실행이 바뀌었어요".to_string())
+        } else if TerminateProcess(handle, 1) == 0 {
+            Err(format!("종료 요청 실패: {}", std::io::Error::last_os_error()))
+        } else {
+            Ok(())
+        };
+        CloseHandle(handle);
+        result
+    }
 }
 
 fn backfill_history(live: &mut serde_json::Value, saved: &serde_json::Value, last: &std::collections::HashMap<String, (String, String)>) {
@@ -333,13 +368,21 @@ mod tests {
         assert_eq!(rest.unwrap()["close_record_key"], "receipt");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn a_real_child_ends_without_touching_its_sibling_and_stale_birth_is_refused() {
         struct Child(std::process::Child);
         impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
-        let mut first = Child(std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap());
-        let mut sibling = Child(std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap());
+        fn sleeper() -> std::process::Child {
+            #[cfg(unix)]
+            return std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
+            // Windows 엔 sleep 이 없다. 셸을 거치면 셸만 끄게 되므로 ping 을 직접 띄운다.
+            #[cfg(windows)]
+            return std::process::Command::new("ping").args(["-n", "60", "127.0.0.1"])
+                .stdout(std::process::Stdio::null()).spawn().unwrap();
+        }
+        let mut first = Child(sleeper());
+        let mut sibling = Child(sleeper());
         let rows = crate::input::fresh_usage_processes().unwrap();
         let row = rows.iter().find(|row| row.id.pid == first.0.id()).unwrap().clone();
         let mut stale = row.clone(); stale.id.started = stale.id.started.wrapping_add(1);

@@ -4801,7 +4801,84 @@ fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows 판 — 메모리는 표본(`process_rows`)과 같은 작업 집합, 시작 시각은 생성 FILETIME 이다.
+/// 시작 시각이 이 프로세스의 신원이라(같은 PID 가 다시 쓰여도 갈린다) 끄기 전에 이것으로 대조한다.
+#[cfg(windows)]
+fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: 연 핸들은 이 함수 안에서 닫고, 조회가 성공했을 때만 값을 쓴다.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let out = windows_process_facts(handle).map(|facts| (facts.working_set, facts.created));
+        CloseHandle(handle);
+        out
+    }
+}
+
+/// 열린 프로세스 핸들 하나에서 표본에 쓰는 사실을 한 번에 읽는다.
+#[cfg(windows)]
+struct WindowsProcessFacts {
+    working_set: u64,
+    cpu_ms: u64,
+    /// 생성 FILETIME(100ns 눈금). 0 이면 못 읽은 것이다.
+    created: u64,
+}
+
+#[cfg(windows)]
+unsafe fn windows_process_facts(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<WindowsProcessFacts> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    let ticks = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    unsafe {
+        let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        if GetProcessMemoryInfo(handle, &mut pmc, std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32) == 0 {
+            return None;
+        }
+        let (mut created, mut exited, mut kernel, mut user) = std::mem::zeroed();
+        let timed = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0;
+        Some(WindowsProcessFacts {
+            working_set: pmc.WorkingSetSize as u64,
+            // FILETIME 은 100ns 눈금이라 10,000 으로 나누면 ms 다(맥의 `time` 열과 같은 단위).
+            cpu_ms: if timed { (ticks(kernel) + ticks(user)) / 10_000 } else { 0 },
+            created: if timed { ticks(created) } else { 0 },
+        })
+    }
+}
+
+/// 프로세스를 띄운 계정. 맥의 uid 자리를 Windows 는 토큰의 사용자 SID 가 맡는다 — 그 바이트를
+/// 접어 u32 로 쓴다(같은 계정이면 같은 값, 비교에만 쓴다). 토큰을 못 열면(남의 계정·권한 상승한
+/// 프로세스) `None` 이고, 그건 우리가 끌 수도 없는 것이라 남의 것으로 친다.
+#[cfg(windows)]
+unsafe fn windows_owner(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(handle, TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        // TOKEN_USER 뒤에 SID 본체가 붙어 오므로 넉넉한 버퍼에 받는다(SID 는 최대 68바이트).
+        let mut buffer = [0u64; 32];
+        let mut length = 0u32;
+        let read = GetTokenInformation(token, TokenUser, buffer.as_mut_ptr().cast(), std::mem::size_of_val(&buffer) as u32, &mut length) != 0;
+        CloseHandle(token);
+        if !read {
+            return None;
+        }
+        let sid = (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        let bytes = std::slice::from_raw_parts(sid.cast::<u8>(), GetLengthSid(sid) as usize);
+        // FNV-1a. 맨 윗비트를 비워 둬서 「못 읽음」(u32::MAX)과 겹치지 않게 한다.
+        Some(bytes.iter().fold(0x811c_9dc5u32, |hash, byte| (hash ^ *byte as u32).wrapping_mul(0x0100_0193)) & 0x7fff_ffff)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn process_memory_birth(pid: u32) -> Option<(u64, u64)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let tail = stat.rsplit_once(')')?.1;
@@ -4990,29 +5067,18 @@ pub(crate) fn usage_process_birth(pid: u32) -> Option<u64> {
 /// (`kasa_pty::process_table`, 이미 하네스·학생 판정이 쓰는 그 표)에 프로세스마다
 /// 메모리와 CPU 시간을 물어 붙인다. 재는 쪽이 프로세스를 안 낳으므로 뺄 pid 도 없다.
 ///
-/// **열 수 없는 프로세스는 버린다.** 다른 계정 것이거나 보호된 시스템 프로세스인데,
-/// 맥에서 uid 로 남의 것을 거르는 것과 같은 뜻이다 — 이 목록의 행에는 끄기 버튼이
-/// 붙고, 권한이 없으면 눌러도 아무 일이 없다. 보여 주고 안 되는 것보다 안 보이는 편이
-/// 낫다. 그래서 `current_uid()` 가 Windows 에서 상수를 내도 아래 uid 필터가 성립한다
-/// (남는 행이 전부 「열리는 것」뿐이라 서로 같은 값을 갖는다).
+/// **열 수 없는 프로세스는 버리고, 열려도 남의 계정 것은 남의 것으로 적는다.** 조회 권한
+/// (`PROCESS_QUERY_LIMITED_INFORMATION`)은 SYSTEM 서비스에도 대개 열려서, 여는 것만으로는
+/// 맥에서 uid 로 남의 것을 거르는 것과 같아지지 않는다 — 이 목록의 행에는 끄기 버튼이
+/// 붙고, 남의 것은 눌러도 권한이 없다. 그래서 토큰의 사용자 SID 를 uid 자리에 둔다.
 #[cfg(windows)]
 fn process_rows() -> Option<(Vec<Row>, u32)> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
-    use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    // FILETIME 은 100ns 눈금이라 10,000 으로 나누면 ms 다(맥의 `time` 열과 같은 단위).
-    fn ms(f: FILETIME) -> u64 {
-        (((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64) / 10_000
-    }
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     let table = kasa_pty::process_table();
     if table.is_empty() {
         return None;
     }
-    let me_uid = current_uid();
     let rows: Vec<Row> = table
         .into_iter()
         .filter_map(|(pid, ppid, name)| unsafe {
@@ -5020,29 +5086,20 @@ fn process_rows() -> Option<(Vec<Row>, u32)> {
             if h.is_null() {
                 return None;
             }
-            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-            let got_mem = GetProcessMemoryInfo(
-                h,
-                &mut pmc,
-                std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-            ) != 0;
-            let (mut created, mut exited, mut kernel, mut user) = std::mem::zeroed();
-            let got_time =
-                GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user) != 0;
+            let facts = windows_process_facts(h);
+            let owner = windows_owner(h);
             CloseHandle(h);
-            if !got_mem {
-                return None;
-            }
+            let facts = facts?;
             Some(Row {
-                uid: me_uid,
+                uid: owner.unwrap_or(u32::MAX),
                 pid,
                 ppid,
                 // 순간 사용률은 Windows 가 안 준다 — 폴 사이의 cpu_time 증분으로
                 // 재는 `CpuTrack` 이 그 자리를 대신한다(아래 self_cpu).
                 cpu: 0.0,
-                rss: pmc.WorkingSetSize as u64 / 1024,
-                cpu_time: if got_time { ms(kernel) + ms(user) } else { 0 },
-                started: if got_time { ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64 } else { 0 },
+                rss: facts.working_set / 1024,
+                cpu_time: facts.cpu_ms,
+                started: facts.created,
                 exe: name.clone(),
                 // `pwsh.exe` 가 아니라 `pwsh` 로 적는다 — 같은 목록을 맥과 나란히 읽는다.
                 name: name.strip_suffix(".exe").unwrap_or(&name).to_string(),
@@ -5066,20 +5123,21 @@ struct Row {
     exe: String,
 }
 
-/// 나를 실행한 사용자의 uid. `libc` 는 Cargo.toml 에서 macOS 전용 의존성이라
-/// Windows 빌드에는 크레이트 자체가 없다 — cfg 를 이 한 곳에 가둬 두면 부르는
-/// 쪽(`outside_apps` 와 그 테스트)이 양쪽에서 같은 모양으로 컴파일된다.
-///
-/// Windows 가 0 인 것은 값이 맞아서가 아니라 **비교에만 쓰이기 때문**이다.
-/// 실사용 경로는 `sample_process_tree_usage` 인데 그쪽이 `ps` 를 spawn 하지
-/// 못해 먼저 `None` 을 내므로 여기까지 오지 않는다. 테스트는 `Row.uid` 도 이
-/// 함수로 채워 필터와 같은 값을 쓰므로 어느 플랫폼에서든 그대로 선다.
+/// 나를 실행한 사용자의 uid. Windows 는 표본 행과 같은 방식으로 접은 토큰 SID 다
+/// ([`windows_owner`]) — 비교에만 쓰이므로 값의 뜻보다 행과 같은 규칙인 것이 중요하다.
+/// 테스트는 `Row.uid` 도 이 함수로 채워 필터와 같은 값을 쓰므로 어느 플랫폼에서든 그대로 선다.
 pub(crate) fn current_uid() -> u32 {
     #[cfg(unix)]
     {
         unsafe { libc::getuid() }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        static ME: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        // SAFETY: 자기 프로세스의 의사 핸들은 닫지 않아도 된다.
+        *ME.get_or_init(|| unsafe { windows_owner(windows_sys::Win32::System::Threading::GetCurrentProcess()) }.unwrap_or(0))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         0
     }
