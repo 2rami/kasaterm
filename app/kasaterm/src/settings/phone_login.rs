@@ -2,7 +2,6 @@ use super::*;
 use crate::claude_auth::phone_credentials::{self, Snapshot, Stage, Staged};
 use serde::Deserialize;
 use std::collections::HashMap;
-#[cfg(any(unix, test))]
 use std::io::Read;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -301,7 +300,6 @@ impl State {
         Effect::None
     }
 
-    #[cfg(any(unix, test))]
     fn output(&mut self, output: Output) {
         if self.phase.terminal() {
             return;
@@ -537,7 +535,6 @@ fn owns_login_lease(flow: &str) -> bool {
         .is_ok_and(|cell| cell.0.as_ref().is_some_and(|job| job.id == lease_id(flow)))
 }
 
-#[cfg(any(unix, test))]
 fn detach_process(
     cell: &mut (
         Option<LoginJob>,
@@ -552,24 +549,28 @@ fn detach_process(
     }
 }
 
-#[cfg(unix)]
 fn clear_process_lease(flow: &str) {
     if let Ok(mut cell) = super::login_cell().lock() {
         detach_process(&mut cell, flow);
     }
 }
 
-#[cfg(unix)]
 struct CliChild {
     inner: std::process::Child,
     flow: String,
     reaped: bool,
+    /// Windows 에는 프로세스 묶음 죽이기가 없어, CLI 가 띄운 자식까지 잡을 작업 객체로 묶는다.
+    #[cfg(windows)]
+    job: Option<job::Job>,
 }
 
-#[cfg(unix)]
 impl CliChild {
     fn stop(&mut self) {
         if !self.reaped {
+            #[cfg(windows)]
+            if let Some(job) = &self.job {
+                job.terminate();
+            }
             stop_child(&mut self.inner);
             self.reaped = true;
         }
@@ -579,7 +580,11 @@ impl CliChild {
         let status = match self.inner.try_wait() {
             Ok(status) => status,
             Err(error) => {
-                if error.raw_os_error() == Some(libc::ECHILD) {
+                #[cfg(unix)]
+                let gone = error.raw_os_error() == Some(libc::ECHILD);
+                #[cfg(not(unix))]
+                let gone = false;
+                if gone {
                     self.reaped = true;
                     clear_process_lease(&self.flow);
                 }
@@ -594,7 +599,6 @@ impl CliChild {
     }
 }
 
-#[cfg(unix)]
 impl Drop for CliChild {
     fn drop(&mut self) {
         self.stop();
@@ -769,9 +773,6 @@ impl App {
         slot: &str,
         argument: &str,
     ) -> Result<serde_json::Value, &'static str> {
-        if !cfg!(unix) {
-            return Err(request_error("phone_login_unsupported"));
-        }
         let request = parse_start(argument)?;
         let binding = self.phone_login_binding(slot).map_err(request_error)?;
         if request.machine_id != binding.machine {
@@ -1055,12 +1056,6 @@ fn verify_stage(
     flow.clean_terminal();
 }
 
-#[cfg(not(unix))]
-fn run_login(id: &str, _proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
-    fail(id, "phone_login_unsupported");
-}
-
-#[cfg(unix)]
 fn run_login(id: &str, proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
     let (slot, email) = {
         let Ok(state) = flows().lock() else { return };
@@ -1104,6 +1099,8 @@ fn run_login(id: &str, proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
         }
     };
     let mut child = CliChild {
+        #[cfg(windows)]
+        job: job::Job::holding(&child),
         inner: child,
         flow: id.into(),
         reaped: false,
@@ -1205,7 +1202,6 @@ fn run_login(id: &str, proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
     }
 }
 
-#[cfg(any(unix, test))]
 fn isolate_command(
     command: &mut std::process::Command,
     root: &std::path::Path,
@@ -1262,9 +1258,12 @@ fn isolate_command(
         use std::os::unix::process::CommandExt;
         command.env("BROWSER", "/usr/bin/true").process_group(0);
     }
+    // Windows 판 CLI 는 BROWSER 가 있으면 그것만 부르고 rundll32(기본 브라우저)로 넘어가지 않는다(2.1.309 실측).
+    // 단계 폴더에 없는 경로를 주면 원본 컴퓨터에서 아무 창도 안 뜨고 수동 승인 URL 만 찍는다.
+    #[cfg(windows)]
+    command.env("BROWSER", root.join("no-browser.exe"));
 }
 
-#[cfg(unix)]
 fn stop_child(child: &mut std::process::Child) {
     #[cfg(unix)]
     unsafe {
@@ -1274,7 +1273,53 @@ fn stop_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-#[cfg(any(unix, test))]
+/// CLI 와 그 자식을 한 작업 객체에 묶는다 — 손잡이가 닫히면(앱이 먼저 죽어도) 다 같이 끝나, 임시 저장소를
+/// 쥔 로그인 프로세스가 남지 않는다.
+#[cfg(windows)]
+mod job {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    pub(super) struct Job(HANDLE);
+
+    impl Job {
+        pub(super) fn holding(child: &std::process::Child) -> Option<Self> {
+            use std::os::windows::io::AsRawHandle;
+            unsafe {
+                let job = Job(CreateJobObjectW(None, None).ok()?);
+                let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    &limit as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+                .ok()?;
+                AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())).ok()?;
+                Some(job)
+            }
+        }
+
+        pub(super) fn terminate(&self) {
+            unsafe {
+                let _ = TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
 enum Output {
     Url(String),
     Prompt,
@@ -1282,7 +1327,6 @@ enum Output {
     InvalidUrl,
 }
 
-#[cfg(any(unix, test))]
 fn authorization_url(raw: &str) -> Option<String> {
     let url = super::login_url_in(&super::strip_ansi(raw))?;
     if url.len() > 8192
@@ -1294,13 +1338,14 @@ fn authorization_url(raw: &str) -> Option<String> {
     }
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_once('/')?;
-    if !matches!(
-        host,
-        "claude.ai" | "console.anthropic.com" | "platform.claude.com"
-    ) {
-        return None;
-    }
-    if path.split('?').next()? != "oauth/authorize" || !path.contains('?') || path.contains('#') {
+    // 2.1.30x 판 CLI 는 claude.com/cai/oauth/authorize 로 보낸다(2026-10-23 Windows 실측) — 옛 주소만 받으면
+    // 새 CLI 의 로그인이 전부 「승인 링크가 올바르지 않다」로 끝난다.
+    let official = matches!(
+        (host, path.split('?').next()?),
+        ("claude.ai" | "console.anthropic.com" | "platform.claude.com", "oauth/authorize")
+            | ("claude.com", "cai/oauth/authorize")
+    );
+    if !official || !path.contains('?') || path.contains('#') {
         return None;
     }
     let mut redirect = None;
@@ -1325,7 +1370,6 @@ fn authorization_url(raw: &str) -> Option<String> {
     Some(url)
 }
 
-#[cfg(any(unix, test))]
 fn decode_query(value: &str) -> Option<String> {
     let mut bytes = value.bytes();
     let mut decoded = Vec::with_capacity(value.len());
@@ -1342,7 +1386,6 @@ fn decode_query(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
-#[cfg(any(unix, test))]
 fn emit_url(line: &str, sender: &std::sync::mpsc::SyncSender<Output>) {
     if let Some(url) = authorization_url(line) {
         let _ = sender.try_send(Output::Url(url));
@@ -1353,7 +1396,6 @@ fn emit_url(line: &str, sender: &std::sync::mpsc::SyncSender<Output>) {
     }
 }
 
-#[cfg(any(unix, test))]
 fn read_output(mut pipe: Box<dyn Read + Send>, sender: std::sync::mpsc::SyncSender<Output>) {
     let mut total = 0usize;
     let mut tail = String::new();
@@ -1532,9 +1574,13 @@ mod tests {
             format!("{expected}&redirect_uri=%zz"),
             format!("{expected}#fragment"),
             "https://claude.ai/oauth/authorize?state=fixture".into(),
+            expected.replace("claude.ai/oauth/", "claude.com/oauth/"),
+            expected.replace("claude.ai/oauth/", "claude.ai/cai/oauth/"),
         ] {
             assert!(authorization_url(&bad).is_none());
         }
+        let current = expected.replace("claude.ai/oauth/", "claude.com/cai/oauth/");
+        assert_eq!(authorization_url(&current).as_deref(), Some(current.as_str()));
     }
 
     #[test]
@@ -1624,6 +1670,47 @@ mod tests {
         }
         #[cfg(unix)]
         assert_eq!(env["BROWSER"], Some("/usr/bin/true".into()));
+        #[cfg(windows)]
+        assert_eq!(env["BROWSER"], Some(root.join("no-browser.exe").display().to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_ends_the_fake_cli_and_the_children_it_started() {
+        let inner = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let shell = inner.id();
+        let mut child = CliChild {
+            job: job::Job::holding(&inner),
+            inner,
+            flow: uuid::Uuid::new_v4().to_string(),
+            reaped: false,
+        };
+        assert!(child.job.is_some());
+        let started = Instant::now();
+        let grandchildren = loop {
+            let found: Vec<u32> = kasa_pty::fresh_process_table()
+                .into_iter()
+                .filter(|(_, parent, _)| *parent == shell)
+                .map(|(pid, _, _)| pid)
+                .collect();
+            if !found.is_empty() || started.elapsed() > Duration::from_secs(5) {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(!grandchildren.is_empty(), "cmd never started ping");
+        child.stop();
+        assert!(child.reaped);
+        assert!(child.try_wait().unwrap().is_some());
+        std::thread::sleep(Duration::from_millis(200));
+        let alive: Vec<u32> = kasa_pty::fresh_process_table().into_iter().map(|(pid, _, _)| pid).collect();
+        assert!(grandchildren.iter().all(|pid| !alive.contains(pid)), "ping outlived the cancelled login");
     }
 
     #[test]

@@ -23,8 +23,12 @@ KASA 자체 Google·GitHub 로그인과 별개다. 이미 데스크톱에 등록
 ## 지원과 실패 표시
 
 - 새 폰 앱과 새 데스크톱 앱이 모두 필요하다. 옛 데스크톱의 `action_unknown`은 업데이트 필요로 표시한다.
-- 현재 원본 로그인 프로세스는 macOS·Linux의 설치된 Claude CLI를 사용한다. Windows 호스트는
-  브라우저를 열지 않는 로그인 실행 경로를 검증하기 전까지 명시적으로 거부한다.
+- 원본 로그인 프로세스는 macOS·Linux·Windows의 설치된 Claude CLI를 사용한다. Windows 판 CLI는 `BROWSER`가
+  있으면 그 명령만 부르고 `rundll32`(기본 브라우저)로 넘어가지 않으므로(2.1.309 실측), 단계 폴더 안의 없는 경로를
+  준다. 원본 컴퓨터에는 아무 창도 뜨지 않고 수동 승인 URL만 출력된다. CLI와 그 자식은 작업 객체에 묶어 취소·실패
+  때 함께 끝낸다. Windows 자격은 키체인 없이 `<설정 폴더>\.credentials.json` 파일이다(아래 파일 규칙).
+- CLI 2.1.30x는 승인 URL을 `https://claude.com/cai/oauth/authorize`로 낸다. 옛 `claude.ai`·`console.anthropic.com`·
+  `platform.claude.com`의 `oauth/authorize`와 함께 이 주소만 받는다.
 - 원본 데스크톱이 켜져 있고 같은 KASA 계정으로 연결돼 있어야 한다. 기기 연결이 바뀌면
   예전 응답으로 새 화면을 갱신하거나 다른 기기에 코드를 보내지 않는다.
 - 대상은 등록된 이름 있는 슬롯이다. 빈 기본 슬롯을 다른 계정으로 추측하거나 슬롯을 자동 생성하지 않는다.
