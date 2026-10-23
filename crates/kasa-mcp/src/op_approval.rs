@@ -128,7 +128,134 @@ mod keychain {
     const AUTH_FAILED: i32 = -25293;
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows 자격 증명 관리자의 일반 자격 증명 — 키체인 자리. 맥의 「서비스·계정」은 「대상·사용자」다
+/// (`cmdkey /generic:<서비스> /user:<계정> /pass` 가 만드는 꼴). 같은 사용자의 프로세스면 묻지 않고 읽히므로
+/// 맥의 접근 허용 창 같은 둘째 문은 없다 — 값은 폰 Face ID 허락 뒤에만 꺼낸다.
+#[cfg(windows)]
+mod keychain {
+    use windows::core::{HSTRING, PWSTR};
+    use windows::Win32::Foundation::ERROR_NOT_FOUND;
+    use windows::Win32::Security::Credentials::{
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    };
+
+    /// 자격 증명 하나에 담기는 값의 상한(CRED_MAX_CREDENTIAL_BLOB_SIZE). 믿은 폰이 여럿이면 열쇠 목록이 넘으므로 뒤는
+    /// `<대상>#2`, `#3` … 에 잇고, 머리의 설명 칸에 조각 수를 적는다.
+    const BLOB_MAX: usize = 5 * 512;
+
+    struct Cred {
+        blob: Vec<u8>,
+        user: String,
+        comment: String,
+    }
+
+    fn read(target: &str) -> anyhow::Result<Option<Cred>> {
+        let mut found: *mut CREDENTIALW = std::ptr::null_mut();
+        match unsafe { CredReadW(&HSTRING::from(target), CRED_TYPE_GENERIC, None, &mut found) } {
+            Ok(()) => unsafe {
+                let c = &*found;
+                let blob = if c.CredentialBlob.is_null() {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec()
+                };
+                let text = |p: PWSTR| if p.is_null() { String::new() } else { p.to_string().unwrap_or_default() };
+                let cred = Cred { blob, user: text(c.UserName), comment: text(c.Comment) };
+                CredFree(found as *const _);
+                Ok(Some(cred))
+            },
+            Err(error) if error.code() == ERROR_NOT_FOUND.to_hresult() => Ok(None),
+            Err(error) => anyhow::bail!("credential: {:#x}", error.code().0),
+        }
+    }
+
+    pub(super) fn write(target: &str, user: &str, blob: &[u8], comment: &str) -> anyhow::Result<()> {
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (mut target, mut comment, mut user) = (wide(target), wide(comment), wide(user));
+        let cred = CREDENTIALW {
+            Type: CRED_TYPE_GENERIC,
+            TargetName: PWSTR(target.as_mut_ptr()),
+            Comment: PWSTR(comment.as_mut_ptr()),
+            CredentialBlobSize: blob.len() as u32,
+            CredentialBlob: blob.as_ptr() as *mut u8,
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            UserName: PWSTR(user.as_mut_ptr()),
+            ..Default::default()
+        };
+        unsafe { CredWriteW(&cred, 0) }.map_err(|error| anyhow::anyhow!("credential: {:#x}", error.code().0))
+    }
+
+    pub(super) fn delete(target: &str) {
+        let _ = unsafe { CredDeleteW(&HSTRING::from(target), CRED_TYPE_GENERIC, None) };
+    }
+
+    fn target(account: &str) -> String {
+        format!("{}/{account}", super::SERVICE)
+    }
+
+    fn parts(cred: &Cred) -> usize {
+        cred.comment.strip_prefix("parts=").and_then(|n| n.parse().ok()).unwrap_or(1)
+    }
+
+    pub fn get(account: &str) -> anyhow::Result<Option<String>> {
+        let base = target(account);
+        let Some(head) = read(&base)? else { return Ok(None) };
+        let mut bytes = head.blob.clone();
+        for i in 2..=parts(&head) {
+            let part = read(&format!("{base}#{i}"))?.ok_or_else(|| anyhow::anyhow!("credential_incomplete"))?;
+            bytes.extend(part.blob);
+        }
+        Ok(Some(String::from_utf8(bytes)?))
+    }
+
+    /// 뒤 조각을 먼저 쓰고 머리를 맨 끝에 — 머리가 말하는 조각 수가 늘 다 써진 조각을 가리킨다.
+    pub fn set(account: &str, value: &str) -> anyhow::Result<()> {
+        let base = target(account);
+        let before = read(&base)?.map(|c| parts(&c)).unwrap_or(1);
+        let chunks: Vec<&[u8]> = if value.is_empty() { vec![&[]] } else { value.as_bytes().chunks(BLOB_MAX).collect() };
+        for (i, chunk) in chunks.iter().enumerate().skip(1) {
+            write(&format!("{base}#{}", i + 1), "kasaterm", chunk, "")?;
+        }
+        write(&base, "kasaterm", chunks[0], &format!("parts={}", chunks.len()))?;
+        for i in chunks.len() + 1..=before {
+            delete(&format!("{base}#{i}"));
+        }
+        Ok(())
+    }
+
+    /// 남이 넣은 값은 UTF-16 으로 적힌 것이 많다(cmdkey·Python keyring·Git 자격 증명 관리자). ASCII 의 UTF-16 은
+    /// 늘 0 바이트를 품고, UTF-8 문자열은 0 을 안 품으니 그것으로 가른다. 끝의 NUL 은 C 문자열 꼬리라 뗀다.
+    pub(super) fn decode(blob: Vec<u8>) -> Vec<u8> {
+        if !blob.contains(&0) && std::str::from_utf8(&blob).is_ok() {
+            return blob;
+        }
+        if blob.len() % 2 == 0 {
+            let units: Vec<u16> = blob.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+            if let Ok(text) = String::from_utf16(&units) {
+                return text.trim_end_matches('\0').as_bytes().to_vec();
+            }
+        }
+        blob
+    }
+
+    /// 학생이 고른 항목의 값. 대상 하나에 사용자는 하나뿐이라, 같은 서비스에 계정이 여럿이면 `<계정>@<서비스>`
+    /// 대상으로 둔 것도 본다(Python keyring 과 같은 꼴). 계정을 비우면 그 대상의 값이다.
+    pub fn value(service: &str, account: Option<&str>) -> anyhow::Result<Vec<u8>> {
+        if let Some(cred) = read(service)? {
+            if account.is_none_or(|a| a == cred.user) {
+                return Ok(decode(cred.blob));
+            }
+        }
+        if let Some(account) = account {
+            if let Some(cred) = read(&format!("{account}@{service}"))? {
+                return Ok(decode(cred.blob));
+            }
+        }
+        anyhow::bail!("not_found")
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod keychain {
     pub fn get(_: &str) -> anyhow::Result<Option<String>> {
         anyhow::bail!("unsupported")
@@ -678,6 +805,51 @@ mod tests {
         assert_eq!(keychain::value("kasaterm.probe", None).unwrap(), b"probe-value");
         assert_eq!(keychain::value("kasaterm.probe", Some("nobody")).unwrap_err().to_string(), "not_found");
         assert_eq!(keychain::value("kasaterm.no-such-service", None).unwrap_err().to_string(), "not_found");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn credential_values_written_as_utf16_read_back_as_text() {
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        assert_eq!(keychain::decode(b"plain-utf8".to_vec()), b"plain-utf8");
+        assert_eq!(keychain::decode(utf16("probe-value")), b"probe-value");
+        assert_eq!(keychain::decode(utf16("비밀\0")), "비밀".as_bytes());
+        assert_eq!(keychain::decode("한글 값".as_bytes().to_vec()), "한글 값".as_bytes());
+    }
+
+    /// 손으로 돌리는 시험 — 사람의 자격 증명 관리자에 `kasaterm.probe*` 항목을 넣었다 지운다.
+    /// `cargo test -p kasa-mcp real_credential -- --ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn a_real_credential_is_read_by_target_and_user_and_long_values_span_parts() {
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        keychain::write("kasaterm.probe", "probe", &utf16("probe-value"), "").unwrap();
+        keychain::write("other@kasaterm.probe", "other", b"other-value", "").unwrap();
+        assert_eq!(keychain::value("kasaterm.probe", Some("probe")).unwrap(), b"probe-value");
+        assert_eq!(keychain::value("kasaterm.probe", None).unwrap(), b"probe-value");
+        assert_eq!(keychain::value("kasaterm.probe", Some("other")).unwrap(), b"other-value");
+        assert_eq!(keychain::value("kasaterm.probe", Some("nobody")).unwrap_err().to_string(), "not_found");
+        assert_eq!(keychain::value("kasaterm.no-such-service", None).unwrap_err().to_string(), "not_found");
+        keychain::delete("kasaterm.probe");
+        keychain::delete("other@kasaterm.probe");
+        // 사람이 넣는 길(docs/secret-faceid-approval.md) 그대로.
+        let made = std::process::Command::new("cmdkey")
+            .args(["/generic:kasaterm.probe-cmdkey", "/user:probe", "/pass:probe-value"])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert_eq!(keychain::value("kasaterm.probe-cmdkey", Some("probe")).unwrap(), b"probe-value");
+        keychain::delete("kasaterm.probe-cmdkey");
+
+        let long: String = (0..6000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        keychain::set("probe-parts", &long).unwrap();
+        assert_eq!(keychain::get("probe-parts").unwrap().as_deref(), Some(long.as_str()));
+        keychain::set("probe-parts", "짧은 값").unwrap();
+        assert_eq!(keychain::get("probe-parts").unwrap().as_deref(), Some("짧은 값"));
+        assert!(keychain::value(&format!("{SERVICE}/probe-parts#2"), None).is_err(), "a stale tail part was left behind");
+        keychain::delete(&format!("{SERVICE}/probe-parts"));
+        assert_eq!(keychain::get("probe-parts").unwrap(), None);
     }
 
     #[test]

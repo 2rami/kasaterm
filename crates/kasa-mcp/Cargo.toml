@@ -87,9 +87,11 @@ path = "src/bin/device.rs"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 
-# 브라우저 포트 전달(browser_route.rs)의 ssh 를 앱과 함께 끝나는 작업 개체에 넣는다 — 유닉스는 sh 감독자가 한다.
 [target.'cfg(windows)'.dependencies]
+# 브라우저 포트 전달(browser_route.rs)의 ssh 를 앱과 함께 끝나는 작업 개체에 넣는다 — 유닉스는 sh 감독자가 한다.
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# 맥 키체인 자리를 자격 증명 관리자의 일반 자격 증명(CredReadW·CredWriteW)으로 둔다(op_approval.rs).
+windows = { workspace = true, features = ["Win32_Security_Credentials"] }
 
 [dev-dependencies]
 kasa-collab = { workspace = true, features = ["net", "test-support"] }

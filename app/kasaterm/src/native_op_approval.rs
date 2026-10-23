@@ -1,4 +1,4 @@
-//! 설정 「계정」의 「비밀 승인」 — 학생이 이 맥 키체인의 비밀을 폰 Face ID 한 번으로 읽게 하는 맥 쪽 설정
+//! 설정 「계정」의 「비밀 승인」 — 학생이 이 맥 키체인(Windows 는 자격 증명 관리자)의 비밀을 폰 Face ID 한 번으로 읽게 하는 데스크톱 쪽 설정
 //! (docs/secret-faceid-approval.md). 넣을 토큰이 없어 여기서는 폰 열쇠만 다룬다 — `op_approval::auto_pick` 규칙대로
 //! 알아서 믿고, 그 밖의 것만 묻는다. 이름의 `op` 는 1Password 로 읽던 때의 것이다.
 
@@ -7,6 +7,25 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 const REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 비밀을 꺼내는 자리 — (이 기기, 보관함). 맥은 키체인, Windows 는 자격 증명 관리자의 일반 자격 증명이다.
+#[cfg(not(windows))]
+const STORE: (&str, &str) = ("이 맥", "키체인");
+#[cfg(windows)]
+const STORE: (&str, &str) = ("이 PC", "자격 증명 관리자");
+/// 처음 꺼낼 때 일 — 맥은 접근 허용 창이 뜨고, Windows 는 묻지 않는 대신 넣는 길을 알린다.
+#[cfg(not(windows))]
+const FIRST_READ: &str = "처음 꺼내는 항목은 이 맥에 접근 허용 창이 떠요";
+#[cfg(windows)]
+const FIRST_READ: &str = "일반 자격 증명만 읽어요 · cmdkey /generic:서비스 /user:계정 /pass 로 넣어요";
+#[cfg(not(windows))]
+const TRUSTS_FIRST_PHONE: &str = "폰 설정 → 계정 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 맥이 그 폰을 바로 믿어요.";
+#[cfg(windows)]
+const TRUSTS_FIRST_PHONE: &str = "폰 설정 → 계정 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 PC 가 그 폰을 바로 믿어요.";
+#[cfg(not(windows))]
+const ISOLATED: &str = "검증 실행에서는 키체인을 쓰지 않아요";
+#[cfg(windows)]
+const ISOLATED: &str = "검증 실행에서는 자격 증명 관리자를 쓰지 않아요";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Act {
@@ -52,7 +71,7 @@ fn readable(error: &str) -> String {
     let code = error.split(':').next().unwrap_or(error).trim();
     match code {
         "bad_key" => "열쇠 모양이 맞지 않아요. 폰에서 열쇠를 다시 만들어 주세요".into(),
-        "isolated_run" => "검증 실행에서는 키체인을 쓰지 않아요".into(),
+        "isolated_run" => ISOLATED.into(),
         "signed_out" => "KASA 계정에 로그인해야 해요".into(),
         "gateway_unreachable" => "관문에 닿지 못했어요".into(),
         "update_required" => "관문이 이 기능을 아직 몰라요. 관문 업데이트가 필요해요".into(),
@@ -184,8 +203,9 @@ impl App {
             crate::chrome::notify_desktop(
                 "비밀 승인 폰을 믿어요",
                 &format!(
-                    "{} — 학생의 키체인 비밀 요청은 이제 이 폰에서 Face ID 로 허락해요",
-                    key["label"].as_str().unwrap_or("폰")
+                    "{} — 학생의 {} 비밀 요청은 이제 이 폰에서 Face ID 로 허락해요",
+                    key["label"].as_str().unwrap_or("폰"),
+                    STORE.1
                 ),
                 None,
                 Some(&format!("op-trusted:{}", key["fingerprint"].as_str().unwrap_or(""))),
@@ -285,18 +305,24 @@ fn alert(window: &winit::window::Window, title: &str, info: &str) -> Option<(*mu
     }
 }
 
+const TRUST_TITLE: &str = "이 폰의 Face ID 열쇠를 믿을까요?";
+
+fn trust_info(key: &serde_json::Value) -> String {
+    let label = key["label"].as_str().unwrap_or("폰");
+    let fingerprint = key["fingerprint"].as_str().unwrap_or("");
+    format!(
+        "{label}\n지문  {fingerprint}\n\n폰 설정 → 계정 → Face ID 승인 열쇠에 같은 지문이 보이는지 맞춰 보세요. 믿으면 학생의 {} 비밀 요청을 이 폰이 Face ID 로 한 번씩 허락할 수 있어요.",
+        STORE.1
+    )
+}
+
 /// 폰 열쇠 믿기 — 두 화면의 지문을 사람이 맞춰 본다. Return 은 취소다(치던 Enter 가 새도 믿음이 나가지 않게).
 #[cfg(target_os = "macos")]
 fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Option<usize> {
     use objc2::msg_send;
     use objc2::runtime::{AnyObject, Bool};
     use objc2_foundation::NSString;
-    let label = key["label"].as_str().unwrap_or("폰");
-    let fingerprint = key["fingerprint"].as_str().unwrap_or("");
-    let info = format!(
-        "{label}\n지문  {fingerprint}\n\n폰 설정 → 계정 → Face ID 승인 열쇠에 같은 지문이 보이는지 맞춰 보세요. 믿으면 학생의 키체인 비밀 요청을 이 폰이 Face ID 로 한 번씩 허락할 수 있어요."
-    );
-    let (alert, ns_window) = alert(window, "이 폰의 Face ID 열쇠를 믿을까요?", &info)?;
+    let (alert, ns_window) = alert(window, TRUST_TITLE, &trust_info(key))?;
     let id = key["id"].as_str().unwrap_or_default().to_string();
     unsafe {
         let trust: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*NSString::from_str("믿기")];
@@ -362,10 +388,30 @@ fn shot_alert(alert: usize, path: &str) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// 맥 시트와 같은 글·단추 — 원문 칸 없이 지문만, Enter 는 취소.
+#[cfg(windows)]
+fn trust_sheet(window: &winit::window::Window, key: &serde_json::Value) -> Option<usize> {
+    let id = key["id"].as_str().unwrap_or_default().to_string();
+    let info = trust_info(key);
+    let spec = crate::win_sheet::Spec { title: TRUST_TITLE, info: &info, body: None, buttons: ["믿기", "취소"], primary_enabled: true };
+    crate::win_sheet::open(window, &spec, move |choice| {
+        if choice == Some(0) {
+            if let Ok(mut answer) = TRUST_ANSWER.lock() {
+                *answer = Some(id.clone());
+            }
+        }
+    })
+}
+
+#[cfg(windows)]
+fn shot_alert(alert: usize, path: &str) {
+    crate::win_sheet::shot(alert, path);
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn shot_alert(_alert: usize, _path: &str) {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn trust_sheet(_window: &winit::window::Window, _key: &serde_json::Value) -> Option<usize> {
     None
 }
@@ -385,14 +431,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
             x,
             y,
             w,
-            "KASA 계정에 로그인하면 학생이 이 맥 키체인의 비밀을 폰 Face ID 한 번으로 읽게 할 수 있어요.",
+            &format!("KASA 계정에 로그인하면 학생이 {} {}의 비밀을 폰 Face ID 한 번으로 읽게 할 수 있어요.", STORE.0, STORE.1),
         );
         *y += 14.0;
         return;
     }
-    let line = if v.status.is_null() { "확인하는 중…" } else { "이 맥 키체인에서 꺼내요" };
-    draw_text(g, x, *y + 4.0, line, 12.0, theme::text(), false);
-    draw_text(g, x, *y + 21.0, "처음 꺼내는 항목은 이 맥에 접근 허용 창이 떠요", 10.5, theme::text_dim(), false);
+    let line = if v.status.is_null() { "확인하는 중…".to_string() } else { format!("{} {}에서 꺼내요", STORE.0, STORE.1) };
+    draw_text(g, x, *y + 4.0, &line, 12.0, theme::text(), false);
+    draw_text(g, x, *y + 21.0, FIRST_READ, 10.5, theme::text_dim(), false);
     if v.busy {
         draw_text(g, x + w - 64.0, *y + (ROW_H - CTL_H) / 2.0 + 5.0, "처리 중…", 12.0, theme::text_dim(), false);
     }
@@ -429,7 +475,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
         y,
         w,
         if trusted.is_empty() {
-            "폰 설정 → 계정 → 비밀 승인에서 「Face ID 로 연결」을 누르면 이 맥이 그 폰을 바로 믿어요."
+            TRUSTS_FIRST_PHONE
         } else {
             "학생은 kasaterm-cli secret run -e 이름=서비스#계정 -- 명령 으로 써요. 요청마다 폰 Face ID 한 번, 값은 관문·폰을 지나지 않아요."
         },
