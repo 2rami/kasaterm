@@ -30,19 +30,21 @@
  "approval_id": "ap_…", "authority": "<조종 기기 machine_id>"}
 ```
 
-- `asset.name` 은 그 태그의 dmg 하나(`kasaterm-<tag>.dmg`), `asset.url` 은 그 이름으로 지은 공식 주소와 **글자까지 같아야**
-  한다(`check_job`). 다른 호스트·다른 파일·`..` 는 모양에서 걸린다. 크기 상한 512 MiB.
+- `asset.name` 은 그 태그의 dmg 하나(`kasaterm-<tag>.dmg`)나 msi 하나(`kasaterm-<tag>-windows-x86_64.msi`), `asset.url` 은
+  그 이름으로 지은 공식 주소와 **글자까지 같아야** 한다(`check_job`). 다른 호스트·다른 파일·`..` 는 모양에서 걸린다. 크기 상한 512 MiB.
+- 작업의 OS 는 파일 이름으로만 정해지고(`job_os`) 기기는 자기 OS 의 작업만 받는다 — 요청이 OS 를 바꿔 대서 그 OS 의 검사를
+  피하지 못한다. Windows 작업은 `team` 을 비우고 `require_notarized: false` 다(MSI 는 코드 서명이 없다). 맥 작업은 예전대로다.
 - `job_id` = `up` + fnv(계획·기기·sha256) — 같은 계획·기기·파일이면 늘 같은 id 라 다시 보내도 새 작업이 안 생긴다.
   조종 쪽 `devices.update_job_id` 와 양쪽 검사에 같은 값이 박혀 있다.
-- 받을 곳은 요청이 아니라 기기가 정한다: 피드는 `https://2rami.github.io/kasaterm/appcast.xml` 하나, 공개키는 설치본에 박힌
-  Sparkle `SUPublicEDKey` 와 같은 값(검사가 `scripts/build-app.sh` 와 대조한다).
+- 받을 곳은 요청이 아니라 기기가 정한다: 피드는 맥 `https://2rami.github.io/kasaterm/appcast.xml`, Windows `…/appcast-win.xml`
+  하나씩, 공개키는 설치본에 박힌 Sparkle `SUPublicEDKey` 와 같은 값(검사가 `scripts/build-app.sh` 와 대조한다).
 
 ## 기기가 판정하는 것 (`authorize`)
 
 | 순서 | 거절 | 까닭 |
 |---|---|---|
 | 1 | `update_disabled` | 이 기기 설치 스위치가 꺼져 있다 |
-| 2 | `unsupported_os` | mac 만. 윈도는 WinSparkle(사람이 [설치]) |
+| 2 | `unsupported_os` | macOS·Windows 만, 그리고 작업 파일(dmg·msi)의 OS 가 이 기기 OS 와 같을 때만 |
 | 3 | 모양 | 위의 `check_job` — 공식 주소가 아니면 여기서 걸린다 |
 | 4 | 재시작 쪽 거부 | 다른 기기의 답·설치본 아닌 실행·자기설치 예정·다른 작업 진행 중 |
 | 5 | 정체 | `machine_id`·`target_hash`·`old_pid` 가 지금 이 기기와 다름 |
@@ -100,6 +102,25 @@
 끝은 `done`·`failed`·`rolled_back`·`cancelled`. 기록은 `~/.config/kasaterm/app-update/<id>.json`·`.events`(격리 리그는 collab
 루트 아래). 업데이트가 도는 동안은 이 기기의 재시작도 막히고(`active_job`), 반대도 같다.
 
+## Windows
+
+틀(수락·승인·기다림·작업 기록·부팅 표식)은 같고 받기 뒤가 다르다.
+
+- 받기·확인: 공식 Windows 피드와 같은 파일인지 보고, 받은 msi 의 크기·sha256·EdDSA 만 본다(dmg 열기·코드 서명·공증 단계 없음).
+  받은 자리(`%LOCALAPPDATA%\kasaterm\updates\<sha 앞 16자>\`)가 곧 준비한 자리다(`staged_for`). 다시 쓰기 전에 늘 다시 잰다.
+- 적용: 막힘이 없으면 PowerShell 도우미(`swap_powershell`, 작업 옆 `.helper.ps1`)를 띄우고 앱이 정상 종료한다. 도우미는
+  옛 앱을 핸들로 기다리고(60초, 강제 종료 없음), 같은 앱이 또 떠 있으면 멈추고, **msi 해시를 다시 잰 뒤** `msiexec /i … /passive
+  /norestart /l*v <id>.msi.log` 를 돌린다. 기기 전체 설치라 **그 PC 에서 사람이 관리자 확인(UAC)을 눌러야 끝난다** — 무인 설치가
+  아니다.
+- 상한: 설치기를 10분(`INSTALL_TIMEOUT_S`) 기다린다. 넘기면 msiexec 를 그대로 두고 `failed`(관리자 확인 미응답일 가능성)로 적고
+  앱을 다시 띄우지 않는다 — 설치가 아직 돌 수 있다.
+- 되돌리기: msiexec 가 실패하면(0·3010 이 아님) Windows Installer 가 이전 판을 그대로 두므로 그 판을 다시 띄우고 `failed`.
+  준비한 msi 가 사라졌거나 바뀌었어도 설치본을 안 건드리고 다시 띄운다. 설치가 끝난 새 판이 부팅 표식 없이 꺼지면 **되돌리지
+  못한다** — MSI 는 낮은 판으로 내려가는 설치를 막는다(`MajorUpgrade`). 그땐 `failed` 로 적고 사람이 이전 msi 로 다시 깐다.
+- 재기동은 재시작과 같은 explorer 길이다([app-restart.md](app-restart.md) 「Windows」).
+- 조종 쪽: 판 파일이 OS 마다 달라 rollout 도 OS 마다 따로다 — `device-plan --json` 의 `rollout`(mac, 나쵸가 읽는 칸 그대로)과
+  `windows_rollout`. Windows 작업은 릴리스 단계의 Windows 산출물과 피드 단계가 확인한 Windows EdDSA 서명이 있어야 지어진다.
+
 ## 조종 쪽 — 한 번 승인, 차례로
 
 1. **rollout 짓기** — `python3 -m tools.release.fastpatch device-plan <plan_id> --json` 이 ready·deferred 인 mac 을 계획 순서로,
@@ -140,14 +161,18 @@
 2. 키 없는 기기(맥북)의 중계 위임 — 명부 파일에 `update_approvals: true` 를 어느 기기에 둘지. 없으면 맥북은 update 승인을 못 읽어
    「맥북 먼저」가 거기서 막힌다. 신뢰 설정이라 사람이 적는다.
 3. 기기 설치 스위치를 켤 기기와 시점 — 켜는 것은 그 기기 앱의 실행 환경(`KASATERM_APP_UPDATE=on`)이다.
-4. mac 판 서명 — CI 가 굽는 판은 자체 서명·미공증이라 이 창구가 **팀·공증 검사에서 거절한다**(의도한 것). 릴리스는
+4. Windows 무인 설치 — 지금 MSI 는 기기 전체 설치(perMachine)라 UAC 를 사람이 눌러야 한다. 사람 없이 끝내려면 사용자 설치
+   (perUser) 이행이나 관리자 예약 작업 같은 설치 모델 결정이 따로 필요하다. 나쵸의 `kasaterm_update` 범위 검사가 msi 이름을
+   받는지도 나쵸 쪽에서 확인해야 한다(이 저장소의 가짜 나쵸 검사는 이름 모양을 보지 않는다).
+5. mac 판 서명 — CI 가 굽는 판은 자체 서명·미공증이라 이 창구가 **팀·공증 검사에서 거절한다**(의도한 것). 릴리스는
    조종 기기가 Developer ID 서명·공증한 dmg 를 올리고 CI 는 검증만 하는 길(`MAC_ARTIFACT: local`)로 간다 —
    [fast-patch-release.md](fast-patch-release.md) 「서명·공증」.
 
 ## 검사
 
 ```sh
-cargo test -p kasa-socket app_update      # 32건 — 기기(가짜 받기·가짜 dmg·실제 sh 도우미·가짜 앱)·러너(가짜 기기·가짜 시계)
+cargo test -p kasa-socket app_update      # 기기(가짜 받기·가짜 dmg·실제 sh 도우미·가짜 앱)·러너(가짜 기기·가짜 시계)
+                                          # Windows 에선 실제 PowerShell 도우미·가짜 msiexec(.cmd)로 설치·실패·바뀐 msi·상한까지
 cargo test -p kasa-mcp update_http_e2e    # 4건 — 기기 서버 둘을 실제 HTTP 로 띄워 러너가 두드린다·중계 창구 거름
 python3 -m unittest tools.release.tests.test_fastpatch   # rollout·device-apply·작업 모양·id·해시 대조 포함
 bash scripts/nacho-update-interop.sh      # 실제 나쵸 승인 서버(격리)와 왕복 — 고정 자료·소비·창·거둠·창구 닫힘·틀린 키

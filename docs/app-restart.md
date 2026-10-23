@@ -101,8 +101,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 - 도우미 env 허용목록: `SystemRoot`·`PATH`(System32·Windows·PowerShell 폴더로 고정)·`SystemDrive`·`windir`·`ComSpec`·
   `USERPROFILE`·`USERNAME`·`USERDOMAIN`·`HOMEDRIVE`·`HOMEPATH`·`APPDATA`·`LOCALAPPDATA`·`TEMP`·`TMP`·`ProgramData`·
   `ProgramFiles`·`PROCESSOR_ARCHITECTURE`.
-- 원격 「업데이트」([app-update.md](app-update.md))는 아직 mac 만이다 — Windows 기기는 `unsupported_os` 로 거절하고 자기 업데이터
-  (WinSparkle)로 받는다.
+- 원격 「업데이트」의 Windows 길(msiexec·UAC)은 [app-update.md](app-update.md) 「Windows」.
 
 ## 다시 켜면 이어지는 것 / 아닌 것
 
