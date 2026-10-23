@@ -3258,7 +3258,12 @@ impl Backend for PtyBackend {
         let shell = live.shell_pid().ok_or_else(||anyhow::anyhow!("live process identity unavailable"))?;
         let table = kasa_pty::fresh_process_table();
         let (kind,pid) = kasa_pty::agent_pid_for_shell(&table,shell).ok_or_else(||anyhow::anyhow!("target is a shell or unknown process"))?;
+        // 그 claude 에 실린 연결 mod(pid 가 맞는 것만 live)가 지금 대화를 안다. 화면 안 `/resume`·`/clear` 는 같은
+        // 프로세스에서 대화만 바꿔 명령줄 `--session-id` 가 옛 값으로 남는다(2026-10-23: 재시작 뒤 새 세션으로
+        // 떴다가 /resume 한 칸의 tell 이 「bound conversation differs」로 거절됐다).
+        let mod_session = kasa_mcp::claude_mod::live(surface).map(|state| state.session).filter(|sid| is_uuid(sid));
         let current = match kind {
+            kasa_pty::AgentKind::Claude if mod_session.is_some() => mod_session.unwrap_or_default(),
             kasa_pty::AgentKind::Claude => {
                 let command = kasa_pty::process_cmdline(pid).ok_or_else(||anyhow::anyhow!("current Claude command unavailable"))?;
                 let words: Vec<_> = command.split_whitespace().collect();
@@ -7507,10 +7512,14 @@ fn attach_target_from_cmdline(shell_pid: u32) -> Option<String> {
     let tokens: Vec<&str> = argv.split_whitespace().collect();
     for (i, tok) in tokens.iter().enumerate() {
         if *tok == "attach" {
-            return tokens
-                .get(i + 1)
-                .filter(|v| is_uuid(v))
-                .map(|v| (*v).to_string());
+            // `claude --bg` 가 찍어 주는 짧은 번호(8자리)로 붙는 게 보통이다 — 그 번호의 세션으로 푼다.
+            let target = tokens.get(i + 1)?.trim_matches('"');
+            return match is_uuid(target) {
+                true => Some(target.to_string()),
+                false => (target.len() == 8 && target.chars().all(|c| c.is_ascii_hexdigit()))
+                    .then(|| resolve_sid8(&target.to_ascii_lowercase()))
+                    .flatten(),
+            };
         }
     }
     None
@@ -7539,6 +7548,14 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
         .max()
     {
         return Some(p);
+    }
+    // Windows 칸의 claude 는 손자다(cmd → claude.cmd 의 sh → bash → claude.exe). 직속 자식만 보면 훅 없는
+    // 발견이 늘 비어, 훅이 한 번 묶기를 건너뛰면(재시작 뒤 이어 켠 칸) 아무도 다시 묶지 못했다.
+    #[cfg(windows)]
+    if let Some((kasa_pty::AgentKind::Claude, pid)) =
+        kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell_pid)
+    {
+        return Some(pid);
     }
     // 2) Background (claude daemon): claude wraps the shell. Walk the parent chain
     //    and take the first claude (`claude --session-id … → zsh`).

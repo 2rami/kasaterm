@@ -73,13 +73,19 @@ marker="/tmp/kasaterm-bound-${KASATERM_PANE_ID//[^A-Za-z0-9]/_}"
 # 재-bind를 건너뛴다(=그 pane이 board에서 사라짐). sock이 새로 생기면 inode가
 # 바뀌므로 자동으로 재-bind 된다.
 sock="${KASATERM_SOCKET_PATH:-$HOME/.config/kasaterm/daemon.sock}"
-sig="$(stat -f %i "$sock" 2>/dev/null || stat -c %i "$sock" 2>/dev/null):$tp"
+gen="$(stat -f %i "$sock" 2>/dev/null || stat -c %i "$sock" 2>/dev/null)"
+# Windows 소켓은 이름 있는 파이프라 그 경로에 파일이 없어 inode 가 빈다. 그러면 앱을 다시 켜도 표식이
+# 그대로라, 같은 대화로 이어 켜진 칸이 새 앱에 안 묶여 tell 이 전부 거절됐다(2026-10-23 0.2.160 업데이트).
+# 앱이 뜰 때마다 소켓 짝으로 새로 쓰는 포트 파일의 시각으로 세대를 가른다.
+port_file="${sock%.sock}.mcp_port"
+[ -z "$gen" ] && gen="p$(stat -c %Y "$port_file" 2>/dev/null)"
+sig="$gen:$tp"
 [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] && exit 0
 # 소켓 birth = 이번 GUI 세대 시작 시각. roster 의 옛 세대 항목(ts < birth) 을
 # archive 하는 기준(아래 python). birth 미지원(Linux %W=0)이면 mtime 으로 폴백 —
-# 소켓은 bind-server 시작 때 한 번 생기므로 mtime≈birth.
+# 소켓은 bind-server 시작 때 한 번 생기므로 mtime≈birth. 파일이 없는 파이프면 포트 파일 시각.
 sock_birth="$(stat -f %B "$sock" 2>/dev/null || stat -c %W "$sock" 2>/dev/null)"
-case "$sock_birth" in ''|0) sock_birth="$(stat -f %m "$sock" 2>/dev/null || stat -c %Y "$sock" 2>/dev/null)";; esac
+case "$sock_birth" in ''|0) sock_birth="$(stat -f %m "$sock" 2>/dev/null || stat -c %Y "$sock" 2>/dev/null || stat -c %Y "$port_file" 2>/dev/null)";; esac
 sock_birth="${sock_birth:-0}"
 if kasaterm-cli bind-transcript "$tp" >/dev/null 2>&1; then
   printf '%s' "$sig" > "$marker"

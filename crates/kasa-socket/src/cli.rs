@@ -3639,9 +3639,39 @@ fn resolve_socket_path() -> Result<String> {
     let default = "/tmp/cmux.sock".to_string();
     #[cfg(windows)]
     let default = r"\\.\pipe\cmux".to_string();
-    Ok(std::env::var("KASATERM_SOCKET_PATH")
+    let path = std::env::var("KASATERM_SOCKET_PATH")
         .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
-        .unwrap_or(default))
+        .unwrap_or(default);
+    #[cfg(windows)]
+    if let Some(live) = live_app_pipe_instead_of(&path) {
+        return Ok(live);
+    }
+    Ok(path)
+}
+
+/// 앱을 다시 켜기 전부터 돌던 프로세스(배경 claude 세션 등)는 옛 앱의 소켓 이름(`kasaterm-<옛 pid>.sock`)을 물고 있어
+/// 아무 명령도 못 붙었다. 그 파이프가 없고 지금 살아 있는 카사텀 파이프가 하나뿐이면 그리로 간다 — 둘 이상이면
+/// 고르지 않는다(검증 리그로 샐 수 있다).
+#[cfg(windows)]
+fn live_app_pipe_instead_of(path: &str) -> Option<String> {
+    let name = Path::new(path).file_name()?.to_string_lossy().into_owned();
+    let app_pipe = |n: &str| n.starts_with("kasaterm-") && n.ends_with(".sock");
+    if !app_pipe(&name) {
+        return None;
+    }
+    let pipes: Vec<String> = std::fs::read_dir(r"\\.\pipe\")
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    if pipes.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+        return None;
+    }
+    let mut live = pipes.into_iter().filter(|p| app_pipe(p));
+    match (live.next(), live.next()) {
+        (Some(only), None) => Some(format!(r"\\.\pipe\{only}")),
+        _ => None,
+    }
 }
 
 fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
