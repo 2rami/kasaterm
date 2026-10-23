@@ -85,11 +85,17 @@ pub struct Facts {
 }
 
 impl Facts {
-    /// 설치본 번들 안의 실행 파일 — 도우미가 생존·재기동을 이 경로로 잰다.
+    /// 설치본 안의 실행 파일 — 도우미가 생존·재기동을 이 경로로 잰다. 맥은 번들, Windows 는 MSI 설치 폴더의 `bin`.
     pub fn app_exe(&self) -> String {
+        if self.os == "windows" {
+            return format!("{}\\bin\\kasaterm.exe", self.app_path.trim_end_matches('\\'));
+        }
         format!("{}/Contents/MacOS/kasaterm", self.app_path.trim_end_matches('/'))
     }
 }
+
+/// 이 계약으로 재시작하는 OS — 판정은 대상이 보고한 `os` 로 하므로 판정하는 호스트와 무관하다.
+const SUPPORTED_OS: [&str; 2] = ["macos", "windows"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -112,7 +118,7 @@ impl Refusal {
         match self {
             Self::Unreachable { reason } => format!("기기에 닿지 못했다 · {reason}"),
             Self::IdentityMismatch { asked, got } => format!("물은 기기({asked})가 아닌 기기({got})가 답했다"),
-            Self::UnsupportedOs { os } => format!("지원하지 않는 OS({os}) — 지금은 macOS 만"),
+            Self::UnsupportedOs { os } => format!("지원하지 않는 OS({os}) — 지금은 macOS·Windows 만"),
             Self::CapabilityMissing { have, need } => format!("이 기기 앱엔 재시작 창구가 없다(판 {have} < {need}) — 새 판 설치 뒤 한 번은 사람이 재시작"),
             Self::NotInstalledApp { running } => format!("설치본으로 도는 앱이 아니다({running}) — 개발 실행은 재시작하지 않는다"),
             Self::BusyStudents { panes } => format!(
@@ -135,13 +141,13 @@ pub fn refusals(asked: &str, facts: &Facts, now_ms: u64) -> Vec<Refusal> {
     if facts.machine_id != asked {
         out.push(Refusal::IdentityMismatch { asked: asked.into(), got: facts.machine_id.clone() });
     }
-    if facts.os != "macos" {
+    if !SUPPORTED_OS.contains(&facts.os.as_str()) {
         out.push(Refusal::UnsupportedOs { os: facts.os.clone() });
     }
     if facts.capability < CAPABILITY {
         out.push(Refusal::CapabilityMissing { have: facts.capability, need: CAPABILITY });
     }
-    if facts.running_exe != facts.app_exe() || !valid_app_path(&facts.app_path) {
+    if facts.running_exe != facts.app_exe() || !valid_app_path(&facts.os, &facts.app_path) {
         out.push(Refusal::NotInstalledApp { running: facts.running_exe.clone() });
     }
     if !facts.busy.is_empty() {
@@ -166,10 +172,18 @@ pub fn refusals(asked: &str, facts: &Facts, now_ms: u64) -> Vec<Refusal> {
     out
 }
 
-/// 재기동에 쓸 번들 경로로 받아들이는 모양 — 사용자·시스템 Applications 의 `kasaterm.app` 만.
-/// 임의 경로를 `open -a` 에 넘기지 않는다. 대상은 늘 macOS(`refusals` 의 os 검사)라 이건 맥 경로다 —
-/// 판정하는 쪽이 Windows 여도 같은 답이 나오게 호스트 `Path` 가 아니라 POSIX 규칙으로 잰다.
-pub fn valid_app_path(path: &str) -> bool {
+/// 재기동에 쓸 설치본 경로로 받아들이는 모양 — 맥은 사용자·시스템 Applications 의 `kasaterm.app`, Windows 는 MSI 가
+/// 까는 `<드라이브>:\Program Files\kasaterm` 만. 임의 경로를 재기동에 넘기지 않는다. 판정하는 쪽 OS 와 무관하게 같은 답이
+/// 나오게 호스트 `Path` 가 아니라 대상 OS 의 글자 규칙으로 잰다.
+pub fn valid_app_path(os: &str, path: &str) -> bool {
+    if os == "windows" {
+        let drive = path.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic());
+        return drive && path.get(1..3) == Some(":\\")
+            && path.get(3..).is_some_and(|rest| rest.trim_end_matches('\\').eq_ignore_ascii_case("Program Files\\kasaterm"));
+    }
+    if os != "macos" {
+        return false;
+    }
     let Some(rest) = path.strip_prefix('/') else { return false };
     let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
     matches!(parts.as_slice(), [.., "Applications", "kasaterm.app"]) && !parts.contains(&"..")
@@ -687,15 +701,22 @@ pub struct HelperSpec {
     pub old_pid: u32,
     /// 생존·재기동을 재는 실행 파일 경로(`Facts::app_exe`).
     pub app_exe: String,
-    /// 다시 띄우는 명령. 운영은 `launch_command(app_path)` 뿐이다.
+    /// 다시 띄우는 명령. 운영은 `launch_command(os, app_path)` 뿐이다.
     pub launch: Vec<String>,
     pub exit_timeout_s: u32,
     pub boot_timeout_s: u32,
 }
 
-/// 운영에서 쓰는 유일한 재기동 명령 — LaunchServices 가 띄우므로 새 앱은 도우미의 env 를 안 물려받는다.
-pub fn launch_command(app_path: &str) -> Result<Vec<String>> {
-    ensure!(valid_app_path(app_path), "launch path is not an installed kasaterm.app: {app_path}");
+/// 운영에서 쓰는 유일한 재기동 명령 — 맥은 LaunchServices, Windows 는 사용자 셸(explorer)이 띄우므로 새 앱은 도우미의
+/// 좁힌 env 를 안 물려받고 사용자 세션의 env 그대로 뜬다. explorer 는 띄우고도 1 로 끝나 성공 여부를 종료 코드로 못 가린다 —
+/// 도우미는 새 프로세스가 보이는지로 잰다.
+pub fn launch_command(os: &str, app_path: &str) -> Result<Vec<String>> {
+    ensure!(valid_app_path(os, app_path), "launch path is not an installed kasaterm: {app_path}");
+    if os == "windows" {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let exe = Facts { os: os.into(), app_path: app_path.into(), ..Default::default() }.app_exe();
+        return Ok(vec![format!("{}\\explorer.exe", root.trim_end_matches('\\')), exe]);
+    }
     Ok(vec!["/usr/bin/open".into(), "-a".into(), app_path.into()])
 }
 
@@ -750,8 +771,97 @@ pub fn helper_env(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String, String)>
     env
 }
 
-/// 재시작 도우미는 sh 스크립트라 유닉스 전용이다. 없는 플랫폼에서는 띄우지 않고 오류로 돌린다 — 호출부를 cfg 로 가르지 않아도 Windows 빌드가 선다.
-#[cfg(not(unix))]
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Windows 도우미 — sh 도우미와 같은 단계·같은 상태 줄·같은 상한, 강제 종료 없음. 옛 앱은 pid 가 아니라 프로세스 핸들로
+/// 기다린다 — 꺼진 뒤 그 pid 가 다른 프로세스에 다시 쓰이면 pid 로 재는 기다림은 상한까지 헛돈다. 앱은 실행 파일 경로가
+/// 같은 프로세스로만 센다(대소문자 무시 — Windows 경로).
+pub fn helper_powershell(spec: &HelperSpec) -> Result<String> {
+    ensure!(valid_job_id(&spec.job_id), "invalid job id");
+    ensure!(!spec.launch.is_empty(), "launch command is empty");
+    let events = ps_quote(&events_path(&spec.dir, &spec.job_id).display().to_string());
+    let exe = ps_quote(&spec.app_exe);
+    let program = ps_quote(&spec.launch[0]);
+    let args = spec.launch[1..].iter().map(|a| ps_quote(a)).collect::<Vec<_>>().join(" ");
+    let (pid, exit_ms, boot_ticks) = (spec.old_pid, u64::from(spec.exit_timeout_s) * 1000, spec.boot_timeout_s * 5);
+    Ok(format!(
+        r#"$ErrorActionPreference = 'Continue'
+function ev($state, $note) {{ [IO.File]::AppendAllText({events}, "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $state $note`n") }}
+function running($skip) {{ Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne $skip -and $_.Path -and $_.Path -ieq {exe} }} | Select-Object -First 1 -ExpandProperty Id }}
+ev 'helper_started' "pid $PID"
+try {{ $old = [Diagnostics.Process]::GetProcessById({pid}) }} catch {{ $old = $null }}
+if ($old -and -not $old.WaitForExit({exit_ms})) {{ ev 'failed' 'app did not exit in time; not forcing'; exit 1 }}
+ev 'exited' ''
+$other = running {pid}
+if ($other) {{ ev 'failed' "another instance is already running (pid $other); not launching a second"; exit 1 }}
+ev 'relaunching' ''
+try {{ & {program} {args} }} catch {{ ev 'failed' 'launch command failed'; exit 1 }}
+$j = 0
+while ($true) {{
+  $new = running {pid}
+  if ($new) {{ break }}
+  $j++; if ($j -gt {boot_ticks}) {{ ev 'failed' 'no new app process in time'; exit 1 }}
+  Start-Sleep -Milliseconds 200
+}}
+ev 'launched' "pid $new"
+"#
+    ))
+}
+
+/// Windows 도우미 env — 허용목록뿐이다. PowerShell 이 서는 데 필요한 시스템 값과 사용자 폴더만 넘기고, claude 마커·토큰·
+/// 카사텀 소켓 경로는 안 넘긴다. 새 앱은 explorer 가 띄우므로 이 env 를 어차피 안 물려받는다.
+pub fn helper_env_windows(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let root = get("SystemRoot").filter(|v| !v.is_empty()).unwrap_or_else(|| r"C:\Windows".into());
+    let mut env = vec![
+        ("SystemRoot".to_string(), root.clone()),
+        ("PATH".to_string(), format!(r"{root}\System32;{root};{root}\System32\WindowsPowerShell\v1.0")),
+    ];
+    for key in ["SystemDrive", "windir", "ComSpec", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH",
+        "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "ProgramData", "ProgramFiles", "PROCESSOR_ARCHITECTURE"] {
+        if let Some(value) = get(key).filter(|v| !v.is_empty()) {
+            env.push((key.to_string(), value));
+        }
+    }
+    env
+}
+
+/// 도우미를 띄운다 — 스크립트는 작업 옆 `.helper.ps1`(UTF-8 BOM: Windows PowerShell 5 는 BOM 없는 파일을 ANSI 로 읽어
+/// 한글 경로가 깨진다), 창 없이, 새 프로세스 그룹, 출력은 작업 옆 로그. 앱이 job object 안에서 돌아도 앱과 함께 꺼지지
+/// 않게 job 에서 빠져나오고, job 이 그걸 막으면 빠져나오기 없이 띄운다.
+#[cfg(windows)]
+pub fn spawn_helper(spec: &HelperSpec) -> Result<u32> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    std::fs::create_dir_all(&spec.dir)?;
+    let script = spec.dir.join(format!("{}.helper.ps1", spec.job_id));
+    std::fs::write(&script, [b"\xEF\xBB\xBF".as_slice(), helper_powershell(spec)?.as_bytes()].concat())?;
+    let env = helper_env_windows(&|k| std::env::var(k).ok());
+    let root = env[0].1.clone();
+    let spawn = |flags: u32| -> std::io::Result<std::process::Child> {
+        let log = std::fs::File::create(spec.dir.join(format!("{}.helper.log", spec.job_id)))?;
+        let err = log.try_clone()?;
+        std::process::Command::new(format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"))
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .env_clear()
+            .envs(env.iter().cloned())
+            .stdin(std::process::Stdio::null())
+            .stdout(log)
+            .stderr(err)
+            .creation_flags(flags)
+            .spawn()
+    };
+    let base = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    let child = spawn(base | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| spawn(base))?;
+    Ok(child.id())
+}
+
+/// 도우미가 없는 플랫폼에서는 띄우지 않고 오류로 돌린다 — 호출부를 cfg 로 가르지 않아도 빌드가 선다.
+#[cfg(not(any(unix, windows)))]
 pub fn spawn_helper(_spec: &HelperSpec) -> Result<u32> {
     anyhow::bail!("app restart helper is not supported on this platform")
 }
@@ -937,7 +1047,7 @@ mod tests {
     fn every_unsafe_condition_is_a_named_refusal() {
         assert!(refusals("m", &facts("m", 1), NOW).is_empty());
         let mut f = facts("m", 1);
-        f.os = "windows".into();
+        f.os = "linux".into();
         f.capability = 0;
         f.running_exe = "/repo/target/debug/kasaterm".into();
         f.busy = vec![BusyPane { surface: "%1".into(), character: "치나츠".into(), state: "working".into() }];
@@ -956,16 +1066,73 @@ mod tests {
 
     #[test]
     fn only_installed_bundles_can_be_relaunched() {
-        assert!(valid_app_path("/Users/x/Applications/kasaterm.app"));
-        assert!(valid_app_path("/Applications/kasaterm.app"));
-        assert!(valid_app_path("/Applications/kasaterm.app/"));
-        // 맥 경로 계약이라 판정하는 호스트와 무관하다 — Windows 꼴은 어디서든 거부.
+        assert!(valid_app_path("macos", "/Users/x/Applications/kasaterm.app"));
+        assert!(valid_app_path("macos", "/Applications/kasaterm.app"));
+        assert!(valid_app_path("macos", "/Applications/kasaterm.app/"));
+        // 대상 OS 의 경로 계약이라 판정하는 호스트와 무관하다 — Windows 꼴은 맥 대상에서 어디서든 거부.
         for bad in ["/tmp/kasaterm.app", "/Users/x/Applications/Other.app", "Applications/kasaterm.app", "/Users/x/Applications/../kasaterm.app",
-            "/Users/x/Applications/../Applications/kasaterm.app", r"C:\Users\x\Applications\kasaterm.app", r"\Applications\kasaterm.app", ""] {
-            assert!(!valid_app_path(bad), "{bad}");
-            assert!(launch_command(bad).is_err());
+            "/Users/x/Applications/../Applications/kasaterm.app", r"C:\Users\x\Applications\kasaterm.app", r"\Applications\kasaterm.app",
+            r"C:\Program Files\kasaterm", ""] {
+            assert!(!valid_app_path("macos", bad), "{bad}");
+            assert!(launch_command("macos", bad).is_err());
         }
-        assert_eq!(launch_command("/Applications/kasaterm.app").unwrap(), vec!["/usr/bin/open", "-a", "/Applications/kasaterm.app"]);
+        assert_eq!(launch_command("macos", "/Applications/kasaterm.app").unwrap(), vec!["/usr/bin/open", "-a", "/Applications/kasaterm.app"]);
+        assert!(!valid_app_path("linux", "/Applications/kasaterm.app"));
+    }
+
+    #[test]
+    fn only_the_msi_install_folder_is_relaunched_on_windows() {
+        for good in [r"C:\Program Files\kasaterm", r"D:\Program Files\kasaterm\", r"c:\program files\KASATERM"] {
+            assert!(valid_app_path("windows", good), "{good}");
+        }
+        for bad in [r"C:\Program Files\kasaterm\bin", r"C:\Users\x\kasaterm", r"C:\Program Files\kasaterm\..\x", r"C:Program Files\kasaterm",
+            r"\\server\Program Files\kasaterm", r"C:\Program Files (x86)\kasaterm", "/Applications/kasaterm.app", "한:\\Program Files\\kasaterm", ""] {
+            assert!(!valid_app_path("windows", bad), "{bad}");
+            assert!(launch_command("windows", bad).is_err());
+        }
+        let launch = launch_command("windows", r"C:\Program Files\kasaterm").unwrap();
+        assert!(launch[0].ends_with(r"\explorer.exe"), "사용자 셸이 띄워 도우미 env 를 안 물려받는다: {launch:?}");
+        assert_eq!(launch[1..], [r"C:\Program Files\kasaterm\bin\kasaterm.exe"]);
+        let win = Facts {
+            os: "windows".into(), app_path: r"C:\Program Files\kasaterm".into(),
+            running_exe: r"C:\Program Files\kasaterm\bin\kasaterm.exe".into(), ..facts("m", 1)
+        };
+        assert!(refusals("m", &win, NOW).is_empty(), "{:?}", refusals("m", &win, NOW));
+        let dev = Facts { running_exe: r"C:\repo\target\release\kasaterm.exe".into(), ..win };
+        assert!(matches!(refusals("m", &dev, NOW)[..], [Refusal::NotInstalledApp { .. }]), "개발 실행은 재시작하지 않는다");
+    }
+
+    #[test]
+    fn windows_helper_waits_by_handle_never_forces_and_quotes_paths() {
+        let spec = HelperSpec {
+            dir: PathBuf::from(r"C:\Users\x\.config\kasaterm\app-restart"), job_id: job_id("plan", "m"), old_pid: 4242,
+            app_exe: r"C:\Program Files\kasaterm\bin\kasaterm.exe".into(),
+            launch: vec![r"C:\Windows\explorer.exe".into(), r"C:\it's\kasaterm.exe".into()], exit_timeout_s: 60, boot_timeout_s: 90,
+        };
+        let script = helper_powershell(&spec).unwrap();
+        assert!(script.contains("GetProcessById(4242)") && script.contains("WaitForExit(60000)"), "pid 재사용에 안 속게 핸들로 기다린다");
+        assert!(script.contains(r"'C:\it''s\kasaterm.exe'"), "작은따옴표를 PowerShell 식으로 감싼다");
+        assert!(script.contains("-gt 450"), "부팅 상한 90초 = 0.2초 × 450");
+        for forbidden in ["Stop-Process", "taskkill", ".Kill(", "Remove-Item"] {
+            assert!(!script.contains(forbidden), "{forbidden}");
+        }
+        assert!(helper_powershell(&HelperSpec { launch: vec![], ..spec.clone() }).is_err());
+        assert!(helper_powershell(&HelperSpec { job_id: "../x".into(), ..spec }).is_err());
+    }
+
+    #[test]
+    fn windows_helper_env_is_an_allowlist() {
+        let env = helper_env_windows(&|k| match k {
+            "SystemRoot" => Some(r"C:\Windows".into()),
+            "USERPROFILE" => Some(r"C:\Users\x".into()),
+            "PATH" => Some(r"C:\Users\x\bin;C:\leak".into()),
+            "CLAUDECODE" | "CLAUDE_CODE_SESSION_ID" | "KASATERM_SOCKET_PATH" | "OG_API_KEY" => Some("leak".into()),
+            _ => None,
+        });
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["SystemRoot", "PATH", "USERPROFILE"]);
+        assert_eq!(env[1].1, r"C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0", "PATH 는 시스템 폴더로 고정");
+        assert!(env.iter().all(|(_, v)| v != "leak"));
     }
 
     #[test]
@@ -1401,6 +1568,91 @@ mod tests {
         assert_eq!(wait_state(&dir, &j.job_id, JobState::Launched, 10), JobState::Launched);
         let note = job_status(&dir, &j.job_id).unwrap().events.last().unwrap().note.clone();
         let _ = std::process::Command::new("/bin/kill").arg(note.trim_start_matches("pid ")).status();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows 가짜 앱 — 설치 폴더 꼴 경로(`…\kasaterm\bin\kasaterm.exe`)에 놓은 PowerShell 사본이 30초 잔다. 실행 파일 경로가
+    /// 앱 경로라 도우미의 「같은 앱」 판정이 실제 앱처럼 걸린다.
+    #[cfg(windows)]
+    fn fake_app_win(dir: &Path) -> String {
+        let exe = dir.join(r"kasaterm\bin\kasaterm.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let root = std::env::var("SystemRoot").unwrap();
+        std::fs::copy(format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"), &exe).unwrap();
+        exe.display().to_string()
+    }
+
+    #[cfg(windows)]
+    fn start_fake_win(exe: &str) -> std::process::Child {
+        std::process::Command::new(exe).args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 30"]).spawn().unwrap()
+    }
+
+    /// 재기동 명령 대역 — explorer 처럼 띄우고 곧바로 돌아온다.
+    #[cfg(windows)]
+    fn fake_launch_win(exe: &str) -> Vec<String> {
+        let root = std::env::var("SystemRoot").unwrap();
+        vec![format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"), "-NoProfile".into(), "-Command".into(),
+             format!("Start-Process -FilePath '{exe}' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 30'")]
+    }
+
+    #[cfg(windows)]
+    fn stop_pid(pid: u32) {
+        // 검사가 띄운 가짜 앱만 — 도우미가 적은 pid 로 끈다.
+        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_waits_for_exit_relaunches_and_records_the_new_pid() {
+        let dir = tmp("win-helper-ok");
+        let exe = fake_app_win(&dir);
+        let mut old = start_fake_win(&exe);
+        let j = Job { old_pid: old.id(), ..job("m") };
+        create_job(&dir, &j).unwrap();
+        spawn_helper(&spec(&dir, &exe, old.id(), fake_launch_win(&exe), 10)).unwrap();
+        assert_eq!(wait_state(&dir, &j.job_id, JobState::HelperStarted, 15), JobState::HelperStarted);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(job_status(&dir, &j.job_id).unwrap().state, JobState::HelperStarted, "앱이 살아 있는 동안은 기다린다");
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_state(&dir, &j.job_id, JobState::Launched, 20), JobState::Launched,
+            "{:?}", std::fs::read_to_string(dir.join(format!("{}.helper.log", j.job_id))));
+        let note = job_status(&dir, &j.job_id).unwrap().events.last().unwrap().note.clone();
+        let new_pid: u32 = note.trim_start_matches("pid ").parse().unwrap();
+        assert_ne!(new_pid, j.old_pid);
+        stop_pid(new_pid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_never_forces_an_app_that_does_not_exit() {
+        let dir = tmp("win-helper-stuck");
+        let exe = fake_app_win(&dir);
+        let mut app = start_fake_win(&exe);
+        let j = Job { old_pid: app.id(), ..job("m") };
+        create_job(&dir, &j).unwrap();
+        spawn_helper(&spec(&dir, &exe, app.id(), fake_launch_win(&exe), 1)).unwrap();
+        assert_eq!(wait_state(&dir, &j.job_id, JobState::Failed, 20), JobState::Failed);
+        assert!(app.try_wait().unwrap().is_none(), "안 꺼지는 앱을 죽이지 않았다");
+        app.kill().unwrap();
+        let _ = app.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_refuses_to_launch_a_second_instance() {
+        let dir = tmp("win-helper-second");
+        let exe = fake_app_win(&dir);
+        let mut other = start_fake_win(&exe);
+        let j = Job { old_pid: 999_999, ..job("m") };
+        create_job(&dir, &j).unwrap();
+        spawn_helper(&spec(&dir, &exe, 999_999, fake_launch_win(&exe), 2)).unwrap();
+        assert_eq!(wait_state(&dir, &j.job_id, JobState::Failed, 20), JobState::Failed);
+        assert!(job_status(&dir, &j.job_id).unwrap().events.iter().any(|e| e.note.contains("another instance")));
+        other.kill().unwrap();
+        let _ = other.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

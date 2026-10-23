@@ -73,7 +73,7 @@ fn start_driving(
                 effects: &effects,
                 public_key: update::ED_PUBLIC_KEY,
                 enabled: enabled(),
-                launch: kasa_socket::app_restart::launch_command(&app_path).map_err(|e| e.to_string())?,
+                launch: kasa_socket::app_restart::launch_command(std::env::consts::OS, &app_path).map_err(|e| e.to_string())?,
                 exit_timeout_s: 60,
                 boot_timeout_s: 90,
             };

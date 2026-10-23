@@ -8,6 +8,12 @@ use super::*;
 use std::io::{Read, Write};
 use kasa_socket::app_restart::{ApprovalView, Authority, BinaryId, BusyPane, Facts, HelperSpec, JobRequest, PendingInstall, CAPABILITY, SCHEMA};
 
+/// 실행 파일에서 설치본까지 — 맥 `kasaterm.app/Contents/MacOS/kasaterm`, Windows `kasaterm\bin\kasaterm.exe`.
+#[cfg(windows)]
+const INSTALL_DEPTH: usize = 2;
+#[cfg(not(windows))]
+const INSTALL_DEPTH: usize = 3;
+
 fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
     meta.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -95,7 +101,7 @@ impl App {
             label: kasa_mcp::machines::self_label(),
             os: std::env::consts::OS.into(),
             capability: CAPABILITY,
-            app_path: exe.as_ref().and_then(|p| p.ancestors().nth(3)).map(|p| p.display().to_string()).unwrap_or_default(),
+            app_path: exe.as_ref().and_then(|p| p.ancestors().nth(INSTALL_DEPTH)).map(|p| p.display().to_string()).unwrap_or_default(),
             pid: std::process::id(),
             running_exe: exe.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             binary,
@@ -205,7 +211,7 @@ pub(crate) fn accept_restart(facts: &Facts, req: &JobRequest, proxy: &winit::eve
             job_id: req.job.job_id.clone(),
             old_pid: facts.pid,
             app_exe: facts.app_exe(),
-            launch: kasa_socket::app_restart::launch_command(&facts.app_path).map_err(|e| e.to_string())?,
+            launch: kasa_socket::app_restart::launch_command(&facts.os, &facts.app_path).map_err(|e| e.to_string())?,
             exit_timeout_s: 60,
             boot_timeout_s: 90,
         };
