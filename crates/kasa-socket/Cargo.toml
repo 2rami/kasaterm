@@ -43,6 +43,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_SystemServices",
     # kasaterm-cli share new 가 폴더 이름에 이 기기 날짜를 붙인다.
     "Win32_System_SystemInformation",
+    # 쪽지를 버릴 시각(tell::clock_hm)을 이 기기 현지 시각으로.
+    "Win32_System_Time",
 ] }
 
 # 터미널 가로 칸 수(TIOCGWINSZ)를 읽으려고. 상수도 구조체도 OS 마다 달라 손으로

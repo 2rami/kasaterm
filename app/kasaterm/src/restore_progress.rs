@@ -685,6 +685,11 @@ pub(crate) fn last_used_label(state: &serde_json::Value) -> String {
                 local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min);
         }
     }
+    #[cfg(windows)]
+    if let Some(local) = crate::info_prompts::local_tm(saved) {
+        return format!("마지막 사용 · {:04}.{:02}.{:02} {:02}:{:02} ({relative})",
+            local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min);
+    }
     format!("마지막 사용 · {relative}")
 }
 

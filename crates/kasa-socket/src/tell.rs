@@ -85,6 +85,21 @@ pub fn clock_hm(ms: u64) -> Option<String> {
             return Some(format!("{:02}:{:02}", local.tm_hour, local.tm_min));
         }
     }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+        use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+        // FILETIME 은 1601-01-01 부터의 100ns 눈금이다.
+        let ticks = ms.saturating_mul(10_000).saturating_add(116_444_736_000_000_000);
+        let file = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+        let (mut utc, mut local): (SYSTEMTIME, SYSTEMTIME) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+        // 시간대를 비우면 지금 이 기기의 시간대(그 날짜의 서머타임 포함)로 옮긴다.
+        if unsafe { FileTimeToSystemTime(&file, &mut utc) } != 0
+            && unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) } != 0
+        {
+            return Some(format!("{:02}:{:02}", local.wHour, local.wMinute));
+        }
+    }
     let _ = ms;
     None
 }
@@ -413,6 +428,24 @@ mod tests {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
         Ledger::open(std::env::temp_dir().join(format!("kasa-tell-{}-{}-{n}",std::process::id(),now_ms())).join("ledger.json")).unwrap()
+    }
+    /// 쪽지 만료 시각은 이 기기 시계가 보이는 시각과 같아야 한다 — 시간대를 빼먹으면 UTC 로 9시간 어긋난다.
+    #[cfg(windows)]
+    #[test] fn expiry_clock_matches_the_local_wall_clock() {
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        for _ in 0..3 {
+            let mut before: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+            unsafe { GetLocalTime(&mut before) };
+            let hm = clock_hm(now_ms()).unwrap();
+            let mut after: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+            unsafe { GetLocalTime(&mut after) };
+            // 분 경계에 걸리면 어느 쪽이 맞는지 모르니 다시 잰다.
+            if (before.wHour, before.wMinute) == (after.wHour, after.wMinute) {
+                assert_eq!(hm, format!("{:02}:{:02}", before.wHour, before.wMinute));
+                return;
+            }
+        }
+        panic!("분 경계를 세 번 연달아 넘었다");
     }
     #[test] fn control_injection_is_rejected_and_crlf_normalizes() {
         assert_eq!(normalize("hello\r\nworld\t!").unwrap(), "hello\nworld\t!");
