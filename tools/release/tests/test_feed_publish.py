@@ -229,10 +229,13 @@ class FeedPublishTests(unittest.TestCase):
         self.assertEqual(result["state"], "already_published")
         calls.assert_called_once()
 
-    def test_preview_rejects_windows_and_malformed_feed(self):
-        with self.assertRaisesRegex(Refused, "macOS"):
-            feed_publish.Publisher(self.repo, "v0.2.2", "preview", self.tagged,
-                                   [self.candidate, feed_publish.Candidate("windows", b"", self.asset, self.candidate.sha256)])
+    def test_preview_rejects_a_mixed_bundle_and_malformed_feed(self):
+        windows = feed_publish.Candidate("windows", b"", self.asset, self.candidate.sha256)
+        for channel, candidates in (("preview", [self.candidate, windows]), ("stable", [windows]), ("preview", [])):
+            with self.subTest(channel=channel, platforms=[c.platform for c in candidates]), self.assertRaisesRegex(Refused, "피드 묶음"):
+                feed_publish.Publisher(self.repo, "v0.2.2", channel, self.tagged, candidates, openssl=OPENSSL["path"])
+        self.assertEqual((windows.destination("preview"), windows.destination("stable")),
+                         ("docs/appcast-win-preview.xml", "docs/appcast-win.xml"))
         for raw in (b"<bad/>", self.candidate.raw.replace(b"</item>", b"</item><item/>")):
             with self.assertRaises(Refused):
                 feed_publish.item(raw)
@@ -243,6 +246,37 @@ class FeedPublishTests(unittest.TestCase):
         self.assertEqual(sh(shallow, "git", "rev-parse", "--is-shallow-repository"), "true")
         self.publisher.repo = shallow
         self.assertEqual(self.publisher.publish()["state"], "published")
+
+    def preview_windows(self):
+        msi = self.root / "kasaterm-v0.2.2-windows-x86_64.msi"
+        msi.write_bytes(b"verified Windows installer")
+        windows = feed_publish.Candidate("windows", xml("0.2.2", self.sign(msi), msi.stat().st_size, "windows"), msi, sha256_file(msi))
+        self.release["assets"].append({"name": msi.name, "size": msi.stat().st_size, "digest": windows.sha256})
+        self.publisher.candidates = (windows,)
+        return windows
+
+    def test_windows_followup_publishes_only_the_windows_preview_feed(self):
+        windows = self.preview_windows()
+        result = self.publisher.publish()
+        self.assertEqual(self.remote_file("docs/appcast-win-preview.xml"), windows.raw)
+        self.assertEqual(self.remote_file("docs/appcast-win.xml"), b"Windows untouched")
+        self.assertEqual(self.remote_file("docs/appcast.xml"), b"stable untouched")
+        self.assertEqual(self.remote_file("docs/appcast-preview.xml"), b"<rss><channel/></rss>")
+        changed = sh(self.root, "git", "--git-dir", str(self.remote), "diff-tree", "--no-commit-id", "--name-only", "-r", result["commit"])
+        self.assertEqual(changed.splitlines(), ["docs/appcast-win-preview.xml"])
+        self.assertEqual(self.publisher.publish()["state"], "already_published")
+
+    def test_windows_followup_needs_a_tag_that_carries_windows(self):
+        (self.writer / CHANNEL_MANIFEST).write_text(json.dumps(channel_manifest("preview", "v0.2.2", self.tagged, ["macos"])))
+        mac_only = self.commit("mac-only preview fixture")
+        sh(self.writer, "git", "push", "-q", "origin", "main")
+        sh(self.root, "git", "--git-dir", str(self.remote), "update-ref", "refs/tags/v0.2.2", mac_only)
+        self.preview_windows()
+        self.publisher.commit = mac_only
+        with self.assertRaisesRegex(Refused, "플랫폼"):
+            self.publisher.publish()
+        listed = sh(self.root, "git", "--git-dir", str(self.remote), "ls-tree", "--name-only", "refs/heads/main", "docs/")
+        self.assertNotIn("docs/appcast-win-preview.xml", listed.splitlines())
 
     def stable_pair(self):
         (self.writer / CHANNEL_MANIFEST).write_text(json.dumps(channel_manifest("stable", "v0.2.2", self.tagged)))
@@ -496,6 +530,13 @@ class RetryClassificationTests(unittest.TestCase):
                     self.runner.run.side_effect = lambda *_args, **_kwargs: Result(1)
                 self.assertEqual(self.backend.appcast_retry_hint(self.run, self.plan), "")
 
+    def test_a_windows_followup_job_does_not_hide_the_publish_retry(self):
+        self.jobs.append({"name": "windows-followup", "status": "completed", "conclusion": "skipped", "databaseId": 14})
+        self.plan = {"channel": "preview", "platforms": ["macos", "windows"]}
+        self.assertIn("gh run rerun 42 --job 13 --repo 2rami/kasaterm", self.backend.appcast_retry_hint(self.run, self.plan))
+        self.jobs[-1]["conclusion"] = "success"
+        self.assertEqual(self.backend.appcast_retry_hint(self.run, self.plan), "", "게시가 끝난 뒤의 실패는 게시 job 재실행으로 가리지 않는다")
+
     def test_workflow_separates_signing_from_bounded_publication(self):
         workflow = (REPO / ".github/workflows/release.yml").read_text()
         publish = workflow.split("      - name: Publish verified appcasts\n", 1)[1]
@@ -528,6 +569,19 @@ class RetryClassificationTests(unittest.TestCase):
                 feed_publish.main(args)
         self.assertEqual(error.exception.code, 1)
         self.assertEqual(err.getvalue().splitlines()[0], "KASATERM_APPCAST_PAGES_UNFINISHED")
+
+    def test_cli_builds_a_windows_only_candidate_and_refuses_half_arguments(self):
+        args = ["--tag", "v0.2.2", "--channel", "preview", "--commit", "a" * 40,
+                "--windows", "feed", "--msi", "msi", "--msi-sha256", "b" * 64]
+        with mock.patch.object(feed_publish.Candidate, "read", side_effect=lambda platform, *_: platform), \
+                mock.patch.object(feed_publish, "Publisher") as publisher, mock.patch("builtins.print"):
+            publisher.return_value.publish.return_value = {"state": "published", "commit": "c" * 40}
+            feed_publish.main(args)
+            self.assertEqual(publisher.call_args.args[4], ["windows"])
+            for partial in (args + ["--mac", "feed"], args[:6] + ["--windows", "feed"]):
+                with self.subTest(partial=partial), self.assertRaises(SystemExit) as error:
+                    feed_publish.main(partial)
+                self.assertEqual(error.exception.code, 1)
 
     def test_cli_pages_failure_cannot_print_publication_success(self):
         args = ["--tag", "v0.2.2", "--channel", "preview", "--commit", "a" * 40,

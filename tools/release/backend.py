@@ -42,6 +42,12 @@ def asset_names(tag):
     return {"macos": f"kasaterm-{tag}.dmg", "windows": f"kasaterm-{tag}-windows-x86_64.msi"}
 
 
+def tag_run_platforms(plan):
+    """태그 실행이 내는 플랫폼. preview 의 Windows 는 mac 피드가 나간 뒤 같은 태그의 `windows` 실행이 따로 굽고 게시하므로
+    (common.ci_release_context) 여기서 기다리지 않는다 — Windows 굽기가 느리거나 실패해도 mac preview 가 늦거나 막히지 않는다."""
+    return ["macos"] if plan.get("channel") == "preview" else plan["platforms"]
+
+
 def parse_identity(text):
     auth = re.search(r"^Authority=(.+)$", text, re.M)
     team = re.search(r"^TeamIdentifier=(.+)$", text, re.M)
@@ -219,8 +225,11 @@ class RealBackend:
             rows = json.loads(view.out).get("jobs", [])
             jobs = {job["name"]: job for job in rows}
             expected = {"resolve": "success", "build-dmg": "success", "appcast": "failure",
-                        "build-msi": "success" if "windows" in plan["platforms"] else "skipped"}
-            if len(rows) != 4 or set(jobs) != set(expected):
+                        "build-msi": "success" if "windows" in tag_run_platforms(plan) else "skipped"}
+            # Windows 덤 실행을 부르는 job 은 게시가 끝나야 돈다. 그 job 이 없던 판의 실행도 같은 길로 다시 돌린다.
+            if "windows-followup" in jobs:
+                expected["windows-followup"] = "skipped"
+            if len(rows) != len(expected) or set(jobs) != set(expected):
                 return None
             if any(jobs[name].get("status") != "completed" or jobs[name].get("conclusion") != conclusion
                    for name, conclusion in expected.items()):
@@ -733,7 +742,7 @@ class RealBackend:
         if release.get("isDraft") or bool(release.get("isPrerelease")) != (plan["channel"] == "preview"):
             raise Refused("릴리스의 공개 상태·채널이 계획과 다르다")
         assets = {a["name"]: a for a in release.get("assets", [])}
-        want = {platform: name for platform, name in asset_names(tag).items() if platform in plan["platforms"]}
+        want = {platform: name for platform, name in asset_names(tag).items() if platform in tag_run_platforms(plan)}
         missing = [p for p, name in want.items() if name not in assets]
         if missing:
             raise Refused(f"릴리스 산출물이 모자라다({', '.join(missing)}) — appcast 로 넘어가지 않는다")
@@ -798,7 +807,7 @@ class RealBackend:
             raise Refused(f"계획에 고정한 openssl({openssl}, {version or '판 모름'})이 지금은 {why} — 서명을 확인하지 않고 멈춘다")
         seen, signatures = {}, {}
         for platform, src in (("macos", plan["feed"]["source"]), ("windows", plan["feed"]["windows"])):
-            if platform not in plan["platforms"]:
+            if platform not in tag_run_platforms(plan):
                 continue
             raw = fetch_feed(self.http, src)
             if raw is None:

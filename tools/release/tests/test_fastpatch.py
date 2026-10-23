@@ -1131,7 +1131,7 @@ class RealRepoTests(unittest.TestCase):
         self.assertEqual((ci["authority"], ci["team"], ci["notarized"]), ("kasaterm-ci", None, False))
         win = (REPO / "app/kasaterm/src/win_sparkle.rs").read_text()
         self.assertIn(caps["macos"]["ed_public_key"], win)
-        self.assertEqual(caps["windows"]["channels"], ["stable"])
+        self.assertEqual(caps["windows"]["channels"], ["stable", "preview"])
         self.assertFalse(caps["ios"]["hotpatch"])
 
     def test_tunnel_ports_match_machines_rs(self):
@@ -2033,7 +2033,7 @@ class PreviewReleaseTests(LocalFixture):
             self.assertEqual((context["platforms"], context["prerelease"], context["commit"], context["feed_path"]),
                              ("macos", "true", bump, "docs/appcast-preview.xml"))
             expected = json.loads((wt / common.CHANNEL_MANIFEST).read_text())
-            for change in ({"tag": "v0.2.0"}, {"source_commit": "a" * 40}, {"platforms": ["macos", "windows"]}):
+            for change in ({"tag": "v0.2.0"}, {"source_commit": "a" * 40}, {"platforms": ["windows"]}):
                 (wt / common.CHANNEL_MANIFEST).write_text(json.dumps({**expected, **change}))
                 with self.assertRaises(Refused):
                     common.ci_release_context(wt, plan["tag"])
@@ -2050,6 +2050,69 @@ class PreviewReleaseTests(LocalFixture):
             self.assertIn("if: needs.resolve.outputs.platforms == 'both'", workflow)
         finally:
             fp.cleanup(backend, plan)
+
+    def windows_preview_app(self):
+        (self.work / "app/kasaterm/src/win_sparkle.rs").write_text(f'const PREVIEW_FEED: &str = "{common.WIN_PREVIEW_FEED}";\n')
+        self.head = self.commit("windows preview feed support")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+
+    def test_preview_carries_windows_only_with_permission_and_an_app_that_knows_the_feed(self):
+        self.assertEqual(self.preview_plan(preview_windows=True)["platforms"], ["macos"],
+                         "Windows preview 피드를 모르는 앱을 올리면 설치한 기기가 안정판 피드로 돌아간다")
+        self.windows_preview_app()
+        self.assertEqual(self.preview_plan()["platforms"], ["macos"], "정책이 허가하지 않으면 싣지 않는다")
+        plan = self.preview_plan(preview_windows=True)
+        self.assertEqual((plan["platforms"], plan["feed"]["windows"]), (["macos", "windows"], None))
+        self.assertEqual(self.backend(plan, "dry").feed_base(plan), plan["feed_base"],
+                         "따로 늦게 나가는 Windows preview 피드는 다음 계획을 낡게 만들지 않도록 기준 해시에 넣지 않는다")
+        backend = self.backend(plan, "local")
+        try:
+            wt = backend.worktree(plan)
+            backend.ensure_bump(wt, plan)
+            context = common.ci_release_context(wt, plan["tag"], "both")
+            self.assertEqual((context["platforms"], context["windows_followup"]), ("macos", "true"))
+            followup = common.ci_release_context(wt, plan["tag"], "windows")
+            self.assertEqual((followup["platforms"], followup["windows_followup"], followup["channel"]), ("windows", "false", "preview"))
+            manifest = json.loads((wt / common.CHANNEL_MANIFEST).read_text())
+            (wt / common.CHANNEL_MANIFEST).write_text(json.dumps({**manifest, "platforms": ["macos"]}))
+            self.assertEqual(common.ci_release_context(wt, plan["tag"], "both")["windows_followup"], "false")
+            with self.assertRaisesRegex(Refused, "Windows 만"):
+                common.ci_release_context(wt, plan["tag"], "windows")
+        finally:
+            fp.cleanup(backend, plan)
+
+    def test_the_controller_finishes_on_the_mac_feed_without_waiting_for_windows(self):
+        self.windows_preview_app()
+        before = (self.feed.read_bytes(), self.feed_win.read_bytes())
+        plan = self.preview_plan(preview_windows=True)
+        self.go(plan, "local")
+        self.publish_any(plan)
+        self.ci_publish(plan, keep=[self.dmg_name(plan)], drop=[asset_names(plan["tag"])["windows"]])
+        state = self.publish_any(plan)
+        self.assertEqual({stage: state["stages"][stage]["status"] for stage in ("tag", "release", "feed")},
+                         {"tag": "done", "release": "done", "feed": "done"})
+        self.assertEqual(set(state["stages"]["release"]["detail"]["assets"]), {"macos"})
+        self.assertEqual(set(state["stages"]["feed"]["detail"]["hashes"]), {"macos"})
+        self.assertEqual((self.feed.read_bytes(), self.feed_win.read_bytes()), before, "안정판 피드는 그대로")
+        manifest = json.loads(self.show(f"refs/tags/{plan['tag']}", common.CHANNEL_MANIFEST))
+        self.assertEqual((manifest["channel"], manifest["platforms"]), ("preview", ["macos", "windows"]))
+
+    def test_stable_tags_never_take_the_windows_only_path(self):
+        with self.assertRaisesRegex(Refused, "Windows 만"):
+            common.ci_release_context(self.work, "v0.2.0", "windows")
+        with self.assertRaisesRegex(Refused, "Windows 만"):
+            common.ci_release_context(self.work, "", "windows")
+        self.assertEqual(common.ci_release_context(self.work, "v0.2.0")["windows_followup"], "false")
+        workflow = (REPO / ".github/workflows/release.yml").read_text()
+        stable_attach = workflow.split("- name: Attach Windows packages to release\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("needs.resolve.outputs.channel == 'stable'", stable_attach)
+        preview_attach = workflow.split("- name: Attach Windows packages to preview release\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("needs.resolve.outputs.channel == 'preview'", preview_attach)
+        self.assertNotIn("release create", preview_attach, "Windows 덤은 mac 실행이 만든 prerelease 에만 붙인다")
+        self.assertNotIn("--clobber", preview_attach)
+        followup = workflow.split("\n  windows-followup:\n", 1)[1]
+        self.assertIn("continue-on-error: true", followup)
+        self.assertIn("-f platforms=windows", followup)
 
     def test_manifestless_legacy_tags_remain_stable(self):
         context = common.ci_release_context(self.work, "v0.2.0")

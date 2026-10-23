@@ -244,7 +244,7 @@ class PolicyFixture(unittest.TestCase):
         with self.assertRaises(Refused): policy.load(self.root)
 
     def test_policy_scope_rejects_stable_windows_new_minor_and_foreign_remote(self):
-        for change in ({"channel": "stable"}, {"platforms": ["macos", "windows"]},
+        for change in ({"channel": "stable"}, {"platforms": ["windows"]}, {"platforms": ["macos", "windows", "ios"]},
                        {"version": "0.3.0", "tag": "v0.3.0"}, {"device_ids": ["foreign"]},
                        {"feed": {"source": fastpatch.MAC_FEED, "windows": None}}):
             plan = rehash({**plan_for(self.config), **change})
@@ -252,6 +252,34 @@ class PolicyFixture(unittest.TestCase):
                 self.auth(plan)(plan, {}, FakeBackend(self.engine), "tag")
         self.engine.remote_url = "https://example.invalid/another.git"
         with self.assertRaises(Refused): self.auth()(plan_for(self.config), {}, FakeBackend(self.engine), "tag")
+
+    def test_windows_rides_only_under_a_policy_sealed_with_windows(self):
+        self.assertEqual(self.config["platforms"], ["macos", "windows"])
+        both = rehash({**plan_for(self.config), "platforms": ["macos", "windows"]})
+        self.assertEqual(self.auth(both)(both, {}, FakeBackend(self.engine), "tag")["stage"], "tag")
+        # 이 판 전에 봉인한 mac 전용 정책은 그대로 유효하다 — 코드가 허가 범위를 넓히지 않으니 그 정책으로는 Windows 를 못 싣는다.
+        old = policy.seal({**self.config, "platforms": ["macos"], "revision": self.config["revision"] + 1})
+        policy.atomic_json(self.root / "policy.json", old)
+        self.assertEqual(policy.load(self.root)["platforms"], ["macos"])
+        authorizer = policy.Authorizer(self.root, old["policy_hash"], A, both["commit"], lambda: CONTROLLER)
+        with self.assertRaisesRegex(Refused, "scope"):
+            authorizer(both, {}, FakeBackend(self.engine), "tag")
+        self.assertEqual(authorizer(plan_for(old), {}, FakeBackend(self.engine), "tag")["stage"], "tag")
+        for platforms in (["windows"], ["macos", "ios"]):
+            policy.atomic_json(self.root / "policy.json", policy.seal({**self.config, "platforms": platforms}))
+            with self.subTest(platforms=platforms), self.assertRaises(Refused):
+                policy.load(self.root)
+
+    def test_engine_plans_windows_only_when_the_policy_carries_it(self):
+        engine = auto.Engine(self.root)
+        for platforms, expected in ((["macos", "windows"], True), (["macos"], False)):
+            with mock.patch.object(engine, "prepare"), mock.patch.object(auto, "git", return_value=""), \
+                    mock.patch.object(fastpatch, "make_plan", return_value=plan_for(self.config)) as make, \
+                    mock.patch.object(fastpatch, "save_plan"):
+                engine.make_plan({**self.config, "platforms": platforms}, A)
+            with self.subTest(platforms=platforms):
+                self.assertIs(make.call_args.kwargs["preview_windows"], expected)
+                self.assertIsNone(make.call_args.kwargs["feed_win"])
 
     def test_plan_hash_and_exact_sha_are_checked(self):
         plan = plan_for(self.config)

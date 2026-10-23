@@ -24,7 +24,7 @@ import time
 
 from tools.release import deps, devices, macsign, nacho
 from tools.release.backend import PUBLISH_STAGES, TESTS, RealBackend, identity_block, identity_of
-from tools.release.common import (MAC_FEED, PREVIEW_FEED, WIN_FEED, Pending, Refused, fetch_feed, feed_fingerprint,
+from tools.release.common import (MAC_FEED, PREVIEW_FEED, WIN_FEED, WIN_PREVIEW_FEED, Pending, Refused, fetch_feed, feed_fingerprint,
                                   feed_item, save_json_atomic, sha256_bytes, version_text, version_tuple)
 from tools.release.proc import Http, Runner
 
@@ -102,6 +102,7 @@ def capabilities(repo):
         return p.read_text(errors="ignore") if p.exists() else ""
 
     mac_src, bake, ci = text("app/kasaterm/src/macos_sparkle.rs"), text("scripts/build-app.sh"), text(".github/workflows/release.yml")
+    win_src = text("app/kasaterm/src/win_sparkle.rs")
     feed = re.search(r"<key>SUFeedURL</key>\s*<string>([^<]+)</string>", bake)
     edkey = re.search(r"<key>SUPublicEDKey</key>\s*<string>([^<]+)</string>", bake)
     sign = re.search(r"KASATERM_SIGN_ID:\s*(.+)", ci)
@@ -121,9 +122,9 @@ def capabilities(repo):
             "apply": "업데이터가 받고 사람이 「설치 후 재실행」 — 강제 종료 없음",
         },
         "windows": {
-            "updater": "winsparkle" if text("app/kasaterm/src/win_sparkle.rs") else None,
+            "updater": "winsparkle" if win_src else None,
             "feed": WIN_FEED,
-            "channels": ["stable"],
+            "channels": ["stable", "preview"] if WIN_PREVIEW_FEED in win_src else ["stable"],
             "apply": "MSI 설치본만 — 토스트 [설치]·판 번호 줄을 눌렀을 때 MSI 실행",
         },
         "ios": {
@@ -233,7 +234,7 @@ def feed_base_of(http, mac, win=None):
 
 def make_plan(repo, remote="origin", branch="main", channel="stable", feed=None, feed_win=WIN_FEED, devices=None,
               version=None, ios_build=None, http=None, runner=None, installed_app=INSTALLED_APP, controller=None,
-              tools=None, signing_env=None, stable_feed=MAC_FEED):
+              tools=None, signing_env=None, stable_feed=MAC_FEED, preview_windows=False):
     repo = Path(repo)
     http, runner = http or Http(), runner or Runner("dry")
     errors, blocks = [], []
@@ -298,7 +299,10 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=None,
     if channel not in caps["macos"]["channels"]:
         errors.append(f"채널 {channel} 은 이 앱의 업데이터에 없다 — 있는 것: {', '.join(caps['macos']['channels'])}")
     platforms = (["macos", "windows"] if kinds["native"] else []) + (["ios"] if kinds["mobile"] else [])
-    desktop = (["macos"] if kinds["native"] else []) if channel == "preview" else [p for p in platforms if p != "ios"]
+    # preview 의 Windows 는 허가(정책)가 있고 그 커밋의 앱이 preview 피드를 알 때만 싣는다 — 모르는 앱을 preview 피드에
+    # 올리면 설치한 기기가 안정판 피드로 돌아가 버린다.
+    preview_desktop = ["macos"] + (["windows"] if preview_windows and "preview" in caps["windows"]["channels"] else [])
+    desktop = (preview_desktop if kinds["native"] else []) if channel == "preview" else [p for p in platforms if p != "ios"]
     if not desktop:
         blocks.append("데스크톱에 게시할 변경이 없다 — iOS 는 설치 링크(mobile/tool/adhoc.sh)로 따로 간다")
 

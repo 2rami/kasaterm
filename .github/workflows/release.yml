@@ -11,6 +11,9 @@ name: Release
 #   tag=vX.Y.Z → 이미 선 태그의 릴리스를 마무리한다(태그를 새로 만들거나 옮기지 않는다). 태그 push 로 돈 실행이 중간에
 #     멈췄을 때 — 태그의 워크플로는 그 커밋에 박혀 고칠 수 없으니, 고친 main 의 워크플로로 같은 일을 그 태그에 대고 한다.
 #     platforms=macos 는 Windows 를 건드리지 않는 **부분 게시**(mac 피드만 갱신, Windows 피드는 그대로 — 성공으로 치지 않는다).
+#     platforms=windows 는 Windows 를 싣는 preview 태그의 **Windows 덤**이다 — MSI 를 굽고 Windows preview 피드만 낸다.
+#     preview 태그 실행은 mac 피드를 낸 뒤 이것을 스스로 부른다(windows-followup). Windows 굽기가 느리거나 실패해도 mac preview 와
+#     그 실행을 기다리는 controller 는 늦거나 막히지 않는다. 안정판 피드는 이 길로 못 바꾼다(tools/release/common.py).
 #
 # git LFS 정본은 미니다(.lfsconfig → tools/release/mini_lfs.py) — GitHub LFS 는 안 쓴다(예산 초과로 2026-09-27 CI 굽기,
 # 09-29 controller 가 섰다). 체크아웃은 모두 lfs: false 이고, 실물 그림이 필요한 굽기(Windows 굽기와 CI 가 mac 을 굽는 길)만
@@ -41,14 +44,16 @@ on:
         required: false
         default: ''
       platforms:
-        description: 'both = mac·Windows 둘 다, macos = Windows 를 건드리지 않는 부분 게시'
+        description: 'both = mac·Windows 둘 다, macos = Windows 를 건드리지 않는 부분 게시, windows = preview 태그의 Windows 덤'
         required: false
         default: both
         type: choice
         options:
           - both
           - macos
+          - windows
 # 태그 마무리 실행은 「release vX.Y.Z (both|macos)」로 이름이 붙는다 — tools/release 가 이 이름으로 그 태그의 실행을 찾는다.
+# Windows 덤은 「release vX.Y.Z (windows)」라 그 찾기에 안 걸린다 — controller 는 mac 실행만 기다린다.
 run-name: ${{ inputs.tag && format('release {0} ({1})', inputs.tag, inputs.platforms) || format('Release {0}', github.ref_name) }}
 
 permissions:
@@ -63,6 +68,7 @@ jobs:
       commit: ${{ steps.context.outputs.commit }}
       prerelease: ${{ steps.context.outputs.prerelease }}
       feed_path: ${{ steps.context.outputs.feed_path }}
+      windows_followup: ${{ steps.context.outputs.windows_followup }}
     steps:
       - name: Checkout release identity
         uses: actions/checkout@v4
@@ -97,7 +103,7 @@ jobs:
 
   build-msi:
     needs: resolve
-    if: needs.resolve.outputs.platforms == 'both'
+    if: needs.resolve.outputs.platforms == 'both' || needs.resolve.outputs.platforms == 'windows'
     runs-on: windows-latest
     steps:
       # 그림 에셋이 git-lfs 라 안 받으면 130바이트 포인터가 내려오고, build.rs 의 에셋 검사가 거기서 빌드를 세운다
@@ -154,7 +160,7 @@ jobs:
 
       # 태그 push·태그 마무리 → 해당 릴리스에 MSI 첨부(릴리스 없으면 생성. 노트는 dmg job 이 채운다).
       - name: Attach Windows packages to release
-        if: env.RELEASE_TAG != ''
+        if: env.RELEASE_TAG != '' && needs.resolve.outputs.channel == 'stable'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
@@ -164,6 +170,26 @@ jobs:
             ${{ steps.windows_packages.outputs.zip }}
             ${{ steps.windows_packages.outputs.zip_hash }}
           fail_on_unmatched_files: true
+
+      # preview Windows 덤 → mac 실행이 이미 만든 prerelease 에만 붙인다. 만들지도, 채널을 바꾸지도, 이미 있는 파일을 덮지도
+      # 않는다 — 다시 돌린 실행이 새로 구운 MSI 로 갈아 끼우면 이미 게시한 피드의 서명이 그 파일과 어긋난다.
+      - name: Attach Windows packages to preview release
+        if: env.RELEASE_TAG != '' && needs.resolve.outputs.channel == 'preview'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGES: ${{ steps.windows_packages.outputs.msi }}|${{ steps.windows_packages.outputs.msi_hash }}|${{ steps.windows_packages.outputs.zip }}|${{ steps.windows_packages.outputs.zip_hash }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG --json isPrerelease,isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release) { throw "preview 릴리스 $env:RELEASE_TAG 를 읽지 못했다 — mac 실행이 먼저 만든다" }
+          if (-not $release.isPrerelease -or $release.isDraft) { throw "공개 prerelease 가 아니다 — 채널을 바꾸지 않는다" }
+          $files = @($env:PACKAGES -split '\|')
+          $names = @($release.assets | ForEach-Object { $_.name })
+          $present = @($files | Where-Object { $names -contains (Split-Path $_ -Leaf) })
+          if ($present.Count -eq $files.Count) { Write-Host "이미 붙어 있다 — 덮지 않는다"; exit 0 }
+          if ($present.Count -gt 0) { throw "일부만 붙어 있다($($present -join ', ')) — 덮지 않고 멈춘다" }
+          gh release upload $env:RELEASE_TAG @files
+          if ($LASTEXITCODE -ne 0) { throw "MSI 를 붙이지 못했다" }
 
       # 빌드 검증 실행 → artifact 로만(릴리스 불변).
       - name: Upload Windows package artifacts
@@ -179,6 +205,7 @@ jobs:
 
   build-dmg:
     needs: resolve
+    if: needs.resolve.outputs.platforms != 'windows'
     runs-on: macos-latest
     env:
       RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
@@ -365,6 +392,7 @@ jobs:
   # 설치된 앱들의 Sparkle(mac)/WinSparkle(win)이 이 Pages 피드를 보고 자동 업데이트한다.
   # mac 만 마무리(platforms=macos)면 build-msi 가 건너뛰어지므로 always() 로 들어와 결과를 직접 본다 — dmg 검증이 성공했고,
   # Windows 는 성공했거나(both) 일부러 건너뛴 경우(macos)에만 돈다. 실패·취소된 job 위로는 절대 안 돈다.
+  # preview Windows 덤(platforms=windows)은 거꾸로 dmg 를 건너뛰고 MSI 와 Windows preview 피드만 다룬다.
   appcast:
     needs: [resolve, build-msi, build-dmg]
     permissions:
@@ -372,7 +400,8 @@ jobs:
       pages: write
     if: >-
       always() && (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '')
-      && needs.resolve.result == 'success' && needs.build-dmg.result == 'success'
+      && needs.resolve.result == 'success'
+      && (needs.build-dmg.result == 'success' || (needs.resolve.outputs.platforms == 'windows' && needs.build-dmg.result == 'skipped'))
       && (needs.build-msi.result == 'success' || (needs.resolve.outputs.platforms == 'macos' && needs.build-msi.result == 'skipped'))
     runs-on: macos-latest
     concurrency:
@@ -412,15 +441,17 @@ jobs:
           git fetch --no-tags origin "refs/tags/$VERSION"
           [[ "$(git rev-parse 'FETCH_HEAD^{commit}')" == "$RELEASE_COMMIT" ]] || { echo "::error::검증 뒤 태그 커밋이 바뀌었다"; exit 1; }
           [[ "$(gh release view "$VERSION" --json isPrerelease -q .isPrerelease)" == "$RELEASE_PRERELEASE" ]] || { echo "::error::릴리스 채널이 다르다"; exit 1; }
-          if [[ "$RELEASE_CHANNEL" == "preview" && "$PLATFORMS" != "macos" ]]; then
-            echo "::error::preview가 Windows 피드를 바꿀 수 없다"; exit 1
+          # 안정판은 두 피드를 함께 낸다. preview 는 한 실행이 한 플랫폼만 — 어느 피드에 쓸지는 feed_publish 가 채널로 정한다.
+          if [[ "$RELEASE_CHANNEL" == "stable" && "$PLATFORMS" == "windows" ]] || [[ "$RELEASE_CHANNEL" == "preview" && "$PLATFORMS" == "both" ]]; then
+            echo "::error::채널($RELEASE_CHANNEL)과 플랫폼($PLATFORMS) 묶음이 다르다"; exit 1
           fi
           KEYFILE="$RUNNER_TEMP/ed.key"
           printf '%s' "$ED_KEY" > "$KEYFILE"
           trap 'rm -f "$KEYFILE"' EXIT
 
-          # mac appcast — 릴리스의 dmg 를 받아 generate_appcast 로 서명·생성.
+          # mac appcast — 릴리스의 dmg 를 받아 generate_appcast 로 서명·생성. Windows 덤이면 mac 피드는 손대지 않는다.
           ASSETS="$(mktemp -d)"
+          if [[ "$PLATFORMS" != "windows" ]]; then
           gh release download "$VERSION" -p '*.dmg' -D "$ASSETS"
           COUNT="$(find "$ASSETS" -name '*.dmg' | wc -l | tr -d ' ')"
           [[ "$COUNT" == 1 && -f "$ASSETS/kasaterm-$VERSION.dmg" ]] || { echo "::error::릴리스 dmg 이름·개수가 다르다"; exit 1; }
@@ -435,11 +466,13 @@ jobs:
             --download-url-prefix "https://github.com/2rami/kasaterm/releases/download/$VERSION/" \
             --link "https://github.com/2rami/kasaterm" \
             "$ASSETS"
+          echo "dmg_sha256=$GOT" >> "$GITHUB_OUTPUT"
+          fi
 
           # Windows appcast — 같은 EdDSA 키로 msi 서명. sign_update 출력이 그대로
           # enclosure 속성: sparkle:edSignature="..." length="..."
           # macos 부분 게시면 Windows 피드는 손대지 않는다(msi 가 없어도 지어내지 않는다).
-          if [[ "$PLATFORMS" == "both" ]]; then
+          if [[ "$PLATFORMS" != "macos" ]]; then
           MSI_NAME="kasaterm-$VERSION-windows-x86_64.msi"
           gh release download "$VERSION" -p "$MSI_NAME" -O "$ASSETS/$MSI_NAME"
           SIG_LINE="$(vendor/Sparkle/bin/sign_update --ed-key-file "$KEYFILE" "$ASSETS/$MSI_NAME")"
@@ -463,7 +496,6 @@ jobs:
           echo "msi_sha256=$(shasum -a 256 "$ASSETS/$MSI_NAME" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           fi
           echo "directory=$ASSETS" >> "$GITHUB_OUTPUT"
-          echo "dmg_sha256=$GOT" >> "$GITHUB_OUTPUT"
 
       - name: Publish verified appcasts
         env:
@@ -477,9 +509,27 @@ jobs:
           GIT_LFS_SKIP_SMUDGE: '1'
         run: |
           VERSION="$RELEASE_TAG"
-          FEED_ARGS=(--repo . --tag "$VERSION" --channel "$RELEASE_CHANNEL" --commit "$RELEASE_COMMIT"
-                     --mac "$ASSETS/appcast.xml" --dmg "$ASSETS/kasaterm-$VERSION.dmg" --dmg-sha256 "$DMG_SHA")
-          if [[ "$PLATFORMS" == "both" ]]; then
+          FEED_ARGS=(--repo . --tag "$VERSION" --channel "$RELEASE_CHANNEL" --commit "$RELEASE_COMMIT")
+          if [[ "$PLATFORMS" != "windows" ]]; then
+            FEED_ARGS+=(--mac "$ASSETS/appcast.xml" --dmg "$ASSETS/kasaterm-$VERSION.dmg" --dmg-sha256 "$DMG_SHA")
+          fi
+          if [[ "$PLATFORMS" != "macos" ]]; then
             FEED_ARGS+=(--windows "$ASSETS/appcast-win.xml" --msi "$ASSETS/kasaterm-$VERSION-windows-x86_64.msi" --msi-sha256 "$MSI_SHA")
           fi
           python3 -m tools.release.feed_publish "${FEED_ARGS[@]}" --attempts 5 --deploy-pages
+
+  # preview 가 Windows 를 실으면 mac 피드를 낸 뒤 같은 태그의 Windows 덤 실행을 부른다. 따로 도는 실행이라 Windows 굽기의 시간·
+  # 실패가 이 실행(과 이것을 기다리는 controller)에 안 묻는다. 부르기가 실패해도 이 실행을 실패로 만들지 않는다 — mac 은 이미
+  # 나갔고, 사람이 `gh workflow run release.yml -f tag=<태그> -f platforms=windows` 로 다시 부르면 된다.
+  windows-followup:
+    needs: [resolve, appcast]
+    if: needs.resolve.outputs.windows_followup == 'true' && needs.appcast.result == 'success'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the Windows preview run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$RELEASE_TAG" -f platforms=windows

@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 
 from tools.release import deps
 from tools.release.backend import ed25519_ok
-from tools.release.common import (CHANNEL_MANIFEST, Refused, sha256_file,
+from tools.release.common import (CHANNEL_MANIFEST, FEED_PATHS, Refused, sha256_file,
                                   validate_channel_manifest, version_tuple)
 from tools.release.proc import Http, Runner
 
@@ -77,8 +77,7 @@ class Candidate:
                    digest if digest.startswith("sha256:") else "sha256:" + digest)
 
     def destination(self, channel):
-        return ("docs/appcast-win.xml" if self.platform == "windows" else
-                "docs/appcast-preview.xml" if channel == "preview" else "docs/appcast.xml")
+        return FEED_PATHS[(channel, self.platform)]
 
 
 class Publisher:
@@ -89,8 +88,13 @@ class Publisher:
                 or not re.fullmatch(r"[0-9a-f]{40}", commit or "")):
             raise Refused("게시 태그·채널·검증 커밋이 올바르지 않다")
         platforms = [candidate.platform for candidate in self.candidates]
-        if platforms not in (["macos"], ["macos", "windows"]) or (channel == "preview" and platforms != ["macos"]):
-            raise Refused("preview는 macOS 피드만 게시할 수 있다")
+        # 안정판은 두 피드를 한 커밋으로 함께 바꾼다. preview 의 Windows 는 mac 게시 뒤 따로 도는 실행이 혼자 낸다.
+        allowed = (["macos"], ["windows"]) if channel == "preview" else (["macos"], ["macos", "windows"])
+        if platforms not in allowed:
+            raise Refused("게시할 피드 묶음이 올바르지 않다 — 안정판은 macos 또는 macos+windows, preview 는 macos 나 windows 하나씩")
+        stable = {FEED_PATHS[("stable", platform)] for platform in ("macos", "windows")}
+        if channel == "preview" and any(candidate.destination(channel) in stable for candidate in self.candidates):
+            raise Refused("preview 가 안정판 피드를 바꿀 수 없다")
         self.runner = Runner("local")
         tool = {"path": openssl} if openssl else deps.find_openssl(self.runner)
         if not tool.get("path"):
@@ -305,9 +309,9 @@ def main(argv=None):
     parser.add_argument("--tag", required=True)
     parser.add_argument("--channel", required=True)
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--mac", required=True)
-    parser.add_argument("--dmg", required=True)
-    parser.add_argument("--dmg-sha256", required=True)
+    parser.add_argument("--mac")
+    parser.add_argument("--dmg")
+    parser.add_argument("--dmg-sha256")
     parser.add_argument("--windows")
     parser.add_argument("--msi")
     parser.add_argument("--msi-sha256")
@@ -315,7 +319,11 @@ def main(argv=None):
     parser.add_argument("--deploy-pages", action="store_true")
     args = parser.parse_args(argv)
     try:
-        candidates = [Candidate.read("macos", args.mac, args.dmg, args.dmg_sha256)]
+        candidates = []
+        if any((args.mac, args.dmg, args.dmg_sha256)):
+            if not all((args.mac, args.dmg, args.dmg_sha256)):
+                raise Refused("mac 피드·산출물·검증 해시가 모두 필요하다")
+            candidates.append(Candidate.read("macos", args.mac, args.dmg, args.dmg_sha256))
         if any((args.windows, args.msi, args.msi_sha256)):
             if not all((args.windows, args.msi, args.msi_sha256)):
                 raise Refused("Windows 피드·산출물·검증 해시가 모두 필요하다")

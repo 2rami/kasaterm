@@ -197,7 +197,8 @@ class Engine:
         signing_env = {**os.environ, "KASATERM_SIGN_KEYCHAIN": config["keychain"],
                        "KASATERM_NOTARY_PROFILE": config["notary_profile"]}
         plan = fastpatch.make_plan(self.repo, channel="preview", feed=policy.PREVIEW_FEED, feed_win=None,
-                                   devices=[], controller=config["controller"], signing_env=signing_env)
+                                   devices=[], controller=config["controller"], signing_env=signing_env,
+                                   preview_windows="windows" in config["platforms"])
         fastpatch.save_plan(plan, self.plans)
         return plan
 

@@ -11,6 +11,10 @@ CHANNEL_SCHEMA = "kasaterm-release-channel/1"
 MAC_FEED = "https://2rami.github.io/kasaterm/appcast.xml"
 PREVIEW_FEED = "https://2rami.github.io/kasaterm/appcast-preview.xml"
 WIN_FEED = "https://2rami.github.io/kasaterm/appcast-win.xml"
+WIN_PREVIEW_FEED = "https://2rami.github.io/kasaterm/appcast-win-preview.xml"
+# 채널마다 플랫폼 피드가 따로다. preview 게시는 앞의 둘(안정판 피드)을 어떤 길로도 바꾸지 않는다.
+FEED_PATHS = {("stable", "macos"): "docs/appcast.xml", ("stable", "windows"): "docs/appcast-win.xml",
+              ("preview", "macos"): "docs/appcast-preview.xml", ("preview", "windows"): "docs/appcast-win-preview.xml"}
 
 
 class Refused(Exception):
@@ -97,9 +101,8 @@ def feed_fingerprint(http, mac, win=None):
 
 
 def channel_manifest(channel, tag, source_commit, platforms=None):
-    allowed = ["macos"] if channel == "preview" else ["macos", "windows"]
     manifest = {"schema": CHANNEL_SCHEMA, "channel": channel, "tag": tag,
-                "source_commit": source_commit, "platforms": allowed if platforms is None else platforms}
+                "source_commit": source_commit, "platforms": ["macos", "windows"] if platforms is None else platforms}
     validate_channel_manifest(manifest, tag, source_commit)
     return manifest
 
@@ -116,14 +119,16 @@ def validate_channel_manifest(manifest, tag, source_commit):
     if manifest["tag"] != tag or manifest["source_commit"] != source_commit or not re.fullmatch(r"[0-9a-f]{40}", source_commit or ""):
         raise Refused("release channel manifest가 태그·버전 커밋의 부모와 다르다")
     platforms = manifest["platforms"]
-    if platforms not in (["macos"], ["macos", "windows"]) or (manifest["channel"] == "preview" and platforms != ["macos"]):
-        raise Refused("preview는 macOS만 게시할 수 있다")
+    if platforms not in (["macos"], ["macos", "windows"]):
+        raise Refused("release channel manifest 플랫폼은 macos 또는 macos+windows 다")
     return manifest["channel"], platforms
 
 
 def ci_release_context(repo, tag, requested_platforms="both"):
+    """preview 의 Windows 는 태그 실행에서 굽지 않는다 — mac 피드가 나간 뒤 같은 태그의 `windows` 실행이 따로 굽고 게시한다.
+    Windows 굽기가 느리거나 실패해도 mac preview 와 그 실행을 기다리는 controller 가 늦거나 막히지 않게 한다."""
     repo = Path(repo)
-    if requested_platforms not in ("both", "macos"):
+    if requested_platforms not in ("both", "macos", "windows"):
         raise Refused("모르는 릴리스 플랫폼")
     commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     channel, platforms = "stable", ["macos", "windows"]
@@ -139,10 +144,19 @@ def ci_release_context(repo, tag, requested_platforms="both"):
                 raise Refused("release channel manifest를 읽지 못했다") from error
             parent = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD^"], text=True).strip()
             channel, platforms = validate_channel_manifest(manifest, tag, parent)
-    effective = "macos" if channel == "preview" or platforms == ["macos"] or requested_platforms == "macos" else "both"
+    windows = "windows" in platforms
+    if requested_platforms == "windows":
+        if channel != "preview" or not windows or not tag:
+            raise Refused("Windows 만 따로 도는 실행은 Windows 를 싣는 preview 태그뿐이다 — 안정판은 두 피드를 함께 낸다")
+        effective = "windows"
+    elif channel == "preview":
+        effective = "macos"
+    else:
+        effective = "macos" if platforms == ["macos"] or requested_platforms == "macos" else "both"
     return {"channel": channel, "platforms": effective, "commit": commit,
             "prerelease": "true" if channel == "preview" else "false",
-            "feed_path": "docs/appcast-preview.xml" if channel == "preview" else "docs/appcast.xml"}
+            "feed_path": FEED_PATHS[(channel, "macos")],
+            "windows_followup": "true" if channel == "preview" and windows and requested_platforms != "windows" else "false"}
 
 
 def stage_appcasts(repo, tag, channel, mac_source, windows_source=None, slug="2rami/kasaterm"):
@@ -150,11 +164,9 @@ def stage_appcasts(repo, tag, channel, mac_source, windows_source=None, slug="2r
     repo = Path(repo)
     if channel not in ("stable", "preview") or not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
         raise Refused("게시 채널·태그가 올바르지 않다")
-    if channel == "preview" and windows_source:
-        raise Refused("preview 게시가 Windows 피드를 바꿀 수 없다")
-    candidates = [("docs/appcast-preview.xml" if channel == "preview" else "docs/appcast.xml", mac_source, f"kasaterm-{tag}.dmg")]
+    candidates = [(FEED_PATHS[(channel, "macos")], mac_source, f"kasaterm-{tag}.dmg")]
     if windows_source:
-        candidates.append(("docs/appcast-win.xml", windows_source, f"kasaterm-{tag}-windows-x86_64.msi"))
+        candidates.append((FEED_PATHS[(channel, "windows")], windows_source, f"kasaterm-{tag}-windows-x86_64.msi"))
     replacements = []
     for relative, source, name in candidates:
         raw = Path(source).read_bytes()

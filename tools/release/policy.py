@@ -15,6 +15,9 @@ REPOSITORY = "2rami/kasaterm"
 REMOTE_URL = "https://github.com/2rami/kasaterm.git"
 PREVIEW_FEED = "https://2rami.github.io/kasaterm/appcast-preview.xml"
 TEAM = "L366799VND"
+# 정책이 허가하는 플랫폼 묶음. 예전에 봉인한 mac 전용 정책은 그대로 mac 만 낸다 — Windows 는 주인이 다시 enable 해
+# 새로 봉인한 정책에서만 실린다(허가 범위를 코드가 넓히지 않는다).
+PLATFORM_SCOPES = (["macos"], ["macos", "windows"])
 SCHEMA = "kasaterm-preview-policy/1"
 FIELDS = {"schema", "enabled", "revision", "repository", "remote_url", "branch", "channel", "feed",
           "platforms", "controller", "minor", "team", "keychain", "notary_profile", "unlock_signing",
@@ -114,9 +117,9 @@ def validate(value):
     if not isinstance(value, dict) or set(value) != FIELDS or seal(value) != value:
         raise Refused("policy fields or hash have changed")
     fixed = {"schema": SCHEMA, "repository": REPOSITORY, "remote_url": REMOTE_URL, "branch": "main",
-             "channel": "preview", "feed": PREVIEW_FEED, "platforms": ["macos"], "team": TEAM}
-    if any(value.get(key) != item for key, item in fixed.items()):
-        raise Refused("policy permits only this repository's macOS preview feed")
+             "channel": "preview", "feed": PREVIEW_FEED, "team": TEAM}
+    if any(value.get(key) != item for key, item in fixed.items()) or value.get("platforms") not in PLATFORM_SCOPES:
+        raise Refused("policy permits only this repository's preview feeds")
     if type(value["enabled"]) is not bool or type(value["unlock_signing"]) is not bool:
         raise Refused("policy switches must be booleans")
     if type(value["revision"]) is not int or value["revision"] < 1:
@@ -155,7 +158,7 @@ def enable(state_dir, controller, minor, keychain=None, notary_profile="AC_NOTAR
     old = load(directory, require_enabled=False) if (directory / "policy.json").exists() else None
     value = seal({"schema": SCHEMA, "enabled": True, "revision": (old["revision"] + 1) if old else 1,
                   "repository": REPOSITORY, "remote_url": REMOTE_URL, "branch": "main", "channel": "preview",
-                  "feed": PREVIEW_FEED, "platforms": ["macos"], "controller": controller, "minor": minor,
+                  "feed": PREVIEW_FEED, "platforms": ["macos", "windows"], "controller": controller, "minor": minor,
                   "team": TEAM, "keychain": str(Path(keychain or Path.home() / "Library/Keychains/codesign.keychain-db").absolute()),
                   "notary_profile": notary_profile, "unlock_signing": bool(unlock_signing),
                   "lfs_storage": lfs_storage(str(Path(lfs_store).resolve()) if lfs_store else (old or {}).get("lfs_storage")),
@@ -211,7 +214,9 @@ class Authorizer:
         if plan.get("commit") != self.planned_commit or not re.fullmatch(r"[0-9a-f]{40}", self.requested_commit):
             raise Refused("plan no longer names the exact verified commit")
         if (plan.get("remote") != "origin" or plan.get("branch") != "main" or plan.get("channel") != "preview"
-                or plan.get("platforms") != ["macos"] or plan.get("device_ids") or plan.get("devices") or plan.get("ios_build")
+                or plan.get("platforms") not in PLATFORM_SCOPES
+                or any(platform not in current["platforms"] for platform in plan["platforms"])
+                or plan.get("device_ids") or plan.get("devices") or plan.get("ios_build")
                 or plan.get("stages") != fastpatch.STAGES
                 or plan.get("feed", {}).get("source") != PREVIEW_FEED or plan.get("feed", {}).get("windows") is not None):
             raise Refused("publication is outside the preview-only policy scope")
