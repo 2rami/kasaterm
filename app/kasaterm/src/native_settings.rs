@@ -4721,10 +4721,11 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
     let os_off = !ws.ignore_os && ws.enabled && (s.weather_os.reduce_transparency || s.weather_os.reduce_motion);
     if os_off {
         *y += 8.0;
-        plain_hint(g, x, y, w, if s.weather_os.reduce_transparency {
-            "macOS 「투명도 줄이기」가 켜져 있어 날씨를 그리지 않습니다. 아래 「OS 설정 무시」로 바꿀 수 있습니다"
-        } else {
-            "macOS 「동작 줄이기」가 켜져 있어 비가 멈추고 맺힌 물방울만 남습니다"
+        plain_hint(g, x, y, w, match (s.weather_os.reduce_transparency, cfg!(windows)) {
+            (true, false) => "macOS 「투명도 줄이기」가 켜져 있어 날씨를 그리지 않습니다. 아래 「OS 설정 무시」로 바꿀 수 있습니다",
+            (true, true) => "Windows 「투명 효과」가 꺼져 있어 날씨를 그리지 않습니다. 아래 「OS 설정 무시」로 바꿀 수 있습니다",
+            (false, false) => "macOS 「동작 줄이기」가 켜져 있어 비가 멈추고 맺힌 물방울만 남습니다",
+            (false, true) => "Windows 「애니메이션 효과」가 꺼져 있어 비가 멈추고 맺힌 물방울만 남습니다",
         });
     }
 

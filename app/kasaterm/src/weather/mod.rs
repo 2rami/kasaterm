@@ -71,7 +71,31 @@ fn os_motion() -> OsMotion {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows 의 「애니메이션 효과」·「투명 효과」(설정 › 접근성 › 시각 효과)가 맥의 동작 줄이기·
+/// 투명도 줄이기에 맞선다.
+#[cfg(windows)]
+fn os_motion() -> OsMotion {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION};
+    let mut animate: i32 = 1;
+    let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut animate as *mut i32).cast(), 0) } != 0;
+    // 값이 없으면 켜진 것이다 — 한 번도 안 만진 기기엔 그 값이 아예 없다.
+    OsMotion { reduce_motion: read && animate == 0, reduce_transparency: enable_transparency() == Some(0) }
+}
+
+/// 투명 효과는 API 가 없어 설정 앱이 쓰는 그 레지스트리 값을 읽는다.
+#[cfg(windows)]
+fn enable_transparency() -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0".encode_utf16().collect();
+    let name: Vec<u16> = "EnableTransparency\0".encode_utf16().collect();
+    let (mut value, mut size) = (0u32, std::mem::size_of::<u32>() as u32);
+    let status = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size)
+    };
+    (status == 0).then_some(value)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn os_motion() -> OsMotion {
     OsMotion::default()
 }
@@ -95,7 +119,7 @@ impl WeatherState {
         if self.os_at.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
             let os = os_motion();
             if self.os_at.is_none() || os != self.os {
-                eprintln!("[weather] macOS reduce_motion={} reduce_transparency={}", os.reduce_motion, os.reduce_transparency);
+                eprintln!("[weather] os reduce_motion={} reduce_transparency={}", os.reduce_motion, os.reduce_transparency);
             }
             self.os = os;
             self.os_at = Some(Instant::now());
@@ -449,5 +473,23 @@ impl App {
             }
             Err(e) => eprintln!("[weather] redraw: {e:?}"),
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// 투명 효과는 레지스트리를 우리가 직접 읽는다 — 키 경로·값 이름이 한 글자만 틀려도
+    /// 「값 없음 = 켜짐」으로 떨어져 끈 사람에게도 비가 온다. reg.exe 가 읽은 값과 맞춘다.
+    #[test]
+    fn transparency_reads_the_value_the_settings_app_writes() {
+        let out = std::process::Command::new("reg")
+            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "EnableTransparency"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let listed = text.lines().find(|line| line.contains("EnableTransparency"))
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|hex| u32::from_str_radix(hex.trim_start_matches("0x"), 16).ok());
+        assert_eq!(super::enable_transparency(), listed, "{text}");
     }
 }
