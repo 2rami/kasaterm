@@ -17,7 +17,7 @@ async fn term_gitcol_get(
             .await.unwrap_or_else(|_| serde_json::json!({"schema": crate::git_panel::SCHEMA, "ok": false, "error": "git_unavailable"}));
         return Json(result);
     }
-    let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
+    let Some(path) = q.get("path").filter(|p| std::path::Path::new(p).is_absolute()).cloned() else {
         return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
     };
     let commits = q.get("commits").and_then(|v| v.parse().ok()).unwrap_or(20usize).min(200);
@@ -40,7 +40,7 @@ async fn term_gitop_post(body: axum::body::Bytes) -> impl IntoResponse {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return err("JSON body 가 필요해요");
     };
-    let Some(path) = v.get("path").and_then(|p| p.as_str()).filter(|p| p.starts_with('/')) else {
+    let Some(path) = v.get("path").and_then(|p| p.as_str()).filter(|p| std::path::Path::new(p).is_absolute()) else {
         return err("`path`(절대경로) 가 필요해요");
     };
     let op = v.get("op").and_then(|o| o.as_str()).unwrap_or_default();
@@ -78,13 +78,16 @@ async fn term_tree_get(
 }
 
 fn term_tree_list(q: &std::collections::HashMap<String, String>) -> serde_json::Value {
-    let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
+    let Some(path) = q.get("path").filter(|p| std::path::Path::new(p).is_absolute()).cloned() else {
         return serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" });
     };
     let Ok(rd) = std::fs::read_dir(&path) else {
         return serde_json::json!({ "ok": false, "error": "폴더를 못 읽어요" });
     };
-    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
+    // Windows canonicalize 의 `\\?\` 꼴은 git 이 주는 최상위(`C:/…`)와 접두가 안 맞아 git 표시가 통째로 빠진다.
+    let real = std::fs::canonicalize(&path)
+        .map(|p| std::path::PathBuf::from(kasa_socket::shell_line::plain_path(&p.to_string_lossy())))
+        .unwrap_or_else(|_| std::path::PathBuf::from(&path));
     let marks = (q.get("git").map(String::as_str) == Some("1")).then(|| marks::read(&real)).flatten();
     let mut entries: Vec<(bool, String, bool)> = rd
         .flatten()
@@ -145,7 +148,7 @@ async fn term_file_get(
     if let Some(denied) = guest_denied(&req) {
         return denied;
     }
-    let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
+    let Some(path) = q.get("path").filter(|p| std::path::Path::new(p).is_absolute()).cloned() else {
         return (axum::http::StatusCode::BAD_REQUEST, "`path`(절대경로) 가 필요해요").into_response();
     };
     match std::fs::metadata(&path) {

@@ -1760,8 +1760,9 @@ const PEER_CHARACTER_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// 기기들에 한꺼번에 묻고 명부 차례로 첫 답을 쓴다 — 꺼진 기기 하나가 다른 기기의 답을 막지 않게.
 async fn first_session_character(bases: &[String], sid: &str, timeout: Duration) -> Option<String> {
+    use futures_util::StreamExt as _;
     let client = reqwest::Client::new();
-    let asks = bases.iter().map(|base| {
+    let mut asks: futures_util::stream::FuturesUnordered<_> = bases.iter().map(|base| {
         let request = client.get(format!("{}/session-character", base.trim_end_matches('/')))
             .query(&[("sid", sid)]).timeout(timeout);
         async move {
@@ -1769,8 +1770,15 @@ async fn first_session_character(bases: &[String], sid: &str, timeout: Duration)
             let body: Value = response.json().await.ok()?;
             body.get("character").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_string)
         }
-    });
-    futures_util::future::join_all(asks).await.into_iter().flatten().next()
+    }).collect();
+    // 답이 온 순서대로 본다 — 다 기다리면 꺼진 기기 하나가 기다림을 늘린다(Windows 는 닫힌 포트 거절에도
+    // 2초가 걸리고, 잠든 기기는 시간 한도까지 간다).
+    while let Some(answer) = asks.next().await {
+        if answer.is_some() {
+            return answer;
+        }
+    }
+    None
 }
 
 /// GET /machines 응답 본체. 캐시만 읽으므로 기계가 죽어 있어도 즉시다.
