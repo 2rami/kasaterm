@@ -5060,6 +5060,11 @@ fn usage_processes(rows: &[Row], exclude: u32) -> Vec<crate::process_usage::Proc
 }
 
 pub(crate) fn fresh_usage_processes() -> Option<Vec<crate::process_usage::Process>> {
+    // 끄기 직전 대조라 방금 뜬 실행까지 보여야 한다. 맥 `ps` 는 늘 새로 뜨지만 Windows 표본은
+    // 주기 폴링용 캐시(`process_table`)를 쓰므로 여기선 새 표를 받는다.
+    #[cfg(windows)]
+    let (rows, exclude) = windows_rows(kasa_pty::fresh_process_table())?;
+    #[cfg(not(windows))]
     let (rows, exclude) = process_rows()?;
     Some(usage_processes(&rows, exclude))
 }
@@ -5078,9 +5083,13 @@ pub(crate) fn usage_process_birth(pid: u32) -> Option<u64> {
 /// 붙고, 남의 것은 눌러도 권한이 없다. 그래서 토큰의 사용자 SID 를 uid 자리에 둔다.
 #[cfg(windows)]
 fn process_rows() -> Option<(Vec<Row>, u32)> {
+    windows_rows(kasa_pty::process_table())
+}
+
+#[cfg(windows)]
+fn windows_rows(table: Vec<(u32, u32, String)>) -> Option<(Vec<Row>, u32)> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    let table = kasa_pty::process_table();
     if table.is_empty() {
         return None;
     }
