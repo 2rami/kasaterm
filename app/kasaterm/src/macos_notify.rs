@@ -67,7 +67,7 @@ define_class!(
             completion: &block2::DynBlock<dyn Fn()>,
         ) {
             let ident = response.notification().request().identifier().to_string();
-            if let Some((pane, sid)) = route_from_identifier(&ident) {
+            if let Some((pane, sid)) = crate::chrome::notify_route(&ident) {
                 let _ = self
                     .ivars()
                     .proxy
@@ -115,43 +115,6 @@ pub(crate) fn with_character_avatar(
         interaction.donateInteractionWithCompletion(None);
         objc2::msg_send![content, contentByUpdatingWithProvider: &*intent,
             error: std::ptr::null_mut::<*mut NSError>()]
-    }
-}
-
-/// 알림 identifier 에서 갈 자리를 꺼낸다 — `kasaterm-notify-{seq}|{pane}|{sid}`.
-///
-/// `userInfo`(NSDictionary) 대신 identifier 를 쓰는 이유: 실어야 하는 게 짧은 문자열
-/// 둘뿐인데, 딕셔너리를 세우려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춘 캐스팅이
-/// 줄줄이 붙는다. identifier 는 우리가 정하는 문자열이라 그 무게가 없다.
-///
-/// 자리 표시(`kasaterm-notify-3||`)나 형식이 안 맞는 것은 None — **못 읽으면 아무 데도
-/// 안 간다**가 이 경로의 규칙이다.
-fn route_from_identifier(ident: &str) -> Option<(String, Option<String>)> {
-    let mut it = ident.split('|');
-    let _prefix = it.next()?;
-    let pane = it.next().filter(|s| !s.is_empty())?.to_string();
-    let sid = it.next().filter(|s| !s.is_empty()).map(str::to_string);
-    Some((pane, sid))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identifier_carries_pane_and_session() {
-        assert_eq!(
-            route_from_identifier("kasaterm-notify-7|%116|abc-123"),
-            Some(("%116".into(), Some("abc-123".into())))
-        );
-        // 세션을 못 실은 알림(순정 셸 pane).
-        assert_eq!(
-            route_from_identifier("kasaterm-notify-7|%116|"),
-            Some(("%116".into(), None))
-        );
-        // 갈 자리가 아예 없는 알림 — 눌러도 아무 데도 안 간다.
-        assert_eq!(route_from_identifier("kasaterm-notify-7"), None);
-        assert_eq!(route_from_identifier("kasaterm-notify-7||"), None);
     }
 }
 

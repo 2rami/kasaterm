@@ -1113,6 +1113,9 @@ impl App {
         let n = self.unread_panes.len();
         if n != self.dock_badge_n {
             self.dock_badge_n = n;
+            #[cfg(windows)]
+            crate::win_notify::set_taskbar_badge(self.window.as_deref(), n);
+            #[cfg(not(windows))]
             set_dock_badge(n);
         }
     }
@@ -4227,7 +4230,8 @@ enum NotifyPath {
 /// 애플 서명 표식이 있는데도 macOS 가 등록을 거절해 허락이 늘 없으므로 사실상 매번
 /// 그랬다. 허락이 있으면 알림센터, 없으면(거절·아직 답 없음) osascript 다.
 ///
-/// 배너가 남는 것은 Windows(OS 알림 경로가 없다)와, 맥의 번들 없는 실행에서
+/// Windows 는 이 판정 앞에서 알림센터 토스트(`win_notify`)가 먼저 받는다. 배너가 남는 것은
+/// 토스트를 못 내는 Windows(사람이 kasaterm 알림을 끔·등록 실패)와, 번들 없는 실행에서
 /// `KASATERM_NOTIFY_BANNER` 로 배너를 일부러 켠 검증뿐이다.
 fn notify_path(macos_bundle: bool, authorized: bool) -> NotifyPath {
     match (macos_bundle, authorized) {
@@ -4263,6 +4267,17 @@ pub(crate) fn notify_desktop(
     if !is_bundled() && std::env::var_os("KASATERM_NOTIFY_BANNER").is_none() {
         return;
     }
+    // 토스트가 받으면 배너는 서지 않는다 — 한 일에 두 번 울리지 않게(맥 번들과 같다). 토스트가 배달에
+    // 실패하면 그 일꾼이 같은 요청을 배너 줄에 세운다.
+    #[cfg(windows)]
+    {
+        if crate::win_notify::toast(title, body, character, route) {
+            return;
+        }
+        if crate::win_notify::quiet_run() && std::env::var_os("KASATERM_NOTIFY_BANNER").is_none() {
+            return;
+        }
+    }
     #[cfg(target_os = "macos")]
     let path = notify_path(
         is_bundled(),
@@ -4286,17 +4301,42 @@ pub(crate) fn notify_desktop(
     }
 }
 
+/// 눌렀을 때 갈 자리를 알림 식별자에 싣는다 — `kasaterm-notify-{seq}|{pane}|{sid}`. pane id(`%116`)도
+/// uuid 도 `|` 를 안 쓴다. macOS 는 요청 identifier 로, Windows 는 토스트 launch 인자로 실어 [`notify_route`]
+/// 로 읽는다. `userInfo`(NSDictionary)를 쓰려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춰 딕셔너리를 세워야
+/// 하는데, 필요한 건 짧은 문자열 둘뿐이라 그 무게를 질 이유가 없다.
+pub(crate) fn notify_ident(seq: u64, route: Option<(&str, Option<&str>)>) -> String {
+    match route {
+        Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
+        None => format!("kasaterm-notify-{seq}"),
+    }
+}
+
+/// 알림 식별자에서 갈 자리를 꺼낸다. 자리 표시(`kasaterm-notify-3||`)나 형식이 안 맞는 것은 None —
+/// **못 읽으면 아무 데도 안 간다**가 이 경로의 규칙이다.
+pub(crate) fn notify_route(ident: &str) -> Option<(String, Option<String>)> {
+    let mut it = ident.split('|');
+    let _prefix = it.next()?;
+    let pane = it.next().filter(|s| !s.is_empty())?.to_string();
+    let sid = it.next().filter(|s| !s.is_empty()).map(str::to_string);
+    Some((pane, sid))
+}
+
 /// 알림에 붙일 그 학생의 프사 파일.
 ///
-/// 이미지는 `include_bytes!` 로 바이너리에 박혀 있어 경로가 없는데, 첨부가 받는
-/// 것은 **파일 URL 뿐**이다. 시스템이 첨부를 자체 저장소로 옮기므로 요청마다
-/// 다른 파일을 쓴다. 같은 학생이 연이어 끝내도 앞 알림의 첨부와 충돌하지 않는다.
-#[cfg(target_os = "macos")]
-fn student_profile_file(character: &str, seq: u64) -> Option<std::path::PathBuf> {
+/// 이미지는 `include_bytes!` 로 바이너리에 박혀 있어 경로가 없는데, 알림이 받는
+/// 것은 **파일 URL 뿐**이다. macOS 는 첨부를 자체 저장소로 옮기므로 요청마다(`seq`)
+/// 다른 파일을 쓴다 — 같은 학생이 연이어 끝내도 앞 알림의 첨부와 충돌하지 않는다.
+/// Windows 알림센터는 지난 토스트를 다시 그릴 때 그 경로를 다시 읽으므로 학생마다
+/// 한 파일(`None`)을 두고 계속 쓴다.
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn student_profile_file(character: &str, seq: Option<u64>) -> Option<std::path::PathBuf> {
     let slug = crate::theme::character_slug_any(character)?;
-    let path = std::env::temp_dir()
-        .join("kasaterm-notify-icons")
-        .join(format!("{slug}-{}-{seq}.png", std::process::id()));
+    let name = match seq {
+        Some(seq) => format!("{slug}-{}-{seq}.png", std::process::id()),
+        None => format!("{slug}.png"),
+    };
+    let path = std::env::temp_dir().join("kasaterm-notify-icons").join(name);
     let remote = crate::mirror_theme::asset(slug, "profile", 0);
     let png = remote.as_deref().or_else(|| crate::render::student_profile_png(slug))?;
     std::fs::create_dir_all(path.parent()?).ok()?;
@@ -4415,15 +4455,7 @@ fn notify_native(
     // Unique id per request so rapid completions don't replace each other.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // 눌렀을 때 갈 자리를 **identifier 에 실어** 보낸다. `userInfo`(NSDictionary)를
-    // 쓰려면 objc2 의 키 타입 제약(`NSCopying`)에 맞춰 딕셔너리를 세워야 하는데, 여기
-    // 필요한 건 짧은 문자열 둘뿐이라 그 무게를 질 이유가 없다.
-    // 형식: `kasaterm-notify-{seq}|{pane}|{sid}` — pane id(`%116`)도 uuid 도 `|` 를
-    // 안 쓴다. 받는 쪽은 `macos_notify::route_from_identifier`(UN·구식 공용).
-    let route_ident = match route {
-        Some((pane, sid)) => format!("kasaterm-notify-{seq}|{pane}|{}", sid.unwrap_or("")),
-        None => format!("kasaterm-notify-{seq}"),
-    };
+    let route_ident = notify_ident(seq, route);
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
@@ -4432,7 +4464,7 @@ fn notify_native(
     // dock 배지뿐이었다 — 그건 "봐야 보이는" 신호다(2026-08-11 조사).
     content.setSound(Some(&UNNotificationSound::defaultSound()));
     // 대화 알림 변환이 불가능한 경우에도 오른쪽 썸네일로 학생 얼굴을 남긴다.
-    if let Some(p) = character.and_then(|c| student_profile_file(c, seq)) {
+    if let Some(p) = character.and_then(|c| student_profile_file(c, Some(seq))) {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
         let aid = NSString::from_str(&format!("kasaterm-icon-{seq}"));
         if let Ok(att) = unsafe {
@@ -4619,7 +4651,7 @@ fn set_dock_badge(count: usize) {
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     app.dockTile().setBadgeLabel(label.as_deref());
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn set_dock_badge(_count: usize) {}
 
 #[cfg(not(target_os = "macos"))]
@@ -4898,7 +4930,19 @@ mod status_feed_tests {
 
 #[cfg(test)]
 mod notify_path_tests {
-    use super::{notify_path, NotifyPath};
+    use super::{notify_ident, notify_path, notify_route, NotifyPath};
+
+    #[test]
+    fn identifier_carries_pane_and_session() {
+        let ident = notify_ident(7, Some(("%116", Some("abc-123"))));
+        assert_eq!(ident, "kasaterm-notify-7|%116|abc-123");
+        assert_eq!(notify_route(&ident), Some(("%116".into(), Some("abc-123".into()))));
+        // 세션을 못 실은 알림(순정 셸 pane).
+        assert_eq!(notify_route(&notify_ident(7, Some(("%116", None)))), Some(("%116".into(), None)));
+        // 갈 자리가 아예 없는 알림 — 눌러도 아무 데도 안 간다.
+        assert_eq!(notify_route(&notify_ident(7, None)), None);
+        assert_eq!(notify_route("kasaterm-notify-7||"), None);
+    }
 
     #[test]
     fn bundled_macos_never_draws_own_banner() {

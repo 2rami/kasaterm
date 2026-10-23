@@ -54,6 +54,10 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
   다음 입력이 올 때까지 프레임을 거의 안 돈다(2026-10-02: Claude Code 는 클릭에 18ms 만에 다시 그렸는데 1.5초 뒤 `peek` 은 옛 화면이었다).
   앱이 무엇을 받고 무엇을 그렸는지는 pane 명령 앞에 입출력을 적는 pty 중계를 끼워 보고, 화면 판정은 다음 입력 뒤에 한다.
 - **알림은 안 뜬다.** 번들 없는 맥 리그는 데스크톱 알림·자체 배너를 내지 않는다(사람 화면에 리그 배너가 뜨던 것, 2026-10-07). 배너를 검증할 때만 `KASATERM_NOTIFY_BANNER=1`.
+  Windows 는 검증 실행·격리 env·cargo `target` 폴더의 exe 가 같은 조용한 실행이다. 토스트를 검증할 때만
+  `KASATERM_NOTIFY_TOAST=1` — 설치본과 갈린 리그 신원(`com.kasa.kasaterm.rig`, 꺼진 앱을 띄우는 `LocalServer32` 없음)으로 낸다.
+  끝나면 `HKCU\Software\Classes\AppUserModelId\com.kasa.kasaterm.rig` 를 지운다. 클릭은 사람 화면의 토스트를 누르지 말고
+  등록된 활성화기(`{d79515d3-0e66-43c1-b6a6-aff9f85d594d}`)를 COM 으로 만들어 `Activate(aumid, launch 인자)` 로 흉내 낸다.
 - **`TMPDIR` 도 리그 폴더로.** 앱은 stderr 가 tty 가 아니면 `$TMPDIR/kasaterm-app.log` 로 돌린다 — 안 가르면 리그 로그가
   사용자 앱 로그에 섞이고, `> app.log` 로 받은 파일은 비어 있다(2026-09-25). 소켓 경로는 104바이트 한도라 스크래치 폴더
   깊숙이 두면 `path must be shorter than SUN_LEN` 으로 소켓 서버가 안 선다 — `/tmp/<네이름>/` 처럼 짧게.

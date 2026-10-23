@@ -118,6 +118,8 @@ uuid = { version = "1", features = ["v4"] }
 vt100 = "0.15"
 wgpu = "28"
 wgpu-hal = { version = "28", features = ["metal"] }
+# `windows::core::implement` 가 펼친 코드가 이 이름을 직접 찾는다 — `windows` 0.61.3 의 짝 판.
+windows-core = "0.61.2"
 windows-sys = "0.59"
 # COM 이 든 셸 API(파일 창 등)는 windows-sys 로는 vtable 을 손으로 불러야 한다. WebView2(wry)가
 # 이미 이 판을 트리에 들였으므로 같은 판으로 맞춰 하나만 빌드되게 한다.
