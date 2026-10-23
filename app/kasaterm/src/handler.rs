@@ -1240,6 +1240,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketAttachView(pane, sid, pid) => {
+                self.seat_attach_view(pane, sid, *pid);
+                return;
+            }
+            UserEvent::RestoreAttach(pane, id, at) => {
+                let Some(sess) = self.pty.get(pane).cloned() else { return };
+                // 확인하는 사이 사람이 그 칸에서 뭔가 띄웠으면 끼어들지 않는다.
+                if sess.active_agent().is_some() { return; }
+                let cmd = format!("claude attach {id}");
+                let line = crate::session::windows_shell_line(&sess, None, &cmd).unwrap_or(format!("{cmd}\r"));
+                self.pending_restores.push((sess, line, (*at).max(std::time::Instant::now())));
+                return;
+            }
             UserEvent::SocketViewCwd(pane, cwd) => {
                 // 파일트리 루트 오버라이드 — "pane 이 보는 경로"(statusline report /
                 // transcript bind). 활성 pane 이면 다음 프레임 refresh_file_tree 가
@@ -1302,45 +1315,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 매핑이 없을 수 있어, bg_agents 의 부모 체인을 따라 원본 학생을 찾는다.
                 // 진입 시점에 확정해야 attach 로 foreground 가 되며 폴러(kind=background)에서
                 // 빠져 상속이 끊기기 전에 고정된다(사용자: 백그라운드 재진입 학생 바뀜).
-                let direct = kasa_mcp::character::session_character(id);
-                let resolved = direct.clone().or_else(|| {
-                    let mut cur = id.to_string();
-                    for _ in 0..8 {
-                        let parent = self
-                            .bg_agents
-                            .lock()
-                            .ok()
-                            .and_then(|m| m.get(&cur).cloned())
-                            .flatten();
-                        match parent {
-                            Some(p) => {
-                                if let Some(c) = kasa_mcp::character::session_character(&p) {
-                                    return Some(c);
-                                }
-                                cur = p;
-                            }
-                            None => break,
-                        }
-                    }
-                    None
-                });
-                // 바인딩도 부모도 없는 세션(포크 parentSessionId 미상) — pending 을 비워두면
-                // split 상속(layout.rs, 같은 맥락 이어보기용)이 소스 pane 의 학생을 물려줘
-                // 무관한 세션이 그 학생으로 둔갑했다(사용자: 왼쪽 pane 둘 다 프라나). 여기서
-                // 빈 슬롯 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(사용자).
-                let resolved = resolved.or_else(|| {
-                    let members = kasa_mcp::character::roster_in_use()
-                        .map(|c| kasa_mcp::character::assignable_names(&c))
-                        .unwrap_or_default();
-                    self.next_auto_character(&members, "")
-                });
-                if let Some(ch) = resolved {
-                    // 부모 체인/신선 배정으로 온 학생은 세션 id 에 영속 — 재진입·board
-                    // retained 가 체인 재탐색 없이(부모가 bg_agents 에서 밀려나도) 같은
-                    // 학생을 파싱한다. direct 면 이미 같은 값이라 무쓰기.
-                    if direct.is_none() {
-                        let _ = kasa_mcp::character::bind_session_character(id, &ch);
-                    }
+                if let Some(ch) = self.background_session_student(id, "") {
                     self.pending_character = Some(ch);
                 }
                 let new_id = if *newroom {

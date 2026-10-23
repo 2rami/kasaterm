@@ -939,6 +939,14 @@ impl PtyBackend {
                 }
             };
             let Some(sid) = sid else { continue };
+            // attach 는 배경 세션 하나에 고정된 실행이다 — 그 세션의 학생을 이 실행에 앉힌다. 빈 셸에서 친
+            // attach 는 학생을 묻지 않고 떠서(셰임이 attach 엔 정체성을 안 싣는다), 앉히지 않으면 아래 묶기가
+            // 「끝난 실행의 늦은 소식」으로 버려져 얼굴도 저장할 대화 번호도 비었다.
+            if sub == "attach" {
+                if let Some(pid) = claude_child_pid(shell_pid) {
+                    let _ = self.proxy.send_event(UserEvent::SocketAttachView(id.clone(), sid.clone(), pid));
+                }
+            }
             let Some(path) = transcript_path_for_session(&sid) else {
                 continue;
             };
@@ -953,6 +961,12 @@ impl PtyBackend {
             }
         }
         *self.view_panes.lock().unwrap() = views;
+    }
+
+    /// 복원이 다시 붙인 attach 칸을 보드 폴링을 기다리지 않고 앉힌다 — 붙은 것이 보이면 true.
+    pub(crate) fn seat_attach_view(&self, pane: &str) -> bool {
+        self.rebind_agents_panes(&self.live_surfaces());
+        self.view_panes.lock().unwrap().contains(pane)
     }
 
     /// sessionId → official claude status (idle/busy/waiting), cached 2s.
@@ -4955,11 +4969,22 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     } else {
         None
     };
-    serde_json::json!({
+    // `claude attach` 칸은 배경 세션을 비추는 창이다 — 복원은 대화를 잇지 않고 같은 세션에 다시 붙인다.
+    // 번호를 못 풀어도 친 낱말을 남긴다: 없으면 복원이 새 claude 를 띄운다.
+    let attach = shell_pid
+        .filter(|_| session_id.is_none() && matches!(agent, Some(kasa_pty::AgentKind::Claude)))
+        .filter(|&pid| claude_view_subcommand(pid) == Some("attach"))
+        .and_then(attach_token_from_cmdline)
+        .map(|token| resolve_attach_target(&token).unwrap_or(token));
+    let mut record = serde_json::json!({
         "cwd": cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
         "was_agent": was_agent,
         "session_id": session_id,
-    })
+    });
+    if let Some(target) = attach {
+        record["attach_session_id"] = serde_json::json!(target);
+    }
+    record
 }
 
 /// Write the full multi-session restore state (built by the caller from each
@@ -7507,22 +7532,47 @@ fn title_session_name(t: &str) -> &str {
 /// `claude attach <sid>` 의 대상 세션 id — attach 는 위치 인자라 기존
 /// claude_session_id_from_cmdline(--resume/--session-id 전용)이 못 잡는다.
 fn attach_target_from_cmdline(shell_pid: u32) -> Option<String> {
+    resolve_attach_target(&attach_token_from_cmdline(shell_pid)?)
+}
+
+/// `claude attach` 뒤에 친 낱말 그대로.
+fn attach_token_from_cmdline(shell_pid: u32) -> Option<String> {
     let pid = claude_child_pid(shell_pid)?;
     let argv = kasa_pty::process_cmdline(pid)?;
     let tokens: Vec<&str> = argv.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == "attach" {
-            // `claude --bg` 가 찍어 주는 짧은 번호(8자리)로 붙는 게 보통이다 — 그 번호의 세션으로 푼다.
-            let target = tokens.get(i + 1)?.trim_matches('"');
-            return match is_uuid(target) {
-                true => Some(target.to_string()),
-                false => (target.len() == 8 && target.chars().all(|c| c.is_ascii_hexdigit()))
-                    .then(|| resolve_sid8(&target.to_ascii_lowercase()))
-                    .flatten(),
-            };
-        }
+    let at = tokens.iter().position(|tok| *tok == "attach")?;
+    Some(tokens.get(at + 1)?.trim_matches('"').to_string())
+}
+
+/// `claude --bg` 가 찍어 주는 짧은 번호(8자리)로 붙는 게 보통이다 — 그 번호의 세션으로 푼다.
+fn resolve_attach_target(target: &str) -> Option<String> {
+    match is_uuid(target) {
+        true => Some(target.to_string()),
+        false => (target.len() == 8 && target.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| resolve_sid8(&target.to_ascii_lowercase()))
+            .flatten(),
     }
-    None
+}
+
+/// `claude attach` 로 다시 붙일 수 있는 살아 있는 배경 세션의 짧은 번호. `claude attach` 는 멈춘 세션도
+/// 다시 깨우므로, 끝났거나 지워진 세션은 여기서 걸러 붙이지 않는다. `claude agents` 를 띄우니 GUI 밖에서만.
+pub(crate) fn live_background_session(target: &str) -> Option<String> {
+    let agents = kasa_mcp::claude_agents_all(AGENTS_SHARE_AGE)?;
+    live_background_id(&agents, target)
+}
+
+fn live_background_id(agents: &[serde_json::Value], target: &str) -> Option<String> {
+    let target = target.to_ascii_lowercase();
+    agents.iter().find_map(|a| {
+        let field = |k: &str| a.get(k).and_then(|v| v.as_str());
+        let sid = field("sessionId")?;
+        let short = field("id");
+        let named = sid == target || short == Some(target.as_str())
+            || (target.len() == 8 && sid.starts_with(&target));
+        // 끝난 배경 세션은 `--all` 목록에 상태 없이 남는다.
+        (named && field("kind") == Some("background") && field("status").is_some())
+            .then(|| short.unwrap_or(sid).to_string())
+    })
 }
 
 /// The pid of the claude process tied to a shell pane, if any. Normal panes run
@@ -8939,6 +8989,21 @@ mod pid_cwd_tests {
         // 배경 세션: 앱 아래에서 claude 가 셸을 감싼다.
         let daemon = [(20, (1, false)), (30, (20, true)), (10, (30, false))].into_iter().collect();
         assert_eq!(super::claude_wrapping_shell(&daemon, 10, 20), Some(30));
+    }
+
+    #[test]
+    fn only_a_running_background_session_is_attached_again() {
+        let sid = "ec4441cd-2e13-4fdc-85b4-ac1ecb482881";
+        let running = serde_json::json!({"id": "ec4441cd", "sessionId": sid, "kind": "background", "status": "idle"});
+        for target in [sid, "ec4441cd", "EC4441CD"] {
+            assert_eq!(super::live_background_id(&[running.clone()], target).as_deref(), Some("ec4441cd"));
+        }
+        // `--all` 이 남겨 둔 끝난 세션은 `claude attach` 가 다시 깨우므로 붙이지 않는다.
+        let ended = serde_json::json!({"id": "ec4441cd", "sessionId": sid, "kind": "background"});
+        assert_eq!(super::live_background_id(&[ended], sid), None);
+        let interactive = serde_json::json!({"sessionId": sid, "kind": "interactive", "status": "busy"});
+        assert_eq!(super::live_background_id(&[interactive], sid), None);
+        assert_eq!(super::live_background_id(&[running], "0aa6c5de"), None);
     }
 
     #[cfg(windows)]

@@ -100,6 +100,57 @@ impl App {
         Ok(identity)
     }
 
+    /// 배경 세션(`claude attach`·이어받기)의 학생 — 세션 자신의 바인딩 > 포크 부모 사슬 > 빈 자리 새 배정.
+    /// background 세션은 detach 때 fork 로 id 가 갈려 직접 매핑이 없을 수 있어 부모를 따라간다. 부모 체인/신선
+    /// 배정으로 온 학생은 세션 id 에 굳힌다 — 재진입·board retained 가 체인 재탐색 없이(부모가 bg_agents 에서
+    /// 밀려나도) 같은 학생을 읽는다.
+    pub(crate) fn background_session_student(&mut self, sid: &str, pane: &str) -> Option<String> {
+        let direct = kasa_mcp::character::session_character(sid);
+        let resolved = direct.clone().or_else(|| {
+            let mut cur = sid.to_string();
+            for _ in 0..8 {
+                let parent = self.bg_agents.lock().ok().and_then(|m| m.get(&cur).cloned()).flatten()?;
+                if let Some(c) = kasa_mcp::character::session_character(&parent) {
+                    return Some(c);
+                }
+                cur = parent;
+            }
+            None
+        });
+        // 바인딩도 부모도 없는 세션(포크 parentSessionId 미상) — 비워 두면 split 상속(layout.rs, 같은 맥락
+        // 이어보기용)이 소스 pane 의 학생을 물려줘 무관한 세션이 그 학생으로 둔갑했다(사용자: 왼쪽 pane 둘 다
+        // 프라나). 빈 자리 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(사용자).
+        let resolved = resolved.or_else(|| {
+            let members = kasa_mcp::character::roster_in_use()
+                .map(|c| kasa_mcp::character::assignable_names(&c))
+                .unwrap_or_default();
+            self.next_auto_character(&members, pane)
+        })?;
+        if direct.is_none() {
+            let _ = kasa_mcp::character::bind_session_character(sid, &resolved);
+        }
+        Some(resolved)
+    }
+
+    /// `claude attach` 실행을 그 칸의 자리로 앉힌다 — 얼굴은 붙은 세션의 학생, 대화 번호는 그 세션.
+    pub(crate) fn seat_attach_view(&mut self, pane: &str, sid: &str, pid: u32) {
+        if self.pane_agent_launches.get(pane) == Some(&pid) && self.pane_claude_sid.get(pane).is_some_and(|s| s == sid) {
+            return;
+        }
+        if self.ws.lock().unwrap().outer_for_pty(pane).is_none() { return; }
+        let Some(name) = self.background_session_student(sid, pane) else { return };
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.pane_next_character.remove(pane);
+            ws.pane_launch_character.insert(pane.into(), name.clone());
+        }
+        self.pane_last_seat.remove(pane);
+        self.pane_agent_launches.insert(pane.into(), pid);
+        self.pane_claude_sid.insert(pane.into(), sid.into());
+        self.session_touched = true;
+        self.relabel_pane(pane, &name);
+    }
+
     pub(crate) fn release_finished_agent_identities(&mut self) {
         if self.pane_agent_launches.is_empty() { return; }
         let table = kasa_pty::process_table_shared();

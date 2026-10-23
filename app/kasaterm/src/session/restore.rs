@@ -856,6 +856,13 @@ impl App {
             .get("session_id")
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
+        // attach 칸은 셸로 띄우고 배경 세션이 살아 있을 때만 다시 붙인다(`restore_attach`). 얼굴은 붙은 뒤
+        // 그 세션에서 오므로 저장된 학생을 미리 앉히지 않는다 — 세션이 끝났으면 빈 셸이어야 한다.
+        let attach_target = rec
+            .get("attach_session_id")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         // 저장된 캐릭터를 되살린다(사용자: 재시작하면 랜덤 둔갑). pending 으로 세팅하면
         // assign_character_env 가 랜덤 대신 이걸 재사용하고, 저장 세션 id 가 있으면 그
         // 원본 sid 에 캐릭터를 다시 bind 해 --resume 후 shim 교정·다음 재시작까지 영속화한다.
@@ -873,7 +880,7 @@ impl App {
         let saved_char = rec
             .get("character")
             .and_then(|c| c.as_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && attach_target.is_none())
             .filter(|s| {
                 // 저장된 세션 id 로 **수동 지정 면제**를 본다 — 사람이 직접 고른
                 // 자리는 명단을 바꿔도 지킨다(2026-08-26 지시: 「손으로 고른 건
@@ -1144,9 +1151,39 @@ impl App {
             self.pending_restores.push((session, cmd, at));
         } else {
             self.restore_server(&id, &session, rec);
+            if let Some(target) = attach_target {
+                self.restore_attach(&id, target);
+            }
         }
         key_registration.committed = true;
         Some(id)
+    }
+
+    /// 배경 세션을 비추던 칸 — 그 세션이 아직 살아 있으면 같은 칸에서 다시 붙이고, 끝났거나 지워졌으면 빈
+    /// 셸로 둔다. 살아 있는지는 `claude agents` 를 띄워야 알아 GUI 밖에서 본다.
+    fn restore_attach(&self, pane: &str, target: String) {
+        let proxy = self.proxy.clone();
+        let backend = self.socket_backend.clone();
+        let pane = pane.to_string();
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        std::thread::spawn(move || {
+            let Some(id) = socket::live_background_session(&target) else {
+                eprintln!("[restore] pane {pane}: 배경 세션 {target} 이 살아 있지 않아 빈 셸로 둔다");
+                return;
+            };
+            if proxy.send_event(crate::UserEvent::RestoreAttach(pane.clone(), id, at)).is_err() {
+                return;
+            }
+            // 얼굴은 뷰 판정이 앉힌다. 그 판정은 보드 폴링·배경 명부 변화에만 돌아, 아무도 보드를 안 부르면
+            // 붙은 칸이 한참 빈 얼굴로 남는다 — 붙을 때까지 몇 번 직접 돌린다.
+            let Some(be) = backend else { return };
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if be.seat_attach_view(&pane) {
+                    break;
+                }
+            }
+        });
     }
 }
 

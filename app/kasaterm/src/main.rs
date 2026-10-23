@@ -4127,6 +4127,11 @@ enum UserEvent {
     /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
     /// 캐릭터 둔갑을 막는다(사용자: 재시작하면 프라나가 미도리로). `apply_session_character`.
     SocketSessionBound(String, String),
+    /// `claude attach` 실행이 칸에 보였다 — (pane, 대상 세션 id, 그 claude pid). 그 세션의 학생을 이
+    /// 실행에 앉히고, 실행이 끝나면 `release_finished_agent_identities` 가 걷는다.
+    SocketAttachView(String, String, u32),
+    /// 복원한 attach 칸의 배경 세션이 살아 있다 — (pane, 짧은 번호, 셸이 뜰 즈음). 그 칸에 다시 붙인다.
+    RestoreAttach(String, String, std::time::Instant),
     /// pane 이 "보고 있는" 경로 — statusline report-cwd(claude 내부 cd 포함) 또는
     /// transcript bind 시 jsonl tail 의 cwd. 셸 pid cwd 와 달리 pane **내용**의
     /// 프로젝트를 가리켜, 파일트리 루트가 이걸 우선한다(bg-attach pane 은 셸이

@@ -408,6 +408,12 @@ impl App {
         if let Some(sid) = pane_claude_sid.get(surface) {
             obj.insert("session_id".to_string(), serde_json::json!(sid));
         }
+        // attach 칸은 이을 대화가 없다 — `--resume` 으로 되살리면 살아 있는 배경 세션을 갈라 새 대화를
+        // 만든다. 붙일 대상만 남기고 하네스·대화 번호는 뺀다(복원이 그 세션에 다시 붙이거나 빈 셸로 둔다).
+        if obj.get("attach_session_id").is_some_and(|v| v.is_string()) {
+            obj.insert("was_agent".to_string(), serde_json::Value::Null);
+            obj.insert("session_id".to_string(), serde_json::Value::Null);
+        }
         // Codex가 업데이트를 고른 뒤 종료하면 셸만 남아 live process 감지는
         // `null`이지만, 직전에 정확히 결속한 root rollout UUID는 남아 있다.
         // 그 둘이 함께 있을 때만 종류를 복원해 다음 저장이 fresh Claude로
@@ -476,7 +482,8 @@ impl App {
             || obj
                 .get("session_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|sid| !sid.is_empty());
+                .is_some_and(|sid| !sid.is_empty())
+            || obj.contains_key("attach_session_id");
         let sb = if restores_agent {
             Vec::new()
         } else {
@@ -685,5 +692,17 @@ mod tests {
         assert_eq!(record["character"], "모모이");
         assert_eq!(record["title"], "거울 탭");
         drop(remote);
+    }
+
+    #[test]
+    fn attach_record_keeps_the_target_but_no_conversation_to_resume() {
+        let target = "ec4441cd-2e13-4fdc-85b4-ac1ecb482881";
+        let mut record = serde_json::json!({"was_agent": "claude", "session_id": null, "attach_session_id": target})
+            .as_object().unwrap().clone();
+        let bound = [("%8".to_string(), target.to_string())].into_iter().collect();
+        super::App::fill_surface_record(&mut record, "%8", None, None,
+            &Default::default(), &crate::Workspace::default(), &bound, &Default::default());
+        assert_eq!(record["attach_session_id"], target);
+        assert!(record["was_agent"].is_null() && record["session_id"].is_null());
     }
 }
