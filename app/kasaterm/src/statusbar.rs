@@ -375,7 +375,7 @@ fn paint_usage_popover(
         // `맥북 재시작 권장 · 메모리 압박 경…` 으로 잘렸다(실측 2026-08-27) —
         // 이유는 아랫줄로 내린다.
         let head = adv.headline();
-        let pct = format!("wired {:.0}%", m.wired_pct());
+        let pct = format!("{} {:.0}%", crate::sysmem::WIRED_LABEL, m.wired_pct());
         let size = format!("{:.1}G / {:.0}G", gb(m.wired), gb(m.total));
         let pw = g.measure_chrome_text(&pct, 11.0, true);
         let sw = g.measure_chrome_text(&size, 10.0, false);
@@ -405,9 +405,7 @@ fn paint_usage_popover(
         // 다른 손을 쓸 수 있는지 판단할 근거가 없다. 원인이 wired 면 그 숫자가
         // 이미 옆에 있으므로, 그때만 압축·스왑을 대신 적는다(둘 다 0 이 아닌데
         // wired 만 낮으면 「왜 무겁지」의 답이 거기 있을 수 있다).
-        let sub = m.extra_reason().unwrap_or_else(|| {
-            format!("압축 {:.1}G · 스왑 {:.1}G", gb(m.compressed), gb(m.swap_used))
-        });
+        let sub = m.extra_reason().unwrap_or_else(|| m.detail());
         let s2 = crate::info::fit_text(g, &sub, avail, 10.0, false);
         g.draw_text(
             x + 12.0,

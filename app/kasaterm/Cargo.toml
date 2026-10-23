@@ -153,6 +153,10 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Console",
     # 날씨가 따르는 「투명 효과」 끔(weather/mod.rs) — API 가 없어 설정 앱의 레지스트리 값을 읽는다.
     "Win32_System_Registry",
+    # 메모리 압박(sysmem.rs): 커널의 「물리 메모리 부족」 알림 객체.
+    "Win32_System_Memory",
+    # sysmem 시험이 GlobalMemoryStatusEx 로 표본을 대조한다.
+    "Win32_System_SystemInformation",
 ] }
 # 파일·폴더 고르기 창(win_dialog.rs) — 셸의 IFileOpenDialog·IFileSaveDialog. 데스크톱 기능은
 # 그 창을 사람 화면 밖(숨은 데스크톱)에서 띄워 보는 시험이 쓴다.
