@@ -760,9 +760,9 @@ struct Ext {
     key: &'static str,
 }
 
-/// 전역 설정 자리. macOS 전용 경로는 그 OS 에서만 본다.
+/// 전역 설정 자리(홈 기준).
 fn ext_globals() -> Vec<Ext> {
-    let mut v = vec![
+    vec![
         Ext { id: "gemini", rel: ".gemini/settings.json", key: "mcpServers" },
         Ext { id: "antigravity", rel: ".gemini/antigravity/mcp_config.json", key: "mcpServers" },
         Ext { id: "cursor", rel: ".cursor/mcp.json", key: "mcpServers" },
@@ -770,20 +770,39 @@ fn ext_globals() -> Vec<Ext> {
         Ext { id: "opencode", rel: ".config/opencode/opencode.json", key: "mcp" },
         Ext { id: "qwen", rel: ".qwen/settings.json", key: "mcpServers" },
         Ext { id: "copilot", rel: ".copilot/mcp-config.json", key: "mcpServers" },
-    ];
+    ]
+}
+
+/// 데스크톱 앱이 OS 의 앱 설정 폴더에 두는 자리. 그 폴더 아래 경로는 macOS
+/// (`~/Library/Application Support`)와 Windows(`%APPDATA%`)가 같다.
+fn ext_app_data() -> Vec<Ext> {
+    vec![
+        Ext { id: "vscode", rel: "Code/User/mcp.json", key: "servers" },
+        Ext { id: "claude desktop", rel: "Claude/claude_desktop_config.json", key: "mcpServers" },
+    ]
+}
+
+/// 그 앱 설정 폴더 안의 실제 파일. Windows 는 `%APPDATA%` 를 env 에서 읽는다 — 폴더 리디렉션으로
+/// 홈 밖(네트워크 드라이브 등)에 있을 수 있어 홈에서 짐작하면 빗나간다.
+///
+/// 스토어(MSIX)판 앱은 `%APPDATA%` 쓰기를 제 꾸러미 안(`Packages/<앱>_<게시자 해시>/LocalCache/Roaming`)
+/// 으로 돌리고, 그 앱은 그쪽 사본을 먼저 읽는다. 그래서 그 사본이 있으면 그것이 정본이다(Claude
+/// Desktop 이 이 꼴로 배포된다). 꾸러미는 수백 개라 그 앱 이름으로 시작하는 것만 본다.
+fn app_data_file(home: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
     if cfg!(target_os = "macos") {
-        v.push(Ext {
-            id: "vscode",
-            rel: "Library/Application Support/Code/User/mcp.json",
-            key: "servers",
-        });
-        v.push(Ext {
-            id: "claude desktop",
-            rel: "Library/Application Support/Claude/claude_desktop_config.json",
-            key: "mcpServers",
-        });
+        return Some(home.join("Library/Application Support").join(rel));
     }
-    v
+    if !cfg!(windows) {
+        return None;
+    }
+    let roaming = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| home.join("AppData/Roaming"));
+    let local = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| home.join("AppData/Local"));
+    let app = rel.split('/').next().unwrap_or(rel);
+    let packaged = std::fs::read_dir(local.join("Packages")).into_iter().flatten().flatten()
+        .filter(|entry| entry.file_name().to_str().and_then(|name| name.strip_prefix(app)).is_some_and(|rest| rest.starts_with('_')))
+        .map(|entry| entry.path().join("LocalCache/Roaming").join(rel))
+        .find(|path| path.is_file());
+    Some(packaged.unwrap_or_else(|| roaming.join(rel)))
 }
 
 /// 레포에 커밋되는 자리. claude 의 `.mcp.json` 은 [`claude_mcp`] 가 이미 읽는다.
@@ -923,6 +942,11 @@ pub(crate) fn collect(cwd: Option<&std::path::Path>) -> Vec<McpRow> {
     ));
     for e in ext_globals() {
         rows.extend(ext_rows(&home.join(e.rel), &e, "전역"));
+    }
+    for e in ext_app_data() {
+        if let Some(path) = app_data_file(&home, e.rel) {
+            rows.extend(ext_rows(&path, &e, "전역"));
+        }
     }
     if let Some(c) = cwd {
         for e in ext_repo() {
