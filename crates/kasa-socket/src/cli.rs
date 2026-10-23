@@ -3651,9 +3651,13 @@ fn resolve_socket_path() -> Result<String> {
 
 /// 앱을 다시 켜기 전부터 돌던 프로세스(배경 claude 세션 등)는 옛 앱의 소켓 이름(`kasaterm-<옛 pid>.sock`)을 물고 있어
 /// 아무 명령도 못 붙었다. 그 파이프가 없고 지금 살아 있는 카사텀 파이프가 하나뿐이면 그리로 간다 — 둘 이상이면
-/// 고르지 않는다(검증 리그로 샐 수 있다).
+/// 고르지 않는다(검증 리그로 샐 수 있다). 끈 검증 리그에 남은 프로세스는 격리 env 를 물고 있다 — 그걸 본판으로
+/// 보내면 리그 칸 번호로 사람 칸을 묶는다.
 #[cfg(windows)]
 fn live_app_pipe_instead_of(path: &str) -> Option<String> {
+    if crate::isolated_collab_root().is_some() || std::env::var_os("KASATERM_SESSION_FILE").is_some() {
+        return None;
+    }
     let name = Path::new(path).file_name()?.to_string_lossy().into_owned();
     let app_pipe = |n: &str| n.starts_with("kasaterm-") && n.ends_with(".sock");
     if !app_pipe(&name) {

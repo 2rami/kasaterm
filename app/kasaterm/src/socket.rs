@@ -7557,16 +7557,23 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
     {
         return Some(pid);
     }
-    // 2) Background (claude daemon): claude wraps the shell. Walk the parent chain
-    //    and take the first claude (`claude --session-id … → zsh`).
+    // 2) Background (claude daemon): claude wraps the shell.
+    claude_wrapping_shell(&procs, shell_pid, std::process::id())
+}
+
+/// 셸의 부모 사슬에서 처음 만나는 claude(`claude --session-id … → zsh`). 앱 위는 칸 밖이라 앱에서 멈춘다 —
+/// 학생 claude 가 앱을 띄웠거나(리그·업데이트 재시작) Windows 가 죽은 앱 부모의 PID 를 claude 에 다시 주면,
+/// 모든 칸이 그 claude 의 대화로 묶여 이름표가 한 학생으로 몰렸다(2026-10-23 0.2.160 재시작 뒤 리오·아스나·노아
+/// 칸이 유우카로).
+fn claude_wrapping_shell(procs: &HashMap<u32, (u32, bool)>, shell_pid: u32, app: u32) -> Option<u32> {
     let mut cur = shell_pid;
     for _ in 0..8 {
         let ppid = procs.get(&cur)?.0;
-        if procs.get(&ppid).map_or(false, |(_, claude)| *claude) {
-            return Some(ppid);
+        if ppid == app || ppid <= 1 {
+            return None;
         }
-        if ppid <= 1 {
-            break;
+        if procs.get(&ppid).is_some_and(|(_, claude)| *claude) {
+            return Some(ppid);
         }
         cur = ppid;
     }
@@ -8922,6 +8929,16 @@ mod pid_cwd_tests {
     #[test]
     fn pid_cwd_is_none_for_a_dead_pid() {
         assert_eq!(super::pid_cwd(u32::MAX - 1), None);
+    }
+
+    #[test]
+    fn a_claude_above_the_app_is_not_the_panes_claude() {
+        // 30 claude → 20 앱 → 10 칸 셸: 앱을 띄운 claude 는 칸의 것이 아니다.
+        let launched_app = [(30, (1, true)), (20, (30, false)), (10, (20, false))].into_iter().collect();
+        assert_eq!(super::claude_wrapping_shell(&launched_app, 10, 20), None);
+        // 배경 세션: 앱 아래에서 claude 가 셸을 감싼다.
+        let daemon = [(20, (1, false)), (30, (20, true)), (10, (30, false))].into_iter().collect();
+        assert_eq!(super::claude_wrapping_shell(&daemon, 10, 20), Some(30));
     }
 
     #[cfg(windows)]
