@@ -1,13 +1,30 @@
 # 개인 기기의 빠른 업데이트
 
-일반 사용자는 기존 안정판을 받는다. 빠른 업데이트에 참여한 Mac만 별도 preview 피드를 확인하고, 새 판이 있으면 Sparkle 표준 창(새 판 안내 → 업데이트 설치 → 진행 막대 → 다시 켜기)을 띄운다. 사람이 표준 창에서 설치를 눌렀을 때만 받는다. 누르기 전에 몰래 받아 두거나 종료할 때 설치하지 않는다.
+일반 사용자는 기존 안정판을 받는다. 빠른 업데이트에 참여한 기기(Mac·Windows)만 별도 preview 피드를 확인한다. Mac 은 새 판이 있으면 Sparkle 표준 창(새 판 안내 → 업데이트 설치 → 진행 막대 → 다시 켜기)을 띄우고, Windows 는 앱의 새 판 알림 [업데이트]가 WinSparkle 받기·서명 확인·MSI 설치로 넘긴다. 사람이 설치를 눌렀을 때만 받는다. 누르기 전에 몰래 받아 두거나 종료할 때 설치하지 않는다.
 
 ## 작업 완료와 발행
 
 1. 에이전트는 수정·검사·커밋을 끝내고 정확한 커밋을 `origin/main`에 올린다. 다른 작업자의 미완성 변경은 포함하지 않는다.
 2. 같은 저장소에서 `python3 -m tools.release.auto enqueue <40자리 커밋 SHA>`를 실행한다. 이것은 `preview-ready/<SHA>` 원격 태그 하나만 멱등 등록한다. 임의 브랜치나 아직 main에 없는 커밋은 발행하지 않는다.
 3. 전용 controller가 대기열을 직렬 처리한다. 깨끗한 별도 checkout에서 검사 → 패치 버전 증가 → Developer ID 서명 → 공증 → 태그·prerelease → CI 검증·EdDSA → preview 피드 순서다.
+   정책이 Windows 를 허가하면 같은 판의 Windows MSI 가 아래 「Windows 덤」으로 뒤따른다.
 4. 완료는 명령 종료 코드가 아니라 `feed` 단계까지 검증된 상태다. CI 대기 중인 작업을 성공으로 보고하지 않는다. 실패·대기는 상태와 원인을 남긴다.
+
+### Windows 덤 — mac 을 기다리게 하지 않는다
+
+preview 태그의 채널 기록(`.github/release-channel.json`)이 `platforms: ["macos","windows"]` 이면 CI 는 Windows 를 그 태그
+실행에서 굽지 않는다. mac 피드를 게시한 뒤 `windows-followup` job 이 같은 태그로 `release vX.Y.Z (windows)` 실행을 부르고,
+그 실행이 MSI 를 굽고 mac 실행이 만든 prerelease 에 붙인 뒤(만들지도·채널을 바꾸지도·있는 파일을 덮지도 않는다) 같은 EdDSA
+키로 서명해 `docs/appcast-win-preview.xml` 하나만 게시한다. 게시는 mac 과 같은 `feed_publish` 다 — 태그 커밋·채널·플랫폼,
+판·주소·크기·산출물 해시, 저장소 공개키로 서명 확인, main CAS, Pages 빌드와 공개 피드 대조.
+
+- 따로 도는 실행이라 Windows 굽기(CI 에서 수십 분)의 시간·실패가 mac preview 와 controller 를 늦추거나 막지 않는다. controller 는
+  mac 실행만 기다리고(`backend.tag_run_platforms`), `(windows)` 실행은 controller 의 실행 찾기에 걸리지 않는다.
+- 같은 이유로 Windows preview 피드는 계획의 기준 해시(`feed_base`)에 넣지 않는다. 늦게 나간 Windows 피드가 다음 계획을 낡게 만들어
+  20분 굽기를 버리게 하지 않는다. 판 번호는 원격 태그로 오르니 Windows 피드가 판을 되돌리지 못한다.
+- Windows 덤이 실패하면 그 판의 Windows 만 빠진다. 고친 뒤 `gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f platforms=windows`
+  로 다시 부른다. 늦은 판이 이미 나갔으면 `feed_publish` 가 옛 판으로 덮기를 거절한다.
+- 안정판은 예전대로 한 실행에서 두 피드를 한 커밋으로 낸다. `windows` 실행은 Windows 를 싣는 preview 태그에만 열린다.
 
 CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
 검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과
@@ -91,6 +108,11 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 install \
 
 `install`은 `--apply`가 없으면 LaunchAgent 내용을 보여줄 뿐이다. 서명 키·비밀번호·공증 자격 내용은 정책이나 로그에 넣지 않는다. 기존 키체인과 이름 있는 공증 프로필을 쓴다.
 
+`enable` 은 정책의 `platforms` 를 `["macos","windows"]` 로 봉인한다. 그 전에 봉인한 `["macos"]` 정책은 그대로 유효하고 mac 만
+낸다 — 코드가 주인이 허가한 범위를 넓히지 않는다. Windows 를 싣으려면 controller 에서 `enable` 을 다시 친다(같은 인자, 정책 revision 이
+오른다). 진행 중인 계획은 옛 정책 해시에 묶여 있으니 `status` 의 `queue.active` 가 비었을 때 친다. 계획은 정책이 허가하고 그 커밋의
+Windows 앱이 preview 피드를 알 때만(`win_sparkle.rs` 에 `appcast-win-preview.xml`) Windows 를 싣는다.
+
 ```sh
 python3 -m tools.release.auto --state-dir /절대/상태폴더 status
 python3 -m tools.release.auto --state-dir /절대/상태폴더 disable
@@ -101,9 +123,10 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 observe
 
 정책을 껐다 다시 켠 뒤에는 같은 범위의 정확한 계획만 `reauthorize <plan_id>`로 재허가한다. 태그가 없는 계획만 `replan <plan_id>`로 새 검사·계획을 요청할 수 있다. 이미 태그가 있는 계획을 버리고 다른 릴리스를 만들어 우회하지 않는다.
 
-## 처음 한 번: 받는 Mac
+## 처음 한 번: 받는 기기
 
-기기별 `settings.json`에서 다음 두 항목을 명시한다. 계정 공통 설정 동기화에는 포함하지 않는다.
+기기별 `settings.json`(Mac `~/.config/kasaterm/settings.json`, Windows `%USERPROFILE%\.config\kasaterm\settings.json`)에서
+다음 두 항목을 명시한다. 계정 공통 설정 동기화에는 포함하지 않는다. 앱은 켤 때 한 번 읽는다 — 바꾼 뒤 한 번 껐다 켠다.
 
 ```json
 {"update_channel":"preview","automatic_update_on_quit":true}
@@ -121,6 +144,23 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 observe
 - 기다렸다 저절로 다시 켜지 않는 것은, 사람이 모르는 때에 화면이 사라지기 때문이다.
 - 안정판도 같은 위임을 단다(표준 창을 띄우는 때, 다시 켜기 전 확인). 피드·확인 주기·자동 받기 선택은 Info.plist 와 사람이 고른 값 그대로다.
 
+### Windows
+
+preview 피드를 아는 MSI 설치본(`C:\Program Files\kasaterm`)이 처음 한 번 있어야 한다. 그 전 판은 안정판 피드(`appcast-win.xml`)만
+보고, 그 피드는 preview 가 바꾸지 않는다 — 첫 preview MSI 는 그 판의 prerelease 에서 받아 사람이 설치한다.
+
+- 확인은 켠 지 10초 뒤, 그 뒤 참여 기기는 한 시간·안정판은 하루마다다(맥과 같은 간격). 확인은 앱이 피드를 직접 읽어 판만 견주고
+  WinSparkle 자동 확인은 끈다 — WinSparkle 은 자체 확인이 새 판을 찾으면 옛 「업데이트 있음」 창을 끌 수 없게 띄운다.
+- 새 판이면 오른쪽 위 새 판 알림 [업데이트][닫기]. [업데이트]는 끊길 일(일하는·사람을 기다리는 학생, 학생이 아닌 창에서 도는 명령,
+  저장 안 한 문서)이 있으면 [그래도 업데이트]로 한 번 더 묻고, WinSparkle 진행 막대 → EdDSA 확인 → MSI 로 넘긴다. 판 번호 줄도
+  같은 피드와 견준다.
+- MSI 를 띄우기 직전(WinSparkle can-shutdown) 앱이 끊길 일을 다시 잰다. [그래도 업데이트]에서 받아들인 것과 같으면 그대로 가고,
+  그 사이 생긴 끊김이면 Windows 확인창 「지금 다시 켜면 끊겨요 · …  그래도 업데이트할까요?」를 띄운다. 기본 단추는 [아니요]
+  (맥 시트와 같다). [아니요]면 WinSparkle 이 설치를 미루고 그 창의 설치를 다시 누를 수 있다. 앱이 5초 안에 답하지 못하면 끄지 않는다.
+- MSI 를 띄운 직후(shutdown-request) 앱이 스스로 정상 종료한다 — `exiting` 을 지나 세션·창 크기가 저장된다. 예전엔 앱이 떠 있어
+  MSI 가 「Files in Use」를 묻고 사람이 앱을 꺼야 했다. 설치는 MSI 창과 관리자 확인(UAC, 설치 범위가 기기 전체)을 사람이 누른다.
+  설치가 끝난 뒤 다시 켜는 것은 사람이 한다(MSI 에 다시 켜기 단계가 아직 없다).
+
 ### 0.2.18~0.2.27 에서 넘어오기
 
 이 판들은 자체 알림 「새 판 있어요 [업데이트]」를 띄웠다. [업데이트]는 이 프로세스에 자동 받기를 켜고 확인을 다시 돌렸지만, Sparkle 은 자동 받기 대신 표준 창 경로를 골랐다(2026-10-02 `scripts/update-rig.py` 리그 재현). 표준 창은 일반 앱이면 다시 활성화될 때까지 미뤄져, 앱 안에서 누른 사람에겐 진행 표시 없이 아무 일도 없었다.
@@ -136,7 +176,7 @@ preview 업데이터를 시작한 프로세스에서는 Sparkle이 설치를 전
 ## 안정판 보호
 
 - `.github/release-channel.json`은 버전 커밋의 채널·태그·부모 SHA·플랫폼을 고정한다. CI는 그 태그의 파일을 검증하고 분기한다.
-- preview는 Mac DMG 하나, GitHub prerelease, `latest=false`, `appcast-preview.xml`만 사용한다. 안정판 피드·Windows 피드·일반 latest는 바꾸지 않는다.
+- preview는 Mac DMG(정책이 허가하면 Windows MSI 도), GitHub prerelease, `latest=false`, `appcast-preview.xml`·`appcast-win-preview.xml`만 사용한다. 안정판 피드(`appcast.xml`·`appcast-win.xml`)·일반 latest는 바꾸지 않는다 — `feed_publish` 가 채널로 피드 자리를 정하고 preview 가 안정판 자리를 가리키면 거절한다.
 - 기존 나쵸 단발 승인 방식은 그대로다. 자동 publisher는 별도 정책 허가이며 두 허가를 같은 작업에서 섞지 않는다.
 - 버전·태그·파일 해시·서명·공증 검사를 낮추지 않는다. main이 움직이면 preview는 위 합침 커밋으로, stable은 재계획으로, 피드는 검증한 피드 커밋을 비교 후 다시 제출한다. 강제 push는 하지 않는다.
 - 모바일 바이너리는 이 Mac 경로의 대상이 아니다. 폰 앱은 설치 링크 판(`mobile/tool/adhoc.sh`, [절차](ios-adhoc-install.md))으로 따로 올린다. TestFlight는 2026-10-01부터 쓰지 않는다.

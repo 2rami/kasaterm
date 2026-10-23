@@ -292,6 +292,8 @@ gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f pl
   태그를 만들거나 옮기는 명령은 워크플로에 없다. 입력한 태그를 체크아웃하고 그 릴리스에만 붙인다.
 - `macos` 는 **부분 게시**다 — Windows job 을 건너뛰고 mac 피드만 갱신하며, Windows 피드는 손대지 않는다(msi 를 지어내지 않는다).
   계획은 msi 가 없어 release 단계에서 멈춘다(성공으로 안 친다). 나중에 `both` 로 마무리하면 이어서 끝난다.
+- `windows` 는 Windows 를 싣는 **preview** 태그의 Windows 덤만 다시 부른다(MSI·`appcast-win-preview.xml`). 안정판 태그에는
+  열리지 않는다. 절차는 [자동 preview 업데이트](automatic-preview-updates.md) 「Windows 덤」.
 - 워크플로 수동 실행은 게시다(appcast 가 나간다) — 나쵸 확인을 받은 흐름에서만.
 
 ### git LFS — 미니 LFS 서버가 정본이다

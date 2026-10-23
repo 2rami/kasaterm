@@ -11,7 +11,7 @@
 | 계획·거부 사유(`plan`) · 작업 상태(`status`) | 된다 — 새 판이 깔린 앱끼리 |
 | 실행(`run --approval ap_…`) | 카사텀 쪽은 된다. **나쵸 승인 창구가 켜져야** 실제로 돈다 — 지금 나쵸는 `approvals_disabled`(아래 「켜려면」) |
 | 앱 안 실행(수락 판정 → 도우미 → `exiting()`) | 된다 — 나쵸에서 읽은 승인과 자기 사실이 맞을 때만 |
-| 윈도우 기기 | 미지원 OS 로 거부 |
+| 윈도우 기기 | 된다 — MSI 설치본(`<드라이브>:\Program Files\kasaterm`)만. 도우미는 PowerShell, 재기동은 explorer(아래 「Windows」) |
 
 **첫 배포는 사람이 한다.** 이 창구는 새 판이 깔린 앱에만 있다 — 두 기기에 굽고 설치한 뒤 처음 한 번은 사람이
 직접 앱을 껐다 켜야 한다(옛 판 앱은 `capability_missing` 이나 닿지 못함으로 거부된다).
@@ -50,9 +50,9 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 |---|---|
 | `unreachable` | 명부에 없거나 닿지 않는다(이유를 함께 싣는다) |
 | `identity_mismatch` | 물은 기기가 아닌 기기가 답했다 |
-| `unsupported_os` | macOS 가 아니다 |
+| `unsupported_os` | macOS·Windows 가 아니다 |
 | `capability_missing` | 그 앱엔 재시작 창구가 없다(옛 판) |
-| `not_installed_app` | `~/Applications`·`/Applications` 의 설치본이 아니다(개발 실행) |
+| `not_installed_app` | `~/Applications`·`/Applications`(Windows 는 `Program Files\kasaterm\bin`)의 설치본이 아니다(개발 실행) |
 | `busy_students` | 일하는 중·압축 중·승인/질문을 기다리는 학생, 또는 학생이 아닌 창에서 명령이 도는 중(등록 서버 창은 뺀다) |
 | `unsaved_editors` | 저장 안 한 편집기 |
 | `self_install_pending` | 끄면 자기설치가 새 빌드를 깐다 — 재시작이 업그레이드가 되므로 거부 |
@@ -87,6 +87,23 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 도우미 env 는 허용목록뿐이다(`PATH` 고정·`HOME`·`USER`·`LOGNAME`·`TMPDIR`·`LANG`·`LC_*`) — claude 마커·토큰·카사텀
 소켓 경로가 새 앱으로 새지 않는다. 새 앱은 LaunchServices 가 띄우므로 도우미의 부모 관계도 안 물려받는다.
 
+### Windows
+
+계획·승인·작업 기록·상태는 맥과 같다(`%USERPROFILE%\.config\kasaterm\app-restart\`). 다른 것은 도우미와 재기동뿐이다.
+
+- 도우미는 작업 옆 `<job_id>.helper.ps1`(UTF-8 BOM — Windows PowerShell 5 는 BOM 없는 파일을 ANSI 로 읽어 한글 경로가 깨진다)을
+  `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File` 로, 창 없이 새 프로세스 그룹으로 띄운다. 앱이 job
+  object 안에서 돌아도 같이 꺼지지 않게 job 에서 빠져나오고, job 이 막으면 빠져나오기 없이 띄운다.
+- 옛 앱은 pid 가 아니라 프로세스 핸들로 기다린다(`WaitForExit`, 60초 상한, 강제 종료 없음) — 꺼진 뒤 그 pid 가 다시 쓰이면 pid
+  로 재는 기다림은 상한까지 헛돈다. 같은 앱은 실행 파일 경로가 `…\kasaterm\bin\kasaterm.exe` 인 프로세스로만 센다.
+- 재기동은 `explorer.exe <설치본 실행 파일>` — 사용자 셸이 띄우므로 새 앱은 도우미의 좁힌 env 가 아니라 사용자 세션의 env 로 뜬다.
+  explorer 는 띄우고도 1 로 끝나 종료 코드로 성공을 못 가리므로, 새 프로세스가 90초 안에 보이는지로 잰다.
+- 도우미 env 허용목록: `SystemRoot`·`PATH`(System32·Windows·PowerShell 폴더로 고정)·`SystemDrive`·`windir`·`ComSpec`·
+  `USERPROFILE`·`USERNAME`·`USERDOMAIN`·`HOMEDRIVE`·`HOMEPATH`·`APPDATA`·`LOCALAPPDATA`·`TEMP`·`TMP`·`ProgramData`·
+  `ProgramFiles`·`PROCESSOR_ARCHITECTURE`.
+- 원격 「업데이트」([app-update.md](app-update.md))는 아직 mac 만이다 — Windows 기기는 `unsupported_os` 로 거절하고 자기 업데이터
+  (WinSparkle)로 받는다.
+
 ## 다시 켜면 이어지는 것 / 아닌 것
 
 - 이어진다: 방·창 배치, 창마다 cwd, 세션 id 가 있는 claude·codex 대화(`--resume`), 등록 서버(`kasaterm-cli tab --server`).
@@ -106,7 +123,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 
 ## 이 절차가 하지 않는 것
 
-강제 종료(`kill -9`·`pkill`·`killall`), 빌드·pull·push·설치, launchd 등록, SSH 관문(`nacho-tunnel-guard`·
+강제 종료(`kill -9`·`pkill`·`killall`·`taskkill`·`Stop-Process`), 빌드·pull·push·설치, launchd 등록, SSH 관문(`nacho-tunnel-guard`·
 `kasaterm-remote`) 변경, 명부 밖 호스트, 임의 명령. claude pane 안에서 앱을 띄우는 일(`open`·`relaunch.sh`)도
 하지 않는다 — 재기동은 앱 밖 도우미가 LaunchServices 로 한다.
 
