@@ -26,13 +26,18 @@ pub fn is_uuid(s: &str) -> bool {
         })
 }
 
+/// claude 가 cwd 를 `~/.claude/projects` 아래 폴더 이름으로 굳히는 규칙 — 영숫자가 아닌 글자는 모두 `-`.
+/// `/`·`.` 만 바꾸면 Windows 의 `C:\Users\x`(실제 폴더 `C--Users-x`)와 맥의 `_`·공백·한글 경로를 놓친다.
+/// 아주 긴 경로는 claude 가 해시를 덧붙여 줄이므로 이 이름이 빗나가고, 부르는 쪽의 uuid 폴백이 찾는다.
+pub fn claude_project_slug(cwd: &Path) -> String {
+    cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
 /// `~/.claude/projects/<encoded-cwd>/` — the transcript dir claude writes a
-/// `cwd`'s session jsonls into. Encoding matches claude code: every `/` and `.`
-/// in the absolute cwd becomes `-`. None when `$HOME` is unset.
+/// `cwd`'s session jsonls into (`claude_project_slug`). None when `$HOME` is unset.
 pub fn claude_project_dir(cwd: &Path) -> Option<PathBuf> {
     let home = crate::home_dir()?;
-    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    Some(home.join(".claude/projects").join(encoded))
+    Some(home.join(".claude/projects").join(claude_project_slug(cwd)))
 }
 
 /// Full jsonl path for session `id` (a uuid) under `cwd`. Used both to list
@@ -486,6 +491,14 @@ mod tests {
         // peek 표시는 같은 턴을 사람이 읽을 형태로.
         assert_eq!(format_turns(&tail), "[사용자] 10 을 곱하면?\n\n[claude] 20");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn 대화_폴더_이름은_영숫자가_아닌_글자를_모두_빗금으로_바꾼다() {
+        assert_eq!(claude_project_slug(Path::new(r"C:\Users\2rami\Desktop")), "C--Users-2rami-Desktop");
+        assert_eq!(claude_project_slug(Path::new(r"c:\Users\2rami\KASA\debi-marlene")), "c--Users-2rami-KASA-debi-marlene");
+        assert_eq!(claude_project_slug(Path::new("/Users/me/my_repo/v1.2")), "-Users-me-my-repo-v1-2");
+        assert_eq!(claude_project_slug(Path::new("/Users/me/한글 폴더")), "-Users-me------");
     }
 
     #[test]

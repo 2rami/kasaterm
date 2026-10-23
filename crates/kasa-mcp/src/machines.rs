@@ -1118,12 +1118,36 @@ pub fn same_machine_bases(a: &str, b: &str) -> bool {
 
 /// 경로 접두 매핑. 경계가 path 성분이어야 한다 — `/a/bc` 가 `/a/b` 규칙에
 /// 걸리면 엉뚱한 폴더가 된다.
+///
+/// Windows 쪽 경로(`C:\…`)는 `\`·`/` 를 같은 구분자로, 대소문자를 안 가리고 견준다 — 같은 폴더가
+/// `c:\Users` 로도 `C:/Users` 로도 온다. 남은 꼬리의 구분자는 도착 쪽 OS 의 것으로 바꾼다.
 fn map_prefix(path: &str, from: &str, to: &str) -> Option<String> {
-    let rest = path.strip_prefix(from)?;
-    if !(rest.is_empty() || rest.starts_with('/')) {
+    let windows = windows_path(from) || windows_path(path);
+    let sep = |c: char| c == '/' || (windows && c == '\\');
+    let mut rest = path;
+    for want in from.chars() {
+        let got = rest.chars().next()?;
+        let same = got == want || (sep(got) && sep(want)) || (windows && got.eq_ignore_ascii_case(&want));
+        if !same {
+            return None;
+        }
+        rest = &rest[got.len_utf8()..];
+    }
+    if !(rest.is_empty() || rest.starts_with(sep)) {
         return None;
     }
+    let rest = match (windows, windows_path(to)) {
+        (false, true) => rest.replace('/', "\\"),
+        (true, false) => rest.replace('\\', "/"),
+        _ => rest.to_string(),
+    };
     Some(format!("{to}{rest}"))
+}
+
+/// 드라이브 글자로 시작하거나 `\` 가 든 경로.
+fn windows_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || path.contains('\\')
 }
 
 pub fn map_local_to_remote(m: &Machine, local: &str) -> Option<String> {
@@ -1907,6 +1931,20 @@ mod tunnel_backoff_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_and_mac_roots_map_both_ways_with_the_other_separator() {
+        let win = r"C:\Users\2rami\Desktop\KASA";
+        let mac = "/Users/kasa/Desktop/KASA";
+        assert_eq!(super::map_prefix(r"C:\Users\2rami\Desktop\KASA\kasaterm\app", win, mac).as_deref(), Some("/Users/kasa/Desktop/KASA/kasaterm/app"));
+        assert_eq!(super::map_prefix(r"c:/users/2rami/Desktop/KASA/kasaterm", win, mac).as_deref(), Some("/Users/kasa/Desktop/KASA/kasaterm"),
+            "드라이브·대소문자·빗금 방향이 달라도 같은 폴더다");
+        assert_eq!(super::map_prefix("/Users/kasa/Desktop/KASA/kasaterm/app", mac, win).as_deref(), Some(r"C:\Users\2rami\Desktop\KASA\kasaterm\app"));
+        assert_eq!(super::map_prefix(win, win, mac).as_deref(), Some(mac));
+        assert_eq!(super::map_prefix(r"C:\Users\2rami\Desktop\KASAX", win, mac), None, "경계는 경로 성분이다");
+        assert_eq!(super::map_prefix("/Users/Kasa/Desktop/KASA/x", mac, win), None, "맥 경로는 대소문자를 가린다");
+        assert_eq!(super::map_prefix("/a/b/c", "/a/b", "/x").as_deref(), Some("/x/c"));
+    }
+
     use super::*;
 
     /// 이어 여는 대화의 학생은 그 대화를 아는 기기에서 온다. 모르는 기기(빈 답)와 꺼진 기기는 건너뛰고,

@@ -8186,8 +8186,7 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
     let Some(home) = kasa_socket::home_dir() else {
         return Vec::new();
     };
-    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let dir = home.join(".claude/projects").join(encoded);
+    let dir = home.join(".claude/projects").join(kasa_socket::sessions::claude_project_slug(cwd));
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -8209,9 +8208,9 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
         .collect()
 }
 
-/// claude 가 cwd 를 projects 폴더 이름으로 굳힐 때 쓰는 규칙 — `/` 와 `.` 이 `-`.
+/// claude 가 cwd 를 projects 폴더 이름으로 굳힐 때 쓰는 규칙.
 pub(crate) fn project_slug(cwd: &std::path::Path) -> String {
-    cwd.to_string_lossy().replace(['/', '.'], "-")
+    kasa_socket::sessions::claude_project_slug(cwd)
 }
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
