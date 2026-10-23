@@ -450,6 +450,15 @@ impl State {
                     if !crate::verification_run() {
                         let _ = crate::proc::command("open").arg("-R").arg(&dest).spawn();
                     }
+                    // 탐색기는 `/select,` 뒤 경로를 따옴표째 한 덩어리로 받아야 한다 — 보통 인자 따옴표는
+                    // 쉼표 앞까지 감싸 빈 폴더 창이 뜬다.
+                    #[cfg(windows)]
+                    if !crate::verification_run() {
+                        use std::os::windows::process::CommandExt;
+                        let _ = crate::proc::command("explorer")
+                            .raw_arg(format!("/select,\"{}\"", dest.display()))
+                            .spawn();
+                    }
                     format!("다운로드 폴더에 저장했어요 · {}", dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
                 }
                 Err(e) => format!("저장하지 못했어요 · {e:#}"),
