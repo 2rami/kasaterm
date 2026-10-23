@@ -1382,9 +1382,12 @@ fn panes_of(pids: &[u32]) -> HashMap<u32, String> {
     out
 }
 
+/// Windows 엔 `ps eww` 가 없어 pid 마다 PEB 의 환경 블록을 읽는다. 묻는 대상은 포트를 쥔 프로세스뿐이다.
 #[cfg(not(unix))]
-fn panes_of(_pids: &[u32]) -> HashMap<u32, String> {
-    HashMap::new()
+fn panes_of(pids: &[u32]) -> HashMap<u32, String> {
+    pids.iter()
+        .filter_map(|&pid| kasa_pty::process_env_var(pid, "KASATERM_PANE_ID").map(|pane| (pid, pane)))
+        .collect()
 }
 
 #[cfg(unix)]
@@ -1502,6 +1505,23 @@ mod pane_activity_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 포트를 쥔 프로세스가 물려받은 칸 번호를 Windows 에서도 읽는다 — 셸이 끝나 부모 사슬이 끊겨도 남는 단서다.
+    #[cfg(windows)]
+    #[test]
+    fn a_port_owner_names_its_pane_from_its_environment() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .env("KASATERM_PANE_ID", "%77")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let panes = panes_of(&[child.id(), u32::MAX]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(panes.get(&child.id()).map(String::as_str), Some("%77"));
+        assert_eq!(panes.len(), 1, "열 수 없는 pid 는 빠진다");
+    }
 
     #[test]
     fn mirrors_keep_viewer_room_and_id_in_the_normal_pane_list() {
