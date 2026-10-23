@@ -9,6 +9,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod windows_terminal;
+
 pub(crate) const VERSION: u64 = 1;
 
 static BOOT_PREPARED: AtomicBool = AtomicBool::new(false);
@@ -704,7 +706,12 @@ pub(crate) fn import_sources() -> Vec<ImportSource> {
         static SOURCES: std::sync::OnceLock<Vec<ImportSource>> = std::sync::OnceLock::new();
         SOURCES.get_or_init(|| vec![apple_terminal_source(), iterm_source()]).clone()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        static SOURCES: std::sync::OnceLock<Vec<ImportSource>> = std::sync::OnceLock::new();
+        SOURCES.get_or_init(windows_terminal::sources).clone()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Vec::new()
     }

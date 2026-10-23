@@ -163,7 +163,7 @@ impl Data {
             .unwrap_or(selected_path);
         Self {
             platform,
-            imports: Arc::new(if platform == "macos" {
+            imports: Arc::new(if matches!(platform, "macos" | "windows") {
                 onboarding::import_sources()
             } else {
                 Vec::new()
@@ -268,7 +268,7 @@ impl State {
     fn apply_loaded(&mut self, data: Data) {
         if !self.loaded {
             self.appearance =
-                if data.platform == "macos" && data.imports.iter().any(import_supported) {
+                if matches!(data.platform, "macos" | "windows") && data.imports.iter().any(import_supported) {
                     AppearanceMode::Import
                 } else {
                     AppearanceMode::Manual
@@ -1229,7 +1229,8 @@ fn paint_appearance(
     w: f32,
 ) {
     use crate::native_settings::Target;
-    if s.state.data.platform == "macos" {
+    let windows = s.state.data.platform == "windows";
+    if s.state.data.platform == "macos" || windows {
         segmented(
             g,
             s,
@@ -1252,12 +1253,12 @@ fn paint_appearance(
         );
         *y += 48.0;
     }
-    if s.state.appearance == AppearanceMode::Import && s.state.data.platform == "macos" {
+    if s.state.appearance == AppearanceMode::Import && (s.state.data.platform == "macos" || windows) {
         section(
             g,
             x,
             y,
-            "Mac 터미널에서 가져오기",
+            if windows { "Windows Terminal에서 가져오기" } else { "Mac 터미널에서 가져오기" },
             "색상과 글꼴만 읽고 원본 프로필은 바꾸지 않습니다",
         );
         if s.state.data.imports.is_empty() {
@@ -1266,7 +1267,11 @@ fn paint_appearance(
                 x,
                 y,
                 w,
-                "가져올 Apple Terminal 또는 iTerm2 프로필을 찾지 못했어요",
+                if windows {
+                    "가져올 Windows Terminal 프로필을 찾지 못했어요"
+                } else {
+                    "가져올 Apple Terminal 또는 iTerm2 프로필을 찾지 못했어요"
+                },
             );
         }
         for source in s.state.data.imports.iter() {

@@ -517,6 +517,8 @@ fn english(value: &str) -> Option<&'static str> {
         "가져오기" => "Import",
         "가져올 수 없음" => "Unavailable",
         "가져올 Apple Terminal 또는 iTerm2 프로필을 찾지 못했어요" => "No Apple Terminal or iTerm2 profile was found",
+        "Windows Terminal에서 가져오기" => "Import from Windows Terminal",
+        "가져올 Windows Terminal 프로필을 찾지 못했어요" => "No Windows Terminal profile was found",
         "색상 테마" => "Color theme",
         "앱과 터미널 ANSI 색이 함께 바뀝니다" => "App and terminal ANSI colors change together",
         "터미널 글꼴" => "Terminal font",
