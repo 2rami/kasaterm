@@ -5,7 +5,7 @@ use super::*;
 use super::blocks::{command_at_cursor, parse_command_blocks};
 use super::grid::snapshot;
 use super::inline::{
-    InlineScan, advance_scanning_inline, attach_inline_views, inline_cell_flow, scan_inline_image,
+    InlineScan, advance_scanning_inline, attach_inline_views, drop_cleared_images, inline_cell_flow, scan_inline_image,
 };
 use super::screen::publish_screen_update;
 use super::vt::history_lines_for_cols;
@@ -446,6 +446,9 @@ pub(super) fn spawn_reader_thread(
                     processor.advance(&mut *t, &processed_bytes[at..]);
                 } else {
                     processor.advance(&mut *t, processed_bytes);
+                }
+                if !scanned {
+                    drop_cleared_images(&inline_imgs, processed_bytes);
                 }
                 if let Some(mut bytes) = wire {
                     if !scanned { bytes.extend_from_slice(processed_bytes); }

@@ -17,6 +17,21 @@ fn terminal_geometry() -> (u32, u32, u32, u32) {
             );
         }
     }
+    // ConPTY 는 칸 크기만 알고 글자 픽셀은 모른다 — 비율만 맞으면 앱이 c·r 칸에 맞춰 그린다.
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{
+            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+        };
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) != 0 {
+            let cols = (info.srWindow.Right - info.srWindow.Left + 1).max(0) as u32;
+            let rows = (info.srWindow.Bottom - info.srWindow.Top + 1).max(0) as u32;
+            if cols > 0 && rows > 0 {
+                return (cols, rows, 10, 20);
+            }
+        }
+    }
     (80, 24, 10, 20)
 }
 
@@ -79,9 +94,12 @@ pub(crate) fn run(args: &[std::ffi::OsString]) -> anyhow::Result<bool> {
         w > 0 && h > 0 && u64::from(w) * u64::from(h) <= 64_000_000,
         "이미지가 너무 큽니다"
     );
-    // Windows 칸 출력은 ConPTY 를 지난다 — kitty 그림(APC)은 걸러지고, OSC 1337 은 지나가도 글보다 먼저·나중에
-    // 와서 엉뚱한 줄에 앉는다(2026-10-23 실측). 글 줄로 지나가는 표시 줄만 내면 앱이 그 줄을 그림으로 그린다.
-    let console = cfg!(windows) && stdout.is_terminal();
+    // Windows 칸 출력은 ConPTY 를 지난다. 동봉 OpenConsole 칸은 kitty 를 그대로 넘겨 맥과 같이 그린다. 시스템
+    // ConPTY 는 kitty 그림(APC)을 걸러 내고, OSC 1337 은 지나가도 글보다 먼저·나중에 와서 엉뚱한 줄에 앉는다
+    // (2026-10-23 실측) — 그때만 글 줄로 지나가는 표시 줄을 내고 앱이 그 줄을 그림으로 그린다.
+    let console = cfg!(windows)
+        && stdout.is_terminal()
+        && std::env::var_os("KASATERM_KITTY_IMAGES").is_none_or(|v| v != "1");
     if explicit_block || !stdout.is_terminal() || console {
         let decoded = image::open(path)?;
         let id = crate::inline_result::register(&decoded)?;

@@ -308,8 +308,14 @@ impl PtySession {
         // Claude Code 가 모르는 터미널을 위해 둔 공식 스위치 — 로 지원을 알린다.
         // kitty 프로토콜을 아는 다른 앱은 `a=q` 질의에 정직하게 답해 알린다.
         // Windows 시스템 ConPTY 는 APC 를 걸러 내 그림이 못 온다 — 앱이 동봉 OpenConsole 을 실었을 때만 켠다.
-        if cfg!(unix) || crate::bundled_conpty_loaded() {
+        // `KASATERM_KITTY_IMAGES` 는 칸 안 imgopen 이 같은 판정을 읽는 값이다. 0 도 늘 적는다 — 안 적으면
+        // 동봉판 칸에서 띄운 다른 카사텀(리그)의 시스템 ConPTY 칸이 바깥 칸의 1 을 물려받는다.
+        let kitty = cfg!(unix) || crate::bundled_conpty_loaded();
+        cmd.env("KASATERM_KITTY_IMAGES", if kitty { "1" } else { "0" });
+        if kitty {
             cmd.env("CLAUDE_CODE_FORCE_TERMINAL_IMAGES", "1");
+        } else {
+            cmd.env_remove("CLAUDE_CODE_FORCE_TERMINAL_IMAGES");
         }
         // claude 의 렌더러(classic·fullscreen)는 여기서 정하지 않는다 — 사람이 claude 의
         // `/tui` 로 고른다. 08-30~09-28 사이 이 자리에서 강제를 다섯 번 뒤집었다. 마지막

@@ -374,7 +374,7 @@ pub(super) fn advance_scanning_inline(
             };
             match next {
                 Some((m, kind, len)) => {
-                    processor.advance(term, &data[..m]);
+                    advance_vt(processor, term, imgs, &data[..m]);
                     if let Some(out) = wire.as_mut() { out.extend_from_slice(&data[..m]); }
                     // 동기 출력(DECSET 2026) 안이면 방금 먹인 바이트가 파서
                     // 버퍼에만 쌓여 커서가 옛 자리(입력줄)에 있다 — recall 은
@@ -400,13 +400,33 @@ pub(super) fn advance_scanning_inline(
                     } else {
                         0
                     };
-                    processor.advance(term, &data[..data.len() - keep]);
+                    advance_vt(processor, term, imgs, &data[..data.len() - keep]);
                     if let Some(out) = wire.as_mut() { out.extend_from_slice(&data[..data.len() - keep]); }
                     st.carry = data[data.len() - keep..].to_vec();
                     return;
                 }
             }
         }
+    }
+}
+
+/// 그림 밖 VT 조각을 파서에 먹인다. 조각은 APC 사이 글이라 앞서 놓인 그림만 지우고 뒤에 올 그림은 안 건드린다.
+fn advance_vt(
+    processor: &mut Processor<StdSyncHandler>,
+    term: &mut Term<PtyEventForwarder>,
+    imgs: &Mutex<InlineImgs>,
+    vt: &[u8],
+) {
+    processor.advance(term, vt);
+    drop_cleared_images(imgs, vt);
+}
+
+/// kitty 규격: 화면 지우기(`ESC[2J`)와 초기화(RIS)는 놓인 그림도 지운다 — `clear` 가 먹히게. 스크롤백 줄 수가 준
+/// 것으로는 못 가른다: 한 번도 안 넘친 칸은 지우기 앞뒤가 둘 다 0 이라 `cls` 뒤에도 그림이 남았다(2026-10-23
+/// Windows 동봉 ConPTY 실측 — `cls` 는 `ESC[H ESC[2J ESC[3J` 로 온다). 방금 파서에 먹인 조각을 받는다.
+pub(super) fn drop_cleared_images(imgs: &Mutex<InlineImgs>, vt: &[u8]) {
+    if memchr::memmem::find(vt, b"\x1b[2J").is_some() || memchr::memmem::find(vt, b"\x1bc").is_some() {
+        imgs.lock().unwrap().kitty.drop_anchored();
     }
 }
 
@@ -1203,6 +1223,19 @@ mod kitty_graphics_tests {
         // 지우기(a=d, 화면 전부)로 놓기가 사라진다.
         r.feed(b"\x1b_Ga=d\x1b\\");
         assert!(r.views().is_empty());
+    }
+
+    #[test]
+    fn clear_screen_takes_the_image_even_with_no_scrollback() {
+        // Windows `cls` 가 동봉 ConPTY 를 지나 오는 꼴. 한 번도 안 넘친 칸이라 스크롤백 줄 수는 지우기 앞뒤 0 이다.
+        let mut r = rig(40, 8, true);
+        r.feed(format!("\x1b_Ga=T,f=100,i=1,c=3,r=2,C=1;{}\x1b\\", b64(&png(4, 4))).as_bytes());
+        assert_eq!(r.views().len(), 1);
+        r.feed(b"\x1b[H\x1b[2J\x1b[3J");
+        assert!(r.views().is_empty());
+        // 지운 뒤 같은 조각에서 새로 놓은 그림은 남는다.
+        r.feed(format!("\x1b[2J\x1b_Ga=T,f=100,i=2,c=3,r=2,C=1;{}\x1b\\", b64(&png(4, 4))).as_bytes());
+        assert_eq!(r.views().len(), 1);
     }
 
     #[test]
