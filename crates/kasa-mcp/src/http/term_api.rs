@@ -459,32 +459,10 @@ async fn term_session_delete(
     Json(serde_json::json!({ "ok": true, "released": released }))
 }
 
-/// 에이전트 pid 를 곱게 끈다. Windows 엔 libc::kill(POSIX) 이 없어 taskkill 로 대신한다
-/// — 원격 이사는 지금 macOS 끼리라 이 갈래는 CI 컴파일용이다.
-#[cfg(unix)]
-fn agent_term_signal(pid: u32) {
-    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-}
-
-#[cfg(windows)]
-fn agent_term_signal(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string()])
-        .spawn();
-}
-
-/// pid 가 살아 있나 — unix 는 `kill(pid, 0)`, Windows 는 taskkill 이 동기 종료라 죽은 것으로 본다.
-#[cfg(unix)]
-fn agent_pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(windows)]
-fn agent_pid_alive(_pid: u32) -> bool {
-    false
-}
-
+/// `force=1` 은 곱게 못 끈 하네스를 강제로 끝낸다(Windows). 없으면 못 끈 것을 실패로 답한다 — 「껐다」고
+/// 답하면 부른 쪽이 그 대화를 제 기기에서 다시 열어 두 기기에서 같은 대화가 돈다.
 async fn term_agent_stop_post(
+    backend: Arc<dyn Backend>,
     q: Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
@@ -502,28 +480,26 @@ async fn term_agent_stop_post(
     let Some(shell) = sess.shell_pid() else {
         return err(format!("{pane} 의 셸 pid 를 모른다"));
     };
-    let table = kasa_pty::process_table_shared();
-    let Some((kind, agent_pid)) = kasa_pty::agent_pid_for_shell(&table, shell) else {
+    let table = kasa_pty::fresh_process_table();
+    let Some((kind, agent_pid)) = kasa_pty::agent_pid_for_pane(&table, shell, pane) else {
         // 이미 꺼져 있는 것은 실패가 아니다 — 대화는 디스크에 남아 있고,
         // 역이사는 그걸 걷어 가면 된다.
         return Json(serde_json::json!({ "ok": true, "stopped": false }));
     };
-    let bypass = std::process::Command::new("ps")
-        .args(["-o", "command=", "-p", &agent_pid.to_string()])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dangerously-skip-permissions"))
-        .unwrap_or(false);
-    agent_term_signal(agent_pid);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    while agent_pid_alive(agent_pid) {
-        if std::time::Instant::now() > deadline {
-            return err(format!(
-                "{kind:?}(pid {agent_pid}) 가 8초 안에 안 꺼졌다 — 반쯤 산 채 두는 것보다 세우는 게 낫다"
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let bypass = kasa_pty::process_cmdline(agent_pid)
+        .is_some_and(|cmd| cmd.contains("--dangerously-skip-permissions"));
+    let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    let surface = pane.clone();
+    let stopped = tokio::task::spawn_blocking(move || {
+        crate::agent_stop::stop_agent(&sess, kind, agent_pid, force, || {
+            backend.agent_prompt_idle(&surface).unwrap_or(false)
+        })
+    })
+    .await;
+    match stopped {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return err(format!("{e:#}")),
+        Err(e) => return err(format!("끄기 작업이 중단됐어요: {e}")),
     }
     // 이사로 학생을 내줬다 — 이 pane 의 sid 주장을 걷으라고 GUI 틱에 알린다.
     // 안 걷으면 세션 저장이 그 대화를 이 pane 것으로 굳혀, 재시작 복원이 남의
@@ -542,6 +518,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let panes_backend = backend.clone();
     let colors_backend = backend.clone();
     let shot_backend = backend.clone();
+    let stop_backend = backend.clone();
     axum::Router::new()
         .route(
             "/term/panes",
@@ -567,7 +544,12 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         .route("/term/input", post(term_input_post))
         .route("/term/screen", get(term_screen_get))
         .route("/term/session", axum::routing::delete(term_session_delete))
-        .route("/term/agent-stop", post(term_agent_stop_post))
+        .route(
+            "/term/agent-stop",
+            post(move |q: Query<std::collections::HashMap<String, String>>| {
+                term_agent_stop_post(stop_backend.clone(), q)
+            }),
+        )
         .route(
             "/term/tunnel",
             get(term_tunnel_get).post(term_tunnel_post),

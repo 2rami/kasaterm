@@ -4594,26 +4594,7 @@ fn status_feed_reader_pid() -> Option<u32> {
     };
     let pid: u32 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     // 죽은 pid 가 남아 있으면 떠 있는 것으로 읽힌다 — 살아 있는지 본다.
-    process_alive(pid).then_some(pid)
-}
-
-/// 그 pid 가 아직 살아 있나.
-///
-/// 시그널은 유닉스 것이라 `libc` 를 여기 한 곳에 가둔다 — 부르는 쪽이 양쪽
-/// 플랫폼에서 같은 모양이 되게. 맥 전용 크레이트를 공용 코드에서 그대로 쓰면
-/// Windows 빌드가 통째로 선다(`libc` 는 Cargo.toml 의 macos 블록에만 있다).
-///
-/// Windows 는 늘 거짓이다. 피드를 읽는 펫 앱이 맥 전용이라 pid 파일 자체가 안 생긴다.
-fn process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    kasa_pty::pid_alive(pid).then_some(pid)
 }
 
 /// 상태 피드 자리(`board.json` · `overlay.json` · `inbox.jsonl`). 펫이 카사텀 안에 있던 때의

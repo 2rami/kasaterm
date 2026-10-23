@@ -30,6 +30,19 @@ impl PtySession {
         self.send_bytes_guarded(bytes,None).map(|_|())
     }
 
+    /// 하네스 끄기 명령(`/exit`)을 넣는 길. 이사는 출발 칸 입력을 닫아 둔 채 끄므로 닫힘을 안 보고,
+    /// 입력 세대도 안 올린다 — 이사가 그 세대로 출발 칸이 그대로인지 대조한다. 사람·tell 쓰기는 닫힌 채 막혀 있다.
+    pub fn send_control_bytes(&self, bytes: &[u8]) -> Result<()> {
+        let mut w = self.writer.lock().unwrap();
+        w.write_all(bytes).context("pty write")?;
+        w.flush().context("pty flush")?;
+        drop(w);
+        if bytes.iter().any(|b| matches!(b, b'\r' | b'\n')) {
+            process_table_poke();
+        }
+        Ok(())
+    }
+
     pub fn input_revision(&self) -> u64 {
         self.input_revision.load(std::sync::atomic::Ordering::Acquire)
     }

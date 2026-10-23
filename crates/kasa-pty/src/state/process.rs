@@ -564,7 +564,86 @@ pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<St
     found
 }
 
-#[cfg(not(unix))]
+/// PEB → RTL_USER_PROCESS_PARAMETERS 의 환경 블록을 읽는다. windows-sys 의 그 구조체는 앞부분만 공개라
+/// Environment(0x80)·EnvironmentSize(0x3F0) 는 64비트 배치의 자리로 읽는다. 키는 Windows 처럼 대소문자를
+/// 가리지 않는다(`Path`).
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<String, String> {
+    use std::ffi::c_void;
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+    const ENVIRONMENT: usize = 0x80;
+    const ENVIRONMENT_SIZE: usize = 0x3F0;
+    // 환경 블록은 32K 글자가 한도다 — 그보다 크게 적힌 크기는 잘못 읽은 것이다.
+    const MAX_BLOCK: usize = 64 * 1024 * 2;
+    let mut found = std::collections::HashMap::new();
+    if keys.is_empty() {
+        return found;
+    }
+    let block = unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if handle.is_null() {
+            return found;
+        }
+        let read = |addr: usize, buf: *mut c_void, len: usize| -> bool {
+            let mut got = 0usize;
+            ReadProcessMemory(handle, addr as *const c_void, buf, len, &mut got) != 0 && got == len
+        };
+        let block = (|| -> Option<Vec<u16>> {
+            let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            if NtQueryInformationProcess(
+                handle,
+                ProcessBasicInformation,
+                &mut pbi as *mut _ as *mut c_void,
+                std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                &mut ret_len,
+            ) != 0
+                || pbi.PebBaseAddress.is_null()
+            {
+                return None;
+            }
+            let mut peb: PEB = std::mem::zeroed();
+            if !read(pbi.PebBaseAddress as usize, &mut peb as *mut _ as *mut c_void, std::mem::size_of::<PEB>()) {
+                return None;
+            }
+            let mut params = [0u8; ENVIRONMENT_SIZE + 8];
+            if !read(peb.ProcessParameters as usize, params.as_mut_ptr().cast(), params.len()) {
+                return None;
+            }
+            let word = |at: usize| usize::from_le_bytes(params[at..at + 8].try_into().unwrap());
+            let (env, size) = (word(ENVIRONMENT), word(ENVIRONMENT_SIZE));
+            if env == 0 || size < 2 || size > MAX_BLOCK {
+                return None;
+            }
+            let mut block = vec![0u16; size / 2];
+            read(env, block.as_mut_ptr().cast(), block.len() * 2).then_some(block)
+        })();
+        CloseHandle(handle);
+        block
+    };
+    let Some(block) = block else { return found };
+    for entry in block.split(|&c| c == 0).take_while(|entry| !entry.is_empty()) {
+        let entry = String::from_utf16_lossy(entry);
+        // `=C:=C:\…` 처럼 `=` 로 시작하는 드라이브별 cwd 표식은 첫 글자 뒤의 `=` 에서 가른다.
+        let Some(split) = entry.char_indices().skip(1).find(|(_, c)| *c == '=').map(|(at, _)| at) else {
+            continue;
+        };
+        let (name, value) = (&entry[..split], &entry[split + 1..]);
+        if let Some(key) = keys.iter().find(|key| key.eq_ignore_ascii_case(name)) {
+            if !value.is_empty() {
+                found.insert((*key).to_string(), value.to_string());
+            }
+        }
+    }
+    found
+}
+
+#[cfg(not(any(unix, all(windows, target_pointer_width = "64"))))]
 pub fn process_env_vars(_pid: u32, _keys: &[&str]) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
 }
@@ -578,6 +657,31 @@ mod cmdline_tests {
     fn cmdline_of_self_nonempty() {
         let cmd = super::process_cmdline(std::process::id());
         assert!(cmd.is_some_and(|c| !c.trim().is_empty()));
+    }
+
+    /// 자식에게 준 env 를 남의 프로세스 판독으로 되읽는다. 키는 대소문자를 안 가린다(`Path`).
+    #[cfg(windows)]
+    #[test]
+    fn env_of_a_child_reads_back_case_insensitively() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "20", "127.0.0.1"])
+            .env("KASATERM_PANE_ID", "%42")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut env = std::collections::HashMap::new();
+        for _ in 0..50 {
+            env = super::process_env_vars(child.id(), &["KASATERM_PANE_ID", "PATH", "KASATERM_NOPE"]);
+            if !env.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(env.get("KASATERM_PANE_ID").map(String::as_str), Some("%42"));
+        assert!(env.get("PATH").is_some_and(|path| !path.is_empty()));
+        assert!(!env.contains_key("KASATERM_NOPE"));
     }
 
     /// 표를 한 번에 뜨는 길로 바꾸면서 깨지기 쉬운 곳은 파싱이다. `ps` 는 pid 를

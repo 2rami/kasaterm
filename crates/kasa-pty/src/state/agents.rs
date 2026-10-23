@@ -198,6 +198,57 @@ pub fn agent_pid_for_shell(
     agent_pid_by_argv(table, eff)
 }
 
+/// `agent_pid_for_shell` 에 칸 이름으로 한 번 더 찾는 길을 더한다. Windows Git bash 는 스크립트를 돌리며
+/// 가운데 프로세스가 죽어 부모 사슬이 끊긴다(bash → [죽음] → sh.exe → claude.exe) — 그 하네스는 셸
+/// 아래에서 안 보인다. 하네스를 끄는 자리처럼 「없다」가 「이미 꺼졌다」는 거짓 답이 되는 곳은 이것을 쓴다.
+pub fn agent_pid_for_pane(
+    table: &[(u32, u32, String)],
+    shell_pid: u32,
+    pane_id: &str,
+) -> Option<(AgentKind, u32)> {
+    if let Some(hit) = agent_pid_for_shell(table, shell_pid) {
+        return Some(hit);
+    }
+    #[cfg(windows)]
+    {
+        // 칸 셸이 물려준 칸 이름과 이 앱의 셰임 폴더가 둘 다 맞아야 이 앱의 그 칸이다 — 칸 번호는 앱마다 겹친다.
+        let shims = [
+            format!("kasaterm-shim-{}", std::process::id()),
+            format!("kasaterm-lite-shim-{}", std::process::id()),
+        ];
+        let hits: Vec<(AgentKind, u32, u32)> = table
+            .iter()
+            .filter_map(|(pid, ppid, name)| AgentKind::from_comm(name).map(|kind| (kind, *pid, *ppid)))
+            .filter(|(_, pid, _)| {
+                let env = crate::procinfo::process_env_vars(*pid, &["KASATERM_PANE_ID", "PATH"]);
+                env.get("KASATERM_PANE_ID").is_some_and(|id| id == pane_id)
+                    && env.get("PATH").is_some_and(|path| shims.iter().any(|shim| path.contains(shim.as_str())))
+            })
+            .collect();
+        // 칸 하네스가 띄운 하네스(`claude -p` 등)도 같은 칸 이름을 물려받는다 — 위에 다른 하네스가 없는 것이 칸 하네스다.
+        let parent: std::collections::HashMap<u32, u32> = table.iter().map(|(pid, ppid, _)| (*pid, *ppid)).collect();
+        let nested = |mut at: u32| {
+            for _ in 0..64 {
+                let Some(&up) = parent.get(&at) else { return false };
+                if up <= 4 || up == at {
+                    return false;
+                }
+                if hits.iter().any(|(_, pid, _)| *pid == up) {
+                    return true;
+                }
+                at = up;
+            }
+            false
+        };
+        if let Some((kind, pid, _)) = hits.iter().find(|(_, pid, _)| !nested(*pid)) {
+            return Some((*kind, *pid));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = pane_id;
+    None
+}
+
 /// `pid` 에서 칸 셸까지 올라가는 길에 하네스가 둘 이상 있는가 — 칸의 claude 가 Bash 로
 /// 돌린 `claude -p` 판정처럼, 칸 하네스가 띄운 하네스다. 그 자식은 칸 env 를 물려받아
 /// 칸의 훅을 그대로 부르므로, 칸 몫의 기록을 덮기 전에 이것으로 가린다. 셸까지 못

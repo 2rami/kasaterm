@@ -1,6 +1,7 @@
 //! kasaterm 호스트의 HTTP 서버 — 보드·원격 방·모바일·웹 pane 이 이 한 포트로 붙는다.
 //! 예전에는 pane 조작을 MCP 도구로도 내보냈지만 `kasaterm-cli` 와 완전히 겹쳐 걷었다.
 
+pub mod agent_stop;
 pub mod character;
 // 보드 수집기·tell 장부·칸 열쇠는 kasa-collab 으로 옮겼다. 옛 경로(`kasa_mcp::board_service`)를 그대로 쓴다.
 pub use kasa_collab::{act_service, board_service, surface_keys, tell_service};

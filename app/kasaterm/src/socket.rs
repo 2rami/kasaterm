@@ -2126,6 +2126,15 @@ impl Backend for PtyBackend {
         ))
     }
 
+    fn agent_prompt_idle(&self, surface_id: &str) -> Option<bool> {
+        let session = kasa_pty::lookup_session(surface_id)?;
+        // 끊긴 부모 사슬 아래의 하네스도 판정한다 — 끄는 쪽이 그 하네스를 찾은 길과 같아야 한다.
+        let (agent, _) = kasa_pty::agent_pid_for_pane(&kasa_pty::process_table_shared(), session.shell_pid()?, surface_id)?;
+        self.hub.refresh();
+        let turn_free = !self.hub.is_working(surface_id) && !self.hub.state(surface_id).needs_you();
+        Some(turn_free && crate::tell_delivery::resumed_input_ready(&session, agent))
+    }
+
     /// 모든 창 + 그 창의 pane 들. `move`(창 간 이동)를 쓰려면 **어느 창에 뭐가 있는지**
     /// 보여야 하는데, 이게 미구현이라 창 목록(`kasaterm-cli where`)이 늘 "(윈도우 없음)"을
     /// 냈다 — 이동 기능을 붙여 놓고 목적지를 못 찾는 상태였다.
@@ -3225,7 +3234,7 @@ impl Backend for PtyBackend {
                 let origin = kasa_mcp::op_approval::Origin {
                     pane,
                     student,
-                    alive: Box::new(move || pid_alive(peer)),
+                    alive: Box::new(move || kasa_pty::pid_alive(peer)),
                 };
                 let values = kasa_mcp::op_approval::read(&refs, &command, &cwd, &origin)?;
                 Ok(serde_json::json!({ "values": values }))
@@ -4907,31 +4916,6 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
         })();
         CloseHandle(handle);
         result
-    }
-}
-
-/// 그 pid 가 아직 살아 있나. `libc` 는 맥 블록에만 있어 공용 코드가 직접 부르면
-/// Windows 빌드가 선다.
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-
-#[cfg(windows)]
-fn pid_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        let mut code = 0u32;
-        let ok = GetExitCodeProcess(handle, &mut code) != 0;
-        CloseHandle(handle);
-        ok && code == STILL_ACTIVE as u32
     }
 }
 

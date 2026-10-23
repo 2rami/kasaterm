@@ -2228,11 +2228,13 @@ pub fn drain_migrated_away() -> Vec<String> {
 /// Ok(None) = 이미 꺼져 있었다. 창구가 없는 옛 바이너리는 Err 로 알린다 —
 /// 확인 없이 progressing 하면 반쯤 산 claude 와 로컬 resume 이 같은 대화를
 /// 다툰다(순방향 9-pane 사고의 원형).
-pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>) -> Result<Option<bool>> {
+pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>, force: bool) -> Result<Option<bool>> {
+    // 강행은 곱게 못 끈 하네스를 저쪽이 강제로 끝내게 한다(Windows 호스트). 옛 판은 이 값을 모르고 무시한다.
     let url = format!(
-        "{}/term/agent-stop?pane={}",
+        "{}/term/agent-stop?pane={}{}",
         base.trim_end_matches('/'),
-        urlencode(pane)
+        urlencode(pane),
+        if force { "&force=1" } else { "" }
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

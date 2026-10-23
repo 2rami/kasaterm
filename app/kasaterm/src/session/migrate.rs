@@ -740,7 +740,7 @@ impl App {
         // 원격 claude 곱게 끄기. 이미 꺼져 있으면(None) 권한 모드를 모르니 안전한
         // 쪽(물어보는 모드)으로 둔다.
         self.migrate_progress(pid, "저쪽 캐릭터 곱게 끄는 중…".to_string());
-        let bypass = match kasa_mcp::remote::remote_agent_stop(&info.base, &info.remote_id, None) {
+        let bypass = match kasa_mcp::remote::remote_agent_stop(&info.base, &info.remote_id, None, force) {
             Ok(stopped) => stopped.unwrap_or(false),
             Err(e) => {
                 if force {

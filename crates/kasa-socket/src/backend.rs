@@ -781,6 +781,11 @@ pub trait Backend: Send + Sync {
     fn pane_shell(&self, _surface_id: &str) -> Option<String> {
         None
     }
+    /// 칸 하네스의 입력창이 비어 있고 일하는 중·사람 차례가 아닌가 — 이사가 끄기 명령을 쳐 넣어도
+    /// 되는지. 화면을 못 읽는 백엔드는 `None` 이고, 부른 쪽은 그것을 「안 된다」로 읽는다.
+    fn agent_prompt_idle(&self, _surface_id: &str) -> Option<bool> {
+        None
+    }
     /// 되살리기 목록을 읽고, `discard` 가 있으면 그 pane 을 **진짜 끈다**.
     ///
     /// 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 밀려날 때

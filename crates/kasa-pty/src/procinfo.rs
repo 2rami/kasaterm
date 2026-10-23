@@ -223,6 +223,74 @@ pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
     process_env_vars(pid, &[key]).remove(key)
 }
 
+/// pid 가 아직 살아 있나. 0 은 늘 거짓이다 — 유닉스 `kill(0, 0)` 은 내 프로세스 묶음 전체에 묻는 꼴이라 참이 된다.
+pub fn pid_alive(pid: u32) -> bool {
+    pid != 0 && !wait_exit(pid, std::time::Duration::ZERO)
+}
+
+/// pid 가 끝나기를 `timeout` 까지 기다린다. 끝났거나 처음부터 없었으면 참.
+#[cfg(unix)]
+pub fn wait_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    // SAFETY: 신호 0 은 보내지 않고 존재만 묻는다.
+    while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    true
+}
+
+/// 종료 코드로 살았나를 보면 259(STILL_ACTIVE)로 끝난 프로세스가 산 것으로 읽힌다 — 핸들의 신호 상태가 정본이다.
+#[cfg(windows)]
+pub fn wait_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            // 남의 권한 프로세스는 열리지 않을 뿐 살아 있다. 없는 pid 는 ERROR_INVALID_PARAMETER 다.
+            return GetLastError() != ERROR_ACCESS_DENIED;
+        }
+        let waited = WaitForSingleObject(handle, ms);
+        CloseHandle(handle);
+        waited != WAIT_TIMEOUT
+    }
+}
+
+/// pid 하나를 곧바로 끝낸다(자식은 건드리지 않는다). 곱게 끄기가 실패했고 사람이 강행을 고른 뒤에만 부른다.
+pub fn terminate_pid(pid: u32) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid 0"));
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: 대상 pid 하나에만 보낸다.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let ok = TerminateProcess(handle, 1) != 0;
+            let err = std::io::Error::last_os_error();
+            CloseHandle(handle);
+            if ok { Ok(()) } else { Err(err) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
