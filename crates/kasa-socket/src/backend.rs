@@ -776,6 +776,11 @@ pub trait Backend: Send + Sync {
     fn pane_agent(&self, _surface_id: &str) -> Option<(String, String)> {
         None
     }
+    /// 그 칸 입력줄을 읽는 셸의 프로세스 이름(`zsh`·`cmd.exe`·`pwsh.exe`). `surface.launch` 가 그 셸 문법으로
+    /// 줄을 짓는다. 모르면 None — POSIX 로 본다.
+    fn pane_shell(&self, _surface_id: &str) -> Option<String> {
+        None
+    }
     /// 되살리기 목록을 읽고, `discard` 가 있으면 그 pane 을 **진짜 끈다**.
     ///
     /// 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 밀려날 때

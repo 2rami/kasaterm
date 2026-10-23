@@ -48,14 +48,22 @@ impl ShellKind {
         }
     }
 
+    /// `dir` 로 옮기는 명령(Enter 없이).
+    pub fn cd(self, dir: &str) -> String {
+        match self {
+            Self::Posix | Self::Fish => format!("cd {}", self.quote(dir)),
+            Self::PowerShell => format!("Set-Location -LiteralPath {}", self.quote(dir)),
+            // `/d` 가 없으면 다른 드라이브 폴더로는 옮기지 않고 성공으로 끝난다.
+            Self::Cmd => format!("cd /d {}", self.quote(dir)),
+        }
+    }
+
     /// `dir` 로 옮기는 데 성공했을 때만 `command` 를 돌린다.
     pub fn cd_then(self, dir: &str, command: &str) -> String {
         match self {
-            Self::Posix | Self::Fish => format!("cd {} && {command}", self.quote(dir)),
             // Windows PowerShell 5.1 엔 `&&` 가 없다. 못 옮기면 멈춤 오류가 그 줄의 나머지를 건너뛴다.
-            Self::PowerShell => format!("Set-Location -LiteralPath {} -ErrorAction Stop; {command}", self.quote(dir)),
-            // `/d` 가 없으면 다른 드라이브 폴더로는 옮기지 않고 성공으로 끝난다.
-            Self::Cmd => format!("cd /d {} && {command}", self.quote(dir)),
+            Self::PowerShell => format!("{} -ErrorAction Stop; {command}", self.cd(dir)),
+            _ => format!("{} && {command}", self.cd(dir)),
         }
     }
 

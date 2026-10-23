@@ -26,6 +26,11 @@ fn address(session: bool) -> Value {
 
 impl Rig {
     fn new(rename_ok: bool) -> Self {
+        Self::with(rename_ok, true)
+    }
+
+    /// `launch_ok` 가 거짓이면 act `launch` 를 모르는 옛 카사텀처럼 답한다.
+    fn with(rename_ok: bool, launch_ok: bool) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "kt-summon-{}-{}",
@@ -70,6 +75,8 @@ impl Rig {
                 };
                 let response = if !rename_ok && params["op"] == "rename_room" {
                     json!({"id":req["id"],"ok":false,"error":{"code":-32603,"message":"room rename refused"}})
+                } else if !launch_ok && params["op"] == "launch" {
+                    json!({"id":req["id"],"ok":false,"error":{"code":-32603,"message":"unknown act \"launch\""}})
                 } else {
                     json!({"id":req["id"],"ok":true,"result":result})
                 };
@@ -166,12 +173,14 @@ fn new_room_is_named_before_boot_and_uses_only_one_pane() {
         );
         let acts = rig.actions();
         let names: Vec<_> = acts.iter().map(|r| r["op"].as_str().unwrap()).collect();
-        assert_eq!(names, ["spawn", "rename_room", "rename", "send_text"]);
+        assert_eq!(names, ["spawn", "rename_room", "rename", "launch"]);
         assert_eq!(acts[0]["window"], "new");
         assert!(acts[0].get("address").is_none());
         assert_eq!(acts[1]["title"], "라이브러리");
         assert_eq!(acts[2]["title"], "사이트 비교");
         assert_eq!(acts[3]["address"], address(false));
+        assert_eq!(acts[3]["command"], "codex");
+        assert!(acts[3]["prompt"].as_str().unwrap().starts_with("test"));
         let result: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(result["address"], address(true));
     }
@@ -218,4 +227,17 @@ fn failed_room_naming_leaves_a_recoverable_blank_without_booting_an_agent() {
     let acts = rig.actions();
     assert_eq!(acts.len(), 2);
     assert_eq!(acts[1]["op"], "rename_room");
+}
+
+/// 받는 기기가 act `launch` 를 모르면(옛 맥 판) 예전 POSIX 줄을 그대로 친다.
+#[test]
+fn an_old_receiver_gets_the_old_posix_boot_line() {
+    let rig = Rig::with(true, false);
+    let out = rig.run(&["summon", "--new-room", "방", "--cmd", "codex", "test"], Some("%0"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let acts = rig.actions();
+    let names: Vec<_> = acts.iter().map(|r| r["op"].as_str().unwrap()).collect();
+    assert_eq!(names, ["spawn", "rename_room", "launch", "send_text"]);
+    let text = acts[3]["text"].as_str().unwrap();
+    assert!(text.starts_with("cd '") && text.contains("' && codex 'test") && text.ends_with("'\n"), "{text}");
 }

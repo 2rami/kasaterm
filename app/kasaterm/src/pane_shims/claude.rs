@@ -720,6 +720,7 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block,
         nblk = claude_mods_block(&install_claude_mods(&hooks_dir, shim_dir)),
         permissions = format!("if [ -n \"$PERSONA_OK\" ]; then\n{}fi\n", agent_preferences::permission_shell("claude", agent_preferences::permission("claude")) + ":\n"));
+    let wrapper = accept_prompt_file(wrapper);
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");

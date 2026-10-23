@@ -39,6 +39,23 @@ fn run_local(backend: &dyn Backend, op: &str, address: Option<&Value>, params: &
             ensure!(body.len() <= TEXT_MAX, "text is too long ({} bytes, max {TEXT_MAX})", body.len());
             ("surface.send_text", json!({"surface_id": surface, "text": body}))
         }
+        // 줄은 받는 이 기기가 제 칸 셸 문법으로 짓는다 — 부른 기기는 그 칸이 cmd 인지 zsh 인지 모른다.
+        "launch" => {
+            let surface = writable(pane()?)?;
+            let mut args = json!({"surface_id": surface, "command": text("command")?});
+            for key in ["cwd", "prompt"] {
+                if let Some(value) = params[key].as_str().filter(|v| !v.is_empty()) {
+                    args[key] = json!(value);
+                }
+            }
+            ensure!(args.to_string().len() <= TEXT_MAX, "launch is too long (max {TEXT_MAX} bytes)");
+            let reply = kasa_socket::methods::dispatch(backend, Request { id: json!(op), method: "surface.launch".into(), params: args });
+            if !reply.ok {
+                bail!("{}", reply.error.map(|e| e.message).unwrap_or_else(|| "surface.launch failed".into()));
+            }
+            let shell = reply.result.as_ref().and_then(|r| r.get("shell")).cloned().unwrap_or(Value::Null);
+            return Ok(json!({"address": address, "shell": shell}));
+        }
         "send_key" => ("surface.send_key", json!({"surface_id": writable(pane()?)?, "key": text("key")?})),
         "persona" => ("surface.repersona", json!({"surface_id": writable(pane()?)?, "character": text("character")?})),
         "focus" => ("surface.focus", json!({"surface_id": pane()?})),
@@ -103,7 +120,7 @@ fn spawn(backend: &dyn Backend, address: Option<&Value>, params: &Value) -> Resu
         Some(dir) => {
             let path = std::path::Path::new(dir);
             ensure!(path.is_absolute() && path.is_dir(), "no such folder on this machine: {dir}");
-            Some(path.canonicalize()?.to_string_lossy().into_owned())
+            Some(kasa_socket::shell_line::plain_path(&path.canonicalize()?.to_string_lossy()))
         }
         None => None,
     };

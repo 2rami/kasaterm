@@ -203,6 +203,7 @@ exec "$REAL" "$@"
     let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("codex", ""))
         .replace("# KASATERM_GUIDE_START", &format!("printf '\\n%s\\n' {} >> \"$INSTRUCTIONS\"", shell_quote_path(kasa_socket::guidance::START)))
         .replace("# KASATERM_PERMISSION_DEFAULT", &(agent_preferences::permission_shell("codex", agent_preferences::permission("codex")) + &agent_preferences::codex_statusline_shell()));
+    let wrapper = accept_prompt_file(wrapper);
     let wrapper_path = shim_dir.join("codex");
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write codex wrapper failed: {e}");

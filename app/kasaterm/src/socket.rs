@@ -2094,6 +2094,9 @@ impl Backend for PtyBackend {
             Err(_) => anyhow::bail!("되살리기 목록 응답 없음(10초) — GUI 스레드가 막혀 있다"),
         }
     }
+    fn pane_shell(&self, surface_id: &str) -> Option<String> {
+        kasa_pty::lookup_session(&self.addressed_pty(surface_id).ok()?)?.input_shell_name()
+    }
     fn pane_agent(&self, surface_id: &str) -> Option<(String, String)> {
         let name = self
             .ws

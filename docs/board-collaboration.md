@@ -86,6 +86,7 @@ the source machine's address. An old receiver answers `unsupported_api`.
 | op | parameters | effect on the addressed machine |
 |---|---|---|
 | `send_text` / `send_key` | `address`, `text` (≤ 48 KiB) / `key` | raw input (`surface.send_text` / `send_key`) |
+| `launch` | `address`, `command` (POSIX shell words, e.g. `claude --model 'opus[1m]'`), optional `cwd`, `prompt` | boot line built in **that pane's shell** grammar (POSIX·fish·PowerShell·cmd, `surface.launch`) and Enter; returns `shell`. cmd·PowerShell panes get `prompt` through a file the harness shim reads (`--kasaterm-prompt-file`). `summon` uses it and falls back to a POSIX `send_text` line when the receiver answers `unknown act` |
 | `spawn` | `address` + `tab`, or `machine_id` + `window:"new"`, or `machine_id` alone; `cwd` (must exist there) | shell pane beside / as a tab of the address, in a new room, or in the viewed room; returns its `address` |
 | `focus`, `rename` (`title`), `color` (`color`), `rename_room` (`title`), `persona` (`character`) | `address` | same as the local commands |
 | `move` | `address`, `target` (same machine), `direction` | moves the pane beside the target |

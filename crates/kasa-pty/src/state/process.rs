@@ -10,6 +10,15 @@ impl PtySession {
         self.shell_pid
     }
 
+    /// 지금 입력줄을 읽는 셸의 프로세스 이름(`zsh`·`cmd.exe`·`pwsh.exe`) — 칸에 칠 명령 줄을 그 셸 문법으로
+    /// 짓는다. 갓 세운 칸은 공유 캐시에 아직 없을 수 있어 새로 잰다. cmd 안에서 친 `pwsh` 처럼 셸 하나만 자식으로
+    /// 둔 셸은 그 자식이 입력을 받는다.
+    pub fn input_shell_name(&self) -> Option<String> {
+        let table = fresh_process_table();
+        let pid = effective_shell_pid(&table, self.shell_pid?);
+        table.into_iter().find(|(p, _, _)| *p == pid).map(|(_, _, name)| name)
+    }
+
     /// The shell's controlling tty short name (e.g. "ttys004"), or None on
     /// Windows. Shown in the pane header — mirrors ghostty / Terminal.app.
     pub fn tty(&self) -> Option<&str> {

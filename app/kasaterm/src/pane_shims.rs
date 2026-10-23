@@ -80,6 +80,27 @@ pub(crate) fn cmd_launcher_body(sh: &str) -> String {
     format!("@echo off\r\n\"{}\" \"%~dpn0\" %*\r\n", sh.replace('/', "\\"))
 }
 
+/// cmd·PowerShell 칸에 학생을 띄울 때 첫 입력은 명령줄로 못 넘긴다(줄바꿈·따옴표가 `.cmd` 의 `%*` 에서
+/// 깨진다). 받는 앱이 파일에 적어 `--kasaterm-prompt-file <파일>` 로 주면(`kasa_socket::shell_line`) 하네스
+/// 래퍼가 원문 그대로 마지막 인자(첫 입력)로 바꿔 넘기고 파일은 지운다. 맥 래퍼는 그대로 둔다.
+pub(crate) fn accept_prompt_file(wrapper: String) -> String {
+    const PROMPT_FILE_SH: &str = r#"KT_PF=; KT_PROMPT=; KT_HAS=
+for a in "$@"; do
+  shift
+  if [ -n "$KT_PF" ]; then KT_PROMPT=$(cat -- "$a") && KT_HAS=1; rm -f -- "$a"; KT_PF=; continue; fi
+  [ "$a" = --kasaterm-prompt-file ] && { KT_PF=1; continue; }
+  set -- "$@" "$a"
+done
+[ -n "$KT_HAS" ] && set -- "$@" "$KT_PROMPT"
+"#;
+    if !cfg!(windows) {
+        return wrapper;
+    }
+    let head = "SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n";
+    debug_assert!(wrapper.contains(head), "래퍼 머리 줄이 바뀌면 첫 입력 파일을 못 받는다");
+    wrapper.replacen(head, &format!("{head}{PROMPT_FILE_SH}"), 1)
+}
+
 /// `lite` 면 최소 shim 만 — rc 셋 + `kasaterm-cli`. claude 래퍼·훅·미리보기
 /// 셰임은 전부 뺀다. CLI 는 이 shim dir 로만 pane PATH 에 오르므로 shim 을 통째로
 /// 끄는 `shim_inject=off` 와는 다르다(그러면 lite 안에서 split/send 가 안 된다).

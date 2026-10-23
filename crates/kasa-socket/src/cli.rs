@@ -971,6 +971,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     }
     let cwd = match cwd { Some(dir) => std::path::PathBuf::from(dir), None => std::env::current_dir()? };
     let cwd = cwd.canonicalize().with_context(|| format!("{} 폴더가 없어요", cwd.display()))?;
+    let cwd = crate::shell_line::plain_path(&cwd.to_string_lossy());
 
     let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("부른 칸이 없어요 — --beside <보드 주소> 또는 --new-room '작업방 이름'으로 자리를 골라 주세요"))?;
@@ -1000,23 +1001,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     // codex 는 첫 입력 전엔 대화 기록이 없어 tell 이 겨눌 주소(대화 번호)가 영영 안 선다 — 브리프를 첫
     // 입력 인자로 넘긴다(2026-10-02 실측: `--cmd '호시노 codex'` 가 90초 뒤 「안 떴어요」로 끝났다).
     let first_prompt = boots_fresh_codex(&boot);
-    // 갓 만든 pane 은 번호 재사용 때문에 「pane 없음」 가드가 한두 번 헛걸린다(실측) — 잠깐 두고 다시 보낸다.
-    let line = if first_prompt {
-        format!("cd {} && {boot} {}\n", shell_quote(&cwd.to_string_lossy()), shell_quote(&body))
-    } else {
-        format!("cd {} && {boot}\n", shell_quote(&cwd.to_string_lossy()))
-    };
-    let mut refused = None;
-    for attempt in 0..3 {
-        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
-        let sent = roundtrip(socket_path, &Request { id: json!("summon"), method: "surface.send_text".into(),
-            params: json!({ "surface_id": surface, "text": line }) })?;
-        refused = (!sent.ok).then(|| sent.error.map(|e| e.message).unwrap_or_default());
-        if refused.is_none() { break; }
-    }
-    if let Some(why) = refused {
-        return Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {why}"));
-    }
+    send_boot(socket_path, &BootTo::Here(&surface), Some(&cwd), &boot, first_prompt.then_some(body.as_str()))?;
     let wait = format!("kasaterm-cli board --wait {surface} --since {since}");
     if first_prompt {
         let started = std::time::Instant::now();
@@ -1109,18 +1094,7 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
     let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
     let body = crate::tell::normalize(&body)?;
     let first_prompt = boots_fresh_codex(boot);
-    let cd = spot.cwd.as_deref().map(|dir| format!("cd {} && ", shell_quote(dir))).unwrap_or_default();
-    let line = if first_prompt { format!("{cd}{boot} {}\n", shell_quote(&body)) } else { format!("{cd}{boot}\n") };
-    let mut refused = None;
-    for attempt in 0..3 {
-        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
-        let sent = roundtrip(socket_path, &act(json!("summon"), "send_text", json!({ "address": placed, "text": line })))?;
-        refused = (!sent.ok).then(|| sent.error.map(|e| e.message).unwrap_or_default());
-        if refused.is_none() { break; }
-    }
-    if let Some(why) = refused {
-        return Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {why}"));
-    }
+    send_boot(socket_path, &BootTo::Placed(&placed, &surface), spot.cwd.as_deref(), boot, first_prompt.then_some(body.as_str()))?;
 
     // 다른 기기 줄은 그 기기 판을 2초마다 당겨 와서 선다 — 칸은 번호가 아니라 열쇠로 찾는다.
     let booted = || snapshot_rows(socket_path, false).ok().and_then(|rows| rows.into_iter().find(|p|
@@ -1177,6 +1151,54 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
     println!("주소 {address}");
     println!("기다리려면: {wait}");
     Ok(())
+}
+
+/// 학생 부팅 줄을 넣을 칸 — 이 기기 칸 번호, 또는 다른 기기일 수 있는 보드 주소(와 알릴 때 쓸 번호).
+enum BootTo<'a> {
+    Here(&'a str),
+    Placed(&'a Value, &'a str),
+}
+
+/// 새 칸에 학생 부팅 줄을 넣는다. 줄은 받는 기기가 그 칸 셸 문법으로 짓는다(`surface.launch`·act `launch`) —
+/// 부르는 쪽은 받는 칸이 cmd 인지 zsh 인지 모른다(맥 → Windows 칸). 그 길을 모르는 옛 카사텀(맥 판)에는
+/// 예전 POSIX 줄을 친다. 갓 만든 pane 은 번호 재사용 때문에 「pane 없음」 가드가 한두 번 헛걸린다(실측) —
+/// 잠깐 두고 다시 보낸다.
+fn send_boot(socket_path: &str, to: &BootTo, cwd: Option<&str>, boot: &str, prompt: Option<&str>) -> Result<()> {
+    let mut launch = json!({ "command": boot });
+    if let Some(dir) = cwd { launch["cwd"] = json!(dir); }
+    if let Some(text) = prompt { launch["prompt"] = json!(text); }
+    let posix = {
+        let run = match prompt { Some(text) => format!("{boot} {}", shell_quote(text)), None => boot.to_string() };
+        match cwd { Some(dir) => format!("cd {} && {run}\n", shell_quote(dir)), None => format!("{run}\n") }
+    };
+    let (mut legacy, mut refused, mut attempt) = (false, None, 0);
+    while attempt < 3 {
+        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
+        let request = match (to, legacy) {
+            (BootTo::Here(surface), false) => {
+                let mut params = launch.clone();
+                params["surface_id"] = json!(surface);
+                Request { id: json!("summon"), method: "surface.launch".into(), params }
+            }
+            (BootTo::Here(surface), true) => Request { id: json!("summon"), method: "surface.send_text".into(),
+                params: json!({ "surface_id": surface, "text": posix }) },
+            (BootTo::Placed(address, _), false) => {
+                let mut params = launch.clone();
+                params["address"] = (*address).clone();
+                act(json!("summon"), "launch", params)
+            }
+            (BootTo::Placed(address, _), true) => act(json!("summon"), "send_text", json!({ "address": address, "text": posix })),
+        };
+        let sent = roundtrip(socket_path, &request)?;
+        refused = (!sent.ok).then(|| sent.error.map(|e| e.message).unwrap_or_default());
+        match &refused {
+            None => return Ok(()),
+            Some(why) if !legacy && (why.contains("unknown method") || why.contains("unknown act")) => legacy = true,
+            Some(_) => attempt += 1,
+        }
+    }
+    let surface = match to { BootTo::Here(surface) | BootTo::Placed(_, surface) => surface };
+    Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {}", refused.unwrap_or_default()))
 }
 
 fn epoch_ms() -> u64 {

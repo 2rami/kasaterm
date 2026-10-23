@@ -219,14 +219,11 @@ async fn room_cd_handler(
         }
     };
     let proc = backend.active_process_name().unwrap_or_default();
-    let base = proc.strip_prefix('-').unwrap_or(&proc);
-    let is_shell = matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh");
-    if !is_shell {
+    let Some(shell) = kasa_socket::shell_line::ShellKind::from_process_name(&proc) else {
         // 셸이 아님(claude/vim/build…) → cd 미주입, 세션 무접촉.
         return (cors, Json(serde_json::json!({ "ok": true, "path": path, "skipped": proc })));
-    }
-    let quoted = path.replace('\'', "'\\''");
-    let ok = backend.send_text(None, &format!("cd '{quoted}'\r")).is_ok();
+    };
+    let ok = backend.send_text(None, &format!("{}\r", shell.cd(&path))).is_ok();
     (cors, Json(serde_json::json!({ "ok": ok, "path": path })))
 }
 

@@ -717,7 +717,29 @@ fn spawn_with_brief(
     if surface.is_empty() {
         anyhow::bail!("no pane created");
     }
-    send_with_retry(backend, &surface, &boot_command(cfg, task))?;
+    use kasa_socket::shell_line::ShellKind;
+    match backend.pane_shell(&surface).as_deref().and_then(ShellKind::from_process_name) {
+        // cmd·PowerShell 칸은 POSIX 줄의 작은따옴표·`&&` 를 못 읽는다 — 그 셸 문법은 `surface.launch` 가 짓는다.
+        Some(ShellKind::Cmd | ShellKind::PowerShell) => {
+            let (command, brief) = boot_parts(cfg, task);
+            let mut params = serde_json::json!({ "surface_id": surface, "command": command, "prompt": brief });
+            if !task.cwd.is_empty() {
+                params["cwd"] = serde_json::json!(task.cwd);
+            }
+            retry_registration(|| {
+                let reply = kasa_socket::methods::dispatch(backend.as_ref(), kasa_socket::protocol::Request {
+                    id: serde_json::json!("dispatch"),
+                    method: "surface.launch".into(),
+                    params: params.clone(),
+                });
+                match reply.ok {
+                    true => Ok(()),
+                    false => Err(anyhow::anyhow!("{}", reply.error.map(|e| e.message).unwrap_or_default())),
+                }
+            })?;
+        }
+        _ => send_with_retry(backend, &surface, &boot_command(cfg, task))?,
+    }
     Ok(surface)
 }
 
@@ -815,6 +837,17 @@ fn compose_brief(idx: usize, q: &[QueueTask], board: &[PaneActivity]) -> String 
 /// 래퍼는 셸 함수일 수 있어(실제로 `glm` 이 그렇다) pane 의 인터랙티브 zsh 에서만
 /// 해석된다 — 그래서 명령 문자열로 넣고 프로세스를 직접 spawn 하지 않는다.
 fn boot_command(cfg: &DispatchConfig, task: &QueueTask) -> String {
+    let (command, brief) = boot_parts(cfg, task);
+    let cd = if task.cwd.is_empty() {
+        String::new()
+    } else {
+        format!("cd {} && ", sh_quote(&task.cwd))
+    };
+    format!("{cd}{command} {}\r", sh_quote(&brief))
+}
+
+/// 부팅 명령(POSIX 셸 꼴)과 한 줄로 편 브리프.
+fn boot_parts(cfg: &DispatchConfig, task: &QueueTask) -> (String, String) {
     let light = task.weight == "light";
     let launcher = if light { &cfg.light_launcher } else { &cfg.heavy_launcher };
     let model = if light { &cfg.light_model } else { &cfg.heavy_model };
@@ -828,26 +861,25 @@ fn boot_command(cfg: &DispatchConfig, task: &QueueTask) -> String {
     } else {
         String::new()
     };
-    let cd = if task.cwd.is_empty() {
-        String::new()
-    } else {
-        format!("cd {} && ", sh_quote(&task.cwd))
-    };
     // 개행은 셸 인자에서 줄을 끊어 명령을 두 동으로 쪼갠다 — 한 줄로 평탄화한다.
     let brief = task.brief.replace(['\n', '\r'], " ");
-    format!("{}{}claude{} {}\r", cd, prefix, model_arg, sh_quote(&brief))
+    (format!("{prefix}claude{model_arg}"), brief)
 }
 
 /// split 이 id 를 돌려준 직후엔 그 pane 이 아직 send 경로에 등록되지 않아 "surface 없음"
 /// 으로 거부된다(실측). 등록은 곧바로 끝나니 짧게 재시도하면 되고, 이걸 안 하면 학생은
 /// 떴는데 브리프만 사라진 pane 이 남는다.
 fn send_with_retry(backend: &Arc<dyn Backend>, surface: &str, text: &str) -> Result<()> {
+    retry_registration(|| backend.send_text(Some(surface), text))
+}
+
+fn retry_registration(mut send: impl FnMut() -> Result<()>) -> Result<()> {
     let mut last = None;
     for attempt in 0..6 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        match backend.send_text(Some(surface), text) {
+        match send() {
             Ok(()) => return Ok(()),
             Err(e) => last = Some(e),
         }

@@ -66,6 +66,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             }
         }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
+        "surface.launch" => surface_launch(backend, id, &req.params),
         "surface.server" => match backend.server(&req.params) {
             Ok(result) => Response::success(id, result),
             Err(error) => backend_err(id, error),
@@ -338,6 +339,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
+                "surface.launch",
                 "surface.server",
                 "surface.paste",
                 "surface.send_key",
@@ -1335,6 +1337,63 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
+}
+
+/// `surface.launch` — 빈 셸 칸에서 `cwd` 로 옮겨 `command`(POSIX 셸 꼴)를 띄운다. 줄은 **받는 칸 셸** 문법으로
+/// 여기서 짓는다: 부른 쪽이 다른 기기·다른 OS 여도(맥 → Windows cmd 칸) 받는 쪽만 자기 셸을 안다.
+/// `prompt` 는 codex 첫 입력 — cmd·PowerShell 칸은 명령줄로 못 넘겨 셰임 폴더에 적고 그 경로를 넘긴다.
+fn surface_launch(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    use crate::shell_line::{launch_line, ShellKind};
+    let Some(target) = params.get("surface_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+        return param_err(id, "surface.launch requires `surface_id`");
+    };
+    let Some(command) = params.get("command").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) else {
+        return param_err(id, "surface.launch requires `command`");
+    };
+    let cwd = params.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let prompt = params.get("prompt").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let posix = match cwd {
+        Some(dir) => ShellKind::Posix.cd_then(dir, command),
+        None => command.to_string(),
+    };
+    if let Some(msg) = claude_boot_into_running_pane(backend, target, &posix) {
+        return param_err(id, &msg);
+    }
+    let shell = backend.pane_shell(target).as_deref().and_then(ShellKind::from_process_name).unwrap_or(ShellKind::Posix);
+    let prompt_file = match (shell, prompt) {
+        (ShellKind::Cmd | ShellKind::PowerShell, Some(text)) => match write_prompt_file(text) {
+            Ok(path) => Some(path),
+            Err(e) => return backend_err(id, e),
+        },
+        _ => None,
+    };
+    let line = match launch_line(shell, cwd, command, prompt, prompt_file.as_deref()) {
+        Ok(line) => line,
+        Err(e) => return param_err(id, &e.to_string()),
+    };
+    match backend.send_text(Some(target), &line) {
+        Ok(()) => Response::success(id, json!({"ok": true, "shell": shell.name()})),
+        Err(e) => {
+            if let Some(path) = prompt_file {
+                let _ = std::fs::remove_file(path);
+            }
+            backend_err(id, e)
+        }
+    }
+}
+
+/// codex 첫 입력을 칸 셰임 폴더에 적는다 — 칸의 codex 셰임이 `--kasaterm-prompt-file` 로 읽고 지운다.
+fn write_prompt_file(text: &str) -> anyhow::Result<String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let shim = std::env::var_os("KASATERM_TMUX_SHIM_DIR")
+        .ok_or_else(|| anyhow::anyhow!("칸 셰임이 꺼져 있어 codex 첫 입력을 넘길 길이 없어요"))?;
+    let dir = std::path::Path::new(&shim).join("prompts");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let path = dir.join(format!("{}-{stamp}-{}.txt", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&path, text)?;
+    Ok(crate::shell_line::plain_path(&path.to_string_lossy()))
 }
 
 /// 이미 에이전트가 도는 pane 에 **부팅 커맨드**를 쏘는 것을 막는다.
