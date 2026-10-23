@@ -111,6 +111,11 @@ fn run() -> Result<Option<Response>> {
         let _ = writeln!(std::io::stdout().lock(), "{}", text.trim_end());
         return Ok(None);
     }
+    if args.first().is_some_and(|a| a == "parent-pid") {
+        let pid = parent_pid().ok_or_else(|| anyhow!("부모 프로세스를 못 찾았어요"))?;
+        let _ = writeln!(std::io::stdout().lock(), "{pid}");
+        return Ok(None);
+    }
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
         print_help();
         return Ok(None);
@@ -1151,6 +1156,40 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
     println!("주소 {address}");
     println!("기다리려면: {wait}");
     Ok(())
+}
+
+/// 이 CLI 를 띄운 프로세스의 pid. claude 에 실린 연결 mod 가 제 claude pid 를 앱에 알리려고 부른다 — mod 엔진엔
+/// pid 를 묻는 길이 없고, Windows 엔 `/bin/sh` 가 없으며 Git Bash sh 의 `$PPID` 는 Windows 부모를 몰라 1 이다.
+fn parent_pid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(std::os::unix::process::parent_id())
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let me = std::process::id();
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = None;
+        let mut more = Process32FirstW(snap, &mut entry) != 0;
+        while more {
+            if entry.th32ProcessID == me {
+                found = Some(entry.th32ParentProcessID);
+                break;
+            }
+            more = Process32NextW(snap, &mut entry) != 0;
+        }
+        CloseHandle(snap);
+        found
+    }
 }
 
 /// 학생 부팅 줄을 넣을 칸 — 이 기기 칸 번호, 또는 다른 기기일 수 있는 보드 주소(와 알릴 때 쓸 번호).

@@ -79,9 +79,14 @@ async function post($: EngineInterface, path: string, body: unknown) {
 }
 
 // claude 프로세스의 pid — 앱은 이것이 그 칸에 지금 도는 claude 와 같을 때만 이 mod 를 정본으로 친다.
+// Windows 엔 /bin/sh 가 없고 Git Bash sh 의 $PPID 는 Windows 부모를 몰라 1 이라, 칸 셰임 폴더의 kasaterm-cli 가
+// 제 부모(이 claude) pid 를 답한다.
 async function claudePid($: EngineInterface): Promise<number> {
+  const os = await $.env.get('OS').catch(() => undefined)
+  const shim = os === 'Windows_NT' ? await $.env.get('KASATERM_TMUX_SHIM_DIR').catch(() => undefined) : undefined
   try {
-    const run = await $.process.run(['/bin/sh', '-c', 'echo $PPID'], { timeoutMs: 5000 })
+    const argv = shim ? [`${shim}\\kasaterm-cli.exe`, 'parent-pid'] : ['/bin/sh', '-c', 'echo $PPID']
+    const run = await $.process.run(argv, { timeoutMs: 5000 })
     const pid = Number(run.stdout.trim())
     return Number.isInteger(pid) && pid > 1 ? pid : 0
   } catch {
@@ -104,9 +109,11 @@ async function boot($: EngineInterface) {
   if (!port || !surface || !/^\d+$/.test(port)) return
   io.base = `http://127.0.0.1:${port}`
   io.surface = surface
-  // 이 claude 가 낳는 settings 훅·명령이 「mod 가 알린다」를 안다 — 같은 일을 하던 옛 훅이 쉰다.
-  await $.env.set('KASATERM_MOD_BRIDGE', '1')
   io.pid = await claudePid($)
+  // 이 claude 가 낳는 settings 훅·명령이 「mod 가 알린다」를 안다 — 같은 일을 하던 옛 훅이 쉰다. 앱은 pid 가 맞는
+  // mod 만 정본으로 치므로, pid 를 모르면 걸지 않는다 — 걸면 정본도 옛 훅도 없이 도구 박동이 끊긴다(Windows 에서
+  // pid 를 못 구하던 동안 그랬다).
+  if (io.pid > 0) await $.env.set('KASATERM_MOD_BRIDGE', '1')
   await hello($)
   $.clock.every(1000, () => void listen($))
 }

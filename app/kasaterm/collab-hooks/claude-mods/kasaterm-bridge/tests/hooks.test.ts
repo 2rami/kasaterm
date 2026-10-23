@@ -20,16 +20,26 @@ function engine(on: On, submitted: string[] = []) {
 }
 
 // 앱 자리 — mod 가 부르는 env·pid·HTTP 를 받아 적고, 경로마다 정해 둔 답을 준다.
-function host(on: On, answers: Record<string, unknown[]> = {}, submitted: string[] = []) {
+type Os = { env?: Record<string, string>; runs?: unknown[]; pid?: string; sets?: string[] }
+
+function host(on: On, answers: Record<string, unknown[]> = {}, submitted: string[] = [], os: Os = {}) {
   const sent: Sent[] = []
   engine(on, submitted)
   on('env.get', ($, e, next) => {
     if (e.name === 'KASASPACE_MCP_PORT') return { value: '4321' }
     if (e.name === 'KASATERM_PANE_ID') return { value: '%9' }
+    if (os.env && e.name in os.env) return { value: os.env[e.name] }
     return next(e)
   })
-  on('env.set', () => ({ value: undefined }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '4242\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('env.set', ($, e) => {
+    os.sets?.push(e.name)
+    return { value: undefined }
+  })
+  on('process.run', ($, e) => {
+    os.runs?.push(e.argv)
+    const stdout = os.pid ?? '4242\n'
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('session.id', () => ({ value: 'sess-1' }))
   on('agent.list', () => ({ value: [] }))
   on('http.fetch', ($, e) => {
@@ -62,6 +72,25 @@ test('session start says hello with the pane, the session and the claude pid', a
   const hello = sent.find(s => s.url === 'http://127.0.0.1:4321/claude-mod/event')
   expect(hello?.body).toMatchObject({ v: 1, surface: '%9', session: 'sess-1' })
   expect(events(sent)[0]).toMatchObject({ kind: 'hello', pid: 4242, mod: '0.1.0' })
+})
+
+test('on Windows the claude pid comes from the pane CLI, not sh $PPID', async ($, on) => {
+  const runs: unknown[] = []
+  const sets: string[] = []
+  const sent = host(on, {}, [], { env: { OS: 'Windows_NT', KASATERM_TMUX_SHIM_DIR: 'C:\\shim' }, runs, sets })
+  await $.session.start(START)
+  await settle()
+  expect(runs[0]).toEqual(['C:\\shim\\kasaterm-cli.exe', 'parent-pid'])
+  expect(events(sent)[0]).toMatchObject({ kind: 'hello', pid: 4242 })
+  expect(sets).toContain('KASATERM_MOD_BRIDGE')
+})
+
+test('without a known claude pid the old status hooks keep running', async ($, on) => {
+  const sets: string[] = []
+  host(on, {}, [], { pid: '1\n', sets })
+  await $.session.start(START)
+  await settle()
+  expect(sets).not.toContain('KASATERM_MOD_BRIDGE')
 })
 
 test('a turn reports its start and end in order', async ($, on) => {

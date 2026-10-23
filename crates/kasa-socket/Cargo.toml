@@ -45,6 +45,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_SystemInformation",
     # 쪽지를 버릴 시각(tell::clock_hm)을 이 기기 현지 시각으로.
     "Win32_System_Time",
+    # `kasaterm-cli parent-pid` — claude 안 연결 mod 가 제 claude pid 를 묻는다.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # 터미널 가로 칸 수(TIOCGWINSZ)를 읽으려고. 상수도 구조체도 OS 마다 달라 손으로

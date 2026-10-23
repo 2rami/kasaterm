@@ -36,8 +36,11 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 
 - **정본 조건**: 앱은 그 칸에 지금 도는 claude 의 pid 가 hello 의 `pid` 와 같을 때만 mod 사실을 쓴다(`claude_mod::live`).
   mod 없이 다시 뜬 claude 의 칸에 지난 mod 의 사실이 남아 판정을 쥐지 않게 한다.
-- **옛 훅 쉬기**: mod 는 뜨면서 `KASATERM_MOD_BRIDGE=1` 을 claude 프로세스 env 에 건다. 그 claude 가 낳는 settings 훅이
-  물려받아, 같은 일을 하던 `kasaterm-agent-status.sh`(도구 호출마다 돌던 백그라운드 추적)가 쉰다.
+  mod 엔진엔 pid 를 묻는 길이 없어 자식을 하나 띄워 그 부모 pid 를 읽는다 — macOS 는 `/bin/sh -c 'echo $PPID'`,
+  Windows 는 칸 셰임 폴더의 `kasaterm-cli parent-pid`(Git Bash sh 의 `$PPID` 는 Windows 부모를 몰라 1 이다).
+- **옛 훅 쉬기**: mod 는 claude pid 를 안 뒤에 `KASATERM_MOD_BRIDGE=1` 을 claude 프로세스 env 에 건다. 그 claude 가 낳는
+  settings 훅이 물려받아, 같은 일을 하던 `kasaterm-agent-status.sh`(도구 호출마다 돌던 백그라운드 추적)가 쉰다. pid 를
+  모르면 걸지 않는다 — 앱이 정본으로 못 치는 mod 가 옛 훅까지 끄면 도구 박동이 통째로 끊긴다(2026-10-23 Windows 칸 전부).
 
 - **상태**: mod 칸의 판정은 `agent_state::resolve_module` 이 한다 — 승인 > 질문 > 압축 > 턴 > 오류 > 쉼. 엔진은 사람이 승인
   창에 답한 순간을 알리지 않으므로, 요청이 열린 뒤 그 칸에 사람이 무언가를 누르면(휠·호버 제외) 답한 것으로 본다.
