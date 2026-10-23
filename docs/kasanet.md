@@ -328,8 +328,8 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   같은 날 관문도 이 서버로 옮겨 443 은 nginx 가 SNI 로 가른다 — 중계 https 는 `127.0.0.1:8443`, TLS 는 풀지 않고 넘기므로 중계의
   ACME 도 그대로다(`docs/seoul-gateway.md`). 그 뒤로 잰 강제 중계 왕복 15ms 로 같다. 2026-10-08 부터 80 도 nginx 가 받는다 —
   중계 http 는 `127.0.0.1:8480` 으로 물러나고, nginx 가 이 이름만 넘기고 나머지는 https 로 돌린다(`nginx-http.conf`).
-- 운영은 `tools/kasanet-relay/relay.sh`(이 맥에서): `install`(바이너리·설정·systemd), `allow <id> <이름>`·`deny <id>`(허용 목록을
-  고치고 다시 켠다 — 붙은 기기는 몇 초 끊겼다 다시 붙는다), `ids`(이 맥·명부 기기·이 맥에 등록한 폰의 id), `status`.
+- 운영은 `tools/kasanet-relay/relay.sh`(이 맥에서): `install`(바이너리·설정·systemd), `allow <id> <이름>`·`deny <id>`(허용 목록만
+  고친다 — `access.py` 가 접속마다 읽어 중계를 다시 켜지 않는다), `ids`(이 맥·명부 기기·이 맥에 등록한 폰의 id), `status`.
 
 ### 허용 목록 — 아무나 못 쓰게
 
@@ -339,7 +339,8 @@ id 가 안 남고 고칠 때마다 중계를 다시 켜야 해서, 같은 날 `a
 `kasanet-relay-access`)로 바꿨다 — 접속마다 `/etc/kasanet-relay/allowlist` 를 읽고 허용·거절을 journal 에 남긴다(어느 쪽이든
 실패하면 거절, 앱은 n0 로 돌아간다).
 
-- 지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`, 폰 `3e6bdd4f…`(10-02 14:40 넣음, 14:40:37 허용 접속). 개인 맥북·윈도우는 아직 없다.
+- 지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`, 폰 `3e6bdd4f…`(10-02 14:40 넣음, 14:40:37 허용 접속),
+  윈도우 데스크톱 `5f4cf084…`(10-23 넣음 — 그 전엔 access 로그에 거절이 이어지고 n0 중계로 물러나 있었다). 개인 맥북은 아직 없다.
 - 넣는 법: `relay.sh ids` 로 id 를 보고 `relay.sh allow <id> <이름>`. 다른 기기 id 는 이 맥의 루프백 base(`/machines`)로 받은
   `/version` 에서 — 앱이 허용 목록을 배우는 길과 같다.
 - **폰**: 데스크톱이 관문 계정 채널로 확인한 폰 등록(`POST /kasanet/phone`)마다 그 id 를 `kasanet-phone-app.json` 의
@@ -416,7 +417,7 @@ id 가 안 남고 고칠 때마다 중계를 다시 켜야 해서, 같은 날 `a
 1. 기기에서 `kasa-net-probe id --key ~/.config/kasaterm/kasanet.key` — 앱이 쓰는 기기 키의 공개키. 없으면 만든다(0600, 앱이 그대로 쓴다).
 2. 미니 `relay.toml` 의 `allowlist` 에 한 줄 + 기기 이름 주석, `launchctl kickstart -k gui/$(id -u)/com.geono.kasanet-relay`.
 
-지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`. 개인 맥북·윈도우는 아직 없다.
+지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`. 앱이 쓰지 않는 중계라 이후 기기(폰·윈도우)는 국내 중계 목록에만 넣었다.
 실측: 모르는 키는 중계 로그에 `The relay denied our authentication`, 거는 쪽은 중계에 못 붙고 연결이 시간 초과로 끝났다.
 임시 키를 넣었다 빼고 kickstart 하자 다시 거부됐다.
 
