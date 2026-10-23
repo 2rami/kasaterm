@@ -1,9 +1,10 @@
 {
   "channel": "preview",
   "platforms": [
-    "macos"
+    "macos",
+    "windows"
   ],
   "schema": "kasaterm-release-channel/1",
-  "source_commit": "7294f5b06579acf15cb5d68e5d3b5e1d4d6abdad",
-  "tag": "v0.2.156"
+  "source_commit": "464b7dcaa9be650be3428c117b76ec2d5d6f94f3",
+  "tag": "v0.2.158"
 }
