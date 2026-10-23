@@ -148,6 +148,42 @@ fn windows_command(shell: ShellKind, words: &[String]) -> Result<String> {
     Ok(line)
 }
 
+/// 셸 별칭·함수·doskey 매크로를 건너뛰고 첫 단어를 PATH 의 실행 파일로 부르는 줄(Enter 없이). `command` 는
+/// POSIX 셸 꼴이다. 이사가 재개 줄을 칠 때 쓴다 — 사람이 `claude` 에 건 별칭·프로필 함수가 다른 권한 모드를
+/// 덧붙이면 출발 세션과 다르게 깬다. PowerShell 은 `Get-Command -CommandType Application` 으로 PATH 의 첫 실행
+/// 파일을 골라 부른다 — 함수·별칭을 안 보고, 셰임 칸이면 `claude.cmd`, 셰임을 끈 칸이면 `claude.exe` 가 된다.
+/// cmd 의 `call` 은 줄 머리의 doskey 매크로를 비킨다.
+pub fn direct_line(shell: ShellKind, command: &str) -> Result<String> {
+    let Some(words) = split_posix_words(command).filter(|w| !w.is_empty()) else {
+        bail!("명령의 따옴표가 안 닫혔어요: {command}");
+    };
+    let program = &words[0];
+    Ok(match shell {
+        ShellKind::Posix | ShellKind::Fish => {
+            let rest = command.trim_start().split_once(char::is_whitespace).map_or("", |(_, rest)| rest);
+            match rest {
+                "" => format!("command {}", shell.quote(program)),
+                rest => format!("command {} {rest}", shell.quote(program)),
+            }
+        }
+        ShellKind::PowerShell | ShellKind::Cmd => {
+            if let Some(bad) = words.iter().find(|w| windows_unsafe(w)) {
+                bail!("{} 칸엔 큰따옴표·줄바꿈이 든 인자를 넘길 수 없어요: {bad}", shell.name());
+            }
+            let line = windows_command(shell, &words)?;
+            match shell {
+                ShellKind::PowerShell => {
+                    let Some(args) = line.strip_prefix(program.as_str()) else {
+                        bail!("하네스 이름은 감싸지 않은 한 단어여야 해요: {program}");
+                    };
+                    format!("& (Get-Command -CommandType Application -TotalCount 1 -Name {}).Source{args}", powershell_quote(program))
+                }
+                _ => format!("call {line}"),
+            }
+        }
+    })
+}
+
 /// POSIX 셸 단어로 나눈다(`claude --model 'opus[1m]'` → 세 단어). 따옴표가 안 닫혔으면 None.
 pub fn split_posix_words(text: &str) -> Option<Vec<String>> {
     let (mut words, mut cur, mut has) = (Vec::new(), String::new(), false);
@@ -338,6 +374,23 @@ mod tests {
     }
 
     #[test]
+    fn direct_lines_skip_aliases_in_each_shell() {
+        let resume = "claude --resume 0b1c --model 'claude-opus-5[1m]' --dangerously-skip-permissions";
+        assert_eq!(direct_line(ShellKind::Posix, resume).unwrap(),
+            "command 'claude' --resume 0b1c --model 'claude-opus-5[1m]' --dangerously-skip-permissions",
+            "맥 칸 줄은 예전 이사 줄 그대로");
+        assert_eq!(direct_line(ShellKind::Cmd, resume).unwrap(),
+            "call claude --resume 0b1c --model \"claude-opus-5[1m]\" --dangerously-skip-permissions");
+        assert_eq!(direct_line(ShellKind::PowerShell, resume).unwrap(),
+            "& (Get-Command -CommandType Application -TotalCount 1 -Name 'claude').Source --resume 0b1c --model 'claude-opus-5[1m]' --dangerously-skip-permissions");
+        assert!(direct_line(ShellKind::PowerShell, "claude --model 'a&b'").is_err(), "cmd 가 다시 읽어 끊을 인자는 거절");
+        assert_eq!(direct_line(ShellKind::PowerShell, "codex resume 0b1c").unwrap(),
+            "& (Get-Command -CommandType Application -TotalCount 1 -Name 'codex').Source resume 0b1c");
+        assert_eq!(direct_line(ShellKind::Posix, "claude").unwrap(), "command 'claude'");
+        assert!(direct_line(ShellKind::Cmd, r#"claude "a\"b""#).is_err());
+    }
+
+    #[test]
     fn windows_prompts_travel_by_file() {
         let line = launch_line(ShellKind::Cmd, Some(r"C:\r"), "codex", Some("a\n\"b\""), Some(r"C:\t\p 1.txt")).unwrap();
         assert_eq!(line, "cd /d \"C:\\r\" && codex --kasaterm-prompt-file \"C:\\t\\p 1.txt\"\r");
@@ -398,6 +451,36 @@ mod tests {
             };
             let _ = run.output().unwrap();
             assert!(!base.join("got.txt").exists(), "{program}: 폴더가 없으면 명령을 안 돌린다");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 사람이 같은 이름에 건 PowerShell 함수·별칭을 지나 칸 셰임(`.cmd`)이 실제로 받는지 본다.
+    #[cfg(windows)]
+    #[test]
+    fn direct_lines_reach_the_shim_past_a_profile_function() {
+        use std::os::windows::process::CommandExt;
+        let base = std::env::temp_dir().join(format!("kasa-direct-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("probe.ps1"), "Set-Content -Encoding utf8 -LiteralPath (Join-Path $PWD 'got.txt') -Value ($args -join '|')\r\n").unwrap();
+        std::fs::write(base.join("kprobe.cmd"), "@powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0probe.ps1\" %*\r\n").unwrap();
+        let path = format!("{};{}", base.display(), std::env::var("PATH").unwrap_or_default());
+        let command = "kprobe --resume s1 --model 'opus[1m]'";
+        for (kind, program) in [(ShellKind::Cmd, "cmd.exe"), (ShellKind::PowerShell, "powershell.exe")] {
+            let _ = std::fs::remove_file(base.join("got.txt"));
+            let line = direct_line(kind, command).unwrap();
+            let mut run = std::process::Command::new(program);
+            run.current_dir(&base).env("PATH", &path);
+            match kind {
+                ShellKind::Cmd => run.raw_arg(format!("/d /s /c \"{line}\"")),
+                _ => run.args(["-NoProfile", "-NonInteractive", "-Command",
+                    &format!("function global:kprobe {{ Set-Content got.txt 'function' }}; Set-Alias kprobe kprobe; {line}")]),
+            };
+            let out = run.output().unwrap();
+            let got = std::fs::read_to_string(base.join("got.txt"))
+                .unwrap_or_else(|_| panic!("{program} `{line}` 가 안 돌았다: {}", String::from_utf8_lossy(&out.stderr)));
+            assert_eq!(got.trim_start_matches('\u{feff}').trim_end(), "--resume|s1|--model|opus[1m]", "{program} `{line}`");
         }
         let _ = std::fs::remove_dir_all(&base);
     }
