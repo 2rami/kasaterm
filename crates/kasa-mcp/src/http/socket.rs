@@ -291,12 +291,13 @@ fn raw_tap_end_message(session: &kasa_pty::PtySession) -> Message {
 async fn send_raw_chunks(
     socket: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     bytes: Vec<u8>,
+    codec: crate::terminal_wire::Codec,
 ) -> Result<(), axum::Error> {
     use futures_util::SinkExt;
     // Image snapshots can exceed a WebSocket message limit; the terminal
     // parser already accepts arbitrary read boundaries, including inside APC.
-    for chunk in bytes.chunks(65536) {
-        socket.send(Message::Binary(chunk.to_vec().into())).await?;
+    for chunk in bytes.chunks(crate::terminal_wire::CHUNK) {
+        socket.send(Message::Binary(codec.encode(chunk).into())).await?;
     }
     Ok(())
 }
@@ -364,13 +365,16 @@ async fn term_ws_handler(
     let cwd = q.get("cwd").cloned();
     // 셀 그리드로 받을지(웹텀 자체 렌더) 원시 바이트로 받을지.
     let grid = q.get("grid").map_or(false, |v| v == "1" || v == "true");
+    let codec = crate::terminal_wire::Codec::negotiated(
+        (!grid).then(|| q.get("compression").map(String::as_str)).flatten(),
+    );
     let glyphs = grid && q.get("glyphs").is_some_and(|v| v == "1" || v == "true");
     // own=1 — 이 연결이 pane 의 **소유자**(원격 kasaterm GUI)다. 미러 규칙 셋이
     // 뒤집힌다: resize 를 force 없이 받고, 끊겨도 격자를 되돌리지 않으며(소유자가
     // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
     let own = q.get("own").map_or(false, |v| v == "1" || v == "true");
     let expected_surface_key = q.get("surface_key").cloned();
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key))
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key, codec))
         .into_response()
 }
 
@@ -383,6 +387,7 @@ async fn term_ws_run(
     own: bool,
     glyphs: bool,
     expected_surface_key: Option<String>,
+    codec: crate::terminal_wire::Codec,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -492,6 +497,7 @@ async fn term_ws_run(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
                 "surface_key": handshake_key,
+                "raw_compression": codec.name(),
                 // 앱의 셀 픽셀 크기 — 브라우저 해석기가 그림이 차지할 칸 수를 앱과 같게 잰다.
                 "cell": kasa_pty::cell_pixels().map(|(w, h)| [w, h]),
                 // `viewport_latest`: the last toucher wins, a person on this machine
@@ -505,9 +511,7 @@ async fn term_ws_run(
         ))
         .await;
     // 이어서 현재 화면. 크기를 먼저 알린 뒤라야 클라가 격자를 맞춘 상태에서 그린다.
-    // 바이너리로 나가므로 클라는 PTY 바이트와 구분 없이 그대로 `term.write` 한다 —
-    // 받는 쪽에 필요한 코드가 0줄이다. 이게 없으면 이미 떠 있는 pane 에 붙었을 때
-    // 다음 출력이 날 때까지 화면이 빈 채로 남는다.
+    // 기존 칸에 늦게 붙어도 다음 출력까지 빈 화면으로 기다리지 않게 한다.
     // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
     // 전용 스레드가 받아 tokio 채널로 건넨다.
     let (btx, mut brx) = tokio::sync::mpsc::channel::<Frame>(64);
@@ -526,7 +530,7 @@ async fn term_ws_run(
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
     match tap {
         Tap::Bytes(rx, screen, _) => {
-            let _ = send_raw_chunks(&mut ws_tx, screen).await;
+            let _ = send_raw_chunks(&mut ws_tx, screen, codec).await;
             std::thread::spawn(move || {
                 while let Ok(chunk) = rx.recv() {
                     if btx.blocking_send(Frame::Bytes(chunk)).is_err() {
@@ -705,7 +709,7 @@ async fn term_ws_run(
                     }
                     let sent = match chunk {
                         Frame::TapEnded => return ws_tx.send(raw_tap_end_message(&sess_sz)).await.is_ok(),
-                        Frame::Bytes(b) => send_raw_chunks(&mut ws_tx, b).await,
+                        Frame::Bytes(b) => send_raw_chunks(&mut ws_tx, b, codec).await,
                         // 그리드는 텍스트 프레임 — 입력(바이너리)과 섞이지 않는다.
                         Frame::Grid(u) => {
                             let (offset, hist) = sess_sz.view_state();
@@ -1069,6 +1073,58 @@ mod tests {
             },
         ).unwrap());
         (session, events, input)
+    }
+
+    #[tokio::test]
+    async fn compressed_native_mirror_preserves_snapshot_updates_input_and_resize() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let id = format!("compressed-wire-{}", uuid::Uuid::new_v4());
+        let (source, events, input) = replacement_source(&id, 80);
+        kasa_pty::register_session(&id, &source);
+        events.send(kasa_pty::ExtEvent::Bytes("\x1b[32m한글 표 │ INITIAL\x1b[0m".as_bytes().to_vec())).unwrap();
+        wait_replacement_text(&source, "INITIAL").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (mut legacy, _) = tokio_tungstenite::connect_async(format!("ws://{address}/term/ws?pane={id}")).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(Ok(message)) = legacy.next().await {
+                if let Message::Binary(bytes) = message {
+                    assert!(String::from_utf8_lossy(&bytes).contains("INITIAL"));
+                    assert_eq!(bytes[0], 0x1b);
+                    return;
+                }
+            }
+            panic!("legacy snapshot missing");
+        }).await.unwrap();
+
+        let local = format!("compressed-view-{}", uuid::Uuid::new_v4());
+        let mirror_local = local.clone();
+        let mirror = tokio::task::spawn_blocking(move || crate::remote::connect_view(
+            crate::remote::RemoteSpec { base: format!("http://{address}"), pane: Some(id), cwd: None,
+                token: None, identity: Default::default() }, &mirror_local,
+        )).await.unwrap().unwrap();
+        wait_replacement_text(&mirror.session, "한글 표 │ INITIAL").await;
+        events.send(kasa_pty::ExtEvent::Bytes(b"\x1b[2;1HUPDATE".to_vec())).unwrap();
+        wait_replacement_text(&mirror.session, "UPDATE").await;
+        mirror.session.send_bytes(b"UNCHANGED INPUT").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while input.0.lock().unwrap().is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(&*input.0.lock().unwrap(), b"UNCHANGED INPUT");
+        assert!(crate::remote::set_viewport(&local, 100, 8));
+        assert!(crate::remote::touch_source(&local));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while mirror.session.size() != (100, 8) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        events.send(kasa_pty::ExtEvent::Bytes(b"\x1b[3;1HAFTER RESIZE".to_vec())).unwrap();
+        wait_replacement_text(&mirror.session, "AFTER RESIZE").await;
+        drop(mirror);
+        let _ = legacy.close(None).await;
+        server.abort();
     }
 
     #[tokio::test]

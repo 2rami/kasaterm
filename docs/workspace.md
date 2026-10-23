@@ -105,6 +105,9 @@ spikes/* ── kasa-bridge
   그대로 둔다(`iced-term` 의 `tokio = "1"` 처럼 제품과 판 요구가 다른 것이 있다).
 - **판을 올리지 않는다.** 이 표는 같은 판 요구를 한 곳에 모은 것이다. 판 올리기는 따로 한다.
 
+`miniz_oxide`는 `kasa-pty`의 Kitty 그림 해제와 `kasa-mcp`의 PC 터미널 미러 압축이 함께 쓰므로
+기존 0.8 판 요구를 루트에 둔다. 미러는 64KiB 조각을 무손실 압축·제한 해제하며 네이티브 라이브러리나 GUI 의존을 더하지 않는다.
+
 ## 4. default-members 와 실험
 
 - 루트 `default-members` 는 제품 크레이트 전부(`app/*`·`crates/*`)다. `-p` 없이 루트에서 부르는

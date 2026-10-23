@@ -78,6 +78,7 @@
   (`auth`)를 두른다. 자식은 기능별: `socket`(`/term/ws`) · `term_*`(웹 터미널) · `sessions`·`panes`·`pane_read`(세션·칸) ·
   `collab`(보드·tell) · `migrate` · `claude_account` · `schedule`·`tasks` · `files` · `git_api` · `settings` · `phone` ·
   `machine_proxy` 등. 상세 지도는 `http.rs` 머리말이 정본
+- `kasa-mcp/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
 - `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤 빈 입력창을 확인해 붙여넣고 Enter(mod 칸도 같다 — 일하는 칸은 진행 중인 턴에 들어간다). 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라

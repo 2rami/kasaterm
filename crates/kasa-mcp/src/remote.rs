@@ -6,7 +6,7 @@
 //! `ExtEvent` 로 옮겨 싣기만 한다.
 //!
 //! 프레임 규약(서버와 쌍):
-//! - binary = PTY 바이트(양방향 — 수신은 화면, 송신은 키 입력)
+//! - binary = PTY 바이트(수신 화면은 협상된 압축을 먼저 해제, 송신 키 입력은 원문)
 //! - text  = 제어 JSON. 수신 `{"t":"size",cols,rows,id}` / `{"t":"gone"}`,
 //!   송신 `{"t":"resize",cols,rows}` / `{"t":"kill"}`
 //!
@@ -734,12 +734,15 @@ async fn manager(
             }
         }
         let mut url = build_url(&spec, remote_id.as_deref(), view);
+        url.push_str("&compression=");
+        url.push_str(crate::terminal_wire::ZLIB_V1);
         if let Some(key) = hint.as_ref().and_then(|hint| hint.surface_key.as_deref()) {
             url.push_str("&surface_key=");
             url.push_str(&urlencode(key));
         }
         let connection = tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(&url)) => result,
+            // 휠·키 입력은 작은 프레임이므로 ACK를 기다리며 다음 입력과 묶으면 손길이 끊긴다.
+            result = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async_with_config(&url, None, true)) => result,
             _ = viewport.retry.notified() => {
                 *viewport.connection_error.lock().unwrap() = None;
                 backoff_ms = 500;
@@ -759,6 +762,7 @@ async fn manager(
                 // 첫 size 에서 딱 한 번.
                 let mut sized_this_conn = false;
                 let mut connection_size = None;
+                let mut codec = crate::terminal_wire::Codec::Raw;
                 loop {
                     tokio::select! {
                         _ = viewport.retry.notified() => {
@@ -836,6 +840,9 @@ async fn manager(
                                         let fresh_connection = !sized_this_conn;
                                         sized_this_conn = true;
                                         if fresh_connection {
+                                            codec = crate::terminal_wire::Codec::negotiated(
+                                                v.get("raw_compression").and_then(|v| v.as_str()),
+                                            );
                                             let latest = v.pointer("/capabilities/viewport_latest")
                                                 .and_then(|x| x.as_u64()) == Some(1);
                                             viewport.latest.store(latest, Ordering::Release);
@@ -917,10 +924,18 @@ async fn manager(
                                     *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별 확인 전에 화면이 도착해 복원을 기다리고 있어요".into());
                                     break;
                                 }
+                                let b = match codec.decode(&b) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        *viewport.connection_error.lock().unwrap() = Some("화면 전송이 손상돼 다시 연결하고 있어요".into());
+                                        break;
+                                    }
+                                };
+                                if b.is_empty() { continue; }
                                 let bytes = if reset_before_frame {
                                     reset_before_frame = false;
                                     [b"\x1bc".as_slice(), b.as_ref()].concat()
-                                } else { b.to_vec() };
+                                } else { b };
                                 if etx.send(ExtEvent::Bytes(bytes)).is_err() {
                                     return;
                                 }

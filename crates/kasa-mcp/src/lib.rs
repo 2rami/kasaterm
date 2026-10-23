@@ -42,6 +42,7 @@ pub mod account_sync;
 pub mod agent_accounts;
 pub mod agent_chains;
 pub mod remote;
+mod terminal_wire;
 pub mod remote_restore;
 mod nacho_relay;
 pub mod kasanet;

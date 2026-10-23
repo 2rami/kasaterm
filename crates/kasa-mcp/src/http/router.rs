@@ -6,6 +6,11 @@ use super::auth::{bind_addr, mobile_prefix_mw, via_phone_mw, via_uplink_mw, ViaU
 use super::machine_proxy::PROXY_BODY_LIMIT;
 use super::schedule::schedule_loop;
 
+fn interactive_tcp(stream: &mut tokio::net::TcpStream) {
+    // 화면의 마지막 작은 조각을 지연 ACK 뒤로 미루면 완성된 TUI 프레임도 늦게 보인다.
+    let _ = stream.set_nodelay(true);
+}
+
 fn direct_loopback_proxy_caller(
     peer: Option<std::net::SocketAddr>,
     via_uplink: bool,
@@ -245,6 +250,7 @@ pub fn spawn_http_server_opts(
                     .service(app);
                 use axum::ServiceExt as _;
                 if let Some(ingress) = uplink_ingress {
+                    let ingress = axum::serve::ListenerExt::tap_io(ingress, interactive_tcp);
                     let via = tower::ServiceBuilder::new()
                         .layer(axum::middleware::from_fn(via_uplink_mw))
                         .service(app.clone());
@@ -255,6 +261,7 @@ pub fn spawn_http_server_opts(
                     });
                 }
                 if let Some(ingress) = phone_ingress.and_then(|l| tokio::net::TcpListener::from_std(l).ok()) {
+                    let ingress = axum::serve::ListenerExt::tap_io(ingress, interactive_tcp);
                     let via = tower::ServiceBuilder::new()
                         .layer(axum::middleware::from_fn(via_phone_mw))
                         .service(app.clone());
@@ -268,7 +275,7 @@ pub fn spawn_http_server_opts(
                 // 로컬/원격을 가를 수 있다. 이게 없으면 원격도 로컬 규칙을 타서
                 // 토큰 없이 통과한다.
                 if let Err(e) = axum::serve(
-                    tokio_listener,
+                    axum::serve::ListenerExt::tap_io(tokio_listener, interactive_tcp),
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .await

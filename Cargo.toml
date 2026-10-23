@@ -97,6 +97,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # libc 0.2.190. Unlike 0.2.186, 0.2.189 also has the desktop proc_bsdshortinfo.
 # Keep clean phone/desktop builds on one compatible version until upstream adapts.
 libc = "=0.2.189"
+miniz_oxide = "0.8"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"

@@ -54,6 +54,8 @@ reqwest.workspace = true
 ring.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
+# Bounded, lossless terminal frames without native compression libraries.
+miniz_oxide.workspace = true
 # tell(standalone): forkpty 로 `claude attach` 를 띄워 background 세션 stdin 에 주입.
 libc.workspace = true
 notify = "8.2"
