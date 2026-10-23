@@ -157,6 +157,9 @@ mod macos_sparkle;
 mod win_sparkle;
 #[cfg(windows)]
 mod win_dialog;
+// `.md` 더블클릭으로 뜬 두 번째 실행이 떠 있는 앱에 문서를 넘긴다(맥 odoc 자리).
+#[cfg(windows)]
+mod doc_forward;
 
 use anyhow::Result;
 use kasa_bridge::layout::{parse_layout, Layout};
@@ -6611,6 +6614,14 @@ impl App {
     }
 }
 
+/// 실행 인자로 받으면 문서 창으로 여는 파일. 설치기(`wix/main.wxs`)가 「연결 프로그램」에 거는
+/// 확장자와 같아야 한다.
+fn is_launch_markdown(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ViewerLaunch {
     viewer_only: bool,
@@ -6650,7 +6661,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let executable = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_name().map(std::ffi::OsStr::to_owned));
-    let launch = ViewerLaunch::detect(executable.as_deref(), args);
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut launch = ViewerLaunch::detect(executable.as_deref(), args);
+    // 로그·설정·셰임 무엇 하나 쓰기 전에 넘긴다 — 넘길 앱이 있는 실행은 아무 흔적도 남기지 않는다.
+    #[cfg(windows)]
+    if !launch.viewer_only && !launch.lite && !launch.paths.is_empty() {
+        match doc_forward::forward_documents(&launch.paths) {
+            doc_forward::Forward::Sent => return Ok(()),
+            doc_forward::Forward::Refused => launch.viewer_only = true,
+            doc_forward::Forward::None => {}
+        }
+    }
     if !launch.viewer_only {
         let log_suffix = if launch.lite { "-lite" } else { "" };
         install_panic_logger(log_suffix);
@@ -6748,12 +6769,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // odoc 로만 오므로 둘이 겹쳐도 open_markdown_window 의 dedup 이 흡수한다.
     if !launch.viewer_only {
         for p in &launch.paths {
-            let is_md = p
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-                .unwrap_or(false);
-            if is_md && p.is_file() {
+            if is_launch_markdown(p) && p.is_file() {
                 if let Ok(abs) = std::fs::canonicalize(p) {
                     let _ = proxy.send_event(UserEvent::OpenMarkdownWindow(
                         abs.to_string_lossy().into_owned(),

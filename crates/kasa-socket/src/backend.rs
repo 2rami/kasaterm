@@ -1324,6 +1324,11 @@ pub trait Backend: Send + Sync {
     fn open_preview(&self, _kind: &str, _path: &str, _target: Option<&str>) -> Result<()> {
         anyhow::bail!("open_preview not supported")
     }
+    /// 파일을 그 앱의 문서 창으로 연다 — 맥이 Finder 더블클릭을 떠 있는 앱에 넘기는(odoc) 자리를
+    /// Windows 에선 두 번째 실행이 이 메서드로 넘긴다. 창이 없는 호스트는 열 곳이 없다.
+    fn open_document(&self, _path: &str) -> Result<()> {
+        anyhow::bail!("app.open_document not supported")
+    }
     /// 그 칸 셸을 `path` 로 옮긴다. 셸이 놀고 있을 때만 — 아니면 까닭과 함께 거절한다(`POST /term/cd`).
     fn surface_cd(&self, _surface: &str, _path: &str) -> Result<()> {
         anyhow::bail!("surface.cd not supported")

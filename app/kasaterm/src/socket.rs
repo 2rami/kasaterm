@@ -2517,6 +2517,16 @@ impl Backend for PtyBackend {
         crate::shell_cd::surface_cd(surface, path)
     }
 
+    fn open_document(&self, path: &str) -> Result<()> {
+        // 상대 경로는 보낸 쪽 폴더 기준이라 여기서 풀면 엉뚱한 파일이 열린다.
+        let file = std::path::Path::new(path);
+        if !file.is_absolute() || !file.is_file() {
+            anyhow::bail!("열 파일이 없어요: {path}");
+        }
+        let _ = self.proxy.send_event(UserEvent::OpenMarkdownWindow(path.to_string()));
+        Ok(())
+    }
+
     /// 웹 pane 조종 — 웹뷰가 GUI 스레드 소유(!Send)라 위임하고 reply 채널로
     /// 결과를 기다린다(`spawn_student` 패턴). 10초 상한: eval 은 페이지 JS 가
     /// 안 돌아오면(무한루프·탭 죽음) 영영 안 오는데, 소켓 스레드를 그보다 오래

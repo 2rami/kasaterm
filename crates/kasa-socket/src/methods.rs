@@ -146,6 +146,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.set_ratio_between" => surface_set_ratio_between(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
+        "app.open_document" => app_open_document(backend, id, &req.params),
         "surface.open_url" => surface_open_url(backend, id, &req.params),
         "web.drive" => web_drive(backend, id, &req.params),
         "collab.snapshot" => match backend.collab_snapshot(&req.params) {
@@ -417,6 +418,16 @@ fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Res
     };
     let target = params.get("target").and_then(|v| v.as_str());
     match backend.open_preview(kind, path, target) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn app_open_document(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(path) = params.get("path").and_then(|v| v.as_str()) else {
+        return param_err(id, "app.open_document requires `path` (string)");
+    };
+    match backend.open_document(path) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

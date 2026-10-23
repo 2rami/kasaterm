@@ -202,6 +202,37 @@
             </Component>
         </DirectoryRef>
 
+        <!-- .md·.markdown 의 「연결 프로그램」 목록에 kasaterm 을 올린다. 확장자의 기본값(지금 쓰는 기본 앱)은
+             건드리지 않는다 — 사람이 고른 편집기를 빼앗지 않고, 「연결 프로그램」에서 고를 때만 kasaterm 이 연다.
+             OpenWithProgids 는 값 이름만 쓰이고 데이터는 읽히지 않는다(빈 값은 WiX 3 이 거절해 이름을 적는다).
+             실행 인자로 받는 확장자는 main.rs is_launch_markdown 과 같아야 한다. -->
+        <DirectoryRef Id='TARGETDIR'>
+            <Component Id='MarkdownOpenWith' Guid='*'>
+                <RegistryKey Root='HKLM' Key='Software\Classes\kasaterm.md'>
+                    <RegistryValue Type='string' Value='Markdown Document' KeyPath='yes'/>
+                    <RegistryValue Type='string' Name='FriendlyTypeName' Value='Markdown Document'/>
+                    <RegistryKey Key='DefaultIcon'>
+                        <RegistryValue Type='string' Value='"[Bin]kasaterm.exe",0'/>
+                    </RegistryKey>
+                    <RegistryKey Key='shell\open\command'>
+                        <RegistryValue Type='string' Value='"[Bin]kasaterm.exe" "%1"'/>
+                    </RegistryKey>
+                </RegistryKey>
+                <RegistryValue Root='HKLM' Key='Software\Classes\.md\OpenWithProgids' Name='kasaterm.md' Type='string' Value='kasaterm.md'/>
+                <RegistryValue Root='HKLM' Key='Software\Classes\.markdown\OpenWithProgids' Name='kasaterm.md' Type='string' Value='kasaterm.md'/>
+                <RegistryKey Root='HKLM' Key='Software\Classes\Applications\kasaterm.exe'>
+                    <RegistryValue Type='string' Name='FriendlyAppName' Value='kasaterm'/>
+                    <RegistryKey Key='SupportedTypes'>
+                        <RegistryValue Type='string' Name='.md' Value='kasaterm.md'/>
+                        <RegistryValue Type='string' Name='.markdown' Value='kasaterm.md'/>
+                    </RegistryKey>
+                    <RegistryKey Key='shell\open\command'>
+                        <RegistryValue Type='string' Value='"[Bin]kasaterm.exe" "%1"'/>
+                    </RegistryKey>
+                </RegistryKey>
+            </Component>
+        </DirectoryRef>
+
         <Feature
             Id='Binaries'
             Title='Application'
@@ -227,6 +258,7 @@
             <ComponentGroupRef Id='CollabHooksGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='DesktopShortcut'/>
+            <ComponentRef Id='MarkdownOpenWith'/>
 
             <Feature
                 Id='Environment'
