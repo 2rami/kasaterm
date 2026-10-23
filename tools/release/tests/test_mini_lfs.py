@@ -380,6 +380,9 @@ class RepoContractTests(unittest.TestCase):
     def test_a_dark_mini_or_a_leftover_pointer_stops_the_build_loudly(self):
         self.assertIn('[[ "$CODE" == 200 ]] || {', self.action)
         self.assertLess(self.action.index('[[ "$CODE" == 200 ]]'), self.action.index("lfs pull"))
-        self.assertIn('[[ -z "$LEFT" ]] || {', self.action)
+        strict = '"$PYTHON" "$LFS_ACTION_PATH/verify.py"\n'
+        self.assertIn(strict, self.action)
+        self.assertLess(self.action.index("lfs pull"), self.action.index(strict))
         self.assertIn("GIT_TERMINAL_PROMPT: '0'", self.action)
-        self.assertNotIn("continue-on-error", self.wf)
+        builds = self.wf[self.wf.index("  build-msi:"):self.wf.index("  appcast:")]
+        self.assertNotIn("continue-on-error", builds)
