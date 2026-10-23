@@ -6,12 +6,25 @@
 //!
 //! 시스템이 색을 건네는 시점은 사용자가 클릭한 뒤라, 액션은 스포이드를 띄우기만
 //! 하고 끝난다. 집힌 색은 여기 통에 담기고 GUI 틱이 꺼내 팔레트에 반영한다.
+//!
+//! Windows 에는 시스템 스포이드가 없어 같은 꼴을 직접 짓는다(`win.rs`) — 거기선 화면 픽셀
+//! 읽기에 권한이 필요 없다.
 
 use std::sync::Mutex;
+
+#[cfg(windows)]
+mod win;
 
 /// 집힌 색과 그것을 넣을 팔레트 칸. 콜백은 GUI 스레드로 돌아오지만 그 안에서는
 /// `App` 을 만질 수 없어(클로저가 `&mut App` 을 못 든다) 여기 놓고 간다.
 static PICKED: Mutex<Option<(crate::SettingsInput, [u8; 3])>> = Mutex::new(None);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn deliver(slot: crate::SettingsInput, rgb: [u8; 3]) {
+    if let Ok(mut g) = PICKED.lock() {
+        *g = Some((slot, rgb));
+    }
+}
 
 /// 집힌 색을 꺼낸다(있으면 비운다). GUI 틱이 매 프레임 부른다.
 pub(crate) fn take_picked() -> Option<(crate::SettingsInput, [u8; 3])> {
@@ -21,16 +34,17 @@ pub(crate) fn take_picked() -> Option<(crate::SettingsInput, [u8; 3])> {
 /// 이 OS 에서 화면 집기가 되는가. 안 되는 곳에서는 화면에 단추를 아예 안 낸다 —
 /// 눌러야 안 된다는 걸 아는 단추보다 없는 편이 낫다.
 pub(crate) const fn supported() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", windows))
 }
 
 /// 스포이드를 띄운다. 사용자가 화면 어디든 클릭하면 그 색이 `slot` 칸의 값으로
-/// 담긴다. 취소하면 아무것도 담기지 않는다.
+/// 담긴다. 취소하면 아무것도 담기지 않는다. `proxy` 는 Windows 스포이드가 끝났을 때
+/// GUI 를 깨우는 데 쓴다 — 맥은 시스템 콜백이 GUI 스레드로 돌아와 따로 깨울 일이 없다.
 ///
 /// **메인 스레드에서 불러야 한다** — AppKit 규칙이고, 설정 액션은 이미 GUI
 /// 스레드에서 처리되므로 그 경로로만 들어온다.
 #[cfg(target_os = "macos")]
-pub(crate) fn pick_screen_color(slot: crate::SettingsInput) {
+pub(crate) fn pick_screen_color(slot: crate::SettingsInput, _proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>) {
     use objc2_app_kit::{NSColor, NSColorSampler, NSColorSpace};
 
     let sampler = NSColorSampler::new();
@@ -52,14 +66,17 @@ pub(crate) fn pick_screen_color(slot: crate::SettingsInput) {
             ch(srgb.greenComponent()),
             ch(srgb.blueComponent()),
         ];
-        if let Ok(mut g) = PICKED.lock() {
-            *g = Some((slot, rgb));
-        }
+        deliver(slot, rgb);
     });
     // 세션이 끝날 때까지 sampler 를 시스템이 붙잡아 준다(NSColorSampler 문서) —
     // 그래서 여기서 떨어뜨려도 스포이드가 사라지지 않는다.
     unsafe { sampler.showSamplerWithSelectionHandler(&handler) };
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn pick_screen_color(_slot: crate::SettingsInput) {}
+#[cfg(windows)]
+pub(crate) fn pick_screen_color(slot: crate::SettingsInput, proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>) {
+    win::start(slot, proxy.clone());
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn pick_screen_color(_slot: crate::SettingsInput, _proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>) {}

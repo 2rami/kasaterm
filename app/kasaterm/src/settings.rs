@@ -1137,7 +1137,7 @@ impl App {
             SettingsAction::PickerSV(_) | SettingsAction::PickerHue(_) => {}
             SettingsAction::ColorEyedropper(slot) => {
                 if crate::eyedropper::supported() {
-                    crate::eyedropper::pick_screen_color(slot);
+                    crate::eyedropper::pick_screen_color(slot, &self.proxy);
                 } else {
                     self.set_toast("이 운영체제에선 화면 집기를 아직 못 써요".to_string());
                 }
@@ -2039,7 +2039,7 @@ impl App {
                         "이 운영체제에선 화면 집기를 아직 못 써요".to_string(),
                     ));
                 }
-                crate::eyedropper::pick_screen_color(SettingsInput::PaletteHex(i));
+                crate::eyedropper::pick_screen_color(SettingsInput::PaletteHex(i), &self.proxy);
                 Ok(true)
             }
             // 색 패널을 여는 동안 오는 미리보기. 화면만 갈고 파일은 안 건드리므로

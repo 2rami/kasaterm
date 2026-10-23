@@ -107,36 +107,28 @@ fn with_com(body: impl FnOnce() -> windows::core::Result<Option<PathBuf>>) -> Re
     result
 }
 
+/// 시험이 실제 창을 사람 화면 밖에서 띄우는 자리. 사람 화면에 띄우면 그 사람이 치던 글자가
+/// 그 창으로 들어가고 누름을 먹는다 — 보이지 않는 데스크톱에 띄우고 창을 찾아 메시지만 보낸다.
+/// 파일 창과 스포이드 시험이 함께 쓴다.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use windows::Win32::Foundation::{GENERIC_ALL, LPARAM, WPARAM};
+pub(crate) mod hidden_desktop {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{GENERIC_ALL, HWND, LPARAM};
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, CreateDesktopW, EnumDesktopWindows, SetThreadDesktop, DESKTOP_CONTROL_FLAGS, HDESK,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, PostMessageW, IDCANCEL, IDOK, WM_COMMAND};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowTextW};
 
-    /// 사람 화면에 띄우면 그 사람이 치던 글자가 이름 칸으로 들어가고 Enter 가 엉뚱한 파일을
-    /// 고른다. 보이지 않는 데스크톱에서 띄우고 창 제목으로 찾아 단추 명령만 보낸다.
-    fn on_hidden_desktop<T: Send + 'static>(title: &'static str, button: i32, open: impl FnOnce() -> T + Send + 'static) -> T {
-        let name = HSTRING::from(format!("kasaterm-dialog-{}-{title}", std::process::id()));
+    /// `open` 을 숨은 데스크톱의 새 스레드에서 돌리고, 그동안 `drive` 가 그 데스크톱을 만진다.
+    pub(crate) fn run<T: Send + 'static>(tag: &str, open: impl FnOnce() -> T + Send + 'static, drive: impl FnOnce(HDESK)) -> T {
+        let name = HSTRING::from(format!("kasaterm-test-{}-{tag}", std::process::id()));
         let desk = unsafe { CreateDesktopW(&name, None, None, DESKTOP_CONTROL_FLAGS(0), GENERIC_ALL.0, None) }.expect("데스크톱");
         let raw = desk.0 as isize;
         let worker = std::thread::spawn(move || {
             unsafe { SetThreadDesktop(HDESK(raw as *mut _)) }.expect("스레드를 옮기지 못했다");
             open()
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let found = loop {
-            if let Some(hwnd) = find_titled(desk, title) {
-                break hwnd;
-            }
-            assert!(std::time::Instant::now() < deadline, "{title} 창이 안 떴다");
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        };
-        // 창이 막 서고 바로 누르면 셸이 결과 항목을 아직 안 채워 OK 가 무시된다.
-        std::thread::sleep(std::time::Duration::from_millis(800));
-        unsafe { PostMessageW(Some(found), WM_COMMAND, WPARAM(button as usize), LPARAM(0)) }.unwrap();
+        drive(desk);
         let out = worker.join().unwrap();
         // 폴더 창은 셸 일꾼 스레드를 그 데스크톱에 남겨 닫기가 ERROR_BUSY 로 실패한다 — 그 스레드가
         // 끝나거나 시험 프로세스가 끝날 때 함께 사라지므로 기다리지 않는다.
@@ -144,21 +136,58 @@ mod tests {
         out
     }
 
-    fn find_titled(desk: HDESK, title: &str) -> Option<HWND> {
-        struct Probe(Vec<u16>, Option<HWND>);
+    /// 클래스나 제목이 맞는 최상위 창이 설 때까지 기다린다.
+    pub(crate) fn wait_for(desk: HDESK, class: Option<&str>, title: Option<&str>) -> HWND {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(hwnd) = find(desk, class, title) {
+                return hwnd;
+            }
+            assert!(std::time::Instant::now() < deadline, "{class:?} {title:?} 창이 안 떴다");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    pub(crate) fn find(desk: HDESK, class: Option<&str>, title: Option<&str>) -> Option<HWND> {
+        struct Probe(Option<Vec<u16>>, Option<Vec<u16>>, Option<HWND>);
         unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
             let probe = unsafe { &mut *(data.0 as *mut Probe) };
             let mut text = [0u16; 256];
-            let n = unsafe { GetWindowTextW(hwnd, &mut text) } as usize;
-            if text[..n] == probe.0[..] {
-                probe.1 = Some(hwnd);
+            let class_ok = probe.0.as_ref().is_none_or(|want| {
+                let n = unsafe { GetClassNameW(hwnd, &mut text) } as usize;
+                text[..n] == want[..]
+            });
+            let title_ok = probe.1.as_ref().is_none_or(|want| {
+                let n = unsafe { GetWindowTextW(hwnd, &mut text) } as usize;
+                text[..n] == want[..]
+            });
+            if class_ok && title_ok {
+                probe.2 = Some(hwnd);
                 return false.into();
             }
             true.into()
         }
-        let mut probe = Probe(title.encode_utf16().collect(), None);
+        let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let mut probe = Probe(class.map(wide), title.map(wide), None);
         let _ = unsafe { EnumDesktopWindows(Some(desk), Some(each), LPARAM(&mut probe as *mut Probe as isize)) };
-        probe.1
+        probe.2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, IDCANCEL, IDOK, WM_COMMAND};
+
+    /// 창 제목으로 찾아 OK·취소 명령만 보낸다.
+    fn on_hidden_desktop<T: Send + 'static>(title: &'static str, button: i32, open: impl FnOnce() -> T + Send + 'static) -> T {
+        hidden_desktop::run(title, open, |desk| {
+            let found = hidden_desktop::wait_for(desk, None, Some(title));
+            // 창이 막 서고 바로 누르면 셸이 결과 항목을 아직 안 채워 OK 가 무시된다.
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            unsafe { PostMessageW(Some(found), WM_COMMAND, WPARAM(button as usize), LPARAM(0)) }.unwrap();
+        })
     }
 
     #[test]
