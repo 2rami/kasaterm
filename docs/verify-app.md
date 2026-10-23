@@ -41,6 +41,12 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **`KASATERM_COLLAB_ROOT`** 로 네이티브 앱의 `session_characters.json`(세션↔학생 바인딩)·bind 마커·`agent-roster/` 조회를 가른다. 안 걸면 본판 폴더를 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않지만, 같은 cwd 의 같은 pane 번호(`%2`)가 본판 세션에 결합해 글리프가 남의 것을 보는 일이 생긴다. **수동 학생 선택 파일과 원본 셸 훅의 쓰기까지 격리하는 설정은 아니다** — 아래 「학생·대화 픽스처」를 따른다.
 - ⚠️ **`KASATERM_SOCKET_PATH` 를 띄울 때도 주고, `kasaterm-cli` 를 부를 때도 줘라.** CLI 는 `$KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock` 순으로 붙고 **포트는 안 본다** — 리그를 다른 포트로 띄웠어도 CLI 에 이 변수를 안 주면 그 명령이 **사용자 앱으로 간다**(2026-09-03 실측: `split right` 이 사용자 창에 pane 을 만들었고, `send` 가 도는 학생의 입력창에 글자를 밀어넣었다). 앱 부팅 줄과 CLI 호출 양쪽에 같은 경로를 걸어라:
   `export KASATERM_SOCKET_PATH=/tmp/<네이름>/rig.sock` 를 먼저 하고 그 셸에서 둘 다 부르는 것이 가장 안전하다.
+  ⚠️ **Windows 는 이 경로의 마지막 조각만 named pipe 이름(`\\.\pipe\rig.sock`)으로 쓴다** — 폴더가 달라도 이름이 같으면
+  옆 학생 리그와 한 파이프다. 이름이 이미 있으면 앱은 `kasaterm-<pid>.sock` 으로 물러나고, CLI 는 남의 리그에 붙는다
+  (2026-10-23: `rig.sock` 으로 친 한 줄이 옆 리그 칸에 들어갔다). 이름에 자기 이름을 넣고(`win-migrate-a.sock`),
+  `[System.IO.Directory]::GetFiles("\\.\pipe\")` 로 내 리그가 그 이름을 잡았는지 확인한다.
+- Windows 리그의 설정 파일은 BOM 없이 써라 — Windows PowerShell 5.1 `Set-Content -Encoding utf8` 은 BOM 을 붙이고, 앱은
+  그 파일을 못 읽어 기본값(셸·셰임)으로 뜬 뒤 덮어쓴다. `[IO.File]::WriteAllText` 를 쓴다.
 - **칸 안에서 claude·codex 를 따로 띄워 화면을 재 볼 때(격리 tmux 등)는 `env -i` 로 칸 환경을 걷어라.** 물려받은
   `KASATERM_PANE_ID` 로 그 실행이 내 칸 이름으로 학생·대화를 묻는다. 앱은 칸 터미널 밖 실행에 자리를 주지 않고 앉은
   학생을 빌려 줄 뿐이지만(`agent_identity.rs`), 그 실행의 훅이 알리는 대화 번호는 여전히 내 칸으로 간다. 2026-10-14 에는
@@ -166,6 +172,8 @@ GPU 확인 카드는 `KASATERM_TEST_CLOSE_FALLBACK=1`로 별도 검사한다. �
 위 격리 환경의 앱 둘을 루프백 기기로 연결하고 `KASATERM_SHELL=/bin/zsh`로 시작한다. 가짜 Claude·Codex는 위 학생 픽스처 규약을 지키고, `surface.turn`의 `end`와 실제 입력창(Claude 보더·❯, Codex 명시 배경·›, bracketed paste·입력 커서)을 출력한다. SID 바인딩만 먼저 알리고 입력창은 늦게 그리는 경우도 만든다. 이 지연 중에는 `/transfer/launch`·이사 결과가 성공하면 안 된다.
 
 `/transfer/spawn`이 돌려준 `SessionIdentity`와 `input_revision`으로 `/transfer/launch`를 부른다. 빈 셸, 예약 후 초안 입력, 세대 교체, CLI 시작 직후 종료, 늦은 입력창을 확인한다. 전체 이사는 종료 시 마지막 JSONL 행을 flush하는 픽스처로 검사한다. 출발·도착 SID·방, 파일 마지막 행, 이사하지 않은 형제 탭의 동일성과 생존을 대조한다. 첫 탭·보조 탭 각각 이동과 도착 재개 중 출발 칸 닫기를 포함한다. 실제 CLI 재개 시간과 가짜 하네스 시간은 별도로 기록한다.
+
+Windows 끼리(같은 PC 두 리그)는 `KASATERM_MACHINE_ID` 를 리그마다 다르게 주고, 출발 리그 명부(`KASATERM_MACHINES`)에 도착 리그의 루프백 주소와 `roots` 를 적는다. 도착 폴더는 이미 신뢰한 폴더의 하위로 고른다(새 폴더면 claude 가 신뢰 확인 창에서 멈춘다). 리그 셰임 폴더(`<리그 TEMP>\kasaterm-shim-<pid>\claude.cmd`)를 `--setting-sources project --strict-mcp-config --tools ""` 로 진짜 claude 를 부르는 래퍼로 덮으면 원본 훅·사용자 플러그인 없이 재개 줄이 그 래퍼를 탄다. 셰임 훅이 하던 신원 알리기·기록 묶기는 위 픽스처 2·3번(`/agent-identity`, `bind-transcript`)으로 대신한다. 훅이 없으면 상태가 「모름」이라 턴 관문이 안 풀리니 `--force` 로 돌리고, 곱게 끄기(`/exit`)는 `/term/agent-stop` 으로 따로 잰다.
 
 대화 운반이 홈의 정본 경로를 요구하면 **이번 리그에서 만든 새 UUID 파일만** 만들고 정리한다. 사용자 세션을 복사해 이사시키거나 같은 UUID로 띄우지 않는다. 실제 Claude 측정은 `--safe-mode --restricted --strict-mcp-config --tools ""`로 훅·도구를 끈 새 대화로 하며, 별도 리그 소켓으로 바인딩한다. 원본 셸 훅·학생 이름 런처는 실행하지 않는다.
 
