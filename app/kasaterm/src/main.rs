@@ -3857,11 +3857,6 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
-    /// pane 을 로컬 상주 데몬으로 **무중단 승격** — (pane, 회신=원격 세션 id).
-    SocketPromote(
-        String,
-        std::sync::mpsc::Sender<std::result::Result<String, String>>,
-    ),
     /// `to ..`(옛 `book`) — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다.
     /// 원격 셸 안에서 셰임이 예약 알림(OSC 777 `kasaterm-home`)을 뱉고, 그 pane 을
     /// 소유한 이 앱의 화면 펌프가 그걸 잡아 올린다. 회신 없음 — 셰임을 부른 CLI 는

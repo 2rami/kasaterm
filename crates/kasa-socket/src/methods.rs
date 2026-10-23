@@ -49,7 +49,6 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.focus" => surface_focus(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
         "surface.remote" => surface_remote(backend, id, &req.params),
-        "surface.promote" => surface_promote(backend, id, &req.params),
         "surface.migrate" => surface_migrate(backend, id, &req.params),
         "machine.unfold" => machine_unfold(backend, id, &req.params),
         "machine.home" => machine_home(backend, id),
@@ -331,7 +330,6 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.focus",
                 "surface.split",
                 "surface.remote",
-                "surface.promote",
                 "surface.migrate",
                 "machine.unfold",
                 "machine.home",
@@ -1128,17 +1126,6 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
             }
             Response::success(id, body)
         }
-        Err(e) => backend_err(id, e),
-    }
-}
-
-/// `surface.promote` — 도는 pane 을 로컬 상주 데몬으로 무중단 승격. params: `{pane}`.
-fn surface_promote(backend: &dyn Backend, id: Value, params: &Value) -> Response {
-    let Some(pane) = params.get("pane").and_then(|v| v.as_str()) else {
-        return param_err(id, "surface.promote requires `pane`");
-    };
-    match backend.promote_pane(pane) {
-        Ok(remote_id) => Response::success(id, json!({"ok": true, "remote_id": remote_id})),
         Err(e) => backend_err(id, e),
     }
 }

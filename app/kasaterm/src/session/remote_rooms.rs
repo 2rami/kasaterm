@@ -46,7 +46,7 @@ pub(super) fn self_view_machine() -> Result<kasa_mcp::machines::Machine> {
 impl App {
     /// 이 pane 을 **그 자리에서** 원격 셸의 거울로 바꾼다 — `mini` 한 마디로 맥미니
     /// 터미널이 보이게(2026-09-02 지시). 학생·대화 운반이 없는 맨 셸 전용이라
-    /// `migrate_pane` 의 레포 준비·학생 소환은 타지 않고, 승격(`promote_pane`)과 같은
+    /// `migrate_pane` 의 레포 준비·학생 소환은 타지 않고, 이사와 같은
     /// 스왑 패턴만 쓴다: 같은 pane id 로 원격 세션을 앉히고 옛 로컬 셸은 insert 의
     /// Drop 이 걷는다. 그래서 자리·크기·방·학생 배정이 그대로다. 부른 CLI 는 그
     /// 셸의 자식이라 회신을 못 받고 함께 걷힌다 — 성공의 표시는 화면이 바뀌는 것이다.

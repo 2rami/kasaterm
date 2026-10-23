@@ -7,14 +7,11 @@
 # 못한다. 그래서 구운 번들을 부쳐 주는 것 말고는 길이 없다.
 #
 # 도는 앱은 덮어쓸 수 없다 — 번들을 갈면 서명 페이지가 무효가 되어 macOS 가 앱을
-# SIGKILL 한다. 그래서 반드시 세우고 갈아야 하고, 그 사이 학생이 죽지 않게 먼저
-# 상주 데몬으로 승격시킨다(`promote`). 승격이 실패한 pane 도 잃지는 않는다 —
-# 저장된 세션으로 `--resume` 되살아난다. 잠깐 끊길 뿐이다.
+# SIGKILL 한다. 그래서 반드시 세우고 갈아야 한다. 학생은 잃지 않는다 — 저장된
+# 세션으로 `--resume` 되살아난다. 잠깐 끊길 뿐이다.
 #
 #   scripts/sync-mini.sh --dry-run   무엇을 할지만 보여준다
-#   scripts/sync-mini.sh --canary    학생 하나만 승격하고 멈춘다(교체 안 함)
-#   scripts/sync-mini.sh --no-promote  승격 없이 그냥 껐다 켠다
-#   scripts/sync-mini.sh             전부: 부치기 → 승격 → 교체 → 되띄우기
+#   scripts/sync-mini.sh             전부: 부치기 → 교체 → 되띄우기
 set -euo pipefail
 
 # 기본은 랙 미니(정본, 2026-09-06 이후) — 옛 미니(macmini-nacho)로 보내면 아무도 없는
@@ -23,12 +20,10 @@ HOST="${KASATERM_MINI_HOST:-nachoneko}"
 LABEL="com.geono.kasaterm"
 STAGE="kasaterm-dist"          # 미니 홈 아래. 레포 밖에 둔다 — 레포를 더럽히면
                                # 세션 시작 훅이 「미커밋이 있다」며 pull 을 멈춘다.
-DRY=0; CANARY=0; PROMOTE=1
+DRY=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
-    --canary) CANARY=1 ;;
-    --no-promote) PROMOTE=0 ;;
     *) echo "모르는 인자: $a" >&2; exit 2 ;;
   esac
 done
@@ -74,29 +69,6 @@ fi
 FIND_PID='pgrep -f "Applications/kasaterm.app/Contents/MacOS/kasaterm( |\$)" | head -1'
 FIND_SOCK='P=$('"$FIND_PID"'); [ -n "$P" ] && lsof -p $P 2>/dev/null | grep -o "/var/folders/[^ ]*kasaterm-$P.sock" | head -1'
 CLI='~/Applications/kasaterm.app/Contents/MacOS/kasaterm-cli'
-
-if [ "$PROMOTE" = 1 ]; then
-  # 앱이 도는데 board 를 못 읽으면 「없음」이 아니라 「모름」이다 — 모르면 갈지 않는다.
-  RUNNING=$(rmt "$FIND_PID" || true)
-  BOARD=$(rmt "S=\$($FIND_SOCK); [ -n \"\$S\" ] && KASATERM_SOCKET_PATH=\"\$S\" $CLI board 2>/dev/null" || true)
-  if [ -n "$RUNNING" ] && [ -z "$BOARD" ]; then
-    say "앱(pid $RUNNING)은 도는데 학생 목록을 못 읽었어요 — 도는 학생 위로 갈아 끼울 수 없어 멈춥니다."
-    exit 1
-  fi
-  PANES=$(printf '%s' "$BOARD" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(p["surface_id"] for p in d["result"]["board"] if p.get("harness")=="claude"))' 2>/dev/null || true)
-  say "학생: ${PANES:-없음}"
-  [ "$CANARY" = 1 ] && PANES=$(echo "$PANES" | awk '{print $1}')
-  for p in $PANES; do
-    printf '  승격 %s → ' "$p"
-    if [ "$DRY" = 1 ]; then echo "(안 함)"; else
-      rmt "S=\$($FIND_SOCK); KASATERM_SOCKET_PATH=\"\$S\" $CLI promote '$p' 2>&1 | tail -1" | cut -c1-120
-    fi
-  done
-  if [ "$CANARY" = 1 ]; then
-    say "카나리아까지만 — 교체는 안 했어요. 그 학생이 멀쩡하면 인자 없이 다시 부르세요."
-    exit 0
-  fi
-fi
 
 say "세우고 · 갈아입히고 · 되띄우는 중…"
 # 넷을 한 번의 ssh 안에서 한다. 왕복마다 나가면 세운 뒤 갈아입기 전에 launchd 가

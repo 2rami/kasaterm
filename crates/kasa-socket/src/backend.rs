@@ -680,10 +680,6 @@ pub trait Backend: Send + Sync {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo>;
-    /// pane 의 PTY 를 로컬 상주 데몬으로 **무중단 이관**(승격). GUI 백엔드 전용.
-    fn promote_pane(&self, _pane: &str) -> Result<String> {
-        anyhow::bail!("promote: 이 백엔드는 지원하지 않는다")
-    }
     /// pane 의 claude 를 다른 기계의 PTY 호스트로 **이사** — 대화 jsonl 운반 +
     /// 같은 자리 원격 스왑 + resume 주입. GUI 백엔드 전용.
     /// `run` 은 태생 스폰(에이전트 없는 셸 pane) 전용 — 저쪽에서 claude 대신

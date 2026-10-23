@@ -7,19 +7,7 @@ pub(super) fn is_local(record: &Value) -> bool {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
     };
-    if let Some(_base) = text("remote_base") {
-        // Promotion hands this machine's PTY to its own daemon, not to another device.
-        #[cfg(unix)]
-        if record["remote_view"] != true
-            && text("remote_label").is_none()
-            && _base
-                .trim_end_matches('/')
-                .strip_prefix("http://127.0.0.1:")
-                .and_then(|port| port.parse::<u16>().ok())
-                == Some(super::migrate::LOCAL_PTYD_PORT)
-        {
-            return true;
-        }
+    if text("remote_base").is_some() {
         return false;
     }
     text("remote_pane").is_none()
@@ -429,20 +417,6 @@ mod tests {
         assert!(surfaces(&input).next().is_none());
         input["tabs"] = json!([null, local("%2")]);
         assert_eq!(record(&input).unwrap()["pane_id"], "%2");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn this_machines_promoted_pty_is_not_a_foreign_device_mirror() {
-        let mut input = remote("%0");
-        input["remote_base"] = json!(format!(
-            "http://127.0.0.1:{}/",
-            super::super::migrate::LOCAL_PTYD_PORT
-        ));
-        input["remote_view"] = json!(false);
-        assert_eq!(record(&input), Some(input.clone()));
-        input["remote_view"] = json!(true);
-        assert!(record(&input).is_none());
     }
 
     #[test]

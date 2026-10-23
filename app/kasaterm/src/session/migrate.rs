@@ -1,4 +1,4 @@
-//! 칸 이사 — 도는 칸을 산 채로 다른 기기(또는 이 기기 ptyd)로 옮기고 되돌린다. 턴 중이면
+//! 칸 이사 — 도는 칸을 산 채로 다른 기기로 옮기고 되돌린다. 턴 중이면
 //! 예약해 두었다가 턴이 끝나면 옮긴다.
 use super::*;
 
@@ -125,129 +125,8 @@ impl App {
         self.set_toast(format!("{label} 로 간 자리를 걷고 그 방을 보기 창으로 열었어요"));
     }
 
-    /// 로컬 상주 PTY 데몬(kasa-serve-web)을 보장한다 — 승격된 학생의 새 집.
-    ///
-    /// 판정은 입양 소켓으로 한다: HTTP 포트는 남이 차지할 수 있지만 입양 소켓
-    /// 파일에 연결이 되는 것은 우리 데몬뿐이다. 없으면 바이너리를 찾아 띄운다 —
-    /// ①KASATERM_SERVE_WEB_BIN ②현재 exe 옆 ③PATH.
-    #[cfg(unix)]
-    pub(super) fn ensure_local_ptyd(&mut self) -> Result<()> {
-        let sock = kasa_mcp::adopt::adopt_sock_path(LOCAL_PTYD_PORT);
-        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
-            return Ok(());
-        }
-        let bin = std::env::var("KASATERM_SERVE_WEB_BIN")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.exists())
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|e| e.parent().map(|d| d.join("kasa-serve-web")))
-                    .filter(|p| p.exists())
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from("kasa-serve-web"));
-        let lp = std::env::temp_dir().join(format!("kasa-ptyd-{LOCAL_PTYD_PORT}.log"));
-        let logf = || {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&lp)
-                .ok()
-        };
-        let mut cmd = std::process::Command::new(&bin);
-        cmd.arg("--port")
-            .arg(LOCAL_PTYD_PORT.to_string())
-            .arg("--cwd")
-            .arg(kasa_socket::home_var().unwrap_or_else(|_| "/".into()))
-            .stdin(std::process::Stdio::null())
-            .stdout(
-                logf()
-                    .map(std::process::Stdio::from)
-                    .unwrap_or_else(std::process::Stdio::null),
-            )
-            .stderr(
-                logf()
-                    .map(std::process::Stdio::from)
-                    .unwrap_or_else(std::process::Stdio::null),
-            );
-        cmd.spawn()
-            .map_err(|e| anyhow::anyhow!("로컬 PTY 데몬을 못 띄웠어요: {} ({e})", bin.display()))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(150));
-        }
-        anyhow::bail!(
-            "로컬 PTY 데몬이 5초 안에 안 떴어요 (로그: {})",
-            lp.display()
-        )
-    }
-
-    /// 도는 pane 을 **재시작 없이** 로컬 상주 데몬으로 승격한다 — 셸·claude
-    /// 프로세스는 그대로 두고 PTY 소유권만 fd(SCM_RIGHTS)로 넘긴 뒤, 이 pane 을
-    /// 그 세션의 원격 소유자 연결로 갈아끼운다. 이후 앱을 굽고 껐다 켜도, 앱이
-    /// 죽어도 그 학생은 살아남는다(맥북 전원이 꺼지면 같이 꺼진다 — 그건 물리).
-    #[cfg(unix)]
-    pub(crate) fn promote_pane(&mut self, pid: &str) -> Result<String> {
-        self.ensure_user_mutation_target(
-            pid,
-            crate::settings_room::SettingsMutation::RemotePane,
-        )?;
-        let Some(sess) = self.pty.get(pid).cloned() else {
-            anyhow::bail!("pane {pid} 이 없다");
-        };
-        if kasa_mcp::remote::is_remote_pane(pid) {
-            anyhow::bail!("{pid} 은 이미 원격 pane 이다");
-        }
-        let Some(fd) = sess.master_raw_fd() else {
-            anyhow::bail!("{pid} 은 로컬 PTY 가 아니라 승격할 수 없다");
-        };
-        self.ensure_local_ptyd()?;
-        // reader 를 세우고 마지막 청크가 Term 에 앉을 시간을 준다 — 그 뒤에 뜬
-        // 스크롤백이 곧 「넘어가는 화면」이다. 정지 순간 escape 가 반 토막 날 수
-        // 있지만 TUI 는 계속 다시 그리므로 스스로 아문다(adopt 머리말).
-        sess.stop_reader();
-        std::thread::sleep(std::time::Duration::from_millis(450));
-        let (c, r) = sess.size();
-        let scroll = sess.scrollback_text(2000);
-        let web_id =
-            kasa_mcp::adopt::handoff_to(LOCAL_PTYD_PORT, fd, sess.shell_pid(), c, r, scroll)?;
-        sess.disarm_kill();
-        // 같은 pane id 로 소유자 연결 — pane 자리·이름·학생 배정은 그대로다.
-        let remote = kasa_mcp::remote::connect(
-            kasa_mcp::remote::RemoteSpec {
-                base: format!("http://127.0.0.1:{LOCAL_PTYD_PORT}"),
-                pane: Some(web_id.clone()),
-                cwd: None,
-                token: None,
-                identity: Default::default(),
-            },
-            pid,
-            c,
-            r,
-        )?;
-        self.insert_pty(pid.to_string(), remote.session.clone());
-        self.pump_pty_screens(
-            remote.session.screens.clone(),
-            pid.to_string(),
-            std::sync::Arc::downgrade(&remote.session),
-        );
-        // 옛 세션의 늦은 죽음표시 정리(스왑 패턴) — 정체 가드가 있지만 이중으로.
-        self.dead_panes.lock().unwrap().retain(|x| x != pid);
-        let (wc, wr) = self.window_cells();
-        self.resize_backend(wc, wr);
-        self.publish_pty_layout();
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
-        Ok(web_id)
-    }
-
     /// pane 의 claude 를 **다른 기계로 이사**시킨다 — 로컬을 정리하고 원격에서 같은
-    /// 대화로 다시 깨운다(promote 와 달리 산 채로는 못 건넌다 — 기계가 다르다).
+    /// 대화로 다시 깨운다(산 채로는 못 건넌다 — 기계가 다르다).
     ///
     /// 순서: ①저쪽 폴더 확인(없으면 홈) ②claude 를 곱게 끄고(jsonl 마지막 flush 를
     /// 기다린다) ③대화 jsonl 을 원격 호스트로 업로드 ④저쪽에 학생 pane 소환
@@ -673,7 +552,7 @@ impl App {
                     .to_string(),
             );
         }
-        // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지(promote 패턴).
+        // 같은 pane id 로 원격 셸을 앉힌다 — 자리·이름·학생 배정 유지.
         let (c, rows) = sess.size();
         let spec = kasa_mcp::remote::RemoteSpec {
                 base: r.base.clone(),
@@ -1092,17 +971,6 @@ impl App {
         }
     }
 }
-
-/// 승격된 학생들이 사는 로컬 상주 데몬(kasa-serve-web)의 HTTP 포트.
-///
-/// ⚠️ 8790 을 쓰면 안 된다 — 기계 간 중계소(`kasa-relay`)의 포트다. 미니는 중계소
-/// 본체가, 맥북은 그걸 끌어오는 터널 LaunchAgent(`kasa-relay-tunnel` 의
-/// `-L 8790:127.0.0.1:8790`)가 상시 물고 있다. `kasa-serve-web` 은 요청한 포트를
-/// 못 잡으면 임의 포트로 도망가는 대신 **즉시 종료**하므로(입양 소켓 이름이 포트에
-/// 묶여 판정이 어긋난다), 승격이 「데몬이 5초 안에 안 떴어요」로 두 기계 모두에서
-/// 실패한다.
-#[cfg(unix)]
-pub(crate) const LOCAL_PTYD_PORT: u16 = 8767;
 
 /// 데려오기(`migrate … local`)가 이어갈 세션 id 를 정한다 — 이 창이 기억하는 것이
 /// 먼저, 없으면 원격이 답한 것. 둘 다 없으면 이유를 사람 말로.

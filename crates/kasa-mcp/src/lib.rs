@@ -44,8 +44,6 @@ pub mod agent_chains;
 pub mod remote;
 pub mod remote_restore;
 mod nacho_relay;
-#[cfg(unix)]
-pub mod adopt;
 pub mod kasanet;
 pub mod netfwd;
 pub mod layout_feed;

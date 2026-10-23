@@ -199,7 +199,7 @@ impl App {
                 // the loop so reap_dead_panes drops it on the next turn.
                 if update.eof {
                     // 같은 id 로 PTY 가 갈아끼워졌으면(캐릭터 교체·계정 재시작·
-                    // 핸드오프 승격) 이 죽음표시는 **옛 세션**의 것이다 — 새 pane 을
+                    // 원격 스왑) 이 죽음표시는 **옛 세션**의 것이다 — 새 pane 을
                     // 걷으면 안 된다. dead_panes.retain 정리는 GUI 스레드와
                     // 마이크로초 경주가 남지만, 레지스트리의 현 세션과 내 정체를
                     // 포인터로 비교하면 결정적이다(pane_replaced).
@@ -311,7 +311,7 @@ impl App {
             // Channel disconnected — the reader thread exited because
             // the PTY hit EOF (shell quit) or errored. Flag this pane
             // for the main thread to remove on its next tick.
-            // eof 와 같은 정체 가드 — 채널 단절은 승격 스왑의 Arc drop 순간에
+            // eof 와 같은 정체 가드 — 채널 단절은 같은 id 스왑의 Arc drop 순간에
             // 정확히 나므로 여기가 더 밟기 쉽다.
             if pane_replaced(&pane_id, &sess_weak) {
                 return;

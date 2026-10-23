@@ -487,7 +487,7 @@ fn build_url(spec: &RemoteSpec, pane: Option<&str>, view: bool) -> String {
 ///
 /// `cols`/`rows` 는 GUI 가 원하는 격자 — 서버 격자와 다르면 접속 직후 resize
 /// 제어로 맞춘다(own=1 이라 force 없이 통과). **이 앱이 그 세션의 주인일 때만**
-/// 쓴다(스폰·이사·승격). 남의 화면을 들여다보는 거울은 `connect_view` 로.
+/// 쓴다(스폰·이사). 남의 화면을 들여다보는 거울은 `connect_view` 로.
 fn is_gui_pane(pane: Option<&str>) -> bool {
     pane.is_some_and(|pane| {
         pane.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
