@@ -189,8 +189,18 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
+    # 인라인 음성·영상 카드(media_player/windows.rs): Media Foundation 재생 엔진이 D3D11 로
+    # 하드웨어 디코드하고, 프레임을 그 장치의 텍스처로 받아 읽는다. 검사는 Source Reader.
+    # 재생기 실기 검사(examples/media_player_check.rs)는 메인 스레드 메시지도 돌린다.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
 ] }
-# `#[implement]`(토스트 활성화기)가 펼친 코드가 찾는 이름.
+# `#[implement]`(토스트 활성화기·Media Foundation 알림·바이트 스트림)가 펼친 코드가 찾는 이름.
 windows-core.workspace = true
 # bg SendMessage 브리지(bridge.rs)가 `claude attach` 를 ConPTY 로 몰고 간다 —
 # unix 는 그 자리에 `/usr/bin/expect` 를 쓰는데 Windows 엔 없다. kasa-pty 가 쓰는

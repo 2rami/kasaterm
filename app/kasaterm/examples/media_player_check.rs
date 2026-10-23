@@ -1,4 +1,4 @@
-//! 네이티브 재생기 실기 검사. 메인 스레드에서 실제 AVPlayer 를 돌려 프레임 진행·위치 찾기·
+//! 네이티브 재생기 실기 검사. 메인 스레드에서 실제 AVPlayer(Windows 는 Media Foundation 재생 엔진)를 돌려 프레임 진행·위치 찾기·
 //! 끝/다시 재생·오디오 시계·회전·해제를 확인한다. 앱을 띄우지 않는다. `stream:` 검사는 느린
 //! 루프백 HTTP Range 원본으로 `open_url` 을 열어, 파일을 다 받기 전에 그림·소리가 나오고 끝쪽
 //! 탐색이 그 구간을 따로 요청하는지 잰다.
@@ -24,16 +24,21 @@
 //!                      moov 가 끝(기본 muxer)
 //!   stream_tail.m4a    같은 소리 30s, 22050Hz 모노 AAC 24k, moov 가 끝
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[path = "../src/media_player.rs"]
 #[allow(dead_code)]
 mod media_player;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 type Check = fn() -> Result<(), String>;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn main() {
+    // 앱 메인 스레드는 winit 이 STA 로 연다. 같은 조건에서 재생기를 연다.
+    #[cfg(windows)]
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED)
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("probe") {
         for file in &args[1..] {
@@ -54,74 +59,74 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("seek-latency") {
         for file in &args[1..] {
-            if let Err(e) = mac::seek_latency(std::path::Path::new(file)) {
+            if let Err(e) = native::seek_latency(std::path::Path::new(file)) {
                 println!("{file}: error {e}");
             }
         }
         return;
     }
     if args.first().map(String::as_str) == Some("stream-buffer") {
-        if let Err(e) = mac::stream_buffer(&args[1..]) {
+        if let Err(e) = native::stream_buffer(&args[1..]) {
             println!("error {e}");
         }
         return;
     }
     if args.first().map(String::as_str) == Some("stream-trace") {
-        if let Err(e) = mac::stream_trace(&args[1..]) {
+        if let Err(e) = native::stream_trace(&args[1..]) {
             println!("error {e}");
         }
         return;
     }
     let checks: &[(&str, Check)] = &[
-        ("probe", mac::probe_files),
+        ("probe", native::probe_files),
         (
             "paused open shows first frame",
-            mac::opens_paused_with_frame,
+            native::opens_paused_with_frame,
         ),
         (
             "play advances frames on the audio clock",
-            mac::play_advances,
+            native::play_advances,
         ),
         (
             "pause holds, seek lands on the right frame",
-            mac::pause_and_seek,
+            native::pause_and_seek,
         ),
         (
             "paused seek stays seeking until the new frame",
-            mac::paused_seek_until_frame,
+            native::paused_seek_until_frame,
         ),
-        ("audio seek settles without frames", mac::audio_seek_settles),
-        ("end then replay from start", mac::end_and_replay),
-        ("audio-only clock", mac::audio_only_clock),
-        ("orientation matches AVFoundation poster", mac::orientation),
-        ("drop stops and releases", mac::drop_releases),
-        ("open errors", mac::open_errors),
+        ("audio seek settles without frames", native::audio_seek_settles),
+        ("end then replay from start", native::end_and_replay),
+        ("audio-only clock", native::audio_only_clock),
+        ("orientation matches AVFoundation poster", native::orientation),
+        ("drop stops and releases", native::drop_releases),
+        ("open errors", native::open_errors),
         (
             "stream: paused first frame before the whole file",
-            mac::stream_first_frame,
+            native::stream_first_frame,
         ),
         (
             "stream: play starts before the whole file",
-            mac::stream_plays_early,
+            native::stream_plays_early,
         ),
         (
             "stream: paused seek near the end asks for that range",
-            mac::stream_seek_tail,
+            native::stream_seek_tail,
         ),
-        ("stream: seek before ready", mac::stream_seek_before_ready),
+        ("stream: seek before ready", native::stream_seek_before_ready),
         (
             "stream: playback resumes after the source stalls",
-            mac::stream_stall_resumes,
+            native::stream_stall_resumes,
         ),
         (
             "stream: audio plays before the whole file",
-            mac::stream_audio_early,
+            native::stream_audio_early,
         ),
         (
             "stream: drop stops pulling bytes",
-            mac::stream_drop_stops_pulling,
+            native::stream_drop_stops_pulling,
         ),
-        ("stream: bad URLs and HTTP errors", mac::stream_errors),
+        ("stream: bad URLs and HTTP errors", native::stream_errors),
     ];
     let mut failed = 0;
     for (name, check) in checks {
@@ -140,18 +145,20 @@ fn main() {
     println!("all {} checks passed", checks.len());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    println!("media_player_check: macOS only");
+    println!("media_player_check: macOS and Windows only");
 }
 
-#[cfg(target_os = "macos")]
-mod mac {
+#[cfg(any(target_os = "macos", windows))]
+mod native {
     use super::media_player::{probe, Frame, Player};
+    #[cfg(target_os = "macos")]
     use std::ffi::c_void;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    #[cfg(target_os = "macos")]
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         static kCFRunLoopDefaultMode: *const c_void;
@@ -159,8 +166,43 @@ mod mac {
     }
 
     /// 앱에선 winit 이 메인 런루프를 돌린다. 여기선 직접 돌려야 AVPlayer 상태가 갱신된다.
+    #[cfg(target_os = "macos")]
     fn pump(seconds: f64) {
         unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 0) };
+    }
+
+    /// 앱처럼 메인 스레드 메시지를 돌리며 기다린다. 재생 엔진의 알림은 제 작업 스레드에서 온다.
+    #[cfg(windows)]
+    fn pump(seconds: f64) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        };
+        let until = Instant::now() + Duration::from_secs_f64(seconds);
+        loop {
+            unsafe {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(2)));
+        }
+    }
+
+    /// 앱에선 winit 이벤트 한 바퀴마다 autorelease 풀이 비워진다. 여기선 직접 감싼다.
+    #[cfg(target_os = "macos")]
+    fn pool<T>(f: impl FnOnce() -> T) -> T {
+        objc2::rc::autoreleasepool(|_| f())
+    }
+
+    #[cfg(windows)]
+    fn pool<T>(f: impl FnOnce() -> T) -> T {
+        f()
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -240,6 +282,27 @@ mod mac {
             hue(pixel(f, qx, f.height - 1 - qy)),
             hue(pixel(f, f.width - 1 - qx, f.height - 1 - qy)),
         ]
+    }
+
+    /// 맨 앞에 멈춰 있을 때 위치가 0 에서 벗어나도 되는 폭. Media Foundation 의 MP4 원본은 B-프레임
+    /// 지연을 당기는 편집 목록을 반영하지 않아, 그런 파일(colors_av)의 첫 프레임을 두 프레임(30fps 에서
+    /// 0.067초) 뒤로 보고한다. 탐색한 위치는 정확하다.
+    #[cfg(target_os = "macos")]
+    const START_SLACK: f64 = 0.01;
+    #[cfg(windows)]
+    const START_SLACK: f64 = 0.1;
+
+    /// 원본이 멈추는 시간. Media Foundation 은 재생 전에 앞을 더 받아 두어 4초 멈춤은 재생이 끊기지 않고
+    /// 지나간다 — 받아 둔 만큼(약 5초)보다 길게 멈춰야 끊김과 회복을 볼 수 있다.
+    #[cfg(target_os = "macos")]
+    const STALL: Duration = Duration::from_secs(4);
+    #[cfg(windows)]
+    const STALL: Duration = Duration::from_secs(8);
+
+    /// 끝에 있는 moov 를 처음부터가 아닌 따로 묻는 구간으로 받았는지. AVFoundation 은 moov 자리부터,
+    /// Media Foundation 은 그 앞 16KiB 경계부터 묻는다.
+    fn asked_tail(requests: &[range::Request], moov: u64) -> bool {
+        requests.iter().any(|r| r.start > 0 && r.end >= moov)
     }
 
     fn ensure(cond: bool, msg: impl FnOnce() -> String) -> Result<(), String> {
@@ -332,7 +395,7 @@ mod mac {
         })?;
         pump(0.5);
         let s = p.state();
-        ensure(!s.playing && s.position < 0.01, || {
+        ensure(!s.playing && s.position < START_SLACK, || {
             format!("advanced while paused: {s:?}")
         })
     }
@@ -402,7 +465,7 @@ mod mac {
         ensure(f2.serial > f.serial, || "serial did not grow".into())?;
         p.seek(-4.0);
         pump(0.2);
-        ensure(p.state().position.abs() < 0.05, || {
+        ensure(p.state().position.abs() < 0.05_f64.max(START_SLACK), || {
             "negative seek not clamped".into()
         })?;
         p.seek(99.0);
@@ -599,8 +662,7 @@ mod mac {
     }
 
     pub fn drop_releases() -> Result<(), String> {
-        // 앱에선 winit 이벤트 한 바퀴마다 autorelease 풀이 비워진다. 여기선 직접 감싼다.
-        let watch = objc2::rc::autoreleasepool(|_| -> Result<_, String> {
+        let watch = pool(|| -> Result<_, String> {
             let mut p = open("colors_av.mp4")?;
             wait_ready(&p)?;
             p.play();
@@ -648,6 +710,68 @@ mod mac {
             p.state()
         );
         Ok(())
+    }
+
+    /// 원본 속도와 스트림 픽스처 비트레이트의 배수. Media Foundation 은 256KiB 창 단위로 다 채워 읽어,
+    /// 278KB 픽스처는 첫 장면 전에 통째로 받는다 — 스트리밍 성질은 창보다 훨씬 긴 원본에서만 보인다.
+    /// Windows 는 같은 색 시간표·길이에 비트레이트를 8배로 한 원본(`stream_bytes`)을 8배 회선으로 보낸다.
+    #[cfg(target_os = "macos")]
+    const RATE_SCALE: usize = 1;
+    #[cfg(windows)]
+    const RATE_SCALE: usize = 8;
+
+    #[cfg(target_os = "macos")]
+    fn stream_bytes(name: &str) -> Result<Vec<u8>, String> {
+        fixture_bytes(name)
+    }
+
+    /// `stream_tail.*` 과 같은 설정에 비트레이트만 높인 것. 저장소에 MB 단위 바이너리를 두지 않으려고
+    /// 처음 쓸 때 ffmpeg 로 만들어 임시 폴더에 둔다.
+    #[cfg(windows)]
+    fn stream_bytes(name: &str) -> Result<Vec<u8>, String> {
+        let (file, args): (&str, &[&str]) = match name {
+            "stream_tail.mp4" => (
+                "stream_long-v1.mp4",
+                &[
+                    "-f", "lavfi", "-i", "color=c=0xff0000:s=320x180:r=24:d=4",
+                    "-f", "lavfi", "-i", "color=c=0x00ff00:s=320x180:r=24:d=4",
+                    "-f", "lavfi", "-i", "color=c=0x0000ff:s=320x180:r=24:d=4",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=12:sample_rate=44100",
+                    "-filter_complex", "[0][1][2]concat=n=3:v=1:a=0,noise=alls=24:allf=t[v];[3]volume=0.03[a]",
+                    "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-b:v", "1200k", "-maxrate", "1200k",
+                    "-bufsize", "600k", "-x264-params", "keyint=48:scenecut=0", "-bf", "0", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "128k",
+                ],
+            ),
+            "stream_tail.m4a" => (
+                "stream_long-v1.m4a",
+                &[
+                    "-f", "lavfi", "-i", "anoisesrc=d=30:c=pink:r=48000:a=0.02",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=30:sample_rate=48000",
+                    "-filter_complex", "[0][1]amix=inputs=2,volume=0.5[a]", "-map", "[a]", "-ac", "2",
+                    "-c:a", "aac", "-b:a", "256k",
+                ],
+            ),
+            other => return fixture_bytes(other),
+        };
+        let path = std::env::temp_dir().join("kasa-media-check").join(file);
+        if !path.exists() {
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            let part = path.with_extension("part");
+            let ok = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-y"])
+                .args(args)
+                .args(["-f", if name.ends_with(".m4a") { "ipod" } else { "mp4" }])
+                .arg(&part)
+                .status()
+                .map_err(|e| format!("needs ffmpeg on PATH to build the long stream fixture: {e}"))?
+                .success();
+            if !ok {
+                return Err("ffmpeg could not build the long stream fixture".into());
+            }
+            std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
+        }
+        std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     fn fixture_bytes(name: &str) -> Result<Vec<u8>, String> {
@@ -700,12 +824,12 @@ mod mac {
     }
 
     pub fn stream_first_frame() -> Result<(), String> {
-        let bytes = fixture_bytes("stream_tail.mp4")?;
+        let bytes = stream_bytes("stream_tail.mp4")?;
         let (moov, _) = top_box(&bytes, b"moov").ok_or("no moov")?;
         ensure(moov > bytes.len() as u64 / 2, || {
             "fixture moov is not at the end".into()
         })?;
-        let server = range::Server::start(bytes, "video/mp4", 64 * 1024, 200);
+        let server = range::Server::start(bytes, "video/mp4", 64 * 1024 * RATE_SCALE, 200);
         let started = Instant::now();
         let mut p = stream_open(&server)?;
         ensure(p.state().buffering && p.state().seeking, || {
@@ -727,7 +851,7 @@ mod mac {
         ensure(sent * 10 < server.size * 6, || {
             format!("{sent}/{} B before the first frame", server.size)
         })?;
-        ensure(server.requests().iter().any(|r| r.start >= moov), || {
+        ensure(asked_tail(&server.requests(), moov), || {
             format!("tail moov never asked by range: {}", server.summary())
         })?;
         let s = p.state();
@@ -739,9 +863,9 @@ mod mac {
 
     pub fn stream_plays_early() -> Result<(), String> {
         let server = range::Server::start(
-            fixture_bytes("stream_tail.mp4")?,
+            stream_bytes("stream_tail.mp4")?,
             "video/mp4",
-            64 * 1024,
+            64 * 1024 * RATE_SCALE,
             200,
         );
         let started = Instant::now();
@@ -765,10 +889,10 @@ mod mac {
     }
 
     pub fn stream_seek_tail() -> Result<(), String> {
-        let bytes = fixture_bytes("stream_tail.mp4")?;
+        let bytes = stream_bytes("stream_tail.mp4")?;
         let (moov, _) = top_box(&bytes, b"moov").ok_or("no moov")?;
         let (mdat, mdat_len) = top_box(&bytes, b"mdat").ok_or("no mdat")?;
-        let server = range::Server::start(bytes, "video/mp4", 64 * 1024, 200);
+        let server = range::Server::start(bytes, "video/mp4", 64 * 1024 * RATE_SCALE, 200);
         let mut p = stream_open(&server)?;
         drive_until(&mut p, 10.0, |_, f| f.is_some())?;
         let before = server.requests().len();
@@ -804,9 +928,9 @@ mod mac {
 
     pub fn stream_seek_before_ready() -> Result<(), String> {
         let server = range::Server::start(
-            fixture_bytes("stream_tail.mp4")?,
+            stream_bytes("stream_tail.mp4")?,
             "video/mp4",
-            64 * 1024,
+            64 * 1024 * RATE_SCALE,
             200,
         );
         let mut p = stream_open(&server)?;
@@ -823,12 +947,12 @@ mod mac {
 
     pub fn stream_stall_resumes() -> Result<(), String> {
         let mut server = range::Server::start(
-            fixture_bytes("stream_tail.mp4")?,
+            stream_bytes("stream_tail.mp4")?,
             "video/mp4",
-            64 * 1024,
+            64 * 1024 * RATE_SCALE,
             200,
         );
-        server.stall_after(120 * 1024, Duration::from_secs(4));
+        server.stall_after(120 * 1024 * RATE_SCALE as u64, STALL);
         let mut p = stream_open(&server)?;
         p.play();
         let mut stalled = None;
@@ -856,12 +980,12 @@ mod mac {
     }
 
     pub fn stream_audio_early() -> Result<(), String> {
-        let bytes = fixture_bytes("stream_tail.m4a")?;
+        let bytes = stream_bytes("stream_tail.m4a")?;
         let (moov, _) = top_box(&bytes, b"moov").ok_or("no moov")?;
         ensure(moov > bytes.len() as u64 / 2, || {
             "fixture moov is not at the end".into()
         })?;
-        let server = range::Server::start(bytes, "audio/mp4", 16 * 1024, 200);
+        let server = range::Server::start(bytes, "audio/mp4", 16 * 1024 * RATE_SCALE, 200);
         let started = Instant::now();
         let mut p = stream_open(&server)?;
         p.play();
@@ -874,7 +998,7 @@ mod mac {
             server.size
         );
         ensure(sent < server.size, || "whole file arrived before audio".into())?;
-        ensure(server.requests().iter().any(|r| r.start >= moov), || {
+        ensure(asked_tail(&server.requests(), moov), || {
             format!("tail moov never asked by range: {}", server.summary())
         })?;
         ensure(p.take_frame().is_none(), || "audio produced a frame".into())
@@ -882,12 +1006,12 @@ mod mac {
 
     pub fn stream_drop_stops_pulling() -> Result<(), String> {
         let server = range::Server::start(
-            fixture_bytes("stream_tail.mp4")?,
+            stream_bytes("stream_tail.mp4")?,
             "video/mp4",
-            24 * 1024,
+            24 * 1024 * RATE_SCALE,
             200,
         );
-        let watch = objc2::rc::autoreleasepool(|_| -> Result<_, String> {
+        let watch = pool(|| -> Result<_, String> {
             let mut p = stream_open(&server)?;
             p.play();
             drive_until(&mut p, 10.0, |_, f| f.is_some())?;
@@ -987,7 +1111,7 @@ mod mac {
         for bad in ["https://example.com/a.mp4", "http://localhost:80/a", "file:///tmp/a.mp4"] {
             ensure(Player::open_url(bad).is_err(), || format!("{bad} opened"))?;
         }
-        let server = range::Server::start(fixture_bytes("stream_tail.mp4")?, "video/mp4", 64 * 1024, 404);
+        let server = range::Server::start(stream_bytes("stream_tail.mp4")?, "video/mp4", 64 * 1024 * RATE_SCALE, 404);
         let p = stream_open(&server)?;
         let error = wait(10.0, || p.state().error).ok_or("404 never reported an error")?;
         ensure(!p.state().buffering && !p.state().seeking, || {
@@ -1012,11 +1136,15 @@ mod mac {
         let _ = std::fs::remove_file(&text);
         let message = result?;
         ensure(!message.is_empty(), || "empty error".into())?;
-        std::thread::spawn(|| Player::open(&fixture("colors_av.mp4")).err())
+        // AVPlayer 는 메인 스레드 전용이다. Media Foundation 재생 엔진은 스레드를 가리지 않는다.
+        #[cfg(target_os = "macos")]
+        return std::thread::spawn(|| Player::open(&fixture("colors_av.mp4")).err())
             .join()
             .map_err(|_| "open panicked off main".to_string())?
             .map(|_| ())
-            .ok_or_else(|| "opened off the main thread".to_string())
+            .ok_or_else(|| "opened off the main thread".to_string());
+        #[cfg(windows)]
+        Ok(())
     }
 
     /// AVFoundation 이 읽을 느린 HTTP Range 원본. 연결이 여럿이어도 한 줄 회선처럼 대역을 나눈다.

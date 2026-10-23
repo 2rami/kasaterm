@@ -4,8 +4,12 @@
 //! 시계를 따르고, 프레임은 그 시계의 지금 시각에 맞는 것만 내준다. 우리는 프레임을 RGBA 로
 //! 옮기고 트랙의 표시 회전만 적용한다. GPU 갱신·카드 UI 는 부르는 쪽이 맡는다.
 //!
+//! Windows 는 Media Foundation 재생 엔진(IMFMediaEngine, 프레임 서버 모드)에 맡긴다 — 소리·시계·탐색은
+//! 엔진이, 프레임은 엔진이 D3D11 텍스처로 옮겨 준 것(표시 회전 적용됨)을 읽는다. 원격 원본은 엔진 내장
+//! HTTP 대신 직접 짠 바이트 스트림(`media_player/windows_stream.rs`)으로 루프백 창구를 읽는다.
+//!
 //! `Player` 는 메인 스레드에서만 만들고 쓴다(AVPlayer 가 메인 스레드 전용이라 타입이 `!Send`).
-//! 원격 원본은 `open_url` 로 루프백 Range 서버(`kasa_mcp::media_stream`)를 읽는다 — AVFoundation 이
+//! 원격 원본은 `open_url` 로 루프백 Range 서버(`kasa_mcp::media_stream`)를 읽는다 — 재생기가
 //! 필요한 구간만 요청하므로 파일 전체를 받기 전에 재생·탐색이 된다.
 //! `probe` 는 파일을 읽느라 막힐 수 있으니 GUI 스레드가 아닌 곳에서 부른다.
 
@@ -15,12 +19,16 @@ use std::path::Path;
 #[path = "media_player/macos.rs"]
 mod imp;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+#[path = "media_player/windows.rs"]
+mod imp;
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod imp {
     use super::{Frame, Playback, Probe};
     use std::path::Path;
 
-    const UNSUPPORTED: &str = "native media playback is only available on macOS";
+    const UNSUPPORTED: &str = "native media playback is only available on macOS and Windows";
 
     pub struct Player;
 
@@ -142,8 +150,8 @@ impl Player {
         self.inner.take_frame()
     }
 
-    /// 떨어뜨린 뒤 AVPlayer 가 실제로 해제됐는지 확인하는 검증용 손잡이.
-    #[cfg(target_os = "macos")]
+    /// 떨어뜨린 뒤 AVPlayer(Windows 는 재생 엔진)가 실제로 해제됐는지 확인하는 검증용 손잡이.
+    #[cfg(any(target_os = "macos", windows))]
     #[doc(hidden)]
     pub fn drop_watch(&self) -> imp::DropWatch {
         self.inner.drop_watch()
