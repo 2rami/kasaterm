@@ -1114,7 +1114,6 @@ impl Backend for PtyBackend {
         }
     }
 
-    #[cfg(unix)]
     fn update_start(&self, machine: Option<&str>, req: &kasa_socket::app_update::UpdateRequest) -> Result<serde_json::Value> {
         match restart_remote(machine)? {
             Some(base) => kasa_mcp::remote::remote_post_json(&base, "/app/update/jobs", &serde_json::to_value(req)?),

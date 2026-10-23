@@ -920,7 +920,9 @@ class DevicePlanTests(Fixture):
         self.assertIn("팀 ABCDE12345", mac[1])
         self.assertIn(".kasaterm.app.previous", mac[3])
         self.assertIn("강제 종료 없음", mac[4])
-        self.assertIn("WinSparkle", rows["윈도"]["steps"][3])
+        self.assertIn("msiexec /passive", rows["윈도"]["steps"][3])
+        self.assertIn("UAC", rows["윈도"]["steps"][3])
+        self.assertIn("appcast-win.xml", rows["윈도"]["steps"][0])
         self.assertIn("releases/download/v0.2.1/kasaterm-v0.2.1.dmg", rows["미니"]["fallback"])
 
     def test_once_the_endpoint_exists_waits_defer_and_signing_blocks(self):
@@ -960,7 +962,17 @@ class DevicePlanTests(Fixture):
         scope = fp.devices.update_scope(job, plan["controller"])
         self.assertEqual((scope["action"], scope["targets"], scope["asset"]["sha256"]),
                          ("kasaterm_update", [{"order": 1, "machine_id": "mac-1", "hash": "tmac-1"}], "sha256:" + "a" * 64))
-        self.assertIn("mac 만", fp.devices.update_job(plan, state, self.facts("win-1", "windows"), 1000)[1])
+        self.assertIn("windows 산출물", fp.devices.update_job(plan, state, self.facts("win-1", "windows"), 1000)[1],
+                      "Windows 기기는 그 OS 의 msi 가 확인돼야 작업을 짓는다")
+        self.assertIn("macOS·Windows", fp.devices.update_job(plan, state, self.facts("linux-1", "linux"), 1000)[1])
+        msi = {"name": "kasaterm-v0.2.1-windows-x86_64.msi", "size": 20, "sha256": "sha256:" + "b" * 64}
+        both = {"stages": {"release": {"status": "done", "detail": {"assets": {**release["detail"]["assets"], "windows": msi}}},
+                           "feed": {"status": "done", "detail": {"signatures": {"macos": "c2ln", "windows": "d2lu"}}}}}
+        win, why = fp.devices.update_job(plan, both, self.facts("win-1", "windows", capability=1, enabled=True), 1000)
+        self.assertIsNone(why)
+        self.assertEqual(win["asset"], {"name": msi["name"], "url": "https://github.com/2rami/kasaterm/releases/download/v0.2.1/" + msi["name"],
+                                        "size": 20, "sha256": msi["sha256"], "ed_signature": "d2lu"})
+        self.assertEqual((win["team"], win["require_notarized"]), ("", False), "기기 check_job 이 받는 Windows 꼴 — 서명 칸을 비운다")
         # 기기(kasa_socket::app_update `the_job_id_matches_the_controller_side`)와 같은 값.
         self.assertEqual(fp.devices.update_job_id("abcdef0123456789", "mac-1", "sha256:" + "0" * 64), "upd4e7a732ffa7a1c8")
 
@@ -1004,6 +1016,24 @@ class DevicePlanTests(Fixture):
         # 러스트 `the_target_hash_matches_the_controller_side` 와 같은 값.
         self.assertEqual(fp.devices.target_hash({"machine_id": "mac-a", "app_path": "/Users/x/Applications/kasaterm.app", "pid": 11,
                                                  "binary": {"inode": 1, "mtime_ms": 2, "build": "8933a0ca"}, "capability": 1}), "d206bd151df55dd2")
+
+    def test_windows_devices_get_their_own_rollout_with_the_msi(self):
+        plan, state, targets, rows = self.rollout_case()
+        msi = {"name": "kasaterm-v0.2.1-windows-x86_64.msi", "size": 20, "sha256": "sha256:" + "b" * 64}
+        state["stages"]["release"]["detail"]["assets"]["windows"] = msi
+        state["stages"]["feed"]["detail"]["signatures"]["windows"] = "d2lu"
+        targets["win-1"] = self.facts("win-1", "windows", capability=1, enabled=True)
+        rows = fp.devices.plan_devices(plan, state, targets)
+        self.assertEqual(next(r for r in rows if r["machine_id"] == "win-1")["status"], "ready")
+        rollout, why = fp.devices.update_rollout(plan, state, targets, rows, 1790000000000, osname="windows")
+        self.assertIsNone(why)
+        self.assertEqual([j["machine_id"] for j in rollout["jobs"]], ["win-1"])
+        self.assertEqual(rollout["approval_scope"]["asset"], {"name": msi["name"], "sha256": msi["sha256"], "size": 20})
+        self.assertEqual({e["machine_id"]: e["code"] for e in rollout["excluded"]},
+                         {"mac-1": "not_windows", "mac-2": "not_windows", "mac-3": "not_windows"})
+        mac, _ = fp.devices.update_rollout(plan, state, targets, rows, 1790000000000)
+        self.assertEqual([j["machine_id"] for j in mac["jobs"]], ["mac-2", "mac-1"], "mac rollout 은 그대로 — 한 rollout 은 파일 하나")
+        self.assertNotEqual(mac["id"], rollout["id"])
 
     def test_device_apply_hands_the_rollout_to_the_runner_only_from_the_nacho_tool(self):
         plan, state, targets, rows = self.rollout_case()

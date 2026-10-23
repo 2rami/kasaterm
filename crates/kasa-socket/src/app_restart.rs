@@ -771,7 +771,7 @@ pub fn helper_env(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String, String)>
     env
 }
 
-fn ps_quote(s: &str) -> String {
+pub(crate) fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
@@ -827,26 +827,32 @@ pub fn helper_env_windows(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String, 
     env
 }
 
-/// 도우미를 띄운다 — 스크립트는 작업 옆 `.helper.ps1`(UTF-8 BOM: Windows PowerShell 5 는 BOM 없는 파일을 ANSI 로 읽어
-/// 한글 경로가 깨진다), 창 없이, 새 프로세스 그룹, 출력은 작업 옆 로그. 앱이 job object 안에서 돌아도 앱과 함께 꺼지지
-/// 않게 job 에서 빠져나오고, job 이 그걸 막으면 빠져나오기 없이 띄운다.
 #[cfg(windows)]
 pub fn spawn_helper(spec: &HelperSpec) -> Result<u32> {
+    spawn_powershell(&spec.dir, &spec.job_id, &helper_powershell(spec)?)
+}
+
+/// 앱 밖 도우미(재시작·업데이트)를 띄운다 — 스크립트는 작업 옆 `.helper.ps1`(UTF-8 BOM: Windows PowerShell 5 는 BOM 없는
+/// 파일을 ANSI 로 읽어 한글 경로가 깨진다), 창 없이, 새 프로세스 그룹, 출력은 작업 옆 로그. 앱이 job object 안에서 돌아도
+/// 앱과 함께 꺼지지 않게 job 에서 빠져나오고, job 이 그걸 막으면 빠져나오기 없이 띄운다.
+#[cfg(windows)]
+pub fn spawn_powershell(dir: &Path, job_id: &str, script: &str) -> Result<u32> {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    std::fs::create_dir_all(&spec.dir)?;
-    let script = spec.dir.join(format!("{}.helper.ps1", spec.job_id));
-    std::fs::write(&script, [b"\xEF\xBB\xBF".as_slice(), helper_powershell(spec)?.as_bytes()].concat())?;
+    ensure!(valid_job_id(job_id), "invalid job id");
+    std::fs::create_dir_all(dir)?;
+    let file = dir.join(format!("{job_id}.helper.ps1"));
+    std::fs::write(&file, [b"\xEF\xBB\xBF".as_slice(), script.as_bytes()].concat())?;
     let env = helper_env_windows(&|k| std::env::var(k).ok());
     let root = env[0].1.clone();
     let spawn = |flags: u32| -> std::io::Result<std::process::Child> {
-        let log = std::fs::File::create(spec.dir.join(format!("{}.helper.log", spec.job_id)))?;
+        let log = std::fs::File::create(dir.join(format!("{job_id}.helper.log")))?;
         let err = log.try_clone()?;
         std::process::Command::new(format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"))
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(&script)
+            .arg(&file)
             .env_clear()
             .envs(env.iter().cloned())
             .stdin(std::process::Stdio::null())

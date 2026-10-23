@@ -707,15 +707,19 @@ def main(argv=None):
         rows = devices.plan_devices(plan, state, targets, problem)
         now = int(time.time() * 1000)
         rollout, why_none = devices.update_rollout(plan, state, targets, rows, now)
-        if rollout:
-            save_rollout(a.plan_id, rollout, a.state_dir)
+        # 판 파일이 OS 마다 달라 Windows 기기는 따로 짓는다 — 나쵸가 읽는 `rollout`(mac)은 그대로 둔다.
+        windows, why_windows = devices.update_rollout(plan, state, targets, rows, now, osname="windows")
+        for built in (rollout, windows):
+            if built:
+                save_rollout(a.plan_id, built, a.state_dir)
         if a.json:
             out = []
             for r in rows:
                 job, why = devices.update_job(plan, state, targets.get(r["machine_id"]), now)
                 out.append({**r, "job": job, "job_problem": why})
             print(json.dumps({"plan_id": plan["plan_id"], "dry_run": True, "devices": out, "rollout": rollout,
-                              "rollout_problem": why_none}, ensure_ascii=False, indent=2))
+                              "rollout_problem": why_none, "windows_rollout": windows, "windows_rollout_problem": why_windows},
+                             ensure_ascii=False, indent=2))
             return 0
         print(f"기기 받기·설치 예약 계획(dry-run) · {plan['tag']} · 기기 {len(rows)}대" + (f" · {problem}" if problem else ""))
         for r in rows:
@@ -725,11 +729,12 @@ def main(argv=None):
             for i, step in enumerate(r["steps"], 1):
                 print(f"      {i}. {step}")
             print(f"      지금 받는 길: {r['fallback']}")
-        if rollout:
-            names = ", ".join(j["machine_id"][:8] for j in rollout["jobs"])
-            print(f"  rollout {rollout['id']} — 차례: {names} · 승인 범위 {rollout['approval_scope_hash'][:19]}")
-        else:
-            print(f"  rollout 없음 — {why_none}")
+        for label, built, why in (("rollout", rollout, why_none), ("Windows rollout", windows, why_windows)):
+            if built:
+                names = ", ".join(j["machine_id"][:8] for j in built["jobs"])
+                print(f"  {label} {built['id']} — 차례: {names} · 승인 범위 {built['approval_scope_hash'][:19]}")
+            else:
+                print(f"  {label} 없음 — {why}")
         return 0
     if a.cmd == "device-apply":
         return device_apply(a.plan_id, plan, state, a.rollout, a.approval, a.live, a.state_dir)

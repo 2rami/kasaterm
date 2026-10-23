@@ -31,7 +31,11 @@ pub const ACTION: &str = "kasaterm_update";
 pub const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_FEED_BYTES: u64 = 256 * 1024;
 pub const MAC_FEED: &str = "https://2rami.github.io/kasaterm/appcast.xml";
+pub const WIN_FEED: &str = "https://2rami.github.io/kasaterm/appcast-win.xml";
 pub const RELEASE_PREFIX: &str = "https://github.com/2rami/kasaterm/releases/download/";
+/// MSI 설치를 기다리는 상한 — 기기 전체 설치라 그 PC 에서 사람이 관리자 확인(UAC)을 눌러야 끝난다. 넘기면 msiexec 를
+/// 그대로 두고 실패로 적는다(강제 종료 없음).
+pub const INSTALL_TIMEOUT_S: u32 = 10 * 60;
 /// Sparkle·WinSparkle 과 같은 EdDSA 공개키(scripts/build-app.sh `SUPublicEDKey`). 새 키가 아니다.
 pub const ED_PUBLIC_KEY: &str = "E4tFAb2UND+0QhgTSv2pFYKIC3ReT/dLia20KHfZxKw=";
 const JOB_TTL_MS: u64 = 60 * 60_000;
@@ -86,6 +90,31 @@ pub fn asset_name(tag: &str) -> String {
     format!("kasaterm-{tag}.dmg")
 }
 
+pub fn msi_name(tag: &str) -> String {
+    format!("kasaterm-{tag}-windows-x86_64.msi")
+}
+
+/// 작업이 어느 OS 의 판인가 — 받을 파일 이름으로만 정해진다. 기기는 자기 OS 의 작업만 받으므로(`authorize`) 요청이 OS 를
+/// 바꿔 대서 그 OS 의 검사를 피할 수 없다.
+pub fn job_os(job: &UpdateJob) -> Option<&'static str> {
+    if job.asset.name == asset_name(&job.tag) {
+        Some("macos")
+    } else if job.asset.name == msi_name(&job.tag) {
+        Some("windows")
+    } else {
+        None
+    }
+}
+
+/// 시스템 msiexec — PATH 로 고르지 않는다.
+pub fn msiexec_path() -> String {
+    format!(r"{}\System32\msiexec.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+}
+
+fn official_feed(os: &str) -> &'static str {
+    if os == "windows" { WIN_FEED } else { MAC_FEED }
+}
+
 pub fn asset_url(tag: &str, name: &str) -> String {
     format!("{RELEASE_PREFIX}{tag}/{name}")
 }
@@ -105,7 +134,7 @@ pub fn version_parts(v: &str) -> Option<(u64, u64, u64)> {
     it.next().is_none().then_some(parts)
 }
 
-/// 요청이 댈 수 있는 모양 — 주소는 태그·이름에서 지은 공식 주소와 같아야 하고, 이름은 그 태그의 dmg 뿐이다.
+/// 요청이 댈 수 있는 모양 — 주소는 태그·이름에서 지은 공식 주소와 같아야 하고, 이름은 그 태그의 dmg 나 msi 뿐이다.
 pub fn check_job(job: &UpdateJob) -> std::result::Result<(), String> {
     if job.schema != SCHEMA {
         return Err("작업 모양(schema)이 다르다".into());
@@ -120,8 +149,9 @@ pub fn check_job(job: &UpdateJob) -> std::result::Result<(), String> {
         return Err("계획·기기 정체가 비었다".into());
     }
     let a = &job.asset;
-    if a.name != asset_name(&job.tag) || a.url != asset_url(&job.tag, &a.name) {
-        return Err("공식 릴리스 주소가 아니다 — 받는 곳은 태그의 dmg 하나뿐이다".into());
+    let os = job_os(job);
+    if os.is_none() || a.url != asset_url(&job.tag, &a.name) {
+        return Err("공식 릴리스 주소가 아니다 — 받는 곳은 태그의 dmg·msi 하나뿐이다".into());
     }
     if a.size == 0 || a.size > MAX_ASSET_BYTES {
         return Err(format!("파일 크기가 상한 밖이다({} 바이트, 상한 {MAX_ASSET_BYTES})", a.size));
@@ -132,11 +162,19 @@ pub fn check_job(job: &UpdateJob) -> std::result::Result<(), String> {
     if base64::engine::general_purpose::STANDARD.decode(&a.ed_signature).map(|s| s.len()) != Ok(64) {
         return Err("EdDSA 서명 모양이 아니다".into());
     }
-    if job.team.len() != 10 || !job.team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
-        return Err("요구 서명 팀이 Apple 팀 id 모양이 아니다".into());
-    }
-    if !job.require_notarized {
-        return Err("공증 요구를 끌 수 없다".into());
+    if os == Some("windows") {
+        // MSI 는 코드 서명이 없다 — 받은 파일은 sha256(릴리스 단계가 잰 값)과 EdDSA 로만 믿는다. 뜻 없는 칸을 비워 두게 해
+        // 맥 칸의 값이 Windows 작업에 섞여 검사를 받은 것처럼 보이지 않게 한다.
+        if !job.team.is_empty() || job.require_notarized {
+            return Err("Windows 작업은 서명 팀·공증 칸을 비운다".into());
+        }
+    } else {
+        if job.team.len() != 10 || !job.team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+            return Err("요구 서명 팀이 Apple 팀 id 모양이 아니다".into());
+        }
+        if !job.require_notarized {
+            return Err("공증 요구를 끌 수 없다".into());
+        }
     }
     if job.job_id != job_id(&job.plan_hash, &job.machine_id, &a.sha256) {
         return Err("작업 id 가 계획·기기·파일과 맞지 않는다".into());
@@ -192,11 +230,14 @@ pub fn authorize(
     if !enabled {
         return Err("update_disabled — 이 기기의 설치 창구가 꺼져 있다(KASATERM_APP_UPDATE)".into());
     }
-    if facts.os != "macos" {
-        return Err(format!("unsupported_os — {} 는 이 창구가 아니라 자기 업데이터(WinSparkle)로 받는다", facts.os));
+    if facts.os != "macos" && facts.os != "windows" {
+        return Err(format!("unsupported_os — {} 는 이 창구로 받지 않는다", facts.os));
     }
     let job = &req.job;
     check_job(job)?;
+    if job_os(job) != Some(facts.os.as_str()) {
+        return Err(format!("unsupported_os — 이 기기({})의 판 파일이 아니다({})", facts.os, job.asset.name));
+    }
     if let Some(refusal) = blocking(facts, &job.job_id, now_ms, false).first() {
         return Err(refusal.message());
     }
@@ -592,6 +633,15 @@ pub fn work_dir(cache: &Path, job: &UpdateJob) -> PathBuf {
     cache.join(job.asset.sha256.trim_start_matches("sha256:").get(..16).unwrap_or("unknown"))
 }
 
+/// 준비한 판의 자리 — 맥은 설치본 곁의 번들, Windows 는 확인을 마친 받은 MSI 그 자체(설치는 msiexec 가 한다).
+pub fn staged_for(job: &UpdateJob, cache: &Path, installed: &Path) -> PathBuf {
+    if job_os(job) == Some("windows") {
+        work_dir(cache, job).join(&job.asset.name)
+    } else {
+        staged_path(installed)
+    }
+}
+
 /// 요구 팀은 요청이 아니라 **설치본 자신의 서명**에서 온다(요청의 `team` 은 그것과 같아야 할 뿐). 공증은 늘 요구한다 — 둘 다 승인
 /// 범위에 없는 칸이라, 요청이 느슨한 값을 대서 검사를 풀 수 없게.
 fn identity_problem(ident: &Identity, team: &str, what: &str) -> Option<String> {
@@ -636,9 +686,13 @@ pub fn prepare(
         why
     };
     check_job(job).map_err(&fail)?;
+    let windows = job_os(job) == Some("windows");
     let here = status(dir, &job.job_id).map_err(|e| e.to_string())?.state;
-    if here >= State::Staged && !here.terminal() && staged_path(installed).exists() {
-        return Ok(staged_path(installed));
+    let staged = staged_for(job, cache, installed);
+    // MSI 는 쓰기 전에 다시 잰다 — 같은 사용자 공간의 파일이라 준비 뒤 바뀌었을 수 있다(도우미도 설치 직전에 다시 잰다).
+    let still_staged = if windows { sha256_file(&staged).ok().as_deref() == Some(job.asset.sha256.as_str()) } else { staged.exists() };
+    if here >= State::Staged && !here.terminal() && still_staged {
+        return Ok(staged);
     }
     if here.terminal() {
         return Err(format!("이미 끝난 작업이다({})", here.word()));
@@ -647,7 +701,8 @@ pub fn prepare(
         let _ = note(dir, &job.job_id, &format!("retry: {why}"));
         why
     };
-    let item = effects.feed(MAC_FEED, MAX_FEED_BYTES).map_err(|e| retry(format!("공식 피드를 못 읽었다 — {e}")))?;
+    let item = effects.feed(official_feed(if windows { "windows" } else { "macos" }), MAX_FEED_BYTES)
+        .map_err(|e| retry(format!("공식 피드를 못 읽었다 — {e}")))?;
     let item = parse_feed(&item).ok_or_else(|| fail("공식 피드를 읽지 못했다".into()))?;
     check_feed(job, &item).map_err(&fail)?;
 
@@ -695,13 +750,16 @@ pub fn prepare(
     if status(dir, &job.job_id).map(|s| s.state < State::Checked).unwrap_or(true) {
         let _ = advance(dir, &job.job_id, State::Checked, "sha256·EdDSA");
     }
+    if windows {
+        let _ = advance(dir, &job.job_id, State::Staged, &file.display().to_string());
+        return Ok(file);
+    }
 
     let mnt = work.join("mnt");
     let _ = std::fs::remove_dir_all(&mnt);
     std::fs::create_dir_all(&mnt).map_err(|e| fail(e.to_string()))?;
     let team = installed_team(effects, installed, job).map_err(&fail)?;
     effects.mount(&file, &mnt).map_err(|e| fail(format!("dmg 를 열지 못했다 — {e}")))?;
-    let staged = staged_path(installed);
     let result = (|| -> std::result::Result<(), String> {
         let app = mnt.join("kasaterm.app");
         let ident = effects.identity(&app)?;
@@ -730,19 +788,35 @@ pub fn prepare(
 pub struct SystemEffects;
 
 fn exec(argv: &[&str]) -> std::result::Result<std::process::Output, String> {
-    std::process::Command::new(argv[0]).args(&argv[1..]).output().map_err(|e| format!("{}: {e}", argv[0]))
+    let mut command = std::process::Command::new(argv[0]);
+    command.args(&argv[1..]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // GUI 앱에서 콘솔 창이 번쩍이지 않게.
+        command.creation_flags(0x0800_0000);
+    }
+    command.output().map_err(|e| format!("{}: {e}", argv[0]))
+}
+
+/// 시스템 curl — Windows 10 1803+ 는 System32 에 들어 있다. PATH 로 고르지 않는다.
+fn curl() -> String {
+    #[cfg(windows)]
+    return format!(r"{}\System32\curl.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()));
+    #[cfg(not(windows))]
+    "/usr/bin/curl".into()
 }
 
 impl Effects for SystemEffects {
     fn feed(&self, url: &str, max: u64) -> std::result::Result<String, String> {
-        let out = exec(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "20",
+        let out = exec(&[&curl(), "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "20",
                         "--max-filesize", &max.to_string(), url])?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
             .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 
     fn fetch(&self, url: &str, max: u64, dest: &Path) -> std::result::Result<(), FetchError> {
-        let out = exec(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
+        let out = exec(&[&curl(), "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
                         "--max-filesize", &max.to_string(), "-o", &dest.display().to_string(), url]).map_err(FetchError::Cut)?;
         match out.status.code() {
             Some(0) => Ok(()),
@@ -788,10 +862,93 @@ pub struct SwapSpec {
     pub job_id: String,
     pub old_pid: u32,
     pub installed: PathBuf,
-    /// 다시 띄우는 명령. 운영은 `app_restart::launch_command(installed)` 뿐이다.
+    /// 다시 띄우는 명령. 운영은 `app_restart::launch_command(os, installed)` 뿐이다.
     pub launch: Vec<String>,
     pub exit_timeout_s: u32,
     pub boot_timeout_s: u32,
+    /// Windows — 갈아 끼우기 대신 돌릴 확인을 마친 MSI. 맥은 `None`(설치본 곁 번들을 옮긴다).
+    pub installer: Option<Installer>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Installer {
+    /// 설치기. 운영은 `msiexec_path()` 뿐이다.
+    pub program: String,
+    pub msi: PathBuf,
+    /// 작업의 sha256(`sha256:` 뒤 소문자 hex) — 도우미가 msiexec 직전에 다시 잰다.
+    pub sha256: String,
+    pub timeout_s: u32,
+}
+
+/// Windows 설치 도우미 — 맥 도우미와 같은 단계·상태 줄·상한, 강제 종료 없음. 앱이 꺼진 뒤 MSI 해시를 다시 재고
+/// `msiexec /passive` 로 설치한다. 기기 전체 설치라 그 PC 에서 사람이 관리자 확인(UAC)을 눌러야 끝나고, 상한을 넘기면
+/// msiexec 를 그대로 두고 실패로 적는다. MSI 가 실패하면 Windows Installer 가 이전 판을 그대로 두므로 그 판을 다시 띄운다.
+/// 새 판이 부팅 표식 없이 꺼지면 맥처럼 되돌리지 못한다 — MSI 는 낮은 판으로 내려가는 설치를 막는다(사람이 이전 MSI 로).
+pub fn swap_powershell(spec: &SwapSpec) -> Result<String> {
+    use app_restart::ps_quote as q;
+    ensure!(app_restart::valid_job_id(&spec.job_id), "invalid job id");
+    ensure!(!spec.launch.is_empty(), "launch command is empty");
+    let installer = spec.installer.as_ref().context("Windows swap needs a staged installer")?;
+    ensure!(hex(&installer.sha256, 64, 64), "installer sha256 must be 64 lowercase hex");
+    let events = q(&events_path(&spec.dir, &spec.job_id).display().to_string());
+    let exe = q(&format!("{}\\bin\\kasaterm.exe", spec.installed.display().to_string().trim_end_matches('\\')));
+    let msi = installer.msi.display().to_string();
+    let log = spec.dir.join(format!("{}.msi.log", spec.job_id)).display().to_string();
+    let (msi_arg, log_arg) = (q(&format!("\"{msi}\"")), q(&format!("\"{log}\"")));
+    let args = spec.launch[1..].iter().map(|a| q(a)).collect::<Vec<_>>().join(" ");
+    let (pid, exit_ms, install_ms) = (spec.old_pid, u64::from(spec.exit_timeout_s) * 1000, u64::from(installer.timeout_s) * 1000);
+    let (boot_ticks, sha, msi, program) = (spec.boot_timeout_s * 5, &installer.sha256, q(&msi), q(&installer.program));
+    let relaunch_program = q(&spec.launch[0]);
+    Ok(format!(
+        r#"$ErrorActionPreference = 'Continue'
+function ev($state, $note) {{ [IO.File]::AppendAllText({events}, "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $state $note`n") }}
+function running($skip) {{ Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne $skip -and $_.Path -and $_.Path -ieq {exe} }} | Select-Object -First 1 -ExpandProperty Id }}
+function booted {{ Select-String -LiteralPath {events} -Pattern '^[0-9]+ booted ' -Quiet }}
+function relaunch {{ try {{ & {relaunch_program} {args}; $true }} catch {{ $false }} }}
+ev 'helper_started' "pid $PID"
+try {{ $old = [Diagnostics.Process]::GetProcessById({pid}) }} catch {{ $old = $null }}
+if ($old -and -not $old.WaitForExit({exit_ms})) {{ ev 'failed' 'app did not exit in time; not forcing'; exit 1 }}
+ev 'exited' ''
+$other = running {pid}
+if ($other) {{ ev 'failed' "another instance is already running (pid $other); not installing"; exit 1 }}
+$hash = if (Test-Path -LiteralPath {msi} -PathType Leaf) {{ (Get-FileHash -Algorithm SHA256 -LiteralPath {msi}).Hash.ToLower() }} else {{ '' }}
+if ($hash -ne '{sha}') {{
+  if (relaunch) {{ ev 'failed' 'staged installer is missing or changed; installed untouched and relaunched' }} else {{ ev 'failed' 'staged installer is missing or changed; installed untouched' }}
+  exit 1
+}}
+$p = Start-Process -FilePath {program} -ArgumentList @('/i', {msi_arg}, '/passive', '/norestart', '/l*v', {log_arg}) -PassThru
+$null = $p.Handle
+if (-not $p.WaitForExit({install_ms})) {{ ev 'failed' 'installer did not finish in time (administrator approval not answered?); msiexec left running, not forcing'; exit 1 }}
+$code = $p.ExitCode
+if ($code -ne 0 -and $code -ne 3010) {{
+  if (relaunch) {{ ev 'failed' "installer exit $code; Windows Installer kept the previous version and it was relaunched" }} else {{ ev 'failed' "installer exit $code; previous version kept but relaunch failed" }}
+  exit 1
+}}
+ev 'swapped' "installer exit $code"
+if (-not (relaunch)) {{ ev 'failed' 'launch command failed after install'; exit 1 }}
+$j = 0
+$new = $null
+while (-not $new) {{
+  $new = running {pid}
+  if ($new) {{ break }}
+  if (booted) {{ break }}
+  $j++; if ($j -gt {boot_ticks}) {{ break }}
+  Start-Sleep -Milliseconds 200
+}}
+if ($new) {{ ev 'launched' "pid $new" }}
+$k = 0
+while (-not (booted)) {{
+  $k++
+  if ($k -gt {boot_ticks} -or -not (running {pid})) {{
+    if (booted) {{ exit 0 }}
+    if (running {pid}) {{ ev 'failed' 'new app is running without a boot mark; not forcing'; exit 1 }}
+    ev 'failed' 'new app did not boot; an MSI upgrade is not rolled back here, reinstall the previous MSI by hand'
+    exit 1
+  }}
+  Start-Sleep -Milliseconds 200
+}}
+"#
+    ))
 }
 
 fn sq(s: &str) -> String {
@@ -878,14 +1035,24 @@ pub fn spawn_swap(spec: &SwapSpec) -> Result<u32> {
     Ok(child.id())
 }
 
-/// 준비된 작업을 도우미에 넘긴다 — 켜져 있고, 준비됐고, 곁의 번들이 있을 때만. 다음은 앱이 스스로 끄는 일이다.
-#[cfg(unix)]
+#[cfg(windows)]
+pub fn spawn_swap(spec: &SwapSpec) -> Result<u32> {
+    app_restart::spawn_powershell(&spec.dir, &spec.job_id, &swap_powershell(spec)?)
+}
+
+/// 준비된 작업을 도우미에 넘긴다 — 켜져 있고, 준비됐고, 준비한 판(맥 곁의 번들·Windows MSI)이 있을 때만. 다음은 앱이 스스로
+/// 끄는 일이다.
+#[cfg(any(unix, windows))]
 pub fn arm(dir: &Path, spec: &SwapSpec, enabled: bool) -> std::result::Result<u32, String> {
     if !enabled {
         return Err("update_disabled — 설치 창구가 꺼져 있다".into());
     }
     let s = status(dir, &spec.job_id).map_err(|e| e.to_string())?;
-    if s.state != State::Staged || !staged_path(&spec.installed).is_dir() {
+    let ready = match &spec.installer {
+        Some(installer) => installer.msi.is_file(),
+        None => staged_path(&spec.installed).is_dir(),
+    };
+    if s.state != State::Staged || !ready {
         return Err(format!("준비되지 않은 작업이다({})", s.state.word()));
     }
     advance(dir, &spec.job_id, State::Armed, "").map_err(|e| e.to_string())?;
@@ -918,7 +1085,7 @@ pub enum Step {
 
 /// 수락한 작업을 준비하고, **지금** 사실로 다시 재서 막힘이 없으면 도우미에 넘긴다. 받는 사이에 학생이 일을 시작했으면
 /// 준비한 채 기다린다. 승인 뒤 이 기기의 정체(pid·바이너리·자기설치 예정)가 바뀌었으면 실패로 끝낸다.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn drive(
     dev: &Device,
     job: &UpdateJob,
@@ -929,7 +1096,7 @@ pub fn drive(
     if !dev.enabled {
         return Err("update_disabled — 설치 창구가 꺼져 있다".into());
     }
-    prepare(&dev.dir, job, &dev.cache, &dev.installed, dev.effects, dev.public_key)?;
+    let staged = prepare(&dev.dir, job, &dev.cache, &dev.installed, dev.effects, dev.public_key)?;
     let facts = facts_now()?;
     if facts.pid != job.old_pid || app_restart::target_hash(&facts) != job.target_hash || Path::new(&facts.app_path) != dev.installed {
         let why = "이 기기의 정체가 승인 뒤 바뀌었다 — 갈아 끼우지 않는다";
@@ -962,6 +1129,12 @@ pub fn drive(
         launch: dev.launch.clone(),
         exit_timeout_s: dev.exit_timeout_s,
         boot_timeout_s: dev.boot_timeout_s,
+        installer: (job_os(job) == Some("windows")).then(|| Installer {
+            program: msiexec_path(),
+            msi: staged,
+            sha256: job.asset.sha256.trim_start_matches("sha256:").to_string(),
+            timeout_s: INSTALL_TIMEOUT_S,
+        }),
     };
     arm(&dev.dir, &spec, dev.enabled).map(Step::Armed)
 }
@@ -1513,11 +1686,13 @@ mod tests {
         identities: RefCell<HashMap<String, Identity>>,
         inner_version: RefCell<String>,
         inner_identity: RefCell<Identity>,
+        fed: RefCell<Vec<String>>,
     }
 
     impl Effects for FakeWorld {
         fn feed(&self, url: &str, _: u64) -> std::result::Result<String, String> {
-            assert_eq!(url, MAC_FEED, "공식 피드만 읽는다");
+            assert!(url == MAC_FEED || url == WIN_FEED, "공식 피드만 읽는다: {url}");
+            self.fed.borrow_mut().push(url.to_string());
             self.feed.borrow().clone().ok_or_else(|| "끊김".to_string())
         }
         fn fetch(&self, url: &str, max: u64, dest: &Path) -> std::result::Result<(), FetchError> {
@@ -1618,6 +1793,230 @@ mod tests {
         // 끊긴 뒤 다시 와도 다시 받지 않는다.
         assert_eq!(w.prepare().unwrap(), staged);
         assert_eq!(*w.fx.fetches.borrow(), 1);
+    }
+
+    fn windows_facts() -> Facts {
+        Facts {
+            machine_id: "win-1".into(), os: "windows".into(), app_path: r"C:\Program Files\kasaterm".into(),
+            running_exe: r"C:\Program Files\kasaterm\bin\kasaterm.exe".into(), ..facts(Path::new("/unused"))
+        }
+    }
+
+    /// 맥 작업을 Windows 판(msi·서명 칸 비움)으로 바꾼다 — 파일 몸통·해시·서명은 그대로라 같은 키로 확인된다.
+    fn as_windows(job: &UpdateJob) -> UpdateJob {
+        let name = msi_name(&job.tag);
+        UpdateJob {
+            asset: Asset { url: asset_url(&job.tag, &name), name, ..job.asset.clone() },
+            team: String::new(), require_notarized: false, ..job.clone()
+        }
+    }
+
+    #[test]
+    fn windows_jobs_carry_the_tag_msi_and_no_mac_signing_fields() {
+        let f = windows_facts();
+        let job = as_windows(&job_for(&f, &Key::new()));
+        assert_eq!((check_job(&job), job_os(&job)), (Ok(()), Some("windows")));
+        assert_eq!(job_os(&job_for(&facts(Path::new("/a")), &Key::new())), Some("macos"));
+        for bad in [UpdateJob { team: TEAM.into(), ..job.clone() }, UpdateJob { require_notarized: true, ..job.clone() }] {
+            assert!(check_job(&bad).unwrap_err().contains("비운다"), "맥 칸을 실은 Windows 작업");
+        }
+        let mut other = job.clone();
+        other.asset.name = "kasaterm-v0.2.1-windows-arm64.msi".into();
+        other.asset.url = asset_url(&other.tag, &other.asset.name);
+        assert!(check_job(&other).is_err(), "태그의 x86_64 msi 하나뿐");
+        // 맥 작업은 예전 그대로 팀·공증을 요구한다.
+        let mac = job_for(&facts(Path::new("/a")), &Key::new());
+        assert!(check_job(&UpdateJob { team: String::new(), ..mac.clone() }).is_err());
+        assert!(check_job(&UpdateJob { require_notarized: false, ..mac }).is_err());
+    }
+
+    #[test]
+    fn a_device_takes_only_the_file_of_its_own_os() {
+        let win = windows_facts();
+        let job = as_windows(&job_for(&win, &Key::new()));
+        assert!(authorize(&req(&job), &win, "0.2.0", &approved(&job), true, NOW).is_ok());
+        let mac_job = job_for(&win, &Key::new());
+        assert!(authorize(&req(&mac_job), &win, "0.2.0", &approved(&mac_job), true, NOW).unwrap_err().starts_with("unsupported_os"),
+                "Windows 기기는 dmg 작업을 안 받는다");
+        let mac = facts(Path::new("/Users/x/Applications/kasaterm.app"));
+        let msi_for_mac = as_windows(&job_for(&mac, &Key::new()));
+        assert!(authorize(&req(&msi_for_mac), &mac, "0.2.0", &approved(&msi_for_mac), true, NOW).unwrap_err().starts_with("unsupported_os"),
+                "맥이 msi 작업으로 팀·공증 검사를 건너뛰지 못한다");
+        let linux = Facts { os: "linux".into(), ..win };
+        assert!(authorize(&req(&job), &linux, "0.2.0", &approved(&job), true, NOW).unwrap_err().starts_with("unsupported_os"));
+    }
+
+    #[test]
+    fn a_verified_msi_is_staged_where_it_was_checked_and_rechecked_before_reuse() {
+        let mut w = world("stage-msi");
+        let job = as_windows(&w.job);
+        w.job = UpdateJob { job_id: job_id("fedcba9876543210", &job.machine_id, &job.asset.sha256), plan_hash: "fedcba9876543210".into(), ..job };
+        create_job(&w.dir, &w.job).unwrap();
+        *w.fx.feed.borrow_mut() = Some(feed_for(&w.job));
+        let staged = w.prepare().unwrap();
+        assert_eq!(staged, work_dir(&w.cache, &w.job).join(msi_name("v0.2.1")));
+        assert_eq!(staged, staged_for(&w.job, &w.cache, &w.installed));
+        assert_eq!(std::fs::read(&staged).unwrap(), DMG);
+        assert_eq!(w.fx.fed.borrow().as_slice(), [WIN_FEED], "Windows 작업은 Windows 피드와 대조한다");
+        assert!(w.fx.mounted.borrow().is_empty() && w.fx.identities.borrow().len() == 1, "dmg·코드 서명 단계가 없다");
+        assert_eq!(std::fs::read_to_string(w.installed.join("Contents/marker")).unwrap(), "old", "설치본은 안 건드린다");
+        assert_eq!(w.state(), State::Staged);
+        assert_eq!(w.prepare().unwrap(), staged);
+        assert_eq!(*w.fx.fetches.borrow(), 1, "확인한 파일은 다시 받지 않는다");
+        std::fs::write(&staged, b"swapped by someone").unwrap();
+        assert_eq!(w.prepare().unwrap(), staged, "바뀐 파일은 다시 받아 확인한다");
+        assert_eq!((*w.fx.fetches.borrow(), std::fs::read(&staged).unwrap()), (2, DMG.to_vec()));
+    }
+
+    #[test]
+    fn the_windows_installer_helper_rechecks_waits_bounded_and_never_forces() {
+        let spec = SwapSpec {
+            dir: PathBuf::from(r"C:\Users\x\.config\kasaterm\app-update"), job_id: job_id("abcdef0123456789", "win-1", "sha256:x"),
+            old_pid: 4242, installed: PathBuf::from(r"C:\Program Files\kasaterm"),
+            launch: vec![r"C:\Windows\explorer.exe".into(), r"C:\Program Files\kasaterm\bin\kasaterm.exe".into()],
+            exit_timeout_s: 60, boot_timeout_s: 90,
+            installer: Some(Installer { program: r"C:\Windows\System32\msiexec.exe".into(),
+                                        msi: PathBuf::from(r"C:\Users\x's\kasaterm-v0.2.1-windows-x86_64.msi"), sha256: "a".repeat(64), timeout_s: 600 }),
+        };
+        let script = swap_powershell(&spec).unwrap();
+        let mismatch = format!("-ne '{}'", "a".repeat(64));
+        for want in ["GetProcessById(4242)", "WaitForExit(60000)", "Get-FileHash -Algorithm SHA256", mismatch.as_str(),
+                     r#"'"C:\Users\x''s\kasaterm-v0.2.1-windows-x86_64.msi"'"#, "'/passive', '/norestart'", "WaitForExit(600000)",
+                     r"-FilePath 'C:\Windows\System32\msiexec.exe'", "msiexec left running, not forcing", "Windows Installer kept the previous version", r"'C:\Program Files\kasaterm\bin\kasaterm.exe'"] {
+            assert!(script.contains(want), "{want}");
+        }
+        for forbidden in ["Stop-Process", "taskkill", ".Kill(", "Remove-Item", "/quiet", "/qn"] {
+            assert!(!script.contains(forbidden), "{forbidden}");
+        }
+        assert!(swap_powershell(&SwapSpec { installer: None, ..spec.clone() }).is_err(), "Windows 는 MSI 없이 갈아 끼우지 않는다");
+        let short = Installer { sha256: "sha256:abc".into(), ..spec.installer.clone().unwrap() };
+        assert!(swap_powershell(&SwapSpec { installer: Some(short), ..spec }).is_err());
+    }
+
+    /// Windows 실제 도우미 — 설치본 꼴 폴더의 가짜 앱(PowerShell 사본), 종료 코드만 내는 가짜 msiexec(.cmd).
+    #[cfg(windows)]
+    struct WinRig {
+        w: World,
+        exe: PathBuf,
+        old: std::process::Child,
+    }
+
+    #[cfg(windows)]
+    impl WinRig {
+        fn new(name: &str) -> Self {
+            let mut w = world(name);
+            // 부팅 표식은 이 기기의 진행 중인 작업 하나에 붙는다 — 세계가 만든 맥 작업은 치운다.
+            advance(&w.dir, &w.job.job_id, State::Cancelled, "").unwrap();
+            let job = as_windows(&w.job);
+            w.job = UpdateJob { job_id: job_id("fedcba9876543210", &job.machine_id, &job.asset.sha256), plan_hash: "fedcba9876543210".into(), ..job };
+            create_job(&w.dir, &w.job).unwrap();
+            *w.fx.feed.borrow_mut() = Some(feed_for(&w.job));
+            w.prepare().unwrap();
+            w.installed = w.dir.parent().unwrap().join("kasaterm");
+            let exe = w.installed.join(r"bin\kasaterm.exe");
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            let root = std::env::var("SystemRoot").unwrap();
+            std::fs::copy(format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"), &exe).unwrap();
+            let old = std::process::Command::new(&exe).args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 30"]).spawn().unwrap();
+            Self { w, exe, old }
+        }
+
+        /// `body` 를 몸통으로 하는 가짜 설치기와, 가짜 앱을 띄우고 곧바로 돌아오는 재기동 명령으로 도우미를 띄운다.
+        fn arm(&self, body: &str, timeout_s: u32) {
+            let fake = self.w.dir.join("fake-msiexec.cmd");
+            std::fs::write(&fake, format!("@{body}\r\n")).unwrap();
+            let root = std::env::var("SystemRoot").unwrap();
+            let launch = vec![format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"), "-NoProfile".into(), "-Command".into(),
+                format!("Start-Process -FilePath '{}' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 30'", self.exe.display())];
+            let spec = SwapSpec {
+                dir: self.w.dir.clone(), job_id: self.w.job.job_id.clone(), old_pid: self.old.id(), installed: self.w.installed.clone(),
+                launch, exit_timeout_s: 10, boot_timeout_s: 10,
+                installer: Some(Installer { program: fake.display().to_string(), msi: staged_for(&self.w.job, &self.w.cache, &self.w.installed),
+                                            sha256: self.w.job.asset.sha256.trim_start_matches("sha256:").into(), timeout_s }),
+            };
+            arm(&self.w.dir, &spec, true).unwrap();
+        }
+
+        fn exit_app(&mut self) {
+            self.old.kill().unwrap();
+            let _ = self.old.wait();
+        }
+
+        fn last_note(&self) -> String {
+            status(&self.w.dir, &self.w.job.job_id).unwrap().events.last().unwrap().note.clone()
+        }
+
+        /// 검사가 띄운 가짜 앱(이 검사 폴더의 실행 파일)이 다시 떴는가 — 떴으면 그 pid 를 끈다.
+        fn relaunched(&self) -> bool {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let script = format!("Get-Process | Where-Object {{ $_.Path -ieq '{}' }} | Select-Object -ExpandProperty Id", self.exe.display());
+            while std::time::Instant::now() < until {
+                let out = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().unwrap();
+                let pids: Vec<String> = String::from_utf8_lossy(&out.stdout).split_whitespace().map(str::to_string).collect();
+                if !pids.is_empty() {
+                    for pid in pids {
+                        let _ = std::process::Command::new("taskkill").args(["/PID", &pid, "/F"]).output();
+                    }
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_waits_for_the_app_then_installs_relaunches_and_finishes_on_boot() {
+        let mut rig = WinRig::new("win-swap-ok");
+        rig.arm("exit 0", 30);
+        assert_eq!(wait_for(&rig.w, &[State::HelperStarted], 15), State::HelperStarted);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(rig.w.state(), State::HelperStarted, "앱이 살아 있는 동안은 기다린다");
+        rig.exit_app();
+        assert_eq!(wait_for(&rig.w, &[State::Launched], 30), State::Launched, "{}", rig.last_note());
+        let new_pid: u32 = rig.last_note().trim_start_matches("pid ").parse().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert_eq!(mark_booted(&rig.w.dir, &rig.w.job.machine_id, new_pid, &rig.w.job.build, now).map(|(_, s)| s), Some(State::Done));
+        let words: Vec<String> = status(&rig.w.dir, &rig.w.job.job_id).unwrap().events.iter().map(|e| e.state.word()).collect();
+        assert!(words.ends_with(&["armed", "helper_started", "exited", "swapped", "launched", "booted", "done"].map(String::from)), "{words:?}");
+        assert!(rig.relaunched());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_msi_keeps_the_previous_version_and_relaunches_it() {
+        let mut rig = WinRig::new("win-swap-msi-fail");
+        rig.arm("exit 1603", 30);
+        rig.exit_app();
+        assert_eq!(wait_for(&rig.w, &[State::Failed], 30), State::Failed);
+        assert!(rig.last_note().contains("installer exit 1603; Windows Installer kept the previous version"), "{}", rig.last_note());
+        assert!(rig.relaunched(), "옛 판을 다시 띄운다");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_changed_installer_is_never_run() {
+        let mut rig = WinRig::new("win-swap-changed");
+        rig.arm("exit 0", 30);
+        std::fs::write(staged_for(&rig.w.job, &rig.w.cache, &rig.w.installed), b"swapped after the check").unwrap();
+        rig.exit_app();
+        assert_eq!(wait_for(&rig.w, &[State::Failed], 30), State::Failed);
+        assert!(rig.last_note().starts_with("staged installer is missing or changed"), "{}", rig.last_note());
+        assert!(!status(&rig.w.dir, &rig.w.job.job_id).unwrap().events.iter().any(|e| e.state == State::Swapped));
+        assert!(rig.relaunched(), "설치본은 그대로라 옛 판을 다시 띄운다");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unanswered_installer_is_left_running_and_recorded_as_failed() {
+        let mut rig = WinRig::new("win-swap-timeout");
+        // 도우미 env 에는 PATHEXT 가 없어 짧은 이름으로는 못 찾는다 — 운영 msiexec 처럼 전체 경로로.
+        rig.arm(&format!(r#""{}\System32\PING.EXE" -n 6 127.0.0.1 >nul"#, std::env::var("SystemRoot").unwrap()), 1);
+        rig.exit_app();
+        assert_eq!(wait_for(&rig.w, &[State::Failed], 30), State::Failed);
+        assert!(rig.last_note().contains("msiexec left running, not forcing"), "{}", rig.last_note());
+        assert!(!rig.relaunched(), "설치기가 아직 도는 동안엔 다시 띄우지 않는다");
     }
 
     #[test]
@@ -1742,7 +2141,7 @@ mod tests {
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         let old = start_fake(&exe);
         let spec = SwapSpec { dir: w.dir.clone(), job_id: w.job.job_id.clone(), old_pid: old.id(), installed: w.installed.clone(),
-                              launch: launch(&exe), exit_timeout_s: 5, boot_timeout_s: boot_s };
+                              launch: launch(&exe), exit_timeout_s: 5, boot_timeout_s: boot_s, installer: None };
         (w, old, spec)
     }
 
@@ -1847,12 +2246,11 @@ mod tests {
     fn nothing_is_armed_before_it_is_staged_or_while_the_switch_is_off() {
         let w = world("arm-early");
         let spec = SwapSpec { dir: w.dir.clone(), job_id: w.job.job_id.clone(), old_pid: 1, installed: w.installed.clone(),
-                              launch: vec!["/usr/bin/true".into()], exit_timeout_s: 1, boot_timeout_s: 1 };
-        #[cfg(unix)]
-        {
-            assert!(arm(&w.dir, &spec, true).unwrap_err().contains("준비되지 않은"));
-            assert!(arm(&w.dir, &spec, false).unwrap_err().starts_with("update_disabled"));
-        }
+                              launch: vec!["/usr/bin/true".into()], exit_timeout_s: 1, boot_timeout_s: 1, installer: None };
+        assert!(arm(&w.dir, &spec, true).unwrap_err().contains("준비되지 않은"));
+        assert!(arm(&w.dir, &spec, false).unwrap_err().starts_with("update_disabled"));
+        let msi = SwapSpec { installer: Some(Installer { program: msiexec_path(), msi: w.cache.join("none.msi"), sha256: "0".repeat(64), timeout_s: 1 }), ..spec };
+        assert!(arm(&w.dir, &msi, true).unwrap_err().contains("준비되지 않은"), "받은 MSI 가 없으면 도우미를 안 띄운다");
         assert!(!install_enabled(&|_| None));
         assert!(!install_enabled(&|_| Some("1".into())), "켜는 값은 on 하나뿐");
         assert!(install_enabled(&|k| (k == "KASATERM_APP_UPDATE").then(|| "on".to_string())));

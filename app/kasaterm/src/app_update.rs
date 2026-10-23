@@ -19,6 +19,10 @@ fn cache_dir() -> Result<std::path::PathBuf, String> {
     if let Some(root) = kasa_socket::isolated_collab_root() {
         return Ok(root.join("app-update-cache"));
     }
+    #[cfg(windows)]
+    return std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join(r"kasaterm\updates"))
+        .ok_or_else(|| "LOCALAPPDATA unavailable".into());
+    #[cfg(not(windows))]
     kasa_socket::home_dir().map(|h| h.join("Library/Caches/kasaterm/updates")).ok_or_else(|| "home directory unavailable".into())
 }
 

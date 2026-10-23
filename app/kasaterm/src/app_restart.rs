@@ -112,8 +112,8 @@ impl App {
                 kasa_socket::app_update::active_job(&dir, now).map(|s| s.job.job_id)
             }),
             observed_at_ms: now,
-            update_capability: if cfg!(unix) { kasa_socket::app_update::CAPABILITY } else { 0 },
-            update_enabled: cfg!(unix) && kasa_socket::app_update::install_enabled(&|k| std::env::var(k).ok()),
+            update_capability: kasa_socket::app_update::CAPABILITY,
+            update_enabled: kasa_socket::app_update::install_enabled(&|k| std::env::var(k).ok()),
         }
     }
 }

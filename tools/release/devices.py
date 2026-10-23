@@ -9,6 +9,8 @@
 4 적용     바쁜 학생·미저장 편집기가 없을 때만 — 앱이 스스로 끄고 도우미가 갈아 끼운다(이전 판은 `.kasaterm.app.previous`).
 5 재기동   도우미가 다시 띄운다. 새 판이 부팅 표식을 못 남기고 꺼지면 이전 판을 되돌려 다시 띄운다(강제 종료 없음).
 6 검증     부팅 표식의 빌드가 태그 커밋이면 끝, 아니면 실패로 적는다.
+Windows 기기는 태그의 msi 를 Windows 피드와 대조해 받고 sha256·EdDSA 로만 확인한 뒤(코드 서명 없음), 도우미가 앱이 꺼진 뒤
+msiexec 로 설치하고 다시 띄운다(`steps`). 판 파일이 OS 마다 달라 rollout 도 OS 마다 따로다.
 
 창구는 이 판부터 기기 앱에 있다(`update_capability`). 그래도 설치 실행은 기기마다 기본 꺼짐(`update_enabled`,
 `KASATERM_APP_UPDATE=on`)이고, 작업은 나쵸 `kasaterm_update` 승인을 조종 기기가 한 번 소비해야 받아들여진다 — 그 승인
@@ -85,14 +87,14 @@ def plan_devices(plan, state, targets, facts_problem=None):
             reasons.append(("unreachable", facts_problem or "앱 재시작 사실을 못 읽었다 — 명부에 없거나 닿지 않는다"))
         if facts and int(facts.get("update_capability") or 0) < UPDATE_CAPABILITY:
             reasons.append(("update_endpoint_missing", "기기 앱에 받기·설치 창구가 없다 — 창구가 든 판을 한 번 사람이 설치해야 한다"))
-        elif facts and osname == "macos" and not facts.get("update_enabled"):
+        elif facts and osname in ("macos", "windows") and not facts.get("update_enabled"):
             reasons.append(("update_disabled", "기기의 설치 스위치가 꺼져 있다(KASATERM_APP_UPDATE) — 켜는 것은 그 기기 사람의 결정"))
         if osname == "macos" and mac_block:
             reasons.append(("signing", mac_block))
         for r in (t or {}).get("refusals") or []:
             code = r.get("code")
-            if code == "unsupported_os" and osname == "windows":
-                continue  # 윈도는 이 창구 대신 WinSparkle 이 MSI 를 돌린다 — 적용은 사람이 [설치]
+            if code == "unsupported_os" and osname == "windows" and int(facts.get("update_capability") or 0) < UPDATE_CAPABILITY:
+                continue  # 창구가 없는 옛 Windows 앱 — 창구 없음 하나로 말한다
             if code == "capability_missing":
                 continue  # 재시작 창구 판 — 업데이트는 update_capability 로 따로 본다
             if code == "unreachable" and any(c == "unreachable" for c, _ in reasons):
@@ -118,12 +120,12 @@ def steps(plan, osname, art, team, facts):
     name = art["name"] if art else "(이 OS 의 산출물 없음)"
     digest = f"{art.get('size')}바이트 · {art.get('sha256', '')[:19]}" if art and art.get("verified") else "릴리스 단계가 잰 크기·해시"
     if osname == "windows":
-        return [f"받기: {name} → %LOCALAPPDATA%\\kasaterm\\updates\\{plan['tag']}\\",
-                f"확인: {digest} · EdDSA(저장소 공개키)",
-                "준비: 확인한 msi 를 둔다(설치본 안 건드림)",
-                "적용: WinSparkle 토스트 [설치] — 사람이 누를 때 MSI 실행",
-                "재기동: MSI 가 앱을 닫고 다시 연다(도는 학생이 있으면 사람이 고른다)",
-                f"검증: /version 이 {target}"]
+        return [f"받기: {name} → %LOCALAPPDATA%\\kasaterm\\updates\\ — 공식 피드(appcast-win.xml)·공식 릴리스만, https, 크기 상한",
+                f"확인: {digest} · EdDSA(설치본 Sparkle 공개키) — MSI 는 코드 서명이 없어 이 둘로만 믿는다",
+                "준비: 확인한 msi 를 받은 자리에 둔다(설치본 안 건드림)",
+                "적용: 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 해시를 다시 잰 뒤 msiexec /passive — 그 PC 에서 사람이 관리자 확인(UAC)을 누른다(10분 상한, 넘기면 msiexec 를 두고 실패)",
+                "재기동: 도우미가 다시 띄운다 — MSI 가 실패하면 이전 판이 그대로라 그 판을 다시 띄움(강제 종료 없음). 새 판이 안 뜨면 되돌리지 못한다",
+                f"검증: 부팅 표식의 빌드가 {target} — 아니면 실패로 적는다"]
     return [f"받기: {name} → ~/Library/Caches/kasaterm/updates/ — 공식 피드·공식 릴리스만, https, 크기 상한",
             f"확인: {digest} · EdDSA(설치본 Sparkle 공개키) · dmg 읽기 전용 · codesign --verify --deep --strict · 팀 {team or '미확인'} 과 같음 · 공증 · 판 번호",
             f"준비: 확인한 번들을 {Path(facts.get('app_path') or '~/Applications/kasaterm.app').with_name('.kasaterm.app.next')} 에(설치본 안 건드림)",
@@ -159,16 +161,18 @@ def update_job(plan, state, target, now_ms, plan_hash=None):
     """(작업, 못 짓는 까닭) — 기기의 `check_job` 이 받는 모양 그대로. 주소는 태그에서 지은 공식 주소뿐이다.
     `plan_hash` 는 rollout id(`update_rollout`) — 없으면 릴리스 plan_id(보이기용)."""
     facts = (target or {}).get("facts") or {}
-    if facts.get("os") != "macos":
-        return None, "mac 만 이 창구로 받는다 — 윈도는 WinSparkle"
-    art = artifact_for(plan, state, "macos")
+    osname = facts.get("os")
+    if osname not in ("macos", "windows"):
+        return None, "이 창구는 macOS·Windows 기기만 받는다"
+    art = artifact_for(plan, state, osname)
     if not art or not art["verified"]:
-        return None, "릴리스 단계가 mac 산출물을 확인하지 않았다"
-    signature = (((state.get("stages") or {}).get("feed", {}).get("detail") or {}).get("signatures") or {}).get("macos")
+        return None, f"릴리스 단계가 {osname} 산출물을 확인하지 않았다"
+    signature = (((state.get("stages") or {}).get("feed", {}).get("detail") or {}).get("signatures") or {}).get(osname)
     if not signature:
-        return None, "피드 단계가 mac EdDSA 서명을 확인하지 않았다"
-    team = ((plan.get("signing") or {}).get("installed") or {}).get("team")
-    if not team:
+        return None, f"피드 단계가 {osname} EdDSA 서명을 확인하지 않았다"
+    # MSI 는 코드 서명이 없어 기기는 sha256·EdDSA 로만 믿는다 — Windows 작업은 서명 팀·공증 칸을 비운다(기기 `check_job`).
+    team = ((plan.get("signing") or {}).get("installed") or {}).get("team") if osname == "macos" else ""
+    if osname == "macos" and not team:
         return None, "설치본 서명 팀을 모른다"
     if not art["size"] or art["size"] > MAX_ASSET_BYTES:
         return None, "산출물 크기가 상한 밖이다"
@@ -178,7 +182,7 @@ def update_job(plan, state, target, now_ms, plan_hash=None):
             "machine_id": mid, "target_hash": target.get("hash") or "", "tag": plan["tag"], "version": plan["version"],
             "commit": plan["commit"], "build": plan["commit"],
             "asset": {"name": art["name"], "url": art["url"], "size": art["size"], "sha256": art["sha256"], "ed_signature": signature},
-            "team": team, "require_notarized": True, "old_pid": int(facts.get("pid") or 0), "created_at_ms": now_ms}, None
+            "team": team, "require_notarized": osname == "macos", "old_pid": int(facts.get("pid") or 0), "created_at_ms": now_ms}, None
 
 
 def update_scope(job, controller, order=1):
@@ -203,16 +207,18 @@ def rollout_id(release_plan, sha256, targets, created_at_ms):
     return fnv([release_plan, sha256, *(f"{mid}={h}" for mid, h in targets), str(created_at_ms)])
 
 
-def update_rollout(plan, state, targets, rows, now_ms):
-    """(rollout, 까닭) — ready·deferred 인 mac 을 계획 순서로, 조종 기기는 맨 뒤에. 나쵸가 `approval_scope` 를 그대로 사람에게
-    보이고 승인하며, 러너(`kasaterm-cli app-update run`)는 작업들로 범위를 다시 지어 대조한다."""
+def update_rollout(plan, state, targets, rows, now_ms, osname="macos"):
+    """(rollout, 까닭) — ready·deferred 인 그 OS 기기를 계획 순서로, 조종 기기는 맨 뒤에. 한 rollout 은 파일 하나라(기기
+    `check_rollout`) OS 마다 따로 짓는다. 나쵸가 `approval_scope` 를 그대로 사람에게 보이고 승인하며, 러너(`kasaterm-cli
+    app-update run`)는 작업들로 범위를 다시 지어 대조한다."""
     from tools.release.nacho import scope_hash
     controller = plan["controller"]
     order = [r for r in rows if r["machine_id"] != controller] + [r for r in rows if r["machine_id"] == controller]
     picked, excluded = [], []
     for r in order:
-        if r["os"] != "macos":
-            excluded.append({"machine_id": r["machine_id"], "code": "not_macos", "why": "mac 만 이 창구로 받는다 — 윈도는 WinSparkle"})
+        if r["os"] != osname:
+            excluded.append({"machine_id": r["machine_id"], "code": f"not_{osname}",
+                             "why": f"{osname} rollout 이 아니다 — 판 파일이 OS 마다 달라 그 OS 의 rollout 으로 따로 보낸다"})
         elif r["status"] == "blocked":
             hard = next((x for x in r["reasons"] if x["code"] not in WAITS), r["reasons"][0])
             excluded.append({"machine_id": r["machine_id"], "code": hard["code"], "why": hard["why"]})

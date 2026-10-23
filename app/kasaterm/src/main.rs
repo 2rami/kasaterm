@@ -116,7 +116,6 @@ mod mirror_focus_probe;
 mod character_assignment;
 mod agent_identity;
 mod app_restart;
-#[cfg(unix)]
 mod app_update;
 mod restore_progress;
 mod restore_picker;
