@@ -1056,8 +1056,19 @@ fn trash(home: &std::path::Path, path: &std::path::Path) -> std::io::Result<std:
     Ok(dest)
 }
 
+/// Windows 휴지통은 폴더가 아니라 셸이 관리하는 자리라 옮겨 넣을 경로가 없다. 파일트리의
+/// 지우기(`session/file_tree.rs`)가 이미 쓰는 `trash` 크레이트에 맡긴다 — 그 안이 셸의
+/// `IFileOperation` 이라 탐색기에서 지운 것과 같이 「복원」으로 되돌린다. 링크(정션·심볼릭
+/// 링크)는 링크 자체만 옮겨지고 가리키던 원본은 남는다. 휴지통 안 이름은 원래 이름 그대로라
+/// 시각을 붙이지 않는다 — 같은 이름이 여럿이어도 셸이 따로 간직한다.
+#[cfg(windows)]
+fn trash(_home: &std::path::Path, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    trash::delete(path).map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(path.to_path_buf())
+}
+
 /// 휴지통이 없는 곳에선 지우지 않는다 — 되돌릴 수 없는 삭제를 조용히 하느니 실패가 낫다.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn trash(_home: &std::path::Path, _path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     Err(std::io::Error::other("이 OS 에선 휴지통으로 못 보낸다"))
 }
@@ -3060,6 +3071,48 @@ enabled = false
 
         trash_entry(&home, &skills.join("plain")).unwrap();
         assert!(!skills.join("plain").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Windows 는 진짜 휴지통으로 간다 — 정션(권한 없이 만드는 Windows 폴더 링크)이면 링크만
+    /// 옮겨지고 원본은 남아야 하며, 지운 것이 휴지통 목록에 있어야 「복원」으로 되돌릴 수 있다.
+    /// 사람의 휴지통을 쓰므로 손으로 돌리고, 시험이 넣은 항목은 끝에 비운다.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "실제 휴지통에 넣었다 비운다 — 손으로 돌린다"]
+    fn skill_delete_goes_to_the_recycle_bin_and_spares_the_junction_target() {
+        // cmd 의 mklink 는 `/` 섞인 경로와 괄호(tmp_home 의 ThreadId(n))를 못 받는다.
+        let home = std::env::temp_dir().join(format!("kt-mcpcol-junction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let skills = home.join(".claude").join("skills");
+        std::fs::create_dir_all(skills.join("plain")).unwrap();
+        std::fs::write(skills.join("plain/SKILL.md"), "plain").unwrap();
+        let origin = home.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("SKILL.md"), "origin").unwrap();
+        // 정션은 심볼릭 링크와 달리 관리자·개발자 모드 없이 만들어진다.
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"]).arg(skills.join("linked")).arg(&origin)
+            .stdout(std::process::Stdio::null()).status().unwrap();
+        assert!(made.success());
+
+        assert!(trash_entry(&home, &origin).is_err(), "스킬 폴더 밖은 통과하면 안 된다");
+        let moved = trash_entry(&home, &skills.join("linked")).unwrap();
+        assert!(moved.contains("linked"), "{moved}");
+        assert!(std::fs::symlink_metadata(skills.join("linked")).is_err(), "링크가 자리에서 빠져야 한다");
+        assert!(origin.join("SKILL.md").is_file(), "정션이 가리키던 원본은 살아 있어야 한다");
+        trash_entry(&home, &skills.join("plain")).unwrap();
+        assert!(!skills.join("plain").exists());
+
+        let skills = skills.canonicalize().unwrap();
+        let ours: Vec<_> = trash::os_limited::list().unwrap().into_iter()
+            .filter(|item| item.original_parent.canonicalize().ok().as_deref() == Some(skills.as_path()))
+            .collect();
+        let mut names: Vec<_> = ours.iter().map(|item| item.name.to_string_lossy().into_owned()).collect();
+        names.sort();
+        let _ = trash::os_limited::purge_all(ours);
+        assert_eq!(names, ["linked", "plain"], "둘 다 휴지통에 있어야 되돌린다");
+        assert!(origin.join("SKILL.md").is_file(), "휴지통을 비워도 원본은 남는다");
         let _ = std::fs::remove_dir_all(&home);
     }
 
