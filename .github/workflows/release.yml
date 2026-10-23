@@ -521,9 +521,11 @@ jobs:
   # preview 가 Windows 를 실으면 mac 피드를 낸 뒤 같은 태그의 Windows 덤 실행을 부른다. 따로 도는 실행이라 Windows 굽기의 시간·
   # 실패가 이 실행(과 이것을 기다리는 controller)에 안 묻는다. 부르기가 실패해도 이 실행을 실패로 만들지 않는다 — mac 은 이미
   # 나갔고, 사람이 `gh workflow run release.yml -f tag=<태그> -f platforms=windows` 로 다시 부르면 된다.
+  # 상태 함수가 없으면 GitHub 는 조상(이 실행에선 늘 건너뛰는 build-msi)의 건너뜀을 물려받아 이 job 도 건너뛴다(v0.2.157) —
+  # !cancelled() 로 그 전파를 끊고 게시 성공만 본다.
   windows-followup:
     needs: [resolve, appcast]
-    if: needs.resolve.outputs.windows_followup == 'true' && needs.appcast.result == 'success'
+    if: ${{ !cancelled() && needs.resolve.outputs.windows_followup == 'true' && needs.appcast.result == 'success' }}
     continue-on-error: true
     runs-on: ubuntu-latest
     permissions:

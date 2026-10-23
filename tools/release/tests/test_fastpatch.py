@@ -2146,6 +2146,8 @@ class PreviewReleaseTests(LocalFixture):
         self.assertNotIn("--clobber", preview_attach)
         followup = workflow.split("\n  windows-followup:\n", 1)[1]
         self.assertIn("continue-on-error: true", followup)
+        # 이 실행에선 build-msi 가 늘 건너뛰어진다 — 상태 함수가 없으면 그 건너뜀이 물려와 덤을 안 부른다(v0.2.157).
+        self.assertIn("if: ${{ !cancelled() && needs.resolve.outputs.windows_followup == 'true'", followup)
         self.assertIn("-f platforms=windows", followup)
 
     def test_manifestless_legacy_tags_remain_stable(self):
