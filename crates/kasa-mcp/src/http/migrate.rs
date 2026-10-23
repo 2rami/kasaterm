@@ -261,7 +261,7 @@ async fn term_transcript_get(
     let bad = |m: &str| {
         (axum::http::StatusCode::BAD_REQUEST, m.to_string()).into_response()
     };
-    let Some(cwd) = q.get("cwd").filter(|s| s.starts_with('/')) else {
+    let Some(cwd) = q.get("cwd").filter(|s| std::path::Path::new(s).is_absolute()) else {
         return bad("`cwd`(이 기계 기준 절대경로) 가 필요해요");
     };
     let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)) else {
@@ -478,7 +478,7 @@ async fn term_transcript_post(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let err = |msg: String| Json(serde_json::json!({ "ok": false, "error": msg }));
-    let Some(cwd) = q.get("cwd").filter(|s| s.starts_with('/')) else {
+    let Some(cwd) = q.get("cwd").filter(|s| std::path::Path::new(s).is_absolute()) else {
         return err("`cwd`(이 기계 기준 절대경로) 가 필요해요".into());
     };
     let Some(sid) = q.get("sid").filter(|s| valid_session_id(s)) else {

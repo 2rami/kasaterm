@@ -48,7 +48,8 @@ pub(crate) fn token_for(id: &str, session: &Arc<kasa_pty::PtySession>) -> String
 }
 
 pub(crate) fn idle_shell(pid: Option<u32>, table: &[(u32, u32, String)]) -> bool {
-    let Some(pid) = pid else { return false };
+    // Git bash 런처는 실셸을 자식으로 늘 물고 있어, 그대로 보면 빈 셸도 「작업 중」이다.
+    let Some(pid) = pid.map(|pid| kasa_pty::input_shell_pid(table, pid)) else { return false };
     let is_shell = table.iter().find(|(found, _, _)| *found == pid).is_some_and(|(_, _, name)| {
         let name = name.trim_start_matches('-').to_ascii_lowercase();
         let name = name.strip_suffix(".exe").unwrap_or(&name);
@@ -59,9 +60,16 @@ pub(crate) fn idle_shell(pid: Option<u32>, table: &[(u32, u32, String)]) -> bool
         && kasa_pty::agent_for_shell(table, pid).is_none()
 }
 
+/// 새 칸 셸이 입력줄 표식(OSC 133 B)을 내는가 — 도착 셸의 준비 판정이 그것을 본다. 맥은 zsh rc 가,
+/// Windows 는 cmd·PowerShell·Git bash 에 칸 셸을 띄울 때 심는다(`kasa-pty` lifecycle).
 pub(crate) fn prepared_launch_supported() -> bool {
-    cfg!(unix) && resolve_default_shell().or_else(|| std::env::var("SHELL").ok())
-        .and_then(|shell| std::path::Path::new(&shell).file_name().map(|name| name == "zsh")) == Some(true)
+    let shell = resolve_default_shell().or_else(|| std::env::var("SHELL").ok());
+    let stem = shell.as_deref().and_then(|shell| std::path::Path::new(shell).file_stem())
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase());
+    if cfg!(windows) {
+        return stem.as_deref().is_none_or(|stem| matches!(stem, "cmd" | "pwsh" | "powershell" | "bash"));
+    }
+    cfg!(unix) && stem.as_deref() == Some("zsh")
 }
 
 pub(crate) fn enrich_snapshot(snapshot: &mut MachineSnapshot) {
@@ -193,7 +201,7 @@ impl App {
         }).collect();
         MachineSnapshot { machine_id: machine.0.clone(), label: machine.1.clone(), instance: instance().into(),
             rooms: rooms.into_iter().map(|(room, _, _)| room).collect(), sessions,
-            room_transfer_supported: cfg!(unix) && self.tmux.is_none(), launch_supported: prepared_launch_supported() && self.tmux.is_none() }
+            room_transfer_supported: self.tmux.is_none(), launch_supported: prepared_launch_supported() && self.tmux.is_none() }
     }
 
     pub(crate) fn validate_transfer_identity(&self, identity: &SessionIdentity) -> Result<()> {

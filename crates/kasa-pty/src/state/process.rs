@@ -130,6 +130,11 @@ impl PtySession {
     }
 }
 
+/// 칸 셸 pid 를 입력을 읽는 셸로 — Windows Git bash 런처 아래의 실셸(`effective_shell_pid`). 유닉스는 그대로.
+pub fn input_shell_pid(table: &[(u32, u32, String)], pid: u32) -> u32 {
+    effective_shell_pid(table, pid)
+}
+
 /// Windows Git bash 는 런처(bin\bash.exe)가 실셸(usr\bin\bash.exe)을 자식으로
 /// 한 번 더 스폰하고, sh wrapper 스크립트도 셸을 한 단 더 끼운다 — 직계 자식만
 /// 보면 항상 "bash.exe"라 claude 탐지(색·프사 게이트)와 busy 판정이 전부 죽는다.

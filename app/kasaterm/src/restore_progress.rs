@@ -530,9 +530,10 @@ impl App {
             let sid = record.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
             if harness.is_empty() || sid.is_empty() { continue; }
             let cwd = record.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
-            let line = kasa_socket::sessions::resume_command(harness, sid, cwd);
+            let line = crate::session::windows_shell_line(&session, Some(cwd), &kasa_socket::sessions::resume_command(harness, sid, ""))
+                .unwrap_or_else(|| format!("{}\r", kasa_socket::sessions::resume_command(harness, sid, cwd)));
             let at = Instant::now() + Duration::from_millis(300);
-            self.pending_restores.push((session, format!("{line}\r"), at));
+            self.pending_restores.push((session, line, at));
             called.push(id);
         }
         if !called.is_empty() {

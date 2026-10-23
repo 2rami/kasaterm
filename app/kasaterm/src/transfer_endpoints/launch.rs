@@ -65,8 +65,11 @@ impl App {
                 let flag = if request.harness == "codex" { "--dangerously-bypass-approvals-and-sandbox" } else { "--dangerously-skip-permissions" };
                 command = format!("{} {flag}\r", command.trim_end_matches('\r'));
             }
-            // Shell aliases/functions can prepend a different permission mode than the source session used.
-            let command = format!("command '{}'{}", request.harness, &command[request.harness.len()..]);
+            // 별칭·프로필 함수가 출발 세션과 다른 권한 모드를 덧붙이지 않게 셰임을 직접 부른다.
+            let shell = session.input_shell_name().as_deref()
+                .and_then(kasa_socket::shell_line::ShellKind::from_process_name)
+                .unwrap_or(kasa_socket::shell_line::ShellKind::Posix);
+            let command = format!("{}\r", kasa_socket::shell_line::direct_line(shell, command.trim_end_matches('\r'))?);
             pending.previous_block = session.blocks_arc().lock().unwrap().back().map(|block| block.id);
             session.send_bytes_guarded(command.as_bytes(), Some(pending.revision))?;
             pending.sent = true;

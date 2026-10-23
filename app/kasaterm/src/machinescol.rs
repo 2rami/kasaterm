@@ -786,7 +786,6 @@ impl App {
     /// 데려오기(migrate_pane_back)의 진행 한 줄 — 그쪽은 아직 GUI 스레드 동기라
     /// 이걸 안 부르면 끝날 때까지 화면이 얼어붙은 채 무소식이다. 보내기는 워커로
     /// 넘어가 `migrate_stage` 가 대신한다(2026-09-07).
-    #[cfg(unix)]
     pub(crate) fn migrate_progress(&mut self, pane: &str, msg: String) {
         self.set_toast(format!("이사 — {msg}"));
         self.info.machines_col.busy = Some((pane.to_string(), msg));
@@ -878,17 +877,9 @@ impl App {
             let (label, rid, name, cwd) = (label.clone(), remote_id.clone(), name.clone(), cwd.clone());
             self.set_toast(format!("{name} 여기로 데려오는 중 — {}", crate::render::pane_identity::device_name(&label)));
             self.render_frame();
-            let outcome = self.mirror_remote_pane(&label, &rid, &name, &cwd).and_then(|id| {
-                #[cfg(unix)]
-                {
-                    self.migrate_pane_back(&id, None, false)
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = id;
-                    Err::<String, _>(anyhow::anyhow!("데려오기는 아직 Windows 에서 안 된다"))
-                }
-            });
+            let outcome = self
+                .mirror_remote_pane(&label, &rid, &name, &cwd)
+                .and_then(|id| self.migrate_pane_back(&id, None, false));
             match outcome {
                 Ok(msg) => self.set_toast(format!("{name} 데려옴 — {msg}")),
                 Err(e) => self.set_toast(format!("데려오기 실패 — {e:#}")),
@@ -934,16 +925,6 @@ impl App {
         self.set_toast(format!("이사 — {going}"));
         self.chrome_dirty = true;
         self.render_frame();
-        // 이사의 본체는 unix 전용이다(session.rs 의 `migrate_pane`·`migrate_pane_back`
-        // 이 `#[cfg(unix)]`) — 원격 셸 철거와 claude 를 곱게 끄는 신호가 그쪽 전제다.
-        // 버튼을 숨기는 대신 눌렀을 때 이유를 말하기로 했다(2026-08-31 지시): 맥과
-        // 화면이 같아 렌더 분기가 안 늘고, 구현되면 이 갈래만 걷어내면 된다.
-        // Err 는 아래 성공/실패 갈림을 그대로 타 note 와 토스트로 사람에게 뜬다.
-        #[cfg(not(unix))]
-        let outcome: anyhow::Result<String> = Err(anyhow::anyhow!(
-            "이사는 아직 Windows 에서 안 된다 — 원격 셸을 다루는 unix 전용 경로다"
-        ));
-        #[cfg(unix)]
         let outcome = match btn {
             state::MachinesColBtn::Screen { .. }
             | state::MachinesColBtn::Unfold { .. }
@@ -960,8 +941,7 @@ impl App {
                 let local = self
                     .pty
                     .get(&pane)
-                    .and_then(|s| s.shell_pid())
-                    .and_then(socket::pid_cwd);
+                    .and_then(|s| crate::session::migration_cwd(s, &pane));
                 let remote_cwd = match &local {
                     Some(l) => Some(
                         kasa_mcp::machines::map_local_to_remote(&m, &l.to_string_lossy())

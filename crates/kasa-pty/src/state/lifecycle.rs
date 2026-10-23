@@ -227,17 +227,19 @@ impl PtySession {
         // when we know we're handing off to zsh / bash so .zshrc /
         // .bashrc gets sourced (matches what tmux-bridge does inside
         // its `new-session -d 'exec $SHELL -il'`).
+        // `-il` (login + interactive) is a bash/zsh/sh-ism that sources
+        // rc files. PowerShell / cmd / wsl reject unknown flags ("Invalid
+        // argument '-il'"), so only hand it to POSIX-style shells, matched
+        // by executable stem (drops the `.exe` on Windows).
+        let stem = opts
+            .shell
+            .as_deref()
+            .and_then(|shell| std::path::Path::new(shell).file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let mut cmd = if let Some(shell) = opts.shell.as_deref() {
             let mut c = CommandBuilder::new(shell);
-            // `-il` (login + interactive) is a bash/zsh/sh-ism that sources
-            // rc files. PowerShell / cmd / wsl reject unknown flags ("Invalid
-            // argument '-il'"), so only hand it to POSIX-style shells, matched
-            // by executable stem (drops the `.exe` on Windows).
-            let stem = std::path::Path::new(shell)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
             if matches!(stem.as_str(), "bash" | "zsh" | "sh" | "dash" | "ksh") {
                 c.arg("-il");
             } else if matches!(stem.as_str(), "pwsh" | "powershell") {
@@ -348,6 +350,21 @@ impl PtySession {
             // kasaterm-cli wins over brew. zsh-only; other shells ignore
             // ZDOTDIR and use the PATH prepend above.
             cmd.env("ZDOTDIR", &shim_dir);
+            // 이사 도착 셸의 준비 판정(`prompt_end`)은 OSC 133 A/B 표식이다 — zsh 는 위 rc, PowerShell 은
+            // PWSH_CWD_SHIM 이 심는다. cmd 는 프롬프트 환경변수로, Git bash 는 프롬프트마다 도는 PROMPT_COMMAND
+            // 로 PS1 을 한 번 감싼다. 사용자 rc 가 PROMPT_COMMAND 를 덮으면 표식 없이 뜨고, 이사는 「도착 셸이
+            // 준비되지 않았어요」로 멈춘다. 셸을 안 고르면 ComSpec(cmd)이 뜬다.
+            #[cfg(windows)]
+            match stem.as_str() {
+                "cmd" | "" => {
+                    let user = std::env::var("PROMPT").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "$P$G".into());
+                    if !user.contains("133;B") {
+                        cmd.env("PROMPT", format!("$e]133;A$e\\{user}$e]133;B$e\\"));
+                    }
+                }
+                "bash" => cmd.env("PROMPT_COMMAND", BASH_PROMPT_MARKS),
+                _ => {}
+            }
         }
         // TMUX is intentionally NOT set in the child env: Claude Code / ink /
         // chalk read its presence as "inside tmux" and downgrade truecolor to
@@ -632,10 +649,18 @@ impl Drop for PtySession {
 /// 승계한다 — 값을 받는 플래그(`--model opus`)는 값까지 옮기지 못하는 한계가 있다.
 /// `__ktcs` 마커로 재진입을 막아 두 번 돌아도 승계한 플래그를 잃지 않는다.
 /// 앱 밖(shim 디렉터리 없음)에서는 아무것도 하지 않는다.
+///
+/// 돌려주는 프롬프트 글을 OSC 133 A/B 로 감싼다 — 이사 도착 셸의 준비 판정(입력줄 시작 `B`)이 이것을
+/// 본다. `B` 는 프롬프트 글 **뒤**여야 해서 `[Console]::Write` 가 아니라 돌려주는 글에 싣는다.
 const PWSH_CWD_SHIM: &str = concat!(
-    "$__ktp=$function:prompt; function global:prompt { $l=$ExecutionContext.SessionState.Path.CurrentLocation; if($l -and $l.Provider.Name -eq 'FileSystem'){[Console]::Write([char]27+']9;9;'+$l.ProviderPath+[char]27+'\\')}; if($__ktp){& $__ktp}else{'PS '+$PWD.Path+'> '} }",
+    "$__ktp=$function:prompt; function global:prompt { $l=$ExecutionContext.SessionState.Path.CurrentLocation; if($l -and $l.Provider.Name -eq 'FileSystem'){[Console]::Write([char]27+']9;9;'+$l.ProviderPath+[char]27+'\\')}; $p=if($__ktp){(& $__ktp) -join ''}else{'PS '+$PWD.Path+'> '}; [char]27+']133;A'+[char]7+$p+[char]27+']133;B'+[char]7 }",
     "; if($env:KASATERM_TMUX_SHIM_DIR){$__kts=Join-Path $env:KASATERM_TMUX_SHIM_DIR 'claude.cmd'; $__ktq=(Test-Path function:claude) -and (\"$function:claude\" -match '__ktcs'); if((Test-Path $__kts) -and (-not $__ktq)){$__ktf=@(); if(Test-Path function:claude){$__ktf=@([regex]::Matches(\"$function:claude\",'--[a-z][a-z0-9-]*')|ForEach-Object{$_.Value}|Select-Object -Unique)}; $global:__ktcs=$__kts; $global:__ktcf=$__ktf; function global:claude { $a=$global:__ktcf; & $global:__ktcs @a @args }}}",
 );
+
+/// Git bash 칸의 PROMPT_COMMAND — PS1 을 OSC 133 A/B 로 한 번만 감싼다. 테마가 PS1 을 다시 지으면 다음
+/// 프롬프트에 다시 감싼다.
+#[cfg(windows)]
+const BASH_PROMPT_MARKS: &str = r#"[[ "$PS1" == *'133;B'* ]] || PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'"#;
 
 /// 셸이 떨어질 홈. Windows GUI 프로세스엔 `HOME` 이 없고 `USERPROFILE` 만 있다.
 fn home_dir() -> Option<std::ffi::OsString> {

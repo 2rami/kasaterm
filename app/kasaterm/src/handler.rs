@@ -669,7 +669,6 @@ impl ApplicationHandler<UserEvent> for App {
                 // 「옮길 학생 본인이 직접 옮기게도」). 이름이면 명부에서 주소를
                 // 찾고, --cwd 가 없으면 roots 매핑으로 도착 경로까지 정한다
                 // (이사 탭 버튼과 같은 정책).
-                #[cfg(unix)]
                 let outcome = (|| {
                     let (base, cwd) = if base.starts_with("http") {
                         (base.clone(), cwd.clone())
@@ -693,8 +692,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 let local = self
                                     .pty
                                     .get(pane)
-                                    .and_then(|s| s.shell_pid())
-                                    .and_then(crate::socket::pid_cwd)
+                                    .and_then(|s| crate::session::migration_cwd(s, pane))
                                     .ok_or_else(|| {
                                         anyhow::anyhow!("{pane} 의 작업 폴더를 못 읽었다")
                                     })?;
@@ -728,9 +726,6 @@ impl ApplicationHandler<UserEvent> for App {
                     )
                 })()
                 .map_err(|e| format!("{e:#}"));
-                #[cfg(not(unix))]
-                let outcome: std::result::Result<String, String> =
-                    Err("이사는 unix 전용이다".to_string());
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket migrate 실패: {why}");
                 }
@@ -775,12 +770,8 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketMigrateToRoom(request, reply) => {
-                #[cfg(unix)]
                 let result = self.start_transfer_migration(request, Some(reply.clone()))
                     .map_err(|error| format!("{error:#}"));
-                #[cfg(not(unix))]
-                let result: std::result::Result<String, String> = Err("이사는 unix 전용이에요".into());
-                #[cfg(unix)]
                 if result.is_ok() && self.migrate_running(&request.session.pane_id) {
                     return;
                 }
@@ -798,13 +789,9 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
-                #[cfg(unix)]
                 let outcome = self
                     .migrate_pane_back(pane, cwd.as_deref(), *force)
                     .map_err(|e| format!("{e:#}"));
-                #[cfg(not(unix))]
-                let outcome: std::result::Result<String, String> =
-                    Err("이사는 unix 전용이다".to_string());
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket migrate back 실패: {why}");
                 }
@@ -1386,7 +1373,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 id,
                                 cwd.as_deref().unwrap_or(""),
                             );
-                            format!("{line}\r")
+                            crate::session::windows_shell_line(&sess, cwd.as_deref(), &kasa_socket::sessions::resume_command(harness, id, ""))
+                                .unwrap_or_else(|| format!("{line}\r"))
                         };
                         let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
                         self.pending_restores.push((sess, cmd, at));

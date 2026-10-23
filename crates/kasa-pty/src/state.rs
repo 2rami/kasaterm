@@ -61,6 +61,7 @@ pub use screen::{PromptAnchor, ViewerSnapshot};
 pub use vt::set_host_colors;
 pub(crate) use inline::{b64_decode, png_size};
 pub(crate) use process::{process_cmdline, process_env_vars};
+pub use process::input_shell_pid;
 use agents::AgentsViewCache;
 use inline::InlineImgs;
 use viewport::ViewportSizes;

@@ -1139,6 +1139,7 @@ impl App {
                 cmd.pop();
                 cmd.push_str(" --dangerously-skip-permissions\r");
             }
+            let cmd = windows_shell_line(&session, None, &cmd).unwrap_or(cmd);
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         } else {
@@ -1382,6 +1383,27 @@ pub(crate) fn restore_agent_command(
     }
     cmd.push('\r');
     cmd
+}
+
+/// 칸에 넣을 POSIX 꼴 하네스 줄(`claude --resume … --model '…'\r`)을 그 칸 셸이 cmd·PowerShell 이면 그 문법으로
+/// 다시 짓는다 — 그대로 치면 작은따옴표가 글자로 남아 모델 이름이 깨지고, `cd '…'` 는 옮기지 못한다.
+/// PowerShell 칸의 `claude` 는 프로필 함수라 `--%` 인자를 통째 한 덩어리로 받으므로 셰임을 직접 부른다.
+/// POSIX 셸이거나 셸을 못 읽으면 `None` — 부른 쪽이 원래 줄을 쓴다.
+pub(crate) fn windows_shell_line(session: &kasa_pty::PtySession, cwd: Option<&str>, posix: &str) -> Option<String> {
+    use kasa_socket::shell_line::{direct_line, plain_path, ShellKind};
+    if !cfg!(windows) {
+        return None;
+    }
+    let kind = session.input_shell_name().as_deref().and_then(ShellKind::from_process_name)?;
+    if !matches!(kind, ShellKind::Cmd | ShellKind::PowerShell) {
+        return None;
+    }
+    let run = direct_line(kind, posix.trim_end_matches('\r')).ok()?;
+    let line = match cwd.filter(|dir| !dir.is_empty()) {
+        Some(dir) => kind.cd_then(&plain_path(dir), &run),
+        None => run,
+    };
+    Some(line + kind.enter())
 }
 
 /// 저장된 학생을 그대로 되살릴 것인가.

@@ -172,7 +172,8 @@ async fn term_changes_handler(q: Query<std::collections::HashMap<String, String>
 async fn term_path_get(
     q: Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let Some(path) = q.get("path").filter(|p| p.starts_with('/')) else {
+    // Windows 호스트의 `C:\…` 도 절대경로다 — 이사가 도착 폴더를 이 창구로 묻는다.
+    let Some(path) = q.get("path").filter(|p| std::path::Path::new(p).is_absolute()) else {
         return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
     };
     let home = kasa_socket::home_dir()

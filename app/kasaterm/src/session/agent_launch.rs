@@ -551,6 +551,7 @@ impl App {
                     cmd.pop();
                     cmd.push_str(" --dangerously-skip-permissions\r");
                 }
+                let cmd = super::restore::windows_shell_line(&sess, None, &cmd).unwrap_or(cmd);
                 let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
                 self.pending_restores.push((sess, cmd, at));
                 self.resize_backend(cols, rows);

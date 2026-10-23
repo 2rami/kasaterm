@@ -16,6 +16,23 @@ pub(crate) struct PendingMigration {
     pub(crate) transfer: Option<kasa_socket::transfer::MigrateRequest>,
 }
 
+/// 이사가 볼 칸의 작업 폴더. PowerShell 은 `cd` 해도 프로세스 cwd 가 뜰 때 그대로이고, `cd …; claude` 를
+/// 한 줄로 치면 OSC 9;9 도 옛 자리다 — Windows 는 하네스가 뜬 자리(그 프로세스의 cwd), 셸이 알린 자리,
+/// 셸 프로세스 cwd 순으로 본다.
+pub(crate) fn migration_cwd(session: &kasa_pty::PtySession, pane: &str) -> Option<std::path::PathBuf> {
+    let shell = session.shell_pid()?;
+    #[cfg(windows)]
+    {
+        let agent = kasa_pty::agent_pid_for_pane(&kasa_pty::process_table_shared(), shell, pane);
+        if let Some(cwd) = agent.and_then(|(_, pid)| socket::pid_cwd(pid)).or_else(|| session.reported_cwd()) {
+            return Some(cwd);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = pane;
+    socket::pid_cwd(shell)
+}
+
 pub(super) fn ensure_migration_slot(queue: &[PendingMigration], pane: &str) -> Result<()> {
     if queue.iter().any(|pending| pending.pane == pane) {
         anyhow::bail!("이 세션에는 이미 예약된 이사가 있어요. 기존 요청이 끝난 뒤 다시 시도해 주세요");
@@ -59,7 +76,7 @@ fn release_migration_input(expected: &std::sync::Weak<kasa_pty::PtySession>, cur
 fn ensure_prepared_destination(snapshot: &kasa_socket::transfer::MachineSnapshot, expected: &str) -> Result<()> {
     anyhow::ensure!(snapshot.machine_id == expected, "도착 기기의 신원이 바뀌었어요. 출발 세션을 유지했어요");
     anyhow::ensure!(snapshot.room_transfer_supported && snapshot.launch_supported,
-        "도착 기기는 대화 재개 확인을 지원하는 새 판과 zsh 셸이 필요해요. 출발 세션을 유지했어요");
+        "도착 기기는 대화 재개 확인을 지원하는 새 판이어야 하고, 새 칸 셸이 맥은 zsh, Windows 는 cmd·PowerShell·Git bash 여야 해요. 출발 세션을 유지했어요");
     Ok(())
 }
 
@@ -144,7 +161,6 @@ impl App {
     /// ⑤만 GUI 스레드 몫이라 `MigrateDone` 을 받은 `migrate_finish` 가 한다. 이
     /// 함수는 검사·재료 수집만 하고 바로 돌아온다 — 반환 문구는 「시작됨」이지
     /// 「끝남」이 아니다.
-    #[cfg(unix)]
     pub(crate) fn migrate_pane(
         &mut self,
         pid: &str,
@@ -159,7 +175,6 @@ impl App {
     /// `migrate_pane` + 끝났을 때 답을 받을 창구. 소켓(CLI·보드·학생 셀프 이사)은
     /// 최종 결과(원격 pane id)를 기다리므로 그 창구를 진행 상태에 맡겨 두고,
     /// `migrate_finish` 가 끝에서 보낸다. 예약(턴 중)·검사 실패는 여기서 바로 답한다.
-    #[cfg(unix)]
     pub(crate) fn migrate_pane_with_reply(
         &mut self,
         pid: &str,
@@ -172,7 +187,6 @@ impl App {
         self.migrate_pane_with_destination(pid, base, remote_cwd, force, run, reply, None)
     }
 
-    #[cfg(unix)]
     pub(crate) fn start_transfer_migration(
         &mut self,
         request: &kasa_socket::transfer::MigrateRequest,
@@ -185,7 +199,7 @@ impl App {
             let shell = source.shell_pid().ok_or_else(|| anyhow::anyhow!("셸 상태를 확인하지 못했어요"))?;
             let command = socket::foreground_proc_name(shell)
                 .ok_or_else(|| anyhow::anyhow!("실행 중인 프로그램을 확인하지 못했어요"))?;
-            if !matches!(command.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh") {
+            if kasa_socket::shell_line::ShellKind::from_process_name(&command).is_none() {
                 anyhow::bail!("다른 프로그램이 실행 중이라 이사할 수 없어요");
             }
         }
@@ -201,7 +215,6 @@ impl App {
         )
     }
 
-    #[cfg(unix)]
     pub(super) fn migrate_pane_with_destination(
         &mut self,
         pid: &str,
@@ -230,7 +243,7 @@ impl App {
         // 에이전트가 **없는** 셸 pane 이면 이사가 아니라 **그 기계 태생 스폰**이다
         // — 옮길 대화가 없으니 레포만 맞추고 저쪽에 진짜 학생을 앉힌 뒤 이 pane 을
         // 거울로 바꾼다(2026-08-30 지시 「claude mini 이렇게 키면 맥미니에서 켜게」).
-        let agent = kasa_pty::agent_pid_for_shell(&kasa_pty::process_table_shared(), shell);
+        let agent = kasa_pty::agent_pid_for_pane(&kasa_pty::process_table_shared(), shell, pid);
         if let Some((kind, _)) = &agent {
             if !matches!(
                 kind,
@@ -290,7 +303,7 @@ impl App {
                 )
             })?)
         };
-        let cwd = socket::pid_cwd(shell)
+        let cwd = migration_cwd(&sess, pid)
             .ok_or_else(|| anyhow::anyhow!("{pid} 의 작업 폴더를 못 읽었다"))?;
         let remote_cwd = remote_cwd
             .map(str::to_string)
@@ -329,20 +342,13 @@ impl App {
         // 태생 스폰(fresh)은 물려받을 인자가 없다 — 학생 스폰 관례(bypass)를 따른다.
         let bypass = match &agent {
             None => true,
-            Some((_, agent_pid)) => crate::proc::command("ps")
-                .args(["-o", "command=", "-p", &agent_pid.to_string()])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| {
-                    let cmd = String::from_utf8_lossy(&o.stdout).into_owned();
-                    if is_codex {
-                        cmd.contains("--dangerously-bypass-approvals-and-sandbox")
-                    } else {
-                        cmd.contains("--dangerously-skip-permissions")
-                    }
-                })
-                .unwrap_or(false),
+            Some((_, agent_pid)) => kasa_pty::process_cmdline(*agent_pid).is_some_and(|cmd| {
+                if is_codex {
+                    cmd.contains("--dangerously-bypass-approvals-and-sandbox")
+                } else {
+                    cmd.contains("--dangerously-skip-permissions")
+                }
+            }),
         };
         let character = self
             .ws
@@ -608,12 +614,15 @@ impl App {
         };
         // 갓 만든 원격 pane 의 셸은 소환된 자리(그 창의 기준 pane)에서 뜬다 —
         // 레포로 옮겨 놓고 이어받아야 학생이 제 코드 위에서 깬다.
-        let cmd = if r.remote_pane.is_some() {
+        let cmd = if r.remote_pane.is_some() && r.transfer_reserved.is_none() {
             format!("cd '{}' && {}", r.remote_cwd.replace('\'', r"'\''"), cmd)
         } else {
             cmd
         };
-        if !r.launched { self.pending_restores.push((
+        // 방 이사로 준비한 빈 셸은 작업 폴더에서 이미 떠 있다 — 칠 것이 자리표시(`:`)뿐이면 안 친다. cmd·PowerShell
+        // 은 `:` 를 명령으로 못 읽는다.
+        let idle_placeholder = r.transfer_reserved.is_some() && r.sid.is_none() && r.run.as_deref() == Some(":");
+        if !r.launched && !idle_placeholder { self.pending_restores.push((
             remote.session.clone(),
             cmd,
             // 갓 소환된 pane 은 셸이 뜨는 데 한 박자 더 걸린다.
@@ -648,7 +657,6 @@ impl App {
     /// ②가 ③보다 먼저인 이유: jsonl 은 살아 있는 동안에도 읽을 수 있지만, 끄기
     /// 전에 받으면 마지막 턴이 파일에 덜 실린 채 건너온다 — 순방향이 SIGTERM
     /// 뒤에 업로드하는 것과 같은 순서다.
-    #[cfg(unix)]
     pub(crate) fn migrate_pane_back(
         &mut self,
         pid: &str,
@@ -678,7 +686,13 @@ impl App {
         };
         let sid = back_migration_sid(local_sid, fetched)?;
         self.pane_claude_sid.insert(pid.to_string(), sid.clone());
-        let Some(remote_cwd) = info.remote_cwd.clone() else {
+        // 방 이사 뒤 이쪽에 남는 것은 그 기기 방의 보기 창이라 이사 링크의 기억(remote_cwd)이 없다 — 그 기기가
+        // 알려 준 칸 목록의 cwd 로 메운다.
+        let remote_cwd = info.remote_cwd.clone().or_else(|| {
+            crate::machinescol::remote_pane_facts(pid)
+                .and_then(|(_, facts)| facts.get("cwd")?.as_str().filter(|cwd| !cwd.is_empty()).map(str::to_string))
+        });
+        let Some(remote_cwd) = remote_cwd else {
             anyhow::bail!("{pid} 의 원격 작업 폴더를 모른다 — 옛 저장본이다. 한 번 재시작해 다시 저장되면 생긴다");
         };
         // 순방향과 같은 관문 — 원격 학생이 턴 중이면 agent-stop 이 그 턴을 자른다.
@@ -860,6 +874,7 @@ impl App {
         } else {
             cmd
         };
+        let cmd = windows_shell_line(&session, None, &cmd).unwrap_or(cmd);
         self.pending_restores.push((
             session,
             cmd,
@@ -884,7 +899,6 @@ impl App {
     /// 잠시 이어졌는지) 보고 끝났으면 이사를 실행한다. 한 틱에 하나만 발사한다 —
     /// migrate_pane 은 GUI 스레드에서 몇 초를 먹으므로 몰아서 하면 화면이 굳는다.
     pub(crate) fn run_pending_migrations(&mut self) {
-        #[cfg(unix)]
         {
             // 이사는 한 번에 하나다 — 도는 동안 발사하면 「이미 도는 중」으로 실패하고 그 예약은
             // 큐에서 빠진 채 사라진다(예약이 둘 이상일 때).
@@ -1119,7 +1133,6 @@ mod transfer_concurrency_tests {
 
 /// 이사 워커의 재료 — GUI 가 검사·수집을 끝내고 스레드에 통째로 넘긴다. 전부
 /// 소유값이라 워커는 App 을 모른다.
-#[cfg(unix)]
 pub(super) struct MigratePlan {
     pub(super) pid: String,
     /// 명부 라벨 — 오류 문장에 어느 기계인지 박는다.
@@ -1165,7 +1178,6 @@ pub(crate) struct MigrateReady {
 /// 이사 ①~④ — 네트워크·기다림뿐이라 GUI 밖에서 돈다. 단계마다 `MigrateStage`,
 /// 끝에 `MigrateDone` 을 보낸다. 실패는 그 단계가 Running 인 채로 Err 가 가고,
 /// GUI 가 그 자리에 ✗ 를 찍는다.
-#[cfg(unix)]
 pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
     use state::MigrateStageState as S;
     let stage = |i: usize, st: S, note: String| {
@@ -1226,7 +1238,9 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
         let fast_launch = if let Some(target) = reserved.as_ref().filter(|_| p.sid.is_some()) {
             let mut snapshot = kasa_mcp::remote::transfer_snapshot(&p.base)?;
             if snapshot.launch_supported {
-                let deadline = Instant::now() + std::time::Duration::from_secs(8);
+                // 도착 셸이 프롬프트를 낼 때까지. Windows PowerShell 은 사용자 프로필(conda 등)로 7초 남짓 걸린다
+                // (2026-10-23 실측 6.8초) — 그동안 출발 세션은 그대로라 넉넉히 기다린다.
+                let deadline = Instant::now() + std::time::Duration::from_secs(20);
                 loop {
                     let row = snapshot.sessions.iter().find(|row| row.identity == target.identity)
                         .ok_or_else(|| anyhow::anyhow!("준비한 도착 셸이 바뀌었어요. 출발 세션은 유지했어요"))?;
@@ -1243,7 +1257,7 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
             validate()?;
             let table = kasa_pty::fresh_process_table();
             let shell = kasa_pty::lookup_session(&p.pid).and_then(|session| session.shell_pid());
-            let current = shell.and_then(|shell| kasa_pty::agent_pid_for_shell(&table, shell)).map(|(_, pid)| pid);
+            let current = shell.and_then(|shell| kasa_pty::agent_pid_for_pane(&table, shell, &p.pid)).map(|(_, pid)| pid);
             ensure_transfer_agent(p.agent_pid, current)?;
             if p.agent_pid.is_none() && !crate::transfer_endpoints::idle_shell(shell, &table) {
                 anyhow::bail!("이사 준비 중 셸에서 작업이 시작됐어요. 현재 작업을 유지하고 이사를 중단했어요");
@@ -1256,14 +1270,12 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
         match (p.agent_pid, &p.sid) {
             (Some(agent_pid), Some(sid)) => {
                 stage(1, S::Running, String::new());
-                unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-                while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
-                    if std::time::Instant::now() > deadline {
-                        anyhow::bail!("캐릭터(pid {agent_pid}) 이 8초 안에 안 꺼졌다 — 이사를 세웠다");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(120));
-                }
+                let session = kasa_pty::lookup_session(&p.pid).ok_or_else(|| anyhow::anyhow!("출발 칸이 사라졌어요"))?;
+                let kind = if p.is_codex { kasa_pty::AgentKind::Codex } else { kasa_pty::AgentKind::Claude };
+                kasa_mcp::agent_stop::stop_agent(&session, kind, agent_pid, p.force, || {
+                    crate::tell_delivery::resumed_input_ready(&session, kind)
+                })
+                .map_err(|e| anyhow::anyhow!("{e:#} — 이사를 세웠다"))?;
                 source_stopped = true;
                 stage(1, S::Done, String::new());
                 // ③ 대화 옮기기
