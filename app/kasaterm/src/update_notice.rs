@@ -99,8 +99,7 @@ impl App {
     /// 화면이 사라지기 때문이다.
     #[cfg(target_os = "macos")]
     fn confirm_update_relaunch(&mut self) {
-        let dirty = self.dirty_docs(&crate::PendingClose::Window).len();
-        let Some(what) = interrupts(&self.update_interrupted_panes(), dirty) else {
+        let Some(what) = self.update_interrupts_now() else {
             crate::macos_sparkle::answer_relaunch(true);
             return;
         };
@@ -179,14 +178,22 @@ impl App {
             return;
         }
         // 끊길 것을 보여 주고 한 번 더 묻는다 — 까닭은 macOS 의 `confirm_update_relaunch` 와 같다.
-        if notice.stage == Stage::Offer {
-            let dirty = self.dirty_docs(&crate::PendingClose::Window).len();
-            if let Some(what) = interrupts(&self.update_interrupted_panes(), dirty) {
-                self.update_notice = Some(Notice { stage: Stage::Interrupts(what), shown_at: None, ..notice });
-                return;
+        match notice.stage {
+            Stage::Offer => {
+                if let Some(what) = self.update_interrupts_now() {
+                    self.update_notice = Some(Notice { stage: Stage::Interrupts(what), shown_at: None, ..notice });
+                    return;
+                }
             }
+            // 설치기를 띄우기 직전에 같은 끊김이면 WinSparkle 쪽에서 다시 묻지 않는다.
+            Stage::Interrupts(what) => crate::win_sparkle::accept_interrupts(&what),
         }
         self.start_update_install();
+    }
+
+    /// 지금 다시 켜면 잃는 것. 알림·설치 직전 확인이 같은 답을 쓴다.
+    pub(crate) fn update_interrupts_now(&self) -> Option<String> {
+        interrupts(&self.update_interrupted_panes(), self.dirty_docs(&crate::PendingClose::Window).len())
     }
 
     /// 다시 켜면 끊길 창. 학생은 상태(일함·사람 기다림)로, 학생이 아닌 창은 도는 명령으로 본다.

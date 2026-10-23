@@ -16,11 +16,80 @@
 //! `win_sparkle_check_update_with_ui_and_install` 로 위임 — "업데이트 있음"
 //! 창을 건너뛰고 다운로드 진행바 → EdDSA 검증 → MSI 실행까지 WinSparkle 의
 //! 검증·설치 머신을 그대로 쓴다.
+//!
+//! 확인 주기는 맥과 같다 — 켠 지 10초 뒤, 그 뒤 안정판은 하루, preview 참여 기기는 한 시간마다. 참여 판정도
+//! 맥과 같은 두 설정(`version::preview_opted_in`)이고, 참여 기기는 피드만 preview 로 바뀐다.
+//!
+//! MSI 는 앱이 떠 있으면 「Files in Use」를 묻고 사람이 앱을 꺼야 했다. 그래서 WinSparkle 이 설치기를 띄우기
+//! 직전(can-shutdown)에 끊길 일을 다시 재고, 띄운 직후(shutdown-request) 앱이 스스로 정상 종료(`exiting` — 세션
+//! 저장)한다. 알림의 [그래도 업데이트]에서 이미 받아들인 끊김과 같으면 다시 묻지 않는다.
 
 use std::sync::Mutex;
+#[cfg(any(windows, test))]
+use std::time::Duration;
+
+#[cfg(any(windows, test))]
+const STABLE_FEED: &str = "https://2rami.github.io/kasaterm/appcast-win.xml";
+#[cfg(any(windows, test))]
+const PREVIEW_FEED: &str = "https://2rami.github.io/kasaterm/appcast-win-preview.xml";
+/// 켠 뒤 첫 확인까지 — 창이 서고 세션이 돌아온 뒤에 알림이 서게 한다(맥 `FIRST_PROBE`).
+#[cfg(any(windows, test))]
+const FIRST_PROBE: Duration = Duration::from_secs(10);
+
+/// 이 기기가 받는 판 — 빠른 업데이트(preview)에 참여했나.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Channel {
+    Stable,
+    Preview,
+}
+
+#[cfg(any(windows, test))]
+impl Channel {
+    pub(crate) fn of(settings: &serde_json::Value) -> Self {
+        if crate::version::preview_opted_in(settings) { Self::Preview } else { Self::Stable }
+    }
+
+    /// 이 채널의 Windows 피드.
+    pub(crate) fn feed(self) -> &'static str {
+        match self {
+            Self::Stable => STABLE_FEED,
+            Self::Preview => PREVIEW_FEED,
+        }
+    }
+
+    /// 다음 확인까지 — 맥 안정판(Info.plist `SUScheduledCheckInterval`)과 preview(`PROBE_EVERY`) 그대로.
+    fn probe_every(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Stable => 86_400,
+            Self::Preview => 3600,
+        })
+    }
+}
+
+/// 알림의 [그래도 업데이트]에서 사람이 받아들인 끊김. 설치 직전 끊김이 이것과 같으면 다시 묻지 않는다.
+static ACCEPTED: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn accept_interrupts(what: &str) {
+    if let Ok(mut accepted) = ACCEPTED.lock() {
+        *accepted = Some(what.to_string());
+    }
+}
+
+/// 설치기를 띄워도 되나. `asked` 는 GUI 스레드의 답 — `None` 이면 앱이 답하지 못한 것이고(멈춤) 그땐 끄지 않는다.
+/// 끊길 일이 있으면 이미 받아들인 것과 같을 때만 그냥 가고, 아니면 사람에게 묻는다.
+#[cfg(any(windows, test))]
+fn may_quit(asked: Option<Option<String>>, accepted: Option<&str>, confirm: impl FnOnce(&str) -> bool) -> bool {
+    match asked {
+        None => false,
+        Some(None) => true,
+        Some(Some(what)) if accepted == Some(what.as_str()) => true,
+        Some(Some(what)) => confirm(&what),
+    }
+}
 
 /// 체커 스레드가 찾은 새 버전. GUI(about_to_wait)가 take 해 새 판 알림을 세운다.
-/// take 후엔 이번 실행에선 다시 안 뜬다(다음 실행 때 재체크).
+/// 주기 확인이 같은 판을 다시 찾아도 알림 쪽(`offer_update`)이 서 있는 알림·닫은 판을 거른다.
 static FOUND: Mutex<Option<String>> = Mutex::new(None);
 
 pub(crate) fn take_found() -> Option<String> {
@@ -91,23 +160,30 @@ pub(crate) use ffi::{available, init, install};
 
 #[cfg(windows)]
 mod ffi {
-    use super::{parse_appcast_version, version_newer, FOUND};
+    use super::{parse_appcast_version, version_newer, ACCEPTED, FIRST_PROBE, FOUND};
+    use crate::UserEvent;
     use std::ffi::c_char;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
 
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    };
 
-    // Windows 전용 appcast 피드(mac 은 appcast.xml 을 따로 쓴다). EdDSA 공개키는 mac
-    // Sparkle 과 **공유** — `.msi` 를 mac `sign_update`(Keychain 개인키)로 서명하면
-    // WinSparkle 이 이 공개키로 검증한다(서명 알고리즘 호환). build-app.sh 의
-    // SUPublicEDKey 와 동일해야 한다.
-    const APPCAST_URL: &str = "https://2rami.github.io/kasaterm/appcast-win.xml";
+    // EdDSA 공개키는 mac Sparkle 과 **공유** — `.msi` 를 mac `sign_update`(Keychain 개인키)로 서명하면
+    // WinSparkle 이 이 공개키로 검증한다(서명 알고리즘 호환). build-app.sh 의 SUPublicEDKey 와 동일해야 한다.
     const ED_PUBLIC_KEY: &str = "E4tFAb2UND+0QhgTSv2pFYKIC3ReT/dLia20KHfZxKw=";
+    /// 설치 직전 GUI 스레드에 끊길 일을 묻고 기다리는 한도. 넘기면 앱이 멈춘 것이라 끄지 않는다.
+    const ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
     static STARTED: AtomicBool = AtomicBool::new(false);
     // win_sparkle_check_update_with_ui_and_install 함수 포인터 — init 성공 시
     // 채워지고 install() 이 호출한다. 0 이면(DLL 없음) install 은 no-op.
     static INSTALL_FN: AtomicUsize = AtomicUsize::new(0);
+    /// WinSparkle 콜백은 주 스레드가 아닌 곳에서 온다 — GUI 에는 이벤트로만 닿는다.
+    static PROXY: OnceLock<Mutex<winit::event_loop::EventLoopProxy<UserEvent>>> = OnceLock::new();
 
     // WinSparkle C API (__cdecl). x64 는 호출규약이 하나라 extern "C" 로 매핑된다.
     // URL/key 는 char*(UTF-8), app_details 는 wchar_t*(UTF-16) — winsparkle.h 참고.
@@ -116,6 +192,8 @@ mod ffi {
     type CSetDetails = unsafe extern "C" fn(*const u16, *const u16, *const u16);
     type CSetInt = unsafe extern "C" fn(i32);
     type CVoid = unsafe extern "C" fn();
+    type CSetCanShutdown = unsafe extern "C" fn(Option<unsafe extern "C" fn() -> i32>);
+    type CSetShutdownRequest = unsafe extern "C" fn(Option<unsafe extern "C" fn()>);
 
     fn utf16z(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -127,16 +205,43 @@ mod ffi {
         v
     }
 
+    fn send(event: UserEvent) -> bool {
+        PROXY.get().and_then(|p| p.lock().ok()).is_some_and(|p| p.send_event(event).is_ok())
+    }
+
+    /// WinSparkle 이 설치기를 띄우기 직전. 끊길 일은 GUI 스레드만 알아 묻고 기다린다(이 콜백은 주 스레드가 아니다).
+    unsafe extern "C" fn can_shutdown() -> i32 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asked = send(UserEvent::UpdaterMayQuit(tx)).then(|| rx.recv_timeout(ASK_TIMEOUT).ok()).flatten();
+        let accepted = ACCEPTED.lock().ok().and_then(|a| a.clone());
+        super::may_quit(asked, accepted.as_deref(), confirm) as i32
+    }
+
+    /// 설치기를 띄운 직후 — 앱이 정상 종료(`exiting`)로 세션을 저장하고 꺼져 MSI 가 파일을 갈아 끼운다.
+    unsafe extern "C" fn shutdown_request() {
+        send(UserEvent::UpdaterQuit);
+    }
+
+    /// 맥의 「지금 다시 켜면 끊겨요」 시트와 같은 자리·같은 기본값(나중에 = 아니요).
+    fn confirm(what: &str) -> bool {
+        let text = utf16z(&format!("지금 다시 켜면 끊겨요 · {what}\n\n그래도 업데이트할까요?"));
+        let caption = utf16z("kasaterm 업데이트");
+        let flags = MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND;
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), flags) == IDYES }
+    }
+
     /// WinSparkle 설치 머신을 초기화하고(자동 체크 OFF — 다이얼로그 원천 차단)
     /// 자체 appcast 버전 체커 스레드를 띄운다(프로세스당 한 번). DLL 이 없으면
     /// 조용히 no-op. `resumed()` 가 사실상 1회라 STARTED 가드는 이중 안전장치.
-    pub(crate) fn init() {
+    pub(crate) fn init(proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
         if !super::may_start(crate::verification_run(), crate::lite_mode(), |key| std::env::var_os(key).is_some()) {
             return;
         }
         if STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
+        let channel = super::Channel::of(&crate::socket::read_settings());
+        let feed = channel.feed();
         unsafe {
             let dll = utf16z("WinSparkle.dll");
             let lib = LoadLibraryW(dll.as_ptr());
@@ -157,11 +262,13 @@ mod ffi {
             let set_eddsa_key = load!("win_sparkle_set_eddsa_public_key", CSetEdKey);
             let set_app_details = load!("win_sparkle_set_app_details", CSetDetails);
             let set_auto_check = load!("win_sparkle_set_automatic_check_for_updates", CSetInt);
+            let set_can_shutdown = load!("win_sparkle_set_can_shutdown_callback", CSetCanShutdown);
+            let set_shutdown_request = load!("win_sparkle_set_shutdown_request_callback", CSetShutdownRequest);
             let start = load!("win_sparkle_init", CVoid);
             let install_fn = load!("win_sparkle_check_update_with_ui_and_install", CVoid);
 
             // 모든 set_* 는 win_sparkle_init() 전에 호출해야 한다(winsparkle.h 규약).
-            let url = utf8z(APPCAST_URL);
+            let url = utf8z(feed);
             set_appcast_url(url.as_ptr() as *const c_char);
             let key = utf8z(ED_PUBLIC_KEY);
             set_eddsa_key(key.as_ptr() as *const c_char);
@@ -173,30 +280,35 @@ mod ffi {
             // 구식 "업데이트 있음" 다이얼로그를 무조건 띄운다(끄는 API 없음).
             // 체크는 아래 체커 스레드가 UI 없이 대신한다.
             set_auto_check(0);
+            let _ = PROXY.set(Mutex::new(proxy));
+            set_can_shutdown(Some(can_shutdown));
+            set_shutdown_request(Some(shutdown_request));
             start();
             INSTALL_FN.store(install_fn as usize, Ordering::SeqCst);
         }
-        // 시작 몇 초 뒤 appcast 를 직접 받아 버전 비교(UI 없음). 새 버전이면
-        // FOUND 에 기록 → GUI(about_to_wait)가 새 판 알림으로 알린다.
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(6));
-            let Some(xml) = fetch_appcast() else { return };
-            let Some(latest) = parse_appcast_version(&xml) else { return };
-            if version_newer(&latest, env!("CARGO_PKG_VERSION")) {
-                if let Ok(mut f) = FOUND.lock() {
-                    *f = Some(latest);
+        // appcast 를 직접 받아 버전 비교(UI 없음). 새 버전이면 FOUND 에 기록 → GUI(about_to_wait)가 새 판 알림으로 알린다.
+        std::thread::spawn(move || {
+            std::thread::sleep(FIRST_PROBE);
+            loop {
+                if let Some(latest) = fetch_appcast(feed).and_then(|xml| parse_appcast_version(&xml)) {
+                    if version_newer(&latest, env!("CARGO_PKG_VERSION")) {
+                        if let Ok(mut f) = FOUND.lock() {
+                            *f = Some(latest);
+                        }
+                    }
                 }
+                std::thread::sleep(channel.probe_every());
             }
         });
     }
 
     /// appcast XML fetch — Windows 10 1803+ 내장 curl.exe 사용(HTTP 클라이언트
     /// 의존성 0). GUI 앱에서 콘솔 창이 번쩍이지 않게 CREATE_NO_WINDOW.
-    fn fetch_appcast() -> Option<String> {
+    fn fetch_appcast(feed: &str) -> Option<String> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let out = std::process::Command::new("curl.exe")
-            .args(["-fsSL", "--max-time", "15", APPCAST_URL])
+            .args(["-fsSL", "--max-time", "15", feed])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
@@ -249,6 +361,35 @@ mod tests {
         assert!(!version_newer("0.1.9", "0.1.9"));
         assert!(!version_newer("0.1.8", "0.1.9"));
         assert!(!version_newer("0.2.0-beta", "0.1.9")); // 비숫자 → 보수적 false
+    }
+
+    #[test]
+    fn preview_devices_watch_their_own_feed_hourly_and_others_daily() {
+        assert_eq!(Channel::Stable.feed(), "https://2rami.github.io/kasaterm/appcast-win.xml");
+        assert_eq!(Channel::Preview.feed(), "https://2rami.github.io/kasaterm/appcast-win-preview.xml");
+        assert_eq!((Channel::Preview.probe_every(), Channel::Stable.probe_every()),
+                   (Duration::from_secs(3600), Duration::from_secs(86_400)));
+        assert_eq!(Channel::of(&serde_json::json!({"update_channel":"preview", "automatic_update_on_quit":true})), Channel::Preview);
+        assert_eq!(Channel::of(&serde_json::json!({"update_channel":"preview"})), Channel::Stable);
+        // 릴리스 도구(tools/release)는 이 글자로 「이 판의 Windows 앱이 preview 피드를 안다」고 판정한다.
+        assert!(include_str!("win_sparkle.rs").contains("appcast-win-preview.xml"));
+    }
+
+    #[test]
+    fn the_installer_waits_for_a_yes_unless_the_same_cut_was_already_accepted() {
+        let never = |_: &str| -> bool { panic!("이미 받아들였거나 끊길 일이 없으면 묻지 않는다") };
+        assert!(may_quit(Some(None), None, never), "끊길 일이 없으면 바로 설치");
+        assert!(may_quit(Some(Some("일하는 창: 유즈".into())), Some("일하는 창: 유즈"), never), "알림에서 받아들인 그 끊김");
+        assert!(!may_quit(None, None, never), "앱이 답하지 못하면 끄지 않는다");
+        let asked = std::cell::Cell::new(0);
+        let say = |answer: bool| {
+            let asked = &asked;
+            move |what: &str| { assert_eq!(what, "일하는 창: 유즈 외 1개"); asked.set(asked.get() + 1); answer }
+        };
+        let grown = || Some(Some("일하는 창: 유즈 외 1개".to_string()));
+        assert!(!may_quit(grown(), Some("일하는 창: 유즈"), say(false)), "그 뒤 늘어난 끊김은 다시 묻고, 아니요면 미룬다");
+        assert!(may_quit(grown(), None, say(true)));
+        assert_eq!(asked.get(), 2);
     }
 
     #[test]

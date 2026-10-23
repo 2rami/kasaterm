@@ -4004,6 +4004,12 @@ enum UserEvent {
     RestartExit(String),
     /// 확인·준비한 업데이트를 도우미에 넘겼다 — 이제 정상 종료로 끄면 도우미가 갈아 끼운다.
     UpdateExit(String),
+    /// WinSparkle 이 MSI 를 띄우기 직전 — 지금 끄면 끊길 일(`None` 이면 없음)을 답한다.
+    #[cfg(windows)]
+    UpdaterMayQuit(std::sync::mpsc::Sender<Option<String>>),
+    /// WinSparkle 이 MSI 를 띄웠다 — 정상 종료(`exiting`)로 끄면 MSI 가 파일을 갈아 끼운다.
+    #[cfg(windows)]
+    UpdaterQuit,
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),

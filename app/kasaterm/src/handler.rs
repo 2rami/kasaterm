@@ -1046,6 +1046,16 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
                 return;
             }
+            #[cfg(windows)]
+            UserEvent::UpdaterMayQuit(reply) => {
+                let _ = reply.send(self.update_interrupts_now());
+                return;
+            }
+            #[cfg(windows)]
+            UserEvent::UpdaterQuit => {
+                event_loop.exit();
+                return;
+            }
             UserEvent::SocketRestartFacts(reply) => {
                 let _ = reply.send(self.restart_facts());
                 return;
@@ -2155,7 +2165,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Windows 자동 업데이트 시작 — 설치본만(DLL 없음·검증·격리·라이트 실행은 init 이 거른다).
         // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
         #[cfg(windows)]
-        crate::win_sparkle::init();
+        crate::win_sparkle::init(self.proxy.clone());
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
         // the "Git 패널" toggle. Built once (NSApp exists by resumed). Clicks
         // arrive on muda's global channel, drained in about_to_wait. Stored

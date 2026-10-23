@@ -51,10 +51,23 @@ pub(crate) fn label() -> String {
     }
 }
 
-#[cfg(windows)]
-const FEED: &str = "https://2rami.github.io/kasaterm/appcast-win.xml";
 #[cfg(not(windows))]
 const FEED: &str = "https://2rami.github.io/kasaterm/appcast.xml";
+
+/// 빠른 업데이트(preview)에 참여한 기기인가 — 맥·Windows 가 같은 두 기기 설정으로 가른다
+/// (`docs/automatic-preview-updates.md` 「처음 한 번: 받는 기기」).
+pub(crate) fn preview_opted_in(settings: &serde_json::Value) -> bool {
+    settings["update_channel"].as_str() == Some("preview")
+        && settings["automatic_update_on_quit"].as_bool() == Some(true)
+}
+
+/// 판 번호 줄이 견주는 피드 — Windows 는 업데이터가 보는 채널 피드와 같아야 「최신」이 거짓말을 안 한다.
+fn feed() -> &'static str {
+    #[cfg(windows)]
+    return crate::win_sparkle::Channel::of(&crate::socket::read_settings()).feed();
+    #[cfg(not(windows))]
+    FEED
+}
 
 /// 성공한 확인을 다시 하기까지. 릴리스는 하루에 몇 번 나오는 것이 아니다.
 const RECHECK: Duration = Duration::from_secs(30 * 60);
@@ -125,7 +138,7 @@ fn fetch() -> Option<String> {
     #[cfg(not(windows))]
     let curl = "curl";
     let out = std::process::Command::new(curl)
-        .args(["-fsS", "--max-time", "8", FEED])
+        .args(["-fsS", "--max-time", "8", feed()])
         .output()
         .ok()?;
     out.status
@@ -201,6 +214,16 @@ mod tests {
             assert!(why.contains("업데이터가 없어요"));
         }
         assert!(RELEASES.starts_with("https://github.com/2rami/kasaterm/releases"));
+    }
+
+    #[test]
+    fn preview_requires_both_explicit_settings() {
+        assert!(preview_opted_in(&serde_json::json!({"update_channel":"preview", "automatic_update_on_quit":true})));
+        for settings in [serde_json::json!({}), serde_json::json!({"update_channel":"preview"}),
+            serde_json::json!({"update_channel":"stable", "automatic_update_on_quit":true}),
+            serde_json::json!({"update_channel":"preview", "automatic_update_on_quit":false})] {
+            assert!(!preview_opted_in(&settings));
+        }
     }
 
     #[test]

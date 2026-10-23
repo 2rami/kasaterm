@@ -82,11 +82,6 @@ pub(crate) fn answer_relaunch(go: bool) {
     }
 }
 
-fn preview_opted_in(settings: &serde_json::Value) -> bool {
-    settings["update_channel"].as_str() == Some("preview")
-        && settings["automatic_update_on_quit"].as_bool() == Some(true)
-}
-
 fn installed_app(exe: &Path, home: &Path, verification: bool) -> bool {
     !verification && (exe == home.join("Applications/kasaterm.app/Contents/MacOS/kasaterm")
         || exe == Path::new("/Applications/kasaterm.app/Contents/MacOS/kasaterm"))
@@ -295,7 +290,7 @@ pub(crate) fn init() -> Option<Updater> {
     let isolated = crate::verification_run() || crate::version::isolated_environment(|key| std::env::var_os(key).is_some());
     let rig = rig_feed(std::env::var("KASATERM_UPDATE_RIG_FEED").ok().as_deref());
     if rig.is_none() && !installed_app(&exe, &home, isolated) { return None; }
-    let preview = preview_opted_in(&crate::socket::read_settings());
+    let preview = crate::version::preview_opted_in(&crate::socket::read_settings());
     if preview && !writable_install_parent(&exe) { return None; }
     unsafe {
         // .app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle 를 dlopen 해
@@ -390,16 +385,6 @@ pub(crate) fn check_for_updates(updater: &Updater) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn preview_requires_both_explicit_settings() {
-        assert!(preview_opted_in(&serde_json::json!({"update_channel":"preview", "automatic_update_on_quit":true})));
-        for settings in [serde_json::json!({}), serde_json::json!({"update_channel":"preview"}),
-            serde_json::json!({"update_channel":"stable", "automatic_update_on_quit":true}),
-            serde_json::json!({"update_channel":"preview", "automatic_update_on_quit":false})] {
-            assert!(!preview_opted_in(&settings));
-        }
-    }
 
     #[test]
     fn development_and_verification_instances_never_start_sparkle() {
