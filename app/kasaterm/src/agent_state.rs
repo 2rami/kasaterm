@@ -477,8 +477,11 @@ pub(crate) struct StateHub {
 
 /// 같은 틱 안에서 두 번 읽어도 파일은 한 번만 본다.
 const REFRESH_MEMO: Duration = Duration::from_millis(250);
-/// 기록 꼬리 창 — 턴 경계·오류·의도는 끝 몇 줄에 있다.
-const TAIL_WINDOW: u64 = 32 * 1024;
+/// 기록 꼬리 창 — 턴 경계·오류·의도는 끝 몇 줄에 있다. 그 안에 대화 줄이 없으면 넓혀 다시 읽는다: claude
+/// 2.1.3xx 는 턴이 끝나면 마지막 답 뒤에 60KB 남짓한 `prompt_snapshot` 첨부를 붙여, 32KB 꼬리엔 대화 줄이 하나도
+/// 없다(2026-10-23 실측 62.7KB). 그러면 처음 보는 칸(묶은 직후·재개 직후)은 턴을 못 읽어, 훅·mod 근거가 없는 칸이
+/// 「모름」=일하는 중에 갇혀 예약 이사가 안 풀리고 완료도 못 알렸다.
+const TAIL_WINDOWS: [u64; 3] = [32 * 1024, 256 * 1024, 2 * 1024 * 1024];
 
 impl StateHub {
     // ── 훅이 부르는 쓰기 ──────────────────────────────────────────────
@@ -709,9 +712,18 @@ impl StateHub {
             .get(id)
             .is_some_and(|o| o.path == path && o.len == len && o.mtime == mtime);
         if !unchanged {
-            let (tail, idle) = crate::socket::read_tail(&path, TAIL_WINDOW);
             let previous = cache.get(id).filter(|o| o.path == path && len >= o.len);
-            let signal = crate::transcript::turn_signal_from_tail(&tail);
+            // 넓혀 읽는 것은 처음 보거나 일하던 칸뿐이다 — 이미 끝난 턴의 완료 줄을 다시 찾아 새 증거로 만들지 않는다.
+            let widen = previous.is_none_or(|o| o.state == TurnState::Working);
+            let (mut tail, mut idle) = (String::new(), false);
+            let mut signal = None;
+            for window in TAIL_WINDOWS {
+                (tail, idle) = crate::socket::read_tail(&path, window);
+                signal = crate::transcript::turn_signal_from_tail(&tail);
+                if signal.is_some() || !widen || window >= len {
+                    break;
+                }
+            }
             let state = signal.map(crate::transcript::TurnSignal::state).or_else(|| previous.map(|o| o.state))?;
             let mut questions = previous.map(|o| o.questions.clone()).unwrap_or_default();
             questions.update_tail(&tail);
@@ -779,6 +791,25 @@ fn completion_evidence(e: &Evidence) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 마지막 답 뒤에 큰 첨부 줄이 붙은 기록도 처음 보는 순간 턴이 끝난 것으로 읽는다.
+    #[test]
+    fn a_large_trailing_attachment_does_not_hide_the_finished_turn() {
+        let path = std::env::temp_dir().join(format!("kasa-observe-{}.jsonl", std::process::id()));
+        let snapshot = format!(r#"{{"type":"attachment","attachment":{{"type":"prompt_snapshot","text":"{}"}}}}"#, "x".repeat(70 * 1024));
+        let body = [
+            r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"apple"}]}}"#,
+            snapshot.as_str(),
+            r#"{"type":"system","subtype":"turn_duration","durationMs":1200}"#,
+            r#"{"type":"last-prompt","lastPrompt":"hi"}"#,
+        ].join("\n");
+        std::fs::write(&path, body + "\n").unwrap();
+        let mut cache = HashMap::new();
+        let observed = StateHub::observe(&mut cache, "%1", Some(&path)).map(|o| o.state);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(observed, Some(TurnState::Idle), "끝난 턴이 꼬리 32KB 밖에 있어도 읽는다");
+    }
     use kasa_pty::AgentKind;
 
     fn claude() -> Evidence {
@@ -843,7 +874,7 @@ mod tests {
         let first = StateHub::observe(&mut cache, "%fixture", Some(&path)).unwrap();
         assert_eq!(first.questions.pending().len(), 1);
         assert!(first.completion.is_some());
-        let metadata = serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","padding":"x".repeat(TAIL_WINDOW as usize + 100)}});
+        let metadata = serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","padding":"x".repeat(TAIL_WINDOWS[0] as usize + 100)}});
         writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "\n{metadata}").unwrap();
         let later = StateHub::observe(&mut cache, "%fixture", Some(&path)).unwrap();
         assert_eq!(later.questions.pending().len(), 1);
