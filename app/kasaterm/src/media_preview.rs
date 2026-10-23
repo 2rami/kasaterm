@@ -253,6 +253,12 @@ impl State {
     pub fn active(&self) -> bool {
         self.preview.as_ref().is_some_and(|p| p.session.busy()) || self.inline.as_ref().is_some_and(|i| i.session.busy())
     }
+    /// 그 가운데 영상이 있다 — 원본 프레임마다 그려야 끊겨 보이지 않는다.
+    #[cfg(windows)]
+    pub fn video_active(&self) -> bool {
+        let video = |s: &Session| s.busy() && s.video();
+        self.preview.as_ref().is_some_and(|p| video(&p.session)) || self.inline.as_ref().is_some_and(|i| video(&i.session))
+    }
     pub fn hit(&self, id: WindowId, point: Point) -> bool {
         self.hits
             .get(&id)

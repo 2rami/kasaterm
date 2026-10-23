@@ -8230,10 +8230,17 @@ impl ApplicationHandler<UserEvent> for App {
             // 뚝뚝 끊겨 보인다. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
             // 0.9초짜리 반짝임은 33ms(30fps)면 27장뿐이라 별이 튀듯 끊긴다 —
             // 테마 디졸브가 8ms 쪽에 있는 것과 같은 이유다.
+            // Windows 의 대기 타이머는 15.6ms 눈금이라 33ms 가 47ms(21fps)로 늘어, 30fps 영상이 세 장에 한 장꼴로
+            // 빠졌다(release 1080p 카드 실측 초당 16~22장, 재생기 자체는 30장). 영상이 도는 동안만 촘촘한 쪽에 붙인다.
+            #[cfg(windows)]
+            let video = self.media_preview.video_active();
+            #[cfg(not(windows))]
+            let video = false;
             let period = if self.md_scroll_anim.is_empty()
                 && self.theme_fx.is_none()
                 && self.expand_anim.is_none()
                 && self.account_flash_factor().is_none()
+                && !video
             {
                 33
             } else {
