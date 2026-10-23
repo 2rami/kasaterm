@@ -38,7 +38,7 @@ pub(crate) use self::agent_launch::{
 };
 pub(crate) use self::file_tree::{git_repo_root, tilde_home};
 pub(crate) use self::migrate::{migration_cwd, MigrateReady, PendingMigration};
-pub(crate) use self::remote_rooms::RoomSpawned;
+pub(crate) use self::remote_rooms::{launch_in_remote_pane, RoomSpawned};
 pub(crate) use self::rooms::remap_window_index;
 pub(crate) use self::restore::{restore_agent_command, windows_shell_line};
 use self::restore::{normalize_saved_agent_map_with, saved_model_fits_agent, saved_sid_fits_agent};

@@ -633,10 +633,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // 셸은 스왑과 함께 걷히므로 여기서 대신 쳐야 한다. 이사(`migrate`)
                     // 처럼 레포를 맞추지 않는다 — 거울은 저쪽 폴더를 그대로 쓴다.
                     if let Some(cmd) = run.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        if let Some(sess) = self.pty.get(&pid).cloned() {
-                            let at = std::time::Instant::now()
-                                + std::time::Duration::from_millis(900);
-                            self.pending_restores.push((sess, format!("{cmd}\r"), at));
+                        // 그 기기의 방 칸이면 줄은 그 기기가 제 셸 문법으로 짓는다. 헤드리스 `web-` 셸은 칸이 아니라
+                        // 예전처럼 거울로 친다.
+                        match kasa_mcp::remote::remote_info(&pid).filter(|info| info.remote_id.starts_with('%')) {
+                            Some(info) => crate::session::launch_in_remote_pane(
+                                self.proxy.clone(), pid.clone(), info.base, info.remote_id, None, cmd.to_string(),
+                                std::time::Duration::from_millis(900),
+                            ),
+                            None => if let Some(sess) = self.pty.get(&pid).cloned() {
+                                let at = std::time::Instant::now()
+                                    + std::time::Duration::from_millis(900);
+                                self.pending_restores.push((sess, format!("{cmd}\r"), at));
+                            },
                         }
                     }
                     anyhow::Ok(pid)

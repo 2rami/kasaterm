@@ -612,17 +612,20 @@ impl App {
                 }
             }
         };
-        // 갓 만든 원격 pane 의 셸은 소환된 자리(그 창의 기준 pane)에서 뜬다 —
-        // 레포로 옮겨 놓고 이어받아야 학생이 제 코드 위에서 깬다.
-        let cmd = if r.remote_pane.is_some() && r.transfer_reserved.is_none() {
-            format!("cd '{}' && {}", r.remote_cwd.replace('\'', r"'\''"), cmd)
-        } else {
-            cmd
-        };
         // 방 이사로 준비한 빈 셸은 작업 폴더에서 이미 떠 있다 — 칠 것이 자리표시(`:`)뿐이면 안 친다. cmd·PowerShell
         // 은 `:` 를 명령으로 못 읽는다.
         let idle_placeholder = r.transfer_reserved.is_some() && r.sid.is_none() && r.run.as_deref() == Some(":");
-        if !r.launched && !idle_placeholder { self.pending_restores.push((
+        // 갓 만든 원격 pane 의 셸은 소환된 자리(그 창의 기준 pane)에서 뜬다 — 레포로 옮겨 놓고 이어받아야 학생이 제
+        // 코드 위에서 깬다. 옮기기와 명령 줄은 그 기기가 제 칸 셸 문법으로 짓는다(Windows 칸은 `cd '…' &&` 를 못 읽는다).
+        let seated_pane = r.remote_pane.as_ref().filter(|_| r.transfer_reserved.is_none() && !r.launched);
+        if let Some(remote_pane) = seated_pane {
+            launch_in_remote_pane(
+                self.proxy.clone(), pid.to_string(), r.base.clone(), remote_pane.clone(), Some(r.remote_cwd.clone()),
+                cmd.trim_end_matches('\r').to_string(),
+                // 갓 소환된 pane 은 셸이 뜨는 데 한 박자 더 걸린다.
+                std::time::Duration::from_millis(2200),
+            );
+        } else if !r.launched && !idle_placeholder { self.pending_restores.push((
             remote.session.clone(),
             cmd,
             // 갓 소환된 pane 은 셸이 뜨는 데 한 박자 더 걸린다.

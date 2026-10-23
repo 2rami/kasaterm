@@ -159,6 +159,9 @@ async fn cmd_handler(
         "surface.set_ratio_between",
         "surface.resize_divider",
         "surface.focus",
+        // 다른 기기가 이 기기 빈 셸 칸에 명령을 띄울 때 — 줄은 이 기기가 제 칸 셸 문법으로 짓는다
+        // (`--run`·옛 태생 스폰이 Windows 칸에 POSIX `cd '…' &&` 를 치던 것).
+        "surface.launch",
         "window.new",
         "window.close",
         "window.close_checked",

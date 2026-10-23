@@ -43,6 +43,40 @@ pub(super) fn self_view_machine() -> Result<kasa_mcp::machines::Machine> {
     })
 }
 
+/// 원격 칸에 띄울 명령(POSIX 셸 꼴)을 그 기기에 맡긴다 — 그 칸이 cmd·PowerShell 이어도 그 기기가 제 셸 문법으로
+/// 짓는다(`surface.launch`). 그 창구를 모르는 옛 판이면 예전처럼 이 거울로 POSIX 줄을 친다. 셸이 뜰 시간을 두고
+/// 보내며, 네트워크라 GUI 스레드 밖에서 돈다.
+pub(crate) fn launch_in_remote_pane(
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    mirror: String,
+    base: String,
+    remote: String,
+    cwd: Option<String>,
+    command: String,
+    after: std::time::Duration,
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        let mut params = serde_json::json!({ "surface_id": remote, "command": command });
+        if let Some(dir) = &cwd {
+            params["cwd"] = serde_json::json!(dir);
+        }
+        let Err(error) = kasa_mcp::remote::remote_cmd(&base, "surface.launch", params) else { return };
+        let why = format!("{error:#}");
+        if why.contains("이 창구로 못 부른다") || why.contains("unknown method") || why.contains("HTTP 404") {
+            use kasa_socket::shell_line::ShellKind;
+            let run = match &cwd {
+                Some(dir) => ShellKind::Posix.cd_then(dir, &command),
+                None => command,
+            };
+            let line = format!("{}{run}\r", if cfg!(unix) { "\x15" } else { "" });
+            let _ = proxy.send_event(UserEvent::SocketBytes(Some(mirror), line.into_bytes()));
+        } else {
+            let _ = proxy.send_event(UserEvent::SocketToast(format!("{remote} 에 명령을 못 넣었어요 — {why}")));
+        }
+    });
+}
+
 impl App {
     /// 이 pane 을 **그 자리에서** 원격 셸의 거울로 바꾼다 — `mini` 한 마디로 맥미니
     /// 터미널이 보이게(2026-09-02 지시). 학생·대화 운반이 없는 맨 셸 전용이라
