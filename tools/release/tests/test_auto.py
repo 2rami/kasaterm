@@ -198,7 +198,8 @@ class PolicyFixture(unittest.TestCase):
         machine = self.root / ".config/kasaterm/machine-id"
         machine.parent.mkdir(parents=True)
         machine.write_text(CONTROLLER)
-        with mock.patch.object(policy.pwd, "getpwuid", return_value=account), mock.patch.dict(os.environ, {
+        # identity() 는 Windows 에서도 enqueue 가 서도록 pwd 를 함수 안에서 들여온다 — 모듈 속성이 아니라 pwd 자체를 바꾼다.
+        with mock.patch("pwd.getpwuid", return_value=account), mock.patch.dict(os.environ, {
                 "HOME": "/not-the-account-home", "KASATERM_MACHINE_ID": "another-machine"}):
             self.assertEqual(policy.identity(), CONTROLLER)
 
