@@ -6695,6 +6695,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // reads KASATERM_* vars.
         load_capture_config();
         install_pty_host_policy();
+        #[cfg(windows)]
+        bootstrap::preload_bundled_conpty();
         kasa_mcp::install_collab_env();
         socket::prepare_session_storage();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야

@@ -144,6 +144,22 @@
                                 Source='$(var.CargoTargetBinDir)\kasaterm-cli.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <!-- 동봉 ConPTY(bin\conpty\) — bootstrap.rs preload_bundled_conpty 가 exe 옆에서
+                             찾아 먼저 싣는다. package.ps1 이 NuGet 에서 받아 해시를 확인해 둔다. -->
+                        <Directory Id='ConptyDir' Name='conpty'>
+                            <Component Id='ConptyDll' Guid='*'>
+                                <File Id='conptydll' Name='conpty.dll' DiskId='1'
+                                    Source='$(var.CargoTargetBinDir)\conpty\conpty.dll' KeyPath='yes'/>
+                            </Component>
+                            <Component Id='ConptyOpenConsole' Guid='*'>
+                                <File Id='openconsoleexe' Name='OpenConsole.exe' DiskId='1'
+                                    Source='$(var.CargoTargetBinDir)\conpty\OpenConsole.exe' KeyPath='yes'/>
+                            </Component>
+                            <Component Id='ConptyLicense' Guid='*'>
+                                <File Id='conptylicense' Name='LICENSE.txt' DiskId='1'
+                                    Source='$(var.CargoTargetBinDir)\conpty\LICENSE.txt' KeyPath='yes'/>
+                            </Component>
+                        </Directory>
                         <Directory Id='ViewerFonts' Name='fonts'>
                             <Component Id='D2CodingLicense' Guid='*'>
                                 <File Id='D2CodingOfl' Name='OFL-D2Coding.txt' DiskId='1'
@@ -251,6 +267,9 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
             <ComponentRef Id='binary2'/>
+            <ComponentRef Id='ConptyDll'/>
+            <ComponentRef Id='ConptyOpenConsole'/>
+            <ComponentRef Id='ConptyLicense'/>
             <ComponentRef Id='ViewerNotoSansKr'/>
             <ComponentRef Id='ViewerNotoSansKrLicense'/>
             <ComponentRef Id='D2CodingLicense'/>

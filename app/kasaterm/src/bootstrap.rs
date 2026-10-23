@@ -336,6 +336,73 @@ pub(crate) fn install_pty_host_policy() {
     });
 }
 
+/// 칸 ConPTY 를 동봉한 MS OpenConsole(`bin\conpty\conpty.dll`+`OpenConsole.exe`)로 연다. 시스템 ConPTY 는 kitty
+/// 그림(APC)을 걸러 내고 OSC 1337 도 글과 순서가 어긋나지만, 동봉판(1.24)은 모르는 VT 를 그대로 넘겨 칸 안 그림이
+/// 제자리에 선다(2026-10-23 실측). portable-pty 는 `conpty.dll` 을 이름으로 싣는데, 같은 이름 모듈이 이미 실려 있으면
+/// Windows 가 그것을 돌려준다 — 그래서 칸을 열기 전에 하위 폴더의 것을 전체 경로로 미리 싣는다. exe 옆에 두지 않는 건
+/// 끄는 스위치(`KASATERM_CONPTY=system`) 때 portable-pty 가 저절로 줍지 않게 하려서다. 의사 콘솔을 한 번 만들어 보고
+/// 안 되면 내려놓아 시스템 ConPTY 로 돌아간다.
+#[cfg(windows)]
+pub(crate) fn preload_bundled_conpty() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE};
+    use windows_sys::Win32::System::Console::{COORD, HPCON};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    type Create = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> i32;
+    type Close = unsafe extern "system" fn(HPCON);
+    if std::env::var("KASATERM_CONPTY").is_ok_and(|v| v.eq_ignore_ascii_case("system")) {
+        eprintln!("[conpty] KASATERM_CONPTY=system — 시스템 ConPTY");
+        return;
+    }
+    let Some(dir) = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("conpty"))) else {
+        return;
+    };
+    let dll = dir.join("conpty.dll");
+    if !dll.is_file() || !dir.join("OpenConsole.exe").is_file() {
+        return;
+    }
+    let wide: Vec<u16> = dll.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let module = LoadLibraryW(wide.as_ptr());
+        if module.is_null() {
+            eprintln!("[conpty] 동봉 {dll:?} 를 못 실어 시스템 ConPTY: {}", std::io::Error::last_os_error());
+            return;
+        }
+        let (Some(create), Some(close)) = (
+            GetProcAddress(module, c"CreatePseudoConsole".as_ptr().cast()),
+            GetProcAddress(module, c"ClosePseudoConsole".as_ptr().cast()),
+        ) else {
+            FreeLibrary(module);
+            return;
+        };
+        type Proc = unsafe extern "system" fn() -> isize;
+        let create = std::mem::transmute::<Proc, Create>(create);
+        let close = std::mem::transmute::<Proc, Close>(close);
+        let mut pipes = [std::ptr::null_mut(); 4];
+        let piped = CreatePipe(&mut pipes[0], &mut pipes[1], std::ptr::null(), 0) != 0
+            && CreatePipe(&mut pipes[2], &mut pipes[3], std::ptr::null(), 0) != 0;
+        let mut console: HPCON = 0;
+        let hr = if piped { create(COORD { X: 80, Y: 24 }, pipes[0], pipes[3], 0, &mut console) } else { -1 };
+        // 읽는 쪽을 먼저 닫아야 닫기가 출력 파이프에서 멎지 않는다.
+        CloseHandle(pipes[2]);
+        if hr == 0 {
+            close(console);
+        }
+        for handle in [pipes[0], pipes[1], pipes[3]] {
+            if !handle.is_null() {
+                CloseHandle(handle);
+            }
+        }
+        if hr != 0 {
+            FreeLibrary(module);
+            eprintln!("[conpty] 동봉 ConPTY 가 의사 콘솔을 못 만들어(HRESULT {hr:#x}) 시스템 ConPTY");
+            return;
+        }
+    }
+    eprintln!("[conpty] 동봉 {dll:?}");
+}
+
 pub(crate) fn apply_lite_env() {
     let root = std::env::var_os("KASATERM_LITE_ROOT")
         .filter(|v| !v.is_empty())

@@ -53,6 +53,8 @@ windows-sys = { workspace = true, features = [
     # open_files — 프로세스가 열어 둔 파일(lsof 대신): 시스템 핸들 표와 핸들의 경로.
     "Wdk_System_SystemInformation",
     "Win32_Storage_FileSystem",
+    # 칸 ConPTY 가 동봉 OpenConsole 인가(bundled_conpty_loaded) — 실린 conpty.dll 모듈을 이름으로 찾는다.
+    "Win32_System_LibraryLoader",
 ] }
 
 [lints]

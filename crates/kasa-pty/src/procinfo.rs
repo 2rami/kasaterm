@@ -291,6 +291,19 @@ pub fn terminate_pid(pid: u32) -> std::io::Result<()> {
     }
 }
 
+/// 칸 ConPTY 가 동봉 OpenConsole 인가 — 호스트 앱이 칸을 열기 전에 그 `conpty.dll` 을 실어 둔다. 시스템 ConPTY 는
+/// kernel32 안이라 이 이름의 모듈이 없다. 동봉판만 kitty 그림(APC)을 칸 밖으로 그대로 넘긴다.
+pub fn bundled_conpty_loaded() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        let name: Vec<u16> = "conpty.dll".encode_utf16().chain(Some(0)).collect();
+        !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null()
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 /// `pids` 가 지금 열어 둔 디스크 파일들 — `lsof -p` 의 Windows 판. 시스템 핸들 표를 한 번 떠서 그 pid 들의
 /// 핸들만 이쪽으로 복제해 경로를 묻는다. 파이프·콘솔 핸들은 이름을 묻다 멎을 수 있어 디스크 파일만 묻는다.
 /// 같은 사용자 프로세스만 열린다(PROCESS_DUP_HANDLE).

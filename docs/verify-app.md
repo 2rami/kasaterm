@@ -69,6 +69,10 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
   깊숙이 두면 `path must be shorter than SUN_LEN` 으로 소켓 서버가 안 선다 — `/tmp/<네이름>/` 처럼 짧게.
   Windows 는 `TMP`·`TEMP` 를 바꿔도 Git Bash 의 `/tmp` 가 사용자 TEMP 에 고정이라, 리그 칸에서 claude 를 띄우면 묶기 훅
   표식 `/tmp/kasaterm-bound-_<칸 번호>` 가 본판 같은 번호 칸의 표식을 덮는다(2026-10-23). 리그 뒤 그 파일을 지워라.
+- **Windows Git Bash 의 `$!` 는 MSYS pid 다 — `kill $APP` 은 kasaterm.exe 를 못 끈다**(2026-10-23 실측: 「killed」라 찍혔는데
+  리그 셋이 계속 살아 있었다). `cat /proc/$!/winpid` 로 Windows PID 를 받아 그 PID 하나만 `taskkill /PID <pid> /F`
+  (MSYS_NO_PATHCONV=1)로 끈다. 격리 env 는 띄우는 스크립트 안에서만 걸리니, 다시 띄울 때도 반드시 그 스크립트로 —
+  밖에서 실행 파일만 다시 띄우면 사용자 설정·세션·기기 신원으로 뜬다.
 - **포트는 지정하지 마라.** 8765 가 사용자 앱 것이므로 새 앱은 알아서 다른 포트를 고른다. 그 번호는 로그에서 읽어라:
   `P=$(grep -o "HTTP on 127.0.0.1:[0-9]*" /tmp/<네이름>-app.log | tail -1 | grep -o "[0-9]*$")`
 - **색을 검증한다면 `NO_COLOR` 를 먼저 걷어내라.** claude code 의 셸 도구는 이 변수를 켜 두는데, 거기서 앱을 띄우면 앱을 거쳐 **pane 의 셸까지** 물려간다. 그러면 셸이 스스로 색을 끄고(PowerShell 7 은 `$PSStyle.OutputRendering` 이 `PlainText` 로 내려간다) 화면이 죄다 흑백으로 나온다 — 렌더러는 멀쩡한데 없는 버그를 쫓게 된다(2026-08-31 실제로 한 번 속았다). 의심되면 pane 안에서 `$PSStyle.OutputRendering` 과 `$env:NO_COLOR` 를 찍어 봐라: `Host` 와 빈 값이면 정상이다. claude 마커(`CLAUDE_MARKER_ENV`)와 달리 앱이 지워 주지 않는다 — 사용자가 일부러 켰을 수도 있는 값이라 터미널이 함부로 뺏으면 안 된다.

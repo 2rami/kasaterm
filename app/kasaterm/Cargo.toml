@@ -146,6 +146,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Diagnostics_Debug",
     # LoadLibraryW/GetProcAddress — WinSparkle.dll 런타임 로드(win_sparkle.rs).
     "Win32_System_LibraryLoader",
+    # 동봉 ConPTY 를 싣기 전 의사 콘솔을 한 번 만들어 본다(bootstrap.rs preload_bundled_conpty).
+    "Win32_System_Pipes",
     # 하단바 사용량 위젯: 맥은 `ps` 한 번으로 rss·cpu 시간을 받지만 Windows 엔
     # 그런 창구가 없어 프로세스마다 물어야 한다(GetProcessMemoryInfo, input.rs).
     "Win32_System_ProcessStatus",

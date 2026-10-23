@@ -176,6 +176,24 @@ if (-not $winSparkleDll) {
 }
 Copy-Item -LiteralPath $winSparkleDll.FullName -Destination (Join-Path $releaseRoot "WinSparkle.dll") -Force
 
+# 시스템 ConPTY 는 kitty 그림(APC)을 걸러 낸다. 동봉 OpenConsole 은 모르는 VT 를 그대로 넘기고,
+# 앱이 시작 때 exe 옆 conpty\conpty.dll 을 먼저 실어 portable-pty 가 그쪽을 쓰게 한다.
+$conptyVersion = "1.24.261001001"
+$conptyPackage = Join-Path $downloadsRoot "microsoft.windows.console.conpty.$conptyVersion.zip"
+Get-VerifiedDownload `
+    -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/$conptyVersion/microsoft.windows.console.conpty.$conptyVersion.nupkg" `
+    -Destination $conptyPackage `
+    -Sha256 "4D6AADDC1D2385C9F5897DF28F33879F699F8F2783315D5204CF3D8C3616AC5F"
+
+$conptyExtract = Reset-Directory -Path (Join-Path $workRoot "conpty") -AllowedRoot $targetRoot
+Expand-Archive -LiteralPath $conptyPackage -DestinationPath $conptyExtract -Force
+$conptyRelease = Reset-Directory -Path (Join-Path $releaseRoot "conpty") -AllowedRoot $targetRoot
+Copy-Item -LiteralPath @(
+    (Join-Path $conptyExtract "runtimes\win-x64\native\conpty.dll"),
+    (Join-Path $conptyExtract "build\native\runtimes\x64\OpenConsole.exe")
+) -Destination $conptyRelease -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "app\kasaterm\wix\ConPTY-LICENSE.txt") -Destination (Join-Path $conptyRelease "LICENSE.txt") -Force
+
 $wixVersion = "3.14.1"
 $wixZip = Join-Path $downloadsRoot "wix314-binaries.zip"
 Get-VerifiedDownload `
@@ -266,6 +284,7 @@ Copy-Item -LiteralPath @(
 ) -Destination $portableFonts -Force
 Copy-Item -LiteralPath $uiDist -Destination (Join-Path $portableStage "arona-ui") -Recurse -Force
 Copy-Item -LiteralPath $collabStage -Destination (Join-Path $portableStage "collab-hooks") -Recurse -Force
+Copy-Item -LiteralPath $conptyRelease -Destination (Join-Path $portableStage "conpty") -Recurse -Force
 
 $portableZip = Join-Path $distRoot "$baseName-portable.zip"
 if (Test-Path -LiteralPath $portableZip) {
@@ -280,7 +299,7 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
     "-nologo", "-x", $verifyFiles, "-o", $verifyWxs, $msiPath
 )
 $requiredFiles = @(
-    "kasaterm.exe", "kasaterm-cli.exe", "WinSparkle.dll", "index.html",
+    "kasaterm.exe", "kasaterm-cli.exe", "WinSparkle.dll", "conpty.dll", "OpenConsole.exe", "index.html",
     "characters.json", "kasacollab.py",
     "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt", "OFL-D2Coding.txt"
 )
