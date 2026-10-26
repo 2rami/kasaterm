@@ -1282,8 +1282,8 @@ macro_rules! f32_slot {
     };
 }
 
-f32_slot!(S_RADIUS_SM, radius_sm, 12.0);
-f32_slot!(S_RADIUS_MD, radius_md, 20.0);
+f32_slot!(S_RADIUS_SM, radius_sm, 6.0);
+f32_slot!(S_RADIUS_MD, radius_md, 10.0);
 f32_slot!(S_BORDER_W, border_w, 1.0);
 f32_slot!(S_SHADOW_OFFSET, shadow_offset, 0.0);
 f32_slot!(S_ROUNDNESS, roundness, 1.0);
@@ -1322,8 +1322,8 @@ pub fn pixel_chrome() -> bool {
 static S_PIXEL_CHROME: AtomicU32 = AtomicU32::new(0);
 
 const SHAPE_ROUNDED: Shape = Shape {
-    radius_sm: 12.0,
-    radius_md: 20.0,
+    radius_sm: 6.0,
+    radius_md: 10.0,
     border_w: 1.0,
     shadow_offset: 0.0,
     roundness: 1.0,
@@ -1442,97 +1442,6 @@ pub fn foreground_on(fill: [u8; 4]) -> [u8; 4] {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoticeTone {
-    Success,
-    Warning,
-    Error,
-    Attention,
-    Info,
-}
-
-pub fn notice_tone(message: &str, has_action: bool) -> NoticeTone {
-    let raw = message.trim();
-    let m = raw.to_ascii_lowercase();
-    if has_action {
-        NoticeTone::Attention
-    } else if raw.starts_with('✗')
-        || m.contains("실패")
-        || m.contains("오류")
-        || m.contains("못")
-        || m.contains("수 없")
-        || m.contains("불가")
-        || m.contains("failed")
-        || m.contains("error")
-    {
-        NoticeTone::Error
-    } else if raw.starts_with('✓') {
-        NoticeTone::Success
-    } else if raw.starts_with('⚠')
-        || m.contains("권한")
-        || m.contains("확인 필요")
-        || m.contains("계정 한도")
-        || m.contains("로그인 필요")
-        || m.contains("attention")
-    {
-        NoticeTone::Attention
-    } else if m.contains("주의")
-        || m.contains("경고")
-        || m.contains("재시작")
-        || m.contains("부족")
-        || m.contains("warning")
-    {
-        NoticeTone::Warning
-    } else if m.contains("완료")
-        || m.contains("저장했")
-        || m.contains("복사됨")
-        || m.contains("치웠어요")
-        || m.contains("만들었어요")
-        || m.contains("바꿨어요")
-        || m.contains("success")
-    {
-        NoticeTone::Success
-    } else {
-        NoticeTone::Info
-    }
-}
-
-pub fn notice_tone_color(tone: NoticeTone) -> [u8; 4] {
-    match tone {
-        NoticeTone::Success => success(),
-        NoticeTone::Warning | NoticeTone::Attention => attention(),
-        NoticeTone::Error => danger(),
-        NoticeTone::Info => accent(),
-    }
-}
-
-pub fn notice_tone_icon(tone: NoticeTone) -> &'static str {
-    match tone {
-        NoticeTone::Success => "square-check",
-        NoticeTone::Warning => "triangle-alert",
-        NoticeTone::Error => "octagon-alert",
-        NoticeTone::Attention => "message-square-warning",
-        NoticeTone::Info => "info",
-    }
-}
-
-pub fn notice_line_limit(tone: NoticeTone) -> usize {
-    match tone {
-        NoticeTone::Warning | NoticeTone::Error | NoticeTone::Attention => 3,
-        NoticeTone::Success | NoticeTone::Info => 2,
-    }
-}
-
-pub fn notice_keeps_tail(tone: NoticeTone) -> bool {
-    matches!(tone, NoticeTone::Warning | NoticeTone::Error | NoticeTone::Attention)
-}
-
-pub fn clean_notice_text(message: &str) -> &str {
-    message
-        .trim_start_matches(['⚠', '✓', '✗', ' '])
-        .trim_start()
-}
-
 /// Base glyph size for chrome icons (logical px; draw_text multiplies by scale).
 pub const ICON_SIZE: f32 = 16.0;
 
@@ -1628,10 +1537,6 @@ pub fn edge_on(fill: [u8; 4]) -> [u8; 4] {
 /// 고정 색이 아니라 `bg`↔`surface_hover` 중간인 건 방향 때문이다 — 대비로 가는
 /// 방향이 테마마다 반대다(어두운 테마는 밝게, 밝은 테마는 어둡게). 팔레트가 이미
 /// 그 방향을 알고 있으니 절반만 따라가면 여덟 테마에서 전부 맞는다.
-pub(crate) fn panel_shadow()->[u8;4] {
-    [0,0,0,if is_light(bg()) {18}else{44}]
-}
-
 pub(crate) fn control_knob(track:[u8;4])->[u8;4] {
     enforce_contrast_at([255,255,255,255],track,3.0)
 }
@@ -2310,41 +2215,6 @@ mod roster_tests {
         ] {
             assert!(palette.get(key).and_then(|v| v.as_str()).is_some(), "누락된 역할 토큰: {key}");
         }
-    }
-
-    #[test]
-    fn 알림_의미는_색과_svg_아이콘으로_갈린다() {
-        assert_eq!(notice_tone("저장 완료", false), NoticeTone::Success);
-        assert_eq!(notice_tone("재시작하면 적용", false), NoticeTone::Warning);
-        assert_eq!(notice_tone("빌드 실패", false), NoticeTone::Error);
-        assert_eq!(notice_tone("창을 만들지 못했어요", false), NoticeTone::Error);
-        assert_eq!(notice_tone("지금 열 수 없습니다", false), NoticeTone::Error);
-        assert_eq!(notice_tone("변경사항 때문에 전환 불가", false), NoticeTone::Error);
-        assert_eq!(notice_tone("메모리 부족", false), NoticeTone::Warning);
-        assert_eq!(notice_tone("✓ 3곳 바꿈", false), NoticeTone::Success);
-        assert_eq!(notice_tone("테마를 치웠어요", false), NoticeTone::Success);
-        assert_eq!(notice_tone("계정 한도 — 옮겨갈 계정이 없어요", false), NoticeTone::Attention);
-        assert_eq!(notice_tone("로그인 필요", false), NoticeTone::Attention);
-        assert_eq!(notice_tone("⚠ 저장 실패: 권한 없음", false), NoticeTone::Error);
-        assert_eq!(notice_tone("권한 필요", false), NoticeTone::Attention);
-        assert_eq!(notice_tone("새 소식", false), NoticeTone::Info);
-        assert_eq!(notice_tone("설치할까요", true), NoticeTone::Attention);
-        assert_eq!(notice_line_limit(NoticeTone::Success), 2);
-        assert_eq!(notice_line_limit(NoticeTone::Info), 2);
-        for tone in [NoticeTone::Warning, NoticeTone::Error, NoticeTone::Attention] {
-            assert_eq!(notice_line_limit(tone), 3);
-            assert!(notice_keeps_tail(tone));
-        }
-        for tone in [
-            NoticeTone::Success,
-            NoticeTone::Warning,
-            NoticeTone::Error,
-            NoticeTone::Attention,
-            NoticeTone::Info,
-        ] {
-            assert!(!notice_tone_icon(tone).is_empty());
-        }
-        assert_eq!(clean_notice_text("⚠ 권한 필요"), "권한 필요");
     }
 
     /// 런타임 로스터는 같은 JSON 에서 **코드젠과 똑같은 표**를 구워야 한다.

@@ -228,18 +228,6 @@ pub(crate) fn account_flash_k(at: Option<std::time::Instant>) -> Option<f32> {
     })
 }
 
-/// 권한 대기 토스트 — 완료 토스트와 같은 원칙(캐릭터 고정값 + hook reason,
-/// 미현존이면 reason 만). Notification hook 경로.
-fn format_attention_toast(character: Option<&str>, reason: &str) -> String {
-    let reason = reason.trim();
-    match (character, reason.is_empty()) {
-        (Some(c), true) => format!("⚠ {c} — 권한 대기중"),
-        (Some(c), false) => format!("⚠ {c} — {reason}"),
-        (None, true) => "⚠ 권한 대기중".to_string(),
-        (None, false) => format!("⚠ 권한 대기중 — {reason}"),
-    }
-}
-
 /// 오토메모리 볼트 폴더. `KASATERM_MEMORY_DIR` 이 이기고, 없으면 알려진 자리를
 /// 차례로 본다 — 구글 드라이브 마운트는 시스템 언어에 따라 이름이 갈린다(한국어
 /// 「내 드라이브」/영어 「My Drive」). 어느 것도 없으면 None 이고, 그러면 빠른 파일에
@@ -615,10 +603,7 @@ impl App {
         self.chrome_dirty = true;
         // 이미 sticky 승인 토스트(칩 포함)가 이 pane 으로 떠 있으면 hook 의
         // 중복 알림으로 텍스트를 덮지 않는다.
-        if self.collab.toast_action.as_deref() != Some(surface_id) {
-            self.collab.toast = Some((format_attention_toast(character.as_deref(), reason), now));
-            self.collab.toast_rect = None;
-        }
+
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
         }
@@ -730,10 +715,7 @@ impl App {
                 if let Some(wi) = background_window {
                     self.window_alert.insert(wi);
                 }
-                if self.collab.toast_action.as_deref() != Some(id) {
-                    self.collab.toast = Some((format_attention_toast(character.as_deref(), &reason), now));
-                    self.collab.toast_rect = None;
-                }
+
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
                 }
@@ -1495,7 +1477,7 @@ impl App {
 
     pub(crate) fn settings_title_rect(&self) -> Option<(f32, f32, f32, f32)> {
         self.git_col_toggle_rect()
-            .map(|(x, y, w, h)| (x - w - 4.0, y, w, h))
+            .map(|(x, y, w, h)| (x - w - crate::native_controls::TOOLBAR_GAP, y, w, h))
     }
     /// Show/hide the git column. Same reflow path as `toggle_sidebar`: flip the
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
@@ -1555,22 +1537,10 @@ impl App {
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
     }
-    /// Surface a transient top-right toast (reuses the collab toast slot).
     pub(crate) fn set_toast(&mut self, msg: String) {
-        // lite 는 토스트가 없다 — 그리는 쪽(render)도 같이 막혀 있어 직접 세운 것도 안 뜬다.
-        // 승인 알림이 서 있으면 그 자리를 안 뺏는다 — 글만 바뀌고 칩은 남아, 「복사됨」
-        // 옆의 [승인] 이 엉뚱한 pane 에 답을 보내게 된다. 새 판 알림은 물러섰다가 자리가
-        // 비면 다시 선다(`update_notice.rs`).
-        if self.lite
-            || self.collab.toast_action.as_deref().is_some_and(|a| a != crate::update_notice::ACTION)
-        {
-            return;
-        }
-        self.collab.toast_action = None;
-        self.collab.toast = Some((msg, std::time::Instant::now()));
-        self.collab.toast_rect = None;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+        self.collab.last_notice = Some((msg.clone(), std::time::Instant::now()));
+        if !self.lite {
+            notify_desktop("카사텀", &msg, None, Some(&format!("feedback:{msg}")), None);
         }
     }
     /// Run a file-tree right-click menu item. The target is the primary
@@ -2012,10 +1982,8 @@ impl App {
                 .current_dir(&cwd)
                 .spawn();
         });
-        self.collab.toast = Some((
-            "gh pr create --web 실행".to_string(),
-            std::time::Instant::now(),
-        ));
+        self.set_toast(
+            "gh pr create --web 실행".to_string());
         self.chrome_dirty = true;
     }
     /// Expand/restore the git column width (header ⤢ button). Toggles between a
@@ -2563,19 +2531,13 @@ impl App {
         let panel_w = if self.tabs_on_top || !self.sidebar_visible { 0.0 } else { self.tab_strip_w() };
         sidebar_button_rect(0.0, panel_w, home, false)
     }
-    /// 파일트리 토글 rect. 사이드바 토글을 따라다닌다 — 접혀 있으면 그 오른쪽,
-    /// 펴져 있으면 사이드바 밖(본문 쪽 첫 자리)이다. 토글이 판 안으로 들어간
-    /// 마당에 트리 버튼까지 넣으면 세션 목록 머리가 버튼 줄이 된다.
+    /// 두 단추가 패널 경계를 사이에 두면 서로 다른 조작 묶음처럼 보인다.
     pub(crate) fn file_tree_toggle_rect(&self) -> (f32, f32, f32, f32) {
         let (sx, sy, sw, sh) = self.sidebar_toggle_rect();
         if self.tabs_on_top {
             return (sx, sy, sw, sh);
         }
-        let strip_w = self.tab_strip_w();
-        if strip_w > 0.0 {
-            return (strip_w + 10.0, sy, sw, sh);
-        }
-        (sx + sw + 2.0, sy, sw, sh)
+        (sx + sw + crate::native_controls::TOOLBAR_GAP, sy, sw, sh)
     }
     /// Windows-only frameless window controls (minimize / maximize / close),
     /// parked at the right end of the title strip. macOS keeps the native
@@ -2886,70 +2848,6 @@ impl App {
         }
         self.autosuggest.maybe_refresh();
         self.current_suggestion = self.autosuggest.suggest(&line);
-    }
-    /// Build banner shown bottom-right on launch: `v<pkg>·<git rev>`
-    /// (rev carries a trailing '+' when built dirty). Stamped at compile
-    /// time by build.rs.
-    pub(crate) fn version_label() -> String {
-        format!(
-            "v{}·{}",
-            env!("CARGO_PKG_VERSION"),
-            env!("KASATERM_GIT_REV")
-        )
-    }
-    /// 0.0..1.0 opacity for the launch banner: solid through
-    /// VERSION_HOLD_MS, then a linear fade across VERSION_FADE_MS, then
-    /// gone. Also the single source of truth for "is the banner still
-    /// animating" (alpha > 0).
-    pub(crate) fn version_alpha(&self) -> f32 {
-        if self.lite {
-            return 0.0;
-        }
-        let e = self.version_anim_start.elapsed().as_millis();
-        if e < VERSION_HOLD_MS {
-            1.0
-        } else if e < VERSION_HOLD_MS + VERSION_FADE_MS {
-            1.0 - (e - VERSION_HOLD_MS) as f32 / VERSION_FADE_MS as f32
-        } else {
-            0.0
-        }
-    }
-    /// 0.0..1.0 opacity for a collab completion toast: a hold long enough for a
-    /// real glance, then a fade.
-    /// Returns 0 with no active toast, so callers gate paint + frame-loop wake.
-    pub(crate) fn collab_toast_alpha(&self) -> f32 {
-        const HOLD: u128 = 2400;
-        const FADE: u128 = 600;
-        let Some((_, at)) = self.collab.toast.as_ref() else {
-            return 0.0;
-        };
-        // 승인 토스트(칩 포함)는 사용자가 응답하거나 프롬프트가 풀릴 때까지
-        // 고정 — 시간 페이드 없음. (해제는 route_approval_prompts/클릭 핸들러)
-        if self.collab.toast_action.is_some() {
-            return 1.0;
-        }
-        let e = at.elapsed().as_millis();
-        if e < HOLD {
-            1.0
-        } else if e < HOLD + FADE {
-            1.0 - (e - HOLD) as f32 / FADE as f32
-        } else {
-            0.0
-        }
-    }
-    /// 알림이 선 뒤 흐른 시간 — 들어오는 움직임이 이것으로 그려진다.
-    pub(crate) fn collab_toast_elapsed_ms(&self) -> f32 {
-        self.collab
-            .toast
-            .as_ref()
-            .map_or(f32::MAX, |(_, at)| at.elapsed().as_secs_f32() * 1000.0)
-    }
-    /// 알림이 아직 움직이는 중인가. 승인 알림은 서 있는 동안 멈춰 있지만 **들어오는
-    /// 0.18초**는 움직인다 — 그 동안 프레임을 안 돌리면 반쯤 투명한 첫 장에서 멈춘다.
-    pub(crate) fn collab_toast_animating(&self) -> bool {
-        self.collab_toast_alpha() > 0.0
-            && (self.collab.toast_action.is_none()
-                || crate::toast::enter_progress(self.collab_toast_elapsed_ms()) < 1.0)
     }
     /// Copy a detected code block's text to the clipboard and say so. Reuses
     /// arboard like `copy_selection`. Best-effort: a clipboard failure just logs.
@@ -4200,105 +4098,32 @@ fn notify_dedup_passes(key: &str) -> bool {
     true
 }
 
-/// 배너를 만들 `ActiveEventLoop` 가 없는 자리에서 줄을 서는 곳.
-///
-/// `notify_desktop` 은 자유 함수라 `App` 에 직접 못 닿는다. 그렇다고 호출부마다
-/// 배너를 따로 세우면 **서는 자리와 안 서는 자리가 갈린다** — 그게 실제로 이
-/// 앱에서 벌어지고 있던 일이다(완료만 배너가 서고 승인 대기·계정 한도는 OS
-/// 알림뿐이었다). 그래서 알림은 전부 이 큐 하나로 모으고, `handler` 가 매 틱
-/// `ActiveEventLoop` 를 쥔 자리에서 걷어 창으로 만든다.
-pub(crate) fn banner_inbox() -> &'static std::sync::Mutex<Vec<crate::notify_banner::BannerReq>> {
-    static Q: std::sync::OnceLock<std::sync::Mutex<Vec<crate::notify_banner::BannerReq>>> =
-        std::sync::OnceLock::new();
-    Q.get_or_init(Default::default)
-}
+fn desktop_notice_allowed(bundled: bool, authorized: bool) -> bool { bundled && authorized }
 
-/// 알림 한 건이 나갈 길.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NotifyPath {
-    /// 알림센터(`UNUserNotificationCenter`) — 앱 아이콘·학생 얼굴·눌러서 그 pane 으로.
-    Native,
-    /// `osascript` — 스크립트 편집기 명의지만 알림센터에 남는다.
-    Osascript,
-    /// 앱이 직접 그리는 배너 창(`notify_banner`).
-    Banner,
-}
-
-/// 번들로 도는 macOS 는 **OS 알림만** 낸다 — 사용자 2026-10-01 「앱 자체 알림 배너
-/// 제거하지 않았나? 계속 뜨네」「os 알림으로 대체하지 않았나」. 전에는 알림센터 허락이
-/// 없으면 자체 배너를 띄우고 osascript 도 함께 쏴 같은 알림이 두 번 떴다. 이 맥북은
-/// 애플 서명 표식이 있는데도 macOS 가 등록을 거절해 허락이 늘 없으므로 사실상 매번
-/// 그랬다. 허락이 있으면 알림센터, 없으면(거절·아직 답 없음) osascript 다.
-///
-/// Windows 는 이 판정 앞에서 알림센터 토스트(`win_notify`)가 먼저 받는다. 배너가 남는 것은
-/// 토스트를 못 내는 Windows(사람이 kasaterm 알림을 끔·등록 실패)와, 번들 없는 실행에서
-/// `KASATERM_NOTIFY_BANNER` 로 배너를 일부러 켠 검증뿐이다.
-fn notify_path(macos_bundle: bool, authorized: bool) -> NotifyPath {
-    match (macos_bundle, authorized) {
-        (false, _) => NotifyPath::Banner,
-        (true, true) => NotifyPath::Native,
-        (true, false) => NotifyPath::Osascript,
-    }
-}
-
-/// 데스크톱 알림을 낸다 — 완료·승인 대기·오류·계정 한도가 전부 이 한 자리를 지난다.
-///
-/// `dedup` 을 주면 그 열쇠로 8초 게이트를 탄다(같은 일에 두 경로가 쏘는 경우).
-///
-/// 플랫폼 분기는 **안쪽**에 둔다 — 게이트를 바깥에 한 벌로 두려면 함수가 하나여야
-/// 하고, 두 벌로 나누면 한쪽에만 게이트가 붙는 그 함정으로 곧장 돌아간다.
-/// `route` 는 눌렀을 때 갈 자리 — `(pane id, 그때의 claude 세션 id)`. 세션까지
-/// 싣는 이유는 surface id 가 재사용되기 때문이다(`macos_notify` 참조).
 pub(crate) fn notify_desktop(
-    title: &str,
-    body: &str,
-    character: Option<&str>,
-    dedup: Option<&str>,
+    title: &str, body: &str, character: Option<&str>, dedup: Option<&str>,
     route: Option<(&str, Option<&str>)>,
 ) {
-    // lite 는 알림(시스템·자체 배너)을 내지 않는다.
-    if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) {
+    if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) { return; }
+    let windows_rig = cfg!(windows) && std::env::var_os("KASATERM_NOTIFY_TOAST").is_some();
+    if crate::verification_run() && !windows_rig {
+        if std::env::var("KASATERM_NOTIFICATION_PROBE").as_deref() == Ok("1") {
+            if let Some(root) = std::env::var_os("TMPDIR").and_then(|p| std::fs::canonicalize(p).ok())
+                .filter(|p| p.starts_with("/private/tmp") || p.starts_with("/tmp")) {
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(root.join("notifications.jsonl")) {
+                    let _ = writeln!(file, "{}", serde_json::json!({"title": title, "body": body, "route": route}));
+                }
+            }
+        }
         return;
     }
-    // 번들 없는 맥 실행(검증 리그·`cargo run`)은 알리지 않는다 — 리그가 띄운 자체 배너가 사람
-    // 화면에 계속 떴다(2026-10-07 「테스트하는 거에서 자체 알림 배너 왜 자꾸 떠」). 배너를
-    // 검증할 때만 `KASATERM_NOTIFY_BANNER` 로 켠다.
     #[cfg(target_os = "macos")]
-    if !is_bundled() && std::env::var_os("KASATERM_NOTIFY_BANNER").is_none() {
-        return;
+    if desktop_notice_allowed(is_bundled(), NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 1) {
+        notify_native(title, body, character, route);
     }
-    // 토스트가 받으면 배너는 서지 않는다 — 한 일에 두 번 울리지 않게(맥 번들과 같다). 토스트가 배달에
-    // 실패하면 그 일꾼이 같은 요청을 배너 줄에 세운다.
     #[cfg(windows)]
-    {
-        if crate::win_notify::toast(title, body, character, route) {
-            return;
-        }
-        if crate::win_notify::quiet_run() && std::env::var_os("KASATERM_NOTIFY_BANNER").is_none() {
-            return;
-        }
-    }
-    #[cfg(target_os = "macos")]
-    let path = notify_path(
-        is_bundled(),
-        NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 1,
-    );
-    #[cfg(not(target_os = "macos"))]
-    let path = notify_path(false, false);
-    match path {
-        NotifyPath::Banner => banner_inbox().lock().unwrap().push((
-            title.to_string(),
-            body.to_string(),
-            character.map(str::to_string),
-            route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
-        )),
-        #[cfg(target_os = "macos")]
-        NotifyPath::Native => notify_native(title, body, character, route),
-        #[cfg(target_os = "macos")]
-        NotifyPath::Osascript => notify_osascript(title, body),
-        #[cfg(not(target_os = "macos"))]
-        NotifyPath::Native | NotifyPath::Osascript => {}
-    }
+    { let _ = crate::win_notify::toast(title, body, character, route); }
 }
 
 /// 눌렀을 때 갈 자리를 알림 식별자에 싣는다 — `kasaterm-notify-{seq}|{pane}|{sid}`. pane id(`%116`)도
@@ -4348,7 +4173,7 @@ pub(crate) fn student_profile_file(character: &str, seq: Option<u64>) -> Option<
 ///
 /// 전에는 `requestAuthorization` 의 콜백이 **빈 블록**이라 거부돼도 아무도 몰랐다:
 /// 요청은 그대로 native 로 나가고 시스템이 조용히 버려, 화면에는 "알림이 안 온다"
-/// 만 남았다. 답을 여기 남겨 두면 허락이 없는 동안은 osascript 로 나간다.
+/// 만 남았다. 답을 기록해 OS가 허용한 실행에서만 알린다.
 #[cfg(target_os = "macos")]
 static NOTIFY_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -4379,7 +4204,7 @@ pub(crate) fn ensure_notification_authorization() {
                     let why = unsafe { err.as_ref() }
                         .map(|e| e.localizedDescription().to_string())
                         .unwrap_or_else(|| "사유 없음".to_string());
-                    eprintln!("[notify] 데스크톱 알림 권한 없음 — osascript 사용: {why}");
+                    eprintln!("[notify] 데스크톱 알림 권한 없음: {why}");
                 }
             },
         );
@@ -4387,7 +4212,7 @@ pub(crate) fn ensure_notification_authorization() {
         let opts = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
         center.requestAuthorizationWithOptions_completionHandler(opts, &handler);
         // 요청 콜백이 **안 오는 경우가 있다.** 그러면 `NOTIFY_AUTH` 가 0(아직 모름)에
-        // 머물러 알림센터를 허락받고도 osascript 로 샌다 — 애플 인증서로 서명해 두고도
+        // 머물러 알림센터를 허락받고도 알림을 못 낸다 — 애플 인증서로 서명해 두고도
         // 알림센터를 못 쓰던 것이 이것이다(2026-09-15 지적). 현재 권한은 요청과
         // 별개로 직접 읽을 수 있으니, 같이 물어 답이 오는 대로 채운다. 둘 중 먼저
         // 오는 쪽이 이기고, 값은 같은 뜻이라 순서가 어느 쪽이든 결과가 같다.
@@ -4412,7 +4237,7 @@ pub(crate) fn refresh_notification_authorization() {
     let handler = block2::RcBlock::new(
         |settings: std::ptr::NonNull<objc2_user_notifications::UNNotificationSettings>| {
             let status = unsafe { settings.as_ref() }.authorizationStatus();
-            // `KASATERM_NOTIFY_DEBUG=1` — 왜 알림센터 대신 osascript 로 나가는지 앱이
+            // `KASATERM_NOTIFY_DEBUG=1` — 어떤 알림 권한을 읽었는지 앱이
             // 직접 말한다. GUI 로 띄운 앱은 stderr 가 어디에도 안 남아(2026-09-15
             // 실측: 로그 파일이 0줄) 이 자리를 밖에서 들여다볼 창구가 없었다.
             if std::env::var_os("KASATERM_NOTIFY_DEBUG").is_some() {
@@ -4481,36 +4306,13 @@ fn notify_native(
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, delivered_content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
-    // 배달이 실패하면(권한 회수·첨부 거부 등) osascript 로 돌린다.
-    // 실패를 삼키면 "알림이 안 온다" 만 남고 이유는 어디에도 안 남는다.
-    let (fb_title, fb_body) = (title.to_string(), body.to_string());
+    // OS의 거절을 다른 앱 명의나 자체 창으로 우회하지 않는다.
     let done = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
         if let Some(e) = unsafe { err.as_ref() } {
-            eprintln!(
-                "[notify] native 배달 실패 — osascript 사용: {}",
-                e.localizedDescription()
-            );
-            notify_osascript(&fb_title, &fb_body);
+            eprintln!("[notify] 알림센터 배달 실패: {}", e.localizedDescription());
         }
     });
     center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
-}
-
-/// 스크립트 편집기 명의로 배달된다 — 알림센터 등록이 거절된 번들에서도 알림센터에
-/// 남는 유일한 OS 알림 길이다. 아이콘·학생 얼굴·눌러서 그 pane 으로 가기는 없다.
-/// 그걸 되찾으려면 알림센터 허락이 서야 하고(사연은 `macos_notify` 아래 주석),
-/// 구식 `NSUserNotification` 은 같은 검문에 조용히 버려져 길이 아니다.
-#[cfg(target_os = "macos")]
-fn notify_osascript(title: &str, body: &str) {
-    let script = format!(
-        "display notification {} with title {}",
-        applescript_quote(body),
-        applescript_quote(title),
-    );
-    let _ = crate::proc::command("osascript")
-        .arg("-e")
-        .arg(script)
-        .spawn();
 }
 
 /// 바깥에서 들어온 한 줄을 꺼낸다(먼저 온 것부터, 꺼내면 지운다).
@@ -4697,22 +4499,6 @@ mod sidebar_tray_tests {
     }
 }
 
-/// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
-/// title with quotes can't break out of the `display notification` command.
-#[cfg(target_os = "macos")]
-fn applescript_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        if c == '"' || c == '\\' {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out.push('"');
-    out
-}
-
 /// 기본 브라우저로 URL 열기 — macOS `open`, Windows `cmd /C start`, 그 외 `xdg-open`.
 /// BA GUI 버튼이 arona-ui 를 외부 탭으로 띄울 때 쓴다(wry 임베드 비활성 대체).
 pub(crate) fn open_url_in_browser(url: &str) {
@@ -4726,48 +4512,6 @@ pub(crate) fn open_url_in_browser(url: &str) {
         .spawn();
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let _ = crate::proc::command("xdg-open").arg(url).spawn();
-}
-
-#[cfg(test)]
-mod toast_tests {
-    use super::*;
-
-    // 완료 토스트 = 캐릭터(pane 고정) + hook title(완료 순간). title 앞 "✓ " 중복 제거.
-    #[test]
-    fn attention_toast_combines_character_and_reason() {
-        assert_eq!(
-            format_attention_toast(Some("미도리"), "권한 요청"),
-            "⚠ 미도리 — 권한 요청"
-        );
-    }
-
-    // 미현존/미배정 pane → 캐릭터 없이 hook title 만(정보 보존, 드롭 안 함).
-    #[test]
-    fn attention_toast_falls_back_when_no_character() {
-        assert_eq!(
-            format_attention_toast(None, "권한 요청"),
-            "⚠ 권한 대기중 — 권한 요청"
-        );
-        assert_eq!(format_attention_toast(None, ""), "⚠ 권한 대기중");
-    }
-
-    // 권한 대기 토스트 — 캐릭터·reason 유무 4갈래.
-    #[test]
-    fn attention_toast_variants() {
-        assert_eq!(
-            format_attention_toast(Some("아루"), "Bash 실행 권한"),
-            "⚠ 아루 — Bash 실행 권한"
-        );
-        assert_eq!(
-            format_attention_toast(Some("아루"), ""),
-            "⚠ 아루 — 권한 대기중"
-        );
-        assert_eq!(
-            format_attention_toast(None, "Bash 실행 권한"),
-            "⚠ 권한 대기중 — Bash 실행 권한"
-        );
-        assert_eq!(format_attention_toast(None, ""), "⚠ 권한 대기중");
-    }
 }
 
 /// 이 간격 안에 다시 누르면 더블클릭이지 이름 편집이 아니다. 헤드리스 하네스도
@@ -4930,7 +4674,7 @@ mod status_feed_tests {
 
 #[cfg(test)]
 mod notify_path_tests {
-    use super::{notify_ident, notify_path, notify_route, NotifyPath};
+    use super::{notify_ident, desktop_notice_allowed, notify_route};
 
     #[test]
     fn identifier_carries_pane_and_session() {
@@ -4945,24 +4689,44 @@ mod notify_path_tests {
     }
 
     #[test]
-    fn bundled_macos_never_draws_own_banner() {
-        assert_eq!(notify_path(true, true), NotifyPath::Native);
-        assert_eq!(notify_path(true, false), NotifyPath::Osascript);
+    fn notification_actions_preserve_the_request_and_version() {
+        for (action, key) in [(crate::remote_approval::ACTION, "request-123"),
+                              (crate::update_notice::ACTION, "0.2.167")] {
+            assert_eq!(notify_route(&notify_ident(8, Some((action, Some(key))))),
+                       Some((action.into(), Some(key.into()))));
+        }
     }
 
     #[test]
-    fn banner_only_where_os_notify_is_unavailable() {
-        assert_eq!(notify_path(false, false), NotifyPath::Banner);
-        assert_eq!(notify_path(false, true), NotifyPath::Banner);
+    fn bundled_macos_never_draws_own_banner() {
+        assert!(desktop_notice_allowed(true, true));
+        assert!(!desktop_notice_allowed(true, false));
+    }
+
+    #[test]
+    fn unbundled_runs_never_fall_back_to_app_banners() {
+        assert!(!desktop_notice_allowed(false, false));
+        assert!(!desktop_notice_allowed(false, true));
     }
 }
 
 fn sidebar_button_rect(window_width: f32, panel_width: f32, reserved: f32, right: bool) -> (f32, f32, f32, f32) {
-    let w = 26.0;
-    let h = 22.0;
-    let inset = (panel_width - SIDEBAR_TAB_INSET - w).max(reserved);
-    let x = if right { window_width - inset - w } else { inset };
-    (x, (TITLE_HEIGHT - h) / 2.0, w, h)
+    let size = crate::native_controls::TOOLBAR_SIZE;
+    let step = size + crate::native_controls::TOOLBAR_GAP;
+    let group = size + step;
+    // 두 단추가 칼럼 경계 양쪽으로 갈라지면 여백과 바탕색이 서로 다른 조작처럼 보인다.
+    let x = if right && panel_width > 0.0 && panel_width < reserved + group + SIDEBAR_TAB_INSET {
+        (window_width - panel_width - SIDEBAR_TAB_INSET - group)
+            .min(window_width - reserved - group) + step
+    } else if right {
+        (window_width - panel_width + SIDEBAR_TAB_INSET)
+            .min(window_width - reserved - group) + step
+    } else if panel_width > 0.0 && panel_width < reserved + group + SIDEBAR_TAB_INSET {
+        (panel_width + SIDEBAR_TAB_INSET).max(reserved)
+    } else {
+        (panel_width - SIDEBAR_TAB_INSET - group).max(reserved)
+    };
+    (x.max(0.0), (TITLE_HEIGHT - size) / 2.0, size, size)
 }
 
 fn side_column_overlay(window_width: f32, open: bool) -> bool {
@@ -4980,7 +4744,7 @@ mod responsive_panel_tests {
             let right = sidebar_button_rect(1200.0, width, 8.0, true);
             assert_eq!(left.0 + left.2 + right.0, 1200.0);
             assert_eq!((left.1, left.2, left.3), (right.1, right.2, right.3));
-            assert_eq!(right.0, 1200.0 - width + 8.0);
+            assert_eq!(right.0, 1200.0 - width + 38.0);
         }
         assert_eq!(sidebar_button_rect(520.0, 0.0, 8.0, true).0, 486.0);
         assert_eq!(sidebar_button_rect(520.0, 0.0, 92.0, true).0, 402.0);
@@ -4995,6 +4759,21 @@ mod responsive_panel_tests {
         }
         for width in [0.0, 1.0, 680.0, 1280.0] {
             assert!(!side_column_overlay(width, true));
+        }
+    }
+
+    #[test]
+    fn toolbar_pairs_stay_on_one_side_of_the_divider() {
+        let step = crate::native_controls::TOOLBAR_SIZE + crate::native_controls::TOOLBAR_GAP;
+        for panel in [48.0, 100.0, 180.0, 240.0, 420.0] {
+            let (x, _, w, _) = sidebar_button_rect(1200.0, panel, 84.0, false);
+            assert!(x >= 84.0);
+            assert!(x >= panel || x + step + w <= panel);
+            for reserved in [8.0, 92.0] {
+                let (x, _, w, _) = sidebar_button_rect(1200.0, panel, reserved, true);
+                assert!(x + w <= 1200.0 - reserved);
+                assert!(x - step >= 1200.0 - panel || x + w <= 1200.0 - panel);
+            }
         }
     }
 }

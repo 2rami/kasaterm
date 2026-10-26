@@ -1483,7 +1483,7 @@ impl crate::App {
                     Err(e) => e,
                 };
                 self.statusbar.tunnel_checked = Some(std::time::Instant::now());
-                self.collab.toast = Some((msg, std::time::Instant::now()));
+                self.set_toast(msg);
                 self.chrome_dirty = true;
                 return true;
             }

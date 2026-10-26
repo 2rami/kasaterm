@@ -83,24 +83,7 @@ fn lane_color(index: usize) -> [u8; 4] {
 }
 
 fn segment(g: &mut gpu::GpuRenderer, from: (f32, f32), to: (f32, f32), color: [u8; 4]) {
-    if (from.0 - to.0).abs() < 0.1 {
-        g.rect(
-            from.0 - 1.0,
-            from.1.min(to.1),
-            2.0,
-            (to.1 - from.1).abs(),
-            color,
-        );
-        return;
-    }
-    let steps = (to.1 - from.1).abs().ceil().max(1.0) as usize;
-    for step in 0..steps {
-        let t = step as f32 / steps as f32;
-        let smooth = t * t * (3.0 - 2.0 * t);
-        let x = from.0 + (to.0 - from.0) * smooth;
-        let y = from.1 + (to.1 - from.1) * t;
-        g.rect(x - 1.0, y, 2.0, 1.5, color);
-    }
+    g.curve_stroke(from, to, 2.0, color);
 }
 
 fn rails(

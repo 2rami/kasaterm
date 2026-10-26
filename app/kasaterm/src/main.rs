@@ -48,7 +48,6 @@ mod native_controls;
 mod native_layout;
 mod design_study;
 mod native_strings;
-mod notify_banner;
 mod onboarding;
 mod quota_alerts;
 mod render;
@@ -73,7 +72,6 @@ mod sprites;
 mod stream;
 mod testkit;
 mod theme;
-mod toast;
 mod update_notice;
 mod remote_approval;
 mod themegen;
@@ -834,11 +832,6 @@ pub(crate) fn invalidate_wheel_pixel_gain() {
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
 /// default; iTerm2 uses 500. 530 matches the platform feel.
 const BLINK_HALF_PERIOD_MS: u64 = 530;
-/// Launch build banner: hold the `v…·<rev>` corner label fully visible
-/// for HOLD ms, then fade it out over FADE ms so you can tell builds
-/// apart at startup without it nagging afterwards.
-const VERSION_HOLD_MS: u128 = 4000;
-const VERSION_FADE_MS: u128 = 1200;
 /// While the user is actively typing we keep the cursor solid for this
 /// long after the last keystroke so it's easy to follow the caret. Same
 /// idea as iTerm2's "smart cursor" pause.
@@ -6069,9 +6062,7 @@ struct App {
     /// paint alongside `image_btn_rects`; the mouse handler matches a
     /// click against it before falling through to tab/plus/cell tests.
     pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))>,
-    /// When the launch build banner began animating. Drives the
-    /// hold-then-fade alpha and keeps the frame loop awake (WaitUntil)
-    /// only while the banner is still visible.
+    /// 모든 창의 학생 동작·상태 효과가 같은 시간축을 쓰게 한다.
     version_anim_start: Instant,
     /// macOS menu bar (muda). Held here because the menu must outlive the
     /// app; `git_menu_item` is matched against incoming MenuEvent ids to
@@ -6154,12 +6145,6 @@ struct App {
     /// Detached document windows and their launch/restore queue. Kept behind
     /// one field so editor-window lifetime does not spread across App.
     aux: auxwin::AuxWindows,
-    /// 떠 있는 완료 알림 배너들(가장 오래된 것이 앞). macOS 알림 센터를 자체 서명
-    /// 번들이 못 쓰기 때문에 우리가 그린다 — 사연은 `notify_banner` 모듈 doc.
-    banners: Vec<notify_banner::Banner>,
-    /// 아직 창을 못 만든 배너 요청 `(제목, 본문, 학생)`. 창 생성은 `ActiveEventLoop`
-    /// 가 있어야 하는데 알림이 오는 자리(`handle_notify`)엔 그게 없다 — 거기서
-    /// 줄을 세우고 `about_to_wait` 에서 만든다.
     /// 웹 pane 실물(자식 창 + webview). 키 = `WebPane.host_id`. GUI 스레드
     /// 전용 — `Workspace` 는 PTY 스레드와 공유라 !Send 인 webview 를 못 담는다.
     web_hosts: HashMap<u64, webpane::WebHost>,
@@ -6612,7 +6597,6 @@ impl App {
             mouse_cursor: if lite { "ibeam".to_string() } else { socket::read_mouse_cursor() },
             pending_open_md: Vec::new(),
             aux: auxwin::AuxWindows::load(viewer_only),
-            banners: Vec::new(),
             web_hosts: HashMap::new(),
             web_host_seq: 0,
             web_addr: None,

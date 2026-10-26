@@ -136,7 +136,7 @@ pub(crate) fn install(proxy: EventLoopProxy<UserEvent>, window: &winit::window::
     }
 }
 
-/// 토스트로 낸다. 일꾼이 없으면(조용한 실행·라이트·아직 부팅 전) false — 부르는 쪽이 배너로 넘어간다.
+/// 토스트로 낸다. 일꾼이 없으면(조용한 실행·라이트·아직 부팅 전) false를 돌려준다.
 pub(crate) fn toast(title: &str, body: &str, character: Option<&str>, route: Option<(&str, Option<&str>)>) -> bool {
     let Some(tx) = WORKER.get() else { return false };
     tx.send(Request {
@@ -162,15 +162,9 @@ fn run_worker(id: &'static Identity, proxy: EventLoopProxy<UserEvent>, rx: mpsc:
     for req in rx {
         seq += 1;
         let shown = show(id, &req, seq);
-        // 알림이 사라지면 사람은 일이 끝난 줄 모른다 — 못 낸 것은 앱 배너로라도 세운다.
+        // OS에서 끈 알림을 앱 배너로 되살리지 않는다.
         if let Err(e) = shown {
-            if e.code() != E_ACCESSDENIED {
-                eprintln!("[notify] 토스트 배달 실패 — 배너 사용: {e}");
-            }
-            if let Ok(mut q) = crate::chrome::banner_inbox().lock() {
-                q.push((req.title, req.body, req.character, req.route));
-            }
-            let _ = proxy.send_event(UserEvent::Redraw);
+            if e.code() != E_ACCESSDENIED { eprintln!("[notify] 알림센터 배달 실패: {e}"); }
         }
     }
 }
@@ -178,7 +172,7 @@ fn run_worker(id: &'static Identity, proxy: EventLoopProxy<UserEvent>, rx: mpsc:
 fn show(id: &Identity, req: &Request, seq: u64) -> windows::core::Result<()> {
     // 알림기는 매번 새로 받는다 — 신원을 적기 전에 받아 둔 알림기는 그 뒤에도 「없는 앱」으로 남는다.
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id.aumid))?;
-    // 사람이 설정에서 kasaterm 알림을 껐거나 정책이 막았으면 Show 는 조용히 버린다 — 미리 갈라 배너로 보낸다.
+    // 사람이 설정에서 kasaterm 알림을 껐거나 정책이 막았으면 Show 는 조용히 버린다 — OS의 선택을 그대로 따른다.
     // 조회 자체가 안 되면 막지 않고 Show 에 맡긴다.
     if notifier.Setting().is_ok_and(|s| s != NotificationSetting::Enabled) {
         return Err(E_ACCESSDENIED.into());

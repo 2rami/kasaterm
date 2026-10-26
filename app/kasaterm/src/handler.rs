@@ -869,6 +869,14 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::NotifyFocus { pane, sid } => {
+                if pane == crate::remote_approval::ACTION || pane == crate::update_notice::ACTION {
+                    if let Some(w) = self.window.as_ref() { w.focus_window(); }
+                    if let Some(key) = sid.as_deref() {
+                        if pane == crate::remote_approval::ACTION { self.open_remote_notification(key); }
+                        else { self.open_update_notification(key); }
+                    }
+                    return;
+                }
                 // 알림을 쏜 시점의 세션과 지금 그 pane 의 세션이 같을 때만 옮긴다.
                 // surface id 는 재사용되므로, 그 사이 pane 이 닫히고 번호가 새 셸에
                 // 넘어갔으면 엉뚱한 자리로 끌려간다 — 그때는 아무 데도 안 가는 게 맞다.
@@ -1504,7 +1512,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 로스터 캐시(`character_slugs`)로 판정하지 않는 이유: 캐시는 이름이
                 // **실제로 바뀔 때만** 무효화되므로, 캐시와 파일이 어긋난 순간
                 // 거부를 성공으로 읽는다(실측으로 거짓 성공을 냈다).
-                let toast_before = self.collab.toast.clone();
+                let toast_before = self.collab.last_notice.clone();
                 self.settings_apply(SettingsAction::SelectStudent(name.clone()));
                 if let Some(p) = persona {
                     self.students_caret = p.chars().count();
@@ -1514,7 +1522,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.students_name = n.clone();
                 }
                 self.settings_apply(SettingsAction::CloseStudent);
-                let rejected = match (&toast_before, &self.collab.toast) {
+                let rejected = match (&toast_before, &self.collab.last_notice) {
                     (_, None) => None,
                     (None, Some((m, _))) => Some(m.clone()),
                     // 시각까지 보는 건 같은 문구가 연달아 떴을 때를 가르기
@@ -1555,7 +1563,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 그래서 판정은 액션마다 그 액션이 남긴 상태로 하고, 토스트 문구는
                 // 판정과 무관하게 그대로 실어 보낸다(웹뷰 창에선 네이티브 토스트가
                 // 안 보이니, 네이티브가 하려던 말은 여기서만 전달된다).
-                let toast_before = self.collab.toast.clone();
+                let toast_before = self.collab.last_notice.clone();
                 let media_changed =
                     crate::native_settings::remote_action_refreshes_media(action.as_str());
                 let arg = id.clone().unwrap_or_default();
@@ -1688,7 +1696,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // (액션이 남긴 상태로 본다) 한 함수에 모아 뒀다.
                     other => self.settings_web_action(other, &arg, label.as_deref()),
                 };
-                let message = match (&toast_before, &self.collab.toast) {
+                let message = match (&toast_before, &self.collab.last_notice) {
                     (_, None) => None,
                     (None, Some((m, _))) => Some(m.clone()),
                     (Some((bm, bt)), Some((m, t))) => (t != bt || m != bm).then(|| m.clone()),
@@ -3299,10 +3307,6 @@ impl ApplicationHandler<UserEvent> for App {
         if self.inline_web_window_event(id, &event) {
             return;
         }
-        if let Some(pos) = self.banners.iter().position(|b| b.window.id() == id) {
-            self.banner_window_event(pos, &event);
-            return;
-        }
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -4908,59 +4912,6 @@ impl ApplicationHandler<UserEvent> for App {
                         {
                             self.file_tree.new = None;
                             self.chrome_dirty = true;
-                        }
-                    }
-                    // 승인 토스트 칩 — 일반 토스트 dismiss 보다 먼저 검사해야
-                    // 칩 클릭이 pane/dismiss 로 새지 않는다 (hit-test 순서 의존).
-                    if let Some(target) = self.collab.toast_action.clone() {
-                        let hit = |r: Option<(f32, f32, f32, f32)>| {
-                            r.map_or(false, |(x, y, w, h)| {
-                                cx >= x && cx <= x + w && cy >= y && cy <= y + h
-                            })
-                        };
-                        let ok = hit(self.collab.toast_approve_rect);
-                        let no = hit(self.collab.toast_deny_rect);
-                        if ok || no {
-                            if target == crate::update_notice::ACTION {
-                                self.answer_update_notice(ok);
-                            } else if target == crate::remote_approval::ACTION {
-                                self.answer_remote_notice(ok);
-                            } else {
-                                self.respond_approval(&target, ok);
-                                // pane_prompt_wait/attention 은 여기서 걷지 않는다 —
-                                // 주입한 키로 프롬프트가 실제로 사라질 때
-                                // route_approval_prompts 가 board 까지 함께 정리.
-                                // (flag 가 남아 있는 동안은 토스트 재무장도 없다.)
-                                self.clear_approval_toast();
-                            }
-                            self.chrome_dirty = true;
-                            window.request_redraw();
-                            return;
-                        }
-                    }
-                    // Completion toast: a click anywhere on it dismisses it
-                    // immediately (top-right, tested before the cell grid).
-                    // 승인 토스트(칩 비적중)의 본문 클릭은 해당 pane 으로 점프 —
-                    // 프롬프트 원문을 읽고 직접 답하라는 의미. 플래그는 유지해
-                    // 그리드 스캔이 프롬프트 해소 시점에 board까지 정리한다.
-                    if let Some((tx, ty, tw, th)) = self.collab.toast_rect {
-                        if cx >= tx && cx <= tx + tw && cy >= ty && cy <= ty + th {
-                            if self.update_notice_showing() {
-                                // 새 판 알림 본문은 닫기다 — 센티널을 active_pane 에
-                                // 넣으면 존재하지 않는 pane 을 가리킨다.
-                                self.answer_update_notice(false);
-                            } else if self.remote_notice_showing() {
-                                // 원격 승인 알림 본문은 [보기] 다 — 원문을 시트로 연다.
-                                self.answer_remote_notice(true);
-                            } else if let Some(target) = self.collab.toast_action.take() {
-                                if target != crate::update_notice::ACTION && target != crate::remote_approval::ACTION {
-                                    self.focus_pane(&target);
-                                }
-                            }
-                            self.clear_approval_toast();
-                            self.chrome_dirty = true;
-                            window.request_redraw();
-                            return;
                         }
                     }
                     // Any press outside the commit input blurs it, so typing
@@ -8027,19 +7978,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoundock(event_loop);
         self.run_pending_autoundock_dock();
         self.run_pending_autoremotecolor();
-        // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
-        // 수명이 다한 것을 걷는다.
-        // 알림은 전부 `notify_desktop` 을 지나 `banner_inbox` 에 줄 선다. 창을
-        // 만들려면 `ActiveEventLoop` 가 필요해 그 자리에서 바로 못 띄우고, 여기가
-        // 그걸 쥔 첫 자리다.
-        let pending: Vec<_> = crate::chrome::banner_inbox()
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
-        for (title, body, who, route) in pending {
-            self.push_notify_banner(event_loop, &title, &body, who, route);
-        }
-        self.expire_banners();
         self.run_pending_autostudent(event_loop);
         self.run_pending_autotabcycle();
         self.run_pending_autoboxlabel();
@@ -8061,12 +7999,6 @@ impl ApplicationHandler<UserEvent> for App {
         // 합치면 `||` 단락이 사라져 모든 조건이 매번 평가된다.
         if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
             let mut why: Vec<&'static str> = Vec::new();
-            if self.version_alpha() > 0.0 {
-                why.push("version");
-            }
-            if self.collab_toast_animating() {
-                why.push("collab_toast");
-            }
             if self.any_notify_flash() {
                 why.push("notify_flash");
             }
@@ -8146,18 +8078,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Each of those drives a redraw directly, so there's no timer in
         // the hot path to be coalesced.
         //
-        // Exception: while the launch build banner is still fading we DO
-        // need a timer, since nothing else is producing frames. Re-arm a
-        // ~30fps WaitUntil until the fade finishes, then fall back to the
-        // idle Wait. (new_events → request_redraw on the timer fire.)
-        // The toast fade needs the same treatment as the launch banner.
-        // (echo-stale 격리) busy 30fps 펌프 임시 제거 — version 배너·토스트만
-        // WaitUntil, 나머지는 Wait. ws lock 경합이 echo stream을 막는지 확인.
-        if self.version_alpha() > 0.0
-            // Sticky approval toast stands still once it has slid in — pumping
-            // 30fps while a blocked pane sits for minutes would burn battery.
-            || self.collab_toast_animating()
-            || self.any_notify_flash()
+        if self.any_notify_flash()
             // 계정 전환 반짝임(0.9초). 끝나면 factor 가 None 이 되어 저절로 멎는다.
             || self.account_flash_factor().is_some()
             // A busy pane's header working bar sweeps every frame — pump ~30fps
@@ -8258,7 +8179,6 @@ impl ApplicationHandler<UserEvent> for App {
                 )
                 // 자체 배너가 유일한 애니메이션/미확인 상태여도 정확히 수명 만기에
                 // 깨어나야 한다. hover 중에는 deadline이 None이라 타이머가 멈춘다.
-                .chain(self.next_banner_deadline())
                 // Completion can settle after the last PTY output has stopped waking the window.
                 .chain(self.collab.hub.notification_deadline())
                 .chain(self.remote_completion_deadline())

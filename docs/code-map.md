@@ -32,8 +32,8 @@
 - `mirror_close.rs` — 원본과 같은 닫기 확인·원격 완료 응답. `mirror_close/source.rs`는 원본 GUI의 신원·구성 재검사와 닫기·복원, `scope.rs`는 응답을 기다리는 동안 바뀐 로컬 탭 보호, `reopen.rs`는 원본 닫힘 기록으로 미러 되살리기.
 - `drag_transfer.rs` — 끌기 시작의 칸 신원·화면 열쇠 고정과 도착 방·기기 머리 경로, 즉시 진행 표시. `session_transfer.rs`는 기기·세션 재검사와 도착 방·대화 준비 확인을 맡는다.
 - `transfer_endpoints.rs` — 기기 간 스냅숏·방 선택·빈 셸 예약과 정체 검사. `transfer_endpoints/launch.rs`는 예약한 셸의 입력 세대·프롬프트를 대조해 한 번만 재개 명령을 보내고, 같은 대화의 실제 입력창을 기다린다. 입력창 판정은 `tell_delivery.rs`의 공통 판독을 사용한다.
-- `toast.rs` — 오른쪽 위 알림 한 장을 그리는 자유함수(`paint_notice`)와 배치·제목/설명 가르기. 세우는 쪽은 `set_toast`(chrome.rs)
-- `win_notify.rs` — Windows 알림센터 토스트(HKCU AUMID 등록·COM 활성화기 → `UserEvent::NotifyFocus`)와 작업표시줄 배지(`set_taskbar_badge`). `chrome::notify_desktop` 이 토스트에 먼저 넘기고 못 내면 배너로
+- `chrome.rs notify_desktop` — OS 알림 전송과 세션·동작 경로. 조작 안내도 이 경로를 사용하며 자체 토스트·배너 창은 없다. `CollabState.last_notice`는 소켓 작업의 오류 회신용이다.
+- `win_notify.rs` — Windows 알림센터 토스트(HKCU AUMID 등록·COM 활성화기 → `UserEvent::NotifyFocus`)와 작업표시줄 배지(`set_taskbar_badge`). `chrome::notify_desktop` 이 OS 토스트로 보내고, OS가 막으면 자체 배너로 우회하지 않는다.
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
 - `render/status_bar/accounts.rs` — 제공된 사용량 창만 폭에 맞춰 표시하는 계정 칩. `statusbar/devices.rs`는 기기 연결·버전·업데이트 판, `statusbar/usage.rs`는 실행별 사용량 상세를 그린다.
 - `process_usage.rs` — PID·시작 시각과 PTY 세대로 실행 신원을 고정하고 개별 종료한다. 숨긴 다중 셸의 복원 기록을 나누고, 문서가 함께 숨겨졌으면 먼저 열어 개별 종료하게 한다. `screen_pump`의 EOF도 같은 PTY 세대일 때만 칸을 걷는다.
@@ -90,10 +90,10 @@
 - `sidebar_pulse.rs` — 사이드바 맨 위 「목록 | 배치도」 전환과 학생 줄 사정(모든 기기 보드의 사람 차례·작업·끝). 수는 `board_digest.rs`(원격 거울 줄 제외)를 백그라운드로 3초마다 읽고 펫 현황판에도 적는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
 - `native_device_account.rs` — 설정 「계정」의 KASA 계정(로그인·Google·GitHub 연결·선택). 자식 `native_account_profile.rs` 는 얼굴 줄(프사·닉네임)·「로그인 방법」·아이디·비밀번호 바꾸기, `native_work_permissions.rs` 는 일 권한. 관문 쪽은 `kasa_mcp` 의 `gateway_profile.rs`(`/relay/profile`)·`device_profile.rs`(이 기기 호출) — `docs/account-oauth.md` 「Profile」
-- `remote_approval.rs` — 원격 승인의 데스크톱 화면: 같은 계정 **다른 기기** 학생의 권한 요청을 관문 긴 폴링으로 받아 오른쪽 위 결정 알림([보기][나중에], `collab.toast_action` 센티널)과 원문 시트([허락][거절], Return=거절)로 묻고 관문에 보낸다. 이 기기 요청은 `kasa_mcp::approval_bridge` 가 브로커(`claude_mod`)↔관문을 잇는다 — `docs/remote-approval.md`
+- `remote_approval.rs` — 원격 승인의 데스크톱 화면: 같은 계정 **다른 기기** 학생의 권한 요청을 관문 긴 폴링으로 받아 OS 알림 클릭과 원문 시트([허락][거절], Return=거절)로 묻고 관문에 보낸다. 이 기기 요청은 `kasa_mcp::approval_bridge` 가 브로커(`claude_mod`)↔관문을 잇는다 — `docs/remote-approval.md`
 - `native_op_approval.rs` — 설정 「계정」의 비밀 승인(학생이 맥 키체인 항목을 폰 Face ID 로 꺼냄): 폰 열쇠 자동 믿기(`op_approval::auto_pick`) 뒤 남은 열쇠만 지문 시트(Return=취소)·거두기, 새 열쇠·믿게 된 폰 알림. 폰이 부르는 `op-link`(socket.rs 설정 동작)는 자동 믿기를 지금 돌린다. 학생 요청 길은 소켓 `op.secret`(socket.rs, 칸은 소켓 상대 pid 로) — `docs/secret-faceid-approval.md`
 - `win_sheet.rs` — Windows 결정 시트(맥 `NSAlert` 시트 자리): 본창에 붙은 소유 창, 고정폭 원문 칸·[주 동작][기본 동작], Enter=기본·Esc=결정 없음. `remote_approval`·`native_op_approval` 의 `cfg(windows)` 시트가 부른다 — 값은 `docs/design.md` 「결정 시트」
-- `update_notice.rs` — 새 판 알림: 업데이터(맥 preview Sparkle 확인·WinSparkle)가 찾은 판을 오른쪽 위 결정 알림으로 세우고, [업데이트]면 끊길 일을 한 번 묻고 설치를 맡긴다, [닫기]면 그 판을 기기 설정에 적는다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
+- `update_notice.rs` — 새 판 알림: Windows에서 찾은 판은 OS 알림으로 알리고, 클릭하면 WinSparkle 표준 확인 창을 연다. 설치 직전 끊길 일 확인은 유지한다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
 - `machinescol.rs` — 기기 절의 재료(`refresh_machines_col`, `machines::snapshot` 을 기기·방 줄로)와 이사·화면 보기 동작, 하단바 기기 연결 요약. 끊긴 기기의 이유·마지막으로 닿은 때·연결 기록 글도 여기서 짓는다 — 판정과 기록 본체는 `kasa-mcp/src/machines/link.rs`([machine-link.md](machine-link.md))
@@ -132,3 +132,5 @@
 - `mobile/lib/inline_media.dart`·`inline_media_bridge_io.dart`·`screens/media_player.dart` — 폰의 결과 카드·루프백 Range 전송·네이티브 재생. 원본 인증 경로로 필요한 512KiB 조각만 읽고 닫힌 소비자의 요청을 취소한다.
 - `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 짧은 시작 안내. `skills/kasapane`의 주제별 원문을 내장하고 요청한 주제 하나만 출력한다. Claude·Codex 실행과 새 작업 브리프는 `references/start.md`만 싣고, 미디어 전달 때 `guide media`로 상세 규칙을 읽는다.
 - `kasa-socket/src/cli/summon_place.rs` — 학생 소환의 작업방 선택. 원격은 기존 칸 주소(`--beside`) 또는 이름 붙인 새 방(`--new-room`)을 지정하고, 사람의 활성 방으로 임의 배치하지 않는다.
+
+- `gpu/curves.rs` — Git 그래프의 배율별 안티앨리어싱 곡선 마스크와 재사용. 기존 아이콘의 클립·그리기 순서를 따른다.

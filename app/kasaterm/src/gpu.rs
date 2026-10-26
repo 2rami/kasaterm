@@ -3,6 +3,7 @@
 //! `GpuRenderer` 는 엔진을 `grid` 로 품고 `Deref` 로 그 메서드를 그대로 내보인다.
 
 use std::sync::Arc;
+mod curves;
 
 use anyhow::{Context, Result};
 use kasa_cells::pipeline::CellInstance;

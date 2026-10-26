@@ -1,15 +1,8 @@
-//! 원격 승인의 데스크톱 화면(docs/remote-approval.md) — 같은 계정의 **다른 기기** 학생이 권한을 물으면
-//! 오른쪽 위 결정 알림으로 알리고, [보기]에서 입력 원문 전부를 시트로 보인 뒤 [허락]·[거절]을 관문에 보낸다.
-//! 이 기기 학생의 요청은 여기 띄우지 않는다 — 그 칸의 엔진 창과 기존 승인 알림이 이미 묻고 있다.
-//!
-//! 결정은 사람이 시트에서 누른 것만 나간다(`kasa_mcp::device_auth::approvals::decide` — 이 프로세스의 승인 열쇠).
-//! 소켓·CLI 에는 결정 동작이 없다.
-//!
-//! 결정 알림 배관(`collab.toast_action`)을 [`ACTION`] 센티널로 빌린다(새 판 알림과 같은 방식). 다른 알림이 글을
-//! 덮으면 칩을 거두고 물러섰다가 자리가 비면 다시 선다. 다른 곳에서 닫히면 알림·시트를 거두고 어디서 닫혔는지 알린다.
+//! 원격 요청은 OS 알림으로 알리고, 사람이 누른 요청의 원문을 네이티브 승인 시트로 연다.
+//! 허락·거절은 시트에서만 보내며, 비밀 요청은 폰 Face ID 경로에 남긴다.
 
 use super::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 /// pane id(`%N`)·새 판 센티널과 겹치지 않는 결정 알림 센티널.
 pub(crate) const ACTION: &str = "__kasaterm_remote_approval__";
@@ -25,17 +18,17 @@ pub(crate) struct State {
     items: Vec<serde_json::Value>,
     /// 이 기기의 관문 기기 id — 이 기기에서 난 요청을 가린다.
     me: Option<String>,
-    first: bool,
     announced: HashSet<String>,
-    queue: VecDeque<String>,
-    /// 알림에 선 요청과 그 알림의 시각(다른 알림이 덮었나 가린다).
-    notice: Option<(String, std::time::Instant)>,
     /// 열린 시트 — (요청 id, 지문, 시트 손잡이).
     sheet: Option<(String, String, usize)>,
     busy: Option<std::sync::mpsc::Receiver<Result<serde_json::Value, String>>>,
     /// 검증 실행 전용 — 시트가 선 뒤 이 시각에 그 단추를 누른다(`KASATERM_AUTOSHEET=allow|deny`). 사람 누름과 같은
     /// 완료 처리를 탄다. 검증 실행(`KASATERM_WINDOW_SIZE`) 밖에서는 서지 않는다.
     auto: Option<(std::time::Instant, bool)>,
+}
+
+fn notification_can_open(a: &serde_json::Value, me: Option<&str>) -> bool {
+    a["state"] == "pending" && a["kind"] != "secret" && me != a["device"].as_str()
 }
 
 impl State {
@@ -134,7 +127,6 @@ impl App {
         }
         if !self.remote_approval.started {
             self.remote_approval.started = true;
-            self.remote_approval.first = true;
             self.remote_approval.rx = Some(spawn_poller(self.proxy.clone()));
             kasa_mcp::approval_bridge::spawn();
         }
@@ -158,7 +150,6 @@ impl App {
         }
         self.drain_remote_answers();
         self.drain_remote_decision();
-        self.show_remote_notice();
     }
 
     fn apply_remote_approvals(&mut self, value: serde_json::Value) {
@@ -167,7 +158,6 @@ impl App {
             st.me = kasa_mcp::device_auth::approvals::device_id();
         }
         st.items = value["approvals"].as_array().cloned().unwrap_or_default();
-        let first = std::mem::take(&mut st.first);
         let mut fresh = Vec::new();
         for a in &st.items {
             let Some(id) = a["id"].as_str() else { continue };
@@ -180,28 +170,13 @@ impl App {
             }
         }
         for a in &fresh {
-            let id = a["id"].as_str().unwrap_or_default().to_string();
-            st.queue.push_back(id.clone());
-            // 켤 때 이미 있던 요청은 시스템 알림 없이 줄에만 — 다시 켤 때마다 울리지 않게.
-            if !first {
-                crate::chrome::notify_desktop(
-                    &format!("{} · 승인 요청", who(a)),
-                    &format!("{} · {}", a["machine"].as_str().unwrap_or(""), a["tool"].as_str().unwrap_or("")),
-                    a["student"].as_str(),
-                    Some(&format!("remote-approval:{id}")),
-                    None,
-                );
-            }
+            let id = a["id"].as_str().unwrap_or_default();
+            crate::chrome::notify_desktop(
+                &format!("{} · 승인 요청", who(a)), &notice_text(a), a["student"].as_str(),
+                Some(&format!("remote-approval:{id}")), Some((ACTION, Some(id))),
+            );
         }
-        st.queue.retain(|id| st.items.iter().any(|a| a["id"] == id.as_str() && a["state"] == "pending"));
-        // 알림·시트에 선 요청이 다른 곳에서 닫혔으면 거두고 어디서 닫혔는지 말한다.
         let mut closed = None;
-        if let Some((id, _)) = st.notice.clone() {
-            if !st.pending(&id) {
-                st.notice = None;
-                closed = st.find(&id).cloned();
-            }
-        }
         if let Some((id, _, handle)) = st.sheet.clone() {
             if !st.pending(&id) {
                 st.sheet = None;
@@ -209,61 +184,17 @@ impl App {
                 closed = closed.or_else(|| st.find(&id).cloned());
             }
         }
-        if self.collab.toast_action.as_deref() == Some(ACTION) && self.remote_approval.notice.is_none() {
-            self.clear_approval_toast();
-        }
         if let Some(a) = closed {
             self.set_toast(closed_line(&a));
         }
         self.chrome_dirty = true;
     }
 
-    /// 지금 오른쪽 위 알림이 원격 승인 알림인가 — 칩을 그리고 누름을 받는 조건.
-    pub(crate) fn remote_notice_showing(&self) -> bool {
-        let Some((_, shown)) = self.remote_approval.notice.as_ref() else { return false };
-        self.collab.toast_action.as_deref() == Some(ACTION) && self.collab.toast.as_ref().map(|(_, at)| *at) == Some(*shown)
-    }
-
-    pub(crate) fn remote_notice_chips(&self) -> Option<((&'static str, &'static str), Option<theme::NoticeTone>)> {
-        self.remote_notice_showing().then_some((("보기", "나중에"), None))
-    }
-
-    fn show_remote_notice(&mut self) {
-        if self.remote_notice_showing() || self.remote_approval.sheet.is_some() {
-            return;
-        }
-        if self.collab.toast_action.as_deref() == Some(ACTION) {
-            // 다른 알림이 글을 덮었다 — 칩을 거두고 다시 설 자리를 기다린다.
-            self.collab.toast_action = None;
-            if let Some((id, _)) = self.remote_approval.notice.take() {
-                self.remote_approval.queue.push_front(id);
-            }
-        }
-        if self.collab.toast_action.is_some() || self.collab_toast_alpha() > 0.0 {
-            return;
-        }
-        let st = &mut self.remote_approval;
-        let Some(id) = st.queue.pop_front() else { return };
-        let Some(a) = st.find(&id).filter(|a| a["state"] == "pending").cloned() else { return };
-        let now = std::time::Instant::now();
-        st.notice = Some((id, now));
-        self.collab.toast = Some((notice_text(&a), now));
-        self.collab.toast_action = Some(ACTION.to_string());
-        self.collab.toast_rect = None;
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-
-    /// [보기](또는 본문)면 `open`, [나중에]면 알림만 거둔다 — 요청은 다른 곳에서 계속 기다린다.
-    pub(crate) fn answer_remote_notice(&mut self, open: bool) {
-        let notice = self.remote_approval.notice.take();
-        self.clear_approval_toast();
-        let Some((id, _)) = notice else { return };
-        if open {
-            self.open_remote_sheet(&id);
-        }
+    pub(crate) fn open_remote_notification(&mut self, id: &str) {
+        let valid = self.remote_approval.find(id).is_some_and(|a| {
+            notification_can_open(a, self.remote_approval.me.as_deref())
+        });
+        if valid && self.remote_approval.sheet.is_none() { self.open_remote_sheet(id); }
     }
 
     fn open_remote_sheet(&mut self, id: &str) {
@@ -563,10 +494,20 @@ mod tests {
     }
 
     #[test]
+    fn notification_click_cannot_reopen_a_resolved_or_secret_request() {
+        let mut a = serde_json::json!({"state":"pending", "kind":"permission", "device":"remote"});
+        assert!(notification_can_open(&a, Some("local")));
+        assert!(!notification_can_open(&a, Some("remote")));
+        a["state"] = "allowed".into();
+        assert!(!notification_can_open(&a, Some("local")));
+        a["state"] = "pending".into(); a["kind"] = "secret".into();
+        assert!(!notification_can_open(&a, Some("local")));
+    }
+
+    #[test]
     fn the_notice_names_who_where_and_the_first_line_and_the_sheet_shows_everything() {
         let a = approval();
         assert_eq!(notice_text(&a), "유우카 승인 요청 · 맥미니 · Bash · rm -rf build");
-        assert_eq!(crate::toast::split_notice(&notice_text(&a)).0, "유우카 승인 요청");
         let body = sheet_body(&a);
         assert!(body.contains("[폴더]\n/repo"));
         assert!(body.contains("[명령]\nrm -rf build\necho done"));

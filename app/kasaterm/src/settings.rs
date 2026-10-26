@@ -804,7 +804,7 @@ impl App {
         match action {
             SettingsAction::PreferredAgent(provider) => {
                 if let Err(error) = agent_preferences::set_preferred_agent(provider) {
-                    self.collab.toast = Some((error, Instant::now()));
+                    self.set_toast(error);
                 } else {
                     self.regen_pane_shims();
                 }
@@ -824,21 +824,21 @@ impl App {
             }
             SettingsAction::AgentPermission(provider, mode) => {
                 if let Err(error) = agent_preferences::set_permission(provider, mode) {
-                    self.collab.toast = Some((error, Instant::now()));
+                    self.set_toast(error);
                 } else {
                     self.regen_pane_shims();
                 }
             }
             SettingsAction::AgentStatusline(field, on) => {
                 if let Err(error) = agent_preferences::set_statusline(field, on) {
-                    self.collab.toast = Some((error, Instant::now()));
+                    self.set_toast(error);
                 } else {
                     self.regen_pane_shims();
                 }
             }
             SettingsAction::AgentStatuslineCustom(on) => {
                 if let Err(error) = agent_preferences::set_statusline_custom(on) {
-                    self.collab.toast = Some((error, Instant::now()));
+                    self.set_toast(error);
                 } else {
                     self.regen_pane_shims();
                 }
@@ -858,7 +858,7 @@ impl App {
             }
             SettingsAction::ChromeMachine(machine) => {
                 if let Err(error) = socket::save_browser_target(&machine) {
-                    self.collab.toast = Some((error.to_string(), Instant::now()));
+                    self.set_toast(error.to_string());
                     return;
                 }
                 // A viewer's "this computer" must mean the viewer, not the

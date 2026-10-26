@@ -17,13 +17,7 @@ mod sidebar;
 mod status_bar;
 
 fn draw_sidebar_toggle(g: &mut gpu::GpuRenderer, cursor: (f32, f32), rect: (f32, f32, f32, f32), icon: &str, active: bool) {
-    let (x, y, w, h) = rect;
-    let hover = cursor.0 >= x && cursor.0 <= x + w && cursor.1 >= y && cursor.1 <= y + h;
-    if hover { hover_rect(g, x, y, w, h, theme::radius_sm()); }
-    g.hover_pointer |= hover;
-    let color = if hover || active { theme::text() } else { theme::text_dim() };
-    let size = theme::ICON_SIZE;
-    g.queue_icon(icon, x + (w - size) / 2.0, y + (h - size) / 2.0, size, color);
+    crate::native_controls::toolbar_button(g, rect, cursor, icon, active);
 }
 
 #[derive(Clone, Copy)]
@@ -774,12 +768,9 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        // Snapshot for the launch banner before the &mut self.gpu borrow
-        // below (which rules out re-borrowing &self inside that block).
         let preview_window_id = window.id();
         let win_size = window.inner_size();
         let win_px = (win_size.width as f32, win_size.height as f32);
-        let version_alpha = self.version_alpha();
         // URL under the mouse right now (pane id + cell range). Hovering it
         // draws a blue underline; computed before the workspace lock below so
         // it doesn't re-enter it. None when the cursor isn't over a link.
@@ -1650,12 +1641,7 @@ impl App {
         });
         // Top-right toast. Pre-read here so the render block below never
         // re-borrows self while g is held.
-        let collab_toast_alpha = self.collab_toast_alpha();
-        let collab_toast_msg = if self.lite { None } else { self.collab.toast.as_ref().map(|(m, _)| m.clone()) };
-        let collab_toast_action_on = self.collab.toast_action.is_some();
-        let collab_toast_elapsed_ms = self.collab_toast_elapsed_ms();
-        // 새 판 알림이면 칩 라벨이 승인/거부 대신 업데이트/닫기, 뜻도 그쪽이 정한다.
-        let update_chips = self.update_notice_chips().or_else(|| self.remote_notice_chips());
+
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -2812,53 +2798,11 @@ impl App {
             if !self.lite && !self.tabs_on_top {
                 draw_sidebar_toggle(g, sb_cursor, sidebar_toggle, "panel-left", tab_strip_w > 0.0);
             }
-            // File-tree toggle, just right of the sidebar toggle. Same chip
-            // treatment; lit when the tree column is shown.
             if !self.lite {
-                let (bx, by, bw, bh) = file_tree_toggle;
-                let hover = sb_cursor.0 >= bx
-                    && sb_cursor.0 <= bx + bw
-                    && sb_cursor.1 >= by
-                    && sb_cursor.1 <= by + bh;
-                if hover {
-                    hover_rect(g, bx, by, bw, bh, theme::radius_sm());
-                }
-                let active = tree_col_w > 0.0;
-                let fg = if hover || active {
-                    theme::text()
-                } else {
-                    theme::text_dim()
-                };
-                let isz = theme::ICON_SIZE;
-                g.queue_icon(
-                    "folder-tree",
-                    bx + (bw - isz) / 2.0,
-                    by + (bh - isz) / 2.0,
-                    isz,
-                    fg,
-                );
+                draw_sidebar_toggle(g, sb_cursor, file_tree_toggle, "folder-tree", tree_col_w > 0.0);
             }
-            if let Some((bx, by, bw, bh)) = settings_title {
-                let hover = sb_cursor.0 >= bx
-                    && sb_cursor.0 <= bx + bw
-                    && sb_cursor.1 >= by
-                    && sb_cursor.1 <= by + bh;
-                if hover {
-                    hover_rect(g, bx, by, bw, bh, theme::radius_sm());
-                }
-                let fg = if hover || settings_room_active {
-                    theme::text()
-                } else {
-                    theme::text_dim()
-                };
-                let isz = theme::ICON_SIZE;
-                g.queue_icon(
-                    "settings-2",
-                    bx + (bw - isz) / 2.0,
-                    by + (bh - isz) / 2.0,
-                    isz,
-                    fg,
-                );
+            if let Some(rect) = settings_title {
+                draw_sidebar_toggle(g, sb_cursor, rect, "settings-2", settings_room_active);
             }
 
             if let Some(rect) = git_col_toggle {
@@ -4784,39 +4728,6 @@ impl App {
                 }
             }
             // 오른쪽 위 알림. 승인 알림은 답할 때까지 서 있고, 나머지는 잠깐 섰다가 흐려진다.
-            self.collab.toast_rect = None;
-            self.collab.toast_approve_rect = None;
-            self.collab.toast_deny_rect = None;
-            if collab_toast_alpha > 0.0 {
-                if let Some(msg) = collab_toast_msg.as_ref() {
-                    // 센티널만 남고 글이 다른 알림으로 덮인 한 프레임은 칩 없이 그린다.
-                    let actions = match update_chips {
-                        Some((chips, _)) => Some(chips),
-                        None if collab_toast_action_on
-                            && self.collab.toast_action.as_deref() != Some(crate::update_notice::ACTION) =>
-                        {
-                            Some(("승인", "거부"))
-                        }
-                        None => None,
-                    };
-                    let hits = toast::paint_notice(
-                        g,
-                        win_px.0 / scale,
-                        (self.cursor_px.0 / scale, self.cursor_px.1 / scale),
-                        &toast::Notice {
-                            message: msg,
-                            alpha: collab_toast_alpha,
-                            elapsed_ms: collab_toast_elapsed_ms,
-                            actions,
-                            decline_is_danger: update_chips.is_none(),
-                            tone: update_chips.and_then(|(_, tone)| tone),
-                        },
-                    );
-                    self.collab.toast_rect = Some(hits.card);
-                    self.collab.toast_approve_rect = hits.approve;
-                    self.collab.toast_deny_rect = hits.deny;
-                }
-            }
             if self.show_pane_numbers {
                 for (id, rect) in &body_rects {
                     if let Some(identity) = pane_identities.get(id) {
@@ -4879,9 +4790,6 @@ impl App {
             if self.info.machine_menu.is_some() {
                 info::draw_machine_menu(g, sb_cursor, &mut self.info, 0.0, tab_strip_w.max(240.0), TITLE_HEIGHT, sb_win_h - status_h);
             }
-            // Launch build banner, bottom-right, painted last so it sits
-            // on top. Faint and short-lived — fades out after a few
-            // seconds. Coords are logical px (gpu promotes to physical).
             // 계정 드롭다운 — 앵커는 Info 탭 머리의 계정 행(`account_chip_rect`,
             // info::draw_info_actions 가 채운다). 패널 본문 위로 떠야 해서 그 안에서
             // 같이 못 그리고, 모든 pane·오버레이가 끝난 여기서 마지막에 그린다.
@@ -4945,32 +4853,6 @@ impl App {
                     codex_rollout: codex_rollout.as_ref(),
                 },
             );
-            let v_alpha = version_alpha;
-            if v_alpha > 0.0 {
-                let label = Self::version_label();
-                let v_font = 11.0_f32;
-                let win_w = win_px.0 / scale;
-                let win_h = win_px.1 / scale;
-                let text_w = g.measure_chrome_text(&label, v_font, false);
-                let margin = 8.0;
-                let x = (win_w - text_w - margin).max(margin);
-                // 상태줄 **위**로. 창 바닥에 붙이던 자리인데 그 자리는 이제 상태줄이
-                // 쓰고, 버전이 그 위에 덧그려져 자원 수치와 글자가 포개졌다(부팅 후
-                // 몇 초라 놓치기 쉽다 — 2026-08-15 캡처에서 잡았다).
-                let y = win_h - status_h - v_font - margin;
-                let a = (170.0 * v_alpha).round() as u8;
-                g.draw_text(
-                    x,
-                    y,
-                    &label,
-                    gpu::DrawOpts {
-                        font_size: v_font,
-                        color: theme::with_alpha(theme::text_dim(), a),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-            }
             // 커밋 모달 — 전면 스크림을 깐 진짜 대화상자라, 창 안의 모든 것보다
             // 나중에 그려져야 한다. 사이드바 블록 안에서 그리던 동안엔 그 뒤에
             // 오는 pane 헤더·divider·활성 보더가 카드 위를 가로질렀다(사용자).
@@ -6434,13 +6316,6 @@ impl App {
             .panes
             .iter()
             .any(|(id, p)| p.dirty && visible_panes.contains(id));
-        // The launch banner fade is its own animation source: while it's
-        // still visible the picture changes every frame, so force the GPU
-        // pass even when panes are clean (about_to_wait re-arms WaitUntil
-        // to keep waking us through the fade).
-        let version_animating = self.version_alpha() > 0.0;
-        // Same for the toast: its slide and fade change the picture every frame.
-        let toast_animating = self.collab_toast_animating();
         // A busy pane's header bar sweeps every frame, so it's an animation
         // source too — keep painting while any pane is working.
         //
@@ -6491,8 +6366,6 @@ impl App {
             // 계정 전환 반짝임 — 펌프가 깨워도 여기 사유가 없으면 GPU 패스를 건너뛰어
             // 커서 blink(530ms)에나 얹혀 그려진다(혜성이 순간이동으로 보이던 그 함정).
             || self.account_flash_factor().is_some()
-            || version_animating
-            || toast_animating
             || git_op_animating
             || banner_animating
             || walk_animating

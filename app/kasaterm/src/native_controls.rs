@@ -7,6 +7,20 @@ pub(crate) const CONTROL_HEIGHT: f32 = 32.0;
 pub(crate) const COMPACT_HEIGHT: f32 = 26.0;
 pub(crate) const FONT_SIZE: f32 = 13.0;
 pub(crate) const CONTROL_PADDING_X: f32 = 12.0;
+pub(crate) const TOOLBAR_SIZE: f32 = 26.0;
+pub(crate) const TOOLBAR_GAP: f32 = 4.0;
+
+pub(crate) fn toolbar_button(g: &mut gpu::GpuRenderer, rect: Rect, cursor: (f32, f32), icon: &str, active: bool) {
+    let hover = contains(rect, cursor);
+    if hover || active {
+        let fill = if hover { theme::surface_hover() } else { theme::surface_active() };
+        g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
+    }
+    g.hover_pointer |= hover;
+    let size = theme::ICON_SIZE;
+    g.queue_icon(icon, rect.0 + (rect.2 - size) / 2.0, rect.1 + (rect.3 - size) / 2.0,
+        size, if hover || active { theme::text() } else { theme::text_dim() });
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Style {
@@ -184,9 +198,6 @@ pub(crate) fn content_button_aligned(
 
 pub(crate) fn panel(g: &mut gpu::GpuRenderer, r: Rect, fill: [u8; 4]) {
     let radius = theme::radius_md();
-    if radius > 3.0 && !theme::pixel_chrome() {
-        g.round_rect_fill(r.0, r.1 + 3.0, r.2, r.3, radius, theme::panel_shadow());
-    }
     g.round_rect_fill(r.0, r.1, r.2, r.3, radius, fill);
     g.round_rect_stroke(
         r.0,
@@ -227,16 +238,6 @@ pub(crate) fn text_button(
     let rect = bounds(rect);
     let hover = style.enabled && contains(rect, cursor);
     let (fill, line, ink) = colors(style, hover);
-    if !theme::pixel_chrome() && theme::radius_sm() > 3.0 {
-        g.round_rect_fill(
-            rect.0,
-            rect.1 + 1.0,
-            rect.2,
-            rect.3,
-            theme::radius_sm(),
-            theme::panel_shadow(),
-        );
-    }
     g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), fill);
     g.round_rect_stroke(
         rect.0,

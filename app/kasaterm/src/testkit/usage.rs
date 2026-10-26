@@ -68,7 +68,7 @@ impl App {
                 self.stop_usage_process(&row.id);
                 assert!(self.pty.contains_key(target), "first click only confirms");
                 self.stop_usage_process(&row.id);
-                assert!(!self.pty.contains_key(target), "{:?}", self.collab.toast);
+                assert!(!self.pty.contains_key(target), "{:?}", self.collab.last_notice);
                 if *number < 2 {
                     let kept = if *number == 1 { &current.first } else { current.second.as_ref().unwrap() };
                     assert!(Arc::ptr_eq(&self.pty[kept], current.survivor.as_ref().unwrap()));

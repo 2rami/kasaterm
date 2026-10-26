@@ -137,10 +137,10 @@ impl App {
     /// `KASATERM_AUTONOTIFY_MS` — 그 시각에 데스크톱 알림을 한 발 쏜다.
     ///
     /// 실물 알림은 학생 턴 완료·승인 대기 같은 실제 사건에서만 나가, 「알림이
-    /// 어느 경로(native/osascript)로 갔고 아이콘이 무엇으로 떴나」를 헤드리스로
+    /// 네이티브 경로로 갔고 아이콘이 무엇으로 떴나」를 헤드리스로
     /// 재현할 길이 없었다(2026-08-17 「os알림 아직도 기본아이콘인데」 조사).
     /// 격리 인스턴스에서 이 훅으로 쏘고 stderr 의 `[notify]` 줄과 화면을 본다.
-    /// 번들 없는 맥 리그는 알림을 안 내므로 배너를 볼 때는 `KASATERM_NOTIFY_BANNER=1` 도 준다.
+    /// 격리 실행은 `KASATERM_NOTIFICATION_PROBE=1`로 OS 전송 직전 자료만 기록한다.
     pub(crate) fn run_pending_autonotify(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
@@ -1335,8 +1335,7 @@ impl App {
                 STAGE.store(4, Ordering::Relaxed);
                 let pid = self.target_surface().unwrap_or_default();
                 let grid = self.shell_prompt_grid(&pid);
-                let toast = self.collab.toast.as_ref().map(|(m, _)| m.clone());
-                eprintln!("[autonlcmd] 결과줄={grid:?} 알림={toast:?}");
+                eprintln!("[autonlcmd] 결과줄={grid:?}");
             }
             _ => {}
         }
@@ -1344,7 +1343,6 @@ impl App {
 
     /// `KASATERM_AUTOTOAST="제목 · 설명"` 을 `KASATERM_AUTOTOAST_MS` 뒤에 띄운다 — 알림은
     /// 복사·완료·권한 같은 바깥 일이 있어야 서는데 격리 창엔 그 일이 없다.
-    /// `KASATERM_AUTOTOAST_ACTION=1` 이면 승인 칩이 붙은 서 있는 알림.
     pub(crate) fn run_pending_autotoast(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
@@ -1362,10 +1360,7 @@ impl App {
         FIRED.store(true, Ordering::Relaxed);
         let msg = std::env::var("KASATERM_AUTOTOAST").unwrap_or_default();
         self.set_toast(msg.clone());
-        if std::env::var("KASATERM_AUTOTOAST_ACTION").as_deref() == Ok("1") {
-            self.collab.toast_action = self.ws.lock().unwrap().active_pane.clone();
-        }
-        eprintln!("[autotoast] {msg:?} action={}", self.collab.toast_action.is_some());
+        eprintln!("[autotoast] {msg:?}");
     }
 
     /// Headless 유령 pane repro: `KASATERM_AUTOGHOST_MS` 뒤에, 숨긴 pane 의 셸이

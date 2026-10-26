@@ -1858,50 +1858,6 @@ impl App {
         }
     }
 
-    /// munder식 승인 프롬프트 라우팅: 오케스트레이터(또는 협업방 없는 단독 pane)의 프롬프트만
-    /// 사용자를 부르고 — sticky 토스트 + 승인/거부 칩 + 데스크탑 알림 — 워커의
-    /// 프롬프트는 board `waiting` 으로만 흘려 오케스트레이터가 처리하게 둔다. 프롬프트가
-    /// 사라지거나(답함) pane 이 다시 일하면 플래그·토스트를 걷는다.
-    pub(crate) fn clear_approval_toast(&mut self) {
-        self.collab.toast = None;
-        self.collab.toast_action = None;
-        self.collab.toast_rect = None;
-        self.collab.toast_approve_rect = None;
-        self.collab.toast_deny_rect = None;
-    }
-
-    /// 승인 토스트 칩 클릭 → 대상 pane PTY 에 응답 키 직주입 (forward_key 의
-    /// IME/모디파이어 경로를 타지 않는다). 클릭 시점에 그리드를 재스캔해 종류를
-    /// 확정한다 — 메뉴에 'n' 을 보내면 글자는 무시되고 \r 만 남아 Yes 를 골라버리는
-    /// 오발이 있어서, munder처럼 y\r 맹발사하지 않는다.
-    pub(crate) fn respond_approval(&mut self, pane_id: &str, approve: bool) {
-        // 상태가 승인 대기가 아니면 아무 바이트도 안 보낸다 — 노는 pane 에 Enter 를 넣는
-        // 사고를 막는다. 어떤 바이트를 보낼지는 화면의 위젯 모양이 정본이라 그건 본다.
-        if !matches!(
-            self.agent_state(pane_id),
-            crate::agent_state::AgentState::Waiting { kind: crate::agent_state::WaitKind::Permission, .. }
-        ) {
-            return;
-        }
-        let kind = {
-            let ws = self.ws.lock().unwrap();
-            ws.panes
-                .get(pane_id)
-                .and_then(|p| p.term())
-                .and_then(|t| rows_show_approval_prompt(&t.cells))
-        };
-        let bytes: &[u8] = match (kind, approve) {
-            (Some(ApprovalPrompt::YesNo), true) => b"y\r",
-            (Some(ApprovalPrompt::YesNo), false) => b"n\r",
-            // 메뉴(또는 프롬프트가 막 사라진 경우): Enter=하이라이트(기본 Yes) / Esc=거부.
-            (_, true) => b"\r",
-            (_, false) => b"\x1b",
-        };
-        if let Some(pty) = self.pty_for_pane(pane_id) {
-            let _ = pty.send_bytes(bytes);
-        }
-    }
-
     /// Sync the macOS window title (Dock label, ⌘-Tab switcher) with
     /// the active pane's resolved label when only one pane is open.
     /// Skipped for multi-pane workspaces — there the per-pane header

@@ -189,7 +189,7 @@ impl crate::App {
                     crate::macos_sparkle::check_for_updates(c);
                 }
             }
-            UpdateEntry::WinSparkle => crate::win_sparkle::install(),
+            UpdateEntry::WinSparkle => crate::win_sparkle::check(),
             UpdateEntry::Download(why) => {
                 self.set_toast(why.to_string());
                 crate::chrome::open_url_in_browser(RELEASES);

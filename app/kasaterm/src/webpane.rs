@@ -571,10 +571,8 @@ impl App {
             .as_deref()
             .map_or(0, |p| kasa_mcp::push_viewer_control(p, &msg));
         if sent > 0 {
-            self.collab.toast = Some((
-                "보고 있는 기계의 브라우저로 열었어요".to_string(),
-                std::time::Instant::now(),
-            ));
+            self.set_toast(
+                "보고 있는 기계의 브라우저로 열었어요".to_string());
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -662,10 +660,8 @@ impl App {
                 .get(pane)
                 .cloned()
                 .unwrap_or_else(|| pane.to_string());
-            self.collab.toast = Some((
-                format!("{who} 이 연 페이지를 이 기계 브라우저로 열었어요"),
-                std::time::Instant::now(),
-            ));
+            self.set_toast(
+                format!("{who} 이 연 페이지를 이 기계 브라우저로 열었어요"));
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }

@@ -59,7 +59,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **리그 창이 다른 창에 가려져 있으면 `peek`·`capture` 가 몇 초 전 화면을 준다.** 격자는 프레임이 돌 때 PTY 에서 옮겨지는데, 가려진 창은
   다음 입력이 올 때까지 프레임을 거의 안 돈다(2026-10-02: Claude Code 는 클릭에 18ms 만에 다시 그렸는데 1.5초 뒤 `peek` 은 옛 화면이었다).
   앱이 무엇을 받고 무엇을 그렸는지는 pane 명령 앞에 입출력을 적는 pty 중계를 끼워 보고, 화면 판정은 다음 입력 뒤에 한다.
-- **알림은 안 뜬다.** 번들 없는 맥 리그는 데스크톱 알림·자체 배너를 내지 않는다(사람 화면에 리그 배너가 뜨던 것, 2026-10-07). 배너를 검증할 때만 `KASATERM_NOTIFY_BANNER=1`.
+- **앱 자체 배너·토스트는 없다.** 격리 리그의 알림 전달은 OS 창을 띄우지 않는다. `KASATERM_NOTIFICATION_PROBE=1`을 더하면 `/tmp` 아래로 격리한 `TMPDIR/notifications.jsonl`에 제목·본문·클릭 목적지를 기록한다. `KASATERM_AUTONOTIFY_MS`와 `KASATERM_AUTOTOAST`로 학생 알림과 조작 피드백의 전달을 확인한다. 실제 설치본의 OS 알림은 시스템 알림 권한이 필요하며, 거부됐을 때 다른 앱이나 자체 배너로 우회하지 않는다.
   Windows 는 검증 실행·격리 env·cargo `target` 폴더의 exe 가 같은 조용한 실행이다. 토스트를 검증할 때만
   `KASATERM_NOTIFY_TOAST=1` — 설치본과 갈린 리그 신원(`com.kasa.kasaterm.rig`, 꺼진 앱을 띄우는 `LocalServer32` 없음)으로 낸다.
   끝나면 `HKCU\Software\Classes\AppUserModelId\com.kasa.kasaterm.rig` 를 지운다. 클릭은 사람 화면의 토스트를 누르지 말고

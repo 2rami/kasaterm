@@ -1198,18 +1198,10 @@ pub(crate) fn transcript_stale(path: &std::path::Path) -> bool {
         .is_none_or(|age| age >= TURN_STALE)
 }
 
-/// Collab completion toast + munder-style approval card. `toast` is the
-/// "✓ %3 완료" message for a sibling pane's working→idle flip (faded by
-/// `collab_toast_alpha`); `toast_action` = Some(pane id) pins it as an
-/// approve/deny card whose chip rects (`toast_approve_rect`/`toast_deny_rect`)
-/// route a response key to that pane. `attention` is the board `waiting` flag
-/// map, shared (Arc) with the socket `PtyBackend`. `unread` badges the board.
+/// 판정·대기·읽지 않음을 같은 허브에서 읽어 알림과 미니맵이 어긋나지 않게 한다.
 pub(crate) struct CollabState {
-    pub(crate) toast: Option<(String, std::time::Instant)>,
-    pub(crate) toast_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) toast_action: Option<String>,
-    pub(crate) toast_approve_rect: Option<(f32, f32, f32, f32)>,
-    pub(crate) toast_deny_rect: Option<(f32, f32, f32, f32)>,
+    /// 소켓 동작의 오류 회신이 직전 안내와 구별되어야 한다. 화면에 그리는 알림 상태는 아니다.
+    pub(crate) last_notice: Option<(String, std::time::Instant)>,
     pub(crate) attention:
         std::sync::Arc<std::sync::Mutex<HashMap<String, crate::stream::AttentionFlag>>>,
     /// pane → 훅이 보고한 in-flight. `attention` 과 같이 socket `PtyBackend` 와 Arc
@@ -1229,11 +1221,7 @@ impl Default for CollabState {
     fn default() -> Self {
         let hub = std::sync::Arc::new(crate::agent_state::StateHub::default());
         Self {
-            toast: None,
-            toast_rect: None,
-            toast_action: None,
-            toast_approve_rect: None,
-            toast_deny_rect: None,
+            last_notice: None,
             attention: hub.attention.clone(),
             hook_activity: hub.hook_activity.clone(),
             hub,

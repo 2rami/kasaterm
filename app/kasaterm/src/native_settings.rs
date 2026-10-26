@@ -27,7 +27,7 @@ const HEADER_H: f32 = 60.0;
 const ROW_H: f32 = 48.0;
 pub(crate) const CTL_H: f32 = crate::native_controls::CONTROL_HEIGHT;
 const CONTENT_MAX_W: f32 = 800.0;
-const NAV_GAP: f32 = 16.0;
+const NAV_GAP: f32 = 0.0;
 
 fn content_column(ax:f32,aw:f32,nav_w:f32)->(f32,f32) {
     content_column_with_max(ax,aw,nav_w,CONTENT_MAX_W)
@@ -2668,8 +2668,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         return output;
     }
     let (outer_x, outer_y, outer_w, outer_h) = snapshot.area;
-    let (ax, ay, aw, ah) = (outer_x + 12.0, outer_y + 12.0,
-        (outer_w - 24.0).max(0.0), (outer_h - 24.0).max(0.0));
+    let (ax, ay, aw, ah) = snapshot.area;
     let nav_w = if aw < 600.0 { 0.0 } else if aw < 760.0 { 154.0 } else { 208.0 };
     let compact = nav_w == 0.0;
     let mut hits = Vec::new();
@@ -2678,10 +2677,11 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let (nav_fill, body_fill) = (theme::settings_nav(), theme::settings_body());
     g.rect(outer_x, outer_y, outer_w, outer_h, theme::settings_canvas());
     if !compact {
-        crate::native_controls::panel(g,(ax,ay,nav_w,ah),nav_fill);
-        crate::native_controls::panel(g,(ax+nav_w+NAV_GAP,ay,(aw-nav_w-NAV_GAP).max(0.0),ah),body_fill);
+        g.rect(ax, ay, nav_w, ah, nav_fill);
+        g.rect(ax + nav_w, ay, (aw - nav_w).max(0.0), ah, body_fill);
+        g.rect(ax + nav_w - 1.0, ay, 1.0, ah, theme::border());
     } else {
-        crate::native_controls::panel(g,(ax,ay,aw,ah),body_fill);
+        g.rect(ax, ay, aw, ah, body_fill);
     }
     let nav_layer = theme::settings_layer(if compact { body_fill } else { nav_fill });
     draw_text(g, ax + 20.0, ay + 18.0, "설정", 13.0, theme::text(), true);
@@ -2736,6 +2736,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                     theme::surface_hover()
                 },
             );
+            if selected {
+                g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, ctrl_radius(), 1.0,
+                    theme::with_alpha(theme::accent(), 150));
+            }
         }
         g.queue_icon(
             icon,

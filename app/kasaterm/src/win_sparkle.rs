@@ -6,23 +6,17 @@
 //! `#[link]` 정적 링크 대신 런타임 로드라 빌드엔 WinSparkle.lib 가 필요 없다 —
 //! DLL 은 순전히 런타임 의존이라 `cargo build` 는 DLL 없이도 통과한다.
 //!
-//! ## "업데이트 있음" UI 는 kasaterm 토스트로
+//! ## 새 판은 OS 알림, 설치는 WinSparkle 표준 창으로
 //!
-//! WinSparkle 은 자체 체크가 업데이트를 찾으면 Win32 구식 다이얼로그를 무조건
-//! 띄우고, 이를 끄거나 꾸밀 API 가 없다. 그래서 **체크는 우리가, 설치만
-//! WinSparkle 에게**: 자동 체크를 0 으로 끄고 appcast 를 직접 받아(curl, UI 없음)
-//! 버전을 비교한 뒤, 새 버전이면 kasaterm 새 판 알림(`update_notice.rs`, [업데이트][닫기]
-//! 칩)으로 알린다. [업데이트] 클릭 시에만
-//! `win_sparkle_check_update_with_ui_and_install` 로 위임 — "업데이트 있음"
-//! 창을 건너뛰고 다운로드 진행바 → EdDSA 검증 → MSI 실행까지 WinSparkle 의
-//! 검증·설치 머신을 그대로 쓴다.
+//! 자동 확인은 조용히 수행하고 새 판을 OS 알림으로 보낸다. 알림이나 업데이트 확인을 누르면
+//! `win_sparkle_check_update_with_ui`가 표준 확인 창을 열며, 설치 동의는 그 창에서 받는다.
 //!
 //! 확인 주기는 맥과 같다 — 켠 지 10초 뒤, 그 뒤 안정판은 하루, preview 참여 기기는 한 시간마다. 참여 판정도
 //! 맥과 같은 두 설정(`version::preview_opted_in`)이고, 참여 기기는 피드만 preview 로 바뀐다.
 //!
 //! MSI 는 앱이 떠 있으면 「Files in Use」를 묻고 사람이 앱을 꺼야 했다. 그래서 WinSparkle 이 설치기를 띄우기
 //! 직전(can-shutdown)에 끊길 일을 다시 재고, 띄운 직후(shutdown-request) 앱이 스스로 정상 종료(`exiting` — 세션
-//! 저장)한다. 알림의 [그래도 업데이트]에서 이미 받아들인 끊김과 같으면 다시 묻지 않는다.
+//! 저장)한다. 설치 동의 뒤 새로 생긴 작업도 잃지 않도록 종료 직전에 끊길 일을 확인한다.
 
 use std::sync::Mutex;
 #[cfg(any(windows, test))]
@@ -67,23 +61,13 @@ impl Channel {
     }
 }
 
-/// 알림의 [그래도 업데이트]에서 사람이 받아들인 끊김. 설치 직전 끊김이 이것과 같으면 다시 묻지 않는다.
-static ACCEPTED: Mutex<Option<String>> = Mutex::new(None);
-
-pub(crate) fn accept_interrupts(what: &str) {
-    if let Ok(mut accepted) = ACCEPTED.lock() {
-        *accepted = Some(what.to_string());
-    }
-}
-
 /// 설치기를 띄워도 되나. `asked` 는 GUI 스레드의 답 — `None` 이면 앱이 답하지 못한 것이고(멈춤) 그땐 끄지 않는다.
-/// 끊길 일이 있으면 이미 받아들인 것과 같을 때만 그냥 가고, 아니면 사람에게 묻는다.
+/// 끊길 일이 있으면 설치 직전의 최신 상태로 사람에게 묻는다.
 #[cfg(any(windows, test))]
-fn may_quit(asked: Option<Option<String>>, accepted: Option<&str>, confirm: impl FnOnce(&str) -> bool) -> bool {
+fn may_quit(asked: Option<Option<String>>, confirm: impl FnOnce(&str) -> bool) -> bool {
     match asked {
         None => false,
         Some(None) => true,
-        Some(Some(what)) if accepted == Some(what.as_str()) => true,
         Some(Some(what)) => confirm(&what),
     }
 }
@@ -147,7 +131,7 @@ fn may_start(verification: bool, lite: bool, has: impl Fn(&str) -> bool) -> bool
 /// 새 판 알림 [업데이트] → WinSparkle 다운로드·설치로 위임. mac 에선 no-op
 /// (부르는 쪽이 `available()` 로 먼저 거르지만 심볼은 공용으로 둔다).
 #[cfg(not(windows))]
-pub(crate) fn install() {}
+pub(crate) fn check() {}
 
 /// 이 실행에 WinSparkle 이 얹혔나 — MSI 로 설치한 판만 DLL 이 곁에 있다.
 #[cfg(not(windows))]
@@ -156,11 +140,11 @@ pub(crate) fn available() -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use ffi::{available, init, install};
+pub(crate) use ffi::{available, init, check};
 
 #[cfg(windows)]
 mod ffi {
-    use super::{parse_appcast_version, version_newer, ACCEPTED, FIRST_PROBE, FOUND};
+    use super::{parse_appcast_version, version_newer, FIRST_PROBE, FOUND};
     use crate::UserEvent;
     use std::ffi::c_char;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -179,9 +163,8 @@ mod ffi {
     const ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
     static STARTED: AtomicBool = AtomicBool::new(false);
-    // win_sparkle_check_update_with_ui_and_install 함수 포인터 — init 성공 시
-    // 채워지고 install() 이 호출한다. 0 이면(DLL 없음) install 은 no-op.
-    static INSTALL_FN: AtomicUsize = AtomicUsize::new(0);
+    // 표준 확인 창에서만 설치를 고르도록 skip-confirmation API는 싣지 않는다.
+    static CHECK_FN: AtomicUsize = AtomicUsize::new(0);
     /// WinSparkle 콜백은 주 스레드가 아닌 곳에서 온다 — GUI 에는 이벤트로만 닿는다.
     static PROXY: OnceLock<Mutex<winit::event_loop::EventLoopProxy<UserEvent>>> = OnceLock::new();
 
@@ -213,8 +196,7 @@ mod ffi {
     unsafe extern "C" fn can_shutdown() -> i32 {
         let (tx, rx) = std::sync::mpsc::channel();
         let asked = send(UserEvent::UpdaterMayQuit(tx)).then(|| rx.recv_timeout(ASK_TIMEOUT).ok()).flatten();
-        let accepted = ACCEPTED.lock().ok().and_then(|a| a.clone());
-        super::may_quit(asked, accepted.as_deref(), confirm) as i32
+        super::may_quit(asked, confirm) as i32
     }
 
     /// 설치기를 띄운 직후 — 앱이 정상 종료(`exiting`)로 세션을 저장하고 꺼져 MSI 가 파일을 갈아 끼운다.
@@ -265,7 +247,7 @@ mod ffi {
             let set_can_shutdown = load!("win_sparkle_set_can_shutdown_callback", CSetCanShutdown);
             let set_shutdown_request = load!("win_sparkle_set_shutdown_request_callback", CSetShutdownRequest);
             let start = load!("win_sparkle_init", CVoid);
-            let install_fn = load!("win_sparkle_check_update_with_ui_and_install", CVoid);
+            let check_fn = load!("win_sparkle_check_update_with_ui", CVoid);
 
             // 모든 set_* 는 win_sparkle_init() 전에 호출해야 한다(winsparkle.h 규약).
             let url = utf8z(feed);
@@ -284,7 +266,7 @@ mod ffi {
             set_can_shutdown(Some(can_shutdown));
             set_shutdown_request(Some(shutdown_request));
             start();
-            INSTALL_FN.store(install_fn as usize, Ordering::SeqCst);
+            CHECK_FN.store(check_fn as usize, Ordering::SeqCst);
         }
         // appcast 를 직접 받아 버전 비교(UI 없음). 새 버전이면 FOUND 에 기록 → GUI(about_to_wait)가 새 판 알림으로 알린다.
         std::thread::spawn(move || {
@@ -318,13 +300,12 @@ mod ffi {
     }
 
     pub(crate) fn available() -> bool {
-        INSTALL_FN.load(Ordering::SeqCst) != 0
+        CHECK_FN.load(Ordering::SeqCst) != 0
     }
 
-    /// 새 판 알림 [업데이트] → WinSparkle 에 다운로드·설치 위임. "업데이트 있음"
-    /// 창은 건너뛰고 진행바부터 시작한다(재체크·EdDSA 검증·MSI 실행 포함).
-    pub(crate) fn install() {
-        let p = INSTALL_FN.load(Ordering::SeqCst);
+    /// 사람이 누른 진입점은 WinSparkle 표준 확인 창으로 잇는다.
+    pub(crate) fn check() {
+        let p = CHECK_FN.load(Ordering::SeqCst);
         if p != 0 {
             unsafe { std::mem::transmute::<usize, CVoid>(p)() }
         }
@@ -376,19 +357,18 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_waits_for_a_yes_unless_the_same_cut_was_already_accepted() {
-        let never = |_: &str| -> bool { panic!("이미 받아들였거나 끊길 일이 없으면 묻지 않는다") };
-        assert!(may_quit(Some(None), None, never), "끊길 일이 없으면 바로 설치");
-        assert!(may_quit(Some(Some("일하는 창: 유즈".into())), Some("일하는 창: 유즈"), never), "알림에서 받아들인 그 끊김");
-        assert!(!may_quit(None, None, never), "앱이 답하지 못하면 끄지 않는다");
+    fn the_installer_waits_for_confirmation_when_work_would_be_interrupted() {
+        let never = |_: &str| -> bool { panic!("끊길 일이 없으면 묻지 않는다") };
+        assert!(may_quit(Some(None), never), "끊길 일이 없으면 바로 설치");
+        assert!(!may_quit(None, never), "앱이 답하지 못하면 끄지 않는다");
         let asked = std::cell::Cell::new(0);
         let say = |answer: bool| {
             let asked = &asked;
             move |what: &str| { assert_eq!(what, "일하는 창: 유즈 외 1개"); asked.set(asked.get() + 1); answer }
         };
         let grown = || Some(Some("일하는 창: 유즈 외 1개".to_string()));
-        assert!(!may_quit(grown(), Some("일하는 창: 유즈"), say(false)), "그 뒤 늘어난 끊김은 다시 묻고, 아니요면 미룬다");
-        assert!(may_quit(grown(), None, say(true)));
+        assert!(!may_quit(grown(), say(false)), "그 뒤 늘어난 끊김은 다시 묻고, 아니요면 미룬다");
+        assert!(may_quit(grown(), say(true)));
         assert_eq!(asked.get(), 2);
     }
 

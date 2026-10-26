@@ -838,10 +838,8 @@ impl App {
                     return Some(id);
                 }
                 Err(e) => {
-                    self.collab.toast = Some((
-                        format!("원격 pane 을 못 이었어요: {e}"),
-                        std::time::Instant::now(),
-                    ));
+                    self.set_toast(
+                        format!("원격 pane 을 못 이었어요: {e}"));
                     return None;
                 }
             }
@@ -1009,13 +1007,11 @@ impl App {
                 // 왜 빠졌는지 화면에 말한다. 대화 파일은 그대로라 resume 으로
                 // 살릴 수 있다는 것까지.
                 eprintln!("[restore] pane {id} spawn failed: {e:#}");
-                self.collab.toast = Some((
+                self.set_toast(
                     format!(
                         "복원에서 {} 창을 잃었어요({e}) — 대화 파일은 남아 있어요",
                         rec.get("character").and_then(|c| c.as_str()).unwrap_or(&id)
-                    ),
-                    std::time::Instant::now(),
-                ));
+                    ));
                 return None;
             }
         };
@@ -1083,13 +1079,11 @@ impl App {
             // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다. 하네스와 무관하게
             // 같다 — codex 도 이제 이어가므로 잃으면 똑같이 말해야 한다.
             if session_id.is_some() && !resumable {
-                self.collab.toast = Some((
+                self.set_toast(
                     format!(
                         "{} 이어갈 대화를 못 찾아 새로 시작합니다",
                         saved_char.as_deref().unwrap_or("이 pane 은")
-                    ),
-                    std::time::Instant::now(),
-                ));
+                    ));
             }
             // `--effort ultracode` 로 되살린 pane 은 **transcript 에 아무 흔적을 안
             // 남긴다**(플래그 launch 는 enter attachment 를 안 쓴다 — 훅 주석의 실측).
