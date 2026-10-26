@@ -106,7 +106,8 @@ fi
 # 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --locked --release -p kasaterm -p kasa-socket -p kasa-mcp --bins
+  # Windows용 최적화 우회가 맥의 대화 기록 JSON 직렬화까지 느리게 만들지 않게 한다.
+  cargo build --locked --release --config 'profile.release.package.kasa-mcp.opt-level=3' -p kasaterm -p kasa-socket -p kasa-mcp --bins
   BINDIR="$TARGET_DIR/release"
 else
   cargo build --locked -p kasaterm -p kasa-socket -p kasa-mcp --bins

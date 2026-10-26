@@ -134,3 +134,5 @@
 - `kasa-socket/src/cli/summon_place.rs` — 학생 소환의 작업방 선택. 원격은 기존 칸 주소(`--beside`) 또는 이름 붙인 새 방(`--new-room`)을 지정하고, 사람의 활성 방으로 임의 배치하지 않는다.
 
 - `gpu/curves.rs` — Git 그래프의 배율별 안티앨리어싱 곡선 마스크와 재사용. 기존 아이콘의 클립·그리기 순서를 따른다.
+
+- HTTP 대화 기록 CPU·배포 최적화: [http-performance.md](http-performance.md), `crates/kasa-mcp/examples/transcript_http_bench.rs`·`scripts/bench-transcript-http.py`.

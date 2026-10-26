@@ -130,5 +130,6 @@ winit = "0.30"
 # kasa-mcp at any opt-level >= 1, blamed at the time on its heavy proc-macro
 # crates (rmcp / schemars). Those were dropped with the MCP tools on 2026-09-26
 # but the crash hasn't been re-tested on Windows, so the pin stays.
+# The macOS bundle script overrides this to 3; its HTTP/JSON hot paths need optimization.
 [profile.release.package.kasa-mcp]
 opt-level = 0
