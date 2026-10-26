@@ -113,12 +113,19 @@ pub(crate) fn install_pane_shims(lite: bool) {
         eprintln!("[shim] shim_inject=off — 순정 모드, pane shim 미설치");
         return;
     }
-    let shim_dir = std::env::temp_dir().join(format!(
-        "kasaterm{}-shim-{}",
-        if lite { "-lite" } else { "" },
-        std::process::id()
-    ));
-    if let Err(e) = std::fs::create_dir_all(&shim_dir) {
+    let Some(shim_dir) = socket::settings_file_path()
+        .and_then(|settings| pane_shim_dir(&settings, lite, std::process::id())) else {
+        eprintln!("[shim] settings directory unavailable — pane shim skipped");
+        return;
+    };
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    if let Err(e) = builder.create(&shim_dir) {
         eprintln!("[shim] mkdir {shim_dir:?} failed: {e}");
         return;
     }
@@ -163,6 +170,20 @@ pub(crate) fn install_pane_shims(lite: bool) {
     // shim_dir 을 안 받는다.
     remove_rename_command();
     }
+    install_shell_rc(&shim_dir);
+    std::env::set_var("KASATERM_TMUX_SHIM_DIR", &shim_dir);
+    eprintln!("[shim] pane shim dir={shim_dir:?}");
+}
+
+fn pane_shim_dir(settings: &std::path::Path, lite: bool, pid: u32) -> Option<std::path::PathBuf> {
+    // A running app can outlive macOS temporary-file cleanup. These files must
+    // survive until later panes source their rc and launch identity helpers.
+    Some(settings.parent()?.join("runtime").join(format!(
+        "kasaterm{}-shim-{pid}", if lite { "-lite" } else { "" }
+    )))
+}
+
+fn install_shell_rc(shim_dir: &std::path::Path) {
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -233,8 +254,6 @@ pub(crate) fn install_pane_shims(lite: bool) {
         ".zlogin",
         "[ -f \"${HOME}/.zlogin\" ] && source \"${HOME}/.zlogin\"\n".to_string(),
     );
-    std::env::set_var("KASATERM_TMUX_SHIM_DIR", &shim_dir);
-    eprintln!("[shim] pane shim dir={shim_dir:?}");
 }
 
 /// 훅·CLI 가 쓸 python3 실행 이름. Windows 엔 `python3` 이 없는 게 보통이고,
@@ -571,6 +590,10 @@ LAUNCH_PID=$$
 if [ -n "$KASATERM_VIA_BACKEND" ] && [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ] && [ -d "$KASATERM_IDENTITY_DIR" ]; then
   IDENTITY="$KASATERM_IDENTITY_DIR"
 else
+  if [ ! -r "$SELF_DIR/agent-identity.py" ]; then
+    echo "kasaterm: 학생 실행 도우미 파일이 없어요: $SELF_DIR/agent-identity.py. 카사텀 실행 파일 복구가 필요해요." >&2
+    exit 1
+  fi
   IDENTITY=$(KASATERM_LAUNCH_PID=$LAUNCH_PID python3 -X utf8 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || {
     # 도우미는 실패를 스스로 알리고 1 로 끝난다. 다른 코드는 python3 자체가 못 돈 것이다 — Windows 는
     # 127(없음)이나 49(MS Store 스텁)라 스텁 안내만 남고 왜 칸이 안 뜨는지 안 보였다. 실행은 그대로 막는다.
@@ -724,6 +747,57 @@ pub(crate) fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn new_shell_keeps_user_path_and_helpers_after_temp_cleanup() {
+        let root = std::env::temp_dir().join(format!("kt-shim-lifetime-{}", uuid::Uuid::new_v4()));
+        let temporary = root.join("temporary");
+        let home = root.join("home");
+        let bin = home.join(".local/bin");
+        let settings = home.join(".config/kasaterm/settings.json");
+        let shim = pane_shim_dir(&settings, false, 123).unwrap();
+        assert!(shim.starts_with(settings.parent().unwrap()));
+        assert_ne!(shim, pane_shim_dir(&settings, true, 123).unwrap());
+        assert_ne!(shim, pane_shim_dir(&settings, false, 124).unwrap());
+        for dir in [&temporary, &bin, &shim] { std::fs::create_dir_all(dir).unwrap(); }
+        std::fs::write(home.join(".zshenv"), "export PATH=\"$HOME/.local/bin:$PATH\"\n").unwrap();
+        write_shim(&bin.join("claude"), "#!/bin/sh\nprintf RECOVERED\n").unwrap();
+        install_shell_rc(&shim);
+        install_agent_identity_helper(&shim);
+        std::fs::remove_dir_all(&temporary).unwrap();
+        let run = std::process::Command::new("/bin/zsh")
+            .args(["-lic", "claude; test -r \"$ZDOTDIR/agent-identity.py\" && printf HELPERS_OK"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("ZDOTDIR", &shim)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("TMPDIR", &temporary)
+            .current_dir(&home)
+            .output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "RECOVEREDHELPERS_OK");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_identity_helper_is_not_reported_as_missing_python() {
+        let sh = test_posix_shell().expect("shim shell");
+        let dir = std::env::temp_dir().join(format!("kt-shim-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_shim(&dir.join("python3"), "#!/bin/sh\necho PYTHON_RAN\nexit 49\n").unwrap();
+        let path = dir.to_string_lossy().replace('\\', "/");
+        let script = format!("SELF_DIR='{path}'\nCLEAN_PATH=$PATH\n{}echo LAUNCHED\n",
+            identity_bootstrap_sh("claude", ""));
+        let run = std::process::Command::new(sh).args(["-c", &script])
+            .env_remove("KASATERM_VIA_BACKEND").output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(1));
+        assert!(run.stdout.is_empty());
+        assert!(stderr.contains("학생 실행 도우미 파일이 없어요"), "{stderr}");
+        assert!(!stderr.contains("Python 3"), "{stderr}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// 실행에는 짧은 시작 안내만 한 번 — 전역 지시와 말투는 그대로 두고, 주제별 원문은 `guide` 로 남긴다.
     #[test]
     fn claude_and_codex_get_the_short_start_guide_once_beside_global_and_persona() {
@@ -803,6 +877,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let id = dir.join("id");
         std::fs::create_dir_all(&id).unwrap();
+        install_agent_identity_helper(&dir);
         for key in ["character", "persona", "slug", "model", "backend", "session_id"] {
             std::fs::write(id.join(key), key).unwrap();
         }
@@ -883,6 +958,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kt-identity-nopy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        install_agent_identity_helper(&dir);
         let out = dir.to_string_lossy().replace('\\', "/");
         let script = format!(
             "SELF_DIR=$(cd \"{out}\" && pwd)\nCLEAN_PATH=$PATH\n{}echo LAUNCHED\n",
