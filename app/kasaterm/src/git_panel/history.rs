@@ -83,7 +83,12 @@ fn lane_color(index: usize) -> [u8; 4] {
 }
 
 fn segment(g: &mut gpu::GpuRenderer, from: (f32, f32), to: (f32, f32), color: [u8; 4]) {
-    g.curve_stroke(from, to, 2.0, color);
+    // 펼친 diff의 세로선은 화면보다 길어질 수 있어 곡선 텍스처의 크기 제한을 거치지 않는다.
+    if from.0 == to.0 {
+        g.rect(from.0 - 1.0, from.1.min(to.1), 2.0, (to.1 - from.1).abs(), color);
+    } else {
+        g.curve_stroke(from, to, 2.0, color);
+    }
 }
 
 fn rails(
