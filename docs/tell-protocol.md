@@ -65,8 +65,16 @@ its turn ended, and the receiver's transcript showed it under a "The kasaterm-br
 A paste with Enter starts a turn in a resting pane and joins the running turn in a working one, the way a person's
 mid-turn message does. Older receivers may still report `waiting:busy`; the CLI keeps reading it.
 Working/thinking/building alone does not defer a message. Approval/question
-screens defer it until the selection UI is gone. A Claude draft does not hold the
-message: the receiver presses Claude's own stash key (`chat:stash`, Ctrl+S), waits up to
+screens defer it until the selection UI is gone.
+
+Screen menu options require a separator after their numbered dot (`1. Yes`); decimals
+such as `1.1000배` or `6.2px` are draft text. Claude can put those numbers immediately
+after `❯` when a long pasted report scrolls inside a small input box. Treating them as
+menu options withheld Enter and left subsequent messages queued until a person submitted
+the first report (2026-10-27, Claude Code 2.1.309 at 59 columns and 24–29 rows).
+
+A Claude draft does not hold the message: the receiver presses Claude's own stash key
+(`chat:stash`, Ctrl+S), waits up to
 3 s for the input box to look empty, pastes and submits, and Claude puts the draft back
 into the input right after that submit — in a resting pane and for a submit queued in a
 working one, collapsed pastes included (Claude Code 2.1.300). Keystrokes from the stash
@@ -193,6 +201,11 @@ events), so a message must be submitted there with the draft back afterwards;
 `boxed-stash-held` already shows `› stashed` and must stay queued with no bytes. Changing the fixture state
 back to busy permits delivery. `quit-after-paste` exits after paste and must
 result in uncertain without automatic reinjection.
+`scrolled-input` shows only the pasted body's lines after its first line, with the
+composer marker on the first visible line. Send a report whose second line starts
+with `1.1000` or `6.2px`, then four follow-ups: all five must submit exactly once and
+leave an empty composer. `approval-after-paste` opens a real numbered menu after the
+first write; it must still withhold Enter and leave an uncertain receipt.
 Restarting a different fixture process in the seat must invalidate the old queue.
 This exercise uses the normal Backend, GUI event loop and managed PTY without
 adding a test bypass to production identity or input checks. No real account,

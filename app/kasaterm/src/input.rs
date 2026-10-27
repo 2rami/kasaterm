@@ -5256,9 +5256,11 @@ pub(crate) fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<Appro
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix('❯').or_else(|| trimmed.strip_prefix('›')) {
             let rest = rest.trim();
-            // "❯ 12. …" — 커서가 올라간 번호 옵션.
+            // A scrolled composer can start with a decimal measurement. The dot
+            // only marks an option when its label is separated from the number.
             let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-            if digits > 0 && rest[digits..].starts_with('.') {
+            if digits > 0 && rest[digits..].strip_prefix('.')
+                .is_some_and(|label| label.chars().next().is_none_or(char::is_whitespace)) {
                 menu_found = true;
                 continue;
             }
@@ -5599,6 +5601,38 @@ mod working_scan_tests {
             rows_show_approval_prompt(&[row("❯ 12. 마지막 옵션")]),
             Some(ApprovalPrompt::Menu)
         );
+        for option in ["❯ 1. Yes", "› 12. No", "❯ 12.", "❯ 1.\tFirst"] {
+            assert_eq!(rows_show_approval_prompt(&[row(option)]), Some(ApprovalPrompt::Menu), "{option}");
+        }
+    }
+
+    #[test]
+    fn scrolled_decimal_draft_is_not_an_approval_menu() {
+        for marker in ['❯', '›'] {
+            for draft in ["1.1000배·L1 1.0685배", "6.2px(7.9%). 다음 측정", "0.35초 결과", "2.1.309"] {
+                let cells = vec![
+                    row("───────────────────────────────────────────────────────────"),
+                    row(&format!("{marker}\u{a0}{draft}")),
+                    row("  긴 보고서의 다음 줄"),
+                    row("───────────────────────────────────────────────────────────"),
+                    row("  bypass permissions on (shift+tab to cycle)"),
+                ];
+                assert_eq!(rows_show_approval_prompt(&cells), None, "{marker} {draft}");
+            }
+        }
+    }
+
+    #[test]
+    fn decimal_draft_below_a_historical_menu_remains_a_composer() {
+        let cells = vec![
+            row("Do you want to proceed?"),
+            row("❯ 1. Yes"),
+            row("  2. No"),
+            row("───────────────────────────────────────────────────────────"),
+            row("❯ 1.1000배·L1 1.0685배"),
+            row("───────────────────────────────────────────────────────────"),
+        ];
+        assert_eq!(rows_show_approval_prompt(&cells), None);
     }
 
     #[test]

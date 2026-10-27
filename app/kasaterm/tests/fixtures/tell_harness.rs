@@ -113,6 +113,13 @@ fn render(root: &Path, harness: Harness, state: &str, body: &str) {
     let visible = body.replace('\n', "\r\n");
     let _ = write!(out, "\x1b[?2004h\x1b[2J\x1b[H");
     match state {
+        "scrolled-input" => {
+            let tail = visible.split_once("\r\n").map_or(visible.as_str(), |(_, tail)| tail);
+            input_box(&mut out, harness, &format!("{prompt} {tail}"));
+        }
+        "approval-after-paste" if !body.is_empty() => {
+            let _ = write!(out, "Do you want to proceed?\r\n{prompt} 1. Yes\r\n  2. No\x1b[2;3H");
+        }
         "approval" => {
             let _ = write!(
                 out,
