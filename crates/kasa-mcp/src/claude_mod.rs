@@ -126,11 +126,18 @@ struct StatusLine {
 static PANES: LazyLock<Mutex<HashMap<String, Pane>>> = LazyLock::new(Default::default);
 
 type Listener = Arc<dyn Fn(&str) + Send + Sync>;
-static LISTENER: OnceLock<Listener> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    State,
+    Data,
+}
+
+type ChangeListener = Arc<dyn Fn(&str, Change) + Send + Sync>;
+static LISTENER: OnceLock<ChangeListener> = OnceLock::new();
 static STATUS_LISTENER: OnceLock<Listener> = OnceLock::new();
 
 /// 사실이 바뀐 칸을 앱에 알릴 자리(상태 판정 다시·GUI 깨우기). 앱이 한 번 건다.
-pub fn set_listener(listener: impl Fn(&str) + Send + Sync + 'static) {
+pub fn set_listener(listener: impl Fn(&str, Change) + Send + Sync + 'static) {
     let _ = LISTENER.set(Arc::new(listener));
 }
 
@@ -155,9 +162,9 @@ pub fn status_overlay(surface: &str, engine: &str) -> Option<String> {
     Some(status.line.clone())
 }
 
-fn changed(surface: &str) {
+fn changed(surface: &str, change: Change) {
     if let Some(listener) = LISTENER.get() {
-        listener(surface);
+        listener(surface, change);
     }
     crate::board_service::poke();
 }
@@ -179,6 +186,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
         return;
     }
     let mut touched = false;
+    let mut boundary = false;
     let mut statusline = false;
     let mut status = false;
     {
@@ -189,6 +197,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                 let pid = event.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let fresh = panes.get(surface).is_none_or(|p| p.state.session != session || p.state.pid != pid);
                 if fresh {
+                    boundary = true;
                     panes.insert(
                         surface.to_string(),
                         Pane {
@@ -207,6 +216,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                 if panes.get(surface).is_some_and(|p| p.state.session == session) {
                     panes.remove(surface);
                     touched = true;
+                    boundary = true;
                 }
                 continue;
             }
@@ -224,7 +234,9 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                 }
                 continue;
             }
-            touched |= apply_one(pane, &kind, event, &mut statusline);
+            let updated = apply_one(pane, &kind, event, &mut statusline);
+            touched |= updated;
+            boundary |= updated && matches!(kind.as_str(), "turn" | "compact" | "permission" | "question");
         }
     }
     if !events.is_empty() {
@@ -234,7 +246,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
         write_statusline(surface);
     }
     if touched {
-        changed(surface);
+        changed(surface, if boundary { Change::State } else { Change::Data });
     }
     if status {
         if let Some(listener) = STATUS_LISTENER.get() {
@@ -1121,6 +1133,40 @@ mod tests {
 
     fn ev(v: Value) -> Vec<Value> {
         vec![v]
+    }
+
+    #[test]
+    fn state_boundaries_have_priority_without_promoting_usage_or_tool_updates() {
+        const SURFACE: &str = "%listener-priority";
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let received = observed.clone();
+        set_listener(move |surface, change| {
+            if surface == SURFACE { received.lock().unwrap().push(change); }
+        });
+        apply(SURFACE, "session", &ev(json!({"kind":"turn","phase":"start"})));
+        assert!(observed.lock().unwrap().is_empty());
+        apply(SURFACE, "session", &ev(json!({"kind":"hello","pid":123})));
+        apply(SURFACE, "session", &ev(json!({"kind":"usage","context":{"tokens":100}})));
+        apply(SURFACE, "session", &ev(json!({"kind":"background","tasks":[]})));
+        apply(SURFACE, "session", &ev(json!({"kind":"tool","phase":"start","id":"t","tool":"Bash"})));
+        apply(SURFACE, "session", &ev(json!({"kind":"row","uuid":"row"})));
+        apply(SURFACE, "other", &ev(json!({"kind":"turn","phase":"start"})));
+        apply(SURFACE, "session", &ev(json!({"kind":"turn","phase":"unknown"})));
+        assert_eq!(*observed.lock().unwrap(), [Change::State, Change::Data, Change::Data]);
+        observed.lock().unwrap().clear();
+
+        apply(SURFACE, "session", &[json!({"kind":"usage"}), json!({"kind":"turn","phase":"start"})]);
+        for kind in ["compact", "question"] {
+            for phase in ["start", "end"] {
+                apply(SURFACE, "session", &ev(json!({"kind":kind,"phase":phase,"id":"q"})));
+            }
+        }
+        for phase in ["ask", "resolved"] {
+            apply(SURFACE, "session", &ev(json!({"kind":"permission","phase":phase,"id":"permission-priority","tool":"Bash"})));
+        }
+        apply(SURFACE, "session", &ev(json!({"kind":"turn","phase":"end","reason":"answer"})));
+        apply(SURFACE, "session", &ev(json!({"kind":"bye"})));
+        assert_eq!(*observed.lock().unwrap(), vec![Change::State; 9]);
     }
 
     #[test]

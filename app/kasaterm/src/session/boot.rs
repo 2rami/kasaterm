@@ -276,9 +276,13 @@ impl App {
         backend.start_session_discovery();
         // 칸 안 mod 가 사실을 알리면 다음 판정이 메모를 건너뛰고, 승인·질문이 닫힌 칸에 밀린 tell 을 곧바로 꺼낸다.
         let (hub, proxy) = (self.collab.hub.clone(), self.proxy.clone());
-        kasa_mcp::claude_mod::set_listener(move |_| {
+        kasa_mcp::claude_mod::set_listener(move |_, change| {
             hub.invalidate();
-            let _ = proxy.send_event(UserEvent::SafeTellWake);
+            let event = match change {
+                kasa_mcp::claude_mod::Change::State => UserEvent::AgentStateChanged,
+                kasa_mcp::claude_mod::Change::Data => UserEvent::SafeTellWake,
+            };
+            let _ = proxy.send_event(event);
         });
         let status_proxy = self.proxy.clone();
         kasa_mcp::claude_mod::set_status_listener(move |_| {

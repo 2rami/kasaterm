@@ -345,6 +345,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::AgentStateChanged => {
+                // The PTY can paint a spinner before the periodic projection
+                // catches up, so state boundaries must refresh before this draw.
+                self.pane_busy_check = None;
+                self.refresh_pane_activity();
+                self.chrome_dirty = true;
+                self.aux_request_redraws();
+                self.safe_tell_tick();
+            }
             UserEvent::SafeTellWake => { self.safe_tell_tick(); }
             UserEvent::SafeTellReady(delivery) => { self.safe_tell_ready(delivery); }
             UserEvent::SafeTellCommit(commit) => { self.safe_tell_commit(commit); }

@@ -44,6 +44,9 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 
 - **상태**: mod 칸의 판정은 `agent_state::resolve_module` 이 한다 — 승인 > 질문 > 압축 > 턴 > 오류 > 쉼. 엔진은 사람이 승인
   창에 답한 순간을 알리지 않으므로, 요청이 열린 뒤 그 칸에 사람이 무언가를 누르면(휠·호버 제외) 답한 것으로 본다.
+- **그리는 시점**: 세션·턴·압축·승인·질문의 경계는 `AgentStateChanged`로 GUI에 알린다. GUI는 300ms 정기 갱신 대기를
+  건너뛰고 정본 상태를 화면용 상태에 옮긴 뒤 그린다. 사용량·백그라운드 목록은 기존 갱신 주기를 유지한다.
+  스피너 모양으로 별도의 작업 상태를 만들지 않는다.
 - **상태줄**: `usage`·`background` 를 받으면 앱이 `$TMPDIR/kasaterm-statusline/<N>-mod.json`(세션·한도·비용·백그라운드 수)을
   쓰고, `kasaterm-cli statusline` 이 같은 세션 것만 읽어 한도(50% 넘은 것)·비용·`bg N` 을 덧붙인다.
 - **바로 그리는 상태줄**(`statusline` mod): 엔진은 상태줄 명령을 `refreshInterval` 1초 박자에 300ms 를 더 미뤄 다시 돌려,
@@ -76,7 +79,7 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   `background`·`usage`·`permission` 으로 짓는다. 앱은 칸마다 도는 도구(시작 시각)·끝난 도구 최근 5개(걸린 시간·실패)·
   백그라운드를 처음 본 때를 쥐고 `claude_mod::focus_facts` 로 내준다(나이는 부른 순간 기준 ms — 거울로 건너가도 시계가
   안 갈린다). 이벤트 묶음·승인 결정마다 그 칸의 판 번호(`claude_mod::seq`)가 오르고 `set_focus_listener` 가 GUI 감시를
-  깨운다 — 판정이 바뀔 때만 부르는 `set_listener` 와 달리 도구 하나가 시작·끝나도 부른다. 다른 기기 칸은 원본의
+  깨운다 — 상태·사용량·백그라운드 목록 변경을 알리는 `set_listener` 와 달리 도구 하나가 시작·끝나도 부른다. 다른 기기 칸은 원본의
   `GET /term/pane-info?schema=kasa.pane-info.v1&machine_id&pane&surface_key&since&wait_ms`(최대 8초)가 판 번호로 풀리고,
   프로세스·포트가 바뀌면 1초 안에 답한다. 신원은 Git 열과 같이 기계 id·칸·surface_key 로 확인하고 거울 칸이면 거절한다.
   답 `{schema, ok, seq, card}` 의 `card` 는 칸 종류·셸·셸 위 프로그램·폴더·모델·추론 강도·위 mod 사실·그 칸 프로세스

@@ -3821,6 +3821,7 @@ enum UserEvent {
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
     /// None = active pane, Some = that PTY (`Workspace::surface_pty`), not its pane's active tab.
     SocketBytes(Option<String>, Vec<u8>),
+    AgentStateChanged,
     SafeTellWake,
     SafeTellReady(tell_delivery::Commit),
     SafeTellCommit(tell_delivery::Commit),
