@@ -114,7 +114,16 @@ fn current_account_retry(provider: AccountProvider, id: &str, active: bool, sign
 }
 
 fn account_retry_height(has_retry: bool) -> f32 {
-    if has_retry { crate::native_controls::CONTROL_HEIGHT + 4.0 } else { 0.0 }
+    if has_retry { crate::native_controls::COMPACT_HEIGHT + 4.0 } else { 0.0 }
+}
+
+fn account_retry_rect(row: Rect, padding: f32, button_width: f32) -> Rect {
+    crate::native_layout::fit_width(
+        (row.0 + padding, row.1 + row.3, (row.2 - 2.0 * padding).max(0.0),
+            crate::native_controls::COMPACT_HEIGHT),
+        button_width,
+        crate::native_layout::Align::End,
+    )
 }
 
 /// 계정 드롭다운. 닫혀 있어도 지난 프레임의 히트렉트·틀은 비운다.
@@ -1508,11 +1517,10 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
             }
             if let Some((label, action)) = retry {
                 // A third footer action would overlap the reset time in narrow account flyouts.
-                let width = (g.measure_chrome_text(label, 12.0, false)
-                    + 2.0 * crate::native_controls::CONTROL_PADDING_X)
-                    .min((sw - 2.0 * pad_x).max(0.0));
-                let rect = crate::native_controls::content_button(g,
-                    (sx + pad_x, sry + base_row_h, width, crate::native_controls::CONTROL_HEIGHT),
+                let width = crate::native_controls::button_width(
+                    g, label, crate::native_controls::COMPACT_HEIGHT, false);
+                let rect = crate::native_controls::text_button(g,
+                    account_retry_rect((sx, sry, sw, base_row_h), pad_x, width),
                     if body_hover { frame.cursor } else { (f32::NEG_INFINITY, f32::NEG_INFINITY) },
                     label, Default::default());
                 st.hits.push((action, rect));
@@ -1596,17 +1604,29 @@ mod tests {
     #[test]
     fn resend_row_is_below_reset_and_management_controls_at_narrow_flyout_widths() {
         assert_eq!(account_retry_height(false), 0.0);
-        assert_eq!(account_retry_height(true), crate::native_controls::CONTROL_HEIGHT + 4.0);
+        assert_eq!(account_retry_height(true), 30.0);
         for width in [284.0, 380.0, 384.0] {
             let base_height = 28.0 + 16.0 + 30.0;
             let total_height = base_height + account_retry_height(true);
             let reset_y = base_height - 22.0;
             let footer_bottom = reset_y - 3.0 + 18.0;
-            let retry = (10.0, base_height, width - 20.0, crate::native_controls::CONTROL_HEIGHT);
+            let retry = account_retry_rect((0.0, 0.0, width, base_height), 10.0, 180.0);
             assert!(retry.1 > footer_bottom);
-            assert!(retry.0 + retry.2 <= width - 10.0);
+            assert_eq!(retry.0 + retry.2, width - 10.0);
+            assert!(retry.0 >= 10.0);
+            assert_eq!(retry.3, 26.0);
             assert_eq!(retry.1 + retry.3 + 4.0, total_height);
         }
+    }
+
+    #[test]
+    fn resend_uses_its_measured_width_at_the_account_row_right_edge() {
+        assert_eq!(account_retry_rect((100.0, 200.0, 380.0, 90.0), 10.0, 180.0),
+            (290.0, 290.0, 180.0, 26.0));
+        assert_eq!(account_retry_rect((100.0, 200.0, 284.0, 90.0), 10.0, 180.0),
+            (194.0, 290.0, 180.0, 26.0));
+        assert_eq!(account_retry_rect((100.0, 200.0, 284.0, 90.0), 10.0, 500.0),
+            (110.0, 290.0, 264.0, 26.0));
     }
 
     #[test]
