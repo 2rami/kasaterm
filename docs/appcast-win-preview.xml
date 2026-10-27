@@ -3,13 +3,13 @@
     <channel>
         <title>kasaterm (Windows)</title>
         <item>
-            <title>0.2.171</title>
-            <pubDate>Tue, 27 Oct 2026 02:55:06 +0000</pubDate>
+            <title>0.2.172</title>
+            <pubDate>Tue, 27 Oct 2026 04:25:37 +0000</pubDate>
             <link>https://github.com/2rami/kasaterm</link>
-            <sparkle:version>0.2.171</sparkle:version>
-            <sparkle:shortVersionString>0.2.171</sparkle:shortVersionString>
-            <enclosure url="https://github.com/2rami/kasaterm/releases/download/v0.2.171/kasaterm-v0.2.171-windows-x86_64.msi"
-                       sparkle:os="windows" type="application/octet-stream" sparkle:edSignature="zOwYE+HEaHhcMY7G9sG00AVvJboiaV/z53xrhAQLd60YcWX+NdnLJo6Bg0cZYi/2A/a8L2uMXBFuyXrn7AgWDQ==" length="88895488" />
+            <sparkle:version>0.2.172</sparkle:version>
+            <sparkle:shortVersionString>0.2.172</sparkle:shortVersionString>
+            <enclosure url="https://github.com/2rami/kasaterm/releases/download/v0.2.172/kasaterm-v0.2.172-windows-x86_64.msi"
+                       sparkle:os="windows" type="application/octet-stream" sparkle:edSignature="ZKqN+FZz6ezq1aZ9RCh20il/6nf4OUiFvqLt8ZhN8qyiH0qWjrsBTgCXT7SS2R1CnDvh7Du68/u6vraGCD6JDg==" length="88883200" />
         </item>
     </channel>
 </rss>
