@@ -196,6 +196,15 @@ pub(crate) struct Placement {
     z: i32,
 }
 
+/// 스냅샷에서 그림을 싣는 자리.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotPhase {
+    /// 커서 자리 놓기가 쓰는 그림 — 지난 줄을 다시 그리며 놓으므로 그림이 없으면 놓기가 버려진다.
+    BeforeText,
+    /// 나머지 그림과 자리표시 놓기 — 자리표시는 그릴 때 id 로 그림을 찾는다.
+    AfterText,
+}
+
 struct Pending {
     cmd: Command,
     at: Option<At>,
@@ -415,9 +424,19 @@ impl KittyStore {
             what as char, cmd.placement, cmd.x, cmd.y, cmd.z).into_bytes()
     }
 
-    pub(crate) fn snapshot_images(&self) -> Vec<u8> {
+    /// 같은 그림이 id 만 바꿔 수십 벌 쌓이기도 한다(2026-10-28 다른 기기 거울: 1.06MB 중
+    /// 98% 가 31KB 아바타 33벌). 그림을 글자 앞에 실으면 느린 길에서 칸이 십수 초 빈 채라,
+    /// 글자 뒤에 와도 되는 그림은 뒤로 미룬다.
+    pub(crate) fn snapshot_images(&self, phase: SnapshotPhase) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut images: Vec<_> = self.images.iter().collect();
+        let mut images: Vec<_> = self
+            .images
+            .iter()
+            .filter(|image| {
+                let anchored = self.placements.iter().any(|p| !p.virtual_ && p.image == image.id);
+                anchored == (phase == SnapshotPhase::BeforeText)
+            })
+            .collect();
         images.sort_by_key(|image| image.uid);
         for image in images {
             if let Ok(bytes) = std::fs::read(&image.path) {
@@ -426,8 +445,10 @@ impl KittyStore {
                 }
             }
         }
-        for placement in self.placements.iter().filter(|p| p.virtual_) {
-            out.extend(placement_wire(placement, true));
+        if phase == SnapshotPhase::AfterText {
+            for placement in self.placements.iter().filter(|p| p.virtual_) {
+                out.extend(placement_wire(placement, true));
+            }
         }
         out
     }

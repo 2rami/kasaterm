@@ -366,7 +366,7 @@ pub(super) fn snapshot_bytes_with_images(
     // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
     // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
     let mut bytes = b"\x1b_Ga=d,d=R,x=0,y=4294967295,q=2;\x1b\\".to_vec();
-    bytes.extend(super::inline::kitty_snapshot_images(images));
+    bytes.extend(super::inline::kitty_snapshot_images(images, crate::kitty::SnapshotPhase::BeforeText));
     if !snap.alt_screen { bytes.extend(hist); }
     bytes.extend(raw_screen_ansi_with_images(t, &snap));
     let placements = super::inline::kitty_anchored_screen(images, t.grid().history_size() as i64, rows);
@@ -374,6 +374,8 @@ pub(super) fn snapshot_bytes_with_images(
         bytes.extend(placements);
         bytes.extend(format!("\x1b[{};{}H", snap.cursor_row + 1, snap.cursor_col + 1).as_bytes());
     }
+    // 그림 전송과 자리표시 놓기는 커서를 옮기지 않아 화면 뒤에 붙여도 된다.
+    bytes.extend(super::inline::kitty_snapshot_images(images, crate::kitty::SnapshotPhase::AfterText));
     (bytes, (cols, rows))
 }
 

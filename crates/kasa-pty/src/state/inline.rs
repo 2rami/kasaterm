@@ -584,8 +584,8 @@ fn sync_inline_coordinates(term: &Term<PtyEventForwarder>, lock: &mut InlineImgs
     lock.last_alt = alt;
 }
 
-pub(super) fn kitty_snapshot_images(imgs: &Mutex<InlineImgs>) -> Vec<u8> {
-    imgs.lock().unwrap().kitty.snapshot_images()
+pub(super) fn kitty_snapshot_images(imgs: &Mutex<InlineImgs>, phase: crate::kitty::SnapshotPhase) -> Vec<u8> {
+    imgs.lock().unwrap().kitty.snapshot_images(phase)
 }
 
 pub(super) fn kitty_anchored_screen(imgs: &Mutex<InlineImgs>, history: i64, rows: u16) -> Vec<u8> {
@@ -1104,6 +1104,24 @@ mod kitty_graphics_tests {
         source.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
         mirror.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
         same_pictures(&source, &mirror, 3);
+    }
+
+    #[test]
+    fn snapshot_sends_text_before_placeholder_pictures() {
+        let mut source = rig(40, 4, true);
+        source.feed(format!("x\x1b_Ga=T,f=100,i=8,c=3,r=1,q=2;{}\x1b\\y\r\n", b64(&png(8, 8))).as_bytes());
+        transmit_virtual(&mut source, 7, 4, 2);
+        source.feed(b"old1\r\nold2\r\nold3\r\n");
+        source.feed(placeholders("38;5;7", 4, 2, (2, 3)).as_bytes());
+        source.feed(b"\x1b[4;1Hhello");
+        let wire = source.wire_snapshot();
+        let at = |needle: &[u8]| wire.windows(needle.len()).position(|w| w == needle).unwrap();
+        assert!(at(b"f=100,i=8,") < at(b"a=p,i=8,"), "지난 줄의 커서 자리 놓기보다 그 그림이 먼저");
+        assert!(at(b"hello") < at(b"f=100,i=7,"), "자리표시 그림은 글자 뒤");
+        let mut mirror = rig(40, 4, false);
+        for part in wire.chunks(29) { mirror.feed(part); }
+        same_pictures(&source, &mirror, 0);
+        assert_eq!(mirror.term.grid().cursor.point, source.term.grid().cursor.point);
     }
 
     /// 질의를 보낸 쪽은 뒤따른 DA1 이 먼저 오면 「지원 안 함」으로 읽는다.
