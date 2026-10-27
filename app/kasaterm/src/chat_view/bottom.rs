@@ -149,7 +149,7 @@ fn plain(row: &[GridCell]) -> Vec<GridCell> {
             c.bg = Color::Default;
         }
     }
-    if let Some(mark) = row.iter_mut().find(|c| !matches!(c.ch, ' ' | '\0')).filter(|c| c.ch == '›') {
+    if let Some(mark) = row.iter_mut().find(|c| !matches!(c.ch, ' ' | '\0')).filter(|c| crate::screenread::is_codex_composer_marker(c.ch)) {
         mark.ch = '❯';
     }
     row

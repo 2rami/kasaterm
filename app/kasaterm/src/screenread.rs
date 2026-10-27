@@ -385,6 +385,12 @@ pub(crate) fn overflowed_title_rule(r: &[GridCell]) -> bool {
         && glyphs.len() >= 8
 }
 
+/// codex 입력칸 머리 표시. 추론 강도 ultra 에서는 입력칸만 `»` 로 바뀐다(codex-rs
+/// `bottom_pane/effort_ignition.rs` 의 `prompt_glyph`) — 지나간 질문은 그대로 `›` 다.
+pub(crate) fn is_codex_composer_marker(ch: char) -> bool {
+    matches!(ch, '›' | '»')
+}
+
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
         if overflowed_title_rule(r) {
@@ -433,10 +439,13 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
         }
     }
     // codex — 칠해진 입력행. 행 전체가 같은 non-Default bg 를 쓰는 것이 시그니처고,
-    // 마커(`›`)를 함께 요구해 배경만 남은 여백 행과 구별한다.
+    // 마커(`›`·`»`)를 함께 요구해 배경만 남은 여백 행과 구별한다.
+    let codex_marker_row = |r: &[GridCell]| {
+        marker_row(r) || r.iter().find(|c| !is_blank_glyph(c.ch)).is_some_and(|c| is_codex_composer_marker(c.ch))
+    };
     let f = rows
         .iter()
-        .rposition(|r| marker_row(r) && uniform_prompt_fill(r).is_some())?;
+        .rposition(|r| codex_marker_row(r) && uniform_prompt_fill(r).is_some())?;
     let fill = uniform_prompt_fill(&rows[f])?;
     // 입력창은 **여러 줄이다** — 마커 행 위아래로 같은 채움색 여백 행이 붙고,
     // 여러 줄을 입력하면 그만큼 자란다(실측 0.146.0: 여백-입력-여백 3줄). 마커
@@ -6376,6 +6385,10 @@ mod prompt_box_tests {
         // 같은 줄이라도 배경이 없으면 입력창이 아니다 — 인용문 오인 방지.
         let plain = vec![row_from("› quoted line, not an input box at all")];
         assert!(prompt_box(&plain).is_none());
+        // 추론 강도 ultra 의 입력칸은 `»` 로 시작한다.
+        let ultra = vec![filled(&" ".repeat(50)), filled("» Ask Codex to do anything"), filled(&" ".repeat(50))];
+        assert!(matches!(prompt_box(&ultra), Some(PromptBox::Filled { ref rows }) if *rows == (0..3)));
+        assert!(prompt_box(&[row_from("» quoted line")]).is_none());
     }
 
     #[test]

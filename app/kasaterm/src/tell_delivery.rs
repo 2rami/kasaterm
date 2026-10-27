@@ -378,11 +378,15 @@ fn prompt_empty_with_particles(cells: &[Vec<GridCell>], cursor_row: usize, curso
     use crate::screenread::PromptBox;
     use kasa_bridge::screen::Color;
     let Some(row) = cells.get(cursor_row) else { return false };
-    let prompt = match harness { kasa_pty::AgentKind::Claude => '❯', kasa_pty::AgentKind::Codex => '›', _ => return false };
+    let prompt = |ch: char| match harness {
+        kasa_pty::AgentKind::Claude => ch == '❯',
+        kasa_pty::AgentKind::Codex => crate::screenread::is_codex_composer_marker(ch),
+        _ => false,
+    };
     let blank = |cell: &GridCell|cell.ch == '\0' || cell.ch.is_whitespace()
         || (particles && harness == kasa_pty::AgentKind::Codex && crate::screenread::is_particle(cell.ch));
     let Some(marker) = row.iter().position(|cell|!blank(cell)) else { return false };
-    if row[marker].ch != prompt { return false; }
+    if !prompt(row[marker].ch) { return false; }
     let region = crate::screenread::prompt_box(cells).and_then(|area| {
         let supported = matches!((&area,harness),
             (PromptBox::Bordered {..},kasa_pty::AgentKind::Claude)
@@ -696,6 +700,7 @@ mod tests {
         for (harness,prompt,footer) in [
             (Claude,"❯","  bypass permissions on (shift+tab to cycle)"),
             (Codex,"›","  gpt-5.5 medium · kasaterm · main · Ask for approval · Context 3% used"),
+            (Codex,"»","  GPT-6-Astra ultra · main · kasaterm · Context 52% used · Main [default]"),
         ] {
             let empty = input_box(harness,&[prompt.into()],footer);
             assert!(prompt_empty_at(&empty,2,2,harness));
@@ -716,7 +721,7 @@ mod tests {
     #[test]
     fn resumed_conversation_requires_the_live_input_box_and_tolerates_astra_particles() {
         use kasa_pty::AgentKind::{Claude, Codex};
-        for (harness, marker) in [(Claude, "❯"), (Codex, "›")] {
+        for (harness, marker) in [(Claude, "❯"), (Codex, "›"), (Codex, "»")] {
             let rows = input_box(harness, &[marker.into()], "status");
             assert!(resumed_prompt_ready(&rows, 2, 2, harness));
             assert!(!resumed_prompt_ready(&rows, 0, 2, harness));
@@ -739,6 +744,7 @@ mod tests {
         for (harness,prompt,hint,footer) in [
             (Claude,"❯","Try \"fix lint errors\"","  bypass permissions on (shift+tab to cycle)"),
             (Codex,"›","Run /review on my current changes","  gpt-5.5 medium · main · Context 3% used"),
+            (Codex,"»","Ask Codex to do anything","  GPT-6-Astra ultra · main · Context 52% used"),
         ] {
             let text = format!("{prompt} {hint}");
             let typed = input_box(harness,&[text.clone()],footer);

@@ -1126,12 +1126,12 @@ fn normalise(sel: Selection) -> ((u16, u16), (u16, u16)) {
 /// after each syllable ("한글" → "한 글"). We peek: a cell right after a
 /// wide char is its spacer and gets skipped. Genuine blanks (empty cell
 /// not following a wide char) still render as a single space.
-/// 입력칸 줄(`❯ `·`› `)의 글이 흐린 글씨면 붙일 표시. 다 흐리면 추천·안내 글, 뒤만 흐리면 자동완성 제안이다.
+/// 입력칸 줄(`❯ `·`› `·`» `)의 글이 흐린 글씨면 붙일 표시. 다 흐리면 추천·안내 글, 뒤만 흐리면 자동완성 제안이다.
 /// 고른 선택지(`❯ 1. Yes`)처럼 흐리지 않은 줄은 그대로 둔다.
 fn ghost_note(cells: &[(char, bool)]) -> Option<&'static str> {
     let blank = |c: char| c == ' ' || c == '\0';
     let first = cells.iter().position(|(c, _)| !blank(*c))?;
-    if !matches!(cells[first].0, '❯' | '›') {
+    if cells[first].0 != '❯' && !crate::screenread::is_codex_composer_marker(cells[first].0) {
         return None;
     }
     let body: Vec<bool> = cells[first + 1..].iter().filter(|(c, _)| !blank(*c)).map(|(_, d)| *d).collect();
@@ -1159,6 +1159,7 @@ mod ghost_note_tests {
     fn only_a_dim_prompt_line_gets_the_note() {
         assert_eq!(ghost_note(&row("❯ 깔았어 확인해봐", 2)), Some("  ⟨흐린 글 — 추천·안내일 뿐, 입력된 글 아님⟩"));
         assert_eq!(ghost_note(&row("› Ask Codex to do anything", 2)), Some("  ⟨흐린 글 — 추천·안내일 뿐, 입력된 글 아님⟩"));
+        assert_eq!(ghost_note(&row("» Ask Codex to do anything", 2)), Some("  ⟨흐린 글 — 추천·안내일 뿐, 입력된 글 아님⟩"));
         assert_eq!(ghost_note(&row("❯ 깔았 어떻게", 6)), Some("  ⟨뒤의 흐린 부분은 추천일 뿐, 입력된 글 아님⟩"));
         assert_eq!(ghost_note(&row("❯ 1. Yes", 99)), None, "고른 선택지는 흐리지 않다");
         assert_eq!(ghost_note(&row("❯ ", 0)), None, "빈 입력칸");
