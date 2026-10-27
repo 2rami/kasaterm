@@ -3926,6 +3926,21 @@ pub(crate) fn is_spinner_head(ch: char) -> bool {
     (0x2720..=0x274F).contains(&cp) || ch == '·' || ch == '*' || ch == '●'
 }
 
+pub(crate) fn spinner_message_end(row: &[GridCell]) -> Option<usize> {
+    let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
+    // Detection and tinting must share cell coordinates: the ASCII suffix has
+    // three cells, while Korean text may include wide-character spacer cells.
+    ((first + 1)..row.len()).find_map(|i| {
+        if row[i].ch == '…' {
+            Some(i + 1)
+        } else if row.get(i..i + 3).is_some_and(|dots| dots.iter().all(|c| c.ch == '.')) {
+            Some(i + 3)
+        } else {
+            None
+        }
+    })
+}
+
 /// `spinner_row_col` 의 경과시간-괄호 요구에 떨어진 행을, 바로 아래의 `Tip:` 행이
 /// 구제한다. 부팅·재개 직후의 스피너는 `✻ Computing…` 뒤에 괄호가 아예 없이 뜨고
 /// 그 아래 `⎿ Tip: Press …` 만 깔린다(2026-08-15 스샷 실측 — 이 상태에서 학생이
@@ -3944,13 +3959,7 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
     if !is_spinner_head(row[first].ch) {
         return None;
     }
-    let rest: String = row[first + 1..]
-        .iter()
-        .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
-        .collect();
-    if !rest.contains('…') {
-        return None;
-    }
+    spinner_message_end(row)?;
     // 스피너와 Tip 사이에 빈 행이 하나 끼는 변형까지만 본다 — 더 멀면 남의 줄이다.
     for below in rows.iter().skip(r + 1).take(2) {
         let Some(fi) = below.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
@@ -3998,11 +4007,7 @@ pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, 
         if spinner_row_col(row).is_some() || spinner_tip_rescue(rows, r).is_some() {
             return None;
         }
-        let rest: String = row[first + 1..]
-            .iter()
-            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
-            .collect();
-        if !rest.contains('…') {
+        if spinner_message_end(row).is_none() {
             continue;
         }
         // 위치 검증은 본판정과 같은 자로 — 아래에 대화 마커가 있으면 옛 본문이다.
@@ -4036,11 +4041,7 @@ pub(crate) fn lenient_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
         ) {
             continue;
         }
-        let rest: String = row[first + 1..]
-            .iter()
-            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
-            .collect();
-        if !rest.contains('…') {
+        if spinner_message_end(row).is_none() {
             continue;
         }
         // 최하단 후보가 live 가 아니면(아래에 대화 마커) 위 후보도 전부 그 마커
@@ -4286,7 +4287,7 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     }
     // 줄임표 **뒤**의 `(3m 19s · ↓ 14.2k tokens)` 가 스피너의 진짜 표식이다. 숫자로
     // 시작하고 초 단위가 들어 있는 괄호를 요구한다.
-    let tail = rest.split_once('…')?.1;
+    let tail: String = row[spinner_message_end(row)?..].iter().map(|c| c.ch).collect();
     let inside = tail.split_once('(')?.1;
     let head = inside.split_once(')').map_or(inside, |(h, _)| h);
     // 경과시간은 괄호 **어딘가에** 있으면 된다 — 맨 앞이어야 한다고 못 박았더니
@@ -5115,6 +5116,53 @@ mod spinner_tests {
                 cell
             })
             .collect()
+    }
+
+    #[test]
+    fn spinner_ascii_ellipsis_keeps_every_animation_frame_themed() {
+        for head in ['·', '✢', '✳', '✶', '✻', '✽', '*', '●'] {
+            for suffix in ["…", "..."] {
+                let rows = vec![row_from(&format!("{head} 미도리가 생각하는 중{suffix} (3s · ↓ 100 tokens)"))];
+                assert_eq!(find_claude_spinner(&rows), Some((0, 0)), "{head} {suffix}");
+                assert_eq!(unconfirmed_spinner_row(&rows), None);
+            }
+        }
+        let quoted = vec![row_from("* 미도리가 생각하는 중... (3s)"), row_from("⏺ 이 줄은 인용이에요")];
+        assert_eq!(find_claude_spinner(&quoted), None);
+        assert_eq!(find_claude_spinner(&[row_from("* 항목을 확인 중... (설명)")]), None);
+    }
+
+    #[test]
+    fn spinner_ascii_ellipsis_keeps_startup_and_tip_detection() {
+        let startup = vec![row_from("* 미도리가 생각하는 중...")];
+        assert_eq!(find_claude_spinner(&startup), None);
+        assert_eq!(unconfirmed_spinner_row(&startup), Some((0, 0, '*')));
+        assert_eq!(lenient_spinner_row(&startup), Some((0, 0)));
+        let tip = vec![startup[0].clone(), row_from("⎿ Tip: 기다려 주세요")];
+        assert_eq!(find_claude_spinner(&tip), Some((0, 0)));
+        let quoted = vec![startup[0].clone(), row_from("⏺ 답변 본문")];
+        assert_eq!(unconfirmed_spinner_row(&quoted), None);
+        assert_eq!(lenient_spinner_row(&quoted), None);
+    }
+
+    #[test]
+    fn spinner_glow_stops_after_the_suffix_in_wide_cell_coordinates() {
+        for suffix in ["…", "..."] {
+            let mut row = Vec::new();
+            for ch in format!("* 미도리가 생각하는 중{suffix} (3s · ↓ 100 tokens)").chars() {
+                row.extend(row_from(&ch.to_string()));
+                if ('가'..='힣').contains(&ch) {
+                    let mut spacer = GridCell::blank();
+                    spacer.ch = '\0';
+                    row.push(spacer);
+                }
+            }
+            let end = spinner_message_end(&row).unwrap();
+            let tail: String = row[end..].iter().map(|c| c.ch).collect();
+            assert_eq!(tail, " (3s · ↓ 100 tokens)");
+            assert_eq!(spinner_row_col(&row), Some(0));
+        }
+        assert_eq!(spinner_message_end(&row_from("* 항목. 설명..")), None);
     }
 
     // 서브에이전트 목록 회귀 방지(2026-09-17): 입력창 **아래** statusline 다음에 뜨는

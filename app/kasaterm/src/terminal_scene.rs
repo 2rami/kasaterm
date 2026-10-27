@@ -1428,10 +1428,7 @@ impl App {
                     // "(esc to interrupt · N tokens)" 는 원래 dim 색을 둔다
                     // (사용자: 문구만 glow). 줄임표(…) 다음을 경계로, 없으면
                     // "(" 앞, 그것도 없으면 행 끝.
-                    let end = row
-                        .iter()
-                        .position(|c| c.ch == '…')
-                        .map(|p| p + 1)
+                    let end = crate::screenread::spinner_message_end(row)
                         .or_else(|| row.iter().position(|c| c.ch == '('))
                         .unwrap_or(row.len());
                     let first = row
