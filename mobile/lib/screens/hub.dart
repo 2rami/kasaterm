@@ -21,6 +21,7 @@ import 'clipboard_sheet.dart';
 import 'controls.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
+import 'screen_mirror.dart';
 import 'settings.dart';
 import 'terminal.dart';
 
@@ -155,6 +156,14 @@ class _HubScreenState extends State<HubScreen> {
     machine: s.route,
     onChanged: _model.refresh,
   );
+
+  void _openScreen(HubSection s, String title) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ScreenMirrorScreen(server: widget.server, machine: s.route, title: title),
+      ),
+    );
+  }
 
   Future<void> _newRoom(HubSection s) => newRoom(
     context,
@@ -293,6 +302,9 @@ class _HubScreenState extends State<HubScreen> {
           count: s.studentCount,
           onTap: () => _model.toggleFold(s),
           onAdd: s.online ? () => _newRoom(s) : null,
+          onScreen: s.online
+              ? () => _openScreen(s, machineName(title, route: s.route, local: s.machine == null))
+              : null,
         ),
       );
       if (folded) continue;
@@ -500,6 +512,7 @@ class _SectionHeader extends StatelessWidget {
     this.count = 0,
     this.onTap,
     this.onAdd,
+    this.onScreen,
   });
 
   final String title;
@@ -519,6 +532,9 @@ class _SectionHeader extends StatelessWidget {
 
   /// 「새 방」 — 그 기계에 빈 창 하나. 안 닿는 기계엔 안 단다.
   final VoidCallback? onAdd;
+
+  /// 「화면 거울」 — 그 기기의 화면을 본다. 안 닿는 기계엔 안 단다.
+  final VoidCallback? onScreen;
 
   @override
   Widget build(BuildContext context) {
@@ -591,6 +607,12 @@ class _SectionHeader extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (onScreen != null)
+                    IconButton(
+                      tooltip: '화면 거울',
+                      onPressed: onScreen,
+                      icon: Icon(Icons.monitor_outlined, color: dim),
+                    ),
                   if (onAdd != null)
                     IconButton(
                       tooltip: '새 방',

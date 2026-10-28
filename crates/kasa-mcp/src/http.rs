@@ -9,7 +9,7 @@
 //! `auth`(토큰·Origin·폰 주소) · `socket`(`/term/ws`) · `term_assets`·`term_api`·`term_files`(웹 터미널) ·
 //! `migrate`(이사) · `claude_account`(계정 슬롯·사용량) · `sessions`·`pane_read`·`panes`(세션·칸) ·
 //! `collab`(보드·보내기·tell) · `schedule`·`tasks`(스케줄·디스패처·팀 작업) · `files` · `inline_media`(대화 소리·영상 원본) · `git_api` ·
-//! `settings` · `arona_ui` · `host` · `phone` · `machine_proxy`(`/m/<기계>/…`).
+//! `settings` · `arona_ui` · `host` · `phone` · `machine_proxy`(`/m/<기계>/…`) · `screen`(기기 화면 거울).
 
 use std::sync::Arc;
 use kasa_socket::backend::{Backend, CharacterSave};
@@ -28,6 +28,7 @@ mod router;
 mod auth;
 mod phone;
 mod machine_proxy;
+mod screen;
 mod socket;
 mod term_assets;
 mod term_api;

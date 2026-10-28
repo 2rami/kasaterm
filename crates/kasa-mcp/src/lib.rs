@@ -58,6 +58,7 @@ pub mod push;
 pub mod uplink;
 pub mod gateway;
 pub mod remoteboard;
+pub mod screen_mirror;
 pub mod reposync;
 pub mod share;
 mod shell_blocks;

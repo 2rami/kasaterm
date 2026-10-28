@@ -4031,6 +4031,12 @@ pub(crate) fn draw_machine_menu(
         let row = if items.len() == 1 { row.sep() } else { row };
         items.push((Some(B::Screen { host: String::new(), kvm: Some(kvm) }), row));
     }
+    // 화면공유와 따로 둔다 — 화면공유는 같은 망의 맥끼리만 되고, 거울은 카사텀이 닿는 기기면 어디서든 된다.
+    if m.online {
+        let row = MenuRow::new("화면 거울").icon("monitor");
+        let row = if items.len() == 1 { row.sep() } else { row };
+        items.push((Some(B::ScreenMirror { label: m.label.clone() }), row));
+    }
     if m.online && m.outdated {
         items.push((None, MenuRow::new("⚠ 프로그램 낡음 — sync-mini 로 갱신").muted()));
     }

@@ -192,8 +192,8 @@ pub(crate) fn normalize_web_url(raw: &str) -> Option<String> {
     }
 }
 
-/// 검색 폴백용 최소 percent-encode — 비예약 문자만 그대로 둔다.
-fn url_query_encode(s: &str) -> String {
+/// 검색 폴백·주소 조각용 최소 percent-encode — 비예약 문자만 그대로 둔다.
+pub(crate) fn url_query_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {

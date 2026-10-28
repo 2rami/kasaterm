@@ -518,6 +518,11 @@ pub(crate) enum MachinesColBtn {
         host: String,
         kvm: Option<String>,
     },
+    /// 그 기기 화면 거울 — 그 기기 카사텀이 뜬 화면을 이 창의 웹 칸으로 본다(`docs/screen-mirror.md`).
+    /// 화면공유와 달리 카사텀 길(터널·카사넷)로 가서 Windows 와 폰에서도 같다. 보기만 한다.
+    ScreenMirror {
+        label: String,
+    },
     /// 방 펼치기 — 그 기계 학생 pane 전부를 이 창의 거울로(원격 방마다 새 창).
     Unfold {
         label: String,

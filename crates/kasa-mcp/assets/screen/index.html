@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>화면</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0d0e11; color: #e8e8ec;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #stage.actual { display: block; overflow: auto; }
+  canvas { display: block; max-width: 100%; max-height: 100%; image-rendering: auto; }
+  #stage.actual canvas { max-width: none; max-height: none; }
+  #bar { position: fixed; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center;
+    padding: 4px 6px 4px 10px; border-radius: 8px; background: rgba(20, 21, 26, .82);
+    border: 1px solid rgba(255, 255, 255, .08); backdrop-filter: blur(8px); opacity: .9; transition: opacity .2s; }
+  #bar:hover { opacity: 1; }
+  #state { color: #a6a7b0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #state.live::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px;
+    border-radius: 50%; background: #3ecf8e; vertical-align: 1px; }
+  button, select { font: inherit; color: inherit; background: rgba(255, 255, 255, .06); height: 26px;
+    border: 1px solid rgba(255, 255, 255, .1); border-radius: 6px; padding: 0 8px; cursor: pointer; }
+  button:hover, select:hover { background: rgba(255, 255, 255, .12); }
+  #note { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; }
+  #note.on { display: flex; }
+  #note div { max-width: 460px; padding: 18px 20px; border-radius: 10px; background: #17181d;
+    border: 1px solid rgba(255, 255, 255, .08); }
+  #note b { display: block; margin-bottom: 6px; font-size: 14px; }
+  #note p { margin: 0; color: #a6a7b0; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="screen" width="0" height="0"></canvas></div>
+<div id="bar">
+  <span id="state">연결 중</span>
+  <select id="display" hidden title="화면 고르기"></select>
+  <button id="fit" title="창에 맞추기 / 실제 크기">실제 크기</button>
+</div>
+<div id="note"><div><b id="noteTitle"></b><p id="noteBody"></p></div></div>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const name = params.get('name');
+  if (name) document.title = `화면 · ${name}`;
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d');
+  const state = document.getElementById('state');
+  const pickDisplay = document.getElementById('display');
+  const fitButton = document.getElementById('fit');
+  const note = document.getElementById('note');
+  const NOTES = {
+    permission: ['화면 기록 권한이 필요해요',
+      '그 기기에서 시스템 설정 › 개인정보 보호 및 보안 › 화면 및 시스템 오디오 녹음에서 kasaterm 을 켠 뒤 카사텀을 다시 열어 주세요. 켜지면 여기 화면이 저절로 들어와요.'],
+    unavailable: ['이 기기는 화면을 보낼 수 없어요', '화면이 없는 기기이거나 화면 거울이 없는 옛 판이에요.'],
+  };
+  let ws = null, retry = 1, display = null, frames = [], shown = null;
+
+  // 창 픽셀만큼만 받는다 — 더 크게 받아 봐야 관문 길만 무거워진다.
+  const want = () => {
+    const ratio = window.devicePixelRatio || 1;
+    const edge = v => Math.min(3840, Math.max(320, Math.round(v * ratio / 160) * 160));
+    return { w: edge(innerWidth), h: edge(innerHeight) };
+  };
+  let asked = want();
+
+  function say(text, live) {
+    state.textContent = text;
+    state.classList.toggle('live', !!live);
+  }
+
+  function showNote(reason) {
+    const n = NOTES[reason];
+    note.classList.toggle('on', !!n);
+    if (!n) return;
+    document.getElementById('noteTitle').textContent = n[0];
+    document.getElementById('noteBody').textContent = n[1];
+  }
+
+  function connect() {
+    const url = new URL('screen/ws', location.href);
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.search = '';
+    url.searchParams.set('w', asked.w);
+    url.searchParams.set('h', asked.h);
+    url.searchParams.set('q', 70);
+    url.searchParams.set('fps', 10);
+    if (display != null) url.searchParams.set('display', display);
+    ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { retry = 1; say('화면 기다리는 중'); };
+    ws.onmessage = e => typeof e.data === 'string' ? control(JSON.parse(e.data)) : draw(e.data);
+    ws.onclose = () => {
+      ws = null;
+      say('다시 연결 중');
+      setTimeout(connect, retry * 1000);
+      retry = Math.min(retry * 2, 10);
+    };
+  }
+
+  function control(m) {
+    if (m.t === 'hello') {
+      display = m.display;
+      const list = m.displays || [];
+      pickDisplay.hidden = list.length < 2;
+      pickDisplay.replaceChildren(...list.map((d, i) => {
+        const o = new Option(`${d.main ? '주 화면' : `화면 ${i + 1}`} · ${d.width}×${d.height}`, d.id);
+        o.selected = d.id === m.display;
+        return o;
+      }));
+    } else if (m.t === 'denied') {
+      showNote(m.reason);
+      say(m.reason === 'permission' ? '권한 없음' : '보낼 수 없음');
+    }
+  }
+
+  async function draw(buf) {
+    const view = new DataView(buf);
+    const seq = view.getUint32(0);
+    const metaLen = view.getUint16(4);
+    const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 6, metaLen)));
+    const socket = ws;
+    try {
+      const bitmap = await createImageBitmap(new Blob([new Uint8Array(buf, 6 + metaLen)], { type: 'image/jpeg' }));
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+    } catch (_) {}
+    // 다 그린 뒤에 ack — 그래야 서버가 이 화면이 그릴 수 있는 만큼만 보낸다.
+    if (socket && socket === ws && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ t: 'ack', seq }));
+    }
+    showNote(null);
+    const now = performance.now();
+    frames.push(now);
+    while (frames.length && now - frames[0] > 2000) frames.shift();
+    shown = meta;
+    status();
+  }
+
+  function status() {
+    if (!shown || !ws) return;
+    const fps = frames.length > 1 ? Math.round((frames.length - 1) / ((frames[frames.length - 1] - frames[0]) / 1000)) : 0;
+    const quiet = !frames.length || performance.now() - frames[frames.length - 1] > 1500;
+    say(`${shown.w}×${shown.h} · ${quiet ? '변화 없음' : `${fps}fps`}`, true);
+  }
+  setInterval(() => {
+    const now = performance.now();
+    while (frames.length && now - frames[0] > 2000) frames.shift();
+    status();
+  }, 1000);
+
+  pickDisplay.onchange = () => {
+    display = Number(pickDisplay.value);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'tune', display }));
+  };
+  fitButton.onclick = () => {
+    const actual = stage.classList.toggle('actual');
+    fitButton.textContent = actual ? '창에 맞추기' : '실제 크기';
+  };
+  let resizing = null;
+  addEventListener('resize', () => {
+    clearTimeout(resizing);
+    resizing = setTimeout(() => {
+      const next = want();
+      if (next.w === asked.w && next.h === asked.h) return;
+      asked = next;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'tune', w: asked.w, h: asked.h }));
+    }, 300);
+  });
+  connect();
+})();
+</script>
+</body>
+</html>
