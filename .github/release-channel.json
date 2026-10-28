@@ -5,6 +5,6 @@
     "windows"
   ],
   "schema": "kasaterm-release-channel/1",
-  "source_commit": "9aced941a69ae403e53f10de0d538d5fb653e54f",
-  "tag": "v0.2.176"
+  "source_commit": "b51466b4472daff30132fd735c646664cd538c5d",
+  "tag": "v0.2.177"
 }
