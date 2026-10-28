@@ -4082,7 +4082,6 @@ fn clipboard_login_code(seen: &mut Option<String>) -> Option<String> {
 /// 결과는 프로세스 종료 코드로 온다. 틀린 코드면 CLI 가 다시 물어보므로 리더가
 /// 곧 `NeedCode` 로 되돌린다.
 pub(crate) fn submit_login_code(code: &str) -> bool {
-    use std::io::Write;
     let code = code.trim();
     if code.is_empty() {
         return false;
@@ -4090,6 +4089,11 @@ pub(crate) fn submit_login_code(code: &str) -> bool {
     let Ok(mut c) = login_cell().lock() else {
         return false;
     };
+    write_login_code(&mut c, code)
+}
+
+fn write_login_code(c: &mut (Option<LoginJob>, Option<u32>, Option<std::process::ChildStdin>), code: &str) -> bool {
+    use std::io::Write;
     let Some(stdin) = c.2.as_mut() else {
         return false;
     };
@@ -4101,6 +4105,51 @@ pub(crate) fn submit_login_code(code: &str) -> bool {
         job.state = LoginState::Running;
     }
     true
+}
+
+/// Claude 로그인이 연 승인 주소의 `(CLI pid, state)`. 확장이 넘기는 코드(`<코드>#<state>`)를 이것과 대조한다.
+/// pid 를 함께 쥐는 것은 취소·같은 슬롯 재로그인 뒤 늦게 온 옛 출력이 새 로그인의 state 로 읽히지 않게다.
+/// 잠금 순서는 언제나 `login_cell` → 이것.
+fn browser_login_state() -> &'static std::sync::Mutex<Option<(u32, String)>> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<Option<(u32, String)>>> = std::sync::OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+
+fn remember_browser_login_state(pid: u32, state: String) {
+    let Ok(cell) = login_cell().lock() else { return };
+    let live = cell.1 == Some(pid)
+        && cell.0.as_ref().is_some_and(|job| job.provider == AccountProvider::Claude);
+    if live {
+        *browser_login_state().lock().unwrap_or_else(|e| e.into_inner()) = Some((pid, state));
+    }
+}
+
+fn oauth_state_of(url: &str) -> Option<String> {
+    url.split_once('?')?.1.split('&')
+        .find_map(|pair| pair.strip_prefix("state="))
+        .filter(|state| !state.is_empty())
+        .map(str::to_string)
+}
+
+/// 브라우저 확장이 주운 코드는 **이 로그인이 연 승인의 state 와 맞을 때만** 넣는다. 다른 확장도 이 창구에 닿을 수
+/// 있어, 확인 없이 받으면 기다리는 로그인에 엉뚱한 글을 넣어 사람이 하던 로그인을 실패시킬 수 있다.
+pub(crate) fn submit_browser_login_code(code: &str) -> bool {
+    let code = code.trim();
+    // 대조와 쓰기를 한 잠금 안에서 — 둘 사이에 취소·새 로그인이 끼면 옛 state 로 새 stdin 에 쓰게 된다.
+    let Ok(mut cell) = login_cell().lock() else { return false };
+    let waiting = cell.0.as_ref().is_some_and(|job| job.provider == AccountProvider::Claude
+        && matches!(job.state, LoginState::Running | LoginState::NeedCode));
+    let expected = browser_login_state().lock().unwrap_or_else(|e| e.into_inner()).clone()
+        .filter(|(pid, _)| cell.1 == Some(*pid))
+        .map(|(_, state)| state);
+    if !waiting || !browser_code_matches(code, expected.as_deref()) {
+        return false;
+    }
+    write_login_code(&mut cell, code)
+}
+
+fn browser_code_matches(code: &str, expected: Option<&str>) -> bool {
+    code.split_once('#').is_some_and(|(code, state)| !code.is_empty() && expected == Some(state))
 }
 
 pub(crate) fn cancel_hidden_login() {
@@ -4241,6 +4290,7 @@ fn spawn_hidden_login(
         device: None,
         adopting: opts.expect.as_ref().map(|(key, _)| key.clone()),
     });
+    *browser_login_state().lock().unwrap_or_else(|e| e.into_inner()) = None;
     cell.1 = None;
     drop(cell);
     std::thread::spawn(move || {
@@ -4294,8 +4344,9 @@ fn spawn_hidden_login(
         };
         // stdin 을 셀에 맡긴다 — 붙들고만 있으면(옛 코드) 코드를 넣을 길이 없고,
         // 떨어뜨리면 CLI 가 EOF 로 즉시 죽는다. 취소·완료 때 셀이 놓아 준다.
+        let login_pid = child.id();
         if let Ok(mut c) = login_cell().lock() {
-            c.1 = Some(child.id());
+            c.1 = Some(login_pid);
             c.2 = child.stdin.take();
         }
         // 두 파이프를 각각 읽어 한 버퍼에 모은다 — URL 이 어느 쪽으로 오는지는
@@ -4342,6 +4393,11 @@ fn spawn_hidden_login(
                     // 열면 끊긴 주소가 뜬다.
                     while let Some(pos) = tail.find('\n') {
                         let line: String = tail.drain(..=pos).collect();
+                        if provider == AccountProvider::Claude {
+                            if let Some(state) = login_url_in(&line).as_deref().and_then(oauth_state_of) {
+                                remember_browser_login_state(login_pid, state);
+                            }
+                        }
                         if device_code {
                             note_device_login(provider, &job_id, &line, &browser_opened);
                             continue;
@@ -4698,6 +4754,18 @@ fn login_url_in(line: &str) -> Option<String> {
 #[cfg(test)]
 mod login_url_tests {
     use super::{login_url_in, with_account_chooser};
+
+    #[test]
+    fn a_browser_code_must_carry_the_state_of_the_waiting_login() {
+        let url = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&state=abc&code_challenge=z";
+        assert_eq!(super::oauth_state_of(url).as_deref(), Some("abc"));
+        assert_eq!(super::oauth_state_of("https://claude.com/cai/oauth/authorize?state="), None);
+        assert!(super::browser_code_matches("code123#abc", Some("abc")));
+        assert!(!super::browser_code_matches("code123#other", Some("abc")), "another login's state");
+        assert!(!super::browser_code_matches("code123", Some("abc")), "no state");
+        assert!(!super::browser_code_matches("#abc", Some("abc")), "no code");
+        assert!(!super::browser_code_matches("code123#abc", None), "no login opened an authorize URL");
+    }
 
     #[test]
     fn codex_default_login_keeps_the_official_browser_callback() {

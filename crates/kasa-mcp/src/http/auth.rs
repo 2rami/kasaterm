@@ -227,7 +227,8 @@ fn cross_site_request(h: &HeaderMap) -> bool {
 
 /// 카사크롬 확장이 승인 탭에서 주운 로그인 코드(`kasachrome/extension/background.js`). 확장의 fetch 는
 /// `chrome-extension://` 출처를 실어 와 우리 Host 와 안 맞아 막혔다 — 그래서 코드가 한 번도 못 건너갔다
-/// (2026-10-28). 웹페이지는 그 출처를 꾸밀 수 없고, 코드는 기다리는 로그인의 state·PKCE 와 맞아야 교환된다.
+/// (2026-10-28). 웹페이지는 그 출처를 꾸밀 수 없다. 남의 확장도 닿을 수 있어 앱이 코드의 state 를 기다리는
+/// 로그인의 승인 주소와 대조한 뒤에만 넣는다(`settings::submit_browser_login_code`) — CLI 는 state 를 안 본다.
 fn extension_login_code(req: &axum::extract::Request) -> bool {
     req.method() == Method::POST
         && req.uri().path() == "/claude-login-code"
