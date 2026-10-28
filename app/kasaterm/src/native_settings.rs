@@ -5803,6 +5803,18 @@ fn account_group(
         Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "running"),
         None => local_state == Some(&crate::settings::LoginState::Running),
     };
+    let login_id = match home {
+        Some(h) => h.login.as_ref().map(|(id, _, _)| id.as_str()),
+        None => s.login_job.as_ref().filter(|job| job.provider == provider).map(|job| job.id.as_str()),
+    };
+    // 폰 로그인 임대와 본진의 Codex 작업은 이 입력 경로를 쓰지 않으므로 실제 Claude 슬롯만 앞당긴다.
+    let manual_claude_login = provider == AccountProvider::Claude && login_id.is_some_and(|id| {
+        if id.is_empty() { home.is_none() } else {
+            home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref()).iter()
+                .any(|row| row.provider == AccountProvider::Claude && row.id == id)
+        }
+    });
+    let show_code_input = needs_code || (running && manual_claude_login);
 
     g.queue_icon(provider.icon(), x, *y - 1.0, 17.0, theme::text());
     draw_text(g, x + 24.0, *y, provider.label(), 14.5, theme::text(), true);
@@ -5953,7 +5965,7 @@ fn account_group(
         *y += 20.0;
     }
 
-    if needs_code {
+    if show_code_input {
         *y += 4.0;
         for line in wrap_words(g, "브라우저에 코드가 나오면 아래에 붙여넣고 확인하세요.", w, 11.0) {
             draw_text(g, x, *y, &line, 11.0, theme::attention(), false);

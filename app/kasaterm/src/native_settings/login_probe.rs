@@ -12,7 +12,14 @@ impl App {
             || DONE.swap(true, Ordering::Relaxed) { return; }
         self.open_settings_room(Some(SettingsCat::Accounts));
         self.set_account_scope_home = false;
-        let seeded = self.seed_login_probe("fixture-account", crate::settings::LoginState::NeedCode);
+        let mode = std::env::var("KASATERM_LOGIN_PASTE_PROBE").unwrap_or_default();
+        let state = if mode.ends_with("running") {
+            crate::settings::LoginState::Running
+        } else {
+            crate::settings::LoginState::NeedCode
+        };
+        let id = if mode == "phone-running" { "phone-login-fixture" } else { "" };
+        let seeded = self.seed_login_probe(id, state);
         self.refresh_native_settings_dynamic_cache();
         let mut target = None;
         for _ in 0..24 {

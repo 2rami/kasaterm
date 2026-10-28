@@ -4427,16 +4427,6 @@ fn spawn_hidden_login(
                             }
                         }
                     }
-                    // 남은 꼬리가 코드를 묻고 있나. CLI 가 다시 물으면(틀린 코드)
-                    // 그때도 잡아야 하므로 꼬리를 비운 뒤 플래그를 되돌린다.
-                    //
-                    // ⚠️ **본 즉시 칸을 띄우지 않는다.** 「Paste code here if
-                    // prompted」는 승인하기 **전에 늘** 나오는 안내지 요청이
-                    // 아니다(실측). 정상 경로에서는 CLI 가 자기 창구로 승인을
-                    // 되받아 그대로 끝나는데, 그 문구만 보고 칸을 띄우는 바람에
-                    // 화면은 늘 「코드를 붙여넣으라」고 말하고 있었다(2026-09-07
-                    // 「orca는 되던데 나는 왜 코드복사 그거뜨지」). 되돌림이 올
-                    // 만큼 기다린 뒤에도 안 끝났을 때만 손으로 넣는 길을 연다.
                 }
             }));
         }
@@ -4449,7 +4439,7 @@ fn spawn_hidden_login(
         let first_wait = if device_code { 900 } else { 180 };
         let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(first_wait);
         let mut extended = false;
-        // 코드를 묻는 문구를 처음 본 시각과, 손 입력 칸을 이미 열었는지.
+        // 입력칸은 Running 때부터 보이지만, 클립보드 감시·마감 연장은 자동 전달을 기다린 뒤 켠다.
         let mut prompt_at: Option<std::time::Instant> = None;
         let mut prompt_armed = false;
         let mut clip_seen: Option<String> = None;
@@ -4464,16 +4454,8 @@ fn spawn_hidden_login(
             if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
                 return;
             }
-            // 「Paste code here if prompted」는 승인 **전에 늘** 나오는 안내지
-            // 요청이 아니다. 정상 경로에서는 CLI 가 자기 창구로 승인을 되받아
-            // 그대로 끝나는데, 그 문구만 보고 칸을 띄우는 바람에 화면은 늘 코드를
-            // 붙여넣으라고 말하고 있었다(2026-09-07 「orca는 되던데 나는 왜
-            // 코드복사 그거뜨지」). 되돌림이 올 만큼 기다린 뒤에도 안 끝났을
-            // 때만 손으로 넣는 길을 연다.
-            //
-            // 시간을 여기서 재는 것은 리더 스레드가 **출력이 없으면 멈춰 있어서**다
-            // — 문구를 본 뒤로 아무 말이 없는 것이 정확히 정상 경로의 모습이라,
-            // 거기서 재면 영영 안 돈다.
+            // 승인 전에 늘 찍히는 안내만으로 클립보드를 읽지는 않는다. 입력칸 표시와 달리
+            // NeedCode의 부작용은 기존 대기를 유지한다. 출력이 멈춰도 전환되도록 여기서 시간을 잰다.
             if provider == AccountProvider::Claude && !prompt_armed {
                 let saw = buf
                     .lock()
