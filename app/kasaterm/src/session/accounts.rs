@@ -86,7 +86,11 @@ impl App {
         // 켜지 않는다(아무것도 안 바뀌었는데 축포를 터뜨리는 꼴이다).
         let (_, to_label, restarted, deferred, focused, live) = match self.apply_claude_account_switch_checked(id, None) {
             Ok(result) => result,
-            Err(error) => { self.set_toast(error.failure_message().into()); return false; }
+            Err(error) => {
+                eprintln!("[account] Claude {id} 전환 실패: {}", error.failure_code());
+                self.set_toast(error.failure_message().into());
+                return false;
+            }
         };
         if !same {
             self.account_flash = Some(std::time::Instant::now());

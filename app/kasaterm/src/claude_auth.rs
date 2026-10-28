@@ -539,6 +539,9 @@ pub(crate) enum SwapOutcome {
     IdentityUnverified,
     PreservationPending,
     WorkbenchChanged,
+    /// 떠나는 계정 금고의 토큰이 만료됐고 신원 표식도 없어, 작업대가 그 계정 것인지 증명할 길이 없다.
+    /// 기다려도 안 풀린다 — 그 계정을 다시 로그인해야 금고 신원을 다시 물을 수 있다.
+    DepartingExpired,
 }
 
 impl SwapOutcome {
@@ -548,6 +551,7 @@ impl SwapOutcome {
             Self::PreservationPending => "account_sync_preservation_pending",
             Self::IdentityUnverified => "account_sync_identity_unverified",
             Self::WriteFailed => "account_sync_storage_failed",
+            Self::DepartingExpired => "account_sync_departing_expired",
             _ => "account_switch_failed",
         }
     }
@@ -558,6 +562,7 @@ impl SwapOutcome {
             Self::PreservationPending => "현재 로그인을 안전하게 보관하기 전에는 전환하지 않아요. 신원을 다시 확인 중이니 잠시 뒤 같은 계정을 다시 선택해 주세요",
             Self::IdentityUnverified => "계정 신원을 다시 확인 중이에요. 잠시 뒤 같은 계정을 다시 선택해 주세요",
             Self::WriteFailed => "계정 저장소 접근·저장을 확인하지 못했어요. 저장소 접근을 확인한 뒤 다시 선택해 주세요",
+            Self::DepartingExpired => "지금 계정의 보관 로그인이 만료돼 현재 로그인을 그 계정 것으로 확인할 수 없어요. 계정 화면에서 지금 계정을 다시 로그인한 뒤 전환해 주세요",
             _ => "선택한 계정에 로그인이 없어요. 계정 화면에서 로그인한 뒤 다시 선택해 주세요",
         }
     }
@@ -632,6 +637,11 @@ fn read_back_verified_in(
         return ReadBack::Deferred(SwapOutcome::WorkbenchChanged);
     }
     if expected.is_none() || previous_identity.is_none() {
+        // 만료된 금고 토큰으로는 신원을 못 묻고, 활성 금고는 회전도 금지라 저절로 살아나지 않는다.
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        if expected.is_none() && expires_at(&previous).is_none_or(|expires| expires <= now_ms) {
+            return ReadBack::Deferred(SwapOutcome::DepartingExpired);
+        }
         return defer;
     }
     if read_stamp_in(stamp_home).as_ref() != Some(&(stamped_account.clone(), stamped_digest))
@@ -668,9 +678,11 @@ pub(crate) fn ensure_active(
     match outcome {
         // 빈 경로 = 작업대(기본 자리). shim 은 이 경우 env 를 아예 안 붙인다.
         SwapOutcome::Swapped | SwapOutcome::AlreadyActive => Some(PathBuf::new()),
-        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed | SwapOutcome::IdentityUnverified | SwapOutcome::PreservationPending | SwapOutcome::WorkbenchChanged
+        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed | SwapOutcome::IdentityUnverified | SwapOutcome::PreservationPending
+            | SwapOutcome::WorkbenchChanged | SwapOutcome::DepartingExpired
             if workbench_account().as_deref() == Some(account_id) => Some(PathBuf::new()),
-        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed | SwapOutcome::IdentityUnverified | SwapOutcome::PreservationPending | SwapOutcome::WorkbenchChanged => None,
+        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed | SwapOutcome::IdentityUnverified | SwapOutcome::PreservationPending
+            | SwapOutcome::WorkbenchChanged | SwapOutcome::DepartingExpired => None,
     }
 }
 
@@ -1328,6 +1340,26 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_unproven_departing_vault_asks_for_login_instead_of_waiting() {
+        let s = Slots::new("readback-departing-expired");
+        let (stamp, bench) = s.bench();
+        let fresh = creds(i64::MAX, "new-a");
+        assert!(write_credentials(Some(&bench), &fresh));
+        assert!(write_credentials(Some(&s.dir("vault-b")), &creds(i64::MAX, "b")));
+        let identity = |blob: &[u8]| (blob == fresh.as_slice()).then(|| proof("a"));
+        for (vault, expected) in [
+            (creds(1000, "old-a"), SwapOutcome::DepartingExpired),
+            (creds(i64::MAX - 1, "old-a"), SwapOutcome::PreservationPending),
+        ] {
+            assert!(write_credentials(Some(&s.dir("vault-a")), &vault));
+            write_stamp_in(&stamp, "a", &digest_of(&vault));
+            assert_eq!(read_back_verified_in(&stamp, Some(&bench), s.vault_of(), identity), ReadBack::Deferred(expected));
+            assert_eq!(swap_active_with_identity_in(&stamp, Some(&bench), "b", s.vault_of(), None, identity, true), expected);
+            assert_eq!(read_credentials(Some(&bench)), Some(fresh.clone()), "the unproven workbench is kept");
+        }
+    }
+
+    #[test]
     fn legacy_stamp_gains_identity_only_while_exact_bytes_are_unchanged() {
         let s = Slots::new("readback-legacy-proof");
         let (stamp, bench) = s.bench();
@@ -1528,6 +1560,8 @@ mod tests {
         assert!(SwapOutcome::WorkbenchChanged.failure_message().contains("추가·로그인"));
         assert!(SwapOutcome::WorkbenchChanged.failure_message().contains("먼저 선택"));
         assert_eq!(SwapOutcome::PreservationPending.failure_code(), "account_sync_preservation_pending");
+        assert!(SwapOutcome::DepartingExpired.failure_message().contains("다시 로그인"));
+        assert!(!SwapOutcome::DepartingExpired.failure_message().contains("잠시 뒤"));
     }
 
     #[test]

@@ -225,6 +225,17 @@ fn cross_site_request(h: &HeaderMap) -> bool {
         .is_some_and(|v| v == "cross-site")
 }
 
+/// 카사크롬 확장이 승인 탭에서 주운 로그인 코드(`kasachrome/extension/background.js`). 확장의 fetch 는
+/// `chrome-extension://` 출처를 실어 와 우리 Host 와 안 맞아 막혔다 — 그래서 코드가 한 번도 못 건너갔다
+/// (2026-10-28). 웹페이지는 그 출처를 꾸밀 수 없고, 코드는 기다리는 로그인의 state·PKCE 와 맞아야 교환된다.
+fn extension_login_code(req: &axum::extract::Request) -> bool {
+    req.method() == Method::POST
+        && req.uri().path() == "/claude-login-code"
+        && !cross_site_request(req.headers())
+        && req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok())
+            .is_some_and(|origin| origin.starts_with("chrome-extension://"))
+}
+
 /// POST 를 전부 통과시키는 관문. `Router::layer` 로 걸린다.
 ///
 /// GET 은 통과시킨다 — 이 서버의 GET 은 읽기 전용이고, 막으면 webview 폴링이
@@ -269,7 +280,7 @@ pub(crate) async fn origin_guard_mw(
     let h = req.headers();
     // ① 메서드를 가리지 않는다 — GET 에도 창을 띄우거나 대화를 내주는 창구가 있고,
     //    navigation 은 Origin 을 안 보내 ②만으로는 못 잡는다.
-    let blocked = if has_token(h) {
+    let blocked = if has_token(h) || extension_login_code(&req) {
         false
     } else {
         cross_site_request(h) || (req.method() == Method::POST && !mutating_request_ok(h))
@@ -412,6 +423,30 @@ pub(super) async fn mobile_prefix_mw(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn only_the_login_code_route_accepts_an_extension_origin() {
+        use super::*;
+        use axum::http::StatusCode;
+        let app = axum::Router::new()
+            .route("/claude-login-code", axum::routing::post(|| async { "taken" }))
+            .route("/other", axum::routing::post(|| async { "done" }))
+            .layer(axum::middleware::from_fn(origin_guard_mw));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let post = |path: &str, origin: &str, site: &str| client.post(format!("{base}{path}"))
+            .header("origin", origin).header("sec-fetch-site", site).send();
+        let extension = "chrome-extension://mpiljclgheneefhfbeikchdnimoaebdf";
+        assert_eq!(post("/claude-login-code", extension, "none").await.unwrap().status(), StatusCode::OK);
+        assert_eq!(post("/other", extension, "none").await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(post("/claude-login-code", "https://evil.example", "cross-site").await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(post("/claude-login-code", extension, "cross-site").await.unwrap().status(), StatusCode::FORBIDDEN);
+        task.abort();
+    }
+
     #[tokio::test]
     async fn gateway_requests_must_stay_under_a_user_address() {
         use super::*;
