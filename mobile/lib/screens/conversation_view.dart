@@ -10,6 +10,7 @@ import '../inline_result.dart';
 import '../conversation.dart';
 import '../file_link.dart';
 import '../server.dart';
+import '../server_image.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
@@ -625,6 +626,19 @@ class _ConversationViewState extends State<ConversationView> {
     );
   }
 
+  /// 쪽지를 넣은 학생 얼굴 — 기록엔 이름(`⟦아로나⟧`)뿐이라 서버가 명부로 이름을 슬러그로 바꿔 그린다.
+  /// 모르는 이름(카사텀·커스텀 캐릭터)은 첫 글자.
+  Widget _senderFace(String name) => ClipOval(
+    child: ServerImage(
+      server: widget.server,
+      uri: widget.server.avatar(name, machine: widget.pane.machine),
+      width: 30,
+      height: 30,
+      fit: BoxFit.cover,
+      fallback: _Initial(name),
+    ),
+  );
+
   Widget _row(
     BuildContext context,
     List<Object> list,
@@ -650,7 +664,7 @@ class _ConversationViewState extends State<ConversationView> {
         cwd: widget.pane.cwd,
         bubble: b,
         name: b.from ?? widget.pane.displayName,
-        face: b.from == null ? face : null,
+        face: b.from == null ? face : _senderFace(b.from!),
         accent: widget.accent,
         head: head,
         tail: tail,

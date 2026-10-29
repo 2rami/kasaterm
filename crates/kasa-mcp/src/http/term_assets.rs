@@ -169,6 +169,13 @@ pub(super) fn avatar_slug(agent_name: &str) -> Option<String> {
 /// 폰에서 「누구 화면인가」가 이름 한 줄로만 남으면 눈에 안 들어와서, 같은 그림을
 /// 웹에도 준다. 자산은 GUI 가 쓰는 것 그대로다(따로 복제하지 않는다).
 async fn term_avatar(axum::extract::Path(slug): axum::extract::Path<String>) -> impl IntoResponse {
+    // 대화 보기의 쪽지는 보낸 학생 이름(`⟦아로나⟧`)만 안다 — 슬러그가 아니면 명부에서 이름으로 찾는다.
+    let raw = slug.trim_end_matches(".png");
+    let slug = if raw.is_ascii() {
+        raw.to_string()
+    } else {
+        crate::character::slug_for_any(raw).unwrap_or_default()
+    };
     macro_rules! avatars {
         ($($s:literal),* $(,)?) => {
             match slug.trim_end_matches(".png") {

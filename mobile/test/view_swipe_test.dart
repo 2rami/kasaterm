@@ -36,9 +36,18 @@ final _transcript =
       },
     })}\n';
 
+/// 화면이 받으려 한 그림 주소 — 얼굴을 누구 것으로 물었나.
+final askedImages = <Uri>[];
+
 class SwipeServer extends Server {
   SwipeServer({this.transcript}) : super(Uri.parse('https://example.com/'));
   final String? transcript;
+
+  @override
+  Future<Uint8List> imageBytes(Uri uri) async {
+    askedImages.add(uri);
+    throw const ServerException('시험 서버에는 그림이 없다');
+  }
 
   @override
   Future<({String raw, int offset, bool reset, String source})?> transcriptRaw(
@@ -356,6 +365,24 @@ void main() {
       await _close(tester);
     }, variant: TargetPlatformVariant.only(platform));
   }
+
+  testWidgets('쪽지는 보낸 학생 얼굴을 이름으로 물어 단다', (tester) async {
+    askedImages.clear();
+    final relayed = '${jsonEncode({
+      'type': 'user',
+      'sessionId': 's1',
+      'timestamp': '2026-10-02T01:00:00Z',
+      'message': {'role': 'user', 'content': '⟦아로나⟧ 폰 판 구워서 올려'},
+    })}\n';
+    await _open(tester, view: PaneView.chat, transcript: relayed + _transcript);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.textContaining('아로나 · 쪽지', findRichText: true), findsOneWidget);
+    expect(
+      askedImages.map((u) => Uri.decodeComponent(u.path)),
+      contains(endsWith('term/avatar/아로나.png')),
+    );
+    await _close(tester);
+  });
 
   testWidgets('대화 목록의 빈 곳을 누르면 자판이 내려간다', (tester) async {
     await _open(tester, view: PaneView.chat);
