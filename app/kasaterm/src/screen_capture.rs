@@ -3,7 +3,7 @@
 //! 화면을 OS 가 줄여 주는 크기로 바로 받아(macOS 는 비트맵 문맥에 그리기, Windows 는 StretchBlt) 줄인 픽셀만
 //! 만진다 — 5K 화면을 통째로 들고 줄이면 한 장에 수십 ms 가 더 든다. 줄인 픽셀이 지난 장과 같으면 인코딩하지 않는다.
 
-use kasa_mcp::screen_mirror::{Ask, Denied, Display, Shot, Source};
+use kasa_mcp::screen_mirror::{Ask, Denied, Display, Input, Shot, Source};
 
 pub(crate) fn install() {
     kasa_mcp::screen_mirror::install(std::sync::Arc::new(Screen));
@@ -28,6 +28,14 @@ impl Source for Screen {
 
     fn request_permission(&self) {
         os::request_permission();
+    }
+
+    fn input(&self, display: u32, input: &Input) -> Result<(), Denied> {
+        crate::screen_input::put(display, input)
+    }
+
+    fn request_input_permission(&self) {
+        crate::screen_input::request_permission();
     }
 }
 

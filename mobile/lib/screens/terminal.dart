@@ -1064,23 +1064,23 @@ class _KeyBar extends StatelessWidget {
       onKey();
     };
     final keys = <Widget>[
-      _Key(label: 'esc', onTap: tap(() => s.sendText('\x1b'))),
-      _Key(label: 'tab', onTap: tap(() => s.sendText('\t'))),
-      _Key(label: 'ctrl', selected: ctrl, onTap: onCtrl),
-      _Key(label: '^C', onTap: tap(() => s.ctrl('c'))),
-      _Key(icon: Icons.keyboard_arrow_left, onTap: tap(() => s.arrow('D'))),
-      _Key(icon: Icons.keyboard_arrow_down, onTap: tap(() => s.arrow('B'))),
-      _Key(icon: Icons.keyboard_arrow_up, onTap: tap(() => s.arrow('A'))),
-      _Key(icon: Icons.keyboard_arrow_right, onTap: tap(() => s.arrow('C'))),
-      _Key(
+      KeyChip(label: 'esc', onTap: tap(() => s.sendText('\x1b'))),
+      KeyChip(label: 'tab', onTap: tap(() => s.sendText('\t'))),
+      KeyChip(label: 'ctrl', selected: ctrl, onTap: onCtrl),
+      KeyChip(label: '^C', onTap: tap(() => s.ctrl('c'))),
+      KeyChip(icon: Icons.keyboard_arrow_left, onTap: tap(() => s.arrow('D'))),
+      KeyChip(icon: Icons.keyboard_arrow_down, onTap: tap(() => s.arrow('B'))),
+      KeyChip(icon: Icons.keyboard_arrow_up, onTap: tap(() => s.arrow('A'))),
+      KeyChip(icon: Icons.keyboard_arrow_right, onTap: tap(() => s.arrow('C'))),
+      KeyChip(
         icon: Icons.backspace_outlined,
         onTap: tap(() => s.sendText('\x7f')),
       ),
       // 줄바꿈 — 데스크톱의 Shift+Enter 와 같은 바이트(LF). claude·codex 둘 다
       // CR 은 제출, 맨 LF 는 줄바꿈으로 읽는다. 폰 자판엔 Shift+Enter 가 없어
       // 여러 줄 프롬프트를 칠 길이 없었다(2026-09-17 지적).
-      _Key(label: '⇧↵', onTap: tap(() => s.sendText('\n'))),
-      _Key(
+      KeyChip(label: '⇧↵', onTap: tap(() => s.sendText('\n'))),
+      KeyChip(
         icon: Icons.keyboard_return,
         onTap: tap(() {
           s.sendText('\r');
@@ -1088,60 +1088,7 @@ class _KeyBar extends StatelessWidget {
         }),
       ),
     ];
-    return SizedBox(
-      height: 56,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        itemCount: keys.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (_, i) => keys[i],
-      ),
-    );
-  }
-}
-
-class _Key extends StatelessWidget {
-  const _Key({
-    this.label,
-    this.icon,
-    required this.onTap,
-    this.selected = false,
-  });
-
-  final String? label;
-  final IconData? icon;
-  final VoidCallback onTap;
-  final bool selected;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    // 쌍둥이 결 — 테 없이 톤 채움, 켜진 ctrl 은 강조 물·글자.
-    final ink = selected ? scheme.primary : scheme.onSurface;
-    return Material(
-      color: selected ? scheme.primary.withValues(alpha: 0.18) : scheme.surfaceContainerHigh,
-      shape: RoundedRectangleBorder(borderRadius: Look.corners),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: Look.corners,
-        child: Container(
-          constraints: const BoxConstraints(minWidth: Look.tap, minHeight: Look.tap),
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          alignment: Alignment.center,
-          child: icon != null
-              ? Icon(icon, size: Look.iconSize, color: ink)
-              : Text(
-                  label!,
-                  style: TextStyle(
-                    fontFamily: 'TermMono',
-                    fontSize: Look.sub,
-                    color: ink,
-                  ),
-                ),
-        ),
-      ),
-    );
+    return KeyRow(keys: keys);
   }
 }
 

@@ -6,6 +6,7 @@
 //! - 서버 → 보는 쪽: 붙자마자 텍스트 `{"t":"hello",displays,display}`, 그 뒤 바이너리
 //!   `[u32 seq BE][u16 meta 길이 BE][meta JSON {w,h,d}][JPEG]`. 뜰 수 없으면 `{"t":"denied","reason"}`.
 //! - 보는 쪽 → 서버: 그림을 다 그린 뒤 `{"t":"ack","seq"}`, 설정을 바꿀 때 `{"t":"tune",display?,w?,h?,q?,fps?}`.
+//!   조작은 `pointer`·`scroll`·`key`·`text`([`Input`]). 넣지 못하면 사정이 바뀔 때 한 번 `{"t":"input","ok":false,"reason"}`.
 //! - ack 안 받은 프레임은 [`WINDOW`] 장까지만 보내고, 막힌 동안은 화면을 뜨지도 않는다. 관문의 흐름 큐(256 프레임)가
 //!   느린 폰 때문에 차서 끊기는 일이 없고, 아무도 안 보는 화면을 뜨느라 CPU 를 쓰지 않는다.
 
@@ -70,12 +71,32 @@ pub struct Ask {
     pub prev: u64,
 }
 
+/// 보는 쪽이 넣는 조작. 좌표는 그 화면 안의 비율(0–1)이라 받은 그림 크기와 상관없다.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Input {
+    /// 단추 상태(1 왼쪽·2 오른쪽·4 가운데)를 통째로 보낸다. `prev` 는 서버가 붙인 직전 상태 — 둘을 견줘
+    /// 누름·뗌·끌기를 가른다. `mods` 는 1 shift·2 control·4 option(alt)·8 command(win).
+    Pointer { x: f64, y: f64, buttons: u8, prev: u8, mods: u8 },
+    /// 휠 — 화면 좌표(포인트) 단위. 양수 dy 는 위로 굴림(내용이 내려온다).
+    Scroll { x: f64, y: f64, dx: i32, dy: i32 },
+    /// 이름 붙은 키(`Enter`·`KeyA`… 웹 `KeyboardEvent.code`). `down` 이 없으면 눌렀다 뗀다.
+    Key { code: String, down: Option<bool>, mods: u8 },
+    /// 글자째 넣기 — 폰 자판·보는 쪽 입력기가 이미 조합한 글이라 그 기기 입력기를 거치지 않는다.
+    Text(String),
+}
+
 pub trait Source: Send + Sync {
     fn displays(&self) -> Vec<Display>;
     /// 비율을 지켜 `max_w × max_h` 안으로 줄여 뜬다(키우지는 않는다). 픽셀이 `ask.prev` 와 같으면 `Ok(None)`.
     fn capture(&self, ask: &Ask) -> Result<Option<Shot>, Denied>;
     /// 그 기기 앞에 권한 창을 띄운다. OS 는 앱마다 처음 한 번만 띄우므로 연결마다 한 번만 부른다.
     fn request_permission(&self) {}
+    /// 조작을 그 화면에 넣는다. macOS 는 손쉬운 사용 권한이 없으면 `Permission`.
+    fn input(&self, _display: u32, _input: &Input) -> Result<(), Denied> {
+        Err(Denied::Unavailable)
+    }
+    /// 조작 권한 창을 그 기기 앞에 띄운다 — 연결마다 한 번.
+    fn request_input_permission(&self) {}
 }
 
 static SOURCE: OnceLock<Arc<dyn Source>> = OnceLock::new();
@@ -153,13 +174,39 @@ fn text(v: serde_json::Value) -> Message {
 enum Control {
     Ack(u32),
     Tune(serde_json::Value),
+    /// `Pointer.prev` 는 아직 비어 있다 — 연결이 쥔 단추 상태로 채운다.
+    Input(Input),
 }
+
+/// 글자 넣기 한 번의 상한 — 폰 입력줄 한 번에 보내는 글이라 이보다 길 일이 없다.
+const TEXT_MAX: usize = 4096;
 
 fn control(raw: &str) -> Option<Control> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let unit = |k: &str| v.get(k).and_then(serde_json::Value::as_f64).filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));
+    let small = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0).min(255) as u8;
+    let wheel = |k: &str| v.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0).clamp(-10_000, 10_000) as i32;
     match v.get("t")?.as_str()? {
         "ack" => Some(Control::Ack(u32::try_from(v.get("seq")?.as_u64()?).ok()?)),
         "tune" => Some(Control::Tune(v)),
+        "pointer" => Some(Control::Input(Input::Pointer {
+            x: unit("x")?,
+            y: unit("y")?,
+            buttons: small("b") & 7,
+            prev: 0,
+            mods: small("m") & 15,
+        })),
+        "scroll" => Some(Control::Input(Input::Scroll { x: unit("x")?, y: unit("y")?, dx: wheel("dx"), dy: wheel("dy") })),
+        "key" => {
+            let code = v.get("k")?.as_str()?;
+            (!code.is_empty() && code.len() <= 32).then(|| {
+                Control::Input(Input::Key { code: code.to_string(), down: v.get("down").and_then(serde_json::Value::as_bool), mods: small("m") & 15 })
+            })
+        }
+        "text" => {
+            let s = v.get("s")?.as_str()?;
+            (!s.is_empty() && s.len() <= TEXT_MAX).then(|| Control::Input(Input::Text(s.to_string())))
+        }
         _ => None,
     }
 }
@@ -188,6 +235,11 @@ pub(crate) async fn serve(socket: WebSocket, source: Option<Arc<dyn Source>>, mu
     let mut heard = Instant::now();
     let mut denied: Option<Denied> = None;
     let mut asked = false;
+    // 조작 — 쥔 단추(뗌을 못 받고 끊기면 그 기기에 단추가 눌린 채 남지 않게 끝에서 뗀다), 마지막 사정, 권한 창.
+    let mut buttons = 0u8;
+    let mut last_at = (0.5, 0.5);
+    let mut input_denied: Option<Denied> = None;
+    let mut input_asked = false;
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     loop {
         let open = seq.wrapping_sub(acked) < WINDOW;
@@ -203,6 +255,32 @@ pub(crate) async fn serve(socket: WebSocket, source: Option<Arc<dyn Source>>, mu
                 match control(raw.as_str()) {
                     // 보낸 적 없는 번호나 이미 받은 것보다 옛 번호는 버린다 — 창을 거짓으로 열면 쌓인다.
                     Some(Control::Ack(n)) if seq.wrapping_sub(n) < seq.wrapping_sub(acked) => acked = n,
+                    Some(Control::Input(mut input)) => {
+                        if let Input::Pointer { x, y, buttons: next, prev, .. } = &mut input {
+                            *prev = buttons;
+                            buttons = *next;
+                            last_at = (*x, *y);
+                        }
+                        // 차례가 섞이면 누름과 뗌이 뒤바뀐다 — 한 번에 하나씩 넣고 기다린다.
+                        let s = source.clone();
+                        let got = tokio::task::spawn_blocking(move || s.input(display, &input)).await.unwrap_or(Err(Denied::Unavailable));
+                        let now = got.err();
+                        if now != input_denied {
+                            input_denied = now;
+                            let told = match now {
+                                Some(why) => json!({ "t": "input", "ok": false, "reason": why.reason() }),
+                                None => json!({ "t": "input", "ok": true }),
+                            };
+                            if tx.send(text(told)).await.is_err() {
+                                break;
+                            }
+                        }
+                        if now == Some(Denied::Permission) && !input_asked {
+                            input_asked = true;
+                            let s = source.clone();
+                            let _ = tokio::task::spawn_blocking(move || s.request_input_permission()).await;
+                        }
+                    }
                     Some(Control::Tune(v)) => {
                         tune.apply(|k| v.get(k).and_then(serde_json::Value::as_u64));
                         if tune.display.is_some_and(|d| d != display) {
@@ -262,6 +340,10 @@ pub(crate) async fn serve(socket: WebSocket, source: Option<Arc<dyn Source>>, mu
             }
         }
     }
+    if buttons != 0 && input_denied.is_none() {
+        let up = Input::Pointer { x: last_at.0, y: last_at.1, buttons: 0, prev: buttons, mods: 0 };
+        let _ = tokio::task::spawn_blocking(move || source.input(display, &up)).await;
+    }
     let _ = tx.close().await;
 }
 
@@ -279,6 +361,9 @@ mod tests {
         captures: AtomicUsize,
         asked: AtomicUsize,
         last: Mutex<Option<Ask>>,
+        inputs: Mutex<Vec<(u32, Input)>>,
+        input_denied: Mutex<Option<Denied>>,
+        input_asked: AtomicUsize,
     }
 
     impl Fake {
@@ -289,6 +374,9 @@ mod tests {
                 captures: AtomicUsize::new(0),
                 asked: AtomicUsize::new(0),
                 last: Mutex::new(None),
+                inputs: Mutex::new(Vec::new()),
+                input_denied: Mutex::new(None),
+                input_asked: AtomicUsize::new(0),
             })
         }
     }
@@ -316,6 +404,18 @@ mod tests {
 
         fn request_permission(&self) {
             self.asked.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn input(&self, display: u32, input: &Input) -> Result<(), Denied> {
+            if let Some(why) = *self.input_denied.lock().unwrap() {
+                return Err(why);
+            }
+            self.inputs.lock().unwrap().push((display, input.clone()));
+            Ok(())
+        }
+
+        fn request_input_permission(&self) {
+            self.input_asked.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -459,6 +559,84 @@ mod tests {
         assert_eq!((denied["t"].as_str(), denied["reason"].as_str()), (Some("denied"), Some("permission")));
         assert!(next(&mut ws, Duration::from_millis(300)).await.is_none());
         assert_eq!(fake.asked.load(Ordering::SeqCst), 1);
+    }
+
+    async fn say(ws: &mut Client, v: serde_json::Value) {
+        ws.send(TM::Text(v.to_string().into())).await.unwrap();
+    }
+
+    /// 넣은 조작이 다 들어갈 때까지 — 소켓 너머라 보내고 바로 보면 아직 없다.
+    async fn inputs_after(fake: &Fake, n: usize) -> Vec<(u32, Input)> {
+        for _ in 0..100 {
+            if fake.inputs.lock().unwrap().len() >= n {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        fake.inputs.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn input_lands_in_order_on_the_shown_display_with_the_previous_buttons() {
+        let fake = Fake::new();
+        let mut ws = connect(Some(fake.clone()), fast()).await;
+        json_of(&mut ws).await;
+        say(&mut ws, json!({ "t": "pointer", "x": 0.25, "y": 0.5, "b": 1 })).await;
+        say(&mut ws, json!({ "t": "pointer", "x": 0.3, "y": 2.0, "b": 0, "m": 8 })).await;
+        say(&mut ws, json!({ "t": "scroll", "x": 0.5, "y": 0.5, "dy": -120 })).await;
+        say(&mut ws, json!({ "t": "key", "k": "Enter" })).await;
+        say(&mut ws, json!({ "t": "text", "s": "안녕 hi" })).await;
+        // 좌표 없는 누름·빈 글·모르는 종류는 버린다.
+        say(&mut ws, json!({ "t": "pointer", "b": 1 })).await;
+        say(&mut ws, json!({ "t": "text", "s": "" })).await;
+        say(&mut ws, json!({ "t": "warp" })).await;
+        say(&mut ws, json!({ "t": "key", "k": "Tab", "down": true })).await;
+        let got = inputs_after(&fake, 6).await;
+        assert_eq!(
+            got,
+            vec![
+                (9, Input::Pointer { x: 0.25, y: 0.5, buttons: 1, prev: 0, mods: 0 }),
+                (9, Input::Pointer { x: 0.3, y: 1.0, buttons: 0, prev: 1, mods: 8 }),
+                (9, Input::Scroll { x: 0.5, y: 0.5, dx: 0, dy: -120 }),
+                (9, Input::Key { code: "Enter".into(), down: None, mods: 0 }),
+                (9, Input::Text("안녕 hi".into())),
+                (9, Input::Key { code: "Tab".into(), down: Some(true), mods: 0 }),
+            ]
+        );
+        assert!(next(&mut ws, Duration::from_millis(200)).await.is_some_and(|m| matches!(m, TM::Binary(_))));
+    }
+
+    #[tokio::test]
+    async fn input_without_permission_is_told_once_and_asked_once() {
+        let fake = Fake::new();
+        *fake.input_denied.lock().unwrap() = Some(Denied::Permission);
+        let mut ws = connect(Some(fake.clone()), fast()).await;
+        json_of(&mut ws).await;
+        let first = next(&mut ws, Duration::from_secs(1)).await.unwrap();
+        ack(&mut ws, seq_of(&first)).await;
+        for _ in 0..3 {
+            say(&mut ws, json!({ "t": "key", "k": "Escape" })).await;
+        }
+        let told = json_of(&mut ws).await;
+        assert_eq!((told["t"].as_str(), told["ok"].as_bool(), told["reason"].as_str()), (Some("input"), Some(false), Some("permission")));
+        assert!(next(&mut ws, Duration::from_millis(300)).await.is_none(), "같은 사정을 또 알렸다");
+        assert_eq!(fake.input_asked.load(Ordering::SeqCst), 1);
+
+        *fake.input_denied.lock().unwrap() = None;
+        say(&mut ws, json!({ "t": "key", "k": "Escape" })).await;
+        assert_eq!(json_of(&mut ws).await["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn a_held_button_is_released_when_the_viewer_leaves() {
+        let fake = Fake::new();
+        let mut ws = connect(Some(fake.clone()), fast()).await;
+        json_of(&mut ws).await;
+        say(&mut ws, json!({ "t": "pointer", "x": 0.1, "y": 0.2, "b": 1 })).await;
+        inputs_after(&fake, 1).await;
+        ws.close(None).await.unwrap();
+        let got = inputs_after(&fake, 2).await;
+        assert_eq!(got.last().unwrap().1, Input::Pointer { x: 0.1, y: 0.2, buttons: 0, prev: 1, mods: 0 });
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -38,6 +39,12 @@ class ScreenDisplay {
   }
 }
 
+/// 그림 상자 안의 자리를 그 화면 안의 비율(0–1)로 — 조작 좌표는 그림 크기와 상관없이 이것으로 오간다.
+(double, double) screenFraction(Offset local, Size box) => (
+  box.width <= 0 ? 0.5 : (local.dx / box.width).clamp(0.0, 1.0),
+  box.height <= 0 ? 0.5 : (local.dy / box.height).clamp(0.0, 1.0),
+);
+
 /// 한 프레임 바이트에서 (seq, meta 끝) — 모자라면 null. 꼴은 `docs/screen-mirror.md`.
 (int, int)? screenFrameHead(Uint8List b) {
   if (b.length < 6) return null;
@@ -68,6 +75,9 @@ class ScreenSession extends ChangeNotifier {
 
   /// 서버가 못 뜬다고 한 까닭 — `permission`(맥 화면 기록 권한) · `unavailable`(화면 없는 기기·옛 판).
   String? denied;
+
+  /// 조작을 못 넣은 까닭 — `permission`(맥 손쉬운 사용 권한) · `unavailable`(옛 판·지원 안 하는 OS). 넣히면 null.
+  String? inputDenied;
 
   /// 관문이 거절한 까닭 같은, 다시 붙어도 안 풀리는 사정.
   String? note;
@@ -201,6 +211,8 @@ class ScreenSession extends ChangeNotifier {
       case 'denied':
         denied = m['reason'] as String? ?? 'unavailable';
         state = ScreenState.denied;
+      case 'input':
+        inputDenied = m['ok'] == true ? null : (m['reason'] as String? ?? 'unavailable');
       default:
         return;
     }
@@ -245,6 +257,39 @@ class ScreenSession extends ChangeNotifier {
     display = id;
     _sendJson({'t': 'tune', 'display': id});
     notifyListeners();
+  }
+
+  /// 지금 화면의 포인트 크기 — 끌기 거리를 그 기기의 휠 픽셀로 바꿀 때. 모르면 받은 그림 크기.
+  Size get displaySize {
+    for (final d in displays) {
+      if (d.id == display && d.width > 0 && d.height > 0) return Size(d.width.toDouble(), d.height.toDouble());
+    }
+    final i = image;
+    return i == null ? const Size(1, 1) : Size(i.width.toDouble(), i.height.toDouble());
+  }
+
+  /// 단추 상태(1 왼쪽·2 오른쪽)를 통째로 — 서버가 앞 상태와 견줘 누름·뗌을 가른다.
+  void pointer(double x, double y, int buttons) =>
+      _sendJson({'t': 'pointer', 'x': x, 'y': y, 'b': buttons});
+
+  void click(double x, double y, {bool right = false}) {
+    pointer(x, y, right ? 2 : 1);
+    pointer(x, y, 0);
+  }
+
+  /// 휠 — 그 기기 화면 포인트 단위, 양수 dy 는 위로 굴림.
+  void scroll(double x, double y, int dx, int dy) {
+    if (dx == 0 && dy == 0) return;
+    _sendJson({'t': 'scroll', 'x': x, 'y': y, 'dx': dx, 'dy': dy});
+  }
+
+  /// 이름 붙은 키(웹 `KeyboardEvent.code`)를 눌렀다 뗀다.
+  void key(String code) => _sendJson({'t': 'key', 'k': code});
+
+  /// 폰 자판이 조합을 끝낸 글을 통째로 — 한글을 키로 풀어 보내면 그 기기 입력기가 다시 조합해 어긋난다.
+  void typeText(String text) {
+    if (text.isEmpty) return;
+    _sendJson({'t': 'text', 's': text});
   }
 
   void _lost({Uri? refused}) {

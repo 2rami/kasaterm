@@ -480,3 +480,68 @@ class PlaceLine extends StatelessWidget {
     ),
   );
 }
+
+/// 옆으로 미는 키 줄 — 터미널 키 줄과 화면 거울 조작 줄.
+class KeyRow extends StatelessWidget {
+  const KeyRow({super.key, required this.keys});
+
+  final List<Widget> keys;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: 56,
+    child: ListView.separated(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      itemCount: keys.length,
+      separatorBuilder: (_, _) => const SizedBox(width: 8),
+      itemBuilder: (_, i) => keys[i],
+    ),
+  );
+}
+
+/// 키 줄의 단추 하나.
+class KeyChip extends StatelessWidget {
+  const KeyChip({
+    super.key,
+    this.label,
+    this.icon,
+    required this.onTap,
+    this.selected = false,
+  });
+
+  final String? label;
+  final IconData? icon;
+  final VoidCallback onTap;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // 쌍둥이 결 — 테 없이 톤 채움, 켜진 ctrl 은 강조 물·글자.
+    final ink = selected ? scheme.primary : scheme.onSurface;
+    return Material(
+      color: selected ? scheme.primary.withValues(alpha: 0.18) : scheme.surfaceContainerHigh,
+      shape: RoundedRectangleBorder(borderRadius: Look.corners),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: Look.corners,
+        child: Container(
+          constraints: const BoxConstraints(minWidth: Look.tap, minHeight: Look.tap),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          alignment: Alignment.center,
+          child: icon != null
+              ? Icon(icon, size: Look.iconSize, color: ink)
+              : Text(
+                  label!,
+                  style: TextStyle(
+                    fontFamily: 'TermMono',
+                    fontSize: Look.sub,
+                    color: ink,
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+}

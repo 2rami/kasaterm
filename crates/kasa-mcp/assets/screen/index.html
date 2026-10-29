@@ -28,6 +28,12 @@
     border: 1px solid rgba(255, 255, 255, .08); }
   #note b { display: block; margin-bottom: 6px; font-size: 14px; }
   #note p { margin: 0; color: #a6a7b0; }
+  #stage.control canvas { outline: 2px solid #4c8dff; outline-offset: -2px; cursor: default; }
+  #control[aria-pressed="true"] { background: rgba(76, 141, 255, .28); border-color: rgba(76, 141, 255, .6); }
+  #keys { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+  #inputNote { position: fixed; left: 10px; right: 10px; bottom: 10px; display: none; padding: 10px 12px; border-radius: 8px;
+    background: #2a1d1d; border: 1px solid rgba(255, 120, 120, .3); color: #f1c9c9; }
+  #inputNote.on { display: block; }
 </style>
 </head>
 <body>
@@ -35,8 +41,11 @@
 <div id="bar">
   <span id="state">연결 중</span>
   <select id="display" hidden title="화면 고르기"></select>
+  <button id="control" aria-pressed="false" title="그 기기를 누르고 치기 — 끄면 보기만">조작</button>
   <button id="fit" title="창에 맞추기 / 실제 크기">실제 크기</button>
 </div>
+<textarea id="keys" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+<div id="inputNote"></div>
 <div id="note"><div><b id="noteTitle"></b><p id="noteBody"></p></div></div>
 <script>
 (() => {
@@ -56,6 +65,15 @@
     unavailable: ['이 기기는 화면을 보낼 수 없어요', '화면이 없는 기기이거나 화면 거울이 없는 옛 판이에요.'],
   };
   let ws = null, retry = 1, display = null, frames = [], shown = null;
+  const controlButton = document.getElementById('control');
+  const keys = document.getElementById('keys');
+  const inputNote = document.getElementById('inputNote');
+  const INPUT_NOTES = {
+    permission: '그 기기의 카사텀에 손쉬운 사용 권한이 없어 조작이 안 들어가요. 그 기기에서 시스템 설정 › 개인정보 보호 및 보안 › 손쉬운 사용에서 kasaterm 을 켜 주세요. 켜면 바로 먹어요.',
+    unavailable: '이 기기는 조작을 받을 수 없어요. 조작이 없는 옛 판이거나 지원하지 않는 OS 예요.',
+  };
+  let controlling = false;
+  const send = m => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
 
   // 창 픽셀만큼만 받는다 — 더 크게 받아 봐야 관문 길만 무거워진다.
   const want = () => {
@@ -109,6 +127,10 @@
         o.selected = d.id === m.display;
         return o;
       }));
+    } else if (m.t === 'input') {
+      const text = m.ok ? null : INPUT_NOTES[m.reason] || INPUT_NOTES.unavailable;
+      inputNote.textContent = text || '';
+      inputNote.classList.toggle('on', !!text);
     } else if (m.t === 'denied') {
       showNote(m.reason);
       say(m.reason === 'permission' ? '권한 없음' : '보낼 수 없음');
@@ -157,6 +179,67 @@
   pickDisplay.onchange = () => {
     display = Number(pickDisplay.value);
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'tune', display }));
+  };
+  // 조작 — 좌표는 그림 안 비율, 단추는 e.buttons(1 왼쪽·2 오른쪽·4 가운데) 그대로, 휠은 아래가 양수인 브라우저와 반대.
+  const at = e => {
+    const r = canvas.getBoundingClientRect();
+    const clamp = v => Math.min(1, Math.max(0, v));
+    return { x: clamp((e.clientX - r.left) / Math.max(1, r.width)), y: clamp((e.clientY - r.top) / Math.max(1, r.height)) };
+  };
+  const mods = e => (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+  let pendingMove = null;
+  const pointer = e => {
+    if (!controlling) return;
+    e.preventDefault();
+    const p = at(e);
+    const m = { t: 'pointer', x: p.x, y: p.y, b: e.buttons & 7, m: mods(e) };
+    // 움직임은 한 화면 틀에 하나 — 누름·뗌은 바로.
+    if (e.type !== 'pointermove') { pendingMove = null; send(m); return; }
+    if (!pendingMove) requestAnimationFrame(() => { if (pendingMove) send(pendingMove); pendingMove = null; });
+    pendingMove = m;
+  };
+  canvas.addEventListener('pointerdown', e => {
+    pointer(e);
+    if (!controlling) return;
+    keys.focus();
+    // 그림 밖에서 놓아도 뗌이 오게 — 잡지 못해도 누름은 이미 갔다.
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  canvas.addEventListener('pointermove', pointer);
+  canvas.addEventListener('pointerup', pointer);
+  canvas.addEventListener('contextmenu', e => { if (controlling) e.preventDefault(); });
+  canvas.addEventListener('wheel', e => {
+    if (!controlling) return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
+    const p = at(e);
+    send({ t: 'scroll', x: p.x, y: p.y, dx: Math.round(-e.deltaX * unit), dy: Math.round(-e.deltaY * unit) });
+  }, { passive: false });
+  // 글자는 이 기기 입력기가 조합을 끝낸 글째 보낸다. 조합 밖의 이름 붙은 키와 단축키만 키로.
+  const NAMED = new Set(['Enter', 'NumpadEnter', 'Tab', 'Backspace', 'Escape', 'Delete', 'Home', 'End', 'PageUp', 'PageDown',
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12']);
+  keys.addEventListener('keydown', e => {
+    if (!controlling || e.isComposing || e.keyCode === 229) return;
+    const shortcut = e.ctrlKey || e.metaKey || e.altKey;
+    if (!NAMED.has(e.code) && !(shortcut && e.code)) return;
+    e.preventDefault();
+    send({ t: 'key', k: e.code, m: mods(e) });
+  });
+  keys.addEventListener('input', e => {
+    if (!controlling || e.isComposing) return;
+    if (keys.value) send({ t: 'text', s: keys.value });
+    keys.value = '';
+  });
+  // 칸에 남은 글을 보낸다 — 조합 끝과 input 의 차례가 엔진마다 달라(웹킷은 끝 뒤에 input 이 한 번 더 온다) 두 번 가지 않게.
+  keys.addEventListener('compositionend', () => {
+    if (controlling && keys.value) send({ t: 'text', s: keys.value });
+    keys.value = '';
+  });
+  controlButton.onclick = () => {
+    controlling = !controlling;
+    controlButton.setAttribute('aria-pressed', String(controlling));
+    stage.classList.toggle('control', controlling);
+    if (controlling) keys.focus(); else { keys.blur(); inputNote.classList.remove('on'); }
   };
   fitButton.onclick = () => {
     const actual = stage.classList.toggle('actual');

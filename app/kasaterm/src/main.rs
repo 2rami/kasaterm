@@ -55,6 +55,7 @@ mod rich_document;
 mod vault;
 mod vault_graph;
 mod screen_capture;
+mod screen_input;
 mod screenread;
 mod session;
 mod bootstrap;

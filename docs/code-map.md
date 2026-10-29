@@ -83,8 +83,8 @@
   `collab`(보드·tell) · `migrate` · `claude_account` · `schedule`·`tasks` · `files` · `git_api` · `settings` · `phone` ·
   `machine_proxy` 등. 상세 지도는 `http.rs` 머리말이 정본
 - 기기 화면 거울 — `kasa-mcp/src/screen_mirror.rs`(소켓·ack 창 2장·뜨는 박자, 앱이 꽂는 `Source`)·`http/screen.rs`(`/screen` 보기
-  페이지·`/screen/ws`)·`assets/screen/index.html`(PC 웹 칸·브라우저 보기), 앱 `screen_capture.rs`(macOS `CGDisplayCreateImage`·
-  Windows `StretchBlt` 줄여 뜨기·JPEG). PC 입구는 Info 「다른 기계」 메뉴 「화면 거울」(`machinescol.rs open_screen_mirror`),
+  페이지·`/screen/ws`)·`assets/screen/index.html`(PC 웹 칸·브라우저 보기·조작), 앱 `screen_capture.rs`(macOS `CGDisplayCreateImage`·
+  Windows `StretchBlt` 줄여 뜨기·JPEG)·`screen_input.rs`(조작 넣기 — macOS CGEvent·손쉬운 사용 권한, Windows `SendInput`). PC 입구는 Info 「다른 기계」 메뉴 「화면 거울」(`machinescol.rs open_screen_mirror`),
   폰은 `mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`(허브 기기 머리글 모니터 단추). 계약 [screen-mirror.md](screen-mirror.md)
 - `kasa-mcp/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.
 - `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
