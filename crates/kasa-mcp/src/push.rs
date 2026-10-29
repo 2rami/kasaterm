@@ -4,7 +4,7 @@
 //! 재료 셋: ①폰이 `POST /term/push-token` 으로 맡긴 기기 토큰(`push_tokens.json`,
 //! 0600) ②애플 푸시 열쇠(`~/.config/kasaterm/apns/key.json` — key_id·team_id·p8,
 //! 앱스토어 API 열쇠와 **다른** 열쇠다) ③상태 변화 감시 루프(`push_loop`) — 폰이 읽는
-//! `/term/panes` 행(이 기계 + 명부 기계 캐시)을 4초마다 대조해 「대기로 들어감」
+//! `/term/panes` 행(이 기계 + 명부 기계 캐시)을 4초마다 대조해 「승인·질문 대기로 들어감」
 //! 「바쁨→끝냄」 순간에만 쏜다. 상태를 그대로 폴링해 쏘면 같은 대기가 매번 온다.
 //!
 //! APNs 는 HTTP/2 + ES256 JWT(`iss`=팀, `kid`=열쇠) 를 요구한다. 서명은 ring 으로
@@ -364,8 +364,23 @@ pub async fn send_to(env: &str, token: &str, payload: &Value, collapse: &str) ->
         .map_err(|(status, text)| (status.as_u16(), text))
 }
 
+/// 폰을 울리는 대기는 사람이 골라야 하는 것(승인·질문)뿐이다 — 답 기다림·오래 쉼까지 울리니
+/// 끝냄·승인 알림이 묻혔다(2026-10-29 「done일때만 오게, 선택해야되는거나」).
+fn needs_choice(kind: &str) -> bool {
+    matches!(kind, "permission" | "question")
+}
+
+/// 쪽지 중 폰을 울릴 것 — 끝냄·실패·고를 것·브라우저에서 사람 손 기다림(`docs/chrome-mirror.md`),
+/// 그리고 「이 폰」으로 보낸 페이지(울리지 않으면 종 목록을 열기 전엔 못 본다). 나머지는 종 목록에만 남는다.
+fn note_rings(kind: &str) -> bool {
+    matches!(kind, "done_ok" | "done_fail" | "browser" | "link") || needs_choice(kind)
+}
+
 /// 쪽지가 들어왔을 때 — `notes::add` 뒤에서 부른다.
 pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
+    if !note_rings(kind) {
+        return;
+    }
     let alert = note_alert(character, kind, summary, pane, url);
     tokio::spawn(async move {
         send(&alert).await;
@@ -374,6 +389,9 @@ pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str, url:
 
 /// 런타임 밖(GUI 스레드)에서 — `open` 이 폰으로 갈 때. 자기 런타임을 하나 세워 보낸다.
 pub fn note_arrived_blocking(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
+    if !note_rings(kind) {
+        return;
+    }
     let alert = note_alert(character, kind, summary, pane, url);
     if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
         rt.block_on(send(&alert));
@@ -503,13 +521,11 @@ pub async fn push_loop() {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| crate::character::slug_for_any(name));
-            let alert = if cur.waiting && !prev.as_ref().is_some_and(|p| p.waiting && p.kind == cur.kind) {
-                let head = match cur.kind.as_str() {
-                    "permission" => "승인 기다림",
-                    "question" => "질문 기다림",
-                    "idle" => "오래 기다림",
-                    _ => "답 기다림",
-                };
+            let alert = if cur.waiting
+                && needs_choice(&cur.kind)
+                && !prev.as_ref().is_some_and(|p| p.waiting && p.kind == cur.kind)
+            {
+                let head = if cur.kind == "permission" { "승인 기다림" } else { "질문 기다림" };
                 Some(Alert {
                     title: format!("{name} · {head}{where_}"),
                     body: title_of(),
@@ -564,6 +580,17 @@ mod tests {
         let local = super::notification_thread(&alert);
         alert.machine = Some("macbook".into());
         assert_ne!(local, super::notification_thread(&alert));
+    }
+
+    #[test]
+    fn only_done_and_choices_ring() {
+        for kind in ["done_ok", "done_fail", "permission", "question", "browser", "link"] {
+            assert!(super::note_rings(kind), "{kind}");
+        }
+        for kind in ["waiting", "idle", "dead", "note", ""] {
+            assert!(!super::note_rings(kind), "{kind}");
+        }
+        assert!(!super::needs_choice("idle"));
     }
 
     /// 진짜 열쇠가 있는 기계에서만 — ring 이 애플 .p8 을 읽고 서명하는지.

@@ -109,6 +109,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
   final _selection = GlobalKey<SelectionAreaState>();
   final _selectionFocus = FocusNode(canRequestFocus: false, skipTraversal: true);
 
+  /// 대화 쪽 글 고르기 — 터미널 쪽과 같은 손맛·같은 까닭으로 초점을 잡지 않는다.
+  final _chatSelection = GlobalKey<SelectionAreaState>();
+  final _chatSelectionFocus = FocusNode(canRequestFocus: false, skipTraversal: true);
+
   /// 답장·키를 보낼 때마다 올린다 — 화면이 맨 아래로 내려간다.
   int _bottomTick = 0;
 
@@ -117,8 +121,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
     setState(() => _bottomTick++);
   }
 
-  void _dropSelection() =>
-      _selection.currentState?.selectableRegion.clearSelection();
+  void _dropSelection() {
+    _selection.currentState?.selectableRegion.clearSelection();
+    _chatSelection.currentState?.selectableRegion.clearSelection();
+  }
 
   void _focusMoved() {
     if (_inputFocus.hasFocus || _chatFocus.hasFocus) _dropSelection();
@@ -229,6 +235,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _chatInput.dispose();
     _chatFocus.dispose();
     _selectionFocus.dispose();
+    _chatSelectionFocus.dispose();
     _pages.dispose();
     super.dispose();
   }
@@ -755,16 +762,25 @@ class _TerminalScreenState extends State<TerminalScreen> {
                               1,
                               chat ? 1 : 0,
                               WeatherScene(
-                                child: ConversationView(
-                                  server: widget.server,
-                                  conversation: _conversation,
-                                  pane: pane,
-                                  session: s,
-                                  accent: accent,
-                                  onTerminal: _showTerminal,
-                                  bottomTick: _bottomTick,
-                                  active: _paging || chat,
-                                  draft: _chatInput,
+                                child: SelectionArea(
+                                  key: _chatSelection,
+                                  focusNode: _chatSelectionFocus,
+                                  contextMenuBuilder: gridSelectionMenu,
+                                  child: RawGestureDetector(
+                                    behavior: HitTestBehavior.translucent,
+                                    gestures: _swipeGestures,
+                                    child: ConversationView(
+                                      server: widget.server,
+                                      conversation: _conversation,
+                                      pane: pane,
+                                      session: s,
+                                      accent: accent,
+                                      onTerminal: _showTerminal,
+                                      bottomTick: _bottomTick,
+                                      active: _paging || chat,
+                                      draft: _chatInput,
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),

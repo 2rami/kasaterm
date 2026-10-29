@@ -342,6 +342,21 @@ void main() {
     expect(who('사람 말'), isNull);
   });
 
+  test('이름 없이 맡긴 일은 선생님 말풍선이 아니다', () {
+    String? who(String raw) {
+      final m = relayedMessage(stripMeta(raw));
+      return m == null ? null : '${m.name}|${m.via}|${m.body}';
+    }
+
+    const hint = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed)으로 한 번 보고해 주세요.";
+    const start = 'Kasaterm: read `kasaterm-cli guide TOPIC` once when needed: collab.';
+    expect(who('폰 알림 고쳐\n\n둘째 문단\n\n$start\n\n$hint'), '카사텀|맡긴 일|폰 알림 고쳐\n\n둘째 문단');
+    expect(who('폰 알림 고쳐\n\n$hint'), '카사텀|맡긴 일|폰 알림 고쳐');
+    expect(who('⟦아로나⟧ 일\n\n$hint'), startsWith('아로나|쪽지|'));
+    expect(who('$hint\n\n사람 말'), isNull);
+    expect(who(hint), isNull);
+  });
+
   test('화면의 선택 메뉴 — ❯ 커서가 있어야 메뉴', () {
     final permission = parsePromptMenu([
       ' Bash command',

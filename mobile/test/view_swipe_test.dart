@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/screens/shell_blocks_view.dart';
@@ -279,6 +281,81 @@ void main() {
     expect(tester.widget<TextField>(chatField).focusNode!.hasFocus, isTrue);
     await _close(tester);
   });
+
+  /// 대화 쪽에서 고른 글 — 말풍선 글 칸마다 고른 조각을 모은다.
+  String chatSelected(WidgetTester tester) => [
+    for (final p in tester.renderObjectList<RenderParagraph>(
+      find.descendant(
+        of: find.byType(ConversationView, skipOffstage: false),
+        matching: find.byType(RichText, skipOffstage: false),
+        skipOffstage: false,
+      ),
+    ))
+      for (final s in p.selections)
+        p.text.toPlainText().substring(s.start, s.end),
+  ].join();
+
+  testWidgets('대화 글도 길게 눌러 고르고 메뉴의 복사로 담는다 — 입력칸 초점은 그대로', (tester) async {
+    String? clip;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clip = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await _open(tester, view: PaneView.chat, transcript: _transcript);
+    await tester.pump(const Duration(milliseconds: 100));
+    final chatField = find.descendant(
+      of: find.byType(ChatComposer),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(chatField, '쓰던 글');
+    await tester.pump();
+
+    final said = find.textContaining('이렇게 돌려요', findRichText: true);
+    final g = await tester.startGesture(tester.getTopLeft(said) + const Offset(12, 10));
+    await tester.pump(const Duration(milliseconds: 600));
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(chatSelected(tester), '이렇게');
+    expect(find.text('복사'), findsOneWidget);
+    expect(find.text('전체 선택'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(chatField).focusNode!.hasFocus,
+      isTrue,
+      reason: '고르기가 초점을 가져가면 자판이 내려간다',
+    );
+
+    await tester.tap(find.text('복사'));
+    await tester.pump();
+    expect(clip, '이렇게');
+    expect(find.text('복사했어요'), findsOneWidget);
+    await _close(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    testWidgets('대화 글을 고른 채 가로로 밀어도 쪽이 넘어가고 고름은 걷힌다 ($platform)', (tester) async {
+      await _open(tester, view: PaneView.chat, transcript: _transcript);
+      await tester.pump(const Duration(milliseconds: 100));
+      final said = find.textContaining('이렇게 돌려요', findRichText: true);
+      await tester.longPressAt(tester.getTopLeft(said) + const Offset(12, 10));
+      await tester.pumpAndSettle();
+      expect(chatSelected(tester), isNotEmpty);
+      await _swipe(tester, const Offset(100, 400), const Offset(220, 0));
+      expect(_page(tester), 0);
+      expect(chatSelected(tester), isEmpty);
+      await _close(tester);
+    }, variant: TargetPlatformVariant.only(platform));
+  }
 
   testWidgets('대화 목록의 빈 곳을 누르면 자판이 내려간다', (tester) async {
     await _open(tester, view: PaneView.chat);

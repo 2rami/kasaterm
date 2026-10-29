@@ -661,7 +661,26 @@ bool isInjection(String text) => _injection.hasMatch(text);
   if (t.startsWith('[쪽지 확인 못 함]')) {
     return (name: '카사텀', via: '쪽지 확인 못 함', body: t.substring('[쪽지 확인 못 함]'.length).trim());
   }
-  return null;
+  final brief = assignedBrief(t);
+  return brief == null ? null : (name: '카사텀', via: '맡긴 일', body: brief);
+}
+
+/// `summon`·제목 붙은 `tell` 이 새 일 끝에 다는 완료 보고 안내로 끝나는 말이면 그 안내 문단을 걷은 본문 —
+/// 사람이 친 말엔 없다. 칸 밖 프로그램(나쵸 서버)은 `⟦이름⟧` 없이 맡겨, 그 일이 사람 말풍선에
+/// 담겼다. 데스크톱 `chat_view::parse::assigned_brief` 와 같은 규칙.
+String? assignedBrief(String text) {
+  final cut = text.lastIndexOf('\n\n');
+  if (cut < 0 || !text.startsWith('끝나면 `kasaterm-cli done ', cut + 2)) {
+    return null;
+  }
+  var body = text.substring(0, cut);
+  final start = body.lastIndexOf('\n\n');
+  if (start >= 0 &&
+      body.startsWith('Kasaterm: read `kasaterm-cli guide', start + 2)) {
+    body = body.substring(0, start);
+  }
+  body = body.trim();
+  return body.isEmpty ? null : body;
 }
 
 /// `<teammate-message teammate_id="…">본문</teammate-message>` 이 턴 전체일 때만.

@@ -589,7 +589,24 @@ pub(crate) fn relayed(text: &str) -> Option<(Sender, String)> {
     if let Some(body) = t.strip_prefix("[쪽지 확인 못 함]") {
         return Some((sender("카사텀", "쪽지 확인 못 함"), body.trim().to_string()));
     }
-    None
+    assigned_brief(t).map(|body| (sender("카사텀", "맡긴 일"), body))
+}
+
+/// `summon`·제목 붙은 `tell` 이 새 일 끝에 다는 완료 보고 안내(cli `BRIEF_DONE_HINT`)로 끝나는 말 — 사람이
+/// 친 말엔 없다. 칸 밖 프로그램(나쵸 서버)은 `KASATERM_CHARACTER` 가 없어 `⟦이름⟧` 없이 맡겨, 그 일이
+/// 사람 말풍선에 담겼다(2026-10-29 「내가 보낸 거 아닌데」). 본문은 뒤에 붙은 안내 문단을 걷은 것.
+fn assigned_brief(text: &str) -> Option<String> {
+    let (mut body, hint) = text.rsplit_once("\n\n")?;
+    if !hint.starts_with("끝나면 `kasaterm-cli done ") {
+        return None;
+    }
+    if let Some((head, start)) = body.rsplit_once("\n\n") {
+        if start.starts_with("Kasaterm: read `kasaterm-cli guide") {
+            body = head;
+        }
+    }
+    let body = body.trim();
+    (!body.is_empty()).then(|| body.to_string())
 }
 
 /// `<teammate-message teammate_id="…">본문</teammate-message>` 이 턴 전체일 때만.
@@ -1099,6 +1116,21 @@ mod tests {
         assert_eq!(who[3], None, "괄호 속 칸 번호가 없으면 사람이 친 글이다");
         assert_eq!(who[4], None);
         assert_eq!(who[5], Some(("%1", "실패 보고", "CI 깨짐")));
+    }
+
+    #[test]
+    fn unmarked_briefs_are_not_the_persons_words() {
+        let hint = "끝나면 `kasaterm-cli done succeeded '끝난 것·남은 것'`(못 끝냈으면 failed)으로 한 번 보고해 주세요.";
+        let start = "Kasaterm: read `kasaterm-cli guide TOPIC` once when needed: collab.";
+        let brief = format!("폰 알림 고쳐\n\n둘째 문단\n\n{start}\n\n{hint}");
+        assert_eq!(
+            relayed(&brief).map(|(s, b)| (s.name, s.via, b)),
+            Some(("카사텀".into(), "맡긴 일", "폰 알림 고쳐\n\n둘째 문단".into()))
+        );
+        assert_eq!(relayed(&format!("폰 알림 고쳐\n\n{hint}")).map(|(_, b)| b).as_deref(), Some("폰 알림 고쳐"));
+        assert!(relayed(&format!("⟦아로나⟧ 일\n\n{hint}")).is_some_and(|(s, _)| s.name == "아로나"));
+        assert!(relayed(&format!("{hint}\n\n사람 말")).is_none());
+        assert!(relayed(hint).is_none());
     }
 
     #[test]

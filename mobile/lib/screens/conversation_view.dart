@@ -764,20 +764,17 @@ class _Bubble extends StatelessWidget {
                 ),
       ],
     );
-    final box = GestureDetector(
-      onLongPress: text.isEmpty ? null : () => _copy(context, text),
-      child: SpeechBubble(
-        mine: mine,
-        maxWidth: maxWidth,
-        // 예약은 아직 안 간 말 — 강조색 대신 주의색 옅은 바탕(경고 띠와 같은 옅기).
-        fill: queued
-            ? Color.alphaBlend(
-                StatusStyle.attention.withValues(alpha: Look.dangerTint),
-                theme.scaffoldBackgroundColor,
-              )
-            : null,
-        child: content,
-      ),
+    final box = SpeechBubble(
+      mine: mine,
+      maxWidth: maxWidth,
+      // 예약은 아직 안 간 말 — 강조색 대신 주의색 옅은 바탕(경고 띠와 같은 옅기).
+      fill: queued
+          ? Color.alphaBlend(
+              StatusStyle.attention.withValues(alpha: Look.dangerTint),
+              theme.scaffoldBackgroundColor,
+            )
+          : null,
+      child: content,
     );
     final clock = !tail
         ? null
@@ -867,15 +864,6 @@ class _Bubble extends StatelessWidget {
 
   static String _clock(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-}
-
-Future<void> _copy(BuildContext context, String text) async {
-  await Clipboard.setData(ClipboardData(text: text));
-  HapticFeedback.lightImpact();
-  if (!context.mounted) return;
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(const SnackBar(content: Text('복사했어요')));
 }
 
 /// 얼굴 없는 발신자(학생끼리 쪽지) — 이름 첫 글자.
