@@ -11,90 +11,22 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod policy;
+use policy::{step, Act, Phase, Sense};
+
 const TICK: Duration = Duration::from_secs(1);
-/// 일이 이만큼 멎어야 끝난 것으로 본다 — 턴 사이 잠깐 쉬거나 다른 학생의 쪽지를 기다리는 사이에 막음을
-/// 풀었다 걸거나, 덮인 채 하던 일 가운데서 재우지 않게.
-const QUIET_GRACE: Duration = Duration::from_secs(60);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 const BATTERY_FLOOR: u8 = 20;
 pub(crate) const DEFAULT_MINUTES: u64 = 30;
 pub(crate) const MINUTE_CHOICES: [u64; 3] = [10, 30, 60];
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Phase {
-    Idle,
-    Armed { quiet_since: Option<Instant> },
-    Away { since: Instant, quiet_since: Option<Instant> },
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Sense {
-    /// 켜져 있고, sudo 가 허락하고, 전원·열이 괜찮다.
-    allowed: bool,
-    /// 이 기기 칸에서 학생이 일하거나, 사람이 신청한 이사가 예약·실행 중이다.
-    busy: bool,
-    /// 덮였고 외부 모니터도 없다.
-    departed: bool,
-    cap: Duration,
-    now: Instant,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Act {
-    Arm,
-    Disarm,
-    Sleep,
-}
-
-fn step(phase: Phase, s: Sense) -> (Phase, Option<Act>) {
-    let quiet = |since: Option<Instant>| if s.busy { None } else { Some(since.unwrap_or(s.now)) };
-    let rested = |since: Option<Instant>| since.is_some_and(|t| s.now.duration_since(t) >= QUIET_GRACE);
-    match phase {
-        Phase::Idle => {
-            // 덮인 채 잠깐 깬 것(Power Nap)에 다시 걸면 가방 속에서 상한만큼 깨어 있게 된다.
-            if s.allowed && s.busy && !s.departed {
-                (Phase::Armed { quiet_since: None }, Some(Act::Arm))
-            } else {
-                (Phase::Idle, None)
-            }
-        }
-        Phase::Armed { quiet_since } => {
-            if s.departed {
-                return if s.allowed {
-                    (Phase::Away { since: s.now, quiet_since: quiet(quiet_since) }, None)
-                } else {
-                    (Phase::Idle, Some(Act::Sleep))
-                };
-            }
-            if !s.allowed {
-                return (Phase::Idle, Some(Act::Disarm));
-            }
-            let quiet_since = quiet(quiet_since);
-            if rested(quiet_since) {
-                (Phase::Idle, Some(Act::Disarm))
-            } else {
-                (Phase::Armed { quiet_since }, None)
-            }
-        }
-        Phase::Away { since, quiet_since } => {
-            let quiet_since = quiet(quiet_since);
-            if !s.departed {
-                return (Phase::Armed { quiet_since }, None);
-            }
-            if !s.allowed || s.now.duration_since(since) >= s.cap || rested(quiet_since) {
-                (Phase::Idle, Some(Act::Sleep))
-            } else {
-                (Phase::Away { since, quiet_since }, None)
-            }
-        }
-    }
-}
 
 fn phase_name(p: Phase) -> &'static str {
     match p {
         Phase::Idle => "Idle",
         Phase::Armed { .. } => "Armed",
         Phase::Away { .. } => "Away",
+        Phase::Disarming { .. } => "Disarming",
+        Phase::Sleeping { .. } => "Sleeping",
     }
 }
 
@@ -201,6 +133,8 @@ pub(crate) fn status_line() -> Option<&'static str> {
         Phase::Idle => None,
         Phase::Armed { .. } => Some("학생이 일하는 중이라 잠자기를 막아 두었어요"),
         Phase::Away { .. } => Some("덮인 채 학생이 하던 일을 마치는 중이에요"),
+        Phase::Disarming { .. } => Some("잠자기 막음을 해제하는 중이에요"),
+        Phase::Sleeping { .. } => Some("덮개를 열 때까지 잠자기를 유지해요"),
     })
 }
 
@@ -224,9 +158,12 @@ fn clear_heartbeat() {
     }
 }
 
-/// 막음을 풀고 박동을 지운다. 못 풀면 박동을 남겨 감시가 다시 시도하게 한다.
-fn release() -> anyhow::Result<()> {
+/// 잠자기 요청까지 실패하면 박동을 남겨 앱 밖 감시도 다시 시도하게 한다.
+fn release(sleep: bool) -> anyhow::Result<()> {
     kasa_socket::lid_away::set_sleep_disabled(false)?;
+    if sleep {
+        kasa_socket::lid_away::sleep_now()?;
+    }
     clear_heartbeat();
     Ok(())
 }
@@ -236,7 +173,7 @@ pub(crate) fn shutdown() {
     STATE.with(|s| {
         let mut st = s.borrow_mut();
         if st.phase != Phase::Idle {
-            if let Err(e) = release() {
+            if let Err(e) = release(false) {
                 eprintln!("[lid-away] 끝내며 잠자기 막음을 못 풀었다: {e:#}");
             }
             st.phase = Phase::Idle;
@@ -258,7 +195,7 @@ impl App {
                 st.booted = true;
                 // 지난 실행이 막아 둔 채 죽었다.
                 if kasa_socket::lid_away::heartbeat_path().is_some_and(|hb| hb.exists()) {
-                    if let Err(e) = release() {
+                    if let Err(e) = release(false) {
                         eprintln!("[lid-away] 지난 실행의 잠자기 막음을 못 풀었다: {e:#}");
                     }
                 }
@@ -332,7 +269,7 @@ impl App {
         }
         STATE.with(|s| {
             let mut st = s.borrow_mut();
-            if st.phase != Phase::Idle && st.beat_at.is_none_or(|t| now.duration_since(t) >= HEARTBEAT_EVERY) {
+            if st.phase.keeps_awake() && st.beat_at.is_none_or(|t| now.duration_since(t) >= HEARTBEAT_EVERY) {
                 write_heartbeat();
                 st.beat_at = Some(now);
             }
@@ -354,20 +291,18 @@ impl App {
     }
 
     fn lid_away_release(&mut self, sleep: bool) {
-        if let Err(e) = release() {
-            eprintln!("[lid-away] 잠자기 막음을 못 풀었다: {e:#}");
-            self.set_toast(format!("덮어도 마저 하기: 잠자기 막음을 못 풀었어요 — 터미널에서 sudo pmset -a disablesleep 0 ({e:#})"));
+        if let Err(e) = release(sleep) {
+            eprintln!("[lid-away] 잠자기 전환 실패, 다시 시도한다: {e:#}");
+            self.set_toast("덮어도 마저 하기: 잠자기 전환에 실패해 다시 시도하고 있어요".into());
+            return;
         }
         STATE.with(|s| {
             let mut st = s.borrow_mut();
             st.beat_at = None;
-            hold_app_nap_off(&mut st, false);
+            st.phase = st.phase.released();
+            let watching = st.phase != Phase::Idle;
+            hold_app_nap_off(&mut st, watching);
         });
-        if sleep {
-            if let Err(e) = kasa_socket::lid_away::sleep_now() {
-                eprintln!("[lid-away] 재우지 못했다: {e:#}");
-            }
-        }
     }
 }
 
@@ -427,7 +362,7 @@ mod probe {
 
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
-        fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+        fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
         fn CGDisplayIsBuiltin(display: u32) -> u32;
     }
 
@@ -477,7 +412,8 @@ mod probe {
         }
         let mut ids = [0u32; 16];
         let mut count = 0u32;
-        if unsafe { CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) } != 0 {
+        // Online 목록은 뽑은 뒤 잠든 모니터도 남겨 가방 속 덮개를 책상으로 오판한다.
+        if unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) } != 0 {
             return false;
         }
         ids[..count as usize].iter().any(|id| unsafe { CGDisplayIsBuiltin(*id) } == 0)
@@ -544,88 +480,6 @@ mod probe {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sense(now: Instant) -> Sense {
-        Sense { allowed: true, busy: false, departed: false, cap: Duration::from_secs(30 * 60), now }
-    }
-
-    #[test]
-    fn arms_only_when_work_needs_it_and_sudo_allows() {
-        let t = Instant::now();
-        assert_eq!(step(Phase::Idle, sense(t)), (Phase::Idle, None));
-        let busy = Sense { busy: true, ..sense(t) };
-        assert_eq!(step(Phase::Idle, busy), (Phase::Armed { quiet_since: None }, Some(Act::Arm)));
-        assert_eq!(step(Phase::Idle, Sense { allowed: false, ..busy }), (Phase::Idle, None));
-    }
-
-    #[test]
-    fn a_dark_wake_with_the_lid_closed_does_not_arm_again() {
-        let s = Sense { busy: true, departed: true, ..sense(Instant::now()) };
-        assert_eq!(step(Phase::Idle, s), (Phase::Idle, None));
-    }
-
-    #[test]
-    fn a_short_pause_between_turns_keeps_the_mac_awake() {
-        let t = Instant::now();
-        let (p, act) = step(Phase::Armed { quiet_since: None }, sense(t));
-        assert_eq!(act, None);
-        let (p, act) = step(p, sense(t + QUIET_GRACE - Duration::from_secs(1)));
-        assert_eq!(act, None);
-        let (p, _) = step(p, Sense { busy: true, ..sense(t + QUIET_GRACE) });
-        assert_eq!(p, Phase::Armed { quiet_since: None });
-        let (p, _) = step(p, sense(t + QUIET_GRACE * 2));
-        assert_eq!(step(p, sense(t + QUIET_GRACE * 3 + Duration::from_secs(1))), (Phase::Idle, Some(Act::Disarm)));
-    }
-
-    #[test]
-    fn closing_the_lid_waits_for_the_work_to_finish_then_sleeps() {
-        let t = Instant::now();
-        let closed = |d: u64, busy| Sense { departed: true, busy, ..sense(t + Duration::from_secs(d)) };
-        let (p, act) = step(Phase::Armed { quiet_since: None }, closed(0, true));
-        assert_eq!((p, act), (Phase::Away { since: t, quiet_since: None }, None), "덮여도 옮기지 않고 깨어 있는다");
-        let (p, act) = step(p, closed(600, true));
-        assert_eq!(act, None, "일하는 동안은 계속 깨어 있다");
-        let (p, act) = step(p, closed(700, false));
-        assert_eq!(act, None, "턴이 막 끝났으면 다음 쪽지를 잠깐 기다린다");
-        let (p, act) = step(p, closed(730, true));
-        assert_eq!((p, act), (Phase::Away { since: t, quiet_since: None }, None), "그 사이 다시 일하면 처음부터 기다린다");
-        let (p, _) = step(p, closed(800, false));
-        assert_eq!(step(p, closed(800 + QUIET_GRACE.as_secs(), false)), (Phase::Idle, Some(Act::Sleep)));
-    }
-
-    #[test]
-    fn work_that_already_ended_before_the_lid_closed_sleeps_after_the_rest_of_the_pause() {
-        let t = Instant::now();
-        let (p, _) = step(Phase::Armed { quiet_since: None }, sense(t));
-        let (p, act) = step(p, Sense { departed: true, ..sense(t + Duration::from_secs(50)) });
-        assert_eq!(act, None);
-        assert_eq!(step(p, Sense { departed: true, ..sense(t + QUIET_GRACE) }), (Phase::Idle, Some(Act::Sleep)));
-    }
-
-    #[test]
-    fn opening_the_lid_keeps_the_block_and_stops_counting_toward_sleep() {
-        let t = Instant::now();
-        let away = Phase::Away { since: t, quiet_since: None };
-        assert_eq!(step(away, Sense { busy: true, ..sense(t) }), (Phase::Armed { quiet_since: None }, None));
-    }
-
-    #[test]
-    fn the_cap_sleeps_even_while_students_still_work() {
-        let t = Instant::now();
-        let away = Phase::Away { since: t, quiet_since: None };
-        let at = |d: Duration| Sense { departed: true, busy: true, ..sense(t + d) };
-        let cap = Duration::from_secs(30 * 60);
-        assert_eq!(step(away, at(cap - Duration::from_secs(1))).1, None);
-        assert_eq!(step(away, at(cap)), (Phase::Idle, Some(Act::Sleep)));
-    }
-
-    #[test]
-    fn low_battery_or_heat_at_the_lid_goes_straight_to_sleep() {
-        let t = Instant::now();
-        let s = Sense { allowed: false, departed: true, busy: true, ..sense(t) };
-        assert_eq!(step(Phase::Armed { quiet_since: None }, s), (Phase::Idle, Some(Act::Sleep)));
-        assert_eq!(step(Phase::Away { since: t, quiet_since: None }, s), (Phase::Idle, Some(Act::Sleep)));
-    }
 
     #[test]
     fn a_machine_chosen_for_the_old_move_keeps_the_feature_on() {
