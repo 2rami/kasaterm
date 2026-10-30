@@ -55,7 +55,8 @@ Power Nap 에서는 다시 막지 않는다 — 가방 속에서 상한만큼 �
 - `KASATERM_LID_AWAY_PMSET=<실행 파일>` — `sudo -n /usr/bin/pmset` 대신 부른다(인자를 기록하는 스크립트).
   이 값이 있으면 sudo 허락도 있는 것으로 본다.
 - `KASATERM_LID_PROBE=<파일>` — 내용이 `closed` 면 덮인 것으로 본다. 외부 모니터 검사는 건너뛴다.
-- 칸을 「일하는 중」으로 만들려면 같은 소켓으로 `kasaterm-cli turn --surface %0 start`, 끝내려면 `… end`.
-  설정 파일에 `"lid_away": true` 를 넣어 켠다.
+- 먼저 칸에서 이름이 `claude`인 시험용 바이너리를 실행한다(`scripts/verify-agent-state.sh`의 픽스처 참고).
+  빈 셸은 `turn start`를 보내도 학생으로 인식되지 않는다. 같은 소켓으로 `kasaterm-cli turn --surface %0 start`를
+  보내 일하는 중으로, `… end`로 종료 상태로 바꾼다. 설정 파일에 `"lid_away": true`를 넣어 켠다.
 
 박동 파일은 `KASATERM_SETTINGS_FILE` 옆에 생겨 본판 감시가 리그를 보지 않는다.
