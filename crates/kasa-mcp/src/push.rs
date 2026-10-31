@@ -26,6 +26,8 @@ pub const TOPIC: &str = "com.debimarlene.kasaterm";
 const TICK: Duration = Duration::from_secs(4);
 /// 같은 pane 에 연달아 쏘지 않는 최소 간격 — 대기↔바쁨을 튀는 스피너 오판이 있다.
 const MIN_GAP: Duration = Duration::from_secs(15);
+/// 이보다 오래된 완료 보고는 울리지 않는다 — 끊겼던 기계가 다시 붙으면 묵은 보고가 새 줄로 들어온다.
+const DONE_FRESH_SECS: u64 = 120;
 const JWT_TTL: Duration = Duration::from_secs(50 * 60);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -506,19 +508,30 @@ fn note_alert(character: &str, kind: &str, summary: &str, pane: &str, url: Optio
 #[derive(Clone, PartialEq, Eq)]
 struct Seen {
     waiting: bool,
-    busy: bool,
     kind: String,
+    /// 완료 보고가 있으면 그 나이(초).
+    done_ago: Option<u64>,
 }
 
 fn seen_of(row: &Value) -> Seen {
     let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-    let waiting = status == "waiting" || status == "blocked";
-    let idle = status == "idle";
     Seen {
-        waiting,
-        busy: !status.is_empty() && !idle && !waiting,
+        waiting: status == "waiting" || status == "blocked",
         kind: row.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+        done_ago: row
+            .get("done_outcome")
+            .and_then(Value::as_str)
+            .map(|_| row.get("done_ago_secs").and_then(Value::as_u64).unwrap_or(0)),
     }
+}
+
+/// 새 완료 보고인가 — 보고가 새로 생겼거나, 같은 칸이 다시 보고해 나이가 줄었을 때.
+/// 다른 기계의 줄은 목록 캐시라 갱신 사이에 나이가 멈춰 있으니 「줄었나」로만 가른다.
+fn new_done(prev: Option<&Seen>, cur: &Seen) -> bool {
+    let Some(age) = cur.done_ago.filter(|a| *a <= DONE_FRESH_SECS) else {
+        return false;
+    };
+    prev.and_then(|p| p.done_ago).is_none_or(|before| age < before)
 }
 
 /// 이 기계 + 명부 기계의 pane 행을 한 번 모은다 — (기계 route, 행).
@@ -566,6 +579,10 @@ fn ready() -> bool {
 
 /// 상태 변화 감시 — 본체(PTY 를 가진 앱) 한 곳만 돈다. 첫 바퀴는 기준만 잡고 안 쏜다
 /// (켜자마자 대기 중인 학생 전부가 한꺼번에 울리지 않게).
+///
+/// 「끝냄」은 턴이 끝날 때가 아니라 완료 보고(`kasaterm-cli done`)가 들어올 때만 울린다 — 백그라운드
+/// 작업을 기다리는 학생은 턴을 몇 번이고 끝내서, 끝날 때마다 폰이 울렸다(2026-10-31 「done 상태인
+/// 학생만 보내게」).
 pub async fn push_loop() {
     let mut last: HashMap<String, Seen> = HashMap::new();
     let mut sent_at: HashMap<String, Instant> = HashMap::new();
@@ -620,10 +637,16 @@ pub async fn push_loop() {
                     avatar_slug: slug.clone(),
                     url: None,
                 })
-            } else if !cur.busy && !cur.waiting && prev.as_ref().is_some_and(|p| p.busy) {
+            } else if new_done(prev.as_ref(), &cur) {
+                let failed = row.get("done_outcome").and_then(Value::as_str) == Some("failed");
                 Some(Alert {
-                    title: format!("{name} · 끝냄{where_}"),
-                    body: title_of(),
+                    title: format!("{name} · {}{where_}", if failed { "실패" } else { "끝냄" }),
+                    body: row
+                        .get("done_summary")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(title_of),
                     machine: route.clone(),
                     pane: id.to_string(),
                     kind: "done".into(),
@@ -674,6 +697,25 @@ mod tests {
             assert!(!super::note_rings(kind), "{kind}");
         }
         assert!(!super::needs_choice("idle"));
+    }
+
+    #[test]
+    fn a_turn_ending_without_a_done_report_never_rings() {
+        let seen = |row: serde_json::Value| super::seen_of(&row);
+        let working = seen(serde_json::json!({"status": "working"}));
+        let idle = seen(serde_json::json!({"status": "idle"}));
+        assert!(!super::new_done(Some(&working), &idle));
+        assert!(!super::new_done(None, &idle));
+
+        let reported = seen(serde_json::json!({"status": "working", "done_outcome": "succeeded", "done_ago_secs": 0}));
+        assert!(super::new_done(Some(&working), &reported));
+        let later = seen(serde_json::json!({"status": "idle", "done_outcome": "succeeded", "done_ago_secs": 8}));
+        assert!(!super::new_done(Some(&reported), &later), "같은 보고가 쉬는 칸으로 넘어가도 다시 울리지 않는다");
+        let again = seen(serde_json::json!({"status": "idle", "done_outcome": "failed", "done_ago_secs": 1}));
+        assert!(super::new_done(Some(&later), &again), "다시 보고하면 나이가 줄어 다시 울린다");
+
+        let stale = seen(serde_json::json!({"status": "idle", "done_outcome": "succeeded", "done_ago_secs": 3600}));
+        assert!(!super::new_done(None, &stale), "다시 붙은 기계의 묵은 보고는 울리지 않는다");
     }
 
     #[test]

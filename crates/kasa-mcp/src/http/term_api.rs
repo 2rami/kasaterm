@@ -276,6 +276,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "attention_kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
+                // 완료 보고(`kasaterm-cli done`) — 폰 알림은 턴 끝이 아니라 이것으로 울린다.
+                "done_outcome": b.and_then(|p| p.done_outcome.clone()),
+                "done_summary": b.and_then(|p| p.done_summary.clone()),
+                "done_ago_secs": b.and_then(|p| p.done_ago_secs),
                 // 도는 지 몇 초 — 폰 목록 줄이 데스크톱 사이드바 줄처럼 띠 끝에 시간을 단다.
                 "busy_secs": b.and_then(|p| p.busy_secs),
                 // 무엇을 하는 중인가 — 폰이 「작업 중」 대신 정확한 말을 쓴다(2026-09-08 지시
