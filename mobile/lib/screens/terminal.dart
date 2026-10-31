@@ -113,6 +113,20 @@ class _TerminalScreenState extends State<TerminalScreen> {
   final _chatSelection = GlobalKey<SelectionAreaState>();
   final _chatSelectionFocus = FocusNode(canRequestFocus: false, skipTraversal: true);
 
+  /// 고른 글이 화면 어디에 있나. 초점을 안 잡으니 고른 글 바깥을 눌러도 초점을 잃지 않아 고름이 안 풀린다 —
+  /// 바깥 탭은 [_onPagePointerUp] 이 걷는다. 고른 글 위를 누른 것(iOS 는 메뉴를 여닫는다)은 빼야 하는데 영역
+  /// 자신의 고름 기하는 감춰져 있어, 영역 바로 안에 같은 종류의 담는 칸을 하나 더 두고 그 기하를 읽는다.
+  final _termGeometry = StaticSelectionContainerDelegate();
+  final _chatGeometry = StaticSelectionContainerDelegate();
+  final _termGeometryBox = GlobalKey();
+  final _chatGeometryBox = GlobalKey();
+
+  /// 지금 손가락이 탭이 될 수 있나 — 하나만 닿았고, 문턱만큼 안 움직였고, 길게 누르기 전에 뗐다.
+  int? _tapPointer;
+  Offset _tapAt = Offset.zero;
+  int _pointers = 0;
+  Timer? _tapHeld;
+
   /// 답장·키를 보낼 때마다 올린다 — 화면이 맨 아래로 내려간다.
   int _bottomTick = 0;
 
@@ -128,6 +142,61 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   void _focusMoved() {
     if (_inputFocus.hasFocus || _chatFocus.hasFocus) _dropSelection();
+  }
+
+  /// 고르기 영역 안쪽 — 고른 글 기하를 읽는 담는 칸과 손가락 엿보기. 엿보기만 하고 겨루지 않는다(밀기·스크롤·
+  /// 길게 눌러 고르기를 빼앗지 않게). 고름 손잡이와 메뉴는 위층(Overlay)에 떠서 여기로 오지 않는다.
+  Widget _selectable(StaticSelectionContainerDelegate geometry, GlobalKey box, Widget child) => SelectionContainer(
+    delegate: geometry,
+    child: Listener(
+      key: box,
+      onPointerDown: _onPagePointerDown,
+      onPointerMove: _onPagePointerMove,
+      onPointerUp: _onPagePointerUp,
+      onPointerCancel: _onPagePointerCancel,
+      child: child,
+    ),
+  );
+
+  void _onPagePointerDown(PointerDownEvent e) {
+    _pointers++;
+    _tapHeld?.cancel();
+    if (_pointers > 1) {
+      _tapPointer = null;
+      return;
+    }
+    _tapPointer = e.pointer;
+    _tapAt = e.position;
+    _tapHeld = Timer(kLongPressTimeout, () => _tapPointer = null);
+  }
+
+  void _onPagePointerMove(PointerMoveEvent e) {
+    if (e.pointer == _tapPointer && (e.position - _tapAt).distance > kTouchSlop) _tapPointer = null;
+  }
+
+  void _onPagePointerUp(PointerUpEvent e) {
+    _pointers = math.max(0, _pointers - 1);
+    final tap = e.pointer == _tapPointer;
+    _tapPointer = null;
+    _tapHeld?.cancel();
+    if (tap && !_onSelection(e.position)) _dropSelection();
+  }
+
+  void _onPagePointerCancel(PointerCancelEvent e) {
+    _pointers = math.max(0, _pointers - 1);
+    if (e.pointer == _tapPointer) _tapPointer = null;
+  }
+
+  bool _onSelection(Offset global) {
+    for (final (geometry, key) in [(_termGeometry, _termGeometryBox), (_chatGeometry, _chatGeometryBox)]) {
+      final box = key.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.attached || !geometry.value.hasSelection) continue;
+      final toScreen = box.getTransformTo(null);
+      if (geometry.value.selectionRects.any((r) => MatrixUtils.transformRect(toScreen, r).contains(global))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// 지금 보는 쪽 — 화면마다 따로다(아이패드 여러 열이 서로의 쪽을 끌고 가지 않게).
@@ -236,6 +305,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _chatFocus.dispose();
     _selectionFocus.dispose();
     _chatSelectionFocus.dispose();
+    _termGeometry.dispose();
+    _chatGeometry.dispose();
+    _tapHeld?.cancel();
     _pages.dispose();
     super.dispose();
   }
@@ -734,11 +806,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                 contextMenuBuilder: gridSelectionMenu,
                                 // 고르기 영역의 가로 끌기(마우스 고르기용)보다 먼저 밀기를 판정한다 —
                                 // 안쪽에 한 벌 더 둔다. 어느 쪽이 이겨도 같은 쪽 넘김이다.
-                                child: RawGestureDetector(
+                                child: _selectable(_termGeometry, _termGeometryBox, RawGestureDetector(
                                   behavior: HitTestBehavior.translucent,
                                   gestures: _swipeGestures,
                                   child: _view(s),
-                                ),
+                                )),
                               ),
                             ),
                           ),
@@ -766,7 +838,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                   key: _chatSelection,
                                   focusNode: _chatSelectionFocus,
                                   contextMenuBuilder: gridSelectionMenu,
-                                  child: RawGestureDetector(
+                                  child: _selectable(_chatGeometry, _chatGeometryBox, RawGestureDetector(
                                     behavior: HitTestBehavior.translucent,
                                     gestures: _swipeGestures,
                                     child: ConversationView(
@@ -780,7 +852,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                       active: _paging || chat,
                                       draft: _chatInput,
                                     ),
-                                  ),
+                                  )),
                                 ),
                               ),
                             ),

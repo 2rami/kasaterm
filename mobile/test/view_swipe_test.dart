@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kasaterm_mobile/grid_select.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/screens/shell_blocks_view.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
@@ -365,6 +366,45 @@ void main() {
       await _close(tester);
     }, variant: TargetPlatformVariant.only(platform));
   }
+
+  testWidgets('대화 글을 고른 뒤 고른 글 바깥을 한 번 누르면 고름이 풀린다', (tester) async {
+    await _open(tester, view: PaneView.chat, transcript: _transcript);
+    await tester.pump(const Duration(milliseconds: 100));
+    final said = find.textContaining('이렇게 돌려요', findRichText: true);
+    await tester.longPressAt(tester.getTopLeft(said) + const Offset(12, 10));
+    await tester.pumpAndSettle();
+    expect(chatSelected(tester), '이렇게');
+
+    // 고른 글 위를 누르면 그대로 — iOS 는 메뉴를 여닫는다.
+    await tester.tapAt(tester.getTopLeft(said) + const Offset(12, 10));
+    await tester.pumpAndSettle();
+    expect(chatSelected(tester), '이렇게');
+
+    await tester.tapAt(const Offset(195, 300));
+    await tester.pumpAndSettle();
+    expect(chatSelected(tester), isEmpty);
+    expect(find.text('복사'), findsNothing);
+    await _close(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('터미널 글도 고른 글 바깥을 한 번 누르면 고름이 풀린다', (tester) async {
+    await _open(tester, view: PaneView.terminal);
+    final grid = find.byType(GridSelectable);
+    String picked() => tester.renderObject<RenderGridSelectable>(grid).getSelectedContent()?.plainText ?? '';
+    final box = tester.getRect(grid);
+    final word = Offset(box.left + 30, box.top + box.height * 0.2);
+    await tester.longPressAt(word);
+    await tester.pumpAndSettle();
+    expect(picked(), isNotEmpty);
+    final chosen = picked();
+    await tester.tapAt(word);
+    await tester.pumpAndSettle();
+    expect(picked(), chosen, reason: '고른 글 위를 누르면 그대로');
+    await tester.tapAt(Offset(box.left + 30, box.top + box.height * 0.7));
+    await tester.pumpAndSettle();
+    expect(picked(), isEmpty);
+    await _close(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('쪽지는 보낸 학생 얼굴을 이름으로 물어 단다', (tester) async {
     askedImages.clear();
