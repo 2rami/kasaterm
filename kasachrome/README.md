@@ -299,6 +299,74 @@ SPA 에서 해시는 화면을 가르는 라우트다). 사람이 열어둔 탭�
 
 승격된 세션은 **유휴 15초 뒤 자동으로 떨어져** 배너가 사라진다. `browser_watch` 로 수집을 켠 탭만 계속 붙어 있는다.
 
+## 판정 모델이 몇 걸음 스스로 (`go`)
+
+```bash
+kc go "체크박스 두 개를 모두 켠다" 123
+kc go "아이디 tomsmith, 비밀번호 SuperSecretPassword! 로 로그인한다" 123 \
+  --values '{"username":"tomsmith","password":"SuperSecretPassword!"}'
+```
+
+큰 모델이 걸음마다 `read_page`(최대 4만 자)를 읽고 ref 를 골라 `click` 을 부르면 클릭 하나에 큰 모델 턴 2번과
+kc 호출 2~3번이 든다. `go` 는 판정 모델 Jev-Omni(OpenGateway `sionic-ai/jev-omni`)에게 걸음마다 한 번 묻고
+바로 누른다. 큰 모델은 멈춘 뒤의 결과만 받는다. 밥폰의 `bobphone go` 와 같은 모양이다.
+
+한 걸음:
+
+1. **번호표** — 화면 안 상호작용 요소에 번호를 붙이고 종류·이름·상태(체크박스 켜짐/꺼짐, 입력 칸 비어 있음/입력됨)를 모은다.
+   가려진 요소·비활성 요소는 뺀다. 번호표는 칸 왼쪽 바깥에 둔다 — 안쪽에 얹으면 글자 첫머리를 가려 판정이 흐려졌다(0.75 → 0.91).
+2. **찍기** — 디버거를 붙인 채 `Page.captureScreenshot` 으로 뷰포트를 폭 1024px JPEG 로 줄여 찍는다(담당 칩은 걷고). 장당 30ms 안팎.
+3. **판정** — Jev-Omni 한 번. 보기는 번호 칸 + `done` + `none` (+ 아래가 남았으면 `scroll`). 보기가 14개를 넘으면
+   12개씩 나눈 질문에 「이 묶음엔 없다」를 두고, 다음 걸음 종류(누른다·done·none·scroll)는 따로 물어 한 요청에 보낸다 —
+   긴 보기 한 줄이면 뒤쪽 정답을 놓친다. 질문 문장과 「칸 상태」 줄은 데모(11/11)에서 검증된 그대로다.
+4. **조작** — 페이지 안 합성 클릭을 먼저 하고, 350ms 안에 아무것도 안 바뀌었을 때만 진짜 입력(CDP)으로 누른다.
+   입력 칸은 `values` 의 값을 넣는다. 고른 칸은 세션 색 테두리와 `번호 · 확률` 꼬리표로 잠깐 강조한다.
+5. **기다림** — 문서가 바뀌었으면 `loading` 을 벗어날 때까지(최대 10초). 바뀐 페이지는 다음 판정의 「한 일」에
+   「…페이지로 넘어감」으로 붙는다.
+
+멈추는 까닭(`ended`): `done` · `none` · `low_confidence`(확률이 `threshold`, 기본 0.7 미만 — `candidates` 에 상위 셋) ·
+`irreversible` · `needs_value`(값 없는 입력 칸을 고름) · `repeat`(같은 화면에서 같은 칸) · `left_site` · `new_tab` ·
+`page_changed`(판정 사이에 고른 칸이 두 번 연달아 사라짐) · `max_steps`(기본 8) · `error`.
+돌려주는 것은 걸음마다 고른 칸·확률·입력 토큰·ms(`mark`/`shot`/`judge`/`act`/`wait`)와 마지막 화면 사진 경로(`shot`)뿐이다.
+접근성 트리는 싣지 않는다. 걸음별 번호표 사진과 판정 확률(`step-N.jpg`·`step-N.json`)은 같은 폴더에 남는다 — 목표 문장은 값이 들어 있을 수 있어 남기지 않는다.
+
+**되돌릴 수 없는 버튼은 누르지 않는다.** 결제·구매·주문·보내기·삭제·게시·제출·장바구니(영어 pay·buy·checkout·send·delete·
+post·publish·submit·add to cart …)가 이름·id 에 든 버튼을 Jev 가 고르면, 빨간 테두리로 4초 표시만 하고 `irreversible` 로
+멈춘다. Jev 의 선택은 조언일 뿐이다. 다른 페이지로 가는 진짜 링크는 뒤로 가기로 되돌릴 수 있어 막지 않는다.
+「Submit」 이라 적힌 로그인 버튼도 여기서 멈추니, 그때는 큰 모델이 확인하고 `click` 으로 누른다.
+
+**`values` 는 목표 문장에 그대로 적힌 값만 받는다.** 칸 이름은 name·id·placeholder·라벨 중 하나와 맞추고(대소문자·띄어쓰기 무시),
+값은 페이지 안에서 비교해 참/거짓만 돌려받는다 — 결과·로그에 값이 실리지 않는다. 사이트 비밀번호를 모델에 보이지 않게
+넣어야 하면 `go` 가 아니라 아래 `login` 을 쓴다. `tabId` 는 꼭 줘야 한다(활성 탭으로 떨어지지 않는다).
+키는 `~/.config/opengateway.key`(MCP 가 도는 기계 것)에서 읽고 출력하지 않는다. `live-*` 를 직접 부르지 않는다.
+
+### 실측 (2026-10-31, Chrome for Testing 146 · the-internet.herokuapp.com · 3바퀴)
+
+| | go | 지금 방식(kc 따로) |
+|---|---|---|
+| 체크박스 둘 다 켜기 | kc 1번 · 판정 3번 · 1.6~1.9초 | kc 5번(read_page 3 · click 2) · 1.9~2.0초 + 큰 모델 턴 5번 |
+| tomsmith 로그인 | kc 1번 · 판정 4번 · 1.7~1.8초 | kc 5번(read_page 2 · fill 2 · click 1) · 1.4초 + 큰 모델 턴 5번 |
+| 「장바구니 담기」 | `none` 으로 멈춤 · 0.5초 | — |
+| 걸음 하나 | 번호표 6ms · 찍기 30ms · 판정 250ms · 조작 12ms · 기다림 236ms(중앙, 합 320ms) | read_page 155ms · click 807ms · fill 148ms · 스크린샷 224ms(호출 하나, node 기동 포함) |
+
+9/9 맞혔다. 지금 방식의 시간에는 큰 모델이 read_page(체크박스 흐름 5.8천 자)를 읽고 고르는 턴이 빠져 있다. 스크린샷이 빠른 것은 보이는 탭이라 `captureVisibleTab` 을 타서다(숨은 탭은 디버거를 붙여 1.16초). 판정 입력은 걸음당 약 550토큰(보기 14개 이하), 위키백과처럼 칸이 50~60개면 질문이 다섯으로 나뉘어 3.8천 토큰·0.6~1초다.
+
+### 왜 합성 클릭이 먼저인가
+
+처음엔 늘 진짜 입력(CDP `Input.dispatchMouseEvent`)으로 눌렀다. 그런데 **CDP 클릭이 폼 제출로 페이지를 넘긴 뒤, 그 탭의
+CDP 마우스 입력이 통째로 버려졌다** — 다음 클릭의 pointerdown·mousedown·click 이 페이지에 하나도 안 왔다. 디버거를 떼었다
+붙여도, 다른 주소로 가도, 탭을 바꿨다 돌아와도 안 풀렸고 새 탭에서만 됐다(2026-10-31 Chrome for Testing 146 실측. 링크 이동
+뒤에는 멀쩡했다). 키보드 `insertText` 는 그 탭에서도 먹었다. 그래서 `go` 는 `click` 의 기본 경로처럼 페이지 안 합성 클릭을
+먼저 하고, 변화가 없을 때만 CDP 로 간다. 체크박스는 DOM 이 안 바뀌고 checked 만 바뀌므로 그것도 변화로 센다 — 안 세면
+진짜 입력으로 한 번 더 눌러 도로 끈다. `click --trusted` 를 폼 제출 버튼에 쓰면 같은 함정을 밟는다.
+
+### 안 되는 것
+
+- iframe·shadow DOM·canvas 안의 칸은 번호를 못 붙인다 — `read_page` 로 내려간다.
+- 숨은(백그라운드) 탭은 값 넣기·합성 클릭은 됐지만(the-internet 로그인 성공) 진짜 키 입력이 필요한 칸은 안 먹을 수 있다.
+  입력이 있는 목표는 보이는 창(`browser_new_window`)에서 부른다. 숨은 탭에서 값을 주면 결과 `note` 로 알린다.
+- 새 탭으로 열리는 링크는 따라가지 않고 `new_tab` 으로 멈춘다.
+
 ## 로그인 채우기 (`login`)
 
 에이전트가 로그인 화면에서 멈추지 않게, 비밀번호를 모델 맥락에 한 글자도 남기지 않고 칸에 넣는다. 사람이 이 맥
@@ -521,7 +589,7 @@ node scripts/cc.mjs '[["list_tabs",{}],["read_page",{"tabId":123}]]'
 
 ## 툴
 
-`browser_status` `list_tabs` `new_tab` `close_tab` `activate_tab` `navigate` `read_page` `get_text` `find` `screenshot` `click` `hover` `drag` `swipe` `fill` `type` `press_key` `scroll` `scroll_to` `eval_js` `watch` `console_logs` `network_requests` `upload_file` `wait_for` `resize_window` `emulate_device` `set_task` `bookmarks` `login` `attach_debugger` `detach_debugger` `dev_reload` `cdp_raw`
+`browser_status` `list_tabs` `new_tab` `close_tab` `activate_tab` `navigate` `read_page` `get_text` `find` `go` `screenshot` `click` `hover` `drag` `swipe` `fill` `type` `press_key` `scroll` `scroll_to` `eval_js` `watch` `console_logs` `network_requests` `upload_file` `wait_for` `resize_window` `emulate_device` `set_task` `bookmarks` `login` `attach_debugger` `detach_debugger` `dev_reload` `cdp_raw`
 
 `swipe` 는 진짜 손가락이다. 폰에서 손가락으로 하는 것(캐러셀·덱 넘기기, 당겨서 새로고침, 스와이프 삭제,
 바텀시트 끌어올리기)은 `drag` 로 재현되지 않는다 — 그 UI 들은 touch 이벤트를 읽고 방향 락과 임계 거리로

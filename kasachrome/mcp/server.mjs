@@ -385,7 +385,21 @@ tool('browser_get_text', 'Plain innerText of the page. Cheaper than read_page wh
 tool('browser_find', 'Find elements by role/name/placeholder text and get their refs plus viewport coordinates.', { tabId, query: z.string() },
   async (a) => text(await call('find', a)))
 
-tool('browser_layout', '레이아웃툴 편집기를 이 탭에 켜고 끈다. 켜면 사람이 화면 위의 요소를 피그마처럼 직접 잡아 옮기고·크기와 색을 바꾸고·화살표로 흐름을 잇는다. 그 결과는 browser_layout_edits 로 가져와 네가 소스를 고친다 — 편집기의 「코드에 반영」 단추를 대신 누르지 마라, 그건 창도 맥락도 없는 클로드를 새로 낳고 멈출 수도 없다. 그 주소를 맡은 레이아웃툴 서버가 떠 있어야 켜진다(`layoutool <개발서버 포트> --src <소스 폴더>`); 없으면 그렇게 말해 준다. 사람에게 「이제 만져 보세요」 하고 기다린 뒤 가져오는 것이 이 도구의 쓰임새다.', { tabId, on: z.boolean().optional().describe('false 면 끈다. 끄기는 판을 감출 뿐이라 만지던 내역은 남고, 다시 켜면 그대로 돌아온다.') },
+// go 는 한 번에 여러 도구를 부르는 고리라 인자 검사를 직접 한다 — CLI 경로는 zod 검사를 거치지 않는다.
+const goSchema = {
+  goal: z.string().min(1).describe('One sentence: what should be true when done (e.g. "체크박스 두 개를 모두 켠다", "아이디 tomsmith, 비밀번호 SuperSecretPassword! 로 로그인한다").'),
+  tabId: z.number().int().positive().describe('Tab to drive. Required — go never falls back to the active tab.'),
+  maxSteps: z.number().int().min(1).max(20).optional().describe('Most clicks/inputs before it stops (default 8).'),
+  values: z.record(z.string(), z.string()).optional().describe('Input field name → value, e.g. {"username":"tomsmith","password":"…"}. Matched against the field name, id, placeholder or label. Every value must appear verbatim in goal, otherwise the call is rejected.'),
+  threshold: z.number().min(0).max(1).optional().describe('Stop and hand back when the judge is less sure than this (default 0.7).'),
+}
+tool('browser_go', 'Let the judge model (Jev-Omni) drive a few steps on its own, then stop and report — instead of you reading read_page and picking a ref for every click. Each step numbers the interactive elements on screen (set-of-marks), sends one ~1024px screenshot plus a list of element kinds/names/states (checkbox on/off, field empty/filled) to Jev-Omni, and clicks or fills the pick — about 0.3–1s per step (more elements on screen means more questions) and no tokens of yours. Use it for short, concrete UI goals on one site: open a section, toggle settings, fill and submit a login form. It is not for reading content (use get_text) or for long multi-page research.\n\nIt stops on: `done`, `none` (nothing on this screen leads to the goal), `low_confidence` (the pick fell under threshold — `candidates` lists the top picks so you can continue by hand), `irreversible` (it picked a pay/buy/send/delete/post/submit-style button — that is NEVER pressed by go; look at `candidates` and the final shot, and press it yourself only if the human asked for exactly that), `needs_value` (it picked an input you gave no value for), `repeat` (same pick on an unchanged screen), `left_site`, `max_steps`. The reply lists each step (pick, probability, ms split into mark/shot/judge/act) and `shot`, the path of a clean final screenshot — Read it before deciding what to do next. Typing is reliable only in a visible tab: open the page with browser_new_window (or activate_tab) first when the goal involves input. Elements inside iframes, shadow DOM or canvas are not marked; fall back to read_page there.', goSchema, async (raw) => {
+  const a = z.object(goSchema).parse(raw)
+  const { runGo } = await import('./go.mjs')
+  return text(await runGo(a, { call, color: IDENTITY.headerColor }))
+})
+
+tool('browser_layout','레이아웃툴 편집기를 이 탭에 켜고 끈다. 켜면 사람이 화면 위의 요소를 피그마처럼 직접 잡아 옮기고·크기와 색을 바꾸고·화살표로 흐름을 잇는다. 그 결과는 browser_layout_edits 로 가져와 네가 소스를 고친다 — 편집기의 「코드에 반영」 단추를 대신 누르지 마라, 그건 창도 맥락도 없는 클로드를 새로 낳고 멈출 수도 없다. 그 주소를 맡은 레이아웃툴 서버가 떠 있어야 켜진다(`layoutool <개발서버 포트> --src <소스 폴더>`); 없으면 그렇게 말해 준다. 사람에게 「이제 만져 보세요」 하고 기다린 뒤 가져오는 것이 이 도구의 쓰임새다.', { tabId, on: z.boolean().optional().describe('false 면 끈다. 끄기는 판을 감출 뿐이라 만지던 내역은 남고, 다시 켜면 그대로 돌아온다.') },
   async (a) => text(await call('layout', a)))
 
 tool('browser_layout_edits', '사람이 화면에서 만진 것을 가져온다. 무엇을 어디로 옮겼고·무엇을 어떻게 바꿨는지를, 소스를 고칠 때 지킬 규칙(원래 스타일이 정의된 자리를 고쳐라·좌표를 그대로 박지 마라 따위)과 함께 글로 준다. 그대로 읽고 네가 파일을 고치면 된다. 만진 것이 없으면 그렇게 말해 준다.', { tabId, raw: z.boolean().optional().describe('정리된 글 대신 만진 내역 원자료를 받는다. 서버 없이 페이지만 볼 때·지시문이 무엇을 빠뜨렸는지 볼 때만.') },
