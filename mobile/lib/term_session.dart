@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'grid.dart';
+import 'network_watch.dart';
 import 'server.dart';
 import 'term_socket.dart';
 
@@ -25,6 +26,7 @@ class TermSession extends ChangeNotifier {
   }) {
     server.addCloseListener(_serverClosed);
     server.routeChanges?.addListener(_routeChanged);
+    NetworkWatch.instance.addListener(networkChanged);
   }
 
   /// 폰에서 마지막으로 친 뒤 이만큼 조용하면 쥔 원본 격자를 놓는다.
@@ -146,6 +148,15 @@ class TermSession extends ChangeNotifier {
     final now = server.isDirect(_wsUri().replace(scheme: 'http'));
     if (now == _direct) return;
     _gateway = false;
+    connect();
+  }
+
+  /// 앱을 켠 채 망이 바뀌었다 — 붙어 있던 소켓은 옛 망의 것이라 살아 있는 척하다 핑에야 끊기고, 그동안 친 키가
+  /// 사라진다. 관문으로 곧바로 다시 붙는다. 새 망에서 직통이 서면 [_routeChanged] 가 옮겨 준다.
+  void networkChanged() {
+    if (_paused || _disposed || server.isClosed || state == TermState.gone) return;
+    _backoffSec = 1;
+    _gateway = true;
     connect();
   }
 
@@ -430,6 +441,7 @@ class TermSession extends ChangeNotifier {
     _disposed = true;
     server.removeCloseListener(_serverClosed);
     server.routeChanges?.removeListener(_routeChanged);
+    NetworkWatch.instance.removeListener(networkChanged);
     _retry?.cancel();
     _idleTimer?.cancel();
     _closeChannel();

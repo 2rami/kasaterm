@@ -12,6 +12,7 @@ import 'hub_model.dart';
 import 'hub_prefs.dart';
 import 'kasanet.dart';
 import 'look.dart';
+import 'network_watch.dart';
 import 'push.dart';
 import 'resume_spot.dart';
 import 'screens/approval_screen.dart';
@@ -378,10 +379,10 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     BackgroundGrace.instance
       ..attach()
-      ..onReturn = () {
-        _connection.server?.freshConnections();
-        KasanetRouter.resumed();
-      };
+      ..onReturn = _freshRoutes;
+    NetworkWatch.instance
+      ..attach()
+      ..addListener(_freshRoutes);
     phoneThemeSync.bind(null);
     weather.bind(null);
     _connection.addListener(_changed);
@@ -406,10 +407,17 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// 묶어 둔 연결을 버리고 카사넷 길을 다시 찾는다 — 앱으로 돌아왔거나 켠 채 망이 바뀌었을 때.
+  void _freshRoutes() {
+    _connection.server?.freshConnections();
+    KasanetRouter.resumed();
+  }
+
   @override
   void dispose() {
     ApprovalCenter.instance.onNew = null;
     BackgroundGrace.instance.onReturn = null;
+    NetworkWatch.instance.removeListener(_freshRoutes);
     _approvalBanner?.remove();
     AppLinkObserver.instance.detach();
     _connection.removeListener(_changed);

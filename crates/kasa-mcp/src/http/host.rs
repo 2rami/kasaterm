@@ -27,6 +27,8 @@ async fn version_handler() -> impl IntoResponse {
             "machine_id": crate::mobile::machine_identity(),
             // 카사넷 주소(id·주소·포트). 이것을 루프백 길로 받은 쪽만 이 기기를 허용 목록에 넣는다.
             "kasanet": crate::kasanet::info(),
+            // 폰은 이것을 보고서야 답 없는 요청을 같은 표식으로 다시 보낸다(`http/replay.rs`) — 옛 판은 두 번 넣는다.
+            "replay": true,
         })),
     )
 }

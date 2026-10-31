@@ -98,8 +98,7 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
   }
 
   void _sendText() {
-    _session.typeText(_text.text);
-    _text.clear();
+    if (_session.typeText(_text.text)) _text.clear();
   }
 
   void _graceChanged() {

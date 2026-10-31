@@ -8,6 +8,7 @@ import 'package:flutter/painting.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'network_watch.dart';
 import 'server.dart';
 import 'term_socket.dart';
 
@@ -64,6 +65,7 @@ class ScreenSession extends ChangeNotifier {
   }) {
     server.addCloseListener(_serverClosed);
     server.routeChanges?.addListener(_routeChanged);
+    NetworkWatch.instance.addListener(networkChanged);
   }
 
   final Server server;
@@ -178,6 +180,15 @@ class ScreenSession extends ChangeNotifier {
     connect();
   }
 
+  /// 앱을 켠 채 망이 바뀌었다 — 옛 망의 소켓은 끊긴 줄도 모르고 「화면을 받는 중」에 머문다. 관문으로 곧바로
+  /// 다시 붙는다. 새 망에서 직통이 서면 [_routeChanged] 가 옮겨 준다.
+  void networkChanged() {
+    if (_paused || _disposed || server.isClosed) return;
+    _backoffSec = 1;
+    _gateway = true;
+    connect();
+  }
+
   void _onData(Object? data) {
     if (data is String) {
       _control(data);
@@ -287,9 +298,11 @@ class ScreenSession extends ChangeNotifier {
   void key(String code) => _sendJson({'t': 'key', 'k': code});
 
   /// 폰 자판이 조합을 끝낸 글을 통째로 — 한글을 키로 풀어 보내면 그 기기 입력기가 다시 조합해 어긋난다.
-  void typeText(String text) {
-    if (text.isEmpty) return;
+  /// 보냈으면 참 — 다시 붙는 중이면 거짓이라 입력칸의 글을 지우지 않는다.
+  bool typeText(String text) {
+    if (text.isEmpty || _channel == null) return false;
     _sendJson({'t': 'text', 's': text});
+    return true;
   }
 
   void _lost({Uri? refused}) {
@@ -347,6 +360,7 @@ class ScreenSession extends ChangeNotifier {
     _disposed = true;
     server.removeCloseListener(_serverClosed);
     server.routeChanges?.removeListener(_routeChanged);
+    NetworkWatch.instance.removeListener(networkChanged);
     _retry?.cancel();
     _closeChannel();
     image?.dispose();

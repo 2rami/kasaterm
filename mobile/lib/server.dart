@@ -910,16 +910,11 @@ class Server {
     String? label,
     String? machine,
   }) async {
-    final http.Response res;
-    try {
-      res = await _client.post(
-        uri('settings/action', machine: machine),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'action': action, 'id': ?id, 'label': ?label}),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    final res = await _mutate(
+      'settings/action',
+      machine: machine,
+      json: {'action': action, 'id': ?id, 'label': ?label},
+    );
     if (res.statusCode != 200) {
       throw ServerException('설정이 안 바뀌었다 (${res.statusCode})');
     }
@@ -1175,30 +1170,86 @@ class Server {
     }
   }
 
+  /// 데스크톱을 바꾸는 요청 한 번의 상한. 데스크톱은 받은 일을 바로 하고 답한다(관문 왕복 1초 안팎) — 첫 시도가
+  /// 이보다 늦으면 길이 죽은 것으로 보고 관문으로 다시 보낸다.
+  @visibleForTesting
+  static Duration mutateFirstWait = const Duration(seconds: 8);
+  @visibleForTesting
+  static Duration mutateRetryWait = const Duration(seconds: 15);
+
+  /// 같은 표식의 다시 보내기를 한 번만 하는 데스크톱(`/version` 의 `replay`, `http/replay.rs`). 기계 route, 기본 기계는 빈 문자열.
+  final Set<String> _replay = {};
+
+  Future<bool> _replayable(String? machine) async {
+    if (_replay.contains(machine ?? '')) return true;
+    try {
+      final v = await _getJson('version', machine: machine, timeout: const Duration(seconds: 5));
+      if (v is Map && v['replay'] == true) _replay.add(machine ?? '');
+    } catch (_) {}
+    return _replay.contains(machine ?? '');
+  }
+
+  /// 데스크톱을 바꾸는 요청 하나. 길에서 끊기거나 [first] 안에 답이 없으면 같은 표식(`x-kasa-request-id`)으로 관문에
+  /// 두 번까지 다시 보낸다 — 셀룰러에서 카사넷 직통이 죽어도 입구는 알아챌 때까지 「직통」이라 답하고 요청을 삼켜, 키
+  /// 입력·사진·칸 닫기가 시간 상한도 없이 멈췄다(10-31). 다시 보내기는 그 표식을 한 번만 하는 데스크톱에만 —
+  /// [deduped] 면 몸통의 표식으로 이미 거르는 창구다. 옛 데스크톱에는 첫 시도를 길게 한 번만 한다.
+  Future<http.Response> _mutate(
+    String path, {
+    Map<String, String>? query,
+    String? machine,
+    Object? json,
+    List<int>? bytes,
+    String contentType = 'application/json',
+    String? id,
+    Duration? first,
+    Duration? retry,
+    bool deduped = false,
+  }) async {
+    final mark = id ?? _messageId();
+    final body = bytes ?? (json == null ? const <int>[] : utf8.encode(jsonEncode(json)));
+    final head = uri(path, query: query, machine: machine);
+    final direct = isDirect(head);
+    // 다시 보낼 곳 — 직통이었으면 그 입구가 가리키던 기계의 관문 경로.
+    final route = direct ? _kasanet?.machineOf(head) : machine;
+    final via = route == null || route.isEmpty ? null : route;
+    final known = deduped || _replay.contains(via ?? '');
+    for (var attempt = 0;; attempt++) {
+      final target = attempt == 0
+          ? head
+          : (direct ? _gatewayOf(head) : null) ?? _gatewayUri(path, query: query, machine: machine);
+      final abort = Completer<void>();
+      final request = http.AbortableRequest('POST', target, abortTrigger: abort.future)
+        ..headers['content-type'] = contentType
+        ..headers['x-kasa-request-id'] = mark
+        ..bodyBytes = body;
+      final wait = attempt == 0 && known ? first ?? mutateFirstWait : retry ?? mutateRetryWait;
+      try {
+        return await _client.send(request).then(http.Response.fromStream).timeout(wait);
+      } catch (_) {
+        // 시간 초과로 버린 요청이 묶음 연결을 쥔 채 남지 않게.
+        if (!abort.isCompleted) abort.complete();
+        if (attempt >= 2 || isClosed || !(deduped || await _replayable(via))) {
+          throw ServerException('${describe()} 에 닿지 못했다');
+        }
+        freshConnections();
+        await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+      }
+    }
+  }
+
   /// 답장 한 줄. 서버가 Ctrl-U·bracketed paste·짧은 지연 뒤 Enter 를 맡으므로
   /// 여기서는 글만 준다 — 소켓으로 `글\r` 을 한 번에 쏘면 Enter 가 먹힌다.
   Future<void> send(String pane, String text, {String? machine}) async {
-    final http.Response res;
-    try {
-      res = await _client.post(
-        uri('send', query: {'surface': pane}, machine: machine),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'text': text, 'submit': true}),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    final res = await _mutate(
+      'send',
+      query: {'surface': pane},
+      machine: machine,
+      json: {'text': text, 'submit': true},
+    );
     if (res.statusCode != 200) {
       throw ServerException('답장이 안 갔다 (${res.statusCode})');
     }
   }
-
-  /// 대화 입력 한 번의 상한. 데스크톱은 받은 말을 대열에 넣고 바로 답한다(관문 왕복 1초 안팎) — 첫 시도가 이보다
-  /// 늦으면 길이 죽은 것으로 보고 관문으로 다시 보낸다.
-  @visibleForTesting
-  static Duration chatSendFirstWait = const Duration(seconds: 8);
-  @visibleForTesting
-  static Duration chatSendRetryWait = const Duration(seconds: 15);
 
   /// 대화 보기의 입력 — 원본이 넣는다(`/term/chat-send`): 데스크톱 입력칸이 빌 때 붙여넣고(초안·한글 조합·승인 창은
   /// 기다린다), 일하는 칸이면 진행 중인 턴 안으로 든다. 그 창구를 모르는 옛 데스크톱은 [send].
@@ -1207,37 +1258,16 @@ class Server {
   /// 늦게 붙어 첫 요청이 관문에 못 닿고 「닿지 못했다」가 떴다(10-13). 데스크톱은 받는 순간 표식을 잡아, 받는 중이거나
   /// 이미 넣은 표식이면 다시 넣지 않고 받았다고 답한다 — 그래서 시간 초과도 다시 보내도 된다.
   ///
-  /// 다시 보낼 때는 관문으로 간다. 셀룰러에서 카사넷 직통이 죽어도 입구는 알아챌 때까지 「직통」이라 답하고 요청을
-  /// 삼킨다 — 같은 길로 다시 보내면 셋 다 시간 초과로 끝나고, 관문에는 아무 기록도 남지 않았다(10-31).
+  /// 몸통의 표식은 [_mutate] 의 표식보다 먼저 생겼다 — 그것을 아는 옛 데스크톱에도 다시 보내도 된다.
   Future<void> chatSend(String pane, String text, {String? machine}) async {
     final id = _messageId();
-    final payload = jsonEncode({'surface': pane, 'text': text, 'message_id': id});
-    final first = uri('term/chat-send', machine: machine);
-    late final http.Response res;
-    for (var attempt = 0;; attempt++) {
-      final target = attempt == 0
-          ? first
-          : (isDirect(first) ? _gatewayOf(first) : null) ??
-                _gatewayUri('term/chat-send', machine: machine);
-      final abort = Completer<void>();
-      final request =
-          http.AbortableRequest('POST', target, abortTrigger: abort.future)
-            ..headers['content-type'] = 'application/json'
-            ..body = payload;
-      try {
-        res = await _client
-            .send(request)
-            .then(http.Response.fromStream)
-            .timeout(attempt == 0 ? chatSendFirstWait : chatSendRetryWait);
-        break;
-      } catch (_) {
-        // 시간 초과로 버린 요청이 묶음 연결을 쥔 채 남지 않게.
-        if (!abort.isCompleted) abort.complete();
-        if (attempt >= 2 || isClosed) throw ServerException('${describe()} 에 닿지 못했다');
-        freshConnections();
-        await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));
-      }
-    }
+    final res = await _mutate(
+      'term/chat-send',
+      machine: machine,
+      json: {'surface': pane, 'text': text, 'message_id': id},
+      id: id,
+      deduped: true,
+    );
     if (res.statusCode == 404 || res.statusCode == 405) {
       return send(pane, text, machine: machine);
     }
@@ -1284,25 +1314,18 @@ class Server {
     String message = '',
     String? machine,
   }) async {
-    final http.Response res;
-    try {
-      res = await _client
-          .post(
-            uri('term/mod-decide', machine: machine),
-            headers: {'content-type': 'application/json'},
-            body: jsonEncode({
-              'surface': pane,
-              'session': session,
-              'id': id,
-              'decision': allow ? 'allow' : 'deny',
-              'message': message,
-              'by': 'phone',
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    final res = await _mutate(
+      'term/mod-decide',
+      machine: machine,
+      json: {
+        'surface': pane,
+        'session': session,
+        'id': id,
+        'decision': allow ? 'allow' : 'deny',
+        'message': message,
+        'by': 'phone',
+      },
+    );
     final body = res.statusCode == 200 ? jsonDecode(utf8.decode(res.bodyBytes)) : null;
     if (body is! Map || body['ok'] != true) {
       final why = body is Map ? '${body['error']}' : '${res.statusCode}';
@@ -1396,17 +1419,20 @@ class Server {
         '사진이나 첨부할 창을 확인해 주세요. 사진은 32 MB까지 첨부할 수 있어요.',
       );
     }
+    // 올리는 시간만큼 더 기다린다 — 셀룰러 오르막을 초당 256KB 로 잡는다.
+    final upload = Duration(milliseconds: png.length ~/ 256);
     final http.Response res;
     try {
-      res = await _client
-          .post(
-            uri('paste-image', query: {'surface': pane}, machine: machine),
-            headers: {'content-type': 'image/png'},
-            body: png,
-          )
-          .timeout(const Duration(seconds: 30));
-    } catch (_) {
-      // Do not automatically retry: the server may already have attached it.
+      res = await _mutate(
+        'paste-image',
+        query: {'surface': pane},
+        machine: machine,
+        bytes: png,
+        contentType: 'image/png',
+        first: mutateFirstWait + upload,
+        retry: mutateRetryWait + upload,
+      );
+    } on ServerException {
       throw const ServerException('사진 전송을 확인하지 못했어요. 창을 확인한 뒤 다시 시도해 주세요.');
     }
     if (res.statusCode != 200) {
@@ -1500,16 +1526,11 @@ class Server {
     Map<String, Object?> params, {
     String? machine,
   }) async {
-    final http.Response res;
-    try {
-      res = await _client.post(
-        uri('cmd', machine: machine),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'method': method, 'params': params}),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    final res = await _mutate(
+      'cmd',
+      machine: machine,
+      json: {'method': method, 'params': params},
+    );
     Object? body;
     try {
       body = jsonDecode(res.body);
@@ -1529,14 +1550,11 @@ class Server {
 
   /// pane 닫기 — 데스크톱에서 × 를 누른 것과 같다(되살리기 대열에 남는다).
   Future<void> closePane(String pane, {String? machine}) async {
-    final http.Response res;
-    try {
-      res = await _client.post(
-        uri('close-pane', query: {'surface': pane}, machine: machine),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    final res = await _mutate(
+      'close-pane',
+      query: {'surface': pane},
+      machine: machine,
+    );
     if (res.statusCode != 200) {
       throw ServerException('pane 을 못 닫았다 (${res.statusCode})');
     }
@@ -1603,15 +1621,11 @@ class Server {
     bool all = false,
     String? machine,
   }) async {
-    try {
-      await _client.post(
-        uri('term/notes/read', machine: machine),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'ids': ids, 'all': all}),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    await _mutate(
+      'term/notes/read',
+      machine: machine,
+      json: {'ids': ids, 'all': all},
+    );
   }
 
   /// 옆으로 밀어 지운 쪽지 — 서버 파일에서도 사라진다(사진 포함).
@@ -1620,15 +1634,11 @@ class Server {
     bool all = false,
     String? machine,
   }) async {
-    try {
-      await _client.post(
-        uri('term/notes/delete', machine: machine),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'ids': ids, 'all': all}),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    await _mutate(
+      'term/notes/delete',
+      machine: machine,
+      json: {'ids': ids, 'all': all},
+    );
   }
 
   /// 하단바 「최근 복사」 목록 — 미리보기·id·비밀 여부. 본문은 `clipboardItem` 으로.
@@ -1670,16 +1680,7 @@ class Server {
     Map<String, Object?> body, {
     String? machine,
   }) async {
-    final http.Response res;
-    try {
-      res = await _client.post(
-        uri(path, machine: machine),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode(body),
-      );
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
+    final res = await _mutate(path, machine: machine, json: body);
     final j = res.statusCode == 200 ? jsonDecode(res.body) : null;
     if (j is! Map || j['ok'] != true) {
       throw ServerException(
@@ -1833,7 +1834,12 @@ class _KasanetGateway implements KasanetGateway {
         .timeout(const Duration(seconds: 10));
     if (res.statusCode != 200) return null;
     final j = jsonDecode(utf8.decode(res.bodyBytes));
-    return j is Map ? j.cast<String, Object?>() : null;
+    if (j is! Map) return null;
+    if (j['replay'] == true) {
+      final id = j['machine_id'];
+      server._replay.addAll([machine ?? '', if (id is String && id.isNotEmpty) '~$id']);
+    }
+    return j.cast<String, Object?>();
   }
 
   @override

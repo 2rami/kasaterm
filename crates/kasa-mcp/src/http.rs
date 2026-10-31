@@ -47,6 +47,7 @@ mod git_api;
 mod settings;
 mod arona_ui;
 mod host;
+mod replay;
 #[cfg(test)]
 mod test_support;
 

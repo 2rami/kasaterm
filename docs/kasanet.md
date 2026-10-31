@@ -207,8 +207,13 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - **길 고르기(폰)** `KasanetRouter` — 요청마다 `Server.uri` 가 그 기계 입구가 직통이면 `http://127.0.0.1:L/…`, 아니면 관문
   (`relay/account/[m/~id/]…`). 관문이 확인해 주는 값(`machines` 의 살아 있는 기계 목록, `nacho/`)과 배우는 길(`version`·
   `kasanet/`)은 늘 관문. 입구로는 관문 토큰·소켓 인증 부프로토콜을 싣지 않는다. 입구로 간 GET 이 길에서 끊기면 관문으로
-  한 번 더 간다(POST 는 다시 안 보낸다 — 키 입력이 두 번 간다). 1초마다 입구 상태를 읽어 직통↔관문이 바뀌면 알리고, 학생
-  화면 소켓은 관문에 붙어 있다가 직통이 서면 다시 붙어 옮긴다. 앱이 깨어나면 `network_changed` 와 재등록. 데스크톱이 다시
+  한 번 더 간다. 데스크톱을 바꾸는 요청(답장·사진·칸 조작·승인·쪽지·클립보드·설정)은 `Server._mutate` 하나로 가고, 첫 시도가
+  8초(사진은 올리는 시간만큼 더) 안에 답이 없으면 같은 `x-kasa-request-id` 로 관문에 두 번까지 다시 보낸다 — 셀룰러에서 직통이
+  죽어도 입구는 알아챌 때까지 「직통」이라 답하며 요청을 삼킨다(10-31). 다시 보내기는 `/version` 에 `replay` 를 알린 데스크톱에만
+  (`http/replay.rs` 가 같은 표식을 한 번만 처리하고 처음 답을 되준다). 옛 판에는 한 번만 길게 — 키 입력이 두 번 간다. 1초마다
+  입구 상태를 읽어 직통↔관문이 바뀌면 알리고, 학생 화면 소켓은 관문에 붙어 있다가 직통이 서면 다시 붙어 옮긴다. 앱이 깨어나거나
+  켠 채 망이 바뀌면(iOS `NWPathMonitor` → `network_watch.dart`) `network_changed` 와 재등록, 묶어 둔 HTTP 연결은 버리고 학생
+  화면·화면 보기 소켓은 관문으로 곧바로 다시 붙는다 — 옛 망의 소켓은 살아 있는 척하다 핑에야 끊긴다. 데스크톱이 다시
   떠 폰을 잊었으면(403) 수명을 기다리지 않고 다시 등록하고, 재등록마다 `/version` 부터 다시 받아 포트가 바뀐 데스크톱에도
   입구가 따라간다.
 - **앱 안 Safari 화면** 설정 「데스크톱 개발 서버 열기」(포트·경로) → `NetTcpBridge` 가 폰 `localhost:L`(v4·v6, 데스크톱과
@@ -228,8 +233,10 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - 검사 `cargo test -p kasa-net`(돌리기: 원래 포트 안 닿음·표 밖 포트 막힘·잊으면 연결 끊김 / `direct_only` 가 못 실을 때
   닫음) · `cargo test -p kasa-net-ffi`(C ABI 를 앱 순서로: 루프백 데스크톱에 직통으로 싣고, 직통을 잃으면 닫음) ·
   `cargo test -p kasa-mcp --lib phone_ingress`(폰 입구 = 관문 자격·쿠키 걷기 / 카사넷·로컬로 온 등록 403 / 관문 주인 등록 통과)
-  · `flutter test test/kasanet_test.dart test/net_tcp_test.dart`(길 고르기·토큰 안 싣기·GET 한 번 더·POST 안 다시·옛 판·거절·
-  다른 기계·깨어남·새 포트 따라가기 / 다리 반쯤 닫기·빈 포트).
+  · `flutter test test/kasanet_test.dart test/net_tcp_test.dart`(길 고르기·토큰 안 싣기·GET 한 번 더·옛 판·거절·
+  다른 기계·깨어남·새 포트 따라가기 / 다리 반쯤 닫기·빈 포트) · `flutter test test/foreground_reconnect_test.dart`(삼킨 직통 뒤
+  같은 표식으로 관문 다시 보내기·옛 판은 안 다시·망 바뀜에 소켓 옮기기) · `cargo test -p kasa-mcp --lib replay`(같은 표식 한 번·
+  처리 중이면 기다려 같은 답·끊긴 첫 요청도 끝까지).
 
 ### P5 검증 (2026-09-29, 로컬 관문 + 격리 데스크톱 + 시뮬레이터, 같은 맥)
 

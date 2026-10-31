@@ -1,6 +1,7 @@
 import AuthenticationServices
 import Flutter
 import LocalAuthentication
+import Network
 import UIKit
 import QuickLook
 import UserNotifications
@@ -21,6 +22,10 @@ import os
   private var webAuth: ASWebAuthenticationSession?
   private var backgroundChannel: FlutterMethodChannel?
   private var graceTask: UIBackgroundTaskIdentifier = .invalid
+  private var networkChannel: FlutterMethodChannel?
+  private let pathMonitor = NWPathMonitor()
+  /// 지난번에 본 망의 모양(상태·인터페이스). 처음 한 번은 지금 상태를 알릴 뿐이라 비교할 것이 없다.
+  private var lastPath: String?
   /// 설치에 앞자리를 내주는 중 — 뒤로 간 앱이 시간을 더 받아 살아 있으면 설치가 그만큼 밀릴 수 있다.
   private var leavingForInstall = false
   /// 새 판 설치 뒤 「눌러서 열기」 알림. 새 판이 켜지면 거둔다.
@@ -104,6 +109,22 @@ import os
         result(FlutterMethodNotImplemented)
       }
     }
+    // 앱을 켠 채 망이 바뀐 순간(다트 `network_watch.dart`). 돌아올 때만 길을 다시 찾으면 옛 망의 직통 입구가
+    // 요청과 소켓을 삼킨다. 새 망이 쓸 수 있게 됐을 때만 알린다 — 끊긴 동안 다시 붙어 봐야 헛돈다.
+    networkChannel = FlutterMethodChannel(name: "kasaterm/network", binaryMessenger: messenger)
+    pathMonitor.pathUpdateHandler = { [weak self] path in
+      let shape = "\(path.status)|" + path.availableInterfaces.map { $0.name }.joined(separator: ",")
+      let usable = path.status == .satisfied
+      DispatchQueue.main.async {
+        guard let self else { return }
+        let last = self.lastPath
+        self.lastPath = shape
+        if let last, last != shape, usable {
+          self.networkChannel?.invokeMethod("changed", arguments: nil)
+        }
+      }
+    }
+    pathMonitor.start(queue: DispatchQueue(label: "kasaterm.network"))
     // 새 판 설치(다트 `installRelease`). 앞에 떠 있는 앱은 iOS 가 갈아 끼우지 않아 홈으로 비켜서야 설치가 시작되고,
     // 설치된 앱을 스스로 켤 수는 없어 알림을 남긴다. 비켜서는 공개 API 가 없어 suspend 를 보낸다 — App Store 판이 아니다.
     // suspend 가 먹지 않는 iOS 면 사파리로 설치 화면을 연다(공개 API 로 앞자리를 내주는 길).

@@ -174,7 +174,7 @@ void main() {
     expect(server.uri('term/panes').host, '127.0.0.1');
   });
 
-  test('입구로 간 GET 이 끊기면 관문으로 한 번 더, POST 는 다시 안 보낸다', () async {
+  test('입구로 간 GET 이 끊기면 관문으로 한 번 더, 같은 표식을 모르는 데스크톱엔 POST 를 다시 안 보낸다', () async {
     final wire = Wire();
     final native = FakeNative();
     final server = Server.account(
@@ -194,9 +194,10 @@ void main() {
 
     wire.requests.clear();
     await expectLater(server.send('%1', 'hi'), throwsA(anything));
-    expect(wire.requests.map((r) => r.url.host), [
+    expect(wire.requests.where((r) => r.method == 'POST').map((r) => r.url.host), [
       '127.0.0.1',
     ], reason: '키 입력이 두 번 가면 안 된다');
+    expect(wire.requests.last.url.path, '/relay/account/m/~mac1/version', reason: '다시 보내도 되는지는 그 입구의 기계에 관문으로 묻는다');
   });
 
   test('카사넷이 없는 옛 데스크톱·거절하는 데스크톱은 관문 그대로', () async {

@@ -240,6 +240,8 @@ pub fn spawn_http_server_opts(
                         // 오판했다(2026-09-16 실측). 상류 한도는 상류가 판정하게 둔다.
                         .layer(axum::extract::DefaultBodyLimit::max(PROXY_BODY_LIMIT)),
                     )
+                    // 폰이 같은 표식으로 다시 보낸 요청은 한 번만 — 자격 검사(아래 겹) 뒤에 표식을 잡는다.
+                    .layer(axum::middleware::from_fn(replay::replay_mw))
                     // 부작용 있는 요청에 두르는 마지막 한 겹. 라우트마다 손으로
                     // 거는 대신 레이어로 걸어야 **새로 추가될 라우트도 자동으로**
                     // 보호된다 — 31개 중 하나를 빠뜨리면 그게 곧 구멍이다.

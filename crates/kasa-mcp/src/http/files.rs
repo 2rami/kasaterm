@@ -162,9 +162,12 @@ async fn paste_image_handler(
     }
     // 클립보드+Ctrl+V 로 claude 입력에 [Image] 첨부만. 아로나 대화창엔 send 후 프록시가
     // 캡처한 user 메시지(텍스트+이미지)로 말풍선에 뜬다 — sent-images 큰 박스 write 안 함(사용자).
-    match backend.paste_image(&surface, body.to_vec()) {
-        Ok(()) => (cors, Json(serde_json::json!({ "ok": true }))),
-        Err(error) => (cors, Json(serde_json::json!({ "ok": false, "error": error.to_string() }))),
+    // GUI 답을 10초까지 기다린다 — 비동기 일꾼을 그동안 붙들면 같은 기기의 다른 요청이 밀린다.
+    let pasted = tokio::task::spawn_blocking(move || backend.paste_image(&surface, body.to_vec())).await;
+    match pasted {
+        Ok(Ok(())) => (cors, Json(serde_json::json!({ "ok": true }))),
+        Ok(Err(error)) => (cors, Json(serde_json::json!({ "ok": false, "error": error.to_string() }))),
+        Err(_) => (cors, Json(serde_json::json!({ "ok": false, "error": "paste worker stopped" }))),
     }
 }
 

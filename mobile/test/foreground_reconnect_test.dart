@@ -5,7 +5,9 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:kasaterm_mobile/kasanet.dart';
+import 'package:kasaterm_mobile/network_watch.dart';
 import 'package:kasaterm_mobile/relay_account.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/term_session.dart';
@@ -209,21 +211,96 @@ void main() {
 
   test('a chat line the dead direct path swallowed is resent once through the gateway with the same id',
       () => HttpOverrides.runWithHttpOverrides(() async {
-    // 셀룰러에서 직통이 죽은 입구 — 연결은 받고 요청은 삼킨 채 답하지 않는다.
-    final swallowed = <String>[];
+    final rig = await _Swallow.start(replay: false);
+    addTearDown(rig.close);
+
+    await rig.server.chatSend('%3', '셀룰러에서 친 말', machine: '~mini');
+
+    expect(rig.swallowed.toString(), contains('/term/chat-send'), reason: 'the first try took the direct path');
+    expect(rig.received, hasLength(1));
+    final sent = jsonDecode(rig.received.single.body) as Map;
+    expect(sent['text'], '셀룰러에서 친 말');
+    final id = RegExp(r'"message_id":"([^"]+)"').firstMatch(rig.swallowed.toString())?.group(1);
+    expect(sent['message_id'], id, reason: 'an older desktop still drops a repeat of the same body id');
+  }, _NativeHttp()));
+
+  test('a pane command and a photo the dead direct path swallowed are resent once with the same request id',
+      () => HttpOverrides.runWithHttpOverrides(() async {
+    final rig = await _Swallow.start(replay: true);
+    addTearDown(rig.close);
+
+    await rig.server.closePane('%3', machine: '~mini');
+    await rig.server.pasteImage('%3', [0x89, 0x50, 0x4e, 0x47], machine: '~mini');
+
+    expect(rig.received.map((r) => r.path), ['/relay/account/m/~mini/close-pane', '/relay/account/m/~mini/paste-image']);
+    final firstTries = RegExp(r'x-kasa-request-id: ([^\r\n]+)', caseSensitive: false)
+        .allMatches(rig.swallowed.toString())
+        .map((m) => m.group(1))
+        .toList();
+    expect(firstTries, rig.received.map((r) => r.id).toList(), reason: 'the desktop runs a repeated id once');
+    expect(rig.received.last.query, {'surface': '%3'});
+  }, _NativeHttp()));
+
+  test('an older desktop that cannot drop repeats gets a single longer try, never a resend',
+      () => HttpOverrides.runWithHttpOverrides(() async {
+    final rig = await _Swallow.start(replay: false);
+    addTearDown(rig.close);
+
+    await expectLater(rig.server.closePane('%3', machine: '~mini'), throwsA(isA<ServerException>()));
+
+    expect(rig.swallowed.toString(), contains('/close-pane'));
+    expect(rig.received, isEmpty, reason: 'a resend could close a second pane on an old desktop');
+  }, _NativeHttp()));
+
+  test('a network change while open moves the terminal socket to the gateway at once',
+      () => HttpOverrides.runWithHttpOverrides(() async {
+    final gateway = await _Host.start();
+    final direct = await _Host.start();
+    final server = gateway.server(native: _Native(direct.http.port));
+    server.uri('term/panes', machine: '~mini');
+    await _until(() => server.pathOf('~mini')?.$1 == true);
+    final term = TermSession(server, _pane)..connect();
+    addTearDown(() async { term.dispose(); server.close(); await direct.close(); await gateway.close(); });
+    await _until(() => term.canSend && direct.sockets.length == 1);
+    expect(gateway.sockets, isEmpty);
+
+    TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    NetworkWatch.instance.changed();
+
+    await _until(() => gateway.sockets.length == 1 && term.canSend);
+    expect(gateway.addresses.single.path, '/relay/account/m/~mini/term/ws');
+    term.sendText('after the switch');
+    await _until(() => gateway.keys.isNotEmpty);
+    expect(direct.keys, isEmpty);
+  }, _NativeHttp()));
+}
+
+/// 셀룰러에서 직통이 죽은 입구(연결은 받고 요청은 삼킨다)와 관문. 관문은 받은 POST 를 적는다.
+class _Swallow {
+  _Swallow._(this.hole, this.gateway, this.saved);
+  final ServerSocket hole;
+  final HttpServer gateway;
+  final (Duration, Duration) saved;
+  late final Server server;
+  final swallowed = StringBuffer();
+  final received = <({String path, Map<String, String> query, String? id, String body})>[];
+
+  static Future<_Swallow> start({required bool replay}) async {
     final hole = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-    hole.listen((sock) => sock.listen((d) => swallowed.add(latin1.decode(d)), onError: (Object _) {}));
-    final sent = <Map<String, Object?>>[];
     final gateway = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final rig = _Swallow._(hole, gateway, (Server.mutateFirstWait, Server.mutateRetryWait));
+    hole.listen((sock) => sock.listen((d) => rig.swallowed.write(latin1.decode(d)), onError: (Object _) {}));
     gateway.listen((request) async {
       final path = request.uri.path;
+      final body = latin1.decode(await request.fold<List<int>>([], (all, part) => all..addAll(part)));
       final Object reply;
       if (path.endsWith('/version')) {
-        reply = {'machine_id': 'mini', 'kasanet': {'id': 'fixture-desk'}};
+        reply = {'machine_id': 'mini', 'kasanet': {'id': 'fixture-desk'}, if (replay) 'replay': true};
       } else if (path.endsWith('/kasanet/phone')) {
         reply = {'ok': true, 'ttl_secs': 900};
-      } else if (path == '/relay/account/m/~mini/term/chat-send') {
-        sent.add((jsonDecode(await utf8.decodeStream(request)) as Map).cast<String, Object?>());
+      } else if (request.method == 'POST') {
+        rig.received.add((path: path, query: request.uri.queryParameters,
+          id: request.headers.value('x-kasa-request-id'), body: utf8.decode(latin1.encode(body), allowMalformed: true)));
         reply = {'ok': true, 'via': 'tell'};
       } else {
         reply = {};
@@ -232,29 +309,22 @@ void main() {
       request.response.write(jsonEncode(reply));
       await request.response.close();
     });
-    final (first, retry) = (Server.chatSendFirstWait, Server.chatSendRetryWait);
-    Server.chatSendFirstWait = const Duration(milliseconds: 300);
-    Server.chatSendRetryWait = const Duration(seconds: 2);
-    final server = Server.account(AccountSession(
+    Server.mutateFirstWait = const Duration(milliseconds: 300);
+    Server.mutateRetryWait = const Duration(seconds: 2);
+    rig.server = Server.account(AccountSession(
       origin: Uri.parse('http://127.0.0.1:${gateway.port}'), account: 'fixture',
       deviceId: 'fixture-phone', token: 'fixture-token',
     ), kasanet: _Native(hole.port));
-    addTearDown(() async {
-      Server.chatSendFirstWait = first;
-      Server.chatSendRetryWait = retry;
-      server.close();
-      await gateway.close(force: true);
-      await hole.close();
-    });
-    server.uri('term/panes', machine: '~mini');
-    await _until(() => server.pathOf('~mini')?.$1 == true);
+    rig.server.uri('term/panes', machine: '~mini');
+    await _until(() => rig.server.pathOf('~mini')?.$1 == true);
+    return rig;
+  }
 
-    await server.chatSend('%3', '셀룰러에서 친 말', machine: '~mini');
-
-    expect(swallowed.join(), contains('/term/chat-send'), reason: 'the first try took the direct path');
-    expect(sent, hasLength(1));
-    expect(sent.single['text'], '셀룰러에서 친 말');
-    final id = RegExp(r'"message_id":"([^"]+)"').firstMatch(swallowed.join())?.group(1);
-    expect(sent.single['message_id'], id, reason: 'the desktop drops a repeat of the same id');
-  }, _NativeHttp()));
+  Future<void> close() async {
+    Server.mutateFirstWait = saved.$1;
+    Server.mutateRetryWait = saved.$2;
+    server.close();
+    await gateway.close(force: true);
+    await hole.close();
+  }
 }
