@@ -41,9 +41,11 @@ mod(tool.check · classic.PermissionRequest)
 | `POST /relay/approvals/approver` | 계정 기기 | 이 관문 실행 동안 그 앱 화면의 승인 열쇠(43자) 해시를 맡긴다 |
 | `POST·DELETE /relay/approvals/push` | 폰 | APNs 토큰 맡기기·거두기(기기 하나에 토큰 하나) |
 | `GET /relay/approvals/audit?limit=` | 계정 기기 | 감사 줄, 최근 것부터 |
+| `POST /relay/push/alert` | 데스크톱 기기만 | 이 기계 학생의 끝냄·대기·쪽지 `{title, body, pane, kind, collapse?, sender?, url?}` 를 계정 폰들에 쏜다(`gateway_push_alert.rs`). 기계는 관문 기록의 `~<machine_id>`, 종류는 폰을 울리는 것만, 기기당 분당 30통. 답 `{ok, phones}` — 토큰이 있는 계정 폰 수 |
 
 거절 코드: `desktop_only` · `already_closed`(409, 지금 상태 동봉) · `expired`(410) · `digest_mismatch` ·
 `truncated_cannot_allow` · `approver_required` · `not_origin` · `too_many_pending`(계정당 열린 요청 32).
+알림 창구는 `bad_kind` · `bad_text` · `bad_url` · `machine_required` · `rate_limited`(429).
 
 ## 지키는 것
 

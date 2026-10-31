@@ -7,6 +7,10 @@
 //! `/term/panes` 행(이 기계 + 명부 기계 캐시)을 4초마다 대조해 「승인·질문 대기로 들어감」
 //! 「바쁨→끝냄」 순간에만 쏜다. 상태를 그대로 폴링해 쏘면 같은 대기가 매번 온다.
 //!
+//! 계정 모드 폰은 데스크톱에 토큰을 맡기지 않고 관문에만 맡긴다(폰 `push.dart` `bindAccount`) — 이 기기엔
+//! 토큰도 열쇠도 없을 수 있다. 그래서 이 기계 학생의 알림은 관문 로그인이 있으면 관문(`POST /relay/push/alert`)에도
+//! 올리고, 관문이 계정 폰들에 쏜다. 명부 기계 행은 올리지 않는다 — 그 기계가 계정 기기면 스스로 올려 두 번 온다.
+//!
 //! APNs 는 HTTP/2 + ES256 JWT(`iss`=팀, `kid`=열쇠) 를 요구한다. 서명은 ring 으로
 //! 직접 한다 — jsonwebtoken 을 더 들이지 않으려고. 토큰은 50분마다 새로 만든다
 //! (애플은 1시간 넘은 것을 거절하고, 너무 잦은 갱신도 막는다).
@@ -286,8 +290,82 @@ fn notification_thread(alert: &Alert) -> String {
     format!("{}/{}", alert.machine.as_deref().unwrap_or("local"), alert.pane)
 }
 
-/// 등록된 폰 전부에 쏜다. 열쇠나 토큰이 없으면 조용히 0.
+/// 이 기기에 맡긴 폰 전부 + (이 기계 학생이면) 관문을 거쳐 계정 폰 전부. 받은 폰 수.
 pub async fn send(alert: &Alert) -> usize {
+    let mut sent = send_local(alert).await;
+    if alert.machine.is_none() {
+        sent += send_account(alert).await;
+    }
+    sent
+}
+
+/// 관문에 올릴 몸통. 관문은 상한을 넘거나 제어 문자가 든 몸통을 통째로 거절하니(알림이 사라진다) 여기서 맞춰
+/// 다듬는다 — 쪽지 요약엔 줄바꿈이 든다. 얼굴은 싣지 않는다(관문이 안 받는다, `gateway_push_alert.rs`).
+pub(crate) fn relay_body(alert: &Alert) -> Value {
+    let clip = |text: &str, max: usize| -> String {
+        text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(max).collect()
+    };
+    let url = alert.url.as_deref().filter(|u| {
+        u.len() <= 2048 && (u.starts_with("https://") || u.starts_with("http://")) && !u.chars().any(char::is_control)
+    });
+    serde_json::json!({
+        "title": clip(&alert.title, 120),
+        "body": clip(&alert.body, 180),
+        "pane": alert.pane,
+        "kind": alert.kind,
+        "collapse": alert.collapse.as_deref().map(|c| clip(c, 64)),
+        "sender": alert.sender.as_deref().map(|s| clip(s, 40)),
+        "url": url,
+    })
+}
+
+fn relay_client() -> &'static reqwest::Client {
+    static C: OnceLock<reqwest::Client> = OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+/// 관문 로그인이 있으면 관문에 올린다. 답의 `phones` 는 토큰이 있는 계정 폰 수다.
+async fn send_account(alert: &Alert) -> usize {
+    static OLD_GATEWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some((cred, _)) = crate::device_auth::capture() else { return 0 };
+    let url = format!("{}/relay/push/alert", cred.relay.trim_end_matches('/'));
+    let response = match relay_client().post(url).bearer_auth(&cred.token).json(&relay_body(alert)).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[push] 관문에 못 올림: {e}");
+            return 0;
+        }
+    };
+    let status = response.status().as_u16();
+    let value: Value = response.json().await.unwrap_or_default();
+    match status {
+        200..=299 => value["phones"].as_u64().unwrap_or(0) as usize,
+        401 if value["error"] == "unauthorized" => {
+            crate::device_auth::reject_token(&cred.token);
+            0
+        }
+        // 창구가 없는 옛 관문 — 알림마다 같은 말을 쌓지 않는다.
+        404 => {
+            if !OLD_GATEWAY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("[push] 관문이 옛 판이라 계정 폰 알림을 못 올림(/relay/push/alert 없음)");
+            }
+            0
+        }
+        _ => {
+            eprintln!("[push] 관문이 알림을 거절함 ({status} {})", value["error"].as_str().unwrap_or(""));
+            0
+        }
+    }
+}
+
+/// 이 기기의 `push_tokens.json` 폰 전부에 쏜다. 열쇠나 토큰이 없으면 조용히 0.
+async fn send_local(alert: &Alert) -> usize {
     let Some(key) = load_key() else { return 0 };
     let list = tokens();
     if list.is_empty() {
@@ -481,6 +559,11 @@ fn client_local() -> &'static reqwest::Client {
     C.get_or_init(|| reqwest::Client::builder().build().unwrap_or_default())
 }
 
+/// 쏠 길이 하나라도 있나 — 이 기기에 맡긴 토큰과 열쇠, 또는 관문 로그인(계정 폰은 관문이 쏜다).
+fn ready() -> bool {
+    (!tokens().is_empty() && configured()) || crate::device_auth::capture().is_some()
+}
+
 /// 상태 변화 감시 — 본체(PTY 를 가진 앱) 한 곳만 돈다. 첫 바퀴는 기준만 잡고 안 쏜다
 /// (켜자마자 대기 중인 학생 전부가 한꺼번에 울리지 않게).
 pub async fn push_loop() {
@@ -489,7 +572,7 @@ pub async fn push_loop() {
     let mut primed = false;
     loop {
         tokio::time::sleep(TICK).await;
-        if tokens().is_empty() || !configured() {
+        if !ready() {
             continue;
         }
         let rows = all_rows().await;
@@ -591,6 +674,33 @@ mod tests {
             assert!(!super::note_rings(kind), "{kind}");
         }
         assert!(!super::needs_choice("idle"));
+    }
+
+    #[test]
+    fn the_relay_body_fits_the_gateway_and_never_names_a_machine_or_face() {
+        let alert = super::Alert {
+            title: "가".repeat(130),
+            body: "첫 줄\n둘째 줄".repeat(40),
+            machine: None,
+            pane: "%3".into(),
+            kind: "note:link".into(),
+            collapse: None,
+            sender: Some("시로코\t".repeat(10)),
+            avatar_slug: Some("shiroko".into()),
+            url: Some("javascript:alert(1)".into()),
+        };
+        let body = super::relay_body(&alert);
+        assert_eq!(body["title"].as_str().unwrap().chars().count(), 120);
+        let text = body["body"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 180);
+        assert!(text.starts_with("첫 줄 둘째 줄"));
+        assert_eq!(body["sender"].as_str().unwrap().chars().count(), 40);
+        assert!(!body["sender"].as_str().unwrap().contains('\t'));
+        assert!(body["url"].is_null() && body["collapse"].is_null());
+        assert!(body.get("avatar").is_none() && body.get("machine").is_none());
+
+        let page = super::Alert { url: Some("https://example.com/a".into()), ..alert };
+        assert_eq!(super::relay_body(&page)["url"], "https://example.com/a");
     }
 
     /// 진짜 열쇠가 있는 기계에서만 — ring 이 애플 .p8 을 읽고 서명하는지.

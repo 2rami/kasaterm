@@ -45,6 +45,8 @@ mod approvals;
 mod profile;
 #[path = "gateway_agent_chains.rs"]
 mod chains;
+#[path = "gateway_push_alert.rs"]
+mod push_alert;
 
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -247,6 +249,8 @@ pub struct Gate {
     enroll: Arc<install::Enroll>,
     /// 원격 승인 요청(메모리)·승인 열쇠·폰 푸시 토큰(`gateway_approvals.rs`).
     approvals: Arc<approvals::Store>,
+    /// 데스크톱이 올린 끝냄·대기 알림의 기기별 분당 송신 수(`gateway_push_alert.rs`).
+    push_alerts: Arc<push_alert::Meter>,
     /// 닉네임·올린 프사(`gateway_profile.rs`).
     profiles: Arc<profile::Profiles>,
     auth_changes: tokio::sync::watch::Sender<u64>,
@@ -349,6 +353,7 @@ impl Gate {
             install_dir: state_path.as_ref().map(|p| p.with_file_name("relay-install")),
             enroll: Arc::new(install::Enroll::from_env()),
             approvals: Arc::new(approvals::Store::open(state_path.as_deref())),
+            push_alerts: Arc::default(),
             profiles: Arc::new(profile::Profiles::open(state_path.as_deref())),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
@@ -498,6 +503,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(approvals::routes())
         .merge(profile::routes())
         .merge(chains::routes())
+        .merge(push_alert::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))
