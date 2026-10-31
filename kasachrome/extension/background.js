@@ -3,6 +3,7 @@ import { setBridgeSender, bridgeResolve } from './bridge-ask.js'
 import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
+import { conceal } from './conceal.js'
 import { PORT } from './port.js'
 
 // 이름을 URL 로 두면 전역 URL 생성자를 가려 hostOf 가 조용히 폴백을 탄다
@@ -51,6 +52,8 @@ function describe(tool, args = {}, result = {}) {
     case 'bookmarks': return '북마크 읽기'
     case 'set_task': return `작업명 — ${args.task}`
     case 'cdp_raw': return `CDP — ${args.method}`
+    // 값은 args 에 있지만 여기서는 host 만 쓴다 — 이 줄은 팝업·칩에 그대로 보인다.
+    case 'login_fill': return result?.host ? `로그인 채우기 — ${result.host}` : '로그인 채우기'
     default: return null
   }
 }
@@ -156,13 +159,13 @@ function connect() {
       const label = describe(msg.tool, msg.args, result)
       if (label) addActivity(msg.client, label, tabId)
       if (tabId) markDone(msg.client, tabId)
-      reply({ type: 'result', id: msg.id, ok: true, result })
+      reply({ type: 'result', id: msg.id, ok: true, result: conceal(result) })
     } catch (e) {
       // 실패도 남긴다 — "눌렀는데 왜 안 됐지" 를 되짚을 때 성공만 보이면 그림이 반쪽이다
       const label = describe(msg.tool, msg.args, {})
       if (label) addActivity(msg.client, label, tabId, false)
       if (tabId) markDone(msg.client, tabId)
-      reply({ type: 'result', id: msg.id, ok: false, error: String(e && e.message ? e.message : e) })
+      reply({ type: 'result', id: msg.id, ok: false, error: conceal(String(e && e.message ? e.message : e)) })
     }
   }
 

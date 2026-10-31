@@ -299,6 +299,75 @@ SPA 에서 해시는 화면을 가르는 라우트다). 사람이 열어둔 탭�
 
 승격된 세션은 **유휴 15초 뒤 자동으로 떨어져** 배너가 사라진다. `browser_watch` 로 수집을 켠 탭만 계속 붙어 있는다.
 
+## 로그인 채우기 (`login`)
+
+에이전트가 로그인 화면에서 멈추지 않게, 비밀번호를 모델 맥락에 한 글자도 남기지 않고 칸에 넣는다. 사람이 이 맥
+키체인에 사이트 로그인을 등록해 두고, 쓸 때마다 폰 Face ID 로 허락한다(카사텀 `secret` — `docs/secret-faceid-approval.md`).
+
+```bash
+kc login 123                        # 탭 123 의 사이트 로그인으로 채운다(폰 허락을 최대 2분 기다린다)
+kc login 123 --account work@x.com   # 같은 사이트에 로그인이 여럿이면 계정 라벨로 고른다
+```
+
+```
+login_target(tabId)   확장이 탭의 실제 주소에서 host 와 로그인 칸 유무를 읽는다 — 칸이 없으면 폰을 부르지 않는다
+kasaterm-cli secret read web:<host>[#계정]   폰 허락 → 값은 이 MCP(또는 kc) 프로세스 stdout 으로만
+login_fill(tabId, host, 값)   브리지 → 확장: 탭 host 를 다시 보고, 페이지 안에서 넣는 같은 실행에서 한 번 더 본다
+```
+
+- **host 는 에이전트가 주지 않는다.** 확장이 탭 주소(`URL.host`, 포트 포함)에서 읽고, 그 값이 곧 키체인 서비스
+  이름이다. 폰 승인을 기다리는 사이 탭이 다른 사이트로 가면 `LOGIN_HOST_CHANGED` 로 넣지 않는다.
+  https 와 localhost 만 받는다(평문 http 는 같은 이름을 가로채기 쉽다).
+- **칸 찾기.** 최상위 문서의 보이는 칸만(열린 shadow root 포함, iframe 제외). 비밀번호는 `type=password` 중
+  `autocomplete=current-password` 를 먼저, `new-password` 만 있는 가입 폼에는 넣지 않는다. 사용자명은
+  `autocomplete` username·email → 같은 폼에서 비밀번호 앞의 마지막 글 칸 → `type=email`·이름(user·email·login…).
+  비밀번호 칸이 없으면 사용자명만 넣는다(두 단계 로그인의 첫 화면 — 다음 화면에서 다시 부른다).
+- **넣기만 한다.** 네이티브 setter 로 값을 넣고 `input`·`change` 를 보낸다. 제출은 에이전트가 `click` 으로 한다.
+- **결과에는** host·서비스 키·채운 칸 종류·가린 사용자명(`t•••`, `showUsername` 으로만 보인다)만 있다.
+  비밀번호는 결과·오류·브리지 로그·활동 기록 어디에도 없다. 값은 MCP 프로세스 → 브리지 → 확장 메모리로만
+  지나가고 디스크에 안 쓴다.
+- **가림.** 넣은 비밀번호를 확장 워커 메모리에 30분 들고 있으면서 **모든 도구 결과·오류**에서 그 값(그대로·JSON
+  문자열·URL·폼 인코딩)을 `<concealed>` 로 바꾼다 — `eval_js` 로 칸을 읽거나 요청 본문을 보다가 새는 것을 막는다.
+  4자 미만 값과 스크린샷 base64 는 건너뛴다.
+- **사용 기록** `~/.kasachrome/credential-access.jsonl`(0600, 2MB 에서 한 번 돌림): 시각·누가(이름·칸·세션)·tabId·
+  host·서비스 키·계정 라벨·결과·채운 칸. 값과 사용자명은 없다.
+
+| 오류 | 뜻 |
+|---|---|
+| `LOGIN_DENIED` · `LOGIN_TIMEOUT` · `LOGIN_CANCELLED` | 폰에서 거절 · 2분 안에 허락 없음 · 요청 취소 |
+| `LOGIN_NOT_REGISTERED` | 그 사이트 로그인이 키체인에 없다 — 오류에 실린 등록 명령을 사람에게 부탁한다 |
+| `LOGIN_KEYCHAIN_DENIED` | 맥의 키체인 허용 창에서 거절 |
+| `LOGIN_NO_APPROVER` · `LOGIN_NOT_IN_PANE` | 믿는 폰 열쇠가 없다 · kasaterm 칸 밖에서 띄운 세션 |
+| `LOGIN_HOST_CHANGED` · `LOGIN_INSECURE_PAGE` · `LOGIN_NO_FORM` | 탭이 다른 사이트로 감 · https 아님 · 로그인 칸 없음 |
+
+### 사이트 로그인 등록 (사람이)
+
+```bash
+node kasachrome/scripts/login-add.mjs https://example.com/login [사용자명]
+```
+
+- 사용자명은 보이게, 비밀번호는 화면에 안 찍히는 프롬프트로 두 번 받는다. 터미널이 아니면 멈춘다 — 에이전트
+  도구(`kc`·MCP·`kasaterm-cli`)에는 쓰기 길이 없다.
+- 키체인 일반 암호로 넣는다: 서비스 `web:<host>`, 계정 = 사용자명, 값 = `{"username","password"}` JSON.
+  값은 `security -i` 에 표준입력으로 16진(`-X`)으로 넘겨 명령줄(`ps`)에 안 보인다. 같은 서비스·계정이면 덮어쓴다.
+- **읽을 앱을 `kasaterm.app` 하나로 묶는다(`-T`).** 안 묶으면 항목을 만든 `security` 가 믿는 앱이 되어, 같은
+  사용자의 아무 프로세스나 `security find-generic-password -w` 로 창 없이 꺼낸다 — 폰 승인을 건너뛰는 길이다
+  (`security dump-keychain -a` 로 ACL 확인: `-T` 를 주면 그 앱만 남는다). 앱은 `~/Applications`·`/Applications`
+  에서 찾고, 다른 곳이면 `--app <경로>`.
+- 처음 꺼낼 때 그 맥에 키체인 허용 창이 뜬다(항목 파티션이 `apple-tool:` 이라서) — 「항상 허용」 한 번.
+- host 는 탭 주소와 같은 꼴이어야 찾힌다: 기본 아닌 포트 포함(`localhost:3000`), `www.` 유무도 다른 사이트다.
+- 손으로 넣어도 된다: `security add-generic-password -s web:<host> -a <사용자명> -T ~/Applications/kasaterm.app -w`.
+  값이 JSON 이 아니면 통째로 비밀번호로 보고, 사용자명은 `--account` 로 준 라벨을 쓴다(안 주면 사용자명 칸은 둔다).
+  Windows 는 `cmdkey /generic:web:<host> /user:<사용자명> /pass`.
+- 지우기: `security delete-generic-password -s web:<host> -a <사용자명>`.
+
+### 남은 위험
+
+- 가림은 실수로 새는 것만 막는다. 페이지에 들어간 값은 페이지 것이라, 작정한 `eval_js`·`cdp_raw` 가 값을
+  비틀어(글자 사이 띄우기 따위) 꺼내는 것까지는 못 막는다. 워커가 다시 뜨면 가림 목록도 비워진다.
+- 원격 크롬(`KASACHROME_BRIDGE_URLS` 터널)에 붙어 있으면, 이 맥 키체인의 값이 터널을 건너 그 기계 크롬으로 간다.
+- 다른 출처 iframe 안의 로그인 위젯에는 넣지 않는다. 두 단계 로그인은 화면마다 폰 허락이 필요하다.
+
 ## 함정 (실측·문서 확인)
 
 - **DevTools 를 열면 디버거가 끊긴다**(`canceled_by_user`). 붙일 때 이미 열려 있으면 `DEVTOOLS_CONFLICT` 로 알려준다.
@@ -422,6 +491,8 @@ kc get_text '{"tabId":123}'     # 인자를 JSON 통째로 (도구 호출을 그
 
 도구 이름은 `browser_` 를 떼고 쓰며, 접두가 하나에만 걸리면 줄여도 된다(`kc book`).
 결과는 stdout, 진단은 stderr 로 나가므로 파이프에 섞이지 않는다. 실패하면 종료 코드가 1 이다.
+정수 인자에 빈 값·공백·16진·지수 꼴(`--tabId ""`)을 주면 거절한다 — 예전엔 `Number("")` = 0 이 되어 확장이 사람의
+활성 탭을 대상으로 잡았고, 확장도 이제 명시적 `tabId: 0` 을 `BAD_TAB_ID` 로 거절한다.
 
 **MCP 와 같은 코드를 지나간다.** `mcp/server.mjs --cli` 가 진입점이고, 도구 정의 하나를 MCP 레지스트리와
 CLI 가 함께 읽는다. 기기 라우팅·localhost 재작성·확장 자동 기동·스크린샷 파일 저장이 모두 그대로 적용되며,
@@ -450,7 +521,7 @@ node scripts/cc.mjs '[["list_tabs",{}],["read_page",{"tabId":123}]]'
 
 ## 툴
 
-`browser_status` `list_tabs` `new_tab` `close_tab` `activate_tab` `navigate` `read_page` `get_text` `find` `screenshot` `click` `hover` `drag` `swipe` `fill` `type` `press_key` `scroll` `scroll_to` `eval_js` `watch` `console_logs` `network_requests` `upload_file` `wait_for` `resize_window` `emulate_device` `set_task` `bookmarks` `attach_debugger` `detach_debugger` `dev_reload` `cdp_raw`
+`browser_status` `list_tabs` `new_tab` `close_tab` `activate_tab` `navigate` `read_page` `get_text` `find` `screenshot` `click` `hover` `drag` `swipe` `fill` `type` `press_key` `scroll` `scroll_to` `eval_js` `watch` `console_logs` `network_requests` `upload_file` `wait_for` `resize_window` `emulate_device` `set_task` `bookmarks` `login` `attach_debugger` `detach_debugger` `dev_reload` `cdp_raw`
 
 `swipe` 는 진짜 손가락이다. 폰에서 손가락으로 하는 것(캐러셀·덱 넘기기, 당겨서 새로고침, 스와이프 삭제,
 바텀시트 끌어올리기)은 `drag` 로 재현되지 않는다 — 그 UI 들은 touch 이벤트를 읽고 방향 락과 임계 거리로

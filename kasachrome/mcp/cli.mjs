@@ -45,16 +45,21 @@ function usage(name, flds, { brief = false } = {}) {
   return [strip(name), ...req, ...opt].join(' ')
 }
 
-function cast(value, f) {
-  if (f.type === 'integer' || f.type === 'number') {
-    const n = Number(value)
-    if (Number.isNaN(n)) throw new Error(`--${f.name} 은 숫자여야 합니다 (받은 값: ${value})`)
-    return n
-  }
+// ★`Number("")` 는 0 이고 확장은 tabId 가 비면 사람의 활성 탭을 쓴다. 변수에 tabId 를 못 담은 채
+// `kc close_tab --tabId ""` 를 부르면 사람 탭이 닫혔다(2026-10-01·10-12). 빈 값·공백·16진·지수 꼴은 숫자로 받지 않는다.
+function toNumber(value, type, name) {
+  const text = String(value).trim()
+  const ok = type === 'integer' ? /^-?\d+$/.test(text) : /^-?(\d+\.?\d*|\.\d+)$/.test(text)
+  if (!ok) throw new Error(`--${name} 은 ${type === 'integer' ? '정수' : '숫자'}여야 합니다 (받은 값: ${JSON.stringify(String(value))})`)
+  return Number(text)
+}
+
+export function cast(value, f) {
+  if (f.type === 'integer' || f.type === 'number') return toNumber(value, f.type, f.name)
   if (f.type === 'boolean') return value !== 'false'
   if (f.type === 'array') {
     try { return JSON.parse(value) } catch {}
-    return value.split(',').map((v) => (f.item === 'integer' || f.item === 'number' ? Number(v) : v))
+    return value.split(',').map((v) => (f.item === 'integer' || f.item === 'number' ? toNumber(v, f.item, f.name) : v))
   }
   if (f.type === 'object') return JSON.parse(value)
   if (value === 'null') return null

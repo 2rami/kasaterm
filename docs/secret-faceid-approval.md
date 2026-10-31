@@ -86,6 +86,9 @@
 거절 코드: `bad_ref` · `no_trusted_key`(믿는 폰 열쇠 없음) · `denied` · `expired` · `cancelled` · `bad_signature` · `replayed` ·
 `not_found`(그 키체인 항목 없음) · `keychain_denied`(맥의 허용 창에서 거절) · `not_text`.
 
+카사크롬 로그인 채우기(`kasachrome/README.md` 「로그인 채우기」)가 `secret read web:<host>[#계정]` 을 부르고 stderr 마지막 줄 끝의
+`(코드)` 로 거절 사유를 가른다(`kasachrome/mcp/login.mjs`). 이 꼴을 바꾸면 그쪽도 맞춘다.
+
 ## 관문 창구
 
 | 창구 | 누가 | 하는 일 |

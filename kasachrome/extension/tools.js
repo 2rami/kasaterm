@@ -3,6 +3,8 @@
 import * as cdp from './cdp.js'
 import { askBridge } from './bridge-ask.js'
 import { page, restricted } from './page.js'
+import { loginTarget, loginFill } from './login.js'
+import { explicitTabId } from './tab-id.js'
 import { withTimeout } from './wait.js'
 import { lookupDevice, suggestDevices, deviceTable, uaOverrideFor } from './devices.js'
 import { sameUrlKey, pickExistingTab } from './url.js'
@@ -202,8 +204,15 @@ function tabsQuery(q) {
   return new Promise((resolve) => chrome.tabs.query(q, resolve))
 }
 
+function requiredTabId(tabId) {
+  const id = explicitTabId(tabId)
+  if (!id) throw new Error('BAD_TAB_ID: 이 도구는 tabId 가 꼭 있어야 합니다. list_tabs 로 확인하세요.')
+  return id
+}
+
 async function resolveTabId(tabId) {
-  if (tabId) return Number(tabId)
+  const id = explicitTabId(tabId)
+  if (id) return id
   const [active] = await tabsQuery({ active: true, lastFocusedWindow: true })
   if (!active) throw new Error('NO_ACTIVE_TAB: 활성 탭을 찾지 못했습니다. list_tabs 로 확인하고 tabId 를 지정하세요.')
   return active.id
@@ -610,7 +619,7 @@ const handlers = {
 
     const opts = { focused, ...(incognito ? { incognito: true } : {}) }
     if (width && height) Object.assign(opts, { width: Number(width), height: Number(height), left: 0, top: 0 })
-    if (tabId) opts.tabId = await resolveTabId(tabId)
+    if (tabId != null) opts.tabId = await resolveTabId(tabId)
     else opts.url = normalizeUrl(url) || 'about:blank'
 
     const win = await chrome.windows.create(opts)
@@ -1456,6 +1465,15 @@ const handlers = {
     }
     return await cdp.raw(id, method, params || {})
   },
+
+  // MCP 의 browser_login 만 부르는 내부 단계. 활성 탭으로 물러나지 않는다 — 사람 탭에 비밀번호가 들어가면 안 된다.
+  async login_target({ tabId }) {
+    return await loginTarget(requiredTabId(tabId))
+  },
+
+  async login_fill({ tabId, host, username, password }) {
+    return await loginFill(requiredTabId(tabId), { host, username, password })
+  },
 }
 
 export async function dispatch(tool, args, ctx = {}) {
@@ -1467,7 +1485,8 @@ export async function dispatch(tool, args, ctx = {}) {
 // background 가 상태 배지를 그릴 대상 탭을 고르는 데 쓴다. tools 의 resolveTabId 와 같은 규칙이어야
 // 배지가 실제 조작 대상과 어긋나지 않는다.
 export async function targetTabOf(args = {}) {
-  if (args.tabId) return Number(args.tabId)
+  const id = explicitTabId(args.tabId)
+  if (id) return id
   const [active] = await tabsQuery({ active: true, lastFocusedWindow: true })
   return active?.id || null
 }

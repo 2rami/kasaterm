@@ -17,6 +17,7 @@ import { HOST, HOST_ID } from '../bridge/host.mjs'
 import { bridgeRoute, needsFreshBrowserHandles } from './bridge-route.mjs'
 import { resolveBrowserArgs } from './localhost-route.mjs'
 import { humanOnPhone, withHumanNote, showHuman, PHONE_NOTE } from './human-route.mjs'
+import { login } from './login.mjs'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
 const NAME = 'kasachrome'
@@ -547,6 +548,12 @@ tool('browser_dev_reload', 'Reload this extension itself after its source change
 tool('browser_cdp_raw', 'Escape hatch: send any raw Chrome DevTools Protocol command (e.g. "Emulation.setDeviceMetricsOverride"). Everything CDP can do is reachable here. One command is guarded: Input.dispatchTouchEvent on a hidden tab never gets acknowledged, so it is rejected with an explanation instead of hanging until the tool times out — for a whole gesture, prefer browser_swipe.', {
   tabId, method: z.string(), params: z.record(z.string(), z.any()).optional(),
 }, async (a) => text(await call('cdp_raw', a, 45000)))
+
+tool('browser_login', 'Sign in on a login page without ever seeing the password. Fills the username and password fields of the tab from the login the HUMAN saved for that site in this Mac\'s keychain (service `web:<host>`), after the human approves the request with Face ID on their phone — this call blocks until they do (up to 2 minutes) and fails with LOGIN_DENIED / LOGIN_TIMEOUT otherwise. The site is taken from the tab\'s real address, never from you, and is re-checked right before filling, so a password can only land on the site it was saved for (LOGIN_HOST_CHANGED if the tab moved). Only https pages (or localhost) are filled.\n\nIt only FILLS: press the sign-in button yourself with browser_click afterwards. The result names which fields were filled and the host — never the password, and the username is masked unless you pass showUsername. If the password later shows up in any other tool\'s output (eval_js, network bodies, page text) it comes back as <concealed>. Never try to read the password field back. LOGIN_NOT_REGISTERED means no login is saved for that site: ask the human to register one (the error carries the command) instead of asking them for the password. On a two-step sign-in (username screen, then password screen) call it once per screen. Every call is recorded (who, host, outcome — no values).', {
+  tabId: z.number().int().positive().describe('Tab id from list_tabs. Required — login never falls back to the active tab.'),
+  account: z.string().optional().describe('Which saved login for this site — the keychain account label (usually the username). Omit to use the first one saved.'),
+  showUsername: z.boolean().optional().describe('Show the filled username in the result. Default false — it is masked.'),
+}, async (a) => text(await login(a, { call, identity: IDENTITY })))
 
 // --cli 면 stdio MCP 대신 한 번 호출하고 끝낸다. 도구 스키마 45개를 상주로 들고
 // 다니지 않으려는 쪽을 위한 길이며, 지나는 경로는 MCP 와 완전히 같다.
