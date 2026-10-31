@@ -99,7 +99,7 @@ function render(result) {
   return out.join('\n')
 }
 
-function resolve(name, tools) {
+function resolve(name, tools, prog) {
   const want = strip(name)
   const names = [...tools.keys()]
   const exact = names.find((n) => strip(n) === want)
@@ -107,26 +107,26 @@ function resolve(name, tools) {
   const prefix = names.filter((n) => strip(n).startsWith(want))
   if (prefix.length === 1) return prefix[0]
   if (prefix.length > 1) throw new Error(`"${name}" 은 여럿에 걸립니다: ${prefix.map(strip).join(', ')}`)
-  throw new Error(`모르는 도구 "${name}" — kc --help 로 목록을 보세요`)
+  throw new Error(`모르는 ${prog.noun} "${name}" — ${prog.name} --help 로 목록을 보세요`)
 }
 
-function listAll(tools) {
+function listAll(tools, { name: p, noun, about }) {
   const rows = [...tools.entries()].map(([name, t]) => [usage(name, fields(t.schema), { brief: true }), summary(t.description)])
   const pad = Math.max(...rows.map((r) => width(r[0])))
   return [
-    'kc — 카사크롬 도구를 터미널에서 직접. MCP 서버를 거치지 않는다.',
+    `${p} — ${about}`,
     '',
-    '  kc <도구> [인자…]        실행',
-    '  kc <도구> --help         그 도구의 전문',
-    "  kc <도구> '{\"k\":1}'      인자를 JSON 통째로",
+    `  ${p} <${noun}> [인자…]        실행`,
+    `  ${p} <${noun}> --help         그 ${noun}의 전문`,
+    `  ${p} <${noun}> '{"k":1}'      인자를 JSON 통째로`,
     '',
     ...rows.map(([u, s]) => `  ${padTo(u, pad)}  ${s}`),
   ].join('\n')
 }
 
-function detail(name, tool) {
+function detail(name, tool, prog) {
   const flds = fields(tool.schema)
-  const lines = [`kc ${usage(name, flds)}`, '', tool.description]
+  const lines = [`${prog.name} ${usage(name, flds)}`, '', tool.description]
   if (flds.length) {
     lines.push('', '인자:')
     const pad = Math.max(...flds.map((f) => f.name.length))
@@ -139,12 +139,15 @@ function detail(name, tool) {
   return lines.join('\n')
 }
 
-export async function runCli(argv, tools) {
+const KC = { name: 'kc', noun: '도구', about: '카사크롬 도구를 터미널에서 직접. MCP 서버를 거치지 않는다.' }
+
+// kj 도 이 해석기를 그대로 쓴다. 이름·소개만 갈아 끼우므로 정수 인자 거절 같은 검사가 두 갈래로 갈라지지 않는다.
+export async function runCli(argv, tools, prog = KC) {
   const [first, ...rest] = argv
-  if (!first || first === '--help' || first === '-h') { console.log(listAll(tools)); return 0 }
-  const name = resolve(first, tools)
+  if (!first || first === '--help' || first === '-h') { console.log(listAll(tools, prog)); return 0 }
+  const name = resolve(first, tools, prog)
   const tool = tools.get(name)
-  if (rest.includes('--help') || rest.includes('-h')) { console.log(detail(name, tool)); return 0 }
+  if (rest.includes('--help') || rest.includes('-h')) { console.log(detail(name, tool, prog)); return 0 }
   const result = await tool.run(parseArgs(rest, fields(tool.schema)))
   const text = render(result)
   if (result?.isError) { console.error(text); return 1 }

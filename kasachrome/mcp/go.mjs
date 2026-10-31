@@ -1,4 +1,4 @@
-// browser_go — 판정 모델(Jev-Omni)이 화면을 보고 몇 걸음 스스로 누르다 멈추는 길.
+// kj go — 판정 모델(Jev-Omni)이 화면을 보고 몇 걸음 스스로 누르다 멈추는 길.
 // 큰 모델이 걸음마다 read_page(최대 4만 자)를 읽고 ref 를 골라 click 을 부르면 클릭 하나에
 // 큰 모델 턴 2번 + kc 호출 2~3번이 든다. 여기서는 번호표를 붙인 화면 한 장(~550토큰)을
 // Jev-Omni 에 한 번 묻고 바로 누른다 — 판정은 걸음당 0.2~0.6초, 큰 모델은 멈춘 뒤에만 이어받는다.
@@ -178,7 +178,7 @@ const WHY = {
   repeat: '같은 칸을 같은 화면에서 다시 골라 멈췄다(눌러도 바뀌지 않음)',
   max_steps: 'maxSteps 에 닿았다',
   left_site: '다른 사이트로 넘어가 멈췄다',
-  new_tab: '링크가 새 탭으로 열려 멈췄다 — browser_list_tabs 로 새 탭을 찾아 이어가세요',
+  new_tab: '링크가 새 탭으로 열려 멈췄다 — kc list_tabs 로 새 탭을 찾아 이어가세요',
   page_changed: '고른 칸이 판정하는 사이에 두 번 연달아 사라졌다(화면이 계속 바뀜)',
   error: '도중에 오류가 났다 — note 를 보세요',
 }
@@ -470,7 +470,7 @@ async function settle(call, tabId, before) {
 export async function runGo(args, { call, color = '#4C8DFF', decide = decideJev, outDir } = {}) {
   const { goal, tabId, maxSteps = 8, values = {}, threshold = 0.7 } = args
   // ⚠️빈 tabId 가 0 이 되면 확장이 「활성 탭」으로 받아 사람의 탭을 누른다. go 는 탭을 꼭 집어야 한다.
-  if (!Number.isInteger(tabId) || tabId <= 0) throw new Error('TAB_REQUIRED: go 는 tabId(양의 정수)가 꼭 필요합니다 — browser_list_tabs·new_tab 의 tabId 를 주세요.')
+  if (!Number.isInteger(tabId) || tabId <= 0) throw new Error('TAB_REQUIRED: go 는 tabId(양의 정수)가 꼭 필요합니다 — kc list_tabs·new_tab 의 tabId 를 주세요.')
   if (!goal || !goal.trim()) throw new Error('GOAL_REQUIRED: goal 이 비었습니다.')
   checkValues(goal, values)
 
@@ -516,7 +516,7 @@ export async function runGo(args, { call, color = '#4C8DFF', decide = decideJev,
       if (startSite === null) startSite = site
       else if (site !== startSite) { ended = 'left_site'; break }
       if (i === 1 && view.visibility === 'hidden' && Object.keys(values).length) {
-        note = '탭이 숨어 있습니다 — 숨은 탭은 입력이 안 먹을 수 있으니 browser_new_window 로 보이는 창에서 부르세요.'
+        note = '탭이 숨어 있습니다 — 숨은 탭은 입력이 안 먹을 수 있으니 kc new_window 로 보이는 창에서 부르세요.'
       }
 
       t0 = performance.now()

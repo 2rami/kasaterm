@@ -305,22 +305,20 @@ const ref = z.string().describe('Element ref like "e12" from read_page or find.'
 // 도구가 늘 때마다 두 곳을 고쳐야 하고, 빠뜨린 쪽이 조용히 낡는다.
 const TOOLS = new Map()
 
-function tool(name, description, schema, run, { timeoutMs = 30000 } = {}) {
-  TOOLS.set(name, { description, schema, run: async (args) => {
+function guarded(run) {
+  return async (args) => {
     try {
       return await run(args)
     } catch (e) {
       return { content: [{ type: 'text', text: `ERROR: ${e.message}` }], isError: true }
     }
-  } })
-  server.registerTool(name, { description, inputSchema: schema }, async (args) => {
-    try {
-      return await run(args)
-    } catch (e) {
-      return { content: [{ type: 'text', text: `ERROR: ${e.message}` }], isError: true }
-    }
-  })
-  void timeoutMs
+  }
+}
+
+function tool(name, description, schema, run) {
+  const entry = { description, schema, run: guarded(run) }
+  TOOLS.set(name, entry)
+  server.registerTool(name, { description, inputSchema: schema }, entry.run)
 }
 
 tool('browser_status', 'Check the bridge/extension connection and which tabs currently have the debugger attached. Call this first if any other tool errors. Also reports WHICH MACHINE the Chrome you are driving runs on: `chrome.host` is that machine (with `chrome.remote` true when you are driving a Chrome across a tunnel on another machine, and `chrome.bridgeUrl` the bridge you reached), while `session.host` is the machine this Claude session itself runs on. When they differ, your screenshots and logins come from the other machine.', {},
@@ -384,20 +382,6 @@ tool('browser_get_text', 'Plain innerText of the page. Cheaper than read_page wh
 
 tool('browser_find', 'Find elements by role/name/placeholder text and get their refs plus viewport coordinates.', { tabId, query: z.string() },
   async (a) => text(await call('find', a)))
-
-// go 는 한 번에 여러 도구를 부르는 고리라 인자 검사를 직접 한다 — CLI 경로는 zod 검사를 거치지 않는다.
-const goSchema = {
-  goal: z.string().min(1).describe('One sentence: what should be true when done (e.g. "체크박스 두 개를 모두 켠다", "아이디 tomsmith, 비밀번호 SuperSecretPassword! 로 로그인한다").'),
-  tabId: z.number().int().positive().describe('Tab to drive. Required — go never falls back to the active tab.'),
-  maxSteps: z.number().int().min(1).max(20).optional().describe('Most clicks/inputs before it stops (default 8).'),
-  values: z.record(z.string(), z.string()).optional().describe('Input field name → value, e.g. {"username":"tomsmith","password":"…"}. Matched against the field name, id, placeholder or label. Every value must appear verbatim in goal, otherwise the call is rejected.'),
-  threshold: z.number().min(0).max(1).optional().describe('Stop and hand back when the judge is less sure than this (default 0.7).'),
-}
-tool('browser_go', 'Let the judge model (Jev-Omni) drive a few steps on its own, then stop and report — instead of you reading read_page and picking a ref for every click. Each step numbers the interactive elements on screen (set-of-marks), sends one ~1024px screenshot plus a list of element kinds/names/states (checkbox on/off, field empty/filled) to Jev-Omni, and clicks or fills the pick — about 0.3–1s per step (more elements on screen means more questions) and no tokens of yours. Use it for short, concrete UI goals on one site: open a section, toggle settings, fill and submit a login form. It is not for reading content (use get_text) or for long multi-page research.\n\nIt stops on: `done`, `none` (nothing on this screen leads to the goal), `low_confidence` (the pick fell under threshold — `candidates` lists the top picks so you can continue by hand), `irreversible` (it picked a pay/buy/send/delete/post/submit-style button — that is NEVER pressed by go; look at `candidates` and the final shot, and press it yourself only if the human asked for exactly that), `needs_value` (it picked an input you gave no value for), `repeat` (same pick on an unchanged screen), `left_site`, `max_steps`. The reply lists each step (pick, probability, ms split into mark/shot/judge/act) and `shot`, the path of a clean final screenshot — Read it before deciding what to do next. Typing is reliable only in a visible tab: open the page with browser_new_window (or activate_tab) first when the goal involves input. Elements inside iframes, shadow DOM or canvas are not marked; fall back to read_page there.', goSchema, async (raw) => {
-  const a = z.object(goSchema).parse(raw)
-  const { runGo } = await import('./go.mjs')
-  return text(await runGo(a, { call, color: IDENTITY.headerColor }))
-})
 
 tool('browser_layout','레이아웃툴 편집기를 이 탭에 켜고 끈다. 켜면 사람이 화면 위의 요소를 피그마처럼 직접 잡아 옮기고·크기와 색을 바꾸고·화살표로 흐름을 잇는다. 그 결과는 browser_layout_edits 로 가져와 네가 소스를 고친다 — 편집기의 「코드에 반영」 단추를 대신 누르지 마라, 그건 창도 맥락도 없는 클로드를 새로 낳고 멈출 수도 없다. 그 주소를 맡은 레이아웃툴 서버가 떠 있어야 켜진다(`layoutool <개발서버 포트> --src <소스 폴더>`); 없으면 그렇게 말해 준다. 사람에게 「이제 만져 보세요」 하고 기다린 뒤 가져오는 것이 이 도구의 쓰임새다.', { tabId, on: z.boolean().optional().describe('false 면 끈다. 끄기는 판을 감출 뿐이라 만지던 내역은 남고, 다시 켜면 그대로 돌아온다.') },
   async (a) => text(await call('layout', a)))
@@ -569,14 +553,36 @@ tool('browser_login', 'Sign in on a login page without ever seeing the password.
   showUsername: z.boolean().optional().describe('Show the filled username in the result. Default false — it is masked.'),
 }, async (a) => text(await login(a, { call, identity: IDENTITY })))
 
-// --cli 면 stdio MCP 대신 한 번 호출하고 끝낸다. 도구 스키마 45개를 상주로 들고
+// kj — 판정 모델에게 몇 걸음을 통째로 맡기는 명령. 큰 모델이 걸음마다 ref 를 고르는 도구 목록(MCP·kc)은
+// 그대로 두기로 해서 MCP 에 등록하지 않는다. 대신 call·기기 라우팅·신원은 kc 와 같은 이 프로세스 것을 쓴다.
+const KJ = { name: 'kj', noun: '명령', about: '판정 모델(Jev-Omni)에게 화면을 맡겨 몇 걸음 가게 하는 카사크롬 명령. 걸음마다 직접 고를 땐 kc.' }
+const JEV = new Map()
+
+// go 는 한 번에 여러 도구를 부르는 고리라 인자 검사를 직접 한다 — CLI 경로는 zod 검사를 거치지 않는다.
+const goSchema = {
+  goal: z.string().min(1).describe('One sentence: what should be true when done (e.g. "체크박스 두 개를 모두 켠다", "아이디 tomsmith, 비밀번호 SuperSecretPassword! 로 로그인한다").'),
+  tabId: z.number().int().positive().describe('Tab to drive. Required — go never falls back to the active tab.'),
+  maxSteps: z.number().int().min(1).max(20).optional().describe('Most clicks/inputs before it stops (default 8).'),
+  values: z.record(z.string(), z.string()).optional().describe('Input field name → value, e.g. {"username":"tomsmith","password":"…"}. Matched against the field name, id, placeholder or label. Every value must appear verbatim in goal, otherwise the call is rejected.'),
+  threshold: z.number().min(0).max(1).optional().describe('Stop and hand back when the judge is less sure than this (default 0.7).'),
+}
+JEV.set('go', { schema: goSchema, description: 'Let the judge model (Jev-Omni) drive a few steps on its own, then stop and report. Use it instead of reading `kc read_page` and picking a ref for every click yourself. Each step numbers the interactive elements on screen (set-of-marks), sends one ~1024px screenshot plus a list of element kinds/names/states (checkbox on/off, field empty/filled) to Jev-Omni, and clicks or fills the pick — about 0.3–1s per step (more elements on screen means more questions) and no tokens of yours. Use it for short, concrete UI goals on one site: open a section, toggle settings, fill and submit a form. It is not for reading content (use `kc get_text`) or for long multi-page research.\n\nIt stops on: `done`, `none` (nothing on this screen leads to the goal), `low_confidence` (the pick fell under threshold — `candidates` lists the top picks so you can continue by hand), `irreversible` (it picked a pay/buy/send/delete/post/submit-style button — that is NEVER pressed by go; look at `candidates` and the final shot, and press it yourself with `kc click` only if the human asked for exactly that), `needs_value` (it picked an input you gave no value for), `repeat` (same pick on an unchanged screen), `left_site`, `new_tab`, `page_changed`, `max_steps`, `error`. The reply lists each step (pick, probability, ms split into mark/shot/judge/act/wait) and `shot`, the path of a clean final screenshot — Read it before deciding what to do next. Never put a real password in goal or values (goal is sent to the judge and stays in your context): fill it with `kj login <tabId>` first, then go. Typing is reliable only in a visible tab: open the page with `kc new_window` (or `kc activate_tab`) first when the goal involves input. Elements inside iframes, shadow DOM or canvas are not marked; fall back to `kc read_page` there.', run: guarded(async (raw) => {
+  const parsed = z.object(goSchema).safeParse(raw)
+  if (!parsed.success) throw new Error(`BAD_ARGS: ${z.prettifyError(parsed.error)}`)
+  const { runGo } = await import('./go.mjs')
+  return text(await runGo(parsed.data, { call, color: IDENTITY.headerColor }))
+}) })
+JEV.set('login', TOOLS.get('browser_login'))
+
+// --cli(kc)·--kj 면 stdio MCP 대신 한 번 호출하고 끝낸다. 도구 스키마 45개를 상주로 들고
 // 다니지 않으려는 쪽을 위한 길이며, 지나는 경로는 MCP 와 완전히 같다.
-const cliAt = process.argv.indexOf('--cli')
+const cliAt = process.argv.findIndex((arg) => arg === '--cli' || arg === '--kj')
 if (cliAt !== -1) {
   const { runCli } = await import('./cli.mjs')
+  const kj = process.argv[cliAt] === '--kj'
   let code = 0
   try {
-    code = await runCli(process.argv.slice(cliAt + 1), TOOLS)
+    code = await runCli(process.argv.slice(cliAt + 1), kj ? JEV : TOOLS, kj ? KJ : undefined)
   } catch (e) {
     process.stderr.write(`${e.message}\n`)
     code = 1
