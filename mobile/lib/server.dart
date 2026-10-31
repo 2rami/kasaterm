@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show Random;
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show Listenable;
+import 'package:flutter/foundation.dart' show Listenable, visibleForTesting;
 import 'package:http/http.dart' as http;
 
 import 'app_release.dart';
@@ -1193,28 +1193,46 @@ class Server {
     }
   }
 
+  /// 대화 입력 한 번의 상한. 데스크톱은 받은 말을 대열에 넣고 바로 답한다(관문 왕복 1초 안팎) — 첫 시도가 이보다
+  /// 늦으면 길이 죽은 것으로 보고 관문으로 다시 보낸다.
+  @visibleForTesting
+  static Duration chatSendFirstWait = const Duration(seconds: 8);
+  @visibleForTesting
+  static Duration chatSendRetryWait = const Duration(seconds: 15);
+
   /// 대화 보기의 입력 — 원본이 넣는다(`/term/chat-send`): 데스크톱 입력칸이 빌 때 붙여넣고(초안·한글 조합·승인 창은
   /// 기다린다), 일하는 칸이면 진행 중인 턴 안으로 든다. 그 창구를 모르는 옛 데스크톱은 [send].
   ///
-  /// 길에서 끊기면 같은 표식(`message_id`)으로 두 번까지 다시 보낸다 — 다른 앱에 다녀온 직후엔 망이 늦게 붙어 첫
-  /// 요청이 관문에 못 닿고 「닿지 못했다」가 떴다(10-13). 데스크톱은 이미 받은 표식이면 다시 넣지 않는다. 20초를
-  /// 넘긴 것은 다시 보내지 않는다 — 데스크톱이 느리게 받는 중일 수 있다.
+  /// 길에서 끊기거나 답이 없으면 같은 표식(`message_id`)으로 두 번까지 다시 보낸다 — 다른 앱에 다녀온 직후엔 망이
+  /// 늦게 붙어 첫 요청이 관문에 못 닿고 「닿지 못했다」가 떴다(10-13). 데스크톱은 받는 순간 표식을 잡아, 받는 중이거나
+  /// 이미 넣은 표식이면 다시 넣지 않고 받았다고 답한다 — 그래서 시간 초과도 다시 보내도 된다.
+  ///
+  /// 다시 보낼 때는 관문으로 간다. 셀룰러에서 카사넷 직통이 죽어도 입구는 알아챌 때까지 「직통」이라 답하고 요청을
+  /// 삼킨다 — 같은 길로 다시 보내면 셋 다 시간 초과로 끝나고, 관문에는 아무 기록도 남지 않았다(10-31).
   Future<void> chatSend(String pane, String text, {String? machine}) async {
     final id = _messageId();
+    final payload = jsonEncode({'surface': pane, 'text': text, 'message_id': id});
+    final first = uri('term/chat-send', machine: machine);
     late final http.Response res;
     for (var attempt = 0;; attempt++) {
+      final target = attempt == 0
+          ? first
+          : (isDirect(first) ? _gatewayOf(first) : null) ??
+                _gatewayUri('term/chat-send', machine: machine);
+      final abort = Completer<void>();
+      final request =
+          http.AbortableRequest('POST', target, abortTrigger: abort.future)
+            ..headers['content-type'] = 'application/json'
+            ..body = payload;
       try {
         res = await _client
-            .post(
-              uri('term/chat-send', machine: machine),
-              headers: {'content-type': 'application/json'},
-              body: jsonEncode({'surface': pane, 'text': text, 'message_id': id}),
-            )
-            .timeout(const Duration(seconds: 20));
+            .send(request)
+            .then(http.Response.fromStream)
+            .timeout(attempt == 0 ? chatSendFirstWait : chatSendRetryWait);
         break;
-      } on TimeoutException {
-        throw ServerException('${describe()} 에 닿지 못했다');
       } catch (_) {
+        // 시간 초과로 버린 요청이 묶음 연결을 쥔 채 남지 않게.
+        if (!abort.isCompleted) abort.complete();
         if (attempt >= 2 || isClosed) throw ServerException('${describe()} 에 닿지 못했다');
         freshConnections();
         await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));

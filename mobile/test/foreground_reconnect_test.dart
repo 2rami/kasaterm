@@ -206,4 +206,55 @@ void main() {
     await noEnter;
     expect(host.keys, hasLength(1), reason: 'live-input delayed Enter has the same connection guard');
   }, _NativeHttp()));
+
+  test('a chat line the dead direct path swallowed is resent once through the gateway with the same id',
+      () => HttpOverrides.runWithHttpOverrides(() async {
+    // 셀룰러에서 직통이 죽은 입구 — 연결은 받고 요청은 삼킨 채 답하지 않는다.
+    final swallowed = <String>[];
+    final hole = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    hole.listen((sock) => sock.listen((d) => swallowed.add(latin1.decode(d)), onError: (Object _) {}));
+    final sent = <Map<String, Object?>>[];
+    final gateway = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    gateway.listen((request) async {
+      final path = request.uri.path;
+      final Object reply;
+      if (path.endsWith('/version')) {
+        reply = {'machine_id': 'mini', 'kasanet': {'id': 'fixture-desk'}};
+      } else if (path.endsWith('/kasanet/phone')) {
+        reply = {'ok': true, 'ttl_secs': 900};
+      } else if (path == '/relay/account/m/~mini/term/chat-send') {
+        sent.add((jsonDecode(await utf8.decodeStream(request)) as Map).cast<String, Object?>());
+        reply = {'ok': true, 'via': 'tell'};
+      } else {
+        reply = {};
+      }
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode(reply));
+      await request.response.close();
+    });
+    final (first, retry) = (Server.chatSendFirstWait, Server.chatSendRetryWait);
+    Server.chatSendFirstWait = const Duration(milliseconds: 300);
+    Server.chatSendRetryWait = const Duration(seconds: 2);
+    final server = Server.account(AccountSession(
+      origin: Uri.parse('http://127.0.0.1:${gateway.port}'), account: 'fixture',
+      deviceId: 'fixture-phone', token: 'fixture-token',
+    ), kasanet: _Native(hole.port));
+    addTearDown(() async {
+      Server.chatSendFirstWait = first;
+      Server.chatSendRetryWait = retry;
+      server.close();
+      await gateway.close(force: true);
+      await hole.close();
+    });
+    server.uri('term/panes', machine: '~mini');
+    await _until(() => server.pathOf('~mini')?.$1 == true);
+
+    await server.chatSend('%3', '셀룰러에서 친 말', machine: '~mini');
+
+    expect(swallowed.join(), contains('/term/chat-send'), reason: 'the first try took the direct path');
+    expect(sent, hasLength(1));
+    expect(sent.single['text'], '셀룰러에서 친 말');
+    final id = RegExp(r'"message_id":"([^"]+)"').firstMatch(swallowed.join())?.group(1);
+    expect(sent.single['message_id'], id, reason: 'the desktop drops a repeat of the same id');
+  }, _NativeHttp()));
 }
