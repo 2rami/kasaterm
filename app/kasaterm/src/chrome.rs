@@ -1394,7 +1394,15 @@ impl App {
         let Some(h) = heights.get(idx).copied() else {
             return;
         };
-        let card_top = heights[..idx].iter().sum::<f32>() + SIDEBAR_TAB_GAP * idx as f32;
+        // A remote viewing room has no card in the local device section.
+        if h <= 0.0 { return; }
+        let (card_top, h) = if self.sidebar_local_device_collapsed() {
+            (self.sidebar_local_device_top(), crate::sidebar_navigation::HEADER_H)
+        } else {
+            let before = heights[..idx].iter().filter(|height| **height > 0.0)
+                .map(|height| height + SIDEBAR_TAB_GAP).sum::<f32>();
+            (self.sidebar_local_body_offset() + before, h)
+        };
         let avail = self.sidebar_avail_h(win_h);
         let mut px = self.sidebar_scroll_px;
         if card_top < px {

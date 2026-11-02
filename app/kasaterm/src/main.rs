@@ -6415,6 +6415,7 @@ impl App {
                 ..Default::default()
             },
             info: state::InfoState {
+                navigation: sidebar_navigation::NavigationState::from_settings(&socket::read_settings()),
                 // 헤드리스 검증용 — 시작 탭을 Info 로. 탭 전환은 클릭이라
                 // PTY-only autosend 로는 재현할 수 없다(KASATERM_TEST_FILETREE
                 // 가 사이드바를 강제로 여는 것과 같은 이유).

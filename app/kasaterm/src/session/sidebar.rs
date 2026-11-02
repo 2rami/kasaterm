@@ -140,7 +140,7 @@ impl App {
     }
 
     pub(crate) fn sidebar_content_h(&self) -> f32 {
-        self.sidebar_local_content_h() + crate::sidebar_navigation::remote_content_h(&self.info, self.tab_strip_w())
+        self.sidebar_devices_content_h()
     }
 
     /// 아래 절까지 포함한 세로 구간 — 절 배치는 이 값으로 잰다.
@@ -277,10 +277,10 @@ impl App {
         //
         // 여기는 배치 계산이라 시저를 세워도 이 규칙은 남는다 — 이 rect 들은 그리기와
         // 클릭 판정이 함께 쓰는 값이고, 클릭은 시저가 안 자른다.
-        let mut y = top - scroll;
+        let mut y = top + self.sidebar_local_body_offset() - scroll;
         for i in 0..n {
             // 다른 기기 방의 보기 창은 그 기계 절의 방 카드가 탭이다 — 여기엔 안 세운다.
-            if self.remote_view_of_window(i).is_some() {
+            if self.sidebar_local_device_collapsed() || self.remote_view_of_window(i).is_some() {
                 continue;
             }
             // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,

@@ -1,5 +1,8 @@
 use super::*;
 mod responsive_probe;
+mod device_order;
+mod devices;
+mod device_probe;
 
 type Rect = (f32, f32, f32, f32);
 
@@ -34,6 +37,12 @@ const SECTION_H: f32 = 36.0;
 
 #[derive(Default)]
 pub(crate) struct NavigationState {
+    device_order: device_order::Order,
+    collapsed_devices: std::collections::HashSet<String>,
+    device_drag: Option<devices::DeviceDrag>,
+    device_sections: Vec<device_order::Section>,
+    device_heads: Vec<(String, Rect)>,
+    device_viewport: Option<Rect>,
     pub(crate) local_content_h: f32,
     pub(crate) shared_scroll: f32,
     pub(crate) room_numbers: Vec<(String, Option<u64>, String, usize)>,
@@ -247,19 +256,9 @@ fn cell_rects(list: &[&state::MachinesColRow], ma: Rect) -> Vec<Rect> {
     }).collect()
 }
 
-/// 기기 표시·순서의 정본을 공유해 새 기기와 오프라인 기기가 양쪽에 함께 나타난다.
+/// 기기 표시를 옮겨도 방 단축키는 같은 방을 가리켜야 한다.
 pub(crate) fn section_labels(info: &state::InfoState) -> Vec<String> {
     info.machines_col.machines.iter().map(|m| m.label.clone()).collect()
-}
-
-/// 이 기기 카드 아래와 원격 절 사이에 서는 몫까지 — 이 기기의 창 밖 셸 줄이 거기 선다.
-pub(crate) fn remote_content_h(info: &state::InfoState, width: f32) -> f32 {
-    let nav = &info.navigation;
-    let local = web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""), width);
-    local + info.machines_col.machines.iter().map(|machine| {
-        SECTION_H + content_height(machine, &nav.collapsed_rooms, &nav.list_rooms, width)
-            + web_block_h(&machine.web_shells, nav.web_open.contains(&machine.label), width)
-    }).sum::<f32>()
 }
 
 /// 「창 밖 셸」 줄 높이 — 요약 한 줄, 펴면 셸마다 목록 줄.
@@ -756,44 +755,57 @@ fn draw_device_section(g: &mut gpu::GpuRenderer, label: &str, area: Rect) {
         crate::render::pane_identity::device_section_border(base, label));
 }
 
-/// `head_top` 은 이 기기 머리줄의 윗변 — 그 위에 현황 줄(`sidebar_pulse`)이 설 수 있다.
-pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, head_top: f32, viewport: Rect) {
+pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, viewport: Rect) {
+    let sections = if width > 0.0 { devices::sections(info, width, info.navigation.local_content_h) } else { Vec::new() };
     let nav = &mut info.navigation;
     nav.hits.clear();
     nav.device_views.clear();
     nav.heads.clear();
+    nav.device_heads.clear();
+    nav.device_sections.clear();
+    nav.device_viewport = None;
     nav.home = None;
     if width <= 0.0 { return; }
+    nav.device_viewport = Some(viewport);
+    nav.device_sections = sections.into_iter().map(|mut section| {
+        section.top += viewport.1 - nav.shared_scroll;
+        section
+    }).collect();
+    let local = nav.device_sections.iter().find(|section| section.key.is_empty()).unwrap();
+    let local_top = local.top;
+    let local_height = local.height;
+    let local_closed = nav.collapsed_devices.contains("");
     let label = crate::info::local_machine_name();
     let label = if label.is_empty() { "이 기기" } else { label };
-    let local_web_h = web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""), width);
-    let local_bottom = (viewport.1 + nav.local_content_h - nav.shared_scroll + local_web_h).max(viewport.1);
-    g.push_clip(0.0, head_top, width, (viewport.1 + viewport.3 - head_top).max(0.0));
-    draw_device_section(g, label, (0.0, head_top, width, local_bottom - head_top));
-    g.pop_clip();
     let compact = width < 180.0;
-    let head = (8.0, head_top + 4.0, width - 16.0, HEADER_H - 8.0);
-    nav.home = Some(head);
+    g.push_clip(viewport.0, viewport.1, viewport.2, viewport.3);
+    draw_device_section(g, label, (0.0, local_top, width, local_height));
+    let head = (8.0, local_top + 4.0, width - 16.0, HEADER_H - 8.0);
+    nav.home = clipped(head, viewport);
     let wide = Density::sidebar(width).is_wide();
     let plus_w = if wide { 76.0 } else { 28.0 };
     let plus = (width - 8.0 - plus_w, head.1, plus_w, head.3);
-    let text_x = if compact { 12.0 } else { 38.0 };
-    if !compact { g.queue_icon(&crate::device_icons::icon(label), 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
+    let text_x = if compact { 28.0 } else { 48.0 };
+    g.queue_icon(if local_closed { "chevron-right" } else { "chevron-down" }, 12.0, head.1 + 15.0, 10.0, theme::text_dim());
+    if !compact { g.queue_icon(&crate::device_icons::icon(label), 27.0, head.1 + 12.0, 16.0, theme::text_dim()); }
     let name = crate::render::pane_identity::local_device_name().filter(|n| !n.is_empty()).unwrap_or_else(|| label.to_string());
     text(g, &name, text_x, head.1 + 4.0, plus.0 - text_x - 4.0, 12.0, theme::text(), true);
-    // 이사가 도는 동안은 둘째 줄이 그 단계를 말한다 — 놓은 순간부터 엔진이 끝낼 때까지.
     let (sub, sub_color) = crate::drag_transfer::arriving("")
         .map_or(("이 기기".to_string(), theme::text_dim()), |stage| (stage, theme::accent()));
     text(g, &sub, text_x, head.1 + 22.0, plus.0 - text_x - 4.0, 10.0, sub_color, false);
-    if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
-    g.hover_pointer |= hit(cursor, plus);
+    if clipped(plus, viewport).is_some_and(|r| hit(cursor, r)) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
+    g.hover_pointer |= clipped(head, viewport).is_some_and(|r| hit(cursor, r));
     g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
     if wide { text(g, "새 방", plus.0 + 27.0, plus.1 + 13.0, plus.2 - 31.0, 11.0, theme::text_dim(), false); }
-    nav.hits.push((Action::NewLocalRoom, plus));
-    g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
+    if let Some(r) = clipped(plus, viewport) { nav.hits.push((Action::NewLocalRoom, r)); }
+    if let Some(r) = clipped(head, viewport) { nav.hits.push((Action::Section(String::new()), r)); }
+    if let Some(r) = clipped((head.0, head.1, (plus.0 - head.0).max(0.0), head.3), viewport) {
+        nav.device_heads.push((String::new(), r));
+    }
+    if !local_closed { g.rect(12.0, local_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border()); }
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, shared_scroll, room_numbers, device_views, heads, web_open, .. } = nav;
+        local_content_h, room_numbers, device_views, heads, web_open, device_heads, device_sections, collapsed_devices, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
@@ -805,26 +817,27 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         web_open,
         done: &info.machines_col.done_marks,
     };
-    let mut y = viewport.1 + *local_content_h - *shared_scroll;
-    g.push_clip(viewport.0, viewport.1, viewport.2, viewport.3);
-    y += draw_web_shells(g, hits, "", &info.machines_col.local_web_shells, web_open.contains(""),
-        cursor, width, y, viewport);
-    for machine in &info.machines_col.machines {
-        let body_h = content_height(machine, collapsed_rooms, list_rooms, width)
-            + web_block_h(&machine.web_shells, web_open.contains(&machine.label), width);
-        draw_device_section(g, &machine.label, (0.0, y, width, SECTION_H + body_h));
+    if !local_closed {
+        draw_web_shells(g, hits, "", &info.machines_col.local_web_shells, web_open.contains(""),
+            cursor, width, local_top + HEADER_H + devices::LOCAL_GAP + *local_content_h, viewport);
+    }
+    for section in device_sections.iter().filter(|section| !section.key.is_empty()) {
+        let Some(machine) = info.machines_col.machines.iter().find(|machine| machine.label == section.key) else { continue };
+        let y = section.top;
+        let body_h = section.height - SECTION_H;
+        draw_device_section(g, &machine.label, (0.0, y, width, section.height));
         let head = (8.0, y + 2.0, width - 16.0, SECTION_H - 4.0);
         let menu = (width - 30.0, y + 7.0, 22.0, 22.0);
         let plus = (width - 54.0, y + 7.0, 22.0, 22.0);
-        let text_x = if compact { 12.0 } else { 36.0 };
+        let text_x = if compact { 28.0 } else { 46.0 };
         let text_right = plus.0 - 4.0;
-        if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 14.0, y + 11.0, 14.0, theme::text_dim()); }
+        g.queue_icon(if collapsed_devices.contains(&machine.label) { "chevron-right" } else { "chevron-down" }, 12.0, y + 13.0, 10.0, theme::text_dim());
+        if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 27.0, y + 11.0, 14.0, theme::text_dim()); }
         text(g, &crate::render::pane_identity::device_name(&machine.label), text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
         let (line, line_color) = crate::drag_transfer::arriving(&machine.label)
             .map_or_else(|| (status(machine), theme::text_dim()), |stage| (stage, theme::accent()));
         text(g, &line, text_x, y + 20.0, text_right - text_x, 9.5, line_color, false);
-        g.hover_pointer |= clipped(menu, viewport).is_some_and(|r| hit(cursor, r))
-            || machine.online && clipped(plus, viewport).is_some_and(|r| hit(cursor, r));
+        g.hover_pointer |= clipped(head, viewport).is_some_and(|r| hit(cursor, r));
         if machine.online {
             g.queue_icon("plus", plus.0 + 4.0, plus.1 + 4.0, 14.0, theme::text_dim());
             if let Some(r) = clipped(plus, viewport) { hits.push((Action::NewRoom(machine.label.clone()), r)); }
@@ -834,19 +847,24 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         if let Some(r) = clipped(head, viewport) { hits.push((Action::Section(machine.label.clone()), r)); }
         if let Some(r) = clipped((head.0, head.1, (plus.0 - head.0).max(0.0), head.3), viewport) {
             heads.push((machine.label.clone(), r));
+            device_heads.push((machine.label.clone(), r));
         }
         let body = (viewport.0, y + SECTION_H, viewport.2, body_h);
         if let Some(visible) = clipped(body, viewport) {
             device_views.push((machine.label.clone(), visible));
             draw_rows(g, hits, &ctx, machine, cursor, width, visible, visible.1 - body.1);
         }
-        y += SECTION_H + body_h;
     }
     g.pop_clip();
 }
 
+pub(crate) fn draw_device_drag(g: &mut gpu::GpuRenderer, info: &state::InfoState, cursor: (f32, f32)) {
+    devices::draw_drag(g, info, cursor);
+}
+
 /// 커서가 기기 머리의 이름·상태 위면 그 기기의 연결 기록 글.
 pub(crate) fn hover_history(info: &state::InfoState, cursor: (f32, f32)) -> Option<String> {
+    if info.navigation.device_drag.is_some() { return None; }
     let (label, _) = info.navigation.heads.iter().find(|(_, r)| hit(cursor, *r))?;
     let machine = info.machines_col.machines.iter().find(|m| &m.label == label)?;
     Some(crate::machinescol::link_history(&crate::render::pane_identity::device_name(label), &machine.link))
@@ -859,6 +877,7 @@ impl App {
     /// (「맥북」 픽스처는 Info 타이머가 돌아야 심긴다) · `KASATERM_MACHINES='[]'`.
     /// 결과는 `KASATERM_AUTONAV_DIR/navigation.log` 와 단계별 png.
     pub(crate) fn run_pending_sidebar_navigation_probe(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_pending_sidebar_device_probe(event_loop);
         self.run_pending_sidebar_responsive_probe(event_loop);
         use std::sync::{Mutex, OnceLock};
         if !crate::verification_run()
@@ -1106,9 +1125,9 @@ impl App {
         step.1 += 1;
     }
 
-    pub(crate) fn sidebar_content_top(&self) -> f32 { self.sidebar_head_top() + HEADER_H + 10.0 }
+    pub(crate) fn sidebar_content_top(&self) -> f32 { self.sidebar_head_top() }
 
-    /// 이 기기 머리줄의 윗변. 현황 줄이 서 있으면 그만큼 내려간다.
+    /// 보기 전환 줄은 기기 묶음과 함께 스크롤되지 않아야 한다.
     pub(crate) fn sidebar_head_top(&self) -> f32 { TITLE_HEIGHT + self.sidebar_pulse_h() }
 
     pub(crate) fn sidebar_navigation_click(&mut self, cursor: (f32, f32)) -> bool {
@@ -1120,7 +1139,10 @@ impl App {
                 self.info.machine_menu = Some((cursor.0, cursor.1, label));
                 self.info.machines_col.last_refresh = None;
             }
-            Action::Section(_) => {}
+            Action::Section(label) => {
+                self.close_freeze.thaw();
+                self.info.navigation.device_drag = Some(devices::DeviceDrag::new(label, cursor));
+            }
             Action::Open { label, window, room, focus } => match focus {
                 // 칸은 잡아 끌 수 있다 — 문턱을 안 넘고 놓으면 그냥 연다.
                 Some(pane) => {
@@ -1226,6 +1248,12 @@ impl App {
     /// 문턱을 넘은 칸 끌기는 다른 hover 처리가 가로채지 않게 한다.
     pub(crate) fn sidebar_navigation_drag_move(&mut self) -> bool {
         let cursor = self.cursor_px;
+        if let Some(device) = self.info.navigation.device_drag.as_mut() {
+            let (dx, dy) = (cursor.0 - device.start.0, cursor.1 - device.start.1);
+            if !device.active && dx * dx + dy * dy > 16.0 { device.active = true; }
+            if device.active { self.chrome_dirty = true; }
+            return device.active;
+        }
         if let Some(cell) = self.info.navigation.cell_drag.as_mut() {
             let (dx, dy) = (cursor.0 - cell.start.0, cursor.1 - cell.start.1);
             if !cell.active && dx * dx + dy * dy > 9.0 { cell.active = true; }
@@ -1237,6 +1265,7 @@ impl App {
 
     /// 클릭은 방을 열고, 끌기는 실제 pane 이동 경로로 전달한다.
     pub(crate) fn sidebar_navigation_release(&mut self, cursor: (f32, f32)) -> bool {
+        if self.sidebar_device_release(cursor) { return true; }
         if let Some(cell) = self.info.navigation.cell_drag.take() {
             if !cell.active {
                 match self.open_remote_room(&cell.label, cell.window, &cell.room, Some(&cell.pane)) {
@@ -1281,6 +1310,7 @@ impl App {
             _ => None,
         };
         let Some(label) = label else { return false; };
+        if label.is_empty() { return true; }
         self.info.machine_menu = Some((cursor.0, cursor.1, label));
         self.chrome_dirty = true;
         true
@@ -1344,6 +1374,37 @@ mod tests {
         assert_eq!(web_block_h(&shells, true, SIDEBAR_W), PANE_H + 2.0 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD);
         assert_eq!(web_shell_name(&shells[0]), "2e6442f1");
         assert_eq!(web_shell_name(&shells[1]), "Desktop");
+    }
+
+    #[test]
+    fn device_collapse_removes_whole_bodies_without_changing_room_preferences() {
+        let mut info = state::InfoState::default();
+        info.machines_col.machines = vec![machine()];
+        info.navigation.collapsed_rooms.insert(room_key("test", None, "A"));
+        let expanded = devices::sections(&info, 240.0, 200.0);
+        info.navigation.collapsed_devices.extend([String::new(), "test".into()]);
+        let collapsed = devices::sections(&info, 240.0, 200.0);
+        assert_eq!((collapsed[0].height, collapsed[1].height), (HEADER_H, SECTION_H));
+        assert!(expanded[0].height > collapsed[0].height && expanded[1].height > collapsed[1].height);
+        info.navigation.collapsed_devices.clear();
+        assert_eq!(devices::sections(&info, 240.0, 200.0), expanded);
+        assert_eq!(rooms(&info.machines_col.machines[0]).len(), 2);
+    }
+
+    #[test]
+    fn saved_device_preferences_restore_and_do_not_reorder_room_shortcuts() {
+        let mut info = state::InfoState::default();
+        info.machines_col.machines = vec![machine()];
+        info.navigation = NavigationState::from_settings(&serde_json::json!({
+            "sidebar_device_order": ["test", "", "test", 7],
+            "sidebar_collapsed_devices": ["test", "", false],
+        }));
+        let layout = devices::sections(&info, 240.0, 200.0);
+        assert_eq!(layout.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["test", ""]);
+        assert_eq!(layout[1].top, SECTION_H);
+        assert_eq!(section_labels(&info), ["test"]);
+        assert_eq!(info.navigation.collapsed_devices.len(), 2);
+        assert_eq!(info.navigation.device_order.keys, ["test", ""]);
     }
 
     /// 기다림 낱말은 하나인데 뜻은 셋이다. 주황(숨쉬는 점)은 사람을 부르는 둘에만
@@ -1476,7 +1537,9 @@ mod tests {
         assert!(rooms(&info.machines_col.machines[0]).is_empty());
         let expected: f32 = info.machines_col.machines.iter()
             .map(|m| SECTION_H + content_height(m, &Default::default(), &Default::default(), SIDEBAR_W)).sum();
-        assert_eq!(remote_content_h(&info, SIDEBAR_W), expected);
+        let sections = devices::sections(&info, SIDEBAR_W, 0.0);
+        assert_eq!(sections.iter().map(|section| section.height).sum::<f32>(),
+            HEADER_H + devices::LOCAL_GAP + expected);
         info.machines_col.machines.reverse();
         assert_eq!(section_labels(&info), ["test", "offline"]);
         info.machines_col.machines[0].label = "renamed".into();
@@ -1637,7 +1700,7 @@ impl App {
             | Action::NewRoom(label) | Action::CloseRoom { label, .. } => Some(label.clone()),
             _ => None,
         });
-        by_hit
+        by_hit.filter(|label| !label.is_empty())
             .or_else(|| nav.device_views.iter().find(|(_, view)| hit(cursor, *view)).map(|(label, _)| label.clone()))
     }
 

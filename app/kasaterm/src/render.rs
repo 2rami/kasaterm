@@ -1862,6 +1862,7 @@ impl App {
             .filter(|&i| self.remote_view_of_window(i).is_none()).count();
         self.info.navigation.room_numbers = self.remote_room_navigation().into_iter().enumerate()
             .map(|(n, (label, window, room))| (label, window, room, local_count + n)).collect();
+        self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
         self.info.navigation.local_content_h = self.sidebar_local_content_h();
         self.info.navigation.shared_scroll = self.sidebar_scroll_px.clamp(0.0, self.sidebar_max_scroll(sb_win_h));
         // 방마다 탭 글리프 — 내부 방(설정·보드)은 셸이 아니라 자기 아이콘을 단다.
@@ -2498,7 +2499,6 @@ impl App {
         };
         let settings_room_active = self.settings_room_active();
         let pulse_h = self.sidebar_pulse_h();
-        let sb_head_top = self.sidebar_head_top();
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
         // 못 띄운다. 계정 화면이 떠 있는 동안 여기서 받아 올린다 — 실패가 조용히
         // 사라지면 「눌렀는데 아무 일도 안 남」이 되고, 그 상태로 같은 버튼을
@@ -2792,9 +2792,8 @@ impl App {
                 self.pulse.switch = None;
                 None
             };
-            self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
             crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
-                sb_head_top, (0.0, sb_view.0, tab_strip_w, sb_full_h));
+                (0.0, sb_view.0, tab_strip_w, sb_full_h));
             if !self.lite && !self.tabs_on_top {
                 draw_sidebar_toggle(g, sb_cursor, sidebar_toggle, "panel-left", tab_strip_w > 0.0);
             }
@@ -4780,6 +4779,7 @@ impl App {
                 Self::draw_hover_tip(g, "기기 추가", sb_plus.0, sb_plus.1,
                     win_px.0 / scale, sb_win_h);
             }
+            crate::sidebar_navigation::draw_device_drag(g, &self.info, sb_cursor);
             if !self.tabs_on_top && self.info.machine_menu.is_none() && self.info.navigation.room_menu.is_none()
                 && tab_strip_w > 0.0 && sb_cursor.0 < tab_strip_w
             {
