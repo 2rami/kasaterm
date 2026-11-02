@@ -442,6 +442,7 @@ impl App {
         self.room_list_body = Self::saved_room_bodies(state).into_iter()
             .filter_map(|(old, body)| Some((restored_indices.get(old).copied().flatten()?, body)))
             .collect();
+        self.restore_sidebar_room_cards(state, &restored_indices);
         let (collapsed, remote_collapsed) = Self::saved_room_collapses(state);
         self.collapsed_windows = collapsed.into_iter()
             .filter_map(|old| restored_indices.get(old).copied().flatten()).collect();

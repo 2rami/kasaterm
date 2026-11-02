@@ -226,6 +226,9 @@ impl App {
                 "active_window": new_active,
                 "undocked": undocked_json,
                 "room_body": room_body_json,
+                "sidebar_room_cards": if i == self.active_session {
+                    self.sidebar_room_cards_snapshot(&persisted_idx)
+                } else { serde_json::Value::Null },
                 "collapsed_rooms": if i == self.active_session {
                     persisted_collapses(&self.collapsed_windows, &persisted_idx)
                 } else { Vec::new() },

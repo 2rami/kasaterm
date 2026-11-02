@@ -31,12 +31,13 @@ impl NavigationState {
 pub(super) fn sections(info: &state::InfoState, width: f32, local_content_h: f32) -> Vec<Section> {
     let nav = &info.navigation;
     let local_body = if nav.collapsed_devices.contains("") { 0.0 } else {
-        LOCAL_GAP + local_content_h + web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""), width)
+        LOCAL_GAP + local_content_h + nav.room_cards.hidden_height("", nav.room_cards.local_hidden.len())
+            + web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""), width)
     };
     let mut sizes = vec![(String::new(), HEADER_H + local_body)];
     sizes.extend(info.machines_col.machines.iter().map(|machine| {
         let body = if nav.collapsed_devices.contains(&machine.label) { 0.0 } else {
-            content_height(machine, &nav.collapsed_rooms, &nav.list_rooms, width)
+            content_height(machine, &nav.collapsed_rooms, &nav.list_rooms, width, &nav.room_cards)
                 + web_block_h(&machine.web_shells, nav.web_open.contains(&machine.label), width)
         };
         (machine.label.clone(), SECTION_H + body)
@@ -101,17 +102,23 @@ impl App {
         !self.tabs_on_top && self.sidebar_visible && self.info.navigation.device_heads.iter().any(|(_, rect)| hit(cursor, *rect))
     }
 
-    pub(crate) fn sidebar_device_drag_event(&mut self, event: &WindowEvent) -> bool {
+    pub(crate) fn sidebar_navigation_drag_event(&mut self, event: &WindowEvent) -> bool {
         let escape = matches!(event, WindowEvent::KeyboardInput { event, .. }
             if event.state == ElementState::Pressed && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape));
-        if (escape || matches!(event, WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. }))
-            && self.info.navigation.device_drag.take().is_some() {
-            self.chrome_dirty = true;
-            if let Some(window) = &self.window {
-                window.set_cursor(CursorIcon::Default);
-                window.request_redraw();
+        let right = matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. });
+        if escape || right || matches!(event, WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. }) {
+            let device = self.info.navigation.device_drag.take().is_some();
+            let room = self.info.navigation.room_cards.cancel_resize();
+            if device || room {
+                self.chrome_dirty = true;
+                if let Some(window) = &self.window {
+                    let height = window.inner_size().height as f32 / self.effective_scale();
+                    self.sidebar_scroll_px = self.sidebar_scroll_px.clamp(0.0, self.sidebar_max_scroll(height));
+                    window.set_cursor(CursorIcon::Default);
+                    window.request_redraw();
+                }
+                return escape || right;
             }
-            return escape;
         }
         false
     }

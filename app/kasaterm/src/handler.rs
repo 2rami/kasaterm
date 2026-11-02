@@ -30,6 +30,12 @@ fn lid_away_deadline() -> Option<Instant> {
     None
 }
 
+fn sidebar_media_probe_deadline() -> Option<Instant> {
+    (crate::verification_run() && ["KASATERM_AUTODEVICEORDER_DIR", "KASATERM_AUTOROOMCARDS_DIR", "KASATERM_AUTOVOLUME_DIR"]
+        .iter().any(|key| std::env::var_os(key).is_some()))
+        .then(|| Instant::now() + std::time::Duration::from_millis(100))
+}
+
 fn blocks_obscured_button(button: MouseButton, modal: bool, workspace: Option<(f32, f32, f32, f32)>, cursor: (f32, f32)) -> bool {
     matches!(button, MouseButton::Right | MouseButton::Middle)
         && (modal || workspace.is_some_and(|(x, y, w, h)| {
@@ -3188,7 +3194,7 @@ impl ApplicationHandler<UserEvent> for App {
             if self.consume_settings_activation_key(event) { return; }
         }
         let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
-        if main_window && self.sidebar_device_drag_event(&event) { return; }
+        if main_window && self.sidebar_navigation_drag_event(&event) { return; }
         if main_window {
             if let WindowEvent::MouseInput { state, button: MouseButton::Left, .. } = &event {
                 self.weather.mouse_down = *state == ElementState::Pressed;
@@ -3955,6 +3961,11 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                if self.sidebar_room_resize_move() {
+                    window.set_cursor(CursorIcon::RowResize);
+                    window.request_redraw();
+                    return;
+                }
                 // 기기·원격 칸의 끌기를 다른 영역의 호버나 재배치가 가로채지 않게 한다.
                 if self.sidebar_navigation_drag_move() {
                     window.set_cursor(CursorIcon::Grabbing);
@@ -4294,6 +4305,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // 히트렉트를 다시 훑지 않고 직전 프레임이 세운 플래그를 읽는다.
                     // 들림을 그린 자리가 곧 손가락이 뜨는 자리라, 새 버튼을 만들어도
                     // 커서를 따로 챙길 일이 없다.
+                    let icon = if matches!(icon, CursorIcon::Default) && self.sidebar_room_grip_at((cx, cy)) {
+                        CursorIcon::RowResize
+                    } else { icon };
                     let icon = if matches!(icon, CursorIcon::Default) && self.sidebar_device_header_at((cx, cy)) {
                         CursorIcon::Grab
                     } else { icon };
@@ -4565,6 +4579,10 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if self.native_settings_end_drag() {
+                        window.request_redraw();
+                        return;
+                    }
+                    if self.sidebar_room_resize_release() {
                         window.request_redraw();
                         return;
                     }
@@ -5109,6 +5127,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // 앞이어야 한다** — 그 게이트가 왼쪽 띠의 클릭을 통째로 삼켜서,
                     // 뒤에 두면 메뉴가 영영 안 닫힌다.
                     if self.sidebar_menu_click(cx, cy) {
+                        window.request_redraw();
+                        return;
+                    }
+                    if self.sidebar_room_resize_press((cx, cy)) {
+                        window.set_cursor(CursorIcon::RowResize);
                         window.request_redraw();
                         return;
                     }
@@ -7899,6 +7922,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.aux_request_redraws();
         }
         self.image_preview_probe(event_loop);
+        self.run_pending_media_volume_probe(event_loop);
         self.run_pending_autosplits();
         self.run_pending_autowindows();
         self.run_pending_autodrag();
@@ -8205,6 +8229,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .chain(self.transfer_launch_tick())
                 .chain(lid_away_deadline())
                 .chain(self.sidebar_device_drag_deadline())
+                .chain(sidebar_media_probe_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))
                 .min();

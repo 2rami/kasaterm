@@ -4518,6 +4518,8 @@ enum SidebarMenuAction {
     MapBody,
     /// 방 이름 편집 — 두 번 느리게 누르는 것과 같은 길.
     RenameRoom,
+    HideRoom,
+    ResetRoomSize,
     /// 방 닫기 — × 와 같은 길(도는 claude 가 있으면 묻는다).
     CloseRoom,
     /// 사이드바 맨 위 현황 줄 숨기기·보이기(모든 방 공통, settings.json `sidebar_pulse`).
@@ -6195,7 +6197,7 @@ impl App {
             hover: None,
             image_tip: None,
             image_preview: Default::default(),
-            media_preview: Default::default(),
+            media_preview: media_preview::State::from_settings(&socket::read_settings()),
             image_hover_cell: None,
             lsp_goto: None,
             tmux: None,

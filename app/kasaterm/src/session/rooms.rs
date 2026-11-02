@@ -303,6 +303,7 @@ impl App {
         self.collapsed_windows = collapsed.into_iter().map(remap).collect();
         let bodies = std::mem::take(&mut self.room_list_body);
         self.room_list_body = bodies.into_iter().map(|(i, v)| (remap(i), v)).collect();
+        self.remap_sidebar_room_cards(|i| Some(remap(i)));
         // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
         // 끌어 옮기는 일은 드물지만, 인덱스를 키로 쓰는 필드가 **예외 없이** 여기를
         // 지나야 다음 사람이 이 목록을 믿는다.
@@ -479,6 +480,7 @@ impl App {
     }
     /// 방이 사라지면 이름·펼침·복원 위치가 다음 방에 잘못 붙지 않게 함께 당긴다.
     pub(crate) fn remap_removed_window_metadata(&mut self, idx: usize) {
+        self.remap_sidebar_room_cards(|i| crate::internal_room::remap_after_removal(i, idx));
         let remap = |i: usize| crate::internal_room::remap_after_removal(i, idx).unwrap_or(0);
         self.window_name_override = std::mem::take(&mut self.window_name_override)
             .into_iter()

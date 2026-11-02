@@ -7,6 +7,8 @@ use kasa_mcp::media_stream::Stream;
 use winit::keyboard::PhysicalKey;
 
 mod probe;
+mod volume;
+use volume::Volume;
 type Point = (f32, f32);
 /// 재생 중인 프레임 텍스처 — 카드와 큰 미리보기가 같은 열쇠를 써서, 크게 보기로 옮겨도 그림이 끊기지 않는다.
 const LIVE: &str = "media-live:";
@@ -17,8 +19,16 @@ struct Hit {
     rect: Rect,
     controls: Vec<(Control, Rect)>,
     track: Rect,
+    volume_track: Rect,
 }
 impl Hit {
+    fn volume_hover(&self, point: Point) -> bool {
+        self.volume_track.2 > 0.0 && contains(self.rect, point) && self.controls.iter()
+            .find(|(c, _)| *c == Control::Mute).is_some_and(|(_, mute)| {
+                let left = self.volume_track.0 - 8.0;
+                contains((left, mute.1, mute.0 + mute.2 - left, mute.3), point)
+            })
+    }
     fn control(&self, point: Point) -> Option<Control> {
         self.controls.iter().find(|(_, r)| contains(*r, point)).map(|(c, _)| *c)
     }
@@ -36,6 +46,8 @@ enum Action {
     Back,
     Forward,
     Mute,
+    Quieter,
+    Louder,
     Retry,
 }
 
@@ -48,15 +60,15 @@ struct Session {
     player: Option<Player>,
     stream: Option<Stream>,
     error: Option<String>,
-    muted: bool,
+    volume: Volume,
     /// 준비되는 대로 튼다 — 카드는 누른 순간부터, 큰 미리보기는 창에 초점이 있을 때.
     autoplay: bool,
     frame_serial: u64,
 }
 impl Session {
-    fn new(reference: Reference, generation: u64, autoplay: bool, proxy: &EventLoopProxy<UserEvent>) -> Self {
+    fn new(reference: Reference, generation: u64, autoplay: bool, volume: Volume, proxy: &EventLoopProxy<UserEvent>) -> Self {
         cache::request(&reference, proxy, true);
-        Self { reference, generation, asset: None, player: None, stream: None, error: None, muted: false, autoplay, frame_serial: 0 }
+        Self { reference, generation, asset: None, player: None, stream: None, error: None, volume, autoplay, frame_serial: 0 }
     }
     fn key(&self) -> String {
         format!("{LIVE}{}", self.generation)
@@ -86,10 +98,7 @@ impl Session {
                     .and_then(|stream| Player::open_url(stream.url()).map(|player| (stream, player)));
                 match opened {
                     Ok((stream, mut player)) => {
-                        if crate::verification_run() {
-                            player.set_volume(0.0);
-                            self.muted = true;
-                        }
+                        player.set_volume(if crate::verification_run() { 0.0 } else { self.volume.value() });
                         if self.autoplay {
                             player.play();
                         }
@@ -138,10 +147,9 @@ impl Session {
             player.seek((s.position + by).max(0.0).min(s.duration.unwrap_or(f64::MAX)));
         }
     }
-    fn mute(&mut self) {
-        self.muted = !self.muted;
+    fn apply_volume(&mut self) {
         if let Some(player) = &mut self.player {
-            player.set_volume(if self.muted { 0.0 } else { 1.0 });
+            player.set_volume(if crate::verification_run() { 0.0 } else { self.volume.value() });
         }
     }
     fn seek_fraction(&mut self, fraction: f32) {
@@ -170,6 +178,13 @@ impl Session {
     }
 }
 
+#[derive(Clone, Copy)]
+struct VolumeDrag {
+    owner: WindowId,
+    context: usize,
+    track: Rect,
+}
+
 struct Preview {
     owner: WindowId,
     context: usize,
@@ -178,6 +193,7 @@ struct Preview {
     from_card: bool,
     actions: Vec<(Action, Rect)>,
     seek: Rect,
+    volume_track: Rect,
     dragging: bool,
     focus: usize,
 }
@@ -186,11 +202,12 @@ struct Inline {
     owner: WindowId,
     context: usize,
     session: Session,
-    /// 탐색 막대를 끄는 중 — 그 카드의 막대 전체 자리.
     dragging: Option<Rect>,
 }
 #[derive(Default)]
 pub(crate) struct State {
+    volume: Volume,
+    volume_drag: Option<VolumeDrag>,
     hits: HashMap<WindowId, (usize, Vec<Hit>)>,
     press: Option<Press>,
     preview: Option<Preview>,
@@ -220,7 +237,34 @@ fn file_name(name: &str) -> String {
     if clean.is_empty() { "media".into() } else { clean }
 }
 impl State {
+    pub(crate) fn from_settings(settings: &serde_json::Value) -> Self {
+        Self { volume: Volume::load(settings), ..Default::default() }
+    }
+    fn store_volume(&self) {
+        socket::write_setting("media_volume", self.volume.settings());
+    }
+    fn sync_volume(&mut self) {
+        for session in self.inline.as_mut().map(|i| &mut i.session).into_iter()
+            .chain(self.preview.as_mut().map(|p| &mut p.session)) {
+            session.volume = self.volume;
+            session.apply_volume();
+        }
+    }
+    fn set_volume(&mut self, value: f32) {
+        self.volume.set(value);
+        self.sync_volume();
+    }
+    fn volume_at(&mut self, point: Point, track: Rect) {
+        if track.2 > 0.0 { self.set_volume((point.0 - track.0) / track.2); }
+    }
+    fn finish_volume_drag(&mut self, owner: WindowId) {
+        if self.volume_drag.is_some_and(|d| d.owner == owner) {
+            self.volume_drag = None;
+            self.store_volume();
+        }
+    }
     pub fn close_owner(&mut self, id: WindowId) {
+        self.finish_volume_drag(id);
         if self.owns(id) {
             self.preview = None;
         }
@@ -279,6 +323,7 @@ impl State {
                             rect: inline_media::intersection(s.rect, s.clip),
                             controls: Vec::new(),
                             track: (0.0, 0.0, 0.0, 0.0),
+                            volume_track: (0.0, 0.0, 0.0, 0.0),
                         })
                     })
                     .collect(),
@@ -286,6 +331,7 @@ impl State {
         );
     }
     fn forget_context(&mut self, id: WindowId, context: usize) {
+        if self.volume_drag.is_some_and(|d| d.owner == id && d.context != context) { self.finish_volume_drag(id); }
         if self
             .preview
             .as_ref()
@@ -326,25 +372,26 @@ impl State {
                 i.session.reference.clone(),
                 g.has_image(&key).then_some(key),
                 s,
-                i.session.muted,
                 note.or_else(|| i.session.player.is_none().then(|| "불러오는 중…".into())),
                 i.session.video(),
             )
         });
         let saving = self.saving.lock().map(|s| s.clone()).unwrap_or_default();
         let cards = {
-            let view = live.as_ref().map(|(reference, frame, s, muted, note, _)| inline_media::Live {
+            let view = live.as_ref().map(|(reference, frame, s, note, _)| inline_media::Live {
                 reference,
                 frame: frame.as_deref(),
                 playing: s.as_ref().is_some_and(|s| s.playing) || s.is_none(),
                 position: s.as_ref().map_or(0.0, |s| s.position),
                 duration: s.as_ref().and_then(|s| s.duration),
-                muted: *muted,
                 note: note.clone(),
             });
-            inline_media::paint(g, slots, cursor, view.as_ref(), &|r| saving.contains(r))
+            let volume_open = self.hits.get(&id).and_then(|(_, hits)| hits.iter().find(|h|
+                h.volume_hover(cursor) || self.volume_drag.is_some_and(|d| d.owner == id && d.track == h.volume_track))
+                .map(|h| &h.reference));
+            inline_media::paint(g, slots, cursor, view.as_ref(), self.volume.value(), volume_open, &|r| saving.contains(r))
         };
-        if let Some((reference, _, s, _, _, video)) = &live {
+        if let Some((reference, _, s, _, video)) = &live {
             let shown = cards.iter().any(|c| c.reference == *reference);
             if !shown && *video && s.as_ref().is_some_and(|s| s.playing) {
                 if let Some(i) = self.inline.as_mut() {
@@ -359,7 +406,7 @@ impl State {
                 context,
                 cards
                     .into_iter()
-                    .map(|c| Hit { reference: c.reference, rect: c.rect, controls: c.controls, track: c.track })
+                    .map(|c| Hit { reference: c.reference, rect: c.rect, controls: c.controls, track: c.track, volume_track: c.volume_track })
                     .collect(),
             ),
         );
@@ -377,7 +424,7 @@ impl State {
             || self.preview.as_ref().is_some_and(|p| {
                 p.owner == id
                     && (p.actions.iter().any(|(_, r)| contains(*r, point))
-                        || contains(p.seek, point))
+                        || contains(p.seek, point) || contains(p.volume_track, point))
             })
         {
             CursorIcon::Pointer
@@ -400,10 +447,11 @@ impl State {
         self.preview = Some(Preview {
             owner: id,
             context,
-            session: Session::new(reference, self.generation, true, proxy),
+            session: Session::new(reference, self.generation, true, self.volume, proxy),
             from_card: false,
             actions: Vec::new(),
             seek: (0.0, 0.0, 0.0, 0.0),
+            volume_track: (0.0, 0.0, 0.0, 0.0),
             dragging: false,
             focus: 0,
         });
@@ -419,6 +467,7 @@ impl State {
             from_card: true,
             actions: Vec::new(),
             seek: (0.0, 0.0, 0.0, 0.0),
+            volume_track: (0.0, 0.0, 0.0, 0.0),
             dragging: false,
             focus: 0,
         });
@@ -431,7 +480,7 @@ impl State {
         }
         self.generation += 1;
         let context = self.hits.get(&id).map_or(0, |h| h.0);
-        self.inline = Some(Inline { owner: id, context, session: Session::new(reference, self.generation, true, proxy), dragging: None });
+        self.inline = Some(Inline { owner: id, context, session: Session::new(reference, self.generation, true, self.volume, proxy), dragging: None });
     }
     /// 카드의 「저장」 — 원본 파일 전체를 다운로드 폴더에 받는다. 다른 기기 카드는 그 기기에서 받는다.
     fn save(&mut self, reference: Reference, proxy: &EventLoopProxy<UserEvent>) {
@@ -486,7 +535,18 @@ impl State {
         preview || inline
     }
     fn action(&mut self, action: Action, proxy: &EventLoopProxy<UserEvent>) {
+        if matches!(action, Action::Mute | Action::Quieter | Action::Louder) {
+            match action {
+                Action::Mute => { self.volume.toggle(); self.sync_volume(); }
+                Action::Quieter => self.set_volume(self.volume.value() - 0.05),
+                Action::Louder => self.set_volume(self.volume.value() + 0.05),
+                _ => {}
+            }
+            self.store_volume();
+            return;
+        }
         if action == Action::Close {
+            if let Some(owner) = self.preview.as_ref().map(|p| p.owner) { self.finish_volume_drag(owner); }
             if let Some(p) = self.preview.take().filter(|p| p.from_card) {
                 self.inline = Some(Inline { owner: p.owner, context: p.context, session: p.session, dragging: None });
             }
@@ -504,7 +564,7 @@ impl State {
             Action::Toggle => p.session.toggle(),
             Action::Back => p.session.step(-5.0),
             Action::Forward => p.session.step(5.0),
-            Action::Mute => p.session.mute(),
+            Action::Mute | Action::Quieter | Action::Louder => {},
             Action::Close => {}
         }
     }
@@ -545,6 +605,9 @@ impl State {
                 self.consumed_button = Some((owner, *button));
             }
         }
+        if matches!(event, WindowEvent::Focused(false) | WindowEvent::Destroyed | WindowEvent::CloseRequested) {
+            self.finish_volume_drag(owner);
+        }
         if matches!(event, WindowEvent::Focused(false) | WindowEvent::Destroyed) {
             self.press = None;
             self.suppress_key = None;
@@ -555,6 +618,36 @@ impl State {
                 if i.session.video() {
                     i.session.pause();
                 }
+            }
+        }
+        if let Some(drag) = self.volume_drag.filter(|d| d.owner == owner) {
+            match event {
+                WindowEvent::CursorMoved { .. } => {
+                    self.volume_at(point, drag.track);
+                    return Response::Consumed;
+                }
+                WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                    self.volume_at(point, drag.track);
+                    self.finish_volume_drag(owner);
+                    return Response::Consumed;
+                }
+                WindowEvent::MouseWheel { .. } | WindowEvent::KeyboardInput { .. } => self.finish_volume_drag(owner),
+                _ => {}
+            }
+        }
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }) {
+            let volume = if let Some(p) = self.preview.as_ref().filter(|p| p.owner == owner) {
+                contains(p.volume_track, point).then_some((p.context, p.volume_track))
+            } else if allow && !modifiers.alt_key() && !modifiers.super_key() && !modifiers.control_key() {
+                self.hits.get(&owner).and_then(|(context, hits)| hits.iter().rev()
+                    .find(|h| contains(h.rect, point) && h.control(point) == Some(Control::Volume))
+                    .map(|h| (*context, h.volume_track)))
+            } else { None };
+            if let Some((context, track)) = volume {
+                self.press = None;
+                self.volume_drag = Some(VolumeDrag { owner, context, track });
+                self.volume_at(point, track);
+                return Response::Consumed;
             }
         }
         if self.owns(owner) {
@@ -579,6 +672,8 @@ impl State {
                             Key::Named(NamedKey::Space) => Some(Action::Toggle),
                             Key::Named(NamedKey::ArrowLeft) => Some(Action::Back),
                             Key::Named(NamedKey::ArrowRight) => Some(Action::Forward),
+                            Key::Named(NamedKey::ArrowDown) => Some(Action::Quieter),
+                            Key::Named(NamedKey::ArrowUp) => Some(Action::Louder),
                             Key::Named(NamedKey::Enter) => p.actions.get(p.focus).map(|(a, _)| *a),
                             Key::Named(NamedKey::Tab) => {
                                 if !p.actions.is_empty() {
@@ -686,10 +781,10 @@ impl State {
                                 }
                             }
                             Some(Control::Save) => self.save(hit.reference, proxy),
-                            Some(Control::Mute) if playing => {
-                                if let Some(i) = self.inline.as_mut() {
-                                    i.session.mute();
-                                }
+                            Some(Control::Mute) => self.action(Action::Mute, proxy),
+                            Some(Control::Volume) => {
+                                self.volume_at(point, hit.volume_track);
+                                self.store_volume();
                             }
                             Some(Control::Seek) if playing => {}
                             _ => self.play_inline(owner, hit.reference, proxy),
@@ -757,7 +852,7 @@ impl State {
             .min(if audio { 640.0 } else { f32::MAX });
         let oh = (h - 32.0)
             .max(0.0)
-            .min(if audio { 240.0 } else { f32::MAX });
+            .min(if audio { 280.0 } else { f32::MAX });
         let outer = ((w - ow) * 0.5, (h - oh) * 0.5, ow, oh);
         g.rect(0.0, 0.0, w, h, theme::with_alpha(theme::bg(), 235));
         crate::native_controls::panel(g, outer, theme::surface());
@@ -798,7 +893,7 @@ impl State {
             (Action::Forward, "+5초"),
             (
                 Action::Mute,
-                if p.session.muted {
+                if p.session.volume.muted {
                     "소리 켜기"
                 } else {
                     "음소거"
@@ -845,6 +940,8 @@ impl State {
             bx += width + 8.0;
         }
         y += 40.0;
+        p.volume_track = inline_media::paint_volume(g, (x, y, right - x, 24.0), p.session.volume.value(), cursor);
+        y += 32.0;
         let status = if let Some(error) = failure {
             error
         } else if let Some(s) = &s {
@@ -905,7 +1002,7 @@ impl State {
             inline_media::text(
                 g,
                 (x, y + 16.0, area.2, 24.0),
-                "Space 재생·일시정지  ·  ← → 5초 이동  ·  Esc 닫기",
+                "Space 재생·일시정지  ·  ← → 5초 이동  ·  ↑ ↓ 볼륨  ·  Esc 닫기",
                 true,
             );
         }
@@ -913,6 +1010,7 @@ impl State {
         self.observe(owner, g);
     }
 }
+
 impl Preview {
     fn seek_to(&mut self, point: Point) {
         if self.seek.2 > 0.0 {
@@ -955,12 +1053,32 @@ mod tests {
     }
 
     #[test]
+    fn volume_hover_bridges_icon_and_slider_but_stays_inside_the_visible_card() {
+        let mut hit = Hit {
+            reference: Reference { id: "0123456789abcdef".into(), source: None },
+            rect: (0.0, 0.0, 400.0, 70.0),
+            controls: vec![(Control::Mute, (316.0, 22.0, 32.0, 32.0))],
+            track: (0.0, 0.0, 0.0, 0.0),
+            volume_track: (200.0, 26.0, 72.0, 24.0),
+        };
+        assert!(hit.volume_hover((300.0, 38.0)));
+        assert!(hit.volume_hover((220.0, 38.0)));
+        assert!(!hit.volume_hover((180.0, 38.0)));
+        assert!(!hit.volume_hover((220.0, 55.0)));
+        hit.rect.1 = 40.0;
+        assert!(!hit.volume_hover((220.0, 38.0)));
+        hit.volume_track.2 = 0.0;
+        assert!(!hit.volume_hover((220.0, 45.0)));
+    }
+
+    #[test]
     fn a_press_on_a_card_goes_to_the_control_under_it() {
         let hit = Hit {
             reference: Reference { id: "0123456789abcdef".into(), source: None },
             rect: (0.0, 0.0, 400.0, 88.0),
             controls: vec![(Control::Toggle, (12.0, 40.0, 32.0, 32.0)), (Control::Save, (356.0, 40.0, 32.0, 32.0))],
             track: (0.0, 0.0, 0.0, 0.0),
+            volume_track: (0.0, 0.0, 0.0, 0.0),
         };
         assert_eq!(hit.control((20.0, 50.0)), Some(Control::Toggle));
         assert_eq!(hit.control((360.0, 50.0)), Some(Control::Save));

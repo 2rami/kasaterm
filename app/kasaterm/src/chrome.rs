@@ -2274,6 +2274,8 @@ impl App {
                 }
             }
             SidebarMenuAction::RenameRoom => self.begin_room_rename(wi),
+            SidebarMenuAction::HideRoom => self.hide_sidebar_room(crate::sidebar_navigation::RoomId::Local(wi)),
+            SidebarMenuAction::ResetRoomSize => self.reset_sidebar_room_height(crate::sidebar_navigation::RoomId::Local(wi)),
             SidebarMenuAction::CloseRoom => self.confirm_or_close_session(wi),
             SidebarMenuAction::TogglePulse => self.toggle_sidebar_pulse(),
         }

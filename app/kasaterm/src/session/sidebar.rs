@@ -74,7 +74,7 @@ impl App {
     ///
     /// 배치 루프와 스크롤 한계가 **같은 값**을 봐야 한다. 갈라지면 스크롤은 되는데
     /// 목록 끝이 영영 안 나오는 종류로 어긋난다 — 실제로 그랬다(아래 참조).
-    pub(super) fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>, Vec<String>) {
+    pub(crate) fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>, Vec<String>) {
         // 설정·보드 카드는 펴지 않는다. 배치도는 「어느 학생이 어디 있나」를 그리는
         // 자리인데 내부 방의 leaf 는 화면 표식 하나뿐이라, 펴면 아이콘 한 칸짜리
         // 빈 지도가 남는다(2026-09-07 지적 「설정창 방미니맵 그건 필요없으니까」).
@@ -109,6 +109,7 @@ impl App {
         // 목록 줄은 두 줄(40)이고 거울 줄을 뺀다 — 원본 기기 줄과 같은 학생이다.
         let metrics = crate::chrome::SidebarMetrics::new(self.tab_strip_w());
         let body_h = metrics.body_h(if self.room_body_is_list(i) { self.sidebar_list_panes(i).len() } else { leaves.len() }, self.room_body_is_list(i));
+        let body_h = self.sidebar_room_height(i, body_h, self.room_body_is_list(i));
         let strip_h = metrics.undocked(undocked.len()).3;
         let full_h = body_h + strip_h + hidden.len() as f32 * metrics.retained_h() + SIDEBAR_ROW_PAD;
         (body_h, (full_h * t).round(), hidden, undocked)
@@ -120,7 +121,7 @@ impl App {
         (0..self.windows.len())
             .map(|i| {
                 // 다른 기기 방의 보기 창은 이 목록에 안 선다 — 높이 0.
-                if self.remote_view_of_window(i).is_some() {
+                if self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some() {
                     return 0.0;
                 }
                 SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1
@@ -280,7 +281,7 @@ impl App {
         let mut y = top + self.sidebar_local_body_offset() - scroll;
         for i in 0..n {
             // 다른 기기 방의 보기 창은 그 기계 절의 방 카드가 탭이다 — 여기엔 안 세운다.
-            if self.sidebar_local_device_collapsed() || self.remote_view_of_window(i).is_some() {
+            if self.sidebar_local_device_collapsed() || self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some() {
                 continue;
             }
             // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,

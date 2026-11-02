@@ -1185,6 +1185,8 @@ pub(super) fn paint_row_menu(
                 (SidebarMenuAction::ListBody, "목록으로 보기")
             },
             (SidebarMenuAction::RenameRoom, "이름 바꾸기"),
+            (SidebarMenuAction::ResetRoomSize, "미니맵 크기 초기화"),
+            (SidebarMenuAction::HideRoom, "방 숨기기"),
             (SidebarMenuAction::CloseRoom, "방 닫기"),
             (SidebarMenuAction::TogglePulse, pulse_menu_label),
         ]

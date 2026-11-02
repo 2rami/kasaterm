@@ -3,7 +3,7 @@ use super::*;
 const A: &str = "검증 A";
 const B: &str = "검증 B";
 
-fn fixture(label: &str, count: usize) -> state::MachinesColMachine {
+pub(super) fn fixture(label: &str, count: usize) -> state::MachinesColMachine {
     state::MachinesColMachine {
         label: label.into(), online: true, ago_secs: Some(0), outdated: false,
         host: String::new(), kvm: None, mirrored: Vec::new(), closed: 0, web_shells: Vec::new(), link: Default::default(),

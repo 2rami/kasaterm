@@ -1856,6 +1856,7 @@ impl App {
             .then(|| self.close_freeze.tab_slots.clone())
             .flatten();
         self.refresh_window_labels();
+        self.refresh_hidden_sidebar_rooms();
         let sb_labels = self.window_labels.clone();
         let sb_room_numbers = self.room_numbers_for_windows();
         let local_count = (0..self.windows.len())
@@ -1889,6 +1890,7 @@ impl App {
         // 방 목록이 실제로 보이는 세로 구간 `(top, height)`. 그리기의 시저와 아래
         // 히트렉트 자르기가 **같은 값**을 봐야 한다 — 갈리면 화면엔 없는 방이 눌린다.
         let sb_view = (self.sidebar_content_top(), self.sidebar_avail_h(sb_win_h));
+        self.refresh_local_room_grips(&sb_tabs, (0.0, sb_view.0, tab_strip_w, sb_view.1));
         // 기기 절까지 합친 높이 — 절 배치는 그 안에서 스스로 나눈다.
         let sb_full_h = self.sidebar_full_avail_h(sb_win_h);
         // 지금 보는 창이 다른 기기 방의 보기 창이면 그 기계 절의 카드가 「보는 중」으로 선다.

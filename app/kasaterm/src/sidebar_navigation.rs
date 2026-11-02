@@ -3,6 +3,8 @@ mod responsive_probe;
 mod device_order;
 mod devices;
 mod device_probe;
+mod room_cards;
+pub(crate) use room_cards::RoomId;
 
 type Rect = (f32, f32, f32, f32);
 
@@ -37,6 +39,7 @@ const SECTION_H: f32 = 36.0;
 
 #[derive(Default)]
 pub(crate) struct NavigationState {
+    pub(crate) room_cards: room_cards::RoomCards,
     device_order: device_order::Order,
     collapsed_devices: std::collections::HashSet<String>,
     device_drag: Option<devices::DeviceDrag>,
@@ -118,6 +121,8 @@ enum RoomMenuAction {
     MapBody,
     Rename,
     Close,
+    Hide,
+    ResetSize,
     ClosePane,
     SplitBeside,
     NewTab,
@@ -126,6 +131,8 @@ enum RoomMenuAction {
 
 #[derive(Clone)]
 enum Action {
+    HiddenRooms(String),
+    ShowHiddenRoom(RoomId),
     Menu(String),
     /// 방 접기·펴기(배지).
     Room(String),
@@ -228,18 +235,24 @@ fn content_height(
     collapsed: &std::collections::HashSet<String>,
     listed: &RoomViews,
     width: f32,
+    cards: &room_cards::RoomCards,
 ) -> f32 {
     let groups = rooms(machine);
     let mut height = 0.0;
     for (room, list) in &groups {
-        height += SIDEBAR_TAB_H;
         let key = room_key(&machine.label, list[0].window, room);
-        if !collapsed.contains(&key) { height += crate::chrome::SidebarMetrics::new(width).body_h(decks(list).len(), listed.listed(&key)); }
+        let id = RoomId::Remote(key.clone());
+        if cards.hidden(&id) { continue; }
+        height += SIDEBAR_TAB_H;
+        if !collapsed.contains(&key) {
+            let natural = crate::chrome::SidebarMetrics::new(width).body_h(decks(list).len(), listed.listed(&key));
+            height += cards.height(&id, natural, listed.listed(&key));
+        }
         height += SIDEBAR_TAB_GAP;
     }
     if groups.is_empty() { height = PANE_H; }
     if machine.closed > 0 { height += PANE_H; }
-    height + 8.0
+    height + cards.hidden_height(&machine.label, room_cards::remote_hidden(machine, cards).len()) + 8.0
 }
 
 /// 배치도 칸 — 원본 기기가 준 칸(0..1)을 상자에 얹는다. 옛 판 기기라 칸이 없으면
@@ -549,6 +562,8 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
         vec![
             if listed { (RoomMenuAction::MapBody, "배치도로 보기") } else { (RoomMenuAction::ListBody, "목록으로 보기") },
             (RoomMenuAction::Rename, "이름 바꾸기"),
+            (RoomMenuAction::ResetSize, "미니맵 크기 초기화"),
+            (RoomMenuAction::Hide, "방 숨기기"),
             (RoomMenuAction::Close, "방 닫기"),
             (RoomMenuAction::TogglePulse, pulse_label),
         ]
@@ -588,6 +603,7 @@ struct RowsCtx<'a> {
 fn draw_rows(
     g: &mut gpu::GpuRenderer,
     hits: &mut Vec<(Action, Rect)>,
+    cards: &mut room_cards::RoomCards,
     ctx: &RowsCtx,
     machine: &state::MachinesColMachine,
     cursor: (f32, f32),
@@ -599,11 +615,15 @@ fn draw_rows(
     let tab_x = SIDEBAR_TAB_INSET;
     let tab_w = (width - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
     let mut y = view.1 - scroll;
-    let groups = rooms(machine);
-    if groups.is_empty() && machine.online {
+    let all_groups = rooms(machine);
+    let empty = all_groups.is_empty();
+    let hidden = room_cards::remote_hidden(machine, cards);
+    let groups: Vec<_> = all_groups.into_iter().filter(|(room, list)|
+        !cards.hidden(&RoomId::Remote(room_key(&machine.label, list[0].window, room)))).collect();
+    if empty && machine.online {
         text(g, "열린 pane 없음", 16.0, y + 12.0, width - 32.0, 11.0, theme::text_dim(), false);
         y += PANE_H;
-    } else if groups.is_empty() {
+    } else if empty {
         // 끊긴 기기는 지우지 않고 이유를 둔다 — 머리 줄은 잘리니 여기서 이유를 온전히, 그 아래
         // 마지막으로 닿은 때. 방은 다시 붙으면 폴링이 저절로 되돌린다.
         let reason = if machine.link.reason.is_empty() { "이유 확인 중" } else { machine.link.reason.as_str() };
@@ -620,7 +640,9 @@ fn draw_rows(
         let collapsed = ctx.collapsed.contains(&key);
         let listed = ctx.listed.listed(&key);
         let stacks = decks(list);
-        let body_h = if collapsed { 0.0 } else { crate::chrome::SidebarMetrics::new(width).body_h(stacks.len(), listed) };
+        let id = RoomId::Remote(key.clone());
+        let natural = crate::chrome::SidebarMetrics::new(width).body_h(stacks.len(), listed);
+        let body_h = if collapsed { 0.0 } else { cards.height(&id, natural, listed) };
         let h = SIDEBAR_TAB_H + body_h;
         let head = (tab_x, y, tab_w, SIDEBAR_TAB_H);
         let active = active_room == Some(index);
@@ -736,8 +758,10 @@ fn draw_rows(
                 draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view, ctx.drag, done);
             }
         }
+        if !collapsed && !listed { cards.push_grip(id, (tab_x, y, tab_w, h), body_h, view); }
         y += h + SIDEBAR_TAB_GAP;
     }
+    y += room_cards::draw_hidden(g, hits, cards, &machine.label, &hidden, cursor, width, y, view);
     if machine.closed > 0 {
         text(g, &format!("닫힌 pane {} · 원본에서 되살리기", machine.closed), 16.0, y + 12.0, width - 32.0, 10.0, theme::text_dim(), false);
         y += PANE_H;
@@ -805,7 +829,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     if !local_closed { g.rect(12.0, local_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border()); }
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, room_numbers, device_views, heads, web_open, device_heads, device_sections, collapsed_devices, .. } = nav;
+        local_content_h, room_numbers, device_views, heads, web_open, device_heads, device_sections, collapsed_devices, room_cards, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
@@ -818,8 +842,10 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         done: &info.machines_col.done_marks,
     };
     if !local_closed {
+        let hidden_y = local_top + HEADER_H + devices::LOCAL_GAP + *local_content_h;
+        let hidden_h = room_cards::draw_hidden(g, hits, room_cards, "", &room_cards.local_hidden, cursor, width, hidden_y, viewport);
         draw_web_shells(g, hits, "", &info.machines_col.local_web_shells, web_open.contains(""),
-            cursor, width, local_top + HEADER_H + devices::LOCAL_GAP + *local_content_h, viewport);
+            cursor, width, hidden_y + hidden_h, viewport);
     }
     for section in device_sections.iter().filter(|section| !section.key.is_empty()) {
         let Some(machine) = info.machines_col.machines.iter().find(|machine| machine.label == section.key) else { continue };
@@ -852,13 +878,14 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         let body = (viewport.0, y + SECTION_H, viewport.2, body_h);
         if let Some(visible) = clipped(body, viewport) {
             device_views.push((machine.label.clone(), visible));
-            draw_rows(g, hits, &ctx, machine, cursor, width, visible, visible.1 - body.1);
+            draw_rows(g, hits, room_cards, &ctx, machine, cursor, width, visible, visible.1 - body.1);
         }
     }
     g.pop_clip();
 }
 
 pub(crate) fn draw_device_drag(g: &mut gpu::GpuRenderer, info: &state::InfoState, cursor: (f32, f32)) {
+    room_cards::draw_grips(g, info, cursor);
     devices::draw_drag(g, info, cursor);
 }
 
@@ -877,6 +904,7 @@ impl App {
     /// (「맥북」 픽스처는 Info 타이머가 돌아야 심긴다) · `KASATERM_MACHINES='[]'`.
     /// 결과는 `KASATERM_AUTONAV_DIR/navigation.log` 와 단계별 png.
     pub(crate) fn run_pending_sidebar_navigation_probe(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_pending_sidebar_room_cards_probe(event_loop);
         self.run_pending_sidebar_device_probe(event_loop);
         self.run_pending_sidebar_responsive_probe(event_loop);
         use std::sync::{Mutex, OnceLock};
@@ -1135,12 +1163,16 @@ impl App {
         let action = self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| a.clone());
         let Some(action) = action else { return false; };
         match action {
+            Action::HiddenRooms(label) => self.toggle_hidden_sidebar_rooms(label),
+            Action::ShowHiddenRoom(room) => self.show_sidebar_room(room),
             Action::Menu(label) => {
                 self.info.machine_menu = Some((cursor.0, cursor.1, label));
                 self.info.machines_col.last_refresh = None;
             }
             Action::Section(label) => {
                 self.close_freeze.thaw();
+                self.info.navigation.room_cards.cancel_resize();
+                self.info.navigation.cell_drag = None;
                 self.info.navigation.device_drag = Some(devices::DeviceDrag::new(label, cursor));
             }
             Action::Open { label, window, room, focus } => match focus {
@@ -1333,6 +1365,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn content_height(machine: &state::MachinesColMachine, collapsed: &std::collections::HashSet<String>, listed: &RoomViews, width: f32) -> f32 {
+        super::content_height(machine, collapsed, listed, width, &room_cards::RoomCards::default())
+    }
 
     #[test]
     fn collapsed_room_summary_counts_cells_not_tabs_and_does_not_guess_offline() {
@@ -1620,6 +1656,8 @@ impl App {
                 None => self.set_toast("옛 판 기기의 방은 이름을 바꿀 수 없어요".to_string()),
             },
             Some(RoomMenuAction::Close) => self.confirm_or_close_remote_room(&menu.label, menu.window, &menu.room),
+            Some(RoomMenuAction::Hide) => self.hide_sidebar_room(RoomId::Remote(menu.key)),
+            Some(RoomMenuAction::ResetSize) => self.reset_sidebar_room_height(RoomId::Remote(menu.key)),
             Some(RoomMenuAction::ClosePane) => {
                 if let Some(pane) = menu.pane { self.confirm_or_close_remote_cell(&menu.label, &pane); }
             }

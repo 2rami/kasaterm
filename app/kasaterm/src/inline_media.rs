@@ -184,7 +184,6 @@ pub(crate) struct Live<'a> {
     pub playing: bool,
     pub position: f64,
     pub duration: Option<f64>,
-    pub muted: bool,
     /// 준비 중·버퍼링·실패를 시각 뒤에 덧붙인다.
     pub note: Option<String>,
 }
@@ -194,6 +193,7 @@ pub(crate) enum Control {
     Toggle,
     Seek,
     Mute,
+    Volume,
     Expand,
     Save,
 }
@@ -205,6 +205,25 @@ pub(crate) struct Card {
     pub controls: Vec<(Control, Rect)>,
     /// 탐색 막대 전체 폭 — 끌 때 위치를 비율로 바꾼다.
     pub track: Rect,
+    pub volume_track: Rect,
+}
+
+pub(crate) fn paint_volume(g: &mut gpu::GpuRenderer, area: Rect, volume: f32, cursor: (f32, f32)) -> Rect {
+    text(g, (area.0, area.1 + 3.0, 34.0, 20.0), "볼륨", true);
+    paint_volume_track(g, (area.0 + 40.0, area.1, (area.2 - 40.0).max(0.0), area.3), volume, cursor)
+}
+
+fn paint_volume_track(g: &mut gpu::GpuRenderer, area: Rect, volume: f32, cursor: (f32, f32)) -> Rect {
+    let value = volume.clamp(0.0, 1.0);
+    let track = (area.0 + 4.0, area.1, (area.2 - 44.0).max(0.0), area.3);
+    let y = area.1 + area.3 / 2.0;
+    g.rect(track.0, y - 1.5, track.2, 3.0, theme::border());
+    g.rect(track.0, y - 1.5, track.2 * value, 3.0, theme::accent());
+    g.round_rect_fill(track.0 + track.2 * value - 4.0, y - 4.0, 8.0, 8.0, 4.0, theme::accent());
+    text(g, (area.0 + area.2 - 34.0, area.1 + 3.0, 34.0, 20.0), &format!("{:.0}%", value * 100.0), true);
+    g.hover_pointer |= cursor.0 >= track.0 && cursor.0 <= track.0 + track.2
+        && cursor.1 >= track.1 && cursor.1 <= track.1 + track.3;
+    track
 }
 
 const BUTTON: f32 = 32.0;
@@ -219,6 +238,8 @@ pub(crate) fn paint(
     slots: &[InlineSlot],
     cursor: (f32, f32),
     live: Option<&Live>,
+    volume: f32,
+    volume_open: Option<&Reference>,
     saving: &dyn Fn(&Reference) -> bool,
 ) -> Vec<Card> {
     let live_keys: std::collections::HashSet<_> = slots
@@ -243,6 +264,7 @@ pub(crate) fn paint(
         crate::native_controls::panel(g, (x, y, w, h), theme::surface());
         let asset = cache::get(&reference);
         let line_y = (y + h - 52.0).max(y + 8.0);
+        let button_y = line_y + 4.0;
         if h > 100.0 {
             let area = (x + 8.0, y + 8.0, (w - 16.0).max(0.0), (line_y - 14.0 - y - 8.0).max(0.0));
             let frame = live.and_then(|l| l.frame).filter(|k| g.has_image(k));
@@ -263,33 +285,45 @@ pub(crate) fn paint(
         let mut controls = Vec::new();
         let toggle = crate::native_controls::icon_button(
             g,
-            (x + 12.0, line_y + 4.0, BUTTON, BUTTON),
+            (x + 12.0, button_y, BUTTON, BUTTON),
             cursor,
             if live.is_some_and(|l| l.playing) { "pause" } else { "play" },
             Default::default(),
         );
         controls.push((Control::Toggle, toggle));
-        // 오른쪽부터 저장 · 크게 보기 · 소리. 좁으면 이름 줄을 남기고 왼쪽 것부터 뺀다.
         let mut right = x + w - 12.0;
-        let wanted: Vec<(Control, &str, bool)> = [
-            (Control::Save, "download", ready && !saving(&reference)),
-            (Control::Expand, "maximize", true),
-        ]
-        .into_iter()
-        .chain(live.map(|l| (Control::Mute, if l.muted { "volume-x" } else { "volume-2" }, true)))
-        .collect();
+        let capacity = ((w - 12.0 - 52.0 - TEXT_MIN) / (BUTTON + GAP)).floor().clamp(0.0, 3.0) as usize;
+        let mut wanted = Vec::new();
+        if capacity >= 2 { wanted.push((Control::Save, "download", ready && !saving(&reference))); }
+        if capacity >= 3 { wanted.push((Control::Expand, "maximize", true)); }
+        wanted.push((Control::Mute, if volume == 0.0 { "volume-x" } else { "volume-2" }, true));
         for (control, icon, enabled) in wanted {
             if right - BUTTON - GAP < x + 52.0 + TEXT_MIN {
                 break;
             }
             let style = crate::native_controls::Style { enabled, ..Default::default() };
-            let r = crate::native_controls::icon_button(g, (right - BUTTON, line_y + 4.0, BUTTON, BUTTON), cursor, icon, style);
+            let r = crate::native_controls::icon_button(g, (right - BUTTON, button_y, BUTTON, BUTTON), cursor, icon, style);
             if enabled {
                 controls.push((control, r));
             }
             right -= BUTTON + GAP;
         }
-        let text_w = (right - x - 52.0).max(0.0);
+        let mut text_w = (right - x - 52.0).max(0.0);
+        let mut volume_track = (0.0, 0.0, 0.0, 0.0);
+        if let Some((_, mute)) = controls.iter().find(|(c, _)| *c == Control::Mute) {
+            let hovered = cursor.0 >= mute.0 && cursor.0 <= mute.0 + mute.2
+                && cursor.1 >= mute.1 && cursor.1 <= mute.1 + mute.3;
+            if hovered || volume_open == Some(&reference) {
+                let left = (mute.0 - 168.0).max(x + 52.0);
+                let area = (left, button_y + 4.0, (mute.0 - 8.0 - left).max(0.0), 24.0);
+                if area.2 >= 64.0 {
+                    g.round_rect_fill(area.0 - 4.0, button_y, area.2 + 8.0, BUTTON, 4.0, theme::surface_hover());
+                    volume_track = paint_volume_track(g, area, volume, cursor);
+                    text_w = (left - x - 60.0).max(0.0);
+                }
+            }
+        }
+        if volume_track.2 > 0.0 { controls.push((Control::Volume, volume_track)); }
         let (name, detail) = match &asset {
             Ok(Some(asset)) => {
                 let detail = match live {
@@ -324,7 +358,7 @@ pub(crate) fn paint(
                 track = (x + 12.0, bar_y, (w - 24.0).max(0.0), 3.0);
                 g.rect(track.0, track.1, track.2, track.3, theme::border());
                 g.rect(track.0, track.1, track.2 * (l.position / d).clamp(0.0, 1.0) as f32, track.3, theme::accent());
-                controls.push((Control::Seek, (track.0, bar_y - 6.0, track.2, 15.0)));
+                controls.push((Control::Seek, (track.0, bar_y - 6.0, track.2, (line_y - bar_y + 6.0).min(15.0))));
             }
         }
         g.pop_clip();
@@ -333,6 +367,7 @@ pub(crate) fn paint(
             rect: clip,
             controls: controls.into_iter().map(|(c, r)| (c, intersection(r, clip))).filter(|(_, r)| r.2 > 0.0 && r.3 > 0.0).collect(),
             track,
+            volume_track,
         });
     }
     cards
