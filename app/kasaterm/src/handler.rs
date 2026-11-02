@@ -30,8 +30,8 @@ fn lid_away_deadline() -> Option<Instant> {
     None
 }
 
-fn sidebar_media_probe_deadline() -> Option<Instant> {
-    (crate::verification_run() && ["KASATERM_AUTODEVICEORDER_DIR", "KASATERM_AUTOROOMCARDS_DIR", "KASATERM_AUTOVOLUME_DIR"]
+fn interaction_probe_deadline() -> Option<Instant> {
+    (crate::verification_run() && ["KASATERM_AUTODEVICEORDER_DIR", "KASATERM_AUTOROOMCARDS_DIR", "KASATERM_AUTOVOLUME_DIR", "KASATERM_AUTOSHELLEDIT_DIR", "KASATERM_TEST_PREVIEW_FRAME_REPORT"]
         .iter().any(|key| std::env::var_os(key).is_some()))
         .then(|| Instant::now() + std::time::Duration::from_millis(100))
 }
@@ -6498,6 +6498,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let switched = self.ws.lock().unwrap().active_pane.as_deref()
                                 != Some(pane_id.as_str());
                             self.focus_pane(&pane_id);
+                            if !self.pane_takes_mouse(&pane_id) { self.cancel_shell_editor_selection(); }
                             if self.pane_takes_mouse(&pane_id) {
                                 // Hand the press to the TUI. Its own
                                 // selection / copy-on-select kicks in
@@ -7254,7 +7255,9 @@ impl ApplicationHandler<UserEvent> for App {
                         };
                         self.in_preedit = false;
                         self.preedit.clear();
-                        self.send_bytes_to_surface(owner_surface.as_deref(), text.as_bytes());
+                        if !self.shell_edit_insert_text(owner_surface.as_deref(), &text) {
+                            self.send_bytes_to_surface(owner_surface.as_deref(), text.as_bytes());
+                        }
                     }
                 }
                 // Preedit is chrome, not PTY grid — flag it so the damage
@@ -7923,6 +7926,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.image_preview_probe(event_loop);
         self.run_pending_media_volume_probe(event_loop);
+        self.preview_frame_probe();
         self.run_pending_autosplits();
         self.run_pending_autowindows();
         self.run_pending_autodrag();
@@ -8229,7 +8233,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .chain(self.transfer_launch_tick())
                 .chain(lid_away_deadline())
                 .chain(self.sidebar_device_drag_deadline())
-                .chain(sidebar_media_probe_deadline())
+                .chain(interaction_probe_deadline())
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))
                 .min();

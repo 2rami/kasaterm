@@ -444,11 +444,11 @@ fn draw_cell(
     let metrics = crate::chrome::SidebarMetrics::new(view.2);
     let (fx, fy, face) = metrics.face_box(cell);
     if metrics.map_label(mw, mh) {
-        text(g, &crate::sidebar_pulse::row_title(&row.title, "터미널"), mx + 6.0, my + mh - 28.0, mw - 12.0, 10.5, theme::text_dim(), false);
+        crate::sidebar_map::paint_title(g, cell, &crate::sidebar_pulse::row_title(&row.title, "터미널"));
     }
     let phase = crate::sprites::anim_phase_secs();
     let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
-    let walked = busy && crate::sprites::draw_student_walk(g, who, fx - 2.0, fy - 2.0, face + 4.0, phase);
+    let walked = busy && crate::sprites::draw_student_walk(g, who, fx, fy, face, phase);
     if !walked && !crate::sprites::draw_student_face_anim(g, who, fx, fy, face, phase) {
         let size = face.min(16.0);
         g.queue_icon("terminal", fx + (face - size) / 2.0, fy + (face - size) / 2.0, size, theme::text_dim());

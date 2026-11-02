@@ -43,6 +43,7 @@ mod screen;
 mod grid;
 mod vt;
 mod reader;
+mod shell_editor;
 mod blocks;
 mod inline;
 mod process;
@@ -201,6 +202,8 @@ pub struct PtySession {
     /// `theme: auto` 등)에게만 테마 전환 때 `CSI ?997;N n` 리포트를 보낸다 —
     /// 구독 안 한 셸에 보내면 입력줄에 이스케이프 쓰레기가 박힌다.
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
+    // Enhanced editing keys are valid only while the shell's ZLE widgets own input.
+    shell_editor: Arc<std::sync::atomic::AtomicU8>,
     /// reader 스레드 정지 신호 — 핸드오프(fd 를 다른 프로세스로 넘기기) 직전에
     /// 세운다. 안 세우고 넘기면 커널이 다음 출력 청크를 **이쪽** read 에 줘 버려,
     /// 넘긴 뒤의 화면이 두 소비자에게 갈라진다.

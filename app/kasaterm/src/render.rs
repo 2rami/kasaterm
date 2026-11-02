@@ -200,13 +200,7 @@ pub(crate) fn dashed_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f
 }
 
 pub(crate) fn minimap_face_box(mx: f32, my: f32, mw: f32, mh: f32) -> (f32, f32, f32) {
-    let room = if minimap_has_bar(mw, mh) {
-        MINI_BAR_H + MINI_BAR_PAD
-    } else {
-        0.0
-    };
-    let face = (mw.min(mh - room) - 8.0).clamp(10.0, 26.0);
-    (mx + (mw - face) / 2.0, my + (mh - room - face) / 2.0, face)
+    crate::sidebar_map::layout((mx, my, mw, mh)).face
 }
 
 /// 오래 도는 것일수록 눈에 띄게 — 색과 굵기로 세 단(사용자 2026-08-24 조건).
@@ -7287,11 +7281,11 @@ mod minimap_box_tests {
         }
     }
 
-    /// 얼굴은 칸 가운데다 — 세로만 띠 쪽으로 치우친다.
+    /// 이름을 둘 폭이 없는 칸은 얼굴을 가운데에 남긴다.
     #[test]
     fn face_is_centered_horizontally() {
-        let (fx, _, face) = minimap_face_box(10.0, 0.0, 100.0, 62.0);
-        assert_eq!(fx, 10.0 + (100.0 - face) / 2.0);
+        let (fx, _, face) = minimap_face_box(10.0, 0.0, 60.0, 62.0);
+        assert_eq!(fx, 10.0 + (60.0 - face) / 2.0);
     }
 }
 

@@ -535,9 +535,7 @@ pub(super) fn paint_layouts(
         // 띠가 파고든다(칸 31 · 얼굴 23 이면 2px).
         let (fx, fy, face) = metrics.face_box(*r);
         if metrics.map_label(mw, mh) {
-            let title = clip_px(g, &info.student.title, 10.5, false, (mw - 12.0).max(0.0));
-            g.draw_text(mx + 6.0, my + mh - 28.0, &title,
-                gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+            crate::sidebar_map::paint_title(g, *r, &info.student.title);
         }
         if info.error {
             let size = face.min(18.0);
@@ -553,9 +551,9 @@ pub(super) fn paint_layouts(
                 && draw_student_walk(
                     g,
                     &info.who,
-                    fx - 2.0,
-                    fy - 2.0,
-                    face + 4.0,
+                    fx,
+                    fy,
+                    face,
                     anim_phase_secs(),
                 );
             if !walked
@@ -731,9 +729,7 @@ pub(super) fn paint_layouts(
         );
         let (fx, fy, face) = metrics.face_box(*r);
         if metrics.map_label(mw, mh) {
-            let title = clip_px(g, &info.student.title, 10.5, false, (mw - 12.0).max(0.0));
-            g.draw_text(mx + 6.0, my + mh - 28.0, &title,
-                gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+            crate::sidebar_map::paint_title(g, *r, &info.student.title);
         }
         if info.error {
             let size = face.min(18.0);
@@ -749,9 +745,9 @@ pub(super) fn paint_layouts(
                 && draw_student_walk(
                     g,
                     &info.who,
-                    fx - 2.0,
-                    fy - 2.0,
-                    face + 4.0,
+                    fx,
+                    fy,
+                    face,
                     anim_phase_secs(),
                 );
             if !walked

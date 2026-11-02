@@ -4039,6 +4039,7 @@ impl App {
                         "home" => '\u{f729}',
                         "end" => '\u{f72b}',
                         "backspace" => '\u{7f}',
+                        "delete" => '\u{f728}',
                         "enter" => '\r',
                         "esc" => '\u{1b}',
                         "space" => ' ',
@@ -4066,10 +4067,13 @@ impl App {
             '\u{f700}' => 126,
             '\u{f729}' => 115,
             '\u{f72b}' => 119,
+            '\u{f728}' => 117,
             '\u{7f}' => 51,
             '\r' => 36,
             '\u{1b}' => 53,
             ' ' => 49,
+            '=' | '+' => 24,
+            '-' | '_' => 27,
             c => match LETTERS.chars().position(|l| l == c.to_ascii_lowercase()) {
                 Some(at) => at as u16,
                 None => match c.to_ascii_lowercase() {

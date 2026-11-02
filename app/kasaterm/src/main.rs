@@ -28,8 +28,10 @@ mod gpu;
 mod handler;
 mod homeaccounts;
 mod input;
+mod shell_edit;
 mod process_usage;
 mod image_preview;
+mod preview_frame;
 // claude 한도 초기화권 — 잔량 읽기와 쓰는 페이지 열기.
 mod limit_reset;
 mod layout;
@@ -106,6 +108,7 @@ mod machinescol;
 #[cfg(target_os = "macos")]
 mod lid_away;
 mod sidebar_navigation;
+mod sidebar_map;
 mod sidebar_pulse;
 mod mirror_theme;
 mod mirror_view;

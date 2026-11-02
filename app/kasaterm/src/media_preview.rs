@@ -186,6 +186,7 @@ struct VolumeDrag {
 }
 
 struct Preview {
+    frame: crate::preview_frame::Frame,
     owner: WindowId,
     context: usize,
     session: Session,
@@ -193,6 +194,7 @@ struct Preview {
     from_card: bool,
     actions: Vec<(Action, Rect)>,
     seek: Rect,
+    area: Rect,
     volume_track: Rect,
     dragging: bool,
     focus: usize,
@@ -420,6 +422,10 @@ impl State {
         g.images.retain(|k, _| !k.starts_with(LIVE) || keep.contains(k));
     }
     pub fn cursor(&self, id: WindowId, point: Point) -> CursorIcon {
+        if let Some(p) = self.preview.as_ref().filter(|p| p.owner == id) {
+            let move_allowed = p.frame.title_contains(point) && !p.actions.iter().any(|(_, r)| contains(*r, point));
+            if let Some(cursor) = p.frame.cursor(point, move_allowed) { return cursor; }
+        }
         if self.hit(id, point)
             || self.preview.as_ref().is_some_and(|p| {
                 p.owner == id
@@ -445,12 +451,14 @@ impl State {
         self.focused = Some(id);
         let context = self.hits.get(&id).map_or(0, |h| h.0);
         self.preview = Some(Preview {
+            frame: Default::default(),
             owner: id,
             context,
             session: Session::new(reference, self.generation, true, self.volume, proxy),
             from_card: false,
             actions: Vec::new(),
             seek: (0.0, 0.0, 0.0, 0.0),
+            area: (0.0, 0.0, 0.0, 0.0),
             volume_track: (0.0, 0.0, 0.0, 0.0),
             dragging: false,
             focus: 0,
@@ -461,12 +469,14 @@ impl State {
         let Some(inline) = self.inline.take() else { return };
         self.focused = Some(id);
         self.preview = Some(Preview {
+            frame: Default::default(),
             owner: inline.owner,
             context: inline.context,
             session: inline.session,
             from_card: true,
             actions: Vec::new(),
             seek: (0.0, 0.0, 0.0, 0.0),
+            area: (0.0, 0.0, 0.0, 0.0),
             volume_track: (0.0, 0.0, 0.0, 0.0),
             dragging: false,
             focus: 0,
@@ -618,6 +628,14 @@ impl State {
                 if i.session.video() {
                     i.session.pause();
                 }
+            }
+        }
+        if let Some(p) = self.preview.as_mut().filter(|p| p.owner == owner) {
+            let move_allowed = p.frame.title_contains(point) && !p.actions.iter().any(|(_, r)| contains(*r, point));
+            if p.frame.event(event, point, move_allowed) {
+                p.dragging = false;
+                self.finish_volume_drag(owner);
+                return Response::Consumed;
             }
         }
         if let Some(drag) = self.volume_drag.filter(|d| d.owner == owner) {
@@ -847,14 +865,9 @@ impl State {
         };
         let (w, h) = size;
         let audio = p.session.asset.as_ref().is_some_and(|a| a.media.kind == "audio");
-        let ow = (w - 32.0)
-            .max(0.0)
-            .min(if audio { 640.0 } else { f32::MAX });
-        let oh = (h - 32.0)
-            .max(0.0)
-            .min(if audio { 280.0 } else { f32::MAX });
-        let outer = ((w - ow) * 0.5, (h - oh) * 0.5, ow, oh);
-        g.rect(0.0, 0.0, w, h, theme::with_alpha(theme::bg(), 235));
+        let outer = p.frame.layout(size, audio.then_some((640.0, 280.0)),
+            (360.0, if audio { 280.0 } else { 300.0 }));
+        g.rect(0.0, 0.0, w, h, theme::with_alpha(theme::bg(), 120));
         crate::native_controls::panel(g, outer, theme::surface());
         let x = outer.0 + 16.0;
         let right = (outer.0 + outer.2 - 16.0).max(x);
@@ -983,6 +996,7 @@ impl State {
             (right - x).max(0.0),
             (outer.1 + outer.3 - 16.0 - y).max(0.0),
         );
+        p.area = area;
         if let Some((_, r)) = p
             .actions
             .get(p.focus.min(p.actions.len().saturating_sub(1)))
@@ -1006,8 +1020,19 @@ impl State {
                 true,
             );
         }
+        p.frame.paint_grip(g, cursor);
         self.retain_live(g);
         self.observe(owner, g);
+    }
+
+    pub(crate) fn frame_probe(&self) -> Option<serde_json::Value> {
+        let p = self.preview.as_ref()?;
+        Some(serde_json::json!({
+            "kind": p.session.asset.as_ref().map_or("video", |a| a.media.kind.as_str()),
+            "frame": p.frame.rect()?, "area": p.area, "generation": p.session.generation,
+            "ready": p.session.player.is_some(), "decoded": p.session.frame_serial > 0,
+            "volume": p.session.volume.value()
+        }))
     }
 }
 

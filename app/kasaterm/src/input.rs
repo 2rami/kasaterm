@@ -2198,6 +2198,10 @@ impl App {
         if self.copy_md_render_selection() {
             return;
         }
+        if self.selection.is_none() && !self.chat_view_has_selection() && self.shell_editor_has_selection() {
+            self.send_bytes(b"\x1b[99;9u");
+            return;
+        }
         let text = if self.chat_view_has_selection() {
             let text = self.chat_view_selection_text().unwrap_or_default();
             // 리그는 사람 클립보드 대신 파일에 쓴다.
@@ -2216,6 +2220,10 @@ impl App {
             extract_selection(&rows, sel)
         };
         if text.is_empty() {
+            return;
+        }
+        if let Some(clipboard) = crate::shell_edit::verification_clipboard() {
+            clipboard.store(&text);
             return;
         }
         match arboard::Clipboard::new() {
@@ -2268,6 +2276,28 @@ impl App {
         }
     }
 
+    pub(crate) fn paste_terminal_text(&mut self, surface: Option<&str>, text: &str) {
+        if text.is_empty() || self.shell_edit_insert_text(surface, text) { return; }
+        let bracketed = self.ws.lock().ok().and_then(|ws| {
+            if let Some(pid) = surface {
+                let outer = ws.outer_for_pty(pid)?;
+                ws.panes.get(&outer)?.tab_for_pid(pid).term().map(|t| t.bracketed_paste)
+            } else {
+                ws.active()?.term().map(|t| t.bracketed_paste)
+            }
+        }).unwrap_or(false);
+        if bracketed {
+            let mut payload = Vec::with_capacity(text.len() + 12);
+            payload.extend_from_slice(b"\x1b[200~");
+            payload.extend_from_slice(text.as_bytes());
+            payload.extend_from_slice(b"\x1b[201~");
+            self.send_bytes_to_surface(surface, &payload);
+        } else {
+            let raw = text.replace("\r\n", "\r").replace('\n', "\r");
+            self.send_bytes_to_surface(surface, raw.as_bytes());
+        }
+    }
+
     pub(crate) fn paste_clipboard(&mut self) {
         if self.image_preview.focused() || self.media_preview.focused() { return; }
         if crate::verification_run() && std::env::var_os("KASATERM_TEST_IMAGE_PREVIEW").is_some() {
@@ -2277,6 +2307,10 @@ impl App {
         if self.native_settings_paste_clipboard() { return; }
         if self.side_column_covers_workspace() { return; }
         let surface = self.target_surface();
+        if let Some(clipboard) = crate::shell_edit::verification_clipboard() {
+            self.paste_terminal_text(surface.as_deref(), &clipboard.load());
+            return;
+        }
         let mut cb = match arboard::Clipboard::new() {
             Ok(cb) => cb,
             Err(e) => {
@@ -2311,31 +2345,7 @@ impl App {
         // 클립보드 PNG를 [Image] 칩으로 읽게 한다.
         if let Some(text) = text {
             if !text.is_empty() {
-                // 감싸개(`ESC[200~ … ESC[201~`)는 앱이 DECSET 2004 로 **켰을 때만**
-                // 보낸다. 안 켠 앱은 저 바이트를 입력의 일부로 받는다 — `claude auth
-                // login` 의 코드 프롬프트가 그래서 "Invalid code" 로 튕겼다(사용자:
-                // "붙여넣기가 안되는거같은데"). zsh·claude TUI 는 켜므로 평소 붙여넣기
-                // 경험은 그대로다.
-                let bracketed = self
-                    .ws
-                    .lock()
-                    .unwrap()
-                    .active()
-                    .and_then(|p| p.term())
-                    .map(|t| t.bracketed_paste)
-                    .unwrap_or(false);
-                if bracketed {
-                    let mut payload = Vec::with_capacity(text.len() + 12);
-                    payload.extend_from_slice(b"\x1b[200~");
-                    payload.extend_from_slice(text.as_bytes());
-                    payload.extend_from_slice(b"\x1b[201~");
-                    self.send_bytes(&payload);
-                } else {
-                    // 감싸개가 없으면 줄바꿈이 곧 실행이다 — 실제 터미널과 같이
-                    // CR 로 보낸다(LF 는 대부분의 라인 편집기가 안 먹는다).
-                    let raw = text.replace("\r\n", "\r").replace('\n', "\r");
-                    self.send_bytes(raw.as_bytes());
-                }
+                self.paste_terminal_text(surface.as_deref(), &text);
                 return;
             }
         }
@@ -3019,7 +3029,11 @@ impl App {
             return;
         };
         match prev {
-            crate::ImeFocus::Pane(id) => self.send_bytes_to_surface(Some(&id), text.as_bytes()),
+            crate::ImeFocus::Pane(id) => {
+                if !self.shell_edit_insert_text(Some(&id), &text) {
+                    self.send_bytes_to_surface(Some(&id), text.as_bytes());
+                }
+            }
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
             crate::ImeFocus::AuxEditor(id) => self.aux_insert_id(id, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
@@ -3267,7 +3281,7 @@ impl App {
     }
     /// 지금 pane 이 스크롤백을 보고 있으면 살아 있는 끝으로 되돌린다.
     /// 이미 끝에 있으면 아무 일도 안 한다(공짜 질의라 매번 물어도 된다).
-    fn follow_live_tail_now(&mut self) {
+    pub(crate) fn follow_live_tail_now(&mut self) {
         let Some(pane) = self.target_surface() else { return };
         // 거울 스크롤 기억과 거울 이동 목적지는 **백엔드 pid** 로 적힌다(`handle_wheel`·
         // `jump_mirror_abs`). 바깥 pane id 로만 지우면 탭이 있는 pane 에서 기억이
@@ -3592,6 +3606,7 @@ impl App {
             if let Some(id) = self.target_surface() {
                 self.ime_retarget(crate::ImeFocus::Pane(id));
             }
+            if self.shell_edit_key(event) { return; }
         }
         // Typing snaps the active pane back to live tail. Other panes'
         // scroll offsets are left alone — switching focus by clicking
@@ -3621,7 +3636,7 @@ impl App {
         if let Some(sugg) = self.current_suggestion.clone() {
             if !sugg.is_empty() {
                 use winit::keyboard::{KeyCode, PhysicalKey};
-                let plain = !self.modifiers.alt_key() && !self.modifiers.super_key();
+                let plain = self.modifiers.is_empty();
                 let phys = match event.physical_key {
                     PhysicalKey::Code(c) => Some(c),
                     _ => None,
@@ -3629,12 +3644,13 @@ impl App {
                 let accept_full = (matches!(event.logical_key, Key::Named(NamedKey::ArrowRight))
                     && plain)
                     || (matches!(event.logical_key, Key::Named(NamedKey::End)) && plain)
-                    || (self.modifiers.control_key() && phys == Some(KeyCode::KeyE));
+                    || (self.modifiers == ModifiersState::CONTROL && phys == Some(KeyCode::KeyE));
                 let accept_word =
-                    self.modifiers.alt_key() && phys == Some(KeyCode::KeyF) && !sugg.is_empty();
+                    self.modifiers == ModifiersState::ALT && phys == Some(KeyCode::KeyF);
                 if accept_full {
-                    self.send_bytes(sugg.as_bytes());
-                    self.input_buf.push_str(&sugg);
+                    let motion = if matches!(event.logical_key, Key::Named(NamedKey::ArrowRight)) { "right" } else { "end" };
+                    if self.shell_accept_suggestion(&sugg, motion) { self.input_buf.clear(); }
+                    else { self.send_bytes(sugg.as_bytes()); self.input_buf.push_str(&sugg); }
                     self.current_suggestion = None;
                     return;
                 }
@@ -3650,8 +3666,8 @@ impl App {
                         end += 1;
                     }
                     let word = &sugg[..end];
-                    self.send_bytes(word.as_bytes());
-                    self.input_buf.push_str(word);
+                    if self.shell_accept_suggestion(word, "word") { self.input_buf.clear(); }
+                    else { self.send_bytes(word.as_bytes()); self.input_buf.push_str(word); }
                     self.current_suggestion = None;
                     return;
                 }
@@ -4190,39 +4206,7 @@ impl App {
                     .and_then(|p| p.term())
                     .map(|t| (t.app_cursor, t.alt_screen))
                     .unwrap_or((false, false));
-                if self.modifiers.super_key() {
-                    match letter {
-                        'D' if !alt_screen => b"\x01".to_vec(),
-                        'C' if !alt_screen => b"\x05".to_vec(),
-                        'D' => b"\x1b[H".to_vec(),
-                        'C' => b"\x1b[F".to_vec(),
-                        _ => format!("\x1b[{letter}").into_bytes(),
-                    }
-                } else if self.modifiers.control_key() {
-                    // Windows / readline word-wise motion: Ctrl+←/→.
-                    // CSI modifier 5 = Ctrl (1 + ctrl-bit 4). zsh, bash
-                    // readline, and Ink all read this as forward/backward-word.
-                    format!("\x1b[1;5{letter}").into_bytes()
-                } else if self.modifiers.alt_key() {
-                    // 위아래(Option+↑/↓)는 셸에 대응 위젯이 없어 CSI 그대로.
-                    match letter {
-                        'D' if !alt_screen => b"\x1bb".to_vec(),
-                        'C' if !alt_screen => b"\x1bf".to_vec(),
-                        _ => format!("\x1b[1;3{letter}").into_bytes(),
-                    }
-                } else {
-                    // Plain arrow: honor the active pane's DECCKM. When the
-                    // inner app (claude code / vim / readline) set
-                    // application-cursor mode it expects SS3 (`ESC O A`);
-                    // sending CSI (`ESC [ A`) there silently fails, which
-                    // is why up/down line-navigation in the prompt did
-                    // nothing while modified arrows still worked.
-                    if app_cursor {
-                        format!("\x1bO{letter}").into_bytes()
-                    } else {
-                        format!("\x1b[{letter}").into_bytes()
-                    }
-                }
+                crate::shell_edit::arrow_bytes(letter, self.modifiers, app_cursor, alt_screen)
             }
             _ => match event.text.as_ref() {
                 Some(t) => {
@@ -4263,7 +4247,7 @@ impl App {
                                             before.map(|b| (commit.clone(), b, surface))
                                         });
                                     self.input_buf.push_str(&commit);
-                                    self.send_bytes(commit.as_bytes());
+                                    if !self.shell_edit_insert_text(None, &commit) { self.send_bytes(commit.as_bytes()); }
                                 }
                                 self.preedit = self.hangul.preedit().unwrap_or_default();
                                 self.in_preedit = !self.preedit.is_empty();
@@ -4315,6 +4299,13 @@ impl App {
                 self.in_preedit,
                 self.ime_active
             );
+        }
+        if matches!(event.logical_key, Key::Character(_)) {
+            let mut text = commit_prefix.clone();
+            text.extend_from_slice(&bytes);
+            if let Ok(text) = std::str::from_utf8(&text) {
+                if self.shell_edit_insert_text(None, text) { return; }
+            }
         }
         if commit_prefix.is_empty() {
             self.send_bytes(&bytes);

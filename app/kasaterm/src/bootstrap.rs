@@ -332,7 +332,7 @@ pub(crate) fn install_pty_host_policy() {
     kasa_pty::set_host_policy(kasa_pty::HostPolicy {
         term_program: Some(("kasaterm".into(), env!("CARGO_PKG_VERSION").into())),
         last_login_dir,
-        clipboard: None,
+        clipboard: crate::shell_edit::verification_clipboard(),
     });
 }
 

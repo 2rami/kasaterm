@@ -149,6 +149,7 @@ impl Wiring {
         let screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>> = Arc::new(Mutex::new(Vec::new()));
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shell_editor = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_beats: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -172,6 +173,7 @@ impl Wiring {
             Arc::clone(&inline_imgs),
             self.responder,
             Arc::clone(&scheme_reports),
+            Arc::clone(&shell_editor),
             Arc::clone(&output_beats),
             l.parsed_generation,
         );
@@ -200,6 +202,7 @@ impl Wiring {
             cwd_handle,
             inline_imgs,
             scheme_reports,
+            shell_editor,
             reader_stop,
             output_closed,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),

@@ -10,6 +10,7 @@
 
 - `bootstrap.rs` — `main()` 이 창을 띄우기 전에 부르는 것: 패닉·stderr 로그, 물려받은 claude 표식 지우기(`CLAUDE_MARKER_ENV`), 라이트(`lite_mode`·`apply_lite_env`)·캡처 env·검증 실행 판정(`verification_run`), 엔진 호스트 정책(`install_pty_host_policy`), 자기설치(`install_pending`·`arm_self_install`), 끝난 태스크·빈 인박스 청소, 살아 있는 인스턴스 pid
 - `pane_shims.rs` — 칸 셸 PATH 앞에 놓는 shim 설치(`install_pane_shims`, 원자 교체 `write_shim`)·미리보기/`open`(Windows 는 칸 `BROWSER` 를 `kasaterm-open.exe` 로 — `kasa_socket::cli` 의 browser 멀티콜)/tmux/rust-analyzer shim·칸 env(`proxy_env`·`agent_name_suffix`·신원 도우미)·학생 shim(`install_student_shims`). 파일은 설정 폴더의 `runtime/kasaterm[-lite]-shim-<pid>`에 보관한다([수명·복구](pane-shims.md)). 하네스별 래퍼는 자식: `pane_shims/claude.rs`(claude 래퍼·협업 훅·연결 mod·계정 줄) · `pane_shims/codex.rs`(codex 래퍼·계정 파일·`codex_binary`) · `pane_shims/agy.rs`(agy 훅 래퍼)
+- `shell_edit.rs`·`shell_edit/zsh.zsh` — 일반 zsh 입력의 시각적 줄 이동·선택·삭제·클립보드와 프롬프트 검증. `pane_shims.rs`가 ZLE 위젯을 설치하고 `kasa-pty/state/shell_editor.rs`가 편집 준비·선택 표식을 읽는다. `input.rs`는 실제 셸이 편집을 소유할 때만 전용 키를 쓴다.
 - `spawn_env.rs` — 칸이 뜰 자리: 시작 cwd(`resolve_spawn_cwd`)·기본 셸·훅용 셸(`hook_shell_program`)·고를 수 있는 셸, 이 인스턴스의 소켓 경로(`resolve_kasaterm_socket_path`)와 HTTP 포트(`mcp_panel_port`)
 
 - `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`). 자유함수는 2026-08-15 에 아래 두 모듈로 분리(13180→8360줄), 옛 `render::…` 경로는 glob 재수출로 유지.
@@ -130,6 +131,8 @@
 - `mobile/lib/file_link.dart` — 대화·터미널 링크의 원본 기기 경로 해석과 파일 열기. `Server.resultFileBytes`가 인증된 파일을 받고 `ios/Runner/AppDelegate.swift`의 Quick Look 다리가 임시 미리보기를 연다.
 
 - `inline_result/remote.rs` — PC 미러 결과 이미지의 원본 기기 읽기·해시/치수 검증·로컬 캐시와 재시도. 렌더는 읽기를 예약하고 PNG가 준비되면 다시 그린다.
+- `preview_frame.rs` — 그림·영상 미리보기의 초기 1/4 크기, 제목줄 이동, 모서리 크기 조절, 화면 안 제한·취소를 공유한다.
+- `sidebar_map.rs` — 실제 미니맵 칸 크기에 따른 고정 프사와 1~2줄 세션 이름 배치. 로컬·원격·별도창이 같은 함수를 쓴다.
 - `image_preview.rs` — 실제 인라인 그림 영역의 클릭·드래그 구분과 창별 미리보기. 워커 디코드·복사·저장, 클리핑된 히트 영역, 앵커 줌·팬·키보드 포커스를 공유하며 본창과 별도 터미널 창이 같은 상태를 사용한다.
 - `native_settings/login_probe.rs` — 격리 화면에서 가짜 로그인 상태와 테스트용 클립보드 값으로 메뉴·버튼 붙여넣기를 검사한다. 실제 인증 코드나 시스템 클립보드를 읽지 않는다.
 

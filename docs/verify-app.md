@@ -122,6 +122,14 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
 5. **체감(스크롤·입력 지연)은 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지.
 6. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션.
 
+## 셸 편집·미리보기·미니맵 회귀
+
+- `python3 app/kasaterm/src/shell_edit/tests/zle.py`는 실제 zsh PTY로 줄 이동·선택 삭제·붙여넣기·클립보드·되돌리기와 낡은 좌표 보호를 확인한다. 사용자 rc·기록 파일을 사용하지 않는다.
+- macOS의 `python3 app/kasaterm/src/shell_edit/tests/native.py`는 AppKit 키·마우스로 같은 조작을 검증한다. `--user-prompt`는 실제 프롬프트 설정도 확인한다. 입력 내용과 클립보드·세션·소켓·캡처는 실행별 임시 폴더에 둔다.
+- `python3 app/kasaterm/src/preview_frame/tests/native.py`는 그림·영상 카드를 열고 초기 크기·제목줄 이동·모서리 조절·닫기를 검사한다. `KASATERM_TEST_PREVIEW_FRAME_REPORT`는 격리 실행에서만 현재 미리보기의 위치·크기·재생 세대를 기록한다.
+- `python3 app/kasaterm/src/sidebar_map/tests/native.py`는 번들 그림을 별도 폴더에 복사하고 방 높이·숨김 리그를 돌린다. 작은 프사 캐시가 다시 확대되지 않는지와 제목 영역은 실제 캡처도 확인한다.
+- 네이티브 리그의 바이너리는 기본 `target/debug/kasaterm`이며 `CARGO_TARGET_DIR`를 지정하면 그 경로를 사용한다. 큰 글꼴 변경과 GPU 캡처는 디버그 빌드에서 오래 걸릴 수 있으므로 다음 조작과 충분히 간격을 두고, 마지막 캡처 이후에는 새 조작을 예약하지 않는다.
+
 ## 학생·대화 픽스처
 
 **리그에서 학생 얼굴을 붙이려고 `/repersona`·`kasaterm-cli repersona`·학생 이름 런처를 호출하지 마라.**

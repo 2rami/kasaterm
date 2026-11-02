@@ -42,6 +42,7 @@ enum Action {
     Close,
 }
 struct Preview {
+    frame: crate::preview_frame::Frame,
     owner: WindowId,
     context: usize,
     generation: u64,
@@ -112,7 +113,10 @@ impl State {
     }
     pub(crate) fn cursor(&self, owner: WindowId, point: Point) -> CursorIcon {
         if let Some(p) = self.preview.as_ref().filter(|p| p.owner == owner) {
-            if p.actions.iter().any(|(_, r)| contains(*r, point)) {
+            let button = p.actions.iter().any(|(_, r)| contains(*r, point));
+            if let Some(cursor) = p.frame.cursor(point, !button && p.frame.title_contains(point)) {
+                cursor
+            } else if button {
                 CursorIcon::Pointer
             } else if p.drag.is_some() {
                 CursorIcon::Grabbing
@@ -202,6 +206,7 @@ impl State {
         });
         self.focused = Some(owner);
         self.preview = Some(Preview {
+            frame: Default::default(),
             owner,
             context: self.hits.get(&owner).map_or(0, |h| h.0),
             generation: self.next_generation,
@@ -266,6 +271,11 @@ impl State {
         }
         if self.owns(owner) {
             let p = self.preview.as_mut().unwrap();
+            let move_allowed = p.frame.title_contains(point) && !p.actions.iter().any(|(_, r)| contains(*r, point));
+            if p.frame.event(event, point, move_allowed) {
+                p.drag = None;
+                return Response::Consumed;
+            }
             let mut action = None;
             match event {
                 WindowEvent::CloseRequested | WindowEvent::Destroyed => {
@@ -299,16 +309,17 @@ impl State {
                         p.drag = None;
                     }
                 }
-                WindowEvent::MouseWheel { delta, .. } => {
+                WindowEvent::MouseWheel { delta, .. } if contains(p.area, point) => {
                     let amount = match delta {
                         MouseScrollDelta::LineDelta(_, y) => *y * 0.18,
                         MouseScrollDelta::PixelDelta(d) => d.y as f32 * 0.006,
                     };
                     p.zoom_by(amount.clamp(-1.0, 1.0).exp(), point);
                 }
-                WindowEvent::PinchGesture { delta, .. } => {
+                WindowEvent::PinchGesture { delta, .. } if contains(p.area, point) => {
                     p.zoom_by((1.0 + *delta as f32).max(0.1), point)
                 }
+                WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } => {}
                 WindowEvent::KeyboardInput { event, .. } => {
                     if event.state.is_pressed() {
                         match &event.logical_key {
@@ -511,8 +522,8 @@ impl State {
         }
         p.scale = g.scale();
         let (w, h) = size;
-        let outer = (16.0, 16.0, (w - 32.0).max(0.0), (h - 32.0).max(0.0));
-        g.rect(0.0, 0.0, w, h, theme::with_alpha(theme::bg(), 235));
+        let outer = p.frame.layout(size, None, (320.0, 240.0));
+        g.rect(0.0, 0.0, w, h, theme::with_alpha(theme::bg(), 120));
         crate::native_controls::panel(g, outer, theme::surface());
         let x = outer.0 + 16.0;
         let right = (outer.0 + outer.2 - 16.0).max(x);
@@ -651,6 +662,16 @@ impl State {
                 }
             }
         }
+        p.frame.paint_grip(g, cursor);
+    }
+
+    pub(crate) fn frame_probe(&self) -> Option<serde_json::Value> {
+        let p = self.preview.as_ref()?;
+        Some(serde_json::json!({
+            "kind": "image", "frame": p.frame.rect()?, "area": p.area,
+            "generation": p.generation, "ready": p.pixels.is_some(),
+            "zoom": p.zoom, "pan": p.pan
+        }))
     }
 }
 impl Preview {

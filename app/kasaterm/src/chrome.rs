@@ -2808,7 +2808,7 @@ impl App {
     ///      trust `input_buf` but only if it's still the tail of the
     ///      cursor row, which auto-suppresses on edits we can't track.
     pub(crate) fn update_suggestion(&mut self) {
-        if !self.autosuggest.enabled() || !self.preedit.is_empty() {
+        if !self.autosuggest.enabled() || !self.preedit.is_empty() || self.shell_editor_has_selection() {
             self.current_suggestion = None;
             return;
         }

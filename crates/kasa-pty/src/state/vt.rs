@@ -225,11 +225,6 @@ impl EventListener for PtyEventForwarder {
             AlacEvent::ClipboardStore(_, text) => {
                 // OSC 52 set — Claude Code, helix, etc. push selected
                 // text into the host clipboard through this.
-                let preview: String = text.chars().take(40).collect();
-                eprintln!(
-                    "[pty-backend] OSC 52 set ({} chars): {preview:?}",
-                    text.len()
-                );
                 crate::host::clipboard_store(&text);
             }
             AlacEvent::Title(name) => {

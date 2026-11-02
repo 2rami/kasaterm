@@ -198,6 +198,7 @@ fn install_shell_rc(shim_dir: &std::path::Path) {
             eprintln!("[shim] write rc {name} failed: {e}");
         }
     };
+    write_rc("shell-edit.zsh", include_str!("shell_edit/zsh.zsh").to_string());
     write_rc(
         ".zshenv",
         "[ -f \"${HOME}/.zshenv\" ] && source \"${HOME}/.zshenv\"\n".to_string(),
@@ -246,7 +247,8 @@ fn install_shell_rc(shim_dir: &std::path::Path) {
              else _command_names -e; fi; }}\n\
              (( $+functions[compdef] )) || {{ autoload -Uz compinit 2>/dev/null && \
              compinit -C -d \"{0}/.zcompdump\" 2>/dev/null; }}\n\
-             (( $+functions[compdef] )) && compdef _kasaterm_to_complete to 2>/dev/null\n",
+             (( $+functions[compdef] )) && compdef _kasaterm_to_complete to 2>/dev/null\n\
+             source \"{0}/shell-edit.zsh\"\n",
             shim_dir.display()
         ),
     );

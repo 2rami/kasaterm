@@ -863,7 +863,7 @@ pub(crate) fn invalidate_idle_anim() {
 /// 알파 bbox 를 잡아 **어깨 위 정사각**만 도려낸다. 정적 프사가 이미 얼굴에 맞춰
 /// 잘린 에셋인 것과 같은 이유고, 덕분에 두 경로가 같은 크기로 읽힌다.
 ///
-/// 픽셀 아트라 축소는 Nearest 로 — 보간을 쓰면 도트가 뭉개져 흐려진다.
+/// Retina와 큰 UI 배율에서도 얼굴의 세부가 남도록 작은 얼굴은 원본 해상도를 보존한다.
 pub(crate) fn student_idle_anim(slug: &str) -> Option<std::sync::Arc<IdleAnim>> {
     let cache = IDLE_ANIM_CACHE.get_or_init(Default::default);
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(slug).cloned()) {
@@ -912,10 +912,12 @@ fn idle_anim_from_gif(bytes: Vec<u8>) -> Option<std::sync::Arc<IdleAnim>> {
             return None;
         }
         let face = image::imageops::crop(&mut buf, ux, uy, cs, cs).to_image();
-        // 쓰는 자리가 16~22px 이라 32² 면 충분하고, 프레임 수만큼 곱해도 가볍다.
-        const OUT: u32 = 32;
-        let small = image::imageops::resize(&face, OUT, OUT, image::imageops::FilterType::Nearest);
-        frames.push((small.into_raw(), OUT, OUT));
+        // The renderer uses logical points; 32 source pixels underfill even a 2x display.
+        let edge = cs.min(128);
+        let face = if edge < cs {
+            image::imageops::resize(&face, edge, edge, image::imageops::FilterType::Lanczos3)
+        } else { face };
+        frames.push((face.into_raw(), edge, edge));
         delays_ms.push(ms);
     }
     (!frames.is_empty()).then(|| {
@@ -1047,6 +1049,24 @@ fn schale_classroom_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u
 #[cfg(test)]
 mod idle_anim_tests {
     use super::*;
+
+    #[test]
+    fn portrait_frames_keep_native_detail_for_retina_minimaps() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Frame, Rgba, RgbaImage};
+        let mut frame = RgbaImage::new(256, 256);
+        for y in 16..208 {
+            for x in 80..176 {
+                frame.put_pixel(x, y, if x % 2 == 0 { Rgba([250, 20, 20, 255]) } else { Rgba([20, 20, 250, 255]) });
+            }
+        }
+        let mut bytes = Vec::new();
+        GifEncoder::new(&mut bytes).encode_frame(Frame::new(frame)).unwrap();
+        let anim = idle_anim_from_gif(bytes).unwrap();
+        let (pixels, width, height) = &anim.frames[0];
+        assert_eq!((*width, *height), (96, 96));
+        assert_ne!(&pixels[..4], &pixels[4..8]);
+    }
 
     /// 통통 튀는 gif — 둘째 프레임에서 몸이 첫 프레임 bbox 위로 올라간다. 크롭을
     /// 첫 프레임에 고정하면 그 프레임의 정수리가 잘린다(미니맵 얼굴 잘림의 원인,

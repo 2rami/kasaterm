@@ -17,16 +17,21 @@ struct PromptMark {
 }
 
 impl PromptMark {
-    fn feed(&mut self, bytes: &[u8]) {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<usize> {
         const MARK: &[u8] = b"\x1b]133;B";
-        for &byte in bytes {
+        let mut positions = Vec::new();
+        for (at, &byte) in bytes.iter().enumerate() {
             if self.matched == MARK.len() {
-                self.pending |= matches!(byte, 0x07 | 0x1b | b';');
+                if matches!(byte, 0x07 | 0x1b | b';') {
+                    self.pending = true;
+                    positions.push(at);
+                }
                 self.matched = 0;
             }
             if byte == MARK[self.matched] { self.matched += 1; }
             else { self.matched = usize::from(byte == MARK[0]); }
         }
+        positions
     }
 
     fn take(&mut self) -> bool { std::mem::take(&mut self.pending) }
@@ -34,7 +39,7 @@ impl PromptMark {
 
 #[cfg(test)]
 mod prompt_mark_tests {
-    use super::PromptMark;
+    use super::*;
 
     #[test]
     fn shell_readiness_survives_every_byte_boundary_and_sync_suppression() {
@@ -51,6 +56,25 @@ mod prompt_mark_tests {
         let mut state = PromptMark::default();
         state.feed(b"\x1b]133;Bad\x07");
         assert!(!state.take());
+    }
+
+    #[test]
+    fn redraw_prompt_anchor_precedes_the_input_in_the_same_read() {
+        let marker = b"\x1b]133;B\x07";
+        for split in 0..=marker.len() {
+            let (session, tx, _, _) = super::super::test_support::ext_session(40, 6);
+            tx.send(ExtEvent::Bytes([b"\x1b[2J\x1b[Hp> ".as_slice(), &marker[..split]].concat())).unwrap();
+            tx.send(ExtEvent::Bytes([&marker[split..], b"alpha beta gamma".as_slice()].concat())).unwrap();
+            let mut mark = None;
+            let until = Instant::now() + std::time::Duration::from_secs(2);
+            while Instant::now() < until {
+                if let Ok(frame) = session.screens.recv_timeout(std::time::Duration::from_millis(100)) {
+                    mark = frame.prompt_end.or(mark);
+                }
+                if mark.is_some() && session.visible_text(6).contains("alpha beta gamma") { break; }
+            }
+            assert_eq!(mark, Some((0, 3)), "split {split}");
+        }
     }
 }
 
@@ -139,6 +163,7 @@ pub(super) fn spawn_reader_thread(
     inline_imgs: Arc<Mutex<InlineImgs>>,
     responder: PtyEventForwarder,
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
+    shell_editor: Arc<std::sync::atomic::AtomicU8>,
     output_beats: Arc<Mutex<VecDeque<Instant>>>,
     parsed_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> std::thread::JoinHandle<()> {
@@ -167,6 +192,7 @@ pub(super) fn spawn_reader_thread(
         // never sees a half codepoint (a multibyte char split between
         // two reads).
         let mut utf8_buf = Utf8Buffer::new();
+        let mut shell_editor = super::shell_editor::Scanner::new(shell_editor);
         // OSC 1337 inline-image capture state (a payload can span reads).
         // img_buf/img_capturing 은 레거시 탭 모드 전용, inline_scan 은 셀-흐름
         // 모드 전용 — 같은 시퀀스를 두 경로가 동시에 잡지 않는다.
@@ -189,6 +215,7 @@ pub(super) fn spawn_reader_thread(
         let mut blk_start: Option<Instant> = None;
         let mut blk_prompt: Option<(u16, u16)> = None;
         let mut prompt_mark = PromptMark::default();
+        let mut prompt_point: Option<(i64, u16)> = None;
         // read 경계에서 잘린 다중 바이트 글자 — 다음 배치 앞에 붙여 한글이 깨지지 않게.
         let mut blk_utf8: Vec<u8> = Vec::new();
         // 이번 묶음의 C 직전에 읽어 둔 명령 줄(있으면 격자를 다시 읽지 않는다).
@@ -349,6 +376,7 @@ pub(super) fn spawn_reader_thread(
                 eprintln!("[pty-backend] read {n} bytes: {preview}");
             }
 
+            shell_editor.feed(&buf[..n]);
             // NFC-normalize so decomposed Hangul (NFD jamo) collapses to
             // precomposed syllables before alacritty stores them. Pure-ASCII
             // batches (the common case — TUI rendering, ANSI control flow)
@@ -365,7 +393,7 @@ pub(super) fn spawn_reader_thread(
             };
             let processed_bytes: &[u8] =
                 nfc_holder.as_deref().map(str::as_bytes).unwrap_or(batch.as_slice());
-            prompt_mark.feed(processed_bytes);
+            let prompt_marks = prompt_mark.feed(processed_bytes);
             // Sniff for iTerm OSC 1337 inline images. The scan walks the
             // byte slice, so we cheaply prefix-check first — most reads have
             // no `\x1b]1337` and we skip the walk entirely. Critical for TUI
@@ -428,24 +456,31 @@ pub(super) fn spawn_reader_thread(
                     || memchr::memmem::find(processed_bytes, b"\x1b_G").is_some()
                     || processed_bytes.ends_with(b"\x1b")
                     || processed_bytes.ends_with(b"\x1b_");
-                if scanned {
-                    advance_scanning_inline(
-                        &mut processor,
-                        &mut t,
-                        processed_bytes,
-                        &mut inline_scan,
-                        &inline_imgs,
-                        &responder,
-                        wire.as_mut(),
-                    );
-                } else if let Some(at) = find_subslice(processed_bytes, b"\x1b]133;C") {
-                    // 명령의 첫 출력이 C 와 한 묶음으로 오면, 묶음을 다 먹인 뒤엔 명령 줄이
-                    // 이미 출력에 밀려 있다 — C 앞까지 먹이고 그 자리에서 읽는다.
-                    processor.advance(&mut *t, &processed_bytes[..at]);
-                    blk_cmd = Some(command_at_cursor(&t, current_size, blk_prompt));
-                    processor.advance(&mut *t, &processed_bytes[at..]);
-                } else {
-                    processor.advance(&mut *t, processed_bytes);
+                let mut cuts: Vec<_> = prompt_marks.into_iter().map(|at| (at, 0u8)).collect();
+                if let Some(at) = find_subslice(processed_bytes, b"\x1b]133;C") { cuts.push((at, 1)); }
+                cuts.push((processed_bytes.len(), 2));
+                cuts.sort_unstable_by_key(|(at, _)| *at);
+                let mut from = 0;
+                for (at, kind) in cuts {
+                    let bytes = &processed_bytes[from..at];
+                    if scanned {
+                        advance_scanning_inline(&mut processor, &mut t, bytes, &mut inline_scan,
+                            &inline_imgs, &responder, wire.as_mut());
+                    } else {
+                        processor.advance(&mut *t, bytes);
+                    }
+                    // Prompt redraws can include the entire edited buffer in one read.
+                    // Sampling at the marker keeps its origin independent of the final caret.
+                    if kind == 0 {
+                        prompt_point = (processor.sync_bytes_count() == 0).then(|| {
+                            let point = t.grid().cursor.point;
+                            blk_prompt = Some((point.line.0.max(0) as u16, point.column.0 as u16));
+                            (t.grid().history_size() as i64 + point.line.0 as i64, point.column.0 as u16)
+                        });
+                    } else if kind == 1 {
+                        blk_cmd = Some(command_at_cursor(&t, current_size, blk_prompt));
+                    }
+                    from = at;
                 }
                 if !scanned {
                     drop_cleared_images(&inline_imgs, processed_bytes);
@@ -494,10 +529,14 @@ pub(super) fn spawn_reader_thread(
                     // VT drops OSC 133, so retain the mark across split reads and
                     // synchronized output until the matching grid can be published.
                     if prompt_mark.take() {
-                        snap.prompt_end = Some((snap.cursor_row, snap.cursor_col));
+                        let point = prompt_point.take().map(|(row, col)| {
+                            let row = row - t.grid().history_size() as i64;
+                            (if row >= 0 && row < current_size.1 as i64 { row as u16 } else { u16::MAX }, col)
+                        }).unwrap_or((snap.cursor_row, snap.cursor_col));
+                        snap.prompt_end = Some(point);
                         // Same mark drives the command-block command extraction:
                         // the cursor here is where the typed command begins.
-                        blk_prompt = Some((snap.cursor_row, snap.cursor_col));
+                        blk_prompt = Some(point);
                     }
                     // Hand off any OSC 777 notify captured this read (or a
                     // prior sync-suppressed one) to the host pump.

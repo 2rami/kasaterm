@@ -45,15 +45,12 @@ impl SidebarMetrics {
     }
 
     pub(crate) fn map_label(self, width: f32, height: f32) -> bool {
-        self.density.is_wide() && width >= 80.0 && height >= 60.0
+        crate::sidebar_map::has_title(width, height)
     }
 
     pub(crate) fn face_box(self, r: (f32, f32, f32, f32)) -> (f32, f32, f32) {
         let (x, y, w, h) = r;
-        if !self.map_label(w, h) { return crate::render::minimap_face_box(x, y, w, h); }
-        let max_face = if self.density == Density::Spacious { 48.0 } else { 40.0 };
-        let face = (w.min(h - 28.0) - 8.0).clamp(10.0, max_face);
-        (x + (w - face) / 2.0, y + (h - 28.0 - face) / 2.0, face)
+        crate::render::minimap_face_box(x, y, w, h)
     }
 }
 
