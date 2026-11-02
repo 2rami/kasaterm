@@ -285,13 +285,10 @@ mod ffi {
     }
 
     /// appcast XML fetch — Windows 10 1803+ 내장 curl.exe 사용(HTTP 클라이언트
-    /// 의존성 0). GUI 앱에서 콘솔 창이 번쩍이지 않게 CREATE_NO_WINDOW.
+    /// 의존성 0).
     fn fetch_appcast(feed: &str) -> Option<String> {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let out = std::process::Command::new("curl.exe")
+        let out = crate::proc::command("curl.exe")
             .args(["-fsSL", "--max-time", "15", feed])
-            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
         out.status

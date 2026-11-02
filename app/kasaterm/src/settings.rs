@@ -14,11 +14,11 @@ fn inside(r: Rect, p: (f32, f32)) -> bool {
 
 fn open_path(path: &std::path::Path) {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(path).spawn();
+    let _ = crate::proc::command("open").arg(path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let _ = crate::proc::command("xdg-open").arg(path).spawn();
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    let _ = crate::proc::command("explorer").arg(path).spawn();
 }
 
 impl App {
@@ -4859,7 +4859,7 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
         eprintln!("[account] 크롬을 못 찾음 — URL 을 직접 시크릿 창에 여세요");
         return;
     }
-    let r = std::process::Command::new(CHROME)
+    let r = crate::proc::command(CHROME)
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(["--no-first-run", "--no-default-browser-check"])
         .arg(url)

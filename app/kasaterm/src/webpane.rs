@@ -234,11 +234,11 @@ fn ns_window_of(
 /// 필요해지면 여기로 탈출한다.
 fn open_external(url: &str) -> std::result::Result<(), String> {
     #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("open").arg(url).spawn();
+    let spawned = crate::proc::command("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let spawned = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let spawned = crate::proc::command("cmd").args(["/C", "start", "", url]).spawn();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let spawned = std::process::Command::new("xdg-open").arg(url).spawn();
+    let spawned = crate::proc::command("xdg-open").arg(url).spawn();
     spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 

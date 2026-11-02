@@ -637,7 +637,7 @@ fn keychain_line(service: &str, user: &str, bytes: &[u8], update: bool) -> Resul
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn security(args: &[&str], input: Option<Vec<u8>>) -> Result<(std::process::ExitStatus, Vec<u8>)> {
-    let mut command = std::process::Command::new("/usr/bin/security");
+    let mut command = crate::proc::command("/usr/bin/security");
     command.args(args);
     bounded_child(command, input, CHILD_TIMEOUT)
 }

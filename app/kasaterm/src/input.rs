@@ -4963,7 +4963,7 @@ fn sample_process_tree_usage(track: &mut CpuTrack) -> Option<UsageSample> {
 /// 실제로 목록 맨 아래에 `ps 0.0% 1MB` 가 늘 앉아 있었다.
 #[cfg(unix)]
 fn process_rows() -> Option<(Vec<Row>, u32)> {
-    let child = std::process::Command::new("ps")
+    let child = crate::proc::command("ps")
         // uid 를 함께 읽는 것은 바깥 앱 목록 때문이다 — 거기엔 끄기 버튼이 붙는데,
         // 남(root 데몬)의 프로세스는 눌러도 권한이 없어 아무 일도 안 일어난다.
         // `time` 은 누적 CPU 시간 — 폴 사이의 증분이 그 구간의 실제 사용률이다.

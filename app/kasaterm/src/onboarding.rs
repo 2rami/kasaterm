@@ -502,7 +502,7 @@ fn apply_font_choice(family: &str, path: &Path) -> Result<(), String> {
 }
 
 fn plutil_raw(path: &Path, key: &str) -> Option<String> {
-    let out = std::process::Command::new("/usr/bin/plutil").args(["-extract", key, "raw"]).arg(path).output().ok()?;
+    let out = crate::proc::command("/usr/bin/plutil").args(["-extract", key, "raw"]).arg(path).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -511,7 +511,7 @@ fn archive_xml(encoded: &str) -> Option<String> {
     use std::process::Stdio;
     let compact: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD.decode(compact).ok()?;
-    let mut child = std::process::Command::new("/usr/bin/plutil").args(["-convert", "xml1", "-o", "-", "--", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = crate::proc::command("/usr/bin/plutil").args(["-convert", "xml1", "-o", "-", "--", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     child.stdin.take()?.write_all(&bytes).ok()?;
     let out = child.wait_with_output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -849,11 +849,11 @@ pub(crate) fn command_available(name: &str) -> bool {
 
 fn command_available_uncached(name: &str) -> bool {
     #[cfg(windows)]
-    let status = std::process::Command::new("where.exe").arg(name).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let status = crate::proc::command("where.exe").arg(name).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     #[cfg(not(windows))]
     let status = {
         let shell = crate::resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
-        std::process::Command::new(shell).args(["-lc", &format!("command -v {name} >/dev/null 2>&1")]).status()
+        crate::proc::command(shell).args(["-lc", &format!("command -v {name} >/dev/null 2>&1")]).status()
     };
     status.is_ok_and(|s| s.success())
 }

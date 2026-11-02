@@ -532,7 +532,7 @@ fn ssh_output(args: &[&str]) -> Option<String> {
 /// ssh 한 번 — 성공이면 stdout, 실패면 stderr(거절 이유). 열쇠를 찾을 때 「거절」과
 /// 「안 닿음」을 갈라야 해서 이유를 돌려준다.
 fn ssh_run(args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("ssh")
+    let out = crate::no_window_command("ssh")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"])
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -704,7 +704,7 @@ fn tunnel_state(label: &str) -> (bool, Option<String>) {
 
 fn stop_watched(tun: &mut Tunnel) {
     let pid = tun.child.id();
-    let _ = std::process::Command::new("kill")
+    let _ = crate::no_window_command("kill")
         .arg(pid.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -731,7 +731,7 @@ fn spawn_watched_ssh(
     target: &str,
     err_log: &std::path::Path,
 ) -> std::io::Result<std::process::Child> {
-    std::process::Command::new("sh")
+    crate::no_window_command("sh")
         .arg("-c")
         .arg(
             // `sleep 3 & wait $!` — 그냥 `sleep 3` 이면 TERM 이 와도 sleep 이 끝나야
@@ -1365,7 +1365,7 @@ async fn announce_to(client: &reqwest::Client, base: &str) {
     let body = serde_json::json!({
         "label": self_label(),
         "port": reverse_port(&self_label()),
-        "host": std::process::Command::new("hostname")
+        "host": crate::no_window_command("hostname")
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())

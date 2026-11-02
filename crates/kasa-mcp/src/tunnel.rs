@@ -40,7 +40,7 @@ fn tunnel_pid() -> Option<u32> {
             }
         }
     }
-    let out = std::process::Command::new("pgrep")
+    let out = crate::no_window_command("pgrep")
         .args(["-f", "cloudflared tunnel run"])
         .output()
         .ok()?;
@@ -95,7 +95,7 @@ pub fn set(on: bool) -> Result<bool, String> {
     }
     if !on {
         if let Some(pid) = tunnel_pid() {
-            let _ = std::process::Command::new("kill")
+            let _ = crate::no_window_command("kill")
                 .args(["-TERM", &pid.to_string()])
                 .status();
         }
@@ -113,7 +113,7 @@ pub fn set(on: bool) -> Result<bool, String> {
         .create(true)
         .append(true)
         .open(std::env::temp_dir().join("kasaterm-tunnel.log"));
-    let mut cmd = std::process::Command::new(cloudflared_bin());
+    let mut cmd = crate::no_window_command(cloudflared_bin());
     cmd.args(["tunnel", "run", "kasaterm"]).stdin(std::process::Stdio::null());
     match log {
         Ok(f) => {

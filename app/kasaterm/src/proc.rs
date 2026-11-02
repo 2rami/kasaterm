@@ -195,3 +195,83 @@ pub(crate) fn open_path_default(path: &std::path::Path) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = command("xdg-open").arg(path).spawn();
 }
+
+#[cfg(test)]
+mod tests {
+    /// 숨김 없이 띄우는 자리가 하나라도 남으면 Windows 에서 그게 불릴 때마다 콘솔 창이 번쩍인다 —
+    /// 2026-11-03 기기 명부의 ssh·sh 가 켤 때마다 세 번, 끊긴 터널을 다시 열 때마다 또 띄웠다.
+    /// 앱은 `command`, 그 HTTP 호스트(kasa-mcp)는 `no_window_command` 로만 띄운다. 시험 모듈의
+    /// 자식은 사람 화면에 안 남으니 따지지 않는다.
+    #[test]
+    fn every_spawn_hides_its_console_window() {
+        let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut found = Vec::new();
+        let mut dirs = vec![app.join("src"), app.join("../../crates/kasa-mcp/src")];
+        while let Some(dir) = dirs.pop() {
+            for path in std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()) {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                let test_file = stem == "tests" || stem == "test_support" || stem.ends_with("_tests");
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && !test_file {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    found.extend(unhidden_spawns(&text).into_iter().map(|n| format!("{}:{n}", path.display())));
+                }
+            }
+        }
+        assert!(found.is_empty(), "콘솔 창을 숨기지 않고 띄운다 — proc::command·no_window_command 로:\n{}", found.join("\n"));
+    }
+
+    #[test]
+    fn the_scan_skips_test_modules_but_not_what_follows_them() {
+        let src = "fn d() {\n    let mut c = std::process::Command::new(\"git\");\n    c.creation_flags(0x0800_0000);\n}\n\
+                   fn b() { crate::proc::command(\"ssh\"); MyCommand::new(1); }\n\
+                   #[cfg(all(test, unix))]\nmod tests {\n    fn t() { std::process::Command::new(\"sh\"); }\n}\n\
+                   fn a() { std::process::Command::new(\"ssh\"); }\n\
+                   fn c() { tokio::process::Command::new(\"git\"); }\n";
+        assert_eq!(unhidden_spawns(src), vec![10, 11]);
+    }
+
+    /// 시험 모듈 밖에서 `Command::new(` 를 부르고 다섯 줄 안에 `creation_flags` 를 걸지 않는 줄 번호.
+    /// 다섯 줄은 숨김 도우미가 플래그를 거는 데 쓰는 길이다.
+    fn unhidden_spawns(text: &str) -> Vec<usize> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if let Some(end) = test_module_end(&lines, i) {
+                i = end + 1;
+                continue;
+            }
+            let line = lines[i];
+            let spawns = !line.trim_start().starts_with("//")
+                && line.match_indices("Command::new(").any(|(at, _)| !line[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+            if spawns && !lines[i..lines.len().min(i + 6)].iter().any(|l| l.contains("creation_flags")) {
+                out.push(i + 1);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// `i` 줄이 시험 모듈을 여는 `#[cfg(…test…)]` 면 그 모듈을 닫는 줄. 이 저장소의 모듈은 여는 줄과
+    /// 같은 들여쓰기의 `}` 로 닫힌다.
+    fn test_module_end(lines: &[&str], i: usize) -> Option<usize> {
+        let attr = lines[i].trim_start();
+        if !attr.starts_with("#[cfg(") || !attr.contains("test") || attr.contains("not(test") {
+            return None;
+        }
+        let indent = &lines[i][..lines[i].len() - attr.len()];
+        let mut j = i + 1;
+        while lines.get(j)?.trim_start().starts_with("#[") {
+            j += 1;
+        }
+        let decl = lines[j].trim_start();
+        let decl = decl.strip_prefix("pub(crate) ").or_else(|| decl.strip_prefix("pub ")).unwrap_or(decl);
+        if !decl.starts_with("mod ") || !decl.trim_end().ends_with('{') {
+            return None;
+        }
+        let close = format!("{indent}}}");
+        (j + 1..lines.len()).find(|&k| lines[k].trim_end() == close)
+    }
+}

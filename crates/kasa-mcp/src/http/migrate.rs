@@ -139,7 +139,7 @@ async fn term_repo_post(
     };
     let branch = q.get("branch").cloned().unwrap_or_default();
     let git = |args: Vec<String>| -> (bool, String) {
-        match std::process::Command::new("git").args(&args).output() {
+        match crate::no_window_command("git").args(&args).output() {
             Ok(o) => (
                 o.status.success(),
                 format!(
@@ -298,7 +298,7 @@ async fn term_repo_get(
         return err("`path`(절대경로) 가 필요해요".into());
     };
     let git = |args: &[&str]| -> (bool, String) {
-        match std::process::Command::new("git").arg("-C").arg(path).args(args).output() {
+        match crate::no_window_command("git").arg("-C").arg(path).args(args).output() {
             Ok(o) => (
                 o.status.success(),
                 format!(

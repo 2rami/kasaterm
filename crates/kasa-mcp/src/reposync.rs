@@ -57,7 +57,7 @@ pub fn tool_path() -> &'static str {
 }
 
 fn git_out(root: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<String> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::no_window_command("git");
     cmd.arg("-C").arg(root).args(args);
     cmd.env("PATH", tool_path());
     for (k, v) in envs {
@@ -247,7 +247,7 @@ pub fn apply(
     // 아래 checkout -B 가 브랜치를 되감는다. 커밋이 지워지진 않지만(reflog)
     // 브랜치에서는 사라진다 — 미push 작업이 이 기계에 먼저 있었단 뜻이다.
     let cur_head = git_out(&root, &["rev-parse", "HEAD"], &[])?;
-    let ff_ok = std::process::Command::new("git")
+    let ff_ok = crate::no_window_command("git")
         .arg("-C")
         .arg(&root)
         .args(["merge-base", "--is-ancestor", &cur_head, head])

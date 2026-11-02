@@ -61,7 +61,15 @@ fn emit_inline_image(body: &[u8]) {
     }
     let port = std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".into());
     let url = format!("http://127.0.0.1:{port}/open-image");
-    let _ = std::process::Command::new("curl")
+    #[allow(unused_mut)]
+    let mut curl = std::process::Command::new("curl");
+    // 창 없는 앱이 콘솔 프로그램을 띄우면 Windows 가 그때마다 콘솔 창을 하나 번쩍 띄운다.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        curl.creation_flags(0x08000000);
+    }
+    let _ = curl
         .args([
             "-s",
             "--get",

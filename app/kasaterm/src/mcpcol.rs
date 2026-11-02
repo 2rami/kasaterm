@@ -1156,7 +1156,7 @@ fn claude_mcp_remove_command(name: &str, scope: &str, cwd: Option<&std::path::Pa
         "레포" => "project",
         _ => "user",
     };
-    let mut command = std::process::Command::new("claude");
+    let mut command = crate::proc::command("claude");
     command.args(["mcp", "remove", name, "-s", s]);
     if matches!(s, "local" | "project") {
         command.current_dir(cwd.ok_or_else(|| anyhow::anyhow!("선택한 폴더를 몰라 삭제하지 못했어요"))?);
@@ -1222,7 +1222,7 @@ fn add_codex_mcp(home: &std::path::Path, name: &str, url: &str) -> anyhow::Resul
 /// claude 에 URL 서버를 더한다. 지우기와 같은 이유로 CLI 에 맡긴다 —
 /// `~/.claude.json` 은 도는 세션들이 함께 쓴다.
 fn add_claude_mcp(name: &str, url: &str) -> anyhow::Result<String> {
-    let out = std::process::Command::new("claude")
+    let out = crate::proc::command("claude")
         .args([
             "mcp", "add", "--transport", "http", name, url, "-s", "user",
         ])

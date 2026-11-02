@@ -388,7 +388,7 @@ async fn background_kill_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let body = match params.get("pid").and_then(|s| s.parse::<u32>().ok()) {
-        Some(pid) => match std::process::Command::new("kill")
+        Some(pid) => match crate::no_window_command("kill")
             .arg("-TERM")
             .arg(pid.to_string())
             .output()

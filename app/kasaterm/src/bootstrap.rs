@@ -112,7 +112,7 @@ pub(crate) fn arm_self_install() {
         return;
     };
     let Ok(err) = out.try_clone() else { return };
-    let _ = std::process::Command::new("/bin/sh")
+    let _ = crate::proc::command("/bin/sh")
         .arg("-c")
         .arg(script)
         .stdout(out)

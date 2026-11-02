@@ -375,14 +375,14 @@ pub fn machine_name() -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(o) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output() {
+        if let Ok(o) = crate::no_window_command("scutil").args(["--get", "ComputerName"]).output() {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !s.is_empty() {
                 return s;
             }
         }
     }
-    std::process::Command::new("hostname")
+    crate::no_window_command("hostname")
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -394,13 +394,13 @@ pub fn machine_name() -> String {
 pub fn machine_aliases() -> Vec<String> {
     let mut aliases = vec![machine_name()];
     #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("scutil")
+    if let Ok(output) = crate::no_window_command("scutil")
         .args(["--get", "ComputerName"])
         .output()
     {
         aliases.push(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
-    if let Ok(output) = std::process::Command::new("hostname").output() {
+    if let Ok(output) = crate::no_window_command("hostname").output() {
         let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
         aliases.push(hostname.clone());
         if let Some(short) = hostname.split('.').next() {

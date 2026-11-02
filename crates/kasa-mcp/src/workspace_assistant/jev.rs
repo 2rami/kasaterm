@@ -1,7 +1,7 @@
 use super::*;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const MAX_BYTES: usize = 16 * 1024;
@@ -242,7 +242,7 @@ impl JevAdapter {
         if payload.len() > MAX_BYTES || String::from_utf8_lossy(&payload).contains(key) {
             return Err(Error::Invalid);
         }
-        let mut child = Command::new(&self.node)
+        let mut child = crate::no_window_command(&self.node)
             .args(["--input-type=module", "--eval", BRIDGE])
             .arg(&self.client_module)
             .env_clear()

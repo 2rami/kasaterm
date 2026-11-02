@@ -657,7 +657,7 @@ pub(crate) fn curl_post(url: &str, auth_header: &str, body: &str, max_secs: u32)
         "url = \"{url}\"\nheader = \"Content-Type: application/json\"\nheader = \"{auth_header}\"\ndata = \"@{}\"\nsilent\nshow-error\nmax-time = {max_secs}\n",
         tmp.display()
     );
-    let mut child = std::process::Command::new("curl")
+    let mut child = crate::proc::command("curl")
         .arg("--config")
         .arg("-")
         .stdin(std::process::Stdio::piped())
@@ -757,7 +757,7 @@ fn describe(kind: &str, ref_jpg: &Path) -> String {
         }),
         // codex 는 CLI 로 이미지를 넣는다. 없으면 폴백.
         "codex" => which("codex").and_then(|bin| {
-            let out = std::process::Command::new(bin)
+            let out = crate::proc::command(bin)
                 .arg("exec")
                 .arg("-i")
                 .arg(ref_jpg)
@@ -791,7 +791,7 @@ fn run_ppgen(
     env: &[(String, String)],
     extra: &[&str],
 ) -> Result<(), String> {
-    let mut cmd = std::process::Command::new(ppgen);
+    let mut cmd = crate::proc::command(ppgen);
     cmd.args(args);
     cmd.args(extra);
     for (k, v) in env {

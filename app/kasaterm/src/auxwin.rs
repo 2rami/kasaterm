@@ -1785,7 +1785,7 @@ impl App {
         std::thread::spawn(move || {
             #[cfg(target_os = "macos")]
             {
-                let root = std::process::Command::new("/usr/bin/osascript").args(["-e", "POSIX path of (choose folder with prompt \"마크다운 볼트 폴더 선택\")"]).output().ok()
+                let root = crate::proc::command("/usr/bin/osascript").args(["-e", "POSIX path of (choose folder with prompt \"마크다운 볼트 폴더 선택\")"]).output().ok()
                     .filter(|output| output.status.success()).map(|output|String::from_utf8_lossy(&output.stdout).trim().to_string()).unwrap_or_default();
                 let _ = proxy.send_event(UserEvent::VaultPicked { owner,root });
             }
@@ -3294,7 +3294,7 @@ impl App {
             self.aux.windows[index].status = Some("파일 선택 중…".to_string());
             self.aux_redraw(index);
             std::thread::spawn(move || {
-                let output = std::process::Command::new("/usr/bin/osascript")
+                let output = crate::proc::command("/usr/bin/osascript")
                     .args([
                         "-e",
                         "POSIX path of (choose file with prompt \"kasaterm 문서 열기\")",

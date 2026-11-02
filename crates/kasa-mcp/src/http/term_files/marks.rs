@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Default)]
 pub(super) struct Marks {
@@ -84,7 +83,7 @@ pub(super) fn parse(raw: &[u8], top: &Path) -> Marks {
 }
 
 fn git(dir: &Path, args: &[&std::ffi::OsStr]) -> Option<Vec<u8>> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let out = crate::no_window_command("git").arg("-C").arg(dir).args(args).output().ok()?;
     out.status.success().then_some(out.stdout)
 }
 

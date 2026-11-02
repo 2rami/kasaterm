@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -147,7 +147,7 @@ fn ensure(origin: &str) -> Result<String, String> {
     if let Some(public) = alive(origin) {
         return Ok(public);
     }
-    let mut cmd = Command::new(crate::tunnel::cloudflared_bin());
+    let mut cmd = crate::no_window_command(crate::tunnel::cloudflared_bin());
     cmd.arg("--config")
         .arg(empty_config_path())
         .args(["tunnel", "--no-autoupdate", "--protocol", "http2", "--edge-ip-version", "4", "--url", origin])

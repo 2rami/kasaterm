@@ -233,7 +233,7 @@ impl App {
         self.ws.lock().unwrap().pane_character.remove("%elsewhere");
         // 앉은 하네스 아래에서 뜬 짧은 실행은 자리를 빌릴 뿐, 끝나도 자리를 걷지 않는다(%14).
         let seated = moved["character"].as_str().unwrap().to_string();
-        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let mut child = crate::proc::command("/bin/sleep").arg("30").spawn().unwrap();
         let nested = self.prepare_agent_identity(&pane, &kasa_mcp::character::new_session_id(), "", child.id()).unwrap();
         assert_eq!(nested["character"], seated.as_str(), "a nested run borrows the seated student");
         assert_eq!(self.pane_agent_launches[&pane], std::process::id(), "a nested run does not take the seat");
@@ -243,13 +243,13 @@ impl App {
         assert_eq!(self.ws.lock().unwrap().pane_character[&pane], seated, "the seated harness keeps its name");
         // 칸 밖 터미널에서 떨어져 나가 뜬 실행(tmux 표본)도 빌릴 뿐이다 — 자손이 아니어도(%6 아로나).
         if cfg!(target_os = "macos") {
-            let out = std::process::Command::new("/bin/sh").args(["-c", "/bin/sleep 30 >/dev/null 2>&1 & echo $!"]).output().unwrap();
+            let out = crate::proc::command("/bin/sh").args(["-c", "/bin/sleep 30 >/dev/null 2>&1 & echo $!"]).output().unwrap();
             let detached: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
             assert!(!descends_from(&kasa_pty::fresh_process_table(), detached, std::process::id()), "the detached run left the harness tree");
             let borrowed = self.prepare_agent_identity(&pane, &kasa_mcp::character::new_session_id(), "", detached).unwrap();
             assert_eq!(borrowed["character"], seated.as_str(), "a run on another terminal borrows the seated student");
             assert_eq!(self.pane_agent_launches[&pane], std::process::id(), "a run on another terminal does not take the seat");
-            let _ = std::process::Command::new("/bin/kill").arg(detached.to_string()).status();
+            let _ = crate::proc::command("/bin/kill").arg(detached.to_string()).status();
             let deadline = Instant::now() + std::time::Duration::from_secs(3);
             while kasa_pty::fresh_process_table().iter().any(|(p, _, _)| *p == detached) && Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(50));

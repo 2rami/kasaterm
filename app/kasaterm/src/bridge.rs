@@ -385,7 +385,7 @@ fn deliver(bin: &Path, sid: &str, text: &str, nonce: &str) -> DeliverOutcome {
     }
     let guard = guard_token(sid);
     let home = std::env::var_os("HOME").unwrap_or_default();
-    let out = std::process::Command::new("/usr/bin/expect")
+    let out = crate::proc::command("/usr/bin/expect")
         .arg(&script)
         .arg(bin)
         .arg(sid8)

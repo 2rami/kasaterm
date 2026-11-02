@@ -137,7 +137,7 @@ fn fetch() -> Option<String> {
     let curl = "curl.exe";
     #[cfg(not(windows))]
     let curl = "curl";
-    let out = std::process::Command::new(curl)
+    let out = crate::proc::command(curl)
         .args(["-fsS", "--max-time", "8", feed()])
         .output()
         .ok()?;

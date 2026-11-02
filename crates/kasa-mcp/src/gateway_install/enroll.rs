@@ -156,7 +156,7 @@ impl Gate {
 /// 서명기를 띄워 끝날 때까지(최대 `timeout`) 기다린다. (성공, 표준출력, 표준오류 끝).
 fn run_signer(signer: &std::path::Path, args: &[String], input: Option<Vec<u8>>, timeout: Duration) -> (bool, Vec<u8>, String) {
     use std::io::{Read as _, Write as _};
-    let child = std::process::Command::new(signer)
+    let child = crate::no_window_command(signer)
         .args(args)
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())

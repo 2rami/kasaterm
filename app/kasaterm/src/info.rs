@@ -62,7 +62,7 @@ pub(crate) fn local_machine_name() -> &'static str {
 /// 사이에 U+00A0 을 넣는데, 셀 폰트에 그 글리프가 없어 화면에서는 폭 0 으로
 /// 사라진다(실측: `사용자의 MacBookPro` 로 붙어 그려졌다).
 fn cmd_line(bin: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(bin).args(args).output().ok()?;
+    let out = crate::proc::command(bin).args(args).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout)
         .replace('\u{a0}', " ")
         .trim()
