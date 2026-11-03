@@ -5,6 +5,9 @@ mod reopen;
 mod scope;
 pub(crate) use scope::{LocalScope, TabIdentity};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseMode { IdleShells, Confirmed }
+
 pub(crate) fn confirmation_text(dialog: &ConfirmClose) -> (String, String) {
     let what = match dialog.action {
         PendingClose::Window => "앱을 종료할까요?",
@@ -16,7 +19,7 @@ pub(crate) fn confirmation_text(dialog: &ConfirmClose) -> (String, String) {
     match &dialog.why {
         CloseWhy::Busy(process) => (what.into(), format!("{process} 이(가) 실행 중이에요. 닫으면 작업이 중단돼요.")),
         CloseWhy::LastPane => (what.into(), "마지막 칸을 닫으면 이 방도 닫혀요.".into()),
-        CloseWhy::Mirror { targets, closing, error } => {
+        CloseWhy::Mirror { targets, closing, error, .. } => {
             let names = targets.iter().take(3).map(|target| {
                 let name = kasa_mcp::machines::cached_pane(&target.label, &target.source)
                     .and_then(|row| row["name"].as_str().map(str::to_owned)).unwrap_or_else(|| target.source.clone());
@@ -129,7 +132,7 @@ fn close_request(action: &PendingClose, targets: &[&MirrorTarget]) -> Result<ser
     Ok(json!({"kind": kind, "window": first.window, "addresses": addresses}))
 }
 
-fn request_source_close(action: &PendingClose, targets: &[MirrorTarget]) -> Result<serde_json::Value, String> {
+fn request_source_close(action: &PendingClose, targets: &[MirrorTarget], mode: CloseMode) -> Result<serde_json::Value, String> {
     let mut groups: std::collections::BTreeMap<&str, Vec<&MirrorTarget>> = Default::default();
     for target in targets {
         let group = groups.entry(&target.base).or_default();
@@ -139,9 +142,16 @@ fn request_source_close(action: &PendingClose, targets: &[MirrorTarget]) -> Resu
         close_request(action, &group).map(|request| (base, group[0], request))
     }).collect::<Result<Vec<_>, _>>()?;
     let mut records = Vec::new();
+    let method = match mode {
+        CloseMode::IdleShells => "surface.close_idle_checked",
+        CloseMode::Confirmed => "surface.close_checked",
+    };
     for (base, first, request) in requests {
-        match kasa_mcp::remote::remote_cmd(base, "surface.close_checked", request) {
+        match kasa_mcp::remote::remote_cmd(base, method, request) {
             Ok(reply) => {
+                if mode == CloseMode::IdleShells && reply["result"]["requires_confirmation"] == true {
+                    return Ok(serde_json::json!({"records": records, "requires_confirmation": true}));
+                }
                 if let Some(rows) = reply["result"]["records"].as_array() {
                     for row in rows {
                         records.push(serde_json::json!({"base": base, "label": first.label, "receipt": row}));
@@ -155,6 +165,10 @@ fn request_source_close(action: &PendingClose, targets: &[MirrorTarget]) -> Resu
             result => {
                 let error = result.err().map(|error| format!("{error:#}"))
                     .unwrap_or_else(|| "원본이 닫기를 완료하지 못했어요".into());
+                if mode == CloseMode::IdleShells && error.contains("surface.close_idle_checked")
+                    && (error.contains("unknown method") || error.contains("unsupported") || error.contains("이 창구로 못 부른다")) {
+                    return Ok(serde_json::json!({"records": records, "requires_confirmation": true}));
+                }
                 let error = if error.contains("surface.close_checked") {
                     "원본 기기도 업데이트한 뒤 닫아 주세요".to_string()
                 } else { format!("{}: {error}", first.label) };
@@ -293,18 +307,27 @@ impl App {
     }
 
     pub(crate) fn guard_mirror_close(&mut self, action: &PendingClose) -> bool {
+        if matches!(self.confirm_close.as_ref().map(|dialog| &dialog.why), Some(CloseWhy::Mirror { closing: true, .. })) {
+            return true;
+        }
         let targets = self.mirror_close_targets(action);
         if targets.is_empty() { return false; }
-        self.mirror_close_scope = Some(self.local_close_scope(action, &targets));
-        self.raise_confirm(ConfirmClose {
-            why: CloseWhy::Mirror { targets, closing: false, error: None },
-            action: action.clone(),
-        });
+        let scope = self.local_close_scope(action, &targets);
+        self.mirror_close_scope = Some(scope.clone());
+        // One source can check the whole action before mutating any of its panes.
+        if targets.iter().all(|target| target.base == targets[0].base) {
+            self.start_mirror_close(action.clone(), targets, scope, CloseMode::IdleShells);
+        } else {
+            self.raise_confirm(ConfirmClose {
+                why: CloseWhy::Mirror { targets, mode: CloseMode::Confirmed, closing: false, error: None },
+                action: action.clone(),
+            });
+        }
         true
     }
 
     pub(crate) fn choose_mirror_close(
-        &mut self, action: PendingClose, targets: Vec<MirrorTarget>, button: ConfirmBtn,
+        &mut self, action: PendingClose, targets: Vec<MirrorTarget>, mode: CloseMode, button: ConfirmBtn,
     ) {
         let scope = self.local_close_scope(&action, &targets);
         let unchanged = self.mirror_close_targets(&action) == targets
@@ -317,29 +340,44 @@ impl App {
             }
             _ => return,
         }
-        self.confirm_close = Some(ConfirmClose {
-            why: CloseWhy::Mirror { targets: targets.clone(), closing: true, error: None },
+        self.start_mirror_close(action, targets, scope, mode);
+    }
+
+    fn start_mirror_close(&mut self, action: PendingClose, targets: Vec<MirrorTarget>, scope: LocalScope, mode: CloseMode) {
+        self.raise_confirm(ConfirmClose {
+            why: CloseWhy::Mirror { targets: targets.clone(), mode, closing: true, error: None },
             action: action.clone(),
         });
-        self.chrome_dirty = true;
-        if let Some(w) = &self.window { w.request_redraw(); }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let result = request_source_close(&action, &targets);
-            let _ = proxy.send_event(UserEvent::MirrorCloseDone { action, targets, scope, result });
+            let result = request_source_close(&action, &targets, mode);
+            let _ = proxy.send_event(UserEvent::MirrorCloseDone { action, targets, scope, mode, result });
         });
     }
 
     pub(crate) fn finish_mirror_close(
-        &mut self, action: PendingClose, targets: Vec<MirrorTarget>, scope: LocalScope, result: Result<serde_json::Value, String>,
+        &mut self, action: PendingClose, targets: Vec<MirrorTarget>, scope: LocalScope, mode: CloseMode, result: Result<serde_json::Value, String>,
     ) {
+        if mode == CloseMode::IdleShells && result.as_ref().is_ok_and(|reply| reply["requires_confirmation"] == true) {
+            if self.mirror_close_targets(&action) == targets && self.local_close_scope(&action, &targets) == scope {
+                self.raise_confirm(ConfirmClose {
+                    why: CloseWhy::Mirror { targets, mode: CloseMode::Confirmed, closing: false, error: None }, action,
+                });
+            } else {
+                self.confirm_close = None;
+                self.set_toast("거울이 바뀌었어요. 닫을 창을 다시 골라 주세요".into());
+            }
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window { w.request_redraw(); }
+            return;
+        }
         let completion = reply_completion(&result);
         let effect = completion_effect(completion, true);
         if let Ok(reply) = &result { self.remember_mirror_close(&targets, reply); }
         match effect {
             CloseEffect::Error(error) => {
-                self.confirm_close = Some(ConfirmClose {
-                    why: CloseWhy::Mirror { targets, closing: false, error: Some(error) },
+                self.raise_confirm(ConfirmClose {
+                    why: CloseWhy::Mirror { targets, mode, closing: false, error: Some(error) },
                     action,
                 });
             }
@@ -427,7 +465,7 @@ mod tests {
     #[test]
     fn return_cannot_confirm_a_remote_close_or_retry() {
         for (closing, error) in [(false, None), (true, None), (false, Some("offline".into()))] {
-            let why = CloseWhy::Mirror { targets: vec![], closing, error };
+            let why = CloseWhy::Mirror { targets: vec![], mode: CloseMode::Confirmed, closing, error };
             assert!(default_button(&why) == ConfirmBtn::Cancel);
         }
         assert!(default_button(&CloseWhy::Dirty(vec![])) == ConfirmBtn::Save);
@@ -466,7 +504,7 @@ mod tests {
         });
         let target = MirrorTarget { local: "%2".into(), base, source: "%16".into(), label: "fake source".into(), source_key: None, address: Some(serde_json::json!({"surface_id":"%16","surface_key":"fixture-key"})), ..Default::default() };
         assert_eq!(choice_effect(ConfirmBtn::Close, true), CloseEffect::Source);
-        let worker = std::thread::spawn(move || request_source_close(&PendingClose::Pane { pane: "%2".into() }, &[target.clone(), target]));
+        let worker = std::thread::spawn(move || request_source_close(&PendingClose::Pane { pane: "%2".into() }, &[target.clone(), target], CloseMode::Confirmed));
         received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(!worker.is_finished(), "local close cannot be approved before the source replies");
         approve.send(()).unwrap();
@@ -486,6 +524,36 @@ mod tests {
         let (effect, requests) = source_case(false);
         assert!(matches!(effect, CloseEffect::Error(error) if error.contains("source unavailable")));
         assert_eq!(requests, 1);
+    }
+
+    #[test]
+    fn idle_close_uses_a_distinct_method_and_preserves_confirmation_and_error_replies() {
+        for (body, confirm, error) in [
+            (r#"{"ok":true,"result":{"closed":true,"records":[]}}"#, false, false),
+            (r#"{"ok":true,"result":{"closed":false,"requires_confirmation":true}}"#, true, false),
+            (r#"{"ok":false,"error":"unknown method: surface.close_idle_checked"}"#, true, false),
+            (r#"{"ok":false,"error":"cmd: `surface.close_idle_checked` 는 이 창구로 못 부른다"}"#, true, false),
+            (r#"{"ok":false,"error":"source unavailable"}"#, false, true),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut bytes = [0u8; 4096];
+                let count = socket.read(&mut bytes).unwrap();
+                let request = String::from_utf8_lossy(&bytes[..count]);
+                assert!(request.contains("surface.close_idle_checked"));
+                assert!(!request.contains("surface.close_checked"));
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let target = MirrorTarget { base, source: "%4".into(), label: "fixture".into(),
+                address: Some(serde_json::json!({"surface_id":"%4","surface_key":"key"})), ..Default::default() };
+            let reply = request_source_close(&PendingClose::Pane { pane: "%view".into() }, &[target], CloseMode::IdleShells).unwrap();
+            assert_eq!(reply["requires_confirmation"] == true, confirm);
+            assert_eq!(reply["error"].is_string(), error);
+            server.join().unwrap();
+        }
     }
 
     #[test]

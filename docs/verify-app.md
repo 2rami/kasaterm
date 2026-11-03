@@ -184,6 +184,9 @@ macOS 시트는 `KASATERM_UPDATE_RIG_SHOTS=<기존 폴더>`로 자기 앱의 시
 `KASATERM_UPDATE_RIG_BUTTON=닫기`를 더하면 그 제목의 실제 NSButton을 누른다(격리 실행에서만). `KASATERM_TEST_MD_SCRIPT`의 `reopen:`은 되살리기 경로를 실행한다.
 GPU 확인 카드는 `KASATERM_TEST_CLOSE_FALLBACK=1`로 별도 검사한다. 원본 첫 탭·다중 탭 칸·방 전체, 취소·원본 완료 응답·신원 변경 거절,
 혼합 로컬/미러 칸과 대기 중 새 탭 추가, 유예 시간 전후 되살리기를 모두 확인한다. 본판 세션으로 닫기·되살리기를 시험하지 않는다.
+일반 셸은 `surface.close_idle_checked`로 원본에서 재검사한 뒤 확인 없이 닫힌다. 빈 셸·마지막 탭, 실행 중인 명령·셸 내장 명령,
+바쁜 형제 탭이 섞인 칸·방, 오래된 주소·구판 원본을 대조한다. 자동 검사 오류 뒤의 「다시 시도」도 일반 셸 검사로 돌아가야 한다.
+`python3 app/kasaterm/src/mirror_close/tests/native.py`는 격리한 두 앱에서 이 경로를 확인한다. `--case idle-pane`처럼 한 사례만 고를 수 있고, `CARGO_TARGET_DIR`로 검증 바이너리 위치를 지정한다.
 
 ## 기기 간 드래그 이사 리그
 

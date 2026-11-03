@@ -37,6 +37,7 @@ impl App {
 
     pub(crate) fn close_source_checked(&mut self, request: &Value) -> Result<Value> {
         let expected = addresses(request)?;
+        let idle_only = request["idle_only"] == true;
         let kind = request["kind"].as_str().unwrap_or("");
         anyhow::ensure!(matches!(kind, "tab" | "tabs" | "pane" | "room"), "알 수 없는 닫기 대상이에요");
         let backend = self.socket_backend.as_ref().ok_or_else(|| anyhow::anyhow!("세션 정보를 읽을 수 없어요"))?;
@@ -66,14 +67,21 @@ impl App {
                 let count = self.ws.lock().unwrap().panes.get(pane).map_or(1, |p| p.tabs.len());
                 if count <= 1 {
                     if let Some(window) = self.window_of_pane(pane).filter(|w| self.window_leaves(*w).len() <= 1) {
-                        anyhow::ensure!(self.user_room_count() > 1, "마지막 방은 닫을 수 없어요");
-                        PendingClose::Session(window)
+                        if self.user_room_count() > 1 { PendingClose::Session(window) }
+                        else if idle_only { PendingClose::Pane { pane: pane.clone() } }
+                        else { anyhow::bail!("마지막 방은 닫을 수 없어요"); }
                     } else { PendingClose::Pane { pane: pane.clone() } }
                 } else { PendingClose::Tab { pane: pane.clone(), idx: *idx } }
             }
             _ => PendingClose::Tab { pane: slots[0].0.clone(), idx: slots[0].1 },
         };
         anyhow::ensure!(self.dirty_docs(&action).is_empty(), "원본에 저장하지 않은 문서가 있어요. 원본에서 저장한 뒤 다시 닫아 주세요");
+        if idle_only {
+            let processes = kasa_pty::fresh_process_table();
+            let idle = expected.iter().all(|address| self.pty.get(address["surface_id"].as_str().unwrap())
+                .is_some_and(|session| idle_shell_ready(session, &processes)));
+            if !idle { return Ok(json!({"closed": false, "requires_confirmation": true, "records": []})); }
+        }
         let before: std::collections::HashSet<_> = self.closed_panes.iter().map(|c| c.ui_id).collect();
         let execution: Result<()> = (|| {
         match action {
@@ -123,6 +131,14 @@ impl App {
         let (outer, _) = self.source_slot(&id)?;
         Ok(json!({"address": address, "window": self.window_of_pane(&outer)}))
     }
+}
+
+fn idle_shell_ready(session: &kasa_pty::PtySession, processes: &[(u32, u32, String)]) -> bool {
+    !session.input_closed()
+        && crate::transfer_endpoints::idle_shell(session.shell_pid(), processes)
+        // A shell builtin has no child, and a just-submitted command may not have spawned one yet.
+        && session.last_submit().is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(250))
+        && session.blocks_arc().lock().is_ok_and(|blocks| blocks.back().is_none_or(|block| block.exit_code.is_some()))
 }
 
 #[cfg(test)]

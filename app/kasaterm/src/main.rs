@@ -1499,6 +1499,7 @@ enum DirtyDoc {
 enum CloseWhy {
     Mirror {
         targets: Vec<mirror_close::MirrorTarget>,
+        mode: mirror_close::CloseMode,
         closing: bool,
         error: Option<String>,
     },
@@ -3803,6 +3804,7 @@ enum UserEvent {
         action: PendingClose,
         targets: Vec<mirror_close::MirrorTarget>,
         scope: mirror_close::LocalScope,
+        mode: mirror_close::CloseMode,
         result: Result<serde_json::Value, String>,
     },
     MirrorReopenDone {

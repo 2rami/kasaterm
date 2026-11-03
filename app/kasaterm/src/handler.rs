@@ -780,8 +780,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.migrate_finish(pane, res.clone());
                 return;
             }
-            UserEvent::MirrorCloseDone { action, targets, scope, result } => {
-                self.finish_mirror_close(action.clone(), targets.clone(), scope.clone(), result.clone());
+            UserEvent::MirrorCloseDone { action, targets, scope, mode, result } => {
+                self.finish_mirror_close(action.clone(), targets.clone(), scope.clone(), *mode, result.clone());
                 return;
             }
             UserEvent::MirrorReopenDone { record, result } => {
@@ -8345,8 +8345,8 @@ impl App {
             self.confirm_close = Some(dlg);
             return;
         }
-        if let CloseWhy::Mirror { targets, .. } = dlg.why {
-            self.choose_mirror_close(dlg.action, targets, btn);
+        if let CloseWhy::Mirror { targets, mode, .. } = dlg.why {
+            self.choose_mirror_close(dlg.action, targets, mode, btn);
             return;
         }
         if btn == ConfirmBtn::Cancel {

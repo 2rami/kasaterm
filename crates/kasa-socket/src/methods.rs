@@ -105,6 +105,18 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Ok(value) => Response::success(id, value),
             Err(error) => backend_err(id, error),
         },
+        "surface.close_idle_checked" => {
+            let mut params = req.params.clone();
+            let Some(object) = params.as_object_mut() else {
+                return param_err(id, "surface.close_idle_checked requires an object");
+            };
+            // Older sources must reject this method instead of ignoring an idle-only flag.
+            object.insert("idle_only".into(), Value::Bool(true));
+            match backend.close_checked(&params) {
+                Ok(value) => Response::success(id, value),
+                Err(error) => backend_err(id, error),
+            }
+        },
         "surface.reopen_checked" => match backend.reopen_checked(&req.params) {
             Ok(value) => Response::success(id, value),
             Err(error) => backend_err(id, error),
@@ -1587,6 +1599,7 @@ mod tests {
     #[derive(Default)]
     struct FakeBackend {
         closed_windows: Mutex<Vec<(usize, Vec<Value>)>>,
+        checked_closes: Mutex<Vec<Value>>,
         sent_text: Mutex<Vec<(Option<String>, String)>>,
         sent_keys: Mutex<Vec<(Option<String>, String)>>,
         resized: Mutex<Vec<(Vec<u8>, f32)>>,
@@ -1603,6 +1616,10 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
+        fn close_checked(&self, request: &Value) -> anyhow::Result<Value> {
+            self.checked_closes.lock().unwrap().push(request.clone());
+            Ok(json!({"closed":true}))
+        }
         fn close_window_checked(&self, idx: usize, keys: Vec<Value>) -> anyhow::Result<()> {
             self.closed_windows.lock().unwrap().push((idx, keys));
             Ok(())
@@ -1705,6 +1722,17 @@ mod tests {
             "idx": 2, "addresses": [address],
         }))).ok);
         assert_eq!(*backend.closed_windows.lock().unwrap(), vec![(2, vec![address])]);
+    }
+
+    #[test]
+    fn idle_close_cannot_disable_the_source_guard() {
+        let backend = FakeBackend::default();
+        for params in [Value::Null, json!([]), json!("pane")] {
+            assert!(!dispatch(&backend, req("surface.close_idle_checked", params)).ok);
+        }
+        assert!(backend.checked_closes.lock().unwrap().is_empty());
+        assert!(dispatch(&backend, req("surface.close_idle_checked", json!({"idle_only":false,"kind":"pane"}))).ok);
+        assert_eq!(*backend.checked_closes.lock().unwrap(), vec![json!({"idle_only":true,"kind":"pane"})]);
     }
 
     #[test]

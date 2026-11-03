@@ -27,7 +27,7 @@ mod close_authority_tests {
     #[tokio::test]
     async fn lifecycle_commands_require_owner_not_guest_and_allow_authenticated_machine_transport() {
         let desk = Arc::new(Desk::default());
-        for method in ["surface.close_checked", "surface.reopen_checked"] {
+        for method in ["surface.close_checked", "surface.close_idle_checked", "surface.reopen_checked"] {
             for owner in [Some(false), Some(true), None] {
                 let auth = owner.map(|owner| axum::extract::Extension(MobileAuth(crate::mobile::MobileUser {
                     name: "fixture".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner,
@@ -151,6 +151,7 @@ async fn cmd_handler(
         "surface.split",
         "surface.close",
         "surface.close_checked",
+        "surface.close_idle_checked",
         "surface.reopen_checked",
         "surface.swap",
         "surface.move",
