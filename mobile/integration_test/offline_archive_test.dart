@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:kasaterm_mobile/archive_store.dart';
+import 'package:kasaterm_mobile/approvals.dart';
 import 'package:kasaterm_mobile/connection_store.dart';
 import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/relay_account.dart';
@@ -17,6 +18,8 @@ import 'offline_archive_fixture.dart';
 
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // A cold iOS launch delivers the native semantics handle before the test baseline.
+  setUpAll(() => Future<void>.delayed(const Duration(seconds: 1)));
   Future<void> until(
     WidgetTester tester,
     bool Function() ready,
@@ -28,6 +31,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
+    await tester.pump(const Duration(milliseconds: 500));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
     await tester.pump();
   }
 
@@ -153,6 +158,9 @@ void main() {
         );
         await fixture.close();
       }
+      ApprovalCenter.instance.bind(null);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 3));
     },
     timeout: const Timeout(Duration(minutes: 4)),
   );
