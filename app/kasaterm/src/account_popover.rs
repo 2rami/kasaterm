@@ -706,7 +706,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                         (usage.unwrap_or_default(), pressure.map_or(theme::text_mute(), |(_, pct, _)| pct_col(*pct)), true)
                     }
                     None if codex_signed_in => {
-                        ("한도 확인 중…".to_string(), theme::text_mute(), false)
+                        (crate::codexlimits::missing_note_for(frame.accounts.codex).to_string(), theme::text_mute(), false)
                     }
                     None => ("로그인 안 됨".to_string(), theme::danger(), false),
                 },
@@ -762,7 +762,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                         ("", theme::text_mute())
                     }
                     AccountProvider::Codex if codex_signed_in => {
-                        ("한도 확인 중…", theme::text_mute())
+                        (crate::codexlimits::missing_note_for(frame.accounts.codex), theme::text_mute())
                     }
                     AccountProvider::Codex => ("로그인 안 됨", theme::danger()),
                 };
@@ -1427,7 +1427,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, st: MenuState<'_>, frame: &Frame<'
                             let t = if signed_out {
                                 "로그인 필요"
                             } else {
-                                "한도 확인 중…"
+                                crate::codexlimits::missing_note_for(&id)
                             };
                             g.draw_text(
                                 sx + pad_x,

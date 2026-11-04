@@ -38,7 +38,9 @@ pub(super) fn badges(f: &Frame<'_>) -> Vec<Badge> {
                     selected_codex_windows(raw.as_deref().unwrap_or_default(), f.prefs)
                         .into_iter().map(|(label, pct)| (label, Some(pct))).collect()
                 } else { Vec::new() };
-                let note = if !logged_in { "로그인 필요" } else if raw.is_none() && f.prefs.wants_usage("codex") { "확인 중" } else { "" };
+                let note = if !logged_in { "로그인 필요" } else if raw.is_none() && f.prefs.wants_usage("codex") {
+                    if crate::codexlimits::attempted_for(id) { "조회 실패" } else { "확인 중" }
+                } else { "" };
                 ("codex", codex_account_label(id, f.accounts.codex_list), windows, note, snapshot.is_some_and(|s| s.stale))
             }
             _ => return None,

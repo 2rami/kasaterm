@@ -156,6 +156,10 @@ pub(crate) fn attempted_for(account_id: &str) -> bool {
         .is_some_and(|cached| cached.contains_key(account_id))
 }
 
+pub(crate) fn missing_note_for(account_id: &str) -> &'static str {
+    if attempted_for(account_id) { "한도 조회 실패" } else { "한도 확인 중…" }
+}
+
 /// 화면 리그가 계정별 그래프를 확인할 때만 쓰는 값 주입구.
 pub(crate) fn seed_for_probe(account_id: &str, windows: Vec<Window>) -> bool {
     if std::env::var_os("KASATERM_AUTOPORTPOP_MS").is_none() {

@@ -1070,6 +1070,19 @@ pub fn held(key: &str) -> bool {
     seen().lock().is_ok_and(|s| s.iter().any(|(k, state)| k == key && state == "ok"))
 }
 
+/// A remembered email does not mean adoption finished. Reuse its registered slot
+/// without clearing ownership proof or allocating another slot after reconnect.
+pub fn registered_slot<'a>(key: &str, slots: impl Iterator<Item = &'a str>) -> Option<String> {
+    let map = load_map();
+    registered_slot_in(key, slots, &map)
+}
+
+fn registered_slot_in<'a>(key: &str, slots: impl Iterator<Item = &'a str>, map: &BTreeMap<String, String>) -> Option<String> {
+    slots.filter(|slot| !slot.is_empty())
+        .find(|slot| map.get(*slot).is_some_and(|mapped| mapped == key))
+        .map(str::to_string)
+}
+
 /// 그 슬롯을 관문 사슬로 채우게 한다 — 「다른 기기에 있는 계정」을 이 기기에 붙일 때.
 pub fn adopt(slot: &str, key: &str) {
     let mut map = load_map();

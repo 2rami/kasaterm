@@ -3,6 +3,20 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use std::sync::Mutex;
 
+#[test]
+fn reconnect_reuses_only_a_still_registered_chain_slot() {
+    let key = "claude:fixture@example.invalid";
+    let map = BTreeMap::from([
+        ("removed".into(), key.into()),
+        ("acct-1".into(), key.into()),
+        ("acct-2".into(), "claude:other@example.invalid".into()),
+    ]);
+    for _ in 0..3 {
+        assert_eq!(registered_slot_in(key, ["acct-2", "acct-1"].into_iter(), &map).as_deref(), Some("acct-1"));
+    }
+    assert_eq!(registered_slot_in(key, ["acct-2"].into_iter(), &map), None);
+}
+
 /// What the fake Anthropic endpoints saw: (endpoint, request body or bearer).
 pub(crate) type Seen = Arc<Mutex<Vec<(String, String)>>>;
 

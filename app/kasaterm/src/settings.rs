@@ -460,6 +460,12 @@ impl App {
             return;
         };
         let name = if acct.label.is_empty() { acct.email.clone() } else { acct.label.clone() };
+        if provider == AccountProvider::Claude && kasa_mcp::agent_chains::held(&acct.key) {
+            if self.adopt_held_claude_chain(&acct.key).is_some() {
+                self.set_toast(format!("관문에서 「{name}」 로그인을 받아 와요 — 기존 계정 자리에서 확인해요"));
+            }
+            return;
+        }
         // 앞서 실패한(아직 아무도 로그인 안 한) 같은 이름 자리가 있으면 그 자리에 다시 한다 —
         // 누를 때마다 빈 슬롯이 늘면 목록이 껍데기로 찬다(2026-09-05 「등록만 100번」).
         let unused = match provider {
@@ -481,11 +487,6 @@ impl App {
         let Some((id, dir)) = slot else {
             return;
         };
-        if provider == AccountProvider::Claude && kasa_mcp::agent_chains::held(&acct.key) {
-            adopt_held_into(&id, &acct.key, &acct.email, &acct.org);
-            self.set_toast(format!("관문에서 「{name}」 로그인을 받아 와요 — 로그인 없이 곧 쓸 수 있어요"));
-            return;
-        }
         let opts = LoginOpts {
             email: (provider == AccountProvider::Claude).then(|| acct.email.clone()),
             device_code: provider == AccountProvider::Codex,
@@ -507,6 +508,13 @@ impl App {
     pub(crate) fn adopt_held_claude_chain(&mut self, key: &str) -> Option<String> {
         if hidden_login_running() || !kasa_mcp::agent_chains::held(key) {
             return None;
+        }
+        if let Some(id) = kasa_mcp::agent_chains::registered_slot(key,
+            self.set_claude_accounts.iter().map(|account| account.id.as_str()))
+        {
+            kasa_mcp::agent_chains::poke();
+            request_account_sync_identity(&id);
+            return Some(id);
         }
         let acct = kasa_mcp::agent_accounts::cached()?.shared.into_iter().find(|a| a.key == key)?;
         let unused = self
@@ -3901,6 +3909,13 @@ fn login_cell() -> &'static LoginCell {
     CELL.get_or_init(|| std::sync::Mutex::new((None, None, None)))
 }
 
+// Slot IDs survive retries, so they cannot distinguish a canceled process from its replacement.
+static LOGIN_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn login_attempt_current(attempt: u64) -> bool {
+    LOGIN_ATTEMPT.load(std::sync::atomic::Ordering::Acquire) == attempt
+}
+
 pub(crate) fn hidden_login_job() -> Option<LoginJob> {
     login_cell().lock().ok().and_then(|cell| cell.0.clone())
 }
@@ -4155,6 +4170,7 @@ fn browser_code_matches(code: &str, expected: Option<&str>) -> bool {
 pub(crate) fn cancel_hidden_login() {
     if phone_login::cancel_from_local() { return; }
     let pgid = login_cell().lock().ok().and_then(|mut cell| {
+        LOGIN_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         cell.0 = None;
         // stdin 을 놓아 EOF 를 준다 — 코드를 기다리던 CLI 는 이걸로 즉시 끝난다.
         cell.2 = None;
@@ -4283,6 +4299,7 @@ fn spawn_hidden_login(
     {
         return;
     }
+    let attempt = LOGIN_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
     cell.0 = Some(LoginJob {
         provider,
         id: id.clone(),
@@ -4338,6 +4355,7 @@ fn spawn_hidden_login(
                     provider,
                     &id,
                     LoginState::Err(format!("로그인 실행 실패: {e}")),
+                    attempt,
                 );
                 return;
             }
@@ -4345,9 +4363,19 @@ fn spawn_hidden_login(
         // stdin 을 셀에 맡긴다 — 붙들고만 있으면(옛 코드) 코드를 넣을 길이 없고,
         // 떨어뜨리면 CLI 가 EOF 로 즉시 죽는다. 취소·완료 때 셀이 놓아 준다.
         let login_pid = child.id();
-        if let Ok(mut c) = login_cell().lock() {
-            c.1 = Some(login_pid);
-            c.2 = child.stdin.take();
+        let registered = if let Ok(mut c) = login_cell().lock() {
+            if login_attempt_current(attempt) {
+                c.1 = Some(login_pid);
+                c.2 = child.stdin.take();
+                true
+            } else {
+                false
+            }
+        } else { false };
+        if !registered {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
         }
         // 두 파이프를 각각 읽어 한 버퍼에 모은다 — URL 이 어느 쪽으로 오는지는
         // CLI 버전에 따라 다르고, 실패 이유는 대개 stderr 로 온다.
@@ -4384,6 +4412,7 @@ fn spawn_hidden_login(
                         Ok(0) | Err(_) => break,
                         Ok(n) => n,
                     };
+                    if !login_attempt_current(attempt) { break; }
                     let text = String::from_utf8_lossy(&chunk[..n]).to_string();
                     if let Ok(mut b) = buf.lock() {
                         b.push_str(&text);
@@ -4451,7 +4480,9 @@ fn spawn_hidden_login(
                 Err(_) => break false,
             }
             // 사용자가 취소하면 pgid 가 비워지고 프로세스는 이미 죽었다.
-            if login_cell().lock().is_ok_and(|c| c.0.is_none()) {
+            if !login_attempt_current(attempt) {
+                let _ = child.kill();
+                let _ = child.wait();
                 return;
             }
             // 승인 전에 늘 찍히는 안내만으로 클립보드를 읽지는 않는다. 입력칸 표시와 달리
@@ -4500,7 +4531,7 @@ fn spawn_hidden_login(
                 } else {
                     "로그인이 3분 안에 안 끝났어요"
                 };
-                finish_login(provider, &id, LoginState::Err(why.into()));
+                finish_login(provider, &id, LoginState::Err(why.into()), attempt);
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -4517,7 +4548,7 @@ fn spawn_hidden_login(
                 None => LoginState::Ok,
             }
         };
-        finish_login(provider, &id, state);
+        finish_login(provider, &id, state, attempt);
     });
 }
 
@@ -4646,7 +4677,13 @@ fn verify_login_identity(
 
 /// 결과를 기록한다 — 단, 그 사이 사용자가 취소했거나 다른 슬롯을 시작했으면
 /// 덮지 않는다(늦게 끝난 옛 작업이 새 작업의 표시를 갈아치우면 안 된다).
-fn finish_login(provider: AccountProvider, id: &str, state: LoginState) {
+fn finish_login(provider: AccountProvider, id: &str, state: LoginState, attempt: u64) {
+    if let Ok(mut c) = login_cell().lock() {
+        if !finish_login_state(&mut c, provider, id, state.clone(), attempt,
+            LOGIN_ATTEMPT.load(std::sync::atomic::Ordering::Acquire)) { return; }
+    } else {
+        return;
+    }
     // 성공했으면 **그 자리에서** 신원과 한도를 다시 읽는다. 둘 다 캐시가 있어
     // (신원 20초·한도는 폴러 주기) 가만두면 「로그인을 마쳤어요」가 뜬 뒤에도
     // 한동안 옛 계정과 빈 한도가 화면에 남는다(2026-09-07 「로그인을 마쳤어요 뜨고
@@ -4661,19 +4698,38 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState) {
         // 새 로그인의 사슬을 곧 관문에 맡긴다 — 다른 기기가 바로 쓸 수 있게.
         kasa_mcp::agent_chains::poke();
     }
-    if let Ok(mut c) = login_cell().lock() {
-        if c.0
-            .as_ref()
-            .is_some_and(|j| j.provider == provider && j.id == id)
-        {
-            if let Some(j) = c.0.as_mut() {
-                j.state = state;
-            }
-            c.1 = None;
-            // 끝난 프로세스의 stdin 을 계속 들고 있으면, 다음 로그인의 코드가
-            // 죽은 파이프로 가 조용히 사라진다.
-            c.2 = None;
-        }
+}
+
+fn finish_login_state(
+    cell: &mut (Option<LoginJob>, Option<u32>, Option<std::process::ChildStdin>),
+    provider: AccountProvider, id: &str, state: LoginState, attempt: u64, current: u64,
+) -> bool {
+    if attempt != current || !cell.0.as_ref().is_some_and(|job| job.provider == provider && job.id == id) {
+        return false;
+    }
+    if let Some(job) = cell.0.as_mut() { job.state = state; }
+    cell.1 = None;
+    cell.2 = None;
+    true
+}
+
+#[cfg(test)]
+mod login_retry_tests {
+    use super::*;
+
+    #[test]
+    fn canceled_completion_cannot_close_the_same_slots_replacement() {
+        let mut cell = (Some(LoginJob {
+            provider: AccountProvider::Claude, id: "acct-1".into(),
+            state: LoginState::Running, device: None, adopting: None,
+        }), Some(123), None);
+        assert!(!finish_login_state(&mut cell, AccountProvider::Claude, "acct-1",
+            LoginState::Err("old process exited".into()), 1, 2));
+        assert!(matches!(cell.0.as_ref().unwrap().state, LoginState::Running));
+        assert_eq!(cell.1, Some(123));
+        assert!(finish_login_state(&mut cell, AccountProvider::Claude, "acct-1", LoginState::Ok, 2, 2));
+        assert!(matches!(cell.0.as_ref().unwrap().state, LoginState::Ok));
+        assert_eq!(cell.1, None);
     }
 }
 

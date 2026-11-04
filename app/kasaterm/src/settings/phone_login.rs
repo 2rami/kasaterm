@@ -911,7 +911,8 @@ impl App {
                 &slot,
                 crate::session::AccountIdentity::from_verified(actual),
             );
-            super::finish_login(AccountProvider::Claude, &slot, LoginState::Ok);
+            super::finish_login(AccountProvider::Claude, &slot, LoginState::Ok,
+                super::LOGIN_ATTEMPT.load(std::sync::atomic::Ordering::Acquire));
             self.account_flash = Some(Instant::now());
             self.set_toast(if selected && !flow.runtime_updated {
                 "폰 로그인을 계정 슬롯에 저장했어요. 현재 작업대는 보존했으니 계정을 다시 선택해 주세요"
