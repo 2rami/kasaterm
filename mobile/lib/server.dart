@@ -48,6 +48,7 @@ class Pane {
     this.undocked = false,
     this.session,
     this.harness,
+    this.surfaceKey,
     this.mirrorOf,
     this.contextPct,
     this.compactPct,
@@ -96,6 +97,7 @@ class Pane {
 
   /// claude·codex — 상태줄 앞의 작은 로고.
   final String? harness;
+  final String? surfaceKey;
 
   /// 이 자리가 다른 기계 pane 의 거울이면 그 기계 이름. 몸통은 저쪽에 있다.
   final String? mirrorOf;
@@ -211,6 +213,7 @@ class Pane {
     undocked: j['undocked'] == true,
     session: j['session'] as String?,
     harness: j['harness'] as String?,
+    surfaceKey: j['surface_key'] as String?,
     mirrorOf: j['mirror_of'] as String?,
     contextPct: (j['context_pct'] as num?)?.toInt(),
     compactPct: (j['compact_pct'] as num?)?.toInt(),
@@ -533,9 +536,9 @@ class Server {
     _client = OriginClient(this.root, client: client);
   }
 
-  Server.account(AccountSession session, {http.Client? client, KasanetNative? kasanet})
+  Server.account(AccountSession session, {http.Client? client, KasanetNative? kasanet, bool connectDirect = true})
     : root = session.root, account = session {
-    final native = kasanet ?? startKasanet();
+    final native = connectDirect ? (kasanet ?? startKasanet()) : null;
     _kasanet = native == null ? null : KasanetRouter(native, _KasanetGateway(this));
     _client = OriginClient(session.origin, client: client, token: session.token,
       onUnauthorized: () => onUnauthorized?.call(),
@@ -1407,6 +1410,15 @@ class Server {
       reset: body['reset'] == true,
       source: body['source'] is String ? body['source'] as String : '',
     );
+  }
+
+  Future<Map<String, dynamic>> conversationArchive(Pane pane, int offset, String source) async {
+    final body = await _getJson('conversation-archive', machine: pane.machine,
+      query: {'surface': pane.id, 'offset': '$offset', if (source.isNotEmpty) 'source': source});
+    if (body is! Map<String, dynamic> || body['ok'] != true || body['archive_version'] != 1) {
+      throw const ServerException('기기 앱을 업데이트하고 대화가 준비된 뒤 다시 저장해 주세요.');
+    }
+    return body;
   }
 
   /// Existing native paste path sets the clipboard on the actual harness host;

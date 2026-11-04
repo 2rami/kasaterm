@@ -171,6 +171,26 @@ fn read_for_source(
     Ok(fresh)
 }
 
+async fn conversation_archive_handler(backend: Arc<dyn Backend>, Query(params): Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let offset = params.get("offset").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let held = params.get("source").map(String::as_str).unwrap_or("");
+    let result = (|| {
+        anyhow::ensure!(!surface.is_empty(), "surface is required");
+        let identity = backend.collab_pane_identity(surface)?;
+        let mut chunk = backend.transcript_archive(surface, offset)?;
+        if !held.is_empty() && chunk.source != held {
+            chunk = backend.transcript_archive(surface, 0)?;
+            chunk.reset = true;
+        }
+        anyhow::ensure!(backend.collab_pane_identity(surface)? == identity, "conversation changed");
+        Ok::<_, anyhow::Error>(serde_json::json!({"ok":true,"archive_version":1,"raw":chunk.raw,"offset":chunk.offset,
+            "reset":chunk.reset,"source":chunk.source,"address":identity,"machine_name":crate::machines::self_label()}))
+    })();
+    let body = result.unwrap_or_else(|_| serde_json::json!({"ok":false,"error":"conversation_archive_unavailable"}));
+    ([(header::CACHE_CONTROL, "no-store")], Json(body))
+}
+
 /// `GET /session-transcript-raw?id=<uuid>&cwd=<abs>` — a *past* (offline)
 /// session's transcript jsonl, raw and unparsed, addressed by its session uuid
 /// + the cwd it ran in (no live pane needed). The BA GUI's resume picker reads
@@ -258,6 +278,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
     let blocks_backend = backend.clone();
     let transcript_backend = backend.clone();
     let transcript_raw_backend = backend.clone();
+    let archive_backend = backend.clone();
     let session_transcript_raw_backend = backend.clone();
     let subagents_backend = backend.clone();
     let subagent_transcript_raw_backend = backend.clone();
@@ -276,6 +297,9 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
                 transcript_raw_handler(transcript_raw_backend.clone(), q)
             }),
         )
+        .route("/conversation-archive", get(move |q: Query<std::collections::HashMap<String, String>>| {
+            conversation_archive_handler(archive_backend.clone(), q)
+        }))
         .route(
             "/session-transcript-raw",
             get(move |q: Query<std::collections::HashMap<String, String>>| {

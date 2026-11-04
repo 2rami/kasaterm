@@ -24,6 +24,7 @@ import 'pane_actions.dart';
 import 'screen_mirror.dart';
 import 'settings.dart';
 import 'terminal.dart';
+import 'saved_conversations.dart';
 
 export '../machine_look.dart' show parseHexColor;
 
@@ -208,6 +209,7 @@ class _HubScreenState extends State<HubScreen> {
             // 제목 글자 없이 쌍둥이 표 — 목록이 학생이라는 것은 화면이 말한다(2026-10-01).
             title: TwinsMark(hopping: _refreshing || _model.showingCached),
             actions: [
+              IconButton(tooltip: '저장한 대화', onPressed: () => openSavedConversations(context, widget.server), icon: const Icon(Icons.offline_pin_outlined)),
               // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
               // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
               IconButton(

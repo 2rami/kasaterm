@@ -3077,6 +3077,12 @@ impl Backend for PtyBackend {
             .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
     }
 
+    fn transcript_archive(&self, surface_id: &str, offset: u64) -> Result<TranscriptChunk> {
+        let path = self.bound.lock().unwrap().get(surface_id).cloned()
+            .ok_or_else(|| anyhow::anyhow!("pane has no bound transcript"))?;
+        crate::chat_view::history::read_archive(&path, offset).map_err(anyhow::Error::from)
+    }
+
     fn session_transcript_raw(&self, id: &str, cwd: Option<&str>) -> Result<String> {
         // Offline read by uuid — no bound surface. Resolve the jsonl path the
         // same way recent_sessions_for discovers candidates, so the BA GUI can

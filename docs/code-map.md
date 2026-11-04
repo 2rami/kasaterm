@@ -2,6 +2,10 @@
 
 프로젝트 개발 안내가 여기를 가리킨다. Rust 를 수정할 때 해당 영역을 찾아 읽는다.
 
+대화의 계정 보관·폰 오프라인 저장은 [offline-conversations.md](offline-conversations.md)가 계약이다.
+`kasa-mcp/conversation_archive.rs`와 `conversation_archive/sync.rs`는 영속 저장·데스크톱 전송,
+`gateway_conversations.rs`는 계정 권한과 HTTP, 모바일 `archive_*`와 `screens/saved_conversations.dart`는 폰 저장·읽기 전용 화면을 맡는다.
+
 터미널 글꼴 선택은 `crates/kasa-gridview/src/fonts.rs`, 번들 D2Coding 버전·출처는 `crates/kasa-gridview/assets/fonts/README.md`다.
 `kasa-cells/src/shaper.rs`가 글꼴별 사설영역 제외와 Regular/Bold 짝을 동일한 측정·그리기 경로에서 적용한다.
 크레이트 사이 층과 의존 방향은 [`workspace.md`](workspace.md)(검사 `scripts/check-workspace.py`).

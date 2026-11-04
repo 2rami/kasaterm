@@ -47,6 +47,8 @@ mod profile;
 mod chains;
 #[path = "gateway_push_alert.rs"]
 mod push_alert;
+#[path = "gateway_conversations.rs"]
+mod conversations;
 
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -240,6 +242,7 @@ pub struct Gate {
     usage: Arc<admin::Meter>,
     limiter: Arc<crate::relay_auth::Limiter>,
     account_sync: Arc<crate::account_sync::server::Store>,
+    conversations: Option<Arc<conversations::Service>>,
     /// 계정별 개인비서(키·작업·대화). 상태 폴더가 없으면 `None` — 메모리에만 키를 두지 않는다.
     workspace: Option<Arc<workspace::Service>>,
     /// 계정에 붙인 메일·PR 일 권한(`connections.rs`). 상태 폴더가 없으면 `None`.
@@ -347,6 +350,7 @@ impl Gate {
             account_sync: Arc::new(crate::account_sync::server::Store::new(
                 state_path.as_ref().map(|p| p.with_file_name("account-sync")),
             )),
+            conversations: conversations::Service::open(state_path.as_deref()),
             workspace: workspace::Service::open(state_path.as_deref()),
             connections: crate::connections::Service::open(state_path.as_deref(), oauth_config),
             agent_chains: crate::agent_chains::Service::open(state_path.as_deref()),
@@ -504,6 +508,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(profile::routes())
         .merge(chains::routes())
         .merge(push_alert::routes())
+        .merge(conversations::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))
@@ -1804,7 +1809,7 @@ mod tests {
         closes: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
     }
 
-    async fn spawn_relay(gate: Gate) -> std::net::SocketAddr {
+    pub(super) async fn spawn_relay(gate: Gate) -> std::net::SocketAddr {
         let app = crate::relay::router().merge(router(gate));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -1962,7 +1967,7 @@ mod tests {
 
     // ── 계정 로그인 ─────────────────────────────────────────────────────────────
 
-    fn account_gate(dir: &std::path::Path) -> Gate {
+    pub(super) fn account_gate(dir: &std::path::Path) -> Gate {
         let accounts = dir.join("relay-accounts.json");
         let mut f = crate::relay_auth::AccountsFile::default();
         f.accounts.insert(
@@ -1978,7 +1983,7 @@ mod tests {
         Gate::with_accounts(Some(dir.join("relay-state.json")), Some(accounts))
     }
 
-    async fn post(addr: std::net::SocketAddr, path: &str, bearer: Option<&str>, body: serde_json::Value) -> (u16, serde_json::Value) {
+    pub(super) async fn post(addr: std::net::SocketAddr, path: &str, bearer: Option<&str>, body: serde_json::Value) -> (u16, serde_json::Value) {
         let mut rb = reqwest::Client::new().post(format!("http://{addr}{path}")).json(&body);
         if let Some(t) = bearer {
             rb = rb.bearer_auth(t);
@@ -1987,7 +1992,7 @@ mod tests {
         (r.status().as_u16(), r.json().await.unwrap_or_default())
     }
 
-    async fn get_json(addr: std::net::SocketAddr, path: &str, bearer: &str) -> (u16, serde_json::Value) {
+    pub(super) async fn get_json(addr: std::net::SocketAddr, path: &str, bearer: &str) -> (u16, serde_json::Value) {
         let r = reqwest::Client::new().get(format!("http://{addr}{path}")).bearer_auth(bearer).send().await.unwrap();
         (r.status().as_u16(), r.json().await.unwrap_or_default())
     }

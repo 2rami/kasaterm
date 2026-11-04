@@ -70,12 +70,14 @@ class InlineResultBody extends StatelessWidget {
     required this.style,
     required this.onLink,
     this.machine,
+    this.offline = false,
   });
   final Server server;
   final String text;
   final MarkdownStyleSheet style;
   final ValueChanged<String> onLink;
   final String? machine;
+  final bool offline;
 
   @override
   Widget build(BuildContext context) => Column(
@@ -83,7 +85,12 @@ class InlineResultBody extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       for (final part in inlineResultParts(text))
-        if (part.media)
+        if (offline && part.id != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(part.media ? '음성·영상 첨부 · 저장본에 포함되지 않음' : '이미지 첨부 · 저장본에 포함되지 않음'),
+          )
+        else if (part.media)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: InlineMediaCard(
@@ -103,6 +110,7 @@ class InlineResultBody extends StatelessWidget {
             data: part.text!,
             styleSheet: style,
             softLineBreak: true,
+            imageBuilder: offline ? (uri, title, alt) => Text(alt?.isNotEmpty == true ? '$alt · 저장되지 않은 이미지' : '저장되지 않은 이미지') : null,
             onTapLink: (_, href, _) {
               if (href != null) onLink(href);
             },

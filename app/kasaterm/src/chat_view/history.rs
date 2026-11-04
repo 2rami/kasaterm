@@ -28,7 +28,16 @@ const MESSAGE_KEYS: &[&str] = &["id", "model", "usage", "stop_reason", "stop_seq
 
 /// 기록 한 줄을 대화 칸에 쓰이는 만큼만 남긴다. 대화에 안 쓰이는 줄이면 None.
 pub(crate) fn slim(line: &str) -> Option<String> {
+    slim_for(line, HistoryView::Screen)
+}
+
+#[derive(Clone, Copy)]
+enum HistoryView { Screen, Archive }
+
+fn slim_for(line: &str, view: HistoryView) -> Option<String> {
+    let text_limit = match view { HistoryView::Screen => TEXT_CAP, HistoryView::Archive => usize::MAX };
     let mut v: Value = serde_json::from_str(line).ok()?;
+    if matches!(view, HistoryView::Archive) && !archive_event(&mut v) { return None; }
     let obj = v.as_object_mut()?;
     if obj.get("type").and_then(Value::as_str) == Some("token_usage_record") {
         return None;
@@ -49,7 +58,7 @@ pub(crate) fn slim(line: &str) -> Option<String> {
                 cap(payload, TOOL_CAP);
             }
         }
-        return Some(finish(v));
+        return Some(finish(v, text_limit));
     }
     match obj.get("type").and_then(Value::as_str).unwrap_or("") {
         "user" | "assistant" | "system" | "queue-operation" => {}
@@ -57,7 +66,7 @@ pub(crate) fn slim(line: &str) -> Option<String> {
         "attachment" if obj["attachment"]["type"] == "hook_success" => {}
         _ => return None,
     }
-    if line.len() < LIGHT {
+    if line.len() < LIGHT && matches!(view, HistoryView::Screen) {
         return Some(line.to_string());
     }
     // Edit 의 줄 번호 붙은 diff 덩이는 classic 이 그대로 보인다 — 사본 전체에서 그것만 남긴다.
@@ -68,6 +77,7 @@ pub(crate) fn slim(line: &str) -> Option<String> {
         .filter(|p| !p.is_empty())
         .cloned();
     for key in META_KEYS {
+        if matches!(view, HistoryView::Archive) && *key == "timestamp" { continue; }
         obj.remove(*key);
     }
     if let Some(mut patch) = patch {
@@ -98,17 +108,50 @@ pub(crate) fn slim(line: &str) -> Option<String> {
                 let limit = match block["type"].as_str().unwrap_or("") {
                     "tool_result" | "tool_use" => TOOL_CAP,
                     "thinking" => THINKING_CAP,
-                    _ => TEXT_CAP,
+                    _ => text_limit,
                 };
                 cap(block, limit);
             }
         }
     }
-    Some(finish(v))
+    Some(finish(v, text_limit))
 }
 
-fn finish(mut v: Value) -> String {
-    cap(&mut v, TEXT_CAP);
+fn archive_event(value: &mut Value) -> bool {
+    if value["isSidechain"] == true || (value["type"] == "user" && value["isMeta"] == true) { return false; }
+    if value["payload"].is_object() {
+        return match (value["type"].as_str(), value["payload"]["type"].as_str()) {
+            (Some("event_msg"), Some("user_message" | "agent_message" | "agent_reasoning" | "turn_aborted")) => true,
+            (Some("event_msg"), Some("item_completed")) => matches!(value["payload"]["item"]["type"].as_str(), Some("UserMessage" | "AgentMessage")),
+            (Some("response_item"), Some("function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output")) => true,
+            _ => false,
+        };
+    }
+    if value["type"] == "system" {
+        if !matches!(value["subtype"].as_str(), Some("compact_boundary" | "api_error")) { return false; }
+        *value = serde_json::json!({"type":"system","subtype":value["subtype"],"timestamp":value["timestamp"],
+            "sessionId":value["sessionId"],"compactMetadata":{"preTokens":value["compactMetadata"]["preTokens"]},
+            "error":{"status":value["error"]["status"]},"retryAttempt":value["retryAttempt"],"maxRetries":value["maxRetries"]});
+    }
+    if value["type"] == "attachment" && value["attachment"]["type"] == "hook_success" {
+        let message = value["attachment"]["stdout"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v["systemMessage"].as_str().map(str::to_owned));
+        let Some(message) = message.filter(|s| !s.trim().is_empty()) else { return false };
+        value["attachment"] = serde_json::json!({"type":"hook_success","stdout":serde_json::json!({"systemMessage":message}).to_string()});
+    }
+    if value["type"] == "user" {
+        let hidden = |text: &str| !text.contains("[Request interrupted") && super::parse::is_injection(&super::parse::strip_meta(text));
+        if value["message"]["content"].as_str().is_some_and(hidden) { return false; }
+        if let Some(blocks) = value["message"]["content"].as_array_mut() {
+            blocks.retain(|b| b["type"] != "text" || !b["text"].as_str().is_some_and(hidden));
+            if blocks.is_empty() { return false; }
+        }
+    }
+    true
+}
+
+fn finish(mut v: Value, text_limit: usize) -> String {
+    cap(&mut v, text_limit);
     serde_json::to_string(&v).unwrap_or_default()
 }
 
@@ -118,6 +161,14 @@ fn cap(v: &mut Value, limit: usize) {
         Value::Object(map) => {
             if map.get("type").and_then(Value::as_str) == Some("image") && map.contains_key("source") {
                 map.insert("source".into(), Value::Object(Default::default()));
+            }
+            if map.get("type").and_then(Value::as_str) == Some("input_image") {
+                map.remove("image_url");
+            }
+            if let Some(Value::Array(images)) = map.get_mut("images") {
+                for image in images {
+                    if image.as_str().is_some_and(|s| s.starts_with("data:image/")) { *image = Value::Null; }
+                }
             }
             map.remove("signature");
             for (_, child) in map.iter_mut() {
@@ -139,6 +190,14 @@ fn cap(v: &mut Value, limit: usize) {
 /// `read_incremental` 과 같은 약속(완전한 줄만, 반환 `offset` 은 마지막 개행 직후, 줄었거나 처음이면
 /// `reset`)이되 처음 읽기는 꼬리가 아니라 파일 처음부터다. 덧붙은 줄도 같은 거르개를 지난다.
 pub(crate) fn read(path: &std::path::Path, offset: u64) -> std::io::Result<TranscriptChunk> {
+    read_inner(path, offset, None)
+}
+
+pub(crate) fn read_archive(path: &std::path::Path, offset: u64) -> std::io::Result<TranscriptChunk> {
+    read_inner(path, offset, Some(512 << 10))
+}
+
+fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std::io::Result<TranscriptChunk> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
@@ -155,20 +214,30 @@ pub(crate) fn read(path: &std::path::Path, offset: u64) -> std::io::Result<Trans
     let mut buf = Vec::new();
     loop {
         buf.clear();
-        let n = reader.read_until(b'\n', &mut buf)?;
+        let n = if budget.is_some() {
+            use std::io::Read;
+            let count = (&mut reader).take((64 << 20) + 1).read_until(b'\n', &mut buf)?;
+            if count > (64 << 20) { return Err(std::io::Error::other("transcript row exceeds archive limit")); }
+            count
+        } else { reader.read_until(b'\n', &mut buf)? };
         // 끝의 쓰다 만 줄은 다음 바퀴로 미룬다.
         if n == 0 || buf.last() != Some(&b'\n') {
             break;
         }
-        next += n as u64;
         let line = String::from_utf8_lossy(&buf[..n - 1]);
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(kept) = slim(&line) {
+        let kept = (!line.trim().is_empty()).then(|| if budget.is_some() {
+            slim_for(&line, HistoryView::Archive)
+        } else { slim(&line) }).flatten();
+        if let Some(kept) = kept {
+            if budget.is_some() && kept.len() + 1 > kasa_mcp::conversation_archive::MAX_APPEND {
+                return Err(std::io::Error::other("conversation row exceeds archive limit"));
+            }
+            if budget.is_some_and(|budget| !raw.is_empty() && raw.len() + kept.len() + 1 > budget) { break; }
             raw.push_str(&kept);
             raw.push('\n');
         }
+        next += n as u64;
+        if budget.is_some_and(|budget| raw.len() >= budget || next - start >= (8 << 20)) { break; }
     }
     Ok(TranscriptChunk { raw, offset: next, reset, source })
 }
@@ -260,5 +329,56 @@ mod tests {
         assert!(!next.reset);
         assert_eq!(next.raw, format!("{first}\n"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_pages_preserve_the_first_message_every_boundary_and_the_original_cursor() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-archive-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let line = serde_json::json!({"type":"user","sessionId":"s","message":{"content":"한글 문장".repeat(100)}}).to_string();
+        let body = format!("{line}\n").repeat(1200);
+        std::fs::write(&path, format!("{body}{{\"type\":\"user\"" )).unwrap();
+        let expected = read(&path, 0).unwrap().raw;
+        let mut all = String::new(); let mut cursor = 0; let mut pages = 0;
+        loop {
+            let chunk = read_archive(&path, cursor).unwrap();
+            assert!(chunk.raw.len() <= kasa_mcp::conversation_archive::MAX_APPEND);
+            if chunk.offset == cursor { assert!(chunk.raw.is_empty()); break; }
+            assert!(chunk.offset > cursor);
+            cursor = chunk.offset; all.push_str(&chunk.raw); pages += 1;
+        }
+        assert!(pages > 1); assert_eq!(cursor, body.len() as u64); assert_eq!(all, expected);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archived_messages_keep_long_text_and_timestamps_without_embedding_image_payloads() {
+        let text = "긴 대화 내용".repeat(20_000);
+        let line = serde_json::json!({"type":"assistant","timestamp":"2026-11-04T00:00:00Z","message":{"content":[{"type":"text","text":text}]}}).to_string();
+        let archived: Value = serde_json::from_str(&slim_for(&line, HistoryView::Archive).unwrap()).unwrap();
+        assert_eq!(archived["message"]["content"][0]["text"], text);
+        assert_eq!(archived["timestamp"], "2026-11-04T00:00:00Z");
+        let codex = serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":text,"images":["data:image/png;base64,AAAA"]}}).to_string();
+        let archived: Value = serde_json::from_str(&slim_for(&codex, HistoryView::Archive).unwrap()).unwrap();
+        assert_eq!(archived["payload"]["message"], text);
+        assert!(archived["payload"]["images"][0].is_null());
+    }
+
+    #[test]
+    fn archive_omits_hidden_context_and_keeps_only_displayed_error_and_hook_fields() {
+        for line in [
+            serde_json::json!({"type":"session_meta","payload":{"developer_instructions":"private context"}}),
+            serde_json::json!({"type":"turn_context","payload":{"cwd":"/private","model":"m"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"developer","content":"hidden context"}}),
+            serde_json::json!({"type":"user","isMeta":true,"message":{"content":"hidden instruction"}}),
+            serde_json::json!({"type":"assistant","isSidechain":true,"message":{"content":"another conversation"}}),
+        ] { assert!(slim_for(&line.to_string(), HistoryView::Archive).is_none()); }
+        let error = serde_json::json!({"type":"system","subtype":"api_error","error":{"status":429,"request_headers":"private"},"retryAttempt":2,"maxRetries":3});
+        let kept = slim_for(&error.to_string(), HistoryView::Archive).unwrap();
+        assert!(!kept.contains("private")); assert!(kept.contains("429"));
+        let hook = serde_json::json!({"type":"attachment","attachment":{"type":"hook_success","stdout":serde_json::json!({"systemMessage":"visible","internal":"private"}).to_string()}});
+        let kept = slim_for(&hook.to_string(), HistoryView::Archive).unwrap();
+        assert!(!kept.contains("private")); assert!(kept.contains("visible"));
     }
 }

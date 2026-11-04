@@ -23,6 +23,7 @@ import 'screens/dev_server.dart';
 import 'screens/conversation_view.dart';
 import 'screens/hub.dart';
 import 'screens/terminal.dart';
+import 'screens/saved_conversations.dart';
 import 'server.dart';
 import 'theme_prefs.dart';
 import 'twins_loading.dart';
@@ -364,9 +365,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   /// 앱이 거둬지기 전에 보던 학생 화면 — 연결이 서면 그리로 돌아간다.
   ResumeSpot? _spot;
 
-  /// 기다림 화면을 한 번 봤나 — 그 뒤의 「다시 확인」은 그 화면의 단추가 진행을 보이고,
-  /// 쌍둥이는 켜고 처음 확인할 때만 나온다.
-  bool _waited = false;
+  String? _archiveScope;
 
   /// 검증용: 빌드 때 `KASA_OPEN_PANE`(과 `KASA_OPEN_MACHINE`)을 주면 켜자마자 그 학생
   /// 화면을 연다 — 시뮬레이터는 탭을 못 보내니 링크와 같은 길로 화면을 꺼내 본다.
@@ -604,6 +603,15 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void _changed() {
     if (!mounted) return;
     final server = _connection.server;
+    final archiveScope = _connection.archiveServer?.resumeScope;
+    if (_archiveScope != archiveScope) {
+      final previous = _archiveScope; _archiveScope = archiveScope;
+      if (previous != null && archiveRouteOpenFor(previous)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) navigatorKey.currentState?.popUntil((route) => route.isFirst);
+        });
+      }
+    }
     ApprovalCenter.instance.bind(_connection.account);
     if (phoneThemeSync.account != _connection.account) {
       if (_connection.account case final account?) {
@@ -633,20 +641,19 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       PushBridge.instance.unbind();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _connection.server == server) {
-          navigatorKey.currentState?.popUntil((route) => route.isFirst);
+          final readingArchive = server != null && archiveRouteOpenFor(server.resumeScope);
+          if (!readingArchive) navigatorKey.currentState?.popUntil((route) => route.isFirst);
           final pending = server == null ? null : _pendingLink;
           if (server != null) _pendingLink = null;
           if (server != null && pending != null) unawaited(_openLink(pending));
-          if (pending == null) _resumeSpot();
+          if (pending == null && !readingArchive) _resumeSpot();
         }
       });
       if (server != null) _loadTokens(server);
     }
     if (_connection.phase == ConnectionPhase.signedOut) {
       _pendingLink = null;
-      _waited = false;
     }
-    if (_connection.phase == ConnectionPhase.waiting) _waited = true;
     setState(() {});
   }
 
@@ -655,11 +662,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     final server = _connection.server;
     final phase = _connection.phase;
     // 로그인 중(계정이 아직 없음)에는 연결 화면을 남긴다 — 갈아 끼우면 친 아이디가 지워진다.
-    if (phase == ConnectionPhase.restoring ||
-        (phase == ConnectionPhase.checking &&
-            _connection.account != null &&
-            server == null &&
-            !_waited)) {
+    if (phase == ConnectionPhase.restoring) {
       return const Scaffold(body: SafeArea(child: TwinsLoading()));
     }
     if (server == null && _connection.account == null) {
@@ -742,6 +745,13 @@ class AccountWaitingScreen extends StatelessWidget {
                 ],
               ),
             const SizedBox(height: 20),
+            if (connection.archiveServer case final archiveServer?) ...[
+              FilledButton.tonalIcon(
+                onPressed: () => openSavedConversations(context, archiveServer),
+                icon: const Icon(Icons.offline_pin_outlined), label: const Text('저장한 대화'),
+              ),
+              const SizedBox(height: 8),
+            ],
             FilledButton(
               onPressed: checking ? null : connection.retry,
               child: Text(checking ? '확인 중' : '연결 다시 확인'),

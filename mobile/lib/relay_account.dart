@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 import 'package:http/http.dart' as http;
+import 'archive_model.dart';
 
 const defaultGateway = 'https://kasaterm.debimarlene.com';
 
@@ -538,6 +539,7 @@ class RelayAccountApi {
   }
   final Uri origin;
   final http.Client _client;
+  void freshConnections() => (_client as OriginClient).freshConnections();
 
   Future<Map<String, dynamic>> _request(
     String path, {
@@ -966,6 +968,24 @@ class RelayAccountApi {
   Future<void> logout() async {
     await _request('logout', body: {});
   }
+
+  Future<ArchiveCatalog> conversations() async => ArchiveCatalog.fromJson(await _request('conversations', error: archiveError));
+
+  Future<ArchiveChunk> conversationChunk(ArchiveEntry entry, int offset) async => ArchiveChunk.fromJson((await _request(
+    'conversations/${Uri.encodeComponent(entry.id)}?generation=${Uri.encodeComponent(entry.generation)}&offset=$offset&end=${entry.bytes}', error: archiveError,
+  ))['chunk']);
+
+  Future<void> setConversationSync(bool enabled) async {
+    await _request('conversations/settings', method: 'PUT', body: {'enabled': enabled}, error: archiveError);
+  }
+
+  Future<void> deleteConversation(String id) async {
+    await _request('conversations/${Uri.encodeComponent(id)}', delete: true, error: archiveError);
+  }
+
+  Future<ArchiveEntry> restoreConversation(String id) async => ArchiveEntry.fromJson((await _request(
+    'conversations/${Uri.encodeComponent(id)}/restore', body: const {}, error: archiveError,
+  ))['conversation']);
 
   Future<AccountSyncSnapshot> readSync() async =>
       AccountSyncSnapshot.fromJson(await _request('account-sync'));

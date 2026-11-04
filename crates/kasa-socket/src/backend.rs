@@ -1688,6 +1688,11 @@ pub trait Backend: Send + Sync {
         self.transcript_raw(surface_id, offset)
     }
 
+    /// Archives require a bounded, from-the-start reader; falling back to a tail would silently lose history.
+    fn transcript_archive(&self, _surface_id: &str, _offset: u64) -> Result<TranscriptChunk> {
+        anyhow::bail!("transcript_archive unsupported by this backend")
+    }
+
     /// Read a *past* (offline) Claude session's transcript jsonl as raw text,
     /// addressed by its session uuid + the cwd it ran in — no live pane needed.
     /// Where `transcript_raw` reads the jsonl bound to a running surface, this

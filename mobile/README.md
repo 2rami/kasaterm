@@ -56,6 +56,13 @@ Keychain 접근이 거부될 수 있어 로그인 저장소 검증용으로 쓰�
   길 자체가 없으면(404) 폴링만 한다. 끊기면 2→30초로 물러서며 다시 붙는다.
 - 읽는 중에 또 부르면 겹쳐 쏘지 않고 끝난 뒤 한 번만 더 읽는다. 앱이 쉬면 멈추고 돌아오면 바로 다시 읽는다.
 
+## 저장한 대화
+
+대화 아래 `오프라인 저장`으로 텍스트·코드·도구 요약을 폰에 보관한다. 허브와 계정 연결 대기 화면의 `저장한 대화`에서
+인터넷 없이 읽을 수 있으며 앱을 다시 켜도 남는다. `계정 기록`의 동기화를 켜면 연결된 데스크톱의 기록을 관문에
+이어 저장하여 원본 기기가 꺼져도 받을 수 있다. 외부 첨부 파일은 포함되지 않고 저장 화면은 읽기 전용이다.
+중간 실패·취소는 이전 저장본을 보존한다. 자세한 계약과 한도는 [오프라인 대화](../docs/offline-conversations.md).
+
 ## 백그라운드에서 돌아오기
 
 iOS 유예(최대 25초) 동안 받기를 이어가되, 복귀 때는 유예 만료 여부와 무관하게 HTTP 묶음과
@@ -116,7 +123,7 @@ test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 
 ```bash
 flutter pub get
 flutter analyze
-NO_PROXY='127.0.0.1,localhost' flutter test            # 유닛 + 골든
+TZ=Asia/Seoul NO_PROXY='127.0.0.1,localhost,::1' no_proxy='127.0.0.1,localhost,::1' flutter test # 유닛 + 골든
 KASA_ROOT=http://127.0.0.1:8765/ NO_PROXY='127.0.0.1,localhost' flutter test test/live/
 ```
 
@@ -131,6 +138,7 @@ flutter drive -d <시뮬레이터> --driver test_driver/integration_test.dart \
 
 `flutter test` 는 `flutter_tester` 와 로컬 소켓으로 붙는데, 셸에 프록시 변수가 있으면 그 연결이
 프록시로 새어 "Invalid WebSocket upgrade request" 로 죽는다 — `NO_PROXY` 가 그걸 막는다.
+골든의 고정 메시지 시각은 서울 시각으로 찍는다. 테스트 프로세스에만 `TZ=Asia/Seoul`을 주며 기기의 시간대 설정은 바꾸지 않는다.
 
 크롬에서 보기 — 서버는 Origin 이 Host 와 같아야 소켓을 열어 주고 CORS 헤더도 없으므로, 앱과
 서버를 한 주소로 내주는 역프록시가 필요하다:

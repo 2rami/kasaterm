@@ -34,6 +34,7 @@ class ChatBubble extends ChatItem {
   /// 이 폰에서 보냈고 기록에는 아직 안 닿은 말([Conversation.echo]).
   final bool sending;
   final List<Uint8List> images = [];
+  int omittedImages = 0;
 
   /// 붙은 사진 수만큼 앞에서부터 「(사진)」 표를 걷는다 — 사람이 친 「(사진)」은 뒤에 남는다.
   void addPhotos(Iterable<Uint8List> photos) {
@@ -101,6 +102,8 @@ class ChatInterrupted extends ChatItem {}
 
 /// 한 pane 의 대화. claude 의 transcript 와 codex 의 rollout 을 같은 칸으로 편다.
 class Conversation {
+  Conversation({this.archived = false});
+  final bool archived;
   final List<ChatItem> items = [];
 
   /// 서버에 다음에 물을 자리(바이트). 0 이면 꼬리부터 다시.
@@ -287,14 +290,14 @@ class Conversation {
           }
         case 'image' when user:
           final bytes = _imageBytes(block['source']);
-          if (bytes == null) break;
+          if (bytes == null && !archived) break;
           final last = items.isEmpty ? null : items.last;
           if (last is ChatBubble && last.mine && last.at == at) {
-            last.addPhotos([bytes]);
+            if (bytes == null) { last.omittedImages++; } else { last.addPhotos([bytes]); }
           } else {
-            items.add(
-              ChatBubble(user: true, text: '', at: at)..images.add(bytes),
-            );
+            final image = ChatBubble(user: true, text: '', at: at);
+            if (bytes == null) { image.omittedImages = 1; } else { image.images.add(bytes); }
+            items.add(image);
           }
         case 'thinking':
           final t = block['thinking'];
@@ -461,7 +464,9 @@ class Conversation {
       // 옛 판은 event_msg 로, 새 판은 item_completed 로 말을 적는다 — 한 판이 둘 다
       // 적기도 해서, 같은 쪽의 같은 글이 이어 오면 한 번만 세운다.
       case ('event_msg', 'user_message'):
-        _codexSay(true, p['message'], at);
+        final images = p['images'] is List ? (p['images'] as List).length : 0;
+        final local = p['local_images'] is List ? (p['local_images'] as List).length : 0;
+        _codexSay(true, p['message'], at, omittedImages: archived ? (images > local ? images : local) : 0);
       case ('event_msg', 'agent_message'):
         _codexSay(false, p['message'], at);
       case ('event_msg', 'item_completed'):
@@ -469,7 +474,9 @@ class Conversation {
         if (item is! Map) return;
         switch (item['type']) {
           case 'UserMessage':
-            _codexSay(true, _codexText(item['content']), at);
+            final content = item['content'];
+            final images = content is List ? content.whereType<Map>().where((b) => b['type'] == 'image' || b['type'] == 'input_image').length : 0;
+            _codexSay(true, _codexText(content), at, omittedImages: archived ? images : 0);
           case 'AgentMessage':
             _codexSay(false, _codexText(item['content']), at);
         }
@@ -503,15 +510,22 @@ class Conversation {
     }
   }
 
-  void _codexSay(bool user, Object? raw, DateTime? at) {
+  void _codexSay(bool user, Object? raw, DateTime? at, {int omittedImages = 0}) {
     final t = raw is String ? raw.trim() : '';
-    if (t.isEmpty || t == (user ? _lastCodexPrompt : _lastCodexSay)) return;
+    final signature = t.isEmpty && omittedImages > 0 ? '\u0000images:$omittedImages' : t;
+    if (signature.isEmpty) return;
+    if (signature == (user ? _lastCodexPrompt : _lastCodexSay)) {
+      final last = items.lastOrNull;
+      if (archived && last is ChatBubble && last.mine && omittedImages > last.omittedImages) last.omittedImages = omittedImages;
+      return;
+    }
     if (user) {
-      _lastCodexPrompt = t;
+      _lastCodexPrompt = signature;
     } else {
       _lastCodexSay = t;
+      if (archived && (_lastCodexPrompt?.startsWith('\u0000images:') ?? false)) _lastCodexPrompt = null;
     }
-    items.add(ChatBubble(user: user, text: t, at: at));
+    items.add(ChatBubble(user: user, text: t, at: at)..omittedImages = omittedImages);
   }
 
   static String _codexText(Object? content) => content is List

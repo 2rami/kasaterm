@@ -28,6 +28,7 @@ class ConnectionController extends ChangeNotifier {
   ConnectionPhase phase = ConnectionPhase.restoring;
   AccountSession? account;
   Server? server;
+  Server? archiveServer;
   String? message;
   Future<bool> Function()? beforeDisconnect;
   List<Map<String, dynamic>> devices = [];
@@ -61,7 +62,9 @@ class ConnectionController extends ChangeNotifier {
     _waitRetry = null;
     _waitFails = 0;
     server?.close();
+    archiveServer?.close();
     server = null;
+    archiveServer = null;
     account = null;
     devices = [];
     message = null;
@@ -80,6 +83,7 @@ class ConnectionController extends ChangeNotifier {
       if (!_current(generation)) return;
       account = saved?.account;
       if (account != null) {
+        _prepareArchives(account!, generation);
         await _check(generation);
         return;
       }
@@ -128,6 +132,7 @@ class ConnectionController extends ChangeNotifier {
       await _save(SavedConnection(account: session), generation);
       if (!_current(generation)) return;
       account = session;
+      _prepareArchives(session, generation);
       await _check(generation);
     } on AccountException catch (e) {
       if (!_current(generation)) return;
@@ -149,6 +154,12 @@ class ConnectionController extends ChangeNotifier {
     _waitRetry?.cancel();
     _waitRetry = null;
     await _check(_generation);
+  }
+
+  void _prepareArchives(AccountSession session, int generation) {
+    archiveServer?.close();
+    archiveServer = Server.account(session, connectDirect: false)
+      ..onUnauthorized = () { if (_current(generation)) unawaited(_expired(generation)); };
   }
 
   void _retryLater(int generation) {

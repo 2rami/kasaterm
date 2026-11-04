@@ -173,12 +173,16 @@ class ConversationView extends StatefulWidget {
     this.active = true,
     this.draft,
     this.conversation,
+    this.readOnly = false,
+    this.footerAction,
   });
 
   final Server server;
 
   /// 화면이 쥔 기록 — 보낸 말을 기록보다 먼저 세운다([Conversation.echo]). 없으면 제 것을 쓴다.
   final Conversation? conversation;
+  final bool readOnly;
+  final Widget? footerAction;
 
   final Pane pane;
   final TermSession session;
@@ -232,6 +236,7 @@ class _ConversationViewState extends State<ConversationView> {
     super.initState();
     BackgroundGrace.instance.addListener(_graceChanged);
     _scroll.addListener(_onScroll);
+    _loaded = widget.readOnly;
     if (widget.active) _start();
   }
 
@@ -265,13 +270,14 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   void _start() {
+    if (widget.readOnly) return;
     _poll();
     _timer ??= Timer.periodic(_pollEvery, (_) => _poll());
     unawaited(_liveLoop());
   }
 
   bool get _liveWanted =>
-      mounted && widget.active && BackgroundGrace.instance.live && !_liveGone;
+      mounted && !widget.readOnly && widget.active && BackgroundGrace.instance.live && !_liveGone;
 
   /// 원본의 `/term/mod-live` 에 매달린다 — 바뀔 때만 답이 온다.
   Future<void> _liveLoop() async {
@@ -349,7 +355,7 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   Future<void> _poll() async {
-    if (_polling || !mounted) return;
+    if (_polling || !mounted || widget.readOnly) return;
     _polling = true;
     var again = false;
     try {
@@ -476,7 +482,7 @@ class _ConversationViewState extends State<ConversationView> {
 
   @override
   Widget build(BuildContext context) {
-    final connected = widget.session.state == TermState.connected;
+    final connected = !widget.readOnly && widget.session.state == TermState.connected;
     final menu = connected ? _menu : null;
     final live = _liveNow;
     final asks = live.live && live.permissions.isNotEmpty;
@@ -520,7 +526,13 @@ class _ConversationViewState extends State<ConversationView> {
             onTerminal: widget.onTerminal,
           ),
         // 셸 명령 쪽과 같은 맥락 줄 — 앱바엔 경로가 들어갈 폭이 없다.
-        if (widget.pane.cwd.isNotEmpty)
+        if (widget.footerAction != null)
+          Row(children: [
+            Expanded(child: widget.pane.cwd.isEmpty ? const SizedBox.shrink() : PlaceLine(cwd: widget.pane.cwd, branch: widget.pane.branch,
+              style: TextStyle(fontFamily: 'TermMono', fontFamilyFallback: Look.flowMonoFallback, fontSize: Look.sub, color: Theme.of(context).colorScheme.onSurfaceVariant))),
+            widget.footerAction!,
+          ])
+        else if (widget.pane.cwd.isNotEmpty)
           PlaceLine(
             cwd: widget.pane.cwd,
             branch: widget.pane.branch,
@@ -550,9 +562,10 @@ class _ConversationViewState extends State<ConversationView> {
     final list = rows;
     final pane = widget.pane;
     final live = _liveNow;
-    final typing = pane.isBusy || (live.live && (live.turnOpen || live.compacting));
+    final typing = !widget.readOnly && (pane.isBusy || (live.live && (live.turnOpen || live.compacting)));
     // 기록이 아직 없어도 일하는 중이면 그 줄은 보인다 — 빈 화면이 「쉬는 중」으로 읽혔다.
     if (list.isEmpty && !typing) {
+      if (widget.readOnly) return const Center(child: Text('이 저장본에는 표시할 대화가 없어요.'));
       return _Empty(
         icon: Icons.forum_outlined,
         title: '아직 대화가 없어요',
@@ -573,7 +586,7 @@ class _ConversationViewState extends State<ConversationView> {
               ),
       );
     }
-    final face = StudentFace(
+    final Widget face = widget.readOnly ? _Initial(pane.displayName) : StudentFace(
       server: widget.server,
       slug: pane.slug,
       url: pane.slug == null
@@ -628,7 +641,7 @@ class _ConversationViewState extends State<ConversationView> {
 
   /// 쪽지를 넣은 학생 얼굴 — 기록엔 이름(`⟦아로나⟧`)뿐이라 서버가 명부로 이름을 슬러그로 바꿔 그린다.
   /// 모르는 이름(카사텀·커스텀 캐릭터)은 첫 글자.
-  Widget _senderFace(String name) => ClipOval(
+  Widget _senderFace(String name) => widget.readOnly ? _Initial(name) : ClipOval(
     child: ServerImage(
       server: widget.server,
       uri: widget.server.avatar(name, machine: widget.pane.machine),
@@ -670,11 +683,12 @@ class _ConversationViewState extends State<ConversationView> {
         tail: tail,
         maxWidth: maxBubble,
         md: md,
+        offline: widget.readOnly,
       ),
       ToolRun r => _ToolRunCard(
         run: r,
         open: _open,
-        live: widget.pane.isBusy,
+        live: !widget.readOnly && widget.pane.isBusy,
         onToggle: (o) => setState(() {
           if (!_open.remove(o)) _open.add(o);
         }),
@@ -739,6 +753,7 @@ class _Bubble extends StatelessWidget {
     required this.tail,
     required this.maxWidth,
     required this.md,
+    this.offline = false,
   });
 
   final Server server;
@@ -752,6 +767,7 @@ class _Bubble extends StatelessWidget {
   final bool tail;
   final double maxWidth;
   final MarkdownStyleSheet md;
+  final bool offline;
 
   @override
   Widget build(BuildContext context) {
@@ -766,6 +782,7 @@ class _Bubble extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         for (final img in bubble.images) _Photo(bytes: img),
+        if (bubble.omittedImages > 0) Text('이미지 ${bubble.omittedImages}장 · 저장본에 포함되지 않음', style: TextStyle(fontSize: Look.sub, color: ink)),
         if (text.isNotEmpty)
           mine
               ? Text(
@@ -774,7 +791,10 @@ class _Bubble extends StatelessWidget {
                 )
               : InlineResultBody(
                   server: server, machine: machine, text: text, style: md,
-                  onLink: (href) => showResultLink(context, server, href, cwd: cwd, machine: machine),
+                  offline: offline,
+                  onLink: (href) => offline
+                      ? ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('외부 파일과 링크는 이 텍스트 저장본에 포함되지 않아요.')))
+                      : showResultLink(context, server, href, cwd: cwd, machine: machine),
                 ),
       ],
     );

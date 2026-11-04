@@ -224,6 +224,8 @@ impl App {
                 if !crate::verification_run() {
                     kasa_mcp::agent_accounts::spawn();
                     kasa_mcp::agent_chains::spawn();
+                    #[cfg(not(test))]
+                    kasa_mcp::conversation_archive::spawn(backend.clone());
                     kasa_mcp::unregister_clients();
                 }
                 Some(port)
