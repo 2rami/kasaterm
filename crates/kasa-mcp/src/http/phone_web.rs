@@ -20,13 +20,18 @@ fn query(req: &axum::extract::Request) -> std::collections::HashMap<String, Stri
         .unwrap_or_default()
 }
 
-/// `GET /phone/web/next?wait=25` — 다음 명령 `{id, op, arg}`, 기다려도 없으면 204.
+/// `GET /phone/web/next?wait=25&target=browser` — 그 앱의 다음 명령 `{id, op, arg}`, 기다려도 없으면 204.
+/// `target` 이 없으면 카사텀 폰 앱(그것만 있던 판이 묻는 꼴).
 async fn next(req: axum::extract::Request) -> axum::response::Response {
     if !owner_phone(&req) {
         return forbidden();
     }
-    let wait = query(&req).get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(25).min(25);
-    match crate::phone_web::next(std::time::Duration::from_secs(wait)).await {
+    let q = query(&req);
+    let wait = q.get("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(25).min(25);
+    let Some(target) = crate::phone_web::target(q.get("target").map_or("kasaterm", String::as_str)) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "모르는 target").into_response();
+    };
+    match crate::phone_web::next(target, std::time::Duration::from_secs(wait)).await {
         Some((id, op, arg)) => Json(serde_json::json!({"id": id, "op": op, "arg": arg})).into_response(),
         None => axum::http::StatusCode::NO_CONTENT.into_response(),
     }
