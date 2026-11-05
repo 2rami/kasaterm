@@ -61,6 +61,7 @@ class _MediaPlayerScreenState extends State<MediaPlayerScreen>
   /// 막대를 끄는 동안의 자리(초). 놓을 때 한 번만 찾아간다.
   double? _drag;
   bool _resume = false;
+  double _volume = 1;
 
   @override
   void initState() {
@@ -94,6 +95,8 @@ class _MediaPlayerScreenState extends State<MediaPlayerScreen>
       _known = at;
     });
     await c.initialize();
+    if (!mounted || !identical(c, _c)) return;
+    await c.setVolume(_volume);
     if (!mounted || !identical(c, _c)) return;
     if (at > Duration.zero) {
       await c.seekTo(at);
@@ -453,10 +456,69 @@ class _MediaPlayerScreenState extends State<MediaPlayerScreen>
               textAlign: TextAlign.end,
             ),
           ),
+          IconButton(
+            tooltip: '볼륨',
+            onPressed: ready ? _volumeSheet : null,
+            color: ink,
+            icon: Icon(
+              _volume == 0
+                  ? Icons.volume_off_outlined
+                  : Icons.volume_up_outlined,
+            ),
+          ),
         ],
       ),
     );
   }
+
+  Future<void> _volumeSheet() => showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (context) => StatefulBuilder(
+      builder: (context, update) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(Look.pagePad),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '볼륨 ${(_volume * 100).round()}%',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: _volume == 0 ? '소리 켜기' : '음소거',
+                    onPressed: () {
+                      setState(() => _volume = _volume == 0 ? 1 : 0);
+                      update(() {});
+                      unawaited(_c?.setVolume(_volume));
+                    },
+                    icon: Icon(
+                      _volume == 0
+                          ? Icons.volume_off_outlined
+                          : Icons.volume_up_outlined,
+                    ),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: _volume,
+                      semanticFormatterCallback: (v) => '${(v * 100).round()}%',
+                      onChanged: (v) {
+                        setState(() => _volume = v);
+                        update(() {});
+                        unawaited(_c?.setVolume(v));
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 class _AudioArt extends StatelessWidget {

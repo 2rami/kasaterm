@@ -38,7 +38,8 @@ class ScreenMirrorScreen extends StatefulWidget {
 }
 
 class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
-  late final ScreenSession _session = widget.session ?? ScreenSession(widget.server, machine: widget.machine);
+  late final ScreenSession _session =
+      widget.session ?? ScreenSession(widget.server, machine: widget.machine);
 
   /// 화면이 멈추면 프레임이 안 와 다시 그릴 일이 없다 — 상태 줄의 fps 가 내려가도록 1초마다 다시 센다.
   Timer? _tick;
@@ -47,6 +48,9 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
   Offset _tapAt = Offset.zero;
 
   bool _control = false;
+  bool _pointerDrag = false;
+  int _modifiers = 0;
+  (double, double)? _heldPointer;
   final TextEditingController _text = TextEditingController();
   final FocusNode _textFocus = FocusNode();
 
@@ -66,6 +70,7 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
 
   @override
   void dispose() {
+    _releasePointer();
     _zoom.dispose();
     _text.dispose();
     _textFocus.dispose();
@@ -82,14 +87,20 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
       return;
     }
     const scale = 3.0;
-    _zoom.value = Matrix4.diagonal3Values(scale, scale, 1)
-      ..setTranslationRaw(-_tapAt.dx * (scale - 1), -_tapAt.dy * (scale - 1), 0);
+    _zoom.value = Matrix4.diagonal3Values(
+      scale,
+      scale,
+      1,
+    )..setTranslationRaw(-_tapAt.dx * (scale - 1), -_tapAt.dy * (scale - 1), 0);
   }
 
   /// 끈 거리를 그 기기 화면 포인트로 — 손가락 아래 내용이 손가락을 따라오게. 배율을 키웠어도 그림 상자 기준이라 같다.
   void _drag(DragUpdateDetails d, Size box) {
     final size = _session.displaySize;
-    _wheel += Offset(d.delta.dx * size.width / box.width, d.delta.dy * size.height / box.height);
+    _wheel += Offset(
+      d.delta.dx * size.width / box.width,
+      d.delta.dy * size.height / box.height,
+    );
     final (dx, dy) = (_wheel.dx.truncate(), _wheel.dy.truncate());
     if (dx == 0 && dy == 0) return;
     _wheel -= Offset(dx.toDouble(), dy.toDouble());
@@ -105,8 +116,22 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
     if (BackgroundGrace.instance.live) {
       _session.resume();
     } else {
+      _releasePointer();
+      _modifiers = 0;
       _session.pause();
     }
+  }
+
+  void _releasePointer() {
+    final held = _heldPointer;
+    _heldPointer = null;
+    if (held != null) _session.pointer(held.$1, held.$2, 0, modifiers: _modifiers);
+    _dragFrom = null;
+  }
+
+  void _key(String code) {
+    _session.key(code, modifiers: _modifiers);
+    setState(() => _modifiers = 0);
   }
 
   String _status() {
@@ -165,6 +190,8 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
                   ? null
                   : () => setState(() {
                       _control = !_control;
+                      _releasePointer();
+                      _modifiers = 0;
                       if (!_control) _textFocus.unfocus();
                     }),
             ),
@@ -172,13 +199,19 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
               PopupMenuButton<int>(
                 tooltip: '화면 고르기',
                 icon: const Icon(Icons.monitor_outlined),
-                onSelected: _session.pickDisplay,
+                onSelected: (display) {
+                  _releasePointer();
+                  _modifiers = 0;
+                  _session.pickDisplay(display);
+                },
                 itemBuilder: (_) => [
                   for (final (i, d) in displays.indexed)
                     CheckedPopupMenuItem(
                       value: d.id,
                       checked: d.id == _session.display,
-                      child: Text('${d.main ? '주 화면' : '화면 ${i + 1}'} · ${d.width}×${d.height}'),
+                      child: Text(
+                        '${d.main ? '주 화면' : '화면 ${i + 1}'} · ${d.width}×${d.height}',
+                      ),
                     ),
                 ],
               ),
@@ -188,6 +221,37 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
           children: [
             Expanded(child: _body(theme)),
             if (_control && _session.image != null) ...[
+              KeyRow(
+                keys: [
+                  KeyChip(
+                    label: '스크롤',
+                    selected: !_pointerDrag,
+                    onTap: () {
+                      _releasePointer();
+                      setState(() => _pointerDrag = false);
+                    },
+                  ),
+                  KeyChip(
+                    label: '끌기·선택',
+                    selected: _pointerDrag,
+                    onTap: () {
+                      _releasePointer();
+                      setState(() => _pointerDrag = true);
+                    },
+                  ),
+                  for (final (label, bit) in [
+                    ('shift', 1),
+                    ('ctrl', 2),
+                    ('alt', 4),
+                    ('⌘ / win', 8),
+                  ])
+                    KeyChip(
+                      label: label,
+                      selected: _modifiers & bit != 0,
+                      onTap: () => setState(() => _modifiers ^= bit),
+                    ),
+                ],
+              ),
               _keys(),
               ChatComposer(
                 controller: _text,
@@ -214,11 +278,18 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
         padding: const EdgeInsets.all(Look.pagePad),
         children: [
           if (note != null) ErrorBand(text: note),
-          Padding(padding: const EdgeInsets.only(top: Look.groupGap * 2), child: center),
+          Padding(
+            padding: const EdgeInsets.only(top: Look.groupGap * 2),
+            child: center,
+          ),
         ],
       );
     }
-    final picture = RawImage(image: image, fit: BoxFit.fill, filterQuality: FilterQuality.medium);
+    final picture = RawImage(
+      image: image,
+      fit: BoxFit.fill,
+      filterQuality: FilterQuality.medium,
+    );
     final stage = Center(
       child: AspectRatio(
         aspectRatio: image.width / image.height,
@@ -233,14 +304,22 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
           // 보기에서 키운 배율·자리를 그대로 쥔다. 확대 손이 없어야 한 손가락 끌기가 휠로 간다.
           DecoratedBox(
             position: DecorationPosition.foreground,
-            decoration: BoxDecoration(border: Border.all(color: theme.colorScheme.primary, width: 2)),
-            child: ClipRect(child: Transform(transform: _zoom.value, child: stage)),
+            decoration: BoxDecoration(
+              border: Border.all(color: theme.colorScheme.primary, width: 2),
+            ),
+            child: ClipRect(
+              child: Transform(transform: _zoom.value, child: stage),
+            ),
           )
         else
           GestureDetector(
             onDoubleTapDown: (d) => _tapAt = d.localPosition,
             onDoubleTap: _toggleZoom,
-            child: InteractiveViewer(transformationController: _zoom, maxScale: 8, child: stage),
+            child: InteractiveViewer(
+              transformationController: _zoom,
+              maxScale: 8,
+              child: stage,
+            ),
           ),
         if (_session.state == ScreenState.reconnecting)
           const Positioned(top: 0, left: 0, right: 0, child: TwinBar()),
@@ -272,19 +351,41 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
         dragStartBehavior: DragStartBehavior.down,
         onTapUp: (d) {
           final (x, y) = screenFraction(d.localPosition, box);
-          _session.click(x, y);
+          _session.click(x, y, modifiers: _modifiers);
+          setState(() => _modifiers = 0);
         },
         onLongPressStart: (d) {
           HapticFeedback.selectionClick();
           final (x, y) = screenFraction(d.localPosition, box);
-          _session.click(x, y, right: true);
+          _session.click(x, y, right: true, modifiers: _modifiers);
+          setState(() => _modifiers = 0);
         },
         onPanStart: (d) {
           _dragFrom = d.localPosition;
           _wheel = Offset.zero;
+          if (_pointerDrag) {
+            final at = screenFraction(d.localPosition, box);
+            _heldPointer = at;
+            _session.pointer(at.$1, at.$2, 1, modifiers: _modifiers);
+          }
         },
-        onPanUpdate: (d) => _drag(d, box),
-        onPanEnd: (_) => _dragFrom = null,
+        onPanUpdate: (d) {
+          if (!_pointerDrag) {
+            _drag(d, box);
+            return;
+          }
+          final at = screenFraction(d.localPosition, box);
+          _heldPointer = at;
+          _session.pointer(at.$1, at.$2, 1, modifiers: _modifiers);
+        },
+        onPanEnd: (_) {
+          _releasePointer();
+          setState(() => _modifiers = 0);
+        },
+        onPanCancel: () {
+          _releasePointer();
+          setState(() => _modifiers = 0);
+        },
         child: picture,
       );
     },
@@ -292,14 +393,40 @@ class _ScreenMirrorScreenState extends State<ScreenMirrorScreen> {
 
   Widget _keys() {
     final keys = <Widget>[
-      KeyChip(label: 'esc', onTap: () => _session.key('Escape')),
-      KeyChip(label: 'tab', onTap: () => _session.key('Tab')),
-      KeyChip(icon: Icons.keyboard_arrow_left, onTap: () => _session.key('ArrowLeft')),
-      KeyChip(icon: Icons.keyboard_arrow_down, onTap: () => _session.key('ArrowDown')),
-      KeyChip(icon: Icons.keyboard_arrow_up, onTap: () => _session.key('ArrowUp')),
-      KeyChip(icon: Icons.keyboard_arrow_right, onTap: () => _session.key('ArrowRight')),
-      KeyChip(icon: Icons.backspace_outlined, onTap: () => _session.key('Backspace')),
-      KeyChip(icon: Icons.keyboard_return, onTap: () => _session.key('Enter')),
+      KeyChip(label: 'esc', onTap: () => _key('Escape')),
+      KeyChip(label: 'tab', onTap: () => _key('Tab')),
+      KeyChip(icon: Icons.keyboard_arrow_left, onTap: () => _key('ArrowLeft')),
+      KeyChip(icon: Icons.keyboard_arrow_down, onTap: () => _key('ArrowDown')),
+      KeyChip(icon: Icons.keyboard_arrow_up, onTap: () => _key('ArrowUp')),
+      KeyChip(
+        icon: Icons.keyboard_arrow_right,
+        onTap: () => _key('ArrowRight'),
+      ),
+      KeyChip(icon: Icons.backspace_outlined, onTap: () => _key('Backspace')),
+      KeyChip(icon: Icons.keyboard_return, onTap: () => _key('Enter')),
+      for (final key in 'ACVXZSFWRTEQYUIOPDGHJKLBNM'.split(''))
+        KeyChip(label: key.toLowerCase(), onTap: () => _key('Key$key')),
+      for (final key in '1234567890'.split(''))
+        KeyChip(label: key, onTap: () => _key('Digit$key')),
+      for (final (code, label) in [
+        ('Space', 'space'),
+        ('Backquote', '`'),
+        ('Minus', '-'),
+        ('Equal', '='),
+        ('BracketLeft', '['),
+        ('BracketRight', ']'),
+        ('Backslash', '\\'),
+        ('Semicolon', ';'),
+        ('Quote', "'"),
+        ('Comma', ','),
+        ('Period', '.'),
+        ('Slash', '/'),
+      ])
+        KeyChip(label: label, onTap: () => _key(code)),
+      for (final key in ['Home', 'End', 'PageUp', 'PageDown', 'Delete'])
+        KeyChip(label: key, onTap: () => _key(key)),
+      for (var i = 1; i <= 12; i++)
+        KeyChip(label: 'F$i', onTap: () => _key('F$i')),
     ];
     return KeyRow(keys: keys);
   }

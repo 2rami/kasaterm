@@ -7,6 +7,7 @@ import 'package:video_player_platform_interface/video_player_platform_interface.
 /// AVPlayer 대신 — 연 파일·재생·멈춤·찾기·해제를 기록만 한다.
 class FakeVideoPlayer extends VideoPlayerPlatform {
   final calls = <String>[];
+  final volumes = <double>[];
   final _events = <int, StreamController<VideoEvent>>{};
   final _positions = <int, Duration>{};
   int _next = 1;
@@ -96,7 +97,7 @@ class FakeVideoPlayer extends VideoPlayerPlatform {
   @override
   Future<void> setLooping(int playerId, bool looping) async {}
   @override
-  Future<void> setVolume(int playerId, double volume) async {}
+  Future<void> setVolume(int playerId, double volume) async => volumes.add(volume);
   @override
   Future<void> setPlaybackSpeed(int playerId, double speed) async {}
   @override

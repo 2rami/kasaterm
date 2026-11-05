@@ -913,14 +913,39 @@ class Server {
     String? label,
     String? machine,
   }) async {
-    final res = await _mutate(
-      'settings/action',
-      machine: machine,
-      json: {'action': action, 'id': ?id, 'label': ?label},
-    );
-    if (res.statusCode != 200) {
-      throw ServerException('설정이 안 바뀌었다 (${res.statusCode})');
+    await desktopAction('settings/action',
+        body: {'action': action, 'id': ?id, 'label': ?label}, machine: machine);
+  }
+
+  Future<Map<String, dynamic>> desktopValues(String path, {
+    String? machine, Map<String, String>? query,
+  }) async {
+    final value = await _getJson(path, machine: machine, query: query,
+        timeout: const Duration(seconds: 20));
+    if (value is! Map<String, dynamic>) {
+      throw const ServerException('PC 응답을 읽지 못했어요.');
     }
+    if (value['ok'] == false) {
+      throw ServerException(value['error'] is String
+          ? value['error'] as String : 'PC에서 요청을 처리하지 못했어요.');
+    }
+    return value;
+  }
+
+  Future<Map<String, dynamic>> desktopAction(String path, {
+    String? machine, Map<String, String>? query, Object? body,
+  }) async {
+    final response = await _mutate(path, machine: machine, query: query, json: body);
+    Object? value;
+    try { value = jsonDecode(response.body); } catch (_) {}
+    if (response.statusCode != 200 || value is! Map<String, dynamic> || value['ok'] != true) {
+      throw ServerException(
+        value is Map && value['error'] is String
+            ? value['error'] as String : 'PC에서 요청을 처리하지 못했어요 (${response.statusCode}).',
+        status: response.statusCode,
+      );
+    }
+    return value;
   }
 
   /// 그 맥의 비밀 승인 연결 — 부르면 맥이 폰 열쇠 자동 믿기 규칙을 지금 돌리고 상태를 준다
@@ -1562,14 +1587,11 @@ class Server {
 
   /// pane 닫기 — 데스크톱에서 × 를 누른 것과 같다(되살리기 대열에 남는다).
   Future<void> closePane(String pane, {String? machine}) async {
-    final res = await _mutate(
+    await desktopAction(
       'close-pane',
       query: {'surface': pane},
       machine: machine,
     );
-    if (res.statusCode != 200) {
-      throw ServerException('pane 을 못 닫았다 (${res.statusCode})');
-    }
   }
 
   /// `from` 옆에 셸 pane 하나 — 방향은 서버가 pane 모양을 보고 고른다.

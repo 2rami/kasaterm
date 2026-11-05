@@ -96,6 +96,33 @@ void main() {
     expect(pointers.first['y'] as double, closeTo(0.5, 0.01));
     final wheel = heard.where((m) => m['t'] == 'scroll').fold<int>(0, (sum, m) => sum + (m['dy'] as int));
     expect(wheel, inInclusiveRange(-260, -200));
+    heard.clear();
+    await tester.tap(find.byTooltip('조작하기'));
+    await tester.pump();
+    await tester.tap(find.text('끌기·선택'));
+    await tester.tap(find.text('shift'));
+    final dragBox = tester.getRect(_screen);
+    final drag = await tester.startGesture(dragBox.center);
+    await drag.moveBy(const Offset(60, 10));
+    await tester.pump();
+    await drag.cancel();
+    await tester.pump();
+    await tester.tap(find.text('shift'));
+    await tester.ensureVisible(find.text('ctrl'));
+    await tester.tap(find.text('ctrl'));
+    await tester.tap(find.byIcon(Icons.keyboard_arrow_left));
+    await tester.pump();
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    }
+    final dragged = heard.where((m) => m['t'] == 'pointer').toList();
+    expect(dragged.first['b'], 1);
+    expect(dragged.first['m'], 1);
+    expect(dragged.last['b'], 0, reason: '손짓이 취소되어도 PC 마우스를 놓아야 한다');
+    expect(dragged.last['m'], 1, reason: '놓는 순간에도 끌기의 수정키를 유지한다');
+    expect(heard.where((m) => m['t'] == 'scroll'), isEmpty);
+    expect(heard.where((m) => m['t'] == 'key').single,
+      {'t': 'key', 'k': 'ArrowLeft', 'm': 3});
     await tester.pumpWidget(const SizedBox());
   });
 }

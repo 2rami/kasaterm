@@ -21,10 +21,10 @@ import 'clipboard_sheet.dart';
 import 'controls.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
-import 'screen_mirror.dart';
 import 'settings.dart';
 import 'terminal.dart';
 import 'saved_conversations.dart';
+import 'desktop_tools.dart';
 
 export '../machine_look.dart' show parseHexColor;
 
@@ -144,6 +144,7 @@ class _HubScreenState extends State<HubScreen> {
     context,
     server: widget.server,
     room: room,
+    rooms: s.rooms,
     pane: p,
     machine: s.route,
     onOpen: _open,
@@ -157,14 +158,6 @@ class _HubScreenState extends State<HubScreen> {
     machine: s.route,
     onChanged: _model.refresh,
   );
-
-  void _openScreen(HubSection s, String title) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ScreenMirrorScreen(server: widget.server, machine: s.route, title: title),
-      ),
-    );
-  }
 
   Future<void> _newRoom(HubSection s) => newRoom(
     context,
@@ -305,7 +298,8 @@ class _HubScreenState extends State<HubScreen> {
           onTap: () => _model.toggleFold(s),
           onAdd: s.online ? () => _newRoom(s) : null,
           onScreen: s.online
-              ? () => _openScreen(s, machineName(title, route: s.route, local: s.machine == null))
+              ? () => openDesktopTools(context, server: widget.server, machine: s.route,
+                  title: machineName(title, route: s.route, local: s.machine == null))
               : null,
         ),
       );
@@ -611,9 +605,9 @@ class _SectionHeader extends StatelessWidget {
                   ),
                   if (onScreen != null)
                     IconButton(
-                      tooltip: '화면 거울',
+                      tooltip: 'PC 기능',
                       onPressed: onScreen,
-                      icon: Icon(Icons.monitor_outlined, color: dim),
+                      icon: Icon(Icons.more_horiz, color: dim),
                     ),
                   if (onAdd != null)
                     IconButton(

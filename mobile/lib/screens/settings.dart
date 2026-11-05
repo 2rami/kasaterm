@@ -26,6 +26,7 @@ import 'hub.dart' show parseHexColor;
 import 'oauth_sheet.dart';
 import 'approval_key.dart';
 import 'work_permissions.dart';
+import 'desktop_tools.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -648,6 +649,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 데스크톱에서 일어나는 일 — 새 창 학생·학생이 여는 페이지·개발 서버.
   List<Widget> _desktopRows(int tone) {
     return [
+      SettingsRow(
+        tone: tone, icon: Icons.desktop_windows_outlined, title: '기기별 PC 기능',
+        subtitle: 'PC 설정·대화 기록·화면 조작', chevron: true,
+        onTap: () => chooseDesktopTools(context, server),
+      ),
       SettingsRow(
         key: const Key('claude-accounts'),
         tone: tone,

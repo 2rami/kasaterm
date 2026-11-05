@@ -674,6 +674,29 @@ void main() {
       });
     }
 
+    testWidgets('볼륨을 조절하고 음소거해도 영상 탐색과 재생은 유지한다', (tester) async {
+      await pumpChat(tester, mediaBlock(_video, 12), width: 320);
+      await tester.tap(find.text('demo clip.mp4'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final pauses = platform.calls.where((c) => c == 'pause').length;
+      await tester.tap(find.byTooltip('볼륨'));
+      await tester.pumpAndSettle();
+      final volume = find.byType(Slider).last;
+      final box = tester.getRect(volume);
+      await tester.tapAt(Offset(box.center.dx, box.center.dy));
+      await tester.pump();
+      expect(platform.volumes.last, closeTo(.5, .1));
+      await tester.tap(find.byTooltip('음소거'));
+      await tester.pump();
+      expect(platform.volumes.last, 0);
+      expect(find.text('볼륨 0%'), findsOneWidget);
+      expect(platform.calls.where((c) => c == 'pause').length, pauses);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      await settleDispose(tester);
+    });
+
     testWidgets('누르면 곧바로 플레이어가 서고 창구로 재생하며, 닫으면 창구를 닫는다', (tester) async {
       final calls = <Uri>[];
       await pumpChat(tester, mediaBlock(_video, 12), calls: calls);

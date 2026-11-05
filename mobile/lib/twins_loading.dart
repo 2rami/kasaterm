@@ -71,7 +71,7 @@ class _TwinsLoadingState extends State<TwinsLoading>
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(widget.label, style: text),
+                  Flexible(child: Text(widget.label, style: text, textAlign: TextAlign.center)),
                   for (var i = 0; i < 3; i++)
                     _still
                         ? Text('.', style: text)

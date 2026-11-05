@@ -145,7 +145,11 @@ class ScreenSession extends ChangeNotifier {
     final generation = _generation;
     final uri = _wsUri(gateway: _gateway);
     _direct = server.isDirect(uri.replace(scheme: 'http'));
-    final ch = connectTermSocket(uri, protocols: server.wsProtocolsFor(uri), ping: ping);
+    final ch = connectTermSocket(
+      uri,
+      protocols: server.wsProtocolsFor(uri),
+      ping: ping,
+    );
     _channel = ch;
     // 악수가 끝나도 그 뒤 기기가 말을 안 하면 붙은 것이 아니다 — hello 를 기다린다.
     _opening = Timer(connectWait, () {
@@ -174,7 +178,12 @@ class ScreenSession extends ChangeNotifier {
   }
 
   void _routeChanged() {
-    if (_channel == null || _paused || _disposed || state == ScreenState.connecting) return;
+    if (_channel == null ||
+        _paused ||
+        _disposed ||
+        state == ScreenState.connecting) {
+      return;
+    }
     if (server.isDirect(_wsUri().replace(scheme: 'http')) == _direct) return;
     _gateway = false;
     connect();
@@ -223,7 +232,9 @@ class ScreenSession extends ChangeNotifier {
         denied = m['reason'] as String? ?? 'unavailable';
         state = ScreenState.denied;
       case 'input':
-        inputDenied = m['ok'] == true ? null : (m['reason'] as String? ?? 'unavailable');
+        inputDenied = m['ok'] == true
+            ? null
+            : (m['reason'] as String? ?? 'unavailable');
       default:
         return;
     }
@@ -237,7 +248,9 @@ class ScreenSession extends ChangeNotifier {
     final generation = _generation;
     ui.Image? decoded;
     try {
-      final codec = await ui.instantiateImageCodec(Uint8List.sublistView(bytes, start));
+      final codec = await ui.instantiateImageCodec(
+        Uint8List.sublistView(bytes, start),
+      );
       decoded = (await codec.getNextFrame()).image;
       codec.dispose();
     } catch (_) {}
@@ -256,7 +269,9 @@ class ScreenSession extends ChangeNotifier {
     final old = image;
     image = decoded;
     // 그리는 쪽이 아직 옛 장을 들고 있을 수 있어 한 프레임 뒤에 놓는다.
-    if (old != null) SchedulerBinding.instance.addPostFrameCallback((_) => old.dispose());
+    if (old != null) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => old.dispose());
+    }
     _shownAt.add(_clock.elapsedMilliseconds);
     denied = null;
     state = ScreenState.live;
@@ -273,19 +288,29 @@ class ScreenSession extends ChangeNotifier {
   /// 지금 화면의 포인트 크기 — 끌기 거리를 그 기기의 휠 픽셀로 바꿀 때. 모르면 받은 그림 크기.
   Size get displaySize {
     for (final d in displays) {
-      if (d.id == display && d.width > 0 && d.height > 0) return Size(d.width.toDouble(), d.height.toDouble());
+      if (d.id == display && d.width > 0 && d.height > 0) {
+        return Size(d.width.toDouble(), d.height.toDouble());
+      }
     }
     final i = image;
-    return i == null ? const Size(1, 1) : Size(i.width.toDouble(), i.height.toDouble());
+    return i == null
+        ? const Size(1, 1)
+        : Size(i.width.toDouble(), i.height.toDouble());
   }
 
   /// 단추 상태(1 왼쪽·2 오른쪽)를 통째로 — 서버가 앞 상태와 견줘 누름·뗌을 가른다.
-  void pointer(double x, double y, int buttons) =>
-      _sendJson({'t': 'pointer', 'x': x, 'y': y, 'b': buttons});
+  void pointer(double x, double y, int buttons, {int modifiers = 0}) =>
+      _sendJson({
+        't': 'pointer',
+        'x': x,
+        'y': y,
+        'b': buttons,
+        if (modifiers & 15 != 0) 'm': modifiers & 15,
+      });
 
-  void click(double x, double y, {bool right = false}) {
-    pointer(x, y, right ? 2 : 1);
-    pointer(x, y, 0);
+  void click(double x, double y, {bool right = false, int modifiers = 0}) {
+    pointer(x, y, right ? 2 : 1, modifiers: modifiers);
+    pointer(x, y, 0, modifiers: modifiers);
   }
 
   /// 휠 — 그 기기 화면 포인트 단위, 양수 dy 는 위로 굴림.
@@ -295,7 +320,11 @@ class ScreenSession extends ChangeNotifier {
   }
 
   /// 이름 붙은 키(웹 `KeyboardEvent.code`)를 눌렀다 뗀다.
-  void key(String code) => _sendJson({'t': 'key', 'k': code});
+  void key(String code, {int modifiers = 0}) => _sendJson({
+    't': 'key',
+    'k': code,
+    if (modifiers & 15 != 0) 'm': modifiers & 15,
+  });
 
   /// 폰 자판이 조합을 끝낸 글을 통째로 — 한글을 키로 풀어 보내면 그 기기 입력기가 다시 조합해 어긋난다.
   /// 보냈으면 참 — 다시 붙는 중이면 거짓이라 입력칸의 글을 지우지 않는다.
@@ -311,7 +340,10 @@ class ScreenSession extends ChangeNotifier {
     if (fallback) _gateway = true;
     _closeChannel();
     state = ScreenState.reconnecting;
-    _retry = Timer(fallback ? Duration.zero : Duration(seconds: _backoffSec), connect);
+    _retry = Timer(
+      fallback ? Duration.zero : Duration(seconds: _backoffSec),
+      connect,
+    );
     _backoffSec = math.min(_backoffSec * 2, 10);
     notifyListeners();
     if (refused != null && !fallback) unawaited(_explain(refused));
@@ -320,7 +352,9 @@ class ScreenSession extends ChangeNotifier {
   Future<void> _explain(Uri refused) async {
     final generation = _generation;
     final why = await server.socketRefusal(refused);
-    if (_disposed || generation != _generation || why == null || why == note) return;
+    if (_disposed || generation != _generation || why == null || why == note) {
+      return;
+    }
     note = why;
     notifyListeners();
   }
