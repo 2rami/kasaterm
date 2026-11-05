@@ -161,8 +161,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "app.open_document" => app_open_document(backend, id, &req.params),
         "surface.open_url" => surface_open_url(backend, id, &req.params),
         "web.drive" => web_drive(backend, id, &req.params),
-        "phone.web" => phone_web(backend, "kasaterm", id, &req.params),
-        "phone.browser" => phone_web(backend, "browser", id, &req.params),
+        "phone.browser" => phone_web(backend, id, &req.params),
         "collab.snapshot" => match backend.collab_snapshot(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },
@@ -365,7 +364,6 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.open_preview",
                 "surface.open_url",
                 "web.drive",
-                "phone.web",
                 "phone.browser",
                 "surface.capture",
                 "surface.dock",
@@ -418,15 +416,14 @@ fn web_drive(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
-/// 폰 앱 안 웹뷰 조종(backend.rs `phone_web`) — `phone.web` 은 카사텀 폰 앱, `phone.browser` 는 카사브라우저 폰 앱.
-/// `arg` 는 open 의 주소, eval 의 JS, shot 의 저장 절대경로.
-fn phone_web(backend: &dyn Backend, target: &str, id: Value, params: &Value) -> Response {
+/// 카사브라우저 폰 앱의 웹뷰 조종(backend.rs `phone_web`). `arg` 는 open 의 주소, eval 의 JS, shot 의 저장 절대경로.
+fn phone_web(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let Some(op) = params.get("op").and_then(|v| v.as_str()) else {
-        return param_err(id, "phone.web/phone.browser requires `op` (open|shot|text|url|eval|back|forward|reload)");
+        return param_err(id, "phone.browser requires `op` (open|shot|text|url|eval|back|forward|reload)");
     };
     let arg = params.get("arg").and_then(|v| v.as_str()).unwrap_or("");
     let timeout_ms = params.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(30_000).clamp(1_000, 300_000);
-    match backend.phone_web(target, op, arg, timeout_ms) {
+    match backend.phone_web(op, arg, timeout_ms) {
         Ok(v) => Response::success(id, v),
         Err(e) => backend_err(id, e),
     }

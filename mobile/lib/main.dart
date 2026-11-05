@@ -7,7 +7,6 @@ import 'background_grace.dart';
 import 'connection.dart';
 import 'app_link.dart';
 import 'approvals.dart';
-import 'phone_web.dart';
 import 'desktop_palette.dart';
 import 'hub_model.dart';
 import 'hub_prefs.dart';
@@ -392,7 +391,6 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     unawaited(_takeSpot());
     AppLinkObserver.instance.attach(_openLink);
     ApprovalCenter.instance.onNew = _announceApproval;
-    PhoneWebAgent.instance.navigator = () => navigatorKey.currentState;
     if (_openApproval.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => unawaited(_openLink(AppLink(approval: _openApproval))),
@@ -434,11 +432,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
       ApprovalCenter.instance.setForeground(false);
-      PhoneWebAgent.instance.setForeground(false);
     }
     if (state == AppLifecycleState.resumed) {
       ApprovalCenter.instance.setForeground(true);
-      PhoneWebAgent.instance.setForeground(true);
       unawaited(PushBridge.instance.retryCleanup());
       unawaited(phoneThemeSync.refresh());
       unawaited(weather.refresh());
@@ -617,7 +613,6 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       }
     }
     ApprovalCenter.instance.bind(_connection.account);
-    PhoneWebAgent.instance.bind(server);
     if (phoneThemeSync.account != _connection.account) {
       if (_connection.account case final account?) {
         unawaited(

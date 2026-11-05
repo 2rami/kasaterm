@@ -1348,10 +1348,9 @@ pub trait Backend: Send + Sync {
     fn web_drive(&self, _op: &str, _arg: &str, _surface: Option<&str>) -> Result<String> {
         anyhow::bail!("web_drive not supported")
     }
-    /// 폰 앱 안 웹뷰에 명령 하나(`kasa_mcp::phone_web`) — target 은 받을 앱(browser·kasaterm), op 는
-    /// open·shot·text·url·eval·back·forward·reload. 폰이 답할 때까지(최대 `timeout_ms`) 기다린다.
-    /// shot 은 `arg` 경로에 PNG 를 쓰고 그 경로를 돌려준다.
-    fn phone_web(&self, _target: &str, _op: &str, _arg: &str, _timeout_ms: u64) -> Result<serde_json::Value> {
+    /// 카사브라우저 폰 앱의 웹뷰에 명령 하나(`kasa_mcp::phone_web`) — op 는 open·shot·text·url·eval·back·forward·reload.
+    /// 폰이 답할 때까지(최대 `timeout_ms`) 기다린다. shot 은 `arg` 경로에 PNG 를 쓰고 그 경로를 돌려준다.
+    fn phone_web(&self, _op: &str, _arg: &str, _timeout_ms: u64) -> Result<serde_json::Value> {
         anyhow::bail!("phone_web not supported")
     }
     /// Show/hide the *main terminal* window. The arona classroom window calls

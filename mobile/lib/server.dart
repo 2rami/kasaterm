@@ -15,14 +15,6 @@ import 'relay_account.dart';
 import 'shell_blocks.dart' show TreeEntry;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
-/// 데스크톱 에이전트가 폰 브라우저에 맡긴 명령 하나.
-class PhoneWebCommand {
-  const PhoneWebCommand({required this.id, required this.op, required this.arg});
-  final String id;
-  final String op;
-  final String arg;
-}
-
 class ServerException implements Exception {
   const ServerException(this.message, {this.status, this.code});
   final String message;
@@ -1457,44 +1449,6 @@ class Server {
       throw const ServerException('기기 앱을 업데이트하고 대화가 준비된 뒤 다시 저장해 주세요.');
     }
     return body;
-  }
-
-  /// 폰 브라우저 명령(`phone_web.dart`) — 데스크톱 줄에서 하나 가져온다. 기다려도 없으면 null.
-  Future<PhoneWebCommand?> phoneWebNext({Duration wait = const Duration(seconds: 25)}) async {
-    final http.Response res;
-    try {
-      res = await _client
-          .get(uri('phone/web/next', query: {'wait': '${wait.inSeconds}'}))
-          .timeout(wait + const Duration(seconds: 15));
-    } catch (_) {
-      throw ServerException('${describe()} 에 닿지 못했다');
-    }
-    if (res.statusCode == 204) return null;
-    if (res.statusCode != 200) {
-      throw ServerException('${describe()} 응답 ${res.statusCode} (phone/web/next)', status: res.statusCode);
-    }
-    final Object? j;
-    try {
-      j = jsonDecode(utf8.decode(res.bodyBytes));
-    } catch (_) {
-      throw ServerException('${describe()} 응답을 읽지 못했다 (phone/web/next)');
-    }
-    if (j is! Map || j['id'] is! String || j['op'] is! String) return null;
-    return PhoneWebCommand(id: j['id'] as String, op: j['op'] as String, arg: (j['arg'] as String?) ?? '');
-  }
-
-  /// 폰 브라우저 명령의 결과 — 화면은 PNG 그대로, 나머지는 JSON. 기다리던 쪽이 이미 떠났으면(410) 버린다.
-  Future<void> phoneWebResult(String id, {Object? json, List<int>? png}) async {
-    final upload = Duration(milliseconds: (png?.length ?? 0) ~/ 256);
-    await _mutate(
-      'phone/web/result',
-      query: {'id': id},
-      json: png == null ? json : null,
-      bytes: png,
-      contentType: png == null ? 'application/json' : 'image/png',
-      first: mutateFirstWait + upload,
-      retry: mutateRetryWait + upload,
-    );
   }
 
   /// Existing native paste path sets the clipboard on the actual harness host;
