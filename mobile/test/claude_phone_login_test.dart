@@ -72,6 +72,7 @@ class _Fake {
   bool maliciousUrl = false;
   String? authorizationUrl;
   bool startFailure = false;
+  bool codeFailure = false;
   bool remotes = true;
   bool? runtimeUpdated;
   String? runtimeErrorCode;
@@ -148,6 +149,7 @@ class _Fake {
         return statusReply!.future;
       }
       if (action == 'claude-phone-login-code' && afterCode != null) {
+        if (codeFailure) throw http.ClientException('fixture disconnected');
         if (!RegExp(
           r'^[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{16,}$',
         ).hasMatch(body['label'] as String)) {
@@ -295,6 +297,10 @@ void main() {
   test('authorization URL accepts only official HTTPS authorization pages', () {
     for (final url in [
       _authorizationUrl,
+      _authorizationUrl.replaceFirst(
+        'claude.ai/oauth/',
+        'claude.com/cai/oauth/',
+      ),
       _authorizationUrl.replaceFirst('claude.ai', 'console.anthropic.com'),
       _authorizationUrl.replaceFirst('claude.ai', 'platform.claude.com'),
       _authorizationUrl.replaceFirst(
@@ -306,6 +312,11 @@ void main() {
     }
     for (final url in [
       'https://claude.ai.evil.test/oauth/authorize',
+      _authorizationUrl.replaceFirst('claude.ai/oauth/', 'claude.com/oauth/'),
+      _authorizationUrl.replaceFirst(
+        'claude.ai/oauth/',
+        'claude.com.evil.test/cai/oauth/',
+      ),
       'https://evil.test/oauth/authorize',
       'http://claude.ai/oauth/authorize',
       'https://claude.ai:444/oauth/authorize',
@@ -506,6 +517,119 @@ void main() {
         'label': 'fixture-confirmation',
       });
       expect(find.text('이 기기에 다시 로그인했어요.'), findsOneWidget);
+      await _end(tester);
+    },
+  );
+
+  testWidgets(
+    'current Claude address opens and code paste is explicit across Safari return',
+    (tester) async {
+      var reads = 0;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.getData') {
+            reads++;
+            return {'text': _code};
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final fake = _Fake()
+        ..authorizationUrl = _authorizationUrl.replaceFirst(
+          'claude.ai/oauth/',
+          'claude.com/cai/oauth/',
+        );
+      await _show(tester, fake);
+      await _start(tester);
+      await tester.tap(find.byKey(const Key('claude-open-browser')));
+      await tester.pumpAndSettle();
+      expect(fake.opened.single.toString(), fake.authorizationUrl);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(reads, 0);
+      await tester.ensureVisible(find.byKey(const Key('claude-paste-code')));
+      await tester.tap(find.byKey(const Key('claude-paste-code')));
+      await tester.pumpAndSettle();
+      expect(reads, 1);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('claude-code')))
+            .controller!
+            .text,
+        _code,
+      );
+      expect(
+        fake.posts.where((p) => p.body['action'] == 'claude-phone-login-code'),
+        isEmpty,
+      );
+      await tester.ensureVisible(find.byKey(const Key('claude-submit-code')));
+      await tester.tap(find.byKey(const Key('claude-submit-code')));
+      await tester.pumpAndSettle();
+      expect(find.text('이 기기에 다시 로그인했어요.'), findsOneWidget);
+      await _end(tester);
+    },
+  );
+
+  testWidgets(
+    'invalid or undelivered codes stay editable without waiting for a poll',
+    (tester) async {
+      final fake = _Fake();
+      await _show(tester, fake);
+      await _start(tester);
+      final field = find.byKey(const Key('claude-code'));
+      final send = find.byKey(const Key('claude-submit-code'));
+      await tester.enterText(field, 'incomplete');
+      await tester.ensureVisible(send);
+      await tester.tap(send);
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(field).controller!.text, 'incomplete');
+      expect(
+        fake.posts.where((p) => p.body['action'] == 'claude-phone-login-code'),
+        isEmpty,
+      );
+      expect(find.textContaining('인증코드 전체'), findsOneWidget);
+      fake.codeFailure = true;
+      await tester.enterText(field, _code);
+      await tester.ensureVisible(send);
+      await tester.tap(send);
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(field).controller!.text, _code);
+      expect(tester.widget<TextField>(field).enabled, isTrue);
+      fake.codeFailure = false;
+      await tester.ensureVisible(send);
+      await tester.tap(send);
+      await tester.pumpAndSettle();
+      expect(find.text('이 기기에 다시 로그인했어요.'), findsOneWidget);
+      await _end(tester);
+    },
+  );
+
+  testWidgets(
+    'expired login can restart for the same account with a fresh nonce',
+    (tester) async {
+      final fake = _Fake()..state = 'expired';
+      await _show(tester, fake);
+      await _start(tester);
+      final original = fake.posts.last.body['label'];
+      fake.state = 'awaiting_code';
+      await tester.tap(find.byKey(const Key('claude-retry-login')));
+      await tester.pumpAndSettle();
+      expect(fake.posts.last.body['action'], 'claude-phone-login-start');
+      expect(fake.posts.last.body['id'], 'personal');
+      expect(fake.posts.last.body['label'], isNot(original));
+      expect(find.byKey(const Key('claude-code')), findsOneWidget);
       await _end(tester);
     },
   );
@@ -965,9 +1089,10 @@ void main() {
             .widget<TextField>(find.byKey(const Key('claude-code')))
             .controller!
             .text,
-        isEmpty,
+        _code,
       );
       server.close();
+      expect(tester.widget<TextField>(find.byKey(const Key('claude-code'))).controller!.text, isEmpty);
       fake.gate!.complete();
       fake.gate = null;
       await tester.pumpAndSettle();

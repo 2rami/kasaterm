@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../claude_login.dart';
@@ -128,6 +129,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   ClaudePhoneLogin? _flow;
   _PendingStart? _pendingStart;
   String? _error;
+  String? _codeError;
   final _unconfirmedPrevious = <_PendingStart>{};
   bool _loading = true;
   bool _busy = false;
@@ -140,6 +142,9 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
 
   Server get _server => widget.server;
   bool get _active => _flow != null && !_flow!.state.terminal;
+  bool get _acceptsCode =>
+      _flow?.state == ClaudeLoginState.awaitingAuthorization ||
+      _flow?.state == ClaudeLoginState.awaitingCode;
   bool get _pending => _pendingStart != null && !_pendingStart!.settled;
   bool get _locked => _active || _pending;
   bool _current(int generation) =>
@@ -175,6 +180,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     _generation++;
     _timer?.cancel();
     _code.clear();
+    _codeError = null;
     _devices = const [];
     _accounts = const [];
     _device = null;
@@ -438,6 +444,8 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     setState(() {
       _slot = slot;
       _flow = null;
+      _codeError = null;
+      _code.clear();
     });
     await _request('start', slot.id);
   }
@@ -494,7 +502,11 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
             _flow = null;
             _slot = null;
           }
-          _error = _pending && _flow == null ? _uncertainStart : e.message;
+          if (action == 'code' && e.code == 'phone_login_invalid_code') {
+            _codeError = e.message;
+          } else {
+            _error = _pending && _flow == null ? _uncertainStart : e.message;
+          }
         });
       }
     } on TimeoutException {
@@ -558,6 +570,12 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   void _take(ClaudePhoneLogin flow) {
     _flow = flow;
     _pendingStart?.take(flow);
+    if (flow.state != ClaudeLoginState.awaitingAuthorization &&
+        flow.state != ClaudeLoginState.awaitingCode &&
+        flow.state != ClaudeLoginState.starting) {
+      _code.clear();
+      _codeError = null;
+    }
     if (flow.state.terminal) {
       _pendingStart = null;
       _code.clear();
@@ -566,7 +584,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
 
   Future<void> _openBrowser() async {
     final uri = _flow?.authorizationUrl;
-    if (uri == null || _busy || _disconnected || _error != null) return;
+    if (uri == null || _busy || _disconnected) return;
     final generation = _generation;
     bool opened;
     try {
@@ -584,10 +602,44 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   Future<void> _submit() async {
     final flow = _flow;
     final code = _code.text.trim();
-    if (flow == null || code.isEmpty || _busy || _error != null) return;
-    _code.clear();
+    if (flow == null || !_acceptsCode || _busy || _disconnected) return;
+    if (!claudeLoginCode(code)) {
+      setState(() => _codeError = '승인 화면의 인증코드 전체를 복사해 붙여 넣어 주세요.');
+      return;
+    }
+    setState(() => _codeError = null);
     FocusManager.instance.primaryFocus?.unfocus();
     await _request('code', flow.flowId, label: code);
+  }
+
+  Future<void> _pasteCode() async {
+    final generation = _generation, flowId = _flow?.flowId;
+    try {
+      final text = (await Clipboard.getData(
+        Clipboard.kTextPlain,
+      ))?.text?.trim();
+      if (!_current(generation) ||
+          _flow?.flowId != flowId ||
+          _busy ||
+          !_acceptsCode) {
+        return;
+      }
+      setState(() {
+        if (text == null || text.isEmpty) {
+          _codeError = '복사한 인증코드가 없어요. 승인 화면에서 먼저 복사해 주세요.';
+        } else {
+          _code.value = TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          );
+          _codeError = null;
+        }
+      });
+    } on PlatformException {
+      if (_current(generation)) {
+        setState(() => _codeError = '붙여넣기를 허용하거나 입력칸을 길게 눌러 붙여 넣어 주세요.');
+      }
+    }
   }
 
   void _finish() {
@@ -751,11 +803,13 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     final waiting =
         flow.state == ClaudeLoginState.awaitingAuthorization ||
         flow.state == ClaudeLoginState.awaitingCode;
-    final ready = !_busy && !_disconnected && _error == null;
+    final ready = !_busy && !_disconnected;
     final status = switch (flow.state) {
       ClaudeLoginState.starting => '로그인 준비 중',
       ClaudeLoginState.awaitingAuthorization || ClaudeLoginState.awaitingCode =>
-        'Safari에서 Claude에 로그인해 주세요. 승인 화면의 인증코드를 아래에 붙여 넣어 주세요.',
+        _code.text.trim().isNotEmpty
+            ? '인증코드를 보내면 선택한 기기의 계정을 확인하고 로그인을 저장해요.'
+            : 'Safari에서 Claude에 로그인한 뒤, 승인 화면의 인증코드를 복사해 돌아오세요.',
       ClaudeLoginState.verifying => '계정을 확인하고 이 기기에 저장하는 중이에요.',
       ClaudeLoginState.needsConfirmation =>
         '이 슬롯의 기존 계정을 확인할 수 없어요. 아래 계정이 맞는지 확인한 뒤 저장해 주세요.',
@@ -776,11 +830,9 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
           key: const Key('claude-login-flow'),
           icon: Icons.person_outline_rounded,
           title: _slot!.title,
-          subtitle: [
-            if (_slot!.name.isNotEmpty && _slot!.name != _slot!.title)
-              _slot!.name,
-            '슬롯 ${flow.slotId}',
-          ].join(' · '),
+          subtitle: _slot!.name.isNotEmpty && _slot!.name != _slot!.title
+              ? _slot!.name
+              : null,
           below: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -827,11 +879,25 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
                     keyboardType: TextInputType.visiblePassword,
                     textInputAction: TextInputAction.done,
                     autofillHints: const [],
-                    decoration: const InputDecoration(hintText: '인증코드 붙여넣기…'),
+                    decoration: InputDecoration(
+                      hintText: '인증코드 붙여넣기…',
+                      errorText: _codeError,
+                      errorMaxLines: 4,
+                    ),
+                    onChanged: (_) => setState(() => _codeError = null),
                     onSubmitted: (_) => _submit(),
                   ),
                 ),
                 const SizedBox(height: Look.fieldGap),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: const Key('claude-paste-code'),
+                    onPressed: ready ? _pasteCode : null,
+                    icon: const Icon(Icons.content_paste_rounded),
+                    label: const Text('인증코드 붙여넣기'),
+                  ),
+                ),
                 OutlinedButton(
                   key: const Key('claude-submit-code'),
                   onPressed: ready ? _submit : null,
@@ -881,6 +947,13 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
                 ),
               ],
               const SizedBox(height: Look.fieldGap),
+              if (flow.state.terminal &&
+                  flow.state != ClaudeLoginState.succeeded)
+                FilledButton(
+                  key: const Key('claude-retry-login'),
+                  onPressed: ready ? () => _start(_slot!) : null,
+                  child: const Text('다시 로그인'),
+                ),
               if (flow.state.terminal)
                 OutlinedButton(
                   onPressed: _disconnected ? null : _finish,

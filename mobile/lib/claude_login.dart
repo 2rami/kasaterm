@@ -224,6 +224,7 @@ Uri? claudeAuthorizationUrl(String value) {
     return null;
   }
   final allowed = switch (uri.host) {
+    'claude.com' => uri.path == '/cai/oauth/authorize',
     'claude.ai' => uri.path == '/oauth/authorize',
     'console.anthropic.com' ||
     'platform.claude.com' => uri.path == '/oauth/authorize',
