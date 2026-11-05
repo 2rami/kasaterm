@@ -88,7 +88,12 @@ impl Children {
         }
         if !matches!(kind, "function_call_output" | "custom_tool_call_output") { return; }
         let Some(call) = self.calls.remove(id) else { return };
-        let Some(output) = p["output"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()) else { return };
+        if p["is_error"] == true || p["isError"] == true { return; }
+        let Some(raw) = p["output"].as_str() else { return };
+        // The collaboration runtime acknowledges followup_task with an empty successful output.
+        let output = if raw.is_empty() && matches!(&call, Call::Resume(_)) {
+            Value::Object(Default::default())
+        } else if let Ok(output) = serde_json::from_str::<Value>(raw) { output } else { return };
         if !output.is_object() || output.get("error").is_some_and(|v| !v.is_null()) || output["isError"] == true || output["ok"] == false { return; }
         let resumed = matches!(&call, Call::Resume(_));
         match call {
@@ -425,6 +430,24 @@ mod tests {
     fn unrelated_namespaces_cannot_create_child_activity() {
         let mut state = Children::default();
         call(&mut state,"bad","files.spawn_agent",json!({"task_name":"not-a-child"}),json!({"task_name":"/root/not-a-child"}));
+        assert!(state.running().is_empty());
+    }
+
+    #[test]
+    fn void_followup_ack_restarts_a_child_but_sending_a_message_does_not() {
+        let mut state = Children::default();
+        for line in spawn("a", "review").lines() { state.line(line.as_bytes()); }
+        state.line(finished("/root/review").as_bytes());
+        let void = |state: &mut Children, id: &str, name: &str| {
+            state.consume(&json!({"type":"response_item","payload":{"type":"function_call","call_id":id,
+                "name":name,"namespace":"collaboration","arguments":json!({"target":"review","message":"more work"}).to_string()}}));
+            state.consume(&json!({"type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":""}}));
+        };
+        void(&mut state,"b","send_message");
+        assert!(state.running().is_empty());
+        void(&mut state,"c","followup_task");
+        assert_eq!(state.running(), ["review"]);
+        state.line(finished("/root/review").as_bytes());
         assert!(state.running().is_empty());
     }
 }
