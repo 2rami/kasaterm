@@ -60,7 +60,7 @@ while its running children add a green outline and count. The detail sheet
 updates with the hub; finished children disappear from both the outline and list.
 
 Codex child state is derived from acknowledged spawn/followup/interrupt/close
-results and final child notifications. A planning parent or a completed parent
+results and runtime-tagged final child notifications. A planning parent or a completed parent
 turn does not finish its children. The desktop reads rollout additions on one
 worker and retains lifecycle state beyond the bounded transcript tail; snapshots
 never wait for disk I/O. A changed child list wakes the existing phone change feed.

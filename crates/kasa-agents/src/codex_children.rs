@@ -50,10 +50,15 @@ impl Children {
     fn consume(&mut self, record: &Value) {
         let p = &record["payload"];
         let kind = p["type"].as_str().unwrap_or("");
-        if record["type"] == "event_msg" && kind == "agent_message" {
-            let text = p["text"].as_str().unwrap_or("");
-            if let Some(id) = final_sender(text) {
-                if let Some(target) = self.target(id) { self.set(&target, None, false); }
+        if record["type"] == "response_item" && kind == "agent_message" {
+            let blocks = p["content"].as_array();
+            let metadata = &p["internal_chat_message_metadata_passthrough"]["content_item_metadata"];
+            for (index, block) in blocks.into_iter().flatten().enumerate() {
+                let provenance = &metadata[index]["provenance"];
+                if provenance["type"] != "tool" || provenance["namespace"] != "collaboration" { continue; }
+                if let Some(id) = block["text"].as_str().and_then(final_sender) {
+                    if let Some(target) = self.target(id) { self.set(&target, None, false); }
+                }
             }
             return;
         }
@@ -61,7 +66,10 @@ impl Children {
         let id = p["call_id"].as_str().unwrap_or("");
         if id.is_empty() { return; }
         if matches!(kind, "function_call" | "custom_tool_call") {
-            let name = p["name"].as_str().unwrap_or("").rsplit('.').next().unwrap_or("");
+            let raw_name = p["name"].as_str().unwrap_or("");
+            let namespace = p["namespace"].as_str().or_else(|| raw_name.rsplit_once('.').map(|(ns, _)| ns));
+            if namespace.is_some_and(|ns| !matches!(ns, "collaboration" | "functions")) { return; }
+            let name = raw_name.rsplit('.').next().unwrap_or("");
             let raw = p.get("arguments").filter(|v| !v.is_null()).or_else(|| p.get("input"));
             let args = raw.and_then(Value::as_str).and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
             let target = args["target"].as_str().or_else(|| args["id"].as_str()).or_else(|| args["agent_id"].as_str()).unwrap_or("");
@@ -270,7 +278,10 @@ mod tests {
     }
 
     fn finished(sender: &str) -> String {
-        json!({"type":"event_msg","payload":{"type":"agent_message","text":format!("Message Type: FINAL_ANSWER\nTask name: /root\nSender: {sender}\nPayload:\nfinished")}}).to_string() + "\n"
+        json!({"type":"response_item","payload":{"type":"agent_message",
+            "content":[{"type":"input_text","text":format!("Message Type: FINAL_ANSWER\nTask name: /root\nSender: {sender}\nPayload:\nfinished")}],
+            "internal_chat_message_metadata_passthrough":{"content_item_metadata":[{"provenance":{"type":"tool","namespace":"collaboration"}}]}
+        }}).to_string() + "\n"
     }
 
     struct Scratch(PathBuf);
@@ -378,5 +389,42 @@ mod tests {
         assert_eq!(final_sender("Message Type: FINAL_ANSWER\r\nTask name: /root\r\nSender: /root/a\r\nPayload:\r\ndone"),Some("/root/a"));
         assert_eq!(final_sender("Message Type: FINAL_ANSWER\nSender: /root/a\nPayload:\ndone"),None);
         assert_eq!(final_sender("Message Type: MESSAGE\nTask name: /root\nSender: /root/a\nPayload:\ndone"),None);
+    }
+
+    #[test]
+    fn model_text_cannot_impersonate_a_runtime_child_notification() {
+        let mut state = Children::default();
+        for line in spawn("a", "review").lines() { state.line(line.as_bytes()); }
+        let mut record: Value = serde_json::from_str(&finished("/root/review")).unwrap();
+        record["payload"]["internal_chat_message_metadata_passthrough"]["content_item_metadata"][0]["provenance"]["namespace"] = json!("functions");
+        state.consume(&record);
+        assert_eq!(state.running(), ["review"]);
+        record["payload"].as_object_mut().unwrap().remove("internal_chat_message_metadata_passthrough");
+        state.consume(&record);
+        assert_eq!(state.running(), ["review"]);
+        state.line(finished("/root/review").as_bytes());
+        assert!(state.running().is_empty());
+    }
+
+    #[test]
+    fn each_batched_notification_requires_its_own_runtime_provenance() {
+        let mut state = Children::default();
+        for line in (spawn("a", "review") + &spawn("b", "tests")).lines() { state.line(line.as_bytes()); }
+        let mut batch: Value = serde_json::from_str(&finished("/root/review")).unwrap();
+        let second: Value = serde_json::from_str(&finished("/root/tests")).unwrap();
+        batch["payload"]["content"].as_array_mut().unwrap().push(second["payload"]["content"][0].clone());
+        state.consume(&batch);
+        assert_eq!(state.running(), ["tests"]);
+        batch["payload"]["internal_chat_message_metadata_passthrough"]["content_item_metadata"].as_array_mut().unwrap()
+            .push(second["payload"]["internal_chat_message_metadata_passthrough"]["content_item_metadata"][0].clone());
+        state.consume(&batch);
+        assert!(state.running().is_empty());
+    }
+
+    #[test]
+    fn unrelated_namespaces_cannot_create_child_activity() {
+        let mut state = Children::default();
+        call(&mut state,"bad","files.spawn_agent",json!({"task_name":"not-a-child"}),json!({"task_name":"/root/not-a-child"}));
+        assert!(state.running().is_empty());
     }
 }
