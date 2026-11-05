@@ -3409,7 +3409,9 @@ impl Backend for PtyBackend {
             let supported = harness.as_deref().is_some_and(|h|matches!(h,"claude"|"codex"|"agy"));
             let meta = binding.as_ref().filter(|_|supported).map(|path| {
                 let (tail,idle) = read_tail(path,128*1024);
-                snapshot_from_tail(&id,&tail,idle)
+                let mut activity = snapshot_from_tail(&id,&tail,idle);
+                if harness.as_deref() == Some("codex") { activity.subagents = codex_live_children(path); }
+                activity
             }).unwrap_or_default();
             // 판정은 **한 번만** 묻는다. 아래 attention 칸이 이것을 다시 물었는데, 그
             // 사이 GUI 틱이 허브를 갱신하면 두 값이 갈렸다 — 낱말은 「기다림」인데 종류
@@ -3610,6 +3612,7 @@ impl Backend for PtyBackend {
                     row.background = background;
                     row.subagents = subagents;
                 }
+                if codex_sid_from_rollout(path).is_some() { row.subagents = codex_live_children(path); }
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
                 row.room_number = pane_window.get(sid.as_str()).and_then(|w| room_numbers.get(*w)).and_then(|n| n.shown);
                 // pane_window 는 모든 방의 split 트리 leaf 집합이다(publish_pty_layout).
@@ -7730,6 +7733,12 @@ fn restart_remote(machine: Option<&str>) -> Result<Option<String>> {
     let machine = kasa_mcp::machines::find_route(&format!("~{id}"))
         .ok_or_else(|| anyhow::anyhow!("machine {id} is not registered on this device"))?;
     Ok(Some(machine.base))
+}
+
+fn codex_live_children(path: &std::path::Path) -> Vec<String> {
+    let (children, changed) = kasa_agents::codex_children::running(path);
+    if changed { kasa_mcp::changes::bump(); }
+    children
 }
 
 pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {

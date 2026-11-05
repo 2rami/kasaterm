@@ -59,6 +59,13 @@ parent's state. A parent waiting for a question keeps its orange attention icon
 while its running children add a green outline and count. The detail sheet
 updates with the hub; finished children disappear from both the outline and list.
 
+Codex child state is derived from acknowledged spawn/followup/interrupt/close
+results and final child notifications. A planning parent or a completed parent
+turn does not finish its children. The desktop reads rollout additions on one
+worker and retains lifecycle state beyond the bounded transcript tail; snapshots
+never wait for disk I/O. A changed child list wakes the existing phone change feed.
+Failed launches and user text quoting a notification do not create lifecycle events.
+
 Screen viewing starts read-only. In control mode, **스크롤** sends a wheel gesture;
 **끌기·선택** holds the left mouse button through the gesture. Cancellation, leaving
 control mode, backgrounding and disposal release the pointer. Long press remains

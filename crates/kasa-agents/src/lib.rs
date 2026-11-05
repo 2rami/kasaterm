@@ -2,3 +2,4 @@
 //! (transcript·rollout) 읽기다. 본판 GUI 와 `kasa tui` 가 같이 쓴다.
 
 pub mod transcript;
+pub mod codex_children;
