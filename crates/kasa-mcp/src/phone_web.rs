@@ -5,8 +5,9 @@
 //! 알림으로 열어 달라고 한다. 사람이 보는 링크(`open_url_to_phone`)는 그대로 Safari 보기로 가고, 이 길은 에이전트가
 //! 다룰 수 있는 폰 안 브라우저다.
 //!
-//! 명령마다 받을 앱([`TARGETS`])이 있다. 카사브라우저 폰 앱(`browser`)과 카사텀 폰 앱의 실험 웹뷰(`kasaterm`)가
-//! 같은 줄을 보더라도 제 것만 가져간다.
+//! 명령마다 받을 앱([`TARGETS`])이 있다. 카사브라우저 폰 앱(`browser`)과 카사텀 폰 앱의 실험 웹뷰(`kasaterm`)는
+//! 창구부터 다르다(`/phone/browser/*`·`/phone/web/*`, RPC `phone.browser`·`phone.web`) — 이 구분을 모르는 옛
+//! 데스크톱은 새 창구에 404·모르는 명령으로 답해, 한 앱의 명령이 다른 앱으로 새지 않는다.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, LazyLock, Mutex};
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 /// 폰이 할 수 있는 일. `arg` 는 open 의 주소, eval 의 JS 원문이고 나머지는 비운다.
 pub const OPS: &[&str] = &["open", "shot", "text", "eval", "url", "back", "forward", "reload"];
 
-/// 명령을 받을 폰 앱. `target` 없이 묻는 옛 카사텀 폰 앱 판은 `kasaterm` 으로 본다.
+/// 명령을 받을 폰 앱.
 pub const TARGETS: &[&str] = &["browser", "kasaterm"];
 
 /// 폰이 돌려준 답 — 화면은 PNG 그대로, 나머지는 JSON.
@@ -155,15 +156,16 @@ pub async fn next(target: &'static str, wait: Duration) -> Option<(String, Strin
     }
 }
 
-/// 폰이 올린 결과를 기다리던 쪽에 넘긴다. 기다리는 쪽이 이미 포기했으면 false.
-pub fn deliver(id: &str, outcome: Result<Outcome, String>) -> bool {
-    match lock(&WAITERS).remove(id) {
-        Some((target, tx)) => {
-            polled(target);
-            tx.send(outcome).is_ok()
-        }
-        None => false,
+/// [`TARGETS`] 앱이 올린 결과를 기다리던 쪽에 넘긴다. 기다리는 쪽이 이미 포기했거나 다른 앱에 맡긴 명령이면 false.
+pub fn deliver(target: &'static str, id: &str, outcome: Result<Outcome, String>) -> bool {
+    let mut waiters = lock(&WAITERS);
+    if waiters.get(id).is_none_or(|(t, _)| *t != target) {
+        return false;
     }
+    let (_, tx) = waiters.remove(id).expect("checked above");
+    drop(waiters);
+    polled(target);
+    tx.send(outcome).is_ok()
 }
 
 #[cfg(test)]
@@ -176,12 +178,13 @@ mod tests {
         let caller = std::thread::spawn(|| call("kasaterm", "text", "", Duration::from_secs(5)));
         let (id, op, arg) = next("kasaterm", Duration::from_secs(5)).await.expect("the phone got no command");
         assert_eq!((op.as_str(), arg.as_str()), ("text", ""));
-        assert!(deliver(&id, Ok(Outcome::Json(serde_json::json!({"text": "본문"})))));
+        assert!(!deliver("browser", &id, Ok(Outcome::Json(serde_json::json!({})))), "another app answered");
+        assert!(deliver("kasaterm", &id, Ok(Outcome::Json(serde_json::json!({"text": "본문"})))));
         match caller.join().unwrap() {
             Ok(Outcome::Json(v)) => assert_eq!(v["text"], "본문"),
             _ => panic!("the caller did not get the answer"),
         }
-        assert!(!deliver(&id, Ok(Outcome::Json(serde_json::json!({})))), "an answer was taken twice");
+        assert!(!deliver("kasaterm", &id, Ok(Outcome::Json(serde_json::json!({})))), "an answer was taken twice");
         assert!(call("kasaterm", "jump", "", Duration::from_millis(10)).is_err());
         assert!(call("kasaterm", "open", " ", Duration::from_millis(10)).is_err());
         assert!(call("tv", "url", "", Duration::from_millis(10)).is_err());
@@ -192,7 +195,7 @@ mod tests {
         let (id, op, arg) = next("browser", Duration::from_secs(5)).await.expect("the browser got no command");
         assert_eq!((op.as_str(), arg.as_str()), ("eval", "1+1"));
         assert!(next("kasaterm", Duration::from_millis(50)).await.is_none(), "the other app took a browser command");
-        assert!(deliver(&id, Ok(Outcome::Json(serde_json::json!({"value": 2})))));
+        assert!(deliver("browser", &id, Ok(Outcome::Json(serde_json::json!({"value": 2})))));
         assert!(matches!(for_browser.join().unwrap(), Ok(Outcome::Json(v)) if v["value"] == 2));
     }
 }

@@ -136,6 +136,7 @@ fn run() -> Result<Option<Response>> {
         ("machines", Some("move")) => { args.remove(0); "machines:move".to_string() }
         ("share", Some("open")) => { args.remove(0); "share:open".to_string() }
         ("phone", Some("web")) => { args.remove(0); "phone:web".to_string() }
+        ("phone", Some("browser")) => { args.remove(0); "phone:browser".to_string() }
         ("tab", _) if args.iter().any(|a| a == "--server") => {
             args.retain(|a| a != "--server");
             "tab:server".to_string()
@@ -2077,7 +2078,7 @@ fn print_help() {
             "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
             "share path | new <주제> | status          결과물 폴더(new 는 경로를 찍는다)",
             "share open <url>                          사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
-            "phone web open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초] [--target browser|kasaterm]",
+            "phone browser open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초]   (카사브라우저 폰 앱; phone web 은 카사텀 폰 앱의 웹뷰)",
             "                                          폰 앱 안 브라우저를 에이전트가 쓴다(앱이 꺼져 있으면 열어 달라는 알림)",
         ]),
         ("기기·네트워크", &[
@@ -2537,20 +2538,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
         // 같은 세션에 다시 붙는다.
         // share open — 사람이 보는 브라우저로(칸 안 웹 pane 이 아니다). 어느 기기로 갈지는 사람이 고른다.
-        // phone web — 폰 앱 안 웹뷰. 화면은 --out(없으면 지금 폴더에 phone-shot-시각.png)에 앱이 써 준다.
-        // 받는 앱은 --target(기본 카사브라우저 폰 앱, kasaterm 은 카사텀 폰 앱의 실험 웹뷰).
-        "phone:web" => {
+        // phone browser — 카사브라우저 폰 앱, phone web — 카사텀 폰 앱의 웹뷰. 화면은 --out(없으면 지금 폴더에
+        // phone-shot-시각.png)에 앱이 써 준다. 두 앱은 RPC 이름부터 달라 옛 앱 판은 phone.browser 를 모른다고 답한다.
+        "phone:web" | "phone:browser" => {
             let mut positional: Vec<String> = Vec::new();
-            let (mut out, mut timeout, mut target) = (None::<String>, 30u64, "browser".to_string());
+            let (mut out, mut timeout) = (None::<String>, 30u64);
             let mut i = 0usize;
             while i < args.len() {
                 match args[i].as_str() {
                     "--out" => { out = args.get(i + 1).cloned(); i += 2; }
-                    "--target" => {
-                        target = args.get(i + 1).filter(|t| matches!(t.as_str(), "browser" | "kasaterm")).cloned()
-                            .ok_or_else(|| anyhow!("--target 은 browser 나 kasaterm"))?;
-                        i += 2;
-                    }
                     "--timeout" => {
                         timeout = args.get(i + 1).and_then(|s| s.parse().ok())
                             .ok_or_else(|| anyhow!("--timeout 은 초 단위 숫자"))?;
@@ -2560,7 +2556,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 }
             }
             let op = positional.first().cloned()
-                .ok_or_else(|| anyhow!("phone web 다음에 open|shot|text|url|eval|back|forward|reload"))?;
+                .ok_or_else(|| anyhow!("{} 다음에 open|shot|text|url|eval|back|forward|reload", cmd.replace(':', " ")))?;
             let mut arg = positional[1..].join(" ");
             if op == "shot" {
                 let path = out.unwrap_or_else(|| format!("phone-shot-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)));
@@ -2568,7 +2564,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
                 arg = path.to_string_lossy().into_owned();
             }
-            ("phone.web", json!({ "target": target, "op": op, "arg": arg, "timeout_ms": timeout * 1000 }))
+            (if cmd == "phone:web" { "phone.web" } else { "phone.browser" }, json!({ "op": op, "arg": arg, "timeout_ms": timeout * 1000 }))
         }
         "share:open" => {
             let url = args
@@ -4598,10 +4594,8 @@ mod tests {
         assert_eq!(eval.params["op"], "eval");
         assert_eq!(eval.params["arg"], "document.title + 1");
         assert_eq!(eval.params["timeout_ms"], 30_000);
-        assert_eq!(eval.params["target"], "browser");
-        let old = super::build_request("phone:web", &["url".into(), "--target".into(), "kasaterm".into()]).unwrap();
-        assert_eq!((old.params["target"].as_str(), old.params["op"].as_str()), (Some("kasaterm"), Some("url")));
-        assert!(super::build_request("phone:web", &["url".into(), "--target".into(), "tv".into()]).is_err());
+        let browser = super::build_request("phone:browser", &["open".into(), "https://example.com/".into()]).unwrap();
+        assert_eq!((browser.method.as_str(), browser.params["arg"].as_str()), ("phone.browser", Some("https://example.com/")));
         let shot = super::build_request("phone:web", &["shot".into(), "--timeout".into(), "60".into()]).unwrap();
         let path = shot.params["arg"].as_str().unwrap();
         assert!(std::path::Path::new(path).is_absolute() && path.ends_with(".png"), "{path}");
