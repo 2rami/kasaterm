@@ -27,6 +27,7 @@ use crate::git;
 mod router;
 mod auth;
 mod phone;
+mod phone_web;
 mod machine_proxy;
 mod screen;
 mod socket;

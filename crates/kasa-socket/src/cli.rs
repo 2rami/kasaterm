@@ -135,6 +135,7 @@ fn run() -> Result<Option<Response>> {
         ("machines", Some("connect")) => { args.remove(0); "machines:connect".to_string() }
         ("machines", Some("move")) => { args.remove(0); "machines:move".to_string() }
         ("share", Some("open")) => { args.remove(0); "share:open".to_string() }
+        ("phone", Some("web")) => { args.remove(0); "phone:web".to_string() }
         ("tab", _) if args.iter().any(|a| a == "--server") => {
             args.retain(|a| a != "--server");
             "tab:server".to_string()
@@ -2076,6 +2077,8 @@ fn print_help() {
             "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
             "share path | new <주제> | status          결과물 폴더(new 는 경로를 찍는다)",
             "share open <url>                          사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
+            "phone web open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초]",
+            "                                          폰 앱 안 브라우저를 에이전트가 쓴다(앱이 꺼져 있으면 열어 달라는 알림)",
         ]),
         ("기기·네트워크", &[
             "machines [--names|--json|--history]       명부 기계 목록과 닿는 길, 끊긴 이유와 붙음·끊김 기록",
@@ -2534,6 +2537,33 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
         // 같은 세션에 다시 붙는다.
         // share open — 사람이 보는 브라우저로(칸 안 웹 pane 이 아니다). 어느 기기로 갈지는 사람이 고른다.
+        // phone web — 폰 앱 안 웹뷰. 화면은 --out(없으면 지금 폴더에 phone-shot-시각.png)에 앱이 써 준다.
+        "phone:web" => {
+            let mut positional: Vec<String> = Vec::new();
+            let (mut out, mut timeout) = (None::<String>, 30u64);
+            let mut i = 0usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--out" => { out = args.get(i + 1).cloned(); i += 2; }
+                    "--timeout" => {
+                        timeout = args.get(i + 1).and_then(|s| s.parse().ok())
+                            .ok_or_else(|| anyhow!("--timeout 은 초 단위 숫자"))?;
+                        i += 2;
+                    }
+                    a => { positional.push(a.to_string()); i += 1; }
+                }
+            }
+            let op = positional.first().cloned()
+                .ok_or_else(|| anyhow!("phone web 다음에 open|shot|text|url|eval|back|forward|reload"))?;
+            let mut arg = positional[1..].join(" ");
+            if op == "shot" {
+                let path = out.unwrap_or_else(|| format!("phone-shot-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)));
+                let path = std::path::Path::new(&path);
+                let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
+                arg = path.to_string_lossy().into_owned();
+            }
+            ("phone.web", json!({ "op": op, "arg": arg, "timeout_ms": timeout * 1000 }))
+        }
         "share:open" => {
             let url = args
                 .iter()
@@ -4553,6 +4583,20 @@ mod tests {
         assert!(response.ok); assert_eq!(response.result.unwrap()["accepted"],true);
         server.join().unwrap();
         assert!(api_roundtrip(&target,&Request{id:json!("test"),method:"surface.send".into(),params:json!({})}).is_err());
+    }
+
+    #[test]
+    fn phone_web_takes_its_op_argument_and_an_absolute_shot_path() {
+        let eval = super::build_request("phone:web", &["eval".into(), "document.title".into(), "+".into(), "1".into()]).unwrap();
+        assert_eq!(eval.method, "phone.web");
+        assert_eq!(eval.params["op"], "eval");
+        assert_eq!(eval.params["arg"], "document.title + 1");
+        assert_eq!(eval.params["timeout_ms"], 30_000);
+        let shot = super::build_request("phone:web", &["shot".into(), "--timeout".into(), "60".into()]).unwrap();
+        let path = shot.params["arg"].as_str().unwrap();
+        assert!(std::path::Path::new(path).is_absolute() && path.ends_with(".png"), "{path}");
+        assert_eq!(shot.params["timeout_ms"], 60_000);
+        assert!(super::build_request("phone:web", &[]).is_err());
     }
 
     #[test]

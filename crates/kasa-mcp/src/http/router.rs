@@ -169,6 +169,7 @@ pub fn spawn_http_server_opts(
                     .merge(term_files::routes(&backend))
                     .merge(socket::routes(&backend))
                     .merge(phone::routes())
+                    .merge(phone_web::routes())
                     .merge(machine_proxy::routes())
                     .merge(screen::routes())
                     .merge(arona_ui::routes(&backend))

@@ -5,6 +5,7 @@ import Network
 import UIKit
 import QuickLook
 import UserNotifications
+import WebKit
 import os
 
 /// 푸시(APNs) 다리. 다트가 `request` 를 부르면 권한을 묻고 애플에 등록하고, 토큰이
@@ -13,6 +14,17 @@ import os
 /// 켜진 경우는 다트가 아직 없으므로 `pending` 에 두었다가 `pending` 호출 때 준다.
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  /// 창에 붙어 보이는 첫 WKWebView — 앱 안 웹뷰는 폰 브라우저 하나뿐이다.
+  static func visibleWebView(in root: UIView?) -> WKWebView? {
+    // UIWindow 의 window 는 nil 이다 — 창 자신은 그대로 들어간다.
+    guard let root, !root.isHidden, root is UIWindow || root.window != nil else { return nil }
+    if let web = root as? WKWebView { return web }
+    for child in root.subviews.reversed() {
+      if let web = visibleWebView(in: child) { return web }
+    }
+    return nil
+  }
+
   private let filePreview = ResultFilePreview()
   private var channel: FlutterMethodChannel?
   private var a11yChannel: FlutterMethodChannel?
@@ -71,6 +83,26 @@ import os
         return
       }
       self.filePreview.open(name: name, data: bytes.data, result: result)
+    }
+    // 폰 브라우저(다트 `phone_web.dart`) 찍기 — 플러그인이 WKWebView 를 감추니 화면에 붙은 것을 찾아 그 스냅숏을 쓴다.
+    let phoneWeb = FlutterMethodChannel(name: "kasaterm/phone_web", binaryMessenger: messenger)
+    phoneWeb.setMethodCallHandler { call, result in
+      guard call.method == "snapshot" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let shown = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+      guard let web = Self.visibleWebView(in: shown) else {
+        result(FlutterError(code: "no_webview", message: "화면에 웹뷰가 없다", details: nil))
+        return
+      }
+      web.takeSnapshot(with: nil) { image, error in
+        guard let png = image?.pngData() else {
+          result(FlutterError(code: "snapshot_failed", message: error?.localizedDescription ?? "찍지 못했다", details: nil))
+          return
+        }
+        result(FlutterStandardTypedData(bytes: png))
+      }
     }
     // 「투명도 줄이기」는 플러터가 안 알려 준다 — 날씨가 이 값을 보고 꺼진다(docs/weather.md 접근성).
     let a11y = FlutterMethodChannel(name: "kasaterm/a11y", binaryMessenger: messenger)

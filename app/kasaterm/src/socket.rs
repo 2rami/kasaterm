@@ -2565,6 +2565,22 @@ impl Backend for PtyBackend {
         }
     }
 
+    /// 폰은 데스크톱 쪽 줄에서 명령을 가져간다(GUI 스레드와 무관). 화면은 여기서 파일로 쓴다.
+    fn phone_web(&self, op: &str, arg: &str, timeout_ms: u64) -> Result<serde_json::Value> {
+        if op == "shot" && !std::path::Path::new(arg).is_absolute() {
+            anyhow::bail!("shot 은 저장할 절대경로가 필요하다");
+        }
+        let outcome = kasa_mcp::phone_web::call(op, if op == "shot" { "" } else { arg }, std::time::Duration::from_millis(timeout_ms))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        match outcome {
+            kasa_mcp::phone_web::Outcome::Png(png) => {
+                std::fs::write(arg, &png)?;
+                Ok(serde_json::json!({ "path": arg, "bytes": png.len() }))
+            }
+            kasa_mcp::phone_web::Outcome::Json(v) => Ok(v),
+        }
+    }
+
     /// 살아 있는 토큰을 그대로 읽는다 — atomic 슬롯 로드뿐이라 GUI 스레드에
     /// 위임(`EventLoopProxy`)할 필요가 없다. `App` 상태를 안 만지는 몇 안 되는
     /// 창구다.

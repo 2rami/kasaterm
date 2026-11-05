@@ -56,6 +56,7 @@ pub mod media_stream;
 pub mod mobile;
 pub mod notes;
 pub mod push;
+pub mod phone_web;
 pub mod uplink;
 pub mod gateway;
 pub mod remoteboard;

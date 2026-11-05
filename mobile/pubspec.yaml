@@ -27,6 +27,8 @@ dependencies:
   # 대화 속 소리·영상을 앱 안에서 튼다(iOS 는 AVPlayer). 받은 파일은 앱 캐시 폴더에 둔다.
   video_player: ^2.11.1
   path_provider: ^2.1.6
+  # 폰 브라우저(lib/phone_web.dart) — 에이전트가 읽고 찍는 앱 안 WKWebView. 사람이 보는 링크는 url_launcher 의 Safari 보기.
+  webview_flutter: ^4.13.0
 
 dev_dependencies:
   flutter_test:
