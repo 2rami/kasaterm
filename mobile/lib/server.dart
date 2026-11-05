@@ -129,6 +129,11 @@ class Pane {
   /// 도는 서브에이전트의 설명.
   final List<String> subagents;
 
+  bool get hasRunningSubagents => !closed && subagents.isNotEmpty;
+
+  // A recycled %N must not inherit another pane's hidden or selected state.
+  String get viewKey => '${surfaceKey?.isNotEmpty == true ? 's' : 'e'}:${jsonEncode([machine ?? '', surfaceKey?.isNotEmpty == true ? surfaceKey : id])}';
+
   /// 작업 중일 때 정확한 한 마디. 백그라운드가 있으면 그 설명이 먼저다 — 최신 도구
   /// 라벨은 턴이 끝난 뒤에도 남아, 감시만 도는 pane 에 옛 「Edit …」가 붙는다.
   String get busyLabel => busyDetail ?? '하는 중';

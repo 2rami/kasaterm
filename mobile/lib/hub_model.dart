@@ -23,6 +23,44 @@ class HubRoom {
   /// 데스크톱 창의 가로÷세로 — 미니맵을 그 모양대로 그린다.
   final double? aspect;
 
+  HubRoom visible(Set<String> hidden) {
+    if (!panes.any((pane) => hidden.contains(pane.viewKey))) return this;
+    final kept = panes.where((pane) => !hidden.contains(pane.viewKey)).toList();
+    final ids = kept.map((pane) => pane.id).toSet();
+    bool keepSurface(String id) => paneOf(id) == null || ids.contains(id);
+    return HubRoom(
+      title: title,
+      panes: kept,
+      aspect: aspect,
+      rects: [
+        for (final rect in rects)
+          if (keepSurface(rect.surface) || rect.tabs.any(ids.contains))
+            PaneRect(
+              surface: keepSurface(rect.surface)
+                  ? rect.surface
+                  : rect.tabs.firstWhere(ids.contains),
+              x: rect.x,
+              y: rect.y,
+              w: rect.w,
+              h: rect.h,
+              tabs: rect.tabs.where(ids.contains).toList(),
+              tabActive: () {
+                final active = rect.tabActive;
+                final id =
+                    active != null && active >= 0 && active < rect.tabs.length
+                    ? rect.tabs[active]
+                    : rect.surface;
+                final index = rect.tabs
+                    .where(ids.contains)
+                    .toList()
+                    .indexOf(id);
+                return index < 0 ? 0 : index;
+              }(),
+            ),
+      ],
+    );
+  }
+
   Pane? paneOf(String surface) {
     for (final p in panes) {
       if (p.id == surface) return p;
@@ -147,7 +185,24 @@ class HubModel extends ChangeNotifier {
   Future<void> setView(HubView next) async {
     view = next;
     notifyListeners();
-    await _prefs?.save(next);
+    _saveView = _saveView
+        .catchError((Object _) {})
+        .then((_) async => _prefs?.save(next));
+    await _saveView;
+  }
+
+  Future<void> _saveView = Future.value();
+
+  Future<void> hide(Iterable<Pane> panes, bool hidden) {
+    final keys = {...view.hidden};
+    for (final pane in panes) {
+      if (hidden) {
+        keys.add(pane.viewKey);
+      } else {
+        keys.remove(pane.viewKey);
+      }
+    }
+    return setView(view.copyWith(hidden: keys));
   }
 
   Future<void> toggleFold(HubSection s) =>
@@ -258,7 +313,9 @@ class HubModel extends ChangeNotifier {
   /// 기기 색·아이콘은 데스크톱 설정에서 바뀔 때만 바뀐다 — 폴링 박자엔 안 싣고 열 때·당길 때만 읽는다.
   Future<void> _loadLooks() async {
     final looks = await server.machineLooks();
-    if (!_disposed) machineLooks.value = looks.copyWith(ids: machineLooks.value.ids);
+    if (!_disposed) {
+      machineLooks.value = looks.copyWith(ids: machineLooks.value.ids);
+    }
   }
 
   /// `~id` 길로 닿는 기계의 이름 → id. 이름만 든 자리(거울 칩)도 계정 이름을 찾는다.

@@ -35,6 +35,11 @@ void main() {
     final http = (await tester.runAsync(() => HttpOverrides.runWithHttpOverrides(() async {
       final http = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       http.listen((request) async {
+        if (!WebSocketTransformer.isUpgradeRequest(request)) {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
         final ws = await WebSocketTransformer.upgrade(request);
         ws.listen((data) {
           if (data is! String) return;

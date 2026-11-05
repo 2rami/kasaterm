@@ -14,6 +14,9 @@ session resume to whichever desktop becomes the gateway's new default.
 | Offline conversation reading | Existing saved conversations |
 | New room, room rename/close, pane close/swap | Hub room/pane menus |
 | Split direction, pane move between rooms, split ratio, desktop focus | Expanded pane menu |
+| Hide current room members or individual panes on the phone; restore visibility | Room/pane menu, drag action dock, hidden-items sheet |
+| Drag panes, select multiple panes, close and undo | Long press a minimap cell or list row; drop on a sibling edge or the action dock |
+| Running subagents while their parent plans or waits | Green minimap outline, count and live task list |
 | Start Claude or Codex in a shell | Pane menu → 에이전트 시작 |
 | Resume Claude/Codex/AGY history | PC 기능 → 대화 기록 이어하기; exact session, harness and cwd; new room |
 | Default agent, per-provider permissions, Claude model/effort/options | PC 기능 → PC 설정 |
@@ -22,7 +25,7 @@ session resume to whichever desktop becomes the gateway's new default.
 | Shell, starting folder, file opening app/command, file tree, autosave | PC 설정 → 셸·파일 |
 | Tab placement, pane header, all cursor shapes/thickness, mouse pointer, scroll speed | PC 설정 → PC 배치·입력 |
 | Claude relogin, character selection, device names, browser destination | Existing Settings screens |
-| Device reorder, room hide/resize, pane hide/restore/detach, cross-device transfer | PC 기능 → PC 화면 조작 |
+| Desktop device order, desktop sidebar hide/resize, detach, cross-device transfer | PC 기능 → PC 화면 조작 |
 | File editor/tree mutations, Git panel, work board, MCP, character/theme authoring, advanced account/status-bar configuration | PC 기능 → PC 화면 조작 |
 
 The last two rows operate the desktop UI. They are not independent native phone
@@ -31,6 +34,30 @@ Offline reading remains limited to saved conversations; mutations are not queued
 while the desktop is unavailable.
 
 ## Interaction
+
+Long press on a minimap cell or list row starts a drag. The bottom dock exposes
+selection, hiding, trash and the existing pane menu. Dropping on another pane's
+edge moves beside that pane on the same desktop. Selection stays active until
+the user finishes it; taps then select additional panes on that device.
+
+Hiding changes only the phone view. A room's hide action hides its current
+members, leaving subsequently created panes visible. Hidden membership is scoped
+to the connection and stable surface keys, so names, room order and reused pane
+numbers do not hide unrelated sessions. Old sources without stable keys only
+retain hiding for the current app run. A remaining visible tab replaces the
+hidden tab's face without changing desktop geometry. Hidden panes can be restored
+individually or together.
+
+Trash obtains complete current addresses and uses the desktop's checked close
+operation. Idle shells may close immediately; other sessions require confirmation.
+The same addresses are retained through confirmation, so a replacement session
+is rejected. Successful closes return restore receipts; partial failures retain
+receipts for the panes already closed. Undo uses those receipts.
+
+The desktop's active `term/panes.subagents` list is shown independently of the
+parent's state. A parent waiting for a question keeps its orange attention icon
+while its running children add a green outline and count. The detail sheet
+updates with the hub; finished children disappear from both the outline and list.
 
 Screen viewing starts read-only. In control mode, **스크롤** sends a wheel gesture;
 **끌기·선택** holds the left mouse button through the gesture. Cancellation, leaving
@@ -46,6 +73,11 @@ the phone preserves the previous displayed setting and shows the error.
 
 ## Verification
 
+- `hub_interactions_test.dart`: drag/drop, multi-selection, hiding and restoration,
+  scoped persistence, tab visibility, exact close identity, partial-close undo,
+  confirmation cancellation, active-child updates and narrow screens with large text.
+- `integration_test/hub_interactions_test.dart`: native iOS minimap actions and
+  screenshots using an isolated fixture, with no changes to user sessions.
 - `desktop_tools_test.dart`: exact machine routing, server refusal, malformed
   responses, settings search, 320/390/430 px with 200% text and keyboard,
   Codex resume identity/path and pane movement.

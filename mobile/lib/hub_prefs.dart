@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// 허브를 어떤 모양으로 볼지 — 지도(미니맵)와 목록을 함께, 목록만, 지도만.
@@ -10,6 +12,7 @@ class HubView {
     this.machine,
     this.shape = HubShape.both,
     this.folded = const {},
+    this.hidden = const {},
   });
 
   final String? machine;
@@ -18,6 +21,7 @@ class HubView {
   /// 머리글을 눌러 접어 둔 기계들(주소 기계는 빈 문자열). 기계가 셋이면 방 목록이
   /// 화면 몇 장을 넘어가, 지금 안 보는 기계는 이름만 남긴다(2026-09-08 지시).
   final Set<String> folded;
+  final Set<String> hidden;
 
   bool get allMachines => machine == null;
 
@@ -35,10 +39,12 @@ class HubView {
     bool clearMachine = false,
     HubShape? shape,
     Set<String>? folded,
+    Set<String>? hidden,
   }) => HubView(
     machine: clearMachine ? null : (machine ?? this.machine),
     shape: shape ?? this.shape,
     folded: folded ?? this.folded,
+    hidden: hidden ?? this.hidden,
   );
 }
 
@@ -51,6 +57,7 @@ class HubPrefs {
   static const _machineKey = 'hub.machine';
   static const _shapeKey = 'hub.shape';
   static const _foldedKey = 'hub.folded';
+  static const _hiddenKey = 'hub.hidden';
   static const _all = '*';
   static const _storage = FlutterSecureStorage();
 
@@ -59,6 +66,7 @@ class HubPrefs {
       final m = await _storage.read(key: _key(_machineKey));
       final s = await _storage.read(key: _shapeKey);
       final f = await _storage.read(key: _key(_foldedKey));
+      final h = await _storage.read(key: _key(_hiddenKey));
       return HubView(
         machine: m == null || m == _all ? null : m,
         shape: HubShape.values.firstWhere(
@@ -66,6 +74,7 @@ class HubPrefs {
           orElse: () => HubShape.both,
         ),
         folded: decodeFolded(f),
+        hidden: decodeHidden(h),
       );
     } catch (_) {
       return const HubView();
@@ -76,10 +85,35 @@ class HubPrefs {
     try {
       await _storage.write(key: _key(_machineKey), value: v.machine ?? _all);
       await _storage.write(key: _shapeKey, value: v.shape.name);
-      await _storage.write(key: _key(_foldedKey), value: encodeFolded(v.folded));
+      await _storage.write(
+        key: _key(_foldedKey),
+        value: encodeFolded(v.folded),
+      );
+      await _storage.write(
+        key: _key(_hiddenKey),
+        value: encodeHidden(v.hidden),
+      );
     } catch (_) {
       // 저장소가 막혀도 이번 화면은 고른 대로 보인다 — 다음에 다시 고르면 된다.
     }
+  }
+}
+
+String encodeHidden(Set<String> keys) =>
+    jsonEncode(keys.where((key) => key.startsWith('s:')).take(2000).toList());
+
+Set<String> decodeHidden(String? text) {
+  try {
+    final value = jsonDecode(text ?? '[]');
+    return value is List
+        ? value
+              .whereType<String>()
+              .where((key) => key.startsWith('s:'))
+              .take(2000)
+              .toSet()
+        : {};
+  } catch (_) {
+    return {};
   }
 }
 

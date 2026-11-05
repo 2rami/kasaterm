@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../app_release.dart';
 import '../background_grace.dart';
 import '../hub_model.dart';
+import '../hub_actions.dart';
 import '../hub_prefs.dart';
 import '../look.dart';
 import '../machine_look.dart';
@@ -25,8 +26,12 @@ import 'settings.dart';
 import 'terminal.dart';
 import 'saved_conversations.dart';
 import 'desktop_tools.dart';
+import 'desktop_controls.dart';
+import 'hub_drag.dart';
 
 export '../machine_look.dart' show parseHexColor;
+
+part 'hub_interactions.dart';
 
 /// 첫 화면 — 기계·방별 학생 목록. 기다리는 학생이 맨 위에 선다.
 class HubScreen extends StatefulWidget {
@@ -50,8 +55,10 @@ class HubScreen extends StatefulWidget {
   State<HubScreen> createState() => _HubScreenState();
 }
 
-class _HubScreenState extends State<HubScreen> {
+class _HubScreenState extends State<HubScreen> with HubInteractions {
   late final HubModel _model = HubModel(widget.server, prefs: widget.prefs);
+  @override
+  HubModel get hubModel => _model;
 
   /// 목록과 기기 색표 — 색표는 관문 기준 기기 설정에서 따로 온다.
   late final Listenable _shown = Listenable.merge([_model, machineLooks]);
@@ -132,6 +139,7 @@ class _HubScreenState extends State<HubScreen> {
     }
   }
 
+  @override
   void _open(Pane pane) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -140,6 +148,7 @@ class _HubScreenState extends State<HubScreen> {
     );
   }
 
+  @override
   Future<void> _paneSheet(HubSection s, HubRoom room, Pane p) => showPaneSheet(
     context,
     server: widget.server,
@@ -149,6 +158,9 @@ class _HubScreenState extends State<HubScreen> {
     machine: s.route,
     onOpen: _open,
     onChanged: _model.refresh,
+    onHide: () => _hidePanes([p]),
+    onSelect: () => _select([p]),
+    onSubagents: () => _showSubagents(p),
   );
 
   Future<void> _roomSheet(HubSection s, HubRoom room) => showRoomSheet(
@@ -157,6 +169,7 @@ class _HubScreenState extends State<HubScreen> {
     room: room,
     machine: s.route,
     onChanged: _model.refresh,
+    onHide: () => _hidePanes(room.panes),
   );
 
   Future<void> _newRoom(HubSection s) => newRoom(
@@ -259,6 +272,16 @@ class _HubScreenState extends State<HubScreen> {
               // 지난번 목록을 먼저 그렸다 — 새 목록이 닿을 때까지 위에 얇게 「확인 중」.
               if (_model.showingCached)
                 const Positioned(top: 0, left: 0, right: 0, child: TwinBar()),
+              if (_manipulating)
+                const Positioned(top: 0, left: 0, right: 0, child: LinearProgressIndicator()),
+              if (_dragData != null || _chosen.isNotEmpty)
+                Positioned(left: 12, right: 12, bottom: 8, child: SafeArea(
+                  child: HubActionDock(
+                    count: _chosenPanes.length, drag: _dragData, busy: _manipulating,
+                    onAction: _dropAction,
+                    onCancel: () { _dragEnd(); setState(_chosen.clear); },
+                  ),
+                )),
             ],
           ),
         ),
@@ -270,6 +293,13 @@ class _HubScreenState extends State<HubScreen> {
     final sections = _model.visible;
     final shape = _model.view.shape;
     final children = <Widget>[];
+    if (_model.view.hidden.isNotEmpty) {
+      children.add(TextButton.icon(
+        key: const Key('hub-hidden'),
+        onPressed: _showHidden, icon: const Icon(Icons.visibility_off_outlined),
+        label: Text('숨긴 칸 ${_allHubPanes.where((p) => _model.view.hidden.contains(p.viewKey)).length}개 · 다시 보이기'),
+      ));
+    }
     if (_model.error != null) {
       children.add(ErrorBand(text: _model.error!, onRetry: _refresh));
     }
@@ -319,13 +349,15 @@ class _HubScreenState extends State<HubScreen> {
       // 아이패드·가로 화면에선 방 상자가 여러 열로 선다 — 한 방이 화면 폭을 다 먹으면
       // 한 칸짜리 방의 지도가 화면 반을 차지한다.
       final rooms = <Widget>[];
-      for (final room in s.rooms) {
+      for (final sourceRoom in s.rooms) {
+        final room = sourceRoom.visible(_model.view.hidden);
+        if (room.panes.isEmpty && sourceRoom.panes.isNotEmpty) continue;
         final inside = <Widget>[
           _RoomHeader(
             title: room.title,
             icon: icon,
             color: tint,
-            onMenu: s.online ? () => _roomSheet(s, room) : null,
+            onMenu: () => _roomSheet(s, sourceRoom),
           ),
         ];
         final hasMap = room.rects.isNotEmpty && shape != HubShape.list;
@@ -334,8 +366,9 @@ class _HubScreenState extends State<HubScreen> {
             _MiniMap(
               server: widget.server,
               room: room,
-              onOpen: s.online ? _open : null,
-              onMore: s.online ? (p) => _paneSheet(s, room, p) : null,
+              onOpen: s.online || _chosen.isNotEmpty ? _tapPane : null,
+              wrapPane: (p, child) => _wrapPane(p, child, online: s.online),
+              onSubagents: _showSubagents,
             ),
           );
         }
@@ -346,12 +379,11 @@ class _HubScreenState extends State<HubScreen> {
               Appear(
                 key: ValueKey('tile-${p.machine}-${p.id}'),
                 delayIndex: i,
-                child: _PaneTile(
+                child: _wrapPane(p, _PaneTile(
                   server: widget.server,
                   pane: p,
-                  onTap: s.online ? () => _open(p) : null,
-                  onLongPress: s.online ? () => _paneSheet(s, room, p) : null,
-                ),
+                  onTap: s.online || _chosen.isNotEmpty ? () => _tapPane(p) : null,
+                ), online: s.online),
               ),
             );
           }
@@ -374,7 +406,8 @@ class _HubScreenState extends State<HubScreen> {
         );
       }
       // 웹 터미널·도구가 연 셸은 데스크톱 방 밖에 산다 — 첫 방에 섞으면 정체 모를 「셸」로 보인다.
-      if (s.webShells.isNotEmpty) {
+      final webShells = s.webShells.where((p) => !_model.view.hidden.contains(p.viewKey)).toList();
+      if (webShells.isNotEmpty) {
         rooms.add(
           _RoomBox(
             child: Column(
@@ -385,7 +418,7 @@ class _HubScreenState extends State<HubScreen> {
                   icon: icon,
                   color: tint,
                 ),
-                for (final (i, p) in s.webShells.indexed)
+                for (final (i, p) in webShells.indexed)
                   Appear(
                     key: ValueKey('web-${p.machine}-${p.id}'),
                     delayIndex: i,
@@ -404,15 +437,17 @@ class _HubScreenState extends State<HubScreen> {
     }
     // 당기면 쌍둥이가 내려온다 — 머티리얼 빙글이 대신(design.md 「쌍둥이 결」).
     return CustomScrollView(
+      key: _scrollViewport,
+      controller: _hubScroll,
       physics: twinsScroll,
       slivers: [
         twinsRefreshSliver(_refresh),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(
+          padding: EdgeInsets.fromLTRB(
             Look.pagePad,
             0,
             Look.pagePad,
-            Look.groupGap,
+            Look.groupGap + (_dragData != null || _chosen.isNotEmpty ? 160 : 0),
           ),
           sliver: SliverList.list(children: children),
         ),
@@ -555,7 +590,7 @@ class _SectionHeader extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             SizedBox(
-              height: Look.row2,
+              height: Look.row2 * math.max(1, MediaQuery.textScalerOf(context).scale(14) / 14),
               child: Row(
                 children: [
                   Container(
@@ -580,6 +615,7 @@ class _SectionHeader extends StatelessWidget {
                         Text(
                           title,
                           style: theme.textTheme.titleMedium,
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                         const SizedBox(height: Look.rowGap),
@@ -598,6 +634,7 @@ class _SectionHeader extends StatelessWidget {
                             ],
                           ),
                           style: sub?.copyWith(color: dim),
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ],
@@ -731,15 +768,16 @@ class _MiniMap extends StatelessWidget {
     required this.server,
     required this.room,
     this.onOpen,
-    this.onMore,
+    this.wrapPane,
+    this.onSubagents,
   });
 
   final Server server;
   final HubRoom room;
   final void Function(Pane)? onOpen;
 
-  /// 길게 누름 — pane 판(닫기·추가·자리 바꾸기). 「지도만」 보기에서도 닿게.
-  final void Function(Pane)? onMore;
+  final Widget Function(Pane, Widget)? wrapPane;
+  final void Function(Pane)? onSubagents;
 
   static const _gap = 1.5;
 
@@ -766,6 +804,23 @@ class _MiniMap extends StatelessWidget {
               child: _board(scheme),
             ),
           ),
+          for (final pane in room.panes.where((p) => p.hasRunningSubagents))
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Material(
+                color: StatusStyle.success.withValues(alpha: .08),
+                shape: RoundedRectangleBorder(borderRadius: Look.corners,
+                  side: const BorderSide(color: StatusStyle.success)),
+                child: ListTile(
+                  key: ValueKey('subagents-${pane.viewKey}'),
+                  dense: true,
+                  leading: Icon(Icons.account_tree_outlined, color: StatusStyle.successText(scheme)),
+                  title: Text('${pane.rowTitle} · 하위 작업 ${pane.subagents.length}개'),
+                  subtitle: Text(pane.subagents.take(2).join('\n'), maxLines: 3, overflow: TextOverflow.ellipsis),
+                  onTap: () => onSubagents?.call(pane),
+                ),
+              ),
+            ),
           if (hidden.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(2, 6, 2, 0),
@@ -785,6 +840,7 @@ class _MiniMap extends StatelessWidget {
                       active: null,
                       size: 24,
                       onOpen: onOpen,
+                      wrapPane: wrapPane,
                       marks: true,
                     ),
                   ),
@@ -813,6 +869,7 @@ class _MiniMap extends StatelessWidget {
                       active: null,
                       size: 24,
                       onOpen: onOpen,
+                      wrapPane: wrapPane,
                       marks: true,
                       dashed: true,
                     ),
@@ -851,7 +908,7 @@ class _MiniMap extends StatelessWidget {
                     tabs: [for (final t in r.tabs) room.paneOf(t)],
                     tabActive: r.tabActive,
                     onOpen: onOpen,
-                    onMore: onMore,
+                    wrapPane: wrapPane,
                   ),
                 ),
             ],
@@ -869,7 +926,7 @@ class _MiniCell extends StatefulWidget {
     this.tabs = const [],
     this.tabActive,
     this.onOpen,
-    this.onMore,
+    this.wrapPane,
   });
 
   final Server server;
@@ -880,7 +937,7 @@ class _MiniCell extends StatefulWidget {
   final List<Pane?> tabs;
   final int? tabActive;
   final void Function(Pane)? onOpen;
-  final void Function(Pane)? onMore;
+  final Widget Function(Pane, Widget)? wrapPane;
 
   @override
   State<_MiniCell> createState() => _MiniCellState();
@@ -928,8 +985,9 @@ class _MiniCellState extends State<_MiniCell> {
     final st = p == null ? null : StatusStyle.of(p, scheme);
     final waiting = st?.needsYou ?? false;
     final busy = st?.live ?? false;
+    final childrenRunning = p?.hasRunningSubagents ?? false;
     // 칸 바탕은 학생색, 테두리·점은 상태색 — 「누구」와 「어떤 상태」를 다른 채널로.
-    final edge = waiting ? StatusStyle.attention : accent;
+    final edge = childrenRunning ? StatusStyle.success : waiting ? StatusStyle.attention : accent;
     return LayoutBuilder(
       builder: (context, box) {
         final ch = box.maxHeight;
@@ -980,7 +1038,7 @@ class _MiniCellState extends State<_MiniCell> {
           decoration: BoxDecoration(
             color: accent.withValues(alpha: 0.12),
             borderRadius: Look.smallCorners,
-            border: waiting ? Border.all(color: edge, width: 1.5) : null,
+            border: waiting || childrenRunning ? Border.all(color: edge, width: childrenRunning ? 2 : 1.5) : null,
           ),
           clipBehavior: Clip.antiAlias,
           child: Material(
@@ -989,9 +1047,6 @@ class _MiniCellState extends State<_MiniCell> {
               onTap: p == null || widget.onOpen == null
                   ? null
                   : () => widget.onOpen!(p),
-              onLongPress: p == null || widget.onMore == null
-                  ? null
-                  : () => widget.onMore!(p),
               child: Stack(
                 children: [
                   // 넘길 때 새 학생이 아래에서 올라온다 — 카드가 위로 올라오는 느낌
@@ -1046,6 +1101,17 @@ class _MiniCellState extends State<_MiniCell> {
                       right: 3,
                       child: Icon(st!.icon, size: 12, color: st.color),
                     ),
+                  if (childrenRunning && ch >= 32)
+                    Positioned(top: 3, left: 3, child: IgnorePointer(child: Semantics(
+                      label: '서브에이전트 ${p!.subagents.length}개 실행 중',
+                      child: Container(
+                        key: ValueKey('subagent-badge-${p.viewKey}'),
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(color: scheme.surface, borderRadius: BorderRadius.circular(6)),
+                        child: Text('${p.subagents.length}', style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600, color: StatusStyle.successText(scheme))),
+                      ),
+                    ))),
                 ],
               ),
             ),
@@ -1054,15 +1120,16 @@ class _MiniCellState extends State<_MiniCell> {
         // 작업 중은 학생색 빛 조각이 칸 윤곽을 한 바퀴씩 돈다 — 바닥에 흐르던 막대를 걷었다(2026-10-07).
         // 기다림의 고정 테(상태색)와는 상태가 배타적이라 같이 서지 않는다.
         final cell = OrbitEdge(
-          live: busy && !waiting,
-          color: accent,
+          live: (busy && !waiting) || childrenRunning,
+          color: childrenRunning ? StatusStyle.success : accent,
           radius: Look.smallCorners,
           child: front,
         );
-        if (!tabbed) return cell;
+        Widget wrap(Widget child) => p == null ? child : widget.wrapPane?.call(p, child) ?? child;
+        if (!tabbed) return wrap(cell);
         // 좌우로 쓸면 다음·이전 탭. 겹친 뒷장은 두지 않는다 — 몇째인지는 밑의 점이
         // 말하고, 칸이 작아 덱까지 들어가면 얼굴이 밀린다(2026-09-08 지시).
-        return GestureDetector(
+        return wrap(GestureDetector(
           behavior: HitTestBehavior.opaque,
           onHorizontalDragEnd: (d) {
             final v = d.primaryVelocity ?? 0;
@@ -1070,7 +1137,7 @@ class _MiniCellState extends State<_MiniCell> {
             _flip(v < 0 ? 1 : -1);
           },
           child: cell,
-        );
+        ));
       },
     );
   }
@@ -1085,6 +1152,7 @@ class _MiniTabRow extends StatelessWidget {
     required this.active,
     required this.size,
     this.onOpen,
+    this.wrapPane,
     this.marks = false,
     this.dashed = false,
   });
@@ -1097,11 +1165,13 @@ class _MiniTabRow extends StatelessWidget {
   final int? active;
   final double size;
   final void Function(Pane)? onOpen;
+  final Widget Function(Pane, Widget)? wrapPane;
 
   /// 테를 상태색으로 — 칸 밖에 홀로 선 줄에선 얼굴만으론 「답 기다림」이 안 보인다.
   final bool marks;
 
   Color _edge(Pane? p, int i, ColorScheme scheme) {
+    if (p?.hasRunningSubagents == true) return StatusStyle.success;
     if (marks && p != null) {
       final st = StatusStyle.of(p, scheme);
       if (st.needsYou) return StatusStyle.attention;
@@ -1115,17 +1185,20 @@ class _MiniTabRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Row(
+    Widget wrap(int i, Widget child) => tabs[i] == null ? child : wrapPane?.call(tabs[i]!, child) ?? child;
+    return Wrap(
+      spacing: 3,
+      runSpacing: 3,
       children: [
         for (var i = 0; i < tabs.length; i++)
           Padding(
             padding: const EdgeInsets.only(right: 3),
-            child: GestureDetector(
+            child: wrap(i, GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: tabs[i] == null || onOpen == null
                   ? null
                   : () => onOpen!(tabs[i]!),
-              child: Container(
+              child: SizedBox(width: 44, height: 44, child: Center(child: Container(
                 padding: const EdgeInsets.all(1),
                 foregroundDecoration: dashed
                     ? _DashRing(_edge(tabs[i], i, scheme))
@@ -1164,8 +1237,8 @@ class _MiniTabRow extends StatelessWidget {
                         shell: tabs[i]!.isShell,
                         size: size,
                       ),
-              ),
-            ),
+              ))),
+            )),
           ),
       ],
     );
@@ -1216,13 +1289,11 @@ class _PaneTile extends StatelessWidget {
     required this.server,
     required this.pane,
     this.onTap,
-    this.onLongPress,
   });
 
   final Server server;
   final Pane pane;
   final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -1237,12 +1308,11 @@ class _PaneTile extends StatelessWidget {
     // 얼굴이, 상태는 띠와 도는 윤곽이 말한다.
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
     return OrbitEdge(
-      live: st.live,
-      color: scheme.primary,
+      live: st.live || pane.hasRunningSubagents,
+      color: pane.hasRunningSubagents ? StatusStyle.success : scheme.primary,
       radius: Look.smallCorners,
       child: InkWell(
         onTap: onTap,
-        onLongPress: onLongPress,
         child: CustomPaint(
           // 줄 사이 선은 글자 시작점부터 — 판 안의 안쪽 선(design.md 「행」).
           painter: _InsetLine(scheme.outline, Look.cardPad + Look.face + 12),
@@ -1314,6 +1384,8 @@ class _PaneTile extends StatelessWidget {
                             height: Look.subLine,
                             child: Row(
                               children: [
+                                if (pane.hasRunningSubagents)
+                                  Text('하위 작업 ${pane.subagents.length}개', style: theme.textTheme.labelSmall?.copyWith(color: StatusStyle.successText(scheme))),
                                 const Spacer(),
                                 if (time != null) ...[
                                   const SizedBox(width: 6),

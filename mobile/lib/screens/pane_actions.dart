@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../hub_model.dart';
 import '../server.dart';
 import '../student_art.dart';
+import '../status_style.dart';
 import '../weather/sheet.dart';
 import 'controls.dart';
 import 'desktop_controls.dart';
@@ -10,9 +11,21 @@ import 'desktop_controls.dart';
 /// 허브에서 pane·방을 다루는 판들 — 닫기·옆에 추가·자리 바꾸기·방 만들기/이름/닫기.
 /// 데스크톱 없이 폰에서 배치를 만질 수 있게(2026-09-07 지시). 명령은 전부 서버의
 /// `cmd` 창구로 가고, 끝나면 `onChanged` 로 목록을 다시 받는다 — 푸시가 없어서다.
-enum _PaneAct { open, split, swap, move, ratio, focus, launch, close }
+enum _PaneAct {
+  open,
+  split,
+  swap,
+  move,
+  ratio,
+  focus,
+  launch,
+  close,
+  hide,
+  select,
+  subagents,
+}
 
-enum _RoomAct { add, rename, close }
+enum _RoomAct { add, rename, close, hide }
 
 Future<void> showPaneSheet(
   BuildContext context, {
@@ -23,6 +36,9 @@ Future<void> showPaneSheet(
   required String? machine,
   required void Function(Pane) onOpen,
   required Future<void> Function() onChanged,
+  VoidCallback? onHide,
+  VoidCallback? onSelect,
+  VoidCallback? onSubagents,
 }) async {
   final act = await showModalBottomSheet<_PaneAct>(
     context: context,
@@ -55,6 +71,24 @@ Future<void> showPaneSheet(
                     ),
             ),
             const Divider(height: 1),
+            if (onSelect != null)
+              SettingsRow(
+                icon: Icons.check_circle_outline,
+                title: '선택하기',
+                onTap: () => Navigator.pop(ctx, _PaneAct.select),
+              ),
+            if (onHide != null)
+              SettingsRow(
+                icon: Icons.visibility_off_outlined,
+                title: '이 폰에서 숨기기',
+                onTap: () => Navigator.pop(ctx, _PaneAct.hide),
+              ),
+            if (pane.hasRunningSubagents)
+              SettingsRow(
+                icon: Icons.account_tree_outlined,
+                title: '실행 중인 서브에이전트 ${pane.subagents.length}개',
+                onTap: () => Navigator.pop(ctx, _PaneAct.subagents),
+              ),
             SettingsRow(
               icon: Icons.open_in_new,
               title: '화면 보기',
@@ -113,6 +147,16 @@ Future<void> showPaneSheet(
   );
   if (act == null || !context.mounted) return;
   switch (act) {
+    case _PaneAct.hide:
+      onHide?.call();
+    case _PaneAct.select:
+      onSelect?.call();
+    case _PaneAct.subagents:
+      if (onSubagents != null) {
+        onSubagents();
+      } else {
+        await showRunningSubagents(context, pane);
+      }
     case _PaneAct.open:
       onOpen(pane);
     case _PaneAct.split:
@@ -213,6 +257,7 @@ Future<void> showRoomSheet(
   required HubRoom room,
   required String? machine,
   required Future<void> Function() onChanged,
+  VoidCallback? onHide,
 }) async {
   final first = room.panes.isEmpty ? null : room.panes.first;
   final act = await showModalBottomSheet<_RoomAct>(
@@ -233,6 +278,13 @@ Future<void> showRoomSheet(
               subtitle: Text('pane ${room.panes.length}개'),
             ),
             const Divider(height: 1),
+            if (onHide != null)
+              SettingsRow(
+                icon: Icons.visibility_off_outlined,
+                title: '이 폰에서 방 숨기기',
+                subtitle: '현재 방의 칸을 숨겨요. 작업은 계속 실행돼요.',
+                onTap: () => Navigator.pop(ctx, _RoomAct.hide),
+              ),
             if (first != null)
               SettingsRow(
                 icon: Icons.add_box_outlined,
@@ -263,6 +315,8 @@ Future<void> showRoomSheet(
   );
   if (act == null || first == null || !context.mounted) return;
   switch (act) {
+    case _RoomAct.hide:
+      onHide?.call();
     case _RoomAct.add:
       await _run(
         context,
@@ -350,6 +404,39 @@ Future<bool> _confirm(BuildContext context, String text) =>
 
 Future<String?> _askText(BuildContext context, String label, String initial) =>
     desktopText(context, label, initial, submit: '바꾸기');
+
+Future<void> showRunningSubagents(BuildContext context, Pane pane) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * .65,
+          ),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                title: Text('실행 중인 서브에이전트 ${pane.subagents.length}개'),
+                subtitle: Text(pane.rowTitle),
+              ),
+              for (final task in pane.subagents)
+                ListTile(
+                  leading: Icon(
+                    Icons.account_tree_outlined,
+                    color: StatusStyle.successText(
+                      Theme.of(context).colorScheme,
+                    ),
+                  ),
+                  title: Text(task),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
 
 /// 명령 하나를 돌리고 목록을 다시 받는다. 실패는 스낵바 한 줄 — 주소(slug)가 새지
 /// 않게 서버 쪽 문구만 쓴다.

@@ -37,6 +37,7 @@ class StatusStyle {
   /// 흰 바탕 위 글자·테두리용. 위 두 색은 점·띠에는 되지만 글자로는 대비가 모자란다(4.5:1 미만).
   static const attentionInk = Color(0xffB25A00);
   static const successInk = Color(0xff2A7D37);
+  static Color successText(ColorScheme scheme) => machineInk(success, scheme.surface);
 
   static StatusStyle of(Pane p, ColorScheme scheme) {
     if (p.closed) {
