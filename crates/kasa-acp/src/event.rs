@@ -58,6 +58,8 @@ pub struct ToolCall {
     pub kind: Option<String>,
     pub status: ToolStatus,
     pub command: Option<String>,
+    /// 도구가 건드리는 파일 경로.
+    pub locations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +71,8 @@ pub struct ToolCallUpdate {
     pub command: Option<String>,
     pub output: Option<ToolOutput>,
     pub exit_code: Option<i64>,
+    /// 도구가 건드리는 파일 경로. claude 는 쓰기 도구의 경로를 첫 호출이 아니라 갱신에 싣는다.
+    pub locations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +225,7 @@ pub(crate) fn parse_update(params: &Value) -> Option<Event> {
             kind: str_of(&u["kind"]),
             status: ToolStatus::parse(&u["status"]).unwrap_or(ToolStatus::Pending),
             command: str_of(&u["rawInput"]["command"]),
+            locations: locations(u),
         }),
         "tool_call_update" => Event::ToolCallUpdate(ToolCallUpdate {
             session_id,
@@ -230,6 +235,7 @@ pub(crate) fn parse_update(params: &Value) -> Option<Event> {
             command: str_of(&u["rawInput"]["command"]),
             output: tool_output(u),
             exit_code: u["rawOutput"]["exit_code"].as_i64(),
+            locations: locations(u),
         }),
         "plan" => Event::Plan {
             session_id,
@@ -302,6 +308,13 @@ fn tool_name(u: &Value) -> Option<String> {
     str_of(&u["name"]).or_else(|| str_of(&u["_meta"]["claudeCode"]["toolName"]))
 }
 
+fn locations(u: &Value) -> Vec<String> {
+    u["locations"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|l| str_of(&l["path"])).collect())
+        .unwrap_or_default()
+}
+
 fn tool_output(u: &Value) -> Option<ToolOutput> {
     if let Some(full) = u["rawOutput"].as_str() {
         return Some(ToolOutput::Full(full.to_owned()));
@@ -364,6 +377,7 @@ mod tests {
                 kind: Some("execute".into()),
                 status: ToolStatus::InProgress,
                 command: Some("ls -la".into()),
+                locations: Vec::new(),
             })
         );
         let Event::ToolCallUpdate(done) = update(json!({
@@ -399,6 +413,14 @@ mod tests {
         };
         assert_eq!(done.output, Some(ToolOutput::Full("total 16".into())));
         assert_eq!(done.exit_code, None);
+
+        let Event::ToolCallUpdate(write) = update(json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "toolu_2",
+            "locations": [{ "path": "/w/hello.txt" }]
+        })) else {
+            panic!("not an update");
+        };
+        assert_eq!(write.locations, ["/w/hello.txt"]);
     }
 
     #[test]

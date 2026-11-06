@@ -3,7 +3,7 @@
 //! 입출력은 실행 파일(`src/bin/kasa-acp.rs`)이 붙인다. 이 몫을 따로 둔 이유: 디스패처가 결과
 //! 파일 하나로 수확을 판정하므로, 무엇을 학생의 「답」으로 볼지가 시험으로 고정돼 있어야 한다.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::Path;
 
@@ -22,6 +22,7 @@ pub enum Line {
 
 #[derive(Default)]
 struct ToolSeen {
+    kind: Option<String>,
     title: Option<String>,
     command: Option<String>,
     shown: bool,
@@ -45,6 +46,8 @@ pub struct SessionView {
     context: Option<(u64, u64)>,
     cost_usd: Option<f64>,
     tools: HashMap<String, ToolSeen>,
+    /// 이 세션이 고친 파일. 디스패처가 같은 파일에 다른 학생을 붙이지 않는 근거라 턴을 넘어 쌓는다.
+    files: BTreeSet<String>,
 }
 
 impl SessionView {
@@ -69,6 +72,10 @@ impl SessionView {
             Event::ToolCall(call) => {
                 self.tail.clear();
                 let seen = self.tools.entry(call.id.clone()).or_default();
+                seen.kind.clone_from(&call.kind);
+                if is_edit(seen.kind.as_deref()) {
+                    self.files.extend(call.locations.iter().cloned());
+                }
                 if !call.title.is_empty() {
                     seen.title = Some(call.title.clone());
                 }
@@ -79,6 +86,9 @@ impl SessionView {
             }
             Event::ToolCallUpdate(update) => {
                 let seen = self.tools.entry(update.id.clone()).or_default();
+                if is_edit(seen.kind.as_deref()) {
+                    self.files.extend(update.locations.iter().cloned());
+                }
                 if update.title.is_some() {
                     seen.title.clone_from(&update.title);
                 }
@@ -151,20 +161,27 @@ impl SessionView {
         format!("── {}", parts.join(" · "))
     }
 
-    /// 디스패처가 수확할 때 읽는 결과. 턴이 끝날 때마다 덮어쓴다.
-    pub fn outcome_json(&self, harness: &str, session_id: &str, stop: &str, finished_at: f64) -> Value {
+    /// 디스패처가 읽는 상태. `state` 는 `working`(턴 도는 중)·`idle`(다음 지시 대기)·`exited`(runner 끝).
+    /// `stop`·`answer` 는 마지막으로 끝난 턴의 것이다.
+    pub fn status_json(&self, harness: &str, session_id: &str, state: &str, stop: Option<&str>, at: f64) -> Value {
         json!({
             "harness": harness,
             "session_id": session_id,
+            "state": state,
             "turn": self.turn,
             "stop": stop,
             "answer": self.answer(),
+            "files": self.files,
             "context_used": self.context.map(|c| c.0),
             "context_size": self.context.map(|c| c.1),
             "cost_usd": self.cost_usd,
-            "finished_at": finished_at,
+            "at": at,
         })
     }
+}
+
+fn is_edit(kind: Option<&str>) -> bool {
+    matches!(kind, Some("edit" | "delete" | "move"))
 }
 
 fn show_header(id: &str, seen: &mut ToolSeen) -> Option<Line> {
@@ -197,14 +214,30 @@ pub fn permission_prompt(req: &PermissionRequest) -> (String, Vec<String>) {
 }
 
 /// 반쯤 쓴 파일을 디스패처가 읽지 않게 임시 파일에 쓰고 옮긴다.
-pub fn write_outcome(path: &Path, outcome: &Value) -> io::Result<()> {
+pub fn write_status(path: &Path, status: &Value) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    std::fs::write(&tmp, format!("{outcome}\n"))?;
+    std::fs::write(&tmp, format!("{status}\n"))?;
     std::fs::rename(&tmp, path)
+}
+
+/// inbox 파일에 놓인 다음 지시를 가져가고 파일을 지운다. 비었거나 없으면 `None`.
+///
+/// 지시를 칸 입력으로 넣지 않는 이유: 터미널의 정규 모드는 한 줄을 MAX_CANON(macOS 1024바이트)까지만
+/// 받아 긴 한글 브리프가 잘리고, 여러 줄은 줄마다 다른 지시가 된다. 보내는 쪽은 임시 파일에 쓰고
+/// 옮겨서(`write_status` 와 같은 꼴) 반쯤 쓴 지시를 읽히지 않는다.
+pub fn take_inbox(path: &Path) -> io::Result<Option<String>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    std::fs::remove_file(path)?;
+    let text = text.trim();
+    Ok((!text.is_empty()).then(|| text.to_owned()))
 }
 
 #[cfg(test)]
@@ -228,6 +261,7 @@ mod tests {
             kind: None,
             status: ToolStatus::Pending,
             command: command.map(Into::into),
+            locations: Vec::new(),
         })
     }
 
@@ -240,6 +274,7 @@ mod tests {
             command: command.map(Into::into),
             output,
             exit_code: None,
+            locations: Vec::new(),
         })
     }
 
@@ -329,11 +364,12 @@ mod tests {
             total_tokens: None,
         };
         assert_eq!(v.footer(&outcome), "── end_turn · context 4.8% · $0.30");
-        let j = v.outcome_json("claude", "sid", "end_turn", 12.5);
+        let j = v.status_json("claude", "sid", "idle", Some("end_turn"), 12.5);
         assert_eq!(
             j,
-            json!({ "harness": "claude", "session_id": "sid", "turn": 2, "stop": "end_turn", "answer": "ok",
-                    "context_used": 48001, "context_size": 1000000, "cost_usd": 0.3, "finished_at": 12.5 })
+            json!({ "harness": "claude", "session_id": "sid", "state": "idle", "turn": 2, "stop": "end_turn",
+                    "answer": "ok", "files": [], "context_used": 48001, "context_size": 1000000,
+                    "cost_usd": 0.3, "at": 12.5 })
         );
     }
 
@@ -356,11 +392,43 @@ mod tests {
     }
 
     #[test]
-    fn outcome_file_is_replaced_whole() {
-        let dir = std::env::temp_dir().join(format!("kasa-acp-outcome-{}", std::process::id()));
+    fn edited_files_accumulate_across_turns_but_reads_do_not_count() {
+        let mut v = SessionView::default();
+        v.begin_turn();
+        let Event::ToolCall(mut write) = call("w1", "Write", None) else { unreachable!() };
+        write.kind = Some("edit".into());
+        v.observe(&Event::ToolCall(write));
+        let Event::ToolCallUpdate(mut located) = update("w1", None, None, None) else { unreachable!() };
+        located.locations = vec!["/w/a.rs".into()];
+        v.observe(&Event::ToolCallUpdate(located));
+        let Event::ToolCall(mut read) = call("r1", "Read", None) else { unreachable!() };
+        read.kind = Some("read".into());
+        read.locations = vec!["/w/b.rs".into()];
+        v.observe(&Event::ToolCall(read));
+        v.begin_turn();
+        assert_eq!(v.status_json("c", "s", "working", None, 0.0)["files"], json!(["/w/a.rs"]));
+    }
+
+    #[test]
+    fn inbox_is_taken_once() {
+        let dir = std::env::temp_dir().join(format!("kasa-acp-inbox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let inbox = dir.join("next.txt");
+        assert_eq!(take_inbox(&inbox).expect("missing is fine"), None);
+        std::fs::write(&inbox, "first line\nsecond line\n").expect("write");
+        assert_eq!(take_inbox(&inbox).expect("read").as_deref(), Some("first line\nsecond line"));
+        assert!(!inbox.exists());
+        std::fs::write(&inbox, "  \n").expect("write");
+        assert_eq!(take_inbox(&inbox).expect("blank"), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn status_file_is_replaced_whole() {
+        let dir = std::env::temp_dir().join(format!("kasa-acp-status-{}", std::process::id()));
         let path = dir.join("nested/task.json");
-        write_outcome(&path, &json!({ "turn": 1 })).expect("write");
-        write_outcome(&path, &json!({ "turn": 2 })).expect("rewrite");
+        write_status(&path, &json!({ "turn": 1 })).expect("write");
+        write_status(&path, &json!({ "turn": 2 })).expect("rewrite");
         let read: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
         assert_eq!(read["turn"], 2);
         assert!(!dir.join("nested/task.json.tmp").exists());

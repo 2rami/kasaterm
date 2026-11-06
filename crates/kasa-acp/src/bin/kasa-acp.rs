@@ -1,11 +1,11 @@
 //! `kasa-acp run` — 칸 안에서 ACP 학생 하나를 돌린다.
 //!
 //!   kasa-acp run --harness claude|codex [--cwd DIR] [--mode ID] [--set ID=VALUE]...
-//!                [--outcome FILE] [--resume SESSION] [--permission ask|allow|reject] [--once]
-//!                [-- 첫 지시]
+//!                [--status FILE] [--inbox FILE] [--resume SESSION]
+//!                [--permission ask|allow|reject] [--once] [-- 첫 지시]
 //!
-//! 턴이 끝날 때마다 `--outcome` 파일에 결과를 쓴다. 디스패처는 그 파일로 수확한다 — 화면의
-//! idle 을 짐작하지 않는다. `--once` 가 아니면 턴 뒤에 다음 지시를 입력받는다.
+//! 턴이 시작하고 끝날 때마다 `--status` 파일을 덮어쓴다. 디스패처는 그 파일로 수확한다 — 화면의
+//! idle 을 짐작하지 않는다. `--once` 가 아니면 턴 뒤에 다음 지시를 칸 입력이나 `--inbox` 파일로 받는다.
 //! Ctrl-C 는 도는 턴을 멈추고, 멈추는 중에 한 번 더 누르면 끝낸다.
 
 use std::error::Error;
@@ -21,7 +21,7 @@ use kasa_acp::{Connection, Event, Harness, LaunchSpec, PermissionKind, PromptOut
 
 const TICK: Duration = Duration::from_millis(100);
 const USAGE: &str = "usage: kasa-acp run --harness claude|codex [--cwd DIR] [--mode ID] [--set ID=VALUE]... \
-[--outcome FILE] [--resume SESSION] [--permission ask|allow|reject] [--once] [-- PROMPT]";
+[--status FILE] [--inbox FILE] [--resume SESSION] [--permission ask|allow|reject] [--once] [-- PROMPT]";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -35,7 +35,8 @@ struct Args {
     cwd: PathBuf,
     mode: Option<String>,
     set: Vec<(String, String)>,
-    outcome: Option<PathBuf>,
+    status: Option<PathBuf>,
+    inbox: Option<PathBuf>,
     resume: Option<String>,
     permission: Policy,
     once: bool,
@@ -50,7 +51,8 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut cwd = None;
     let mut mode = None;
     let mut set = Vec::new();
-    let mut outcome = None;
+    let mut status = None;
+    let mut inbox = None;
     let mut resume = None;
     let mut permission = Policy::Ask;
     let mut once = false;
@@ -72,7 +74,8 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 let (k, v) = kv.split_once('=').ok_or_else(|| format!("--set wants ID=VALUE, got {kv}"))?;
                 set.push((k.to_owned(), v.to_owned()));
             }
-            "--outcome" => outcome = Some(PathBuf::from(value()?)),
+            "--status" => status = Some(PathBuf::from(value()?)),
+            "--inbox" => inbox = Some(PathBuf::from(value()?)),
             "--resume" => resume = Some(value()?),
             "--permission" => {
                 permission = match value()?.as_str() {
@@ -104,7 +107,8 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         cwd,
         mode,
         set,
-        outcome,
+        status,
+        inbox,
         resume,
         permission,
         once,
@@ -191,6 +195,7 @@ struct Session<'a> {
     conn: &'a Connection,
     events: &'a Receiver<Event>,
     lines: &'a Receiver<String>,
+    inbox: Option<&'a std::path::Path>,
     id: &'a str,
     policy: Policy,
 }
@@ -278,14 +283,38 @@ impl Session<'_> {
         }
     }
 
-    /// 사람의 다음 지시. 입력이 끝났거나 Ctrl-C 면 `None`.
+    /// 다음 지시 — 칸 입력이나 inbox 파일 중 먼저 온 것. 입력이 끝났거나 Ctrl-C 면 `None`.
     fn next_prompt(&self, screen: &mut Screen) -> Option<String> {
         screen.break_line();
         print!("\n> ");
         std::io::stdout().flush().ok();
+        let mut typed_closed = false;
+        let mut warned = false;
         loop {
             if take_interrupt() {
                 return None;
+            }
+            match self.inbox.map(runner::take_inbox) {
+                Some(Ok(Some(text))) => {
+                    let first = text.lines().next().unwrap_or_default();
+                    let more = if text.lines().nth(1).is_some() { " …" } else { "" };
+                    println!("{first}{more}");
+                    return Some(text);
+                }
+                Some(Err(e)) if !warned => {
+                    warned = true;
+                    screen.note(&format!("(inbox unreadable: {e})"));
+                }
+                Some(Err(_)) => {}
+                Some(Ok(None)) | None => {}
+            }
+            if typed_closed {
+                // 칸 입력이 닫혀도 inbox 로 오는 지시는 계속 받는다. inbox 도 없으면 끝낼 길뿐이다.
+                if self.inbox.is_none() {
+                    return None;
+                }
+                std::thread::sleep(TICK);
+                continue;
             }
             match self.lines.recv_timeout(TICK) {
                 Ok(line) if line.trim().is_empty() => {
@@ -294,7 +323,7 @@ impl Session<'_> {
                 }
                 Ok(line) => return Some(line),
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return None,
+                Err(RecvTimeoutError::Disconnected) => typed_closed = true,
             }
         }
     }
@@ -341,9 +370,27 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
 
     install_sigint();
     let lines = stdin_lines();
-    let session = Session { conn: &conn, events: &events, lines: &lines, id: &session_id, policy: args.permission };
+    let session = Session {
+        conn: &conn,
+        events: &events,
+        lines: &lines,
+        inbox: args.inbox.as_deref(),
+        id: &session_id,
+        policy: args.permission,
+    };
     let mut view = SessionView::default();
+    let report = |view: &SessionView, state: &str, stop: Option<&str>, error: Option<&str>| -> Result<(), Box<dyn Error>> {
+        let Some(path) = &args.status else { return Ok(()) };
+        let mut status = view.status_json(args.harness.name(), &session_id, state, stop, now());
+        if let Some(why) = error {
+            status["error"] = why.into();
+        }
+        runner::write_status(path, &status)?;
+        Ok(())
+    };
+    report(&view, "idle", None, None)?;
     let mut next = args.prompt.clone();
+    let mut last_stop: Option<String> = None;
     let mut ok = true;
     loop {
         let prompt = match next.take() {
@@ -355,6 +402,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             },
         };
         view.begin_turn();
+        report(&view, "working", last_stop.as_deref(), None)?;
         let (stop, broken) = match session.turn(&prompt, &mut view, &mut screen) {
             TurnEnd::Done(outcome) => {
                 screen.note(&view.footer(&outcome));
@@ -365,20 +413,19 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 ("error".to_owned(), Some(why))
             }
         };
-        if let Some(path) = &args.outcome {
-            let mut outcome = view.outcome_json(args.harness.name(), &session_id, &stop, now());
-            if let Some(why) = &broken {
-                outcome["error"] = why.as_str().into();
-            }
-            runner::write_outcome(path, &outcome)?;
-        }
-        if broken.is_some() {
+        if let Some(why) = &broken {
+            report(&view, "exited", Some(&stop), Some(why))?;
             ok = false;
             break;
         }
+        report(&view, "idle", Some(&stop), None)?;
+        last_stop = Some(stop);
         if args.once {
             break;
         }
+    }
+    if ok {
+        report(&view, "exited", last_stop.as_deref(), None)?;
     }
     conn.shutdown(Duration::from_secs(5));
     Ok(ok)
@@ -397,10 +444,10 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::from(1),
         Err(e) => {
             eprintln!("kasa-acp: {e}");
-            if let Some(path) = &args.outcome {
-                let failed = serde_json::json!({ "harness": args.harness.name(), "stop": "error",
-                                                 "error": e.to_string(), "finished_at": now() });
-                let _ = runner::write_outcome(path, &failed);
+            if let Some(path) = &args.status {
+                let failed = serde_json::json!({ "harness": args.harness.name(), "state": "exited",
+                                                 "stop": "error", "error": e.to_string(), "at": now() });
+                let _ = runner::write_status(path, &failed);
             }
             ExitCode::from(1)
         }

@@ -56,27 +56,34 @@ codex 어댑터는 ChatGPT 로그인을 지원한다고 명시한다.
 ## 칸 안의 runner — `kasa-acp run`
 
 무인 학생도 칸에 보이게 둔다. 칸에서 `claude '<브리프>'` 대신 runner 를 띄우면, 화면에는 말·도구 호출·출력
-몇 줄이 흐르고, 턴이 끝날 때마다 결과 파일이 덮어써진다.
+몇 줄이 흐르고, 턴이 시작하고 끝날 때마다 상태 파일이 덮어써진다.
 
 ```sh
 kasa-acp run --harness claude|codex [--cwd DIR] [--mode ID] [--set ID=VALUE]... \
-             [--outcome FILE] [--resume SESSION] [--permission ask|allow|reject] [--once] [-- 첫 지시]
+             [--status FILE] [--inbox FILE] [--resume SESSION] \
+             [--permission ask|allow|reject] [--once] [-- 첫 지시]
 ```
 
-- `--once` 가 아니면 턴 뒤에 `> ` 로 다음 지시를 받는다. Ctrl-C 는 도는 턴을 멈추고(`cancelled`), 멈추는 중에 한 번 더
-  누르면 끝낸다. Ctrl-D 는 끝낸다.
+- 첫 지시는 실행 인자로 준다. 다음 지시는 칸 입력(`> `)이나 `--inbox` 파일 중 먼저 온 것을 받는다.
+- 기계가 보내는 지시는 칸 입력이 아니라 inbox 파일로 보낸다. 터미널 정규 모드는 한 줄을 MAX_CANON(macOS
+  1024바이트)까지만 받아 긴 한글 브리프가 잘리고, 여러 줄은 줄마다 다른 지시가 된다. 보내는 쪽은 임시 파일에
+  쓰고 옮긴다. runner 는 쉬는 동안 그 파일을 읽고 지운다.
+- Ctrl-C 는 도는 턴을 멈추고(`cancelled`), 멈추는 중에 한 번 더 누르거나 쉬는 동안 누르면 끝낸다. Ctrl-D 는
+  칸 입력을 닫는다 — inbox 가 없으면 끝나고, 있으면 inbox 지시를 계속 받는다.
 - 권한 요청은 `ask` 면 칸에서 번호로 고른다. stdin 이 터미널이 아니면 `ask` 는 `reject` 로 바뀐다 — 사람이 없는데
   묻고 기다리면 학생이 영영 멈춘다.
 - claude 는 PATH 의 `claude` 를 쓰되 칸 shim(`kasaterm-shim-N`) 폴더는 건너뛴다. shim 은 대화형 실행에 훅·페르소나·
   session-id 플래그를 얹는데, 어댑터의 SDK 모드 호출에 섞이면 안 된다. 그래서 runner 학생에는 아직 협업 훅이 없다.
 
-결과 파일(`--outcome`)은 한 줄 JSON 이고 임시 파일에 쓴 뒤 옮긴다.
+상태 파일(`--status`)은 한 줄 JSON 이고 임시 파일에 쓴 뒤 옮긴다.
 
 | 키 | 뜻 |
 |---|---|
-| `stop` | `end_turn`·`cancelled`·`max_tokens`·`refusal`… 연결이 죽으면 `error` 와 `error` 키 |
+| `state` | `working`(턴 도는 중)·`idle`(다음 지시 대기)·`exited`(runner 끝) |
+| `turn` | 이 runner 의 몇 번째 턴인가. `working` 이면 도는 턴, 아니면 마지막으로 끝난 턴 |
+| `stop` | 마지막으로 끝난 턴의 `end_turn`·`cancelled`·`max_tokens`·`refusal`…, 연결이 죽으면 `error` 와 `error` 키 |
 | `answer` | 마지막 도구 호출 뒤의 말. 그게 비면 그 턴의 말 전부 |
-| `turn` | 이 runner 의 몇 번째 턴인가 |
+| `files` | 이 세션이 편집 도구(edit·delete·move)로 고친 파일. 셸 명령으로 쓴 파일은 안 잡힌다 |
 | `session_id` | 하네스 세션 id — `--resume` 이나 TUI resume 으로 이어받는다 |
 | `context_used`·`context_size`·`cost_usd` | 마지막 사용량. claude 만 비용을 준다 |
 
