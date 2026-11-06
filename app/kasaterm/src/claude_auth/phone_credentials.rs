@@ -55,7 +55,7 @@ impl fmt::Debug for Staged {
 }
 
 impl Staged {
-    pub(crate) fn identity(&self) -> Option<kasa_mcp::VerifiedClaudeIdentity> {
+    pub(crate) fn identity(&self) -> Option<kasa_device::VerifiedClaudeIdentity> {
         match &self.original {
             Stored::Present(_, blob) => super::verified_blob_identity(&blob.0),
             Stored::Absent => None,
@@ -237,7 +237,7 @@ fn refresh_active_in(
     staged: &Staged,
     stamp_home: &Path,
     store: Option<&Path>,
-    identity_of: impl Fn(&[u8]) -> Option<kasa_mcp::VerifiedClaudeIdentity>,
+    identity_of: impl Fn(&[u8]) -> Option<kasa_device::VerifiedClaudeIdentity>,
 ) -> Result<bool> {
     let Some((owner, digest)) = super::read_stamp_in(stamp_home) else {
         return Ok(false);
@@ -927,8 +927,8 @@ mod tests {
         assert_eq!(std::fs::read_dir(target).unwrap().count(), 1);
     }
 
-    fn fixture_identity(_: &[u8]) -> Option<kasa_mcp::VerifiedClaudeIdentity> {
-        Some(kasa_mcp::VerifiedClaudeIdentity {
+    fn fixture_identity(_: &[u8]) -> Option<kasa_device::VerifiedClaudeIdentity> {
+        Some(kasa_device::VerifiedClaudeIdentity {
             account_uuid: uuid::Uuid::from_u128(1).to_string(),
             organization_uuid: uuid::Uuid::from_u128(2).to_string(),
             email: "fixture@example.test".into(),

@@ -6,7 +6,7 @@
 
 ### 페르소나 원본: `~/.config/kasaterm/characters.json` (git 미추적)
 
-레포 소스엔 characters.json 이 **없다**. `crates/kasa-mcp/src/character.rs::candidate_paths()` 우선순위:
+레포 소스엔 characters.json 이 **없다**. `crates/kasa-characters/src/character.rs::candidate_paths()` 우선순위:
 
 1. `~/.config/kasaterm/characters.json` ← **현재 유일한 실존본** (실질 소스 오브 트루스)
 2. `$KASATERM_COLLAB_HOOKS_DIR/characters.json`

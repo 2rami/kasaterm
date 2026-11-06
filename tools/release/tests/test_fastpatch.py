@@ -475,7 +475,7 @@ class LocalRunTests(Fixture):
         state = self.go(self.plan())
         self.assertEqual([state["stages"][s]["status"] for s in fp.STAGES], ["done", "done", "dry", "dry", "dry", "done"])
         cargo = [c for c in self.calls if c[0] == "cargo" and c[1] == "test"]
-        self.assertEqual([c[3] for c in cargo], ["kasaterm", "kasa-mcp", "kasa-socket"])
+        self.assertEqual([c[3] for c in cargo], ["kasaterm", "kasa-http", "kasa-socket"])
         self.assertIn("built", state["stages"]["build"]["detail"])
         self.assertEqual(state["stages"]["build"]["detail"]["identity"]["team"], "ABCDE12345")
         self.assertEqual((self.remote_tags(), self.remote("refs/heads/main")), (["v0.2.0"], self.head))
@@ -497,8 +497,8 @@ class LocalRunTests(Fixture):
 
     def test_failing_or_timed_out_tests_stop_with_the_command(self):
         plan = self.plan()
-        self.cargo_answer = lambda argv: Result(101, "", "test foo ... FAILED") if argv[3] == "kasa-mcp" else Result(0)
-        with self.assertRaisesRegex(Refused, "검사 실패: cargo test -p kasa-mcp"):
+        self.cargo_answer = lambda argv: Result(101, "", "test foo ... FAILED") if argv[3] == "kasa-http" else Result(0)
+        with self.assertRaisesRegex(Refused, "검사 실패: cargo test -p kasa-http"):
             self.go(plan)
         _, state = fp.load(plan["plan_id"], self.state)
         self.assertEqual(state["stages"]["verify"]["status"], "failed")
@@ -1168,9 +1168,9 @@ class RealRepoTests(unittest.TestCase):
         self.assertEqual((fp.tunnel_port("맥북"), fp.tunnel_port("windesktop")), (18986, 18917))
 
     def test_classify_splits_native_mobile_and_non_shipping_files(self):
-        kinds = fp.classify(["app/kasaterm/src/a.rs", "crates/kasa-mcp/src/b.rs", "mobile/lib/c.dart",
+        kinds = fp.classify(["app/kasaterm/src/a.rs", "crates/kasa-http/src/b.rs", "mobile/lib/c.dart",
                              "docs/d.md", "docs/appcast.xml", "scripts/e.sh", "README.md"])
-        self.assertEqual(kinds["native"], ["app/kasaterm/src/a.rs", "crates/kasa-mcp/src/b.rs"])
+        self.assertEqual(kinds["native"], ["app/kasaterm/src/a.rs", "crates/kasa-http/src/b.rs"])
         self.assertEqual(kinds["mobile"], ["mobile/lib/c.dart"])
         self.assertEqual(kinds["feed"], ["docs/appcast.xml"])
         self.assertEqual(kinds["docs"], ["docs/d.md", "README.md"])

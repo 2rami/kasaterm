@@ -173,7 +173,7 @@
 ```sh
 cargo test -p kasa-socket app_update      # 기기(가짜 받기·가짜 dmg·실제 sh 도우미·가짜 앱)·러너(가짜 기기·가짜 시계)
                                           # Windows 에선 실제 PowerShell 도우미·가짜 msiexec(.cmd)로 설치·실패·바뀐 msi·상한까지
-cargo test -p kasa-mcp update_http_e2e    # 4건 — 기기 서버 둘을 실제 HTTP 로 띄워 러너가 두드린다·중계 창구 거름
+cargo test -p kasa-http update_http_e2e    # 4건 — 기기 서버 둘을 실제 HTTP 로 띄워 러너가 두드린다·중계 창구 거름
 python3 -m unittest tools.release.tests.test_fastpatch   # rollout·device-apply·작업 모양·id·해시 대조 포함
 bash scripts/nacho-update-interop.sh      # 실제 나쵸 승인 서버(격리)와 왕복 — 고정 자료·소비·창·거둠·창구 닫힘·틀린 키
 ```

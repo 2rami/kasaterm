@@ -77,7 +77,7 @@ def scope_problem(scope):
 
 
 class NachoAuthority:
-    """나쵸 앱 창구. 주소·키는 데스크톱 앱과 같은 서술자·키 파일(kasa-mcp `nacho_relay::app_target`)."""
+    """나쵸 앱 창구. 주소·키는 데스크톱 앱과 같은 서술자·키 파일(kasa-device `nacho_relay::app_target`)."""
 
     def __init__(self, base, key, http):
         self.base, self._key, self.http = base.rstrip("/"), key, http

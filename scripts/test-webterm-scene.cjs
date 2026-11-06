@@ -30,7 +30,7 @@ function fixture() {
     clearTimeout: id => timers.delete(id),
     fetch: (url, options) => new Promise(resolve => requests.push({ url, options, resolve })),
   };
-  vm.runInNewContext(fs.readFileSync('crates/kasa-mcp/assets/term/grid.js', 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync('crates/kasa-http/assets/term/grid.js', 'utf8'), context);
   const root = new Element('main'), grid = window.KasaGrid(root, { assetRoot: '/u/fixture/m/device' });
   grid.setPane('%1');
   function find(className, parent = grid.el) {

@@ -1,10 +1,10 @@
 //! 기기 화면 거울의 조작 넣기 — 보는 쪽(폰·다른 PC)이 보낸 누르기·휠·키·글자를 이 기기에 넣는다
-//! (`docs/screen-mirror.md` 「조작」). 소켓·차례는 `kasa_mcp::screen_mirror`, 여기는 OS 에 넣는 일만.
+//! (`docs/screen-mirror.md` 「조작」). 소켓·차례는 `kasa_remote::screen_mirror`, 여기는 OS 에 넣는 일만.
 //!
 //! 좌표는 그 화면 안의 비율이라 화면 사각형(macOS 포인트, Windows 가상 화면 픽셀)에 얹어 푼다. 글자는 키 위치가
 //! 아니라 글자째 넣는다 — 폰 자판이 이미 조합한 한글을 키로 풀면 그 기기 입력기가 다시 조합해 어긋난다.
 
-use kasa_mcp::screen_mirror::{Denied, Input};
+use kasa_remote::screen_mirror::{Denied, Input};
 
 pub(crate) fn put(display: u32, input: &Input) -> Result<(), Denied> {
     os::put(display, input)

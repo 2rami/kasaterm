@@ -274,7 +274,7 @@ impl App {
     pub(crate) fn seed_home_accounts_probe(
         &mut self,
         label: &str,
-        value: kasa_mcp::remote::RemoteAccounts,
+        value: kasa_remote::remote::RemoteAccounts,
     ) {
         crate::homeaccounts::seed_for_probe(label, value);
         self.chrome_dirty = true;
@@ -293,8 +293,8 @@ impl App {
     pub(crate) fn save_machine_edit(&mut self) {
         let Some(edit) = self.machine_edit.as_ref() else { return };
         let deleting = edit.deleting;
-        let result = edit.updated(&kasa_mcp::machines::entries()).and_then(|entries| {
-            kasa_mcp::machines::save_entries(&entries).map_err(|e| format!("저장하지 못했습니다: {e}"))
+        let result = edit.updated(&kasa_device::machines::entries()).and_then(|entries| {
+            kasa_device::machines::save_entries(&entries).map_err(|e| format!("저장하지 못했습니다: {e}"))
         });
         match result {
             Ok(()) => {
@@ -453,14 +453,14 @@ impl App {
             self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
             return;
         }
-        let Some(acct) = kasa_mcp::agent_accounts::cached()
+        let Some(acct) = kasa_device::agent_accounts::cached()
             .and_then(|seen| seen.shared.into_iter().find(|a| a.key == key))
         else {
             self.set_toast("그 계정이 목록에서 사라졌어요 — 잠시 뒤 다시 봐 주세요".to_string());
             return;
         };
         let name = if acct.label.is_empty() { acct.email.clone() } else { acct.label.clone() };
-        if provider == AccountProvider::Claude && kasa_mcp::agent_chains::held(&acct.key) {
+        if provider == AccountProvider::Claude && kasa_device::agent_chains::held(&acct.key) {
             if self.adopt_held_claude_chain(&acct.key).is_some() {
                 self.set_toast(format!("관문에서 「{name}」 로그인을 받아 와요 — 기존 계정 자리에서 확인해요"));
             }
@@ -506,17 +506,17 @@ impl App {
     /// 받기와 같은 길로 새 슬롯(앞서 받다 만 같은 이름의 빈 슬롯이면 그 자리)에 받는다. 브라우저 로그인은 하지 않는다.
     /// 목록의 이메일·조직은 이름일 뿐이라, 고르는 쪽이 받은 토큰의 UUID 를 확인한 뒤에 쓴다.
     pub(crate) fn adopt_held_claude_chain(&mut self, key: &str) -> Option<String> {
-        if hidden_login_running() || !kasa_mcp::agent_chains::held(key) {
+        if hidden_login_running() || !kasa_device::agent_chains::held(key) {
             return None;
         }
-        if let Some(id) = kasa_mcp::agent_chains::registered_slot(key,
+        if let Some(id) = kasa_device::agent_chains::registered_slot(key,
             self.set_claude_accounts.iter().map(|account| account.id.as_str()))
         {
-            kasa_mcp::agent_chains::poke();
+            kasa_device::agent_chains::poke();
             request_account_sync_identity(&id);
             return Some(id);
         }
-        let acct = kasa_mcp::agent_accounts::cached()?.shared.into_iter().find(|a| a.key == key)?;
+        let acct = kasa_device::agent_accounts::cached()?.shared.into_iter().find(|a| a.key == key)?;
         let unused = self
             .set_claude_accounts
             .iter()
@@ -570,7 +570,7 @@ impl App {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if let Some(v) = kasa_mcp::character::characters_json() {
+            if let Some(v) = kasa_characters::character::characters_json() {
                 if let Ok(txt) = serde_json::to_string_pretty(&v) {
                     let _ = std::fs::write(&p, txt);
                 }
@@ -597,7 +597,7 @@ impl App {
         // 이 버튼의 뜻이 곧 "파일을 다시 봐라"다. 손으로 폴더를 넣거나 지운 경우는
         // 캐시가 알 길이 없으니, 목록 자체도 여기서 함께 다시 읽는다.
         socket::invalidate_theme_rows();
-        kasa_mcp::character::invalidate_active_theme();
+        kasa_characters::character::invalidate_active_theme();
         theme::invalidate_roster();
         self.repaint_all();
     }
@@ -619,7 +619,7 @@ impl App {
         // 활성 테마가 이미 새것이라, 옛 테마에서 고친 글이 새 테마 파일에 쓰인다.
         self.flush_student_persona();
         socket::write_setting("character_theme", serde_json::Value::String(id.clone()));
-        kasa_mcp::character::invalidate_active_theme();
+        kasa_characters::character::invalidate_active_theme();
         theme::invalidate_roster();
         // 목록의 "쓰는 중" 배지가 어느 카드에 붙는지가 여기서 바뀐다.
         socket::invalidate_theme_rows();
@@ -680,7 +680,7 @@ impl App {
                     self.theme_label_edit = None;
                     self.settings_input = None;
                 }
-                kasa_mcp::character::invalidate_active_theme();
+                kasa_characters::character::invalidate_active_theme();
                 // 활성이 아닌 테마를 치웠으면 위 `select_theme` 갈래를 안 타므로 이름·그림
                 // 합집합이 안 비워진다 — 치운 테마의 캐릭터가 계속 조회에 잡힌다.
                 theme::invalidate_roster();
@@ -722,7 +722,7 @@ impl App {
             return;
         }
         // 목록 표시명은 활성 테마 해석과 같은 캐시를 타므로 함께 비워야 한다.
-        kasa_mcp::character::invalidate_active_theme();
+        kasa_characters::character::invalidate_active_theme();
         socket::invalidate_theme_rows();
         self.theme_label_edit = None;
     }
@@ -772,7 +772,7 @@ impl App {
         };
         if found {
             self.settings_save();
-            kasa_mcp::agent_accounts::poke();
+            kasa_device::agent_accounts::poke();
             self.account_label_edit = None;
         } else {
             self.set_toast("그 계정 슬롯이 더는 없어요".to_string());
@@ -781,7 +781,7 @@ impl App {
 
     /// 테마 목록 `(폴더 id, 표시명)` — 번들은 목록에 없다(폴더가 없어서).
     fn settings_snapshot_themes(&self) -> Vec<(String, String)> {
-        kasa_mcp::character::list_themes()
+        kasa_characters::character::list_themes()
     }
 
     /// Mark every pane + chrome dirty so a theme/accent change repaints the
@@ -895,20 +895,20 @@ impl App {
                 // A viewer's "this computer" must mean the viewer, not the
                 // source where the agent's MCP process happens to run.
                 let target_label = if machine.is_empty() {
-                    kasa_mcp::machines::self_label()
+                    kasa_device::machines::self_label()
                 } else { machine.clone() };
                 let target_id = if machine.is_empty() {
-                    kasa_mcp::mobile::machine_identity()
+                    kasa_device::mobile::machine_identity()
                 } else {
-                    kasa_mcp::machines::snapshot().into_iter().find_map(|m| {
+                    kasa_device::machines::snapshot().into_iter().find_map(|m| {
                         (m.get("label")?.as_str()? == machine).then(|| {
                             m.get("route")?.as_str()?.strip_prefix('~').map(str::to_string)
                         }).flatten()
                     })
                 };
                 let mut sources: Vec<String> = self.pty.keys()
-                    .filter_map(|p| kasa_mcp::remote::remote_info(p).map(|i| i.base))
-                    .chain(kasa_mcp::machines::machines().into_iter().filter(|m| m.home).map(|m| m.base))
+                    .filter_map(|p| kasa_remote::remote::remote_info(p).map(|i| i.base))
+                    .chain(kasa_device::machines::machines().into_iter().filter(|m| m.home).map(|m| m.base))
                     .collect();
                 sources.sort(); sources.dedup();
                 let proxy = self.proxy.clone();
@@ -918,8 +918,8 @@ impl App {
                     static SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
                     let Ok(_guard) = SYNC.lock() else { return };
                     for base in sources {
-                        if kasa_mcp::machines::kasachrome_machine() != machine { return; }
-                        if let Err(error) = kasa_mcp::remote::settings_action(
+                        if kasa_device::machines::kasachrome_machine() != machine { return; }
+                        if let Err(error) = kasa_remote::remote::settings_action(
                             &base, "set-browser-target", target_id.as_deref(), Some(&target_label), None,
                         ) {
                             let _ = proxy.send_event(UserEvent::SocketToast(format!(
@@ -931,21 +931,21 @@ impl App {
                 self.statusbar.tunnel_checked = None;
             }
             SettingsAction::OpenOnPhone(on) => {
-                let value = if on { kasa_mcp::machines::OPEN_TARGET_PHONE } else { "" };
+                let value = if on { kasa_device::machines::OPEN_TARGET_PHONE } else { "" };
                 socket::write_setting("open_url_target", serde_json::json!(value));
                 self.statusbar.chrome_phone = on;
                 // `open` 은 학생이 도는 기계가 처리한다 — 본진에도 같은 값을 둬야
                 // 거기 학생이 연 페이지가 폰으로 온다(크롬 선택 전파와 같은 길).
                 let mut sources: Vec<String> = self.pty.keys()
-                    .filter_map(|p| kasa_mcp::remote::remote_info(p).map(|i| i.base))
-                    .chain(kasa_mcp::machines::machines().into_iter().filter(|m| m.home).map(|m| m.base))
+                    .filter_map(|p| kasa_remote::remote::remote_info(p).map(|i| i.base))
+                    .chain(kasa_device::machines::machines().into_iter().filter(|m| m.home).map(|m| m.base))
                     .collect();
                 sources.sort(); sources.dedup();
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     for base in sources {
-                        if kasa_mcp::machines::opens_on_phone() != on { return; }
-                        if let Err(error) = kasa_mcp::remote::settings_action(
+                        if kasa_device::machines::opens_on_phone() != on { return; }
+                        if let Err(error) = kasa_remote::remote::settings_action(
                             &base, "set-open-target", Some(value), None, None,
                         ) {
                             let _ = proxy.send_event(UserEvent::SocketToast(format!(
@@ -1024,7 +1024,7 @@ impl App {
                 if let Ok(value) = serde_json::to_value(&self.weather.settings) {
                     socket::write_setting("weather", value);
                 }
-                kasa_mcp::account_sync::poke();
+                kasa_device::account_sync::poke();
                 self.weather_settings_changed();
             }
             SettingsAction::AutosaveDelay(ms) => {
@@ -1469,7 +1469,7 @@ impl App {
                     edit.error = Some("열린 편집을 먼저 저장하거나 취소해 주세요".into());
                     return;
                 }
-                if let Some(entry) = kasa_mcp::machines::entries().get(idx) {
+                if let Some(entry) = kasa_device::machines::entries().get(idx) {
                     let mut edit = native_settings::devices::Editor::existing(idx, entry);
                     edit.deleting = true;
                     self.machine_edit = Some(edit);
@@ -1484,7 +1484,7 @@ impl App {
                         edit.error = Some("열린 편집을 먼저 저장하거나 취소해 주세요".into());
                         return;
                     }
-                } else if let Some(entry) = kasa_mcp::machines::entries().get(idx) {
+                } else if let Some(entry) = kasa_device::machines::entries().get(idx) {
                     self.machine_edit = Some(native_settings::devices::Editor::existing(idx, entry));
                 }
                 let Some(edit) = self.machine_edit.as_ref() else { return };
@@ -1508,7 +1508,7 @@ impl App {
                 self.chrome_dirty = true;
             }
             SettingsAction::SyncMachine(label, expected_target) => {
-                let entries = kasa_mcp::machines::entries();
+                let entries = kasa_device::machines::entries();
                 let matching_rows: Vec<&serde_json::Value> = entries
                     .iter()
                     .into_iter()
@@ -1529,7 +1529,7 @@ impl App {
                     .flatten()
                     .filter(|target| *target == expected_target)
                     .map(str::to_string);
-                let still_mismatched = kasa_mcp::machines::snapshot().iter().any(|machine| {
+                let still_mismatched = kasa_device::machines::snapshot().iter().any(|machine| {
                     machine.get("label").and_then(|v| v.as_str()) == Some(&label)
                         && machine.get("online").and_then(|v| v.as_bool()) == Some(true)
                         && machine.get("build_match").and_then(|v| v.as_bool()) == Some(false)
@@ -1574,7 +1574,7 @@ impl App {
                 // 남의 토큰을 물려받는 사고를 없앴다.
                 forget_account_email(&id);
                 socket::forget_account_cooldown(&id);
-                kasa_mcp::agent_accounts::poke();
+                kasa_device::agent_accounts::poke();
                 // 라벨 포커스는 행 인덱스라 목록이 줄면 다른 행을 가리킨다.
                 self.settings_input = None;
                 self.settings_save();
@@ -1591,7 +1591,7 @@ impl App {
                 }
                 self.settings_input = None;
                 self.settings_save();
-                kasa_mcp::agent_accounts::poke();
+                kasa_device::agent_accounts::poke();
             }
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
@@ -1650,13 +1650,13 @@ impl App {
                 // 빈 값도 그대로 쓴다(키를 지우지 않는다) — 읽는 쪽이 빈 문자열을
                 // "지정 없음"으로 걸러내므로 결과가 같고, 삭제 경로를 따로 두면
                 // 로스터가 테마 파일일 때와 홈 override 일 때 두 곳을 맞춰야 한다.
-                let _ = kasa_mcp::character::update_member_in_theme(
+                let _ = kasa_characters::character::update_member_in_theme(
                     &self.students_theme,
                     &name,
                     "model",
                     serde_json::Value::String(model.clone()),
                 );
-                let _ = kasa_mcp::character::update_member_in_theme(
+                let _ = kasa_characters::character::update_member_in_theme(
                     &self.students_theme,
                     &name,
                     "backend",
@@ -2944,7 +2944,7 @@ impl App {
     pub(crate) fn select_student_for_edit_in_theme(&mut self, theme_id: String, name: String) {
         self.flush_student_persona();
         self.flush_student_name();
-        let theme_id = if theme_id == kasa_mcp::character::BASE_THEME_KEY {
+        let theme_id = if theme_id == kasa_characters::character::BASE_THEME_KEY {
             String::new()
         } else {
             theme_id
@@ -2952,7 +2952,7 @@ impl App {
         let roster = student_roster_for_theme(&theme_id);
         let def = roster
             .as_ref()
-            .and_then(|value| kasa_mcp::character::member_def(value, &name));
+            .and_then(|value| kasa_characters::character::member_def(value, &name));
         let persona = def
             .as_ref()
             .and_then(|value| value.get("persona"))
@@ -3018,13 +3018,13 @@ impl App {
         } else if student_roster_for_theme(&self.students_theme)
             .as_ref()
             .is_some_and(|roster| {
-                kasa_mcp::character::member_names(roster)
+                kasa_characters::character::member_names(roster)
                     .iter()
                     .any(|name| name == &new && name != &old)
             })
         {
             Some(format!("{new} 은(는) 이미 있어요"))
-        } else if kasa_mcp::character::update_member_in_theme(
+        } else if kasa_characters::character::update_member_in_theme(
             &self.students_theme,
             &old,
             "name",
@@ -3280,9 +3280,9 @@ impl App {
             return;
         };
         let def = student_roster_for_theme(&self.students_theme)
-            .and_then(|c| kasa_mcp::character::member_def(&c, &name));
+            .and_then(|c| kasa_characters::character::member_def(&c, &name));
         self.students_raw.text = match def {
-            Some(d) if self.students_raw.yaml => kasa_mcp::character::member_to_yaml(&d),
+            Some(d) if self.students_raw.yaml => kasa_characters::character::member_to_yaml(&d),
             Some(d) => serde_json::to_string_pretty(&d).unwrap_or_default(),
             None => String::new(),
         };
@@ -3297,7 +3297,7 @@ impl App {
             return;
         };
         let parsed = if self.students_raw.yaml {
-            kasa_mcp::character::member_from_yaml(&self.students_raw.text)
+            kasa_characters::character::member_from_yaml(&self.students_raw.text)
         } else {
             serde_json::from_str::<serde_json::Value>(&self.students_raw.text)
                 .map_err(|e| e.to_string())
@@ -3310,7 +3310,7 @@ impl App {
             }
         };
         if let Err(e) =
-            kasa_mcp::character::replace_member_in_theme(&self.students_theme, &name, &def)
+            kasa_characters::character::replace_member_in_theme(&self.students_theme, &name, &def)
         {
             self.students_raw.err = Some(e.to_string());
             return;
@@ -3355,12 +3355,12 @@ impl App {
             return;
         };
         let cur = student_roster_for_theme(&self.students_theme)
-            .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
+            .and_then(|c| kasa_characters::character::raw_persona_for(&c, &name))
             .unwrap_or_default();
         if cur == self.students_persona {
             return;
         }
-        let _ = kasa_mcp::character::update_member_in_theme(
+        let _ = kasa_characters::character::update_member_in_theme(
             &self.students_theme,
             &name,
             "persona",
@@ -3693,7 +3693,7 @@ fn themegen_ref_path(theme_id: &str, slug: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(
-        kasa_mcp::character::themes_root()?
+        kasa_characters::character::themes_root()?
             .join(theme_id)
             .join("gen")
             .join(slug)
@@ -3702,10 +3702,10 @@ fn themegen_ref_path(theme_id: &str, slug: &str) -> Option<std::path::PathBuf> {
 }
 
 fn student_roster_for_theme(theme_id: &str) -> Option<serde_json::Value> {
-    if theme_id.is_empty() || theme_id == kasa_mcp::character::BASE_THEME_KEY {
-        kasa_mcp::character::base_characters_json()
+    if theme_id.is_empty() || theme_id == kasa_characters::character::BASE_THEME_KEY {
+        kasa_characters::character::base_characters_json()
     } else {
-        kasa_mcp::character::theme_characters_json(theme_id)
+        kasa_characters::character::theme_characters_json(theme_id)
     }
 }
 
@@ -4268,7 +4268,7 @@ pub(crate) enum LoginBrowser {
 
 fn account_login_invocation(provider: AccountProvider) -> (std::path::PathBuf, Vec<&'static str>) {
     match provider {
-        AccountProvider::Claude => (kasa_mcp::claude_bin(), vec!["auth", "login", "--claudeai"]),
+        AccountProvider::Claude => (kasa_agents::claude_bin(), vec!["auth", "login", "--claudeai"]),
         // 계정 슬롯은 auth.json 한 장으로 격리한다. macOS 키링을 쓰면 CODEX_HOME이
         // 달라도 모든 슬롯이 같은 자격증명을 보므로 공식 file 저장 모드로 고정한다.
         AccountProvider::Codex => (
@@ -4708,7 +4708,7 @@ fn verify_login_identity(
     want: &str,
     name: &str,
 ) -> LoginState {
-    use kasa_mcp::agent_accounts::account_key;
+    use kasa_device::agent_accounts::account_key;
     let got = match provider {
         AccountProvider::Claude => match slot_identity_full(dir) {
             SlotIdentity::Known { email, org, sync_identity } => {
@@ -4720,7 +4720,7 @@ fn verify_login_identity(
             SlotIdentity::Unavailable => None,
         },
         AccountProvider::Codex => dir
-            .and_then(|d| kasa_mcp::agent_accounts::codex_auth_identity(&d.join("auth.json")))
+            .and_then(|d| kasa_device::agent_accounts::codex_auth_identity(&d.join("auth.json")))
             .map(|a| (a.key(), a.email)),
     };
     match got {
@@ -4750,9 +4750,9 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState, attempt:
         probe_cache().lock().unwrap().remove("");
         crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
         crate::codexlimits::invalidate();
-        kasa_mcp::agent_accounts::poke();
+        kasa_device::agent_accounts::poke();
         // 새 로그인의 사슬을 곧 관문에 맡긴다 — 다른 기기가 바로 쓸 수 있게.
-        kasa_mcp::agent_chains::poke();
+        kasa_device::agent_chains::poke();
     }
 }
 
@@ -5456,8 +5456,8 @@ fn codex_account_display_from_identity(
 
 fn adopt_held_into(id: &str, key: &str, email: &str, org: &str) {
     remember_account_identity(id, email, org);
-    kasa_mcp::agent_chains::adopt(id, key);
-    kasa_mcp::agent_accounts::poke();
+    kasa_device::agent_chains::adopt(id, key);
+    kasa_device::agent_accounts::poke();
     request_account_sync_identity(id);
 }
 
@@ -5553,12 +5553,12 @@ fn same_account_note(id: &str, email: &str, org: &str, slots: &[(String, String,
     if !email.contains('@') {
         return None;
     }
-    let mine = kasa_mcp::agent_accounts::account_key("claude", email, org, "");
+    let mine = kasa_device::agent_accounts::account_key("claude", email, org, "");
     slots
         .iter()
         .take_while(|(other, ..)| other != id)
         .filter(|(other, ..)| !other.is_empty())
-        .find(|(_, _, e, o)| e.contains('@') && kasa_mcp::agent_accounts::account_key("claude", e, o, "") == mine)
+        .find(|(_, _, e, o)| e.contains('@') && kasa_device::agent_accounts::account_key("claude", e, o, "") == mine)
         .map(|(other, label, ..)| {
             let name = if label.trim().is_empty() { other.as_str() } else { label.as_str() };
             format!("「{name}」과 같은 계정이에요")

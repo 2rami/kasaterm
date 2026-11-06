@@ -101,9 +101,9 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.fetch = Some(rx);
         std::thread::spawn(move || {
-            let done = match kasa_mcp::op_approval::sync() {
+            let done = match kasa_device::op_approval::sync() {
                 Ok((status, rest)) => Done::Loaded(status, Ok(rest)),
-                Err(error) => Done::Loaded(kasa_mcp::op_approval::status(), Err(error.to_string())),
+                Err(error) => Done::Loaded(kasa_device::op_approval::status(), Err(error.to_string())),
             };
             let _ = tx.send(done);
         });
@@ -151,7 +151,7 @@ impl State {
             }
             _ => {}
         }
-        if kasa_mcp::op_approval::take_changed() {
+        if kasa_device::op_approval::take_changed() {
             self.fetched = None;
         }
         (changed, fresh, believed)
@@ -187,7 +187,7 @@ impl App {
             let key = self.device_account.op.untrusted.iter().find(|k| k["id"] == id.as_str()).cloned();
             if let Some(key) = key {
                 self.device_account.op.run(move || {
-                    kasa_mcp::op_approval::trust(&key)
+                    kasa_device::op_approval::trust(&key)
                         .map(|()| format!("{} 의 열쇠를 믿어요", key["label"].as_str().unwrap_or("폰")))
                         .map_err(|e| e.to_string())
                 });
@@ -271,10 +271,10 @@ impl App {
                 }
             }
             Act::Untrust(index) => {
-                let list = kasa_mcp::op_approval::trusted().unwrap_or_default();
+                let list = kasa_device::op_approval::trusted().unwrap_or_default();
                 let Some(t) = list.get(index).cloned() else { return };
                 self.device_account.op.run(move || {
-                    kasa_mcp::op_approval::untrust(&t.id)
+                    kasa_device::op_approval::untrust(&t.id)
                         .map(|()| format!("{} 의 열쇠를 더는 믿지 않아요", t.label))
                         .map_err(|e| e.to_string())
                 });

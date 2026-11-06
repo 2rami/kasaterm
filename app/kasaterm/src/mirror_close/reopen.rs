@@ -24,7 +24,7 @@ impl App {
     pub(crate) fn reopen_mirror_record(&mut self, record: ClosedPane) {
         let metadata = record.rec["remote_restore"].clone();
         let label = metadata["label"].as_str().unwrap_or("").to_string();
-        let base = kasa_mcp::machines::find(&label).map(|m| m.base)
+        let base = kasa_device::machines::find(&label).map(|m| m.base)
             .or_else(|| metadata["base"].as_str().map(str::to_string));
         let Some(base) = base else {
             self.closed_panes.push(record);
@@ -34,7 +34,7 @@ impl App {
         self.set_toast("원본 세션을 되살리는 중이에요".into());
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let result = kasa_mcp::remote::remote_cmd(&base, "surface.reopen_checked", metadata["receipt"].clone())
+            let result = kasa_remote::remote::remote_cmd(&base, "surface.reopen_checked", metadata["receipt"].clone())
                 .map_err(|error| format!("{error:#}")).and_then(|reply| {
                     let value = reply["result"].clone();
                     let address = &value["address"];
@@ -42,10 +42,10 @@ impl App {
                         || address["machine_id"] != metadata["receipt"]["machine_id"] {
                         return Err("원본 기기나 세션이 바뀌었어요".into());
                     }
-                    kasa_mcp::machines::poke();
+                    kasa_device::machines::poke();
                     let end = Instant::now() + Duration::from_secs(10);
                     while Instant::now() < end {
-                        if address["surface_id"].as_str().and_then(|id| kasa_mcp::machines::cached_pane(&label, id))
+                        if address["surface_id"].as_str().and_then(|id| kasa_device::machines::cached_pane(&label, id))
                             .is_some_and(|row| row["surface_key"] == address["surface_key"] && !crate::machinescol::remote_pane_closed(&row)) {
                             return Ok(value);
                         }

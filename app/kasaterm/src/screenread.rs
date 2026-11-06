@@ -3428,13 +3428,13 @@ pub(crate) fn mirror_runs_claude(ws: &Workspace, id: &str) -> bool {
 /// Remote process metadata is authoritative, including an explicit null after
 /// the agent exits. The face marker only supports hosts predating that field.
 pub(crate) fn mirror_agent_kind(id: &str, has_face: bool) -> Option<kasa_pty::AgentKind> {
-    let info = kasa_mcp::remote::remote_info(id)?;
+    let info = kasa_remote::remote::remote_info(id)?;
     let label = if info.label.is_empty() {
-        kasa_mcp::machines::label_for_base(&info.base)?
+        kasa_device::machines::label_for_base(&info.base)?
     } else {
         info.label
     };
-    let row = kasa_mcp::machines::cached_pane(&label, &info.remote_id);
+    let row = kasa_device::machines::cached_pane(&label, &info.remote_id);
     remote_agent_metadata(row.as_ref(), has_face)
 }
 

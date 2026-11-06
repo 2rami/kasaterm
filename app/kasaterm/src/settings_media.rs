@@ -530,15 +530,15 @@ fn texture_key(generation: u64, key: &MediaKey, frame: usize) -> String {
 }
 
 fn normalize_theme(theme: &str) -> String {
-    if theme.is_empty() || theme == kasa_mcp::character::BASE_THEME_KEY {
-        kasa_mcp::character::BASE_THEME_KEY.to_string()
+    if theme.is_empty() || theme == kasa_characters::character::BASE_THEME_KEY {
+        kasa_characters::character::BASE_THEME_KEY.to_string()
     } else {
         theme.to_string()
     }
 }
 
 fn is_base_theme(theme: &str) -> bool {
-    theme.is_empty() || theme == kasa_mcp::character::BASE_THEME_KEY
+    theme.is_empty() || theme == kasa_characters::character::BASE_THEME_KEY
 }
 
 fn safe_component(value: &str) -> bool {
@@ -560,7 +560,7 @@ fn theme_sprite_dir(theme: &str) -> Option<(PathBuf, MediaSource)> {
             .map(|home| (home.join(".config/kasaterm/students"), MediaSource::User));
     }
     safe_component(theme).then_some(())?;
-    kasa_mcp::character::themes_root()
+    kasa_characters::character::themes_root()
         .map(|root| (root.join(theme).join("sprites"), MediaSource::Theme))
 }
 
@@ -881,10 +881,10 @@ mod tests {
     fn plan_deduplicates_faces_and_normalizes_base_theme() {
         let mut plan = MediaPlan::new();
         plan.include_face("", "midori")
-            .include_face(kasa_mcp::character::BASE_THEME_KEY, "midori")
+            .include_face(kasa_characters::character::BASE_THEME_KEY, "midori")
             .include_face("theme", "midori");
         assert_eq!(plan.faces.len(), 2);
-        assert_eq!(plan.faces[0].theme, kasa_mcp::character::BASE_THEME_KEY);
+        assert_eq!(plan.faces[0].theme, kasa_characters::character::BASE_THEME_KEY);
     }
 
     #[test]

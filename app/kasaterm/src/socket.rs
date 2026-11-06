@@ -418,7 +418,7 @@ fn read_agents() -> (
     //
     // 배경 에이전트 폴러와 같은 `--all` 한 벌을 나눠 쓴다. `--all` 은 `--json` 에 끝난 배경
     // 세션만 더하고, 배경 세션에는 `status` 가 없어 아래에서 걸러지므로 결과가 같다.
-    if let Some(items) = kasa_mcp::claude_agents_all(AGENTS_SHARE_AGE) {
+    if let Some(items) = kasa_agents::claude_agents_all(AGENTS_SHARE_AGE) {
         let rank = |s: &str| match s {
             "busy" => 3,
             "waiting" => 2,
@@ -486,7 +486,7 @@ impl PtyBackend {
     /// 소환 관계를 적는다 — 메모리와 함께 surface 키 짝으로 파일에도. 앱을 다시 켜면 번호가 바뀌고
     /// 메모리가 비어, 재시작 뒤 학생의 done 이 갈 곳을 잃었다(새 판 설치마다 재시작한다).
     pub(crate) fn remember_spawner(&self, child: &str, parent: &str) {
-        let pair = (kasa_mcp::surface_keys::ensure(child), kasa_mcp::surface_keys::ensure(parent));
+        let pair = (kasa_collab::surface_keys::ensure(child), kasa_collab::surface_keys::ensure(parent));
         if let Ok(mut m) = self.spawned_by.lock() {
             m.insert(pair.0.clone(), pair.1.clone());
         }
@@ -1104,7 +1104,7 @@ impl Backend for PtyBackend {
                 rx.recv_timeout(std::time::Duration::from_secs(2))
                     .map_err(|_| anyhow::anyhow!("app did not answer restart facts in time"))
             }
-            Some(base) => Ok(serde_json::from_value(kasa_mcp::remote::remote_get_json(&base, "/app/restart/facts")?)?),
+            Some(base) => Ok(serde_json::from_value(kasa_remote::remote::remote_get_json(&base, "/app/restart/facts")?)?),
         }
     }
 
@@ -1120,7 +1120,7 @@ impl Backend for PtyBackend {
 
     fn restart_start(&self, machine: Option<&str>, req: &kasa_socket::app_restart::JobRequest) -> Result<serde_json::Value> {
         match restart_remote(machine)? {
-            Some(base) => kasa_mcp::remote::remote_post_json(&base, "/app/restart/jobs", &serde_json::to_value(req)?),
+            Some(base) => kasa_remote::remote::remote_post_json(&base, "/app/restart/jobs", &serde_json::to_value(req)?),
             None => {
                 let facts = self.restart_facts(None)?;
                 crate::app_restart::accept_restart(&facts, req, &self.proxy).map_err(anyhow::Error::msg)
@@ -1130,7 +1130,7 @@ impl Backend for PtyBackend {
 
     fn update_start(&self, machine: Option<&str>, req: &kasa_socket::app_update::UpdateRequest) -> Result<serde_json::Value> {
         match restart_remote(machine)? {
-            Some(base) => kasa_mcp::remote::remote_post_json(&base, "/app/update/jobs", &serde_json::to_value(req)?),
+            Some(base) => kasa_remote::remote::remote_post_json(&base, "/app/update/jobs", &serde_json::to_value(req)?),
             None => {
                 let facts = self.restart_facts(None)?;
                 crate::app_update::accept_update(&facts, req, &self.proxy).map_err(anyhow::Error::msg)
@@ -1142,7 +1142,7 @@ impl Backend for PtyBackend {
         anyhow::ensure!(kasa_socket::app_restart::valid_job_id(job_id), "invalid job id");
         match restart_remote(machine)? {
             None => kasa_socket::app_update::status(&kasa_socket::app_update::jobs_dir()?, job_id),
-            Some(base) => Ok(serde_json::from_value(kasa_mcp::remote::remote_get_json(&base, &format!("/app/update/jobs/{job_id}"))?)?),
+            Some(base) => Ok(serde_json::from_value(kasa_remote::remote::remote_get_json(&base, &format!("/app/update/jobs/{job_id}"))?)?),
         }
     }
 
@@ -1150,7 +1150,7 @@ impl Backend for PtyBackend {
         anyhow::ensure!(kasa_socket::app_restart::valid_job_id(job_id), "invalid job id");
         match restart_remote(machine)? {
             None => kasa_socket::app_restart::job_status(&kasa_socket::app_restart::jobs_dir()?, job_id),
-            Some(base) => Ok(serde_json::from_value(kasa_mcp::remote::remote_get_json(&base, &format!("/app/restart/jobs/{job_id}"))?)?),
+            Some(base) => Ok(serde_json::from_value(kasa_remote::remote::remote_get_json(&base, &format!("/app/restart/jobs/{job_id}"))?)?),
         }
     }
 
@@ -1219,7 +1219,7 @@ impl Backend for PtyBackend {
         self.hub.refresh();
         kasa_pty::live_sessions()
             .into_iter()
-            .filter(|id| !kasa_mcp::remote::is_remote_pane(id))
+            .filter(|id| !kasa_remote::remote::is_remote_pane(id))
             .filter_map(|id| self.hub.resolved(&id).and_then(|r| crate::agent_state::response_end(&id, &r)))
             .collect()
     }
@@ -1398,7 +1398,7 @@ impl Backend for PtyBackend {
             "character_theme",
             serde_json::Value::String(theme_id.to_string()),
         );
-        kasa_mcp::character::invalidate_active_theme();
+        kasa_characters::character::invalidate_active_theme();
         crate::theme::invalidate_roster();
         // 화면 갱신은 best-effort — 다음 상호작용에서라도 새 테마로 그려진다.
         let _ = self.proxy.send_event(UserEvent::Redraw);
@@ -1924,7 +1924,7 @@ impl Backend for PtyBackend {
         use kasa_socket::backend::{SpawnShellAt, SpawnWindow};
         let label = params["machine"].as_str().filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("machine(기계 라벨)이 필요해요"))?;
-        let m = kasa_mcp::machines::find(label)
+        let m = kasa_device::machines::find(label)
             .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
         let text = |k: &str| params[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
         let window = match &params["window"] {
@@ -1950,7 +1950,7 @@ impl Backend for PtyBackend {
             };
         }
         let at = SpawnShellAt { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of"), ..Default::default() };
-        let (surface, room) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+        let (surface, room) = kasa_remote::remote::spawn_shell_pane_at(&m.base, &at, None)?;
         let how = if at.tab_of.is_some() { "탭으로" } else if at.beside.is_some() { "옆에" } else { "활성 방에" };
         Ok(serde_json::json!({
             "machine": m.label, "surface": surface, "window": room.window,
@@ -1977,17 +1977,17 @@ impl Backend for PtyBackend {
         // 명부·폴링 캐시·원격 링크 표만 읽는다 — GUI 소유물이 없어 스레드 위임이
         // 필요 없다(home_machine 과 같은 이유).
         let here = from
-            .and_then(kasa_mcp::remote::remote_info)
+            .and_then(kasa_remote::remote::remote_info)
             .map(|i| if i.label.is_empty() { i.base } else { i.label });
         let mut mirrors: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for id in kasa_pty::live_sessions() {
-            if let Some(i) = kasa_mcp::remote::remote_info(&id) {
+            if let Some(i) = kasa_remote::remote::remote_info(&id) {
                 let key = if i.label.is_empty() { i.base } else { i.label };
                 *mirrors.entry(key).or_default() += 1;
             }
         }
         // 스냅샷을 돈다 — 명부에서 빠져 이유만 남은 기기도 CLI 에 선다.
-        let snap = kasa_mcp::machines::snapshot();
+        let snap = kasa_device::machines::snapshot();
         let machines: Vec<serde_json::Value> = snap
             .iter()
             .map(|row| {
@@ -2037,10 +2037,10 @@ impl Backend for PtyBackend {
 
     fn home_machine(&self) -> Result<Option<(String, bool)>> {
         // 명부·폴링 캐시만 읽는다 — GUI 소유물이 없어 스레드 위임이 필요 없다.
-        let Some(m) = kasa_mcp::machines::home_machine() else {
+        let Some(m) = kasa_device::machines::home_machine() else {
             return Ok(None);
         };
-        let online = kasa_mcp::machines::snapshot()
+        let online = kasa_device::machines::snapshot()
             .iter()
             .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()))
             .and_then(|v| v.get("online").and_then(|o| o.as_bool()))
@@ -2125,7 +2125,7 @@ impl Backend for PtyBackend {
             .into_iter()
             .find(|(p, _)| p == surface_id)
             .and_then(|(_, pid)| self.pane_cwd_live(pid))?;
-        let team = kasa_mcp::team::team_name_for(&kasa_mcp::character::mode_slug(&cwd));
+        let team = kasa_students::team::team_name_for(&kasa_characters::character::mode_slug(&cwd));
         // 셰임은 팀명이 비면 트리플을 통째로 생략한다 — 그때는 이름도 안 생긴다.
         if team.is_empty() {
             return None;
@@ -2570,14 +2570,14 @@ impl Backend for PtyBackend {
         if op == "shot" && !std::path::Path::new(arg).is_absolute() {
             anyhow::bail!("shot 은 저장할 절대경로가 필요하다");
         }
-        let outcome = kasa_mcp::phone_web::call(op, if op == "shot" { "" } else { arg }, std::time::Duration::from_millis(timeout_ms))
+        let outcome = kasa_device::phone_web::call(op, if op == "shot" { "" } else { arg }, std::time::Duration::from_millis(timeout_ms))
             .map_err(|e| anyhow::anyhow!(e))?;
         match outcome {
-            kasa_mcp::phone_web::Outcome::Png(png) => {
+            kasa_device::phone_web::Outcome::Png(png) => {
                 std::fs::write(arg, &png)?;
                 Ok(serde_json::json!({ "path": arg, "bytes": png.len() }))
             }
-            kasa_mcp::phone_web::Outcome::Json(v) => Ok(v),
+            kasa_device::phone_web::Outcome::Json(v) => Ok(v),
         }
     }
 
@@ -2599,8 +2599,8 @@ impl Backend for PtyBackend {
                 // 고른 이름은 **그 테마 것만** 싣는다. 명단 전체(11테마 300명)를
                 // 실으면 설정 화면을 열 때마다 그만큼이 오가는데, 화면은 접힌
                 // 상태에서 「n/m」만 있으면 되고 펼칠 때 `/theme-roster` 로 받는다.
-                let picked = kasa_mcp::character::picks_of_theme(if r.id.is_empty() {
-                    kasa_mcp::character::BASE_THEME_KEY
+                let picked = kasa_characters::character::picks_of_theme(if r.id.is_empty() {
+                    kasa_characters::character::BASE_THEME_KEY
                 } else {
                     &r.id
                 });
@@ -2615,12 +2615,12 @@ impl Backend for PtyBackend {
             .collect();
         // characters_json 은 활성 테마의 theme.json 을 최우선으로 본다 — 그래서
         // 테마를 고르면 이 목록도 함께 바뀐다.
-        let roster = kasa_mcp::character::characters_json()
+        let roster = kasa_characters::character::characters_json()
             .as_ref()
             .map(roster_entries)
             .unwrap_or_default();
         serde_json::json!({
-            "active_theme": kasa_mcp::character::active_theme_id(),
+            "active_theme": kasa_characters::character::active_theme_id(),
             // persona 토글은 로스터와 같은 화면에 있다 — 상태를 안 실으면 웹이
             // 토글을 항상 켜진 모양으로 그려 화면이 거짓말을 한다.
             "persona_enabled": read_claude_persona(),
@@ -2628,9 +2628,9 @@ impl Backend for PtyBackend {
             "roster": roster,
             // 모델 후보 — 로스터 파일의 `models` 에서 온다. 화면이 하드코딩하지
             // 않는 이유는 커스텀 모델을 원본에 적어 늘릴 수 있어야 해서다.
-            "models": kasa_mcp::character::characters_json()
+            "models": kasa_characters::character::characters_json()
                 .as_ref()
-                .map(kasa_mcp::character::model_choices)
+                .map(kasa_characters::character::model_choices)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|c| serde_json::json!({
@@ -2657,7 +2657,7 @@ impl Backend for PtyBackend {
             if !safe_path_component(id) {
                 return None;
             }
-            let root = kasa_mcp::character::themes_root()?;
+            let root = kasa_characters::character::themes_root()?;
             let sprites = root.join(id).join("sprites");
             return rels
                 .iter()
@@ -2687,8 +2687,8 @@ impl Backend for PtyBackend {
         if !crate::theme::character_appearance() {
             return None;
         }
-        let color = kasa_mcp::character::header_color_any(name);
-        let face = kasa_mcp::character::slug_for_any(name)
+        let color = kasa_characters::character::header_color_any(name);
+        let face = kasa_characters::character::slug_for_any(name)
             .filter(|slug| safe_path_component(slug))
             .and_then(|slug| write_mod_face(&slug));
         let mut body = serde_json::json!({ "name": name, "color": color });
@@ -2775,21 +2775,21 @@ impl Backend for PtyBackend {
         // 폰이 「Face ID 로 연결」 뒤 부른다 — 화면의 1분 주기를 기다리지 않고 자동 믿기 규칙을 지금 돌린다.
         // 믿는 것은 `op_approval::auto_pick` 규칙이 고른 열쇠뿐이고 토큰은 이 길로 안 다닌다.
         if action == "op-link" {
-            return Ok(match kasa_mcp::op_approval::sync() {
+            return Ok(match kasa_device::op_approval::sync() {
                 Ok((status, rest)) => serde_json::json!({"ok": true, "op": status, "waiting": rest.len()}),
-                Err(error) => serde_json::json!({"ok": true, "op": kasa_mcp::op_approval::status(), "error": error.to_string()}),
+                Err(error) => serde_json::json!({"ok": true, "op": kasa_device::op_approval::status(), "error": error.to_string()}),
             });
         }
         if action == "set-browser-target" {
             let wanted = label.unwrap_or("");
-            let own_id = kasa_mcp::mobile::machine_identity();
+            let own_id = kasa_device::mobile::machine_identity();
             let local = browser_target_is_local(wanted, id,
-                &kasa_mcp::machines::self_label(), own_id.as_deref());
+                &kasa_device::machines::self_label(), own_id.as_deref());
             let chosen = if local {
                 String::new()
             } else {
                 match id {
-                    Some(id) => kasa_mcp::machines::find_route(&format!("~{id}"))
+                    Some(id) => kasa_device::machines::find_route(&format!("~{id}"))
                         .map(|machine| machine.label)
                         .ok_or_else(|| anyhow::anyhow!("선택한 기기 ID를 이 기기의 명부에서 찾지 못했어요"))?,
                     None => wanted.to_string(),
@@ -2801,10 +2801,10 @@ impl Backend for PtyBackend {
         }
         // 폰이 「이 폰」을 고르면 — 학생 도구의 크롬은 그대로, `open` 의 도착지만 폰.
         if action == "set-open-target" {
-            let phone = id == Some(kasa_mcp::machines::OPEN_TARGET_PHONE);
+            let phone = id == Some(kasa_device::machines::OPEN_TARGET_PHONE);
             anyhow::ensure!(phone || id.unwrap_or("").is_empty(), "모르는 도착지예요");
             write_setting("open_url_target",
-                serde_json::json!(if phone { kasa_mcp::machines::OPEN_TARGET_PHONE } else { "" }));
+                serde_json::json!(if phone { kasa_device::machines::OPEN_TARGET_PHONE } else { "" }));
             return Ok(serde_json::json!({"ok": true, "phone": phone}));
         }
         // 언어는 파일 한 줄이고 GUI 상태가 아니다 — 비울 캐시도, 다시 그릴 네이티브
@@ -2884,10 +2884,10 @@ impl Backend for PtyBackend {
             o.insert(
                 "browser".to_string(),
                 serde_json::json!({
-                    "machine": kasa_mcp::machines::kasachrome_machine(),
-                    "candidates": kasa_mcp::machines::kasachrome_candidates(),
-                    "local": kasa_mcp::machines::self_label(),
-                    "phone": kasa_mcp::machines::opens_on_phone(),
+                    "machine": kasa_device::machines::kasachrome_machine(),
+                    "candidates": kasa_device::machines::kasachrome_candidates(),
+                    "local": kasa_device::machines::self_label(),
+                    "phone": kasa_device::machines::opens_on_phone(),
                 }),
             );
         }
@@ -3046,7 +3046,7 @@ impl Backend for PtyBackend {
         limit: usize,
     ) -> Result<Vec<kasa_socket::backend::ActivityEvent>> {
         // mod 칸은 엔진이 알린 활동을 그대로 준다 — 기록 꼬리를 읽어 짝짓지 않는다.
-        if let Some(events) = kasa_mcp::claude_mod::activity(surface_id, limit) {
+        if let Some(events) = kasa_students::claude_mod::activity(surface_id, limit) {
             return Ok(events.into_iter().filter_map(|e| serde_json::from_value(e).ok()).collect());
         }
         let path = self
@@ -3200,27 +3200,27 @@ impl Backend for PtyBackend {
     }
 
     fn collab_snapshot(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::board_service::snapshot(params)
+        kasa_collab::board_service::snapshot(params)
     }
 
     fn collab_changes(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::board_service::changes(params)
+        kasa_collab::board_service::changes(params)
     }
 
     fn collab_inspect(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::board_service::inspect(self,params)
+        kasa_collab::board_service::inspect(self,params)
     }
 
     fn collab_view(&self, op: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::board_service::view(self,op,params)
+        kasa_collab::board_service::view(self,op,params)
     }
 
     fn collab_act(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::act_service::act(self,params)
+        kasa_collab::act_service::act(self,params)
     }
 
     fn collab_reach(&self) -> Result<serde_json::Value> {
-        kasa_mcp::board_service::reach()
+        kasa_collab::board_service::reach()
     }
 
     fn mirror_pane(&self, label: &str, remote_id: &str, name: &str, cwd: &str, anchor: Option<&str>, focus: bool) -> Result<String> {
@@ -3242,29 +3242,29 @@ impl Backend for PtyBackend {
         // 알릴 창은 이 기기의 창이다 — 받는 기기로 넘기기 전에 뗀다.
         let mut params = params.clone();
         let notify = params.as_object_mut().and_then(|fields|fields.remove("notify"));
-        let receipt = kasa_mcp::tell_service::submit(self,&params,||self.proxy.send_event(UserEvent::SafeTellWake)
+        let receipt = kasa_collab::tell_service::submit(self,&params,||self.proxy.send_event(UserEvent::SafeTellWake)
             .map_err(|_|anyhow::anyhow!("GUI delivery event loop stopped")))?;
         if let Some(notify) = notify { crate::tell_delivery::watch_sent(&receipt,&notify,&params); }
         Ok(receipt)
     }
 
     fn collab_tell_status(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::tell_service::status(params)
+        kasa_collab::tell_service::status(params)
     }
 
     fn relay_account(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::device_auth::handle(params)
+        kasa_device::device_auth::handle(params)
     }
 
     fn net_forward(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
-        kasa_mcp::netfwd::handle(params)
+        kasa_remote::netfwd::handle(params)
     }
 
     /// 키체인 비밀 읽기(docs/secret-faceid-approval.md). 칸·학생·명령·폴더는 요청 본문이 아니라 소켓 상대
     /// 프로세스에서 찾는다 — 폰에 보이는 「누가」를 요청한 쪽이 지어내지 못하게. 칸 밖 프로세스는 받지 않는다.
     fn op_secret(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         match params["op"].as_str() {
-            Some("status") => Ok(kasa_mcp::op_approval::status()),
+            Some("status") => Ok(kasa_device::op_approval::status()),
             Some("read") => {
                 let peer = kasa_socket::server::peer_pid().ok_or_else(|| anyhow::anyhow!("requester_unknown"))?;
                 let pane = self.pane_of_pid(peer).ok_or_else(|| anyhow::anyhow!("not_in_pane"))?;
@@ -3277,12 +3277,12 @@ impl Backend for PtyBackend {
                     .collect();
                 let command = kasa_pty::process_cmdline(peer).unwrap_or_default();
                 let cwd = pid_cwd(peer).map(|p| p.display().to_string()).unwrap_or_default();
-                let origin = kasa_mcp::op_approval::Origin {
+                let origin = kasa_device::op_approval::Origin {
                     pane,
                     student,
                     alive: Box::new(move || kasa_pty::pid_alive(peer)),
                 };
-                let values = kasa_mcp::op_approval::read(&refs, &command, &cwd, &origin)?;
+                let values = kasa_device::op_approval::read(&refs, &command, &cwd, &origin)?;
                 Ok(serde_json::json!({ "values": values }))
             }
             _ => Err(anyhow::anyhow!("op read|status")),
@@ -3297,7 +3297,7 @@ impl Backend for PtyBackend {
         // 그 claude 에 실린 연결 mod(pid 가 맞는 것만 live)가 지금 대화를 안다. 화면 안 `/resume`·`/clear` 는 같은
         // 프로세스에서 대화만 바꿔 명령줄 `--session-id` 가 옛 값으로 남는다(2026-10-23: 재시작 뒤 새 세션으로
         // 떴다가 /resume 한 칸의 tell 이 「bound conversation differs」로 거절됐다).
-        let mod_session = kasa_mcp::claude_mod::live(surface).map(|state| state.session).filter(|sid| is_uuid(sid));
+        let mod_session = kasa_students::claude_mod::live(surface).map(|state| state.session).filter(|sid| is_uuid(sid));
         let current = match kind {
             kasa_pty::AgentKind::Claude if mod_session.is_some() => mod_session.unwrap_or_default(),
             kasa_pty::AgentKind::Claude => {
@@ -3345,7 +3345,7 @@ impl Backend for PtyBackend {
         let bound = self.bound.lock().unwrap();
         let session = bound.get(surface).and_then(|path| codex_sid_from_rollout(path)
             .or_else(||path.file_stem().and_then(|s|s.to_str()).map(str::to_owned)));
-        kasa_mcp::board_service::address(surface,session.as_deref())
+        kasa_collab::board_service::address(surface,session.as_deref())
     }
 
     fn submit_login_code(&self, code: &str) -> bool {
@@ -3403,7 +3403,7 @@ impl Backend for PtyBackend {
             let binding = self.bound.lock().unwrap().get(&id).cloned();
             let session = binding.as_deref().and_then(|path|codex_sid_from_rollout(path)
                 .or_else(||path.file_stem().and_then(|s|s.to_str()).map(str::to_owned)));
-            let observed_address = kasa_mcp::board_service::address(&id,session.as_deref())?;
+            let observed_address = kasa_collab::board_service::address(&id,session.as_deref())?;
             let harness = managed.as_ref().and_then(|pty|pty.shell_pid())
                 .and_then(|pid|kasa_pty::agent_for_shell(&table,pid)).map(|kind|kind.as_str().to_owned());
             let supported = harness.as_deref().is_some_and(|h|matches!(h,"claude"|"codex"|"agy"));
@@ -3417,7 +3417,7 @@ impl Backend for PtyBackend {
             // 사이 GUI 틱이 허브를 갱신하면 두 값이 갈렸다 — 낱말은 「기다림」인데 종류
             // 칸만 빠져, 받는 기계가 무슨 기다림인지 모른 채 승인으로 치고 주황을 켰다.
             let resolved = self.hub.resolved(&id);
-            let mirrored = kasa_mcp::remote::is_remote_pane(&id);
+            let mirrored = kasa_remote::remote::is_remote_pane(&id);
             let (status,reason): (&'static str,&'static str) = if mirrored {
                 ("unknown",REMOTE_MIRROR_REASON)
             } else if !supported {
@@ -3450,7 +3450,7 @@ impl Backend for PtyBackend {
                 if !reason.is_empty() { row["waiting_for"] = json!(reason); }
             }
             if !mirrored {
-                let (background, subagents) = kasa_mcp::claude_mod::task_labels(&id)
+                let (background, subagents) = kasa_students::claude_mod::task_labels(&id)
                     .unwrap_or_else(|| (meta.background.clone(), meta.subagents.clone()));
                 if !background.is_empty() { row["background"] = json!(background); }
                 if !subagents.is_empty() { row["subagents"] = json!(subagents); }
@@ -3484,10 +3484,10 @@ impl Backend for PtyBackend {
             };
             let session = current_binding.as_deref().and_then(|path|codex_sid_from_rollout(path)
                 .or_else(||path.file_stem().and_then(|s|s.to_str()).map(str::to_owned)));
-            let current_address = kasa_mcp::board_service::address(&id,session.as_deref())?;
+            let current_address = kasa_collab::board_service::address(&id,session.as_deref())?;
             complete &= kasa_socket::board::guard_observation(row,&current_address,binding == current_binding,same_pty);
         }
-        let mut source = kasa_mcp::board_service::local_source(panes,complete)?;
+        let mut source = kasa_collab::board_service::local_source(panes,complete)?;
         source["source_kind"] = json!("desktop");
         source["capabilities"] = json!(["live_places","rooms","transcript_summary","bounded_activity","done_reports"]);
         Ok(source)
@@ -3568,8 +3568,8 @@ impl Backend for PtyBackend {
                 Some((sid.clone(), vars))
             })
             .collect();
-        let valid_members: HashSet<String> = kasa_mcp::character::characters_json()
-            .map(|c| kasa_mcp::character::member_names(&c).into_iter().collect())
+        let valid_members: HashSet<String> = kasa_characters::character::characters_json()
+            .map(|c| kasa_characters::character::member_names(&c).into_iter().collect())
             .unwrap_or_default();
         // 세션 → 포크 부모 세션 id(argv --resume). detach 포크로 세션 id 가 갈려도 이 사슬
         // 끝의 원본 바인딩(session_characters.json)이 retained 학생이다(사용자: bg 재진입 둔갑).
@@ -3608,7 +3608,7 @@ impl Backend for PtyBackend {
                     }
                 }
                 // mod 칸은 엔진 목록이 정본이다 — 꼬리·훅 짐작을 갈아 끼운다.
-                if let Some((background, subagents)) = kasa_mcp::claude_mod::task_labels(sid) {
+                if let Some((background, subagents)) = kasa_students::claude_mod::task_labels(sid) {
                     row.background = background;
                     row.subagents = subagents;
                 }
@@ -3622,7 +3622,7 @@ impl Backend for PtyBackend {
                 row.detached = !pane_window.contains_key(sid.as_str());
                 // 이사 간 학생 — 화면은 이 창(%N)이지만 실제로 도는 곳은 저 기계다.
                 // 라벨이 비면(명부 밖 주소) 주소의 host:port 로라도 가른다.
-                row.machine = kasa_mcp::remote::remote_info(sid).map(|i| {
+                row.machine = kasa_remote::remote::remote_info(sid).map(|i| {
                     if i.label.is_empty() {
                         i.base
                             .trim_start_matches("http://")
@@ -3759,7 +3759,7 @@ impl Backend for PtyBackend {
                     .and_then(|s| {
                         let mut cur = s.to_string();
                         for _ in 0..8 {
-                            if let Some(c) = kasa_mcp::character::session_character(&cur) {
+                            if let Some(c) = kasa_characters::character::session_character(&cur) {
                                 return Some(c);
                             }
                             match daemon_parents.get(&cur) {
@@ -3780,7 +3780,7 @@ impl Backend for PtyBackend {
                 let env_char = env
                     .and_then(|e| {
                         e.get("KASATERM_SESSION_ID")
-                            .and_then(|s| kasa_mcp::character::session_character(s))
+                            .and_then(|s| kasa_characters::character::session_character(s))
                             .or_else(|| e.get("KASATERM_CHARACTER").cloned())
                     })
                     .filter(|c| valid_members.contains(c));
@@ -3797,20 +3797,20 @@ impl Backend for PtyBackend {
                     .or(env_char)
                     .or_else(|| pane_character.get(sid.as_str()).cloned())
                     .or_else(|| {
-                        kasa_mcp::character::read_marker(&rslug, sid)
+                        kasa_characters::character::read_marker(&rslug, sid)
                     });
                 // Repair a missing derived marker from the live identity;
                 // never reassign a running student just because a file vanished.
                 if let Some(name) = row.character.as_deref() {
-                    if kasa_mcp::character::read_marker(&rslug, sid).as_deref() != Some(name) {
-                        let _ = kasa_mcp::character::write_marker(&rslug, sid, name);
+                    if kasa_characters::character::read_marker(&rslug, sid).as_deref() != Some(name) {
+                        let _ = kasa_characters::character::write_marker(&rslug, sid, name);
                     }
                 }
                 // retained 진실이 ws·marker 와 어긋나면 교정 — render(statusline·테두리·타이틀)는
                 // ws.pane_character 를 보므로 복원된 오염 랜덤을 원본으로 되돌린다.
                 if let Some(rc) = retained {
                     if pane_character.get(sid.as_str()) != Some(&rc) {
-                        let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &rc);
+                        let _ = kasa_characters::character::write_marker(&rslug, sid.as_str(), &rc);
                         self.ws
                             .lock()
                             .unwrap()
@@ -3836,11 +3836,11 @@ impl Backend for PtyBackend {
                                 .and_then(|m| m.get(stem).cloned())
                                 .flatten()
                         })
-                        .and_then(|parent| kasa_mcp::character::session_character(&parent));
+                        .and_then(|parent| kasa_characters::character::session_character(&parent));
                     // 세션 자신이 이미 배정받은 적 있으면(재시작·resume 이 같은 transcript id 로
                     // 복귀) 그 학생을 재사용 — board 첫 폴링부터 랜덤 둔갑 차단(사용자). 부모
                     // 상속 다음, 빈 슬롯 랜덤 앞.
-                    let own = stem.and_then(kasa_mcp::character::session_character);
+                    let own = stem.and_then(kasa_characters::character::session_character);
                     // respawn/새 세션(claude 가 --resume 없이 새 sid 발급)은 pane 셸 env 의
                     // SESSION_ID(스폰·swap 이 박은 원본 anchor)가 가리키는 학생을 상속한다 —
                     // 안 하면 lazy 빈슬롯 배정이 미도리로 오배정돼 retained 가 오염됐다(사용자:
@@ -3849,32 +3849,32 @@ impl Backend for PtyBackend {
                     let anchored = pane_shell_pid
                         .get(sid.as_str())
                         .and_then(|&pid| kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID"))
-                        .and_then(|es| kasa_mcp::character::session_character(&es))
+                        .and_then(|es| kasa_characters::character::session_character(&es))
                         .filter(|c| valid_members.contains(c));
                     let name = anchored.or(inherited).or(own).or_else(|| {
-                        kasa_mcp::character::roster_in_use().and_then(|chars| {
-                            let members = kasa_mcp::character::assignable_names(&chars);
+                        kasa_characters::character::roster_in_use().and_then(|chars| {
+                            let members = kasa_characters::character::assignable_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
                             // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(사용자: 모모이 둘).
                             let mut taken: Vec<_> = pane_character.values().cloned().collect();
-                            taken.extend(kasa_mcp::character::assigned_global());
+                            taken.extend(kasa_characters::character::assigned_global());
                             if !crate::verification_run() {
-                                taken.extend(kasa_mcp::machines::cached_character_assignments());
+                                taken.extend(kasa_device::machines::cached_character_assignments());
                             }
                             taken.extend(lazy_assigned.iter().cloned());
-                            kasa_mcp::character::pick_in_order(&members, &taken)
+                            kasa_characters::character::pick_in_order(&members, &taken)
                         })
                     });
                     {
                         if let Some(name) = name {
-                            let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &name);
+                            let _ = kasa_characters::character::write_marker(&rslug, sid.as_str(), &name);
                             // claude sid(transcript stem)에도 영속 — 재진입·재시작이 같은
                             // transcript id 로 돌아오면 own(session_character(stem))으로 잡혀
                             // 랜덤 재배정(둔갑) 없이 같은 학생을 유지한다(사용자: 어느새 미도리로
                             // 바뀜). write_marker/pane_character 만으론 session_characters.json 에
                             // 안 남아 다음 폴링·재진입의 stem 조회가 계속 None → 매번 재랜덤이었다.
                             if let Some(stem) = stem {
-                                let _ = kasa_mcp::character::bind_session_character(stem, &name);
+                                let _ = kasa_characters::character::bind_session_character(stem, &name);
                             }
                             // 단일 진실 ws.pane_character 에도 기록 — 다음 폴링·session 배정이
                             // 이 캐릭터를 중복하지 않게. 같은 폴링 내 다른 lazy 가 또 같은 캐릭터를
@@ -4034,8 +4034,8 @@ impl Backend for PtyBackend {
         // 이사 전 transcript는 대화 보관용이다. 지금 실행 상태는 원격 호스트가
         // 알려 준 행을 써야 종료한 학생과 살아 있는 거울을 모두 정확히 가른다.
         board.retain_mut(|row| {
-            if kasa_mcp::remote::is_remote_pane(&row.surface_id) {
-                if let Some(facts) = kasa_mcp::remote::cached_pane(&row.surface_id) {
+            if kasa_remote::remote::is_remote_pane(&row.surface_id) {
+                if let Some(facts) = kasa_remote::remote::cached_pane(&row.surface_id) {
                     apply_remote_board_facts(row, &facts);
                 }
                 true
@@ -4144,7 +4144,7 @@ impl Backend for PtyBackend {
             reason: reason.to_string(),
         });
         self.hub.invalidate();
-        kasa_mcp::board_service::poke();
+        kasa_collab::board_service::poke();
         Ok(())
     }
 
@@ -4163,7 +4163,7 @@ impl Backend for PtyBackend {
                 idle_seen: false,
             },
         );
-        kasa_mcp::board_service::poke();
+        kasa_collab::board_service::poke();
         // 소환한 pane 에 **직접 전한다.** 여태 보고는 여기 쌓이기만 하고 아무에게도
         // 안 갔다 — 오케스트레이터가 알려면 손으로 board 를 조회하는 수밖에 없어서,
         // 학생은 보고했다고 하는데 시킨 쪽은 모르는 상태가 됐다(2026-08-15 지적).
@@ -4223,7 +4223,7 @@ impl Backend for PtyBackend {
         drop(map);
         // 도구 훅이 왔다 = 하네스가 살아 움직인다. 열린 턴의 staleness 시계를 되돌린다.
         self.hub.beat(surface_id);
-        kasa_mcp::board_service::poke();
+        kasa_collab::board_service::poke();
         Ok(())
     }
 
@@ -4238,7 +4238,7 @@ impl Backend for PtyBackend {
             }
         }
         // 턴 경계가 곧 보드의 status 다 — 관측 주기를 기다리지 않고 바로 긁게 한다.
-        kasa_mcp::board_service::poke();
+        kasa_collab::board_service::poke();
         Ok(())
     }
 
@@ -4326,7 +4326,7 @@ mod web_shell_close_tests {
     /// 닫힌 칸 번호를 새 칸이 받으면 옛 소환 관계가 따라오지 않는다 — 아이 쪽이든 부모 쪽이든.
     #[test]
     fn a_reused_pane_number_does_not_inherit_the_old_spawner() {
-        use kasa_mcp::surface_keys;
+        use kasa_collab::surface_keys;
         let (child, parent) = ("%spawn-test-child", "%spawn-test-parent");
         let mut memory = std::collections::HashMap::new();
         memory.insert(surface_keys::ensure(child), surface_keys::ensure(parent));
@@ -4597,7 +4597,7 @@ pub(crate) fn read_head(path: &std::path::Path, max_bytes: u64) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-use kasa_mcp::git::head_branch;
+use kasa_git::git::head_branch;
 
 /// 채팅뷰 증분 읽기 — `offset` 이후 append 된 **완전한 줄**만 돌려준다. offset==0
 /// (첫 로드)이거나 파일이 줄었으면(세션 교체) 마지막 `TRANSCRIPT_TAIL` 바이트 윈도를
@@ -5095,7 +5095,7 @@ pub(crate) fn prepare_session_storage() {
         }
         let dir = kasa_socket::session_storage::read_path(&root, "session.json")
             .parent().unwrap().to_path_buf();
-        std::thread::spawn(kasa_mcp::character::maintain_session_characters);
+        std::thread::spawn(kasa_characters::character::maintain_session_characters);
         SessionStorage { dir, _owner: owner }
     });
 }
@@ -5196,7 +5196,7 @@ pub fn students_dir() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    if let Some(d) = kasa_mcp::character::active_theme_dir() {
+    if let Some(d) = kasa_characters::character::active_theme_dir() {
         return Some(d.join("sprites"));
     }
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"))
@@ -5266,7 +5266,7 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
     let Some(path) = settings_file_path() else {
         return;
     };
-    let _ = kasa_mcp::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
+    let _ = kasa_device::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
         settings.as_object_mut().ok_or("settings is not an object")?.insert(key.into(), value);
         Ok(())
     });
@@ -5353,7 +5353,7 @@ mod browser_target_identity_tests {
 }
 
 pub(crate) fn save_browser_target(machine: &str) -> std::io::Result<()> {
-    let urls = kasa_mcp::machines::kasachrome_bridge_urls_for(machine);
+    let urls = kasa_device::machines::kasachrome_bridge_urls_for(machine);
     if !machine.is_empty() && urls.is_empty() {
         return Err(std::io::Error::other(format!("{machine} 브라우저로 연결할 경로가 없어요")));
     }
@@ -5714,7 +5714,7 @@ fn sanitize_theme_id(label: &str) -> String {
 pub fn create_theme(label: &str) -> std::io::Result<std::path::PathBuf> {
     // 목록을 읽는 곳과 **같은 뿌리**여야 한다 — 여기만 따로 계산하면
     // `KASATERM_THEMES_DIR` 을 쓰는 사용자는 새 테마가 목록에 안 뜬다.
-    let root = kasa_mcp::character::themes_root()
+    let root = kasa_characters::character::themes_root()
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
     let base = match sanitize_theme_id(label) {
         s if s.is_empty() => "my-theme".to_string(),
@@ -5734,7 +5734,7 @@ pub fn create_theme(label: &str) -> std::io::Result<std::path::PathBuf> {
         .ok_or_else(|| std::io::Error::other("빈 이름을 못 찾았다"))?;
     std::fs::create_dir_all(&dir)?;
 
-    let mut roster = kasa_mcp::character::characters_json()
+    let mut roster = kasa_characters::character::characters_json()
         .ok_or_else(|| std::io::Error::other("로스터를 못 읽었다"))?;
     if let Some(o) = roster.as_object_mut() {
         // 화면에 보일 이름은 한글로 짓는다 — 폴더 이름(`my-theme-3`)을 그대로
@@ -5808,7 +5808,7 @@ pub fn write_character_picks(picks: &[(String, Vec<String>)]) {
         obj.insert(theme.clone(), serde_json::json!(names));
     }
     write_setting("character_picks", serde_json::Value::Object(obj));
-    kasa_mcp::character::invalidate_character_picks();
+    kasa_characters::character::invalidate_character_picks();
     invalidate_theme_rows();
 }
 
@@ -5838,8 +5838,8 @@ fn build_theme_rows() -> Vec<ThemeRow> {
             .collect(),
     };
     let mut out = vec![bundled];
-    for (id, label) in kasa_mcp::character::list_themes() {
-        let dir = kasa_mcp::character::themes_root().map(|r| r.join(&id));
+    for (id, label) in kasa_characters::character::list_themes() {
+        let dir = kasa_characters::character::themes_root().map(|r| r.join(&id));
         let roster = dir
             .as_ref()
             .and_then(|d| std::fs::read_to_string(d.join("theme.json")).ok())
@@ -5907,13 +5907,13 @@ pub(crate) fn character_sprite_spec(motion: &str) -> Option<(usize, &'static str
 }
 
 fn sprite_dir_for_theme(theme: &str) -> Option<std::path::PathBuf> {
-    if theme.is_empty() || theme == kasa_mcp::character::BASE_THEME_KEY {
+    if theme.is_empty() || theme == kasa_characters::character::BASE_THEME_KEY {
         return Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"));
     }
     if !safe_path_component(theme) {
         return None;
     }
-    Some(kasa_mcp::character::themes_root()?.join(theme).join("sprites"))
+    Some(kasa_characters::character::themes_root()?.join(theme).join("sprites"))
 }
 
 fn validate_sprite_frames(slug: &str, motion: &str, frames: &[Vec<u8>]) -> anyhow::Result<()> {
@@ -6241,7 +6241,7 @@ pub fn theme_dir(id: &str) -> Option<std::path::PathBuf> {
     if id.is_empty() {
         return None;
     }
-    let d = kasa_mcp::character::themes_root()?.join(id);
+    let d = kasa_characters::character::themes_root()?.join(id);
     d.is_dir().then_some(d)
 }
 
@@ -6280,7 +6280,7 @@ pub fn rename_theme(id: &str, label: &str) -> std::io::Result<()> {
 /// 부르는 쪽이 그 경로를 사용자에게 보여 줄 수 있다.
 pub fn delete_theme(id: &str) -> std::io::Result<std::path::PathBuf> {
     let dir = theme_dir(id).ok_or_else(|| std::io::Error::other("그 테마 폴더가 없다"))?;
-    let trash = kasa_mcp::character::themes_root()
+    let trash = kasa_characters::character::themes_root()
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?
         .join("_trash");
     std::fs::create_dir_all(&trash)?;
@@ -6315,7 +6315,7 @@ fn zip_noise(p: &std::path::Path) -> bool {
 /// 푸는 자리도 임시 폴더다. 다 풀고 `theme.json` 을 확인한 뒤에야 최종 위치로 옮긴다.
 /// 같은 뿌리 안이라 그 이동은 rename 한 번이고, 중간에 끊겨도 목록에 반쪽이 안 뜬다.
 pub fn import_theme(zip_path: &std::path::Path) -> std::io::Result<String> {
-    let root = kasa_mcp::character::themes_root()
+    let root = kasa_characters::character::themes_root()
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
     import_theme_into(&root, zip_path)
 }
@@ -6331,7 +6331,7 @@ pub fn export_theme_zip(id: &str) -> std::io::Result<Vec<u8>> {
     if id.is_empty() || id.contains('/') || id.contains("..") {
         return Err(std::io::Error::other("테마 id 가 이상하다"));
     }
-    let root = kasa_mcp::character::themes_root()
+    let root = kasa_characters::character::themes_root()
         .ok_or_else(|| std::io::Error::other("홈 폴더를 못 찾았다"))?;
     let dir = root.join(id);
     if !dir.join("theme.json").is_file() {
@@ -6542,7 +6542,7 @@ fn import_theme_into(
 /// 표시하는 데 쓰므로, 폴더가 사라져도 고른 값 자체는 그대로 보여야 사용자가
 /// 무엇이 어긋났는지 안다.
 pub fn read_character_theme() -> String {
-    kasa_mcp::character::active_theme_id()
+    kasa_characters::character::active_theme_id()
 }
 
 pub fn read_claude_persona() -> bool {
@@ -7582,7 +7582,7 @@ fn resolve_attach_target(target: &str) -> Option<String> {
 /// `claude attach` 로 다시 붙일 수 있는 살아 있는 배경 세션의 짧은 번호. `claude attach` 는 멈춘 세션도
 /// 다시 깨우므로, 끝났거나 지워진 세션은 여기서 걸러 붙이지 않는다. `claude agents` 를 띄우니 GUI 밖에서만.
 pub(crate) fn live_background_session(target: &str) -> Option<String> {
-    let agents = kasa_mcp::claude_agents_all(AGENTS_SHARE_AGE)?;
+    let agents = kasa_agents::claude_agents_all(AGENTS_SHARE_AGE)?;
     live_background_id(&agents, target)
 }
 
@@ -7726,18 +7726,18 @@ fn scan_projects_for_session(projects: &std::path::Path, sid: &str) -> Option<st
 /// 명부 밖 호스트나 임의 주소는 받지 않는다.
 fn restart_remote(machine: Option<&str>) -> Result<Option<String>> {
     let Some(id) = machine.map(str::trim).filter(|id| !id.is_empty()) else { return Ok(None) };
-    if kasa_mcp::board_service::local_id().ok().as_deref() == Some(id) {
+    if kasa_collab::board_service::local_id().ok().as_deref() == Some(id) {
         return Ok(None);
     }
     anyhow::ensure!(id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "machine id must be a registered stable id");
-    let machine = kasa_mcp::machines::find_route(&format!("~{id}"))
+    let machine = kasa_device::machines::find_route(&format!("~{id}"))
         .ok_or_else(|| anyhow::anyhow!("machine {id} is not registered on this device"))?;
     Ok(Some(machine.base))
 }
 
 fn codex_live_children(path: &std::path::Path) -> Vec<String> {
     let (children, changed) = kasa_agents::codex_children::running(path);
-    if changed { kasa_mcp::changes::bump(); }
+    if changed { kasa_wire::changes::bump(); }
     children
 }
 
@@ -9289,10 +9289,10 @@ fn read_spawner_pairs(path: &std::path::Path) -> Vec<(String, String)> {
 
 /// 아이 칸을 부른 칸의 지금 번호를 키 짝으로만 푼다 — 어느 쪽이든 닫혀 키가 걷혔으면 `None`.
 fn spawner_by_keys(memory: &HashMap<String, String>, file: impl FnOnce() -> Vec<(String, String)>, child: &str) -> Option<String> {
-    let key = kasa_mcp::surface_keys::get(child)?;
+    let key = kasa_collab::surface_keys::get(child)?;
     let parent_key = memory.get(&key).cloned()
         .or_else(|| file().into_iter().rev().find(|(c, _)| *c == key).map(|(_, p)| p))?;
-    kasa_mcp::surface_keys::find(&parent_key)
+    kasa_collab::surface_keys::find(&parent_key)
 }
 
 /// 같은 자식은 새 부모로 덮고, 오래된 것부터 버려 `SPAWNER_PAIRS_MAX` 를 넘지 않는다.

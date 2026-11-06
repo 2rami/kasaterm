@@ -12,6 +12,7 @@ name = "kasaterm-cli"
 path = "src/bin/kasaterm_cli_main.rs"
 
 [features]
+test-support = []
 default = ["app-update"]
 # 카사텀 앱 재시작·업데이트 작업(`app_restart`·`app_update`, `app.*` 메서드, CLI
 # `app-restart`·`app-update`). 앱을 스스로 갈아 끼우지 않는 호스트(`kasa tui` 는
@@ -41,7 +42,7 @@ windows-sys = { workspace = true, features = [
     # 소유자 전용 저장소(private_store.rs): 열린 핸들의 소유자·DACL 읽기/쓰기와 ACE 종류·설명자 판 상수.
     "Win32_Security_Authorization",
     "Win32_System_SystemServices",
-    # kasaterm-cli share new 가 폴더 이름에 이 기기 날짜를 붙인다.
+    # 받은 쪽지의 시각은 이 기기의 현지 시간으로 표시한다.
     "Win32_System_SystemInformation",
     # 쪽지를 버릴 시각(tell::clock_hm)을 이 기기 현지 시각으로.
     "Win32_System_Time",

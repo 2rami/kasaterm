@@ -90,9 +90,9 @@ fn build_picked_sprite_dirs() -> &'static [(String, std::path::PathBuf)] {
     if cfg!(test) {
         return &[];
     }
-    let v: Vec<(String, std::path::PathBuf)> = kasa_mcp::character::picked_theme_of_slug()
+    let v: Vec<(String, std::path::PathBuf)> = kasa_characters::character::picked_theme_of_slug()
         .into_iter()
-        .filter_map(|(slug, theme)| Some((slug, kasa_mcp::character::picked_sprite_dir(&theme)?)))
+        .filter_map(|(slug, theme)| Some((slug, kasa_characters::character::picked_sprite_dir(&theme)?)))
         .collect();
     Box::leak(v.into_boxed_slice())
 }
@@ -116,7 +116,7 @@ fn build_other_sprite_dirs() -> &'static [std::path::PathBuf] {
     if cfg!(test) {
         return &[];
     }
-    let Some(root) = kasa_mcp::character::themes_root() else { return &[] };
+    let Some(root) = kasa_characters::character::themes_root() else { return &[] };
     let active = crate::socket::students_dir();
     Box::leak(other_sprite_dirs_in(&root, active.as_deref()).into_boxed_slice())
 }

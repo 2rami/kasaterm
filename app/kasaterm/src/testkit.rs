@@ -1545,7 +1545,7 @@ impl App {
             }
             self.seed_home_accounts_probe(
                 "본진",
-                kasa_mcp::remote::RemoteAccounts {
+                kasa_remote::remote::RemoteAccounts {
                     accounts: vec![serde_json::json!({ "id": "acct-1", "label": "시험" })],
                     active: "acct-1".to_string(),
                     autoswitch: true,
@@ -3156,7 +3156,7 @@ impl App {
             let opened = if let Some(id) = act.strip_prefix("panechars:") {
                 P::Theme(id.to_string())
             } else if act == "panechars" {
-                let first = kasa_mcp::character::list_themes().into_iter().next();
+                let first = kasa_characters::character::list_themes().into_iter().next();
                 if first.is_none() {
                     eprintln!("[autoinfo] 테마가 하나도 없다 — 캐릭터 목록을 못 편다");
                 }
@@ -7019,7 +7019,7 @@ impl App {
                     };
                     self.open_remote_room(label, Some(window), "fixture room", Some(pane)).and_then(|()| {
                         self.window_leaves(self.active_window).into_iter().find(|id| {
-                            kasa_mcp::remote::remote_info(id).is_some_and(|info| &info.remote_id == pane)
+                            kasa_remote::remote::remote_info(id).is_some_and(|info| &info.remote_id == pane)
                         }).ok_or_else(|| anyhow::anyhow!("room mirror did not contain {pane}"))
                     })
                 } else {
@@ -7028,10 +7028,10 @@ impl App {
                 match outcome {
                     Ok(id) => {
                         eprintln!("[mirror-view-test] source={pane} viewer={id} read_only={}",
-                            kasa_mcp::remote::is_view_pane(&id));
+                            kasa_remote::remote::is_view_pane(&id));
                         let _ = VIEW_ID.set(id);
                         if let Ok(extra) = std::env::var("KASATERM_TEST_MIRROR_EXTRA_PANE") {
-                            let window = kasa_mcp::machines::cached_pane(label, &extra)
+                            let window = kasa_device::machines::cached_pane(label, &extra)
                                 .and_then(|r| r.get("window").and_then(|v| v.as_u64()));
                             if let Some(window) = window {
                                 let result = self.open_remote_room(label, Some(window), "second fixture room", Some(&extra));
@@ -7121,11 +7121,11 @@ impl App {
 
         match step {
             0 => {
-                let backend = Arc::new(kasa_mcp::standalone::StandaloneBackend::new(
+                let backend = Arc::new(kasa_backend::standalone::StandaloneBackend::new(
                     std::env::temp_dir()
                         .join(format!("kasaterm-remote-color-{}", std::process::id())),
                 ));
-                let port = match kasa_mcp::spawn_http_server_opts(backend, 0, false) {
+                let port = match kasa_http::spawn_http_server_opts(backend, 0, false) {
                     Ok(port) => port,
                     Err(error) => {
                         eprintln!("[remote-color] FAIL loopback server: {error}");
@@ -7134,8 +7134,8 @@ impl App {
                     }
                 };
                 let base = format!("http://127.0.0.1:{port}");
-                let owner = match kasa_mcp::remote::connect(
-                    kasa_mcp::remote::RemoteSpec {
+                let owner = match kasa_remote::remote::connect(
+                    kasa_remote::remote::RemoteSpec {
                         base: base.clone(),
                         pane: None,
                         cwd: None,
@@ -7168,13 +7168,13 @@ impl App {
                     return;
                 };
                 let remote_id = self.alloc_pane_id();
-                let remote = match kasa_mcp::remote::connect_view(
-                    kasa_mcp::remote::RemoteSpec {
+                let remote = match kasa_remote::remote::connect_view(
+                    kasa_remote::remote::RemoteSpec {
                         base: base.clone(),
                         pane: Some(origin.clone()),
                         cwd: None,
                         token: None,
-                        identity: kasa_mcp::remote::RemoteIdentity {
+                        identity: kasa_remote::remote::RemoteIdentity {
                             label: "격리 원격".to_string(),
                             remote_cwd: None,
                             origin_cwd: None,
@@ -7224,13 +7224,13 @@ impl App {
                 {
                     return;
                 }
-                let marker = match kasa_mcp::remote::connect_view(
-                    kasa_mcp::remote::RemoteSpec {
+                let marker = match kasa_remote::remote::connect_view(
+                    kasa_remote::remote::RemoteSpec {
                         base: base.clone(),
                         pane: Some(origin.clone()),
                         cwd: None,
                         token: None,
-                        identity: kasa_mcp::remote::RemoteIdentity {
+                        identity: kasa_remote::remote::RemoteIdentity {
                             label: "격리 원격".to_string(),
                             remote_cwd: None,
                             origin_cwd: None,
@@ -7263,7 +7263,7 @@ impl App {
                     index
                 };
                 let fallback = self.ws.lock().unwrap().active_tab_pid(outer);
-                let detected = kasa_mcp::remote::is_remote_pane(&fallback);
+                let detected = kasa_remote::remote::is_remote_pane(&fallback);
                 capture(self, "1-remote-none-pid-focused.png");
                 if let Ok(mut ws) = self.ws.lock() {
                     if let Some(pane) = ws.panes.get_mut(outer) {
@@ -7277,11 +7277,11 @@ impl App {
             }
             3 => {
                 let (Some(outer), Some(remote_id)) = (OUTER.get(), REMOTE.get()) else { return };
-                if kasa_mcp::remote::is_remote_pane(outer) {
+                if kasa_remote::remote::is_remote_pane(outer) {
                     return;
                 }
                 let active = self.ws.lock().unwrap().active_tab_pid(outer);
-                let detected = active == *remote_id && kasa_mcp::remote::is_remote_pane(&active);
+                let detected = active == *remote_id && kasa_remote::remote::is_remote_pane(&active);
                 capture(self, "2-remote-focused.png");
                 eprintln!("[remote-color] focused active={active} detected={detected}");
             }
@@ -7329,7 +7329,7 @@ impl App {
                     pane.dirty = true;
                 }
                 let active = self.ws.lock().unwrap().active_tab_pid(outer);
-                let remote = kasa_mcp::remote::is_remote_pane(&active);
+                let remote = kasa_remote::remote::is_remote_pane(&active);
                 capture(self, "4-local-markdown.png");
                 eprintln!("[remote-color] local markdown active={active} remote={remote}");
             }
@@ -7352,14 +7352,14 @@ impl App {
                 capture(self, "5-remote-return.png");
                 eprintln!(
                     "[remote-color] remote tab restored={}",
-                    kasa_mcp::remote::is_remote_pane(remote_id)
+                    kasa_remote::remote::is_remote_pane(remote_id)
                 );
             }
             7 => {
                 let Some(remote_id) = REMOTE.get() else { return };
                 match self.bring_pane_home(remote_id) {
                     Ok(()) => {
-                        let remote = kasa_mcp::remote::is_remote_pane(remote_id);
+                        let remote = kasa_remote::remote::is_remote_pane(remote_id);
                         capture(self, "6-home-immediate.png");
                         eprintln!("[remote-color] bring home immediate remote={remote}");
                     }
@@ -7373,7 +7373,7 @@ impl App {
             8 => {
                 let Some(remote_id) = REMOTE.get() else { return };
                 let (remote, stale_text) = (
-                    kasa_mcp::remote::is_remote_pane(remote_id),
+                    kasa_remote::remote::is_remote_pane(remote_id),
                     self.pty
                         .get(remote_id)
                         .is_some_and(|session| session.visible_text(20).contains("DEFAULT-REMOTE")),
@@ -8243,7 +8243,7 @@ impl App {
         let active_layout = self.ws.lock().unwrap().layout.clone();
         let active_panes = self.ws.lock().unwrap().active_window_panes.clone();
         let zoom = self.zoomed_pane.clone();
-        let epoch = kasa_mcp::changes::current();
+        let epoch = kasa_wire::changes::current();
         let fleet = std::env::var("KASATERM_AUTOFOREIGNSPLIT").as_deref() == Ok("fleet");
         let outcome = if fleet {
             self.split_fleet(2, Some(&target), 0.5)
@@ -8264,7 +8264,7 @@ impl App {
                 let focus = self.active_window == active_window && ws.active_pane == prev
                     && ws.layout == active_layout && ws.active_window_panes == active_panes
                     && self.zoomed_pane == zoom;
-                let changed = kasa_mcp::changes::current() > epoch;
+                let changed = kasa_wire::changes::current() > epoch;
                 let passed = !made.is_empty() && after > before && published && geometry && focus && changed;
                 eprintln!(
                     "[autoforeignsplit] {}: fleet={fleet} window={win} {target} → {made:?}, leaf {before}→{after}, published={published} geometry={geometry} focus={focus} changed={changed}",
@@ -9528,7 +9528,7 @@ impl App {
                 assert!(self.statusbar_popover_click(choice.1.0 + choice.1.2 / 2.0,
                     choice.1.1 + choice.1.3 / 2.0));
                 assert!(self.statusbar.popover.is_none(), "selection closes its menu");
-                assert_eq!(kasa_mcp::machines::kasachrome_machine(), choice.0,
+                assert_eq!(kasa_device::machines::kasachrome_machine(), choice.0,
                     "browser selection must persist through the settings action");
             }
             return;

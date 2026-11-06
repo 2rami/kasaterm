@@ -302,7 +302,7 @@ impl App {
         self.collab.hub.refresh();
         let bindings = self.collab.hub.bound.try_lock().map(|b| b.clone()).unwrap_or_default();
         let mut panes: Vec<String> = self.pty.keys()
-            .filter(|p| !kasa_mcp::remote::is_remote_pane(p))
+            .filter(|p| !kasa_remote::remote::is_remote_pane(p))
             .filter(|p| {
                 // Hidden tabs and children can still work while the front tab waits for input.
                 let busy = self.collab.hub.resolved(p).is_none_or(|r|

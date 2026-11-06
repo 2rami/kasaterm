@@ -1,11 +1,11 @@
-//! 기기들이 같은 Claude 계정으로 모인다 — 관문 공통 설정의 순서 있는 선택(`kasa_mcp::account_sync::choice`,
+//! 기기들이 같은 Claude 계정으로 모인다 — 관문 공통 설정의 순서 있는 선택(`kasa_device::account_sync::choice`,
 //! docs/agent-account-selection.md). 슬롯 번호·별명은 기기마다 달라 선택은 공급자 UUID 쌍으로만 맞춘다.
 //! 이메일·조직명은 관문 사슬을 찾고 화면에 보이는 힌트다.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use kasa_mcp::account_sync::choice;
+use kasa_device::account_sync::choice;
 use serde_json::Value;
 
 use super::sync::{AccountIdentity, SyncNotice};
@@ -52,7 +52,7 @@ const BENCH_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) fn observe_workbench_identity() {
     let generation = selection_generation();
-    let epoch = kasa_mcp::device_auth::change_epoch();
+    let epoch = kasa_device::device_auth::change_epoch();
     let found = crate::claude_auth::verified_workbench_identity().and_then(AccountIdentity::from_verified);
     if let Ok(mut bench) = BENCH.lock() {
         *bench = Some(BenchObservation { at: std::time::Instant::now(), generation, epoch, identity: found });
@@ -61,7 +61,7 @@ pub(crate) fn observe_workbench_identity() {
 
 fn observed_bench() -> Option<AccountIdentity> {
     BENCH.lock().ok()?.as_ref()
-        .filter(|observed| observed.current(selection_generation(), kasa_mcp::device_auth::change_epoch()))
+        .filter(|observed| observed.current(selection_generation(), kasa_device::device_auth::change_epoch()))
         .and_then(|observed| observed.identity.clone())
 }
 
@@ -137,7 +137,7 @@ fn set_step(rev: u64, step: Step) {
 
 pub(super) fn notice() -> Option<SyncNotice> {
     let state = state().lock().ok()?;
-    state.scope.as_ref().filter(|(_, epoch)| *epoch == kasa_mcp::device_auth::change_epoch())?;
+    state.scope.as_ref().filter(|(_, epoch)| *epoch == kasa_device::device_auth::change_epoch())?;
     state.notice.clone()
 }
 
@@ -154,8 +154,8 @@ fn settle() {
     }
 }
 
-fn paths() -> Option<kasa_mcp::account_sync::local::Paths> {
-    crate::settings::account_sync_allowed().then(kasa_mcp::account_sync::local::Paths::current).flatten()
+fn paths() -> Option<kasa_device::account_sync::local::Paths> {
+    crate::settings::account_sync_allowed().then(kasa_device::account_sync::local::Paths::current).flatten()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -225,13 +225,13 @@ impl App {
     /// `claude-account-sync-v1` 을 그대로 적용해도 되나. 아니면 동기화를 깨우고 관문 순서로 맞춘다.
     pub(crate) fn peer_choice_applies(&self, requested: &AccountIdentity) -> bool {
         let settings = crate::socket::read_settings();
-        let account = kasa_mcp::account_sync::current_account();
+        let account = kasa_device::account_sync::current_account();
         let local = account.as_ref().and_then(|account| choice::owned(&settings, account));
         let waiting = state().lock().map_or(true, |state| state.pending.as_ref().is_some_and(|pending|
-            pending.current(&self.set_claude_account, account.as_deref(), kasa_mcp::device_auth::change_epoch(), selection_generation())));
+            pending.current(&self.set_claude_account, account.as_deref(), kasa_device::device_auth::change_epoch(), selection_generation())));
         let applies = peer_request(local, requested, waiting) == PeerRequest::Apply;
         if !applies {
-            kasa_mcp::account_sync::poke();
+            kasa_device::account_sync::poke();
         }
         applies
     }
@@ -239,10 +239,10 @@ impl App {
     /// 사람이나 자동 전환이 고른 계정을 다른 기기에 알린다. 다른 기기를 따라 바꾼 것은 다시 내지 않는다.
     pub(super) fn record_claude_choice(&mut self, slot: &str, identity: Option<&AccountIdentity>) {
         let Some(paths) = paths() else { return };
-        let Some(account) = kasa_mcp::account_sync::current_account() else { return };
-        let seen = kasa_mcp::account_sync::seen_revision(&paths);
+        let Some(account) = kasa_device::account_sync::current_account() else { return };
+        let seen = kasa_device::account_sync::seen_revision(&paths);
         let Ok(mut state) = state().lock() else { return };
-        state.align_scope(Some(&account), kasa_mcp::device_auth::change_epoch());
+        state.align_scope(Some(&account), kasa_device::device_auth::change_epoch());
         state.notice = None;
         state.attempt = None;
         state.pending = None;
@@ -257,7 +257,7 @@ impl App {
                     seen,
                     generation: selection_generation(),
                     account,
-                    epoch: kasa_mcp::device_auth::change_epoch(),
+                    epoch: kasa_device::device_auth::change_epoch(),
                 });
             }
         }
@@ -267,9 +267,9 @@ impl App {
     /// 같은 UUID 의 슬롯으로 바꾸거나 관문 사슬을 새 슬롯에 받아 증명 뒤 고른다.
     pub(crate) fn converge_claude_choice(&mut self) {
         let Some(paths) = paths() else { return };
-        let account = kasa_mcp::account_sync::current_account();
+        let account = kasa_device::account_sync::current_account();
         if let Ok(mut state) = state().lock() {
-            state.align_scope(account.as_deref(), kasa_mcp::device_auth::change_epoch());
+            state.align_scope(account.as_deref(), kasa_device::device_auth::change_epoch());
         }
         let Some(account) = account else { return };
         let settings = crate::socket::read_settings();
@@ -327,10 +327,10 @@ impl App {
         }
     }
 
-    fn publish_pending_choice(&mut self, paths: &kasa_mcp::account_sync::local::Paths, account: Option<&str>) {
+    fn publish_pending_choice(&mut self, paths: &kasa_device::account_sync::local::Paths, account: Option<&str>) {
         let Ok(mut state) = state().lock() else { return };
         let Some(pending) = state.pending.clone() else { return };
-        if !pending.current(&self.set_claude_account, account, kasa_mcp::device_auth::change_epoch(), selection_generation()) {
+        if !pending.current(&self.set_claude_account, account, kasa_device::device_auth::change_epoch(), selection_generation()) {
             state.pending = None;
             return;
         }
@@ -397,8 +397,8 @@ impl App {
         }
         let (email, org) = want.email_org();
         let name = display_name(email, org);
-        let key = kasa_mcp::agent_accounts::account_key("claude", email, org, "");
-        let state = kasa_mcp::agent_chains::chain_state(&key);
+        let key = kasa_device::agent_accounts::account_key("claude", email, org, "");
+        let state = kasa_device::agent_chains::chain_state(&key);
         if state.as_deref() == Some("ok") {
             if let Some(slot) = self.adopt_held_claude_chain(&key) {
                 show("다른 기기 계정 받는 중", format!("관문에서 「{name}」 로그인을 새 슬롯에 받아요 — 신원을 확인한 뒤 고릅니다"), false);
@@ -411,8 +411,8 @@ impl App {
         }
         // 관문 사슬·계정 목록은 각자 주기로 받아 온다. 막 켜졌으면 아직 없으니 몇 주기 더 본 뒤에 없다고 말한다.
         if tries + 1 < WAIT_PASSES {
-            kasa_mcp::agent_chains::poke();
-            kasa_mcp::agent_accounts::poke();
+            kasa_device::agent_chains::poke();
+            kasa_device::agent_accounts::poke();
             show("다른 기기 계정 확인 중", format!("「{name}」 — 관문에서 그 계정 로그인을 찾고 있어요"), false);
             return set_step(rev, Step::Listing(tries + 1));
         }
@@ -430,10 +430,10 @@ fn display_name(email: &str, org: &str) -> String {
     if !org.is_empty() && !org.to_lowercase().contains(&email.to_lowercase()) { org.into() } else { email.into() }
 }
 
-fn publish(paths: &kasa_mcp::account_sync::local::Paths, account: &str, seen: u64, identity: &AccountIdentity) {
+fn publish(paths: &kasa_device::account_sync::local::Paths, account: &str, seen: u64, identity: &AccountIdentity) {
     let (account_uuid, organization_uuid) = identity.uuids();
     let (email, org) = identity.email_org();
-    if let Err(error) = kasa_mcp::account_sync::choose_for(paths, account, seen, account_uuid, organization_uuid, email, org) {
+    if let Err(error) = kasa_device::account_sync::choose_for(paths, account, seen, account_uuid, organization_uuid, email, org) {
         eprintln!("[account-choice] 선택을 적지 못했어요: {error}");
     }
 }
@@ -445,7 +445,7 @@ mod tests {
     const ORG: &str = "00000000-0000-4000-8000-0000000000f0";
 
     fn who(account: &str, email: &str) -> AccountIdentity {
-        AccountIdentity::from_verified(kasa_mcp::VerifiedClaudeIdentity {
+        AccountIdentity::from_verified(kasa_device::VerifiedClaudeIdentity {
             account_uuid: account.into(),
             organization_uuid: ORG.into(),
             email: email.into(),

@@ -87,7 +87,7 @@ fn compose_student_banners(
         }
     }
 }
-use kasa_mcp::visual::{
+use kasa_wire::visual::{
     self, PaneVisualFrame, VisualAsset, VisualMotion, VisualOverlay, VisualRect,
 };
 
@@ -898,7 +898,7 @@ impl App {
         // The parser always follows the source's canonical screen. Only this
         // viewer's presentation is reflowed, at its own unchanged font size.
         // Remote visual exports (desktop_view=false) remain canonical.
-        let projection = term.filter(|t| desktop_view && !t.laid_out && kasa_mcp::remote::is_view_pane(&tab_pid))
+        let projection = term.filter(|t| desktop_view && !t.laid_out && kasa_remote::remote::is_view_pane(&tab_pid))
             .map(|source| {
                 let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
                 if let Some(session) = self.pty.get(&tab_pid) {
@@ -1066,8 +1066,8 @@ impl App {
         // BOTH source and viewer. Harness polling must not flash a light CLI
         // background into a dark viewer, and raw CLI defaults are not a theme.
         localize_codex_prompt_background(&mut composed, theme::surface());
-        if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
-            let facts = kasa_mcp::remote::cached_pane(tab_pid.as_str());
+        if kasa_remote::remote::is_remote_pane(tab_pid.as_str()) {
+            let facts = kasa_remote::remote::cached_pane(tab_pid.as_str());
             // 기본 Codex는 상태줄이 없을 수 있다. 호스트가 셸이라고 보고했다면
             // 남은 스크롤백 모양으로 다시 Codex 취급하지 않는다.
             // Claude 의 번호 패치도 같은 거터 모양이고, 그 색은 저쪽 기계의
@@ -1087,7 +1087,7 @@ impl App {
         // 그릴 때까지만 덧그린다. 모델 표식이 줄에 실려 와 아래 로고 자리도 그대로 잡힌다.
         if let Some((row, col)) = runs_claude.then(|| status_line_anchor(&composed, statusline_face)).flatten() {
             let engine = status_line_text(&composed[row], col);
-            if let Some(line) = kasa_mcp::claude_mod::status_overlay(tab_pid.as_str(), &engine) {
+            if let Some(line) = kasa_students::claude_mod::status_overlay(tab_pid.as_str(), &engine) {
                 paint_status_line(&mut composed[row], col, &line);
             }
         }
@@ -1141,7 +1141,7 @@ impl App {
         }
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-            let source = kasa_mcp::remote::remote_meta(&tab_pid);
+            let source = kasa_remote::remote::remote_meta(&tab_pid);
             inline_slots.extend(crate::inline_media::compose(
                 &mut composed, (body_left, body_top), (self.cell.w * fs, self.cell.h * fs), cols_now,
                 source.as_ref().map(|(base, _)| base.as_str()), &self.proxy,
@@ -1702,7 +1702,7 @@ impl App {
                         else {
                             continue;
                         };
-                        let Some(slug) = kasa_mcp::character::session_character(sid)
+                        let Some(slug) = kasa_characters::character::session_character(sid)
                             .and_then(|c| student_face_slug(&c))
                         else {
                             continue;
@@ -2077,7 +2077,7 @@ impl App {
         if !(agents_view || resume_picker || ask_picker)
             && agent_kind == Some(kasa_pty::AgentKind::Codex)
         {
-            let remote = kasa_mcp::remote::cached_pane(&tab_pid);
+            let remote = kasa_remote::remote::cached_pane(&tab_pid);
             if let Some(name) = codex_session_label(
                 pane.title_pinned.then(|| pane.title.as_deref()).flatten(), remote.as_ref(),
             ) {

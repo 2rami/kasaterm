@@ -40,7 +40,7 @@ pub(super) fn request(base: &str, id: &str, proxy: winit::event_loop::EventLoopP
 
 fn fetch(base: &str, id: &str, root: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(valid_id(id), "invalid image id");
-    let bytes = kasa_mcp::remote::remote_get_bytes_bounded(
+    let bytes = kasa_remote::remote::remote_get_bytes_bounded(
         base, &format!("/term/inline-result?id={id}"), kasa_socket::inline_results::MAX_BYTES as usize,
     )?;
     store(root, id, &bytes)

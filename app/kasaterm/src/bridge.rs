@@ -125,7 +125,7 @@ pub(crate) fn spawn_inbox_bridge(bg_agents: Arc<Mutex<HashMap<String, Option<Str
         return;
     }
     std::thread::spawn(move || {
-        let bin = kasa_mcp::claude_bin();
+        let bin = kasa_agents::claude_bin();
         let mut backoff: HashMap<String, Instant> = HashMap::new();
         loop {
             std::thread::sleep(TICK);

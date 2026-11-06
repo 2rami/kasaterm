@@ -533,7 +533,7 @@ impl App {
         };
         // 사람이 폰을 들고 있다(하단바·폰 허브의 「폰」) — 어느 기계 브라우저도 그 눈앞에
         // 없다. 쪽지+알림으로 보내고, 되돌아온 open(`__local_browser__`)도 같다.
-        if kasa_mcp::machines::opens_on_phone() {
+        if kasa_device::machines::opens_on_phone() {
             self.open_url_to_phone(&url, target);
             return;
         }
@@ -542,11 +542,11 @@ impl App {
             self.open_url_here(&url, None);
             return;
         }
-        let selected = kasa_mcp::machines::kasachrome_machine();
+        let selected = kasa_device::machines::kasachrome_machine();
         if !selected.is_empty() {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                let result = kasa_mcp::browser_target::open_selected_blocking(&url, &selected);
+                let result = kasa_remote::browser_target::open_selected_blocking(&url, &selected);
                 let message = match result {
                     Ok(()) => format!("{selected} 브라우저로 열었어요"),
                     Err(error) => format!("{selected} 브라우저로 열지 못했어요: {error}"),
@@ -569,7 +569,7 @@ impl App {
         let msg = serde_json::json!({ "t": "open-url", "url": url }).to_string();
         let sent = outer
             .as_deref()
-            .map_or(0, |p| kasa_mcp::push_viewer_control(p, &msg));
+            .map_or(0, |p| kasa_http::push_viewer_control(p, &msg));
         if sent > 0 {
             self.set_toast(
                 "보고 있는 기계의 브라우저로 열었어요".to_string());
@@ -602,18 +602,18 @@ impl App {
         let url_owned = url.to_string();
         std::thread::spawn(move || {
             // 새 판 폰 앱은 이 기기 localhost 를 앱 안 웹뷰로 연다 — 임시 터널을 세우지 않는다.
-            let in_app = kasa_mcp::quicktunnel::in_app_url(&url_owned);
+            let in_app = kasa_device::quicktunnel::in_app_url(&url_owned);
             let (public, did) = if let Some(local) = in_app.clone() {
                 (local, "이 기기 localhost — 폰 앱 안에서 연다".to_string())
             } else {
-                match kasa_mcp::quicktunnel::public_url(&url_owned) {
+                match kasa_device::quicktunnel::public_url(&url_owned) {
                     Ok(p) if p != url_owned => (p, format!("원래 주소 {url_owned}")),
                     Ok(p) => (p, String::new()),
                     // 터널을 못 세워도 쪽지는 보낸다 — 같은 와이파이면 열릴 수 있고, 이유가 남아야 고친다.
                     Err(e) => (url_owned.clone(), format!("바깥 주소를 못 만들었어요: {e}")),
                 }
             };
-            let input = kasa_mcp::notes::NoteInput {
+            let input = kasa_students::notes::NoteInput {
                 pane: if pane.is_empty() { "-".to_string() } else { pane.clone() },
                 character: character.clone(),
                 kind: "link".to_string(),
@@ -624,8 +624,8 @@ impl App {
                 image: None,
                 url: public.clone(),
             };
-            if let Some(n) = kasa_mcp::notes::add(input) {
-                kasa_mcp::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&public));
+            if let Some(n) = kasa_students::notes::add(input) {
+                kasa_device::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&public));
             }
             let toast = if in_app.is_some() {
                 "폰 쪽지로 보냈어요 · 앱 안에서 열림".to_string()

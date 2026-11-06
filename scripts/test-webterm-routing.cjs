@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const index = fs.readFileSync('crates/kasa-mcp/assets/term/index.html', 'utf8');
+const index = fs.readFileSync('crates/kasa-http/assets/term/index.html', 'utf8');
 const script = [...index.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].at(-1)[1];
 async function route(search, panes = []) {
   const navigations = [], historyWrites = [];
@@ -43,7 +43,7 @@ async function route(search, panes = []) {
   const gridPicked = await route('?renderer=grid&t=opaque', [{ id: '%9', window: 2 }]);
   assert.deepEqual(gridPicked.navigations, ['/u/fixture/m/device/term/grid?renderer=grid&t=opaque&pane=%259#tail']);
 
-  const grid = fs.readFileSync('crates/kasa-mcp/assets/term/grid.html', 'utf8');
+  const grid = fs.readFileSync('crates/kasa-http/assets/term/grid.html', 'utf8');
   const helpers = ['paneQuery', 'socketURL'].map(name => grid.match(new RegExp(`function ${name}\\([^]*?\\n}`))[0]).join('\n');
   const context = { connectedPane: 'web-owned', proto: 'wss', ROOT: '/u/fixture/m/device', encodeURIComponent,
     location: { host: 'fixture.test', search: '?pane=%251&t=opaque%2Bvalue&pic=1' } };

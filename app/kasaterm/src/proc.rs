@@ -200,13 +200,13 @@ pub(crate) fn open_path_default(path: &std::path::Path) {
 mod tests {
     /// 숨김 없이 띄우는 자리가 하나라도 남으면 Windows 에서 그게 불릴 때마다 콘솔 창이 번쩍인다 —
     /// 2026-11-03 기기 명부의 ssh·sh 가 켤 때마다 세 번, 끊긴 터널을 다시 열 때마다 또 띄웠다.
-    /// 앱은 `command`, 그 HTTP 호스트(kasa-mcp)는 `no_window_command` 로만 띄운다. 시험 모듈의
+    /// 앱은 `command`, 그 HTTP 호스트(kasa-http)는 `no_window_command` 로만 띄운다. 시험 모듈의
     /// 자식은 사람 화면에 안 남으니 따지지 않는다.
     #[test]
     fn every_spawn_hides_its_console_window() {
         let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut found = Vec::new();
-        let mut dirs = vec![app.join("src"), app.join("../../crates/kasa-mcp/src")];
+        let mut dirs = vec![app.join("src"), app.join("../../crates/kasa-http/src")];
         while let Some(dir) = dirs.pop() {
             for path in std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()) {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();

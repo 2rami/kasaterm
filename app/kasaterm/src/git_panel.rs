@@ -119,7 +119,7 @@ pub(crate) fn fetch(
         return placeholder(target, generation, Some(issue.clone()));
     }
     let result = if let Some((_, base, machine_id)) = &target.remote {
-        let expected = kasa_mcp::git_panel::Source {
+        let expected = kasa_git::git_panel::Source {
             machine_id: machine_id.clone(),
             pane: target.pane.clone(),
             surface_key: target.surface_key.clone().unwrap_or_default(),
@@ -128,13 +128,13 @@ pub(crate) fn fetch(
         };
         let query = format!(
             "/term/gitcol?schema={}&machine_id={}&pane={}&surface_key={}&commits={}",
-            kasa_mcp::git_panel::SCHEMA,
-            kasa_mcp::remote::urlencode(machine_id),
-            kasa_mcp::remote::urlencode(&expected.pane),
-            kasa_mcp::remote::urlencode(&expected.surface_key),
+            kasa_git::git_panel::SCHEMA,
+            kasa_remote::remote::urlencode(machine_id),
+            kasa_remote::remote::urlencode(&expected.pane),
+            kasa_remote::remote::urlencode(&expected.surface_key),
             commits.clamp(1, 200)
         );
-        kasa_mcp::remote::remote_get_json_bounded(base, &query, 2 * 1024 * 1024)
+        kasa_remote::remote::remote_get_json_bounded(base, &query, 2 * 1024 * 1024)
             .map_err(|error| {
                 if error.to_string().contains("404") {
                     "update_needed"
@@ -142,7 +142,7 @@ pub(crate) fn fetch(
                     "offline"
                 }
             })
-            .and_then(|value| kasa_mcp::git_panel::validate_response(&value, &expected))
+            .and_then(|value| kasa_git::git_panel::validate_response(&value, &expected))
             .and_then(|value| {
                 serde_json::from_value::<GitColView>(value).map_err(|_| "invalid_response")
             })
@@ -216,9 +216,9 @@ fn busy_dirs(shell: Option<u32>) -> Vec<std::path::PathBuf> {
 }
 
 /// 열이 보이는 것을 고치는 변경이 왔나 — 보이는 레포(아직 못 읽었으면 칸 폴더) 아래.
-fn touched_by(changes: &[kasa_mcp::git_watch::Change], shown: Option<&std::path::Path>, target: &Target) -> bool {
+fn touched_by(changes: &[kasa_git::git_watch::Change], shown: Option<&std::path::Path>, target: &Target) -> bool {
     match shown.or(target.cwd.as_deref()) {
-        Some(root) => kasa_mcp::git_watch::touched(changes, root),
+        Some(root) => kasa_git::git_watch::touched(changes, root),
         None => false,
     }
 }
@@ -229,7 +229,7 @@ fn moved_to_another_repo(target: &Target, shown: Option<&std::path::Path>, busy:
         return false;
     }
     let Some(cwd) = target.cwd.as_deref() else { return false };
-    kasa_mcp::git_panel::rank_repos(cwd, busy).first().map(|p| p.as_path()) != shown
+    kasa_git::git_panel::rank_repos(cwd, busy).first().map(|p| p.as_path()) != shown
 }
 
 /// Git 열 일꾼을 깨우는 자리 — 보는 칸이 바뀌었을 때(바로 읽기)와 작업 트리가 바뀌었을 때.
@@ -296,7 +296,7 @@ impl Wake {
 fn watched(target: &Target, wake: &Wake) -> bool {
     match &target.remote {
         Some((_, base, _)) => wake.remote_live(base, &target.pane),
-        None => target.issue.is_none() && target.cwd.as_deref().is_some_and(kasa_mcp::git_panel::watch_panel),
+        None => target.issue.is_none() && target.cwd.as_deref().is_some_and(kasa_git::git_panel::watch_panel),
     }
 }
 
@@ -311,12 +311,12 @@ pub(crate) fn spawn_poller(
 ) {
     std::thread::spawn(move || {
         let mut kicks = 0;
-        let mut seen = kasa_mcp::git_watch::seq();
+        let mut seen = kasa_git::git_watch::seq();
         let mut read_generation = None;
         let mut due = Instant::now();
         let mut pending: Option<(Instant, Instant)> = None;
         let mut last_read = Instant::now().checked_sub(MIN_GAP).unwrap_or_else(Instant::now);
-        let mut repo: Option<(std::path::PathBuf, Option<kasa_mcp::git::RepoPaths>)> = None;
+        let mut repo: Option<(std::path::PathBuf, Option<kasa_git::git::RepoPaths>)> = None;
         let mut read_print: Option<u64> = None;
         let mut read_want = 0;
         let mut failures = 0u32;
@@ -331,7 +331,7 @@ pub(crate) fn spawn_poller(
                 Ok(context) => (context.generation, context.target.clone()),
                 Err(_) => break,
             };
-            let (seq, changes, lost) = kasa_mcp::git_watch::changes_since(seen);
+            let (seq, changes, lost) = kasa_git::git_watch::changes_since(seen);
             seen = seq;
             let Some(target) = target else {
                 pending = None;
@@ -371,15 +371,15 @@ pub(crate) fn spawn_poller(
             }
             let print = shown.as_deref().filter(|_| local).and_then(|root| {
                 if repo.as_ref().is_none_or(|(at, _)| at != root) {
-                    repo = Some((root.to_path_buf(), kasa_mcp::git::repo_paths(root)));
+                    repo = Some((root.to_path_buf(), kasa_git::git::repo_paths(root)));
                 }
-                repo.as_ref().and_then(|(_, paths)| paths.as_ref()).and_then(kasa_mcp::git::repo_fingerprint)
+                repo.as_ref().and_then(|(_, paths)| paths.as_ref()).and_then(kasa_git::git::repo_fingerprint)
             });
             let want_now = want.load(std::sync::atomic::Ordering::Relaxed);
             if !(fresh || signal_due)
                 && print.is_some()
                 && (print, want_now) == (read_print, read_want)
-                && now.duration_since(last_read) < kasa_mcp::git::idle_period(watching)
+                && now.duration_since(last_read) < kasa_git::git::idle_period(watching)
             {
                 due = now + if watching { POLL_WATCHED } else { POLL };
                 continue;
@@ -480,14 +480,14 @@ pub(crate) fn spawn_remote_watcher(context: Arc<Mutex<Context>>, wake: Arc<Wake>
             let previous = since.as_ref().filter(|(b, p, _)| *b == base && *p == target.pane).map(|(_, _, seq)| *seq);
             let query = format!(
                 "/term/gitcol/wait?schema={}&machine_id={}&pane={}&surface_key={}&wait_ms={}{}",
-                kasa_mcp::git_panel::SCHEMA,
-                kasa_mcp::remote::urlencode(&machine_id),
-                kasa_mcp::remote::urlencode(&target.pane),
-                kasa_mcp::remote::urlencode(target.surface_key.as_deref().unwrap_or_default()),
-                kasa_mcp::git_panel::WAIT_CAP_MS,
+                kasa_git::git_panel::SCHEMA,
+                kasa_remote::remote::urlencode(&machine_id),
+                kasa_remote::remote::urlencode(&target.pane),
+                kasa_remote::remote::urlencode(target.surface_key.as_deref().unwrap_or_default()),
+                kasa_git::git_panel::WAIT_CAP_MS,
                 previous.map(|seq| format!("&since={seq}")).unwrap_or_default(),
             );
-            match kasa_mcp::remote::remote_get_json_bounded(&base, &query, 4096) {
+            match kasa_remote::remote::remote_get_json_bounded(&base, &query, 4096) {
                 Ok(answer) if answer.get("ok").and_then(serde_json::Value::as_bool) == Some(true) => {
                     let seq = answer.get("seq").and_then(serde_json::Value::as_u64).unwrap_or(0);
                     let live = answer.get("live").and_then(serde_json::Value::as_bool) == Some(true);
@@ -521,19 +521,19 @@ impl App {
 
     pub(crate) fn current_git_target(&self) -> Option<Target> {
         let id = self.git_active_pane()?;
-        if let Some(info) = kasa_mcp::remote::remote_info(&id) {
-            let label = kasa_mcp::machines::label_for_base(&info.base)
+        if let Some(info) = kasa_remote::remote::remote_info(&id) {
+            let label = kasa_device::machines::label_for_base(&info.base)
                 .or_else(|| (!info.label.is_empty()).then_some(info.label.clone()))
                 .unwrap_or_else(|| "원격 기기".into());
-            let machine_id = kasa_mcp::machines::find(&label)
+            let machine_id = kasa_device::machines::find(&label)
                 .and_then(|m| m.machine_id)
                 .unwrap_or_default();
-            let key = kasa_mcp::remote::remote_surface_key(&id);
+            let key = kasa_remote::remote::remote_surface_key(&id);
             // Only the source device's record supplies cwd; a mirror has a local launch directory too.
-            let cwd = kasa_mcp::machines::cached_fresh_pane(&label, &info.remote_id)
+            let cwd = kasa_device::machines::cached_fresh_pane(&label, &info.remote_id)
                 .filter(|row| row.get("surface_key").and_then(|v| v.as_str()) == key.as_deref())
                 .and_then(|row| row.get("cwd").and_then(|v| v.as_str()).map(str::to_owned))
-                .filter(|cwd| kasa_mcp::git_panel::absolute_path(cwd))
+                .filter(|cwd| kasa_git::git_panel::absolute_path(cwd))
                 .map(std::path::PathBuf::from);
             let issue = if key.is_none() {
                 Some(message("update_needed"))
@@ -563,7 +563,7 @@ impl App {
         let repo = self.git.col_pinned_cwd.is_none().then(|| self.git.col_repo_choice.get(&id).cloned()).flatten();
         Some(Target {
             pane: id.clone(),
-            surface_key: kasa_mcp::surface_keys::get(&id),
+            surface_key: kasa_collab::surface_keys::get(&id),
             cwd,
             remote: None,
             issue,
@@ -1010,7 +1010,7 @@ mod tests {
 
     #[test]
     fn a_change_counts_when_it_is_under_the_repository_on_show_whoever_made_it() {
-        let change = |path: &str| kasa_mcp::git_watch::Change { seq: 1, path: path.into() };
+        let change = |path: &str| kasa_git::git_watch::Change { seq: 1, path: path.into() };
         let pane = target("%7", None, "/work");
         let shown = std::path::Path::new("/work/repo-a");
         assert!(touched_by(&[change("/work/repo-a/src/a.rs")], Some(shown), &pane));
@@ -1037,7 +1037,7 @@ mod tests {
                 }
                 if round == 0 {
                     first = String::from_utf8(request).unwrap();
-                    let body = serde_json::json!({"schema": kasa_mcp::git_panel::SCHEMA, "ok": true, "seq": 7, "changed": true, "live": true}).to_string();
+                    let body = serde_json::json!({"schema": kasa_git::git_panel::SCHEMA, "ok": true, "seq": 7, "changed": true, "live": true}).to_string();
                     write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
                 } else {
                     assert!(String::from_utf8(request).unwrap().contains("&since=7"), "the next hold waits past the number it learned");
@@ -1200,13 +1200,13 @@ mod tests {
             cwd: Some("C:\\source\\repo".into()),
             branch: "main".into(),
             branch_list: vec![
-                kasa_mcp::git::GitBranch {
+                kasa_git::git::GitBranch {
                     name: "main".into(),
                     remote: false,
                     current: true,
                     ..Default::default()
                 },
-                kasa_mcp::git::GitBranch {
+                kasa_git::git::GitBranch {
                     name: "origin/main".into(),
                     remote: true,
                     current: false,
@@ -1216,7 +1216,7 @@ mod tests {
             ..Default::default()
         };
         let (base, server) = serve_once(
-            serde_json::json!({"schema":kasa_mcp::git_panel::SCHEMA,"ok":true,
+            serde_json::json!({"schema":kasa_git::git_panel::SCHEMA,"ok":true,
             "source":{"machine_id":"source-device","pane":"%7","surface_key":"key-%7","cwd":"C:\\source\\repo"}, "view": snapshot}),
         );
         let mut target = target("%7", Some("source-device"), "/stale-board-path");

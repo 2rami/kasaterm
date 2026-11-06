@@ -1,0 +1,38 @@
+[package]
+name = "kasa-gateway"
+description = "Phone gateway service, account routing and relay administration."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+kasa-device = { workspace = true }
+kasa-identity = { workspace = true }
+kasa-remote = { workspace = true }
+kasa-socket = { workspace = true, default-features = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+kasa-remote = { workspace = true, features = ["test-isolation"] }
+kasa-identity = { workspace = true, features = ["test-support"] }
+kasa-device = { workspace = true, features = ["test-support", "test-isolation"] }
+
+[[bin]]
+name = "kasa-relay"
+path = "src/bin/relay.rs"
+
+[lints]
+workspace = true

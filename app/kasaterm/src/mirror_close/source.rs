@@ -16,7 +16,7 @@ fn addresses(request: &Value) -> Result<Vec<Value>> {
 
 impl App {
     fn source_slot(&self, id: &str) -> Result<(String, usize)> {
-        anyhow::ensure!(self.pty.contains_key(id) && !kasa_mcp::remote::is_remote_pane(id),
+        anyhow::ensure!(self.pty.contains_key(id) && !kasa_remote::remote::is_remote_pane(id),
             "이 기기의 열린 세션이 아니에요");
         let ws = self.ws.lock().unwrap();
         let outer = ws.outer_for_pty(id).unwrap_or_else(|| id.to_string());
@@ -115,7 +115,7 @@ impl App {
     }
 
     pub(crate) fn reopen_source_checked(&mut self, request: &Value) -> Result<Value> {
-        let machine = kasa_mcp::board_service::local_source(vec![], true)?;
+        let machine = kasa_collab::board_service::local_source(vec![], true)?;
         anyhow::ensure!(request["machine_id"] == machine["machine_id"], "원본 기기가 바뀌었어요");
         let key = request["source_key"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("원본 세션 열쇠가 필요해요"))?;
         let record = request["restore_key"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("닫힘 기록 열쇠가 필요해요"))?;
@@ -123,7 +123,7 @@ impl App {
             self.reopen_closed_pane_at(index);
             anyhow::ensure!(!self.closed_panes.iter().any(|c| c.rec["close_record_key"] == record), "원본 세션을 되살리지 못했어요");
         }
-        let mut found = self.pty.keys().filter(|id| kasa_mcp::surface_keys::get(id).as_deref() == Some(key)
+        let mut found = self.pty.keys().filter(|id| kasa_collab::surface_keys::get(id).as_deref() == Some(key)
             && self.source_slot(id).is_ok());
         let id = found.next().cloned().ok_or_else(|| anyhow::anyhow!("이 닫힘 기록은 더 이상 복원할 수 없어요"))?;
         anyhow::ensure!(found.next().is_none(), "원본 세션이 둘 이상이에요");

@@ -101,7 +101,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - 검사 `cargo test -p kasa-net` — 신원 3개, 루프백 두 노드 3개(포워드 왕복·반쯤 닫기 / 모르는 id 403·뒤쪽 TCP 안 닿음 /
   허용 포트만·허용 거두기·빈 포트). 허용 목록·포트 검사를 끄면 뒤의 둘이 실패하는 것을 확인했다.
 
-## P2 배선 (`crates/kasa-mcp/src/kasanet.rs`)
+## P2 배선 (`crates/kasa-device/src/kasanet.rs`)
 
 - **띄우기**: 앱 HTTP 서버가 뜰 때 기기 키로 엔드포인트 하나(`presets::Minimal` + n0 중계). 주소 찾기(pkarr)는 안 쓴다 —
   상대 주소는 `/version` 으로 받고 기기 IP 를 공용 DNS 에 올리지 않는다. 받는 포트는 이 앱의 HTTP 포트와 8777 뿐.
@@ -137,7 +137,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   원래 길이었고, B pane 의 새 출력이 A 거울에 떴다.
 - 남은 것: 두 기기 **양쪽이 새 판**이어야 효과다. 이 맥북↔미니 실사용 측정은 두 기기에 새 판이 깔린 뒤.
 
-## P3 포트 공유 (`crates/kasa-mcp/src/netfwd.rs`)
+## P3 포트 공유 (`crates/kasa-remote/src/netfwd.rs`)
 
 - **받는 쪽** `GET /net/tcp?port=N` 웹소켓 — 업그레이드 **전에** `127.0.0.1:N` 에 붙어 보고(거부되면 `[::1]:N` 한 번 더.
   `localhost` 로 뜬 Node 17+ 개발 서버는 `::1` 에만 묶인다) 아무도 안 들으면 502, 포트가 틀리면 400. 문은 다른 라우트와
@@ -160,7 +160,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   바꿔 연다. ①거울 되돌림 — 원본 학생의 `open` 이 거울로 밀린 `open-url` 을 보는 쪽 `remote.rs` 가 끌어온 뒤 연다(전에는
   보는 기기 자기 localhost 를 열었다). ②브라우저 기기 — `/browser/resolve-localhost` 가 원본 base 로 먼저 끌어오고, 원본이
   옛 판이면 기존 ssh -L 로 떨어진다(ssh 설정이 없는 기기, 손님 -R 로만 닿는 기기도 이제 된다). 폰은 P5 전까지 임시 터널.
-- 검사 `cargo test -p kasa-mcp --lib netfwd` — 왕복·반쯤 닫기 / 업그레이드 전 502·400 / 원격 무토큰·남의 Origin 403 /
+- 검사 `cargo test -p kasa-remote --lib netfwd` — 왕복·반쯤 닫기 / 업그레이드 전 502·400 / 원격 무토큰·남의 Origin 403 /
   손님 폰 403·주인 통과 / 끌어오기 왕복(300KB)·반쯤 닫기·`::1`·다시 쓰기·닫은 뒤 거부 / 빈 포트·쓰이는 `--local` 오류 /
   주소 고쳐 쓰기.
 
@@ -172,7 +172,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   `localhost`·`127.0.0.1`·`[::1]` 셋 다 200. 붙들어 둔 연결 중 B HTTP 포트로 들어온 것의 여는 쪽이 **전부 B 자신**(카사넷
   수신기), A 에서 곧장 간 연결 0.
 - A 의 `/browser/resolve-localhost`(원본 kyb, ssh 설정 없음) → 기존 끌어오기를 다시 써서 `http://localhost:61285/…?q=1`.
-- A 에서 `window-new --machine kyb` 로 B 방을 거울로 열고 B pane 에서 `kasaterm-cli open 'http://localhost:47913/…'`(지금은 `kasaterm-cli share open`) →
+- A 에서 `window-new --machine kyb` 로 B 방을 거울로 열고 B pane 에서 `kasaterm-cli open 'http://localhost:47913/…'` →
   A 가 `http://localhost:61285/…` 를 열었다(B 는 아무것도 안 열었다). 새 포트 `http://127.0.0.1:47914/` 는 새 끌어오기
   `http://127.0.0.1:61900/` 로 — 호스트 모양 유지.
 - B HTTP 에 직접: 루프백 무토큰 101, `X-Forwarded-For` 무토큰·틀린 토큰 403, `Origin: https://evil.example.com` 403,
@@ -232,10 +232,10 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
     IndexedDB·OAuth 돌아올 주소는 출처(`localhost:포트`)에 묶인다. 폰 번호가 데스크톱과 같아야 앱을 껐다 켜도 같은 출처다.
 - 검사 `cargo test -p kasa-net`(돌리기: 원래 포트 안 닿음·표 밖 포트 막힘·잊으면 연결 끊김 / `direct_only` 가 못 실을 때
   닫음) · `cargo test -p kasa-net-ffi`(C ABI 를 앱 순서로: 루프백 데스크톱에 직통으로 싣고, 직통을 잃으면 닫음) ·
-  `cargo test -p kasa-mcp --lib phone_ingress`(폰 입구 = 관문 자격·쿠키 걷기 / 카사넷·로컬로 온 등록 403 / 관문 주인 등록 통과)
+  `cargo test -p kasa-device --lib phone_ingress`(폰 입구 = 관문 자격·쿠키 걷기 / 카사넷·로컬로 온 등록 403 / 관문 주인 등록 통과)
   · `flutter test test/kasanet_test.dart test/net_tcp_test.dart`(길 고르기·토큰 안 싣기·GET 한 번 더·옛 판·거절·
   다른 기계·깨어남·새 포트 따라가기 / 다리 반쯤 닫기·빈 포트) · `flutter test test/foreground_reconnect_test.dart`(삼킨 직통 뒤
-  같은 표식으로 관문 다시 보내기·옛 판은 안 다시·망 바뀜에 소켓 옮기기) · `cargo test -p kasa-mcp --lib replay`(같은 표식 한 번·
+  같은 표식으로 관문 다시 보내기·옛 판은 안 다시·망 바뀜에 소켓 옮기기) · `cargo test -p kasa-http --lib replay`(같은 표식 한 번·
   처리 중이면 기다려 같은 답·끊긴 첫 요청도 끝까지).
 
 ### P5 검증 (2026-09-29, 로컬 관문 + 격리 데스크톱 + 시뮬레이터, 같은 맥)
@@ -285,7 +285,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - **폰**: 쪽지·알림 링크가 localhost 면(`desktopLocal`) 입구를 세운 받침 화면(`DevServerScreen`)에서 앱 안 Safari 화면으로 그
   쪽지를 낸 기계의 포트를 연다(그 밖의 주소는 입구 없이 바로 앱 안 Safari 화면). 폰에는 제 localhost 서버가 없으니 쪽지의
   localhost 는 늘 그 데스크톱이다. 길은 위와 같다(직통이면 카사넷, 아니면 관문).
-- 검사 `cargo test -p kasa-mcp --lib quicktunnel`(등록 전에는 터널, 뒤에는 localhost·`0.0.0.0`·`[::1]` 만 그대로, 사설망·
+- 검사 `cargo test -p kasa-device --lib quicktunnel`(등록 전에는 터널, 뒤에는 localhost·`0.0.0.0`·`[::1]` 만 그대로, 사설망·
   `.local`·바깥 주소·http 아닌 것은 터널) · `flutter test test/shown_link_test.dart test/dev_server_test.dart`(바깥 주소도 앱 안
   Safari 모드, localhost 는 길 표시 뒤 데스크톱과 같은 번호로 열고 받침 화면을 닫으면 입구도 닫힘).
 - 검증(격리 리그, 브라우저 기기 = 폰): 폰 등록 뒤 `/open-url?url=http://localhost:4719/?from=show-http` → 답 `in_app: true`,

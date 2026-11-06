@@ -517,7 +517,7 @@ impl App {
         for id in pending_remote {
             // Wake only existing unfinished links, never replace their parser
             // or attach a new source pane when an old source has disappeared.
-            kasa_mcp::remote::retry_pending_restore(&id);
+            kasa_remote::remote::retry_pending_restore(&id);
         }
         // 로컬 학생 — 그 pane 에 claude 가 없을 때만 되살리기 줄을 다시 넣는다. 도는 중에
         // 보내면 그건 입력창에 글자를 밀어넣는 짓이 된다.
@@ -590,8 +590,8 @@ impl App {
                 .and_then(|tab| tab.term());
             let has_grid = term.is_some_and(|term| term.live_output && !term.cells.is_empty());
             if entry.remote {
-                let readiness = kasa_mcp::remote::connection_readiness(id);
-                let info = kasa_mcp::remote::remote_info(id);
+                let readiness = kasa_remote::remote::connection_readiness(id);
+                let info = kasa_remote::remote::remote_info(id);
                 entry.update_remote(info.as_ref().map(|info| info.label.as_str()), readiness.as_ref().is_some_and(|(connected, _, _)| *connected));
                 match readiness {
                     Some((true, generation, _)) if has_grid && term.is_some_and(|term| term.output_generation == generation) => {

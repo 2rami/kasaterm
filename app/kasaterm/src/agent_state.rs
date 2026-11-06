@@ -13,7 +13,7 @@
 //! - PTY 출력 박동(살아 있나만) · Enter 직후 브리지 · codex·agy 전용 화면 승인 폴백
 //!
 //! claude 칸에 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 실려 있으면 그것이 엔진 이벤트로 알린
-//! 사실(`kasa_mcp::claude_mod`)이 위 전부를 대신한다 — 그 칸에서는 화면·기록 턴·명부·Enter 다리가 쉰다.
+//! 사실(`kasa_students::claude_mod`)이 위 전부를 대신한다 — 그 칸에서는 화면·기록 턴·명부·Enter 다리가 쉰다.
 //! 위 재료들은 mod 없는 claude 와 codex·agy 몫으로 남는다.
 //!
 //! 화면은 이제 그림 자리(스프라이트 앵커)와 압축 % 장식에만 쓴다. `resolve` 는 순수 함수라
@@ -179,7 +179,7 @@ pub(crate) struct ScreenSigns {
     pub trouble: Option<&'static str>,
 }
 
-/// 연결 mod 가 엔진 이벤트로 알린 것(`kasa_mcp::claude_mod::ModState` 에서 판정에 쓰는 몫).
+/// 연결 mod 가 엔진 이벤트로 알린 것(`kasa_students::claude_mod::ModState` 에서 판정에 쓰는 몫).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ModuleSigns {
     pub turn_open: bool,
@@ -578,7 +578,7 @@ impl StateHub {
         }
         self.perm_mode.lock().unwrap().retain(|id, _| live.contains(id));
         self.screen.lock().unwrap().retain(|id, _| live.contains(id));
-        kasa_mcp::claude_mod::retain(&live);
+        kasa_students::claude_mod::retain(&live);
         let official = crate::socket::agents_status_cached();
         let official_errors = crate::socket::agents_error_sids_cached();
         let bound: HashMap<String, PathBuf> = match self.bound.try_lock() {
@@ -597,8 +597,8 @@ impl StateHub {
             let harness = session.as_ref().and_then(|p| p.active_agent());
             let mut evidence = Evidence { harness, ..Default::default() };
             let mut source = None;
-            if kasa_mcp::remote::is_remote_pane(id) {
-                let facts = kasa_mcp::remote::cached_fresh_pane(id);
+            if kasa_remote::remote::is_remote_pane(id) {
+                let facts = kasa_remote::remote::cached_fresh_pane(id);
                 let word = facts
                     .as_ref()
                     .and_then(|v| v.get("status").and_then(|s| s.as_str()))
@@ -655,12 +655,12 @@ impl StateHub {
                     .is_some_and(|h| h.get(id).is_some_and(|a| !a.is_empty()));
                 evidence.screen = self.screen.lock().unwrap().get(id).cloned();
                 if harness == Some(kasa_pty::AgentKind::Claude) {
-                    if let Some(m) = kasa_mcp::claude_mod::live(id) {
+                    if let Some(m) = kasa_students::claude_mod::live(id) {
                         source = Some(format!("claude-mod:{}:{}", m.session, m.pid));
                         let key = session.as_ref().and_then(|p| p.last_key());
                         let answered = m.permission_since.zip(key).is_some_and(|(asked, key)| key > asked);
                         if let Some(key) = key.filter(|_| answered) {
-                            kasa_mcp::claude_mod::close_answered(id, key);
+                            kasa_students::claude_mod::close_answered(id, key);
                         }
                         evidence.bg_active = m.running_tasks().next().is_some();
                         evidence.module = Some(ModuleSigns {

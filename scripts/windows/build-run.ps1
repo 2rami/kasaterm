@@ -17,7 +17,7 @@ Set-Location $Repo
 Write-Host "== repo: $Repo =="
 
 # 1) arona-ui dist — 웹뷰 콘텐츠. MSI 는 이걸 번들하지 않으므로 소스에서 직접
-#    빌드해 두면 kasaterm 이 dev 폴백 경로로 서빙한다(kasa-mcp/http.rs arona_ui_root).
+#    빌드해 두면 kasaterm 이 dev 폴백 경로로 서빙한다(kasa-http/http.rs arona_ui_root).
 if (-not $SkipUi) {
     Write-Host "-- arona-ui 빌드"
     Push-Location web\arona-ui
@@ -29,7 +29,7 @@ if (-not (Test-Path "web\arona-ui\dist\index.html")) {
     Write-Warning "arona-ui dist 없음 — god 모드 웹뷰가 빈 화면일 수 있다(-SkipUi 를 뺐는지 확인)."
 }
 
-# 2) 네이티브 빌드. 루트 Cargo.toml 이 kasa-mcp 를 opt-level=0 으로 pin 해 둬서
+# 2) 네이티브 빌드. 루트 Cargo.toml이 호스트 크레이트들을 opt-level=0으로 유지해서
 #    Windows LLVM 의 STATUS_ACCESS_VIOLATION 을 피한다 — 그대로 둘 것.
 Write-Host "-- cargo build --release -p kasaterm -p kasa-socket"
 cargo build --release -p kasaterm -p kasa-socket

@@ -21,7 +21,7 @@ pub(crate) fn confirmation_text(dialog: &ConfirmClose) -> (String, String) {
         CloseWhy::LastPane => (what.into(), "마지막 칸을 닫으면 이 방도 닫혀요.".into()),
         CloseWhy::Mirror { targets, closing, error, .. } => {
             let names = targets.iter().take(3).map(|target| {
-                let name = kasa_mcp::machines::cached_pane(&target.label, &target.source)
+                let name = kasa_device::machines::cached_pane(&target.label, &target.source)
                     .and_then(|row| row["name"].as_str().map(str::to_owned)).unwrap_or_else(|| target.source.clone());
                 format!("{} · {name}", target.label)
             }).collect::<Vec<_>>().join(", ");
@@ -147,7 +147,7 @@ fn request_source_close(action: &PendingClose, targets: &[MirrorTarget], mode: C
         CloseMode::Confirmed => "surface.close_checked",
     };
     for (base, first, request) in requests {
-        match kasa_mcp::remote::remote_cmd(base, method, request) {
+        match kasa_remote::remote::remote_cmd(base, method, request) {
             Ok(reply) => {
                 if mode == CloseMode::IdleShells && reply["result"]["requires_confirmation"] == true {
                     return Ok(serde_json::json!({"records": records, "requires_confirmation": true}));
@@ -180,7 +180,7 @@ fn request_source_close(action: &PendingClose, targets: &[MirrorTarget], mode: C
 }
 
 fn target_metadata(target: &mut MirrorTarget) {
-    let snapshot = kasa_mcp::machines::snapshot();
+    let snapshot = kasa_device::machines::snapshot();
     let Some(rows) = snapshot.iter().find(|m| m["label"] == target.label)
         .and_then(|m| m["panes"].as_array()) else { return };
     let Some(row) = rows.iter().find(|r| r["id"] == target.source) else { return };
@@ -228,7 +228,7 @@ impl App {
         }
         ids.sort();
         ids.dedup();
-        for id in ids { kasa_mcp::push_viewer_control(&id, r#"{"t":"source-closed"}"#); }
+        for id in ids { kasa_http::push_viewer_control(&id, r#"{"t":"source-closed"}"#); }
     }
 
     pub(crate) fn room_close_addresses(&self, idx: usize) -> Vec<serde_json::Value> {
@@ -247,7 +247,7 @@ impl App {
     }
 
     pub(crate) fn mirror_close_targets(&self, action: &PendingClose) -> Vec<MirrorTarget> {
-        let board = kasa_mcp::board_service::snapshot(&serde_json::json!({"scope": "all"})).unwrap_or_default();
+        let board = kasa_collab::board_service::snapshot(&serde_json::json!({"scope": "all"})).unwrap_or_default();
         let remote = match action {
             PendingClose::RemoteRoom { label, window, room } => Some((label, self.remote_room_panes(label, *window, room)
                 .into_iter().map(|row| row.remote_id.clone()).collect::<Vec<_>>())),
@@ -255,9 +255,9 @@ impl App {
             _ => None,
         };
         if let Some((label, mut ids)) = remote {
-            let Some(machine) = kasa_mcp::machines::find(label) else { return vec![]; };
+            let Some(machine) = kasa_device::machines::find(label) else { return vec![]; };
             if let PendingClose::RemotePane { pane, .. } = action {
-                if let Some(rows) = kasa_mcp::machines::snapshot().iter()
+                if let Some(rows) = kasa_device::machines::snapshot().iter()
                     .find(|m| m["label"] == *label).and_then(|m| m["panes"].as_array()) {
                     ids.extend(rows.iter().filter(|r| r["tab_of"] == *pane && !crate::machinescol::remote_pane_closed(r))
                         .filter_map(|r| r["id"].as_str().map(str::to_string)));
@@ -266,7 +266,7 @@ impl App {
             ids.sort();
             ids.dedup();
             return ids.into_iter().map(|source| {
-                let source_key = kasa_mcp::machines::cached_pane(label, &source)
+                let source_key = kasa_device::machines::cached_pane(label, &source)
                     .and_then(|row| row["surface_key"].as_str().map(str::to_owned));
                 let address = source_address(&board, &source, source_key.as_deref());
                 let mut target = MirrorTarget { base: machine.base.clone(), source,
@@ -292,11 +292,11 @@ impl App {
         drop(ws);
         let room_scope = matches!(action, PendingClose::Session(idx) if self.remote_view_of_window(*idx).is_some());
         ids.into_iter().filter_map(|local| {
-            let info = kasa_mcp::remote::remote_info(&local)?;
-            let source_key = kasa_mcp::remote::remote_surface_key(&local);
+            let info = kasa_remote::remote::remote_info(&local)?;
+            let source_key = kasa_remote::remote::remote_surface_key(&local);
             let address = source_address(&board, &info.remote_id, source_key.as_deref());
             let mut target = MirrorTarget {
-                local_key: Some(kasa_mcp::surface_keys::ensure(&local)),
+                local_key: Some(kasa_collab::surface_keys::ensure(&local)),
                 local_pty: self.pty.get(&local).map(|pty| Arc::as_ptr(pty) as usize),
                 source_key, address, local, base: info.base, source: info.remote_id, label: info.label,
                 room_scope, ..Default::default()
@@ -385,10 +385,10 @@ impl App {
                 for target in targets.iter().filter(|_| scope.matches_workspace(self)).cloned().collect::<Vec<_>>() {
                     if !target.local.is_empty() && target.local_key.is_some()
                         && self.pty.get(&target.local).map(|pty| Arc::as_ptr(pty) as usize) == target.local_pty
-                        && kasa_mcp::surface_keys::get(&target.local) == target.local_key
-                        && kasa_mcp::remote::remote_info(&target.local).is_none_or(|info|
+                        && kasa_collab::surface_keys::get(&target.local) == target.local_key
+                        && kasa_remote::remote::remote_info(&target.local).is_none_or(|info|
                             info.view && info.base == target.base && info.remote_id == target.source
-                            && kasa_mcp::remote::remote_surface_key(&target.local) == target.source_key) {
+                            && kasa_remote::remote::remote_surface_key(&target.local) == target.source_key) {
                         self.remove_finished_surface(&target.local);
                     }
                 }
@@ -397,7 +397,7 @@ impl App {
             }
             _ => { self.confirm_close = None; }
         }
-        kasa_mcp::machines::poke();
+        kasa_device::machines::poke();
         self.info.machines_col.last_refresh = None;
         self.chrome_dirty = true;
         if let Some(w) = &self.window { w.request_redraw(); }

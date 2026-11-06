@@ -16,7 +16,7 @@ pub(super) struct Frame<'a> {
     pub cwd: Option<&'a std::path::Path>,
     /// 지금 칸 셸의 윗 폴더 — 있으면 트리 위에 「..」 줄을 고정한다(셸 칸일 때만).
     pub up: Option<&'a std::path::Path>,
-    pub git_badges: &'a std::sync::Mutex<HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge>>,
+    pub git_badges: &'a std::sync::Mutex<HashMap<std::path::PathBuf, kasa_git::git::GitBadge>>,
 }
 
 /// 폴더 줄 끝 「셸을 이 폴더로」 단추 한 변.

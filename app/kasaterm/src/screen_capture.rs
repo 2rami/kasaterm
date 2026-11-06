@@ -1,12 +1,12 @@
-//! 기기 화면 거울의 화면 뜨기 — `kasa_mcp::screen_mirror` 에 꽂는다(`docs/screen-mirror.md`).
+//! 기기 화면 거울의 화면 뜨기 — `kasa_remote::screen_mirror` 에 꽂는다(`docs/screen-mirror.md`).
 //!
 //! 화면을 OS 가 줄여 주는 크기로 바로 받아(macOS 는 비트맵 문맥에 그리기, Windows 는 StretchBlt) 줄인 픽셀만
 //! 만진다 — 5K 화면을 통째로 들고 줄이면 한 장에 수십 ms 가 더 든다. 줄인 픽셀이 지난 장과 같으면 인코딩하지 않는다.
 
-use kasa_mcp::screen_mirror::{Ask, Denied, Display, Input, Shot, Source};
+use kasa_remote::screen_mirror::{Ask, Denied, Display, Input, Shot, Source};
 
 pub(crate) fn install() {
-    kasa_mcp::screen_mirror::install(std::sync::Arc::new(Screen));
+    kasa_remote::screen_mirror::install(std::sync::Arc::new(Screen));
 }
 
 struct Screen;

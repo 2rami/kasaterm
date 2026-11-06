@@ -38,7 +38,7 @@ impl App {
             return;
         }
         // The source owns undo for a mirrored close; a local VT snapshot cannot restore it.
-        if kasa_mcp::remote::is_view_pane(pane) || self.confirm_close.as_ref().is_some_and(|dialog| {
+        if kasa_remote::remote::is_view_pane(pane) || self.confirm_close.as_ref().is_some_and(|dialog| {
             matches!(&dialog.why, CloseWhy::Mirror { targets, closing: true, .. }
                 if targets.iter().any(|target| target.local == pane))
         }) { return; }
@@ -175,7 +175,7 @@ impl App {
     pub(crate) fn push_closed_pane(&mut self, mut c: crate::ClosedPane) {
         if let Some(record) = c.rec.as_object_mut() {
             record.entry("close_record_key").or_insert_with(||
-                serde_json::json!(kasa_mcp::character::new_session_id()));
+                serde_json::json!(kasa_characters::character::new_session_id()));
         }
         self.closed_panes.push(c);
         while self.closed_panes.iter().filter(|c| !c.stashed).count() > crate::CLOSED_PANE_KEEP {

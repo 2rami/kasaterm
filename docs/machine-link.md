@@ -2,7 +2,7 @@
 
 다른 기기가 사이드바 기기 목록에서 통째로 사라질 때가 있었는데 이유를 볼 곳이 없었다(2026-10-15 지적). 폴링은 실패
 사유를 버렸고(`fetch_panes` 의 `.ok()?`), 명부에서 빠진 기기는 흔적 없이 지워졌다. 코드는
-`crates/kasa-mcp/src/machines/link.rs`, 화면 모양은 [design.md](design.md) 「끊긴 기기」.
+`crates/kasa-device/src/machines/link.rs`, 화면 모양은 [design.md](design.md) 「끊긴 기기」.
 
 ## 기기가 목록에서 빠지던 길 (코드로 확인)
 

@@ -9,7 +9,7 @@
 //! HTTP 대신 직접 짠 바이트 스트림(`media_player/windows_stream.rs`)으로 루프백 창구를 읽는다.
 //!
 //! `Player` 는 메인 스레드에서만 만들고 쓴다(AVPlayer 가 메인 스레드 전용이라 타입이 `!Send`).
-//! 원격 원본은 `open_url` 로 루프백 Range 서버(`kasa_mcp::media_stream`)를 읽는다 — 재생기가
+//! 원격 원본은 `open_url` 로 루프백 Range 서버(`kasa_remote::media_stream`)를 읽는다 — 재생기가
 //! 필요한 구간만 요청하므로 파일 전체를 받기 전에 재생·탐색이 된다.
 //! `probe` 는 파일을 읽느라 막힐 수 있으니 GUI 스레드가 아닌 곳에서 부른다.
 

@@ -24,11 +24,11 @@ fn moved_view_member(
     true
 }
 
-pub(super) fn self_view_machine() -> Result<kasa_mcp::machines::Machine> {
+pub(super) fn self_view_machine() -> Result<kasa_device::machines::Machine> {
     let port = std::env::var("KASASPACE_MCP_PORT")
         .map_err(|_| anyhow::anyhow!("이 기기 HTTP 창구가 안 떠 있어요"))?;
-    Ok(kasa_mcp::machines::Machine {
-        label: kasa_mcp::machines::self_label(),
+    Ok(kasa_device::machines::Machine {
+        label: kasa_device::machines::self_label(),
         machine_id: None,
         base: format!("http://127.0.0.1:{port}"),
         host: String::new(),
@@ -61,7 +61,7 @@ pub(crate) fn launch_in_remote_pane(
         if let Some(dir) = &cwd {
             params["cwd"] = serde_json::json!(dir);
         }
-        let Err(error) = kasa_mcp::remote::remote_cmd(&base, "surface.launch", params) else { return };
+        let Err(error) = kasa_remote::remote::remote_cmd(&base, "surface.launch", params) else { return };
         let why = format!("{error:#}");
         if why.contains("이 창구로 못 부른다") || why.contains("unknown method") || why.contains("HTTP 404") {
             use kasa_socket::shell_line::ShellKind;
@@ -100,7 +100,7 @@ impl App {
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("pane {pid} 이 없다");
         };
-        if kasa_mcp::remote::is_remote_pane(pid) {
+        if kasa_remote::remote::is_remote_pane(pid) {
             anyhow::bail!("{pid} 은 이미 원격 pane 이다");
         }
         // 역이사(`migrate %N local`)가 돌아올 자리 — 지금 이 로컬 폴더.
@@ -109,8 +109,8 @@ impl App {
             .and_then(socket::pid_cwd)
             .map(|p| p.to_string_lossy().into_owned());
         let (c, r) = sess.size();
-        let identity = kasa_mcp::remote::RemoteIdentity {
-            label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
+        let identity = kasa_remote::remote::RemoteIdentity {
+            label: kasa_device::machines::label_for_base(base).unwrap_or_default(),
             remote_cwd: remote_cwd.map(str::to_string),
             origin_cwd: origin,
             owned: true,
@@ -120,28 +120,28 @@ impl App {
         // 기계 앞에 앉으면 안 보였다. 창구가 없는 낡은 서버·kasa-serve-web 은 옛
         // 길(web 셸)로 물러선다. 거울(view)로 붙는 이유는 그 pane 의 크기 주인이
         // 저쪽 창이라서다 — 이쪽 pane 이 작으면 글자 배율로 담는다.
-        let remote = match kasa_mcp::remote::spawn_shell_pane(base, remote_cwd, None) {
+        let remote = match kasa_remote::remote::spawn_shell_pane(base, remote_cwd, None) {
             Ok(rid) => {
-                let spec = kasa_mcp::remote::RemoteSpec {
+                let spec = kasa_remote::remote::RemoteSpec {
                     base: base.to_string(),
                     pane: Some(rid.clone()),
                     cwd: None,
                     token: None,
                     identity: identity.clone(),
                 };
-                match kasa_mcp::remote::open_view(spec, pid) {
+                match kasa_remote::remote::open_view(spec, pid) {
                     Ok(r) => r,
                     Err(e) => {
                         // 세운 자리를 못 비추면 저쪽에 빈 pane 만 남는다 — 걷고 실패.
-                        let _ = kasa_mcp::remote::close_remote_pane(base, &rid, None, true);
+                        let _ = kasa_remote::remote::close_remote_pane(base, &rid, None, true);
                         return Err(e);
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[to] {base} 에 pane 을 못 세워 창 없는 셸로 물러섬: {e:#}");
-                kasa_mcp::remote::connect(
-                    kasa_mcp::remote::RemoteSpec {
+                kasa_remote::remote::connect(
+                    kasa_remote::remote::RemoteSpec {
                         base: base.to_string(),
                         pane: None,
                         cwd: remote_cwd.map(str::to_string),
@@ -176,7 +176,7 @@ impl App {
     /// 원격 PTY 호스트의 세션을 **이 창의 pane** 으로 앉힌다 — 스폰 또는 이어받기.
     ///
     /// `split_active_pane` 과 같은 삽입 규칙(기준 pane 이 든 트리에 꽂는다)을 쓰되,
-    /// 로컬 셸 대신 `kasa_mcp::remote::connect` 의 로컬 파서 세션을 앉힌다. 방향은
+    /// 로컬 셸 대신 `kasa_remote::remote::connect` 의 로컬 파서 세션을 앉힌다. 방향은
     /// v1 에선 가로 고정 — auto 판정(픽셀 종횡비)은 활성 pane 전제라 배경 스폰과
     /// 어긋난다.
     pub(crate) fn spawn_remote_pane(
@@ -211,14 +211,14 @@ impl App {
         }
         let new_id = self.alloc_pane_id();
         let (win_cols, win_rows) = self.window_cells();
-        let remote = kasa_mcp::remote::connect(
-            kasa_mcp::remote::RemoteSpec {
+        let remote = kasa_remote::remote::connect(
+            kasa_remote::remote::RemoteSpec {
                 base: base.to_string(),
                 pane: remote_pane.map(str::to_string),
                 cwd: cwd.map(str::to_string),
                 token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
-                    label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
+                identity: kasa_remote::remote::RemoteIdentity {
+                    label: kasa_device::machines::label_for_base(base).unwrap_or_default(),
                     remote_cwd: cwd.map(str::to_string),
                     origin_cwd: None,
                     owned: false,
@@ -318,15 +318,15 @@ impl App {
             &outer,
             crate::settings_room::SettingsMutation::RemoteMirror,
         )?;
-        let m = match kasa_mcp::machines::find(label) {
+        let m = match kasa_device::machines::find(label) {
             Some(m) => m,
             // 이 기기의 창 밖 셸 — 명부엔 제 자신이 없으니 제 HTTP 창구로 붙는다. 보기 연결이라
             // 폰이 쥔 셸 크기를 안 건드리고, 셸이면 거울 셸처럼 명령 묶음으로 그려진다.
-            None if label == kasa_mcp::machines::self_label() => self_view_machine()?,
+            None if label == kasa_device::machines::self_label() => self_view_machine()?,
             None => anyhow::bail!("기계 {label} 가 명부(machines.json)에 없다"),
         };
         if let Some(existing) = kasa_pty::live_sessions().into_iter().find(|id| {
-            kasa_mcp::remote::remote_info(id)
+            kasa_remote::remote::remote_info(id)
                 .is_some_and(|i| i.base == m.base && i.remote_id == remote_id)
         }) {
             if focus {
@@ -346,20 +346,20 @@ impl App {
     pub(super) fn attach_remote_view_tab(
         &mut self,
         outer: &str,
-        m: &kasa_mcp::machines::Machine,
+        m: &kasa_device::machines::Machine,
         remote_id: &str,
         name: &str,
         remote_cwd: &str,
         focus: bool,
     ) -> Result<String> {
         let new_id = self.alloc_pane_id();
-        let remote = kasa_mcp::remote::open_view(
-            kasa_mcp::remote::RemoteSpec {
+        let remote = kasa_remote::remote::open_view(
+            kasa_remote::remote::RemoteSpec {
                 base: m.base.clone(),
                 pane: Some(remote_id.to_string()),
                 cwd: None,
                 token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
+                identity: kasa_remote::remote::RemoteIdentity {
                     label: m.label.clone(),
                     remote_cwd: (!remote_cwd.is_empty()).then(|| remote_cwd.to_string()),
                     origin_cwd: None,
@@ -435,7 +435,7 @@ impl App {
             leaves.iter().filter_map(|leaf| {
                 let tabs = &ws.panes.get(leaf)?.tabs;
                 let rids = tabs.iter().map(|t| {
-                    kasa_mcp::remote::remote_info(t.pid.as_deref().unwrap_or(leaf)).map(|i| i.remote_id)
+                    kasa_remote::remote::remote_info(t.pid.as_deref().unwrap_or(leaf)).map(|i| i.remote_id)
                 }).collect();
                 Some((leaf.clone(), rids))
             }).collect()
@@ -449,7 +449,7 @@ impl App {
             return false;
         }
         let row_of = |rid: &str| panes.iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(rid));
-        let source_of = |s: &Self, leaf: &str| kasa_mcp::remote::remote_info(&s.leaf_pty_id(leaf)).map(|i| i.remote_id);
+        let source_of = |s: &Self, leaf: &str| kasa_remote::remote::remote_info(&s.leaf_pty_id(leaf)).map(|i| i.remote_id);
         let mut outer_of: HashMap<String, String> = HashMap::new();
         let mut windows: Vec<u64> = Vec::new();
         for leaf in &leaves {
@@ -467,7 +467,7 @@ impl App {
             let Some(rid) = source_of(self, leaf) else { continue };
             let Some(row) = row_of(&rid) else { continue };
             let in_home = row.get("window").and_then(|v| v.as_u64()) == Some(home);
-            let mirror = kasa_mcp::surface_keys::get(leaf).unwrap_or_else(|| leaf.clone());
+            let mirror = kasa_collab::surface_keys::get(leaf).unwrap_or_else(|| leaf.clone());
             let moved = moved_view_member(
                 &mut MOVED_SINCE.get_or_init(Default::default).lock().unwrap(),
                 label, &mirror, &rid, in_home, Instant::now(),
@@ -557,10 +557,10 @@ impl App {
                 let single = self.ws.lock().unwrap().panes.get(&leaf).is_some_and(|p| p.tabs.len() == 1);
                 let pty = self.leaf_pty_id(&leaf);
                 let matches = single
-                    && kasa_mcp::remote::remote_info(&pty).is_some_and(|info| {
-                        info.view && info.remote_id == remote_id && kasa_mcp::machines::same_machine_bases(&info.base, base)
+                    && kasa_remote::remote::remote_info(&pty).is_some_and(|info| {
+                        info.view && info.remote_id == remote_id && kasa_device::machines::same_machine_bases(&info.base, base)
                     })
-                    && kasa_mcp::remote::remote_surface_key(&pty).as_deref() == Some(key);
+                    && kasa_remote::remote::remote_surface_key(&pty).as_deref() == Some(key);
                 if matches {
                     if found.is_some() {
                         return None;
@@ -652,7 +652,7 @@ impl App {
     pub(crate) fn seat_remote_view_leaf(
         &mut self,
         window: usize,
-        m: &kasa_mcp::machines::Machine,
+        m: &kasa_device::machines::Machine,
         remote_id: &str,
         name: &str,
         remote_cwd: &str,
@@ -666,13 +666,13 @@ impl App {
             },
         };
         let new_id = self.alloc_pane_id();
-        let remote = kasa_mcp::remote::open_view(
-            kasa_mcp::remote::RemoteSpec {
+        let remote = kasa_remote::remote::open_view(
+            kasa_remote::remote::RemoteSpec {
                 base: m.base.clone(),
                 pane: Some(remote_id.to_string()),
                 cwd: None,
                 token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
+                identity: kasa_remote::remote::RemoteIdentity {
                     label: m.label.clone(),
                     remote_cwd: (!remote_cwd.is_empty()).then(|| remote_cwd.to_string()),
                     origin_cwd: None,
@@ -729,10 +729,10 @@ impl App {
         if self.tmux.is_some() || self.restore_applying.is_some() {
             return;
         }
-        let snap = kasa_mcp::machines::snapshot();
+        let snap = kasa_device::machines::snapshot();
         for i in 0..self.windows.len() {
             let Some((label, _)) = self.remote_view_of_window(i) else { continue };
-            let Some(m) = kasa_mcp::machines::find(&label) else { continue };
+            let Some(m) = kasa_device::machines::find(&label) else { continue };
             let Some(machine) = snap.iter().find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label.as_str())) else { continue };
             if machine.get("online").and_then(|b| b.as_bool()) != Some(true) {
                 continue;
@@ -757,10 +757,10 @@ impl App {
             let mut consistent = true;
             for (leaf, ids) in &per_leaf {
                 for (k, id) in ids.iter().enumerate() {
-                    let Some(info) = kasa_mcp::remote::remote_info(id) else { continue };
+                    let Some(info) = kasa_remote::remote::remote_info(id) else { continue };
                     if k == 0 {
                         outer_of.insert(info.remote_id.clone(), leaf.clone());
-                        if let Some(w) = kasa_mcp::machines::cached_pane(&label, &info.remote_id)
+                        if let Some(w) = kasa_device::machines::cached_pane(&label, &info.remote_id)
                             .and_then(|row| row.get("window").and_then(|v| v.as_u64()))
                         {
                             if source_window.is_some_and(|s| s != w) { consistent = false; }
@@ -838,7 +838,7 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
-        let m = kasa_mcp::machines::find(label)
+        let m = kasa_device::machines::find(label)
             .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
         let rows: Vec<crate::state::MachinesColRow> = self
             .info
@@ -863,8 +863,8 @@ impl App {
         // 거울은 여기 방(원래 방)에 앉아 있어서, 그걸 찾아 가면 기기 방을 눌렀는데 이쪽
         // 방이 열렸다(2026-09-17 지적). 그 방은 따로 보기 창으로 연다.
         let view_mirrors: Vec<(String, String)> = kasa_pty::live_sessions().into_iter().filter_map(|id| {
-            let info = kasa_mcp::remote::remote_info(&id)?;
-            if !kasa_mcp::machines::same_machine_bases(&info.base, &m.base) { return None; }
+            let info = kasa_remote::remote::remote_info(&id)?;
+            if !kasa_device::machines::same_machine_bases(&info.base, &m.base) { return None; }
             let in_view = self.window_of_pane(&id)
                 .and_then(|w| self.remote_view_of_window(w))
                 .is_some_and(|(view_label, _)| view_label == label);
@@ -889,19 +889,19 @@ impl App {
         let mut fail: Vec<String> = Vec::new();
         for row in &outers {
             let local_id = if seated.is_empty() { host.clone() } else { self.alloc_pane_id() };
-            let spec = kasa_mcp::remote::RemoteSpec {
+            let spec = kasa_remote::remote::RemoteSpec {
                 base: m.base.clone(),
                 pane: Some(row.remote_id.clone()),
                 cwd: None,
                 token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
+                identity: kasa_remote::remote::RemoteIdentity {
                     label: m.label.clone(),
                     remote_cwd: (!row.remote_cwd.is_empty()).then(|| row.remote_cwd.clone()),
                     origin_cwd: None,
                     owned: false,
                 },
             };
-            match kasa_mcp::remote::open_view(spec, &local_id) {
+            match kasa_remote::remote::open_view(spec, &local_id) {
                 Ok(remote) => {
                     if seated.is_empty() {
                         if let Some(old) = self.pty.get(&host).cloned() {
@@ -1016,13 +1016,13 @@ impl App {
         let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
             anyhow::bail!("새 창의 기본 pane 을 못 얻었다");
         };
-        let remote = kasa_mcp::remote::open_view(
-            kasa_mcp::remote::RemoteSpec {
+        let remote = kasa_remote::remote::open_view(
+            kasa_remote::remote::RemoteSpec {
                 base: base.to_string(),
                 pane: Some(remote_id.to_string()),
                 cwd: None,
                 token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
+                identity: kasa_remote::remote::RemoteIdentity {
                     label: label.to_string(),
                     remote_cwd: None,
                     origin_cwd: None,
@@ -1062,7 +1062,7 @@ impl App {
         let machine = if self.tmux.is_some() {
             Err("tmux 백엔드에선 원격 pane 을 쓰지 않는다".to_string())
         } else {
-            kasa_mcp::machines::find(label).ok_or_else(|| format!("기계 {label} 가 명부(machines.json)에 없다"))
+            kasa_device::machines::find(label).ok_or_else(|| format!("기계 {label} 가 명부(machines.json)에 없다"))
         };
         let m = match machine {
             Ok(m) => m,
@@ -1081,7 +1081,7 @@ impl App {
                 window: Some(kasa_socket::backend::SpawnWindow::New),
                 ..Default::default()
             };
-            let outcome = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None).map_err(|e| format!("{e:#}"));
+            let outcome = kasa_remote::remote::spawn_shell_pane_at(&m.base, &at, None).map_err(|e| format!("{e:#}"));
             let done = RoomSpawned { label: m.label, base: m.base, outcome: Mutex::new(Some(outcome)), reply };
             let _ = proxy.send_event(UserEvent::RemoteRoomSpawned(Arc::new(done)));
         });
@@ -1120,20 +1120,20 @@ impl App {
             window: Some(kasa_socket::backend::SpawnWindow::New),
             ..Default::default()
         };
-        let (remote_id, room) = match kasa_mcp::remote::spawn_shell_pane_at(base, &at, None) {
+        let (remote_id, room) = match kasa_remote::remote::spawn_shell_pane_at(base, &at, None) {
             Ok(seat) => seat,
             Err(e) => {
                 eprintln!("[connect] {base} 에 방을 못 세워 옆 연결 칸으로 물러섬: {e:#}");
                 return Ok(None);
             }
         };
-        let label = kasa_mcp::machines::label_for_base(base).unwrap_or_default();
+        let label = kasa_device::machines::label_for_base(base).unwrap_or_default();
         let back = self.active_window;
         let seated = self.seat_remote_view_window(&label, base, &remote_id, true, room.shown().map(|n| format!("방 {n}")));
         let host = self.ws.lock().unwrap().active_pane.clone();
         self.switch_window(back);
         if let Err(e) = seated {
-            let _ = kasa_mcp::remote::close_remote_pane(base, &remote_id, None, true);
+            let _ = kasa_remote::remote::close_remote_pane(base, &remote_id, None, true);
             return Err(e);
         }
         self.set_toast(format!("{label} 에 새 방 — 사이드바 {label} 에서 보세요"));
@@ -1158,21 +1158,21 @@ impl App {
         // 분할선 하나만 움직여 나머지 줄이 당겨오기에 되돌아 보였다(2026-09-18). 양쪽 모든
         // 쌍을 축과 함께 보내고 원본이 같은 축의 분할선만 고른다.
         let Some((left, right)) = tree.and_then(|t| t.split_leaves_at(path)) else { return };
-        let remote = |local: &str| kasa_mcp::remote::remote_info(&self.leaf_pty_id(local)).map(|i| i.remote_id);
+        let remote = |local: &str| kasa_remote::remote::remote_info(&self.leaf_pty_id(local)).map(|i| i.remote_id);
         let left: Vec<String> = left.iter().filter_map(|l| remote(l)).collect();
         let right: Vec<String> = right.iter().filter_map(|l| remote(l)).collect();
         if left.is_empty() || right.is_empty() { return }
         let pairs: Vec<serde_json::Value> = left.iter()
             .flat_map(|a| right.iter().map(move |b| serde_json::json!([a, b])))
             .collect();
-        let Some(m) = kasa_mcp::machines::find(&label) else { return };
+        let Some(m) = kasa_device::machines::find(&label) else { return };
         // `a`/`b` 는 `pairs` 를 모르는 옛 판(2026-09-17) 원본용.
         let params = serde_json::json!({
             "pairs": pairs, "ratio": ratio, "dir": crate::layout::seam_axis(dir).as_str(),
             "a": left[0], "b": right[0],
         });
         // 배치 채널이 있으면 그 소켓으로 — 순서가 지켜지고 원본이 적용을 확인해 준다.
-        if kasa_mcp::layout_watch::send_ratio(&m.base, &params) {
+        if kasa_remote::layout_watch::send_ratio(&m.base, &params) {
             return;
         }
         self.remote_view_push_at = Some(Instant::now());
@@ -1185,7 +1185,7 @@ impl App {
         self.watch_view_machines();
         {
             // 기계 캐시가 새로 채워졌으면 2초를 기다리지 않는다.
-            let generation = kasa_mcp::machines::generation();
+            let generation = kasa_device::machines::generation();
             // 방금 저쪽에 보낸 직후면 당겨오지 않는다 — 도착 전에 옛 배치로 되돌리면
             // 손으로 맞춘 크기가 튀어 오른다. 3초가 지나도 **보낸 뒤에 읽은 명부가 아직
             // 없으면**(느린 기기) 15초까지 더 기다린다 — 옛 명부로 되돌리는 게 튐의 원인이다.
@@ -1195,7 +1195,7 @@ impl App {
                     return;
                 }
                 if since < std::time::Duration::from_secs(15) {
-                    let stale = kasa_mcp::machines::snapshot().iter().any(|m| {
+                    let stale = kasa_device::machines::snapshot().iter().any(|m| {
                         m.get("ago_secs").and_then(|v| v.as_u64())
                             .is_some_and(|ago| ago as f32 > since.as_secs_f32())
                     });
@@ -1233,8 +1233,8 @@ impl App {
             let mut source_window: Option<u64> = None;
             let mut complete = true;
             for leaf in &leaves {
-                let Some(info) = kasa_mcp::remote::remote_info(&self.leaf_pty_id(leaf)) else { complete = false; break };
-                let Some(row) = kasa_mcp::machines::cached_pane(&label, &info.remote_id) else { complete = false; break };
+                let Some(info) = kasa_remote::remote::remote_info(&self.leaf_pty_id(leaf)) else { complete = false; break };
+                let Some(row) = kasa_device::machines::cached_pane(&label, &info.remote_id) else { complete = false; break };
                 let (Some(rect), Some(win)) = (crate::machinescol::row_rect(&row), row.get("window").and_then(|v| v.as_u64())) else { complete = false; break };
                 if source_window.is_some_and(|w| w != win) { complete = false; break }
                 source_window = Some(win);
@@ -1287,7 +1287,7 @@ impl App {
     /// 방 카드가 탭 노릇을 한다(2026-09-16 지시 「새로 여는 게 아니라 눌러서 보이게」).
     /// 셸을 하나라도 끼워 넣으면 그 순간 보통 방이 된다 — 표식이 아니라 내용으로 가른다.
     pub(crate) fn remote_view_of_window(&self, i: usize) -> Option<(String, Vec<String>)> {
-        let identity = kasa_mcp::machines::display_identity();
+        let identity = kasa_device::machines::display_identity();
         let leaves = self.window_leaves(i);
         if leaves.is_empty() {
             return None;
@@ -1299,10 +1299,10 @@ impl App {
             let pid = self.leaf_pty_id(leaf);
             // PTY 도 링크도 없는 빈 자리(복원이 못 채운 leaf)는 방의 성격을 못 가른다 —
             // 그 하나 때문에 보기 창이 보통 방으로 둔갑하지 않게 건너뛴다(2026-09-18).
-            if !self.pty.contains_key(&pid) && kasa_mcp::remote::remote_info(&pid).is_none() {
+            if !self.pty.contains_key(&pid) && kasa_remote::remote::remote_info(&pid).is_none() {
                 continue;
             }
-            let info = kasa_mcp::remote::remote_info(&pid).filter(|r| r.view)?;
+            let info = kasa_remote::remote::remote_info(&pid).filter(|r| r.view)?;
             match &base {
                 Some(b) if !identity.same_machine(b, &info.base) => return None,
                 None => { base = Some(info.base.clone()); saved_label = info.label.clone(); }
@@ -1332,9 +1332,9 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
-        let m = kasa_mcp::machines::find(label)
+        let m = kasa_device::machines::find(label)
             .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
-        let snap = kasa_mcp::machines::snapshot();
+        let snap = kasa_device::machines::snapshot();
         let entry = snap
             .iter()
             .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label))
@@ -1351,7 +1351,7 @@ impl App {
         // (이사 탭의 미러 대표 규칙과 동일) 그대로 집합 키가 된다.
         let mirrored: std::collections::HashSet<String> = kasa_pty::live_sessions()
             .into_iter()
-            .filter_map(|id| kasa_mcp::remote::remote_info(&id))
+            .filter_map(|id| kasa_remote::remote::remote_info(&id))
             .filter(|i| i.base == m.base)
             .map(|i| i.remote_id)
             .collect();
@@ -1430,13 +1430,13 @@ impl App {
                 // connect 가 아니라 거울(open_view) — 거울은 원본 세션 크기를 절대
                 // 바꾸지 않는다(사용자: 「미러링할때 크기 줄이면 미러링되는곳도
                 // 줄어들어」). 격자가 pane 보다 크면 렌더가 그 pane 만 배율을 줄인다.
-                match kasa_mcp::remote::open_view(
-                    kasa_mcp::remote::RemoteSpec {
+                match kasa_remote::remote::open_view(
+                    kasa_remote::remote::RemoteSpec {
                         base: m.base.clone(),
                         pane: Some(rid.clone()),
                         cwd: None,
                         token: None,
-                        identity: kasa_mcp::remote::RemoteIdentity {
+                        identity: kasa_remote::remote::RemoteIdentity {
                             label: m.label.clone(),
                             // 원격 pane 의 작업 폴더 — 재접속 자동 따라잡기가
                             // 이 거울의 레포를 아는 유일한 길이다.
@@ -1537,8 +1537,8 @@ pub(crate) struct RoomSpawned {
 /// 거울을 앉힐 때마다 GUI 스레드를 칸당 최대 10초 붙잡았다. 캐시에 아직 없으면
 /// `refresh_mirror_theme` 이 캐시가 차는 대로 붙인다.
 fn cached_remote_name(base: &str, remote_id: &str) -> Option<String> {
-    let label = kasa_mcp::machines::label_for_base(base)?;
-    let row = kasa_mcp::machines::cached_pane(&label, remote_id)?;
+    let label = kasa_device::machines::label_for_base(base)?;
+    let row = kasa_device::machines::cached_pane(&label, remote_id)?;
     row.get("name")?.as_str().filter(|name| !name.is_empty()).map(str::to_string)
 }
 
@@ -1566,14 +1566,14 @@ pub(super) fn queue_remote_divider(base: String, params: serde_json::Value) {
                     if batch[i + 1..].iter().any(|later| key(later) == k) { batch.remove(i); } else { i += 1; }
                 }
                 for (base, params) in batch {
-                    if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.set_ratio_between", params) {
+                    if let Err(e) = kasa_remote::remote::remote_cmd(&base, "surface.set_ratio_between", params) {
                         eprintln!("[remote] divider push failed: {e:#}");
                     }
                 }
                 // 원본은 명령을 GUI 스레드에 넘기고 바로 답한다 — 그 직후 명부를 당기면 옛
                 // 칸이 캐시에 앉는다. 한 프레임쯤 기다린 뒤 당긴다(배치 발행이 롱폴도 깨운다).
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                kasa_mcp::machines::poke();
+                kasa_device::machines::poke();
             }
         });
         Mutex::new(tx)

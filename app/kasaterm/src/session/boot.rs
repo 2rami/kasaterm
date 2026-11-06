@@ -208,25 +208,25 @@ impl App {
         let http_port = if self.lite {
             Err(std::io::Error::other("lite: no http server"))
         } else {
-            kasa_mcp::spawn_http_server(backend.clone(), CANONICAL_MCP_PORT)
+            kasa_http::spawn_http_server(backend.clone(), CANONICAL_MCP_PORT)
         };
         let http_port = match http_port {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP on 127.0.0.1:{port}");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
                 // 다른 기계가 `/version` 으로 묻는 빌드 표식 — 앱 build.rs 가 박은
-                // git 리비전. kasa-mcp 는 자기 것이 없어 여기서 넘긴다.
-                kasa_mcp::machines::set_build_id(env!("KASATERM_GIT_REV"));
+                // git 리비전. kasa-http 는 자기 것이 없어 여기서 넘긴다.
+                kasa_device::machines::set_build_id(env!("KASATERM_GIT_REV"));
                 crate::screen_capture::install();
                 // 재시작 작업이 이 부팅을 기다리고 있었으면 도착을 적는다 — 빌드 표식이 선 뒤라야 맞는 값이 실린다.
                 crate::app_restart::mark_restart_booted();
                 crate::app_update::mark_update_booted();
                 if !crate::verification_run() {
-                    kasa_mcp::agent_accounts::spawn();
-                    kasa_mcp::agent_chains::spawn();
+                    kasa_device::agent_accounts::spawn();
+                    kasa_device::agent_chains::spawn();
                     #[cfg(not(test))]
-                    kasa_mcp::conversation_archive::spawn(backend.clone());
-                    kasa_mcp::unregister_clients();
+                    kasa_remote::conversation_archive::spawn(backend.clone());
+                    kasa_http::unregister_clients();
                 }
                 Some(port)
             }
@@ -279,16 +279,16 @@ impl App {
         backend.start_session_discovery();
         // 칸 안 mod 가 사실을 알리면 다음 판정이 메모를 건너뛰고, 승인·질문이 닫힌 칸에 밀린 tell 을 곧바로 꺼낸다.
         let (hub, proxy) = (self.collab.hub.clone(), self.proxy.clone());
-        kasa_mcp::claude_mod::set_listener(move |_, change| {
+        kasa_students::claude_mod::set_listener(move |_, change| {
             hub.invalidate();
             let event = match change {
-                kasa_mcp::claude_mod::Change::State => UserEvent::AgentStateChanged,
-                kasa_mcp::claude_mod::Change::Data => UserEvent::SafeTellWake,
+                kasa_students::claude_mod::Change::State => UserEvent::AgentStateChanged,
+                kasa_students::claude_mod::Change::Data => UserEvent::SafeTellWake,
             };
             let _ = proxy.send_event(event);
         });
         let status_proxy = self.proxy.clone();
-        kasa_mcp::claude_mod::set_status_listener(move |_| {
+        kasa_students::claude_mod::set_status_listener(move |_| {
             let _ = status_proxy.send_event(UserEvent::Redraw);
         });
         crate::info_focus::start(&self.info.focus, self.info.sites.clone(), backend.clone(), self.proxy.clone());

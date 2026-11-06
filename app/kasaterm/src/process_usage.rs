@@ -178,7 +178,7 @@ impl App {
     pub(crate) fn decorate_usage_processes(&mut self) {
         let seats: Vec<_> = {
             let ws = self.ws.lock().unwrap();
-            self.pty.iter().filter(|(surface, _)| !kasa_mcp::remote::is_remote_pane(surface)).filter_map(|(surface, session)| {
+            self.pty.iter().filter(|(surface, _)| !kasa_remote::remote::is_remote_pane(surface)).filter_map(|(surface, session)| {
                 let shell = session.shell_pid()?;
                 let outer = ws.outer_for_pty(surface).unwrap_or_else(|| surface.clone());
                 let name = ws.pane_character.get(surface).filter(|name| !name.is_empty()).cloned().unwrap_or_else(|| "셸".into());
@@ -191,7 +191,7 @@ impl App {
                 .or_else(|| self.window_labels.get(index).map(|label| label.0.clone()))).unwrap_or_default();
             let label = if room.is_empty() { name } else { format!("{name} · {room}") };
             let closed_record = self.closed_panes.iter().find(|record| record.pane_id == outer && record.alive).map(|record| record.ui_id);
-            (shell, Owner { key: kasa_mcp::surface_keys::ensure(&surface), surface, session, shell, label, closed_record, needs_open: mixed && closed_record.is_some() })
+            (shell, Owner { key: kasa_collab::surface_keys::ensure(&surface), surface, session, shell, label, closed_record, needs_open: mixed && closed_record.is_some() })
         }).collect();
         let parents: std::collections::HashMap<u32, u32> = self.statusbar.usage_processes.iter().map(|row| (row.id.pid, row.ppid)).collect();
         for row in &mut self.statusbar.usage_processes {
@@ -206,7 +206,7 @@ impl App {
     pub(crate) fn open_usage_shell(&mut self, id: &Identity) {
         let Some(owner) = self.statusbar.usage_processes.iter().find(|row| row.id == *id).and_then(|row| row.owner.clone()) else { return };
         if !self.pty.get(&owner.surface).is_some_and(|session| owner.session.ptr_eq(&Arc::downgrade(session)))
-            || kasa_mcp::surface_keys::get(&owner.surface).as_deref() != Some(owner.key.as_str()) { return; }
+            || kasa_collab::surface_keys::get(&owner.surface).as_deref() != Some(owner.key.as_str()) { return; }
         if let Some(index) = self.closed_panes.iter().position(|record| Some(record.ui_id) == owner.closed_record && record.alive) {
             self.reopen_closed_pane_at(index);
             self.force_usage_refresh();
@@ -291,7 +291,7 @@ impl App {
             let Some(session) = self.pty.get(&owner.surface).cloned().filter(|session| owner.session.ptr_eq(&Arc::downgrade(session))) else {
                 self.set_toast("선택한 셸이 바뀌었어요".into()); return;
             };
-            if kasa_mcp::surface_keys::get(&owner.surface).as_deref() != Some(owner.key.as_str())
+            if kasa_collab::surface_keys::get(&owner.surface).as_deref() != Some(owner.key.as_str())
                 || crate::input::usage_process_birth(identity.pid) != Some(identity.started) {
                 self.set_toast("선택한 셸이 바뀌었어요".into()); return;
             }

@@ -101,7 +101,7 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.fetch = Some(rx);
         std::thread::spawn(move || {
-            let result = kasa_mcp::device_auth::handle(&serde_json::json!({"op":"connections"}))
+            let result = kasa_device::device_auth::handle(&serde_json::json!({"op":"connections"}))
                 .map_err(|error| error.to_string());
             let _ = tx.send(Done::Listed(result));
         });
@@ -291,7 +291,7 @@ impl App {
             Act::Disconnect => {
                 let Some(id) = work.disconnect.clone() else { return };
                 work.run(move || {
-                    let value = kasa_mcp::device_auth::handle(&serde_json::json!({"op":"disconnect","id":id}))
+                    let value = kasa_device::device_auth::handle(&serde_json::json!({"op":"disconnect","id":id}))
                         .map_err(|error| error.to_string())?;
                     Ok(if value["provider_revoked"] == true {
                         "연결을 끊고 권한도 돌려줬어요".into()
@@ -309,7 +309,7 @@ impl App {
             Act::Approve => {
                 let Some((id, digest)) = work.open.clone() else { return };
                 work.run(move || {
-                    let value = kasa_mcp::device_auth::connections::approve(&id, &digest)
+                    let value = kasa_device::device_auth::connections::approve(&id, &digest)
                         .map_err(|error| error.to_string())?;
                     Ok(match value["status"].as_str() {
                         Some("created") => format!("PR #{} 을 만들었어요", value["number"]),
@@ -320,7 +320,7 @@ impl App {
             Act::Reject => {
                 let Some((id, _)) = work.open.clone() else { return };
                 work.run(move || {
-                    kasa_mcp::device_auth::handle(&serde_json::json!({"op":"reject","id":id}))
+                    kasa_device::device_auth::handle(&serde_json::json!({"op":"reject","id":id}))
                         .map(|_| "요청을 버렸어요".to_string())
                         .map_err(|error| error.to_string())
                 });

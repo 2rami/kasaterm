@@ -91,7 +91,7 @@ scripts\windows\build-run.ps1
   `-SkipUi` 없이 다시 실행해 dist를 만든다.
 - **link.exe / rc.exe 못 찾음** — VS Build Tools 설치가 덜 됨. "x64 Native Tools /
   ARM64 Native Tools Command Prompt"에서 실행하거나 새 로그인으로 PATH 반영.
-- **kasa-mcp에서 STATUS_ACCESS_VIOLATION** — 루트 Cargo.toml의 `opt-level=0` pin이
+- **호스트 모듈 최적화에서 STATUS_ACCESS_VIOLATION** — 루트 Cargo.toml의 `opt-level=0` pin이
   이걸 막는다. 그 pin을 지우지 말 것.
 - **자동 업데이트(WinSparkle)** — 실행 테스트엔 불필요해 생략했다(DLL 없으면
   `win_sparkle.rs`가 no-op으로 통과). 자동업뎃까지 보려면 CI가 받는 x64 prebuilt

@@ -1,7 +1,7 @@
 //! Offline Claude-session discovery from the transcript jsonl files under
 //! `~/.claude/projects/<encoded-cwd>/`. Pure filesystem + serde_json — no live
 //! pane, no GUI state — so both the GUI backend (PtyBackend, app/kasaterm) and
-//! the standalone web server (StandaloneBackend, kasa-mcp) share one impl.
+//! the standalone web server (StandaloneBackend, kasa-backend) share one impl.
 //!
 //! Lifted out of app/kasaterm/src/socket.rs so the standalone `serve-web` bin
 //! can list/read sessions without depending on the winit/wgpu GUI crate.

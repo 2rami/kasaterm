@@ -5,7 +5,7 @@ does not send commands to a user terminal. Screen captures carry the same synthe
 
 The contracts are grounded in repository examples:
 
-- `crates/kasa-mcp/src/http.rs`, `term_panes_handler`: `harness` indicates the live agent;
+- `crates/kasa-http/src/http/term_api.rs`, `term_panes_handler`: `harness` indicates the live agent;
   `name` comes from an optional character assignment and may be null. Status, model, effort,
   attention kind, and idle seconds are separate fields.
 - `app/kasaterm/src/input.rs`, `codex_live_choices_are_distinct_from_history_above_the_composer`:

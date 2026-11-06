@@ -284,7 +284,7 @@ fn local_vnc_ports() -> Vec<String> {
 /// 명부에서 이 host 의 ssh 대상. 명부에 ssh 가 없으면 host 자체를 쓴다 —
 /// `user@ip` 꼴이면 그대로 붙는다.
 fn ssh_target_for_host(host: &str) -> Option<String> {
-    let listed = kasa_mcp::machines::snapshot().into_iter().find_map(|m| {
+    let listed = kasa_device::machines::snapshot().into_iter().find_map(|m| {
         (m.get("host").and_then(|v| v.as_str()) == Some(host))
             .then(|| m.get("ssh").and_then(|v| v.as_str()).map(str::to_string))
             .flatten()
@@ -466,7 +466,7 @@ pub(crate) fn status_links() -> Vec<StatusLink> {
     if let Some(links) = LAST.with(|l| l.borrow().as_ref().filter(|(at, _)| at.elapsed() < KEEP).map(|(_, v)| v.clone())) {
         return links;
     }
-    let links: Vec<StatusLink> = kasa_mcp::machines::snapshot().iter()
+    let links: Vec<StatusLink> = kasa_device::machines::snapshot().iter()
         .map(|m| StatusLink {
             label: m["label"].as_str().unwrap_or("기기").to_string(),
             online: m["online"].as_bool() == Some(true),
@@ -479,11 +479,11 @@ pub(crate) fn status_links() -> Vec<StatusLink> {
 }
 
 pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)> {
-    let info = kasa_mcp::remote::remote_info(id)?;
-    let label = kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| {
+    let info = kasa_remote::remote::remote_info(id)?;
+    let label = kasa_device::machines::label_for_base(&info.base).unwrap_or_else(|| {
         if info.label.is_empty() { info.base.clone() } else { info.label.clone() }
     });
-    let snap = kasa_mcp::machines::snapshot();
+    let snap = kasa_device::machines::snapshot();
     let m = snap
         .iter()
         .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label.as_str()))?;
@@ -498,7 +498,7 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
     // `legacy:%N` 은 열쇠가 아니라 「옛 기록이라 열쇠를 모른다」는 자리표시다 — 대조하면 멀쩡한
     // 자기 pane 을 남으로 본다(2026-09-17: 재시작 뒤 옛 `to` 링크가 정리 후보에서 빠졌다).
     if let (Some(mine), Some(theirs)) = (
-        kasa_mcp::remote::remote_surface_key(id).filter(|k| !k.starts_with("legacy:")),
+        kasa_remote::remote::remote_surface_key(id).filter(|k| !k.starts_with("legacy:")),
         row.get("surface_key").and_then(|v| v.as_str()),
     ) {
         if mine != theirs {
@@ -524,7 +524,7 @@ impl App {
         if !self.machines_section_active() && !self.has_pending_view_rooms() {
             return;
         }
-        let generation = kasa_mcp::machines::generation();
+        let generation = kasa_device::machines::generation();
         if generation == self.info.machines_col.last_generation
             && self
                 .info
@@ -580,7 +580,7 @@ impl App {
             // 캐시의 저쪽 행에서(2026-09-07 지적 「맥미니에서 여기로 옮기는 것도 없어」
             // — 이 관문 탓에 거울이 데려오기 목록에 안 섰다).
             let facts = remote_pane_facts(id);
-            let remote = kasa_mcp::remote::remote_info(id);
+            let remote = kasa_remote::remote::remote_info(id);
             if remote.is_none() && !self.pane_claude_ready(id) {
                 continue;
             }
@@ -636,7 +636,7 @@ impl App {
             };
             match remote {
                 Some(info) => {
-                    let label = if let Some(label) = kasa_mcp::machines::label_for_base(&info.base) {
+                    let label = if let Some(label) = kasa_device::machines::label_for_base(&info.base) {
                         label
                     } else if info.label.is_empty() {
                         info.base.clone()
@@ -655,8 +655,8 @@ impl App {
 
         // 기계 섹션 — 폴링 캐시 스냅샷을 그대로 편다. host(화면공유 주소)는
         // 캐시에 없어 명부에서 라벨로 찾는다 — 한 번만 읽어 루프에 물린다.
-        let registry = kasa_mcp::machines::machines();
-        let mut machines: Vec<state::MachinesColMachine> = kasa_mcp::machines::snapshot()
+        let registry = kasa_device::machines::machines();
+        let mut machines: Vec<state::MachinesColMachine> = kasa_device::machines::snapshot()
             .into_iter()
             .filter_map(|m| {
                 let label = m.get("label")?.as_str()?.to_string();
@@ -956,7 +956,7 @@ impl App {
                 unreachable!("위에서 return")
             }
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {
-                let m = kasa_mcp::machines::find(&label).ok_or_else(|| {
+                let m = kasa_device::machines::find(&label).ok_or_else(|| {
                     anyhow::anyhow!("기계 {label} 를 명부에서 못 찾았다 — machines.json 확인")
                 })?;
                 // cwd 는 명부 roots 로 매핑 — 규칙이 없으면 막고 이유를 말한다
@@ -967,7 +967,7 @@ impl App {
                     .and_then(|s| crate::session::migration_cwd(s, &pane));
                 let remote_cwd = match &local {
                     Some(l) => Some(
-                        kasa_mcp::machines::map_local_to_remote(&m, &l.to_string_lossy())
+                        kasa_device::machines::map_local_to_remote(&m, &l.to_string_lossy())
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "{} 를 {label} 경로로 못 옮겼다 — machines.json roots 에 규칙을",

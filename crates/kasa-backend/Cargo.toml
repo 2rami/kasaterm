@@ -1,0 +1,24 @@
+[package]
+name = "kasa-backend"
+description = "Headless Backend implementations shared by standalone serving and host tests."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow = { workspace = true }
+kasa-agents = { workspace = true }
+kasa-collab = { workspace = true, features = ["net"] }
+kasa-device = { workspace = true }
+kasa-pty = { workspace = true, default-features = true }
+kasa-socket = { workspace = true, default-features = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+kasa-device = { workspace = true, features = ["test-isolation"] }
+
+[lints]
+workspace = true

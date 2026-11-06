@@ -23,7 +23,7 @@ impl TurnJump {
 impl crate::App {
     pub(crate) fn jump_mirror_abs(&mut self, pane: &str, abs: i64) -> bool {
         let pid = self.ws.lock().unwrap().active_tab_pid(pane);
-        if !kasa_mcp::remote::is_view_pane(&pid) { return false; }
+        if !kasa_remote::remote::is_view_pane(&pid) { return false; }
         if let Some(pty) = self.pty.get(&pid) {
             pty.scroll_to_abs(abs);
             self.mirror_view_scroll.remove(&pid);

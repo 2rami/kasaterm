@@ -13,8 +13,8 @@ fn action(g: &mut gpu::GpuRenderer, sb: &mut state::StatusbarState, cursor: (f32
 }
 
 pub(super) fn paint(g: &mut gpu::GpuRenderer, sb: &mut state::StatusbarState, cursor: (f32, f32), anchor: Rect, viewport: (f32, f32)) {
-    let machines = kasa_mcp::machines::snapshot();
-    let entries = kasa_mcp::machines::entries();
+    let machines = kasa_device::machines::snapshot();
+    let entries = kasa_device::machines::entries();
     let w = 420.0_f32.min((viewport.0 - 16.0).max(1.0));
     let stacked = w < 350.0;
     let local_h = if stacked { 96.0 } else { 66.0 };

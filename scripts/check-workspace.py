@@ -34,15 +34,25 @@ LAYERS = {
     "kasa-agents": ("collab", 3),
     "kasa-acp": ("collab", 3),
     "kasa-collab": ("collab", 4),
-    "kasa-mcp": ("host", 5),
+    "kasa-identity": ("host", 5),
+    "kasa-characters": ("host", 5),
+    "kasa-wire": ("host", 5),
+    "kasa-device": ("host", 6),
+    "kasa-backend": ("host", 7),
+    "kasa-students": ("host", 7),
+    "kasa-remote": ("host", 8),
+    "kasa-git": ("host", 9),
+    "kasa-gateway": ("host", 9),
+    "kasa-http": ("host", 10),
+    "kasa-serve": ("host", 11),
     "kasa-host": ("host", 5),
-    "kasaterm": ("app", 7),
+    "kasaterm": ("app", 12),
 }
 SPIKE_DIR = "spikes/"
-HOST_RANK = LAYERS["kasa-mcp"][1]
+HOST_RANK = min(rank for layer, rank in LAYERS.values() if layer == "host")
 
 # 받는 쪽이 없어야 하는 산출물(실행 파일·폰 정적 라이브러리).
-LEAVES = {"kasaterm", "kasa-net-ffi", "kasa-host"}
+LEAVES = {"kasaterm", "kasa-net-ffi", "kasa-host", "kasa-gateway", "kasa-serve"}
 
 # 옛 tmux 백엔드. 화면 낱말은 kasa-screen 에서 받는다 — 새로 기대는 크레이트를 만들지 않는다.
 LEGACY_DEPENDENTS = {"kasa-bridge": {"kasaterm"}}
@@ -256,20 +266,20 @@ def self_test(meta):
 
     cases = {
         "경계 역전": inject("kasa-pty", name="kasa-socket", uses_default_features=False),
-        "옛 tmux 백엔드": inject("kasa-mcp", name="kasa-bridge"),
+        "옛 tmux 백엔드": inject("kasa-http", name="kasa-bridge"),
         "기본 기능": inject("kasa-agents", name="kasa-pty"),
         "app-update": inject("kasa-collab", name="kasa-socket", uses_default_features=False, features=["app-update"]),
         "창·GPU": inject("kasa-socket", name="winit", req="^0.30", source="registry+https://github.com/rust-lang/crates.io-index"),
         "네트워크 스택": inject("kasa-screen", name="tokio", req="^1.52.3", source="registry+https://github.com/rust-lang/crates.io-index"),
         "optional": inject("kasa-collab", name="reqwest", req="^0.12", uses_default_features=False, source="registry+https://github.com/rust-lang/crates.io-index"),
         "실험 크레이트": inject("kasaterm", name="iced-term"),
-        "산출물": inject("kasa-mcp", name="kasaterm"),
-        "다른 이름": inject("kasa-mcp", name="kasa-screen", rename="kasa_bridge"),
+        "산출물": inject("kasa-http", name="kasaterm"),
+        "다른 이름": inject("kasa-http", name="kasa-screen", rename="kasa_bridge"),
         "공개 크레이트": inject("kasa-cells", name="kasa-screen"),
     }
     failed = [k for k, errs in cases.items() if not any(k in e for e in errs)]
     m = copy.deepcopy(meta)
-    m["workspace_default_members"] = [i for i in m.get("workspace_default_members") or [] if "kasa-mcp" not in i]
+    m["workspace_default_members"] = [i for i in m.get("workspace_default_members") or [] if "kasa-http" not in i]
     if not any("default-members 에 없다" in e for e in check_metadata(m)):
         failed.append("default-members")
     if failed:

@@ -8,7 +8,7 @@
 카사모바일은 같은 나쵸의 두 화면이라 대화 원장이 하나다.
 
 ```
-폰 ── /u/<slug>/nacho/app/<rest> ──▶ 이 허브(kasa-mcp nacho_relay.rs) ── <url>/api/app/<rest> ──▶ 나쵸 askserve(:8792)
+폰 ── /u/<slug>/nacho/app/<rest> ──▶ 이 허브(kasa-device nacho_relay.rs) ── <url>/api/app/<rest> ──▶ 나쵸 askserve(:8792)
 ```
 
 - **신원은 허브가 정한다.** 주인 주소(`owner`)로 온 요청만 받고, 폰이 보낸 헤더는 하나도 옮기지 않는다.

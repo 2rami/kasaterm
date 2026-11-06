@@ -50,7 +50,7 @@ fn spawn_poller(proxy: EventLoopProxy<UserEvent>) -> std::sync::mpsc::Receiver<M
             let mut since: Option<u64> = None;
             let mut backoff = 2;
             loop {
-                match kasa_mcp::device_auth::approvals::list_blocking(since, if since.is_some() { 25 } else { 0 }) {
+                match kasa_device::device_auth::approvals::list_blocking(since, if since.is_some() { 25 } else { 0 }) {
                     Ok(value) => {
                         backoff = 2;
                         since = value["rev"].as_u64();
@@ -128,7 +128,7 @@ impl App {
         if !self.remote_approval.started {
             self.remote_approval.started = true;
             self.remote_approval.rx = Some(spawn_poller(self.proxy.clone()));
-            kasa_mcp::approval_bridge::spawn();
+            kasa_students::approval_bridge::spawn();
         }
         let mut lists = Vec::new();
         if let Some(rx) = &self.remote_approval.rx {
@@ -155,7 +155,7 @@ impl App {
     fn apply_remote_approvals(&mut self, value: serde_json::Value) {
         let st = &mut self.remote_approval;
         if st.me.is_none() {
-            st.me = kasa_mcp::device_auth::approvals::device_id();
+            st.me = kasa_device::device_auth::approvals::device_id();
         }
         st.items = value["approvals"].as_array().cloned().unwrap_or_default();
         let mut fresh = Vec::new();
@@ -248,8 +248,8 @@ impl App {
             self.remote_approval.busy = Some(rx);
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                let result = kasa_mcp::device_auth::approvals::decide_blocking(&id, &digest, allow).map_err(|error| {
-                    match kasa_mcp::device_auth::approvals::closed_view(&error) {
+                let result = kasa_device::device_auth::approvals::decide_blocking(&id, &digest, allow).map_err(|error| {
+                    match kasa_device::device_auth::approvals::closed_view(&error) {
                         Some(view) => format!("closed:{view}"),
                         None => error.to_string(),
                     }

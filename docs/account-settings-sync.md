@@ -4,7 +4,7 @@
 
 ## 동기화 범위
 
-허용 목록의 정본은 `crates/kasa-mcp/src/account_sync/schema.rs`다. 서버와 클라이언트가 같은 검증을 적용한다.
+허용 목록의 정본은 `crates/kasa-device/src/account_sync/schema.rs`다. 서버와 클라이언트가 같은 검증을 적용한다.
 
 - 공통 설정: 언어, 색·커스텀 팔레트, UI 글꼴 이름·크기, 커서 모양, 캐릭터 외형/페르소나 켜기, 학생 테마와 켠 학생 명단(`character_picks`, 테마별 이름 목록 — 적힌 순서가 새 pane 배정 순서), 상태줄과 패널의 표시 선호. 모바일 밝기 선택은 `mobile_theme_mode`(`system`·`light`·`dark`)로 같은 계정에 저장한다.
 - 기기 연결: 이름, 기계 id, SSH의 공개 host/user/port, 기본 아이콘·표시 색.

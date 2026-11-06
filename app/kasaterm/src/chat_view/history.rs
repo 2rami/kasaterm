@@ -229,7 +229,7 @@ fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std
             slim_for(&line, HistoryView::Archive)
         } else { slim(&line) }).flatten();
         if let Some(kept) = kept {
-            if budget.is_some() && kept.len() + 1 > kasa_mcp::conversation_archive::MAX_APPEND {
+            if budget.is_some() && kept.len() + 1 > kasa_remote::conversation_archive::MAX_APPEND {
                 return Err(std::io::Error::other("conversation row exceeds archive limit"));
             }
             if budget.is_some_and(|budget| !raw.is_empty() && raw.len() + kept.len() + 1 > budget) { break; }
@@ -248,10 +248,10 @@ fn read_inner(path: &std::path::Path, offset: u64, budget: Option<usize>) -> std
 pub(crate) fn remote(base: &str, surface: &str, offset: u64, source: &str) -> anyhow::Result<Option<TranscriptChunk>> {
     let path = format!(
         "/transcript-raw?surface={}&offset={offset}&source={}&history=1",
-        kasa_mcp::remote::urlencode(surface),
-        kasa_mcp::remote::urlencode(source),
+        kasa_remote::remote::urlencode(surface),
+        kasa_remote::remote::urlencode(source),
     );
-    let v = kasa_mcp::remote::remote_get_json(base, &path)?;
+    let v = kasa_remote::remote::remote_get_json(base, &path)?;
     if v["ok"].as_bool() != Some(true) {
         return Ok(None);
     }
@@ -343,7 +343,7 @@ mod tests {
         let mut all = String::new(); let mut cursor = 0; let mut pages = 0;
         loop {
             let chunk = read_archive(&path, cursor).unwrap();
-            assert!(chunk.raw.len() <= kasa_mcp::conversation_archive::MAX_APPEND);
+            assert!(chunk.raw.len() <= kasa_remote::conversation_archive::MAX_APPEND);
             if chunk.offset == cursor { assert!(chunk.raw.is_empty()); break; }
             assert!(chunk.offset > cursor);
             cursor = chunk.offset; all.push_str(&chunk.raw); pages += 1;

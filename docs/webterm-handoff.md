@@ -32,7 +32,7 @@ PORT=$(lsof -nP -iTCP -sTCP:LISTEN -a -c kasaterm 2>/dev/null \
 kasaterm 없이 서버만 띄울 수도 있다(포트는 임의로 골라 쓴다):
 
 ```
-cargo build -p kasa-mcp --bin kasa-serve-web
+cargo build -p kasa-serve --bin kasa-serve-web
 ./target/debug/kasa-serve-web --port 8799   # 8799 는 예시일 뿐, 약속된 포트가 아니다
 ```
 
@@ -423,7 +423,7 @@ cloudflared tunnel run kasaterm     # 켜기. 끄면 그 주소는 530 이 된�
 - **켜고 끄는 스위치(2026-08-15)**: **kasaterm 앱 하단 상태줄(계정 게이지 줄)의
   오른쪽 끝 「● 바깥」** — 처음엔 /term 페이지 하단바에 넣었다가(1ef9b33) 앱으로
   옮겼다: 폰 하단바는 좁고, 문이 닫히면 폰은 접속 자체가 안 돼 스위치를 폰에 둘
-  이유가 없다(지시 정정). 실체는 `kasa-mcp` 의 `tunnel` 모듈 — 켜기가 위의
+  이유가 없다(지시 정정). 실체는 `kasa-http` 의 `tunnel` 모듈 — 켜기가 위의
   `tunnel run` 을 스폰하고, 끄기는 TERM. HTTP `GET/POST /term/tunnel` 도 같은
   손을 쓴다(스크립트·curl 용). **앱을 꺼도 터널은 살아 남고**(폰 북마크가
   재시작을 넘게), 재시작 뒤에는 pgrep 으로 되찾아 상태·끄기를 잇는다. 로그는

@@ -30,8 +30,8 @@ pub(crate) fn instance() -> &'static str {
 pub(crate) fn machine_context() -> Result<&'static (String, String)> {
     static VALUE: OnceLock<(String, String)> = OnceLock::new();
     if VALUE.get().is_none() {
-        let id = kasa_mcp::mobile::machine_identity().ok_or_else(|| anyhow::anyhow!("이 기계의 신원을 확인하지 못했어요"))?;
-        let _ = VALUE.set((id, kasa_mcp::machines::self_label()));
+        let id = kasa_device::mobile::machine_identity().ok_or_else(|| anyhow::anyhow!("이 기계의 신원을 확인하지 못했어요"))?;
+        let _ = VALUE.set((id, kasa_device::machines::self_label()));
     }
     Ok(VALUE.get().unwrap())
 }
@@ -130,10 +130,10 @@ pub(crate) fn spawn(plan: SpawnPlan) -> Spawned {
         env.push(("KASATERM_ROOM".into(), plan.collab_room.clone().unwrap_or_default()));
         let mut sid = None;
         if let Some(name) = &plan.character {
-            let assigned = kasa_mcp::character::new_session_id();
-            let slug = kasa_mcp::character::rslug(std::path::Path::new(&plan.cwd), plan.collab_room.as_deref());
-            kasa_mcp::character::write_marker(&slug, &plan.pane, name)?;
-            kasa_mcp::character::bind_session_character(&assigned, name)?;
+            let assigned = kasa_characters::character::new_session_id();
+            let slug = kasa_characters::character::rslug(std::path::Path::new(&plan.cwd), plan.collab_room.as_deref());
+            kasa_characters::character::write_marker(&slug, &plan.pane, name)?;
+            kasa_characters::character::bind_session_character(&assigned, name)?;
             env.extend([
                 ("KASATERM_CHARACTER".into(), name.clone()),
                 ("KASATERM_SESSION_ID".into(), assigned.clone()),
@@ -141,7 +141,7 @@ pub(crate) fn spawn(plan: SpawnPlan) -> Spawned {
                 ("KASATERM_AGENT_SLUG".into(), crate::theme::agent_slug(name)),
             ]);
             if socket::read_claude_persona() {
-                if let Some(persona) = kasa_mcp::character::persona_for_any(name) {
+                if let Some(persona) = kasa_characters::character::persona_for_any(name) {
                     env.push(("KASATERM_PERSONA".into(), persona));
                 }
             }
@@ -177,12 +177,12 @@ impl App {
         let ready: HashSet<String> = self.pty.iter().filter(|(id, session)| !session.input_closed() && (session.input_revision() == 0 || !session.input_draft_present())
             && self.shell_prompt_grid(id).is_some_and(|line| line.trim().is_empty())).map(|(id, _)| id.clone()).collect();
         let ws = self.ws.lock().unwrap();
-        let sessions = self.pty.iter().filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id)).map(|(id, session)| {
+        let sessions = self.pty.iter().filter(|(id, _)| !kasa_remote::remote::is_remote_pane(id)).map(|(id, session)| {
             let outer = ws.outer_for_pty(id).unwrap_or_else(|| id.clone());
             let room = rooms.iter().find(|(_, idx, _)| self.window_leaves(*idx).contains(&outer));
             let activity = self.pane_activity.get(id);
             SessionRow {
-                surface_key: kasa_mcp::surface_keys::ensure(id),
+                surface_key: kasa_collab::surface_keys::ensure(id),
                 identity: SessionIdentity { machine_id: machine.0.clone(), pane_id: id.clone(),
                     session_id: self.pane_claude_sid.get(id).cloned(), instance: instance().into(), token: token_for(id, session) },
                 local_panes: vec![id.clone()],
@@ -210,7 +210,7 @@ impl App {
             anyhow::bail!("앱이 바뀌었어요. 목록을 새로 읽어 주세요");
         }
         let session = self.pty.get(&identity.pane_id).ok_or_else(|| anyhow::anyhow!("선택한 세션이 이미 닫혔어요"))?;
-        if kasa_mcp::remote::is_remote_pane(&identity.pane_id) || token_for(&identity.pane_id, session) != identity.token {
+        if kasa_remote::remote::is_remote_pane(&identity.pane_id) || token_for(&identity.pane_id, session) != identity.token {
             anyhow::bail!("선택한 자리에 다른 세션이 있어요. 목록을 새로 읽어 주세요");
         }
         let active = session.active_agent().is_some();

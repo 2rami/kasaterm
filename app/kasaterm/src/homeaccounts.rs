@@ -8,12 +8,12 @@
 //! 없었고, 85% 자동 전환이 영영 일어나지 않았다.
 //!
 //! 여기서 오가는 것은 **목록·스위치·기준값과 OAuth 코드 한 줄**뿐이다. 자격증명
-//! 자체는 옮기지 않는다(`kasa_mcp::remote` 의 같은 절 참고).
+//! 자체는 옮기지 않는다(`kasa_remote::remote` 의 같은 절 참고).
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use kasa_mcp::remote::RemoteAccounts;
+use kasa_remote::remote::RemoteAccounts;
 
 /// 폴링 간격. 계정 칸은 사람이 보고 있을 때만 갱신하면 되고, 그 화면에서 값이
 /// 초 단위로 변하는 것은 사용량뿐이다.
@@ -79,8 +79,8 @@ fn push_toast(msg: String) {
 /// 비어 보이는 이유를 알 길이 없고, 그 상태로 「계정 추가」를 누르면 조용히
 /// 아무 일도 안 난다.
 pub(crate) fn home_target() -> Option<(String, String)> {
-    let m = kasa_mcp::machines::home_machine()?;
-    let online = kasa_mcp::machines::snapshot()
+    let m = kasa_device::machines::home_machine()?;
+    let online = kasa_device::machines::snapshot()
         .iter()
         .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()))
         .and_then(|v| v.get("online").and_then(serde_json::Value::as_bool))
@@ -123,7 +123,7 @@ pub(crate) fn poll() {
         return;
     }
     std::thread::spawn(move || {
-        let got = kasa_mcp::remote::fetch_accounts(&base, None);
+        let got = kasa_remote::remote::fetch_accounts(&base, None);
         if let Ok(mut c) = cache().lock() {
             // 늦게 온 응답이 그 사이 바뀐 기계의 칸을 덮으면 안 된다.
             if c.base == base {
@@ -161,7 +161,7 @@ pub(crate) fn act(action: &'static str, id: Option<String>, label: Option<String
         return;
     };
     std::thread::spawn(move || {
-        let r = kasa_mcp::remote::settings_action(
+        let r = kasa_remote::remote::settings_action(
             &base,
             action,
             id.as_deref(),

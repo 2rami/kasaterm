@@ -375,7 +375,7 @@ impl App {
             );
         }
         anyhow::ensure!(
-            !kasa_mcp::remote::is_remote_pane(&pid),
+            !kasa_remote::remote::is_remote_pane(&pid),
             "server restoration only supports local terminals"
         );
         anyhow::ensure!(

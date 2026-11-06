@@ -197,7 +197,7 @@ cp theme-src-<작품>/roster.json ~/.config/kasaterm/themes/<작품>/theme.json
 ```
 
 **`theme.json` 이 없으면 그 폴더는 없는 것과 같다** — `active_theme_dir_in`
-(`crates/kasa-mcp/src/character.rs`)이 `theme.json` 이 실재할 때만 폴더를 돌려주고,
+(`crates/kasa-characters/src/character.rs`)이 `theme.json` 이 실재할 때만 폴더를 돌려주고,
 없으면 오류 없이 번들로 떨어진다. 스프라이트만 넣고 화면이 안 바뀌면 여기를 보라.
 `roster.json` 과 `theme.json` 은 스키마가 같아 그대로 복사하면 된다.
 

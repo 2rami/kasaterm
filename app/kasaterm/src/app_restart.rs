@@ -54,7 +54,7 @@ impl App {
         let binary = exe.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|meta| BinaryId {
             inode: inode(&meta),
             mtime_ms: mtime_ms(&meta),
-            build: kasa_mcp::machines::build_id(),
+            build: kasa_device::machines::build_id(),
         }).unwrap_or_default();
         let install_pending = crate::install_pending_paths().map(|(_, dist)| PendingInstall {
             dist_mtime_ms: std::fs::metadata(dist.join("Contents/MacOS/kasaterm")).map(|m| mtime_ms(&m)).unwrap_or(0),
@@ -90,8 +90,8 @@ impl App {
         let jobs = kasa_socket::app_restart::jobs_dir().ok();
         Facts {
             schema: SCHEMA.into(),
-            machine_id: kasa_mcp::board_service::local_id().unwrap_or_default(),
-            label: kasa_mcp::machines::self_label(),
+            machine_id: kasa_collab::board_service::local_id().unwrap_or_default(),
+            label: kasa_device::machines::self_label(),
             os: std::env::consts::OS.into(),
             capability: CAPABILITY,
             app_path: exe.as_ref().and_then(|p| p.ancestors().nth(INSTALL_DEPTH)).map(|p| p.display().to_string()).unwrap_or_default(),
@@ -120,11 +120,11 @@ impl App {
 
 /// 부팅 때 한 번 — 이 기기의 재시작 작업이 재기동을 기다리고 있었으면 도착을 적는다.
 pub(crate) fn mark_restart_booted() {
-    let (Ok(dir), Ok(machine)) = (kasa_socket::app_restart::jobs_dir(), kasa_mcp::board_service::local_id()) else {
+    let (Ok(dir), Ok(machine)) = (kasa_socket::app_restart::jobs_dir(), kasa_collab::board_service::local_id()) else {
         return;
     };
     if let Some(job) = kasa_socket::app_restart::mark_booted(
-        &dir, &machine, std::process::id(), &kasa_mcp::machines::build_id(), kasa_socket::board::now_ms(),
+        &dir, &machine, std::process::id(), &kasa_device::machines::build_id(), kasa_socket::board::now_ms(),
     ) {
         eprintln!("[app-restart] booted for job {job}");
     }
@@ -149,14 +149,14 @@ impl NachoAuthority {
 
     /// 동작마다 중계 갈래가 따로다 — 키 없는 기기는 그 동작의 위임 표식(`Relay::delegation`)이 명부 파일에 있어야 읽는다.
     pub(crate) fn for_relay(relay: &kasa_socket::app_restart::Relay, requested: &str) -> Result<Self, String> {
-        let local_key = kasa_mcp::nacho_app_target().is_ok();
-        let relay = kasa_socket::app_restart::target_authority_for(relay, local_key, &kasa_mcp::machines::listed_entries(), requested, |id| {
+        let local_key = kasa_device::nacho_app_target().is_ok();
+        let relay = kasa_socket::app_restart::target_authority_for(relay, local_key, &kasa_device::machines::listed_entries(), requested, |id| {
             // 위임한 파일 항목의 주소만 쓴다 — `find_route` 는 끊긴 파일 항목을 같은 id 를 댄 손님 경로로 갈아 끼운다.
-            let base = kasa_mcp::machines::listed_machines().into_iter()
+            let base = kasa_device::machines::listed_machines().into_iter()
                 .find(|m| m.machine_id.as_deref() == Some(id))
                 .map(|m| m.base)
                 .ok_or_else(|| format!("위임한 기기({id})의 주소가 명부 파일에 없다"))?;
-            Ok(Box::new(move |path: &str| kasa_mcp::remote::remote_get_json(&base, path).map_err(|e| e.to_string())))
+            Ok(Box::new(move |path: &str| kasa_remote::remote::remote_get_json(&base, path).map_err(|e| e.to_string())))
         })?;
         Ok(relay.map_or(Self::Local, Self::Relay))
     }
@@ -224,7 +224,7 @@ pub(crate) fn app_request(method: &str, path: &str, body: Option<&[u8]>) -> Resu
 }
 
 fn app_exchange(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, String> {
-    let (url, key) = kasa_mcp::nacho_app_target().map_err(|code| match code {
+    let (url, key) = kasa_device::nacho_app_target().map_err(|code| match code {
         "nacho_key_missing" => "이 기기에는 나쵸 앱 키가 없어 나쵸에 묻지 않았어요".to_string(),
         _ => "나쵸 자리 정보가 없어 나쵸에 묻지 않았어요".to_string(),
     })?;

@@ -23,7 +23,7 @@ pub(super) fn latest_restored_state(dir: &std::path::Path) -> Option<serde_json:
             .filter(serde_json::Value::is_object);
         // A corrupt checkpoint breaks the lineage. Later valid checkpoints
         // start independently; a corrupt final checkpoint returns None.
-        previous = state.map(|state| kasa_mcp::surface_keys::prepare_restore_state(&state, previous.as_ref()));
+        previous = state.map(|state| kasa_collab::surface_keys::prepare_restore_state(&state, previous.as_ref()));
     }
     previous
 }
@@ -45,9 +45,9 @@ pub(super) struct RestoredSurfaceKey {
 impl RestoredSurfaceKey {
     pub(super) fn register(id: &str, record: &serde_json::Value) -> Self {
         if let Some(key) = record.get("surface_key").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
-            kasa_mcp::surface_keys::set(id, key);
+            kasa_collab::surface_keys::set(id, key);
         } else {
-            kasa_mcp::surface_keys::ensure(id);
+            kasa_collab::surface_keys::ensure(id);
         }
         Self { id: id.into(), committed: false }
     }
@@ -58,7 +58,7 @@ impl Drop for RestoredSurfaceKey {
         if !self.committed {
             // Failed restore must not leave a key for a later unrelated shell
             // that happens to reuse the still-free pane number.
-            kasa_mcp::surface_keys::remove(&self.id);
+            kasa_collab::surface_keys::remove(&self.id);
         }
     }
 }
@@ -312,7 +312,7 @@ impl App {
         let previous = crate::socket::session_file_path()
             .and_then(|path| path.parent().and_then(latest_restored_state));
         let selection = state.get("restore_selection").cloned();
-        let mut original = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let mut original = kasa_collab::surface_keys::prepare_restore_state(state, previous.as_ref());
         if let Some(object) = original.as_object_mut() { object.remove("restore_selection"); }
         let mut prepared = super::local_restore::state(&original);
         self.remember_view_rooms(&prepared);
@@ -486,11 +486,11 @@ impl App {
         // 않게 백그라운드로 돌고, 막히면(로컬 미저장 등) 덮지 않고 incoming
         // 보관(OnBlock::Deposit)이라 잃는 것이 없다.
         {
-            let registry = kasa_mcp::machines::machines();
+            let registry = kasa_device::machines::machines();
             let mut seen = std::collections::HashSet::new();
             let mut catchup: Vec<(String, String, String, String)> = Vec::new();
             for id in kasa_pty::live_sessions() {
-                let Some(info) = kasa_mcp::remote::remote_info(&id) else {
+                let Some(info) = kasa_remote::remote::remote_info(&id) else {
                     continue;
                 };
                 let Some(rcwd) = info.remote_cwd.clone() else {
@@ -505,7 +505,7 @@ impl App {
                 let Some(local) = info
                     .origin_cwd
                     .clone()
-                    .or_else(|| kasa_mcp::machines::map_remote_to_local(m, &rcwd))
+                    .or_else(|| kasa_device::machines::map_remote_to_local(m, &rcwd))
                 else {
                     continue;
                 };
@@ -521,9 +521,9 @@ impl App {
                 std::thread::spawn(move || {
                     for (base, label, rcwd, local) in catchup {
                         let tail = local.rsplit('/').next().unwrap_or(&local).to_string();
-                        let msg = match kasa_mcp::remote::fetch_repo_sync(&base, &rcwd, None) {
-                            Ok(kasa_mcp::remote::RepoSyncFetch::Bundle(meta, bytes)) => {
-                                match kasa_mcp::reposync::apply(
+                        let msg = match kasa_remote::remote::fetch_repo_sync(&base, &rcwd, None) {
+                            Ok(kasa_remote::remote::RepoSyncFetch::Bundle(meta, bytes)) => {
+                                match kasa_remote::reposync::apply(
                                     std::path::Path::new(&local),
                                     &bytes,
                                     &meta.head,
@@ -531,7 +531,7 @@ impl App {
                                     &meta.branch,
                                     meta.dirty,
                                     false,
-                                    kasa_mcp::reposync::OnBlock::Deposit,
+                                    kasa_remote::reposync::OnBlock::Deposit,
                                 ) {
                                     Ok(what) => format!("{label} 따라잡기({tail}): {what}"),
                                     Err(e) => {
@@ -723,14 +723,14 @@ impl App {
             rec.get("remote_pane").and_then(|v| v.as_str()),
         ) {
             let rec_str = |k: &str| rec.get(k).and_then(|v| v.as_str()).map(str::to_string);
-            let spec = kasa_mcp::remote::RemoteSpec {
+            let spec = kasa_remote::remote::RemoteSpec {
                 base: base.to_string(),
                 pane: Some(rpane.to_string()),
                 cwd: None,
                 token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
+                identity: kasa_remote::remote::RemoteIdentity {
                     label: rec_str("remote_label")
-                        .or_else(|| kasa_mcp::machines::label_for_base(base))
+                        .or_else(|| kasa_device::machines::label_for_base(base))
                         .unwrap_or_default(),
                     remote_cwd: rec_str("remote_cwd"),
                     origin_cwd: rec_str("remote_origin_cwd"),
@@ -751,15 +751,15 @@ impl App {
             let surface_key = rec_str("remote_surface_key")
                 .or_else(|| rpane.starts_with('%').then(|| format!("legacy:{rpane}")));
             let attempt = if surface_key.is_some() {
-                kasa_mcp::remote::restore_connection_identified(
+                kasa_remote::remote::restore_connection_identified(
                     spec, &id, cols, rows, view,
-                    kasa_mcp::remote_restore::RestoreIdentity {
+                    kasa_remote::remote_restore::RestoreIdentity {
                         surface_key,
                         ..Default::default()
                     },
                 )
             } else {
-                kasa_mcp::remote::restore_connection(spec, &id, cols, rows, view)
+                kasa_remote::remote::restore_connection(spec, &id, cols, rows, view)
             };
             match attempt {
                 Ok(remote) => {
@@ -885,7 +885,7 @@ impl App {
                 // 자리는 명단을 바꿔도 지킨다(2026-08-26 지시: 「손으로 고른 건
                 // 명단 상관없이 지키게 해줘」).
                 let sid = rec.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-                let keep = kasa_mcp::character::is_assignable_for(sid, s);
+                let keep = kasa_characters::character::is_assignable_for(sid, s);
                 if !keep {
                     eprintln!("[restore] {s} 는 고른 명단 밖 — 새로 배정한다");
                 }
@@ -905,7 +905,7 @@ impl App {
             // 그건 배정 사고가 아니다(같은 날 정한 「손으로 고른 건 지킨다」 규칙).
             let manual = session_id
                 .as_deref()
-                .is_some_and(kasa_mcp::character::is_manual_pick);
+                .is_some_and(kasa_characters::character::is_manual_pick);
             // ⚠️ 예약(위 `RESERVE_KEY`)은 **세지 않는다.** 그건 「이 이름은 되살릴
             // 자리가 있으니 새 배정이 집어가지 마라」는 표시라, 여기서 함께 세면
             // 되살리려는 자리가 제 예약에 막혀 통째로 새로 배정된다(자기 자신을
@@ -935,7 +935,7 @@ impl App {
                 }
                 self.pending_character = Some(c.clone());
                 if let Some(ref sid) = session_id {
-                    let _ = kasa_mcp::character::bind_session_character(sid, c);
+                    let _ = kasa_characters::character::bind_session_character(sid, c);
                 }
             } else {
                 eprintln!("[restore] {c} 는 이미 다른 자리가 쓰는 중 — 새로 배정한다");
@@ -990,7 +990,7 @@ impl App {
         if stored_char.is_some() && !revived {
             let now = self.ws.lock().unwrap().pane_character.get(&id).cloned();
             if let (Some(sid), Some(now)) = (session_id.as_deref(), now) {
-                let _ = kasa_mcp::character::bind_session_character(sid, &now);
+                let _ = kasa_characters::character::bind_session_character(sid, &now);
             }
         }
         let session = match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -1800,24 +1800,24 @@ mod tests {
     fn surface_key_save_close_reopen_preserves_identity_without_reusing_live_ids() {
         let alive = format!("%{}", uuid::Uuid::new_v4().as_u128() as u32);
         let restored = format!("surface-key-restored-{}", uuid::Uuid::new_v4());
-        let old_key = kasa_mcp::surface_keys::ensure(&alive);
+        let old_key = kasa_collab::surface_keys::ensure(&alive);
         let mut record = serde_json::Map::new();
         super::append_surface_record_metadata(&mut record, &alive);
         assert_eq!(record["surface_key"], old_key);
         // Close the original, then let an unrelated live shell reuse its number.
-        kasa_mcp::surface_keys::remove(&alive);
-        let newcomer_key = kasa_mcp::surface_keys::ensure(&alive);
+        kasa_collab::surface_keys::remove(&alive);
+        let newcomer_key = kasa_collab::surface_keys::ensure(&alive);
         assert_ne!(newcomer_key, old_key);
         assert!(super::pick_restore_id(Some(&alive), |id| id == alive).is_none());
         let mut registered = super::RestoredSurfaceKey::register(&restored, &serde_json::Value::Object(record.clone()));
         registered.committed = true;
         drop(registered);
-        assert_eq!(kasa_mcp::surface_keys::get(&alive), Some(newcomer_key));
-        assert_eq!(kasa_mcp::surface_keys::get(&restored), Some(old_key.clone()));
+        assert_eq!(kasa_collab::surface_keys::get(&alive), Some(newcomer_key));
+        assert_eq!(kasa_collab::surface_keys::get(&restored), Some(old_key.clone()));
         // A saved closed record keeps its key after real resource removal.
         assert_eq!(record["surface_key"], old_key);
-        kasa_mcp::surface_keys::remove(&alive);
-        kasa_mcp::surface_keys::remove(&restored);
+        kasa_collab::surface_keys::remove(&alive);
+        kasa_collab::surface_keys::remove(&restored);
     }
 
     #[test]
@@ -1825,11 +1825,11 @@ mod tests {
         let id = format!("surface-key-failed-{}", uuid::Uuid::new_v4());
         {
             let _pending = super::RestoredSurfaceKey::register(&id, &serde_json::json!({"surface_key": "saved-key"}));
-            assert_eq!(kasa_mcp::surface_keys::get(&id).as_deref(), Some("saved-key"));
+            assert_eq!(kasa_collab::surface_keys::get(&id).as_deref(), Some("saved-key"));
         }
-        assert_eq!(kasa_mcp::surface_keys::get(&id), None);
-        assert_ne!(kasa_mcp::surface_keys::ensure(&id), "saved-key");
-        kasa_mcp::surface_keys::remove(&id);
+        assert_eq!(kasa_collab::surface_keys::get(&id), None);
+        assert_ne!(kasa_collab::surface_keys::ensure(&id), "saved-key");
+        kasa_collab::surface_keys::remove(&id);
     }
 
     #[test]
@@ -1845,7 +1845,7 @@ mod tests {
         let saved = super::latest_restored_state(&dir).unwrap();
         assert_eq!(saved["leaf"]["pane_id"], "%4");
         assert_eq!(saved["leaf"]["surface_key"], "legacy:%4");
-        let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&saved));
+        let prepared = kasa_collab::surface_keys::prepare_restore_state(&current, Some(&saved));
         assert_eq!(prepared["leaf"]["pane_id"], "%3");
         assert_eq!(prepared["leaf"]["surface_key"], "legacy:%4");
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&backup).unwrap()).unwrap(), previous);
@@ -1869,7 +1869,7 @@ mod tests {
         std::fs::write(dir.join("session-restored-1788964315.json"), old.to_string()).unwrap();
         let previous = super::latest_restored_state(&dir).unwrap();
         let current = records(&[("%4", "new-session"), ("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
-        let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&previous));
+        let prepared = kasa_collab::surface_keys::prepare_restore_state(&current, Some(&previous));
         for (index, old_id) in ["%4", "%2", "%7", "%8"].iter().enumerate() {
             assert_eq!(prepared["windows"][index + 1]["leaf"]["surface_key"], format!("legacy:{old_id}"));
         }

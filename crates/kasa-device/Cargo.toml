@@ -1,0 +1,51 @@
+[package]
+name = "kasa-device"
+description = "Device account, phone ingress, peer discovery and gateway uplink state."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+test-isolation = []
+test-support = []
+
+[dependencies]
+kasa-agents.workspace = true
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+base64 = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+kasa-characters = { workspace = true }
+kasa-collab = { workspace = true, features = ["net"] }
+kasa-identity = { workspace = true }
+kasa-net = { workspace = true }
+kasa-socket = { workspace = true, default-features = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Existing credential handlers need the platform keychain APIs.
+security-framework = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = ["Win32_Security_Credentials"] }
+
+[dev-dependencies]
+kasa-socket = { workspace = true, features = ["test-support"] }
+
+[[bin]]
+name = "kasa-device"
+path = "src/bin/device.rs"
+
+[lints]
+workspace = true

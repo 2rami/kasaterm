@@ -679,7 +679,7 @@ fn focused(ws: &crate::Workspace) -> Option<(String, String)> {
 impl crate::App {
     fn prompt_shelf(&mut self, pane: &str) -> Option<Shelf> {
         let pid = self.ws.lock().ok()?.active_tab_pid(pane);
-        if kasa_mcp::remote::is_view_pane(&pid) {
+        if kasa_remote::remote::is_view_pane(&pid) {
             let sess = self.pty.get(&pid)?.clone();
             // 거울은 원본이 claude 든 codex 든 받은 화면 그대로다 — 마커로 가르지 않고 다 받는다. 출처 줄 같은
             // 군더더기는 맞추기(`place`)가 안 센다.
@@ -734,7 +734,7 @@ impl crate::App {
         let cols = self.ws.lock().ok().and_then(|ws| ws.panes.get(pane)?.term().map(|t| t.cells.first().map_or(0, Vec::len))).unwrap_or(0);
         let cell = ((cols / 2) as u16, (rows.len() / 2) as u16);
         let now = Instant::now();
-        let remote = self.ws.lock().is_ok_and(|ws| kasa_mcp::remote::is_view_pane(&ws.active_tab_pid(pane)));
+        let remote = self.ws.lock().is_ok_and(|ws| kasa_remote::remote::is_view_pane(&ws.active_tab_pid(pane)));
         let seek = Seek {
             pane: pane.to_string(),
             want: keys[index].clone(),
@@ -874,7 +874,7 @@ impl crate::App {
         self.pump_screen_seek();
         let open = self.info.runtime_page() && self.git.col_visible;
         let seen = if open { self.ws.lock().ok().and_then(|ws| focused(&ws)) } else { None };
-        let source = seen.as_ref().and_then(|(pane, pid)| match kasa_mcp::remote::remote_meta(pid) {
+        let source = seen.as_ref().and_then(|(pane, pid)| match kasa_remote::remote::remote_meta(pid) {
             Some((base, rid)) => Some(Source::Remote(base, rid)),
             None => self.collab.hub.bound.lock().ok()?.get(pid).cloned().or_else(|| crate::info_outputs::fixture(pane)).map(Source::File),
         });

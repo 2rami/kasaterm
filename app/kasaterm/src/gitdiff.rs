@@ -1,6 +1,6 @@
 //! 편집기 거터의 **HEAD 대비 실시간 diff**.
 //!
-//! git 컬럼의 인라인 diff(`kasa_mcp::git::git_file_diff`)를 그대로 못 쓴다 — 그건
+//! git 컬럼의 인라인 diff(`kasa_git::git::git_file_diff`)를 그대로 못 쓴다 — 그건
 //! `git diff` 라 **디스크**를 보고, 저장 전 버퍼를 모른다. 「타이핑하는 동안 바가
 //! 따라 움직인다」가 이 기능의 전부라서, 원본만 git 에서 받아 오고(`git_head_text`)
 //! 차이는 여기서 메모리로 낸다.
@@ -147,7 +147,7 @@ pub(crate) fn read_head_text(path: &str) -> HeadText {
     // git 은 경로 구분자로 `/` 만 받는다 — 윈도우의 `\` 를 그대로 넘기면
     // 「그런 경로 없음」이 되어 표시가 조용히 사라진다.
     let rel = rel.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>().join("/");
-    match kasa_mcp::git::git_head_text(root, &rel) {
+    match kasa_git::git::git_head_text(root, &rel) {
         Some(text) => HeadText::Lines(std::sync::Arc::new(split_lines(&text))),
         None => HeadText::Absent,
     }

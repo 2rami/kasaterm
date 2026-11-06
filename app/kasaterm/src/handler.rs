@@ -601,12 +601,12 @@ impl ApplicationHandler<UserEvent> for App {
                     let (base, cwd) = if base.starts_with("http") {
                         (base.clone(), cwd.clone())
                     } else {
-                        let m = kasa_mcp::machines::find(base)
+                        let m = kasa_device::machines::find(base)
                             .or_else(|| {
                                 (base == "mini" || base == "home")
                                     .then(|| {
-                                        kasa_mcp::machines::home_machine().or_else(|| {
-                                            kasa_mcp::machines::machines().into_iter().next()
+                                        kasa_device::machines::home_machine().or_else(|| {
+                                            kasa_device::machines::machines().into_iter().next()
                                         })
                                     })
                                     .flatten()
@@ -622,7 +622,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .and_then(|p| self.pty.get(p))
                                 .and_then(|s| s.shell_pid())
                                 .and_then(crate::socket::pid_cwd)?;
-                            kasa_mcp::machines::map_local_to_remote(
+                            kasa_device::machines::map_local_to_remote(
                                 &m,
                                 &local.to_string_lossy(),
                             )
@@ -650,7 +650,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(cmd) = run.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         // 그 기기의 방 칸이면 줄은 그 기기가 제 셸 문법으로 짓는다. 헤드리스 `web-` 셸은 칸이 아니라
                         // 예전처럼 거울로 친다.
-                        match kasa_mcp::remote::remote_info(&pid).filter(|info| info.remote_id.starts_with('%')) {
+                        match kasa_remote::remote::remote_info(&pid).filter(|info| info.remote_id.starts_with('%')) {
                             Some(info) => crate::session::launch_in_remote_pane(
                                 self.proxy.clone(), pid.clone(), info.base, info.remote_id, None, cmd.to_string(),
                                 std::time::Duration::from_millis(900),
@@ -698,10 +698,10 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         // `mini` 는 「명부 첫 기계」의 별칭 — `claude mini` 셰임이
                         // 라벨을 모른 채 보내는 기본값이다(라벨이 뭐든 통하게).
-                        let m = kasa_mcp::machines::find(base)
+                        let m = kasa_device::machines::find(base)
                             .or_else(|| {
                                 (base == "mini")
-                                    .then(|| kasa_mcp::machines::machines().into_iter().next())
+                                    .then(|| kasa_device::machines::machines().into_iter().next())
                                     .flatten()
                             })
                             .ok_or_else(|| {
@@ -723,7 +723,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 저쪽에 없는 폴더로 cd 가 실패해 학생이 안 뜬다(격리
                                 // 검증 실측: /tmp 가 /private/tmp 로 풀려 규칙을 비껴갔다).
                                 Some(
-                                    kasa_mcp::machines::map_local_to_remote(
+                                    kasa_device::machines::map_local_to_remote(
                                         &m,
                                         &local.to_string_lossy(),
                                     )
@@ -861,11 +861,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SocketUnfold(label, reply) => {
                 // 라벨도 migrate 처럼 별칭을 받는다 — `mini` 는 명부 첫 기계.
-                let resolved = kasa_mcp::machines::find(label)
+                let resolved = kasa_device::machines::find(label)
                     .map(|m| m.label)
                     .or_else(|| {
                         (label == "mini")
-                            .then(|| kasa_mcp::machines::machines().into_iter().next())
+                            .then(|| kasa_device::machines::machines().into_iter().next())
                             .flatten()
                             .map(|m| m.label)
                     });
@@ -972,7 +972,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::LayoutBarrier(client, seq) => {
                 // 앞선 명령의 결과를 먼저 싣고 확인한다 — 순서가 바뀌면 거울이 옛 배치를 받는다.
                 self.publish_layout_feed();
-                kasa_mcp::layout_feed::ack(*client, *seq);
+                kasa_wire::layout_feed::ack(*client, *seq);
                 return;
             }
             UserEvent::SocketRevealTerminal(show, focus_pane) => {
@@ -1243,15 +1243,15 @@ impl ApplicationHandler<UserEvent> for App {
                     // 이긴다(session.rs `pane_pick_wins`).
                     let reassigned = crate::session::pane_reassigned(pane.as_str());
                     if !cur.is_empty()
-                        && kasa_mcp::character::session_character(sid).is_some_and(|bound| {
+                        && kasa_characters::character::session_character(sid).is_some_and(|bound| {
                             bound != cur
                                 && crate::session::pane_pick_wins(
                                     reassigned,
-                                    kasa_mcp::character::is_assignable(&bound),
+                                    kasa_characters::character::is_assignable(&bound),
                                 )
                         })
                     {
-                        let _ = kasa_mcp::character::bind_session_character(sid, &cur);
+                        let _ = kasa_characters::character::bind_session_character(sid, &cur);
                     }
                 }
                 self.apply_session_character(pane, sid);
@@ -1493,16 +1493,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // 모델·통로는 하나만 와도 다른 하나가 빈 값으로 덮이면 안 된다 —
                 // 안 준 쪽은 저장된 값을 그대로 다시 쓴다.
                 if model.is_some() || backend.is_some() {
-                    let cur = kasa_mcp::character::characters_json();
+                    let cur = kasa_characters::character::characters_json();
                     let keep = |f: fn(&serde_json::Value, &str) -> Option<String>| {
                         cur.as_ref().and_then(|c| f(c, &name)).unwrap_or_default()
                     };
                     let m = model
                         .clone()
-                        .unwrap_or_else(|| keep(kasa_mcp::character::model_for));
+                        .unwrap_or_else(|| keep(kasa_characters::character::model_for));
                     let b = backend
                         .clone()
-                        .unwrap_or_else(|| keep(kasa_mcp::character::backend_for));
+                        .unwrap_or_else(|| keep(kasa_characters::character::backend_for));
                     self.settings_apply(SettingsAction::SelectStudent(name.clone()));
                     self.settings_apply(SettingsAction::StudentModel(m, b));
                     if persona.is_none() && new_name.is_none() {
@@ -1589,7 +1589,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // **어느 카드에도 안 붙어서**, 사용자는 무엇이 켜져 있는지 화면에서
                 // 알 수 없게 된다(실측으로 그 상태를 만들었다).
                 let theme_exists = |id: &str| {
-                    kasa_mcp::character::list_themes()
+                    kasa_characters::character::list_themes()
                         .iter()
                         .any(|(t, _)| t.as_str() == id)
                 };
@@ -1753,10 +1753,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Forward bytes across another mirror, or fill the clipboard on
                 // the actual harness host. Acknowledge only after target input.
-                if let Some(remote) = kasa_mcp::remote::remote_info(surface) {
+                if let Some(remote) = kasa_remote::remote::remote_info(surface) {
                     let (proxy, bytes, reply) = (self.proxy.clone(), bytes.clone(), reply.clone());
                     std::thread::spawn(move || {
-                        let result = kasa_mcp::remote::paste_remote_image(&remote.base, &remote.remote_id, bytes)
+                        let result = kasa_remote::remote::paste_remote_image(&remote.base, &remote.remote_id, bytes)
                             .map_err(|e| format!("이미지 전송 실패: {e:#}"));
                         if let Some(reply) = reply { let _ = reply.send(result); }
                         else { let _ = proxy.send_event(UserEvent::ImagePasteDone(result)); }
@@ -1915,7 +1915,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.window_labels_at = None; // force a relabel next paint
                     // 다른 기기가 이 방 이름을 보고 있다 — 바로 알린다.
-                    kasa_mcp::changes::bump();
+                    kasa_wire::changes::bump();
                 }
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -2054,9 +2054,9 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                     .unwrap_or_default();
                 for (sid, parent) in fork_pairs {
-                    if kasa_mcp::character::session_character(&sid).is_none() {
-                        if let Some(c) = kasa_mcp::character::session_character(&parent) {
-                            let _ = kasa_mcp::character::bind_session_character(&sid, &c);
+                    if kasa_characters::character::session_character(&sid).is_none() {
+                        if let Some(c) = kasa_characters::character::session_character(&parent) {
+                            let _ = kasa_characters::character::bind_session_character(&sid, &c);
                         }
                     }
                 }
@@ -2094,7 +2094,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.close_inline_web();
         // 자동 ssh 터널(명부의 ssh 항목)이 고아로 남지 않게.
-        kasa_mcp::machines::stop_tunnels();
+        kasa_device::machines::stop_tunnels();
         self.close_web_hosts();
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
@@ -2356,7 +2356,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 다른 기기의 방 배치가 오면 그 자리에서 깨운다 — 안 깨우면 다음 깜빡임까지 옛 배치다.
         {
             let proxy = std::sync::Mutex::new(self.proxy.clone());
-            kasa_mcp::layout_watch::set_waker(move || {
+            kasa_remote::layout_watch::set_waker(move || {
                 if let Ok(proxy) = proxy.lock() {
                     let _ = proxy.send_event(UserEvent::Redraw);
                 }
@@ -2434,7 +2434,7 @@ impl ApplicationHandler<UserEvent> for App {
             let git_proxy = self.proxy.clone();
             let poll_cwds = self.git_poll_cwds.clone();
             let git_cache = self.window_git.clone();
-            let mut poller = kasa_mcp::git::BadgePoller::default();
+            let mut poller = kasa_git::git::BadgePoller::default();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 let targets: Vec<std::path::PathBuf> = poll_cwds.lock().unwrap().clone();
@@ -2453,7 +2453,7 @@ impl ApplicationHandler<UserEvent> for App {
             });
         }
         let git_wake = self.git.col_wake.clone();
-        kasa_mcp::git_watch::set_listener(move || git_wake.kick());
+        kasa_git::git_watch::set_listener(move || git_wake.kick());
         crate::git_panel::spawn_poller(
             self.proxy.clone(),
             self.git.col_context.clone(),
@@ -2513,7 +2513,7 @@ impl ApplicationHandler<UserEvent> for App {
                 loop {
                     // 조회할 슬롯을 **매 사이클 설정에서 다시 읽어 URL 에 못 박는다.**
                     //
-                    // 전에는 dir 을 안 넘겼는데, 그 경우 프록시(kasa-mcp/http.rs)는
+                    // 전에는 dir 을 안 넘겼는데, 그 경우 프록시(kasa-http/http.rs)는
                     // 「활성 슬롯」이 아니라 **자기 프로세스의**
                     // `KASATERM_CLAUDE_ACCOUNT_DIR` env 로 떨어진다. 그 env 를 세우는
                     // 곳은 shim 을 굽는 자리 하나뿐이라 이 앱의 설정과 갈릴 수 있고,
@@ -2535,7 +2535,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 건너뛰어, 같은 화면의 숫자가 서로 다른 시각의 것이 된다.
                     let menu_open = usage_menu_open().load(std::sync::atomic::Ordering::Relaxed);
                     // 관문이 갱신을 못 해 곧 끊길 Claude 로그인 — 관문이 멈추면 관문은 못 알리니 기기가 띄운다.
-                    for alert in kasa_mcp::agent_chains::take_alerts() {
+                    for alert in kasa_device::agent_chains::take_alerts() {
                         let _ = usage_proxy.send_event(UserEvent::AgentChainAlert(alert.title, alert.body));
                     }
                     // 코덱스 한도는 **코덱스에게 직접 묻는다** — 대화 기록에서
@@ -3012,7 +3012,7 @@ impl ApplicationHandler<UserEvent> for App {
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     let mut next: HashMap<String, Option<String>> = HashMap::new();
                     // 명부 캐시(`socket::read_agents`)와 한 벌을 나눠 쓴다 — 둘 다 node 를 띄우는 일이다.
-                    if let Some(arr) = kasa_mcp::claude_agents_all(crate::socket::AGENTS_SHARE_AGE) {
+                    if let Some(arr) = kasa_agents::claude_agents_all(crate::socket::AGENTS_SHARE_AGE) {
                         for a in arr.iter() {
                             if a.get("kind").and_then(|k| k.as_str()) != Some("background")
                             {
@@ -3500,7 +3500,7 @@ impl ApplicationHandler<UserEvent> for App {
                     for (id, pane) in &self.pty {
                         // A passive mirror's grid never resized. Repaint its
                         // local projection without injecting a replacement frame.
-                        if !kasa_mcp::remote::is_view_pane(id) { pane.publish_full_snapshot(); }
+                        if !kasa_remote::remote::is_view_pane(id) { pane.publish_full_snapshot(); }
                     }
                 }
                 self.repaint_all();
@@ -5666,9 +5666,9 @@ impl ApplicationHandler<UserEvent> for App {
                                             });
                                         } else {
                                             self.info.machine_click = Some((now, key));
-                                            let existing = kasa_mcp::machines::find(&label).and_then(|m| {
+                                            let existing = kasa_device::machines::find(&label).and_then(|m| {
                                                 kasa_pty::live_sessions().into_iter().find(|id| {
-                                                    kasa_mcp::remote::remote_info(id).is_some_and(|i| {
+                                                    kasa_remote::remote::remote_info(id).is_some_and(|i| {
                                                         i.base == m.base && i.remote_id == remote_id
                                                     })
                                                 })
@@ -5900,9 +5900,9 @@ impl ApplicationHandler<UserEvent> for App {
                                     .load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
                                     let result = if stage {
-                                        kasa_mcp::git::git_add_path(&cwd, &path)
+                                        kasa_git::git::git_add_path(&cwd, &path)
                                     } else {
-                                        kasa_mcp::git::git_unstage_path(&cwd, &path)
+                                        kasa_git::git::git_unstage_path(&cwd, &path)
                                     };
                                     if let Some(error) = crate::chrome::git_operation_error(&result) {
                                         let _ = proxy.send_event(UserEvent::GitOpFailed(error));
@@ -5937,7 +5937,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     .col_commit_want
                                     .load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
-                                    let result = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
+                                    let result = kasa_git::git::git_discard_path(&cwd, &path, untracked);
                                     if let Some(error) = crate::chrome::git_operation_error(&result) {
                                         let _ = proxy.send_event(UserEvent::GitOpFailed(error));
                                     }
@@ -8436,7 +8436,7 @@ fn urlencode(s: &str) -> String {
 /// 이쪽이다(슬롯 순차 조회는 그 위에 얹힌 두 번째 몫이었다).
 ///
 /// **이 깨움이 upstream 호출을 늘리지 않는다.** 프록시가 슬롯별로 60초 TTL 캐시를
-/// 쥐고 있어(kasa-mcp/http.rs `claude_usage_handler`), 그보다 자주 물으면 캐시가
+/// 쥐고 있어(kasa-http/http.rs `claude_usage_handler`), 그보다 자주 물으면 캐시가
 /// 답하고 upstream 은 안 나간다. 즉 호출 상한은 여기가 아니라 그 캐시가 정한다.
 ///
 /// 깃발이 하나라 여러 pane 이 동시에 끝나도 한 번으로 합쳐진다 — 연타 방지를 따로
@@ -8613,7 +8613,7 @@ pub(crate) fn fetch_git_col_view(
 ) -> Option<GitColView> {
     let commits = if commits == 0 { crate::GIT_RECENT_COMMITS_DEFAULT } else { commits };
     let prior = same_refs.and_then(|view| serde_json::to_value(view).ok());
-    let view = kasa_mcp::git_panel::panel_view(cwd, choice, busy, commits, kasa_mcp::git::PANEL_READ_TIMEOUT, prior.as_ref()).ok()?;
+    let view = kasa_git::git_panel::panel_view(cwd, choice, busy, commits, kasa_git::git::PANEL_READ_TIMEOUT, prior.as_ref()).ok()?;
     serde_json::from_value(view).ok()
 }
 

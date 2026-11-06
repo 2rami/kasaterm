@@ -4,7 +4,17 @@ resolver = "2"
 members = [
     "app/kasaterm",
     "crates/kasa-socket",
-    "crates/kasa-mcp",
+    "crates/kasa-identity",
+    "crates/kasa-characters",
+    "crates/kasa-wire",
+    "crates/kasa-device",
+    "crates/kasa-backend",
+    "crates/kasa-remote",
+    "crates/kasa-students",
+    "crates/kasa-git",
+    "crates/kasa-gateway",
+    "crates/kasa-http",
+    "crates/kasa-serve",
     "crates/kasa-cells",
     "crates/kasa-ime",
     "crates/kasa-pty",
@@ -29,7 +39,17 @@ members = [
 default-members = [
     "app/kasaterm",
     "crates/kasa-socket",
-    "crates/kasa-mcp",
+    "crates/kasa-identity",
+    "crates/kasa-characters",
+    "crates/kasa-wire",
+    "crates/kasa-device",
+    "crates/kasa-backend",
+    "crates/kasa-remote",
+    "crates/kasa-students",
+    "crates/kasa-git",
+    "crates/kasa-gateway",
+    "crates/kasa-http",
+    "crates/kasa-serve",
     "crates/kasa-cells",
     "crates/kasa-ime",
     "crates/kasa-pty",
@@ -78,7 +98,15 @@ kasa-cells = { path = "crates/kasa-cells" }
 kasa-collab = { path = "crates/kasa-collab" }
 kasa-gridview = { path = "crates/kasa-gridview" }
 kasa-ime = { path = "crates/kasa-ime" }
-kasa-mcp = { path = "crates/kasa-mcp" }
+kasa-identity = { path = "crates/kasa-identity" }
+kasa-characters = { path = "crates/kasa-characters" }
+kasa-wire = { path = "crates/kasa-wire" }
+kasa-device = { path = "crates/kasa-device" }
+kasa-backend = { path = "crates/kasa-backend" }
+kasa-remote = { path = "crates/kasa-remote" }
+kasa-students = { path = "crates/kasa-students" }
+kasa-git = { path = "crates/kasa-git" }
+kasa-http = { path = "crates/kasa-http" }
 kasa-net = { path = "crates/kasa-net" }
 kasa-pty = { path = "crates/kasa-pty", default-features = false }
 kasa-screen = { path = "crates/kasa-screen" }
@@ -128,10 +156,41 @@ windows-sys = "0.59"
 windows = "0.61.3"
 winit = "0.30"
 
-# Windows rustc/LLVM crashed (STATUS_ACCESS_VIOLATION / OOM) optimizing
-# kasa-mcp at any opt-level >= 1, blamed at the time on its heavy proc-macro
-# crates (rmcp / schemars). Those were dropped with the MCP tools on 2026-09-26
-# but the crash hasn't been re-tested on Windows, so the pin stays.
-# The macOS bundle script overrides this to 3; its HTTP/JSON hot paths need optimization.
-[profile.release.package.kasa-mcp]
+tower = "0.5"
+tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+
+# Retain the former host's Windows LLVM optimization workaround after splitting it.
+# The macOS bundle build overrides every host package to level 3.
+[profile.release.package.kasa-identity]
+opt-level = 0
+
+[profile.release.package.kasa-characters]
+opt-level = 0
+
+[profile.release.package.kasa-wire]
+opt-level = 0
+
+[profile.release.package.kasa-device]
+opt-level = 0
+
+[profile.release.package.kasa-backend]
+opt-level = 0
+
+[profile.release.package.kasa-remote]
+opt-level = 0
+
+[profile.release.package.kasa-students]
+opt-level = 0
+
+[profile.release.package.kasa-git]
+opt-level = 0
+
+[profile.release.package.kasa-gateway]
+opt-level = 0
+
+[profile.release.package.kasa-http]
+opt-level = 0
+
+[profile.release.package.kasa-serve]
 opt-level = 0

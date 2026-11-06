@@ -15,17 +15,17 @@ impl App {
     pub(crate) fn assigned_characters(&self, excluded: &str) -> Vec<String> {
         let mut taken: Vec<_> = workspace_characters(std::iter::once(&self.ws)
             .chain(self.sessions.iter().flatten().map(|s| &s.ws)), excluded)
-            .into_iter().filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id))
+            .into_iter().filter(|(id, _)| !kasa_remote::remote::is_remote_pane(id))
             .map(|(_, name)| name).collect();
-        taken.extend(kasa_mcp::character::assigned_other_instances());
+        taken.extend(kasa_characters::character::assigned_other_instances());
         if !crate::verification_run() {
-            taken.extend(kasa_mcp::machines::cached_character_assignments());
+            taken.extend(kasa_device::machines::cached_character_assignments());
         }
         taken
     }
 
     pub(crate) fn next_auto_character(&self, members: &[String], excluded: &str) -> Option<String> {
-        kasa_mcp::character::pick_in_order_after(members, &self.assigned_characters(excluded), self.last_auto_character.as_deref())
+        kasa_characters::character::pick_in_order_after(members, &self.assigned_characters(excluded), self.last_auto_character.as_deref())
     }
 
     pub(crate) fn run_character_assignment_probe(&mut self) {
@@ -62,11 +62,11 @@ impl App {
         static RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if RAN.swap(true, std::sync::atomic::Ordering::Relaxed) { return; }
         let original = self.target_surface().expect("initial verification pane");
-        let roster = kasa_mcp::character::roster_in_use().expect("bundled roster");
-        assert!(kasa_mcp::character::assignable_names(&roster).len() > 2, "no picks yet: everyone");
+        let roster = kasa_characters::character::roster_in_use().expect("bundled roster");
+        assert!(kasa_characters::character::assignable_names(&roster).len() > 2, "no picks yet: everyone");
         socket::write_setting("character_picks", serde_json::json!({"__base": ["세이아", "아즈사"]}));
         self.reload_student_choices();
-        assert_eq!(kasa_mcp::character::assignable_names(&roster), ["세이아", "아즈사"]);
+        assert_eq!(kasa_characters::character::assignable_names(&roster), ["세이아", "아즈사"]);
         let first = self.prepare_agent_identity(&original, "", "", std::process::id()).unwrap();
         assert_eq!(first["character"], "세이아");
         let tab = self.spawn_new_tab(&original, false).expect("second tab");
@@ -90,7 +90,7 @@ mod tests {
         let taken = workspace_characters([&active, &parked, &active].into_iter(), "%new");
         assert_eq!(taken.len(), 2, "an active workspace must not be counted twice");
         let members = ["미도리", "모모이", "아로나"].map(String::from);
-        assert_eq!(kasa_mcp::character::pick_in_order(&members, &taken.into_values().collect::<Vec<_>>()).as_deref(), Some("모모이"));
+        assert_eq!(kasa_characters::character::pick_in_order(&members, &taken.into_values().collect::<Vec<_>>()).as_deref(), Some("모모이"));
         assert_eq!(workspace_characters([&active, &parked].into_iter(), "%1").len(), 1);
     }
 }

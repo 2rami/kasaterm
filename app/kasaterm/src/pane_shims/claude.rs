@@ -173,11 +173,11 @@ pub(crate) fn claude_account_export_line(dir: Option<&std::path::Path>) -> Strin
 /// 캐릭터는 해시 축약으로 방어. 색은 characters.json claude_color 를 8색으로 정규화 —
 /// --agent-color 는 teammate TUI 전체 테마라 pane accent 와 결이 맞아야 한다(team.rs).
 pub(crate) fn teammate_case_arms() -> String {
-    let Some(chars) = kasa_mcp::character::characters_json() else {
+    let Some(chars) = kasa_characters::character::characters_json() else {
         return String::new();
     };
     let mut arms = String::new();
-    for name in kasa_mcp::character::member_names(&chars) {
+    for name in kasa_characters::character::member_names(&chars) {
         // case 패턴 자리에 그대로 박히므로 sh 특수문자가 든 이름은 건너뛴다(사용자 편집
         // characters.json 방어 — 그 캐릭터만 팀모드 없이 부팅될 뿐 스크립트는 안 깨진다).
         if name
@@ -187,8 +187,8 @@ pub(crate) fn teammate_case_arms() -> String {
             continue;
         }
         let slug = theme::agent_slug(&name);
-        let color = kasa_mcp::character::claude_color_for(&chars, &name)
-            .map(|c| kasa_mcp::team::normalize_agent_color(&c).to_string())
+        let color = kasa_characters::character::claude_color_for(&chars, &name)
+            .map(|c| kasa_students::team::normalize_agent_color(&c).to_string())
             .unwrap_or_default();
         arms.push_str(&format!("      {name}) AGENT={slug}; ACOLOR={color} ;;\n"));
     }

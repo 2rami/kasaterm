@@ -23,7 +23,7 @@ pub(super) fn terminal_identity_pid(pane_id: &str, active_is_terminal: bool) -> 
 /// Display the source device's number without changing the local routing key.
 pub(super) fn shown_pane_id(pane_id: &str, active_is_terminal: bool) -> String {
     terminal_identity_pid(pane_id, active_is_terminal)
-        .and_then(kasa_mcp::remote::remote_info)
+        .and_then(kasa_remote::remote::remote_info)
         .map(|info| info.remote_id)
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| pane_id.to_string())
@@ -31,10 +31,10 @@ pub(super) fn shown_pane_id(pane_id: &str, active_is_terminal: bool) -> String {
 
 impl MachineIdentity {
     pub fn for_pane(pane_id: Option<&str>, local_name: Option<&str>) -> Self {
-        let remote = pane_id.and_then(kasa_mcp::remote::remote_info);
+        let remote = pane_id.and_then(kasa_remote::remote::remote_info);
         let (label, detail, is_remote) = match remote {
             Some(info) => {
-                let label = if let Some(label) = kasa_mcp::machines::label_for_base(&info.base) {
+                let label = if let Some(label) = kasa_device::machines::label_for_base(&info.base) {
                     label
                 } else if info.label.trim().is_empty() {
                     info.base
@@ -160,11 +160,11 @@ fn device_aliases(settings: &serde_json::Value) -> HashMap<String, String> {
     for (label, id) in settings.get("device_color_ids").and_then(|v| v.as_object()).into_iter().flatten() {
         if let Some(id) = id.as_str() { put(label, id); }
     }
-    for machine in kasa_mcp::machines::machines() {
+    for machine in kasa_device::machines::machines() {
         if let Some(id) = machine.machine_id.as_deref() { put(&machine.label, id); }
     }
     if let Some(id) = local_machine_id() {
-        for label in crate::info::cached_local_machine_name().into_iter().chain([kasa_mcp::machines::self_label().as_str()]) {
+        for label in crate::info::cached_local_machine_name().into_iter().chain([kasa_device::machines::self_label().as_str()]) {
             put(label, &id);
         }
     }
@@ -226,7 +226,7 @@ fn assign_defaults(roster: &[(String, Option<String>)]) -> HashMap<String, [u8; 
 
 fn local_machine_id() -> Option<String> {
     LOCAL_MACHINE_ID
-        .get_or_init(kasa_mcp::mobile::machine_identity)
+        .get_or_init(kasa_device::mobile::machine_identity)
         .clone()
 }
 
@@ -260,7 +260,7 @@ fn build_device_colors() -> DeviceColors {
         shown.push((local.to_string(), true));
         if let Some(id) = local_machine_id() { known.push((local.to_string(), id, true)); }
     }
-    for machine in kasa_mcp::machines::machines() {
+    for machine in kasa_device::machines::machines() {
         if let Some(id) = machine.machine_id.as_deref().filter(|id| !id.trim().is_empty()) {
             if !machine.label.trim().is_empty() && !known.iter().any(|(_, k, _)| k == id) {
                 known.push((machine.label.clone(), id.trim().to_string(), false));
@@ -354,14 +354,14 @@ pub(crate) fn local_device_id() -> Option<String> {
 pub(crate) fn set_device_name(id: &str, name: &str) -> Result<(), String> {
     let id = id.trim_start_matches('~');
     let name = name.trim();
-    if !kasa_mcp::account_sync::schema::valid_machine_id(id) {
+    if !kasa_device::account_sync::schema::valid_machine_id(id) {
         return Err("기기 id 를 몰라 이름을 못 붙여요".into());
     }
     if name.chars().count() > 40 || name.chars().any(char::is_control) {
         return Err("이름은 40자까지예요".into());
     }
     let path = socket::settings_file_path().ok_or("설정 파일을 못 찾았어요")?;
-    kasa_mcp::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
+    kasa_device::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
         let settings = settings.as_object_mut().ok_or("settings is not an object")?;
         let names = settings.entry("device_names").or_insert_with(|| serde_json::json!({}));
         if !names.is_object() { *names = serde_json::json!({}); }
@@ -372,7 +372,7 @@ pub(crate) fn set_device_name(id: &str, name: &str) -> Result<(), String> {
     })
     .map_err(|_| "이름을 저장하지 못했어요".to_string())?;
     reload_device_colors();
-    kasa_mcp::account_sync::poke();
+    kasa_device::account_sync::poke();
     Ok(())
 }
 

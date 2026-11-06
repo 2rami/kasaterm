@@ -506,17 +506,17 @@ mod tests {
         }).unwrap());
         kasa_pty::register_session(&id, &source);
         let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
-            kasa_mcp::standalone::StandaloneBackend::new(std::env::temp_dir()),
+            kasa_backend::standalone::StandaloneBackend::new(std::env::temp_dir()),
         );
-        let port = kasa_mcp::spawn_http_server_opts(backend, 0, false).unwrap();
-        let _mirror = kasa_mcp::remote::connect_view(kasa_mcp::remote::RemoteSpec {
+        let port = kasa_http::spawn_http_server_opts(backend, 0, false).unwrap();
+        let _mirror = kasa_remote::remote::connect_view(kasa_remote::remote::RemoteSpec {
             base: format!("http://127.0.0.1:{port}"), pane: Some(id),
             cwd: None, token: None, identity: Default::default(),
         }, &local).unwrap();
-        assert!(kasa_mcp::remote::is_view_pane(&local));
+        assert!(kasa_remote::remote::is_view_pane(&local));
 
         let mut ws = crate::Workspace::default();
-        assert!(kasa_mcp::remote::set_viewport(&local, 30, 8));
+        assert!(kasa_remote::remote::set_viewport(&local, 30, 8));
         let mut snapshot = source.full_snapshot();
         snapshot.pane_id = local.clone();
         super::App::apply_screen_update(&mut ws, snapshot.clone());
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!((displayed.cols, displayed.rows), (60, 12));
 
         // Changing viewer geometry never changes the TUI grid or its input coordinates.
-        assert!(kasa_mcp::remote::set_viewport(&local, 60, 6));
+        assert!(kasa_remote::remote::set_viewport(&local, 60, 6));
         let displayed = ws.panes[&local].tabs[0].term().unwrap();
         assert_eq!((displayed.cols, displayed.rows), (60, 12));
 

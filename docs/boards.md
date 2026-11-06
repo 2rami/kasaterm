@@ -33,7 +33,7 @@
 어긋난 것 — 다음 구조가 푸는 문제:
 
 - **PC 나쵸는 조언만 한다.** 입력칸이 workspace-assistant 로 가고, 그 모델은 학생에게 보낼 권한이 없다.
-  이름으로 보내기(tell)와 새 일 나누기(kasa-mcp dispatch)는 있는데 입력칸과 안 이어졌다.
+  이름으로 보내기(tell)와 새 일 나누기(kasa-http dispatch)는 있는데 입력칸과 안 이어졌다.
 - **장부가 둘이다.** PC 작업현황은 workspace-assistant(transcript 마지막 요청을 10초마다 올린 것),
   폰 작업판은 나쵸네코 `/api/app/tasks`.
 - **사람 차례 수가 네 곳**(현황 줄 · 관측 「확인 필요」 · 펫 현황판 · 폰)이고 거울 줄 처리가 달라 어긋날 수 있다.
@@ -42,7 +42,7 @@
 
 ## 다음 구조 (2026-09-29 합의 — ②③ 구현됨, ① 사이드바 진행 중)
 
-웹 목업으로 합의했다(`KASA-share/2026-09-29-작업현황-목업`, D안). 구현은 네이티브. 치수는
+웹 목업 D안으로 합의했다. 구현은 네이티브. 치수는
 [design.md](design.md) 「사이드바 현황 목록」「나쵸 판」.
 
 ### 사이드바 = 현황
@@ -78,7 +78,7 @@
    「받는 곳을 직접 골라 주세요」.
 4. 부르는 때: 어절이 끝나면 60ms 뒤, 아니면 손이 멈춘 뒤 320ms, 쉬지 않고 쳐도 900ms 에 한 번.
    늦게 온 답은 더 새 판단이 서 있으면 버린다. IME 조합 중인 글자(preedit)는 넣지 않는다 — 확정된 글만.
-5. 판정은 제안이다. 보내기는 사람이 누를 때만: 학생 → tell(같은 id 재시도 규칙), 새 일 → kasa-mcp dispatch
+5. 판정은 제안이다. 보내기는 사람이 누를 때만: 학생 → tell(같은 id 재시도 규칙), 새 일 → kasa-http dispatch
    (자기가 부른 학생만 부림), 나쵸 → workspace-assistant.
 
 실측(목업, 학생 7, 2026-09-29): 한 번 200~660ms. 예시 7문장 중 2개는 코드가, 3개는 Jev 가 확률 97~100 으로
@@ -92,7 +92,7 @@
 |---|---|---|
 | ① 사이드바 현황 (구현됨) | 현황 줄 → 목록·배치도 전환, 두 줄 목록 행, 차례 줄 먼저, 거울 줄 빼기, 기본 폭 240, 받는 곳 강조 | `sidebar_pulse.rs`(그리기만 걷고 펫용 요약은 유지) · `sidebar_navigation.rs` · `render.rs` 목록 줄 · `chrome.rs` |
 | ② 나쵸 판 | 운영 보드 목록 → 도구 ▾, 대화 원장에 지시 영수증·학생 보고·답 단추, 받는 곳 줄·보내기 단추 이름 | `native_board.rs` · `native_board/chat.rs` · `left_panel.rs` |
-| ③ 받는 곳 판정 | 코드 규칙·부르는 때·늦은 답(순수 함수 + 테스트), 관문 판정 창구, tell·dispatch·나쵸로 보내기 | 새 `native_board/route.rs` · `crates/kasa-mcp` 의 `workspace_assistant.rs`·`gateway_workspace.rs` |
+| ③ 받는 곳 판정 | 코드 규칙·부르는 때·늦은 답(순수 함수 + 테스트), 관문 판정 창구, tell·dispatch·나쵸로 보내기 | 새 `native_board/route.rs` · `crates/kasa-device/src/workspace_assistant.rs`·`crates/kasa-gateway/src/gateway_workspace.rs` |
 | ④ 지금 일 = 세션 이름 | tell·brief 목적 → 세션 이름, 장부 goal 대체, 관측 `title` 같은 값 | `tell_delivery.rs` · `pane_identity.rs`(또는 세션 이름 정본이 있는 곳) |
 
 폰(카사모바일 작업 탭)과 장부 하나로 합치기(나쵸네코 ↔ workspace-assistant)는 이 네 묶음 뒤에 따로 정한다.

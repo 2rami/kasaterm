@@ -1172,7 +1172,7 @@ pub enum Reach {
     Unreachable(String),
 }
 
-/// 작업 걸기 오류 글을 가른다 — 원격(`kasa_mcp::remote`)이 닿지 못했거나 앱 소켓이 끊긴 것은 `Unreachable`, 기기가 판정해 답한
+/// 작업 걸기 오류 글을 가른다 — 원격(`kasa_remote::remote`)이 닿지 못했거나 앱 소켓이 끊긴 것은 `Unreachable`, 기기가 판정해 답한
 /// 것(HTTP 4xx·앱의 거절 글)은 `Refused`.
 pub fn reach_of(err: &str) -> Reach {
     const CUT: [&str; 6] = ["원격 POST 요청", "원격 답 해석", "error sending request", "timed out", "Connection refused", "connect to"];

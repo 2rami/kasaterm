@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { create } = require('../crates/kasa-mcp/assets/term/viewport.js');
+const { create } = require('../crates/kasa-http/assets/term/viewport.js');
 
 function fixture() {
   let visible = true;

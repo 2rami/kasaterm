@@ -30,7 +30,7 @@ impl LocalScope {
 
 fn pty_token(app: &App, id: &str) -> String {
     let generation = app.pty.get(id).map_or(0, |pty| Arc::as_ptr(pty) as usize);
-    format!("pty:{}:{generation}", kasa_mcp::surface_keys::ensure(id))
+    format!("pty:{}:{generation}", kasa_collab::surface_keys::ensure(id))
 }
 
 fn cell_tokens(app: &App, ws: &Workspace, pane: &str) -> Vec<String> {

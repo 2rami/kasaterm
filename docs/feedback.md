@@ -27,5 +27,5 @@ python3 scripts/configure-feedback-relay.py SOURCE.env PRIVATE.env \
 응답은 성공 시 `200 {"ok":true}`, 입력 오류 400, 요청 크기 초과 413, 빈도 초과 429다.
 전달 오류 502·시간 초과는 전달 여부가 불명확할 수 있으므로 자동 재전송하지 않는다.
 
-검증: `cargo test -p kasa-mcp --lib feedback`. 화면 검증은 앱의 격리 실행 절차
+검증: `cargo test -p kasa-gateway --lib feedback`. 화면 검증은 앱의 격리 실행 절차
 (`verify-app.md`)를 따른다.

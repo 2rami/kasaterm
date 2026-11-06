@@ -978,7 +978,7 @@ impl App {
                 report = format!("shared_scroll={}", self.sidebar_scroll_px > 0.0);
             }
             7 => {
-                report = format!("remote_rooms_reachable={} no_remote_sessions={}", self.info.navigation.hits.iter().any(|(a, _)| matches!(a, Action::Open { .. })), self.pty.keys().all(|id| !kasa_mcp::remote::is_remote_pane(id)));
+                report = format!("remote_rooms_reachable={} no_remote_sessions={}", self.info.navigation.hits.iter().any(|(a, _)| matches!(a, Action::Open { .. })), self.pty.keys().all(|id| !kasa_remote::remote::is_remote_pane(id)));
                 report.push_str(&format!(" room_navigation_count={} remote_room_count={}", self.room_navigation_count(), self.remote_room_navigation().len()));
             }
             8 => {
@@ -1124,7 +1124,7 @@ impl App {
                 let ws = self.ws.lock().unwrap();
                 let tab = ws.active_pane.as_ref().map(|p| ws.active_tab_pid(p)).unwrap_or_default();
                 drop(ws);
-                format!("active_tab={tab} view={} kind={:?}", kasa_mcp::remote::is_view_pane(&tab), self.mirror_kind(&tab))
+                format!("active_tab={tab} view={} kind={:?}", kasa_remote::remote::is_view_pane(&tab), self.mirror_kind(&tab))
             }
             4 => {
                 let rows = self.info.navigation.hits.iter().filter(|(a, _)| matches!(a, Action::CloseWebShell { label, .. } if label.is_empty())).count();
@@ -1178,7 +1178,7 @@ impl App {
             Action::Open { label, window, room, focus } => match focus {
                 // 칸은 잡아 끌 수 있다 — 문턱을 안 넘고 놓으면 그냥 연다.
                 Some(pane) => {
-                    if let Some(machine) = kasa_mcp::machines::find(&label) {
+                    if let Some(machine) = kasa_device::machines::find(&label) {
                         self.begin_drag_identity(crate::drag_transfer::DragEndpoint::RemotePane {
                             label: label.clone(), base: machine.base, pane: pane.clone(),
                         });
@@ -1211,7 +1211,7 @@ impl App {
                 if !self.info.navigation.web_open.remove(&label) { self.info.navigation.web_open.insert(label); }
             }
             Action::OpenWebShell { label, id, cwd } => {
-                let label = if label.is_empty() { kasa_mcp::machines::self_label() } else { label };
+                let label = if label.is_empty() { kasa_device::machines::self_label() } else { label };
                 if let Err(e) = self.mirror_remote_pane(&label, &id, "", &cwd) {
                     self.set_toast(format!("창 밖 셸 열기 실패 — {e:#}"));
                 }
@@ -1243,7 +1243,7 @@ impl App {
     fn close_web_shells(&mut self, label: &str, ids: Vec<String>) {
         if ids.is_empty() { return; }
         let base = if label.is_empty() { None } else {
-            match kasa_mcp::machines::find(label) {
+            match kasa_device::machines::find(label) {
                 Some(m) => Some(m.base),
                 None => {
                     self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
@@ -1259,7 +1259,7 @@ impl App {
             for id in &ids {
                 let result = match &base {
                     None => crate::socket::release_web_shell(id, std::time::Duration::from_secs(2)),
-                    Some(base) => kasa_mcp::remote::release_remote_web_shell(base, id).and_then(|released| {
+                    Some(base) => kasa_remote::remote::release_remote_web_shell(base, id).and_then(|released| {
                         anyhow::ensure!(released, "{id} 은 이미 없거나 놓을 수 없다");
                         Ok(())
                     }),
@@ -1269,7 +1269,7 @@ impl App {
                     eprintln!("[web-shell] {id} close failed: {e:#}");
                 }
             }
-            kasa_mcp::machines::poke();
+            kasa_device::machines::poke();
             let note = if kept == 0 { format!("{who} 의 창 밖 셸 {total}개를 닫았어요") }
                 else { format!("{who} 의 창 밖 셸 {}개 닫음 · {kept}개는 못 닫았어요(열린 화면이 있거나 이미 없음)", total - kept) };
             let _ = proxy.send_event(UserEvent::SocketToast(note));
@@ -1689,7 +1689,7 @@ impl App {
     /// 편집칸의 이름을 그 기계의 `window.rename` 으로 보낸다 — 그쪽은 pane 으로 방을 짚으므로
     /// 그 방의 첫 pane 을 함께 준다.
     pub(crate) fn rename_remote_room(&mut self, label: &str, window: u64, name: &str) {
-        let Some(m) = kasa_mcp::machines::find(label) else {
+        let Some(m) = kasa_device::machines::find(label) else {
             self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
             return;
         };
@@ -1700,17 +1700,17 @@ impl App {
         let (base, name) = (m.base.clone(), name.to_string());
         std::thread::spawn(move || {
             let params = serde_json::json!({ "surface_id": pane, "title": name });
-            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "window.rename", params) {
+            if let Err(e) = kasa_remote::remote::remote_cmd(&base, "window.rename", params) {
                 eprintln!("[remote] room rename failed: {e:#}");
             }
-            kasa_mcp::machines::poke();
+            kasa_device::machines::poke();
         });
     }
 
     /// 그 칸 **옆에**(`as_tab` 이면 그 칸의 탭으로) 새 셸을 세운다. 자리는 저쪽이 정한다 —
     /// 우리 배치도는 그 기계 배치의 사본이라, 여기서 자리를 지어 보내면 어긋난다.
     pub(crate) fn spawn_beside_remote_cell(&mut self, label: &str, pane: &str, as_tab: bool) {
-        let Some(m) = kasa_mcp::machines::find(label) else {
+        let Some(m) = kasa_device::machines::find(label) else {
             self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
             return;
         };
@@ -1722,10 +1722,10 @@ impl App {
         let (base, label) = (m.base.clone(), label.to_string());
         self.set_toast(format!("{} 에 {} 세우는 중…", crate::render::pane_identity::device_name(&label), if as_tab { "탭을" } else { "옆자리를" }));
         std::thread::spawn(move || {
-            if let Err(e) = kasa_mcp::remote::spawn_shell_pane_at(&base, &at, None) {
+            if let Err(e) = kasa_remote::remote::spawn_shell_pane_at(&base, &at, None) {
                 eprintln!("[remote] spawn beside failed: {e:#}");
             }
-            kasa_mcp::machines::poke();
+            kasa_device::machines::poke();
         });
     }
 
@@ -1764,7 +1764,7 @@ impl App {
         let anchor = focused.clone().or_else(|| machine.remote.iter().chain(&machine.mirrored)
             .find(|row| window.map_or(row.room == *room, |id| row.window == Some(id)))
             .map(|row| row.remote_id.clone()))?;
-        let peer = kasa_mcp::machines::find(label)?;
+        let peer = kasa_device::machines::find(label)?;
         let zone = if focused.is_some() {
             crate::layout::drop_edge_for_offsets(
                 (cursor.0 - rect.0 - rect.2 / 2.0) / (rect.2 / 2.0).max(1.0),
@@ -1775,7 +1775,7 @@ impl App {
     }
 
     fn drop_remote_cell(&mut self, cell: &CellDrag, cursor: (f32, f32)) {
-        let Some(machine) = kasa_mcp::machines::find(&cell.label) else {
+        let Some(machine) = kasa_device::machines::find(&cell.label) else {
             self.set_toast("출발 기기의 연결을 확인할 수 없어요".into());
             return;
         };

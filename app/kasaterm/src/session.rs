@@ -162,10 +162,10 @@ impl App {
         }
         // 로컬 pane 에서 book 을 눌렀다 — 되돌릴 원격이 없다. 조용히 무시한다
         // (예약 알림을 데스크톱 알림으로 흘리지 않는 것으로 충분하다).
-        if !kasa_mcp::remote::is_remote_pane(pid) {
+        if !kasa_remote::remote::is_remote_pane(pid) {
             return Ok(());
         }
-        let Some(info) = kasa_mcp::remote::remote_info(pid) else {
+        let Some(info) = kasa_remote::remote::remote_info(pid) else {
             return Ok(());
         };
         // 이사로 나간 **학생**(claude/codex)은 book 이 아니라 데려오기(migrate local)로
@@ -181,13 +181,13 @@ impl App {
             .origin_cwd
             .clone()
             .or_else(|| {
-                kasa_mcp::machines::machines()
+                kasa_device::machines::machines()
                     .into_iter()
                     .find(|m| m.base == info.base.trim_end_matches('/'))
                     .and_then(|m| {
                         info.remote_cwd
                             .as_deref()
-                            .and_then(|rc| kasa_mcp::machines::map_remote_to_local(&m, rc))
+                            .and_then(|rc| kasa_device::machines::map_remote_to_local(&m, rc))
                     })
             });
         let (c, r) = self
@@ -207,13 +207,13 @@ impl App {
         })?);
         // 원격 web 세션을 폐기한다 — insert 의 Drop 은 detach(살려 둠)라, 명시적
         // kill 이 없으면 저쪽 셸이 남는다. insert **전**에: 스왑 뒤엔 링크가 없다.
-        kasa_mcp::remote::kill_remote(pid);
+        kasa_remote::remote::kill_remote(pid);
         // `to` 로 세운 저쪽 pane 은 돌아올 때 함께 걷는다 — ssh 를 나오면 저쪽 셸이
         // 끝나듯이. 위 kill 은 우리 링크만 끊고 GUI pane 은 저쪽 앱이 쥐고 있다.
         if info.owned && info.remote_id.starts_with('%') {
             let (base, rid) = (info.base.clone(), info.remote_id.clone());
             std::thread::spawn(move || {
-                if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &rid, None, true) {
+                if let Err(e) = kasa_remote::remote::close_remote_pane(&base, &rid, None, true) {
                     eprintln!("[to ..] 원격 pane {rid} 닫기 실패(무시): {e:#}");
                 }
             });
@@ -246,7 +246,7 @@ impl App {
     /// 해제는 App 이 Arc 를 떨어뜨리는 것으로 저절로 된다.
     pub(crate) fn insert_pty(&mut self, id: String, sess: std::sync::Arc<kasa_pty::PtySession>) {
         crate::close_grace::clear_marker(&id);
-        kasa_mcp::surface_keys::ensure(&id);
+        kasa_collab::surface_keys::ensure(&id);
         if !self.pty.get(&id).is_some_and(|old| std::sync::Arc::ptr_eq(old, &sess)) {
             if let Some(backend) = &self.socket_backend {
                 backend.forget_transcript(&id);

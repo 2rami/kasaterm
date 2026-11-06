@@ -1,5 +1,5 @@
 //! 방 배치 채널의 GUI 쪽 — 원본이면 이 기계의 트리를 싣고, 거울이면 받은 트리를 보기 창에
-//! 그대로 앉힌다(`kasa_mcp::layout_feed`·`layout_watch`). 좌표에서 트리를 되짓는
+//! 그대로 앉힌다(`kasa_wire::layout_feed`·`layout_watch`). 좌표에서 트리를 되짓는
 //! `sync_remote_view_layouts` 는 채널이 없는 옛 판 원본용으로만 남는다.
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -50,7 +50,7 @@ fn leaf_ptys(ws: &Workspace, leaf: &str) -> Vec<String> {
 }
 
 /// 원본 leaf 에 든 PTY 번호들. 옛 원본이 `members` 를 비웠으면 leaf 번호 하나.
-fn source_ptys<'a>(room: &'a kasa_mcp::layout_feed::Room, leaf: &'a str) -> Vec<&'a str> {
+fn source_ptys<'a>(room: &'a kasa_wire::layout_feed::Room, leaf: &'a str) -> Vec<&'a str> {
     match room.members.get(leaf) {
         Some(ids) if !ids.is_empty() => ids.iter().map(String::as_str).collect(),
         _ => vec![leaf],
@@ -82,17 +82,17 @@ impl App {
             let members = tree.leaves().into_iter()
                 .map(|leaf| (leaf.to_string(), leaf_ptys(&ws, leaf)))
                 .collect();
-            Some(kasa_mcp::layout_feed::Room { window, tree: tree.clone(), members })
+            Some(kasa_wire::layout_feed::Room { window, tree: tree.clone(), members })
         }).collect();
         drop(ws);
-        kasa_mcp::layout_feed::publish(rooms);
+        kasa_wire::layout_feed::publish(rooms);
     }
 
     /// 보기 창과 그 기계의 base.
     fn view_window_bases(&self) -> Vec<(usize, String)> {
         (0..self.windows.len()).filter_map(|i| {
             let (label, _) = self.remote_view_of_window(i)?;
-            Some((i, kasa_mcp::machines::find(&label)?.base))
+            Some((i, kasa_device::machines::find(&label)?.base))
         }).collect()
     }
 
@@ -104,13 +104,13 @@ impl App {
         let mut bases: Vec<String> = self.view_window_bases().into_iter().map(|(_, base)| base).collect();
         bases.sort();
         bases.dedup();
-        kasa_mcp::layout_watch::retain(&bases);
+        kasa_remote::layout_watch::retain(&bases);
     }
 
     /// 채널에 새 배치가 왔으면 맞춘다 — 매 루프.
     pub(crate) fn poll_layout_watch(&mut self) {
         static SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
-        let now = kasa_mcp::layout_watch::generation();
+        let now = kasa_remote::layout_watch::generation();
         if SEEN.swap(now, Ordering::Relaxed) != now {
             self.apply_remote_view_trees();
         }
@@ -122,11 +122,11 @@ impl App {
         let mut live = HashSet::new();
         let (mut changed_active, mut changed_any) = (false, false);
         for (i, base) in self.view_window_bases() {
-            if !kasa_mcp::layout_watch::is_live(&base) {
+            if !kasa_remote::layout_watch::is_live(&base) {
                 continue;
             }
             live.insert(i);
-            let Some((stamp, rooms)) = kasa_mcp::layout_watch::settled(&base) else { continue };
+            let Some((stamp, rooms)) = kasa_remote::layout_watch::settled(&base) else { continue };
             let Some((fresh, shape)) = self.project_source_room(i, &base, &rooms) else { continue };
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (stamp, shape).hash(&mut hasher);
@@ -169,7 +169,7 @@ impl App {
         &self,
         i: usize,
         base: &str,
-        rooms: &[kasa_mcp::layout_feed::Room],
+        rooms: &[kasa_wire::layout_feed::Room],
     ) -> Option<(kasa_pty::PtyLayout, Vec<(String, Vec<String>)>)> {
         let leaves = self.window_leaves(i);
         // 원격 조회는 ws 를 놓고 한다 — 링크 잠금과 순서가 엇갈리지 않게.
@@ -181,8 +181,8 @@ impl App {
         let mut shape = Vec::with_capacity(per_leaf.len());
         for (leaf, ids) in per_leaf {
             let remote: Vec<String> = ids.iter()
-                .filter_map(|id| kasa_mcp::remote::remote_info(id))
-                .filter(|info| kasa_mcp::machines::same_machine_bases(&info.base, base))
+                .filter_map(|id| kasa_remote::remote::remote_info(id))
+                .filter(|info| kasa_device::machines::same_machine_bases(&info.base, base))
                 .map(|info| info.remote_id)
                 .collect();
             for id in &remote {
@@ -190,7 +190,7 @@ impl App {
             }
             shape.push((leaf, remote));
         }
-        let touches = |room: &kasa_mcp::layout_feed::Room| room.tree.leaves().iter()
+        let touches = |room: &kasa_wire::layout_feed::Room| room.tree.leaves().iter()
             .any(|leaf| source_ptys(room, leaf).iter().any(|id| owner.contains_key(*id)));
         let mut hits = rooms.iter().filter(|room| touches(room));
         let room = hits.next()?;

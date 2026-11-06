@@ -1550,7 +1550,7 @@ impl App {
         let cwd = self.active_pane_cwd();
         let remote = self.ws.lock().ok().and_then(|ws| {
             ws.active_pane.as_deref().map(|pane| ws.active_tab_pid(pane))
-        }).is_some_and(|pane| kasa_mcp::remote::remote_info(&pane).is_some());
+        }).is_some_and(|pane| kasa_remote::remote::remote_info(&pane).is_some());
         if remote {
             self.set_toast("MCP 설정 변경은 해당 기기에서 해 주세요. 이 목록은 이 기기의 설정이에요".into());
             return false;

@@ -7,14 +7,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn resolve(local: &MachineSnapshot, machine_id: &str) -> Result<Option<kasa_mcp::machines::Machine>> {
+fn resolve(local: &MachineSnapshot, machine_id: &str) -> Result<Option<kasa_device::machines::Machine>> {
     if local.machine_id == machine_id { return Ok(None); }
-    kasa_mcp::machines::find_route(&format!("~{machine_id}")).map(Some)
+    kasa_device::machines::find_route(&format!("~{machine_id}")).map(Some)
         .ok_or_else(|| anyhow!("기계 연결 정체가 바뀌었어요. 목록을 다시 확인해 주세요"))
 }
 
-fn snapshot_at(backend: &Arc<dyn Backend>, machine: Option<&kasa_mcp::machines::Machine>) -> Result<MachineSnapshot> {
-    match machine { Some(machine) => kasa_mcp::remote::transfer_snapshot(&machine.base), None => backend.transfer_snapshot() }
+fn snapshot_at(backend: &Arc<dyn Backend>, machine: Option<&kasa_device::machines::Machine>) -> Result<MachineSnapshot> {
+    match machine { Some(machine) => kasa_remote::remote::transfer_snapshot(&machine.base), None => backend.transfer_snapshot() }
 }
 
 fn current_row(snapshot: &MachineSnapshot, identity: &SessionIdentity) -> Result<SessionRow> {
@@ -54,11 +54,11 @@ pub(crate) fn execute_with_progress(
             let destination = resolve(&local, &request.destination_machine)?;
             let (origin_snapshot, dest_snapshot) = std::thread::scope(|scope| {
                 let origin = scope.spawn(|| match &origin {
-                    Some(machine) => kasa_mcp::remote::transfer_snapshot(&machine.base),
+                    Some(machine) => kasa_remote::remote::transfer_snapshot(&machine.base),
                     None => Ok(local.clone()),
                 });
                 let destination = match &destination {
-                    Some(machine) => kasa_mcp::remote::transfer_snapshot(&machine.base),
+                    Some(machine) => kasa_remote::remote::transfer_snapshot(&machine.base),
                     None => Ok(local.clone()),
                 };
                 (origin.join().unwrap_or_else(|_| Err(anyhow!("출발 상태 조회가 끝나지 않았어요"))), destination)
@@ -78,7 +78,7 @@ pub(crate) fn execute_with_progress(
             let migrate = MigrateRequest { session: source.clone(), destination_machine: request.destination_machine.clone(), room: room.clone() };
             submitted = true;
             let response = match &origin {
-                Some(machine) => kasa_mcp::remote::transfer_migrate(&machine.base, &migrate),
+                Some(machine) => kasa_remote::remote::transfer_migrate(&machine.base, &migrate),
                 None => backend.transfer_migrate(&migrate),
             };
             let remote_id = match response {

@@ -12,7 +12,7 @@
 
 새 재개 경로는 셸 별칭·함수가 덧붙이는 옵션을 건너뛰고 카사텀 하네스 래퍼를 직접 부른다. 출발 프로세스에서 읽은 권한 옵션이 도착 기기 프로필의 기본값으로 바뀌지 않게 하기 위해서다. 줄은 도착 칸 셸 문법으로 짓는다(`kasa_socket::shell_line::direct_line`): POSIX `command 'claude' …`, PowerShell `& (Get-Command -CommandType Application -TotalCount 1 -Name 'claude').Source …`, cmd `call claude …`.
 
-출발 하네스 끄기는 맥은 SIGTERM, Windows 는 빈 입력창을 확인한 뒤 `/exit`(codex `/quit`) + Enter 다 — Ctrl+C 는 `claude.cmd` 를 감싼 cmd 가 「일괄 작업을 끝내시겠습니까」로 받아 멈춘다. 8초 안에 안 꺼지거나 입력창에 쓰던 글이 있으면 실패로 멈추고, `--force` 일 때만 강제 종료한다(`kasa_mcp::agent_stop`). Windows PowerShell 칸은 사용자 프로필(conda 등)로 뜨는 데 7초 남짓 걸려 도착 셸 준비를 20초까지 기다린다.
+출발 하네스 끄기는 맥은 SIGTERM, Windows 는 빈 입력창을 확인한 뒤 `/exit`(codex `/quit`) + Enter 다 — Ctrl+C 는 `claude.cmd` 를 감싼 cmd 가 「일괄 작업을 끝내시겠습니까」로 받아 멈춘다. 8초 안에 안 꺼지거나 입력창에 쓰던 글이 있으면 실패로 멈추고, `--force` 일 때만 강제 종료한다(`kasa_remote::agent_stop`). Windows PowerShell 칸은 사용자 프로필(conda 등)로 뜨는 데 7초 남짓 걸려 도착 셸 준비를 20초까지 기다린다.
 
 ## 기기와 칸 고르기
 

@@ -19,7 +19,7 @@ impl App {
                 {"leaf":{"character":"아리스","was_agent":"codex","title":"복원창과 대화 기록 화면 정리","cwd":"/work/kasaterm"}},
                 {"leaf":{"character":"마리","title":"로컬 개발 서버","cwd":"/work/website"}},
                 {"leaf":{"character":"미카","was_agent":"claude","title":"폰 연결이 끊기지 않는지 확인","cwd":"/work/mobile"}},
-                {"leaf":{"character":"유우카","was_agent":"codex","title":"공유 폴더 검색 개선","cwd":"/work/kasa-share"}},
+                {"leaf":{"character":"유우카","was_agent":"codex","title":"파일 검색 개선","cwd":"/work/search-demo"}},
                 {"leaf":{"title":"문서 정리","cwd":"/work/docs"}},
                 {"leaf":{"character":"호시노","was_agent":"claude","remote_label":"fixture-mini"}}
             ]}]}));

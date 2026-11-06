@@ -45,7 +45,7 @@ impl AccountIdentity {
         })
     }
 
-    pub(crate) fn from_verified(identity: kasa_mcp::VerifiedClaudeIdentity) -> Option<Self> {
+    pub(crate) fn from_verified(identity: kasa_device::VerifiedClaudeIdentity) -> Option<Self> {
         Self::new(
             &identity.account_uuid,
             &identity.organization_uuid,
@@ -77,7 +77,7 @@ impl AccountIdentity {
         (&self.account_uuid, &self.organization_uuid)
     }
 
-    pub(crate) fn matches_verified(&self, identity: kasa_mcp::VerifiedClaudeIdentity) -> bool {
+    pub(crate) fn matches_verified(&self, identity: kasa_device::VerifiedClaudeIdentity) -> bool {
         Self::from_verified(identity).is_some_and(|identity| &identity == self)
     }
 
@@ -334,7 +334,7 @@ pub(crate) fn account_sync_notice(selected: &str) -> Option<SyncNotice> {
     let report = last_report().lock().ok().and_then(|report| report.clone());
     let serial = queue().lock().ok().map(|queue| queue.serial);
     let report = report
-        .filter(|report| serial.is_some_and(|serial| report.visible_for(selected, serial, kasa_mcp::device_auth::change_epoch())))
+        .filter(|report| serial.is_some_and(|serial| report.visible_for(selected, serial, kasa_device::device_auth::change_epoch())))
         .map(|report| report.notice());
     current_first(super::choice::notice(), report)
 }
@@ -367,7 +367,7 @@ pub(crate) fn seed_account_sync_notice_for_verify(selected: &str) -> bool {
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(AccountSyncReport {
         serial: queue.serial,
-        device_epoch: kasa_mcp::device_auth::change_epoch(),
+        device_epoch: kasa_device::device_auth::change_epoch(),
         slot: selected.into(),
         label: "검증 계정".into(),
         peers: vec![
@@ -449,7 +449,7 @@ fn current(report: &AccountSyncReport) -> bool {
         .unwrap_or_else(|error| error.into_inner())
         .serial
         == report.serial
-        && kasa_mcp::device_auth::change_epoch() == report.device_epoch
+        && kasa_device::device_auth::change_epoch() == report.device_epoch
 }
 
 pub(super) fn accept_report(report: &AccountSyncReport, selected: &str) -> Option<String> {
@@ -483,9 +483,9 @@ pub(super) fn start(
     if cfg!(test) || !environment_allowed(|key| std::env::var_os(key).is_some()) {
         return;
     }
-    let own = kasa_mcp::mobile::machine_identity();
+    let own = kasa_device::mobile::machine_identity();
     let mut seen = std::collections::HashSet::new();
-    let peers: Vec<_> = kasa_mcp::machines::machines()
+    let peers: Vec<_> = kasa_device::machines::machines()
         .into_iter()
         .filter(|machine| {
             !machine.base.trim().is_empty() && !(own.is_some() && machine.machine_id == own)
@@ -512,7 +512,7 @@ pub(super) fn start(
         .submit(|serial| {
             let report = AccountSyncReport {
                 serial,
-                device_epoch: kasa_mcp::device_auth::change_epoch(),
+                device_epoch: kasa_device::device_auth::change_epoch(),
                 slot,
                 label,
                 peers: peers
@@ -555,7 +555,7 @@ pub(super) fn start(
                         serde_json::json!({"ok":false,"error_code":"account_sync_identity_unverified"}),
                     );
                 }
-                kasa_mcp::remote::settings_action_reply(
+                kasa_remote::remote::settings_action_reply(
                     &peer.base,
                     ACTION,
                     Some(identity),

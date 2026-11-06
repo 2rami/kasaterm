@@ -1,0 +1,3322 @@
+//! 원격 PTY 호스트(`/term/ws`)에 붙는 **GUI 쪽 클라이언트**.
+//!
+//! 서버(`http.rs` 의 `term_ws_run`)와 같은 crate 에 두어 term-ws 프로토콜 지식이
+//! 한 곳에 모인다. 역할은 전송뿐이다 — 파싱·스크롤백·tap 은 전부
+//! `kasa_pty::PtySession::start_external` 의 로컬 파서가 맡고, 여기는 WS 프레임을
+//! `ExtEvent` 로 옮겨 싣기만 한다.
+//!
+//! 프레임 규약(서버와 쌍):
+//! - binary = PTY 바이트(수신 화면은 협상된 압축을 먼저 해제, 송신 키 입력은 원문)
+//! - text  = 제어 JSON. 수신 `{"t":"size",cols,rows,id}` / `{"t":"gone"}`,
+//!   송신 `{"t":"resize",cols,rows}` / `{"t":"kill"}`
+//!
+//! 재접속: 연결이 끊기면 백오프(0.5s→5s)로 같은 세션에 다시 붙는다. 서버가
+//! 접속 직후 스냅샷(히스토리 포함)을 보내므로, 그 직전에 RIS(`ESC c`)를 파서에
+//! 밀어 로컬 그리드·스크롤백을 비운다 — alacritty `Grid::reset` 이
+//! `clear_history` 를 부르는 것에 기댄 설계다(kasa-pty 의
+//! `external_reconnect_ris_clears_history` 테스트가 그 계약을 감시한다).
+//! 「세션이 정말 끝났다」는 서버의 `gone` 만이 말한다 — 연결 유실만으로는
+//! 재접속을 멈추지 않는다.
+
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use kasa_pty::{ExtEvent, ExternalIo, PtyOptions, PtySession};
+use tokio_tungstenite::tungstenite::Message;
+
+/// 원격 pane 의 「누구·어디」 — 연결 자체에는 안 쓰이고, 표시(기계 배지)와
+/// 역이사(되돌아갈 자리)가 읽는다. 링크가 사는 동안 Link 에 실려 다니고
+/// 세션 저장을 거쳐 재시작을 넘는다.
+#[derive(Clone, Debug, Default)]
+pub struct RemoteIdentity {
+    /// 기계 명부(machines.json)의 라벨. 명부 밖 주소로 붙었으면 빈 문자열.
+    pub label: String,
+    /// 그 pane 의 **원격 기계 기준** 작업 폴더. 역이사가 원격 git 상태를 물을 때 쓴다.
+    pub remote_cwd: Option<String>,
+    /// 이사(migrate)로 떠나온 pane 의 **원래 로컬 경로** — 역이사가 되돌아갈 자리.
+    /// 원격에서 태어난 pane 은 None 이고, 그때 역이사는 명부의 roots 매핑으로 정한다.
+    pub origin_cwd: Option<String>,
+    /// 이 앱이 `to <기계>` 로 **세운** 자리인가 — 그 기계 창에 진짜 pane 을 만들고
+    /// 여기서 비추는 것. 닫을 때 저쪽 pane 도 함께 걷는 근거다. 남의 pane 을
+    /// 비추는 거울은 false 라 원본을 절대 안 건드린다.
+    pub owned: bool,
+}
+
+/// 원격 pane 하나의 연결 명세.
+#[derive(Clone, Debug)]
+pub struct RemoteSpec {
+    /// `http://127.0.0.1:18766` 꼴 — ssh 터널의 로컬 끝이 보통이다.
+    pub base: String,
+    /// 이어받을 원격 세션 id(`web-…`). None = 새 셸을 띄운다.
+    pub pane: Option<String>,
+    /// 새 셸의 시작 디렉터리(**원격 기계 기준** 경로). pane 지정 시 무시.
+    pub cwd: Option<String>,
+    /// LAN 직결일 때의 remote-token. ssh 터널(양끝 loopback)이면 불필요.
+    pub token: Option<String>,
+    pub identity: RemoteIdentity,
+}
+
+/// 접속에 성공한 원격 pane.
+pub struct RemoteSession {
+    pub session: Arc<PtySession>,
+    /// 서버가 확정해 준 원격 세션 id — session.json 에 저장해 재접속에 쓴다.
+    pub remote_id: String,
+}
+
+enum Out {
+    Input(Vec<u8>),
+    Control(String),
+    Detach,
+}
+
+struct DetachOnDrop {
+    outgoing: tokio::sync::mpsc::UnboundedSender<Out>,
+    viewport: Arc<ViewportState>,
+}
+
+impl Drop for DetachOnDrop {
+    fn drop(&mut self) {
+        self.viewport.detached.store(true, Ordering::Release);
+        self.viewport.retry.notify_one();
+        // 원본 격자를 쥔 채로 pane 을 닫으면 호스트가 그 격자로 남는다 — 떼기 전에 놓는다.
+        if self.viewport.held.lock().unwrap().take().is_some() {
+            let _ = self.outgoing.send(Out::Control(
+                serde_json::json!({"t": "viewport", "op": "release"}).to_string(),
+            ));
+        }
+        let _ = self.outgoing.send(Out::Detach);
+    }
+}
+
+#[derive(Default)]
+struct ViewportState {
+    target: Mutex<Option<(u16, u16)>>,
+    detached: AtomicBool,
+    received_frame: AtomicBool,
+    generation: std::sync::atomic::AtomicU64,
+    // A restore retry can need a new snapshot even after transport bytes
+    // arrived: the GUI may still lack an applied frame for this generation.
+    refresh_generation: std::sync::atomic::AtomicU64,
+    connection_error: Mutex<Option<String>>,
+    retry: tokio::sync::Notify,
+    surface_key: Mutex<Option<String>>,
+    /// 원본 격자를 바꾸는 길. `on_resize` 는 거울에서 닫혀 있고(창 크기만 바뀌었는데
+    /// 원본이 따라 흔들리면 다른 뷰어와 호스트가 서로 덮는다) 사람이 이 거울을 만졌을
+    /// 때(`touch_source`)나 옛 호스트에서 확대했을 때(`expand_source`)만 연다.
+    outgoing: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Out>>>,
+    /// 호스트에 요청해 쥐고 있는 격자. Some 이면 「지금 소유권을 쥐고 있어야 하는
+    /// 상태」다. 되돌릴 격자는 **서버가** 안다(`viewport_sizes.effective()` — 쥔
+    /// 뷰어가 없으면 호스트 자기 크기로 돌아간다). 크기를 기억하는 이유는 재접속이다:
+    /// 연결이 끊기면 소유권은 옛 연결과 함께 죽으므로 새 연결의 첫 악수 뒤에 이 크기로
+    /// 다시 잡는다. 남(원본의 사람·더 늦게 만진 뷰어)이 가져가면 서버의 `lost` 로 비운다 —
+    /// 안 비우면 재접속이 빼앗긴 격자를 도로 빼앗는다.
+    held: Mutex<Option<(u16, u16)>>,
+    /// 호스트가 「마지막으로 만진 쪽이 이긴다」를 안다(`viewport_latest`). 모르는 옛
+    /// 호스트면 거울은 만져도 원본을 안 바꾸고 예전처럼 확대 때만 키운다 — 옛 호스트엔
+    /// 원본 쪽 사람이 격자를 되찾는 길이 없다.
+    latest: AtomicBool,
+}
+
+impl ViewportState {
+    fn take_snapshot_refresh(&self, generation: u64) -> bool {
+        self.refresh_generation.swap(0, Ordering::AcqRel) == generation
+    }
+}
+
+/// A handshake alone is not ready: restoration waits for the live snapshot.
+pub fn connection_readiness(local_id: &str) -> Option<(bool, u64, Option<String>)> {
+    let links = links().lock().unwrap();
+    let link = links.get(local_id)?;
+    let error = link.viewport.connection_error.lock().unwrap().clone();
+    Some((link.viewport.received_frame.load(Ordering::Acquire), link.viewport.generation.load(Ordering::Acquire), error))
+}
+
+/// Wake only an unfinished connection, preserving its parser, identity and PTY.
+/// Returns false for an absent link or an already live stream. A retry racing
+/// with the first frame is also ignored by the manager after that frame arrives.
+pub fn retry_connection(local_id: &str) -> bool {
+    retry_connection_inner(local_id, false)
+}
+
+/// Refresh an existing link whose current frame has not become ready in the
+/// GUI. Call only for pending restore entries, after refreshing GUI readiness.
+/// The request is tied to this connection generation so it cannot interrupt a
+/// later connection that recovered while the notification was queued.
+pub fn retry_pending_restore(local_id: &str) -> bool {
+    retry_connection_inner(local_id, true)
+}
+
+fn retry_connection_inner(local_id: &str, pending_restore: bool) -> bool {
+    let viewport = links().lock().unwrap().get(local_id).map(|link| link.viewport.clone());
+    let Some(viewport) = viewport else { return false };
+    if viewport.detached.load(Ordering::Acquire)
+        || (!pending_restore && viewport.received_frame.load(Ordering::Acquire)) {
+        return false;
+    }
+    if pending_restore {
+        viewport.refresh_generation.store(viewport.generation.load(Ordering::Acquire), Ordering::Release);
+    }
+    *viewport.connection_error.lock().unwrap() = None;
+    viewport.retry.notify_one();
+    true
+}
+
+/// The persisted expected identity, or the source-issued key learned from a
+/// verified size handshake. Keep it available while offline; readiness is separate.
+pub fn remote_surface_key(local_id: &str) -> Option<String> {
+    let viewport = links().lock().ok()?.get(local_id)?.viewport.clone();
+    let key = viewport.surface_key.lock().ok()?.clone();
+    key
+}
+
+/// 원격 링크 하나의 명부 항목.
+struct Link {
+    /// Authentication of the existing connection, reused for appearance GETs.
+    auth_token: Option<String>,
+    kill: tokio::sync::mpsc::UnboundedSender<()>,
+    base: String,
+    remote_id: String,
+    identity: RemoteIdentity,
+    /// Mirrors preserve the host grid; only the viewer's renderer scales it.
+    view: bool,
+    viewport: Arc<ViewportState>,
+    /// 같은 local pane id 가 재사용될 때 낡은 매니저의 정리 가드가 **새 링크를**
+    /// 걷어가지 않게 하는 세대 표식.
+    token: u64,
+}
+
+/// 살아 있는 원격 링크 명부 — local pane id → 링크.
+///
+/// GUI 의 pane 닫기·저장 경로가 App 필드 없이 원격 셸을 죽이고 전송 명세를
+/// 읽을 수 있게 프로세스 전역이다(kasa-pty 레지스트리와 같은 이유). 항목은
+/// 매니저 스레드가 끝날 때 스스로 걷는다.
+fn links() -> &'static Mutex<std::collections::HashMap<String, Link>> {
+    static L: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Link>>> =
+        std::sync::OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// 원격 pane 의 전송 명세 `(base, remote_id)` — 세션 저장(layout_to_json)이
+/// 재시작 후 같은 원격 세션에 다시 붙을 수 있게 싣는다.
+pub fn remote_meta(local_id: &str) -> Option<(String, String)> {
+    links()
+        .lock()
+        .unwrap()
+        .get(local_id)
+        .map(|l| (l.base.clone(), l.remote_id.clone()))
+}
+
+/// 이 pane 이 원격 링크인가.
+/// 호스트가 거울로 밀어 준 `open-url` 을 받을 GUI 쪽 손잡이 — (로컬 pane id, URL).
+/// kasa-http 는 창을 모르니 앱이 시작할 때 EventLoopProxy 를 물려 등록한다.
+type OpenUrlSink = Box<dyn Fn(&str, &str) + Send + Sync>;
+
+fn open_url_sink() -> &'static std::sync::OnceLock<OpenUrlSink> {
+    static S: std::sync::OnceLock<OpenUrlSink> = std::sync::OnceLock::new();
+    &S
+}
+
+pub fn set_open_url_sink(f: OpenUrlSink) {
+    let _ = open_url_sink().set(f);
+}
+
+fn fire_open_url(local: &str, url: &str) {
+    match open_url_sink().get() {
+        Some(f) => f(local, url),
+        None => eprintln!("[remote] open-url 받았지만 받을 창이 없어요: {url}"),
+    }
+}
+
+pub fn is_remote_pane(local_id: &str) -> bool {
+    links().lock().unwrap().contains_key(local_id)
+}
+
+pub fn cached_pane(local_id: &str) -> Option<serde_json::Value> {
+    let info = remote_info(local_id)?;
+    let label = if info.label.is_empty() {
+        kasa_device::machines::display_identity().label_for_base(&info.base)?.to_string()
+    } else {
+        info.label
+    };
+    kasa_device::machines::cached_pane(&label, &info.remote_id)
+}
+
+pub fn cached_fresh_pane(local_id: &str) -> Option<serde_json::Value> {
+    let info = remote_info(local_id)?;
+    let label = if info.label.is_empty() {
+        kasa_device::machines::display_identity().label_for_base(&info.base)?.to_string()
+    } else {
+        info.label
+    };
+    kasa_device::machines::cached_fresh_pane(&label, &info.remote_id)
+}
+
+/// 캐시가 없거나 구 호스트가 실행 상태를 안 주는 것은 종료 증거가 아니다.
+pub fn cached_agent_running(local_id: &str) -> Option<bool> {
+    if let Some(row) = cached_pane(local_id) {
+        return row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()));
+    }
+    // 이 기기의 창 밖 셸을 제 창구로 본 탭 — 명부 캐시에 제 자신은 없으니 세션을 직접 본다.
+    let info = remote_info(local_id)?;
+    if info.label != kasa_device::machines::self_label() {
+        return None;
+    }
+    kasa_pty::lookup_session(&info.remote_id).map(|s| s.active_agent().is_some())
+}
+
+/// 이 pane 이 거울 연결인가. 구 호스트에서는 기존 읽기 미러로 남는다.
+pub fn is_view_pane(local_id: &str) -> bool {
+    links()
+        .lock()
+        .unwrap()
+        .get(local_id)
+        .is_some_and(|l| l.view)
+}
+
+/// Record local display bounds. Attaching, resizing or reconnecting a mirror
+/// alone never takes the source grid; the GUI fits the host's grid inside these
+/// bounds. Only a mirror that a person touched (`touch_source`) holds the grid,
+/// and while it holds it the grid follows these bounds.
+pub fn set_viewport(local_id: &str, cols: u16, rows: u16) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    let target = (cols.clamp(2, 1000), rows.clamp(1, 1000));
+    *link.viewport.target.lock().unwrap() = Some(target);
+    if link.viewport.latest.load(Ordering::Acquire) {
+        let mut held = link.viewport.held.lock().unwrap();
+        if held.is_some_and(|size| size != target) && send_viewport(link, serde_json::json!({
+            "t": "viewport", "op": "resize", "cols": target.0, "rows": target.1,
+        })) {
+            *held = Some(target);
+        }
+    }
+    true
+}
+
+/// 호스트가 「마지막으로 만진 쪽이 이긴다」를 아는 거울인가 — 아니면 호출부는
+/// 예전 규칙(확대 때만 키움)을 쓴다.
+pub fn follows_latest(local_id: &str) -> bool {
+    links().lock().unwrap().get(local_id)
+        .is_some_and(|link| link.view && link.viewport.latest.load(Ordering::Acquire))
+}
+
+/// 사람이 이 거울을 만졌다(초점·입력) — 원본 격자를 이 칸 크기로 잡는다(tmux
+/// `window-size latest`). 원본 기기의 사람이 자기 칸을 만지거나 다른 뷰어가 더 늦게
+/// 만지면 서버가 `lost` 로 알려 비우고, 다음 손길에 다시 잡는다. 이미 이 크기로 쥐고
+/// 있으면 아무것도 안 보낸다 — 입력마다 불리는 자리다.
+pub fn touch_source(local_id: &str) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    if !link.viewport.latest.load(Ordering::Acquire) {
+        return false;
+    }
+    let Some(target) = *link.viewport.target.lock().unwrap() else { return false };
+    let mut held = link.viewport.held.lock().unwrap();
+    if *held == Some(target) {
+        return false;
+    }
+    let op = if held.is_some() { "resize" } else { "acquire" };
+    if !send_viewport(link, serde_json::json!({"t": "viewport", "op": op, "cols": target.0, "rows": target.1})) {
+        return false;
+    }
+    *held = Some(target);
+    true
+}
+
+/// 이 거울이 지금 원본 격자를 쥐고 있다고 아는 크기(검사·표시용).
+pub fn held_source_size(local_id: &str) -> Option<(u16, u16)> {
+    let map = links().lock().unwrap();
+    let held = *map.get(local_id)?.viewport.held.lock().unwrap();
+    held
+}
+
+/// 거울이 **확대되어 있는 동안만** 원본 격자를 키운다.
+///
+/// 평상시 창 크기 변화는 원본에 닿지 않는다(`on_resize` 의 view 가드) — 예전에
+/// 그 길을 열어 두었더니 「미러링할때 크기 줄이면 미러링되는곳도 줄어들어」가 됐다.
+/// 사람이 확대를 누른 순간은 뜻이 다르다: 접혀 있던 줄을 보겠다는 것이고, 접힌
+/// 줄은 호스트가 그 rows 로 그리지 않아 스크롤백에도 없으므로 원본을 키우는 것
+/// 말고는 길이 없다. 그래서 **키우는 방향으로만** 연다.
+///
+/// `current` 는 호출부가 읽은 지금 격자다(로컬 파서는 호스트 격자를 그대로 쓴다).
+/// 되돌릴 크기는 이쪽이 적어 두지 않는다 — 서버가 viewport 소유권으로 안다.
+pub fn expand_source(local_id: &str, cols: u16, rows: u16, current: (u16, u16)) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    // 어느 방향으로도 좁히지 않는다 — 확대는 더 보려는 동작이고, 호스트를 좁히면
+    // 거기 앉은 사람의 화면만 망가진다. 차원마다 지금 격자와 요청 중 큰 쪽을 쓰고,
+    // 그래서 아무것도 안 커지면 보내지 않는다.
+    let (cols, rows) = (cols.clamp(2, 1000).max(current.0), rows.clamp(1, 1000).max(current.1));
+    if (cols, rows) == current {
+        return false;
+    }
+    // 처음 키울 때만 소유권을 잡고(acquire), 쥔 뒤에는 크기만 바꾼다(resize).
+    let mut held = link.viewport.held.lock().unwrap();
+    let op = if held.is_some() { "resize" } else { "acquire" };
+    if !send_viewport(link, serde_json::json!({"t": "viewport", "op": op, "cols": cols, "rows": rows})) {
+        return false;
+    }
+    *held = Some((cols, rows));
+    true
+}
+
+/// 확대를 풀 때 원본을 원래 격자로 되돌린다. 키운 적이 없으면 아무것도 안 한다 —
+/// 그래서 확대와 무관한 pane 에 대고 불러도 안전하다(리사이즈마다 훑는 호출부의 전제).
+pub fn restore_source(local_id: &str) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    if link.viewport.held.lock().unwrap().take().is_none() {
+        return false;
+    }
+    // 크기를 지정하지 않는다 — 놓으면 호스트가 자기 격자로 돌아간다.
+    send_viewport(link, serde_json::json!({"t": "viewport", "op": "release"}))
+}
+
+fn send_viewport(link: &Link, frame: serde_json::Value) -> bool {
+    let outgoing = link.viewport.outgoing.lock().unwrap();
+    let Some(tx) = outgoing.as_ref() else { return false };
+    tx.send(Out::Control(frame.to_string())).is_ok()
+}
+
+/// 원격 pane 의 전송 명세 + 정체 한 벌. remote_meta 와 달리 표시·역이사가 쓴다.
+#[derive(Clone, Debug)]
+pub struct RemoteInfo {
+    pub base: String,
+    pub remote_id: String,
+    pub label: String,
+    pub remote_cwd: Option<String>,
+    pub origin_cwd: Option<String>,
+    /// 거울 연결(만지기 전엔 원본 격자 불변). 세션 저장이 이걸 실어야 재시작 뒤에도
+    /// 거울로 되붙는다 — 안 실으면 복원된 pane 이 원본 크기를 뺏는다.
+    pub view: bool,
+    /// `to` 로 이 앱이 세운 자리(RemoteIdentity::owned).
+    pub owned: bool,
+}
+
+pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
+    links().lock().unwrap().get(local_id).map(|l| RemoteInfo {
+        base: l.base.clone(),
+        remote_id: l.remote_id.clone(),
+        label: l.identity.label.clone(),
+        remote_cwd: l.identity.remote_cwd.clone(),
+        origin_cwd: l.identity.origin_cwd.clone(),
+        view: l.view,
+        owned: l.identity.owned,
+    })
+}
+
+/// 원격 셸까지 **정말로 죽인다**(pane 닫기 = 이사가 아니라 폐기일 때).
+///
+/// detach(그냥 Arc drop)와 이 길을 가르는 것이 원격 pane 수명 설계의 핵심이다 —
+/// 안 부르고 닫으면 원격 셸은 살아남아 나중에 이어받을 수 있다.
+pub fn kill_remote(local_id: &str) -> bool {
+    let mut map = links().lock().unwrap();
+    let Some(link) = map.remove(local_id) else {
+        return false;
+    };
+    // 종료 신호를 받아들인 순간부터 이 local pane 은 원격이 아니다. 매니저의
+    // 비동기 Drop 까지 명부를 남기면 `to ..`가 로컬 PTY를 끼운 첫 프레임도
+    // 옛 기계색을 칠한다. Unlink의 token 가드는 같은 id에 새 링크가 생겨도
+    // 옛 매니저가 그것을 걷지 못하게 그대로 지킨다.
+    link.kill.send(()).is_ok()
+}
+
+/// `send_bytes` 가 쓰는 송신로 — WS 매니저의 출력 큐로 밀어 넣는다.
+/// 연결이 잠깐 끊겨 있어도 큐에 쌓였다가 재접속 후 배달된다.
+struct WsWriter(tokio::sync::mpsc::UnboundedSender<Out>);
+
+impl Write for WsWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.0.send(Out::Input(buf.to_vec()));
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn build_url(spec: &RemoteSpec, pane: Option<&str>, view: bool) -> String {
+    // 붙을 때마다 카사넷 입구를 거친다 — spec.base 는 그대로라 거울이 기기를 잃지 않고, 재접속이 그 순간의
+    // 길(직통·ssh)을 탄다.
+    let base = kasa_device::kasanet::route_base(&spec.base);
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if base.starts_with("ws://") || base.starts_with("wss://") {
+        base.clone()
+    } else {
+        format!("ws://{base}")
+    };
+    let mut url = format!("{}/term/ws?own={}", ws_base.trim_end_matches('/'), if view { 0 } else { 1 });
+    if let Some(p) = pane {
+        // `%` 함정(webterm-handoff): `%N` 을 그대로 실으면 서버가 퍼센트 디코딩으로
+        // 읽어 제어문자가 된다. 스크립트 경로는 반드시 인코딩한다.
+        url.push_str("&pane=");
+        url.push_str(&urlencode(p).replace('%', "%25").replace("%2525", "%25"));
+    } else if let Some(c) = &spec.cwd {
+        url.push_str("&cwd=");
+        url.push_str(&urlencode(c));
+    }
+    if let Some(t) = &spec.token {
+        url.push_str("&t=");
+        url.push_str(t);
+    }
+    url
+}
+
+/// 원격 호스트에 붙어 로컬 파서 세션을 만든다. 동기 — 원격 id 와 초기 격자가
+/// 확정되고서야 돌아오므로, 실패가 스폰 시점에 드러난다.
+///
+/// `cols`/`rows` 는 GUI 가 원하는 격자 — 서버 격자와 다르면 접속 직후 resize
+/// 제어로 맞춘다(own=1 이라 force 없이 통과). **이 앱이 그 세션의 주인일 때만**
+/// 쓴다(스폰·이사). 남의 화면을 들여다보는 거울은 `connect_view` 로.
+fn is_gui_pane(pane: Option<&str>) -> bool {
+    pane.is_some_and(|pane| {
+        pane.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+pub fn connect(
+    spec: RemoteSpec,
+    local_pane_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<RemoteSession> {
+    // GUI pane은 호스트 창도 크기를 갱신한다. 옛 저장본의 own=1 연결을 그대로
+    // 되살리면 두 창이 크기를 번갈아 덮으므로 기존 GUI 자리만 거울로 승계한다.
+    // 새 셸과 web-* 소유 연결의 생성·종료 책임은 그대로 둔다.
+    let view = is_gui_pane(spec.pane.as_deref());
+    connect_inner(spec, local_pane_id, cols, rows, view, Attach::Wait, None)
+}
+
+/// 접속을 누가 어떻게 기다리나.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attach {
+    /// 첫 악수까지 호출한 스레드가 기다린다. 못 붙으면 몇 번 뒤 포기하고 Err 로 돌려준다.
+    Wait,
+    /// 칸부터 세우고 화면은 붙는 대로 채운다. 첫 악수 실패도 뒤에서 계속 다시 붙는다.
+    Background,
+    /// `Background` 에 더해, 원본이 아직 그 칸을 되살리지 않았다(`gone`)는 답에도 기다린다.
+    Restore,
+}
+
+/// Mirrors follow the server's grid and fit it locally; they take size control only
+/// when a person touches them (`touch_source`).
+pub fn connect_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
+    connect_inner(spec, local_pane_id, 0, 0, true, Attach::Wait, None)
+}
+
+/// 사람이 연 거울. `connect_view` 는 첫 악수까지 붙잡는데, 원본이 느리거나 꺼져 있으면
+/// 칸마다 최대 15초를 GUI 스레드가 그대로 멈춘다(2026-10-13 맥북: 기기 펼치기·새 방에서
+/// 무지개 커서 1~19초). 격자는 원본의 첫 `size` 가 바로 덮으니 그 전까지만 임시 크기다.
+pub fn open_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
+    anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing remote pane");
+    connect_inner(spec, local_pane_id, 80, 24, true, Attach::Background, None)
+}
+
+/// Restore a known remote identity immediately, even while its host is starting.
+/// A late tunnel must never turn a saved mirror into a new local shell.
+pub fn restore_connection(
+    spec: RemoteSpec, local_pane_id: &str, cols: u16, rows: u16, view: bool,
+) -> Result<RemoteSession> {
+    anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing restored remote pane");
+    // Old snapshots may have saved GUI panes as own=1. Deferred restore must
+    // preserve the same host-owned dimensions as a normal legacy attach.
+    let view = view || is_gui_pane(spec.pane.as_deref());
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, Attach::Restore, None)
+}
+
+/// Deferred restoration with a source-issued identity. Resolution is read-only
+/// and repeats before every connection; an unmatched source stays pending.
+pub fn restore_connection_identified(
+    spec: RemoteSpec, local_pane_id: &str, cols: u16, rows: u16, view: bool,
+    hint: crate::remote_restore::RestoreIdentity,
+) -> Result<RemoteSession> {
+    anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing restored remote pane");
+    let view = view || is_gui_pane(spec.pane.as_deref());
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, Attach::Restore, Some(hint))
+}
+
+fn connect_inner(
+    mut spec: RemoteSpec,
+    local_pane_id: &str,
+    cols: u16,
+    rows: u16,
+    view: bool,
+    attach: Attach,
+    hint: Option<crate::remote_restore::RestoreIdentity>,
+) -> Result<RemoteSession> {
+    let deferred = attach != Attach::Wait;
+    // Additional mirrors use the same authenticated host connection without
+    // putting its credential into pane/session snapshots.
+    if spec.token.is_none() {
+        spec.token = connection_auth_token(&spec.base);
+    }
+    let (etx, erx) = crossbeam_channel::unbounded::<ExtEvent>();
+    let (otx, orx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+    let otx = Arc::new(otx);
+    let viewport = Arc::new(ViewportState {
+        surface_key: Mutex::new(hint.as_ref().and_then(|hint| hint.surface_key.clone())),
+        ..Default::default()
+    });
+    *viewport.outgoing.lock().unwrap() = Some(otx.as_ref().clone());
+    let manager_viewport = viewport.clone();
+    let (ktx, krx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (htx, hrx) =
+        std::sync::mpsc::sync_channel::<std::result::Result<(String, u16, u16), String>>(1);
+    static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let token = TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let spec2 = spec.clone();
+    let local2 = local_pane_id.to_string();
+    let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    std::thread::Builder::new()
+        .name(format!("remote-ws-{local_pane_id}"))
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = htx.try_send(Err(format!("tokio runtime: {e}")));
+                    return;
+                }
+            };
+            // Deferred links must be registered before the manager may finish
+            // and unlink them (a fast "gone" reply otherwise leaves a stale link).
+            if deferred && start_rx.recv().is_err() { return; }
+            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport, attach, hint));
+        })
+        .context("remote-ws 스레드")?;
+    let (remote_id, rc, rr) = if deferred {
+        (spec.pane.clone().unwrap(), cols, rows)
+    } else {
+        hrx.recv_timeout(Duration::from_secs(15))
+            .context("원격 호스트가 15초 안에 응답하지 않았어요")?
+            .map_err(|e| anyhow!(e))?
+    };
+    let otx_resize = otx.clone();
+    // 외부 파서가 writer를 공유해 sender 종료만 기다리면 순환이 생긴다.
+    // 세션이 직접 소유한 resize 콜백의 수명으로 WS 종료를 명시한다.
+    let lifetime = DetachOnDrop { outgoing: otx.as_ref().clone(), viewport: viewport.clone() };
+    let session = PtySession::start_external(
+        PtyOptions {
+            cols: rc,
+            rows: rr,
+            pane_id: local_pane_id.to_string(),
+            ..Default::default()
+        },
+        ExternalIo {
+            events: erx,
+            writer: Box::new(WsWriter(otx.as_ref().clone())),
+            on_resize: Arc::new(move |c, r| {
+                let _lifetime = &lifetime;
+                // A viewer must never send owner resize controls to the source.
+                if view {
+                    return;
+                }
+                let _ = otx_resize.send(Out::Control(
+                    serde_json::json!({"t": "resize", "cols": c, "rows": r}).to_string(),
+                ));
+            }),
+        },
+    )?;
+    links().lock().unwrap().insert(
+        local_pane_id.to_string(),
+        Link {
+            auth_token: spec.token.clone(),
+            kill: ktx,
+            base: spec.base.clone(),
+            remote_id: remote_id.clone(),
+            identity: spec.identity.clone(),
+            view,
+            viewport,
+            token,
+        },
+    );
+    let session = Arc::new(session);
+    let _ = start_tx.send(());
+    // 거울은 서버 격자를 그대로 받아 산다 — 맞춤 resize 조차 원본을 흔든다.
+    if !view && (cols, rows) != (rc, rr) {
+        let _ = session.resize(cols, rows);
+    }
+    Ok(RemoteSession { session, remote_id })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn manager(
+    spec: RemoteSpec,
+    local: String,
+    token: u64,
+    etx: crossbeam_channel::Sender<ExtEvent>,
+    mut orx: tokio::sync::mpsc::UnboundedReceiver<Out>,
+    mut krx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    htx: std::sync::mpsc::SyncSender<std::result::Result<(String, u16, u16), String>>,
+    view: bool,
+    viewport: Arc<ViewportState>,
+    attach: Attach,
+    mut hint: Option<crate::remote_restore::RestoreIdentity>,
+) {
+    let retry_initial = attach == Attach::Restore;
+    // 어떤 길로 나가든 명부를 걷는다 — 안 걷으면 pane 번호가 재사용될 때 새 로컬
+    // pane 이 「원격」으로 오판된다. 세대 표식이 맞을 때만 걷는 이유는 Link 주석에.
+    struct Unlink(String, u64);
+    impl Drop for Unlink {
+        fn drop(&mut self) {
+            let mut map = links().lock().unwrap();
+            if map.get(&self.0).is_some_and(|l| l.token == self.1) {
+                map.remove(&self.0);
+            }
+        }
+    }
+    let _unlink = Unlink(local.clone(), token);
+    let mut remote_id: Option<String> = spec.pane.clone();
+    // 첫 attach 가 이미 성사됐는가 — 이후의 연결 유실은 재접속 대상이고,
+    // 그 전의 실패는 「스폰 실패」로 호출자에게 돌려준다.
+    let mut had_attach = false;
+    let mut attempts_before_first = 0u32;
+    let mut backoff_ms = 500u64;
+    // Never forward authentication across a source-controlled HTTP redirect.
+    let identity_client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none()).build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            *viewport.connection_error.lock().unwrap() = Some("원본 창을 확인할 연결을 준비하지 못했어요".into());
+            return;
+        }
+    };
+    'outer: loop {
+        if viewport.detached.load(Ordering::Acquire) {
+            break;
+        }
+        viewport.received_frame.store(false, Ordering::Release);
+        if let Some(identity) = hint.as_ref() {
+            let resolved = tokio::select! {
+                result = crate::remote_restore::resolve(&identity_client, &spec.base, spec.token.as_deref(),
+                    remote_id.as_deref().unwrap_or_default(), identity) => result,
+                _ = viewport.retry.notified() => {
+                    *viewport.connection_error.lock().unwrap() = None;
+                    backoff_ms = 500;
+                    continue 'outer;
+                }
+            };
+            match resolved {
+                Ok(id) => {
+                    remote_id = Some(id.clone());
+                    if let Some(link) = links().lock().unwrap().get_mut(&local).filter(|link| link.token == token) {
+                        link.remote_id = id;
+                    }
+                }
+                Err(error) => {
+                    *viewport.connection_error.lock().unwrap() = Some(error);
+                    reconnect_pause(&viewport, &mut backoff_ms).await;
+                    continue 'outer;
+                }
+            }
+        }
+        let mut url = build_url(&spec, remote_id.as_deref(), view);
+        url.push_str("&compression=");
+        url.push_str(kasa_wire::terminal_wire::ZLIB_V1);
+        if let Some(key) = hint.as_ref().and_then(|hint| hint.surface_key.as_deref()) {
+            url.push_str("&surface_key=");
+            url.push_str(&urlencode(key));
+        }
+        let connection = tokio::select! {
+            // 휠·키 입력은 작은 프레임이므로 ACK를 기다리며 다음 입력과 묶으면 손길이 끊긴다.
+            result = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async_with_config(&url, None, true)) => result,
+            _ = viewport.retry.notified() => {
+                *viewport.connection_error.lock().unwrap() = None;
+                backoff_ms = 500;
+                continue 'outer;
+            }
+        }.unwrap_or_else(|_| Err(tokio_tungstenite::tungstenite::Error::Io(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "remote handshake timed out"),
+            )));
+        match connection {
+            Ok((ws, _resp)) => {
+                let generation = viewport.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let _ = etx.send(ExtEvent::Generation(generation));
+                let (mut tx, mut rx) = ws.split();
+                let mut reset_before_frame = had_attach;
+                let first_frame_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                // 이 연결에서 size 핸드셰이크를 받았는가 — 재접속 RIS 는 연결마다
+                // 첫 size 에서 딱 한 번.
+                let mut sized_this_conn = false;
+                let mut connection_size = None;
+                let mut codec = kasa_wire::terminal_wire::Codec::Raw;
+                loop {
+                    tokio::select! {
+                        _ = viewport.retry.notified() => {
+                            let refresh = viewport.take_snapshot_refresh(generation);
+                            if refresh || !viewport.received_frame.load(Ordering::Acquire) {
+                                // Manual retry should not wait through the backoff.
+                                *viewport.connection_error.lock().unwrap() = None;
+                                backoff_ms = 500;
+                                continue 'outer;
+                            }
+                        }
+                        _ = tokio::time::sleep_until(first_frame_deadline), if !viewport.received_frame.load(Ordering::Acquire) => {
+                            *viewport.connection_error.lock().unwrap() = Some("기기에는 연결됐지만 화면을 받지 못했어요. 다시 연결하고 있어요".into());
+                            break;
+                        }
+                        m = rx.next() => match m {
+                            Some(Ok(Message::Text(t))) => {
+                                let Ok(v) = serde_json::from_str::<serde_json::Value>(t.as_str())
+                                else { continue };
+                                match v.get("t").and_then(|x| x.as_str()) {
+                                    Some("size") => {
+                                        let source_key = v.get("surface_key").and_then(|v| v.as_str())
+                                            .filter(|key| !key.trim().is_empty());
+                                        if let Some(expected) = hint.as_ref().and_then(|hint| hint.surface_key.as_deref()) {
+                                            if source_key != Some(expected) {
+                                                *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별자가 달라 복원을 기다리고 있어요".into());
+                                                break;
+                                            }
+                                        } else if hint.is_some() && source_key.is_none() {
+                                            *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별 정보를 기다리고 있어요".into());
+                                            break;
+                                        }
+                                        if let Some(key) = source_key {
+                                            *viewport.surface_key.lock().unwrap() = Some(key.to_owned());
+                                            if view || retry_initial {
+                                                hint = Some(crate::remote_restore::RestoreIdentity {
+                                                    surface_key: Some(key.to_owned()), ..Default::default()
+                                                });
+                                            }
+                                        }
+                                        let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
+                                        let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                                        let changed = connection_size.is_some_and(|previous| previous != (c, r));
+                                        // `snapshot` 표식은 「이 연결로 스냅샷이 뒤따른다」 — 내 viewport
+                                        // 요청(확대·해제)에 호스트가 같은 연결로 답한 것이다. 재접속하면
+                                        // 서버 쪽 ViewerViewport 가 떨어져 방금 잡은 소유권을 놓으므로
+                                        // 제자리에서 RIS 로 옛 격자를 비우고 받는다(http.rs SelfSized).
+                                        let in_band = v.get("snapshot").and_then(|x| x.as_bool()) == Some(true);
+                                        if changed && in_band {
+                                            reset_before_frame = true;
+                                        } else if changed {
+                                            // Old hosts send size+raw deltas on
+                                            // resize, without replacing their
+                                            // reflowed scrollback. Reconnect to
+                                            // obtain its authoritative history.
+                                            // Leave queued input in orx: no
+                                            // replay of previously sent bytes.
+                                            break;
+                                        }
+                                        connection_size = Some((c, r));
+                                        if remote_id.is_none() {
+                                            remote_id = v
+                                                .get("id")
+                                                .and_then(|x| x.as_str())
+                                                .map(str::to_string);
+                                        }
+                                        if etx.send(ExtEvent::SetSize(c, r)).is_err() {
+                                            return; // 세션이 사라졌다(detach)
+                                        }
+                                        if had_attach && !sized_this_conn {
+                                            // 재접속 — 곧 올 스냅샷 앞에 RIS 로 그리드·
+                                            // 스크롤백을 비운다(모듈 머리말 참고).
+                                            reset_before_frame = true;
+                                        }
+                                        let fresh_connection = !sized_this_conn;
+                                        sized_this_conn = true;
+                                        if fresh_connection {
+                                            codec = kasa_wire::terminal_wire::Codec::negotiated(
+                                                v.get("raw_compression").and_then(|v| v.as_str()),
+                                            );
+                                            let latest = v.pointer("/capabilities/viewport_latest")
+                                                .and_then(|x| x.as_u64()) == Some(1);
+                                            viewport.latest.store(latest, Ordering::Release);
+                                        }
+                                        if !had_attach {
+                                            had_attach = true;
+                                            let id = remote_id.clone().unwrap_or_default();
+                                            let _ = htx.try_send(Ok((id, c, r)));
+                                        }
+                                        // 확대 중에 (남이 바꾼 격자로) 재접속했으면 소유권은 옛 연결과
+                                        // 함께 죽었다 — 새 연결의 첫 악수 뒤에 같은 크기로 다시 잡는다.
+                                        // 같은 연결 안의 size(내 요청의 결과)에는 걸리지 않는다.
+                                        if fresh_connection {
+                                            if let Some((cols, rows)) = *viewport.held.lock().unwrap() {
+                                                if let Some(out) = viewport.outgoing.lock().unwrap().as_ref() {
+                                                    let _ = out.send(Out::Control(serde_json::json!({
+                                                        "t": "viewport", "op": "acquire", "cols": cols, "rows": rows,
+                                                    }).to_string()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 원본의 사람이나 더 늦게 만진 뷰어가 격자를 가져갔다. 쥔 줄 알고
+                                    // 있으면 재접속이 도로 빼앗고, 다음 손길이 acquire 대신 resize 를
+                                    // 보내 거절당한다.
+                                    Some("viewport") if v.get("lost").and_then(|x| x.as_bool()) == Some(true) => {
+                                        viewport.held.lock().unwrap().take();
+                                    }
+                                    // 호스트가 「이 페이지를 네 쪽에서 열어라」 —
+                                    // 본진 학생이 연 브라우저를 보는 사람의 기계로
+                                    // 되돌리는 길(http.rs push_viewer_control).
+                                    Some("open-url") => {
+                                        if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
+                                            // 원본의 localhost 는 이 기기에서 딴 곳이다 — 그 포트를 끌어와 이 기기
+                                            // localhost 로 연다(카사넷 P3). 공개 터널을 세우지 않는다.
+                                            let (local, url, base) = (local.clone(), u.to_string(), spec.base.clone());
+                                            tokio::spawn(async move {
+                                                let shown = match crate::netfwd::show_from_base(&base, &url).await {
+                                                    Some(Ok(pulled)) => pulled,
+                                                    Some(Err(e)) => {
+                                                        eprintln!("[remote] {url} 포트를 끌어오지 못해 그대로 연다: {e}");
+                                                        url
+                                                    }
+                                                    None => url,
+                                                };
+                                                fire_open_url(&local, &shown);
+                                            });
+                                        }
+                                    }
+                                    Some("source-closed") => {
+                                        // Explicit user close, unlike `gone` during host restore.
+                                        // End only the viewer, even if an older build had marked
+                                        // this inherited mirror as owning its source shell.
+                                        if let Some(link) = links().lock().unwrap().get_mut(&local) {
+                                            link.identity.owned = false;
+                                        }
+                                        let _ = htx.try_send(Err("원본 창이 닫혔어요".to_string()));
+                                        let _ = etx.send(ExtEvent::Eof);
+                                        return;
+                                    }
+                                    Some("gone") => {
+                                        if retry_initial {
+                                            *viewport.connection_error.lock().unwrap() = Some("본진에서 이 창을 기다리는 중이에요".into());
+                                            break; // The host may not have restored this pane yet.
+                                        }
+                                        // 세션이 정말 끝났다 — 재접속하지 않는다.
+                                        let _ = htx.try_send(Err(
+                                            "원격 세션이 이미 끝났어요".to_string(),
+                                        ));
+                                        let _ = etx.send(ExtEvent::Eof);
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Some(Ok(Message::Binary(b))) => {
+                                if b.is_empty() { continue; }
+                                if hint.is_some() && !sized_this_conn {
+                                    *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별 확인 전에 화면이 도착해 복원을 기다리고 있어요".into());
+                                    break;
+                                }
+                                let b = match codec.decode(&b) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        *viewport.connection_error.lock().unwrap() = Some("화면 전송이 손상돼 다시 연결하고 있어요".into());
+                                        break;
+                                    }
+                                };
+                                if b.is_empty() { continue; }
+                                let bytes = if reset_before_frame {
+                                    reset_before_frame = false;
+                                    [b"\x1bc".as_slice(), b.as_ref()].concat()
+                                } else { b };
+                                if etx.send(ExtEvent::Bytes(bytes)).is_err() {
+                                    return;
+                                }
+                                *viewport.connection_error.lock().unwrap() = None;
+                                viewport.received_frame.store(true, Ordering::Release);
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            // Ping/Pong — tungstenite 가 pong 을 알아서 큐잉한다.
+                            // 실제 송신은 아래 주기 flush 가 밀어낸다.
+                            Some(Ok(_)) => {}
+                        },
+                        // Keep queued input in its existing channel until the
+                        // source identity is verified; never type into a reused
+                        // pane number while its size handshake is still pending.
+                        o = orx.recv(), if hint.is_none() || sized_this_conn => match o {
+                            Some(Out::Input(b)) => {
+                                if tx.send(Message::Binary(b.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Out::Control(s)) => {
+                                if tx.send(Message::Text(s.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            // 세션이 drop 됐다(모든 송신자 소멸) = detach. 원격 셸은
+                            // 살려 둔 채 조용히 접는다 — 단, 직전에 kill 신호가 큐에
+                            // 남아 있으면 그건 폐기 의도이므로 마지막으로 배달한다.
+                            Some(Out::Detach) | None => {
+                                if krx.try_recv().is_ok() {
+                                    let _ = tx.send(Message::Text(
+                                        serde_json::json!({"t": "kill"}).to_string().into(),
+                                    )).await;
+                                }
+                                let _ = tx.close().await;
+                                break 'outer;
+                            }
+                        },
+                        k = krx.recv() => {
+                            if k.is_some() {
+                                // 명시적 폐기 — 서버가 keep 을 놓고, 우리는 eof 로 pane 을 걷는다.
+                                let _ = tx.send(Message::Text(
+                                    serde_json::json!({"t": "kill"}).to_string().into(),
+                                )).await;
+                                let _ = tx.close().await;
+                                let _ = etx.send(ExtEvent::Eof);
+                                break 'outer;
+                            }
+                            // ktx 전부 소멸(명부에서 걷힘) — kill 은 더 안 온다. 채널이
+                            // 닫힌 채 recv 를 계속 부르면 busy loop 라, 여기서부터는
+                            // 영원히 잠드는 팔로 바꾼다.
+                            std::future::pending::<()>().await;
+                        }
+                        // 조용한 pane 대비: tungstenite 가 큐잉해 둔 auto-pong 을 주기로
+                        // 밀어낸다. 안 밀면 서버의 75초 무-pong 판정에 걸려 끊긴다.
+                        _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                            let _ = tx.flush().await;
+                        }
+                    }
+                }
+                backoff_ms = 500;
+            }
+            Err(e) => {
+                *viewport.connection_error.lock().unwrap() = Some("기기에 연결하지 못했어요. 자동으로 다시 시도하고 있어요".into());
+                if !had_attach {
+                    attempts_before_first += 1;
+                    if attempts_before_first >= 6 && attach == Attach::Wait {
+                        let _ = htx.try_send(Err(format!("원격 호스트에 못 붙었어요: {e}")));
+                        return;
+                    }
+                }
+            }
+        }
+        viewport.received_frame.store(false, Ordering::Release);
+        // 세션이 이미 사라졌으면 재접속할 이유가 없다.
+        if orx.is_closed() {
+            break 'outer;
+        }
+        reconnect_pause(&viewport, &mut backoff_ms).await;
+    }
+}
+
+async fn reconnect_pause(viewport: &ViewportState, backoff_ms: &mut u64) {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(*backoff_ms)) => {
+            *backoff_ms = (*backoff_ms * 2).min(5000);
+        }
+        _ = viewport.retry.notified() => {
+            *viewport.connection_error.lock().unwrap() = None;
+            *backoff_ms = 500;
+        }
+    }
+}
+
+/// 원격 kasaterm 에 **진짜 학생 pane** 을 하나 만들고 그 pane id 를 받는다.
+///
+/// 이사(migrate)가 이걸 먼저 부른다. 안 부르고 새 셸만 띄우면 그 자리는 캐릭터도
+/// 보드도 훅도 없는 반쪽이 된다 — 옮겨간 학생이 이름을 잃는다(2026-08-27 지시:
+/// 「진짜 카사텀이 돌게」). 창 없는 축소판 서버(kasa-serve-web)는 이 창구가
+/// 없으므로 실패하고, 호출자는 옛 경로로 물러선다.
+pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> Result<String> {
+    let u = format!(
+        "{}/spawn-student?character={}",
+        base.trim_end_matches('/'),
+        urlencode(character)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("spawn runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("캐릭터 소환 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 캐릭터 소환 실패: {}",
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    let id = v
+        .get("surface")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if id.is_empty() {
+        anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
+    }
+    Ok(id)
+}
+
+/// 원격 kasaterm 창에 **맨 셸 pane** 을 하나 세우고 그 id 를 받는다(`POST /spawn-shell`).
+///
+/// `to <기계>` 가 쓴다 — 창 없는 web 셸은 그 기계 앞에 앉으면 안 보였다(2026-09-07
+/// 지시 「to 로 붙으면 거기도 생기게, 원격을 터미널로 조종한다는 느낌으로」). 창구가
+/// 없는 낡은 서버·kasa-serve-web 은 실패하고, 호출자는 web 셸로 물러선다.
+pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> Result<String> {
+    let at = kasa_socket::backend::SpawnShellAt { cwd: cwd.map(str::to_string), ..Default::default() };
+    spawn_shell_pane_at(base, &at, token).map(|(id, _)| id)
+}
+
+/// 자리를 지정해 세운다 — 새 방(`window=new`)·pane 옆(`beside`)·탭(`tab_of`). 돌려주는
+/// 것은 `(pane id, 그 방)`. 옛 서버는 자리를 몰라 활성 방에 세우고 방을 안 준다.
+pub fn spawn_shell_pane_at(
+    base: &str,
+    at: &kasa_socket::backend::SpawnShellAt,
+    token: Option<&str>,
+) -> Result<(String, kasa_socket::backend::SeatRoom)> {
+    use kasa_socket::backend::SpawnWindow;
+    let mut q: Vec<String> = Vec::new();
+    if let Some(c) = &at.cwd {
+        q.push(format!("cwd={}", urlencode(c)));
+    }
+    match at.window {
+        Some(SpawnWindow::New) => q.push("window=new".into()),
+        Some(SpawnWindow::Index(n)) => q.push(format!("window={n}")),
+        None => {}
+    }
+    if let Some(b) = &at.beside {
+        q.push(format!("beside={}", urlencode(b)));
+        if let Some(dir) = at.dir {
+            q.push(format!("dir={}", dir.as_str()));
+        }
+        if at.before {
+            q.push("before=1".into());
+        }
+    }
+    if let Some(t) = &at.tab_of {
+        q.push(format!("tab_of={}", urlencode(t)));
+    }
+    let u = format!(
+        "{}/spawn-shell{}",
+        base.trim_end_matches('/'),
+        if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) }
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("spawn runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("셸 pane 세우기 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격에 셸 pane 세우기 실패: {}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    let id = v.get("surface").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if id.is_empty() {
+        anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
+    }
+    let number = |key: &str| v.get(key).and_then(|x| x.as_u64()).map(|n| n as usize);
+    Ok((id, kasa_socket::backend::SeatRoom { window: number("window"), number: number("room_number") }))
+}
+
+fn transfer_request(base: &str, action: &str, body: Option<serde_json::Value>, seconds: u64) -> Result<serde_json::Value> {
+    let url = format!("{}/transfer/{action}", base.trim_end_matches('/'));
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(seconds)).build()?;
+        let request = match body {
+            Some(body) => client.post(&url).json(&body),
+            None => client.get(&url),
+        };
+        let response = request.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("이 기계는 도착 방을 고르는 이사를 지원하지 않아요. 새 판이 필요해요");
+        }
+        let value: serde_json::Value = response.error_for_status()?.json().await?;
+        if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            anyhow::bail!("{}", value.get("error").and_then(serde_json::Value::as_str).unwrap_or("이사 요청을 처리하지 못했어요"));
+        }
+        Ok(value)
+    })
+}
+
+pub fn transfer_snapshot(base: &str) -> Result<kasa_socket::transfer::MachineSnapshot> {
+    let value = transfer_request(base, "snapshot", None, 5)?;
+    Ok(serde_json::from_value(value.get("snapshot").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_spawn(base: &str, request: &kasa_socket::transfer::SpawnRequest) -> Result<kasa_socket::transfer::SessionRow> {
+    let value = transfer_request(base, "spawn", Some(serde_json::to_value(request)?), 30)?;
+    Ok(serde_json::from_value(value.get("session").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_close(base: &str, identity: &kasa_socket::transfer::SessionIdentity) -> Result<()> {
+    transfer_request(base, "close", Some(serde_json::to_value(identity)?), 15)?;
+    Ok(())
+}
+
+pub fn transfer_launch(base: &str, request: &kasa_socket::transfer::LaunchRequest) -> Result<kasa_socket::transfer::SessionRow> {
+    let value = transfer_request(base, "launch", Some(serde_json::to_value(request)?), 40)?;
+    Ok(serde_json::from_value(value.get("session").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_migrate(base: &str, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
+    let value = transfer_request(base, "migrate", Some(serde_json::to_value(request)?), 250)?;
+    value.get("remote_id").and_then(serde_json::Value::as_str).map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("이사 결과를 확인하지 못했어요"))
+}
+
+/// 원격 pane 의 캐릭터를 그 이름으로 못 박는다(`GET /repersona`).
+///
+/// 소환만으로는 못 미덥다 — 2026-08-27 실측에서 `spawn-student?character=유즈` 로
+/// 만든 자리가 **이름표는 유즈, 실제 말투는 남의 캐릭터**로 떴다(pane id 가 재사용된
+/// 자리였다). 그래서 claude 를 띄우기 **직전에** 한 번 더 박는다 — 학생 명령 셰임이
+/// 쓰는 것과 같은 창구고, respawn 없이 override 파일만 갱신한다.
+/// `sid` 는 이사 전용 — 학생의 **원 대화 세션 id** 를 주면 서버가 그 sid 에
+/// 캐릭터를 바인딩+수동 표식으로 못박아, resume 뒤의 복원·명단 검사가 이사 온
+/// 학생을 개명하지 못한다(2026-08-31 실측: 시로코가 왕복에서 케이로 돌아왔다).
+/// 낡은 서버는 파라미터를 몰라도 무시할 뿐 오류가 아니다.
+pub fn repersona(
+    base: &str,
+    pane: &str,
+    character: &str,
+    sid: Option<&str>,
+    token: Option<&str>,
+) -> Result<()> {
+    let mut u = format!(
+        "{}/repersona?surface={}&character={}",
+        base.trim_end_matches('/'),
+        urlencode(pane).replace('%', "%25").replace("%2525", "%25"),
+        urlencode(character)
+    );
+    if let Some(s) = sid.filter(|s| !s.is_empty()) {
+        u.push_str("&sid=");
+        u.push_str(&urlencode(s));
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("repersona runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        req.send().await.context("repersona 요청")?;
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
+/// 출발지의 캐릭터 테마 선택(`character_theme` + 고른 명단 JSON)을 목적지에
+/// 재현한다(`POST /term/character-theme`). 이사 때 안 실으면 도착지 기계의 제
+/// 테마·명단으로 배정·복원이 돌아 학생이 다른 얼굴로 뜬다(2026-08-31 지적
+/// 「이사시켜봤는데 테마 적용이 안 되네」). 실패는 Err 로 알리되 호출부는 경고만
+/// 하고 이사를 계속한다 — 색·명단 문제일 뿐 대화는 무사하다.
+pub fn push_character_theme(
+    base: &str,
+    theme_id: &str,
+    picks_json: &str,
+    token: Option<&str>,
+) -> Result<()> {
+    let u = format!(
+        "{}/term/character-theme?theme={}",
+        base.trim_end_matches('/'),
+        urlencode(theme_id)
+    );
+    let body = picks_json.as_bytes().to_vec();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("theme runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).body(body);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("테마 동행 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(())
+}
+
+/// 테마 팩 zip 을 도착지에 푼다(`POST /term/character-theme?pack=1`) — 도착지에
+/// 그 팩이 없어 push_character_theme 가 거절됐을 때 팩을 실어 나르는 두 번째 호출.
+/// 성공 시 풀린 테마 id.
+pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<String> {
+    let u = format!("{}/term/character-theme?pack=1", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("pack runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            // 그림 뭉치 수십 MB 가 터널을 타면 15초는 짧다.
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).body(zip);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("테마 팩 운반 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(resp
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
+
+// --- 릴레이(중계소) 클라이언트 ---------------------------------------------
+// 셋 다 X-Relay-Token 인증(사내 공용 토큰). ⚠️토큰은 ASCII 만 — HTTP 헤더가
+// latin-1 이라 한글 토큰은 헤더에서 깨져 무조건 401 이 난다(2026-09-01 실측).
+
+/// 공용: 릴레이에 요청 하나 보내고 `{ok:true}` 응답을 확인한다.
+fn relay_call(
+    method: reqwest::Method,
+    url: &str,
+    token: Option<&str>,
+    body: Option<Vec<u8>>,
+    json: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("relay runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("http client")?;
+        let mut req = client.request(method, url);
+        if let Some(t) = token {
+            req = req.header("x-relay-token", t);
+        }
+        if let Some(j) = json {
+            // reqwest 가 json feature 없이 빌드돼(.json 미존재) 손으로 직렬화한다.
+            req = req
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&j).unwrap_or_default());
+        } else if let Some(b) = body {
+            req = req.body(b);
+        }
+        let r = req.send().await.context("릴레이 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(resp)
+}
+
+/// `POST /relay/register` — 이 기계와 살아 있는 세션 목록을 중계소에 올린다(upsert).
+/// sessions 는 `[{sid,name,status}]`. advertise 는 중계소가 이 기계로 배달할 때 칠 주소.
+pub fn relay_register(
+    base: &str,
+    token: Option<&str>,
+    machine_id: &str,
+    account: &str,
+    advertise_base: &str,
+    advertise_token: Option<&str>,
+    sessions: &[serde_json::Value],
+) -> Result<()> {
+    let u = format!("{}/relay/register", base.trim_end_matches('/'));
+    relay_call(
+        reqwest::Method::POST,
+        &u,
+        token,
+        None,
+        Some(serde_json::json!({
+            "machine_id": machine_id,
+            "account": account,
+            "base": advertise_base,
+            "token": advertise_token.unwrap_or(""),
+            "sessions": sessions,
+        })),
+    )
+    .map(|_| ())
+}
+
+/// `GET /relay/sessions` — 중계소 명단. `(machine, sid, name)` 목록으로 돌려준다.
+pub fn relay_sessions(base: &str, token: Option<&str>) -> Result<Vec<(String, String, String)>> {
+    let u = format!("{}/relay/sessions", base.trim_end_matches('/'));
+    let resp = relay_call(reqwest::Method::GET, &u, token, None, None)?;
+    Ok(resp
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some((
+                        r.get("machine")?.as_str()?.to_string(),
+                        r.get("sid")?.as_str()?.to_string(),
+                        r.get("name")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `POST /relay/send` — 중계소를 거쳐 대상 세션으로 보낸다. from_account 를 정직하게
+/// 대면 계정이 다른 상대에겐 릴레이가 부탁 봉투를 강제한다.
+pub fn relay_send(
+    base: &str,
+    token: Option<&str>,
+    to_sid: &str,
+    from_name: &str,
+    from_sid: &str,
+    from_account: &str,
+    from_machine: &str,
+    body: &str,
+) -> Result<()> {
+    let u = format!(
+        "{}/relay/send?to_sid={}&from_name={}&from_sid={}&from_account={}&from_machine={}",
+        base.trim_end_matches('/'),
+        urlencode(to_sid),
+        urlencode(from_name),
+        urlencode(from_sid),
+        urlencode(from_account),
+        urlencode(from_machine),
+    );
+    relay_call(
+        reqwest::Method::POST,
+        &u,
+        token,
+        Some(body.as_bytes().to_vec()),
+        None,
+    )
+    .map(|_| ())
+}
+
+/// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
+/// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
+/// (2026-08-27 사용자 지적: 「옮기면 왜 테마가 없어져」).
+pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
+    let u = format!("{}/term/panes", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let list: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.ok()?;
+        serde_json::from_str(&r.text().await.ok()?).ok()
+    })?;
+    list.as_array()?.iter().find_map(|row| {
+        (row.get("id")?.as_str()? == pane)
+            .then(|| row.get("name")?.as_str().map(str::to_string))
+            .flatten()
+    })
+}
+
+/// Read-only appearance fetch used by desktop mirrors. The bounded response
+/// keeps a corrupt or incompatible host from filling the viewer's memory.
+pub fn fetch_mirror_appearance(base: &str, path: &str) -> Result<Vec<u8>> {
+    let route = path.split('?').next().unwrap_or_default();
+    anyhow::ensure!(matches!(route, "/design-tokens" | "/character-sprite" | "/character-sprite-status"), "unsupported appearance route");
+    let auth = connection_auth_token(base);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none()).build()?;
+        let mut request = client.get(format!("{}{path}", base.trim_end_matches('/')));
+        if let Some(token) = auth { request = request.header("x-kasa-token", token); }
+        let mut response = request.send().await?.error_for_status()?;
+        const MAX: usize = 8 << 20;
+        anyhow::ensure!(response.content_length().unwrap_or(0) <= MAX as u64, "appearance response too large");
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(body.len() + chunk.len() <= MAX, "appearance response too large");
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    })
+}
+
+/// Transfer the image to the machine that owns the harness before asking that
+/// machine to paste. The viewer's clipboard is never visible to the host TUI.
+pub fn paste_remote_image(base: &str, surface: &str, bytes: Vec<u8>) -> Result<()> {
+    anyhow::ensure!(!surface.is_empty(), "missing image target");
+    anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 32 << 20, "image must be at most 32 MiB");
+    let auth = connection_auth_token(base);
+    let url = format!("{}/paste-image?surface={}", base.trim_end_matches('/'), urlencode(surface));
+    // 고정 20초는 32MiB 까지 받는 업로드에 1.6MiB/s 를 요구한다. 네트워크 메모리가 바닥난 기계의 루프백은
+    // 3MiB 에 37초가 걸렸고(2026-10-07) 그 길은 느린 중계에서도 같다 — 안 닿는 기계는 연결 단계에서 10초 안에
+    // 거르고, 전송은 최소 64KiB/s 를 기준으로 크기에 맞춰 준다.
+    let transfer = Duration::from_secs(20 + bytes.len() as u64 / (64 << 10));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(transfer)
+            .redirect(reqwest::redirect::Policy::none()).build()?;
+        let mut request = client.post(url).header("content-type", "application/octet-stream").body(bytes);
+        if let Some(token) = auth { request = request.header("x-kasa-token", token); }
+        let response = request.send().await?.error_for_status()?;
+        let value: serde_json::Value = response.json().await?;
+        anyhow::ensure!(value.get("ok").and_then(|v| v.as_bool()) == Some(true),
+            "{}", value.get("error").and_then(|v| v.as_str()).unwrap_or("원본 기기에 이미지를 붙이지 못했어"));
+        Ok(())
+    })
+}
+
+pub fn connection_auth_token(base: &str) -> Option<String> {
+    let normalized = reqwest::Url::parse(base).ok()?;
+    links().lock().ok()?.values()
+        .filter(|link| reqwest::Url::parse(&link.base).ok().as_ref() == Some(&normalized))
+        .find_map(|link| link.auth_token.clone())
+}
+
+/// 원격 pane 이 지금 쥔 claude(또는 codex) 세션 id — 그 기계의 `GET /pane-session`
+/// (bound transcript stem). **원격에서 태어난 학생**의 거울은 이 창이 sid 를 모르므로
+/// 데려오기(`migrate … local`)가 여기서 묻는다(2026-09-02 코유키 감사: 「sid 없음으로
+/// 거부 — 수동 bind-transcript 없이 데려와야」). 미바인딩·미지정은 None.
+pub fn remote_pane_session(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
+    let u = format!(
+        "{}/pane-session?pane={}",
+        base.trim_end_matches('/'),
+        urlencode(pane)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let text = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        r.text().await.ok()
+    })?;
+    let sid = text.trim().to_string();
+    (!sid.is_empty()).then_some(sid)
+}
+
+/// 원격 GUI pane 을 닫는다(`POST /close-pane`). 데려오기(`migrate … local`) 뒤에
+/// 부른다 — `kill_remote` 는 세션의 keep 참조만 놓는데 GUI pane 은 앱이 제 Arc 를
+/// 쥐고 있어 셸이 안 죽고, 그 기계엔 학생 이름표만 남은 빈 pane 이 좀비로 선다
+/// (2026-09-02 2-앱 리그 실측: 데려온 뒤 원격에 「Resume this session with」 셸이 남았다).
+///
+/// `kill` — 되살리기 대열에서도 걷어 진짜 끝낸다(데려오기 뒤). false 면 그 기계에서
+/// 사람이 pane 을 닫은 것과 같아 셸이 되살리기 대열에 남는다(Info 의 pane 닫기).
+/// 낡은 원격은 그 인자를 몰라 어느 쪽이든 닫기만 한다.
+pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool) -> Result<()> {
+    let connection_token = token.is_none().then(|| connection_auth_token(base)).flatten();
+    let token = token.or(connection_token.as_deref());
+    let u = format!(
+        "{}/close-pane?surface={}{}",
+        base.trim_end_matches('/'),
+        urlencode(pane),
+        if kill { "&kill=1" } else { "" }
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("close runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 pane 닫기 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(())
+}
+
+/// 그 기계의 창 없는 웹 셸(`web-…`)을 놓는다(`DELETE /term/session`). `close-pane` 이 아니라
+/// 이 창구를 쓰는 이유: 옛 판의 `close-pane` 은 웹 셸에 ok 를 주고도 셸을 안 풀었다 — 이 창구는
+/// 옛 판에서도 실제로 놓는다(2026-09-28 맥미니 실측 `released:true`). 누가 화면을 열어 두었으면
+/// 셸은 그 화면이 닫힐 때 끝난다.
+pub fn release_remote_web_shell(base: &str, id: &str) -> Result<bool> {
+    anyhow::ensure!(id.starts_with("web-"), "{id} 은 웹 셸이 아니다");
+    let token = connection_auth_token(base);
+    let u = format!("{}/term/session?pane={}", base.trim_end_matches('/'), urlencode(id));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("release runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.delete(&u);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 웹 셸 놓기 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!("{}", v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유"));
+    }
+    Ok(v.get("released").and_then(|x| x.as_bool()) == Some(true))
+}
+
+/// 그 기계의 HTTP 창구를 GET 으로 읽는다 — 파일트리·깃 패널이 저쪽 것을 그대로 싣는다.
+pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::Value> {
+    remote_get_json_bounded(base, path_and_query, 16 * 1024 * 1024)
+}
+
+pub fn remote_get_json_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<serde_json::Value> {
+    let token = connection_auth_token(base);
+    let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("get runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let mut r = req.send().await.context("원격 GET 요청")?;
+        let status = r.status();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}");
+        }
+        anyhow::ensure!(r.content_length().is_none_or(|n| n <= max_bytes as u64), "원격 응답 크기 초과");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = r.chunk().await.context("원격 응답 읽기")? {
+            anyhow::ensure!(bytes.len().saturating_add(chunk.len()) <= max_bytes, "원격 응답 크기 초과");
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).context("원격 답 해석")
+    })
+}
+
+/// 그 기계의 HTTP 창구에 POST 한다 — 읽기만 하던 길(`remote_get_json`)의 짝이다.
+///
+/// 깃 패널이 다른 기기 레포를 **읽기만** 하고 고치지는 못하던 자리를 위해 열었다. 그
+/// 경로는 이 기계에 없으니 여기서 git 을 돌 수는 없고, 그 기계에 시키는 길이 필요하다.
+/// 시간 상한을 읽기보다 길게 두는 이유는 push 가 네트워크를 타기 때문이다.
+pub fn remote_post_json(base: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    let token = connection_auth_token(base);
+    let u = format!("{}{}", base.trim_end_matches('/'), path);
+    let body = body.clone();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("post runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(90))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).json(&body);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 POST 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}: {text}");
+        }
+        serde_json::from_str(&text).context("원격 답 해석")
+    })
+}
+
+/// 그 기계의 파일 하나를 통째로 받는다(4MB 상한은 저쪽이 건다).
+pub fn remote_get_bytes(base: &str, path_and_query: &str) -> Result<Vec<u8>> {
+    remote_get_bytes_bounded(base, path_and_query, 32 * 1024 * 1024)
+}
+
+pub fn remote_get_bytes_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    let token = connection_auth_token(base);
+    let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("get runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let mut r = req.send().await.context("원격 파일 요청")?;
+        let status = r.status();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}: {}", r.text().await.unwrap_or_default());
+        }
+        anyhow::ensure!(r.content_length().is_none_or(|n| n <= max_bytes as u64), "원격 파일 크기 초과");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = r.chunk().await.context("원격 파일 본문")? {
+            anyhow::ensure!(bytes.len().saturating_add(chunk.len()) <= max_bytes, "원격 파일 크기 초과");
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    })
+}
+
+/// 원격 앱의 `/cmd` 창구 — 소켓 명령(`window.close`·`window.rename` 등)을 HTTP 로 보낸다.
+/// 다른 기기 방 카드의 ×·이름 바꾸기가 이 길로 간다(2026-09-17). 허용 목록 밖은 그쪽이
+/// 거절한다. 답의 `ok` 가 거짓이면 그 사유를 오류로 돌려준다.
+pub fn remote_cmd(base: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let token = connection_auth_token(base);
+    let u = format!("{}/cmd", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("cmd runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client
+            .post(&u)
+            .json(&serde_json::json!({ "method": method, "params": params }));
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 cmd 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let why = v
+            .get("error")
+            .map(|e| e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string()))
+            .unwrap_or_else(|| "알 수 없는 이유".into());
+        anyhow::bail!("{why}");
+    }
+    Ok(v)
+}
+
+/// 원격 pane 의 (model, effort) — `/term/panes` 행의 `model`·`effort`. 낡은 원격은
+/// 그 필드가 없어 None — 부른 쪽은 그때 기본값으로 물러선다.
+pub fn remote_pane_cfg(base: &str, pane: &str, token: Option<&str>) -> Option<(String, String)> {
+    let u = format!("{}/term/panes", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let list: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.ok()?;
+        serde_json::from_str(&r.text().await.ok()?).ok()
+    })?;
+    let row = list
+        .as_array()?
+        .iter()
+        .find(|row| row.get("id").and_then(|v| v.as_str()) == Some(pane))?;
+    let model = row.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let effort = row.get("effort").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    (!model.is_empty() || !effort.is_empty()).then_some((model, effort))
+}
+
+/// 원격 기계에 그 레포를 **있게** 만든다 — 없으면 clone, 뒤처졌으면 fast-forward.
+/// 이사 전에 부른다: 대화만 건너가고 코드가 없거나 옛것이면 학생이 딴 세상에서 깬다.
+/// 원격에 안 올린 변경이 있으면 서버가 거부하고 그 사유가 그대로 올라온다.
+pub fn ensure_repo(
+    base: &str,
+    path: &str,
+    url: Option<&str>,
+    branch: Option<&str>,
+    token: Option<&str>,
+) -> Result<String> {
+    let mut u = format!(
+        "{}/term/repo?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    if let Some(g) = url.filter(|s| !s.is_empty()) {
+        u.push_str(&format!("&url={}", urlencode(g)));
+    }
+    if let Some(b) = branch.filter(|s| !s.is_empty()) {
+        u.push_str(&format!("&branch={}", urlencode(b)));
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("repo runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("레포 준비 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 레포 준비 실패: {}",
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("?");
+    let branch = v.get("branch").and_then(|x| x.as_str()).unwrap_or("?");
+    let head = v.get("head").and_then(|x| x.as_str()).unwrap_or("?");
+    // 저쪽이 작업 중이라 파일 갈아끼우기를 건너뛴 것은 사고가 아니라 「그쪽 작업을
+    // 지켰다」는 뜻이다 — 이 문장이 이사 화면에 그대로 뜨므로 사람 말로 적는다.
+    if action == "kept-dirty" {
+        let n = v.get("dirty").and_then(|x| x.as_u64()).unwrap_or(0);
+        return Ok(format!(
+            "코드는 받아만 뒀다 — 저쪽이 작업 중({n}개)이라 파일은 그대로 ({branch} @{head})"
+        ));
+    }
+    Ok(format!("{action} ({branch} @{head})"))
+}
+
+/// 이사(migrate)의 대화 운반 — claude jsonl 하나를 원격 호스트의
+/// `/term/transcript` 로 올린다. 동기 — 성공/실패가 호출 시점에 확정된다.
+///
+/// `remote_cwd` 는 **원격 기계 기준** 경로다. 저장 위치(claude projects 슬러그)를
+/// 서버가 그 경로로 계산하므로, 이어질 원격 스폰의 cwd 와 같아야 resume 이 찾는다.
+pub fn upload_transcript(
+    base: &str,
+    remote_cwd: &str,
+    sid: &str,
+    jsonl: &std::path::Path,
+    token: Option<&str>,
+    force: bool,
+) -> Result<u64> {
+    let bytes = std::fs::read(jsonl)
+        .with_context(|| format!("대화 파일을 못 읽었어요: {}", jsonl.display()))?;
+    let n = bytes.len() as u64;
+    let mut url = format!(
+        "{}/term/transcript?cwd={}&sid={}",
+        base.trim_end_matches('/'),
+        urlencode(remote_cwd),
+        urlencode(sid)
+    );
+    if force {
+        url.push_str("&force=1");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("upload runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url).body(bytes);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("대화 업로드 요청")?;
+        let status = r.status();
+        // reqwest 는 json 피처 없이 들어와 있다 — text 로 받아 직접 파싱한다.
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "대화 업로드 거부: {}",
+            resp.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(n)
+}
+
+/// 블로킹 HTTP 한 방 — 이 파일의 원격 호출 관례(현재 스레드 런타임, 실패가
+/// 호출 시점에 확정)를 한 곳으로 모은다.
+fn blocking_get(url: &str, token: Option<&str>, timeout: Duration) -> Result<(u16, Vec<u8>)> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("http client")?;
+        let mut req = client.get(url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = r.status().as_u16();
+        let body = r.bytes().await.unwrap_or_default().to_vec();
+        Ok((status, body))
+    })
+}
+
+/// 역이사의 대화 운반 — 원격 호스트의 jsonl 을 통짜로 받아 온다.
+///
+/// 옛 바이너리 폴백: `GET /term/transcript` 가 없는(404) 호스트에는
+/// `GET /session-transcript-raw`(전부터 있던 JSON 래핑 창구)로 물러선다 —
+/// 기계의 프로그램이 낡았다고 학생을 못 데려오면 안 된다.
+pub fn download_transcript(
+    base: &str,
+    remote_cwd: &str,
+    sid: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>> {
+    let base = base.trim_end_matches('/');
+    let url = format!(
+        "{base}/term/transcript?cwd={}&sid={}",
+        urlencode(remote_cwd),
+        urlencode(sid)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(180))?;
+    if status == 200 && !body.is_empty() {
+        return Ok(body);
+    }
+    if status != 404 {
+        anyhow::bail!(
+            "대화 내려받기 실패(HTTP {status}): {}",
+            String::from_utf8_lossy(&body[..body.len().min(200)])
+        );
+    }
+    let url = format!(
+        "{base}/session-transcript-raw?id={}&cwd={}",
+        urlencode(sid),
+        urlencode(remote_cwd)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(180))?;
+    if status != 200 {
+        anyhow::bail!("옛 창구도 실패(HTTP {status}) — 그 기계의 프로그램이 너무 낡았어요");
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).context("session-transcript-raw 응답 파싱")?;
+    let raw = v
+        .get("raw")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| anyhow!("응답에 raw 가 없어요"))?;
+    Ok(raw.as_bytes().to_vec())
+}
+
+/// 원격 기계의 Codex 대화(rollout)를 내려받는다 — 역이사의 codex 판.
+///
+/// `Ok(None)` = 그 기계에 그 대화가 없다(창구 자체가 없는 낡은 기계도 같은 404 라
+/// 여기로 온다 — 부르는 쪽이 claude 대화 실패와 합쳐 한 문장으로 말한다).
+/// 반환은 (Codex home 기준 상대경로, rollout 바이트) — 상대경로가 있어야 도착지가
+/// 같은 자리(`sessions/…`)에 앉힌다.
+pub fn fetch_codex_session(
+    base: &str,
+    sid: &str,
+    token: Option<&str>,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let url = format!(
+        "{}/term/codex-session?sid={}",
+        base.trim_end_matches('/'),
+        urlencode(sid)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = r.status().as_u16();
+        if status == 404 {
+            return Ok(None);
+        }
+        let rel = r
+            .headers()
+            .get("x-kasa-codex-rel")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = r.bytes().await.unwrap_or_default().to_vec();
+        if status != 200 {
+            anyhow::bail!(
+                "Codex 대화 내려받기 실패(HTTP {status}): {}",
+                String::from_utf8_lossy(&body[..body.len().min(200)])
+            );
+        }
+        let rel = rel.ok_or_else(|| anyhow!("응답에 x-kasa-codex-rel 헤더가 없다"))?;
+        Ok(Some((rel, body)))
+    })
+}
+
+/// Codex 대화(rollout)를 원격 Codex home 의 같은 자리에 앉힌다 — 순방향 이사.
+/// 도착지 검증·충돌 보관 정책은 저쪽 창구(codexhome::install_codex_rollout)가 맡는다.
+pub fn push_codex_session(
+    base: &str,
+    sid: &str,
+    rel: &str,
+    bytes: Vec<u8>,
+    token: Option<&str>,
+) -> Result<String> {
+    let url = format!(
+        "{}/term/codex-session?sid={}&rel={}",
+        base.trim_end_matches('/'),
+        urlencode(sid),
+        urlencode(rel)
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let resp: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url).body(bytes);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("Codex 대화 업로드 요청")?;
+        let status = r.status().as_u16();
+        if status == 404 || status == 405 {
+            anyhow::bail!(
+                "저쪽 프로그램이 낡아 Codex 이사 창구가 없다 — 그 기계를 갱신하고 다시"
+            );
+        }
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        }))
+    })?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "Codex 대화 업로드 거부: {}",
+            resp.get("error").and_then(|v| v.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(resp
+        .get("note")
+        .and_then(|v| v.as_str())
+        .unwrap_or("앉힘")
+        .to_string())
+}
+
+/// 원격 레포의 「그 기계에만 있는 것」 — 역이사 git 관문의 재료.
+/// (dirty 줄 수, 미push 커밋 수, origin, branch). 창구가 없는 옛 바이너리는
+/// None — 관문을 못 세우는 것이지 이사가 불가능한 게 아니라서, 호출부가
+/// force 요구로 갈음한다.
+/// 저쪽에 그 폴더가 있나 + 저쪽 홈. 창구가 없는 옛 판이면 `None` — 부르는 쪽이
+/// 「있다고 치고」 옛 동작으로 간다.
+pub fn remote_path_probe(
+    base: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Option<(bool, String)>> {
+    let url = format!(
+        "{}/term/path?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(20))?;
+    if status == 404 || status == 405 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("path 상태 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 폴더 확인 실패: {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(Some((
+        v.get("exists").and_then(|b| b.as_bool()).unwrap_or(true),
+        v.get("home").and_then(|h| h.as_str()).unwrap_or("").to_string(),
+    )))
+}
+
+pub fn remote_repo_state(
+    base: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Option<(u64, u64, String, String)>> {
+    let url = format!(
+        "{}/term/repo?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(20))?;
+    if status == 404 || status == 405 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("repo 상태 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 레포 상태 조회 실패: {}",
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    if v.get("exists").and_then(|b| b.as_bool()) == Some(false) {
+        return Ok(Some((0, 0, String::new(), String::new())));
+    }
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let t = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Ok(Some((n("dirty"), n("unpushed"), t("origin"), t("branch"))))
+}
+
+/// 이사(agent-stop)로 학생을 내준 pane 들 — HTTP 핸들러는 App 상태(pane 의 sid
+/// 주장)를 못 만지므로 여기 적어 두고, GUI 틱이 걷어 간다. 안 걷으면 세션 저장이
+/// 그 대화를 「이 pane 것」으로 계속 굳혀, 재시작 복원이 **남의 기계로 이사 간
+/// 대화를 다시 연다**(2026-08-30 실측: 미니 재기동이 맥북으로 간 미도리의 대화를
+/// 열어 이중 열림).
+static MIGRATED_AWAY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn note_migrated_away(pane: &str) {
+    if let Ok(mut q) = MIGRATED_AWAY.lock() {
+        if !q.iter().any(|p| p == pane) {
+            q.push(pane.to_string());
+        }
+    }
+}
+
+pub fn drain_migrated_away() -> Vec<String> {
+    MIGRATED_AWAY
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
+}
+
+/// 원격 세션의 에이전트를 곱게 끈다. Ok(Some(bypass)) = 껐다(권한 모드 포함),
+/// Ok(None) = 이미 꺼져 있었다. 창구가 없는 옛 바이너리는 Err 로 알린다 —
+/// 확인 없이 progressing 하면 반쯤 산 claude 와 로컬 resume 이 같은 대화를
+/// 다툰다(순방향 9-pane 사고의 원형).
+pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>, force: bool) -> Result<Option<bool>> {
+    // 강행은 곱게 못 끈 하네스를 저쪽이 강제로 끝내게 한다(Windows 호스트). 옛 판은 이 값을 모르고 무시한다.
+    let url = format!(
+        "{}/term/agent-stop?pane={}{}",
+        base.trim_end_matches('/'),
+        urlencode(pane),
+        if force { "&force=1" } else { "" }
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let (status, body): (u16, Vec<u8>) = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("POST {url}"))?;
+        let status = r.status().as_u16();
+        Ok::<_, anyhow::Error>((status, r.bytes().await.unwrap_or_default().to_vec()))
+    })?;
+    if status == 404 || status == 405 {
+        anyhow::bail!("그 기계의 프로그램이 낡아 곱게 끄는 창구가 없어요 — 저쪽을 갱신하고 다시");
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("agent-stop 응답 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 에이전트 종료 실패: {}",
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    if v.get("stopped").and_then(|b| b.as_bool()) == Some(true) {
+        Ok(Some(
+            v.get("bypass").and_then(|b| b.as_bool()).unwrap_or(false),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 파일 싱크 스냅샷의 메타 — `reposync::Snapshot` 에서 bundle 만 뺀 것.
+pub struct RepoSyncMeta {
+    pub head: String,
+    pub sync: String,
+    pub branch: String,
+    pub origin: String,
+    pub dirty: bool,
+}
+
+/// `GET /term/repo-sync` 의 세 갈래 — 역이사가 이 결과로 길을 고른다.
+pub enum RepoSyncFetch {
+    /// 창구가 없는 옛 바이너리(404/405) — 옛 관문(막아 세우기)으로 물러선다.
+    Unsupported,
+    /// 그 기계에만 있는 것이 없다 — 실어 올 것 없이 그대로 진행.
+    Nothing,
+    /// 스냅샷이 실려 왔다 — 로컬 레포에 apply 하면 같은 상태가 된다.
+    Bundle(RepoSyncMeta, Vec<u8>),
+}
+
+/// 원격 기계의 「그 기계에만 있는 것」을 bundle 로 받아 온다(역이사의 파일 싱크).
+pub fn fetch_repo_sync(base: &str, path: &str, token: Option<&str>) -> Result<RepoSyncFetch> {
+    let url = format!(
+        "{}/term/repo-sync?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    // bundle 뜨기는 큰 레포에서 수십 초다 — 대화 내려받기와 같은 여유를 준다.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let (status, headers, body): (u16, Vec<(String, String)>, Vec<u8>) = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&url);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = r.status().as_u16();
+        let headers = r
+            .headers()
+            .iter()
+            .filter(|(k, _)| k.as_str().starts_with("x-kasa-") || k.as_str() == "content-type")
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = r.bytes().await.unwrap_or_default().to_vec();
+        Ok::<_, anyhow::Error>((status, headers, body))
+    })?;
+    if status == 404 || status == 405 {
+        return Ok(RepoSyncFetch::Unsupported);
+    }
+    let h = |k: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    if h("content-type").starts_with("application/octet-stream") {
+        return Ok(RepoSyncFetch::Bundle(
+            RepoSyncMeta {
+                head: h("x-kasa-head"),
+                sync: h("x-kasa-sync"),
+                branch: h("x-kasa-branch"),
+                origin: h("x-kasa-origin"),
+                dirty: h("x-kasa-dirty") == "1",
+            },
+            body,
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("repo-sync 응답 파싱")?;
+    if v.get("nothing").and_then(|b| b.as_bool()) == Some(true) {
+        return Ok(RepoSyncFetch::Nothing);
+    }
+    anyhow::bail!(
+        "원격 스냅샷 실패: {}",
+        v.get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("알 수 없는 이유")
+    )
+}
+
+/// 로컬에서 떠낸 스냅샷을 원격 기계의 레포에 재현한다(순방향 이사의 파일 싱크).
+/// Ok(None) = 창구가 없는 옛 바이너리 — 호출부가 옛 관문으로 물러선다.
+pub fn push_repo_sync(
+    base: &str,
+    path: &str,
+    meta: &RepoSyncMeta,
+    bundle: Vec<u8>,
+    token: Option<&str>,
+    force: bool,
+) -> Result<Option<String>> {
+    let mut url = format!(
+        "{}/term/repo-sync?path={}&head={}&sync={}&branch={}&dirty={}",
+        base.trim_end_matches('/'),
+        urlencode(path),
+        urlencode(&meta.head),
+        urlencode(&meta.sync),
+        urlencode(&meta.branch),
+        if meta.dirty { "1" } else { "0" }
+    );
+    if force {
+        url.push_str("&force=1");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("http runtime")?;
+    let (status, body): (u16, Vec<u8>) = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&url).body(bundle);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.with_context(|| format!("POST {url}"))?;
+        let status = r.status().as_u16();
+        Ok::<_, anyhow::Error>((status, r.bytes().await.unwrap_or_default().to_vec()))
+    })?;
+    if status == 404 || status == 405 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("repo-sync 응답 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 적용 실패: {}",
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(Some(
+        v.get("applied")
+            .and_then(|a| a.as_str())
+            .unwrap_or("적용됨")
+            .to_string(),
+    ))
+}
+
+// ── 다른 기계의 계정 칸 ─────────────────────────────────────────────────────
+//
+// 계정 등록·자동 전환은 **학생이 실제로 도는 기계**에서 일어나야 한다. 본진
+// 디스패치를 켠 뒤로 claude 는 본진에서 태어나는데, 계정 설정·사용량 조회·전환은
+// 기계마다 따로인 로컬 상태라 그대로 갈라져 있었다(2026-09-05 실측: 작업대는
+// 슬롯 4개·자동전환 켜짐·80%, 본진은 슬롯 0개·꺼짐·90%). 등록을 아무리 반복해도
+// 실제로 한도가 차는 기계에는 아무것도 없었다.
+//
+// 그래서 설정창이 본진의 계정 칸을 직접 다룬다. 자격증명 자체는 절대 옮기지
+// 않는다 — Keychain 이름이 그 기계의 절대경로 해시라 기계마다 다르고, refresh
+// token 은 한 번 쓰면 교체돼 두 기계에 복제하면 먼저 갱신한 쪽이 다른 쪽 로그인을
+// 깨뜨린다. 오가는 것은 **목록·스위치·기준값과 OAuth 코드 한 줄**뿐이다.
+
+/// 다른 기계 설정창의 계정 칸 한 장.
+#[derive(Clone, Debug, Default)]
+pub struct RemoteAccounts {
+    /// `/settings/values` 의 `claude.accounts` 원문. 화면이 쓰는 모양 그대로라
+    /// 여기서 다시 조립하지 않는다.
+    pub accounts: Vec<serde_json::Value>,
+    pub active: String,
+    pub autoswitch: bool,
+    pub autoswitch_pct: f32,
+    /// 진행 중인 로그인 `(슬롯 id, 상태, 실패 이유)`. 상태는 `running` ·
+    /// `need_code` · `ok` · `error`.
+    pub login: Option<(String, String, Option<String>)>,
+}
+
+/// 그 기계의 계정 칸을 읽는다(`GET /settings/values`).
+pub fn fetch_accounts(base: &str, token: Option<&str>) -> Result<RemoteAccounts> {
+    let u = format!("{}/settings/values", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("accounts runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("계정 칸 조회")?;
+        let text = r.text().await.unwrap_or_default();
+        serde_json::from_str(&text).context("계정 칸 응답이 JSON 이 아니다")
+    })?;
+    let c = v.get("claude").cloned().unwrap_or_default();
+    let login = c.get("login").and_then(|l| {
+        let id = l.get("id")?.as_str()?.to_string();
+        let state = l.get("state")?.as_str()?.to_string();
+        let err = l.get("error").and_then(|e| e.as_str()).map(str::to_string);
+        Some((id, state, err))
+    });
+    Ok(RemoteAccounts {
+        accounts: c
+            .get("accounts")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        active: c.get("account").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+        autoswitch: c.get("autoswitch").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        autoswitch_pct: c
+            .get("autoswitch_pct")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(90.0) as f32,
+        login,
+    })
+}
+
+/// 그 기계 설정창의 버튼 하나를 누른다(`POST /settings/action`).
+///
+/// 실패 이유를 삼키지 않는다 — 「눌렀는데 아무 일도 안 남」이 이 화면에서 제일
+/// 비싼 상태라서다. 그 상태로 반복해 누른 것이 애초에 이 버그의 증상이었다.
+pub fn settings_action(
+    base: &str,
+    action: &str,
+    id: Option<&str>,
+    label: Option<&str>,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let v = settings_action_reply(base, action, id, label, token)?;
+    if v.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+        anyhow::bail!(
+            "{}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(v)
+}
+
+/// Typed callers need rejection codes and an acknowledgement, not an error string alone.
+pub fn settings_action_reply(
+    base: &str,
+    action: &str,
+    id: Option<&str>,
+    label: Option<&str>,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let inherited_token = token.is_none().then(|| connection_auth_token(base)).flatten();
+    let token = token.or(inherited_token.as_deref());
+    let u = format!("{}/settings/action", base.trim_end_matches('/'));
+    let mut body = serde_json::json!({ "action": action });
+    if let Some(id) = id {
+        body["id"] = serde_json::Value::String(id.to_string());
+    }
+    if let Some(label) = label {
+        body["label"] = serde_json::Value::String(label.to_string());
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("settings action runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        // reqwest 의 json feature 를 안 켠 빌드라 본문을 직접 만든다.
+        let mut req = client
+            .post(&u)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("설정 동작 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        let mut answer: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") })
+        });
+        if !status.is_success() {
+            if let Some(object) = answer.as_object_mut() {
+                object.insert("ok".into(), false.into());
+            } else {
+                answer = serde_json::json!({"ok":false,"error":format!("HTTP {status}")});
+            }
+        }
+        Ok::<_, anyhow::Error>(answer)
+    })?;
+    Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settings_action_reply_preserves_structured_rejection_and_acknowledgement() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                ("200 OK", r#"{"ok":false,"error":"choose an alias","error_code":"account_sync_ambiguous"}"#),
+                ("200 OK", r#"{"ok":true,"account_sync_identity":"fixture-identity"}"#),
+                ("503 Service Unavailable", r#"{"ok":true,"account_sync_identity":"fixture-identity"}"#),
+                ("200 OK", r#"{"ok":false,"error":"choose an alias","error_code":"account_sync_ambiguous"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut input = Vec::new();
+                let mut byte = [0; 1];
+                while !input.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    input.push(byte[0]);
+                }
+                let header = String::from_utf8(input).unwrap();
+                let length: usize = header.lines().find_map(|line| line.to_ascii_lowercase()
+                    .strip_prefix("content-length:").and_then(|length| length.trim().parse().ok())).unwrap();
+                let mut request = vec![0; length];
+                stream.read_exact(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                assert_eq!(request["action"], "claude-account-sync-v1");
+                assert_eq!(request["id"], "fixture-identity");
+                assert!(header.contains("fixture-token"));
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let call = || super::settings_action_reply(&base, "claude-account-sync-v1", Some("fixture-identity"), Some("fixture-label"), Some("fixture-token")).unwrap();
+        assert_eq!(call()["error_code"], "account_sync_ambiguous");
+        assert_eq!(call()["account_sync_identity"], "fixture-identity");
+        assert_eq!(call()["ok"], false);
+        assert!(super::settings_action(&base, "claude-account-sync-v1", Some("fixture-identity"), Some("fixture-label"), Some("fixture-token")).is_err());
+        server.join().unwrap();
+    }
+
+    fn identity_connection_test(mode: &'static str) {
+        use axum::{extract::{Query, WebSocketUpgrade, ws::Message as WsMessage}, routing::get, Router};
+        let stage = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (address_tx, address_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let server_stage = stage.clone();
+        let server_requests = requests.clone();
+        let server_inputs = inputs.clone();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                let listing_stage = server_stage.clone();
+                let app = Router::new()
+                    .route("/term/panes", get(move || {
+                        let stage = listing_stage.clone();
+                        async move {
+                            let rows = if stage.load(Ordering::Acquire) > 0 {
+                                serde_json::json!([
+                                    {"id":"%1","surface_key":"reused-by-someone-else"},
+                                    {"id":"%9","surface_key":"legacy:%1"}
+                                ])
+                            } else if mode == "reused" {
+                                serde_json::json!([{ "id":"%1","surface_key":"reused-by-someone-else" }])
+                            } else {
+                                serde_json::json!([{ "id":"%1","surface_key":"legacy:%1" }])
+                            };
+                            axum::Json(rows)
+                        }
+                    }))
+                    .route("/term/ws", get(move |Query(query): Query<std::collections::HashMap<String,String>>, upgrade: WebSocketUpgrade| {
+                        let stage = server_stage.clone();
+                        let requests = server_requests.clone();
+                        let inputs = server_inputs.clone();
+                        async move {
+                            upgrade.on_upgrade(move |mut socket| async move {
+                                let pane = query.get("pane").cloned().unwrap_or_default();
+                                requests.lock().unwrap().push((pane.clone(), query.get("surface_key").cloned()));
+                                let bad_handshake = mode == "mismatch" && stage.load(Ordering::Acquire) == 0;
+                                let key = if bad_handshake { "reused-by-someone-else" } else { "legacy:%1" };
+                                socket.send(WsMessage::Text(serde_json::json!({
+                                    "t":"size","cols":50,"rows":4,"id":pane,"surface_key":key
+                                }).to_string().into())).await.unwrap();
+                                let body = if bad_handshake { "FORBIDDEN SCREEN" } else if pane == "%9" { "VERIFIED MOVED SOURCE" } else { "VERIFIED ORIGINAL SOURCE" };
+                                let _ = socket.send(WsMessage::Binary(body.as_bytes().to_vec().into())).await;
+                                while let Some(Ok(message)) = socket.recv().await {
+                                    if let WsMessage::Binary(bytes) = message {
+                                        assert!(!bad_handshake, "input leaked before source key verification");
+                                        inputs.lock().unwrap().push(pane.clone());
+                                        if bytes.as_ref() == b"restart" { break; }
+                                    }
+                                }
+                            })
+                        }
+                    }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                address_tx.send(listener.local_addr().unwrap()).unwrap();
+                axum::serve(listener, app).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+            });
+        });
+        let address = address_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let local = format!("identified-{mode}-{}", uuid::Uuid::new_v4());
+        let spec = RemoteSpec { base: format!("http://{address}"), pane: Some("%1".into()),
+            cwd: None, token: None, identity: Default::default() };
+        let mirror = if mode == "reconnect" {
+            connect_view(spec, &local).unwrap()
+        } else {
+            restore_connection_identified(spec, &local, 80, 24, true,
+                crate::remote_restore::RestoreIdentity { surface_key: Some("legacy:%1".into()), ..Default::default() }).unwrap()
+        };
+        if mode == "reconnect" {
+            wait_remote_test(|| mirror.session.visible_text(4).contains("VERIFIED ORIGINAL SOURCE"));
+            assert_eq!(remote_surface_key(&local).as_deref(), Some("legacy:%1"));
+            stage.store(1, Ordering::Release);
+            mirror.session.send_bytes(b"restart").unwrap();
+        } else {
+            if mode == "mismatch" { mirror.session.send_bytes(b"queued until verified").unwrap(); }
+            wait_remote_test(|| connection_readiness(&local).is_some_and(|(_,_,error)| error.is_some()));
+            assert!(!connection_readiness(&local).unwrap().0);
+            assert_eq!(remote_surface_key(&local).as_deref(), Some("legacy:%1"),
+                "saving an offline/unverified restore must retain its expected source identity");
+            assert!(!mirror.session.visible_text(4).contains("FORBIDDEN"));
+            if mode == "reused" { assert!(requests.lock().unwrap().is_empty(), "opened a reused pane before resolving its key"); }
+            stage.store(1, Ordering::Release);
+            assert!(retry_connection(&local));
+        }
+        wait_remote_test(|| mirror.session.visible_text(4).contains("VERIFIED MOVED SOURCE"));
+        assert_eq!(remote_info(&local).unwrap().remote_id, "%9");
+        assert_eq!(remote_surface_key(&local).as_deref(), Some("legacy:%1"));
+        let opened = requests.lock().unwrap().clone();
+        assert_eq!(opened.last(), Some(&("%9".into(), Some("legacy:%1".into()))));
+        if mode == "mismatch" {
+            wait_remote_test(|| !inputs.lock().unwrap().is_empty());
+            assert!(inputs.lock().unwrap().iter().all(|id| id == "%9"));
+        }
+        drop(mirror);
+        let _ = stop_tx.send(());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn identified_restore_never_opens_a_reused_pane_number_and_tracks_the_source_key() {
+        identity_connection_test("reused");
+    }
+
+    #[test]
+    fn ordinary_mirror_reconnect_follows_the_first_source_key_to_its_new_number() {
+        identity_connection_test("reconnect");
+    }
+
+    #[test]
+    fn identified_restore_rejects_a_changed_handshake_key_and_holds_queued_input() {
+        identity_connection_test("mismatch");
+    }
+
+    fn wait_remote_test(mut predicate: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            assert!(std::time::Instant::now() < deadline, "remote test condition timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn resize_reconnect_replaces_history_for_legacy_and_keyed_hosts_without_replaying_input() {
+        use axum::{extract::{WebSocketUpgrade, ws::Message as WsMessage}, routing::get, Router};
+        for mode in ["legacy", "keyed", "missing-key"] {
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+            let (address_tx, address_rx) = std::sync::mpsc::channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let server_count = count.clone();
+            let server_inputs = inputs.clone();
+            let server = std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    let app = Router::new()
+                        .route("/term/panes", get(|| async {
+                            axum::Json(serde_json::json!([{"id":"resize-source", "surface_key":"same-source"}]))
+                        }))
+                        .route("/term/ws", get(move |upgrade: WebSocketUpgrade| {
+                            let count = server_count.clone();
+                            let inputs = server_inputs.clone();
+                            async move { upgrade.on_upgrade(move |mut socket| async move {
+                                let index = count.fetch_add(1, Ordering::AcqRel);
+                                assert!(index < 2, "same-size control caused a reconnect loop");
+                                let mut size = serde_json::json!({"t":"size", "cols":if index==0 {26} else {93}, "rows":4, "id":"resize-source"});
+                                if mode != "legacy" { size["surface_key"] = serde_json::json!("same-source"); }
+                                socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                let text = if index == 0 { b"OLD_NARROW_HISTORY\r\n\n\n\nOLD_SCREEN".as_slice() }
+                                    else { b"CANONICAL_WIDE_HISTORY\r\n\n\n\nNEW_SCREEN".as_slice() };
+                                socket.send(WsMessage::Binary(text.to_vec().into())).await.unwrap();
+                                // Duplicate handshakes at unchanged size are harmless.
+                                socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                while let Some(Ok(message)) = socket.recv().await {
+                                    if let WsMessage::Binary(bytes) = message {
+                                        let text = String::from_utf8(bytes.to_vec()).unwrap();
+                                        inputs.lock().unwrap().push(text.clone());
+                                        if text == "resize" {
+                                            size["cols"] = serde_json::json!(93);
+                                            if mode == "missing-key" { size.as_object_mut().unwrap().remove("surface_key"); }
+                                            socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                            let _ = socket.send(WsMessage::Binary(b"STALE_DELTA".to_vec().into())).await;
+                                        }
+                                    }
+                                }
+                            }) }
+                        }));
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    address_tx.send(listener.local_addr().unwrap()).unwrap();
+                    axum::serve(listener, app).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+                });
+            });
+            let address = address_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let local = format!("resize-{mode}-{}", uuid::Uuid::new_v4());
+            let mirror = connect_view(RemoteSpec { base: format!("http://{address}"), pane: Some("resize-source".into()),
+                cwd: None, token: None, identity: Default::default() }, &local).unwrap();
+            wait_remote_test(|| mirror.session.visible_text(10).contains("OLD_SCREEN"));
+            mirror.session.send_bytes(b"before").unwrap();
+            wait_remote_test(|| inputs.lock().unwrap().len() == 1);
+            assert_eq!(count.load(Ordering::Acquire), 1);
+            mirror.session.send_bytes(b"resize").unwrap();
+            wait_remote_test(|| mirror.session.visible_text(10).contains("NEW_SCREEN"));
+            mirror.session.send_bytes(b"after").unwrap();
+            wait_remote_test(|| inputs.lock().unwrap().len() == 3);
+            assert_eq!(*inputs.lock().unwrap(), ["before", "resize", "after"]);
+            assert_eq!(count.load(Ordering::Acquire), 2);
+            assert_eq!(mirror.session.size(), (93, 4));
+            let history: String = mirror.session.rows_above_live(100).iter()
+                .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
+                .collect::<Vec<_>>().join("\n");
+            let all = format!("{history}\n{}", mirror.session.visible_text(100));
+            assert!(all.contains("CANONICAL_WIDE_HISTORY"));
+            assert!(!all.contains("OLD_NARROW_HISTORY"), "RIS did not clear stale history");
+            assert!(!all.contains("STALE_DELTA"), "old-width queued bytes leaked into new snapshot");
+            drop(mirror);
+            let _ = stop_tx.send(());
+            server.join().unwrap();
+        }
+    }
+
+    async fn accept_retry_test(listener: &tokio::net::TcpListener) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                if let Ok(socket) = tokio_tungstenite::accept_async(stream).await { return socket; }
+            }
+        }).await.unwrap()
+    }
+
+    #[test]
+    fn open_view_seats_before_the_source_answers_and_takes_its_grid_later() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (answer, answer_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            answer_rx.recv().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"late-source"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"SEATED FIRST".to_vec().into())).await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            });
+        });
+        let local = format!("open-view-{}", uuid::Uuid::new_v4());
+        let started = std::time::Instant::now();
+        let mirror = open_view(RemoteSpec { base: format!("http://{address}"), pane: Some("late-source".into()),
+            cwd: None, token: None, identity: Default::default() }, &local).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "open_view waited for the source");
+        assert_eq!(mirror.remote_id, "late-source");
+        answer.send(()).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("SEATED FIRST"));
+        assert_eq!(mirror.session.size(), (40, 4));
+        drop(mirror);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn retry_connection_wakes_handshake_and_empty_stream_without_replacing_or_interrupting_ready_pty() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                // TCP connects, but this peer never answers the upgrade request.
+                let (stalled, _) = listener.accept().await.unwrap();
+                report.send("tcp").unwrap();
+                let mut no_frame = accept_retry_test(&listener).await;
+                drop(stalled);
+                no_frame.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"retry-target"}"#.into())).await.unwrap();
+                no_frame.send(Message::Binary(Vec::new().into())).await.unwrap();
+                report.send("empty").unwrap();
+                let mut ready = accept_retry_test(&listener).await;
+                drop(no_frame);
+                ready.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"retry-target"}"#.into())).await.unwrap();
+                ready.send(Message::Binary(b"READY RETAINED PTY".to_vec().into())).await.unwrap();
+                report.send("ready").unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), ready.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"same ready stream"),
+                    other => panic!("retry interrupted ready stream: {other:?}"),
+                }
+            });
+        });
+        let local = format!("retry-preserved-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("retry-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        let token = links().lock().unwrap()[&local].token;
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "tcp");
+        assert!(retry_connection(&local));
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "empty");
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(_, generation, _)| generation >= 1));
+        assert!(!connection_readiness(&local).unwrap().0, "empty binary cannot mark a pane ready");
+        assert!(retry_connection(&local));
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "ready");
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, _, _)| ready)
+            && mirror.session.visible_text(4).contains("READY RETAINED PTY"));
+        assert_eq!(links().lock().unwrap()[&local].token, token, "manual retry replaced the link");
+        assert!(!retry_connection(&local));
+        mirror.session.send_bytes(b"same ready stream").unwrap();
+        server.join().unwrap();
+        assert!(!retry_connection("nonexistent-retry-target"));
+    }
+
+    #[test]
+    fn pending_restore_refresh_only_consumes_its_requested_generation() {
+        let viewport = ViewportState::default();
+        viewport.refresh_generation.store(3, Ordering::Release);
+        assert!(!viewport.take_snapshot_refresh(4), "a stale retry must preserve a recovered stream");
+        viewport.refresh_generation.store(4, Ordering::Release);
+        assert!(viewport.take_snapshot_refresh(4));
+        assert!(!viewport.take_snapshot_refresh(4), "one request causes at most one reconnect");
+    }
+
+    #[test]
+    fn pending_restore_retry_refreshes_received_but_unapplied_frame_on_same_link() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut first = accept_retry_test(&listener).await;
+                first.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"pending-render-target"}"#.into())).await.unwrap();
+                first.send(Message::Binary(b"UNAPPLIED FRAME".to_vec().into())).await.unwrap();
+                report.send(()).unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), first.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"input before refresh"),
+                    other => panic!("unexpected first-stream input: {other:?}"),
+                }
+                report.send(()).unwrap();
+                let mut second = accept_retry_test(&listener).await;
+                drop(first);
+                second.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"pending-render-target"}"#.into())).await.unwrap();
+                second.send(Message::Binary(b"REFRESHED FRAME".to_vec().into())).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), second.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"input after refreshed frame"),
+                    other => panic!("unexpected control or lost refreshed stream: {other:?}"),
+                }
+            });
+        });
+        let local = format!("retry-unapplied-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("pending-render-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        let token = links().lock().unwrap()[&local].token;
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, _, _)| ready));
+        mirror.session.send_bytes(b"input before refresh").unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Deliberately leave the screen receiver undrained: transport readiness
+        // alone cannot prove the GUI applied this frame. The old retry was a
+        // no-op in precisely this state.
+        let generation = connection_readiness(&local).unwrap().1;
+        assert!(!retry_connection(&local));
+        assert!(retry_pending_restore(&local));
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, next, _)| ready && next > generation)
+            && mirror.session.visible_text(4).contains("REFRESHED FRAME"));
+        assert_eq!(links().lock().unwrap()[&local].token, token, "restore retry replaced the PTY link");
+        assert_eq!(remote_meta(&local).unwrap().1, "pending-render-target");
+        // The server must see this exactly once and must not see a replay of
+        // "input before refresh" from the previous connection.
+        mirror.session.send_bytes(b"input after refreshed frame").unwrap();
+        server.join().unwrap();
+        assert!(!retry_pending_restore("nonexistent-restore-target"));
+    }
+
+    #[test]
+    fn restore_stream_without_first_bytes_times_out_then_reconnects() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut silent = accept_retry_test(&listener).await;
+                silent.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"timeout-target"}"#.into())).await.unwrap();
+                report.send("size").unwrap();
+                let started = std::time::Instant::now();
+                // The server remains connected and quiet; only the first-frame
+                // deadline can cause this disconnect (no manual retry or gone).
+                let _ = tokio::time::timeout(Duration::from_secs(12), silent.next()).await.unwrap();
+                assert!(started.elapsed() >= Duration::from_secs(9));
+                report.send("expired").unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"timeout-target"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"AFTER FIRST FRAME TIMEOUT".to_vec().into())).await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            });
+        });
+        let local = format!("retry-deadline-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("timeout-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "size");
+        assert_eq!(received.recv_timeout(Duration::from_secs(12)).unwrap(), "expired");
+        assert!(connection_readiness(&local).unwrap().2.unwrap().contains("화면을 받지 못했어요"));
+        wait_remote_test(|| mirror.session.visible_text(4).contains("AFTER FIRST FRAME TIMEOUT"));
+        assert!(connection_readiness(&local).unwrap().0);
+        mirror.session.send_bytes(b"done").unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn restored_connection_waits_through_gone_even_after_a_live_frame() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"stable-target"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"BEFORE RESTART".to_vec().into())).await.unwrap();
+                let _ = socket.next().await;
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+                socket.close(None).await.unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+                socket.close(None).await.unwrap();
+                report.send("waiting").unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"stable-target"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"AFTER RESTART".to_vec().into())).await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            });
+        });
+        let local = format!("retry-gone-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("stable-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("BEFORE RESTART"));
+        mirror.session.send_bytes(b"restart").unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "waiting");
+        assert_eq!(remote_info(&local).unwrap().remote_id, "stable-target");
+        wait_remote_test(|| mirror.session.visible_text(4).contains("AFTER RESTART"));
+        assert!(mirror.session.screens.try_iter().all(|update| !update.eof));
+        mirror.session.send_bytes(b"done").unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn explicit_source_close_ends_restored_view_without_killing_or_retrying_source() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"closed-source"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"SOURCE STILL RUNNING".to_vec().into())).await.unwrap();
+                let _ = socket.next().await;
+                socket.send(Message::Text(r#"{"t":"source-closed"}"#.into())).await.unwrap();
+                while let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+                    if let Message::Text(text) = message { assert!(!text.contains("kill")); }
+                    else if matches!(message, Message::Close(_)) { break; }
+                }
+                // 닫힌 뒤 오는 접속은 전부 재시도로 친다 — 단 하나, 카사텀 창 안에서 검사를 돌리면
+                // 앱의 Info 패널이 창 프로세스 트리의 열린 포트 제목을 `GET / HTTP/1.0` 으로 찍어
+                // 보는데(app/kasaterm/src/info.rs `http_title`), 업그레이드 없는 그 모양만 흘린다.
+                // 창은 첫 재접속 대기(`reconnect_pause` 500ms)보다 길어야 한다 — 250ms 였을 때는
+                // 닫은 뒤에도 재접속하도록 일부러 망가뜨린 클라이언트를 한 번도 못 잡았다.
+                let window = tokio::time::Instant::now() + Duration::from_millis(1500);
+                while let Ok(Ok((mut extra, _))) = tokio::time::timeout_at(window, listener.accept()).await {
+                    use tokio::io::AsyncReadExt;
+                    let mut head = [0u8; 1024];
+                    let read = tokio::time::timeout(Duration::from_millis(500), extra.read(&mut head)).await;
+                    let head = String::from_utf8_lossy(&head[..read.ok().and_then(Result::ok).unwrap_or(0)]).to_ascii_lowercase();
+                    let port_probe = head.starts_with("get / http/") && !head.contains("upgrade:");
+                    assert!(port_probe, "explicit close must not start restore retries");
+                }
+            });
+        });
+        let local = format!("explicit-close-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("closed-source".into()),
+            cwd: None, token: None, identity: RemoteIdentity { owned: true, ..Default::default() } }, &local, 80, 24, true).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("SOURCE STILL RUNNING"));
+        mirror.session.send_bytes(b"ack").unwrap();
+        wait_remote_test(|| remote_info(&local).is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn remote_image_upload_preserves_source_target_and_large_binary_body() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bytes = vec![0xa7; 3 << 20];
+        let expected = bytes.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let header_end = loop {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") { break pos + 4; }
+            };
+            let header = String::from_utf8_lossy(&request[..header_end]);
+            assert!(header.starts_with("POST /paste-image?surface=%2516 HTTP/1.1\r\n"));
+            assert!(header.to_ascii_lowercase().contains("content-length: 3145728"));
+            while request.len() - header_end < expected.len() {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+            }
+            assert_eq!(&request[header_end..], expected.as_slice());
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+        });
+        super::paste_remote_image(&base, "%16", bytes).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn remote_image_upload_reports_host_failure_instead_of_sending_paste_key() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ok":false,"error":"clipboard unavailable"}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let error = super::paste_remote_image(&base, "%9", vec![1, 2, 3]).unwrap_err();
+        assert!(error.to_string().contains("clipboard unavailable"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn restored_mirror_retries_missing_source_and_accepts_input_after_attach() {
+        use super::*;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                async fn accept_mirror(listener: &tokio::net::TcpListener) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            // Other HTTP-server tests leave discovery probes running.
+                            // They are not mirror clients and may visit a reused port.
+                            if let Ok(socket) = tokio_tungstenite::accept_async(stream).await { return socket; }
+                        }
+                    }).await.unwrap()
+                }
+                let mut socket = accept_mirror(&listener).await;
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+                socket.close(None).await.unwrap();
+                report.send("waiting").unwrap();
+                let mut socket = accept_mirror(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":93,"rows":27,"id":"restored-source"}"#.into())).await.unwrap();
+                report.send("attached").unwrap();
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap() {
+                        Message::Binary(bytes) => {
+                            assert_eq!(&bytes[..], b"restored input");
+                            report.send("input").unwrap();
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+            });
+        });
+        let started = std::time::Instant::now();
+        let mirror = restore_connection(RemoteSpec {
+            base: format!("http://{address}"), pane: Some("restored-source".into()),
+            cwd: None, token: None, identity: Default::default(),
+        }, "%restored-mirror-test", 80, 24, true).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "waiting");
+        assert!(is_view_pane("%restored-mirror-test"));
+        assert_eq!(remote_info("%restored-mirror-test").unwrap().remote_id, "restored-source");
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "attached");
+        mirror.session.send_bytes(b"restored input").unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "input");
+        server.join().unwrap();
+    }
+    use super::*;
+
+    #[test]
+    fn appearance_reads_reuse_the_authenticated_remote_connection() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = [0u8; 4096];
+            let n = stream.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]).to_lowercase();
+            assert!(request.contains("x-kasa-token: test-appearance-token\r\n"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        let (kill, _killed) = tokio::sync::mpsc::unbounded_channel();
+        let id = "%appearance-auth-test";
+        links().lock().unwrap().insert(id.into(), Link {
+            auth_token: Some("test-appearance-token".into()),
+            kill, base: base.clone(), remote_id: "%17".into(),
+            identity: RemoteIdentity::default(), view: true,
+            viewport: Arc::new(ViewportState::default()),
+            token: u64::MAX,
+        });
+        let result = fetch_mirror_appearance(&base, "/design-tokens");
+        links().lock().unwrap().remove(id);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), b"{}");
+        assert!(fetch_mirror_appearance(&base, "/settings/action").is_err());
+    }
+
+    #[test]
+    fn kill_removes_remote_state_before_manager_cleanup() {
+        let local = "%remote-state-boundary";
+        let (kill, mut killed) = tokio::sync::mpsc::unbounded_channel();
+        links().lock().unwrap().insert(
+            local.to_string(),
+            Link {
+                auth_token: None,
+                kill,
+                base: "http://127.0.0.1:1".into(),
+                remote_id: "%remote".into(),
+                identity: RemoteIdentity::default(),
+                view: true,
+                viewport: Arc::new(ViewportState::default()),
+                token: u64::MAX,
+            },
+        );
+        assert!(is_remote_pane(local));
+        assert!(kill_remote(local));
+        assert!(!is_remote_pane(local));
+        assert!(killed.try_recv().is_ok());
+    }
+
+
+
+
+
+
+
+
+    #[test]
+    fn viewport_reconnect_stays_passive_with_new_and_old_hosts() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (reports, received) = std::sync::mpsc::channel();
+        let (advance, steps) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                for connection in 0..3 {
+                    // 실행 중인 앱의 포트 탐색(HTTP/1.0 GET /)은 WS 재접속이 아니다.
+                    let mut socket = loop {
+                        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
+                        if let Ok(socket) = tokio_tungstenite::accept_async(stream).await {
+                            break socket;
+                        }
+                    };
+                    let mut size = serde_json::json!({"t":"size", "cols":120, "rows":40, "id":"mock-origin"});
+                    if connection < 2 {
+                        size["capabilities"] = serde_json::json!({"mirror_viewport":1});
+                    }
+                    socket.send(Message::Text(size.to_string().into())).await.unwrap();
+                    assert!(tokio::time::timeout(Duration::from_millis(300), socket.next()).await.is_err(),
+                        "mirror sent a source-size control on attach/reconnect");
+                    reports.send(connection).unwrap();
+                    steps.recv_timeout(Duration::from_secs(5)).unwrap();
+                    socket.close(None).await.unwrap();
+                }
+            });
+        });
+        let mirror = connect_view(RemoteSpec {
+            base: format!("http://{address}"), pane: Some("mock-origin".into()),
+            cwd: None, token: None, identity: Default::default(),
+        }, "%viewport-passive-reconnect").unwrap();
+        for connection in 0..3 {
+            assert!(set_viewport("%viewport-passive-reconnect", 21 + connection, 6));
+            assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), connection);
+            assert_eq!(mirror.session.size(), (120, 40));
+            if connection < 2 { advance.send(()).unwrap(); }
+        }
+        drop(mirror);
+        advance.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn build_url_encodes_percent_pane_and_cwd() {
+        let spec = RemoteSpec {
+            base: "http://127.0.0.1:8766".into(),
+            pane: Some("%12".into()),
+            cwd: None,
+            token: None,
+            identity: Default::default(),
+        };
+        assert_eq!(
+            build_url(&spec, spec.pane.as_deref(), false),
+            "ws://127.0.0.1:8766/term/ws?own=1&pane=%2512"
+        );
+        assert_eq!(
+            build_url(&spec, spec.pane.as_deref(), true),
+            "ws://127.0.0.1:8766/term/ws?own=0&pane=%2512"
+        );
+        let spec = RemoteSpec {
+            base: "http://h:1".into(),
+            pane: None,
+            cwd: Some("/Users/miku/한글 폴더".into()),
+            token: Some("tok".into()),
+            identity: Default::default(),
+        };
+        let url = build_url(&spec, None, false);
+        assert!(
+            url.contains("cwd=/Users/miku/%ED%95%9C%EA%B8%80%20%ED%8F%B4%EB%8D%94"),
+            "{url}"
+        );
+        assert!(url.ends_with("&t=tok"));
+    }
+}
+

@@ -36,7 +36,7 @@ const vm = require('node:vm');
       return Promise.resolve({ ok: true, json: async () => value });
     },
   };
-  vm.runInNewContext(fs.readFileSync('crates/kasa-mcp/assets/term/chrome.js', 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync('crates/kasa-http/assets/term/chrome.js', 'utf8'), context);
   const chrome = window.KasaTermChrome.create({ root: '', pane: '%1', timeoutMs: 20 });
   await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(element('root').style.values['--kt-bg'], '#252c35', 'one slow endpoint blocked available theme tokens');

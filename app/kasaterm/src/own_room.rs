@@ -61,7 +61,7 @@ impl App {
                 ids.extend(self.room_undocked(i));
                 ids.sort();
                 ids.dedup();
-                let own_panes = ids.iter().filter(|id| kasa_mcp::remote::remote_info(id).is_none()).count();
+                let own_panes = ids.iter().filter(|id| kasa_remote::remote::remote_info(id).is_none()).count();
                 RoomFacts { kind, own_panes }
             })
             .collect()

@@ -74,7 +74,7 @@ impl App {
     pub(crate) fn poll_mirror_sync(&mut self) {
         if self.tmux.is_some() { return; }
         self.finish_mirror_sync();
-        let generation = kasa_mcp::machines::generation();
+        let generation = kasa_device::machines::generation();
         if generation == self.mirror_sync.last_generation
             && self.mirror_sync.last_poll.is_some_and(|t| t.elapsed() < Duration::from_secs(1))
         {
@@ -82,7 +82,7 @@ impl App {
         }
         self.mirror_sync.last_poll = Some(Instant::now());
         self.mirror_sync.last_generation = generation;
-        let machines = kasa_mcp::machines::snapshot();
+        let machines = kasa_device::machines::snapshot();
         let now = Instant::now();
         self.mirror_sync.first_seen.retain(|local, _| self.pty.contains_key(local));
         for local in self.pty.keys() {
@@ -94,17 +94,17 @@ impl App {
         // 카드와 보기 창에 남았다(2026-09-17 「미니맵엔 둘, 들어가면 하나」). 호스트 재시작
         // 중의 빈 목록·방금 세운 거울을 오판하지 않게, 처음 본 뒤 한참 지나서만 「없음」을 믿는다.
         let closed: Vec<String> = self.pty.keys().filter_map(|local| {
-            let info = kasa_mcp::remote::remote_info(local)?;
+            let info = kasa_remote::remote::remote_info(local)?;
             if !info.view || self.window_of_pane(local).is_none() { return None; }
             let settled = self.mirror_sync.first_seen.get(local)
                 .is_some_and(|at| at.elapsed() > Duration::from_secs(15));
             // `legacy:` 자리표시는 열쇠가 아니다 — 번호로만 대조한다.
-            let key = kasa_mcp::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"));
+            let key = kasa_remote::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"));
             let (mut live_source, mut found, mut marked_closed) = (false, false, false);
             for m in machines.iter()
                 .filter(|m| m["online"].as_bool() == Some(true) && m["online_via"].as_str() == Some("direct"))
                 .filter(|m| m["base"].as_str().is_some_and(|base|
-                    kasa_mcp::machines::same_machine_bases(&info.base, base)))
+                    kasa_device::machines::same_machine_bases(&info.base, base)))
             {
                 live_source = true;
                 for row in m["panes"].as_array().into_iter().flatten() {
@@ -183,10 +183,10 @@ impl App {
             let proxy = self.proxy.clone();
             candidate.attempts += 1;
             std::thread::spawn(move || {
-                let session = kasa_mcp::remote::connect_view(kasa_mcp::remote::RemoteSpec {
+                let session = kasa_remote::remote::connect_view(kasa_remote::remote::RemoteSpec {
                     base: candidate.base.clone(), pane: Some(candidate.source.clone()),
                     cwd: None, token: None,
-                    identity: kasa_mcp::remote::RemoteIdentity {
+                    identity: kasa_remote::remote::RemoteIdentity {
                         label: candidate.label.clone(), remote_cwd: candidate.cwd.clone(),
                         origin_cwd: None, owned: false,
                     },
@@ -200,8 +200,8 @@ impl App {
 
     fn mirror_sync_views(&self, base: &str) -> Vec<(String, String)> {
         self.pty.keys().filter_map(|local| {
-            let info = kasa_mcp::remote::remote_info(local)?;
-            (info.view && kasa_mcp::machines::same_machine_bases(&info.base, base)
+            let info = kasa_remote::remote::remote_info(local)?;
+            (info.view && kasa_device::machines::same_machine_bases(&info.base, base)
                 && self.window_of_pane(local).is_some())
                 .then(|| (local.clone(), info.remote_id))
         }).collect()
@@ -213,7 +213,7 @@ impl App {
     /// 저쪽 새 방은 여기 새 창으로 열렸다(2026-09-28 「가끔 다른 기기 pane 이 이 방에 뜨면 헷갈린다」).
     fn mirror_sync_anchors(&self, base: &str) -> Vec<(String, String)> {
         self.mirror_sync_views(base).into_iter()
-            .filter(|(local, _)| kasa_mcp::remote::remote_info(local).is_some_and(|info| info.origin_cwd.is_none())
+            .filter(|(local, _)| kasa_remote::remote::remote_info(local).is_some_and(|info| info.origin_cwd.is_none())
                 && self.window_of_pane(local).is_some_and(|window| self.remote_view_of_window(window).is_some()))
             .collect()
     }
@@ -228,7 +228,7 @@ impl App {
         let ready: Vec<_> = self.mirror_sync.receiver.as_ref()
             .map(|rx| rx.try_iter().collect()).unwrap_or_default();
         if ready.is_empty() { return; }
-        let machines = kasa_mcp::machines::snapshot();
+        let machines = kasa_device::machines::snapshot();
         for mut ready in ready {
             self.mirror_sync.pending.remove(&ready.local);
             let views = self.mirror_sync_anchors(&ready.candidate.base);

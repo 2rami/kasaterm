@@ -1,5 +1,5 @@
 use super::*;
-use kasa_mcp::oauth_accounts::Provider;
+use kasa_identity::oauth_accounts::Provider;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{
     Arc,
@@ -132,7 +132,7 @@ impl State {
 
     pub(crate) fn refresh(&mut self) {
         if !self.pinned {
-            self.status = kasa_mcp::device_auth::status();
+            self.status = kasa_device::device_auth::status();
         }
         if self.provider_check.is_none()
             && self
@@ -144,7 +144,7 @@ impl State {
             self.provider_checked = Some(std::time::Instant::now());
             std::thread::spawn(move || {
                 let providers =
-                    kasa_mcp::device_auth::handle(&serde_json::json!({"op":"oauth_providers"}))
+                    kasa_device::device_auth::handle(&serde_json::json!({"op":"oauth_providers"}))
                         .unwrap_or_else(|_| serde_json::json!({"state":"unavailable"}));
                 let _ = tx.send(providers);
             });
@@ -202,11 +202,11 @@ impl State {
         self.confirm_logout = false;
         if let Some(cancel) = &self.oauth_cancel {
             if !cancel.swap(true, Ordering::AcqRel) {
-                kasa_mcp::device_auth::cancel_oauth();
+                kasa_device::device_auth::cancel_oauth();
             }
         }
         if self.choice.take().is_some() {
-            kasa_mcp::device_auth::cancel_oauth();
+            kasa_device::device_auth::cancel_oauth();
         }
         self.work.hide();
         self.profile.hide();
@@ -260,7 +260,7 @@ impl State {
                 self.choice = None;
                 self.profile.refresh_now();
                 // 관문에 붙은 즉시 다른 기기의 에이전트 계정 목록을 받는다.
-                kasa_mcp::agent_accounts::poke();
+                kasa_device::agent_accounts::poke();
                 self.message = Some((
                     "로그인을 저장했어요. 관문 연결을 확인하고 있어요".into(),
                     false,
@@ -387,7 +387,7 @@ impl App {
         if action == Action::CancelOAuth {
             if let Some(cancel) = &self.device_account.oauth_cancel {
                 if !cancel.swap(true, Ordering::AcqRel) {
-                    kasa_mcp::device_auth::cancel_oauth();
+                    kasa_device::device_auth::cancel_oauth();
                 }
             }
             return;
@@ -476,7 +476,7 @@ impl App {
                 let (tx, rx) = mpsc::channel();
                 self.device_account.pending = Some(rx);
                 std::thread::spawn(move || {
-                    let result = kasa_mcp::device_auth::handle(&params)
+                    let result = kasa_device::device_auth::handle(&params)
                         .map(|_| {
                             if action == Action::CancelChoice {
                                 Action::CancelChoice
@@ -508,7 +508,7 @@ impl App {
                 let (tx, rx) = mpsc::channel();
                 self.device_account.pending = Some(rx);
                 std::thread::spawn(move || {
-                    let result = kasa_mcp::device_auth::handle(&params)
+                    let result = kasa_device::device_auth::handle(&params)
                         .map(|_| action)
                         .map_err(|error| safe_error(&error.to_string()));
                     let _ = tx.send(result);
@@ -938,7 +938,7 @@ fn run_oauth(
     choice_tx: mpsc::Sender<Choice>,
 ) -> Result<Action, String> {
     let call = |params| {
-        kasa_mcp::device_auth::handle(&params).map_err(|error| safe_error(&error.to_string()))
+        kasa_device::device_auth::handle(&params).map_err(|error| safe_error(&error.to_string()))
     };
     // 로그인된 기기에서 GitHub 을 연결하면 같은 동의로 PR 일 권한까지 붙인다. Google 은 로그인만.
     let started =

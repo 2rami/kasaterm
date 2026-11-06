@@ -8,7 +8,7 @@ fn editing_synced_setting(input: Option<SettingsInput>, device_name_edit: bool) 
 impl App {
     pub(crate) fn register_account_sync(&self) {
         let proxy = self.proxy.clone();
-        kasa_mcp::account_sync::set_apply_hook(Arc::new(move |request| {
+        kasa_device::account_sync::set_apply_hook(Arc::new(move |request| {
             // Off the GUI thread: the keychain read behind the workbench proof is a child process.
             crate::session::observe_workbench_identity();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -17,7 +17,7 @@ impl App {
         }));
     }
 
-    pub(crate) fn apply_account_sync(&mut self, request: kasa_mcp::account_sync::PendingApply) -> Result<(), String> {
+    pub(crate) fn apply_account_sync(&mut self, request: kasa_device::account_sync::PendingApply) -> Result<(), String> {
         // Search is local-only; connection drafts compare their saved entry on commit.
         // Leaving either open must not stall account synchronization indefinitely.
         if editing_synced_setting(self.settings_input, self.device_name_edit.is_some()) {
@@ -26,7 +26,7 @@ impl App {
         let refresh = request.changes_runtime();
         let students = ["character_theme", "character_picks"].iter().any(|key| request.changes_setting(key));
         let names = request.changes_setting("device_names");
-        kasa_mcp::account_sync::apply_pending(request)?;
+        kasa_device::account_sync::apply_pending(request)?;
         if !refresh { return Ok(()); }
         let settings = socket::read_settings();
         let persona = self.set_claude_persona;

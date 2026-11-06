@@ -64,12 +64,12 @@ impl DragEndpoint {
         match self {
             Self::LocalPane(_) => backend.transfer_snapshot(),
             Self::RemotePane { label, base, .. } => {
-                let current = kasa_mcp::machines::find(label)
+                let current = kasa_device::machines::find(label)
                     .ok_or_else(|| anyhow::anyhow!("기계 연결이 없어졌어요. 다시 골라 주세요"))?;
                 if current.base != *base {
                     anyhow::bail!("기계 연결이 바뀌었어요. 다시 골라 주세요");
                 }
-                let snapshot = kasa_mcp::remote::transfer_snapshot(base)?;
+                let snapshot = kasa_remote::remote::transfer_snapshot(base)?;
                 if current
                     .machine_id
                     .as_ref()
@@ -417,7 +417,7 @@ fn seat_move_landed(
 }
 
 /// 원본 배치 채널에서 그 PTY 가 앉은 방(원본 창 번호).
-fn feed_room_of(rooms: &[kasa_mcp::layout_feed::Room], pty: &str) -> Option<usize> {
+fn feed_room_of(rooms: &[kasa_wire::layout_feed::Room], pty: &str) -> Option<usize> {
     rooms.iter()
         .find(|room| room.tree.leaves().contains(&pty) || room.members.values().any(|ids| ids.iter().any(|id| id == pty)))
         .map(|room| room.window)
@@ -591,7 +591,7 @@ impl App {
     /// 도착 후보 기기를 미리 읽어 둔다. 놓는 순간 도착 방을 재조회 없이 고정하려는 것이다.
     fn warm_hosts(&self) {
         for machine in self.info.machines_col.machines.iter().filter(|m| m.online) {
-            let Some(peer) = kasa_mcp::machines::find(&machine.label) else {
+            let Some(peer) = kasa_device::machines::find(&machine.label) else {
                 continue;
             };
             self.warm_drag_identity(DragEndpoint::RemotePane {
@@ -619,12 +619,12 @@ impl App {
     /// 누를 때 화면에 보이던 그 칸의 열쇠 — 거울 연결이 확인한 것과 기기 목록에 실린 것.
     fn screen_key(&self, label: &str, base: &str, pane: &str) -> Option<String> {
         let mirrored = self.pty.keys().filter_map(|id| {
-            let info = kasa_mcp::remote::remote_info(id)?;
-            (info.remote_id == pane && kasa_mcp::machines::same_machine_bases(&info.base, base))
-                .then(|| kasa_mcp::remote::remote_surface_key(id))
+            let info = kasa_remote::remote::remote_info(id)?;
+            (info.remote_id == pane && kasa_device::machines::same_machine_bases(&info.base, base))
+                .then(|| kasa_remote::remote::remote_surface_key(id))
                 .flatten()
         });
-        let listed = kasa_mcp::machines::cached_pane(label, pane)
+        let listed = kasa_device::machines::cached_pane(label, pane)
             .and_then(|row| row.get("surface_key")?.as_str().map(str::to_string));
         single_screen_key(mirrored.chain(listed))
     }
@@ -662,7 +662,7 @@ impl App {
             },
             DragEndpoint::RemotePane { label, base, pane } => match self.screen_key(label, base, pane) {
                 None => {
-                    kasa_mcp::machines::poke();
+                    kasa_device::machines::poke();
                     Pin::Failed(SCREEN_UNKNOWN.into())
                 }
                 // 관측이 화면의 칸이면 그 신원을 쓴다. 그 뒤 세션이 바뀌었으면 엔진의 신원 대조가 거절한다.
@@ -774,7 +774,7 @@ impl App {
             .machines
             .iter()
             .any(|m| m.label == label && m.online);
-        let peer = kasa_mcp::machines::find(label).filter(|_| online);
+        let peer = kasa_device::machines::find(label).filter(|_| online);
         let Some(peer) = peer else {
             drop_pin(ticket);
             self.set_toast("그 기기에 연결되어 있지 않아요. 연결 상태를 확인해 주세요".into());
@@ -826,11 +826,11 @@ impl App {
     }
 
     pub(crate) fn drag_endpoint_for_pid(&self, pane: &str) -> DragEndpoint {
-        match kasa_mcp::remote::remote_info(pane) {
+        match kasa_remote::remote::remote_info(pane) {
             Some(info) => DragEndpoint::RemotePane {
                 label: Some(info.label)
                     .filter(|label| !label.is_empty())
-                    .or_else(|| kasa_mcp::machines::label_for_base(&info.base))
+                    .or_else(|| kasa_device::machines::label_for_base(&info.base))
                     .unwrap_or_default(),
                 base: info.base,
                 pane: info.remote_id,
@@ -921,11 +921,11 @@ impl App {
                     zone,
                 );
                 // 외톨이 두 칸 맞바꾸기는 스냅샷으로 못 가려 원본 배치 채널의 창 번호로 본다 — 보내기 전 자리.
-                let feed_before = kasa_mcp::layout_watch::settled(base).and_then(|(_, rooms)| {
+                let feed_before = kasa_remote::layout_watch::settled(base).and_then(|(_, rooms)| {
                     Some((feed_room_of(&rooms, source.pane())?, feed_room_of(&rooms, destination.pane())?))
                 });
                 submitted = true;
-                kasa_mcp::remote::remote_cmd(base, method, params)?;
+                kasa_remote::remote::remote_cmd(base, method, params)?;
                 if cross_room {
                     let deadline = Instant::now() + Duration::from_secs(10);
                     loop {
@@ -934,7 +934,7 @@ impl App {
                         let settled = seat_move_landed(zone, &origin, &current, source.pane(), destination.pane())
                             .or_else(|| {
                                 let (from, to) = feed_before?;
-                                let (_, rooms) = kasa_mcp::layout_watch::settled(base)?;
+                                let (_, rooms) = kasa_remote::layout_watch::settled(base)?;
                                 Some((feed_room_of(&rooms, source.pane()), feed_room_of(&rooms, destination.pane()))
                                     == (Some(to), Some(from)))
                             });
@@ -963,7 +963,7 @@ impl App {
             let refreshed = result.is_ok()
                 && match &source {
                     DragEndpoint::RemotePane { base, .. } => {
-                        kasa_mcp::machines::refresh_panes_now(base).is_ok()
+                        kasa_device::machines::refresh_panes_now(base).is_ok()
                     }
                     _ => false,
                 };
@@ -985,7 +985,7 @@ impl App {
                 state.pending.remove(&source);
             }
             drop(state);
-            kasa_mcp::machines::poke();
+            kasa_device::machines::poke();
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
@@ -1044,7 +1044,7 @@ impl App {
                 state.pending.remove(&source);
             }
             drop(state);
-            kasa_mcp::machines::poke();
+            kasa_device::machines::poke();
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
@@ -1183,7 +1183,7 @@ mod tests {
 
     #[test]
     fn feed_room_finds_tabs_too() {
-        let room = |window, leaf: &str, tabs: &[&str]| kasa_mcp::layout_feed::Room {
+        let room = |window, leaf: &str, tabs: &[&str]| kasa_wire::layout_feed::Room {
             window,
             tree: kasa_pty::PtyLayout::single(leaf),
             members: [(leaf.to_string(), tabs.iter().map(|t| t.to_string()).collect())].into_iter().collect(),

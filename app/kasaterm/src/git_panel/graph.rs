@@ -1,4 +1,4 @@
-use kasa_mcp::git::GitGraphCommit;
+use kasa_git::git::GitGraphCommit;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Track {

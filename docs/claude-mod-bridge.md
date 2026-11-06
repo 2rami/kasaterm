@@ -2,7 +2,7 @@
 
 claude 칸의 상태·상태줄·백그라운드·도구 활동·tell·대화·권한 요청을 **바깥에서 읽어 내던 것**(화면 격자
 판독·기록 jsonl 꼬리·settings 훅 스크립트)을 claude 안에 실린 mod 가 엔진 이벤트로 직접 알린다.
-mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구는 `kasa_mcp::claude_mod`.
+mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구는 `kasa_students::claude_mod`.
 
 - mod 가 없는 claude(`claude attach`·옛 판·mod 가 못 뜬 칸)와 codex·agy 는 옛 길 그대로다. 앱은 칸마다
   「이 칸은 mod 가 말한다」(hello 를 받았고 그 claude 가 살아 있다)를 따로 쥐고, 그 칸에서만 새 길을 정본으로 쓴다.
@@ -72,7 +72,7 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
 - **대화 보기**: 내용은 기록 파일이 정본이다(재개한 세션도 전체가 보여야 한다). `GET /transcript-raw` 에 `wait_ms` 를 주면
   새 줄이 없을 때 그 칸의 다음 `row` 까지 쥐었다가 다시 읽는다 — 폰은 1.5초 바퀴 대신 행이 쌓이는 즉시 받는다.
 
-- **깃 신호는 없다**: Git 열·배지는 누가 고쳤든 같은 길로 안다 — 작업 트리 파일 감시(`kasa_mcp::git_watch`, macOS FSEvents·
+- **깃 신호는 없다**: Git 열·배지는 누가 고쳤든 같은 길로 안다 — 작업 트리 파일 감시(`kasa_git::git_watch`, macOS FSEvents·
   Windows ReadDirectoryChangesW)와 git 지문. codex·셸 칸에도 같아야 해서 mod 신호(`git` 이벤트)는 걷었다(2026-10-07). 옛 mod 가
   보내는 `git` 이벤트는 앱이 버린다. 상세는 `docs/remote-git-panel.md`.
 - **Info 카드**(오른쪽 Info 열 맨 위 「지금 보는 칸」, `app/kasaterm/src/info_focus.rs`): 새 이벤트 없이 `tool`·`turn`·
@@ -145,10 +145,10 @@ mod 는 `app/kasaterm/collab-hooks/claude-mods/kasaterm-bridge/`, 앱 쪽 입구
   토큰)을 탄다. 그 거울은 이미 `/send` 로 이 칸에 무엇이든 칠 수 있어 새 권한이 아니다. 감사 줄의 `by` 는 `mirror:<곳>`.
   규칙은 `docs/mirror-render.md` 「구현 자리」.
 - 이 두 경로는 loopback 전용이다. 폰·다른 기기의 원격 승인은 **그 기기를 계정 주인 기기로 확인하는 쪽**(관문·릴레이)이
-  인증한 뒤 앱 안에서 `kasa_mcp::claude_mod::permissions()`·`decide()` 를 부른다. 이 계약은 인증을 하지 않는다.
+  인증한 뒤 앱 안에서 `kasa_students::claude_mod::permissions()`·`decide()` 를 부른다. 이 계약은 인증을 하지 않는다.
 - 요청마다 한 번 결정한다. 규칙 추가·모드 전환·「항상 허락」은 원격에 없다.
 - 결정마다 감사 기록 한 줄(`<collab root>/claude-mod/permission-audit.jsonl`: 시각·칸·세션·id·도구·입력 지문·결정·by).
-- 새 요청이 열리면 `kasa_mcp::claude_mod::subscribe()` 가 알린다(푸시 알림을 붙이는 자리).
+- 새 요청이 열리면 `kasa_students::claude_mod::subscribe()` 가 알린다(푸시 알림을 붙이는 자리).
 
 ## tell·거울 대화 입력 받기 — mod 를 거치지 않는다
 

@@ -106,7 +106,7 @@ fn validate(m: &Media, id: &str) -> anyhow::Result<()> {
 }
 fn load(reference: &Reference) -> anyhow::Result<Asset> {
     let media: Media = if let Some(base) = &reference.source {
-        let bytes = kasa_mcp::remote::remote_get_bytes_bounded(
+        let bytes = kasa_remote::remote::remote_get_bytes_bounded(
             base,
             &format!("/term/inline-media?id={}", reference.id),
             16 * 1024,
@@ -118,7 +118,7 @@ fn load(reference: &Reference) -> anyhow::Result<Asset> {
     validate(&media, &reference.id)?;
     let poster = if media.poster {
         let bytes = if let Some(base) = &reference.source {
-            kasa_mcp::remote::remote_get_bytes_bounded(
+            kasa_remote::remote::remote_get_bytes_bounded(
                 base,
                 &format!("/term/inline-media/poster?id={}", reference.id),
                 12 * 1024 * 1024,

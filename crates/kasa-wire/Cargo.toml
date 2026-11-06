@@ -1,0 +1,21 @@
+[package]
+name = "kasa-wire"
+description = "Terminal and visual wire formats, layout snapshots and change notifications."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+kasa-pty = { workspace = true, default-features = true }
+kasa-screen = { workspace = true }
+kasa-socket = { workspace = true, default-features = true }
+miniz_oxide = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

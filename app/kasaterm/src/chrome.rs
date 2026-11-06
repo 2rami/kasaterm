@@ -298,7 +298,7 @@ mod quick_instruction_tests {
     #[cfg(unix)]
     #[test]
     fn project_memory_link_to_the_whole_vault_keeps_the_global_label() {
-        let dir = std::env::temp_dir().join(kasa_mcp::character::new_session_id());
+        let dir = std::env::temp_dir().join(kasa_characters::character::new_session_id());
         let vault = dir.join("vault");
         let project = dir.join("project");
         std::fs::create_dir_all(&vault).unwrap();
@@ -331,7 +331,7 @@ mod quick_instruction_tests {
 
     #[test]
     fn instruction_pair_preserves_distinct_sources_and_omits_missing_files() {
-        let dir = std::env::temp_dir().join(kasa_mcp::character::new_session_id());
+        let dir = std::env::temp_dir().join(kasa_characters::character::new_session_id());
         std::fs::create_dir(&dir).unwrap();
         let claude = dir.join("CLAUDE.md");
         let codex = dir.join("AGENTS.md");
@@ -352,7 +352,7 @@ mod quick_instruction_tests {
 
     #[test]
     fn snapshot_requires_the_current_launch_and_matching_pane() {
-        let dir = std::env::temp_dir().join(kasa_mcp::character::new_session_id());
+        let dir = std::env::temp_dir().join(kasa_characters::character::new_session_id());
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("append.md");
         std::fs::write(&path, "original launch instructions").unwrap();
@@ -401,16 +401,16 @@ impl App {
     /// 지시: 탭 겹친 pane 에서 「어떤 학생인지 모른다」). 관문은 같다 — claude 가
     /// 실제로 도는 탭만 학생을 갖는다.
     pub(crate) fn display_tab_char(&self, ws: &Workspace, tab: &str) -> Option<String> {
-        if kasa_mcp::remote::cached_agent_running(tab) == Some(false) {
+        if kasa_remote::remote::cached_agent_running(tab) == Some(false) {
             return None;
         }
-        if let Some(info) = kasa_mcp::remote::remote_info(tab) {
+        if let Some(info) = kasa_remote::remote::remote_info(tab) {
             let label = if info.label.is_empty() {
-                kasa_mcp::machines::label_for_base(&info.base)
+                kasa_device::machines::label_for_base(&info.base)
             } else {
                 Some(info.label)
             };
-            if let Some(row) = label.and_then(|label| kasa_mcp::machines::cached_pane(&label, &info.remote_id)) {
+            if let Some(row) = label.and_then(|label| kasa_device::machines::cached_pane(&label, &info.remote_id)) {
                 if row.get("harness").is_some_and(serde_json::Value::is_null) {
                     return None;
                 }
@@ -447,7 +447,7 @@ impl App {
             .or_else(|| {
                 self.pane_claude_sid
                     .get(tab)
-                    .and_then(|sid| kasa_mcp::character::session_character(sid))
+                    .and_then(|sid| kasa_characters::character::session_character(sid))
             })
     }
 
@@ -751,17 +751,17 @@ impl App {
     /// 폴링 캐시라 새 세대에서만 판정하고, 2초 유지 만기에는 새로 읽어 확인한다.
     pub(crate) fn pump_remote_completions(&mut self) {
         let now = std::time::Instant::now();
-        let generation = kasa_mcp::machines::generation();
+        let generation = kasa_device::machines::generation();
         if !self.info.machines_col.remote_done.fresh(generation) {
             if self.info.machines_col.remote_done.wants_sample(now) {
-                kasa_mcp::machines::poke();
+                kasa_device::machines::poke();
             }
             if self.info.machines_col.marks_at.is_none_or(|at| now.duration_since(at) >= REMOTE_MARKS_EVERY) {
                 self.sync_remote_done_marks();
             }
             return;
         }
-        let snapshot = kasa_mcp::machines::snapshot();
+        let snapshot = kasa_device::machines::snapshot();
         let mut known_routes = std::collections::HashSet::new();
         let mut online_routes = std::collections::HashSet::new();
         let mut seats = Vec::new();
@@ -870,11 +870,11 @@ impl App {
     /// 그 원격 칸을 지금 비추는 이 기기 칸들 — 방에 앉은 것만. 번호가 재사용됐으면 surface_key 로 거른다.
     fn remote_mirrors(&self, seat: &crate::state::RemoteSeat) -> Vec<String> {
         self.pty.keys().filter(|local| {
-            let Some(info) = kasa_mcp::remote::remote_info(local) else { return false };
-            let label = kasa_mcp::machines::label_for_base(&info.base)
+            let Some(info) = kasa_remote::remote::remote_info(local) else { return false };
+            let label = kasa_device::machines::label_for_base(&info.base)
                 .unwrap_or_else(|| if info.label.is_empty() { info.base.clone() } else { info.label.clone() });
             label == seat.label && info.remote_id == seat.remote_id && self.window_of_pane(local).is_some()
-                && kasa_mcp::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"))
+                && kasa_remote::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"))
                     .is_none_or(|mine| seat.surface_key.as_deref().is_none_or(|theirs| theirs == mine))
         }).cloned().collect()
     }
@@ -1005,7 +1005,7 @@ impl App {
     fn notification_character(&self, surface: &str) -> Option<String> {
         // A hidden first tab shares the outer pane id; folding it to the active
         // tab would attribute its notification to a different agent.
-        let running = kasa_mcp::remote::cached_agent_running(surface).unwrap_or_else(|| {
+        let running = kasa_remote::remote::cached_agent_running(surface).unwrap_or_else(|| {
             self.pty.get(surface).and_then(|p| p.active_agent()).is_some()
                 || self.pane_claude_sid.contains_key(surface)
         });
@@ -1015,7 +1015,7 @@ impl App {
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         let key = ws.active_tab_pid(id);
-        if let Some(running) = kasa_mcp::remote::cached_agent_running(&key) {
+        if let Some(running) = kasa_remote::remote::cached_agent_running(&key) {
             return running.then(|| ws.pane_character.get(&key).cloned()).flatten();
         }
         // 현존만으로는 모자란다 — 캐릭터는 spawn 때 **모든** pane 에 배정되므로
@@ -1709,7 +1709,7 @@ impl App {
             return;
         }
         if !self.git.col_diff_cache.contains_key(&key) {
-            let rows = kasa_mcp::git::git_file_diff(&cwd, &path, staged);
+            let rows = kasa_git::git::git_file_diff(&cwd, &path, staged);
             self.git.col_diff_cache.insert(key.clone(), rows);
         }
         self.git.col_expanded.insert(key);
@@ -1727,7 +1727,7 @@ impl App {
             self.git.col_commit_expanded = None;
         } else {
             if !self.git.col_commit_files_cache.contains_key(&hash) {
-                let files = kasa_mcp::git::git_commit_files(&cwd, &hash);
+                let files = kasa_git::git::git_commit_files(&cwd, &hash);
                 self.git.col_commit_files_cache.insert(hash.clone(), files);
             }
             self.git.col_commit_expanded = Some(hash);
@@ -1750,7 +1750,7 @@ impl App {
             return;
         }
         if !self.git.col_commit_diff_cache.contains_key(&key) {
-            let rows = kasa_mcp::git::git_commit_file_diff(&cwd, &hash, &path);
+            let rows = kasa_git::git::git_commit_file_diff(&cwd, &hash, &path);
             self.git.col_commit_diff_cache.insert(key.clone(), rows);
         }
         self.git.col_commit_file_expanded.insert(key);
@@ -1799,7 +1799,7 @@ impl App {
         // poller dedups by cwd and only wakes on a change, so an idle feed is one
         // cheap git call per distinct repo per interval (no repaint).
         let cwds: Vec<std::path::PathBuf> = self.pane_cwd_cache.iter()
-            .filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id))
+            .filter(|(id, _)| !kasa_remote::remote::is_remote_pane(id))
             .map(|(_, cwd)| cwd.clone()).collect();
         if let Ok(mut guard) = self.git_poll_cwds.lock() {
             *guard = cwds;
@@ -1882,7 +1882,7 @@ impl App {
                 self.git.op = Some("Pulling");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let result = kasa_mcp::git::git_pull(&cwd);
+                    let result = kasa_git::git::git_pull(&cwd);
                     if let Some(error) = git_operation_error(&result) {
                         let _ = proxy.send_event(UserEvent::GitOpFailed(error));
                     }
@@ -1895,7 +1895,7 @@ impl App {
                 self.git.op = Some("Pushing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let result = kasa_mcp::git::git_push(&cwd);
+                    let result = kasa_git::git::git_push(&cwd);
                     if let Some(error) = git_operation_error(&result) {
                         let _ = proxy.send_event(UserEvent::GitOpFailed(error));
                     }
@@ -1915,7 +1915,7 @@ impl App {
                 self.git.op = Some("Committing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let result = kasa_mcp::git::git_commit_staged(&cwd, &msg);
+                    let result = kasa_git::git::git_commit_staged(&cwd, &msg);
                     if let Some(error) = git_operation_error(&result) {
                         let _ = proxy.send_event(UserEvent::GitOpFailed(error));
                     }
@@ -1963,10 +1963,10 @@ impl App {
         self.git.op = Some(if push { "Pushing" } else { "Committing" });
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let mut result = if include { kasa_mcp::git::git_commit_all(&cwd, &msg) }
-                else { kasa_mcp::git::git_commit_staged(&cwd, &msg) };
+            let mut result = if include { kasa_git::git::git_commit_all(&cwd, &msg) }
+                else { kasa_git::git::git_commit_staged(&cwd, &msg) };
             if push && git_operation_error(&result).is_none() {
-                result = kasa_mcp::git::git_push(&cwd);
+                result = kasa_git::git::git_push(&cwd);
             }
             if let Some(error) = git_operation_error(&result) {
                 let _ = proxy.send_event(UserEvent::GitOpFailed(error));
@@ -2609,7 +2609,7 @@ impl App {
         }
         self.window_labels_at = None;
         self.mark_room_label_dirty();
-        kasa_mcp::changes::bump();
+        kasa_wire::changes::bump();
     }
 
     /// 편집을 버린다(Esc).
@@ -3785,7 +3785,7 @@ impl App {
                 }
             }
             PendingClose::RemoteRoom { .. } | PendingClose::RemotePane { .. } => {
-                kasa_mcp::machines::poke();
+                kasa_device::machines::poke();
                 self.info.machines_col.last_refresh = None;
             }
             PendingClose::AuxEditor(id) => self.close_aux_by_id(id),

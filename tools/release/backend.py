@@ -25,7 +25,7 @@ from tools.release.common import (CHANNEL_MANIFEST, Pending, Refused, channel_ma
 
 REPO_SLUG = "2rami/kasaterm"
 TESTS = (["cargo", "test", "-p", "kasaterm", "--release"],
-         ["cargo", "test", "-p", "kasa-mcp", "--release"],
+         ["cargo", "test", "-p", "kasa-http", "-p", "kasa-identity", "-p", "kasa-characters", "-p", "kasa-wire", "-p", "kasa-device", "-p", "kasa-backend", "-p", "kasa-students", "-p", "kasa-remote", "-p", "kasa-git", "-p", "kasa-gateway", "-p", "kasa-serve", "--release"],
          ["cargo", "test", "-p", "kasa-socket", "--release"])
 PUBLISH_STAGES = ("tag", "release", "feed")
 MAIN_RACE_ATTEMPTS = 5

@@ -1,5 +1,5 @@
 //! Windows 소유자 전용 저장소 — Unix 의 0700 디렉터리·0600 파일·`O_NOFOLLOW`·uid 검사에 대응한다.
-//! tell 영수증 장부(`tell::Ledger`)와 관문·기기 보관함(kasa-mcp `sealed::Vault`)이 쓴다.
+//! tell 영수증 장부(`tell::Ledger`)와 관문·기기 보관함(kasa-http `sealed::Vault`)이 쓴다.
 //!
 //! 접근은 이 프로세스 토큰의 사용자 SID 하나에만 연다 — 허용 ACE 하나, 상속 차단. SYSTEM·Administrators 는
 //! 넣지 않는다. Unix 0700 이 root 를 적지 않는 것과 같고, 관리자는 어차피 소유권 가져오기·백업 권한으로

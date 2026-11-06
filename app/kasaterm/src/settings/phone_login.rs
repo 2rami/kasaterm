@@ -91,7 +91,7 @@ struct State {
     authorization_url: Option<String>,
     confirmation: Option<String>,
     confirmation_accepted: bool,
-    actual: Option<kasa_mcp::VerifiedClaudeIdentity>,
+    actual: Option<kasa_device::VerifiedClaudeIdentity>,
     runtime_updated: bool,
     runtime_error: Option<&'static str>,
     workers: usize,
@@ -268,7 +268,7 @@ impl State {
         Ok(Effect::None)
     }
 
-    fn verified(&mut self, actual: kasa_mcp::VerifiedClaudeIdentity, confirmed: bool) -> Effect {
+    fn verified(&mut self, actual: kasa_device::VerifiedClaudeIdentity, confirmed: bool) -> Effect {
         if self.phase.terminal() {
             return Effect::None;
         }
@@ -329,10 +329,10 @@ impl State {
         owner_current: bool,
         lease_owned: bool,
         now: Instant,
-        actual: Option<kasa_mcp::VerifiedClaudeIdentity>,
+        actual: Option<kasa_device::VerifiedClaudeIdentity>,
         selected: bool,
         promote: impl FnOnce() -> Result<bool, &'static str>,
-    ) -> Option<kasa_mcp::VerifiedClaudeIdentity> {
+    ) -> Option<kasa_device::VerifiedClaudeIdentity> {
         if self.phase != Phase::Verifying {
             return None;
         }
@@ -448,7 +448,7 @@ fn can_start<'a>(
 
 struct Flow {
     state: State,
-    owner: kasa_mcp::device_auth::Stamp,
+    owner: kasa_device::device_auth::Stamp,
     cancel: Arc<AtomicBool>,
     input: Option<std::process::ChildStdin>,
     stage: Option<Arc<Stage>>,
@@ -675,7 +675,7 @@ fn parse_start(argument: &str) -> Result<StartRequest, &'static str> {
 
 fn identity_decision(
     expected: &Binding,
-    actual: &kasa_mcp::VerifiedClaudeIdentity,
+    actual: &kasa_device::VerifiedClaudeIdentity,
 ) -> IdentityDecision {
     if let Some(identity) = &expected.identity {
         return if identity.matches_verified(actual.clone()) {
@@ -699,7 +699,7 @@ impl App {
             .iter()
             .find(|account| account.id == slot && !slot.is_empty())
             .ok_or("phone_login_target_changed")?;
-        let machine = kasa_mcp::mobile::machine_identity()
+        let machine = kasa_device::mobile::machine_identity()
             .filter(|id| !id.is_empty())
             .ok_or("phone_login_machine_mismatch")?;
         let (email, org) = super::remembered_identity(slot);
@@ -733,7 +733,7 @@ impl App {
             .get_mut(id)
             .ok_or_else(|| request_error("phone_login_unknown"))?;
         let current = self.phone_login_binding(&flow.binding.slot);
-        let owner_current = kasa_mcp::device_auth::stamp_is_current(&flow.owner);
+        let owner_current = kasa_device::device_auth::stamp_is_current(&flow.owner);
         let checked = flow.state.check(
             current.as_ref().map_err(|error| *error),
             owner_current,
@@ -778,7 +778,7 @@ impl App {
         if request.machine_id != binding.machine {
             return Err(request_error("phone_login_machine_mismatch"));
         }
-        let owner = kasa_mcp::device_auth::current_stamp()
+        let owner = kasa_device::device_auth::current_stamp()
             .ok_or_else(|| request_error("phone_login_owner_changed"))?;
         let mut state = flows()
             .lock()
@@ -793,7 +793,7 @@ impl App {
             state.by_id.values().map(|flow| &flow.state),
             &request,
             &binding,
-            |id| kasa_mcp::device_auth::stamp_is_current(&state.by_id[id].owner),
+            |id| kasa_device::device_auth::stamp_is_current(&state.by_id[id].owner),
         )? {
             let flow = &state.by_id[&id];
             return Ok(serde_json::json!({"ok":true,"phone_login":flow.view()}));
@@ -877,7 +877,7 @@ impl App {
         };
         let selected = self.set_claude_account == flow.binding.slot;
         let slot = flow.binding.slot.clone();
-        let owner_current = kasa_mcp::device_auth::stamp_is_current(&flow.owner);
+        let owner_current = kasa_device::device_auth::stamp_is_current(&flow.owner);
         let lease_owned = owns_login_lease(&flow.id);
         let committed = flow.state.commit(
             current.as_ref().map_err(|error| *error),
@@ -887,7 +887,7 @@ impl App {
             staged.identity(),
             selected,
             || {
-                kasa_mcp::device_auth::with_current(&flow.owner, || {
+                kasa_device::device_auth::with_current(&flow.owner, || {
                     phone_credentials::promote(&target, &snapshot, &staged)
                         .map_err(str::to_string)?;
                     Ok(if selected {
@@ -897,7 +897,7 @@ impl App {
                     })
                 })
                 .map_err(|error| {
-                    if kasa_mcp::device_auth::stamp_is_current(&flow.owner) {
+                    if kasa_device::device_auth::stamp_is_current(&flow.owner) {
                         storage_error(&error)
                     } else {
                         "phone_login_owner_changed"
@@ -982,7 +982,7 @@ fn still_current(id: &str) -> bool {
             !flow.phase.terminal()
                 && !flow.cancel.load(Ordering::Acquire)
                 && Instant::now() < flow.deadline
-                && kasa_mcp::device_auth::stamp_is_current(&flow.owner)
+                && kasa_device::device_auth::stamp_is_current(&flow.owner)
                 && owns_login_lease(id)
         })
     })
@@ -1000,7 +1000,7 @@ fn watch_deadline(id: &str) {
             if flow.phase.terminal() {
                 return;
             }
-            let owner_current = kasa_mcp::device_auth::stamp_is_current(&flow.owner);
+            let owner_current = kasa_device::device_auth::stamp_is_current(&flow.owner);
             flow.state
                 .check_liveness(owner_current, owns_login_lease(id), Instant::now());
             flow.clean_terminal();
@@ -1043,7 +1043,7 @@ fn verify_stage(
     else {
         return;
     };
-    let owner_current = kasa_mcp::device_auth::stamp_is_current(&flow.owner);
+    let owner_current = kasa_device::device_auth::stamp_is_current(&flow.owner);
     flow.state
         .check_liveness(owner_current, owns_login_lease(id), Instant::now());
     if flow.phase.terminal() {
@@ -1086,7 +1086,7 @@ fn run_login(id: &str, proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
     if !still_current(id) {
         return;
     }
-    let mut command = crate::proc::command(kasa_mcp::claude_bin());
+    let mut command = crate::proc::command(kasa_agents::claude_bin());
     command.args(["auth", "login", "--claudeai"]);
     if !email.is_empty() {
         command.args(["--email", &email]);
@@ -1446,8 +1446,8 @@ mod tests {
         organization: u128,
         email: &str,
         org: &str,
-    ) -> kasa_mcp::VerifiedClaudeIdentity {
-        kasa_mcp::VerifiedClaudeIdentity {
+    ) -> kasa_device::VerifiedClaudeIdentity {
+        kasa_device::VerifiedClaudeIdentity {
             account_uuid: uuid::Uuid::from_u128(account).to_string(),
             organization_uuid: uuid::Uuid::from_u128(organization).to_string(),
             email: email.into(),

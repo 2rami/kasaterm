@@ -1,0 +1,18 @@
+[package]
+name = "kasa-characters"
+description = "Character assets, persona configuration and visibility shared by hosts."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kasa-socket = { workspace = true, default-features = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

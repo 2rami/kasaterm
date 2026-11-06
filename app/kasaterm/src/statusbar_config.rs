@@ -261,7 +261,7 @@ pub(crate) fn mismatched_machines() -> Vec<String> {
             }
         }
     }
-    let values = kasa_mcp::machines::snapshot()
+    let values = kasa_device::machines::snapshot()
         .into_iter()
         .filter(|machine| {
             machine.get("online").and_then(|v| v.as_bool()) == Some(true)

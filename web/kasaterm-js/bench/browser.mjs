@@ -14,8 +14,8 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(join(execSync('npm root -g').toString().trim(), 'playwright'));
 const repo = join(here, '..', '..', '..');
 // The xterm.js 5.5 + fit build /term shipped until 2026-10, from git history.
-const xterm55 = execSync('git show 579cd414:crates/kasa-mcp/assets/term/xterm.js', { cwd: repo, maxBuffer: 1 << 26 });
-const xterm55css = execSync('git show 579cd414:crates/kasa-mcp/assets/term/xterm.css', { cwd: repo });
+const xterm55 = execSync('git show 579cd414:crates/kasa-http/assets/term/xterm.js', { cwd: repo, maxBuffer: 1 << 26 });
+const xterm55css = execSync('git show 579cd414:crates/kasa-http/assets/term/xterm.css', { cwd: repo });
 const files = {
   '/page.html': [readFileSync(join(here, 'page.html')), 'text/html'],
   '/kasaterm.js': [readFileSync(join(here, '..', 'dist', 'kasaterm.js')), 'text/javascript'],
@@ -24,7 +24,7 @@ const files = {
   '/xterm6.js': [readFileSync(join(here, 'node_modules/@xterm/xterm/lib/xterm.js')), 'text/javascript'],
   '/xterm6.css': [readFileSync(join(here, 'node_modules/@xterm/xterm/css/xterm.css')), 'text/css'],
   '/xterm6-webgl.js': [readFileSync(join(here, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.js')), 'text/javascript'],
-  '/font.woff2': [readFileSync(join(repo, 'crates/kasa-mcp/assets/term/font.woff2')), 'font/woff2'],
+  '/font.woff2': [readFileSync(join(repo, 'crates/kasa-http/assets/term/font.woff2')), 'font/woff2'],
 };
 const scale = Number(process.env.KTJS_BENCH_SCALE || 0.25);
 for (const [name, buf] of Object.entries(workloads(scale))) files[`/w/${name}`] = [buf, 'application/octet-stream'];

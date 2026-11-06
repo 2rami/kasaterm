@@ -25,7 +25,7 @@
 ```
 폰  BrowserMirrorScreen
  ⇅  /browser/ws  — 직통이면 카사넷, 아니면 관문 (기존 입구 규칙 그대로)
-카사텀  crates/kasa-mcp  browser_mirror.rs  — 주인 폰만, 크레딧 창 2
+카사텀  crates/kasa-http  browser_mirror.rs  — 주인 폰만, 크레딧 창 2
  ⇅  ws://127.0.0.1:8777  — 다리 손님으로 붙는다
 카사크롬 다리  bridge/server.mjs  — mirror.* 길잡이
  ⇅
@@ -73,7 +73,7 @@
 - 인증은 지금과 같다(루프백만). 다리는 이미 `eval_js` 를 받는 자리라 거울이 새 구멍을 내지 않는다. 밖으로 여는 문은
   카사텀 하나다.
 
-### 카사텀 (`crates/kasa-mcp/src/browser_mirror.rs` 새로)
+### 카사텀 (`crates/kasa-http/src/browser_mirror.rs` 새로)
 
 - `GET /browser/tabs` → `{chrome: bool, profiles: [{id, label, tabs: [...]}]}`. 다리가 없거나 확장이 안 붙었으면
   `chrome: false`.

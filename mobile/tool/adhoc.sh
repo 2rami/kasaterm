@@ -141,7 +141,7 @@ cat > "$out/install-link.md" <<MD
 $url
 MD
 if [ "$show" = 1 ] && command -v kasaterm-cli >/dev/null; then
-  kasaterm-cli share open "$url"
+  kasaterm-cli open "$url"
 fi
 
 exit 0

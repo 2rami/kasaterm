@@ -18,7 +18,7 @@ pub(crate) fn active_models(backend: Option<&crate::socket::PtyBackend>, active_
     let processes = kasa_pty::process_table_shared();
     let mut models = Vec::new();
     for surface in kasa_pty::live_sessions() {
-        if kasa_mcp::remote::is_remote_pane(&surface) { continue; }
+        if kasa_remote::remote::is_remote_pane(&surface) { continue; }
         let agent = kasa_pty::lookup_session(&surface).and_then(|session| session.shell_pid())
             .and_then(|pid| kasa_pty::agent_pid_for_shell(&processes, pid));
         let Some((kasa_pty::AgentKind::Claude, pid)) = agent else { continue };

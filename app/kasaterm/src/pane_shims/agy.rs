@@ -38,7 +38,7 @@ pub(crate) fn sh_case_pat(name: &str) -> String {
 /// 훅은 아직 안 붙인다 — agy 훅 스키마를 재지 않았다. 이 함수는 페르소나까지다.
 pub(crate) fn install_agy_hook_shim(shim_dir: &std::path::Path) {
     install_agent_identity_helper(shim_dir);
-    let Some(chars) = kasa_mcp::character::characters_json() else {
+    let Some(chars) = kasa_characters::character::characters_json() else {
         return;
     };
     // agy 는 이름으로만 에이전트를 찾으므로 파일이 사용자 홈에 실재해야 한다.
@@ -59,7 +59,7 @@ pub(crate) fn install_agy_hook_shim(shim_dir: &std::path::Path) {
     let mut arms = String::new();
     // 「말투」 토글이 꺼져 있으면 agent 파일을 아예 안 만든다.
     let persona_on = socket::read_claude_persona();
-    for name in kasa_mcp::character::member_names(&chars) {
+    for name in kasa_characters::character::member_names(&chars) {
         let Some(slug) = theme::character_slug(&name) else {
             // 로스터 밖 캐릭터 — 슬러그가 없으면 스프라이트도 없다. 페르소나만
             // 따로 주면 화면과 어긋나므로 여기서도 뺀다.
@@ -68,7 +68,7 @@ pub(crate) fn install_agy_hook_shim(shim_dir: &std::path::Path) {
         // 토글이 꺼져 있으면 agent 파일 자체를 안 만든다 — 남겨 두면 agy 가 그걸
         // 그대로 읽어 말투가 붙는다.
         let Some(persona) = persona_on
-            .then(|| kasa_mcp::character::persona_for(&chars, &name))
+            .then(|| kasa_characters::character::persona_for(&chars, &name))
             .flatten()
         else {
             continue;

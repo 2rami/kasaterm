@@ -8,8 +8,8 @@
 
 ```
 mod(tool.check · classic.PermissionRequest)
-  → 앱 브로커 kasa_mcp::claude_mod (loopback, 인증 없음)
-  → 앱 다리 kasa_mcp::approval_bridge — 비밀을 가려 관문에 올린다
+  → 앱 브로커 kasa_students::claude_mod (loopback, 인증 없음)
+  → 앱 다리 kasa_students::approval_bridge — 비밀을 가려 관문에 올린다
   → 관문 /relay/approvals (계정 기기 토큰) ─┬→ 폰: APNs 푸시 + 승인 화면
                                           └→ 다른 PC: OS 알림 클릭 → 원문 시트
   ← 결정(지문 동봉) → 관문 → 다리 → claude_mod::decide → mod 가 { decision } 으로 엔진에
@@ -17,10 +17,10 @@ mod(tool.check · classic.PermissionRequest)
 
 | 자리 | 파일 |
 |---|---|
-| 관문 창구·푸시 | `crates/kasa-mcp/src/gateway_approvals.rs` |
-| 표시 칸·비밀 가리기·지문 | `crates/kasa-mcp/src/approval_text.rs` |
-| 데스크톱 관문 호출(결정은 앱 화면만) | `crates/kasa-mcp/src/device_approvals.rs` |
-| 브로커 ↔ 관문 다리 | `crates/kasa-mcp/src/approval_bridge.rs` |
+| 관문 창구·푸시 | `crates/kasa-gateway/src/gateway_approvals.rs` |
+| 표시 칸·비밀 가리기·지문 | `crates/kasa-identity/src/approval_text.rs` |
+| 데스크톱 관문 호출(결정은 앱 화면만) | `crates/kasa-device/src/device_approvals.rs` |
+| 브로커 ↔ 관문 다리 | `crates/kasa-students/src/approval_bridge.rs` |
 | 데스크톱 알림·시트 | `app/kasaterm/src/remote_approval.rs` |
 | 폰 | `mobile/lib/approvals.dart` · `mobile/lib/screens/approval_screen.dart` · `mobile/lib/push.dart` |
 

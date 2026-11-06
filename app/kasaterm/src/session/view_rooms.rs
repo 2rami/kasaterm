@@ -114,7 +114,7 @@ impl App {
             .filter_map(|i| {
                 let (label, ids) = self.remote_view_of_window(i)?;
                 let window = ids.iter().find_map(|id| {
-                    kasa_mcp::machines::cached_pane(&label, id)?.get("window")?.as_u64()
+                    kasa_device::machines::cached_pane(&label, id)?.get("window")?.as_u64()
                 });
                 Some(ViewRoom {
                     room: self.window_name_override.get(&i).cloned().unwrap_or_default(),

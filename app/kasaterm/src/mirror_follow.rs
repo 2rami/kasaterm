@@ -37,9 +37,9 @@ impl ViewHold {
         self.wanting.retain(|tab, _| want.contains(tab));
         for tab in self.holding.clone() {
             if !want.contains(&tab) {
-                kasa_mcp::remote::restore_source(&tab);
+                kasa_remote::remote::restore_source(&tab);
                 self.holding.remove(&tab);
-            } else if kasa_mcp::remote::held_source_size(&tab).is_none() {
+            } else if kasa_remote::remote::held_source_size(&tab).is_none() {
                 self.holding.remove(&tab);
                 self.yielded.insert(tab);
             }
@@ -49,7 +49,7 @@ impl ViewHold {
                 continue;
             }
             // 사람이 이 칸을 만져 이미 쥐었다.
-            if kasa_mcp::remote::held_source_size(tab).is_some() {
+            if kasa_remote::remote::held_source_size(tab).is_some() {
                 self.yielded.remove(tab);
                 self.holding.insert(tab.clone());
                 continue;
@@ -66,7 +66,7 @@ impl ViewHold {
                 }
                 self.wanting.insert(tab.clone(), now);
             }
-            if self.wanting.get(tab).is_some_and(|t| now.duration_since(*t) >= SETTLE) && kasa_mcp::remote::touch_source(tab) {
+            if self.wanting.get(tab).is_some_and(|t| now.duration_since(*t) >= SETTLE) && kasa_remote::remote::touch_source(tab) {
                 self.holding.insert(tab.clone());
             }
         }
@@ -84,7 +84,7 @@ pub(crate) struct HumanTouch {
 impl App {
     /// 사람이 이 칸을 만졌다. 다시 그릴 수 없는 거울이면 원본을 이 칸 크기로, 원본이면 뷰어가 쥔 크기를 거둔다.
     pub(crate) fn touch_surface_size(&self, surface: &str) {
-        if kasa_mcp::remote::is_view_pane(surface) {
+        if kasa_remote::remote::is_view_pane(surface) {
             // 대화·명령 묶음은 원본 크기 없이 다시 짓는다 — docs/mirror-render.md. 입력마다 불리는 자리라
             // 판정은 ws 를 기다리지 않는다(쥐고 부른 자리면 판정을 모르는 거울처럼 다룬다).
             let needs = match self.ws.try_lock() {
@@ -92,7 +92,7 @@ impl App {
                 Err(_) => false,
             };
             if needs || self.mirror_kind(surface) == crate::mirror_render::MirrorKind::Grid {
-                kasa_mcp::remote::touch_source(surface);
+                kasa_remote::remote::touch_source(surface);
             }
         } else if let Some(session) = self.pty.get(surface) {
             if session.has_viewer_size_control() {
@@ -141,7 +141,7 @@ mod tests {
 
     /// 실제 HTTP·WS 로 원본(32×23 셸)과 거울을 잇는다 — (원본, 거울 연결, 거울 칸 id).
     #[cfg(unix)]
-    fn linked(tag: &str) -> (std::sync::Arc<kasa_pty::PtySession>, kasa_mcp::remote::RemoteSession, String) {
+    fn linked(tag: &str) -> (std::sync::Arc<kasa_pty::PtySession>, kasa_remote::remote::RemoteSession, String) {
         use std::sync::Arc;
         let id = format!("{tag}-origin-{}", uuid::Uuid::new_v4());
         let local = format!("{tag}-local-{}", uuid::Uuid::new_v4());
@@ -152,14 +152,14 @@ mod tests {
         kasa_pty::register_session(&id, &source);
         // 열쇠를 먼저 붙여 거울이 실제 앱처럼 늘 열쇠로 원본을 되찾는 재접속 길을 탄다 — 안 붙이면 보드
         // 수집기가 악수보다 먼저 도느냐에 따라 길이 갈린다(`mirror_host` 머리말).
-        kasa_mcp::surface_keys::ensure(&id);
-        let backend = kasa_mcp::standalone::mirror_host::MirrorHost::new(&[&id]);
-        let port = kasa_mcp::spawn_http_server_opts(backend, 0, false).unwrap();
-        let mirror = kasa_mcp::remote::connect_view(kasa_mcp::remote::RemoteSpec {
+        kasa_collab::surface_keys::ensure(&id);
+        let backend = kasa_backend::standalone::mirror_host::MirrorHost::new(&[&id]);
+        let port = kasa_http::spawn_http_server_opts(backend, 0, false).unwrap();
+        let mirror = kasa_remote::remote::connect_view(kasa_remote::remote::RemoteSpec {
             base: format!("http://127.0.0.1:{port}"), pane: Some(id),
             cwd: None, token: None, identity: Default::default(),
         }, &local).unwrap();
-        wait("latest capability", || kasa_mcp::remote::follows_latest(&local));
+        wait("latest capability", || kasa_remote::remote::follows_latest(&local));
         (source, mirror, local)
     }
 
@@ -171,17 +171,17 @@ mod tests {
         let (source, mirror, local) = linked("follow");
 
         // 손대지 않은 거울은 칸 크기를 적어 두기만 하고 아무것도 안 보낸다 — 쥔 크기가 없으니 보낼 길이 없다.
-        assert!(kasa_mcp::remote::set_viewport(&local, 150, 40));
-        assert_eq!(kasa_mcp::remote::held_source_size(&local), None);
+        assert!(kasa_remote::remote::set_viewport(&local, 150, 40));
+        assert_eq!(kasa_remote::remote::held_source_size(&local), None);
         assert_eq!(source.viewer_size_owner(), None, "an untouched mirror only reflows locally");
         assert_eq!(source.size(), (32, 23));
 
-        assert!(kasa_mcp::remote::touch_source(&local));
+        assert!(kasa_remote::remote::touch_source(&local));
         wait("viewer size", || source.size() == (150, 40));
         wait("mirror parser", || mirror.session.size() == (150, 40));
-        assert!(!kasa_mcp::remote::touch_source(&local), "same size sends nothing per keystroke");
+        assert!(!kasa_remote::remote::touch_source(&local), "same size sends nothing per keystroke");
 
-        assert!(kasa_mcp::remote::set_viewport(&local, 120, 30));
+        assert!(kasa_remote::remote::set_viewport(&local, 120, 30));
         wait("follow the pane", || source.size() == (120, 30));
 
         source.resize(40, 20).unwrap();
@@ -190,13 +190,13 @@ mod tests {
         assert_eq!(source.size(), (40, 20));
         // 서버는 같은 연결에 「잃음」을 먼저, 닫기를 그 뒤에 보낸다. 거울은 그 순서대로 쥔 크기를 비우고 다시
         // 붙으므로, 다시 붙는 악수에 되잡기(acquire)를 실을 근거가 없다 — 소유자가 비어 있으면 아무도 안 잡은 것이다.
-        wait("lost notice", || kasa_mcp::remote::held_source_size(&local).is_none());
+        wait("lost notice", || kasa_remote::remote::held_source_size(&local).is_none());
         wait("mirror reattached", || mirror.session.size() == (40, 20));
-        assert_eq!(kasa_mcp::remote::held_source_size(&local), None);
+        assert_eq!(kasa_remote::remote::held_source_size(&local), None);
         assert_eq!(source.viewer_size_owner(), None, "reconnect does not steal back the reclaimed grid");
         assert_eq!(source.size(), (40, 20));
 
-        assert!(kasa_mcp::remote::touch_source(&local));
+        assert!(kasa_remote::remote::touch_source(&local));
         wait("touch again", || source.size() == (120, 30));
         drop(mirror);
         wait("closing the mirror releases", || source.size() == (40, 20));
@@ -211,7 +211,7 @@ mod tests {
         use std::collections::HashSet;
         use std::time::{Duration, Instant};
         let (source, _mirror, local) = linked("hold");
-        assert!(kasa_mcp::remote::set_viewport(&local, 150, 40));
+        assert!(kasa_remote::remote::set_viewport(&local, 150, 40));
         let seen: HashSet<String> = [local.clone()].into();
         let none = HashSet::new();
         let mut hold = ViewHold::default();
@@ -223,12 +223,12 @@ mod tests {
         wait("held while viewed", || source.size() == (150, 40));
 
         assert!(source.reclaim_viewer_sizes().unwrap());
-        wait("lost notice", || kasa_mcp::remote::held_source_size(&local).is_none());
+        wait("lost notice", || kasa_remote::remote::held_source_size(&local).is_none());
         hold.step(&seen, &seen, None, t0 + SETTLE * 2);
         hold.step(&seen, &seen, None, t0 + SETTLE * 4);
         assert_eq!(source.size(), (32, 23), "the source person took it back; the viewer stands aside");
 
-        assert!(kasa_mcp::remote::touch_source(&local));
+        assert!(kasa_remote::remote::touch_source(&local));
         wait("a touch here takes it again", || source.size() == (150, 40));
         hold.step(&seen, &seen, None, t0 + SETTLE * 5);
         hold.step(&none, &none, None, t0 + SETTLE * 6);

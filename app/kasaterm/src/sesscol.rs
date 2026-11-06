@@ -113,13 +113,13 @@ impl App {
             // 세션만 얼굴이 붙고, 이미 있는 표는 그대로 놀게 된다.
             //
             // 목록을 만드는 `kasa-socket` 이 아니라 여기서 채우는 건 순환 때문이다 —
-            // 표를 쥔 `kasa-mcp` 가 `kasa-socket` 을 의존한다.
+            // 표를 쥔 `kasa-http` 가 `kasa-socket` 을 의존한다.
             for s in next.iter_mut() {
                 // codex 갈래 대화는 자기 id 로는 표에 없다 — 부모를 맡은 학생이 곧
                 // 이 대화의 학생이다(2026-09-08 지시 「세션탭에 코덱스도 학생이미지」).
-                let found = kasa_mcp::character::session_character(&s.id).or_else(|| {
+                let found = kasa_characters::character::session_character(&s.id).or_else(|| {
                     (!s.parent.is_empty())
-                        .then(|| kasa_mcp::character::session_character(&s.parent))
+                        .then(|| kasa_characters::character::session_character(&s.parent))
                         .flatten()
                 });
                 if let Some(n) = found {

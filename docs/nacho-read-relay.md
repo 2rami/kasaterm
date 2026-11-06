@@ -7,7 +7,7 @@
 `docs/development/api/desk-api.md` 의 「읽기 범위」가 정본이다. 여기는 카사텀 쪽 몫만 적는다.
 작업 모드(`work-mode`)와 작업 장부(`tasks`)는 나쵸가 카사텀 학생을 다루던 길이라 2026-10-14 에 함께 걷었다.
 
-## 창구 (`crates/kasa-mcp/src/nacho_relay.rs` `read_relay`)
+## 창구 (`crates/kasa-device/src/nacho_relay.rs` `read_relay`)
 
 - `GET /nacho/read/capabilities` 하나뿐. 그 밖의 이름은 404, GET 밖은 405.
 - 로컬 호출만 받는다. 기기 사이 SSH 터널(`-L <port>:127.0.0.1:8765`)은 로컬로 들어오니 명부 기기가 부를 수 있다.
@@ -27,5 +27,5 @@
 
 ## 확인 방법
 
-- `cargo test -p kasa-mcp nacho_relay` — 허용목록·405·403(원격·폰)·503, 헤더를 새로 짓는지.
-- 실제 나쵸에 읽기만: `cargo test -p kasa-mcp live_read_relay -- --ignored` (키가 있는 기기에서, GET 하나뿐).
+- `cargo test -p kasa-device nacho_relay` — 허용목록·405·403(원격·폰)·503, 헤더를 새로 짓는지.
+- 실제 나쵸에 읽기만: `cargo test -p kasa-device live_read_relay -- --ignored` (키가 있는 기기에서, GET 하나뿐).

@@ -1,4 +1,4 @@
-//! 루프백 Range 창구(`kasa_mcp::media_stream`)를 Media Foundation 바이트 스트림으로 읽는다. 재생 엔진의
+//! 루프백 Range 창구(`kasa_remote::media_stream`)를 Media Foundation 바이트 스트림으로 읽는다. 재생 엔진의
 //! 내장 HTTP 는 원본이 몇 초 멈추면 연결을 새로 맺으며 파일 처음부터 다시 받았고, 그동안 재생이 끊겨도
 //! 알리지 않았다(느린 루프백 원본 실측) — 여기서는 엔진이 묻는 자리부터 `Range` 로 묻고, 끊기면 그
 //! 자리에서 다시 묻는다. 엔진은 이 스트림 말고 다른 길로 원본에 닿지 않는다.

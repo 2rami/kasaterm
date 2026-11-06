@@ -346,7 +346,6 @@ try {
         KASATERM_DEVICE_FILE = Join-Path $script:scratch "device.json"
         KASATERM_STUDENTS_DIR = Join-Path $script:scratch "students"
         KASATERM_COLLAB_ROOT = Join-Path $script:scratch "collab"
-        KASATERM_SHARE_DIR = Join-Path $script:scratch "share"
         KASATERM_MOBILE_USERS = Join-Path $script:scratch "mobile-users.json"
         KASATERM_KASANET_KEY = Join-Path $script:scratch "kasanet.key"
         KASATERM_KASANET = "off"

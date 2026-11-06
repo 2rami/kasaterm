@@ -892,7 +892,7 @@ impl App {
         // Remote paths must never become local repository picker targets.
         let git_repo_list: Vec<std::path::PathBuf> = {
             let mut set: std::collections::BTreeSet<std::path::PathBuf> = self.pane_cwd_cache.iter()
-                .filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id))
+                .filter(|(id, _)| !kasa_remote::remote::is_remote_pane(id))
                 .map(|(_, cwd)| cwd.clone()).collect();
             if let Some(cur) = git_view.cwd.clone().filter(|_| git_view.remote.is_none()) {
                 set.insert(cur);
@@ -1110,7 +1110,7 @@ impl App {
                 // window in that case, never the source terminal dimensions.
                 let pty_cols = pane.term().map_or(1, |t| t.cols).max(1) as usize;
                 let pty_rows = pane.term().map_or(0, |t| t.cells.len());
-                let independent_view = kasa_mcp::remote::is_view_pane(&ws.active_tab_pid(&id));
+                let independent_view = kasa_remote::remote::is_view_pane(&ws.active_tab_pid(&id));
                 let (cols_now, rows_now) = if !independent_view && (w_cells == 0 || h_cells == 0) {
                     (pty_cols, pty_rows)
                 } else {
@@ -1891,7 +1891,7 @@ impl App {
         self.info.navigation.viewing = self.remote_view_of_window(self.active_window);
         // 그 방 안에서 지금 포커스한 거울의 원본 pane — 본기기 배치도의 「지금 보는 칸」 테두리.
         self.info.navigation.viewing_cur = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone())
-            .and_then(|pane| kasa_mcp::remote::remote_info(&pane)).map(|info| info.remote_id);
+            .and_then(|pane| kasa_remote::remote::remote_info(&pane)).map(|info| info.remote_id);
         let sb_over_before = self.win_tab_first > 0;
         let sb_over_after = sb_tabs
             .last()
@@ -2463,7 +2463,7 @@ impl App {
                 let pane = ws.panes.get(id)?;
                 pane.term()?;
                 let tab_pid = ws.active_tab_pid(id);
-                if kasa_mcp::remote::is_remote_pane(&tab_pid) {
+                if kasa_remote::remote::is_remote_pane(&tab_pid) {
                     let (_, row) = crate::machinescol::remote_pane_facts(&tab_pid)?;
                     if row.get("harness").is_some_and(serde_json::Value::is_null)
                         || row.get("name").and_then(|name| name.as_str())

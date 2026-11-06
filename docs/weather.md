@@ -1,7 +1,7 @@
 # 날씨 — 리퀴드 비 설정 모델
 
 카사텀 창·카드·단추에 비를 내린다. 필터가 아니라 **요소마다** 반응한다 — 창마다 제 유리, 단추마다 제 물방울.
-시제품: `KASA-share/2026-09-29-리퀴드-비-시제품/`(폰·데스크톱 1·2차), 가지 `draft/liquid-rain-desktop`·`draft/liquid-rain-mobile`.
+폰·데스크톱 시제품 가지: `draft/liquid-rain-desktop`·`draft/liquid-rain-mobile`.
 
 ## 설정 (전부 사용자가 고른다)
 

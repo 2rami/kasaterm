@@ -23,6 +23,9 @@
 
 /// `kasaterm-cli` 본체. 바이너리와 `kasa tui`(멀티콜)가 같이 부른다.
 pub mod cli;
+pub mod process;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 /// 실행마다 싣는 짧은 시작 안내와 `kasaterm-cli guide` 주제별 원문.
 pub mod guidance;
 pub mod inline_results;
@@ -42,7 +45,7 @@ pub mod shell_line;
 pub mod transport;
 pub mod transfer;
 pub mod tell;
-/// Windows 소유자 전용 저장소(tell 장부·kasa-mcp 보관함) — Unix 0700/0600 의 대응.
+/// Windows 소유자 전용 저장소(tell 장부·kasa-http 보관함) — Unix 0700/0600 의 대응.
 #[cfg(windows)]
 pub mod private_store;
 #[cfg(target_os = "macos")]
@@ -76,14 +79,6 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// KASA-share 실폴더. 바탕화면 `KASA-share` 는 이곳을 가리키는 링크일 뿐이다 — 바탕화면을
-/// 실폴더로 두면 iCloud 바탕화면 동기화와 겹친다. 검증 리그는 `KASATERM_SHARE_DIR` 로 옮긴다.
-pub fn share_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("KASATERM_SHARE_DIR").filter(|v| !v.is_empty()) {
-        return Some(dir.into());
-    }
-    Some(home_dir()?.join(".config").join("kasaterm").join("share"))
-}
 
 /// collab 마커·메시지 루트. unix 는 `/tmp/kasaterm-collab` 리터럴 유지 — sh 훅·
 /// statusline 등 스크립트가 같은 리터럴을 참조한다. Windows 는 `%TEMP%` 기준 —

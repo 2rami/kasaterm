@@ -120,9 +120,9 @@
 
 ## 시험
 
-- 관문(`cargo test -p kasa-mcp gateway_approvals`): 정상 허락·서명 없음·틀린 서명·다른 폰 키·데스크톱이 허락 시도·
+- 관문(`cargo test -p kasa-gateway gateway_approvals`): 정상 허락·서명 없음·틀린 서명·다른 폰 키·데스크톱이 허락 시도·
   변조(도전값/지문)·만료·nonce 재사용·취소 뒤 결정·폐기 기기의 키·키 갈아 끼운 뒤 옛 서명·옛 `op.read` 도전값·종류와 참조 꼴 엇갈림.
-- 맥(`cargo test -p kasa-mcp op_approval`): 같은 허락 두 번(재사용), 관문이 바꾼 도전값, 믿지 않은 키, 관문 목록에서 빠진 키,
+- 맥(`cargo test -p kasa-device op_approval`): 같은 허락 두 번(재사용), 관문이 바꾼 도전값, 믿지 않은 키, 관문 목록에서 빠진 키,
   만료, 참조 모양.
 - CLI(`cargo test -p kasa-socket keychain_refs`): 짧은 꼴 → `keychain://`, `op://` 거절.
 - 폰: Face ID 취소·실패 시 아무것도 안 보냄, 서명 형식(DER) — 맥 `ring` 으로 검증되는지, 키체인·옛 1Password 요청 둘 다 읽는지.
@@ -143,10 +143,10 @@
 
 | 자리 | 파일 |
 |---|---|
-| 관문 비밀 요청·폰 키·서명 확인 | `crates/kasa-mcp/src/gateway_approvals.rs` |
-| 서명 머리·키 id·지문·서명 검증(관문·맥 공용) | `crates/kasa-mcp/src/approval_text.rs` |
-| 맥: 도전값·재확인·nonce·키체인 꺼내기·감사 | `crates/kasa-mcp/src/op_approval.rs` |
-| 맥: 관문 호출(`create_secret`·`keys`) | `crates/kasa-mcp/src/device_approvals.rs` |
+| 관문 비밀 요청·폰 키·서명 확인 | `crates/kasa-gateway/src/gateway_approvals.rs` |
+| 서명 머리·키 id·지문·서명 검증(관문·맥 공용) | `crates/kasa-identity/src/approval_text.rs` |
+| 맥: 도전값·재확인·nonce·키체인 꺼내기·감사 | `crates/kasa-device/src/op_approval.rs` |
+| 맥: 관문 호출(`create_secret`·`keys`) | `crates/kasa-device/src/device_approvals.rs` |
 | 맥: 소켓 `op.secret`(칸·명령·폴더를 소켓 상대 pid 에서) | `app/kasaterm/src/socket.rs` · `crates/kasa-socket/src/server.rs`(`peer_pid`) |
 | 맥: 설정 「계정」 비밀 승인(믿는 폰·믿기 시트) | `app/kasaterm/src/native_op_approval.rs` |
 | 맥: 폰이 부르는 `op-link`(자동 믿기 지금 돌리기) | `app/kasaterm/src/socket.rs` 설정 동작 |

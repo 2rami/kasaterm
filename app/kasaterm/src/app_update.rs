@@ -98,10 +98,10 @@ fn start_driving(
 
 /// 부팅 때 한 번 — 이 기기의 업데이트가 갈아 끼운 뒤 새 판을 기다리고 있었으면 도착과 빌드 표식을 적는다.
 pub(crate) fn mark_update_booted() {
-    let (Ok(dir), Ok(machine)) = (update::jobs_dir(), kasa_mcp::board_service::local_id()) else {
+    let (Ok(dir), Ok(machine)) = (update::jobs_dir(), kasa_collab::board_service::local_id()) else {
         return;
     };
-    if let Some((job, end)) = update::mark_booted(&dir, &machine, std::process::id(), &kasa_mcp::machines::build_id(), kasa_socket::board::now_ms()) {
+    if let Some((job, end)) = update::mark_booted(&dir, &machine, std::process::id(), &kasa_device::machines::build_id(), kasa_socket::board::now_ms()) {
         eprintln!("[app-update] booted for job {job}: {}", end.word());
     }
 }

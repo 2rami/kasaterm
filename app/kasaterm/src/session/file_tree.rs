@@ -66,13 +66,13 @@ impl App {
         let pid = prev_pane.map(|id| self.ws.lock().unwrap().active_tab_pid(id));
         let prev = pid.as_deref().and_then(|id| {
             let cwd = self.pane_current_cwd(id);
-            let Some(info) = kasa_mcp::remote::remote_info(id).filter(|info| info.view) else { return cwd };
+            let Some(info) = kasa_remote::remote::remote_info(id).filter(|info| info.view) else { return cwd };
             // New siblings of a mirror are local shells. Never start one in an
             // absent /Users/<remote-account>/... directory on the other Mac.
             let remote = cwd.as_ref().map(|p| p.to_string_lossy().into_owned()).or(info.remote_cwd);
             let mapped = remote.as_deref().and_then(|path| {
-                let machine = kasa_mcp::machines::find(&info.label)?;
-                kasa_mcp::machines::map_remote_to_local(&machine, path)
+                let machine = kasa_device::machines::find(&info.label)?;
+                kasa_device::machines::map_remote_to_local(&machine, path)
             });
             info.origin_cwd.into_iter().chain(mapped).chain(remote)
                 .map(std::path::PathBuf::from).find(|path| path.is_dir())
@@ -114,10 +114,10 @@ impl App {
         // (2026-09-17 지시 「파일트리나 깃 패널 기기 달라도 뜨게」).
         let remote = active
             .as_ref()
-            .and_then(|id| kasa_mcp::remote::remote_info(id))
+            .and_then(|id| kasa_remote::remote::remote_info(id))
             .filter(|info| info.view)
             .and_then(|info| {
-                kasa_mcp::machines::label_for_base(&info.base)
+                kasa_device::machines::label_for_base(&info.base)
                     .map(|label| (label, info.base.clone(), info.remote_cwd.clone()))
             });
         if let Some((label, base, remote_cwd)) = remote {
@@ -258,7 +258,7 @@ impl App {
                     continue;
                 }
                 last = Some((root.clone(), paths.clone()));
-                let result = kasa_mcp::git::git_ignored(&root, &paths);
+                let result = kasa_git::git::git_ignored(&root, &paths);
                 let mut guard = match cache.lock() {
                     Ok(g) => g,
                     Err(_) => break,
@@ -645,8 +645,8 @@ impl App {
         let proxy = self.proxy.clone();
         let base = base.to_string();
         std::thread::spawn(move || {
-            let query = format!("/term/tree?path={}", kasa_mcp::remote::urlencode(&dir.to_string_lossy()));
-            let entries: Vec<(String, bool, bool)> = match kasa_mcp::remote::remote_get_json(&base, &query) {
+            let query = format!("/term/tree?path={}", kasa_remote::remote::urlencode(&dir.to_string_lossy()));
+            let entries: Vec<(String, bool, bool)> = match kasa_remote::remote::remote_get_json(&base, &query) {
                 Ok(v) => v.get("entries").and_then(|e| e.as_array()).map(|arr| arr.iter().filter_map(|e| Some((
                     e.get("name")?.as_str()?.to_string(),
                     e.get("is_dir")?.as_bool()?,
@@ -667,8 +667,8 @@ impl App {
 
     /// 다른 기기의 파일을 받아 임시 자리에 둔다 — 열기는 그 사본으로(읽기 전용).
     pub(crate) fn fetch_remote_file(label: &str, base: &str, path: &std::path::Path) -> Result<std::path::PathBuf> {
-        let query = format!("/term/file?path={}", kasa_mcp::remote::urlencode(&path.to_string_lossy()));
-        let bytes = kasa_mcp::remote::remote_get_bytes(base, &query)?;
+        let query = format!("/term/file?path={}", kasa_remote::remote::urlencode(&path.to_string_lossy()));
+        let bytes = kasa_remote::remote::remote_get_bytes(base, &query)?;
         let rel = path.strip_prefix("/").unwrap_or(path);
         let local = std::env::temp_dir().join("kasaterm-remote").join(label).join(rel);
         if let Some(parent) = local.parent() { std::fs::create_dir_all(parent)?; }

@@ -186,7 +186,7 @@ struct IdentityKey {
 }
 
 impl IdentityKey {
-    fn from_verified(identity: kasa_mcp::VerifiedClaudeIdentity) -> Self {
+    fn from_verified(identity: kasa_device::VerifiedClaudeIdentity) -> Self {
         Self { account_uuid: identity.account_uuid, organization_uuid: identity.organization_uuid }
     }
 }
@@ -696,10 +696,10 @@ pub(crate) fn swap_active(
     swap_active_in(&stamp_home, workbench_store().as_deref(), account_id, vault_dir_of)
 }
 
-fn verified_blob_identity(blob: &[u8]) -> Option<kasa_mcp::VerifiedClaudeIdentity> {
+fn verified_blob_identity(blob: &[u8]) -> Option<kasa_device::VerifiedClaudeIdentity> {
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
     let token = live_access_token_at(blob, now_ms)?;
-    kasa_mcp::verified_claude_identity_for_token(&token)
+    kasa_device::verified_claude_identity_for_token(&token)
 }
 
 fn live_access_token_at(blob: &[u8], now_ms: u128) -> Option<String> {
@@ -728,7 +728,7 @@ fn stamped_as_in(active: &Path, account: &str, identity: &crate::session::Accoun
             .is_ok_and(|stamped| stamped.account_uuid == account_uuid && stamped.organization_uuid == organization_uuid)
 }
 
-pub(crate) fn verified_workbench_identity() -> Option<kasa_mcp::VerifiedClaudeIdentity> {
+pub(crate) fn verified_workbench_identity() -> Option<kasa_device::VerifiedClaudeIdentity> {
     if !account_sync_credentials_allowed() {
         return None;
     }
@@ -944,7 +944,7 @@ fn preserve_in_selected_slot_with(
 /// 바꿔도 도는 pane 의 /status 가 즉시 따라오는 것을 실측), 저장소만 바꾸면 과금은
 /// 새 계정인데 /status 는 옛말을 한다 — 사용자의 첫 신고가 정확히 그 증상이었다.
 ///
-/// 신원은 로컬 kasa-mcp 의 `/claude-identity` 가 금고 토큰으로 프로필 API 를 물어
+/// 신원은 로컬 kasa-http 의 `/claude-identity` 가 금고 토큰으로 프로필 API 를 물어
 /// 만들어 준다(oauthAccount 와 같은 모양). 네트워크가 없으면 캐시를 안 바꾼다 —
 /// 표시가 낡는 것이 틀린 값을 지어내는 것보다 낫다. GUI 를 막지 않게 스레드로 돈다.
 pub(crate) fn adopt_oauth_account_cache(port: String, vault_dir: Option<PathBuf>) {
@@ -1178,7 +1178,7 @@ mod tests {
     fn only_a_stamp_naming_the_same_slot_and_uuids_lets_the_workbench_name_a_slot() {
         let s = Slots::new("stamped-as");
         let (stamp, _) = s.bench();
-        let identity = |account: &str| crate::session::AccountIdentity::from_verified(kasa_mcp::VerifiedClaudeIdentity {
+        let identity = |account: &str| crate::session::AccountIdentity::from_verified(kasa_device::VerifiedClaudeIdentity {
             account_uuid: account.into(),
             organization_uuid: "00000000-0000-4000-8000-0000000000f0".into(),
             email: "person@example.test".into(),

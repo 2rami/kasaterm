@@ -2,11 +2,11 @@
 //! 도구·백그라운드·그 칸 프로세스 트리의 listen 포트·모델·추론 강도·문맥·승인 요청.
 //!
 //! 사실은 `observe` 한 곳에서 짓는다. 이 기기 칸은 감시 스레드가, 다른 기기가 거울로 보는 칸은 원본의
-//! `/term/pane-info`(`kasa_mcp::pane_info`)가 같은 함수를 부른다. claude 칸은 연결 mod 이벤트로 바로, mod 없는
+//! `/term/pane-info`(`kasa_http::pane_info`)가 같은 함수를 부른다. claude 칸은 연결 mod 이벤트로 바로, mod 없는
 //! 칸·코덱스·셸은 프로세스 표(300ms 공유 캐시)로 프로세스가 뜨고 질 때와 2초마다, 포트는 프로세스가 바뀔 때와
 //! 10초마다 다시 읽는다.
 use super::*;
-use kasa_mcp::claude_mod::FocusFacts;
+use kasa_students::claude_mod::FocusFacts;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -177,11 +177,11 @@ pub(crate) fn start(shared: &Arc<FocusShared>, sites: info::SiteCache, backend: 
         let _ = ports_kick.lock().unwrap().send(Msg::Kick(pane.to_string()));
     }));
     let kick = Mutex::new(tx);
-    kasa_mcp::claude_mod::set_focus_listener(move |surface| {
+    kasa_students::claude_mod::set_focus_listener(move |surface| {
         let _ = kick.lock().unwrap().send(Msg::Kick(surface.to_string()));
     });
     let provider_backend = backend.clone();
-    kasa_mcp::pane_info::set_provider(move |pane| {
+    kasa_http::pane_info::set_provider(move |pane| {
         let (card, print) = observe(pane, None, Some(&provider_backend))?;
         Some((serde_json::to_value(card).ok()?, print))
     });
@@ -276,16 +276,16 @@ fn watch(shared: Arc<FocusShared>, rx: mpsc::Receiver<Msg>, backend: Arc<socket:
                 asking = Some(generation);
                 let query = format!(
                     "/term/pane-info?schema={}&machine_id={}&pane={}&surface_key={}&wait_ms={}{}",
-                    kasa_mcp::pane_info::SCHEMA,
-                    kasa_mcp::remote::urlencode(machine_id),
-                    kasa_mcp::remote::urlencode(remote_id),
-                    kasa_mcp::remote::urlencode(&key),
-                    kasa_mcp::pane_info::WAIT_CAP_MS,
-                    since.as_deref().map(|s| format!("&since={}", kasa_mcp::remote::urlencode(s))).unwrap_or_default(),
+                    kasa_http::pane_info::SCHEMA,
+                    kasa_remote::remote::urlencode(machine_id),
+                    kasa_remote::remote::urlencode(remote_id),
+                    kasa_remote::remote::urlencode(&key),
+                    kasa_http::pane_info::WAIT_CAP_MS,
+                    since.as_deref().map(|s| format!("&since={}", kasa_remote::remote::urlencode(s))).unwrap_or_default(),
                 );
                 let (base, tx) = (base.clone(), shared.tx.lock().unwrap().clone());
                 std::thread::spawn(move || {
-                    let result = kasa_mcp::remote::remote_get_json_bounded(&base, &query, REMOTE_CAP).map_err(|e| e.to_string());
+                    let result = kasa_remote::remote::remote_get_json_bounded(&base, &query, REMOTE_CAP).map_err(|e| e.to_string());
                     if let Some(tx) = tx {
                         let _ = tx.send(Msg::Answer(generation, result));
                     }
@@ -454,7 +454,7 @@ pub(crate) fn observe(pane: &str, cwd_hint: Option<&std::path::Path>, backend: O
         cwd,
         model,
         effort,
-        facts: kasa_mcp::claude_mod::focus_facts(pane),
+        facts: kasa_students::claude_mod::focus_facts(pane),
         ports: ports_of(pane, &procs),
     };
     let print = fingerprint(&card);
@@ -480,15 +480,15 @@ impl App {
         let Some(pane) = self.ws.lock().ok().and_then(|ws| ws.active_pane.as_deref().map(|id| ws.active_tab_pid(id))) else {
             return (None, None);
         };
-        let Some(remote) = kasa_mcp::remote::remote_info(&pane) else {
+        let Some(remote) = kasa_remote::remote::remote_info(&pane) else {
             let hint = self.pane_view_cwd.get(&pane).cloned();
             return (Some(Target::Local { pane }), hint);
         };
-        let label = kasa_mcp::machines::label_for_base(&remote.base)
+        let label = kasa_device::machines::label_for_base(&remote.base)
             .or_else(|| (!remote.label.is_empty()).then(|| remote.label.clone()))
             .unwrap_or_else(|| "원격 기기".into());
-        let machine_id = kasa_mcp::machines::find(&label).and_then(|m| m.machine_id).unwrap_or_default();
-        let surface_key = kasa_mcp::remote::remote_surface_key(&pane);
+        let machine_id = kasa_device::machines::find(&label).and_then(|m| m.machine_id).unwrap_or_default();
+        let surface_key = kasa_remote::remote::remote_surface_key(&pane);
         (Some(Target::Remote { pane, base: remote.base, remote_id: remote.remote_id, machine_id, surface_key, label }), None)
     }
 
@@ -550,7 +550,7 @@ fn task_kind(kind: &str) -> &str {
     }
 }
 
-fn tool_line(tool: &kasa_mcp::claude_mod::FocusTool, elapsed: String) -> String {
+fn tool_line(tool: &kasa_students::claude_mod::FocusTool, elapsed: String) -> String {
     let head = if tool.agent { format!("서브 · {}", tool.tool) } else { tool.tool.clone() };
     if tool.label.is_empty() { format!("{head} · {elapsed}") } else { format!("{head} · {} · {elapsed}", tool.label) }
 }
@@ -668,7 +668,7 @@ pub(crate) fn card_lines<'a>(seen: &Seen, alt_screen: bool) -> Vec<info::Executi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kasa_mcp::claude_mod::{FocusAsk, FocusContext, FocusTask, FocusTool};
+    use kasa_students::claude_mod::{FocusAsk, FocusContext, FocusTask, FocusTool};
 
     fn rows<'a>(lines: &[info::ExecutionLine<'a>]) -> Vec<(String, String)> {
         lines
@@ -770,7 +770,7 @@ mod tests {
             label: "맥미니".into(),
         });
         let mut since = None;
-        let answer = serde_json::json!({"schema": kasa_mcp::pane_info::SCHEMA, "ok": true, "seq": "4.ab", "card": {"pane": "%3", "shell": "zsh", "ports": [{"port": 3000, "name": "node", "site": ""}]}});
+        let answer = serde_json::json!({"schema": kasa_http::pane_info::SCHEMA, "ok": true, "seq": "4.ab", "card": {"pane": "%3", "shell": "zsh", "ports": [{"port": 3000, "name": "node", "site": ""}]}});
         let (seen, back) = remote_answer(&Ok(answer), target.as_ref(), &mut since);
         assert_eq!(since.as_deref(), Some("4.ab"));
         assert_eq!(back, Duration::ZERO);

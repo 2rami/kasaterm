@@ -2,7 +2,7 @@
 # 관문(kasa-relay)을 서울 서버(네이버 클라우드, 국내 중계와 같은 기계)에서 돌린다 — 이 맥에서 ssh 로. docs/seoul-gateway.md.
 #
 #   gateway.sh build      kasa-relay 를 리눅스(x86_64)용으로 굽는다 — 도커 rust 이미지 안 교차 컴파일, 결과는 ./out/kasa-relay.
-#                         서버(1GB)에서 직접 굽지 않는다(kasa-mcp 전체라 메모리가 모자란다).
+#                         서버(1GB)에서 직접 굽지 않는다(관문과 의존 크레이트를 함께 구우면 메모리가 모자란다).
 #   gateway.sh install <kasa-relay 리눅스 바이너리> <caddy 리눅스 바이너리>
 #                         nginx(443 SNI)·Caddy(TLS)·관문 systemd 를 올린다. 관문은 아직 안 켠다.
 #   gateway.sh env        미니 launchd plist 의 관문 환경을 /etc/kasa-relay/env 로 옮긴다(값은 화면·로그에 안 나온다).
@@ -43,7 +43,7 @@ case "${1:-}" in
       -e CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc -e AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar \
       rust:1.95-bookworm bash -c 'apt-get update -qq >/dev/null && apt-get install -y -qq gcc-x86-64-linux-gnu libc6-dev-amd64-cross >/dev/null &&
         rustup target add x86_64-unknown-linux-gnu >/dev/null 2>&1 &&
-        cargo build --release -p kasa-mcp --bin kasa-relay --target x86_64-unknown-linux-gnu &&
+        cargo build --release -p kasa-gateway --bin kasa-relay --target x86_64-unknown-linux-gnu &&
         cp /target/x86_64-unknown-linux-gnu/release/kasa-relay /out/'
     ls -la "$HERE/out/kasa-relay"
     ;;

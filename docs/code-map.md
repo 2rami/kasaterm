@@ -3,7 +3,7 @@
 프로젝트 개발 안내가 여기를 가리킨다. Rust 를 수정할 때 해당 영역을 찾아 읽는다.
 
 대화의 계정 보관·폰 오프라인 저장은 [offline-conversations.md](offline-conversations.md)가 계약이다.
-`kasa-mcp/conversation_archive.rs`와 `conversation_archive/sync.rs`는 영속 저장·데스크톱 전송,
+`kasa-remote/conversation_archive.rs`와 `conversation_archive/sync.rs`는 영속 저장·데스크톱 전송,
 `gateway_conversations.rs`는 계정 권한과 HTTP, 모바일 `archive_*`와 `screens/saved_conversations.dart`는 폰 저장·읽기 전용 화면을 맡는다.
 
 터미널 글꼴 선택은 `crates/kasa-gridview/src/fonts.rs`, 번들 D2Coding 버전·출처는 `crates/kasa-gridview/assets/fonts/README.md`다.
@@ -46,11 +46,11 @@
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)
 - `sesscol.rs` + `sesscol/{model,paint}.rs` — 오른쪽 「기록」의 대화/닫은 칸 보기, 범위·하네스 필터와 선택 상세. 수집은 워커에서 하고 범위가 바뀐 뒤의 늦은 결과를 거른다. 대화 선택은 실행하지 않으며 별도 이어가기 버튼이 기존 ResumeSession 경로를 부른다. 닫은 칸의 UI 신원은 재사용되는 pane 번호와 분리한다.
 - `session/restore_dialog.rs` — 저장된 작업의 종류 아이콘·학생 신원 표시 모델. 선택 복원 화면은 `restore_picker.rs`, 재구성은 `session/restore.rs`가 맡는다.
-- `info_focus.rs` — Info 열 맨 위 「지금 보는 칸」 카드. 사실은 `observe` 한 곳(칸 종류·폴더·모델·mod 사실·그 칸 포트)이고, 이 기기 칸은 감시 스레드가 mod 신호(`claude_mod::set_focus_listener`)·프로세스 지문·느린 주기로, 다른 기기 칸은 원본의 `/term/pane-info`(`kasa_mcp::pane_info`, 같은 `observe` 를 부른다) 롱폴로 받는다. 포트(lsof)는 뒤에서 읽어 mod 반영을 막지 않는다
+- `info_focus.rs` — Info 열 맨 위 「지금 보는 칸」 카드. 사실은 `observe` 한 곳(칸 종류·폴더·모델·mod 사실·그 칸 포트)이고, 이 기기 칸은 감시 스레드가 mod 신호(`claude_mod::set_focus_listener`)·프로세스 지문·느린 주기로, 다른 기기 칸은 원본의 `/term/pane-info`(`kasa_http::pane_info`, 같은 `observe` 를 부른다) 롱폴로 받는다. 포트(lsof)는 뒤에서 읽어 mod 반영을 막지 않는다
 - `info_outputs.rs` — Info 「결과물」. 지금 보는 칸 대화 기록에서 `kasa_socket::inline_outputs::scan` 으로 그림·음성·영상 표식을 뽑아(거울은 `chat_view::history::remote`) 묶음으로 그리고, 누르면 `image_preview::open_path`·`media_preview::open_reference` 로 연다.
 - `info_prompts.rs` — Info 카드 아래 「내 프롬프트」. 지금 보는 칸에 묶인 기록(claude transcript·codex rollout, 거울은 원본 `/transcript-raw`)을 처음부터 읽어 `chat_view::parse` 규칙으로 사람이 친 말과 묻는 말에 고른 답만 남기고(`relayed` 로 쪽지·보고를 뺀다), 줄마다 체크칸(`prompt-checks.json`)을 두며, 누르면 대화 보기를 켠 칸은 그 보기 맨 위로(`chat_view_jump`), 풀스크린 claude 는 `prompt_nav` mod 행, 거울은 받은 화면 앵커에서 글로 맞춘 번호로 옮긴다(`place` — 차례를 지키는 최장 일치 + 사이 틈 차례 메우기). mod 없는 풀스크린 codex 와 풀스크린 원본의 거울은 화면의 `❯`·`›` 줄을 보며 휠로 찾아간다(`Seek`, 거울은 원본 화면이 돌아올 때까지 기다리며 성큼 걷는다). 줄에 올리면 칼럼 왼쪽에 본문만 담은 카드(`draw_card`, 칼럼을 다 그린 뒤 `render/side_column.rs` 가 부른다)
 - `info_split.rs` — Info 열 위(카드·「내 프롬프트」)·아래(「결과물」·「모든 방」) 영역 나눔. 끄는 경계·최소 높이·한 흐름으로 물러나는 조건, 비율 저장(`info-layout.json`, 설정 파일 옆), 휠이 굴릴 영역
-- `git_panel.rs` — 오른쪽 Git 열의 원본 pane·기기 식별, 읽기 요청 순서·문맥 검증, 현재/로컬/원격 브랜치 표시. 원격 조회 계약은 `kasa_mcp::git_panel`의 `kasa.git-panel.v2`이며 원본 기기가 cwd를 확인한다. 일꾼(`spawn_poller`)은 칸이 바뀌면 바로, 작업 트리 파일이 바뀌면(`kasa_mcp::git_watch`, 누가 고쳤든) 합쳐 한 번, 그 밖에는 git 지문이 바뀔 때만 읽고, 다른 기기 칸은 `spawn_remote_watcher` 가 원본의 `/term/gitcol/wait` 에 매달린다. 칸 폴더가 여러 레포를 담은 부모면 그 아래 레포를 최근에 만진 순으로 골라 보이고 머리 메뉴에서 칸마다 고른다(`kasa_mcp::git_panel::panel_view`)
+- `git_panel.rs` — 오른쪽 Git 열의 원본 pane·기기 식별, 읽기 요청 순서·문맥 검증, 현재/로컬/원격 브랜치 표시. 원격 조회 계약은 `kasa_git::git_panel`의 `kasa.git-panel.v2`이며 원본 기기가 cwd를 확인한다. 일꾼(`spawn_poller`)은 칸이 바뀌면 바로, 작업 트리 파일이 바뀌면(`kasa_git::git_watch`, 누가 고쳤든) 합쳐 한 번, 그 밖에는 git 지문이 바뀔 때만 읽고, 다른 기기 칸은 `spawn_remote_watcher` 가 원본의 `/term/gitcol/wait` 에 매달린다. 칸 폴더가 여러 레포를 담은 부모면 그 아래 레포를 최근에 만진 순으로 골라 보이고 머리 메뉴에서 칸마다 고른다(`kasa_git::git_panel::panel_view`)
 - `nl_command.rs` — 셸 입력줄의 `# 자연어 요청` + 맨 Enter 를 명령 한 줄로 바꿔 **넣기만** 한다(실행은 사람이 Enter). 셸 프롬프트 판정은 OSC 133 `B` 마크 + 마지막 명령 블록이 닫힘(`C` 뒤 `D` 전이면 claude·vim 같은 그 명령이 키를 받는 중이라 안 가로챈다). 모델은 OpenGateway(`themegen::og_key`·`curl_post`), settings `nl_command`·`nl_command_model`. 시험 `KASATERM_AUTONLCMD`
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`·호버 전달 `forward_hover`·손가락 커서 판정 `refresh_hover_pointer`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
@@ -76,7 +76,7 @@
   `kasa-screen`(셀·행·ScreenUpdate·ANSI·리플로우·칸 배치·웹 grid 프레임 `wire` — kasa-bridge 가 재수출) ·
   `kasa-collab`(보드 수집기 `board_service`·tell 장부 `tell_service`·칸 열쇠 `surface_keys`·기계 id `identity`·GUI 없는
   호스트용 tell 전달 `delivery`·claude 훅 설치 `hooks`. 기기 명부·관문·원격 칸은 호스트가 `env::CollabEnv` 로 꽂는다 —
-  본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) · `kasa-acp`(ACP 클라이언트 — 어댑터를 띄워 이벤트로 부린다, `docs/acp.md`) ·
+  본판은 `kasa_http::install_collab_env`, 소비자는 kasa-collab을 직접 참조) · `kasa-agents`(대화 기록 읽기) · `kasa-acp`(ACP 클라이언트 — 어댑터를 띄워 이벤트로 부린다, `docs/acp.md`) ·
   `kasa-socket::cli`(`kasaterm-cli` 본체 — 바이너리와 `kasa tui` 멀티콜이 부른다)
 - `kasa-host` — 창 없는 카사텀(설계·소켓 계약 `docs/kasa-host.md`). `lib.rs`(세션 표·메서드) · `server.rs`(유닉스 소켓) ·
   `keys.rs`(키 이름 → 바이트)
@@ -84,33 +84,40 @@
   `reader`(읽기 스레드) · `vt`(파서·답장) · `grid`(격자 → 행·ANSI) · `screen`(읽기·구독) · `viewport`(크기의 주인) ·
   `input`(쓰기 관문) · `blocks`(OSC 133) · `inline`(OSC 1337·kitty) · `process`·`agents`(프로세스·에이전트 감지) ·
   `registry`(세션 등록부). 상세 지도는 `state.rs` 머리말이 정본
-- `kasa-mcp/src/http.rs` — 호스트 HTTP 서버. `http/router.rs` 가 모듈마다의 `routes()` 를 한 표로 합치고 공통 레이어
-  (`auth`)를 두른다. 자식은 기능별: `socket`(`/term/ws`) · `term_*`(웹 터미널) · `sessions`·`panes`·`pane_read`(세션·칸) ·
-  `collab`(보드·tell) · `migrate` · `claude_account` · `schedule`·`tasks` · `files` · `git_api` · `settings` · `phone` ·
+- `kasa-http/src/http.rs` — 호스트 HTTP 서버. `http/router.rs` 가 모듈마다의 `routes()` 를 한 표로 합치고 공통 레이어
+  (`kasa-device/access/auth`)를 두른다. 자식은 기능별: `socket`(`/term/ws`) · `term_*`(웹 터미널) · `sessions`·`panes`·`pane_read`(세션·칸) ·
+  `collab`(보드·tell) · `migrate` · `files` · `git_api` · `settings` ·
   `machine_proxy` 등. 상세 지도는 `http.rs` 머리말이 정본
-- 기기 화면 거울 — `kasa-mcp/src/screen_mirror.rs`(소켓·ack 창 2장·뜨는 박자, 앱이 꽂는 `Source`)·`http/screen.rs`(`/screen` 보기
+- 호스트 역할 분리(층·의존 그림은 `docs/workspace.md`):
+  `kasa-device`(기기 계정·업링크·폰 입구·Claude 계정 슬롯), `kasa-gateway`(관문과 `kasa-relay`),
+  `kasa-identity`(공용 OAuth·계정·봉인 자격), `kasa-remote`(원격 칸·포트·화면·레포 전송),
+  `kasa-students`(학생 디스패치·팀·스케줄·작업), `kasa-characters`(캐릭터·페르소나),
+  `kasa-git`(Git 상태·작업·감시),
+  `kasa-wire`(화면 전송 형식·피드), `kasa-backend`(독립 Backend), `kasa-serve`(`kasa-serve-web`).
+  `kasa-http`는 이 표면들을 같은 HTTP 경로로 합친다. 학생 디스패처 정본은 `crates/kasa-students/src/dispatch.rs`다.
+- 기기 화면 거울 — `kasa-remote/src/screen_mirror.rs`(소켓·ack 창 2장·뜨는 박자, 앱이 꽂는 `Source`)·`http/screen.rs`(`/screen` 보기
   페이지·`/screen/ws`)·`assets/screen/index.html`(PC 웹 칸·브라우저 보기·조작), 앱 `screen_capture.rs`(macOS `CGDisplayCreateImage`·
   Windows `StretchBlt` 줄여 뜨기·JPEG)·`screen_input.rs`(조작 넣기 — macOS CGEvent·손쉬운 사용 권한, Windows `SendInput`). PC 입구는 Info 「다른 기계」 메뉴 「화면 거울」(`machinescol.rs open_screen_mirror`),
   폰은 `mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`(허브 기기 머리글 모니터 단추). 계약 [screen-mirror.md](screen-mirror.md)
-- `kasa-mcp/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.
-- `kasa-mcp/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
+- `kasa-wire/src/terminal_wire.rs` — PC 터미널 미러의 협상된 무손실 압축·64KiB 해제 상한. `http/socket.rs`가 보내고 `remote.rs`가 VT 파서 앞에서 푼다. 구판 연결은 원문 바이트를 유지한다.
+- `kasa-students/src/claude_mod.rs` — claude 안에 실린 연결 mod(`collab-hooks/claude-mods/kasaterm-bridge`)가 loopback HTTP(`/claude-mod/*`)로 알린 사실의 저장소: 칸별 턴·압축·승인·질문·사용량·백그라운드·활동, 승인 요청 브로커(원격 결정·감사 기록), tell 받은편지함, 바뀐 순간의 상태줄(`status_overlay` — 엔진이 다시 그릴 때까지만). 사실은 그 칸에 지금 도는 claude 가 hello 를 보낸 그 pid 일 때만(`live`) 정본이다. 계약 `docs/claude-mod-bridge.md`
 - `tell_delivery.rs` — 안전한 tell 의 이 기기 배달: 대기열에서 칸을 골라 신원을 증명한 뒤 빈 입력창을 확인해 붙여넣고 Enter(mod 칸도 같다 — 일하는 칸은 진행 중인 턴에 들어간다). 계약 `docs/tell-protocol.md`
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. mod 칸은 `claude_mod::live` 가 정본이라 `resolve_module` 이 바로 판정하고 화면·기록 턴·명부·Enter 다리는 쉰다(`input.rs` 화면 스캔도 그 칸은 건너뛴다). **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
 - `board_digest.rs` — 모든 기기 보드 스냅샷(`collab.snapshot`)의 요약: 사람 차례·하는 중·끝 수와 사람을 기다리는 학생. 사이드바 학생 줄·상태 피드(`overlay.json`)가 쓴다. 보드 판은 걷었다(나쵸 대화·작업은 나쵸 독립 앱)
 - `sidebar_pulse.rs` — 사이드바 맨 위 「목록 | 배치도」 전환과 학생 줄 사정(모든 기기 보드의 사람 차례·작업·끝). 수는 `board_digest.rs`(원격 거울 줄 제외)를 백그라운드로 3초마다 읽고 펫 현황판에도 적는다. 방 우클릭 메뉴로 숨기기(settings.json `sidebar_pulse`)
 - `sidebar_navigation.rs` — 기기 머리·원격 방의 배치와 클릭. `sidebar_navigation/devices.rs`는 기기 전체 드래그·접기·저장·가장자리 스크롤, `device_order.rs`는 표시 순서와 삽입 위치 계산, `device_probe.rs`는 이벤트·저장 복원 리그를 맡는다. `room_cards.rs`는 방별 배치도 높이·숨김·복원과 인덱스 재배치를 관리한다. 로컬 방은 `session/sidebar.rs`가 같은 기기 위치를 사용한다.
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
-- `native_device_account.rs` — 설정 「계정」의 KASA 계정(로그인·Google·GitHub 연결·선택). 자식 `native_account_profile.rs` 는 얼굴 줄(프사·닉네임)·「로그인 방법」·아이디·비밀번호 바꾸기, `native_work_permissions.rs` 는 일 권한. 관문 쪽은 `kasa_mcp` 의 `gateway_profile.rs`(`/relay/profile`)·`device_profile.rs`(이 기기 호출) — `docs/account-oauth.md` 「Profile」
-- `remote_approval.rs` — 원격 승인의 데스크톱 화면: 같은 계정 **다른 기기** 학생의 권한 요청을 관문 긴 폴링으로 받아 OS 알림 클릭과 원문 시트([허락][거절], Return=거절)로 묻고 관문에 보낸다. 이 기기 요청은 `kasa_mcp::approval_bridge` 가 브로커(`claude_mod`)↔관문을 잇는다 — `docs/remote-approval.md`
+- `native_device_account.rs` — 설정 「계정」의 KASA 계정(로그인·Google·GitHub 연결·선택). 자식 `native_account_profile.rs` 는 얼굴 줄(프사·닉네임)·「로그인 방법」·아이디·비밀번호 바꾸기, `native_work_permissions.rs` 는 일 권한. 관문 쪽은 `kasa_http` 의 `gateway_profile.rs`(`/relay/profile`)·`device_profile.rs`(이 기기 호출) — `docs/account-oauth.md` 「Profile」
+- `remote_approval.rs` — 원격 승인의 데스크톱 화면: 같은 계정 **다른 기기** 학생의 권한 요청을 관문 긴 폴링으로 받아 OS 알림 클릭과 원문 시트([허락][거절], Return=거절)로 묻고 관문에 보낸다. 이 기기 요청은 `kasa_students::approval_bridge` 가 브로커(`claude_mod`)↔관문을 잇는다 — `docs/remote-approval.md`
 - `native_op_approval.rs` — 설정 「계정」의 비밀 승인(학생이 맥 키체인 항목을 폰 Face ID 로 꺼냄): 폰 열쇠 자동 믿기(`op_approval::auto_pick`) 뒤 남은 열쇠만 지문 시트(Return=취소)·거두기, 새 열쇠·믿게 된 폰 알림. 폰이 부르는 `op-link`(socket.rs 설정 동작)는 자동 믿기를 지금 돌린다. 학생 요청 길은 소켓 `op.secret`(socket.rs, 칸은 소켓 상대 pid 로) — `docs/secret-faceid-approval.md`
 - `win_sheet.rs` — Windows 결정 시트(맥 `NSAlert` 시트 자리): 본창에 붙은 소유 창, 고정폭 원문 칸·[주 동작][기본 동작], Enter=기본·Esc=결정 없음. `remote_approval`·`native_op_approval` 의 `cfg(windows)` 시트가 부른다 — 값은 `docs/design.md` 「결정 시트」
 - `update_notice.rs` — 새 판 알림: Windows에서 찾은 판은 OS 알림으로 알리고, 클릭하면 WinSparkle 표준 확인 창을 연다. 설치 직전 끊길 일 확인은 유지한다. Sparkle 쪽 확인·받기·즉시 설치는 `macos_sparkle.rs` — `docs/automatic-preview-updates.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
 - `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
-- `machinescol.rs` — 기기 절의 재료(`refresh_machines_col`, `machines::snapshot` 을 기기·방 줄로)와 이사·화면 보기 동작, 하단바 기기 연결 요약. 끊긴 기기의 이유·마지막으로 닿은 때·연결 기록 글도 여기서 짓는다 — 판정과 기록 본체는 `kasa-mcp/src/machines/link.rs`([machine-link.md](machine-link.md))
+- `machinescol.rs` — 기기 절의 재료(`refresh_machines_col`, `machines::snapshot` 을 기기·방 줄로)와 이사·화면 보기 동작, 하단바 기기 연결 요약. 끊긴 기기의 이유·마지막으로 닿은 때·연결 기록 글도 여기서 짓는다 — 판정과 기록 본체는 `kasa-device/src/machines/link.rs`([machine-link.md](machine-link.md))
 - `mirror_follow.rs` — 원본 격자는 마지막으로 만진 쪽을 따른다(tmux `window-size latest`). 다시 그릴 수 없는 거울(`mirror_needs_source`)만: 사람 손(키·IME·왼클릭·SGR 누름·확대)이 닿거나 보기 시작하면(`ViewHold` — 1.2초 판정 유지, 안 보면 놓고 되찾기면 비킨다) `remote::touch_source` 로 원본을 그 칸 크기로 잡고, 원본 칸을 만지면 `reclaim_viewer_sizes` 로 되찾는다. 잡기 전 거울은 `mirror_view` 가 뷰어 쪽에서 다시 접는다. 호스트가 `viewport_latest` 를 모르면(옛 판) 확대 때만 키우는 옛 규칙(`layout.rs fit_zoomed_mirror`). 폰까지 묶은 칸 크기 규칙은 `docs/webterm-handoff.md` 「원본 크기는 쓰는 쪽이 쥔다」
 - `mirror_render.rs` — 모든 PC 거울은 원본 터미널로 시작한다. `MirrorKind`는 수동 전환 가능한 보기와 크기 제어 판정에 쓴다. `pump_mirror_views`는 원본 터미널을 보는 칸만 `mirror_follow`에 넘기며, 대화·명령 묶음을 자동으로 켜지 않는다. 계약은 `docs/mirror-render.md`.
-- `shell_cd.rs` — 셸을 다른 폴더로 옮긴다: 왼쪽 파일트리 칼럼의 폴더 줄 `>_` 단추·우클릭 「셸을 이 폴더로」·트리 위 「..」(`cd_active_shell`), 다른 기기가 부르는 `POST /term/cd`(`kasa_mcp http/term_files.rs` → `Backend::surface_cd`). 놀고 있는 셸만(`transfer_endpoints::idle_shell`), 다른 기기 칸은 그 기기가 판단한다.
+- `shell_cd.rs` — 셸을 다른 폴더로 옮긴다: 왼쪽 파일트리 칼럼의 폴더 줄 `>_` 단추·우클릭 「셸을 이 폴더로」·트리 위 「..」(`cd_active_shell`), 다른 기기가 부르는 `POST /term/cd`(`kasa_http http/term_files.rs` → `Backend::surface_cd`). 놀고 있는 셸만(`transfer_endpoints::idle_shell`), 다른 기기 칸은 그 기기가 판단한다.
 - `prompt_nav.rs` — 풀스크린 claude 칸의 프롬프트 이동(Info 「내 프롬프트」 누름, 스크롤바·눈금은 걷음). 칸 안 mod(`collab-hooks/claude-mods/prompt-nav`, claude shim 이 `--plugin-dir` 로 싣는다)가 쓴 `<shim>/prompt-nav/<pane>.json` 을 읽고, 요청 파일 + 장전 화음(`ctrl+x b`) → `armed` 확인 → `ctrl+↑` 로 mod 에 스크롤을 시킨다. Option·Ctrl+↑↓ 는 claude 로 가 mod 단추가 받는다. classic 렌더러(스크롤백 막대)는 받지 않는다
 - `trust_prompt.rs` — claude 폴더 신뢰 화면 자동 통과. 화면 펌프(`pump_pty_screens`)가 후보 pane 을 적고 GUI 틱이 판정한다: claude pane·입력 조용·한글 조합 아님일 때만, 초점이 No 면 아래 화살표 한 번, Yes 면 Enter 한 번(같은 화면에 반복 없음). 신뢰 선탑재는 `kasa_socket::claude_trust`(claude shim 이 `kasaterm-cli claude-trust "$PWD"` 로 부름)
 - `own_room.rs` — 이 기기 방 지키기: 현지에 세울 칸(셸·학생·연결 칸)의 기준이 다른 기기 방의 보기 창이면 이 기기 방으로 옮기고(`own_spawn_host` — 섞이면 그 방이 통째로 「이 기기」 절로 넘어가 저쪽 학생이 이쪽 학생처럼 보인다), 자기 칸이 0 이 되면(닫기·이사·미러만 복원) 이 기기 셸 방을 하나 세운다(`keep_own_room`, 1초 틱)
@@ -141,11 +148,11 @@
 - `image_preview.rs` — 실제 인라인 그림 영역의 클릭·드래그 구분과 창별 미리보기. 워커 디코드·복사·저장, 클리핑된 히트 영역, 앵커 줌·팬·키보드 포커스를 공유하며 본창과 별도 터미널 창이 같은 상태를 사용한다.
 - `native_settings/login_probe.rs` — 격리 화면에서 가짜 로그인 상태와 테스트용 클립보드 값으로 메뉴·버튼 붙여넣기를 검사한다. 실제 인증 코드나 시스템 클립보드를 읽지 않는다.
 
-- `inline_media.rs`·`inline_media/cache.rs` — 음성·영상 표시 블록, 원본 기기별 메타데이터·썸네일 캐시와 스트리밍 재생 참조. `media_preview.rs`는 카드 안 재생(한 번에 하나)·크게 보기로 이어 틀기·저장과 큰 미리보기의 재생 조작, `media_preview/volume.rs`는 카드·미리보기의 공통 음량과 음소거 저장을, `media_preview/probe.rs`는 조작 관찰·볼륨 이벤트 검증을 맡는다. `media_player.rs`는 플랫폼 디코더·음성 시계·영상 프레임을 맡는다(macOS `media_player/macos.rs`, Windows `media_player/windows.rs`와 루프백 창구를 읽는 바이트 스트림 `windows_stream.rs`). 로컬 등록과 HTTP 읽기는 `kasa_socket::inline_media`·`kasa_mcp::http`에 있고, 재생용 루프백 Range 창구는 `kasa_mcp::media_stream`이다. 계약은 [inline-media.md](inline-media.md).
+- `inline_media.rs`·`inline_media/cache.rs` — 음성·영상 표시 블록, 원본 기기별 메타데이터·썸네일 캐시와 스트리밍 재생 참조. `media_preview.rs`는 카드 안 재생(한 번에 하나)·크게 보기로 이어 틀기·저장과 큰 미리보기의 재생 조작, `media_preview/volume.rs`는 카드·미리보기의 공통 음량과 음소거 저장을, `media_preview/probe.rs`는 조작 관찰·볼륨 이벤트 검증을 맡는다. `media_player.rs`는 플랫폼 디코더·음성 시계·영상 프레임을 맡는다(macOS `media_player/macos.rs`, Windows `media_player/windows.rs`와 루프백 창구를 읽는 바이트 스트림 `windows_stream.rs`). 로컬 등록과 HTTP 읽기는 `kasa_socket::inline_media`·`kasa_http::http`에 있고, 재생용 루프백 Range 창구는 `kasa_remote::media_stream`이다. 계약은 [inline-media.md](inline-media.md).
 - `mobile/lib/inline_media.dart`·`inline_media_bridge_io.dart`·`screens/media_player.dart` — 폰의 결과 카드·루프백 Range 전송·네이티브 재생. 원본 인증 경로로 필요한 512KiB 조각만 읽고 닫힌 소비자의 요청을 취소한다.
 - `kasa-socket/src/guidance.rs` — 앱 연결 없는 `kasaterm-cli guide`와 짧은 시작 안내. `skills/kasapane`의 주제별 원문을 내장하고 요청한 주제 하나만 출력한다. Claude·Codex 실행과 새 작업 브리프는 `references/start.md`만 싣고, 미디어 전달 때 `guide media`로 상세 규칙을 읽는다.
 - `kasa-socket/src/cli/summon_place.rs` — 학생 소환의 작업방 선택. 원격은 기존 칸 주소(`--beside`) 또는 이름 붙인 새 방(`--new-room`)을 지정하고, 사람의 활성 방으로 임의 배치하지 않는다.
 
 - `gpu/curves.rs` — Git 그래프의 배율별 안티앨리어싱 곡선 마스크와 재사용. 기존 아이콘의 클립·그리기 순서를 따른다.
 
-- HTTP 대화 기록 CPU·배포 최적화: [http-performance.md](http-performance.md), `crates/kasa-mcp/examples/transcript_http_bench.rs`·`scripts/bench-transcript-http.py`.
+- HTTP 대화 기록 CPU·배포 최적화: [http-performance.md](http-performance.md), `crates/kasa-http/examples/transcript_http_bench.rs`·`scripts/bench-transcript-http.py`.

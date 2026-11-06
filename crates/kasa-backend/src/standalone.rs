@@ -1,0 +1,279 @@
+//! A headless `Backend` for the standalone webview server (the `kasa-serve-web`
+//! bin). kasaterm normally serves the arona-ui webview off 8765 via
+//! `spawn_http_server`, so when the terminal exits the webview goes blind. This
+//! backend lets a tiny stand-alone process keep serving the *daemon* view —
+//! `claude agents` background sessions and their transcripts — with no GUI, no
+//! live panes, just the `~/.claude/projects` files on disk.
+//!
+//! The `Backend` trait already defaults 57 of its methods to a safe
+//! bail/empty, so this only writes the 7 required-no-default methods (live-pane
+//! ops that are meaningless here → bail; list queries → empty) plus the ones that
+//! actually do work off disk: `active_cwd`, `recent_sessions`,
+//! `session_transcript_raw`, `collab_board`, `peek`, `transcript_tail`.
+//!
+//! ⚠️ **디스크를 읽는 창구는 전부 `jsonl_for` 를 지난다.** 세션 목록을 만드는 길과
+//! 세션 하나를 여는 길이 서로 다른 cwd 를 쓰면 「목록엔 뜨는데 안 열리는」 상태가
+//! 되고, 목록이 정상이라 화면에선 원인이 안 보인다(맥미니 실측: 교집합 0개).
+//! 그리고 트레이트 기본값이 대부분 **빈 값**이라, 창구를 빠뜨리면 오류가 아니라
+//! **빈 화면**으로 나온다 — `transcript_tail` 이 그렇게 `turns: 0` 을 주고 있었다.
+//! `/background-agents` needs no method — its handler
+//! shells out to `claude agents --json --all` and only reads
+//! `pane_session_ids()` (default empty), so background sessions simply come
+//! back without a `parentSurface` tag, which is correct for a paneless host.
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use kasa_socket::backend::{
+    Backend, ConversationTurn, PaneActivity, RecentSession, SplitDirection, SurfaceInfo,
+    WorkspaceInfo,
+};
+use kasa_socket::sessions::{
+    format_turns, is_uuid, recent_sessions_here, session_board_meta, session_jsonl_path_resolved,
+    transcript_turns_at,
+};
+
+pub struct StandaloneBackend {
+    /// The cwd all disk lookups resolve against when a caller doesn't pass one.
+    /// There's no GUI proxy to ask for the "active" pane cwd, so it's fixed at
+    /// construction (from `--cwd` or the process cwd). `recent_sessions` and
+    /// `session_transcript_raw` fall back to this when their `cwd` arg is None.
+    root: PathBuf,
+}
+
+impl StandaloneBackend {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    /// 세션 하나를 **여는** 길. 목록을 만드는 길과 갈리지 않게 한 자리로 모았다.
+    ///
+    /// ⚠️ 원래는 세 창구가 제각기 `self.root` 로만 열려 했는데, board 는
+    /// `claude agents --json` 이 준 **세션마다의 cwd** 로 제목을 읽는다. 그 둘이
+    /// 갈려 있으면 **목록엔 뜨는데 누르면 안 열리는** 상태가 된다 — 맥미니 실측에서
+    /// 교집합이 0개였다(root `/Users/miku`, board 14개는 전부 `/Users/miku/nacho-neko`).
+    /// 목록은 멀쩡하니 화면에선 원인이 안 보인다.
+    fn jsonl_for(&self, id: &str, cwd: Option<&str>) -> Result<PathBuf> {
+        let base = cwd.map(PathBuf::from).unwrap_or_else(|| self.root.clone());
+        session_jsonl_path_resolved(&base, id)
+            .ok_or_else(|| anyhow::anyhow!("no transcript for session {id}"))
+    }
+}
+
+impl Backend for StandaloneBackend {
+    fn collab_snapshot(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::board_service::snapshot(params)
+    }
+
+    fn collab_changes(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::board_service::changes(params)
+    }
+
+    fn collab_inspect(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::board_service::inspect(self,params)
+    }
+
+    fn collab_view(&self, op: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::board_service::view(self,op,params)
+    }
+
+    fn collab_act(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::act_service::act(self,params)
+    }
+
+    fn collab_reach(&self) -> Result<serde_json::Value> {
+        kasa_collab::board_service::reach()
+    }
+
+    fn collab_pane_identity(&self, surface: &str) -> Result<serde_json::Value> {
+        if kasa_pty::lookup_session(surface).is_none() { anyhow::bail!("managed place no longer exists"); }
+        kasa_collab::board_service::address(surface,None)
+    }
+
+    fn collab_board_source(&self) -> Result<serde_json::Value> {
+        let table = kasa_pty::process_table_shared();
+        let mut panes = Vec::new();
+        for id in kasa_pty::live_sessions() {
+            let Some(pty) = kasa_pty::lookup_session(&id) else { continue };
+            let harness = pty.shell_pid().and_then(|pid|kasa_pty::agent_for_shell(&table,pid))
+                .map(|kind|kind.as_str().to_owned());
+            panes.push(serde_json::json!({"address":self.collab_pane_identity(&id)?,"room_label":"Managed terminals",
+                "harness":harness,"title":pty.osc_title().unwrap_or_default(),"status":"unknown",
+                "status_reason":"standalone activity binding unsupported","request":"","progress":"",
+                "place_state":"managed","detached":false}));
+        }
+        let mut source = kasa_collab::board_service::local_source(panes,true)?;
+        source["source_kind"] = serde_json::json!("standalone");
+        source["capabilities"] = serde_json::json!(["live_places","activity_unsupported","rooms_unsupported"]);
+        Ok(source)
+    }
+
+    // --- required (no trait default) ---------------------------------------
+    // Standalone has no live panes: list queries return empty, pane ops bail.
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        Ok(Vec::new())
+    }
+    fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> {
+        Ok(None)
+    }
+    fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
+        Ok(Vec::new())
+    }
+    fn focus_surface(&self, _surface_id: &str) -> Result<()> {
+        anyhow::bail!("standalone webview server has no live panes")
+    }
+    fn split_surface(
+        &self,
+        _direction: SplitDirection,
+        _focus: bool,
+        _from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
+        anyhow::bail!("standalone webview server has no live panes")
+    }
+    fn send_text(&self, _surface_id: Option<&str>, _text: &str) -> Result<()> {
+        anyhow::bail!("unmanaged background sessions do not support safe tell; no attach fallback")
+    }
+
+    fn collab_tell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::tell_service::submit(self,params,|| {
+            anyhow::bail!("standalone local injection is unsupported: managed input/IME evidence is unavailable")
+        })
+    }
+
+    fn collab_tell_status(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_collab::tell_service::status(params)
+    }
+
+    fn relay_account(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_device::device_auth::handle(params)
+    }
+    fn send_key(&self, _surface_id: Option<&str>, _key: &str) -> Result<()> {
+        anyhow::bail!("standalone webview server has no live panes")
+    }
+
+    // --- the 3 that actually work off disk ---------------------------------
+    fn active_cwd(&self) -> Option<PathBuf> {
+        Some(self.root.clone())
+    }
+
+    fn recent_sessions(&self, cwd: Option<&str>) -> Result<Vec<RecentSession>> {
+        // ⚠️ 여기는 일부러 root 를 그대로 쓴다 — 「이 폴더의 `claude --resume` 후보」가
+        // 뜻이라, 위 `jsonl_for` 처럼 전역으로 넓히면 다른 뜻이 된다. 대신 standalone 은
+        // root 가 프로세스가 뜬 자리일 뿐이라 board 와 갈릴 수 있다(맥미니가 그랬다).
+        // 전역 목록이 필요해지면 `recent_claude_sessions_all` 이 이미 있다.
+        let base = cwd.map(PathBuf::from).unwrap_or_else(|| self.root.clone());
+        // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
+        // codex 로 일한 기록이 한 줄도 안 보인다(kasaterm 실측: 20칸 전부 claude,
+        // 60칸이면 비-claude 6개가 올라온다). 값은 release 로 재고 정했다.
+        Ok(recent_sessions_here(&base, 60))
+    }
+
+    fn session_transcript_raw(&self, id: &str, cwd: Option<&str>) -> Result<String> {
+        // Offline read by uuid — same resolution as PtyBackend, minus the live
+        // pane: uuid guard → cwd (arg else root) → jsonl path → read.
+        if !is_uuid(id) {
+            anyhow::bail!("invalid session id: {id}");
+        }
+        let path = self.jsonl_for(id, cwd)?;
+        std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("read session transcript {path:?}: {e}"))
+    }
+
+    // --- 협업 뷰(read-only) — 라이브 pane 이 없으니 대상은 claude agents 세션들 ---------
+    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
+        // board = claude agents(background/interactive) 세션 현황. 각 세션 transcript 에서
+        // title/last_prompt 를 파싱 → kasaterm 꺼져도 세션들이 서로의 작업을 board 로 본다.
+        let out = kasa_socket::process::no_window_command(kasa_agents::claude_bin())
+            .args(["agents", "--json", "--all"])
+            .output()?;
+        if !out.status.success() {
+            return Ok(Vec::new());
+        }
+        let agents: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        let mut board = Vec::new();
+        for a in &agents {
+            let Some(sid) = a.get("sessionId").and_then(|s| s.as_str()) else { continue };
+            let name = a.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let state = a
+                .get("state")
+                .and_then(|s| s.as_str())
+                .or_else(|| a.get("status").and_then(|s| s.as_str()))
+                .unwrap_or("idle")
+                .to_string();
+            let cwd = a
+                .get("cwd")
+                .and_then(|s| s.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.root.clone());
+            let (title, last_prompt) = session_board_meta(&cwd, sid).unwrap_or_default();
+            board.push(PaneActivity {
+                surface_id: sid.to_string(),
+                character: (!name.is_empty()).then_some(name),
+                title,
+                last_prompt,
+                status: state,
+                cwd: cwd.to_string_lossy().into_owned(),
+                ..Default::default()
+            });
+        }
+        Ok(board)
+    }
+
+    fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
+        // surface_id = sessionId(라이브 pane 이 아니므로). transcript 마지막 대화로 '엿보기'.
+        let turns = if lines == 0 { 6 } else { lines };
+        let path = self.jsonl_for(surface_id, None)?;
+        Ok(format_turns(&transcript_turns_at(&path, turns)))
+    }
+
+    /// 웹뷰의 대화 화면이 읽는 것. 트레이트 기본값이 **빈 벡터**라, 이걸 안 쓰면
+    /// `/transcript` 가 `ok:true` 에 `turns: 0` 을 준다 — 오류가 아니라 **빈 대화**로
+    /// 보여서 「이 세션은 원래 비었다」와 구분이 안 된다(맥미니 실측으로 밟은 자리).
+    fn transcript_tail(&self, surface_id: &str, turns: usize) -> Result<Vec<ConversationTurn>> {
+        let path = self.jsonl_for(surface_id, None)?;
+        Ok(transcript_turns_at(&path, turns)
+            .into_iter()
+            .map(|(role, text)| ConversationTurn { role, text })
+            .collect())
+    }
+}
+
+/// 거울 시험의 원본 호스트 — `/term/ws`·`/term/panes` 만 쓰는 시험이 띄우는 서버의 백엔드. 다른 크레이트 시험도
+/// 쓴다(feature `test-support`).
+///
+/// `StandaloneBackend` 를 쓰면 안 되는 까닭이 둘이다. ①창이 없어 거기 등록한 칸이 `/term/panes` 에 「닫힘」으로
+/// 실려, 열쇠로 원본을 되찾는 재접속(`remote_restore::resolve`)이 원본을 못 찾고 물러선다. ②보드를 부를 때마다
+/// 진짜 `claude agents` 를 띄워 목록 한 번이 몇 초 걸리고 기계마다 다르다. 둘 다 시험을 시간에 매달았다 — 열쇠가
+/// 악수보다 먼저 붙느냐(보드 수집기가 먼저 도느냐)에 따라 재접속 길이 갈려 부하가 걸리면 떨어졌다.
+#[cfg(any(test, feature = "test-support"))]
+pub mod mirror_host {
+    use anyhow::{bail, Result};
+    use kasa_socket::backend::{Backend, SurfaceInfo, WorkspaceInfo};
+    use std::sync::Arc;
+
+    /// `open` 칸은 0번 방에 열려 있다.
+    pub struct MirrorHost {
+        open: Vec<String>,
+    }
+
+    impl MirrorHost {
+        pub fn new(open: &[&str]) -> Arc<dyn Backend> {
+            Arc::new(Self { open: open.iter().map(|id| id.to_string()).collect() })
+        }
+    }
+
+    impl Backend for MirrorHost {
+        fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> Result<()> { bail!("mirror host has no layout") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> Result<SurfaceInfo> {
+            bail!("mirror host has no layout")
+        }
+        fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> { bail!("mirror host takes input over /term/ws") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> Result<()> { bail!("mirror host takes input over /term/ws") }
+        fn pane_windows(&self) -> Vec<(String, usize)> {
+            self.open.iter().map(|id| (id.clone(), 0)).collect()
+        }
+    }
+}

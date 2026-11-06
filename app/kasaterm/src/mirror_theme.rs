@@ -75,7 +75,7 @@ pub(crate) fn source_palette(base: &str) -> Option<crate::cells::SourcePalette> 
 
 /// 이 pane 이 거울이면 그 원본 기기의 팔레트. 로컬 pane 은 None.
 pub(crate) fn pane_source_palette(pane_id: &str) -> Option<crate::cells::SourcePalette> {
-    let info = kasa_mcp::remote::remote_info(pane_id)?;
+    let info = kasa_remote::remote::remote_info(pane_id)?;
     source_palette(&info.base)
 }
 
@@ -87,7 +87,7 @@ fn color(value: &serde_json::Value) -> Option<[u8; 4]> {
 }
 
 fn fetch(base: &str, path: &str) -> Option<Vec<u8>> {
-    kasa_mcp::remote::fetch_mirror_appearance(base, path).ok()
+    kasa_remote::remote::fetch_mirror_appearance(base, path).ok()
 }
 
 fn fetch_json(base: &str, path: &str) -> Option<serde_json::Value> {
@@ -192,9 +192,9 @@ impl App {
         // A restored mirror can carry yesterday's local assignment. Refresh
         // every mirror, including background tabs and rooms, from its host.
         let assignments: Vec<_> = self.pty.keys().filter_map(|id| {
-            let info = kasa_mcp::remote::remote_info(id)?;
-            let label = if info.label.is_empty() { kasa_mcp::machines::label_for_base(&info.base)? } else { info.label };
-            let row = kasa_mcp::machines::cached_pane(&label, &info.remote_id)?;
+            let info = kasa_remote::remote::remote_info(id)?;
+            let label = if info.label.is_empty() { kasa_device::machines::label_for_base(&info.base)? } else { info.label };
+            let row = kasa_device::machines::cached_pane(&label, &info.remote_id)?;
             let name = row.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
             Some((id.clone(), name.to_string()))
         }).collect();
@@ -204,7 +204,7 @@ impl App {
         }
         let target = {
             let ws = self.ws.lock().unwrap();
-            ws.active_pane.as_ref().and_then(|id| kasa_mcp::remote::remote_info(&ws.active_tab_pid(id)))
+            ws.active_pane.as_ref().and_then(|id| kasa_remote::remote::remote_info(&ws.active_tab_pid(id)))
         };
         let mut c = cache().lock().unwrap();
         if focus_source(&mut c, target.as_ref().map(|v| v.base.as_str())) {
@@ -221,8 +221,8 @@ impl App {
         let old = c.sources.get(&target.base).cloned().unwrap_or_default();
         c.pending = Some(target.base.clone());
         drop(c);
-        let label = if target.label.is_empty() { kasa_mcp::machines::label_for_base(&target.base).unwrap_or_default() } else { target.label };
-        let mut rows = kasa_mcp::machines::snapshot().into_iter()
+        let label = if target.label.is_empty() { kasa_device::machines::label_for_base(&target.base).unwrap_or_default() } else { target.label };
+        let mut rows = kasa_device::machines::snapshot().into_iter()
             .find(|m| m.get("label").and_then(|v| v.as_str()) == Some(label.as_str()))
             .and_then(|m| m.get("panes").and_then(|v| v.as_array()).cloned()).unwrap_or_default();
         rows.sort_by_key(|row| row.get("id").and_then(|v| v.as_str()) != Some(target.remote_id.as_str()));

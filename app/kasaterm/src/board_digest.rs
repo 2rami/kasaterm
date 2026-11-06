@@ -87,7 +87,7 @@ fn digest(data: &Snapshot) -> crate::sidebar_pulse::PulseDigest {
     let mirrors: Vec<&str> = data.panes.iter().filter(mirror).map(|row| row.address.surface_id.as_str()).collect();
     for student in digest.waiting.iter_mut().filter(|student| !student.local) {
         student.mirror = mirrors.iter().find(|pane| {
-            kasa_mcp::remote::remote_info(pane).is_some_and(|info| info.label == student.machine_label && info.remote_id == student.surface_id)
+            kasa_remote::remote::remote_info(pane).is_some_and(|info| info.label == student.machine_label && info.remote_id == student.surface_id)
         }).map(|pane| pane.to_string());
     }
     digest.waiting.sort_by(|a, b| a.since_ms.cmp(&b.since_ms).then_with(|| a.name.cmp(&b.name)));

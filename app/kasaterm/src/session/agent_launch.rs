@@ -33,19 +33,19 @@ impl App {
             return blank();
         }
         let Some(cwd) = cwd else { return Vec::new() };
-        let Some(chars) = kasa_mcp::character::roster_in_use() else {
+        let Some(chars) = kasa_characters::character::roster_in_use() else {
             return Vec::new();
         };
-        let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
+        let rslug = kasa_characters::character::rslug(std::path::Path::new(cwd), room);
         // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(사용자
         // 2026-07-13): 아로나·프라나도 별도 클래스가 아닌 같은 배정 풀에 포함한다.
         // 배정 풀 — 골라 둔 명단이 있으면 그것만, 없으면 전원(지금까지의 동작).
-        let members = kasa_mcp::character::assignable_names(&chars);
+        let members = kasa_characters::character::assignable_names(&chars);
         // `KASATERM_ASSIGN_DEBUG=1` — 풀이 왜 그 크기인지 찍는다. 「골랐는데 안 고른
         // 애가 나온다」는 신고가 왔을 때 설정을 읽었는지부터 갈라야 하는데, 그걸
         // 밖에서 볼 방법이 이것 말고 없다.
         if std::env::var_os("KASATERM_ASSIGN_DEBUG").is_some() {
-            let all = kasa_mcp::character::member_names(&chars).len();
+            let all = kasa_characters::character::member_names(&chars).len();
             eprintln!(
                 "[assign] pool={} / roster={all} — {:?}",
                 members.len(),
@@ -67,13 +67,13 @@ impl App {
                 );
             }
         }
-        let sid = kasa_mcp::character::new_session_id();
+        let sid = kasa_characters::character::new_session_id();
         self.ws.lock().unwrap().pane_launch_character.remove(id);
-        let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
+        let _ = kasa_characters::character::write_marker(&rslug, id, &name);
         self.pane_session_id.insert(id.to_string(), sid.clone());
         // 세션→캐릭터 영속 바인딩(사용자 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
         // 캐릭터를 재사용하도록 스폰 시점에 기록(apply_session_character 가 조회).
-        let _ = kasa_mcp::character::bind_session_character(&sid, &name);
+        let _ = kasa_characters::character::bind_session_character(&sid, &name);
         self.ws
             .lock()
             .unwrap()
@@ -108,8 +108,8 @@ impl App {
         // 그 래퍼는 정적 문자열이라 Rust 값을 박을 자리도 없다. 근원에서 한 번 막는다.
         // 캐릭터 이름·색·그림은 그대로다 — 토글의 뜻은 「말투만 끄기」다.
         if socket::read_claude_persona() {
-            if let Some(p) = kasa_mcp::character::persona_for(&chars, &name)
-                .or_else(|| kasa_mcp::character::persona_for_any(&name))
+            if let Some(p) = kasa_characters::character::persona_for(&chars, &name)
+                .or_else(|| kasa_characters::character::persona_for_any(&name))
             {
                 env.push(("KASATERM_PERSONA".to_string(), p));
             }
@@ -118,10 +118,10 @@ impl App {
         // (2026-08-24 지시: 학생 한 명당 모델 선택). shim 은 부팅 1회 생성이라
         // 학생마다 다른 값을 구워 넣을 수가 없다. env 로 내려서 shim 안에서
         // 참조하는 것이 유일한 길이고, 그래서 이 자리가 정본이다.
-        if let Some(m) = kasa_mcp::character::model_for(&chars, &name) {
+        if let Some(m) = kasa_characters::character::model_for(&chars, &name) {
             env.push(("KASATERM_MODEL".to_string(), m));
         }
-        if let Some(b) = kasa_mcp::character::backend_for(&chars, &name) {
+        if let Some(b) = kasa_characters::character::backend_for(&chars, &name) {
             env.push(("KASATERM_BACKEND".to_string(), b));
         }
         env
@@ -137,9 +137,9 @@ impl App {
         let launched = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned();
         if let Some(name) = launched {
             if name.is_empty() { return; } // this run ended; do not relabel its shell
-            let bound = kasa_mcp::character::session_character(sid);
+            let bound = kasa_characters::character::session_character(sid);
             let keep_pane = bound.as_deref().is_some_and(|bound| pane_pick_wins(
-                pane_reassigned(pane), kasa_mcp::character::is_assignable_for(sid, bound)));
+                pane_reassigned(pane), kasa_characters::character::is_assignable_for(sid, bound)));
             let name = match bound.filter(|bound| resume_takes_over(
                 self.pane_session_id.get(pane).map(String::as_str), sid, &name, bound, keep_pane)) {
                 Some(bound) => {
@@ -149,8 +149,8 @@ impl App {
                 None => name,
             };
             self.relabel_pane(pane, &name);
-            if kasa_mcp::character::session_character(sid).is_none() {
-                let _ = kasa_mcp::character::bind_session_character(sid, &name);
+            if kasa_characters::character::session_character(sid).is_none() {
+                let _ = kasa_characters::character::bind_session_character(sid, &name);
             }
             return;
         }
@@ -161,7 +161,7 @@ impl App {
         // 이기면 오히려 진실이 뒤집힌다: 미도리로 확정된 포크 세션(2535079b)의 부모
         // (b18e41d2)가 히마리라서, BgAgentsChanged 재적용마다 미도리→히마리로 둔갑+
         // 재바인딩되는 지뢰였다(사용자 07-16). 부모는 자기 바인딩이 없을 때만.
-        match kasa_mcp::character::session_character(sid) {
+        match kasa_characters::character::session_character(sid) {
             Some(mapped) => {
                 if cur.as_deref() != Some(mapped.as_str()) {
                     self.relabel_pane(pane, &mapped);
@@ -179,13 +179,13 @@ impl App {
             .ok()
             .and_then(|m| m.get(sid).cloned())
             .flatten()
-            .and_then(|parent| kasa_mcp::character::session_character(&parent));
+            .and_then(|parent| kasa_characters::character::session_character(&parent));
         match parent_char {
             Some(pc) => {
                 if cur.as_deref() != Some(pc.as_str()) {
                     self.relabel_pane(pane, &pc);
                 }
-                let _ = kasa_mcp::character::bind_session_character(sid, &pc);
+                let _ = kasa_characters::character::bind_session_character(sid, &pc);
             }
             None => {
                 // stem 매핑도 부모도 없는 포크/재접속(claude 가 transcript id 를 새로 발급,
@@ -198,25 +198,25 @@ impl App {
                     .and_then(|p| p.shell_pid())
                     .and_then(|pid| kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID"))
                     .filter(|env_sid| env_sid.as_str() != sid)
-                    .and_then(|env_sid| kasa_mcp::character::session_character(&env_sid));
+                    .and_then(|env_sid| kasa_characters::character::session_character(&env_sid));
                 match anchored {
                     Some(true_char) => {
                         if cur.as_deref() != Some(true_char.as_str()) {
                             self.relabel_pane(pane, &true_char);
                         }
                         // stem 으로도 바로 잡히게 영속화 — 다음 board 폴링·재접속 안정화.
-                        let _ = kasa_mcp::character::bind_session_character(sid, &true_char);
+                        let _ = kasa_characters::character::bind_session_character(sid, &true_char);
                     }
                     None => {
                         if let Some(cur) = cur.filter(|c| !c.is_empty()) {
-                            let _ = kasa_mcp::character::bind_session_character(sid, &cur);
-                        } else if let Some(chars) = kasa_mcp::character::roster_in_use() {
+                            let _ = kasa_characters::character::bind_session_character(sid, &cur);
+                        } else if let Some(chars) = kasa_characters::character::roster_in_use() {
                             // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수
                             // 없으므로, 캐릭터 없이 복원된 pane은 SessionStart에서 보충한다.
-                            let members = kasa_mcp::character::assignable_names(&chars);
+                            let members = kasa_characters::character::assignable_names(&chars);
                             if let Some(name) = self.next_auto_character(&members, pane) {
                                 self.relabel_pane(pane, &name);
-                                let _ = kasa_mcp::character::bind_session_character(sid, &name);
+                                let _ = kasa_characters::character::bind_session_character(sid, &name);
                             }
                         }
                     }
@@ -239,8 +239,8 @@ impl App {
         // board 도 같은 이름을 보게 /tmp 마커 동기(swap_character 의 cwd/room 관례).
         if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
             let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
-            let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
-            let _ = kasa_mcp::character::write_marker(&rslug, pane, character);
+            let rslug = kasa_characters::character::rslug(&cwd, room.as_deref());
+            let _ = kasa_characters::character::write_marker(&rslug, pane, character);
         }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -285,8 +285,8 @@ impl App {
             .insert(pane.to_string(), character.to_string());
         if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
             let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
-            let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
-            let _ = kasa_mcp::character::write_marker(&rslug, pane, character);
+            let rslug = kasa_characters::character::rslug(&cwd, room.as_deref());
+            let _ = kasa_characters::character::write_marker(&rslug, pane, character);
         }
         // --resume 가 같은 캐릭터로 돌아오게 세션 바인딩도 갱신 — pane 이 물고 있는 sid 를
         // **모두** 맞춘다. spawn anchor(pane_session_id)와 claude transcript stem
@@ -301,10 +301,10 @@ impl App {
         .into_iter()
         .flatten()
         {
-            let _ = kasa_mcp::character::bind_session_character(sid, character);
+            let _ = kasa_characters::character::bind_session_character(sid, character);
             // **사람이 고른 자리**라고 적어 둔다. 이게 없으면 명단을 정리할 때
             // 자동 배정의 잔재와 구별되지 않아 함께 쓸려 나간다(2026-08-26 지시).
-            kasa_mcp::character::mark_manual_pick(sid);
+            kasa_characters::character::mark_manual_pick(sid);
         }
         // 말투도 새 캐릭터 것으로 — **다음에 이 pane 에서 claude 가 뜰 때부터**.
         //
@@ -623,10 +623,10 @@ impl App {
                 ));
             }
         }
-        let picks = updated_character_picks(kasa_mcp::character::all_picks(), theme, name, on, theme_roster_value)?;
+        let picks = updated_character_picks(kasa_characters::character::all_picks(), theme, name, on, theme_roster_value)?;
         socket::write_character_picks(&picks);
         self.invalidate_character_view();
-        Ok(kasa_mcp::character::picks_of_theme(theme)
+        Ok(kasa_characters::character::picks_of_theme(theme)
             .iter()
             .any(|n| n == name)
             == on)
@@ -647,7 +647,7 @@ impl App {
                 "그 테마의 명단을 못 읽었어요".to_string(),
             ));
         }
-        let mut picks = kasa_mcp::character::all_picks();
+        let mut picks = kasa_characters::character::all_picks();
         picks.retain(|(k, _)| k != theme);
         if on {
             replace_conflicting_character_picks(&mut picks, theme, &names, theme_roster_value);
@@ -659,14 +659,14 @@ impl App {
         // 끄기는 키를 빼는 것으로 끝난다 — 빈 배열은 저장 때 어차피 걷힌다.
         socket::write_character_picks(&picks);
         self.invalidate_character_view();
-        Ok(kasa_mcp::character::picks_of_theme(theme).is_empty() != on)
+        Ok(kasa_characters::character::picks_of_theme(theme).is_empty() != on)
     }
 
     /// 다른 기기에서 학생 테마·명단이 넘어와 settings.json 이 밖에서 바뀌었을 때. 설정 화면이
     /// 쓰는 길과 달리 `write_character_picks` 를 안 거쳤으니 배정·활성 테마 캐시도 여기서 걷는다.
     pub(crate) fn reload_student_choices(&mut self) {
-        kasa_mcp::character::invalidate_active_theme();
-        kasa_mcp::character::invalidate_character_picks();
+        kasa_characters::character::invalidate_active_theme();
+        kasa_characters::character::invalidate_character_picks();
         socket::invalidate_theme_rows();
         self.invalidate_character_view();
     }
@@ -775,10 +775,10 @@ pub(crate) fn character_swap_confirm_text(to: &str, resumable: bool) -> (String,
 }
 
 pub(super) fn theme_roster_value(theme: &str) -> Option<serde_json::Value> {
-    if theme == kasa_mcp::character::BASE_THEME_KEY {
-        kasa_mcp::character::base_characters_json()
+    if theme == kasa_characters::character::BASE_THEME_KEY {
+        kasa_characters::character::base_characters_json()
     } else {
-        kasa_mcp::character::theme_characters_json(theme)
+        kasa_characters::character::theme_characters_json(theme)
     }
 }
 
@@ -800,7 +800,7 @@ pub(super) fn updated_character_picks(
     let names = &mut picks[index].1;
     // 처음의 전체 후보에서 한 명을 뺄 때만 나머지를 명시적으로 저장한다.
     if !on && unrestricted {
-        *names = load(theme).as_ref().map(kasa_mcp::character::member_names).unwrap_or_default();
+        *names = load(theme).as_ref().map(kasa_characters::character::member_names).unwrap_or_default();
     }
     names.retain(|other| other != name);
     if on { names.push(name.to_string()); }
@@ -816,7 +816,7 @@ pub(super) fn replace_conflicting_character_picks(
     load: impl Fn(&str) -> Option<serde_json::Value>,
 ) {
     let slug_of = |roster: &serde_json::Value, name: &str| {
-        kasa_mcp::character::member_def(roster, name)
+        kasa_characters::character::member_def(roster, name)
             .and_then(|m| m.get("slug").and_then(|s| s.as_str()).map(String::from))
             .filter(|s| !s.is_empty())
     };
@@ -833,7 +833,7 @@ pub(super) fn replace_conflicting_character_picks(
 pub(super) fn theme_roster_names(theme: &str) -> Vec<String> {
     theme_roster_value(theme)
         .as_ref()
-        .map(kasa_mcp::character::member_names)
+        .map(kasa_characters::character::member_names)
         .unwrap_or_default()
 }
 
@@ -882,9 +882,9 @@ pub(crate) fn write_persona_override(pane: &str, character: &str) {
     };
     let dir = std::path::Path::new(&shim);
     let persona = if socket::read_claude_persona() {
-        kasa_mcp::character::characters_json()
-            .and_then(|c| kasa_mcp::character::persona_for(&c, character))
-            .or_else(|| kasa_mcp::character::persona_for_any(character))
+        kasa_characters::character::characters_json()
+            .and_then(|c| kasa_characters::character::persona_for(&c, character))
+            .or_else(|| kasa_characters::character::persona_for_any(character))
             .unwrap_or_default()
     } else {
         String::new()
@@ -901,7 +901,7 @@ pub(crate) fn write_persona_override(pane: &str, character: &str) {
     );
     // 모델·통로도 새 캐릭터 것으로 — 안 맞추면 이름과 얼굴만 바뀌고 앞 학생의
     // 모델로 계속 돈다(학생 명령이 넷을 함께 쓰는 것과 같은 이유).
-    let chars = kasa_mcp::character::characters_json();
+    let chars = kasa_characters::character::characters_json();
     let pick = |f: fn(&serde_json::Value, &str) -> Option<String>| {
         chars
             .as_ref()
@@ -910,11 +910,11 @@ pub(crate) fn write_persona_override(pane: &str, character: &str) {
     };
     let _ = std::fs::write(
         base.with_extension("model"),
-        pick(kasa_mcp::character::model_for),
+        pick(kasa_characters::character::model_for),
     );
     let _ = std::fs::write(
         base.with_extension("backend"),
-        pick(kasa_mcp::character::backend_for),
+        pick(kasa_characters::character::backend_for),
     );
 }
 

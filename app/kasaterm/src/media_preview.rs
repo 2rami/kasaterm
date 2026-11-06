@@ -3,7 +3,7 @@ use crate::image_preview::Response;
 use crate::inline_media::{self, cache, Control, Rect, Reference};
 use crate::media_player::{Playback, Player};
 use kasa_gridview::images::InlineSlot;
-use kasa_mcp::media_stream::Stream;
+use kasa_remote::media_stream::Stream;
 use winit::keyboard::PhysicalKey;
 
 mod probe;
@@ -505,7 +505,7 @@ impl State {
         let media = asset.media.clone();
         std::thread::spawn(move || {
             let dest = crate::webpane::download_path(&file_name(&media.name));
-            let result = kasa_mcp::media_stream::Stream::save(reference.source.as_deref(), &media, &dest);
+            let result = kasa_remote::media_stream::Stream::save(reference.source.as_deref(), &media, &dest);
             if let Ok(mut s) = saving.lock() {
                 s.remove(&reference);
             }

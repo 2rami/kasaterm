@@ -26,7 +26,7 @@ List<Run> _line(Object? raw) => raw is List
     : const [];
 
 /// 결과 속 폴더 고리 — [line] 번째 줄의 [start]부터 [length] 글자가 [path] 폴더다.
-/// 원본 기계가 실제로 있는 폴더만 준다(`kasa-mcp shell_blocks.rs dir_links`).
+/// 원본 기계가 실제로 있는 폴더만 준다(`kasa-git shell_blocks.rs dir_links`).
 class ShellLink {
   const ShellLink(this.line, this.start, this.length, this.path);
   final int line;

@@ -15,7 +15,7 @@ impl App {
         if phase >= 5 || elapsed < 4 + u64::from(phase) * 3
             || self.restore_progress.is_some() || self.restore_applying.is_some() { return; }
         let Some(id) = self.target_surface() else { return };
-        if !kasa_mcp::remote::is_view_pane(&id) { return; }
+        if !kasa_remote::remote::is_view_pane(&id) { return; }
         let session = self.pty[&id].clone();
         let window = self.window.as_ref().unwrap().id();
         if phase == 0 {
@@ -41,15 +41,15 @@ impl App {
                 eprintln!("[mirror-focus] focus retains content/anchor/dimensions; restore loading gone; returned to live input");
             }
         } else if phase == 3 {
-            if !kasa_mcp::remote::follows_latest(&id) {
+            if !kasa_remote::remote::follows_latest(&id) {
                 eprintln!("[mirror-focus] PASS: host predates latest-toucher sizing; source untouched");
                 PHASE.store(5, Ordering::Relaxed);
                 return;
             }
             self.touch_surface_size(&id);
-            eprintln!("[mirror-focus] touched; source {:?} -> {:?}", session.size(), kasa_mcp::remote::held_source_size(&id));
+            eprintln!("[mirror-focus] touched; source {:?} -> {:?}", session.size(), kasa_remote::remote::held_source_size(&id));
         } else {
-            let held = kasa_mcp::remote::held_source_size(&id).expect("a touch holds the source grid");
+            let held = kasa_remote::remote::held_source_size(&id).expect("a touch holds the source grid");
             assert_eq!(session.size(), held, "a touch moves the source to this pane");
             eprintln!("[mirror-focus] PASS: passive until touched, then source follows this pane {held:?}");
         }

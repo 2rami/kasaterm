@@ -54,7 +54,7 @@
 ## 공유 선택 — 관문 공통 설정의 순서 있는 선택
 
 모든 기기가 같은 계정으로 모이는 정본은 관문 공통 설정(`/relay/account-sync`)의 opt-in 키
-`claude_account_choice` 다(`kasa_mcp::account_sync::choice`). 값은 공급자 **계정·조직 UUID**, 표시·사슬 탐색용
+`claude_account_choice` 다(`kasa_device::account_sync::choice`). 값은 공급자 **계정·조직 UUID**, 표시·사슬 탐색용
 이메일·조직명, `intent`(선택마다 새 UUID), `base`, `after`, 관문이 찍는 `rev` 뿐이다. 슬롯 번호·별명·토큰·지문은
 싣지 않는다. UUID 만 권위이고 이메일·조직명은 힌트다.
 

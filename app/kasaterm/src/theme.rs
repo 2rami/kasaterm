@@ -1847,7 +1847,7 @@ fn build_other_rosters() -> &'static [Roster] {
     if cfg!(test) {
         return &[];
     }
-    let Some(root) = kasa_mcp::character::themes_root() else { return &[] };
+    let Some(root) = kasa_characters::character::themes_root() else { return &[] };
     let Ok(rd) = std::fs::read_dir(root) else { return &[] };
     let mut out: Vec<Roster> = Vec::new();
     for e in rd.flatten() {
@@ -1878,7 +1878,7 @@ fn build_roster() -> Roster {
     // 명부의 일원으로 본다. 그게 없으면 그 학생들은 색도 슬러그도 활성 명부에서
     // 못 찾아, 이름만 뜨고 테마가 안 붙는다(2026-08-29 「에무랑 카사크롬도 테마
     // 해결해봐」). 이름이 겹칠 때 고른 쪽이 이기는 것도 같은 함수가 정한다.
-    let chars = (!cfg!(test)).then(kasa_mcp::character::roster_in_use).flatten();
+    let chars = (!cfg!(test)).then(kasa_characters::character::roster_in_use).flatten();
     roster_of(chars.as_ref())
 }
 
@@ -1974,7 +1974,7 @@ pub fn agent_slug(name: &str) -> String {
     // Mirrored image keys are viewer-local GPU identities, never inbox names.
     character_slug(name).or_else(|| slug_beyond_active(name, other_rosters()))
         .map(String::from)
-        .unwrap_or_else(|| kasa_mcp::team::ascii_ident(name))
+        .unwrap_or_else(|| kasa_students::team::ascii_ident(name))
 }
 
 /// 슬러그 → 캐릭터명 — 팀원 agent 이름("aru-9c88")의 로마자 앞부분에서 보낸

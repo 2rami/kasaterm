@@ -1,0 +1,27 @@
+[package]
+name = "kasa-git"
+description = "Git inspection, operations and panel change feeds."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+kasa-collab = { workspace = true, features = ["net"] }
+kasa-device = { workspace = true }
+kasa-pty = { workspace = true, default-features = true }
+kasa-remote = { workspace = true }
+kasa-screen = { workspace = true }
+kasa-socket = { workspace = true, default-features = true }
+libc = { workspace = true }
+notify = "8.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+
+[dev-dependencies]
+kasa-remote = { workspace = true, features = ["test-isolation"] }
+kasa-device = { workspace = true, features = ["test-isolation"] }
+
+[lints]
+workspace = true

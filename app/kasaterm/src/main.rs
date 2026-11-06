@@ -3791,7 +3791,7 @@ mod settings_action_privacy_tests {
 /// without the ~0.5s blink-cadence lag.
 #[derive(Debug, Clone)]
 enum UserEvent {
-    AccountSyncApply(kasa_mcp::account_sync::PendingApply, std::sync::mpsc::Sender<Result<(), String>>),
+    AccountSyncApply(kasa_device::account_sync::PendingApply, std::sync::mpsc::Sender<Result<(), String>>),
     VaultPicked { owner: WindowId, root: String },
     VaultGraph { owner: WindowId, generation: u64, request_generation: u64, request_id: String, graph: vault_graph::Graph },
     VaultListings { owner: WindowId, generation: u64, listings: Vec<vault::Listing> },
@@ -4295,7 +4295,7 @@ enum UserEvent {
         generation: u64,
     },
     ClaudeQuotaWarning(quota_alerts::QuotaAlert),
-    /// 관문 사슬로 도는 Claude 로그인이 곧 끊기거나 끊겼다(`kasa_mcp::agent_chains`). (제목, 본문)
+    /// 관문 사슬로 도는 Claude 로그인이 곧 끊기거나 끊겼다(`kasa_device::agent_chains`). (제목, 본문)
     AgentChainAlert(String, String),
     /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
     /// 마크다운 풀 뷰어. `SocketOpenPreview`(현재 창 split)와 달리 별도 탭의
@@ -4419,7 +4419,7 @@ fn resets_in_label_at(resets_at: Option<u64>, now: u64) -> Option<String> {
 }
 
 /// Parsed `git status` snapshot for the right-hand git column. The background
-/// poller fills it from `kasa_mcp::git::git_status` (off the main thread);
+/// poller fills it from `kasa_git::git::git_status` (off the main thread);
 /// the render reads it. Kept as a flat, render-ready struct so the gpu block
 /// (which can't re-borrow `&self` to call helpers) paints straight from it.
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -4436,7 +4436,7 @@ struct GitColView {
     #[serde(default)]
     repo_root: Option<std::path::PathBuf>,
     #[serde(default)]
-    branch_list: Vec<kasa_mcp::git::GitBranch>,
+    branch_list: Vec<kasa_git::git::GitBranch>,
     #[serde(default)]
     detached: bool,
     #[serde(default)]
@@ -4472,7 +4472,7 @@ struct GitColView {
     /// Most recent commits `(short_hash, subject)` for the panel's preview list.
     recent_commits: Vec<(String, String)>,
     #[serde(default)]
-    commit_graph: Vec<kasa_mcp::git::GitGraphCommit>,
+    commit_graph: Vec<kasa_git::git::GitGraphCommit>,
     #[serde(default)]
     graph_supported: bool,
     #[serde(default)]
@@ -4574,7 +4574,7 @@ impl ImeFocus {
 
 /// Action buttons at the foot of the git column. `Commit` hands the commit to
 /// the active claude pane; `Pull`/`Push` sync the current branch with its
-/// upstream. All shell out through `kasa_mcp::git` on a worker thread so the UI
+/// upstream. All shell out through `kasa_git::git` on a worker thread so the UI
 /// never blocks. (전체 stage 버튼은 cursor 개조 때 사라졌다 — 파일 행마다
 /// 개별 stage 하는 모델로 바뀌어서다.)
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -5097,7 +5097,7 @@ fn code_lang_for_path(p: &std::path::Path) -> &'static str {
 #[derive(Clone, Debug)]
 pub(crate) struct PaneStatus {
     pub(crate) cwd: std::path::PathBuf,
-    pub(crate) badge: Option<kasa_mcp::git::GitBadge>,
+    pub(crate) badge: Option<kasa_git::git::GitBadge>,
     /// Shared handle to the pane's OSC 133 command blocks. The socket `/blocks`
     /// reads it directly — no clone, no `App.pty` access. None for non-terminal
     /// tiles or panes whose PTY isn't tracked.
@@ -5829,7 +5829,7 @@ struct App {
     /// polls each window's cwd directly (not via the daemon), so this stays
     /// off `%0`'s daemon path. Render reads it; the poller writes it.
     window_git:
-        std::sync::Arc<std::sync::Mutex<HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge>>>,
+        std::sync::Arc<std::sync::Mutex<HashMap<std::path::PathBuf, kasa_git::git::GitBadge>>>,
     /// cwds the git poller should refresh, set from the current windows' repr
     /// cwd just before the sidebar paints. Shared with the poll thread.
     git_poll_cwds: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
@@ -6193,7 +6193,7 @@ impl App {
         PANE_HEADER_BAR.store(socket::read_pane_header_bar(), std::sync::atomic::Ordering::Relaxed);
         if !viewer_only {
             let visual_proxy = proxy.clone();
-            kasa_mcp::visual::register_producer(Arc::new(move || {
+            kasa_wire::visual::register_producer(Arc::new(move || {
                 let _ = visual_proxy.send_event(UserEvent::Redraw);
             }));
         }
@@ -6524,8 +6524,8 @@ impl App {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .and_then(|n| {
-                    kasa_mcp::character::characters_json()
-                        .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &n))
+                    kasa_characters::character::characters_json()
+                        .and_then(|c| kasa_characters::character::raw_persona_for(&c, &n))
                 })
                 .unwrap_or_default(),
             students_caret: 0,
@@ -6706,7 +6706,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         install_pty_host_policy();
         #[cfg(windows)]
         bootstrap::preload_bundled_conpty();
-        kasa_mcp::install_collab_env();
+        kasa_http::install_collab_env();
         socket::prepare_session_storage();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야
     // 이름·기기색이 생기거나 렌더 스레드에서 scutil을 띄우지 않도록 한다.
@@ -6740,7 +6740,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // inventory. Keep any owner still alive outside that directory;
             // if process enumeration fails, do not sweep other owners at all.
             let processes = kasa_pty::fresh_process_table();
-            kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid)
+            kasa_characters::character::sweep_stale_markers(|pid| live.contains(&pid)
                 || processes.is_empty() || processes.iter().any(|(p, _, _)| *p == pid));
             prune_finished_tasks();
             prune_empty_inboxes();
@@ -6772,10 +6772,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     macos_open::prepare_open_doc_handler(proxy.clone());
     turn_probe::start_lag_probe(proxy.clone());
-    // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-mcp 는 창을 모른다.
+    // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-http 는 창을 모른다.
     if !launch.viewer_only {
         let p = std::sync::Mutex::new(proxy.clone());
-        kasa_mcp::remote::set_open_url_sink(Box::new(move |pane, url| {
+        kasa_remote::remote::set_open_url_sink(Box::new(move |pane, url| {
             if let Ok(p) = p.lock() {
                 let _ = p.send_event(UserEvent::RemoteOpenUrl(pane.to_string(), url.to_string()));
             }

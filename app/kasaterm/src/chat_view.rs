@@ -378,7 +378,7 @@ impl App {
             return false;
         }
         let tab = ws.active_tab_pid(id);
-        kasa_mcp::remote::cached_agent_running(&tab).unwrap_or_else(|| {
+        kasa_remote::remote::cached_agent_running(&tab).unwrap_or_else(|| {
             self.pty
                 .get(tab.as_str())
                 .or_else(|| self.pty.get(id))
@@ -441,7 +441,7 @@ impl App {
                 self.chat_view.drawn.borrow_mut().remove(&id);
                 continue;
             }
-            let remote = kasa_mcp::remote::remote_meta(&tab);
+            let remote = kasa_remote::remote::remote_meta(&tab);
             let path = self.collab.hub.bound.lock().ok().and_then(|b| b.get(&tab).cloned());
             // 격리 검증 — `%1:<jsonl>` 이면 그 칸(가짜 claude)에서만, 기록이 안 묶였을 때 긴 대화 사본을 읽기만 하며 편다.
             let path = path.or_else(|| {

@@ -172,7 +172,7 @@ impl App {
             *last = Some(Instant::now());
         }
         let mut changed = false;
-        for (_, table) in kasa_mcp::machines::cached_device_colors() {
+        for (_, table) in kasa_device::machines::cached_device_colors() {
             changed |= crate::render::pane_identity::merge_device_colors(&table);
         }
         if changed { self.chrome_dirty = true; }
@@ -572,9 +572,9 @@ impl App {
             // pane 은 로컬 cwd 도 프로세스도 없어 아래 사슬이 전부 비고 「win 6」으로
             // 떨어졌다(2026-09-07 지적). 둘째 줄은 저쪽 작업 폴더.
             let mirror_room: Option<(String, Option<String>)> = {
-                let infos: Vec<kasa_mcp::remote::RemoteInfo> = leaves
+                let infos: Vec<kasa_remote::remote::RemoteInfo> = leaves
                     .iter()
-                    .filter_map(|id| kasa_mcp::remote::remote_info(id))
+                    .filter_map(|id| kasa_remote::remote::remote_info(id))
                     .collect();
                 (!leaves.is_empty()
                     && infos.len() == leaves.len()

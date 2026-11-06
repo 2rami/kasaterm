@@ -84,7 +84,7 @@ impl App {
                 }
             } else { clear_marker(&id); }
             if let Some(pty) = self.pty.get(&id) {
-                let interrupt = closed && !kasa_mcp::remote::is_view_pane(&id);
+                let interrupt = closed && !kasa_remote::remote::is_view_pane(&id);
                 let _ = pty.set_input_closed(closed, interrupt);
             }
         }

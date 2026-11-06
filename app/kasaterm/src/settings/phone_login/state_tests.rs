@@ -29,7 +29,7 @@ fn state(known: bool) -> State {
     )
 }
 
-fn identity() -> kasa_mcp::VerifiedClaudeIdentity {
+fn identity() -> kasa_device::VerifiedClaudeIdentity {
     actual(1, 2, "one@example.test", "Example")
 }
 

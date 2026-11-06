@@ -29,8 +29,8 @@ mod collapse_tests {
 }
 
 pub(super) fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
-    obj.insert("surface_key".into(), serde_json::json!(kasa_mcp::surface_keys::ensure(surface)));
-    if let Some(key) = kasa_mcp::remote::remote_surface_key(surface) {
+    obj.insert("surface_key".into(), serde_json::json!(kasa_collab::surface_keys::ensure(surface)));
+    if let Some(key) = kasa_remote::remote::remote_surface_key(surface) {
         obj.insert("remote_surface_key".into(), serde_json::json!(key));
     }
 }
@@ -368,7 +368,7 @@ impl App {
             obj.insert("character".to_string(), serde_json::json!(name));
         }
         // Every surface, including inactive tabs, must retain its remote endpoint.
-        if let Some(info) = kasa_mcp::remote::remote_info(surface) {
+        if let Some(info) = kasa_remote::remote::remote_info(surface) {
             obj.insert("remote_base".into(), serde_json::json!(info.base));
             obj.insert("remote_pane".into(), serde_json::json!(info.remote_id));
             obj.insert("remote_view".into(), serde_json::json!(info.view));
@@ -539,7 +539,7 @@ impl App {
                 // 붙는다(restore_leaf 의 remote 가지). cwd·agent 감지(ps 기반)는
                 // 원격이라 비지만, 스크롤백과 sid 마커 오버레이(pane_claude_sid)는
                 // 로컬 파서 덕에 그대로 동작한다.
-                if kasa_mcp::remote::is_remote_pane(pane_id) && !rec.is_object() {
+                if kasa_remote::remote::is_remote_pane(pane_id) && !rec.is_object() {
                     rec = serde_json::json!({});
                 }
                 // Attach the pane's scrollback (text lines) so restore can
@@ -674,9 +674,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let pid = "%saved-remote-tab-regression";
-        let remote = kasa_mcp::remote::restore_connection(kasa_mcp::remote::RemoteSpec {
+        let remote = kasa_remote::remote::restore_connection(kasa_remote::remote::RemoteSpec {
             base: base.clone(), pane: Some("%73".into()), cwd: None, token: None,
-            identity: kasa_mcp::remote::RemoteIdentity {
+            identity: kasa_remote::remote::RemoteIdentity {
                 label: "맥미니".into(), remote_cwd: Some("/source/project".into()),
                 origin_cwd: Some("/viewer/project".into()), owned: false,
             },

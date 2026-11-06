@@ -32,10 +32,10 @@ fn needs_source(kind: MirrorKind, chat: bool, known: bool) -> bool {
 impl App {
     /// `surface` 는 거울 링크가 걸린 탭 pid. 거울이 아니면 `Grid`.
     pub(crate) fn mirror_kind(&self, surface: &str) -> MirrorKind {
-        if !kasa_mcp::remote::is_view_pane(surface) {
+        if !kasa_remote::remote::is_view_pane(surface) {
             return MirrorKind::Grid;
         }
-        match kasa_mcp::remote::cached_agent_running(surface) {
+        match kasa_remote::remote::cached_agent_running(surface) {
             Some(true) => MirrorKind::Chat,
             _ => MirrorKind::Grid,
         }
@@ -43,7 +43,7 @@ impl App {
 
     /// 이 거울을 다시 그릴 수 없나 — 그럴 때만 보는 동안 원본 격자를 이 칸 크기로 잡는다.
     pub(crate) fn mirror_needs_source(&self, id: &str, tab: &str) -> bool {
-        needs_source(self.mirror_kind(tab), self.chat_view_on(id), kasa_mcp::remote::cached_agent_running(tab).is_some())
+        needs_source(self.mirror_kind(tab), self.chat_view_on(id), kasa_remote::remote::cached_agent_running(tab).is_some())
     }
 
     /// 원본 TUI를 보는 거울만 뷰어 크기를 빌려야 원본 앱이 그 폭으로 다시 그린다.
@@ -60,7 +60,7 @@ impl App {
             let mut want = HashSet::new();
             for id in visible.iter().filter(|id| ws.panes.contains_key(*id)) {
                 let tab = ws.active_tab_pid(id);
-                if !kasa_mcp::remote::is_view_pane(&tab) {
+                if !kasa_remote::remote::is_view_pane(&tab) {
                     continue;
                 }
                 if self.mirror_needs_source(id, &tab) {

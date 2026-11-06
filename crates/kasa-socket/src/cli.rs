@@ -134,7 +134,6 @@ fn run() -> Result<Option<Response>> {
         ("board", Some("--wait")) => { args.remove(0); "board:wait".to_string() }
         ("machines", Some("connect")) => { args.remove(0); "machines:connect".to_string() }
         ("machines", Some("move")) => { args.remove(0); "machines:move".to_string() }
-        ("share", Some("open")) => { args.remove(0); "share:open".to_string() }
         ("phone", Some("browser")) => { args.remove(0); "phone:browser".to_string() }
         ("tab", _) if args.iter().any(|a| a == "--server") => {
             args.retain(|a| a != "--server");
@@ -179,11 +178,6 @@ fn run() -> Result<Option<Response>> {
         let socket_path = resolve_socket_path()?;
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
-    }
-    // `share` — KASA-share 결과물 폴더. 앱을 안 거친다: 폴더를 만들고 상태 파일을 읽을
-    // 뿐이라 앱이 꺼져 있어도 되고, 옮기는 일은 앱이 다음 훑기에 한다.
-    if cmd == "share" {
-        return run_share(&args);
     }
     // `secret` — 이 맥 키체인의 비밀을 폰 Face ID 승인 한 번으로(docs/secret-faceid-approval.md). 값은 이 프로세스에만
     // 온다. `op` 는 1Password 로 읽던 때의 이름이라 같은 뜻으로 받는다 — 학생이 손에 익은 명령을 쳐도 길을 잃지 않게.
@@ -1943,94 +1937,8 @@ fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
         .join("\n")
 }
 
-fn share_local_date() -> String {
-    #[cfg(unix)]
-    {
-        let now = unsafe { libc::time(std::ptr::null_mut()) };
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&now, &mut tm) };
-        format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
-    }
-    #[cfg(windows)]
-    {
-        let mut t: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
-        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
-        format!("{:04}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay)
-    }
-}
 
-/// 폴더 이름에 못 쓰는 글자를 `-` 로. 윈도우에서도 같은 이름이어야 옮겨진다.
-fn share_topic(words: &[String]) -> String {
-    let raw = words.join(" ");
-    let clean: String = raw
-        .chars()
-        .map(|c| if c < ' ' || "/\\<>:\"|?*".contains(c) { '-' } else { c })
-        .collect();
-    clean.trim().trim_matches('.').trim().to_string()
-}
 
-fn run_share(args: &[String]) -> Result<Option<Response>> {
-    let root = crate::share_dir().ok_or_else(|| anyhow!("홈 폴더를 못 찾았다"))?;
-    let status: Value = std::fs::read_to_string(root.join(".kasaterm").join("status.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
-    // 사람에게 보일 경로는 바탕화면 링크 쪽 — 파인더에서 그 이름으로 보인다.
-    let shown = status["desktop_link"]
-        .as_str()
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| root.clone());
-    match args.first().map(String::as_str).unwrap_or("path") {
-        "path" => println!("{}", shown.display()),
-        "new" => {
-            let topic = share_topic(&args[1..]);
-            if topic.is_empty() {
-                return Err(anyhow!("share new <주제> — 주제가 필요하다"));
-            }
-            let name = format!("{}-{topic}", share_local_date());
-            std::fs::create_dir_all(root.join(&name))?;
-            println!("{}", shown.join(&name).display());
-        }
-        "status" => {
-            if status.is_null() {
-                println!("KASA-share: 아직 안 돌았다 — 새 판 카사텀이 켜져 있어야 한다 ({})", root.display());
-                return Ok(None);
-            }
-            let ago = crate::board::now_ms().saturating_sub(status["updated_ms"].as_u64().unwrap_or(0)) / 1000;
-            println!(
-                "KASA-share {} · 파일 {}개 · {}초 전 갱신",
-                shown.display(),
-                status["files"].as_u64().unwrap_or(0),
-                ago
-            );
-            for p in status["peers"].as_array().into_iter().flatten() {
-                let state = if p["ok"] == true {
-                    format!("맞춤 (이번에 {}개)", p["pulled"].as_u64().unwrap_or(0))
-                } else {
-                    p["error"].as_str().unwrap_or("실패").to_string()
-                };
-                println!("  {} — {state}", p["label"].as_str().unwrap_or("?"));
-            }
-            let paused = status["paused_deletes"].as_u64().unwrap_or(0);
-            if paused > 0 {
-                println!("  삭제 {paused}개를 멈췄다 — 한꺼번에 많이 사라졌다. 맞으면 `kasaterm-cli share accept-deletes`");
-            }
-            for (key, what) in [("too_big", "1GB 넘어 이 기기에만"), ("skipped", "이 기기에 둘 수 없는 이름")] {
-                for p in status[key].as_array().into_iter().flatten() {
-                    println!("  {what}: {}", p.as_str().unwrap_or(""));
-                }
-            }
-        }
-        "accept-deletes" => {
-            std::fs::create_dir_all(root.join(".kasaterm"))?;
-            std::fs::write(root.join(".kasaterm").join("accept-deletes"), b"")?;
-            println!("다음 훑기에 멈춘 삭제를 퍼뜨린다");
-        }
-        other => return Err(anyhow!("share {other}? — path | new <주제> | status | accept-deletes")),
-    }
-    Ok(None)
-}
 
 fn print_help() {
     // 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 CLI 정리).
@@ -2075,8 +1983,7 @@ fn print_help() {
         ("클립보드·결과물", &[
             "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
             "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
-            "share path | new <주제> | status          결과물 폴더(new 는 경로를 찍는다)",
-            "share open <url>                          사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
+            "open <url>                                사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
             "phone browser open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초]   (카사브라우저 폰 앱)",
             "                                          폰 앱 안 브라우저를 에이전트가 쓴다(앱이 꺼져 있으면 열어 달라는 알림)",
         ]),
@@ -2536,7 +2443,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
         // 같은 세션에 다시 붙는다.
-        // share open — 사람이 보는 브라우저로(칸 안 웹 pane 이 아니다). 어느 기기로 갈지는 사람이 고른다.
+        // open — 사람이 보는 브라우저로(칸 안 웹 pane 이 아니다). 어느 기기로 갈지는 사람이 고른다.
         // phone browser — 카사브라우저 폰 앱의 웹뷰. 화면은 --out(없으면 지금 폴더에 phone-shot-시각.png)에 앱이 써 준다.
         "phone:browser" => {
             let mut positional: Vec<String> = Vec::new();
@@ -2564,11 +2471,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             }
             ("phone.browser", json!({ "op": op, "arg": arg, "timeout_ms": timeout * 1000 }))
         }
-        "share:open" => {
+        "open" => {
             let url = args
                 .iter()
                 .find(|a| !a.starts_with('%'))
-                .ok_or_else(|| anyhow!("share open needs a URL (e.g. share open https://example.com)"))?;
+                .ok_or_else(|| anyhow!("open needs a URL (e.g. open https://example.com)"))?;
             let target = args
                 .iter()
                 .find(|a| a.starts_with('%'))
@@ -4745,6 +4652,18 @@ mod tests {
         for head in ["방 1 「나쵸」", "방 5 · 개인맥북 보기 「개인맥북」", "방 2 「카사텀」", "방 ? · 데스크탑 보기 「데스크탑」", "방 5 「옛 판」"] {
             assert!(all.lines().any(|l| l == head), "{head} 없음: {all}");
         }
+    }
+
+    #[test]
+    fn retired_folder_commands_do_not_create_requests() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for args in [v(&["path"]), v(&["new", "fixture"]), v(&["status"]), v(&["accept-deletes"])] {
+            assert!(super::build_request("share", &args).is_err());
+        }
+        assert!(super::build_request("share:open", &v(&["https://example.invalid"])).is_err());
+        let open = super::build_request("open", &v(&["https://example.invalid", "%8"])).unwrap();
+        assert_eq!(open.method, "surface.open_url");
+        assert_eq!(open.params, json!({"url":"https://example.invalid", "target":"%8"}));
     }
 
     #[test]

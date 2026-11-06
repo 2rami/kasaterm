@@ -348,7 +348,7 @@ List<int> _statusLine(int status, Map<String, String> headers) {
 const unsatisfiable = (-1, -1);
 
 /// `Range: bytes=…` 하나를 [start, end] 로. 파일 밖의 단일 구간이면 [unsatisfiable]. 모르는 단위·여러 구간·어긋난
-/// 꼴·넘치는 숫자는 null — 머리를 무시하고 전체로 답한다(RFC 9110 §14.2, PC `kasa_mcp::media_stream` 과 같은 규칙).
+/// 꼴·넘치는 숫자는 null — 머리를 무시하고 전체로 답한다(RFC 9110 §14.2, PC `kasa_remote::media_stream` 과 같은 규칙).
 /// 단위 이름은 대소문자를 가리지 않는다(§14.1).
 @visibleForTesting
 (int, int)? byteRange(String header, int size) {

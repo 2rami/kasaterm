@@ -26,5 +26,5 @@ return { ${EXPORTS.join(', ')} };
 mkdirSync(join(root, 'dist'), { recursive: true });
 writeFileSync(join(root, 'dist', 'kasaterm.js'), out);
 // The web terminal (`/term`) serves this copy, compiled into the app.
-writeFileSync(join(root, '..', '..', 'crates', 'kasa-mcp', 'assets', 'term', 'kasaterm.js'), out);
-console.log(`dist/kasaterm.js + crates/kasa-mcp/assets/term/kasaterm.js ${out.length} bytes`);
+writeFileSync(join(root, '..', '..', 'crates', 'kasa-http', 'assets', 'term', 'kasaterm.js'), out);
+console.log(`dist/kasaterm.js + crates/kasa-http/assets/term/kasaterm.js ${out.length} bytes`);

@@ -56,7 +56,7 @@ impl App {
             anyhow::ensure!(idle_shell(session.shell_pid(), &kasa_pty::fresh_process_table()), "도착 셸에서 다른 작업이 시작됐어요");
             let character = self.ws.lock().unwrap().pane_character.get(id).cloned();
             if let Some(name) = character.filter(|name| !name.is_empty()) {
-                kasa_mcp::character::bind_session_character(&request.session_id, &name)?;
+                kasa_characters::character::bind_session_character(&request.session_id, &name)?;
             }
             let mut command = restore_agent_command(Some(&request.harness), Some(&request.session_id), true,
                 (!request.model.is_empty()).then_some(request.model.as_str()),

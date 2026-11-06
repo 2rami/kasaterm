@@ -1440,7 +1440,7 @@ impl App {
         // 꺼져도 낡은 주장이 leaf 에 안 남아, 재시작 복원이 남의 기계로 이사 간
         // 대화를 다시 여는 일(2026-08-30 이중 열림 실측)이 없다.
         {
-            let gone = kasa_mcp::remote::drain_migrated_away();
+            let gone = kasa_remote::remote::drain_migrated_away();
             let mut dropped = false;
             for pane in gone {
                 dropped |= self.pane_claude_sid.remove(&pane).is_some();
@@ -1495,7 +1495,7 @@ impl App {
                         }
                     };
                     // mod 가 실린 claude 칸은 엔진이 직접 알린다 — 화면을 판독하지 않는다.
-                    if kasa_mcp::claude_mod::live(&key).is_some() {
+                    if kasa_students::claude_mod::live(&key).is_some() {
                         screen.remove(&key);
                         continue;
                     }
@@ -1573,7 +1573,7 @@ impl App {
             let prev = self.pane_activity.get(id).map(|a| a.state.clone());
             state_changed |= prev.as_ref() != Some(&state);
             own_moved |= !prev.as_ref().is_some_and(|p| p.same_kind(&state))
-                && !kasa_mcp::remote::is_remote_pane(tab);
+                && !kasa_remote::remote::is_remote_pane(tab);
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
@@ -1608,9 +1608,9 @@ impl App {
         }
 
         if state_changed {
-            kasa_mcp::board_service::poke();
+            kasa_collab::board_service::poke();
         }
-        kasa_mcp::changes::status_tick(own_moved);
+        kasa_wire::changes::status_tick(own_moved);
         // 계정 전환 때 일하고 있어서 못 되띄운 pane — 방금 갱신한 활동 상태가
         // idle 로 떨어졌으면 여기서 따라 돌린다(같은 300ms 박자, 표시가 없으면 공짜).
         let switched = self.run_pending_account_restarts();
@@ -2246,10 +2246,10 @@ impl App {
             return;
         }
         if let Some(pty) = self.pty_for_pane(&surface) { pty.reserve_input_draft(); }
-        if let Some(remote) = kasa_mcp::remote::remote_info(&surface) {
+        if let Some(remote) = kasa_remote::remote::remote_info(&surface) {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                let result = kasa_mcp::remote::paste_remote_image(&remote.base, &remote.remote_id, bytes)
+                let result = kasa_remote::remote::paste_remote_image(&remote.base, &remote.remote_id, bytes)
                     .map_err(|e| format!("이미지 전송 실패: {e:#}"));
                 let _ = proxy.send_event(UserEvent::ImagePasteDone(result));
             });
@@ -4613,11 +4613,11 @@ impl StatusProbe {
 fn take_status_sample(kicked: Instant, track: &mut CpuTrack) -> StatusSample {
     // 브라우저 선택은 읽기만 한다 — 설정 요청이 표본을 뜨는 중에 와도 옛 선택을
     // 다시 쓰지 않는다.
-    let chrome_machine = kasa_mcp::machines::kasachrome_machine();
+    let chrome_machine = kasa_device::machines::kasachrome_machine();
     let port = if chrome_machine.is_empty() {
-        Some(kasa_mcp::machines::KASACHROME_PORT)
+        Some(kasa_device::machines::KASACHROME_PORT)
     } else {
-        kasa_mcp::machines::kasachrome_target_port(&chrome_machine)
+        kasa_device::machines::kasachrome_target_port(&chrome_machine)
     };
     let reach = |p: u16| {
         std::net::TcpStream::connect_timeout(
@@ -4633,7 +4633,7 @@ fn take_status_sample(kicked: Instant, track: &mut CpuTrack) -> StatusSample {
     // 실체 = 이 맥의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
     // (-R 18800→8777)을 실은 ssh 가 살아 있는 것. 기계 명부가 비면 잴 이유가
     // 없다(칩도 안 그린다).
-    let chrome_bridge = if kasa_mcp::machines::machines().is_empty() {
+    let chrome_bridge = if kasa_device::machines::machines().is_empty() {
         None
     } else {
         let tunnel = crate::proc::command("pgrep")
@@ -4645,8 +4645,8 @@ fn take_status_sample(kicked: Instant, track: &mut CpuTrack) -> StatusSample {
     };
     StatusSample {
         kicked,
-        tunnel_on: kasa_mcp::tunnel::is_on(),
-        tunnel_host: kasa_mcp::tunnel::host(),
+        tunnel_on: kasa_device::tunnel::is_on(),
+        tunnel_host: kasa_device::tunnel::host(),
         chrome_machine,
         chrome_reach,
         chrome_bridge,

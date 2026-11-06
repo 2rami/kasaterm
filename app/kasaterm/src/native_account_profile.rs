@@ -75,7 +75,7 @@ fn readable(error: &str) -> String {
         "bad_credentials" => "지금 비밀번호가 맞지 않아요".into(),
         "login_taken" => "이미 누가 쓰는 아이디예요. 다른 아이디를 골라 주세요".into(),
         "invalid_login" => "아이디는 소문자·숫자·-·_ 로 2~32자예요".into(),
-        "weak_password" => format!("비밀번호는 {}자 이상으로 해 주세요", kasa_mcp::relay_auth::MIN_PASSWORD_CHARS),
+        "weak_password" => format!("비밀번호는 {}자 이상으로 해 주세요", kasa_identity::relay_auth::MIN_PASSWORD_CHARS),
         "rate_limited" => "시도가 많았어요. 잠시 뒤 다시 해 주세요".into(),
         "no_password" => "Google·GitHub 로 만든 계정이라 비밀번호가 없어요".into(),
         "invalid_nickname" => "닉네임은 40자까지예요".into(),
@@ -138,7 +138,7 @@ impl State {
             let (tx, rx) = mpsc::channel();
             self.fetch = Some(rx);
             std::thread::spawn(move || {
-                let result = kasa_mcp::device_auth::handle(&serde_json::json!({"op":"profile"}))
+                let result = kasa_device::device_auth::handle(&serde_json::json!({"op":"profile"}))
                     .map_err(|error| error.to_string());
                 let _ = tx.send(result);
             });
@@ -204,7 +204,7 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.face_fetch = Some(rx);
         std::thread::spawn(move || {
-            let face = kasa_mcp::device_auth::profile::picture(&avatar)
+            let face = kasa_device::device_auth::profile::picture(&avatar)
                 .ok()
                 .and_then(|bytes| round_face(&bytes))
                 .map(|rgba| Face { key: key.clone(), rgba: Arc::new(rgba) });
@@ -224,7 +224,7 @@ impl State {
 }
 
 fn call(params: serde_json::Value, done: &'static str) -> Result<(serde_json::Value, String), String> {
-    kasa_mcp::device_auth::handle(&params)
+    kasa_device::device_auth::handle(&params)
         .map(|value| (value, done.to_string()))
         .map_err(|error| error.to_string())
 }
@@ -260,7 +260,7 @@ fn fixture_face() -> Option<Face> {
 
 /// 고른 사진을 관문에 올릴 크기(정사각 256 PNG)로 만든다.
 fn upload_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let image = square(bytes, kasa_mcp::device_auth::profile::AVATAR_PX).ok_or("unreadable_image")?;
+    let image = square(bytes, kasa_device::device_auth::profile::AVATAR_PX).ok_or("unreadable_image")?;
     let mut out = std::io::Cursor::new(Vec::new());
     image.write_to(&mut out, image::ImageFormat::Png).map_err(|_| "unreadable_image")?;
     Ok(out.into_inner())
@@ -369,7 +369,7 @@ impl App {
                         return Ok((serde_json::Value::Null, "사진을 고르지 않았어요".into()));
                     };
                     let png = upload_bytes(&bytes)?;
-                    kasa_mcp::device_auth::profile::upload(png)
+                    kasa_device::device_auth::profile::upload(png)
                         .map(|value| (value, "사진을 바꿨어요".to_string()))
                         .map_err(|error| error.to_string())
                 });
@@ -393,7 +393,7 @@ impl App {
                     Some("지금 비밀번호와 새 비밀번호를 입력해 주세요".to_string())
                 } else if profile.new_password != profile.new_password2 {
                     Some("새 비밀번호 두 칸이 달라요".to_string())
-                } else if profile.new_password.chars().count() < kasa_mcp::relay_auth::MIN_PASSWORD_CHARS {
+                } else if profile.new_password.chars().count() < kasa_identity::relay_auth::MIN_PASSWORD_CHARS {
                     Some(readable("weak_password"))
                 } else {
                     None

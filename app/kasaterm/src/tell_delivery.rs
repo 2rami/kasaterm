@@ -88,7 +88,7 @@ fn release(surface: &str) { scheduler().lock().unwrap().active.remove(surface); 
 fn finish(record: &Record, state: State, reason: &str) {
     let record = record.clone(); let reason = reason.to_owned();
     std::thread::spawn(move || {
-        let _ = kasa_mcp::tell_service::transition(&record.message_id,state,&reason);
+        let _ = kasa_collab::tell_service::transition(&record.message_id,state,&reason);
         release(&record.address.surface_id);
     });
 }
@@ -248,7 +248,7 @@ fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop
             else { finish(&record,State::Failed,reason); }
             return;
         }
-        if kasa_mcp::tell_service::transition(&record.message_id,State::Dispatching,"identity proven; awaiting guarded first write").is_err() {
+        if kasa_collab::tell_service::transition(&record.message_id,State::Dispatching,"identity proven; awaiting guarded first write").is_err() {
             release(&record.address.surface_id); return;
         }
         let delivery = Commit {record,pty,revision,proof,pasted_at:None,stashed_at:None};
@@ -307,7 +307,7 @@ fn poll_watches() {
         .filter(|watch|watch.next_poll <= now).map(|watch|(watch.id.clone(),watch.address.clone())).collect();
     for (id,address) in due {
         // 다른 기기 영수증은 HTTP 라 늦을 수 있어 목록 자물쇠 밖에서 묻는다.
-        let receipt = kasa_mcp::tell_service::status(&serde_json::json!({"message_id":id,"address":address}));
+        let receipt = kasa_collab::tell_service::status(&serde_json::json!({"message_id":id,"address":address}));
         let notice = {
             let mut list = watches().lock().unwrap();
             let Some(index) = list.iter().position(|watch|watch.id == id) else { continue };
@@ -327,7 +327,7 @@ fn poll_watches() {
             }
         };
         // mod 없는 칸(codex·mod 없는 claude)에는 턴을 안 깨우고 띄울 자리가 없다 — 영수증이 정본이다.
-        if let Some((surface,text)) = notice { kasa_mcp::claude_mod::notice(&surface,&text); }
+        if let Some((surface,text)) = notice { kasa_students::claude_mod::notice(&surface,&text); }
     }
 }
 
@@ -458,7 +458,7 @@ impl App {
         if !self.socket_backend.as_ref().is_some_and(|backend|backend.tell_binding_epoch(surface) == proof.binding_epoch) {
             return Some("target transcript binding changed");
         }
-        if kasa_mcp::surface_keys::get(surface).as_deref() != Some(delivery.record.address.surface_key.as_str()) {
+        if kasa_collab::surface_keys::get(surface).as_deref() != Some(delivery.record.address.surface_key.as_str()) {
             return Some("target surface identity changed");
         }
         // 탭 안의 학생도 받는다 — 바깥 pane 의 **활성 탭**이 아니라 그 surface 의 PTY 를 본다.
@@ -506,7 +506,7 @@ impl App {
         if BATCH_ACTIVE.swap(true,Ordering::AcqRel) { return; }
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            if let Ok(pending) = kasa_mcp::tell_service::pending() {
+            if let Ok(pending) = kasa_collab::tell_service::pending() {
                 let selected = scheduler().lock().unwrap().select(pending,WORKERS);
                 for record in selected { begin_proof(backend.clone(),proxy.clone(),record); }
             }

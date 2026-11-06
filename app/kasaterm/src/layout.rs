@@ -111,7 +111,7 @@ impl Drop for RemoteShellReady {
 }
 
 fn cleanup_new_remote_shell(base: &str, pane: &str, proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
-    if let Err(error) = kasa_mcp::remote::close_remote_pane(base, pane, None, true) {
+    if let Err(error) = kasa_remote::remote::close_remote_pane(base, pane, None, true) {
         eprintln!("[remote-spawn] cleanup failed: base={base} pane={pane}: {error:#}");
         let _ = proxy.send_event(UserEvent::RepoCatchup(
             "새 원격 셸을 정리하지 못했어요. 미니 창에 남아 있을 수 있어요".to_string(),
@@ -401,7 +401,7 @@ impl App {
         // shell mirror inside a full-screen program, which cannot be re-wrapped
         // and is only shown shrunk until the source grid follows this pane
         // (docs/mirror-render.md).
-        let needs_fit = if kasa_mcp::remote::is_view_pane(active_pid) {
+        let needs_fit = if kasa_remote::remote::is_view_pane(active_pid) {
             self.mirror_kind(active_pid) != crate::mirror_render::MirrorKind::Chat
                 && pane.term().is_some_and(|t| t.alt_screen)
         } else {
@@ -445,7 +445,7 @@ impl App {
         let pane = ws.panes.get(id)?;
         let pid = ws.active_tab_pid(id);
         let term = pane.term().filter(|t| t.alt_screen)?;
-        if !kasa_mcp::remote::is_view_pane(&pid) || self.chat_view_on(id)
+        if !kasa_remote::remote::is_view_pane(&pid) || self.chat_view_on(id)
             || self.mirror_kind(&pid) != crate::mirror_render::MirrorKind::Chat {
             return None;
         }
@@ -722,7 +722,7 @@ impl App {
         // through publish_pty_layout, so this is the one spot we have
         // to wire the cmux mirror.
         // 다른 기기가 이 방 목록을 5초 폴링 대신 즉시 받게 한다.
-        kasa_mcp::changes::bump();
+        kasa_wire::changes::bump();
     }
     /// Resize every backend session so its grid matches the new window
     /// size. In tmux mode the daemon redistributes for us. In PTY mode
@@ -778,8 +778,8 @@ impl App {
         // Mirrors record local bounds; the source grid follows them only while a
         // person's touch holds it (`mirror_follow`).
         for (id, (pc, pr)) in &leaf_cells {
-            if kasa_mcp::remote::is_view_pane(id) {
-                kasa_mcp::remote::set_viewport(id, *pc, *pr);
+            if kasa_remote::remote::is_view_pane(id) {
+                kasa_remote::remote::set_viewport(id, *pc, *pr);
                 self.fit_zoomed_mirror(id, id, *pc, *pr);
                 continue;
             }
@@ -809,8 +809,8 @@ impl App {
                 continue;
             };
             for pid in pids {
-                if kasa_mcp::remote::is_view_pane(&pid) {
-                    kasa_mcp::remote::set_viewport(&pid, pc, pr);
+                if kasa_remote::remote::is_view_pane(&pid) {
+                    kasa_remote::remote::set_viewport(&pid, pc, pr);
                     // 확대 판정은 바깥 leaf 로 한다 — 탭은 그 자리를 함께 쓴다.
                     self.fit_zoomed_mirror(&outer, &pid, pc, pr);
                     continue;
@@ -835,16 +835,16 @@ impl App {
     /// 「마지막으로 만진 쪽이 이긴다」를 아는 호스트면 이 규칙을 안 쓴다 — 확대는 그 칸을
     /// 만진 것이라(`toggle_pane_zoom`) 원본이 이미 이 칸 크기를 따르고, 풀어도 놓지 않는다.
     fn fit_zoomed_mirror(&self, zoom_key: &str, pid: &str, cols: u16, rows: u16) {
-        if kasa_mcp::remote::follows_latest(pid) {
+        if kasa_remote::remote::follows_latest(pid) {
             return;
         }
         if self.zoomed_pane.as_deref() != Some(zoom_key) {
-            kasa_mcp::remote::restore_source(pid);
+            kasa_remote::remote::restore_source(pid);
             return;
         }
         // 지금 격자는 로컬 파서에서 읽는다 — 거울의 파서는 호스트 격자를 그대로 쓴다.
         let Some(sess) = self.pty.get(pid) else { return };
-        kasa_mcp::remote::expand_source(pid, cols, rows, sess.size());
+        kasa_remote::remote::expand_source(pid, cols, rows, sess.size());
     }
 
     /// If the cursor (logical px) rests on a split seam, return the BSP
@@ -1152,7 +1152,7 @@ impl App {
                     // 없는데 셸은 계속 돈다.
                     for id in &made {
                         self.close_owned_remote_surface(id);
-                        kasa_mcp::remote::kill_remote(id);
+                        kasa_remote::remote::kill_remote(id);
                         self.pty.remove(id);
                     }
                     return Err(e);
@@ -1169,7 +1169,7 @@ impl App {
         if !layout.is_some_and(|l| l.replace_leaf(&host, tree)) {
             for id in &made {
                 self.close_owned_remote_surface(id);
-                kasa_mcp::remote::kill_remote(id);
+                kasa_remote::remote::kill_remote(id);
                 self.pty.remove(id);
             }
             anyhow::bail!("pane {host} 자리를 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라");
@@ -1206,14 +1206,14 @@ impl App {
     /// 같은 보기 창에서 원본에 살아 있는 이웃을 댄다 — 죽은 번호를 보내면 원본이 「어느 방에도
     /// 없다」로 거절했다(2026-09-25 맥미니 로그 %9·%0·%1). 채널이 없으면 확인 없이 그대로.
     fn live_remote_anchor(&self, source: &str, base: &str, remote_id: &str) -> Result<String> {
-        if kasa_mcp::layout_watch::source_has(base, remote_id) != Some(false) {
+        if kasa_remote::layout_watch::source_has(base, remote_id) != Some(false) {
             return Ok(remote_id.to_string());
         }
         let window = self.window_of_pane(source);
         let neighbour = window.into_iter().flat_map(|w| self.window_leaves(w)).find_map(|leaf| {
-            let info = kasa_mcp::remote::remote_info(&self.leaf_pty_id(&leaf))?;
-            (kasa_mcp::machines::same_machine_bases(&info.base, base)
-                && kasa_mcp::layout_watch::source_has(base, &info.remote_id) == Some(true))
+            let info = kasa_remote::remote::remote_info(&self.leaf_pty_id(&leaf))?;
+            (kasa_device::machines::same_machine_bases(&info.base, base)
+                && kasa_remote::layout_watch::source_has(base, &info.remote_id) == Some(true))
                 .then_some(info.remote_id)
         });
         neighbour.ok_or_else(|| anyhow::anyhow!("원본에서 이 방의 칸이 이미 닫혔어요 — 기기 목록에서 방을 다시 열어 주세요"))
@@ -1234,7 +1234,7 @@ impl App {
         };
         if !layout.is_some_and(|l| l.insert_beside(&host, dir, before, id.clone())) {
             self.close_owned_remote_surface(&id);
-            kasa_mcp::remote::kill_remote(&id);
+            kasa_remote::remote::kill_remote(&id);
             self.pty.remove(&id);
             anyhow::bail!("pane {host} 자리를 못 찾았다");
         }
@@ -1330,7 +1330,7 @@ impl App {
             return Ok(None);
         }
         let source_pid = self.ws.lock().unwrap().active_tab_pid(source);
-        let Some(info) = kasa_mcp::remote::remote_info(&source_pid) else {
+        let Some(info) = kasa_remote::remote::remote_info(&source_pid) else {
             if self.pty.get(&source_pid).is_some_and(|session| session.shell_pid().is_none()) {
                 anyhow::bail!("원격 셸을 여는 중이에요. 연결된 뒤 다시 나눠 주세요");
             }
@@ -1362,7 +1362,7 @@ impl App {
             .and_then(|session| session.reported_cwd())
             .map(|p| p.to_string_lossy().into_owned())
             .or_else(|| {
-                kasa_mcp::machines::cached_pane(&info.label, &info.remote_id)
+                kasa_device::machines::cached_pane(&info.label, &info.remote_id)
                     .and_then(|pane| pane.get("cwd").and_then(|v| v.as_str()).map(str::to_string))
             })
             .or(info.remote_cwd);
@@ -1390,7 +1390,7 @@ impl App {
                     anyhow::bail!(REMOTE_PENDING_INPUT_ERROR);
                 }
                 let at = kasa_socket::backend::SpawnShellAt { cwd: cwd.clone(), ..placement };
-                let (id, _) = kasa_mcp::remote::spawn_shell_pane_at(&info.base, &at, None)?;
+                let (id, _) = kasa_remote::remote::spawn_shell_pane_at(&info.base, &at, None)?;
                 remote_id = Some(id.clone());
                 if expected.strong_count() == 0 {
                     anyhow::bail!("생성 중인 pane이 닫혔어요");
@@ -1398,13 +1398,13 @@ impl App {
                 if input.lock().unwrap().overflowed {
                     anyhow::bail!(REMOTE_PENDING_INPUT_ERROR);
                 }
-                let remote = kasa_mcp::remote::connect_view(
-                    kasa_mcp::remote::RemoteSpec {
+                let remote = kasa_remote::remote::connect_view(
+                    kasa_remote::remote::RemoteSpec {
                         base: info.base.clone(),
                         pane: Some(id),
                         cwd: None,
                         token: None,
-                        identity: kasa_mcp::remote::RemoteIdentity {
+                        identity: kasa_remote::remote::RemoteIdentity {
                             label: info.label,
                             remote_cwd: cwd,
                             origin_cwd: info.origin_cwd,
@@ -1448,7 +1448,7 @@ impl App {
             // 일부만 실행하면 긴 명령이 다른 뜻이 되므로 입력 전체를 폐기한다.
             if outcome.is_ok() {
                 self.close_owned_remote_surface(&ready.pane);
-                kasa_mcp::remote::kill_remote(&ready.pane);
+                kasa_remote::remote::kill_remote(&ready.pane);
             }
             Err(REMOTE_PENDING_INPUT_ERROR.to_string())
         } else {
@@ -1594,7 +1594,7 @@ impl App {
         if !layout.is_some_and(|l| l.split_leaf(&active, dir, new_id.clone())) {
             // 샌 세션을 되감고 사유를 올린다.
             self.close_owned_remote_surface(&new_id);
-            kasa_mcp::remote::kill_remote(&new_id);
+            kasa_remote::remote::kill_remote(&new_id);
             self.pty.remove(&new_id);
             anyhow::bail!(
                 "pane {active} 을 어느 window 트리에서도 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라"
@@ -1937,18 +1937,18 @@ impl App {
             )
         };
         if let Some(pid) = pid_opt.as_deref() {
-            kasa_mcp::push_viewer_control(pid, r#"{"t":"source-closed"}"#);
+            kasa_http::push_viewer_control(pid, r#"{"t":"source-closed"}"#);
             self.cancel_restore_surface(pid);
             // The primary tab can close while siblings keep its cell alive. Keeping
             // its PTY only because pid == outer turns a deliberate close into an orphan.
             self.close_owned_remote_surface(pid);
-            kasa_mcp::remote::kill_remote(pid);
+            kasa_remote::remote::kill_remote(pid);
             if let Some(session) = self.pty.get(pid) {
                 let _ = session.set_input_closed(true, false);
                 session.terminate_local();
             }
             self.pty.remove(pid);
-            kasa_mcp::surface_keys::remove(pid);
+            kasa_collab::surface_keys::remove(pid);
             let closed_cwd = self.pane_cwd_cache.get(pid).cloned();
             Self::cleanup_collab_markers(pid, closed_cwd.as_deref());
             let mut ws = self.ws.lock().unwrap();
@@ -2497,8 +2497,8 @@ impl App {
         if self.window_of_pane(moving).is_none() {
             return Err(format!("옮길 pane {moving} 이 없다"));
         }
-        let mirror = |id: &str| kasa_mcp::remote::remote_info(id)
-            .or_else(|| kasa_mcp::remote::remote_info(&self.leaf_pty_id(&self.outer_of(id))));
+        let mirror = |id: &str| kasa_remote::remote::remote_info(id)
+            .or_else(|| kasa_remote::remote::remote_info(&self.leaf_pty_id(&self.outer_of(id))));
         if let Some(info) = mirror(moving) {
             return Err(format!(
                 "옮길 칸 {moving} 은 「{}」 기기 칸 {} 의 거울이다 — 그 기기 주소 둘({}@{} 와 대상@{})로 옮겨라",
@@ -2702,7 +2702,7 @@ impl App {
             .collect();
         let _ = std::fs::remove_file(kasa_socket::bound_marker_path(&safe));
         let num = target.trim_start_matches('%');
-        let slug = cwd.map(kasa_mcp::character::mode_slug);
+        let slug = cwd.map(kasa_characters::character::mode_slug);
         if let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) {
             for room in rooms.flatten() {
                 // slug 를 알면 그 cwd 의 방(정확히 그 slug, 또는 __room_<id> 변형)만.
@@ -2859,14 +2859,14 @@ for p in glob.glob(os.path.join(d, '*.json')):
         }
         for sess in self.sessions.iter_mut().flatten() {
             if sess.pty.remove(target).is_some() {
-                kasa_mcp::surface_keys::remove(target);
+                kasa_collab::surface_keys::remove(target);
             }
             if let Ok(mut ws) = sess.ws.lock() {
                 if let Some(pane) = ws.panes.remove(target) {
-                    kasa_mcp::surface_keys::remove(target);
+                    kasa_collab::surface_keys::remove(target);
                     for pid in pane.tabs.iter().filter_map(|tab| tab.pid.as_deref()) {
                         if !sess.pty.contains_key(pid) {
-                            kasa_mcp::surface_keys::remove(pid);
+                            kasa_collab::surface_keys::remove(pid);
                         }
                     }
                 }
@@ -2907,7 +2907,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let hosted_elsewhere = self.ws.lock().unwrap().outer_for_pty(target).is_some_and(|o| o != target);
         if !hosted_elsewhere {
             self.pty.remove(target);
-            kasa_mcp::surface_keys::remove(target);
+            kasa_collab::surface_keys::remove(target);
         }
         Self::cleanup_collab_markers(target, closed_cwd.as_deref());
         // Free the GPU texture if this was an image pane (no-op otherwise).
@@ -2929,7 +2929,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         };
         for pid in &secondary_pids {
             self.pty.remove(pid);
-            kasa_mcp::surface_keys::remove(pid);
+            kasa_collab::surface_keys::remove(pid);
         }
         {
             let mut ws = self.ws.lock().unwrap();
@@ -3088,7 +3088,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // 원격 pane 의 「진짜 끄기」(되살리기 목록에서 지우기) — 원격 셸도 함께.
         // 위 lingers 가드 **뒤**여야 한다: 낡은 레코드가 살아 있는 pane 번호를
         // 가리킬 때 그 pane 의 원격 셸을 죽이면 안 된다.
-        kasa_mcp::remote::kill_remote(target);
+        kasa_remote::remote::kill_remote(target);
         self.drop_pane_resources(target);
         self.chrome_dirty = true;
     }
@@ -3098,7 +3098,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // 저쪽 셸도 끝나듯이. 이사·종료 알림의 뒷정리(`remote_keep`)만 예외다.
         // kill_remote 는 우리 링크만 끊고 GUI pane 은 저쪽 앱이 Arc 를 쥐어 안 죽는다.
         // HTTP 라 GUI 스레드 밖에서 — 저쪽이 안 닿으면 10초를 여기서 멈추게 된다.
-        if let Some(info) = kasa_mcp::remote::remote_info(target) {
+        if let Some(info) = kasa_remote::remote::remote_info(target) {
             if info.owned && info.remote_id.starts_with('%') && !self.remote_keep.remove(target) {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
@@ -3112,7 +3112,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.close_owned_remote_surface(target);
         // 원격 pane 이면 원격 셸까지 죽인다 — 여기는 「진짜 끄기」 경로다.
         // detach(앱 종료·재시작)는 이 함수를 안 타고 Arc drop 만으로 끝난다.
-        kasa_mcp::remote::kill_remote(target);
+        kasa_remote::remote::kill_remote(target);
         // 숨겨 둔(alive) 레코드가 이 번호를 물고 있으면 먼저 걷는다 — 지금 이 PTY 가
         // 죽으므로 그 손잡이는 재부착할 것이 없는 거짓이 된다. 되살리기 재료는 바로
         // 아래에서 alive=false 로 새로 적으니 잃지 않는다.
@@ -3494,7 +3494,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.warm_drag_identity(crate::drag_transfer::DragEndpoint::LocalPane(pane.clone()));
         }
         for machine in self.info.machines_col.machines.iter().filter(|m| m.online) {
-            let Some(peer) = kasa_mcp::machines::find(&machine.label) else { continue };
+            let Some(peer) = kasa_device::machines::find(&machine.label) else { continue };
             let Some(row) = machine.remote.iter().chain(&machine.mirrored).next() else { continue };
             self.warm_drag_identity(crate::drag_transfer::DragEndpoint::RemotePane {
                 label: machine.label.clone(), base: peer.base, pane: row.remote_id.clone(),

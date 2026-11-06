@@ -89,7 +89,7 @@ pub(crate) struct SharedChoice {
     email: String,
 }
 
-fn shared_choices(seen: Option<&kasa_mcp::agent_accounts::Seen>) -> (Vec<SharedChoice>, Option<String>) {
+fn shared_choices(seen: Option<&kasa_device::agent_accounts::Seen>) -> (Vec<SharedChoice>, Option<String>) {
     let Some(seen) = seen else { return (Vec::new(), None) };
     let mut out = Vec::new();
     for (provider, key) in [(AccountProvider::Claude, "claude"), (AccountProvider::Codex, "codex")] {
@@ -156,7 +156,7 @@ pub(crate) struct SettingsCache {
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     characters: Arc<Vec<CharacterChoice>>,
     themes: Arc<Vec<socket::ThemeRow>>,
-    models: Arc<Vec<kasa_mcp::character::ModelChoice>>,
+    models: Arc<Vec<kasa_characters::character::ModelChoice>>,
     roster: Option<serde_json::Value>,
     open_apps: Arc<Vec<(String, String)>>,
     character_theme: String,
@@ -206,14 +206,14 @@ impl SettingsCache {
         self.agent_statusline_customized = crate::agent_preferences::statusline_customized();
         let saved = socket::read_settings();
         self.refresh_palette_from(&saved);
-        let roster = kasa_mcp::character::characters_json();
+        let roster = kasa_characters::character::characters_json();
         let characters = roster
             .as_ref()
             .map(|value| {
-                kasa_mcp::character::member_names(value)
+                kasa_characters::character::member_names(value)
                     .into_iter()
                     .map(|name| CharacterChoice {
-                        slug: kasa_mcp::character::member_def(value, &name)
+                        slug: kasa_characters::character::member_def(value, &name)
                             .and_then(|entry| entry.get("slug").and_then(|v| v.as_str()).map(str::to_string))
                             .unwrap_or_else(|| theme::agent_slug(&name)),
                         name,
@@ -223,7 +223,7 @@ impl SettingsCache {
             .unwrap_or_default();
         let models = roster
             .as_ref()
-            .map(kasa_mcp::character::model_choices)
+            .map(kasa_characters::character::model_choices)
             .unwrap_or_default();
 
         self.ready = true;
@@ -236,25 +236,25 @@ impl SettingsCache {
         self.language = socket::read_ui_language();
 
         let mut theme_rosters = std::collections::HashMap::new();
-        self.ordered_picks = Arc::new(kasa_mcp::character::all_picks());
+        self.ordered_picks = Arc::new(kasa_characters::character::all_picks());
         for row in self.themes.iter() {
             let key = if row.id.is_empty() {
-                kasa_mcp::character::BASE_THEME_KEY.to_string()
+                kasa_characters::character::BASE_THEME_KEY.to_string()
             } else {
                 row.id.clone()
             };
             let value = if row.id.is_empty() {
-                kasa_mcp::character::base_characters_json()
+                kasa_characters::character::base_characters_json()
             } else {
-                kasa_mcp::character::theme_characters_json(&row.id)
+                kasa_characters::character::theme_characters_json(&row.id)
             };
             let members = value
                 .as_ref()
                 .map(|roster| {
-                    kasa_mcp::character::member_names(roster)
+                    kasa_characters::character::member_names(roster)
                         .into_iter()
                         .map(|name| CharacterChoice {
-                            slug: kasa_mcp::character::member_def(roster, &name)
+                            slug: kasa_characters::character::member_def(roster, &name)
                                 .and_then(|entry| entry.get("slug").and_then(|v| v.as_str()).map(str::to_string))
                                 .unwrap_or_else(|| theme::agent_slug(&name)),
                             name,
@@ -281,7 +281,7 @@ impl SettingsCache {
         self.themegen_providers = Arc::new(crate::themegen::detect_providers());
         let mut refs = std::collections::HashSet::new();
         for (theme_id, roster) in self.theme_rosters.iter() {
-            if theme_id == kasa_mcp::character::BASE_THEME_KEY {
+            if theme_id == kasa_characters::character::BASE_THEME_KEY {
                 continue;
             }
             for character in roster {
@@ -351,8 +351,8 @@ impl SettingsCache {
         if cfg!(test) { return; }
         self.machines = Arc::new(machines_view());
         self.device_names = Arc::new(crate::render::pane_identity::device_name_rows());
-        self.chrome_machine = kasa_mcp::machines::kasachrome_machine();
-        self.chrome_candidates = kasa_mcp::machines::kasachrome_candidates();
+        self.chrome_machine = kasa_device::machines::kasachrome_machine();
+        self.chrome_candidates = kasa_device::machines::kasachrome_candidates();
     }
 
     pub(crate) fn language(&self) -> &str {
@@ -866,7 +866,7 @@ pub(crate) struct Snapshot {
     pub(crate) student_raw_text: String,
     pub(crate) student_raw_caret: usize,
     pub(crate) student_raw_error: Option<String>,
-    pub(crate) models: Arc<Vec<kasa_mcp::character::ModelChoice>>,
+    pub(crate) models: Arc<Vec<kasa_characters::character::ModelChoice>>,
     pub(crate) settings_caret: usize,
     pub(crate) feedback_body: String,
     pub(crate) feedback_caret: usize,
@@ -896,7 +896,7 @@ impl App {
                     plan.include_theme_cards(&cache.themes);
                     if let Some(theme_id) = self.settings_scene.inspected_theme() {
                         let key = if theme_id.is_empty() {
-                            kasa_mcp::character::BASE_THEME_KEY
+                            kasa_characters::character::BASE_THEME_KEY
                         } else {
                             theme_id
                         };
@@ -910,7 +910,7 @@ impl App {
                 }
                 SettingsCat::Students if self.students_selected.is_none() => {
                     for row in cache.themes.iter() {
-                        let key = if row.id.is_empty() { kasa_mcp::character::BASE_THEME_KEY } else { &row.id };
+                        let key = if row.id.is_empty() { kasa_characters::character::BASE_THEME_KEY } else { &row.id };
                         if let Some(roster) = cache.theme_rosters.get(key) {
                             plan.include_student_faces(&row.id, roster.iter().map(|c| c.slug.as_str()));
                         }
@@ -964,7 +964,7 @@ impl App {
         }
         let accounts = account_choices(self);
         self.device_account.refresh();
-        let shared = shared_choices(kasa_mcp::agent_accounts::cached().as_ref());
+        let shared = shared_choices(kasa_device::agent_accounts::cached().as_ref());
         self.settings_scene.set_account_cache(accounts, shared);
         self.settings_scene.refresh_device_cache();
     }
@@ -2218,7 +2218,7 @@ impl App {
                 Err(error) => self.set_toast(format!("테마를 못 가져왔어요 — {error}")),
             }
             socket::invalidate_theme_rows();
-            kasa_mcp::character::invalidate_active_theme();
+            kasa_characters::character::invalidate_active_theme();
             theme::invalidate_roster();
             self.settings_scene.refresh_cache();
             self.reload_native_settings_media_cache();
@@ -2312,7 +2312,7 @@ impl App {
             match crate::themegen::themegen_put_ref(None, name, &bytes) {
                 Ok(slug) => {
                     socket::invalidate_theme_rows();
-                    kasa_mcp::character::invalidate_active_theme();
+                    kasa_characters::character::invalidate_active_theme();
                     theme::invalidate_roster();
                     self.settings_scene.refresh_cache();
                     if let Some(name) = self
@@ -2336,7 +2336,7 @@ impl App {
             self.set_toast("캐릭터의 그림 이름을 못 찾았어요".to_string());
             return true;
         }
-        let Some(root) = kasa_mcp::character::themes_root() else {
+        let Some(root) = kasa_characters::character::themes_root() else {
             return true;
         };
         if let Err(error) = drop_size_ok(&path, THEMEGEN_DROP_MAX_BYTES) {
@@ -4637,8 +4637,8 @@ fn machines_view() -> Vec<MachineRow> {
             guest: false,
         }];
     }
-    let live = kasa_mcp::machines::snapshot();
-    let mut rows: Vec<MachineRow> = kasa_mcp::machines::entries()
+    let live = kasa_device::machines::snapshot();
+    let mut rows: Vec<MachineRow> = kasa_device::machines::entries()
         .iter()
         .map(|e| {
             let label = e.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -4999,7 +4999,7 @@ fn paint_themes(
     }
     if let Some(id) = s.inspected_theme.as_deref() {
         let key = if id.is_empty() {
-            kasa_mcp::character::BASE_THEME_KEY
+            kasa_characters::character::BASE_THEME_KEY
         } else {
             id
         };
@@ -5128,7 +5128,7 @@ fn paint_character_theme_row(
         info_slab(g, x, y, w, "선택한 캐릭터가 없으면 기본 명단을 사용해요.");
     }
     for row in s.themes.iter() {
-        let key = if row.id.is_empty() { kasa_mcp::character::BASE_THEME_KEY } else { &row.id };
+        let key = if row.id.is_empty() { kasa_characters::character::BASE_THEME_KEY } else { &row.id };
         let Some(roster) = s.theme_rosters.get(key) else { continue };
         if roster.is_empty() { continue; }
         let label = fit(g, &row.label, w.max(0.0), 14.0, true);
@@ -5184,7 +5184,7 @@ fn character_choice_selected_from(
 ) -> bool {
     let picks: Vec<_> = selected.iter().filter(|(key, names)| rosters.get(key).is_some_and(|roster| roster.iter().any(|c| names.contains(&c.name)))).collect();
     if picks.is_empty() {
-        return key == if active.is_empty() { kasa_mcp::character::BASE_THEME_KEY } else { active };
+        return key == if active.is_empty() { kasa_characters::character::BASE_THEME_KEY } else { active };
     }
     // 저장 순서가 실제 배정 우선순위이므로 과거 중복 선택도 그대로 표시한다.
     picks.iter().find(|(theme, names)| names.iter().any(|n| n == name)

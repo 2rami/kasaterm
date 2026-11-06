@@ -218,7 +218,7 @@ pub(crate) fn poll() -> bool {
 /// 부르지 않는다 — 그건 `clipboard_set_from_peer` 가 담기만 한다.
 pub(crate) fn share(text: &str, secret: bool) {
     if isolated_probe() { return; }
-    kasa_mcp::machines::share_clipboard(text.to_string(), secret);
+    kasa_device::machines::share_clipboard(text.to_string(), secret);
 }
 
 fn set_system(text: &str) -> Option<()> {

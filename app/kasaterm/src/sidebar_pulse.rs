@@ -460,7 +460,7 @@ impl App {
         let mut panes: Vec<(RowTurn, String)> = self
             .window_leaves(room)
             .into_iter()
-            .filter(|id| kasa_mcp::remote::remote_info(id).is_none())
+            .filter(|id| kasa_remote::remote::remote_info(id).is_none())
             .map(|id| (self.row_student(&id).turn, id))
             .collect();
         panes.sort_by_key(|(turn, _)| *turn);

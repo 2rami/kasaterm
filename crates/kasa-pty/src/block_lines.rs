@@ -9,7 +9,7 @@
 
 use kasa_screen::screen::Color;
 
-// 격자 전송(`kasa-mcp` gridwire)과 같은 비트 — 폰이 두 길을 같은 규칙으로 푼다.
+// 격자 전송(`kasa-http` gridwire)과 같은 비트 — 폰이 두 길을 같은 규칙으로 푼다.
 pub const SPAN_BOLD: u8 = 1;
 pub const SPAN_ITALIC: u8 = 2;
 pub const SPAN_UNDERLINE: u8 = 4;

@@ -523,7 +523,7 @@ fn install_browser_shim(shim_dir: &std::path::Path) {
 }
 
 /// 캡처 프록시로 claude API 라우팅 — pane 별 깨끗한 대화 캡처(ccglass 방식). claude 가
-/// 이 base 로 `/v1/messages` 를 보내면 kasa-mcp 프록시가 본문 messages[] 를 캡처(peek·
+/// 이 base 로 `/v1/messages` 를 보내면 kasa-http 프록시가 본문 messages[] 를 캡처(peek·
 /// jsonl 없이 구조화 대화)하고 api.anthropic.com 으로 투명 포워드한다. MCP 서버 포트
 /// (KASASPACE_MCP_PORT, pane spawn 전에 동기 설정)를 쓴다. 포트 미설정이면 빈 env →
 /// claude 가 api.anthropic.com 직행(안전 폴백, 프록시 의존 안 함).
@@ -625,21 +625,21 @@ export KASATERM_LAUNCH_OWNER="$SELF_DIR:$KASATERM_PANE_ID"
 /// 노브와 동일하게 변경은 재시작 후 적용).
 pub(crate) fn install_student_shims(shim_dir: &std::path::Path) {
     // POSIX sh 스크립트 — Windows 는 Git Bash 의 sh 로 돌고, PowerShell·cmd 칸은 `.cmd` 짝으로 닿는다.
-    let Some(chars) = kasa_mcp::character::characters_json() else {
+    let Some(chars) = kasa_characters::character::characters_json() else {
         return;
     };
     let sq = |s: &str| s.replace('\'', "'\\''");
     // 「말투」 토글이 꺼져 있으면 런처도 말투를 안 싣는다 — 이름·얼굴만 갈아 끼운다.
     let persona_on = socket::read_claude_persona();
-    for name in kasa_mcp::character::member_names(&chars) {
+    for name in kasa_characters::character::member_names(&chars) {
         let persona = persona_on
-            .then(|| kasa_mcp::character::persona_for(&chars, &name))
+            .then(|| kasa_characters::character::persona_for(&chars, &name))
             .flatten()
             .unwrap_or_default();
         // 이 학생의 모델·통로를 스크립트에 굽는다. claude shim 과 달리 여기서는
         // 학생이 이미 정해져 있으므로 값을 직접 실을 수 있다.
-        let model = kasa_mcp::character::model_for(&chars, &name).unwrap_or_default();
-        let backend = kasa_mcp::character::backend_for(&chars, &name).unwrap_or_default();
+        let model = kasa_characters::character::model_for(&chars, &name).unwrap_or_default();
+        let backend = kasa_characters::character::backend_for(&chars, &name).unwrap_or_default();
         let (feed, character_arg) = curl_utf8_value("character", &format!("'{}'", sq(&name)), &sq(&name));
         let script = format!(
             "#!/bin/sh\n\

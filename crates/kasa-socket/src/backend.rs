@@ -115,7 +115,7 @@ pub struct RecentSession {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub preview: String,
     /// 이 세션을 맡았던 학생 이름. **여기서 채우지 않는다** — 세션→캐릭터 표는
-    /// `kasa-mcp` 가 쥐고 있고 그 crate 가 이 crate 를 의존하므로, 여기서 부르면
+    /// `kasa-characters`가 쥐고 있고 그 crate 가 이 crate 를 의존하므로, 여기서 부르면
     /// 순환이 된다. 목록을 받은 쪽(app)이 채워 넣는 칸이고, 매핑이 없는 옛 세션은
     /// 빈 문자열로 남는다 — 짐작해 아무나 붙이면 남의 대화가 남의 얼굴로 보인다.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1348,7 +1348,7 @@ pub trait Backend: Send + Sync {
     fn web_drive(&self, _op: &str, _arg: &str, _surface: Option<&str>) -> Result<String> {
         anyhow::bail!("web_drive not supported")
     }
-    /// 카사브라우저 폰 앱의 웹뷰에 명령 하나(`kasa_mcp::phone_web`) — op 는 open·shot·text·url·eval·back·forward·reload.
+    /// 카사브라우저 폰 앱의 웹뷰에 명령 하나(`kasa_device::phone_web`) — op 는 open·shot·text·url·eval·back·forward·reload.
     /// 폰이 답할 때까지(최대 `timeout_ms`) 기다린다. shot 은 `arg` 경로에 PNG 를 쓰고 그 경로를 돌려준다.
     fn phone_web(&self, _op: &str, _arg: &str, _timeout_ms: u64) -> Result<serde_json::Value> {
         anyhow::bail!("phone_web not supported")
@@ -1575,19 +1575,19 @@ pub trait Backend: Send + Sync {
     }
 
     /// 관문 계정 로그인(`relay.account`, `{op: login|logout|devices|revoke|status}`). 관문과
-    /// 말하는 코드는 kasa-mcp 에 있어 그걸 아는 백엔드만 덮어쓴다.
+    /// 말하는 코드는 kasa-device에 있어 그걸 아는 백엔드만 덮어쓴다.
     fn relay_account(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
         Err(anyhow::anyhow!("이 백엔드는 관문 로그인을 못 해요"))
     }
 
     /// 키체인 비밀 읽기(`op.secret`, `{op: read|status}`, docs/secret-faceid-approval.md). 폰 Face ID 승인과
-    /// 키체인은 kasa-mcp 와 앱이 알아 그 백엔드만 덮어쓴다.
+    /// 키체인은 kasa-device와 앱이 알아 그 백엔드만 덮어쓴다.
     fn op_secret(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
         Err(anyhow::anyhow!("이 백엔드는 키체인 비밀을 못 읽어요"))
     }
 
     /// 카사넷 포트 공유(`net.forward`, `{op: forward|list|stop}`) — 다른 기기 포트를 이 기기 localhost 로.
-    /// 끌어오기는 kasa-mcp 에 있어 그걸 아는 백엔드만 덮어쓴다.
+    /// 끌어오기는 kasa-remote에 있어 그걸 아는 백엔드만 덮어쓴다.
     fn net_forward(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
         Err(anyhow::anyhow!("이 백엔드는 포트 공유를 못 해요"))
     }
@@ -1846,4 +1846,12 @@ mod spawn_at_tests {
         let at = SpawnShellAt::from_query(&q(&[("beside", "%4"), ("dir", "diagonal")]));
         assert_eq!((at.dir, at.before), (None, false));
     }
+}
+
+/// Directory git commands run in: follow the active pane's shell cwd so the
+/// panel tracks the user's terminal directory; fall back to the host cwd.
+pub fn resolve_cwd(backend: &std::sync::Arc<dyn Backend>) -> std::path::PathBuf {
+    backend
+        .active_cwd()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
 }

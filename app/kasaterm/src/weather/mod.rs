@@ -173,7 +173,7 @@ impl App {
             .weather
             .overrides
             .iter()
-            .filter_map(|(pane, w)| Some((kasa_mcp::surface_keys::ensure(pane), serde_json::to_value(w).ok()?)))
+            .filter_map(|(pane, w)| Some((kasa_collab::surface_keys::ensure(pane), serde_json::to_value(w).ok()?)))
             .collect();
         serde_json::Value::Object(map)
     }
@@ -181,7 +181,7 @@ impl App {
     pub(crate) fn weather_restore_overrides(&mut self, state: &serde_json::Value) {
         let Some(map) = state.get("pane_weather").and_then(|v| v.as_object()) else { return };
         for (key, value) in map {
-            let (Some(pane), Ok(w)) = (kasa_mcp::surface_keys::find(key), serde_json::from_value::<PaneWeather>(value.clone())) else {
+            let (Some(pane), Ok(w)) = (kasa_collab::surface_keys::find(key), serde_json::from_value::<PaneWeather>(value.clone())) else {
                 continue;
             };
             if w != PaneWeather::Follow {

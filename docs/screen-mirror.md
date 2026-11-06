@@ -16,13 +16,13 @@
 폰 ScreenMirrorScreen ──(직통이면 카사넷, 아니면 관문)──┐
 PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──┤
                                                      ▼
-                         그 기기 카사텀  GET /screen/ws  (kasa-mcp http/screen.rs → screen_mirror.rs)
+                         그 기기 카사텀  GET /screen/ws  (kasa-http http/screen.rs → screen_mirror.rs)
                                                      │  Source::capture (앱이 꽂는다)
                                                      ▼
                          app/kasaterm/src/screen_capture.rs  macOS CGDisplayCreateImage · Windows StretchBlt
 ```
 
-- 화면을 뜨는 법은 OS 마다 달라 앱이 부팅 때 `kasa_mcp::screen_mirror::install` 로 꽂는다. 관문·`kasa-device`·lite 처럼 꽂지
+- 화면을 뜨는 법은 OS 마다 달라 앱이 부팅 때 `kasa_remote::screen_mirror::install` 로 꽂는다. 관문·`kasa-device`·lite 처럼 꽂지
   않은 곳은 `unavailable` 로 답한다.
 - PC 는 Info 「다른 기계」 줄 메뉴의 **「화면 거울」**로 연다(연결된 기기만). 그 기기 화면이 이 창의 웹 칸(`/screen` 보기
   페이지)으로 뜬다. 화면공유(「화면 보기」)·「KVM 보기」는 그대로 둔다.
@@ -67,7 +67,7 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
 - 폰(`mobile/lib/screen_session.dart`·`screens/screen_mirror.dart`): 직통이면 1920·q60, 관문이면 1280·q50, 8fps. 수명은 터미널과
   같다 — 앱이 뒤로 가면 닫고, 돌아오면 관문부터 다시 붙고, 길이 바뀌면(`routeChanges`) 옮겨 붙는다. 화면은 가운데 맞춤,
   핀치(최대 8배)·두 번 탭(그 자리 3배 ↔ 전체). 두 장을 함께 풀어 늦게 끝난 옛 장이 새 장을 덮지 않게 seq 로 거른다.
-- 웹(`crates/kasa-mcp/assets/screen/index.html`): 창 픽셀(×devicePixelRatio, 160 단위)만큼 받고 창 크기가 바뀌면 `tune`.
+- 웹(`crates/kasa-http/assets/screen/index.html`): 창 픽셀(×devicePixelRatio, 160 단위)만큼 받고 창 크기가 바뀌면 `tune`.
   `?name=` 이 탭 제목(「화면 · 이름」)이 된다. 「실제 크기」로 1:1 스크롤 보기.
 
 ## 조작
@@ -113,11 +113,11 @@ PC 웹 칸 /m/<기기>/screen ──(이 기기 HTTP → 그 기기 길)──�
 
 ## 검증
 
-- `cargo test -p kasa-mcp --lib screen_mirror` — 가짜 화면으로 hello·창 2장·옛/미래 ack·같은 화면·tune·거절·없는 기기.
+- `cargo test -p kasa-remote --lib screen_mirror` — 가짜 화면으로 hello·창 2장·옛/미래 ack·같은 화면·tune·거절·없는 기기.
 - `cargo test -p kasaterm --bin kasaterm screen_capture` — 줄이기·지문·두 바이트 순서의 JPEG 색.
 - `flutter test test/screen_session_test.dart` — 프레임 머리 읽기, 푼 뒤 ack, 화면 바꾸기, 거절, 조작 메시지·권한 안내.
 - `flutter test test/screen_mirror_control_test.dart` — 보기에서는 아무것도 안 가고, 조작에서 탭이 그 자리 비율의 클릭·끌기가 휠.
-- `cargo test -p kasa-mcp --lib screen_mirror` 의 조작 셋 — 차례·직전 단추·버리는 메시지, 권한 안내 한 번·창 한 번, 끊길 때 단추 떼기.
+- `cargo test -p kasa-remote --lib screen_mirror` 의 조작 셋 — 차례·직전 단추·버리는 메시지, 권한 안내 한 번·창 한 번, 끊길 때 단추 떼기.
 - `cargo test -p kasaterm --bin kasaterm screen_input` — 키 이름 표·누름 수. 실제 HID 길은
   `screen_input::tests::pointer_lands -- --ignored`(커서를 3포인트 옮겼다 되돌린다. 커서가 있는 화면 기준이어야 한다 — 주 화면
   기준으로 풀면 옆 모니터의 커서가 주 화면 끝으로 끌려온다).

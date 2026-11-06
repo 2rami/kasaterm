@@ -579,9 +579,9 @@ fn paint_usage_popover(
 ///
 /// 주소는 **주인의 유저 주소**(`https://<host>/u/<slug>/…`)다 — 주소 자체가 자격이라
 /// `?t=` 토큰이 필요 없고, 슬랙 링크·홈화면 앱에서 열어도 그대로 붙는다(2026-09-02,
-/// `kasa_mcp::mobile` 머리말). 주인 주소를 못 만드는 경우(홈 폴더 없음)에만 옛 꼴.
+/// `kasa_device::mobile` 머리말). 주인 주소를 못 만드는 경우(홈 폴더 없음)에만 옛 꼴.
 fn tunnel_url(host: &str, path: &str) -> String {
-    kasa_mcp::mobile::owner_address(host, path).unwrap_or_else(|| match kasa_mcp::remote_token() {
+    kasa_device::mobile::owner_address(host, path).unwrap_or_else(|| match kasa_device::remote_token() {
         Some(t) => format!("https://{host}{path}?t={t}"),
         None => format!("https://{host}{path}"),
     })
@@ -642,7 +642,7 @@ fn paint_tunnel_popover(
         g.draw_text(xx, yy, value, gpu::DrawOpts { font_size: size, color, bold, italic: false });
     };
     text(g, x + 42.0, y + 15.0, "모바일에서 이어보기", 13.0, theme::text(), true);
-    let uplink = kasa_mcp::uplink::status();
+    let uplink = kasa_device::uplink::status();
     let ready = on && host.is_some() && (uplink.gateway.is_none() || uplink.connected);
     let status = if ready { "연결 준비됨" } else if on { "연결 준비 중…" } else { "연결 꺼짐" };
     let status_color = if ready { theme::success() } else { theme::text_mute() };
@@ -1442,14 +1442,14 @@ impl crate::App {
                 return true;
             }
             Some(state::StatusbarHit::ScheduleToggle(id)) => {
-                let _ = kasa_mcp::schedule_toggle(&id);
+                let _ = kasa_students::schedule_toggle(&id);
                 // 목록은 Info 수집이 다시 읽어 온다 — 바로 다시 돌게 문을 연다.
                 self.info.last_refresh = None;
                 self.chrome_dirty = true;
                 return true;
             }
             Some(state::StatusbarHit::ScheduleDelete(id)) => {
-                let _ = kasa_mcp::schedule_delete(&id);
+                let _ = kasa_students::schedule_delete(&id);
                 self.info.last_refresh = None;
                 self.chrome_dirty = true;
                 return true;
@@ -1475,7 +1475,7 @@ impl crate::App {
                 // 결과는 낙관 반영하고 5초 뒤 폴이 확정한다 — 끄기(TERM)는 소멸이
                 // 한 박자 늦어 즉시 되물으면 아직 살아 보인다.
                 let want = !self.statusbar.tunnel_on.unwrap_or(false);
-                let msg = match kasa_mcp::tunnel::set(want) {
+                let msg = match kasa_device::tunnel::set(want) {
                     Ok(on) => {
                         self.statusbar.tunnel_on = Some(on);
                         if on { "원격 접속 열림" } else { "원격 접속 닫힘" }.to_string()
@@ -1589,13 +1589,13 @@ impl crate::App {
         self.statusbar.popover_scroll = 0.0;
         self.statusbar.clip_menu = None;
         if !same && kind == state::StatusbarPopover::Chrome {
-            self.statusbar.chrome_candidates = kasa_mcp::machines::kasachrome_candidates();
-            let chosen = kasa_mcp::machines::kasachrome_machine();
+            self.statusbar.chrome_candidates = kasa_device::machines::kasachrome_candidates();
+            let chosen = kasa_device::machines::kasachrome_machine();
             if !chosen.is_empty() && !self.statusbar.chrome_candidates.contains(&chosen) {
                 self.statusbar.chrome_candidates.push(chosen.clone());
             }
             self.statusbar.chrome_machine = chosen;
-            self.statusbar.chrome_phone = kasa_mcp::machines::opens_on_phone();
+            self.statusbar.chrome_phone = kasa_device::machines::opens_on_phone();
         }
         // 사용량은 **경고를 보고 누르는** 자리다. 하단바가 「재시작 권장」이라
         // 말했는데 CPU 탭이 펴지면, 방금 읽은 그 말의 근거를 보려고 탭을 한 번

@@ -172,7 +172,7 @@ impl crate::App {
     pub(crate) fn pump_info_outputs(&mut self) {
         let open = self.info.runtime_page() && self.git.col_visible;
         let seen = if open { self.ws.lock().ok().and_then(|ws| focused(&ws)) } else { None };
-        let source = seen.as_ref().and_then(|(pane, pid)| match kasa_mcp::remote::remote_meta(pid) {
+        let source = seen.as_ref().and_then(|(pane, pid)| match kasa_remote::remote::remote_meta(pid) {
             Some((base, rid)) => Some(Source::Remote(base, rid)),
             None => self.collab.hub.bound.lock().ok()?.get(pid).cloned().or_else(|| fixture(pane)).map(Source::File),
         });
@@ -240,7 +240,7 @@ impl crate::App {
 
     fn open_output(&mut self, item: &Output, pid: &str) {
         let Some(owner) = self.window.as_ref().map(|w| w.id()) else { return };
-        let base = kasa_mcp::remote::remote_meta(pid).map(|(base, _)| base);
+        let base = kasa_remote::remote::remote_meta(pid).map(|(base, _)| base);
         match item.kind {
             Kind::Image => match (crate::inline_result::local_png(&item.id), base) {
                 (Some(path), _) => self.image_preview.open_path(owner, path.to_string_lossy().into_owned(), &self.proxy),

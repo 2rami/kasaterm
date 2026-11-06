@@ -1,5 +1,5 @@
 use super::*;
-use kasa_mcp::git::GitGraphCommit;
+use kasa_git::git::GitGraphCommit;
 
 fn row_height(commit: &GitGraphCommit) -> f32 {
     if commit.refs.is_empty() {
@@ -333,7 +333,7 @@ fn details(
         }
         for line in diff {
             if y + 18.0 > top && y < bottom {
-                use kasa_mcp::git::DiffLineKind as K;
+                use kasa_git::git::DiffLineKind as K;
                 let (prefix, color) = match line.kind {
                     K::Add => ("+", theme::success()),
                     K::Del => ("−", theme::danger()),

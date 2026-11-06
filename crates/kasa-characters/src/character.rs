@@ -1,0 +1,2627 @@
+//! 캐릭터 배정 — characters.json persona + /tmp 마커 + 빈 슬롯 순환.
+//!
+//! 자율통솔·MCP `/spawn` 폐기(사용자) 후, 학생 정체성을 백엔드(kasaterm)가
+//! pane 생성 시점에 직접 박는다. 사용자가 그 pane 에서 `claude` 를 치면 shim 이
+//! 여기서 심은 env(KASATERM_CHARACTER/SESSION_ID/PERSONA)를 --session-id·
+//! --append-system-prompt 로 적용한다. board(socket.rs)는 같은 /tmp 마커를 읽어
+//! `row.character` 를 채우므로, 마커 경로 규칙은 socket.rs 의 rslug 와 일치해야 한다.
+
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+
+/// Windows GUI 프로세스엔 HOME 이 없다 — USERPROFILE 이 그 자리.
+fn home() -> Option<PathBuf> {
+    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).map(PathBuf::from)
+}
+
+/// settings.json 의 문자열 설정 하나. 앱의 `socket::read_settings` 와 **같은 파일**을
+/// 봐야 한다 — kasa-http → app 은 없는 의존 방향이라 부를 수 없어 경로 규칙만 옮겨
+/// 왔다. `KASATERM_SETTINGS_FILE` 을 빠뜨렸더니 설정 화면은 이 파일을, 로더는 저
+/// 파일을 읽어 「테마를 바꿨는데 아무 일도 안 일어나는」 상태가 됐다(2026-08-13 실측).
+pub fn read_setting_str(key: &str) -> Option<String> {
+    read_setting_value(key)?.as_str().map(String::from)
+}
+
+/// 폰 앱을 내려받는 주소(설치 링크 `…/relay/install/<token>/` 같은 것). 하단바 「기기」 QR 이 여는
+/// 안내 페이지가 「설치」 단추에 단다. 없으면 페이지가 케이블 설치 안내로 대신한다 —
+/// 무료 Apple ID 로는 공중 설치 경로가 없어서다. env 가 설정을 이긴다(헤드리스 검증).
+pub fn app_install_url() -> Option<String> {
+    match std::env::var("KASATERM_APP_INSTALL_URL") {
+        Ok(v) if !v.trim().is_empty() => return Some(v.trim().to_string()),
+        _ => {}
+    }
+    read_setting_str("app_install_url").filter(|s| !s.trim().is_empty())
+}
+
+/// 테마 팩 루트 — `~/.config/kasaterm/themes/`. **폴더 하나가 테마 하나**다:
+/// `theme.json`(로스터 + 팔레트) + `sprites/`(캐릭터 그림). 지금까지 흩어져 있던
+/// 세 override(`students/`·`characters.json`·`custom_theme`)를 한 단위로 묶은 것이라,
+/// 폴더째 주고받으면 그게 곧 테마 배포다.
+pub fn themes_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_THEMES_DIR") {
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    Some(home()?.join(".config/kasaterm/themes"))
+}
+
+/// 그 슬러그의 프사 파일 — 고른 테마 → 활성 override → 설치 테마 순.
+///
+/// 웹/폰 목록이 얼굴을 받는 창구(`/term/avatar`)가 번들 `include_bytes` 만 갖고 있어
+/// 테마 학생은 통째로 404 였다. GUI 는 `sprites.rs` 가 같은 순서로 이미 디스크를
+/// 뒤지고 있으니, 그 순서만 여기로 옮겨 온다(코드는 못 공유한다 — kasa-http → app 은
+/// 없는 의존 방향이다).
+pub fn profile_png_on_disk(slug: &str) -> Option<Vec<u8>> {
+    if slug.is_empty() || slug.contains('/') || slug.contains("..") {
+        return None;
+    }
+    let picked = picked_theme_of_slug().into_iter().find(|(s, _)| s == slug);
+    if let Some((_, theme)) = picked {
+        let dir = picked_sprite_dir(&theme)?;
+        return [format!("profile/{slug}.png"), format!("{slug}-profile.png")]
+            .into_iter()
+            .find_map(|rel| std::fs::read(dir.join(rel)).ok());
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let root = themes_root();
+    // 2. 활성 override 폴더(`students/`) — 앱과 같은 env 이름을 본다.
+    if let Ok(p) = std::env::var("KASATERM_STUDENTS_DIR") {
+        if !p.is_empty() {
+            dirs.push(PathBuf::from(p));
+        }
+    }
+    if let Some(h) = home() {
+        dirs.push(h.join(".config/kasaterm/students"));
+    }
+    // 3. 나머지 설치 테마.
+    if let Some(r) = root {
+        let mut rest: Vec<PathBuf> = std::fs::read_dir(&r)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|d| d.join("theme.json").is_file())
+            .map(|d| d.join("sprites"))
+            .collect();
+        // read_dir 순서는 파일시스템이 정한다 — 같은 슬러그를 가진 테마가 둘이면
+        // 그냥 두었을 때 어느 얼굴이 이기는지가 실행마다 달라진다.
+        rest.sort();
+        dirs.extend(rest);
+    }
+    for d in dirs {
+        for rel in [format!("profile/{slug}.png"), format!("{slug}-profile.png")] {
+            if let Ok(b) = std::fs::read(d.join(rel)) {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+/// 활성 테마 폴더. settings.json 의 `character_theme` 가 고른다(팔레트 테마 키
+/// `theme` 와 다른 이름인 이유가 이것 — 둘은 따로 고른다).
+///
+/// **폴더에 `theme.json` 이 실재할 때만** 돌려준다. 테마를 지우고 앱을 켜면 설정
+/// 키만 남는데 그걸 믿으면 로스터가 통째로 비어 캐릭터 배정이 멈춘다. 없으면
+/// 조용히 번들로 돌아가는 쪽이 맞다.
+/// 캐시. 바깥 `None` = 아직 안 정함, `Some(None)` = 테마 없음(번들로 간다).
+///
+/// 캐시가 필요한 이유: `students_dir()` 을 거쳐 **매 프레임** 불린다
+/// (`student_has_sprite` 가 스프라이트 슬롯을 세우기 전에 묻는다). 캐시가 없으면
+/// 프레임마다 settings.json 을 열게 된다.
+static ACTIVE_THEME: std::sync::RwLock<Option<Option<PathBuf>>> = std::sync::RwLock::new(None);
+
+pub fn active_theme_dir() -> Option<PathBuf> {
+    if let Some(v) = ACTIVE_THEME.read().unwrap().as_ref() {
+        return v.clone();
+    }
+    let mut w = ACTIVE_THEME.write().unwrap();
+    // 잠금을 바꿔 잡는 사이 다른 스레드가 이미 정했을 수 있다.
+    if let Some(v) = w.as_ref() {
+        return v.clone();
+    }
+    let v = resolve_active_theme_dir();
+    *w = Some(v.clone());
+    v
+}
+
+/// 테마를 갈아 끼운 뒤 부른다 — 다음 조회가 다시 해석한다.
+/// `theme::invalidate_roster()` 와 **짝으로** 불러야 한다. 한쪽만 비우면 그림은 새
+/// 테마인데 이름·색은 옛 테마가 되어, 화면이 두 테마를 섞어 보여 준다.
+pub fn invalidate_active_theme() {
+    *ACTIVE_THEME.write().unwrap() = None;
+}
+
+fn resolve_active_theme_dir() -> Option<PathBuf> {
+    // env 가 설정을 이긴다 — 헤드리스 검증이 사용자 settings.json 을 건드리지 않고
+    // 테마를 갈아 끼울 유일한 손잡이다(`KASATERM_STUDENTS_DIR` 과 같은 역할).
+    let id = std::env::var("KASATERM_CHARACTER_THEME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| read_setting_str("character_theme"))?;
+    active_theme_dir_in(&themes_root()?, &id)
+}
+
+/// root 주입 버전(테스트용) — themes_root·settings 해석과 분리해 env 없이 검증한다.
+fn active_theme_dir_in(root: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let d = root.join(id);
+    d.join("theme.json").is_file().then_some(d)
+}
+
+/// 지금 고른 테마 id — 빈 문자열이면 번들. **`active_theme_dir` 과 같은 손잡이를
+/// 본다**(env 우선, 그다음 설정). 화면이 「고른 것」을 표시할 때 이걸 써야 실제로
+/// 도는 테마와 어긋나지 않는다.
+pub fn active_theme_id() -> String {
+    std::env::var("KASATERM_CHARACTER_THEME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| read_setting_str("character_theme"))
+        .unwrap_or_default()
+}
+
+/// 설치된 테마 `(id, label)` 목록 — 설정 화면의 선택지. 번들은 폴더가 없으니 여기
+/// 안 들어간다(호출부가 맨 앞에 따로 세운다). label 은 `theme.json` 의 `label`,
+/// 없으면 기존 스키마의 `theme` 필드, 그것도 없으면 폴더 이름.
+pub fn list_themes() -> Vec<(String, String)> {
+    themes_root().map(|r| list_themes_in(&r)).unwrap_or_default()
+}
+
+/// root 주입 버전(테스트용).
+fn list_themes_in(root: &Path) -> Vec<(String, String)> {
+    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut out: Vec<(String, String)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let f = e.path().join("theme.json");
+            if !f.is_file() {
+                return None;
+            }
+            let id = e.file_name().to_str()?.to_string();
+            let label = std::fs::read_to_string(&f)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("label")
+                        .or_else(|| v.get("theme"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| id.clone());
+            Some((id, label))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// characters.json 후보 경로 — kasaterm-assign-character.py 와 동일 우선순위:
+/// 활성 테마 → ~/.config → env override → .app Resources(mac)/exe 옆(win MSI) → 레포 소스.
+fn candidate_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    // 테마가 최우선 — 고른 테마의 로스터가 개별 override 보다 앞선다. 뒤에 두면
+    // 옛 characters.json 이 남아 있는 사용자에게 테마 선택이 아무 일도 안 한다.
+    if let Some(d) = active_theme_dir() {
+        v.push(d.join("theme.json"));
+    }
+    if let Some(home) = home() {
+        v.push(home.join(".config/kasaterm/characters.json"));
+    }
+    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
+        v.push(PathBuf::from(p).join("characters.json"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(res) = exe
+            .parent()
+            .and_then(|m| m.parent())
+            .map(|c| c.join("Resources/collab-hooks/characters.json"))
+        {
+            v.push(res);
+        }
+        // Windows MSI: bin\collab-hooks\ (exe 와 나란히 — arona-ui 번들과 같은 자리)
+        if let Some(adj) = exe.parent().map(|d| d.join("collab-hooks/characters.json")) {
+            v.push(adj);
+        }
+    }
+    v.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/kasaterm/collab-hooks/characters.json"));
+    v
+}
+
+/// 후보 중 첫 번째로 파싱되는 characters.json. 없으면 None(테마 미설치 = 배정 skip).
+pub fn characters_json() -> Option<Value> {
+    for p in candidate_paths() {
+        let Ok(s) = std::fs::read_to_string(&p) else { continue };
+        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// **실제로 쓰는 명부** — 활성 명부에 고른 캐릭터를 그 사람이 고른 테마의 것으로 얹는다.
+///
+/// 이름이 두 테마에 겹치면 **어느 명부를 먼저 보느냐가 곧 정체다.** 실측
+/// (2026-08-29): 「리오」가 번들(츠카츠키 리오)과 eternalreturn 양쪽에 있는데
+/// 사용자는 eternalreturn 쪽만 켜 두었다. 그런데 배정도 색도 그림도 활성 명부
+/// (번들)부터 찾으니, **켠 적 없는 블루아카 리오**가 붙었다("리오는 켜지도않았는데
+/// 너 리오잖아 블루아카"). 고른 쪽을 활성보다 앞에 세워 그 자리를 닫는다.
+///
+/// 덤이 하나 더 있다. 고른 명단은 테마를 가로지르는데(실측 10개 테마 31명) 활성
+/// 명부는 한 벌뿐이라, 다른 테마에서 고른 학생은 **활성 명부에 아예 없었다** —
+/// 이름은 배정되는데 색·슬러그를 활성 명부에서 찾는 자리마다 빈손이 됐다. 여기서
+/// 얹으면 그 학생들도 활성 명부의 일원이 된다.
+///
+/// 고르기를 한 번도 안 썼으면 활성 명부 **그대로** 돌려준다 — 「아무도 안 골랐다」는
+/// 제한이 없다는 뜻이지 명부를 바꾸라는 뜻이 아니다.
+pub fn roster_in_use() -> Option<Value> {
+    roster_in_use_from(&read_character_picks(), characters_json(), |theme| {
+        if theme == BASE_THEME_KEY {
+            base_characters_json()
+        } else {
+            theme_characters_json(theme)
+        }
+    })
+}
+
+/// 위의 순수부 — 명부를 주입받는다. `picked_names_from` 과 같은 이유로 갈라 뒀다:
+/// 이름 충돌 규칙은 **어느 테마가 깔려 있느냐와 무관하게** 성립해야 하는데, 파일에
+/// 기대면 그 테마를 깐 컴퓨터에서만 도는 검증이 된다.
+fn roster_in_use_from(
+    picks: &[(String, Vec<String>)],
+    base: Option<Value>,
+    load: impl Fn(&str) -> Option<Value>,
+) -> Option<Value> {
+    if picks.is_empty() {
+        return base;
+    }
+    // 1. 고른 것부터. 겹치는 이름이 여기서 먼저 잡히므로 활성보다 이긴다.
+    let picked = picked_entries_from(picks, &load);
+    let mut seen: std::collections::HashSet<String> =
+        picked.iter().filter_map(|(_, m)| name_of(m).map(String::from)).collect();
+    let mut out: Vec<Value> = picked.into_iter().map(|(_, m)| m).collect();
+    // 2. 활성 명부의 나머지.
+    if let Some(c) = base.as_ref() {
+        for m in entries_of(c) {
+            let Some(n) = name_of(m) else { continue };
+            if !seen.insert(n.to_string()) {
+                continue;
+            }
+            out.push(m.clone());
+        }
+    }
+    // 원래 객체의 나머지 키(테마 메타)는 살린다. 인원은 `members` 한 칸으로 편다 —
+    // 읽는 쪽이 전부 leader/leaders/members 를 합쳐 보므로 갈라 둘 이유가 없고,
+    // `leader` 를 남기면 그 한 명이 두 번 세어진다.
+    let mut obj = base
+        .as_ref()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    obj.remove("leader");
+    obj.insert("leaders".to_string(), Value::Array(Vec::new()));
+    obj.insert("members".to_string(), Value::Array(out));
+    Some(Value::Object(obj))
+}
+
+/// 고른 명단이 실제로 집어 온 항목 — `(테마 id, 캐릭터)` 를 고른 순서 그대로.
+///
+/// `roster_in_use_from` 의 1단이자 `picked_theme_of_slug_from` 의 전부다. 두 곳이
+/// 각자 순회하면 「어느 테마가 이기는가」가 두 벌이 되고, 어긋나도 오류는 안 난다 —
+/// 이름은 이 테마인데 얼굴은 저 테마인 학생이 될 뿐이다.
+fn picked_entries_from(
+    picks: &[(String, Vec<String>)],
+    load: &impl Fn(&str) -> Option<Value>,
+) -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for (theme, names) in picks {
+        // 테마를 지웠으면 조용히 건너뛴다 — 목록에 남은 유령까지 명부에 넣으면
+        // 이름은 뜨는데 그림·색이 없는 학생이 된다.
+        let Some(c) = load(theme) else { continue };
+        for m in entries_of(&c) {
+            let Some(n) = name_of(m) else { continue };
+            if !names.iter().any(|x| x == n) {
+                continue;
+            }
+            if !seen.insert(n.to_string()) {
+                continue;
+            }
+            out.push((theme.clone(), m.clone()));
+        }
+    }
+    out
+}
+
+fn name_of(m: &Value) -> Option<&str> {
+    m.get("name").and_then(|v| v.as_str())
+}
+
+/// 고른 학생의 **그림이 어느 테마 것인가** — `[(슬러그, 테마 id)]`.
+///
+/// 이름은 `roster_in_use` 가 고른 쪽으로 정했는데 그림은 슬러그로만 찾는다. 슬러그가
+/// 겹치면 그 둘이 갈라진다 — 실측(2026-08-29) 「리오」는 번들과 eternalreturn 양쪽에
+/// `rio` 라, 이름·색·말투는 eternalreturn 인데 얼굴만 블루아카가 붙었다. 이 표를
+/// 에셋 찾기의 0단으로 세워 그 자리를 닫는다.
+///
+/// 번들 선택도 남겨야 활성 테마의 같은 슬러그가 선택한 얼굴을 가로채지 않는다.
+pub fn picked_theme_of_slug() -> Vec<(String, String)> {
+    picked_theme_of_slug_from(&read_character_picks(), |theme| {
+        if theme == BASE_THEME_KEY {
+            base_characters_json()
+        } else {
+            theme_characters_json(theme)
+        }
+    })
+}
+
+fn picked_theme_of_slug_from(
+    picks: &[(String, Vec<String>)],
+    load: impl Fn(&str) -> Option<Value>,
+) -> Vec<(String, String)> {
+    picked_entries_from(picks, &load)
+        .into_iter()
+        .filter_map(|(t, m)| {
+            Some((m.get("slug")?.as_str()?.to_string(), t))
+        })
+        .collect()
+}
+
+pub fn picked_sprite_dir(theme: &str) -> Option<PathBuf> {
+    if theme == BASE_THEME_KEY {
+        Some(home()?.join(".config/kasaterm/students"))
+    } else {
+        Some(themes_root()?.join(theme).join("sprites"))
+    }
+}
+
+/// 설치된 **모든** 로스터 — 활성 테마 + 기본 + `themes/` 아래 테마 전부.
+///
+/// 「이 이름이 우리가 배정한 학생 이름인가」를 묻는 쪽은 활성 명단이 아니라 이것을
+/// 봐야 한다. 활성 명단만 보면 테마를 갈아탄 순간 옛 캐릭터가 「학생이 아닌 것」이
+/// 되고, 그 이름으로 남아 있던 자국을 **사용자가 손수 붙인 것**으로 오인해 영영
+/// 손대지 않는다(2026-08-27 실측: /resume 피커에 옛 테마의 페이몬 얼굴이 붙은 채
+/// 굳었다 — 그 세션의 배정은 진작 아리스로 바뀌어 있었다). `agent_slug` 가 같은
+/// 이유로 전 테마 합집합을 보게 넓혀졌다(`0eedb9c4`) — 같은 함정의 다른 자리다.
+pub fn all_rosters() -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+    let mut push = |p: PathBuf, out: &mut Vec<Value>| {
+        if !seen.insert(p.clone()) {
+            return;
+        }
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                out.push(v);
+            }
+        }
+    };
+    for p in candidate_paths() {
+        push(p, &mut out);
+    }
+    if let Some(root) = themes_root() {
+        for p in theme_roster_paths(&root) {
+            push(p, &mut out);
+        }
+    }
+    out
+}
+
+/// 말투 판독표 — 전 명부의 (이름, 말투 첫 줄 앞머리). 도는 claude 의 argv 나 codex 의
+/// AGENTS.md 에 **어느 학생의 말투가 실제로 실렸는지** 되짚을 때 쓴다(2026-09-09 지시:
+/// 재시작 뒤 얼굴은 새 학생인데 말투는 옛 학생인 자리를 인포에서 보이게). 앞머리가
+/// 같은 두 이름은 먼저 온 쪽만 남는다 — 판독이 갈리는 것보다 하나로 고정되는 게 낫다.
+pub fn persona_prefixes() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for chars in all_rosters() {
+        for m in entries_of(&chars) {
+            let Some(name) = name_of(m) else { continue };
+            let Some(p) = m.get("persona").and_then(|x| x.as_str()) else { continue };
+            let head: String = p.trim().lines().next().unwrap_or("").trim().chars().take(48).collect();
+            if head.chars().count() < 12 || !seen.insert(head.clone()) {
+                continue;
+            }
+            out.push((name.to_string(), head));
+        }
+    }
+    out
+}
+
+/// `<root>/*/theme.json` 전부 — root 주입이라 테스트가 env 없이 검증한다
+/// (`active_theme_dir_in` 과 같은 결).
+pub fn theme_roster_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut v: Vec<PathBuf> =
+        rd.flatten().map(|e| e.path()).filter(|d| d.is_dir()).map(|d| d.join("theme.json")).collect();
+    v.sort();
+    v
+}
+
+/// 활성 테마 항목을 뺀 기본 로스터 — 테마를 안 골랐을 때와 같은 것. 진행 중
+/// pane 을 기본(번들) 학생으로 바꾸는 피커의 「기본」 묶음이 쓴다(2026-08-24
+/// 지시: 어느 테마가 활성이어도 다른 테마 캐릭터로 바꿀 수 있어야 한다).
+pub fn base_characters_json() -> Option<Value> {
+    let skip = active_theme_dir().map(|d| d.join("theme.json"));
+    for p in candidate_paths() {
+        if skip.as_deref() == Some(p.as_path()) {
+            continue;
+        }
+        let Ok(s) = std::fs::read_to_string(&p) else { continue };
+        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 설치 테마 하나의 로스터(theme.json). id 는 경로 조각이 되므로 구분자를 거부한다.
+pub fn theme_characters_json(id: &str) -> Option<Value> {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return None;
+    }
+    let s = std::fs::read_to_string(themes_root()?.join(id).join("theme.json")).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+/// persona 합집합 조회 — 활성 → 기본(번들) → 설치 테마 전부. 진행 중 pane 이
+/// 다른 테마 캐릭터로 재배정된 뒤 재시작·resume 할 때, 활성 로스터에 없는
+/// 이름이라도 원 소속 테마의 말투를 찾아 입힌다.
+/// 이름 → header_color(hex) 를 **아는 명부 전부**에서 찾는다 — 고른 것 우선.
+///
+/// `header_color_for(characters_json(), …)` 로 활성 명부만 보던 자리가 있었다.
+/// 테마에서 고른 학생은 활성 명부에 없으니 색이 `null` 로 나갔고, 그 값을 그대로
+/// 싣는 pane 목록을 남의 기계가 읽으면 **이사 간 학생만 무색**이 됐다
+/// (2026-08-30 지적: 「맥미니로 가면 왜 맥북에서 테마가 안보여」).
+pub fn header_color_any(name: &str) -> Option<String> {
+    for chars in all_rosters() {
+        if let Some(c) = header_color_for(&chars, name) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// 학생 이름 → 프사 슬러그. agent 이름이 없는 자리(codex 는 셰임 env 를 안 실어
+/// `agent_name` 이 비고, 그래서 폰 목록에 얼굴이 안 떴다 — 2026-09-07 지적)에서
+/// 이름표(`character`)로 대신 찾는다. 색과 같은 이유로 명부 전부를 본다.
+pub fn slug_for_any(name: &str) -> Option<String> {
+    for chars in all_rosters() {
+        if let Some(s) = find_character(&chars, name)
+            .and_then(|m| m.get("slug").and_then(|x| x.as_str()))
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// 그 슬러그가 **아는 학생의 것인가** — 맞으면 그대로 돌려준다.
+///
+/// agent 이름(`emu-p27-1uc`)의 앞 토막이 곧 슬러그라, 하는 일은 「이게 진짜 슬러그냐」를
+/// 가리는 문지기뿐이다. 번들 슬러그를 손으로 적어 둔 목록으로 재던 자리가 있었는데,
+/// 테마 학생의 슬러그는 그 목록에 없어 전부 떨어졌다(에무·하치와레·진천우 → `null`).
+pub fn known_slug(head: &str) -> Option<String> {
+    if head.is_empty() {
+        return None;
+    }
+    for chars in all_rosters() {
+        for m in entries_of(&chars) {
+            if m.get("slug").and_then(|v| v.as_str()) == Some(head) {
+                return Some(head.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn persona_for_any(name: &str) -> Option<String> {
+    // `roster_in_use` 가 맨 앞이다 — 이름이 겹칠 때 **말투가 얼굴·색과 갈리면** 안
+    // 된다. 이 자리가 활성 명부를 먼저 보던 탓에 eternalreturn 리오로 배정된 pane 이
+    // 블루아카 리오의 말투로 떴다(2026-08-29).
+    for chars in [roster_in_use(), base_characters_json()].into_iter().flatten() {
+        if let Some(p) = persona_for(&chars, name) {
+            return Some(p);
+        }
+    }
+    let root = themes_root()?;
+    for e in std::fs::read_dir(root).ok()?.flatten() {
+        let Ok(s) = std::fs::read_to_string(e.path().join("theme.json")) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&s) else { continue };
+        if let Some(p) = persona_for(&v, name) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn names_of(arr: Option<&Value>) -> Vec<String> {
+    arr.and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 캐릭터 풀 — leader/leaders/members 통합, 이름 중복 제거. god 개념 폐기(사용자
+/// 2026-07-13): 아로나·프라나도 특별 클래스가 아니라 동등한 배정 대상이라
+/// 풀 구분 없이 전원 한 목록이다(config 의 leader/leaders 필드는 하위호환 파싱만).
+pub fn member_names(chars: &Value) -> Vec<String> {
+    let mut v = Vec::new();
+    if let Some(n) = chars.get("leader").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
+        v.push(n.to_string());
+    }
+    for key in ["leaders", "members"] {
+        for n in names_of(chars.get(key)) {
+            if !v.contains(&n) {
+                v.push(n);
+            }
+        }
+    }
+    v
+}
+
+/// 설정의 「말투」 토글. 꺼져 있으면 persona 를 **어느 경로로도** 안 붙인다.
+///
+/// 앱 쪽 `socket::read_claude_persona` 와 같은 값을 봐야 한다 — kasa-http → app 은 없는
+/// 의존 방향이라 부를 수 없어 키 이름과 기본값(없으면 켬)만 옮겨 왔다.
+pub fn persona_enabled() -> bool {
+    read_setting_value("claude_persona").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+/// 번들(테마 폴더 없음) 로스터를 가리키는 예약 키. `theme_roster_handler` 가 이미
+/// 같은 이름을 쓴다 — 번들은 테마 id 가 빈 문자열이라 그대로 키로 쓰면 안 된다.
+pub const BASE_THEME_KEY: &str = "__base";
+
+/// settings.json 의 `character_picks` — `{"<테마 id|__base>": ["이름", …]}`.
+///
+/// **테마를 가로지르는 한 명단**이라 어느 한 `theme.json` 에도 적을 수 없고, 여기 두면
+/// 번들 로스터를 사용자 홈으로 포크시키지도 않는다(`update_member` 가 파일이 없으면
+/// 번들을 seed 로 홈에 사본을 만드는데, 그 사본은 그 뒤 앱 업데이트의 로스터 변경을
+/// 영영 못 받는다).
+fn read_character_picks() -> Vec<(String, Vec<String>)> {
+    let Some(v) = read_setting_value("character_picks") else { return Vec::new() };
+    let Some(obj) = v.as_object() else { return Vec::new() };
+    obj.iter()
+        .map(|(k, names)| {
+            let names = names
+                .as_array()
+                .map(|a| {
+                    a.iter().filter_map(|n| n.as_str()).map(String::from).collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (k.clone(), names)
+        })
+        .filter(|(_, names)| !names.is_empty())
+        .collect()
+}
+
+/// settings.json 의 값 하나(문자열이 아닌 것도). `read_setting_str` 과 같은 경로 규칙.
+fn read_setting_value(key: &str) -> Option<Value> {
+    let p = settings_path()?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+    v.get(key).cloned()
+}
+
+fn settings_path() -> Option<PathBuf> {
+    match std::env::var("KASATERM_SETTINGS_FILE") {
+        Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
+        _ => Some(home()?.join(".config/kasaterm/settings.json")),
+    }
+}
+
+/// 테마 하나에서 고른 이름들(있는 그대로 — 실재 확인 안 함). 화면이 체크 표시를
+/// 그리는 데 쓴다.
+pub fn picks_of_theme(theme: &str) -> Vec<String> {
+    read_character_picks()
+        .into_iter()
+        .find(|(k, _)| k == theme)
+        .map(|(_, v)| v)
+        .unwrap_or_default()
+}
+
+/// 고른 명단 전체 — `{테마: [이름…]}`. 저장 전에 읽어 고치는 쪽이 쓴다.
+pub fn all_picks() -> Vec<(String, Vec<String>)> {
+    read_character_picks()
+}
+
+/// 골라 둔 이름들 — 테마를 가로질러 모으고 **그 테마에 실재하는 것만** 남긴다.
+///
+/// 실재 확인을 하는 이유: 테마를 지웠거나 이름을 바꾸면 목록에 유령이 남는데, 그걸
+/// 배정하면 이름은 뜨는데 그림·색이 없는 pane 이 된다. 없는 id 를 조용히 접는
+/// `read_claude_account` 와 같은 방어다.
+fn picked_names_from(
+    picks: &[(String, Vec<String>)],
+    load: impl Fn(&str) -> Option<Value>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (theme, wanted) in picks {
+        let Some(chars) = load(theme) else { continue };
+        let have = member_names(&chars);
+        for n in wanted {
+            // 이름이 두 테마에 겹쳐도 한 번만 — 배정은 이름을 키로 쓰므로 둘을 구별
+            // 못 하고, 중복이 있으면 그 이름만 뽑힐 확률이 두 배가 된다.
+            if have.contains(n) && !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 로스터를 실제로 읽는 판.
+fn picked_names_uncached(picks: &[(String, Vec<String>)]) -> Vec<String> {
+    picked_names_from(picks, |theme| {
+        if theme == BASE_THEME_KEY {
+            base_characters_json()
+        } else {
+            theme_characters_json(theme)
+        }
+    })
+}
+
+/// 위의 캐시판. 배정은 pane 이 뜰 때마다 도는데 `read_character_picks` 는 매번 디스크를
+/// 읽고 테마 파일까지 훑는다 — settings.json 의 mtime 이 그대로면 재사용한다.
+#[allow(clippy::type_complexity)]
+static PICKED: std::sync::OnceLock<
+    std::sync::Mutex<Option<(Option<(std::time::SystemTime, u64)>, Vec<String>)>>,
+> = std::sync::OnceLock::new();
+
+fn picked_names() -> Vec<String> {
+    let stamp = settings_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    let cell = PICKED.get_or_init(Default::default);
+    let Ok(mut g) = cell.lock() else {
+        return picked_names_uncached(&read_character_picks());
+    };
+    if let Some((s, names)) = g.as_ref() {
+        // stat 이 실패하면(파일 없음) 언제 무효화할지 모르니 캐시를 안 믿는다.
+        if stamp.is_some() && *s == stamp {
+            return names.clone();
+        }
+    }
+    let names = picked_names_uncached(&read_character_picks());
+    *g = Some((stamp, names.clone()));
+    names
+}
+
+/// 고른 목록이 바뀐 뒤 부른다. `theme::invalidate_roster()`·`invalidate_active_theme()`
+/// 과 **짝으로** — settings.json 을 바로 다시 써서 mtime 이 같은 초에 머무는 경우가
+/// 있어 stat 만으로는 갱신을 못 잡는다.
+pub fn invalidate_character_picks() {
+    if let Some(c) = PICKED.get() {
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
+    }
+}
+
+/// **배정에 쓸** 이름들. 고른 것이 없으면 `member_names` 그대로(=지금까지의 동작)고,
+/// 있으면 테마를 가로질러 그 이름들만 돌려준다.
+///
+/// `member_names` 를 그대로 필터하지 않는 이유: 그 함수는 배정 말고도 셸 런처 생성
+/// (`시로코` 명령)·agy persona 파일·설정 화면 캐릭터 격자가 쓴다. 거기까지 걸러 버리면
+/// 안 고른 캐릭터의 **런처 명령이 사라진다** — 고르기는 「누가 배정되나」의 문제지
+/// 「무엇이 존재하나」의 문제가 아니다.
+///
+/// 결과가 비면 반드시 `member_names` 로 돌아간다. 전원을 끄거나 고른 이름이 전부
+/// 사라졌을 때 빈 목록을 주면 배정이 통째로 죽어 캐릭터 없는 pane 이 뜬다.
+pub fn assignable_names(chars: &Value) -> Vec<String> {
+    assignable_names_with(chars, &picked_names())
+}
+
+/// 그 이름이 **지금 배정 대상인가**.
+///
+/// 재시작 복원이 쓴다. 저장된 캐릭터를 그대로 되살리면 고른 명단을 바꿔도 이미
+/// 배정된 학생은 영원히 남는다 — 사용자가 30명을 골랐는데 화면엔 안 고른 9명이
+/// 계속 떠 있었고, 그건 새 배정이 명단을 어긴 게 아니라 **옛 배정이 안 바뀐** 것이었다
+/// (2026-08-25 실측: 새 pane 은 `pool=30/roster=79` 로 정확했다).
+pub fn is_assignable(name: &str) -> bool {
+    is_assignable_with(name, &picked_names())
+}
+
+/// 위의 순수부. 고른 목록이 **비어 있으면 전원이 대상**이다 — 아무도 안 골랐다는
+/// 것은 「아무도 못 쓴다」가 아니라 「제한이 없다」는 뜻이고, 여기서 거짓을 주면
+/// 고르기를 한 번도 안 쓴 사람의 복원이 통째로 랜덤이 된다.
+fn is_assignable_with(name: &str, picked: &[String]) -> bool {
+    picked.is_empty() || picked.iter().any(|n| n == name)
+}
+
+/// 위의 순수부 — 고른 목록을 이미 손에 들고 있을 때. 폴백 규칙이 여기 한 줄로 모여
+/// 있어야 「빈 목록이 배정을 굶기는가」를 파일 없이 시험할 수 있다.
+fn assignable_names_with(chars: &Value, picked: &[String]) -> Vec<String> {
+    if picked.is_empty() {
+        return member_names(chars);
+    }
+    // **명부에 실재하는 것만.** 고른 이름을 그대로 후보로 쓰면, 그 이름이 명부에서
+    // 다른 사람을 가리키는 경우에 그 사람이 배정된다 — 「리오」가 정확히 그랬다
+    // (`roster_in_use` 주석). 명부를 고른 순서대로 짠 뒤 그 명부와 교집합을 잡으면
+    // 이름이 가리키는 사람과 배정되는 사람이 갈릴 자리가 없다.
+    let have = member_names(chars);
+    let v: Vec<String> = picked.iter().filter(|n| have.contains(n)).cloned().collect();
+    // 하나도 안 남으면 전원 — 빈 후보는 배정을 굶겨 캐릭터 없는 pane 을 만든다.
+    if v.is_empty() {
+        member_names(chars)
+    } else {
+        v
+    }
+}
+
+/// 방 학교 판정에서 빼는 소속 — 학원이 아니라 소속 기관이고 인원도 둘뿐이라,
+/// 이게 방 학교로 잡히면 그 방은 두 명 쓰고 곧장 고갈된다.
+const NOT_A_SCHOOL: &str = "샬레";
+
+/// 이름 → 학원. 없는 캐릭터(옛 테마·커스텀)는 `None`.
+pub fn school_of(chars: &Value, name: &str) -> Option<String> {
+    let s = find_character(chars, name)?.get("school")?.as_str()?;
+    (s != NOT_A_SCHOOL).then(|| s.to_string())
+}
+
+/// 후보를 **그 방에 이미 있는 학생들과 같은 학원**으로 좁힌다.
+///
+/// 한 방(프로젝트)에 같은 학원 학생들이 모이면 화면이 한 덩어리로 읽힌다 —
+/// 사용자 2026-08-11: "방마다 같은학원소속이나 연관되게 생성되면 재밌을듯".
+///
+/// 좁힌 결과가 비면 **빈 Vec 을 돌려준다**. 호출부가 원래 후보로 폴백해야 한다 —
+/// 학원을 맞추는 것보다 학생이 겹치지 않는 게 먼저다(같은 방에 같은 얼굴이 둘이면
+/// 누가 누군지 사라진다).
+///
+/// 방이 비어 있으면(첫 학생) 좁히지 않는다. 그 첫 배정이 그 방의 학원을 정한다.
+pub fn prefer_same_school(chars: &Value, free: &[String], room: &[String]) -> Vec<String> {
+    let here: std::collections::HashSet<String> =
+        room.iter().filter_map(|n| school_of(chars, n)).collect();
+    if here.is_empty() {
+        return Vec::new();
+    }
+    free.iter()
+        .filter(|n| school_of(chars, n).is_some_and(|s| here.contains(&s)))
+        .cloned()
+        .collect()
+}
+
+/// 방의 **첫 학생**을 고를 때, 다른 방이 이미 쓰는 학원을 피한다.
+///
+/// 첫 배정이 그 방의 학원을 정하므로(`prefer_same_school`), 여기서 갈라 두면 방마다
+/// 다른 학원이 서서 화면에서 방이 구분된다. 학원 수보다 방이 많으면 빈 Vec 을 주고,
+/// 그때는 겹쳐도 된다 — 방이 갈리는 것보다 학생이 안 겹치는 게 먼저다.
+pub fn prefer_fresh_school(chars: &Value, free: &[String], elsewhere: &[String]) -> Vec<String> {
+    let used: std::collections::HashSet<String> =
+        elsewhere.iter().filter_map(|n| school_of(chars, n)).collect();
+    free.iter()
+        .filter(|n| school_of(chars, n).is_some_and(|s| !used.contains(&s)))
+        .cloned()
+        .collect()
+}
+
+/// leader/leaders/members 통합 풀. `leader` 는 `leaders[0]` 을 한 번 더 적어 둔
+/// 하위호환 필드라 같은 사람이 두 번 나올 수 있다 — 이름으로 거르는 쪽에서 접힌다.
+fn entries_of(chars: &Value) -> Vec<&Value> {
+    let mut pool: Vec<&Value> = Vec::new();
+    if let Some(l) = chars.get("leader") {
+        pool.push(l);
+    }
+    for key in ["leaders", "members"] {
+        if let Some(arr) = chars.get(key).and_then(|x| x.as_array()) {
+            pool.extend(arr);
+        }
+    }
+    pool
+}
+
+/// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
+fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
+    entries_of(chars)
+        .into_iter()
+        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
+}
+
+/// 캐릭터의 persona 텍스트(leader/leaders/members 통합 풀에서 이름 매칭).
+///
+/// 학생 프롬프트에 덧붙는 것은 이것뿐이다 — 정체성·호칭·말투. 협업 규약을 뒤에 붙이던
+/// 것을 2026-10-07 에 걷었다(사용자 결정: 덧붙임은 말투·페르소나만, 작업에 영향 가는
+/// 것은 빼기). 규약은 kasapane 스킬(`skills/kasapane/collab.md`)로 가서 필요할 때 읽고,
+/// 빠지면 협업이 깨지는 것은 문장 대신 장치가 맡는다 — 완료 보고는 summon·`tell --title`
+/// 이 브리프 끝에 붙이고, 셸·닫힌 창 전달과 서브에이전트 위임·파일 겹침은 서버·훅이 막는다.
+pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+}
+
+/// 이 학생이 뜰 때 붙일 `--model` 값. `claude-opus-5[1m]` 처럼 CLI 가 그대로
+/// 받는 자유 문자열이라 이 자리에서 후보를 좁히지 않는다 — 2026-08-24 지시로
+/// 커스텀 모델을 로스터 파일에 직접 적을 수 있어야 해서다. 비었거나 없으면
+/// 설정창의 전역 모델로 떨어진다.
+pub fn model_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("model").and_then(|x| x.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// 이 학생을 띄울 실행 통로 — `kimi`·`glm` 처럼 claude 를 감싸 게이트웨이로
+/// 보내는 런처 이름이다.
+///
+/// `model` 과 축이 다르므로 한 필드에 못 섞는다: 게이트웨이 모델은 `--model`
+/// 로는 못 닿고 래퍼가 환경(프록시 주소·키)을 씌워야만 붙는다. 반대로 래퍼를
+/// 쓰면서 그 안에서 다시 모델을 고를 수도 있어, 둘은 곱해지는 관계다.
+pub fn backend_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("backend").and_then(|x| x.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        // 실행 파일 이름이 되어 셸에 그대로 넘어가는 값이다 — 경로 구분자나
+        // 공백이 섞이면 임의 명령이 되므로 한 낱말만 통과시킨다.
+        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .map(String::from)
+}
+
+/// 설정창 드롭다운이 늘어놓을 모델 후보 하나.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// 화면에 뜨는 이름.
+    pub label: String,
+    /// `--model` 값. 비면 안 붙인다.
+    pub model: String,
+    /// 실행 래퍼 이름. 비면 순정 claude.
+    pub backend: String,
+}
+
+/// 내장 후보 — 로스터 파일에 `models` 가 없을 때의 기본값.
+fn builtin_model_choices() -> Vec<ModelChoice> {
+    let m = |label: &str, model: &str, backend: &str| ModelChoice {
+        label: label.to_string(),
+        model: model.to_string(),
+        backend: backend.to_string(),
+    };
+    vec![
+        m("기본", "", ""),
+        m("Opus 5 (1M)", "claude-opus-5[1m]", ""),
+        m("Sonnet 5 (1M)", "claude-sonnet-5[1m]", ""),
+        m("Haiku", "haiku", ""),
+        m("Kimi", "", "kimi"),
+        m("GLM", "", "glm"),
+    ]
+}
+
+/// 드롭다운 후보 목록. 로스터 파일 최상위 `models` 배열을 읽으므로 원본을 고쳐
+/// 커스텀 모델을 늘릴 수 있다(2026-08-24 지시: 커스텀 모델은 json/yaml 로 설정
+/// 가능하게). 배열이 없거나 쓸 만한 항목이 하나도 없으면 내장 목록으로 간다.
+///
+/// 첫 칸은 늘 "안 고름"이어야 한다 — 목록이 사용자 것으로 통째로 바뀌어도 전역
+/// 기본으로 되돌릴 길이 사라지면 안 되므로, 빈 항목이 없으면 앞에 끼워 넣는다.
+pub fn model_choices(chars: &Value) -> Vec<ModelChoice> {
+    let mut out: Vec<ModelChoice> = Vec::new();
+    if let Some(arr) = chars.get("models").and_then(|x| x.as_array()) {
+        for it in arr {
+            let get = |k: &str| {
+                it.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
+            };
+            let (model, backend) = (get("model"), get("backend"));
+            // label 이 없으면 값으로 대신 부른다 — 이름 없는 칸은 고를 수가 없다.
+            let label = match get("label") {
+                l if !l.is_empty() => l,
+                _ if !model.is_empty() => model.clone(),
+                _ if !backend.is_empty() => backend.clone(),
+                _ => "기본".to_string(),
+            };
+            out.push(ModelChoice { label, model, backend });
+        }
+    }
+    if out.is_empty() {
+        return builtin_model_choices();
+    }
+    if !out.iter().any(|c| c.model.is_empty() && c.backend.is_empty()) {
+        out.insert(
+            0,
+            ModelChoice { label: "기본".into(), model: String::new(), backend: String::new() },
+        );
+    }
+    out
+}
+
+/// 캐릭터의 claude_color(characters.json) — teammate 스폰 `--agent-color` 용. 팔레트 밖
+/// 값(프라나=magenta)이 실재하므로 8색 정규화는 team::normalize_agent_color 가 맡는다.
+pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("claude_color").and_then(|x| x.as_str()))
+        .filter(|c| !c.is_empty())
+        .map(String::from)
+}
+
+/// 캐릭터의 header_color(hex) — 웹텀 pane 목록이 학생 이름을 학생색으로 칠하는
+/// 용. GUI 의 `theme::character_accent` 가 읽는 것과 같은 필드다.
+pub fn header_color_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("header_color").and_then(|x| x.as_str()))
+        .filter(|c| !c.is_empty())
+        .map(String::from)
+}
+
+/// 편집용 원본 persona — persona_for 와 달리 빈 문자열도 그대로 돌려준다(설정 폼이
+/// 사용자가 실제로 쓴 텍스트를 그대로 로드/저장해야 해서).
+pub fn raw_persona_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
+        .map(String::from)
+}
+
+/// 학생 정의 한 명을 사람이 고칠 수 있는 YAML 로 편다.
+///
+/// **범용 YAML 직렬화가 아니다.** 우리가 내는 형태 — 값이 스칼라뿐인 평평한
+/// map — 만 다루고, 중첩 map 이나 배열을 만나면 그 값은 JSON 표기로 그대로
+/// 적는다(왕복은 여전히 성립한다). 범용 파서를 새 의존성으로 들이는 대신 좁게
+/// 가는 쪽을 골랐다: 여기서 다루는 값의 형태를 우리가 통제하고, 못 읽을 때
+/// 조용히 뭉개는 대신 저장을 거부하면 정의가 깨질 길이 없다.
+pub fn member_to_yaml(v: &Value) -> String {
+    let Some(map) = v.as_object() else { return String::new() };
+    let mut out = String::new();
+    for (k, val) in map {
+        match val {
+            Value::String(s) if s.contains('\n') => {
+                // 여러 줄은 블록 스칼라로. `|-` 로 끝 개행을 지우지 않는 이유는
+                // 원문에 있던 마지막 개행까지 그대로 살리기 위해서다 — `|` 는
+                // 끝 개행 하나를 남기므로, 원문이 개행으로 안 끝나면 그만큼
+                // 어긋난다. 그래서 원문 기준으로 골라 준다.
+                let chomp = if s.ends_with('\n') { "|" } else { "|-" };
+                out.push_str(&format!("{k}: {chomp}\n"));
+                for line in s.trim_end_matches('\n').split('\n') {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+            Value::String(s) => {
+                out.push_str(&format!("{k}: {}\n", yaml_scalar(s)));
+            }
+            other => {
+                // 스칼라가 아니거나 문자열이 아닌 값 — JSON 표기가 곧 YAML 의
+                // 흐름 표기라 그대로 통한다.
+                out.push_str(&format!("{k}: {other}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// 한 줄 문자열을 YAML 스칼라로. 따옴표 없이 두면 다른 타입으로 읽히거나
+/// 문법이 깨지는 값만 감싼다.
+fn yaml_scalar(s: &str) -> String {
+    let plain_ok = !s.is_empty()
+        && s.trim() == s
+        && !s.contains(['#', ':', '"', '\'', '\\', '\t'])
+        && !s.starts_with(['-', '?', '&', '*', '!', '|', '>', '%', '@', '`', '[', '{'])
+        // 따옴표 없이 두면 불리언·널·숫자로 읽혀 문자열이 아니게 되는 값들.
+        && !matches!(s, "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "~")
+        && s.parse::<f64>().is_err();
+    if plain_ok {
+        s.to_string()
+    } else {
+        Value::String(s.to_string()).to_string()
+    }
+}
+
+/// `member_to_yaml` 이 낸 것을 되돌린다. 우리가 내는 문법만 받는다 — 앵커·흐름
+/// map·다중 문서 같은 건 오류로 돌려보내 저장을 막는다.
+pub fn member_from_yaml(src: &str) -> Result<Value, String> {
+    let mut map = serde_json::Map::new();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            i += 1;
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            return Err(format!("{}번째 줄이 들여쓰기로 시작해요 — 키가 없어요", i + 1));
+        }
+        let Some((k, rest)) = line.split_once(':') else {
+            return Err(format!("{}번째 줄에 `키: 값` 의 콜론이 없어요", i + 1));
+        };
+        let key = k.trim().to_string();
+        if key.is_empty() {
+            return Err(format!("{}번째 줄의 키가 비었어요", i + 1));
+        }
+        let rest = rest.trim();
+        if rest == "|" || rest == "|-" {
+            // 블록 스칼라 — 들여쓴 줄을 전부 모은다. 빈 줄은 본문의 일부이므로
+            // 들여쓰기가 없어도 이어 간다(끊으면 문단이 통째로 잘린다).
+            let mut body: Vec<String> = Vec::new();
+            i += 1;
+            while i < lines.len() {
+                let l = lines[i];
+                if l.trim().is_empty() {
+                    body.push(String::new());
+                    i += 1;
+                    continue;
+                }
+                let Some(stripped) = l.strip_prefix("  ") else { break };
+                body.push(stripped.to_string());
+                i += 1;
+            }
+            while body.last().is_some_and(String::is_empty) {
+                body.pop();
+            }
+            let mut text = body.join("\n");
+            if rest == "|" {
+                text.push('\n');
+            }
+            map.insert(key, Value::String(text));
+            continue;
+        }
+        // 한 줄 값. JSON 으로 읽히면 그 타입(따옴표 친 문자열·숫자·불리언),
+        // 아니면 평문 문자열이다.
+        let val = serde_json::from_str::<Value>(rest).unwrap_or_else(|_| {
+            if rest.is_empty() { Value::String(String::new()) } else { Value::String(rest.to_string()) }
+        });
+        map.insert(key, val);
+        i += 1;
+    }
+    if map.is_empty() {
+        return Err("내용이 비었어요".to_string());
+    }
+    Ok(Value::Object(map))
+}
+
+/// 설정 폼이 persona·색을 저장할 파일 — `candidate_paths` 의 최우선 슬롯과 **같은
+/// 자리여야 한다**. 활성 테마가 있으면 그 테마의 `theme.json`, 없으면 기존
+/// `~/.config/kasaterm/characters.json`.
+///
+/// 여기가 읽기 우선순위와 어긋나면 저장은 성공하는데 읽기는 테마가 이겨서, 편집한
+/// persona 가 화면에 영영 안 나타난다 — 오류도 안 나므로 알아챌 방법이 없다.
+pub fn user_characters_path() -> Option<PathBuf> {
+    if let Some(d) = active_theme_dir() {
+        return Some(d.join("theme.json"));
+    }
+    Some(home()?.join(".config/kasaterm/characters.json"))
+}
+
+/// 사용자 override characters.json 에서 `name` 캐릭터의 `key` 필드를 갱신한다
+/// (persona·claude_color 인라인 편집용). 파일이 없으면 현재 활성 정본을 seed 로
+/// 로드해 편집하므로 첫 저장이 다른 캐릭터를 지우지 않는다. 원자 write
+/// (tmp→rename). 이름을 못 찾으면 조용히 무시(파일 오염 방지).
+///
+/// ⚠️ **같은 이름이 여러 군데 적혀 있으면 전부 고친다** — 첫 매치에서 멈추면 안
+/// 된다. `leader` 는 `leaders[0]` 을 한 번 더 적어 둔 하위호환 필드라(로스터
+/// 빌드가 **이름으로** 접는다) 리더는 늘 두 번 적혀 있는데, 한쪽만 고치면
+/// 이름을 바꿨을 때 두 이름이 갈려 접히지 않고 **로스터에 유령이 하나 늘어난다**
+/// (79→80명, 실측). UI 에는 캐릭터를 지우는 창구가 없으니 밟으면 파일을 손으로
+/// 고쳐야 한다. persona 도 같은 이유로 전부 고쳐야 옳다 — 안 그러면 안 고쳐진
+/// 쪽에 옛 성격이 그림자로 남는다.
+///
+/// 이름이 로스터의 키라 같은 이름은 곧 같은 사람이다(중복 이름은 저장 단계에서
+/// 막힌다) — 그래서 "전부"가 "엉뚱한 사람까지"가 되지 않는다.
+pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()> {
+    let path = user_characters_path().ok_or_else(|| std::io::Error::other("no HOME"))?;
+    let mut root = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    } else {
+        characters_json()
+    }
+    .unwrap_or_else(|| Value::Object(Default::default()));
+
+    let mut applied = false;
+    if let Some(l) = root.get_mut("leader") {
+        if l.get("name").and_then(|n| n.as_str()) == Some(name) {
+            l[key] = value.clone();
+            applied = true;
+        }
+    }
+    for arr_key in ["leaders", "members"] {
+        if let Some(arr) = root.get_mut(arr_key).and_then(|x| x.as_array_mut()) {
+            for m in arr.iter_mut() {
+                if m.get("name").and_then(|n| n.as_str()) == Some(name) {
+                    m[key] = value.clone();
+                    applied = true;
+                }
+            }
+        }
+    }
+    if !applied {
+        return Ok(());
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// 로스터에서 `name` 캐릭터의 **정의 전체**를 새 것으로 갈아 끼운다(원본 편집 저장).
+///
+/// `update_member` 와 갈라 두는 이유는 키 삭제 때문이다 — 원본에서 한 줄을 지우면
+/// 그 필드가 없어져야 하는데, 키 하나씩 덮는 경로로는 지운 것이 그대로 남는다.
+///
+/// ⚠️ `update_member` 와 같은 함정을 공유한다: **같은 이름이 여러 군데 적혀 있으면
+/// 전부 갈아야 한다.** `leader` 는 `leaders[0]` 을 한 번 더 적어 둔 하위호환 필드라
+/// 리더는 늘 두 번 적혀 있는데, 한쪽만 갈고 이름까지 바꾸면 두 이름이 갈려 로스터에
+/// 유령이 하나 는다(로스터 빌드가 **이름으로** 접기 때문).
+pub fn replace_member(name: &str, def: &Value) -> std::io::Result<()> {
+    if !def.is_object() {
+        return Err(std::io::Error::other("정의가 map 이 아님"));
+    }
+    let path = user_characters_path().ok_or_else(|| std::io::Error::other("no HOME"))?;
+    let mut root = if path.exists() {
+        std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    } else {
+        characters_json()
+    }
+    .unwrap_or_else(|| Value::Object(Default::default()));
+
+    let mut applied = false;
+    if let Some(l) = root.get_mut("leader") {
+        if l.get("name").and_then(|n| n.as_str()) == Some(name) {
+            *l = def.clone();
+            applied = true;
+        }
+    }
+    for arr_key in ["leaders", "members"] {
+        if let Some(arr) = root.get_mut(arr_key).and_then(|x| x.as_array_mut()) {
+            for m in arr.iter_mut() {
+                if m.get("name").and_then(|n| n.as_str()) == Some(name) {
+                    *m = def.clone();
+                    applied = true;
+                }
+            }
+        }
+    }
+    if !applied {
+        return Err(std::io::Error::other(format!("로스터에 '{name}' 이 없음")));
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// 설정 상세가 활성 테마가 아닌 카드에서 열렸을 때도 그 카드의 `theme.json`을
+/// 정확히 고친다. 빈 문자열과 `__base`는 번들 기반 사용자 override를 뜻한다.
+pub fn update_member_in_theme(
+    theme: &str,
+    name: &str,
+    key: &str,
+    value: Value,
+) -> std::io::Result<()> {
+    update_member_at(theme_member_path(theme)?, theme_roster_for_edit(theme), name, |member| {
+        member[key] = value.clone();
+    })
+}
+
+pub fn replace_member_in_theme(theme: &str, name: &str, def: &Value) -> std::io::Result<()> {
+    if !def.is_object() {
+        return Err(std::io::Error::other("정의가 map 이 아님"));
+    }
+    update_member_at(theme_member_path(theme)?, theme_roster_for_edit(theme), name, |member| {
+        *member = def.clone();
+    })
+}
+
+fn theme_member_path(theme: &str) -> std::io::Result<PathBuf> {
+    if theme.is_empty() || theme == BASE_THEME_KEY {
+        return Ok(home()
+            .ok_or_else(|| std::io::Error::other("no HOME"))?
+            .join(".config/kasaterm/characters.json"));
+    }
+    if theme.contains('/') || theme.contains('\\') || theme.contains("..") {
+        return Err(std::io::Error::other("쓸 수 없는 테마 이름"));
+    }
+    Ok(themes_root()
+        .ok_or_else(|| std::io::Error::other("no themes root"))?
+        .join(theme)
+        .join("theme.json"))
+}
+
+fn theme_roster_for_edit(theme: &str) -> Option<Value> {
+    if theme.is_empty() || theme == BASE_THEME_KEY {
+        base_characters_json()
+    } else {
+        theme_characters_json(theme)
+    }
+}
+
+fn update_member_at(
+    path: PathBuf,
+    seed: Option<Value>,
+    name: &str,
+    mut apply: impl FnMut(&mut Value),
+) -> std::io::Result<()> {
+    let mut root = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    } else {
+        seed
+    }
+    .unwrap_or_else(|| Value::Object(Default::default()));
+    let mut applied = false;
+    if let Some(leader) = root.get_mut("leader") {
+        if leader.get("name").and_then(Value::as_str) == Some(name) {
+            apply(leader);
+            applied = true;
+        }
+    }
+    for key in ["leaders", "members"] {
+        if let Some(members) = root.get_mut(key).and_then(Value::as_array_mut) {
+            for member in members {
+                if member.get("name").and_then(Value::as_str) == Some(name) {
+                    apply(member);
+                    applied = true;
+                }
+            }
+        }
+    }
+    if !applied {
+        return Err(std::io::Error::other(format!("로스터에 '{name}' 이 없음")));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?,
+    )?;
+    std::fs::rename(tmp, path)
+}
+
+/// 로스터에서 한 명의 정의를 그대로 떠 온다(원본 뷰가 보여 줄 것).
+pub fn member_def(chars: &Value, name: &str) -> Option<Value> {
+    find_character(chars, name).cloned()
+}
+
+/// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
+///
+/// Windows 네이티브 경로는 먼저 Git bash 형태(`C:\Users\x` → `/c/Users/x`)로 정규화한다.
+/// 이유가 둘이다. ① 훅(`kasaterm-steer-hook.sh` 의 `pwd | sed 's#[/.]#-#g'`)은 Git bash
+/// 안에서 도니 언제나 그 형태를 만든다 — 정규화 없이는 훅과 앱이 서로 다른 방을 보고
+/// 영영 안 만난다. ② 정규화 전 슬러그는 `C:\...` 라 **절대경로**고, `collab_root().join()`
+/// 에 절대경로를 주면 base 가 통째로 버려져 마커가 collab 루트가 아니라 **프로젝트 폴더
+/// 안에** 쓰인다(실측). unix 경로는 이 단계를 그대로 통과하므로 동작이 바뀌지 않는다.
+pub fn mode_slug(cwd: &Path) -> String {
+    posix_style(&cwd.to_string_lossy())
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+/// `C:\Users\x` → `/c/Users/x`. 이미 posix 형태거나 드라이브 문자가 없으면 구분자만 바꾼다.
+/// UNC 확장 접두사(`\\?\`)는 `canonicalize` 가 붙여 주는 것이라 먼저 떼야 한다.
+///
+/// Windows 밖에선 통째로 통과시킨다 — unix 폴더 이름엔 역슬래시가 실제로 들어갈
+/// 수 있어서, 거기서까지 구분자로 접으면 멀쩡하던 슬러그가 sh 훅(`pwd | sed`)과
+/// 갈린다. 고칠 대상은 Windows 뿐이다.
+fn posix_style(raw: &str) -> String {
+    if !cfg!(windows) {
+        return raw.to_string();
+    }
+    let raw = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    let mut chars = raw.chars();
+    let drive = chars.next().filter(|c| c.is_ascii_alphabetic());
+    let has_colon = chars.next() == Some(':');
+    match (drive, has_colon) {
+        (Some(d), true) => {
+            let rest = raw[2..].replace('\\', "/");
+            let rest = rest.strip_prefix('/').unwrap_or(&rest);
+            format!("/{}/{}", d.to_ascii_lowercase(), rest)
+        }
+        _ => raw.replace('\\', "/"),
+    }
+}
+
+/// 방별 collab slug — socket.rs board 읽기와 동일(base + 방이면 `__room_<id>`).
+pub fn rslug(cwd: &Path, room: Option<&str>) -> String {
+    let base = mode_slug(cwd);
+    match room {
+        Some(r) => format!("{base}__room_{r}"),
+        None => base,
+    }
+}
+
+fn collab_dir(rslug: &str) -> PathBuf {
+    kasa_socket::collab_root().join(rslug)
+}
+
+/// `/tmp/kasaterm-collab/<rslug>/character-<N>` — board 가 row.character 로 읽는 마커.
+pub fn character_marker(rslug: &str, surface_id: &str) -> PathBuf {
+    collab_dir(rslug).join(format!("character-{}", surface_id.trim_start_matches('%')))
+}
+
+/// 마커 파일 이름인가 — `character-<N>`. `write_marker` 의 원자 교체가 잠깐 남기는
+/// `character-<N>.tmp` 는 뺀다(같은 접두사로 시작해 그냥 두면 유령 배정으로 잡힌다).
+fn is_marker_file(name: &str) -> bool {
+    name.starts_with("character-") && !name.ends_with(".tmp")
+}
+
+/// 마커 본문에서 캐릭터 이름만. 형식은 `<이름>\n<쓴 kasaterm pid>` 이고 pid 줄은
+/// sweep 전용이라 이름을 읽는 모든 경로가 첫 줄만 본다. pid 가 없는 옛 마커도 그대로
+/// 읽힌다(한 줄뿐이라 첫 줄 = 전부).
+fn marker_name(body: &str) -> Option<String> {
+    let s = body.lines().next()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// 한 collab 디렉토리의 character-* 마커 내용들.
+fn assigned_in(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(n) = name.to_str() else { continue };
+            if !is_marker_file(n) {
+                continue;
+            }
+            if let Some(s) = std::fs::read_to_string(e.path()).ok().as_deref().and_then(marker_name)
+            {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// 이 방에서 이미 배정된 캐릭터 이름들(character-* 마커 내용).
+pub fn assigned(rslug: &str) -> Vec<String> {
+    assigned_in(&collab_dir(rslug))
+}
+
+/// 모든 방(rslug)의 배정 캐릭터 — 전역 유일 배정용. /tmp/kasaterm-collab/ 아래 각
+/// 방 디렉토리의 character-* 마커를 합친다. 닫힌 pane 마커는 cleanup_collab_markers
+/// (layout.rs)가 지우므로 대체로 live 만 남는다 → 프로젝트(방)를 넘어 같은 학생이
+/// 중복 배정되는 걸 막는다(사용자: 미도리 둘).
+pub fn assigned_global() -> Vec<String> {
+    assigned_global_except(None)
+}
+
+/// The current GUI owns an authoritative in-memory map; count its markers
+/// only once. Markers from other app instances remain useful reservations.
+pub fn assigned_other_instances() -> Vec<String> {
+    assigned_global_except(Some(std::process::id()))
+}
+
+fn assigned_global_except(excluded_owner: Option<u32>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) {
+        for room in rooms.flatten() {
+            let Ok(entries) = std::fs::read_dir(room.path()) else { continue };
+            for entry in entries.flatten() {
+                if !entry.file_name().to_str().is_some_and(is_marker_file) { continue; }
+                let Ok(body) = std::fs::read_to_string(entry.path()) else { continue };
+                let owner = body.lines().nth(1).and_then(|v| v.parse::<u32>().ok());
+                if excluded_owner.is_some() && excluded_owner == owner { continue; }
+                if let Some(name) = marker_name(&body) { out.push(name); }
+            }
+        }
+    }
+    out
+}
+
+/// 한 pane(surface)의 character-<N> 마커 내용. 없거나 비면 None.
+/// resume 복원처럼 ws.pane_character 엔 없지만 마커엔 있는 캐릭터를 중복 배정에서
+/// 피하려 쓴다(assign_character_env).
+pub fn read_marker(rslug: &str, surface_id: &str) -> Option<String> {
+    std::fs::read_to_string(character_marker(rslug, surface_id)).ok().as_deref().and_then(marker_name)
+}
+
+/// 죽은 kasaterm 이 남긴 character-* 마커를 지운다. `live` 는 「이 pid 가 지금 도는
+/// kasaterm 인가」.
+///
+/// **왜 필요한가.** 마커는 pane 을 *정상적으로 닫을 때만* 지워진다
+/// (`cleanup_collab_markers`). 그래서 앱이 죽거나 그냥 재시작되면 옛 마커가 전부 남고,
+/// 배정은 그것들을 taken 으로 세므로 쓸 수 있는 학생이 재시작마다 줄어든다. 실측
+/// 2026-08-09 에 마커 17개 > 총원 12명이 되어 풀이 통째로 말랐고, 그때 폴백이
+/// members 전체로 되돌아가 **아루가 셋**이 됐다. 지금은 그 폴백이 이 방 live 만 피하는
+/// 단계를 거치지만, 그건 피해를 줄일 뿐 마르는 것 자체를 못 막는다.
+///
+/// 살았는지를 pane 번호로는 못 판단한다 — 번호는 방 간에도 창 간에도 재사용된다.
+/// 그래서 마커를 쓸 때 **쓴 프로세스의 pid** 를 함께 적고 여기서 그 pid 를 본다.
+/// pid 줄이 없는 마커는 이 코드가 나오기 전 것이므로 지운다 — 지금 도는 kasaterm 이
+/// 쓴 것이라면 반드시 pid 가 있다.
+///
+/// 지워도 살아있는 pane 은 안 다친다. 배정의 정본은 `ws.pane_character` 이고 마커는
+/// 그 사본이라, 잘못 지워봐야 **다른 인스턴스가 그 캐릭터를 겹쳐 쓸 수 있다**가 전부다.
+/// 반대로 안 지우면 풀이 마른다.
+pub fn sweep_stale_markers(live: impl Fn(u32) -> bool) -> usize {
+    sweep_stale_markers_in(&kasa_socket::collab_root(), live)
+}
+
+/// [`sweep_stale_markers`] 의 본체 — 루트를 받는 건 테스트 때문이다. 이 함수는 **모든
+/// 방**을 훑으므로 실제 `/tmp/kasaterm-collab` 에 대고 테스트하면 돌고 있는 pane 의
+/// 마커를 지운다.
+fn sweep_stale_markers_in(root: &Path, live: impl Fn(u32) -> bool) -> usize {
+    let mut n = 0;
+    let Ok(rooms) = std::fs::read_dir(root) else { return 0 };
+    for room in rooms.flatten() {
+        let Ok(rd) = std::fs::read_dir(room.path()) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(f) = name.to_str() else { continue };
+            if !is_marker_file(f) {
+                continue;
+            }
+            let owner = std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|s| s.lines().nth(1)?.trim().parse::<u32>().ok());
+            if owner.is_some_and(&live) {
+                continue;
+            }
+            if std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// 후보 중 **가장 적게 쓰인** 것들만 남긴다. 배정 풀이 말랐을 때의 폴백이다.
+///
+/// pane 수가 학생 총원을 넘으면 중복은 비둘기집이라 못 막는다. 막을 수 있는 건
+/// **몰리는 것**이다 — 예전 폴백은 전체에서 그냥 랜덤이라 이미 셋인 학생이 넷이 됐다
+/// (실측 2026-08-11: pane 15 > 총원 12 인데 아루 3·프라나 3 이고 한 번도 안 쓰인
+/// 학생이 남아 있었다). 최소 사용 횟수인 쪽만 남기면 15명이어도 3명만 2회씩이 된다.
+///
+/// `taken` 은 **중복을 살린** 목록이어야 한다. HashSet 을 넘기면 횟수가 사라져
+/// 이 함수가 하는 일이 없어진다.
+pub fn least_used(candidates: &[String], taken: &[String]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut n: std::collections::HashMap<&str, usize> =
+        candidates.iter().map(|c| (c.as_str(), 0)).collect();
+    for t in taken {
+        if let Some(c) = n.get_mut(t.as_str()) {
+            *c += 1;
+        }
+    }
+    let lo = n.values().copied().min().unwrap_or(0);
+    candidates.iter().filter(|c| n[c.as_str()] == lo).cloned().collect()
+}
+
+/// 후보 중 하나를 유사난수로 고른다 — 순서 고정(늘 미도리부터) 대신 랜덤 배정용
+/// (사용자: 완전 랜덤). 시드 = SystemTime nanos ^ pid ^ salt(pane id) 해시라, 같은
+/// 순간 spawn 된 여러 pane 도 서로 갈린다. rand 크레이트 없이 std 만.
+pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    seed ^= std::process::id() as u128;
+    for b in salt.bytes() {
+        seed = seed.wrapping_mul(131).wrapping_add(b as u128);
+    }
+    Some(candidates[(seed % candidates.len() as u128) as usize].clone())
+}
+
+/// Stable automatic assignment: Arona first (only if selected), then the
+/// configured roster order. Reuse a student only after every candidate is in
+/// use, choosing the least-used student with the same deterministic tie-break.
+pub fn pick_in_order(candidates: &[String], taken: &[String]) -> Option<String> {
+    pick_in_order_after(candidates, taken, None)
+}
+
+/// Advance only when a fresh harness starts; freeing a seat does not reset the
+/// order to Arona. Restoring a conversation does not consume the cursor.
+pub fn pick_in_order_after(candidates: &[String], taken: &[String], previous: Option<&str>) -> Option<String> {
+    let mut ordered = Vec::new();
+    for name in candidates.iter().filter(|n| n.as_str() == "아로나").chain(candidates) {
+        if !name.is_empty() && !ordered.contains(name) { ordered.push(name.clone()); }
+    }
+    if let Some(index) = previous.and_then(|name| ordered.iter().position(|n| n == name)) {
+        let shift = (index + 1) % ordered.len();
+        ordered.rotate_left(shift);
+    }
+    least_used(&ordered, taken).into_iter().next()
+}
+
+#[cfg(test)]
+mod ordered_assignment_tests {
+    use super::*;
+
+    #[test]
+    fn exiting_a_harness_does_not_reset_the_fresh_launch_order() {
+        let candidates = ["미도리", "모모이", "아로나"].map(String::from);
+        assert_eq!(pick_in_order_after(&candidates, &[], None).as_deref(), Some("아로나"));
+        assert_eq!(pick_in_order_after(&candidates, &[], Some("아로나")).as_deref(), Some("미도리"));
+        assert_eq!(pick_in_order_after(&candidates, &["미도리".into()], Some("아로나")).as_deref(), Some("모모이"));
+        assert_eq!(pick_in_order_after(&candidates, &[], Some("모모이")).as_deref(), Some("아로나"));
+    }
+
+    #[test]
+    fn arona_first_then_selected_order_skipping_every_reserved_student() {
+        let candidates = ["미도리", "모모이", "아로나", "히후미"].map(String::from);
+        let mut assigned = Vec::new();
+        for expected in ["아로나", "미도리", "모모이", "히후미"] {
+            let next = pick_in_order(&candidates, &assigned).unwrap();
+            assert_eq!(next, expected);
+            assigned.push(next);
+        }
+        assert_eq!(pick_in_order(&candidates, &assigned).as_deref(), Some("아로나"));
+        assigned.push("아로나".into());
+        assert_eq!(pick_in_order(&candidates, &assigned).as_deref(), Some("미도리"));
+    }
+
+    #[test]
+    fn selection_and_current_workers_win_over_arona_preference() {
+        let candidates = ["히후미", "미도리", "히후미"].map(String::from);
+        assert_eq!(pick_in_order(&candidates, &[]).as_deref(), Some("히후미"));
+        assert_eq!(pick_in_order(&candidates, &["히후미".into()]).as_deref(), Some("미도리"));
+        assert!(pick_in_order(&[], &[]).is_none());
+        assert_eq!(pick_in_order(&["미도리".into(), "아로나".into()], &["아로나".into()]).as_deref(), Some("미도리"));
+    }
+}
+
+/// character-<N> 마커를 원자적으로 쓴다(tmp → rename). board 가 즉시 읽는다.
+///
+/// 둘째 줄에 이 프로세스 pid 를 남긴다 — 마커가 죽은 뒤에도 남는 문제를
+/// [`sweep_stale_markers`] 가 풀 때 「누가 쓴 것인가」의 유일한 단서다. 이름을 읽는
+/// 경로는 전부 첫 줄만 보므로 board·배정에는 아무 변화가 없다.
+pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Result<()> {
+    let path = character_marker(rslug, surface_id);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, format!("{name}\n{}", std::process::id()))?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Resumed sessions keep their character across application restarts.
+fn session_char_root() -> PathBuf {
+    if let Some(root) = kasa_socket::isolated_collab_root() { return root; }
+    kasa_socket::home_dir()
+        .unwrap_or_default()
+        .join(".config/kasaterm")
+}
+
+fn session_char_path() -> PathBuf {
+    kasa_socket::session_storage::read_path(&session_char_root(), "session_characters.json")
+}
+
+#[path = "character_gc.rs"]
+mod character_gc;
+
+pub fn maintain_session_characters() -> std::io::Result<()> {
+    if kasa_socket::isolated_collab_root().is_some() { return Ok(()); }
+    let Some(home) = kasa_socket::home_dir() else { return Ok(()); };
+    let root = session_char_root();
+    let path = migrate_session_characters(&root)?;
+    // A custom harness home may contain sessions outside the supported stores.
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() || std::env::var_os("CODEX_HOME").is_some() {
+        return Ok(());
+    }
+    character_gc::sweep(&home, &root, &path).map(|_| ())
+}
+
+fn load_session_chars(path: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+type CharCache = Option<(PathBuf, std::time::SystemTime, u64, serde_json::Map<String, Value>)>;
+static CHARS: std::sync::Mutex<CharCache> = std::sync::Mutex::new(None);
+
+/// 파싱한 매핑을 빌려준다 — 파일이 그대로면 디스크를 다시 읽지 않는다.
+///
+/// 렌더가 pane 마다, 프레임마다 부르는 경로다. 캐시 없이 두면 창 하나가 코어를
+/// 통째로 태운다(실측: `sample` 상 렌더 프레임 시간의 77%가 이 안의 serde_json).
+/// 무효화 판정은 mtime+크기 — 쓰기가 tmp→rename 원자 교체라 내용이 바뀌면 둘 중
+/// 하나는 반드시 달라지고, 쓰는 쪽이 직접 캐시를 비우기까지 한다.
+fn with_session_chars<R>(path: &Path, f: impl FnOnce(&serde_json::Map<String, Value>) -> R) -> R {
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    // stat 이 실패하면 언제 무효화할지 알 수 없다 — 캐시하지 않고 그때그때 읽는다.
+    let Some((mtime, len)) = stamp else {
+        return f(&load_session_chars(path));
+    };
+    let Ok(mut g) = CHARS.lock() else {
+        return f(&load_session_chars(path));
+    };
+    let fresh = g
+        .as_ref()
+        .is_some_and(|(p, t, l, _)| p == path && *t == mtime && *l == len);
+    if !fresh {
+        *g = Some((path.to_path_buf(), mtime, len, load_session_chars(path)));
+    }
+    match g.as_ref() {
+        Some((_, _, _, map)) => f(map),
+        None => f(&serde_json::Map::new()),
+    }
+}
+
+/// 세션 id 의 영속 배정 캐릭터 — 있으면 재사용, 없으면(None) 신규 세션이라 랜덤 배정.
+pub fn session_character(sid: &str) -> Option<String> {
+    let path = session_char_path();
+    session_character_in(&path, sid).or_else(|| {
+        let current = session_char_path();
+        (current != path).then(|| session_character_in(&current, sid)).flatten()
+    })
+}
+
+fn session_character_in(path: &Path, sid: &str) -> Option<String> {
+    with_session_chars(path, |m| {
+        m.get(sid)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// 세션id→캐릭터 매핑 저장(같은 값이면 무쓰기). 원자 쓰기(tmp→rename, write_marker 관례).
+pub fn bind_session_character(sid: &str, name: &str) -> std::io::Result<()> {
+    let root = session_char_root();
+    let _migration = session_character_migration_lock(&root)?;
+    bind_session_character_in(&session_char_path(), sid, name)
+}
+
+fn session_character_migration_lock(root: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(root)?;
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(root.join("session_characters.migration.lock"))?;
+    guard.lock()?;
+    Ok(guard)
+}
+
+fn read_session_chars_strict(path: &Path) -> std::io::Result<serde_json::Map<String, Value>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes)
+            .map_err(std::io::Error::other),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(e),
+    }
+}
+
+fn write_session_chars_atomic(path: &Path, map: &serde_json::Map<String, Value>) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?)?;
+    let result = std::fs::rename(&tmp, path);
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    if let Ok(mut cache) = CHARS.lock() { *cache = None; }
+    result
+}
+
+fn migrate_session_characters(root: &Path) -> std::io::Result<PathBuf> {
+    let _migration = session_character_migration_lock(root)?;
+    let old = root.join("session_characters.json");
+    let path = root.join("sessions/session_characters.json");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    // The caller has verified sole ownership; existing bind transactions still
+    // share these locks while the registry is published in its new directory.
+    let old_guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(old.with_extension("json.lock"))?;
+    old_guard.lock()?;
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(path.with_extension("json.lock"))?;
+    guard.lock()?;
+    if std::fs::symlink_metadata(&old).is_ok_and(|m| m.file_type().is_symlink()) {
+        if std::fs::canonicalize(&old)? == std::fs::canonicalize(&path)? {
+            std::fs::remove_file(&old)?;
+            return Ok(path);
+        }
+        return Err(std::io::Error::other("unexpected character registry symlink"));
+    }
+    let mut merged = read_session_chars_strict(&old)?;
+    let current = read_session_chars_strict(&path)?;
+    if current.iter().any(|(id, name)| merged.get(id).is_some_and(|old_name| old_name != name)) {
+        return Err(std::io::Error::other("conflicting character registries; both preserved"));
+    }
+    merged.extend(current);
+    if !path.exists() || old.exists() { write_session_chars_atomic(&path, &merged)?; }
+    if old.exists() { std::fs::remove_file(&old)?; }
+    Ok(path)
+}
+
+fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Result<()> {
+    if sid.is_empty() || name.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    // Atomic rename alone does not protect the read/modify/write transaction:
+    // concurrent launches could each erase the other's session assignment.
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(path.with_extension("json.lock"))?;
+    guard.lock()?;
+    let mut map = read_session_chars_strict(path)?;
+    if map.get(sid).and_then(|v| v.as_str()) == Some(name) {
+        return Ok(());
+    }
+    map.insert(sid.to_string(), Value::String(name.to_string()));
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let body = serde_json::to_string_pretty(&Value::Object(map)).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, body)?;
+    let r = std::fs::rename(&tmp, path);
+    // mtime 판정에만 기대지 않는다 — 쓰고 바로 읽는 흐름에서 파일시스템 시각
+    // 해상도가 두 시점을 같게 볼 여지를 없앤다.
+    if let Ok(mut g) = CHARS.lock() {
+        *g = None;
+    }
+    r
+}
+
+#[cfg(test)]
+mod binding_race_tests {
+    #[test]
+    fn migration_merges_identities_and_resolves_legacy_readers() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let legacy = root.join("session_characters.json");
+        let current = root.join("sessions/session_characters.json");
+        std::fs::write(&legacy, r#"{"old":"one","shared":"new"}"#).unwrap();
+        std::fs::write(&current, r#"{"new":"two","shared":"new"}"#).unwrap();
+        assert_eq!(super::migrate_session_characters(&root).unwrap(), current);
+        let map = super::load_session_chars(&current);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["shared"], "new");
+        assert!(!legacy.exists());
+        assert_eq!(kasa_socket::session_storage::read_path(&root, "session_characters.json"), current);
+        super::bind_session_character_in(&current, "later", "three").unwrap();
+        super::migrate_session_characters(&root).unwrap();
+        assert_eq!(super::load_session_chars(&current).len(), 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn broken_registry_is_preserved_instead_of_replaced() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-broken-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("session_characters.json");
+        std::fs::write(&legacy, "{unfinished").unwrap();
+        assert!(super::migrate_session_characters(&root).is_err());
+        assert!(super::bind_session_character_in(&legacy, "sid", "name").is_err());
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "{unfinished");
+        assert!(!root.join("sessions/session_characters.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_character_identity_preserves_both_registries() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-conflict-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let old = root.join("session_characters.json");
+        let new = root.join("sessions/session_characters.json");
+        std::fs::write(&old, r#"{"same":"old"}"#).unwrap();
+        std::fs::write(&new, r#"{"same":"new"}"#).unwrap();
+        assert!(super::migrate_session_characters(&root).is_err());
+        assert_eq!(std::fs::read_to_string(old).unwrap(), r#"{"same":"old"}"#);
+        assert_eq!(std::fs::read_to_string(new).unwrap(), r#"{"same":"new"}"#);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_migration_and_bind_do_not_recreate_legacy_registry() {
+        let root = std::env::temp_dir().join(format!("kasaterm-migrate-bind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session_characters.json"), "{}").unwrap();
+        let writer_root = root.clone();
+        let writer = std::thread::spawn(move || {
+            for i in 0..30 {
+                let _migration = super::session_character_migration_lock(&writer_root).unwrap();
+                let path = kasa_socket::session_storage::read_path(&writer_root, "session_characters.json");
+                super::bind_session_character_in(&path, &format!("sid-{i}"), "name").unwrap();
+            }
+        });
+        let path = super::migrate_session_characters(&root).unwrap();
+        writer.join().unwrap();
+        assert_eq!(super::load_session_chars(&path).len(), 30);
+        assert!(!root.join("session_characters.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn simultaneous_launches_preserve_every_session_identity() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-race-{}", uuid::Uuid::new_v4()));
+        let path = root.join("characters.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let workers: Vec<_> = (0..12).map(|i| {
+            let (path, barrier) = (path.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::bind_session_character_in(&path, &format!("session-{i}"), &format!("student-{i}")).unwrap();
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        let saved = super::load_session_chars(&path);
+        assert_eq!(saved.len(), 12);
+        for i in 0..12 { assert_eq!(saved[&format!("session-{i}")], format!("student-{i}")); }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// 새 `claude --session-id` 용 uuid. claude 가 엄격한 UUID 형식을 요구하므로
+/// 외부 uuidgen(Windows 부재 → kt- 폴백이 "Invalid session ID" 유발) 대신 crate 생성.
+pub fn new_session_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod same_school_tests {
+    use super::{prefer_same_school, school_of};
+    use serde_json::json;
+
+    fn chars() -> serde_json::Value {
+        json!({
+            "leaders": [{"name": "아로나", "slug": "arona", "school": "샬레"}],
+            "members": [
+                {"name": "미도리", "slug": "midori", "school": "밀레니엄"},
+                {"name": "유즈",   "slug": "yuzu",   "school": "밀레니엄"},
+                {"name": "케이",   "slug": "kei",    "school": "밀레니엄"},
+                {"name": "아루",   "slug": "aru",    "school": "게헨나"},
+                {"name": "히나",   "slug": "hina",   "school": "게헨나"},
+                {"name": "코하루", "slug": "koharu", "school": "트리니티"},
+            ]
+        })
+    }
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pulls_the_rooms_own_school() {
+        let free = v(&["유즈", "케이", "아루", "히나", "코하루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리"]));
+        assert_eq!(got, v(&["유즈", "케이"]));
+    }
+
+    /// 첫 배정은 좁히지 않는다 — 그 학생이 그 방의 학원을 정한다.
+    #[test]
+    fn empty_room_is_not_narrowed() {
+        let free = v(&["미도리", "아루"]);
+        assert!(prefer_same_school(&chars(), &free, &[]).is_empty());
+    }
+
+    /// 학원이 마르면 빈 Vec — 호출부가 원래 후보로 폴백해야 한다. 학원을 맞추는 것보다
+    /// 같은 방에서 학생이 안 겹치는 게 먼저다.
+    #[test]
+    fn exhausted_school_falls_through() {
+        let free = v(&["아루", "히나", "코하루"]);
+        assert!(prefer_same_school(&chars(), &free, &v(&["미도리", "유즈", "케이"])).is_empty());
+    }
+
+    /// 샬레는 학원이 아니다 — 둘뿐이라 방 학교로 잡히면 그 방이 즉시 마른다.
+    #[test]
+    fn shale_never_becomes_a_rooms_school() {
+        assert_eq!(school_of(&chars(), "아로나"), None);
+        let free = v(&["미도리", "아루"]);
+        assert!(prefer_same_school(&chars(), &free, &v(&["아로나"])).is_empty());
+    }
+
+    /// 방에 두 학원이 섞여 있으면(폴백으로 그렇게 된다) 둘 다 인정한다 — 한쪽만
+    /// 고르면 이미 있는 다른 쪽이 영영 안 늘어난다.
+    #[test]
+    fn mixed_room_keeps_both_schools() {
+        let free = v(&["유즈", "히나", "코하루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리", "아루"]));
+        assert_eq!(got, v(&["유즈", "히나"]));
+    }
+
+    #[test]
+    fn fresh_school_avoids_other_rooms() {
+        use super::prefer_fresh_school;
+        let free = v(&["유즈", "케이", "아루", "히나", "코하루"]);
+        // 다른 방이 밀레니엄과 게헨나를 쓰고 있다 → 트리니티만 남는다.
+        let got = prefer_fresh_school(&chars(), &free, &v(&["미도리", "아루"]));
+        assert_eq!(got, v(&["코하루"]));
+    }
+
+    /// 학원보다 방이 많아지면 빈 Vec — 방이 갈리는 것보다 학생이 안 겹치는 게 먼저다.
+    #[test]
+    fn fresh_school_gives_up_when_all_used() {
+        use super::prefer_fresh_school;
+        let free = v(&["유즈", "히나"]);
+        let all = v(&["미도리", "아루", "코하루"]);
+        assert!(prefer_fresh_school(&chars(), &free, &all).is_empty());
+    }
+
+    /// 로스터에 없는 이름(옛 마커·커스텀 캐릭터)이 방에 있어도 안 흔들린다.
+    #[test]
+    fn unknown_names_are_ignored() {
+        let free = v(&["유즈", "아루"]);
+        let got = prefer_same_school(&chars(), &free, &v(&["미도리", "모르는이름"]));
+        assert_eq!(got, v(&["유즈"]));
+    }
+}
+
+#[cfg(test)]
+mod least_used_tests {
+    use super::least_used;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unused_candidates_win() {
+        let members = v(&["아루", "미도리", "케이"]);
+        let taken = v(&["아루", "아루", "미도리"]);
+        assert_eq!(least_used(&members, &taken), v(&["케이"]));
+    }
+
+    /// pane 이 총원을 넘으면 중복은 못 막는다. 막아야 하는 건 **몰리는 것**이다 —
+    /// 이미 둘인 학생이 셋이 되는 대신 아직 하나인 쪽이 뽑혀야 한다.
+    #[test]
+    fn spreads_instead_of_piling_up() {
+        let members = v(&["아루", "미도리", "케이"]);
+        let taken = v(&["아루", "아루", "미도리", "케이"]);
+        assert_eq!(least_used(&members, &taken), v(&["미도리", "케이"]));
+    }
+
+    /// 실측 재현: 총원 12, pane 15 에서 아루 3·프라나 3 이 나왔던 분포.
+    /// 이 폴백이 있었다면 3회짜리는 후보에서 빠졌어야 한다.
+    #[test]
+    fn the_aru_times_three_case() {
+        let members = v(&["아루", "프라나", "히마리", "호시노", "유우카", "코하루"]);
+        let taken = v(&[
+            "아루", "아루", "아루", "프라나", "프라나", "프라나", "히마리", "히마리",
+            "호시노", "호시노", "유우카", "유우카",
+        ]);
+        // 한 번도 안 쓰인 코하루만 남아야 한다 — 예전 폴백은 여기서 아루를 넷째로
+        // 뽑을 수 있었다.
+        assert_eq!(least_used(&members, &taken), v(&["코하루"]));
+    }
+
+    /// `taken` 을 HashSet 으로 넘기면(=중복이 사라지면) 이 함수는 무의미해진다.
+    /// 호출부가 중복을 살린 Vec 을 준다는 전제를 여기 박아 둔다.
+    #[test]
+    fn counts_duplicates_not_presence() {
+        let members = v(&["아루", "미도리"]);
+        let dedup = v(&["아루", "미도리"]);
+        assert_eq!(least_used(&members, &dedup), v(&["아루", "미도리"]));
+        let with_dupes = v(&["아루", "아루", "미도리"]);
+        assert_eq!(least_used(&members, &with_dupes), v(&["미도리"]));
+    }
+
+    #[test]
+    fn empty_candidates_stay_empty() {
+        assert!(least_used(&[], &v(&["아루"])).is_empty());
+    }
+
+    /// 로스터에 없는 이름(커스텀 캐릭터·옛 마커)이 섞여도 셈이 흔들리면 안 된다.
+    #[test]
+    fn ignores_names_outside_the_roster() {
+        let members = v(&["아루", "미도리"]);
+        let taken = v(&["아루", "모르는이름", "또다른이름"]);
+        assert_eq!(least_used(&members, &taken), v(&["미도리"]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roster(names: &[&str]) -> Value {
+        serde_json::json!({
+            "leader": { "name": names.first().copied().unwrap_or("리더") },
+            "leaders": [{ "name": names.first().copied().unwrap_or("리더") }],
+            "members": names.iter().skip(1).map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>(),
+        })
+    }
+
+    fn picks(v: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        v.iter()
+            .map(|(t, ns)| (t.to_string(), ns.iter().map(|n| n.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn explicit_theme_member_edit_never_falls_back_to_the_active_roster() {
+        let dir = std::env::temp_dir().join(format!("kt-theme-member-{}", std::process::id()));
+        let path = dir.join("theme.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = serde_json::json!({
+            "leader": { "name": "A", "persona": "old" },
+            "leaders": [{ "name": "A", "persona": "old" }],
+            "members": [{ "name": "B", "persona": "untouched" }]
+        });
+        std::fs::write(&path, serde_json::to_vec(&source).unwrap()).unwrap();
+        update_member_at(path.clone(), None, "A", |member| {
+            member["persona"] = serde_json::json!("new");
+        })
+        .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["leader"]["persona"], "new");
+        assert_eq!(saved["leaders"][0]["persona"], "new");
+        assert_eq!(saved["members"][0]["persona"], "untouched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 슬러그까지 갖춘 명부 — 이름 충돌이 **누구를 가리키는지** 재려면 이름만으론
+    /// 안 된다(둘 다 "리오"라 이름은 같다). 슬러그가 정체의 증거다.
+    fn roster_slugged(v: &[(&str, &str)]) -> Value {
+        serde_json::json!({
+            "members": v
+                .iter()
+                .map(|(n, s)| serde_json::json!({"name": n, "slug": s}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// 2026-08-29 "리오는 켜지도않았는데 너 리오잖아 블루아카".
+    ///
+    /// 「리오」가 번들과 eternalreturn 양쪽에 있고 사용자는 eternalreturn 쪽만 켰다.
+    /// 활성 명부(번들)를 먼저 보면 켠 적 없는 쪽이 이긴다 — 이 순서가 뒤집히면
+    /// 화면·말투·그림이 전부 다른 사람을 가리키므로 여기서 못을 박는다.
+    #[test]
+    fn 고른_테마가_같은_이름의_활성_명부를_이긴다() {
+        let base = roster_slugged(&[("리오", "rio_ba"), ("미도리", "midori")]);
+        let er = roster_slugged(&[("리오", "rio_er"), ("아야", "aya")]);
+        let got = roster_in_use_from(
+            &picks(&[("eternalreturn", &["리오"])]),
+            Some(base),
+            |t| (t == "eternalreturn").then(|| er.clone()),
+        )
+        .expect("명부가 나와야 한다");
+        let slug_of = |n: &str| {
+            find_character(&got, n)
+                .and_then(|m| m.get("slug"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(slug_of("리오").as_deref(), Some("rio_er"), "고른 쪽이 이겨야 한다");
+        // 활성 명부의 나머지는 그대로 남는다 — 고르기는 덮어쓰기지 갈아치우기가 아니다.
+        assert_eq!(slug_of("미도리").as_deref(), Some("midori"));
+        // 한 사람이 두 번 세어지지 않는다(leader 가 members 와 겹치던 자리).
+        assert_eq!(member_names(&got).iter().filter(|n| *n == "리오").count(), 1);
+    }
+
+    /// 다른 테마에서 고른 학생은 **활성 명부의 일원이 된다.** 이게 없으면 이름만
+    /// 배정되고 색·슬러그를 활성 명부에서 찾는 자리마다 빈손이었다(2026-08-29
+    /// "에무랑 카사크롬도 테마 해결해봐").
+    #[test]
+    fn 다른_테마에서_고른_학생이_활성_명부에_들어온다() {
+        let base = roster_slugged(&[("미도리", "midori")]);
+        let sekai = roster_slugged(&[("에무", "emu"), ("네네", "nene")]);
+        let got = roster_in_use_from(
+            &picks(&[("project-sekai", &["에무"])]),
+            Some(base),
+            |t| (t == "project-sekai").then(|| sekai.clone()),
+        )
+        .expect("명부가 나와야 한다");
+        let names = member_names(&got);
+        assert!(names.contains(&"에무".to_string()), "고른 학생이 명부에 있어야 한다");
+        assert!(names.contains(&"미도리".to_string()));
+        // 안 고른 같은 테마 학생까지 딸려오면 안 된다 — 그건 고르기를 무시하는 것이다.
+        assert!(!names.contains(&"네네".to_string()));
+    }
+
+    /// 고르기를 한 번도 안 썼으면 활성 명부 **그대로**. 「아무도 안 골랐다」는 제한이
+    /// 없다는 뜻이지 명부를 바꾸라는 뜻이 아니다.
+    #[test]
+    fn 고른_것이_없으면_명부를_손대지_않는다() {
+        let base = roster(&["아로나", "시로코"]);
+        let got = roster_in_use_from(&[], Some(base.clone()), |_| None);
+        assert_eq!(got, Some(base));
+    }
+
+    /// 지운 테마에서 고른 유령은 명부에 안 들어간다 — 이름만 뜨고 그림·색이 없는
+    /// 학생이 되고, 그건 오류로 안 드러난다.
+    #[test]
+    fn 지운_테마의_유령은_명부에_안_들어간다() {
+        let base = roster_slugged(&[("미도리", "midori")]);
+        let got = roster_in_use_from(&picks(&[("지운테마", &["누구"])]), Some(base), |_| None)
+            .expect("명부가 나와야 한다");
+        assert_eq!(member_names(&got), vec!["미도리".to_string()]);
+    }
+
+    /// 두 「리오」가 **같은 슬러그**를 쓴다 — 이름은 고른 쪽이 이기는데 그림은
+    /// 슬러그로만 찾으니 활성 폴더의 블루아카가 붙었다(2026-08-29 실측). 그 슬러그가
+    /// 어느 테마 폴더를 봐야 하는지 표로 남겨 에셋 찾기의 0단으로 쓴다.
+    #[test]
+    fn 고른_학생의_그림은_그_테마_폴더를_가리킨다() {
+        let er = roster_slugged(&[("리오", "rio")]);
+        let sekai = roster_slugged(&[("에무", "emu")]);
+        let got = picked_theme_of_slug_from(
+            &picks(&[("eternalreturn", &["리오"]), ("project-sekai", &["에무"])]),
+            |t| match t {
+                "eternalreturn" => Some(er.clone()),
+                "project-sekai" => Some(sekai.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(
+            got,
+            vec![
+                ("rio".to_string(), "eternalreturn".to_string()),
+                ("emu".to_string(), "project-sekai".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn 번들에서_고른_학생도_그림_출처를_보존한다() {
+        let base = roster_slugged(&[("미도리", "midori")]);
+        let got = picked_theme_of_slug_from(&picks(&[(BASE_THEME_KEY, &["미도리"])]), |t| {
+            (t == BASE_THEME_KEY).then(|| base.clone())
+        });
+        assert_eq!(got, vec![("midori".into(), BASE_THEME_KEY.into())]);
+    }
+
+    #[test]
+    fn same_slug_follows_the_explicit_base_or_other_theme_pick() {
+        for theme in [BASE_THEME_KEY, "eternalreturn"] {
+            let got = picked_theme_of_slug_from(&picks(&[(theme, &["리오"])]), |_| {
+                Some(roster_slugged(&[("리오", "rio")]))
+            });
+            assert_eq!(got, vec![("rio".into(), theme.into())]);
+        }
+    }
+
+    /// 고른 것이 없으면 지금까지의 동작 그대로 — 전원이 후보다.
+    #[test]
+    fn picking_nothing_keeps_every_character_assignable() {
+        let chars = roster(&["아로나", "시로코", "호시노"]);
+        assert_eq!(picked_names_from(&[], |_| None), Vec::<String>::new());
+        assert_eq!(assignable_names_with(&chars, &[]), member_names(&chars));
+    }
+
+    /// 2026-08-25: 고른 명단을 바꿔도 **이미 배정된 학생이 재시작을 넘어 남았다.**
+    /// 복원이 저장된 이름을 무조건 되살렸기 때문 — 이 판정이 그 자리를 막는다.
+    #[test]
+    fn a_name_outside_the_picks_is_not_assignable() {
+        let picked = vec!["시로코".to_string(), "미도리".to_string()];
+        assert!(is_assignable_with("미도리", &picked));
+        assert!(!is_assignable_with("고블린", &picked), "안 고른 이름은 배정 대상이 아니다");
+    }
+
+    /// 아무도 안 고른 상태는 「아무도 못 쓴다」가 아니라 「제한이 없다」다. 여기서
+    /// 거짓을 주면 고르기를 한 번도 안 쓴 사람의 복원이 통째로 랜덤이 된다.
+    #[test]
+    fn an_empty_pick_list_lets_everyone_through() {
+        assert!(is_assignable_with("아무나", &[]));
+    }
+
+    /// 테마를 가로질러 모인다 — 이게 이 기능의 핵심이다. (attribute 가 위 테스트로
+    /// 밀려 이 테스트가 조용히 꺼져 있었다 — 2026-08-31 경고를 따라가 복구.)
+    #[test]
+    fn picks_are_gathered_across_themes() {
+        let base = roster(&["아로나", "시로코"]);
+        let genshin = roster(&["푸리나", "나히다"]);
+        let got = picked_names_from(
+            &picks(&[(BASE_THEME_KEY, &["시로코"]), ("genshin", &["푸리나", "나히다"])]),
+            |t| match t {
+                BASE_THEME_KEY => Some(base.clone()),
+                "genshin" => Some(genshin.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(got, vec!["시로코", "푸리나", "나히다"]);
+    }
+
+    /// 지운 테마·바뀐 이름은 유령으로 남는다. 그대로 배정하면 이름은 뜨는데 그림도
+    /// 색도 없는 pane 이 되므로 조용히 뺀다.
+    #[test]
+    fn names_that_no_longer_exist_are_dropped() {
+        let base = roster(&["아로나", "시로코"]);
+        let got = picked_names_from(
+            &picks(&[(BASE_THEME_KEY, &["시로코", "없는애"]), ("지운테마", &["누구"])]),
+            |t| (t == BASE_THEME_KEY).then(|| base.clone()),
+        );
+        assert_eq!(got, vec!["시로코"]);
+    }
+
+    /// 같은 이름이 두 테마에 있어도 한 번만 — 배정은 이름을 키로 쓰므로 둘을 구별
+    /// 못 하고, 중복이 있으면 그 이름만 뽑힐 확률이 두 배가 된다.
+    #[test]
+    fn a_name_in_two_themes_is_listed_once() {
+        let a = roster(&["아로나", "겹침"]);
+        let b = roster(&["푸리나", "겹침"]);
+        let got = picked_names_from(
+            &picks(&[("a", &["겹침"]), ("b", &["겹침", "푸리나"])]),
+            |t| match t {
+                "a" => Some(a.clone()),
+                "b" => Some(b.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(got, vec!["겹침", "푸리나"]);
+    }
+
+    /// ⚠️ 전원을 끄거나 고른 이름이 전부 사라져도 **빈 목록을 주면 안 된다** —
+    /// 배정이 통째로 죽어 캐릭터 없는 pane 이 뜬다.
+    #[test]
+    fn an_empty_pick_never_starves_assignment() {
+        let chars = roster(&["아로나", "시로코"]);
+        // 고른 이름이 전부 유령인 경우
+        let ghosts = picked_names_from(&picks(&[("지운테마", &["누구"])]), |_| None);
+        assert!(ghosts.is_empty());
+        assert_eq!(assignable_names_with(&chars, &ghosts), member_names(&chars));
+    }
+
+    /// 테마 폴더 판정은 `theme.json` 의 **실재**로만 한다.
+    ///
+    /// 설정 키만 믿으면, 테마 폴더를 지운 뒤 앱을 켰을 때 로스터가 통째로 비어
+    /// 캐릭터 배정이 멈춘다. 그건 오류로 안 드러나고 「학생이 안 뜬다」로만 보인다.
+    #[test]
+    fn theme_pack_discovery() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kasaterm-themes-{}-{n}", std::process::id()));
+
+        // label 있음 / label 없이 기존 스키마의 theme 필드만 / 둘 다 없음.
+        for (id, body) in [
+            ("eternal-return", r#"{"label":"이터널 리턴","members":[]}"#),
+            ("wuwa", r#"{"theme":"명조","members":[]}"#),
+            ("nameless", r#"{"members":[]}"#),
+        ] {
+            std::fs::create_dir_all(root.join(id)).unwrap();
+            std::fs::write(root.join(id).join("theme.json"), body).unwrap();
+        }
+        // theme.json 없는 폴더는 테마가 아니다 — sprites 만 놓다 만 자리일 수 있다.
+        std::fs::create_dir_all(root.join("half-made/sprites")).unwrap();
+
+        let got = list_themes_in(&root);
+        assert_eq!(
+            got,
+            vec![
+                ("eternal-return".into(), "이터널 리턴".into()),
+                ("nameless".into(), "nameless".into()),
+                ("wuwa".into(), "명조".into()),
+            ]
+        );
+
+        assert_eq!(
+            active_theme_dir_in(&root, "eternal-return"),
+            Some(root.join("eternal-return"))
+        );
+        // 폴더는 있는데 theme.json 이 없다 → 번들로 폴백.
+        assert_eq!(active_theme_dir_in(&root, "half-made"), None);
+        // 지워진 테마가 설정에 남아 있는 경우.
+        assert_eq!(active_theme_dir_in(&root, "deleted"), None);
+        assert_eq!(active_theme_dir_in(&root, ""), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_character_roundtrip() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("kasaterm-sesschar-{}-{n}", std::process::id()))
+            .join("session_characters.json");
+        // 미매핑 세션 = None → 랜덤 배정 대상.
+        assert_eq!(session_character_in(&path, "sid-1"), None);
+        bind_session_character_in(&path, "sid-1", "프라나").unwrap();
+        bind_session_character_in(&path, "sid-2", "미도리").unwrap();
+        assert_eq!(session_character_in(&path, "sid-1").as_deref(), Some("프라나"));
+        assert_eq!(session_character_in(&path, "sid-2").as_deref(), Some("미도리"));
+        // 재바인딩은 덮어쓴다(마지막 배정이 정본) — 다른 sid 는 불변.
+        bind_session_character_in(&path, "sid-1", "모모이").unwrap();
+        assert_eq!(session_character_in(&path, "sid-1").as_deref(), Some("모모이"));
+        assert_eq!(session_character_in(&path, "sid-2").as_deref(), Some("미도리"));
+        // 빈 sid/이름은 무시(파일 오염 방지).
+        bind_session_character_in(&path, "", "유즈").unwrap();
+        bind_session_character_in(&path, "sid-3", "").unwrap();
+        assert_eq!(session_character_in(&path, "sid-3"), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 읽기는 파싱 결과를 캐시한다(렌더가 프레임마다 부르는 경로) — 그 캐시가
+    /// **다른 프로세스의 쓰기**를 놓치면 학생이 옛 이름으로 굳는다. 여기서
+    /// `bind_*` 를 거치지 않고 파일을 직접 갈아 끼우는 이유다(그쪽은 스스로
+    /// 캐시를 비우므로 무효화 판정을 검증하지 못한다).
+    #[test]
+    fn session_chars_reload_on_external_write() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("kasaterm-sesschar-ext-{}-{n}", std::process::id()))
+            .join("session_characters.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"sid-x":"프라나"}"#).unwrap();
+        assert_eq!(session_character_in(&path, "sid-x").as_deref(), Some("프라나"));
+        std::fs::write(&path, r#"{"sid-x":"하늘색 미도리"}"#).unwrap();
+        assert_eq!(
+            session_character_in(&path, "sid-x").as_deref(),
+            Some("하늘색 미도리")
+        );
+        // 파일이 사라지면 캐시가 아니라 없음으로 읽혀야 한다.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(session_character_in(&path, "sid-x"), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 훅이 만드는 슬러그와 같은 자리로 접히는지. 어긋나면 앱과 훅이 서로 다른
+    /// collab 방을 보고, 슬러그가 절대경로로 남으면 `collab_root().join()` 이 base 를
+    /// 버려 마커가 collab 루트가 아니라 프로젝트 폴더 안에 쓰인다.
+    ///
+    /// 접기 자체가 Windows 전용이라(`posix_style`) 테스트도 거기서만 돈다.
+    #[cfg(windows)]
+    #[test]
+    fn mode_slug_folds_windows_paths_like_git_bash() {
+        // Git bash 의 `pwd` 는 `/c/Users/...` 를 주고 훅은 거기에 s#[/.]#-#g 를 건다.
+        let from_hook: String = "/c/Users/kshkj/desktop/kasaterm"
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        assert_eq!(mode_slug(Path::new(r"C:\Users\kshkj\desktop\kasaterm")), from_hook);
+        // canonicalize 가 붙이는 확장 접두사도 같은 자리로.
+        assert_eq!(
+            mode_slug(Path::new(r"\\?\C:\Users\kshkj\desktop\kasaterm")),
+            from_hook,
+        );
+        // 슬러그는 반드시 상대경로 — 절대경로면 join 이 base 를 통째로 버린다.
+        assert!(!Path::new(&mode_slug(Path::new(r"C:\Users\x"))).is_absolute());
+    }
+
+    /// unix 경로는 정규화를 그대로 통과해야 한다(기존 방 이름이 바뀌면 안 된다).
+    #[test]
+    fn mode_slug_leaves_unix_paths_alone() {
+        assert_eq!(
+            mode_slug(Path::new("/Users/kasa/dev/kasaterm")),
+            "-Users-kasa-dev-kasaterm"
+        );
+        assert_eq!(mode_slug(Path::new("/tmp/room/mine")), "-tmp-room-mine");
+        assert_eq!(mode_slug(Path::new("/a/b.c")), "-a-b-c");
+    }
+
+    /// 마커의 둘째 줄(주인 pid)이 배정 풀 고갈을 막는 유일한 단서다. 살아있는 주인 것은
+    /// 남기고, 죽은 주인 것과 주인을 모르는 옛 형식은 지운다.
+    #[test]
+    fn sweep_keeps_live_owner_only() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kasaterm-sweep-{}-{n}", std::process::id()));
+        let room = root.join("-tmp-room-a");
+        let other = root.join("-tmp-room-b");
+        std::fs::create_dir_all(&room).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(room.join("character-1"), "아루\n111").unwrap();
+        std::fs::write(room.join("character-2"), "미도리\n222").unwrap();
+        std::fs::write(other.join("character-1"), "유즈\n111").unwrap();
+        // 이 코드가 나오기 전 형식 — 주인을 알 수 없으니 지운다.
+        std::fs::write(other.join("character-9"), "프라나").unwrap();
+        // 원자 교체가 남긴 조각은 마커가 아니다.
+        std::fs::write(other.join("character-9.tmp"), "노아\n111").unwrap();
+
+        assert_eq!(sweep_stale_markers_in(&root, |pid| pid == 111), 2);
+        assert!(room.join("character-1").exists(), "살아있는 주인의 마커는 남는다");
+        assert!(!room.join("character-2").exists(), "죽은 주인의 마커는 지운다");
+        assert!(other.join("character-1").exists(), "다른 방도 주인 기준으로 남긴다");
+        assert!(!other.join("character-9").exists(), "pid 없는 옛 마커는 지운다");
+        assert!(other.join("character-9.tmp").exists(), ".tmp 는 건드리지 않는다");
+
+        // 이름을 읽는 쪽은 pid 줄을 못 본다 — 배정·board 가 "아루\n111" 로 굳으면 안 된다.
+        let mut names = assigned_in(&room);
+        names.sort();
+        assert_eq!(names, vec!["아루".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod persona_text_tests {
+    use super::*;
+
+    #[test]
+    fn persona_is_the_identity_alone() {
+        let chars = serde_json::json!({
+            "members": [{ "name": "치나츠", "persona": "너는 치나츠." }]
+        });
+        assert_eq!(persona_for(&chars, "치나츠").as_deref(), Some("너는 치나츠."));
+    }
+
+    /// 덧붙임은 말투·정체성만 싣는다(2026-10-07 사용자 결정). 내장 명단에 일하는 방식
+    /// 문장이 다시 들어오면 그 학생만 다르게 일하는데, 프롬프트는 화면에 안 보여 아무도
+    /// 모른다 — 여기서 먼저 걸린다.
+    #[test]
+    fn bundled_personas_carry_no_work_instructions() {
+        let chars: Value = serde_json::from_str(include_str!(
+            "../../../app/kasaterm/collab-hooks/characters.json"
+        ))
+        .unwrap();
+        for m in entries_of(&chars) {
+            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let persona = m.get("persona").and_then(|v| v.as_str()).unwrap_or("");
+            for word in ["커밋", "보고는", "kasaterm-cli", "오케스트레이터", "pane", "검증"] {
+                assert!(!persona.contains(word), "{name} 페르소나에 작업 지시({word}): {persona}");
+            }
+        }
+    }
+
+    /// 원본 뷰의 왕복 — 여기가 깨지면 사용자가 YAML 로 한 번 보기만 해도 학생
+    /// 정의가 조용히 변형된다. 실제 로스터에 있는 값의 모양을 그대로 담았다.
+    #[test]
+    fn yaml_roundtrip_keeps_every_value() {
+        let src = serde_json::json!({
+            "name": "미도리",
+            "slug": "midori",
+            "school": "밀레니엄",
+            // `#` 로 시작 — 따옴표를 안 씌우면 YAML 주석이 되어 값이 통째로 사라진다.
+            "header_color": "#6BCF7F",
+            "model": "claude-opus-5[1m]",
+            // 빈 문자열 — 평문으로 두면 null 로 읽힌다.
+            "backend": "",
+            // 여러 줄 — 블록 스칼라로 나가야 한다.
+            "persona": "너는 미도리.\n차분한 존댓말로 말한다.\n\n보고는 결과 위주.",
+        });
+        let y = member_to_yaml(&src);
+        assert!(y.contains("persona: |-"), "여러 줄은 블록 스칼라로: {y}");
+        assert!(y.contains("header_color: \"#6BCF7F\""), "# 값은 따옴표로: {y}");
+        let back = member_from_yaml(&y).expect("되읽기");
+        assert_eq!(src, back, "왕복에서 값이 바뀌었다\n--- yaml ---\n{y}");
+    }
+
+    /// 문자열로 남아야 할 값이 다른 타입으로 읽히지 않는지. `"true"` 가 불리언이
+    /// 되면 로스터를 쓰는 쪽이 문자열을 기대하다 조용히 빈 값을 본다.
+    #[test]
+    fn yaml_keeps_stringy_looking_values_as_strings() {
+        for v in ["true", "false", "null", "no", "123", "1.5", "~", "- 하이픈"] {
+            let src = serde_json::json!({ "k": v });
+            let back = member_from_yaml(&member_to_yaml(&src)).expect(v);
+            assert_eq!(back["k"], serde_json::json!(v), "{v} 가 문자열로 안 돌아왔다");
+        }
+    }
+
+    /// 문법이 틀리면 **저장을 거부**해야 한다 — 조용히 일부만 읽어 저장하면
+    /// 지워지지 않았어야 할 필드가 사라진다.
+    #[test]
+    fn yaml_rejects_broken_input() {
+        assert!(member_from_yaml("콜론이 없는 줄").is_err());
+        assert!(member_from_yaml("  들여쓰기로 시작").is_err());
+        assert!(member_from_yaml("").is_err());
+    }
+}
+
+/// 손으로 고른 자리의 세션 id 들 — **명단 필터를 면제받는다.**
+///
+/// 고른 명단(`character_picks`)은 「새로 배정할 때 누구 중에서 뽑나」의 풀이고,
+/// 거기 없는 이름은 자동 배정의 잔재로 보고 정리한다. 그런데 사람이 **직접 고른**
+/// 학생도 그 정리에 함께 쓸려 나갔다 — 다른 세계관 학생으로 바꿔 두면 앱을 껐다
+/// 켤 때마다 명단 안 학생으로 되돌아갔다(2026-08-26 지시: 「손으로 고른 건 명단
+/// 상관없이 지키게 해줘」).
+///
+/// 자동 배정과 수동 지정은 같은 바인딩 파일에 같은 모양으로 남아 구별할 수가
+/// 없으므로, 수동인 사실만 따로 적어 둔다. sid 단위인 이유는 필터가 걸리는 자리가
+/// 전부 sid 를 들고 있어서다(복원의 저장된 학생, shim 의 정체성 교정).
+fn manual_pick_path() -> PathBuf {
+    kasa_socket::home_dir()
+        .unwrap_or_default()
+        .join(".config/kasaterm/manual_characters.json")
+}
+
+/// 이 세션의 학생은 사람이 골랐다고 적는다. 실패는 삼킨다 — 표식을 못 남겨도
+/// 나빠지는 것은 「명단을 바꾸면 되돌아간다」뿐이고, 그건 이 기능이 있기 전의
+/// 동작이다.
+pub fn mark_manual_pick(sid: &str) {
+    if sid.is_empty() {
+        return;
+    }
+    let path = manual_pick_path();
+    let mut list = load_manual_picks(&path);
+    if list.iter().any(|s| s == sid) {
+        return;
+    }
+    list.push(sid.to_string());
+    // 무한정 쌓이지 않게 꼬리를 자른다. 오래된 세션은 어차피 transcript 가 없어
+    // 되살아날 일이 없고, 이 파일이 커지면 매 조회가 그만큼 비싸진다.
+    let n = list.len();
+    if n > MANUAL_PICK_CAP {
+        list.drain(..n - MANUAL_PICK_CAP);
+    }
+    let _ = write_manual_picks(&path, &list);
+}
+
+/// 이 세션의 학생을 사람이 골랐나. 파일이 없으면(대부분) false 다.
+pub fn is_manual_pick(sid: &str) -> bool {
+    !sid.is_empty() && load_manual_picks(&manual_pick_path()).iter().any(|s| s == sid)
+}
+
+const MANUAL_PICK_CAP: usize = 512;
+
+fn load_manual_picks(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_manual_picks(path: &Path, list: &[String]) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(list).map_err(std::io::Error::other)?)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// 그 이름을 **이 세션에서** 써도 되나 — `is_assignable` 에 수동 지정 면제를 얹은 판.
+///
+/// 필터가 걸리는 자리(복원의 저장된 학생, shim 의 정체성 교정)는 전부 sid 를 들고
+/// 있으므로, 명단만 보는 `is_assignable` 대신 이걸 부른다.
+pub fn is_assignable_for(sid: &str, name: &str) -> bool {
+    is_assignable(name) || is_manual_pick(sid)
+}
+
+/// 손으로 고른 자리는 **명단을 바꿔도 지킨다** — 2026-08-26 지시.
+#[cfg(test)]
+mod manual_pick_tests {
+    use super::{is_assignable_with, load_manual_picks, write_manual_picks};
+
+    /// `is_assignable_for` 의 판정부를 파일 없이 재현한다 — 진짜 파일을 읽는 판은
+    /// 이 컴퓨터의 설정에 기대므로 테스트로 못 고정한다.
+    fn assignable_for(manual: bool, picked: &[String], name: &str) -> bool {
+        is_assignable_with(name, picked) || manual
+    }
+
+    #[test]
+    fn a_hand_picked_name_survives_a_roster_that_excludes_it() {
+        let picked = vec!["미도리".to_string()];
+        assert!(!assignable_for(false, &picked, "은랑"), "면제가 없으면 걸러진다");
+        assert!(assignable_for(true, &picked, "은랑"), "손으로 고른 것이 안 지켜진다");
+    }
+
+    #[test]
+    fn the_roster_still_governs_everything_else() {
+        let picked = vec!["미도리".to_string()];
+        assert!(assignable_for(false, &picked, "미도리"));
+        // 아무도 안 골랐으면 제한이 없다 — 면제와 무관하게 전원이 대상이다.
+        assert!(assignable_for(false, &[], "은랑"));
+    }
+
+    #[test]
+    fn marks_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join("kasaterm-manual-pick-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("manual.json");
+        let _ = std::fs::remove_file(&path);
+        assert!(load_manual_picks(&path).is_empty(), "없는 파일은 빈 목록이다");
+        write_manual_picks(&path, &["sid-a".to_string(), "sid-b".to_string()]).expect("write");
+        let back = load_manual_picks(&path);
+        assert_eq!(back, vec!["sid-a".to_string(), "sid-b".to_string()]);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod theme_roster_tests {
+    use super::*;
+
+    /// 설치된 테마 **전부**를 훑어야 한다 — 활성 하나만 보면 갈아탄 뒤 옛 캐릭터가
+    /// 「우리 학생이 아닌 것」이 되어 그 자국을 영영 못 고친다(2026-08-27 실측).
+    #[test]
+    fn every_theme_folder_contributes_its_roster_path() {
+        let d = std::env::temp_dir().join(format!("kt-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for t in ["genshin", "bluearchive"] {
+            std::fs::create_dir_all(d.join(t)).unwrap();
+            std::fs::write(d.join(t).join("theme.json"), "{}").unwrap();
+        }
+        std::fs::write(d.join("stray.txt"), "x").unwrap();
+        let got = theme_roster_paths(&d);
+        assert_eq!(got.len(), 2, "폴더마다 하나씩: {got:?}");
+        assert!(got.iter().all(|p| p.ends_with("theme.json")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

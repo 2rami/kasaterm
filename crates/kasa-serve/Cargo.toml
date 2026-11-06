@@ -1,0 +1,20 @@
+[package]
+name = "kasa-serve"
+description = "Standalone HTTP serving executable."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+kasa-backend = { workspace = true }
+kasa-http = { workspace = true }
+kasa-pty = { workspace = true, default-features = true }
+kasa-socket = { workspace = true, default-features = true }
+
+[[bin]]
+name = "kasa-serve-web"
+path = "src/bin/serve_web.rs"
+
+[lints]
+workspace = true

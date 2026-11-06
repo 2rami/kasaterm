@@ -629,7 +629,7 @@ fn paint_git(
                             if !g.clip_visible(git_col_x, dy, git_col_w, dline_h) {
                                 continue;
                             }
-                            use kasa_mcp::git::DiffLineKind as K;
+                            use kasa_git::git::DiffLineKind as K;
                             let (bg, sign, scol) = match dl.kind {
                                 K::Add => (
                                     theme::with_alpha(theme::success(), 0x22),

@@ -148,9 +148,9 @@ fn resolve_path(
 fn download_link_file(base: &str, path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let query = format!(
         "/term/file?path={}",
-        kasa_mcp::remote::urlencode(&path.to_string_lossy())
+        kasa_remote::remote::urlencode(&path.to_string_lossy())
     );
-    let bytes = kasa_mcp::remote::remote_get_bytes(base, &query)?;
+    let bytes = kasa_remote::remote::remote_get_bytes(base, &query)?;
     let name = path
         .to_string_lossy()
         .rsplit(['/', '\\'])
@@ -181,7 +181,7 @@ impl App {
                 return;
             }
         }
-        let remote = kasa_mcp::remote::remote_info(pane).filter(|info| info.view);
+        let remote = kasa_remote::remote::remote_info(pane).filter(|info| info.view);
         let cwd = remote
             .as_ref()
             .and_then(|r| r.remote_cwd.as_deref())

@@ -1,6 +1,6 @@
 # HTTP 대화 기록 CPU 확인
 
-`kasa-mcp`는 HTTP 라우터와 JSON 직렬화를 포함한다. `Cargo.toml`의 패키지별
+`kasa-http`는 HTTP 라우터와 JSON 직렬화를 포함한다. `Cargo.toml`의 패키지별
 `opt-level=0`은 Windows의 과거 LLVM 오류 우회다. 이 설정을 macOS에도 그대로 적용하면
 배포판에서도 큰 대화 문자열을 검사하고 이스케이프하는 코드가 최적화되지 않는다.
 macOS 번들 경로인 `scripts/build-app.sh`는 release에서 이 패키지만 `opt-level=3`으로
@@ -15,11 +15,11 @@ Python 드라이버는 각각 512KiB·2MiB 기록을 네 요청씩 동시에 읽
 
 ```sh
 BENCH_DIR="$(mktemp -d /tmp/kasa-http-bench.XXXXXX)"
-CARGO_BUILD_JOBS=2 cargo build --release -p kasa-mcp --example transcript_http_bench \
-  --config 'profile.release.package.kasa-mcp.opt-level=0'
+CARGO_BUILD_JOBS=2 cargo build --release -p kasa-http --example transcript_http_bench \
+  --config 'profile.release.package.kasa-http.opt-level=0'
 cp "${CARGO_TARGET_DIR:-target}/release/examples/transcript_http_bench" "$BENCH_DIR/before"
-CARGO_BUILD_JOBS=2 cargo build --release -p kasa-mcp --example transcript_http_bench \
-  --config 'profile.release.package.kasa-mcp.opt-level=3'
+CARGO_BUILD_JOBS=2 cargo build --release -p kasa-http --example transcript_http_bench \
+  --config 'profile.release.package.kasa-http.opt-level=3'
 cp "${CARGO_TARGET_DIR:-target}/release/examples/transcript_http_bench" "$BENCH_DIR/after"
 python3 scripts/bench-transcript-http.py --before "$BENCH_DIR/before" \
   --after "$BENCH_DIR/after" --output "$BENCH_DIR/results"

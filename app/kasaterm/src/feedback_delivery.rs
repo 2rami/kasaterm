@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 #[derive(Default)]
 pub(crate) struct State {
-    pending: Option<Receiver<Result<(), kasa_mcp::feedback_client::DeliveryError>>>,
+    pending: Option<Receiver<Result<(), kasa_device::feedback_client::DeliveryError>>>,
     submitted_body: String,
     pub(crate) message: Option<(String, bool)>,
     pub(crate) attempt: u64,
@@ -26,7 +26,7 @@ impl App {
         } else {
             String::new()
         };
-        if let Err(error) = kasa_mcp::feedback_client::validate(&body, &diagnostics) {
+        if let Err(error) = kasa_device::feedback_client::validate(&body, &diagnostics) {
             self.feedback_delivery.message = Some((error.message().into(), true));
             self.chrome_dirty = true;
             return;
@@ -46,7 +46,7 @@ impl App {
             false,
         ));
         std::thread::spawn(move || {
-            let _ = tx.send(kasa_mcp::feedback_client::send(&body, &diagnostics));
+            let _ = tx.send(kasa_device::feedback_client::send(&body, &diagnostics));
         });
         self.chrome_dirty = true;
     }
@@ -60,7 +60,7 @@ impl App {
         {
             Some(Ok(result)) => result,
             Some(Err(TryRecvError::Disconnected)) => {
-                Err(kasa_mcp::feedback_client::DeliveryError::Unconfirmed)
+                Err(kasa_device::feedback_client::DeliveryError::Unconfirmed)
             }
             _ => return,
         };

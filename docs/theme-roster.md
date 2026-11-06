@@ -63,7 +63,7 @@ build.rs 가 접는다.
 **pane 수가 총원을 넘으면 중복은 비둘기집이라 못 막는다.** 실측 2026-08-11 에 pane
 15개 · 총원 12명이었고, 그때 아루가 셋이었다. 지금은 79명이라 여유가 있다.
 
-풀이 마르면 `least_used`(`kasa-mcp/src/character.rs`)가 **가장 적게 쓰인 학생**으로
+풀이 마르면 `least_used`(`kasa-characters/src/character.rs`)가 **가장 적게 쓰인 학생**으로
 좁혀 몰림만은 막지만, 그건 완화지 해결이 아니다. 40명 이상을 권한다.
 
 ## 만드는 절차
@@ -108,7 +108,7 @@ build.rs 가 슬러그 형식(`[a-z0-9_]`)·슬러그 중복·이름 중복을 �
 패널·macOS 알림·`/resume` 피커에 뜨고, **없으면 색 점으로 떨어진다**(`header_color`).
 79명 중 12명만 이미지가 있고 나머지는 색 점으로 도는데, 그게 정상 동작이다.
 
-웹 터미널(`/term`)의 pane 칩 프사는 `kasa-mcp/src/http.rs` 의 `AVATAR_SLUGS` 가 따로
+웹 터미널(`/term`)의 pane 칩 프사는 `kasa-http/src/http.rs` 의 `AVATAR_SLUGS` 가 따로
 가진다 — 이미지가 있는 슬러그만 거기 적는다.
 
 > claude code **상태줄**에는 학생을 안 그린다(2026-08-11). pane 헤더가 이미 이름과
@@ -123,7 +123,7 @@ build.rs 가 슬러그 형식(`[a-z0-9_]`)·슬러그 중복·이름 중복을 �
 
 - `app/kasaterm/assets/students/` — 프사·스프라이트(선택). 없으면 색 점.
   모션별 폴더(`idle/` `walk/` `wave/` `cheer/` `profile/` `gif/`)로 나뉘어 있다
-- `kasa-mcp/src/http.rs` 의 `AVATAR_SLUGS` — 웹 칩 프사가 필요하면
+- `kasa-http/src/http.rs` 의 `AVATAR_SLUGS` — 웹 칩 프사가 필요하면
 - `theme.rs` 의 `character_welcome` — claude 배너 인사말(선택). 없으면 원문 유지
 
 `user_title` 도 잊지 마라 — 페르소나 안의 호칭과 같아야 한다.

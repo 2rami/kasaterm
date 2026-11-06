@@ -17,7 +17,7 @@ pub(crate) fn cd_line(shell: &str, path: &str) -> String {
 
 /// 이 기기 셸 칸(`id` 는 탭 pid)을 `path` 로. 소켓·HTTP 스레드에서도 부른다 — GUI 루프를 거치지 않는다.
 pub(crate) fn surface_cd(id: &str, path: &str) -> Result<()> {
-    if kasa_mcp::remote::is_remote_pane(id) {
+    if kasa_remote::remote::is_remote_pane(id) {
         anyhow::bail!("다른 기기 칸은 그 기기가 옮겨요");
     }
     let session = kasa_pty::lookup_session(id).ok_or_else(|| anyhow::anyhow!("옮길 셸 칸이 없어요"))?;
@@ -46,7 +46,7 @@ impl App {
             let tab = ws.active_tab_pid(&id);
             (id, tab)
         };
-        match kasa_mcp::remote::remote_info(&tab) {
+        match kasa_remote::remote::remote_info(&tab) {
             Some(info) => self.pane_cwd_cache.get(&id).cloned().or_else(|| info.remote_cwd.map(std::path::PathBuf::from)),
             None => self.pane_cwd_cache.get(&id).cloned().or_else(|| self.pane_current_cwd(&tab)),
         }
@@ -60,7 +60,7 @@ impl App {
             ws.active_tab_pid(&active)
         };
         let path = dir.to_string_lossy().into_owned();
-        let Some(info) = kasa_mcp::remote::remote_info(&tab) else {
+        let Some(info) = kasa_remote::remote::remote_info(&tab) else {
             if let Err(e) = surface_cd(&tab, &path) {
                 self.set_toast(format!("{e:#}"));
             }
@@ -69,7 +69,7 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let body = serde_json::json!({ "pane": info.remote_id, "path": path });
-            let why = match kasa_mcp::remote::remote_post_json(&info.base, "/term/cd", &body) {
+            let why = match kasa_remote::remote::remote_post_json(&info.base, "/term/cd", &body) {
                 Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => return,
                 Ok(v) => v.get("error").and_then(|e| e.as_str()).unwrap_or("셸을 옮기지 못했어요").to_string(),
                 Err(e) if e.to_string().contains("404") => format!("{} 의 카사텀이 아직 셸 옮기기를 몰라요", info.label),

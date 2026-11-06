@@ -71,7 +71,7 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 | **`kasa-ime`** | 두벌식 한글 입력 오토마타. OS IME 비의존 | 한글 입력이 필요한 Rust 앱 |
 | **`kasa-socket`** | cmux 호환 Unix-socket JSON-RPC 서버. `kasaterm-cli` 포함 | pane 제어 프로토콜 |
 | **`kasa-bridge`** | tmux control-mode(`-C`) 브리지. GUI 비의존, 이벤트·화면 채널만 넘긴다 | tmux를 붙이는 다른 UI |
-| **`kasa-mcp`** | 원격 세션·기계 명부·폰 관문·보드의 HTTP 층 | 폰·다른 기기·웹 pane 연동 |
+| **`kasa-http`** | 원격 세션·기계 명부·폰 관문·보드의 HTTP 층 | 폰·다른 기기·웹 pane 연동 |
 | `app/kasaterm` | 메인 바이너리 — winit+wgpu 윈도우, chrome UI, 입력·단축키 라우팅 | — |
 
 ---

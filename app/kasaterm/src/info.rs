@@ -298,7 +298,7 @@ pub(crate) struct InfoSnap {
     /// 세션 제목 자리에 이것이 먼저 선다.
     pub(crate) tasks: HashMap<String, TaskLine>,
     /// 예약(반복·타이머) — 하단바 「예약」 칩과 팝오버가 읽는다.
-    pub(crate) schedules: Vec<kasa_mcp::ScheduleItem>,
+    pub(crate) schedules: Vec<kasa_students::ScheduleItem>,
     pub(crate) contexts: HashMap<String, ContextLines>,
     pub(crate) now: HashMap<String, NowLine>,
     pub(crate) execution_states: HashMap<String, String>,
@@ -362,7 +362,7 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
         });
         snap.contexts.insert(target.id.clone(), ContextLines { pane_id: format!("{}:{}", target.machine_identity, target.pty_id), session_id: target.session_id.clone(), harness: target.harness.clone(), note: evidence.detail_note(), scope: evidence.detail_scope(), details: evidence.detail_sections() });
     }
-    snap.schedules = kasa_mcp::schedule_snapshot();
+    snap.schedules = kasa_students::schedule_snapshot();
     snap
 }
 
@@ -1788,12 +1788,12 @@ impl App {
         self.info.selected_pane = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
         let selected_pid = self.ws.lock().ok().and_then(|ws| ws.active_pane.as_deref().map(|pane| ws.active_tab_pid(pane)));
         self.info.selected_pid = selected_pid.as_ref().map(|pid| {
-            let source = kasa_mcp::remote::remote_info(pid).map(|remote| format!("{}:{}", remote.base, remote.remote_id)).unwrap_or_else(|| "local".into());
+            let source = kasa_remote::remote::remote_info(pid).map(|remote| format!("{}:{}", remote.base, remote.remote_id)).unwrap_or_else(|| "local".into());
             format!("{source}:{pid}")
         }).unwrap_or_default();
         self.info.selected_session_id = selected_pid.as_ref().and_then(|pid| self.pane_claude_sid.get(pid)).cloned().unwrap_or_default();
         self.info.selected_harness = selected_pid.as_ref().and_then(|pid| self.pty.get(pid)).and_then(|session| session.active_agent()).map(|kind| kind.as_str().to_string()).or_else(|| selected_pid.as_ref().and_then(|pid| {
-            kasa_mcp::remote::remote_info(pid)?;
+            kasa_remote::remote::remote_info(pid)?;
             Some(crate::machinescol::remote_pane_facts(pid).and_then(|(_, row)| row.get("harness").and_then(|value| value.as_str()).map(str::to_string)).unwrap_or_else(|| "unknown".into()))
         })).unwrap_or_default();
         // 탭 판정보다 앞이다 — "열기" 앱 목록은 Info 의 버튼뿐 아니라 우클릭
@@ -1991,7 +1991,7 @@ impl App {
                     .unwrap_or_else(|| (String::new(), outer.is_none(), 0));
                 // 원격 거울은 프로세스가 저쪽이라 이름·제목이 로컬에 없다 — 폴링 캐시의
                 // 저쪽 행이 대신 말한다(2026-09-07 지적 「%0 나쵸네코 이렇게만 뜬다」).
-                let remote = kasa_mcp::remote::remote_info(id);
+                let remote = kasa_remote::remote::remote_info(id);
                 let facts = crate::machinescol::remote_pane_facts(id);
                 let remote_str = |k: &str| {
                     facts
@@ -2065,11 +2065,11 @@ impl App {
                     // 세션이 안 보인다」였다.
                     shell_pid: match s.shell_pid() {
                         Some(p) => p,
-                        None if kasa_mcp::remote::is_remote_pane(id) => 0,
+                        None if kasa_remote::remote::is_remote_pane(id) => 0,
                         None => return None,
                     },
                     machine: remote.map(|i| {
-                        if let Some(label) = kasa_mcp::machines::label_for_base(&i.base) {
+                        if let Some(label) = kasa_device::machines::label_for_base(&i.base) {
                             label
                         } else if i.label.is_empty() {
                             i.base
@@ -2458,7 +2458,7 @@ pub(crate) enum ExecutionLine<'a> {
     PillRow { name: String, items: Vec<Pill>, tip: String },
     Context(String),
     Process(&'a ProcRow),
-    Schedule(&'a kasa_mcp::ScheduleItem),
+    Schedule(&'a kasa_students::ScheduleItem),
     /// 카드 아래 「내 프롬프트」 묶음 통째(`info_prompts`). 줄마다 누름 자리를 새로 매기므로 안 보여도 부른다.
     Prompts,
     /// 그 아래 「결과물」 묶음(`info_outputs`) — 이 칸 대화가 낸 그림·음성·영상.
@@ -3104,7 +3104,7 @@ fn draw_plain_head(g: &mut gpu::GpuRenderer, icon: &str, label: &str, count: &st
 
 /// 예약 한 줄 — `매 30m  보드 정리 브리프          12m 뒤`. 종류가 머리, 라벨(없으면
 /// 본문 첫 줄)이 몸, 오른쪽이 다음 발사까지.
-fn draw_schedule_row(g: &mut gpu::GpuRenderer, it: &kasa_mcp::ScheduleItem, x0: f32, right: f32, y: f32) {
+fn draw_schedule_row(g: &mut gpu::GpuRenderer, it: &kasa_students::ScheduleItem, x0: f32, right: f32, y: f32) {
     let head = match it.kind.as_str() {
         "loop" => format!("매 {}", dur_label(it.interval_sec)),
         "timer" => "타이머".to_string(),
@@ -3783,7 +3783,7 @@ fn draw_pane_menu(
     // 설정에서 켠 학생만 세운다(2026-08-29 지시: 「내가 켠것만 나오게해야지」).
     // 아무도 안 골랐으면 **제한이 없다**는 뜻으로 읽는다 — `is_assignable` 과 같은
     // 규칙이고, 그 폴백이 없으면 고르기를 한 번도 안 쓴 사람에게 빈 메뉴가 뜬다.
-    let picks = kasa_mcp::character::all_picks();
+    let picks = kasa_characters::character::all_picks();
     let unrestricted = picks.is_empty();
     let picked_of = |theme: &str| -> Vec<String> {
         picks.iter().find(|(k, _)| k == theme).map(|(_, v)| v.clone()).unwrap_or_default()
@@ -3826,7 +3826,7 @@ fn draw_pane_menu(
             let mut first = true;
             for r in crate::socket::theme_rows() {
                 let id = if r.id.is_empty() {
-                    kasa_mcp::character::BASE_THEME_KEY.to_string()
+                    kasa_characters::character::BASE_THEME_KEY.to_string()
                 } else {
                     r.id
                 };
@@ -3842,14 +3842,14 @@ fn draw_pane_menu(
         }
         P::Theme(theme_id) => {
             items.push((M::Back, MenuRow::new("‹ 테마 고르기")));
-            let chars = if theme_id == kasa_mcp::character::BASE_THEME_KEY {
-                kasa_mcp::character::base_characters_json()
+            let chars = if theme_id == kasa_characters::character::BASE_THEME_KEY {
+                kasa_characters::character::base_characters_json()
             } else {
-                kasa_mcp::character::theme_characters_json(theme_id)
+                kasa_characters::character::theme_characters_json(theme_id)
             };
             let mut names = chars
                 .as_ref()
-                .map(kasa_mcp::character::member_names)
+                .map(kasa_characters::character::member_names)
                 .unwrap_or_default();
             if !unrestricted {
                 // **테마별로** 거른다. `assignable_names` 는 테마를 가로질러 모은

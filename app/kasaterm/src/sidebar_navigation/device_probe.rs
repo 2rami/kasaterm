@@ -163,7 +163,7 @@ impl App {
             check("saved_order", loaded.device_order.keys == [B, A, ""]);
             check("saved_collapse", ["", A, B].iter().all(|key| loaded.collapsed_devices.contains(*key)));
             check("rooms_not_moved", self.windows.len() == step.2);
-            check("no_remote_sessions_created", self.pty.keys().all(|id| !kasa_mcp::remote::is_remote_pane(id)));
+            check("no_remote_sessions_created", self.pty.keys().all(|id| !kasa_remote::remote::is_remote_pane(id)));
             step.1 = 10;
         }
         let _ = std::fs::write(root.join(format!("{stage:02}.json")), serde_json::json!({"checks": checks, "order": order(self)}).to_string());
