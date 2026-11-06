@@ -76,7 +76,7 @@
   `kasa-screen`(셀·행·ScreenUpdate·ANSI·리플로우·칸 배치·웹 grid 프레임 `wire` — kasa-bridge 가 재수출) ·
   `kasa-collab`(보드 수집기 `board_service`·tell 장부 `tell_service`·칸 열쇠 `surface_keys`·기계 id `identity`·GUI 없는
   호스트용 tell 전달 `delivery`·claude 훅 설치 `hooks`. 기기 명부·관문·원격 칸은 호스트가 `env::CollabEnv` 로 꽂는다 —
-  본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) ·
+  본판은 `kasa_mcp::install_collab_env`, kasa-mcp 가 옛 경로를 재수출) · `kasa-agents`(대화 기록 읽기) · `kasa-acp`(ACP 클라이언트 — 어댑터를 띄워 이벤트로 부린다, `docs/acp.md`) ·
   `kasa-socket::cli`(`kasaterm-cli` 본체 — 바이너리와 `kasa tui` 멀티콜이 부른다)
 - `kasa-host` — 창 없는 카사텀(설계·소켓 계약 `docs/kasa-host.md`). `lib.rs`(세션 표·메서드) · `server.rs`(유닉스 소켓) ·
   `keys.rs`(키 이름 → 바이트)

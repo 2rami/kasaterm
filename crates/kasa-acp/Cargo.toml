@@ -1,0 +1,17 @@
+[package]
+name = "kasa-acp"
+description = "Agent Client Protocol client: drives Claude Code and Codex through their ACP adapters over stdio JSON-RPC, so the host reads turn ends, tool calls, context use and permission requests as events instead of guessing from the terminal screen."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+# 어댑터는 npx → node → codex app-server 처럼 손자 프로세스를 낳는다. 직속 자식만 죽이면
+# 손자가 고아로 남으니 프로세스 그룹째 신호를 보낸다.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true
