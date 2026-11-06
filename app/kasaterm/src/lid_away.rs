@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+pub(crate) mod hotspot;
 mod policy;
 use policy::{step, Act, Phase, Sense};
 
@@ -34,6 +35,8 @@ fn phase_name(p: Phase) -> &'static str {
 struct Config {
     on: bool,
     cap: Duration,
+    hotspot_on: bool,
+    hotspot_ssid: String,
 }
 
 struct State {
@@ -71,8 +74,11 @@ fn config_from(settings: &serde_json::Value) -> Config {
     let on = settings["lid_away"]
         .as_bool()
         .unwrap_or_else(|| settings["lid_away_machine"].as_str().is_some_and(|m| !m.trim().is_empty()));
-    let minutes = settings["lid_away_minutes"].as_u64().filter(|m| *m > 0).unwrap_or(DEFAULT_MINUTES);
-    Config { on, cap: Duration::from_secs(minutes * 60) }
+    let minutes = settings["lid_away_minutes"].as_u64().filter(|m| MINUTE_CHOICES.contains(m)).unwrap_or(DEFAULT_MINUTES);
+    Config { on, cap: Duration::from_secs(minutes * 60),
+        hotspot_on: settings["lid_away_hotspot"].as_bool().unwrap_or(false),
+        hotspot_ssid: settings["lid_away_hotspot_ssid"].as_str().unwrap_or_default().into(),
+    }
 }
 
 fn config(st: &mut State, now: Instant) -> Config {
@@ -91,12 +97,23 @@ pub(crate) fn forget_config() {
     STATE.with(|s| s.borrow_mut().config = None);
 }
 
-pub(crate) fn enabled() -> bool {
-    read_config().on
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct View {
+    pub(crate) supported: bool,
+    pub(crate) on: bool,
+    pub(crate) minutes: u64,
+    pub(crate) ready: Option<bool>,
+    pub(crate) status: String,
+    pub(crate) hotspot_on: bool,
+    pub(crate) hotspot_ssid: String,
+    pub(crate) hotspot: hotspot::View,
 }
 
-pub(crate) fn cap_minutes() -> u64 {
-    read_config().cap.as_secs() / 60
+pub(crate) fn view() -> View {
+    let cfg = STATE.with(|s| config(&mut s.borrow_mut(), Instant::now()));
+    View { supported: true, on: cfg.on, minutes: cfg.cap.as_secs() / 60,
+        ready: sudo_ready(), status: status_line().unwrap_or_default().into(),
+        hotspot_on: cfg.hotspot_on, hotspot_ssid: cfg.hotspot_ssid, hotspot: hotspot::view() }
 }
 
 /// 0 모름 · 1 없음 · 2 있음. sudo 를 띄워야 알 수 있어 뒤에서 잰다.
@@ -140,7 +157,7 @@ pub(crate) fn status_line() -> Option<&'static str> {
 
 /// 깨어 있는 동안은 1초마다 루프를 깨운다 — 덮이면 화면 이벤트가 없어 `Wait` 에 잠든다.
 pub(crate) fn wake_deadline() -> Option<Instant> {
-    STATE.with(|s| (s.borrow().phase != Phase::Idle).then(|| Instant::now() + TICK))
+    STATE.with(|s| (s.borrow().phase != Phase::Idle || hotspot::pending()).then(|| Instant::now() + TICK))
 }
 
 fn write_heartbeat() {
@@ -170,6 +187,7 @@ fn release(sleep: bool) -> anyhow::Result<()> {
 
 /// 앱이 끝날 때. 막아 둔 채 나가면 감시가 90초 뒤에야 푼다.
 pub(crate) fn shutdown() {
+    hotspot::cancel();
     STATE.with(|s| {
         let mut st = s.borrow_mut();
         if st.phase != Phase::Idle {
@@ -210,6 +228,7 @@ impl App {
             (st.phase, config(&mut st, now))
         });
         if !cfg.on && phase == Phase::Idle {
+            if hotspot::tick(None) { self.chrome_dirty = true; }
             return;
         }
         let working = self.lid_away_working_panes();
@@ -237,6 +256,8 @@ impl App {
         };
         let (next, act) = step(phase, sense);
         STATE.with(|s| s.borrow_mut().phase = next);
+        let hotspot_target = (cfg.hotspot_on && matches!(next, Phase::Away { .. })).then_some(cfg.hotspot_ssid.as_str());
+        if hotspot::tick(hotspot_target) { self.chrome_dirty = true; }
         if act.is_some() || phase_name(phase) != phase_name(next) {
             eprintln!("[lid-away] {act:?} {} → {} (일하는 칸 {}, 이사 {migrating})", phase_name(phase), phase_name(next), working.len());
         }
@@ -278,14 +299,19 @@ impl App {
 
     /// 이 기기에서 지금 일하는 학생 칸. 거울은 저쪽 기기의 일이다.
     fn lid_away_working_panes(&self) -> Vec<String> {
-        let Ok(ws) = self.ws.lock() else { return Vec::new() };
-        let mut panes: Vec<String> = self
-            .pty
-            .keys()
+        self.collab.hub.refresh();
+        let bindings = self.collab.hub.bound.try_lock().map(|b| b.clone()).unwrap_or_default();
+        let mut panes: Vec<String> = self.pty.keys()
             .filter(|p| !kasa_mcp::remote::is_remote_pane(p))
-            .filter(|p| self.pane_agent_working(&ws, p))
-            .cloned()
-            .collect();
+            .filter(|p| {
+                // Hidden tabs and children can still work while the front tab waits for input.
+                let busy = self.collab.hub.resolved(p).is_none_or(|r|
+                    matches!(r.state, crate::agent_state::AgentState::Working | crate::agent_state::AgentState::Compacting | crate::agent_state::AgentState::Unknown) || r.bg_active);
+                let children = bindings.get(*p).filter(|path| crate::socket::codex_sid_from_rollout(path).is_some())
+                    .is_some_and(|path| !kasa_agents::codex_children::running(path).0.is_empty());
+                busy || children
+            })
+            .cloned().collect();
         panes.sort();
         panes
     }
@@ -489,6 +515,13 @@ mod tests {
         assert!(!on(serde_json::json!({})));
         assert!(!on(serde_json::json!({ "lid_away": false, "lid_away_machine": "나쵸네코" })), "새 값이 이긴다");
         assert_eq!(config_from(&serde_json::json!({ "lid_away": true })).cap, Duration::from_secs(DEFAULT_MINUTES * 60));
+    }
+
+    #[test]
+    fn corrupt_or_unbounded_minutes_keep_the_safety_cap() {
+        for minutes in [0, 61, u64::MAX] {
+            assert_eq!(config_from(&serde_json::json!({"lid_away_minutes": minutes})).cap, Duration::from_secs(30 * 60));
+        }
     }
 
     #[test]

@@ -752,6 +752,8 @@ fn take_paint_feedback() -> PaintFeedback {
 }
 
 pub(crate) struct Snapshot {
+    #[cfg(target_os = "macos")]
+    pub(crate) lid_away: crate::lid_away::View,
     pub(crate) weather: crate::weather::model::WeatherSettings,
     pub(crate) weather_os: crate::weather::model::OsMotion,
     pub(crate) device_account: device_account::View,
@@ -1004,6 +1006,8 @@ impl App {
             })
             .unwrap_or_else(theme::cursor);
         let mut snapshot = Snapshot {
+            #[cfg(target_os = "macos")]
+            lid_away: crate::lid_away::view(),
             weather: self.weather.settings.clone(),
             weather_os: self.weather.os(),
             device_account: self.device_account.view(),
@@ -2612,7 +2616,7 @@ fn category_matches(cat: SettingsCat, query: &str) -> bool {
         SettingsCat::Accounts => "계정 로그인 로그아웃 비밀번호 패스워드 oauth claude codex kasa 구글 github 키체인 비밀 승인 keychain secret 자동 전환 한도 사용량 account login password",
         SettingsCat::Claude => "클로드 claude 코덱스 codex 모델 model 추론 effort 권한 실행 인자",
         SettingsCat::Students | SettingsCat::Theme => "학생 캐릭터 이름 말투 페르소나 스프라이트 테마 character persona sprite theme",
-        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 크롬 chrome 브라우저 device connection machine browser",
+        SettingsCat::Machines => "기기 연결 현재 이 기기 다른 기기 컴퓨터 맥미니 서버 ssh 주소 덮개 덮어 마저 잠자기 핫스팟 폰 lid sleep hotspot 크롬 chrome 브라우저 device connection machine browser",
         SettingsCat::Feedback => "피드백 문의 오류 버그 문제 제안 feedback bug report",
     };
     let haystack = search_text(&format!("{title} {detail} {aliases}"));
@@ -4794,13 +4798,14 @@ fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x:
 fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
     section_title(g, x, *y, "덮어도 마저 하기", "");
     *y += 54.0;
-    let on = crate::lid_away::enabled();
+    let lid = &s.lid_away;
+    let on = lid.on;
     seg_row(g, s, hits, x, y, w, "덮었을 때", &[
         ("바로 잠자기", !on, SettingsAction::LidAway(false)),
         ("마저 하고 잠자기", on, SettingsAction::LidAway(true)),
     ]);
     if on {
-        let cap = crate::lid_away::cap_minutes();
+        let cap = lid.minutes;
         let minutes: Vec<String> = crate::lid_away::MINUTE_CHOICES.iter().map(|m| format!("{m}분")).collect();
         let cells: Vec<(&str, bool, SettingsAction)> = crate::lid_away::MINUTE_CHOICES
             .iter()
@@ -4811,18 +4816,44 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
     }
     *y += 6.0;
     let note = if !on {
-        "학생이 일하는 중에 덮으면 하던 일을 끝낼 때까지 깨어 있다가 잠듭니다".to_string()
+        "꺼져 있어요. 덮으면 macOS의 기본 잠자기 동작을 따릅니다".to_string()
     } else {
-        match crate::lid_away::sudo_ready() {
+        match lid.ready {
             None => "잠자기를 막을 허락이 있는지 확인하는 중입니다".to_string(),
             Some(false) => "처음 한 번 터미널에서 kasaterm-cli lid-away install 을 실행해 주세요 — 잠자기를 막고 푸는 pmset 명령만 비밀번호 없이 허락합니다. 이 계정의 다른 프로그램도 그 명령을 쓸 수 있게 됩니다".to_string(),
-            Some(true) => match crate::lid_away::status_line() {
-                Some(now) => now.to_string(),
-                None => "학생이 일하는 동안 잠자기를 막고, 덮으면 일이 끝나 1분 넘게 쉴 때 잠듭니다. 덮인 뒤 최대 시간이 차도 잠듭니다. 학생은 다른 기기로 옮기지 않습니다".to_string(),
+            Some(true) => match lid.status.as_str() {
+                now if !now.is_empty() => now.to_string(),
+                _ => "학생이 일하는 동안 잠자기를 막고, 덮으면 일이 끝나 1분 넘게 쉴 때 잠듭니다. 덮인 뒤 최대 시간이 차도 잠듭니다. 학생은 다른 기기로 옮기지 않습니다".to_string(),
             },
         }
     };
     for line in wrap_words(g, &note, w, 10.5) {
+        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+        *y += 15.0;
+    }
+    *y += 11.0;
+    toggle_row_hint(g, s, hits, x, y, w, "덮으면 폰 핫스팟 연결",
+        "마저 하고 잠자기가 켜져 있고 작업 중일 때 등록한 핫스팟으로 연결합니다",
+        lid.hotspot_on, SettingsAction::LidHotspot(!lid.hotspot_on));
+    let registered = if lid.hotspot_ssid.is_empty() { "등록된 폰 없음" } else { &lid.hotspot_ssid };
+    if disclosure(g, s, hits, x, y, w, "lid-hotspot", &format!("핫스팟 등록 · {registered}")) {
+        for ssid in &lid.hotspot.networks {
+            seg_row(g, s, hits, x, y, w, "", &[(ssid, *ssid == lid.hotspot_ssid, SettingsAction::LidHotspotSelect(ssid.clone()))]);
+        }
+        *y += button_row(g, s, hits, (x, *y, w, CTL_H), &[
+            ("목록 새로고침", Target::Setting(SettingsAction::LidHotspotRefresh), false),
+            ("등록 해제", Target::Setting(SettingsAction::LidHotspotSelect(String::new())), false),
+        ], crate::native_layout::Align::Start) + 8.0;
+    }
+    if !lid.hotspot_ssid.is_empty() && !lid.hotspot.busy {
+        *y += button_row(g, s, hits, (x, *y, w, CTL_H), &[
+            ("지금 연결 확인", Target::Setting(SettingsAction::LidHotspotTest), false),
+        ], crate::native_layout::Align::Start) + 8.0;
+    }
+    let hotspot_note = if lid.hotspot.status.is_empty() {
+        "먼저 macOS Wi-Fi 메뉴에서 폰에 한 번 연결한 뒤 등록해 주세요. iPhone의 자동 활성화는 macOS의 ‘핫스팟 자동 연결’을 사용합니다. 연결 실패가 잠자기 시간을 늘리지는 않습니다"
+    } else { &lid.hotspot.status };
+    for line in wrap_words(g, hotspot_note, w, 10.5) {
         draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
         *y += 15.0;
     }
@@ -7717,6 +7748,7 @@ mod tests {
         assert!(category_matches(SettingsCat::Appearance, "기기 아이콘"));
         assert!(category_matches(SettingsCat::Accounts, "CLAUDE 로그인"));
         assert!(category_matches(SettingsCat::Machines, "ssh 주소"));
+        assert!(category_matches(SettingsCat::Machines, "덮개 핫스팟"));
         assert!(!category_matches(SettingsCat::General, "존재하지않는설정"));
         for cat in SettingsCat::nav() { assert!(category_matches(*cat, "  ")); }
         assert_eq!(matching_categories("계정").first(), Some(&SettingsCat::Accounts));

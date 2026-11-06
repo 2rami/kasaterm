@@ -5,7 +5,7 @@
 미커밋 변경은 맥북에 남는다). 설정 「연결 기기 → 덮어도 마저 하기」에서 「덮었을 때」(바로 잠자기·마저
 하고 잠자기)와 상한(10·30·60분)을 고른다. 코드는 `app/kasaterm/src/lid_away/policy.rs`(정책),
 `app/kasaterm/src/lid_away.rs`(판독·실행),
-`crates/kasa-socket/src/lid_away.rs`(설치물·pmset 명령). 설정 값은 `lid_away`(켬·끔)·`lid_away_minutes` 이고,
+`crates/kasa-socket/src/lid_away.rs`(설치물·pmset 명령). 설정 값은 `lid_away`(켬·끔)·`lid_away_minutes`(10·30·60분) 이고,
 `lid_away` 가 없으면 이사이던 때의 `lid_away_machine` 이 비어 있지 않은 것을 켬으로 본다.
 
 ## 왜 sudo 가 필요한가
@@ -60,3 +60,21 @@ Power Nap 에서는 다시 막지 않는다 — 가방 속에서 상한만큼 �
   보내 일하는 중으로, `… end`로 종료 상태로 바꾼다. 설정 파일에 `"lid_away": true`를 넣어 켠다.
 
 박동 파일은 `KASATERM_SETTINGS_FILE` 옆에 생겨 본판 감시가 리그를 보지 않는다.
+
+## 폰 핫스팟
+
+연결 기기 설정의 「덮으면 폰 핫스팟 연결」은 따로 끌 수 있다. macOS Wi-Fi 메뉴에서 폰에 한 번 연결한 뒤
+「핫스팟 등록」에서 저장된 네트워크를 고른다. 이름만 `lid_away_hotspot_ssid`에 보관하며 비밀번호는 읽거나 저장하지 않는다.
+켜기·끄기는 `lid_away_hotspot`이다. 폰에서도 해당 맥의 설정 → 덮개·핫스팟에서 바꿀 수 있다. 소유자만 변경한다.
+
+작업 중 Armed에서 Away로 들어갈 때 등록된 네트워크에 한 번 연결을 요청한다. iPhone 자체를 깨우는 것은
+macOS의 Instant Hotspot·핫스팟 자동 연결 설정이 맡는다. 앱이 iPhone의 개인용 핫스팟 스위치를 직접 켜는 것은 아니다.
+Mac과 iPhone의 같은 Apple 계정, Wi-Fi·Bluetooth, 통신사의 개인용 핫스팟 지원이 필요하다.
+
+`networksetup`은 실패 문구를 내고도 종료 코드 0을 반환할 수 있다. 문구와 실제 연결 이름을 검사하며,
+macOS가 SSID를 숨기면 「연결 확인 안 됨」으로 표시한다. 알 수 없는 연결을 실패로 단정해 Wi-Fi를 반복해서 끊지 않는다.
+연결 명령은 별도 워커에서 실행하며 명령별 25초 상한이 있다. 덮개를 열거나 설정을 끄거나 잠자기로 넘어가면 자동 요청을 취소한다.
+핫스팟 연결 실패·확인은 작업으로 세지 않으므로 1분 유휴·최대 시간·배터리·발열·감시자의 잠자기 조건을 늘리지 않는다.
+숨은 탭과 실행 중인 서브에이전트도 작업으로 센다.
+
+네트워크 명령의 격리 시험은 `KASATERM_LID_AWAY_NETWORKSETUP=<가짜 실행 파일>`을 쓴다. 별도 설정 파일과 세션 파일을 지정한 리그에서만 적용된다.

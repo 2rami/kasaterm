@@ -60,6 +60,65 @@ Map<String, Object?> fixture() => {
 };
 
 void main() {
+  testWidgets('lid and hotspot switches are independent and update the selected Mac', (tester) async {
+    final posts = <Map<String, dynamic>>[];
+    final lid = <String, dynamic>{'supported': true, 'on': false, 'minutes': 30,
+      'ready': true, 'hotspot_on': false, 'hotspot_ssid': 'phone / name',
+      'hotspot': {'busy': false, 'status': ''}};
+    var polls = 0;
+    final server = Server(Uri.parse('https://fixture.test/'), client: MockClient((r) async {
+      expect(r.url.path.startsWith('/m/~mac/'), isTrue);
+      if (r.method == 'POST') {
+        final body = jsonDecode(r.body) as Map<String, dynamic>;
+        posts.add(body);
+        if (body['action'] == 'lid-away-enabled') lid['on'] = body['label'] == 'true';
+        if (body['action'] == 'lid-away-hotspot') lid['hotspot_on'] = body['label'] == 'true';
+        if (body['action'] == 'lid-away-hotspot-test') polls = 1;
+        return reply('{"ok":true}', 200);
+      }
+      lid['hotspot'] = {'busy': polls-- > 0, 'status': polls == -1 ? '연결을 확인했어요' : ''};
+      return reply(jsonEncode({'lid_away': lid}), 200);
+    }));
+    addTearDown(server.close);
+    await tester.pumpWidget(MaterialApp(home: DesktopSettingsScreen(server: server, title: '맥북', machine: '~mac')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('덮어도 마저 하고 잠자기'));
+    await tester.pumpAndSettle();
+    expect(posts.last, {'action': 'lid-away-enabled', 'label': 'true'});
+    expect(lid['hotspot_on'], false);
+    await tester.tap(find.text('덮으면 폰 핫스팟 연결'));
+    await tester.pumpAndSettle();
+    expect(posts.last, {'action': 'lid-away-hotspot', 'label': 'true'});
+    await tester.ensureVisible(find.text('지금 연결 확인'));
+    await tester.tap(find.text('지금 연결 확인'));
+    await tester.pumpAndSettle();
+    expect(find.text('연결 확인 중'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    expect(find.text('연결을 확인했어요'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final width in [320.0, 390.0, 430.0]) {
+    testWidgets('lid settings fit large text at $width px', (tester) async {
+      tester.view.physicalSize = Size(width, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final server = Server(Uri.parse('https://fixture.test/'), client: MockClient((_) async => reply(jsonEncode({
+        'lid_away': {'supported': true, 'on': true, 'minutes': 30, 'ready': true,
+          'hotspot_on': true, 'hotspot_ssid': '길게 붙인 폰 이름',
+          'hotspot': {'busy': false, 'status': 'macOS가 Wi-Fi 이름을 숨겨 연결을 확인할 수 없어요'}}}), 200)));
+      addTearDown(server.close);
+      await tester.pumpWidget(MaterialApp(builder: (_, child) => MediaQuery(
+        data: MediaQueryData(size: Size(width, 844), textScaler: const TextScaler.linear(2)), child: child!),
+        home: DesktopSettingsScreen(server: server, title: '맥북')));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('지금 연결 확인'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   test(
     'settings actions reject HTTP 200 failures and malformed replies',
     () async {

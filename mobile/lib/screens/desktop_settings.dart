@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../look.dart';
@@ -24,12 +26,19 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
   Map<String, dynamic>? _values;
   String? _error;
   bool _busy = false;
+  Timer? _refresh;
   String _filter = '';
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _refresh?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -43,6 +52,10 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
           _values = values;
           _error = null;
         });
+        _refresh?.cancel();
+        if (desktopMap(desktopMap(values['lid_away'])['hotspot'])['busy'] == true) {
+          _refresh = Timer(const Duration(seconds: 2), _load);
+        }
       }
     } catch (error) {
       if (mounted) setState(() => _error = desktopError(error));
@@ -156,11 +169,35 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
     final a = desktopMap(v?['appearance']);
     final c = desktopMap(v?['claude']);
     final agents = desktopMap(v?['agents']);
+    final lid = desktopMap(v?['lid_away']);
+    final hotspot = desktopMap(lid['hotspot']);
     final themes = [
       for (final t in desktopRows(a['themes']))
         ('${t['key']}', '${t['label']}'),
     ];
     final groups = <String, List<Widget>>{
+      if (lid['supported'] == true)
+        '덮개·핫스팟': [
+          _toggle('덮어도 마저 하고 잠자기', lid['on'] == true,
+              'lid-away-enabled', explicit: true),
+          if (lid['on'] == true)
+            _choice('덮인 뒤 최대', lid['minutes'], 'lid-away-minutes',
+                const [('10', '10분'), ('30', '30분'), ('60', '60분')]),
+          if (lid['on'] == true && lid['ready'] != true)
+            const ListTile(title: Text('맥에서 잠자기 권한 설정이 필요해요'),
+                subtitle: Text('맥 설정의 연결 기기 → 덮어도 마저 하기 안내를 확인해 주세요')),
+          _toggle('덮으면 폰 핫스팟 연결', lid['hotspot_on'] == true,
+              'lid-away-hotspot', explicit: true),
+          _text('등록할 핫스팟 이름', lid['hotspot_ssid'],
+              'lid-away-hotspot-ssid', empty: true),
+          SettingsRow(title: '지금 연결 확인', icon: Icons.wifi,
+              subtitle: hotspot['busy'] == true ? '연결 확인 중' : '${hotspot['status'] ?? ''}',
+              onTap: _busy || hotspot['busy'] == true || '${lid['hotspot_ssid'] ?? ''}'.isEmpty
+                  ? null : () => _apply('lid-away-hotspot-test')),
+          const ListTile(subtitle: Text('마저 하고 잠자기가 켜져 있고 작업 중일 때 연결합니다. 먼저 맥 Wi-Fi 메뉴에서 폰에 한 번 연결해 주세요. iPhone 자동 활성화는 macOS의 핫스팟 자동 연결을 사용합니다.')),
+          if ('${lid['status'] ?? ''}'.isNotEmpty)
+            ListTile(subtitle: Text('${lid['status']}')),
+        ],
       '에이전트': [
         if (agents.containsKey('preferred_agent'))
           _choice(

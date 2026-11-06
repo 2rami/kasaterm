@@ -4803,6 +4803,14 @@ pub(crate) enum SettingsAction {
     LidAway(bool),
     /// 덮인 뒤 깨어 있을 최대 분.
     LidAwayMinutes(u64),
+    #[cfg(target_os = "macos")]
+    LidHotspot(bool),
+    #[cfg(target_os = "macos")]
+    LidHotspotSelect(String),
+    #[cfg(target_os = "macos")]
+    LidHotspotTest,
+    #[cfg(target_os = "macos")]
+    LidHotspotRefresh,
     /// 사람에게 보여 줄 페이지를 폰(쪽지+알림)으로. 크롬 선택은 건드리지 않는다.
     OpenOnPhone(bool),
     CwdMode(&'static str),

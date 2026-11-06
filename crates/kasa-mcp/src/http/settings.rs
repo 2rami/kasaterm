@@ -109,10 +109,14 @@ async fn settings_characters_handler(backend: Arc<dyn Backend>) -> impl IntoResp
 /// 값은 여기서 파일을 읽어 만들지 않는다 — 정본이 GUI 프로세스의 메모리라서다.
 /// 파일에 애초에 저장되지 않는 값(UI 배율은 세션 한정)이 섞여 있어, 파일에서 읽으면
 /// 그 칸만 늘 기본값을 보여 준다.
-async fn settings_values_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+async fn settings_values_handler(backend: Arc<dyn Backend>, auth: Option<MobileAuth>) -> impl IntoResponse {
+    let mut values = backend.settings_values();
+    if auth.as_ref().is_some_and(|auth| !auth.0.owner) {
+        if let Some(values) = values.as_object_mut() { values.remove("lid_away"); }
+    }
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(backend.settings_values()),
+        Json(values),
     )
 }
 
@@ -507,6 +511,9 @@ async fn settings_action_handler(backend: Arc<dyn Backend>, auth: Option<MobileA
     if action.is_empty() {
         return bad("action required".to_string());
     }
+    if action.starts_with("lid-away-") && auth.as_ref().is_some_and(|auth| !auth.0.owner) {
+        return answer(StatusCode::FORBIDDEN, serde_json::json!({"ok": false, "error": "이 기기의 소유자만 잠자기와 핫스팟 설정을 바꿀 수 있어요"}));
+    }
     let phone_login = action.starts_with("claude-phone-login-");
     if phone_login && auth.as_ref().is_some_and(|auth| !auth.0.owner) {
         return answer(StatusCode::FORBIDDEN, serde_json::json!({"ok": false, "error_code": "phone_login_owner_only"}));
@@ -578,7 +585,7 @@ pub(super) fn routes(backend: &Arc<dyn Backend>) -> axum::Router {
         )
         .route(
             "/settings/values",
-            get(move || settings_values_handler(settings_values_backend.clone())),
+            get(move |auth: Option<axum::Extension<MobileAuth>>| settings_values_handler(settings_values_backend.clone(), auth.map(|value| value.0))),
         )
         .route(
             "/onboarding/state",
@@ -671,6 +678,16 @@ mod tests {
             }));
         }
         routes(&backend).oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn guests_cannot_change_sleep_or_connect_a_hotspot() {
+        let desk = Arc::new(LoginDesk::default());
+        for action in ["lid-away-enabled", "lid-away-minutes", "lid-away-hotspot", "lid-away-hotspot-ssid", "lid-away-hotspot-test"] {
+            assert_eq!(login_action(desk.clone(), Some(false), action, "phone").await.status(), axum::http::StatusCode::FORBIDDEN);
+        }
+        assert_eq!(desk.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(login_action(desk.clone(), Some(true), "lid-away-hotspot-test", "").await.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]

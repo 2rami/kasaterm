@@ -119,6 +119,9 @@ pub(super) fn paint(
         );
     }
     *y += 12.0;
+    #[cfg(target_os = "macos")]
+    paint_lid_away(g, s, hits, x, y, w);
+    *y += 12.0;
     if !disclosure(
         g,
         s,
@@ -127,7 +130,7 @@ pub(super) fn paint(
         y,
         w,
         "device-tools",
-        "브라우저·자동 전환 설정",
+        "브라우저 설정",
     ) {
         return;
     }
@@ -162,8 +165,6 @@ pub(super) fn paint(
             "선택한 기기의 Chrome을 사용합니다. 연결되지 않으면 이 기기의 Chrome을 사용합니다."
         },
     );
-    #[cfg(target_os = "macos")]
-    paint_lid_away(g, s, hits, x, y, w);
 }
 
 fn device_row(

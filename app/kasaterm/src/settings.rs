@@ -864,6 +864,29 @@ impl App {
                 #[cfg(target_os = "macos")]
                 crate::lid_away::forget_config();
             }
+            #[cfg(target_os = "macos")]
+            SettingsAction::LidHotspot(on) => {
+                if !on { crate::lid_away::hotspot::cancel(); }
+                socket::write_setting("lid_away_hotspot", serde_json::json!(on));
+                crate::lid_away::forget_config();
+            }
+            #[cfg(target_os = "macos")]
+            SettingsAction::LidHotspotSelect(ssid) => {
+                if !ssid.is_empty() && !crate::lid_away::hotspot::valid_ssid(&ssid) {
+                    self.set_toast("핫스팟 이름은 32바이트 이내여야 해요".into());
+                } else {
+                    crate::lid_away::hotspot::cancel();
+                    socket::write_setting("lid_away_hotspot_ssid", serde_json::json!(ssid));
+                    crate::lid_away::forget_config();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            SettingsAction::LidHotspotTest => {
+                let ssid = crate::lid_away::view().hotspot_ssid;
+                if let Err(error) = crate::lid_away::hotspot::test(&ssid) { self.set_toast(error); }
+            }
+            #[cfg(target_os = "macos")]
+            SettingsAction::LidHotspotRefresh => crate::lid_away::hotspot::refresh(),
             SettingsAction::ChromeMachine(machine) => {
                 if let Err(error) = socket::save_browser_target(&machine) {
                     self.set_toast(error.to_string());
@@ -1732,6 +1755,30 @@ impl App {
         };
         let arg = label.unwrap_or("").trim().to_string();
         match action {
+            #[cfg(target_os = "macos")]
+            "lid-away-enabled" | "lid-away-hotspot" => {
+                let on = match label { Some("true") => true, Some("false") => false, _ => return Err("켜기·끄기 값을 확인해 주세요".into()) };
+                self.settings_apply(if action == "lid-away-enabled" { SettingsAction::LidAway(on) } else { SettingsAction::LidHotspot(on) });
+                Ok(true)
+            }
+            #[cfg(target_os = "macos")]
+            "lid-away-minutes" => {
+                let minutes = id.parse::<u64>().ok().filter(|m| crate::lid_away::MINUTE_CHOICES.contains(m)).ok_or("최대 시간은 10·30·60분 중에서 골라 주세요")?;
+                self.settings_apply(SettingsAction::LidAwayMinutes(minutes));
+                Ok(true)
+            }
+            #[cfg(target_os = "macos")]
+            "lid-away-hotspot-ssid" => {
+                let ssid = label.unwrap_or_default();
+                if !ssid.is_empty() && !crate::lid_away::hotspot::valid_ssid(ssid) { return Err("핫스팟 이름은 32바이트 이내여야 해요".into()) }
+                self.settings_apply(SettingsAction::LidHotspotSelect(ssid.into()));
+                Ok(true)
+            }
+            #[cfg(target_os = "macos")]
+            "lid-away-hotspot-test" => {
+                crate::lid_away::hotspot::test(&crate::lid_away::view().hotspot_ssid)?;
+                Ok(true)
+            }
             // ── 화면 데이터 ──────────────────────────────────────────────
             "values" => {
                 publish_web_values(self.settings_values_json());
@@ -2741,7 +2788,16 @@ impl App {
             })
             .collect();
 
+        #[cfg(target_os = "macos")]
+        let lid_away = {
+            let mut view = crate::lid_away::view();
+            view.hotspot.networks.clear();
+            serde_json::to_value(view).unwrap_or_default()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let lid_away = serde_json::json!({"supported": false});
         serde_json::json!({
+            "lid_away": lid_away,
             "general": {
                 "cwd_mode": self.set_cwd_mode,
                 "file_open_mode": self.set_file_open_mode,
