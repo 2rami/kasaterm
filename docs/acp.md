@@ -1,6 +1,6 @@
 # ACP 클라이언트 — 화면 대신 이벤트로 학생 부리기
 
-코드는 `crates/kasa-acp`. 아직 앱·호스트에 연결하지 않은 라이브러리다.
+코드는 `crates/kasa-acp`(라이브러리와 runner 실행 파일 `kasa-acp`). 아직 앱·디스패처에 연결하지 않았고 앱 묶음에도 들지 않는다.
 
 ## 왜
 
@@ -52,6 +52,33 @@ claude·codex 는 ACP 를 직접 말하지 않아 어댑터를 띄운다. 설치
 Agent SDK 문서는 사전 승인 없이 서드파티 제품이 claude.ai 로그인이나 구독 한도를 제공하는 것을 허용하지 않는다
 (Agent SDK 로 만든 에이전트 포함). claude 어댑터 길을 공개 배포판의 기본 기능으로 켜기 전에 이 조항을 확인한다.
 codex 어댑터는 ChatGPT 로그인을 지원한다고 명시한다.
+
+## 칸 안의 runner — `kasa-acp run`
+
+무인 학생도 칸에 보이게 둔다. 칸에서 `claude '<브리프>'` 대신 runner 를 띄우면, 화면에는 말·도구 호출·출력
+몇 줄이 흐르고, 턴이 끝날 때마다 결과 파일이 덮어써진다.
+
+```sh
+kasa-acp run --harness claude|codex [--cwd DIR] [--mode ID] [--set ID=VALUE]... \
+             [--outcome FILE] [--resume SESSION] [--permission ask|allow|reject] [--once] [-- 첫 지시]
+```
+
+- `--once` 가 아니면 턴 뒤에 `> ` 로 다음 지시를 받는다. Ctrl-C 는 도는 턴을 멈추고(`cancelled`), 멈추는 중에 한 번 더
+  누르면 끝낸다. Ctrl-D 는 끝낸다.
+- 권한 요청은 `ask` 면 칸에서 번호로 고른다. stdin 이 터미널이 아니면 `ask` 는 `reject` 로 바뀐다 — 사람이 없는데
+  묻고 기다리면 학생이 영영 멈춘다.
+- claude 는 PATH 의 `claude` 를 쓰되 칸 shim(`kasaterm-shim-N`) 폴더는 건너뛴다. shim 은 대화형 실행에 훅·페르소나·
+  session-id 플래그를 얹는데, 어댑터의 SDK 모드 호출에 섞이면 안 된다. 그래서 runner 학생에는 아직 협업 훅이 없다.
+
+결과 파일(`--outcome`)은 한 줄 JSON 이고 임시 파일에 쓴 뒤 옮긴다.
+
+| 키 | 뜻 |
+|---|---|
+| `stop` | `end_turn`·`cancelled`·`max_tokens`·`refusal`… 연결이 죽으면 `error` 와 `error` 키 |
+| `answer` | 마지막 도구 호출 뒤의 말. 그게 비면 그 턴의 말 전부 |
+| `turn` | 이 runner 의 몇 번째 턴인가 |
+| `session_id` | 하네스 세션 id — `--resume` 이나 TUI resume 으로 이어받는다 |
+| `context_used`·`context_size`·`cost_usd` | 마지막 사용량. claude 만 비용을 준다 |
 
 ## 써 보기
 

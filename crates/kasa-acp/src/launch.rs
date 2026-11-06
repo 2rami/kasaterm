@@ -68,15 +68,26 @@ impl LaunchSpec {
     }
 }
 
-fn find_program(name: &str, path: &OsStr) -> Option<PathBuf> {
+/// PATH 에서 실행 파일을 찾되 카사텀 칸의 shim 폴더(`kasaterm-shim-N`)는 건너뛴다.
+/// shim 의 `claude`·`codex` 는 대화형 실행에 훅·페르소나·session-id 플래그를 얹는데,
+/// 어댑터가 SDK 모드로 부르는 호출에 그것이 섞이면 안 된다.
+pub fn find_program(name: &str, path: &OsStr) -> Option<PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
         vec![format!("{name}.cmd"), format!("{name}.exe"), name.to_owned()]
     } else {
         vec![name.to_owned()]
     };
     std::env::split_paths(path)
+        .filter(|dir| !is_shim_dir(dir))
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|p| p.is_file())
+}
+
+fn is_shim_dir(dir: &Path) -> bool {
+    dir.file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|n| n.strip_prefix("kasaterm-shim-"))
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -104,6 +115,26 @@ mod tests {
         assert!(spec.args.is_empty());
         assert_eq!(spec.env, [(OsString::from("PATH"), dir.clone().into_os_string())]);
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pane_shim_dirs_are_skipped() {
+        let root = scratch("shim");
+        let shim = root.join("kasaterm-shim-74204");
+        let real = root.join("bin");
+        let not_shim = root.join("kasaterm-shim-notes");
+        for d in [&shim, &real, &not_shim] {
+            fs::create_dir_all(d).expect("dir");
+        }
+        let exe = if cfg!(windows) { "claude.cmd" } else { "claude" };
+        fs::write(shim.join(exe), "").expect("write");
+        fs::write(real.join(exe), "").expect("write");
+        let path = std::env::join_paths([&shim, &real]).expect("path");
+        assert_eq!(find_program("claude", &path), Some(real.join(exe)));
+        fs::write(not_shim.join(exe), "").expect("write");
+        let path = std::env::join_paths([&not_shim, &real]).expect("path");
+        assert_eq!(find_program("claude", &path), Some(not_shim.join(exe)));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

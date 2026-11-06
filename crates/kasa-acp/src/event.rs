@@ -162,6 +162,19 @@ pub enum StopReason {
     Other(String),
 }
 
+impl StopReason {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::MaxTokens => "max_tokens",
+            Self::MaxTurnRequests => "max_turn_requests",
+            Self::Refusal => "refusal",
+            Self::Cancelled => "cancelled",
+            Self::Other(s) => s,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptOutcome {
     pub stop: StopReason,

@@ -12,10 +12,11 @@
 mod event;
 mod launch;
 mod rpc;
+pub mod runner;
 
 pub use event::{
     ConfigOption, Event, NewSession, PermissionKind, PermissionOption, PermissionRequest,
     PlanEntry, PromptOutcome, StopReason, ToolCall, ToolCallUpdate, ToolOutput, ToolStatus,
 };
-pub use launch::{Harness, LaunchSpec};
+pub use launch::{Harness, LaunchSpec, find_program};
 pub use rpc::{Connection, Error, Pending, RequestId};
