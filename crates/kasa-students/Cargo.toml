@@ -14,6 +14,7 @@ axum = { workspace = true, features = ["ws"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+kasa-acp = { workspace = true }
 kasa-agents = { workspace = true }
 kasa-characters = { workspace = true }
 kasa-collab = { workspace = true, features = ["net"] }

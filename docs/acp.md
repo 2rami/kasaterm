@@ -1,6 +1,7 @@
 # ACP 클라이언트 — 화면 대신 이벤트로 학생 부리기
 
-코드는 `crates/kasa-acp`(라이브러리와 runner 실행 파일 `kasa-acp`). 아직 앱·디스패처에 연결하지 않았고 앱 묶음에도 들지 않는다.
+코드는 `crates/kasa-acp`(라이브러리와 runner 실행 파일 `kasa-acp`). 디스패처(`crates/kasa-students/src/dispatch.rs`)가
+설정으로 켜면 쓰고, 맥 앱 묶음은 `kasa-acp` 를 본판 실행 파일 옆에 둔다.
 
 ## 왜
 
@@ -47,6 +48,35 @@ claude·codex 는 ACP 를 직접 말하지 않아 어댑터를 띄운다. 설치
 - 어댑터는 npx → node → 하네스로 손자를 낳는다. 프로세스 그룹으로 띄우고 그룹째 죽인다(시험
   `shutdown_kills_the_whole_process_group`).
 
+## 디스패처에서 쓰기
+
+`~/.config/kasaterm/dispatch.json` 에 `"runtime": "acp"` 를 두면 디스패처가 새로 부르는 학생을 runner 로 띄운다.
+이미 떠 있는 TUI 학생은 그대로 TUI 로 일한다.
+
+| 키 | 뜻 |
+|---|---|
+| `runtime` | 빈 값 = TUI(`claude '<브리프>'`), `"acp"` = runner. Windows 는 아직 TUI 로 띄운다 |
+| `acp_harness` | `claude`(기본)·`codex` |
+| `acp_mode` | 세션 모드. 비우면 그 기기 설정을 따른다. codex 기본(`agent`, 자동 검토)은 샌드박스라 칸 소켓 연결(`kasaterm-cli`)을 한 번 막고 검토 뒤 허락한다. TUI codex 학생(칸 shim 이 샌드박스를 끈다)과 같이 묻지 않게 하려면 `agent-full-access` |
+| `heavy_model`·`light_model` | runner 의 `--set model=…` 로 간다. `*_launcher`(게이트웨이 래퍼)는 runner 에 쓰이지 않는다 |
+
+흐름:
+
+1. 칸을 하나 만들고 브리프를 `acp/<열쇠>.inbox` 에 먼저 놓은 뒤, 칸에 `cd <작업 폴더> && <앱>/kasa-acp run …
+   --status acp/<열쇠>.status.json --inbox acp/<열쇠>.inbox --permission reject` 를 친다. 브리프는 셸 줄에 싣지 않는다.
+   이 작업의 `acp_turn` 은 1이다.
+2. 매 tick 상태 파일을 읽어 board 와 같은 꼴의 줄을 지어 넣는다 — 파일 충돌(`files`)·컨텍스트 상한·캐릭터 중복은
+   TUI 학생과 같은 길로 판정한다.
+3. 상태의 `turn` 이 작업의 `acp_turn` 에 닿고 `idle` 이면 그 tick 에 `answer` 를 거둔다. 부팅 유예·idle 연속을
+   기다리지 않는다. 상태 파일이 아직 없으면(runner 부팅 중·못 뜸) TUI 와 같은 유예·재시도로 간다.
+4. 쉬는 runner 학생에게 다음 일은 inbox 로 주고 `acp_turn` 을 지금 턴 + 1 로 적는다.
+5. runner 가 끝나면(`exited`) 그 턴을 마쳤으면 거두고, 아니면 까닭을 실어 실패로 접는다. 맡은 일 없이 끝난
+   runner 칸은 일이 없을 때도 치운다.
+
+`cargo run -p kasa-students --example dispatch_acp_e2e -- codex|claude` 가 이 사슬을 진짜 어댑터로 끝까지 돌린다
+(먼저 `cargo build -p kasa-acp --bin kasa-acp`). 학생은 칸 환경에서 `kasaterm-cli done` 으로도 보고하지만,
+디스패처는 그것을 기다리지 않는다.
+
 ## 제약 — Claude 구독 로그인
 
 Agent SDK 문서는 사전 승인 없이 서드파티 제품이 claude.ai 로그인이나 구독 한도를 제공하는 것을 허용하지 않는다
@@ -72,6 +102,9 @@ kasa-acp run --harness claude|codex [--cwd DIR] [--mode ID] [--set ID=VALUE]... 
   칸 입력을 닫는다 — inbox 가 없으면 끝나고, 있으면 inbox 지시를 계속 받는다.
 - 권한 요청은 `ask` 면 칸에서 번호로 고른다. stdin 이 터미널이 아니면 `ask` 는 `reject` 로 바뀐다 — 사람이 없는데
   묻고 기다리면 학생이 영영 멈춘다.
+- codex 는 도구 셸의 env 를 `shell_environment_policy` 로 새로 지어, 사용자 설정이 `inherit = "core"` 면 `KASATERM_*` 가
+  빠진다(학생의 `kasaterm-cli` 가 앱 소켓을 못 찾는다). runner 는 칸의 `KASA*`·`CODEX_HOME` 을 `CODEX_CONFIG` 의 점 경로 키
+  (`shell_environment_policy.set.<이름>`)로 못박는다 — 칸 shim 이 `-c` 로 하는 것과 같다. claude 의 셸은 칸 env 를 그대로 받는다.
 - claude 는 PATH 의 `claude` 를 쓰되 칸 shim(`kasaterm-shim-N`) 폴더는 건너뛴다. shim 은 대화형 실행에 훅·페르소나·
   session-id 플래그를 얹는데, 어댑터의 SDK 모드 호출에 섞이면 안 된다. 그래서 runner 학생에는 아직 협업 훅이 없다.
 

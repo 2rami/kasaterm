@@ -23,7 +23,7 @@
 | 전송 | 2 | `kasa-net` | 카사넷 — 기기끼리 iroh QUIC 직통 길 | 금지 | 허용 |
 | 전송 | 3 | `kasa-net-ffi` | 카사넷 C ABI(폰 앱 정적 라이브러리). 산출물이라 받는 쪽이 없다 | 금지 | 허용 |
 | 협업 | 3 | `kasa-agents` | 하네스 지식: Claude Code·Codex 대화 기록, CLI 위치·공용 명부 캐시 | 금지 | feature 뒤만 |
-| 협업 | 3 | `kasa-acp` | ACP 클라이언트와 칸 runner `kasa-acp` — Claude Code·Codex 어댑터를 stdio JSON-RPC 로 부린다(`docs/acp.md`). 아직 받는 쪽이 없다 | 금지 | 금지 |
+| 협업 | 3 | `kasa-acp` | ACP 클라이언트와 칸 runner `kasa-acp` — Claude Code·Codex 어댑터를 stdio JSON-RPC 로 부린다(`docs/acp.md`). 디스패처(`kasa-students`)가 받는다 | 금지 | 금지 |
 | 협업 | 4 | `kasa-collab` | 보드 수집기·tell 장부·칸 열쇠·기계 id. 다른 기계와의 HTTP 는 feature `net` | 금지 | feature 뒤만 |
 | 호스트 | 5 | `kasa-identity` | 관문 계정·OAuth·권한 연결·봉인 자격의 공통 구현 | 금지 | 허용 |
 | 호스트 | 5 | `kasa-characters` | 캐릭터 자산·페르소나·세션 표시 규칙 | 금지 | 허용 |
@@ -57,7 +57,7 @@ kasa-collab ── kasa-socket · kasa-pty ── kasa-screen
 kasa-agents ── kasa-socket
 kasa-gridview ── kasa-cells · kasa-screen
 kasa-net-ffi ── kasa-net
-kasa-acp (3, 내부 의존 없음)
+kasa-acp (3, 내부 의존 없음) ← kasa-students (7)
 kasa-host ── kasa-pty · kasa-screen
 spikes/* ── kasa-bridge ── kasa-screen
 ```

@@ -134,6 +134,9 @@ fn main() -> Result<()> {
         light_launcher: "glm".into(), // 가벼운 일은 게이트웨이로 — 명령 조립을 눈으로 보려고
 
         characters: vec!["미도리".into(), "유즈".into(), "아리스".into()],
+        runtime: String::new(),
+        acp_harness: String::new(),
+        acp_mode: String::new(),
     });
 
     let be = Arc::new(FakeBackend(Mutex::new(Fleet::default())));
@@ -234,6 +237,7 @@ fn mk(brief: &str, files: &[&str]) -> dispatch::QueueTask {
         created_ts: 0.0,
         updated_ts: 0.0,
         assigned_ts: 0.0,
+        acp_turn: 0,
     }
 }
 

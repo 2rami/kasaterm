@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kasa_acp::runner::{self, Line, SessionView};
-use kasa_acp::{Connection, Event, Harness, LaunchSpec, PermissionKind, PromptOutcome, find_program};
+use kasa_acp::{Connection, Event, Harness, LaunchSpec, PermissionKind, PromptOutcome, codex_pane_env_config, find_program};
 
 const TICK: Duration = Duration::from_millis(100);
 const USAGE: &str = "usage: kasa-acp run --harness claude|codex [--cwd DIR] [--mode ID] [--set ID=VALUE]... \
@@ -336,9 +336,18 @@ fn now() -> f64 {
 fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut spec = LaunchSpec::resolve(args.harness, &path).ok_or("neither the adapter nor npx is on PATH")?;
-    if args.harness == Harness::Claude && std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_none() {
-        let claude = find_program("claude", &path).ok_or("claude is not on PATH")?;
-        spec = spec.claude_executable(&claude);
+    match args.harness {
+        Harness::Claude if std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_none() => {
+            let claude = find_program("claude", &path).ok_or("claude is not on PATH")?;
+            spec = spec.claude_executable(&claude);
+        }
+        Harness::Codex => {
+            let existing = std::env::var("CODEX_CONFIG").ok();
+            if let Some(config) = codex_pane_env_config(std::env::vars(), existing.as_deref()) {
+                spec = spec.env("CODEX_CONFIG", config);
+            }
+        }
+        Harness::Claude => {}
     }
     let mut screen = Screen { styled: std::io::stdout().is_terminal(), at_line_start: true };
     screen.note(&format!("starting {} adapter…", args.harness.name()));

@@ -224,6 +224,62 @@ pub fn write_status(path: &Path, status: &Value) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// 디스패처가 읽는 상태 파일의 꼴. `SessionView::status_json` 이 쓰는 것과 같은 키다.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunnerStatus {
+    pub state: String,
+    pub turn: u32,
+    pub stop: Option<String>,
+    pub answer: String,
+    pub files: Vec<String>,
+    pub context_used: Option<u64>,
+    pub context_size: Option<u64>,
+    pub session_id: Option<String>,
+    pub error: Option<String>,
+}
+
+impl RunnerStatus {
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let text = |k: &str| v[k].as_str().map(str::to_owned);
+        Some(Self {
+            state: text("state")?,
+            turn: v["turn"].as_u64().and_then(|t| u32::try_from(t).ok()).unwrap_or_default(),
+            stop: text("stop"),
+            answer: text("answer").unwrap_or_default(),
+            files: v["files"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_owned)).collect())
+                .unwrap_or_default(),
+            context_used: v["context_used"].as_u64(),
+            context_size: v["context_size"].as_u64(),
+            session_id: text("session_id"),
+            error: text("error"),
+        })
+    }
+
+    /// 없거나 반쯤 쓴 파일이면 `None` — runner 가 아직 안 떴다.
+    pub fn read(path: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(path).ok()?;
+        Self::from_json(&serde_json::from_str(&text).ok()?)
+    }
+
+    pub fn context_percent(&self) -> Option<u8> {
+        let (used, size) = (self.context_used?, self.context_size?);
+        (size > 0).then(|| u8::try_from(used.saturating_mul(100) / size).unwrap_or(100))
+    }
+}
+
+/// 다음 지시를 inbox 에 놓는다. runner 가 반쯤 쓴 지시를 집어 가지 않게 임시 파일에 쓰고 옮긴다.
+pub fn write_inbox(path: &Path, text: &str) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// inbox 파일에 놓인 다음 지시를 가져가고 파일을 지운다. 비었거나 없으면 `None`.
 ///
 /// 지시를 칸 입력으로 넣지 않는 이유: 터미널의 정규 모드는 한 줄을 MAX_CANON(macOS 1024바이트)까지만
@@ -415,12 +471,40 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         let inbox = dir.join("next.txt");
         assert_eq!(take_inbox(&inbox).expect("missing is fine"), None);
-        std::fs::write(&inbox, "first line\nsecond line\n").expect("write");
+        write_inbox(&inbox, "first line\nsecond line\n").expect("write");
+        assert!(!dir.join("next.txt.tmp").exists());
         assert_eq!(take_inbox(&inbox).expect("read").as_deref(), Some("first line\nsecond line"));
         assert!(!inbox.exists());
         std::fs::write(&inbox, "  \n").expect("write");
         assert_eq!(take_inbox(&inbox).expect("blank"), None);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn status_written_by_the_runner_reads_back() {
+        let mut v = SessionView::default();
+        v.begin_turn();
+        v.observe(&Event::Usage { session_id: "s".into(), used: 850, size: 1000, cost_usd: None });
+        v.observe(&msg("done"));
+        let mut j = v.status_json("codex", "sid", "exited", Some("end_turn"), 1.0);
+        j["error"] = "boom".into();
+        let st = RunnerStatus::from_json(&j).expect("parsed");
+        assert_eq!(
+            st,
+            RunnerStatus {
+                state: "exited".into(),
+                turn: 1,
+                stop: Some("end_turn".into()),
+                answer: "done".into(),
+                files: Vec::new(),
+                context_used: Some(850),
+                context_size: Some(1000),
+                session_id: Some("sid".into()),
+                error: Some("boom".into()),
+            }
+        );
+        assert_eq!(st.context_percent(), Some(85));
+        assert_eq!(RunnerStatus::from_json(&json!({ "turn": 1 })), None, "state is required");
     }
 
     #[test]

@@ -93,6 +93,7 @@ borrowed_box = "warn"
 # 내부 크레이트. kasa-socket·kasa-pty 의 기본 기능(앱 업데이트 서명 확인 ring, OS
 # 클립보드 arboard)은 앱·호스트만 싣는다 — kasa-agents·kasa-collab·`kasa tui` 는 끈 채 받는다.
 kasa-agents = { path = "crates/kasa-agents" }
+kasa-acp = { path = "crates/kasa-acp" }
 kasa-bridge = { path = "crates/kasa-bridge" }
 kasa-cells = { path = "crates/kasa-cells" }
 kasa-collab = { path = "crates/kasa-collab" }

@@ -18,5 +18,5 @@ pub use event::{
     ConfigOption, Event, NewSession, PermissionKind, PermissionOption, PermissionRequest,
     PlanEntry, PromptOutcome, StopReason, ToolCall, ToolCallUpdate, ToolOutput, ToolStatus,
 };
-pub use launch::{Harness, LaunchSpec, find_program};
+pub use launch::{Harness, LaunchSpec, codex_pane_env_config, find_program};
 pub use rpc::{Connection, Error, Pending, RequestId};

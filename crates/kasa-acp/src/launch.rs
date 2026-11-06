@@ -3,6 +3,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use serde_json::{Map, Value};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
     Claude,
@@ -68,6 +70,31 @@ impl LaunchSpec {
     }
 }
 
+/// codex 는 도구 셸의 env 를 `shell_environment_policy` 로 새로 짓는다. 사용자가 `inherit = "core"` 를 쓰면
+/// `KASATERM_*` 가 빠져 학생의 `kasaterm-cli` 가 앱 소켓을 못 찾는다 — 칸 shim 이 `-c` 로 막는 것과 같은 문제다.
+/// codex-acp 는 `CODEX_CONFIG`(JSON) 의 키를 세션 설정 덮어쓰기로 넘기므로, 칸의 값을 점 경로 키로 못박는다.
+/// 고를 이름은 shim 과 같다: `KASA*`·`CODEX_HOME`, 단 `KASATERM_PERSONA`·KEY·TOKEN·SECRET 이 든 이름·여러 줄 값은 뺀다.
+/// 넣을 것이 없거나 이미 있는 `CODEX_CONFIG` 를 못 읽으면 `None` — 남의 설정을 덮지 않는다.
+pub fn codex_pane_env_config(vars: impl IntoIterator<Item = (String, String)>, existing: Option<&str>) -> Option<String> {
+    let mut config: Map<String, Value> = match existing {
+        Some(text) => serde_json::from_str(text).ok()?,
+        None => Map::new(),
+    };
+    let mut added = false;
+    for (name, value) in vars {
+        let ours = name.starts_with("KASA") || name == "CODEX_HOME";
+        let secret = ["KEY", "TOKEN", "SECRET"].iter().any(|w| name.contains(w));
+        if !ours || secret || name == "KASATERM_PERSONA" || value.contains('\n') {
+            continue;
+        }
+        config.entry(format!("shell_environment_policy.set.{name}")).or_insert_with(|| {
+            added = true;
+            Value::String(value)
+        });
+    }
+    added.then(|| Value::Object(config).to_string())
+}
+
 /// PATH 에서 실행 파일을 찾되 카사텀 칸의 shim 폴더(`kasaterm-shim-N`)는 건너뛴다.
 /// shim 의 `claude`·`codex` 는 대화형 실행에 훅·페르소나·session-id 플래그를 얹는데,
 /// 어댑터가 SDK 모드로 부르는 호출에 그것이 섞이면 안 된다.
@@ -115,6 +142,37 @@ mod tests {
         assert!(spec.args.is_empty());
         assert_eq!(spec.env, [(OsString::from("PATH"), dir.clone().into_os_string())]);
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn codex_gets_the_pane_env_pinned_like_the_shim_does() {
+        let vars = [
+            ("KASATERM_PANE_ID", "%1"),
+            ("KASATERM_SOCKET_PATH", "/tmp/rig.sock"),
+            ("KASATERM_PERSONA", "persona"),
+            ("KASA_API_KEY", "secret"),
+            ("KASATERM_NOTE", "two\nlines"),
+            ("CODEX_HOME", "/h"),
+            ("HOME", "/Users/x"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let config: Value =
+            serde_json::from_str(&codex_pane_env_config(vars.clone(), None).expect("something to pin")).expect("json");
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "shell_environment_policy.set.KASATERM_PANE_ID": "%1",
+                "shell_environment_policy.set.KASATERM_SOCKET_PATH": "/tmp/rig.sock",
+                "shell_environment_policy.set.CODEX_HOME": "/h",
+            })
+        );
+        let kept = codex_pane_env_config(vars.clone(), Some(r#"{"model":"m","shell_environment_policy.set.CODEX_HOME":"/mine"}"#))
+            .expect("merged");
+        let kept: Value = serde_json::from_str(&kept).expect("json");
+        assert_eq!(kept["model"], "m");
+        assert_eq!(kept["shell_environment_policy.set.CODEX_HOME"], "/mine", "an explicit value wins");
+        assert_eq!(codex_pane_env_config(vars, Some("not json")), None);
+        assert_eq!(codex_pane_env_config([("HOME".to_owned(), "/x".to_owned())], None), None);
     }
 
     #[test]

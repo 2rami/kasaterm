@@ -16,6 +16,7 @@
 
 use kasa_agents::claude_bin;
 use anyhow::Result;
+use kasa_acp::runner::RunnerStatus;
 use kasa_socket::backend::{Backend, PaneActivity};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,10 @@ pub struct QueueTask {
     /// (`settle_sec`) 안에서는 수확 판정을 하지 않는다.
     #[serde(default)]
     pub assigned_ts: f64,
+    /// ACP 학생에게 준 작업이면 그 runner 의 몇 번째 턴이 이 작업인가. 상태 파일의 `turn` 이
+    /// 여기에 닿고 쉬면 끝난 것이다. 0 = TUI 학생(board 로 판정).
+    #[serde(default)]
+    pub acp_turn: u32,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -123,6 +128,18 @@ pub struct DispatchConfig {
     /// 스폰할 때 돌려 쓸 캐릭터 이름. 비면 `characters.json` 순서를 따른다.
     #[serde(default)]
     pub characters: Vec<String>,
+    /// 새 학생을 어떻게 띄우나. 빈 값 = 칸에 TUI(`claude '<브리프>'`), `"acp"` = 칸에 ACP runner
+    /// (`kasa-acp run`, docs/acp.md). acp 학생은 board 를 짐작하지 않고 runner 상태 파일로 수확하고,
+    /// 지시는 칸 입력 대신 inbox 파일로 준다. Windows 와 cmd·PowerShell 칸은 아직 TUI 로 띄운다.
+    #[serde(default)]
+    pub runtime: String,
+    /// runtime=acp 의 하네스(`claude`·`codex`). 빈 값 = claude.
+    #[serde(default)]
+    pub acp_harness: String,
+    /// runtime=acp 의 세션 모드(claude `acceptEdits`·`bypassPermissions`, codex `agent`·`workspace-write`).
+    /// 빈 값이면 그 기기 사용자 설정을 따른다. 권한 요청은 사람이 없으니 거절된다.
+    #[serde(default)]
+    pub acp_mode: String,
 }
 
 fn d_max_students() -> usize {
@@ -159,6 +176,9 @@ impl Default for DispatchConfig {
             heavy_launcher: String::new(),
             light_launcher: String::new(),
             characters: Vec::new(),
+            runtime: String::new(),
+            acp_harness: String::new(),
+            acp_mode: String::new(),
         }
     }
 }
@@ -177,6 +197,9 @@ pub struct OwnedStudent {
     pub character: String,
     #[serde(default)]
     pub spawned_ts: f64,
+    /// ACP runner 학생이면 상태·inbox 파일 이름(`acp/<key>.status.json`·`acp/<key>.inbox`). 빈 값 = TUI 학생.
+    #[serde(default)]
+    pub acp: String,
 }
 
 // ── 파일 IO ──────────────────────────────────────────────────────────────────
@@ -204,6 +227,14 @@ fn config_path() -> Option<std::path::PathBuf> {
 
 fn state_path() -> Option<std::path::PathBuf> {
     Some(cfg_dir()?.join("dispatch-state.json"))
+}
+
+fn acp_status_path(key: &str) -> Option<std::path::PathBuf> {
+    Some(cfg_dir()?.join("acp").join(format!("{key}.status.json")))
+}
+
+fn acp_inbox_path(key: &str) -> Option<std::path::PathBuf> {
+    Some(cfg_dir()?.join("acp").join(format!("{key}.inbox")))
 }
 
 /// tmp + rename — 강제종료가 큐 파일을 반쯤 쓴 상태로 남기면 다음 부팅에 전부 잃는다.
@@ -318,6 +349,7 @@ pub fn reset_on_boot() {
         t.surface.clear();
         t.character.clear();
         t.assigned_ts = 0.0;
+        t.acp_turn = 0;
         t.updated_ts = now_unix();
         changed = true;
     }
@@ -395,6 +427,8 @@ pub enum Decision {
     },
     /// 새 학생을 부른다(브리프를 부팅 인자로 싣는다).
     SpawnFor { idx: usize, character: String },
+    /// runner 가 끝나 셸만 남은 자기 ACP 학생 — 칸을 치우고 명부에서 뺀다.
+    Retire { surface: String },
 }
 
 /// 순수 판단 — 큐·board·명부·설정·idle 연속 카운트를 보고 무엇을 할지만 정한다.
@@ -413,6 +447,7 @@ pub fn decide(
     state: &DispatchState,
     cfg: &DispatchConfig,
     streak: &HashMap<String, u8>,
+    acp: &HashMap<String, RunnerStatus>,
     now: f64,
     cursor: &mut usize,
 ) -> Vec<Decision> {
@@ -426,6 +461,26 @@ pub fn decide(
         // pane 자체가 없다 = 선생님이 닫았다. 결과를 못 봤으니 done 이 아니고, 치울 것도 없다.
         if !live_panes.contains(&t.surface) {
             out.push(Decision::Requeue { idx: i, close_pane: false });
+            continue;
+        }
+        // ACP 학생은 runner 가 쓴 상태가 정본이다 — 유예·idle 연속을 기다리지 않는다. 상태가 아직
+        // 없으면(runner 부팅 중이거나 못 떴다) 아래 board 판정의 유예·재시도로 간다.
+        if let Some(st) = acp.get(t.surface.as_str()).filter(|_| t.acp_turn > 0) {
+            let reached = st.turn >= t.acp_turn;
+            match st.state.as_str() {
+                "idle" if reached => {
+                    out.push(Decision::Harvest { idx: i, result: st.answer.clone() });
+                    freed.insert(t.surface.clone());
+                }
+                "exited" if reached && st.stop.as_deref() == Some("end_turn") => {
+                    out.push(Decision::Harvest { idx: i, result: st.answer.clone() });
+                }
+                "exited" => {
+                    let why = st.error.clone().or_else(|| st.stop.clone()).unwrap_or_else(|| "turn not finished".into());
+                    out.push(Decision::Fail { idx: i, reason: format!("ACP runner 가 끝났다: {why}") });
+                }
+                _ => {}
+            }
             continue;
         }
         match by_surface.get(t.surface.as_str()) {
@@ -479,10 +534,12 @@ pub fn decide(
             let held = q
                 .iter()
                 .any(|t| t.status == "assigned" && t.surface == s.surface && !freed.contains(&t.surface));
-            is_idle(row)
-                && streak.get(s.surface.as_str()).copied().unwrap_or(0) >= cfg.idle_ticks
-                && row.context_pct < cfg.context_cap
-                && !held
+            // ACP 학생의 idle 은 runner 가 직접 쓴 사실이라 연속 확인이 필요 없다.
+            let settled = match acp.get(s.surface.as_str()) {
+                Some(st) => st.state == "idle",
+                None => is_idle(row) && streak.get(s.surface.as_str()).copied().unwrap_or(0) >= cfg.idle_ticks,
+            };
+            settled && row.context_pct < cfg.context_cap && !held
         })
         .map(|s| s.surface.clone())
         .collect();
@@ -520,6 +577,13 @@ pub fn decide(
         }
         busy.extend(q[i].files_hint.iter().map(|f| norm_path(f)));
     }
+    for s in &state.students {
+        let exited = acp.get(s.surface.as_str()).is_some_and(|st| st.state == "exited");
+        let held = q.iter().any(|t| t.status == "assigned" && t.surface == s.surface);
+        if exited && !held {
+            out.push(Decision::Retire { surface: s.surface.clone() });
+        }
+    }
     out
 }
 
@@ -531,10 +595,11 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
     }
     let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut q = read_queue();
-    if q.iter().all(|t| t.status == "done" || t.status == "failed") {
+    // 일이 없어도 끝난 runner 칸은 치운다 — 안 그러면 다음 일이 올 때까지 셸만 남은 학생 칸이 선다.
+    if q.iter().all(|t| t.status == "done" || t.status == "failed") && !has_exited_runner(&read_state()) {
         return;
     }
-    let board = backend.collab_board().unwrap_or_default();
+    let mut board = backend.collab_board().unwrap_or_default();
     // 실제 pane 목록 — 셸만 뜬 pane 도 여기 있다. 이걸 명부·상한의 기준으로 삼아야
     // 부팅 중인 학생을 죽은 것으로 오해하지 않는다(`decide` 주석 참고).
     let live: HashSet<String> = backend
@@ -546,6 +611,17 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
     let mut state = read_state();
     state.students.retain(|s| live.contains(&s.surface));
 
+    // ACP 학생은 transcript 훅이 없어 board 에 안 뜬다. runner 상태로 같은 꼴의 줄을 지어 넣어
+    // 파일 충돌·컨텍스트 상한·캐릭터 중복 판단을 TUI 학생과 같은 길로 지나게 한다.
+    let acp: HashMap<String, RunnerStatus> = state
+        .students
+        .iter()
+        .filter(|s| !s.acp.is_empty())
+        .filter_map(|s| Some((s.surface.clone(), RunnerStatus::read(&acp_status_path(&s.acp)?)?)))
+        .collect();
+    board.retain(|r| !acp.contains_key(&r.surface_id));
+    board.extend(state.students.iter().filter_map(|s| Some(acp_row(s, acp.get(&s.surface)?))));
+
     for row in board.iter() {
         let e = rt.idle_streak.entry(row.surface_id.clone()).or_insert(0);
         *e = if is_idle(row) { e.saturating_add(1) } else { 0 };
@@ -553,7 +629,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
     rt.idle_streak.retain(|k, _| live.contains(k));
 
     let now = now_unix();
-    let decisions = decide(&q, &board, &live, &state, &cfg, &rt.idle_streak, now, &mut rt.cursor);
+    let decisions = decide(&q, &board, &live, &state, &cfg, &rt.idle_streak, &acp, now, &mut rt.cursor);
     let mut changed = false;
 
     for d in decisions {
@@ -578,6 +654,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 q[idx].surface.clear();
                 q[idx].character.clear();
                 q[idx].assigned_ts = 0.0;
+                q[idx].acp_turn = 0;
                 q[idx].updated_ts = now;
                 changed = true;
             }
@@ -600,8 +677,14 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 // 턴 시작). "유휴는 못 깨운다"는 관찰이 한 번 있었지만 그건 **다른 방에
                 // 만든 학생에게 자기 팀 이름으로 보내** 고아 인박스가 된 것이었다 —
                 // 그래서 team 은 규칙으로 짐작하지 않고 board 실측값만 쓴다.
-                let delivered = match &inbox {
-                    Some(addr) => crate::team::append_message(
+                let acp_key = state.students.iter().find(|s| s.surface == surface).map(|s| s.acp.clone());
+                let acp_turn = acp.get(&surface).map(|st| st.turn + 1);
+                let delivered = match (&inbox, acp_key.filter(|k| !k.is_empty())) {
+                    // ACP runner 는 칸 입력 대신 inbox 파일을 읽는다 — 긴 브리프가 터미널 한 줄 상한에 안 잘린다.
+                    (_, Some(key)) => acp_inbox_path(&key)
+                        .ok_or_else(|| anyhow::anyhow!("no config dir"))
+                        .and_then(|path| kasa_acp::runner::write_inbox(&path, &brief).map_err(anyhow::Error::from)),
+                    (Some(addr), None) => crate::team::append_message(
                         &crate::team::teams_root(),
                         &addr.team,
                         &addr.agent,
@@ -614,7 +697,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                     )
                     .map_err(anyhow::Error::from),
                     // 트리플 없이 뜬 pane(비-claude·shim 밖)은 인박스를 안 읽는다.
-                    None => backend.send_text(Some(&surface), &submit_payload(&brief)),
+                    (None, None) => backend.send_text(Some(&surface), &submit_payload(&brief)),
                 };
                 if let Err(e) = delivered {
                     eprintln!("[dispatch] assign failed to {surface}: {e:#}");
@@ -625,20 +708,35 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 q[idx].status = "assigned".into();
                 q[idx].surface = surface;
                 q[idx].assigned_ts = now;
+                q[idx].acp_turn = acp_turn.unwrap_or_default();
                 q[idx].updated_ts = now;
                 changed = true;
+            }
+            Decision::Retire { surface } => {
+                if let Err(e) = backend.close_surface(&surface) {
+                    eprintln!("[dispatch] close {surface} failed: {e:#}");
+                }
+                state.students.retain(|s| s.surface != surface);
             }
             Decision::SpawnFor { idx, character } => {
                 // 맥락을 실은 사본으로 부팅한다 — 큐에는 원래 브리프를 남겨 이력이 지저분해지지 않게.
                 let mut booted = q[idx].clone();
                 booted.brief = compose_brief(idx, &q, &board);
-                match spawn_with_brief(backend, &cfg, &character, &booted) {
-                    Ok(sid) if !sid.is_empty() => {
+                // runner 는 Windows 에서 아직 실측하지 않았다 — 거기서는 TUI 로 띄운다.
+                let spawned = if cfg.runtime == "acp" && cfg!(unix) {
+                    spawn_acp(backend, &cfg, &character, &booted, now)
+                } else {
+                    spawn_with_brief(backend, &cfg, &character, &booted).map(|sid| (sid, String::new()))
+                };
+                match spawned {
+                    Ok((sid, acp_key)) if !sid.is_empty() => {
                         name_seat(backend, &sid, &q[idx].brief);
+                        q[idx].acp_turn = u32::from(!acp_key.is_empty());
                         state.students.push(OwnedStudent {
                             surface: sid.clone(),
                             character: character.clone(),
                             spawned_ts: now,
+                            acp: acp_key,
                         });
                         q[idx].character = character;
                         q[idx].status = "assigned".into();
@@ -717,8 +815,13 @@ fn spawn_with_brief(
     if surface.is_empty() {
         anyhow::bail!("no pane created");
     }
+    boot_tui(backend, cfg, &surface, task)?;
+    Ok(surface)
+}
+
+fn boot_tui(backend: &Arc<dyn Backend>, cfg: &DispatchConfig, surface: &str, task: &QueueTask) -> Result<()> {
     use kasa_socket::shell_line::ShellKind;
-    match backend.pane_shell(&surface).as_deref().and_then(ShellKind::from_process_name) {
+    match backend.pane_shell(surface).as_deref().and_then(ShellKind::from_process_name) {
         // cmd·PowerShell 칸은 POSIX 줄의 작은따옴표·`&&` 를 못 읽는다 — 그 셸 문법은 `surface.launch` 가 짓는다.
         Some(ShellKind::Cmd | ShellKind::PowerShell) => {
             let (command, brief) = boot_parts(cfg, task);
@@ -738,9 +841,103 @@ fn spawn_with_brief(
                 }
             })?;
         }
-        _ => send_with_retry(backend, &surface, &boot_command(cfg, task))?,
+        _ => send_with_retry(backend, surface, &boot_command(cfg, task))?,
     }
-    Ok(surface)
+    Ok(())
+}
+
+/// ACP runner 학생을 부른다. 브리프는 부팅 명령에 싣지 않고 inbox 파일에 먼저 놓는다 — 셸 한 줄로
+/// 펴지 않아도 되고, runner 는 뜨자마자 그것을 첫 턴으로 집어 간다. 돌려주는 둘째 값이 상태 파일
+/// 열쇠이고, 비어 있으면 그 칸은 TUI 로 떴다(cmd·PowerShell 칸).
+fn spawn_acp(
+    backend: &Arc<dyn Backend>,
+    cfg: &DispatchConfig,
+    character: &str,
+    task: &QueueTask,
+    now: f64,
+) -> Result<(String, String)> {
+    use kasa_socket::shell_line::ShellKind;
+    let surface = backend.spawn_student(character)?;
+    if surface.is_empty() {
+        anyhow::bail!("no pane created");
+    }
+    if matches!(
+        backend.pane_shell(&surface).as_deref().and_then(ShellKind::from_process_name),
+        Some(ShellKind::Cmd | ShellKind::PowerShell)
+    ) {
+        boot_tui(backend, cfg, &surface, task)?;
+        return Ok((surface, String::new()));
+    }
+    let key = format!("{}-{}", surface.trim_start_matches('%'), (now * 1000.0) as u64);
+    let (Some(status), Some(inbox)) = (acp_status_path(&key), acp_inbox_path(&key)) else {
+        anyhow::bail!("no config dir for ACP status");
+    };
+    kasa_acp::runner::write_inbox(&inbox, &task.brief)?;
+    send_with_retry(backend, &surface, &acp_boot_command(cfg, task, &kasa_acp_program(), &status, &inbox))?;
+    Ok((surface, key))
+}
+
+fn acp_boot_command(
+    cfg: &DispatchConfig,
+    task: &QueueTask,
+    program: &str,
+    status: &std::path::Path,
+    inbox: &std::path::Path,
+) -> String {
+    let harness = if cfg.acp_harness.is_empty() { "claude" } else { cfg.acp_harness.as_str() };
+    let cd = if task.cwd.is_empty() {
+        String::new()
+    } else {
+        format!("cd {} && ", sh_quote(&task.cwd))
+    };
+    let mut line = format!(
+        "{cd}{} run --harness {} --status {} --inbox {} --permission reject",
+        sh_quote(program),
+        sh_quote(harness),
+        sh_quote(&status.to_string_lossy()),
+        sh_quote(&inbox.to_string_lossy()),
+    );
+    if !cfg.acp_mode.is_empty() {
+        line.push_str(&format!(" --mode {}", sh_quote(&cfg.acp_mode)));
+    }
+    let model = if task.weight == "light" { &cfg.light_model } else { &cfg.heavy_model };
+    if !model.is_empty() {
+        line.push_str(&format!(" --set {}", sh_quote(&format!("model={model}"))));
+    }
+    line.push('\r');
+    line
+}
+
+/// 앱 묶음은 `kasa-acp` 를 본판 실행 파일 옆에 둔다. 칸의 PATH 에는 없어 절대 경로로 부른다.
+fn kasa_acp_program() -> String {
+    let name = if cfg!(windows) { "kasa-acp.exe" } else { "kasa-acp" };
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(name)))
+        .filter(|p| p.is_file())
+        .map_or_else(|| name.to_owned(), |p| p.to_string_lossy().into_owned())
+}
+
+fn has_exited_runner(state: &DispatchState) -> bool {
+    state.students.iter().filter(|s| !s.acp.is_empty()).any(|s| {
+        acp_status_path(&s.acp)
+            .and_then(|path| RunnerStatus::read(&path))
+            .is_some_and(|st| st.state == "exited")
+    })
+}
+
+/// runner 상태를 board 줄 꼴로. `status` 는 `working`·`idle`·`exited` 그대로 — 이 줄은 판단에만 쓰고
+/// board 로 내보내지 않는다.
+fn acp_row(student: &OwnedStudent, st: &RunnerStatus) -> PaneActivity {
+    PaneActivity {
+        surface_id: student.surface.clone(),
+        status: st.state.clone(),
+        last_reply: st.answer.clone(),
+        changed_files: st.files.clone(),
+        context_pct: st.context_percent().unwrap_or_default(),
+        character: Some(student.character.clone()).filter(|c| !c.is_empty()),
+        ..Default::default()
+    }
 }
 
 /// 학생이 실제로 받는 지시문 = 원래 브리프 + 이 작업의 맥락.
@@ -980,6 +1177,7 @@ pub fn solo_task(instruction: &str, cwd: &str) -> QueueTask {
         created_ts: 0.0,
         updated_ts: 0.0,
         assigned_ts: 0.0,
+        acp_turn: 0,
     }
 }
 
@@ -1099,6 +1297,7 @@ fn parse_plan(text: &str, origin: &str, cwd: &str) -> Option<Vec<QueueTask>> {
             created_ts: 0.0,
             updated_ts: 0.0,
             assigned_ts: 0.0,
+            acp_turn: 0,
         });
     }
     Some(out)
@@ -1129,7 +1328,7 @@ mod tests {
         cursor: &mut usize,
     ) -> Vec<Decision> {
         let live: HashSet<String> = board.iter().map(|r| r.surface_id.clone()).collect();
-        decide(q, board, &live, state, cfg, streak, now, cursor)
+        decide(q, board, &live, state, cfg, streak, &HashMap::new(), now, cursor)
     }
 
     fn task(id: &str, status: &str, files: &[&str], deps: &[&str]) -> QueueTask {
@@ -1151,6 +1350,7 @@ mod tests {
             created_ts: 0.0,
             updated_ts: 0.0,
             assigned_ts: 0.0,
+            acp_turn: 0,
         }
     }
 
@@ -1313,7 +1513,7 @@ mod tests {
     }
 
     fn owned(surface: &str, character: &str) -> OwnedStudent {
-        OwnedStudent { surface: surface.into(), character: character.into(), spawned_ts: 0.0 }
+        OwnedStudent { surface: surface.into(), character: character.into(), spawned_ts: 0.0, acp: String::new() }
     }
 
     /// idle 이 충분히 이어진 상태 — 실제로는 tick 을 여러 번 돌아 쌓인다.
@@ -1449,7 +1649,7 @@ mod tests {
         let live: HashSet<String> = ["%1".to_string()].into_iter().collect();
         let state = DispatchState { students: vec![owned("%1", "미도리")] };
         let mut cur = 0;
-        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), &HashMap::new(), 1000.0, &mut cur);
         assert!(d.is_empty(), "부팅 중인 학생은 건드리지 않는다: {d:?}");
     }
 
@@ -1464,7 +1664,7 @@ mod tests {
         let mut cur = 0;
 
         // 1회차 — 껍데기를 치우고 다시 대기열로.
-        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), &HashMap::new(), 1000.0, &mut cur);
         assert_eq!(
             d,
             vec![Decision::Requeue { idx: 0, close_pane: true }],
@@ -1473,7 +1673,7 @@ mod tests {
 
         // 상한(기본 2)에 닿으면 접는다 — 조용히 영원히 반복하지 않는다.
         q[0].attempts = 1;
-        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), &HashMap::new(), 1000.0, &mut cur);
         match &d[..] {
             [Decision::Fail { idx: 0, reason }] => assert!(reason.contains("올라오지"), "{reason}"),
             other => panic!("접어야 한다: {other:?}"),
@@ -1489,7 +1689,7 @@ mod tests {
             DispatchState { students: vec![owned("%1", "미도리"), owned("%2", "유즈")] };
         let mut cur = 0;
         // board 는 비어 있다(둘 다 아직 claude 없음) — 그래도 상한 2 는 이미 찼다.
-        let d = decide(&q, &[], &live, &state, &cfg_for(2), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide(&q, &[], &live, &state, &cfg_for(2), &HashMap::new(), &HashMap::new(), 1000.0, &mut cur);
         assert!(d.is_empty(), "board 가 비었다고 상한을 우회해선 안 된다: {d:?}");
     }
 
@@ -1545,6 +1745,142 @@ mod tests {
         let d = decide_t(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert_eq!(d.len(), 1, "선행이 안 끝났으면 후행은 배정 대상이 아니다");
         assert!(matches!(d[0], Decision::SpawnFor { idx: 0, .. }));
+    }
+
+    // ── ACP runner 학생 ──
+
+    fn acp_owned(surface: &str, character: &str) -> OwnedStudent {
+        OwnedStudent { acp: format!("{}-1", surface.trim_start_matches('%')), ..owned(surface, character) }
+    }
+
+    fn runner(state: &str, turn: u32, stop: Option<&str>, answer: &str) -> RunnerStatus {
+        RunnerStatus {
+            state: state.into(),
+            turn,
+            stop: stop.map(Into::into),
+            answer: answer.into(),
+            ..Default::default()
+        }
+    }
+
+    fn acp_task(id: &str, status: &str, surface: &str, acp_turn: u32, assigned_ts: f64) -> QueueTask {
+        QueueTask { surface: surface.into(), acp_turn, assigned_ts, ..task(id, status, &["a.rs"], &[]) }
+    }
+
+    fn decide_acp(
+        q: &[QueueTask],
+        state: &DispatchState,
+        acp: &[(&str, RunnerStatus)],
+        now: f64,
+    ) -> Vec<Decision> {
+        let acp: HashMap<String, RunnerStatus> = acp.iter().map(|(s, st)| ((*s).to_string(), st.clone())).collect();
+        let board: Vec<PaneActivity> = state
+            .students
+            .iter()
+            .filter_map(|s| Some(acp_row(s, acp.get(&s.surface)?)))
+            .collect();
+        let live: HashSet<String> = state.students.iter().map(|s| s.surface.clone()).collect();
+        let mut cur = 0;
+        decide(q, &board, &live, state, &cfg_for(4), &HashMap::new(), &acp, now, &mut cur)
+    }
+
+    #[test]
+    fn acp_task_is_harvested_the_moment_its_turn_is_done() {
+        let state = DispatchState { students: vec![acp_owned("%5", "미도리")] };
+        // 배정 2초 뒤 — TUI 라면 45초 유예와 idle 연속을 기다릴 자리다.
+        let q = vec![acp_task("t1", "assigned", "%5", 2, 998.0)];
+        assert!(decide_acp(&q, &state, &[("%5", runner("idle", 1, Some("end_turn"), "old"))], 1000.0).is_empty(),
+            "the previous turn's answer is not this task's");
+        assert!(decide_acp(&q, &state, &[("%5", runner("working", 2, Some("end_turn"), "old"))], 1000.0).is_empty());
+        assert_eq!(
+            decide_acp(&q, &state, &[("%5", runner("idle", 2, Some("end_turn"), "done"))], 1000.0),
+            vec![Decision::Harvest { idx: 0, result: "done".into() }]
+        );
+    }
+
+    #[test]
+    fn acp_runner_death_fails_the_task_unless_its_turn_finished() {
+        let state = DispatchState { students: vec![acp_owned("%5", "미도리")] };
+        let q = vec![acp_task("t1", "assigned", "%5", 1, 900.0)];
+        let mut dead = runner("exited", 1, Some("error"), "");
+        dead.error = Some("agent exited".into());
+        assert_eq!(
+            decide_acp(&q, &state, &[("%5", dead)], 1000.0),
+            vec![Decision::Fail { idx: 0, reason: "ACP runner 가 끝났다: agent exited".into() }]
+        );
+        assert_eq!(
+            decide_acp(&q, &state, &[("%5", runner("exited", 1, Some("end_turn"), "ok"))], 1000.0),
+            vec![Decision::Harvest { idx: 0, result: "ok".into() }]
+        );
+    }
+
+    #[test]
+    fn acp_runner_that_never_wrote_status_falls_back_to_the_boot_grace() {
+        let state = DispatchState { students: vec![acp_owned("%5", "미도리")] };
+        let q = vec![acp_task("t1", "assigned", "%5", 1, 990.0)];
+        assert!(decide_acp(&q, &state, &[], 1000.0).is_empty(), "still booting");
+        assert_eq!(
+            decide_acp(&q, &state, &[], 1100.0),
+            vec![Decision::Requeue { idx: 0, close_pane: true }]
+        );
+    }
+
+    #[test]
+    fn idle_acp_student_takes_work_without_an_idle_streak() {
+        let state = DispatchState { students: vec![acp_owned("%5", "미도리")] };
+        let q = vec![task("t2", "pending", &["b.rs"], &[])];
+        let d = decide_acp(&q, &state, &[("%5", runner("idle", 3, Some("end_turn"), ""))], 1000.0);
+        assert_eq!(
+            d,
+            vec![Decision::AssignExisting { idx: 0, surface: "%5".into(), character: "미도리".into(), inbox: None }]
+        );
+    }
+
+    #[test]
+    fn working_acp_student_holds_the_files_it_edited() {
+        let state = DispatchState { students: vec![acp_owned("%5", "미도리")] };
+        let q = vec![task("t2", "pending", &["/repo/a.rs"], &[])];
+        let mut busy = runner("working", 1, None, "");
+        busy.files = vec!["/repo/a.rs".into()];
+        let d = decide_acp(&q, &state, &[("%5", busy)], 1000.0);
+        assert!(d.iter().all(|x| !matches!(x, Decision::SpawnFor { .. } | Decision::AssignExisting { .. })), "{d:?}");
+    }
+
+    #[test]
+    fn exited_acp_student_without_work_is_retired() {
+        let state = DispatchState { students: vec![acp_owned("%5", "미도리"), acp_owned("%6", "유즈")] };
+        let q = vec![acp_task("t1", "assigned", "%6", 1, 900.0)];
+        let d = decide_acp(
+            &q,
+            &state,
+            &[("%5", runner("exited", 2, Some("end_turn"), "")), ("%6", runner("working", 1, None, ""))],
+            1000.0,
+        );
+        assert_eq!(d, vec![Decision::Retire { surface: "%5".into() }]);
+    }
+
+    #[test]
+    fn acp_boot_command_keeps_the_brief_out_of_the_shell_line() {
+        let mut cfg = cfg_for(4);
+        cfg.acp_harness = "codex".into();
+        cfg.acp_mode = "workspace-write".into();
+        cfg.heavy_model = "gpt-6.1-sol".into();
+        let mut t = task("t1", "pending", &[], &[]);
+        t.brief = "여러 줄\n브리프 `$(rm -rf /)`".into();
+        let line = acp_boot_command(
+            &cfg,
+            &t,
+            "/Applications/kasaterm.app/Contents/MacOS/kasa-acp",
+            std::path::Path::new("/c/acp/5-1.status.json"),
+            std::path::Path::new("/c/acp/5-1.inbox"),
+        );
+        assert_eq!(
+            line,
+            "cd '/repo' && '/Applications/kasaterm.app/Contents/MacOS/kasa-acp' run --harness 'codex' \
+             --status '/c/acp/5-1.status.json' --inbox '/c/acp/5-1.inbox' --permission reject \
+             --mode 'workspace-write' --set 'model=gpt-6.1-sol'\r"
+        );
+        assert!(!line.contains("브리프"));
     }
 
     #[test]

@@ -111,10 +111,10 @@ if [[ "$PROFILE" == "release" ]]; then
   for package in kasa-identity kasa-characters kasa-wire kasa-device kasa-backend kasa-students kasa-remote kasa-git kasa-gateway kasa-http kasa-serve; do
     host_optimization+=(--config "profile.release.package.${package}.opt-level=3")
   done
-  cargo build --locked --release "${host_optimization[@]}" -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve --bins
+  cargo build --locked --release "${host_optimization[@]}" -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins
   BINDIR="$TARGET_DIR/release"
 else
-  cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve --bins
+  cargo build --locked -p kasaterm -p kasa-socket -p kasa-gateway -p kasa-device -p kasa-serve -p kasa-acp --bins
   BINDIR="$TARGET_DIR/debug"
 fi
 
@@ -124,6 +124,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
+# 디스패처의 ACP 학생 runner — 칸 PATH 에 없어 디스패처가 본판 옆 절대 경로로 부른다(docs/acp.md).
+cp "$BINDIR/kasa-acp" "$APP/Contents/MacOS/kasa-acp"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 mkdir -p "$APP/Contents/Resources/licenses"
 cp crates/kasa-gridview/assets/fonts/OFL-D2Coding.txt "$APP/Contents/Resources/licenses/OFL-D2Coding.txt"
@@ -555,6 +557,7 @@ if [[ -d "$FW" ]]; then
 fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 sign_part "$APP/Contents/MacOS/kasaterm-cli"
+sign_part "$APP/Contents/MacOS/kasa-acp"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
 [[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")
