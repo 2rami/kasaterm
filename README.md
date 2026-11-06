@@ -71,8 +71,20 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 | **`kasa-ime`** | 두벌식 한글 입력 오토마타. OS IME 비의존 | 한글 입력이 필요한 Rust 앱 |
 | **`kasa-socket`** | cmux 호환 Unix-socket JSON-RPC 서버. `kasaterm-cli` 포함 | pane 제어 프로토콜 |
 | **`kasa-bridge`** | tmux control-mode(`-C`) 브리지. GUI 비의존, 이벤트·화면 채널만 넘긴다 | tmux를 붙이는 다른 UI |
-| **`kasa-http`** | 원격 세션·기계 명부·폰 관문·보드의 HTTP 층 | 폰·다른 기기·웹 pane 연동 |
+| **`kasa-http`** | 이 기기의 HTTP 라우터·칸·화면 API | 로컬 API 호스트 |
+| **`kasa-gateway`** | 폰 관문·계정 라우팅·설치판 창구 | kasa-relay 서버 |
+| **`kasa-device`** | 기기 계정·명부·업링크·폰 입구 | 기기 클라이언트와 kasa-device |
+| **`kasa-identity`** | OAuth·권한 연결·봉인 자격 | 관문과 기기의 공통 인증 |
+| **`kasa-remote`** | 원격 칸·포트·화면·레포 전송 | 기기 간 연결 |
+| **`kasa-students`** | 학생 호출·팀·예약·작업 | 하네스 운영 |
+| **`kasa-characters`** | 캐릭터 자산·페르소나 | 학생 표시·설정 |
+| **`kasa-git`** | Git 작업·상태·파일 감시 | Git 판과 API |
+| **`kasa-wire`** | 화면 전송 형식·레이아웃·변경 피드 | 화면 전송 계약 |
+| **`kasa-backend`** | 창 없는 Backend 구현 | 호스트와 통합 시험 |
+| **`kasa-serve`** | 독립 HTTP 실행기 | kasa-serve-web |
 | `app/kasaterm` | 메인 바이너리 — winit+wgpu 윈도우, chrome UI, 입력·단축키 라우팅 | — |
+
+전체 crate 목록과 의존 방향은 [워크스페이스 표와 그림](docs/workspace.md)을 따른다.
 
 ---
 

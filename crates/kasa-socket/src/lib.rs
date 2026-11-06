@@ -45,7 +45,7 @@ pub mod shell_line;
 pub mod transport;
 pub mod transfer;
 pub mod tell;
-/// Windows 소유자 전용 저장소(tell 장부·kasa-http 보관함) — Unix 0700/0600 의 대응.
+/// Windows 소유자 전용 저장소(tell 장부·관문 보관함) — Unix 0700/0600 의 대응.
 #[cfg(windows)]
 pub mod private_store;
 #[cfg(target_os = "macos")]

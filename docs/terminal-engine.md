@@ -1,5 +1,7 @@
 # 공통 터미널 엔진 — 카사텀·새 카사라이트·`kasa tui`
 
+현재 crate 경계는 [workspace.md](workspace.md)가 정본이다. 아래의 통합 호스트 크기·위치·재수출 계획은 분리 전 설계 기록이며, 현행 코드 위치는 [code-map.md](code-map.md)에서 찾는다.
+
 상태: **설계**(2026-10-06). L 트랙 결과는 §8. 이 문서는 세 제품이 같은 코드를 쓰게 하려면
 무엇을 어디로 떼는지, 새 카사라이트와 TUI 판을 어떤 순서로 세우는지를 정한다.
 
@@ -57,7 +59,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
 - `struct App` 은 337필드이고, 그중 터미널 핵심은 약 100개다.
 - **feature 플래그가 하나도 없다**(`[features]` 0, `cfg(feature)` 0).
   - 라이트 모드는 런타임 분기 약 66곳으로만 갈린다.
-  - 그래서 라이트 바이너리도 wry·tree-sitter·kasa-http를 전부 링크한다.
+  - 그래서 라이트 바이너리도 wry·tree-sitter·통합 호스트를 전부 링크한다.
 
 ### 1.2 엔진이 될 크레이트 — 생각보다 이미 떨어져 있다
 
@@ -68,7 +70,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
 | `kasa-cells` | 1,650 | 글리프 아틀라스·셰이퍼(swash)·wgpu 셀 파이프라인 |
 | `kasa-ime` | 486 | 두벌식 조합기. 의존 0 |
 | `kasa-socket` | 18,284 | 줄 단위 JSON 프로토콜·서버·전송·`kasaterm-cli`·협업 낱말·앱 업데이트 |
-| `kasa-http` | 60,395 | HTTP 서버(axum·tokio·reqwest·iroh)·**보드 수집기·tell 장부**·원격 칸 |
+| `통합 호스트` | 60,395 | HTTP 서버(axum·tokio·reqwest·iroh)·**보드 수집기·tell 장부**·원격 칸 |
 
 - **`kasa-pty` 는 GUI 없이 돈다.**
   - winit·wgpu 의존이 없다. alacritty_terminal 0.26 타입을 밖에 내놓지 않는다(밖으로는 `kasa_bridge::screen` 만 나간다).
@@ -83,7 +85,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
   - 칸 좌표만 다룬다. 본판 10개 파일이 87곳에서 쓰고, 직렬화는 serde다.
   - 칸 사이 경계 칸을 따로 남기지 않는다. TUI는 테두리 칸을 직접 떼야 한다.
 - **협업은 무겁게 엉켜 있다.**
-  - 보드 수집기(`board_service`)와 tell 장부(`tell_service`)는 kasa-http 안에 있다. 수집기는 `spawn_http_server` 안에서만 켜진다.
+  - 보드 수집기(`board_service`)와 tell 장부(`tell_service`)는 통합 호스트 안에 있다. 수집기는 `spawn_http_server` 안에서만 켜진다.
   - 그래서 옛 라이트는 「collaboration collector is not running」 을 낸다.
   - 앱에만 있는 것:
     - 보드 행(`collab_board_source`)
@@ -151,7 +153,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
 | `kasa-pty` (다이어트) | PTY·VT·스크롤백·OSC 133·OSC 1337·kitty·fd 인계·세션 등록부·`PtyLayout` | 그대로. 아래 다섯 가지를 뺀다 | 셋 다 |
 | `kasa-keys` (새, 작음) | 키 → 바이트 인코더(커서 키 모드·kitty 키보드 플래그·브래킷 붙여넣기) | `input.rs` `forward_key`(1,039줄) 안의 순수 부분 | 셋 다 |
 | `kasa-agents` (새) | 프로세스 표·에이전트 표(30종)·프롬프트 앵커·출력 박동·화면 신호(스피너·승인 위젯·입력창 판독)·`agent_state`·`transcript` | kasa-pty 감지부 ≈900, `screenread` 순수 판정부, `agent_state.rs`, `transcript.rs` | 본판·TUI |
-| `kasa-collab` (새) | 보드 수집기·tell 장부·tell 전달 루프·claude 훅/칸 shim 설치·`Backend` 협업 메서드 기본 구현. 기기 사이 관측은 feature `net` | kasa-http `board_service`·`tell_service`, 앱 `tell_delivery.rs`·`install_claude_hook_shim`·`install_pane_shims`·`collab_board_source` | 본판·TUI(라이트는 선택) |
+| `kasa-collab` (새) | 보드 수집기·tell 장부·tell 전달 루프·claude 훅/칸 shim 설치·`Backend` 협업 메서드 기본 구현. 기기 사이 관측은 feature `net` | 통합 호스트 `board_service`·`tell_service`, 앱 `tell_delivery.rs`·`install_claude_hook_shim`·`install_pane_shims`·`collab_board_source` | 본판·TUI(라이트는 선택) |
 | `kasa-socket` (유지) | 프로토콜·서버·전송(유닉스 소켓·윈도우 named pipe)·`kasaterm-cli` | 앱 업데이트·재시작(3,918줄)은 feature로 빼서 TUI에 안 실리게 | 셋 다 |
 | `kasa-ime` (유지) | 두벌식 조합 | 그대로 | 본판·라이트(GUI만) |
 | `kasa-cells` (정리) | 아틀라스·셰이퍼·wgpu 셀 파이프라인 | 아래 두 가지를 정리한다 | 본판·라이트 |
@@ -301,7 +303,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
   - 둘 다 보드 원천(source)이 된다. 원천 종류 `tui` 를 더한다.
   - 주소(`surface_key`)가 원천마다 달라 tell이 섞이지 않는다.
   - 본판 수집기는 이 기계의 TUI 서버 소켓이 있으면 그 행을 함께 싣는다. TUI 쪽도 마찬가지다.
-- **기기 사이**(`board --all`, `tell 이름@기계`)는 `kasa-collab` feature `net` 이 맡는다. 지금 kasa-http의 원격 관측과 `/collab` 엔드포인트를 옮겨 온 것이다.
+- **기기 사이**(`board --all`, `tell 이름@기계`)는 `kasa-collab` feature `net` 이 맡는다. 지금 통합 호스트의 원격 관측과 `/collab` 엔드포인트를 옮겨 온 것이다.
   - 첫 판에 넣되 관문(T4)을 따로 둔다. 가장 무거운 의존(tokio·HTTP·kasanet)이 여기서 들어온다.
 
 ### 3.6 배포
@@ -367,7 +369,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
     - macOS: SF Mono·Menlo + Apple SD Gothic Neo
     - Windows: Cascadia Mono·Consolas + 맑은 고딕
   - Nerd 기호(1.9MB)만 넣거나, 쓰는 글자만 서브셋한다.
-  - wry·tree-sitter·rusqlite·kasa-http·스프라이트를 넣지 않는다.
+  - wry·tree-sitter·rusqlite·통합 호스트·스프라이트를 넣지 않는다.
   - release 프로필: `lto = "fat"`, `codegen-units = 1`, `strip = true`, `panic = "abort"`
 
 ### 4.3 목표 수치
@@ -390,7 +392,7 @@ PTY를 고칠 때마다 레포를 오가야 한다. kasalite는 엔진을 올릴
 | **T0 엔진 준비** | kasaterm | `kasa-screen` 떼기(재수출), kasa-pty env 정책·`ClipboardSink`·셀 픽셀 옵션, 「Last login」을 호스트로, 앱 업데이트를 feature로 | 본판 시험 통과. 격리 리그로 칸 열기·한글·`kitty icat` 전후 동일. kasalite에서 git 의존으로 kasa-pty 빌드 | 1~2일, 수백 줄 이동 |
 | **T1 TUI 뼈대** | kasalite | `kasa server/tui/attach/ls/kill`, 칸 나누기·탭·접두키·마우스·한글 커서·스크롤백·선택·OSC 52, `kasa-keys` | Ghostty·iTerm2·Windows Terminal에서 vim·htop·claude를 칸 넷에 띄워 화면 깨짐 0. 닫았다 붙어도 칸이 산다. 폭 고문 파일 스크린샷 일치. 한글 조합은 사람이 직접 친다(자동 재현 불가) | 3~5천 줄 |
 | **T2 kitty 넘기기** | kasalite | 감지·`a=t`+`U=1`·자리표시·글자 대체 | Ghostty·kitty에서 `kitty icat` 과 Claude Code 그림이 칸 안에 잘려 보이고 스크롤을 따른다. Windows Terminal은 글자 자리표시 | ≈800줄 |
-| **T3 협업 떼기** | kasaterm | `kasa-agents`·`kasa-collab` 크레이트를 만들고 본판이 그것을 쓰게 | 본판 보드·tell·summon·done 회귀 없음(격리 리그 + 기존 시험). kasa-http는 재수출로 호출부 0줄 | **가장 큼**. 6~9천 줄 이동, 약 1주 |
+| **T3 협업 떼기** | kasaterm | `kasa-agents`·`kasa-collab` 크레이트를 만들고 본판이 그것을 쓰게 | 본판 보드·tell·summon·done 회귀 없음(격리 리그 + 기존 시험). 통합 호스트는 재수출로 호출부 0줄 | **가장 큼**. 6~9천 줄 이동, 약 1주 |
 | **T4 TUI 협업** | kasalite | `TuiBackend`·훅 shim·칸 머리 학생 상태·한 기계 두 원천 합치기·feature `net` | TUI 안에서 `kasaterm-cli summon` → 브리프 tell 접수 → done이 부른 칸으로 온다. `board --local` 에 본판·TUI 행이 함께 뜬다. 기기 사이 tell 왕복 | 2~3천 줄 |
 | **T5 첫 공개** | kasalite | dist 설정, homebrew-tap 레포, npm, winget 첫 손 제출, 맥 서명·공증 | 깨끗한 맥·윈도·리눅스(도커)에서 brew·npm·winget·셸로 설치 → `kasa tui` 실행. 설치 시간·크기 기록 | 반나절~1일 + 비밀 승인 대기 |
 | **L1 렌더 엔진 떼기** | kasaterm | `kasa-gridview`, `kasa-cells` 정리, 글꼴을 호스트가 넘기게 | 본판 화면 격리 리그 전후 px 차 0(또는 의도한 것만). 본판 그리기 시간 회귀 없음 | 4~5천 줄 이동, 3~5일 |
