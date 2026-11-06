@@ -134,7 +134,7 @@ fn main() -> Result<()> {
         light_launcher: "glm".into(), // 가벼운 일은 게이트웨이로 — 명령 조립을 눈으로 보려고
 
         characters: vec!["미도리".into(), "유즈".into(), "아리스".into()],
-        runtime: String::new(),
+        runtime: "tui".into(),
         acp_harness: String::new(),
         acp_mode: String::new(),
     });

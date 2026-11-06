@@ -144,6 +144,16 @@
                                 Source='$(var.CargoTargetBinDir)\kasaterm-cli.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <!-- 디스패처의 ACP 학생 runner(docs/acp.md). 칸 PATH 에 없어 디스패처가 본판 exe 옆
+                             절대 경로로 부른다. package.ps1 이 kasa-acp 의 bin 을 함께 빌드한다. -->
+                        <Component Id='binary3' Guid='*'>
+                            <File
+                                Id='kasaacp'
+                                Name='kasa-acp.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\kasa-acp.exe'
+                                KeyPath='yes'/>
+                        </Component>
                         <!-- 동봉 ConPTY(bin\conpty\) — bootstrap.rs preload_bundled_conpty 가 exe 옆에서
                              찾아 먼저 싣는다. package.ps1 이 NuGet 에서 받아 해시를 확인해 둔다. -->
                         <Directory Id='ConptyDir' Name='conpty'>
@@ -267,6 +277,7 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
             <ComponentRef Id='binary2'/>
+            <ComponentRef Id='binary3'/>
             <ComponentRef Id='ConptyDll'/>
             <ComponentRef Id='ConptyOpenConsole'/>
             <ComponentRef Id='ConptyLicense'/>

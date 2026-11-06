@@ -128,16 +128,17 @@ pub struct DispatchConfig {
     /// 스폰할 때 돌려 쓸 캐릭터 이름. 비면 `characters.json` 순서를 따른다.
     #[serde(default)]
     pub characters: Vec<String>,
-    /// 새 학생을 어떻게 띄우나. 빈 값 = 칸에 TUI(`claude '<브리프>'`), `"acp"` = 칸에 ACP runner
-    /// (`kasa-acp run`, docs/acp.md). acp 학생은 board 를 짐작하지 않고 runner 상태 파일로 수확하고,
-    /// 지시는 칸 입력 대신 inbox 파일로 준다. Windows 와 cmd·PowerShell 칸은 아직 TUI 로 띄운다.
-    #[serde(default)]
+    /// 새 학생을 어떻게 띄우나. `"acp"`(기본) = 칸에 ACP runner(`kasa-acp run`, docs/acp.md),
+    /// `"tui"` = 칸에 TUI(`claude '<브리프>'`). acp 학생은 board 를 짐작하지 않고 runner 상태 파일로
+    /// 수확하고, 지시는 칸 입력 대신 inbox 파일로 준다.
+    #[serde(default = "d_runtime")]
     pub runtime: String,
     /// runtime=acp 의 하네스(`claude`·`codex`). 빈 값 = claude.
     #[serde(default)]
     pub acp_harness: String,
-    /// runtime=acp 의 세션 모드(claude `acceptEdits`·`bypassPermissions`, codex `agent`·`workspace-write`).
-    /// 빈 값이면 그 기기 사용자 설정을 따른다. 권한 요청은 사람이 없으니 거절된다.
+    /// runtime=acp 의 세션 모드(claude `acceptEdits`·`bypassPermissions`, codex `agent`·`agent-full-access`).
+    /// 빈 값이면 TUI 학생과 같게 둔다 — claude 는 그 기기 사용자 설정, codex 는 칸 shim 처럼 샌드박스 없이
+    /// (`agent-full-access`). 그래도 오는 권한 요청은 칸에서 사람에게 묻는다.
     #[serde(default)]
     pub acp_mode: String,
 }
@@ -160,6 +161,9 @@ fn d_planner_model() -> String {
 fn d_max_attempts() -> u8 {
     2
 }
+fn d_runtime() -> String {
+    "acp".into()
+}
 
 impl Default for DispatchConfig {
     fn default() -> Self {
@@ -176,7 +180,7 @@ impl Default for DispatchConfig {
             heavy_launcher: String::new(),
             light_launcher: String::new(),
             characters: Vec::new(),
-            runtime: String::new(),
+            runtime: d_runtime(),
             acp_harness: String::new(),
             acp_mode: String::new(),
         }
@@ -722,8 +726,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 // 맥락을 실은 사본으로 부팅한다 — 큐에는 원래 브리프를 남겨 이력이 지저분해지지 않게.
                 let mut booted = q[idx].clone();
                 booted.brief = compose_brief(idx, &q, &board);
-                // runner 는 Windows 에서 아직 실측하지 않았다 — 거기서는 TUI 로 띄운다.
-                let spawned = if cfg.runtime == "acp" && cfg!(unix) {
+                let spawned = if cfg.runtime == "acp" {
                     spawn_acp(backend, &cfg, &character, &booted, now)
                 } else {
                     spawn_with_brief(backend, &cfg, &character, &booted).map(|sid| (sid, String::new()))
@@ -825,30 +828,39 @@ fn boot_tui(backend: &Arc<dyn Backend>, cfg: &DispatchConfig, surface: &str, tas
         // cmd·PowerShell 칸은 POSIX 줄의 작은따옴표·`&&` 를 못 읽는다 — 그 셸 문법은 `surface.launch` 가 짓는다.
         Some(ShellKind::Cmd | ShellKind::PowerShell) => {
             let (command, brief) = boot_parts(cfg, task);
-            let mut params = serde_json::json!({ "surface_id": surface, "command": command, "prompt": brief });
-            if !task.cwd.is_empty() {
-                params["cwd"] = serde_json::json!(task.cwd);
-            }
-            retry_registration(|| {
-                let reply = kasa_socket::methods::dispatch(backend.as_ref(), kasa_socket::protocol::Request {
-                    id: serde_json::json!("dispatch"),
-                    method: "surface.launch".into(),
-                    params: params.clone(),
-                });
-                match reply.ok {
-                    true => Ok(()),
-                    false => Err(anyhow::anyhow!("{}", reply.error.map(|e| e.message).unwrap_or_default())),
-                }
-            })?;
+            launch_in_pane(backend, surface, &command, &task.cwd, Some(&brief))?;
         }
         _ => send_with_retry(backend, surface, &boot_command(cfg, task))?,
     }
     Ok(())
 }
 
+/// `command`(POSIX 셸 꼴)를 그 칸 셸의 문법으로 지어 친다(`surface.launch`). 받는 칸이 cmd·PowerShell 이어도
+/// 작은따옴표·`&&` 가 글자로 남지 않는다.
+fn launch_in_pane(backend: &Arc<dyn Backend>, surface: &str, command: &str, cwd: &str, prompt: Option<&str>) -> Result<()> {
+    let mut params = serde_json::json!({ "surface_id": surface, "command": command });
+    if !cwd.is_empty() {
+        params["cwd"] = serde_json::json!(cwd);
+    }
+    if let Some(prompt) = prompt {
+        params["prompt"] = serde_json::json!(prompt);
+    }
+    retry_registration(|| {
+        let reply = kasa_socket::methods::dispatch(backend.as_ref(), kasa_socket::protocol::Request {
+            id: serde_json::json!("dispatch"),
+            method: "surface.launch".into(),
+            params: params.clone(),
+        });
+        match reply.ok {
+            true => Ok(()),
+            false => Err(anyhow::anyhow!("{}", reply.error.map(|e| e.message).unwrap_or_default())),
+        }
+    })
+}
+
 /// ACP runner 학생을 부른다. 브리프는 부팅 명령에 싣지 않고 inbox 파일에 먼저 놓는다 — 셸 한 줄로
-/// 펴지 않아도 되고, runner 는 뜨자마자 그것을 첫 턴으로 집어 간다. 돌려주는 둘째 값이 상태 파일
-/// 열쇠이고, 비어 있으면 그 칸은 TUI 로 떴다(cmd·PowerShell 칸).
+/// 펴지 않아도 되고(cmd·PowerShell 칸은 줄바꿈·큰따옴표를 못 넘긴다), runner 는 뜨자마자 그것을 첫
+/// 턴으로 집어 간다. 돌려주는 둘째 값이 상태 파일 열쇠다.
 fn spawn_acp(
     backend: &Arc<dyn Backend>,
     cfg: &DispatchConfig,
@@ -856,27 +868,21 @@ fn spawn_acp(
     task: &QueueTask,
     now: f64,
 ) -> Result<(String, String)> {
-    use kasa_socket::shell_line::ShellKind;
     let surface = backend.spawn_student(character)?;
     if surface.is_empty() {
         anyhow::bail!("no pane created");
-    }
-    if matches!(
-        backend.pane_shell(&surface).as_deref().and_then(ShellKind::from_process_name),
-        Some(ShellKind::Cmd | ShellKind::PowerShell)
-    ) {
-        boot_tui(backend, cfg, &surface, task)?;
-        return Ok((surface, String::new()));
     }
     let key = format!("{}-{}", surface.trim_start_matches('%'), (now * 1000.0) as u64);
     let (Some(status), Some(inbox)) = (acp_status_path(&key), acp_inbox_path(&key)) else {
         anyhow::bail!("no config dir for ACP status");
     };
     kasa_acp::runner::write_inbox(&inbox, &task.brief)?;
-    send_with_retry(backend, &surface, &acp_boot_command(cfg, task, &kasa_acp_program(), &status, &inbox))?;
+    let command = acp_boot_command(cfg, task, &kasa_acp_program(), &status, &inbox);
+    launch_in_pane(backend, &surface, &command, &task.cwd, None)?;
     Ok((surface, key))
 }
 
+/// runner 부팅 명령(POSIX 셸 꼴, 폴더 옮기기·Enter 없이). 칸 셸 문법으로는 `launch_in_pane` 이 옮긴다.
 fn acp_boot_command(
     cfg: &DispatchConfig,
     task: &QueueTask,
@@ -885,26 +891,25 @@ fn acp_boot_command(
     inbox: &std::path::Path,
 ) -> String {
     let harness = if cfg.acp_harness.is_empty() { "claude" } else { cfg.acp_harness.as_str() };
-    let cd = if task.cwd.is_empty() {
-        String::new()
-    } else {
-        format!("cd {} && ", sh_quote(&task.cwd))
-    };
     let mut line = format!(
-        "{cd}{} run --harness {} --status {} --inbox {} --permission reject",
+        "{} run --harness {harness} --status {} --inbox {} --permission ask",
         sh_quote(program),
-        sh_quote(harness),
         sh_quote(&status.to_string_lossy()),
         sh_quote(&inbox.to_string_lossy()),
     );
-    if !cfg.acp_mode.is_empty() {
-        line.push_str(&format!(" --mode {}", sh_quote(&cfg.acp_mode)));
+    // 칸 shim 은 TUI codex 를 샌드박스 없이 띄운다(`--dangerously-bypass-approvals-and-sandbox`). 기본은 그와
+    // 같게 둔다 — 자동 검토 모드는 학생의 kasaterm-cli 가 앱 소켓에 붙는 것부터 한 번 막는다.
+    let mode = match (cfg.acp_mode.as_str(), harness) {
+        ("", "codex") => "agent-full-access",
+        (mode, _) => mode,
+    };
+    if !mode.is_empty() {
+        line.push_str(&format!(" --mode {}", sh_quote(mode)));
     }
     let model = if task.weight == "light" { &cfg.light_model } else { &cfg.heavy_model };
     if !model.is_empty() {
         line.push_str(&format!(" --set {}", sh_quote(&format!("model={model}"))));
     }
-    line.push('\r');
     line
 }
 
@@ -1863,24 +1868,48 @@ mod tests {
     fn acp_boot_command_keeps_the_brief_out_of_the_shell_line() {
         let mut cfg = cfg_for(4);
         cfg.acp_harness = "codex".into();
-        cfg.acp_mode = "workspace-write".into();
         cfg.heavy_model = "gpt-6.1-sol".into();
         let mut t = task("t1", "pending", &[], &[]);
         t.brief = "여러 줄\n브리프 `$(rm -rf /)`".into();
-        let line = acp_boot_command(
-            &cfg,
-            &t,
-            "/Applications/kasaterm.app/Contents/MacOS/kasa-acp",
-            std::path::Path::new("/c/acp/5-1.status.json"),
-            std::path::Path::new("/c/acp/5-1.inbox"),
-        );
+        let status = std::path::Path::new("/c/acp/5-1.status.json");
+        let inbox = std::path::Path::new("/c/acp/5-1.inbox");
+        let line = acp_boot_command(&cfg, &t, "/Applications/kasaterm.app/Contents/MacOS/kasa-acp", status, inbox);
         assert_eq!(
             line,
-            "cd '/repo' && '/Applications/kasaterm.app/Contents/MacOS/kasa-acp' run --harness 'codex' \
-             --status '/c/acp/5-1.status.json' --inbox '/c/acp/5-1.inbox' --permission reject \
-             --mode 'workspace-write' --set 'model=gpt-6.1-sol'\r"
+            "'/Applications/kasaterm.app/Contents/MacOS/kasa-acp' run --harness codex \
+             --status '/c/acp/5-1.status.json' --inbox '/c/acp/5-1.inbox' --permission ask \
+             --mode 'agent-full-access' --set 'model=gpt-6.1-sol'"
         );
         assert!(!line.contains("브리프"));
+        cfg.acp_harness = String::new();
+        cfg.acp_mode = String::new();
+        assert!(!acp_boot_command(&cfg, &t, "kasa-acp", status, inbox).contains("--mode"), "claude follows the user's own default");
+    }
+
+    #[test]
+    fn acp_boot_line_is_built_for_the_panes_own_shell() {
+        use kasa_socket::shell_line::{ShellKind, launch_line};
+        let cfg = DispatchConfig { acp_harness: "codex".into(), ..cfg_for(4) };
+        let t = task("t1", "pending", &[], &[]);
+        let command = acp_boot_command(
+            &cfg,
+            &t,
+            r"C:\Program Files\kasaterm\kasa-acp.exe",
+            std::path::Path::new(r"C:\Users\me\.config\kasaterm\acp\5-1.status.json"),
+            std::path::Path::new(r"C:\Users\me\.config\kasaterm\acp\5-1.inbox"),
+        );
+        let ps = launch_line(ShellKind::PowerShell, Some(r"C:\work\repo"), &command, None, None).expect("powershell");
+        assert!(ps.starts_with(r"Set-Location -LiteralPath 'C:\work\repo' -ErrorAction Stop; & 'C:\Program Files\kasaterm\kasa-acp.exe' run"), "{ps}");
+        let cmd = launch_line(ShellKind::Cmd, Some(r"C:\work\repo"), &command, None, None).expect("cmd");
+        assert!(cmd.starts_with(r#"cd /d "C:\work\repo" && "C:\Program Files\kasaterm\kasa-acp.exe" run"#), "{cmd}");
+        assert!(cmd.ends_with("--mode agent-full-access\r"), "{cmd}");
+    }
+
+    #[test]
+    fn acp_is_the_default_runtime() {
+        assert_eq!(DispatchConfig::default().runtime, "acp");
+        let parsed: DispatchConfig = serde_json::from_str(r#"{"enabled": true}"#).expect("json");
+        assert_eq!(parsed.runtime, "acp", "a config file without the key follows the default");
     }
 
     #[test]

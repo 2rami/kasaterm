@@ -3,7 +3,8 @@
 //!   cargo build -p kasa-acp --bin kasa-acp
 //!   cargo run -p kasa-students --example dispatch_acp_e2e -- codex|claude
 //!
-//! 가짜 백엔드의 「칸」은 셸 하나다. 디스패처가 보낸 부팅 줄을 `sh -c` 로 돌리므로 부팅 줄의 인용,
+//! 가짜 백엔드의 「칸」은 셸 하나다(맥 `sh`, Windows `cmd`). 디스패처가 그 셸 문법으로 지은 부팅 줄을 실제로
+//! 돌리므로 부팅 줄의 인용,
 //! inbox 로 넣은 첫 지시, 상태 파일, 수확, inbox 로 다음 일 주기, 끝난 runner 치우기가 실물로 지나간다.
 //! 큐·명부·상태 파일은 실행마다 새 임시 폴더에 둔다(라이브 설정과 격리).
 
@@ -35,10 +36,16 @@ impl FakeBackend {
         self.0.lock().unwrap().logs.join(format!("{}.log", id.trim_start_matches('%')))
     }
 
-    /// 칸의 셸 그룹에 신호를 보낸다 — 사람이 칸에서 Ctrl-C 를 누른 것과 같다.
+    /// 칸의 셸 그룹에 신호를 보낸다 — 사람이 칸에서 Ctrl-C 를 누른 것과 같다. Windows 는 TERM 자리에
+    /// 트리째 끄기만 한다(콘솔 Ctrl-C 를 남의 콘솔에 보낼 길이 없다).
     fn signal(&self, id: &str, sig: &str) {
         let f = self.0.lock().unwrap();
-        if let Some(child) = f.panes.iter().find(|p| p.id == id).and_then(|p| p.shell.as_ref()) {
+        let Some(child) = f.panes.iter().find(|p| p.id == id).and_then(|p| p.shell.as_ref()) else { return };
+        if cfg!(windows) {
+            if sig == "-TERM" {
+                let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).status();
+            }
+        } else {
             let _ = Command::new("kill").args([sig, "--", &format!("-{}", child.id())]).status();
         }
     }
@@ -61,24 +68,23 @@ impl Backend for FakeBackend {
         Ok(())
     }
 
-    /// 칸에 친 줄. 부팅 줄(CR 로 끝남)이면 그 칸의 셸로 실제로 돌린다.
+    /// 칸에 친 줄. Enter 로 끝나면 그 칸의 셸로 실제로 돌린다.
     fn send_text(&self, surface: Option<&str>, text: &str) -> Result<()> {
         let id = surface.unwrap_or("-").to_string();
         let log = self.log_of(&id);
         let mut f = self.0.lock().unwrap();
         f.boots.push((id.clone(), text.to_string()));
-        let Some(line) = text.strip_suffix('\r') else { return Ok(()) };
+        let Some(line) = text.strip_suffix(['\r', '\n']) else { return Ok(()) };
         let Some(pane) = f.panes.iter_mut().find(|p| p.id == id) else { bail!("no pane {id}") };
         let out = std::fs::File::create(&log)?;
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", line]).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        let mut cmd = shell_running(line);
+        cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
         pane.shell = Some(cmd.spawn()?);
         Ok(())
+    }
+
+    fn pane_shell(&self, _: &str) -> Option<String> {
+        Some(if cfg!(windows) { "cmd.exe" } else { "zsh" }.into())
     }
 
     fn spawn_student(&self, _character: &str) -> Result<String> {
@@ -111,6 +117,23 @@ impl Backend for FakeBackend {
         f.closed.push(id.to_string());
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn shell_running(line: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = Command::new("cmd");
+    // 줄을 그대로 넘긴다 — Rust 의 인자 인용은 cmd 가 모르는 `\"` 를 쓴다.
+    cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{line}\""));
+    cmd
+}
+
+#[cfg(not(windows))]
+fn shell_running(line: &str) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", line]).process_group(0);
+    cmd
 }
 
 fn task(brief: &str, cwd: &Path, files: &[&str], deps: &[&str]) -> dispatch::QueueTask {
@@ -230,7 +253,9 @@ fn main() -> Result<()> {
     }
 
     println!("\n[2] runner 를 Ctrl-C 로 끝낸다 — 다음 tick 에 칸을 치우고 명부에서 빼야 한다");
-    if let Some(id) = boots.first().map(|(id, _)| id.clone()) {
+    if cfg!(windows) {
+        println!("  Windows 는 남의 콘솔에 Ctrl-C 를 보낼 길이 없어 건너뛴다");
+    } else if let Some(id) = boots.first().map(|(id, _)| id.clone()) {
         be.signal(&id, "-INT");
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(20) && !be.0.lock().unwrap().closed.contains(&id) {
@@ -242,7 +267,11 @@ fn main() -> Result<()> {
         println!("\n── {id} 칸 화면 ──\n{}", screen.trim_end());
     }
 
-    let retired = boots.first().is_some_and(|(id, _)| be.0.lock().unwrap().closed.contains(id));
+    let screen = boots.first().map(|(id, _)| std::fs::read_to_string(be.log_of(id)).unwrap_or_default());
+    if cfg!(windows) {
+        println!("\n── 칸 화면 ──\n{}", screen.as_deref().unwrap_or_default().trim_end());
+    }
+    let retired = cfg!(windows) || boots.first().is_some_and(|(id, _)| be.0.lock().unwrap().closed.contains(id));
     let leftover: Vec<String> = be.0.lock().unwrap().panes.iter().map(|p| p.id.clone()).collect();
     for id in &leftover {
         let _ = backend.close_surface(id);

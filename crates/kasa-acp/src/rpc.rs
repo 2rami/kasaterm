@@ -140,6 +140,14 @@ impl Connection {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
+        #[cfg(windows)]
+        {
+            // 칸에서 누른 Ctrl-C 는 같은 콘솔의 모든 프로세스에 간다. 새 그룹이면 어댑터는 안 받고,
+            // runner 가 받아 그 턴만 멈춘다(`session/cancel`).
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
         let mut child = cmd.spawn()?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -458,7 +466,18 @@ fn kill_tree(child: &mut Child) {
     let _ = child.kill();
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn kill_tree(child: &mut Child) {
+    // npx.cmd → node → codex 처럼 손자를 낳는다. 그룹 신호가 없어 taskkill 로 트리째 끈다.
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &child.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_tree(child: &mut Child) {
     let _ = child.kill();
 }

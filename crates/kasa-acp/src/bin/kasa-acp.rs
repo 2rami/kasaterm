@@ -123,11 +123,25 @@ extern "C" fn on_sigint(_: libc::c_int) {
     INTERRUPTS.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(windows)]
+unsafe extern "system" fn on_console_ctrl(kind: u32) -> windows_sys::Win32::Foundation::BOOL {
+    if kind == windows_sys::Win32::System::Console::CTRL_C_EVENT {
+        INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+        return 1;
+    }
+    0
+}
+
 fn install_sigint() {
     #[cfg(unix)]
     // SAFETY: 처리기는 원자 카운터 하나만 올린다(async-signal-safe).
     unsafe {
         libc::signal(libc::SIGINT, on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t);
+    }
+    #[cfg(windows)]
+    // SAFETY: 처리기는 원자 카운터 하나만 올린다. Ctrl-C 만 먹고 닫기·로그오프는 기본 처리로 넘긴다.
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console_ctrl), 1);
     }
 }
 

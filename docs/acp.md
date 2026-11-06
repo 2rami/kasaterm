@@ -50,21 +50,22 @@ claude·codex 는 ACP 를 직접 말하지 않아 어댑터를 띄운다. 설치
 
 ## 디스패처에서 쓰기
 
-`~/.config/kasaterm/dispatch.json` 에 `"runtime": "acp"` 를 두면 디스패처가 새로 부르는 학생을 runner 로 띄운다.
-이미 떠 있는 TUI 학생은 그대로 TUI 로 일한다.
+디스패처가 새로 부르는 학생은 기본으로 runner 로 뜬다. `~/.config/kasaterm/dispatch.json` 에 `"runtime": "tui"` 를
+두면 예전처럼 `claude '<브리프>'` TUI 로 띄운다. 이미 떠 있는 TUI 학생은 그대로 TUI 로 일한다.
 
 | 키 | 뜻 |
 |---|---|
-| `runtime` | 빈 값 = TUI(`claude '<브리프>'`), `"acp"` = runner. Windows 는 아직 TUI 로 띄운다 |
+| `runtime` | `"acp"`(기본) = runner, `"tui"` = TUI(`claude '<브리프>'`) |
 | `acp_harness` | `claude`(기본)·`codex` |
-| `acp_mode` | 세션 모드. 비우면 그 기기 설정을 따른다. codex 기본(`agent`, 자동 검토)은 샌드박스라 칸 소켓 연결(`kasaterm-cli`)을 한 번 막고 검토 뒤 허락한다. TUI codex 학생(칸 shim 이 샌드박스를 끈다)과 같이 묻지 않게 하려면 `agent-full-access` |
+| `acp_mode` | 세션 모드. 비우면 TUI 학생과 같게 둔다 — claude 는 그 기기 사용자 설정, codex 는 `agent-full-access`(칸 shim 이 TUI codex 의 샌드박스를 끄는 것과 같다). codex 자동 검토(`agent`)는 샌드박스라 학생의 `kasaterm-cli` 가 앱 소켓에 붙는 것부터 한 번 막는다 |
 | `heavy_model`·`light_model` | runner 의 `--set model=…` 로 간다. `*_launcher`(게이트웨이 래퍼)는 runner 에 쓰이지 않는다 |
 
 흐름:
 
-1. 칸을 하나 만들고 브리프를 `acp/<열쇠>.inbox` 에 먼저 놓은 뒤, 칸에 `cd <작업 폴더> && <앱>/kasa-acp run …
-   --status acp/<열쇠>.status.json --inbox acp/<열쇠>.inbox --permission reject` 를 친다. 브리프는 셸 줄에 싣지 않는다.
-   이 작업의 `acp_turn` 은 1이다.
+1. 칸을 하나 만들고 브리프를 `acp/<열쇠>.inbox` 에 먼저 놓은 뒤, `<앱>/kasa-acp run … --status acp/<열쇠>.status.json
+   --inbox acp/<열쇠>.inbox --permission ask` 를 `surface.launch` 로 그 칸 셸(POSIX·PowerShell·cmd) 문법에 맞춰 친다.
+   브리프는 셸 줄에 싣지 않는다(cmd·PowerShell 칸은 줄바꿈·큰따옴표를 못 넘긴다). 이 작업의 `acp_turn` 은 1이다.
+   그래도 오는 권한 요청은 TUI 학생처럼 칸에서 사람이 고른다.
 2. 매 tick 상태 파일을 읽어 board 와 같은 꼴의 줄을 지어 넣는다 — 파일 충돌(`files`)·컨텍스트 상한·캐릭터 중복은
    TUI 학생과 같은 길로 판정한다.
 3. 상태의 `turn` 이 작업의 `acp_turn` 에 닿고 `idle` 이면 그 tick 에 `answer` 를 거둔다. 부팅 유예·idle 연속을
@@ -82,6 +83,12 @@ claude·codex 는 ACP 를 직접 말하지 않아 어댑터를 띄운다. 설치
 Agent SDK 문서는 사전 승인 없이 서드파티 제품이 claude.ai 로그인이나 구독 한도를 제공하는 것을 허용하지 않는다
 (Agent SDK 로 만든 에이전트 포함). claude 어댑터 길을 공개 배포판의 기본 기능으로 켜기 전에 이 조항을 확인한다.
 codex 어댑터는 ChatGPT 로그인을 지원한다고 명시한다.
+
+## Windows
+
+runner 는 어댑터를 새 콘솔 프로세스 그룹으로 띄워(`CREATE_NEW_PROCESS_GROUP`) 칸의 Ctrl-C 가 어댑터를 죽이지 않게 하고,
+자기는 콘솔 제어 처리기로 Ctrl-C 를 받아 턴만 멈춘다. 끌 때는 `taskkill /T` 로 npx.cmd → node → 하네스 트리를 함께
+끈다. MSI 는 `kasa-acp.exe` 를 `kasaterm.exe` 옆에 둔다(`app/kasaterm/wix/main.wxs`, `scripts/windows/package.ps1`).
 
 ## 칸 안의 runner — `kasa-acp run`
 

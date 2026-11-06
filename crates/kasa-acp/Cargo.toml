@@ -13,5 +13,9 @@ serde_json.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# Windows 콘솔의 Ctrl-C 는 신호가 아니라 콘솔 제어 이벤트다 — runner 가 턴만 멈추려면 처리기를 단다.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [lints]
 workspace = true
