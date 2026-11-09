@@ -63,9 +63,20 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/shared-rooms/{room}/sessions/{session}/fork", post(fork))
         .route("/relay/shared-forks", get(forks))
         .route("/relay/shared-forks/{fork}", get(fork_get).delete(fork_delete))
+        .layer(axum::middleware::from_fn(no_store))
 }
 
 type Reply = axum::response::Response;
+
+async fn no_store(request: axum::extract::Request, next: axum::middleware::Next) -> Reply {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
+}
+
+fn shared_error(status: StatusCode, code: &str) -> Reply {
+    (status, axum::Json(json!({"ok": false, "error": code}))).into_response()
+}
 
 fn failure(error: Error) -> Reply {
     let status = match error {
@@ -74,7 +85,7 @@ fn failure(error: Error) -> Reply {
         Error::Conflict => StatusCode::CONFLICT, Error::Gone => StatusCode::GONE, Error::Limit => StatusCode::PAYLOAD_TOO_LARGE,
         Error::Storage => StatusCode::SERVICE_UNAVAILABLE, Error::Busy => StatusCode::TOO_MANY_REQUESTS,
     };
-    json_err(status, error.code())
+    shared_error(status, error.code())
 }
 
 fn respond(value: Result<Value, Error>) -> Reply {
@@ -93,7 +104,7 @@ fn open(gate: &Gate, headers: &axum::http::HeaderMap) -> Result<(Arc<Service>, A
 /// Publishing comes from the desktop that owns the conversation; the machine id is the device record's, never the body's.
 fn publisher_machine(gate: &Gate, access: &AccountAccess) -> Result<String, Reply> {
     let device = gate.devices.lock().ok().and_then(|devices| devices.get(&access.device_id).cloned());
-    let Some(device) = device.filter(|d| d.kind == "desktop") else { return Err(json_err(StatusCode::FORBIDDEN, "desktop_only")) };
+    let Some(device) = device.filter(|d| d.kind == "desktop") else { return Err(shared_error(StatusCode::FORBIDDEN, "desktop_only")) };
     device.machine_id.filter(|id| !id.is_empty()).ok_or_else(|| failure(Error::Invalid))
 }
 

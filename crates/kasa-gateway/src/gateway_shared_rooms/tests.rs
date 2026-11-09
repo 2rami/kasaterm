@@ -25,6 +25,25 @@ async fn login(addr: std::net::SocketAddr, account: &str, kind: &str) -> String 
     value["token"].as_str().unwrap().into()
 }
 
+#[tokio::test]
+async fn successes_and_rejections_never_cache_shared_responses() {
+    let fixture = Fixture::new();
+    let addr = spawn_relay(fixture.gate()).await;
+    let token = login(addr, "alice", "phone").await;
+    for (method, path, auth, expected) in [
+        (reqwest::Method::GET, "/relay/shared-rooms", "invalid", 401),
+        (reqwest::Method::GET, "/relay/shared-forks", "invalid", 401),
+        (reqwest::Method::GET, "/relay/shared-rooms", token.as_str(), 200),
+        (reqwest::Method::GET, "/relay/shared-rooms/missing", token.as_str(), 404),
+        (reqwest::Method::PUT, "/relay/shared-rooms", token.as_str(), 405),
+    ] {
+        let response = reqwest::Client::new().request(method, format!("http://{addr}{path}")).bearer_auth(auth).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), expected);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        if expected == 401 { assert_eq!(response.json::<Value>().await.unwrap()["ok"], false); }
+    }
+}
+
 async fn call(addr: std::net::SocketAddr, method: reqwest::Method, path: &str, token: &str, body: Option<Value>) -> (u16, Value) {
     let mut request = reqwest::Client::new().request(method, format!("http://{addr}{path}")).bearer_auth(token);
     if let Some(body) = body { request = request.json(&body); }
