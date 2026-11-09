@@ -2416,6 +2416,7 @@ impl App {
                     crate::internal_room::InternalRoomKind::Settings => {
                         self.open_settings_room(None);
                     }
+                    crate::internal_room::InternalRoomKind::SharedRooms => { self.open_shared_room_view(None); }
                 }
                 self.win_tab_drag = Some(WinTabDrag {
                     from: idx,
@@ -3451,6 +3452,7 @@ impl App {
                 crate::internal_room::InternalRoomKind::Settings => {
                     self.close_settings_room();
                 }
+                crate::internal_room::InternalRoomKind::SharedRooms => { self.close_shared_room_view(); }
             }
             return;
         }

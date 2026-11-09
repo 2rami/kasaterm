@@ -1853,8 +1853,7 @@ impl App {
         self.refresh_hidden_sidebar_rooms();
         let sb_labels = self.window_labels.clone();
         let sb_room_numbers = self.room_numbers_for_windows();
-        let local_count = (0..self.windows.len())
-            .filter(|&i| self.remote_view_of_window(i).is_none()).count();
+        let local_count = self.local_room_navigation().len();
         self.info.navigation.room_numbers = self.remote_room_navigation().into_iter().enumerate()
             .map(|(n, (label, window, room))| (label, window, room, local_count + n)).collect();
         self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
@@ -1867,6 +1866,7 @@ impl App {
         let sb_icons: Vec<&'static str> = (0..sb_labels.len())
             .map(|i| match self.internal_room_kind_at(i) {
                 Some(crate::internal_room::InternalRoomKind::Settings) => "settings-2",
+                Some(crate::internal_room::InternalRoomKind::SharedRooms) => "users",
                 None => tab_icon_glyph(&sb_labels[i].0),
             })
             .collect();
@@ -2078,6 +2078,7 @@ impl App {
                             PaneContent::Image(_) => "image",
                             PaneContent::Markdown(_) => "file-text",
                             PaneContent::Settings => "settings",
+                            PaneContent::SharedRooms => "shared-rooms",
                             _ => "terminal",
                         })
                         .unwrap_or("terminal");
@@ -2433,6 +2434,11 @@ impl App {
             (ws.active_pane.clone(), chars, agents)
         };
         let settings_room_active = self.settings_room_active();
+        let shared_room_active = self.shared_room_active();
+        let shared_area = shared_room_active.then(|| crate::native_settings::content_area(
+            (win_px.0 / scale, win_px.1 / scale), self.effective_sidebar_w(), status_h));
+        let shared_preedit = if matches!(self.ime_focus, Some(ImeFocus::SharedRooms)) { self.preedit.clone() } else { String::new() };
+        let shared_caret = matches!(self.ime_focus, Some(ImeFocus::SharedRooms)) && self.cursor_blink_on(Instant::now());
         let pulse_h = self.sidebar_pulse_h();
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
         // 못 띄운다. 계정 화면이 떠 있는 동안 여기서 받아 올린다 — 실패가 조용히
@@ -4633,7 +4639,10 @@ impl App {
             if let Some(snapshot) = settings_snapshot.as_ref() {
                 settings_paint = Some(crate::native_settings::paint(g, snapshot));
             }
-            if !side_column_covers_workspace {
+            if let Some(area) = shared_area {
+                crate::shared_rooms::scene::paint(g, &mut self.shared_rooms, area, sb_cursor, &shared_preedit, shared_caret);
+            }
+            if !side_column_covers_workspace && !shared_room_active {
                 kasa_gridview::overlay::paint(g, &overlay);
                 if let Some(placed) = &preedit_cursor {
                     let cw = overlay.cell_w * overlay.font_scale;

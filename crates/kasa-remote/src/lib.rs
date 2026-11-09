@@ -11,3 +11,5 @@ pub mod media_stream;
 pub mod agent_stop;
 pub mod codexhome;
 pub mod conversation_archive;
+pub mod shared_rooms;
+pub mod shared_fork_project;

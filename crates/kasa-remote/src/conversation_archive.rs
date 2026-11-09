@@ -76,17 +76,17 @@ impl Error {
     }
 }
 
-fn hex(value: &str, size: usize) -> bool {
+pub(crate) fn hex(value: &str, size: usize) -> bool {
     value.len() == size && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn text(value: &str, max: usize) -> bool { value.len() <= max && !value.chars().any(char::is_control) }
+pub(crate) fn text(value: &str, max: usize) -> bool { value.len() <= max && !value.chars().any(char::is_control) }
 
 pub fn id_for(machine: &str, source: &str) -> String {
     format!("{:x}", Sha256::digest(format!("{machine}\0{source}").as_bytes()))
 }
 
-fn private_dir(path: &Path) -> Result<(), Error> {
+pub(crate) fn private_dir(path: &Path) -> Result<(), Error> {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if !meta.is_dir() || meta.file_type().is_symlink() { return Err(Error::Storage); }
     }
@@ -98,7 +98,7 @@ fn private_dir(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn regular(path: &Path, max: u64) -> Result<std::fs::Metadata, Error> {
+pub(crate) fn regular(path: &Path, max: u64) -> Result<std::fs::Metadata, Error> {
     let meta = std::fs::symlink_metadata(path).map_err(|e|
         if e.kind() == std::io::ErrorKind::NotFound { Error::Missing } else { Error::Storage })?;
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > max { return Err(Error::Storage); }

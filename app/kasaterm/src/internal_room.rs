@@ -10,29 +10,33 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum InternalRoomKind {
     Settings,
+    SharedRooms,
 }
 
 /// 보드가 방이던 때의 기록. 옛 세션 파일에 남아 있으면 사용자 방으로 되살리지 않고 건너뛴다.
 const LEGACY_BOARD: (&str, &str) = ("board", "\0kasaterm-board");
 
 impl InternalRoomKind {
-    pub(crate) const ALL: [Self; 1] = [Self::Settings];
+    pub(crate) const ALL: [Self; 2] = [Self::Settings, Self::SharedRooms];
 
     pub(crate) const fn pane_id(self) -> &'static str {
         match self {
             Self::Settings => "\0kasaterm-settings",
+            Self::SharedRooms => crate::shared_rooms::PANE,
         }
     }
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Settings => "설정",
+            Self::SharedRooms => "공유방",
         }
     }
 
     pub(crate) const fn saved_name(self) -> &'static str {
         match self {
             Self::Settings => "settings",
+            Self::SharedRooms => "shared_rooms",
         }
     }
 
@@ -172,12 +176,14 @@ impl App {
     pub(crate) fn internal_return_pane(&self, kind: InternalRoomKind) -> Option<&str> {
         match kind {
             InternalRoomKind::Settings => self.settings_scene.return_pane(),
+            InternalRoomKind::SharedRooms => self.shared_rooms.return_pane(),
         }
     }
 
     pub(crate) fn return_from_active_internal_room(&mut self) -> bool {
         match self.internal_room_kind_at(self.active_window) {
             Some(InternalRoomKind::Settings) => self.return_from_settings_room(),
+            Some(InternalRoomKind::SharedRooms) => self.close_shared_room_view(),
             None => false,
         }
     }

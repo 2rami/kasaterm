@@ -10,6 +10,13 @@
 `kasa-remote/conversation_archive.rs`와 `conversation_archive/sync.rs`는 영속 저장·데스크톱 전송,
 `gateway_conversations.rs`는 계정 권한과 HTTP, 모바일 `archive_*`와 `screens/saved_conversations.dart`는 폰 저장·읽기 전용 화면을 맡는다.
 
+계정 간 공유방과 독립 세션 포크는 [shared-rooms.md](shared-rooms.md)가 계약이다.
+`kasa-socket/shared_rooms.rs`는 DTO, `kasa-remote/shared_rooms/{store,client}`는 저장·관문 클라이언트,
+`kasa-gateway/gateway_shared_rooms`는 ACL과 HTTP, `kasa-agents/session_fork`는 native 기록 정제·검증·포크를 맡는다.
+프로젝트 자료는 `kasa-remote/shared_fork_project`, 목적지 PC API는 `kasa-http/http/shared_rooms`다.
+앱 `shared_rooms/{scene,input,lifecycle}`는 PTY 없는 보기, `{service,publisher,fork,sources}`는 게시·새 탭 실행을 맡고,
+모바일 `shared_rooms_*`와 `screens/shared_rooms.dart`는 같은 관문과 목적지 PC API를 쓴다.
+
 터미널 글꼴 선택은 `crates/kasa-gridview/src/fonts.rs`, 번들 D2Coding 버전·출처는 `crates/kasa-gridview/assets/fonts/README.md`다.
 `kasa-cells/src/shaper.rs`가 글꼴별 사설영역 제외와 Regular/Bold 짝을 동일한 측정·그리기 경로에서 적용한다.
 크레이트 사이 층과 의존 방향은 [`workspace.md`](workspace.md)(검사 `scripts/check-workspace.py`).

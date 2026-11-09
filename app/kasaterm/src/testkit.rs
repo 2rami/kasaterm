@@ -3959,7 +3959,7 @@ impl App {
     /// 차례로 넘긴다. `window_event` 를 직접 부르는 `text:` 와 달리 winit 이 누름·뗌마다 먼저 내는
     /// CursorMoved 와 수정키 갱신까지 탄다. 창 서버(활성화)는 안 거쳐 사람 화면의 초점을 안 뺏는다.
     #[cfg(target_os = "macos")]
-    fn native_mouse(&self, events: &[(u64, f32, f32)], flags: u64) {
+    pub(crate) fn native_mouse(&self, events: &[(u64, f32, f32)], flags: u64) {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
         use objc2_foundation::{NSPoint, NSRect};
@@ -4054,7 +4054,7 @@ impl App {
 
     /// 키 하나를 눌렀다 뗀다. 물리 키(맥 가상 키 번호)가 있어야 `KeyCode` 로 보는 단축키(⌘C 등)가 듣는다.
     #[cfg(target_os = "macos")]
-    fn native_key(&self, flags: u64, ch: char) {
+    pub(crate) fn native_key(&self, flags: u64, ch: char) {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
         use objc2_foundation::{NSPoint, NSString};

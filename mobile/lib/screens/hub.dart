@@ -11,6 +11,7 @@ import '../hub_prefs.dart';
 import '../look.dart';
 import '../machine_look.dart';
 import '../server.dart';
+import '../shared_rooms_repository.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../twins_loading.dart';
@@ -23,6 +24,7 @@ import 'controls.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
+import 'shared_rooms.dart';
 import 'terminal.dart';
 import 'saved_conversations.dart';
 import 'desktop_tools.dart';
@@ -40,10 +42,14 @@ class HubScreen extends StatefulWidget {
     required this.server,
     required this.onChangeAddress,
     this.prefs,
+    this.shared,
   });
 
   final Server server;
   final Future<void> Function() onChangeAddress;
+
+  /// 계정의 공유방 — 기기 목록과 별도 묶음으로 아래에 선다. 옛 주소 연결이면 없다.
+  final SharedRoomsRepository? shared;
 
   /// 보기 설정 저장소. 없으면(테스트) 고른 것이 이 화면에서만 산다.
   final HubPrefs? prefs;
@@ -435,6 +441,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
       }
       if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
     }
+    if (widget.shared case final shared?) children.add(_SharedSection(repository: shared));
     // 당기면 쌍둥이가 내려온다 — 머티리얼 빙글이 대신(design.md 「쌍둥이 결」).
     return CustomScrollView(
       key: _scrollViewport,
@@ -544,10 +551,16 @@ class _SectionHeader extends StatelessWidget {
     this.onTap,
     this.onAdd,
     this.onScreen,
+    this.detail,
+    this.addTip = '새 방',
   });
 
   final String title;
   final IconData icon;
+
+  /// 기기가 아닌 묶음(공유방)의 둘째 줄. 없으면 기기 사정을 쓴다.
+  final String? detail;
+  final String addTip;
 
   /// 그 기기의 색 — 데스크톱 설정 「기기 색」 그대로.
   final Color color;
@@ -622,7 +635,9 @@ class _SectionHeader extends StatelessWidget {
                         Text.rich(
                           TextSpan(
                             children: [
-                              if (!online)
+                              if (detail != null)
+                                TextSpan(text: detail)
+                              else if (!online)
                                 TextSpan(
                                   text: '연결 안 됨',
                                   style: TextStyle(color: scheme.error),
@@ -648,7 +663,7 @@ class _SectionHeader extends StatelessWidget {
                     ),
                   if (onAdd != null)
                     IconButton(
-                      tooltip: '새 방',
+                      tooltip: addTip,
                       onPressed: onAdd,
                       icon: Icon(Icons.add, color: dim),
                     ),
@@ -676,6 +691,73 @@ class _SectionHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 공유방 묶음 — 기기 목록 아래 따로 선다. 방을 보거나 참여해도 셸·창을 만들지 않는다(docs/shared-rooms.md).
+class _SharedSection extends StatefulWidget {
+  const _SharedSection({required this.repository});
+  final SharedRoomsRepository repository;
+  @override
+  State<_SharedSection> createState() => _SharedSectionState();
+}
+
+class _SharedSectionState extends State<_SharedSection> {
+  bool _folded = false;
+
+  @override
+  Widget build(BuildContext context) => SharedRoomsWatch(
+    every: const Duration(seconds: 30),
+    onTick: widget.repository.load,
+    child: ListenableBuilder(
+      listenable: widget.repository,
+      builder: (context, _) {
+        final repo = widget.repository;
+        if (repo.locked) return const SizedBox.shrink();
+        final scheme = Theme.of(context).colorScheme;
+        final mine = repo.rooms.where((r) => r.owner).length;
+        return Column(
+          key: const Key('hub-shared-rooms'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _SectionHeader(
+              title: '공유방',
+              icon: Icons.groups_outlined,
+              color: scheme.primary,
+              folded: _folded,
+              detail: repo.loading && repo.rooms.isEmpty ? '받는 중' : '내 방 $mine · 참여 ${repo.rooms.length - mine}',
+              onTap: () => setState(() => _folded = !_folded),
+              addTip: '새 공유방',
+              onAdd: () => createSharedRoom(context, repo),
+            ),
+            if (!_folded)
+              _RoomBox(
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (repo.error != null && repo.rooms.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(Look.cardPad),
+                          child: Text(repo.error!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.error)),
+                        ),
+                      for (final (i, r) in repo.rooms.indexed)
+                        SharedRoomRow(tone: i, room: r, onTap: () => openSharedRoom(context, repo, r.id)),
+                      SettingsRow(
+                        tone: repo.rooms.length,
+                        icon: Icons.login,
+                        title: '초대 코드로 참여',
+                        onTap: () => joinSharedRoom(context, repo),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    ),
+  );
 }
 
 /// 방 하나 = 둥근 판 하나(쌍둥이 결). 날씨 유리가 판 모서리 밖으로 안 나가게 같은 모서리로 자른다.

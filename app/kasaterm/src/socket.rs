@@ -3108,6 +3108,21 @@ impl Backend for PtyBackend {
             .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
     }
 
+    /// 공유방 host 창구 — 앱 스레드의 공유방 작업표에 묻는다. 기기·로그인 사실은 앱 스레드를 붙잡지 않게 여기서 더한다.
+    fn shared_room_action(&self, action: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SharedLocal(crate::shared_rooms::service::Event::Host {
+            action: action.into(), body: body.clone(), guard: crate::shared_rooms::service::HostGuard::capture(), reply: tx,
+        })).map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        let mut value = rx.recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| anyhow::anyhow!("앱이 공유방 요청에 답하지 않았어요"))?
+            .map_err(anyhow::Error::msg)?;
+        if matches!(action, "status" | "sources") {
+            value["machine_id"] = serde_json::json!(kasa_collab::board_service::local_id().ok());
+        }
+        Ok(value)
+    }
+
     fn transcript_archive(&self, surface_id: &str, offset: u64) -> Result<TranscriptChunk> {
         let path = self.bound.lock().unwrap().get(surface_id).cloned()
             .ok_or_else(|| anyhow::anyhow!("pane has no bound transcript"))?;
@@ -9349,6 +9364,7 @@ fn where_kind(content: &crate::PaneContent) -> &'static str {
         crate::PaneContent::Markdown(_) => "doc",
         crate::PaneContent::Image(_) => "image",
         crate::PaneContent::Settings => "settings",
+        crate::PaneContent::SharedRooms => "shared-rooms",
     }
 }
 

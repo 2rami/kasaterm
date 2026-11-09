@@ -1728,6 +1728,12 @@ impl App {
     /// `activate`: 사람이 탭바 + 를 누른 경우만 true. 소켓 스폰(false)이 활성탭을
     /// 뺏으면 오케스트레이터 pane 을 보던 사람 화면이 서브에이전트 부팅으로 덮인다.
     pub(crate) fn spawn_new_tab(&mut self, outer: &str, activate: bool) -> Result<String> {
+        self.spawn_new_tab_at(outer, activate, None)
+    }
+
+    /// `cwd` 를 주면 그 폴더에서 새 로컬 셸 탭을 연다(공유방 포크). 원격 칸에 붙은 탭은 원격 기기에서
+    /// 열려 그 폴더가 이 기기의 것이 아니게 되므로, 그때는 원격으로 넘기지 않고 거부한다.
+    pub(crate) fn spawn_new_tab_at(&mut self, outer: &str, activate: bool, cwd_override: Option<std::path::PathBuf>) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("in-pane tabs not supported on tmux backend");
         }
@@ -1744,9 +1750,21 @@ impl App {
         let (cols, rows) = self
             .pane_cells(outer)
             .unwrap_or_else(|| self.window_cells());
-        let cwd = self.spawn_cwd_from(Some(outer));
+        if cwd_override.is_some() {
+            let anchor = self.ws.lock().unwrap().active_tab_pid(outer);
+            if kasa_remote::remote::is_remote_pane(outer) || kasa_remote::remote::remote_info(&anchor).is_some() {
+                anyhow::bail!("원격 칸에는 이 기기 폴더의 탭을 열 수 없어요");
+            }
+        }
+        let cwd = match &cwd_override {
+            Some(dir) => Some(dir.to_string_lossy().into_owned()),
+            None => self.spawn_cwd_from(Some(outer)),
+        };
         let new_pid = self.alloc_pane_id();
-        let inherited = self.spawn_inherited_remote_session(outer, &new_pid, true, None)?;
+        let inherited = match cwd_override {
+            Some(_) => None,
+            None => self.spawn_inherited_remote_session(outer, &new_pid, true, None)?,
+        };
         // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
         // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
         // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(사용자 2026-08-07:

@@ -344,6 +344,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
+            UserEvent::SharedRooms(event) => { self.shared_rooms_event(event.clone()); return; }
+            UserEvent::SharedLocal(event) => { self.shared_local_event(event.clone()); return; }
             UserEvent::VaultPicked { .. } | UserEvent::VaultListings { .. } | UserEvent::VaultSearch { .. } | UserEvent::VaultDocument { .. } | UserEvent::VaultGraph { .. } => return,
             UserEvent::RichDocument { .. } => return,
             UserEvent::CloseGraceExpired => {
@@ -1098,6 +1100,7 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(crate::internal_room::InternalRoomKind::Settings) => {
                         self.open_settings_room(None);
                     }
+                    Some(crate::internal_room::InternalRoomKind::SharedRooms) => { self.open_shared_room_view(None); }
                     None => self.switch_window(*idx),
                 }
                 return;
@@ -3215,7 +3218,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reproject_main_cursor();
             }
             if let WindowEvent::MouseInput { button, .. } = &event {
-                let workspace = self.settings_room_active().then(|| {
+                let workspace = self.internal_room_active_any().then(|| {
                     let size = self.window.as_ref().unwrap().inner_size();
                     let scale = self.effective_scale();
                     let left = self.effective_sidebar_w();
@@ -3228,7 +3231,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         if main_window {
-            let allow_image = !self.main_pointer_modal() && !self.settings_room_active()
+            let allow_image = !self.main_pointer_modal() && !self.internal_room_active_any()
                 && self.handle_menu.is_none() && self.statusbar.popover.is_none() && !self.account_menu
                 && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
                 && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
@@ -3350,6 +3353,18 @@ impl ApplicationHandler<UserEvent> for App {
         // burst.
         if !matches!(event, WindowEvent::RedrawRequested) {
             self.chrome_dirty = true;
+        }
+        if self.shared_pointer_focus() {
+            let used = match &event {
+                WindowEvent::MouseInput { button, state, .. } => self.shared_mouse(self.cursor_px, *button, *state),
+                WindowEvent::CursorMoved { .. } => self.shared_pointer(self.cursor_px),
+                WindowEvent::MouseWheel { delta, .. } => self.shared_wheel(self.cursor_px, *delta),
+                WindowEvent::DroppedFile(_) => {
+                    self.set_toast("공유 보기에는 파일을 넣을 수 없어요. 내 작업방에서 열어 주세요.".into()); true
+                }
+                _ => false,
+            };
+            if used { window.request_redraw(); return; }
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -7193,6 +7208,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_ime(ime);
                     return;
                 }
+                if self.shared_ime(&ime) { window.request_redraw(); return; }
                 if self.side_column_covers_workspace() && !self.git.commit_focused
                     && self.mcp_col.add.is_none() {
                     self.discard_modal_ime(&ime);
@@ -7432,6 +7448,7 @@ impl ApplicationHandler<UserEvent> for App {
                         Some(crate::internal_room::InternalRoomKind::Settings) => {
                             self.close_settings_room();
                         }
+                        Some(crate::internal_room::InternalRoomKind::SharedRooms) => { self.close_shared_room_view(); }
                         None => self.close_active_tab(),
                     }
                     window.request_redraw();
@@ -7864,6 +7881,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.tick_restore_progress();
         self.tick_migrate_handoff();
         self.tick_transfer_launches();
+        self.tick_shared_local();
+        self.poll_shared_rooms();
         self.run_restore_probe();
         self.run_mirror_focus_probe(event_loop);
         self.run_character_assignment_probe();
@@ -8249,6 +8268,8 @@ impl ApplicationHandler<UserEvent> for App {
                 .chain(self.migrate_handoff.as_ref().map(|h| h.at))
                 .chain(self.migration_tick_deadline())
                 .chain(self.transfer_launch_tick())
+                .chain(self.shared_local_tick())
+                .chain(self.shared_ui_tick())
                 .chain(lid_away_deadline())
                 .chain(self.sidebar_device_drag_deadline())
                 .chain(interaction_probe_deadline())
@@ -8286,7 +8307,7 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
-    fn main_pointer_modal(&self) -> bool {
+    pub(crate) fn main_pointer_modal(&self) -> bool {
         self.main_confirmation_modal() || self.git.commit_modal_open
     }
 

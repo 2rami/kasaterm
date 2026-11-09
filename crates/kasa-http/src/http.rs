@@ -46,6 +46,7 @@ mod git_api;
 mod settings;
 mod arona_ui;
 mod host;
+mod shared_rooms;
 mod replay;
 #[cfg(test)]
 use kasa_socket::test_support;

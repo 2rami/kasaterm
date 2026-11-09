@@ -49,6 +49,8 @@ mod chains;
 mod push_alert;
 #[path = "gateway_conversations.rs"]
 mod conversations;
+#[path = "gateway_shared_rooms.rs"]
+mod shared_rooms;
 
 use kasa_device::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
@@ -243,6 +245,8 @@ pub struct Gate {
     limiter: Arc<kasa_identity::relay_auth::Limiter>,
     account_sync: Arc<kasa_device::account_sync::server::Store>,
     conversations: Option<Arc<conversations::Service>>,
+    /// 계정 간 공유방(`gateway_shared_rooms.rs`). 상태 폴더가 없으면 `None`.
+    shared_rooms: Option<Arc<shared_rooms::Service>>,
     /// 계정별 개인비서(키·작업·대화). 상태 폴더가 없으면 `None` — 메모리에만 키를 두지 않는다.
     workspace: Option<Arc<workspace::Service>>,
     /// 계정에 붙인 메일·PR 일 권한(`connections.rs`). 상태 폴더가 없으면 `None`.
@@ -351,6 +355,7 @@ impl Gate {
                 state_path.as_ref().map(|p| p.with_file_name("account-sync")),
             )),
             conversations: conversations::Service::open(state_path.as_deref()),
+            shared_rooms: shared_rooms::Service::open(state_path.as_deref()),
             workspace: workspace::Service::open(state_path.as_deref()),
             connections: kasa_identity::connections::Service::open(state_path.as_deref(), oauth_config),
             agent_chains: kasa_device::agent_chains::Service::open(state_path.as_deref()),
@@ -509,6 +514,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(chains::routes())
         .merge(push_alert::routes())
         .merge(conversations::routes())
+        .merge(shared_rooms::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))

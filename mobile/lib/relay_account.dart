@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 
 import 'package:http/http.dart' as http;
 import 'archive_model.dart';
+import 'shared_rooms_model.dart';
 
 const defaultGateway = 'https://kasaterm.debimarlene.com';
 
@@ -986,6 +987,58 @@ class RelayAccountApi {
   Future<ArchiveEntry> restoreConversation(String id) async => ArchiveEntry.fromJson((await _request(
     'conversations/${Uri.encodeComponent(id)}/restore', body: const {}, error: archiveError,
   ))['conversation']);
+
+  static String _room(String id) => 'shared-rooms/${Uri.encodeComponent(id)}';
+
+  Future<Map<String, dynamic>> _shared(String path, {Map<String, Object?>? body, String? method, bool delete = false}) =>
+      _request(path, body: body, method: method, delete: delete, error: sharedError);
+
+  Future<List<SharedRoom>> sharedRooms() async => sharedRoomsFrom(await _shared('shared-rooms'));
+
+  Future<SharedRoom> sharedRoom(String id) async => SharedRoom.fromJson((await _shared(_room(id)))['room']);
+
+  /// 같은 폼의 재시도는 같은 [requestId] 라 방이 두 번 생기지 않는다.
+  Future<SharedRoom> createSharedRoom(String title, {required bool allowFork, required String requestId}) async => SharedRoom.fromJson(
+    (await _shared('shared-rooms', body: {'title': title, 'allow_fork': allowFork, 'request_id': requestId}))['room'],
+  );
+
+  Future<SharedRoom> updateSharedRoom(String id, int expectedRevision, {String? title, bool? allowFork}) async =>
+      SharedRoom.fromJson((await _shared(
+        _room(id),
+        method: 'PATCH',
+        body: {'expected_revision': expectedRevision, 'title': ?title, 'allow_fork': ?allowFork},
+      ))['room']);
+
+  Future<void> deleteSharedRoom(String id) => _shared(_room(id), delete: true);
+
+  /// 관문 기본값(24시간·1회)으로 발급한다. 원문 코드는 이 응답에만 있다.
+  Future<SharedInvite> createSharedInvite(String roomId) async =>
+      SharedInvite.fromJson((await _shared('${_room(roomId)}/invites', body: const {}))['invite']);
+
+  Future<void> revokeSharedInvite(String roomId, String inviteId) =>
+      _shared('${_room(roomId)}/invites/${Uri.encodeComponent(inviteId)}', delete: true);
+
+  Future<SharedRoom?> acceptSharedInvite(String token) async {
+    final room = (await _shared('shared-room-invites/accept', body: {'token': token}))['room'];
+    return room == null ? null : SharedRoom.fromJson(room);
+  }
+
+  Future<void> removeSharedMember(String roomId, String account) =>
+      _shared('${_room(roomId)}/members/${Uri.encodeComponent(account)}', delete: true);
+
+  Future<SharedContent> sharedContent(String roomId, String sessionId, {required String generation, required int offset, int? end}) async {
+    final query = Uri(queryParameters: {'generation': generation, 'offset': '$offset', 'end': ?end?.toString()}).query;
+    return SharedContent.fromJson(
+      (await _shared('${_room(roomId)}/sessions/${Uri.encodeComponent(sessionId)}/content?$query'))['content'],
+    );
+  }
+
+  /// 같은 [requestId] 로 다시 부르면 관문이 같은 사본을 돌려준다.
+  Future<SharedForkInfo> createSharedFork(String roomId, String sessionId, {required String checkpointId, required String requestId}) async =>
+      SharedForkInfo.fromJson((await _shared(
+        '${_room(roomId)}/sessions/${Uri.encodeComponent(sessionId)}/fork',
+        body: {'checkpoint_id': checkpointId, 'request_id': requestId},
+      ))['fork']);
 
   Future<AccountSyncSnapshot> readSync() async =>
       AccountSyncSnapshot.fromJson(await _request('account-sync'));

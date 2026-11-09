@@ -121,7 +121,8 @@ impl App {
         (0..self.windows.len())
             .map(|i| {
                 // 다른 기기 방의 보기 창은 이 목록에 안 선다 — 높이 0.
-                if self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some() {
+                if self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some()
+                    || self.internal_room_kind_at(i) == Some(crate::internal_room::InternalRoomKind::SharedRooms) {
                     return 0.0;
                 }
                 SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1
@@ -281,7 +282,8 @@ impl App {
         let mut y = top + self.sidebar_local_body_offset() - scroll;
         for i in 0..n {
             // 다른 기기 방의 보기 창은 그 기계 절의 방 카드가 탭이다 — 여기엔 안 세운다.
-            if self.sidebar_local_device_collapsed() || self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some() {
+            if self.sidebar_local_device_collapsed() || self.sidebar_room_hidden(i) || self.remote_view_of_window(i).is_some()
+                || self.internal_room_kind_at(i) == Some(crate::internal_room::InternalRoomKind::SharedRooms) {
                 continue;
             }
             // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,

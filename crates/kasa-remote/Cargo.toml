@@ -11,6 +11,7 @@ test-isolation = ["kasa-device/test-isolation"]
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
+base64 = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
 futures-util = { workspace = true }

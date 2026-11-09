@@ -3046,6 +3046,7 @@ impl App {
             crate::ImeFocus::Settings(field) => {
                 self.native_settings_insert_into(field, &text)
             }
+            crate::ImeFocus::SharedRooms => self.shared_field_insert(&text),
         }
     }
 
@@ -3307,6 +3308,7 @@ impl App {
         if self.room_rename_key(event) {
             return;
         }
+        if self.shared_key(event) { return; }
         // A full-width panel must not type into the terminal or chat hidden underneath it.
         if self.side_column_covers_workspace() {
             if self.git.commit_focused {

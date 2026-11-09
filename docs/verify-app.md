@@ -139,6 +139,13 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
 
 ## 학생·대화 픽스처
 
+`python3 app/kasaterm/src/shared_rooms/tests/native.py`는 합성 관문·자격과 격리한 창으로 공유방을 검증한다.
+읽기 화면의 입력·붙여넣기·닫기, 작은 폼의 클릭 영역, 기존 방 번호와 PTY 수, 포크 재시도의 단일 실행을 확인한다.
+가짜 Claude 실행 파일은 리그 안에서 만들며 계정이나 모델 호출을 사용하지 않는다. 첫 입력 전에 child 기록 파일이
+없어도 statusline 신원 보고와 입력 준비가 일치하면 완료되는지 대조한다.
+`KASATERM_TEST_SHARED_DIR`의 command/report는 검증 실행과 `KASATERM_SHARED_FIXTURE_CREDENTIAL`이 함께 있을 때만 쓴다.
+fixture 자격은 HTTP loopback만 받는다. native 루트는 격리 collab 폴더에 고정하며 검증용 실행 파일이 없으면 포크를 거부한다.
+
 **리그에서 학생 얼굴을 붙이려고 `/repersona`·`kasaterm-cli repersona`·학생 이름 런처를 호출하지 마라.**
 2026-10-16 검증에서 `/repersona?sid=<검증 UUID>`가 본판 `~/.config/kasaterm/manual_characters.json`에
 검증 UUID를 추가했다. `character.rs::manual_pick_path`는 HOME 아래 경로를 직접 쓰며

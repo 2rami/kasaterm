@@ -39,6 +39,7 @@ const SECTION_H: f32 = 36.0;
 
 #[derive(Default)]
 pub(crate) struct NavigationState {
+    pub(crate) shared: crate::shared_rooms::Nav,
     pub(crate) room_cards: room_cards::RoomCards,
     device_order: device_order::Order,
     collapsed_devices: std::collections::HashSet<String>,
@@ -73,6 +74,19 @@ pub(crate) struct NavigationState {
     /// 이름을 고치는 원격 방의 카드 키와 편집 화면. 라벨에 커서 글자를 섞지 않는다.
     pub(crate) rename: Option<(String, crate::lineedit::SingleLine)>,
     hits: Vec<(Action, Rect)>,
+}
+
+impl NavigationState {
+    pub(crate) fn shared_verification_hits(&self) -> Vec<(String, Rect)> {
+        self.hits.iter().filter_map(|(action, rect)| {
+            let name = match action {
+                Action::SharedOpen(id) => format!("open:{id}"),
+                Action::SharedCreate => "new".into(), Action::SharedJoin => "join".into(),
+                Action::SharedToggle => "toggle".into(), _ => return None,
+            };
+            Some((name, *rect))
+        }).collect()
+    }
 }
 
 /// 방 카드 우클릭 메뉴 — 어느 기기의 어느 방인가와 뜬 자리. `pane` 이 있으면 **칸 메뉴**다.
@@ -131,6 +145,10 @@ enum RoomMenuAction {
 
 #[derive(Clone)]
 enum Action {
+    SharedToggle,
+    SharedOpen(String),
+    SharedCreate,
+    SharedJoin,
     HiddenRooms(String),
     ShowHiddenRoom(RoomId),
     Menu(String),
@@ -803,6 +821,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let label = if label.is_empty() { "이 기기" } else { label };
     let compact = width < 180.0;
     g.push_clip(viewport.0, viewport.1, viewport.2, viewport.3);
+    draw_shared_section(g, nav, cursor, width, viewport);
     draw_device_section(g, label, (0.0, local_top, width, local_height));
     let head = (8.0, local_top + 4.0, width - 16.0, HEADER_H - 8.0);
     nav.home = clipped(head, viewport);
@@ -882,6 +901,37 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         }
     }
     g.pop_clip();
+}
+
+fn draw_shared_section(g: &mut gpu::GpuRenderer, nav: &mut NavigationState, cursor: (f32, f32), width: f32, viewport: Rect) {
+    let y = viewport.1 - nav.shared_scroll;
+    let plus = (width - 30.0, y + 9.0, 22.0, 26.0);
+    let join = (width - 68.0, y + 9.0, 34.0, 26.0);
+    let head = (8.0, y + 4.0, (join.0 - 12.0).max(0.0), 36.0);
+    g.queue_icon(if nav.shared.collapsed { "chevron-right" } else { "chevron-down" }, 12.0, y + 17.0, 10.0, theme::text_dim());
+    text(g, "공유방", 28.0, y + 13.0, (join.0 - 32.0).max(0.0), 12.0, theme::text(), true);
+    g.queue_icon("plus", plus.0 + 3.0, plus.1 + 5.0, 16.0, theme::text_dim());
+    text(g, "참여", join.0 + 3.0, join.1 + 6.0, join.2 - 6.0, 11.0, theme::text_dim(), false);
+    for (action, rect) in [(Action::SharedCreate, plus), (Action::SharedJoin, join), (Action::SharedToggle, head)] {
+        if let Some(rect) = clipped(rect, viewport) {
+            g.hover_pointer |= hit(cursor, rect);
+            nav.hits.push((action, rect));
+        }
+    }
+    if nav.shared.collapsed { return; }
+    for (i, (id, title, own, count)) in nav.shared.rows.iter().enumerate() {
+        let rect = (8.0, y + 44.0 + i as f32 * 44.0, (width - 16.0).max(0.0), 42.0);
+        let Some(visible) = clipped(rect, viewport) else { continue; };
+        let hover = hit(cursor, visible);
+        if hover || nav.shared.active.as_deref() == Some(id) {
+            g.round_rect_fill(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), theme::surface_active());
+        }
+        text(g, title, rect.0 + 8.0, rect.1 + 5.0, rect.2 - 16.0, 12.0, theme::text(), true);
+        text(g, &format!("{} · 대화 {count}", if *own { "내가 공유" } else { "참여 중" }),
+            rect.0 + 8.0, rect.1 + 23.0, rect.2 - 16.0, 10.0, theme::text_dim(), false);
+        g.hover_pointer |= hover;
+        nav.hits.push((Action::SharedOpen(id.clone()), visible));
+    }
 }
 
 pub(crate) fn draw_device_drag(g: &mut gpu::GpuRenderer, info: &state::InfoState, cursor: (f32, f32)) {
@@ -1163,6 +1213,10 @@ impl App {
         let action = self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| a.clone());
         let Some(action) = action else { return false; };
         match action {
+            Action::SharedToggle => { self.info.navigation.shared.collapsed = !self.info.navigation.shared.collapsed; }
+            Action::SharedOpen(room) => { self.open_shared_room_view(Some(&room)); }
+            Action::SharedCreate => { self.open_shared_room_view(None); self.shared_action(crate::shared_rooms::Action::New); }
+            Action::SharedJoin => { self.open_shared_room_view(None); self.shared_action(crate::shared_rooms::Action::Join); }
             Action::HiddenRooms(label) => self.toggle_hidden_sidebar_rooms(label),
             Action::ShowHiddenRoom(room) => self.show_sidebar_room(room),
             Action::Menu(label) => {
@@ -1437,10 +1491,15 @@ mod tests {
         }));
         let layout = devices::sections(&info, 240.0, 200.0);
         assert_eq!(layout.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["test", ""]);
-        assert_eq!(layout[1].top, SECTION_H);
+        assert_eq!(layout[0].top, info.navigation.shared.height());
+        assert_eq!(layout[1].top, info.navigation.shared.height() + SECTION_H);
         assert_eq!(section_labels(&info), ["test"]);
         assert_eq!(info.navigation.collapsed_devices.len(), 2);
         assert_eq!(info.navigation.device_order.keys, ["test", ""]);
+        info.navigation.shared.rows.push(("shared".into(), "Shared".into(), true, 1));
+        let with_room = devices::sections(&info, 240.0, 200.0);
+        assert_eq!(with_room.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["test", ""]);
+        for (before, after) in layout.iter().zip(&with_room) { assert_eq!(after.top - before.top, 44.0); }
     }
 
     /// 기다림 낱말은 하나인데 뜻은 셋이다. 주황(숨쉬는 점)은 사람을 부르는 둘에만

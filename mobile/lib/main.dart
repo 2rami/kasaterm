@@ -24,7 +24,9 @@ import 'screens/conversation_view.dart';
 import 'screens/hub.dart';
 import 'screens/terminal.dart';
 import 'screens/saved_conversations.dart';
+import 'screens/shared_rooms.dart';
 import 'server.dart';
+import 'shared_rooms_repository.dart';
 import 'theme_prefs.dart';
 import 'twins_loading.dart';
 import 'weather/store.dart';
@@ -367,6 +369,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
 
   String? _archiveScope;
 
+  /// 로그인한 계정의 공유방. 기기 연결과 별개라 데스크톱을 기다리는 동안에도 쓴다. 계정이 바뀌면 닫고 새로 만든다.
+  SharedRoomsRepository? _shared;
+
   /// 검증용: 빌드 때 `KASA_OPEN_PANE`(과 `KASA_OPEN_MACHINE`)을 주면 켜자마자 그 학생
   /// 화면을 연다 — 시뮬레이터는 탭을 못 보내니 링크와 같은 길로 화면을 꺼내 본다.
   static const _openPane = String.fromEnvironment('KASA_OPEN_PANE');
@@ -421,6 +426,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     AppLinkObserver.instance.detach();
     _connection.removeListener(_changed);
     _connection.dispose();
+    _shared?.close();
     phoneThemeSync.unbind();
     weather.unbind();
     WidgetsBinding.instance.removeObserver(this);
@@ -613,6 +619,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       }
     }
     ApprovalCenter.instance.bind(_connection.account);
+    _bindShared();
     if (phoneThemeSync.account != _connection.account) {
       if (_connection.account case final account?) {
         unawaited(
@@ -641,7 +648,8 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       PushBridge.instance.unbind();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _connection.server == server) {
-          final readingArchive = server != null && archiveRouteOpenFor(server.resumeScope);
+          final readingArchive = server != null &&
+              (archiveRouteOpenFor(server.resumeScope) || (sharedRoutesOpen && _shared?.account == server.account));
           if (!readingArchive) navigatorKey.currentState?.popUntil((route) => route.isFirst);
           final pending = server == null ? null : _pendingLink;
           if (server != null) _pendingLink = null;
@@ -655,6 +663,27 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       _pendingLink = null;
     }
     setState(() {});
+  }
+
+  void _bindShared() {
+    final account = _connection.account;
+    if (_shared?.account != account) {
+      final previous = _shared;
+      _shared = account == null ? null : (SharedRoomsRepository(account)
+        ..onUnauthorized = () {
+          if (_connection.account == account) unawaited(_connection.logout(revoke: false));
+        });
+      if (previous != null) {
+        previous.close();
+        // 다른 계정의 방·초대 코드가 화면에 남지 않게 공유방 화면과 그 위 대화상자를 닫는다.
+        if (sharedRoutesOpen) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) navigatorKey.currentState?.popUntil((route) => route.isFirst);
+          });
+        }
+      }
+    }
+    _shared?.desktop = _connection.server;
   }
 
   @override
@@ -675,12 +704,13 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
         onSession: _connection.adopt,
       );
     }
-    if (server == null) return AccountWaitingScreen(connection: _connection);
+    if (server == null) return AccountWaitingScreen(connection: _connection, shared: _shared);
     final account = server.account;
     return HubScreen(
       key: ObjectKey(server),
       server: server,
       onChangeAddress: _connection.logout,
+      shared: _shared,
       prefs: HubPrefs(
         scope: account == null ? '' : '${account.origin}|${account.account}',
       ),
@@ -689,8 +719,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
 }
 
 class AccountWaitingScreen extends StatelessWidget {
-  const AccountWaitingScreen({super.key, required this.connection});
+  const AccountWaitingScreen({super.key, required this.connection, this.shared});
   final ConnectionController connection;
+  final SharedRoomsRepository? shared;
 
   @override
   Widget build(BuildContext context) {
@@ -745,6 +776,14 @@ class AccountWaitingScreen extends StatelessWidget {
                 ],
               ),
             const SizedBox(height: 20),
+            // 공유방은 계정 기능이라 데스크톱 없이도 목록·참여·읽기가 된다.
+            if (shared case final shared?) ...[
+              FilledButton.tonalIcon(
+                onPressed: () => openSharedRooms(context, shared),
+                icon: const Icon(Icons.groups_outlined), label: const Text('공유방'),
+              ),
+              const SizedBox(height: 8),
+            ],
             if (connection.archiveServer case final archiveServer?) ...[
               FilledButton.tonalIcon(
                 onPressed: () => openSavedConversations(context, archiveServer),

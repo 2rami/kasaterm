@@ -432,6 +432,7 @@ impl App {
                 Some(PaneContent::Image(_)) => "이미지",
                 Some(PaneContent::Markdown(_)) => "문서",
                 Some(PaneContent::Settings) => "설정",
+                Some(PaneContent::SharedRooms) => "공유방",
                 _ => "터미널",
             };
             (self.display_pane_char(&ws, id).unwrap_or_default(), kind)

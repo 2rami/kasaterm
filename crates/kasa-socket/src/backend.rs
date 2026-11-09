@@ -1704,6 +1704,12 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("transcript_archive unsupported by this backend")
     }
 
+    /// 공유방 host 창구(`/shared-rooms/*`). `action` 은 status·sources·publish·fork·operation 이고 응답은
+    /// `ok` 를 뺀 몸통이다. 공유방을 모르는 백엔드는 「없음」으로 답해 폰이 업데이트 필요를 알린다.
+    fn shared_room_action(&self, _action: &str, _body: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("shared rooms unsupported by this backend")
+    }
+
     /// Read a *past* (offline) Claude session's transcript jsonl as raw text,
     /// addressed by its session uuid + the cwd it ran in — no live pane needed.
     /// Where `transcript_raw` reads the jsonl bound to a running surface, this

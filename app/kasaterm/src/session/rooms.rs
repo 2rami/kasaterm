@@ -1,17 +1,17 @@
 //! 방(창)과 초점 — 방 만들기·고르기·순서 바꾸기·닫기, 방 이름 짓기, 칸·탭 초점 옮기기.
 use super::*;
 
-fn room_number_plan<T>(views: &[Option<T>], mut remote_number: impl FnMut(&T) -> Option<usize>) -> Vec<Option<usize>> {
-    let local_count = views.iter().filter(|view| view.is_none()).count();
+fn room_number_plan<T>(views: &[Option<T>], excluded: Option<usize>, mut remote_number: impl FnMut(&T) -> Option<usize>) -> Vec<Option<usize>> {
+    let local_count = views.iter().enumerate().filter(|(i, view)| Some(*i) != excluded && view.is_none()).count();
     let mut next_local = 0;
-    views.iter().map(|view| match view {
+    views.iter().enumerate().map(|(i, view)| if Some(i) == excluded { None } else { match view {
         Some(view) => remote_number(view).map(|number| local_count + number),
         None => {
             let number = next_local;
             next_local += 1;
             Some(number)
         }
-    }).collect()
+    }}).collect()
 }
 
 pub(super) fn forward_backend_focus<T>(pane_id: String, send: impl FnOnce(String) -> T) -> T {
@@ -123,8 +123,12 @@ impl App {
     }
 
     pub(crate) fn room_navigation_count(&self) -> usize {
-        (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).count()
-            + self.remote_room_navigation().len()
+        self.local_room_navigation().len() + self.remote_room_navigation().len()
+    }
+
+    pub(crate) fn local_room_navigation(&self) -> Vec<usize> {
+        let shared = self.internal_room_index(crate::internal_room::InternalRoomKind::SharedRooms);
+        (0..self.windows.len()).filter(|&i| Some(i) != shared && self.remote_view_of_window(i).is_none()).collect()
     }
 
     pub(crate) fn room_number_for_window(&self, window: usize) -> Option<usize> {
@@ -136,7 +140,7 @@ impl App {
         // every frame, multiplying roster work as mirror rooms accumulated.
         let views: Vec<_> = (0..self.windows.len()).map(|i| self.remote_view_of_window(i)).collect();
         let remote = self.remote_room_navigation();
-        room_number_plan(&views, |(label, ids)| {
+        room_number_plan(&views, self.internal_room_index(crate::internal_room::InternalRoomKind::SharedRooms), |(label, ids)| {
             let machine = self.info.machines_col.machines.iter().find(|m| &m.label == label)?;
             let source = machine.remote.iter().chain(&machine.mirrored).find(|row| ids.contains(&row.remote_id))?;
             remote.iter().position(|(l, w, name)| {
@@ -151,7 +155,7 @@ impl App {
 
     pub(crate) fn goto_room_number(&mut self, number: usize) {
         self.chrome_dirty = true;
-        let local: Vec<_> = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).collect();
+        let local = self.local_room_navigation();
         if let Some(&window) = local.get(number) {
             self.goto_room(window);
         } else if let Some((label, window, room)) = number.checked_sub(local.len())
@@ -187,6 +191,9 @@ impl App {
             Some(crate::internal_room::InternalRoomKind::Settings) => {
                 self.commit_room_rename();
                 self.open_settings_room(None);
+            }
+            Some(crate::internal_room::InternalRoomKind::SharedRooms) => {
+                self.open_shared_room_view(None);
             }
             None => {
                 self.commit_room_rename();
@@ -408,6 +415,7 @@ impl App {
         if let Some(kind) = self.internal_room_kind_at(idx) {
             let closed = match kind {
                 crate::internal_room::InternalRoomKind::Settings => self.close_settings_room(),
+                crate::internal_room::InternalRoomKind::SharedRooms => self.close_shared_room_view(),
             };
             return closed
                 .then_some(())
@@ -1032,17 +1040,24 @@ mod tests {
     #[test]
     fn bulk_room_numbers_preserve_local_order_duplicate_views_and_unknown_sources() {
         let views = [None, Some(1), None, Some(1), Some(2), None];
-        assert_eq!(room_number_plan(&views, |id| (*id == 1).then_some(1)),
+        assert_eq!(room_number_plan(&views, None, |id| (*id == 1).then_some(1)),
             [Some(0), Some(4), Some(1), Some(4), None, Some(2)]);
-        assert_eq!(room_number_plan::<()>(&[], |_| None), Vec::<Option<usize>>::new());
+        assert_eq!(room_number_plan::<()>(&[], None, |_| None), Vec::<Option<usize>>::new());
     }
 
     #[test]
     fn a_frame_resolves_each_remote_number_only_once() {
         let views: Vec<_> = (0..1000).map(|i| (i % 2 == 1).then_some(i / 2)).collect();
         let mut reads = 0;
-        let numbers = room_number_plan(&views, |number| { reads += 1; Some(*number) });
+        let numbers = room_number_plan(&views, None, |number| { reads += 1; Some(*number) });
         assert_eq!(reads, 500);
         assert_eq!((numbers[998], numbers[999]), (Some(499), Some(999)));
+    }
+
+    #[test]
+    fn shared_view_does_not_shift_local_or_remote_shortcuts() {
+        let before = room_number_plan(&[None, Some(0), None], None, |id| Some(*id));
+        let opened = room_number_plan(&[None, None, Some(0), None], Some(1), |id| Some(*id));
+        assert_eq!(opened, [before[0], None, before[1], before[2]]);
     }
 }

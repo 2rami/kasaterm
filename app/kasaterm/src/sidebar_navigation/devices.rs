@@ -42,7 +42,10 @@ pub(super) fn sections(info: &state::InfoState, width: f32, local_content_h: f32
         };
         (machine.label.clone(), SECTION_H + body)
     }));
-    device_order::layout(&nav.device_order, &sizes)
+    device_order::layout(&nav.device_order, &sizes).into_iter().map(|mut section| {
+        section.top += nav.shared.height();
+        section
+    }).collect()
 }
 
 fn drop_at(nav: &NavigationState, cursor: (f32, f32)) -> Option<(Order, f32)> {

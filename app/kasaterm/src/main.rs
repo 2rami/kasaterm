@@ -98,6 +98,7 @@ mod info_prompts;
 mod info_split;
 mod context_info;
 mod internal_room;
+mod shared_rooms;
 mod links;
 mod inline_image;
 mod inline_media;
@@ -2072,6 +2073,7 @@ enum PaneContent {
     Web(WebPane),
     /// PTY 없는 네이티브 설정 방. 화면 상태는 `App.settings_scene`가 소유한다.
     Settings,
+    SharedRooms,
 }
 
 /// 웹(브라우저) pane 의 그리드 쪽 상태 — 주소뿐이다. 실제 브라우저는 이 pane
@@ -3792,6 +3794,8 @@ mod settings_action_privacy_tests {
 /// without the ~0.5s blink-cadence lag.
 #[derive(Debug, Clone)]
 enum UserEvent {
+    SharedRooms(shared_rooms::Event),
+    SharedLocal(shared_rooms::service::Event),
     AccountSyncApply(kasa_device::account_sync::PendingApply, std::sync::mpsc::Sender<Result<(), String>>),
     VaultPicked { owner: WindowId, root: String },
     VaultGraph { owner: WindowId, generation: u64, request_generation: u64, request_id: String, graph: vault_graph::Graph },
@@ -4563,6 +4567,7 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 설정 방의 폼 입력. 필드를 함께 실어야 조합 중 다른 칸을 눌렀을 때
     /// 마지막 음절이 새 칸이 아니라 떠나는 칸에 확정된다.
     Settings(SettingsInput),
+    SharedRooms,
 }
 
 impl ImeFocus {
@@ -5885,6 +5890,7 @@ struct App {
     git_ignore_started: bool,
     /// PTY 없는 싱글턴 설정 방의 카테고리와 돌아갈 사용자 pane.
     settings_scene: settings_room::SettingsScene,
+    shared_rooms: shared_rooms::State,
     /// In-memory mirror of settings.json, edited live and written on each
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
@@ -6484,6 +6490,7 @@ impl App {
             // 헤드리스 초기 열림은 KASATERM_AUTOSETTINGS(testkit)가 event_loop
             // 위에서 담당한다.
             settings_scene: settings_room::SettingsScene::default(),
+            shared_rooms: shared_rooms::State::default(),
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_open_mode: socket::read_file_open_mode(),
             set_file_open_app: socket::read_file_open_app(),

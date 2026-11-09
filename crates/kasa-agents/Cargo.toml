@@ -9,6 +9,8 @@ license.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 kasa-socket.workspace = true
+# 공유방 포크 자료의 해시·fork_key(`session_fork`). 이미 워크스페이스에 있는 판이다.
+sha2.workspace = true
 
 [lints]
 workspace = true
