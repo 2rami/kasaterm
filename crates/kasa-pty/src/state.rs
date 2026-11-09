@@ -2475,6 +2475,37 @@ fn chunk_is_only_particles(buf: &[u8]) -> bool {
     saw
 }
 
+/// 출력이 쏟아지는 동안 스냅샷을 이보다 자주 만들지 않는다 — 120Hz 한 박자 남짓.
+const SNAPSHOT_COALESCE: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// 이번 read 의 스냅샷을 미뤄도 되나. 리눅스 PTY 는 read 한 번에 4KB 남짓만 줘서, read 마다 격자를
+/// 베끼면 `cat` 같은 홍수에서 스냅샷만 수만 번 뜨고(스크롤 중엔 매번 전체 격자) 그게 파싱보다 비쌌다
+/// (2코어 VM 실측: 100MB cat 동안 읽기 스레드 10.3초). alacritty 처럼 쌓인 걸 다 먹고 한 번만 뜬다.
+///
+/// 미루는 건 셋이 다 맞을 때뿐이다 — 바로 읽을 바이트가 더 있다(그러니 다음 read 가 곧 온다), 마지막
+/// 스냅샷이 박자 안이다, 이 배치에 OSC·APC·DCS 가 없다(프롬프트 표시·그림·알림은 그 배치의 커서·상태를
+/// 스냅샷에 싣는다). 키 메아리처럼 출력이 끊기는 자리에선 첫 조건이 깨져 바로 보낸다. alacritty 의
+/// damage 는 `reset_damage` 전까지 쌓이므로 건너뛴 배치의 바뀐 줄도 다음 스냅샷에 다 실린다.
+fn defer_snapshot(batch: &[u8], last_publish: Instant, poll_fd: Option<i32>) -> bool {
+    if last_publish.elapsed() >= SNAPSHOT_COALESCE {
+        return false;
+    }
+    if [b"\x1b]".as_slice(), b"\x1b_", b"\x1bP"].iter().any(|p| memchr::memmem::find(batch, p).is_some()) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Some(fd) = poll_fd else { return false };
+        let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        (unsafe { libc::poll(&mut p, 1, 0) }) > 0 && p.revents & libc::POLLIN != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = poll_fd;
+        false
+    }
+}
+
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     reader_stop: Arc<std::sync::atomic::AtomicBool>,
@@ -2546,6 +2577,9 @@ fn spawn_reader_thread(
         let mut blk_utf8: Vec<u8> = Vec::new();
         // 이번 묶음의 C 직전에 읽어 둔 명령 줄(있으면 격자를 다시 읽지 않는다).
         let mut blk_cmd: Option<String> = None;
+        // 스냅샷 모으기 — `defer_snapshot` 머리말. 파싱했지만 아직 안 보낸 변경이 있나.
+        let mut last_publish = Instant::now() - SNAPSHOT_COALESCE;
+        let mut unsent = false;
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -2589,6 +2623,13 @@ fn spawn_reader_thread(
             let n = match reader.read(&mut buf) {
                 Ok(0) => {
                     eprintln!("[pty-backend] EOF on PTY reader — shell exited");
+                    // 모아 두기만 하고 못 보낸 마지막 화면 — 셸이 끝나기 직전 출력이 사라지지 않게.
+                    if unsent {
+                        let mut t = term.lock().unwrap();
+                        let snap = snapshot(&mut t, current_size.0, current_size.1, &pane_id, &title_handle, false);
+                        drop(t);
+                        let _ = publish_screen_update(&tx, &screen_taps, snap);
+                    }
                     // Tell the host pump the pane died. The PtySession also
                     // holds a Sender (for scroll/resize), so dropping our
                     // clone alone never closes the channel — the recv loop
@@ -2818,7 +2859,12 @@ fn spawn_reader_thread(
                 // ?2026l or the sync timeout — no torn frame ever reaches us.
                 if processor.sync_bytes_count() > 0 {
                     None
+                } else if defer_snapshot(processed_bytes, last_publish, poll_fd) {
+                    unsent = true;
+                    None
                 } else {
+                    unsent = false;
+                    last_publish = Instant::now();
                     // 새 출력은 맨 아래를 보고 있던 사람만 따라간다. 위의 내용을
                     // 읽는 중이라면 alacritty가 늘려 둔 display_offset을 보존해야
                     // 스트리밍 출력마다 화면이 아래로 끌려가지 않는다.
@@ -7860,5 +7906,58 @@ mod astra_heartbeat_tests {
         assert!(!chunk_is_only_particles(b"\x1b[2J\x1b[Hhello"));
         // 점 하나 없는 커서 이동만 — 박동으로 셀 근거도, 뺄 근거도 아니다.
         assert!(!chunk_is_only_particles(b"\x1b[2;7H"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod snapshot_coalesce_tests {
+    use super::*;
+
+    /// 스냅샷을 모아 보내도 GUI 가 받은 줄들만으로 마지막 화면이 맞아야 한다. 홍수 한가운데서 **한 번만**
+    /// 쓰고 다시 안 건드리는 줄(MID-ONCE)이 핵심이다 — 그 배치가 미뤄진 채 damage 가 다음 스냅샷에 안
+    /// 실리면 그 줄은 영영 GUI 에 안 간다. 스크롤 홍수만으로는 마지막 배치가 모든 줄을 다시 칠해 그 결함이
+    /// 가려진다(변형 시험으로 확인).
+    #[test]
+    fn rows_written_inside_a_deferred_batch_reach_the_gui() {
+        let s = PtySession::start(PtyOptions {
+            shell: Some(test_posix_shell()),
+            cols: 40,
+            rows: 10,
+            pane_id: "%coalesce".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut flood = b"\x1b[2J".to_vec();
+        for i in 1..=200_000 {
+            flood.extend_from_slice(format!("\x1b[1;1Hcount-{i}").as_bytes());
+            if i == 100_000 {
+                flood.extend_from_slice(b"\x1b[2;1HMID-ONCE");
+            }
+        }
+        flood.extend_from_slice(b"\x1b[3;1HFLOOD-DONE\r\n");
+        let path = std::env::temp_dir().join(format!("kasa-pty-coalesce-{}.bin", std::process::id()));
+        std::fs::write(&path, &flood).unwrap();
+        s.send_bytes(format!("cat {}\n", path.display()).as_bytes())
+        .unwrap();
+        let mut rows: std::collections::BTreeMap<u16, String> = Default::default();
+        let mut updates = 0usize;
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match s.screens.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(u) => {
+                    updates += 1;
+                    for (r, row) in &u.dirty {
+                        rows.insert(*r, row.iter().map(|c| c.ch).collect::<String>().trim_end().to_string());
+                    }
+                }
+                Err(_) if rows.get(&2).is_some_and(|l| l == "FLOOD-DONE") => break,
+                Err(_) => {}
+            }
+        }
+        assert_eq!(rows.get(&2).map(String::as_str), Some("FLOOD-DONE"), "홍수 끝 줄이 없다: {rows:?}");
+        assert_eq!(rows.get(&0).map(String::as_str), Some("count-200000"), "마지막 덮어쓰기가 안 왔다: {rows:?}");
+        assert_eq!(rows.get(&1).map(String::as_str), Some("MID-ONCE"), "미룬 배치의 줄이 빠졌다: {rows:?}");
+        let _ = std::fs::remove_file(&path);
+        assert!(updates < 10_000, "read 마다 스냅샷을 떴다({updates}회)");
     }
 }
