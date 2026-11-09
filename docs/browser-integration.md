@@ -24,18 +24,25 @@
 `kasa-device`(6)의 기기 명부·푸시를 사용한다. `kasa-http`(10)와 앱(12)이 이를 받는다.
 GUI·CEF를 의존하지 않고, 낮은 층에서 브라우저 크레이트로 되돌아가는 의존도 없다.
 
-## 도구 선택
+## 사용 기준
+
+브라우저 조작과 인증은 카사브라우저의 `kb`를 사용한다. 연결이 없거나 지원하지 않는 동작이면
+카사브라우저의 실행·설치·지원 여부를 확인하며 Google Chrome·`kc`·`kj`로 자동 전환하지 않는다.
+기존 Chrome 프로필·로그인·북마크는 가져오기 원본으로 보존한다.
 
 | 하려는 일 | 도구 |
 |---|---|
 | 카사브라우저 데스크톱 탭 읽기·조작 | `kb tabs`, `kb inspect`, `kb command`; `kb --help`와 `kb commands`에서 실제 계약 확인 |
-| Google Chrome의 기존 프로필·확장·탭 조작 | `kc`; 짧은 화면 목표는 `kj` |
+| 로그인 항목 선택·안전한 채우기 | `kb command`의 `login.list`·`login.fill`; 비밀 값을 출력하거나 자동 제출하지 않는다 |
 | 카사브라우저 폰 앱에 일 맡기기 | `kb command`의 `phone.*`, 또는 `kasaterm-cli phone browser` |
 | 사람이 보는 기기에 링크 열기 | `kasaterm-cli open <url>`; 카사텀이 도착 기기를 정하고 OS 브라우저로 연다 |
 
-`kb`와 `kc`는 탭 ID·프로필·연결을 공유하지 않는다. Google Chrome에서 인증하라는 요청은
-Chrome 경로로 처리한다. OS 기본 브라우저 설정과 에이전트가 조작할 브라우저 선택은 별개다.
+OS 기본 브라우저 설정과 에이전트가 조작할 브라우저 선택은 별개다.
 `kasachrome_machine`은 URL 도착 기기에도 쓰이는 기존 설정 키이므로 이 정리에서 바꾸지 않았다.
+
+구현에는 기존 `kasachrome/` 도구, Chrome 전용 기기 연결, 격리 재인증의 Chrome 실행 경로가 남아 있다.
+이들은 현재 사용 기준과 구분하며, Chrome 지원 폐기 때 함께 이행할 대상이다.
+브라우저 엔진인 CEF/Chromium과 Chrome 데이터 가져오기는 Google Chrome 앱 조작과 구분한다.
 
 ## 폰 연결 계약
 
