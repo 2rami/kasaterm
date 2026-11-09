@@ -994,7 +994,7 @@ impl App {
             }
         }
         let session = match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
-            shell: resolve_default_shell(),
+            shell: crate::spawn_env::resolve_restored_shell(rec.get("shell").and_then(|v| v.as_str())),
             cwd: cwd.clone(),
             cols,
             rows,

@@ -133,7 +133,7 @@ pub struct DispatchConfig {
     /// 수확하고, 지시는 칸 입력 대신 inbox 파일로 준다.
     #[serde(default = "d_runtime")]
     pub runtime: String,
-    /// runtime=acp 의 하네스(`claude`·`codex`). 빈 값 = claude.
+    /// 새 학생의 하네스(`claude`·`codex`). 빈 값은 현재 계정 사용량으로 선택한다.
     #[serde(default)]
     pub acp_harness: String,
     /// runtime=acp 의 세션 모드(claude `acceptEdits`·`bypassPermissions`, codex `agent`·`agent-full-access`).
@@ -808,12 +808,34 @@ fn pick_character(cfg: &DispatchConfig, taken: &HashSet<String>, cursor: &mut us
 /// 주입하면 claude 가 뜨기까지의 몇 초를 노려야 하고, 그 사이 텍스트는 셸이 먹는다.
 /// `claude '<브리프>'` 는 인터랙티브로 뜨면서 그 프롬프트를 첫 턴으로 실행하니 경합이 없다
 /// (실측 확인: 프롬프트 인자가 shim 을 지나서도 첫 턴으로 실행된다).
+fn launch_config(cfg: &DispatchConfig, task: &QueueTask, choose: impl FnOnce() -> Result<String>) -> Result<DispatchConfig> {
+    let mut selected = cfg.clone();
+    let light = task.weight == "light";
+    let model = if light { &cfg.light_model } else { &cfg.heavy_model };
+    let launcher = if light { &cfg.light_launcher } else { &cfg.heavy_launcher };
+    // Explicit models, wrappers and modes belong to their requested harness.
+    if (cfg.acp_harness.is_empty() || cfg.acp_harness == "auto")
+        && model.is_empty() && launcher.is_empty() && cfg.acp_mode.is_empty() {
+        let provider = choose()?;
+        anyhow::ensure!(matches!(provider.as_str(), "claude" | "codex"), "알 수 없는 하네스 선택 응답");
+        selected.acp_harness = provider;
+    } else if selected.acp_harness == "auto" {
+        selected.acp_harness.clear();
+    }
+    Ok(selected)
+}
+
 fn spawn_with_brief(
     backend: &Arc<dyn Backend>,
     cfg: &DispatchConfig,
     character: &str,
     task: &QueueTask,
 ) -> Result<String> {
+    let selected = launch_config(cfg, task, || {
+        let choice = backend.agent_choice(None)?;
+        choice["provider"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("하네스 선택 응답이 비어 있어요"))
+    })?;
+    let cfg = &selected;
     let surface = backend.spawn_student(character)?;
     if surface.is_empty() {
         anyhow::bail!("no pane created");
@@ -868,6 +890,11 @@ fn spawn_acp(
     task: &QueueTask,
     now: f64,
 ) -> Result<(String, String)> {
+    let selected = launch_config(cfg, task, || {
+        let choice = backend.agent_choice(None)?;
+        choice["provider"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("하네스 선택 응답이 비어 있어요"))
+    })?;
+    let cfg = &selected;
     let surface = backend.spawn_student(character)?;
     if surface.is_empty() {
         anyhow::bail!("no pane created");
@@ -1065,7 +1092,8 @@ fn boot_parts(cfg: &DispatchConfig, task: &QueueTask) -> (String, String) {
     };
     // 개행은 셸 인자에서 줄을 끊어 명령을 두 동으로 쪼갠다 — 한 줄로 평탄화한다.
     let brief = task.brief.replace(['\n', '\r'], " ");
-    (format!("{prefix}claude{model_arg}"), brief)
+    let provider = if launcher.is_empty() && cfg.acp_harness == "codex" { "codex" } else { "claude" };
+    (format!("{prefix}{provider}{model_arg}"), brief)
 }
 
 /// split 이 id 를 돌려준 직후엔 그 pane 이 아직 send 경로에 등록되지 않아 "surface 없음"
@@ -1334,6 +1362,31 @@ mod tests {
     ) -> Vec<Decision> {
         let live: HashSet<String> = board.iter().map(|r| r.surface_id.clone()).collect();
         decide(q, board, &live, state, cfg, streak, &HashMap::new(), now, cursor)
+    }
+
+    #[test]
+    fn new_student_auto_choice_preserves_explicit_configuration() {
+        let task = task("quota", "pending", &[], &[]);
+        let cfg = DispatchConfig::default();
+        let picked = launch_config(&cfg, &task, || Ok("codex".into())).unwrap();
+        assert_eq!(picked.acp_harness, "codex");
+        assert!(boot_parts(&picked, &task).0.starts_with("codex"));
+        assert!(cfg.acp_harness.is_empty());
+        for explicit in [
+            DispatchConfig { acp_harness: "claude".into(), ..cfg.clone() },
+            DispatchConfig { acp_harness: "codex".into(), ..cfg.clone() },
+            DispatchConfig { heavy_model: "opus".into(), ..cfg.clone() },
+            DispatchConfig { heavy_launcher: "glm".into(), ..cfg.clone() },
+            DispatchConfig { acp_mode: "acceptEdits".into(), ..cfg.clone() },
+        ] {
+            let result = launch_config(&explicit, &task, || panic!("explicit configuration must win")).unwrap();
+            assert_eq!(result.acp_harness, explicit.acp_harness);
+        }
+        assert!(launch_config(&cfg, &task, || Ok("untrusted-program".into())).is_err());
+        let explicit = DispatchConfig { acp_harness: "auto".into(), heavy_model: "opus".into(), ..cfg.clone() };
+        let selected = launch_config(&explicit, &task, || panic!("model override must keep its harness")).unwrap();
+        assert!(selected.acp_harness.is_empty());
+        assert!(boot_parts(&selected, &task).0.starts_with("claude --model"));
     }
 
     fn task(id: &str, status: &str, files: &[&str], deps: &[&str]) -> QueueTask {

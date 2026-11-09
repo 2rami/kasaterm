@@ -28,6 +28,30 @@ mod collapse_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod shell_record_tests {
+    use super::*;
+
+    #[test]
+    fn each_terminal_record_restores_its_own_launch_program() {
+        let mut sessions = HashMap::new();
+        for (id, program) in [("%shell-primary", "/bin/cat"), ("%shell-tab", "/usr/bin/tee")] {
+            let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+                shell: Some(program.into()), pane_id: id.into(), ..Default::default()
+            }).unwrap();
+            sessions.insert(id.to_string(), Arc::new(session));
+        }
+        let ws = Workspace::default();
+        for (id, program) in [("%shell-primary", "/bin/cat"), ("%shell-tab", "/usr/bin/tee")] {
+            let mut record = serde_json::Map::new();
+            App::fill_surface_record(&mut record, id, None, None, &sessions, &ws, &Default::default(), &Default::default());
+            let saved: serde_json::Value = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+            assert_eq!(saved["shell"], program);
+            assert_eq!(crate::spawn_env::resolve_restored_shell(saved["shell"].as_str()).as_deref(), Some(program));
+        }
+    }
+}
+
 pub(super) fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
     obj.insert("surface_key".into(), serde_json::json!(kasa_collab::surface_keys::ensure(surface)));
     if let Some(key) = kasa_remote::remote::remote_surface_key(surface) {
@@ -361,6 +385,9 @@ impl App {
         agent_cfg: &HashMap<String, (String, String)>,
     ) {
         append_surface_record_metadata(obj, surface);
+        if let Some(shell) = pty.get(surface).and_then(|session| session.shell_program()) {
+            obj.insert("shell".into(), serde_json::json!(shell));
+        }
         // 캐릭터 영속(사용자: 재시작하면 미도리로 둔갑): pane_character 는
         // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
         // 실패해도 캐릭터는 여기서 확실히 저장한다.

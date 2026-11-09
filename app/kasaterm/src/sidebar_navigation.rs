@@ -1199,7 +1199,7 @@ impl App {
                 self.new_remote_room(&label, None);
                 self.info.machines_col.last_refresh = None;
             }
-            Action::NewLocalRoom => self.new_window(),
+            Action::NewLocalRoom => self.request_new_window(),
             Action::CloseRoom { label, window, room } => {
                 self.confirm_or_close_remote_room(&label, window, &room);
             }

@@ -124,6 +124,13 @@ kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '
 
 ## 셸 편집·미리보기·미니맵 회귀
 
+- Windows 셸 선택판은 위 격리 환경에 `KASATERM_AUTOSHELLMENU_MS=2500`을 더해 연다.
+  `KASATERM_AUTOSHELLMENU_TARGET=window|tab|split`은 실제 새 방·탭·분할 요청 경로를 사용한다.
+  방향키·Enter·Esc를 창 이벤트로 보내 선택·취소와 입력 누출을 대조하고, 기존 셸 유지와 `session.json`의
+  탭별 `shell` 값을 확인한다. 좁은 창에서도 표시한 행만 클릭 영역을 갖는지 캡처한다.
+  셸만 담은 격리 저장본의 재시작 검사는 `KASATERM_SERVER_RESTORE_TEST=1`과 `KASATERM_AUTORESTORE=restore`를 함께 준다.
+  일반 검증 실행은 저장본을 읽지 않으며, 이 옵션도 에이전트 대화가 들어 있는 저장본은 받지 않는다.
+
 - `python3 app/kasaterm/src/shell_edit/tests/zle.py`는 실제 zsh PTY로 줄 이동·선택 삭제·붙여넣기·클립보드·되돌리기와 낡은 좌표 보호를 확인한다. 사용자 rc·기록 파일을 사용하지 않는다.
 - macOS의 `python3 app/kasaterm/src/shell_edit/tests/native.py`는 AppKit 키·마우스로 같은 조작을 검증한다. `--user-prompt`는 실제 프롬프트 설정도 확인한다. 입력 내용과 클립보드·세션·소켓·캡처는 실행별 임시 폴더에 둔다.
 - `python3 app/kasaterm/src/preview_frame/tests/native.py`는 그림·영상 카드를 열고 초기 크기·제목줄 이동·모서리 조절·닫기를 검사한다. `KASATERM_TEST_PREVIEW_FRAME_REPORT`는 격리 실행에서만 현재 미리보기의 위치·크기·재생 세대를 기록한다.

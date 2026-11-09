@@ -5889,9 +5889,7 @@ impl App {
             self.sidebar_row_rects.len()
         );
     }
-    /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
-    /// 항목(기본 셸·Claude 학생 등)을 클릭 없이 캡처. autosettings 처럼 함수-로컬
-    /// static(병렬 작업 규칙: struct App 무접촉).
+    /// Native picker verification needs the same spawn target as the user action.
     pub(crate) fn run_pending_autoshellmenu(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
@@ -5909,7 +5907,18 @@ impl App {
         }
         FIRED.store(true, Ordering::Relaxed);
         eprintln!("[autoshellmenu] open shell picker");
-        self.shell_menu_open = true;
+        if cfg!(windows) && crate::verification_run() {
+            let pane = self.ws.lock().unwrap().active_pane.clone();
+            match std::env::var("KASATERM_AUTOSHELLMENU_TARGET").as_deref() {
+                Ok("tab") => { if let Some(pane) = pane { let _ = self.request_shell_tab(&pane); } }
+                Ok("split") => { let _ = self.request_shell_split(kasa_pty::SplitDir::Horizontal); }
+                _ => self.request_new_window(),
+            }
+            return;
+        }
+        let mut choices = available_shells();
+        if choices.is_empty() { choices.push(("기본 셸", "terminal", resolve_default_shell().unwrap_or_else(|| "/bin/sh".into()))); }
+        self.shell_picker.open(crate::shell_picker::Target::Window, choices, None);
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();

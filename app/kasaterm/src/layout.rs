@@ -1300,7 +1300,7 @@ impl App {
         }
         env.extend(self.assign_character_env(&new_id, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
-            shell: resolve_default_shell(),
+            shell: self.pending_shell.take().or_else(resolve_default_shell),
             cwd,
             cols: win_cols,
             rows: win_rows,
@@ -1767,7 +1767,7 @@ impl App {
         } else {
             env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
             Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
-                shell: resolve_default_shell(),
+                shell: self.pending_shell.take().or_else(resolve_default_shell),
                 cwd,
                 cols,
                 rows,

@@ -36,7 +36,7 @@ fn handle_menu_tip(action: ActionKind, chat_on: bool) -> &'static str {
     match action {
         ActionKind::ChatView if chat_on => "터미널로 보기",
         ActionKind::ChatView => "대화로 보기",
-        ActionKind::NewTab => "새 탭",
+        ActionKind::NewTab => if cfg!(windows) { "셸 선택 · 새 탭" } else { "새 탭" },
         ActionKind::SplitH => "좌우로 나누기",
         ActionKind::SplitV => "위아래로 나누기",
         ActionKind::ToggleHeader => "상단바",
@@ -1958,84 +1958,23 @@ impl App {
             Vec::new()
         };
         self.room_list_add_rect = Some(sb_plus);
-        // Shell picker popup layout, computed here (no GPU borrow) so the
-        // click hit-list and the painted boxes share one source of truth.
-        // Top tabs have room below the button, while the sidebar button lives
-        // in the bottom tray and must open upward to stay inside the window.
-        let menu_open = self.shell_menu_open;
-        // (label, icon, cmd, chord). `chord` 는 맨 위 «기본 셸» 줄에만 붙는다 —
-        // 그 줄은 새 탭 단축키가 어느 셸을 여는지 알려주는 자리라, 아래 목록에
-        // 같은 셸이 또 나와도 중복이 아니라 안내다.
+        // Paint and hit testing share one layout, including keyboard selection.
+        let menu_open = self.shell_picker.is_open();
+        let shell_title = self.shell_picker.title();
         let shell_items: Vec<(&'static str, &'static str, String, Option<&'static str>)> =
-            if menu_open {
-                let all = available_shells();
-                let chord = if cfg!(target_os = "macos") {
-                    "⌘T"
-                } else {
-                    "Ctrl Shift T"
-                };
-                let head = resolve_default_shell().map(|dc| {
-                    // 설정에 적힌 경로가 이 기계에 없는 셸일 수 있다(다른 OS 에서
-                    // 넘어온 값 등). 그때는 목록에서 못 찾으니 일반 라벨로 둔다 —
-                    // 줄을 통째로 빼면 단축키를 알릴 자리가 사라진다.
-                    all.iter()
-                        .find(|(_, _, c)| c.eq_ignore_ascii_case(&dc))
-                        .map(|(l, i, c)| (*l, *i, c.clone(), Some(chord)))
-                        .unwrap_or(("기본 셸", "terminal", dc.clone(), Some(chord)))
-                });
-                head.into_iter()
-                    .chain(all.into_iter().map(|(l, i, c)| (l, i, c, None)))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-        const SHELL_ITEM_H: f32 = 34.0;
-        const SHELL_SEP_H: f32 = 9.0;
-        let shell_has_head = shell_items
-            .first()
-            .is_some_and(|(_, _, _, chord)| chord.is_some());
-        // 단축키가 라벨을 밀지 않도록 폭을 벌렸다.
-        let menu_w_for_paint = sb_plus.2.max(240.0);
-        let mut shell_sep_y: Option<f32> = None;
-        #[allow(clippy::type_complexity)]
-        let shell_menu_layout: Vec<(
-            String,
-            &'static str,
-            &'static str,
-            Option<&'static str>,
-            (f32, f32, f32, f32),
-        )> = {
-            let (px, py, _, ph) = sb_plus;
-            let menu_h = shell_items.len() as f32 * SHELL_ITEM_H
-                + if shell_has_head { SHELL_SEP_H } else { 0.0 };
-            // 위로 열 자리가 모자라면 아래로 뒤집고, 그래도 넘치면 창 안으로
-            // 당긴다. 아래 트레이의 "+" 는 위로 여는 게 기본인데, 항목이 늘거나
-            // 창이 짧으면 첫 줄들이 타이틀바 위로 잘려 나간다 — 잘린 줄은 클릭도
-            // 안 되므로 «메뉴가 짧아 보이는» 게 아니라 항목이 사라진 것이 된다.
-            let below = py + ph + 4.0;
-            let above = py - menu_h - 4.0;
-            let mut iy = if self.tabs_on_top || above < TITLE_HEIGHT {
-                below
-            } else {
-                above
-            };
-            if iy + menu_h > sb_win_h - 4.0 {
-                iy = (sb_win_h - 4.0 - menu_h).max(TITLE_HEIGHT);
-            }
-            shell_items
-                .iter()
-                .enumerate()
-                .map(|(n, (label, icon, cmd, chord))| {
-                    let r = (px, iy, menu_w_for_paint, SHELL_ITEM_H);
-                    iy += SHELL_ITEM_H;
-                    if n == 0 && shell_has_head {
-                        shell_sep_y = Some((iy + SHELL_SEP_H / 2.0).round());
-                        iy += SHELL_SEP_H;
-                    }
-                    (cmd.clone(), *label, *icon, *chord, r)
-                })
-                .collect()
-        };
+            self.shell_picker.choices.iter().enumerate().map(|(i, (label, icon, command))|
+                (*label, *icon, command.clone(), (i == self.shell_picker.selected).then_some("Enter"))).collect();
+        const SHELL_ITEM_H: f32 = 36.0;
+        const SHELL_HEADER_H: f32 = 32.0;
+        let sb_win_w = win_px.0 / scale;
+        let menu_w_for_paint = 280.0_f32.min((sb_win_w - 24.0).max(0.0));
+        let shell_menu_x = ((sb_win_w - menu_w_for_paint) / 2.0).max(4.0);
+        let shell_visible = (((sb_win_h - TITLE_HEIGHT - SHELL_HEADER_H - 32.0).max(0.0) / SHELL_ITEM_H) as usize).min(shell_items.len());
+        let shell_first = self.shell_picker.selected.saturating_sub(shell_visible.saturating_sub(1));
+        let shell_menu_y = ((sb_win_h - SHELL_HEADER_H - shell_visible as f32 * SHELL_ITEM_H) / 2.0).max(TITLE_HEIGHT + 4.0);
+        let shell_menu_layout: Vec<_> = shell_items.iter().skip(shell_first).take(shell_visible).enumerate().map(|(i, (label, icon, command, chord))|
+            (command.clone(), *label, *icon, *chord,
+             (shell_menu_x, shell_menu_y + SHELL_HEADER_H + i as f32 * SHELL_ITEM_H, menu_w_for_paint, SHELL_ITEM_H))).collect();
         self.shell_menu_hits = shell_menu_layout
             .iter()
             .map(|(cmd, _, _, _, r)| (cmd.clone(), *r))
@@ -3189,37 +3128,19 @@ impl App {
                 if !menu_open || shell_menu_layout.is_empty() {
                     return;
                 }
-                let (px, py, _, _) = sb_plus;
-                let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H
-                    + if shell_sep_y.is_some() { SHELL_SEP_H } else { 0.0 }
-                    + 8.0;
-                // 첫 항목에서 되짚는다 — 위/아래 뒤집기와 창 안 당김을 레이아웃이
-                // 이미 정했는데 여기서 같은 분기를 또 쓰면 둘이 어긋난다.
-                let backdrop_y = shell_menu_layout
-                    .first()
-                    .map(|(_, _, _, _, r)| r.1 - 4.0)
-                    .unwrap_or(py);
-                round_rect(
-                    g,
-                    px - 4.0,
-                    backdrop_y,
-                    menu_w_for_paint + 8.0,
-                    backdrop_h,
-                    theme::radius_md(),
-                    theme::surface_active(),
-                );
-                // 기본 셸 줄과 «다른 셸로 열기» 목록을 가르는 선. 둘은 성격이
-                // 달라서(하나는 안내, 아래는 선택지) 붙여 두면 첫 줄이 목록의
-                // 일부로 읽힌다.
-                if let Some(sy) = shell_sep_y {
-                    g.rect(px + 12.0, sy, menu_w_for_paint - 24.0, 1.0, theme::border());
-                }
+                round_rect(g, shell_menu_x - 4.0, shell_menu_y - 4.0,
+                    menu_w_for_paint + 8.0, SHELL_HEADER_H + shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0,
+                    theme::radius_md(), theme::surface_active());
+                g.draw_text(shell_menu_x + 12.0, shell_menu_y + 8.0, shell_title,
+                    gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: true, italic: false });
+                g.rect(shell_menu_x + 8.0, shell_menu_y + SHELL_HEADER_H - 1.0,
+                    menu_w_for_paint - 16.0, 1.0, theme::border());
                 for (_, label, icon, chord, (ix, iy, iw, ih)) in &shell_menu_layout {
                     let hov = sb_cursor.0 >= *ix
                         && sb_cursor.0 <= *ix + *iw
                         && sb_cursor.1 >= *iy
                         && sb_cursor.1 <= *iy + *ih;
-                    if hov {
+                    if hov || chord.is_some() {
                         hover_rect(g, *ix, *iy, *iw, *ih, theme::radius_md());
                     }
                     // 셸 아이콘은 브랜드색을 그대로 쓰는 filled SVG 다 — 모노크롬
@@ -3241,10 +3162,12 @@ impl App {
                             theme::text_dim(),
                         );
                     }
+                    let label_room = (*iw - 50.0 - chord.map_or(0.0, |c| g.measure_chrome_text(c, 11.5, false) + 8.0)).max(0.0);
+                    let label = crate::info::fit_text(g, label, label_room, 14.0, false);
                     g.draw_text(
                         *ix + 38.0,
                         *iy + (*ih - 14.0) / 2.0,
-                        label,
+                        &label,
                         gpu::DrawOpts {
                             font_size: 14.0,
                             color: theme::text(),

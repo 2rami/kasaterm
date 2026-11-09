@@ -67,6 +67,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.launch" => surface_launch(backend, id, &req.params),
+        "agent.choice" => match backend.agent_choice(req.params.get("machine").and_then(Value::as_str)) {
+            Ok(choice) => Response::success(id, choice),
+            Err(error) => backend_err(id, error),
+        },
         "surface.server" => match backend.server(&req.params) {
             Ok(result) => Response::success(id, result),
             Err(error) => backend_err(id, error),
@@ -353,7 +357,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
-                "surface.launch",
+                "surface.launch", "agent.choice",
                 "surface.server",
                 "surface.paste",
                 "surface.send_key",

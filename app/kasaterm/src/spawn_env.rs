@@ -83,6 +83,33 @@ fn shell_exists(shell: &str) -> bool {
     ok
 }
 
+pub(crate) fn shell_program_available(shell: &str) -> bool {
+    if shell.is_empty() || shell.chars().any(char::is_control) { return false; }
+    if shell.contains('/') || shell.contains('\\') { return std::path::Path::new(shell).is_file(); }
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path)
+        .any(|dir| dir.join(shell).is_file() || cfg!(windows) && dir.join(format!("{shell}.exe")).is_file()))
+}
+
+fn restore_shell_choice(saved: Option<&str>, fallback: impl FnOnce() -> Option<String>, available: impl Fn(&str) -> bool) -> Option<String> {
+    saved.filter(|shell| available(shell)).map(str::to_string).or_else(fallback)
+}
+
+pub(crate) fn resolve_restored_shell(saved: Option<&str>) -> Option<String> {
+    restore_shell_choice(saved, resolve_default_shell, shell_program_available)
+}
+
+#[cfg(test)]
+mod restored_shell_tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_pane_does_not_follow_a_later_global_default() {
+        assert_eq!(restore_shell_choice(Some("pwsh.exe"), || panic!("saved shell must not consult global settings"), |s| s == "pwsh.exe"), Some("pwsh.exe".into()));
+        assert_eq!(restore_shell_choice(None, || Some("cmd.exe".into()), |_| false), Some("cmd.exe".into()));
+        assert_eq!(restore_shell_choice(Some("C:\\missing\\bash.exe"), || Some("/bin/sh".into()), |_| false), Some("/bin/sh".into()));
+    }
+}
+
 /// First installed Git Bash, if any. Git for Windows ships a Unix-like
 /// shell that's the closest match to the macOS zsh workflow kasaterm was
 /// built around (so `ls`/`grep`/`claude` etc. just work).

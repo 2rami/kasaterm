@@ -2865,6 +2865,21 @@ impl Backend for PtyBackend {
         Ok(value)
     }
 
+    fn agent_choice(&self, machine: Option<&str>) -> Result<serde_json::Value> {
+        let machine = machine.unwrap_or("").trim_start_matches('~');
+        if machine.is_empty() || kasa_device::mobile::machine_identity().as_deref() == Some(machine) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.proxy.send_event(UserEvent::AgentChoice(tx)).map_err(|_| anyhow::anyhow!("GUI event loop closed"))?;
+            return rx.recv_timeout(std::time::Duration::from_secs(8))
+                .map_err(|_| anyhow::anyhow!("사용량 선택 응답 시간 초과"))?.map_err(anyhow::Error::msg);
+        }
+        let base = kasa_device::machines::find_route(&format!("~{machine}"))
+            .ok_or_else(|| anyhow::anyhow!("대상 기기를 명부에서 찾지 못했어요"))?.base;
+        let values = kasa_remote::remote::remote_get_json_bounded(&base, "/settings/values", 2 * 1024 * 1024)?;
+        let choice = kasa_socket::agent_choice::choose(&values).map_err(anyhow::Error::msg)?;
+        Ok(serde_json::to_value(choice)?)
+    }
+
     /// 값은 GUI 스레드의 `App` 이 정본이라(UI 배율처럼 파일에 없는 값이 있다) 여기서
     /// 파일을 직접 읽지 않는다. `values` 액션이 그 스레드에서 스냅샷을 굽고, 회신이
     /// 돌아온 **뒤에** 그것을 집어 온다 — 액션 왕복이 동기라 이 순서가 보장된다.

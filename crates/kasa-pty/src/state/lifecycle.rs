@@ -177,6 +177,7 @@ impl Wiring {
             Arc::clone(&output_beats),
             l.parsed_generation,
         );
+        let launch_shell = if matches!(&l.io, SessionIo::External { .. }) { None } else { opts.shell.clone() };
         PtySession {
             screens: rx,
             io: l.io,
@@ -185,6 +186,7 @@ impl Wiring {
             viewport_sizes: Mutex::new(ViewportSizes::new(opts.cols, opts.rows)),
             _reader_thread: reader_thread,
             shell_pid: l.shell_pid,
+            launch_shell,
             proc_cache: Arc::new(Mutex::new((
                 Instant::now() - std::time::Duration::from_secs(1),
                 None,

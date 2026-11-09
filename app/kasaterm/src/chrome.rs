@@ -2465,7 +2465,7 @@ impl App {
             .unwrap_or(false)
         {
             if !self.tabs_on_top {
-                self.shell_menu_open = false;
+                self.shell_picker.close();
                 let _ = self.open_settings_room(Some(SettingsCat::Machines));
                 self.settings_apply(SettingsAction::AddMachine);
                 self.chrome_dirty = true;
@@ -2474,11 +2474,8 @@ impl App {
             // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
             // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
             // split+claude 수동 부팅으로 충분, 사용자).
-            if crate::available_shells().is_empty() {
-                self.new_window();
-            } else {
-                self.shell_menu_open = !self.shell_menu_open;
-            }
+            if self.shell_picker.is_open() { self.shell_picker.close(); }
+            else { self.request_new_window(); }
             self.chrome_dirty = true;
             return true;
         }

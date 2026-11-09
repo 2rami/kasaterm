@@ -51,16 +51,20 @@ claude·codex 는 ACP 를 직접 말하지 않아 어댑터를 띄운다. 설치
 ## 디스패처에서 쓰기
 
 디스패처가 새로 부르는 학생은 기본으로 runner 로 뜬다. `~/.config/kasaterm/dispatch.json` 에 `"runtime": "tui"` 를
-두면 예전처럼 `claude '<브리프>'` TUI 로 띄운다. 이미 떠 있는 TUI 학생은 그대로 TUI 로 일한다.
+두면 선택된 하네스의 TUI로 띄운다. 이미 떠 있는 학생의 하네스는 바꾸지 않는다.
 
 | 키 | 뜻 |
 |---|---|
-| `runtime` | `"acp"`(기본) = runner, `"tui"` = TUI(`claude '<브리프>'`) |
-| `acp_harness` | `claude`(기본)·`codex` |
+| `runtime` | `"acp"`(기본) = runner, `"tui"` = 선택된 하네스의 TUI |
+| `acp_harness` | 비움·`auto`(기본) = 현재 Claude·Codex 로그인 사용량 비교, `claude`·`codex` = 명시적 선택 |
 | `acp_mode` | 세션 모드. 비우면 TUI 학생과 같게 둔다 — claude 는 그 기기 사용자 설정, codex 는 `agent-full-access`(칸 shim 이 TUI codex 의 샌드박스를 끄는 것과 같다). codex 자동 검토(`agent`)는 샌드박스라 학생의 `kasaterm-cli` 가 앱 소켓에 붙는 것부터 한 번 막는다 |
 | `heavy_model`·`light_model` | runner 의 `--set model=…` 로 간다. `*_launcher`(게이트웨이 래퍼)는 runner 에 쓰이지 않는다 |
 
 흐름:
+
+모델·런처·ACP 모드를 명시하면 하네스를 자동으로 바꾸지 않는다. 사용량 자동 선택은 최신 조회에 성공한
+현재 로그인끼리 비교하며, 미확인 수치를 0%로 간주하지 않는다. 다른 계정 슬롯으로의 전환은 기존 계정
+전환 기능이 맡는다. 이 선택은 새 학생에게만 적용한다.
 
 1. 칸을 하나 만들고 브리프를 `acp/<열쇠>.inbox` 에 먼저 놓은 뒤, `<앱>/kasa-acp run … --status acp/<열쇠>.status.json
    --inbox acp/<열쇠>.inbox --permission ask` 를 `surface.launch` 로 그 칸 셸(POSIX·PowerShell·cmd) 문법에 맞춰 친다.

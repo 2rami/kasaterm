@@ -932,8 +932,32 @@ fn tell_target_booting(why: &str) -> bool {
 /// `summon [--cwd 폴더] [--cmd 부팅명령] [--name 제목] [--tab] [--stdin] [브리프…]` — 부른 pane 옆에 학생을
 /// 세우고, 그 claude 가 보드에 설 때까지 기다렸다가 브리프를 tell 로 건넨다. 학생의 `done` 은 부른 pane
 /// 입력창으로 들어온다(`spawned_by`). 창은 실패해도 닫지 않는다 — 사람이 무엇이 멎었는지 봐야 한다.
+fn auto_summon_boot(socket_path: &str, requested: &str, machine: Option<&str>) -> Result<String> {
+    if !requested.is_empty() && requested != "auto" { return Ok(requested.to_string()); }
+    let reply = roundtrip(socket_path, &Request { id: json!("agent-choice"), method: "agent.choice".into(), params: json!({"machine": machine}) })?;
+    if !reply.ok { return Err(anyhow!("자동 하네스 선택 실패: {} — 앱을 업데이트하거나 --cmd로 지정해 주세요", reply.error.map(|e| e.message).unwrap_or_default())); }
+    let choice = reply.result.unwrap_or_default();
+    let provider = choice["provider"].as_str().filter(|p| matches!(*p, "claude" | "codex"))
+        .ok_or_else(|| anyhow!("알 수 없는 자동 하네스 선택 응답"))?;
+    eprintln!("[summon] {provider} · {}", choice["used_percent"].as_f64()
+        .map(|v| format!("현재 계정 사용량 {v:.0}%")).unwrap_or_else(|| "사용량 미확인, 기본 선택".into()));
+    Ok(provider.to_string())
+}
+
+#[cfg(test)]
+mod auto_summon_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_launches_and_resumes_never_query_or_change_provider() {
+        for command in ["claude", "codex", "codex resume previous", "glm claude --model custom"] {
+            assert_eq!(auto_summon_boot("/no-socket-required", command, Some("remote")).unwrap(), command);
+        }
+    }
+}
+
 fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
-    let (mut cwd, mut name, mut boot) = (None::<String>, None::<String>, "claude".to_string());
+    let (mut cwd, mut name, mut boot) = (None::<String>, None::<String>, String::new());
     let (mut tab, mut stdin, mut json_out) = (false, false, false);
     let (mut machine, mut beside, mut new_room) = (None::<String>, None::<String>, None::<String>);
     let mut words: Vec<String> = Vec::new();
@@ -942,7 +966,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
             "--cwd" => { cwd = Some(value(i)?); i += 2; }
-            "--cmd" => { boot = value(i)?; i += 2; }
+            "--cmd" => { boot = value(i)?; if boot.trim().is_empty() { return Err(anyhow!("--cmd 명령이 비어 있어요")); } i += 2; }
             "--name" => { name = Some(value(i)?); i += 2; }
             "--machine" => { machine = Some(value(i)?); i += 2; }
             "--beside" => { beside = Some(value(i)?); i += 2; }
@@ -977,6 +1001,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     let cwd = cwd.canonicalize().with_context(|| format!("{} 폴더가 없어요", cwd.display()))?;
     let cwd = crate::shell_line::plain_path(&cwd.to_string_lossy());
 
+    boot = auto_summon_boot(socket_path, &boot, None)?;
     let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("부른 칸이 없어요 — --beside <보드 주소> 또는 --new-room '작업방 이름'으로 자리를 골라 주세요"))?;
     let since = epoch_ms();
@@ -1092,6 +1117,8 @@ fn run_summon_placed(socket_path: &str, spot: SummonSpot, name: Option<String>, 
         let _ = roundtrip(socket_path, &act(json!("summon"), "rename", json!({ "address": placed, "title": title })));
     }
 
+    let chosen_boot = auto_summon_boot(socket_path, boot, placed.get("machine_id").and_then(Value::as_str))?;
+    let boot = chosen_boot.as_str();
     let body = with_done_hint(brief);
     let title = name.clone().or_else(|| brief_title(brief)).map(|t| crate::tell::normalize_title(&t)).transpose()?
         .filter(|t| !t.is_empty());

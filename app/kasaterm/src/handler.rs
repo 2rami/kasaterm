@@ -456,6 +456,11 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketNewWindow => self.new_window(),
+            UserEvent::AgentChoice(reply) => {
+                let choice = kasa_socket::agent_choice::choose(&self.settings_values_json())
+                    .map_err(str::to_string).and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()));
+                let _ = reply.send(choice);
+            }
             UserEvent::SocketNewTab(from, focus, reply) => {
                 let outer = from
                     .clone()
@@ -3227,7 +3232,7 @@ impl ApplicationHandler<UserEvent> for App {
                 && self.handle_menu.is_none() && self.statusbar.popover.is_none() && !self.account_menu
                 && self.file_tree.ctx_menu.is_none() && self.sidebar_menu.is_none()
                 && self.info.pane_menu.is_none() && self.info.ctx_menu.is_none()
-                && self.info.machine_menu.is_none() && !self.shell_menu_open;
+                && self.info.machine_menu.is_none() && !self.shell_picker.is_open();
             let media_was_open = self.media_preview.owns(id);
             match self.media_preview.event(id, self.cursor_px, self.modifiers, &event, &self.proxy, allow_image && !self.image_preview.owns(id)) {
                 crate::image_preview::Response::Consumed => {
@@ -3522,6 +3527,14 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.shell_picker.is_open() {
+                    let y = match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y };
+                    if y != 0.0 { self.shell_picker.step(if y > 0.0 { -1 } else { 1 }); }
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
                 if self.restore_prompt.is_some() {
                     self.restore_picker.wheel(delta);
                     self.chrome_dirty = true;
@@ -4990,7 +5003,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // hit an item → spawn that shell in a new window; click
                     // anywhere else → dismiss. Checked first so it captures
                     // clicks before the sidebar / cell grid underneath.
-                    if self.shell_menu_open {
+                    if self.shell_picker.is_open() {
                         let pick = self
                             .shell_menu_hits
                             .iter()
@@ -4998,12 +5011,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                             })
                             .map(|(s, _)| s.clone());
-                        self.shell_menu_open = false;
-                        self.chrome_dirty = true;
-                        if let Some(shell) = pick {
-                            self.pending_shell = Some(shell);
-                            self.new_window();
-                        }
+                        if let Some(shell) = pick { self.select_shell(&shell); }
+                        else { self.shell_picker.close(); self.chrome_dirty = true; }
                         return;
                     }
                     // 사용량 pill = Claude 계정 스위처. 드롭다운은 타이틀바 아래 pane
@@ -6041,16 +6050,16 @@ impl ApplicationHandler<UserEvent> for App {
                             match action {
                                 ActionKind::SplitV => {
                                     let _ = self
-                                        .split_active_pane_focused(kasa_pty::SplitDir::Vertical);
+                                        .request_shell_split(kasa_pty::SplitDir::Vertical);
                                 }
                                 ActionKind::SplitH => {
                                     let _ = self
-                                        .split_active_pane_focused(kasa_pty::SplitDir::Horizontal);
+                                        .request_shell_split(kasa_pty::SplitDir::Horizontal);
                                 }
                                 ActionKind::ToggleHeader => self.toggle_pane_header(&menu_pid),
                                 ActionKind::ToggleZoom => self.toggle_pane_zoom(&menu_pid),
                                 ActionKind::NewTab => {
-                                    let _ = self.spawn_new_tab(&menu_pid, true);
+                                    let _ = self.request_shell_tab(&menu_pid);
                                 }
                                 ActionKind::Close => self.confirm_or_close_pane(&menu_pid),
                                 ActionKind::Undock => {
@@ -6121,14 +6130,14 @@ impl ApplicationHandler<UserEvent> for App {
                         match action {
                             ActionKind::SplitV => {
                                 if let Err(e) =
-                                    self.split_active_pane_focused(kasa_pty::SplitDir::Vertical)
+                                    self.request_shell_split(kasa_pty::SplitDir::Vertical)
                                 {
                                     eprintln!("[split-v] {e}");
                                 }
                             }
                             ActionKind::SplitH => {
                                 if let Err(e) = self
-                                    .split_active_pane_focused(kasa_pty::SplitDir::Horizontal)
+                                    .request_shell_split(kasa_pty::SplitDir::Horizontal)
                                 {
                                     eprintln!("[split-h] {e}");
                                 }
@@ -6161,7 +6170,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.confirm_or_close_pane(&pid);
                             }
                             ActionKind::NewTab => {
-                                let _ = self.spawn_new_tab(&pid, true);
+                                let _ = self.request_shell_tab(&pid);
                             }
                             ActionKind::ToggleHeader => {
                                 self.toggle_pane_header(&pid);
@@ -6316,7 +6325,7 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         // Stage 3: spawn a real PTY-backed tab. spawn_new_tab
                         // pushes a PaneTab with its own pid and sets active.
-                        if let Err(e) = self.spawn_new_tab(&pid, true) {
+                        if let Err(e) = self.request_shell_tab(&pid) {
                             eprintln!("[spawn_new_tab] {e}");
                         }
                         window.request_redraw();
@@ -7163,7 +7172,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
                     eprintln!("[ime] event={ime:?}");
                 }
-                if self.main_confirmation_modal() {
+                if self.main_confirmation_modal() || self.shell_picker.is_open() {
                     self.discard_modal_ime(&ime);
                     window.request_redraw();
                     return;
@@ -7266,6 +7275,7 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if self.shell_picker_key(&event) { return; }
                 if self.main_confirmation_modal() && event.state.is_pressed() {
                     if let Key::Named(key @ (NamedKey::Enter | NamedKey::Escape)) = event.logical_key {
                         if event.repeat { return; }
@@ -8272,7 +8282,7 @@ impl App {
         self.main_confirmation_modal() || self.git.commit_modal_open
     }
 
-    fn main_confirmation_modal(&self) -> bool {
+    pub(crate) fn main_confirmation_modal(&self) -> bool {
         self.confirm_close.is_some() || self.restore_prompt.is_some()
             || self.character_swap_confirm.is_some()
             || self.account_switch_confirm.as_ref().is_some_and(|pending| {

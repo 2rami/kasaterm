@@ -2538,7 +2538,7 @@ impl App {
     /// 계정 행의 이름·부제는 여기서 조립해 넘긴다. 그 규칙(라벨이 없으면 이메일,
     /// 팀 조직이면 이어 붙이기, 이름과 겹치면 걷어내기)은 네이티브 폼이 이미 쥐고
     /// 있어, 웹에서 다시 짜면 두 화면이 같은 계정을 다르게 부르게 된다.
-    fn settings_values_json(&self) -> serde_json::Value {
+    pub(crate) fn settings_values_json(&self) -> serde_json::Value {
         let hex = |c: [u8; 4]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
         let hex3 = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
         let s = socket::read_settings();

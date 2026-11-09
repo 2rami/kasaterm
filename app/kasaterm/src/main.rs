@@ -62,6 +62,7 @@ mod screenread;
 mod session;
 mod bootstrap;
 mod pane_shims;
+mod shell_picker;
 mod spawn_env;
 mod server_restore;
 mod session_transfer;
@@ -3981,6 +3982,7 @@ enum UserEvent {
     /// 새 창(사이드바에 하나 더). 창 간 이동(`surface.move`)의 목적지를 만들 때 쓴다 —
     /// 만들 수단이 없으면 그 기능 자체를 CLI 에서 못 쓴다.
     SocketNewWindow,
+    AgentChoice(std::sync::mpsc::Sender<Result<serde_json::Value, String>>),
     SocketFocus(String),
     /// tmux control-mode가 보고한 실제 활성 pane 변경. 백엔드 스레드가 App 의
     /// IME 소유권을 만질 수 없으므로 GUI 이벤트로 건너와 함께 전환한다.
@@ -5460,14 +5462,12 @@ struct App {
     closed_panes: Vec<ClosedPane>,
     /// One hit rectangle keeps the bottom device action and top-tab room action aligned with their paint.
     room_list_add_rect: Option<(f32, f32, f32, f32)>,
-    /// Whether the "+" shell picker popup is open. Toggled by clicking the
-    /// top-tab "+"; dismissed on item-click or an outside click.
-    shell_menu_open: bool,
+    /// The shell choice retains its target while new rooms or tabs arrive.
+    shell_picker: shell_picker::Picker,
     /// Popup item hit rects `(shell_command, rect)`, logical px. Rebuilt each
     /// paint while the menu is open; consumed by the MouseInput handler.
     shell_menu_hits: Vec<(String, (f32, f32, f32, f32))>,
-    /// Shell command the next `spawn_session_pane` should launch instead of
-    /// the default. Set by a shell-picker selection, consumed (taken) once.
+    /// A user choice belongs to exactly one room, split or tab spawn.
     pending_shell: Option<String>,
     /// Per-window (name, cwd) tab labels, by window index. Refreshed on a
     /// throttle (cwd resolution shells out to lsof, so never per-frame).
@@ -6318,7 +6318,7 @@ impl App {
             win_tab_drag: None,
             closed_panes: Vec::new(),
             room_list_add_rect: None,
-            shell_menu_open: false,
+            shell_picker: shell_picker::Picker::default(),
             shell_menu_hits: Vec::new(),
             pending_shell: None,
             window_labels: Vec::new(),

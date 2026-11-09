@@ -149,6 +149,7 @@ pub struct PtySession {
     /// so the pane header can label itself the way iTerm does — by
     /// running process rather than by OSC title.
     shell_pid: Option<u32>,
+    launch_shell: Option<String>,
     /// (last_query_at, cached_name). Throttle the ps(1) shellout to
     /// ~500ms so a 60Hz render loop doesn't fork-exec on every frame.
     proc_cache: Arc<Mutex<(Instant, Option<String>)>>,

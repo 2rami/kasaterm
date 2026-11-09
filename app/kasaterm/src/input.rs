@@ -320,7 +320,7 @@ impl App {
             } else { None };
             if let Some(anchor) = opening_anchor {
                 self.handle_menu = None;
-                self.shell_menu_open = false;
+                self.shell_picker.close();
                 self.sidebar_menu = None;
                 self.statusbar.popover = None;
                 self.statusbar.clip_menu = None;
@@ -3784,13 +3784,13 @@ impl App {
                         } else {
                             kasa_pty::SplitDir::Horizontal
                         };
-                        if let Err(e) = self.split_active_pane_focused(dir) {
+                        if let Err(e) = self.request_shell_split(dir) {
                             eprintln!("[kasaterm] split failed: {e}");
                         }
                         return;
                     }
                     if code == KeyCode::KeyE {
-                        if let Err(e) = self.split_active_pane_focused(kasa_pty::SplitDir::Vertical) {
+                        if let Err(e) = self.request_shell_split(kasa_pty::SplitDir::Vertical) {
                             eprintln!("[kasaterm] split failed: {e}");
                         }
                         return;
@@ -3846,7 +3846,7 @@ impl App {
                             // 대화까지 --resume 으로 돌아온다.
                             self.reopen_closed_pane();
                         } else {
-                            self.new_window();
+                            self.request_new_window();
                         }
                         return;
                     }

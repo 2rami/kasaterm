@@ -1389,6 +1389,12 @@ pub trait Backend: Send + Sync {
         serde_json::Value::Null
     }
 
+    fn agent_choice(&self, machine: Option<&str>) -> Result<serde_json::Value> {
+        anyhow::ensure!(machine.is_none_or(str::is_empty), "이 호스트는 원격 사용량 선택을 지원하지 않아요");
+        crate::agent_choice::choose(&self.settings_values()).map_err(anyhow::Error::msg)
+            .and_then(|choice| serde_json::to_value(choice).map_err(Into::into))
+    }
+
     /// 테마 캐릭터 생성 화면이 2초마다 묻는 상태 — 엔진 목록·선택값·마스킹한 키·
     /// 활성 테마·돌고 있는 잡.
     ///

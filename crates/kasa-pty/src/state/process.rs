@@ -4,6 +4,9 @@ use super::*;
 use super::agents::{descend_launchers, strip_exe_suffix};
 
 impl PtySession {
+    /// Keep the launch program independent of foreground jobs and nested shells for restoration.
+    pub fn shell_program(&self) -> Option<&str> { self.launch_shell.as_deref() }
+
     /// The shell's process id (None if it failed to launch). Used to look up
     /// the active pane's cwd for the git panel.
     pub fn shell_pid(&self) -> Option<u32> {
