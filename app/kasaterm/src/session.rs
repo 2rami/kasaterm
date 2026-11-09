@@ -658,6 +658,7 @@ impl App {
         env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
         let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
+            command: Vec::new(),
             cwd: cwd.clone(),
             cols,
             rows,
@@ -727,6 +728,7 @@ impl App {
         // 로컬 셸을 같은 pane id 로 — 자리·크기·방·학생 배정 유지(스왑 패턴).
         let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd: dest.clone(),
             cols: c,
             rows: r,
@@ -2844,6 +2846,7 @@ impl App {
         env.extend(self.assign_character_env(pid, Some(&dest), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd: Some(dest.clone()),
             cols: c,
             rows: r,
@@ -3186,6 +3189,7 @@ impl App {
         env.extend(self.assign_character_env(pane, cwd.as_deref(), room.as_deref()));
         match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd,
             cols,
             rows,
@@ -3282,6 +3286,7 @@ impl App {
         env.extend(self.assign_character_env(pane, cwd.as_deref(), room.as_deref()));
         match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd,
             cols,
             rows,
@@ -8070,6 +8075,7 @@ impl App {
         }
         let session = match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd: cwd.clone(),
             cols,
             rows,

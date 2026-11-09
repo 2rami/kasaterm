@@ -136,7 +136,7 @@ pub(crate) fn spawn(plan: SpawnPlan) -> Spawned {
         }
         let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             pane_id: plan.pane.clone(), cwd: Some(plan.cwd.clone()), shell: resolve_default_shell(),
-            cols: plan.cols, rows: plan.rows, env, initial_scrollback: Vec::new(),
+            cols: plan.cols, rows: plan.rows, env, initial_scrollback: Vec::new(), command: Vec::new(),
         })?);
         Ok((session, sid))
     })();

@@ -1067,6 +1067,7 @@ mod tests {
         let id = format!("restore-input-test-{}", std::process::id());
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: Some("/bin/cat".into()), cwd: Some("/tmp".into()),
+            command: Vec::new(),
             cols: 80, rows: 8, env: Vec::new(), pane_id: id.clone(),
             initial_scrollback: Vec::new(),
         }).unwrap();

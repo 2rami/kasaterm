@@ -61,6 +61,9 @@ pub struct CommandBlock {
 #[derive(Debug, Clone)]
 pub struct PtyOptions {
     pub shell: Option<String>,
+    /// 비어 있지 않으면 셸 대신 이 argv 를 **그대로** 띄운다 — `shell` 처럼 로그인 플래그(`-il`)를 붙이지 않는다.
+    /// 터미널의 `-e <명령> [인자…]` 자리다.
+    pub command: Vec<std::ffi::OsString>,
     pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -80,6 +83,7 @@ impl Default for PtyOptions {
     fn default() -> Self {
         Self {
             shell: None,
+            command: Vec::new(),
             cwd: None,
             cols: 80,
             rows: 24,
@@ -566,7 +570,9 @@ impl PtySession {
         // when we know we're handing off to zsh / bash so .zshrc /
         // .bashrc gets sourced (matches what tmux-bridge does inside
         // its `new-session -d 'exec $SHELL -il'`).
-        let mut cmd = if let Some(shell) = opts.shell.as_deref() {
+        let mut cmd = if !opts.command.is_empty() {
+            CommandBuilder::from_argv(opts.command.clone())
+        } else if let Some(shell) = opts.shell.as_deref() {
             let mut c = CommandBuilder::new(shell);
             // `-il` (login + interactive) is a bash/zsh/sh-ism that sources
             // rc files. PowerShell / cmd / wsl reject unknown flags ("Invalid
@@ -7959,5 +7965,38 @@ mod snapshot_coalesce_tests {
         assert_eq!(rows.get(&1).map(String::as_str), Some("MID-ONCE"), "미룬 배치의 줄이 빠졌다: {rows:?}");
         let _ = std::fs::remove_file(&path);
         assert!(updates < 10_000, "read 마다 스냅샷을 떴다({updates}회)");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod command_argv_tests {
+    use super::*;
+
+    /// `command` 는 셸을 거치지 않고 argv 그대로 뜬다 — 인자가 갈리지도, 로그인 플래그가 끼지도 않는다.
+    #[test]
+    fn command_runs_argv_verbatim() {
+        let s = PtySession::start(PtyOptions {
+            command: ["/bin/sh", "-c", r#"printf 'ARGS:%s|%s|%s\n' "$1" "$2" "$-"; sleep 5"#, "x", "one two", "three"]
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+            cols: 60,
+            rows: 5,
+            pane_id: "%argv".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            let _ = s.screens.recv_timeout(std::time::Duration::from_millis(200));
+            seen = s.visible_text(10);
+            if seen.contains("ARGS:") {
+                break;
+            }
+        }
+        let line = seen.lines().find(|l| l.contains("ARGS:")).unwrap_or_default().trim_end().to_string();
+        assert!(line.starts_with("ARGS:one two|three|"), "argv 가 그대로 안 갔다: {seen:?}");
+        assert!(!line.trim_start_matches("ARGS:one two|three|").contains('i'), "대화형 플래그가 끼었다: {line}");
     }
 }

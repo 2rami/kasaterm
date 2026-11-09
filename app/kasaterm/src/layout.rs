@@ -1218,6 +1218,7 @@ impl App {
         env.extend(self.assign_character_env(&new_id, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd,
             cols: win_cols,
             rows: win_rows,
@@ -1673,6 +1674,7 @@ impl App {
             env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
             Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
                 shell: resolve_default_shell(),
+                command: Vec::new(),
                 cwd,
                 cols,
                 rows,
@@ -2154,6 +2156,7 @@ impl App {
         let new_id = self.alloc_pane_id();
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
+            command: Vec::new(),
             cwd,
             cols,
             rows,
