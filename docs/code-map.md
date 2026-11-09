@@ -2,6 +2,10 @@
 
 프로젝트 개발 안내가 여기를 가리킨다. Rust 를 수정할 때 해당 영역을 찾아 읽는다.
 
+브라우저 앱·Chrome 도구·카사텀 연결의 경계는 [browser-integration.md](browser-integration.md)다.
+`kasa-browser/{route,target,phone}.rs`가 URL 도착 기기와 폰 명령 중계를 맡고,
+`kasa-http/http/phone_browser.rs`가 HTTP 권한·라우트를 조립한다. 브라우저 엔진과 UI는 별도 `kasabrowser-go`에 있다.
+
 대화의 계정 보관·폰 오프라인 저장은 [offline-conversations.md](offline-conversations.md)가 계약이다.
 `kasa-remote/conversation_archive.rs`와 `conversation_archive/sync.rs`는 영속 저장·데스크톱 전송,
 `gateway_conversations.rs`는 계정 권한과 HTTP, 모바일 `archive_*`와 `screens/saved_conversations.dart`는 폰 저장·읽기 전용 화면을 맡는다.
@@ -91,6 +95,7 @@
 - 호스트 역할 분리(층·의존 그림은 `docs/workspace.md`):
   `kasa-device`(기기 계정·업링크·폰 입구·Claude 계정 슬롯), `kasa-gateway`(관문과 `kasa-relay`),
   `kasa-identity`(공용 OAuth·계정·봉인 자격), `kasa-remote`(원격 칸·포트·화면·레포 전송),
+  `kasa-browser`(브라우저 URL 도착 기기·폰 명령 중계),
   `kasa-students`(학생 디스패치·팀·스케줄·작업), `kasa-characters`(캐릭터·페르소나),
   `kasa-git`(Git 상태·작업·감시),
   `kasa-wire`(화면 전송 형식·피드), `kasa-backend`(독립 Backend), `kasa-serve`(`kasa-serve-web`).

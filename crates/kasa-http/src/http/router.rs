@@ -166,7 +166,7 @@ pub fn spawn_http_server_opts(
                     .merge(term_files::routes(&backend))
                     .merge(socket::routes(&backend))
                     .merge(phone::routes())
-                    .merge(phone_web::routes())
+                    .merge(phone_browser::routes())
                     .merge(machine_proxy::routes())
                     .merge(screen::routes())
                     .merge(arona_ui::routes(&backend))
@@ -178,7 +178,7 @@ pub fn spawn_http_server_opts(
                     .route("/net/tcp", get(kasa_remote::netfwd::tcp_ws_handler))
                     .route("/term/blocks", get(kasa_git::shell_blocks::term_blocks_get))
                     .merge(kasa_students::claude_mod::routes())
-                    .route("/browser/resolve-localhost", post(kasa_remote::browser_route::resolve_handler))
+                    .route("/browser/resolve-localhost", post(kasa_browser::route::resolve_handler))
                     // 채팅 소스: 캡처 프록시가 모은 pane 대화(turns + 진행 중 streaming).
                     .route(
                         "/conversation",

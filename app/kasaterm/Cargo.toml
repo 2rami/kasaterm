@@ -7,6 +7,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+kasa-browser.workspace = true
 kasa-collab = { workspace = true, features = ["net"] }
 crossbeam-channel = { workspace = true }
 kasa-bridge.workspace = true

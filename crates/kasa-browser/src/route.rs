@@ -352,7 +352,7 @@ pub async fn resolve_handler(Json(request): Json<ResolveRequest>) -> impl IntoRe
         let machine = registered_machine(&request)?;
         // 원본 기기에 닿는 base 가 있으면 그 기기의 /net/tcp 로 끌어온다(카사넷 P3) — 이 기기에 원본으로 가는 ssh
         // 설정이 없어도 되고(손님 -R 로만 닿는 기기), 직통이면 카사넷을 탄다. 옛 판 원본이면 아래 ssh -L 로.
-        let pulled = crate::netfwd::show_from_machine_blocking(&machine, &request.url);
+        let pulled = kasa_remote::netfwd::show_from_machine_blocking(&machine, &request.url);
         match pulled {
             Ok((url, local_port, source_port)) => {
                 return Ok(ResolveResponse { ok: true, url, forwarded: true, local_port, source_port });
@@ -513,7 +513,7 @@ mod tests {
 
     fn fixture_child(local: u16, remote: u16) -> std::io::Result<Child> {
         std::process::Command::new(std::env::current_exe()?)
-            .args(["--exact", "browser_route::tests::forward_fixture_child", "--nocapture"])
+            .args(["--exact", "route::tests::forward_fixture_child", "--nocapture"])
             .env("KASATERM_BROWSER_ROUTE_FIXTURE", format!("{local}:{remote}"))
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
     }

@@ -23,7 +23,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value> {
 }
 
 pub async fn resolve_url(url: &str, selected: &str) -> Result<String> {
-    if selected.is_empty() || !crate::browser_route::is_loopback_url(url) {
+    if selected.is_empty() || !crate::route::is_loopback_url(url) {
         return Ok(url.to_string());
     }
     let base = target_base(selected)?;
@@ -31,7 +31,7 @@ pub async fn resolve_url(url: &str, selected: &str) -> Result<String> {
         "source_machine_id": kasa_device::mobile::machine_identity(), "url": url});
     let mut request = client()?.post(format!("{}/browser/resolve-localhost", base.trim_end_matches('/')))
         .header("content-type", "application/json").body(body.to_string());
-    if let Some(token) = crate::remote::connection_auth_token(&base) {
+    if let Some(token) = kasa_remote::remote::connection_auth_token(&base) {
         request = request.header("x-kasa-token", token);
     }
     let value = response_json(request.send().await?).await?;
@@ -47,7 +47,7 @@ pub async fn open_selected(url: &str, selected: &str) -> Result<()> {
     let base = target_base(selected)?;
     let mut request = client()?.get(format!("{}/open-url", base.trim_end_matches('/')))
         .query(&[("url", resolved.as_str()), ("local", "1")]);
-    if let Some(token) = crate::remote::connection_auth_token(&base) {
+    if let Some(token) = kasa_remote::remote::connection_auth_token(&base) {
         request = request.header("x-kasa-token", token);
     }
     response_json(request.send().await?).await?;

@@ -11,6 +11,7 @@ members = [
     "crates/kasa-backend",
     "crates/kasa-remote",
     "crates/kasa-students",
+    "crates/kasa-browser",
     "crates/kasa-git",
     "crates/kasa-gateway",
     "crates/kasa-http",
@@ -46,6 +47,7 @@ default-members = [
     "crates/kasa-backend",
     "crates/kasa-remote",
     "crates/kasa-students",
+    "crates/kasa-browser",
     "crates/kasa-git",
     "crates/kasa-gateway",
     "crates/kasa-http",
@@ -106,6 +108,7 @@ kasa-device = { path = "crates/kasa-device" }
 kasa-backend = { path = "crates/kasa-backend" }
 kasa-remote = { path = "crates/kasa-remote" }
 kasa-students = { path = "crates/kasa-students" }
+kasa-browser = { path = "crates/kasa-browser" }
 kasa-git = { path = "crates/kasa-git" }
 kasa-http = { path = "crates/kasa-http" }
 kasa-net = { path = "crates/kasa-net" }
@@ -182,6 +185,9 @@ opt-level = 0
 opt-level = 0
 
 [profile.release.package.kasa-students]
+opt-level = 0
+
+[profile.release.package.kasa-browser]
 opt-level = 0
 
 [profile.release.package.kasa-git]

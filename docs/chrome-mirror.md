@@ -1,5 +1,10 @@
 # 크롬 거울 — 폰에서 학생 크롬 탭 보기·손대기
 
+> 2026-10-13의 미구현 설계 제안이다. 아래 `browser_mirror.rs`, `/browser/ws`,
+> `BrowserMirrorScreen`, 확장의 `mirror.*`는 현재 제공되는 기능이 아니다.
+> 카사브라우저의 분리 이후 코드 소속과 실제 연결 계약은 [browser-integration.md](browser-integration.md)를 따른다.
+> 이 문서는 데스크톱 Chrome 탭을 폰에서 공유하는 안의 기록으로 보존한다.
+
 학생(에이전트 pane)이 카사크롬으로 모는 크롬 탭을 폰에서 실시간으로 보고, 필요할 때 대신 눌러 준다.
 터미널 거울은 PTY 바이트를 흘리면 끝이지만 크롬은 픽셀이라, CDP 스크린캐스트(JPEG)를 흘린다.
 

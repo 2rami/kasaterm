@@ -94,7 +94,7 @@ fn wake_phone() {
         *last = Some(Instant::now());
     }
     std::thread::spawn(|| {
-        let alert = crate::push::Alert {
+        let alert = kasa_device::push::Alert {
             title: "카사브라우저".into(),
             body: "에이전트가 폰 브라우저를 쓰려고 해요. 카사브라우저 앱을 열어 주세요.".into(),
             machine: None,
@@ -106,7 +106,7 @@ fn wake_phone() {
             url: None,
         };
         if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            rt.block_on(crate::push::send(&alert));
+            rt.block_on(kasa_device::push::send(&alert));
         }
     });
 }

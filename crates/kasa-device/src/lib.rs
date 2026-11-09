@@ -13,7 +13,6 @@ pub mod tunnel;
 pub mod uplink;
 pub mod relayconf;
 pub mod push;
-pub mod phone_web;
 pub mod workspace_assistant;
 pub mod feedback_client;
 pub mod op_approval;

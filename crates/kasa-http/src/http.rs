@@ -28,7 +28,7 @@ use kasa_device::access::{auth, phone, claude_account};
 use kasa_students::http::{schedule, tasks};
 
 mod router;
-mod phone_web;
+mod phone_browser;
 mod machine_proxy;
 mod screen;
 mod socket;

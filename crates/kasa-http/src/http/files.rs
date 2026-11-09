@@ -299,7 +299,7 @@ async fn browser_resolve_url_handler(Query(params): Query<std::collections::Hash
         return Json(serde_json::json!({"ok": false, "error": "브라우저 기기가 바뀌었어요. 다시 시도해 주세요"}));
     }
     let url = params.get("url").map(String::as_str).unwrap_or("");
-    match kasa_remote::browser_target::resolve_url(url, &selected).await {
+    match kasa_browser::target::resolve_url(url, &selected).await {
         Ok(url) => Json(serde_json::json!({"ok": true, "url": url, "machine": selected})),
         Err(error) => Json(serde_json::json!({"ok": false, "error": error.to_string()})),
     }

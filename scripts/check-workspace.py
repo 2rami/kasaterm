@@ -41,6 +41,7 @@ LAYERS = {
     "kasa-backend": ("host", 7),
     "kasa-students": ("host", 7),
     "kasa-remote": ("host", 8),
+    "kasa-browser": ("host", 9),
     "kasa-git": ("host", 9),
     "kasa-gateway": ("host", 9),
     "kasa-http": ("host", 10),

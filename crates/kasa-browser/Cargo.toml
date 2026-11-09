@@ -1,0 +1,29 @@
+[package]
+name = "kasa-browser"
+description = "Browser destination routing and Kasa Browser phone command transport."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+kasa-device.workspace = true
+kasa-remote.workspace = true
+kasa-socket.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+uuid.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+kasa-device = { workspace = true, features = ["test-isolation"] }
+kasa-remote = { workspace = true, features = ["test-isolation"] }
+
+[lints]
+workspace = true

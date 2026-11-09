@@ -1985,7 +1985,7 @@ fn print_help() {
             "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
             "open <url>                                사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
             "phone browser open <url> | shot [--out 경로] | text | url | eval <JS> | back | forward | reload [--timeout 초]   (카사브라우저 폰 앱)",
-            "                                          폰 앱 안 브라우저를 에이전트가 쓴다(앱이 꺼져 있으면 열어 달라는 알림)",
+            "                                          별도 카사브라우저 폰 앱에서 실행한다. 꺼져 있으면 카사텀 폰 앱으로 알림을 보낸다",
         ]),
         ("기기·네트워크", &[
             "machines [--names|--json|--history]       명부 기계 목록과 닿는 길, 끊긴 이유와 붙음·끊김 기록",

@@ -139,7 +139,7 @@ function detail(name, tool, prog) {
   return lines.join('\n')
 }
 
-const KC = { name: 'kc', noun: '도구', about: '카사크롬 도구를 터미널에서 직접. MCP 서버를 거치지 않는다.' }
+const KC = { name: 'kc', noun: '도구', about: 'Google Chrome용 카사크롬 도구. 카사브라우저는 kb를 쓴다. MCP 서버를 거치지 않는다.' }
 
 // kj 도 이 해석기를 그대로 쓴다. 이름·소개만 갈아 끼우므로 정수 인자 거절 같은 검사가 두 갈래로 갈라지지 않는다.
 export async function runCli(argv, tools, prog = KC) {

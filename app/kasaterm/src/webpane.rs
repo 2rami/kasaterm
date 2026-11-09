@@ -546,7 +546,7 @@ impl App {
         if !selected.is_empty() {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                let result = kasa_remote::browser_target::open_selected_blocking(&url, &selected);
+                let result = kasa_browser::target::open_selected_blocking(&url, &selected);
                 let message = match result {
                     Ok(()) => format!("{selected} 브라우저로 열었어요"),
                     Err(error) => format!("{selected} 브라우저로 열지 못했어요: {error}"),

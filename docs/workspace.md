@@ -33,6 +33,7 @@
 | 호스트 | 7 | `kasa-backend` | 창 없는 Backend 구현과 거울 시험용 호스트 | 금지 | 허용 |
 | 호스트 | 7 | `kasa-students` | 학생 디스패치·팀·명령 중계·예약·작업 HTTP 표면 | 금지 | 허용 |
 | 호스트 | 8 | `kasa-remote` | 원격 칸·포트 전달·기기 화면·레포 전송·대화 보관 전송 | 금지 | 허용 |
+| 호스트 | 9 | `kasa-browser` | 브라우저 도착 기기·localhost 연결·카사브라우저 폰 명령 중계. 엔진·UI는 별도 Go 앱 | 금지 | 허용 |
 | 호스트 | 9 | `kasa-git` | Git 작업·상태 판·파일 감시·셸 경로 판독 | 금지 | 허용 |
 | 호스트 | 9 | `kasa-gateway` | 폰 관문 서버·계정 라우팅·설치판 배포 창구. kasa-relay 실행 파일 | 금지 | 허용 |
 | 호스트 | 10 | `kasa-http` | 이 기기 HTTP 라우터·칸·화면 API와 서버 수명 | 금지 | 허용 |
@@ -46,6 +47,7 @@
 kasaterm (12) ─┬─ kasa-http (10) ─┬─ kasa-git (9) ── kasa-remote (8)
                │                  ├─ kasa-students (7) ── kasa-device (6)
                │                  ├─ kasa-remote (8) ── kasa-device (6)
+               │                  ├─ kasa-browser (9) ── kasa-remote (8), kasa-device (6)
                │                  └─ kasa-wire · kasa-characters (5)
                ├─ kasa-device (6) ── kasa-identity · kasa-characters (5)
                └─ kasa-agents (3), kasa-gridview, kasa-pty, kasa-socket
@@ -78,6 +80,9 @@ spikes/* ── kasa-bridge ── kasa-screen
   `kasa-remote`에 남는다. 개발 의존으로 층을 거슬러 순환을 만들지 않는다.
   공용 목업은 `test-support`, 기존 시험의 계정·네트워크 격리는 `test-isolation`으로 개발 의존에서만 잇는다.
   일반 바이너리 빌드는 이 기능들을 켜지 않는다.
+- **브라우저 앱과 연결 호스트는 따로 둔다.** `kasa-browser`는 URL 도착 기기·폰 명령 중계만 맡고,
+  별도 `kasabrowser-go`의 엔진·화면·프로필을 싣지 않는다. 코드 소속과 `kb`·`kc`의 구분은
+  [browser-integration.md](browser-integration.md)가 정한다.
 - **바이너리·HTTP·설정 계약은 유지한다.** 패키지는 갈렸지만 `kasa-relay`, `kasa-device`, `kasa-serve-web` 이름과
   경로·설정 키·파일 위치는 유지한다. 공유 동기화 기능은 제거했다. 기존 사용자 폴더와 바탕화면 링크를 지우는 마이그레이션은 없다.
 - **`kasa-bridge` 는 줄여 가는 크레이트다.** 화면 낱말은 `kasa-screen` 으로 옮겼고(재수출로 옛 경로 유지),
