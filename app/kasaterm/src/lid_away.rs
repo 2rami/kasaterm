@@ -144,6 +144,46 @@ pub(crate) fn sudo_ready() -> Option<bool> {
     }
 }
 
+/// 하단바 칩이 한눈에 말할 상태.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Glance {
+    Off,
+    Checking,
+    NeedsSetup,
+    On,
+    Awake,
+}
+
+impl Glance {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Off => "바로 잠자기",
+            Self::Checking | Self::On => "마저 하고 잠자기",
+            Self::NeedsSetup => "잠자기 허락 필요",
+            Self::Awake => "잠자기 막는 중",
+        }
+    }
+}
+
+/// 그리기 경로에서 프레임마다 부르므로 설정 파일은 5초 캐시로 읽는다.
+pub(crate) fn glance() -> Glance {
+    let (on, phase) = STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        (config(&mut st, Instant::now()).on, st.phase)
+    });
+    if phase.keeps_awake() {
+        return Glance::Awake;
+    }
+    if !on {
+        return Glance::Off;
+    }
+    match sudo_ready() {
+        None => Glance::Checking,
+        Some(false) => Glance::NeedsSetup,
+        Some(true) => Glance::On,
+    }
+}
+
 /// 설정 화면의 한 줄 — 지금 무엇을 하고 있나.
 pub(crate) fn status_line() -> Option<&'static str> {
     STATE.with(|s| match s.borrow().phase {
@@ -153,6 +193,19 @@ pub(crate) fn status_line() -> Option<&'static str> {
         Phase::Disarming { .. } => Some("잠자기 막음을 해제하는 중이에요"),
         Phase::Sleeping { .. } => Some("덮개를 열 때까지 잠자기를 유지해요"),
     })
+}
+
+/// 설정 화면과 하단바 팝오버가 함께 쓰는 설명.
+pub(crate) fn note(on: bool, ready: Option<bool>, status: &str) -> &str {
+    if !on {
+        return "꺼져 있어요. 덮으면 macOS의 기본 잠자기 동작을 따릅니다";
+    }
+    match ready {
+        None => "잠자기를 막을 허락이 있는지 확인하는 중입니다",
+        Some(false) => "처음 한 번 터미널에서 kasaterm-cli lid-away install 을 실행해 주세요 — 잠자기를 막고 푸는 pmset 명령만 비밀번호 없이 허락합니다. 이 계정의 다른 프로그램도 그 명령을 쓸 수 있게 됩니다",
+        Some(true) if !status.is_empty() => status,
+        Some(true) => "학생이 일하는 동안 잠자기를 막고, 덮으면 일이 끝나 1분 넘게 쉴 때 잠듭니다. 덮인 뒤 최대 시간이 차도 잠듭니다. 학생은 다른 기기로 옮기지 않습니다",
+    }
 }
 
 /// 깨어 있는 동안은 1초마다 루프를 깨운다 — 덮이면 화면 이벤트가 없어 `Wait` 에 잠든다.

@@ -74,6 +74,8 @@ pub(crate) struct StatusbarState {
     pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
     /// 클립보드 칩(하단바 오른쪽 그룹) — 누르면 최근 복사 목록이 펼쳐진다.
     pub(crate) clip_rect: Option<(f32, f32, f32, f32)>,
+    /// 덮어도 마저 하기 칩 — 누르면 켜고 끄는 팝오버.
+    pub(crate) sleep_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) clip_expanded: Option<u64>,
     pub(crate) clip_menu: Option<(u64, f32, f32)>,
     /// 도구 칩이 직전 프레임에 실제로 쓴 폭. 오른쪽 칩은 왼쪽 칩들 몫을 남기고
@@ -147,6 +149,8 @@ pub(crate) enum StatusbarPopover {
     Build,
     /// 붙어 있는 기기들의 연결 — 직통·중계와 왕복 시간.
     Link,
+    /// 덮어도 마저 하기 — 켜고 끄기와 지금 무엇을 하고 있나.
+    Sleep,
 }
 
 /// 팝오버 행을 눌렀을 때 할 일.
@@ -169,6 +173,7 @@ pub(crate) enum StatusbarHit {
     OpenWebTerm,
     /// 원격 접속 문을 여닫는다.
     ToggleTunnel,
+    ToggleLidAway,
     ChooseChrome(String),
     /// 열려 있을 때의 주소를 클립보드로.
     CopyTunnelHost,

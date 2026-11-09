@@ -3597,6 +3597,7 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "ports" => "열린 포트",
         "clipboard" => "클립보드",
         "resources" => "기기 상태",
+        "sleep" => "덮어도 마저 하기",
         "tunnel" => "모바일 연결",
         "devices" => "기기 · 업데이트",
         "schedules" => "예약",
@@ -3632,6 +3633,7 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
         "schedules" => "예약 2",
         "clipboard" => "클립보드",
         "resources" => "CPU 18% · RAM 42%",
+        "sleep" => "마저 하고 잠자기",
         "tunnel" => "모바일 연결됨",
         "devices" => "기기 2대",
         _ => "",
@@ -4815,19 +4817,7 @@ fn paint_lid_away(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x
         seg_row(g, s, hits, x, y, w, "덮인 뒤 최대", &cells);
     }
     *y += 6.0;
-    let note = if !on {
-        "꺼져 있어요. 덮으면 macOS의 기본 잠자기 동작을 따릅니다".to_string()
-    } else {
-        match lid.ready {
-            None => "잠자기를 막을 허락이 있는지 확인하는 중입니다".to_string(),
-            Some(false) => "처음 한 번 터미널에서 kasaterm-cli lid-away install 을 실행해 주세요 — 잠자기를 막고 푸는 pmset 명령만 비밀번호 없이 허락합니다. 이 계정의 다른 프로그램도 그 명령을 쓸 수 있게 됩니다".to_string(),
-            Some(true) => match lid.status.as_str() {
-                now if !now.is_empty() => now.to_string(),
-                _ => "학생이 일하는 동안 잠자기를 막고, 덮으면 일이 끝나 1분 넘게 쉴 때 잠듭니다. 덮인 뒤 최대 시간이 차도 잠듭니다. 학생은 다른 기기로 옮기지 않습니다".to_string(),
-            },
-        }
-    };
-    for line in wrap_words(g, &note, w, 10.5) {
+    for line in wrap_words(g, crate::lid_away::note(on, lid.ready, &lid.status), w, 10.5) {
         draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
         *y += 15.0;
     }

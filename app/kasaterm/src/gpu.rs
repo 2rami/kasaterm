@@ -3387,6 +3387,7 @@ impl GpuRenderer {
             "play" => include_str!("../assets/icons/play.svg"),
             "pause" => include_str!("../assets/icons/pause.svg"),
             "umbrella" => include_str!("../assets/icons/umbrella.svg"),
+            "moon" => include_str!("../assets/icons/moon.svg"),
             "folder" => include_str!("../assets/icons/folder.svg"),
             "square" => include_str!("../assets/icons/square.svg"),
             "square-check" => include_str!("../assets/icons/square-check.svg"),

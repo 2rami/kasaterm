@@ -54,6 +54,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             bar.res_rect,
             bar.clip_rect,
             bar.schedule_rect,
+            bar.sleep_rect,
         ]
         .into_iter()
         .flatten()
@@ -124,6 +125,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
     bar.port_rect = None;
     bar.schedule_rect = None;
     bar.clip_rect = None;
+    bar.sleep_rect = None;
     // 다른 기기와 어떻게·얼마나 가깝게 붙어 있나. 직통(그 기계에 바로)과
     // 중계(공용 관문 경유)는 체감이 딴판이라, 숫자와 함께 한눈에 보여야 한다.
     macro_rules! draw_link_widget {
@@ -421,12 +423,46 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
         }
             }};
         }
+        // 덮어도 마저 하기 — 설정 안에만 두면 덮기 전에 켜 뒀는지 알 길이 없다.
+        macro_rules! draw_sleep_widget {
+            () => {{
+        #[cfg(target_os = "macos")]
+        {
+            use crate::lid_away::Glance;
+            let glance = crate::lid_away::glance();
+            let icon = tool_icon;
+            let gap = if compact_tools { 0.0 } else { 3.0_f32 };
+            let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
+            let text = if compact_tools { String::new() } else {
+                crate::info::fit_text(g, glance.label(), (slot_w - 24.0 - dot).max(0.0), fs, false)
+            };
+            let w = g.measure_chrome_text(&text, fs, false);
+            rx -= w + icon + gap + dot + chip;
+            let open = matches!(bar.popover, Some((state::StatusbarPopover::Sleep, _)));
+            let col = chip_ink(&status_prefs, "sleep", open);
+            g.queue_icon("moon", rx, sy + (status_h - icon) / 2.0, icon, col);
+            g.draw_text(rx + icon + gap, ty, &text,
+                gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false });
+            if !compact_tools {
+                status_dot(g, rx + icon + gap + w, sy, status_h, match glance {
+                    Glance::Off | Glance::Checking => ChipState::Off,
+                    Glance::NeedsSetup => ChipState::Warn,
+                    Glance::On | Glance::Awake => ChipState::Ok,
+                });
+            }
+            let r = (rx - chip / 2.0, sy, w + icon + gap + dot + chip, status_h);
+            let (hx, hy) = f.cursor;
+            g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
+            bar.sleep_rect = Some(r);
+        }
+            }};
+        }
         let device_right = rx;
         for id in status_prefs
             .order
             .iter()
             .rev()
-            .filter(|id| matches!(id.as_str(), "resources" | "devices" | "tunnel"))
+            .filter(|id| matches!(id.as_str(), "resources" | "sleep" | "devices" | "tunnel"))
             .filter(|id| status_prefs.visible(id))
         {
             let slot_right = rx;
@@ -443,6 +479,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             g.push_clip(slot_right - allocated, sy, allocated, status_h);
             match id.as_str() {
                 "resources" => draw_resources_widget!(),
+                "sleep" => draw_sleep_widget!(),
                 "devices" => draw_link_widget!(),
                 "tunnel" => draw_tunnel_widget!(),
                 _ => {}
@@ -451,6 +488,7 @@ pub(super) fn paint(g: &mut gpu::GpuRenderer, chips: Chips<'_>, f: &Frame<'_>) {
             bar.tunnel_rect = bar.tunnel_rect.and_then(|r| if id == "tunnel" { g.clip_hit(r) } else { Some(r) });
             bar.chrome_rect = bar.chrome_rect.and_then(|r| if id == "tunnel" { g.clip_hit(r) } else { Some(r) });
             bar.res_rect = bar.res_rect.and_then(|r| if id == "resources" { g.clip_hit(r) } else { Some(r) });
+            bar.sleep_rect = bar.sleep_rect.and_then(|r| if id == "sleep" { g.clip_hit(r) } else { Some(r) });
             g.pop_clip();
             rx = statusbar_next_right(slot_right, rx, allocated);
             bar.tool_used.insert(id.clone(), slot_right - rx);

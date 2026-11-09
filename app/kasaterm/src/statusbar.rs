@@ -7,6 +7,8 @@
 
 use crate::gpu;
 mod devices;
+#[cfg(target_os = "macos")]
+mod sleep;
 mod usage;
 use crate::state;
 use crate::theme;
@@ -64,6 +66,10 @@ pub(crate) fn paint_popover(
         state::StatusbarPopover::Clipboard => {
             paint_clipboard_popover(g, sb, cursor, anchor, win_w, win_h)
         }
+        #[cfg(target_os = "macos")]
+        state::StatusbarPopover::Sleep => sleep::paint(g, sb, cursor, anchor, win_w),
+        #[cfg(not(target_os = "macos"))]
+        state::StatusbarPopover::Sleep => {}
     }
 }
 
@@ -1484,6 +1490,12 @@ impl crate::App {
                 };
                 self.statusbar.tunnel_checked = Some(std::time::Instant::now());
                 self.set_toast(msg);
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::ToggleLidAway) => {
+                #[cfg(target_os = "macos")]
+                self.settings_apply(crate::SettingsAction::LidAway(crate::lid_away::glance() == crate::lid_away::Glance::Off));
                 self.chrome_dirty = true;
                 return true;
             }

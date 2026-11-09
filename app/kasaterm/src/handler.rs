@@ -4680,6 +4680,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.statusbar.chrome_rect,
                         self.statusbar.res_rect,
                         self.statusbar.clip_rect,
+                        self.statusbar.sleep_rect,
                     ]
                     .into_iter()
                     .flatten()
@@ -6260,6 +6261,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(r) = self.statusbar.clip_rect {
                         if sb_hit(&r) {
                             self.toggle_statusbar_popover(state::StatusbarPopover::Clipboard, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
+                    if let Some(r) = self.statusbar.sleep_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Sleep, r);
                             window.request_redraw();
                             return;
                         }

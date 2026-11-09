@@ -7,13 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub(crate) const WIDGETS: [&str; 8] = [
+pub(crate) const WIDGETS: [&str; 9] = [
     "claude",
     "codex",
     "ports",
     "schedules",
     "clipboard",
     "resources",
+    "sleep",
     "devices",
     "tunnel",
 ];
@@ -33,7 +34,7 @@ pub(crate) struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
-            order: WIDGETS.iter().map(|id| (*id).to_string()).collect(),
+            order: WIDGETS.iter().filter(|id| valid_widget(id)).map(|id| (*id).to_string()).collect(),
             hidden: HashSet::new(),
             colors: HashMap::new(),
             usage_fields: PROVIDERS
@@ -215,25 +216,24 @@ fn normalized_order<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
             out.push(id.to_string());
         }
     }
-    for id in WIDGETS {
+    for (at, id) in WIDGETS.iter().enumerate().filter(|(_, id)| valid_widget(id)) {
         if seen.insert(id.to_string()) {
-            // 새로 생긴 「기기 연결」은 모바일 연결 옆이 제자리 — 저장된 순서 끝에 붙이면
-            // 버전 뒤로 밀려 연결 둘이 갈라진다.
-            if id == "devices" {
-                if let Some(at) = out.iter().position(|x| x == "tunnel") {
-                    out.insert(at, id.to_string());
-                    continue;
-                }
+            // 저장된 순서에 없던 새 칩은 기본 순서의 앞 이웃 뒤가 제자리 — 끝에 붙이면
+            // 「기기 연결」이 모바일 연결과 갈라지고 「잠자기」가 맨 오른쪽 모바일 자리를 뺏는다.
+            // 다음 이웃 앞에 끼우면 사람이 바꿔 둔 순서(codex 를 claude 앞으로)를 되돌린다.
+            match WIDGETS[..at].iter().rev().find_map(|prev| out.iter().position(|x| x == prev)) {
+                Some(after) => out.insert(after + 1, id.to_string()),
+                None => out.push(id.to_string()),
             }
-            out.push(id.to_string());
         }
     }
     out.sort_by_key(|id| group(id));
     out
 }
 
+/// 덮어도 마저 하기(`sleep`)는 맥 전용이다.
 fn valid_widget(id: &str) -> bool {
-    WIDGETS.contains(&id)
+    WIDGETS.contains(&id) && (cfg!(target_os = "macos") || id != "sleep")
 }
 
 fn valid_usage_field(field: &str) -> bool {
@@ -300,10 +300,22 @@ mod tests {
         assert!(!Prefs::from_settings(&serde_json::json!({"statusbar_hidden":["link","version"]})).visible("devices"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_saved_order_gets_the_sleep_chip_beside_machine_state_not_at_the_right_edge() {
+        let p = Prefs::from_settings(&serde_json::json!({
+            "statusbar_order": ["claude", "codex", "ports", "schedules", "clipboard", "resources", "devices", "tunnel"],
+        }));
+        assert_eq!(&p.order[5..], ["resources", "sleep", "devices", "tunnel"]);
+        assert!(p.visible("sleep"));
+        let old = Prefs::from_settings(&serde_json::json!({ "statusbar_order": ["resources", "tunnel"] }));
+        assert_eq!(&old.order[old.order.len() - 4..], ["resources", "sleep", "devices", "tunnel"]);
+    }
+
     #[test]
     fn defaults_keep_the_quiet_account_bar() {
         let p = Prefs::default();
-        assert_eq!(p.order, WIDGETS);
+        assert_eq!(p.order, WIDGETS.iter().filter(|id| valid_widget(id)).copied().collect::<Vec<_>>());
         assert!(p.hidden.is_empty());
         for provider in PROVIDERS {
             assert!(p.has_usage_field(provider, "account"));
@@ -323,7 +335,7 @@ mod tests {
             "statusbar_usage_fields": {"claude":["weekly", "bogus", "weekly"]},
         }));
         assert_eq!(p.order.first().map(String::as_str), Some("codex"));
-        assert_eq!(p.order.len(), WIDGETS.len());
+        assert_eq!(p.order.len(), Prefs::default().order.len());
         assert_eq!(p.hidden, HashSet::from(["ports".to_string()]));
         assert_eq!(p.colors.get("claude").map(String::as_str), Some("#112233"));
         assert!(!p.colors.contains_key("codex"));
