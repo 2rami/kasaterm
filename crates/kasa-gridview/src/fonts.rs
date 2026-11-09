@@ -159,19 +159,40 @@ pub fn fallback_font_paths() -> Vec<(String, u32)> {
     }
     #[cfg(target_os = "linux")]
     {
-        // 이 사슬이 비면 DejaVu 하나만 남아 한글이 통째로 빈칸이 된다. fontconfig 를 부르지 않고
-        // 배포판 패키지 경로를 바로 본다 — 켤 때 프로세스 하나를 더 띄우지 않기 위해서다.
+        // 이 사슬이 비면 DejaVu 하나만 남아 한글이 통째로 빈칸이 된다. 먼저 배포판 패키지 경로를 바로
+        // 본다 — 켤 때 프로세스 하나를 더 띄우지 않기 위해서다.
+        let mut has_cjk = false;
         for (p, i) in linux_font_candidates(&[
             ("JetBrainsMonoNerdFontMono-Regular.ttf", 0),
             ("D2CodingLigatureNerdFont-Regular.ttf", 0),
         ]) {
+            has_cjk |= p.contains("D2Coding");
             out.push((p, i));
         }
         // Noto CJK 묶음의 6번 면이 「Noto Sans Mono CJK KR」(Debian fonts-noto-cjk 실측).
-        let fixed: &[(&str, u32)] = &[
+        for (p, i) in [
             ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 6),
             ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 6),
             ("/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf", 0),
+        ] {
+            if std::path::Path::new(p).exists() {
+                has_cjk = true;
+                out.push((p.to_string(), i));
+            }
+        }
+        // 아는 경로에 한글 글꼴이 하나도 없을 때만 fontconfig 에 묻는다 — 배포판·패키지마다 이름이 달라
+        // 목록으로는 끝이 없다(Debian fonts-naver-d2coding 은 판 번호가 파일 이름에 박혀 있다). 한자는
+        // 한글 글꼴에 없는 일이 많아 zh-cn 도 하나 붙인다.
+        if !has_cjk {
+            for lang in ["ko", "zh-cn"] {
+                if let Some(f) = fc_list_font(lang) {
+                    if !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        let fixed: &[(&str, u32)] = &[
             ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),
             ("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 0),
             ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
@@ -206,6 +227,67 @@ fn linux_font_candidates(names: &[(&str, u32)]) -> Vec<(String, u32)> {
 
 #[cfg(target_os = "linux")]
 const LINUX_JETBRAINS_DIR: &str = "/usr/share/fonts/truetype/jetbrains-mono";
+
+/// `lang` 을 덮는 설치 글꼴 하나(경로·TTC 면 번호). fontconfig 가 없거나 그런 글꼴이 없으면 `None`.
+#[cfg(target_os = "linux")]
+fn fc_list_font(lang: &str) -> Option<(String, u32)> {
+    let out = std::process::Command::new("fc-list")
+        .args([format!(":lang={lang}").as_str(), "-f", "%{file}|%{index}|%{style[0]}|%{spacing}\n"])
+        .output()
+        .ok()?;
+    pick_fc_font(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `fc-list -f '%{file}|%{index}|%{style[0]}|%{spacing}\n'` 출력에서 하나를 고른다 — 보통 굵기를 먼저,
+/// 그다음 고정폭(spacing 100)을. 굵은 면이 뽑히면 본문 한글이 다 굵게 나오고, 같은 점수면 경로 순으로
+/// 골라 켤 때마다 같은 글꼴이 된다.
+#[cfg(any(target_os = "linux", test))]
+fn pick_fc_font(listing: &str) -> Option<(String, u32)> {
+    let regular = |s: &str| matches!(s.to_ascii_lowercase().as_str(), "regular" | "book" | "normal" | "medium");
+    listing
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('|');
+            let file = f.next()?.trim();
+            let index = f.next()?.trim().parse::<u32>().ok()?;
+            let style = f.next().unwrap_or("").trim();
+            let mono = f.next().unwrap_or("").trim() == "100";
+            let file_ok = !file.is_empty()
+                && [".ttf", ".otf", ".ttc"].iter().any(|e| file.to_ascii_lowercase().ends_with(e));
+            file_ok.then(|| (std::cmp::Reverse((regular(style), mono)), file.to_string(), index))
+        })
+        .min()
+        .map(|(_, file, index)| (file, index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_fc_font;
+
+    #[test]
+    fn picks_the_regular_face_inside_a_ttc() {
+        let listing = "\
+/usr/share/fonts/truetype/naver-d2coding/D2Coding-Ver1.3.2-20180524-all.ttc|1|Bold|100
+/usr/share/fonts/truetype/naver-d2coding/D2Coding-Ver1.3.2-20180524-all.ttc|0|Regular|100
+";
+        assert_eq!(
+            pick_fc_font(listing),
+            Some(("/usr/share/fonts/truetype/naver-d2coding/D2Coding-Ver1.3.2-20180524-all.ttc".into(), 0))
+        );
+    }
+
+    #[test]
+    fn prefers_monospace_among_regular_faces() {
+        let listing = "/a/NanumGothic.ttf|0|Regular|\n/b/NanumGothicCoding.ttf|0|Regular|100\n";
+        assert_eq!(pick_fc_font(listing), Some(("/b/NanumGothicCoding.ttf".into(), 0)));
+    }
+
+    #[test]
+    fn skips_bitmap_and_garbage_lines() {
+        assert_eq!(pick_fc_font("/x/font.pcf.gz|0|Regular|100\nnot a line\n"), None);
+        assert_eq!(pick_fc_font(""), None);
+    }
+}
 
 /// Real italic variant of the primary mono face. JetBrains Mono ships
 /// `JetBrainsMonoNerdFontMono-Italic.ttf` — D2Coding has none, so when
