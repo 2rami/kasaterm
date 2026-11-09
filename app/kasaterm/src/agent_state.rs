@@ -265,6 +265,16 @@ fn turn_open(e: &Evidence) -> Option<&'static str> {
                 .flatten()
                 .all(|signal| signal > submit)
     });
+    // Codex can compact or wait for a tool without redrawing or appending its rollout.
+    // Silence cannot close that turn, and a leftover spinner cannot reopen a completed one.
+    // Process exit is handled by resolve's harness=None branch; approvals still take priority.
+    if matches!(e.harness, Some(kasa_pty::AgentKind::Codex)) && e.transcript_present {
+        match e.transcript_turn {
+            Some(TurnState::Working) if !e.transcript_error.as_ref().is_some_and(|err| err.hard) => return Some("codex turn open"),
+            Some(_) => return bridge.then_some("enter bridge"),
+            None => {}
+        }
+    }
     let hook = e.hook_turn;
     let transcript = e.transcript_turn.zip(e.transcript_age);
     let newest = match (hook, transcript) {
@@ -1068,6 +1078,36 @@ mod tests {
         assert_eq!(resolve(&a), (AgentState::Working, "agy fresh"));
         a.transcript_age = Some(secs(50));
         assert_eq!(resolve(&a).0, AgentState::Idle);
+    }
+
+    #[test]
+    fn codex_open_turn_survives_silent_compaction_and_ends_on_recorded_boundary() {
+        let mut e = Evidence { harness: Some(AgentKind::Codex), transcript_present: true,
+            transcript_turn: Some(TurnState::Working), ..Default::default() };
+        for age in [3, 8, 91, 601, 1800] {
+            e.transcript_age = Some(secs(age));
+            for heartbeat in [false, true, false] {
+                e.heartbeat = heartbeat;
+                sc(&mut e).spinner = heartbeat;
+                assert_eq!(resolve(&e), (AgentState::Working, "codex turn open"));
+            }
+        }
+        sc(&mut e).approval = Some("Allow command?".into());
+        assert!(matches!(resolve(&e).0, AgentState::Waiting { kind: WaitKind::Permission, .. }));
+        sc(&mut e).approval = None;
+        for end in ["task_complete", "turn_aborted"] {
+            let tail = format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"{end}\"}}}}");
+            e.transcript_turn = crate::transcript::turn_state_from_tail(&tail);
+            e.transcript_age = Some(secs(0));
+            e.heartbeat = true;
+            sc(&mut e).spinner = true;
+            assert_eq!(resolve(&e).0, AgentState::Idle, "a trailing redraw cannot reopen {end}");
+        }
+        e.transcript_turn = Some(TurnState::Working);
+        e.transcript_error = Some(HarnessError { label: "failed".into(), hard: true });
+        assert!(matches!(resolve(&e).0, AgentState::Error { .. }));
+        e.harness = None;
+        assert_eq!(resolve(&e), (AgentState::Idle, "shell"));
     }
 
     /// 화면은 둘째 눈이다 — 정본이 없거나 정본과 어긋날 때만 판정을 바꾼다.
