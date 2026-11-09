@@ -11,6 +11,7 @@ pub mod macos;
 pub mod overlay;
 pub mod palette;
 pub mod renderer;
+pub mod soft;
 
 pub use cursor::{cursor_primitives, CursorPrimitives, CursorQuad, CursorShape};
 pub use geometry::{block_rects, box_line_rects};

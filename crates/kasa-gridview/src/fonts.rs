@@ -60,7 +60,10 @@ pub fn sibling_bold_font_path(regular: &str) -> Option<(String, u32)> {
 /// primary 의 빈 아웃라인 구멍은 여기까지 흘러와 반드시 글리프를 얻는다.
 pub fn attach_fallback_chain(shaper: &mut Shaper, bundled: &[&'static [u8]]) {
     for (path, idx) in fallback_font_paths() {
-        let bold = sibling_bold_font_path(&path);
+        // TTC 묶음은 굵은 판도 면 순서가 같다 — 면 번호를 이어받아야 Noto CJK 의 Mono KR(6번)이
+        // 굵게 칠할 때 JP 비례폭(0번)으로 바뀌지 않는다.
+        let bold = sibling_bold_font_path(&path)
+            .map(|(p, b)| if p.ends_with(".ttc") { (p, idx) } else { (p, b) });
         shaper.add_fallback_with_bold(&path, idx, bold);
     }
     for bytes in bundled {
@@ -154,8 +157,55 @@ pub fn fallback_font_paths() -> Vec<(String, u32)> {
         push_if(&mut out, r"C:\Windows\Fonts\seguisym.ttf", 0);
         push_if(&mut out, r"C:\Windows\Fonts\seguiemj.ttf", 0);
     }
+    #[cfg(target_os = "linux")]
+    {
+        // 이 사슬이 비면 DejaVu 하나만 남아 한글이 통째로 빈칸이 된다. fontconfig 를 부르지 않고
+        // 배포판 패키지 경로를 바로 본다 — 켤 때 프로세스 하나를 더 띄우지 않기 위해서다.
+        for (p, i) in linux_font_candidates(&[
+            ("JetBrainsMonoNerdFontMono-Regular.ttf", 0),
+            ("D2CodingLigatureNerdFont-Regular.ttf", 0),
+        ]) {
+            out.push((p, i));
+        }
+        // Noto CJK 묶음의 6번 면이 「Noto Sans Mono CJK KR」(Debian fonts-noto-cjk 실측).
+        let fixed: &[(&str, u32)] = &[
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 6),
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 6),
+            ("/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf", 0),
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),
+            ("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 0),
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+            ("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", 0),
+            ("/usr/share/fonts/noto/NotoColorEmoji.ttf", 0),
+        ];
+        for &(p, i) in fixed {
+            if std::path::Path::new(p).exists() {
+                out.push((p.to_string(), i));
+            }
+        }
+    }
     out
 }
+
+/// 사용자가 손수 깐 글꼴(`~/.local/share/fonts`, `~/.fonts`)을 시스템 것보다 먼저 본다.
+#[cfg(target_os = "linux")]
+fn linux_font_candidates(names: &[(&str, u32)]) -> Vec<(String, u32)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut out = Vec::new();
+    for &(name, idx) in names {
+        for dir in [format!("{home}/.local/share/fonts"), format!("{home}/.fonts")] {
+            let p = format!("{dir}/{name}");
+            if std::path::Path::new(&p).exists() {
+                out.push((p, idx));
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_JETBRAINS_DIR: &str = "/usr/share/fonts/truetype/jetbrains-mono";
 
 /// Real italic variant of the primary mono face. JetBrains Mono ships
 /// `JetBrainsMonoNerdFontMono-Italic.ttf` — D2Coding has none, so when
@@ -170,6 +220,16 @@ pub fn primary_italic_font_path() -> Option<(String, u32)> {
     {
         let home = home_var().unwrap_or_default();
         let p = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Italic.ttf");
+        if std::path::Path::new(&p).exists() {
+            return Some((p, 0));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(found) = linux_font_candidates(&[("JetBrainsMonoNerdFontMono-Italic.ttf", 0)]).pop() {
+            return Some(found);
+        }
+        let p = format!("{LINUX_JETBRAINS_DIR}/JetBrainsMono-Italic.ttf");
         if std::path::Path::new(&p).exists() {
             return Some((p, 0));
         }
@@ -280,7 +340,25 @@ pub fn default_font_path() -> String {
         }
         return r"C:\Windows\Fonts\consola.ttf".into();
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        // macOS·Windows 와 같은 순서 — JetBrains Mono 가 라틴을, 대체 사슬이 한글을 받는다.
+        if let Some((p, _)) = linux_font_candidates(&[
+            ("JetBrainsMonoNerdFontMono-Regular.ttf", 0),
+            ("D2CodingLigatureNerdFontMono-Regular.ttf", 0),
+        ])
+        .into_iter()
+        .next()
+        {
+            return p;
+        }
+        let jb = format!("{LINUX_JETBRAINS_DIR}/JetBrainsMono-Regular.ttf");
+        if std::path::Path::new(&jb).exists() {
+            return jb;
+        }
+        return "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         return "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into();
     }

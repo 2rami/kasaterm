@@ -3295,9 +3295,13 @@ impl GpuRenderer {
         if !self.weather.as_ref().is_some_and(|wg| wg.has_frame(w, h) && wg.format() == self.grid.config.format) {
             return Ok(false);
         }
+        // CPU 렌더(GPU 표면 없음)에선 날씨 패스를 따로 낼 자리가 없다.
+        let Some(surface) = self.grid.surface.as_ref() else {
+            return Ok(false);
+        };
         #[cfg(target_os = "macos")]
-        apply_p3_via_hal(&self.grid.surface);
-        let frame = self.grid.surface.get_current_texture()?;
+        apply_p3_via_hal(surface);
+        let frame = surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.grid.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("weather only") });
         if let Some(wg) = self.weather.as_mut() {

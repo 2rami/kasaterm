@@ -97,6 +97,8 @@ pub struct Atlas {
     consecutive_full: u32,
     /// True once we've given up above, so the diagnostic prints once.
     futility_logged: bool,
+    /// CPU 렌더가 읽는 텍스처 사본(RGBA8, `width × height`). GPU 경로에선 `None` 이라 메모리를 안 쓴다.
+    cpu: Option<Vec<u8>>,
 }
 
 /// Consecutive out-of-room frames tolerated before concluding the live glyph
@@ -163,6 +165,7 @@ impl Atlas {
             full_this_frame: false,
             consecutive_full: 0,
             futility_logged: false,
+            cpu: None,
         };
         // Reserve a 2×2 solid-white block at (0, 0). 2×2 (not 1×1)
         // keeps the bilinear sampler honest in case a caller picks
@@ -204,6 +207,25 @@ impl Atlas {
 
     pub fn extent(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// 이후 굽는 글리프를 CPU 사본에도 적는다. 아틀라스를 만든 직후, 첫 글리프를 굽기 전에 부른다 —
+    /// 그 전에 구운 글리프는 사본에 없다(흰 블록만 여기서 다시 적는다).
+    pub fn keep_cpu_copy(&mut self) {
+        if self.cpu.is_some() {
+            return;
+        }
+        let mut px = vec![0u8; (self.width * self.height * 4) as usize];
+        let stride = (self.width * 4) as usize;
+        for row in 0..2 {
+            px[row * stride..row * stride + 8].fill(255);
+        }
+        self.cpu = Some(px);
+    }
+
+    /// CPU 사본. `keep_cpu_copy` 를 안 불렀으면 `None`.
+    pub fn cpu_pixels(&self) -> Option<&[u8]> {
+        self.cpu.as_deref()
     }
 
     /// Set the supersampling factor (>=1). Every cached entry was baked at
@@ -378,6 +400,14 @@ impl Atlas {
                 }
                 std::borrow::Cow::Owned(buf)
             };
+            if let Some(cpu) = self.cpu.as_mut() {
+                let stride = (self.width * 4) as usize;
+                let row_bytes = (r.width * 4) as usize;
+                for row in 0..r.height as usize {
+                    let dst = (y as usize + row) * stride + x as usize * 4;
+                    cpu[dst..dst + row_bytes].copy_from_slice(&rgba[row * row_bytes..(row + 1) * row_bytes]);
+                }
+            }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.texture,

@@ -8,12 +8,15 @@ license.workspace = true
 [dependencies]
 kasa-screen.workspace = true
 kasa-cells = { path = "../kasa-cells" }
-wgpu = "28"
+# noop: CPU 렌더(soft.rs)가 드라이버 없이 장치·큐만 세울 때 쓴다.
+wgpu = { version = "28", features = ["noop"] }
 wgpu-hal = { version = "28", features = ["metal"] }
 winit = "0.30"
 raw-window-handle = "0.6"
 anyhow.workspace = true
 pollster = "0.4"
+# GPU 없는 기계에서 CPU 로 칠한 화면을 창에 내보낸다(X11 은 XShm). kms 는 창이 아니라 쓰지 않는다.
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

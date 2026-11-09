@@ -27,7 +27,10 @@ pub struct GridFonts {
 
 pub struct GridRenderer {
     pub window: Arc<Window>,
-    pub surface: wgpu::Surface<'static>,
+    /// GPU 표면. CPU 렌더(`soft`)일 땐 없다.
+    pub surface: Option<wgpu::Surface<'static>>,
+    /// CPU 렌더. 있으면 `render` 가 GPU 대신 여기로 칠한다(soft.rs).
+    pub soft: Option<crate::soft::SoftPresenter>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -108,7 +111,23 @@ impl GridRenderer {
         let scale = window.scale_factor() as f32;
         let font_size_px = (font_size_logical * scale).round() as u32;
         let size = window.inner_size();
-        let instance = wgpu::Instance::default();
+        let soft_mode = crate::soft::wanted();
+        let instance = if soft_mode {
+            // 드라이버 없이 장치·큐만 세운다. 셀을 쌓는 코드가 아틀라스를 구울 때 장치를 받으니 그 자리를
+            // 채우는 용도이고, 픽셀은 아틀라스의 CPU 사본으로 칠한다(soft.rs).
+            wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::NOOP,
+                backend_options: wgpu::BackendOptions {
+                    noop: wgpu::NoopBackendOptions { enable: true },
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        } else {
+            // GPU 없는 리눅스에서 GPU 경로를 강제했다면 llvmpipe(GL)와 lavapipe(Vulkan) 중 어느 쪽이 가벼운지
+            // 기계마다 다르다 — `WGPU_BACKEND=gl|vulkan` 으로 고를 수 있게 환경을 읽는다. 값이 없으면 전과 같다.
+            wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default())
+        };
         // P3 color reproduction is the DEFAULT path. Despite ghostty's
         // `+show-config --default` advertising `window-colorspace = srgb`,
         // empirical measurement against ghostty's actual output shows it
@@ -120,19 +139,22 @@ impl GridRenderer {
         // RawHandle/sublayer path (byte passthrough — useful only when
         // comparing against a non-P3 reference).
         #[cfg(target_os = "macos")]
-        let p3_root = std::env::var("KASATERM_P3_ROOT")
-            .ok()
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
+        let p3_root = !soft_mode
+            && std::env::var("KASATERM_P3_ROOT")
+                .ok()
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
         #[cfg(not(target_os = "macos"))]
         let p3_root = false;
-        let surface = if p3_root {
+        let surface = if soft_mode {
+            None
+        } else if p3_root {
             #[cfg(target_os = "macos")]
             unsafe {
                 let layer_ptr = install_root_p3_layer(&window, scale)
                     .context("install_root_p3_layer failed")?;
                 let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr);
-                instance.create_surface_unsafe(target)?
+                Some(instance.create_surface_unsafe(target)?)
             }
             #[cfg(not(target_os = "macos"))]
             unreachable!()
@@ -141,28 +163,30 @@ impl GridRenderer {
                 raw_display_handle: window.display_handle()?.as_raw(),
                 raw_window_handle: window.window_handle()?.as_raw(),
             };
-            unsafe { instance.create_surface_unsafe(surface_target)? }
+            Some(unsafe { instance.create_surface_unsafe(surface_target)? })
         };
         // Live-resize would otherwise show the layer's stale pixels stretched
         // into the new bounds until our next frame lands. Pinning the layer's
         // contentsGravity to top-left keeps content anchored — same trick
         // ghostty uses (see feedback_kasaterm_rendering_pipeline).
         #[cfg(target_os = "macos")]
-        unsafe {
-            patch_metal_layer_gravity(&window);
-            if !p3_root {
-                // Legacy path: promote wgpu's observer CAMetalLayer to root
-                // (try 5 — recorded as ineffective on macOS 26 because the
-                // observer reattaches its own layer as a child). Kept for
-                // the default `RawHandle` branch only.
-                promote_metal_layer_to_root(&window, &surface);
-            } else {
-                eprintln!("[gpu] P3 root layer path active (KASATERM_P3_ROOT)");
+        if let Some(surface) = &surface {
+            unsafe {
+                patch_metal_layer_gravity(&window);
+                if !p3_root {
+                    // Legacy path: promote wgpu's observer CAMetalLayer to root
+                    // (try 5 — recorded as ineffective on macOS 26 because the
+                    // observer reattaches its own layer as a child). Kept for
+                    // the default `RawHandle` branch only.
+                    promote_metal_layer_to_root(&window, surface);
+                } else {
+                    eprintln!("[gpu] P3 root layer path active (KASATERM_P3_ROOT)");
+                }
             }
         }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
+            compatible_surface: surface.as_ref(),
             force_fallback_adapter: false,
         }))
         .context("no compatible wgpu adapter")?;
@@ -179,7 +203,15 @@ impl GridRenderer {
             experimental_features: wgpu::ExperimentalFeatures::default(),
             trace: wgpu::Trace::Off,
         }))?;
-        let caps = surface.get_capabilities(&adapter);
+        // CPU 렌더엔 표면이 없다 — 파이프라인이 받을 형식만 정하고 configure 는 건너뛴다.
+        let caps = surface.as_ref().map(|s| s.get_capabilities(&adapter)).unwrap_or_else(|| {
+            wgpu::SurfaceCapabilities {
+                formats: vec![wgpu::TextureFormat::Rgba8Unorm],
+                present_modes: vec![wgpu::PresentMode::Fifo],
+                alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+                usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            }
+        });
         // Pick a NON-sRGB (linear-storage) framebuffer and feed it
         // already-sRGB-encoded colours directly. Why not an sRGB
         // target? Alpha blending. An sRGB target makes the hardware
@@ -224,10 +256,14 @@ impl GridRenderer {
                 .unwrap_or_else(|| caps.formats[0].remove_srgb_suffix())
         };
         eprintln!("[gpu] surface format = {:?} srgb={}", format, format.is_srgb());
+        // COPY_SRC lets us read the presented frame back into a buffer for
+        // headless self-capture (no screen-recording permission needed). wgpu 의 GL 표면은
+        // COLOR_TARGET 만 내주므로(llvmpipe 포함) 거기서 요청하면 configure 가 검증 오류로 죽는다 —
+        // 지원할 때만 얹고, 없으면 캡처만 꺼진다.
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (caps.usages & wgpu::TextureUsages::COPY_SRC);
         let config = wgpu::SurfaceConfiguration {
-            // COPY_SRC lets us read the presented frame back into a buffer for
-            // headless self-capture (no screen-recording permission needed).
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -253,7 +289,23 @@ impl GridRenderer {
             "[gpu] present_modes={:?} chosen={:?} frame_latency={}",
             caps.present_modes, config.present_mode, config.desired_maximum_frame_latency
         );
-        surface.configure(&device, &config);
+        if let Some(s) = &surface {
+            s.configure(&device, &config);
+        }
+        let (init_gamma, init_contrast, init_sat) = text_render_knobs();
+        let soft = if soft_mode {
+            eprintln!("[gpu] CPU 렌더(GPU 렌더 노드 없음 또는 KASATERM_RENDERER=cpu)");
+            Some(crate::soft::SoftPresenter::new(
+                window.clone(),
+                config.width,
+                config.height,
+                init_gamma,
+                init_contrast,
+                init_sat,
+            )?)
+        } else {
+            None
+        };
 
         // Phase 2a font path: macOS Menlo for now, mirrors the
         // grid_bw example. The real fallback chain (D2Coding →
@@ -285,12 +337,15 @@ impl GridRenderer {
         // under the hood via cosmic-text).
         let cell_h = shaper.line_height(font_size_px as f32).ceil();
         let mut atlas = Atlas::new(&device, &queue, ATLAS_SIZE);
+        if soft.is_some() {
+            atlas.keep_cpu_copy();
+        }
         // Supersample glyphs on sub-Retina displays (scale < 2): at 100% DPI
         // the logical pixel size (e.g. 13px) is too small to resolve a crisp
         // coverage mask, so bake at 2x and let the Linear sampler downsample
         // — Retina-class sharpness without changing layout. Retina (scale>=2)
         // already has the pixels, so keep it 1:1.
-        atlas.set_oversample(oversample_for(scale));
+        atlas.set_oversample(glyph_oversample(scale, soft.is_some()));
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 let key = GlyphKey {
@@ -307,7 +362,6 @@ impl GridRenderer {
         // supersampled glyphs downsample smoothly (see Atlas::set_oversample).
         let pipeline = Pipeline::with_filtering(&device, format, 32_768, true);
         let init_dims = [config.width as f32, config.height as f32];
-        let (init_gamma, init_contrast, init_sat) = text_render_knobs();
         pipeline.write_uniforms_full(
             &queue,
             init_dims,
@@ -370,7 +424,13 @@ impl GridRenderer {
             clip_runs: Vec::new(),
             palette: Palette::default(),
             font_path,
+            soft,
         })
+    }
+
+    /// CPU 로 그리는 중인가(GPU 렌더 노드 없는 리눅스, 또는 `KASATERM_RENDERER=cpu`).
+    pub fn is_soft(&self) -> bool {
+        self.soft.is_some()
     }
 
     /// 이번 장에 쌓은 그리기를 비운다. 호스트가 장마다 맨 앞에서 부른다.
@@ -423,7 +483,7 @@ impl GridRenderer {
         // set_oversample only requests a reset when the factor actually
         // changes (Retina↔Retina moves keep it), so ask explicitly — the
         // size_px keys are stale either way.
-        self.atlas.set_oversample(oversample_for(scale));
+        self.atlas.set_oversample(glyph_oversample(scale, self.soft.is_some()));
         self.atlas.request_reset();
     }
 
@@ -447,6 +507,10 @@ impl GridRenderer {
         let before = self.atlas.len();
         if self.atlas.begin_frame() {
             eprintln!("[gpu] atlas repacked ({before} glyphs dropped, scale={})", self.scale);
+            // 같은 uv 자리에 다른 글리프가 들어갈 수 있어 띠 해시만으로는 못 알아챈다.
+            if let Some(s) = self.soft.as_mut() {
+                s.invalidate();
+            }
         }
     }
 
@@ -945,6 +1009,9 @@ impl GridRenderer {
         if self.images.contains_key(id) || w == 0 || h == 0 {
             return;
         }
+        if let Some(s) = self.soft.as_mut() {
+            s.put_image(id, rgba, w, h);
+        }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kasaterm image"),
             size: wgpu::Extent3d {
@@ -1000,6 +1067,9 @@ impl GridRenderer {
     /// Free a pane's image texture when the pane closes.
     pub fn drop_image(&mut self, id: &str) {
         self.images.remove(id);
+        if let Some(s) = self.soft.as_mut() {
+            s.images.remove(id);
+        }
     }
 
     /// Evict every cached texture whose id starts with `prefix`. Used to force a
@@ -1007,6 +1077,9 @@ impl GridRenderer {
     /// existing key, so the stale texture must be dropped first.
     pub fn drop_images_with_prefix(&mut self, prefix: &str) {
         self.images.retain(|k, _| !k.starts_with(prefix));
+        if let Some(s) = self.soft.as_mut() {
+            s.images.retain(|k, _| !k.starts_with(prefix));
+        }
     }
 
     /// Queue an image pane for this frame. `(x, y, w, h)` is the pane's body
@@ -1175,7 +1248,14 @@ impl GridRenderer {
     pub fn resize(&mut self, w: u32, h: u32) {
         self.config.width = w.max(1);
         self.config.height = h.max(1);
-        self.surface.configure(&self.device, &self.config);
+        if let Some(s) = &self.surface {
+            s.configure(&self.device, &self.config);
+        }
+        if let Some(s) = self.soft.as_mut() {
+            if let Err(e) = s.resize(self.config.width, self.config.height) {
+                eprintln!("[gpu] CPU 렌더 크기 변경 실패: {e}");
+            }
+        }
         let dims = [self.config.width as f32, self.config.height as f32];
         let (gamma, contrast, sat) = text_render_knobs();
         self.pipeline.write_uniforms_full(
@@ -1216,6 +1296,9 @@ impl GridRenderer {
         max_w: u32,
         paint: impl FnOnce(&mut Self),
     ) -> Result<(u32, u32), String> {
+        if self.soft.is_some() {
+            return Err("CPU 렌더에선 화면 밖 칸을 굽지 못한다".into());
+        }
         let w = w.max(1);
         let h = h.max(1);
         // 본 프레임 몫과 섞이지 않게 스왑 — 실패해도 아래 복구 블록이 돌도록
@@ -1704,6 +1787,35 @@ impl GridRenderer {
             wgpu::TextureFormat,
         ),
     ) -> Result<usize> {
+        if let Some(soft) = self.soft.as_mut() {
+            // GPU 패스와 같은 fail-open: 안 닫힌 클립이 화면 절반을 지우게 두지 않는다.
+            let runs: &[(u32, Option<[u32; 4]>)] = if self.clip_stack.is_empty() {
+                &self.clip_runs
+            } else {
+                eprintln!("[clip] 프레임이 끝났는데 클립 {}개가 안 닫혔다 — 이 프레임은 클립 없이 그린다", self.clip_stack.len());
+                &[]
+            };
+            let (atlas_w, atlas_h) = self.atlas.extent();
+            soft.render(&crate::soft::SoftFrame {
+                chrome: &self.chrome,
+                runs,
+                image_quads: &self.image_quads,
+                icon_quads: &self.icon_quads,
+                atlas: self.atlas.cpu_pixels().unwrap_or_default(),
+                atlas_w,
+                atlas_h,
+                bg: self.palette.bg,
+                time: time_secs,
+            })?;
+            if let Some(path) = self.capture_next.take() {
+                let (rgba, w, h) = soft.snapshot_rgba(self.capture_crop.take());
+                save_capture(&path, rgba, w, h, std::mem::take(&mut self.capture_max_w), "cpu");
+            }
+            return Ok(self.chrome.len());
+        }
+        let Some(surface) = self.surface.as_ref() else {
+            anyhow::bail!("GPU 표면이 없다");
+        };
         // Re-apply P3 colorspace before every drawable. wgpu's Metal HAL
         // doesn't touch this, but in practice the byte we read off the
         // panel ended up matching plain sRGB (255,0,0 measured as
@@ -1717,10 +1829,10 @@ impl GridRenderer {
             // Legacy `RawHandle` path: wgpu owns the layer and creates it as
             // a sublayer that macOS won't color-manage. Re-apply / re-promote
             // every frame as a (mostly ineffective) workaround.
-            apply_p3_via_hal(&self.surface);
+            apply_p3_via_hal(surface);
             unsafe {
                 reapply_p3(self.window.as_ref());
-                promote_metal_layer_to_root(self.window.as_ref(), &self.surface);
+                promote_metal_layer_to_root(self.window.as_ref(), surface);
             }
         } else {
             // P3_ROOT mode: we own the metal layer, but wgpu's
@@ -1729,7 +1841,7 @@ impl GridRenderer {
             // hal handle every frame — same cheap setColorspace selector as
             // `apply_p3_via_hal`, just targeting the layer wgpu now reports
             // (which IS our root layer in this mode).
-            apply_p3_via_hal(&self.surface);
+            apply_p3_via_hal(surface);
         }
         // Advance the working-bar sweep on the GPU every present (cheap
         // offset write). When chrome is unchanged — a bar-only frame while a
@@ -1756,7 +1868,7 @@ impl GridRenderer {
                     .write_instances(&self.device, &self.queue, &all_instances);
             }
         }
-        let frame = self.surface.get_current_texture()?;
+        let frame = surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self
             .device
@@ -1894,6 +2006,13 @@ impl GridRenderer {
         // present, then read it back to a PNG. No OS screen-record permission
         // needed (screencapture is blocked in headless runs).
         let capture = self.capture_next.take();
+        let capture = if capture.is_some() && !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            eprintln!("[gpu] 이 표면은 읽어 낼 수 없어 캡처를 건너뛴다(COPY_SRC 없음)");
+            self.capture_crop = None;
+            None
+        } else {
+            capture
+        };
         let cap = if capture.is_some() {
             let w = self.config.width;
             let h = self.config.height;
@@ -1964,27 +2083,7 @@ impl GridRenderer {
                         }
                     }
                 }
-                let saved = if max_w > 0 && cw > max_w {
-                    let nh = ((chh as u64 * max_w as u64) / cw as u64).max(1) as u32;
-                    match image::RgbaImage::from_raw(cw, chh, rgba.clone()) {
-                        Some(img) => {
-                            let small = image::imageops::resize(
-                                &img,
-                                max_w,
-                                nh,
-                                image::imageops::FilterType::Lanczos3,
-                            );
-                            save_rgba_png(&path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
-                        }
-                        None => save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh)),
-                    }
-                } else {
-                    save_rgba_png(&path, &rgba, cw, chh).map(|()| (cw, chh))
-                };
-                match saved {
-                    Ok((ow, oh)) => eprintln!("[capture] gpu readback → {path} ({ow}x{oh})"),
-                    Err(e) => eprintln!("[capture] gpu png failed: {e}"),
-                }
+                save_capture(&path, rgba, cw, chh, max_w, "gpu readback");
             }
             buf.unmap();
         }
@@ -1993,6 +2092,35 @@ impl GridRenderer {
 }
 
 pub const ATLAS_SIZE: u32 = 2048;
+
+/// 자기 캡처 한 장을 PNG 로 — `max_w` 를 넘으면 비율을 지켜 줄인다(캡처를 읽는 쪽은 보통 에이전트다).
+fn save_capture(path: &str, rgba: Vec<u8>, w: u32, h: u32, max_w: u32, how: &str) {
+    let saved = if max_w > 0 && w > max_w {
+        let nh = ((h as u64 * max_w as u64) / w as u64).max(1) as u32;
+        match image::RgbaImage::from_raw(w, h, rgba) {
+            Some(img) => {
+                let small = image::imageops::resize(&img, max_w, nh, image::imageops::FilterType::Lanczos3);
+                save_rgba_png(path, small.as_raw(), max_w, nh).map(|()| (max_w, nh))
+            }
+            None => Err(std::io::Error::other("capture buffer size mismatch")),
+        }
+    } else {
+        save_rgba_png(path, &rgba, w, h).map(|()| (w, h))
+    };
+    match saved {
+        Ok((ow, oh)) => eprintln!("[capture] {how} → {path} ({ow}x{oh})"),
+        Err(e) => eprintln!("[capture] {how} png failed: {e}"),
+    }
+}
+
+/// 글리프를 몇 배로 구울까. CPU 렌더는 축소 샘플링이 픽셀마다 이중선형이라 비싸서 1:1 로 굽는다.
+fn glyph_oversample(scale: f32, soft: bool) -> u32 {
+    if soft {
+        1
+    } else {
+        oversample_for(scale)
+    }
+}
 
 /// Glyph supersampling factor for a render scale. Below Retina the logical
 /// pixel size is too small to resolve a coverage mask cleanly, so bake at 2x
