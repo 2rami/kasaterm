@@ -6823,6 +6823,12 @@ pub fn read_account_autoswitch() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) const ACCOUNT_AUTOSWITCH_LEVELS: [u32; 5] = [80, 85, 90, 95, 100];
+
+pub(crate) fn account_has_capacity(percent: f32, threshold: f32) -> bool {
+    percent.is_finite() && percent >= 0.0 && percent < threshold && (1.0..=100.0).contains(&threshold)
+}
+
 /// 전환을 부르는 사용률(%) — 기본 90. 100 이면 벽에 부딪힌 뒤에나 넘어가니
 /// 여유를 두고 미리 넘어가는 게 이 기능의 요점이다.
 pub fn read_account_autoswitch_pct() -> f32 {
@@ -8784,6 +8790,15 @@ mod agents_view_tests {
 #[cfg(test)]
 mod account_autoswitch_tests {
     use super::*;
+
+    #[test]
+    fn full_use_keeps_partial_accounts_and_excludes_exhausted_or_unknown_usage() {
+        let remaining = [81.0, 90.0, 92.0, 100.0, f32::NAN];
+        assert_eq!(remaining.into_iter().filter(|pct| account_has_capacity(*pct, 85.0)).collect::<Vec<_>>(), [81.0]);
+        assert_eq!(remaining.into_iter().filter(|pct| account_has_capacity(*pct, 100.0)).collect::<Vec<_>>(), [81.0, 90.0, 92.0]);
+        assert!(ACCOUNT_AUTOSWITCH_LEVELS.contains(&100));
+        assert!(!account_has_capacity(-1.0, 100.0));
+    }
 
     #[test]
     fn rfc3339_epoch_reads_offsets_and_fractions() {

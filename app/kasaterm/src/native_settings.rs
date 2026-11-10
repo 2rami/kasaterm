@@ -4542,6 +4542,11 @@ fn paint_accounts(
                     switch_pct == 95,
                     SettingsAction::AccountAutoswitchPct(95),
                 ),
+                (
+                    "100%",
+                    switch_pct == 100,
+                    SettingsAction::AccountAutoswitchPct(100),
+                ),
             ],
         );
     }

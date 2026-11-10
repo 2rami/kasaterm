@@ -2876,6 +2876,8 @@ impl ApplicationHandler<UserEvent> for App {
                                         if let Some(until) = b.resets_at {
                                             socket::write_account_cooldown(id, until);
                                         }
+                                    } else if !b.stale && socket::account_has_capacity(b.pct, limit) {
+                                        socket::forget_account_cooldown(id);
                                     }
                                 }
                             }
@@ -2922,7 +2924,8 @@ impl ApplicationHandler<UserEvent> for App {
                                             crate::claude_auth::runtime_dir_for(&a.id, &active_id)
                                                 .is_some_and(|d| {
                                                     g.get(d.to_string_lossy().as_ref())
-                                                        .is_some_and(|badge| !badge.stale)
+                                                        .is_some_and(|badge| !badge.stale
+                                                            && (a.id == active_id || socket::account_has_capacity(badge.pct, socket::read_account_autoswitch_pct())))
                                                 })
                                         })
                                         .collect()

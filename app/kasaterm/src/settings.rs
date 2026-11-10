@@ -1328,8 +1328,10 @@ impl App {
                 self.settings_save();
             }
             SettingsAction::AccountAutoswitchPct(p) => {
+                let raised = p as f32 > self.set_account_autoswitch_pct;
                 self.set_account_autoswitch_pct = p as f32;
                 self.settings_save();
+                if raised { socket::clear_account_cooldowns(); }
             }
             SettingsAction::WheelPixelGain(x100) => {
                 self.set_wheel_pixel_gain = x100 as f32 / 100.0;
@@ -2429,7 +2431,7 @@ impl App {
             }
             "autoswitch-pct" => {
                 let p: u32 = id.parse().map_err(|_| unknown(id))?;
-                if !matches!(p, 80 | 85 | 90 | 95) {
+                if !socket::ACCOUNT_AUTOSWITCH_LEVELS.contains(&p) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::AccountAutoswitchPct(p));
