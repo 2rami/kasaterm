@@ -16,6 +16,8 @@ axum = { workspace = true, features = ["ws"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+# Retry-After may contain legacy HTTP dates that must share one parser.
+httpdate = "1"
 kasa-characters = { workspace = true }
 kasa-collab = { workspace = true, features = ["net"] }
 kasa-identity = { workspace = true }

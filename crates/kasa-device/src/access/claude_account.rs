@@ -5,6 +5,7 @@ use super::*;
 #[cfg(test)]
 use super::test_support::temp_dir;
 mod identity;
+mod retry_after;
 pub mod live_limits;
 pub use identity::{VerifiedClaudeIdentity, verified_claude_identity_for_token};
 
@@ -523,10 +524,9 @@ async fn claude_usage_handler(
     // "하나도안돼"). 한 번 막히면 물러나 있어야 창이 닫힌다.
     //
     // ⚠️ 키가 **슬롯이 아니라 토큰**인 것이 중요하다. 슬롯으로 걸면 작업대가 막힌
-    // 15분 동안 아래 금고 폴백까지 함께 막혀, 폴백을 넣은 의미가 사라진다(실측:
+    // 대기하는 동안 아래 금고 폴백까지 함께 막혀, 폴백을 넣은 의미가 사라진다(실측:
     // 폴백을 넣고도 화면이 여전히 빈칸이었다). 막힌 건 그 토큰이지 계정이 아니다.
     static BACKOFF: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
-    const BACKOFF_FOR: Duration = Duration::from_secs(15 * 60);
     let backoff = BACKOFF.get_or_init(Default::default);
 
     // 조회 대상 슬롯: `?dir=` 이 있으면 그것, 없으면 활성 계정(kasaterm 이 shim 을
@@ -563,7 +563,7 @@ async fn claude_usage_handler(
     // 것이고, 화면이 열려 있다는 사정과 무관하다. 아래 3) 이 그대로 처리한다.
     let fresh = params.get("fresh").is_some_and(|v| v == "1" || v == "true");
     // 응답 헤더로 이 계정 값이 계속 들어오는 동안은 상류를 5분에 한 번만 친다. 헤더가 싣지 않는
-    // 창(경고선 아래 5시간·모델별 주간)만 그때 맞추면 되고, 그만큼 429 로 15분 막힐 일이 준다.
+    // 창(경고선 아래 5시간·모델별 주간)만 그때 맞추면 되고, 그만큼 429 로 조회가 막힐 일이 준다.
     // 목록을 펼친 `fresh` 도 마찬가지다 — 펼친 화면이 보는 창은 이미 헤더로 지금 값이다.
     let live_recent = live_limits::latest_at(&remembered_token_keys(&cache_slot))
         .is_some_and(|at| at.elapsed() < LIVE_FRESH);
@@ -658,7 +658,7 @@ async fn claude_usage_handler(
                 };
                 if code == 429 {
                     if let Ok(mut g) = backoff.lock() {
-                        g.insert(key, Instant::now() + BACKOFF_FOR);
+                        g.insert(key, retry_after::deadline(r.headers(), Instant::now(), std::time::SystemTime::now()));
                     }
                 }
                 // 이 슬롯의 접근 토큰이 죽었다 — 기기엔 갱신 토큰이 없어(관문이 쥔다) claude 가 스스로 못 살린다.
