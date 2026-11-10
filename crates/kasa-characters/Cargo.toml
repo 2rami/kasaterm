@@ -6,6 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+kasa-agents = { workspace = true }
 kasa-socket = { workspace = true, default-features = true }
 libc = { workspace = true }
 reqwest = { workspace = true }

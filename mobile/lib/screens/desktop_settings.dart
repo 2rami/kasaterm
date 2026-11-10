@@ -250,12 +250,12 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
                     },
             ),
         if (c.containsKey('model'))
-          _choice('Claude 모델', c['model'], 'claude-model', const [
-            ('', '기본값'),
-            ('opus', 'Opus'),
-            ('sonnet', 'Sonnet'),
-            ('haiku', 'Haiku'),
-          ]),
+          _choice(
+            'Claude 모델',
+            c['model'],
+            'claude-model',
+            claudeModelChoices(c['model_choices']),
+          ),
         if (c.containsKey('effort'))
           _choice('Claude 추론 깊이', c['effort'], 'claude-effort', const [
             ('', '기본값'),
@@ -496,4 +496,22 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
       ),
     );
   }
+}
+
+/// 데스크톱이 Claude CLI 에서 받은 모델 목록(`model_choices`). 고정 목록은 새 모델(Fable 5.2)을 몰랐다.
+/// 이 값을 안 보내는 옛 데스크톱 판에는 예전 넷으로 메운다.
+List<(String, String)> claudeModelChoices(Object? raw) {
+  final choices = <(String, String)>[
+    if (raw is List)
+      for (final m in raw)
+        if (m is Map && m['value'] is String && m['label'] is String)
+          (m['value'] as String, m['label'] as String),
+  ];
+  if (choices.isNotEmpty) return choices;
+  return const [
+    ('', '기본값'),
+    ('opus', 'Opus'),
+    ('sonnet', 'Sonnet'),
+    ('haiku', 'Haiku'),
+  ];
 }

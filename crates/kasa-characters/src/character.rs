@@ -874,21 +874,30 @@ pub struct ModelChoice {
     pub backend: String,
 }
 
-/// 내장 후보 — 로스터 파일에 `models` 가 없을 때의 기본값.
+/// 내장 후보 — 로스터 파일에 `models` 가 없을 때의 기본값. Claude 모델은 Claude CLI 가 알려 주는
+/// 목록이다(고정해 두면 새 모델이 안 뜬다). 받기 전이면 옛 고정 목록으로 메운다.
 fn builtin_model_choices() -> Vec<ModelChoice> {
+    builtin_model_choices_from(kasa_agents::claude_models::choices())
+}
+
+fn builtin_model_choices_from(claude: Vec<kasa_agents::claude_models::ClaudeModel>) -> Vec<ModelChoice> {
     let m = |label: &str, model: &str, backend: &str| ModelChoice {
         label: label.to_string(),
         model: model.to_string(),
         backend: backend.to_string(),
     };
-    vec![
-        m("기본", "", ""),
-        m("Opus 5 (1M)", "claude-opus-5[1m]", ""),
-        m("Sonnet 5 (1M)", "claude-sonnet-5[1m]", ""),
-        m("Haiku", "haiku", ""),
-        m("Kimi", "", "kimi"),
-        m("GLM", "", "glm"),
-    ]
+    let mut out = vec![m("기본", "", "")];
+    if claude.is_empty() {
+        out.extend([
+            m("Opus 5 (1M)", "claude-opus-5[1m]", ""),
+            m("Sonnet 5 (1M)", "claude-sonnet-5[1m]", ""),
+            m("Haiku", "haiku", ""),
+        ]);
+    } else {
+        out.extend(claude.iter().map(|c| m(&c.label, &c.value, "")));
+    }
+    out.extend([m("Kimi", "", "kimi"), m("GLM", "", "glm")]);
+    out
 }
 
 /// 드롭다운 후보 목록. 로스터 파일 최상위 `models` 배열을 읽으므로 원본을 고쳐
@@ -1530,6 +1539,22 @@ pub fn pick_in_order_after(candidates: &[String], taken: &[String], previous: Op
 
 #[cfg(test)]
 mod ordered_assignment_tests {
+
+    #[test]
+    fn builtin_models_follow_the_claude_cli_list() {
+        use kasa_agents::claude_models::ClaudeModel;
+        let labels = |v: Vec<ModelChoice>| v.into_iter().map(|c| (c.label, c.model, c.backend)).collect::<Vec<_>>();
+        let cli = vec![
+            ClaudeModel { value: "opus".into(), label: "Opus 5.5".into() },
+            ClaudeModel { value: "claude-fable-5-2".into(), label: "Fable 5.2".into() },
+        ];
+        let got = labels(builtin_model_choices_from(cli));
+        assert_eq!(got.first(), Some(&("기본".to_string(), String::new(), String::new())));
+        assert!(got.contains(&("Fable 5.2".to_string(), "claude-fable-5-2".to_string(), String::new())));
+        assert_eq!(got.iter().filter(|(_, _, backend)| !backend.is_empty()).count(), 2, "Kimi·GLM stay");
+        let fallback = labels(builtin_model_choices_from(Vec::new()));
+        assert!(fallback.iter().any(|(_, model, _)| model == "haiku"), "the old fixed list fills in before the first fetch");
+    }
     use super::*;
 
     #[test]

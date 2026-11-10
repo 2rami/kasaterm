@@ -2227,7 +2227,7 @@ impl App {
                 Ok(saved_bool("shim_inject") == Some(self.set_shim_inject))
             }
             "claude-model" => {
-                if !matches!(id, "" | "opus" | "sonnet" | "haiku") {
+                if !kasa_agents::claude_models::setting_choices(&self.set_claude_model).iter().any(|m| m.value == id) {
                     return Err(unknown(id));
                 }
                 self.settings_apply(SettingsAction::ClaudeModel(id.to_string()));
@@ -2918,6 +2918,11 @@ impl App {
                     },
                 })),
                 "model": self.set_claude_model,
+                // 폰 설정창이 고정 넷 대신 이 목록을 그린다 — 데스크톱의 Claude CLI 가 아는 모델이다.
+                "model_choices": kasa_agents::claude_models::setting_choices(&self.set_claude_model)
+                    .into_iter()
+                    .map(|m| serde_json::json!({ "value": m.value, "label": m.label }))
+                    .collect::<Vec<_>>(),
                 "effort": self.set_claude_effort,
                 "extra": self.set_claude_extra,
             },

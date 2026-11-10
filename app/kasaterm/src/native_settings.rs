@@ -4428,21 +4428,11 @@ fn paint_claude(
         s.shim_inject,
         SettingsAction::ToggleShimInject,
     );
-    let models = [
-        ("기본", ""),
-        ("Opus", "opus"),
-        ("Sonnet", "sonnet"),
-        ("Haiku", "haiku"),
-    ];
+    // 고정 목록은 새 모델(Fable 5.2)을 몰랐다 — Claude CLI 가 알려 주는 목록을 쓴다.
+    let models = kasa_agents::claude_models::setting_choices(&s.claude_model);
     let model_cells: Vec<(&str, bool, SettingsAction)> = models
         .iter()
-        .map(|(label, key)| {
-            (
-                *label,
-                s.claude_model == *key,
-                SettingsAction::ClaudeModel((*key).to_string()),
-            )
-        })
+        .map(|m| (m.label.as_str(), s.claude_model == m.value, SettingsAction::ClaudeModel(m.value.clone())))
         .collect();
     seg_row(g, s, hits, x, y, w, "모델", &model_cells);
     let efforts = [
