@@ -47,11 +47,19 @@ automatically; reject policy fails instead of requeuing a zero-write deferral.
 
 Bodies allow LF and TAB, normalize CRLF to LF, reject remaining C0/C1/DEL controls,
 and are limited to 16 KiB. The fingerprint is FNV-1a-64, with exact body comparison
-as the deduplication authority. Records are capped at 1,024 and 4 MiB; exhausted
-storage rejects new messages rather than forgetting live idempotency keys.
+as the deduplication authority. Records are capped at 1,024 and 4 MiB (accepting
+keeps 256 KiB free for later reason updates).
 Receipts expire 24 hours after the issuance timestamp embedded in the ID. Their
 storage is reclaimed, and IDs older than that window are permanently refused
 with `receipt_expired`, so pruning never makes an old retry eligible to inject.
+When a new message would exceed either cap, the receiver forgets finished receipts
+(`submitted`, `failed`, `uncertain`) earliest-issued first. On 2026-11-10 one Mac
+filled all 1,024 slots in 15 hours and refused every tell until the oldest aged out.
+Before rewriting the ledger it durably records the latest forgotten issuance time
+in `evicted-through` beside it; an unknown ID issued at or before that time is refused
+with `receipt_expired`, so forgetting never makes a retry eligible to inject either.
+`accepted` and `dispatching` records are never forgotten; storage holding only
+those rejects new messages.
 Queue TTL is at most one hour and never extends beyond receipt expiry.
 Restarted dispatching records become uncertain. Expired or
 replaced sessions are never retargeted. Queue policy is independent of readiness.

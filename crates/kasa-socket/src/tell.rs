@@ -1,5 +1,5 @@
 //! Durable, receiver-owned idempotency and fail-closed message transitions.
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, io::Write, path::{Path, PathBuf}};
@@ -8,6 +8,9 @@ pub const MAX_BODY: usize = 16 * 1024;
 pub const MAX_TITLE_CHARS: usize = 60;
 const MAX_RECORDS: usize = 1024;
 const MAX_STORAGE: usize = 4 * 1024 * 1024;
+/// 받을 때 남겨 두는 바이트. 받은 뒤 사유 문장이 길어져(`waiting:…`) 저장 한도를 넘으면 붙여 넣은 쪽지의
+/// 마지막 기록이 실패해 `uncertain` 이 된다.
+const ACCEPT_HEADROOM: usize = 256 * 1024;
 pub const RECEIPT_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 /// 줄 선 쪽지를 버리기까지(초). 상한(1시간)으로 둔다. 2026-10-01 이 맥북 영수증 하루치 61건 중 21건이 옛 기본
 /// 15분에 만료됐는데, 막은 것은 사람이 Enter 를 칠 때까지 안 꺼지던 초안 표시였고(그 뒤로는 화면이 판정한다)
@@ -208,7 +211,9 @@ pub fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub struct Ledger { path: PathBuf, records: BTreeMap<String, Record>, _lock: fs::File,
+/// `forgotten_through` — 자리를 내느라 24시간 전에 버린 영수증 가운데 가장 늦은 발급 시각(ms). 장부 옆
+/// `evicted-through` 에 남아 재시작 뒤에도 그 아래 ID 를 받지 않는다. 장부 꼴은 그대로라 옛 판이 읽는다.
+pub struct Ledger { path: PathBuf, records: BTreeMap<String, Record>, forgotten_through: u64, _lock: fs::File,
     #[cfg(windows)] _directory: crate::private_store::DirGuard }
 impl Ledger {
     pub fn open(path: PathBuf) -> Result<Self> {
@@ -235,16 +240,21 @@ impl Ledger {
             ensure!(lock.try_lock().is_ok(),"another receiver owns this tell storage");
             lock
         };
-        let records: BTreeMap<String, Record> = match read_ledger(&path)? {
+        let records: BTreeMap<String, Record> = match read_private(&path)? {
             Some(bytes) => { ensure!(bytes.len() <= MAX_STORAGE, "tell ledger exceeds storage limit"); serde_json::from_slice(&bytes).context("corrupt tell ledger; delivery stopped")? },
             None => BTreeMap::new(),
+        };
+        let forgotten_through = match read_private(&forgotten_mark(&path))? {
+            Some(bytes) => std::str::from_utf8(&bytes).ok().and_then(|text| text.trim().parse().ok())
+                .context("corrupt tell eviction mark; delivery stopped")?,
+            None => 0,
         };
         ensure!(records.len() <= MAX_RECORDS,"tell ledger exceeds record limit");
         for (id,record) in &records {
             ensure!(id == &record.message_id && issued_at(id).is_ok() && normalize(&record.body)? == record.body
                 && fingerprint(&record.body) == record.body_hash,"tell ledger record integrity mismatch");
         }
-        let mut ledger = Self { path, records, _lock: lock, #[cfg(windows)] _directory: directory_guard };
+        let mut ledger = Self { path, records, forgotten_through, _lock: lock, #[cfg(windows)] _directory: directory_guard };
         let mut recovered = false;
         for record in ledger.records.values_mut() {
             if record.state == State::Dispatching {
@@ -268,6 +278,7 @@ impl Ledger {
             ensure!(record.address == *address && record.body == body, "message_id already belongs to a different body or target");
             return Ok(Some(record.clone()));
         }
+        ensure!(issued_at(id)? > self.forgotten_through, "receipt_expired: this message ID's receipt was evicted to make room; old message IDs cannot be submitted again");
         Ok(None)
     }
     pub fn accept(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64) -> Result<Record> {
@@ -277,19 +288,55 @@ impl Ledger {
     pub fn accept_with_policy(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64, reject_if_busy: bool, receiver_agent_pid: u32, title: String) -> Result<Record> {
         let body = normalize(&body)?;
         if let Some(record) = self.existing(id, &address, &body)? { return Ok(record); }
-        self.prune_at(now_ms());
-        ensure!(self.records.len() < MAX_RECORDS, "tell receipt storage is full");
         ensure!((1..=3600).contains(&ttl_seconds), "ttl_seconds must be between 1 and 3600");
+        self.prune_at(now_ms());
         let now = now_ms();
         let record = Record { message_id: id.into(), address, body_hash: fingerprint(&body), body,
             state: State::Accepted, reason: STORED_REASON.into(), accepted_at_ms: now,
             updated_at_ms: now, expires_at_ms: (now + ttl_seconds * 1000).min(issued_at(id)? + RECEIPT_LIFETIME_MS), reject_if_busy, receiver_agent_pid, title: normalize_title(&title)? };
+        let evicted = self.make_room(&record)?;
         self.records.insert(id.into(), record.clone());
-        if let Err(error) = self.persist() { self.records.remove(id); return Err(error); }
+        if let Err(error) = self.forget(&evicted).and_then(|()| self.persist()) {
+            self.records.remove(id);
+            for old in evicted { self.records.insert(old.message_id.clone(), old); }
+            return Err(error);
+        }
         Ok(record)
     }
     fn prune_at(&mut self, now: u64) {
         self.records.retain(|id,_|issued_at(id).is_ok_and(|issued|issued.saturating_add(RECEIPT_LIFETIME_MS) > now));
+    }
+    /// 장부가 차면 끝난 영수증(submitted·failed·uncertain)을 발급이 이른 것부터 메모리에서 뺀다. 24시간을 다
+    /// 채울 때까지 들고 있었더니 학생이 많은 날 15시간 만에 1024건이 차 이 기기로 오는 tell 이 전부 막혔다
+    /// (2026-11-10). 줄 선 것(accepted)·붙여 넣는 중(dispatching)은 빼지 않는다 — 그것만으로 차면 거절한다.
+    fn make_room(&mut self, incoming: &Record) -> Result<Vec<Record>> {
+        let entry = |record: &Record| serde_json::to_vec(record).map(|bytes| bytes.len() + record.message_id.len() + 4);
+        let mut finished: Vec<_> = self.records.values()
+            .filter(|record| !matches!(record.state, State::Accepted | State::Dispatching))
+            .map(|record| (issued_at(&record.message_id).unwrap_or(0), record.message_id.clone())).collect();
+        finished.sort_unstable();
+        let limit = MAX_STORAGE - ACCEPT_HEADROOM;
+        let mut bytes = serde_json::to_vec(&self.records)?.len() + entry(incoming)?;
+        let mut evicted = Vec::new();
+        for (_, id) in finished {
+            if self.records.len() < MAX_RECORDS && bytes <= limit { break; }
+            let Some(old) = self.records.remove(&id) else { continue };
+            bytes = bytes.saturating_sub(entry(&old)?);
+            evicted.push(old);
+        }
+        if self.records.len() >= MAX_RECORDS || bytes > limit {
+            for old in evicted { self.records.insert(old.message_id.clone(), old); }
+            bail!("tell receipt storage is full of undelivered messages");
+        }
+        Ok(evicted)
+    }
+    /// 뺀 ID 를 다시 받으면 두 번 붙여 넣게 된다. 장부를 쓰기 전에 그 발급 시각을 먼저 남긴다.
+    fn forget(&mut self, evicted: &[Record]) -> Result<()> {
+        let Some(through) = evicted.iter().filter_map(|record| issued_at(&record.message_id).ok()).max() else { return Ok(()) };
+        if through <= self.forgotten_through { return Ok(()); }
+        private_write(&forgotten_mark(&self.path), through.to_string().as_bytes())?;
+        self.forgotten_through = through;
+        Ok(())
     }
     pub fn status(&self, id: &str, address: &Address) -> Result<Record> {
         valid_id(id)?;
@@ -387,8 +434,10 @@ fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-/// 장부 바이트. 아직 없으면 None.
-fn read_ledger(path: &Path) -> Result<Option<Vec<u8>>> {
+fn forgotten_mark(ledger: &Path) -> PathBuf { ledger.with_file_name("evicted-through") }
+
+/// 소유자 전용 저장 파일 바이트. 아직 없으면 None.
+fn read_private(path: &Path) -> Result<Option<Vec<u8>>> {
     #[cfg(unix)] {
         if let Ok(metadata) = fs::symlink_metadata(path) {
             ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),"tell ledger must be a regular file");
@@ -514,6 +563,54 @@ mod tests {
         ledger.accept(&id,address(),"hello".into(),900).unwrap();
         ledger.prune_at(issued_at(&id).unwrap() + RECEIPT_LIFETIME_MS);
         assert!(ledger.records.is_empty());
+    }
+    fn filled(ledger: &mut Ledger, count: usize, body_len: usize, state: impl Fn(usize) -> State) -> Vec<String> {
+        let issued = now_ms() - 3_600_000;
+        let ids: Vec<String> = (0..count).map(|n| format!("kt1.{}.{n:016x}", issued + n as u64)).collect();
+        for (n, id) in ids.iter().enumerate() {
+            let body = format!("{n:0>body_len$}");
+            ledger.records.insert(id.clone(), Record { message_id: id.clone(), address: address(), body_hash: fingerprint(&body), body,
+                state: state(n), reason: "test".into(), accepted_at_ms: issued, updated_at_ms: issued, expires_at_ms: issued + 3_600_000,
+                reject_if_busy: false, receiver_agent_pid: 0, title: String::new() });
+        }
+        ledger.persist().unwrap();
+        ids
+    }
+    #[test] fn a_full_ledger_forgets_the_oldest_finished_receipt_and_keeps_queued_ones() {
+        let mut ledger = ledger();
+        let ids = filled(&mut ledger, MAX_RECORDS, 8, |n| match n { 0 | 1 => State::Accepted, 2 => State::Dispatching, 5 => State::Failed, _ => State::Submitted });
+        let fresh = new_message_id();
+        assert_eq!(ledger.accept(&fresh,address(),"new".into(),900).unwrap().state, State::Accepted, "꽉 차도 새 tell 을 받는다");
+        assert_eq!(ledger.records.len(), MAX_RECORDS);
+        assert!(!ledger.records.contains_key(&ids[3]), "끝난 것 가운데 가장 이른 것만 빠진다");
+        for (n, state) in [(0, State::Accepted), (1, State::Accepted), (2, State::Dispatching), (4, State::Submitted), (5, State::Failed)] {
+            assert_eq!(ledger.records[&ids[n]].state, state, "{n}");
+        }
+        assert_eq!(ledger.accept(&fresh,address(),"new".into(),900).unwrap().message_id, fresh, "살아 있는 영수증은 같은 ID 재조회 그대로");
+        assert!(ledger.records.contains_key(&ids[4]), "재조회는 자리를 비우지 않는다");
+        let body = ledger.records[&ids[0]].body.clone();
+        assert_eq!(ledger.accept(&ids[0],address(),body,900).unwrap().state, State::Accepted);
+        let replay = |ledger: &mut Ledger| ledger.accept(&ids[3],address(),format!("{:0>8}", 3),900).unwrap_err().to_string();
+        assert!(replay(&mut ledger).contains("receipt_expired"), "뺀 ID 로 다시 와도 붙여 넣지 않는다");
+        let mut reopened = Ledger::open({ let path = ledger.path.clone(); drop(ledger); path }).unwrap();
+        assert!(replay(&mut reopened).contains("receipt_expired"), "재시작 뒤에도");
+        assert_eq!(reopened.records.len(), MAX_RECORDS);
+    }
+    #[test] fn a_ledger_full_of_undelivered_messages_still_refuses_and_bytes_count_too() {
+        let mut ledger = ledger();
+        let queued = filled(&mut ledger, MAX_RECORDS, 8, |_| State::Accepted);
+        let error = ledger.accept(&new_message_id(),address(),"new".into(),900).unwrap_err().to_string();
+        assert!(error.contains("storage is full"), "{error}");
+        assert!(queued.iter().all(|id| ledger.records[id].state == State::Accepted), "줄 선 쪽지는 버리지 않는다");
+        assert_eq!(ledger.records.len(), MAX_RECORDS);
+
+        let mut ledger = self::ledger();
+        filled(&mut ledger, (MAX_STORAGE - ACCEPT_HEADROOM / 2) / (MAX_BODY + 400), MAX_BODY - 16, |_| State::Submitted);
+        assert!(serde_json::to_vec(&ledger.records).unwrap().len() > MAX_STORAGE - ACCEPT_HEADROOM, "바이트로 찬 장부에서 시작한다");
+        let before = ledger.records.len();
+        ledger.accept(&new_message_id(),address(),"x".repeat(MAX_BODY),900).unwrap();
+        assert!(ledger.records.len() <= before, "바이트 한도에 닿아도 끝난 것을 빼고 받는다");
+        assert!(fs::metadata(&ledger.path).unwrap().len() as usize <= MAX_STORAGE - ACCEPT_HEADROOM);
     }
     #[test] fn another_receiver_cannot_overwrite_the_same_ledger() {
         let ledger = ledger();
