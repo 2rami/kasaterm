@@ -20,6 +20,7 @@ struct Plan {
     status: StatusCode,
     content_type: &'static str,
     body: &'static str,
+    weekly_utilization: Option<&'static str>,
 }
 
 impl Plan {
@@ -28,6 +29,7 @@ impl Plan {
             status,
             content_type: "application/json",
             body,
+            weekly_utilization: None,
         }
     }
 
@@ -36,17 +38,22 @@ impl Plan {
             status: StatusCode::OK,
             content_type: "text/event-stream",
             body,
+            weekly_utilization: None,
         }
     }
 
     fn response(self) -> Response {
-        Response::builder()
+        let mut builder = Response::builder()
             .status(self.status)
             .header(header::CONTENT_TYPE, self.content_type)
             .header("x-upstream-response", "kept")
-            .header(header::CONNECTION, "close")
-            .body(Body::from(self.body))
-            .unwrap()
+            .header(header::CONNECTION, "close");
+        if let Some(utilization) = self.weekly_utilization {
+            builder = builder
+                .header("anthropic-ratelimit-unified-7d-utilization", utilization)
+                .header("anthropic-ratelimit-unified-7d-reset", "1794812400");
+        }
+        builder.body(Body::from(self.body)).unwrap()
     }
 }
 
@@ -267,6 +274,38 @@ async fn old_401_retries_once_with_only_authorization_changed() {
 }
 
 #[tokio::test]
+async fn rate_limit_headers_are_recorded_for_the_token_actually_sent() {
+    let (recovery, _stats) = immediate_fixture();
+    let (upstream, _attempts, server) = spawn_upstream(|index, _| {
+        if index == 0 {
+            Plan::json(StatusCode::UNAUTHORIZED, r#"{"error":{"message":"old"}}"#)
+        } else {
+            Plan { weekly_utilization: Some("0.37"), ..Plan::sse("event: message_stop\ndata: {}\n\n") }
+        }
+    })
+    .await;
+    let response = invoke(
+        &upstream,
+        recovery.as_ref(),
+        Duration::from_secs(1),
+        Method::POST,
+        "v1/messages",
+        request_headers("Bearer old-managed"),
+        Bytes::from_static(br#"{"messages":[]}"#),
+        true,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = response_bytes(response).await;
+    use kasa_device::access::claude_account::live_limits::observed_pct;
+    let pct = observed_pct("new-managed", "7d").expect("recorded under the retried token");
+    assert!((pct - 37.0).abs() < 1e-9);
+    assert_eq!(observed_pct("old-managed", "7d"), None, "the rejected first try carried no limits");
+    server.abort();
+}
+
+#[tokio::test]
 async fn recovered_second_401_is_not_retried_again() {
     let (recovery, stats) = immediate_fixture();
     let (upstream, attempts, server) = spawn_upstream(|_, _| {
@@ -313,6 +352,7 @@ async fn policy_rejects_wrong_auth_origin_method_path_and_status() {
                 status: StatusCode::UNAUTHORIZED,
                 content_type: "text/event-stream",
                 body: "data: {\"type\":\"error\"}\n\n",
+                weekly_utilization: None,
             },
             Some("200-sse") => Plan::sse("data: {\"type\":\"error\"}\n\n"),
             _ => Plan::json(StatusCode::UNAUTHORIZED, "old"),

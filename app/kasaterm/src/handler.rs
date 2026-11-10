@@ -2519,6 +2519,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut others_at: Option<std::time::Instant> = None;
                 const OTHERS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
                 loop {
+                    let cycle_started = std::time::Instant::now();
                     // 조회할 슬롯을 **매 사이클 설정에서 다시 읽어 URL 에 못 박는다.**
                     //
                     // 전에는 dir 을 안 넘겼는데, 그 경우 프록시(kasa-http/http.rs)는
@@ -2966,8 +2967,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // shim env 를 함께 갱신하므로 이 신호로 충분하다.
                     for _ in 0..12 {
                         std::thread::sleep(std::time::Duration::from_secs(5));
-                        // 턴이 끝났으면 남은 잠을 건너뛴다(`usage_poke`).
+                        // 턴이 끝났거나 프록시가 응답 헤더로 새 한도 값을 봤으면 남은 잠을 건너뛴다.
+                        // 헤더 관측은 사용량 응답에 덧입혀지므로 다시 읽어도 상류 호출이 늘지 않는다.
+                        // 다만 한 바퀴가 키체인 되받기까지 하므로, 헤더로 깨우는 건 15초에 한 번까지다
+                        // — 응답은 칸마다 몇 초에 하나씩 온다.
                         if usage_poke().swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        if cycle_started.elapsed() >= std::time::Duration::from_secs(15)
+                            && kasa_device::access::claude_account::live_limits::take_dirty()
+                        {
                             break;
                         }
                         // 목록을 펼쳐 놓고 보는 중이면 5초짜리 한 조각만 자고 다시

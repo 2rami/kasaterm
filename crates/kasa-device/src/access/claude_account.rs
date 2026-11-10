@@ -5,6 +5,7 @@ use super::*;
 #[cfg(test)]
 use super::test_support::temp_dir;
 mod identity;
+pub mod live_limits;
 pub use identity::{VerifiedClaudeIdentity, verified_claude_identity_for_token};
 
 /// Keychain service name holding one account's credentials.
@@ -541,7 +542,13 @@ async fn claude_usage_handler(
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     // `account_dir` 을 함께 돌려준다 — 어느 계정의 숫자인지 소비자가 알 수 있어야
     // 전환 직후 옛 값을 새 계정 것으로 오인하지 않는다.
-    let ok = |v: &serde_json::Value, stale: bool| {
+    //
+    // 프록시가 본 응답 헤더 관측(`live_limits`)을 덧입혀 낸다. `fetched_at` 은 이 값을 상류에서
+    // 받은 시각이고, 그보다 새 관측만 쓴다. 상류가 막혀(stale) 있어도 헤더로 방금 맞춘 창은 지금 값이다.
+    let ok = |v: &serde_json::Value, stale: bool, fetched_at: Option<Instant>| {
+        let mut v = v.clone();
+        let live = live_limits::overlay(&remembered_token_keys(&cache_slot), &mut v, fetched_at);
+        let stale = stale && !live.is_some_and(|at| at.elapsed() < LIVE_FRESH);
         serde_json::json!({ "ok": true, "usage": v, "stale": stale, "account_dir": dir })
     };
 
@@ -555,11 +562,17 @@ async fn claude_usage_handler(
     // 백오프(429)는 **우회하지 않는다** — 그건 upstream 이 그만 두드리라고 한
     // 것이고, 화면이 열려 있다는 사정과 무관하다. 아래 3) 이 그대로 처리한다.
     let fresh = params.get("fresh").is_some_and(|v| v == "1" || v == "true");
-    // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
+    // 응답 헤더로 이 계정 값이 계속 들어오는 동안은 상류를 5분에 한 번만 친다. 헤더가 싣지 않는
+    // 창(경고선 아래 5시간·모델별 주간)만 그때 맞추면 되고, 그만큼 429 로 15분 막힐 일이 준다.
+    // 목록을 펼친 `fresh` 도 마찬가지다 — 펼친 화면이 보는 창은 이미 헤더로 지금 값이다.
+    let live_recent = live_limits::latest_at(&remembered_token_keys(&cache_slot))
+        .is_some_and(|at| at.elapsed() < LIVE_FRESH);
+    let ttl = if live_recent { LIVE_TTL } else { TTL };
+    // 1) 신선한 캐시면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
         if let Some((Some(at), v)) = g.get(&cache_slot) {
-            if !fresh && at.elapsed() < TTL {
-                return (cors, Json(ok(v, false)));
+            if (!fresh || live_recent) && at.elapsed() < ttl {
+                return (cors, Json(ok(v, false, Some(*at))));
             }
         }
     }
@@ -599,6 +612,7 @@ async fn claude_usage_handler(
             }
         }
     }
+    remember_token_keys(&cache_slot, &tokens);
     let mut fresh: Option<serde_json::Value> = None;
     for token in &tokens {
         // 막힌 동안은 이 토큰으로 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
@@ -672,15 +686,15 @@ async fn claude_usage_handler(
             g.insert(cache_slot.clone(), (Some(Instant::now()), v.clone()));
         }
         save_usage_disk(&cache_slot, &v);
-        return (cors, Json(ok(&v, false)));
+        return (cors, Json(ok(&v, false, Some(Instant::now()))));
     }
 
     // 3) upstream 실패 — 만료됐어도 이 슬롯의 마지막 성공값이 있으면 stale 로
     //    폴백(pill 유지). **다른 슬롯 값으로는 절대 폴백하지 않는다** — 그게 전에
     //    한 계정의 숫자를 세 계정에 전부 붙여 보이던 경로다.
     if let Ok(g) = cache.lock() {
-        if let Some((_, v)) = g.get(&cache_slot) {
-            return (cors, Json(ok(v, true)));
+        if let Some((at, v)) = g.get(&cache_slot) {
+            return (cors, Json(ok(v, true, *at)));
         }
     }
     // 갱신이 죽은 슬롯은 429 를 맞았더라도 **로그인 문제**다 — 기다려서 안 풀린다.
@@ -725,6 +739,29 @@ fn dead_refresh() -> &'static std::sync::Mutex<std::collections::HashSet<String>
     static DEAD: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     DEAD.get_or_init(Default::default)
+}
+
+/// 응답 헤더 관측이 이만큼 새로우면 그 계정 값을 지금 값으로 본다.
+const LIVE_FRESH: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+/// 헤더 관측이 들어오는 동안의 상류 캐시 수명. 다른 오픈소스 사용량 도구도 3~5분이다.
+const LIVE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// 사용량 캐시 칸 → 그 칸을 조회할 때 쓴 토큰들의 지문. 신선 캐시로 답할 때는 토큰을 다시 읽지
+/// 않으므로(키체인), 헤더 관측을 찾을 열쇠를 여기 남긴다.
+fn slot_token_keys() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<u64>>> {
+    static KEYS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u64>>>> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(Default::default)
+}
+
+fn remember_token_keys(slot: &str, tokens: &[String]) {
+    if let Ok(mut keys) = slot_token_keys().lock() {
+        keys.insert(slot.to_owned(), tokens.iter().map(|t| token_key(t)).collect());
+    }
+}
+
+fn remembered_token_keys(slot: &str) -> Vec<u64> {
+    slot_token_keys().lock().ok().and_then(|keys| keys.get(slot).cloned()).unwrap_or_default()
 }
 
 /// 백오프 맵의 키. 토큰 문자열을 그대로 키로 두면 값이 맵에 오래 남으므로 지문만
