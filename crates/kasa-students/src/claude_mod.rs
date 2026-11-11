@@ -189,6 +189,7 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
     let mut boundary = false;
     let mut statusline = false;
     let mut status = false;
+    let mut measured: Option<Vec<Limit>> = None;
     {
         let mut panes = PANES.lock().unwrap();
         for event in events {
@@ -235,6 +236,9 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
                 continue;
             }
             let updated = apply_one(pane, &kind, event, &mut statusline);
+            if kind == "usage" {
+                measured = pane.state.usage.as_ref().map(|usage| usage.limits.clone());
+            }
             touched |= updated;
             boundary |= updated && matches!(kind.as_str(), "turn" | "compact" | "permission" | "question");
         }
@@ -244,6 +248,13 @@ pub fn apply(surface: &str, session: &str, events: &[Value]) {
     }
     if statusline {
         write_statusline(surface);
+    }
+    // 경고선 아래 5시간 창은 응답 헤더에 안 실린다 — Claude Code 의 측정이 그 칸 계정의 지금 값이다.
+    if let Some(limits) = measured {
+        kasa_device::access::claude_account::live_limits::record_measure(
+            surface,
+            limits.iter().map(|l| (l.kind.as_str(), l.percent, l.resets_at.as_deref())),
+        );
     }
     if touched {
         changed(surface, if boundary { Change::State } else { Change::Data });
@@ -1133,6 +1144,21 @@ mod tests {
 
     fn ev(v: Value) -> Vec<Value> {
         vec![v]
+    }
+
+    /// 칸의 Claude Code 측정은 그 칸이 프록시로 보낸 계정의 실시간 한도가 된다 — 경고선 아래 5시간 창 포함.
+    #[test]
+    fn a_usage_measure_feeds_the_account_the_pane_called_with() {
+        use kasa_device::access::claude_account::live_limits;
+        const SURFACE: &str = "%9201";
+        live_limits::record("9201", Some("Bearer tok-mod-measure"), std::iter::empty::<(&str, &str)>());
+        apply(SURFACE, "session", &ev(json!({"kind":"hello","pid":4242})));
+        apply(SURFACE, "session", &ev(json!({"kind":"usage","limits":[
+            {"kind":"five_hour","percent":8.0,"resets_at":"2100-01-01T00:00:00.000Z"},
+            {"kind":"seven_day","percent":19.0,"resets_at":"2100-01-02T00:00:00.000Z"}
+        ]})));
+        assert_eq!(live_limits::observed_pct("tok-mod-measure", "5h"), Some(8.0));
+        assert_eq!(live_limits::observed_pct("tok-mod-measure", "7d"), Some(19.0));
     }
 
     #[test]

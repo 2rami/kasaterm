@@ -797,8 +797,10 @@ async fn proxy_handler_inner(
     let status = upstream.status();
     let upstream_is_sse = is_sse_response(&upstream);
     // 응답마다 실려 오는 한도 헤더로 그 계정 사용량을 맞춘다 — `oauth/usage` 를 더 치지 않고 실시간이 된다.
+    // 칸도 함께 넘긴다: 그 칸의 Claude Code 가 재는 한도(`claude_mod` 의 측정)를 이 계정에 묶는다.
     if rest == "v1/messages" {
         kasa_device::access::claude_account::live_limits::record(
+            &pane,
             sent_authorization.as_ref().and_then(|value| value.to_str().ok()),
             upstream.headers().iter().filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
         );

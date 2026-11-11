@@ -446,24 +446,35 @@ async fn claude_identity_handler(
     }
     // Keep token rotation in its existing owner; identity lookup must not introduce a second refresh path.
     let _ = refresh_claude_token(&dir).await;
-    let out = identity::resolve(current, |token| async move {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .redirect(reqwest::redirect::Policy::none())
-            .build().ok()?;
-        let mut response = client.get("https://api.anthropic.com/api/oauth/profile")
-            .bearer_auth(token)
-            .header("anthropic-beta", "oauth-2025-04-20")
-            .send().await.ok()?;
-        if !response.status().is_success() { return None; }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.ok()? {
-            if body.len().saturating_add(chunk.len()) > 64 * 1024 { return None; }
-            body.extend_from_slice(&chunk);
-        }
-        serde_json::from_slice(&body).ok()
-    }).await;
+    let out = identity::resolve(current, fetch_profile).await;
     (cors, Json(out))
+}
+
+async fn fetch_profile(token: String) -> Option<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().ok()?;
+    let mut response = client.get("https://api.anthropic.com/api/oauth/profile")
+        .bearer_auth(token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > 64 * 1024 { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).ok()
+}
+
+/// `GET /claude-usage/live` — 이 기기에서 본 한도 관측을 계정·조직 UUID 별로. 다른 기기의 `peer_loop` 가 읽어
+/// 같은 계정 조회에 덧입힌다. 토큰·지문은 싣지 않는다. 계정 정보라 폰 손님에게는 주지 않는다.
+async fn claude_usage_live_handler(req: axum::extract::Request) -> axum::response::Response {
+    if let Some(denied) = super::auth::guest_denied(&req) {
+        return denied;
+    }
+    Json(live_limits::export()).into_response()
 }
 
 /// 사용량 조회에 claude CLI 와 같은 User-Agent 를 단다. 서버가 이 값으로 「Claude Code
@@ -613,6 +624,18 @@ async fn claude_usage_handler(
         }
     }
     remember_token_keys(&cache_slot, &tokens);
+    // 다른 기기의 관측은 계정 UUID 로 온다. 이 토큰들이 어느 계정인지 묶어 두고, 아직 모르면 프로필을 한 번
+    // 묻는다(토큰마다 10분에 한 번까지). 신원 캐시가 이미 있으면 상류를 치지 않는다.
+    for token in &tokens {
+        live_limits::remember_account(token);
+    }
+    if let Some(token) = tokens.first().filter(|t| live_limits::should_ask_account(t)).cloned() {
+        tokio::spawn(async move {
+            let current = token.clone();
+            identity::resolve(move || Some(current.clone()), fetch_profile).await;
+            live_limits::remember_account(&token);
+        });
+    }
     let mut fresh: Option<serde_json::Value> = None;
     for token in &tokens {
         // 막힌 동안은 이 토큰으로 아예 안 친다 — 두드림 자체가 한도 창을 되살린다.
@@ -863,12 +886,35 @@ fn save_usage_disk(dir: &str, usage: &serde_json::Value) {
 pub fn routes() -> axum::Router {
     axum::Router::new()
         .route("/claude-usage", get(claude_usage_handler))
+        .route("/claude-usage/live", get(claude_usage_live_handler))
         .route("/claude-identity", get(claude_identity_handler))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 다른 기기가 읽는 관측 창구 — 계정 정보라 폰 손님은 막고, 기기 사이 요청(폰 주소 없음)과 주인은 받는다.
+    #[tokio::test]
+    async fn live_usage_is_for_the_owner_and_other_machines_only() {
+        use tower::ServiceExt;
+        let guest = crate::mobile::MobileUser { name: "손님".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner: false };
+        let ask = |user: Option<crate::mobile::MobileUser>| async move {
+            let mut req = axum::extract::Request::get("/claude-usage/live").body(axum::body::Body::empty()).unwrap();
+            if let Some(u) = user {
+                req.extensions_mut().insert(super::super::auth::MobileAuth(u));
+            }
+            routes().oneshot(req).await.unwrap()
+        };
+        assert_eq!(ask(Some(guest.clone())).await.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(ask(Some(crate::mobile::MobileUser { owner: true, ..guest })).await.status(), axum::http::StatusCode::OK);
+        let res = ask(None).await;
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["v"], 1);
+        assert!(v["accounts"].is_array());
+    }
 
     /// 계정 저장소별로 스냅샷이 갈리는지 — 한 계정의 숫자가 다른 계정 자리에 앉으면
     /// 한도 분산 기능에서 한도 표시가 거짓말을 한다(사용자 2026-08-05: 세 계정의

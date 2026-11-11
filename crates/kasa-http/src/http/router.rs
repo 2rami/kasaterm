@@ -131,6 +131,8 @@ pub fn spawn_http_server_opts(
                     // 공유 파일이 아니라 **순환**이다. 서로를 원격으로 걸면 board 가
                     // 서로를 물어 무한히 부푼다. 합치는 쪽은 본체 한 곳이면 된다.
                     tokio::spawn(kasa_remote::remoteboard::poll_loop());
+                    // 다른 기기가 본 Claude 한도 관측 — 같은 계정이면 이 기기 사용량에 덧입힌다. 같은 순환 이유로 본체 한정.
+                    tokio::spawn(kasa_device::access::claude_account::live_limits::peer_loop());
                     // 기계 명부(machines.json) 폴링 — 이사 탭이 기계별 학생 목록을
                     // 즉시 그리게 미리 받아 둔다. 같은 순환 이유로 본체 한정.
                     // 카사넷 엔드포인트 — 폴링이 상대 id 를 배우기 전에 떠 있어야 입구가 선다.
