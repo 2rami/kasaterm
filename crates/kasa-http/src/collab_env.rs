@@ -22,6 +22,9 @@ impl CollabEnv for McpEnv {
     fn auth_token(&self, base: &str) -> Option<String> {
         kasa_remote::remote::connection_auth_token(base)
     }
+    fn route_base(&self, base: &str) -> String {
+        kasa_device::kasanet::route_base(base)
+    }
     fn is_remote_pane(&self, surface: &str) -> bool {
         kasa_remote::remote::is_remote_pane(surface)
     }

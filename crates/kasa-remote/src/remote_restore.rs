@@ -120,6 +120,7 @@ pub async fn resolve(
     saved_id: &str,
     hint: &RestoreIdentity,
 ) -> Result<String, String> {
+    let base = kasa_device::kasanet::route_base(base);
     tokio::time::timeout(Duration::from_secs(20), async {
         let endpoint = |path: &str| {
             reqwest::Url::parse(&format!("{}{path}", base.trim_end_matches('/')))

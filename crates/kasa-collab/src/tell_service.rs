@@ -105,8 +105,10 @@ fn remote(address: &Address, params: &Value, path: &'static str) -> Result<Value
         tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async move {
             let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5))
                 .redirect(reqwest::redirect::Policy::none()).build()?;
-            let token = crate::env::env().auth_token(&base);
-            request_remote(&client,&base,token.as_deref(),&expected,&body,path).await
+            let host = crate::env::env();
+            let token = host.auth_token(&base);
+            let routed = host.route_base(&base);
+            request_remote(&client,&routed,token.as_deref(),&expected,&body,path).await
         })
     }).join().map_err(|_|anyhow::anyhow!("remote tell worker failed; inspect status before retrying"))?
 }

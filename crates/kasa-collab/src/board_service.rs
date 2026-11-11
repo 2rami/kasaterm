@@ -438,10 +438,12 @@ async fn fetch_json(
     path: &str,
     query: &[(&str, String)],
 ) -> Result<Value> {
+    let host = crate::env::env();
+    let routed = host.route_base(base);
     let mut request = client
-        .get(format!("{}{path}", base.trim_end_matches('/')))
+        .get(format!("{}{path}", routed.trim_end_matches('/')))
         .query(query);
-    if let Some(token) = crate::env::env().auth_token(base) {
+    if let Some(token) = host.auth_token(base) {
         request = request.header("x-kasa-token", token);
     }
     let mut response = request
@@ -1173,6 +1175,72 @@ pub(crate) mod tests {
             ))
             .is_err());
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn remote_reads_follow_transport_changes_and_keep_source_credentials() {
+        use std::io::{Read, Write};
+        use crate::env::{CollabEnv, Route};
+
+        struct Routed {
+            previous: Arc<dyn CollabEnv>,
+            source: String,
+            transport: Arc<Mutex<String>>,
+        }
+        impl CollabEnv for Routed {
+            fn self_label(&self) -> String { self.previous.self_label() }
+            fn machines(&self) -> Vec<Route> { self.previous.machines() }
+            fn relay(&self) -> Option<(String, String)> { self.previous.relay() }
+            fn auth_token(&self, base: &str) -> Option<String> {
+                if base == self.source { Some("fixture-source-token".into()) }
+                else { self.previous.auth_token(base) }
+            }
+            fn route_base(&self, base: &str) -> String {
+                if base == self.source { self.transport.lock().unwrap().clone() }
+                else { self.previous.route_base(base) }
+            }
+            fn is_remote_pane(&self, surface: &str) -> bool { self.previous.is_remote_pane(surface) }
+        }
+        struct RestoreEnv(Arc<dyn CollabEnv>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) { crate::env::set_env(self.0.clone()); }
+        }
+
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/unavailable-original", unavailable.local_addr().unwrap());
+        let transport = Arc::new(Mutex::new(String::new()));
+        let previous = crate::env::env();
+        let _restore = RestoreEnv(previous.clone());
+        crate::env::set_env(Arc::new(Routed { previous, source: source.clone(), transport: transport.clone() }));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let client = http_client().unwrap();
+        for generation in 0..2 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            *transport.lock().unwrap() = format!("http://{}", listener.local_addr().unwrap());
+            let responder = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let n = socket.read(&mut chunk).unwrap();
+                    assert!(n > 0 && bytes.len() + n <= 8192);
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                assert!(request.starts_with("GET /collab/board?scope=local "));
+                assert!(request.to_ascii_lowercase().contains("x-kasa-token: fixture-source-token\r\n"));
+                let body = json!({"schema_version":1,"scope":"local","sources":[{
+                    "machine_id":"routed-source","state":"online","observed_at_ms":board::now_ms(),
+                    "complete":true}],"panes":[],"generation":generation}).to_string();
+                write!(socket, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let value = runtime.block_on(fetch_json(&client, &source, "/collab/board", &[("scope", "local".into())])).unwrap();
+            assert_eq!(value["generation"], generation);
+            assert!(source_from_snapshot(&value, Some("routed-source")).is_ok());
+            assert!(source_from_snapshot(&value, Some("another-source")).is_err());
+            responder.join().unwrap();
+        }
     }
 
     #[test]

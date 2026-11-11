@@ -30,6 +30,10 @@ pub trait CollabEnv: Send + Sync {
     fn auth_token(&self, _base: &str) -> Option<String> {
         None
     }
+    /// Transport endpoints may change while the source identity and credential key stay stable.
+    fn route_base(&self, base: &str) -> String {
+        base.to_owned()
+    }
     /// 다른 기계 칸을 비추는 거울 칸이면 참 — 그 칸에는 전역 주소로만 보낸다.
     fn is_remote_pane(&self, _surface: &str) -> bool {
         false

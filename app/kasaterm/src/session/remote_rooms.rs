@@ -878,17 +878,12 @@ impl App {
             self.focus_surface(&existing);
             return Ok(());
         }
-        self.new_window();
-        let owner = self.active_window;
-        let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
-            anyhow::bail!("새 창의 기본 pane 을 못 얻었다");
-        };
-        let (win_cols, win_rows) = self.window_cells();
         let outers: Vec<&crate::state::MachinesColRow> = rows.iter().filter(|r| r.tab_of.is_none()).collect();
         let mut seated: Vec<(String, String)> = Vec::new();
         let mut fail: Vec<String> = Vec::new();
+        let mut owner = None;
         for row in &outers {
-            let local_id = if seated.is_empty() { host.clone() } else { self.alloc_pane_id() };
+            let local_id = self.alloc_pane_id();
             let spec = kasa_remote::remote::RemoteSpec {
                 base: m.base.clone(),
                 pane: Some(row.remote_id.clone()),
@@ -903,10 +898,8 @@ impl App {
             };
             match kasa_remote::remote::open_view(spec, &local_id) {
                 Ok(remote) => {
-                    if seated.is_empty() {
-                        if let Some(old) = self.pty.get(&host).cloned() {
-                            old.stop_reader();
-                        }
+                    if owner.is_none() {
+                        owner = Some(self.new_mirror_window(&local_id));
                     }
                     self.insert_pty(local_id.clone(), remote.session.clone());
                     self.pump_pty_screens(
@@ -921,9 +914,10 @@ impl App {
                 Err(e) => fail.push(format!("{}: {e:#}", row.remote_id)),
             }
         }
-        if seated.is_empty() {
+        let Some(owner) = owner else {
             anyhow::bail!("거울을 하나도 못 열었다 — {}", fail.join(" · "));
-        }
+        };
+        let (win_cols, win_rows) = self.window_cells();
         if seated.len() > 1 {
             // 원본 칸 좌표가 다 있으면 그 배치 그대로, 아니면 고르게 나눈다.
             let cells: Vec<(String, [f32; 4])> = seated
@@ -1011,11 +1005,7 @@ impl App {
         owned: bool,
         name: Option<String>,
     ) -> Result<()> {
-        self.new_window();
-        let owner = self.active_window;
-        let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
-            anyhow::bail!("새 창의 기본 pane 을 못 얻었다");
-        };
+        let host = self.alloc_pane_id();
         let remote = kasa_remote::remote::open_view(
             kasa_remote::remote::RemoteSpec {
                 base: base.to_string(),
@@ -1031,9 +1021,7 @@ impl App {
             },
             &host,
         )?;
-        if let Some(old) = self.pty.get(&host).cloned() {
-            old.stop_reader();
-        }
+        let owner = self.new_mirror_window(&host);
         self.insert_pty(host.clone(), remote.session.clone());
         self.pump_pty_screens(
             remote.session.screens.clone(),

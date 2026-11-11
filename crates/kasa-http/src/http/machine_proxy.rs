@@ -57,7 +57,8 @@ async fn machine_proxy(
         return (axum::http::StatusCode::NOT_FOUND, "no such machine").into_response();
     };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-    let target = format!("{}/{rest}{query}", m.base);
+    let base = kasa_device::kasanet::route_base(&m.base);
+    let target = format!("{}/{rest}{query}", base.trim_end_matches('/'));
     let is_ws = req
         .headers()
         .get(header::UPGRADE)

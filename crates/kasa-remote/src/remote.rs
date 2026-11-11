@@ -452,6 +452,11 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+fn http_base(base: &str) -> String {
+    // Control requests must survive the same SSH outage as their terminal stream.
+    kasa_device::kasanet::route_base(base).trim_end_matches('/').to_owned()
+}
+
 fn build_url(spec: &RemoteSpec, pane: Option<&str>, view: bool) -> String {
     // 붙을 때마다 카사넷 입구를 거친다 — spec.base 는 그대로라 거울이 기기를 잃지 않고, 재접속이 그 순간의
     // 길(직통·ssh)을 탄다.
@@ -1039,7 +1044,7 @@ async fn reconnect_pause(viewport: &ViewportState, backoff_ms: &mut u64) {
 pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> Result<String> {
     let u = format!(
         "{}/spawn-student?character={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(character)
     );
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1122,7 +1127,7 @@ pub fn spawn_shell_pane_at(
     }
     let u = format!(
         "{}/spawn-shell{}",
-        base.trim_end_matches('/'),
+        http_base(base),
         if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) }
     );
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1160,7 +1165,7 @@ pub fn spawn_shell_pane_at(
 }
 
 fn transfer_request(base: &str, action: &str, body: Option<serde_json::Value>, seconds: u64) -> Result<serde_json::Value> {
-    let url = format!("{}/transfer/{action}", base.trim_end_matches('/'));
+    let url = format!("{}/transfer/{action}", http_base(base));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let client = reqwest::Client::builder().timeout(Duration::from_secs(seconds)).build()?;
@@ -1225,7 +1230,7 @@ pub fn repersona(
 ) -> Result<()> {
     let mut u = format!(
         "{}/repersona?surface={}&character={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(pane).replace('%', "%25").replace("%2525", "%25"),
         urlencode(character)
     );
@@ -1264,7 +1269,7 @@ pub fn push_character_theme(
 ) -> Result<()> {
     let u = format!(
         "{}/term/character-theme?theme={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(theme_id)
     );
     let body = picks_json.as_bytes().to_vec();
@@ -1303,7 +1308,7 @@ pub fn push_character_theme(
 /// 그 팩이 없어 push_character_theme 가 거절됐을 때 팩을 실어 나르는 두 번째 호출.
 /// 성공 시 풀린 테마 id.
 pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<String> {
-    let u = format!("{}/term/character-theme?pack=1", base.trim_end_matches('/'));
+    let u = format!("{}/term/character-theme?pack=1", http_base(base));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1476,7 +1481,7 @@ pub fn relay_send(
 /// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
 /// (2026-08-27 사용자 지적: 「옮기면 왜 테마가 없어져」).
 pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
-    let u = format!("{}/term/panes", base.trim_end_matches('/'));
+    let u = format!("{}/term/panes", http_base(base));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1510,7 +1515,7 @@ pub fn fetch_mirror_appearance(base: &str, path: &str) -> Result<Vec<u8>> {
     rt.block_on(async {
         let client = reqwest::Client::builder().timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none()).build()?;
-        let mut request = client.get(format!("{}{path}", base.trim_end_matches('/')));
+        let mut request = client.get(format!("{}{path}", http_base(base)));
         if let Some(token) = auth { request = request.header("x-kasa-token", token); }
         let mut response = request.send().await?.error_for_status()?;
         const MAX: usize = 8 << 20;
@@ -1530,7 +1535,7 @@ pub fn paste_remote_image(base: &str, surface: &str, bytes: Vec<u8>) -> Result<(
     anyhow::ensure!(!surface.is_empty(), "missing image target");
     anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 32 << 20, "image must be at most 32 MiB");
     let auth = connection_auth_token(base);
-    let url = format!("{}/paste-image?surface={}", base.trim_end_matches('/'), urlencode(surface));
+    let url = format!("{}/paste-image?surface={}", http_base(base), urlencode(surface));
     // 고정 20초는 32MiB 까지 받는 업로드에 1.6MiB/s 를 요구한다. 네트워크 메모리가 바닥난 기계의 루프백은
     // 3MiB 에 37초가 걸렸고(2026-10-07) 그 길은 느린 중계에서도 같다 — 안 닿는 기계는 연결 단계에서 10초 안에
     // 거르고, 전송은 최소 64KiB/s 를 기준으로 크기에 맞춰 준다.
@@ -1563,7 +1568,7 @@ pub fn connection_auth_token(base: &str) -> Option<String> {
 pub fn remote_pane_session(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
     let u = format!(
         "{}/pane-session?pane={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(pane)
     );
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1602,7 +1607,7 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
     let token = token.or(connection_token.as_deref());
     let u = format!(
         "{}/close-pane?surface={}{}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(pane),
         if kill { "&kill=1" } else { "" }
     );
@@ -1643,7 +1648,7 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
 pub fn release_remote_web_shell(base: &str, id: &str) -> Result<bool> {
     anyhow::ensure!(id.starts_with("web-"), "{id} 은 웹 셸이 아니다");
     let token = connection_auth_token(base);
-    let u = format!("{}/term/session?pane={}", base.trim_end_matches('/'), urlencode(id));
+    let u = format!("{}/term/session?pane={}", http_base(base), urlencode(id));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1678,7 +1683,7 @@ pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::V
 
 pub fn remote_get_json_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<serde_json::Value> {
     let token = connection_auth_token(base);
-    let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
+    let u = format!("{}{}", http_base(base), path_and_query);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1715,7 +1720,7 @@ pub fn remote_get_json_bounded(base: &str, path_and_query: &str, max_bytes: usiz
 /// 시간 상한을 읽기보다 길게 두는 이유는 push 가 네트워크를 타기 때문이다.
 pub fn remote_post_json(base: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
     let token = connection_auth_token(base);
-    let u = format!("{}{}", base.trim_end_matches('/'), path);
+    let u = format!("{}{}", http_base(base), path);
     let body = body.clone();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1748,7 +1753,7 @@ pub fn remote_get_bytes(base: &str, path_and_query: &str) -> Result<Vec<u8>> {
 
 pub fn remote_get_bytes_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<Vec<u8>> {
     let token = connection_auth_token(base);
-    let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
+    let u = format!("{}{}", http_base(base), path_and_query);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1783,7 +1788,7 @@ pub fn remote_get_bytes_bounded(base: &str, path_and_query: &str, max_bytes: usi
 /// 거절한다. 답의 `ok` 가 거짓이면 그 사유를 오류로 돌려준다.
 pub fn remote_cmd(base: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let token = connection_auth_token(base);
-    let u = format!("{}/cmd", base.trim_end_matches('/'));
+    let u = format!("{}/cmd", http_base(base));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1820,7 +1825,7 @@ pub fn remote_cmd(base: &str, method: &str, params: serde_json::Value) -> Result
 /// 원격 pane 의 (model, effort) — `/term/panes` 행의 `model`·`effort`. 낡은 원격은
 /// 그 필드가 없어 None — 부른 쪽은 그때 기본값으로 물러선다.
 pub fn remote_pane_cfg(base: &str, pane: &str, token: Option<&str>) -> Option<(String, String)> {
-    let u = format!("{}/term/panes", base.trim_end_matches('/'));
+    let u = format!("{}/term/panes", http_base(base));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1858,7 +1863,7 @@ pub fn ensure_repo(
 ) -> Result<String> {
     let mut u = format!(
         "{}/term/repo?path={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(path)
     );
     if let Some(g) = url.filter(|s| !s.is_empty()) {
@@ -1927,7 +1932,7 @@ pub fn upload_transcript(
     let n = bytes.len() as u64;
     let mut url = format!(
         "{}/term/transcript?cwd={}&sid={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(remote_cwd),
         urlencode(sid)
     );
@@ -2000,7 +2005,7 @@ pub fn download_transcript(
     sid: &str,
     token: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let base = base.trim_end_matches('/');
+    let base = http_base(base);
     let url = format!(
         "{base}/term/transcript?cwd={}&sid={}",
         urlencode(remote_cwd),
@@ -2047,7 +2052,7 @@ pub fn fetch_codex_session(
 ) -> Result<Option<(String, Vec<u8>)>> {
     let url = format!(
         "{}/term/codex-session?sid={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(sid)
     );
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2096,7 +2101,7 @@ pub fn push_codex_session(
 ) -> Result<String> {
     let url = format!(
         "{}/term/codex-session?sid={}&rel={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(sid),
         urlencode(rel)
     );
@@ -2151,7 +2156,7 @@ pub fn remote_path_probe(
 ) -> Result<Option<(bool, String)>> {
     let url = format!(
         "{}/term/path?path={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(path)
     );
     let (status, body) = blocking_get(&url, token, Duration::from_secs(20))?;
@@ -2178,7 +2183,7 @@ pub fn remote_repo_state(
 ) -> Result<Option<(u64, u64, String, String)>> {
     let url = format!(
         "{}/term/repo?path={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(path)
     );
     let (status, body) = blocking_get(&url, token, Duration::from_secs(20))?;
@@ -2232,7 +2237,7 @@ pub fn remote_agent_stop(base: &str, pane: &str, token: Option<&str>, force: boo
     // 강행은 곱게 못 끈 하네스를 저쪽이 강제로 끝내게 한다(Windows 호스트). 옛 판은 이 값을 모르고 무시한다.
     let url = format!(
         "{}/term/agent-stop?pane={}{}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(pane),
         if force { "&force=1" } else { "" }
     );
@@ -2297,7 +2302,7 @@ pub enum RepoSyncFetch {
 pub fn fetch_repo_sync(base: &str, path: &str, token: Option<&str>) -> Result<RepoSyncFetch> {
     let url = format!(
         "{}/term/repo-sync?path={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(path)
     );
     // bundle 뜨기는 큰 레포에서 수십 초다 — 대화 내려받기와 같은 여유를 준다.
@@ -2371,7 +2376,7 @@ pub fn push_repo_sync(
 ) -> Result<Option<String>> {
     let mut url = format!(
         "{}/term/repo-sync?path={}&head={}&sync={}&branch={}&dirty={}",
-        base.trim_end_matches('/'),
+        http_base(base),
         urlencode(path),
         urlencode(&meta.head),
         urlencode(&meta.sync),
@@ -2447,7 +2452,7 @@ pub struct RemoteAccounts {
 
 /// 그 기계의 계정 칸을 읽는다(`GET /settings/values`).
 pub fn fetch_accounts(base: &str, token: Option<&str>) -> Result<RemoteAccounts> {
-    let u = format!("{}/settings/values", base.trim_end_matches('/'));
+    let u = format!("{}/settings/values", http_base(base));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2519,7 +2524,7 @@ pub fn settings_action_reply(
 ) -> Result<serde_json::Value> {
     let inherited_token = token.is_none().then(|| connection_auth_token(base)).flatten();
     let token = token.or(inherited_token.as_deref());
-    let u = format!("{}/settings/action", base.trim_end_matches('/'));
+    let u = format!("{}/settings/action", http_base(base));
     let mut body = serde_json::json!({ "action": action });
     if let Some(id) = id {
         body["id"] = serde_json::Value::String(id.to_string());

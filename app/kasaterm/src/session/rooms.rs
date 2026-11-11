@@ -58,6 +58,19 @@ impl App {
     /// them never tears a pane down. Windows are this session's tmux-style
     /// "windows"; the session list one level up is tmux "sessions".
     pub(crate) fn new_window(&mut self) {
+        self.prepare_new_window();
+        if let Err(e) = self.spawn_session_pane() {
+            eprintln!("[window] new window pane spawn failed: {e:#}");
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    fn prepare_new_window(&mut self) {
         self.close_inline_web();
         self.session_touched = true;
         // Active window's slot is None — its layout lives in pty_layout. Park
@@ -68,17 +81,16 @@ impl App {
         // 방을 옮기는 것이라 switch_window 처럼 확대를 푼다.
         self.zoomed_pane = None;
         self.win_tab_reveal(self.active_window);
-        // spawn_session_pane sets pty_layout to a fresh single-pane tree,
-        // inserts the PTY into the shared map, and points ws.active_pane at it.
-        if let Err(e) = self.spawn_session_pane() {
-            eprintln!("[window] new window pane spawn failed: {e:#}");
-        }
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+    }
+
+    pub(super) fn new_mirror_window(&mut self, pane: &str) -> usize {
+        // A mirror must not pay for a local shell/ConPTY only to discard it immediately.
+        self.prepare_new_window();
+        self.pty_layout = Some(kasa_pty::PtyLayout::single(pane));
+        let mut ws = self.ws.lock().unwrap();
+        ws.panes.entry(pane.to_owned()).or_default();
+        ws.active_pane = Some(pane.to_owned());
+        self.active_window
     }
     /// Switch the visible window to `idx` within the current session: park the
     /// visible window's layout, swap the target's in. `pty`/`ws` are shared

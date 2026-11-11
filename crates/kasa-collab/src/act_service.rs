@@ -174,8 +174,10 @@ fn remote(machine: &str, op: &str, params: &Value) -> Result<Value> {
             // 원본 앱은 칸 세우기·옮기기·닫기에 GUI 답을 20초까지 기다린다.
             let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none()).build()?;
-            let token = crate::env::env().auth_token(&base);
-            request_remote(&client, &base, token.as_deref(), &machine, &op, &body).await
+            let host = crate::env::env();
+            let token = host.auth_token(&base);
+            let routed = host.route_base(&base);
+            request_remote(&client, &routed, token.as_deref(), &machine, &op, &body).await
         })
     }).join().map_err(|_| anyhow::anyhow!("remote act worker failed; check the pane before retrying"))?
 }

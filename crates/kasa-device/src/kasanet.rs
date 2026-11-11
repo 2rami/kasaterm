@@ -197,8 +197,8 @@ pub fn info() -> Option<Value> {
 /// 평문 HTTP 로 받은 id 를 믿으면 같은 망의 누구든 허용 목록에 들어올 수 있다.
 fn loopback(base: &str) -> Option<SocketAddr> {
     let rest = base.trim().trim_end_matches('/').strip_prefix("http://")?;
-    let hostport = rest.split('/').next()?;
-    let (host, port) = hostport.rsplit_once(':')?;
+    // A TCP route cannot preserve a proxy path prefix when it falls back to the original endpoint.
+    let (host, port) = rest.rsplit_once(':')?;
     let port: u16 = port.parse().ok()?;
     match host {
         "127.0.0.1" | "localhost" => Some(SocketAddr::from(([127, 0, 0, 1], port))),
@@ -454,5 +454,7 @@ mod tests {
         assert_eq!(loopback("http://10.1.2.3:8765"), None);
         assert_eq!(loopback("https://127.0.0.1:8765"), None);
         assert_eq!(loopback("http://127.0.0.1"), None);
+        assert_eq!(loopback("http://127.0.0.1:8765/m/peer"), None);
+        assert_eq!(loopback("http://localhost:8765/prefix/?token=fixture"), None);
     }
 }
