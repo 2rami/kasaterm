@@ -32,6 +32,7 @@ pub mod inline_results;
 pub mod inline_media;
 pub mod inline_outputs;
 pub mod backend;
+pub mod app_control;
 pub mod agent_choice;
 pub mod board;
 pub mod claude_trust;

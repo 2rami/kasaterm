@@ -1081,6 +1081,10 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
                 return;
             }
+            UserEvent::AppControl(event) => {
+                self.app_control_event(event);
+                return;
+            }
             UserEvent::SocketRestartFacts(reply) => {
                 let _ = reply.send(self.restart_facts());
                 return;
@@ -7825,6 +7829,8 @@ impl ApplicationHandler<UserEvent> for App {
         // without a click. KASATERM_AUTORESTORE=restore|fresh. No-op unless a
         // prompt is actually up, so it never fires on a normal (no saved state)
         // launch.
+        if self.tick_control_exit() { event_loop.exit(); return; }
+        self.tick_control_restore();
         if self.restore_prompt.is_some() {
             match std::env::var("KASATERM_AUTORESTORE").as_deref() {
                 Ok("restore") => {
@@ -8260,6 +8266,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .then(|| self.session_saved_at + crate::SESSION_AUTOSAVE_PERIOD)
                 .into_iter()
                 .chain(autosave_due)
+                .chain(self.control_exit.as_ref().map(|exit| exit.at))
                 // 툴팁 지연도 "조용해진 직후"가 중요한 만기다 — 커서가 멎어 있는
                 // 동안은 이 만기 말고 루프를 깨울 것이 없다.
                 .chain(

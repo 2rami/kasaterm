@@ -2184,6 +2184,17 @@ impl Backend for PtyBackend {
         Ok(serde_json::to_value(view)?)
     }
 
+    fn app_control(&self, request: &kasa_socket::app_control::Request) -> Result<serde_json::Value> {
+        request.validate()?;
+        if let Some(base) = restart_remote(request.machine_id.as_deref())? {
+            let result = kasa_remote::remote::remote_post_json(&base, "/app/control", &serde_json::to_value(request)?)?;
+            anyhow::ensure!(result["machine_id"].as_str() == request.machine_id.as_deref(), "target identity changed");
+            anyhow::ensure!(result["ok"] != false, "{}", result["error"].as_str().unwrap_or("app action failed"));
+            return Ok(result);
+        }
+        crate::app_control::request(&self.proxy, request)
+    }
+
     fn where_map(&self) -> Result<serde_json::Value> {
         use serde_json::json;
         // ws 를 잠그기 전에 — 안에서 다시 잠근다.
@@ -5055,25 +5066,26 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
 /// 아니면 완전한 새 파일만 남는다. rename 전 `sync_all` 은 정전 대비 —
 /// 데이터가 아직 캐시에만 있는 채로 이름만 바뀌면 빈 파일이 정본이 된다.
 pub fn write_session_state(state: &serde_json::Value) {
+    let _ = write_session_state_checked(state);
+}
+
+pub(crate) fn write_session_state_checked(state: &serde_json::Value) -> anyhow::Result<()> {
     use std::io::Write;
-    let Some(path) = session_file_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("json.tmp");
-    let Ok(mut f) = std::fs::File::create(&tmp) else {
-        return;
-    };
-    if f.write_all(state.to_string().as_bytes()).is_err() || f.sync_all().is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return;
-    }
-    drop(f);
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = session_file_path().ok_or_else(|| anyhow::anyhow!("session path unavailable"))?;
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), seq));
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(state.to_string().as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    result
 }
 
 /// Read the restore state written by `write_session_state`. `None` when the

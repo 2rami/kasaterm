@@ -33,7 +33,7 @@ fn inode(_meta: &std::fs::Metadata) -> u64 {
 }
 
 /// 굽기가 도는 중인가 — dist 를 쓰는 도중에 끄면 자기설치가 반쯤 쓴 번들을 볼 수 있다.
-fn baking() -> bool {
+pub(crate) fn baking() -> bool {
     crate::proc::command("/bin/ps")
         .args(["-Axww", "-o", "command="])
         .output()
@@ -49,6 +49,10 @@ fn pet_alive() -> Option<bool> {
 
 impl App {
     pub(crate) fn restart_facts(&self) -> Facts {
+        self.restart_facts_with_baking(baking())
+    }
+
+    pub(crate) fn restart_facts_with_baking(&self, baking: bool) -> Facts {
         let now = kasa_socket::board::now_ms();
         let exe = std::env::current_exe().ok();
         let binary = exe.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|meta| BinaryId {
@@ -99,7 +103,7 @@ impl App {
             running_exe: exe.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             binary,
             install_pending,
-            baking: baking(),
+            baking,
             busy,
             dirty_editors: self.dirty_docs(&PendingClose::Window).len() as u32,
             restorable_sessions: restorable,
@@ -123,10 +127,14 @@ pub(crate) fn mark_restart_booted() {
     let (Ok(dir), Ok(machine)) = (kasa_socket::app_restart::jobs_dir(), kasa_collab::board_service::local_id()) else {
         return;
     };
+    crate::app_control::prepare_restore_fixture(&dir, &machine);
     if let Some(job) = kasa_socket::app_restart::mark_booted(
         &dir, &machine, std::process::id(), &kasa_device::machines::build_id(), kasa_socket::board::now_ms(),
     ) {
         eprintln!("[app-restart] booted for job {job}");
+        if let Ok(status) = kasa_socket::app_restart::job_status(&dir, &job) {
+            if status.job.restore { crate::app_control::booted(job, status.job.restore_panes); }
+        }
     }
 }
 
@@ -268,6 +276,8 @@ mod tests {
     fn request(plan: &Plan, approval_id: &str, facts: &Facts, authority: &str) -> JobRequest {
         JobRequest {
             job: Job {
+                restore: false,
+                restore_panes: 0,
                 schema: SCHEMA.into(),
                 job_id: job_id(&plan.hash, &facts.machine_id),
                 plan_hash: plan.hash.clone(),

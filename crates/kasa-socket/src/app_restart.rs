@@ -556,6 +556,10 @@ impl JobState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
+    #[serde(default)]
+    pub restore: bool,
+    #[serde(default)]
+    pub restore_panes: u32,
     pub schema: String,
     pub job_id: String,
     pub plan_hash: String,
@@ -737,15 +741,19 @@ pub fn helper_script(spec: &HelperSpec) -> Result<String> {
     Ok(format!(
         r#"ev() {{ printf '%s %s %s\n' "$(/bin/date +%s)" "$1" "$2" >> {events}; }}
 running() {{ /bin/ps -Axww -o pid=,command= | /usr/bin/awk -v exe={exe} -v skip="$1" '{{ cmd = $0; sub(/^ *[0-9]+ /, "", cmd); if (index(cmd, exe) == 1 && $1 != skip) {{ print $1; exit }} }}'; }}
+cancelled() {{ /usr/bin/grep -Eq '^[0-9]+ (failed|cancelled) ' {events}; }}
 ev helper_started "pid $$"
 i=0
 while /bin/kill -0 {pid} 2>/dev/null; do
+  cancelled && exit 0
   i=$((i+1)); [ "$i" -gt {exit_ticks} ] && {{ ev failed "app did not exit in time; not forcing"; exit 1; }}
   /bin/sleep 0.2
 done
+cancelled && exit 0
 ev exited ""
 other=$(running {pid})
 [ -n "$other" ] && {{ ev failed "another instance is already running (pid $other); not launching a second"; exit 1; }}
+cancelled && exit 0
 ev relaunching ""
 {launch} || {{ ev failed "launch command failed"; exit 1; }}
 j=0
@@ -790,12 +798,15 @@ pub fn helper_powershell(spec: &HelperSpec) -> Result<String> {
         r#"$ErrorActionPreference = 'Continue'
 function ev($state, $note) {{ [IO.File]::AppendAllText({events}, "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $state $note`n") }}
 function running($skip) {{ Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne $skip -and $_.Path -and $_.Path -ieq {exe} }} | Select-Object -First 1 -ExpandProperty Id }}
+function cancelled {{ [bool](Get-Content -LiteralPath {events} -ErrorAction SilentlyContinue | Select-String '^[0-9]+ (failed|cancelled) ') }}
 ev 'helper_started' "pid $PID"
 try {{ $old = [Diagnostics.Process]::GetProcessById({pid}) }} catch {{ $old = $null }}
 if ($old -and -not $old.WaitForExit({exit_ms})) {{ ev 'failed' 'app did not exit in time; not forcing'; exit 1 }}
+if (cancelled) {{ exit 0 }}
 ev 'exited' ''
 $other = running {pid}
 if ($other) {{ ev 'failed' "another instance is already running (pid $other); not launching a second"; exit 1 }}
+if (cancelled) {{ exit 0 }}
 ev 'relaunching' ''
 try {{ & {program} {args} }} catch {{ ev 'failed' 'launch command failed'; exit 1 }}
 $j = 0
@@ -973,6 +984,8 @@ fn run_one(
         return fail(None, "계획 뒤 대상이 바뀌었다(pid·바이너리·자기설치 예정 중 하나) — 다시 계획해야 한다".into());
     }
     let job = Job {
+        restore: false,
+        restore_panes: 0,
         schema: SCHEMA.into(),
         job_id: job_id(&plan.hash, id),
         plan_hash: plan.hash.clone(),
@@ -1226,7 +1239,7 @@ mod tests {
     fn request_for(plan: &Plan, id: &str, pid: u32) -> JobRequest {
         let f = facts(id, pid);
         JobRequest {
-            job: Job { schema: SCHEMA.into(), job_id: job_id(&plan.hash, id), plan_hash: plan.hash.clone(), machine_id: id.into(), target_hash: target_hash(&f), old_pid: pid, created_at_ms: NOW },
+            job: Job { restore: false, restore_panes: 0, schema: SCHEMA.into(), job_id: job_id(&plan.hash, id), plan_hash: plan.hash.clone(), machine_id: id.into(), target_hash: target_hash(&f), old_pid: pid, created_at_ms: NOW },
             approval_id: AP.into(),
             authority: "ctl".into(),
         }
@@ -1392,7 +1405,7 @@ mod tests {
         let mut mac_facts = facts_of[mac].clone();
         mac_facts.observed_at_ms = at;
         let req = JobRequest {
-            job: Job { schema: SCHEMA.into(), job_id: job_id(&plan.hash, mac), plan_hash: plan.hash.clone(), machine_id: mac.into(), target_hash: target_hash(&mac_facts), old_pid: mac_facts.pid, created_at_ms: at },
+            job: Job { restore: false, restore_panes: 0, schema: SCHEMA.into(), job_id: job_id(&plan.hash, mac), plan_hash: plan.hash.clone(), machine_id: mac.into(), target_hash: target_hash(&mac_facts), old_pid: mac_facts.pid, created_at_ms: at },
             approval_id: used.id.clone(),
             authority: controller.into(),
         };
@@ -1409,7 +1422,7 @@ mod tests {
     }
 
     fn job(id: &str) -> Job {
-        Job { schema: SCHEMA.into(), job_id: job_id("plan", id), plan_hash: "plan".into(), machine_id: id.into(), target_hash: "t".into(), old_pid: 41, created_at_ms: NOW }
+        Job { restore: false, restore_panes: 0, schema: SCHEMA.into(), job_id: job_id("plan", id), plan_hash: "plan".into(), machine_id: id.into(), target_hash: "t".into(), old_pid: 41, created_at_ms: NOW }
     }
 
     #[test]
@@ -1525,6 +1538,26 @@ mod tests {
         assert_ne!(new_pid, j.old_pid);
         let _ = std::process::Command::new("/bin/kill").arg(new_pid.to_string()).status();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_exit_does_not_relaunch_when_the_user_quits_later() {
+        let dir = tmp("helper-cancelled");
+        let exe = fake_app(&dir);
+        let mut old = start_fake(&exe);
+        let j = Job { old_pid:old.id(), ..job("m") };
+        create_job(&dir,&j).unwrap();
+        let marker = dir.join("unexpected-launch");
+        let launch=vec!["/usr/bin/touch".into(),marker.display().to_string()];
+        spawn_helper(&spec(&dir,&exe,old.id(),launch,5)).unwrap();
+        assert_eq!(wait_state(&dir,&j.job_id,JobState::HelperStarted,5),JobState::HelperStarted);
+        advance(&dir,&j.job_id,JobState::Failed,"view changed; cancelled").unwrap();
+        old.kill().unwrap(); let _=old.wait();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(!marker.exists());
+        assert_eq!(job_status(&dir,&j.job_id).unwrap().state,JobState::Failed);
+        let _=std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

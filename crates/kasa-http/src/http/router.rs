@@ -159,6 +159,7 @@ pub fn spawn_http_server_opts(
                     .merge(sessions::routes(&backend))
                     .merge(collab::routes(&backend))
                     .merge(host::routes(&backend))
+                    .merge(app_control::routes(&backend))
                     .merge(shared_rooms::routes(&backend))
                     .merge(migrate::routes(&backend))
                     .merge(pane_read::routes(&backend))

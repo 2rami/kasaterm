@@ -280,3 +280,7 @@ KASATERM_AUTOSIDEBAR_DIR=/tmp/<네이름>/sidebar-shots
 - 단계별 PNG와 JSON의 실제 폭·행/지도/별도창 사각형·스크롤 범위·`hits_within_width`·`clicked_expected_pane`을 확인한다. PNG는 위 규칙대로 줄여 한 장씩 본다.
 - `KASATERM_AUTOSIDEBAR_EXTRAS=1`이면 검증 앱의 마지막 칸 하나를 보관하고 둘을 별도창으로 떼어 같은 사이클을 반복한다. 실제 사용자 세션에는 적용하지 않는다.
 - 학생·원격 기기는 표시용 픽스처다. 실기기 연결 성공이나 원격 실행 성공의 증거로 쓰지 않는다.
+
+## 에이전트 앱 조작
+
+`CARGO_TARGET_DIR=<검증 타깃> python3 app/kasaterm/src/app_control/tests/native.py`는 사용자 데이터와 다른 세션·설정·기기·소켓에서 셸 두 개만 복원한다. CLI inspect/restore, HTTP 대상 불일치, 오래된 revision, 자동 복원과 저장본 누락 실패, 개발 실행의 재시작 거부를 검사하고 전후 창 캡처를 남긴다. `KASATERM_TEST_CONTROL_RESTORE`는 기존 `KASATERM_SERVER_RESTORE_TEST`의 완전 격리 조건에서만 부팅된 작업을 만든다. 설치본 종료·LaunchServices 재기동은 이 리그에서 하지 않으며 기존 `app_restart`의 가짜 앱 도우미 시험으로 검사한다.

@@ -234,6 +234,12 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Ok(windows) => Response::success(id, json!({ "windows": windows })),
             Err(e) => backend_err(id, e),
         },
+        "app.control" => match serde_json::from_value::<crate::app_control::Request>(req.params.clone()) {
+            Ok(request) => match request.validate().and_then(|_| backend.app_control(&request)) {
+                Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+            },
+            Err(error) => backend_err(id, error.into()),
+        },
         "window.where" => match backend.where_map() {
             Ok(map) => Response::success(id, map),
             Err(e) => backend_err(id, e),
@@ -392,6 +398,7 @@ fn system_capabilities(id: Value) -> Response {
                 "window.layout",
                 "window.list",
                 "window.where",
+                "app.control",
                 "collab.bind_transcript",
                 "collab.transcript",
                 "collab.activity",

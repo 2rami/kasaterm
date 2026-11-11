@@ -1,5 +1,7 @@
 # 카사텀 앱 재시작 — 등록된 어느 기기에서든, 한 대씩
 
+에이전트의 소유자 앱 조작·복원·화면 조회는 [app-controls.md](app-controls.md)를 따른다. 아래 승인 서버 계약은 배포 조율용 창구에 적용된다.
+
 대상은 **카사텀 앱 하나**다. OS 재부팅·나쵸 봇·request-journal·펫 재시작이 아니다. 대상 기기는 명부의
 안정 `machine_id` 로만 고른다(호스트·명령을 받지 않는다). 핵심 코드는 `crates/kasa-socket/src/app_restart.rs`,
 앱이 사실을 재는 곳은 `app/kasaterm/src/app_restart.rs`.

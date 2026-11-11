@@ -121,6 +121,7 @@ mod mirror_focus_probe;
 mod character_assignment;
 mod agent_identity;
 mod app_restart;
+mod app_control;
 mod app_update;
 mod restore_progress;
 mod restore_picker;
@@ -4015,6 +4016,7 @@ enum UserEvent {
     /// (윈도우 수, 활성 idx, [(name, cwd)] 라벨). arona-ui 좌측 방 네비가 쓴다.
     SocketQuerySessions(std::sync::mpsc::Sender<(usize, usize, Vec<(String, String)>)>),
     /// 재시작 계획용 사실 — 바쁜 학생·미저장 편집기는 GUI 스레드만 안다.
+    AppControl(app_control::Event),
     SocketRestartFacts(std::sync::mpsc::Sender<kasa_socket::app_restart::Facts>),
     /// 승인된 재시작 작업을 받아 도우미를 띄웠다 — 이제 정상 종료(`exiting`)로 끈다.
     RestartExit(String),
@@ -5182,6 +5184,7 @@ struct App {
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
+    control_exit: Option<app_control::PendingExit>,
     /// Pending GPU self-captures `(deadline, png path)` from KASATERM_AUTOCAPTURE_MS
     /// (콤마로 여러 시각 지정 가능 — 애니메이션 프레임 비교 검증용).
     /// `about_to_wait` arms `gpu.capture_next` once a deadline passes so the
@@ -6227,6 +6230,7 @@ impl App {
             migrate_queue: Vec::new(),
             migrate_frozen: None,
             transfer_launches: Vec::new(),
+            control_exit: None,
             autoquit_at: None,
             pending_capture: Vec::new(),
             pending_capture_reply: Vec::new(),

@@ -30,6 +30,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 mod browser;
+mod app_control;
 mod session_move;
 mod summon_place;
 use summon_place::SummonSpot;
@@ -144,8 +145,8 @@ fn run() -> Result<Option<Response>> {
     };
     if API_TARGET.get().is_some() {
         if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status"|"peek"|"capture"|"where"
-            |"tell:raw"|"tell:key"|"transcript"|"focus"|"move"|"rename-window"|"window-new"|"attach") {
-            return Err(anyhow!("--api supports board, board-watch, activity, tell, peek, capture, where, transcript and address forms of tell --raw/--key, focus, move, rename-window, window-new --on, attach"));
+            |"tell:raw"|"tell:key"|"transcript"|"focus"|"move"|"rename-window"|"window-new"|"attach"|"app") {
+            return Err(anyhow!("--api supports app, board, board-watch, activity, tell, peek, capture, where, transcript and address forms of tell --raw/--key, focus, move, rename-window, window-new --on, attach"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
@@ -157,6 +158,7 @@ fn run() -> Result<Option<Response>> {
             roundtrip(&resolve_socket_path()?, request)
         }).map(Some);
     }
+    if cmd == "app" { return app_control::run(&args); }
     resolve_pane_targets(&cmd, &mut args)?;
     if matches!(cmd.as_str(), "window-new" | "attach" | "summon") {
         resolve_machine_flag(&mut args, if cmd == "summon" { "--machine" } else { "--on" })?;
@@ -2034,6 +2036,7 @@ fn print_help() {
         ]),
         ("앱", &[
             "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
+            "app inspect|screen|restore|restart|update-check …  현재 화면·복원·재시작 (guide panes)",
             "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
         ]),
         ("훅 (claude 훅이 부른다)", &[
@@ -3666,6 +3669,7 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
     use std::io::Read;
     use std::process::{Command,Stdio};
     let (path,post) = match request.method.as_str() {
+        "app.control" => ("/app/control",true),
         "collab.snapshot" => ("/collab/board",false),
         "collab.changes" => ("/collab/changes",false),
         "collab.inspect" => ("/collab/inspect",false),
@@ -3681,7 +3685,7 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
     let quote = |text: &str| format!("\"{}\"",text.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n").replace('\r',"\\r"));
     // Credentials and message bodies travel through stdin, never process arguments.
     // 칸 세우기·옮기기·닫기는 원본 앱이 GUI 답을 20초까지 기다린다.
-    let max_time = if request.method == "collab.act" { 30 } else { 5 };
+    let max_time = if matches!(request.method.as_str(), "collab.act" | "app.control") { 30 } else { 5 };
     let mut config = format!("silent\nshow-error\nfail-with-body\nmax-time = {max_time}\nconnect-timeout = 3\nmax-filesize = 4194304\nproto = \"=http,https\"\nmax-redirs = 0\nurl = {}\n",quote(&format!("{}{path}",target.base)));
     if let Some(path) = &target.token_file {
         let mut token = String::new();

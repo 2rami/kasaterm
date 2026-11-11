@@ -1617,6 +1617,10 @@ pub trait Backend: Send + Sync {
 
     /// 방마다 칸(행·열·사각형)과 칸 안의 탭(터미널·웹·문서·이미지, 학생·제목·주소·경로) — `where` 가 읽는다.
     /// 칸이 열리고 닫힐 때마다 격자가 다시 짜이고 웹·문서는 탭으로 열리므로, 번호만으로는 어디 있는지 모른다.
+    fn app_control(&self, _request: &crate::app_control::Request) -> Result<serde_json::Value> {
+        anyhow::bail!("app controls unsupported by this backend")
+    }
+
     fn where_map(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({ "rooms": [] }))
     }

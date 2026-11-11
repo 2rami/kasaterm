@@ -36,6 +36,12 @@ impl State {
         }
     }
 
+    pub(crate) fn control_view(&self) -> Value {
+        json!({"selected_count":self.count(), "items": self.plan.rows.iter().enumerate().map(|(i, row)|
+            json!({"index":i, "title":row.title, "kind":row.kind, "character":row.character,
+                "selected":self.selected[i], "group":row.group})).collect::<Vec<_>>()})
+    }
+
     fn count(&self) -> usize {
         self.selected.iter().filter(|v| **v).count()
     }

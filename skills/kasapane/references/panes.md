@@ -20,3 +20,10 @@
 
 자주 쓰는 조회: `where --json`, `peek <대상> N`, `activity <대상> N`, `capture --window /절대/경로.png`.
 만들기·이름·배치·닫기 옵션은 `kasaterm-cli --help`에서 필요한 명령만 찾는다. 화면 검증을 위해 앱을 띄운다면 먼저 `guide develop`의 격리 규칙을 따른다.
+
+## 앱 화면과 재시작
+
+- `app inspect [--machine 안정ID]`로 현재 방·칸·OS 초점·복원 대기/진행·재시작 영향을 읽는다. 배경 앱의 선택을 사용자가 실제 보는 화면으로 단정하지 않는다.
+- 실제 모니터는 `app screen [--machine 안정ID] [--display 번호] --out /새/경로.jpg`로 한 장 본다. 화면 기록 권한은 OS가 관리한다.
+- 복원은 `app restore … --expect <방금 inspect의 revision>`, 재시작과 자동 복원은 `app restart … --expect <revision>`이다. 사용자가 허락한 시점에 실행하고 이미 받은 승인을 되묻지 않는다. 바쁜 작업 중단을 허락받았으면 `--interrupt`를 붙인다. 미저장 문서는 이 옵션으로도 넘지 못한다.
+- 재시작 응답의 job_id를 `app-restart status`로 확인하고 새 앱의 `app inspect`로 복원 완료를 확인한다. 대화 복원과 중단된 작업의 자동 재개는 다르다. `app update-check … --expect <revision>`은 표준 업데이트 창만 연다. 상세 계약은 `docs/app-controls.md`다.

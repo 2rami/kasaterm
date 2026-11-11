@@ -171,3 +171,5 @@
 - `gpu/curves.rs` — Git 그래프의 배율별 안티앨리어싱 곡선 마스크와 재사용. 기존 아이콘의 클립·그리기 순서를 따른다.
 
 - HTTP 대화 기록 CPU·배포 최적화: [http-performance.md](http-performance.md), `crates/kasa-http/examples/transcript_http_bench.rs`·`scripts/bench-transcript-http.py`.
+
+- `app_control.rs` · `kasa-socket::app_control` · `kasa-http::http::app_control` — 에이전트의 현재 앱 상태·실제 모니터 캡처·선택 복원·재시작과 자동 복원. 관측 revision을 GUI에서 다시 확인하고 기존 재기동 도우미를 공유한다. 계약은 [app-controls.md](app-controls.md).
