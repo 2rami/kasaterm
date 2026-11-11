@@ -140,10 +140,49 @@ fn install_sigint() {
     }
     #[cfg(windows)]
     // SAFETY: 처리기는 원자 카운터 하나만 올린다. Ctrl-C 만 먹고 닫기·로그오프는 기본 처리로 넘긴다.
+    // 「Ctrl-C 무시」는 자식에게 물려지고 켜져 있으면 처리기까지 오지 않는다. 새 프로세스 그룹으로
+    // 띄운 부모가 물려줬을 수 있으니 먼저 끈다.
     unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
         windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console_ctrl), 1);
     }
 }
+
+/// Windows 에선 학생의 도구 셸이 어댑터와 다른 콘솔에서 돌아, 칸이 닫히거나 runner 가 강제로
+/// 끝나면(소멸자가 돌지 않는다) 도는 명령이 고아로 남는다. runner 를 kill-on-close 잡에 넣으면
+/// 이후 자손이 모두 잡을 물려받고, runner 가 어떻게 끝나든 핸들이 닫히며 함께 끝난다.
+/// 유닉스는 어댑터가 stdin EOF 로 끝나며 도구의 프로세스 그룹까지 거둬 들여 따로 할 일이 없다.
+#[cfg(windows)]
+fn bind_descendants_to_runner() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: 우리가 만든 잡 핸들과 현재 프로세스 의사 핸들만 넘긴다. 정보 구조체는 스택에 산다.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut limit: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limit).cast(),
+            u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap_or(u32::MAX),
+        );
+        if set == 0 || AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
+            CloseHandle(job);
+        }
+        // 성공하면 핸들을 닫지 않는다 — 프로세스가 끝날 때 닫히는 순간이 자손을 거두는 신호다.
+    }
+}
+
+#[cfg(not(windows))]
+fn bind_descendants_to_runner() {}
 
 fn take_interrupt() -> bool {
     INTERRUPTS.swap(0, Ordering::Relaxed) > 0
@@ -366,6 +405,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let mut screen = Screen { styled: std::io::stdout().is_terminal(), at_line_start: true };
     screen.note(&format!("starting {} adapter…", args.harness.name()));
 
+    bind_descendants_to_runner();
     let (conn, events) = Connection::spawn(&spec, &args.cwd)?;
     let info = conn
         .initialize()

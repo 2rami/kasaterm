@@ -91,8 +91,14 @@ codex 어댑터는 ChatGPT 로그인을 지원한다고 명시한다.
 ## Windows
 
 runner 는 어댑터를 새 콘솔 프로세스 그룹으로 띄워(`CREATE_NEW_PROCESS_GROUP`) 칸의 Ctrl-C 가 어댑터를 죽이지 않게 하고,
-자기는 콘솔 제어 처리기로 Ctrl-C 를 받아 턴만 멈춘다. 끌 때는 `taskkill /T` 로 npx.cmd → node → 하네스 트리를 함께
-끈다. MSI 는 `kasa-acp.exe` 를 `kasaterm.exe` 옆에 둔다(`app/kasaterm/wix/main.wxs`, `scripts/windows/package.ps1`).
+자기는 콘솔 제어 처리기로 Ctrl-C 를 받아 턴만 멈춘다. 「Ctrl-C 무시」 속성은 자식에게 물려지고 켜져 있으면 처리기까지
+오지 않으므로, 처리기를 달기 전에 먼저 끈다(SSH 세션에서 띄운 runner 가 실제로 물려받아 Ctrl-C 를 못 받았다).
+
+runner 는 시작할 때 자기를 kill-on-close 잡 객체에 넣는다. 학생의 도구 셸은 어댑터와 다른 콘솔에서 돌아, 칸이 닫히거나
+runner 가 강제로 끝나면(소멸자가 돌지 않는다) 돌던 명령이 고아로 남았다 — 실측: 턴 도중 runner 를 끄면 어댑터·하네스·MCP
+는 stdin EOF 로 끝나는데 `Start-Sleep` 셸만 남았다. 잡에 넣은 뒤엔 모든 자손이 함께 끝난다. 유닉스는 같은 시험에서 도구
+셸까지 정리돼 따로 하지 않는다. 정상 종료 때는 `taskkill /T` 로 npx.cmd → node → 하네스 트리를 끈다.
+MSI 는 `kasa-acp.exe` 를 `kasaterm.exe` 옆에 둔다(`app/kasaterm/wix/main.wxs`, `scripts/windows/package.ps1`).
 
 ## 칸 안의 runner — `kasa-acp run`
 
