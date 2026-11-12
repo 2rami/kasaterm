@@ -1141,6 +1141,10 @@ impl App {
                 cmd.pop();
                 cmd.push_str(" --dangerously-skip-permissions\r");
             }
+            match crate::account_launch::restore_command(rec,&kasa_collab::board_service::local_id().unwrap_or_default(),&cmd) {
+                Ok(pinned)=>cmd=pinned,
+                Err(_)=>{self.set_toast("저장된 계정을 확인할 수 없어 대화를 자동 실행하지 않았어요".into()); return Some(id);}
+            }
             let cmd = windows_shell_line(&session, None, &cmd).unwrap_or(cmd);
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));

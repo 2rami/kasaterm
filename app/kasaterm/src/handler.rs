@@ -458,8 +458,16 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketNewWindow => self.new_window(),
+            UserEvent::AgentAccountsSnapshot(reply) => {
+                let _=reply.send(crate::account_launch::fixture_values().unwrap_or_else(||self.settings_values_json()));
+            }
+            UserEvent::AgentPlan(reply) => {
+                let choice = kasa_socket::agent_choice::choose(&crate::account_launch::fixture_values().unwrap_or_else(||self.settings_values_json()))
+                    .map_err(str::to_string).and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string()));
+                let _ = reply.send(choice);
+            }
             UserEvent::AgentChoice(reply) => {
-                let choice = kasa_socket::agent_choice::choose(&self.settings_values_json())
+                let choice = kasa_socket::agent_choice::choose_current(&self.settings_values_json())
                     .map_err(str::to_string).and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()));
                 let _ = reply.send(choice);
             }

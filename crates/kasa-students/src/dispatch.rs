@@ -133,7 +133,7 @@ pub struct DispatchConfig {
     /// 수확하고, 지시는 칸 입력 대신 inbox 파일로 준다.
     #[serde(default = "d_runtime")]
     pub runtime: String,
-    /// 새 학생의 하네스(`claude`·`codex`). 빈 값은 현재 계정 사용량으로 선택한다.
+    /// 새 학생의 하네스(`claude`·`codex`). 빈 값은 로그인된 전체 계정의 사용량으로 선택한다.
     #[serde(default)]
     pub acp_harness: String,
     /// runtime=acp 의 세션 모드(claude `acceptEdits`·`bypassPermissions`, codex `agent`·`agent-full-access`).
@@ -825,26 +825,40 @@ fn launch_config(cfg: &DispatchConfig, task: &QueueTask, choose: impl FnOnce() -
     Ok(selected)
 }
 
+fn account_launch_config(backend: &dyn Backend, cfg: &DispatchConfig, task: &QueueTask) -> Result<(DispatchConfig, Option<kasa_socket::agent_choice::Selection>)> {
+    let mut account=None;
+    let selected=launch_config(cfg,task,|| {
+        let choice=backend.agent_plan(None)?;
+        let plan=kasa_socket::agent_choice::selection(&choice).map_err(anyhow::Error::msg)?;
+        let provider=plan.provider.clone();
+        account=Some(plan);
+        Ok(provider)
+    })?;
+    Ok((selected,account))
+}
+
 fn spawn_with_brief(
     backend: &Arc<dyn Backend>,
     cfg: &DispatchConfig,
     character: &str,
     task: &QueueTask,
 ) -> Result<String> {
-    let selected = launch_config(cfg, task, || {
-        let choice = backend.agent_choice(None)?;
-        choice["provider"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("하네스 선택 응답이 비어 있어요"))
-    })?;
+    let (selected, account) = account_launch_config(backend.as_ref(), cfg, task)?;
     let cfg = &selected;
     let surface = backend.spawn_student(character)?;
     if surface.is_empty() {
         anyhow::bail!("no pane created");
     }
-    boot_tui(backend, cfg, &surface, task)?;
+    boot_tui(backend, cfg, &surface, task, account.as_ref())?;
     Ok(surface)
 }
 
-fn boot_tui(backend: &Arc<dyn Backend>, cfg: &DispatchConfig, surface: &str, task: &QueueTask) -> Result<()> {
+fn boot_tui(backend: &Arc<dyn Backend>, cfg: &DispatchConfig, surface: &str, task: &QueueTask, account: Option<&kasa_socket::agent_choice::Selection>) -> Result<()> {
+    if let Some(account)=account {
+        let (command,brief)=boot_parts(cfg,task);
+        let command=account.command(&command).map_err(anyhow::Error::msg)?;
+        return launch_in_pane(backend,surface,&command,&task.cwd,Some(&brief));
+    }
     use kasa_socket::shell_line::ShellKind;
     match backend.pane_shell(surface).as_deref().and_then(ShellKind::from_process_name) {
         // cmd·PowerShell 칸은 POSIX 줄의 작은따옴표·`&&` 를 못 읽는다 — 그 셸 문법은 `surface.launch` 가 짓는다.
@@ -890,10 +904,7 @@ fn spawn_acp(
     task: &QueueTask,
     now: f64,
 ) -> Result<(String, String)> {
-    let selected = launch_config(cfg, task, || {
-        let choice = backend.agent_choice(None)?;
-        choice["provider"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("하네스 선택 응답이 비어 있어요"))
-    })?;
+    let (selected, account) = account_launch_config(backend.as_ref(), cfg, task)?;
     let cfg = &selected;
     let surface = backend.spawn_student(character)?;
     if surface.is_empty() {
@@ -905,6 +916,7 @@ fn spawn_acp(
     };
     kasa_acp::runner::write_inbox(&inbox, &task.brief)?;
     let command = acp_boot_command(cfg, task, &kasa_acp_program(), &status, &inbox);
+    let command = match account {Some(account)=>account.command(&command).map_err(anyhow::Error::msg)?,None=>command};
     launch_in_pane(backend, &surface, &command, &task.cwd, None)?;
     Ok((surface, key))
 }
@@ -1362,6 +1374,17 @@ mod tests {
     ) -> Vec<Decision> {
         let live: HashSet<String> = board.iter().map(|r| r.surface_id.clone()).collect();
         decide(q, board, &live, state, cfg, streak, &HashMap::new(), now, cursor)
+    }
+
+    #[test]
+    fn selected_account_wraps_both_launch_forms() {
+        let task=task("quota","pending",&[],&[]);
+        let cfg=DispatchConfig {acp_harness:"codex".into(),..Default::default()};
+        let account=kasa_socket::agent_choice::Selection {provider:"codex".into(),account_id:"spare".into()};
+        let tui=account.command(&boot_parts(&cfg,&task).0).unwrap();
+        assert_eq!(tui,"kasaterm-cli account-run codex 'spare' -- codex");
+        let acp=acp_boot_command(&cfg,&task,"kasa-acp",std::path::Path::new("state"),std::path::Path::new("inbox"));
+        assert!(account.command(&acp).unwrap().starts_with("kasaterm-cli account-run codex 'spare' -- 'kasa-acp' run --harness codex"));
     }
 
     #[test]

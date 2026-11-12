@@ -1391,8 +1391,18 @@ pub trait Backend: Send + Sync {
 
     fn agent_choice(&self, machine: Option<&str>) -> Result<serde_json::Value> {
         anyhow::ensure!(machine.is_none_or(str::is_empty), "이 호스트는 원격 사용량 선택을 지원하지 않아요");
+        crate::agent_choice::choose_current(&self.settings_values()).map_err(anyhow::Error::msg)
+            .and_then(|choice| serde_json::to_value(choice).map_err(Into::into))
+    }
+
+    fn agent_plan(&self, machine: Option<&str>) -> Result<serde_json::Value> {
+        anyhow::ensure!(machine.is_none_or(str::is_empty), "remote account planning unsupported");
         crate::agent_choice::choose(&self.settings_values()).map_err(anyhow::Error::msg)
             .and_then(|choice| serde_json::to_value(choice).map_err(Into::into))
+    }
+
+    fn agent_account_env(&self, _surface: &str, _pid: u32, _selected: &crate::agent_choice::Selection, _resuming: bool) -> Result<serde_json::Value> {
+        anyhow::bail!("account-aware launch unsupported; update the destination app")
     }
 
     /// 테마 캐릭터 생성 화면이 2초마다 묻는 상태 — 엔진 목록·선택값·마스킹한 키·

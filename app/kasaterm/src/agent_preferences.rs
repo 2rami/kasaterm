@@ -127,7 +127,7 @@ fn fresh_defaults_patch(settings: &Value) -> Vec<(&'static str, Value)> {
 }
 
 pub(crate) fn values() -> Value {
-    json!({
+    json!({"account_selection":1,
         "preferred_agent": preferred_agent(),
         "permissions": {"claude": permission("claude"), "codex": permission("codex")},
         "statusline": {"customized": statusline_customized(), "model": statusline_enabled("model"), "usage": statusline_enabled("usage"), "cwd": statusline_enabled("cwd")},

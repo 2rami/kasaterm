@@ -14,7 +14,7 @@ fn choose<'a>(requested: Option<&'a str>, resumed: Option<&'a str>, seated: Opti
 }
 
 /// `pid` 가 `ancestor` 아래에서 뜬 프로세스인가.
-fn descends_from(table: &[(u32, u32, String)], pid: u32, ancestor: u32) -> bool {
+pub(crate) fn descends_from(table: &[(u32, u32, String)], pid: u32, ancestor: u32) -> bool {
     let mut cur = pid;
     for _ in 0..64 {
         let Some(&(_, parent, _)) = table.iter().find(|(p, _, _)| *p == cur) else { return false };

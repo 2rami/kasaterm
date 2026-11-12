@@ -297,6 +297,11 @@ fn agent_pid_by_argv(
         best
     };
     let (child_pid, child) = newest_child(shell_pid)?;
+    if is_account_runner(child) {
+        let (pid,name)=account_process(table,child_pid)?;
+        return is_argv_probe_launcher(name).then(||agent_spec_by_argv_cached(pid)).flatten().map(|spec|(AgentKind::Other(spec),pid));
+    }
+
     // 런처가 아니면 이름이 이미 진실을 말한 것이다 — 그걸로 못 잡았으면
     // 하네스가 아니라는 뜻이므로 ps 를 부를 이유가 없다.
     if !is_argv_probe_launcher(child) {
@@ -379,6 +384,11 @@ fn agent_pid_in_table(
         best
     };
     let (child_pid, child) = newest_child(shell_pid)?;
+    if is_account_runner(child) {
+        let (pid,name)=account_process(table,child_pid)?;
+        return AgentKind::from_comm(name).map(|kind|(kind,pid));
+    }
+
     if let Some(kind) = AgentKind::from_comm(child) {
         return Some((kind, child_pid));
     }
@@ -388,6 +398,26 @@ fn agent_pid_in_table(
         }
     }
     None
+}
+
+fn is_account_runner(name: &str) -> bool {
+    let name=name.rsplit(['/', '\\']).next().unwrap_or(name);
+    name.eq_ignore_ascii_case("kasaterm-cli") || name.eq_ignore_ascii_case("kasaterm-cli.exe")
+}
+
+// Windows cannot exec away the account runner; follow its wrappers without descending into a live harness's tools.
+fn account_process(table: &[(u32,u32,String)], start: u32) -> Option<(u32,&str)> {
+    let row=table.iter().find(|(pid,_,_)|*pid==start)?;
+    let mut current=(row.0,row.2.as_str());
+    for _ in 0..12 {
+        if AgentKind::from_comm(current.1).is_some() {break;}
+        let base=current.1.rsplit(['/', '\\']).next().unwrap_or(current.1).to_ascii_lowercase();
+        let base=base.strip_suffix(".exe").unwrap_or(&base);
+        if !matches!(base,"kasaterm-cli"|"cmd"|"pwsh"|"powershell"|"sh"|"bash"|"zsh"|"fish"|"node"|"npm"|"npx"|"bun"|"deno"|"env") {break;}
+        let Some(next)=table.iter().filter(|(_,parent,_)|*parent==current.0).max_by_key(|(pid,_,_)|*pid) else {break};
+        current=(next.0,next.2.as_str());
+    }
+    Some(current)
 }
 
 /// 에이전트를 감싸 띄우는 것들 — 이게 직속 자식이면 진짜 프로세스는 한 세대 아래다.
@@ -422,6 +452,9 @@ pub(super) fn descend_launchers(
     table: &[(u32, u32, String)],
     start: Option<(u32, String)>,
 ) -> Option<(u32, String)> {
+    if let Some((pid,name))=&start {
+        if is_account_runner(name) {return account_process(table,*pid).map(|(pid,name)|(pid,name.to_owned())).or(start);}
+    }
     let mut cur = start;
     for _ in 0..3 {
         let (cpid, cname) = cur.clone()?;
@@ -855,6 +888,16 @@ mod launcher_descend_tests {
 
     fn row(pid: u32, ppid: u32, name: &str) -> (u32, u32, String) {
         (pid, ppid, name.to_string())
+    }
+
+    #[test]
+    fn account_runner_tracks_the_harness_through_windows_wrappers() {
+        let t=vec![row(10,1,"cmd"),row(20,10,"kasaterm-cli"),row(21,20,"cmd.exe"),
+            row(22,21,"bash.exe"),row(23,22,"sh.exe"),row(24,23,"node"),row(25,24,"codex"),row(26,25,"claude")];
+        assert_eq!(super::agent_pid_in_table(&t,10),Some((super::AgentKind::Codex,25)));
+        assert_eq!(descend_launchers(&t,Some((20,"kasaterm-cli".into()))),Some((25,"codex".into())));
+        let preparing=vec![row(10,1,"cmd"),row(20,10,"kasaterm-cli")];
+        assert_eq!(super::agent_pid_in_table(&preparing,10),None);
     }
 
     #[test]

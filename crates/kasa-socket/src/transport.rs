@@ -93,10 +93,17 @@ mod imp {
             (rc == 0 && pid > 0).then_some(pid as u32)
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         pub fn peer_pid(&self) -> Option<u32> {
-            None
+            use std::os::unix::io::AsRawFd;
+            let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut len=std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            let rc=unsafe {libc::getsockopt(self.inner.as_raw_fd(),libc::SOL_SOCKET,libc::SO_PEERCRED,(&mut cred as *mut libc::ucred).cast(),&mut len)};
+            (rc==0 && cred.pid>0).then_some(cred.pid as u32)
         }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        pub fn peer_pid(&self) -> Option<u32> { None }
     }
 
     impl std::io::Read for LocalStream {
@@ -433,7 +440,7 @@ mod imp {
 
 pub use imp::{Incoming, LocalListener, LocalStream};
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os="macos", target_os="linux")))]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -441,7 +448,9 @@ mod tests {
     /// 받은 연결의 상대 pid 는 붙은 프로세스다 — 같은 시험 프로세스가 양쪽이라 제 pid 여야 한다.
     #[test]
     fn an_accepted_pipe_knows_its_client_pid() {
-        let path = std::path::PathBuf::from(format!("kasa-peer-{}.sock", std::process::id()));
+        let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("kasa-peer-{}-{stamp}.sock",std::process::id()));
+        #[cfg(unix)] let cleanup=path.clone();
         let listener = LocalListener::bind(&path).unwrap();
         let client = std::thread::spawn(move || {
             let mut stream = LocalStream::connect(&path).unwrap();
@@ -455,6 +464,9 @@ mod tests {
         accepted.read_exact(&mut got).unwrap();
         accepted.write_all(&got).unwrap();
         client.join().unwrap();
+        drop(accepted);
+        drop(listener);
+        #[cfg(unix)] std::fs::remove_file(cleanup).unwrap();
     }
 }
 

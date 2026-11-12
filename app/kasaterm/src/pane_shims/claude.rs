@@ -162,6 +162,14 @@ pub(crate) fn claude_account_export_line(dir: Option<&std::path::Path>) -> Strin
     )
 }
 
+fn automatic_account_backend_guard() -> &'static str {
+    r#"if [ -n "$PERSONA_OK" ] && [ -n "$KASATERM_AUTO_ACCOUNT_PROVIDER" ] && [ -n "$KASATERM_BACKEND" ] && [ "$KASATERM_BACKEND" != native ]; then
+  echo 'kasaterm: 자동 계정 선택과 지정된 API 실행 통로를 함께 쓸 수 없어요. 실행 통로를 명시해 주세요.' >&2
+  exit 1
+fi
+"#
+}
+
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
 /// PATH (munder-difflin pattern). Collab hooks ride in via `claude --settings`
 /// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
@@ -430,6 +438,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
 && [ -z \"$KASATERM_VIA_BACKEND\" ] && command -v \"$KASATERM_BACKEND\" >/dev/null 2>&1 \
 && { KASATERM_VIA_BACKEND=1; export KASATERM_VIA_BACKEND; exec \"$KASATERM_BACKEND\" claude \"$@\"; }\n"
         .to_string();
+    let backend_line = format!("{}{backend_line}", automatic_account_backend_guard());
     // 학생별 모델(`KASATERM_MODEL`)이 설정창 전역 노브를 이긴다(2026-08-24 지시:
     // 학생 한 명당 모델 선택). 전역이 비어 있어도 줄을 굽는다 — 학생 값이 들어올
     // 자리를 남겨야 하고, 둘 다 비면 셸에서 걸러져 `--model` 이 안 붙는다.
@@ -810,6 +819,19 @@ mod tests {
     /// would not be inert — Claude Code treats a defined-but-empty
     /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` as an explicit "use the unsuffixed
     /// store", which is a different code path from leaving it unset.
+    #[test]
+    fn automatic_account_cannot_silently_route_through_a_different_api_backend() {
+        let shell=crate::pane_shims::tests::test_posix_shell().unwrap();
+        let script=format!("{}printf launched", automatic_account_backend_guard());
+        for (auto,allowed) in [("claude",false),("",true)] {
+            let output=std::process::Command::new(&shell).args(["-c",&script])
+                .env("PERSONA_OK","1").env("KASATERM_AUTO_ACCOUNT_PROVIDER",auto).env("KASATERM_BACKEND","custom-wrapper")
+                .output().unwrap();
+            assert_eq!(output.status.success(),allowed);
+            assert_eq!(String::from_utf8_lossy(&output.stdout).contains("launched"),allowed);
+        }
+    }
+
     #[test]
     fn no_claude_account_emits_no_shim_line() {
         assert_eq!(claude_account_export_line(None), "");

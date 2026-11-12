@@ -69,6 +69,7 @@ mod session_transfer;
 mod drag_transfer;
 mod settings;
 mod agent_preferences;
+mod account_launch;
 mod account_brand;
 mod settings_media;
 mod settings_room;
@@ -3581,6 +3582,7 @@ struct Workspace {
     pane_launch_character: HashMap<String, String>,
     /// Explicit selection waiting for its first harness launch, not a shell identity.
     pane_next_character: HashMap<String, String>,
+    auto_accounts: HashMap<String, account_launch::Binding>,
     /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
     /// (사용자: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
@@ -3626,6 +3628,7 @@ impl Default for Workspace {
             pane_character: HashMap::new(),
             pane_launch_character: HashMap::new(),
             pane_next_character: HashMap::new(),
+            auto_accounts: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
             undocked: std::collections::HashSet::new(),
@@ -3987,6 +3990,8 @@ enum UserEvent {
     /// 새 창(사이드바에 하나 더). 창 간 이동(`surface.move`)의 목적지를 만들 때 쓴다 —
     /// 만들 수단이 없으면 그 기능 자체를 CLI 에서 못 쓴다.
     SocketNewWindow,
+    AgentAccountsSnapshot(std::sync::mpsc::Sender<serde_json::Value>),
+    AgentPlan(std::sync::mpsc::Sender<Result<serde_json::Value, String>>),
     AgentChoice(std::sync::mpsc::Sender<Result<serde_json::Value, String>>),
     SocketFocus(String),
     /// tmux control-mode가 보고한 실제 활성 pane 변경. 백엔드 스레드가 App 의

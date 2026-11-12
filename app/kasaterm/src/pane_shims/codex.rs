@@ -35,6 +35,8 @@ fi
 # 관리 서브커맨드는 순정으로 통과 — 우리 홈을 씌우면 `login` 이 엉뚱한 자리를 보고
 # `plugin add` 는 다음 실행에 사라진다(config 를 매번 새로 복사하므로). 대화 계열
 # (서브커맨드 없음=TUI · exec · resume · fork · review)만 우리 홈을 쓴다.
+KT_HOME_ONLY=
+if [ "${1-}" = --kasaterm-home ]; then KT_HOME_ONLY=1; shift; fi
 SUB=""; for a in "$@"; do case "$a" in -*) ;; *) SUB="$a"; break ;; esac; done
 case "$SUB" in
   login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
@@ -105,7 +107,11 @@ kt_stop() {
 # 그대로 써져 로그인이 안 갈린다(실측: doctor 가 stored ChatGPT tokens=true). 매 실행
 # 다시 걸어 pane 안에서 생긴 드리프트는 다음 실행에 원상복구된다.
 # 계정 슬롯을 골랐으면 auth.json 은 아래에서 슬롯 것만 건다 — 기본 계정 것을 잠깐이라도 걸지 않는다.
-ACCT=$(cat "$SELF_DIR/codex-account" 2>/dev/null)
+if [ -n "${KASATERM_CODEX_ACCOUNT_DIR+x}" ]; then
+  ACCT="$KASATERM_CODEX_ACCOUNT_DIR"
+else
+  ACCT=$(cat "$SELF_DIR/codex-account" 2>/dev/null)
+fi
 for e in "$SRC"/* "$SRC"/.[!.]*; do
   [ -e "$e" ] || continue
   n=${e##*/}
@@ -131,6 +137,10 @@ if [ -n "$ACCT" ]; then
   fi
 fi
 cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
+if [ -n "$KT_HOME_ONLY" ]; then
+  if [ -n "$KT_WIN" ]; then cygpath -w "$CH" || exit 1; else printf '%s\n' "$CH"; fi
+  exit 0
+fi
 # 디렉터리 신뢰 프롬프트 선해결 — 무인 스폰이 여기서 멈춘다("Do you trust the contents
 # of this directory?", 실측). 같은 경로를 또 쓰면 TOML 중복 테이블이라 config 가 통째로
 # 안 읽히므로 없을 때만 붙인다.
@@ -427,6 +437,7 @@ mod tests {
     enum HomeCase {
         /// 고른 계정 슬롯에 로그인돼 있다.
         Slot,
+        Override,
         /// 슬롯 없음 — 기본 로그인(~/.codex/auth.json).
         Default,
         /// 고른 슬롯이 아직 로그인 전이고 기본 로그인은 있다(첫 로그인).
@@ -446,7 +457,7 @@ mod tests {
     fn codex_pane_home_writes_reach_the_original_auth_and_sessions() {
         let sh = crate::pane_shims::tests::test_posix_shell().expect("셰임을 돌릴 POSIX sh");
         for mode in ["native", "msys"] {
-            for case in [HomeCase::Slot, HomeCase::Default, HomeCase::EmptySlot, HomeCase::Migration] {
+            for case in [HomeCase::Slot, HomeCase::Override, HomeCase::Default, HomeCase::EmptySlot, HomeCase::Migration] {
                 // 옛 사본은 복사 ln 에서만 생긴다 — 유닉스 래퍼는 그 자리를 다루지 않는다.
                 if case == HomeCase::Migration && mode == "native" && !cfg!(windows) {
                     continue;
@@ -478,7 +489,7 @@ mod tests {
         install_codex_shim(&shim);
         // 설치가 앱 설정의 활성 슬롯을 적으므로 그 뒤에 덮는다. 앱이 쓰는 그대로 — Windows 면 역슬래시 경로다.
         let slot = case != HomeCase::Default;
-        let account = if slot { slot_dir.display().to_string() } else { String::new() };
+        let account = if case == HomeCase::Override { src.display().to_string() } else if slot { slot_dir.display().to_string() } else { String::new() };
         std::fs::write(shim.join("codex-account"), account).unwrap();
         let body = std::fs::read_to_string(shim.join("codex")).unwrap();
         let from = body.find("mkdir -p \"$CH\" 2>/dev/null || exec").unwrap();
@@ -535,6 +546,8 @@ mod tests {
                 cmd.env("EMULATE_COPY", "1");
             }
             // pid 가 재사용돼 이 셸의 pid 로 된 백업이 이미 있는 자리 — 같은 셸에서 `$$` 로 미리 만든다.
+            cmd.env_remove("KASATERM_CODEX_ACCOUNT_DIR");
+            if case == HomeCase::Override { cmd.env("KASATERM_CODEX_ACCOUNT_DIR",fwd(&slot_dir)); }
             if case == HomeCase::Migration && write == "refreshed-1" {
                 cmd.env("PRESEED", "1");
             }

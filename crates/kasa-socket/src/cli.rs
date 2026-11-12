@@ -30,6 +30,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 mod browser;
+mod account_run;
 mod app_control;
 mod session_move;
 mod summon_place;
@@ -145,7 +146,7 @@ fn run() -> Result<Option<Response>> {
     };
     if API_TARGET.get().is_some() {
         if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status"|"peek"|"capture"|"where"
-            |"tell:raw"|"tell:key"|"transcript"|"focus"|"move"|"rename-window"|"window-new"|"attach"|"app") {
+            |"tell:raw"|"tell:key"|"transcript"|"focus"|"move"|"rename-window"|"window-new"|"attach"|"app"|"agent-plan") {
             return Err(anyhow!("--api supports app, board, board-watch, activity, tell, peek, capture, where, transcript and address forms of tell --raw/--key, focus, move, rename-window, window-new --on, attach"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
@@ -159,6 +160,14 @@ fn run() -> Result<Option<Response>> {
         }).map(Some);
     }
     if cmd == "app" { return app_control::run(&args); }
+    if cmd == "agent-plan" && API_TARGET.get().is_some() {
+        let response=roundtrip(&resolve_socket_path()?,&Request{id:json!("agent-plan"),method:"agent.plan".into(),params:json!({})})?;
+        if let Some(machine)=flag_value(&args,"--machine").filter(|_|response.ok) {
+            if response.result.as_ref().and_then(|v|v["machine_id"].as_str())!=Some(machine.as_str()) {return Err(anyhow!("account plan target identity changed"));}
+        }
+        return Ok(Some(response));
+    }
+    if cmd == "account-run" { return account_run::run(&args); }
     resolve_pane_targets(&cmd, &mut args)?;
     if matches!(cmd.as_str(), "window-new" | "attach" | "summon") {
         resolve_machine_flag(&mut args, if cmd == "summon" { "--machine" } else { "--on" })?;
@@ -918,6 +927,7 @@ const SUMMON_BOOT_SECS: u64 = 90;
 /// 부팅 명령이 새 codex 대화를 여는가(`codex`·`시로코 codex`·`codex --model x`). 이어 열기·한 번 실행 같은
 /// 서브커맨드는 첫 입력 인자를 받는 자리가 아니라 빼고, 따옴표로 지시를 이미 준 명령에는 덧붙이지 않는다.
 fn boots_fresh_codex(boot: &str) -> bool {
+    let boot=if boot.starts_with("kasaterm-cli account-run ") { boot.split_once(" -- ").map_or(boot,|(_,command)|command) } else { boot };
     let words: Vec<&str> = boot.split_whitespace().collect();
     let Some(at) = words.iter().position(|w| *w == "codex") else { return false };
     !words[at + 1..].iter().any(|w| w.starts_with(['\'', '"'])
@@ -936,19 +946,28 @@ fn tell_target_booting(why: &str) -> bool {
 /// 입력창으로 들어온다(`spawned_by`). 창은 실패해도 닫지 않는다 — 사람이 무엇이 멎었는지 봐야 한다.
 fn auto_summon_boot(socket_path: &str, requested: &str, machine: Option<&str>) -> Result<String> {
     if !requested.is_empty() && requested != "auto" { return Ok(requested.to_string()); }
-    let reply = roundtrip(socket_path, &Request { id: json!("agent-choice"), method: "agent.choice".into(), params: json!({"machine": machine}) })?;
+    let reply = roundtrip(socket_path, &Request { id: json!("agent-choice"), method: "agent.plan".into(), params: json!({"machine": machine}) })?;
     if !reply.ok { return Err(anyhow!("자동 하네스 선택 실패: {} — 앱을 업데이트하거나 --cmd로 지정해 주세요", reply.error.map(|e| e.message).unwrap_or_default())); }
     let choice = reply.result.unwrap_or_default();
     let provider = choice["provider"].as_str().filter(|p| matches!(*p, "claude" | "codex"))
         .ok_or_else(|| anyhow!("알 수 없는 자동 하네스 선택 응답"))?;
-    eprintln!("[summon] {provider} · {}", choice["used_percent"].as_f64()
-        .map(|v| format!("현재 계정 사용량 {v:.0}%")).unwrap_or_else(|| "사용량 미확인, 기본 선택".into()));
-    Ok(provider.to_string())
+    let selected=crate::agent_choice::selection(&choice).map_err(anyhow::Error::msg)?;
+    let label: String=choice["account_label"].as_str().unwrap_or(&selected.account_id).chars().filter(|c|!c.is_control()).take(80).collect();
+    eprintln!("[summon] {provider} / {label} ({}) · {}", selected.account_id, choice["used_percent"].as_f64()
+        .map(|v| format!("선택 계정 사용량 {v:.0}%")).unwrap_or_else(|| "사용량 미확인, 기본 선택".into()));
+    selected.command(provider).map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]
 mod auto_summon_tests {
     use super::*;
+
+    #[test]
+    fn pinned_codex_launch_still_receives_its_first_prompt() {
+        assert!(boots_fresh_codex("kasaterm-cli account-run codex '' -- codex"));
+        assert!(!boots_fresh_codex("kasaterm-cli account-run codex 'spare' -- codex resume old"));
+        assert!(!boots_fresh_codex("kasaterm-cli account-run claude 'spare' -- claude"));
+    }
 
     #[test]
     fn explicit_launches_and_resumes_never_query_or_change_provider() {
@@ -1260,7 +1279,7 @@ fn send_boot(socket_path: &str, to: &BootTo, cwd: Option<&str>, boot: &str, prom
         refused = (!sent.ok).then(|| sent.error.map(|e| e.message).unwrap_or_default());
         match &refused {
             None => return Ok(()),
-            Some(why) if !legacy && (why.contains("unknown method") || why.contains("unknown act")) => legacy = true,
+            Some(why) if !legacy && !boot.starts_with("kasaterm-cli account-run ") && (why.contains("unknown method") || why.contains("unknown act")) => legacy = true,
             Some(_) => attempt += 1,
         }
     }
@@ -2036,6 +2055,7 @@ fn print_help() {
         ]),
         ("앱", &[
             "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
+            "agent-plan [--machine ID]                전체 로그인 계정의 사용량으로 새 세션 계획 조회",
             "app inspect|screen|restore|restart|update-check …  현재 화면·복원·재시작 (guide panes)",
             "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
         ]),
@@ -2932,6 +2952,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "outcome": outcome, "summary": summary }),
             )
         }
+        "agent-plan" => ("agent.plan",json!({"machine":flag_value(args,"--machine")})),
         "where" => match args.iter().position(|a| a == "--machine-id") {
             Some(pos) => {
                 let machine = args.get(pos + 1).ok_or_else(|| anyhow!("--machine-id needs a machine id"))?;
@@ -3669,6 +3690,7 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
     use std::io::Read;
     use std::process::{Command,Stdio};
     let (path,post) = match request.method.as_str() {
+        "agent.plan" => ("/agents/plan",false),
         "app.control" => ("/app/control",true),
         "collab.snapshot" => ("/collab/board",false),
         "collab.changes" => ("/collab/changes",false),

@@ -67,6 +67,18 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.launch" => surface_launch(backend, id, &req.params),
+        "agent.plan" => match backend.agent_plan(req.params.get("machine").and_then(Value::as_str)) {
+            Ok(choice) => Response::success(id, choice), Err(error) => backend_err(id, error),
+        },
+        "agent.account_env" => {
+            let selection = req.params.get("selection").cloned().and_then(|v|serde_json::from_value::<crate::agent_choice::Selection>(v).ok());
+            match (req.params["surface_id"].as_str(),req.params["pid"].as_u64().and_then(|p|u32::try_from(p).ok()),selection) {
+                (Some(surface),Some(pid),Some(selection)) => match backend.agent_account_env(surface,pid,&selection,req.params["resuming"]==true) {
+                    Ok(value) => Response::success(id,value), Err(error) => backend_err(id,error),
+                },
+                _ => param_err(id,"account launch requires surface_id, pid and selection"),
+            }
+        },
         "agent.choice" => match backend.agent_choice(req.params.get("machine").and_then(Value::as_str)) {
             Ok(choice) => Response::success(id, choice),
             Err(error) => backend_err(id, error),
@@ -363,7 +375,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
-                "surface.launch", "agent.choice",
+                "surface.launch", "agent.choice", "agent.plan", "agent.account_env",
                 "surface.server",
                 "surface.paste",
                 "surface.send_key",

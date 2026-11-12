@@ -1025,8 +1025,10 @@ mod kitty_graphics_tests {
     }
 
     fn owned_png() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("kasa-wire-tty-graphics-protocol-{}-{n}.png", std::process::id()));
+        let path = std::env::temp_dir().join(format!("kasa-wire-tty-graphics-protocol-{}-{n}-{seq}.png", std::process::id()));
         std::fs::write(&path, png(8, 8)).unwrap();
         path
     }

@@ -2887,8 +2887,38 @@ impl Backend for PtyBackend {
         let base = kasa_device::machines::find_route(&format!("~{machine}"))
             .ok_or_else(|| anyhow::anyhow!("대상 기기를 명부에서 찾지 못했어요"))?.base;
         let values = kasa_remote::remote::remote_get_json_bounded(&base, "/settings/values", 2 * 1024 * 1024)?;
-        let choice = kasa_socket::agent_choice::choose(&values).map_err(anyhow::Error::msg)?;
+        let choice = kasa_socket::agent_choice::choose_current(&values).map_err(anyhow::Error::msg)?;
         Ok(serde_json::to_value(choice)?)
+    }
+
+    fn agent_plan(&self, machine: Option<&str>) -> Result<serde_json::Value> {
+        if let Some(base) = restart_remote(machine)? {
+            let plan = kasa_remote::remote::remote_get_json_bounded(&base, "/agents/plan", 64*1024)?;
+            return crate::account_launch::remote_plan(&plan,machine);
+        }
+        let (tx,rx)=std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::AgentPlan(tx)).map_err(|_|anyhow::anyhow!("app event loop gone"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(8)).map_err(|_|anyhow::anyhow!("account plan timed out"))?.map_err(anyhow::Error::msg)
+    }
+
+    fn agent_account_env(&self, surface: &str, pid: u32, selected: &kasa_socket::agent_choice::Selection, resuming: bool) -> Result<serde_json::Value> {
+        anyhow::ensure!(kasa_socket::server::peer_pid()==Some(pid),"account launch process identity does not match the socket client");
+        selected.validate().map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!kasa_remote::remote::is_remote_pane(surface),"account launch must run on the source machine");
+        let binding=crate::account_launch::Binding::new(pid,selected.clone())?;
+        let pane=kasa_pty::lookup_session(surface).ok_or_else(||anyhow::anyhow!("launch pane disappeared"))?;
+        anyhow::ensure!(crate::account_launch::hosts(&pane,pid),"account launcher is not in this pane");
+        let (tx,rx)=std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::AgentAccountsSnapshot(tx)).map_err(|_|anyhow::anyhow!("app event loop gone"))?;
+        let values=rx.recv_timeout(std::time::Duration::from_secs(8)).map_err(|_|anyhow::anyhow!("account snapshot timed out"))?;
+        let env=crate::account_launch::resolve(&values,selected,resuming)?;
+        anyhow::ensure!(crate::account_launch::hosts(&pane,pid),"launch pane changed");
+        anyhow::ensure!(kasa_pty::lookup_session(surface).is_some_and(|current|Arc::ptr_eq(&pane,&current)),"launch pane was replaced");
+        let mut ws=self.ws.lock().unwrap();
+        anyhow::ensure!(ws.outer_for_pty(surface).is_some(),"launch pane closed");
+        anyhow::ensure!(binding.live(),"account launch process ended or changed");
+        ws.auto_accounts.insert(surface.into(),binding);
+        Ok(serde_json::json!({"provider":selected.provider,"account_id":selected.account_id,"env":env}))
     }
 
     /// 값은 GUI 스레드의 `App` 이 정본이라(UI 배율처럼 파일에 없는 값이 있다) 여기서

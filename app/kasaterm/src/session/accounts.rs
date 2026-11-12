@@ -445,6 +445,7 @@ impl App {
             }
             return Err(swapped);
         }
+        self.forget_auto_accounts("claude");
         // /status 가 보여주는 신원 캐시(~/.claude.json oauthAccount)도 함께 갈아
         // 끼운다 — 저장소만 바꾸면 과금은 새 계정인데 /status 는 옛말을 한다.
         // AlreadyActive 여도 부른다: 캐시는 다른 로그인(밖에서 친 claude /login)이
@@ -538,6 +539,7 @@ impl App {
         let to_label = self.codex_account_display(to);
         let target_dir = self.codex_target_dir(to);
         self.set_codex_account = to.to_string();
+        self.forget_auto_accounts("codex");
         // 이 파일은 Codex shim이 다음 실행 때 읽는다. 먼저 저장해야 restart가 새 슬롯의
         // auth.json 링크를 만들고, 옛 슬롯으로 다시 뜨지 않는다.
         self.settings_save();

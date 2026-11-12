@@ -26,6 +26,12 @@ struct Fleet {
 struct FakeBackend(Mutex<Fleet>);
 
 impl Backend for FakeBackend {
+    fn settings_values(&self) -> serde_json::Value {
+        serde_json::json!({"agents":{"preferred_agent":"claude"},"claude":{"account":"fixture",
+            "accounts":[{"id":"fixture","logged_in":true,"usage":10,"usage_state":"ready","usage_stale":false}],
+            "codex_accounts":[]}})
+    }
+
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         Ok(vec![WorkspaceInfo { id: "w".into(), name: "w".into() }])
     }

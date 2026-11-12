@@ -173,3 +173,5 @@
 - HTTP 대화 기록 CPU·배포 최적화: [http-performance.md](http-performance.md), `crates/kasa-http/examples/transcript_http_bench.rs`·`scripts/bench-transcript-http.py`.
 
 - `app_control.rs` · `kasa-socket::app_control` · `kasa-http::http::app_control` — 에이전트의 현재 앱 상태·실제 모니터 캡처·선택 복원·재시작과 자동 복원. 관측 revision을 GUI에서 다시 확인하고 기존 재기동 도우미를 공유한다. 계약은 [app-controls.md](app-controls.md).
+
+- `kasa-socket::agent_choice`·`cli/account_run.rs`·앱 `account_launch.rs` — 새 세션의 전체 Claude/Codex 계정 선택과 자식별 인증 경로, 같은 기기 복원 시 계정 유지. TUI·ACP·원격 소환이 같은 계획을 사용한다. 계약은 [agent-auto-accounts.md](agent-auto-accounts.md).

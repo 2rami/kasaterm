@@ -32,6 +32,7 @@ mod phone_browser;
 mod machine_proxy;
 mod screen;
 mod app_control;
+mod agent_plan;
 mod socket;
 mod term_assets;
 mod term_api;

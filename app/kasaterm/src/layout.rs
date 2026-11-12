@@ -1974,6 +1974,7 @@ impl App {
             ws.pane_character.remove(pid);
             ws.pane_launch_character.remove(pid);
             ws.pane_next_character.remove(pid);
+            ws.auto_accounts.remove(pid);
         }
         // Preview tab removal is immediate via the ws.panes mutation below;
         // with no daemon there's no broadcast to resurrect it.

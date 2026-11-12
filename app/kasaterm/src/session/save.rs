@@ -385,6 +385,12 @@ impl App {
         agent_cfg: &HashMap<String, (String, String)>,
     ) {
         append_surface_record_metadata(obj, surface);
+        if let Some(binding)=ws.auto_accounts.get(surface).filter(|binding|binding.live()) {
+            if let Ok(machine)=kasa_collab::board_service::local_id() {
+                obj.insert("auto_account".into(),serde_json::to_value(&binding.selection).unwrap_or_default());
+                obj.insert("auto_account_machine".into(),serde_json::json!(machine));
+            }
+        }
         if let Some(shell) = pty.get(surface).and_then(|session| session.shell_program()) {
             obj.insert("shell".into(), serde_json::json!(shell));
         }
