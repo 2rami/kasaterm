@@ -458,6 +458,14 @@ class SelfSignedCiTests(Fixture):
 
 
 class LocalRunTests(Fixture):
+    def test_build_parallelism_is_bounded_and_an_explicit_budget_is_preserved(self):
+        backend = self.backend(self.plan(), "dry")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CARGO_BUILD_JOBS", None)
+            self.assertEqual(backend.env()["CARGO_BUILD_JOBS"], "1")
+            os.environ["CARGO_BUILD_JOBS"] = "2"
+            self.assertEqual(backend.env()["CARGO_BUILD_JOBS"], "2")
+
     def test_dry_run_reads_only_and_writes_nothing(self):
         plan = self.plan()
         b = self.backend(plan, "dry")
@@ -475,7 +483,12 @@ class LocalRunTests(Fixture):
         state = self.go(self.plan())
         self.assertEqual([state["stages"][s]["status"] for s in fp.STAGES], ["done", "done", "dry", "dry", "dry", "done"])
         cargo = [c for c in self.calls if c[0] == "cargo" and c[1] == "test"]
-        self.assertEqual([c[3] for c in cargo], ["kasaterm", "kasa-http", "kasa-socket"])
+        self.assertEqual(len(cargo), 1, "all checks use the same dependency feature graph")
+        packages = [cargo[0][i + 1] for i, arg in enumerate(cargo[0]) if arg == "-p"]
+        self.assertEqual(packages, ["kasaterm", "kasa-http", "kasa-identity", "kasa-characters", "kasa-wire",
+            "kasa-device", "kasa-backend", "kasa-students", "kasa-remote", "kasa-browser", "kasa-git",
+            "kasa-gateway", "kasa-serve", "kasa-socket"])
+        self.assertEqual(cargo[0][-1], "--release", "no test-name filter may narrow coverage")
         self.assertIn("built", state["stages"]["build"]["detail"])
         self.assertEqual(state["stages"]["build"]["detail"]["identity"]["team"], "ABCDE12345")
         self.assertEqual((self.remote_tags(), self.remote("refs/heads/main")), (["v0.2.0"], self.head))
@@ -497,8 +510,8 @@ class LocalRunTests(Fixture):
 
     def test_failing_or_timed_out_tests_stop_with_the_command(self):
         plan = self.plan()
-        self.cargo_answer = lambda argv: Result(101, "", "test foo ... FAILED") if argv[3] == "kasa-http" else Result(0)
-        with self.assertRaisesRegex(Refused, "검사 실패: cargo test -p kasa-http"):
+        self.cargo_answer = lambda argv: Result(101, "", "test foo ... FAILED") if "kasa-http" in argv else Result(0)
+        with self.assertRaisesRegex(Refused, "검사 실패: cargo test -p kasaterm"):
             self.go(plan)
         _, state = fp.load(plan["plan_id"], self.state)
         self.assertEqual(state["stages"]["verify"]["status"], "failed")
@@ -1871,7 +1884,8 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertNotIn("kasa-files", self.bake, "파일 칸 TUI 는 셸 명령 보기의 빈 화면 트리로 옮기며 뺐다(2026-10-21)")
         self.assertNotIn("kasapet", self.bake, "펫은 카사텀 번들에서 뗐다(2026-10-19)")
         self.assertNotIn("kasa-op", self.bake, "1Password 실행기는 키체인으로 바꾸며 뺐다(2026-10-19)")
-        self.assertIn("--entitlements \"$ROOT/scripts/kasaterm.entitlements\"", self.bake)
+        self.assertIn('APP_ENTITLEMENTS="$ROOT/scripts/kasaterm.entitlements"', self.bake)
+        self.assertIn('APP_SIGN_ARGS+=(--entitlements "$APP_ENTITLEMENTS")', self.bake)
         ent = plistlib.loads((REPO / "scripts/kasaterm.entitlements").read_bytes())
         self.assertEqual(ent, {"com.apple.security.device.audio-input": True, "com.apple.security.automation.apple-events": True})
         self.assertIn("NSMicrophoneUsageDescription", self.bake)

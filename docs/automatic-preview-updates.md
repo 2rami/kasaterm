@@ -10,6 +10,10 @@
    정책이 Windows 를 허가하면 같은 판의 Windows MSI 가 아래 「Windows 덤」으로 뒤따른다.
 4. 완료는 명령 종료 코드가 아니라 `feed` 단계까지 검증된 상태다. CI 대기 중인 작업을 성공으로 보고하지 않는다. 실패·대기는 상태와 원인을 남긴다.
 
+검사는 앱과 기반 크레이트 14개를 한 Cargo 호출에 함께 넣는다. 호출마다 합쳐지는 macOS 의존성 기능이 제품 빌드와
+같도록 유지하며, 각 패키지의 시험을 이름 필터 없이 전부 실행한다. 실패·시간 초과는 그대로 발행을 막는다. 기본 Cargo 일꾼은
+1개로 제한한다. 별도 `CARGO_BUILD_JOBS` 설정이 있으면 그 값을 따르며, 메모리·스왑 여유를 확인한 뒤 늘린다.
+
 ### Windows 덤 — mac 을 기다리게 하지 않는다
 
 preview 태그의 채널 기록(`.github/release-channel.json`)이 `platforms: ["macos","windows"]` 이면 CI 는 Windows 를 그 태그

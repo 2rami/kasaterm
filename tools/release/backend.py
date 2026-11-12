@@ -24,9 +24,13 @@ from tools.release.common import (CHANNEL_MANIFEST, Pending, Refused, channel_ma
                                   feed_item, fetch_feed, sha256_bytes, sha256_file, validate_channel_manifest, version_tuple)
 
 REPO_SLUG = "2rami/kasaterm"
-TESTS = (["cargo", "test", "-p", "kasaterm", "--release"],
-         ["cargo", "test", "-p", "kasa-http", "-p", "kasa-identity", "-p", "kasa-characters", "-p", "kasa-wire", "-p", "kasa-device", "-p", "kasa-backend", "-p", "kasa-students", "-p", "kasa-remote", "-p", "kasa-browser", "-p", "kasa-git", "-p", "kasa-gateway", "-p", "kasa-serve", "--release"],
-         ["cargo", "test", "-p", "kasa-socket", "--release"])
+# Cargo unifies dependency features per invocation; native macOS checks need the product's graph.
+TEST_PACKAGES = (
+    "kasaterm", "kasa-http", "kasa-identity", "kasa-characters", "kasa-wire", "kasa-device",
+    "kasa-backend", "kasa-students", "kasa-remote", "kasa-browser", "kasa-git", "kasa-gateway",
+    "kasa-serve", "kasa-socket",
+)
+TESTS = (["cargo", "test", *[arg for package in TEST_PACKAGES for arg in ("-p", package)], "--release"],)
 PUBLISH_STAGES = ("tag", "release", "feed")
 MAIN_RACE_ATTEMPTS = 5
 # 게시 job 이 남긴 표식 → 그 job 만 다시 돌리면 되는 까닭. feed_publish.main 이 찍는다.
@@ -137,7 +141,8 @@ class RealBackend:
                                env={**deps.git_env(self.tools), **(extra or {})})
 
     def env(self):
-        return {**deps.tool_env(self.tools, ("cargo", "git-lfs", "gh")), "CARGO_TARGET_DIR": str(self.cargo_target)}
+        return {**deps.tool_env(self.tools, ("cargo", "git-lfs", "gh")), "CARGO_TARGET_DIR": str(self.cargo_target),
+                "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "1")}
 
     # ── 원격 상태 ─────────────────────────────────────────────────────────
     def remote_ref(self, ref):
