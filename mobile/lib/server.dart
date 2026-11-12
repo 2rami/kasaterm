@@ -123,6 +123,10 @@ class Pane {
 
   bool get hasRunningSubagents => !closed && subagents.isNotEmpty;
 
+  /// 뒤에서 도는 일이 있나 — 데스크톱 `bg_active` 와 같은 재료(백그라운드 셸·Monitor·서브에이전트 목록은
+  /// 데스크톱 판정이 보는 기록 꼬리·훅·mod 를 합친 것이다).
+  bool get bgActive => !closed && (background.isNotEmpty || subagents.isNotEmpty);
+
   // A recycled %N must not inherit another pane's hidden or selected state.
   String get viewKey => '${surfaceKey?.isNotEmpty == true ? 's' : 'e'}:${jsonEncode([machine ?? '', surfaceKey?.isNotEmpty == true ? surfaceKey : id])}';
 

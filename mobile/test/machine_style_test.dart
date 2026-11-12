@@ -76,6 +76,14 @@ void main() {
     expect(p({'name': ''}).mapTitle, 'kasaterm', reason: '셸은 폴더');
   });
 
+  test('뒤에서 도는 일은 백그라운드 셸·감시와 서브에이전트 — 데스크톱 bg_active 와 같은 재료', () {
+    Pane p(Map<String, Object?> extra) => Pane.fromJson({'id': '%1', 'cwd': '/w', 'name': '아리스', ...extra});
+    expect(p({}).bgActive, isFalse);
+    expect(p({'background': ['Monitor 빌드 감시']}).bgActive, isTrue);
+    expect(p({'subagents': ['코드 찾기']}).bgActive, isTrue);
+    expect(p({'background': ['Monitor 빌드 감시'], 'closed': true}).bgActive, isFalse, reason: '닫힌 칸은 안 돈다');
+  });
+
   test('거울 pane 은 어느 기계의 거울인지 안다', () {
     expect(Pane.fromJson({'id': '%9', 'mirror_of': '나쵸네코'}).mirrorOf, '나쵸네코');
     expect(Pane.fromJson({'id': '%9'}).mirrorOf, isNull);

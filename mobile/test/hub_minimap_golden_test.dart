@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/screens/hub.dart';
 import 'package:kasaterm_mobile/server.dart';
+import 'package:kasaterm_mobile/status_style.dart';
 
 /// 허브가 서버에 묻는 것마다 한 방 세 학생을 답한다 — 미니맵이 방 아래 붙는 모양을 굳힌다.
 http.Response _answer(http.Request req) {
@@ -51,6 +52,8 @@ http.Response _answer(http.Request req) {
         'name': '호시노',
         'title': '✳ 탭 넘김 확인',
         'status': 'idle',
+        // 뒤에서 도는 일만 있다 — 지도 칸·목록 줄이 흐르는 점선을 긋는다.
+        'background': ['Monitor 배포 감시'],
         'window': 0,
         'cwd': '/w',
         'color': '#7cc4ff',
@@ -147,6 +150,12 @@ void main() {
     expect(find.text('권한 묻는 칸'), findsOneWidget);
     expect(find.text('shell'), findsWidgets);
     expect(find.text('호시노'), findsNothing);
+    // 뒤에서 도는 칸은 점선(데스크톱 `Activity::Background`) — 호시노 칸은 제 백그라운드에 더해 뒤 탭의
+    // 아리스가 일하는 중이다. 일하는 중인 칸은 한 바퀴 그대로다.
+    bool dashed(Widget w) => w is CustomPaint && w.foregroundPainter is DashPainter;
+    bool orbit(Widget w) => w is CustomPaint && w.foregroundPainter is OrbitPainter;
+    expect(find.byWidgetPredicate(dashed), findsNWidgets(2), reason: '지도 칸 하나 + 목록 줄 하나');
+    expect(find.byWidgetPredicate(orbit), findsWidgets);
     expect(find.text('아리스'), findsNothing);
     expect(find.text('폰 목록 줄'), findsOneWidget);
     expect(find.text('14분'), findsOneWidget);

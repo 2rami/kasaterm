@@ -1079,6 +1079,10 @@ class _MiniCellState extends State<_MiniCell> {
     final waiting = st?.needsYou ?? false;
     final busy = st?.live ?? false;
     final childrenRunning = p?.hasRunningSubagents ?? false;
+    // 뒤에서 도는 중 — 이 학생의 백그라운드 일이거나, 같은 칸 뒤 탭의 학생이 일하는 중(데스크톱
+    // `bg_tab_busy`). 일하는 중·기다림·서브에이전트 표시가 먼저다.
+    final behind = !busy && !waiting && !childrenRunning &&
+        ((p?.bgActive ?? false) || tabs.any((t) => t != null && t.id != p?.id && t.isBusy));
     // 칸 바탕은 학생색, 테두리·점은 상태색 — 「누구」와 「어떤 상태」를 다른 채널로.
     final edge = childrenRunning ? StatusStyle.success : waiting ? StatusStyle.attention : accent;
     return LayoutBuilder(
@@ -1213,7 +1217,8 @@ class _MiniCellState extends State<_MiniCell> {
         // 작업 중은 학생색 빛 조각이 칸 윤곽을 한 바퀴씩 돈다 — 바닥에 흐르던 막대를 걷었다(2026-10-07).
         // 기다림의 고정 테(상태색)와는 상태가 배타적이라 같이 서지 않는다.
         final cell = OrbitEdge(
-          live: (busy && !waiting) || childrenRunning,
+          live: (busy && !waiting) || childrenRunning || behind,
+          dashed: behind,
           color: childrenRunning ? StatusStyle.success : accent,
           radius: Look.smallCorners,
           child: front,
@@ -1400,8 +1405,10 @@ class _PaneTile extends StatelessWidget {
     // 글은 세션 이름과 도는 시간뿐 — 데스크톱 사이드바 목록 줄과 같다(2026-10-01). 학생 이름은
     // 얼굴이, 상태는 띠와 도는 윤곽이 말한다.
     final time = st.live ? elapsedLabel(pane.busySecs) : null;
+    final behind = !st.live && !st.needsYou && !pane.hasRunningSubagents && pane.bgActive;
     return OrbitEdge(
-      live: st.live || pane.hasRunningSubagents,
+      live: st.live || pane.hasRunningSubagents || behind,
+      dashed: behind,
       color: pane.hasRunningSubagents ? StatusStyle.success : scheme.primary,
       radius: Look.smallCorners,
       child: InkWell(

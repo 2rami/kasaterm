@@ -534,6 +534,10 @@
   칸이 있는 동안의 프레임은 다시 짓지 않고 시간만 넘긴다(bar-only 프레임).
 - 폰: 지도 칸은 그 학생색, 학생 줄은 `accent` 로 돈다(`Look.orbitLap` 2초 · `orbitHead` 2.5 → `orbitTailEnd` 1 ·
   `orbitTail` 0.2). 폰엔 초점이 없어 늘 또렷한 쪽. 동작 줄이기면 돌지 않고 윤곽 전체가 1 굵기 60% 로 서 있는다.
+  뒤에서 도는 중은 같은 색 점선이 흐른다(`OrbitEdge(dashed:)` · `Look.dashThick` 1 · `dashCycle` 6 · `dashDuty` 0.6 ·
+  `dashStep` 2초 · `dashAlpha` `cc` — 배치도 칸 초점 쪽 값). 판정은 `Pane.bgActive`(백그라운드 셸·감시·서브에이전트 목록)와,
+  지도 칸이면 같은 칸 뒤 탭의 일하는 중(`bg_tab_busy`)이다. 일하는 중·기다림·서브에이전트 초록 한 바퀴가 먼저다.
+  동작 줄이기면 멈춘 점선으로 선다.
 
 ### 깜빡임 멈춤 — 방을 보러 오면
 

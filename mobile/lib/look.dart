@@ -176,6 +176,14 @@ abstract final class Look {
   static const orbitTailEnd = 1.0;
   static const orbitTail = 0.2;
 
+  /// 「뒤에서 도는 중」 흐르는 점선 — 데스크톱 배치도 칸·목록 줄의 초점 쪽 `Dash` 와 같은 값(폰엔 초점이 없다).
+  /// 굵기, 선+틈 한 칸 길이(둘레를 가장 가까운 정수 칸으로 나눈다), 그중 선 몫, 한 칸 흐르는 시간, 진하기.
+  static const dashThick = 1.0;
+  static const dashCycle = 6.0;
+  static const dashDuty = 0.6;
+  static const dashStep = Duration(seconds: 2);
+  static const dashAlpha = 0xcc / 0xff;
+
   /// 확인 중 띠 — 두께, 빛이 한 번 흐르는 시간.
   static const twinBarH = 2.0;
   static const twinBarSweep = Duration(milliseconds: 1400);

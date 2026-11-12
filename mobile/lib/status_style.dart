@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'look.dart';
@@ -187,6 +189,8 @@ class Appear extends StatelessWidget {
 /// 「일하는 중」의 테두리 한 바퀴 — 학생색 빛 조각 하나가 칸 윤곽을 2초에 한 바퀴씩 돌고 꼬리가 옅어진다.
 /// 데스크톱 pane 테두리와 같은 결이다(2026-10-07 「숨쉬는 거 헷갈리는데 선택이랑. 한 바퀴 도는 거로 하자
 /// 아웃라인을」). 쉬면 아무것도 안 그린다. 동작 줄이기면 돌지 않고 윤곽 전체가 옅게 서 있는다.
+/// [dashed] 면 「뒤에서 도는 중」(백그라운드 셸·Monitor) — 같은 윤곽을 흐르는 점선으로 긋는다(데스크톱
+/// `Activity::Background`). 일하는 중이 이기므로 둘 다면 부르는 쪽이 한 바퀴를 고른다.
 class OrbitEdge extends StatefulWidget {
   const OrbitEdge({
     super.key,
@@ -194,9 +198,11 @@ class OrbitEdge extends StatefulWidget {
     required this.color,
     required this.radius,
     required this.child,
+    this.dashed = false,
   });
 
   final bool live;
+  final bool dashed;
   final Color color;
   final BorderRadius radius;
   final Widget child;
@@ -226,6 +232,7 @@ class _OrbitEdgeState extends State<OrbitEdge>
 
   void _sync() {
     final run = widget.live && !Look.still(context);
+    _ctl.duration = widget.dashed ? Look.dashStep : Look.orbitLap;
     if (run && !_ctl.isAnimating) _ctl.repeat();
     if (!run && _ctl.isAnimating) _ctl.stop();
   }
@@ -239,13 +246,11 @@ class _OrbitEdgeState extends State<OrbitEdge>
   @override
   Widget build(BuildContext context) {
     if (!widget.live) return widget.child;
+    final still = Look.still(context);
     return CustomPaint(
-      foregroundPainter: OrbitPainter(
-        _ctl,
-        color: widget.color,
-        radius: widget.radius,
-        still: Look.still(context),
-      ),
+      foregroundPainter: widget.dashed
+          ? DashPainter(_ctl, color: widget.color, radius: widget.radius, still: still)
+          : OrbitPainter(_ctl, color: widget.color, radius: widget.radius, still: still),
       child: widget.child,
     );
   }
@@ -327,6 +332,52 @@ class OrbitPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(OrbitPainter o) =>
+      o.color != color || o.radius != radius || o.still != still;
+}
+
+/// 흐르는 점선 — 데스크톱 셰이더(`FLAG_EDGE_DASH`)와 같이 둘레를 한 칸 길이에 가장 가까운 정수 칸으로 나눠
+/// 출발점(왼쪽 위 직선 시작)에서 무늬가 끊기지 않고, 한 칸 시간마다 시계 방향으로 한 칸 간다. 동작 줄이기면
+/// 멈춘 점선으로 선다 — 멈춰도 실선과 갈린다.
+class DashPainter extends CustomPainter {
+  DashPainter(
+    this.t, {
+    required this.color,
+    required this.radius,
+    required this.still,
+  }) : super(repaint: t);
+
+  final Animation<double> t;
+  final Color color;
+  final BorderRadius radius;
+  final bool still;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = (Offset.zero & size).deflate(Look.dashThick / 2);
+    final metric = OrbitPainter._clockwise(radius.toRRect(rect)).computeMetrics().first;
+    final len = metric.length;
+    final n = math.max((len / Look.dashCycle).round(), 1);
+    final cyc = len / n;
+    final on = Look.dashDuty * cyc;
+    final shift = still ? 0.0 : t.value * cyc;
+    final path = Path();
+    for (var k = 0; k < n; k++) {
+      final a = shift + k * cyc;
+      final b = a + on;
+      path.addPath(metric.extractPath(a, math.min(b, len)), Offset.zero);
+      if (b > len) path.addPath(metric.extractPath(0, b - len), Offset.zero);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = Look.dashThick
+        ..color = color.withValues(alpha: color.a * Look.dashAlpha),
+    );
+  }
+
+  @override
+  bool shouldRepaint(DashPainter o) =>
       o.color != color || o.radius != radius || o.still != still;
 }
 
