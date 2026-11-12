@@ -126,7 +126,8 @@ pub fn access(token: &str, left_ms: u64) -> Access {
 pub fn age_chains(service: &Service, account: &str) {
     let mut book = service.load(account).unwrap();
     book.values_mut().for_each(|c| {
-        c.sealed_at = 0;
+        // 맡긴 직후 쉬는 틈만 넘긴다 — 0 으로 두면 로그인이 수십 년 전 것처럼 읽혀 새 로그인이 늘 갈아 끼운다.
+        c.sealed_at = now_ms().saturating_sub(SEAL_SETTLE_MS + 1);
         c.expires_at = now_ms() + HOUR;
     });
     service.save(account, &book).unwrap();

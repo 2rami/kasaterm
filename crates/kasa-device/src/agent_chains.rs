@@ -32,6 +32,12 @@ const MAX_CHAINS: usize = 16;
 const MAX_TOKEN: usize = 4096;
 const MAX_RESPONSE: usize = 1024 * 1024;
 const AUDIT_ROTATE: u64 = 1024 * 1024;
+/// 로그인 하나의 수명. 갱신해도 늘지 않는다(공식 문서 「갱신해도 로그인 수명은 그대로」, 2026-11 관문 기록: 5시간마다
+/// 갱신하던 사슬이 맡긴 지 27~28.5일에 `invalid_grant`). 공급자가 만료를 안 알려 준 사슬은 맡긴 때부터 이만큼으로 본다.
+const LOGIN_LIFETIME_MS: u64 = 28 * 24 * 60 * 60 * 1000;
+/// 같은 계정의 새 로그인이 이만큼 더 오래가면 멀쩡한 사슬이라도 갈아 끼운다 — 만료 전에 다시 로그인해 이어 가는 길.
+/// 그보다 짧으면 같은 로그인을 두 기기가 맡기는 경우라 지금 사슬을 지킨다.
+const RENEW_GAIN_MS: u64 = 24 * 60 * 60 * 1000;
 /// 사슬마다 기억하는 이전 접근 토큰 지문 수. 갱신은 몇 시간에 한 번이라 claude 의 30초 캐시를 넘기에 넉넉하다.
 const LINEAGE: usize = 4;
 /// 힌트를 놓쳐도 두 번의 5분 pull 안에는 옛 Bearer 를 같은 세대의 새 토큰에 결속할 수 있어야 한다.
@@ -179,6 +185,13 @@ impl Chain {
         Who::new(&self.account_uuid, &self.organization_uuid)
     }
 
+    /// 이 로그인이 끝나는 때. 공급자가 알려 준 만료가 있어도 맡긴 때부터의 수명을 넘겨 보지 않는다 — 갱신 응답이
+    /// 만료를 밀어 주는지는 확인되지 않았고, 늦게 보면 다시 로그인할 때를 놓친다.
+    fn login_expires_at(&self) -> u64 {
+        let lifetime = self.sealed_at.saturating_add(LOGIN_LIFETIME_MS);
+        if self.refresh_expires_at > 0 { self.refresh_expires_at.min(lifetime) } else { lifetime }
+    }
+
     fn due(&self, now: u64) -> bool {
         !self.broken
             && now >= self.sealed_at + SEAL_SETTLE_MS
@@ -246,6 +259,20 @@ pub struct Held {
     pub account_uuid: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub organization_uuid: String,
+    /// 이 로그인이 끝나는 때(ms, `Chain::login_expires_at`). 그 전에 아무 기기에서 다시 로그인하면 이어진다. 옛 관문은
+    /// 안 보낸다(0).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub login_expires_at: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// 맡기는 로그인이 끝나는 때 — 공급자가 적어 준 만료가 있으면 그것, 없으면 지금부터의 수명.
+fn offered_login_expires_at(offer: &Offer, now: u64) -> u64 {
+    let lifetime = now.saturating_add(LOGIN_LIFETIME_MS);
+    if offer.refresh_token_expires_at > now { offer.refresh_token_expires_at.min(lifetime) } else { lifetime }
 }
 
 /// 관문이 사람에게 알릴 일 — 그 관문 계정의 폰으로 간다(`gateway_agent_chains.rs`).
@@ -427,7 +454,8 @@ impl Service {
     }
 
     /// 기기가 사슬을 맡긴다. 같은 계정의 멀쩡한 사슬이 이미 있으면 그것을 지키고 그 접근 토큰을
-    /// 돌려준다(`held: true`) — 기기는 자기 사슬을 버리고 관문 것을 쓴다.
+    /// 돌려준다(`held: true`) — 기기는 자기 사슬을 버리고 관문 것을 쓴다. 다만 맡기는 로그인이 지금 사슬보다
+    /// `RENEW_GAIN_MS` 넘게 오래가면 새 로그인으로 갈아 끼운다(`renewed`) — 로그인 수명이 끝나기 전에 이어 가는 길이다.
     pub async fn seal(&self, account: &str, device: &str, offer: Offer) -> Result<Value, Error> {
         let now = now_ms();
         if !opaque(&offer.access_token)
@@ -443,11 +471,15 @@ impl Service {
         let key = crate::agent_accounts::account_key("claude", &email, &org, "");
         let _guard = self.books.lock().await;
         let mut book = self.load(account)?;
+        let mut renewed = false;
         if let Some(existing) = book.get(&key).filter(|c| !c.broken && c.expires_at > now + 10 * 60 * 1000) {
             if existing.who().zip(who.as_ref()).is_some_and(|(held, offered)| &held != offered) {
                 self.record(account, device, "seal", &key, "identity_conflict");
                 return Err(Error::Conflict);
             }
+            renewed = offered_login_expires_at(&offer, now) > existing.login_expires_at().saturating_add(RENEW_GAIN_MS);
+        }
+        if let Some(existing) = book.get(&key).filter(|c| !renewed && !c.broken && c.expires_at > now + 10 * 60 * 1000) {
             self.record(account, device, "seal", &key, "held");
             let held = existing.who();
             return Ok(json!({"ok":true,"key":key,"held":true,"access":existing.access(),
@@ -480,7 +512,7 @@ impl Service {
         let access = chain.access();
         book.insert(key.clone(), chain);
         self.save(account, &book)?;
-        self.record(account, device, "seal", &key, "sealed");
+        self.record(account, device, "seal", &key, if renewed { "renewed" } else { "sealed" });
         Ok(json!({"ok":true,"key":key,"held":false,"access":access,
             "account_uuid":who.as_ref().map(|w| w.account_uuid.as_str()),
             "organization_uuid":who.as_ref().map(|w| w.organization_uuid.as_str())}))
@@ -524,6 +556,7 @@ impl Service {
                 },
                 account_uuid: chain.account_uuid.clone(),
                 organization_uuid: chain.organization_uuid.clone(),
+                login_expires_at: chain.login_expires_at(),
             })
             .collect();
         Ok(json!({"ok":true,"chains":chains}))
@@ -1469,6 +1502,48 @@ fn pending() -> &'static std::sync::Mutex<Vec<Alert>> {
     &PENDING
 }
 
+/// 이 기기 슬롯이 맡긴 사슬의 상태 — 마지막으로 관문에서 받은 그대로이고 토큰은 없다. 로그인 수명이 끝나기 전에 다시
+/// 로그인할 때를 고르는 데 쓴다(`/claude-accounts/logins`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ChainLogin {
+    pub slot: String,
+    pub key: String,
+    pub email: String,
+    pub org: String,
+    pub state: String,
+    pub login_expires_at: u64,
+}
+
+/// 슬롯마다 맡긴 사슬을 찾아 상태를 붙인다. 관문이 모르는 사슬은 `missing` 이다.
+pub fn chain_logins(slots: &[Slot], map: &BTreeMap<String, String>, chains: &[Held]) -> Vec<ChainLogin> {
+    slots
+        .iter()
+        .filter(|slot| !slot.bench)
+        .filter_map(|slot| {
+            let key = map.get(&slot.id)?;
+            let chain = chains.iter().find(|c| &c.key == key);
+            Some(ChainLogin {
+                slot: slot.id.clone(),
+                key: key.clone(),
+                email: chain.map(|c| c.email.clone()).unwrap_or_default(),
+                org: chain.map(|c| c.org.clone()).unwrap_or_default(),
+                state: chain.map_or_else(|| "missing".into(), |c| c.state.clone()),
+                login_expires_at: chain.map_or(0, |c| c.login_expires_at),
+            })
+        })
+        .collect()
+}
+
+fn logins_seen() -> &'static std::sync::Mutex<Option<(u64, Vec<ChainLogin>)>> {
+    static SEEN: std::sync::Mutex<Option<(u64, Vec<ChainLogin>)>> = std::sync::Mutex::new(None);
+    &SEEN
+}
+
+/// 마지막으로 관문에 닿은 시각(ms)과 그때 본 슬롯별 사슬. 아직 한 번도 못 닿았으면 `None`.
+pub fn last_logins() -> Option<(u64, Vec<ChainLogin>)> {
+    logins_seen().lock().ok()?.clone()
+}
+
 /// 아직 사람에게 안 보인 알림 — 앱이 데스크톱 알림·토스트로 띄운다.
 pub fn take_alerts() -> Vec<Alert> {
     pending().lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
@@ -1510,6 +1585,9 @@ async fn sync_local(gateway: &Gateway<'_>, stamp: &crate::device_auth::Stamp) ->
             }
             Err(error) => (Err(error), None),
         };
+    if let (Some(chains), Ok(mut seen)) = (chains.as_deref(), logins_seen().lock()) {
+        *seen = Some((now_ms(), chain_logins(&slots, &map, chains)));
+    }
     raise(device_alerts(&slots, &map, &Local, chains.as_deref(), now_ms()));
     outcome
 }

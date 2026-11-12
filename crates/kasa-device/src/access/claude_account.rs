@@ -477,6 +477,19 @@ async fn claude_usage_live_handler(req: axum::extract::Request) -> axum::respons
     Json(live_limits::export()).into_response()
 }
 
+/// `GET /claude-accounts/logins` — 슬롯마다 관문에 맡긴 로그인이 언제 끝나는지. 로그인 수명은 갱신으로 안 늘어서
+/// 끝나기 전에 다시 로그인해야 이어진다 — 그때를 고르는 도구가 읽는다. 토큰은 없고, 계정 정보라 폰 손님은 막는다.
+async fn claude_account_logins_handler(req: axum::extract::Request) -> axum::response::Response {
+    if let Some(denied) = super::auth::guest_denied(&req) {
+        return denied;
+    }
+    let body = match crate::agent_chains::last_logins() {
+        Some((at, logins)) => serde_json::json!({ "v": 1, "synced_at": at, "logins": logins }),
+        None => serde_json::json!({ "v": 1, "synced_at": null, "logins": [] }),
+    };
+    Json(body).into_response()
+}
+
 /// `POST /claude-usage/live` — 다른 기기가 새 관측을 본 자리에서 밀어 넣는다. 당겨 오기만 하면 기기 사이가
 /// 그 주기만큼 늦다. 몸은 `export` 꼴이고 `merge_peer` 가 검사한다.
 async fn claude_usage_live_push_handler(req: axum::extract::Request) -> axum::response::Response {
@@ -916,6 +929,7 @@ pub fn routes() -> axum::Router {
     axum::Router::new()
         .route("/claude-usage", get(claude_usage_handler))
         .route("/claude-usage/live", get(claude_usage_live_handler).post(claude_usage_live_push_handler))
+        .route("/claude-accounts/logins", get(claude_account_logins_handler))
         .route("/claude-identity", get(claude_identity_handler))
 }
 

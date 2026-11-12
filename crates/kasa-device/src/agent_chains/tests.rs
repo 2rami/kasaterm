@@ -49,6 +49,34 @@ async fn a_second_device_adopts_the_held_chain_instead_of_replacing_it() {
     assert_eq!(book["claude:fixture@example.invalid"].refresh_token, "refresh-1");
 }
 
+/// 로그인 수명은 갱신으로 안 는다 — 끝나기 전에 다시 로그인한 사슬은 멀쩡한 옛 사슬을 갈아 끼운다. 수명이 더 짧은
+/// 옛 로그인은 지금 사슬을 못 밀어낸다.
+#[tokio::test]
+async fn a_fresher_login_renews_a_chain_close_to_its_login_expiry() {
+    let (service, _, dir) = service().await;
+    let key = "claude:fixture@example.invalid";
+    service.seal("one", "dev_a", offer("access-personal-1", "refresh-1", 7 * HOUR)).await.unwrap();
+    let listed = service.list("one").await.unwrap();
+    let first_expiry = listed["chains"][0]["login_expires_at"].as_u64().unwrap();
+    assert!(first_expiry > now_ms() + 27 * 24 * HOUR, "a fresh login reads as about four weeks");
+
+    let mut stale = offer("access-personal-b", "refresh-b", 7 * HOUR);
+    stale.refresh_token_expires_at = now_ms() + 3 * 24 * HOUR;
+    assert_eq!(service.seal("one", "dev_b", stale).await.unwrap()["held"], true, "an older login replaced a fresher chain");
+
+    let mut book = service.load("one").unwrap();
+    let chain = book.get_mut(key).unwrap();
+    chain.sealed_at = now_ms() - 26 * 24 * HOUR;
+    chain.refresh_expires_at = now_ms() + 2 * 24 * HOUR;
+    service.save("one", &book).unwrap();
+    let renewed = service.seal("one", "dev_b", offer("access-personal-2", "refresh-2", 7 * HOUR)).await.unwrap();
+    assert_eq!(renewed["held"], false);
+    assert_eq!(renewed["access"]["accessToken"], "access-personal-2");
+    assert_eq!(service.load("one").unwrap()[key].refresh_token, "refresh-2");
+    let audit = std::fs::read_to_string(dir.join("agent-chains/audit.jsonl")).unwrap();
+    assert!(audit.contains("renewed"));
+}
+
 #[tokio::test]
 async fn offers_that_cannot_be_verified_or_are_about_to_expire_are_refused() {
     let (service, _, _) = service().await;
@@ -331,4 +359,26 @@ async fn chains_carry_provider_uuids_and_older_chains_gain_them_on_the_next_refr
     assert_eq!(service.refresh_due().await.0, 1);
     let chain = &service.load("one").unwrap()["claude:fixture@example.invalid"];
     assert_eq!((chain.account_uuid.as_str(), chain.organization_uuid.as_str()), (PERSON, PERSONAL_ORG));
+}
+
+/// 다시 로그인할 때를 고르는 도구가 읽는 슬롯별 상태 — 작업대는 슬롯의 계정을 알려 주지 못하니 뺀다.
+#[test]
+fn each_mapped_slot_reports_its_chain_and_login_expiry() {
+    let slot = |id: &str, bench: bool| Slot { id: id.into(), store: None, table_key: None, bench, stamped: None };
+    let map = BTreeMap::from([
+        ("acct-1".to_string(), "claude:a@example.invalid".to_string()),
+        ("acct-2".to_string(), "claude:gone@example.invalid".to_string()),
+        ("bench".to_string(), "claude:a@example.invalid".to_string()),
+    ]);
+    let chains = vec![Held {
+        key: "claude:a@example.invalid".into(),
+        email: "a@example.invalid".into(),
+        state: "ok".into(),
+        login_expires_at: 42,
+        ..Held::default()
+    }];
+    let logins = chain_logins(&[slot("acct-1", false), slot("acct-2", false), slot("bench", true), slot("acct-9", false)], &map, &chains);
+    assert_eq!(logins.len(), 2);
+    assert_eq!((logins[0].slot.as_str(), logins[0].state.as_str(), logins[0].login_expires_at), ("acct-1", "ok", 42));
+    assert_eq!((logins[1].slot.as_str(), logins[1].state.as_str()), ("acct-2", "missing"));
 }
