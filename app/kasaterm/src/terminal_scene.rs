@@ -1767,7 +1767,7 @@ impl App {
                     })
                     .unwrap_or_default();
                 let accent = match carried_message_header(&above) {
-                    Some(CarriedHeader::Tell(name)) => theme::character_accent_any(&name),
+                    Some(CarriedHeader::Tell(name)) => student_face_slug(&name).and_then(|_| theme::character_accent_any(&name)),
                     Some(CarriedHeader::Native(label)) => {
                         // 인정 규칙은 화면 안 헤더와 동일 — transcript 최신
                         // 태그와 라벨 대조, 아니면 로스터 agent 이름꼴만.

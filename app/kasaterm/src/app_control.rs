@@ -10,6 +10,7 @@ pub(crate) struct PendingExit { pub at: Instant, request: Request, job: Job, bak
 pub(crate) enum Reply { View(Value), Restart(Prepared) }
 #[derive(Clone)]
 pub(crate) enum Event {
+    PrepareAction { deadline: Instant, epoch: u64, reply: mpsc::Sender<Result<(), String>> },
     Request { request: Request, baking: bool, deadline: Instant, reply: mpsc::Sender<Result<Reply, String>> },
     RestartReady { request: Request, job: Job, baking: bool, deadline: Instant, reply: mpsc::Sender<Result<Reply, String>> },
 }
@@ -44,6 +45,16 @@ fn capture_screen(source: &dyn kasa_remote::screen_mirror::Source, display: Opti
     Ok(json!({"ok":true, "machine_id":machine_id, "observed_at_ms":kasa_socket::board::now_ms(),
         "display":selected.id, "displays":displays, "width":shot.width, "height":shot.height,
         "mime":"image/jpeg", "image_base64":base64::engine::general_purpose::STANDARD.encode(shot.jpeg)}))
+}
+
+pub(crate) fn prepare_action(proxy: &winit::event_loop::EventLoopProxy<UserEvent>) -> anyhow::Result<()> {
+    let (reply, rx) = mpsc::channel();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    proxy.send_event(UserEvent::AppControl(Event::PrepareAction {
+        deadline, epoch: kasa_device::device_auth::change_epoch(), reply,
+    })).map_err(|_| anyhow::anyhow!("app event loop gone"))?;
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| anyhow::anyhow!("app readiness timed out; no action performed"))?.map_err(anyhow::Error::msg)
 }
 
 pub(crate) fn request(proxy: &winit::event_loop::EventLoopProxy<UserEvent>, request: &Request) -> anyhow::Result<Value> {
@@ -114,7 +125,10 @@ impl App {
             "restore":self.restore_prompt.as_ref().map(|_|self.restore_picker.control_view()),
             "restoring":self.restore_applying.is_some() || self.restoration_blocks_input() || !self.pending_restores.is_empty(),
             "restore_progress":progress,"restart":facts_json,
-            "actions":{"restore":self.restore_prompt.is_some(),"restart":self.restore_prompt.is_none() && !self.restoration_blocks_input(),"update-check":true},
+            "ready":self.restore_prompt.is_none() && self.restore_applying.is_none() && !self.restoration_blocks_input()
+                && self.pending_restores.is_empty() && self.restore_progress.as_ref().is_none_or(|p|p.failure.is_none()),
+            "before_action":"restore opens automatically on an agent mutation; inspect until ready, then resolve fresh pane addresses",
+            "actions":{"restore":self.restore_prompt.is_some() || self.restore_progress.as_ref().is_some_and(|p|p.failure.is_some()),"restart":self.restore_prompt.is_none() && !self.restoration_blocks_input(),"update-check":true},
             "screen":"app screen captures the actual monitor; focused=false means this app is not in front"});
         Ok((state,facts))
     }
@@ -126,8 +140,28 @@ impl App {
     }
 
     pub(crate) fn app_control_event(&mut self, event: &Event) {
+        if let Event::PrepareAction { deadline, epoch, reply } = event {
+            let result = (|| -> anyhow::Result<()> {
+                anyhow::ensure!(Instant::now() < *deadline && *epoch == kasa_device::device_auth::change_epoch(), "app readiness expired; no action performed");
+                if self.restore_prompt.is_some() {
+                    anyhow::ensure!(self.restore_picker.control_view()["selected_count"].as_u64().unwrap_or(0) > 0,
+                        "restore_selection_empty: 복원할 작업을 선택해 주세요. 조작은 실행하지 않았어요. app inspect로 확인하세요");
+                    self.restore_dialog_pick(RestoreBtn::Restore);
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                    anyhow::bail!("app_restoring: 저장된 작업 복원을 시작했어요. 조작은 실행하지 않았어요. app inspect로 복원 완료와 새 주소를 확인한 뒤 다시 요청하세요");
+                }
+                anyhow::ensure!(self.restore_applying.is_none() && !self.restoration_blocks_input() && self.pending_restores.is_empty(),
+                    "app_restoring: 복원 중이에요. 조작은 실행하지 않았어요. app inspect로 완료를 확인하세요");
+                anyhow::ensure!(self.restore_progress.as_ref().is_none_or(|p|p.failure.is_none()),
+                    "app_restore_failed: 복원이 끝나지 않았어요. app inspect로 확인한 뒤 app restore --expect REVISION으로 다시 시도하세요");
+                Ok(())
+            })().map_err(|e|e.to_string());
+            let _ = reply.send(result);
+            return;
+        }
         let (request, baking, deadline, reply) = match event {
             Event::Request {request,baking,deadline,reply} | Event::RestartReady {request,baking,deadline,reply,..} => (request,*baking,deadline,reply),
+            Event::PrepareAction { .. } => unreachable!(),
         };
         let result = (|| -> anyhow::Result<Reply> {
             anyhow::ensure!(Instant::now() < *deadline, "app request expired");
@@ -150,9 +184,13 @@ impl App {
             let (_, facts) = self.validate_control(request, None, baking)?;
             match request.action {
                 Action::Restore => {
-                    anyhow::ensure!(self.restore_prompt.is_some(), "no restore dialog");
-                    anyhow::ensure!(self.restore_picker.control_view()["selected_count"].as_u64().unwrap_or(0)>0, "no saved work selected");
-                    self.restore_dialog_pick(RestoreBtn::Restore);
+                    if self.restore_prompt.is_some() {
+                        anyhow::ensure!(self.restore_picker.control_view()["selected_count"].as_u64().unwrap_or(0)>0, "no saved work selected");
+                        self.restore_dialog_pick(RestoreBtn::Restore);
+                    } else {
+                        anyhow::ensure!(self.restore_progress.as_ref().is_some_and(|p|p.failure.is_some()), "no restore dialog or failed restoration");
+                        self.retry_restore();
+                    }
                     if let Some(window) = &self.window { window.request_redraw(); }
                     Ok(Reply::View(json!({"ok":true,"machine_id":facts.machine_id,"status":"restoring"})))
                 }

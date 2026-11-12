@@ -12,6 +12,8 @@ class _Unavailable implements ArchiveStore {
   @override
   Future<void> remove(String scope, String id) async {}
   @override
+  Future<bool> excluded(String scope, String id) async => false;
+  @override
   Future<void> save(
     String scope,
     SavedConversation conversation, {

@@ -9,6 +9,7 @@
 대화의 계정 보관·폰 오프라인 저장은 [offline-conversations.md](offline-conversations.md)가 계약이다.
 `kasa-remote/conversation_archive.rs`와 `conversation_archive/sync.rs`는 영속 저장·데스크톱 전송,
 `gateway_conversations.rs`는 계정 권한과 HTTP, 모바일 `archive_*`와 `screens/saved_conversations.dart`는 폰 저장·읽기 전용 화면을 맡는다.
+`conversation_cache.dart`는 계정당 하나의 자동 받기 워커이며, 허브 예열·최근 기록·앱 복귀를 묶고 대화 화면은 같은 저장본을 먼저 읽는다.
 
 계정 간 공유방과 독립 세션 포크는 [shared-rooms.md](shared-rooms.md)가 계약이다.
 `kasa-socket/shared_rooms.rs`는 DTO, `kasa-remote/shared_rooms/{store,client}`는 저장·관문 클라이언트,

@@ -324,7 +324,10 @@ impl Conversation {
                     self.queue.push(None);
                     return;
                 }
-                let at = self.push(Item::Bubble { user: true, text: clean, from: None, queued: true, images: 0 });
+                let (from, text) = relayed(&clean).map(|(sender, body)| (Some(sender), body)).unwrap_or((None, clean.clone()));
+                let is_relayed = from.is_some();
+                let at = self.push(Item::Bubble { user: true, text, from, queued: true, images: 0 });
+                if is_relayed { self.relayed_raw.insert(at, clean); }
                 self.queue.push(Some(at));
             }
             op @ ("dequeue" | "popAll") => {
@@ -427,7 +430,12 @@ impl Conversation {
             return;
         }
         *last = Some(t.to_string());
-        self.push(Item::Bubble { user, text: t.into(), from: None, queued: false, images: 0 });
+        let clean = strip_meta(t);
+        let (from, text) = if user { relayed(&clean).map(|(sender, body)| (Some(sender), body)) } else { None }
+            .unwrap_or((None, t.into()));
+        let is_relayed = from.is_some();
+        let at = self.push(Item::Bubble { user, text, from, queued: false, images: 0 });
+        if is_relayed { self.relayed_raw.insert(at, clean); }
     }
 }
 
@@ -1131,6 +1139,20 @@ mod tests {
         assert!(relayed(&format!("⟦아로나⟧ 일\n\n{hint}")).is_some_and(|(s, _)| s.name == "아로나"));
         assert!(relayed(&format!("{hint}\n\n사람 말")).is_none());
         assert!(relayed(hint).is_none());
+    }
+
+    #[test]
+    fn queued_and_codex_messages_keep_their_sender() {
+        let mut c = conv(&[
+            r#"{"type":"queue-operation","operation":"enqueue","content":"⟦유즈⟧ report"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":"my words"}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"⟦아로나⟧ codex report"}}"#,
+        ]);
+        assert!(matches!(&c.items[0], Item::Bubble { from:Some(from), queued:true, text, .. } if from.name == "유즈" && text == "report"));
+        assert!(matches!(&c.items[1], Item::Bubble { from:None, queued:true, .. }));
+        assert!(matches!(&c.items[2], Item::Bubble { from:Some(from), text, .. } if from.name == "아로나" && text == "codex report"));
+        c.apply(r#"{"type":"queue-operation","operation":"remove"}"#);
+        assert!(matches!(&c.items[0], Item::Bubble { from:Some(from), queued:false, .. } if from.name == "유즈"));
     }
 
     #[test]

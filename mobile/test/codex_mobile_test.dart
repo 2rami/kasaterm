@@ -278,6 +278,7 @@ void main() {
         await tester.pumpWidget(host(server, session, Brightness.light));
         await tester.pump(const Duration(milliseconds: 200));
         expect(tester.takeException(), isNull);
+        expect(find.text('오프라인 저장'), findsNothing);
         final decline = find.widgetWithText(
           OutlinedButton,
           '2. No, and tell Codex what to do differently (esc)',

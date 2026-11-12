@@ -234,6 +234,8 @@ class IoArchiveStore implements ArchiveStore {
       );
       if (!current()) throw const ArchiveException('저장을 취소했어요.');
       await pending.rename(manifest.path);
+      final marker = File('${dir.path}/${entry.id}.excluded');
+      if (await FileSystemEntity.type(marker.path, followLinks:false) == FileSystemEntityType.file) await marker.delete();
       if (old != null && old['sha256'] != hash) {
         final previous = File('${dir.path}/${entry.id}-${old['sha256']}.jsonl');
         if (await previous.exists()) await previous.delete();
@@ -254,9 +256,17 @@ class IoArchiveStore implements ArchiveStore {
   });
 
   @override
+  Future<bool> excluded(String scope, String id) async =>
+      await FileSystemEntity.type('${(await _dir(scope)).path}/${_id(id)}.excluded', followLinks: false)
+          != FileSystemEntityType.notFound;
+
+  @override
   Future<void> remove(String scope, String id) => _write(() async {
     _id(id);
     final dir = await _dir(scope);
+    final marker = File('${dir.path}/$id.${DateTime.now().microsecondsSinceEpoch}.part');
+    await marker.writeAsString('', flush:true);
+    await marker.rename('${dir.path}/$id.excluded');
     final manifest = File('${dir.path}/${_id(id)}.json');
     if (await manifest.exists()) await manifest.delete();
     await for (final body in dir.list(followLinks: false)) {

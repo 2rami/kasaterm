@@ -146,13 +146,11 @@ pub(crate) fn other_sprite_dirs_in(
     out
 }
 
-/// 다른 테마에 이 슬러그의 프사가 있나 — **파일 존재만** 본다(디코딩 없음).
-/// 자리를 비우기 전에 묻는 게이트(`face_ready`)가 이걸 쓴다.
-pub(crate) fn other_theme_has_profile(slug: &str) -> bool {
-    if crate::mirror_theme::asset(slug, "profile", 0).is_some() { return true; }
-    other_theme_sprite_dirs()
-        .iter()
-        .any(|d| [true, false].into_iter().any(|f| d.join(profile_rel(slug, f)).is_file()))
+pub(crate) fn has_student_profile(slug: &str) -> bool {
+    if student_profile_png(slug).is_some() || crate::mirror_theme::asset(slug, "profile", 0).is_some() { return true; }
+    selected_asset(picked_theme_sprite_dir(slug),
+        |dir| [true, false].into_iter().any(|foldered| dir.join(profile_rel(slug, foldered)).is_file()).then_some(()),
+        || None, crate::socket::students_dir().as_deref(), other_theme_sprite_dirs()).is_some()
 }
 
 /// dir 주입 버전(테스트용) — students_dir 해석과 분리해 env 없이 검증한다.
@@ -1205,7 +1203,6 @@ mod theme_sprite_dir_tests {
     #[test]
     fn lookup_is_isolated_under_test() {
         assert!(other_theme_sprite_dirs().is_empty());
-        assert!(!other_theme_has_profile("hachiware"));
     }
 }
 

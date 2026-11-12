@@ -1,3 +1,4 @@
+import 'conversation_cache.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -609,7 +610,14 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void _changed() {
     if (!mounted) return;
     final server = _connection.server;
-    final archiveScope = _connection.archiveServer?.resumeScope;
+    final archiveServer = _connection.archiveServer;
+    if (archiveServer != null) {
+      final cache = ConversationCache.of(archiveServer)..start();
+      if (server != null) ConversationCache.bind(server, cache);
+    } else if (server != null) {
+      ConversationCache.of(server).start();
+    }
+    final archiveScope = archiveServer?.resumeScope;
     if (_archiveScope != archiveScope) {
       final previous = _archiveScope; _archiveScope = archiveScope;
       if (previous != null && archiveRouteOpenFor(previous)) {

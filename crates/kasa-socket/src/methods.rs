@@ -29,6 +29,9 @@ use serde_json::{json, Value};
 /// socket.
 pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
     let id = req.id.clone();
+    if crate::app_control::needs_ready(&req.method) {
+        if let Err(error) = backend.prepare_action() { return backend_err(id, error); }
+    }
     match req.method.as_str() {
         "system.ping" => Response::success(id, json!({"pong": true})),
         "system.identify" => system_identify(backend, id),
@@ -1638,11 +1641,26 @@ mod tests {
     use crate::backend::{Backend, SurfaceInfo, WorkspaceInfo};
     use std::sync::Mutex;
 
+    #[test]
+    fn restore_guard_precedes_mutations_but_readonly_requests_stay_available() {
+        let backend = FakeBackend { restoring:true, ..Default::default() };
+        for method in ["surface.send_text", "window.new", "surface.new_tab", "collab.tell", "collab.act"] {
+            let response = dispatch(&backend, Request {id:json!(1),method:method.into(),params:json!({"text":"do not send"})});
+            assert!(!response.ok);
+            assert!(response.error.unwrap().message.contains("app_restoring"));
+        }
+        assert!(backend.sent_text.lock().unwrap().is_empty());
+        for method in ["system.ping", "surface.list"] {
+            assert!(dispatch(&backend, Request {id:json!(1),method:method.into(),params:json!({})}).ok);
+        }
+    }
+
     /// Fake backend that records calls and returns canned answers.
     /// Single-pane behavior matches what kasaterm-sugarloaf-cli will
     /// expose in its first Backend impl.
     #[derive(Default)]
     struct FakeBackend {
+        restoring: bool,
         closed_windows: Mutex<Vec<(usize, Vec<Value>)>>,
         checked_closes: Mutex<Vec<Value>>,
         sent_text: Mutex<Vec<(Option<String>, String)>>,
@@ -1661,6 +1679,10 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
+        fn prepare_action(&self) -> anyhow::Result<()> {
+            anyhow::ensure!(!self.restoring, "app_restoring: no action performed");
+            Ok(())
+        }
         fn close_checked(&self, request: &Value) -> anyhow::Result<Value> {
             self.checked_closes.lock().unwrap().push(request.clone());
             Ok(json!({"closed":true}))

@@ -656,6 +656,11 @@ fn run() -> Result<Option<Response>> {
             .and_then(|r| r.get("machine_label")).and_then(Value::as_str) {
             println!("[{label}]");
         }
+        if let Some(app) = response.result.as_ref().and_then(|r|r.get("app")) {
+            if app["ready"] == false {
+                println!("앱 준비 중: 복원 창 또는 복원 진행이 남아 있어요. app inspect로 확인하세요.");
+            }
+        }
         println!("{}", render_where(&response, &query.join(" "), me.as_deref()));
         return Ok(None);
     }

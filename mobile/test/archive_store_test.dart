@@ -20,6 +20,20 @@ void main() {
     await dir.delete(recursive: true);
   });
 
+  test('local deletion remains excluded from automatic downloads after restart', () async {
+    final raw=message('assistant','delete locally');
+    final entry=entryFor(raw);
+    final value=SavedConversation(entry:entry,raw:raw,savedAt:DateTime.utc(2026));
+    await store.save(scope,value,current:()=>true);
+    await store.remove(scope,entry.id);
+    final reopened=IoArchiveStore(dir);
+    await reopened.recover();
+    expect(await reopened.excluded(scope,entry.id),isTrue);
+    expect(await reopened.excluded('other-account',entry.id),isFalse);
+    await reopened.save(scope,value,current:()=>true);
+    expect(await reopened.excluded(scope,entry.id),isFalse);
+  });
+
   test(
     'a new store instance reads the complete account-scoped conversation offline',
     () async {

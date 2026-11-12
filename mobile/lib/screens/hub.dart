@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../app_release.dart';
 import '../background_grace.dart';
 import '../hub_model.dart';
+import '../conversation_cache.dart';
 import '../hub_actions.dart';
 import '../hub_prefs.dart';
 import '../look.dart';
@@ -73,8 +74,17 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
   void initState() {
     super.initState();
     BackgroundGrace.instance.addListener(_graceChanged);
+    _model.addListener(_warmConversations);
     _model.start();
+    _warmConversations();
     unawaited(_watchReleases());
+  }
+
+  void _warmConversations() {
+    ConversationCache.of(widget.server).warm([
+      for (final section in _model.visible.where((s) => s.online))
+        for (final room in section.rooms) ...room.panes,
+    ]);
   }
 
   /// 이 실행에서 이미 알린 빌드 — 앱으로 돌아올 때마다 같은 판을 또 알리지 않는다.
@@ -130,6 +140,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
   void dispose() {
     BackgroundGrace.instance.removeListener(_graceChanged);
     _stopWatchingReleases();
+    _model.removeListener(_warmConversations);
     _model.dispose();
     super.dispose();
   }

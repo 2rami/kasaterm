@@ -226,6 +226,7 @@ abstract class ArchiveStore {
     required bool Function() current,
   });
   Future<void> remove(String scope, String id);
+  Future<bool> excluded(String scope, String id);
 }
 
 abstract class ArchiveApi {

@@ -8,6 +8,7 @@ import '../archive_model.dart';
 import '../archive_repository.dart';
 import '../background_grace.dart';
 import '../conversation.dart';
+import '../conversation_cache.dart';
 import '../look.dart';
 import '../network_watch.dart';
 import '../server.dart';
@@ -51,79 +52,6 @@ void openSavedConversations(BuildContext context, Server server) {
   );
 }
 
-class ArchiveSaveButton extends StatefulWidget {
-  const ArchiveSaveButton({
-    super.key,
-    required this.server,
-    required this.pane,
-    required this.source,
-  });
-  final Server server;
-  final Pane pane;
-  final String Function() source;
-  @override
-  State<ArchiveSaveButton> createState() => _ArchiveSaveButtonState();
-}
-
-class _ArchiveSaveButtonState extends State<ArchiveSaveButton> {
-  late final _repository = ArchiveRepository(widget.server);
-  @override
-  void dispose() {
-    _repository.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    try {
-      await _repository.savePane(widget.pane, source: widget.source());
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('대화 텍스트를 오프라인에 저장했어요'),
-          action: SnackBarAction(
-            label: '보기',
-            onPressed: () => openSavedConversations(context, widget.server),
-          ),
-        ),
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('$e')));
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _repository,
-    builder: (context, _) {
-      final busy = _repository.downloading != null;
-      return Tooltip(
-        message: '대화 텍스트·코드·도구 요약을 저장해요. 외부 첨부 파일은 포함되지 않아요.',
-        child: TextButton.icon(
-          onPressed: _repository.locked
-              ? null
-              : busy
-              ? _repository.cancel
-              : _save,
-          icon: busy
-              ? SizedBox.square(
-                  dimension: Look.iconSize,
-                  child: CircularProgressIndicator(
-                    value: _repository.progress,
-                    strokeWidth: 2,
-                  ),
-                )
-              : const Icon(Icons.download_outlined),
-          label: Text(busy ? '저장 취소' : '오프라인 저장'),
-        ),
-      );
-    },
-  );
-}
-
 class SavedConversationsScreen extends StatefulWidget {
   const SavedConversationsScreen({
     super.key,
@@ -140,7 +68,7 @@ class SavedConversationsScreen extends StatefulWidget {
 class _SavedConversationsScreenState extends State<SavedConversationsScreen>
     with WidgetsBindingObserver {
   late final _repository =
-      widget.repository ?? ArchiveRepository(widget.server);
+      widget.repository ?? ConversationCache.of(widget.server).repository;
   bool _savedOnly = true;
   Timer? _timer;
   @override
@@ -178,7 +106,6 @@ class _SavedConversationsScreenState extends State<SavedConversationsScreen>
     WidgetsBinding.instance.removeObserver(this);
     BackgroundGrace.instance.removeListener(_connected);
     NetworkWatch.instance.removeListener(_connected);
-    if (widget.repository == null) _repository.dispose();
     super.dispose();
   }
 
@@ -204,14 +131,6 @@ class _SavedConversationsScreenState extends State<SavedConversationsScreen>
   void _show(Object e) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
-    }
-  }
-
-  Future<void> _download(ArchiveEntry entry) async {
-    try {
-      await _repository.save(entry);
-    } catch (e) {
-      _show(e);
     }
   }
 
@@ -346,7 +265,7 @@ class _SavedConversationsScreenState extends State<SavedConversationsScreen>
                                 padding: const EdgeInsets.all(Look.pagePad),
                                 child: Text(
                                   _savedOnly
-                                      ? '저장한 대화가 없어요. 대화 화면에서 오프라인 저장을 눌러 주세요.'
+                                      ? '대화가 연결되면 자동으로 저장돼요. 저장된 내용은 연결 없이도 읽을 수 있어요.'
                                       : r.enabled
                                       ? '기기가 연결되면 대화 기록이 여기에 모여요.'
                                       : '기기 대화 동기화를 켜면 원본 기기가 꺼져도 기록을 받을 수 있어요.',
@@ -395,21 +314,6 @@ class _SavedConversationsScreenState extends State<SavedConversationsScreen>
                                               value: r.progress,
                                               strokeWidth: 2,
                                             ),
-                                          ),
-                                        )
-                                      else if ((cached == null || newer) &&
-                                          entry.ready)
-                                        IconButton(
-                                          tooltip: newer
-                                              ? '새 내용 저장'
-                                              : '오프라인 저장',
-                                          onPressed:
-                                              r.downloading != null ||
-                                                  !r.available
-                                              ? null
-                                              : () => _download(cloud ?? entry),
-                                          icon: const Icon(
-                                            Icons.download_outlined,
                                           ),
                                         ),
                                       PopupMenuButton<String>(

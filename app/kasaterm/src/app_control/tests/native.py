@@ -25,11 +25,11 @@ def rpc(path, method, params):
         return json.loads(s.makefile('rb').readline())
 
 
-def phase(name, automatic=False, missing=False):
+def phase(name, automatic=False, missing=False, mutation=False):
     rig = RUN / name
     rig.mkdir()
     (rig / 'tmp').mkdir()
-    (rig / 'settings.json').write_text(json.dumps({'shim_inject':False,'font_size':13,'onboarding_complete':True}))
+    (rig / 'settings.json').write_text(json.dumps({'shim_inject':False,'font_size':13,'onboarding_complete':True,'claude_account':''}))
     state = {'active_session':0,'sessions':[{'active_window':0,'windows':[
         {'leaf':{'pane_id':'%31','cwd':str(rig),'shell':'/bin/sh','title':'Saved first'}},
         {'leaf':{'pane_id':'%32','cwd':str(rig),'shell':'/bin/sh','title':'Saved second'}}]}]}
@@ -79,8 +79,18 @@ def phase(name, automatic=False, missing=False):
             assert not bad['ok']
             assert inspect()['restore']['selected_count']==2
             current=inspect()
-            restored=json.loads(subprocess.run([str(CLI),'app','restore','--expect',current['revision']],env=env,capture_output=True,timeout=15,check=True).stdout)
-            assert restored['ok'],restored
+            assert not current['ready']
+            if mutation:
+                if mutation == 'http':
+                    request=urllib.request.Request(f'http://127.0.0.1:{port}/spawn-shell?window=new',data=b'')
+                    refused=json.load(urllib.request.urlopen(request,timeout=10))
+                else:
+                    refused=rpc(rig/'app.sock','window.new',{})
+                assert not refused['ok'] and 'app_restoring' in str(refused),refused
+                (rig/'mutation.json').write_text(json.dumps(refused,ensure_ascii=False,indent=2))
+            else:
+                restored=json.loads(subprocess.run([str(CLI),'app','restore','--expect',current['revision']],env=env,capture_output=True,timeout=15,check=True).stdout)
+                assert restored['ok'],restored
         until=time.monotonic()+20
         while True:
             after=inspect()
@@ -90,6 +100,7 @@ def phase(name, automatic=False, missing=False):
             time.sleep(.3)
         (rig/'after.json').write_text(json.dumps(after,ensure_ascii=False,indent=2))
         if not missing:
+            assert after['ready'],after
             assert after['restart']['plain_shells']==2,after
             image=rpc(rig/'app.sock','surface.capture',{'surface_id':'','path':str(rig/'after.png'),'max_width':1100})
             assert image['ok'],image
@@ -122,5 +133,7 @@ if __name__=='__main__':
         result=phase(name,auto,missing)
         results.append(result)
         print(json.dumps(result),flush=True)
+    results.append(phase('agent-mutation', mutation=True))
+    results.append(phase('agent-http', mutation='http'))
     (RUN/'report.json').write_text(json.dumps(results,indent=2))
     print(RUN,flush=True)

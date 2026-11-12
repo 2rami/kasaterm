@@ -25,6 +25,25 @@ Map<String, Object?> assistant(List<Object> blocks) => {
 };
 
 void main() {
+  test('queued tell and Codex delivery retain the sender without settling my echo', () {
+    final c = Conversation();
+    final echo = c.echo('report');
+    c.apply(lines([
+      {'type':'queue-operation','operation':'enqueue','content':'⟦유즈⟧ report'},
+      {'type':'queue-operation','operation':'enqueue','content':'my words'},
+      {'type':'event_msg','payload':{'type':'user_message','message':'⟦아로나⟧ report'}},
+    ]), reset: true, next: 10);
+    final bubbles = c.items.cast<ChatBubble>();
+    expect(bubbles.map((b) => b.mine), [false, true, false]);
+    expect(bubbles.map((b) => b.from), ['유즈', null, '아로나']);
+    expect(bubbles.first.queued, isTrue);
+    expect(bubbles.first.text, 'report');
+    expect(c.echoes, contains(echo));
+    c.apply(lines([{'type':'queue-operation','operation':'remove'}]), reset:false, next:20);
+    expect(bubbles.first.from, '유즈');
+    expect(bubbles.first.queued, isFalse);
+  });
+
   test('claude 대화: 말풍선·도구 짝·주입 숨김', () {
     final c = Conversation();
     c.apply(

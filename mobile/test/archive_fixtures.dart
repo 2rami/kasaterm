@@ -97,6 +97,9 @@ class FakeArchiveApi implements ArchiveApi {
 }
 
 class MemoryArchiveStore implements ArchiveStore {
+  final exclusions = <String>{};
+  @override
+  Future<bool> excluded(String scope, String id) async => exclusions.contains('$scope|$id');
   final values = <String, Map<String, SavedConversation>>{};
   @override
   bool get persistent => true;
@@ -114,10 +117,12 @@ class MemoryArchiveStore implements ArchiveStore {
   }) async {
     if (!current()) throw const ArchiveException('저장을 취소했어요.');
     values.putIfAbsent(scope, () => {})[conversation.entry.id] = conversation;
+    exclusions.remove('$scope|${conversation.entry.id}');
   }
 
   @override
   Future<void> remove(String scope, String id) async {
     values[scope]?.remove(id);
+    exclusions.add('$scope|$id');
   }
 }

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:kasaterm_mobile/archive_store.dart';
+import 'package:kasaterm_mobile/conversation_cache.dart';
 import 'package:kasaterm_mobile/approvals.dart';
 import 'package:kasaterm_mobile/connection_store.dart';
 import 'package:kasaterm_mobile/main.dart';
@@ -60,13 +61,18 @@ void main() {
         );
         await const ConnectionStore().save(SavedConnection(account: account));
         final server = Server.account(account, connectDirect: false);
+        ConversationCache.of(server).start();
         await tester.pumpWidget(
           MaterialApp(
             theme: buildTheme(Brightness.light),
             home: SavedConversationsScreen(server: server),
           ),
         );
-        await tester.tap(find.text('계정 기록'));
+        final store = await openArchiveStore();
+        await until(tester, () => fixture.reads.isNotEmpty, 'automatic download without a button');
+        await until(tester, () => find.text(OfflineArchiveFixture.title).evaluate().isNotEmpty, 'automatically saved list');
+        expect(find.text('오프라인 저장'), findsNothing);
+
         await until(
           tester,
           () => find.text(OfflineArchiveFixture.title).evaluate().isNotEmpty,
@@ -85,7 +91,6 @@ void main() {
           ),
           findsOneWidget,
         );
-        final store = await openArchiveStore();
         final saved = await store.read(server.resumeScope, fixture.entry.id);
         expect(saved?.raw, fixture.raw);
         expect(fixture.reads, [0]);
@@ -95,6 +100,7 @@ void main() {
           flush: true,
         );
         await fixture.close();
+        server.close();
       } else {
         expect(previous['phase'], 'downloaded');
         final account = (await const ConnectionStore().load())!.account!;

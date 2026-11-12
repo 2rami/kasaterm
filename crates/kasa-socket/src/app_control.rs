@@ -36,6 +36,19 @@ impl Request {
     }
 }
 
+pub fn needs_ready(method: &str) -> bool {
+    matches!(method,
+        "surface.focus" | "surface.split" | "surface.split_fleet" | "surface.remote" | "surface.migrate"
+        | "surface.send_text" | "surface.launch" | "surface.server" | "surface.paste" | "surface.send_key" | "surface.send_raw"
+        | "surface.close" | "surface.close_checked" | "surface.close_idle_checked" | "surface.reopen_checked"
+        | "surface.dock" | "surface.undock" | "surface.rename" | "surface.set_color" | "surface.repersona"
+        | "surface.swap" | "surface.move" | "surface.new_tab" | "surface.resize_divider" | "surface.set_ratio" | "surface.set_ratio_between"
+        | "surface.open_preview" | "surface.open_url" | "app.open_document" | "web.drive"
+        | "session.new" | "session.switch" | "session.close" | "session.resume"
+        | "window.new" | "window.switch" | "window.close" | "window.close_checked" | "window.reorder" | "window.rename"
+        | "collab.act" | "collab.tell" | "remote.spawn_shell" | "machine.unfold" | "machine.home")
+}
+
 fn hash(state: &Value) -> String {
     format!("{:x}", Sha256::digest(state.to_string().as_bytes()))
 }

@@ -8,6 +8,7 @@ import '../background_grace.dart';
 import '../chat_markdown.dart';
 import '../inline_result.dart';
 import '../conversation.dart';
+import '../conversation_cache.dart';
 import '../file_link.dart';
 import '../server.dart';
 import '../server_image.dart';
@@ -174,7 +175,6 @@ class ConversationView extends StatefulWidget {
     this.draft,
     this.conversation,
     this.readOnly = false,
-    this.footerAction,
   });
 
   final Server server;
@@ -182,7 +182,6 @@ class ConversationView extends StatefulWidget {
   /// 화면이 쥔 기록 — 보낸 말을 기록보다 먼저 세운다([Conversation.echo]). 없으면 제 것을 쓴다.
   final Conversation? conversation;
   final bool readOnly;
-  final Widget? footerAction;
 
   final Pane pane;
   final TermSession session;
@@ -216,6 +215,9 @@ class _ConversationViewState extends State<ConversationView> {
   Timer? _timer;
   bool _polling = false;
   bool _loaded = false;
+  bool _cached = false;
+  bool _receivedLive = false;
+  bool _bootstrapping = true;
   bool _missing = false;
   String? _error;
   bool _awayFromBottom = false;
@@ -236,8 +238,30 @@ class _ConversationViewState extends State<ConversationView> {
     super.initState();
     BackgroundGrace.instance.addListener(_graceChanged);
     _scroll.addListener(_onScroll);
-    _loaded = widget.readOnly;
-    if (widget.active) _start();
+    _loaded = widget.readOnly || _conv.items.isNotEmpty;
+    unawaited(_bootstrap());
+  }
+
+  Future<void> _bootstrap() async {
+    if (!widget.readOnly && _conv.items.isEmpty) {
+      try { await _hydrate().timeout(const Duration(milliseconds: 150)); }
+      on TimeoutException { /* A slow disk must not delay the source request. */ }
+    }
+    _bootstrapping = false;
+    if (mounted && widget.active && BackgroundGrace.instance.live) _start();
+  }
+
+  Future<void> _hydrate() async {
+    final cache = ConversationCache.of(widget.server);
+    cache.warm([widget.pane], priority: true);
+    try {
+      final saved = await cache.repository.openPane(widget.pane);
+      if (!mounted || widget.server.isClosed || _receivedLive || _conv.items.isNotEmpty || saved == null) return;
+      _conv.hydrateArchive(saved.raw, next: saved.entry.cursor, source: saved.entry.source);
+      setState(() { _loaded = true; _cached = true; });
+    } catch (_) {
+      // A bad cache is ignored; the source still gets a fresh request.
+    }
   }
 
   @override
@@ -270,7 +294,7 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   void _start() {
-    if (widget.readOnly) return;
+    if (widget.readOnly || _bootstrapping) return;
     _poll();
     _timer ??= Timer.periodic(_pollEvery, (_) => _poll());
     unawaited(_liveLoop());
@@ -361,7 +385,7 @@ class _ConversationViewState extends State<ConversationView> {
     try {
       final pane = widget.pane;
       final from = _conv.offset;
-      final waited = _loaded && !_missing;
+      final waited = _loaded && !_missing && !_cached && _receivedLive;
       final chunk = await widget.server.transcriptRaw(
         pane.id,
         from,
@@ -371,6 +395,7 @@ class _ConversationViewState extends State<ConversationView> {
       );
       if (!mounted) return;
       if (chunk == null) {
+        if (_cached) return;
         setState(() {
           _missing = true;
           _loaded = true;
@@ -378,6 +403,9 @@ class _ConversationViewState extends State<ConversationView> {
         });
         return;
       }
+      _receivedLive = true;
+      final wasCached = _cached;
+      _cached = false;
       // 기다려 받은 새 줄이면 곧바로 다음 줄을 기다린다 — 타이머 박자를 안 기다린다.
       again = waited && !chunk.reset && chunk.offset > from && widget.active;
       if (!_conv.apply(chunk.raw, reset: chunk.reset, next: chunk.offset, source: chunk.source)) {
@@ -385,7 +413,7 @@ class _ConversationViewState extends State<ConversationView> {
         _conv.clear();
         _open.clear();
       }
-      if (_loaded && !_missing && _rowsVersion == _conv.version) return;
+      if (_loaded && !_missing && !wasCached && _rowsVersion == _conv.version) return;
       setState(() {
         _loaded = true;
         _missing = false;
@@ -494,6 +522,11 @@ class _ConversationViewState extends State<ConversationView> {
     final held = DateTime.now().isBefore(_menuHold);
     return Column(
       children: [
+        if (_cached) Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text('저장된 대화 · 연결 확인 중', style: TextStyle(fontSize: Look.sub,
+              color: Theme.of(context).colorScheme.onSurfaceVariant)),
+        ),
         Expanded(child: DismissKeyboard(child: _body(context))),
         if (menu != null)
           _MenuCard(
@@ -526,13 +559,7 @@ class _ConversationViewState extends State<ConversationView> {
             onTerminal: widget.onTerminal,
           ),
         // 셸 명령 쪽과 같은 맥락 줄 — 앱바엔 경로가 들어갈 폭이 없다.
-        if (widget.footerAction != null)
-          Row(children: [
-            Expanded(child: widget.pane.cwd.isEmpty ? const SizedBox.shrink() : PlaceLine(cwd: widget.pane.cwd, branch: widget.pane.branch,
-              style: TextStyle(fontFamily: 'TermMono', fontFamilyFallback: Look.flowMonoFallback, fontSize: Look.sub, color: Theme.of(context).colorScheme.onSurfaceVariant))),
-            widget.footerAction!,
-          ])
-        else if (widget.pane.cwd.isNotEmpty)
+        if (widget.pane.cwd.isNotEmpty)
           PlaceLine(
             cwd: widget.pane.cwd,
             branch: widget.pane.branch,

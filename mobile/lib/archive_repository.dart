@@ -65,6 +65,7 @@ class ArchiveRepository extends ChangeNotifier {
   int _job = 0;
   static int _deleteSerial = 0;
   static final Map<String, int> _deleted = {};
+  static final Set<String> _autoExcluded = {};
   final Set<String> _paused = {};
   List<ArchiveEntry> saved = const [];
   List<ArchiveEntry> remote = const [];
@@ -103,8 +104,12 @@ class ArchiveRepository extends ChangeNotifier {
     return '대화를 받지 못했어요. 저장한 대화는 계속 읽을 수 있어요.';
   }
 
-  void reconnect() {
+  void freshConnections() {
     if (_api case final RelayArchiveApi api) api.freshConnections();
+  }
+
+  void reconnect() {
+    freshConnections();
     unawaited(load(updateSaved: true));
   }
 
@@ -203,8 +208,39 @@ class ArchiveRepository extends ChangeNotifier {
     return result;
   }
 
-  void cancel() {
-    if (downloading case final String id when RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) _paused.add(id);
+  Future<SavedConversation?> openPane(Pane pane, {String source = ''}) async {
+    if (locked || pane.surfaceKey == null) return null;
+    final rows = await (await _storage()).list(scope);
+    final matches = rows.where((e) => e.surfaceKey == pane.surfaceKey &&
+        (source.isEmpty || e.source == source) &&
+        (!(pane.machine?.startsWith('~') ?? false) ||
+            (pane.mirrorOf?.isNotEmpty ?? false) || e.machineId == pane.machine!.substring(1))).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return matches.isEmpty ? null : open(matches.first.id);
+  }
+
+  Future<bool> autoAllowed(String id) async => !_autoExcluded.contains(_key(id)) && !_paused.contains(id)
+      && !await (await _storage()).excluded(scope, id);
+
+  Future<void> refreshRecent() async {
+    await load(updateSaved: true);
+    if (locked || downloading != null) return;
+    final recent = remote.where((e) => e.ready && !e.deleted).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    var bytes = 0;
+    for (final entry in recent.take(20)) {
+      if (!await autoAllowed(entry.id)) continue;
+      bytes += entry.bytes;
+      if (bytes > 128 << 20 || locked) break;
+      final local = saved.where((e) => e.id == entry.id).firstOrNull;
+      if (local == null || entry.newerThan(local)) {
+        try { await save(entry); } on ArchiveException { /* Keep completed snapshots on network failure. */ }
+      }
+    }
+  }
+
+  void cancel({bool pause = true}) {
+    if (downloading case final String id when pause && RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) _paused.add(id);
     _job++;
     downloading = null;
     progress = null;
@@ -214,6 +250,7 @@ class ArchiveRepository extends ChangeNotifier {
   Future<void> remove(String id, {bool fromAccount = false}) async {
     if (locked) return;
     _deleted[_key(id)] = ++_deleteSerial;
+    _autoExcluded.add(_key(id));
     if (downloading == id) cancel();
     if (fromAccount && _api != null) await _api.delete(id);
     await (await _storage()).remove(scope, id);
@@ -232,14 +269,16 @@ class ArchiveRepository extends ChangeNotifier {
 
   Future<SavedConversation> save(ArchiveEntry entry) {
     _paused.remove(entry.id);
+    _autoExcluded.remove(_key(entry.id));
     return _saving(entry.id, (current) => _download(entry, current));
   }
 
   Future<SavedConversation> savePane(
     Pane pane, {
     String source = '',
+    bool direct = false,
   }) => _saving('pane:${pane.id}', (current) async {
-    if (_api != null) {
+    if (_api != null && !direct) {
       try {
         final catalog = await _api.catalog();
         final matches =
@@ -275,14 +314,16 @@ class ArchiveRepository extends ChangeNotifier {
     if (source.isEmpty && pane.surfaceKey == null) {
       throw const ArchiveException('대화를 먼저 불러온 뒤 저장해 주세요.');
     }
-    var cursor = 0;
-    var held = source;
-    String? machine, key, id;
+    final previous = await openPane(pane, source: source);
+    var cursor = previous?.entry.cursor ?? 0;
+    var held = source.isNotEmpty ? source : previous?.entry.source ?? '';
+    String? machine = previous?.entry.machineId, key = previous?.entry.surfaceKey, id;
     var machineName = pane.machine?.startsWith('~') == true
         ? '연결된 기기'
         : pane.machine ?? '이 기기';
-    var size = 0;
-    final raw = StringBuffer();
+    var size = previous?.entry.bytes ?? 0;
+    final raw = StringBuffer(previous?.raw ?? '');
+    var restarted = false;
     final deadline = DateTime.now().add(const Duration(minutes: 5));
     while (true) {
       if (!current(id)) throw const ArchiveException('저장을 취소했어요.');
@@ -294,6 +335,14 @@ class ArchiveRepository extends ChangeNotifier {
       final text = chunk['raw'],
           next = chunk['offset'],
           origin = chunk['source'];
+      if (cursor != 0 && chunk['reset'] == true && !restarted) {
+        restarted = true;
+        cursor = 0;
+        held = source;
+        size = 0;
+        raw.clear();
+        continue;
+      }
       if (address is! Map ||
           text is! String ||
           next is! int ||
@@ -320,6 +369,7 @@ class ArchiveRepository extends ChangeNotifier {
       }
       key = address['surface_key'] as String;
       id = sha256.convert(utf8.encode('$machine\u0000$held')).toString();
+      if (direct && !await autoAllowed(id)) throw const ArchiveException('자동 저장에서 제외한 대화예요.');
       final bytes = utf8.encode(text).length;
       if (bytes > 4 << 20 ||
           size + bytes > maxArchiveBytes ||
@@ -328,7 +378,13 @@ class ArchiveRepository extends ChangeNotifier {
       }
       raw.write(text);
       size += bytes;
-      if (next == cursor) break;
+      if (next == cursor) {
+        if (!restarted && previous != null && previous.entry.id == id &&
+            previous.entry.cursor == cursor && previous.entry.bytes == size) {
+          return previous;
+        }
+        break;
+      }
       cursor = next;
     }
     final entry = ArchiveEntry(

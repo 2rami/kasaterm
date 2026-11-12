@@ -26,7 +26,6 @@ import '../term_session.dart';
 import '../theme_prefs.dart';
 import '../weather/scene.dart';
 import 'conversation_view.dart';
-import 'saved_conversations.dart';
 import 'shell_blocks_view.dart';
 import 'controls.dart';
 
@@ -852,7 +851,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                       bottomTick: _bottomTick,
                                       active: _paging || chat,
                                       draft: _chatInput,
-                                      footerAction: ArchiveSaveButton(server: widget.server, pane: pane, source: () => _conversation.source),
                                     ),
                                   )),
                                 ),

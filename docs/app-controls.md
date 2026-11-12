@@ -23,3 +23,10 @@ kasaterm-cli app update-check --machine <등록된-machine_id> --expect <inspect
 - `update-check`: 설치된 Sparkle/WinSparkle의 업데이트 창을 연다. 업데이트 설치 완료·OS 권한 승인을 뜻하지 않는다.
 
 소스: `kasa-socket::app_control`(계약·관측 조건), `kasa-http::http::app_control`(소유자 문), 앱 `app_control.rs`(GUI 작업), `cli/app_control.rs`(명령·캡처 파일). 캡처는 기존 `kasa_remote::screen_mirror::Source`를 공유한다. 재기동 도우미·작업 기록은 기존 `app_restart`를 재사용한다.
+
+일반 조작도 복원 상태를 확인한다. 복원 창에서 선택된 작업이 있으면 최초 조작이 같은 복원 경로를 시작하고
+`app_restoring` 오류를 반환한다. **그 조작 자체는 실행하지 않는다.** `inspect.ready`가 true가 된 뒤 현재 판에서
+대상 주소를 다시 찾고 요청한다. 복원 전의 `%N`에 대기 중 조작을 재생하지 않는다. 선택이 비었거나 복원이 실패하면
+까닭을 돌려주며 새로 시작·기록 삭제로 대체하지 않는다. 실패한 복원은 새 revision으로 `app restore`를 다시 부르면
+기존 UI의 다시 시도 경로를 타며 이미 준비된 칸은 유지한다. `where`의 `app`에도 준비·복원 상태가 실린다.
+단순 조회·캡처·연결 확인·미러 크기 갱신은 자동 복원을 시작하지 않는다.

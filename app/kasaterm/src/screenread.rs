@@ -1264,26 +1264,12 @@ pub(crate) fn restyle_peer_native_header(
     }
 }
 
-/// 이 슬러그로 프사를 실제로 그릴 수 있는가.
-///
-/// 활성 명부의 슬러그는 통과시킨다 — 그림은 활성 자산 경로(`students_dir()`)가
-/// 댄다. **넓힌 몫**(다른 테마·번들에서 온 이름)은 그 그림이 거기 없으므로 뒤 두
-/// 칸으로 가른다: 컴파일 내장 프사(match 하나라 IO 0), 그리고 다른 설치 테마의
-/// `sprites/`(파일 존재만 — 앞 둘이 다 빗나간 이름에만 오므로 흔치 않다).
-///
-/// 세 칸의 순서가 `student_profile_rgba_full` 의 3단과 **같아야** 한다. 어긋나면
-/// 여기서는 통과시킨 슬러그를 로더가 못 찾아 자리만 비고 그림이 안 온다.
-///
-/// 게이트가 필요한 이유: 프사를 그리는 자리들은 **먼저 자리를 비운다**(tell 은 2칸,
-/// 피커는 `#이름` 태그를 통째로). 슬러그만 믿고 자리를 비웠는데 그림이 없으면
-/// 지운 자리에 아무것도 안 들어와 **빈 칸으로 남는다**.
+/// 로더와 같은 자산 경계를 확인해야 그림 없는 학생에게 빈 얼굴 자리를 만들지 않는다.
 pub(crate) fn face_ready(slug: &str) -> bool {
     if !theme::character_appearance() {
         return false;
     }
-    theme::slug_character(slug).is_some()
-        || crate::sprites::student_profile_png(slug).is_some()
-        || crate::sprites::other_theme_has_profile(slug)
+    crate::sprites::has_student_profile(slug)
 }
 
 /// 이름 → 프사에 쓸 슬러그. tell·피커·팀메시지가 **이 하나를** 쓴다 — 판정이 두
@@ -1357,7 +1343,7 @@ pub(crate) fn restyle_tell_messages(
             r += 1;
             continue;
         };
-        let Some(accent) = theme::character_accent_any(&name) else {
+        let Some(accent) = student_face_slug(&name).and_then(|_| theme::character_accent_any(&name)) else {
             r += 1;
             continue;
         };
@@ -1381,8 +1367,18 @@ pub(crate) fn restyle_tell_messages(
         r += 1;
         while r < rows.len() {
             let cols = foreground.prefix_end(r, rows[r].len());
+            let paragraph = msg_blank_row(&rows[r][..cols]) && rows[r + 1..].iter().enumerate()
+                .find(|(i, row)| !msg_blank_row(&row[..foreground.prefix_end(r + 1 + i, row.len())]))
+                .is_some_and(|(i, row)| {
+                    let next = &row[..foreground.prefix_end(r + 1 + i, row.len())];
+                    tell_body_row(next, band.as_ref())
+                        && rows[r..r + 1 + i].iter().enumerate().all(|(j, row)| {
+                            let row = &row[..foreground.prefix_end(r + j, row.len())];
+                            band.as_ref().is_none_or(|band| band_edges(row).as_ref() == Some(band))
+                        })
+                });
             let row = &mut rows[r][..cols];
-            if !tell_wrap_continuation(row)
+            if (!tell_body_row(row, band.as_ref()) && !paragraph)
                 || band.as_ref().is_some_and(|band| band_edges(row).as_ref() != Some(band))
             {
                 break;
@@ -1405,6 +1401,12 @@ pub(crate) fn restyle_tell_messages(
         }
     }
     faces
+}
+
+fn tell_body_row(row: &[GridCell], band: Option<&kasa_bridge::screen::Color>) -> bool {
+    let Some(band) = band else { return tell_wrap_continuation(row) };
+    band_edges(row).as_ref() == Some(band) && row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))
+        .is_some_and(|first| first >= 2)
 }
 
 fn message_fill(accent: [u8; 4]) -> kasa_bridge::screen::Color {
@@ -5787,8 +5789,7 @@ mod teammate_msg_tests {
     fn student_face_slug_needs_a_real_picture() {
         assert_eq!(student_face_slug("미도리"), Some("midori"));
         assert!(student_face_slug("없는캐릭").is_none());
-        // 활성 명부 슬러그는 그림 확인 없이 통과 — 그림은 활성 자산 경로가 댄다.
-        assert!(face_ready("midori"), "활성 명부 슬러그가 막히면 기존 프사가 전멸한다");
+        assert!(face_ready("midori"), "내장 프사는 사용할 수 있어야 한다");
         // 어느 쪽으로도 그림을 못 찾으면 막는다.
         assert!(!face_ready("존재하지않는슬러그"));
     }
@@ -5912,6 +5913,34 @@ mod teammate_msg_tests {
             assert_eq!(rows[r][9..20].iter().map(|c| c.ch).collect::<Vec<_>>(),
                 original[r][9..20].iter().map(|c| c.ch).collect::<Vec<_>>());
         }
+    }
+
+    #[test]
+    fn tell_keeps_paragraphs_and_stops_before_the_next_message() {
+        use kasa_bridge::screen::Color;
+        let mut rows = vec!["› ⟦유즈⟧ first", "  wrapped", "", "  second paragraph", "", "",
+            "  | table content |", "", "› ordinary prompt", "  ordinary body"]
+            .into_iter().map(|s| {
+                let mut row = row_from(s, 60);
+                for cell in &mut row { cell.bg = Color::Rgb(72,77,84); }
+                row
+            }).collect::<Vec<_>>();
+        let original = rows.clone();
+        restyle_tell_messages(&mut rows, &TuiForeground::default());
+        let fill = rows[0][0].bg.clone();
+        for (r, row) in rows[..8].iter().enumerate() {
+            assert!(row.iter().all(|c|c.bg == fill), "paragraph {r} lost its background");
+        }
+        assert_ne!(rows[3][2].fg, original[3][2].fg);
+        assert_eq!(rows[8..], original[8..]);
+    }
+
+    #[test]
+    fn unrecognized_sender_stays_an_ordinary_message() {
+        let mut rows = vec![row_from("› ⟦No picture⟧ hello", 60), row_from("  body", 60)];
+        let original = rows.clone();
+        assert!(restyle_tell_messages(&mut rows, &TuiForeground::default()).is_empty());
+        assert_eq!(rows, original);
     }
 
     #[test]

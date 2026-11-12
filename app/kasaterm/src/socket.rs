@@ -1234,6 +1234,7 @@ impl Backend for PtyBackend {
 
     /// `POST /session-switch?idx=N` — 방=윈도우 전환을 GUI 스레드에 위임.
     fn switch_session(&self, idx: usize) -> Result<()> {
+        self.prepare_action()?;
         self.proxy
             .send_event(UserEvent::SocketSwitchSession(idx))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
@@ -1242,6 +1243,7 @@ impl Backend for PtyBackend {
 
     /// `POST /session-new?character=<name>` — 새 방(윈도우) + 캐릭터 지정 스폰을 GUI 에 위임.
     fn new_room(&self, character: &str) -> Result<()> {
+        self.prepare_action()?;
         self.proxy
             .send_event(UserEvent::SocketNewRoom(character.to_string()))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
@@ -1252,6 +1254,7 @@ impl Backend for PtyBackend {
     /// split 은 GUI 스레드에서 도니 reply 채널로 새 pane id 를 받아 돌려준다
     /// (`split_surface` 와 같은 패턴) — 디스패처가 그 주소로 브리프를 쏜다.
     fn spawn_student(&self, character: &str) -> Result<String> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
             .send_event(UserEvent::SocketSpawnStudent(character.to_string(), tx))
@@ -1263,6 +1266,7 @@ impl Backend for PtyBackend {
 
     /// `POST /spawn-shell?cwd=` — 다른 기계의 `to` 가 비출 맨 셸 pane.
     fn spawn_shell(&self, cwd: Option<&str>) -> Result<String> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
             .send_event(UserEvent::SocketSpawnShell(cwd.map(str::to_string), tx))
@@ -1273,6 +1277,7 @@ impl Backend for PtyBackend {
     }
 
     fn spawn_shell_at(&self, at: &kasa_socket::backend::SpawnShellAt) -> Result<kasa_socket::backend::SpawnShellReply> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
             .send_event(UserEvent::SocketSpawnShellAt(at.clone(), tx))
@@ -1296,6 +1301,7 @@ impl Backend for PtyBackend {
     }
 
     fn transfer_spawn(&self, request: &kasa_socket::transfer::SpawnRequest) -> Result<kasa_socket::transfer::SessionRow> {
+        self.prepare_action()?;
         let mut request = request.clone();
         let path = std::path::Path::new(&request.cwd);
         if !path.is_absolute() || !path.is_dir() { anyhow::bail!("도착 기계에 작업 폴더가 없어요"); }
@@ -1317,6 +1323,7 @@ impl Backend for PtyBackend {
     }
 
     fn transfer_close(&self, identity: &kasa_socket::transfer::SessionIdentity) -> Result<()> {
+        self.prepare_action()?;
         if identity.machine_id != crate::transfer_endpoints::machine_context()?.0 {
             anyhow::bail!("이 기계의 세션이 아니에요");
         }
@@ -1327,6 +1334,7 @@ impl Backend for PtyBackend {
     }
 
     fn transfer_launch(&self, request: &kasa_socket::transfer::LaunchRequest) -> Result<kasa_socket::transfer::SessionRow> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy.send_event(UserEvent::TransferLaunch(request.clone(), tx, std::time::Instant::now() + std::time::Duration::from_secs(30)))
             .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
@@ -1335,6 +1343,7 @@ impl Backend for PtyBackend {
 
     /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).
     fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
+        self.prepare_action()?;
         self.proxy
             .send_event(UserEvent::SocketSwapCharacter(
                 surface_id.to_string(),
@@ -1476,6 +1485,7 @@ impl Backend for PtyBackend {
 
     /// `POST /session-close?idx=N` — 방(윈도우) 닫기를 GUI 스레드에 위임.
     fn close_session(&self, idx: usize) -> Result<()> {
+        self.prepare_action()?;
         self.proxy
             .send_event(UserEvent::SocketCloseRoom(idx))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
@@ -1552,6 +1562,7 @@ impl Backend for PtyBackend {
     }
 
     fn focus_surface(&self, surface_id: &str) -> Result<()> {
+        self.prepare_action()?;
         let _ = self
             .proxy
             .send_event(UserEvent::SocketFocus(surface_id.to_string()));
@@ -1559,6 +1570,7 @@ impl Backend for PtyBackend {
     }
 
     fn paste_image(&self, surface: &str, bytes: Vec<u8>) -> Result<()> {
+        self.prepare_action()?;
         if let Some(pty) = kasa_pty::lookup_session(surface) { pty.reserve_input_draft(); }
         let (reply, result) = std::sync::mpsc::channel();
         self.proxy
@@ -1585,6 +1597,7 @@ impl Backend for PtyBackend {
     }
 
     fn swap_surfaces(&self, a: &str, b: &str) -> Result<()> {
+        self.prepare_action()?;
         // 검증은 여기(backend 스레드, ws 조회 가능)서 — GUI 위임은 fire-and-
         // forget 이라 저쪽 실패를 CLI 에 돌려줄 수 없다.
         if a == b {
@@ -1660,6 +1673,7 @@ impl Backend for PtyBackend {
         attach: bool,
         harness: &str,
     ) -> Result<()> {
+        self.prepare_action()?;
         self.proxy
             .send_event(UserEvent::ResumeSession {
                 id: id.to_string(),
@@ -1674,6 +1688,7 @@ impl Backend for PtyBackend {
     }
 
     fn save_session(&self, surface: Option<&str>) -> Result<()> {
+        self.prepare_action()?;
         self.proxy
             .send_event(UserEvent::SaveSession {
                 surface: surface.map(str::to_string),
@@ -1684,6 +1699,7 @@ impl Backend for PtyBackend {
     }
 
     fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
+        self.prepare_action()?;
         let _ = self.proxy.send_event(UserEvent::SocketRename(
             surface_id.to_string(),
             title.to_string(),
@@ -1692,6 +1708,7 @@ impl Backend for PtyBackend {
     }
 
     fn rename_window(&self, surface_id: &str, title: &str) -> Result<()> {
+        self.prepare_action()?;
         let _ = self.proxy.send_event(UserEvent::SocketRenameWindow(
             surface_id.to_string(),
             title.to_string(),
@@ -1700,6 +1717,7 @@ impl Backend for PtyBackend {
     }
 
     fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()> {
+        self.prepare_action()?;
         let _ = self
             .proxy
             .send_event(UserEvent::SocketColor(surface_id.to_string(), color));
@@ -1782,6 +1800,7 @@ impl Backend for PtyBackend {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo> {
+        self.prepare_action()?;
         let dir = match direction {
             SplitDirection::Right | SplitDirection::Left => Some(kasa_pty::SplitDir::Horizontal),
             SplitDirection::Up | SplitDirection::Down => Some(kasa_pty::SplitDir::Vertical),
@@ -1838,6 +1857,7 @@ impl Backend for PtyBackend {
         here: bool,
         run: Option<&str>,
     ) -> Result<SurfaceInfo> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketRemotePane(
             base.to_string(),
@@ -1877,6 +1897,7 @@ impl Backend for PtyBackend {
         run: Option<&str>,
         resume: Option<&str>,
     ) -> Result<String> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketMigrate(
             pane.to_string(),
@@ -1896,6 +1917,7 @@ impl Backend for PtyBackend {
     }
 
     fn migrate_pane_back(&self, pane: &str, cwd: Option<&str>, force: bool) -> Result<String> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketMigrateBack(
             pane.to_string(),
@@ -1912,6 +1934,7 @@ impl Backend for PtyBackend {
     }
 
     fn transfer_migrate(&self, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy.send_event(UserEvent::SocketMigrateToRoom(request.clone(), tx))
             .map_err(|_| anyhow::anyhow!("이사 창에 연결할 수 없어요"))?;
@@ -1923,6 +1946,7 @@ impl Backend for PtyBackend {
     /// `remote.spawn_shell` — 다른 기계에 셸 pane. 새 방은 GUI 스레드가 보기 창까지 열고,
     /// 옆·탭은 여기서 바로 HTTP 로 세운다(이쪽 보기 창엔 mirror_sync 가 곧 거울을 붙인다).
     fn remote_spawn_shell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        self.prepare_action()?;
         use kasa_socket::backend::{SpawnShellAt, SpawnWindow};
         let label = params["machine"].as_str().filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("machine(기계 라벨)이 필요해요"))?;
@@ -2056,6 +2080,7 @@ impl Backend for PtyBackend {
         from: Option<&str>,
         host_ratio: Option<f32>,
     ) -> Result<Vec<SurfaceInfo>> {
+        self.prepare_action()?;
         // 기본 0.6 — 부른 쪽(오케스트레이터)이 대화를 읽는 자리라 학생 칸보다 넓어야
         // 한다. 사용자가 그려서 고른 비율이다(2026-08-13).
         let ratio = host_ratio.unwrap_or(0.6);
@@ -2186,6 +2211,10 @@ impl Backend for PtyBackend {
         Ok(serde_json::to_value(view)?)
     }
 
+    fn prepare_action(&self) -> Result<()> {
+        crate::app_control::prepare_action(&self.proxy)
+    }
+
     fn app_control(&self, request: &kasa_socket::app_control::Request) -> Result<serde_json::Value> {
         request.validate()?;
         if let Some(base) = restart_remote(request.machine_id.as_deref())? {
@@ -2200,6 +2229,11 @@ impl Backend for PtyBackend {
     fn where_map(&self) -> Result<serde_json::Value> {
         use serde_json::json;
         // ws 를 잠그기 전에 — 안에서 다시 잠근다.
+        let app = crate::app_control::request(&self.proxy, &kasa_socket::app_control::Request {
+            action:kasa_socket::app_control::Action::Inspect, machine_id:None, expect:None, interrupt:false, display:None,
+        }).map(|view|json!({"ready":view["ready"],"restore":view["restore"],"restoring":view["restoring"],
+            "restore_progress":view["restore_progress"],"instance_id":view["instance_id"]}))
+            .unwrap_or_else(|_|json!({"ready":false,"error":"app state unavailable; inspect before acting"}));
         let windows = self.windows_overview()?;
         let labels = self.sessions().labels;
         let ws = self.ws.lock().unwrap();
@@ -2224,7 +2258,7 @@ impl Backend for PtyBackend {
                 "view_of": number.and_then(|n| n.view_of.clone()),
                 "label": labels.get(room.idx), "active": room.active, "cells": cells})
         }).collect();
-        Ok(json!({ "rooms": rooms }))
+        Ok(json!({ "rooms": rooms, "app":app }))
     }
 
     fn windows_overview(&self) -> Result<Vec<kasa_socket::backend::WindowOverview>> {
@@ -2307,6 +2341,7 @@ impl Backend for PtyBackend {
     }
 
     fn new_window(&self) -> Result<()> {
+        self.prepare_action()?;
         // 창 생성은 회신할 게 없다(창 인덱스는 `windows` 로 읽는다) — 이벤트만 던진다.
         let _ = self.proxy.send_event(UserEvent::SocketNewWindow);
         Ok(())
@@ -2319,6 +2354,7 @@ impl Backend for PtyBackend {
     /// pane 탭에 띄우는 것이 이 경로의 주 용도라, 부모가 보이던 화면이 그대로 남아야
     /// 한다(사용자 2026-08-18).
     fn new_tab(&self, outer: Option<&str>, focus: bool) -> Result<SurfaceInfo> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketNewTab(
             outer.map(str::to_string),
@@ -2357,6 +2393,7 @@ impl Backend for PtyBackend {
         target: &str,
         direction: SplitDirection,
     ) -> Result<()> {
+        self.prepare_action()?;
         let zone = match direction {
             SplitDirection::Left => crate::DropZone::Left,
             SplitDirection::Right => crate::DropZone::Right,
@@ -2382,6 +2419,7 @@ impl Backend for PtyBackend {
     }
 
     fn close_window(&self, idx: usize) -> Result<()> {
+        self.prepare_action()?;
         // 방(창) 닫기 — 폰 허브의 「방 닫기」가 `/cmd` 로 부른다(2026-09-07). 결과를
         // 기다리는 이유는 close_surface 와 달리 거절이 있어서다(마지막 사용자 방).
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2394,6 +2432,7 @@ impl Backend for PtyBackend {
     }
 
     fn close_window_checked(&self, idx: usize, addresses: Vec<serde_json::Value>) -> Result<()> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketCloseWindow(idx, Some(addresses), tx));
         rx.recv_timeout(std::time::Duration::from_secs(20))
@@ -2402,6 +2441,7 @@ impl Backend for PtyBackend {
     }
 
     fn close_checked(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy.send_event(UserEvent::SocketCloseChecked(false, request.clone(), tx))
             .map_err(|_| anyhow::anyhow!("GUI event loop closed"))?;
@@ -2411,6 +2451,7 @@ impl Backend for PtyBackend {
     }
 
     fn reopen_checked(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy.send_event(UserEvent::SocketCloseChecked(true, request.clone(), tx))
             .map_err(|_| anyhow::anyhow!("GUI event loop closed"))?;
@@ -2420,6 +2461,7 @@ impl Backend for PtyBackend {
     }
 
     fn close_surface(&self, surface_id: &str) -> Result<()> {
+        self.prepare_action()?;
         let web_existed = is_web_shell(surface_id)
             && (kasa_pty::lookup_session(surface_id).is_some() || kasa_pty::kept_sessions().iter().any(|id| id == surface_id));
         // 로컬 PTY 모드: close 도 split/focus 처럼 GUI 스레드에 위임(App.pty 는
@@ -2461,6 +2503,7 @@ impl Backend for PtyBackend {
     }
 
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
+        self.prepare_action()?;
         // 대상 surface 가 지정됐는데 현재 없는 pane 이면 거부 — 재시작·종료로 사라진 학생에게
         // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(사용자). 보낸 쪽이 ok:false
         // 로 즉시 알아 떠맡기/--resume 을 결정한다. None(focused)은 항상 통과.
@@ -2497,6 +2540,7 @@ impl Backend for PtyBackend {
     }
 
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
+        self.prepare_action()?;
         if let Some(sid) = surface_id {
             let pid = self.addressed_pty(sid)?;
             if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
@@ -2542,6 +2586,7 @@ impl Backend for PtyBackend {
     }
 
     fn surface_cd(&self, surface: &str, path: &str) -> Result<()> {
+        self.prepare_action()?;
         crate::shell_cd::surface_cd(surface, path)
     }
 
@@ -3153,6 +3198,7 @@ impl Backend for PtyBackend {
 
     /// 공유방 host 창구 — 앱 스레드의 공유방 작업표에 묻는다. 기기·로그인 사실은 앱 스레드를 붙잡지 않게 여기서 더한다.
     fn shared_room_action(&self, action: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+        if matches!(action, "fork" | "publish") { self.prepare_action()?; }
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy.send_event(UserEvent::SharedLocal(crate::shared_rooms::service::Event::Host {
             action: action.into(), body: body.clone(), guard: crate::shared_rooms::service::HostGuard::capture(), reply: tx,
@@ -3289,6 +3335,7 @@ impl Backend for PtyBackend {
     }
 
     fn collab_act(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        self.prepare_action()?;
         kasa_collab::act_service::act(self,params)
     }
 
@@ -3297,6 +3344,7 @@ impl Backend for PtyBackend {
     }
 
     fn mirror_pane(&self, label: &str, remote_id: &str, name: &str, cwd: &str, anchor: Option<&str>, focus: bool) -> Result<String> {
+        self.prepare_action()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
             .send_event(UserEvent::SocketMirrorPane {
@@ -3312,6 +3360,7 @@ impl Backend for PtyBackend {
     }
 
     fn collab_tell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        self.prepare_action()?;
         // 알릴 창은 이 기기의 창이다 — 받는 기기로 넘기기 전에 뗀다.
         let mut params = params.clone();
         let notify = params.as_object_mut().and_then(|fields|fields.remove("notify"));
@@ -4145,6 +4194,7 @@ impl Backend for PtyBackend {
     }
 
     fn paste_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
+        self.prepare_action()?;
         // 감싸개는 그 pane 의 앱이 DECSET 2004 로 켰을 때만 — GUI 의 Cmd+V 와 같은 규칙
         // (`paste_clipboard`). 안 켠 앱에 두르면 `[200~`·`[201~` 가 글자로 튀어나온다.
         // 안 켠 앱에서는 줄바꿈이 곧 실행이라 실제 터미널처럼 CR 로 보낸다.
