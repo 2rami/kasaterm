@@ -995,8 +995,20 @@ impl App {
     /// 다른 기기에 **새 방**을 만들고 그 첫 pane 을 여기 보기 창으로 연다 — 기기 절 머리의
     /// 「+」(2026-09-17 지시). 저쪽엔 그쪽 「+」 를 누른 것과 같은 방이 생기고, 이쪽 창은
     /// 그 방의 보기 창이라 로컬 방 목록엔 안 선다. 옛 판 기기는 활성 방에 pane 만 세운다.
+    /// 그 기기 `remote_id` 를 이미 비추는 보기 창의 거울. 이사는 도착 칸을 먼저 세우고 몇 초 뒤에 뒤처리하는데,
+    /// 그사이 새 칸 따라 붙기(`mirror_sync`)가 그 칸을 보기 방으로 연다 — 뒤처리가 이걸 안 보고 또 열어
+    /// 맥에 같은 학생 거울이 둘 섰다(2026-11-12 집 PC 이사).
+    pub(crate) fn view_mirror_of(&self, base: &str, remote_id: &str) -> Option<String> {
+        self.pty.keys().find(|local| {
+            kasa_remote::remote::remote_info(local).is_some_and(|info| info.view && info.remote_id == remote_id
+                && kasa_device::machines::same_machine_bases(&info.base, base))
+                && self.window_of_pane(local).is_some_and(|window| self.remote_view_of_window(window).is_some())
+        }).cloned()
+    }
+
     /// 새 창을 열고 그 기기의 pane 하나를 보기 창으로 앉힌다 — 「+ 새 방」과 `to` 뒤처리가 같이
-    /// 쓴다. `owned` 는 이 창을 닫을 때 저쪽 pane 도 끝낼지(내가 만든 방이면 참).
+    /// 쓴다. `owned` 는 이 창을 닫을 때 저쪽 pane 도 끝낼지(내가 만든 방이면 참). `focus` 가 거짓이면
+    /// 보던 방을 두고 뒤에 세운다.
     pub(crate) fn seat_remote_view_window(
         &mut self,
         label: &str,
@@ -1004,6 +1016,7 @@ impl App {
         remote_id: &str,
         owned: bool,
         name: Option<String>,
+        focus: bool,
     ) -> Result<()> {
         let host = self.alloc_pane_id();
         let remote = kasa_remote::remote::open_view(
@@ -1021,7 +1034,7 @@ impl App {
             },
             &host,
         )?;
-        let owner = self.new_mirror_window(&host);
+        let owner = if focus { self.new_mirror_window(&host) } else { self.new_background_mirror_window(&host) };
         self.insert_pty(host.clone(), remote.session.clone());
         self.pump_pty_screens(
             remote.session.screens.clone(),
@@ -1079,7 +1092,7 @@ impl App {
         let Some(outcome) = done.outcome.lock().unwrap().take() else { return };
         let outcome = outcome.and_then(|(remote_id, room)| {
             let name = room.shown().map(|n| format!("방 {n}"));
-            self.seat_remote_view_window(&done.label, &done.base, &remote_id, true, name)
+            self.seat_remote_view_window(&done.label, &done.base, &remote_id, true, name, true)
                 .map_err(|e| format!("{e:#}"))?;
             Ok((remote_id, room))
         });
@@ -1117,7 +1130,7 @@ impl App {
         };
         let label = kasa_device::machines::label_for_base(base).unwrap_or_default();
         let back = self.active_window;
-        let seated = self.seat_remote_view_window(&label, base, &remote_id, true, room.shown().map(|n| format!("방 {n}")));
+        let seated = self.seat_remote_view_window(&label, base, &remote_id, true, room.shown().map(|n| format!("방 {n}")), true);
         let host = self.ws.lock().unwrap().active_pane.clone();
         self.switch_window(back);
         if let Err(e) = seated {

@@ -42,12 +42,16 @@ pub fn current_address(backend: &dyn Backend, surface: &str) -> Result<Address> 
     Address::parse(&value)
 }
 
-pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Result<()>) -> Result<Value> {
+/// 다른 기기 칸으로만 보내기 — 이 기기 칸 없이 앱 안에서 부르는 자리(이사 뒤 이어 할 일)가 쓴다.
+pub fn submit_remote(params: &Value) -> Result<Value> {
+    let address = Address::parse(params.get("address").context("remote tell requires address")?)?;
+    ensure!(address.machine_id != crate::board_service::local_id()?, "remote tell must name another machine");
+    let (address, normalized) = prepare(params, address)?;
+    remote(&address,&normalized,"/collab/tell")
+}
+
+fn prepare(params: &Value, address: Address) -> Result<(Address, Value)> {
     ensure!(params.get("force").is_none_or(|v|v == false), "force cannot bypass tell protection");
-    let address = match params.get("address") {
-        Some(value) => Address::parse(value)?,
-        None => current_address(backend,params["surface_id"].as_str().context("tell requires address or local surface_id")?)?,
-    };
     let id = params["message_id"].as_str().context("tell requires message_id")?;
     tell::valid_id(id)?;
     let body = tell::normalize(params["body"].as_str().context("tell requires body")?)?;
@@ -56,6 +60,17 @@ pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Resu
     }
     let mut normalized = params.clone(); normalized["address"] = serde_json::to_value(&address)?;
     normalized["body"] = json!(body);
+    Ok((address, normalized))
+}
+
+pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Result<()>) -> Result<Value> {
+    let address = match params.get("address") {
+        Some(value) => Address::parse(value)?,
+        None => current_address(backend,params["surface_id"].as_str().context("tell requires address or local surface_id")?)?,
+    };
+    let (address, normalized) = prepare(params, address)?;
+    let id = normalized["message_id"].as_str().unwrap_or_default();
+    let body = normalized["body"].as_str().unwrap_or_default().to_owned();
     if address.machine_id != crate::board_service::local_id()? {
         ensure!(params["local_only"] != true,"tell must terminate at its receiving machine");
         return remote(&address,&normalized,"/collab/tell");

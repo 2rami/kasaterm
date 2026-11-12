@@ -14,6 +14,36 @@ pub(crate) struct PendingMigration {
     pub(crate) run: Option<String>,
     pub(crate) idle_since: Option<std::time::Instant>,
     pub(crate) transfer: Option<kasa_socket::transfer::MigrateRequest>,
+    /// 요청 때 정한 이어 할 일 — 턴이 끝난 뒤 이사할 때는 이미 쉬고 있어 그때 상태로 다시 정하면 안 된다.
+    pub(crate) resume: Option<String>,
+}
+
+/// 출발 하네스를 끈 뒤 이사가 실패했을 때 그 자리에서 같은 대화로 다시 켤 재료. 대화는 출발 기기에 남는데
+/// 하네스가 꺼진 채라 사람이 와서 켤 때까지 학생이 멈춰 있었다(2026-11-12 Codex 이사 거절).
+#[derive(Clone, Debug)]
+pub(crate) struct SourceRestart {
+    sid: String,
+    is_codex: bool,
+    model: String,
+    effort: String,
+    bypass: bool,
+}
+
+/// 남이 옮긴 학생도 하던 일은 잇되 쉬던 학생은 깨우지 않는다(2026-11-12 지시).
+const DEFAULT_RESUME: &str = "하던 일 이어서";
+
+/// 이어 할 일을 정한다. 명시한 글이 이기고 빈 글은 끈다. 없으면 일하거나 답을 기다리던 대화만 잇는다.
+pub(super) fn resolve_resume(asked: Option<&str>, state: Option<&crate::agent_state::AgentState>) -> Option<String> {
+    use crate::agent_state::AgentState;
+    match asked {
+        Some(text) => Some(text.trim().to_string()).filter(|text| !text.is_empty()),
+        None => state.filter(|state| matches!(state, AgentState::Working | AgentState::Compacting | AgentState::Waiting { .. }))
+            .map(|_| DEFAULT_RESUME.to_string()),
+    }
+}
+
+fn resume_body(origin: &str, destination: &str, cwd: &str, text: &str) -> String {
+    format!("이사 완료: {origin} → {destination}, cwd {cwd}. 이어서: {text}")
 }
 
 /// 이사가 볼 칸의 작업 폴더. PowerShell 은 `cd` 해도 프로세스 cwd 가 뜰 때 그대로이고, `cd …; claude` 를
@@ -103,10 +133,21 @@ impl App {
             || !self.pty.get(&h.pid).is_some_and(|session| h.session.ptr_eq(&Arc::downgrade(session)))
             || !kasa_remote::remote::remote_info(&h.pid).is_some_and(|info| info.base == h.base && info.remote_id == h.remote_id)
         { return; }
+        // 이사는 학생이나 CLI 가 부르는 일이라 사람이 보던 방을 바꾸지 않는다(2026-11-12 지시 「초점은 그대로,
+        // 알림만」). 보던 방이 그 칸 하나뿐이어서 통째로 걷힐 때만 도착 방을 따라간다.
+        let follow = self.window_of_pane(&h.pid) == Some(self.active_window) && {
+            let leaves = self.window_leaves(self.active_window);
+            let ws = self.ws.lock().unwrap();
+            leaves.len() == 1 && ws.panes.get(&leaves[0]).is_none_or(|pane| pane.tabs.len() <= 1)
+        };
         self.remote_keep.insert(h.pid.clone());
         self.remove_finished_surface(&h.pid);
         self.remote_keep.remove(&h.pid);
-        if let Err(e) = self.seat_remote_view_window(&h.label, &h.base, &h.remote_id, false, None) {
+        if let Some(existing) = self.view_mirror_of(&h.base, &h.remote_id) {
+            if follow { self.focus_surface(&existing); }
+            return;
+        }
+        if let Err(e) = self.seat_remote_view_window(&h.label, &h.base, &h.remote_id, false, None, follow) {
             self.set_toast(format!("{} 의 방을 보기 창으로 못 열었어요 — {e:#}", h.label));
         }
     }
@@ -169,7 +210,7 @@ impl App {
         force: bool,
         run: Option<&str>,
     ) -> Result<String> {
-        self.migrate_pane_with_reply(pid, base, remote_cwd, force, run, None)
+        self.migrate_pane_with_reply(pid, base, remote_cwd, force, run, None, None)
     }
 
     /// `migrate_pane` + 끝났을 때 답을 받을 창구. 소켓(CLI·보드·학생 셀프 이사)은
@@ -182,9 +223,10 @@ impl App {
         remote_cwd: Option<&str>,
         force: bool,
         run: Option<&str>,
+        resume: Option<&str>,
         reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
     ) -> Result<String> {
-        self.migrate_pane_with_destination(pid, base, remote_cwd, force, run, reply, None)
+        self.migrate_pane_with_destination(pid, base, remote_cwd, force, run, resume, reply, None)
     }
 
     pub(crate) fn start_transfer_migration(
@@ -210,7 +252,7 @@ impl App {
         let remote_cwd = kasa_device::machines::map_local_to_remote(&target, &cwd.to_string_lossy())
             .ok_or_else(|| anyhow::anyhow!("도착 기기의 작업 폴더 대응 규칙이 없어요"))?;
         self.migrate_pane_with_destination(
-            &request.session.pane_id, &target.base, Some(&remote_cwd), false, None,
+            &request.session.pane_id, &target.base, Some(&remote_cwd), false, None, None,
             reply, Some(request.clone()),
         )
     }
@@ -222,6 +264,7 @@ impl App {
         remote_cwd: Option<&str>,
         force: bool,
         run: Option<&str>,
+        resume: Option<&str>,
         reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
         mut transfer: Option<kasa_socket::transfer::MigrateRequest>,
     ) -> Result<String> {
@@ -268,6 +311,10 @@ impl App {
         if let Some(request) = &transfer {
             self.validate_transfer_identity(&request.session)?;
         }
+        let resume = if fresh { None } else {
+            self.collab.hub.refresh();
+            resolve_resume(resume, Some(&self.collab.hub.state(pid)))
+        };
         // 턴 중 이사는 하던 일을 자른다 — SIGTERM 이 진행 중 턴을 버리고, 옮겨간
         // 학생은 하다 만 채로 앉는다(2026-08-31 지적 「이사하고 작업이 끊겨」).
         // 일하는 학생은 죽이지 않고 예약한다: 턴이 끝나면(스피너가 꺼지고 잠시
@@ -285,6 +332,7 @@ impl App {
                     run: run.map(str::to_string),
                     idle_since: (!working).then(|| Instant::now() - std::time::Duration::from_secs(3)),
                     transfer: transfer.clone(),
+                    resume: resume.clone(),
                 });
                 let reason = if working { "현재 턴이 끝나면" } else { "앞선 이사가 끝나면" };
                 let message = format!("예약됨 — {pid} {reason} 이사해요. 아직 도착한 상태가 아니에요");
@@ -366,6 +414,7 @@ impl App {
             if !crate::verification_run() { kasa_characters::character::mark_manual_pick(s); }
         }
         let label = kasa_device::machines::label_for_base(base).unwrap_or_else(|| base.to_string());
+        let origin = crate::transfer_endpoints::machine_context().map(|(_, label)| label.clone()).unwrap_or_default();
         let plan = MigratePlan {
             pid: pid.to_string(),
             label: label.clone(),
@@ -384,6 +433,8 @@ impl App {
             bypass,
             run: if fresh && transfer.is_some() { Some(":".to_string()) } else { run.map(str::to_string) },
             transfer,
+            resume,
+            origin,
         };
         let mc = &mut self.info.machines_col;
         mc.busy = Some((pid.to_string(), format!("{label} 로 이사 중")));
@@ -457,6 +508,7 @@ impl App {
         &mut self,
         pid: &str,
         outcome: std::result::Result<Box<MigrateReady>, String>,
+        restart: Option<SourceRestart>,
     ) {
         let launched = outcome.as_ref().ok().is_some_and(|ready| ready.launched);
         let reserved = outcome.as_ref().ok().filter(|ready| !ready.launched).and_then(|ready| ready.transfer_reserved.clone())
@@ -484,6 +536,11 @@ impl App {
                 });
                 result = result.map_err(|why| format!("{why}\n대화는 출발 기기에 남아 있어요. 그 기기에서 세션을 다시 켜야 해요"));
             }
+        }
+        if let (Err(why), Some(restart)) = (&result, restart) {
+            let restarted = self.restart_source(pid, &restart);
+            result = Err(format!("{why}\n{}", if restarted { "출발 기기에서 같은 대화를 다시 켰어요" }
+                else { "출발 칸이 바뀌어 다시 켜지 못했어요 — 그 칸에서 직접 켜 주세요" }));
         }
         if let Err(why) = &result {
             // 덮인 채 도는 이사(lid_away)는 토스트를 볼 사람이 없다 — 남는 기록은 로그뿐이다.
@@ -534,6 +591,25 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// 끈 출발 하네스를 그 칸에서 같은 대화로 다시 켠다. 칸이 원격으로 바뀌었거나 셸에 다른 것이 돌면 안 친다.
+    fn restart_source(&mut self, pid: &str, restart: &SourceRestart) -> bool {
+        let Some(session) = self.pty.get(pid).cloned() else { return false };
+        if kasa_remote::remote::is_remote_pane(pid) || session.input_closed() || session.active_agent().is_some()
+            || !crate::transfer_endpoints::idle_shell(session.shell_pid(), &kasa_pty::fresh_process_table())
+        {
+            return false;
+        }
+        let cmd = restore_agent_command(Some(if restart.is_codex { "codex" } else { "claude" }), Some(&restart.sid), true,
+            Some(restart.model.as_str()).filter(|s| !s.is_empty()), Some(restart.effort.as_str()).filter(|s| !s.is_empty()));
+        let cmd = if restart.bypass {
+            let flag = if restart.is_codex { "--dangerously-bypass-approvals-and-sandbox" } else { "--dangerously-skip-permissions" };
+            format!("{} {flag}\r", cmd.trim_end_matches('\r'))
+        } else { cmd };
+        let cmd = windows_shell_line(&session, None, &cmd).unwrap_or(cmd);
+        self.pending_restores.push((session, cmd, Instant::now() + std::time::Duration::from_millis(900)));
+        true
     }
 
     /// ⑦ 자리 갈아끼우기 + 켜기. 원격 pane 소환까지는 워커가 끝냈고, 여기는 이
@@ -712,6 +788,7 @@ impl App {
                     run: None,
                     idle_since: None,
                     transfer: None,
+                    resume: None,
                 });
                 self.set_toast(format!("{pid} 는 지금 일하는 중 — 턴이 끝나면 데려온다"));
                 return Ok(format!("예약됨 — {pid} 가 하던 턴을 마치면 데려온다"));
@@ -968,6 +1045,7 @@ impl App {
                     q.cwd.as_deref(),
                     q.force,
                     q.run.as_deref(),
+                    Some(q.resume.as_deref().unwrap_or("")),
                     None,
                     q.transfer,
                 )
@@ -1117,7 +1195,7 @@ mod transfer_concurrency_tests {
         };
         let queue = vec![PendingMigration {
             pane: "%4".into(), base: "mini".into(), cwd: None, force: false, run: None,
-            idle_since: None, transfer: Some(request.clone()),
+            idle_since: None, transfer: Some(request.clone()), resume: None,
         }];
         assert!(ensure_migration_slot(&queue, "%4").is_err());
         assert!(ensure_migration_slot(&queue, "%5").is_ok());
@@ -1155,6 +1233,9 @@ pub(super) struct MigratePlan {
     pub(super) bypass: bool,
     pub(super) run: Option<String>,
     pub(super) transfer: Option<kasa_socket::transfer::MigrateRequest>,
+    pub(super) resume: Option<String>,
+    /// 이 기기 이름 — 도착 학생에게 어디서 왔는지 알린다.
+    pub(super) origin: String,
 }
 
 /// 워커가 끝내고 GUI 에 돌려주는 것 — ⑦(자리 갈아끼우기·켜기)에 필요한 만큼만.
@@ -1181,6 +1262,21 @@ pub(crate) struct MigrateReady {
 /// 이사 ①~④ — 네트워크·기다림뿐이라 GUI 밖에서 돈다. 단계마다 `MigrateStage`,
 /// 끝에 `MigrateDone` 을 보낸다. 실패는 그 단계가 Running 인 채로 Err 가 가고,
 /// GUI 가 그 자리에 ✗ 를 찍는다.
+/// 도착 대화에 이어 할 일을 한 번 넣는다. 재개 확인 직후엔 도착 기기 보드가 새 대화 번호를 아직 못 실어
+/// 「identity changed」로 거절할 수 있어 같은 메시지 번호로 잠깐 다시 보낸다(받은 쪽 장부가 중복을 거른다).
+fn send_resume(address: &serde_json::Value, body: &str) -> Result<()> {
+    let params = serde_json::json!({ "message_id": kasa_socket::tell::new_message_id(), "address": address,
+        "body": body, "title": "이사 뒤 이어서" });
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match kasa_collab::tell_service::submit_remote(&params) {
+            Ok(_) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(std::time::Duration::from_secs(1)),
+        }
+    }
+}
+
 pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
     use state::MigrateStageState as S;
     let stage = |i: usize, st: S, note: String| {
@@ -1390,6 +1486,20 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
                 "도착 대화의 신원이 바뀌었어요");
             launched = true;
             let _ = kasa_device::machines::refresh_panes_now(&p.base);
+            if let (Some(text), Some(sid)) = (&p.resume, &p.sid) {
+                let address = serde_json::json!({
+                    "machine_id": target.identity.machine_id, "surface_key": reserved.as_ref().map(|row| row.surface_key.clone()),
+                    "surface_id": target.identity.pane_id, "session_id": sid, "instance_id": target.identity.instance,
+                });
+                let note = match send_resume(&address, &resume_body(&p.origin, &p.label, &remote_cwd, text)) {
+                    Ok(()) => format!("{} 에게 이어 할 일을 넣었어요 — {text}", p.character.as_deref().unwrap_or("도착 세션")),
+                    Err(error) => {
+                        eprintln!("[migrate] {} 이어 할 일 못 넣음: {error:#}", p.pid);
+                        format!("이사는 됐는데 이어 할 일을 못 넣었어요 — 도착 칸에 직접 알려 주세요: {error:#}")
+                    }
+                };
+                let _ = proxy.send_event(UserEvent::RepoCatchup(note));
+            }
         }
         Ok(MigrateReady {
             launched,
@@ -1422,9 +1532,12 @@ pub(super) fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoop
             }
         }
     }
+    let restart = (outcome.is_err() && source_stopped && !launched).then(|| p.sid.clone()).flatten()
+        .map(|sid| SourceRestart { sid, is_codex: p.is_codex, model: p.model.clone(), effort: p.effort.clone(), bypass: p.bypass });
     let sent = proxy.send_event(UserEvent::MigrateDone(
         p.pid.clone(),
         outcome.map(Box::new).map_err(|e| format!("{e:#}")),
+        restart,
     ));
     if sent.is_err() && !launched {
         if let Some(row) = reserved {

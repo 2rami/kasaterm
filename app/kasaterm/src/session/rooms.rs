@@ -92,6 +92,14 @@ impl App {
         ws.active_pane = Some(pane.to_owned());
         self.active_window
     }
+
+    /// 사람이 고르지 않은 보기 방(이사 뒤처리)은 뒤에 세운다 — 보던 방·초점·확대를 그대로 둔다.
+    pub(super) fn new_background_mirror_window(&mut self, pane: &str) -> usize {
+        self.session_touched = true;
+        self.windows.push(Some(kasa_pty::PtyLayout::single(pane)));
+        self.ws.lock().unwrap().panes.entry(pane.to_owned()).or_default();
+        self.windows.len() - 1
+    }
     /// Switch the visible window to `idx` within the current session: park the
     /// visible window's layout, swap the target's in. `pty`/`ws` are shared
     /// across the session's windows, so no PTY is touched — only which BSP tree

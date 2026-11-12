@@ -9,7 +9,7 @@ const MACHINES_HELP: &str = "kasaterm-cli machines — 기기 목록·연결·�
   machines move [%N] <기기|local>            기존 claude·codex 세션 이동
   machines move --help                      이동 순서·예시·주의점";
 
-const MOVE_HELP: &str = "kasaterm-cli machines move [%N] <기기|local> [--cwd 경로] [--run 명령] [--force]
+const MOVE_HELP: &str = "kasaterm-cli machines move [%N] <기기|local> [--cwd 경로] [--run 명령] [--resume 글|--no-resume] [--force]
 claude·codex 세션을 다른 기기로 옮깁니다. 대화·모델을 이어서 쓰며 원래 칸은 거울이 됩니다.
 
   1. kasaterm-cli machines                  도착 기기의 등록된 이름과 연결 상태 확인
@@ -26,6 +26,9 @@ claude·codex 세션을 다른 기기로 옮깁니다. 대화·모델을 이어�
                여러 기기와 맞는 짧은 이름·알 수 없는 이름·주소는 이동 전에 거부합니다.
   --cwd 경로   도착 기기의 작업 경로. 생략하면 등록된 경로 매핑을 씁니다.
   --run 명령   도착 셸에서 실행할 명령(필요할 때만, 한 인자로 따옴표 사용). local에서는 지원하지 않습니다.
+  --resume 글  도착 대화가 준비되면 「이사 완료 … 이어서: 글」을 한 번 넣습니다. local에서는 지원하지 않습니다.
+               생략하면 내 세션 이동과 일하던(또는 답을 기다리던) 세션은 「하던 일 이어서」를 넣고, 쉬던 세션은 깨우지 않습니다.
+  --no-resume  도착 뒤 아무것도 넣지 않습니다.
   --force      진행 중 턴 중단·도착지 충돌 덮어쓰기를 허용합니다. 기본 이동에는 쓰지 마세요.
 
 일하는 세션은 기본적으로 턴을 마친 뒤 이동하도록 예약됩니다. 예약됨은 이동 완료가 아닙니다.
@@ -56,12 +59,24 @@ pub(super) fn help_for(args: &[String]) -> Option<&'static str> {
     }
 }
 
+/// 도착 뒤 이어 할 일. 앱이 정하는 기본(`Auto`)은 출발 칸이 일하던 중인지로 가른다.
+#[derive(Debug, PartialEq, Eq)]
+enum Resume {
+    Auto,
+    Text(String),
+    Off,
+}
+
+/// 내 세션을 옮기면 그 요청 자체가 하던 일의 한가운데라 늘 이어 간다.
+const SELF_RESUME: &str = "하던 일 이어서";
+
 #[derive(Debug, PartialEq, Eq)]
 struct MoveArgs {
     pane: String,
     destination: String,
     cwd: Option<String>,
     run: Option<String>,
+    resume: Resume,
     force: bool,
 }
 
@@ -72,7 +87,7 @@ fn valid_pane(pane: &str) -> bool {
 
 fn parse(args: &[String], current_pane: Option<&str>) -> Result<MoveArgs> {
     let (mut pane, mut destination, mut cwd, mut run) = (None, None, None, None);
-    let mut force = false;
+    let (mut resume, mut force) = (Resume::Auto, false);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -91,6 +106,16 @@ fn parse(args: &[String], current_pane: Option<&str>) -> Result<MoveArgs> {
                 if slot.replace(value.clone()).is_some() {
                     bail!("{arg} 옵션은 한 번만 주세요");
                 }
+            }
+            "--resume" | "--no-resume" => {
+                if resume != Resume::Auto {
+                    bail!("--resume·--no-resume 는 한 번만 주세요");
+                }
+                resume = if arg == "--no-resume" { Resume::Off } else {
+                    let value = args.next().filter(|v| !v.trim().is_empty() && !v.starts_with('-'))
+                        .ok_or_else(|| anyhow!("--resume 뒤에 이어 할 일을 한 인자로 주세요 — machines move --help"))?;
+                    Resume::Text(value.trim().to_string())
+                };
             }
             "--force" => {
                 if force {
@@ -122,6 +147,9 @@ fn parse(args: &[String], current_pane: Option<&str>) -> Result<MoveArgs> {
     let destination = destination.ok_or_else(|| {
         anyhow!("도착 기기가 필요해요 — machines로 이름 확인 후 machines move [%N] <기기|local>")
     })?;
+    if pane.is_none() && resume == Resume::Auto && destination != "local" {
+        resume = Resume::Text(SELF_RESUME.into());
+    }
     let pane = pane
         .or_else(|| current_pane.filter(|p| !p.is_empty()).map(str::to_owned))
         .ok_or_else(|| {
@@ -133,11 +161,15 @@ fn parse(args: &[String], current_pane: Option<&str>) -> Result<MoveArgs> {
     if destination == "local" && run.is_some() {
         bail!("local 데려오기는 --run을 지원하지 않아요");
     }
+    if destination == "local" && matches!(resume, Resume::Text(_)) {
+        bail!("local 데려오기는 --resume 을 아직 지원하지 않아요");
+    }
     Ok(MoveArgs {
         pane,
         destination,
         cwd,
         run,
+        resume,
         force,
     })
 }
@@ -205,11 +237,18 @@ pub(super) fn execute(
         // Passing a canonical roster name preserves the app's cwd mapping and avoids its legacy `mini` fallback.
         options.destination = resolve_destination(&options.destination, machines)?;
     }
+    let mut params = json!({ "pane": options.pane, "base": options.destination,
+        "cwd": options.cwd, "run": options.run, "force": options.force });
+    // 기본(Auto)은 키를 안 싣는다 — 옛 앱도 같은 요청으로 받는다.
+    match options.resume {
+        Resume::Auto => {}
+        Resume::Text(text) => params["resume"] = json!(text),
+        Resume::Off => params["resume"] = json!(false),
+    }
     send(&Request {
         id: json!(format!("cli-{}", std::process::id())),
         method: "surface.migrate".into(),
-        params: json!({ "pane": options.pane, "base": options.destination,
-            "cwd": options.cwd, "run": options.run, "force": options.force }),
+        params,
     })
 }
 
@@ -270,10 +309,16 @@ mod tests {
                 destination: "Mac Mini".into(),
                 cwd: Some("/work/a b".into()),
                 run: Some("codex --resume thread".into()),
+                resume: Resume::Auto,
                 force: true
             }
         );
         assert_eq!(parse(&args(&["mini"]), Some("%8")).unwrap().pane, "%8");
+        assert_eq!(parse(&args(&["mini"]), Some("%8")).unwrap().resume, Resume::Text(SELF_RESUME.into()), "내 세션은 이어 간다");
+        assert_eq!(parse(&args(&["%3", "mini"]), Some("%8")).unwrap().resume, Resume::Auto, "남의 칸은 앱이 정한다");
+        assert_eq!(parse(&args(&["mini", "--no-resume"]), Some("%8")).unwrap().resume, Resume::Off);
+        assert_eq!(parse(&args(&["%3", "mini", "--resume", " 시험 이어서 "]), None).unwrap().resume, Resume::Text("시험 이어서".into()));
+        assert_eq!(parse(&args(&["local"]), Some("%8")).unwrap().resume, Resume::Auto, "데려오기는 아직 넣지 않는다");
         assert!(parse(&args(&["mini"]), None).is_err());
     }
 
@@ -295,6 +340,10 @@ mod tests {
             vec!["mini", "--run", "a", "--run", "b"],
             vec!["mini", "--force", "--force"],
             vec!["local", "--run", "codex"],
+            vec!["%3", "local", "--resume", "이어서"],
+            vec!["mini", "--resume"],
+            vec!["mini", "--resume", "--force"],
+            vec!["mini", "--resume", "a", "--no-resume"],
             vec!["mini\nother"],
             vec![""],
         ] {

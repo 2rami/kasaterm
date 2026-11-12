@@ -1741,8 +1741,15 @@ impl App {
             outer,
             crate::settings_room::SettingsMutation::Tab,
         )?;
-        let own_host = self.spawns_own_pane().then(|| self.own_spawn_host(outer));
-        let outer = own_host.as_deref().unwrap_or(outer);
+        // 배경 탭의 학생이 `summon --tab` 하면 탭 번호가 온다. 탭을 실을 곳은 그 탭이 사는 바깥 칸이라
+        // 접지 않으면 `panes` 에 없는 번호여서 셸만 뜨고 어느 방에도 안 붙는다(「Unplaced」).
+        let host = if self.spawns_own_pane() {
+            self.own_spawn_host(outer)
+        } else {
+            self.ws.lock().unwrap().outer_for_pty(outer).unwrap_or_else(|| outer.to_string())
+        };
+        let outer = host.as_str();
+        anyhow::ensure!(self.ws.lock().unwrap().panes.contains_key(outer), "탭을 실을 칸 {outer} 이 없어요");
         // Outer pane must already exist in the layout (it's the user's focused
         // pane). Use its size for the initial pty so the shell starts at the
         // right cols/rows — `resize_backend` after re-applies it anyway, but a
@@ -3216,7 +3223,8 @@ for p in glob.glob(os.path.join(d, '*.json')):
     // than a layout leaf. Removing only the leaf leaves that tab and its PTY alive.
     pub(crate) fn remove_finished_surface(&mut self, pid: &str) {
         let (tab_slot, replaced_cell) = {
-            let ws = self.ws.lock().unwrap();
+            let mut ws = self.ws.lock().unwrap();
+            name_own_tab(&mut ws, pid);
             let slot = finished_tab_slot(&ws, pid);
             let replaced = !self.pty.contains_key(pid) && ws.panes.get(pid).is_some_and(|p| {
                 !p.tabs.is_empty() && p.tabs.iter().all(|t| t.pid.as_deref() != Some(pid))
@@ -4070,6 +4078,17 @@ fn cell_rekey(ws: &Workspace, leaf: &str) -> Option<String> {
     (!ws.panes.contains_key(&first)).then_some(first)
 }
 
+/// 첫 탭은 pid 없이 칸 번호로 제 PTY 를 가리킬 수 있다(`grid_needs_pty`). 닫기 전에 그 이름을 채운다 — 못 찾으면
+/// 칸 통째 `remove_pane` 으로 빠져 남은 탭이 떠돌다 칸으로 흩어졌다(2026-11-12 이사: 탭 셋 칸이 칸 둘로).
+fn name_own_tab(ws: &mut Workspace, pid: &str) {
+    let named = ws.panes.get_mut(pid).filter(|pane| pane.tabs.len() > 1
+        && pane.tabs.iter().all(|tab| tab.pid.as_deref() != Some(pid)))
+        .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.pid.is_none() && tab.term().is_some()))
+        .map(|tab| tab.pid = Some(pid.to_string()))
+        .is_some();
+    if named { ws.rebuild_pid_map(); }
+}
+
 fn finished_tab_slot(ws: &Workspace, pid: &str) -> Option<(String, usize)> {
     let outer = ws.outer_for_pty(pid)?;
     let pane = ws.panes.get(&outer)?;
@@ -4358,6 +4377,24 @@ mod orphan_leaf_tests {
         ws.panes.insert("%2".into(), PaneState { tabs: vec![tab("%2")], ..Default::default() });
         ws.rebuild_pid_map();
         assert_eq!(super::finished_tab_slot(&ws, "%2"), None, "last tab closes its cell");
+    }
+
+    /// pid 없는 첫 탭(칸 제 셸)이 끝나도 형제 탭은 한 칸에 남는다 — 이름을 채워야 탭 닫기 길을 탄다.
+    #[test]
+    fn a_pidless_primary_tab_closes_as_a_tab_and_keeps_its_siblings_together() {
+        let tab = |pid: Option<&str>| PaneTab { pid: pid.map(str::to_string), ..PaneTab::default() };
+        let mut ws = Workspace::default();
+        ws.panes.insert("%35".into(), PaneState { tabs: vec![tab(None), tab(Some("%23")), tab(Some("%12"))], ..PaneState::default() });
+        ws.panes.insert("%5".into(), PaneState { tabs: vec![tab(None)], ..PaneState::default() });
+        ws.rebuild_pid_map();
+        assert_eq!(super::finished_tab_slot(&ws, "%35"), None, "이름 없는 첫 탭은 칸 통째 닫기로 빠진다");
+        super::name_own_tab(&mut ws, "%35");
+        assert_eq!(super::finished_tab_slot(&ws, "%35"), Some(("%35".into(), 0)));
+        ws.panes.get_mut("%35").unwrap().tabs.remove(0);
+        ws.rebuild_pid_map();
+        assert_eq!(cell_rekey(&ws, "%35").as_deref(), Some("%23"), "남은 탭은 한 칸으로 이름만 바뀐다");
+        super::name_own_tab(&mut ws, "%5");
+        assert_eq!(ws.panes["%5"].tabs[0].pid, None, "탭 하나뿐인 칸은 손대지 않는다");
     }
 
     /// 제 셸 탭을 잃고 남의 탭만 품은 칸은 첫 탭 이름으로, 제 탭이 있거나 아직 pid 를 못 받은 칸은 그대로.

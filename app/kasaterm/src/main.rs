@@ -3893,6 +3893,7 @@ enum UserEvent {
         Option<String>,
         bool,
         Option<String>,
+        Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     /// `surface.migrate` 의 역방향(`base: "local"`) — 원격 pane 을 이 기계로.
@@ -3908,6 +3909,7 @@ enum UserEvent {
     MigrateDone(
         String,
         std::result::Result<Box<session::MigrateReady>, String>,
+        Option<session::SourceRestart>,
     ),
     RemoteShellReady(Arc<layout::RemoteShellReady>),
     SocketMigrateToRoom(

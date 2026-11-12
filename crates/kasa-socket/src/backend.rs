@@ -684,6 +684,7 @@ pub trait Backend: Send + Sync {
     /// 같은 자리 원격 스왑 + resume 주입. GUI 백엔드 전용.
     /// `run` 은 태생 스폰(에이전트 없는 셸 pane) 전용 — 저쪽에서 claude 대신
     /// 돌릴 명령(`mini codex`). 이사(대화 운반)에는 뜻이 없어 무시된다.
+    /// `resume` 은 도착 대화가 준비된 뒤 한 번 넣을 이어 할 일 — `None` 이면 앱이 출발 칸 상태로 정하고 빈 글은 끈다.
     fn migrate_pane(
         &self,
         _pane: &str,
@@ -691,6 +692,7 @@ pub trait Backend: Send + Sync {
         _cwd: Option<&str>,
         _force: bool,
         _run: Option<&str>,
+        _resume: Option<&str>,
     ) -> Result<String> {
         anyhow::bail!("migrate: 이 백엔드는 지원하지 않는다")
     }

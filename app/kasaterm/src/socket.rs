@@ -1875,6 +1875,7 @@ impl Backend for PtyBackend {
         cwd: Option<&str>,
         force: bool,
         run: Option<&str>,
+        resume: Option<&str>,
     ) -> Result<String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketMigrate(
@@ -1883,6 +1884,7 @@ impl Backend for PtyBackend {
             cwd.map(str::to_string),
             force,
             run.map(str::to_string),
+            resume.map(str::to_string),
             tx,
         ));
         // 대화 jsonl 업로드(수백 MB 가능)+원격 접속이 들어 있다 — 넉넉히.

@@ -37,7 +37,7 @@ pub(crate) use self::agent_launch::{
     CharacterSwapBtn, PendingCharacterSwap,
 };
 pub(crate) use self::file_tree::{git_repo_root, tilde_home};
-pub(crate) use self::migrate::{migration_cwd, MigrateReady, PendingMigration};
+pub(crate) use self::migrate::{migration_cwd, MigrateReady, PendingMigration, SourceRestart};
 pub(crate) use self::remote_rooms::{launch_in_remote_pane, RoomSpawned};
 pub(crate) use self::rooms::remap_window_index;
 pub(crate) use self::restore::{restore_agent_command, windows_shell_line};
