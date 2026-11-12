@@ -477,6 +477,22 @@ async fn claude_usage_live_handler(req: axum::extract::Request) -> axum::respons
     Json(live_limits::export()).into_response()
 }
 
+/// `POST /claude-usage/live` — 다른 기기가 새 관측을 본 자리에서 밀어 넣는다. 당겨 오기만 하면 기기 사이가
+/// 그 주기만큼 늦다. 몸은 `export` 꼴이고 `merge_peer` 가 검사한다.
+async fn claude_usage_live_push_handler(req: axum::extract::Request) -> axum::response::Response {
+    if let Some(denied) = super::auth::guest_denied(&req) {
+        return denied;
+    }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), live_limits::PEER_BODY_LIMIT).await else {
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    live_limits::merge_peer(&body);
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
 /// 사용량 조회에 claude CLI 와 같은 User-Agent 를 단다. 서버가 이 값으로 「Claude Code
 /// 에서 온 요청」인지 가르고, 아니면 초기화권(`cedar_ember`)을 `ineligible_reason:
 /// "surface"` 로 비워 보낸다(2026-09-23 실측: 같은 토큰이 UA 하나로 0장↔1장).
@@ -579,6 +595,15 @@ async fn claude_usage_handler(
     let live_recent = live_limits::latest_at(&remembered_token_keys(&cache_slot))
         .is_some_and(|at| at.elapsed() < LIVE_FRESH);
     let ttl = if live_recent { LIVE_TTL } else { TTL };
+    // `?cached=1` — 새 관측이 들어올 때마다 앱이 그 자리에서 다시 그리는 문. 관측은 몇 초에 하나씩 오므로
+    // 상류도 토큰 갱신도 건드리지 않고 가진 값에 관측만 덧입힌다. 가진 값이 없으면 다음 정기 조회를 기다린다.
+    if params.get("cached").is_some_and(|v| v == "1") {
+        let held = cache.lock().ok().and_then(|g| g.get(&cache_slot).cloned());
+        return match held {
+            Some((at, v)) => (cors, Json(ok(&v, at.is_none_or(|at| at.elapsed() >= ttl), at))),
+            None => (cors, Json(serde_json::json!({ "ok": false, "reason": "not_cached", "account_dir": dir }))),
+        };
+    }
     // 1) 신선한 캐시면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
         if let Some((Some(at), v)) = g.get(&cache_slot) {
@@ -886,7 +911,7 @@ fn save_usage_disk(dir: &str, usage: &serde_json::Value) {
 pub fn routes() -> axum::Router {
     axum::Router::new()
         .route("/claude-usage", get(claude_usage_handler))
-        .route("/claude-usage/live", get(claude_usage_live_handler))
+        .route("/claude-usage/live", get(claude_usage_live_handler).post(claude_usage_live_push_handler))
         .route("/claude-identity", get(claude_identity_handler))
 }
 
@@ -914,6 +939,39 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["v"], 1);
         assert!(v["accounts"].is_array());
+    }
+
+    /// 다른 기기가 밀어 넣는 관측 — 읽기와 같은 문지기를 쓰고, 꼴이 틀린 몸은 받지 않는다.
+    #[tokio::test]
+    async fn pushed_usage_is_for_the_owner_and_other_machines_only() {
+        use tower::ServiceExt;
+        let guest = crate::mobile::MobileUser { name: "손님".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner: false };
+        let push = |user: Option<crate::mobile::MobileUser>, body: &'static str| async move {
+            let mut req = axum::extract::Request::post("/claude-usage/live").body(axum::body::Body::from(body)).unwrap();
+            if let Some(u) = user {
+                req.extensions_mut().insert(super::super::auth::MobileAuth(u));
+            }
+            routes().oneshot(req).await.unwrap().status()
+        };
+        let empty = r#"{"v":1,"accounts":[]}"#;
+        assert_eq!(push(Some(guest.clone()), empty).await, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(push(Some(crate::mobile::MobileUser { owner: true, ..guest }), empty).await, axum::http::StatusCode::NO_CONTENT);
+        assert_eq!(push(None, empty).await, axum::http::StatusCode::NO_CONTENT);
+        assert_eq!(push(None, "not json").await, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// 관측이 올 때마다 다시 그리는 읽기는 가진 값만 쓴다 — 없으면 상류로 가지 않고 없다고 답한다.
+    #[tokio::test]
+    async fn a_held_read_never_goes_upstream() {
+        let query = [("dir", "/kasaterm-test/held-read-slot"), ("cached", "1")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let res = claude_usage_handler(Query(query)).await.into_response();
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["reason"], "not_cached");
     }
 
     /// 계정 저장소별로 스냅샷이 갈리는지 — 한 계정의 숫자가 다른 계정 자리에 앉으면

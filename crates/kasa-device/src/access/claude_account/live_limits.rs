@@ -5,16 +5,16 @@
 //! - **Claude Code 의 측정**: 칸의 mod 가 `session.measure` 의 `rateLimits` 를 보낸다(`claude_mod`). 상태줄
 //!   stdin 의 `rate_limits` 와 같은 값이고 경고선 아래 5시간 창도 실린다(2026-11 실측: `five_hour 8%`). 칸 번호로
 //!   오므로 그 칸이 프록시로 보낸 Bearer 에 묶는다.
-//! - **다른 기기**: 기기마다 자기 관측을 계정·조직 UUID 로 내보내고(`export`, `/claude-usage/live`), `peer_loop`
-//!   가 받아 합친다. 기기마다 토큰이 달라 지문으로는 같은 계정을 못 알아본다. 토큰·지문은 기기 밖으로 안 나간다.
+//! - **다른 기기**: 기기마다 자기 관측을 계정·조직 UUID 로 내보낸다(`export`, `/claude-usage/live`). `peer_loop` 가
+//!   새 관측을 본 자리에서 다른 기기로 밀고(POST), 15초마다 당겨 와(GET) 막 켜진 기기도 맞춘다. 기기마다 토큰이
+//!   달라 지문으로는 같은 계정을 못 알아본다. 토큰·지문은 기기 밖으로 안 나간다.
 //!
 //! `oauth/usage` 는 자주 치면 429 이고 맞으면 그 토큰을 쉬게 해, 그동안 화면이 낡은 값이었다. 여기 관측은 상류
 //! 호출 없이 들어온다. 창마다 가장 새 관측이 이기고, 초기화 시각이 지난 창은 쓰지 않는다. 같은 계정 조회만
 //! 덧입히므로 다른 계정의 숫자가 새지 않는다.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -22,13 +22,16 @@ use serde_json::{Value, json};
 const PREFIX: &str = "anthropic-ratelimit-unified-";
 /// 이보다 오래된 관측은 덧입히지 않는다 — 그 사이 창이 넘어갔을 수 있다.
 const KEEP_FOR: Duration = Duration::from_secs(15 * 60);
-/// 다른 기기에 묻는 주기. 상류가 아니라 내 기기들이라 429 가 없고, 앱 폴러가 15초에 한 번 깨는 것과 맞춘다.
+/// 다른 기기에서 당겨 오는 주기. 새 관측은 본 기기가 바로 밀어 주므로, 이건 막 켜졌거나 밀기를 놓친 기기를
+/// 맞추는 몫이다. 상류가 아니라 내 기기들이라 429 가 없다.
 const PEER_EVERY: Duration = Duration::from_secs(15);
+/// 밀기 전에 모으는 틈 — 칸 여럿이 몇 ms 사이로 재면 한 번에 보낸다.
+const PUSH_GATHER: Duration = Duration::from_millis(250);
 /// 한 기기에 묻는 한계. 꺼진 기기가 다른 기기 관측까지 늦추지 않게 짧게 둔다.
 const PEER_TIMEOUT: Duration = Duration::from_secs(4);
 /// 응답이 없거나 이 창구를 모르는 구판 기기는 이만큼 쉰다.
 const PEER_BACKOFF: Duration = Duration::from_secs(60);
-const PEER_BODY_LIMIT: usize = 64 * 1024;
+pub(crate) const PEER_BODY_LIMIT: usize = 64 * 1024;
 const PEER_ACCOUNTS_CAP: usize = 32;
 /// 신원을 모르는 토큰의 프로필을 다시 묻기까지. 토큰이 갈리지 않는 한 한 번이면 된다.
 const ACCOUNT_ASK_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -103,11 +106,33 @@ impl Store {
 }
 
 fn store() -> &'static Mutex<Store> {
-    static STORE: std::sync::OnceLock<Mutex<Store>> = std::sync::OnceLock::new();
+    static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
     STORE.get_or_init(Default::default)
 }
 
-static DIRTY: AtomicBool = AtomicBool::new(false);
+/// 새 관측이 들어왔다는 깃발. 앱 폴러가 `wait_dirty` 로 그 자리에서 깨어 다시 그린다.
+fn dirty() -> &'static (Mutex<bool>, Condvar) {
+    static DIRTY: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+    DIRTY.get_or_init(Default::default)
+}
+
+/// 이 기기에서 새로 본 관측이 있다 — `peer_loop` 가 다른 기기로 민다.
+fn push_wanted() -> &'static tokio::sync::Notify {
+    static PUSH: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    PUSH.get_or_init(Default::default)
+}
+
+/// 값이 바뀌었다. 다른 기기에서 받은 것은 되밀지 않는다 — 기기끼리 메아리가 돈다.
+fn changed(local: bool) {
+    let (flag, wake) = dirty();
+    if let Ok(mut flag) = flag.lock() {
+        *flag = true;
+    }
+    wake.notify_all();
+    if local {
+        push_wanted().notify_one();
+    }
+}
 
 fn epoch_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -205,7 +230,7 @@ pub fn record<'a>(pane: &str, authorization: Option<&str>, headers: impl IntoIte
         changed |= put(local, &name, win, now, Source::Header);
     }
     if changed {
-        DIRTY.store(true, Ordering::Release);
+        self::changed(true);
     }
 }
 
@@ -231,7 +256,7 @@ pub fn record_measure<'a>(pane: &str, limits: impl IntoIterator<Item = (&'a str,
         changed |= put(local, name, win, now, Source::Measure);
     }
     if changed {
-        DIRTY.store(true, Ordering::Release);
+        self::changed(true);
     }
 }
 
@@ -254,9 +279,23 @@ pub(crate) fn should_ask_account(token: &str) -> bool {
     true
 }
 
-/// 새 관측이 들어왔는가 — 사용량 폴러가 잠을 건너뛰고 바로 다시 읽게 한다. 읽으면 내려간다.
+/// 새 관측이 들어왔는가. 읽으면 내려간다.
 pub fn take_dirty() -> bool {
-    DIRTY.swap(false, Ordering::AcqRel)
+    dirty().0.lock().map(|mut flag| std::mem::take(&mut *flag)).unwrap_or(false)
+}
+
+/// 새 관측을 `timeout` 까지 기다린다 — 사용량 폴러가 자는 동안 들어온 관측을 그 자리에서 그린다. 들어왔으면 참이고
+/// 깃발은 내려간다.
+pub fn wait_dirty(timeout: Duration) -> bool {
+    let (flag, wake) = dirty();
+    let waited = flag.lock().ok().and_then(|flag| wake.wait_timeout_while(flag, timeout, |up| !*up).ok());
+    match waited {
+        Some((mut flag, _)) => std::mem::take(&mut *flag),
+        None => {
+            std::thread::sleep(timeout);
+            false
+        }
+    }
 }
 
 fn newest(keys: &[u64]) -> Windows {
@@ -366,65 +405,100 @@ pub(crate) fn merge_peer(body: &Value) -> bool {
         }
     }
     if changed {
-        DIRTY.store(true, Ordering::Release);
+        self::changed(false);
     }
     changed
 }
 
-/// 다른 기기의 관측을 받아 오는 루프 — 협업 판이 지금 닿는다고 본 기기마다, 판과 같은 길(직통·관문 우회)로.
-/// 판 수집기가 없는 실행(검증·홀로 선 서버)에서는 물을 곳이 없어 쉰다.
+/// 다른 기기와 관측을 주고받는 루프 — 협업 판이 지금 닿는다고 본 기기마다, 판과 같은 길(직통·관문 우회)로.
+/// 이 기기에서 새 관측을 보면 그 자리에서 밀고, `PEER_EVERY` 마다 당겨 온다. 기기마다 따로 띄워 꺼진 기기가 다른
+/// 기기를 늦추지 않게 한다. 판 수집기가 없는 실행(검증·홀로 선 서버)에서는 주고받을 곳이 없어 쉰다.
 pub async fn peer_loop() {
-    let client = match reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(PEER_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-    {
-        Ok(client) => client,
-        Err(_) => return,
+    else {
+        return;
     };
-    let mut resting: HashMap<String, Instant> = HashMap::new();
+    let mut online: Vec<String> = Vec::new();
+    // (기기, 밀기인가) → 이 시각까지 쉰다. 밀기를 모르는 구판 기기도 당기기는 계속 된다.
+    let mut resting: HashMap<(String, bool), Instant> = HashMap::new();
+    let mut next_pull = tokio::time::Instant::now();
     loop {
-        let online: Vec<String> = kasa_collab::board_service::snapshot(&json!({ "scope": "all" }))
-            .ok()
-            .and_then(|board| {
-                board["sources"].as_array().map(|sources| {
-                    sources
-                        .iter()
-                        .filter(|s| s["is_local"] != true && s["state"] == "online")
-                        .filter_map(|s| s["machine_id"].as_str().map(str::to_owned))
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-        resting.retain(|_, until| Instant::now() < *until);
-        for machine in online {
-            if resting.contains_key(&machine) {
+        let push = tokio::select! {
+            () = push_wanted().notified() => true,
+            () = tokio::time::sleep_until(next_pull) => false,
+        };
+        if push {
+            tokio::time::sleep(PUSH_GATHER).await;
+        } else {
+            online = online_machines();
+            next_pull = tokio::time::Instant::now() + PEER_EVERY;
+        }
+        let mine = push.then(export);
+        let now = Instant::now();
+        resting.retain(|_, until| now < *until);
+        let mut jobs = tokio::task::JoinSet::new();
+        for machine in &online {
+            if resting.contains_key(&(machine.clone(), push)) {
                 continue;
             }
-            let Some(base) = kasa_collab::board_service::remote_base(&machine) else { continue };
-            match fetch_peer(&client, &base).await {
-                Some(body) => {
-                    merge_peer(&body);
+            let Some(base) = kasa_collab::board_service::remote_base(machine) else { continue };
+            let (client, mine, machine) = (client.clone(), mine.clone(), machine.clone());
+            jobs.spawn(async move { (machine, exchange(&client, &base, mine.as_ref()).await) });
+        }
+        while let Some(joined) = jobs.join_next().await {
+            let Ok((machine, reply)) = joined else { continue };
+            match reply {
+                Some(Some(theirs)) => {
+                    merge_peer(&theirs);
                 }
+                Some(None) => {}
                 None => {
-                    resting.insert(machine, Instant::now() + PEER_BACKOFF);
+                    resting.insert((machine, push), Instant::now() + PEER_BACKOFF);
                 }
             }
         }
-        tokio::time::sleep(PEER_EVERY).await;
     }
 }
 
-async fn fetch_peer(client: &reqwest::Client, base: &str) -> Option<Value> {
+fn online_machines() -> Vec<String> {
+    kasa_collab::board_service::snapshot(&json!({ "scope": "all" }))
+        .ok()
+        .and_then(|board| {
+            board["sources"].as_array().map(|sources| {
+                sources
+                    .iter()
+                    .filter(|s| s["is_local"] != true && s["state"] == "online")
+                    .filter_map(|s| s["machine_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// 한 기기와 한 번 주고받는다. `mine` 이 있으면 밀고(POST) 답 몸은 없다(`Some(None)`). 없으면 그 기기의 관측을
+/// 당겨 온다. 닿지 않았거나 거절됐으면 `None`.
+async fn exchange(client: &reqwest::Client, base: &str, mine: Option<&Value>) -> Option<Option<Value>> {
     let host = kasa_collab::env::env();
-    let routed = host.route_base(base);
-    let mut request = client.get(format!("{}/claude-usage/live", routed.trim_end_matches('/')));
+    let url = format!("{}/claude-usage/live", host.route_base(base).trim_end_matches('/'));
+    let mut request = match mine {
+        Some(body) => client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(body).ok()?),
+        None => client.get(url),
+    };
     if let Some(token) = host.auth_token(base) {
         request = request.header("x-kasa-token", token);
     }
     let mut response = request.send().await.ok()?;
     if !response.status().is_success() {
         return None;
+    }
+    if mine.is_some() {
+        return Some(None);
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
@@ -433,7 +507,7 @@ async fn fetch_peer(client: &reqwest::Client, base: &str) -> Option<Value> {
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).ok()
+    serde_json::from_slice(&body).ok().map(Some)
 }
 
 fn apply(usage: &mut Value, kind: &str, group: &str, legacy: &str, win: &Window) {
@@ -679,6 +753,42 @@ mod tests {
     }
 
     /// 다른 기기에서 받은 관측은 계정 UUID 로 이 기기의 같은 계정 조회에 덧입혀진다 — 토큰이 달라도.
+    /// 기기 사이 한 번 주고받기 — 민 관측은 받은 기기의 같은 계정에 들어가고, 당겨 온 몸은 그대로 읽힌다.
+    #[tokio::test]
+    async fn a_push_lands_on_the_other_machine_and_a_pull_reads_back() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, super::super::routes()).await });
+        let account = "33333333-3333-4333-8333-333333333333";
+        bind_account("tok-pushed-here", account);
+        let mine = json!({ "v": 1, "accounts": [{
+            "account_uuid": account,
+            "organization_uuid": "00000000-0000-4000-8000-0000000000aa",
+            "windows": { "5h": { "pct": 63.0, "resets_at": 4_102_400_000u64, "age_ms": 10 } }
+        }]});
+        let client = reqwest::Client::new();
+        assert_eq!(exchange(&client, &base, Some(&mine)).await, Some(None));
+        assert_eq!(observed_pct("tok-pushed-here", "5h"), Some(63.0));
+        let pulled = exchange(&client, &base, None).await.flatten().expect("pulled body");
+        assert_eq!(pulled["v"], 1);
+    }
+
+    /// 앱 폴러는 자는 동안 들어온 관측을 그 자리에서 그린다 — 정기 조회 60초를 기다리지 않는다.
+    #[test]
+    fn a_new_observation_wakes_the_sleeping_poller() {
+        let pane = "%wake-1";
+        record(pane, Some("Bearer tok-wake"), std::iter::empty::<(&str, &str)>());
+        let measure = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            record_measure(pane, [("five_hour", 12.0, None)]);
+        });
+        let started = Instant::now();
+        assert!(wait_dirty(Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        measure.join().unwrap();
+        assert_eq!(observed_pct("tok-wake", "5h"), Some(12.0));
+    }
+
     #[test]
     fn a_peer_observation_reaches_the_same_account_here() {
         let account = "11111111-1111-4111-8111-111111111111";

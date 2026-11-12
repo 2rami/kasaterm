@@ -2522,7 +2522,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 최신이다.
                 let mut others_at: Option<std::time::Instant> = None;
                 const OTHERS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
-                loop {
+                'poll: loop {
                     let cycle_started = std::time::Instant::now();
                     // 조회할 슬롯을 **매 사이클 설정에서 다시 읽어 URL 에 못 박는다.**
                     //
@@ -2547,6 +2547,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 조회가 같은 판정을 쓰게 한다 — 도중에 닫히면 반쪽만 캐시를
                     // 건너뛰어, 같은 화면의 숫자가 서로 다른 시각의 것이 된다.
                     let menu_open = usage_menu_open().load(std::sync::atomic::Ordering::Relaxed);
+                    let read = if menu_open { UsageRead::Fresh } else { UsageRead::Usual };
                     // 관문이 갱신을 못 해 곧 끊길 Claude 로그인 — 관문이 멈추면 관문은 못 알리니 기기가 띄운다.
                     for alert in kasa_device::agent_chains::take_alerts() {
                         let _ = usage_proxy.send_event(UserEvent::AgentChainAlert(alert.title, alert.body));
@@ -2617,7 +2618,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let active_dir = crate::claude_auth::runtime_dir_for(&active_id, &active_id)
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
                     let fetched =
-                        fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, menu_open);
+                        fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, read);
                     if socket::read_claude_account() != active_id {
                         continue;
                     }
@@ -2644,23 +2645,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
-                    let next = fetched.as_ref().and_then(|(u, stale, dir)| {
-                        socket::usage_pressure(u).map(|p| crate::UsageBadge {
-                            pct: p.pct,
-                            label: p.label,
-                            stale: *stale,
-                            account_dir: dir.clone(),
-                            resets_at: p.resets_at,
-                            windows: socket::usage_windows(u)
-                                .into_iter()
-                                .map(|w| crate::UsageWindowBadge {
-                                    label: w.label,
-                                    pct: w.pct,
-                                    resets_at: w.resets_at,
-                                })
-                                .collect(),
-                        })
-                    });
+                    let next = fetched.as_ref().and_then(|(u, stale, dir)| usage_badge(u, *stale, dir.clone()));
                     // 아래 계정별 표에서 다시 쓴다 — 활성 계정을 두 번 조회하지 않게.
                     let active_badge = next.clone();
                     // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — 깜빡임/사라짐 방지.
@@ -2778,7 +2763,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 (
                                     d,
                                     std::thread::spawn(move || {
-                                        fetch_claude_usage(&port, &query_dir, menu_open)
+                                        fetch_claude_usage(&port, &query_dir, read)
                                     }),
                                 )
                             })
@@ -2794,25 +2779,8 @@ impl ApplicationHandler<UserEvent> for App {
                             let Some((u, stale, dir)) = result else {
                                 continue;
                             };
-                            if let Some(p) = socket::usage_pressure(&u) {
-                                all.insert(
-                                    dir.clone(),
-                                    crate::UsageBadge {
-                                        pct: p.pct,
-                                        label: p.label,
-                                        stale,
-                                        account_dir: dir,
-                                        resets_at: p.resets_at,
-                                        windows: socket::usage_windows(&u)
-                                            .into_iter()
-                                            .map(|w| crate::UsageWindowBadge {
-                                                label: w.label,
-                                                pct: w.pct,
-                                                resets_at: w.resets_at,
-                                            })
-                                            .collect(),
-                                    },
-                                );
+                            if let Some(badge) = usage_badge(&u, stale, dir.clone()) {
+                                all.insert(dir, badge);
                             }
                         }
                         // 조회가 통째로 실패한 사이클엔 옛 표를 지우지 않는다 — 빈칸은
@@ -2969,25 +2937,38 @@ impl ApplicationHandler<UserEvent> for App {
                     // 미스라 새 계정 값을 곧바로 물어 온다. 설정 파일을 보는 것은
                     // 폴러가 GUI 상태를 못 만지기 때문이고, `settings_save` 가 파일과
                     // shim env 를 함께 갱신하므로 이 신호로 충분하다.
-                    for _ in 0..12 {
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        // 턴이 끝났거나 프록시가 응답 헤더로 새 한도 값을 봤으면 남은 잠을 건너뛴다.
-                        // 헤더 관측은 사용량 응답에 덧입혀지므로 다시 읽어도 상류 호출이 늘지 않는다.
-                        // 다만 한 바퀴가 키체인 되받기까지 하므로, 헤더로 깨우는 건 15초에 한 번까지다
-                        // — 응답은 칸마다 몇 초에 하나씩 온다.
-                        if usage_poke().swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    let next_cycle = cycle_started + std::time::Duration::from_secs(60);
+                    loop {
+                        let left = next_cycle.saturating_duration_since(std::time::Instant::now());
+                        if left.is_zero() {
                             break;
                         }
-                        if cycle_started.elapsed() >= std::time::Duration::from_secs(15)
-                            && kasa_device::access::claude_account::live_limits::take_dirty()
-                        {
+                        // 자는 동안 새 관측(응답 헤더·Claude Code 측정·다른 기기)이 오면 그 자리에서 깨어 활성 계정
+                        // 숫자만 다시 그린다. 서버가 가진 값에 관측을 덧입혀 받을 뿐이라(`UsageRead::Held`) 상류·키체인을
+                        // 건드리지 않고, 그래서 정기 조회처럼 간격을 둘 까닭이 없다.
+                        let live = kasa_device::access::claude_account::live_limits::wait_dirty(
+                            left.min(std::time::Duration::from_secs(5)),
+                        );
+                        if live {
+                            // 칸 여럿이 몇 ms 사이로 재면 한 번에 그린다.
+                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            kasa_device::access::claude_account::live_limits::take_dirty();
+                            if !redraw_live_usage(&badge_account, &usage_cache, &usage_all, &mut quota_alerts, &usage_proxy) {
+                                break 'poll;
+                            }
+                        }
+                        // 아래 둘은 정기 조회를 당긴다 — 키체인 되받기와 펼친 목록의 상류 조회가 따라오므로, 관측으로
+                        // 자주 깨더라도 한 바퀴는 5초를 넘긴 뒤에만 당긴다.
+                        let rested = cycle_started.elapsed() >= std::time::Duration::from_secs(5);
+                        // 턴이 끝났으면 남은 잠을 건너뛴다(`usage_poke`).
+                        if rested && usage_poke().swap(false, std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
                         // 목록을 펼쳐 놓고 보는 중이면 5초짜리 한 조각만 자고 다시
                         // 돈다. 잠 안에서 **매번** 다시 읽는 것이 중요하다 — 사이클
                         // 머리의 `menu_open` 을 재사용하면, 자는 동안 열린 목록은
                         // 남은 55초를 그대로 굳은 채 기다린다.
-                        if usage_menu_open().load(std::sync::atomic::Ordering::Relaxed) {
+                        if rested && usage_menu_open().load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
                         let now = socket::read_claude_account();
@@ -8452,6 +8433,72 @@ impl App {
 
 }
 
+#[derive(Clone, Copy)]
+enum UsageRead {
+    /// 서버 캐시가 신선하면 그것, 아니면 상류.
+    Usual,
+    /// 계정 목록을 펼쳐 보는 동안 — 신선 캐시도 건너뛴다.
+    Fresh,
+    /// 서버가 가진 값에 새 관측만 덧입힌다. 상류·토큰을 건드리지 않는다.
+    Held,
+}
+
+fn usage_badge(usage: &serde_json::Value, stale: bool, account_dir: String) -> Option<crate::UsageBadge> {
+    socket::usage_pressure(usage).map(|p| crate::UsageBadge {
+        pct: p.pct,
+        label: p.label,
+        stale,
+        account_dir,
+        resets_at: p.resets_at,
+        windows: socket::usage_windows(usage)
+            .into_iter()
+            .map(|w| crate::UsageWindowBadge { label: w.label, pct: w.pct, resets_at: w.resets_at })
+            .collect(),
+    })
+}
+
+/// 새 관측을 활성 계정 숫자와 한도 경고에 바로 반영한다. 이벤트 루프가 닫혔으면 거짓.
+fn redraw_live_usage(
+    account: &str,
+    active: &std::sync::Mutex<Option<crate::UsageBadge>>,
+    all: &std::sync::Mutex<HashMap<String, crate::UsageBadge>>,
+    alerts: &mut crate::quota_alerts::AlertTracker,
+    proxy: &EventLoopProxy<UserEvent>,
+) -> bool {
+    // 정기 조회와 같은 이유로 신원 모를 작업대는 묻지 않는다.
+    if account.is_empty() {
+        return true;
+    }
+    let dir = crate::claude_auth::runtime_dir_for(account, account)
+        .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+    let Some((usage, stale, dir)) = fetch_claude_usage(&crate::mcp_panel_port(), &dir, UsageRead::Held) else {
+        return true;
+    };
+    if socket::read_claude_account() != account {
+        return true;
+    }
+    for alert in alerts.observe(account, &usage, !stale) {
+        if proxy.send_event(UserEvent::ClaudeQuotaWarning(alert)).is_err() {
+            return false;
+        }
+    }
+    let Some(badge) = usage_badge(&usage, stale, dir) else { return true };
+    let mut redraw = false;
+    if let Ok(mut held) = active.lock() {
+        if held.as_ref() != Some(&badge) {
+            *held = Some(badge.clone());
+            redraw = true;
+        }
+    }
+    if let Ok(mut held) = all.lock() {
+        if held.get(&badge.account_dir) != Some(&badge) {
+            held.insert(badge.account_dir.clone(), badge);
+            redraw = true;
+        }
+    }
+    !redraw || proxy.send_event(UserEvent::Redraw).is_ok()
+}
+
 /// Build a git-column snapshot from `git_status`, split into Staged Changes /
 /// Changes (VSCode model; no dedup, so a partially-staged file shows in both).
 /// Returns `None` on a transient git failure so the caller keeps the last good
@@ -8634,13 +8681,17 @@ mod usage_badge_merge_tests {
 fn fetch_claude_usage(
     port: &str,
     dir: &str,
-    fresh: bool,
+    read: UsageRead,
 ) -> Option<(serde_json::Value, bool, String)> {
     // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
     let url = format!(
         "http://127.0.0.1:{port}/claude-usage?dir={}{}",
         urlencode(dir),
-        if fresh { "&fresh=1" } else { "" }
+        match read {
+            UsageRead::Usual => "",
+            UsageRead::Fresh => "&fresh=1",
+            UsageRead::Held => "&cached=1",
+        }
     );
     let out = crate::proc::command("curl")
         .args(["-s", "--max-time", "5", &url])
