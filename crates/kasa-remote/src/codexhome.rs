@@ -105,7 +105,7 @@ fn install_via_tmp(
         .context("rollout 상대경로에 부모 폴더가 없다")?;
     std::fs::create_dir_all(parent).context("임시 검증 폴더 생성 실패")?;
     std::fs::write(&tmp_path, bytes).context("임시 검증 파일 쓰기 실패")?;
-    let bundle = fmt::bundle_codex_session(tmp_home, &tmp_path)?;
+    let bundle = fmt::bundle_received_codex_session(tmp_home, &tmp_path)?;
     if bundle.session_id != sid {
         bail!(
             "rollout 의 세션 id({}) 가 요청 id({sid}) 와 다르다",

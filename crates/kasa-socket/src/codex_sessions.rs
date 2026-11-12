@@ -106,6 +106,28 @@ pub fn locate_codex_session_at(
     codex_home: &Path,
     rollout_path: &Path,
 ) -> Result<CodexSessionLocation> {
+    locate_with(codex_home, rollout_path, CwdRule::Local)
+}
+
+/// 대화 머리의 cwd 를 무엇으로 받나. 이 기기에서 찾는 대화는 이 기기 꼴만, 이사로 받은 대화는 보낸 기기 꼴도
+/// 받는다 — 맥에서 온 Codex 대화의 `/Users/…` 를 Windows 가 「절대경로 아님」으로 거절해, 출발 Codex 를 끈 뒤
+/// 이사가 멈췄다(2026-11-12).
+#[derive(Clone, Copy)]
+enum CwdRule {
+    Local,
+    AnyOs,
+}
+
+impl CwdRule {
+    fn accepts(self, cwd: &Path) -> bool {
+        let text = cwd.to_string_lossy();
+        let bytes = text.as_bytes();
+        cwd.is_absolute() || matches!(self, Self::AnyOs) && (text.starts_with('/') || text.starts_with(r"\\")
+            || bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/'))
+    }
+}
+
+fn locate_with(codex_home: &Path, rollout_path: &Path, rule: CwdRule) -> Result<CodexSessionLocation> {
     let sessions = codex_home.join("sessions");
     let canonical_sessions = std::fs::canonicalize(&sessions)
         .with_context(|| format!("Codex sessions 폴더를 열 수 없음: {}", sessions.display()))?;
@@ -123,7 +145,7 @@ pub fn locate_codex_session_at(
     validate_relative_rollout_path(&relative)?;
 
     let bytes = read_stable_rollout(&canonical_rollout)?;
-    let meta = rollout_meta(&bytes)?;
+    let meta = rollout_meta(&bytes, rule)?;
     validate_meta_against_path(&meta, &relative)?;
 
     Ok(CodexSessionLocation {
@@ -165,7 +187,16 @@ pub fn find_codex_session(
 
 /// Read one validated rollout into a transfer bundle.
 pub fn bundle_codex_session(codex_home: &Path, rollout_path: &Path) -> Result<CodexSessionBundle> {
-    let location = locate_codex_session_at(codex_home, rollout_path)?;
+    bundle_with(codex_home, rollout_path, CwdRule::Local)
+}
+
+/// 이사로 받아 임시 home 에 놓은 rollout 의 재검증 — 보낸 기기 OS 꼴의 cwd 도 받는다.
+pub fn bundle_received_codex_session(codex_home: &Path, rollout_path: &Path) -> Result<CodexSessionBundle> {
+    bundle_with(codex_home, rollout_path, CwdRule::AnyOs)
+}
+
+fn bundle_with(codex_home: &Path, rollout_path: &Path, rule: CwdRule) -> Result<CodexSessionBundle> {
+    let location = locate_with(codex_home, rollout_path, rule)?;
     let bytes = read_stable_rollout(&location.rollout_path)?;
     let bundle = CodexSessionBundle {
         version: CODEX_SESSION_BUNDLE_VERSION,
@@ -176,7 +207,7 @@ pub fn bundle_codex_session(codex_home: &Path, rollout_path: &Path) -> Result<Co
             bytes,
         }],
     };
-    validate_bundle(&bundle)?;
+    validate_bundle(&bundle, rule)?;
     Ok(bundle)
 }
 
@@ -198,7 +229,7 @@ pub fn codex_restore_files<'a>(
     destination_codex_home: &Path,
     bundle: &'a CodexSessionBundle,
 ) -> Result<Vec<CodexRestoreFile<'a>>> {
-    validate_bundle(bundle)?;
+    validate_bundle(bundle, CwdRule::AnyOs)?;
     Ok(bundle
         .files
         .iter()
@@ -209,7 +240,7 @@ pub fn codex_restore_files<'a>(
         .collect())
 }
 
-fn validate_bundle(bundle: &CodexSessionBundle) -> Result<()> {
+fn validate_bundle(bundle: &CodexSessionBundle, rule: CwdRule) -> Result<()> {
     if bundle.version != CODEX_SESSION_BUNDLE_VERSION {
         bail!(
             "지원하지 않는 Codex session bundle version: {}",
@@ -219,7 +250,7 @@ fn validate_bundle(bundle: &CodexSessionBundle) -> Result<()> {
     if !super::is_uuid(&bundle.session_id) {
         bail!("Codex bundle session id가 UUID가 아님");
     }
-    if !bundle.cwd.is_absolute() {
+    if !rule.accepts(&bundle.cwd) {
         bail!("Codex bundle cwd가 절대경로가 아님");
     }
     if bundle.files.len() != 1 {
@@ -230,7 +261,7 @@ fn validate_bundle(bundle: &CodexSessionBundle) -> Result<()> {
     if file.bytes.len() as u64 > MAX_CODEX_ROLLOUT_BYTES {
         bail!("Codex rollout이 512 MiB 상한을 넘음");
     }
-    let meta = rollout_meta(&file.bytes)?;
+    let meta = rollout_meta(&file.bytes, rule)?;
     validate_meta_against_path(&meta, &file.codex_home_relative_path)?;
     if meta.id != bundle.session_id || meta.cwd != bundle.cwd {
         bail!("Codex bundle manifest와 rollout metadata가 다름");
@@ -288,7 +319,7 @@ fn valid_digits(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn rollout_meta(bytes: &[u8]) -> Result<RolloutMeta> {
+fn rollout_meta(bytes: &[u8], rule: CwdRule) -> Result<RolloutMeta> {
     // Current Codex puts session_meta first. Scan a small bounded prefix to
     // tolerate harmless prelude records without treating arbitrary later
     // events as metadata.
@@ -324,7 +355,7 @@ fn rollout_meta(bytes: &[u8]) -> Result<RolloutMeta> {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .context("Codex session_meta.payload.cwd가 없음")?;
-        if !cwd.is_absolute() {
+        if !rule.accepts(&cwd) {
             bail!("Codex session_meta.payload.cwd가 절대경로가 아님");
         }
         return Ok(RolloutMeta {
@@ -493,6 +524,20 @@ mod tests {
             let err = locate_codex_session_at(&root.0, &path).unwrap_err().to_string();
             assert!(err.contains("절대경로가 아님"), "{cwd}: {err}");
         }
+    }
+
+    /// 이사로 받은 대화는 보낸 기기 OS 꼴의 cwd 를 그대로 받는다. 상대경로는 여전히 거절한다.
+    #[test]
+    fn a_received_rollout_keeps_the_other_os_cwd() {
+        let foreign = if cfg!(windows) { "/Users/kasa/project" } else { r"C:\Users\kasa\project" };
+        let root = TempRoot::new("foreign-cwd");
+        let path = rollout(&root.0, ID, ID, foreign);
+        let bundle = bundle_received_codex_session(&root.0, &path).unwrap();
+        assert_eq!(bundle.cwd, PathBuf::from(foreign));
+        assert!(codex_restore_files(&root.0, &bundle).is_ok(), "받은 묶음을 앉힐 자리도 같은 규칙으로 판정한다");
+        let root = TempRoot::new("received-relative");
+        let path = rollout(&root.0, ID, ID, "relative/project");
+        assert!(bundle_received_codex_session(&root.0, &path).unwrap_err().to_string().contains("절대경로가 아님"));
     }
 
     #[test]
