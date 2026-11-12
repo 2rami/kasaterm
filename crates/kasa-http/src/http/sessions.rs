@@ -233,6 +233,30 @@ fn parent_session_from_pid(pid: u64) -> Option<String> {
     None
 }
 
+/// `claude agents` 는 부를 때마다 새 프로세스다. 다른 기기들이 3초마다 `/background-agents` 를 물어 Windows 에서
+/// 1~4초마다 claude.exe 가 떴다(2026-11-12) — 같은 질문은 잠깐 같은 답을 주고, 동시에 온 질문은 한 번만 띄운다.
+const AGENTS_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn cached_agents_output(cwd: Option<&str>) -> std::io::Result<std::process::Output> {
+    use std::sync::{Mutex, OnceLock};
+    type Seen = std::collections::HashMap<String, (std::time::Instant, std::process::Output)>;
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    let mut seen = SEEN.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = cwd.unwrap_or_default().to_string();
+    if let Some((_, output)) = seen.get(&key).filter(|(at, _)| at.elapsed() < AGENTS_TTL) {
+        return Ok(output.clone());
+    }
+    let mut cmd = kasa_socket::process::no_window_command(claude_bin());
+    cmd.args(["agents", "--json", "--all"]);
+    if let Some(cwd) = cwd {
+        cmd.args(["--cwd", cwd]);
+    }
+    let output = cmd.output()?;
+    seen.retain(|_, (at, _)| at.elapsed() < AGENTS_TTL);
+    seen.insert(key, (std::time::Instant::now(), output.clone()));
+    Ok(output)
+}
+
 /// `GET /background-agents?cwd=<abs>` — the `claude agents --json --all` view:
 /// the background/interactive sessions Claude's own supervisor hosts, as
 /// `{ ok, agents: [{pid,id,cwd,kind,startedAt,sessionId,name,status,state}] }`.
@@ -246,12 +270,7 @@ async fn background_agents_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let mut cmd = kasa_socket::process::no_window_command(claude_bin());
-    cmd.args(["agents", "--json", "--all"]);
-    if let Some(cwd) = params.get("cwd").filter(|s| !s.is_empty()) {
-        cmd.args(["--cwd", cwd]);
-    }
-    let body = match cmd.output() {
+    let body = match cached_agents_output(params.get("cwd").map(String::as_str).filter(|s| !s.is_empty())) {
         Ok(out) if out.status.success() => {
             match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
                 Ok(mut agents) => {
