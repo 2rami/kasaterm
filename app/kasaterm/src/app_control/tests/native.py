@@ -100,7 +100,7 @@ def phase(name, automatic=False, missing=False, mutation=False):
             time.sleep(.3)
         (rig/'after.json').write_text(json.dumps(after,ensure_ascii=False,indent=2))
         if not missing:
-            assert after['ready'],after
+            assert after['ready'] and after['restore_complete'],after
             assert after['restart']['plain_shells']==2,after
             image=rpc(rig/'app.sock','surface.capture',{'surface_id':'','path':str(rig/'after.png'),'max_width':1100})
             assert image['ok'],image
@@ -115,6 +115,10 @@ def phase(name, automatic=False, missing=False, mutation=False):
                 assert time.monotonic()<until,status
                 time.sleep(.2)
             (rig/'job.json').write_text(json.dumps(status,indent=2))
+            if missing:
+                failed=inspect()
+                assert not failed['restore_complete'] and failed['restore_error']=='saved work missing',failed
+                (rig/'missing-status.json').write_text(json.dumps(failed,indent=2))
         current=inspect()
         refusal=rpc(rig/'app.sock','app.control',{'action':'restart','expect':current['revision'],'interrupt':True})
         assert not refusal['ok'],'development app must not relaunch outside isolation'

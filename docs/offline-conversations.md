@@ -90,6 +90,8 @@ Rust 저장소·관문 시험은 계정 분리, 자격 폐기, desktop 전용 �
 계정에서 버튼 없이 자동 저장한 뒤 UI로 열고 실제 Keychain과 Application Support에 남긴다. 앱을 종료한 뒤 **재설치 없이**
 같은 앱을 다시 실행하면 서버 없이 연결 대기 화면에서 저장본을 열고, 같은 주소의 서버를 복구해 추가 바이트만
 받는지 확인한다. 푸시 등록만 제외하며 결과는 앱 지원 폴더의 `offline-archive-native-test.json`에 남긴다.
+처음 만든 worktree는 `mobile/tool/kasanet.sh` 뒤 `mobile/ios`에서 `pod install --deployment`를 실행한다.
+라이브러리가 없을 때 Pods를 먼저 만들었다면 라이브러리 생성만으로 링크 목록이 갱신되지 않는다.
 `flutter drive --keep-app-running --driver test_driver/integration_test.dart --target integration_test/offline_archive_test.dart`
 뒤 전용 기기의 앱을 종료·재실행하고 `--use-existing-app=<VM service URL>`로 두 번째 driver를 붙인다.
 `KASA_SHOT_DIR`에 다운로드·콜드 재시작·재연결의 실제 화면 세 장을 남긴다. 사용자 폰·계정·세션은 쓰지 않는다.

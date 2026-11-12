@@ -2232,7 +2232,7 @@ impl Backend for PtyBackend {
         let app = crate::app_control::request(&self.proxy, &kasa_socket::app_control::Request {
             action:kasa_socket::app_control::Action::Inspect, machine_id:None, expect:None, interrupt:false, display:None,
         }).map(|view|json!({"ready":view["ready"],"restore":view["restore"],"restoring":view["restoring"],
-            "restore_progress":view["restore_progress"],"instance_id":view["instance_id"]}))
+            "restore_progress":view["restore_progress"],"restore_complete":view["restore_complete"],"restore_error":view["restore_error"],"instance_id":view["instance_id"]}))
             .unwrap_or_else(|_|json!({"ready":false,"error":"app state unavailable; inspect before acting"}));
         let windows = self.windows_overview()?;
         let labels = self.sessions().labels;

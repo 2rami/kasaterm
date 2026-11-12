@@ -100,7 +100,16 @@ pub(crate) fn request(proxy: &winit::event_loop::EventLoopProxy<UserEvent>, requ
     }
 }
 
+fn progress_complete(progress: Option<&crate::restore_progress::RestoreProgress>) -> bool {
+    progress.is_none_or(|p| p.built && p.failure.is_none() && p.ready >= p.expected)
+}
+
 impl App {
+    fn control_ready(&self) -> bool {
+        self.restore_prompt.is_none() && self.restore_applying.is_none()
+            && !self.restoration_blocks_input() && self.pending_restores.is_empty()
+    }
+
     fn control_state(&self, own_job: Option<&str>, baking: bool) -> anyhow::Result<(Value, Facts)> {
         let mut facts = self.restart_facts_with_baking(baking);
         if facts.active_job.as_deref() == own_job { facts.active_job = None; }
@@ -116,6 +125,9 @@ impl App {
             .chain(self.aux.windows.iter().map(|w| json!({"kind":"document","focused":w.window.has_focus()}))).collect();
         let focused = self.window_focused || extra_windows.iter().any(|w|w["focused"] == true) || self.image_preview.focused() || self.media_preview.focused();
         let progress = self.restore_progress.as_ref().map(|p| json!({"expected":p.expected,"ready":p.ready,"failure":p.failure,"built":p.built,"background":p.background}));
+        let missing = RESTORE_MISSING.load(std::sync::atomic::Ordering::Relaxed);
+        let restore_error = self.restore_progress.as_ref().and_then(|p|p.failure.clone())
+            .or_else(|| missing.then(|| "saved work missing".into()));
         let state = json!({"schema":"kasaterm-app-control/1","machine_id":facts.machine_id,
             "instance_id":kasa_collab::board_service::instance_id(),"auth_epoch":kasa_device::device_auth::change_epoch(),"version":env!("CARGO_PKG_VERSION"),
             "focused":focused,"main_window_focused":self.window_focused,"extra_windows":extra_windows,"minimized":self.window.as_ref().and_then(|w|w.is_minimized()),
@@ -123,12 +135,14 @@ impl App {
             "conversation_view":active.as_ref().is_some_and(|id|self.chat_view_showing(id)),
             "image_preview_focused":self.image_preview.focused(),"media_preview_focused":self.media_preview.focused(),
             "restore":self.restore_prompt.as_ref().map(|_|self.restore_picker.control_view()),
-            "restoring":self.restore_applying.is_some() || self.restoration_blocks_input() || !self.pending_restores.is_empty(),
+            "restoring":self.restore_applying.is_some() || !self.pending_restores.is_empty()
+                || self.restore_progress.as_ref().is_some_and(|p| p.failure.is_none() && !progress_complete(Some(p))),
             "restore_progress":progress,"restart":facts_json,
-            "ready":self.restore_prompt.is_none() && self.restore_applying.is_none() && !self.restoration_blocks_input()
-                && self.pending_restores.is_empty() && self.restore_progress.as_ref().is_none_or(|p|p.failure.is_none()),
+            "ready":self.control_ready(),
+            "restore_complete":self.control_ready() && !missing && progress_complete(self.restore_progress.as_ref()),
+            "restore_error":restore_error,
             "before_action":"restore opens automatically on an agent mutation; inspect until ready, then resolve fresh pane addresses",
-            "actions":{"restore":self.restore_prompt.is_some() || self.restore_progress.as_ref().is_some_and(|p|p.failure.is_some()),"restart":self.restore_prompt.is_none() && !self.restoration_blocks_input(),"update-check":true},
+            "actions":{"restore":self.restore_prompt.is_some() || self.restore_progress.as_ref().is_some_and(|p|p.failure.is_some()),"restart":self.control_ready(),"update-check":true},
             "screen":"app screen captures the actual monitor; focused=false means this app is not in front"});
         Ok((state,facts))
     }
@@ -150,10 +164,10 @@ impl App {
                     if let Some(window) = &self.window { window.request_redraw(); }
                     anyhow::bail!("app_restoring: 저장된 작업 복원을 시작했어요. 조작은 실행하지 않았어요. app inspect로 복원 완료와 새 주소를 확인한 뒤 다시 요청하세요");
                 }
-                anyhow::ensure!(self.restore_applying.is_none() && !self.restoration_blocks_input() && self.pending_restores.is_empty(),
-                    "app_restoring: 복원 중이에요. 조작은 실행하지 않았어요. app inspect로 완료를 확인하세요");
-                anyhow::ensure!(self.restore_progress.as_ref().is_none_or(|p|p.failure.is_none()),
+                anyhow::ensure!(self.control_ready() || self.restore_progress.as_ref().is_none_or(|p|p.failure.is_none()),
                     "app_restore_failed: 복원이 끝나지 않았어요. app inspect로 확인한 뒤 app restore --expect REVISION으로 다시 시도하세요");
+                anyhow::ensure!(self.control_ready(),
+                    "app_restoring: 복원 중이에요. 조작은 실행하지 않았어요. app inspect로 완료를 확인하세요");
                 Ok(())
             })().map_err(|e|e.to_string());
             let _ = reply.send(result);
@@ -195,7 +209,7 @@ impl App {
                     Ok(Reply::View(json!({"ok":true,"machine_id":facts.machine_id,"status":"restoring"})))
                 }
                 Action::Restart => {
-                    anyhow::ensure!(self.restore_prompt.is_none() && self.restore_applying.is_none() && !self.restoration_blocks_input(), "finish restoration before restarting");
+                    anyhow::ensure!(self.control_ready(), "finish restoration before restarting");
                     check_restart(&facts, request.interrupt)?;
                     let saved = self.session_state_json().ok_or_else(|| anyhow::anyhow!("session snapshot unavailable"))?;
                     Ok(Reply::Restart(Prepared {facts,saved}))
@@ -259,6 +273,26 @@ fn check_restart(facts: &Facts, interrupt: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_built_background_layout_is_not_complete_until_its_students_are_ready() {
+        let mut progress = crate::restore_progress::RestoreProgress::new(json!({
+            "active_session":0,"sessions":[{"windows":[{"leaf":{"pane_id":"%1"}},{"leaf":{"pane_id":"%2"}}]}]
+        }));
+        assert_eq!(progress.expected, 2);
+        progress.built = true;
+        progress.background = true;
+        progress.ready = 1;
+        assert!(!progress_complete(Some(&progress)));
+        progress.ready = 2;
+        progress.failure = Some("resume failed".into());
+        assert!(!progress_complete(Some(&progress)));
+        progress.failure = None;
+        assert!(progress_complete(Some(&progress)));
+        progress.built = false;
+        assert!(!progress_complete(Some(&progress)));
+        assert!(progress_complete(None));
+    }
+
     #[test]
     fn screen_selection_and_permission_fail_without_fallback_or_permission_prompts() {
         use kasa_remote::screen_mirror::{Source, Display, Ask, Shot, Denied};
