@@ -30,7 +30,7 @@ http.Response _answer(http.Request req) {
       {
         'id': '%2',
         'name': '모모이',
-        'title': '',
+        'title': '◐ 권한 묻는 칸',
         'status': 'waiting',
         'kind': 'permission',
         'window': 0,
@@ -49,7 +49,7 @@ http.Response _answer(http.Request req) {
       {
         'id': '%6',
         'name': '호시노',
-        'title': '',
+        'title': '✳ 탭 넘김 확인',
         'status': 'idle',
         'window': 0,
         'cwd': '/w',
@@ -140,9 +140,13 @@ void main() {
     // 떠오르기(Appear)가 끝난 뒤를 찍는다 — 중간 프레임을 골든으로 굳히면 안 된다.
     await tester.pump(const Duration(milliseconds: 1200));
     expect(find.text('게임개발부'), findsOneWidget);
-    // 지도 칸은 앞 탭(호시노)을 보인다. 목록 줄은 학생 이름 없이 세션 이름과 도는 시간만
-    // (데스크톱 사이드바 목록 줄과 같다) — 아리스는 칸을 넘겨야 이름이 나온다.
-    expect(find.text('호시노'), findsOneWidget);
+    // 지도 칸은 앞 탭(호시노)을 보이고, 칸 글은 데스크톱 배치도 칸처럼 도는 표시를 뗀 창
+    // 이름이다. 목록 줄은 학생 이름 없이 세션 이름과 도는 시간만(데스크톱 사이드바 목록 줄과
+    // 같다) — 학생 이름은 지도에도 목록에도 글로 안 나온다.
+    expect(find.text('탭 넘김 확인'), findsOneWidget);
+    expect(find.text('권한 묻는 칸'), findsOneWidget);
+    expect(find.text('shell'), findsWidgets);
+    expect(find.text('호시노'), findsNothing);
     expect(find.text('아리스'), findsNothing);
     expect(find.text('폰 목록 줄'), findsOneWidget);
     expect(find.text('14분'), findsOneWidget);

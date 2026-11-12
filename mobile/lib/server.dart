@@ -190,6 +190,18 @@ class Pane {
     return harness == 'codex' ? 'Codex' : 'Claude';
   }
 
+  /// 미니맵 칸의 글 — 데스크톱 배치도 칸(`sidebar_pulse::row_title`)과 같은 창 이름. 학생
+  /// 이름을 달면 얼굴과 같은 말을 두 번 해 「무슨 일 하는 칸」인지가 지도에서 사라진다.
+  /// 창 이름이 비면 목록 줄 글로 물러선다.
+  String get mapTitle {
+    final t = title.replaceFirst(_activityLead, '').trim();
+    return t.isNotEmpty ? t : rowTitle;
+  }
+
+  /// 창 이름 앞의 도는 표시(`◐ `·`✳ `·`⠂ `) — 데스크톱 `plain_title` 과 같이 글자·숫자·여는
+  /// 괄호·따옴표가 나올 때까지 뗀다. 서버가 떼는 것보다 넓다(반달 `◐` 는 서버를 지나온다).
+  static final _activityLead = RegExp(r'''^[^\p{L}\p{N}\[(「"']+''', unicode: true);
+
   String get subtitle {
     // 목록엔 /rename 으로 붙인 이름(session)만 — 에이전트가 제 대화를 요약한 제목은
     // 안 보인다(2026-09-08 지시). 이름 없는 셸만 어느 폴더인지 한 마디.

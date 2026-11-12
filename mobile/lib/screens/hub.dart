@@ -1102,7 +1102,7 @@ class _MiniCellState extends State<_MiniCell> {
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
                   child: Text(
-                    q.displayName,
+                    q.mapTitle,
                     style: Theme.of(
                       context,
                     ).textTheme.labelSmall?.copyWith(color: scheme.onSurface),

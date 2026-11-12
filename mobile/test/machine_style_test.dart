@@ -66,6 +66,16 @@ void main() {
     expect(elapsedLabel(null), isNull);
   });
 
+  test('미니맵 칸 글은 데스크톱 배치도 칸처럼 창 이름 — 학생 이름이 아니다', () {
+    Pane p(Map<String, Object?> extra) => Pane.fromJson({'id': '%1', 'cwd': '/w/kasaterm', 'name': '아리스', ...extra});
+    expect(p({'title': '폰 미니맵', 'session': '폰 목록 줄'}).mapTitle, '폰 미니맵');
+    expect(p({'title': '◑ 목록뷰 진행 막대·이름 정리'}).mapTitle, '목록뷰 진행 막대·이름 정리', reason: '도는 표시는 뗀다');
+    expect(p({'title': '「계정」 정리'}).mapTitle, '「계정」 정리', reason: '여는 괄호는 남긴다');
+    expect(p({'title': '⠂ ', 'session': '폰 목록 줄'}).mapTitle, '폰 목록 줄', reason: '창 이름이 비면 목록 줄 글');
+    expect(p({'harness': 'codex'}).mapTitle, 'Codex');
+    expect(p({'name': ''}).mapTitle, 'kasaterm', reason: '셸은 폴더');
+  });
+
   test('거울 pane 은 어느 기계의 거울인지 안다', () {
     expect(Pane.fromJson({'id': '%9', 'mirror_of': '나쵸네코'}).mirrorOf, '나쵸네코');
     expect(Pane.fromJson({'id': '%9'}).mirrorOf, isNull);
