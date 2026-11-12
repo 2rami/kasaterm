@@ -108,6 +108,8 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 install \
 
 `install`은 `--apply`가 없으면 LaunchAgent 내용을 보여줄 뿐이다. 서명 키·비밀번호·공증 자격 내용은 정책이나 로그에 넣지 않는다. 기존 키체인과 이름 있는 공증 프로필을 쓴다.
 
+알림 배너의 큰 아이콘을 학생 얼굴로 그리는 대화 알림 권한은 Developer ID 프로파일이 있어야 실린다. App ID `com.kasa.kasaterm`에 Communication Notifications를 켜고 `MAC_APP_DIRECT` 프로파일을 controller의 `~/.config/kasaterm/signing/kasaterm-developer-id.provisionprofile`(또는 `KASATERM_MAC_PROFILE`)에 둔다. 프로파일이 없거나 팀·번들 id·서명 인증서가 안 맞으면 `scripts/mac-provision.py`가 까닭을 남기고, 판은 권한 없이 서명돼 앱 아이콘 배너로 돌아간다. 인증서를 새로 받으면 프로파일도 새로 받는다.
+
 `enable` 은 정책의 `platforms` 를 `["macos","windows"]` 로 봉인한다. 그 전에 봉인한 `["macos"]` 정책은 그대로 유효하고 mac 만
 낸다 — 코드가 주인이 허가한 범위를 넓히지 않는다. Windows 를 싣으려면 controller 에서 `enable` 을 다시 친다(같은 인자, 정책 revision 이
 오른다). 진행 중인 계획은 옛 정책 해시에 묶여 있으니 `status` 의 `queue.active` 가 비었을 때 친다. 계획은 정책이 허가하고 그 커밋의

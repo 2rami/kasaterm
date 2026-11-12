@@ -96,7 +96,10 @@ pub(crate) fn with_character_avatar(
     let slug = crate::theme::character_slug_any(character)?;
     let remote = crate::mirror_theme::asset(slug, "profile", 0);
     let png = remote.as_deref().or_else(|| crate::render::student_profile_png(slug))?;
-    let name = NSString::from_str(character);
+    // 대화 알림은 제목 자리에 보낸 사람 이름을 그려 원래 제목을 버린다 — 「응답 완료」·「승인 대기」가
+    // 사라지지 않게 제목 전체를 이름으로 준다. 같은 학생끼리 묶는 건 이름이 아니라 handle 이다.
+    let title = content.title().to_string();
+    let name = NSString::from_str(if title.is_empty() { character } else { &title });
     let identity = NSString::from_str(&format!("kasaterm:{slug}"));
     let thread = NSString::from_str(thread);
     // SAFETY: all arguments are live Foundation/Intents objects of the declared
@@ -116,6 +119,53 @@ pub(crate) fn with_character_avatar(
         objc2::msg_send![content, contentByUpdatingWithProvider: &*intent,
             error: std::ptr::null_mut::<*mut NSError>()]
     }
+}
+
+/// 서명에 대화 알림 권한이 실렸는지. 실렸으면 시스템이 학생 얼굴을 큰 아이콘으로 그려서,
+/// 오른쪽 썸네일까지 달면 같은 얼굴이 두 번 보인다. 권한은 Developer ID 프로파일이 있는
+/// 릴리스 서명에만 실리므로(scripts/build-app.sh) 판마다 다르고, 실행 중엔 바뀌지 않는다.
+pub(crate) fn communication_entitled() -> bool {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecTaskCreateFromSelf(allocator: *const c_void) -> *const c_void;
+        fn SecTaskCopyValueForEntitlement(
+            task: *const c_void,
+            entitlement: *const c_void,
+            error: *mut *const c_void,
+        ) -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFBooleanTrue: *const c_void;
+        fn CFRelease(object: *const c_void);
+    }
+
+    static ENTITLED: OnceLock<bool> = OnceLock::new();
+    *ENTITLED.get_or_init(|| {
+        let key = objc2_foundation::NSString::from_str("com.apple.developer.usernotifications.communication");
+        // SAFETY: NSString is toll-free bridged to CFString; both returned objects
+        // follow the Create/Copy rule and are released exactly once here.
+        unsafe {
+            let task = SecTaskCreateFromSelf(std::ptr::null());
+            if task.is_null() {
+                return false;
+            }
+            let value = SecTaskCopyValueForEntitlement(
+                task,
+                Retained::as_ptr(&key).cast(),
+                std::ptr::null_mut(),
+            );
+            let entitled = value == kCFBooleanTrue;
+            if !value.is_null() {
+                CFRelease(value);
+            }
+            CFRelease(task);
+            entitled
+        }
+    })
 }
 
 // ⚠️ 구식(NSUserNotification) 경로는 시도했고 **막혀 있다** — 다시 시도하지 말 것.

@@ -560,11 +560,24 @@ sign_part "$APP/Contents/MacOS/kasaterm-cli"
 sign_part "$APP/Contents/MacOS/kasa-acp"
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
 # hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
-[[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")
-# Communication Notifications is restricted: Apple Development signatures with
-# this entitlement are killed at launch without a matching macOS profile.
-# Native notification center + avatar provider work without it; keep the bundle
-# runnable until a macOS profile has been explicitly prepared and validated.
+APP_ENTITLEMENTS="-"
+[[ "$HARDENED" == "1" ]] && APP_ENTITLEMENTS="$ROOT/scripts/kasaterm.entitlements"
+# 대화 알림(배너 큰 아이콘이 학생 얼굴)은 제한 권한이다. 알림 내용은 대화로 바뀌어도 권한이 없으면 시스템이
+# 앱 아이콘으로 그리고(2026-11-12 같은 시험 앱을 권한 유무로만 갈라 실측), 그 권한을 허락하는 프로파일 없이
+# 싣으면 실행 순간 죽는다. 그래서 Developer ID 프로파일이 팀·번들 id·서명 인증서까지 맞을 때만 둘을 함께 넣는다.
+# 프로파일은 App ID 에 Communication Notifications 를 켠 뒤 MAC_APP_DIRECT 로 받아 아래 경로에 둔다.
+MAC_PROFILE="${KASATERM_MAC_PROFILE:-$HOME/.config/kasaterm/signing/kasaterm-developer-id.provisionprofile}"
+if [[ "$APPLE_SIGN" == "Developer ID Application: "* ]]; then
+  SIGN_SHA1=$(security find-identity -v "${IDENTITY_ARGS[@]}" 2>/dev/null | grep -F -- "$SIGN_ID" | head -1 | awk '{print $2}' || true)
+  PROVISION_ENTITLEMENTS="dist/kasaterm.entitlements.plist"
+  if python3 "$ROOT/scripts/mac-provision.py" "$MAC_PROFILE" "$APP" "$SIGN_TEAM" "${SIGN_SHA1:-none}" \
+       "$APP_ENTITLEMENTS" "$PROVISION_ENTITLEMENTS"; then
+    cp "$MAC_PROFILE" "$APP/Contents/embedded.provisionprofile"
+    APP_ENTITLEMENTS="$PROVISION_ENTITLEMENTS"
+    echo "embedded Developer ID profile — 대화 알림 권한을 싣는다"
+  fi
+fi
+[[ "$APP_ENTITLEMENTS" != "-" ]] && APP_SIGN_ARGS+=(--entitlements "$APP_ENTITLEMENTS")
 if ! codesign "${APP_SIGN_ARGS[@]}" "$APP"; then
   echo "error: signing '$APP' failed — no installable bundle produced" >&2
   exit 1

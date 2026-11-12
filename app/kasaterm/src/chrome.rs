@@ -4297,8 +4297,9 @@ fn notify_native(
     // 받아 두고 정작 콘텐츠에 안 달아, 창을 뒤로 물린 동안 학생이 끝나도 알 길이
     // dock 배지뿐이었다 — 그건 "봐야 보이는" 신호다(2026-08-11 조사).
     content.setSound(Some(&UNNotificationSound::defaultSound()));
-    // 대화 알림 변환이 불가능한 경우에도 오른쪽 썸네일로 학생 얼굴을 남긴다.
-    if let Some(p) = character.and_then(|c| student_profile_file(c, Some(seq))) {
+    // 대화 알림 권한이 없는 판(개발 서명)에서는 큰 아이콘이 앱 아이콘이라 오른쪽 썸네일로 학생 얼굴을 남긴다.
+    let face_is_icon = crate::macos_notify::communication_entitled();
+    if let Some(p) = character.filter(|_| !face_is_icon).and_then(|c| student_profile_file(c, Some(seq))) {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
         let aid = NSString::from_str(&format!("kasaterm-icon-{seq}"));
         if let Ok(att) = unsafe {
