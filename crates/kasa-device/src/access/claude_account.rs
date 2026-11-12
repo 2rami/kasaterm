@@ -635,6 +635,10 @@ async fn claude_usage_handler(
         Some(t) => Some(t),
         None => read_claude_token_from(Some(dir.as_str())),
     };
+    // 관문이 갱신하는 슬롯은 갱신 토큰 없이 접근 토큰만 쥔다. 사슬이 끊겨(`reconnect_required`) 그 토큰이 끝나면
+    // 사용량 창구는 401 이 아니라 429 를 돌려줘(2026-11-12 실측: 29시간 지난 토큰에 `Retry-After` 와 함께 429,
+    // 같은 토큰의 프로필은 401) 하루 넘게 「조회가 막혔다」로 보였다. 쓸 수 없는 토큰은 묻지 않고 로그인 문제로 알린다.
+    let token = token.filter(|_| claude_slot_login(Some(dir.as_str())) != SlotLogin::LoggedOut);
     // 왜 못 읽었는지를 남긴다. 전에는 어떤 실패든 「rate-limited」 한 문구라, 정작
     // 로그아웃된 슬롯도 「한도 초과」로 보여 사용자가 기다리면 될 줄 알았다.
     let mut why = if token.is_some() { "usage_unavailable" } else { "logged_out" };
@@ -1118,6 +1122,24 @@ mod tests {
         assert!(oauth_usable(&doc("a", "r", 1000), 100, true), "거부됐어도 access 가 살아 있는 동안은 로그인");
         assert!(oauth_usable(&doc("a", "", 1000), 100, false));
         assert!(!oauth_usable(&doc("a", "", 10), 100, false));
+    }
+
+    /// 끝난 접근 토큰만 남은 슬롯(관문 사슬이 끊긴 자리)은 사용량 창구에 묻지 않고 로그인 문제로 답한다 — 묻으면
+    /// 429 가 와 「조회가 막혔다」로 보인다.
+    #[tokio::test]
+    async fn an_expired_gateway_token_reads_as_signed_out_not_rate_limited() {
+        let d = temp_dir("acct-chain-cut");
+        std::fs::write(
+            d.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"expired-access","expiresAt":1000,"subscriptionType":"max"}}"#,
+        )
+        .unwrap();
+        let query = [("dir".to_owned(), d.to_str().unwrap().to_owned())].into_iter().collect();
+        let res = claude_usage_handler(Query(query)).await.into_response();
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["reason"], "logged_out");
     }
 
     #[test]
