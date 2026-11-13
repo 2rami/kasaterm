@@ -52,6 +52,13 @@ controller 는 게시 job 만 실패하고 표식이 `KASATERM_APPCAST_CAS_EXHAU
 
 일반적인 `build-app.sh` 실행이나 자유문구 `done`만으로 공개 발행을 승인하지 않는다. 새 커밋을 검증하고 위 대기열에 등록하는 것까지가 빠른 업데이트 작업의 완료 기준이다.
 
+### 끝난 계획 거두기
+
+계획마다 `plans/<id>/work/` 에 격리 워크트리·dmg·자산(판마다 0.9GB 남짓)이 남는다. 지우는 곳이 없어 맥미니에 38개 29GB 가
+쌓였다(2026-11-13). tick 끝에 `plan_sweep.py` 가 최근 5개와 아직 안 끝난 요청(지금 굽는 것·`cancelled_plans` 포함)이
+가리키는 계획은 두고 나머지의 `work/` 를 지운다 — 워크트리는 checkout 에서 `git worktree remove` 로 떼고 `prune` 한다.
+`plan.json`·`state.json` 은 남긴다. 실패해도 그 tick 의 결과는 그대로다(`symbols` 와 같은 꼴).
+
 ### 무엇을 굽나 — 등록된 커밋 그대로
 
 controller는 마지막 발행 뒤 main에 들어온 등록 커밋 가운데 가장 새 것을 **그 커밋 그대로** 굽는다. main 끝이 아니다.
