@@ -264,12 +264,17 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         assert!(ensure(&dir));
         assert!(ensure(&dir.join("src")), "a folder under a watched one is already covered");
-        std::thread::sleep(Duration::from_millis(300));
         let start = seq();
-        std::fs::write(dir.join("src/edit.txt"), "x").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // 감시가 실제로 붙기 전의 쓰기는 OS 가 알려 주지 않는다. 바쁜 굽기 기계(스왑을 쓰는 미니)에선 붙는 데 몇 초가
+        // 걸려 한 번 쓰고 기다리면 놓쳤다 — 알림이 올 때까지 1초마다 다시 쓴다.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut next_write = Instant::now();
         let mut seen = false;
         while Instant::now() < deadline && !seen {
+            if Instant::now() >= next_write {
+                std::fs::write(dir.join("src/edit.txt"), "x").unwrap();
+                next_write = Instant::now() + Duration::from_secs(1);
+            }
             let (_, changes, _) = changes_since(start);
             seen = touched(&changes, &dir);
             std::thread::sleep(Duration::from_millis(50));
