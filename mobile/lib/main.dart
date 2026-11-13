@@ -9,20 +9,21 @@ import 'connection.dart';
 import 'app_link.dart';
 import 'approvals.dart';
 import 'desktop_palette.dart';
-import 'hub_model.dart';
 import 'hub_prefs.dart';
+import 'hub_snapshot.dart';
 import 'kasanet.dart';
 import 'look.dart';
 import 'network_watch.dart';
 import 'push.dart';
+import 'relay_account.dart' show AccountSession;
 import 'resume_spot.dart';
 import 'screens/approval_screen.dart';
 import 'screens/claude_accounts.dart';
-import 'screens/controls.dart';
 import 'screens/connect.dart';
 import 'screens/dev_server.dart';
 import 'screens/conversation_view.dart';
 import 'screens/hub.dart';
+import 'screens/offline_hub.dart';
 import 'screens/terminal.dart';
 import 'screens/saved_conversations.dart';
 import 'screens/shared_rooms.dart';
@@ -370,6 +371,17 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
 
   String? _archiveScope;
 
+  /// 지난 허브 — 계정(옛 주소면 그 주소)마다 따로 두고, 로그아웃하면 지운다.
+  final _snapshots = HubSnapshots.shared;
+  String? _hubScope;
+
+  /// [_hubScope] 의 파일을 다 읽었다 — 그 전엔 대기 화면을 잠깐 비추지 않게 쌍둥이를 둔다.
+  String? _hubLoaded;
+
+  /// 파일 읽기가 이만큼 넘게 걸리면 기다리지 않고 대기 화면으로 — 다 읽으면 그때 허브로 바뀐다.
+  static const _hubReadWait = Duration(seconds: 1);
+  Timer? _hubWait;
+
   /// 로그인한 계정의 공유방. 기기 연결과 별개라 데스크톱을 기다리는 동안에도 쓴다. 계정이 바뀌면 닫고 새로 만든다.
   SharedRoomsRepository? _shared;
 
@@ -425,6 +437,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     NetworkWatch.instance.removeListener(_freshRoutes);
     _approvalBanner?.remove();
     AppLinkObserver.instance.detach();
+    _hubWait?.cancel();
     _connection.removeListener(_changed);
     _connection.dispose();
     _shared?.close();
@@ -439,6 +452,8 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
       ApprovalCenter.instance.setForeground(false);
+      // 뒤로 간 앱은 언제 거둬질지 모른다 — 묶어 둔 지난 허브 쓰기를 지금 끝낸다.
+      unawaited(_snapshots.flush());
     }
     if (state == AppLifecycleState.resumed) {
       ApprovalCenter.instance.setForeground(true);
@@ -628,6 +643,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     }
     ApprovalCenter.instance.bind(_connection.account);
     _bindShared();
+    _bindSnapshot();
     if (phoneThemeSync.account != _connection.account) {
       if (_connection.account case final account?) {
         unawaited(
@@ -650,7 +666,6 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     if (_boundServer != server) {
       _boundServer = server;
       designTokens.value = null;
-      HubModel.clearCache();
       PaintingBinding.instance.imageCache.clear();
       PaintingBinding.instance.imageCache.clearLiveImages();
       PushBridge.instance.unbind();
@@ -671,6 +686,29 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       _pendingLink = null;
     }
     setState(() {});
+  }
+
+  /// 계정이 정해지면 그 계정의 지난 허브를 읽고, 로그아웃(만료 포함)하면 메모리·파일을 함께 지운다.
+  void _bindSnapshot() {
+    if (_connection.phase == ConnectionPhase.signedOut) {
+      final previous = _hubScope;
+      _hubScope = _hubLoaded = null;
+      _hubWait?.cancel();
+      if (previous != null) unawaited(_snapshots.forget(previous));
+      return;
+    }
+    final account = _connection.account;
+    final scope = account != null ? '${account.origin}|${account.account}' : _connection.server?.resumeScope;
+    if (scope == null || scope == _hubScope) return;
+    _hubScope = scope;
+    _hubLoaded = null;
+    void loaded() {
+      _hubWait?.cancel();
+      if (mounted && _hubScope == scope) setState(() => _hubLoaded = scope);
+    }
+    _hubWait?.cancel();
+    _hubWait = Timer(_hubReadWait, loaded);
+    unawaited(_snapshots.load(scope).then((_) => loaded()));
   }
 
   void _bindShared() {
@@ -694,6 +732,9 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     _shared?.desktop = _connection.server;
   }
 
+  HubPrefs _hubPrefs(AccountSession? account) =>
+      HubPrefs(scope: account == null ? '' : '${account.origin}|${account.account}');
+
   @override
   Widget build(BuildContext context) {
     final server = _connection.server;
@@ -712,107 +753,64 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
         onSession: _connection.adopt,
       );
     }
-    if (server == null) return AccountWaitingScreen(connection: _connection, shared: _shared);
-    final account = server.account;
+    if (server == null) {
+      final scope = _hubScope;
+      if (scope != null && _hubLoaded != scope) {
+        return const Scaffold(body: SafeArea(child: TwinsLoading()));
+      }
+      final seen = scope == null ? null : _snapshots.peek(scope);
+      final archive = _connection.archiveServer;
+      // 본 적이 하나도 없을 때만 대기 화면이다. 한 번이라도 본 허브는 연결 전·끊김에도 그대로 띄운다.
+      if (seen == null || seen.isEmpty || archive == null) {
+        return AccountWaitingScreen(connection: _connection, shared: _shared);
+      }
+      return HubScreen(
+        key: ObjectKey(archive),
+        server: archive,
+        offline: true,
+        connection: _connection,
+        onChangeAddress: _connection.logout,
+        shared: _shared,
+        prefs: _hubPrefs(archive.account),
+      );
+    }
     return HubScreen(
       key: ObjectKey(server),
       server: server,
+      connection: server.account == null ? null : _connection,
       onChangeAddress: _connection.logout,
       shared: _shared,
-      prefs: HubPrefs(
-        scope: account == null ? '' : '${account.origin}|${account.account}',
-      ),
+      prefs: _hubPrefs(server.account),
     );
   }
 }
 
+/// 본 허브가 하나도 없을 때(처음 로그인)만 쓰는 대기 화면. 한 번이라도 본 뒤로는 허브 안 띠·계정 시트가 같은 일을 한다.
 class AccountWaitingScreen extends StatelessWidget {
   const AccountWaitingScreen({super.key, required this.connection, this.shared});
   final ConnectionController connection;
   final SharedRoomsRepository? shared;
 
   @override
-  Widget build(BuildContext context) {
-    final checking = connection.phase == ConnectionPhase.checking;
-    final devices = [
-      for (final d in connection.devices)
-        if (d['kind'] != 'phone') d,
-    ];
-    return TwinBackdrop(
-      child: Scaffold(
+  Widget build(BuildContext context) => TwinBackdrop(
+    child: Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(backgroundColor: Colors.transparent, title: const Text('기기 연결')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
-            Center(child: TwinsMark(hopping: checking, face: Look.pullFace)),
+            ListenableBuilder(
+              listenable: connection,
+              builder: (_, _) => Center(
+                child: TwinsMark(hopping: connection.phase == ConnectionPhase.checking, face: Look.pullFace),
+              ),
+            ),
             const SizedBox(height: Look.fieldGap),
-            Text(
-              '${connection.account!.label} 계정',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              checking
-                  ? '로그인과 기기 상태를 확인하고 있어요.'
-                  : connection.message ?? '연결할 데스크톱을 기다리고 있어요.',
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              '데스크톱 카사텀을 켜고 같은 계정으로 로그인해 주세요. 이미 켜져 있다면 최신 버전인지 확인해 주세요.',
-            ),
-            // Google·GitHub 로 처음 들어오면 관문이 새 계정을 만든다 — 쓰던 데스크톱 계정과 다르다는 것을 여기서 알린다.
-            if (connection.account!.account.startsWith('oauth_') &&
-                !connection.devices.any((d) => d['kind'] != 'phone')) ...[
-              const SizedBox(height: 12),
-              const Text(
-                '이 계정에는 아직 데스크톱이 없어요. 쓰던 데스크톱 계정이 있다면 로그아웃한 뒤 아이디로 로그인하고, 설정에서 Google·GitHub 을 연결해 주세요.',
-              ),
-            ],
-            if (devices.isNotEmpty)
-              SettingsGroup(
-                title: '이 계정의 데스크톱',
-                children: [
-                  for (final (i, device) in devices.indexed)
-                    SettingsRow(
-                      tone: i,
-                      icon: Icons.computer_outlined,
-                      title: '${device['label'] ?? device['device_id']}',
-                      subtitle: device['online'] == true ? '온라인 · 연결 준비 확인 중' : '오프라인',
-                    ),
-                ],
-              ),
-            const SizedBox(height: 20),
-            // 공유방은 계정 기능이라 데스크톱 없이도 목록·참여·읽기가 된다.
-            if (shared case final shared?) ...[
-              FilledButton.tonalIcon(
-                onPressed: () => openSharedRooms(context, shared),
-                icon: const Icon(Icons.groups_outlined), label: const Text('공유방'),
-              ),
-              const SizedBox(height: 8),
-            ],
-            if (connection.archiveServer case final archiveServer?) ...[
-              FilledButton.tonalIcon(
-                onPressed: () => openSavedConversations(context, archiveServer),
-                icon: const Icon(Icons.offline_pin_outlined), label: const Text('저장한 대화'),
-              ),
-              const SizedBox(height: 8),
-            ],
-            FilledButton(
-              onPressed: checking ? null : connection.retry,
-              child: Text(checking ? '확인 중' : '연결 다시 확인'),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton(
-              style: OutlinedButton.styleFrom(minimumSize: const Size(Look.tap, Look.buttonH)),
-              onPressed: connection.logout,
-              child: const Text('로그아웃'),
-            ),
+            AccountStatus(connection: connection, shared: shared),
           ],
         ),
       ),
-      ),
-    );
-  }
+    ),
+  );
 }

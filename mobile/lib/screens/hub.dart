@@ -4,11 +4,13 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../app_release.dart';
+import '../connection.dart';
 import '../background_grace.dart';
 import '../hub_model.dart';
 import '../conversation_cache.dart';
 import '../hub_actions.dart';
 import '../hub_prefs.dart';
+import '../hub_snapshot.dart';
 import '../look.dart';
 import '../machine_look.dart';
 import '../server.dart';
@@ -23,6 +25,7 @@ import '../wide_layout.dart';
 import 'clipboard_sheet.dart';
 import 'controls.dart';
 import 'notes_sheet.dart';
+import 'offline_hub.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
 import 'shared_rooms.dart';
@@ -44,10 +47,22 @@ class HubScreen extends StatefulWidget {
     required this.onChangeAddress,
     this.prefs,
     this.shared,
+    this.snapshots,
+    this.offline = false,
+    this.connection,
   });
 
   final Server server;
   final Future<void> Function() onChangeAddress;
+
+  /// 닿는 데스크톱이 없다 — 지난 목록만 흐리게 보이고, 학생을 누르면 저장한 대화를 연다. 연결이 서면 새 허브로 바뀐다.
+  final bool offline;
+
+  /// 계정 연결 — 끊긴 허브의 띠·계정 시트가 로그인 상태·기기 목록·다시 확인을 여기서 읽는다.
+  final ConnectionController? connection;
+
+  /// 지난 목록 저장소. 없으면 앱 전체의 것.
+  final HubSnapshots? snapshots;
 
   /// 계정의 공유방 — 기기 목록과 별도 묶음으로 아래에 선다. 옛 주소 연결이면 없다.
   final SharedRoomsRepository? shared;
@@ -63,7 +78,12 @@ class HubScreen extends StatefulWidget {
 }
 
 class _HubScreenState extends State<HubScreen> with HubInteractions {
-  late final HubModel _model = HubModel(widget.server, prefs: widget.prefs);
+  late final HubModel _model = HubModel(
+    widget.server,
+    prefs: widget.prefs,
+    snapshots: widget.snapshots,
+    offline: widget.offline,
+  );
   @override
   HubModel get hubModel => _model;
 
@@ -77,7 +97,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
     _model.addListener(_warmConversations);
     _model.start();
     _warmConversations();
-    unawaited(_watchReleases());
+    if (!widget.offline) unawaited(_watchReleases());
   }
 
   void _warmConversations() {
@@ -149,7 +169,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
   void _graceChanged() {
     if (BackgroundGrace.instance.live) {
       _model.start();
-      unawaited(_watchReleases());
+      if (!widget.offline) unawaited(_watchReleases());
     } else {
       _model.stop();
       _stopWatchingReleases();
@@ -196,6 +216,14 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
     onChanged: _model.refresh,
   );
 
+  void _openAccount() {
+    final connection = widget.connection;
+    if (connection == null) return;
+    unawaited(showAccountSheet(context, connection: connection, shared: widget.shared));
+  }
+
+  void _openFrozen(Pane pane) => unawaited(openFrozenPane(context, widget.server, pane));
+
   void _openSettings() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -213,7 +241,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
   Future<void> _refresh() async {
     setState(() => _refreshing = true);
     try {
-      await _model.refresh();
+      await (widget.offline ? (widget.connection?.retry() ?? Future<void>.value()) : _model.refresh());
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }
@@ -230,9 +258,20 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
           appBar: AppBar(
             backgroundColor: Colors.transparent,
             // 제목 글자 없이 쌍둥이 표 — 목록이 학생이라는 것은 화면이 말한다(2026-10-01).
-            title: TwinsMark(hopping: _refreshing || _model.showingCached),
+            title: TwinsMark(
+              hopping: _refreshing || _model.showingCached || widget.connection?.phase == ConnectionPhase.checking,
+            ),
             actions: [
               IconButton(tooltip: '저장한 대화', onPressed: () => openSavedConversations(context, widget.server), icon: const Icon(Icons.offline_pin_outlined)),
+              // 끊긴 허브엔 데스크톱이 받아야 하는 클립보드·쪽지를 달지 않는다. 설정 자리는 계정·기기 시트다.
+              if (widget.offline) ...[
+                _ViewMenu(model: _model),
+                IconButton(
+                  tooltip: '계정·연결',
+                  onPressed: _openAccount,
+                  icon: const Icon(Icons.manage_accounts_outlined),
+                ),
+              ] else ...[
               // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
               // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
               IconButton(
@@ -280,6 +319,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
                 icon: const Icon(Icons.settings_outlined),
                 tooltip: '설정',
               ),
+              ],
             ],
           ),
           body: Stack(
@@ -317,6 +357,9 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
         label: Text('숨긴 칸 ${_allHubPanes.where((p) => _model.view.hidden.contains(p.viewKey)).length}개 · 다시 보이기'),
       ));
     }
+    if (widget.offline && widget.connection != null) {
+      children.add(OfflineBand(connection: widget.connection!, onOpen: _openAccount));
+    }
     if (_model.error != null) {
       children.add(ErrorBand(text: _model.error!, onRetry: _refresh));
     }
@@ -340,6 +383,8 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
           color: tint,
           root: s.machine == null,
           online: s.online,
+          seenAt: s.seenAt,
+          checking: widget.offline && widget.connection?.phase == ConnectionPhase.checking,
           folded: folded,
           count: s.studentCount,
           onTap: () => _model.toggleFold(s),
@@ -374,7 +419,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
             title: room.title,
             icon: icon,
             color: tint,
-            onMenu: () => _roomSheet(s, sourceRoom),
+            onMenu: s.online ? () => _roomSheet(s, sourceRoom) : () => explainOffline(context, '방을 고칠'),
           ),
         ];
         final hasMap = room.rects.isNotEmpty && shape != HubShape.list;
@@ -383,8 +428,9 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
             _MiniMap(
               server: widget.server,
               room: room,
-              onOpen: s.online || _chosen.isNotEmpty ? _tapPane : null,
-              wrapPane: (p, child) => _wrapPane(p, child, online: s.online),
+              // 끊긴 방은 끌기·고르기 없이 누르면 저장한 대화 — 닿지 않는 기기에 화면을 열지 않는다.
+              onOpen: !s.online ? _openFrozen : _tapPane,
+              wrapPane: s.online ? (p, child) => _wrapPane(p, child, online: true) : null,
               onSubagents: _showSubagents,
             ),
           );
@@ -396,11 +442,9 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
               Appear(
                 key: ValueKey('tile-${p.machine}-${p.id}'),
                 delayIndex: i,
-                child: _wrapPane(p, _PaneTile(
-                  server: widget.server,
-                  pane: p,
-                  onTap: s.online || _chosen.isNotEmpty ? () => _tapPane(p) : null,
-                ), online: s.online),
+                child: s.online
+                    ? _wrapPane(p, _PaneTile(server: widget.server, pane: p, onTap: () => _tapPane(p)), online: true)
+                    : _PaneTile(server: widget.server, pane: p, onTap: () => _openFrozen(p)),
               ),
             );
           }
@@ -442,7 +486,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
                     child: _PaneTile(
                       server: widget.server,
                       pane: p,
-                      onTap: s.online ? () => _open(p) : null,
+                      onTap: s.online ? () => _open(p) : () => _openFrozen(p),
                     ),
                   ),
               ],
@@ -450,7 +494,10 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
           ),
         );
       }
-      if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
+      if (rooms.isNotEmpty) {
+        final board = Masonry(children: rooms);
+        children.add(s.online ? board : Opacity(key: ValueKey('stale-${s.route ?? ''}'), opacity: Look.staleFade, child: board));
+      }
     }
     if (widget.shared case final shared?) children.add(_SharedSection(repository: shared));
     // 당기면 쌍둥이가 내려온다 — 머티리얼 빙글이 대신(design.md 「쌍둥이 결」).
@@ -563,8 +610,16 @@ class _SectionHeader extends StatelessWidget {
     this.onAdd,
     this.onScreen,
     this.detail,
+    this.seenAt,
+    this.checking = false,
     this.addTip = '새 방',
   });
+
+  /// 끊긴 기기를 마지막으로 본 때 — 「끊김 · 15:32」.
+  final DateTime? seenAt;
+
+  /// 앱을 켜고 아직 데스크톱을 확인하는 중 — 끊겼다고 단정하지 않고 「확인 중 · 15:32」.
+  final bool checking;
 
   final String title;
   final IconData icon;
@@ -648,11 +703,13 @@ class _SectionHeader extends StatelessWidget {
                             children: [
                               if (detail != null)
                                 TextSpan(text: detail)
-                              else if (!online)
+                              else if (!online) ...[
                                 TextSpan(
-                                  text: '연결 안 됨',
-                                  style: TextStyle(color: scheme.error),
-                                )
+                                  text: checking ? '확인 중' : '끊김',
+                                  style: checking ? null : TextStyle(color: scheme.error),
+                                ),
+                                TextSpan(text: ' · ${lastSeenLabel(seenAt)}'),
+                              ]
                               else
                                 TextSpan(
                                   text: '${root ? '기준 기기' : '연결됨'} · 학생 $count',

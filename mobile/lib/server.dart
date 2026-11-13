@@ -170,6 +170,7 @@ class Pane {
   /// 상태 낱말 — 판정은 [needsYou]·[isBusy] 로 데스크톱과 같고, 같은 학생이 두 화면에서 같은 말을 한다.
   String get statusWord {
     if (closed) return '닫힘';
+    if (offline) return '끊김';
     if (needsYou) return kind == 'permission' ? '승인' : '질문';
     if (isBusy) return '하는 중';
     return '쉬는 중';
@@ -245,6 +246,59 @@ class Pane {
     background: [for (final s in (j['background'] as List?) ?? const []) '$s'],
     subagents: [for (final s in (j['subagents'] as List?) ?? const []) '$s'],
   );
+  /// [fromJson] 이 읽는 꼴 그대로 — 허브 스냅숏이 디스크에 남긴다(`hub_snapshot.dart`).
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'title': title,
+    'status': status,
+    'window': window,
+    'cwd': cwd,
+    'slug': ?slug,
+    'color': ?color,
+    'model': ?model,
+    'effort': ?effort,
+    'machine': ?machine,
+    'kind': ?kind,
+    'waiting_for': ?waitingFor,
+    if (closed) 'closed': true,
+    if (undocked) 'undocked': true,
+    'session': ?session,
+    'harness': ?harness,
+    'surface_key': ?surfaceKey,
+    'mirror_of': ?mirrorOf,
+    'branch': ?branch,
+    'model_label': ?modelLabel,
+    'effort_label': ?effortLabel,
+  };
+
+  /// 끊긴 기기에서 마지막으로 본 모습 — 이름·자리·얼굴은 두고 지금 일어나는 일(상태·도는 시간·하위 작업)은 뺀다.
+  /// 지난 「하는 중」·「승인」을 지금 일처럼 보이면 누를 수 없는 것을 부르는 꼴이 된다.
+  Pane get frozen => Pane(
+    id: id,
+    name: name,
+    title: title,
+    status: offlineStatus,
+    window: window,
+    cwd: cwd,
+    slug: slug,
+    color: color,
+    model: model,
+    effort: effort,
+    machine: machine,
+    closed: closed,
+    undocked: undocked,
+    session: session,
+    harness: harness,
+    surfaceKey: surfaceKey,
+    mirrorOf: mirrorOf,
+    branch: branch,
+    modelLabel: modelLabel,
+    effortLabel: effortLabel,
+  );
+
+  static const offlineStatus = 'offline';
+  bool get offline => status == offlineStatus;
 }
 
 /// 데스크톱 창 안에서 pane 이 차지하는 자리 — 창 대비 백분율.
@@ -271,6 +325,16 @@ class PaneRect {
 
   /// `tabs` 중 지금 앞에 나온 탭의 자리.
   final int? tabActive;
+
+  Map<String, Object?> toJson() => {
+    'surface_id': surface,
+    'x': x,
+    'y': y,
+    'w': w,
+    'h': h,
+    if (tabs.isNotEmpty) 'tabs': tabs,
+    'tab_active': ?tabActive,
+  };
 
   static PaneRect? fromJson(Map<String, Object?> j) {
     final id = j['surface_id'] as String?;
@@ -317,6 +381,15 @@ class WindowLayout {
       : cwd.isEmpty
       ? name
       : '$name · $cwd';
+
+  Map<String, Object?> toJson() => {
+    'idx': idx,
+    if (active) 'active': true,
+    'aspect': ?aspect,
+    if (name.isNotEmpty) 'name': name,
+    if (cwd.isNotEmpty) 'cwd': cwd,
+    'panes': [for (final r in rects) r.toJson()],
+  };
 
   static WindowLayout fromJson(Map<String, Object?> j) {
     final panes = j['panes'];
@@ -619,8 +692,6 @@ class Server {
   final Uri root;
   final AccountSession? account;
   late final OriginClient _client;
-  final Object _accountCacheIdentity = Object();
-  Object get cacheIdentity => account == null ? root.toString() : _accountCacheIdentity;
   final Set<void Function()> _closeListeners = {};
   void Function()? onUnauthorized;
   bool get isClosed => _closed;

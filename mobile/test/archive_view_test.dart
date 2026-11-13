@@ -9,6 +9,7 @@ import 'package:kasaterm_mobile/archive_model.dart';
 import 'package:kasaterm_mobile/archive_repository.dart';
 import 'package:kasaterm_mobile/approvals.dart';
 import 'package:kasaterm_mobile/connection_store.dart';
+import 'package:kasaterm_mobile/hub_snapshot.dart';
 import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/screens/saved_conversations.dart';
 import 'package:kasaterm_mobile/server.dart';
@@ -153,6 +154,8 @@ void main() {
       FlutterSecureStorage.setMockInitialValues({
         ConnectionStore.key: jsonEncode(archiveSession().toJson()),
       });
+      // 본 허브가 없는 계정 — 지난 허브 대신 대기 화면이 저장한 대화 입구를 연다. 파일 읽기는 가짜 시간에서 안 끝난다.
+      HubSnapshots.shared = HubSnapshots.memory();
       await tester.pumpWidget(
         MaterialApp(
           navigatorKey: navigatorKey,

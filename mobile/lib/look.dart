@@ -103,6 +103,9 @@ abstract final class Look {
   /// 눌림 — 바탕에 `text` 8%.
   static const pressTint = 0.08;
 
+  /// 끊긴 기기의 지난 방 — 판 전체를 이만큼만 비친다. 지금 일처럼 읽히지 않되 이름·얼굴은 알아볼 만큼.
+  static const staleFade = 0.55;
+
   /// 판 그림자(밝은 테마) — 검정 알파·흐림·아래. 어두운 테마는 그림자 대신 `border` [cardEdge] 테.
   static const cardShadow = 0.06;
   static const cardBlur = 18.0;

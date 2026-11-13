@@ -365,9 +365,13 @@ class SavedConversationScreen extends StatefulWidget {
     super.key,
     required this.repository,
     required this.conversation,
+    this.offline = false,
   });
   final ArchiveRepository repository;
   final SavedConversation conversation;
+
+  /// 끊긴 기기의 학생을 허브에서 눌러 왔다 — 왜 보낼 수 없는지 한 줄 더.
+  final bool offline;
   @override
   State<SavedConversationScreen> createState() =>
       _SavedConversationScreenState();
@@ -470,7 +474,8 @@ class _SavedConversationScreenState extends State<SavedConversationScreen> {
                     vertical: Look.groupTitleGap,
                   ),
                   child: Text(
-                    '저장한 대화 · 읽기 전용\n마지막 동기화 ${archiveTime(_saved.entry.updatedAt)}',
+                    '저장한 대화 · 읽기 전용\n마지막 동기화 ${archiveTime(_saved.entry.updatedAt)}'
+                    '${widget.offline ? '\n기기가 끊겨 보내기·승인·끄기는 다시 붙은 뒤에 할 수 있어요.' : ''}',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'hub_prefs.dart';
+import 'hub_snapshot.dart';
 import 'machine_look.dart';
 import 'server.dart';
 
@@ -96,6 +97,7 @@ class HubSection {
     required this.online,
     required this.rooms,
     this.webShells = const [],
+    this.seenAt,
   });
 
   /// null 이면 주소가 가리키는 그 기계.
@@ -103,7 +105,12 @@ class HubSection {
 
   /// 요청에 쓰는 안정 route. `machine`은 사람에게 보여 줄 이름으로만 남긴다.
   final String? route;
+
+  /// 지금 닿는가. 거짓이면 [rooms] 는 마지막으로 본 모습([Pane.frozen])이고 조작은 저장한 대화 읽기뿐이다.
   final bool online;
+
+  /// 마지막으로 새 목록을 받은 때 — 끊긴 머리의 「끊김 · 15:32」. 본 적 없으면 null.
+  final DateTime? seenAt;
   final List<HubRoom> rooms;
 
   /// 어느 방에도 없는 셸 — 웹 터미널·도구가 연 셸이라 데스크톱 방 밖에 산다(데스크톱 사이드바의 「창 밖 셸」).
@@ -114,29 +121,22 @@ class HubSection {
       rooms.fold(0, (n, r) => n + r.panes.where((p) => !p.isShell).length);
 }
 
-/// 앱이 살아 있는 동안 기억하는 마지막 목록 — 허브를 다시 열면 이것부터 그린다.
-/// 관문 너머 요청 하나가 1초 안팎이라 빈 화면으로 기다리게 하지 않는다.
-class _Snapshot {
-  List<Pane>? rootPanes;
-  List<String> rootLabels = const [];
-  List<WindowLayout> rootLayouts = const [];
-  List<Machine> machines = const [];
-  Map<String, List<Pane>> remotePanes = const {};
-  Map<String, List<WindowLayout>> remoteLayouts = const {};
-  Map<String, List<Note>> notes = const {};
-  String? rootName;
-}
-
 /// 허브 한 화면의 상태. 기계마다 따로 받아 받은 것부터 그리고, 서버가 알려 주는
 /// 변경 번호(`term/changes` 롱폴)에 매달려 바뀐 기계만 곧바로 다시 읽는다. 폴링은
 /// 그 알림이 못 덮는 것(작업 중 도구 이름·옛 판 서버)을 위한 바닥이다.
 class HubModel extends ChangeNotifier {
-  HubModel(this.server, {HubPrefs? prefs}) : _prefs = prefs {
+  HubModel(this.server, {HubPrefs? prefs, HubSnapshots? snapshots, this.offline = false})
+    : _prefs = prefs,
+      _snapshots = snapshots ?? HubSnapshots.shared {
     _seed();
   }
 
   final Server server;
   final HubPrefs? _prefs;
+  final HubSnapshots _snapshots;
+
+  /// 닿는 데스크톱 없이 지난 목록만 보이는 허브 — 묻지 않고, 모든 절이 끊김이다. 연결이 서면 새 허브로 바뀐다.
+  final bool offline;
 
   /// 알림을 못 받는 서버에서의 폴링 박자 — 학생 화면도 같은 박자로 제 줄을 다시 읽는다.
   static const pollEvery = Duration(seconds: 5);
@@ -152,9 +152,8 @@ class HubModel extends ChangeNotifier {
   static const retryFirst = Duration(seconds: 1);
   static const retryMax = Duration(seconds: 30);
 
-  static final Map<Object, _Snapshot> _cache = {};
-
-  static void clearCache() => _cache.clear();
+  @visibleForTesting
+  static void clearCache() => HubSnapshots.shared.clearMemory();
 
   List<HubSection> sections = const [];
 
@@ -212,7 +211,7 @@ class HubModel extends ChangeNotifier {
   DateTime? updatedAt;
 
   /// 주소 기계의 줄이 아직 지난번 기억이다 — 화면이 얇은 진행 막대로 「확인 중」을 말한다.
-  bool get showingCached => _seeded.contains(_rootKey) && error == null;
+  bool get showingCached => !offline && _seeded.contains(_rootKey) && error == null;
 
   /// 지금 사람을 부르는 학생 수(승인·질문) — 상단 배지. 「마지막으로 본 뒤 새로 기다리게 된 수」를
   /// 누적했더니 학생 화면에 머무는 동안 상태가 오락가락한 것까지 쌓여 52 같은 수가
@@ -232,6 +231,10 @@ class HubModel extends ChangeNotifier {
   final Map<String, List<Pane>> _remotePanes = {};
   final Map<String, List<WindowLayout>> _remoteLayouts = {};
   final Map<String, List<Note>> _notesBy = {};
+  final Map<String, DateTime> _seenAt = {};
+
+  /// 명부를 잇달아 못 받은 횟수 — 두 번이면 원격 기기가 붙어 있는지도 모르는 것이라 끊김으로 보인다.
+  int _rosterFails = 0;
 
   /// 기억에서 꺼낸 채 아직 새로 못 받은 기계. 전이 진동은 새로 받은 것끼리만 비교한다 —
   /// 허브를 닫아 둔 사이 바뀐 것까지 울리면 「방금 바뀐 것」이라는 뜻이 사라진다.
@@ -270,7 +273,7 @@ class HubModel extends ChangeNotifier {
   final Map<Timer, Completer<void>> _sleeps = {};
 
   void _seed() {
-    final c = _cache[server.cacheIdentity];
+    final c = _snapshots.peek(server.resumeScope);
     if (c == null) return;
     _rootPanes = c.rootPanes;
     _rootLabels = c.rootLabels;
@@ -279,6 +282,7 @@ class HubModel extends ChangeNotifier {
     _remotePanes.addAll(c.remotePanes);
     _remoteLayouts.addAll(c.remoteLayouts);
     _notesBy.addAll(c.notes);
+    _seenAt.addAll(c.seenAt);
     rootName = c.rootName;
     if (_rootPanes != null) _seeded.add(_rootKey);
     _seeded.addAll(_machines.map((m) => m.route));
@@ -290,6 +294,13 @@ class HubModel extends ChangeNotifier {
 
   void start() {
     if (_disposed) return;
+    if (offline) {
+      if (!_prefsLoaded) {
+        _prefsLoaded = true;
+        _loadPrefs();
+      }
+      return;
+    }
     _running = true;
     // 앱이 쉬는 사이 서버가 새 판으로 바뀌었을 수 있다 — 알림 길을 다시 물어본다.
     _noChanges.clear();
@@ -362,6 +373,7 @@ class HubModel extends ChangeNotifier {
 
   /// 전부 한 번 — 당겨서 새로 고침·첫 화면. 명부에 새로 뜬 기계까지 받은 뒤 돌아온다.
   Future<void> refresh() async {
+    if (offline) return;
     unawaited(_loadLooks());
     final mark = _seq;
     await Future.wait([
@@ -435,6 +447,7 @@ class HubModel extends ChangeNotifier {
       _seeded.remove(_rootKey);
       error = null;
       updatedAt = DateTime.now();
+      _seenAt[_rootKey] = updatedAt!;
       _rootFails = 0;
       _rootRetry?.cancel();
       _rootRetry = null;
@@ -469,9 +482,13 @@ class HubModel extends ChangeNotifier {
     try {
       list = await server.machines().timeout(listTimeout);
     } catch (_) {
-      return; // 명부를 못 받으면 직전 것을 둔다.
+      // 명부를 못 받으면 직전 것을 둔다.
+      if (!_disposed && ++_rosterFails == 2) _compose();
+      return;
     }
     if (_disposed) return;
+    _rosterFails = 0;
+    final now = DateTime.now();
     final before = {for (final m in _machines) m.route: m.online};
     final routes = {for (final m in list) m.route};
     _remotePanes.removeWhere((r, _) => !routes.contains(r));
@@ -482,6 +499,7 @@ class HubModel extends ChangeNotifier {
         _remotePanes.remove(m.route);
         _seeded.remove(m.route);
       }
+      if (m.online && m.panes.isNotEmpty) _seenAt[m.route] = now;
       if (!m.online) _seeded.remove(m.route);
     }
     _machines = list;
@@ -509,6 +527,7 @@ class HubModel extends ChangeNotifier {
     if (panes != null) {
       _remotePanes[route] = panes;
       _seeded.remove(route);
+      _seenAt[route] = DateTime.now();
     }
     final layouts = results[1] as List<WindowLayout>?;
     if (layouts != null) _remoteLayouts[route] = layouts;
@@ -614,37 +633,27 @@ class HubModel extends ChangeNotifier {
 
   void _compose() {
     final root = _rootPanes;
+    final rootLive = !offline && error == null;
+    final rosterLive = !offline && _rosterFails < 2;
     final next = <HubSection>[
       if (root != null)
-        HubSection(
-          machine: null,
-          online: true,
-          rooms: rooms(root, _rootLabels, _rootLayouts),
-          webShells: webShells(root),
-        ),
+        _section(null, null, rootLive, root, _rootLabels, _rootLayouts),
       for (final m in _machines)
-        HubSection(
-          machine: m.label,
-          route: m.route,
-          online: m.online,
-          rooms: m.online
-              ? rooms(
-                  _remotePanes[m.route] ?? m.panes,
-                  const [],
-                  _remoteLayouts[m.route] ?? const [],
-                )
-              : rooms(m.panes, const []),
-          webShells: m.online
-              ? webShells(_remotePanes[m.route] ?? m.panes)
-              : const [],
+        _section(
+          m.label,
+          m.route,
+          rosterLive && m.online,
+          _remotePanes[m.route] ?? m.panes,
+          const [],
+          _remoteLayouts[m.route] ?? const [],
         ),
     ];
     _noteWaiting(next);
     sections = next;
     final live = {
-      _rootKey,
-      for (final m in _machines)
-        if (m.online) m.route,
+      if (rootLive) _rootKey,
+      for (final s in next)
+        if (s.online && s.route != null) s.route!,
     };
     notes = [
       for (final e in _notesBy.entries)
@@ -654,17 +663,42 @@ class HubModel extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// 끊긴 절도 지난 방·배치·이름을 그대로 둔다 — 학생만 지금 일을 뺀 모습([Pane.frozen])으로.
+  HubSection _section(
+    String? machine,
+    String? route,
+    bool online,
+    List<Pane> panes,
+    List<String> labels,
+    List<WindowLayout> layouts,
+  ) {
+    final shown = online ? panes : [for (final p in panes) p.frozen];
+    return HubSection(
+      machine: machine,
+      route: route,
+      online: online,
+      rooms: rooms(shown, labels, layouts),
+      webShells: webShells(shown),
+      seenAt: _seenAt[route ?? _rootKey],
+    );
+  }
+
   void _save() {
-    if (_disposed || server.isClosed) return;
-    _cache[server.cacheIdentity] = _Snapshot()
-      ..rootPanes = _rootPanes
-      ..rootLabels = _rootLabels
-      ..rootLayouts = _rootLayouts
-      ..machines = _machines
-      ..remotePanes = Map.of(_remotePanes)
-      ..remoteLayouts = Map.of(_remoteLayouts)
-      ..notes = Map.of(_notesBy)
-      ..rootName = rootName;
+    if (_disposed || server.isClosed || offline) return;
+    _snapshots.put(
+      server.resumeScope,
+      HubSnapshot(
+        rootPanes: _rootPanes,
+        rootLabels: _rootLabels,
+        rootLayouts: _rootLayouts,
+        machines: _machines,
+        remotePanes: Map.of(_remotePanes),
+        remoteLayouts: Map.of(_remoteLayouts),
+        notes: Map.of(_notesBy),
+        rootName: rootName,
+        seenAt: Map.of(_seenAt),
+      ),
+    );
   }
 
   /// 처음 본 학생은 세지 않는다 — 앱을 켠 순간 이미 기다리던 것은 목록 맨 위에

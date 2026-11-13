@@ -183,11 +183,11 @@ void main() {
     },
   );
 
-  test('two accounts at the same gateway never share cache identity', () {
+  test('two accounts at the same gateway never share the hub cache scope', () {
     final a = Server.account(session());
     final b = Server.account(session(account: 'other'));
     expect(a.root, b.root);
-    expect(a.cacheIdentity, isNot(b.cacheIdentity));
+    expect(a.resumeScope, isNot(b.resumeScope));
     a.close();
     b.close();
   });
