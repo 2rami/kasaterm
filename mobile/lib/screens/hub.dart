@@ -23,7 +23,6 @@ import '../weather/card.dart';
 import '../weather/model.dart';
 import '../weather/scene.dart';
 import '../wide_layout.dart';
-import 'clipboard_sheet.dart';
 import 'controls.dart';
 import 'notes_sheet.dart';
 import 'offline_hub.dart';
@@ -31,7 +30,6 @@ import 'pane_actions.dart';
 import 'settings.dart';
 import 'shared_rooms.dart';
 import 'terminal.dart';
-import 'saved_conversations.dart';
 import 'desktop_tools.dart';
 import 'desktop_controls.dart';
 import 'hub_drag.dart';
@@ -263,8 +261,7 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
               hopping: _refreshing || _model.showingCached || widget.connection?.phase == ConnectionPhase.checking,
             ),
             actions: [
-              IconButton(tooltip: '저장한 대화', onPressed: () => openSavedConversations(context, widget.server), icon: const Icon(Icons.offline_pin_outlined)),
-              // 끊긴 허브엔 데스크톱이 받아야 하는 클립보드·쪽지를 달지 않는다. 설정 자리는 계정·기기 시트다.
+              // 끊긴 허브엔 데스크톱이 받아야 하는 쪽지를 달지 않는다. 설정 자리는 계정·기기 시트(저장한 대화 입구 포함)다.
               if (widget.offline) ...[
                 _ViewMenu(model: _model),
                 IconButton(
@@ -273,14 +270,6 @@ class _HubScreenState extends State<HubScreen> with HubInteractions {
                   icon: const Icon(Icons.manage_accounts_outlined),
                 ),
               ] else ...[
-              // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
-              // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
-              IconButton(
-                tooltip: '클립보드',
-                onPressed: () =>
-                    showClipboardSheet(context, server: widget.server),
-                icon: const Icon(Icons.content_paste_outlined),
-              ),
               // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
               // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
               IconButton(

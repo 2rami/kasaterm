@@ -361,6 +361,8 @@ void main() {
       expect(find.byTooltip('새 방'), findsNothing);
       expect(find.byTooltip('PC 기능'), findsNothing);
       expect(find.byTooltip('클립보드'), findsNothing);
+      expect(find.byTooltip('저장한 대화'), findsNothing);
+      expect(find.byTooltip('계정·연결'), findsOneWidget);
       expect(find.text('10분'), findsNothing, reason: '지난 도는 시간을 지금 일처럼 보이지 않는다');
       expect(tester.takeException(), isNull);
       await done(tester);
