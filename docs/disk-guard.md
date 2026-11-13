@@ -39,14 +39,14 @@ APFS 복제본이라 원본과 블록을 나눠 써서, 45개를 지워도 20MB 
 
 | 종류 | 무엇 | 표식 |
 |---|---|---|
-| cargo target | 뿌리에 `CACHEDIR.TAG` 가 있고 그 둘째 줄이 「created by cargo」 | 서명 줄은 캐시 폴더 표준이라 pytest 도 똑같이 쓴다 — 레포의 `.pytest_cache` 가 target 으로 잡혔다 |
+| cargo target | 뿌리에 `CACHEDIR.TAG` 가 있고 그 둘째 줄이 「created by cargo」, 또는 뿌리에 `.rustc_info.json` | 서명 줄은 캐시 폴더 표준이라 pytest 도 똑같이 쓴다 — 레포의 `.pytest_cache` 가 target 으로 잡혔다. 안에 다른 target(`target/ios`)을 먼저 만든 폴더는 CACHEDIR.TAG 가 없어 31GB 가 빠져나갔다 |
 | flutter 빌드 결과 | `pubspec.yaml` 옆의 `build/`, `.dart_tool/flutter_build/` | `.dart_tool` 의 나머지(패키지 설정)는 남긴다 |
 | Xcode DerivedData | `~/Library/Developer/Xcode/DerivedData/` 바로 아래 항목 하나하나 | |
 
 찾는 자리:
 
-- `/private/tmp/kt-*`·`/private/tmp/kasaterm-*` 아래 두 겹(학생 격리 작업 폴더)
-- `~/Library/Caches/kasaterm-builds/` 아래 두 겹
+- `/private/tmp/kt-*`·`/private/tmp/kasaterm-*` 아래 세 겹(학생 격리 작업 폴더)
+- `~/Library/Caches/kasaterm-builds/` 아래 세 겹 — `<일>/source/target` 꼴이 있다
 - `scripts/build-app.sh` 가 구운 레포(`disk prune --repo` 가 `~/.config/kasaterm/disk-guard-repos.json` 에 기억한다, 최근 20개)의
   한 겹 — 레포의 `target`·`mobile`
 - DerivedData

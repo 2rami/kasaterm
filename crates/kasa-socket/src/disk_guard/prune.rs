@@ -111,7 +111,7 @@ impl Scope {
         let deny = vec![outputs::real(&home.join(RELEASE_STATE))];
         if let Some(test) = std::env::var_os(ROOTS_ENV).filter(|v| !v.is_empty()) {
             let roots: Vec<PathBuf> = std::env::split_paths(&test).filter(|p| p.is_dir()).collect();
-            return Ok(Scope::of(roots.into_iter().map(|path| outputs::Root { path, depth: 2 }).collect(), None, deny));
+            return Ok(Scope::of(roots.into_iter().map(|path| outputs::Root { path, depth: 3 }).collect(), None, deny));
         }
         if super::isolated() {
             return Err("격리 실행이라 지우지 않아요");
@@ -122,11 +122,11 @@ impl Scope {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let real_dir = entry.file_type().is_ok_and(|t| t.is_dir());
                 if real_dir && (name.starts_with("kt-") || name.starts_with("kasaterm-")) {
-                    roots.push(outputs::Root { path: entry.path(), depth: 2 });
+                    roots.push(outputs::Root { path: entry.path(), depth: 3 });
                 }
             }
         }
-        roots.push(outputs::Root { path: home.join("Library/Caches/kasaterm-builds"), depth: 2 });
+        roots.push(outputs::Root { path: home.join("Library/Caches/kasaterm-builds"), depth: 3 });
         for repo in super::remembered_repos().into_iter().chain(extra_repos.iter().cloned()) {
             roots.push(outputs::Root { path: repo, depth: 1 });
         }

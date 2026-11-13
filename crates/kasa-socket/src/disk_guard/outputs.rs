@@ -42,8 +42,11 @@ fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
 }
 
+/// cargo target 뿌리인가 — cargo 가 남기는 CACHEDIR.TAG, 또는 늘 남기는 `.rustc_info.json`. 다른 target 을 먼저
+/// 안에 만든 폴더(`target/ios` 를 먼저 굽고 `target/debug` 를 나중에)는 CACHEDIR.TAG 가 없어 31GB 가 빠져나갔다.
 pub(crate) fn is_cargo_target(path: &Path) -> bool {
     std::fs::read_to_string(path.join("CACHEDIR.TAG")).is_ok_and(|text| text.replace("\r\n", "\n").starts_with(CARGO_TAG))
+        || std::fs::symlink_metadata(path.join(".rustc_info.json")).is_ok_and(|m| m.is_file())
 }
 
 fn is_flutter_project(path: &Path) -> bool {
@@ -222,11 +225,16 @@ mod tests {
         std::fs::create_dir_all(mobile.join(".dart_tool/package_config_dir")).unwrap();
         std::fs::write(mobile.join("pubspec.yaml"), "name: x\n").unwrap();
         std::fs::create_dir_all(root.join("no-pubspec/build")).unwrap();
+        let untagged = root.join("nested/target");
+        std::fs::create_dir_all(untagged.join("debug")).unwrap();
+        std::fs::write(untagged.join(".rustc_info.json"), "{}").unwrap();
+        cargo_target(&untagged.join("ios"));
         let found = find(&[Root { path: root.clone(), depth: 2 }], None);
         let paths: Vec<_> = found.iter().map(|o| (o.path.clone(), o.kind)).collect();
         assert_eq!(paths, vec![
             (mobile.join(".dart_tool/flutter_build"), Kind::Flutter),
             (mobile.join("build"), Kind::Flutter),
+            (untagged, Kind::Cargo),
             (target, Kind::Cargo),
         ]);
         assert_eq!(found[0].workspace, mobile);
