@@ -22,6 +22,7 @@ pub(crate) fn begin() {
     TURN.with(|t| {
         if t.get().is_none() {
             t.set(Some(Instant::now()));
+            crate::stall_dump::turn_opened();
         }
     });
 }
@@ -36,6 +37,7 @@ pub(crate) struct TurnEnd;
 impl Drop for TurnEnd {
     fn drop(&mut self) {
         let Some(start) = TURN.with(|t| t.take()) else { return };
+        crate::stall_dump::turn_closed();
         let clicked = CLICKED.with(|c| c.replace(false));
         let took = start.elapsed();
         if took >= STALL {

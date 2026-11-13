@@ -144,6 +144,7 @@ mod syntax;
 mod turnjump;
 mod prompt_nav;
 mod turn_probe;
+mod stall_dump;
 mod frame_pace;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
 mod version;

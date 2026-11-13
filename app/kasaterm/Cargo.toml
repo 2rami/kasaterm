@@ -156,6 +156,9 @@ windows-sys = { workspace = true, features = [
     # 클립보드가 바뀐 때만 열기(clipboard.rs GetClipboardSequenceNumber).
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
+    # 메인 스레드가 멈춘 순간의 미니덤프(stall_dump.rs MiniDumpWriteDump 가 이 둘을 요구한다).
+    "Win32_Storage_FileSystem",
+    "Win32_System_Kernel",
     # LoadLibraryW/GetProcAddress — WinSparkle.dll 런타임 로드(win_sparkle.rs).
     "Win32_System_LibraryLoader",
     # 동봉 ConPTY 를 싣기 전 의사 콘솔을 한 번 만들어 본다(bootstrap.rs preload_bundled_conpty).
