@@ -29,6 +29,10 @@ preview 태그의 채널 기록(`.github/release-channel.json`)이 `platforms: [
 - Windows 덤이 실패하면 그 판의 Windows 만 빠진다. 고친 뒤 `gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f platforms=windows`
   로 다시 부른다. 늦은 판이 이미 나갔으면 `feed_publish` 가 옛 판으로 덮기를 거절한다.
 - 안정판은 예전대로 한 실행에서 두 피드를 한 커밋으로 낸다. `windows` 실행은 Windows 를 싣는 preview 태그에만 열린다.
+- Windows 굽기는 `kasaterm.pdb`·`kasaterm_cli.pdb`·`kasa_acp.pdb` 를 릴리스 자산이 아니라 그 실행의 산출물
+  `kasaterm-windows-pdb`(보존 90일)로만 남긴다. controller 는 tick 마다 끝난 release.yml 실행에서 그것을 받아
+  `<상태폴더>/symbols/<태그>/` 에 계속 둔다(`tools/release/symbols.py`). 받지 못해도 출시는 그대로 가고, 산출물이 없던 실행은
+  `symbols/.no-artifact.json` 에 적어 다시 묻지 않는다. 집 PC 덤프의 `kasaterm.exe + 오프셋` 을 함수로 바꿀 때 그 판의 PDB 를 쓴다.
 
 CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
 검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과

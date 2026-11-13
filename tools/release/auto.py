@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-from tools.release import fastpatch, policy
+from tools.release import fastpatch, policy, symbols
 from tools.release.backend import RealBackend
 from tools.release.common import Refused, sha256_file, validate_channel_manifest
 from tools.release.proc import Http, Runner
@@ -549,6 +549,9 @@ def main(argv=None):
                 result = {"state": "disabled"}
             else:
                 result = tick(args.state_dir)
+                kept = symbols.sweep_quietly(args.state_dir)
+                if kept:
+                    result = {**result, "windows_symbols": kept}
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except Locked:

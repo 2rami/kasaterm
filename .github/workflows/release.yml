@@ -158,6 +158,19 @@ jobs:
           "name=kasaterm-windows-x86_64" >> $env:GITHUB_OUTPUT
           Write-Host "built $($msi.Name) ($([math]::Round($msi.Length/1MB,1)) MB)"
 
+      # 기호(PDB)는 릴리스 자산이 아니라 이 실행의 산출물로만 남긴다. controller 가 돌 때 받아 판별로 보관해
+      # 집 PC 덤프의 `kasaterm.exe + 오프셋` 을 함수로 바꾼다(tools/release/symbols.py). 이름은 거기 ARTIFACT 와 같아야 한다.
+      - name: Keep Windows debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: kasaterm-windows-pdb
+          path: |
+            target/release/kasaterm.pdb
+            target/release/kasaterm_cli.pdb
+            target/release/kasa_acp.pdb
+          retention-days: 90
+          if-no-files-found: error
+
       # 태그 push·태그 마무리 → 해당 릴리스에 MSI 첨부(릴리스 없으면 생성. 노트는 dmg job 이 채운다).
       - name: Attach Windows packages to release
         if: env.RELEASE_TAG != '' && needs.resolve.outputs.channel == 'stable'
