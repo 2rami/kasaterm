@@ -888,6 +888,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                       pane: pane,
                                       session: s,
                                       accent: accent,
+                                      senderAccents: s.tokens?.characterAccents ?? const {},
                                       onTerminal: _showTerminal,
                                       bottomTick: _bottomTick,
                                       active: _paging || chat,

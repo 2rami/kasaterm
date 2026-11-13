@@ -19,6 +19,7 @@ import '../status_style.dart';
 import '../student_art.dart';
 import '../student_walk.dart';
 import '../term_session.dart';
+import '../contrast.dart';
 import '../look.dart';
 import '../twins_loading.dart';
 import 'controls.dart';
@@ -175,6 +176,7 @@ class ConversationView extends StatefulWidget {
     required this.pane,
     required this.session,
     required this.accent,
+    this.senderAccents = const {},
     required this.onTerminal,
     this.bottomTick = 0,
     this.active = true,
@@ -196,6 +198,9 @@ class ConversationView extends StatefulWidget {
   final Pane pane;
   final TermSession session;
   final Color accent;
+
+  /// 학생 이름 → 데스크톱 학생색. 다른 학생이 넣은 말(tell·보고)의 말풍선을 그 학생 색으로 칠한다.
+  final Map<String, int> senderAccents;
   final VoidCallback onTerminal;
 
   /// 보낼 때마다 오른다 — 맨 아래로 내리고 곧바로 한 번 더 받는다.
@@ -869,6 +874,12 @@ class _ConversationViewState extends State<ConversationView> {
     );
   }
 
+  /// 다른 학생이 넣은 말의 그 학생 색. 카사텀·모르는 이름은 색이 없어 보통 말풍선이다.
+  Color? _senderAccent(String? from) {
+    final v = from == null ? null : widget.senderAccents[from];
+    return v == null ? null : Color(v);
+  }
+
   /// 쪽지를 넣은 학생 얼굴 — 기록엔 이름(`⟦아로나⟧`)뿐이라 서버가 명부로 이름을 슬러그로 바꿔 그린다.
   /// 모르는 이름(카사텀·커스텀 캐릭터)은 첫 글자.
   Widget _senderFace(String name) => widget.readOnly ? _Initial(name) : ClipOval(
@@ -909,6 +920,7 @@ class _ConversationViewState extends State<ConversationView> {
         name: b.from ?? widget.pane.displayName,
         face: b.from == null ? face : _senderFace(b.from!),
         accent: widget.accent,
+        sender: _senderAccent(b.from),
         head: head,
         tail: tail,
         maxWidth: maxBubble,
@@ -1004,6 +1016,7 @@ class _Bubble extends StatelessWidget {
     required this.name,
     required this.face,
     required this.accent,
+    this.sender,
     required this.head,
     required this.tail,
     required this.maxWidth,
@@ -1018,6 +1031,9 @@ class _Bubble extends StatelessWidget {
   final String name;
   final Widget? face;
   final Color accent;
+
+  /// 다른 학생이 넣은 말이면 그 학생 색 — 말풍선 바탕과 이름표를 그 색으로.
+  final Color? sender;
   final bool head;
   final bool tail;
   final double maxWidth;
@@ -1064,6 +1080,8 @@ class _Bubble extends StatelessWidget {
               StatusStyle.attention.withValues(alpha: Look.dangerTint),
               theme.scaffoldBackgroundColor,
             )
+          : !mine && sender != null
+          ? senderFill(context, sender!)
           : null,
       child: content,
     );
@@ -1130,7 +1148,9 @@ class _Bubble extends StatelessWidget {
                     child: Text.rich(
                       TextSpan(
                         text: name,
-                        style: theme.textTheme.labelMedium?.copyWith(color: accent),
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: sender == null ? accent : enforceContrast(sender!, theme.scaffoldBackgroundColor, 4.5),
+                        ),
                         children: [
                           if (bubble.via != null)
                             TextSpan(
@@ -2014,4 +2034,13 @@ class _TabChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 다른 학생이 넣은 말풍선 바탕 — 그 학생 색을 화면 바탕에 어두우면 24%, 밝으면 16% 섞는다.
+/// 선생님 말과 학생끼리 주고받은 말이 같은 회색이라 누가 넣은 말인지 이름표를 읽어야 갈렸다. 데스크톱 tell 띠(18%·10%)
+/// 보다 진한 까닭: 폰 상대 말풍선은 푸른 기운 도는 표면색이라 10% 로는 학생 색이 그 푸른빛에 묻혀 다른 색으로 읽혔다.
+Color senderFill(BuildContext context, Color sender) {
+  final theme = Theme.of(context);
+  final dark = theme.brightness == Brightness.dark;
+  return Color.alphaBlend(sender.withValues(alpha: dark ? 0.24 : 0.16), theme.scaffoldBackgroundColor);
 }
