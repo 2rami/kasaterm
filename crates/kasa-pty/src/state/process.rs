@@ -503,12 +503,15 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
             if cmd.Buffer.is_null() || cmd.Length == 0 {
                 return None;
             }
+            // 버퍼 크기만큼만 읽는다. 시작·종료 중인 프로세스를 읽으면 Length 가 홀수로 올 수 있는데, 예전엔 u16
+            // `Length/2` 개를 잡고 `Length` 바이트를 읽어 힙을 한 바이트 넘겨 썼다 — 그 뒤 엉뚱한 스레드가 깨진 힙을
+            // 밟아 죽었다(2026-11-13 집 PC 충돌 넷, 모두 안전한 코드 안의 엉터리 주소).
             let mut buf = vec![0u16; (cmd.Length / 2) as usize];
             if ReadProcessMemory(
                 handle,
                 cmd.Buffer as *const c_void,
                 buf.as_mut_ptr() as *mut c_void,
-                cmd.Length as usize,
+                buf.len() * 2,
                 std::ptr::null_mut(),
             ) == 0
             {

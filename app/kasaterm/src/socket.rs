@@ -5075,8 +5075,9 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
             if length == 0 || buffer == 0 {
                 return None;
             }
+            // 버퍼 크기만큼만 읽는다 — 홀수 length 를 그대로 읽으면 힙을 한 바이트 넘겨 쓴다(`process_cmdline` 과 같은 병).
             let mut wide = vec![0u16; length / 2];
-            if !read_mem(buffer, wide.as_mut_ptr() as *mut _, length) {
+            if !read_mem(buffer, wide.as_mut_ptr() as *mut _, wide.len() * 2) {
                 return None;
             }
             let s = std::ffi::OsString::from_wide(&wide);
