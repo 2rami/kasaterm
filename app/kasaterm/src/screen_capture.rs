@@ -37,6 +37,10 @@ impl Source for Screen {
     fn request_input_permission(&self) {
         crate::screen_input::request_permission();
     }
+
+    fn keep_awake(&self) {
+        os::keep_awake();
+    }
 }
 
 /// 32비트 픽셀의 바이트 순서 — 마지막 바이트는 늘 버린다.
@@ -116,6 +120,22 @@ mod os {
 
     pub(super) fn request_permission() {
         unsafe { CGRequestScreenCaptureAccess() };
+    }
+
+    /// 사람이 만진 것처럼 알려 화면을 깨우고 잠들기 시계를 되감는다. 같은 번호를 다시 쓰면 그 알림을 늘린다.
+    pub(super) fn keep_awake() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        #[link(name = "IOKit", kind = "framework")]
+        unsafe extern "C" {
+            fn IOPMAssertionDeclareUserActivity(name: *const std::ffi::c_void, user_type: u32, id: *mut u32) -> i32;
+        }
+        static ID: AtomicU32 = AtomicU32::new(0);
+        let name = objc2_core_foundation::CFString::from_str("kasaterm screen mirror viewer");
+        let mut id = ID.load(Ordering::Relaxed);
+        // SAFETY: name is a live CFString for the call; id points to a local u32. kIOPMUserActiveLocal = 0.
+        if unsafe { IOPMAssertionDeclareUserActivity((&*name as *const objc2_core_foundation::CFString).cast(), 0, &mut id) } == 0 {
+            ID.store(id, Ordering::Relaxed);
+        }
     }
 
     /// SDK 는 ScreenCaptureKit 로 밀어냈지만 한 장 뜨기는 이 함수가 가장 단순하다. 헤더에서 빠져도 심볼은 있어
@@ -203,6 +223,8 @@ mod os {
 
     pub(super) fn request_permission() {}
 
+    pub(super) fn keep_awake() {}
+
     pub(super) fn grab(ask: &Ask) -> Result<Option<(Vec<u8>, u32, u32)>, Denied> {
         let list = monitors();
         let Some((r, _)) = list.get(ask.display as usize).or(list.first()).copied() else {
@@ -259,6 +281,8 @@ mod os {
     }
 
     pub(super) fn request_permission() {}
+
+    pub(super) fn keep_awake() {}
 
     pub(super) fn grab(_: &Ask) -> Result<Option<(Vec<u8>, u32, u32)>, Denied> {
         Err(Denied::Unavailable)

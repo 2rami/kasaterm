@@ -26,6 +26,9 @@ const IDLE_EVERY: Duration = Duration::from_millis(500);
 const PING_EVERY: Duration = Duration::from_secs(20);
 /// 이만큼 아무 말(ack·핑·퐁)이 없으면 반쯤 열린 소켓으로 보고 닫는다.
 const SILENT_LIMIT: Duration = Duration::from_secs(60);
+/// 깨운 화면이 켜진 화면 목록에 잡힐 때까지 기다리는 박자와 횟수(합 3초).
+const WAKE_POLL: Duration = Duration::from_millis(250);
+const WAKE_TRIES: u32 = 12;
 /// 권한이 없을 때 다시 떠 보는 간격 — 그 기기 앞의 사람이 설정에서 켜는 것을 기다린다.
 const DENIED_RETRY: Duration = Duration::from_secs(3);
 
@@ -97,6 +100,9 @@ pub trait Source: Send + Sync {
     }
     /// 조작 권한 창을 그 기기 앞에 띄운다 — 연결마다 한 번.
     fn request_input_permission(&self) {}
+    /// 보는 사람이 있는 동안 화면을 켜 둔다(사람이 만진 것처럼 잠들기 시계를 되감는다). 잠든 화면은 뜰 장면이
+    /// 없어 폰이 「화면을 받는 중」에서 멈췄다 — 그 기기 앞에 아무도 없을 때 보려는 기능인데 바로 그때 못 봤다.
+    fn keep_awake(&self) {}
 }
 
 static SOURCE: OnceLock<Arc<dyn Source>> = OnceLock::new();
@@ -224,7 +230,19 @@ pub async fn serve(socket: WebSocket, source: Option<Arc<dyn Source>>, mut tune:
         let _ = tx.close().await;
         return;
     };
+    // 먼저 깨운다 — 잠든 화면은 켜진 화면 목록에 안 잡혀, 목록부터 받으면 빈 목록·화면 0 으로 시작해 한 장도 못 떴다.
+    {
+        let s = source.clone();
+        let _ = tokio::task::spawn_blocking(move || s.keep_awake()).await;
+    }
     let mut displays = displays_of(&source).await;
+    for _ in 0..WAKE_TRIES {
+        if !displays.is_empty() {
+            break;
+        }
+        tokio::time::sleep(WAKE_POLL).await;
+        displays = displays_of(&source).await;
+    }
     let mut display = pick(&displays, tune.display);
     if tx.send(text(json!({ "t": "hello", "displays": displays, "display": display }))).await.is_err() {
         return;
@@ -337,6 +355,21 @@ pub async fn serve(socket: WebSocket, source: Option<Arc<dyn Source>>, mut tune:
                 if heard.elapsed() > SILENT_LIMIT || tx.send(Message::Ping(Default::default())).await.is_err() {
                     break;
                 }
+                // 화면 잠들기는 짧아야 1분이라 핑 박자(20초)로 되감으면 보는 동안 꺼지지 않는다.
+                let s = source.clone();
+                let _ = tokio::task::spawn_blocking(move || s.keep_awake()).await;
+                // 깨우는 데 오래 걸려 빈 목록으로 시작했으면 이제라도 화면을 잡는다.
+                if displays.is_empty() {
+                    displays = displays_of(&source).await;
+                    if !displays.is_empty() {
+                        display = pick(&displays, tune.display);
+                        if tx.send(text(json!({ "t": "hello", "displays": displays, "display": display }))).await.is_err() {
+                            break;
+                        }
+                        prev = 0;
+                        next = Instant::now();
+                    }
+                }
             }
         }
     }
@@ -364,6 +397,9 @@ mod tests {
         inputs: Mutex<Vec<(u32, Input)>>,
         input_denied: Mutex<Option<Denied>>,
         input_asked: AtomicUsize,
+        woken: AtomicUsize,
+        /// 참이면 깨우기 전엔 켜진 화면이 없다(잠든 화면).
+        asleep: std::sync::atomic::AtomicBool,
     }
 
     impl Fake {
@@ -377,12 +413,17 @@ mod tests {
                 inputs: Mutex::new(Vec::new()),
                 input_denied: Mutex::new(None),
                 input_asked: AtomicUsize::new(0),
+                woken: AtomicUsize::new(0),
+                asleep: std::sync::atomic::AtomicBool::new(false),
             })
         }
     }
 
     impl Source for Fake {
         fn displays(&self) -> Vec<Display> {
+            if self.asleep.load(Ordering::SeqCst) && self.woken.load(Ordering::SeqCst) == 0 {
+                return Vec::new();
+            }
             vec![
                 Display { id: 7, width: 1512, height: 982, main: false },
                 Display { id: 9, width: 2560, height: 1440, main: true },
@@ -416,6 +457,10 @@ mod tests {
 
         fn request_input_permission(&self) {
             self.input_asked.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn keep_awake(&self) {
+            self.woken.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -482,6 +527,25 @@ mod tests {
 
         let mut ws = connect(Some(fake), Tune { display: Some(7), ..fast() }).await;
         assert_eq!(json_of(&mut ws).await["display"], 7);
+    }
+
+    #[tokio::test]
+    async fn a_viewer_keeps_the_screen_awake_from_the_start() {
+        let fake = Fake::new();
+        let mut ws = connect(Some(fake.clone()), fast()).await;
+        assert_eq!(json_of(&mut ws).await["t"], "hello");
+        assert!(next(&mut ws, Duration::from_secs(2)).await.is_some(), "깨운 뒤 첫 장이 온다");
+        assert!(fake.woken.load(Ordering::SeqCst) >= 1, "붙자마자 화면을 깨운다");
+    }
+
+    #[tokio::test]
+    async fn a_sleeping_screen_is_woken_before_the_hello_names_it() {
+        let fake = Fake::new();
+        fake.asleep.store(true, Ordering::SeqCst);
+        let mut ws = connect(Some(fake.clone()), fast()).await;
+        let hello = json_of(&mut ws).await;
+        assert_eq!(hello["displays"].as_array().unwrap().len(), 2, "깨운 뒤 목록을 받아 빈 목록으로 시작하지 않는다");
+        assert_eq!(hello["display"], 9);
     }
 
     #[tokio::test]
