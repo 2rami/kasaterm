@@ -22,9 +22,10 @@ fn created_rooms() -> &'static Mutex<HashSet<String>> {
     VALUE.get_or_init(Default::default)
 }
 
+/// 이 앱 실행의 번호 — 판(board) 주소의 `instance_id` 와 같은 값이어야 한다. 따로 만들면 이사가 도착 칸에 넣는
+/// 이어 할 일(tell)이 판 주소와 어긋나 「remote pane identity changed」로 거절된다.
 pub(crate) fn instance() -> &'static str {
-    static VALUE: OnceLock<String> = OnceLock::new();
-    VALUE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+    kasa_collab::board_service::instance_id()
 }
 
 pub(crate) fn machine_context() -> Result<&'static (String, String)> {
@@ -367,6 +368,11 @@ pub(crate) fn deliver_spawn(sender: &Reply<SessionRow>, result: Result<SessionRo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transfer_identity_names_the_same_app_instance_as_the_board_address() {
+        assert_eq!(instance(), kasa_collab::board_service::instance_id());
+    }
 
     #[test]
     fn busy_or_unknown_shells_are_never_cleanup_targets() {
