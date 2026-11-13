@@ -187,7 +187,20 @@ pub(crate) fn install_stderr_log(suffix: &str) {
     else {
         return;
     };
-    if !redirect_stderr(f) {
+    // 파일을 fd 2 에 바로 걸지 않고 파이프를 건다. 디스크가 차면 파일 쓰기가 실패하는데, eprintln 은 쓰기 실패에
+    // 패닉하고 그 스레드가 쥔 잠금이 독이 들어 다른 스레드가 줄줄이 따라 죽었다(2026-11-13 18:08 맥북, 「No space
+    // left on device」 한 줄로 앱이 통째로 꺼짐). 파이프 쓰기는 디스크와 무관하고, 옮겨 적는 스레드는 실패를 버린다.
+    let Ok((reader, writer)) = std::io::pipe() else {
+        return;
+    };
+    if !redirect_stderr(writer) {
+        return;
+    }
+    if std::thread::Builder::new()
+        .name("stderr-log".into())
+        .spawn(move || copy_ignoring_write_errors(reader, f))
+        .is_err()
+    {
         return;
     }
     let ts = std::time::SystemTime::now()
@@ -200,6 +213,23 @@ pub(crate) fn install_stderr_log(suffix: &str) {
 #[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn install_stderr_log(_suffix: &str) {}
 
+/// 파이프에서 읽은 것을 파일로 옮긴다. 파일 쓰기가 실패하면(디스크 가득) 그 조각은 버리고 계속 읽는다 —
+/// 읽기를 멈추면 파이프가 차서 eprintln 이 막힌다.
+#[cfg(any(target_os = "macos", windows))]
+fn copy_ignoring_write_errors(mut from: impl std::io::Read, mut to: impl std::io::Write) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                let _ = to.write_all(&buf[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn stderr_is_received() -> bool {
     // SAFETY: isatty 는 fd 번호 하나를 읽기만 한다.
@@ -207,11 +237,11 @@ fn stderr_is_received() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn redirect_stderr(f: std::fs::File) -> bool {
+fn redirect_stderr(w: std::io::PipeWriter) -> bool {
     use std::os::unix::io::AsRawFd;
-    // SAFETY: f 는 열린 파일이고 dup2 는 fd 2 를 그 파일의 복제로 바꾼다. f 가 여기서
+    // SAFETY: w 는 열린 파이프 쓰기 끝이고 dup2 는 fd 2 를 그 복제로 바꾼다. w 가 여기서
     // 닫혀도 fd 2 는 독립된 복제라 남는다.
-    unsafe { libc::dup2(f.as_raw_fd(), 2) != -1 }
+    unsafe { libc::dup2(w.as_raw_fd(), 2) != -1 }
 }
 
 #[cfg(windows)]
@@ -225,15 +255,15 @@ fn stderr_is_received() -> bool {
 
 /// Rust 의 stderr 는 쓸 때마다 표준 핸들 칸을 다시 읽어서 칸만 바꾸면 eprintln 이 따라온다.
 #[cfg(windows)]
-fn redirect_stderr(f: std::fs::File) -> bool {
+fn redirect_stderr(w: std::io::PipeWriter) -> bool {
     use std::os::windows::io::{AsRawHandle, IntoRawHandle};
     use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
-    // SAFETY: f 가 살아 있는 동안 그 핸들을 표준 칸에 건다.
-    if unsafe { SetStdHandle(STD_ERROR_HANDLE, f.as_raw_handle()) } == 0 {
+    // SAFETY: w 가 살아 있는 동안 그 핸들을 표준 칸에 건다.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, w.as_raw_handle()) } == 0 {
         return false;
     }
-    // 걸렸으면 표준 칸이 프로세스 끝까지 쥔다 — File 이 닫지 않게 소유권을 놓는다(실패면 위에서 닫힌다).
-    let _ = f.into_raw_handle();
+    // 걸렸으면 표준 칸이 프로세스 끝까지 쥔다 — 쓰기 끝이 닫히지 않게 소유권을 놓는다(실패면 위에서 닫힌다).
+    let _ = w.into_raw_handle();
     true
 }
 
@@ -673,6 +703,26 @@ pub(crate) fn live_kasaterm_pids() -> std::collections::HashSet<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 디스크가 가득 차 파일 쓰기가 늘 실패해도 끝까지 읽어 낸다 — 읽기가 멈추면 파이프가 차서 eprintln 이 막힌다.
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn a_full_disk_never_stops_draining_stderr() {
+        struct Full(usize);
+        impl std::io::Write for Full {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0 += buf.len();
+                Err(std::io::Error::from_raw_os_error(28))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let data = vec![b'x'; 200_000];
+        let mut sink = Full(0);
+        copy_ignoring_write_errors(std::io::Cursor::new(&data), &mut sink);
+        assert_eq!(sink.0, data.len(), "실패한 조각을 버리고 다음 조각을 계속 읽는다");
+    }
 
     /// 자기설치 도우미를 실제 sh 로 돌린다 — 성공하면 이전 판이 곁에 남고, 복사가 실패하면
     /// 설치본이 되돌아오고(앱이 사라지면 다음 판을 받을 길도 사라진다), 더 새것이 아니면 손대지 않는다.
