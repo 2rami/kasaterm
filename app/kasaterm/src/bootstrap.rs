@@ -789,6 +789,15 @@ mod tests {
             install_stderr_log("-kttest");
             use std::io::Write;
             let _ = std::io::stderr().write_all(b"after-redirect\n");
+            // 옮겨 적는 스레드는 파이프를 따로 비운다 — 곧장 끝나면 그 줄이 파일에 닿기 전에 프로세스가 사라져, 시험을
+            // 한꺼번에 돌릴 때만 로그가 비었다. 줄이 닿을 때까지(최대 3초) 기다린다.
+            let log = std::env::temp_dir().join("kasaterm-kttest-app.log");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline
+                && !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("after-redirect"))
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             return;
         }
         let run = |mode: &str| {
