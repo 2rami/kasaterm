@@ -356,10 +356,7 @@ impl App {
         let Some(state) = self.session_state_json() else {
             return;
         };
-        let body = state.to_string();
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&body, &mut h);
-        let sum = std::hash::Hasher::finish(&h);
+        let sum = unchanged_key(&state);
         if self.session_saved_hash == Some(sum) {
             return;
         }
@@ -740,5 +737,32 @@ mod tests {
             &Default::default(), &crate::Workspace::default(), &bound, &Default::default());
         assert_eq!(record["attach_session_id"], target);
         assert!(record["was_agent"].is_null() && record["session_id"].is_null());
+    }
+}
+
+/// 자동 저장이 「바뀌었나」를 재는 열쇠. 저장 시각(`last_used_unix`)은 뺀다 — 초마다 달라져, 아무것도 안 바뀐
+/// 5초마다 세션 파일을 다시 쓰고 fsync 했다(Windows 메인 스레드 멈춤의 한 몫).
+pub(crate) fn unchanged_key(state: &serde_json::Value) -> u64 {
+    let mut body = state.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.remove("last_used_unix");
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&body.to_string(), &mut h);
+    std::hash::Hasher::finish(&h)
+}
+
+#[cfg(test)]
+mod autosave_key_tests {
+    use super::unchanged_key;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_save_clock_changing_is_not_a_change() {
+        let a = json!({"active_session": 0, "sessions": [{"x": 1}], "last_used_unix": 100});
+        let later = json!({"active_session": 0, "sessions": [{"x": 1}], "last_used_unix": 105});
+        let moved = json!({"active_session": 1, "sessions": [{"x": 1}], "last_used_unix": 105});
+        assert_eq!(unchanged_key(&a), unchanged_key(&later));
+        assert_ne!(unchanged_key(&a), unchanged_key(&moved));
     }
 }
