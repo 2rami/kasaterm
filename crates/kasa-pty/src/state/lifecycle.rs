@@ -177,6 +177,10 @@ impl Wiring {
             Arc::clone(&output_beats),
             l.parsed_generation,
         );
+        #[cfg(windows)]
+        if let (SessionIo::Local { .. }, Some(pid)) = (&l.io, l.shell_pid) {
+            watch_shell_exit(pid, opts.pane_id.clone(), tx.clone(), Arc::clone(&screen_taps), Arc::clone(&byte_taps), Arc::clone(&output_closed));
+        }
         let launch_shell = if matches!(&l.io, SessionIo::External { .. }) { None } else { opts.shell.clone() };
         PtySession {
             screens: rx,
@@ -675,6 +679,28 @@ const PWSH_CWD_SHIM: &str = concat!(
 const BASH_PROMPT_MARKS: &str = r#"[[ "$PS1" == *'133;B'* ]] || PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'"#;
 
 /// 셸이 떨어질 홈. Windows GUI 프로세스엔 `HOME` 이 없고 `USERPROFILE` 만 있다.
+/// ConPTY 는 셸이 끝나도 의사 콘솔을 닫기 전엔 출력 통로를 열어 둬서, `exit` 한 칸이 빈 콘솔째
+/// 남았다(2026-11-13). Windows Terminal 처럼 처음 띄운 셸이 끝나면 칸을 걷는다 — 칸을 걷으면 세션이
+/// 의사 콘솔을 닫는다. 읽기 루프가 셸의 마지막 줄을 마저 그릴 틈을 잠깐 준다.
+#[cfg(windows)]
+fn watch_shell_exit(
+    pid: u32,
+    pane_id: String,
+    tx: Sender<ScreenUpdate>,
+    screen_taps: Arc<Mutex<Vec<Sender<ScreenUpdate>>>>,
+    byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    output_closed: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Some(exit) = crate::procinfo::ExitWait::open(pid) else { return };
+    let _ = std::thread::Builder::new().name("pty-exit-watch".into()).spawn(move || {
+        exit.wait();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if super::reader::announce_closed(&pane_id, &output_closed, &tx, &screen_taps, &byte_taps) {
+            eprintln!("[pty-backend] shell {pid} exited — closing {pane_id}");
+        }
+    });
+}
+
 fn home_dir() -> Option<std::ffi::OsString> {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
@@ -862,6 +888,36 @@ mod external_session_tests {
             }
         }
         assert!(saw_eof, "Eof 이벤트는 eof 센티널 프레임이 되어야 한다");
+    }
+
+    /// ConPTY 는 셸이 끝나도 출력 통로를 열어 둔다 — 칸이 걷히려면 셸의 끝을 따로 봐야 한다.
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_exit_emits_reap_sentinel() {
+        let sess = PtySession::start(PtyOptions {
+            shell: Some("cmd.exe".into()),
+            pane_id: "win-exit".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let mut sent = false;
+        let mut saw_eof = false;
+        while Instant::now() < deadline {
+            match sess.screens.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(u) if u.eof => {
+                    saw_eof = true;
+                    break;
+                }
+                _ if !sent && sess.visible_text(40).contains('>') => {
+                    sess.send_bytes(b"exit\r").unwrap();
+                    sent = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(sent, "cmd 프롬프트가 떠야 exit 를 보낸다");
+        assert!(saw_eof, "셸이 끝나면 eof 센티널이 와야 한다");
     }
 
     #[test]

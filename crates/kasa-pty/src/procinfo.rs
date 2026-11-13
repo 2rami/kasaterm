@@ -260,6 +260,32 @@ pub fn wait_exit(pid: u32, timeout: std::time::Duration) -> bool {
     }
 }
 
+/// 프로세스가 끝나기를 기다릴 핸들. 띄운 자리에서 바로 잡아야 한다 — 기다릴 스레드에서 열면 그 사이
+/// 끝난 pid 를 다른 프로세스가 물려받아 엉뚱한 것을 기다릴 수 있다.
+#[cfg(windows)]
+pub(crate) struct ExitWait(isize);
+
+#[cfg(windows)]
+impl ExitWait {
+    pub(crate) fn open(pid: u32) -> Option<Self> {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        (!handle.is_null()).then_some(Self(handle as isize))
+    }
+
+    pub(crate) fn wait(self) {
+        use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+        unsafe { WaitForSingleObject(self.0 as _, INFINITE) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ExitWait {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0 as _) };
+    }
+}
+
 /// pid 하나를 곧바로 끝낸다(자식은 건드리지 않는다). 곱게 끄기가 실패했고 사람이 강행을 고른 뒤에만 부른다.
 pub fn terminate_pid(pid: u32) -> std::io::Result<()> {
     if pid == 0 {

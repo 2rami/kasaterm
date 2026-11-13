@@ -143,6 +143,33 @@ fn chunk_is_only_particles(buf: &[u8]) -> bool {
     saw
 }
 
+/// 셸이 끝났다고 칸과 구독자에게 **한 번만** 알린다. 출력 통로의 EOF·읽기 오류가 부르고, Windows 는
+/// 셸 끝 감시도 부른다(ConPTY 는 셸이 끝나도 통로를 안 닫는다). 이미 알렸으면 false.
+pub(super) fn announce_closed(
+    pane_id: &str,
+    output_closed: &std::sync::atomic::AtomicBool,
+    tx: &Sender<ScreenUpdate>,
+    screen_taps: &Mutex<Vec<Sender<ScreenUpdate>>>,
+    byte_taps: &Mutex<Vec<Sender<Vec<u8>>>>,
+) -> bool {
+    if output_closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return false;
+    }
+    let eof = || ScreenUpdate { pane_id: pane_id.to_string(), eof: true, ..Default::default() };
+    // The PtySession also holds a Sender (for scroll/resize), so dropping our
+    // clone alone never closes the channel — the recv loop would block forever
+    // and the pane would linger as a zombie. An explicit eof sentinel reaps it.
+    let _ = tx.send(eof());
+    // 그리드 구독자(원격 거울의 WS 핸들러)에게도 EOF 를 알린다 — 위 센티널은 `tx` 로만 가서 그쪽
+    // 핸들러가 세션 Arc 를 쥔 채 프레임을 끝없이 기다렸고, 거울 pane 이 「exit」 화면 그대로 45초 넘게
+    // 서 있었다(2026-09-02 실측, `mini` 거울). 바이트 tap(앱 거울·xterm)은 센티널을 실을 수 없으니
+    // 송신자를 통째로 놓는다 — 구독자 쪽 recv 가 끊겨 같은 뜻이 된다. 송신자 목록은 세션 소유라
+    // 세션이 살아 있는 한 저절로는 안 떨어지므로 셸이 끝난 이때 놓아야 한다.
+    screen_taps.lock().unwrap().retain(|sub| sub.try_send(eof()).is_ok());
+    byte_taps.lock().unwrap().clear();
+    true
+}
+
 pub(super) fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     reader_stop: Arc<std::sync::atomic::AtomicBool>,
@@ -262,39 +289,8 @@ pub(super) fn spawn_reader_thread(
             let _ = poll_fd;
             let n = match reader.read(&mut buf) {
                 Ok(0) => {
-                    output_closed.store(true, std::sync::atomic::Ordering::Release);
                     eprintln!("[pty-backend] EOF on PTY reader — shell exited");
-                    // Tell the host pump the pane died. The PtySession also
-                    // holds a Sender (for scroll/resize), so dropping our
-                    // clone alone never closes the channel — the recv loop
-                    // would block forever and the pane would linger as a
-                    // zombie. An explicit eof sentinel reaps it instead.
-                    let _ = tx.send(ScreenUpdate {
-                        pane_id: pane_id.clone(),
-                        eof: true,
-                        ..Default::default()
-                    });
-                    // 그리드 구독자(원격 거울의 WS 핸들러)에게도 EOF 를 알린다 — 이
-                    // 센티널은 위 `tx` 로만 가고 tap 은 못 받아서, 그쪽 핸들러가 세션
-                    // Arc 를 쥔 채 프레임을 끝없이 기다렸다. 그 Arc 때문에 세션이 안
-                    // 죽고 명부에도 남아, 거울 pane 이 「exit」 화면 그대로 45초 넘게
-                    // 서 있었다(2026-09-02 실측, `mini` 거울). 바이트 tap(앱 거울·xterm)은
-                    // 센티널을 실을 수 없으니 송신자를 통째로 놓는다 — 구독자 쪽 recv 가
-                    // 끊겨 같은 뜻이 된다. 둘 다 세션이 아니라 **이 스레드**가 끝나는
-                    // 순간에 해야 한다: 송신자 목록은 세션 소유라 세션이 살아 있는 한
-                    // 저절로는 안 떨어진다.
-                    {
-                        let mut subs = screen_taps.lock().unwrap();
-                        subs.retain(|sub| {
-                            sub.try_send(ScreenUpdate {
-                                pane_id: pane_id.clone(),
-                                eof: true,
-                                ..Default::default()
-                            })
-                            .is_ok()
-                        });
-                    }
-                    byte_taps.lock().unwrap().clear();
+                    announce_closed(&pane_id, &output_closed, &tx, &screen_taps, &byte_taps);
                     return;
                 }
                 Ok(n) => {
@@ -318,14 +314,8 @@ pub(super) fn spawn_reader_thread(
                     n
                 }
                 Err(e) => {
-                    output_closed.store(true, std::sync::atomic::Ordering::Release);
-                    byte_taps.lock().unwrap().clear();
                     eprintln!("[pty-backend] read error: {e}");
-                    let _ = tx.send(ScreenUpdate {
-                        pane_id: pane_id.clone(),
-                        eof: true,
-                        ..Default::default()
-                    });
+                    announce_closed(&pane_id, &output_closed, &tx, &screen_taps, &byte_taps);
                     return;
                 }
             };
