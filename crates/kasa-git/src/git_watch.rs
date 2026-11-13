@@ -255,6 +255,19 @@ mod tests {
         assert!(last_change_under(&root.join("repo-c")).is_none());
     }
 
+    /// `path` 그 자체의 알림이 `since` 뒤에 오길 `wait` 까지 기다린다. `poke` 는 50ms 마다 불린다.
+    fn arrives(since: u64, path: &[PathBuf], wait: Duration, mut poke: impl FnMut()) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            poke();
+            if changes_since(since).1.iter().any(|c| path.contains(&c.path)) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
     #[test]
     fn a_watched_folder_reports_an_edit_made_by_any_process() {
         if !supported() {
@@ -262,24 +275,27 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("kasa-git-watch-live-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
+        // 알림 경로는 OS 가 준 꼴이다(맥은 /private/var/…) — 감싼 경로와 실제 경로 둘 다 맞는 것으로 친다.
+        let forms = |name: &str| vec![dir.join(name), roots_of(&dir)[1].join(name)];
         assert!(ensure(&dir));
         assert!(ensure(&dir.join("src")), "a folder under a watched one is already covered");
-        let start = seq();
-        // 감시가 실제로 붙기 전의 쓰기는 OS 가 알려 주지 않는다. 바쁜 굽기 기계(스왑을 쓰는 미니)에선 붙는 데 몇 초가
-        // 걸려 한 번 쓰고 기다리면 놓쳤다 — 알림이 올 때까지 1초마다 다시 쓴다.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut next_write = Instant::now();
-        let mut seen = false;
-        while Instant::now() < deadline && !seen {
-            if Instant::now() >= next_write {
-                std::fs::write(dir.join("src/edit.txt"), "x").unwrap();
-                next_write = Instant::now() + Duration::from_secs(1);
+        // 감시가 붙기 전의 쓰기는 OS 가 알려 주지 않고, 바쁜 굽기 기계에선 붙는 데 몇 초가 걸린다. 그래서 준비용 파일을
+        // 되풀이해 써서 감시가 붙은 것부터 확인하고, 그 뒤 실제 편집은 한 번만 해 단발 편집 누락을 가리지 않는다.
+        let probe = dir.join("ready.txt");
+        let mut next = Instant::now();
+        let ready = arrives(seq(), &forms("ready.txt"), Duration::from_secs(30), || {
+            if Instant::now() >= next {
+                std::fs::write(&probe, "ready").unwrap();
+                next = Instant::now() + Duration::from_millis(500);
             }
-            let (_, changes, _) = changes_since(start);
-            seen = touched(&changes, &dir);
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        });
+        let seen = ready && {
+            let start = seq();
+            std::fs::write(dir.join("src/edit.txt"), "x").unwrap();
+            arrives(start, &forms("src/edit.txt"), Duration::from_secs(30), || {})
+        };
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(seen, "the edit reached the change ring");
+        assert!(ready, "the watch never reported its own probe file");
+        assert!(seen, "a single edit made after the watch was live reached the change ring");
     }
 }
