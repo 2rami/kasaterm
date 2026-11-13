@@ -228,7 +228,8 @@ impl EventListener for PtyEventForwarder {
                 crate::host::clipboard_store(&text);
             }
             AlacEvent::Title(name) => {
-                eprintln!("[pty-backend] OSC title set: {name:?}");
+                // 여기는 칸 출력을 term 락 안에서 읽는 중이다 — 로그를 쓰지 않는다. 스피너가 제목을 초마다 바꿔
+                // 로그가 수만 줄로 불었고, 디스크가 차자 이 eprintln 이 락을 쥔 채 panic 해 락 오염 연쇄로 앱이 죽었다.
                 if let Ok(mut t) = self.last_title.lock() {
                     *t = Some(name);
                 }
