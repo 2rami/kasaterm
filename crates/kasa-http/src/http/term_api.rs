@@ -275,6 +275,8 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "kind": b.and_then(|p| p.attention_kind.clone()),
                 "attention_kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
+                // 오류로 멈춘 턴의 실제 문구 — `status` 는 `idle` 로 오므로 폰·다른 기기는 이 칸으로 멈춤을 가른다.
+                "error": b.and_then(|p| p.error.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
                 // 완료 보고(`kasaterm-cli done`) — 끝의 가장 확실한 신호다. 보고 시각은 다른 기기가 같은 보고를
                 // 두 번 울리지 않게 가르는 열쇠다(`kasa_agents::ring`).

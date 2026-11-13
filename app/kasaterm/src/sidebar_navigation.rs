@@ -554,6 +554,7 @@ fn draw_list_row(
         bg_active: false,
         busy_secs: None,
         muted: head.closed,
+        trouble: deck.iter().find_map(|r| r.error.as_deref()).filter(|_| machine.online),
     });
     if !head.closed {
         hits.push((Action::Open {
@@ -1445,7 +1446,7 @@ mod tests {
         let row = |pane: &str, remote: &str, room: &str| state::MachinesColRow {
             pane: pane.into(), remote_id: remote.into(), room: room.into(), remote_cwd: String::new(),
             name: String::new(), title: String::new(), status: String::new(), closed: false, rect: None,
-            window: None, tab_of: None, attention_kind: None,
+            window: None, tab_of: None, attention_kind: None, error: None,
         };
         state::MachinesColMachine {
             label: "test".into(), online: true, ago_secs: None, outdated: false,
@@ -1510,7 +1511,7 @@ mod tests {
         let row = |status: &str, kind: Option<&str>| state::MachinesColRow {
             pane: String::new(), remote_id: "%1".into(), room: "A".into(), remote_cwd: String::new(),
             name: String::new(), title: String::new(), status: status.into(), closed: false,
-            rect: None, window: None, tab_of: None, attention_kind: kind.map(str::to_string),
+            rect: None, window: None, tab_of: None, attention_kind: kind.map(str::to_string), error: None,
         };
         assert!(row("waiting", Some("permission")).needs_you());
         assert!(row("waiting", Some("question")).needs_you());

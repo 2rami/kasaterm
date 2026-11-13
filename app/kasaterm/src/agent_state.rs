@@ -264,6 +264,7 @@ fn remote_state(word: &str, reason: Option<&str>, kind: Option<WaitKind>) -> Age
             kind: kind.unwrap(),
             reason: reason.unwrap_or("").to_string(),
         },
+        "error" => AgentState::Error { label: reason.unwrap_or("").to_string() },
         _ => AgentState::Unknown,
     }
 }
@@ -639,6 +640,16 @@ impl StateHub {
                     .and_then(|v| v.get("waiting_for").and_then(|s| s.as_str()))
                     .map(str::to_string);
                 let kind = facts.as_ref().and_then(wait_kind_of_row);
+                // 원본의 멈춤은 `idle` 낱말에 문구 칸으로 온다(board 낱말은 넷뿐이다).
+                let error = facts
+                    .as_ref()
+                    .and_then(|v| v.get("error").and_then(|s| s.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let (word, why) = match error {
+                    Some(label) if word == "idle" => ("error".to_string(), Some(label)),
+                    _ => (word, why),
+                };
                 source = facts.as_ref().and_then(|v| v["session_id"].as_str()).map(|sid| format!("remote:{sid}"));
                 evidence.remote = Some((word, why, kind));
             } else if harness.is_some() {
@@ -1240,6 +1251,16 @@ mod tests {
         assert_eq!(read(&pane("permission prompt")), None, "모르는 이유는 지어내지 않는다");
         let with_kind = serde_json::json!({"attention_kind": "question", "status_reason": IDLE_PROMPT});
         assert_eq!(read(&with_kind), Some(WaitKind::Question), "칸이 있으면 그것이 먼저다");
+    }
+
+    #[test]
+    fn remote_stall_keeps_the_origin_error_text() {
+        let limit = "You've hit your weekly limit · resets Nov 18, 9pm (Asia/Seoul)";
+        assert_eq!(remote_state("error", Some(limit), None), AgentState::Error { label: limit.into() });
+        let mut e = Evidence { remote: Some(("error".into(), Some(limit.into()), None)), ..Default::default() };
+        assert_eq!(resolve(&e).0, AgentState::Error { label: limit.into() });
+        e.remote = Some(("idle".into(), None, None));
+        assert_eq!(resolve(&e).0, AgentState::Idle);
     }
 
     #[test]

@@ -911,6 +911,7 @@ impl App {
                 &slot,
                 crate::session::AccountIdentity::from_verified(actual),
             );
+            crate::session::retry_choice_after_login(&slot);
             super::finish_login(AccountProvider::Claude, &slot, LoginState::Ok,
                 super::LOGIN_ATTEMPT.load(std::sync::atomic::Ordering::Acquire));
             self.account_flash = Some(Instant::now());

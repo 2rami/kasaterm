@@ -803,6 +803,7 @@ pub(super) fn paint_rows(g: &mut gpu::GpuRenderer, s: &Strip, p: &Panes<'_>) {
                 bg_active: info.bg_active,
                 busy_secs: info.busy_secs,
                 muted: false,
+                trouble: info.trouble.as_deref(),
             });
             continue;
         }

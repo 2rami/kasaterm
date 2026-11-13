@@ -13,6 +13,8 @@ use std::collections::HashMap;
 /// 창 하단 상태줄의 칩·팝오버 상태. 칸마다 있던 하단바는 걷었다 — 그 자리는 ⋮ 「파일 트리」 칸이다.
 #[derive(Default)]
 pub(crate) struct StatusbarState {
+    /// 기기 팝오버의 「이 기기」 계정 줄 — 열 때 한 번 채운다(그리는 쪽은 `App` 을 못 빌린다).
+    pub(crate) local_account: Option<crate::device_accounts::DeviceAccount>,
     /// 바깥주소(터널) 칩 — **창** 우하단 고정(2026-08-15 지시). pane 소속이
     /// 아니지만 발판 chips 와 같은 프레임에 그려지고 같은 손이 클릭을 가르므로
     /// 여기 얹는다. `tunnel_on` 은 마지막 폴 결과(None=아직 모름), `tunnel_checked`
@@ -494,6 +496,8 @@ pub(crate) struct MachinesColRow {
     /// 모두 `waiting` 한 낱말로 뭉개므로, 주황으로 부를지는 이 칸이 가른다.
     /// 안 보내는 옛 판 기계에서는 None.
     pub(crate) attention_kind: Option<String>,
+    /// 오류로 멈춘 턴의 문구(그 기기 board 의 `error`). 사이드바 줄 둘째 줄이 「입력 대기」 대신 이것을 말한다.
+    pub(crate) error: Option<String>,
 }
 
 impl MachinesColRow {

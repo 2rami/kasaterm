@@ -27,6 +27,7 @@ mod eyedropper;
 mod gpu;
 mod handler;
 mod homeaccounts;
+mod device_accounts;
 mod input;
 mod shell_edit;
 mod process_usage;

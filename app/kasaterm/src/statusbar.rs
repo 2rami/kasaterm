@@ -1600,6 +1600,9 @@ impl crate::App {
         self.statusbar.popover = (!same).then_some((kind, anchor));
         self.statusbar.popover_scroll = 0.0;
         self.statusbar.clip_menu = None;
+        if !same && matches!(kind, state::StatusbarPopover::Link | state::StatusbarPopover::Build) {
+            self.statusbar.local_account = Some(self.local_device_account());
+        }
         if !same && kind == state::StatusbarPopover::Chrome {
             self.statusbar.chrome_candidates = kasa_device::machines::kasachrome_candidates();
             let chosen = kasa_device::machines::kasachrome_machine();

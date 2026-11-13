@@ -315,13 +315,36 @@ pub struct HarnessError {
     pub hard: bool,
 }
 
+// 한도 문구는 재설정 시각이 맨 끝에 온다(「… · resets Nov 18, 9pm (Asia/Seoul)」) — 60자로 자르면 그 시각이 잘렸다.
+const ERROR_LABEL_CHARS: usize = 120;
+
 fn short_label(text: &str, fallback: &str) -> String {
     let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let one = one.trim();
     if one.is_empty() {
         return fallback.to_string();
     }
-    one.chars().take(60).collect()
+    one.chars().take(ERROR_LABEL_CHARS).collect()
+}
+
+/// Claude Code 는 한도·로그인 만료·상류 오류를 `system/api_error` 가 아니라 합성 assistant 줄
+/// (`isApiErrorMessage: true`, 본문이 사람이 볼 오류 문구)로 적는다. 이 줄을 답변으로 읽으면
+/// 오류가 없는 것으로 보여 화면에는 원인 없는 폴백 문구만 남는다.
+fn api_error_message(v: &serde_json::Value) -> Option<String> {
+    if v.get("isApiErrorMessage").and_then(|x| x.as_bool()) != Some(true) {
+        return None;
+    }
+    let text = match v.pointer("/message/content") {
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|x| x.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|x| x.as_str()))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        _ => String::new(),
+    };
+    Some(text)
 }
 
 /// Claude Code·Codex 전사본의 가장 최근 활동이 오류인가 — 그렇다면 무슨 오류인가.
@@ -388,7 +411,7 @@ pub fn harness_error(tail: &str) -> Option<HarnessError> {
             }
         }
         if kind == "assistant" {
-            return None;
+            return api_error_message(&v).map(|text| HarnessError { label: short_label(&text, "API 오류"), hard: true });
         }
     }
     None
@@ -574,6 +597,7 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         harness: None,
         waiting_for: None,
         attention_kind: None,
+        error: None,
         idle_secs: None,
         busy_secs: None,
         tokens_in: ti,
@@ -762,6 +786,7 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         harness: None,
         waiting_for: None,
         attention_kind: None,
+        error: None,
         idle_secs: None,
         busy_secs: None,
         tokens_in: 0,
@@ -1100,6 +1125,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
         attention_kind: None,
+        error: None,
         idle_secs: None,
         busy_secs: None,
         tokens_in,
@@ -1503,6 +1529,22 @@ mod tests {
         assert!(latest_harness_error(
             r#"{"type":"system","subtype":"api_error","error":{"status":500}}"#
         ));
+    }
+
+    #[test]
+    fn 한도_로그인만료_같은_합성_오류줄의_문구를_그대로_읽는다() {
+        let limit = r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your weekly limit · resets Nov 18, 9pm (Asia/Seoul)"}]}}"#;
+        let err = harness_error(limit).expect("합성 오류 줄은 오류다");
+        assert!(err.hard);
+        assert_eq!(err.label, "You've hit your weekly limit · resets Nov 18, 9pm (Asia/Seoul)", "재설정 시각까지 남아야 한다");
+        let expired = r#"{"type":"assistant","isApiErrorMessage":true,"error":"authentication_failed","message":{"content":[{"type":"text","text":"Please run /login · API Error: 401 OAuth access token has expired."}]}}"#;
+        assert!(harness_error(expired).unwrap().label.starts_with("Please run /login"));
+        let blank = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"content":[]}}"#;
+        assert_eq!(harness_error(blank).unwrap().label, "API 오류");
+        let retried = format!("{limit}\n{}", r#"{"type":"user","message":{"content":"다시 해 줘"}}"#);
+        assert_eq!(harness_error(&retried), None, "그 뒤 사람이 말했으면 지난 오류다");
+        let answer = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your weekly limit 라는 말을 인용"}]}}"#;
+        assert_eq!(harness_error(answer), None, "표식 없는 답변은 문구가 같아도 오류가 아니다");
     }
 
     #[test]

@@ -7,6 +7,11 @@ class ClaudeAccount {
     required this.usageState,
     this.subtitleCode,
     this.loggedIn,
+    this.email = '',
+    this.org = '',
+    this.usage,
+    this.usageLabel = '',
+    this.relogin,
   });
 
   final String id;
@@ -16,6 +21,28 @@ class ClaudeAccount {
   final String usageState;
   final String? subtitleCode;
   final bool? loggedIn;
+  final String email;
+
+  /// 팀 조직명. 개인 조직(「…'s Organization」)은 기기가 비워 보낸다.
+  final String org;
+
+  /// 가장 압박이 큰 창의 사용률과 그 창 이름(`5h`·`7d`). 모르면 null·빈 값.
+  final double? usage;
+  final String usageLabel;
+
+  /// 이 슬롯을 다시 로그인해야 풀리는 사유 코드(로그인 만료·공통 선택 따라가기 멈춤·관문 사슬 끊김).
+  final String? relogin;
+
+  /// 폰에서 [다시 로그인]을 먼저 내밀 계정인가.
+  bool get needsLogin => relogin != null || status == '다시 로그인 필요';
+
+  /// 「7d 34%」 — 사용률을 모르면 빈 값.
+  String get usageText {
+    final pct = usage;
+    if (pct == null) return '';
+    final window = usageLabel.isEmpty ? '' : '$usageLabel ';
+    return '$window${pct.round()}%';
+  }
 
   String get title => label.isNotEmpty
       ? label
@@ -87,8 +114,117 @@ class ClaudeAccount {
             usageState: account['usage_state'] is String
                 ? account['usage_state'] as String
                 : '',
+            email: account['email'] is String ? account['email'] as String : '',
+            org: account['org'] is String ? account['org'] as String : '',
+            usage: account['usage'] is num
+                ? (account['usage'] as num).toDouble()
+                : null,
+            usageLabel: account['usage_label'] is String
+                ? account['usage_label'] as String
+                : '',
+            relogin:
+                account['relogin'] is String &&
+                    (account['relogin'] as String).isNotEmpty
+                ? account['relogin'] as String
+                : null,
           ),
     ];
+  }
+}
+
+/// 기기가 공통 선택을 따라가다 멈춘 사정. [reloginSlot] 을 다시 로그인하면 풀린다.
+class ClaudeSyncNotice {
+  const ClaudeSyncNotice({
+    required this.summary,
+    required this.details,
+    required this.failed,
+    this.code,
+    this.reloginSlot,
+  });
+
+  final String summary;
+  final String details;
+  final bool failed;
+  final String? code;
+  final String? reloginSlot;
+
+  static ClaudeSyncNotice? parse(Object? raw) {
+    if (raw is! Map || raw['summary'] is! String) return null;
+    final slot = raw['relogin_slot'];
+    return ClaudeSyncNotice(
+      summary: raw['summary'] as String,
+      details: raw['details'] is String ? raw['details'] as String : '',
+      failed: raw['failed'] == true,
+      code: raw['code'] is String ? raw['code'] as String : null,
+      reloginSlot: slot is String && slot.isNotEmpty ? slot : null,
+    );
+  }
+}
+
+/// 한 기기의 Claude 계정 칸 — 등록 슬롯, 지금 쓰는 슬롯, 공통 선택과 그것을 따르는지.
+class ClaudeDeviceAccounts {
+  const ClaudeDeviceAccounts({
+    required this.accounts,
+    required this.activeId,
+    this.sync,
+    this.sharedName,
+    this.followsShared,
+  });
+
+  final List<ClaudeAccount> accounts;
+  final String activeId;
+  final ClaudeSyncNotice? sync;
+
+  /// 관문 공통 선택의 이름(조직명 또는 이메일). 공통 선택이 없거나 옛 판이면 null.
+  final String? sharedName;
+
+  /// 지금 계정이 공통 선택과 같은가. 신원 확인 전이면 null.
+  final bool? followsShared;
+
+  ClaudeAccount? get active =>
+      accounts.where((account) => account.id == activeId).firstOrNull;
+
+  /// 이 기기에서 먼저 다시 로그인할 슬롯 — 공통 선택을 막은 슬롯이 먼저, 그다음 지금 계정, 그다음 아무 만료 슬롯.
+  ClaudeAccount? get reloginTarget {
+    final blocked = sync?.reloginSlot;
+    if (blocked != null) {
+      final slot = accounts.where((account) => account.id == blocked).firstOrNull;
+      if (slot != null) return slot;
+    }
+    final current = active;
+    if (current != null && current.needsLogin) return current;
+    return accounts.where((account) => account.needsLogin).firstOrNull;
+  }
+
+  /// 공통 선택을 못 따라간 사정 한 줄. 문제없으면 null.
+  String? get followProblem {
+    final notice = sync;
+    if (notice != null && notice.failed) {
+      final first = notice.details.split('\n').first.trim();
+      return first.isEmpty ? notice.summary : '${notice.summary} · $first';
+    }
+    if (followsShared == false && sharedName != null) {
+      return '공통 선택($sharedName)과 다른 계정을 쓰고 있어요';
+    }
+    return null;
+  }
+
+  static ClaudeDeviceAccounts parse(Object? raw) {
+    final claude = raw is Map ? raw['claude'] : null;
+    final shared = claude is Map ? claude['shared'] : null;
+    return ClaudeDeviceAccounts(
+      accounts: ClaudeAccount.parse(raw),
+      activeId: claude is Map && claude['account'] is String
+          ? claude['account'] as String
+          : '',
+      sync: ClaudeSyncNotice.parse(claude is Map ? claude['sync'] : null),
+      sharedName: shared is Map && shared['name'] is String
+          ? shared['name'] as String
+          : null,
+      followsShared: shared is Map && shared['follows'] is bool
+          ? shared['follows'] as bool
+          : null,
+    );
   }
 }
 
@@ -254,6 +390,15 @@ bool claudeLoginCode(String value) =>
 bool claudeLoginNonce(String value) => RegExp(
   r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
 ).hasMatch(value);
+
+/// 기기가 「다시 로그인」을 권하는 사유 — 슬롯 줄과 기기 줄에 붙는다.
+String claudeReloginReason(String? code) => switch (code) {
+  'account_login_required' => '로그인 만료',
+  'account_sync_departing_expired' => '보관 로그인 만료 · 공통 선택을 못 따라감',
+  'account_chain_reconnect' => '관문 로그인 끊김',
+  'account_switch_failed' => '로그인 없음',
+  _ => '다시 로그인 필요',
+};
 
 String claudeLoginError(String? code) => switch (code) {
   'phone_login_identity_mismatch' ||

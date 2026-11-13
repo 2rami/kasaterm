@@ -257,6 +257,10 @@ pub(crate) struct SyncNotice {
     pub(crate) details: String,
     pub(crate) failed: bool,
     pub(crate) pending: bool,
+    /// 멈춘 사유 코드 — 폰·다른 기기가 문구를 해석하지 않고 갈래를 가른다.
+    pub(crate) code: Option<&'static str>,
+    /// 다시 로그인하면 풀리는 이 기기의 슬롯. 폰이 그 슬롯 옆에 바로 [다시 로그인]을 세운다.
+    pub(crate) relogin_slot: Option<String>,
 }
 
 impl AccountSyncReport {
@@ -304,6 +308,8 @@ impl AccountSyncReport {
             details,
             failed: failed > 0,
             pending: pending > 0,
+            code: None,
+            relogin_slot: None,
         }
     }
 
@@ -876,7 +882,7 @@ mod tests {
         assert!(notice.pending && !notice.failed);
         assert_eq!(notice.summary, "다른 기기 2대 반영 중");
         assert!(!notice.summary.contains("완료") && notice.details.contains("관문 정본 확인 대기"));
-        let blocked = SyncNotice { summary: "다른 기기 계정 로그인 필요".into(), details: String::new(), failed: true, pending: false };
+        let blocked = SyncNotice { summary: "다른 기기 계정 로그인 필요".into(), details: String::new(), failed: true, pending: false, code: None, relogin_slot: None };
         let done = AccountSyncReport { peers: vec![("Mini".into(), Outcome::Applied)], ..report }.notice();
         assert_eq!(current_first(Some(blocked.clone()), Some(done.clone())), Some(blocked), "an old success hid the current block");
         assert_eq!(current_first(None, Some(done.clone())), Some(done));

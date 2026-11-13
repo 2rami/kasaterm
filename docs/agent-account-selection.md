@@ -113,6 +113,20 @@ revision 으로 나중에 낸다. 다른 기기를 따라 바꾼 것은 다시 �
 계정 메뉴의 안내는 지금 따라가는 정본의 상태가 지난 P2P 전송 결과보다 먼저다. 새 정본이 오면 다른 계정을 보낸
 지난 P2P 결과는 걷는다.
 
+### 다른 화면에 보이는 따라가기 상태
+
+이 기기가 정본을 못 따라간 사정은 계정 메뉴에만 머물지 않는다. `/settings/values` 의 `claude` 칸이 같은 안내를
+`sync`(`summary`·`details`·`failed`·`pending`·`code`·`relogin_slot`)로, 정본 계정과 그것을 따르는지를
+`shared`(`name`·`email`·`org`·`follows`, 신원 확인 전 `follows` 는 null)로 싣는다. 슬롯 행의 `relogin` 은 그 슬롯을
+다시 로그인해야 풀리는 사유다 — 기기 로그인 없음(`account_login_required`), 따라가기를 막은 사유(`code` 그대로),
+관문 사슬 끊김(`account_chain_reconnect`) 순으로 고른다. 폰 「Claude 계정」과 데스크톱 하단바 기기 목록이 이 값으로
+기기마다 지금 계정·사용률·막힌 사유와 [다시 로그인]을 그린다.
+
+`relogin_slot` 은 다시 로그인하면 풀리는 사유일 때만 있다. 떠나는 계정 금고가 만료돼 작업대를 그 계정 것으로 증명
+못 하면(`account_sync_departing_expired`) 지금 슬롯, 목표 금고가 비었으면 목표 슬롯이다. 그 슬롯의 로그인(데스크톱
+설정·폰 로그인)이 끝나면 멈춘 시도를 걷어 같은 정본을 다음 동기화 주기에 다시 따라간다 — 새 정본을 기다리지 않는다.
+웹·폰의 계정 전환 실패도 묶음 문구 대신 이 코드(`error_code`)와 데스크톱 토스트와 같은 문구를 돌려준다.
+
 ## 요청과 확인
 
 새 요청은 `/settings/action`의 `claude-account-sync-v1`이다. `id`는 UUID 쌍·이메일·조직 JSON의 URL-safe

@@ -212,7 +212,7 @@ mod tests {
         state::MachinesColRow {
             pane: String::new(), remote_id: id.into(), remote_cwd: String::new(), name: String::new(),
             title: String::new(), status: String::new(), room: room.into(), closed: false, rect: None,
-            window: Some(window), tab_of: None, attention_kind: None,
+            window: Some(window), tab_of: None, attention_kind: None, error: None,
         }
     }
 

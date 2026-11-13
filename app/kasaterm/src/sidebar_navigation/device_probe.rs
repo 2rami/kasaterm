@@ -11,7 +11,7 @@ pub(super) fn fixture(label: &str, count: usize) -> state::MachinesColMachine {
             pane: String::new(), remote_id: format!("%device-probe-{n}"), remote_cwd: "/workspace/probe".into(),
             name: String::new(), title: format!("작업 {}", n + 1), status: "idle".into(),
             room: format!("검증 방 {}", n + 1), closed: false, rect: Some([0.0, 0.0, 1.0, 1.0]), window: Some(n as u64),
-            tab_of: None, attention_kind: None,
+            tab_of: None, attention_kind: None, error: None,
         }).collect(),
     }
 }

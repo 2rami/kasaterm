@@ -2591,6 +2591,7 @@ impl App {
         }));
 
         let active_acct = self.set_claude_account.clone();
+        let sync_notice = crate::session::account_sync_notice(&active_acct);
         let claude_rows: Vec<serde_json::Value> = self
             .set_claude_accounts
             .iter()
@@ -2638,8 +2639,19 @@ impl App {
                 if sub.is_empty() {
                     sub_code = None;
                 }
+                let (email, org) = probe.as_ref().map_or((String::new(), String::new()), |p| (p.email.clone(), p.org.clone()));
+                let relogin = claude_relogin_reason(
+                    logged_in,
+                    sync_notice.as_ref().filter(|n| n.relogin_slot.as_deref() == Some(id.as_str())).and_then(|n| n.code),
+                    (!email.is_empty())
+                        .then(|| kasa_device::agent_chains::chain_state(&kasa_device::agent_accounts::account_key("claude", &email, &org, "")))
+                        .flatten()
+                        .as_deref(),
+                );
                 serde_json::json!({
                     "id": id, "label": label, "name": name,
+                    "email": email, "org": team_org(&email, &org),
+                    "relogin": relogin,
                     "name_code": name_code,
                     "name_args": { "n": idx + 1 },
                     "sub": sub, "sub_kind": kind, "sub_code": sub_code,
@@ -2896,6 +2908,12 @@ impl App {
                 "shim_inject": self.set_shim_inject,
                 "accounts": claude_rows,
                 "account": self.set_claude_account,
+                // 폰·다른 기기의 기기 목록 재료 — 공통 선택을 못 따라간 사유와 다시 로그인할 슬롯.
+                "sync": sync_notice.as_ref().map(|n| serde_json::json!({
+                    "summary": n.summary, "details": n.details, "failed": n.failed, "pending": n.pending,
+                    "code": n.code, "relogin_slot": n.relogin_slot,
+                })),
+                "shared": crate::session::shared_choice_view(&self.set_claude_account),
                 "codex_accounts": codex_rows,
                 "codex_account": self.set_codex_account,
                 "autoswitch": self.set_account_autoswitch,
@@ -4752,6 +4770,9 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState, attempt:
     // 한동안 옛 계정과 빈 한도가 화면에 남는다(2026-09-07 「로그인을 마쳤어요 뜨고
     // 바로 바뀐계정으로 나와야지 한도랑」).
     if state == LoginState::Ok {
+        if provider == AccountProvider::Claude {
+            crate::session::retry_choice_after_login(id);
+        }
         probe_cache().lock().unwrap().remove(id);
         // 활성 계정은 작업대를 물으므로 그쪽 키도 함께 비운다.
         probe_cache().lock().unwrap().remove("");
@@ -4779,6 +4800,16 @@ fn finish_login_state(
 #[cfg(test)]
 mod login_retry_tests {
     use super::*;
+
+    #[test]
+    fn relogin_reason_prefers_the_device_login_then_the_stopped_follow_then_the_chain() {
+        assert_eq!(claude_relogin_reason(Some(false), Some("account_sync_departing_expired"), None), Some("account_login_required"));
+        assert_eq!(claude_relogin_reason(Some(true), Some("account_sync_departing_expired"), Some("reconnect_required")),
+            Some("account_sync_departing_expired"));
+        assert_eq!(claude_relogin_reason(None, None, Some("reconnect_required")), Some("account_chain_reconnect"));
+        assert_eq!(claude_relogin_reason(Some(true), None, Some("ok")), None);
+        assert_eq!(claude_relogin_reason(None, None, None), None, "unknown is not a login request");
+    }
 
     #[test]
     fn canceled_completion_cannot_close_the_same_slots_replacement() {
@@ -5290,6 +5321,18 @@ pub(crate) fn account_identity(id: &str) -> Option<String> {
         Some(p) if !p.email.is_empty() => Some(p.email),
         _ => None,
     }
+}
+
+/// 이 슬롯을 다시 로그인해야 풀리는가 — 그렇다면 그 사유 코드. 기기 로그인 확인이 먼저고, 공통 선택을 따라가다
+/// 멈춘 사유(떠나는 금고 만료 등)와 관문 사슬 끊김은 지금 로그인이 살아 있어도 곧 막히는 경우다.
+pub(crate) fn claude_relogin_reason(logged_in: Option<bool>, stopped: Option<&'static str>, chain: Option<&str>) -> Option<&'static str> {
+    if logged_in == Some(false) {
+        return Some("account_login_required");
+    }
+    if let Some(code) = stopped {
+        return Some(code);
+    }
+    (chain == Some("reconnect_required")).then_some("account_chain_reconnect")
 }
 
 pub(crate) fn account_sync_identity(id: &str) -> Option<crate::session::AccountIdentity> {

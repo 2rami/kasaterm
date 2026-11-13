@@ -3560,11 +3560,15 @@ impl Backend for PtyBackend {
             // 기다리는 이유·종류 — 다른 기기의 학생이 「무엇을 기다리나」를 보드만 보고 안다.
             // 거울 줄에는 안 싣는다. 그 줄의 상태는 `unknown` 이고, 거기 종류만 붙으면
             // 읽는 쪽이 이 기계가 그 학생을 관측한 것으로 읽는다 — 정본은 원본 기계 줄이다.
-            if let Some(crate::agent_state::AgentState::Waiting { kind, reason }) =
-                resolved.map(|r| r.state).filter(|_| !mirrored)
-            {
-                row["attention_kind"] = json!(kind.as_str());
-                if !reason.is_empty() { row["waiting_for"] = json!(reason); }
+            match resolved.map(|r| r.state).filter(|_| !mirrored) {
+                Some(crate::agent_state::AgentState::Waiting { kind, reason }) => {
+                    row["attention_kind"] = json!(kind.as_str());
+                    if !reason.is_empty() { row["waiting_for"] = json!(reason); }
+                }
+                Some(crate::agent_state::AgentState::Error { label }) if !label.is_empty() => {
+                    row["error"] = json!(label);
+                }
+                _ => {}
             }
             if !mirrored {
                 let (background, subagents) = kasa_students::claude_mod::task_labels(&id)
@@ -3815,9 +3819,15 @@ impl Backend for PtyBackend {
                     Some(r) => {
                         row.status = r.state.board_word().into();
                         row.busy_secs = r.state.is_busy().then(|| r.since.elapsed().as_secs());
-                        if let crate::agent_state::AgentState::Waiting { kind, reason } = &r.state {
-                            row.waiting_for = (!reason.is_empty()).then(|| reason.clone());
-                            row.attention_kind = Some(kind.as_str().to_string());
+                        match &r.state {
+                            crate::agent_state::AgentState::Waiting { kind, reason } => {
+                                row.waiting_for = (!reason.is_empty()).then(|| reason.clone());
+                                row.attention_kind = Some(kind.as_str().to_string());
+                            }
+                            crate::agent_state::AgentState::Error { label } => {
+                                row.error = (!label.is_empty()).then(|| label.clone());
+                            }
+                            _ => {}
                         }
                     }
                     None => row.status = "idle".into(),
@@ -4381,6 +4391,7 @@ fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
         row.reach = "stale".into();
         row.waiting_for = None;
         row.attention_kind = None;
+        row.error = None;
         return;
     }
     // 필드가 없는 옛 호스트·연결 유실은 종료로 단정하지 않는다.
@@ -4413,6 +4424,7 @@ fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
         current.background = strings("background");
         current.subagents = strings("subagents");
         current.waiting_for = text("waiting_for");
+        current.error = text("error");
         current.attention_kind = crate::agent_state::wait_kind_of_row(facts)
             .map(|kind| kind.as_str().to_string());
         current.idle_secs = facts.get("idle_secs").and_then(|v| v.as_u64());

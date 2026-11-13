@@ -28,15 +28,19 @@ class FixtureServer extends Server {
   @override
   Future<List<Machine>> machines() async => [];
   @override
-  Future<List<ClaudeAccount>> claudeAccounts({String? machine}) async => [
-    const ClaudeAccount(
-      id: 'personal',
-      label: '개인 계정',
-      name: 'person@example.test',
-      subtitle: '',
-      usageState: 'expired',
-    ),
-  ];
+  Future<ClaudeDeviceAccounts> claudeDeviceAccounts({String? machine}) async =>
+      const ClaudeDeviceAccounts(
+        activeId: 'personal',
+        accounts: [
+          ClaudeAccount(
+            id: 'personal',
+            label: '개인 계정',
+            name: 'person@example.test',
+            subtitle: '',
+            usageState: 'expired',
+          ),
+        ],
+      );
   @override
   Future<ClaudePhoneLogin> claudePhoneLogin({
     required String action,
@@ -137,12 +141,8 @@ void main() {
             .evaluate()
             .isNotEmpty,
       );
+      // 「다시 로그인」 한 번으로 승인 페이지가 열린다 — 따로 누를 Safari 단추를 기다리지 않는다.
       await tester.tap(find.byKey(const Key('claude-login-personal')));
-      await until(
-        () =>
-            find.byKey(const Key('claude-open-browser')).evaluate().isNotEmpty,
-      );
-      await tester.tap(find.byKey(const Key('claude-open-browser')));
       await until(() => lifecycle.returned);
       await Clipboard.setData(const ClipboardData(text: code));
       await tester.ensureVisible(find.byKey(const Key('claude-paste-code')));

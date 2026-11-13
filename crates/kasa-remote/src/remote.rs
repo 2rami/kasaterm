@@ -2448,6 +2448,9 @@ pub struct RemoteAccounts {
     /// 진행 중인 로그인 `(슬롯 id, 상태, 실패 이유)`. 상태는 `running` ·
     /// `need_code` · `ok` · `error`.
     pub login: Option<(String, String, Option<String>)>,
+    /// 공통 선택을 따라가다 멈춘 사유(`claude.sync`)와 관문 공통 선택(`claude.shared`). 옛 판은 None.
+    pub sync: Option<serde_json::Value>,
+    pub shared: Option<serde_json::Value>,
 }
 
 /// 그 기계의 계정 칸을 읽는다(`GET /settings/values`).
@@ -2490,6 +2493,8 @@ pub fn fetch_accounts(base: &str, token: Option<&str>) -> Result<RemoteAccounts>
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(90.0) as f32,
         login,
+        sync: c.get("sync").filter(|v| v.is_object()).cloned(),
+        shared: c.get("shared").filter(|v| v.is_object()).cloned(),
     })
 }
 

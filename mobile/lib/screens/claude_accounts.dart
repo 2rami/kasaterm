@@ -124,6 +124,10 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
   final _code = TextEditingController();
   List<_Device> _devices = const [];
   List<ClaudeAccount> _accounts = const [];
+  // 기기마다 지금 계정·막힌 사정 — 고르지 않은 기기도 목록에서 바로 보이게 함께 받는다.
+  final _summaries = <String, ClaudeDeviceAccounts>{};
+  // 사람이 [다시 로그인]을 누른 그 흐름만 승인 페이지를 스스로 연다. 목록을 여는 것만으로는 열지 않는다.
+  bool _autoOpen = false;
   _Device? _device;
   ClaudeAccount? _slot;
   ClaudePhoneLogin? _flow;
@@ -183,6 +187,8 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     _codeError = null;
     _devices = const [];
     _accounts = const [];
+    _summaries.clear();
+    _autoOpen = false;
     _device = null;
     _slot = null;
     _flow = null;
@@ -339,7 +345,12 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
         }
         _device = device;
       });
-      await _loadAccounts(device, generation);
+      await Future.wait([
+        _loadAccounts(device, generation),
+        for (final other in devices)
+          if (other.id != device.id && other.online)
+            _loadSummary(other, generation),
+      ]);
     } on ServerException catch (e) {
       if (_current(generation)) {
         setState(() {
@@ -364,10 +375,13 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
           '이 기기는 연결되어 있지 않아요. 기기의 KASA를 켠 뒤 새로고침해 주세요.',
         );
       }
-      final accounts = await _server.claudeAccounts(machine: device.route);
+      final summary = await _server.claudeDeviceAccounts(
+        machine: device.route,
+      );
       if (!_current(generation)) return;
       setState(() {
-        _accounts = accounts;
+        _summaries[device.id] = summary;
+        if (_device?.id == device.id) _accounts = summary.accounts;
         _loading = false;
       });
     } on ServerException catch (e) {
@@ -385,42 +399,76 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     }
   }
 
+  /// 고르지 않은 기기의 요약. 못 읽으면 그 줄에 「확인 못 함」만 남는다 — 화면 전체 오류로 올리지 않는다.
+  Future<void> _loadSummary(_Device device, int generation) async {
+    try {
+      final summary = await _server.claudeDeviceAccounts(
+        machine: device.route,
+      );
+      if (_current(generation)) {
+        setState(() => _summaries[device.id] = summary);
+      }
+    } on ServerException {
+      // 기기 줄이 「확인 못 함」으로 남는다.
+    } on TimeoutException {
+      // 같은 까닭.
+    }
+  }
+
   String _name(_Device device) =>
       machineName(device.label, route: '~${device.id}');
 
-  Future<void> _chooseDevice() async {
-    final device = await showModalBottomSheet<_Device>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            for (final device in _devices)
-              SettingsRow(
-                icon: machineIcon(device.label),
-                title: _name(device),
-                subtitle: device.online ? '연결됨' : '연결 안 됨',
-                trailing: device.id == _device?.id
-                    ? const Icon(Icons.check_rounded)
-                    : null,
-                onTap: () => Navigator.pop(context, device),
-              ),
-          ],
-        ),
-      ),
-    );
-    if (!mounted || device == null || _locked || _busy || _disconnected) return;
+  /// 기기 줄의 둘째 줄 — 지금 쓰는 Claude 계정·이메일·사용률.
+  String _deviceLine(_Device device) {
+    if (!device.online) return '연결 안 됨';
+    final summary = _summaries[device.id];
+    if (summary == null) {
+      return _loading ? '계정 확인 중' : '계정을 확인하지 못했어요';
+    }
+    final active = summary.active;
+    if (active == null) {
+      return summary.activeId.isEmpty ? 'Claude 기본 로그인' : 'Claude 계정 확인 중';
+    }
+    return [
+      'Claude ${active.title}',
+      if (active.email.isNotEmpty && active.email != active.title) active.email,
+      if (active.org.isNotEmpty && active.org != active.title) active.org,
+      if (active.usageText.isNotEmpty) active.usageText,
+    ].join(' · ');
+  }
+
+  void _select(_Device device) {
+    if (device.id == _device?.id || _locked || _busy || _disconnected) return;
+    final summary = _summaries[device.id];
     final generation = ++_generation;
     setState(() {
       _device = device;
-      _accounts = const [];
+      _accounts = summary?.accounts ?? const [];
       _flow = null;
       _slot = null;
       _pendingStart = null;
       _error = null;
-      _loading = true;
+      _loading = summary == null;
     });
-    await _loadAccounts(device, generation);
+    if (summary == null) unawaited(_loadAccounts(device, generation));
+  }
+
+  /// 기기 줄의 [다시 로그인] — 기기를 고르고 그 슬롯 로그인을 한 번에 시작한다.
+  Future<void> _loginOn(_Device device, ClaudeAccount slot) async {
+    if (_locked || _busy || _disconnected) return;
+    if (device.id != _device?.id) {
+      _generation++;
+      setState(() {
+        _device = device;
+        _accounts = _summaries[device.id]?.accounts ?? const [];
+        _flow = null;
+        _slot = null;
+        _pendingStart = null;
+        _error = null;
+        _loading = false;
+      });
+    }
+    await _start(slot);
   }
 
   String _newNonce() {
@@ -441,6 +489,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       _pendingStart = _PendingStart(_server, device, slot, _newNonce());
     }
     _pendingStarts[_server] = _pendingStart;
+    _autoOpen = true;
     setState(() {
       _slot = slot;
       _flow = null;
@@ -516,8 +565,22 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       if (_current(generation)) {
         setState(() => _busy = false);
         _schedule();
+        _maybeOpenBrowser();
       }
     }
+  }
+
+  /// 승인 페이지 주소가 처음 오면 한 번 연다 — 「다시 로그인」 뒤 「Safari에서 로그인」을 또 누르던 한 손을 던다.
+  void _maybeOpenBrowser() {
+    final flow = _flow;
+    if (!_autoOpen || flow == null) return;
+    if (flow.state.terminal) {
+      _autoOpen = false;
+      return;
+    }
+    if (!_acceptsCode || flow.authorizationUrl == null || !_foreground) return;
+    _autoOpen = false;
+    unawaited(_openBrowser());
   }
 
   void _schedule() {
@@ -554,6 +617,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
           _error = null;
           _take(next);
         });
+        _maybeOpenBrowser();
       }
     } on ServerException catch (e) {
       if (_current(generation) && operation == _operation) {
@@ -642,6 +706,13 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     }
   }
 
+  /// 승인 화면에서 복사해 돌아온 뒤 한 번에 — 붙여넣기와 보내기를 따로 누르던 두 손을 하나로.
+  Future<void> _pasteAndSubmit() async {
+    await _pasteCode();
+    if (!mounted || _codeError != null || _code.text.trim().isEmpty) return;
+    await _submit();
+  }
+
   void _finish() {
     if (_busy || _locked) return;
     setState(() {
@@ -705,18 +776,12 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       ),
       children: [
         SettingsGroup(
+          title: _locked ? '기기 · 로그인 중에는 고정돼요' : '기기',
+          // 로그인 중에는 그 기기 줄만 — 다른 기기 줄이 승인 단계를 화면 아래로 밀어내지 않게.
           children: [
-            SettingsRow(
-              key: const Key('claude-device'),
-              icon: machineIcon(device.label),
-              title: _name(device),
-              subtitle: _locked ? '로그인할 기기 · 진행 중에는 고정돼요' : '로그인할 기기',
-              chevron:
-                  _devices.length > 1 && !_locked && !_busy && !_disconnected,
-              onTap: _devices.length > 1 && !_locked && !_busy && !_disconnected
-                  ? _chooseDevice
-                  : null,
-            ),
+            for (final each in _devices)
+              if ((flow == null && !_locked) || each.id == device.id)
+                _deviceRow(each),
           ],
         ),
         if (_unconfirmedPrevious.isNotEmpty)
@@ -762,14 +827,23 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
           )
         else if (_accounts.isNotEmpty)
           SettingsGroup(
-            title: '등록된 계정',
+            title: '${_name(device)}에 등록된 계정',
             children: [
               for (final account in _accounts)
                 SettingsRow(
                   key: Key('claude-account-${account.id}'),
-                  icon: Icons.person_outline_rounded,
+                  icon: account.id == _summaries[device.id]?.activeId
+                      ? Icons.person_rounded
+                      : Icons.person_outline_rounded,
                   title: account.title,
-                  subtitle: account.detail,
+                  subtitle: [
+                    if (account.id == _summaries[device.id]?.activeId)
+                      '지금 쓰는 계정',
+                    account.detail,
+                    if (account.usageText.isNotEmpty) account.usageText,
+                    if (account.relogin != null)
+                      claudeReloginReason(account.relogin),
+                  ].join(' · '),
                   below: Align(
                     alignment: Alignment.centerLeft,
                     child: OutlinedButton(
@@ -798,6 +872,46 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
     );
   }
 
+  Widget _deviceRow(_Device device) {
+    final theme = Theme.of(context);
+    final summary = device.online ? _summaries[device.id] : null;
+    final problem = summary?.followProblem;
+    final target = summary?.reloginTarget;
+    final selected = device.id == _device?.id;
+    final free = !_locked && !_busy && !_disconnected;
+    return SettingsRow(
+      key: Key('claude-device-${device.id}'),
+      icon: machineIcon(device.label),
+      title: _name(device),
+      subtitle: _deviceLine(device),
+      trailing: selected ? const Icon(Icons.check_rounded) : null,
+      onTap: free && !selected ? () => _select(device) : null,
+      below: problem == null && target == null
+          ? null
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (problem != null)
+                  Text(
+                    problem,
+                    key: Key('claude-device-problem-${device.id}'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
+                  ),
+                if (target != null) ...[
+                  const SizedBox(height: Look.fieldGap),
+                  FilledButton.tonal(
+                    key: Key('claude-device-login-${device.id}'),
+                    onPressed: free ? () => _loginOn(device, target) : null,
+                    child: Text('다시 로그인 · ${target.title}'),
+                  ),
+                ],
+              ],
+            ),
+    );
+  }
+
   Widget _login(ClaudePhoneLogin flow) {
     final theme = Theme.of(context);
     final waiting =
@@ -809,7 +923,7 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
       ClaudeLoginState.awaitingAuthorization || ClaudeLoginState.awaitingCode =>
         _code.text.trim().isNotEmpty
             ? '인증코드를 보내면 선택한 기기의 계정을 확인하고 로그인을 저장해요.'
-            : 'Safari에서 Claude에 로그인한 뒤, 승인 화면의 인증코드를 복사해 돌아오세요.',
+            : 'Safari에서 Claude에 로그인한 뒤, 승인 화면의 인증코드를 복사해 돌아와 「인증코드 붙여넣고 보내기」를 눌러 주세요.',
       ClaudeLoginState.verifying => '계정을 확인하고 이 기기에 저장하는 중이에요.',
       ClaudeLoginState.needsConfirmation =>
         '이 슬롯의 기존 계정을 확인할 수 없어요. 아래 계정이 맞는지 확인한 뒤 저장해 주세요.',
@@ -853,9 +967,18 @@ class _ClaudeAccountsScreenState extends State<ClaudeAccountsScreen>
                   ),
                 ),
               ],
+              if (waiting) ...[
+                const SizedBox(height: Look.fieldGap),
+                FilledButton.icon(
+                  key: const Key('claude-paste-submit'),
+                  onPressed: ready ? _pasteAndSubmit : null,
+                  icon: const Icon(Icons.content_paste_go_rounded),
+                  label: Text(_busy ? '확인하는 중' : '인증코드 붙여넣고 보내기'),
+                ),
+              ],
               if (waiting && flow.authorizationUrl != null) ...[
                 const SizedBox(height: Look.fieldGap),
-                FilledButton(
+                OutlinedButton(
                   key: const Key('claude-open-browser'),
                   onPressed: ready ? _openBrowser : null,
                   child: const Text('Safari에서 로그인'),

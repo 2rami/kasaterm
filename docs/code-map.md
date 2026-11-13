@@ -54,7 +54,7 @@
 - `chrome.rs notify_desktop` — OS 알림 전송과 세션·동작 경로. 조작 안내도 이 경로를 사용하며 자체 토스트·배너 창은 없다. `CollabState.last_notice`는 소켓 작업의 오류 회신용이다.
 - `win_notify.rs` — Windows 알림센터 토스트(HKCU AUMID 등록·COM 활성화기 → `UserEvent::NotifyFocus`)와 작업표시줄 배지(`set_taskbar_badge`). `chrome::notify_desktop` 이 OS 토스트로 보내고, OS가 막으면 자체 배너로 우회하지 않는다.
 - `account_brand.rs` — 실제 이메일 도메인으로 계정의 Gmail·NAVER·Sionic 표지를 고르는 공통 판정과 네이티브 그리기. 설정·계정 팝오버·상태줄이 같은 폭과 자산을 쓴다.
-- `render/status_bar/accounts.rs` — 제공된 사용량 창만 폭에 맞춰 표시하는 계정 칩. `statusbar/devices.rs`는 기기 연결·버전·업데이트 판, `statusbar/usage.rs`는 실행별 사용량 상세를 그린다.
+- `render/status_bar/accounts.rs` — 제공된 사용량 창만 폭에 맞춰 표시하는 계정 칩. `statusbar/devices.rs`는 기기 연결·버전·업데이트 판과 기기마다 지금 Claude 계정·막힌 사유 줄(`device_accounts.rs`가 그 기기 `/settings/values` 계정 칸을 팝오버가 열린 동안만 읽는다), `statusbar/usage.rs`는 실행별 사용량 상세를 그린다.
 - `process_usage.rs` — PID·시작 시각과 PTY 세대로 실행 신원을 고정하고 개별 종료한다. 숨긴 다중 셸의 복원 기록을 나누고, 문서가 함께 숨겨졌으면 먼저 열어 개별 종료하게 한다. `screen_pump`의 EOF도 같은 PTY 세대일 때만 칸을 걷는다.
 - `session/accounts/sync.rs` — 다른 기기의 Claude 계정 선택: 검증 신원 일치·중복 별명 판정, 최신 선택 직렬 전파와 기기별 적용 확인. 계약은 `docs/agent-account-selection.md`.
 - `info.rs` — 오른쪽 Info 열. 카드 아래 「모든 방」 목록(학생 줄·실행 상세·토큰·스킬·MCP)과 그 수집 워커(`ps`+`lsof`, 펼쳤을 때만 자주)

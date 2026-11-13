@@ -98,6 +98,8 @@ struct SidebarRowInfo {
     quiet: bool,
     /// 에이전트가 오류 복구를 기다리는 중 — 미니맵에만 빨간 삼각형으로 표시한다.
     error: bool,
+    /// 멈춘 턴의 실제 문구 — 목록 줄 둘째 줄이 그대로 말한다.
+    trouble: Option<String>,
     /// 지금 도는 중 — 학생이 걷는다. 기다리는 중은 여기 안 든다(그건 멈춘 것이다).
     busy: bool,
     /// 사이드바에서 숨긴 pane — 화면엔 없지만 PTY 는 돈다. 흐리게 + 아이콘으로
@@ -2161,6 +2163,7 @@ impl App {
                     waiting,
                     quiet: self.blink_quiet.contains(id),
                     error: act.is_some_and(|a| a.has_error),
+                    trouble: act.and_then(|a| a.stalled.clone()),
                     busy,
                     stashed: self
                         .closed_panes

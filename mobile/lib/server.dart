@@ -43,6 +43,7 @@ class Pane {
     this.machine,
     this.kind,
     this.waitingFor,
+    this.error,
     this.idleSecs,
     this.busySecs,
     this.closed = false,
@@ -80,6 +81,10 @@ class Pane {
   /// 사람을 부르는 것은 앞의 둘뿐이다([needsYou]).
   final String? kind;
   final String? waitingFor;
+
+  /// 턴이 오류로 멈췄을 때 데스크톱이 본 실제 문구(한도·재설정 시각, API 오류, 로그인 만료).
+  /// 그 칸의 `status` 는 `idle` 로 오므로 이것이 있어야 「쉬는 중」과 「멈춤」이 갈린다.
+  final String? error;
 
   /// 쉬기 시작한 지 몇 초.
   final int? idleSecs;
@@ -168,12 +173,16 @@ class Pane {
   bool get isBusy => status == 'working' || isCompacting;
   bool get isCompacting => status == 'compacting';
 
+  /// 오류로 멈춘 턴 — 사람이 손대기 전엔 다시 돌지 않는다. 기다림·도는 중이 먼저다.
+  bool get isStalled => !closed && !offline && !needsYou && !isBusy && error != null;
+
   /// 상태 낱말 — 판정은 [needsYou]·[isBusy] 로 데스크톱과 같고, 같은 학생이 두 화면에서 같은 말을 한다.
   String get statusWord {
     if (closed) return '닫힘';
     if (offline) return '끊김';
     if (needsYou) return kind == 'permission' ? '승인' : '질문';
     if (isBusy) return '하는 중';
+    if (isStalled) return '멈춤';
     return '쉬는 중';
   }
   bool get isWebShell => id.startsWith('web-');
@@ -230,6 +239,10 @@ class Pane {
     machine: machine,
     kind: j['kind'] as String?,
     waitingFor: j['waiting_for'] as String?,
+    error: switch ((j['error'] as String?)?.trim()) {
+      final String text when text.isNotEmpty => text,
+      _ => null,
+    },
     idleSecs: (j['idle_secs'] as num?)?.toInt(),
     busySecs: (j['busy_secs'] as num?)?.toInt(),
     closed: j['closed'] == true,
@@ -262,6 +275,7 @@ class Pane {
     'machine': ?machine,
     'kind': ?kind,
     'waiting_for': ?waitingFor,
+    'error': ?error,
     if (closed) 'closed': true,
     if (undocked) 'undocked': true,
     'session': ?session,
@@ -1097,10 +1111,11 @@ class Server {
     }
   }
 
-  Future<List<ClaudeAccount>> claudeAccounts({String? machine}) async {
+  /// 그 기기의 Claude 계정 칸 — 등록 슬롯과 지금 계정, 공통 선택을 못 따라간 사정.
+  Future<ClaudeDeviceAccounts> claudeDeviceAccounts({String? machine}) async {
     final raw = await _getJson('settings/values', machine: machine, timeout: const Duration(seconds: 15));
     try {
-      return ClaudeAccount.parse(raw);
+      return ClaudeDeviceAccounts.parse(raw);
     } on FormatException {
       throw const ServerException('이 기기의 KASA를 새 판으로 업데이트해 주세요.', status: 404);
     }

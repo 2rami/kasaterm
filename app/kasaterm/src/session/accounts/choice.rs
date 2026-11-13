@@ -142,9 +142,46 @@ pub(super) fn notice() -> Option<SyncNotice> {
 }
 
 fn show(summary: &str, details: String, failed: bool) {
+    show_stopped(summary, details, failed, None, None);
+}
+
+fn show_stopped(summary: &str, details: String, failed: bool, code: Option<&'static str>, relogin_slot: Option<String>) {
     if let Ok(mut state) = state().lock() {
-        state.notice = Some(SyncNotice { summary: summary.into(), details, failed, pending: !failed });
+        state.notice = Some(SyncNotice { summary: summary.into(), details, failed, pending: !failed, code, relogin_slot });
     }
+}
+
+/// 따라가기가 멈췄을 때 다시 로그인하면 풀리는 슬롯. 떠나는 계정 금고가 만료됐으면 지금 슬롯을, 목표 금고가
+/// 비었으면 목표 슬롯을 다시 로그인해야 한다 — 나머지(신원 확인 대기·바깥 로그인 보존)는 로그인으로 안 풀린다.
+fn relogin_slot_for(error: crate::claude_auth::SwapOutcome, current: &str, target: &str) -> Option<String> {
+    let slot = match error {
+        crate::claude_auth::SwapOutcome::DepartingExpired => current,
+        crate::claude_auth::SwapOutcome::VaultEmpty => target,
+        _ => return None,
+    };
+    (!slot.is_empty()).then(|| slot.to_string())
+}
+
+/// 다시 로그인하면 풀리는 사유로 멈춰 있던 따라가기를 다음 동기화 주기에 다시 시도하게 한다. 그 사유는
+/// 같은 정본에서 재시도하지 않으므로, 이걸 부르지 않으면 로그인을 마쳐도 새 선택이 올 때까지 멈춰 있다.
+pub(crate) fn retry_choice_after_login(slot: &str) {
+    if let Ok(mut state) = state().lock() {
+        if state.notice.as_ref().is_some_and(|notice| notice.relogin_slot.as_deref() == Some(slot)) {
+            state.notice = None;
+            state.attempt = None;
+        }
+    }
+}
+
+/// 관문 공통 선택과 이 기기가 그것을 따르는지 — 폰·다른 기기의 기기 목록이 「공통 선택을 못 따라감」을 가른다.
+/// 신원 증명이 아직 없으면 `follows` 는 모름(null)이다.
+pub(crate) fn shared_choice_view(active: &str) -> Option<Value> {
+    let account = kasa_device::account_sync::current_account()?;
+    let settings = crate::socket::read_settings();
+    let want = AccountIdentity::from_choice(choice::owned(&settings, &account)?)?;
+    let (email, org) = want.email_org();
+    let follows = crate::settings::account_sync_identity(active).map(|found| found == want);
+    Some(serde_json::json!({ "email": email, "org": org, "name": display_name(email, org), "follows": follows }))
 }
 
 fn settle() {
@@ -362,8 +399,9 @@ impl App {
                 self.chrome_dirty = true;
             }
             Err(error) => {
-                show("다른 기기 계정 따라가기 멈춤", format!("{}: {}", self.claude_account_display(slot), error.failure_message()),
-                    !retry_after(error.failure_code()));
+                show_stopped("다른 기기 계정 따라가기 멈춤", format!("{}: {}", self.claude_account_display(slot), error.failure_message()),
+                    !retry_after(error.failure_code()), Some(error.failure_code()),
+                    relogin_slot_for(error, &self.set_claude_account, slot));
                 set_step(rev, Step::Stopped(error.failure_code()));
             }
         }
@@ -379,7 +417,8 @@ impl App {
         match crate::settings::account_sync_identity(slot) {
             Some(found) if &found == want => self.follow_claude_choice(slot, want, rev),
             Some(_) => {
-                show("다른 기기 계정 받기 멈춤", format!("관문에서 받은 「{name}」 로그인이 다른 계정이에요 — 그 슬롯은 고르지 않았어요"), true);
+                show_stopped("다른 기기 계정 받기 멈춤", format!("관문에서 받은 「{name}」 로그인이 다른 계정이에요 — 그 슬롯은 고르지 않았어요"), true,
+                    Some("account_sync_adopted_mismatch"), None);
                 set_step(rev, Step::Shown);
             }
             None => {
@@ -406,7 +445,8 @@ impl App {
             }
         }
         if state.as_deref() == Some("reconnect_required") {
-            show("다른 기기 계정 로그인 필요", format!("「{name}」 관문 로그인이 끊겼어요 — 아무 기기에서 한 번 다시 로그인하면 이어져요"), true);
+            show_stopped("다른 기기 계정 로그인 필요", format!("「{name}」 관문 로그인이 끊겼어요 — 아무 기기에서 한 번 다시 로그인하면 이어져요"), true,
+                Some("account_chain_reconnect"), None);
             return set_step(rev, Step::Shown);
         }
         // 관문 사슬·계정 목록은 각자 주기로 받아 온다. 막 켜졌으면 아직 없으니 몇 주기 더 본 뒤에 없다고 말한다.
@@ -421,7 +461,7 @@ impl App {
         } else {
             format!("「{name}」 — 이 기기에 같은 계정이 없고 관문 사슬도 없어요. 이 기기에서 로그인해 주세요")
         };
-        show("다른 기기 계정 없음", details, true);
+        show_stopped("다른 기기 계정 없음", details, true, Some("account_sync_missing"), None);
         set_step(rev, Step::Shown);
     }
 }
@@ -503,6 +543,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_that_login_can_clear_names_the_slot_to_log_in() {
+        use crate::claude_auth::SwapOutcome;
+        assert_eq!(relogin_slot_for(SwapOutcome::DepartingExpired, "acct-3", "acct-6").as_deref(), Some("acct-3"),
+            "the departing vault expired, so the current slot needs the login");
+        assert_eq!(relogin_slot_for(SwapOutcome::VaultEmpty, "acct-3", "acct-6").as_deref(), Some("acct-6"));
+        assert_eq!(relogin_slot_for(SwapOutcome::IdentityUnverified, "acct-3", "acct-6"), None, "waiting is not fixed by a login");
+        assert_eq!(relogin_slot_for(SwapOutcome::DepartingExpired, "", "acct-6"), None, "the default login is not a phone-login slot");
+    }
+
+    #[test]
+    fn logging_in_the_named_slot_lets_the_same_choice_retry() {
+        let stopped = |slot: &str| {
+            *state().lock().unwrap() = State {
+                attempt: Some((4, Step::Stopped("account_sync_departing_expired"))),
+                notice: Some(SyncNotice { summary: "s".into(), details: "d".into(), failed: true, pending: false,
+                    code: Some("account_sync_departing_expired"), relogin_slot: Some(slot.into()) }),
+                ..State::default()
+            };
+        };
+        stopped("acct-3");
+        retry_choice_after_login("acct-6");
+        assert!(state().lock().unwrap().attempt.is_some(), "another slot's login does not clear the stop");
+        retry_choice_after_login("acct-3");
+        let after = state().lock().unwrap();
+        assert!(after.attempt.is_none() && after.notice.is_none());
+        drop(after);
+        *state().lock().unwrap() = State::default();
+    }
+
+    #[test]
     fn a_late_v1_request_cannot_bypass_the_ordered_choice() {
         let sionic = who(SIONIC, "person@example.test");
         let gmail = who(GMAIL, "person@example.test");
@@ -544,7 +614,7 @@ mod tests {
         let mut state = State { scope: Some(("x".into(), 3)), seen_rev: Some(12),
             attempt: Some((12, Step::Stopped("account_sync_workbench_changed"))),
             pending: Some(Pending { slot: "acct-5".into(), seen: 12, generation: 7, account: "x".into(), epoch: 3 }),
-            notice: Some(SyncNotice { summary: "old".into(), details: "old".into(), failed: true, pending: false }) };
+            notice: Some(SyncNotice { summary: "old".into(), details: "old".into(), failed: true, pending: false, code: None, relogin_slot: None }) };
         state.align_scope(Some("x"), 3);
         assert!(state.pending.is_some() && state.attempt.is_some());
         state.align_scope(Some("y"), 3);

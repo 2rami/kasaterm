@@ -68,6 +68,15 @@ class StatusStyle {
         color: scheme.primary,
       );
     }
+    if (p.isStalled) {
+      // 「쉬는 중」으로 두면 한도·로그인 만료로 멈춘 칸을 아무도 다시 보지 않는다 — 문구를 그대로 단다.
+      return StatusStyle(
+        mood: PaneMood.resting,
+        label: '${p.statusWord} · ${p.error}',
+        icon: Icons.error_outline_rounded,
+        color: scheme.error,
+      );
+    }
     return StatusStyle(
       mood: PaneMood.resting,
       label: p.statusWord,

@@ -297,6 +297,10 @@ pub struct PaneActivity {
     /// 60초 넘게 방치). claude 의 Notification 훅이 준 종류, 화면 감지 승인은 permission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_kind: Option<String>,
+    /// 턴이 오류로 멈췄을 때 그 문구(한도·재설정 시각, API 오류, 로그인 만료). `status` 는 네 낱말에
+    /// 묶여 있어 멈춤이 `idle` 로 실리므로, 이 칸이 없으면 다른 기기·폰은 왜 멈췄는지 모른다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// idle 로 들어온 뒤 흐른 초 — 「방금 끝냈다」와 「한참 쉼」을 가른다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_secs: Option<u64>,

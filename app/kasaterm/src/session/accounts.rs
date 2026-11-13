@@ -4,7 +4,7 @@ use super::*;
 
 mod choice;
 mod sync;
-pub(crate) use choice::{followed_recently, observe_workbench_identity, selection_generation};
+pub(crate) use choice::{followed_recently, observe_workbench_identity, selection_generation, shared_choice_view, retry_choice_after_login};
 pub(crate) use sync::{account_sync_notice, seed_account_sync_notice_for_verify, AccountIdentity, AccountSyncReport, SyncNotice};
 
 impl App {
@@ -77,8 +77,8 @@ impl App {
         }
     }
 
-    /// 확인 없이 지금 바꾼다. 옛 `SettingsAction::ClaudeAccount` 팔의 본문 그대로다.
-    pub(crate) fn claude_account_switch_now(&mut self, id: &str) -> bool {
+    /// 확인 없이 지금 바꾼다. 실패하면 그 사유를 돌려준다 — 웹·폰이 토스트 대신 같은 문구와 코드를 받는다.
+    pub(crate) fn claude_account_switch_now(&mut self, id: &str) -> Result<(), crate::claude_auth::SwapOutcome> {
         self.settings_input = None;
         let same = id == self.set_claude_account;
         // 바뀐 자리를 반짝여 준다 — 우상단 토스트만으로는 정작 계정 칩이 아무 변화
@@ -89,7 +89,7 @@ impl App {
             Err(error) => {
                 eprintln!("[account] Claude {id} 전환 실패: {}", error.failure_code());
                 self.set_toast(error.failure_message().into());
-                return false;
+                return Err(error);
             }
         };
         if !same {
@@ -98,7 +98,7 @@ impl App {
         self.set_toast(crate::session::account_switch_toast(
             &to_label, same, restarted, deferred, focused, live,
         ));
-        true
+        Ok(())
     }
 
     /// 두 공급자가 같은 확인 카드와 안전 규칙을 쓰게 모은다. 카드에만 상태를 담아
@@ -132,7 +132,7 @@ impl App {
     pub(crate) fn ask_or_switch_claude_account(&mut self, to: &str, surface: ConfirmSurface) {
         let impact = self.preview_claude_account_switch(to);
         if !impact.needs_confirm() {
-            self.claude_account_switch_now(to);
+            let _ = self.claude_account_switch_now(to);
             return;
         }
         let _ = self.show_account_switch_confirm(
@@ -201,11 +201,7 @@ impl App {
         };
         if !impact.needs_confirm() {
             match provider {
-                AccountSwitchProvider::Claude => {
-                    if !self.claude_account_switch_now(to) {
-                        return Err("계정을 전환하지 못했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
-                    }
-                }
+                AccountSwitchProvider::Claude => self.claude_account_switch_now(to).map_err(web_switch_error)?,
                 AccountSwitchProvider::Codex => self.codex_account_switch_now(to),
             }
             return Ok(None);
@@ -243,11 +239,7 @@ impl App {
         )?;
         if let Some((provider, to)) = picked {
             match provider {
-                AccountSwitchProvider::Claude => {
-                    if !self.claude_account_switch_now(&to) {
-                        return Err("계정을 전환하지 못했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
-                    }
-                }
+                AccountSwitchProvider::Claude => self.claude_account_switch_now(&to).map_err(web_switch_error)?,
                 AccountSwitchProvider::Codex => self.codex_account_switch_now(&to),
             }
         }
@@ -279,7 +271,7 @@ impl App {
         };
         if btn == AccountSwitchBtn::Switch {
             match p.provider {
-                AccountSwitchProvider::Claude => { self.claude_account_switch_now(&p.to); }
+                AccountSwitchProvider::Claude => { let _ = self.claude_account_switch_now(&p.to); }
                 AccountSwitchProvider::Codex => self.codex_account_switch_now(&p.to),
             }
         }
@@ -771,6 +763,12 @@ pub(crate) struct PendingAccountSwitch {
     /// 레포 관례지만, `struct App` 정의는 병렬 작업 충돌 핫스팟이라 여기 담아 필드
     /// 하나로 줄였다(CLAUDE.md 병렬 규칙).
     pub rects: Vec<(AccountSwitchBtn, (f32, f32, f32, f32))>,
+}
+
+/// 웹·폰 응답의 전환 실패 — 데스크톱 토스트와 같은 문구에 사유 코드를 붙인다. 묶음 문구 하나로 돌려주면
+/// 「로그인 만료라 그 계정을 다시 로그인해야 한다」 같은 사유가 폰에서 사라진다.
+fn web_switch_error(error: crate::claude_auth::SwapOutcome) -> String {
+    crate::settings::reject(error.failure_code(), error.failure_message().into())
 }
 
 pub(super) fn take_web_account_switch(

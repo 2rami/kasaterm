@@ -237,6 +237,8 @@ pub(crate) struct RowPaint<'a> {
     pub(crate) busy_secs: Option<u64>,
     /// 저쪽에서 닫힌 줄 — 전부 흐리게.
     pub(crate) muted: bool,
+    /// 오류로 멈춘 턴의 문구 — 둘째 줄의 상태 낱말 자리를 빨갛게 대신한다(멈춘 까닭이 미니맵 삼각형 하나로만 남지 않게).
+    pub(crate) trouble: Option<&'a str>,
 }
 
 pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
@@ -286,10 +288,13 @@ pub(crate) fn paint_row(g: &mut gpu::GpuRenderer, rect: Rect, p: &RowPaint) {
         if density.is_wide() {
             let state = if p.muted { "닫힌 칸" } else if s.turn == RowTurn::Yours { "확인 필요" }
                 else if p.bg_active { "백그라운드 작업" } else if p.busy { "작업 중" } else { "입력 대기" };
+            let trouble = p.trouble.filter(|_| !p.muted && p.detail.is_none());
+            let state = trouble.unwrap_or(state);
             let detail = if s.agent.is_empty() { format!("{} · {state}", s.pane) }
                 else { format!("{} · {} · {state}", s.agent, s.pane) };
             let detail = crate::info::fit_text(g, p.detail.unwrap_or(&detail), bar_w, 10.5, false);
-            g.draw_text(tx, line_y, &detail, gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+            let color = if trouble.is_some() { theme::danger() } else { theme::text_dim() };
+            g.draw_text(tx, line_y, &detail, gpu::DrawOpts { font_size: 10.5, color, bold: false, italic: false });
         }
         if bar_w > 0.0 {
             let bar_y = if density.is_wide() { ry + rh - 6.0 } else { line_y + (LINE_H - crate::render::MINI_BAR_H) / 2.0 };

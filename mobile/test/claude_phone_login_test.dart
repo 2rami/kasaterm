@@ -80,6 +80,8 @@ class _Fake {
   Completer<http.Response>? statusReply;
   Completer<http.Response>? startReply;
   Completer<http.Response>? cancelReply;
+  // 기기별 `claude` 칸 통째 — 비면 기본 계정 둘.
+  final claudeOf = <String, Map<String, Object?>>{};
   Future<http.Response> handle(http.Request request) async {
     if (request.url.path.endsWith('/version')) {
       return _json(missingIdentity ? {} : {'machine_id': 'book'});
@@ -113,6 +115,8 @@ class _Fake {
     }
     if (request.url.path.endsWith('/settings/values')) {
       if (unavailable) return _json({'error': 'offline'}, 503);
+      final machine = request.url.path.contains('~mini') ? 'mini' : 'book';
+      if (claudeOf[machine] != null) return _json({'claude': claudeOf[machine]});
       return _json({
         'claude': {
           'accounts': [
@@ -465,17 +469,13 @@ void main() {
       expect(find.text('기본'), findsNothing);
       expect(
         tester.getRect(find.byKey(const Key('claude-account-personal'))).top,
-        lessThan(300),
+        lessThan(600),
       );
-      await tester.tap(find.byKey(const Key('claude-device')));
-      await tester.pumpAndSettle();
+      expect(fake.opened, isEmpty);
       expect(find.text('이름만 있는 기기'), findsNothing);
-      await tester.tap(find.text('미니'));
+      await tester.tap(find.byKey(const Key('claude-device-mini')));
       await tester.pumpAndSettle();
       await _start(tester);
-      expect(fake.opened, isEmpty);
-      await tester.tap(find.byKey(const Key('claude-open-browser')));
-      await tester.pumpAndSettle();
       expect(fake.opened.single.toString(), _authorizationUrl);
       await tester.enterText(find.byKey(const Key('claude-code')), _code);
       await tester.tap(find.byKey(const Key('claude-submit-code')));
@@ -488,6 +488,107 @@ void main() {
       expect(fake.posts.every((p) => p.path.contains('/m/~mini/')), isTrue);
       expect(find.text('이 기기에 다시 로그인했어요.'), findsOneWidget);
       expect(find.byKey(const Key('claude-code')), findsNothing);
+      await _end(tester);
+    },
+  );
+
+  testWidgets(
+    'every device shows its account and a stalled follow logs in that slot in one tap',
+    (tester) async {
+      var reads = 0;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.getData') {
+            reads++;
+            return {'text': _code};
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final fake = _Fake()..responseSlot = 'gmail';
+      fake.claudeOf['mini'] = {
+        'account': 'gmail',
+        'accounts': [
+          {
+            'id': 'gmail',
+            'label': '지메일',
+            'name': '지메일',
+            'email': 'g@example.test',
+            'usage': 100,
+            'usage_label': '7d',
+            'logged_in': true,
+            'usage_state': 'ready',
+            'relogin': 'account_sync_departing_expired',
+          },
+          {
+            'id': 'personal',
+            'label': '개인',
+            'name': '개인',
+            'email': 'p@example.test',
+            'logged_in': true,
+            'usage_state': 'ready',
+          },
+        ],
+        'sync': {
+          'summary': '다른 기기 계정 따라가기 멈춤',
+          'details': '개인: 지금 계정의 보관 로그인이 만료돼 확인할 수 없어요\n둘째 줄',
+          'failed': true,
+          'pending': false,
+          'code': 'account_sync_departing_expired',
+          'relogin_slot': 'gmail',
+        },
+        'shared': {'name': '개인', 'follows': false},
+      };
+      await _show(tester, fake);
+      expect(fake.posts, isEmpty);
+      final mini = find.byKey(const Key('claude-device-mini'));
+      expect(
+        find.descendant(
+          of: mini,
+          matching: find.text('Claude 지메일 · g@example.test · 7d 100%'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Text>(find.byKey(const Key('claude-device-problem-mini')))
+            .data,
+        '다른 기기 계정 따라가기 멈춤 · 개인: 지금 계정의 보관 로그인이 만료돼 확인할 수 없어요',
+      );
+      await tester.ensureVisible(
+        find.byKey(const Key('claude-device-login-mini')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('다시 로그인 · 지메일'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('claude-device-login-mini')));
+      await tester.pumpAndSettle();
+      final start = fake.posts.single;
+      expect(start.path, contains('/m/~mini/'));
+      expect(start.body['action'], 'claude-phone-login-start');
+      expect(start.body['id'], 'gmail');
+      expect(fake.opened.single.toString(), _authorizationUrl);
+      expect(find.byKey(const Key('claude-device-book')), findsNothing);
+      expect(reads, 0);
+      await tester.ensureVisible(find.byKey(const Key('claude-paste-submit')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('claude-paste-submit')));
+      await tester.pumpAndSettle();
+      expect(reads, 1);
+      expect(fake.posts.last.body, {
+        'action': 'claude-phone-login-code',
+        'id': 'flow-fixture',
+        'label': _code,
+      });
+      expect(fake.posts.every((p) => p.path.contains('/m/~mini/')), isTrue);
+      expect(find.text('이 기기에 다시 로그인했어요.'), findsOneWidget);
+      expect(fake.opened.length, 1, reason: '같은 흐름에서 Safari 를 두 번 열지 않는다');
       await _end(tester);
     },
   );
@@ -548,8 +649,6 @@ void main() {
         );
       await _show(tester, fake);
       await _start(tester);
-      await tester.tap(find.byKey(const Key('claude-open-browser')));
-      await tester.pumpAndSettle();
       expect(fake.opened.single.toString(), fake.authorizationUrl);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
@@ -750,7 +849,7 @@ void main() {
       );
       expect(
         tester
-            .widget<SettingsRow>(find.byKey(const Key('claude-device')))
+            .widget<SettingsRow>(find.byKey(const Key('claude-device-book')))
             .onTap,
         isNull,
       );
@@ -814,9 +913,7 @@ void main() {
       final delayed = Completer<http.Response>();
       final fake = _Fake()..startReply = delayed;
       await _show(tester, fake);
-      await tester.tap(find.byKey(const Key('claude-device')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('미니'));
+      await tester.tap(find.byKey(const Key('claude-device-mini')));
       await tester.pumpAndSettle();
       await _start(tester);
       await _end(tester);
@@ -1198,6 +1295,7 @@ void main() {
         await tester.ensureVisible(
           find.byKey(const Key('claude-login-personal')),
         );
+        await tester.pumpAndSettle();
         await _start(tester);
         tester.view.viewInsets = const FakeViewPadding(bottom: 336);
         await tester.ensureVisible(find.byKey(const Key('claude-code')));
@@ -1261,7 +1359,7 @@ void main() {
       final top = tester
           .getRect(find.byKey(const Key('claude-account-personal')))
           .top;
-      expect(top, lessThan(300));
+      expect(top, lessThan(600));
       await tester.runAsync(
         () => File('/tmp/kasa-claude-layout-${brightness.name}.json')
             .writeAsString(

@@ -623,6 +623,11 @@ impl App {
                 tab_of: facts.as_ref().and_then(|(_, p)| row_tab_of(p)),
                 // 칸이 없는 옛 판 기계는 판정 이유로 가른다 — 거울 판정과 같은 창구
                 // (`wait_kind_of_row`)를 써야 목록과 헤더가 같은 답을 낸다.
+                error: remote_str("error").or_else(|| self
+                    .pane_activity
+                    .get(id)
+                    .filter(|_| remote.is_none())
+                    .and_then(|v| v.stalled.clone())),
                 attention_kind: facts
                     .as_ref()
                     .and_then(|(_, r)| crate::agent_state::wait_kind_of_row(r))
@@ -752,6 +757,8 @@ impl App {
                                         tab_of: row_tab_of(p),
                                         attention_kind: crate::agent_state::wait_kind_of_row(p)
                                             .map(|k| k.as_str().to_string()),
+                                        error: p.get("error").and_then(|v| v.as_str())
+                                            .filter(|s| !s.is_empty()).map(str::to_string),
                                     },
                                 ))
                             })
