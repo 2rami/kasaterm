@@ -2,8 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 
+import 'copy_notice.dart';
 import 'grid.dart';
 import 'reflow.dart';
 
@@ -580,22 +580,26 @@ class RenderGridSelectable extends RenderProxyBox
   }
 }
 
-/// 격자 선택의 메뉴 — 복사·전체 선택 둘만, 우리말로. 복사하면 대화 보기처럼 알린다.
-Widget gridSelectionMenu(BuildContext context, SelectableRegionState region) {
+/// 격자 선택의 메뉴 — 복사·전체 선택, 우리말로. [extra](대화 쪽의 「말풍선 복사」)는 복사 뒤에 선다.
+/// 복사하면 대화 보기처럼 알린다.
+Widget gridSelectionMenu(
+  BuildContext context,
+  SelectableRegionState region, {
+  List<ContextMenuButtonItem> extra = const [],
+}) {
   final items = <ContextMenuButtonItem>[
     for (final item in region.contextMenuButtonItems)
-      if (item.type == ContextMenuButtonType.copy)
+      if (item.type == ContextMenuButtonType.copy) ...[
         item.copyWith(
           label: '복사',
           onPressed: () {
+            final messenger = ScaffoldMessenger.maybeOf(context);
             item.onPressed?.call();
-            HapticFeedback.lightImpact();
-            ScaffoldMessenger.maybeOf(context)
-              ?..hideCurrentSnackBar()
-              ..showSnackBar(const SnackBar(content: Text('복사했어요')));
+            tellCopied(messenger);
           },
-        )
-      else if (item.type == ContextMenuButtonType.selectAll)
+        ),
+        ...extra,
+      ] else if (item.type == ContextMenuButtonType.selectAll)
         item.copyWith(label: '전체 선택'),
   ];
   return AdaptiveTextSelectionToolbar.buttonItems(

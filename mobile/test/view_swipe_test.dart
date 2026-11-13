@@ -23,19 +23,32 @@ const target = Pane(
   harness: 'claude',
 );
 
-/// 가로로 넘치는 코드 칸 하나가 든 대화.
-final _transcript =
-    '${jsonEncode({
-      'type': 'assistant',
+String _said(String role, String text, String at) => '${jsonEncode({
+      'type': role,
       'sessionId': 's1',
-      'timestamp': '2026-10-02T01:00:05Z',
+      'timestamp': at,
       'message': {
-        'role': 'assistant',
-        'content': [
-          {'type': 'text', 'text': '이렇게 돌려요\n\n```\n${'cargo build --release --features kasanet ' * 4}\n```'},
-        ],
+        'role': role,
+        'content': role == 'user' ? text : [{'type': 'text', 'text': text}],
       },
     })}\n';
+
+/// 폭보다 긴 코드 칸 하나가 든 대화.
+final _transcript = _said(
+  'assistant',
+  '이렇게 돌려요\n\n```sh\n${'cargo build --release --features kasanet ' * 4}\n```',
+  '2026-10-02T01:00:05Z',
+);
+
+/// 말풍선 둘 — 내 말과 마크다운 답.
+final _twoBubbles = _said('user', '빌드 명령 알려 줘', '2026-10-02T01:00:00Z') + _transcript;
+
+/// 칸이 많아 폭을 넘는 표.
+final _wideTable = _said(
+  'assistant',
+  '표예요\n\n| 하나 | 둘 | 셋 | 넷 |\n|---|---|---|---|\n${'| ${'긴 칸 글자 ' * 8} ' * 4}|',
+  '2026-10-02T01:00:05Z',
+);
 
 /// 화면이 받으려 한 그림 주소 — 얼굴을 누구 것으로 물었나.
 final askedImages = <Uri>[];
@@ -238,26 +251,48 @@ void main() {
     await _close(tester);
   });
 
-  testWidgets('코드 칸 안의 가로 밀기는 코드 칸이 가져간다', (tester) async {
+  testWidgets('코드 칸은 칸 폭에서 꺾는다 — 옆으로 밀리지 않고, 밀면 쪽이 넘어간다', (tester) async {
     await _open(tester, view: PaneView.chat, transcript: _transcript);
     await tester.pump(const Duration(milliseconds: 100));
     final code = find.textContaining('cargo build', findRichText: true);
     expect(code, findsOneWidget);
+    expect(
+      find.ancestor(
+        of: code,
+        matching: find.byWidgetPredicate(
+          (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
+        ),
+      ),
+      findsNothing,
+    );
+    final paragraph = tester.renderObject<RenderParagraph>(code);
+    expect(paragraph.didExceedMaxLines, isFalse);
+    expect(paragraph.size.height, greaterThan(paragraph.preferredLineHeight * 3), reason: '긴 줄이 꺾이지 않았다');
+    expect(tester.getRect(code).right, lessThanOrEqualTo(390), reason: '코드가 화면 밖으로 나갔다');
+    await _swipe(tester, tester.getRect(code).center, const Offset(220, 0));
+    expect(_page(tester), 0, reason: '코드 칸이 가로 밀기를 가져갔다');
+    await _close(tester);
+  });
+
+  testWidgets('표 안의 가로 밀기는 표가 가져간다', (tester) async {
+    await _open(tester, view: PaneView.chat, transcript: _wideTable);
+    await tester.pump(const Duration(milliseconds: 100));
+    final cell = find.textContaining('긴 칸 글자', findRichText: true).first;
     final scroll = find.ancestor(
-      of: code,
+      of: cell,
       matching: find.byWidgetPredicate(
         (w) =>
             w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
       ),
     );
     expect(scroll, findsOneWidget);
-    // 코드 글 전체는 화면보다 넓다 — 보이는 코드 칸의 가운데를 민다.
+    // 표 전체는 화면보다 넓다 — 보이는 표의 가운데를 민다.
     final box = tester.getRect(scroll);
-    final pos = Scrollable.of(tester.element(code)).position;
+    final pos = Scrollable.of(tester.element(cell)).position;
     expect(pos.maxScrollExtent, greaterThan(150));
-    // 맨 왼쪽인 코드 칸을 오른쪽으로 — 더 갈 데가 없어도 코드 칸이 가져가 터미널로 안 넘어간다.
+    // 맨 왼쪽인 표를 오른쪽으로 — 더 갈 데가 없어도 표가 가져가 터미널로 안 넘어간다.
     await _swipe(tester, box.center, const Offset(150, 0));
-    expect(_page(tester), 1, reason: '코드 칸을 밀었는데 쪽이 넘어갔다');
+    expect(_page(tester), 1, reason: '표를 밀었는데 쪽이 넘어갔다');
     await _swipe(tester, box.center, const Offset(-150, 0));
     expect(_page(tester), 1);
     expect(pos.axis, Axis.horizontal);
@@ -349,6 +384,72 @@ void main() {
     await tester.pump();
     expect(clip, '이렇게');
     expect(find.text('복사했어요'), findsOneWidget);
+    await _close(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('말풍선 속 낱말을 고르면 메뉴의 「말풍선 복사」가 그 말풍선 원문을 담는다', (tester) async {
+    String? clip;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clip = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await _open(tester, view: PaneView.chat, transcript: _twoBubbles);
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final said = find.textContaining('이렇게 돌려요', findRichText: true);
+    await tester.longPressAt(tester.getTopLeft(said) + const Offset(12, 10));
+    await tester.pumpAndSettle();
+    expect(find.text('복사'), findsOneWidget);
+    await tester.tap(find.text('말풍선 복사'));
+    await tester.pump();
+    // 마크다운 원문 — 코드 울타리와 말 이름이 남는다.
+    expect(clip, '이렇게 돌려요\n\n```sh\n${'cargo build --release --features kasanet ' * 4}\n```');
+    expect(find.text('복사했어요'), findsOneWidget);
+    expect(chatSelected(tester), isEmpty, reason: '담은 뒤에도 고름이 남았다');
+    await tester.pump(const Duration(seconds: 5));
+
+    // 내 말도 같은 손.
+    final mine = find.textContaining('빌드 명령', findRichText: true);
+    await tester.longPressAt(tester.getTopLeft(mine) + const Offset(8, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('말풍선 복사'));
+    await tester.pump();
+    expect(clip, '빌드 명령 알려 줘');
+    await tester.pump(const Duration(seconds: 5));
+
+    // 두 말풍선에 걸치면 어느 것인지 모른다 — 메뉴에 안 선다.
+    await tester.longPressAt(tester.getTopLeft(said) + const Offset(12, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('전체 선택'));
+    await tester.pumpAndSettle();
+    expect(chatSelected(tester), contains('빌드 명령'));
+    expect(find.text('복사'), findsOneWidget);
+    expect(find.text('말풍선 복사'), findsNothing);
+    await _close(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('코드 칸 머리 줄(말 이름·복사)은 고르기에 안 든다', (tester) async {
+    await _open(tester, view: PaneView.chat, transcript: _transcript);
+    await tester.pump(const Duration(milliseconds: 100));
+    final said = find.textContaining('이렇게 돌려요', findRichText: true);
+    await tester.longPressAt(tester.getTopLeft(said) + const Offset(12, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('전체 선택'));
+    await tester.pumpAndSettle();
+    final picked = chatSelected(tester);
+    expect(picked, contains('cargo build'));
+    expect(picked, isNot(contains('sh')), reason: '말 이름이 고른 글에 섞였다');
     await _close(tester);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 

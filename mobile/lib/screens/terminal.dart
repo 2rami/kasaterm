@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
 import '../conversation.dart';
+import '../copy_notice.dart';
 import '../grid_canvas.dart';
 import '../file_link.dart';
 import '../grid_select.dart';
@@ -185,6 +186,24 @@ class _TerminalScreenState extends State<TerminalScreen> {
   void _onPagePointerCancel(PointerCancelEvent e) {
     _pointers = math.max(0, _pointers - 1);
     if (e.pointer == _tapPointer) _tapPointer = null;
+  }
+
+  /// 대화 쪽 고르기 메뉴 — 고른 글이 말풍선 하나 안이면 「말풍선 복사」를 더한다. 길게 누르기가 고르기 몫이라
+  /// 말풍선 통째 복사는 여기서 고른다.
+  Widget _chatSelectionMenu(BuildContext context, SelectableRegionState region) {
+    final box = _chatGeometryBox.currentContext?.findRenderObject();
+    final bubble = box is RenderBox && box.attached ? selectedBubbleText(box, _chatGeometry.value) : null;
+    return gridSelectionMenu(context, region, extra: [
+      if (bubble != null)
+        ContextMenuButtonItem(
+          label: '말풍선 복사',
+          onPressed: () {
+            unawaited(copyAndTell(context, bubble));
+            region.hideToolbar();
+            region.clearSelection();
+          },
+        ),
+    ]);
   }
 
   bool _onSelection(Offset global) {
@@ -837,7 +856,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                 child: SelectionArea(
                                   key: _chatSelection,
                                   focusNode: _chatSelectionFocus,
-                                  contextMenuBuilder: gridSelectionMenu,
+                                  contextMenuBuilder: _chatSelectionMenu,
                                   child: _selectable(_chatGeometry, _chatGeometryBox, RawGestureDetector(
                                     behavior: HitTestBehavior.translucent,
                                     gestures: _swipeGestures,

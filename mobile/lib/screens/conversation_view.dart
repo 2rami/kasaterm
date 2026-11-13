@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
@@ -769,6 +770,31 @@ class _ConversationViewState extends State<ConversationView> {
 }
 
 
+/// 말풍선의 원문 표 — 고르기 메뉴가 고른 글이 걸친 말풍선을 찾는다([selectedBubbleText]).
+class _BubbleText {
+  _BubbleText(this.text);
+  final String text;
+}
+
+/// 고른 글이 말풍선 하나 안에 있으면 그 말풍선 원문 — 고르기 메뉴의 「말풍선 복사」. 상대 말은 마크다운 원문
+/// 그대로(코드 울타리·링크 주소가 남는다), 그림·소리 표시 블록만 걷는다. [box] 는 [geometry] 의 좌표 칸이다.
+/// 여러 말풍선에 걸치면 null — 그때는 메뉴에 안 선다.
+String? selectedBubbleText(RenderBox box, SelectionGeometry geometry) {
+  final rects = geometry.selectionRects;
+  if (!geometry.hasSelection || rects.isEmpty) return null;
+  _BubbleText? at(Offset local) {
+    final hits = BoxHitTestResult();
+    if (!box.hitTest(hits, position: local)) return null;
+    for (final e in hits.path) {
+      if (e.target case RenderMetaData(metaData: final _BubbleText b)) return b;
+    }
+    return null;
+  }
+
+  final first = at(rects.first.center);
+  return first != null && identical(first, at(rects.last.center)) ? first.text : null;
+}
+
 class _Bubble extends StatelessWidget {
   const _Bubble({
     required this.server,
@@ -806,6 +832,9 @@ class _Bubble extends StatelessWidget {
     final queued = mine && bubble.queued;
     final ink = queued ? scheme.onSurface : SpeechBubble.ink(context, mine: mine);
     final text = bubble.text;
+    void onLink(String href) => offline
+        ? ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('외부 파일과 링크는 이 텍스트 저장본에 포함되지 않아요.')))
+        : showResultLink(context, server, href, cwd: cwd, machine: machine);
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -814,20 +843,19 @@ class _Bubble extends StatelessWidget {
         if (bubble.omittedImages > 0) Text('이미지 ${bubble.omittedImages}장 · 저장본에 포함되지 않음', style: TextStyle(fontSize: Look.sub, color: ink)),
         if (text.isNotEmpty)
           mine
-              ? Text(
+              ? LinkedText(
                   text,
                   style: TextStyle(fontSize: Look.body, height: 1.45, color: ink),
+                  onLink: onLink,
                 )
               : InlineResultBody(
                   server: server, machine: machine, text: text, style: md,
                   offline: offline,
-                  onLink: (href) => offline
-                      ? ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('외부 파일과 링크는 이 텍스트 저장본에 포함되지 않아요.')))
-                      : showResultLink(context, server, href, cwd: cwd, machine: machine),
+                  onLink: onLink,
                 ),
       ],
     );
-    final box = SpeechBubble(
+    final bubbleBox = SpeechBubble(
       mine: mine,
       maxWidth: maxWidth,
       // 예약은 아직 안 간 말 — 강조색 대신 주의색 옅은 바탕(경고 띠와 같은 옅기).
@@ -839,6 +867,12 @@ class _Bubble extends StatelessWidget {
           : null,
       child: content,
     );
+    final box = text.isEmpty
+        ? bubbleBox
+        : MetaData(
+            metaData: _BubbleText(mine ? text : withoutInlineResults(text)),
+            child: bubbleBox,
+          );
     final clock = !tail
         ? null
         : bubble.sending

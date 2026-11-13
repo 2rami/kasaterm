@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'copy_notice.dart';
 import 'grid.dart';
 
 /// 격자 글자에서 URL 을 찾는다 — 데스크톱 `links.rs` 와 같은 규칙. 한 칸 == 한 글자라
@@ -102,8 +102,31 @@ List<LinkHit> detectLinks(
     }
     prev = cells;
   }
+  return [
+    for (final (start, stop, url) in _scanUrls(chars))
+      LinkHit(url, _segments(pos.sublist(start, stop))),
+  ];
+}
+
+/// 이어진 칸 자리를 행마다 한 토막으로 — 접히며 끼운 빈칸(null)은 건너뛴다.
+List<(int, int, int)> _segments(List<(int, int, int)?> cells) {
+  final segs = <(int, int, int)>[];
+  for (final p in cells) {
+    if (p == null) continue;
+    final last = segs.isEmpty ? null : segs.last;
+    if (last != null && last.$1 == p.$1 && last.$3 == p.$2) {
+      segs[segs.length - 1] = (last.$1, last.$2, p.$2 + p.$3);
+    } else {
+      segs.add((p.$1, p.$2, p.$2 + p.$3));
+    }
+  }
+  return segs;
+}
+
+/// 글자 배열 속 주소 — (시작, 끝(exclusive), 주소). 격자와 흐르는 글(코드 칸·내 말)이 같은 규칙을 쓴다.
+List<(int, int, String)> _scanUrls(List<int> chars) {
   final n = chars.length;
-  final out = <LinkHit>[];
+  final out = <(int, int, String)>[];
   var i = 0;
   while (i < n) {
     final head = String.fromCharCode(chars[i]).toLowerCase().codeUnitAt(0);
@@ -134,18 +157,7 @@ List<LinkHit> detectLinks(
         final stop = _trimTrailing(chars, i, j);
         if (stop > i + 8 || (isWww && stop > i + 5)) {
           final body = String.fromCharCodes(chars.sublist(i, stop));
-          final url = isWww ? 'https://$body' : body;
-          final segs = <(int, int, int)>[];
-          for (final p in pos.sublist(i, stop)) {
-            if (p == null) continue;
-            final last = segs.isEmpty ? null : segs.last;
-            if (last != null && last.$1 == p.$1 && last.$3 == p.$2) {
-              segs[segs.length - 1] = (last.$1, last.$2, p.$2 + p.$3);
-            } else {
-              segs.add((p.$1, p.$2, p.$2 + p.$3));
-            }
-          }
-          out.add(LinkHit(url, segs));
+          out.add((i, stop, isWww ? 'https://$body' : body));
         }
         i = j > i ? j : i + 1;
         continue;
@@ -153,6 +165,20 @@ List<LinkHit> detectLinks(
     }
     i++;
   }
+  return out;
+}
+
+/// 흐르는 글을 주소와 나머지 조각으로 — (글, 주소). 주소가 아닌 조각은 주소가 null.
+List<(String, String?)> urlPieces(String text) {
+  final chars = text.runes.toList();
+  final out = <(String, String?)>[];
+  var at = 0;
+  for (final (start, stop, url) in _scanUrls(chars)) {
+    if (start > at) out.add((String.fromCharCodes(chars.sublist(at, start)), null));
+    out.add((String.fromCharCodes(chars.sublist(start, stop)), url));
+    at = stop;
+  }
+  if (at < chars.length) out.add((String.fromCharCodes(chars.sublist(at)), null));
   return out;
 }
 
@@ -210,14 +236,9 @@ Future<void> showLinkSheet(
           ListTile(
             leading: const Icon(Icons.copy),
             title: const Text('주소 복사'),
-            onTap: () async {
-              await Clipboard.setData(ClipboardData(text: url));
-              if (sheet.mounted) Navigator.of(sheet).pop();
-              if (context.mounted) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('주소를 복사했다')));
-              }
+            onTap: () {
+              Navigator.of(sheet).pop();
+              copyAndTell(context, url, done: '주소를 복사했어요');
             },
           ),
           const SizedBox(height: 4),
@@ -231,10 +252,5 @@ Future<void> showLinkSheet(
 Future<void> copyLine(BuildContext context, List<Run> runs) async {
   final text = runs.map((r) => r.text).join().trimRight();
   if (text.isEmpty) return;
-  await Clipboard.setData(ClipboardData(text: text));
-  if (context.mounted) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('한 줄을 복사했다')));
-  }
+  await copyAndTell(context, text, done: '한 줄을 복사했어요');
 }

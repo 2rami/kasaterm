@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
+import 'chat_markdown.dart';
 import 'inline_media.dart';
 import 'server.dart';
 
@@ -62,6 +63,11 @@ List<InlineResultPart> inlineResultParts(String text) {
   return parts;
 }
 
+/// 말풍선 통째 복사에 담을 원문 — 그림·소리 표시 블록은 붙여 넣은 곳에서 뜻이 없어 걷는다.
+String withoutInlineResults(String text) => [
+  for (final part in inlineResultParts(text)) ?part.text,
+].join().replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
+
 class InlineResultBody extends StatelessWidget {
   const InlineResultBody({
     super.key,
@@ -106,14 +112,11 @@ class InlineResultBody extends StatelessWidget {
             child: InlineResultImage(server: server, id: id, machine: machine),
           )
         else if (part.text!.trim().isNotEmpty)
-          MarkdownBody(
+          ChatMarkdownBody(
             data: part.text!,
-            styleSheet: style,
-            softLineBreak: true,
+            style: style,
             imageBuilder: offline ? (uri, title, alt) => Text(alt?.isNotEmpty == true ? '$alt · 저장되지 않은 이미지' : '저장되지 않은 이미지') : null,
-            onTapLink: (_, href, _) {
-              if (href != null) onLink(href);
-            },
+            onLink: onLink,
           ),
     ],
   );
