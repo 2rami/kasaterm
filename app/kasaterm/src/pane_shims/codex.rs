@@ -147,6 +147,17 @@ fi
 if [ -n "$PWD" ] && ! grep -qF "[projects.\"$PWD\"]" "$CH/config.toml" 2>/dev/null; then
   printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$PWD" >> "$CH/config.toml"
 fi
+# Windows codex 는 신뢰를 저장소 뿌리의 Windows 경로(소문자·역슬래시)로 찾는다 — Git sh 의 $PWD(/c/Users/…)만
+# 적어 두면 「Trust this folder?」에서 서서 이사 도착 확인이 시간을 넘겼다. codex 가 스스로 적는 꼴로 하나 더 적는다.
+if [ -n "$KT_WIN" ] && [ -n "$PWD" ]; then
+  KT_TRUST=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")
+  KT_TRUST=$(cygpath -w "$KT_TRUST" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  case "$KT_TRUST" in
+    ""|*"'"*) ;;
+    *) grep -qF "[projects.'$KT_TRUST']" "$CH/config.toml" 2>/dev/null \
+         || printf "\n[projects.'%s']\ntrust_level = \"trusted\"\n" "$KT_TRUST" >> "$CH/config.toml" ;;
+  esac
+fi
 # 예전 버전이 만든 pane 전용 hooks.json 은 신뢰 경고를 되살리므로 걷는다.
 rm -f "$CH/hooks.json"
 # 페르소나 — codex 엔 --append-system-prompt 등가물이 없어 CODEX_HOME/AGENTS.md 로 준다
@@ -359,6 +370,10 @@ mod tests {
         assert!(
             body.contains("grep -qF \"[projects.\\\"$PWD\\\"]\""),
             "중복 [projects] 테이블은 TOML 파싱을 통째로 깬다 — 없을 때만 붙여야 한다"
+        );
+        assert!(
+            body.contains("cygpath -w \"$KT_TRUST\"") && body.contains("grep -qF \"[projects.'$KT_TRUST']\""),
+            "Windows codex 는 저장소 뿌리의 Windows 경로로 신뢰를 찾는다 — Git sh 의 /c/… 꼴만 적으면 신뢰 화면에서 선다"
         );
         assert!(
             body.contains("rm -f \"$CH/hooks.json\""),
